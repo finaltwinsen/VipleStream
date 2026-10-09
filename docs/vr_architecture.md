@@ -193,6 +193,19 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
    controller：模擬 profile、raw_from_grip 校正、skeleton、haptic → shm
 ```
 
+> **現況補註（2026-10-09）**：流程圖裡 `display_vr_t capture` 的「≤ 2 ms，逾時丟幀」是設計當時的數字，不是不變式本身。
+>
+> - 第一段等待現在依週期是 2～6 ms（§VR-FENCE-WAIT；700 ÷ 幀率取整數毫秒：120 Hz 是 5 ms，100 Hz 以下是 6 ms）。
+> - SteamVR 把遊戲貼圖直接當第 0 層（直通）時，driver 的合成排在遊戲這一幀的 GPU 工作之後，server 等的 fence 實際上是在等
+>   遊戲這一幀算完；等待超過第一段的上限，那些影像就被丟——不必把 GPU 壓滿：2026-10-10 實測解析度倍率 300%、遊戲仍是每秒
+>   120 幀，舊規則就丟掉六成多的影像，350% 就是拆線循環。2026-10-09 的事故是每一張都超過：每一張都被丟，「連續逾時滿 1 秒就
+>   拆線」讓 driver 每 1.5 秒重連一次，頭盔全黑（`steam_frame_client.md` §8.7「host 擷取端的 fence 晚到」）。
+> - §VR-FENCE-LATE（server 設定 `vr_capture_late`，預設關閉）：第一段逾時後不丟，繼續在 CPU 端等同一個 fence 值，到值就照常
+>   複製（晚到照收）；從被叫醒起累計超過等待預算（3 個發布間隔，夾在 3 個顯示週期與 `vr_capture_late_max_ms` 之間）才丟。
+>   拆線改成「完成值 3 秒不動」或「5 秒沒有一張複製成功」（期間 driver 仍在發布），而且有 5／15／30 秒的退避。
+> - 不變式 8 沒有變：整段都是 CPU 端的 `GetCompletedValue()`／`SetEventOnCompletion`，確認到值之後才在本端下 CopyResource，
+>   不在 GPU 上等對方行程的 fence。
+
 ### 1.3 執行緒、行程、權限邊界
 
 | 邊界 | 兩側 | 處理方式 |
@@ -200,7 +213,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | SYSTEM ↔ 使用者 medium IL | server ↔ vrserver | **pipe** 由 server 以 `FILE_FLAG_FIRST_PIPE_INSTANCE`、`PIPE_REJECT_REMOTE_CLIENTS` 建立，建立失敗就 fail closed。**shm 和 event** 用每個 session 隨機產生的 GUID 名稱，經 pipe 交給 driver；`CreateFileMapping`、`CreateEvent` 回 `ERROR_ALREADY_EXISTS` 就中止。SDDL 為 `D:P(A;;GA;;;SY)(A;;GRGWGX;;;<console user SID>)S:(ML;;NW;;;ME)`。**雙向驗證**：server 驗 client 的完整映像路徑必須在 `steam_scanner` 找到的 SteamVR 目錄之下，而且 token SID 等於主控台使用者；driver 用 `GetNamedPipeServerProcessId` 驗 server 是 SYSTEM，而且映像位在 install 目錄。貼圖和 fence 由 driver 建立，server 用 `DuplicateHandle` 取得 |
 | driver 寫入的資料 | frame descriptor、貼圖表、log ring | 全部做執行期驗證：`texIdx<3`、尺寸等於協商值、fmt 在白名單內、fenceVal 單調遞增；log 行限長、過濾字元，一律加 `[VIPLE-VR-DRV]` 前綴（driver 無法偽造其他 tag） |
 | 兩端各自的生命週期 | server 重啟、SteamVR 重啟、ABI 版本不一致 | generation 加一，兩端都重建 fence 和貼圖。driver 發現 pipe 斷線就讓 HMD 進入 standby、送 `poseIsValid=false`，每 500 ms 重連。ABI 不一致時回報 STATE `ABI_MISMATCH_RESTART_STEAMVR` |
-| 跨行程同步 | fence | **絕不 GPU-Wait 對方行程的 fence**。一律先用 `GetCompletedValue()`，或 `SetEventOnCompletion` 加上 ≤ 2 ms 的 wait，確認完成後才在本端下 GPU 工作 |
+| 跨行程同步 | fence | **絕不 GPU-Wait 對方行程的 fence**。一律先用 `GetCompletedValue()`，或 `SetEventOnCompletion` 加上 ≤ 2 ms 的 wait，確認完成後才在本端下 GPU 工作。（現況補註 2026-10-09：「≤ 2 ms」是設計當時的數字；server 擷取端現在第一段等 2～6 ms，`vr_capture_late = enabled` 時最多等到等待預算、晚到照收，見 §1.2 的補註。不變的是「CPU 端確認完成之後才下 GPU 工作」。） |
 | 網路執行緒 | ENet control、picoquic IO | VR handler 只做 lock-free 的 seqlock 寫入加 SetEvent |
 | 單執行緒 task_pool | VR 輸入 | 不經過 task_pool |
 | GPU | server、driver、vrcompositor | 同一張 adapter（握手時比對 LUID）。GPU 優先權是**行程層級**的：vr_session 在 session 開始、以及每次 probe 之後設為 HIGH，結束時還原，並記 `[VIPLE-VR-CAP] gpu-priority=` |
@@ -444,6 +457,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 - **fence 交接**：
   - driver：GPU Signal(sharedFence, n) → 寫 descriptor → SetEvent。
   - server：CPU 端確認 `sharedFence ≥ n`（最多等 2 ms，逾時丟幀並計數）→ CopyResource → GPU Signal(consumedFence)。
+    （現況見 §1.2 的補註：第一段 2～6 ms；`vr_capture_late = enabled` 時繼續等到等待預算，晚到照收。）
   - server 用 latest-wins 跳過某些 descriptor 時，一次把 consumedFence Signal 到最新值。
   - driver 重用 slot 前用 `GetCompletedValue()` 確認。
   - 既有的同行程跨 device Wait 模型（`display_vram.cpp:430-436,1761-1859`）**只用在同一個行程內**。
@@ -761,7 +775,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | 4 | 等遊戲取 pose | 1.0（b5 已在 rc） | 1.0 | — | | echo 年齡 |
 | 5 | 遊戲 render 加 vrcompositor | 11.1（**ALVR 實務 `steamvr_pipeline_frames=2.1`，4+5 可能約 23 ms，多約 5 ms**） | 11.1 | — | | `vr_probe`：WaitGetPoses→Present |
 | 6 | driver 合成 SBS | 0.6 | 0.6 | 1.0 | 6＋7＋8＋首封包 p50 4.41／p95 4.70（`presentToFirstPkt`） | GPU timestamp |
-| 7 | IPC、fence 確認、copy | 0.4 | 0.4 | 0.8 | evtToPush p95 1.04（presentToPush p50 1.05） | `[VIPLE-VR-CAP]` |
+| 7 | IPC、fence 確認、copy | 0.4 | 0.4 | 0.8 | evtToPush p95 1.04（presentToPush p50 1.05）；沒有遊戲負載、儀表板開著時量的——遊戲貼圖直通（實際遊玩）時 p50 約 2.3 ms 而且隨遊戲負載上升，見 `steam_frame_client.md` §8.7 | `[VIPLE-VR-CAP]` |
 | 8 | NVENC | 3.5 | 3.5 | 5.0 | | `[VIPLE-NVENC-PROF]` |
 | 9 | packetize、FEC、送出窗 | 2.5 | 2.0 | 4.0 | | `[VIPLE-VR-TX]` |
 | 10 | 下行 | 1.5 | 1.5 | 4.0 | | CLIENT_TIMING |

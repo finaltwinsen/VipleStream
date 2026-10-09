@@ -78,15 +78,68 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
     顯示那一格）。目標 slack 40% → 50% 由 3.4% 降到 1.1%；50%＋注視點 1.5x 那一場 0.1%，使用者體感「非常好」（原因未定論，
     要同場 A/B）。host 目前留在 `vr_latch_target_pct = 50`，頭盔留在注視點 1.5x＋鎖相。待做（都要配戴）：
     既有的「延後挑影像 6 ms」；同場 A/B 注視點開／關；和 Steam 內建串流同位置同遊戲對照。
+  - **10-09／10：頭盔的 GPU 忙碌期定案＝SteamVR 合成器每格一筆高優先權的 GPU 工作（`steam_frame_client.md`「頭盔的「GPU 忙碌期」
+    定案」）**。延後挑影像 5 → 6 ms 在無人、經 Tailscale 的對照裡重複顯示少四到五成，runtime 的重投影每場只多 2～3 格
+    （約 1.6 萬格裡）；頭盔的保存設定已改 6 ms，**待有人配戴驗證**（順便記 runtime 的重投影）。接下來的 client 改動，一次一項、都先放在 dev 開關後面：
+    - 影像一送進 GPU 佇列就交還並發布（不等 GPU 做完）；要驗撕裂／閃舊影像，host 的目標 slack 跟著重調。
+    - 「解碼影像轉 RGB」併進注視點還原的 shader（少 0.32 ms）。
+    - 另一條執行緒先呼叫下一格的 `xrWaitFrame`、把交幀挪到合成器讀取之前（理論上省約 5 ms；runtime 允不允許要實驗）。
+    - 解碼輸出改成被叫醒而不是每 1 ms 輪詢（平均省 0.2 ms）。
+    - 「延後挑影像」目前是固定毫秒數，換到 90／144 Hz 時不會跟著週期變；之後要改成依顯示週期或 runtime 的回饋。
+  - 無人驗測的腳本（本機、不入 git）已改成整場停用 `<host>` 的儀表板、並關掉頭盔自己的選單；頭盔的 Flatpak 裡執行緒升不了優先權、
+    runtime 寫不出我們的 `xrclient` log（沙箱看不到 Steam 的 log 目錄）還沒處理。
+  - 經網際網路（Tailscale）串流（`steam_frame_client.md`「第一次經網際網路（Tailscale）串流」）：自動位元率被區網用的規則釘在下限、
+    往返超過 10 ms 補包就不啟動、GUI 設不了 VR 位元率。改動方向已列，還沒做。
   - **10-09 已實作、待頭盔驗證（都在開關後面、預設關；`steam_frame_client.md`「依這三輪做的改動」有下次配戴的順序）**：
     client 量測 `[VIPLE-VR-LDIAG]`（一律開）、host `vr_latch_mode = v3`＋`vr_latch_acquire`（Monado 上驗過：一步到位、約 3 s 進入追蹤、
     driver 沒有多漏格）、client `vrtrackrelock`／`vrlatchrelatch`／`vrlatchwaitms`／`vrlatchabsec`、dev `--vr-test-jitter`。
-    頭盔版已建好（arm64 dev bundle），還沒裝。
+    頭盔已裝新版（10-09 起的無人場次用它收 LDIAG）；各開關的配戴驗證還沒做。
+  - **§VR-FENCE-LATE（2026-10-09 事故：遊戲的 GPU 負載一重 → 擷取端每一張等 fence 都逾時 → 每 1.5 s 拆線重連、頭盔全黑；
+    `steam_frame_client.md`「host 擷取端的 fence 晚到」）**：server 端已實作（`vr_capture_late`，預設關：晚到照收、拆線改成
+    卡死／餓死並有退避、過載時 LATCH 與 §VR-PREDICT 不採計、補上量測；判定邏輯有單元測試）。
+    `<host>` 上的實測已做（2026-10-10，`steam_frame_client.md`「§VR-FENCE-LATE 在 `<host>` 上的實測」；儀表板整場停用，
+    300／350／400% 開關開與關各一場、100% 只跑開關開）：**舊規則（開關關）在遊戲還跑滿更新率時就踩到**——條件是 Present
+    之後的 fence 等待超過第一段等待（120 Hz 是 5 ms）：解析度倍率 300%（每秒 120 幀）丟掉六成多的影像，350%（每秒 119 幀）
+    就是拆線循環。開關開著時四個負載都不拆線、照遊戲的幀率出幀；頭盔無人場次跑了 300% 與 400%。`<host>` 的設定目前是
+    enabled。待做：
+    - **過載旗標改成表達「Present 鎖不住虛擬 vsync」（下一輪第一項；做完、配戴驗過才把 `vr_capture_late` 的預設改成
+      enabled）**：現在「第一段等待逾時就算晚到」太寬——300%（每秒 120 幀、擷取端每張固定晚約 6 ms）旗標整場設著，LATCH 停在
+      當時的相位。那一場頭盔的重複顯示是 7.2%（正常 3.4%），多出來的約三分之一來自 LATCH 停住（開場 30～70 秒 slack 不到
+      1 ms），約三分之二來自 `<host>` 編碼段的雙峰（下一項），後者和旗標無關。方向：看 driver 回報的「跳過的虛擬 vsync 數」
+      與 `presentPhase` 的散佈（都已經在送），不用晚到的比例，也不用 1 秒內的張數（量化誤差 ±1 張，分不出每秒 118.4 與
+      120 幀）；待決定的三種情況見 `steam_frame_client.md`「已知的限制」。改完用同樣的負載重跑：300% 的 slack 與 `late` 要回到
+      正常負載的水準（slack 中位數約 4 ms、`late` 每 10 秒 20～30 張）；`lateShift`（每 10 秒約 35 次）不在這一項的驗收範圍，
+      預期重複顯示約 5%，不是 3.4%。`vr_capture_late_max_ms` 的預設 100 一併檢討（遊戲載入之後量到的 `presentToFence` 最大約
+      10.7 ms；SteamVR 剛啟動的頭幾張到 16～26 ms，其中一張等滿了 25 ms 的預算下限）。
+    - **負載重時 `<host>` 編碼段的雙峰**（300% 起 `presentToFirstPkt` 在約 8 與 17 ms 之間跳，350% 以上固定在 16 ms 以上；
+      頭盔上是整條晚一格再回位）：先確認機制（推測複製與色彩轉換排在遊戲下一幀後面；GPU 排程還沒有直接量），再評估怎麼
+      讓它固定在其中一邊。這一項對比較重的遊戲的延遲與流暢度影響可能比過載旗標大。
+    - §VR-PREDICT 在過載時的兩個小洞：旗標設起來之前的那一個 CLIENT_TIMING 視窗仍會被採計（追蹤階段最多改 3 ms，也會寫進
+      下一場的起點）；探測走到一半遇到過載時，前後的視窗會隔著過載相比。要補的話由 `stream.cpp` 把旗標由關變開的那一刻通知
+      `vr_predict`（探測中就退回重量、追蹤中就把最近那一次修正退回）。
+    - 開關關著的舊路徑有兩個本來就有的洞沒有動（開關開著時已經補上）：ring 開不起來一直重試、以及每一張 descriptor 都過期時，
+      擷取迴圈不會呼叫任何回呼，session 結束時擷取執行緒停不下來。改預設、拿掉舊路徑時一起收掉。
+    - 頭盔端顯示「host 的 GPU 過載」與「host 的 VR 連線中斷」；黑幀、姿態無效的幀不算 live（現在拆線期間頭盔只看到黑畫面，
+      沒有任何提示）。把過載狀態放進 STATS TLV 送給 client。
+    - `vr_probe ipcpeer --peer-gpu-hold-ms`（目前只有參數、沒有實作）與 selftest 的 T2.gpu-hold；`selftest_consume()`
+      （T2 的消費者，仍是固定 2 ms＋1 秒規則）改用 `vr_capture_health.h` 的同一份判定，T2.stop-signal 的預期時間跟著改。
+      有了假 driver 之後要實測的一項：停止 Signal、等到 `teardown deferred … allowedInMs` 大於 10000 的那一段結束串流，
+      `sunshine.log` 不應出現 `Hang detected`（目前只用模型推演過）。
+    - 還沒用第二個遊戲驗（推論：畫質調到剛好跑滿更新率的遊戲，在開關關著時一進去就會丟幀或全黑；也還沒有量過任何遊戲
+      實際的 GPU 時間）。
+    - 累計統計裡 `late`／`over_period`／`fence_wait_ms`／`present_to_fence_ms` 四個欄位只寫不讀（10 s 行用的是視窗那一份）：
+      拿掉，或讓 selftest 的結果行用它。
+    - 依完成順序取用（改 `read_latest()`）：`presentToFence` 已量到（見實測）；等 `skipped` 與 driver 的 `noslot` 整理出來
+      再決定要不要做。
+    - 讓合成器固定自己合成（與遊戲的幀脫鉤；儀表板開著時就是這個狀態，代價是遊戲幀率再低一些、多一次重新取樣）：只評估。
+    - driver 的 `Present()` 等合成器同步貼圖也是寫死的 5 ms（第二個固定門檻，這次沒有踩到）。
   - `Sunshine/tests/integration/test_config_consistency.cpp` 的 AllConfigOptionsExistInAllFiles 在 vr_* 的設定鍵上本來就會失敗
     （這些鍵沒有進 web UI 的 config.html／en.json）；要嘛把 vr_* 列進該測試的 internalOptions，要嘛補進 web UI。
   - 開場 30～40 s 的重複，七到九成是 host 在 SteamVR 啟動與遊戲載入時沒出幀（每場 200～250 張），需要 host 給「遊戲開始出幀
     且穩定」的訊號才能遮住，還沒做。
-  - 配戴實玩時 host 的 evtToPush 由 0.97 變 2.38 ms（擷取要多等 GPU），連同遊戲算圖變久讓 MTP 多約 4.5 ms；原因未查。
+  - 配戴實玩時 host 的 evtToPush 由 0.97 變 2.38 ms（擷取要多等 GPU），連同遊戲算圖變久讓 MTP 多約 4.5 ms。
+    原因在 10-09 查到了：配戴時儀表板關著、遊戲貼圖直接當第 0 層（直通），driver 的合成排在遊戲這一幀的 GPU 工作之後，
+    等 fence 就是在等遊戲算完（見上面的 §VR-FENCE-LATE）；無人場次儀表板多半開著所以量不到。能不能省（例如讓合成器自己合成）還沒評估。
   - §VR-TRACK-LOCK（追蹤樣本鎖到顯示節拍，`--vr-track-lock`，預設關）：頭盔無人場次 MTP 由 38.8～43.0 ms 的鋸齒變成
     平的 40.6 ms；配戴確認後決定要不要預設開。半速串流時幀晚一格顯示的問題在補幀第五版處理了（真的那一張先發布）。
   - 觀察到一場半速串流整場 MTP 高 13 ms：host 上遊戲讀姿態到 Present 多一整幀（18.8 ms，平常 3.4），下一場恢復，原因未查。
