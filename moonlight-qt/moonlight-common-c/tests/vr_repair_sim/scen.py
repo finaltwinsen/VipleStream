@@ -9,7 +9,7 @@
 # 組別：j2a 估計值偏低｜j2b 補包那一輪掉了｜j2c 估計取錯連線｜j2d 目前的 block 先報過、後面才發現整幀沒到｜
 #       j2e 長空白｜j2f 幀內停頓（沒有掉包）之後才有一張真的尾端掉｜j2g 規則切換的那一刻｜j1a 整段空白與 60 Hz｜
 #       brk 補包永遠到不了（保險）｜hold 放棄之後的暫停｜chain 成串掉包（連續好幾幀各缺一段）｜
-#       gone 預先報的幀收到 REPAIR_GONE
+#       gone 預先報的幀收到 REPAIR_GONE｜latch LATCH 的靜默什麼時候觸發
 import os
 import sys
 
@@ -32,7 +32,12 @@ def run(mode, args):
     return S.parse_result(out)
 
 
-def desc(res, summ, tot, upto=20):
+def latch_cols(tot):
+    """LATCH 的靜默：觸發幾次、合起來多久（模擬器照 VideoStream.c 的做法數的）"""
+    return "LATCH 靜默 %d 次（合計 %.0f ms）" % (int(tot.get("latchQuiet", 0)), float(tot.get("quietMs", 0)))
+
+
+def desc(res, summ, tot, upto=20, more=None):
     if res is None:
         return "沒跑完"
     notdone = [f for f, r in sorted(res.items()) if r["done"] is None and f <= upto]
@@ -52,12 +57,15 @@ def desc(res, summ, tot, upto=20):
         extra.append("保險 %d" % summ["trips"])
     if extra:
         s += "｜" + "、".join(extra)
+    if more is not None:
+        s += "｜" + more(tot)
     if late:
         s += "｜晚到 " + " ".join(late[:8])
     return s
 
 
-def table(title, rows, modes=("legacy", "rtt"), upto=20):
+def table(title, rows, modes=("legacy", "rtt"), upto=20, more=None):
+    # more：這一組另外要印的欄位（latch_cols），從 TOTALS 那一行取
     emit("")
     emit("### " + title)
     for name, args, est_legacy, est_rtt in rows:
@@ -66,7 +74,7 @@ def table(title, rows, modes=("legacy", "rtt"), upto=20):
             est = est_legacy if m == "legacy" else est_rtt
             a = args + ((" est=" + est) if est else "")
             res, summ, tot = run(m, a)
-            emit("  - %s：%s" % ("現行" if m == "legacy" else "RTT ", desc(res, summ, tot, upto)))
+            emit("  - %s：%s" % ("現行" if m == "legacy" else "RTT ", desc(res, summ, tot, upto, more)))
 
 
 def main():
@@ -176,6 +184,18 @@ def main():
         rows = [("空白 −1～27 ms（第 3～5 幀整幀沒到）、每幀 180 個 data、往返 10：預先報的第 5 幀 server 回補不了",
                  "fps=120 rtt=10 frames=20 D=180 spacing=20 gap=-1:27", "", "")]
         table("預先報的幀收到 REPAIR_GONE", rows)
+    if want("latch"):
+        # LATCH 的靜默（被補包拖晚的幀放行後 60 ms 內，XR 那一側不拿新影像更新 LATCH 樣本）只在兩種時候觸發：補包真的用上
+        # 才收齊、跨幀等待結束（等到了或到期）。60 Hz 高位元率時幀內停頓每幾幀就有一次——報了（多餘的回報）、補包還沒到
+        # 它自己的封包就到齊；這種也算的話，沒有任何掉包 LATCH 也有一大半的時間不取樣
+        st60 = " ".join("pause=%d:30:%g" % (f, 4 + (f % 2)) for f in range(3, 9))
+        rows = [("60 Hz、每幀 60 個 data、第 3～8 幀各停 4～5 ms（報了、自己收齊）、沒有掉包",
+                 "fps=60 rtt=10 frames=18 D=60 fec=14 %s idle=fixed" % st60, "", ""),
+                ("同上，第 10 幀再加一次真的尾端掉（補包用上）", "fps=60 rtt=10 frames=18 D=60 fec=14 %s drop=10:50-68 idle=fixed" % st60, "", ""),
+                ("120 Hz、往返 10、三整幀沒到、補回來（跨幀等待等到了）", "fps=120 rtt=10 frames=30 gap=-1:19", "", ""),
+                ("120 Hz、往返 10、中段掉、補包全掉（跨幀等待到期才放行）", "fps=120 rtt=10 frames=24 drop=3:0-4 repairloss=99", "", ""),
+                ("120 Hz、往返 10、掉單一封包（FEC 當場補回，沒有回報）", "fps=120 rtt=10 frames=24 drop=3:1-1", "", "")]
+        table("LATCH 的靜默什麼時候觸發", rows, modes=("rtt",), more=latch_cols)
 
     text = "\n".join(OUT) + "\n"
     sys.stdout.write(text)

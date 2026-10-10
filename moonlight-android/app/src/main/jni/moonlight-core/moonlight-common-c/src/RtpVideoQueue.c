@@ -1833,13 +1833,18 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
             }
             if (queue->currentFrameNumber != prevFrame || queue->multiFecCurrentBlockNumber != prevBlock) {
                 if (hadNack) {
+                    // 補包真的用上的（不是它自己晚到的封包剛好湊齊）
+                    const bool usedRepair = queue->nkUsedRepair || usedNow;
                     queue->mlStatRepaired++;  // 回報之後收齊了（非超前的封包不會讓佇列放棄 block，對象前進＝收齊）
                     queue->mlTot.repaired++;
-                    if (nkCur) {
-                        queue->mlDelayedReleaseUs = nowUs;  // §VR-REPAIR-RTT：這一幀是等補包才收齊的
+                    if (usedRepair) {
+                        queue->mlTot.repairedUsed++;  // 保險只把這種算成功
                     }
-                    if (queue->nkUsedRepair || usedNow) {
-                        queue->mlTot.repairedUsed++;  // 補包真的用上的（不是它自己晚到的封包剛好湊齊）；保險只把這種算成功
+                    if (nkCur && usedRepair) {
+                        // §VR-REPAIR-RTT：這一幀是等補包才收齊的，它的到達時刻反映的是補包花的時間（見 mlNoteDelayedRelease）。
+                        // 報了、補包沒用上就自己收齊的不算：那是幀內停頓，這一幀本來就這時候到——60 Hz 高位元率時這種誤報
+                        // 每幾幀就有一次，算進去的話沒有任何掉包 LATCH 也有一大半的時間不取樣
+                        queue->mlDelayedReleaseUs = nowUs;
                     }
                     if (firstNackUs != 0 && nowUs >= firstNackUs) {
                         const uint64_t fix = nowUs - firstNackUs;

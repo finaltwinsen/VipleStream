@@ -143,7 +143,7 @@ MUTANTS = [
       after="bool RtpvRepairLatched("),
     M("q-nack-flags", "NACK 的旗標", "RtpVideoQueue.c", "n.flags = queue->mlRttMode ? vrrrNackFlags(queue->mlRepairEtaUs) : 0;",
       "n.flags = 0;", "回報不帶旗標（server 照原本的年齡上限）"),
-    M("q-used", "保險", "RtpVideoQueue.c", "if (queue->nkUsedRepair || usedNow) {", "if (true) {",
+    M("q-used", "保險", "RtpVideoQueue.c", "const bool usedRepair = queue->nkUsedRepair || usedNow;", "const bool usedRepair = true;",
       "自己晚到湊齊的 block 也算「補包用上了」"),
     M("q-legacy-idle", "現行規則不變", "RtpVideoQueue.c", "#define RTPV_NACK_IDLE_US    3000", "#define RTPV_NACK_IDLE_US    4000",
       "現行規則的 3 ms 改成 4 ms", order=GOLDEN_FIRST),

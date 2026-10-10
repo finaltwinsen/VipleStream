@@ -1114,8 +1114,9 @@ int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable);
 // reason 是 VIPLE_VR_LOSS_*。
 void LiReportVrLoss(uint32_t firstLost, uint32_t lastLost, uint8_t reason);
 
-// §VR-REPAIR-RTT：距上一次「被補包機制拖晚的幀放行」幾毫秒（回報過才收齊的、等待結束才放行的）；沒有過回
-// UINT32_MAX。XR 那一側用它暫時不更新送給 host 的 LATCH 樣本：那幾張的到達時刻反映的是補包花的時間，不是節拍。
+// §VR-REPAIR-RTT：距上一次「被補包機制拖晚的幀放行」幾毫秒（補包用上才收齊的、等待結束才放行的；報了但補包沒用上、
+// 自己收齊的不算）；沒有過回 UINT32_MAX。XR 那一側用它暫時不更新送給 host 的 LATCH 樣本：那幾張的到達時刻反映的是
+// 補包花的時間，不是節拍。
 // 只在照 §VR-REPAIR-RTT 的規則等待時才會有值，其餘情況恆為 UINT32_MAX。可從任何執行緒呼叫。
 uint32_t LiGetVrRepairQuietMs(void);
 
