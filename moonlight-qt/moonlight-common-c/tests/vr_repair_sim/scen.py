@@ -8,7 +8,8 @@
 #
 # 組別：j2a 估計值偏低｜j2b 補包那一輪掉了｜j2c 估計取錯連線｜j2d 目前的 block 先報過、後面才發現整幀沒到｜
 #       j2e 長空白｜j2f 幀內停頓（沒有掉包）之後才有一張真的尾端掉｜j2g 規則切換的那一刻｜j1a 整段空白與 60 Hz｜
-#       brk 補包永遠到不了（保險）｜hold 放棄之後的暫停｜gone 預先報的幀收到 REPAIR_GONE
+#       brk 補包永遠到不了（保險）｜hold 放棄之後的暫停｜chain 成串掉包（連續好幾幀各缺一段）｜
+#       gone 預先報的幀收到 REPAIR_GONE
 import os
 import sys
 
@@ -158,6 +159,17 @@ def main():
                  "fps=120 rtt=10 frames=30 D=72 spacing=49 drop=%s repairloss=99" % ev, "", ""),
                 ("同上，補包到得了", "fps=120 rtt=10 frames=30 D=72 spacing=49 drop=%s" % ev, "", "")]
         table("放棄之後的暫停", rows)
+    if want("chain"):
+        # 成串掉包：連續十幀各掉一段（每幀 33 個 data＋14 個 parity 裡掉 20 個）。前三輪補包也掉時，第一幀等到上限才放棄；
+        # 接著的暫停只算一次（最短往返＋一個幀週期＋2 ms，從這一次放棄起算）——暫停裡的幾幀立刻放棄，之後的照常回報、補得
+        # 回來。暫停若是每放棄一幀就重新起算，第一次放棄之後整段都不再回報（十幀全掉，intra refresh 那一波一再重來）
+        ev = ",".join("%d:5-24" % f for f in range(3, 13))
+        rows = [("60 Hz（半速）、往返 10、連續十幀各掉 20 個（每幀 33＋14）、前三輪補包掉", "fps=60 rtt=10 D=33 frames=20 drop=%s repairloss=3" % ev, "", ""),
+                ("120 Hz、往返 4（區網）、同樣的掉法", "fps=120 rtt=4 D=33 frames=20 drop=%s repairloss=3" % ev, "", ""),
+                ("120 Hz、往返 10、同樣的掉法", "fps=120 rtt=10 D=33 frames=20 drop=%s repairloss=3" % ev, "", ""),
+                ("60 Hz、往返 10、同樣的掉法、補包沒掉", "fps=60 rtt=10 D=33 frames=20 drop=%s" % ev, "", ""),
+                ("120 Hz、往返 10、同樣的掉法、補包沒掉", "fps=120 rtt=10 D=33 frames=20 drop=%s" % ev, "", "")]
+        table("成串掉包（連續好幾幀各缺一段）：放棄之後的暫停只算一次", rows)
     if want("gone"):
         # 每幀 180 個 data、三整幀沒到：server 的補包額度（最多累積 600 個）只夠補前兩幀，第三幀回 REPAIR_GONE。
         # 那一幀是預先報的——輪到它的時候直接不等、立刻放棄（不再多等一個上限）

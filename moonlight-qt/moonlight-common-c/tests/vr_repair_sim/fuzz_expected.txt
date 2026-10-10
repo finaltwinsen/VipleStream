@@ -1,10 +1,10 @@
 kind=design runs=600 seed=7 crash=0 untouched_lost=0 held_too_long=0 worst_hold=60.34 ms (auto cap: 32.56 ms)
-totals: old_lost=880 new_lost=679 old_pk=15118 new_pk=18076 old_n=1276 new_n=807 trips=0 toomany=47 late=2 afterloss=29
-沒收齊的幀數：RTT 規則較少 100、一樣 488、較多 2（另有 10 個是指定的等待上限短於現行規則的上限）；一樣但第一次 LOSS 晚超過 10 ms 的 25 個，最多晚 60.6 ms
+totals: old_lost=880 new_lost=675 old_pk=15118 new_pk=18189 old_n=1276 new_n=811 trips=0 toomany=47 late=2 afterloss=25
+沒收齊的幀數：RTT 規則較少 104、一樣 484、較多 2（另有 10 個是指定的等待上限短於現行規則的上限）；一樣但第一次 LOSS 晚超過 10 ms 的 24 個，最多晚 60.6 ms
   較多（現行 5 → RTT 6）：est=5.30:6.58:7.87 fps=120 rtt=6 D=66 frames=26 quiet=1 origin=3 drop=16:78-86,7:8-11,14:61-61 gap=92.58:137.58 upgap=71.42:79.42 pause=4:34:3.5 idle=learned capms=20
   較多（現行 2 → RTT 3）：est=12.40:15.88:19.35 fps=60 rtt=14 D=150 frames=26 quiet=1 origin=3 drop=7:98-99 gap=99.45:104.45 gap=57.43:77.43 idle=fixed
 kind=judge runs=500 seed=7 crash=0 untouched_lost=0 held_too_long=0 worst_hold=33.00 ms (auto cap: 33.00 ms)
-totals: old_lost=1164 new_lost=981 old_pk=5751 new_pk=8958 old_n=874 new_n=540 trips=0 toomany=84 late=3 afterloss=31
+totals: old_lost=1164 new_lost=981 old_pk=5751 new_pk=9009 old_n=874 new_n=541 trips=0 toomany=84 late=3 afterloss=31
 沒收齊的幀數：RTT 規則較少 103、一樣 384、較多 7（另有 6 個是指定的等待上限短於現行規則的上限）；一樣但第一次 LOSS 晚超過 10 ms 的 24 個，最多晚 33.6 ms
   較多（現行 1 → RTT 3）：est=9.13:10.40:10.52 fps=60 rtt=10 D=10 frames=30 quiet=1 origin=3 drop=16:8-10,5:8-8,16:7-8 gap=-1.56:3.44 gap=17.30:62.30
   較多（現行 6 → RTT 7）：est=10.50:11.22:16.64 fps=60 rtt=12 D=110 frames=30 quiet=1 origin=3 drop=10:98-115,15:145-149,7:15-100 gap=79.28:80.28 gap=91.10:191.10 pause=6:97:6 pause=13:97:9 idle=size
@@ -19,30 +19,30 @@ kind=multi runs=300 seed=7 crash=0 untouched_lost=0 held_too_long=0 worst_hold=0
 totals: old_lost=241 new_lost=222 old_pk=703 new_pk=1282 old_n=214 new_n=141 trips=0 toomany=16 late=7 afterloss=12
 沒收齊的幀數：RTT 規則較少 15、一樣 283、較多 1（另有 1 個是指定的等待上限短於現行規則的上限）；一樣但第一次 LOSS 晚超過 10 ms 的 9 個，最多晚 33.3 ms
   較多（現行 3 → RTT 4）：est=4.54:6.11:8.71 fps=90 rtt=8 D=20 frames=30 quiet=1 origin=3 blocks=4 drop=16:57-90,12:88-91 gap=109.21:139.21 pause=7:49:4
-kind=burst runs=400 seed=7 crash=0 untouched_lost=0 held_too_long=0 worst_hold=24.70 ms (auto cap: 24.70 ms)
-totals: old_lost=1179 new_lost=1037 old_pk=20949 new_pk=11174 old_n=4690 new_n=1775 trips=0 toomany=0 late=20 afterloss=927
-沒收齊的幀數：RTT 規則較少 97、一樣 264、較多 39（另有 0 個是指定的等待上限短於現行規則的上限）；一樣但第一次 LOSS 晚超過 10 ms 的 29 個，最多晚 98.7 ms
-  120 Hz、往返 12～17 ms：38 個情境，沒收齊 現行 280／RTT 178（RTT 較多的 0 個、較少的 24 個）
-  120 Hz、往返 6～10 ms：41 個情境，沒收齊 現行 316／RTT 274（RTT 較多的 7 個、較少的 16 個）
-  60 Hz、往返 12～17 ms：41 個情境，沒收齊 現行 74／RTT 94（RTT 較多的 6 個、較少的 5 個）
-  60 Hz、往返 6～10 ms：46 個情境，沒收齊 現行 97／RTT 90（RTT 較多的 4 個、較少的 9 個）
-  72 Hz、往返 12～17 ms：18 個情境，沒收齊 現行 23／RTT 36（RTT 較多的 3 個、較少的 2 個）
-  72 Hz、往返 6～10 ms：15 個情境，沒收齊 現行 33／RTT 24（RTT 較多的 0 個、較少的 5 個）
-  90 Hz、往返 12～17 ms：20 個情境，沒收齊 現行 47／RTT 23（RTT 較多的 0 個、較少的 10 個）
-  90 Hz、往返 6～10 ms：17 個情境，沒收齊 現行 50／RTT 50（RTT 較多的 2 個、較少的 4 個）
-  區網（往返 ≤5 ms）：164 個情境，沒收齊 現行 259／RTT 268（RTT 較多的 17 個、較少的 22 個）
-  較多（現行 9 → RTT 10）：est=1.89:2.21:2.52 fps=60 rtt=2 D=85 fec=10 frames=48 quiet=1 origin=3 seed=417407 burst=198.48:398.48:45 burst=201.69:261.69:3
-  較多（現行 3 → RTT 9）：est=4.77:5.47:6.17 fps=90 rtt=5 D=20 fec=40 frames=48 quiet=1 origin=3 seed=643017 burst=271.89:422.22:45
-  較多（現行 8 → RTT 11）：est=11.09:12.35:13.61 fps=60 rtt=12 D=60 fec=10 frames=48 quiet=1 origin=3 seed=688401 burst=275.68:475.68:30 burst=154.56:214.56:5
-  較多（現行 18 → RTT 21）：est=5.78:5.96:6.15 fps=90 rtt=6 D=33 fec=40 frames=48 quiet=1 origin=3 seed=689485 burst=264.40:422.22:20 burst=257.70:422.22:5 burst=94.56:394.56:45 upgap=347.92:377.92
-  較多（現行 4 → RTT 7）：est=2.82:3.36:3.90 fps=90 rtt=3 D=33 fec=40 frames=48 quiet=1 origin=3 seed=378232 burst=254.76:284.76:10 burst=32.56:132.56:45
-  較多（現行 6 → RTT 8）：est=5.66:6.11:6.57 fps=120 rtt=6 D=56 fec=20 frames=48 quiet=1 origin=3 seed=823282 burst=223.78:316.67:30 burst=138.24:168.24:3
-  較多（現行 22 → RTT 25）：est=5.84:6.80:7.76 fps=90 rtt=6 D=20 fec=10 frames=48 quiet=1 origin=3 seed=687861 burst=100.22:400.22:45
-  較多（現行 3 → RTT 7）：est=3.63:4.12:4.60 fps=120 rtt=4 D=85 fec=10 frames=48 quiet=1 origin=3 seed=577123 burst=113.66:213.66:20
-  較多（現行 6 → RTT 10）：est=4.55:5.45:6.35 fps=60 rtt=5 D=33 fec=10 frames=48 quiet=1 origin=3 seed=677162 burst=217.66:317.66:3 burst=62.73:262.73:45
-  較多（現行 3 → RTT 6）：est=1.84:2.18:2.53 fps=120 rtt=2 D=60 fec=10 frames=48 quiet=1 origin=3 seed=85032 burst=56.18:256.18:10 burst=55.91:85.91:45
+kind=burst runs=400 seed=7 crash=0 untouched_lost=0 held_too_long=0 worst_hold=26.11 ms (auto cap: 26.11 ms)
+totals: old_lost=1179 new_lost=833 old_pk=20949 new_pk=15628 old_n=4690 new_n=2211 trips=12 toomany=0 late=25 afterloss=612
+沒收齊的幀數：RTT 規則較少 124、一樣 257、較多 19（另有 0 個是指定的等待上限短於現行規則的上限）；一樣但第一次 LOSS 晚超過 10 ms 的 22 個，最多晚 47.2 ms
+  120 Hz、往返 12～17 ms：38 個情境，沒收齊 現行 280／RTT 164（RTT 較多的 0 個、較少的 25 個）
+  120 Hz、往返 6～10 ms：41 個情境，沒收齊 現行 316／RTT 211（RTT 較多的 1 個、較少的 24 個）
+  60 Hz、往返 12～17 ms：41 個情境，沒收齊 現行 74／RTT 85（RTT 較多的 5 個、較少的 6 個）
+  60 Hz、往返 6～10 ms：46 個情境，沒收齊 現行 97／RTT 78（RTT 較多的 1 個、較少的 14 個）
+  72 Hz、往返 12～17 ms：18 個情境，沒收齊 現行 23／RTT 21（RTT 較多的 2 個、較少的 4 個）
+  72 Hz、往返 6～10 ms：15 個情境，沒收齊 現行 33／RTT 18（RTT 較多的 0 個、較少的 6 個）
+  90 Hz、往返 12～17 ms：20 個情境，沒收齊 現行 47／RTT 20（RTT 較多的 0 個、較少的 11 個）
+  90 Hz、往返 6～10 ms：17 個情境，沒收齊 現行 50／RTT 46（RTT 較多的 2 個、較少的 4 個）
+  區網（往返 ≤5 ms）：164 個情境，沒收齊 現行 259／RTT 190（RTT 較多的 8 個、較少的 30 個）
+  較多（現行 3 → RTT 4）：est=4.77:5.47:6.17 fps=90 rtt=5 D=20 fec=40 frames=48 quiet=1 origin=3 seed=643017 burst=271.89:422.22:45
+  較多（現行 18 → RTT 19）：est=5.78:5.96:6.15 fps=90 rtt=6 D=33 fec=40 frames=48 quiet=1 origin=3 seed=689485 burst=264.40:422.22:20 burst=257.70:422.22:5 burst=94.56:394.56:45 upgap=347.92:377.92
+  較多（現行 22 → RTT 23）：est=5.84:6.80:7.76 fps=90 rtt=6 D=20 fec=10 frames=48 quiet=1 origin=3 seed=687861 burst=100.22:400.22:45
+  較多（現行 3 → RTT 4）：est=3.63:4.12:4.60 fps=120 rtt=4 D=85 fec=10 frames=48 quiet=1 origin=3 seed=577123 burst=113.66:213.66:20
+  較多（現行 3 → RTT 4）：est=1.84:2.18:2.53 fps=120 rtt=2 D=60 fec=10 frames=48 quiet=1 origin=3 seed=85032 burst=56.18:256.18:10 burst=55.91:85.91:45
+  較多（現行 7 → RTT 8）：est=4.66:4.97:5.28 fps=120 rtt=5 D=60 fec=40 frames=48 quiet=1 origin=3 seed=172598 burst=23.95:223.95:5 burst=249.21:316.67:45 burst=73.94:173.94:5 upgap=288.43:303.43
+  較多（現行 3 → RTT 11）：est=13.70:15.61:17.52 fps=60 rtt=14 D=10 fec=10 frames=48 quiet=1 origin=3 seed=726446 burst=268.00:468.00:45
+  較多（現行 4 → RTT 8）：est=11.71:12.17:12.63 fps=60 rtt=12 D=10 fec=40 frames=48 quiet=1 origin=3 seed=611250 burst=100.90:130.90:45 burst=370.71:570.71:45
+  較多（現行 2 → RTT 4）：est=4.59:5.42:6.25 fps=90 rtt=5 D=20 fec=40 frames=48 quiet=1 origin=3 seed=171430 burst=124.11:422.22:3 burst=119.01:319.01:30 burst=22.24:122.24:45 upgap=350.12:365.12
+  較多（現行 1 → RTT 4）：est=2.85:3.36:3.87 fps=60 rtt=3 D=33 fec=40 frames=48 quiet=1 origin=3 seed=438211 burst=441.94:633.33:3 burst=191.07:391.07:45
 kind=frozen runs=300 seed=7 crash=0 untouched_lost=0 held_too_long=0 worst_hold=32.91 ms (auto cap: 32.91 ms)
-totals: old_lost=613 new_lost=501 old_pk=2861 new_pk=4669 old_n=303 new_n=303 trips=0 toomany=45 late=3 afterloss=18
+totals: old_lost=613 new_lost=501 old_pk=2861 new_pk=4720 old_n=303 new_n=304 trips=0 toomany=45 late=3 afterloss=18
 沒收齊的幀數：RTT 規則較少 67、一樣 227、較多 4（另有 2 個是指定的等待上限短於現行規則的上限）；一樣但第一次 LOSS 晚超過 10 ms 的 10 個，最多晚 33.3 ms
   較多（現行 1 → RTT 3）：est=9.13:10.40:10.52 fps=60 rtt=10 D=10 frames=30 quiet=1 origin=3 clock=0 drop=16:8-10,5:8-8,16:7-8 gap=-1.56:3.44 gap=17.30:62.30
   較多（現行 6 → RTT 7）：est=10.50:11.22:16.64 fps=60 rtt=12 D=110 frames=30 quiet=1 origin=3 clock=0 drop=10:98-115,15:145-149,7:15-100 gap=79.28:80.28 gap=91.10:191.10 pause=6:97:6 pause=13:97:9 idle=size

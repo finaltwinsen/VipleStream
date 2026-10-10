@@ -856,6 +856,7 @@ static bool mlIsAhead(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length) {
 //     所以次數不會在空檔裡用完，不用退還；
 //   - 後面整幀沒到的幀一起回報（nkAheadSend）；缺的幀多到補不完就整段不補、立刻放棄（nkAheadPlan）；
 //   - 放棄一個 block 之後的一小段時間（mlLossHoldoffUs）不再替沒報過的 block 回報與等待：那幾幀本來就要等 intra refresh。
+//     這一段只算一次——從這一輪第一次放棄起算，中間再放棄的不延長（見 mlDrain）。
 // mlRttMode 為假時這一段完全不走，時間軸和之前逐步相同（moonlight-common-c/tests/vr_repair_sim 的 golden 守著）。
 #define RTPV_NACK_MAX        3
 #define RTPV_NACK_REFUNDS    2
@@ -1697,9 +1698,15 @@ static void mlDrain(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool mustPop) {
         if (queue->mlRttMode && queue->nkValid && queue->nkFrame == queue->currentFrameNumber &&
                 queue->nkBlock == queue->multiFecCurrentBlockNumber) {
             // §VR-REPAIR-RTT：放棄了，接下來一小段時間不再替沒報過的 block 回報與等待（見 nkNextDueUs）。
+            // 暫停從這一輪第一次放棄起算，暫停裡再放棄的（不管是因為暫停才跳過、還是報過等到期限）不重新起算：暫停比一個
+            // 幀週期長，每放棄一次就重來的話，受損的幀一幀接一幀來的時候（成串掉包）第一次放棄之後就整段不再回報，連
+            // intra refresh 那一波裡的幀也被跳過——server 對那一波裡的掉幀會重開一波，恢復跟著往後拖。暫停該涵蓋的只有
+            // 「server 還不知道掉幀時就編好的那幾幀」，它們全在第一次放棄之後的這一段裡到。
             // 這個 block 自己若沒報過，記下是為什麼（回報過還是放棄的由 nkLogGiveUp 印；計數在 msNoteLost）
             const bool afterLoss = nowUs < queue->mlLossHoldoffUs;  // 前一次放棄之後的暫停還沒結束
-            queue->mlLossHoldoffUs = nowUs + vrrrLossHoldoffUs(queue->mlRttLoUs, queue->mlFramePeriodUs);
+            if (!afterLoss) {
+                queue->mlLossHoldoffUs = nowUs + vrrrLossHoldoffUs(queue->mlRttLoUs, queue->mlFramePeriodUs);
+            }
             if (queue->nkCount + queue->nkRefunds == 0 && !queue->nkGone && !queue->nkTooMany) {
                 mlStatRttEvent(queue, nowUs);
                 if (afterLoss) {

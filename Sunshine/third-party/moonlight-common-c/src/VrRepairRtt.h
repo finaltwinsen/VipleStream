@@ -237,7 +237,9 @@ VIPLE_VR_INLINE uint64_t vrrrHeadDeadlineUs(uint64_t nowUs, uint64_t headArrival
 }
 
 // 放棄一個 block 之後多久之內不再替「還沒報過的 block」回報與等待：LOSS 送到 server（半個往返）、它從下一張開始 intra
-// refresh（最多一個幀週期）、那一張送到（半個往返），再多 VRRR_ETA_MARGIN_US
+// refresh（最多一個幀週期）、那一張送到（半個往返），再多 VRRR_ETA_MARGIN_US。
+// 這一段比一個幀週期長，所以只能從這一輪第一次放棄起算、中間再放棄的不延長（呼叫端 RtpVideoQueue.c 的 mlDrain）：
+// 每放棄一次就重來的話，受損的幀一幀接一幀來時永遠出不了這一段
 VIPLE_VR_INLINE uint32_t vrrrLossHoldoffUs(uint32_t rttLoUs, uint32_t framePeriodUs) {
     return rttLoUs + framePeriodUs + VRRR_ETA_MARGIN_US;
 }

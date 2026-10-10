@@ -175,7 +175,7 @@ typedef struct _RTP_VIDEO_QUEUE {
     uint32_t mlFramePkts;               // 最近收齊的一幀大約幾個封包（data＋parity）
     uint32_t mlPktGapUs;                // 同一個 block 相鄰封包的到達間隔（平滑過；0＝還沒量到）
     uint64_t mlDelayedReleaseUs;        // 最近一次「被補包機制拖晚的幀」放行的時刻（XR 那一側暫時不拿它當 LATCH 樣本）
-    uint64_t mlLossHoldoffUs;           // 剛放棄一個 block（已經確定要走 intra refresh）：這個時刻之前，還沒報過的 block 不回報、不等
+    uint64_t mlLossHoldoffUs;           // 剛放棄一個 block（已經確定要走 intra refresh）：這個時刻之前，還沒報過的 block 不回報、不等（期間再放棄的不延長）
     bool mlStatRttSeen;                 // 以下是 10 s 統計（行尾的 rtt 那一段）：這 10 秒有沒有照 RTT 規則跑過
     bool mlStatRttEvt;                  // 這 10 秒有沒有只屬於 RTT 規則的事件（沒回報就放棄、後面缺太多幀）
     uint32_t mlStatLate;                // 沒回報就放棄（現在報也趕不上期限）
