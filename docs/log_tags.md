@@ -1080,6 +1080,10 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-VR-LATCH] step result: moved=n/a of …us err=n/a -> void                          ← 那一步量不到結果（量完之前 host 掉拍、影像停住或 LATCH 停了）：不算成敗
 [VIPLE-VR-LATCH] ab -> mode=… targetPct=N                                               ← vr_latch_ab 的同場 A/B 每次切換（切換後第一個 10 s 視窗不要算）
 [VIPLE-VR-LATCH] vr_latch_ab could not be parsed (…) - ignored                          ← 格式錯：當成沒設
+[VIPLE-VR-KICK] dev: PostPresent free-run for N ms                                      ← server（dev，`vr_dev_kick_every_s`，2026-10-10）：把 driver 的節拍模式暫時改成
+                                                                                           「PostPresent 立即返回」N 毫秒的那一刻。host 直通落在多一格的時序（B）時，這一下會把它
+                                                                                           推回等遊戲這一格（A）；本來就在 A 時狀態不變、那 10 秒多 3～4 張幀
+                                                                                           （`steam_frame_client.md`「host 直通時的兩種時序」）
 [VIPLE-VR-DRV] timing 10s: recs=… posehistMiss=N periodPpm min/max=a/b presentPhase p50/p95/p99/max=… ms bursts=N
                                                                                     ← periodPpm＝driver 這個視窗實際採用的週期相對標稱值（v2 在 ±200 內；有步進的視窗約 ±4000）；
                                                                                        presentPhase＝每一幀的 Present 落在虛擬 vsync 格內的位置（遊戲算完的時刻的抖動就在這裡）；

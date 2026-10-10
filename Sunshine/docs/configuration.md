@@ -2036,6 +2036,61 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### vr_dev_kick_every_s
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Development only: every this many seconds, let the VR driver's present call return immediately for
+            [vr_dev_kick_ms](#vr_dev_kick_ms) milliseconds instead of waiting for the next virtual vsync. This is the
+            experiment behind moving the SteamVR compositor from the timing where it presents a frame the game
+            finished one period earlier (one extra period of latency) back to the timing where it waits for the
+            game's current frame. The driver's vsync schedule does not advance during that time, so the phase is
+            unchanged afterwards. While this option is set, the driver handshake carries the development flag that
+            makes the driver accept that pacing mode. A log line (`[VIPLE-VR-KICK] ...`) marks each one.
+            @note{Leave at 0 outside of testing: a few extra frames are produced each time. Accepted values: 0,
+            or 5 to 600.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            0
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_dev_kick_every_s = 45
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_dev_kick_ms
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Development only: how long each [vr_dev_kick_every_s](#vr_dev_kick_every_s) step lasts, in
+            milliseconds (1 to 200). It has to be longer than one refresh period for the driver to see it.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            20
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_dev_kick_ms = 20
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_latch_acquire
 
 <table>

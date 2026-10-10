@@ -276,6 +276,11 @@ namespace config {
     /// （100–250）。串流尺寸決定編碼、傳輸、解碼的負擔（也就是延遲），算圖尺寸決定畫面細節；Steam 內建串流是
     /// 算圖 2160、編碼寬度 1152。100＝舊行為（兩者相同）。改了要等 SteamVR 重啟才生效。
     int render_scale_pct = 100;
+    /// §VR-A-KICK 的實驗（dev，2026-10-10）：vr_dev_kick_every_s（0 預設＝關，5–600）。每隔這麼多秒讓 driver 的 PostPresent
+    /// 立刻返回 vr_dev_kick_ms 毫秒（1–200，預設 20），用來確認 host 直通的時序能不能由「多一格」推回「等遊戲這一格」
+    /// （docs/steam_frame_client.md「host 直通時的兩種時序」）。開著時 WELCOME 會帶 dev 旗標（driver 才接受這個節拍模式）。
+    int dev_kick_every_s = 0;
+    int dev_kick_ms = 20;
 
     /// §VR-CTRL-OFFSET：vr_ctrl_pose_offset（disabled 預設）。enabled＝控制器也設 poseTimeOffset（driver pose_flags bit0）
     bool ctrl_pose_offset = false;

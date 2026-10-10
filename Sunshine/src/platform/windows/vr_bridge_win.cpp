@@ -656,6 +656,11 @@ namespace vr::bridge {
       int64_t burst_until = 0;
       vripc_pacing_t burst_after {};
       uint32_t bursts_done = 0;  ///< 這個 timing 視窗裡走完的 burst 數（10 s log 用）
+      // §VR-A-KICK 的實驗（dev，vr_dev_kick_every_s）：下一次的時刻（QPC；0＝還沒排）、進行中、最後寫進去的正式節拍
+      int64_t kick_next = 0;
+      bool kick_active = false;
+      vripc_pacing_t last_pacing {};
+      bool have_last_pacing = false;
       vripc_driver_status_t last_driver {};  ///< 最近一次複製的 driver_status（已驗證的欄位另存 status_）
     };
 
@@ -1965,6 +1970,10 @@ namespace vr::bridge {
       std::memcpy(reinterpret_cast<char *>(dst) + sizeof(uint64_t), reinterpret_cast<const char *>(&p) + sizeof(uint64_t), sizeof(p) - sizeof(uint64_t));
       c.pacing_seq += 1;
       vripc_store_release_u64(&dst->seq, c.pacing_seq);
+      if (p.mode == VRIPC_PM_PRODUCTION) {
+        c.last_pacing = p;  // §VR-A-KICK 的實驗結束後要寫回去的那一份
+        c.have_last_pacing = true;
+      }
     }
 
     void bridge_t::write_default_pacing(conn_t &c) {
@@ -1996,7 +2005,7 @@ namespace vr::bridge {
         std::lock_guard lk(mtx_);
         cfg = desired_config_;
         armed = desired_armed_;
-        dev = dev_mode_;
+        dev = dev_mode_ || config::vr.dev_kick_every_s > 0;  // §VR-A-KICK 的實驗：driver 要有 dev 旗標才接受 E0_FREE
         pacing = explicit_pacing_;
         cmds_.config_changed = false;  // 這個 generation 直接採用目前的期望 config
       }
@@ -2591,7 +2600,11 @@ namespace vr::bridge {
           return;
         }
       }
-      if (cmd.pacing) {
+      if (cmd.pacing && conn_->kick_active && !cmd.pacing_after) {
+        // §VR-A-KICK 的實驗進行中：新的週期等它結束再寫（不然 LATCH 每次修正都會把這一小段提前結束）
+        conn_->burst_after = *cmd.pacing;
+      } else if (cmd.pacing) {
+        conn_->kick_active = false;
         write_pacing(*conn_, *cmd.pacing);
         if (cmd.pacing_after) {
           // §VR-LATCH-V3 定時 burst：剛寫的是 burst 的週期；到期由 periodic() 改寫成基準
@@ -2857,6 +2870,24 @@ namespace vr::bridge {
         write_pacing(c, c.burst_after);
         c.burst_until = 0;
         ++c.bursts_done;
+        c.kick_active = false;
+      }
+      // §VR-A-KICK 的實驗（dev，vr_dev_kick_every_s）：每隔一段時間把節拍模式改成 E0_FREE（PostPresent 立刻返回）一小段。
+      // driver 的虛擬 vsync 排程在這段時間不前進（virtual_vsync_t::step 只在時間過了才往後排），結束後照原本的相位繼續。
+      if (const int every = config::vr.dev_kick_every_s; every > 0 && c.ready && c.have_last_pacing) {
+        if (c.kick_next == 0) {
+          c.kick_next = now + ms_to_qpc((int64_t) every * 1000);
+        } else if (now >= c.kick_next && c.burst_until == 0) {
+          const vripc_pacing_t base = c.last_pacing;
+          vripc_pacing_t k = base;
+          k.mode = VRIPC_PM_E0_FREE;
+          write_pacing(c, k);
+          c.burst_after = base;
+          c.burst_until = now + ms_to_qpc(config::vr.dev_kick_ms);
+          c.kick_active = true;
+          c.kick_next = now + ms_to_qpc((int64_t) every * 1000);
+          BOOST_LOG(info) << "[VIPLE-VR-KICK] dev: PostPresent free-run for " << config::vr.dev_kick_ms << " ms";
+        }
       }
       if (now >= c.next_heartbeat) {
         c.next_heartbeat = now + ms_to_qpc(kHeartbeatMs);
