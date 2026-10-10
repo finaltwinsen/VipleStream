@@ -2949,7 +2949,8 @@ void XrContext::pcvrLatchDiagLog()
 //  - chain：延遲鏈——dec（解碼：DU 進佇列到解出，每秒中位數的中位數）＋render（影像 render thread 開始處理到 GPU
 //    做完）＋slack（GPU 做完到挑影像）＋lead（挑影像到預測顯示時刻），各項的 p50 與四項的和。每一項都是微秒解析度、
 //    可以相加；沒有含的只有解碼幀轉手與在 mailbox 裡等的時間。同一場裡比延遲看它，不看 [VIPLE-VR-MTP10] 的 p50——
-//    鎖相（--vr-track-lock）開著時追蹤樣本取在顯示格點上，那個數字只會一次跳半個週期。
+//    鎖相（--vr-track-lock）開著時追蹤樣本取在顯示格點上，那個數字只會一次跳半個週期。這個視窗沒有樣本的那一項
+//    印 -，少任何一項和也印 -。
 //  - tail：上一格的 xrEndFrame 返回 → 這一格呼叫 xrWaitFrame，frame thread 在兩格之間花多久（見 pcvrLoopDiag）。
 //    每 10 s 印這幾行的那一格工作最多，而它的 tail 要到下一格才量得到，所以算在下一個視窗（下一行）的 max 裡。
 //    量測本身有沒有擠到下一次放行就看它：max 接近頭盔上的餘裕（約 1.7 ms）＝那一格會晚放行。
@@ -2984,12 +2985,27 @@ void XrContext::pcvrLoopDiagLog()
     const int32_t slackP50 = static_cast<int32_t>(r.at(0.50));
     r.scan(d.tailUs);
     const uint32_t tailP50 = u32(r.at(0.50)), tailMax = u32(r.maxValue());
-    // 這個視窗沒有解碼計時的樣本：dec 印 -，少一項的總和沒有意義，也印 -
-    char decText[24] = "-", sumText[24] = "-";
-    if (!d.dec1s.empty()) {
+    // 延遲鏈：這個視窗沒有樣本的那一項印 -（不印 0.00，免得被當成一條正常、只是比較短的鏈）——解碼計時沒有樣本的
+    // dec；一張新影像都沒挑到（影像停住、全被丟掉）時的 render 與 slack；每一格的預測顯示時刻都換算不出來時的 lead。
+    // 少任何一項，總和就沒有意義，也印 -
+    char decText[24] = "-", renderText[24] = "-", slackText[24] = "-", leadText[24] = "-", sumText[24] = "-";
+    const bool haveDec = !d.dec1s.empty();
+    const bool haveRender = !d.render10s.empty() && !d.slack10s.empty();  // 這兩個是成對推的
+    const bool haveLead = !d.latchLeadUs.empty();
+    uint32_t decP50 = 0;
+    if (haveDec) {
         r.scan(d.dec1s);
-        const uint32_t decP50 = u32(r.at(0.50));
+        decP50 = u32(r.at(0.50));
         std::snprintf(decText, sizeof(decText), "%.2f", decP50 / 1000.0);
+    }
+    if (haveRender) {
+        std::snprintf(renderText, sizeof(renderText), "%.2f", renderP50 / 1000.0);
+        std::snprintf(slackText, sizeof(slackText), "%.2f", slackP50 / 1000.0);
+    }
+    if (haveLead) {
+        std::snprintf(leadText, sizeof(leadText), "%.2f", leadP50 / 1000.0);
+    }
+    if (haveDec && haveRender && haveLead) {
         std::snprintf(sumText, sizeof(sumText), "%.2f",
                       static_cast<double>(xrphase::chainSumUs(decP50, renderP50, slackP50, leadP50)) / 1000.0);
     }
@@ -2997,11 +3013,11 @@ void XrContext::pcvrLoopDiagLog()
                 "[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=%u/%u/%u us | latchLead p50/p05=%.2f/%.2f ms "
                 "endLead p50/p05/min=%.2f/%.2f/%.2f ms | span p50/p95/max=%u/%u/%u us | beginCall max=%u us "
                 "endCall p50/p95/max=%u/%u/%u us | ahead p50/min/max=%.2f/%.2f/%.2f ms%s | waitShort=%u | "
-                "chain dec/render/slack/lead p50=%s/%.2f/%.2f/%.2f ms sum=%s ms | tail p50/max=%u/%u us%s",
+                "chain dec/render/slack/lead p50=%s/%s/%s/%s ms sum=%s ms | tail p50/max=%u/%u us%s",
                 wakeP50, wakeP95, wakeMax, leadP50 / 1000.0, leadP05 / 1000.0, endLeadP50 / 1000.0, endLeadP05 / 1000.0,
                 endLeadMin / 1000.0, spanP50, spanP95, spanMax, d.beginCallMaxUs, endCallP50, endCallP95, endCallMax,
                 aheadP50 / 1000.0, aheadMin / 1000.0, aheadMax / 1000.0, m_TimeConv != nullptr ? "" : " (approx)", d.waitShort,
-                decText, renderP50 / 1000.0, slackP50 / 1000.0, leadP50 / 1000.0, sumText, tailP50, tailMax,
+                decText, renderText, slackText, leadText, sumText, tailP50, tailMax,
                 // §VR-LATCH A/B：和同一輪的 [VIPLE-VR-LDIAG] 相同（10 s 區塊在換邊之前記下來的那一邊）
                 m_Options.pcvrLatchAbSec > 0 ? (m_LatchDiag.logAb ? " ab=1" : " ab=0") : "");
     d.wakePhaseUs.clear();

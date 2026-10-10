@@ -868,7 +868,9 @@ frame loop（XR 桌面也有）
                                                                                  waitShort＝相鄰兩次 xrWaitFrame 返回的間隔不到半格的次數（正常是 0）；
                                                                                  chain＝延遲鏈：dec（解碼：DU 進佇列到解出）＋render（影像 render thread 開始處理到 GPU 做完）
                                                                                  ＋slack（GPU 做完到挑影像，可以是負的）＋lead（挑影像到預測顯示時刻）各自的 p50 與四項的和。
-                                                                                 沒有含的只有解碼幀轉手與在 mailbox 裡等的時間；這個視窗沒有解碼樣本時 dec 與 sum 印 `-`。
+                                                                                 沒有含的只有解碼幀轉手與在 mailbox 裡等的時間。這個視窗沒有樣本的那一項印 `-`（沒有解碼樣本的
+                                                                                 dec；一張新影像都沒挑到時的 render 與 slack；預測顯示時刻都換算不出來時的 lead），少任何一項
+                                                                                 sum 也印 `-`——不會印成一條少了幾毫秒、看起來正常的鏈。
                                                                                  **同一場裡比延遲看 chain**，不要看 [VIPLE-VR-MTP10] 的 p50（鎖相開著時它只會一次跳半個週期）；
                                                                                  tail＝上一格的 xrEndFrame 返回到這一格呼叫 xrWaitFrame——frame thread 在兩格之間記帳、印 log、
                                                                                  處理事件花多久（預期 p50 約 0.2 ms）。它吃掉的是「回到 xrWaitFrame 到下一次放行」的餘裕
