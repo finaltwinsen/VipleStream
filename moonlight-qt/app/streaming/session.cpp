@@ -3272,10 +3272,28 @@ bool Session::startConnectionAsync()
                                              (m_VrSession.recoveryIntra ? VIPLE_VR_SF_RECOVERY_INTRA : 0) |
                                              // §VR-MULTILINK：server 回了 multilink=1 才啟用（selftest 是 dev 選項）
                                              (m_VrSession.multilink ? VIPLE_VR_SF_MULTILINK : 0) |
-                                             (m_VrSession.multilink && m_Preferences->vrLinkSelftest ? VIPLE_VR_SF_MULTILINK_SELFTEST : 0);
+                                             (m_VrSession.multilink && m_Preferences->vrLinkSelftest ? VIPLE_VR_SF_MULTILINK_SELFTEST : 0) |
+                                             // §VR-REPAIR-RTT：client 這一邊只是 offer，用不用由 host 的 vr_multilink_repair_rtt 決定
+                                             (m_VrSession.multilink && m_Preferences->effectiveRepairRtt() ? VIPLE_VR_SF_REPAIR_RTT : 0);
+                    m_StreamConfig.vrRepairHoldMs = m_Preferences->effectiveRepairHoldMs();
+                    m_StreamConfig.vrRepairAbSec = m_Preferences->cliRepairAbSec;
+                    m_StreamConfig.vrRepairIdle = m_Preferences->cliRepairIdle;
+                    m_StreamConfig.vrRepairNoAhead = m_Preferences->cliRepairNoAhead ? 1 : 0;
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VR-SESSION] negotiated: %s",
                                 qPrintable(m_VrSession.describe()));
+                    if (m_VrSession.multilink) {
+                        static const char* const k_IdleNames[] = {"auto", "fixed", "frame", "learned", "size"};  // VRRR_IDLE_* 的順序
+                        const int idle = m_StreamConfig.vrRepairIdle;
+                        const QString hold = m_StreamConfig.vrRepairHoldMs > 0 ? QString("%1 ms").arg(m_StreamConfig.vrRepairHoldMs)
+                                                                               : QStringLiteral("auto");
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VR-SESSION] repair options: rtt=%s hold=%s ab=%d s idle=%s ahead=%s",
+                                    (m_StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) ? "offer" : "off", qPrintable(hold),
+                                    m_StreamConfig.vrRepairAbSec,
+                                    (idle >= 0 && idle < (int)SDL_arraysize(k_IdleNames)) ? k_IdleNames[idle] : "?",
+                                    m_StreamConfig.vrRepairNoAhead ? "off" : "on");
+                    }
 #ifdef HAVE_OPENXR
                     if (m_XrPcvr && m_XrContext != nullptr) {
                         m_XrContext->setPcvrFoveation(m_VrSession.fovea);  // §VR-FOVEA：server 確認了才還原

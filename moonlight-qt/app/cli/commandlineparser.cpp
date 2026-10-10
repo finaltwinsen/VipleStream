@@ -8,6 +8,7 @@
 #include <QRegularExpression>
 
 #include <Limelight.h>  // §VR：VIPLE_VR_* 範圍常數
+#include <VrRepairRtt.h>  // §VR-REPAIR-RTT：--vr-repair-idle 的 VRRR_IDLE_*（header-only）
 
 #include <algorithm>
 #include <cstdio>
@@ -620,6 +621,23 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("vr-latch-wait", "PCVR: after --vr-latch-delay, wait up to this many milliseconds (0-1.0) for the stream frame that is due "
                           "on this display refresh when it has not arrived yet; the delay plus the wait never exceeds 6 ms "
                           "(this run only, the saved setting is not changed; no effect with --vr-synth; default 0)");
+    parser.addChoiceOption("vr-repair-rtt", "PCVR multi-link: whether this client offers the repair rules that follow the measured round trip "
+                           "(when to ask for lost packets again, how long to wait for them). They are used only when the host has "
+                           "vr_multilink_repair_rtt enabled (this run only, the saved setting is not changed)",
+                           {"on", "off"});
+    parser.addValueOption("vr-repair-hold", "PCVR multi-link with the round-trip repair rules: the longest later packets may be held back while "
+                          "re-sent packets are awaited, in milliseconds (8-100; 0 = automatic, follows the round trip up to 33; "
+                          "this run only, the saved setting is not changed)");
+    parser.addValueOption("vr-repair-ab", "(dev) PCVR multi-link: switch between the current repair rules and the round-trip rules every this many "
+                          "seconds (20-600, 0 = off), starting with the current rules, to compare them in one session. Not saved.");
+    parser.addChoiceOption("vr-repair-idle", "(dev) PCVR multi-link with the round-trip repair rules: how long a block may go without a new packet "
+                           "before its missing packets are reported - fixed (3 ms), frame (one frame interval), size (3 ms for small "
+                           "blocks, one frame interval for the rest), learned (from the measured stalls), auto (size at 100 Hz and "
+                           "above, fixed below). Not saved",
+                           {"auto", "fixed", "frame", "size", "learned"});
+    parser.addChoiceOption("vr-repair-ahead", "(dev) PCVR multi-link with the round-trip repair rules: whether frames that are missing entirely "
+                           "behind the one being repaired are reported together with it (off is for comparison only). Not saved",
+                           {"on", "off"});
     parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 2160x2160)");
     parser.addValueOption("vr-hz", "HMD refresh rate for PCVR (default 90)");
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
@@ -954,6 +972,37 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError(QString("vr-latch-wait must be a number of milliseconds within 0-1.0: %1").arg(parser.value("vr-latch-wait")));
         }
         preferences->cliLatchWaitMs = ms;
+    }
+    if (parser.isSet("vr-repair-rtt")) {
+        // §VR-REPAIR-RTT：只覆寫這一次（不改 vrRepairRtt）
+        preferences->cliRepairRtt = parser.getChoiceOptionValue("vr-repair-rtt").compare("on", Qt::CaseInsensitive) == 0 ? 1 : 0;
+    }
+    if (parser.isSet("vr-repair-hold")) {
+        // 只覆寫這一次（不改 vrRepairHoldMs）。0＝這一場用自動的上限
+        bool ok = false;
+        const int ms = parser.value("vr-repair-hold").toInt(&ok);
+        if (!ok || !(ms == 0 || (ms >= 8 && ms <= 100))) {
+            parser.showError(QString("vr-repair-hold must be 0 (automatic) or a number of milliseconds within 8-100: %1").arg(parser.value("vr-repair-hold")));
+        }
+        preferences->cliRepairHoldMs = ms;
+    }
+    if (parser.isSet("vr-repair-ab")) {
+        bool ok = false;
+        const int sec = parser.value("vr-repair-ab").toInt(&ok);
+        if (!ok || !(sec == 0 || (sec >= 20 && sec <= 600))) {
+            parser.showError(QString("vr-repair-ab must be 0 (off) or a number of seconds within 20-600: %1").arg(parser.value("vr-repair-ab")));
+        }
+        preferences->cliRepairAbSec = sec;
+    }
+    if (parser.isSet("vr-repair-idle")) {
+        const QString idle = parser.getChoiceOptionValue("vr-repair-idle").toLower();
+        preferences->cliRepairIdle = idle == "fixed" ? VRRR_IDLE_FIXED3 :
+                                     idle == "frame" ? VRRR_IDLE_FRAME :
+                                     idle == "size" ? VRRR_IDLE_SIZE :
+                                     idle == "learned" ? VRRR_IDLE_LEARNED : VRRR_IDLE_AUTO;
+    }
+    if (parser.isSet("vr-repair-ahead")) {
+        preferences->cliRepairNoAhead = parser.getChoiceOptionValue("vr-repair-ahead").compare("off", Qt::CaseInsensitive) == 0;
     }
     if (parser.isSet("vr-eye")) {
         auto eye = parser.getResolutionOptionValue("vr-eye");

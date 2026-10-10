@@ -89,6 +89,8 @@
 #define SER_VRLATCHRELATCH "vrlatchrelatch"
 #define SER_VRLATCHABSEC "vrlatchabsec"
 #define SER_VRLATCHWAITMS "vrlatchwaitms"
+#define SER_VRREPAIRRTT "vrrepairrtt"
+#define SER_VRREPAIRHOLDMS "vrrepairholdms"
 #define SER_VRSYNTH "vrsynth"
 #define SER_VRFOVEATION "vrfoveation"
 #define SER_VREYEWIDTH "vreyewidth"
@@ -312,6 +314,12 @@ void StreamingPreferences::reload()
         vrLatchAbSec = (ab >= 20 && ab <= 600) ? ab : 0;
     }
     vrLatchWaitMs = qBound(0.0, settings.value(SER_VRLATCHWAITMS, 0.0).toDouble(), 1.0);
+    vrRepairRtt = settings.value(SER_VRREPAIRRTT, true).toBool();
+    {
+        // 0＝自動；其他值要在 8～100 ms 內，超出範圍當成 0
+        const int hold = settings.value(SER_VRREPAIRHOLDMS, 0).toInt();
+        vrRepairHoldMs = (hold >= 8 && hold <= 100) ? hold : 0;
+    }
     vrSynth = settings.value(SER_VRSYNTH, false).toBool();
     vrFoveation = qBound(100, settings.value(SER_VRFOVEATION, 100).toInt(), 250);
     // 每眼解析度（2026-10-07 起寫入設定，GUI 啟動的 VR 也吃得到）。範圍同 --vr-eye；超出範圍就用預設
@@ -616,6 +624,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_VRLATCHRELATCH, vrLatchRelatch);
     settings.setValue(SER_VRLATCHABSEC, vrLatchAbSec);
     settings.setValue(SER_VRLATCHWAITMS, vrLatchWaitMs);
+    settings.setValue(SER_VRREPAIRRTT, vrRepairRtt);
+    settings.setValue(SER_VRREPAIRHOLDMS, vrRepairHoldMs);
     settings.setValue(SER_VRSYNTH, vrSynth);
     settings.setValue(SER_VRFOVEATION, vrFoveation);
     settings.setValue(SER_VREYEWIDTH, vrEyeWidth);

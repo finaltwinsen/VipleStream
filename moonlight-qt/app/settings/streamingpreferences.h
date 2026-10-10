@@ -489,7 +489,24 @@ public:
     double vrLatchWaitMs = 0.0;
     double cliLatchWaitMs = -1.0;
     double effectiveLatchWaitMs() const { return cliLatchWaitMs >= 0.0 ? cliLatchWaitMs : vrLatchWaitMs; }
-    bool vrHalfRate = false;          // §VR-HALF-RATE：--vr-half-rate，串流跑顯示更新率的一半；寫入設定（vrhalfrate）
+    // §VR-REPAIR-RTT：client 願不願意讓補包的門檻、等待、重報跟著量到的往返時間走；寫入設定（vrrepairrtt，預設開
+    // ＝跟著 host）。實際用不用由 host 的 vr_multilink_repair_rtt 決定。--vr-repair-rtt on|off 只覆寫這一次、不存設定
+    // （-1＝命令列沒指定）
+    bool vrRepairRtt = true;
+    int cliRepairRtt = -1;
+    bool effectiveRepairRtt() const { return cliRepairRtt >= 0 ? cliRepairRtt == 1 : vrRepairRtt; }
+    // §VR-REPAIR-RTT 的等待上限（後面的封包最多被壓住幾毫秒）：0＝自動（跟著往返走、最多 33 ms），或 8～100；寫入設定
+    // （vrrepairholdms，預設 0）。--vr-repair-hold <ms> 只覆寫這一次、不存設定（負值＝命令列沒指定）
+    int vrRepairHoldMs = 0;
+    int cliRepairHoldMs = -1;
+    int effectiveRepairHoldMs() const { return cliRepairHoldMs >= 0 ? cliRepairHoldMs : vrRepairHoldMs; }
+    // dev（§VR-REPAIR-RTT，都不寫入設定）：--vr-repair-ab <秒>＝同一場每這麼多秒在現行規則與 RTT 規則之間切換一次
+    // （0＝不切換，20～600）；--vr-repair-idle＝第一份回報「多久沒有新封包」的做法（VrRepairRtt.h 的 VRRR_IDLE_*，
+    // 0＝auto）；--vr-repair-ahead off＝後面整幀沒到的幀不預先回報（只給對照用）
+    int cliRepairAbSec = 0;
+    int cliRepairIdle = 0;
+    bool cliRepairNoAhead = false;
+    bool vrHalfRate = false;         // §VR-HALF-RATE：--vr-half-rate，串流跑顯示更新率的一半；寫入設定（vrhalfrate）
     double vrLatchDelayMs = 0.0;      // §VR-LATE-LATCH：--vr-latch-delay，frame thread 晚幾毫秒才挑影像（0～20）；寫入設定（vrlatchdelayms）
     double vrOverscanDeg = 0.0;       // --vr-overscan：每眼 FOV 四邊各放大幾度（0～10）。2026-10-07 起寫入設定（vroverscandeg），GUI 啟動的 VR 也吃得到
     bool vrTestHaptic = false;        // §VR M4a R2（dev）：--vr-test-haptic 本地注入 HAPTIC，不寫入設定
