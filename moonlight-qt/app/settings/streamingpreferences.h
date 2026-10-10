@@ -506,7 +506,7 @@ public:
     int cliRepairAbSec = 0;
     int cliRepairIdle = 0;
     bool cliRepairNoAhead = false;
-    bool vrHalfRate = false;         // §VR-HALF-RATE：--vr-half-rate，串流跑顯示更新率的一半；寫入設定（vrhalfrate）
+    bool vrHalfRate = false;          // §VR-HALF-RATE：--vr-half-rate，串流跑顯示更新率的一半；寫入設定（vrhalfrate）
     double vrLatchDelayMs = 0.0;      // §VR-LATE-LATCH：--vr-latch-delay，frame thread 晚幾毫秒才挑影像（0～20）；寫入設定（vrlatchdelayms）
     double vrOverscanDeg = 0.0;       // --vr-overscan：每眼 FOV 四邊各放大幾度（0～10）。2026-10-07 起寫入設定（vroverscandeg），GUI 啟動的 VR 也吃得到
     bool vrTestHaptic = false;        // §VR M4a R2（dev）：--vr-test-haptic 本地注入 HAPTIC，不寫入設定

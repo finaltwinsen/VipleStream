@@ -627,6 +627,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                            {"on", "off"});
     parser.addValueOption("vr-repair-hold", "PCVR multi-link with the round-trip repair rules: the longest later packets may be held back while "
                           "re-sent packets are awaited, in milliseconds (8-100; 0 = automatic, follows the round trip up to 33; "
+                          "a value below the measured median round trip plus 2 ms switches the repair off; "
                           "this run only, the saved setting is not changed)");
     parser.addValueOption("vr-repair-ab", "(dev) PCVR multi-link: switch between the current repair rules and the round-trip rules every this many "
                           "seconds (20-600, 0 = off), starting with the current rules, to compare them in one session. Not saved.");

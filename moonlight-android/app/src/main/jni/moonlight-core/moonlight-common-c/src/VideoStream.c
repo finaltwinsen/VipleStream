@@ -24,6 +24,8 @@ static RTP_VIDEO_QUEUE rtpQueue;
 //   - --vr-repair-ab：同一場每隔幾秒在原本的規則與 RTT 規則之間切換，換邊時印那一邊的小結；
 //   - 保險觸發時印一行；
 //   - 佇列回報「被補包拖晚的幀放行了」時記下時刻，給 XR 那一側用（LiGetVrRepairQuietMs）。
+// 量測的代價：協商了補包之後，每個影像封包多讀兩次時鐘（這裡取 nowUs 一次、vrmlRepairRtt 看連線是否已確認一次）、
+// 多合併一次各條連線的往返統計——server 的主開關關著時也一樣（gate 10s 要用），不改任何決定。
 // log 的欄位見 docs/log_tags.md。rr 只在影像接收執行緒存取，每場串流在執行緒開頭歸零。
 #define RR_GATE_WINDOW_US 10000000
 

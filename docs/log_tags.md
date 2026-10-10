@@ -753,25 +753,34 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
                                                                                  unasked＝收到一部分、沒回報過就放棄；whole＝一個封包都沒到、也沒回報過（含連續掉好幾幀時
                                                                                  佇列沒等過就跳過的）。三類加起來比 lost 少的部分＝回報過、後來因為後面缺太多幀而放棄的。
                                                                                  repaired＝回報之後收齊的 block；used＝其中補包真的用上的（不是它自己晚到的封包剛好湊齊）。
+                                                                                 預先報過、補包在輪到之前就先排著、輪到時直接收齊的幀也算在這兩欄裡。
                                                                                  rtt …＝印的這一刻正在送影像的連線的往返（最近 8 筆的最小／中位數／第二大）與照它算出來的
                                                                                  eta／etaTry／等待上限（毫秒）——新規則沒開的時候也印，方便事先看它會怎麼訂；沒有樣本印 `-`。
                                                                                  lateDone＝回報過才放棄的 block，放棄之後多久才到齊（≤5／≤10／≤20／≤33／>33 ms）；never＝60 ms
-                                                                                 內沒到齊。同時最多追蹤 4 個 block；影像有應用層加密時晚到的封包在解密前就丟了，只能以幀
-                                                                                 為單位計數（看不到序號、不去重），這時的數字偏樂觀。
-                                                                                 stall＝同一個 block 相鄰兩個封包的到達間隔（3～4／4～6／6～8／8～12／≥12 ms；回報過、隔了
-                                                                                 一個往返才到的當成補包，不算）。
+                                                                                 內沒到齊。放棄前手上已經有的 shard 再到一份（上一輪補包晚到、兩條連線各送一份）不算進度。
+                                                                                 server 回了 `REPAIR_GONE`（或回報送不出去）的 block 不追蹤，兩欄都不含它——所以 never 是
+                                                                                 「server 補了、60 ms 內卻沒到齊」，補包在路上掉了才會這樣；server 沒補的看它那一側
+                                                                                 `[VIPLE-VR-REPAIR] 10s` 的 `gone (expired=… budget=…)`。同時最多追蹤 4 個 block；影像有應用層
+                                                                                 加密時晚到的封包在解密前就丟了，只能以幀為單位計數（看不到序號、不去重），這時的數字偏樂觀。
+                                                                                 stall＝同一個 block 相鄰兩個封包的到達間隔（3～4／4～6／6～8／8～12／≥12 ms）。不算的兩種：
+                                                                                 回報過、隔了一個往返才到的（當成補包）；序號跳號之後才到的（中間掉了一段，那段間隔是
+                                                                                 掉的那幾個封包佔的時間，不是鏈路自己的停頓）。
                                                                                  **救回率的分母用 lost＋used**（補包救回來的＋沒救回來的），不要用 repaired：它含自己晚到湊齊的
 [VIPLE-VR-MTP10] … | repRun max=N ge3=N ge5=N latchSkip=N rr=0|1|m          ← 行尾新增。repRun＝同一張影像連續重複顯示幾格：這 10 秒的最大值（還沒結束的那一段也算）、
                                                                                  長度達到 3 格與 5 格的段數（一段在下一張新影像出現時結算）。半速＋補幀時每張真的影像平常就
                                                                                  重複 1 格，判讀時扣掉。latchSkip＝被補包拖晚的幀剛放行（60 ms 內）、沒有拿來更新 LATCH 樣本的
-                                                                                 新影像張數；rr＝這 10 秒補包照哪一套規則（0 原本的、1 新的、m 兩種都有）
+                                                                                 新影像張數（「拖晚」＝補包用上才收齊、或跨幀等待結束才放行；報了但自己收齊的不算）。
+                                                                                 半速場次驗收時看它佔 `frames new` 的比例；rr＝這 10 秒補包照哪一套規則（0 原本的、1 新的、
+                                                                                 m 兩種都有）
 量測（server）
 [VIPLE-VR-FECSTAT] 10s: recovered=N (shards=N max=N) failed=N wholeFrame=N | fec=P%
                                                                               ← VR session 每 10 秒（這 10 秒有收到 client 的 FEC status 才印）。recovered＝靠 FEC 還原成功的
                                                                                  block 數（括號：一共還原了幾個 data shard、單一 block 最多幾個；補包補到夠還原的也算在
                                                                                  這裡，還原的個數是還原當下還缺的）；failed＝收到的不夠還原；
-                                                                                 wholeFrame＝一個封包都沒到（client 依幀號跳號合成的回報）；fec＝目前的 FEC 百分比。
-                                                                                 只是計數，不影響自動位元率
+                                                                                 wholeFrame＝client 依幀號跳號合成的回報**份數**（收到的欄位都是 0）：每次沒收齊就換幀都有
+                                                                                 一份——收到一部分才放棄的那一幀也有（它另外算一筆 failed），而連續好幾幀沒到只有一份。
+                                                                                 所以它不是「一個封包都沒到的幀數」，那個數看 client `gate 10s` 的 whole；
+                                                                                 fec＝目前的 FEC 百分比。只是計數，不影響自動位元率
 
 規則（client；host 開了 vr_multilink_repair_rtt、而且只有一條連線在送影像時）
 [VIPLE-VR-SESSION] repair options: rtt=offer|off hold=auto|N ms ab=N s idle=auto|fixed|frame|learned|size ahead=on|off
@@ -782,20 +791,25 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
                                                                               ← 預先回報：第 N 幀報過之後，替它後面整幀沒到的第 F 幀送的（total＝0）
 [VIPLE-VR-REPAIR] skipped frame=F block=B (too late to ask|after a loss): try x ms, cap y ms, have=N/D
                                                                               ← 沒回報就放棄：too late to ask＝現在報也趕不上期限；after a loss＝剛放棄過前面的 block，
-                                                                                 intra refresh 還沒到，這段時間不回報、不等。和 gave up 共用節流（每場前 30 筆、之後每 20 筆一筆）
+                                                                                 intra refresh 還沒到，這段時間不回報、不等（從那一輪第一次放棄起算「最短往返＋一個幀週期
+                                                                                 ＋2 ms」，中間再放棄的不延長）。和 gave up 共用節流（每場前 30 筆、之後每 20 筆一筆）
 [VIPLE-VR-REPAIR] skipped frame=F (+N whole frames missing behind it: too many to repair in time): cap … ms, about N pkts/frame, pkt gap N us
                                                                               ← 後面整幀沒到的幀多到補不完：這一段全部不補、不等，立刻放棄
 [VIPLE-VR-REPAIR] rtt: paused N ms (level L)                                  ← 保險觸發：回報過卻連續救不回，新規則暫停這麼久（期間不回報、不等）；level＝退避的級數
 [VIPLE-VR-REPAIR] ab -> rtt|legacy frame=N                                    ← --vr-repair-ab：換邊（從 legacy 開始）
 [VIPLE-VR-REPAIR] ab: arm=rtt|legacy secs=N on=NN% lost=N (nacked=N unasked=N whole=N) repaired=N used=N nack=N spurious=N late=N tooMany=N fixMs avg=… max=…
                                                                               ← --vr-repair-ab：剛結束的那一邊的小結（串流結束時再印最後那一邊）。nack＝送出的回報；
-                                                                                 spurious＝多餘的回報（報完、補包還不可能到，它自己的封包就到了）；late／tooMany 同下一行；
-                                                                                 fixMs＝第一份回報到收齊
+                                                                                 spurious＝報早了的回報：報完、補包還不可能到（距第一份回報不到一個最短往返），這個 block
+                                                                                 自己的封包又到了，每個 block 只算一次。之後補包有沒有用上不看——真的缺包、只是報早了的
+                                                                                 也算；要數「整份白報」用 repaired − used。late／tooMany 同下一行；
+                                                                                 fixMs＝第一份回報到收齊（含補包沒用上、自己收齊的 block）
 [VIPLE-VR-LINK] hold 10s: …原樣… | rtt eta=… try=… cap=… idle=… late=N afterLoss=N tooMany=N spurious=N used=N ahead=N fixMs avg=… max=… hist=a/b/c/d/e/f held hist=a/b/c/d/e/f
                                                                               ← 照新規則跑過的視窗才有這一段。eta／try／cap／idle＝最近一次用的值（毫秒）；
-                                                                                 late／afterLoss＝沒回報就放棄的兩種（同上面的 skipped）；tooMany＝後面缺太多幀而整段不補的次數；
-                                                                                 spurious＝多餘的回報；used＝回報之後才到、而且被採用的**封包**數（gate 10s 的 used 是 block 數）；
-                                                                                 ahead＝預先回報的份數（已含在 nack 裡）；hist＝第一份回報到收齊 ≤8／≤12／≤16／≤20／≤25／>25 ms；
+                                                                                 late／afterLoss＝沒回報就放棄的兩種（同上面的 skipped）；afterLoss 成串出現＝連續好幾幀都受損
+                                                                                 （成串掉包），每放棄一次之後暫停裡的兩三幀都不補；tooMany＝後面缺太多幀而整段不補的次數；
+                                                                                 spurious＝報早了的回報（定義同上一行的 ab 小結）；used＝回報之後才到、而且被採用的**封包**數
+                                                                                 （gate 10s 的 used 是 block 數）；ahead＝預先回報的份數（已含在 nack 裡）；
+                                                                                 fixMs 與 hist＝第一份回報到收齊（≤8／≤12／≤16／≤20／≤25／>25 ms；含自己收齊的 block）；
                                                                                  held hist＝被壓住的幀從它第一個封包到達到放行 ≤4／≤8／≤12／≤17／≤25／>25 ms
 
 規則（server）
@@ -807,7 +821,9 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 - 沒開主開關的 host、舊 host、兩條以上連線在送影像：只有「量測」那幾行，`rules=legacy`、`rr=0`、`latchSkip=0`，
   `hold 10s` 沒有 ` | rtt …` 那一段。
 - 開發用的故障注入 `vr_multilink_fault` 的 `d<linkId>:<ms>` 現在也把這條連線收到的回報晚這麼久才處理（之前只有
-  PONG 晚兩趟、補包只晚一趟，本機模擬會高估補包趕得上的機率）。
+  PONG 晚兩趟、補包只晚一趟，本機模擬會高估補包趕得上的機率）。延後排在去重之後：同一則控制訊息兩條連線各送
+  一份時，被延後的那條若先收到，整則訊息就照它晚處理（另一條的那一份被當成重複）——兩條連線的場次不要拿它量
+  「控制訊息走快的那條」的時間。
 
 ### 探測的開始與結束行
 

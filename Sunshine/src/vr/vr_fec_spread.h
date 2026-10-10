@@ -5,7 +5,8 @@
  * 只依賴標準函式庫，單元測試直接 include（tests/unit/test_vr_fec_spread.cpp）。
  *
  * 目前只有量測（§VR-REPAIR-RTT 的第一步）：每一份 FEC status 是「靠 FEC 還原成功」「收到的不夠、client 放棄了」還是
- * 「整幀沒到」，每 10 秒印成 [VIPLE-VR-FECSTAT]。位元率與 FEC 百分比的調整照舊只看回報裡的缺包數，不看這裡的分類。
+ * 「幀號跳號時 client 合成的那一份」，每 10 秒印成 [VIPLE-VR-FECSTAT]。位元率與 FEC 百分比的調整照舊只看回報裡的
+ * 缺包數，不看這裡的分類。
  * §VR-FEC-SPREAD（小幀的 parity 補滿並延後送）要用到同一個分類，它的規則之後也放這個檔。
  */
 #pragma once
@@ -22,7 +23,9 @@ namespace vr::fecspread {
     none,  ///< data 全到（不該回報）或欄位不合理
     recovered,  ///< 缺了 data、靠 parity 還原了
     failed,  ///< 收到的 shard 不夠還原（client 放棄這個 block）
-    gap,  ///< 一個 shard 都沒收到（client 依幀號跳號合成的回報）
+    /// client 依幀號跳號合成的回報（收到的欄位都是 0）。每次沒收齊就換幀都有一份：收到一部分才放棄的那一幀也有
+    /// （它另外有一份 failed），而連續好幾幀沒到只有一份——所以它的份數不是「一個封包都沒到的幀數」
+    gap,
   };
 
   /**
@@ -48,7 +51,7 @@ namespace vr::fecspread {
     uint32_t recovered_shards = 0;  ///< 這些 block 一共還原了幾個 data shard
     uint32_t recovered_max = 0;  ///< 單一 block 最多還原幾個
     uint32_t failed = 0;  ///< 收到的不夠還原、client 放棄的 block 數
-    uint32_t gap = 0;  ///< 整幀沒到（client 合成的回報）的份數
+    uint32_t gap = 0;  ///< client 合成的跳號回報份數（log 的 wholeFrame；不是整幀沒到的幀數，見 status_e::gap）
 
     void add(unsigned total_data, unsigned total_parity, unsigned recv_data, unsigned recv_parity) {
       switch (classify_status(total_data, total_parity, recv_data, recv_parity)) {

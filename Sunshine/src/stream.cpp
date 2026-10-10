@@ -1915,8 +1915,9 @@ namespace stream {
   }
 
   /**
-   * @brief §VR-REPAIR-RTT（量測）：把一份 client 的 FEC status（0x5502）依「靠 FEC 還原成功／收到的不夠而放棄／整幀沒到」
-   *        記進這 10 秒的計數（vr_control_tick 印成 [VIPLE-VR-FECSTAT]）。只記帳，不影響位元率與 FEC 的調整。
+   * @brief §VR-REPAIR-RTT（量測）：把一份 client 的 FEC status（0x5502）依「靠 FEC 還原成功／收到的不夠而放棄／幀號跳號時
+   *        合成的那一份」記進這 10 秒的計數（vr_control_tick 印成 [VIPLE-VR-FECSTAT]；最後一類印成 wholeFrame，是份數、
+   *        不是整幀沒到的幀數，見 vr_fec_spread.h）。只記帳，不影響位元率與 FEC 的調整。
    * @param fec SS_FRAME_FEC_STATUS 的本體（big-endian；呼叫端已經確認至少 18 B）。呼叫端握著 abrMutex。
    */
   static void vr_note_fec_status_locked(session_t *session, const uint8_t *fec) {

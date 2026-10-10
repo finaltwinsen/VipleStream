@@ -2435,9 +2435,9 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td colspan="2">
             VipleStream 2.0: let the timing of [vr_multilink_repair](#vr_multilink_repair) follow the round trip the
             client measures on the link that carries video, instead of the frame period. Without it a resend is only
-            requested while the latest round trip is at most about one frame period, and later frames are held back
-            for one to two frame periods at most - at 120 Hz over a path with a 10 ms round trip, most resends
-            arrive just too late and the frame is dropped anyway.
+            requested while the latest round trip plus 2 ms is at most one and a half frame periods (10 ms at
+            120 Hz), and later frames are held back for one to two frame periods at most - at 120 Hz over a path
+            with a 10 ms round trip, most resends arrive just too late and the frame is dropped anyway.
             When enabled, and only while a single link carries video:
             the client asks for resends while the median of the last 8 round-trip samples is at most 23 ms (and
             starts again once it is back to 21 ms);
@@ -2445,9 +2445,11 @@ not matter). Any other value is reported in the log as an invalid value and the 
             never more than 33 ms, never less than what the frame-period rules already allow);
             a request is repeated only once a resend had the time to arrive and something else has arrived since;
             frames that are missing entirely behind the one being repaired are requested together with it (up to
-            3 at 90 Hz and above, 2 below; none at all when too many are missing to be resent in time);
+            3 at 90 Hz and above, 2 at 60-72 Hz, 1 for a half-rate stream at 45 or 36 fps; none at all when too
+            many are missing to be resent in time);
             after a frame had to be dropped, frames that were not requested yet are not waited for until the
-            recovery picture can arrive;
+            recovery picture can arrive (the shortest round trip plus one frame period, counted once from that
+            drop - frames dropped inside this window do not extend it);
             and the rules switch themselves off for a few seconds when resends keep arriving too late.
             On the host, requests sent under these rules are served for frames up to 100 ms old (instead of three
             frame periods).
@@ -2487,7 +2489,9 @@ not matter). Any other value is reported in the log as an invalid value and the 
             `d<linkId>:<ms>` (1-40) sends every video batch of that link that much later, handles the control
             messages received on that link (resend requests, loss reports, display-phase feedback) that much
             later, and delays its ping replies by twice that (a link that lags behind the others by that much in
-            each direction);
+            each direction). With two links the client sends each control message on both and the host keeps the
+            copy that arrives first: when that is the copy on the delayed link, the whole message is handled late
+            even though the other link delivered it in time;
             `b<linkId>:<period_ms>:<packets>` drops that many consecutive video packets of first transmissions
             once per period (burst loss; resent packets are not affected);
             `c:<on_ms>:<off_ms>[:<phase_ms>]` drops the unreliable VR messages on the control connection in both
