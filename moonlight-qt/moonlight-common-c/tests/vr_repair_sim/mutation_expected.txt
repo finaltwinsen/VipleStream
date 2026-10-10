@@ -28,6 +28,7 @@ idle-auto | 第一份回報 | VrRepairRtt.h | idle 的預設做法一律 3 ms | 
 idle-size | 第一份回報 | VrRepairRtt.h | 「小的 block」由 32 個 shard 改成 64 個 | unit
 nack-flags | NACK 的旗標 | VrRepairRtt.h | eta 換成毫秒時無條件捨去 | unit
 cannot-be-repair | 量測 | VrRepairRtt.h | 回報之後到的封包一律當成補包 | unit
+stall-min | 第一份回報 | VrRepairRtt.h | 短於 3 ms 的間隔也記成停頓 | unit
 q-retry-silent | 重報 | RtpVideoQueue.c | 鏈路靜默時照樣重報 | scen
 q-refund | 重報 | RtpVideoQueue.c | RTT 規則也用「退還」 | scen
 q-deadline-unasked | 等到什麼時候 | RtpVideoQueue.c | 沒報過的 block 也當成報過（現在報趕不上的照樣等到上限） | scen
@@ -38,10 +39,18 @@ q-too-many | 預先回報 | RtpVideoQueue.c | 缺太多幀時照樣一幀一幀�
 q-pre-consume | 預先回報 | RtpVideoQueue.c | 預先報過的幀輪到時不算報過 | scen
 q-pre-gone | 預先回報 | RtpVideoQueue.c | 預先報的幀收到 REPAIR_GONE 不記 | scen
 q-holdoff | 放棄後暫停 | RtpVideoQueue.c | 放棄之後不暫停 | scen
+q-holdoff-rearm | 放棄後暫停 | RtpVideoQueue.c | 暫停裡每放棄一次就重新起算（成串掉包時第一次放棄之後整段不再回報） | scen
 q-deadline-cap | 等待上限 | RtpVideoQueue.c | 等待的期限變成兩倍的上限 | scen
 q-latched | 規則切換 | RtpVideoQueue.c | 正在等的 block 不回報「沿用規則」 | scen
 q-nack-flags | NACK 的旗標 | RtpVideoQueue.c | 回報不帶旗標（server 照原本的年齡上限） | scen
 q-used | 保險 | RtpVideoQueue.c | 自己晚到湊齊的 block 也算「補包用上了」 | scen
+q-latch-own | LATCH 的靜默 | RtpVideoQueue.c | 報了、補包沒用上就自己收齊的 block 也觸發靜默 | scen
+q-latch-wait | LATCH 的靜默 | RtpVideoQueue.c | 跨幀等待結束時不觸發靜默 | scen
+q-late-seen | 量測 | RtpVideoQueue.c | 放棄前已經收到的 shard 再到一份也算進度（lateDone） | scen
+q-late-gone | 量測 | RtpVideoQueue.c | server 回補不了的 block 也算進「沒到齊」（never） | scen
+q-stall-hole | 量測 | RtpVideoQueue.c | 掉包的洞也算成 block 內的停頓（stall） | scen
+q-ring-settle | 保險 | RtpVideoQueue.c | 預先報過、在環裡收齊的幀不結算（repaired／used 少算，保險看不到成功） | scen
+q-gap-carry | 預先回報 | RtpVideoQueue.c | 「後面整幀沒到」不分是哪條連線送來的封包 | scen
 q-legacy-idle | 現行規則不變 | RtpVideoQueue.c | 現行規則的 3 ms 改成 4 ms | golden
 q-legacy-clock | 現行規則不變 | RtpVideoQueue.c | 每個封包多讀一次時鐘（時間軸差 1 µs） | golden
 s-max-age | server 的年齡上限 | vr_multilink_logic.h | 帶旗標的回報的年齡上限由 100 ms 改成 50 ms | gtest
