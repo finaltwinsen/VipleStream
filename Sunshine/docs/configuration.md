@@ -2452,7 +2452,8 @@ the option keeps its default.}
             at normal load; roughly a third of that difference is attributable to the paused pacing, the rest to
             encoding taking longer and less regularly while the GPU is that busy, which this option does not
             change. The condition will be narrowed to the case where the game no longer keeps up with the virtual
-            vsync before the default changes.}
+            vsync before the default changes. For the pacing controller it is already narrowed by
+            [vr_capture_overload](#vr_capture_overload) `= cadence`, which is off by default.}
         </td>
     </tr>
     <tr>
@@ -2498,6 +2499,45 @@ the option keeps its default.}
         <td>Example</td>
         <td colspan="2">@code{}
             vr_capture_late_max_ms = 60
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_capture_overload
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: what makes the host stop feeding the client's timing measurements to the pacing
+            controller ([vr_latch_mode](#vr_latch_mode)) while [vr_capture_late](#vr_capture_late) is enabled.
+            `late` (default): as described under vr_capture_late — while 30% or more of the frames are late, both
+            the pacing controller and the adaptive [vr_vsync_to_photons_us](#vr_vsync_to_photons_us) ignore the
+            client's measurements.
+            `cadence`: the pacing controller is paused only while the compositor's Present no longer keeps up with
+            the virtual vsync (the driver reports how many vsync slots each Present spanned: four single-slot
+            slips within 10 seconds, until 12 seconds have passed without one; or dense slipping, until 3 seconds
+            without one), or while 30% or more of the frames had to be abandoned. A game that keeps the full
+            display rate with frames that are steadily late keeps being tracked. Whenever the host cannot tell (no
+            timing records from the driver, slips right after a stall within the last 12 seconds, a steady integer
+            fraction of the rate that SteamVR's throttle value does not explain, implausible values, less than
+            10 seconds of observation), the `late` rule applies. The adaptive vr_vsync_to_photons_us keeps
+            ignoring the measurements while frames are late, and additionally while Present is slipping.
+            @note{Only has an effect with `vr_capture_late = enabled`. With `late` the decisions are identical to
+            earlier versions; the log has additional lines and fields that show what `cadence` would decide.}
+            @note{Invalid values are ignored with a warning.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            late
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_capture_overload = cadence
             @endcode</td>
     </tr>
 </table>
