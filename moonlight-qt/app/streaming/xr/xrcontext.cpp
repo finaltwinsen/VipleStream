@@ -1469,12 +1469,14 @@ void XrContext::maybeLogStats(uint64_t nowNs)
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-XR] 10s frames=%llu missed=%llu (%.2f%%) notRendered=%llu endFrameErr=%llu state=%s period=%.2f ms "
-                "xrThread cpu p50=%.2f p95=%.2f ms stale=%d",
+                "xrThread cpu p50=%.2f p95=%.2f ms stale=%d discarded=%llu",
                 static_cast<unsigned long long>(d.frames), static_cast<unsigned long long>(d.missed), d.missPercent(),
                 static_cast<unsigned long long>(cur.notRendered - prev.notRendered),
                 static_cast<unsigned long long>(cur.endFrameErrors - prev.endFrameErrors),
                 sessionStateName(cur.currentState), static_cast<double>(m_LastPeriod) / 1e6,
-                cpuP50, cpuP95, m_StaleState);
+                cpuP50, cpuP95, m_StaleState,
+                // xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（這個視窗的增量；正常是 0）
+                static_cast<unsigned long long>(cur.discarded - prev.discarded));
 #ifdef HAVE_XR_VIDEO
     if (m_Video != nullptr) {
         // §VR-LATCH A/B：開了切換時在行尾標這個視窗是哪一邊。這一行的 10 s 視窗是這個函式自己的計時，不是
@@ -1701,6 +1703,19 @@ void XrContext::frameThreadMain()
             br = xrBeginFrame(m_Session, &bfi);
             m_DiagLockNs = tl1 - tl0;
             m_DiagBeginNs = steadyNowNs() - tl1;
+        }
+        if (br == XR_FRAME_DISCARDED) {
+            // 成功碼：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。原本只檢查 XR_FAILED，
+            // 這個結果看不到。流程照常，只計數（正常是 0）；一場最多印 10 行
+            uint64_t n = 0;
+            {
+                std::lock_guard<std::mutex> lk(m_StatsMutex);
+                n = ++m_Stats.discarded;
+            }
+            if (n <= 10) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] xrBeginFrame returned XR_FRAME_DISCARDED (%llu so far)",
+                            static_cast<unsigned long long>(n));
+            }
         }
         if (XR_FAILED(br)) {
             continue;

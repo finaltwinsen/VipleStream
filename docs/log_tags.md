@@ -843,6 +843,11 @@ PCVR 走真 XR 時 client 這一側的量測：一律開著、不改變任何一
                                                                                  要比哪一個就只開那一個
 [VIPLE-XR] 10s video …原樣… ab=<0|1|m>                                        ← 行尾新增（開了同場切換才印）。這一行的 10 秒視窗是它自己的計時，不是 [VIPLE-VR-MTP10]／
                                                                                  [VIPLE-VR-LDIAG] 的那一個：m＝這個視窗裡換過邊（不拿來比），否則是現在這一邊
+
+frame loop（XR 桌面也有）
+[VIPLE-XR] 10s frames=… …原樣… stale=N discarded=N                            ← 行尾新增：這 10 秒 xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（正常是 0）
+[VIPLE-XR] xrBeginFrame returned XR_FRAME_DISCARDED (N so far)                ← warning，一場最多 10 行：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。
+                                                                                 它是成功碼，流程照常；以前只檢查失敗碼，這個結果看不到
 ```
 
 ### 探測的開始與結束行

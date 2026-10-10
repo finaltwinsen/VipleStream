@@ -156,6 +156,9 @@ public:
         uint64_t warmupMissed = 0;    // bring-up 後前 2 s 的漏幀（runtime 起步期，不計入 miss%）
         uint64_t notRendered = 0;     // shouldRender == false 的幀
         uint64_t endFrameErrors = 0;
+        // xrBeginFrame 回 XR_FRAME_DISCARDED 的次數：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。
+        // 它是成功碼，流程照常，只計數（正常是 0）
+        uint64_t discarded = 0;
         int highestState = 0;         // XrSessionState 的最大值（FOCUSED=5）
         int currentState = 0;
         double missPercent() const {
