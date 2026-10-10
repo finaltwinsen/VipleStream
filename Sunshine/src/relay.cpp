@@ -628,6 +628,10 @@ namespace relay {
   static void relay_thread_proc() {
     platf::set_thread_name("relay");
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
+    // 2026-10-10：這個檔案等關閉事件一律用 view()（只看、不取走）。原本用的是 pop()：它會把事件「取走」，而這個事件是整個
+    // 行程共用的（其他執行緒用 peek()／view() 在看）——這條執行緒在連線中的迴圈每秒 pop 一次，關閉時自己先把事件取走，
+    // 接著在下面「30 秒後重連」的地方就等不到它，主執行緒 join 不回來，最後被 main.cpp 的 10 秒強制關閉（debug_trap）收掉；
+    // 被取走之後其他還沒醒來的執行緒也看不到關閉。host 的事件記錄三天 68 筆 APPCRASH 0x80000003 就是這個。
 
     std::string relay_url = config::stream.relay_url;
     std::string relay_psk = config::stream.relay_psk;
@@ -663,7 +667,7 @@ namespace relay {
     // Wait for http::unique_id to be initialized (race condition with nvhttp startup)
     while (http::unique_id.empty() && !shutdown_event->peek()) {
       BOOST_LOG(info) << "[RELAY] Waiting for server UUID to be initialized...";
-      if (shutdown_event->pop(std::chrono::seconds(2))) return;
+      if (shutdown_event->view(std::chrono::seconds(2))) return;
     }
 
     std::string server_uuid = http::unique_id;
@@ -680,14 +684,14 @@ namespace relay {
 
       if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0 || !res) {
         BOOST_LOG(warning) << "[RELAY] Failed to resolve " << loggable_host(host);
-        if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
+        if (shutdown_event->view(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
         continue;
       }
 
       SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
       if (sock == INVALID_SOCKET) {
         freeaddrinfo(res);
-        if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
+        if (shutdown_event->view(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
         continue;
       }
 
@@ -703,7 +707,7 @@ namespace relay {
         BOOST_LOG(warning) << "[RELAY] TCP connect failed to " << loggable_host(host) << ":" << port;
         closesocket(sock);
         freeaddrinfo(res);
-        if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
+        if (shutdown_event->view(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
         continue;
       }
       freeaddrinfo(res);
@@ -756,7 +760,7 @@ namespace relay {
         if (!tls->handshake(host)) {
           BOOST_LOG(warning) << "[RELAY] TLS handshake failed";
           closesocket(sock);
-          if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
+          if (shutdown_event->view(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
           continue;
         }
         BOOST_LOG(info) << "[RELAY] TLS connected to " << loggable_host(host);
@@ -769,7 +773,7 @@ namespace relay {
       if (!ws_handshake(*transport, host, port)) {
         BOOST_LOG(warning) << "[RELAY] WebSocket handshake failed";
         transport->close();
-        if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
+        if (shutdown_event->view(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
         continue;
       }
 
@@ -782,7 +786,7 @@ namespace relay {
       if (!ws_send(*transport, regMsg)) {
         BOOST_LOG(warning) << "[RELAY] Send register failed";
         transport->close();
-        if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
+        if (shutdown_event->view(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
         continue;
       }
 
@@ -793,7 +797,7 @@ namespace relay {
       } else {
         BOOST_LOG(warning) << "[RELAY] Registration failed: " << resp;
         transport->close();
-        if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
+        if (shutdown_event->view(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
         continue;
       }
 
@@ -852,7 +856,7 @@ namespace relay {
           // Timeout, non-text frame, or close — loop again (outer while
           // drops out naturally if the transport is dead, because
           // subsequent sends will fail and we'll break below).
-          if (shutdown_event->pop(std::chrono::seconds(1))) break;
+          if (shutdown_event->view(std::chrono::seconds(1))) break;
           continue;
         }
 
@@ -1166,7 +1170,7 @@ namespace relay {
       transport->close();
       BOOST_LOG(info) << "[RELAY] Disconnected"
                       << ", reconnecting in " << RECONNECT_INTERVAL_SEC << "s";
-      if (shutdown_event->pop(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
+      if (shutdown_event->view(std::chrono::seconds(RECONNECT_INTERVAL_SEC))) break;
     }
 
     BOOST_LOG(info) << "[RELAY] Client stopped";

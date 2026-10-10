@@ -51,7 +51,6 @@ namespace stun {
   static constexpr uint16_t ATTR_XOR_MAPPED  = 0x0020;
   static constexpr uint16_t ATTR_MAPPED      = 0x0001;
 
-  static constexpr int PROBE_INTERVAL_SEC    = 60;
   static constexpr int RECV_TIMEOUT_MS       = 3000;
 
   // Default STUN servers (public, free)
@@ -258,11 +257,10 @@ namespace stun {
   }
 
   /**
-   * Background thread: periodically probe STUN and update the stored endpoint.
+   * Background thread: probe STUN once at startup and store the endpoint (see the note at the end of the loop).
    */
   static void stun_thread_proc() {
     platf::set_thread_name("stun");
-    auto shutdown_event = mail::man->event<bool>(mail::shutdown);
 
     // Parse STUN server from config (or use default)
     // Config may contain "host:port" format — split them
@@ -305,8 +303,14 @@ namespace stun {
       } else {
         BOOST_LOG(warning) << "[STUN] Probe failed (no response from " << stun_server_1 << ")";
       }
-    } while (!shutdown_event->peek() &&
-             shutdown_event->pop(std::chrono::seconds(PROBE_INTERVAL_SEC)));
+      // 2026-10-10：只在啟動時探測這一次就結束。原本的寫法是
+      //   while (!shutdown_event->peek() && shutdown_event->pop(60 秒))
+      // pop() 逾時回 false，所以實際上一直都是「探測一次、60 秒後結束」；而啟動後 60 秒內遇到關閉時，pop() 會把整個行程
+      // 共用的關閉事件取走並回 true——這條執行緒再探測一次、接著又等 60 秒，其他執行緒也看不到關閉，主執行緒 join 不回來，
+      // 最後被 main.cpp 的 10 秒強制關閉（debug_trap）收掉（host 的事件記錄裡的 APPCRASH 0x80000003）。
+      // 不改成週期性探測：探測用的 socket 以 SO_REUSEADDR 綁在控制埠上，串流進行中再綁一次有搶走控制封包的風險，
+      // 要做得先換一種不佔用控制埠的做法。
+    } while (false);
 
     BOOST_LOG(info) << "[STUN] Prober stopped";
   }
