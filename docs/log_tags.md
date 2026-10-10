@@ -1326,18 +1326,30 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
                                                                                            （`steam_frame_client.md`「host 直通時的兩種時序」）。多出來的那幾張在 timing ring 裡
                                                                                            是「跨 0 格」的紀錄：server 知道這一段是自己開的，節拍偵測器不把它們當成不可能的值，
                                                                                            另外計在下面 `timing 10s` 行尾的 `freeRun`（不影響 `cadence`，也不會有 suspect 警告）
-[VIPLE-VR-KICK] one period behind the game (presentPhase p50=… p90=… ms over N frames, period … ms): free-run for … ms (#n)
-                                                                                    ← server（§VR-DIRECT-KICK，`vr_direct_kick = enabled`，2026-10-10）：host 直通落在多一格的時序（B）
-                                                                                       連續 3 秒，自動做一次 kick 的那一刻。p50／p90＝最近 1 秒那 N 張的 presentPhase（判定為 B：至少
-                                                                                       24 張、p50 < 1.15 ms、p90 < 2.2 ms，每 100 ms 評估一次）；period＝host 的顯示週期；free-run＝
-                                                                                       PostPresent 立即返回多久（週期 × 1.25，夾在 20～40 ms）；#n＝這個 generation 的第幾次。
-                                                                                       只在 host 週期 ≥ 11 ms（約 90 Hz 以下）時會有；握手後前 5 秒不評估；離上一次 kick（含 dev 的）
-                                                                                       至少 5 秒。當下做不了的（另一段定時步進還沒結束）不印，B 再連續成立 3 秒才再試
-[VIPLE-VR-KICK] result: waits for the game again (presentPhase p50 … -> … ms)           ← 那一次的結果（kick 之後 2 秒出來：前 500 ms 的樣本不看，接著 1.5 秒的 p50 ≥ 2.0 ms）：
-                                                                                       回到等遊戲這一格（A）。兩個數＝kick 之前、之後的 p50
-[VIPLE-VR-KICK] result: no change (presentPhase p50=… ms); next try in … s              ← 沒有變化（那 1.5 秒的 p50 < 2.0 ms：還是 B，或剛好開了儀表板）。下一次最早要等 10／30／90／300 s
-                                                                                       （之後都是 300；成功一次就歸零），而且那時還要是 B 才會做。p50=n/a＝那 1.5 秒不到 24 張
-                                                                                       （幾乎沒有 Present），量不出來，照沒有變化退避
+[VIPLE-VR-KICK] one period behind the game (presentPhase p50=… p90=… ms over N frames, echoAge p50=… ms over M frames, period … ms): free-run for … ms (#n)
+                                                                                    ← server（§VR-DIRECT-KICK，`vr_direct_kick = enabled`，2026-10-10；echoAge 是 2026-10-11 加的）：host 直通
+                                                                                       落在多一格的時序（B）連續 3 秒，自動做一次 kick 的那一刻。判定為 B 要最近 1 秒的兩個量都成立
+                                                                                       （每 100 ms 評估一次）：presentPhase 至少 24 張、p50 < 1.15 ms、p90 < 2.2 ms（印的 p50／p90／N 就是
+                                                                                       那一秒的）；回聲年齡至少 24 筆、p50 ≥ 5.5 ms＋半個週期（60 Hz 是 13.8 ms、72 Hz 12.4、90 Hz 11.1；
+                                                                                       印的 echoAge p50／M 就是那一秒的）。回聲年齡＝[VIPLE-VR-CAP] 10s 行的 echoAge 同一個量（影像 Present
+                                                                                       的時刻減掉它用的姿態被發布給 driver 的時刻），擷取端每收下一張對到姿態的影像交一筆；B 比等遊戲
+                                                                                       這一格（A）多一個週期（60 Hz：A 4.4～7.7 ms、B 17.7～20.7 ms）。只看 presentPhase 會誤判：遊戲還在
+                                                                                       載入、第 0 層是合成器自己的畫面時 presentPhase 一樣小（2026-10-11：p50 0.79～1.22 ms，連推三次都
+                                                                                       沒有變化），那時回聲年齡只有 2.7～5.2 ms。沒有串流在擷取、影像都沒有對到姿態時沒有回聲年齡，
+                                                                                       不會有這一行；頭部靜止的無人場次回聲年齡不可靠，也可能不會有。
+                                                                                       period＝host 的顯示週期；free-run＝PostPresent 立即返回多久（週期 × 1.25，夾在 20～40 ms）；
+                                                                                       #n＝這個 generation 的第幾次。只在 host 週期 ≥ 11 ms（約 90 Hz 以下）時會有；握手後前 5 秒不評估；
+                                                                                       離上一次 kick（含 dev 的）至少 5 秒。當下做不了的（另一段定時步進還沒結束）不印，B 再連續成立
+                                                                                       3 秒才再試
+[VIPLE-VR-KICK] result: waits for the game again (presentPhase p50 … -> … ms, echoAge p50 … -> … ms)
+                                                                                    ← 那一次的結果（kick 之後 2 秒出來：前 500 ms 的樣本不看，接著 1.5 秒的 presentPhase p50 ≥ 2.0 ms）：
+                                                                                       回到等遊戲這一格（A）。兩組數＝kick 之前、之後的 p50。成不成功只看 presentPhase；echoAge 只是印出來
+                                                                                       對照（回到 A 應該少一個週期），那 1.5 秒的回聲年齡不到 24 筆時箭頭後面印 n/a
+[VIPLE-VR-KICK] result: no change (presentPhase p50=… ms, echoAge p50=… ms); next try in … s
+                                                                                    ← 沒有變化（那 1.5 秒的 presentPhase p50 < 2.0 ms：還是 B，或剛好開了儀表板）。下一次最早要等
+                                                                                       10／30／90／300 s（之後都是 300；成功一次就歸零），而且那時還要是 B（兩個量都成立）才會做。
+                                                                                       presentPhase p50=n/a＝那 1.5 秒不到 24 張（幾乎沒有 Present），量不出來，照沒有變化退避；
+                                                                                       echoAge p50＝同一段的回聲年齡（不到 24 筆印 n/a），只是印出來對照
 [VIPLE-VR-KICK] the game's frame takes most of the period (presentPhase p90=… of … ms): leaving the timing alone from now on
                                                                                     ← 跟在 result: waits for the game again 後面：回到 A 之後那 1.5 秒的 p90 超過週期的 80%（遊戲一幀
                                                                                        佔掉大半個週期，留在 B 不一定比較差，而我們推不回 B）。這個 generation 之後不再 kick

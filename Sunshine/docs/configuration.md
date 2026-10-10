@@ -2046,12 +2046,20 @@ editing the `conf` file in a text editor. Use the examples as reference.
             compositor can settle into a timing where every virtual vsync presents a frame the game finished one
             period earlier. That costs one extra refresh period of latency (16.7 ms at 60 Hz) and, at 60 Hz, it
             stays that way; it typically starts after the game stalled for a second or the SteamVR dashboard was
-            opened and closed on the host. With this option enabled the host watches where each present falls
-            within the vsync period and, once that timing has lasted 3 seconds, lets the driver's present call
-            return immediately for a moment (1.25 refresh periods, at least 20 and at most 40 ms). The compositor
-            then runs one extra round, uses up the queued frame and goes back to waiting for the game's current
-            frame. The driver's vsync schedule does not advance during that time, so the phase is unchanged
-            afterwards; a few extra frames are produced each time.
+            opened and closed on the host. With this option enabled the host watches two things: where each
+            present falls within the vsync period, and how old the head pose behind each captured frame is when
+            that frame is presented (the late timing adds one refresh period to that age). Once both have shown
+            the late timing for 3 seconds, it lets the driver's present call return immediately for a moment
+            (1.25 refresh periods, at least 20 and at most 40 ms). The compositor then runs one extra round, uses
+            up the queued frame and goes back to waiting for the game's current frame. The driver's vsync
+            schedule does not advance during that time, so the phase is unchanged afterwards; a few extra frames
+            are produced each time.
+            The pose age is only known while a stream is being captured and its frames can be matched to a head
+            pose sent by the client; without it nothing is done. It is required because the position of the
+            present alone cannot tell the late timing from SteamVR showing its own image while a game is still
+            loading: on 2026-10-11 that caused three attempts in a row that changed nothing. During loading the
+            pose age stays at its normal value (2.7 to 5.2 ms were measured, against 17.7 to 20.7 ms in the late
+            timing at 60 Hz), so the host now leaves that case alone.
             Two seconds later the host checks the result. If nothing changed it tries again after 10, 30, 90 and
             then every 300 seconds, as long as the timing is still the late one. It stops for the rest of the
             driver connection after 20 attempts, or when the game's frames turn out to take more than 80% of the
@@ -2062,7 +2070,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
             lines starting with `[VIPLE-VR-KICK]` mark each attempt and its result.
             Accepts `enabled`/`disabled` like the on/off options below.
             @note{Windows hosts with `vr_pcvr = enabled` only. The thresholds come from sessions recorded on
-            2026-10-10; the automatic detection itself has only run in unit tests so far, not in a live session.}
+            2026-10-10 and 2026-10-11. The detection ran in live sessions on 2026-10-10 while it looked at the
+            position of the present only; the pose-age condition added on 2026-10-11 has only run in unit tests
+            so far. With a headset that lies still and unattended the pose age is not reliable, so the late
+            timing may go undetected in such a test.}
         </td>
     </tr>
     <tr>
