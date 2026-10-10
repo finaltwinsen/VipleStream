@@ -12,6 +12,7 @@
 #include <future>
 #include <mutex>  // §S11 (review batch 2)：decryptMutex / abrMutex
 #include <queue>
+#include <utility>
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
@@ -46,6 +47,7 @@ extern "C" {
 #include "vr/vr_bridge.h"
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_abr_outage.h"
+#include "vr/vr_fec_spread.h"
 #include "vr/vr_predict.h"
 #include "vr/vr_session.h"
 
@@ -574,6 +576,9 @@ namespace stream {
       // §VR-LINK-REPAIR：補包救回來的缺包數（下一次 run_abr_aimd 取走）。不進 fecLossAccum，見 kVrAbrRepairHoldPct
       std::atomic<int> vrRepairAccum{0};
       std::chrono::steady_clock::time_point vrRepairHoldLog{};  // 「補包量大、暫停回升」的 log 節流（握 abrMutex）
+      // §VR-REPAIR-RTT（量測）：client 回報的 FEC status 這 10 秒的分類（握 abrMutex；vr_control_tick 印出並歸零）。
+      // 只記帳，位元率與 FEC 的調整不看它
+      ::vr::fecspread::status_stats_t vrFecStat;
 
       // §ABR-RAMP-TICK：periodic ping 驅動的零丟包 tick 節流（500ms 一輪）。
       // client 只在有 missing 時送 FEC status，零丟包輪由 ping handler 合成。
@@ -1910,6 +1915,22 @@ namespace stream {
   }
 
   /**
+   * @brief §VR-REPAIR-RTT（量測）：把一份 client 的 FEC status（0x5502）依「靠 FEC 還原成功／收到的不夠而放棄／整幀沒到」
+   *        記進這 10 秒的計數（vr_control_tick 印成 [VIPLE-VR-FECSTAT]）。只記帳，不影響位元率與 FEC 的調整。
+   * @param fec SS_FRAME_FEC_STATUS 的本體（big-endian；呼叫端已經確認至少 18 B）。呼叫端握著 abrMutex。
+   */
+  static void vr_note_fec_status_locked(session_t *session, const uint8_t *fec) {
+    if (!session->vr) {
+      return;
+    }
+    const auto be16 = [fec](std::size_t off) {
+      return (unsigned) ((uint16_t(fec[off]) << 8) | fec[off + 1]);
+    };
+    // 10：totalDataPackets、12：totalParityPackets、14：receivedDataPackets、16：receivedParityPackets
+    session->video.vrFecStat.add(be16(10), be16(12), be16(14), be16(16));
+  }
+
+  /**
    * @brief VR session 的控制迴圈工作（只在 control 執行緒、peer 已連上時呼叫）：
    *        STATE（連上後一次）、1 Hz STATS 與 RTT 下限、drain outbox、10 秒統計 log。
    */
@@ -2015,6 +2036,19 @@ namespace stream {
         }
         if (const auto line = session->vrLinks->take_repair_line(); !line.empty()) {
           BOOST_LOG(info) << "[VIPLE-VR-REPAIR] 10s: " << line;
+        }
+      }
+      // §VR-REPAIR-RTT（量測）：client 回報的 FEC status 這 10 秒的分類（有回報才印）。fec＝目前的 FEC 百分比
+      {
+        ::vr::fecspread::status_stats_t fec_stat;
+        int fec_pct = 0;
+        {
+          std::lock_guard<std::mutex> lk(session->video.abrMutex);
+          fec_stat = std::exchange(session->video.vrFecStat, {});
+          fec_pct = session->video.adaptiveFecPercentage.load();
+        }
+        if (fec_stat.any()) {
+          BOOST_LOG(info) << "[VIPLE-VR-FECSTAT] 10s: " << fec_stat.line() << " | fec=" << (fec_pct != 0 ? fec_pct : config::stream.fec_percentage) << '%';
         }
       }
       // §M1b S1-12：時鐘對映 10 秒行（欄位順序見 clk::format_stats，F.10 分析腳本依賴）
@@ -2665,6 +2699,7 @@ namespace stream {
       // 全在鎖內，與 QUIC quic-fec 路徑、ping-tick 互斥）。
       std::lock_guard<std::mutex> lk(session->video.abrMutex);
 
+      vr_note_fec_status_locked(session, fec);  // §VR-REPAIR-RTT（量測）：只記帳，下面的調整不看它
       session->video.fecLossAccum.fetch_add(lost);
       session->video.fecFrameAccum.fetch_add(1);
 
@@ -3388,6 +3423,7 @@ namespace stream {
           // picoquic ioLoop 執行緒執行，與 controlBroadcastThread
           // 的 ENet FEC / loss-stats / ping-tick 共用 ABR 狀態。
           std::lock_guard<std::mutex> lk(session->video.abrMutex);
+          vr_note_fec_status_locked(session, fec);  // §VR-REPAIR-RTT（量測）：同 ENet 路徑，只記帳
           session->video.fecLossAccum.fetch_add(missing);
           session->video.fecFrameAccum.fetch_add(1);
           session->video.lastFecStatusTime = std::chrono::steady_clock::now();  // §ABR-RAMP-TICK
