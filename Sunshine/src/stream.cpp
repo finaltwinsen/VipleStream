@@ -1851,8 +1851,11 @@ namespace stream {
     // 控制器——2026-10-09 的事故裡 ppm 頂到 +200、積分一路累積到 +118。改走 hold_latch：三種模式都是積分不動、
     // 輸出只留積分（比例項拿掉：旗標設起來之前漏進去的幾筆已經把它帶偏，不能原樣凍結）；v3 另外視同節拍閘門關著。
     // 被擋掉的筆數記在 10 s 行尾的 overloadHeld。
-    // 旗標只有 `vr_capture_late = enabled` 的 PCVR 擷取會設；其他情況恆為 false，這裡走的就是原本的 on_latch。
-    if (::vr::bridge::capture_health().overload) {
+    // §VR-CADENCE：看的是擷取端發布的 latch_hold。預設（vr_capture_overload = late）它就等於過載旗標，和之前相同；
+    // cadence 時改成「合成器的 Present 鎖不住虛擬 vsync」或放棄的影像太多才擋——只是每一張都晚、仍然跑滿更新率的遊戲
+    // 相位是穩定的，照常取樣。
+    // 只有 `vr_capture_late = enabled` 的 PCVR 擷取會設；其他情況恆為 false，這裡走的就是原本的 on_latch。
+    if (::vr::bridge::capture_health().latch_hold) {
       vr_apply_latch(session, vr_state, vr_state.hold_latch(latch, vr_steady_ns()));
     } else {
       vr_apply_latch(session, vr_state, vr_state.on_latch(latch, vr_steady_ns()));
@@ -2820,8 +2823,11 @@ namespace stream {
             // legacy／v2 的 latch_unsettled() 恆為 false，行為不變。
             // §VR-FENCE-LATE：host 擷取端過載時同樣不採樣——那時量到的姿態落後含 GPU 排隊的時間，不是預測時間不夠。
             // 學到的值（下一場的起點）只在採用樣本時才會更新，所以過載期間量到的東西也不會被存給下一場。
-            // 旗標只有 `vr_capture_late = enabled` 時才會設，其他情況這一行的結果與之前相同。
-            const bool predict_hold = vr_state->latch_unsettled(vr_steady_ns()) || ::vr::bridge::capture_health().overload;
+            // §VR-CADENCE：看的是擷取端發布的 predict_hold。預設（vr_capture_overload = late）它就等於過載旗標；cadence 時
+            // 是「過載旗標，或 Present 鎖不住虛擬 vsync」——和 LATCH 分開判：這裡要的是絕對延遲穩定，每一張都晚的時候
+            // 送出時刻是差一格的雙峰，仍然不採樣。
+            // 只有 `vr_capture_late = enabled` 時才會設，其他情況這一行的結果與之前相同。
+            const bool predict_hold = vr_state->latch_unsettled(vr_steady_ns()) || ::vr::bridge::capture_health().predict_hold;
             const uint16_t pose_lag_count = predict_hold ? uint16_t {0} : ct.poseLagCount;
             if (auto r = vr::predict::on_pose_lag(ct.poseLagP50_100us, pose_lag_count, now)) {
               switch (r->action) {

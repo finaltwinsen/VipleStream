@@ -116,6 +116,26 @@ namespace vr::capture {
     unsure,  ///< 有紀錄，但下不了結論：照 (d) 的旗標，而且不沿用之前確定的值
   };
 
+  /// log 用的名字（`[VIPLE-VR-CAP]` 各行的 cadence=；slipping 印成 slip，和 `[VIPLE-VR-DRV] timing 10s` 同一組詞）
+  inline const char *cadence_name(cadence_e e) {
+    switch (e) {
+      case cadence_e::unknown:
+        return "unknown";
+      case cadence_e::locked:
+        return "locked";
+      case cadence_e::slipping:
+        return "slip";
+      case cadence_e::unsure:
+        return "unsure";
+    }
+    return "?";
+  }
+
+  /// log 用的名字（config `vr_capture_overload` 的值）
+  inline const char *overload_mode_name(overload_mode_e e) {
+    return e == overload_mode_e::cadence ? "cadence" : "late";
+  }
+
   /// 一張影像的處理結果
   enum class outcome_e : uint8_t {
     on_time,  ///< fence 在第一段等待（fence_wait_ms）內到值，已複製

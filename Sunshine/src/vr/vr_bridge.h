@@ -35,6 +35,7 @@
 
 // local includes
 #include "vr_capture_health.h"
+#include "vr_present_cadence.h"
 #if defined(_M_X64) || defined(__x86_64__)
   #define VIPLE_VR_BRIDGE_HAS_ABI 1
   #include "vr_ipc_abi.h"
@@ -398,17 +399,19 @@ namespace vr::bridge {
   // ── 擷取端的健康快照（§VR-FENCE-LATE）────────────────────────────────────
 
   /**
-   * @brief 擷取執行緒（display_vr_t）發布目前的擷取健康：過載旗標一變就更新，數字約每秒更新一次；
+   * @brief 擷取執行緒（display_vr_t）發布目前的擷取健康：過載旗標或 LATCH／PREDICT 的兩個決定一變就更新，其餘約每秒更新一次；
    *        沒有 frame source、離開 capture() 時清成預設值。lock-free（一個 atomic），任何執行緒都可以呼叫。
    *        Linux／macOS 的 stub 不存任何東西。
    */
   void set_capture_health(const capture::snapshot_t &snapshot);
 
   /**
-   * @brief 最近一次發布的擷取健康（lock-free）。stream.cpp 在過載旗標設著時不把 LATCH 樣本餵給頻率鎖、
-   *        §VR-PREDICT 不採樣。沒有 VR 擷取在跑、stub 模式、非 Windows 平台都是預設值；`vr_capture_late = disabled`
-   *        時 overload 恆為 false，所以這些情況下呼叫端的行為不變。另外兩個數字只供觀察：約每秒更新一次，
-   *        開關關著而且每一張都逾時的期間不更新（那條舊路徑不經過發布）。
+   * @brief 最近一次發布的擷取健康（lock-free）。stream.cpp 讀的是其中兩個決定：`latch_hold`（設著時不把 LATCH 樣本餵給
+   *        頻率鎖）與 `predict_hold`（設著時 §VR-PREDICT 不採樣）。`vr_capture_overload = late`（預設）時兩者都等於過載旗標
+   *        `overload`；`cadence` 時改看 Present 的節拍（§VR-CADENCE，見 vr_capture_health.h 的 (e)）。
+   *        沒有 VR 擷取在跑、stub 模式、非 Windows 平台都是預設值；`vr_capture_late = disabled` 時三個旗標恆為 false，
+   *        所以這些情況下呼叫端的行為不變。其餘欄位只供觀察：約每秒更新一次，開關關著而且每一張都逾時的期間不更新
+   *        （那條舊路徑不經過發布）。
    */
   capture::snapshot_t capture_health();
 
@@ -663,6 +666,15 @@ namespace vr::bridge {
    *        READY 時也要在同一張卡建 device（server 先選 LUID，driver 照做）。沒有 session config 時 nullopt。
    */
   std::optional<luid_t> session_config_luid();
+
+  /**
+   * @brief §VR-CADENCE：bridge 執行緒從 driver 的 timing ring 算出來的 Present 節拍摘要（vr_present_cadence.h；lock-free，
+   *        一個 atomic）。只給 display_vr_t 用——它把節拍交給擷取健康（capture::health_t）合併，stream.cpp 仍然只讀
+   *        capture_health()。讀的人要用 cadence::fresh() 確認摘要夠新：bridge 至少每 100 ms 重寫一次，它卡住或連線
+   *        不在了的時候，舊的值不能一直用下去。沒有連線、這個 generation 沒有 session config、剛握手完、正在拆除時
+   *        狀態是 unknown。宣告在 Windows 專用區，所以 Linux／macOS 的 stub 不必提供。
+   */
+  cadence::info_t present_cadence();
 
   /**
    * @brief frame ring 的單一消費者輔助（§B.3 讀取方＋§B.8 copy-once-validate）。只能由一條執行緒使用。

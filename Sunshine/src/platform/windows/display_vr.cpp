@@ -14,6 +14,9 @@
  *   一張複製成功，而且有退避），不再用「連續逾時滿 1 s」。放棄可以連續很久（退避期最長 30 s），所以開關開著時
  *   所有不交影像的路徑都會每 100 ms 讓 captureThread 檢查一次停止（keepalive）。開關關著時走的每一條路徑與之前
  *   相同，只多量測與 log。
+ * - §VR-CADENCE（2026-10-10；config `vr_capture_overload`，預設 late＝決定不變）：`vr_capture_late` 開著時，每次餵健康判定
+ *   之前讀 bridge 執行緒發布的 Present 節拍摘要（一次 atomic 讀取，在交出影像之後），由 vr_capture_health.h 合併成
+ *   發布給 stream.cpp 的兩個決定（LATCH、PREDICT 各自要不要取樣）。late 模式只是影子：照算、照印，不影響決定。
  * - log 衛生（S1-02）：不印 handle 值、完整 GUID、SID。LUID 只印 match／n/a。
  *
  * 結構比照 vr_bridge_win.cpp 的 selftest_consume()（V2 的 T2 消費者），差別在：ring／fence 開在 display 自己的
@@ -421,7 +424,11 @@ namespace platf::dxgi {
     // §VR-FENCE-LATE：開關與等待上限在進來時讀一次（設定檔改了要重啟 server 才生效）；退避接上一次離開時存的
     // （存下來超過 k_backoff_keep_ms 就不接，從頭開始）
     const bool late_enabled = config::vr.capture_late;
-    health_.configure(late_enabled, client_frame_rate > 0 ? vr::capture::k_ns_per_s / client_frame_rate : 0, (int64_t) config::vr.capture_late_max_ms * vr::capture::k_ns_per_ms);
+    // §VR-CADENCE：過載時 LATCH／PREDICT 要不要取樣看哪個訊號（vr_capture_overload；同樣在進來時讀一次，只在開關開著時
+    // 有作用）。late（預設）＝過載旗標，決定和之前相同；cadence＝Present 的節拍（見 vr_capture_health.h 的 (e)）
+    const auto overload_mode = config::vr.capture_overload == config::vr_t::overload_e::cadence ? vr::capture::overload_mode_e::cadence : vr::capture::overload_mode_e::late;
+    const bool cadence_mode = overload_mode == vr::capture::overload_mode_e::cadence;
+    health_.configure(late_enabled, client_frame_rate > 0 ? vr::capture::k_ns_per_s / client_frame_rate : 0, (int64_t) config::vr.capture_late_max_ms * vr::capture::k_ns_per_ms, overload_mode);
     {
       vr::capture::backoff_t restored {};
       std::lock_guard lk {g_backoff_mtx};
@@ -433,13 +440,23 @@ namespace platf::dxgi {
     // 實際生效的設定印一次（每次進 capture() 一行）：之後的 log 只能從 budgetMs 是不是 0 反推開關，看不到上限
     BOOST_LOG(info) << "[VIPLE-VR-CAP] capture late="sv << (late_enabled ? "on"sv : "off"sv)
                     << " firstWaitMs="sv << fence_wait_ms(client_frame_rate) << " maxWaitMs="sv << config::vr.capture_late_max_ms
-                    << " backoffStep="sv << health_.backoff().step;
+                    << " backoffStep="sv << health_.backoff().step
+                    << " overloadMode="sv << vr::capture::overload_mode_name(overload_mode);
     const int64_t keepalive_qpc = ms_to_qpc(k_keepalive_ms);
     const int64_t period_qpc = client_frame_rate > 0 ? platf::qpc_frequency() / client_frame_rate : 0;  ///< 一個顯示週期
     uint64_t health_gen = 0;  ///< 目前（或最近一個）開著的 generation，log 用
     bool overload_pub = false;  ///< 發布出去的過載旗標（stream.cpp 看到的值）
     int64_t health_pub_qpc = 0;  ///< 上一次發布快照的時刻；0＝目前發布的是預設值
     int64_t last_push_cb_qpc = platf::qpc_counter();  ///< 上一次呼叫 push 回呼的時刻（下面的 keepalive 用；約略即可）
+    // §VR-CADENCE：發布出去的兩個決定與放棄的旗標（stream.cpp 讀的是前兩個；late 模式下三個都跟著 overload_pub）
+    bool latch_hold_pub = false;
+    bool predict_hold_pub = false;
+    bool abandon_pub = false;
+    vr::capture::cadence_e cadence_pub = vr::capture::cadence_e::unknown;  ///< 已經印過的節拍狀態（擷取端用的值，含 2 s 的沿用）
+    vr::cadence::info_t cadence_info {};  ///< 最近一次從 bridge 讀到的摘要（log 用；發預設快照時一起清掉）
+    bool cadence_info_fresh = false;  ///< 那一份摘要夠不夠新（不夠新＝當成沒有報告）
+    int64_t cadence_log_qpc = 0;  ///< 上一次印 cadence 行的時刻；0＝下一次變化不受限速
+    uint32_t cadence_log_skipped = 0;  ///< 同一秒內已經印過一行而沒印的變化數（下一行帶出來）
 
     // 過載旗標變化各印一行（設起來要 ≥ 30%、清掉要 < 5% 持續 2 s，再怎麼來回 10 s 內也只有十行上下）
     auto log_overload = [&](bool on, std::string_view why) {
@@ -450,10 +467,52 @@ namespace platf::dxgi {
                       << " waitMaxMs="sv << std::format("{:.1f}", (double) health_.window_wait_max_ns() / 1e6)
                       << " why="sv << why;
     };
-    // 給其他執行緒看的快照（stream.cpp 的 LATCH／PREDICT 只讀過載旗標）：旗標一變就發布，數字每秒發布一次
+    // §VR-CADENCE：擷取端用的節拍狀態（含 2 s 的沿用）每變一次一行；why＝摘要給的原因，沒有夠新的摘要是 no-report，
+    // 清除時是清除的原因。div／slips10＝那一份摘要的節拍與最近 10 s 的滑動數。applied＝這個狀態有沒有拿來做決定
+    // （vr_capture_overload = cadence）；0＝只是影子。行尾的 skipped＝之前因為限速（同一秒內最多一行）沒印的變化數
+    auto log_cadence = [&](vr::capture::cadence_e state, std::string_view why, const vr::cadence::info_t &summary) {
+      BOOST_LOG(info) << "[VIPLE-VR-CAP] cadence "sv << vr::capture::cadence_name(state) << " gen="sv << health_gen << " why="sv << why
+                      << " div="sv << (unsigned) summary.divisor << " slips10="sv << (unsigned) summary.slips_10s
+                      << " applied="sv << (cadence_mode ? 1 : 0)
+                      << (cadence_log_skipped != 0 ? std::format(" skipped={}", cadence_log_skipped) : std::string {});
+      cadence_pub = state;
+      cadence_log_skipped = 0;
+    };
+    // §VR-CADENCE：cadence 模式下發布給 LATCH／PREDICT 的兩個決定變化各一行（late 模式下兩者就是 overload on／off，不另外印）
+    auto log_hold = [&](const vr::capture::snapshot_t &snap, std::string_view why) {
+      BOOST_LOG(info) << "[VIPLE-VR-CAP] hold latch="sv << (snap.latch_hold ? 1 : 0) << " predict="sv << (snap.predict_hold ? 1 : 0)
+                      << " gen="sv << health_gen << " cadence="sv << vr::capture::cadence_name(snap.cadence)
+                      << " overload="sv << (snap.overload ? 1 : 0) << " abandonOvl="sv << (snap.abandon_overload ? 1 : 0)
+                      << " why="sv << why;
+    };
+    // §VR-CADENCE：讀 bridge 執行緒發布的節拍摘要（一次 atomic 讀取），隨影像或 on_idle 交給 health_。開關關著：完全不讀。
+    // 摘要的時戳和這裡的 now 都是 platf::qpc_ticks_to_ns() 換算的，同一個時鐘；超過 1 s 沒更新的摘要當成沒有報告
+    auto read_cadence = [&](int64_t now_qpc) -> vr::capture::cadence_e {
+      if (!late_enabled) {
+        return vr::capture::cadence_e::unknown;
+      }
+      cadence_info = vr::bridge::present_cadence();
+      cadence_info_fresh = vr::cadence::fresh(cadence_info, (uint32_t) (platf::qpc_ticks_to_ns(now_qpc) / 1'000'000));
+      if (!cadence_info_fresh) {
+        return vr::capture::cadence_e::unknown;
+      }
+      switch (cadence_info.state) {
+        case vr::cadence::state_e::locked:
+          return vr::capture::cadence_e::locked;
+        case vr::cadence::state_e::slipping:
+          return vr::capture::cadence_e::slipping;
+        case vr::cadence::state_e::unsure:
+          return vr::capture::cadence_e::unsure;
+        default:
+          return vr::capture::cadence_e::unknown;
+      }
+    };
+    // 給其他執行緒看的快照（stream.cpp 的 LATCH 讀 latch_hold、PREDICT 讀 predict_hold）：這兩個決定或過載旗標一變就發布，
+    // 其餘每秒發布一次。late 模式下三者相等，立刻發布的條件和之前一樣只看過載旗標
     auto publish_health = [&](int64_t now_qpc) {
       const auto snap = health_.snapshot();
-      if (snap.overload == overload_pub && health_pub_qpc != 0 && now_qpc - health_pub_qpc < platf::qpc_frequency()) {
+      const bool flags_same = snap.overload == overload_pub && snap.latch_hold == latch_hold_pub && snap.predict_hold == predict_hold_pub;
+      if (flags_same && health_pub_qpc != 0 && now_qpc - health_pub_qpc < platf::qpc_frequency()) {
         return;
       }
       vr::bridge::set_capture_health(snap);
@@ -462,16 +521,45 @@ namespace platf::dxgi {
         overload_pub = snap.overload;
         log_overload(snap.overload, snap.overload ? "late-frames"sv : "recovered"sv);
       }
+      // §VR-CADENCE：節拍狀態和上一次印的不同就印一行，同一秒內最多一行——被略過的先記數，下一次發布時若還是不同才補印
+      if (snap.cadence != cadence_pub) {
+        if (cadence_log_qpc != 0 && now_qpc - cadence_log_qpc < platf::qpc_frequency()) {
+          ++cadence_log_skipped;
+        } else {
+          log_cadence(snap.cadence, cadence_info_fresh ? std::string_view {vr::cadence::why_name(cadence_info.why)} : "no-report"sv, cadence_info);
+          cadence_log_qpc = now_qpc;
+        }
+      }
+      if (cadence_mode && (snap.latch_hold != latch_hold_pub || snap.predict_hold != predict_hold_pub)) {
+        log_hold(snap, "update"sv);
+      }
+      latch_hold_pub = snap.latch_hold;
+      predict_hold_pub = snap.predict_hold;
+      abandon_pub = snap.abandon_overload;
     };
-    // 沒有 frame source、換 generation、離開 capture()：快照清成預設（過載旗標 false）
+    // 沒有 frame source、換 generation、離開 capture()：快照清成預設（過載旗標、兩個決定都是 false，節拍 unknown）
     auto clear_health = [&](std::string_view why) {
       if (overload_pub) {
         overload_pub = false;
         log_overload(false, why);
       }
+      if (latch_hold_pub || predict_hold_pub) {
+        latch_hold_pub = false;
+        predict_hold_pub = false;
+        if (cadence_mode) {
+          log_hold(vr::capture::snapshot_t {}, why);
+        }
+      }
+      abandon_pub = false;
+      if (cadence_pub != vr::capture::cadence_e::unknown) {
+        log_cadence(vr::capture::cadence_e::unknown, why, vr::cadence::info_t {});
+        cadence_log_qpc = 0;  // 之後第一次變化不受限速
+      }
       if (health_pub_qpc != 0) {
         vr::bridge::set_capture_health({});
         health_pub_qpc = 0;
+        cadence_info = {};  // 最近一次讀到的摘要跟著作廢（10 s 行的 slips10 印 0）
+        cadence_info_fresh = false;
       }
     };
     // 任何出口：退避連同現在的時刻存回行程層級的備份、快照清成預設
@@ -499,7 +587,7 @@ namespace platf::dxgi {
       }
       last_push_cb_qpc = now_qpc;
       if (tick_health) {
-        health_.on_idle(platf::qpc_ticks_to_ns(now_qpc));
+        health_.on_idle(platf::qpc_ticks_to_ns(now_qpc), read_cadence(now_qpc));
         publish_health(now_qpc);
       }
       return push_captured_image_cb(nullptr, false);
@@ -523,6 +611,7 @@ namespace platf::dxgi {
       f.present_ns = platf::qpc_ticks_to_ns(desc.present_qpc);
       f.frame_id = desc.frame_id;
       f.observed = completed;
+      f.cadence = read_cadence(now_qpc);  // §VR-CADENCE：用同一個 now，不另外讀時鐘（開關關著時恆為 unknown、不讀摘要）
       const auto verdict = health_.on_frame(f);
       if (verdict.backoff_reset) {
         // 健康的一秒格在「下一格的第一張」結算，那一張可能是複製成功的、也可能是放棄的：兩條路徑都從這裡印
@@ -589,6 +678,11 @@ namespace platf::dxgi {
       // 時刻就是上一張做完的時刻，這個數字會貼在發布間隔上，不代表「發布後晚多久」——那要看 presentToFence
       // （present_qpc → 到值）。overPeriod＝複製成功的張數裡 fenceWait 達到一個顯示週期的（評估過載的定義用）。
       // overload＝發布給 stream.cpp 的過載旗標；budgetMs＝目前的等待預算（開關關著印 0）
+      // §VR-CADENCE（2026-10-10）：再往後加 ovlMode 起的欄位，印的都是「已發布」的值。ovlMode＝vr_capture_overload；
+      // cadence＝擷取端用的節拍（已經印過 cadence 行的那個狀態）；slips10＝最近一次讀到的摘要的最近 10 s 滑動數；
+      // abandonOvl／latchHold／predictHold＝發布給 stream.cpp 的快照裡的值（overload 仍是晚到的旗標）；
+      // cadHold＝cadence 模式會怎麼決定 LATCH——late 模式下拿它和 latchHold 對照就是影子模式的結果。
+      // 開關關著，或目前發布的是預設快照（沒有 frame source、generation 還沒開起來）時，這些欄位是 unknown／0
       BOOST_LOG(info) << "[VIPLE-VR-CAP] 10s: gen="sv << (cs && cs->src ? cs->src->generation : 0)
                       << " copied="sv << w.copied << " skipped="sv << w.skipped << " fenceTimeout="sv << w.fence_timeout
                       << " invalid="sv << w.invalid << " stale="sv << w.stale << " black="sv << w.black << " released="sv << w.released
@@ -600,7 +694,14 @@ namespace platf::dxgi {
                       << " overload="sv << (overload_pub ? 1 : 0)
                       << " budgetMs="sv << (late_enabled ? (health_.wait_budget_ns() + 500'000) / 1'000'000 : 0)
                       << " presentToFence p50="sv << std::format("{:.3f}", pf50) << "ms p95="sv << std::format("{:.3f}", pf95)
-                      << "ms max="sv << std::format("{:.3f}", pfmax) << "ms overPeriod="sv << w.over_period;
+                      << "ms max="sv << std::format("{:.3f}", pfmax) << "ms overPeriod="sv << w.over_period
+                      << " ovlMode="sv << vr::capture::overload_mode_name(overload_mode)
+                      << " cadence="sv << vr::capture::cadence_name(cadence_pub)
+                      << " slips10="sv << (unsigned) cadence_info.slips_10s
+                      << " abandonOvl="sv << (abandon_pub ? 1 : 0)
+                      << " latchHold="sv << (latch_hold_pub ? 1 : 0)
+                      << " predictHold="sv << (predict_hold_pub ? 1 : 0)
+                      << " cadHold="sv << (health_pub_qpc != 0 && health_.latch_hold_if_cadence() ? 1 : 0);
       last_log_ = now;
     };
 
@@ -722,7 +823,7 @@ namespace platf::dxgi {
         {
           // §VR-FENCE-LATE：沒有影像時也讓最近 1 s 的視窗往前走（過載旗標才清得掉），快照照常更新
           const int64_t idle_qpc = platf::qpc_counter();
-          health_.on_idle(platf::qpc_ticks_to_ns(idle_qpc));
+          health_.on_idle(platf::qpc_ticks_to_ns(idle_qpc), read_cadence(idle_qpc));
           publish_health(idle_qpc);
           last_push_cb_qpc = idle_qpc;  // 下面兩條路都會呼叫回呼
         }

@@ -106,6 +106,18 @@ namespace vr::bridge {
       return (DWORD) std::clamp<int64_t>(ms, 1, 1000);
     }
 
+    // ── §VR-CADENCE：Present 節拍的摘要 ────────────────────────────────────────
+    /// vr::cadence::pack 的值；0＝不知道。單一寫入方＝bridge 執行緒（握手成功與 teardown 一進來寫 0，連線中由
+    /// drain_rings() 更新）；擷取執行緒經 present_cadence() 讀。另開一個 atomic、不併進 g_capture_health：
+    /// 那一個由擷取執行緒整字覆寫，兩個寫入方會互相蓋掉
+    std::atomic<uint64_t> g_present_cadence {0};
+    static_assert(
+      vr::cadence::k_ev_vsync_virtual == VRIPC_TE_VSYNC_VIRTUAL && vr::cadence::k_ev_present_enter == VRIPC_TE_PRESENT_ENTER &&
+        vr::cadence::k_ev_present_exit == VRIPC_TE_PRESENT_EXIT && vr::cadence::k_ev_postpresent_enter == VRIPC_TE_POSTPRESENT_ENTER &&
+        vr::cadence::k_ev_postpresent_exit == VRIPC_TE_POSTPRESENT_EXIT,
+      "vr_present_cadence.h 的事件代碼要和 vr_ipc_abi.h 的 VRIPC_TE_* 相同"
+    );
+
     std::string hex32(uint32_t v) {
       return std::format("0x{:08X}", v);
     }
@@ -661,6 +673,13 @@ namespace vr::bridge {
       bool kick_active = false;
       vripc_pacing_t last_pacing {};
       bool have_last_pacing = false;
+      // §VR-CADENCE：從 timing 紀錄判斷 Present 鎖不鎖得住虛擬 vsync（vr_present_cadence.h）。偵測器的狀態跟著連線走：
+      // 只有 bridge 執行緒碰，driver 重連就是新的一份。兩個擷取端的開關怎麼設都照算、照印
+      vr::cadence::detector_t cadence;
+      bool cadence_on = false;  ///< 這個 generation 有 session config（知道標稱週期）：偵測器有在跑
+      uint64_t cadence_pub = 0;  ///< 上一次寫進 g_present_cadence 的值
+      int64_t cadence_pub_qpc = 0;  ///< 上一次寫的時刻
+      bool cadence_alerted = false;  ///< 「紀錄裡有不可能的值」的警告印過了（每條連線一次）
       vripc_driver_status_t last_driver {};  ///< 最近一次複製的 driver_status（已驗證的欄位另存 status_）
     };
 
@@ -2149,6 +2168,13 @@ namespace vr::bridge {
       c.welcome_qpc = now_qpc();
       c.next_heartbeat = c.welcome_qpc + ms_to_qpc(kHeartbeatMs);
       c.log_window = c.haptic_window = c.state_log_window = c.timing_window = c.welcome_qpc;
+      // §VR-CADENCE：這個 generation 有 config 才知道標稱週期（偵測器只用 server 自己知道的值，不用紀錄裡的週期）。
+      // 時間用 bridge 自己的時鐘（QPC 換成 ns；drain_rings() 與擷取端用同一個換算）。上一條連線發布的摘要到此作廢
+      if (gen->has_config && gen->config.refresh_mhz != 0) {
+        c.cadence.reset((int64_t) (1'000'000'000'000LL / gen->config.refresh_mhz), platf::qpc_ticks_to_ns(c.welcome_qpc), qpf());
+        c.cadence_on = true;
+      }
+      g_present_cadence.store(0, std::memory_order_relaxed);
       const bool is_peer = c.selftest_peer;
       const uint32_t dver = c.driver_version_packed;
       const std::string log_line = std::format(
@@ -2488,6 +2514,8 @@ namespace vr::bridge {
         return;
       }
       in_teardown_ = true;
+      // §VR-CADENCE：這條連線的節拍摘要到此作廢（在下面最長 200 ms 的 close_wait 之前；擷取端下一次讀到的就是「不知道」）
+      g_present_cadence.store(0, std::memory_order_relaxed);
       {
         // 對外狀態一進 TEARDOWN 就變成「未連線」（selftest 的 kill→idle ≤ 100 ms 以它為準；之後的 close_wait
         // 最多 200 ms 只是等對方關閉，期間 driver 重連會拿到 PIPE_BUSY 並自行重試）
@@ -2703,6 +2731,8 @@ namespace vr::bridge {
     void bridge_t::drain_rings(int64_t now) {
       auto &c = *conn_;
       auto *shm = c.gen->shm;
+      // §VR-CADENCE：節拍偵測器的時間一律用這一輪排空 ring 的時刻（bridge 自己的時鐘），不用紀錄裡的時戳
+      const int64_t now_ns = platf::qpc_ticks_to_ns(now);
       // 快速路徑（每 2 ms 一次）：三個 head 都沒動就不取鎖、不複製 sink
       const bool any = vripc_load_acquire_u64(&shm->haptic.head) != c.haptic_tail || vripc_load_acquire_u64(&shm->timing.head) != c.timing_tail ||
                        vripc_load_acquire_u64(&shm->log.head) != c.log_tail;
@@ -2742,6 +2772,10 @@ namespace vr::bridge {
         ++timing_rx;
         ++c.timing_total;
         c.timing_counts[r.event < 16 ? r.event : 0]++;
+        // §VR-CADENCE：每一筆都交給偵測器（它自己把同一幀的紀錄配起來；紀錄不可信，怎麼處理都在那個純標頭裡、有單元測試）
+        if (c.cadence_on) {
+          c.cadence.on_record(now_ns, r.event, r.frame_id, r.arg0, r.arg1, r.qpc);
+        }
         // 2026-10-08：只統計、不影響任何行為。紀錄是 driver 寫的（不可信）：數值只拿來算有上限的統計量
         if (r.event == VRIPC_TE_VSYNC_VIRTUAL && r.arg0 > 0) {
           // arg0＝driver 這一格實際採用的週期（ns）
@@ -2762,6 +2796,26 @@ namespace vr::bridge {
           tsink(r);
         }
       });
+
+      // §VR-CADENCE：timing 一排空就讓偵測器的計時往前走、發布摘要。一定要在這裡做，不可以搬到 periodic() 裡
+      // drain_rings() 返回之後：這個函式結尾的 ring_corrupt 檢查會走 protocol_error() → teardown() → conn_.reset()，
+      // 之後 c 就不存在了（use-after-free；而觸發條件是 driver 寫的 ring head）。
+      // 摘要的內容（狀態、原因、節拍、最近 10 s 的滑動數）一變就寫；沒變也至少每 100 ms 重寫一次，讓時戳往前走——
+      // 擷取端把超過 1 s 沒更新的摘要當成「不知道」。
+      if (c.cadence_on) {
+        c.cadence.on_tick(now_ns);
+        const uint64_t packed = vr::cadence::pack(c.cadence.info(now_ns));
+        if ((uint32_t) packed != (uint32_t) c.cadence_pub || now - c.cadence_pub_qpc >= ms_to_qpc(100)) {
+          g_present_cadence.store(packed, std::memory_order_relaxed);
+          c.cadence_pub = packed;
+          c.cadence_pub_qpc = now;
+        }
+        if (c.cadence.take_suspect_alert() && !c.cadence_alerted) {
+          c.cadence_alerted = true;  // 每條連線只印一次
+          BOOST_LOG(warning) << "[VIPLE-VR-DRV] cadence input suspect gen=" << c.gen->generation
+                             << ": impossible values in the timing records; Present cadence not used (the late-frame flag decides)";
+        }
+      }
 
       if (now - c.log_window >= qpf()) {
         if (c.log_suppressed) {
@@ -2834,6 +2888,36 @@ namespace vr::bridge {
             }
           }
           tail += std::format(" bursts={}", c.bursts_done);
+          // §VR-CADENCE：最尾端再加節拍偵測器的結果（這個 generation 沒有 config 時不印；擷取端的兩個開關怎麼設都印）。
+          // cadence／why／div＝印的當下偵測器的狀態，其餘是這個視窗的計數（negative＝slots 是負值、noTgt＝沒有輸出目標）。
+          // 欄位名刻意不和 driver 自己那一行（presents=／missed=／noTarget=）重複：兩行的開頭相同，分析腳本靠欄位名分辨。
+          // div=1、沒有卡頓時 skipped 應等於 driver 那一行的 missed（兩行的視窗錯開幾秒）——它釘住「arg1 準時是 1」
+          if (c.cadence_on) {
+            const auto w = c.cadence.take_window();
+            const auto ci = c.cadence.info(now_ns);
+            tail += std::format(
+              " cadence={} why={} div={} slips={} masked={} hitches={} skipped={} early={} slipSecs={} burstMax={} slipGapMaxMs={} edge={} thrMax={}"
+              " noTgt={} zeros={} negative={} restarts={} orphans={}",
+              vr::cadence::state_name(ci.state),
+              vr::cadence::why_name(ci.why),
+              (unsigned) ci.divisor,
+              w.slips,
+              w.masked,
+              w.hitches,
+              w.skipped,
+              w.early,
+              w.slip_secs,
+              w.burst_max,
+              w.slip_gap_max_ns / 1'000'000,
+              w.edge,
+              w.throttle_max,
+              w.no_target,
+              w.zeros,
+              w.invalid,
+              w.restarts,
+              w.orphans
+            );
+          }
           BOOST_LOG(info) << "[VIPLE-VR-DRV] timing 10s: recs=" << c.timing_total << " vsync=" << k[VRIPC_TE_VSYNC_VIRTUAL]
                           << " submit=" << k[VRIPC_TE_SUBMIT_LAYER] << " present=" << k[VRIPC_TE_PRESENT_EXIT]
                           << " postpresent=" << k[VRIPC_TE_POSTPRESENT_EXIT] << " compose=" << k[VRIPC_TE_COMPOSE_DONE]
@@ -3475,6 +3559,10 @@ namespace vr::bridge {
 
   capture::snapshot_t capture_health() {
     return capture::unpack(g_capture_health.load(std::memory_order_relaxed));
+  }
+
+  cadence::info_t present_cadence() {
+    return cadence::unpack(g_present_cadence.load(std::memory_order_relaxed));
   }
 
   std::shared_ptr<frame_source_t> frame_source() {

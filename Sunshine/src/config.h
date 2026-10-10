@@ -332,6 +332,17 @@ namespace config {
     /// 3 個發布間隔，夾在 3 個顯示週期與這個值之間（src/vr/vr_capture_health.h）。
     /// 預設值要等於 vr::capture::k_max_wait_ms_default（config.cpp 有 static_assert 對住那個常數；要改兩邊一起改）
     int capture_late_max_ms = 100;
+    /// §VR-CADENCE（2026-10-10）：vr_capture_overload（只在 vr_capture_late = enabled 時有作用）。過載時 LATCH 的頻率鎖與
+    /// §VR-PREDICT 要不要取樣看哪個訊號。late（預設）＝過載旗標（晚到＋放棄 ≥ 30%），兩者都不取樣，決定和之前相同；
+    /// cadence＝LATCH 只在合成器的 Present 鎖不住虛擬 vsync（driver 回報的跨格數）或放棄的影像 ≥ 30% 時不取樣，
+    /// §VR-PREDICT 是過載旗標或鎖不住；節拍說不準時兩者都照過載旗標（src/vr/vr_present_cadence.h、vr_capture_health.h）。
+    /// 兩種模式下節拍都照算、照印（late 是影子模式）
+    enum class overload_e {
+      late,
+      cadence,
+    };
+
+    overload_e capture_overload = overload_e::late;
   };
 
   struct nvhttp_t {

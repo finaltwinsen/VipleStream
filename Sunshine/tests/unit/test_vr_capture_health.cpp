@@ -2240,6 +2240,16 @@ TEST(VrCaptureHealthCadence, SnapshotPackLayout) {
   }
 }
 
+TEST(VrCaptureHealthCadence, LogNames) {
+  // log 的詞彙（[VIPLE-VR-CAP] 各行的 cadence=、ovlMode=）：slipping 印成 slip，和 [VIPLE-VR-DRV] timing 10s 同一組詞
+  EXPECT_STREQ(cadence_name(cadence_e::unknown), "unknown");
+  EXPECT_STREQ(cadence_name(cadence_e::locked), "locked");
+  EXPECT_STREQ(cadence_name(cadence_e::slipping), "slip");
+  EXPECT_STREQ(cadence_name(cadence_e::unsure), "unsure");
+  EXPECT_STREQ(overload_mode_name(kLate), "late");
+  EXPECT_STREQ(overload_mode_name(kCadence), "cadence");
+}
+
 // ── (e) 的亂數序列 ───────────────────────────────────────────────────────
 
 namespace {

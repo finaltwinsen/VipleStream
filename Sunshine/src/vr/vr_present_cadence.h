@@ -126,6 +126,44 @@ namespace vr::cadence {
     proving,  ///< unsure：觀察得還不夠久
   };
 
+  /// log 用的名字（`[VIPLE-VR-DRV] timing 10s` 的 cadence= 與 `[VIPLE-VR-CAP] cadence` 行；slipping 印成 slip）
+  inline const char *state_name(state_e e) {
+    switch (e) {
+      case state_e::unknown:
+        return "unknown";
+      case state_e::locked:
+        return "locked";
+      case state_e::slipping:
+        return "slip";
+      case state_e::unsure:
+        return "unsure";
+    }
+    return "?";
+  }
+
+  /// log 用的名字（why=）
+  inline const char *why_name(why_e e) {
+    switch (e) {
+      case why_e::none:
+        return "none";
+      case why_e::marginal:
+        return "marginal";
+      case why_e::heavy:
+        return "heavy";
+      case why_e::recovering:
+        return "recovering";
+      case why_e::recent:
+        return "recent";
+      case why_e::fraction:
+        return "fraction";
+      case why_e::suspect:
+        return "suspect";
+      case why_e::proving:
+        return "proving";
+    }
+    return "?";
+  }
+
   /// 一次 PostPresent（一筆 VRIPC_TE_VSYNC_VIRTUAL，加上同一幀前幾筆紀錄帶的值）
   struct present_t {
     int64_t now_ns = 0;  ///< 排空 ring 當下呼叫端的單調時鐘（紀錄裡的時戳不拿來判定）

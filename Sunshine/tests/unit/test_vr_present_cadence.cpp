@@ -191,6 +191,18 @@ TEST(VrPresentCadencePack, FreshnessWindow) {
   EXPECT_FALSE(fresh(info_t {}, 0));
 }
 
+TEST(VrPresentCadencePack, LogNames) {
+  // log 的詞彙（[VIPLE-VR-DRV] timing 10s 的 cadence=／why=）：slipping 印成 slip
+  EXPECT_STREQ(state_name(state_e::unknown), "unknown");
+  EXPECT_STREQ(state_name(state_e::locked), "locked");
+  EXPECT_STREQ(state_name(state_e::slipping), "slip");
+  EXPECT_STREQ(state_name(state_e::unsure), "unsure");
+  const char *whys[] = {"none", "marginal", "heavy", "recovering", "recent", "fraction", "suspect", "proving"};
+  for (int i = 0; i < 8; ++i) {
+    EXPECT_STREQ(why_name(static_cast<why_e>(i)), whys[i]) << i;
+  }
+}
+
 // ── 知道與否、觀察期 ─────────────────────────────────────────────────────
 
 TEST(VrPresentCadenceKnown, NeedsTwentyFourRecordsThenTenSecondsOfProof) {

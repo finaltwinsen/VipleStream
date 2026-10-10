@@ -196,6 +196,17 @@ namespace config {
       return vr_t::stale_e::legacy;
     }
 
+    vr_t::overload_e overload_from_view(const std::string_view value, const std::string_view key) {
+      if (value == "late"sv) {
+        return vr_t::overload_e::late;
+      }
+      if (value == "cadence"sv) {
+        return vr_t::overload_e::cadence;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: late, cadence. Falling back to 'late'", key, value));
+      return vr_t::overload_e::late;
+    }
+
     /**
      * @brief 嚴格解析 vr_* 的整數設定項：不是十進位整數、或不在允許範圍就警告並保留預設值。
      *
@@ -1565,6 +1576,9 @@ namespace config {
     static_assert(::vr::capture::k_max_wait_ms_default == 100, "keep the default of vr_t::capture_late_max_ms (config.h) and the docs in sync");
     vr_opt::bool_strict_f(vars, "vr_capture_late", vr.capture_late);
     vr_opt::int_strict_f(vars, "vr_capture_late_max_ms", vr.capture_late_max_ms, ::vr::capture::k_max_wait_ms_min, ::vr::capture::k_max_wait_ms_max, false);
+    // §VR-CADENCE：過載時 LATCH／PREDICT 看哪個訊號（late｜cadence，預設 late；只在 vr_capture_late = enabled 時有作用）。
+    // 值寫錯警告並維持 late。和上面兩個 key 一樣，兩個平台都認得
+    generic_f(vars, "vr_capture_overload", vr.capture_overload, vr_opt::overload_from_view);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 
