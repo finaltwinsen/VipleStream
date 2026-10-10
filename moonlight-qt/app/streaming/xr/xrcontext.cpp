@@ -1452,6 +1452,16 @@ void XrContext::maybeLogStats(uint64_t nowNs)
         m_StatsAtWindowStart = m_Stats;
         return;
     }
+    // §VR-LATCH A/B：這個函式每一格呼叫一次。下面 10s video 那一行的 10 s 視窗是這裡自己計時的，所以另外數這個視窗裡
+    // 「開」「關」兩邊各跑了幾格（行尾的 ab= 照它標）
+    if (m_Options.pcvr && m_Options.pcvrLatchAbSec > 0) {
+        if (m_PcvrTiming.abOn) {
+            m_PcvrTiming.abVideoOnFrames++;
+        }
+        else {
+            m_PcvrTiming.abVideoOffFrames++;
+        }
+    }
     if (nowNs - m_StatsWindowStartNs < 10000000000ull) {
         return;
     }
@@ -1463,6 +1473,10 @@ void XrContext::maybeLogStats(uint64_t nowNs)
         m_StatsAtWindowStart = m_Stats;
     }
     m_StatsWindowStartNs = nowNs;
+    // §VR-LATCH A/B：這個視窗兩邊各跑了幾格（沒有影像路徑的建置用不到）
+    [[maybe_unused]] const uint32_t abOnFrames = m_PcvrTiming.abVideoOnFrames, abOffFrames = m_PcvrTiming.abVideoOffFrames;
+    m_PcvrTiming.abVideoOnFrames = 0;
+    m_PcvrTiming.abVideoOffFrames = 0;
     Stats d;
     d.frames = cur.frames - prev.frames;
     d.missed = cur.missed - prev.missed;
@@ -1486,12 +1500,14 @@ void XrContext::maybeLogStats(uint64_t nowNs)
                 static_cast<unsigned long long>(cur.discarded - prev.discarded));
 #ifdef HAVE_XR_VIDEO
     if (m_Video != nullptr) {
-        // §VR-LATCH A/B：開了切換時在行尾標這個視窗是哪一邊。這一行的 10 s 視窗是這個函式自己的計時，不是
-        // [VIPLE-VR-MTP10]／[VIPLE-VR-LDIAG] 的那一個：上一次印之後換過邊就標 m（兩邊混在一起，不拿來比）
-        const char* ab = "";
+        // §VR-LATCH A/B：開了切換時在行尾標這個視窗是哪一邊。這一行的 10 s 視窗是這個函式自己的計時，但它和
+        // [VIPLE-VR-MTP10]／[VIPLE-VR-LDIAG] 的視窗都是從第一格起算的，整場只差幾格；換邊發生在那兩行的 10 s 區塊裡，
+        // 多半就是這一行要印的同一格（比這裡早）。所以不能用「上一次印之後換過邊沒有」來標：那樣每一邊的最後一個
+        // 視窗——幾乎整段都在換邊之前——會被標成混合，換邊之後還沒穩下來的那一個反而標成乾淨的。照這個視窗實際跑在
+        // 哪一邊的格數標（xrphase::abWindowSide）：99% 以上的格在同一邊就標那一邊，否則 m（兩邊混在一起，不拿來比）
+        char ab[8] = "";
         if (m_Options.pcvr && m_Options.pcvrLatchAbSec > 0) {
-            ab = m_PcvrTiming.abFlips != m_PcvrTiming.abFlipsAtVideoLog ? " ab=m" : (m_PcvrTiming.abOn ? " ab=1" : " ab=0");
-            m_PcvrTiming.abFlipsAtVideoLog = m_PcvrTiming.abFlips;
+            std::snprintf(ab, sizeof(ab), " ab=%c", xrphase::abWindowSide(abOnFrames, abOffFrames));
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] 10s video %s%s", qUtf8Printable(m_Video->takeStatsLine()), ab);
     }
@@ -2771,7 +2787,6 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
             if (t.abElapsedSec >= static_cast<double>(m_Options.pcvrLatchAbSec)) {
                 t.abElapsedSec = 0.0;
                 t.abOn = !t.abOn;
-                t.abFlips++;
                 pcvrApplyAb();
             }
         }

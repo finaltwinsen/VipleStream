@@ -109,6 +109,24 @@ inline uint32_t deferWaitUs(uint32_t vblankPhaseUs, uint32_t loUs, uint32_t hiUs
     return (vblankPhaseUs >= loUs && vblankPhaseUs < hiUs) ? hiUs - vblankPhaseUs : 0u;
 }
 
+// 同場切換（§VR-LATCH A/B）：一個統計視窗裡「開」那一邊跑了 onFrames 格、「關」那一邊跑了 offFrames 格，這個視窗算
+// 哪一邊。少的那一邊不超過 1%（120 Hz 的 10 秒視窗是 12 格）就算多的那一邊——'1'＝開、'0'＝關；否則兩邊混在一起，
+// 回 'm'（不拿來比）。一格都沒有也回 'm'
+inline char abWindowSide(uint32_t onFrames, uint32_t offFrames)
+{
+    const uint64_t total = static_cast<uint64_t>(onFrames) + offFrames;
+    if (total == 0) {
+        return 'm';
+    }
+    if (static_cast<uint64_t>(offFrames) * 100u <= total) {
+        return '1';
+    }
+    if (static_cast<uint64_t>(onFrames) * 100u <= total) {
+        return '0';
+    }
+    return 'm';
+}
+
 // 一個視窗（一千多筆整數，通常是微秒）的分位數：掃一遍建立計數，之後每個分位數只要掃計數，不排序、不複製。
 // 為什麼不逐一 nth_element：印 10 秒行的那一格要十幾個分位數，1200 筆每挑一個約 10 µs，加起來在開發機上是
 // 0.2 ms（頭盔更久），而那一格離下一次 xrWaitFrame 放行只有一毫秒多。一個視窗裡的數值通常只差幾百到幾千，
@@ -698,6 +716,24 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
         std::snprintf(buf, sizeof(buf), "empty -> 0, period 0 -> %u us, one sample per bin -> cut at %u us, out-of-range samples -> %u us",
                       noPeriod, cutEven.cutUs, mixedMedian);
         caseDone("phase-cut-edge-cases", ok, buf);
+    }
+    {
+        // 同場切換：一個視窗算哪一邊。少的那一邊不超過 1% 才算多的那一邊（1200 格的視窗：12 格可以、13 格就是混合）
+        const struct {
+            uint32_t on, off;
+            char want;
+        } k[] = {{1200, 0, '1'},   {0, 1200, '0'},   {1199, 1, '1'},  {1, 1199, '0'}, {1188, 12, '1'}, {1187, 13, 'm'},
+                 {12, 1188, '0'},  {13, 1187, 'm'},  {600, 600, 'm'}, {1, 0, '1'},    {0, 1, '0'},     {99, 1, '1'},
+                 {98, 1, 'm'},     {0, 0, 'm'},      {4000000000u, 40000000u, '1'},   {4000000000u, 40404041u, 'm'},
+                 {40000000u, 4000000000u, '0'},      {40404041u, 4000000000u, 'm'},   {4294967295u, 1, '1'}};
+        // （最後五組：用 32 bit 算會溢位的大小）
+        int wrong = 0;
+        for (const auto& e : k) {
+            wrong += abWindowSide(e.on, e.off) == e.want ? 0 : 1;
+        }
+        std::snprintf(buf, sizeof(buf), "%d of %d wrong; 1188+12 -> %c, 1187+13 -> %c, 13+1187 -> %c", wrong,
+                      static_cast<int>(sizeof(k) / sizeof(k[0])), abWindowSide(1188, 12), abWindowSide(1187, 13), abWindowSide(13, 1187));
+        caseDone("ab-window-side", wrong == 0, buf);
     }
     return failures;
 }

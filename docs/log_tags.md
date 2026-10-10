@@ -841,8 +841,11 @@ PCVR 走真 XR 時 client 這一側的量測：一律開著、不改變任何一
 [VIPLE-VR-LDIAG] ab: N switches are armed and will toggle together: latchRelatch, latchWait
                                                                               ← warning，bring-up 時一次：開了同場切換、會跟著切的開關卻有兩個以上——分不出是誰的效果，
                                                                                  要比哪一個就只開那一個
-[VIPLE-XR] 10s video …原樣… ab=<0|1|m>                                        ← 行尾新增（開了同場切換才印）。這一行的 10 秒視窗是它自己的計時，不是 [VIPLE-VR-MTP10]／
-                                                                                 [VIPLE-VR-LDIAG] 的那一個：m＝這個視窗裡換過邊（不拿來比），否則是現在這一邊
+[VIPLE-XR] 10s video …原樣… ab=<0|1|m>                                        ← 行尾新增（開了同場切換才印）：這個視窗 99% 以上的格跑在哪一邊；m＝兩邊混在一起（換邊落在
+                                                                                 視窗中間），不拿來比。這一行的 10 秒視窗是它自己的計時，但和 [VIPLE-VR-MTP10]／[VIPLE-VR-LDIAG]
+                                                                                 的視窗一樣從第一格起算，整場只差幾格，所以平常和同一輪的 LDIAG 標的是同一邊：每一邊的最後
+                                                                                 一個視窗標那一邊，換邊後的第一個視窗標新的那一邊（還沒穩下來的那一個，比的時候照樣丟掉）。
+                                                                                 兩種視窗差到 1% 以上（120 Hz 是 12 格）的時候，換邊的那個視窗才會標 m
 
 frame loop（XR 桌面也有）
 [VIPLE-XR] 10s frames=… …原樣… stale=N discarded=N                            ← 行尾新增：這 10 秒 xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（正常是 0）
@@ -921,13 +924,14 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
 
 自測
-[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑三組、一共 60 個案例：原有的 27 個（輸出不變）；
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑三組、一共 61 個案例：原有的 27 個（輸出不變）；
                                                                                  `latch-wait-…`／`latch-flip-…`／`latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到
                                                                                  計數：差一點、真的晚、150 µs 的邊界、半速、基準過期、兩張擠在同一格、沒有送出時刻、分格的
-                                                                                 邊界、隨機腳本的自洽）；xrphase.h 的 18 個：`phase-…` 17 個（LDIAG 相位 ↔ vblank 相位、
+                                                                                 邊界、隨機腳本的自洽）；xrphase.h 的 19 個：`phase-…` 17 個（LDIAG 相位 ↔ vblank 相位、
                                                                                  120 Hz 的判斷、交出相位的分類、延遲鏈與 events 的算式，以及相位的環狀中位數：橫跨接縫的
-                                                                                 一群、整群轉任何角度、散滿整圈的視窗、離群值、不折回的 p95／max、邊界）與
-                                                                                 `rank-scan-matches-sort`（10 秒行那些分位數的取法，逐一和排序的結果比對）
+                                                                                 一群、整群轉任何角度、散滿整圈的視窗、離群值、不折回的 p95／max、邊界）、
+                                                                                 `rank-scan-matches-sort`（10 秒行那些分位數的取法，逐一和排序的結果比對）與
+                                                                                 `ab-window-side`（同場切換時一個視窗算哪一邊）
 ```
 
 - 相位有兩種座標：這份文件裡 `latchPhase`、`gpu-by-phase` 與這一節新增的相位欄位都是 **LDIAG 相位**（原點是預測顯示時刻的

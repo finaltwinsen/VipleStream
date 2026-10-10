@@ -525,10 +525,10 @@ private:
         // §VR-LATCH A/B：目前是哪一邊（true＝開）、這一邊已經跑了幾秒
         bool abOn = false;
         double abElapsedSec = 0.0;
-        // 換過幾次邊、[VIPLE-XR] 10s video 上一次印的時候是第幾次（那一行的 10 s 視窗是另外計時的，上一次印之後
-        // 換過邊就標成 ab=m，見 maybeLogStats）
-        uint32_t abFlips = 0;
-        uint32_t abFlipsAtVideoLog = 0;
+        // [VIPLE-XR] 10s video 那一行的 10 s 視窗是 maybeLogStats 自己計時的：這個視窗裡「開」「關」兩邊各跑了幾格
+        // （行尾的 ab= 照它標，見 maybeLogStats）
+        uint32_t abVideoOnFrames = 0;
+        uint32_t abVideoOffFrames = 0;
         // §VR-LATCH-WAIT：10 s 視窗——等了幾格、其中等到新影像的、等到逾時的
         uint32_t waited10s = 0;
         uint32_t waitSaved10s = 0;
