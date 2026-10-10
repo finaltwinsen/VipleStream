@@ -3082,6 +3082,9 @@ bool Session::setupXrPcvr()
     if (m_Preferences->vrHalfRate && hz / 2 >= (int)VIPLE_VR_HZ_MIN) {
         m_VrLaunch.refreshHz = hz / 2;
         m_VrLaunch.periodNs *= 2;
+        // vrDispHz：host 的姿態預測要知道頭盔實際的顯示更新率（vrHz 這時是串流的）。沒減半時維持 0＝不帶：
+        // m_VrLaunch 每次 decideVrRequest() 都重新建構，不會留著上一次的值
+        m_VrLaunch.displayHz = hz;
         m_XrContext->setPcvrStreamDiv(2);  // §VR-LATCH-WAIT：串流一幀佔兩個顯示格（沒有新影像的那一格不等）
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SESSION] half-rate: display %d Hz, stream %d Hz", hz, hz / 2);
     }

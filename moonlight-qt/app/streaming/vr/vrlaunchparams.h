@@ -26,6 +26,9 @@ struct VrLaunchConfig {
     QString controller = QStringLiteral("touch");
     int overscan = 0;              // deg×10
     int fovea = 100;               // §VR-FOVEA：正前方的像素密度是均勻取樣的幾 %（100＝關）
+    // §VR-HALF-RATE：頭盔的顯示更新率（Hz）。半速串流時 refreshHz 是串流的更新率（顯示的一半），host 光看
+    // vrHz 分不出「60 Hz 的顯示器」和「120 Hz 顯示器跑半速」。0 或等於 refreshHz＝不帶 vrDispHz
+    int displayHz = 0;
     bool force = false;
 
     // 預設值：對稱 90° FOV、IPD 63 mm、兩眼只有水平位移

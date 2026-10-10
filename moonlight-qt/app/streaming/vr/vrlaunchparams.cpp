@@ -54,7 +54,9 @@ QString VrLaunchConfig::toQuery() const
            "&vrCtrl=" + controller +
            "&vrOverscan=" + QString::number(overscan) +
            "&vrForce=" + QString::number(force ? 1 : 0) +
-           (fovea > 100 ? "&vrFovea=" + QString::number(fovea) : QString());
+           (fovea > 100 ? "&vrFovea=" + QString::number(fovea) : QString()) +
+           // §VR-HALF-RATE：和 vrHz 不同才帶（其他情況字串和以前一樣；舊 server 不認得的 key 會略過）
+           (displayHz > 0 && displayHz != refreshHz ? "&vrDispHz=" + QString::number(displayHz) : QString());
 }
 
 VrSessionInfo VrSessionInfo::parse(const QString& text)
