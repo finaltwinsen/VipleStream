@@ -1302,8 +1302,12 @@ static bool nkPreNacked(PRTP_VIDEO_QUEUE queue, uint32_t frame) {
     return false;
 }
 
-// 環裡最小的幀號比目前這一幀大幾幀（中間整幀沒到的幀數）；環是空的、或最小的就是目前這一幀（同一幀的下一個 block）回 0
+// 環裡最小的幀號比目前這一幀大幾幀（中間整幀沒到的幀數）；環是空的、或最小的就是目前這一幀（同一幀的下一個 block）回 0。
+// 只看正在送影像的連線送來的封包（mlCarryMask；0＝還不知道哪條在送，全部都看）：同一條路徑上封包才照順序到。另一條
+// 連線剛開始送（還沒被算成「在送」）、或探測中的連線偶爾送來的那一幀可能先到，它前面的幀還在原本那條路上——拿它
+// 當「中間整幀沒到」會白補好幾整幀，缺太多時還會把還在路上的幀整段放棄
 static unsigned nkGapFrames(PRTP_VIDEO_QUEUE queue) {
+    const unsigned carry = queue->mlCarryMask;
     uint32_t lowest = 0;
     bool have = false;
     int i;
@@ -1312,6 +1316,9 @@ static unsigned nkGapFrames(PRTP_VIDEO_QUEUE queue) {
         const RTPV_HELD_PACKET* e = &queue->mlHold[(queue->mlHoldHead + i) % RTPV_ML_HOLD_MAX];
         uint32_t frame;
         uint8_t block;
+        if (carry != 0 && (e->link < 0 || e->link >= RTPV_ML_LINKS || !(carry & (1u << e->link)))) {
+            continue;
+        }
         if (mlPeek(queue, e->packet, e->length, &frame, &block) && (!have || isBefore32(frame, lowest))) {
             lowest = frame;
             have = true;

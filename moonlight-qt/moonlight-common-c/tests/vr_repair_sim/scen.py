@@ -6,7 +6,8 @@
 #   python scen.py [組別…]         印出來（不給組別＝全部），並和 scen_expected.txt 逐字比
 #   python scen.py --update        重寫 scen_expected.txt（規則有意改動之後，看過差異再做）
 #
-# 組別：j2a 估計值偏低｜j2b 補包那一輪掉了｜j2c 估計取錯連線｜j2d 目前的 block 先報過、後面才發現整幀沒到｜
+# 組別：j2a 估計值偏低｜j2b 補包那一輪掉了｜j2c 估計取錯連線｜other 另一條連線送來較新的幀｜
+#       j2d 目前的 block 先報過、後面才發現整幀沒到｜
 #       j2e 長空白｜j2f 幀內停頓（沒有掉包）之後才有一張真的尾端掉｜j2g 規則切換的那一刻｜j1a 整段空白與 60 Hz｜
 #       brk 補包永遠到不了（保險）｜hold 放棄之後的暫停｜chain 成串掉包（連續好幾幀各缺一段）｜
 #       gone 預先報的幀收到 REPAIR_GONE｜latch LATCH 的靜默什麼時候觸發｜meas 量測的計數
@@ -30,6 +31,11 @@ def run(mode, args):
     if out is None or rc != 0:
         return None, None, None
     return S.parse_result(out)
+
+
+def only_frame(keep, frames=14, shards=9):
+    """drop= 的參數：第一條連線上只留第 keep 幀，其餘的幀整幀都掉（每幀 shards 個封包）"""
+    return ",".join("%d:0-%d" % (f, shards - 1) for f in range(1, frames + 1) if f != keep)
 
 
 def latch_cols(tot):
@@ -120,6 +126,16 @@ def main():
             rows.append(("估計取自沒在送的快連線（lo/mid/hi=3.0/3.3/3.5）、補包實際 %.1f ms 才到、中段掉" % rtt, "fps=120 rtt=%g frames=22 drop=3:0-4" % rtt, "3:3.5:3.5", "3:3.3:3.5"))
             rows.append(("同一個情境、估計取自正在送的連線（＝真實值）", "fps=120 rtt=%g frames=22 drop=3:0-4" % rtt, "", ""))
         table("往返估計取錯連線", rows)
+    if want("other"):
+        # 另一條連線（剛開始送、還沒被算成「在送」，或探測中的連線每秒送來的那一幀）比較快：它送來較新的一幀時，中間那幾幀
+        # 還在原本那條路上，沒有掉。「後面整幀沒到的幀」只看正在送影像的那條連線送來的封包，所以不會把還在路上的幀當成
+        # 「缺太多」而整段放棄（第二列；不分連線的話第 4～8 幀五張全被放棄）。「下一幀到了就回報」對輪到的每一幀仍然會誤報
+        # 一次——和現行規則相同，沒有變好也沒有變差（第一列）
+        rows = [("第二條連線才是在送影像的那條（晚 20 ms）；第一條只送來第 6 幀（早兩幀多）",
+                 "fps=120 rtt=10 frames=14 links=2 lag2=20 carrymask=2 drop=%s" % only_frame(6), "", ""),
+                ("同上，第二條晚 45 ms、第一條只送來第 9 幀（早五幀）",
+                 "fps=120 rtt=10 frames=14 links=2 lag2=45 carrymask=2 drop=%s" % only_frame(9), "", "")]
+        table("另一條連線送來較新的幀（它前面的幀還在原本那條路上）", rows)
     if want("j2d"):
         rows = []
         for rtt in (10, 13, 15, 18):
