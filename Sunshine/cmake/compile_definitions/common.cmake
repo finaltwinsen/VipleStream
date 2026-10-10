@@ -276,6 +276,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/vr/vr_capture_publish.h"
         # §VR-DIRECT-KICK：host 直通落在「多一格」的時序時的判定、確認與退避（純邏輯標頭；只有 Windows 的 bridge 與單元測試用到）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_direct_kick.h"
+        # §VR-DIRECT-KICK：回聲年齡從擷取執行緒交到 bridge 執行緒的緩衝（只用標準函式庫；只有 Windows 的 bridge 與單元測試用到）
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_echo_handoff.h"
         # §VR-CADENCE：從 driver 的 timing ring 判斷 Present 鎖不鎖得住虛擬 vsync（純邏輯標頭；Linux 也編譯）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_present_cadence.h"
         # §VR-MULTILINK：多連線（純邏輯在 _logic.h，socket／執行緒在 .cpp；Linux 也編譯）

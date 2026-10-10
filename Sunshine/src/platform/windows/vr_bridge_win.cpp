@@ -51,6 +51,7 @@
 #include "src/platform/windows/utf_utils.h"
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_direct_kick.h"
+#include "src/vr/vr_echo_handoff.h"
 
 using namespace std::literals;
 
@@ -78,9 +79,6 @@ namespace vr::bridge {
     constexpr uint32_t kInvalidStreakLimit = 30;
     constexpr uint32_t kDefaultRefreshMhz = 90000;
     constexpr size_t kRecentSamples = 2048;
-    /// §VR-DIRECT-KICK：擷取執行緒交過來、bridge 執行緒還沒倒進偵測器的回聲年齡最多放這麼多筆。連線中每 2 ms 倒一次，
-    /// 平常裡面只有 0～1 筆；放滿表示 bridge 執行緒卡了半秒以上（90 Hz 的 64 筆是 0.7 秒），新的就丟掉
-    constexpr size_t kEchoHandoffSlots = 64;
     // 握手失敗的退避秒數：vr_bridge.h 的 reject_backoff_sec()（selftest T2.rate-limit 用同一份表驗）
 
     // ── 時間 ───────────────────────────────────────────────────────────────
@@ -804,7 +802,6 @@ namespace vr::bridge {
       void write_default_pacing(conn_t &c);
       bool start_kick(conn_t &c, int64_t now, int64_t burst_ticks);
       void direct_kick_poll(conn_t &c, int64_t now);
-      void drain_echo_ages(conn_t &c);
       void send_state(uint32_t kind, uint32_t arg);
       bool send(const void *msg, DWORD size);
       void protocol_error(const std::string &reason, uint32_t detail);
@@ -887,19 +884,10 @@ namespace vr::bridge {
       std::atomic<uint64_t> trk_dropped_ {0};
 
       // §VR-DIRECT-KICK：擷取執行緒 → bridge 執行緒的回聲年齡交接（偵測器在 conn_t 裡，只有 bridge 執行緒能碰）。
-      // echo_gen_＝要回聲年齡的 generation（0＝沒有：開關關著、偵測器不動作、沒有連線）：bridge 執行緒寫，
-      // report_echo_age() 的呼叫端讀。緩衝與筆數由 echo_mtx_ 保護（拿著它的時候不取別的鎖）；echo_pending_＝緩衝裡
-      // 有東西，只在 echo_mtx_ 內改，bridge 執行緒先看它、沒有東西就不取鎖
-      struct echo_age_t {
-        uint64_t generation = 0;
-        int64_t present_qpc = 0;
-        int64_t age_qpc = 0;
-      };
-      std::atomic<uint64_t> echo_gen_ {0};
-      std::atomic<bool> echo_pending_ {false};
-      std::mutex echo_mtx_;
-      std::array<echo_age_t, kEchoHandoffSlots> echo_buf_ {};
-      size_t echo_n_ = 0;
+      // 上鎖的小緩衝＋「現在收哪一個 generation」的閘門，都在 vr_echo_handoff.h（有單元測試）：擷取執行緒只呼叫
+      // push()，open()／close()／drain() 只在 bridge 執行緒。放的是 QPC tick，倒出來時才換成 ns。
+      // 閘門只在握手時打開（開關開著、而且這個 generation 的偵測器會動作），拆線時關上
+      vr::kick::echo_handoff_t echo_handoff_;
     };
 
     bridge_t &bridge() {
@@ -1338,39 +1326,9 @@ namespace vr::bridge {
 
     // ── §VR-DIRECT-KICK：回聲年齡的交接（擷取執行緒 → bridge 執行緒）──────────────
     void bridge_t::report_echo_age(uint64_t generation, int64_t present_qpc, int64_t age_qpc) {
-      // 閘門：開關關著、偵測器不動作、沒有連線時 echo_gen_ 是 0，generation 從 1 起，一定對不上；
-      // generation 已經換掉的影像也在這裡擋下
-      if (generation == 0 || echo_gen_.load(std::memory_order_relaxed) != generation) {
-        return;
-      }
-      std::lock_guard lk(echo_mtx_);
-      if (echo_n_ < echo_buf_.size()) {
-        echo_buf_[echo_n_++] = echo_age_t {generation, present_qpc, age_qpc};
-        echo_pending_.store(true, std::memory_order_release);
-      }
-    }
-
-    /// 擷取執行緒交過來的回聲年齡倒進這條連線的偵測器（bridge 執行緒；drain_rings() 餵完 presentPhase 的同一輪）。
-    /// 每一筆都帶著自己的 generation：通過閘門之後才換 generation 的那一兩筆在這裡丟掉，不會餵給新的偵測器
-    void bridge_t::drain_echo_ages(conn_t &c) {
-      if (!echo_pending_.load(std::memory_order_acquire)) {
-        return;
-      }
-      std::array<echo_age_t, kEchoHandoffSlots> batch;
-      size_t n = 0;
-      {
-        std::lock_guard lk(echo_mtx_);
-        n = echo_n_;
-        std::copy_n(echo_buf_.begin(), n, batch.begin());
-        echo_n_ = 0;
-        echo_pending_.store(false, std::memory_order_release);
-      }
-      for (size_t i = 0; i < n; ++i) {
-        if (batch[i].generation == c.gen->generation) {
-          // 時刻用這一張影像 Present 的 QPC，和 presentPhase 樣本用的 PRESENT_ENTER 是同一個時鐘、同一種換算
-          c.kick_det.on_echo_age(platf::qpc_ticks_to_ns(batch[i].present_qpc), platf::qpc_ticks_to_ns(batch[i].age_qpc));
-        }
-      }
+      // 閘門關著（開關關著、偵測器不動作、沒有連線）或 generation 已經換掉：push() 只比一次 atomic 就返回。
+      // 緩衝滿了（bridge 執行緒卡住）也只是丟掉這一筆，所以回傳值不必看
+      echo_handoff_.push(generation, present_qpc, age_qpc);
     }
 
     // ── pipe IO（只在 bridge 執行緒）────────────────────────────────────────
@@ -2259,13 +2217,8 @@ namespace vr::bridge {
         // §VR-DIRECT-KICK：這個 generation 的 host 週期（沒有 config 的 idle generation＝0，偵測器不動作）
         const int64_t period_ns = gen->has_config && gen->config.refresh_mhz != 0 ? 1'000'000'000'000LL / gen->config.refresh_mhz : 0;
         c.kick_det.reset(period_ns, platf::qpc_ticks_to_ns(c.welcome_qpc));
-        // 回聲年齡的交接：先清掉緩衝裡上一條連線留下來的，再把閘門開給這個 generation（偵測器不動作就不開）
-        {
-          std::lock_guard lk(echo_mtx_);
-          echo_n_ = 0;
-          echo_pending_.store(false, std::memory_order_release);
-        }
-        echo_gen_.store(c.kick_det.active() ? gen->generation : 0, std::memory_order_relaxed);
+        // 回聲年齡的交接：清掉緩衝裡上一條連線留下來的，再把閘門開給這個 generation（偵測器不動作就不開）
+        echo_handoff_.open(c.kick_det.active() ? gen->generation : 0);
       }
       const bool is_peer = c.selftest_peer;
       const uint32_t dver = c.driver_version_packed;
@@ -2610,7 +2563,7 @@ namespace vr::bridge {
       g_present_cadence.store(0, std::memory_order_relaxed);
       if (config::vr.direct_kick) {
         // §VR-DIRECT-KICK：這條連線的偵測器到此為止，擷取端不必再交回聲年齡（已經在緩衝裡的，下一次握手會清掉）
-        echo_gen_.store(0, std::memory_order_relaxed);
+        echo_handoff_.close();
       }
       {
         // 對外狀態一進 TEARDOWN 就變成「未連線」（selftest 的 kill→idle ≤ 100 ms 以它為準；之後的 close_wait
@@ -2901,9 +2854,13 @@ namespace vr::bridge {
       });
 
       // §VR-DIRECT-KICK：擷取執行緒交過來的回聲年齡，和上面的 presentPhase 在同一輪倒進偵測器（兩個量都成立才判定
-      // 多一格）。開關關著時沒有人交，這裡也不看
+      // 多一格）。開關關著時沒有人交，這裡也不看；緩衝是空的時候 drain() 只讀一個 atomic。
+      // 時刻用那一張影像 Present 的 QPC：和 presentPhase 樣本用的 PRESENT_ENTER 是同一個時鐘、同一種換算。
+      // 換 generation 前後才交到的那一兩筆（帶的是上一個 generation）由 drain() 丟掉，不會餵給新的偵測器
       if (config::vr.direct_kick) {
-        drain_echo_ages(c);
+        echo_handoff_.drain(c.gen->generation, [&c](int64_t present_qpc, int64_t age_qpc) {
+          c.kick_det.on_echo_age(platf::qpc_ticks_to_ns(present_qpc), platf::qpc_ticks_to_ns(age_qpc));
+        });
       }
 
       // §VR-CADENCE：timing 一排空就讓偵測器的計時往前走、發布摘要。一定要在這裡做，不可以搬到 periodic() 裡

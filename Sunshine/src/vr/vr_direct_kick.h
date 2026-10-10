@@ -6,7 +6,7 @@
  * 純邏輯：只用標準函式庫、不碰任何平台標頭、不讀時鐘（時間一律由呼叫端以奈秒整數傳入）、穩態不配置記憶體
  * （樣本放在固定大小的環），可以脫離整個 server 單獨編譯測試（tests/unit/test_vr_direct_kick.cpp）。
  * 只給一條執行緒用（bridge 執行緒：drain_rings() 餵樣本、periodic() 呼叫 poll()），沒有鎖。回聲年齡是擷取執行緒
- * 算的，呼叫端要先交接到這條執行緒再餵（vr_bridge.h 的 report_echo_age()）。
+ * 算的，呼叫端要先交接到這條執行緒再餵（vr_bridge.h 的 report_echo_age()；中間的緩衝在 vr_echo_handoff.h）。
  *
  * 背景（docs/steam_frame_client.md「host 直通時的兩種時序」）：SteamVR 的合成器把遊戲的畫面直接交給 driver 時，
  * 有兩種穩定的時序——
