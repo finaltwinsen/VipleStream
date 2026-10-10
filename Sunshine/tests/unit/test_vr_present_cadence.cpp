@@ -291,6 +291,57 @@ TEST(VrPresentCadenceMarginal, OneSlipEveryThreeSecondsSets) {
   EXPECT_EQ(s.why(), why_e::marginal);
 }
 
+TEST(VrPresentCadenceMarginal, FourSlipsSpanningNinePointSixSecondsSet) {
+  // 視窗是 10 s 整：4 個滑動橫跨 9.6 s 要設（視窗縮成 9 s 就抓不到）
+  sim_t s;
+  s.settle();
+  for (int i = 0; i < 4; ++i) {
+    s.present(2);
+    if (i < 3) {
+      s.run_for(3200 * kMs - 2 * kT120);
+    }
+  }
+  s.present(1);
+  EXPECT_EQ(s.st(), state_e::slipping);
+  EXPECT_EQ(s.why(), why_e::marginal);
+}
+
+TEST(VrPresentCadenceMarginal, TheWindowIncludesItsEndPoint) {
+  // 第 4 個滑動剛好記在第 1 個之後 10.000 s 整也算
+  detector_t d;
+  int64_t now = kStart;
+  d.reset(kT120, now);
+  present_t p;
+  for (int i = 0; i < 1400; ++i) {  // 11.7 s：過了觀察期
+    now += kT120;
+    p.now_ns = now;
+    p.slots = 1;
+    d.on_present(p);
+  }
+  ASSERT_EQ(d.state(), state_e::locked);
+  const int64_t t1 = now + 100 * kMs;
+  // 滑動在「下一張 Present 的時刻」記下來：讓那四個時刻是 t1、t1 + 3 s、t1 + 6 s、t1 + 10 s 整
+  for (const int64_t at : {t1, t1 + 3 * kSec, t1 + 6 * kSec, t1 + 10 * kSec}) {
+    // 中間照常每格一張（紀錄不可以停超過 2 s），到那個時刻之前為止
+    while (now + kT120 < at - 2 * kMs) {
+      now += kT120;
+      p.now_ns = now;
+      p.slots = 1;
+      d.on_present(p);
+    }
+    p.now_ns = at - 2 * kMs;
+    p.slots = 2;
+    d.on_present(p);
+    EXPECT_EQ(d.state(), state_e::locked);
+    p.now_ns = at;
+    p.slots = 1;
+    d.on_present(p);
+    now = at;
+  }
+  EXPECT_EQ(d.state(), state_e::slipping);
+  EXPECT_EQ(d.why(), why_e::marginal);
+}
+
 // ── 重度：3 s 內的滑動達「3 s 的格數 ÷ 15」；結束後 3 s 沒有滑動就清 ─────────────
 
 TEST(VrPresentCadenceHeavy, ThresholdIsOneFifteenthOfTheSlotsInThreeSeconds) {
@@ -410,6 +461,67 @@ TEST(VrPresentCadenceHeavy, DenseSlippingRightAfterAHitchIsHeavy) {
   EXPECT_GE(w.masked, 24u);
   EXPECT_EQ(w.hitches, 1u);
   EXPECT_EQ(w.skipped, 10u + w.masked);  // 卡頓多跨 10 格，每個 masked 滑動各 1 格
+}
+
+TEST(VrPresentCadenceHeavy, RecoveringGoesBackToHeavy) {
+  // 重度停了 2 s 又開始：回到 heavy；結束後仍是 3 s 清（不是臨界的 12 s）
+  sim_t s;
+  s.settle();
+  for (int rep = 0; rep < 2; ++rep) {
+    const int64_t end = s.now + 5 * kSec;
+    while (s.now < end) {
+      s.present(2);
+      s.run(6);
+    }
+    ASSERT_EQ(s.why(), why_e::heavy) << rep;
+    if (rep == 0) {
+      s.run_for(2 * kSec);
+      ASSERT_EQ(s.why(), why_e::recovering);
+    }
+  }
+  s.run_for(3500 * kMs);
+  EXPECT_EQ(s.st(), state_e::locked);
+}
+
+TEST(VrPresentCadenceHeavy, RecoveringBecomesMarginal) {
+  // 重度結束後還有稀疏的滑動（每 2 s 一個）：第 4 個起是 marginal，最後一個之後 12 s 才清——不是 3 s
+  sim_t s;
+  s.settle();
+  const int64_t end = s.now + 5 * kSec;
+  while (s.now < end) {
+    s.present(2);
+    s.run(6);
+  }
+  ASSERT_EQ(s.why(), why_e::heavy);
+  for (int i = 0; i < 6; ++i) {
+    s.run_for(2 * kSec);
+    s.present(2);
+    s.present(1);
+    ASSERT_EQ(s.st(), state_e::slipping) << i;
+  }
+  EXPECT_EQ(s.why(), why_e::marginal);
+  s.run_for(11 * kSec);
+  EXPECT_EQ(s.st(), state_e::slipping);
+  s.run_for(1500 * kMs);
+  EXPECT_EQ(s.st(), state_e::locked);
+}
+
+TEST(VrPresentCadenceHeavy, TheTimersRunOnTicksAlone) {
+  // 沒有紀錄的短空檔（不到 0.5 s）裡計時也要走：滿 3 s 的那一刻 on_tick() 自己會清旗標，不必等下一筆紀錄
+  sim_t s;
+  s.settle();
+  const int64_t end = s.now + 5 * kSec;
+  while (s.now < end) {
+    s.present(2);
+    s.run(6);
+  }
+  ASSERT_EQ(s.why(), why_e::heavy);
+  const int64_t last = s.now - 5 * kT120;  // 最後一個滑動記下來的時刻（present(2) 之後的第一張）
+  s.run_for(last + 2800 * kMs - s.now);
+  ASSERT_EQ(s.st(), state_e::slipping);
+  ASSERT_EQ(s.why(), why_e::recovering);
+  s.advance(300 * kMs);  // 這 0.3 s 沒有任何紀錄，只有 on_tick()
+  EXPECT_EQ(s.st(), state_e::locked);
 }
 
 // ── 卡頓與它的餘波 ───────────────────────────────────────────────────────
@@ -617,6 +729,89 @@ TEST(VrPresentCadenceHitch, HiddenSlippingIsNeverReportedLocked) {
     }
   }
   EXPECT_FALSE(locked_seen);
+}
+
+TEST(VrPresentCadenceHitch, TwelveOffCadencePresentsEndTheHitchClass) {
+  // 長間隔只有在前後還有節拍可回時才算卡頓：連續 12 張都不在節拍上之後，長間隔也算滑動；11 張還是卡頓
+  {
+    sim_t s;
+    s.settle();
+    s.run(11, 3);
+    s.present(1);
+    const auto w = s.d.take_window();
+    EXPECT_EQ(w.hitches, 11u);
+    EXPECT_EQ(w.slips, 0u);
+    EXPECT_EQ(s.st(), state_e::locked);
+  }
+  {
+    sim_t s;
+    s.settle();
+    s.run(12, 3);
+    s.present(1);
+    const auto w = s.d.take_window();
+    EXPECT_EQ(w.hitches, 0u);
+    EXPECT_EQ(w.slips, 12u);
+    EXPECT_EQ(s.st(), state_e::slipping);
+  }
+  {
+    // 長到不進 run 的（每張 17 格、逐筆分類）：第 11 張還是卡頓，第 12 張起是滑動（卡頓後 3 s 內，所以是 masked）
+    sim_t s;
+    s.settle();
+    s.run(11, 17);
+    auto w = s.d.take_window();
+    EXPECT_EQ(w.hitches, 11u);
+    EXPECT_EQ(w.masked + w.slips, 0u);
+    s.present(17);
+    w = s.d.take_window();
+    EXPECT_EQ(w.hitches, 0u);
+    EXPECT_EQ(w.masked, 1u);
+  }
+}
+
+TEST(VrPresentCadenceHitch, SixteenMillisecondsExactly) {
+  // 16 ms 是含端點的整數計算：週期 8.000000 ms 時多跨 2 格（16.0 ms）就是卡頓；7.999999 ms 時多跨 2 格只有
+  // 15.999998 ms，要多跨 3 格
+  {
+    sim_t s(8'000'000);
+    s.settle();
+    s.present(3);
+    s.run(5);
+    const auto w = s.d.take_window();
+    EXPECT_EQ(w.hitches, 1u);
+    EXPECT_EQ(w.slips, 0u);
+  }
+  {
+    sim_t s(7'999'999);
+    s.settle();
+    s.present(3);
+    s.run(5);
+    auto w = s.d.take_window();
+    EXPECT_EQ(w.hitches, 0u);
+    EXPECT_EQ(w.slips, 1u);
+    s.present(4);
+    s.run(5);
+    w = s.d.take_window();
+    EXPECT_EQ(w.hitches, 1u);
+    EXPECT_EQ(w.slips, 0u);
+  }
+}
+
+TEST(VrPresentCadenceHitch, SlipsRightAfterAReAnchorAreMasked) {
+  // 一次跨超過 2 s（driver 重新起算格點）也當成一次卡頓：之後 3 s 內的滑動是 masked
+  sim_t s;
+  s.settle();
+  present_t p;
+  s.advance(kT120);
+  p.now_ns = s.now;
+  p.slots = 242;
+  s.d.on_present(p);
+  s.run(30);
+  s.d.take_window();
+  s.present(2);
+  s.present(1);
+  const auto w = s.d.take_window();
+  EXPECT_EQ(w.masked, 1u);
+  EXPECT_EQ(w.slips, 0u);
 }
 
 // ── 更新率的整數分之一 ───────────────────────────────────────────────────
@@ -861,6 +1056,54 @@ TEST(VrPresentCadenceFraction, FreeRunAtTwentyFiveFps) {
   EXPECT_LE(first, 5 * kSec);
 }
 
+TEST(VrPresentCadenceFraction, DivisorsUpToFiveAreAdopted) {
+  // 節流值 2～4、而且每一張真的跨 1 + 節流值 格：採用 3、4、5（driver 現在的睡眠上限做不出這種節拍，但規則是這樣）
+  for (const int64_t thr : {int64_t {2}, int64_t {3}, int64_t {4}}) {
+    SCOPED_TRACE(thr);
+    sim_t s;
+    s.settle();
+    s.run(23, 1 + thr, thr);
+    EXPECT_EQ(s.d.divisor(), 1);
+    s.present(1 + thr, thr);
+    EXPECT_EQ(s.d.divisor(), 1 + thr);
+    s.run(50, 1 + thr, thr);
+    EXPECT_EQ(s.st(), state_e::locked);
+    const auto w = s.d.take_window();
+    EXPECT_EQ(w.slips + w.masked + w.hitches, 0u);
+    EXPECT_EQ(w.divisor_changes, 1u);
+  }
+}
+
+TEST(VrPresentCadenceFraction, TheExplainedRunMustBeConsecutive) {
+  // 要「連續」24 張都解釋得了：中間一張節流值對不上就從頭數
+  sim_t s;
+  s.settle();
+  s.run(12, 2, 1);
+  s.present(2, 0);
+  s.run(12, 2, 1);
+  EXPECT_EQ(s.d.divisor(), 1);  // 25 張同樣跨 2 格，但解釋得了的最多連續 12 張
+  EXPECT_EQ(s.st(), state_e::unsure);
+  EXPECT_EQ(s.why(), why_e::fraction);
+  s.run(11, 2, 1);
+  EXPECT_EQ(s.d.divisor(), 1);
+  s.present(2, 1);
+  EXPECT_EQ(s.d.divisor(), 2);
+}
+
+TEST(VrPresentCadenceFraction, AdoptingForgetsMaskedSlips) {
+  // 採用新節拍時，卡頓後那幾個 masked 的滑動也一起作廢（它們是相對舊節拍算的）：不再因為它們說不準
+  sim_t s;
+  s.settle();
+  s.present(11);
+  s.run(20);
+  s.present(2);
+  s.run(5);
+  ASSERT_EQ(s.why(), why_e::recent);
+  s.run(24, 2, 1);
+  EXPECT_EQ(s.d.divisor(), 2);
+  EXPECT_EQ(s.st(), state_e::locked);
+}
+
 // ── 有效性 ───────────────────────────────────────────────────────────────
 
 TEST(VrPresentCadenceValidity, TwelveRecordsWithoutATargetStartOver) {
@@ -1066,6 +1309,114 @@ TEST(VrPresentCadenceValidity, StaleKeepsTheFlag) {
   EXPECT_EQ(s.st(), state_e::slipping);
 }
 
+TEST(VrPresentCadenceValidity, TheNoTargetRunMustBeConsecutive) {
+  // 要「連續」12 筆沒有輸出目標才重來：中間夾一筆有目標的就從頭數
+  sim_t s;
+  s.settle();
+  for (int i = 0; i < 11; ++i) {
+    s.present(1, 0, kExitNoTarget);
+  }
+  s.present();
+  for (int i = 0; i < 11; ++i) {
+    s.present(1, 0, kExitNoTarget);
+  }
+  EXPECT_EQ(s.st(), state_e::locked);
+  s.present(1, 0, kExitNoTarget);
+  EXPECT_EQ(s.st(), state_e::unknown);
+}
+
+TEST(VrPresentCadenceValidity, StartingOverForgetsTheCadenceTheEventsAndTheFlags) {
+  sim_t s;
+  s.settle();
+  // 先弄出一堆狀態：採用 1/2；卡頓＋masked 的滑動；再來 5 個不屬於卡頓的滑動（旗標設起來）
+  s.run(24, 2, 1);
+  ASSERT_EQ(s.d.divisor(), 2);
+  s.present(12, 1);
+  s.run(10, 2, 1);
+  s.present(3, 1);
+  s.run(10, 2, 1);
+  ASSERT_EQ(s.why(), why_e::recent);
+  s.run_for(3200 * kMs, 2, 1);
+  for (int i = 0; i < 5; ++i) {
+    s.present(3, 1);
+    s.run(8, 2, 1);
+  }
+  ASSERT_EQ(s.st(), state_e::slipping);
+  // 連續 12 筆沒有輸出目標：重來
+  for (int i = 0; i < 12; ++i) {
+    s.present(2, 1, kExitNoTarget);
+  }
+  EXPECT_EQ(s.st(), state_e::unknown);
+  EXPECT_EQ(s.d.divisor(), 1);  // 節拍回到每格一張
+  s.d.take_window();
+  // 之後每格一張：24 筆後是 proving（不是 recent、fraction，也不是 slipping），而且之後每一筆都是
+  for (int i = 0; i < 23; ++i) {
+    s.present();
+    ASSERT_EQ(s.st(), state_e::unknown) << i;
+  }
+  for (int i = 0; i < 200; ++i) {
+    s.present();
+    ASSERT_EQ(s.st(), state_e::unsure) << i;
+    ASSERT_EQ(s.why(), why_e::proving) << i;
+  }
+  // 重來之前的卡頓不遮罩之後的滑動，之前的滑動也不算進最近 10 s
+  s.present(2);
+  s.present(1);
+  const auto w = s.d.take_window();
+  EXPECT_EQ(w.masked, 0u);
+  EXPECT_EQ(w.slips, 1u);
+  EXPECT_EQ(static_cast<int>(s.d.info(s.now).slips_10s), 1);
+}
+
+TEST(VrPresentCadenceValidity, StartingOverAlsoForgetsTheHitchTheFractionAndThePendingRun) {
+  {
+    // 卡頓之後 0.1 s 重來：之後的滑動不再被那次卡頓遮罩
+    sim_t s;
+    s.settle();
+    s.present(11);
+    for (int i = 0; i < 12; ++i) {
+      s.present(1, 0, kExitNoTarget);
+    }
+    s.run(30);
+    s.d.take_window();
+    s.present(2);
+    s.present(1);
+    const auto w = s.d.take_window();
+    EXPECT_EQ(w.masked, 0u);
+    EXPECT_EQ(w.slips, 1u);
+  }
+  {
+    // 解釋不了的平台（fraction）之後重來：之後不必「連續 24 張在節拍上」也不再是 fraction
+    sim_t s;
+    s.settle();
+    s.run(30, 2, 0);
+    ASSERT_EQ(s.why(), why_e::fraction);
+    for (int i = 0; i < 12; ++i) {
+      s.present(2, 0, kExitNoTarget);
+    }
+    s.run(20);
+    s.present(2);
+    s.run(10);
+    EXPECT_EQ(s.st(), state_e::unsure);
+    EXPECT_EQ(s.why(), why_e::proving);
+  }
+  {
+    // 還差一張就採用的那一段，重來之後要從頭數
+    sim_t s;
+    s.settle();
+    s.run(23, 2, 1);
+    for (int i = 0; i < 12; ++i) {
+      s.present(2, 1, kExitNoTarget);
+    }
+    s.present(2, 1);
+    EXPECT_EQ(s.d.divisor(), 1);
+    s.run(22, 2, 1);
+    EXPECT_EQ(s.d.divisor(), 1);
+    s.present(2, 1);
+    EXPECT_EQ(s.d.divisor(), 2);
+  }
+}
+
 // ── 不可信的輸入 ─────────────────────────────────────────────────────────
 
 TEST(VrPresentCadenceSuspect, ThirdImpossibleValueInTenSeconds) {
@@ -1151,6 +1502,71 @@ TEST(VrPresentCadenceSuspect, OnePercentGarbageIsNeverLocked) {
     }
   }
   EXPECT_FALSE(locked_seen);
+}
+
+TEST(VrPresentCadenceSuspect, ReAnchorsCountAsImpossibleValues) {
+  // 一次跨超過 2 s（driver 重新起算格點）也算一筆不可能的值：10 s 內第 3 筆就不信了
+  sim_t s;
+  s.settle();
+  present_t p;
+  for (int i = 0; i < 2; ++i) {
+    s.advance(kT120);
+    p.now_ns = s.now;
+    p.slots = 242;
+    s.d.on_present(p);
+    s.run(100);
+  }
+  EXPECT_NE(s.why(), why_e::suspect);
+  EXPECT_FALSE(s.d.take_suspect_alert());
+  s.advance(kT120);
+  p.now_ns = s.now;
+  p.slots = 242;
+  s.d.on_present(p);
+  EXPECT_EQ(s.st(), state_e::unsure);
+  EXPECT_EQ(s.why(), why_e::suspect);
+  EXPECT_TRUE(s.d.take_suspect_alert());
+  EXPECT_EQ(s.d.take_window().restarts, 3u);
+}
+
+TEST(VrPresentCadenceSuspect, RecordsStoppingWhileSuspectIsUnknown) {
+  // 紀錄停超過 2 s：不論之前是不是 suspect，一律 unknown
+  sim_t s;
+  s.settle();
+  s.run(3, 0);
+  ASSERT_EQ(s.why(), why_e::suspect);
+  s.advance(2100 * kMs);
+  EXPECT_EQ(s.st(), state_e::unknown);
+  EXPECT_EQ(s.why(), why_e::none);
+}
+
+TEST(VrPresentCadenceSuspect, TheReasonWhenSeveralApply) {
+  // 說不準的原因同時有好幾個時印哪一個：suspect > fraction > recent > proving
+  {
+    // recent 蓋過 proving：觀察期內卡頓＋滑動
+    sim_t s;
+    s.run(30);
+    ASSERT_EQ(s.why(), why_e::proving);
+    s.present(11);
+    s.run(10);
+    s.present(2);
+    s.present(1);
+    EXPECT_EQ(s.why(), why_e::recent);
+  }
+  {
+    // fraction 蓋過 recent：masked 的滑動之後進入解釋不了的平台
+    sim_t s;
+    s.settle();
+    s.present(11);
+    s.run(10);
+    s.present(2);
+    s.run(5);
+    ASSERT_EQ(s.why(), why_e::recent);
+    s.run(24, 2, 0);
+    EXPECT_EQ(s.why(), why_e::fraction);
+    // suspect 蓋過 fraction
+    s.run(3, 0);
+    EXPECT_EQ(s.why(), why_e::suspect);
+  }
 }
 
 // ── PostPresent 不等虛擬 vsync 的那一段（dev 的節拍模式；§VR-A-KICK 的實驗每次約 20 ms）───────
@@ -1564,6 +1980,59 @@ TEST(VrPresentCadenceAssembler, CarriesExitCodeThrottleAndSlots) {
   frame(2, 0, -7);
   w = d.take_window();
   EXPECT_EQ(w.throttle_max, 255);
+}
+
+TEST(VrPresentCadenceAssembler, TheSameFrameIdNeedsBothCompanionsOfThisFrame) {
+  // 沒有合成的幀（沒有 slot）driver 的 frame_id 不前進：連續兩幀帶同一個 frame_id。這時比 frame_id 分不出來，
+  // 只有「上一幀的暫存已經清掉」擋得住拿上一幀的 PRESENT_EXIT／POSTPRESENT_ENTER 來配
+  detector_t d;
+  int64_t now = kStart;
+  d.reset(kT120, now);
+  const uint32_t fid = 42;
+  const auto full = [&](int64_t slots) {
+    now += slots * kT120;
+    d.on_record(now, kEvPresentEnter, fid, 0, 0, 0);
+    d.on_record(now, kEvPresentExit, fid, 2, 0, 0);  // 2：沒有 slot（不是「沒有輸出目標」），frame_id 不變
+    d.on_record(now, kEvPostPresentEnter, fid, 0, 0, 0);
+    d.on_record(now, kEvVsyncVirtual, fid, kT120, slots, 0);
+    d.on_record(now, kEvPostPresentExit, fid, 0, 0, 0);
+  };
+  for (int i = 0; i < 30; ++i) {
+    full(1);
+  }
+  d.take_window();
+  // 這一幀少了 PRESENT_EXIT（frame_id 和上一幀相同）
+  now += 2 * kT120;
+  d.on_record(now, kEvPresentEnter, fid, 0, 0, 0);
+  d.on_record(now, kEvPostPresentEnter, fid, 0, 0, 0);
+  d.on_record(now, kEvVsyncVirtual, fid, kT120, 2, 0);
+  d.on_record(now, kEvPostPresentExit, fid, 0, 0, 0);
+  auto w = d.take_window();
+  EXPECT_EQ(w.orphans, 1u);
+  EXPECT_EQ(w.records, 0u);
+  full(1);
+  // 這一幀少了 POSTPRESENT_ENTER
+  now += 2 * kT120;
+  d.on_record(now, kEvPresentEnter, fid, 0, 0, 0);
+  d.on_record(now, kEvPresentExit, fid, 2, 0, 0);
+  d.on_record(now, kEvVsyncVirtual, fid, kT120, 2, 0);
+  d.on_record(now, kEvPostPresentExit, fid, 0, 0, 0);
+  w = d.take_window();
+  EXPECT_EQ(w.orphans, 1u);
+  EXPECT_EQ(w.records, 1u);  // 中間那一幀完整的
+  EXPECT_EQ(w.slips, 0u);
+}
+
+TEST(VrPresentCadenceAssembler, AThrottleRecordOfAnotherFrameIsNotUsed) {
+  // POSTPRESENT_ENTER 是別幀的（frame_id 不同）：配不起來
+  detector_t d;
+  d.reset(kT120, kStart);
+  d.on_record(kStart, kEvPresentExit, 7, 0, 0, 0);
+  d.on_record(kStart, kEvPostPresentEnter, 8, 0, 0, 0);
+  d.on_record(kStart, kEvVsyncVirtual, 7, kT120, 1, 0);
+  const auto w = d.take_window();
+  EXPECT_EQ(w.orphans, 1u);
+  EXPECT_EQ(w.records, 0u);
 }
 
 // ── 10 s log 的計數 ──────────────────────────────────────────────────────
