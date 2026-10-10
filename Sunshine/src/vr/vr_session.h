@@ -556,6 +556,7 @@ namespace vr {
     latch::controller_t latch_ctl_;
     latch::result_t latch_last_ {};
     latch::coherence_t latch_coh_;  ///< §VR-CADENCE：LATCH 樣本的相位一致性（診斷；latch_mtx_ 保護）
+    uint32_t latch_host_period_ns_ = 0;  ///< configure_latch() 給的 host 虛擬 vsync 週期（0＝不知道；hold_latch() 算 lockR 的模數用；latch_mtx_）
     mutable std::mutex timing_mtx_;
     std::optional<VIPLE_VR_TLV_CLIENT_TIMING> timing_last_;
     std::atomic<uint32_t> haptic_event_id_ {0};

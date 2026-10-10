@@ -2981,3 +2981,131 @@ TEST(VrLatchTest, SessionLatchCoherenceSeesFedAndHeldSamples) {
   // 只是多算一個診斷量：hold 的計數照舊
   EXPECT_EQ(st.stats().latch_held, 11u);
 }
+
+TEST(VrLatchTest, SessionLatchCoherenceGetsTheSlackAndTheModulusOfEachLatch) {
+  // 兩條路各一半，slack 是 3000 與 3000 − 8333：對 8.333 ms 取模是同一個相位（R＝1），對別的模數（例如 11.1 ms）
+  // 或別的 slack 就不是
+  vr::session_state_t st {vr::negotiated_t {}, nullptr, 0};
+  st.configure_latch(mode_e::v2, 40, kPeriod120);
+  int64_t now = 10'000'000'000;
+  uint32_t id = 100;
+  for (int i = 0; i < 40; ++i) {
+    now += kStepNs;
+    if (i % 2) {
+      st.on_latch(make_latch(++id, i % 4 == 1 ? 3000 : 3000 - 8333), now);
+    } else {
+      st.hold_latch(make_latch(++id, i % 4 == 0 ? 3000 : 3000 - 8333), now);
+    }
+  }
+  const auto w = st.take_latch_coherence();
+  EXPECT_EQ(w.samples, 40u);
+  EXPECT_GE(w.r_last, 990);
+}
+
+TEST(VrLatchTest, SessionLatchCoherenceUsesTheDisplayPeriodOfTheSameLatch) {
+  // 半速串流（host 60 Hz、顯示 120 Hz）：第一則 LATCH 就用它自己帶來的顯示週期，第 20 則就算得出 R。
+  // 用上一則的（第一則是預設的 11.1 ms）的話，第二則模數改變、樣本重來，要到第 21 則
+  vr::session_state_t st {vr::negotiated_t {}, nullptr, 0};
+  st.configure_latch(mode_e::v2, 40, 16'666'666);
+  int64_t now = 10'000'000'000;
+  uint32_t id = 100;
+  for (int i = 0; i < 20; ++i) {
+    now += kStepNs;
+    st.on_latch(make_latch(++id, 3000), now);
+  }
+  const auto w = st.take_latch_coherence();
+  EXPECT_EQ(w.samples, 20u);
+  EXPECT_EQ(w.r_last, 1000);
+}
+
+TEST(VrLatchTest, SessionHeldLatchUsesItsOwnDisplayPeriodForCoherence) {
+  // 被擋的路徑控制器不看這一則的顯示週期：半速串流而且從第一則起就被擋時，它的週期還是預設的 11.1 ms。
+  // lockR 要回答的就是「擋著的時候樣本還有沒有眾數」，模數得是對的——用這一則的顯示週期與 host 週期的較小值
+  {
+    vr::session_state_t st {vr::negotiated_t {}, nullptr, 0};
+    st.configure_latch(mode_e::v2, 40, 16'666'666);
+    int64_t now = 10'000'000'000;
+    uint32_t id = 100;
+    for (int i = 0; i < 40; ++i) {
+      now += kStepNs;
+      st.hold_latch(make_latch(++id, i % 2 ? 3000 : 3000 - 8333), now);  // 對 8.333 ms 取模同相
+    }
+    const auto w = st.take_latch_coherence();
+    EXPECT_EQ(w.samples, 40u);
+    EXPECT_GE(w.r_last, 990);
+    EXPECT_GE(w.r_min, 990);
+  }
+  {
+    // 顯示比 host 慢（host 120 Hz、顯示 90 Hz）：模數是 host 的 8.333 ms，不是顯示的 11.1 ms
+    vr::session_state_t st {vr::negotiated_t {}, nullptr, 0};
+    st.configure_latch(mode_e::v2, 40, kPeriod120);
+    int64_t now = 10'000'000'000;
+    uint32_t id = 100;
+    for (int i = 0; i < 40; ++i) {
+      now += kStepNs;
+      st.hold_latch(make_latch(++id, i % 2 ? 3000 : 3000 - 8333, kPeriod90), now);
+    }
+    EXPECT_GE(st.take_latch_coherence().r_last, 990);
+  }
+  {
+    // 擋著的時候換更新率（120 → 90 Hz，host 不知道）：之後的樣本對新的週期取模，舊的作廢
+    vr::session_state_t st {vr::negotiated_t {}, nullptr, 0};
+    st.configure_latch(mode_e::v2, 40, 0);
+    int64_t now = 10'000'000'000;
+    uint32_t id = 100;
+    for (int i = 0; i < 25; ++i) {
+      now += kStepNs;
+      st.on_latch(make_latch(++id, 3000), now);
+    }
+    ASSERT_EQ(st.take_latch_coherence().r_last, 1000);
+    for (int i = 0; i < 19; ++i) {
+      now += kStepNs;
+      st.hold_latch(make_latch(++id, i % 2 ? 3000 : 3000 - 11111, kPeriod90), now);
+    }
+    EXPECT_EQ(st.take_latch_coherence().r_last, -1);  // 重來之後還不到 20 筆
+    now += kStepNs;
+    st.hold_latch(make_latch(++id, 3000, kPeriod90), now);
+    EXPECT_GE(st.take_latch_coherence().r_last, 990);
+    // 不合理的顯示週期（0、1 s）沿用控制器的（120 Hz）：模數又變了，樣本再重來一次
+    now += kStepNs;
+    st.hold_latch(make_latch(++id, 3000, 0), now);
+    EXPECT_EQ(st.take_latch_coherence().r_last, -1);
+    for (int i = 0; i < 19; ++i) {
+      now += kStepNs;
+      st.hold_latch(make_latch(++id, i % 2 ? 3000 : 3000 - 8333, i % 2 ? 0u : 1'000'000'000u), now);
+    }
+    EXPECT_GE(st.take_latch_coherence().r_last, 990);
+  }
+  {
+    // host 週期不合理（1 ms）當成不知道（和控制器一樣只接受 5～50 ms）：模數就是顯示週期
+    vr::session_state_t st {vr::negotiated_t {}, nullptr, 0};
+    st.configure_latch(mode_e::v2, 40, 1'000'000);
+    int64_t now = 10'000'000'000;
+    uint32_t id = 100;
+    for (int i = 0; i < 40; ++i) {
+      now += kStepNs;
+      st.hold_latch(make_latch(++id, i % 2 ? 3000 : 3000 - 8333), now);
+    }
+    const auto w = st.take_latch_coherence();
+    EXPECT_EQ(w.samples, 40u);
+    EXPECT_GE(w.r_last, 990);
+  }
+}
+
+TEST(VrLatchTest, SessionTakingTheCoherenceWindowKeepsTheSamples) {
+  // 取走 10 s 的統計不可以把樣本清掉：下一個視窗的第一筆就有 R
+  vr::session_state_t st {vr::negotiated_t {}, nullptr, 0};
+  st.configure_latch(mode_e::v2, 40, kPeriod120);
+  int64_t now = 10'000'000'000;
+  uint32_t id = 100;
+  for (int i = 0; i < 25; ++i) {
+    now += kStepNs;
+    st.on_latch(make_latch(++id, 3000), now);
+  }
+  (void) st.take_latch_coherence();
+  now += kStepNs;
+  st.on_latch(make_latch(++id, 3000), now);
+  const auto w = st.take_latch_coherence();
+  EXPECT_EQ(w.samples, 1u);
+  EXPECT_EQ(w.r_last, 1000);
+}

@@ -630,6 +630,8 @@ namespace vr {
     std::lock_guard lk {latch_mtx_};
     latch_ctl_.configure(mode, target_pct, host_period_ns, options);
     latch_last_.mode = mode;
+    // §VR-CADENCE：hold_latch() 要自己算 lockR 的模數，留一份 host 週期（可接受的範圍和控制器的 configure() 相同）
+    latch_host_period_ns_ = host_period_ns >= 5'000'000 && host_period_ns <= 50'000'000 ? host_period_ns : 0;
   }
 
   bool session_state_t::latch_unsettled(int64_t now_ns) const {
@@ -664,8 +666,19 @@ namespace vr {
     latch_held_.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lk {latch_mtx_};
     latch_last_ = latch_ctl_.on_hold(now_ns, latch.frameId);
-    // §VR-CADENCE：被擋掉的樣本照樣餵給 lockR——擋著的時候樣本還有沒有眾數，就是要看的東西
-    latch_coh_.on_latch(latch.slackUs, latch.frameId, latch_ctl_.modulus_us(), now_ns);
+    // §VR-CADENCE：被擋掉的樣本照樣餵給 lockR——擋著的時候樣本還有沒有眾數，就是要看的東西。
+    // 模數不能直接拿控制器的：on_hold() 不看這一則的顯示週期，半速串流（host 60 Hz、顯示 120 Hz）而且從第一則起就被擋，
+    // 或擋著的時候換了更新率，控制器的週期都還是舊的（沒收過 LATCH 時是預設的 11.1 ms）。所以照控制器的同一套規則
+    // 用這一則的值算：顯示週期只接受 5～50 ms（否則沿用控制器的），再取它與 host 週期的較小值
+    double modulus_us = latch_ctl_.modulus_us();
+    if (latch.displayPeriodNs >= 5'000'000 && latch.displayPeriodNs <= 50'000'000) {
+      uint32_t period_ns = latch.displayPeriodNs;
+      if (latch_host_period_ns_ != 0 && latch_host_period_ns_ < period_ns) {
+        period_ns = latch_host_period_ns_;
+      }
+      modulus_us = (double) period_ns / 1000.0;
+    }
+    latch_coh_.on_latch(latch.slackUs, latch.frameId, modulus_us, now_ns);
     return latch_last_;
   }
 

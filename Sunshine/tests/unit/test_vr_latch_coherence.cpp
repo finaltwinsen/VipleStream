@@ -130,6 +130,40 @@ TEST(VrLatchCoherence, SamplesOlderThanEightSecondsAreNotUsed) {
   EXPECT_EQ(c.r_permille(now), 1000);
 }
 
+TEST(VrLatchCoherence, KeepsExactlyFortySamples) {
+  // 剛好留最新 40 筆：19 筆相位 A 之後 21 筆相位 B（差半個週期）→ |21 − 19| ÷ 40 = 0.05
+  coherence_t c;
+  int64_t now = kSec;
+  uint32_t fid = 0;
+  feed(c, 19, 1000, fid, now);
+  feed(c, 21, 1000 + 4167, fid, now);
+  EXPECT_EQ(c.r_permille(now), 50);
+  // 再一筆 B：最舊的 A 被擠掉 → 18 A＋22 B → 0.1（每一筆只算一次）
+  feed(c, 1, 1000 + 4167, fid, now);
+  EXPECT_EQ(c.r_permille(now), 100);
+}
+
+TEST(VrLatchCoherence, TheWindowKeepsTheExtremesAndTheLatestValue) {
+  // 10 s 視窗的三個數字：最大、最小是這個視窗裡算出來過的；「最後一次」在樣本變得不夠時回到 −1
+  coherence_t c;
+  int64_t now = kSec;
+  uint32_t fid = 0;
+  feed(c, 20, 1000, fid, now);  // R = 1000
+  feed(c, 10, 1000 + 4167, fid, now);  // 往下掉到 (20 − 10) ÷ 30 = 333
+  auto w = c.take_window();
+  EXPECT_EQ(w.r_last, 333);
+  EXPECT_EQ(w.r_min, 333);
+  EXPECT_EQ(w.r_max, 1000);  // 之後變小了，最大值還是先前的
+  // 同一個視窗裡先有 R、之後換更新率（樣本重來）：最後一次是「算不出來」，最大最小留著先前的
+  feed(c, 5, 1000 + 4167, fid, now);
+  feed(c, 1, 1000, fid, now, kT90Us);
+  w = c.take_window();
+  EXPECT_EQ(w.samples, 6u);
+  EXPECT_EQ(w.r_last, -1);
+  EXPECT_EQ(w.r_max, 290);  // 這個視窗的第一筆：(20 − 11) ÷ 31
+  EXPECT_EQ(w.r_min, 143);  // 第五筆：(20 − 15) ÷ 35
+}
+
 TEST(VrLatchCoherence, SpreadPhasesReadLowAndConcentratedPhasesHigh) {
   std::mt19937_64 g(1);
   // 均勻散開：40 筆的平均 R 約 sqrt(π) ÷ 2 ÷ sqrt(40)＝0.14
