@@ -272,6 +272,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/vr/vr_abr_outage.h"
         # §VR-FENCE-LATE：VR 擷取端等 fence 的等待預算、卡死／餓死、退避、過載旗標（純邏輯標頭；Linux 也編譯）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_capture_health.h"
+        # §VR-CADENCE：擷取端發布快照的時機、狀態變化要印哪幾行 log（純邏輯標頭；只有 Windows 的擷取端用，單元測試各平台都編）
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_capture_publish.h"
         # §VR-CADENCE：從 driver 的 timing ring 判斷 Present 鎖不鎖得住虛擬 vsync（純邏輯標頭；Linux 也編譯）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_present_cadence.h"
         # §VR-MULTILINK：多連線（純邏輯在 _logic.h，socket／執行緒在 .cpp；Linux 也編譯）
