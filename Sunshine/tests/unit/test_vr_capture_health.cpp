@@ -1817,3 +1817,735 @@ TEST(VrCaptureHealthFuzz, InvariantsHoldWithTheSwitchOff) {
   EXPECT_EQ(st.deferred, 0u);
   EXPECT_EQ(st.overload_flips, 0u);
 }
+
+// ── (e) §VR-CADENCE：LATCH／PREDICT 要不要取樣改看 Present 的節拍（config vr_capture_overload）──────────
+//
+// 節拍本身（locked／slipping／unsure／unknown）是 bridge 執行緒算的（test_vr_present_cadence.cpp）；這裡測的是擷取端
+// 怎麼把它和 (d) 的旗標合併。規格的數字（2 s 的沿用、30%／5%／2 s、位元的位置）一樣寫死。
+
+namespace vr::capture {
+  void PrintTo(cadence_e e, std::ostream *os) {
+    static constexpr const char *names[] = {"unknown", "locked", "slipping", "unsure"};
+    *os << names[static_cast<uint8_t>(e) & 3u];
+  }
+
+  void PrintTo(overload_mode_e e, std::ostream *os) {
+    *os << (e == overload_mode_e::late ? "late" : "cadence");
+  }
+}  // namespace vr::capture
+
+namespace {
+  constexpr overload_mode_e kLate = overload_mode_e::late;
+  constexpr overload_mode_e kCadence = overload_mode_e::cadence;
+  constexpr cadence_e kAllReports[] = {cadence_e::unknown, cadence_e::locked, cadence_e::slipping, cadence_e::unsure};
+
+  /// 加 (e) 之前的打包公式：只有三個欄位
+  constexpr uint64_t pack_old(bool overload, uint16_t late_permille, uint16_t pushed_fps) {
+    return (overload ? uint64_t {1} : uint64_t {0}) | (static_cast<uint64_t>(late_permille) << 16) | (static_cast<uint64_t>(pushed_fps) << 32);
+  }
+
+  /// 假的擷取迴圈，每一步把 bridge 這一刻的報告（report）隨影像或 on_idle 帶進去——和 display_vr_t 的做法一樣
+  struct cad_sim_t {
+    health_t h;
+    int64_t now = kStart;
+    uint64_t frame_id = 0;
+    uint64_t fence = 1000;
+    cadence_e report = cadence_e::unknown;
+
+    explicit cad_sim_t(overload_mode_e mode, bool on = true) {
+      h.configure(on, kT120, kMax100, mode);
+      h.begin_generation(now);
+    }
+
+    decision_t step(outcome_e o, int64_t interval_ns = kT120) {
+      now += interval_ns;
+      ++frame_id;
+      ++fence;
+      frame_t f;
+      f.outcome = o;
+      f.now_ns = now;
+      f.present_ns = now - kMs;
+      f.frame_id = frame_id;
+      f.observed = o == outcome_e::abandoned ? fence - 3 : fence;  // 放棄的：完成值有在前進，只是到不了這一張的值
+      f.cadence = report;
+      return h.on_frame(f);
+    }
+
+    /// 連續餵同一種結果，到再餵一張就超過 dur_ns 為止
+    void run_for(int64_t dur_ns, outcome_e o, int64_t interval_ns = kT120) {
+      const int64_t end = now + dur_ns;
+      while (now + interval_ns <= end) {
+        step(o, interval_ns);
+      }
+    }
+
+    /// 每 every 張裡前 bad 張是 o、其餘是 rest
+    void run_mixed(int64_t dur_ns, outcome_e o, int bad, int every, outcome_e rest = outcome_e::on_time, int64_t interval_ns = kT120) {
+      const int64_t end = now + dur_ns;
+      for (int i = 0; now + interval_ns <= end; ++i) {
+        step(i % every < bad ? o : rest, interval_ns);
+      }
+    }
+
+    /// 沒有影像：每 100 ms 一次 on_idle（帶著目前的報告）
+    void idle(int64_t dur_ns) {
+      const int64_t end = now + dur_ns;
+      while (end - now >= 100 * kMs) {
+        now += 100 * kMs;
+        h.on_idle(now, report);
+      }
+      now = end;
+    }
+  };
+}  // namespace
+
+TEST(VrCaptureHealthCadence, TruthTable) {
+  // overload＝(d) 的旗標（晚到＋放棄 ≥ 30%）；abandon＝只算放棄的。最後兩欄是 cadence 模式的決定；
+  // late 模式下兩個決定都等於 overload，不論節拍
+  struct {
+    cadence_e report;
+    outcome_e load;  ///< late＝每一張都晚；abandoned＝每 10 張裡 4 張放棄、其餘準時
+    bool overload;
+    bool abandon;
+    bool latch_hold;
+    bool predict_hold;
+  } rows[] = {
+    // 每一張都晚（跑滿更新率、fence 固定晚幾毫秒）
+    {cadence_e::locked, outcome_e::late, true, false, false, true},  // 相位取模後可鎖：LATCH 照追；絕對延遲不穩：PREDICT 不取樣
+    {cadence_e::slipping, outcome_e::late, true, false, true, true},
+    {cadence_e::unsure, outcome_e::late, true, false, true, true},  // 說不準：照 (d) 的旗標
+    {cadence_e::unknown, outcome_e::late, true, false, true, true},
+    // 全部準時
+    {cadence_e::locked, outcome_e::on_time, false, false, false, false},
+    {cadence_e::slipping, outcome_e::on_time, false, false, true, true},  // 節拍在滑動：一張都沒晚也不取樣
+    {cadence_e::unsure, outcome_e::on_time, false, false, false, false},
+    {cadence_e::unknown, outcome_e::on_time, false, false, false, false},
+    // 40% 放棄（fence 真的不動：沒有新影像可量）
+    {cadence_e::locked, outcome_e::abandoned, true, true, true, true},
+    {cadence_e::slipping, outcome_e::abandoned, true, true, true, true},
+    {cadence_e::unsure, outcome_e::abandoned, true, true, true, true},
+    {cadence_e::unknown, outcome_e::abandoned, true, true, true, true},
+  };
+  for (const auto &r : rows) {
+    for (const overload_mode_e mode : {kCadence, kLate}) {
+      SCOPED_TRACE(::testing::Message() << "report " << static_cast<int>(r.report) << " load " << static_cast<int>(r.load) << " mode " << static_cast<int>(mode));
+      cad_sim_t s(mode);
+      s.report = r.report;
+      if (r.load == outcome_e::abandoned) {
+        s.run_mixed(3 * kSec, outcome_e::abandoned, 4, 10);
+      } else {
+        s.run_for(3 * kSec, r.load);
+      }
+      const auto snap = s.h.snapshot();
+      EXPECT_EQ(s.h.mode(), mode);
+      EXPECT_EQ(s.h.overload(), r.overload);
+      EXPECT_EQ(snap.overload, r.overload);
+      EXPECT_EQ(snap.abandon_overload, r.abandon);
+      EXPECT_EQ(s.h.cadence(), r.report);  // 報告一直有：擷取端用的節拍就是它
+      EXPECT_EQ(snap.cadence, r.report);  // late 模式照樣發布（影子）
+      EXPECT_EQ(s.h.latch_hold_if_cadence(), r.latch_hold);  // cadence 模式會怎麼判：兩種模式都照算
+      const bool want_latch = mode == kCadence ? r.latch_hold : r.overload;
+      const bool want_predict = mode == kCadence ? r.predict_hold : r.overload;
+      EXPECT_EQ(s.h.latch_hold(), want_latch);
+      EXPECT_EQ(s.h.predict_hold(), want_predict);
+      EXPECT_EQ(snap.latch_hold, want_latch);
+      EXPECT_EQ(snap.predict_hold, want_predict);
+    }
+  }
+}
+
+TEST(VrCaptureHealthCadence, ACertainReportIsKeptForTwoSeconds) {
+  // locked、每一張都晚：LATCH 照追。報告沒了（bridge 卡住、摘要過期）之後 2.0 s 內照舊，2.1 s 起照 (d) 的旗標
+  cad_sim_t s(kCadence);
+  s.report = cadence_e::locked;
+  s.run_for(3 * kSec, outcome_e::late);
+  ASSERT_TRUE(s.h.overload());
+  ASSERT_FALSE(s.h.latch_hold());
+  const int64_t t0 = s.now;  // 最後一次帶著 locked 的報告
+  s.report = cadence_e::unknown;
+  while (s.now + kT120 <= t0 + 2000 * kMs) {
+    s.step(outcome_e::late);
+    ASSERT_EQ(s.h.cadence(), cadence_e::locked) << (s.now - t0) / kMs << " ms";
+    ASSERT_FALSE(s.h.latch_hold());
+    ASSERT_TRUE(s.h.predict_hold());
+    ASSERT_EQ(s.h.snapshot().cadence, cadence_e::locked);
+  }
+  while (s.now < t0 + 2100 * kMs) {
+    s.step(outcome_e::late);
+  }
+  EXPECT_EQ(s.h.cadence(), cadence_e::unknown);
+  EXPECT_TRUE(s.h.latch_hold());
+  EXPECT_TRUE(s.h.predict_hold());
+  EXPECT_EQ(s.h.snapshot().cadence, cadence_e::unknown);
+
+  // slipping、全部準時、之後連影像也停了（只有 on_idle）：2.0 s 內還擋著，之後放開
+  cad_sim_t t(kCadence);
+  t.report = cadence_e::slipping;
+  t.run_for(3 * kSec, outcome_e::on_time);
+  ASSERT_FALSE(t.h.overload());
+  ASSERT_TRUE(t.h.latch_hold());
+  ASSERT_TRUE(t.h.predict_hold());
+  t.report = cadence_e::unknown;
+  t.idle(2 * kSec);
+  EXPECT_EQ(t.h.cadence(), cadence_e::slipping);
+  EXPECT_TRUE(t.h.latch_hold());
+  EXPECT_TRUE(t.h.predict_hold());
+  t.idle(100 * kMs);
+  EXPECT_EQ(t.h.cadence(), cadence_e::unknown);
+  EXPECT_FALSE(t.h.latch_hold());
+  EXPECT_FALSE(t.h.predict_hold());
+
+  // 界線：剛好 2 s 還沿用，多 1 ns 就不沿用
+  cad_sim_t e(kCadence);
+  e.report = cadence_e::locked;
+  e.run_for(3 * kSec, outcome_e::late);
+  const int64_t t2 = e.now;
+  e.h.on_idle(t2 + 2 * kSec);
+  EXPECT_EQ(e.h.cadence(), cadence_e::locked);
+  e.h.on_idle(t2 + 2 * kSec + 1);
+  EXPECT_EQ(e.h.cadence(), cadence_e::unknown);
+  // 之後再有確定的報告就照它
+  e.h.on_idle(t2 + 2 * kSec + 2, cadence_e::slipping);
+  EXPECT_EQ(e.h.cadence(), cadence_e::slipping);
+}
+
+TEST(VrCaptureHealthCadence, UnsureIsTakenAtOnceAndDropsTheKeptValue) {
+  cad_sim_t s(kCadence);
+  s.report = cadence_e::locked;
+  s.run_for(3 * kSec, outcome_e::late);
+  ASSERT_TRUE(s.h.overload());
+  ASSERT_FALSE(s.h.latch_hold());
+  // 變成說不準：立刻照 (d) 的旗標，不沿用剛才的 locked
+  s.report = cadence_e::unsure;
+  s.step(outcome_e::late);
+  EXPECT_EQ(s.h.cadence(), cadence_e::unsure);
+  EXPECT_TRUE(s.h.latch_hold());
+  EXPECT_EQ(s.h.snapshot().cadence, cadence_e::unsure);
+  // 接著報告沒了：也不會回頭沿用更早的 locked
+  s.report = cadence_e::unknown;
+  s.step(outcome_e::late);
+  EXPECT_EQ(s.h.cadence(), cadence_e::unknown);
+  EXPECT_TRUE(s.h.latch_hold());
+  // 再來一筆確定的報告就照它
+  s.report = cadence_e::locked;
+  s.step(outcome_e::late);
+  EXPECT_EQ(s.h.cadence(), cadence_e::locked);
+  EXPECT_FALSE(s.h.latch_hold());
+  // on_idle 帶進來的 unsure 也一樣
+  s.h.on_idle(s.now + kMs, cadence_e::unsure);
+  EXPECT_EQ(s.h.cadence(), cadence_e::unsure);
+  EXPECT_TRUE(s.h.latch_hold());
+}
+
+TEST(VrCaptureHealthCadence, NewGenerationStartsOver) {
+  cad_sim_t s(kCadence);
+  s.report = cadence_e::slipping;
+  s.run_mixed(3 * kSec, outcome_e::abandoned, 4, 10);
+  ASSERT_TRUE(s.h.snapshot().abandon_overload);
+  ASSERT_TRUE(s.h.latch_hold());
+  ASSERT_EQ(s.h.cadence(), cadence_e::slipping);
+  // 換 generation：節拍、放棄的旗標都從頭來（2 s 的沿用不跨 generation），快照回到預設值
+  s.h.begin_generation(s.now);
+  EXPECT_EQ(s.h.snapshot(), snapshot_t {});
+  EXPECT_EQ(pack(s.h.snapshot()), 0u);
+  EXPECT_EQ(s.h.cadence(), cadence_e::unknown);
+  EXPECT_FALSE(s.h.latch_hold());
+  EXPECT_FALSE(s.h.predict_hold());
+  EXPECT_FALSE(s.h.latch_hold_if_cadence());
+  EXPECT_EQ(s.h.mode(), kCadence);  // 設定不動
+  // 新 generation 的放棄旗標也要重新看滿 1 s
+  s.report = cadence_e::locked;
+  const int64_t t0 = s.now;
+  for (int i = 0; s.now - t0 < 950 * kMs; ++i) {
+    s.step(i % 2 ? outcome_e::abandoned : outcome_e::on_time);
+    ASSERT_FALSE(s.h.snapshot().abandon_overload) << (s.now - t0) / kMs << " ms";
+    ASSERT_FALSE(s.h.latch_hold());
+  }
+  for (int i = 0; i < 12; ++i) {
+    s.step(i % 2 ? outcome_e::abandoned : outcome_e::on_time);
+  }
+  EXPECT_TRUE(s.h.snapshot().abandon_overload);
+  EXPECT_TRUE(s.h.latch_hold());
+}
+
+TEST(VrCaptureHealthCadence, AbandonFlagFollowsTheThirtyAndFivePercentRule) {
+  // 剛好 30%（每秒 10 張、每 10 張裡 3 張放棄）：要設
+  cad_sim_t at(kCadence);
+  bool set = false;
+  for (int i = 0; i < 200 && !set; ++i) {
+    at.step(i % 10 < 3 ? outcome_e::abandoned : outcome_e::on_time, 100 * kMs);
+    set = at.h.snapshot().abandon_overload;
+  }
+  EXPECT_TRUE(set);
+  // 20% 放棄、其餘全部晚到：(d) 的旗標設著（100%），放棄的旗標不設——只是晚到不擋 LATCH
+  cad_sim_t below(kCadence);
+  below.report = cadence_e::locked;
+  for (int i = 0; i < 200; ++i) {
+    below.step(i % 10 < 2 ? outcome_e::abandoned : outcome_e::late, 100 * kMs);
+    ASSERT_FALSE(below.h.snapshot().abandon_overload) << i;
+    ASSERT_FALSE(below.h.latch_hold()) << i;
+  }
+  EXPECT_TRUE(below.h.overload());
+  EXPECT_TRUE(below.h.predict_hold());
+  // 至少 3 張：每秒只有 2 張、都放棄，不設
+  cad_sim_t two(kCadence);
+  for (int i = 0; i < 8; ++i) {
+    two.step(outcome_e::abandoned, 500 * kMs);
+    ASSERT_FALSE(two.h.snapshot().abandon_overload) << i;
+  }
+
+  // 清除：設起來之後，10% 不清；降到 5% 以下持續 2 s 才清
+  cad_sim_t s(kCadence);
+  s.report = cadence_e::locked;
+  s.run_mixed(3 * kSec, outcome_e::abandoned, 5, 10);
+  ASSERT_TRUE(s.h.snapshot().abandon_overload);
+  ASSERT_TRUE(s.h.latch_hold());
+  for (int i = 0; i < 120 * 5; ++i) {
+    s.step(i % 10 == 0 ? outcome_e::abandoned : outcome_e::on_time);
+    ASSERT_TRUE(s.h.snapshot().abandon_overload) << i;
+  }
+  const int64_t t0 = s.now;
+  int64_t cleared = -1;
+  for (int i = 0; i < 120 * 6 && cleared < 0; ++i) {
+    s.step(i % 30 == 29 ? outcome_e::abandoned : outcome_e::on_time);
+    if (!s.h.snapshot().abandon_overload) {
+      cleared = s.now - t0;
+    }
+  }
+  EXPECT_GT(cleared, 2 * kSec);
+  EXPECT_LT(cleared, 3300 * kMs);
+  EXPECT_FALSE(s.h.latch_hold());
+
+  // 影像整個停了：靠 on_idle 讓視窗往前走，最後一張離開視窗之後再 2 s 清（和 (d) 的旗標同時）
+  cad_sim_t stop(kCadence);
+  stop.report = cadence_e::locked;
+  stop.run_mixed(3 * kSec, outcome_e::abandoned, 5, 10);
+  ASSERT_TRUE(stop.h.snapshot().abandon_overload);
+  const int64_t t1 = stop.now;
+  int64_t cleared_after = 0;
+  while (stop.now - t1 < 10 * kSec && cleared_after == 0) {
+    stop.now += 100 * kMs;
+    stop.h.on_idle(stop.now, cadence_e::locked);
+    ASSERT_TRUE(!stop.h.snapshot().abandon_overload || stop.h.overload());
+    if (!stop.h.snapshot().abandon_overload) {
+      cleared_after = stop.now - t1;
+    }
+  }
+  EXPECT_GE(cleared_after, 2900 * kMs);
+  EXPECT_LE(cleared_after, 3100 * kMs);
+  EXPECT_FALSE(stop.h.overload());
+}
+
+TEST(VrCaptureHealthCadence, WithTheSwitchOffEverythingNewIsFalse) {
+  // vr_capture_late = disabled：不論模式、不論節拍，新欄位全是 false／unknown，打包的快照和加 (e) 之前相同
+  for (const overload_mode_e mode : {kLate, kCadence}) {
+    for (const cadence_e report : kAllReports) {
+      SCOPED_TRACE(::testing::Message() << "mode " << static_cast<int>(mode) << " report " << static_cast<int>(report));
+      cad_sim_t s(mode, false);
+      s.report = report;
+      s.run_mixed(3 * kSec, outcome_e::abandoned, 5, 10);
+      s.idle(300 * kMs);
+      s.run_mixed(kSec, outcome_e::abandoned, 5, 10);
+      const auto snap = s.h.snapshot();
+      EXPECT_FALSE(snap.overload);
+      EXPECT_FALSE(snap.latch_hold);
+      EXPECT_FALSE(snap.predict_hold);
+      EXPECT_FALSE(snap.abandon_overload);
+      EXPECT_EQ(snap.cadence, cadence_e::unknown);
+      EXPECT_EQ(s.h.cadence(), cadence_e::unknown);
+      EXPECT_FALSE(s.h.latch_hold());
+      EXPECT_FALSE(s.h.predict_hold());
+      EXPECT_FALSE(s.h.latch_hold_if_cadence());
+      EXPECT_GT(snap.late_permille, 400);  // 數字照算
+      EXPECT_EQ(pack(snap), pack_old(false, snap.late_permille, snap.pushed_fps));
+    }
+  }
+  // 開著的時候關掉：新的旗標立刻清，之後怎麼餵都不會再設
+  cad_sim_t s(kCadence);
+  s.report = cadence_e::slipping;
+  s.run_mixed(3 * kSec, outcome_e::abandoned, 5, 10);
+  ASSERT_TRUE(s.h.latch_hold());
+  ASSERT_TRUE(s.h.snapshot().abandon_overload);
+  s.h.configure(false, kT120, kMax100, kCadence);
+  EXPECT_EQ(pack(s.h.snapshot()) & 0xFFFFull, 0u);
+  EXPECT_EQ(s.h.cadence(), cadence_e::unknown);
+  EXPECT_FALSE(s.h.latch_hold_if_cadence());
+  s.step(outcome_e::abandoned);
+  s.h.on_idle(s.now + kMs, cadence_e::slipping);
+  EXPECT_EQ(pack(s.h.snapshot()) & 0xFFFFull, 0u);
+}
+
+TEST(VrCaptureHealthCadence, ConfigureWithThreeArgumentsMeansLateMode) {
+  // 現有的呼叫方式（3 個參數）＝late 模式；模式可以用第 4 個參數換，不清任何狀態
+  cad_sim_t s(kCadence);
+  s.report = cadence_e::locked;
+  s.run_for(3 * kSec, outcome_e::late);
+  ASSERT_TRUE(s.h.overload());
+  ASSERT_FALSE(s.h.latch_hold());
+  s.h.configure(true, kT120, kMax100);
+  EXPECT_EQ(s.h.mode(), kLate);
+  EXPECT_TRUE(s.h.overload());
+  EXPECT_TRUE(s.h.latch_hold());  // late 模式：就是 (d) 的旗標
+  EXPECT_FALSE(s.h.latch_hold_if_cadence());  // cadence 模式會怎麼判照算
+  EXPECT_EQ(s.h.cadence(), cadence_e::locked);
+  s.h.configure(true, kT120, kMax100, kCadence);
+  EXPECT_FALSE(s.h.latch_hold());
+
+  health_t fresh;
+  EXPECT_EQ(fresh.mode(), kLate);
+  EXPECT_EQ(fresh.cadence(), cadence_e::unknown);
+  EXPECT_EQ(fresh.snapshot(), snapshot_t {});
+}
+
+TEST(VrCaptureHealthCadence, SnapshotPackLayout) {
+  EXPECT_EQ(pack(snapshot_t {}), 0u);
+  // 只給舊的三個欄位的寫法照樣可用，打包值和加 (e) 之前相同
+  const snapshot_t old3 {true, 1000, 65535};
+  EXPECT_EQ(pack(old3), 0x0000FFFF03E80001ull);
+  EXPECT_EQ(pack(old3), pack_old(true, 1000, 65535));
+  EXPECT_FALSE(old3.latch_hold);
+  EXPECT_EQ(old3.cadence, cadence_e::unknown);
+  // 新位元的位置：bit 1 latch_hold、bit 2 predict_hold、bit 3 abandon_overload、bit 4-5 cadence
+  snapshot_t s;
+  s.latch_hold = true;
+  EXPECT_EQ(pack(s), 0x02u);
+  s = snapshot_t {};
+  s.predict_hold = true;
+  EXPECT_EQ(pack(s), 0x04u);
+  s = snapshot_t {};
+  s.abandon_overload = true;
+  EXPECT_EQ(pack(s), 0x08u);
+  s = snapshot_t {};
+  s.cadence = cadence_e::locked;
+  EXPECT_EQ(pack(s), 0x10u);
+  s.cadence = cadence_e::slipping;
+  EXPECT_EQ(pack(s), 0x20u);
+  s.cadence = cadence_e::unsure;
+  EXPECT_EQ(pack(s), 0x30u);
+  // 每一種組合來回相等；新位元不碰舊的三個欄位
+  for (unsigned bits = 0; bits < 16; ++bits) {
+    for (const cadence_e c : kAllReports) {
+      snapshot_t x;
+      x.overload = (bits & 1u) != 0;
+      x.latch_hold = (bits & 2u) != 0;
+      x.predict_hold = (bits & 4u) != 0;
+      x.abandon_overload = (bits & 8u) != 0;
+      x.cadence = c;
+      x.late_permille = static_cast<uint16_t>(137 * bits);
+      x.pushed_fps = static_cast<uint16_t>(65535 - bits);
+      EXPECT_EQ(unpack(pack(x)), x) << bits;
+      EXPECT_EQ(pack(x) & 0x0000FFFFFFFF0001ull, pack_old(x.overload, x.late_permille, x.pushed_fps)) << bits;
+      EXPECT_EQ(pack(x) & ~0x0000FFFFFFFF003Full, 0u) << bits;
+    }
+  }
+}
+
+// ── (e) 的亂數序列 ───────────────────────────────────────────────────────
+
+namespace {
+  /// 參考模型：擷取端用的節拍（確定的報告沿用 2 s；unsure 立刻採用）。時鐘照 health_t 的規則只往前
+  struct cad_ref_t {
+    bool have = false;
+    bool slip = false;
+    int64_t seen = 0;
+    cadence_e last = cadence_e::unknown;
+    bool have_now = false;
+    int64_t now = 0;
+
+    int64_t tick(int64_t t) {
+      if (!have_now || t > now) {
+        have_now = true;
+        now = t;
+      }
+      return now;
+    }
+
+    void begin(int64_t t) {
+      tick(t);
+      have = false;
+      slip = false;
+      last = cadence_e::unknown;
+    }
+
+    void note(cadence_e c, int64_t t) {
+      const int64_t n = tick(t);
+      last = c;
+      if (c == cadence_e::locked || c == cadence_e::slipping) {
+        have = true;
+        slip = c == cadence_e::slipping;
+        seen = n;
+      } else if (c == cadence_e::unsure) {
+        have = false;
+      }
+    }
+
+    cadence_e used() const {
+      if (have && now - seen <= 2 * kSec) {
+        return slip ? cadence_e::slipping : cadence_e::locked;
+      }
+      return last == cadence_e::unsure ? cadence_e::unsure : cadence_e::unknown;
+    }
+  };
+
+  /// 加 (e) 之前就有的每一個輸出，兩個物件是不是都相同
+  bool same_old_outputs(const health_t &a, const health_t &b, int64_t now) {
+    const auto ga = a.diag(now);
+    const auto gb = b.diag(now);
+    const auto sa = a.snapshot();
+    const auto sb = b.snapshot();
+    return a.enabled() == b.enabled() && a.overload() == b.overload() && a.wait_budget_ns() == b.wait_budget_ns() && a.interval_ema_ns() == b.interval_ema_ns() &&
+           a.window_wait_max_ns() == b.window_wait_max_ns() && a.teardowns() == b.teardowns() && a.backoff() == b.backoff() &&
+           ga.since_advance_ns == gb.since_advance_ns && ga.since_copy_ns == gb.since_copy_ns && ga.published == gb.published && ga.copied == gb.copied && ga.completed == gb.completed &&
+           sa.overload == sb.overload && sa.late_permille == sb.late_permille && sa.pushed_fps == sb.pushed_fps;
+  }
+
+  bool same_decision(const decision_t &x, const decision_t &y) {
+    return x.teardown == y.teardown && x.deferred == y.deferred && x.allowed_in_ns == y.allowed_in_ns && x.backoff_reset == y.backoff_reset;
+  }
+
+  struct cad_fuzz_stats_t {
+    uint64_t steps = 0;
+    uint64_t frames = 0;
+    uint64_t teardowns = 0;
+    uint64_t overload = 0;  ///< (d) 的旗標設著的步數
+    uint64_t abandon = 0;  ///< 放棄的旗標設著的步數
+    uint64_t latch_hold = 0;
+    uint64_t predict_hold = 0;
+    uint64_t latch_differs = 0;  ///< latch_hold 和 (d) 的旗標不同的步數
+    uint64_t kept = 0;  ///< 這一次呼叫沒有報告、用的是沿用的值
+    uint64_t seen[4] = {0, 0, 0, 0};  ///< 擷取端用的節拍
+  };
+
+  /**
+   * @brief 固定種子的亂數影像序列（負載型態同上面的 fuzz()）加亂數的節拍報告。受測的物件 h 帶著節拍、用 4 個參數的
+   *        configure；對照的物件 plain 餵同樣的影像，但節拍永遠是 unknown、用 3 個參數的 configure（＝加 (e) 之前的
+   *        呼叫方式）。每一步核對：
+   *   I6 節拍輸入不影響任何舊輸出、也不推進時鐘：h 與 plain 的回覆、(d) 的旗標、等待預算、發布間隔、視窗、退避、
+   *      diag()、快照的舊三個欄位全部相同（兩種模式都要成立）
+   *   I7 新輸出照真值表：late 模式 latch_hold == predict_hold == overload；cadence 模式看擷取端用的節拍（另外記的
+   *      參考模型：確定的報告沿用 2 s、unsure 立刻採用）。latch_hold_if_cadence() 在兩種模式都是 cadence 那一欄
+   *   I8 恆成立：latch_hold ⇒ predict_hold、abandon_overload ⇒ overload；開關關著時新欄位全是 false／unknown，
+   *      打包的快照等於舊的打包公式
+   */
+  void cad_fuzz(uint64_t seed, bool enabled, overload_mode_e mode, int steps, cad_fuzz_stats_t &st) {
+    rng_t rng {seed};
+    health_t h;
+    health_t plain;
+    const int64_t period = seed % 3 == 0 ? kT90 : kT120;
+    const int64_t max_wait = (20 + static_cast<int64_t>(seed % 231)) * kMs;
+    h.configure(enabled, period, max_wait, mode);
+    plain.configure(enabled, period, max_wait);
+    int64_t now = 1'000 * kSec + static_cast<int64_t>(rng.below(1'000'000'000));
+    h.begin_generation(now);
+    plain.begin_generation(now);
+    cad_ref_t ref;
+    ref.begin(now);
+
+    uint64_t frame_id = 0;
+    uint64_t fence = 5000;
+    uint64_t completed = 5000;
+    cadence_e bridge = cadence_e::unknown;  // bridge 這一刻的狀態
+
+    const auto new_generation = [&](int64_t gap_ns) {
+      now += gap_ns;
+      h.begin_generation(now);
+      plain.begin_generation(now);
+      ref.begin(now);
+      frame_id = 0;
+      fence = 100 + rng.below(100000);
+      completed = fence;
+    };
+
+    // 每一步之後的核對；回 false＝有不成立的（已經記了一個失敗）
+    const auto verify = [&](int i) -> bool {
+      const auto snap = h.snapshot();
+      const cadence_e used = ref.used();
+      const bool want_cadence = used == cadence_e::slipping ? true : (used == cadence_e::locked ? snap.abandon_overload : snap.overload);
+      bool ok = same_old_outputs(h, plain, now);  // I6
+      ok = ok && unpack(pack(snap)) == snap && snap.latch_hold == h.latch_hold() && snap.predict_hold == h.predict_hold() && snap.cadence == h.cadence();
+      ok = ok && (!snap.latch_hold || snap.predict_hold) && (!snap.abandon_overload || snap.overload);  // I8
+      if (!enabled) {
+        ok = ok && !snap.overload && !snap.latch_hold && !snap.predict_hold && !snap.abandon_overload && snap.cadence == cadence_e::unknown &&
+             !h.latch_hold_if_cadence() && pack(snap) == pack_old(false, snap.late_permille, snap.pushed_fps);
+      } else {
+        ok = ok && snap.cadence == used && h.latch_hold_if_cadence() == want_cadence;  // I7
+        if (mode == kLate) {
+          ok = ok && snap.latch_hold == snap.overload && snap.predict_hold == snap.overload;
+        } else {
+          ok = ok && snap.latch_hold == want_cadence && snap.predict_hold == (snap.overload || used == cadence_e::slipping);
+        }
+      }
+      if (!ok) {
+        ADD_FAILURE() << "seed " << seed << " step " << i << " mode " << static_cast<int>(mode) << " enabled " << enabled << " used " << static_cast<int>(used)
+                      << " snapshot 0x" << std::hex << pack(snap) << " plain 0x" << pack(plain.snapshot());
+        return false;
+      }
+      ++st.steps;
+      st.overload += snap.overload ? 1 : 0;
+      st.abandon += snap.abandon_overload ? 1 : 0;
+      st.latch_hold += snap.latch_hold ? 1 : 0;
+      st.predict_hold += snap.predict_hold ? 1 : 0;
+      st.latch_differs += snap.latch_hold != snap.overload ? 1 : 0;
+      ++st.seen[static_cast<uint8_t>(snap.cadence) & 3u];
+      return true;
+    };
+
+    int regime = 0;  // 0 好、1 晚到、2 完成值不動、3 追不上、4 沒有影像、5 混合
+    int regime_left = 0;
+    for (int i = 0; i < steps; ++i) {
+      if (regime_left <= 0) {
+        regime = static_cast<int>(rng.below(6));
+        regime_left = 1 + static_cast<int>(rng.below(regime == 4 ? 80 : 1500));
+        if (rng.below(40) == 0) {
+          new_generation(static_cast<int64_t>(rng.below(2000)) * kMs);
+        }
+      }
+      --regime_left;
+      if (rng.below(200) == 0) {
+        bridge = static_cast<cadence_e>(rng.below(4));
+      }
+      // 這一次呼叫帶的報告：每 4 次有 1 次沒有（摘要過期、bridge 卡住）
+      const cadence_e in = rng.below(4) == 0 ? cadence_e::unknown : bridge;
+      if (in == cadence_e::unknown && bridge != cadence_e::unknown && ref.used() != cadence_e::unknown) {
+        ++st.kept;
+      }
+      if (regime == 4) {
+        now += 100 * kMs + static_cast<int64_t>(rng.below(3)) * kMs;
+        h.on_idle(now, in);
+        plain.on_idle(now);
+        ref.note(in, now);
+        if (!verify(i)) {
+          return;
+        }
+        continue;
+      }
+      if (rng.below(500) == 0) {
+        // 時刻比上一次還早的 on_idle（時鐘只往前：兩個物件都把它當成和上一次相同）
+        const int64_t early = now - static_cast<int64_t>(rng.below(50)) * kMs;
+        h.on_idle(early, in);
+        plain.on_idle(early);
+        ref.note(in, early);
+        if (!verify(i)) {
+          return;
+        }
+      }
+      const int64_t dt = (1 + static_cast<int64_t>(rng.below(regime == 5 ? 700 : 30))) * kMs + static_cast<int64_t>(rng.below(1'000'000));
+      const uint64_t publish = rng.below(8) == 0 ? 1 + rng.below(5) : 1;
+      outcome_e o = outcome_e::on_time;
+      bool moves = true;
+      switch (regime) {
+        case 0:
+          break;
+        case 1:
+          o = rng.below(4) == 0 ? outcome_e::on_time : outcome_e::late;
+          break;
+        case 2:
+          o = outcome_e::abandoned;
+          moves = false;
+          break;
+        case 3:
+          o = outcome_e::abandoned;
+          moves = rng.below(3) != 0;
+          break;
+        default:
+          o = static_cast<outcome_e>(rng.below(3));
+          moves = rng.below(2) != 0;
+          break;
+      }
+      now += dt;
+      frame_id += publish;
+      fence += publish;
+      if (o != outcome_e::abandoned) {
+        completed = fence;
+      } else if (moves && completed + 1 < fence) {
+        completed += 1 + rng.below(static_cast<uint32_t>(std::min<uint64_t>(fence - completed - 1, 3)));
+      }
+      frame_t f;
+      f.outcome = o;
+      f.now_ns = now;
+      f.wait_ns = static_cast<int64_t>(rng.below(100)) * kMs;
+      f.present_ns = now - static_cast<int64_t>(rng.below(50)) * kMs;
+      f.frame_id = frame_id;
+      f.observed = rng.below(200) == 0 ? k_fence_lost : completed;
+      frame_t with_cadence = f;
+      with_cadence.cadence = in;
+      const auto d = h.on_frame(with_cadence);
+      const auto dp = plain.on_frame(f);
+      ref.note(in, now);
+      ++st.frames;
+      if (!same_decision(d, dp)) {
+        ADD_FAILURE() << "seed " << seed << " step " << i << ": the cadence input changed the verdict of on_frame()";
+        return;
+      }
+      if (!verify(i)) {
+        return;
+      }
+      if (d.teardown != teardown_e::none) {
+        ++st.teardowns;
+        new_generation(500 * kMs + static_cast<int64_t>(rng.below(2500)) * kMs);
+        if (!verify(i)) {
+          return;
+        }
+      }
+    }
+  }
+}  // namespace
+
+TEST(VrCaptureHealthCadenceFuzz, DefaultModeDecidesExactlyAsBefore) {
+  // vr_capture_overload = late（預設）：節拍怎麼餵都不影響任何決定——stream.cpp 讀到的兩個旗標就是 (d) 的旗標
+  cad_fuzz_stats_t st;
+  for (uint64_t seed = 1; seed <= 16; ++seed) {
+    cad_fuzz(seed * 0x9E3779B97F4A7C15ull, true, kLate, 40000, st);
+    if (::testing::Test::HasFailure()) {
+      return;
+    }
+  }
+  EXPECT_GT(st.frames, 500'000u);
+  EXPECT_EQ(st.latch_differs, 0u);
+  EXPECT_EQ(st.latch_hold, st.overload);
+  EXPECT_EQ(st.predict_hold, st.overload);
+  // 序列真的有覆蓋到（數字只是下限）：旗標設著、放棄的旗標、拆線、四種節拍、沿用
+  EXPECT_GT(st.overload, 100'000u);
+  EXPECT_GT(st.abandon, 50'000u);
+  EXPECT_GT(st.teardowns, 50u);
+  EXPECT_GT(st.kept, 10'000u);
+  for (const uint64_t n : st.seen) {
+    EXPECT_GT(n, 10'000u);
+  }
+}
+
+TEST(VrCaptureHealthCadenceFuzz, CadenceModeFollowsTheTruthTable) {
+  cad_fuzz_stats_t st;
+  for (uint64_t seed = 21; seed <= 36; ++seed) {
+    cad_fuzz(seed * 0x9E3779B97F4A7C15ull, true, kCadence, 40000, st);
+    if (::testing::Test::HasFailure()) {
+      return;
+    }
+  }
+  EXPECT_GT(st.frames, 500'000u);
+  // 新模式真的有和 (d) 的旗標不同的時候（兩個方向都有：locked 而只是晚到→不擋；slipping 而沒有晚到→擋）
+  EXPECT_GT(st.latch_differs, 20'000u);
+  EXPECT_GE(st.predict_hold, st.latch_hold);
+  EXPECT_GE(st.predict_hold, st.overload);
+  EXPECT_GT(st.overload, 100'000u);
+  EXPECT_GT(st.abandon, 50'000u);
+  EXPECT_GT(st.teardowns, 50u);
+  EXPECT_GT(st.kept, 10'000u);
+  for (const uint64_t n : st.seen) {
+    EXPECT_GT(n, 10'000u);
+  }
+}
+
+TEST(VrCaptureHealthCadenceFuzz, SwitchOffIgnoresModeAndCadence) {
+  cad_fuzz_stats_t st;
+  for (uint64_t seed = 41; seed <= 44; ++seed) {
+    cad_fuzz(seed * 0x9E3779B97F4A7C15ull, false, seed % 2 ? kCadence : kLate, 40000, st);
+    if (::testing::Test::HasFailure()) {
+      return;
+    }
+  }
+  EXPECT_GT(st.frames, 100'000u);
+  EXPECT_EQ(st.overload + st.abandon + st.latch_hold + st.predict_hold, 0u);
+  EXPECT_EQ(st.seen[1] + st.seen[2] + st.seen[3], 0u);
+  EXPECT_EQ(st.teardowns, 0u);
+}

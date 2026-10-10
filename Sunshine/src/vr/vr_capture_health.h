@@ -30,8 +30,16 @@
  *       （關著時恆為 false）。設著的時候 stream.cpp 不把 LATCH 樣本餵給頻率鎖、§VR-PREDICT 不採樣——那時量到的
  *       是 GPU 排隊，不是節拍或預測時間。
  *       已知的限制：「晚到」照規格是「第一段等待逾時」。fence 等待穩定超過第一段等待、但仍然跑滿更新率的遊戲，
- *       每一張都算晚到，旗標會整場設著。2026-10-10 量到了（解析度倍率 300%：仍是每秒 120 幀、旗標整場設著）；
- *       定義要改成表達「Present 鎖不住虛擬 vsync」，做完才改預設（docs/TODO.md）。
+ *       每一張都算晚到，旗標會整場設著。2026-10-10 量到了（解析度倍率 300%：仍是每秒 120 幀、旗標整場設著）。
+ *       這個旗標的定義沒有改；要不要因此擋 LATCH，可以改看「Present 鎖不鎖得住虛擬 vsync」，見 (e)（預設不改）。
+ *   (e) §VR-CADENCE（2026-10-10；config `vr_capture_overload`，只在開關開著時有作用）：LATCH／PREDICT 要不要取樣
+ *       看哪個訊號。Present 的節拍由 bridge 執行緒從 driver 的 timing ring 算（vr_present_cadence.h），擷取端讀進來、
+ *       隨 on_frame()／on_idle() 交給這裡；這裡只負責合併。
+ *       late（預設）：兩者都看 (d) 的旗標——每一步的決定和加這個開關之前相同。節拍照記、照發布（影子），不影響任何決定。
+ *       cadence：LATCH——節拍確定在滑動（slipping）就不取樣；確定鎖得住（locked）時只有放棄的影像 ≥ 30%
+ *       （fence 真的不動，沒有新影像可量；abandon_overload）才不取樣；說不準（unsure，或沒有報告超過 2 s）照 (d) 的旗標。
+ *       PREDICT——(d) 的旗標，或節拍在滑動。「跑滿更新率、每張都晚」因此是 LATCH 照追、PREDICT 不取樣
+ *       （相位取模一個週期之後是穩定的，絕對延遲不是）。恆成立：latch_hold ⇒ predict_hold、abandon_overload ⇒ overload。
  *
  * 寫入方（driver）不可信：frame_id、present 時刻、完成值都可能是錯的。這裡不會因為它們而除以零、溢位或卡住；
  * 最壞的結果是預算被夾在設定的上限、或由餓死條件拆線（有退避）。
@@ -89,6 +97,25 @@ namespace vr::capture {
   /// 幾張時比例會亂跳——每 4 張晚到 1 張（25%）的節奏，頭 9 張裡就有 3 張（33%）。
   constexpr uint32_t k_overload_min_bad = 3;
 
+  // (e) §VR-CADENCE
+  /// 確定的節拍（locked／slipping）在報告變成 unknown 之後沿用這麼久，之後照 (d) 的旗標。
+  /// （bridge 至少每 100 ms 重寫一次摘要；擷取端把超過 1 s 沒更新的摘要當成 unknown）
+  constexpr int64_t k_cadence_keep_ns = 2 * k_ns_per_s;
+
+  /// config `vr_capture_overload`
+  enum class overload_mode_e : uint8_t {
+    late,  ///< 預設：(d) 的旗標同時擋 LATCH 與 PREDICT（和加這個開關之前逐步相同）
+    cadence,  ///< LATCH 看節拍（在滑動，或鎖得住而放棄的影像太多）；PREDICT 看 (d) 的旗標或節拍在滑動
+  };
+
+  /// bridge 執行緒算出來的 Present 節拍（vr_present_cadence.h 的 state_e），呼叫端已經確認過摘要夠新
+  enum class cadence_e : uint8_t {
+    unknown,  ///< 沒有夠新的報告
+    locked,  ///< 確定鎖得住
+    slipping,  ///< 確定鎖不住
+    unsure,  ///< 有紀錄，但下不了結論：照 (d) 的旗標，而且不沿用之前確定的值
+  };
+
   /// 一張影像的處理結果
   enum class outcome_e : uint8_t {
     on_time,  ///< fence 在第一段等待（fence_wait_ms）內到值，已複製
@@ -123,6 +150,9 @@ namespace vr::capture {
     int64_t present_ns = 0;  ///< descriptor 的 present 時刻（估發布間隔用；不可信）
     uint64_t frame_id = 0;  ///< descriptor 的 frame_id（估發布了幾張；不可信）
     uint64_t observed = 0;  ///< 等待結束時讀到的完成值（k_fence_lost＝讀不到，不拿來判斷）
+    /// (e) 這一張處理完時 bridge 回報的節拍（加在尾端；預設＝沒有報告）。節拍只隨 on_frame()／on_idle() 進來、
+    /// 不帶自己的時間：另外開一個帶時間的入口會推進這裡的時鐘，late 模式就不再和之前逐步相同
+    cadence_e cadence = cadence_e::unknown;
   };
 
   /// on_frame() 的回覆
@@ -163,18 +193,30 @@ namespace vr::capture {
     /// 最近 1 s 推給編碼器的張數。視窗實際涵蓋 0.9～1.0 s（目前這一格還沒收滿），所以會比真正的每秒張數少最多
     /// 約一成（穩定每秒 120 張時讀到 109～120）；只供 log 與粗略判斷，要精確的張數看 10 s 行的 copied
     uint16_t pushed_fps = 0;
+    // (e) §VR-CADENCE（加在尾端；上面三個欄位在任何模式下意義都不變。開關關著時這四個恆為 false／unknown）
+    bool latch_hold = false;  ///< stream.cpp：這一則 LATCH 不餵進頻率鎖（late 模式下等於 overload）
+    bool predict_hold = false;  ///< stream.cpp：§VR-PREDICT 不取樣（late 模式下等於 overload）
+    bool abandon_overload = false;  ///< 和 overload 同一套 30%／5%／2 s 的規則，只算放棄的影像
+    cadence_e cadence = cadence_e::unknown;  ///< 上面兩個決定用的節拍（含 k_cadence_keep_ns 的沿用）
 
     bool operator==(const snapshot_t &) const = default;
   };
 
-  /// 快照打包成一個 64-bit 值（一個 atomic 就能整份交換）；預設值打包成 0
+  /// 快照打包成一個 64-bit 值（一個 atomic 就能整份交換）；預設值打包成 0。
+  /// bit 0 overload、1 latch_hold、2 predict_hold、3 abandon_overload、4-5 cadence、16-31 late_permille、32-47 pushed_fps
   constexpr uint64_t pack(const snapshot_t &s) {
-    return (s.overload ? uint64_t {1} : uint64_t {0}) | (static_cast<uint64_t>(s.late_permille) << 16) | (static_cast<uint64_t>(s.pushed_fps) << 32);
+    return (s.overload ? uint64_t {1} : uint64_t {0}) | (s.latch_hold ? uint64_t {2} : uint64_t {0}) | (s.predict_hold ? uint64_t {4} : uint64_t {0}) |
+           (s.abandon_overload ? uint64_t {8} : uint64_t {0}) | (static_cast<uint64_t>(static_cast<uint8_t>(s.cadence) & 3u) << 4) |
+           (static_cast<uint64_t>(s.late_permille) << 16) | (static_cast<uint64_t>(s.pushed_fps) << 32);
   }
 
   constexpr snapshot_t unpack(uint64_t v) {
     snapshot_t s;
     s.overload = (v & 1u) != 0;
+    s.latch_hold = (v & 2u) != 0;
+    s.predict_hold = (v & 4u) != 0;
+    s.abandon_overload = (v & 8u) != 0;
+    s.cadence = static_cast<cadence_e>((v >> 4) & 3u);
     s.late_permille = static_cast<uint16_t>((v >> 16) & 0xFFFFu);
     s.pushed_fps = static_cast<uint16_t>((v >> 32) & 0xFFFFu);
     return s;
@@ -211,14 +253,18 @@ namespace vr::capture {
      * @param on config `vr_capture_late`。false＝只記數（diag／快照的數字照算），不判卡死／餓死、過載旗標恆為 false
      * @param display_period_ns 串流的幀週期（1e9 ÷ 協商的幀率）；不在 2～100 ms 內就用 90 Hz
      * @param max_wait_ns config `vr_capture_late_max_ms`（夾在 20～250 ms）
+     * @param mode config `vr_capture_overload`（(e)；只在 on 為 true 時有作用）。預設 late＝和加這個參數之前相同
      */
-    void configure(bool on, int64_t display_period_ns, int64_t max_wait_ns) {
+    void configure(bool on, int64_t display_period_ns, int64_t max_wait_ns, overload_mode_e mode = overload_mode_e::late) {
       enabled_ = on;
+      mode_ = mode;
       period_ns_ = display_period_ns >= k_period_min_ns && display_period_ns <= k_period_max_ns ? display_period_ns : k_period_default_ns;
       max_wait_ns_ = std::clamp<int64_t>(max_wait_ns, k_max_wait_ms_min * k_ns_per_ms, k_max_wait_ms_max * k_ns_per_ms);
       if (!enabled_) {
         overload_ = false;
         below_active_ = false;
+        abandon_ = false;
+        abandon_below_active_ = false;
       }
     }
 
@@ -260,6 +306,14 @@ namespace vr::capture {
       overload_ = false;
       below_active_ = false;
       below_since_ns_ = 0;
+      win_abandoned_ = 0;
+      abandon_ = false;
+      abandon_below_active_ = false;
+      abandon_below_since_ns_ = 0;
+      cad_have_ = false;
+      cad_slip_ = false;
+      cad_seen_ns_ = 0;
+      cad_last_ = cadence_e::unknown;
       hb_have_ = false;
       hb_partial_ = false;
       hb_slot_ = 0;
@@ -291,6 +345,7 @@ namespace vr::capture {
      */
     decision_t on_frame(const frame_t &f) {
       const int64_t now = tick(f.now_ns);
+      note_cadence(f.cadence, now);
 
       // 到這一張為止 driver 又發布了幾張：frame_id 的差（含被 latest-wins 跳過、過期而沒餵進來的）。
       // 寫入方不可信：倒退或沒變當成 1 張，跳太遠夾住。
@@ -378,9 +433,13 @@ namespace vr::capture {
       if (copied) {
         ++b.copied;
         ++win_copied_;
+      } else {
+        ++b.abandoned;
+        ++win_abandoned_;
       }
       b.wait_max_ns = std::max(b.wait_max_ns, f.wait_ns);
       update_overload(now);
+      update_abandon(now);
 
       decision_t d;
       d.backoff_reset = healthy_advance(now, published, copied);
@@ -424,15 +483,71 @@ namespace vr::capture {
 
     /// 沒有影像餵進來的時候定期呼叫（約每 100 ms；影像在來、但都沒走到等 fence 這一步——過期、不合格——時也一樣）：
     /// 讓 1 s 視窗往前走，過載旗標才清得掉。有影像在餵的時候多呼叫也無妨（只推進視窗）。
-    void on_idle(int64_t now_ns) {
+    /// cadence＝這一刻 bridge 回報的節拍（(e)；同 frame_t::cadence，沒有就不必給）。
+    void on_idle(int64_t now_ns, cadence_e cadence = cadence_e::unknown) {
       const int64_t now = tick(now_ns);
+      note_cadence(cadence, now);
       window_advance(now);
       update_overload(now);
+      update_abandon(now);
     }
 
     /// (d) 過載旗標（開關關著時恆為 false）
     bool overload() const {
       return overload_;
+    }
+
+    /// (e) 擷取端現在用的節拍：確定的報告（locked／slipping）在報告變成 unknown 之後沿用 k_cadence_keep_ns；
+    /// unsure 立刻採用（不沿用之前確定的值）。開關關著時恆為 unknown
+    cadence_e cadence() const {
+      if (!enabled_) {
+        return cadence_e::unknown;
+      }
+      if (cad_have_ && detail::elapsed(last_now_, cad_seen_ns_) <= k_cadence_keep_ns) {
+        return cad_slip_ ? cadence_e::slipping : cadence_e::locked;
+      }
+      return cad_last_ == cadence_e::unsure ? cadence_e::unsure : cadence_e::unknown;
+    }
+
+    /// (e) cadence 模式對 LATCH 的決定。不論現在是哪個模式都照算（late 模式下 10 s log 的 cadHold 印的就是它）：
+    /// 在滑動 → 不取樣；鎖得住 → 只有放棄的影像太多才不取樣；說不準 → 照 (d) 的旗標
+    bool latch_hold_if_cadence() const {
+      if (!enabled_) {
+        return false;
+      }
+      switch (cadence()) {
+        case cadence_e::slipping:
+          return true;
+        case cadence_e::locked:
+          return abandon_;
+        default:
+          return overload_;
+      }
+    }
+
+    /// (e) stream.cpp：LATCH 不餵進頻率鎖（開關關著時恆為 false；late 模式下就是 (d) 的旗標）
+    bool latch_hold() const {
+      if (!enabled_) {
+        return false;
+      }
+      return mode_ == overload_mode_e::late ? overload_ : latch_hold_if_cadence();
+    }
+
+    /// (e) stream.cpp：§VR-PREDICT 不取樣（開關關著時恆為 false；late 模式下就是 (d) 的旗標）。
+    /// cadence 模式仍然看 (d) 的旗標——它要的是絕對延遲穩定，晚到的影像在編碼段是雙峰——另外加上節拍在滑動
+    bool predict_hold() const {
+      if (!enabled_) {
+        return false;
+      }
+      if (mode_ == overload_mode_e::late) {
+        return overload_;
+      }
+      return overload_ || cadence() == cadence_e::slipping;
+    }
+
+    /// (e) config `vr_capture_overload`
+    overload_mode_e mode() const {
+      return mode_;
     }
 
     /// 給其他執行緒看的快照（數字是上一次 on_frame／on_idle 當下的視窗）
@@ -441,6 +556,10 @@ namespace vr::capture {
       s.overload = overload_;
       s.late_permille = win_consumed_ > 0 ? static_cast<uint16_t>(std::min<uint64_t>(static_cast<uint64_t>(win_bad_) * 1000u / win_consumed_, 1000u)) : uint16_t {0};
       s.pushed_fps = static_cast<uint16_t>(std::min<uint32_t>(win_copied_, 0xFFFFu));
+      s.latch_hold = latch_hold();
+      s.predict_hold = predict_hold();
+      s.abandon_overload = abandon_;
+      s.cadence = cadence();
       return s;
     }
 
@@ -485,6 +604,7 @@ namespace vr::capture {
       uint32_t consumed = 0;  ///< 走到等 fence 這一步的張數
       uint32_t bad = 0;  ///< 其中晚到＋放棄的
       uint32_t copied = 0;  ///< 其中複製成功的
+      uint32_t abandoned = 0;  ///< 其中放棄的（(e)；已含在 bad 裡）
       int64_t wait_max_ns = 0;
     };
 
@@ -520,6 +640,7 @@ namespace vr::capture {
         win_consumed_ -= b.consumed;
         win_bad_ -= b.bad;
         win_copied_ -= b.copied;
+        win_abandoned_ -= b.abandoned;
         b = bucket_t {};
       }
       win_slot_ = slot;
@@ -554,6 +675,50 @@ namespace vr::capture {
       } else {
         below_active_ = false;
       }
+    }
+
+    /// (e) 和 update_overload() 同一套規則（視窗看滿 1 s、≥ 30% 而且至少 3 張才設；< 5% 或視窗空了持續 2 s 才清），
+    /// 只算放棄的影像——晚到而複製成功的不算。放棄的是「晚到＋放棄」的子集、門檻與計時都相同，而且緊接在
+    /// update_overload() 之後以同一個 now 呼叫，所以 abandon_ 設著時 overload_ 一定也設著
+    void update_abandon(int64_t now) {
+      if (!enabled_) {
+        abandon_ = false;
+        return;
+      }
+      const uint64_t bad100 = static_cast<uint64_t>(win_abandoned_) * 100u;
+      if (!abandon_) {
+        const bool full = win_span_have_ && detail::elapsed(now, win_span_since_ns_) >= k_window_ns;
+        if (full && win_abandoned_ >= k_overload_min_bad && bad100 >= static_cast<uint64_t>(win_consumed_) * k_overload_on_pct) {
+          abandon_ = true;
+          abandon_below_active_ = false;
+        }
+        return;
+      }
+      if (bad100 < static_cast<uint64_t>(win_consumed_) * k_overload_off_pct || win_consumed_ == 0) {
+        if (!abandon_below_active_) {
+          abandon_below_active_ = true;
+          abandon_below_since_ns_ = now;
+        } else if (detail::elapsed(now, abandon_below_since_ns_) >= k_overload_off_hold_ns) {
+          abandon_ = false;
+          abandon_below_active_ = false;
+        }
+      } else {
+        abandon_below_active_ = false;
+      }
+    }
+
+    /// (e) 這一次 on_frame()／on_idle() 帶進來的節拍。now 就是那次呼叫 tick() 的回傳值：這裡不會推進時鐘，
+    /// 也不碰視窗與任何舊狀態（late 模式的決定因此和加這個功能之前逐步相同）
+    void note_cadence(cadence_e c, int64_t now) {
+      cad_last_ = c;
+      if (c == cadence_e::locked || c == cadence_e::slipping) {
+        cad_have_ = true;
+        cad_slip_ = c == cadence_e::slipping;
+        cad_seen_ns_ = now;
+      } else if (c == cadence_e::unsure) {
+        cad_have_ = false;  // 現在說不準：不沿用之前確定的值
+      }
+      // unknown：什麼都不改（之前確定的值沿用到 k_cadence_keep_ns 為止）
     }
 
     /// 每秒一格（對齊整秒）的健康計數；連續 k_healthy_seconds 個完整的格子都健康就把退避歸零。回傳這一次有沒有歸零。
@@ -650,6 +815,17 @@ namespace vr::capture {
     bool overload_ = false;
     bool below_active_ = false;
     int64_t below_since_ns_ = 0;
+
+    // (e) §VR-CADENCE：模式、放棄的影像的旗標（和 (d) 共用同一個視窗）、bridge 回報的節拍
+    overload_mode_e mode_ = overload_mode_e::late;
+    uint32_t win_abandoned_ = 0;
+    bool abandon_ = false;
+    bool abandon_below_active_ = false;
+    int64_t abandon_below_since_ns_ = 0;
+    bool cad_have_ = false;  ///< 看過確定的報告（locked／slipping），而且之後沒有被 unsure 取代
+    bool cad_slip_ = false;  ///< 那一筆確定的報告是 slipping
+    int64_t cad_seen_ns_ = 0;  ///< 最近一筆確定的報告的時刻
+    cadence_e cad_last_ = cadence_e::unknown;  ///< 最近一次呼叫帶進來的報告（原樣）
   };
 
 }  // namespace vr::capture
