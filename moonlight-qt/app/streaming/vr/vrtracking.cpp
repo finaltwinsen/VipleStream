@@ -113,10 +113,14 @@ void VrTrackingSender::run()
         memset(&sample, 0, sizeof(sample));
 
         const auto now = clock::now();
+        const uint64_t sampleTimeNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            now.time_since_epoch()).count();
         bool havePose = true;
         if (m_Source) {
-            // M4a R1：真 XR。來源填 pose[HMD]、flags、predictNs；取樣時間仍是 client 單調時鐘（M1a 定義）
+            // M4a R1：真 XR。來源填 pose[HMD]、flags、predictNs；取樣時間仍是 client 單調時鐘（M1a 定義），
+            // 先填好讓來源讀得到（--vr-synthetic-hmd 的合成姿態照「取樣時間＋predictNs」那一刻算）
             sample.predictNs = predictNs;
+            sample.sampleTimeNs = sampleTimeNs;
             havePose = m_Source(&sample);
         }
         else {
@@ -130,8 +134,7 @@ void VrTrackingSender::run()
         }
         sample.version = VIPLE_VR_TRACKING_VERSION;
         sample.spaceEpoch = 0;
-        sample.sampleTimeNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
-            now.time_since_epoch()).count();
+        sample.sampleTimeNs = sampleTimeNs;
 
         if (!havePose) {
             noPose++;

@@ -48,6 +48,7 @@ public:
 
     // M4a R1：真 XR 的 HMD 樣本來源（XrContext::sampleHmd）。填 pose[HMD] 與 predictNs，回 false＝這一拍還沒有
     // 有效 pose（不送）。沒設定＝M1a 的合成 pose（--vr-emulate）。要在 start() 之前設定，stop() 之後才可讓來源失效。
+    // 呼叫來源時 sample->sampleTimeNs 已經是這一拍的取樣時間（只給來源讀，送出的值不由來源決定）。
     using Source = std::function<bool(VIPLE_VR_TRACKING* sample)>;
     void setSource(Source source, const char* name) { m_Source = std::move(source); m_SourceName = name; }
 

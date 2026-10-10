@@ -67,11 +67,15 @@ const char* vrSyntheticMotionName(VrSyntheticMotion motion)
     return "unknown";
 }
 
-void vrSyntheticFill(VrSyntheticMotion motion, double t, VIPLE_VR_TRACKING* out)
+void vrSyntheticHead(VrSyntheticMotion motion, double t, float headPos[3], float headRot[4], float headLinVel[3], float headAngVel[3])
 {
-    float headPos[3] = { 0.0f, kHeadHeightM, 0.0f };
-    float headLinVel[3] = { 0.0f, 0.0f, 0.0f };
-    float headAngVel[3] = { 0.0f, 0.0f, 0.0f };
+    headPos[0] = 0.0f;
+    headPos[1] = kHeadHeightM;
+    headPos[2] = 0.0f;
+    for (int i = 0; i < 3; i++) {
+        headLinVel[i] = 0.0f;
+        headAngVel[i] = 0.0f;
+    }
     double yaw = 0.0, pitch = 0.0;
 
     switch (motion) {
@@ -127,8 +131,22 @@ void vrSyntheticFill(VrSyntheticMotion motion, double t, VIPLE_VR_TRACKING* out)
     }
     }
 
-    float headRot[4];
     yawPitchToQuat(yaw, pitch, headRot);
+}
+
+void VrSyntheticHeadTrack::poseAt(uint64_t clientNs, VIPLE_VR_POSE* out) const
+{
+    // 以整數相減再換成秒（起點之前是負的）
+    const double t = static_cast<double>(static_cast<int64_t>(clientNs - startNs)) * 1e-9;
+    float pos[3], rot[4], linVel[3], angVel[3];
+    vrSyntheticHead(motion, t, pos, rot, linVel, angVel);
+    setPose(out, pos, rot, linVel, angVel);
+}
+
+void vrSyntheticFill(VrSyntheticMotion motion, double t, VIPLE_VR_TRACKING* out)
+{
+    float headPos[3], headRot[4], headLinVel[3], headAngVel[3];
+    vrSyntheticHead(motion, t, headPos, headRot, headLinVel, headAngVel);
 
     out->flags = VIPLE_VR_TRK_HMD | VIPLE_VR_TRK_LEFT | VIPLE_VR_TRK_RIGHT | VIPLE_VR_TRK_PRESENCE;
     setPose(&out->pose[VIPLE_VR_POSE_HMD], headPos, headRot, headLinVel, headAngVel);

@@ -491,7 +491,9 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
                                                                                  沒到）；gone＝server 回了「補不了」。自己的節流：每場前 30 筆，之後每 20 筆一筆
 [VIPLE-VR-POSE] dev: --vr-synthetic-hmd - the head pose sent to the host is synthetic (…)   ← client（warning）：dev 選項，真的 XR 連線上
                                                                                  頭的姿態改送合成運動（無人配戴的測試用）；tracking sender 的 source 會印
-                                                                                 `xr+synthetic-hmd`
+                                                                                 `xr+synthetic-hmd`。2026-10-10 起送的是「取樣時間＋predictNs 那一刻」的合成姿態
+                                                                                 （和真的樣本同一個語意）；之前送的是取樣當下的姿態卻帶著 predictNs，host 少外插
+                                                                                 這麼多，算繪姿態在合成軌跡上固定落後一個 predictNs（頭盔上約 26 ms）
 [VIPLE-VR-INPUT] dev: --vr-synthetic-menu-at - the left MENU button is pressed N s after tracking starts (toggles the host's SteamVR dashboard)[; on a real XR runtime …]
                                                                               ← client（warning）：dev 選項，追蹤開始後第 N 秒在左手按一下 MENU（150 ms；host 當成
                                                                                  系統鍵）。只是「切換」儀表板，關掉之後的時序和配戴不同，不要用來做直通的驗測。

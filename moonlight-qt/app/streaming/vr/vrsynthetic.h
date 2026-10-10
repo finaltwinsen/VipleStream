@@ -10,6 +10,8 @@
 
 #include <QString>
 
+#include <cstdint>
+
 enum class VrSyntheticMotion {
     Still = 0,  // 靜止：HMD 在 (0, 1.6, 0)、面向 -Z
     Sine  = 1,  // 小幅位移加左右／上下擺頭（預設）
@@ -27,6 +29,20 @@ const char* vrSyntheticMotionName(VrSyntheticMotion motion);
 
 // 填 out 的 flags、pose[]、input[]、gaze；version／sampleId／時間欄位由呼叫端填
 void vrSyntheticFill(VrSyntheticMotion motion, double tSec, VIPLE_VR_TRACKING* out);
+
+// 只算頭：tSec 那一刻的位置、方向（x, y, z, w）、線速度、世界座標的角速度。vrSyntheticFill 填進 pose[HMD] 的就是這一組
+void vrSyntheticHead(VrSyntheticMotion motion, double tSec, float pos[3], float rot[4], float linVel[3], float angVel[3]);
+
+// 2026-10-10（dev，--vr-synthetic-hmd）：合成頭部軌跡的時間基準。送給 host 的樣本（tracking 來源）與 client 量姿態誤差／落後
+// 用的基準（XR frame thread 的 §VR-POSEERR）各拿一份同樣的值，兩邊算的才是同一條軌跡、對得上時間。時刻一律是 client
+// 單調時鐘的奈秒（VrTrackingSender::nowNs() 的那個時鐘）。
+struct VrSyntheticHeadTrack {
+    VrSyntheticMotion motion = VrSyntheticMotion::Still;
+    uint64_t startNs = 0;  // 軌跡 t＝0 的時刻
+
+    // clientNs 那一刻的頭部姿態（位置、方向、線速度、角速度都是同一刻的；clientNs 可以早於 startNs）
+    void poseAt(uint64_t clientNs, VIPLE_VR_POSE* out) const;
+};
 
 // 2026-10-08（dev，--vr-synthetic-hands）：依 out 裡已經填好的頭部姿態，把左右控制器換成「在眼前揮動」的合成姿態
 // （右手像揮拍：左右 ±25 cm、前後 ±10 cm @1.3 Hz，拍面繞前後軸 ±40°；左手小幅上下），並標成 active／focused。

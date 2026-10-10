@@ -3800,6 +3800,10 @@ bool Session::startConnectionAsync()
             const bool syntheticHmd = m_Preferences->vrSyntheticHmd;
             const bool syntheticHands = m_Preferences->vrSyntheticHands;  // dev：控制器換成在眼前揮動的合成姿態
             const auto synthStart = std::chrono::steady_clock::now();
+            // dev（--vr-synthetic-hmd）：頭的合成軌跡，起點就是 synthStart。下面的來源照它算送給 host 的樣本
+            VrSyntheticHeadTrack synthHead;
+            synthHead.motion = motion;
+            synthHead.startNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(synthStart.time_since_epoch()).count();
             if (syntheticHmd) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VR-POSE] dev: --vr-synthetic-hmd - the head pose sent to the host is synthetic (%s), not the tracked one. "
@@ -3807,7 +3811,7 @@ bool Session::startConnectionAsync()
                             vrSyntheticMotionName(motion));
             }
             const double syntheticMenuAt = m_Preferences->vrSyntheticMenuAtSec;  // dev：第幾秒按一下左手 MENU
-            m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, syntheticMenuAt, motion, synthStart](VIPLE_VR_TRACKING* s) {
+            m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, syntheticMenuAt, synthHead, synthStart](VIPLE_VR_TRACKING* s) {
                 uint32_t predict = 0;
                 VIPLE_VR_POSE& hmd = s->pose[VIPLE_VR_POSE_HMD];
                 if (!xr->sampleHmd(hmd.pos, hmd.rot, hmd.linVel, hmd.angVel, &predict)) {
@@ -3818,10 +3822,11 @@ bool Session::startConnectionAsync()
                 // M4a R2：左右控制器（pose、按鍵、pressCtr、flags active／focused）
                 xr->sampleControllers(s);
                 if (syntheticHmd) {
-                    VIPLE_VR_TRACKING synth;
-                    memset(&synth, 0, sizeof(synth));
-                    vrSyntheticFill(motion, std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), &synth);
-                    hmd = synth.pose[VIPLE_VR_POSE_HMD];
+                    // 樣本的語意是「sampleTimeNs＋predictNs 那一刻的姿態」：真的樣本是 runtime 預測到那一刻的，host 也把它當成
+                    // 那一刻的姿態再往後外插。合成的照同一刻算，位置、方向、速度都是。2026-10-10 之前送的是「現在」的姿態，
+                    // host 以為它已經是 predictNs 之後的，少外插了這麼多：算繪姿態在合成軌跡上固定落後一個 predictNs
+                    // （頭盔上約 26 ms）
+                    synthHead.poseAt(s->sampleTimeNs + predict, &hmd);
                 }
                 if (syntheticHands) {
                     vrSyntheticHands(std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), s);
