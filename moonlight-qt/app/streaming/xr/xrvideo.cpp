@@ -951,10 +951,11 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         m_PubCv.notify_all();
     }
     // §VR-XRLOOP（量測，這一張已經發布了才算）：送出與 GPU 做完的時刻換成相位。顯示格點由 frame thread 每格更新；
-    // 還沒有格點（非 PCVR，或 frame thread 還沒跑到）就不記。兩批 GPU 工作落在哪個相位、有沒有壓到合成器，以前只有
-    // 頭盔的 gpu-trace 看得到
-    const uint64_t gridUs = m_GridUs.load(std::memory_order_relaxed);
-    const uint32_t gridPeriodUs = m_GridPeriodUs.load(std::memory_order_relaxed);
+    // 沒有格點（非 PCVR、frame thread 還沒跑到，或這一格的預測顯示時刻換算不出來）就不記。兩批 GPU 工作落在哪個
+    // 相位、有沒有壓到合成器，以前只有頭盔的 gpu-trace 看得到
+    const uint64_t grid = m_Grid.load(std::memory_order_relaxed);  // （週期 << 32）｜（格點對週期的餘數），見 setDisplayGrid
+    const uint32_t gridPeriodUs = static_cast<uint32_t>(grid >> 32);
+    const uint64_t gridUs = grid & 0xffffffffull;
     const bool phaseOk = gridPeriodUs != 0 && rendered && held;
     const uint32_t subPhase = phaseOk ? xrphase::phaseUs(tSubmit, gridUs, gridPeriodUs) : 0u;
     const uint32_t donePhase = phaseOk ? xrphase::phaseUs(tGpuEnd, gridUs, gridPeriodUs) : 0u;

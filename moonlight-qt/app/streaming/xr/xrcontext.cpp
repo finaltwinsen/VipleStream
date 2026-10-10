@@ -3144,10 +3144,14 @@ void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodN
     // M4a R3：預測顯示時間換成 client steady 時鐘（MTP 用）。沒有時間換算擴充時 ahead 是估計值（≈2 週期）
     m_PcvrTiming.predictedDisplayClientNs = steadyNow + static_cast<uint64_t>(ahead);
 #ifdef HAVE_XR_VIDEO
-    if (m_Video != nullptr && periodNs >= 1000000ull && periodNs <= 100000000ull) {
+    if (m_Video != nullptr) {
         // §VR-XRLOOP：影像 render thread 把送出、GPU 做完的時刻換成相位用的顯示格點（和 [VIPLE-VR-LDIAG] 的相位同一個
-        // 原點；只進統計）。週期還沒有合理的值就不設
-        m_Video->setDisplayGrid(m_PcvrTiming.predictedDisplayClientNs / 1000ull, static_cast<uint32_t>(periodNs / 1000ull));
+        // 原點；只進統計）。這一格的預測顯示時刻是換算出來的才給：換算不出來（或沒有時間換算擴充）時上面那個值只是
+        // 「返回後兩個週期」，不在顯示的格點上，拿它算的相位與「會不會撞上合成器」的比例都是錯的——那時把格點拿掉，
+        // 這一格發布的影像不記相位（10s video 行尾印 -）。週期還沒有合理的值也一樣
+        const bool gridOk = aheadExact && periodNs >= 1000000ull && periodNs <= 100000000ull;
+        m_Video->setDisplayGrid(gridOk ? m_PcvrTiming.predictedDisplayClientNs / 1000ull : 0ull,
+                                gridOk ? static_cast<uint32_t>(periodNs / 1000ull) : 0u);
     }
 #endif
     if (m_Options.pcvrTrackLock && m_TimeConv != nullptr && periodNs > 0) {

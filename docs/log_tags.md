@@ -890,7 +890,8 @@ frame loop（XR 桌面也有）
                                                                                  大小看同一輪 [VIPLE-VR-MTP10] 的 latchSkip。frame thread 沒回報的格之後的那一張、開場的第二張
                                                                                  影像不計。自洽：rescBy 各格相加＝resc；waitBy、waitSlots 各格相加＝waitNew；resc ≤ waitNew
 
-影像 render thread（XR 桌面也有；沒有顯示格點時相位與比例印 -）
+影像 render thread（XR 桌面也有；沒有顯示格點時相位與比例印 -。顯示格點只有 PCVR、而且那一格的預測顯示時刻換算得出來才有：
+                   沒有時間換算擴充、或那一格換算失敗時，那幾張影像不記相位——不拿「返回後兩個週期」的估計值充數）
 [VIPLE-XR] 10s video …原樣… | mbox p50/p95=…/… ms swWait p95/max=…/… ms swNotOk=N rel max=… us | sub/done p50=…/… us coll=P% queued=P%[ synthSub/synthDone p50=…/… us][ ab=<0|1|m>]
                                                                               ← 行尾新增。mbox＝解碼幀在 mailbox 裡等多久（放進去到影像 render thread 取出；延遲鏈沒有含的
                                                                                  那一段。補幀開著時影像 render thread 還在做補幀那一批，新的一幀進不來，p95 會比較長）；

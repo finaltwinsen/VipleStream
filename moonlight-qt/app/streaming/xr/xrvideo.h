@@ -183,12 +183,14 @@ public:
         m_FvA.store(a, std::memory_order_relaxed);
     }
     // §VR-XRLOOP（量測）：顯示格點——任何一格的預測顯示時刻（steady 時鐘，µs）與顯示週期（µs）。影像 render thread
-    // 拿它把送出／GPU 做完的時刻換成相位，只進統計。PCVR 的 XR frame thread 每格設；兩個值不是一起寫的，更新率
-    // 改變的那一瞬間相位會算錯幾張
+    // 拿它把送出／GPU 做完的時刻換成相位，只進統計。PCVR 的 XR frame thread 每格設；periodUs＝0＝這一格沒有格點
+    // （預測顯示時刻換算不出來），那時發布的影像不記相位。
+    // 相位只看格點對週期的餘數，所以兩個值併成一個 atomic（高 32 bit＝週期、低 32 bit＝格點對週期的餘數）：影像
+    // render thread 讀到的一定是同一次設定的一對
     void setDisplayGrid(uint64_t gridUs, uint32_t periodUs)
     {
-        m_GridUs.store(gridUs, std::memory_order_relaxed);
-        m_GridPeriodUs.store(periodUs, std::memory_order_relaxed);
+        const uint64_t packed = periodUs == 0 ? static_cast<uint64_t>(0) : ((static_cast<uint64_t>(periodUs) << 32) | (gridUs % periodUs));
+        m_Grid.store(packed, std::memory_order_relaxed);
     }
     // 暖機：XrContext bring-up 後、第一幀之前可呼叫（目前由 render thread 在第一幀自行處理）
     void setSession(XrSession session);
@@ -493,8 +495,7 @@ private:
     pl_render_params m_RenderParams = {};  // pl_render_fast_params；passTimers 開著時多掛 info_callback（init() 設）
     static void passInfoCb(void* priv, const pl_dispatch_info* info);   // m_Dp 的 pass
     static void renderInfoCb(void* priv, const pl_render_info* info);   // pl_render_image 的 pass
-    std::atomic<uint64_t> m_GridUs{0};        // 見 setDisplayGrid
-    std::atomic<uint32_t> m_GridPeriodUs{0};  // 0＝還沒有格點
+    std::atomic<uint64_t> m_Grid{0};   // 見 setDisplayGrid：（週期 << 32）｜（格點對週期的餘數）；0＝沒有格點
     uint64_t m_TotalDrawn = 0;         // dump 用（XR thread）
     int m_DumpsDone = 0;               // dev：已經存了幾組
     static constexpr int kSynthDumpPairs = 6;  // 補幀開著時 --xr-dump-frame 一共存幾組（每 480 張一組）
