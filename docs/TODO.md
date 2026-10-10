@@ -163,7 +163,8 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
         由平均 5.05 ms 回到 0.61 ms、`presentToFirstPkt` p50 由 16.8 ms 變 9.5 ms，遊戲幾乎沒有代價。已加設定
         `vr_gpu_priority = high｜realtime`（預設 high＝不變）；整場 `realtime` 在 100／300／340／400% 都沒有雙峰
         （數字在 `steam_frame_client.md`）。原本計畫的診斷建置不必做了。
-      - 剩下：耐久：340%、整場 `realtime` 連續 10 分鐘（60 個視窗），`presentToFirstPkt` p50 9.5 ms、p95 11.0～11.8 ms，沒有編碼逾時或卡住的訊息。只有這一場，不能代表顯示記憶體吃緊或更長時間的情況；頭盔無人場次與配戴驗證、第二個比較重的遊戲；驗過才考慮把預設改成 `realtime`。
+      - 剩下：耐久：340%、整場 `realtime` 連續 10 分鐘（60 個視窗），`presentToFirstPkt` p50 9.5 ms、p95 11.0～11.8 ms，沒有編碼逾時或卡住的訊息。只有這一場，不能代表顯示記憶體吃緊或更長時間的情況；真頭盔的無人場次（340%，high 與 realtime 交替四場）`<host>` 這一段少 7.8 ms、
+        頭盔的 MTP 少 6～8 ms。還缺配戴驗證、第二個比較重的遊戲、更長的耐久；驗過才考慮把預設改成 `realtime`。
       - 其他候選（REALTIME 之後不需要了，留著備查）：VR 時關 spatial AQ、固定在慢的那一邊、註冊多張編碼輸入貼圖、
         driver 直接輸出 NV12。
     - §VR-PREDICT 在過載時的兩個小洞：旗標設起來之前的那一個 CLIENT_TIMING 視窗仍會被採計（追蹤階段最多改 3 ms，也會寫進
