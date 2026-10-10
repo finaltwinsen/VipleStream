@@ -1104,6 +1104,122 @@ TEST(VrPresentCadenceFraction, AdoptingForgetsMaskedSlips) {
   EXPECT_EQ(s.st(), state_e::locked);
 }
 
+TEST(VrPresentCadenceFraction, AnAdoptedDivisorMustStayBackedByTheThrottle) {
+  // 採用 1/2 之後 SteamVR 不再節流（節流值回到 0），而遊戲剛好還在半速附近自由跑（GPU 受限）：紀錄仍然每 2 格一張，
+  // 但那已經不是「被固定在整數分之一」。第 24 張起說不準（照原本的旗標）；節拍不變，也不記任何滑動
+  sim_t s;
+  s.settle();
+  s.run(24, 2, 1);
+  ASSERT_EQ(s.d.divisor(), 2);
+  ASSERT_EQ(s.st(), state_e::locked);
+  s.d.take_window();
+  s.run(23, 2, 0);
+  EXPECT_EQ(s.st(), state_e::locked);
+  s.present(2, 0);
+  EXPECT_EQ(s.st(), state_e::unsure);
+  EXPECT_EQ(s.why(), why_e::fraction);
+  EXPECT_EQ(s.d.divisor(), 2);
+  s.run_for(10 * kSec, 2, 0);
+  EXPECT_EQ(s.st(), state_e::unsure);
+  EXPECT_EQ(s.why(), why_e::fraction);
+  const auto w = s.d.take_window();
+  EXPECT_EQ(w.slips + w.masked + w.hitches + w.early + w.skipped, 0u);
+  EXPECT_EQ(w.ok, w.records);
+  EXPECT_EQ(w.divisor_changes, 0u);
+  // 節流值又對得上：連續 24 張才清
+  s.run(23, 2, 1);
+  EXPECT_EQ(s.st(), state_e::unsure);
+  s.present(2, 1);
+  EXPECT_EQ(s.st(), state_e::locked);
+  EXPECT_EQ(s.d.divisor(), 2);
+}
+
+TEST(VrPresentCadenceFraction, OneBackedFrameRestartsTheUnbackedCount) {
+  // 對得上的一張讓「對不上」的計數從頭來；不合理的節流值（負值、超過 4、和格數對不上）都是對不上
+  sim_t s;
+  s.settle();
+  s.run(24, 2, 1);
+  ASSERT_EQ(s.d.divisor(), 2);
+  s.run(23, 2, 0);
+  s.present(2, 1);
+  s.run(23, 2, 0);
+  EXPECT_EQ(s.st(), state_e::locked);
+  s.present(2, 0);
+  EXPECT_EQ(s.why(), why_e::fraction);
+  s.run(24, 2, 1);
+  ASSERT_EQ(s.st(), state_e::locked);
+  const int64_t bad[] = {-1, 2, 5, 255, kI64Max, kI64Min};
+  for (int i = 0; i < 23; ++i) {
+    s.present(2, bad[i % 6]);
+  }
+  EXPECT_EQ(s.st(), state_e::locked);
+  s.present(2, bad[5]);
+  EXPECT_EQ(s.why(), why_e::fraction);
+  EXPECT_EQ(s.d.divisor(), 2);
+  // 不在節拍上的一張（多跨一格的滑動）不是「對得上」：計數不因為它從頭來
+  s.run(24, 2, 1);
+  ASSERT_EQ(s.st(), state_e::locked);
+  s.run(12, 2, 0);
+  s.present(3, 0);
+  s.run(11, 2, 0);
+  EXPECT_EQ(s.st(), state_e::locked);
+  s.present(2, 0);
+  EXPECT_EQ(s.why(), why_e::fraction);
+}
+
+TEST(VrPresentCadenceFraction, GoingBackToFullRateClearsAnUnbackedDivisor) {
+  // 說不準的時候遊戲回到每格一張：第 24 張採用回每格一張，直接是 locked，中間一個事件都不產生
+  sim_t s;
+  s.settle();
+  s.run(24, 2, 1);
+  s.run(30, 2, 0);
+  ASSERT_EQ(s.why(), why_e::fraction);
+  s.d.take_window();
+  s.run(23, 1, 0);
+  EXPECT_EQ(s.d.divisor(), 2);
+  EXPECT_EQ(s.why(), why_e::fraction);
+  s.present(1, 0);
+  EXPECT_EQ(s.d.divisor(), 1);
+  EXPECT_EQ(s.st(), state_e::locked);
+  s.run(50);
+  EXPECT_EQ(s.st(), state_e::locked);
+  const auto w = s.d.take_window();
+  EXPECT_EQ(w.slips + w.masked + w.hitches + w.early + w.skipped, 0u);
+  EXPECT_EQ(w.divisor_changes, 1u);
+}
+
+TEST(VrPresentCadenceFraction, AdoptingAnotherDivisorRestartsTheUnbackedCount) {
+  // 節拍換了（1/2 → 1/3）：之前累計的「對不上」是相對舊節拍的，不帶過去
+  sim_t s;
+  s.settle();
+  s.run(24, 2, 1);
+  ASSERT_EQ(s.d.divisor(), 2);
+  s.run(20, 2, 0);
+  ASSERT_EQ(s.st(), state_e::locked);
+  s.run(24, 3, 2);
+  ASSERT_EQ(s.d.divisor(), 3);
+  s.run(23, 3, 0);
+  EXPECT_EQ(s.st(), state_e::locked);
+  s.present(3, 0);
+  EXPECT_EQ(s.why(), why_e::fraction);
+  EXPECT_EQ(s.d.divisor(), 3);
+}
+
+TEST(VrPresentCadenceFraction, FullRateNeverNeedsTheThrottle) {
+  // 每格一張就是基本的節拍，不需要佐證：節流值（不可信的欄位）填什麼都不影響
+  sim_t s;
+  s.settle();
+  s.d.take_window();
+  for (const int64_t thr : {int64_t {1}, int64_t {4}, int64_t {7}, int64_t {-3}, kI64Max, kI64Min}) {
+    s.run(60, 1, thr);
+    EXPECT_EQ(s.st(), state_e::locked) << thr;
+  }
+  EXPECT_EQ(s.d.divisor(), 1);
+  const auto w = s.d.take_window();
+  EXPECT_EQ(w.ok, w.records);
+  EXPECT_EQ(w.divisor_changes, 0u);
+}
+
 // ── 有效性 ───────────────────────────────────────────────────────────────
 
 TEST(VrPresentCadenceValidity, TwelveRecordsWithoutATargetStartOver) {

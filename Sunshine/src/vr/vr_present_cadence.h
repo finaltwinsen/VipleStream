@@ -99,7 +99,8 @@ namespace vr::cadence {
   /// 呼叫端再晚一輪才排空。合成器那時一輪只要幾毫秒，100 ms 很寬；過了之後 0 又是不可能的值
   constexpr int64_t k_free_run_grace_ns = 100 * k_ns_per_ms;
 
-  // 整數分之一：連續這麼多張都跨 1 + nFramesToThrottle 格＝SteamVR 把遊戲固定在更新率的整數分之一，當成新的節拍
+  // 整數分之一：連續這麼多張都跨 1 + nFramesToThrottle 格＝SteamVR 把遊戲固定在更新率的整數分之一，當成新的節拍。
+  // 採用之後節流值也要一直對得上：累計這麼多張在節拍上而節流值對不上（中間沒有對得上的）＝說不準（fraction）
   constexpr uint32_t k_divisor_run = 24;
   constexpr int64_t k_throttle_max = 4;  ///< driver 把 nFramesToThrottle 夾在這個值以內
   constexpr int64_t k_divisor_max = 1 + k_throttle_max;
@@ -453,12 +454,25 @@ namespace vr::cadence {
       if (m > divisor_) {
         detail::bump(win_.skipped, static_cast<uint32_t>(m - divisor_));  // 到這裡 m ≤ restart_slots_
       }
+      // 節流值解釋得了這個格數：多睡 throttle 格，每一張就跨 1 + throttle 格。節流值是不可信的欄位，
+      // 但它只能讓狀態變成 locked——最壞等於退回沒有這個偵測器的時候
+      const bool explained = p.throttle >= 0 && p.throttle <= k_throttle_max && m == 1 + p.throttle;
       if (m == divisor_) {
         commit_run(now);
         off_run_ = 0;
         detail::bump(win_.ok);
-        if (on_run_ < k_divisor_run && ++on_run_ == k_divisor_run) {
-          fraction_ = false;
+        if (divisor_ == 1 || explained) {
+          unbacked_run_ = 0;
+          if (on_run_ < k_divisor_run && ++on_run_ == k_divisor_run) {
+            fraction_ = false;
+          }
+        } else {
+          // 整數分之一的節拍是因為節流值說「這是 SteamVR 要的」才採用的，之後也要一直有它佐證。SteamVR 不再節流、
+          // 而遊戲剛好還留在那個速度附近自由跑（GPU 受限）時，紀錄仍然每 divisor 格一張——那已經不是鎖住，是說不準
+          on_run_ = 0;
+          if (unbacked_run_ < k_divisor_run && ++unbacked_run_ == k_divisor_run) {
+            fraction_ = true;
+          }
         }
         if (p.have_phase && p.phase_ns >= edge_ns_ && p.phase_ns < k_phase_max_ns) {
           detail::bump(win_.edge);
@@ -468,9 +482,6 @@ namespace vr::cadence {
         if (off_run_ < k_no_cadence_run) {
           ++off_run_;
         }
-        // 節流值解釋得了這個格數：多睡 throttle 格，每一張就跨 1 + throttle 格。節流值是不可信的欄位，
-        // 但它只能讓狀態變成 locked——最壞等於退回沒有這個偵測器的時候
-        const bool explained = p.throttle >= 0 && p.throttle <= k_throttle_max && m == 1 + p.throttle;
         if (m <= k_divisor_max) {
           // 一段同樣格數的連續紀錄（run）等它結束才記事件，所以節流剛開始的那 24 張一個事件都不會產生
           if (run_len_ > 0 && m == run_slots_) {
@@ -654,6 +665,7 @@ namespace vr::cadence {
       run_explained_ = 0;
       off_run_ = 0;
       on_run_ = 0;
+      unbacked_run_ = 0;
       fraction_ = false;
       st_ = st_e::locked;
       um_.clear();
@@ -729,6 +741,7 @@ namespace vr::cadence {
       run_explained_ = 0;
       off_run_ = 0;
       on_run_ = 0;
+      unbacked_run_ = 0;
       fraction_ = false;
       detail::bump(win_.divisor_changes);
       um_.clear();
@@ -826,7 +839,8 @@ namespace vr::cadence {
     uint32_t run_len_ = 0;  ///< 連續幾張都跨 run_slots_ 格（封頂在 k_divisor_run）
     uint32_t run_explained_ = 0;  ///< 其中最近連續幾張是節流值解釋得了的
     uint32_t off_run_ = 0;  ///< 連續幾張不在節拍上（封頂在 k_no_cadence_run）
-    uint32_t on_run_ = 0;  ///< 連續幾張在節拍上（封頂在 k_divisor_run）
+    uint32_t on_run_ = 0;  ///< 連續幾張在節拍上、而且（divisor ≥ 2 時）節流值對得上（封頂在 k_divisor_run）
+    uint32_t unbacked_run_ = 0;  ///< divisor ≥ 2：在節拍上、但節流值對不上的張數（對得上的一張就歸零；封頂在 k_divisor_run）
     bool fraction_ = false;
 
     // 事件
