@@ -529,7 +529,7 @@ TEST_F(PredictTest, ConversionGoesByDisplayRate) {
 }
 
 TEST_F(PredictTest, ConversionSourceWithSameDisplayRatePrefersCloserStreamRate) {
-  // 120 Hz 的頭盔全速、半速各學到一個值，換到別的顯示更新率時取 host 週期較接近的那一筆——和哪一場先跑無關
+  // 120 Hz 的頭盔全速、半速各學到一個值，換到別的顯示更新率時取 host 週期較接近的那一筆——不平手時和哪一場先跑無關
   for (const bool half_first : {false, true}) {
     SCOPED_TRACE(half_first ? "half-rate session first" : "full-rate session first");
     predict::reset_for_test();
@@ -558,6 +558,49 @@ TEST_F(PredictTest, ConversionSourceWithSameDisplayRatePrefersCloserStreamRate) 
     EXPECT_EQ(s45.from_period_us, kPeriod60);
     EXPECT_EQ(s45.us, predict::convert_for_period(half, kPeriod120, kPeriod90));
   }
+}
+
+TEST_F(PredictTest, EquidistantSourcesTakeTheOneLearnedFirst) {
+  // 60／72／90／120 Hz 的週期是等差的（差 2778 µs）：學過 72 與 120 再開 90，兩筆等距 → 取先學到的那一筆。
+  // 這是改之前就有的行為（比較用嚴格小於），釘住它，免得以後動 nearest_learned 時悄悄改掉
+  constexpr uint32_t kPeriod72 = 13889;
+  for (const bool first72 : {true, false}) {
+    SCOPED_TRACE(first72 ? "72 Hz learned first" : "120 Hz learned first");
+    predict::reset_for_test();
+    const uint32_t p1 = first72 ? kPeriod72 : kPeriod120;
+    const uint32_t p2 = first72 ? kPeriod120 : kPeriod72;
+    const uint32_t v1 = probe_honored(predict::begin_session(p1, 0).us);
+    const uint32_t s2 = predict::begin_session(p2, 0).us;
+    warm();
+    ASSERT_NE(follow(static_cast<int64_t>(s2) + 4000, s2, 30), s2);  // 第二個更新率也學到自己的值
+    const auto s90 = predict::begin_session(kPeriod90, 0);
+    EXPECT_EQ(s90.source, predict::start_e::converted);
+    EXPECT_EQ(s90.from_period_us, p1);
+    EXPECT_EQ(s90.us, predict::convert_for_period(v1, p1, kPeriod90));
+  }
+}
+
+TEST_F(PredictTest, SameStreamPeriodWithDifferentDisplayRatesAreSeparateEntries) {
+  // 72 Hz 的頭盔全速（13889, 13889）與 144 Hz 的頭盔半速（13889, 6944）host 的週期相同，但不是同一筆
+  constexpr uint32_t kPeriod72 = 13889;
+  constexpr uint32_t kPeriod144 = 6944;
+  const uint32_t full72 = probe_honored(predict::begin_session(kPeriod72, 0).us);
+  const auto half144 = predict::begin_session(kPeriod72, 0, kPeriod144);
+  EXPECT_EQ(half144.source, predict::start_e::converted);  // 不可以把 72 Hz 全速的值當成自己的
+  EXPECT_EQ(half144.us, predict::convert_for_period(full72, kPeriod72, kPeriod144));
+  warm();
+  const uint32_t learned_half = follow(static_cast<int64_t>(half144.us) + 4000, half144.us, 30);
+  ASSERT_NE(learned_half, half144.us);
+  // 各自記住
+  EXPECT_EQ(predict::begin_session(kPeriod72, 0).us, full72);
+  const auto again = predict::begin_session(kPeriod72, 0, kPeriod144);
+  EXPECT_EQ(again.source, predict::start_e::learned);
+  EXPECT_EQ(again.us, learned_half);
+  // 144 Hz 全速沿用 144 Hz 半速的值（同一個顯示更新率、不換算）
+  const auto full144 = predict::begin_session(kPeriod144, 0);
+  EXPECT_EQ(full144.source, predict::start_e::same_display);
+  EXPECT_EQ(full144.us, learned_half);
+  EXPECT_EQ(full144.from_period_us, kPeriod72);
 }
 
 TEST_F(PredictTest, RevertInHalfRateSessionRestoresItsOwnLearnedValue) {

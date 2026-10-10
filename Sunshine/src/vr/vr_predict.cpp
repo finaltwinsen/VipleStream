@@ -106,7 +106,8 @@ namespace vr::predict {
       return nullptr;
     }
 
-    /// 沒有完全相符的值時的來源：顯示週期最接近的那一筆；同一個顯示更新率有兩筆（全速、半速各學過）時取 host 週期較接近的
+    /// 沒有完全相符的值時的來源：顯示週期最接近的那一筆；同一個顯示更新率有兩筆（全速、半速各學過）時取 host 週期較接近的。
+    /// 距離相同時取先學到的那一筆（比較用的是嚴格小於；60／72／90／120 Hz 的週期是等差的，平手並不罕見，有測試釘住）
     const learned_t *nearest_learned(uint32_t period_us, uint32_t display_us) {
       const auto dist = [](uint32_t a, uint32_t b) {
         return std::llabs(static_cast<int64_t>(a) - static_cast<int64_t>(b));

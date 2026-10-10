@@ -1813,6 +1813,12 @@ namespace nvhttp {
         BOOST_LOG(info) << "[VIPLE-VR-SESSION] /resume: foveation stays at "sv << cur->fovea << "% (running orchestration; client asked for "sv << vr_params->fovea << "%)"sv;
         vr_params->fovea = cur->fovea;
       }
+      // vrDispHz 同理：姿態預測在編排開始時就照當時的顯示更新率起算，/resume 不會重設。log 與之後用到的值都照進行中的那一次
+      if (cur->disp_hz != vr_params->disp_hz) {
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] /resume: display rate for pose prediction stays at "sv << (cur->disp_hz > 0 ? cur->disp_hz : cur->hz)
+                        << " Hz (running orchestration; client reported "sv << (vr_params->disp_hz > 0 ? vr_params->disp_hz : vr_params->hz) << " Hz)"sv;
+        vr_params->disp_hz = cur->disp_hz;
+      }
     }
 
     // §M01-D A1 2026-09-23：同一個 client（同一張 TLS 憑證）重新 /resume

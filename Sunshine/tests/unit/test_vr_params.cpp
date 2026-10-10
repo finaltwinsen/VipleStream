@@ -269,8 +269,9 @@ TEST(VrParamsTest, DisplayHz) {
   auto both = parse_map(with(half_args, "vrFovea", "150"));
   ASSERT_TRUE(both.params.has_value()) << both.error;
   EXPECT_TRUE(vr::format_launch_params(*both.params).ends_with("&vrForce=0&vrFovea=150&vrDispHz=120"));
-  // 上下限都收（VIPLE_VR_HZ_MIN～VIPLE_VR_HZ_MAX）
+  // 上限收（VIPLE_VR_HZ_MAX）；下限 60 只有 vrHz 也是 60 時不會被「不可低於 vrHz」擋下，那時等於 vrHz、視同沒帶
   EXPECT_EQ(parse_map(with(with(minimal_args(), "vrHz", "72"), "vrDispHz", "144")).params->disp_hz, 144);
+  EXPECT_EQ(parse_map(with(with(with(minimal_args(), "vrHz", "60"), "vrPeriodNs", "16666666"), "vrDispHz", "60")).params->disp_hz, 0);
 
   // 等於 vrHz：視同沒帶（minimal_args 的 vrHz 是 90）
   auto same = parse_map(with(minimal_args(), "vrDispHz", "90"));

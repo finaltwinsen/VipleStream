@@ -233,6 +233,10 @@ namespace vr::orchestrator {
             // 2026-10-05：學到的值依更新率分開存；這個更新率沒學過時由最接近的更新率換算。
             // 2026-10-10：比的是頭盔的顯示更新率（全速串流時和以前印的是同一個數字）
             src = std::format("converted from the value learned at {:.1f} Hz", hz_of(v2p.from_display_us));
+            if (v2p.from_period_us != 0 && v2p.from_display_us != 0 && v2p.from_period_us != v2p.from_display_us) {
+              // 來源是半速那一筆（串流幀率和顯示更新率不同）：把串流的 Hz 也寫出來。不加括號（腳本解析到右括號為止）
+              src += std::format(" display, {:.1f} Hz stream", hz_of(v2p.from_period_us));
+            }
             break;
           case vr::predict::start_e::initial:
             src = display_us ? "default: display period + 30 ms" : "default: period + 30 ms";

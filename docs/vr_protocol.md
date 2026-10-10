@@ -41,8 +41,10 @@
    不帶＝和 `vrHz` 相同。範圍同 `vrHz`；超出範圍或比 `vrHz` 低回 400 `VR_BAD_PARAMS`，等於 `vrHz` 視同沒帶。server 只用它
    決定姿態預測時間（`SecondsFromVsyncToPhotons`）的起始值、以及學到的值存在哪一筆——這兩件事看的是頭盔的顯示週期，不是
    加倍之後的 host 週期（`Sunshine/src/vr/vr_predict.h`）。回應沒有對應的欄位，`/resume` 也不會重設（沿用那次編排開始時的值）。
-   不帶這個參數的舊 client：起始值的算法和以前一樣——半速時 host 把它當成 60 Hz 的頭盔，偏大約 20 ms，要靠串流中的調整
-   收回來。舊 server 會略過不認得的 key。
+   不帶這個參數的舊 client：起始值的算法和以前一樣——半速時 host 把它當成 60 Hz 的頭盔，偏大十幾到二十幾毫秒（這個行程學過
+   120 Hz 的值時由它換算、約多 20 ms；沒學過時是 host 週期＋30 ms、約多 16 ms），要靠串流中的調整收回來。另外那一場學到的值
+   會存成「60 Hz 頭盔」的那一筆：同一個 server 行程之後開全速、而全速的值還沒學過時，起始值由它換算、會偏小約 11 ms，
+   約 20 秒才追回來。`/resume` 帶的值和進行中的編排不同時沿用進行中的（log 一行）。舊 server 會略過不認得的 key。
    - 全部是十進位定點數，不用 base64。
    - 要有 round-trip 單元測試；server 解碼失敗就回非 200。
    - `vrCaps`：b0 RECOVERY_INTRA、b1 TRACK_THREAD、b2 GAZE、b3 SKELETON。

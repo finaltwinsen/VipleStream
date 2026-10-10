@@ -693,6 +693,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-LINK] control connection re-homed to host address B (local=L)                ← §VR-LINK-REHOME：控制連線連到了不是 session 位址的 host 位址
 [VIPLE-VR-ORCH] foveated encoding: centre density P% of uniform (edge E%)              ← §VR-FOVEA：這次編排開了注視點編碼（client 要求的強度）
 [VIPLE-VR-SESSION] /resume: foveation stays at P% (running orchestration; client asked for Q%)   ← §VR-FOVEA：/resume 沿用進行中的強度
+[VIPLE-VR-SESSION] /resume: display rate for pose prediction stays at D Hz (running orchestration; client reported E Hz)   ← §VR-PREDICT：/resume 帶的 vrDispHz 和進行中的編排不同時沿用進行中的
 [VIPLE-VR-FOVEA] unwarp pass failed - showing the stream without undoing the foveated encoding for this session   ← client：還原失敗，這個 session 的畫面是壓縮過的樣子
 [VIPLE-VR-ORCH] … step=precheck … console session is locked (sign-in or lock screen)   ← §VR-HOST-LOCKED：host 停在登入／鎖定畫面，VR session 不啟動（STATE ERROR code 22）
 [VIPLE-VR-ORCH] render scale P% (recommended render target WxH per eye, stream WxH)   ← §VR-RENDER-SCALE：`vr_render_scale_pct` 不是 100 時印
@@ -998,6 +999,7 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
                                                                                     ← server（§VR-PREDICT）。<來源>＝fixed by config｜learned｜converted from the value learned at X Hz
                                                                                        ｜default: period + 30 ms，2026-10-10 起多兩種：same display rate: value learned at X Hz stream、
                                                                                        default: display period + 30 ms（右括號之前的格式沒變，新欄位都加在後面）。
+                                                                                       換算的來源是半速那一筆時寫成 converted from the value learned at X Hz display, Y Hz stream。
                                                                                        2026-10-05 起學到的值依更新率分開存；這個更新率沒學過時由最接近的更新率換算
                                                                                        （v' = 14 ms + (v − 14 ms)·T'/T）。2026-10-10 起比的是頭盔的顯示更新率（半速串流時 host 的週期
                                                                                        加倍、顯示週期沒變）：學到的值依（串流, 顯示）存；顯示更新率相同、只是串流幀率不同（全速↔半速）
