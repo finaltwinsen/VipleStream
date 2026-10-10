@@ -37,10 +37,14 @@
 #include <QImage>
 #include <QString>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -85,6 +89,7 @@ public:
         uint64_t arriveUs;  // 影像 render thread 開始處理的時刻
         uint64_t gpuEndUs;  // GPU 做完的時刻
         uint64_t pubUs;     // xrReleaseSwapchainImage 返回的時刻（之後 frame thread 才挑得到）
+        uint64_t submitUs;  // §VR-XRLOOP：pl_vulkan_hold_ex 返回的時刻（這張影像的每一筆 GPU 工作都送出去了）
     };
 
     // XR frame thread 讀取的「目前可顯示影像」
@@ -173,6 +178,14 @@ public:
         m_FvCyR.store(cyR, std::memory_order_relaxed);
         m_FvA.store(a, std::memory_order_relaxed);
     }
+    // §VR-XRLOOP（量測）：顯示格點——任何一格的預測顯示時刻（steady 時鐘，µs）與顯示週期（µs）。影像 render thread
+    // 拿它把送出／GPU 做完的時刻換成相位，只進統計。PCVR 的 XR frame thread 每格設；兩個值不是一起寫的，更新率
+    // 改變的那一瞬間相位會算錯幾張
+    void setDisplayGrid(uint64_t gridUs, uint32_t periodUs)
+    {
+        m_GridUs.store(gridUs, std::memory_order_relaxed);
+        m_GridPeriodUs.store(periodUs, std::memory_order_relaxed);
+    }
     // 暖機：XrContext bring-up 後、第一幀之前可呼叫（目前由 render thread 在第一幀自行處理）
     void setSession(XrSession session);
 
@@ -197,7 +210,8 @@ private:
     bool mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet, bool useCache);
     bool renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
                      bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk, VIPLE_VR_FRAME_META* synthMeta);
-    bool renderNewFrame(AVFrame* frame);
+    // mboxUs＝這一幀在 mailbox 裡等了多久（只進統計）
+    bool renderNewFrame(AVFrame* frame, uint32_t mboxUs);
     // §VR-FOVEA：swapchain 裡一張影像的尺寸（還原後正前方的細節要有地方放，所以比解碼出來的影像大）
     void outputSize(int fw, int fh, int* ow, int* oh) const;
     bool ensureFull(int fw, int fh);
@@ -293,6 +307,7 @@ private:
     std::mutex m_MailboxMutex;
     std::condition_variable m_MailboxCv;
     AVFrame* m_Pending = nullptr;
+    uint64_t m_PendingAtUs = 0;            // §VR-XRLOOP：m_Pending 放進來的時刻（m_MailboxMutex）
     bool m_StopThread = false;
     std::thread m_Thread;
     uint64_t m_FirstSubmitUs = 0;          // stall 測試的起點（submit 端）
@@ -311,6 +326,81 @@ private:
     std::vector<uint32_t> m_GpuUs;     // 本視窗每新幀等 GPU 做完的時間
     std::vector<uint32_t> m_SynthGpuUs;  // §VR-SYNTH：真的那一張發布之後，到合成那一張做完的時間
     std::vector<uint32_t> m_JitUs;     // §VR-LDIAG（dev）：本視窗被注入延後的影像各延後多久
+    // §VR-XRLOOP（量測）：影像 render thread 這一側的 10 s 視窗（[VIPLE-XR] 10s video 行尾那幾欄）。相位是 LDIAG 的
+    // 座標（顯示格點之後多久，µs），沒有格點時不記
+    struct RenderDiag {
+        std::vector<uint32_t> mboxUs;            // 解碼幀在 mailbox 裡等了多久（放進去 → 影像 render thread 取出）
+        std::vector<uint32_t> swWaitUs;          // xrWaitSwapchainImage 這個呼叫花多久
+        std::vector<uint32_t> subPhaseUs;        // 送出（pl_vulkan_hold_ex 返回）的相位
+        std::vector<uint32_t> donePhaseUs;       // GPU 做完的相位
+        std::vector<uint32_t> synthSubPhaseUs;   // §VR-SYNTH：補幀那一批送出的相位
+        std::vector<uint32_t> synthDonePhaseUs;  //            與做完的相位
+        uint32_t swNotOk = 0;         // xrWaitSwapchainImage 回的不是 XR_SUCCESS 的次數
+        uint32_t relMaxUs = 0;        // xrReleaseSwapchainImage 這個呼叫的最大值
+        uint32_t handoffN = 0;        // 顯示是 120 Hz 時：分過類的張數，
+        uint32_t handoffPreempt = 0;  //   其中送出的相位落在「做到一半會被合成器插隊」那一段的，
+        uint32_t handoffQueued = 0;   //   與「排在合成器後面」那一段的（見 xrphase::handoffClass）
+        void clear()
+        {
+            mboxUs.clear();
+            swWaitUs.clear();
+            subPhaseUs.clear();
+            donePhaseUs.clear();
+            synthSubPhaseUs.clear();
+            synthDonePhaseUs.clear();
+            swNotOk = relMaxUs = handoffN = handoffPreempt = handoffQueued = 0;
+        }
+        // 120 Hz、10 s 約 1200 筆：先配好，之後往裡面推不必配置記憶體（clear() 與整包交換都留著空間）
+        void reserveWindow()
+        {
+            for (std::vector<uint32_t>* v : {&mboxUs, &swWaitUs, &subPhaseUs, &donePhaseUs, &synthSubPhaseUs, &synthDonePhaseUs}) {
+                v->reserve(2048);
+            }
+        }
+        // 組出 [VIPLE-XR] 10s video 行尾的那一段。分位數就地挑（不排序、不複製），所以各向量的順序會被打亂；
+        // 位置和 takeStatsLine 既有的算法相同（p50＝第 n/2 個、p95＝第 n×95/100 個）。只用標準函式庫，可以單獨測
+        //   mbox＝解碼幀在 mailbox 裡等多久；swWait＝xrWaitSwapchainImage、swNotOk＝它回的不是 XR_SUCCESS 的次數；
+        //   rel＝xrReleaseSwapchainImage；sub／done＝送出（這張影像最後一筆 GPU 工作送出去）與 GPU 做完的相位；
+        //   coll／queued＝送出的相位落在「做到一半會被合成器插隊」「排在合成器後面」那兩段的比例。
+        //   沒有樣本的相位（沒有顯示格點，例如 XR 桌面）與沒有分過類的比例（顯示不是 120 Hz）印 -
+        std::string statsTail(bool synth)
+        {
+            auto nth = [](std::vector<uint32_t>& v, size_t idx) {
+                std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(idx), v.end());
+                return v[idx];
+            };
+            auto p50of = [&](std::vector<uint32_t>& v) { return v.empty() ? 0u : nth(v, v.size() / 2); };
+            auto p95of = [&](std::vector<uint32_t>& v) {
+                return v.empty() ? 0u : nth(v, (std::min)(v.size() - 1, (v.size() * 95) / 100));
+            };
+            auto phase50 = [&](std::vector<uint32_t>& v) { return v.empty() ? std::string("-") : std::to_string(p50of(v)); };
+            auto share = [&](uint32_t n) {
+                if (handoffN == 0) {
+                    return std::string("-");
+                }
+                char pct[16];
+                std::snprintf(pct, sizeof(pct), "%.1f", 100.0 * static_cast<double>(n) / static_cast<double>(handoffN));
+                return std::string(pct);
+            };
+            const uint32_t swWaitMax = swWaitUs.empty() ? 0u : *std::max_element(swWaitUs.begin(), swWaitUs.end());
+            const double mbox50 = p50of(mboxUs) / 1000.0, mbox95 = p95of(mboxUs) / 1000.0, swWait95 = p95of(swWaitUs) / 1000.0;
+            char head[160];
+            std::snprintf(head, sizeof(head), " | mbox p50/p95=%.2f/%.2f ms swWait p95/max=%.2f/%.2f ms swNotOk=%u rel max=%u us", mbox50,
+                          mbox95, swWait95, swWaitMax / 1000.0, swNotOk, relMaxUs);
+            std::string s = head;
+            s += " | sub/done p50=" + phase50(subPhaseUs) + "/" + phase50(donePhaseUs) + " us coll=" + share(handoffPreempt) +
+                 "% queued=" + share(handoffQueued) + "%";
+            if (synth) {
+                // §VR-SYNTH：補幀那一批送出與做完的相位
+                s += " synthSub/synthDone p50=" + phase50(synthSubPhaseUs) + "/" + phase50(synthDonePhaseUs) + " us";
+            }
+            return s;
+        }
+    };
+    RenderDiag m_Diag;       // m_StatsMutex
+    RenderDiag m_DiagTake;   // 只在 XR frame thread（takeStatsLine）：上一個視窗整包換出來，在鎖外算分位數
+    std::atomic<uint64_t> m_GridUs{0};        // 見 setDisplayGrid
+    std::atomic<uint32_t> m_GridPeriodUs{0};  // 0＝還沒有格點
     uint64_t m_TotalDrawn = 0;         // dump 用（XR thread）
     int m_DumpsDone = 0;               // dev：已經存了幾組
     static constexpr int kSynthDumpPairs = 6;  // 補幀開著時 --xr-dump-frame 一共存幾組（每 480 張一組）

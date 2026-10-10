@@ -2,6 +2,7 @@
 
 #include "xrvideo.h"
 
+#include "xrphase.h"  // §VR-XRLOOP：相位換算（header-only）
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"
 #include "streaming/vr/vrframemeta.h"
 
@@ -152,6 +153,8 @@ bool XrVideo::init(QString* error)
                         qUtf8Printable(m_Config.testJitter), jerr.c_str());
         }
     }
+    m_Diag.reserveWindow();  // §VR-XRLOOP：量測的兩包視窗（輪流用）
+    m_DiagTake.reserveWindow();
     m_Usable.store(true, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lk(m_MailboxMutex);
@@ -357,6 +360,7 @@ void XrVideo::submit(const AVFrame* frame)
             overwrote = true;
         }
         m_Pending = c;
+        m_PendingAtUs = nowUs();  // §VR-XRLOOP：放進 mailbox 的時刻（影像 render thread 取出時算等了多久）
     }
     m_MailboxCv.notify_one();
     std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -644,7 +648,7 @@ void XrVideo::dumpSynthInputs(const QString& prevPath, const QString& curPath, c
                 fv[0], fv[1], fv[2], fv[3], fvCyR);
 }
 
-bool XrVideo::renderNewFrame(AVFrame* frame)
+bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
 {
     const uint64_t t0 = nowUs();
     // §VR-LDIAG：發布紀錄要帶 pts（host 的 Present 時刻，90 kHz）；發布時 frame 可能已經放掉，先抄下來
@@ -665,6 +669,25 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     }
 
     pl_gpu g = m_Vulkan->gpu;
+    // §VR-XRLOOP（量測）：這一張影像的 swapchain 呼叫花多久。先記在這裡，等下面本來就要拿 m_StatsMutex 的地方
+    // 一起寫回（flushSwLocked）——不為了量測多拿一次鎖
+    struct {
+        uint32_t waitUs[2] = {};  // xrWaitSwapchainImage；補幀開著時一張影像 acquire 兩次
+        int waits = 0;
+        uint32_t notOk = 0;       // 回的不是 XR_SUCCESS 的次數
+        uint32_t relMaxUs = 0;    // xrReleaseSwapchainImage 的最大值
+    } swm;
+    auto sat32 = [](uint64_t v) { return static_cast<uint32_t>(std::min<uint64_t>(v, 0xffffffffu)); };
+    auto flushSwLocked = [&]() {  // 呼叫端持 m_StatsMutex
+        for (int i = 0; i < swm.waits; i++) {
+            m_Diag.swWaitUs.push_back(swm.waitUs[i]);
+        }
+        m_Diag.swNotOk += swm.notOk;
+        m_Diag.relMaxUs = std::max(m_Diag.relMaxUs, swm.relMaxUs);
+        swm.waits = 0;
+        swm.notOk = 0;
+        swm.relMaxUs = 0;
+    };
     // 取一張 swapchain 影像並交給 libplacebo。OpenXR（Vulkan）：acquire 後彩色影像在 COLOR_ATTACHMENT_OPTIMAL，
     // release 前也要回到這個 layout
     auto acquire = [&](pl_tex* texOut) {
@@ -680,7 +703,14 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         }
         XrSwapchainImageWaitInfo wi = xrS<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
         wi.timeout = 100000000;  // 100 ms
-        xrWaitSwapchainImage(m_Sw.swapchain, &wi);
+        // §VR-XRLOOP：只量這個呼叫花多久、回的是不是 XR_SUCCESS（等到逾時回 XR_TIMEOUT_EXPIRED，也是成功碼）。
+        // 流程不看結果，和原本一樣
+        const uint64_t tw0 = nowUs();
+        const XrResult wr = xrWaitSwapchainImage(m_Sw.swapchain, &wi);
+        if (swm.waits < 2) {
+            swm.waitUs[swm.waits++] = sat32(nowUs() - tw0);
+        }
+        swm.notOk += wr != XR_SUCCESS ? 1u : 0u;
         pl_vulkan_release_params rp = {};
         rp.tex = m_Sw.wrapped[idx];
         rp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -693,7 +723,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     // M4a 收尾：先以有上限的 timeline 等待確認 hold 的 semaphore 到了（pl_gpu_finish 沒有逾時；runtime 串流
     // 中死掉時 GPU 工作可能永遠等不到結果，R4 在 S1 卡了 7 分鐘），到了再 pl_gpu_finish（此時立即返回）。
     // 回傳 1＝做完、0＝hold 失敗（照舊 pl_gpu_finish）、-1＝GPU 卡住
-    auto finishGpu = [&](pl_tex tex) {
+    // §VR-XRLOOP：submitUs 帶回 hold 返回的時刻——這張影像的每一筆 GPU 工作到這裡都送出去了（hold 失敗時不動它）
+    auto finishGpu = [&](pl_tex tex, uint64_t& submitUs) {
         pl_vulkan_hold_params hp = {};
         hp.tex = tex;
         hp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -704,6 +735,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
             pl_gpu_finish(g);
             return 0;
         }
+        submitUs = nowUs();
         if (!m_Ctx->waitSemaphoreBounded(m_Sem, hp.semaphore.value, 1000000000ull)) {
             return -1;
         }
@@ -713,7 +745,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     auto releaseImage = [&]() {
         XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
         std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
+        const uint64_t tr0 = nowUs();  // §VR-XRLOOP：這個呼叫本身花多久（前後各取一次時鐘，都在 queue 鎖內）
         xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
+        swm.relMaxUs = std::max(swm.relMaxUs, sat32(nowUs() - tr0));
         return m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
     };
     auto wedged = [&](const char* why) {
@@ -722,6 +756,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         markUnusable("GPU wedged");
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_RenderErrors++;
+        flushSwLocked();
     };
 
     pl_tex tex = nullptr;
@@ -814,7 +849,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     }
 
     const uint64_t tCpuEnd = nowUs();
-    const int fin = finishGpu(tex);
+    uint64_t tSubmit = 0;  // §VR-XRLOOP：送出的時刻（hold 返回）
+    const int fin = finishGpu(tex, tSubmit);
     if (fin < 0) {
         wedged("video render did not finish within 1 s");
         return false;
@@ -852,7 +888,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_HavePublished = true;
         m_Published.publishedUs = tPub;
         // §VR-LDIAG：每一張發布的影像記一筆（被跳過、沒顯示的也有），frame thread 用 drainPublished() 抄走
-        m_PubRing[m_PubHead++ % kPubRing] = {m_Published.seq, pts90, t0, tGpuEnd, tPub};
+        m_PubRing[m_PubHead++ % kPubRing] = {m_Published.seq, pts90, t0, tGpuEnd, tPub, tSubmit};
     };
     if (m_Config.atomicPublish) {
         // §VR-LATCH-RELATCH：release 與發布放進同一段 queue 鎖。原本 release 之後、發布之前有一小段空窗——frame thread
@@ -860,6 +896,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         // 唯一的巢狀鎖：queueMutex → m_SwMutex（見 xrvideo.h 檔頭的執行緒模型）。
         XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
         std::lock_guard<std::mutex> q(m_Ctx->queueMutex());
+        const uint64_t tr0 = nowUs();  // §VR-XRLOOP：release 這個呼叫本身花多久（「之後」的時刻就用下面的 tPub）
         xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
         const uint64_t releaseNo = m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
         const uint64_t tPub = nowUs();
@@ -867,6 +904,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
             std::lock_guard<std::mutex> lk(m_SwMutex);
             publishLocked(releaseNo, tPub);
         }
+        swm.relMaxUs = std::max(swm.relMaxUs, sat32(tPub - tr0));
     }
     else {
         const uint64_t releaseNo = releaseImage();
@@ -881,16 +919,39 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         // §VR-SYNTH 的第二次發布（下面）沿用同一個 seq，不叫
         m_PubCv.notify_all();
     }
+    // §VR-XRLOOP（量測，這一張已經發布了才算）：送出與 GPU 做完的時刻換成相位。顯示格點由 frame thread 每格更新；
+    // 還沒有格點（非 PCVR，或 frame thread 還沒跑到）就不記。兩批 GPU 工作落在哪個相位、有沒有壓到合成器，以前只有
+    // 頭盔的 gpu-trace 看得到
+    const uint64_t gridUs = m_GridUs.load(std::memory_order_relaxed);
+    const uint32_t gridPeriodUs = m_GridPeriodUs.load(std::memory_order_relaxed);
+    const bool phaseOk = gridPeriodUs != 0 && rendered && held;
+    const uint32_t subPhase = phaseOk ? xrphase::phaseUs(tSubmit, gridUs, gridPeriodUs) : 0u;
+    const uint32_t donePhase = phaseOk ? xrphase::phaseUs(tGpuEnd, gridUs, gridPeriodUs) : 0u;
+    // 送出的相位會不會撞上合成器自己那一筆：相位窗只量過 120 Hz，別的更新率不分類
+    const bool classify = phaseOk && xrphase::is120Hz(gridPeriodUs);
+    const xrphase::Handoff handoff = classify ? xrphase::handoffClass(xrphase::ldiagToVblankUs(subPhase, gridPeriodUs))
+                                              : xrphase::Handoff::Clear;
     {
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         if (rendered && held) {
             m_Drawn++;
             m_CpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tCpuEnd - t0, 0xffffffffu)));
             m_GpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tGpuEnd - tCpuEnd, 0xffffffffu)));
+            m_Diag.mboxUs.push_back(mboxUs);
+            if (phaseOk) {
+                m_Diag.subPhaseUs.push_back(subPhase);
+                m_Diag.donePhaseUs.push_back(donePhase);
+            }
+            if (classify) {
+                m_Diag.handoffN++;
+                m_Diag.handoffPreempt += handoff == xrphase::Handoff::Preempt ? 1u : 0u;
+                m_Diag.handoffQueued += handoff == xrphase::Handoff::Queued ? 1u : 0u;
+            }
         }
         else {
             m_RenderErrors++;
         }
+        flushSwLocked();
     }
     if (!doSynth) {
         return rendered && held;
@@ -924,7 +985,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         }
         m_DumpsDone++;
     }
-    const int fin2 = finishGpu(tex2);
+    uint64_t tSynthSubmit = 0;  // §VR-XRLOOP：補幀那一批送出的時刻
+    const int fin2 = finishGpu(tex2, tSynthSubmit);
     if (fin2 < 0) {
         wedged("synthesized frame did not finish within 1 s");
         return false;
@@ -939,10 +1001,19 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_Published.hasSynth = synthOk;
         m_Published.synthMeta = synthMeta;
     }
+    // §VR-XRLOOP：補幀那一批的兩個相位（格點沿用這一張第一批讀到的那一組；hold 失敗就沒有送出的時刻，不記）
+    const bool synthPhaseOk = gridPeriodUs != 0 && r2 && fin2 > 0;
+    const uint32_t synthSubPhase = synthPhaseOk ? xrphase::phaseUs(tSynthSubmit, gridUs, gridPeriodUs) : 0u;
+    const uint32_t synthDonePhase = synthPhaseOk ? xrphase::phaseUs(tSynthEnd, gridUs, gridPeriodUs) : 0u;
     {
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_SynthDrawn += synthOk ? 1 : 0;
         m_SynthGpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tSynthEnd - tGpuEnd, 0xffffffffu)));
+        if (synthPhaseOk) {
+            m_Diag.synthSubPhaseUs.push_back(synthSubPhase);
+            m_Diag.synthDonePhaseUs.push_back(synthDonePhase);
+        }
+        flushSwLocked();
     }
     return true;
 }
@@ -952,6 +1023,7 @@ void XrVideo::renderThreadMain()
     while (true) {
         AVFrame* f = nullptr;
         XrSession session = XR_NULL_HANDLE;
+        uint64_t pendingAtUs = 0;
         {
             std::unique_lock<std::mutex> lk(m_MailboxMutex);
             m_MailboxCv.wait_for(lk, std::chrono::milliseconds(100),
@@ -961,7 +1033,14 @@ void XrVideo::renderThreadMain()
             }
             f = m_Pending;
             m_Pending = nullptr;
+            pendingAtUs = m_PendingAtUs;
             session = m_Session;
+        }
+        // §VR-XRLOOP：這一幀在 mailbox 裡等了多久（放進去 → 取出）；只進統計。dev 的抖動注入睡在這之後，不算在內
+        uint32_t mboxUs = 0;
+        if (f != nullptr) {
+            const uint64_t takenUs = nowUs();
+            mboxUs = static_cast<uint32_t>(std::min<uint64_t>(takenUs > pendingAtUs ? takenUs - pendingAtUs : 0, 0xffffffffu));
         }
         reapRetired();
         if (f == nullptr) {
@@ -980,7 +1059,7 @@ void XrVideo::renderThreadMain()
         int outW = f->width, outH = f->height;
         outputSize(f->width, f->height, &outW, &outH);
         if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, outW, m_Config.synth ? outH * 2 : outH)) {
-            renderNewFrame(f);
+            renderNewFrame(f, mboxUs);
         }
         else {
             av_frame_free(&f);
@@ -1662,7 +1741,7 @@ void XrVideo::frameEnded(uint64_t generation)
 
 QString XrVideo::takeStatsLine()
 {
-    std::lock_guard<std::mutex> lk(m_StatsMutex);
+    std::unique_lock<std::mutex> lk(m_StatsMutex);
     auto pct = [](std::vector<uint32_t> v, double* p50, double* p95) {
         *p50 = *p95 = 0.0;
         if (v.empty()) {
@@ -1702,5 +1781,11 @@ QString XrVideo::takeStatsLine()
     m_Received = m_Drawn = m_Overwritten = m_RenderErrors = 0;
     m_CpuUs.clear();
     m_GpuUs.clear();
+    // §VR-XRLOOP：這個視窗的量測整包換出來（只是指標交換），分位數在鎖外算——decoder 與影像 render thread 都會拿
+    // 這把鎖，不讓它們多等幾次排序的時間。m_DiagTake 上一次用完已經清空、空間留著
+    std::swap(m_Diag, m_DiagTake);
+    lk.unlock();
+    line += QString::fromStdString(m_DiagTake.statsTail(m_Config.synth));
+    m_DiagTake.clear();
     return line;
 }

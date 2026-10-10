@@ -3095,6 +3095,13 @@ void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodN
     m_LoopDiag.frameAheadExact = aheadExact;
     // M4a R3：預測顯示時間換成 client steady 時鐘（MTP 用）。沒有時間換算擴充時 ahead 是估計值（≈2 週期）
     m_PcvrTiming.predictedDisplayClientNs = steadyNow + static_cast<uint64_t>(ahead);
+#ifdef HAVE_XR_VIDEO
+    if (m_Video != nullptr && periodNs >= 1000000ull && periodNs <= 100000000ull) {
+        // §VR-XRLOOP：影像 render thread 把送出、GPU 做完的時刻換成相位用的顯示格點（和 [VIPLE-VR-LDIAG] 的相位同一個
+        // 原點；只進統計）。週期還沒有合理的值就不設
+        m_Video->setDisplayGrid(m_PcvrTiming.predictedDisplayClientNs / 1000ull, static_cast<uint32_t>(periodNs / 1000ull));
+    }
+#endif
     if (m_Options.pcvrTrackLock && m_TimeConv != nullptr && periodNs > 0) {
         // §VR-TRACK-LOCK：預測的顯示時刻是 runtime 排好的等間隔格點，拿它當追蹤樣本的節拍
         VrTrackingSender::setDisplayGrid(m_PcvrTiming.predictedDisplayClientNs, periodNs);

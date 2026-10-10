@@ -864,6 +864,19 @@ frame loop（XR 桌面也有）
                                                                                  沒有含的只有解碼幀轉手與在 mailbox 裡等的時間；這個視窗沒有解碼樣本時 dec 與 sum 印 `-`。
                                                                                  **同一場裡比延遲看 chain**，不要看 [VIPLE-VR-MTP10] 的 p50（鎖相開著時它只會一次跳半個週期）
 
+影像 render thread（XR 桌面也有；沒有顯示格點時相位與比例印 -）
+[VIPLE-XR] 10s video …原樣… | mbox p50/p95=…/… ms swWait p95/max=…/… ms swNotOk=N rel max=… us | sub/done p50=…/… us coll=P% queued=P%[ synthSub/synthDone p50=…/… us][ ab=<0|1|m>]
+                                                                              ← 行尾新增。mbox＝解碼幀在 mailbox 裡等多久（放進去到影像 render thread 取出；延遲鏈沒有含的
+                                                                                 那一段。補幀開著時影像 render thread 還在做補幀那一批，新的一幀進不來，p95 會比較長）；
+                                                                                 swWait＝xrWaitSwapchainImage 這個呼叫花多久；swNotOk＝它回的不是 XR_SUCCESS 的次數（等滿
+                                                                                 100 ms 回 XR_TIMEOUT_EXPIRED 也算；正常是 0。只量，流程不看它）；
+                                                                                 rel＝xrReleaseSwapchainImage 這個呼叫的最大值；
+                                                                                 sub／done＝送出（這張影像最後一筆 GPU 工作送出去）與 GPU 做完的相位（LDIAG 相位）的 p50；
+                                                                                 coll／queued＝送出的相位換成 vblank 相位後落在 2.0～3.6 ms（做到一半會被頭盔合成器插隊）
+                                                                                 ／3.6～5.2 ms（排在合成器後面）的比例——不必擷取 gpu-trace 就看得到的合成器干擾。這兩段是
+                                                                                 全速量的（半速＋補幀時被擋的那一段早 0.25～0.5 ms）；顯示不是 120 Hz 時印 -；
+                                                                                 synthSub／synthDone＝補幀開著時，補幀那一批送出與做完的相位
+
 自測
 [VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> phase-…                           ← `xr-probe --selftest-latch` 在 xrlatchstats.h 原有的案例之後接著跑 xrphase.h 的：相位換算
                                                                                  （LDIAG 相位 ↔ vblank 相位）、120 Hz 的判斷、交出相位的分類、延遲鏈與 events 的算式。
