@@ -211,10 +211,16 @@ namespace vr::orchestrator {
       c.layout_epoch = 1;
       const uint32_t period_us = static_cast<uint32_t>(c.period_ns / 1000u);
       // §VR-PREDICT：設定檔 vr_vsync_to_photons_us > 0＝固定；否則用上一個 session 學到的值，沒有就用「一個
-      // 顯示週期＋30 ms」，串流中再依 client 回報的姿態落後調整（stream.cpp 的 CLIENT_TIMING 處理）
-      const auto v2p = vr::predict::begin_session(period_us, config::vr.vsync_to_photons_us > 0 ? static_cast<uint32_t>(config::vr.vsync_to_photons_us) : 0u);
+      // 顯示週期＋30 ms」，串流中再依 client 回報的姿態落後調整（stream.cpp 的 CLIENT_TIMING 處理）。
+      // 2026-10-10：半速串流（vrDispHz 和 vrHz 不同）時把頭盔的顯示週期一起傳進去——起始值看的是顯示週期，
+      // 不是加倍之後的 host 週期（原因與數字見 vr_predict.h）。沒帶 vrDispHz 時傳 0，行為和以前一樣。
+      const uint32_t display_us = p.disp_hz > 0 && p.disp_hz != p.hz ? 1000000u / static_cast<uint32_t>(p.disp_hz) : 0u;
+      const auto v2p = vr::predict::begin_session(period_us, config::vr.vsync_to_photons_us > 0 ? static_cast<uint32_t>(config::vr.vsync_to_photons_us) : 0u, display_us);
       c.vsync_to_photons_us = v2p.us;
       {
+        const auto hz_of = [](uint32_t us) {
+          return us ? 1e6 / us : 0.0;
+        };
         std::string src;
         switch (v2p.source) {
           case vr::predict::start_e::fixed:
@@ -224,14 +230,21 @@ namespace vr::orchestrator {
             src = "learned";
             break;
           case vr::predict::start_e::converted:
-            // 2026-10-05：學到的值依更新率分開存；這個更新率沒學過時由最接近的更新率換算
-            src = std::format("converted from the value learned at {:.1f} Hz", v2p.from_period_us ? 1e6 / v2p.from_period_us : 0.0);
+            // 2026-10-05：學到的值依更新率分開存；這個更新率沒學過時由最接近的更新率換算。
+            // 2026-10-10：比的是頭盔的顯示更新率（全速串流時和以前印的是同一個數字）
+            src = std::format("converted from the value learned at {:.1f} Hz", hz_of(v2p.from_display_us));
             break;
           case vr::predict::start_e::initial:
-            src = "default: period + 30 ms";
+            src = display_us ? "default: display period + 30 ms" : "default: period + 30 ms";
+            break;
+          case vr::predict::start_e::same_display:
+            // 2026-10-10：同一個顯示更新率、串流幀率不同（全速↔半速）學到的值直接沿用，不換算
+            src = std::format("same display rate: value learned at {:.1f} Hz stream", hz_of(v2p.from_period_us));
             break;
         }
-        BOOST_LOG(info) << "[VIPLE-VR-PREDICT] session start vsync_to_photons_us=" << v2p.us << " (" << src << ')';
+        // 右括號之前的格式不可以改（本機的腳本在解析）；新欄位一律加在後面
+        BOOST_LOG(info) << "[VIPLE-VR-PREDICT] session start vsync_to_photons_us=" << v2p.us << " (" << src << ')'
+                        << std::format(" stream={:.1f}Hz display={:.1f}Hz minSamples={}", hz_of(period_us), hz_of(display_us ? display_us : period_us), vr::predict::min_samples_for(period_us));
       }
       c.hmd_extrap_cap_us = 50000;
       c.ctrl_extrap_cap_us = 50000;

@@ -1885,9 +1885,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
             VipleStream 2.0: the headset's "seconds from vsync to photons", in microseconds, reported to SteamVR.
             SteamVR predicts the head pose a game renders with up to this point in time. A streamed frame is
             shown on the headset only after encoding, transport and decoding, so the default is adaptive: a
-            session starts at one display period plus 30 ms (or the value learned from the previous session),
-            and the server then adjusts it from the pose lag the client measures. Any value from 1000 to 200000
-            pins it and disables the adjustment. `0` selects the adaptive behaviour.
+            session starts at one display period of the headset plus 30 ms (or a value learned in an earlier
+            session), and the server then adjusts it from the pose lag the client measures. Any value from 1000
+            to 200000 pins it and disables the adjustment. `0` selects the adaptive behaviour.
             @note{Applies to VR sessions only.}
         </td>
     </tr>

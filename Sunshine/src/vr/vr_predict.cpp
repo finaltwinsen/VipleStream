@@ -15,7 +15,6 @@ namespace vr::predict {
   namespace {
     using steady_t = std::chrono::steady_clock;
 
-    constexpr uint16_t k_reliable_count = 60;  ///< 1 s 內至少這麼多樣本的視窗才用（樣本少的中位數不可靠）
     constexpr int32_t k_input_clamp_us = 20000;  ///< 每個視窗先夾到 ±20 ms（卡頓那一秒可到 +147 ms）
     constexpr int k_probe_windows = 3;  ///< 探測前、後各取幾個視窗平均
     constexpr auto k_settle = std::chrono::seconds(2);  ///< 探測改值後等多久才量
@@ -47,7 +46,8 @@ namespace vr::predict {
     };
 
     struct learned_t {
-      uint32_t period_us;
+      uint32_t period_us;  ///< host（串流）的週期
+      uint32_t display_us;  ///< 頭盔的顯示週期（全速串流＝period_us）
       uint32_t v2p_us;
     };
 
@@ -60,10 +60,12 @@ namespace vr::predict {
     phase_e g_phase = phase_e::off;
     runtime_e g_runtime = runtime_e::unknown;  ///< 行程內：SteamVR 是否採用中途改值
     int g_not_honored_streak = 0;  ///< 連續判不採用的 session 數
-    uint32_t g_period_us = 0;  ///< 目前 session 的顯示週期
+    uint32_t g_period_us = 0;  ///< 目前 session 的 host（串流）週期
+    uint32_t g_display_us = 0;  ///< 目前 session 的頭盔顯示週期（沒給＝g_period_us）
+    uint16_t g_min_samples = k_min_samples_hi;  ///< 目前 session 的樣本數門檻（樣本少的中位數不可靠；跟著串流幀率）
     uint32_t g_start_us = 0;  ///< session 起始值（SteamVR 一定在用的值）
     uint32_t g_cur_us = 0;  ///< 目前送給 driver 的值
-    std::vector<learned_t> g_learned;  ///< 行程內學到的值（依週期分開）：下一個 session 的起始值
+    std::vector<learned_t> g_learned;  ///< 行程內學到的值（依 host 的週期與顯示週期分開）：下一個 session 的起始值
     int g_warm = 0;  ///< 本 session 已丟掉的暖機視窗
     int64_t g_sum_us = 0;  ///< measure／verify／learn 的累積
     int g_n = 0;
@@ -95,24 +97,44 @@ namespace vr::predict {
       return a != 0 && b != 0 && std::abs(static_cast<double>(a) - static_cast<double>(b)) <= k_same_period_tol * static_cast<double>(std::max(a, b));
     }
 
-    learned_t *find_learned(uint32_t period_us) {
+    learned_t *find_learned(uint32_t period_us, uint32_t display_us) {
       for (auto &l : g_learned) {
-        if (same_period(l.period_us, period_us)) {
+        if (same_period(l.period_us, period_us) && same_period(l.display_us, display_us)) {
           return &l;
         }
       }
       return nullptr;
     }
 
-    /// 記下目前更新率學到的值
+    /// 沒有完全相符的值時的來源：顯示週期最接近的那一筆；同一個顯示更新率有兩筆（全速、半速各學過）時取 host 週期較接近的
+    const learned_t *nearest_learned(uint32_t period_us, uint32_t display_us) {
+      const auto dist = [](uint32_t a, uint32_t b) {
+        return std::llabs(static_cast<int64_t>(a) - static_cast<int64_t>(b));
+      };
+      const learned_t *best = nullptr;
+      for (const auto &l : g_learned) {
+        if (!best) {
+          best = &l;
+        } else if (same_period(l.display_us, best->display_us)) {
+          if (dist(l.period_us, period_us) < dist(best->period_us, period_us)) {
+            best = &l;
+          }
+        } else if (dist(l.display_us, display_us) < dist(best->display_us, display_us)) {
+          best = &l;
+        }
+      }
+      return best;
+    }
+
+    /// 記下目前（host 的週期, 顯示週期）學到的值
     void set_learned(uint32_t v2p_us) {
       if (g_period_us == 0) {
         return;
       }
-      if (auto *l = find_learned(g_period_us)) {
+      if (auto *l = find_learned(g_period_us, g_display_us)) {
         l->v2p_us = v2p_us;
       } else {
-        g_learned.push_back({g_period_us, v2p_us});
+        g_learned.push_back({g_period_us, g_display_us, v2p_us});
       }
     }
 
@@ -161,10 +183,19 @@ namespace vr::predict {
     return clamp_us(std::llround(f + (static_cast<double>(v2p_us) - f) * static_cast<double>(to_period_us) / static_cast<double>(from_period_us)));
   }
 
-  start_t begin_session(uint32_t period_us, uint32_t fixed_us) {
+  uint16_t min_samples_for(uint32_t period_us) {
+    if (period_us == 0) {
+      return k_min_samples_hi;
+    }
+    return static_cast<uint16_t>(std::clamp<long>(std::lround(0.5e6 / period_us), k_min_samples_lo, k_min_samples_hi));
+  }
+
+  start_t begin_session(uint32_t period_us, uint32_t fixed_us, uint32_t display_period_us) {
     std::lock_guard lk(g_mtx);
     g_sum_at = {};
     g_period_us = period_us;
+    g_display_us = display_period_us != 0 ? display_period_us : period_us;
+    g_min_samples = min_samples_for(period_us);
     g_warm = 0;
     if (fixed_us > 0) {
       g_phase = phase_e::off;
@@ -172,19 +203,20 @@ namespace vr::predict {
       return {fixed_us, start_e::fixed};
     }
     start_t s;
-    if (const auto *l = find_learned(period_us)) {
+    if (const auto *l = find_learned(period_us, g_display_us)) {
       s = {l->v2p_us, start_e::learned};
-    } else if (!g_learned.empty() && period_us != 0) {
-      // 別的更新率學過：取週期最接近的換算
-      const learned_t *best = &g_learned.front();
-      for (const auto &l2 : g_learned) {
-        if (std::llabs(static_cast<int64_t>(l2.period_us) - period_us) < std::llabs(static_cast<int64_t>(best->period_us) - period_us)) {
-          best = &l2;
-        }
+    } else if (!g_learned.empty() && g_display_us != 0) {
+      const learned_t *best = nearest_learned(period_us, g_display_us);
+      if (same_period(best->display_us, g_display_us)) {
+        // 同一個顯示更新率、只是串流幀率不同（全速↔半速）：直接沿用。換算式是用顯示更新率定出來的，
+        // host 的週期加倍時不適用（2026-10-10：33.7 ms 被換成 53.4 ms，整場超前約 23 ms）
+        s = {best->v2p_us, start_e::same_display, best->period_us, best->display_us};
+      } else {
+        // 別的顯示更新率學過：取顯示週期最接近的換算
+        s = {convert_for_period(best->v2p_us, best->display_us, g_display_us), start_e::converted, best->period_us, best->display_us};
       }
-      s = {convert_for_period(best->v2p_us, best->period_us, period_us), start_e::converted, best->period_us};
     } else {
-      s = {clamp_us(static_cast<int64_t>(period_us) + k_default_extra_us), start_e::initial};
+      s = {clamp_us(static_cast<int64_t>(g_display_us) + k_default_extra_us), start_e::initial};
     }
     g_start_us = g_cur_us = s.us;
     if (g_runtime == runtime_e::honored) {
@@ -200,12 +232,12 @@ namespace vr::predict {
   }
 
   std::optional<result_t> on_pose_lag(int16_t lag_100us, uint16_t count, steady_t::time_point now) {
-    if (count < k_reliable_count || lag_100us == k_lag_none) {
+    if (lag_100us == k_lag_none) {
       return std::nullopt;
     }
     std::lock_guard lk(g_mtx);
-    if (g_phase == phase_e::off) {
-      return std::nullopt;
+    if (count < g_min_samples || g_phase == phase_e::off) {
+      return std::nullopt;  // 樣本不夠（門檻跟著這個 session 的串流幀率），或固定值、已停調
     }
     if (g_warm < k_warmup_windows) {
       ++g_warm;  // 暖機：遊戲載入、host 掉拍時的落後不可信
@@ -344,7 +376,7 @@ namespace vr::predict {
       enter_measure();  // 探測沒送出去：重新量
     } else if (g_phase == phase_e::track) {
       g_ema_us += applied;
-      if (auto *l = find_learned(g_period_us); l && l->v2p_us == r.to_us) {
+      if (auto *l = find_learned(g_period_us, g_display_us); l && l->v2p_us == r.to_us) {
         l->v2p_us = r.from_us;
       }
       if (g_sum_updates > 0) {
@@ -378,6 +410,8 @@ namespace vr::predict {
     g_runtime = runtime_e::unknown;
     g_not_honored_streak = 0;
     g_period_us = 0;
+    g_display_us = 0;
+    g_min_samples = k_min_samples_hi;
     g_start_us = g_cur_us = 0;
     g_learned.clear();
     g_warm = 0;

@@ -989,10 +989,20 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
                                                                                     ← client 10 s（§VR-POSEERR）：0x81 算繪姿態對「該幀實際顯示時的頭部姿態」的差。pos 是頭盔
                                                                                        重投影修不掉的平移偏差；lag 是算繪位置在頭部軌跡上對應的時間差（延後 100 ms 估，正＝落後），
                                                                                        只算頭部 ±50 ms 內移動 ≥ 10 mm、而且是第一次顯示的幀（同一張影像重複顯示時誤差照算、不估 lag）
-[VIPLE-VR-PREDICT] session start vsync_to_photons_us=N (fixed by config|learned|converted from the value learned at X Hz|default: period + 30 ms)
-                                                                                    ← server（§VR-PREDICT）。2026-10-05 起學到的值依更新率分開存；這個更新率沒學過時由最接近的更新率
-                                                                                       換算（v' = 14 ms + (v − 14 ms)·T'/T）
-[VIPLE-VR-PREDICT] probe: vsync_to_photons_us A -> B (pose lag mean of 3 windows x.x ms)   ← 探測：session 開頭 10 個可靠視窗（≥ 60 樣本）先丟掉（暖機），之後 3 個視窗
+[VIPLE-VR-PREDICT] session start vsync_to_photons_us=N (<來源>) stream=X.XHz display=Y.YHz minSamples=K
+                                                                                    ← server（§VR-PREDICT）。<來源>＝fixed by config｜learned｜converted from the value learned at X Hz
+                                                                                       ｜default: period + 30 ms，2026-10-10 起多兩種：same display rate: value learned at X Hz stream、
+                                                                                       default: display period + 30 ms（右括號之前的格式沒變，新欄位都加在後面）。
+                                                                                       2026-10-05 起學到的值依更新率分開存；這個更新率沒學過時由最接近的更新率換算
+                                                                                       （v' = 14 ms + (v − 14 ms)·T'/T）。2026-10-10 起比的是頭盔的顯示更新率（半速串流時 host 的週期
+                                                                                       加倍、顯示週期沒變）：學到的值依（串流, 顯示）存；顯示更新率相同、只是串流幀率不同（全速↔半速）
+                                                                                       的值直接沿用（same display rate…，X＝那個值是在多少 Hz 的串流學到的），不同才換算（converted…
+                                                                                       的 X 是來源的顯示更新率，全速時和以前印的一樣）；沒學過任何值時是顯示週期＋30 ms
+                                                                                       （半速印 display period，38.3 ms；之前用 host 的週期是 46.7 ms）。
+                                                                                       stream／display＝host 串流與頭盔顯示的更新率（client 沒帶 vrDispHz 時兩個相同）；minSamples＝
+                                                                                       這一場一個 1 s 視窗至少要幾筆樣本才採用：串流半秒的幀數，夾在 20～60（120 Hz 60、90 Hz 45、
+                                                                                       72 Hz 36、60 Hz 30）。2026-10-10 之前固定 60，半速每秒只有 41～45 筆，整場不調整
+[VIPLE-VR-PREDICT] probe: vsync_to_photons_us A -> B (pose lag mean of 3 windows x.x ms)   ← 探測：session 開頭 10 個可靠視窗（≥ minSamples 筆樣本）先丟掉（暖機），之後 3 個視窗
                                                                                        平均 ≥ 1.5 ms、且 3 個視窗最大差 ≤ 6 ms 時往補償方向改 8～10 ms
 [VIPLE-VR-PREDICT] SteamVR applies mid-session changes (pose lag x.x -> y.y ms after A -> B us); tracking
                                                                                     ← 探測後 2 s 再取 3 個視窗平均，落後往預期方向移動 ≥ 步長一半：之後改追蹤（同一個行程的下一個 session 直接追蹤）

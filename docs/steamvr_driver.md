@@ -131,7 +131,7 @@ kill server 之後約 33 ms pose 就失效（V4 實測，門檻 1 s）；新 ser
 
 **姿態預測時間（§VR-PREDICT，2.0.0）**：HMD 的 `Prop_SecondsFromVsyncToPhotons` 決定 SteamVR 把遊戲用的頭部姿態預測到
 多遠。session 開始時取 session config 的 `vsync_to_photons_us`（server `vr::predict` 決定：設定檔固定值、上一個
-session 學到的值，或一個週期＋30 ms）；串流中 server 依 client 回報的姿態落後送 STATE `SET_V2P`（0x05，arg＝µs，
+session 學到的值，或頭盔的一個顯示週期＋30 ms）；串流中 server 依 client 回報的姿態落後送 STATE `SET_V2P`（0x05，arg＝µs，
 1000～200000，超出範圍 driver 忽略並記 `ipc state-ignored reason=range`），driver 在 RunFrame 改屬性並送
 `VREvent_PropertyChanged`，log `set-v2p us=<N>`。舊的 `DEV_SET_V2P`（0x04）只在 selftest 的 dev mode 有效。
 重新握手（新 generation）時屬性回到 session config 的值。
@@ -139,6 +139,11 @@ session 學到的值，或一個週期＋30 ms）；串流中 server 依 client 
 3 個視窗最大差 > 6 ms 視為不穩（探測前不探測、探測後退回起始值重量）；「不採用」只停該 session，連續兩個 session 才
 不再探測；學到的值依更新率分開存，沒學過的更新率由最接近的換算（`v' = 14 ms + (v − 14 ms)·T'/T`）。設定檔固定值時
 （目前 `<host>` 是 `vr_vsync_to_photons_us = 55000`）整段不跑。
+2026-10-10 修正（半速串流：頭盔 120 Hz 顯示、host 跑 60 Hz；兩場配戴場次）：可靠視窗的樣本數門檻由固定 60 改成串流
+半秒的幀數（夾在 20～60；60 Hz 串流是 30）——半速每秒只有 41～45 筆樣本，原本整場沒有一個視窗被採用。換算式與預設值
+看的是頭盔的顯示週期，client 以 `/launch` 的 `vrDispHz` 告知（半速才帶）：學到的值依（host 的週期, 顯示週期）存，顯示
+更新率相同、只是串流幀率不同（全速↔半速）的值直接沿用、不換算——原本 120 Hz 學到的 33.7 ms 在半速被換成 53.4 ms，
+整場姿態超前約 23 ms。不帶 `vrDispHz` 的舊 client 開半速時起始值照舊偏大，靠追蹤收回來。
 
 **frame ring 交還（§VR-RING-RELEASE，2.0.0）**：driver 發布一幀後要等 server 的 consumedFence 到值才會重用那個 slot。
 server 換消費者（VR 斷線後 `/resume`、encoder 重建）時，ring 裡最後幾幀可能已過期 1 s 以上；server 用
