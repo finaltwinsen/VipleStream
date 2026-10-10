@@ -276,6 +276,12 @@ namespace config {
     /// （100–250）。串流尺寸決定編碼、傳輸、解碼的負擔（也就是延遲），算圖尺寸決定畫面細節；Steam 內建串流是
     /// 算圖 2160、編碼寬度 1152。100＝舊行為（兩者相同）。改了要等 SteamVR 重啟才生效。
     int render_scale_pct = 100;
+    /// §VR-DIRECT-KICK（2026-10-10）：vr_direct_kick（disabled 預設）。enabled＝host 直通落在「多一格」的時序（合成器送的是
+    /// 遊戲上一格就交好的幀，多一個 host 週期的延遲）滿 3 秒時，bridge 自動讓 driver 的 PostPresent 立刻返回一小段
+    /// （週期 × 1.25，夾在 20～40 ms），把它推回「等遊戲這一格」；之後確認有沒有成功，沒有就退避再試
+    /// （判斷都在 src/vr/vr_direct_kick.h）。只在 host 的週期 ≥ 11 ms（約 90 Hz 以下，例如半速串流的 60 Hz）時動作。
+    /// 開著時 WELCOME 會帶 dev 旗標（driver 才接受那個節拍模式）。只有 Windows 的 PCVR 會用到。
+    bool direct_kick = false;
     /// §VR-A-KICK 的實驗（dev，2026-10-10）：vr_dev_kick_every_s（0 預設＝關，5–600）。每隔這麼多秒讓 driver 的 PostPresent
     /// 立刻返回 vr_dev_kick_ms 毫秒（1–200，預設 20），用來確認 host 直通的時序能不能由「多一格」推回「等遊戲這一格」
     /// （docs/steam_frame_client.md「host 直通時的兩種時序」）。開著時 WELCOME 會帶 dev 旗標（driver 才接受這個節拍模式）。

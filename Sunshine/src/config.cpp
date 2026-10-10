@@ -1545,8 +1545,8 @@ namespace config {
     // VipleStream 2.0 §VR（M1a）：vr_pcvr 預設 disabled；stub 只供開發驗證。
     // enum 與整數選項（vr_opt::*_from_view、vr_opt::int_strict_f）值寫錯一律警告並維持預設
     // （壞值絕不靜靜地變成「開啟」或「關閉安全網」）。
-    // 六個布林選項（vr_latch_acquire、vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、vr_multilink_repair、
-    // vr_capture_late）走 vr_opt::bool_strict_f（2026-10-08）：只接受明確的開／關字樣，其他警告並維持預設。
+    // 七個布林選項（vr_latch_acquire、vr_direct_kick、vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、
+    // vr_multilink_repair、vr_capture_late）走 vr_opt::bool_strict_f（2026-10-08）：只接受明確的開／關字樣，其他警告並維持預設。
     // vr_multilink_fault 是原樣字串，格式錯誤要到多連線的 VR session 建立時才警告（stream.cpp）；
     // vr_latch_ab 也是原樣字串，VR session 建立時才驗。
     generic_f(vars, "vr_pcvr", vr.pcvr, vr_opt::pcvr_from_view);
@@ -1561,6 +1561,8 @@ namespace config {
     vr_opt::bool_strict_f(vars, "vr_latch_acquire", vr.latch_acquire);
     vr_opt::int_strict_f(vars, "vr_latch_acquire_ppm", vr.latch_acquire_ppm, 1000, 5000, false);
     vr_opt::int_strict_f(vars, "vr_render_scale_pct", vr.render_scale_pct, 100, 250, false);
+    // §VR-DIRECT-KICK：兩個平台都認得這個 key（Linux 沒有 PCVR，設了沒有作用，但不會被當成不認得的選項）
+    vr_opt::bool_strict_f(vars, "vr_direct_kick", vr.direct_kick);
     vr_opt::int_strict_f(vars, "vr_dev_kick_every_s", vr.dev_kick_every_s, 5, 600, true);
     vr_opt::int_strict_f(vars, "vr_dev_kick_ms", vr.dev_kick_ms, 1, 200, false);
     vr_opt::bool_strict_f(vars, "vr_ctrl_pose_offset", vr.ctrl_pose_offset);
