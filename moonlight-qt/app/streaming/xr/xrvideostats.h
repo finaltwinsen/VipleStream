@@ -30,7 +30,7 @@ namespace xrvideostats {
 // 影像 render thread 這一側的 10 s 視窗（[VIPLE-XR] 10s video 行尾那幾欄）。相位是 LDIAG 的座標（顯示格點之後多久，µs），
 // 沒有格點時不記
 struct RenderDiag {
-    std::vector<uint32_t> mboxUs;            // 解碼幀在 mailbox 裡等了多久（放進去 → 影像 render thread 取出）
+    std::vector<uint32_t> mboxUs;            // 解碼幀在 mailbox 裡等了多久（放進去 → 影像 render thread 取出）；只記畫出來並發布的
     std::vector<uint32_t> swWaitUs;          // xrWaitSwapchainImage 這個呼叫花多久
     std::vector<uint32_t> subPhaseUs;        // 送出（pl_vulkan_hold_ex 返回）的相位
     std::vector<uint32_t> donePhaseUs;       // GPU 做完的相位

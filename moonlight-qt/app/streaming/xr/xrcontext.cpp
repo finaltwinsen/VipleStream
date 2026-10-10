@@ -2243,7 +2243,7 @@ void XrContext::frameThreadMain()
             // 放在這裡（這一格已經送出去），不放在挑影像到 xrEndFrame 之間
             m_LatchDiag.logDue = false;
             pcvrLatchDiagLog();
-            pcvrLoopDiagLog();  // §VR-XRLOOP：同一個視窗，緊接著印
+            pcvrLoopDiagLog();  // §VR-XRLOOP：同一個視窗，接在 LDIAG 的那一行（或兩行）後面印
         }
 
         double lateRefreshMeasuredHz = 0.0;  // > 0：鎖外呼叫 requestRefreshLate()
@@ -2936,7 +2936,8 @@ void XrContext::pcvrLatchDiagLog()
     }
 }
 
-// §VR-XRLOOP：10 s 一行，緊接在 [VIPLE-VR-LDIAG] 10s 之後（同一個視窗、同一個 ab=）。frame loop 每一格的時刻；
+// §VR-XRLOOP：10 s 一行，和 [VIPLE-VR-LDIAG] 10s 同一格印、排在它後面（同一個視窗、同一個 ab=；每第 6 個視窗中間
+// 隔著 pcvrLatchDiagLog 印的那一行 60s gpu-by-phase，所以配對要找「前一行 LDIAG 10s」）。frame loop 每一格的時刻；
 // 相位都是 LDIAG 的座標（原點是預測顯示時刻的格點；換成距 vblank 多久見 xrphase.h）。
 //  - wakePhase：xrWaitFrame 返回的相位（p50 是環狀的中位數；p95、max 從 p50 往晚的方向數，晚到繞過格點的那一格會
 //    超過一個週期）。latchLead／endLead：挑影像／xrEndFrame 返回的那一刻到這一格的預測顯示時刻

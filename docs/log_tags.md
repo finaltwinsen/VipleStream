@@ -852,7 +852,9 @@ frame loop（XR 桌面也有）
 [VIPLE-XR] xrBeginFrame returned XR_FRAME_DISCARDED (N so far)                ← warning，一場最多 10 行：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。
                                                                                  它是成功碼，流程照常；以前只檢查失敗碼，這個結果看不到
 [VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=…/…/… us | latchLead p50/p05=…/… ms endLead p50/p05/min=…/…/… ms | span p50/p95/max=…/…/… us | beginCall max=… us endCall p50/p95/max=…/…/… us | ahead p50/min/max=…/…/… ms[ (approx)] | waitShort=N | chain dec/render/slack/lead p50=…/…/…/… ms sum=… ms | tail p50/max=…/… us[ ab=<0|1>]
-                                                                              ← PCVR，每 10 秒一行，緊接在 [VIPLE-VR-LDIAG] 10s 之後（視窗與 ab 都相同）。相位是 LDIAG 相位。
+                                                                              ← PCVR，每 10 秒一行，和 [VIPLE-VR-LDIAG] 10s 同一格印、排在它後面（視窗與 ab 都相同）。
+                                                                                 每第 6 個視窗兩行中間隔著一行 [VIPLE-VR-LDIAG] 60s gpu-by-phase，所以要把兩行配成一對就找
+                                                                                 「前一行 LDIAG 10s」，不要找「上一行」。相位是 LDIAG 相位。
                                                                                  order＝frame loop 的呼叫順序，目前固定是 legacy；
                                                                                  wakePhase＝xrWaitFrame 返回的相位（預期：120 Hz 約 4840，也就是距 vblank 0.22 ms）。p50 是
                                                                                  環狀的中位數；p95、max 是從 p50 往晚的方向數的，不折回——晚到繞過格點的那一格會讓 max 超過
@@ -891,7 +893,10 @@ frame loop（XR 桌面也有）
                                                                                  resc＝其中在那個 latch 當下已經送出的（GPU 工作都送出去了，比 latch 早 150 µs 以上）——那一格就
                                                                                  發布的話顯示得到；rescBy＝它們晚多久（前兩格≈多等一下就等得到的張數）；
                                                                                  flip＝沒有等待格、但上一格的 latch 當下已經送出的新影像——一送出就發布的話會早一格顯示、搶掉
-                                                                                 前一張的格（半速＋補幀時搶掉的是合成的那一格）。
+                                                                                 前一張的格（半速＋補幀時搶掉的是合成的那一格）。它數的是張數，不是會多搶的格數：整條對位
+                                                                                 晚一格的那段期間，每一張都在上一格的 latch 之前就送出了，所以每一張都算一次（數字會接近
+                                                                                 影像的張數）——那種狀態下一送出就發布只是整條早一格、少一個重複格。數字大＝對位停在晚的
+                                                                                 那一邊；要不要做提早發布只看 resc。
                                                                                  讀法：waitBy 落在後面幾格（≥2500）的不一定是晚到，前一張提早搶格之後照原本節拍來的下一張也
                                                                                  落在那裡——不拿 waitBy 的總數當晚到張數，看前面幾格的形狀。waitNew − resc 裡有一塊是補包拖晚的幀，
                                                                                  大小看同一輪 [VIPLE-VR-MTP10] 的 latchSkip。frame thread 沒回報的格之後的那一張、開場的第二張
@@ -901,7 +906,9 @@ frame loop（XR 桌面也有）
                    沒有時間換算擴充、或那一格換算失敗時，那幾張影像不記相位——不拿「返回後兩個週期」的估計值充數）
 [VIPLE-XR] 10s video …原樣… | mbox p50/p95=…/… ms swWait p95/max=…/… ms swNotOk=N rel max=… us | sub/done p50=…/… us coll=P% queued=P%[ synthSub/synthDone p50=…/… us][ ab=<0|1|m>]
                                                                               ← 行尾新增。mbox＝解碼幀在 mailbox 裡等多久（放進去到影像 render thread 取出；延遲鏈沒有含的
-                                                                                 那一段。補幀開著時影像 render thread 還在做補幀那一批，新的一幀進不來，p95 會比較長）；
+                                                                                 那一段。補幀開著時影像 render thread 還在做補幀那一批，新的一幀進不來，p95 會比較長）。
+                                                                                 只記畫出來並發布的那幾張：沒有 meta 被丟的、stall 測試丟掉的、acquire／render 失敗的幀不在
+                                                                                 裡面（它們算在同一行的 noMetaDropped／stallDropped／errors）；
                                                                                  swWait＝xrWaitSwapchainImage 這個呼叫花多久；swNotOk＝它回的不是 XR_SUCCESS 的次數（等滿
                                                                                  100 ms 回 XR_TIMEOUT_EXPIRED 也算；正常是 0。只量，流程不看它）；
                                                                                  rel＝xrReleaseSwapchainImage 這個呼叫的最大值；
@@ -949,8 +956,9 @@ decoder 執行緒（VR 走真 XR 才有）
   格點）；頭盔上 gpu-trace 的時間軸是 **vblank 相位**。在 Steam Frame 的 120 Hz 量到預測顯示時刻落在 vblank 之後 3.716 ms，
   所以 vblank 相位＝(LDIAG 相位＋3716) 對週期取餘（例：latch 的 LDIAG 相位 2750 µs＝距 vblank 6.47 ms）。這個常數只量過
   120 Hz，別的更新率不適用。
-- 相位是環，`sub`／`done`／`synthSub`／`synthDone` 的 p50 取的是**環狀的中位數**：到所有樣本的環上距離總和最小的位置，也就是
-  前半圈、後半圈各有一半樣本的那一點（做法：把環從這個視窗的中心的正對面切開，再照順序取中間那一筆）。不可以照數值的
+- 相位是環，`sub`／`done`／`synthSub`／`synthDone`（與 `[VIPLE-VR-XRLOOP]` 的 `wakePhase`）的 p50 取的是**環狀的中位數**：
+  到所有樣本的環上距離總和最小的位置，也就是前半圈、後半圈各有一半樣本的那一點（做法：把環從這個視窗的中心的
+  正對面切開，再照順序取中間那一筆）。不可以照數值的
   大小取——影像做完的相位散滿整圈、補幀那一批做完的時刻又正好橫跨 0／週期的接縫，照數值取的中位數看接縫落在哪裡會差
   一到四毫秒（拿既有場次的資料重建：`done` 差 0.8 ms 上下，`synthDone` 多數視窗差 1 ms 以上）。資料散得很開時這個數字每個
   視窗會差幾百微秒，比兩邊時看多個視窗的中位數。`latchPhase` 是既有欄位，仍是照數值取的（它只擠在一小段，沒有差別）。
