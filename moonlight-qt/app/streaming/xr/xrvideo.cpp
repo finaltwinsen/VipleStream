@@ -585,9 +585,9 @@ void XrVideo::saveDump(const QImage& img, const QString& path, int srcW, int src
     }
 }
 
-void XrVideo::dumpTexture(pl_tex tex)
+void XrVideo::dumpTexture(pl_tex tex, const QString& path)
 {
-    saveDump(readbackTexture(tex), m_Config.dumpPath, tex->params.w, tex->params.h);
+    saveDump(readbackTexture(tex), path, tex->params.w, tex->params.h);
 }
 
 bool XrVideo::renderNewFrame(AVFrame* frame)
@@ -725,12 +725,30 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     }
 
     m_TotalDrawn += rendered ? 1 : 0;
-    // §VR-SYNTH：開著合成時等到第 2400 張之後、而且那一張真的有合成影像才存（存第二張：上半真的、下半合成）
-    const bool wantDump = rendered && !m_Dumped && !m_Config.dumpPath.isEmpty() &&
-                          m_TotalDrawn >= static_cast<uint64_t>(m_Config.synth ? 2400 : std::max(1, m_Config.dumpAfterFrames));
+    // §VR-SYNTH：開著合成時等到第 2400 張之後、而且那一張真的有合成影像才存（存第二張：上半真的、下半合成）。
+    // 2026-10-10：開著合成時一共存 kSynthDumpPairs 組、每 480 張一組（半速 60 Hz 是每 8 秒）——只看一組抓不到偶發的錯；
+    // 第 2 組起檔名在副檔名之前加 -2、-3…。沒開合成時照舊只存一張。
+    const int dumpGoal = m_Config.synth ? kSynthDumpPairs : 1;
+    const uint64_t dumpAt = m_Config.synth ? 2400u + 480u * static_cast<uint64_t>(m_DumpsDone)
+                                           : static_cast<uint64_t>(std::max(1, m_Config.dumpAfterFrames));
+    const bool wantDump = rendered && m_DumpsDone < dumpGoal && !m_Config.dumpPath.isEmpty() && m_TotalDrawn >= dumpAt;
+    // 這一組的檔名：第 1 組用原本的路徑，之後在副檔名之前插 -<第幾組>；suffix 再接在後面（第一次發布的那一張是 -first）
+    auto dumpPathFor = [&](const char* suffix) {
+        QString p = m_Config.dumpPath;
+        QString ins = m_DumpsDone > 0 ? QStringLiteral("-%1").arg(m_DumpsDone + 1) : QString();
+        ins += QLatin1String(suffix);
+        const int dot = p.lastIndexOf(QLatin1Char('.'));
+        if (dot > p.lastIndexOf(QLatin1Char('/'))) {
+            p.insert(dot, ins);
+        }
+        else {
+            p += ins;
+        }
+        return p;
+    };
     if (wantDump && !m_Config.synth) {
-        m_Dumped = true;
-        dumpTexture(tex);  // 必須在 hold 之前（download 需要 libplacebo 仍持有影像）
+        dumpTexture(tex, dumpPathFor(""));  // 必須在 hold 之前（download 需要 libplacebo 仍持有影像）
+        m_DumpsDone++;
     }
     // §VR-SYNTH 的檢查（dev）：開著合成時，第一次發布的這一張（只有真的）也讀回來，等下面確定這一幀有合成影像
     // 再和第二張一起存——兩張的上半應該一樣。2026-10-10：注視點還原＋合成一起開時這一張畫錯過（renderUnwarp），
@@ -838,18 +856,10 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     t2.planes[0].texture = tex2;
     const bool r2 = renderSynth(&mapped, &t2, tex2, frame->width, frame->height, hasMeta, meta, frame->pts, &synthOk, &synthMeta);
     if (r2 && wantDump && (synthOk || m_SynthFailed)) {
-        m_Dumped = true;
-        dumpTexture(tex2);
+        dumpTexture(tex2, dumpPathFor(""));
         // 第一次發布的那一張存成 <路徑>-first.png（副檔名之前插 -first）
-        QString firstPath = m_Config.dumpPath;
-        const int dot = firstPath.lastIndexOf(QLatin1Char('.'));
-        if (dot > firstPath.lastIndexOf(QLatin1Char('/'))) {
-            firstPath.insert(dot, QStringLiteral("-first"));
-        }
-        else {
-            firstPath += QStringLiteral("-first");
-        }
-        saveDump(firstDump, firstPath, firstDumpW, firstDumpH);
+        saveDump(firstDump, dumpPathFor("-first"), firstDumpW, firstDumpH);
+        m_DumpsDone++;
     }
     const int fin2 = finishGpu(tex2);
     if (fin2 < 0) {
