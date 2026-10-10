@@ -19,6 +19,7 @@
 #include "probeutil.h"
 #include "backend/sfenv.h"
 #include "streaming/xr/xrlatchstats.h"  // §VR-LDIAG：--selftest-latch（header-only，沒有 OpenXR 的建置也有）
+#include "streaming/xr/xrphase.h"       // §VR-XRLOOP：相位換算（同上，--selftest-latch 接著跑它的案例）
 #include "streaming/xr/xrruntimejson.h"
 
 #ifdef HAVE_OPENXR
@@ -366,14 +367,17 @@ int runXrProbe(const XrProbeOptions& options)
         root[QStringLiteral("probe")] = QStringLiteral("xr-probe");
         root[QStringLiteral("mode")] = QStringLiteral("selftest-latch");
         QJsonArray cases;
-        const int failures = xrlatch::selfTest([&](const char* name, bool ok, const std::string& detail) {
+        const auto report = [&](const char* name, bool ok, const std::string& detail) {
             ProbeUtil::printLine(kTag, "selftest-latch %s %s (%s)", ok ? "PASS" : "FAIL", name, detail.c_str());
             QJsonObject c;
             c[QStringLiteral("name")] = QLatin1String(name);
             c[QStringLiteral("pass")] = ok;
             c[QStringLiteral("detail")] = QString::fromStdString(detail);
             cases.append(c);
-        });
+        };
+        // 純邏輯的 header 各有一個 selfTest()，依序跑（先 xrlatchstats.h 原有的，其餘接在後面）
+        int failures = xrlatch::selfTest(report);
+        failures += xrphase::selfTest(report);
         ProbeUtil::printLine(kTag, "selftest-latch: %lld case(s), %d failure(s)", static_cast<long long>(cases.size()), failures);
         root[QStringLiteral("cases")] = cases;
         root[QStringLiteral("failures")] = failures;

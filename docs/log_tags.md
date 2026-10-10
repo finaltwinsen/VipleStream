@@ -848,7 +848,17 @@ frame loop（XR 桌面也有）
 [VIPLE-XR] 10s frames=… …原樣… stale=N discarded=N                            ← 行尾新增：這 10 秒 xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（正常是 0）
 [VIPLE-XR] xrBeginFrame returned XR_FRAME_DISCARDED (N so far)                ← warning，一場最多 10 行：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。
                                                                                  它是成功碼，流程照常；以前只檢查失敗碼，這個結果看不到
+
+自測
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> phase-…                           ← `xr-probe --selftest-latch` 在 xrlatchstats.h 原有的案例之後接著跑 xrphase.h 的：相位換算
+                                                                                 （LDIAG 相位 ↔ vblank 相位）、120 Hz 的判斷、交出相位的分類、延遲鏈與 events 的算式。
+                                                                                 原有案例的輸出不變，最後一行的案例數變多
 ```
+
+- 相位有兩種座標：這份文件裡 `latchPhase`、`gpu-by-phase` 與這一節新增的相位欄位都是 **LDIAG 相位**（原點是預測顯示時刻的
+  格點）；頭盔上 gpu-trace 的時間軸是 **vblank 相位**。在 Steam Frame 的 120 Hz 量到預測顯示時刻落在 vblank 之後 3.716 ms，
+  所以 vblank 相位＝(LDIAG 相位＋3716) 對週期取餘（例：latch 的 LDIAG 相位 2750 µs＝距 vblank 6.47 ms）。這個常數只量過
+  120 Hz，別的更新率不適用。
 
 ### 探測的開始與結束行
 
