@@ -857,7 +857,8 @@ frame loop（XR 桌面也有）
                                                                                  span＝xrWaitFrame 返回到 xrEndFrame 返回（SteamVR 自己記的 ApplicationTime CPU 最貼近這一段）；
                                                                                  beginCall／endCall＝xrBeginFrame、xrEndFrame 這兩個呼叫本身花多久；
                                                                                  ahead＝這一格的預測顯示時刻 − 返回當下，逐格的值（`10s pcvr` 的 predictAhead 是平滑過的）。
-                                                                                 max 多出一個週期＝runtime 把預測往後推了一格；沒有時間換算擴充時是估計值，標 (approx)；
+                                                                                 max 多出一個週期＝runtime 把預測往後推了一格；沒有時間換算擴充時是估計值，標 (approx)
+                                                                                 （有擴充、某一格卻換不出來時，那一格的 wakePhase／latchLead／endLead／ahead 都不記）；
                                                                                  waitShort＝相鄰兩次 xrWaitFrame 返回的間隔不到半格的次數（正常是 0）；
                                                                                  chain＝延遲鏈：dec（解碼：DU 進佇列到解出）＋render（影像 render thread 開始處理到 GPU 做完）
                                                                                  ＋slack（GPU 做完到挑影像，可以是負的）＋lead（挑影像到預測顯示時刻）各自的 p50 與四項的和。

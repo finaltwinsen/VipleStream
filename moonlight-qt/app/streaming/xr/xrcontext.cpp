@@ -3084,18 +3084,19 @@ void XrContext::pcvrLoopDiag(uint64_t wakeNs, uint64_t latchNs, uint64_t endCall
     }
     auto& d = m_LoopDiag;
     auto sat32 = [](uint64_t v) { return static_cast<uint32_t>((std::min<uint64_t>)(v, 0xffffffffu)); };
-    // 這一格自己的預測顯示時刻（client steady 時鐘），pcvrAfterWaitFrame 在這一格開頭記的
+    // 這一格自己的預測顯示時刻（client steady 時鐘），pcvrAfterWaitFrame 在這一格開頭記的。有時間換算擴充、這一格卻
+    // 換不出來的話，它只是「返回後約兩個週期」的估計值：對它算的相位與提前量都不記，免得把 min／max 拉成假的
+    // （沒有擴充時每一格都是估計值，照記，行尾標 approx）
     const uint64_t pdtNs = m_PcvrTiming.predictedDisplayClientNs;
-    d.wakePhaseUs.push_back(xrphase::phaseUs(wakeNs / 1000ull, pdtNs / 1000ull, sat32(periodNs / 1000ull)));
-    d.latchLeadUs.push_back(sat32(pdtNs > latchNs ? (pdtNs - latchNs) / 1000ull : 0));
-    d.endLeadUs.push_back(sat32(pdtNs > endNs ? (pdtNs - endNs) / 1000ull : 0));
+    if (d.frameAheadExact || m_TimeConv == nullptr) {
+        d.wakePhaseUs.push_back(xrphase::phaseUs(wakeNs / 1000ull, pdtNs / 1000ull, sat32(periodNs / 1000ull)));
+        d.latchLeadUs.push_back(sat32(pdtNs > latchNs ? (pdtNs - latchNs) / 1000ull : 0));
+        d.endLeadUs.push_back(sat32(pdtNs > endNs ? (pdtNs - endNs) / 1000ull : 0));
+        d.aheadUs.push_back(sat32(d.frameAheadNs > 0 ? static_cast<uint64_t>(d.frameAheadNs) / 1000ull : 0));
+    }
     d.spanUs.push_back(sat32(endNs > wakeNs ? (endNs - wakeNs) / 1000ull : 0));
     d.endCallUs.push_back(sat32(endNs > endCallNs ? (endNs - endCallNs) / 1000ull : 0));
     d.beginCallMaxUs = (std::max)(d.beginCallMaxUs, sat32(m_DiagBeginNs / 1000ull));
-    // 有時間換算擴充時，這一格換不出來（只有「約兩個週期」的估計值）就不記，免得把 min 拉成假的
-    if (d.frameAheadExact || m_TimeConv == nullptr) {
-        d.aheadUs.push_back(sat32(d.frameAheadNs > 0 ? static_cast<uint64_t>(d.frameAheadNs) / 1000ull : 0));
-    }
     if (d.lastWakeNs != 0 && wakeNs > d.lastWakeNs && wakeNs - d.lastWakeNs < periodNs / 2) {
         d.waitShort++;
     }
