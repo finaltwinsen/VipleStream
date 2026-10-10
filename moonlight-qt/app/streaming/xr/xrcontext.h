@@ -50,6 +50,7 @@
 
 #include "xrinput.h"
 #include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Classifier（header-only，不依賴 OpenXR）
+#include "xrphase.h"       // §VR-XRLOOP：相位換算、xrphase::RankScan（header-only，不依賴 OpenXR）
 #include "xrvrcontrollers.h"
 
 class XrVideo;
@@ -618,6 +619,7 @@ private:
         uint64_t lastWakeNs = 0;            // 上一格 xrWaitFrame 返回的時刻
         int64_t frameAheadNs = 0;           // 這一格的 ahead（pcvrAfterWaitFrame 設）
         bool frameAheadExact = false;       //   是換算出來的，不是「約兩個週期」的估計值
+        xrphase::RankScan rank;             // 印 10 s 行時算分位數用的（緩衝區留著重用）
         // 120 Hz、10 s 約 1200 筆。bringUp 先配好：slack10s／render10s 是在挑影像到 xrEndFrame 之間推進去的，
         // 那一段不可以配置記憶體
         void reserveWindow()
@@ -627,6 +629,7 @@ private:
             }
             slack10s.reserve(2048);
             dec1s.reserve(16);
+            rank.prepare();
         }
     } m_LoopDiag;
     void pcvrLoopDiag(uint64_t wakeNs, uint64_t latchNs, uint64_t endCallNs, uint64_t endNs, uint64_t periodNs);

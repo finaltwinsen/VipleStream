@@ -917,11 +917,12 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
 
 自測
-[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑三組、一共 52 個案例：原有的 27 個（輸出不變）；
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑三組、一共 53 個案例：原有的 27 個（輸出不變）；
                                                                                  `latch-wait-…`／`latch-flip-…`／`latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到
                                                                                  計數：差一點、真的晚、150 µs 的邊界、半速、基準過期、兩張擠在同一格、沒有送出時刻、分格的
-                                                                                 邊界、隨機腳本的自洽）；`phase-…` 10 個（xrphase.h：LDIAG 相位 ↔ vblank 相位、120 Hz 的判斷、
-                                                                                 交出相位的分類、延遲鏈與 events 的算式）
+                                                                                 邊界、隨機腳本的自洽）；xrphase.h 的 11 個：`phase-…` 10 個（LDIAG 相位 ↔ vblank 相位、
+                                                                                 120 Hz 的判斷、交出相位的分類、延遲鏈與 events 的算式）與 `rank-scan-matches-sort`（10 秒行
+                                                                                 那些分位數的算法，逐一和排序的結果比對）
 ```
 
 - 相位有兩種座標：這份文件裡 `latchPhase`、`gpu-by-phase` 與這一節新增的相位欄位都是 **LDIAG 相位**（原點是預測顯示時刻的

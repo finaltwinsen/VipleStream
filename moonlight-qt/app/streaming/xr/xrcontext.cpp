@@ -2368,17 +2368,6 @@ T pctOf(std::vector<T> v, double p)
     std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(idx), v.end());
     return v[idx];
 }
-// pctOf 的就地版：不複製，v 的順序會被打亂（分位數的位置和 pctOf 相同）。給印完就清掉的視窗用
-template <typename T>
-T pctInPlace(std::vector<T>& v, double p)
-{
-    if (v.empty()) {
-        return T{};
-    }
-    const size_t idx = (std::min)(v.size() - 1, static_cast<size_t>(p * static_cast<double>(v.size() - 1) + 0.5));
-    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(idx), v.end());
-    return v[idx];
-}
 uint16_t sat16u(uint64_t v) { return static_cast<uint16_t>((std::min<uint64_t>)(v, 0xffff)); }
 int16_t sat16s(int64_t v) { return static_cast<int16_t>((std::max<int64_t>)(-32768, (std::min<int64_t>)(v, 32767))); }
 
@@ -2943,17 +2932,30 @@ void XrContext::pcvrLatchDiagLog()
 void XrContext::pcvrLoopDiagLog()
 {
     auto& d = m_LoopDiag;
-    auto vmin = [](const std::vector<uint32_t>& v) { return v.empty() ? 0u : *std::min_element(v.begin(), v.end()); };
-    auto vmax = [](const std::vector<uint32_t>& v) { return v.empty() ? 0u : *std::max_element(v.begin(), v.end()); };
-    const uint32_t wakeMax = vmax(d.wakePhaseUs), endLeadMin = vmin(d.endLeadUs), spanMax = vmax(d.spanUs);
-    const uint32_t endCallMax = vmax(d.endCallUs), aheadMin = vmin(d.aheadUs), aheadMax = vmax(d.aheadUs);
-    const uint32_t leadP50 = pctInPlace(d.latchLeadUs, 0.50);
-    const uint32_t renderP50 = pctInPlace(d.render10s, 0.50);
-    const int32_t slackP50 = pctInPlace(d.slack10s, 0.50);
+    // 一個視窗掃一遍、要幾個分位數就取幾個（位置和 pctOf 相同）。這裡一共十幾個，逐一 nth_element 太久，見 RankScan
+    xrphase::RankScan& r = d.rank;
+    auto u32 = [](int64_t v) { return static_cast<uint32_t>((std::max<int64_t>)(0, (std::min<int64_t>)(v, 0xffffffffll))); };
+    r.scan(d.wakePhaseUs);
+    const uint32_t wakeP50 = u32(r.at(0.50)), wakeP95 = u32(r.at(0.95)), wakeMax = u32(r.maxValue());
+    r.scan(d.latchLeadUs);
+    const uint32_t leadP50 = u32(r.at(0.50)), leadP05 = u32(r.at(0.05));
+    r.scan(d.endLeadUs);
+    const uint32_t endLeadP50 = u32(r.at(0.50)), endLeadP05 = u32(r.at(0.05)), endLeadMin = u32(r.minValue());
+    r.scan(d.spanUs);
+    const uint32_t spanP50 = u32(r.at(0.50)), spanP95 = u32(r.at(0.95)), spanMax = u32(r.maxValue());
+    r.scan(d.endCallUs);
+    const uint32_t endCallP50 = u32(r.at(0.50)), endCallP95 = u32(r.at(0.95)), endCallMax = u32(r.maxValue());
+    r.scan(d.aheadUs);
+    const uint32_t aheadP50 = u32(r.at(0.50)), aheadMin = u32(r.minValue()), aheadMax = u32(r.maxValue());
+    r.scan(d.render10s);
+    const uint32_t renderP50 = u32(r.at(0.50));
+    r.scan(d.slack10s);
+    const int32_t slackP50 = static_cast<int32_t>(r.at(0.50));
     // 這個視窗沒有解碼計時的樣本：dec 印 -，少一項的總和沒有意義，也印 -
     char decText[24] = "-", sumText[24] = "-";
     if (!d.dec1s.empty()) {
-        const uint32_t decP50 = pctInPlace(d.dec1s, 0.50);
+        r.scan(d.dec1s);
+        const uint32_t decP50 = u32(r.at(0.50));
         std::snprintf(decText, sizeof(decText), "%.2f", decP50 / 1000.0);
         std::snprintf(sumText, sizeof(sumText), "%.2f",
                       static_cast<double>(xrphase::chainSumUs(decP50, renderP50, slackP50, leadP50)) / 1000.0);
@@ -2963,13 +2965,10 @@ void XrContext::pcvrLoopDiagLog()
                 "endLead p50/p05/min=%.2f/%.2f/%.2f ms | span p50/p95/max=%u/%u/%u us | beginCall max=%u us "
                 "endCall p50/p95/max=%u/%u/%u us | ahead p50/min/max=%.2f/%.2f/%.2f ms%s | waitShort=%u | "
                 "chain dec/render/slack/lead p50=%s/%.2f/%.2f/%.2f ms sum=%s ms%s",
-                pctInPlace(d.wakePhaseUs, 0.50), pctInPlace(d.wakePhaseUs, 0.95), wakeMax, leadP50 / 1000.0,
-                pctInPlace(d.latchLeadUs, 0.05) / 1000.0, pctInPlace(d.endLeadUs, 0.50) / 1000.0,
-                pctInPlace(d.endLeadUs, 0.05) / 1000.0, endLeadMin / 1000.0, pctInPlace(d.spanUs, 0.50),
-                pctInPlace(d.spanUs, 0.95), spanMax, d.beginCallMaxUs, pctInPlace(d.endCallUs, 0.50),
-                pctInPlace(d.endCallUs, 0.95), endCallMax, pctInPlace(d.aheadUs, 0.50) / 1000.0, aheadMin / 1000.0,
-                aheadMax / 1000.0, m_TimeConv != nullptr ? "" : " (approx)", d.waitShort, decText, renderP50 / 1000.0,
-                slackP50 / 1000.0, leadP50 / 1000.0, sumText,
+                wakeP50, wakeP95, wakeMax, leadP50 / 1000.0, leadP05 / 1000.0, endLeadP50 / 1000.0, endLeadP05 / 1000.0,
+                endLeadMin / 1000.0, spanP50, spanP95, spanMax, d.beginCallMaxUs, endCallP50, endCallP95, endCallMax,
+                aheadP50 / 1000.0, aheadMin / 1000.0, aheadMax / 1000.0, m_TimeConv != nullptr ? "" : " (approx)", d.waitShort,
+                decText, renderP50 / 1000.0, slackP50 / 1000.0, leadP50 / 1000.0, sumText,
                 // §VR-LATCH A/B：和同一輪的 [VIPLE-VR-LDIAG] 相同（10 s 區塊在換邊之前記下來的那一邊）
                 m_Options.pcvrLatchAbSec > 0 ? (m_LatchDiag.logAb ? " ab=1" : " ab=0") : "");
     d.wakePhaseUs.clear();

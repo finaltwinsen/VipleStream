@@ -12,15 +12,19 @@
 //
 // 用之前要知道的限制：kPdtAfterVblankUs 與下面那幾個相位窗都只在 Steam Frame 的 120 Hz（SteamVR 2.18.2）量過。
 // 別的更新率、別的頭盔不適用——用到 vblank 相位的判斷一律先看 is120Hz()，不成立就不要算。
+//
+// 另外有 RankScan：10 秒行要印的那些分位數用它算（一次掃過去，不排序）。
 
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <initializer_list>
 #include <string>
+#include <vector>
 
 namespace xrphase {
 
@@ -103,6 +107,102 @@ inline uint32_t deferWaitUs(uint32_t vblankPhaseUs, uint32_t loUs, uint32_t hiUs
 {
     return (vblankPhaseUs >= loUs && vblankPhaseUs < hiUs) ? hiUs - vblankPhaseUs : 0u;
 }
+
+// 一個視窗（一千多筆整數，通常是微秒）的分位數：掃一遍建立計數，之後每個分位數只要掃計數，不排序、不複製。
+// 為什麼不逐一 nth_element：印 10 秒行的那一格要十幾個分位數，1200 筆每挑一個約 10 µs，加起來在開發機上是
+// 0.2 ms（頭盔更久），而那一格離下一次 xrWaitFrame 放行只有一毫秒多。一個視窗裡的數值通常只差幾百到幾千，
+// 用計數的做法整個視窗只要幾微秒。
+//  - 結果和「排序之後取第 k 個」完全相同。at(p) 的位置同 XrContext 的 pctOf：第 min(n−1, ⌊p×(n−1)+0.5⌋) 個（從 0 算）。
+//  - 比最小值大 kSpan 以上的離群值另外放一個清單排序；視窗裡大半都是離群值時（很少見）就等於整個排序。
+//  - 內部的緩衝區留著重用：物件當成員留著，不要每次建；prepare() 先把緩衝區配好。
+class RankScan
+{
+public:
+    static constexpr int64_t kSpan = 16384;
+
+    void prepare()
+    {
+        if (m_Count.empty()) {
+            m_Count.assign(static_cast<size_t>(kSpan), 0u);
+        }
+        m_Over.reserve(64);
+    }
+
+    template <typename T>
+    void scan(const std::vector<T>& v)
+    {
+        std::fill(m_Count.begin(), m_Count.begin() + static_cast<std::ptrdiff_t>(m_Used), 0u);  // 只清上一次用到的範圍
+        m_Used = 0;
+        m_InRange = 0;
+        m_Over.clear();
+        m_N = v.size();
+        m_Min = m_Max = 0;
+        if (v.empty()) {
+            return;
+        }
+        int64_t lo = static_cast<int64_t>(v[0]), hi = lo;
+        for (const T x : v) {
+            lo = (std::min)(lo, static_cast<int64_t>(x));
+            hi = (std::max)(hi, static_cast<int64_t>(x));
+        }
+        m_Min = lo;
+        m_Max = hi;
+        prepare();
+        m_Used = static_cast<size_t>((std::min)(hi - lo + 1, kSpan));
+        for (const T x : v) {
+            const int64_t off = static_cast<int64_t>(x) - lo;
+            if (off < kSpan) {
+                m_Count[static_cast<size_t>(off)]++;
+                m_InRange++;
+            }
+            else {
+                m_Over.push_back(static_cast<int64_t>(x));
+            }
+        }
+        std::sort(m_Over.begin(), m_Over.end());
+    }
+
+    size_t count() const { return m_N; }
+    int64_t minValue() const { return m_Min; }  // 沒有資料時 0
+    int64_t maxValue() const { return m_Max; }
+
+    // 由小到大第 idx 個（從 0 算；超過就給最後一個）。沒有資料回 0
+    int64_t nth(size_t idx) const
+    {
+        if (m_N == 0) {
+            return 0;
+        }
+        idx = (std::min)(idx, m_N - 1);
+        if (idx >= m_InRange) {
+            return m_Over[idx - m_InRange];
+        }
+        size_t seen = 0;
+        for (size_t i = 0; i < m_Used; i++) {
+            seen += m_Count[i];
+            if (seen > idx) {
+                return m_Min + static_cast<int64_t>(i);
+            }
+        }
+        return m_Max;  // 走不到這裡
+    }
+
+    // 第 p 分位數（p 在 0～1 之外就夾住）。沒有資料回 0
+    int64_t at(double p) const
+    {
+        if (m_N == 0) {
+            return 0;
+        }
+        p = p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p);
+        return nth(static_cast<size_t>(p * static_cast<double>(m_N - 1) + 0.5));
+    }
+
+private:
+    std::vector<uint32_t> m_Count;  // m_Count[i]＝值等於 m_Min＋i 的筆數
+    std::vector<int64_t> m_Over;    // 比 m_Min 大 kSpan 以上的，排好序
+    size_t m_Used = 0;              // m_Count 這一次用到前幾格
+    size_t m_N = 0, m_InRange = 0;
+    int64_t m_Min = 0, m_Max = 0;
+};
 
 // 自測；回傳失敗數。每個案例呼叫 report(名稱, 是否通過, 細節)（簽名同 xrlatch::selfTest）
 inline int selfTest(const std::function<void(const char* name, bool ok, const std::string& detail)>& report)
@@ -191,6 +291,74 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
         }
         std::snprintf(buf, sizeof(buf), "mismatch at phase %u of period %u us", bad, badPeriod);
         caseDone("phase-roundtrip", ok, ok ? "every phase of 7 periods maps back" : buf);
+    }
+    {
+        // RankScan：每個位置都要和「排序之後取第 k 個」相同。同一個物件接連掃形狀不同的視窗（緩衝區重用）：
+        // 擠在一起的、帶幾個很大的離群值的、有負值的、最小值離其他值很遠的（大半落在計數範圍外）、全部相同的、
+        // 1 筆、2 筆、空的
+        uint32_t rng = 0x2545F491u;
+        auto rnd = [&rng]() {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            return rng;
+        };
+        RankScan scan;
+        int checks = 0, mismatches = 0;
+        auto check = [&](const std::vector<int32_t>& v) {
+            std::vector<int32_t> sorted = v;
+            std::sort(sorted.begin(), sorted.end());
+            scan.scan(v);
+            bool ok = scan.count() == v.size() && scan.minValue() == (v.empty() ? 0 : sorted.front()) &&
+                      scan.maxValue() == (v.empty() ? 0 : sorted.back());
+            for (size_t i = 0; i < v.size() + 2; i++) {  // 超過最後一個位置給最後一個
+                const int64_t want = v.empty() ? 0 : sorted[(std::min)(i, v.size() - 1)];
+                ok = ok && scan.nth(i) == want;
+            }
+            for (double p : {-0.5, 0.0, 0.05, 0.25, 0.5, 0.95, 0.99, 1.0, 1.5}) {
+                const double q = p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p);
+                const int64_t want =
+                    v.empty() ? 0 : sorted[(std::min)(v.size() - 1, static_cast<size_t>(q * static_cast<double>(v.size() - 1) + 0.5))];
+                ok = ok && scan.at(p) == want;
+            }
+            checks++;
+            mismatches += ok ? 0 : 1;
+        };
+        std::vector<int32_t> v;
+        for (int round = 0; round < 40; round++) {
+            v.clear();
+            const int n = round % 4 == 3 ? 37 : 1200;
+            for (int i = 0; i < n; i++) {
+                int32_t x = 4700 + static_cast<int32_t>(rnd() % 300);  // 擠在一起
+                if (round % 5 == 1 && rnd() % 100 == 0) {
+                    x = 100000 + static_cast<int32_t>(rnd() % 900000);  // 幾個很大的離群值
+                }
+                if (round % 5 == 2) {
+                    x = static_cast<int32_t>(rnd() % 6000) - 1500;  // 有負值、散得開
+                }
+                if (round % 5 == 3) {
+                    x = i == 0 ? -20 : 90000 + static_cast<int32_t>(rnd() % 500);  // 最小值離其他值很遠
+                }
+                if (round % 5 == 4) {
+                    x = static_cast<int32_t>(rnd() % 40000);  // 範圍比計數的上限大
+                }
+                v.push_back(x);
+            }
+            check(v);
+        }
+        check(std::vector<int32_t>(500, 8333));
+        check(std::vector<int32_t>{42});
+        check(std::vector<int32_t>{7, -7});
+        check(std::vector<int32_t>());
+        check(std::vector<int32_t>{5, 5 + static_cast<int32_t>(RankScan::kSpan) - 1, 5 + static_cast<int32_t>(RankScan::kSpan)});  // 計數範圍的邊界
+        // uint32 的視窗（相位、時間長度）走同一份
+        const std::vector<uint32_t> u = {8332, 0, 4840, 4841, 4839, 3000000000u};
+        scan.scan(u);
+        const bool unsignedOk = scan.nth(0) == 0 && scan.nth(2) == 4840 && scan.at(0.5) == 4841 && scan.nth(4) == 8332 &&
+                                scan.maxValue() == 3000000000ll;
+        std::snprintf(buf, sizeof(buf), "%d windows checked against a sorted copy, %d mismatch(es)%s", checks, mismatches,
+                      unsignedOk ? "" : ", uint32 window wrong");
+        caseDone("rank-scan-matches-sort", mismatches == 0 && unsignedOk, buf);
     }
     return failures;
 }

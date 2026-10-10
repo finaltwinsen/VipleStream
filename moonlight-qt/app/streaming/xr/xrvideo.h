@@ -32,6 +32,7 @@
 
 #include "xrcontext.h"
 #include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Jitter（dev 的到達抖動注入）
+#include "xrphase.h"       // §VR-XRLOOP：xrphase::RankScan（10s video 行尾的分位數）
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"  // §SF-DMABUF-CACHE：DrmTexCache
 
 #include <QImage>
@@ -343,6 +344,7 @@ private:
         uint32_t handoffN = 0;        // 顯示是 120 Hz 時：分過類的張數，
         uint32_t handoffPreempt = 0;  //   其中送出的相位落在「做到一半會被合成器插隊」那一段的，
         uint32_t handoffQueued = 0;   //   與「排在合成器後面」那一段的（見 xrphase::handoffClass）
+        xrphase::RankScan rank;       // statsTail 算分位數用的（緩衝區留著重用；整包交換時跟著換，無妨）
         void clear()
         {
             mboxUs.clear();
@@ -359,24 +361,21 @@ private:
             for (std::vector<uint32_t>* v : {&mboxUs, &swWaitUs, &subPhaseUs, &donePhaseUs, &synthSubPhaseUs, &synthDonePhaseUs}) {
                 v->reserve(2048);
             }
+            rank.prepare();
         }
-        // 組出 [VIPLE-XR] 10s video 行尾的那一段。分位數就地挑（不排序、不複製），所以各向量的順序會被打亂；
-        // 位置和 takeStatsLine 既有的算法相同（p50＝第 n/2 個、p95＝第 n×95/100 個）。只用標準函式庫，可以單獨測
+        // 組出 [VIPLE-XR] 10s video 行尾的那一段。每個視窗掃一遍取分位數（xrphase::RankScan，不排序）；位置和
+        // takeStatsLine 既有的算法相同（p50＝第 n/2 個、p95＝第 n×95/100 個）。只用標準函式庫，可以單獨測
         //   mbox＝解碼幀在 mailbox 裡等多久；swWait＝xrWaitSwapchainImage、swNotOk＝它回的不是 XR_SUCCESS 的次數；
         //   rel＝xrReleaseSwapchainImage；sub／done＝送出（這張影像最後一筆 GPU 工作送出去）與 GPU 做完的相位；
         //   coll／queued＝送出的相位落在「做到一半會被合成器插隊」「排在合成器後面」那兩段的比例。
         //   沒有樣本的相位（沒有顯示格點，例如 XR 桌面）與沒有分過類的比例（顯示不是 120 Hz）印 -
         std::string statsTail(bool synth)
         {
-            auto nth = [](std::vector<uint32_t>& v, size_t idx) {
-                std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(idx), v.end());
-                return v[idx];
+            auto p95index = [](size_t n) { return n == 0 ? static_cast<size_t>(0) : (std::min)(n - 1, (n * 95) / 100); };
+            auto phase50 = [this](const std::vector<uint32_t>& v) {
+                rank.scan(v);
+                return v.empty() ? std::string("-") : std::to_string(rank.nth(v.size() / 2));
             };
-            auto p50of = [&](std::vector<uint32_t>& v) { return v.empty() ? 0u : nth(v, v.size() / 2); };
-            auto p95of = [&](std::vector<uint32_t>& v) {
-                return v.empty() ? 0u : nth(v, (std::min)(v.size() - 1, (v.size() * 95) / 100));
-            };
-            auto phase50 = [&](std::vector<uint32_t>& v) { return v.empty() ? std::string("-") : std::to_string(p50of(v)); };
             auto share = [&](uint32_t n) {
                 if (handoffN == 0) {
                     return std::string("-");
@@ -385,11 +384,15 @@ private:
                 std::snprintf(pct, sizeof(pct), "%.1f", 100.0 * static_cast<double>(n) / static_cast<double>(handoffN));
                 return std::string(pct);
             };
-            const uint32_t swWaitMax = swWaitUs.empty() ? 0u : *std::max_element(swWaitUs.begin(), swWaitUs.end());
-            const double mbox50 = p50of(mboxUs) / 1000.0, mbox95 = p95of(mboxUs) / 1000.0, swWait95 = p95of(swWaitUs) / 1000.0;
+            rank.scan(mboxUs);
+            const double mbox50 = static_cast<double>(rank.nth(mboxUs.size() / 2)) / 1000.0;
+            const double mbox95 = static_cast<double>(rank.nth(p95index(mboxUs.size()))) / 1000.0;
+            rank.scan(swWaitUs);
+            const double swWait95 = static_cast<double>(rank.nth(p95index(swWaitUs.size()))) / 1000.0;
+            const double swWaitMax = static_cast<double>(rank.maxValue()) / 1000.0;
             char head[160];
             std::snprintf(head, sizeof(head), " | mbox p50/p95=%.2f/%.2f ms swWait p95/max=%.2f/%.2f ms swNotOk=%u rel max=%u us", mbox50,
-                          mbox95, swWait95, swWaitMax / 1000.0, swNotOk, relMaxUs);
+                          mbox95, swWait95, swWaitMax, swNotOk, relMaxUs);
             std::string s = head;
             s += " | sub/done p50=" + phase50(subPhaseUs) + "/" + phase50(donePhaseUs) + " us coll=" + share(handoffPreempt) +
                  "% queued=" + share(handoffQueued) + "%";
