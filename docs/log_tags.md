@@ -896,6 +896,18 @@ frame loop（XR 桌面也有）
                                                                                  全速量的（半速＋補幀時被擋的那一段早 0.25～0.5 ms）；顯示不是 120 Hz 時印 -；
                                                                                  synthSub／synthDone＝補幀開著時，補幀那一批送出與做完的相位
 
+每個 pass 的 GPU 時間（PCVR）
+[VIPLE-VR-PASS] 60s convert0:n/avgUs/minUs/maxUs[ convert1:…] unwarp:… down8:… down16:… flow:… combine:…[ other:…]
+                                                                              ← 影像 render thread 每 60 秒一行，只列這 60 秒有樣本的名稱（不分同場切換的哪一邊）。每一欄＝
+                                                                                 次數／平均／最小／最大（µs）。convert<n>＝解碼出來的影像轉成 RGB（libplacebo 的 pl_render_image；
+                                                                                 n 是它在那一次算繪裡的第幾個 pass，3 以上併在 convert3；補幀開著時每張影像做兩次）；
+                                                                                 unwarp＝注視點還原；down8／down16＝補幀用的 1/8、1/16 縮圖；flow＝位移估計（粗、細兩層記在
+                                                                                 一起）；combine＝補幀的合成；other＝認不得的 pass（不該出現）。
+                                                                                 數字是 libplacebo 每個 pass 本來就帶的 GPU 計時，這裡只是接出來：被頭盔合成器插隊的那一次會含
+                                                                                 被擋住的時間（看 min 與 avg 差多少）；結果晚幾格才查得到，個別樣本可能重複或漏掉，60 秒的平均
+                                                                                 與極值可以用
+[VIPLE-VR-PASS] pass timers unavailable on this driver                        ← 開場 60 秒一筆結果都沒有（這顆驅動的佇列不支援時間戳查詢），只印一次
+
 decoder 執行緒（VR 走真 XR 才有）
 [VIPLE-VR-DECPOLL] 10s frames=N recvWait p50/p95/max=…/…/… us polls=N pollUs=0 mixed=0
                                                                               ← decoder 執行緒自己每 10 秒印（視窗和別的行不是同一個）。frames＝這 10 秒取到的解碼輸出幀數；

@@ -291,6 +291,7 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         vc.requireMeta = m_Options.pcvr;  // M4a R4：PCVR 不發布無 render pose 的影像
         vc.synth = m_Options.pcvr && m_Options.pcvrSynth;  // §VR-SYNTH
         vc.testJitter = m_Options.testJitter;  // §VR-LDIAG（dev）：--vr-test-jitter
+        vc.passTimers = m_Options.pcvr;        // §VR-PASS：每個 pass 的 GPU 時間（[VIPLE-VR-PASS]；VR 的 tag，XR 桌面不開）
         // §VR-LATCH-RELATCH／§VR-LATCH-WAIT：整場維持（A/B 切換只切 frame thread 那一側，發布的方式不跟著變）
         vc.notifyPublish = pcvrLatchWaitEffUs() > 0;
         vc.atomicPublish = (m_Options.pcvr && m_Options.pcvrLatchRelatch && !m_Options.pcvrSynth) || vc.notifyPublish;

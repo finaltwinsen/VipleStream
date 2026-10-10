@@ -88,6 +88,27 @@ pl_gpu XrVideo::gpu() const
     return m_Vulkan != nullptr ? m_Vulkan->gpu : nullptr;
 }
 
+// §VR-PASS：libplacebo 每畫完一個 pass 呼叫一次（影像 render thread，在 pl_dispatch_finish／pl_render_image 裡）。
+// last＝這個 pass 最近一次量到的 GPU 時間（奈秒）；結果是晚幾格才查得到的，所以它不是「這一次」的時間，偶爾連續
+// 兩次拿到同一筆、或一次進來兩筆只看到後面那一筆——60 秒的平均與極值夠用。num_samples＝0＝還沒有任何結果
+// （這顆驅動的佇列不支援時間戳查詢的話永遠是 0）
+void XrVideo::passInfoCb(void* priv, const pl_dispatch_info* info)
+{
+    if (info == nullptr || info->num_samples <= 0) {
+        return;
+    }
+    static_cast<XrVideo*>(priv)->m_PassStats.note(
+        PassStats::slotForDescription(info->shader != nullptr ? info->shader->description : nullptr), info->last);
+}
+
+void XrVideo::renderInfoCb(void* priv, const pl_render_info* info)
+{
+    if (info == nullptr || info->pass == nullptr || info->pass->num_samples <= 0) {
+        return;
+    }
+    static_cast<XrVideo*>(priv)->m_PassStats.note(PassStats::slotForConvert(info->index), info->pass->last);
+}
+
 bool XrVideo::init(QString* error)
 {
     pl_log_params lp = {};
@@ -125,11 +146,21 @@ bool XrVideo::init(QString* error)
         *error = QStringLiteral("pl_renderer_create failed");
         return false;
     }
+    // §VR-PASS：pl_render_image 一律用這一份參數（內容就是 pl_render_fast_params）；量測開著時多掛一個 callback，
+    // libplacebo 每畫完一個 pass 把它的 GPU 計時交給我們
+    m_RenderParams = pl_render_fast_params;
+    if (m_Config.passTimers) {
+        m_RenderParams.info_callback = &XrVideo::renderInfoCb;
+        m_RenderParams.info_priv = this;
+    }
     if (m_Config.synth) {
         m_Dp = pl_dispatch_create(m_Log, m_Vulkan->gpu);
         if (m_Dp == nullptr) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] pl_dispatch_create failed - frame synthesis off");
             m_Config.synth = false;
+        }
+        else if (m_Config.passTimers) {
+            pl_dispatch_callback(m_Dp, this, &XrVideo::passInfoCb);  // §VR-PASS：我們自己的 pass
         }
     }
     pl_vulkan_sem_params sp = {};
@@ -801,7 +832,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
             rendered = renderUnwarp(&mapped, &t1, tex, frame->width, frame->height);
         }
         else {
-            rendered = pl_render_image(m_Renderer, &mapped, &t1, &pl_render_fast_params);
+            rendered = pl_render_image(m_Renderer, &mapped, &t1, &m_RenderParams);
         }
         if (!rendered) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] pl_render_image failed");
@@ -1060,6 +1091,13 @@ void XrVideo::renderThreadMain()
         outputSize(f->width, f->height, &outW, &outH);
         if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, outW, m_Config.synth ? outH * 2 : outH)) {
             renderNewFrame(f, mboxUs);
+            if (m_Config.passTimers) {
+                // §VR-PASS：每 60 秒印一行各個 pass 的 GPU 時間（這一張已經發布了，不佔它的時間）
+                const std::string line = m_PassStats.takeLine(nowUs());
+                if (!line.empty()) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%s", line.c_str());
+                }
+            }
         }
         else {
             av_frame_free(&f);
@@ -1395,7 +1433,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         t.crop.y0 = 0.0f;
         t.crop.x1 = ow;
         t.crop.y1 = oh;
-        return pl_render_image(m_Renderer, mapped, &t, &pl_render_fast_params);
+        return pl_render_image(m_Renderer, mapped, &t, &m_RenderParams);
     }
     if (m_FrameH != fh) {
         m_FrameH = fh;
@@ -1410,7 +1448,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     tFull.crop.y0 = 0.0f;
     tFull.crop.x1 = 0.0f;
     tFull.crop.y1 = 0.0f;
-    if (!pl_render_image(m_Renderer, mapped, &tFull, &pl_render_fast_params)) {
+    if (!pl_render_image(m_Renderer, mapped, &tFull, &m_RenderParams)) {
         return false;
     }
     const int cur = m_SmallCur, prev = cur ^ 1;
@@ -1599,7 +1637,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         t.crop.y0 = 0.0f;
         t.crop.x1 = ow;
         t.crop.y1 = oh;
-        return pl_render_image(m_Renderer, mapped, &t, &pl_render_fast_params);
+        return pl_render_image(m_Renderer, mapped, &t, &m_RenderParams);
     }
 
     if (flowOk) {
@@ -1669,6 +1707,9 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
     bool ok = false;
     if (m_Dp == nullptr) {
         m_Dp = pl_dispatch_create(m_Log, m_Vulkan->gpu);  // 沒開合成時 init() 不會建
+        if (m_Dp != nullptr && m_Config.passTimers) {
+            pl_dispatch_callback(m_Dp, this, &XrVideo::passInfoCb);  // §VR-PASS
+        }
     }
     if (m_Dp != nullptr && ensureFull(fw, fh)) {
         pl_frame tFull = *targetProto;
@@ -1682,7 +1723,7 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         tFull.crop.y0 = 0.0f;
         tFull.crop.x1 = 0.0f;
         tFull.crop.y1 = 0.0f;
-        if (!pl_render_image(m_Renderer, mapped, &tFull, &pl_render_fast_params)) {
+        if (!pl_render_image(m_Renderer, mapped, &tFull, &m_RenderParams)) {
             return false;
         }
         float fv[4];
@@ -1728,7 +1769,7 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VR-FOVEA] unwarp pass failed - showing the stream without undoing the foveated encoding for this session");
     m_UnwarpFailed = true;
-    return pl_render_image(m_Renderer, mapped, targetProto, &pl_render_fast_params);
+    return pl_render_image(m_Renderer, mapped, targetProto, &m_RenderParams);
 }
 
 void XrVideo::frameEnded(uint64_t generation)

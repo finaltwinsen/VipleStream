@@ -80,6 +80,9 @@ public:
         // §VR-LATCH-WAIT：每發布一張新影像就叫醒 waitNewerThan()（frame thread 在等這一格的影像）。要和 atomicPublish
         // 一起開；同樣不可以和 synth 一起開（建構子會把它關掉）
         bool notifyPublish = false;
+        // §VR-PASS（量測）：把 libplacebo 每個 pass 的 GPU 計時接出來，影像 render thread 每 60 秒印一行
+        // [VIPLE-VR-PASS]。只給 PCVR 開（VR 的 tag 不可以出現在一般 session）
+        bool passTimers = false;
     };
 
     // §VR-LDIAG：每發布一張新影像記一筆（§VR-SYNTH 的第二次發布沿用同一個 seq，不另記）。時刻都是 steady 時鐘的微秒
@@ -399,6 +402,92 @@ private:
     };
     RenderDiag m_Diag;       // m_StatsMutex
     RenderDiag m_DiagTake;   // 只在 XR frame thread（takeStatsLine）：上一個視窗整包換出來，在鎖外算分位數
+    // §VR-PASS（量測）：每個 pass 的 GPU 時間。libplacebo 每個 pass 本來就帶 GPU 計時器、每次執行都查結果，這裡只是掛
+    // callback 把數字接出來，不會多任何 GPU 指令。callback 在 pl_render_image／pl_dispatch_finish 裡同步被呼叫，
+    // 所以這一包只在影像 render thread 用。只用標準函式庫，可以單獨測
+    struct PassStats {
+        // convert＝pl_render_image 的 pass（解碼出來的影像轉成 RGB；依它在那一次算繪裡的序號，3 以上併在 Convert3）；
+        // 其餘是我們自己的 pass。Flow 的粗、細兩層是同一個 shader，記在一起
+        enum Slot { Convert0, Convert1, Convert2, Convert3, Unwarp, Down8, Down16, Flow, Combine, Other, SlotCount };
+        struct Stat {
+            uint32_t n = 0;
+            uint64_t sumNs = 0, minNs = 0, maxNs = 0;
+        };
+        Stat stat[SlotCount];
+        uint64_t windowStartUs = 0;      // 這個 60 秒視窗的起點（0＝還沒開始）
+        bool everSampled = false;        // 印過有數字的一行了
+        bool unavailableLogged = false;  // 印過「這顆驅動沒有計時」了
+
+        static int slotForConvert(int index) { return index <= 0 ? Convert0 : (index >= 3 ? Convert3 : Convert0 + index); }
+        // 我們自己的 pass 用 pl_custom_shader 的 description 認（子字串）；"downscale 16" 要排在 "downscale" 前面
+        static int slotForDescription(const char* desc)
+        {
+            if (desc == nullptr) {
+                return Other;
+            }
+            const std::string d(desc);
+            auto has = [&d](const char* what) { return d.find(what) != std::string::npos; };
+            return has("fovea unwarp") ? Unwarp
+                   : has("synth downscale 16") ? Down16
+                   : has("synth downscale") ? Down8
+                   : has("synth flow") ? Flow
+                   : has("synth combine") ? Combine
+                   : Other;
+        }
+        void note(int slot, uint64_t ns)
+        {
+            if (slot < 0 || slot >= SlotCount) {
+                return;
+            }
+            Stat& s = stat[slot];
+            s.minNs = s.n == 0 ? ns : (std::min)(s.minNs, ns);
+            s.maxNs = (std::max)(s.maxNs, ns);
+            s.sumNs += ns;
+            s.n++;
+        }
+        // 每張影像畫完呼叫一次。滿 60 秒就回傳要印的那一行並清掉視窗；還沒到、或沒有東西要印回空字串。
+        // 只列這 60 秒有樣本的名稱（次數／平均／最小／最大，µs）。開場的 60 秒一筆樣本都沒有＝這顆驅動的佇列
+        // 不支援時間戳查詢（libplacebo 靜默略過）：印一次說明，之後不再印
+        std::string takeLine(uint64_t nowUs)
+        {
+            if (windowStartUs == 0) {
+                windowStartUs = nowUs;
+                return std::string();
+            }
+            if (nowUs - windowStartUs < 60000000ull) {
+                return std::string();
+            }
+            windowStartUs = nowUs;
+            static const char* const kName[SlotCount] = {"convert0", "convert1", "convert2", "convert3", "unwarp",
+                                                         "down8",    "down16",   "flow",     "combine",  "other"};
+            std::string fields;
+            for (int i = 0; i < SlotCount; i++) {
+                const Stat& s = stat[i];
+                if (s.n == 0) {
+                    continue;
+                }
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), " %s:%u/%llu/%llu/%llu", kName[i], s.n,
+                              static_cast<unsigned long long>(s.sumNs / s.n / 1000u), static_cast<unsigned long long>(s.minNs / 1000u),
+                              static_cast<unsigned long long>(s.maxNs / 1000u));
+                fields += buf;
+                stat[i] = Stat();
+            }
+            if (!fields.empty()) {
+                everSampled = true;
+                return "[VIPLE-VR-PASS] 60s" + fields;
+            }
+            if (!everSampled && !unavailableLogged) {
+                unavailableLogged = true;
+                return std::string("[VIPLE-VR-PASS] pass timers unavailable on this driver");
+            }
+            return std::string();
+        }
+    };
+    PassStats m_PassStats;
+    pl_render_params m_RenderParams = {};  // pl_render_fast_params；passTimers 開著時多掛 info_callback（init() 設）
+    static void passInfoCb(void* priv, const pl_dispatch_info* info);   // m_Dp 的 pass
+    static void renderInfoCb(void* priv, const pl_render_info* info);   // pl_render_image 的 pass
     std::atomic<uint64_t> m_GridUs{0};        // 見 setDisplayGrid
     std::atomic<uint32_t> m_GridPeriodUs{0};  // 0＝還沒有格點
     uint64_t m_TotalDrawn = 0;         // dump 用（XR thread）
