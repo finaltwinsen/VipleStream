@@ -34,6 +34,7 @@
 #include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Jitter（dev 的到達抖動注入）
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"  // §SF-DMABUF-CACHE：DrmTexCache
 
+#include <QImage>
 #include <QString>
 
 #include <atomic>
@@ -200,6 +201,10 @@ private:
     void loadFoveation(float fv[4]) const;
     bool renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh);
     void dumpTexture(pl_tex tex);
+    // dev（--xr-dump-frame）：把 tex 讀回成縮過的影像（最長邊 ≤ 1280；失敗回空的影像）；saveDump 存檔並印一行。
+    // 分成兩步是為了 §VR-SYNTH：第一次發布的那一張要在 hold 之前讀回，等確定這一幀有合成影像才存。
+    QImage readbackTexture(pl_tex tex);
+    void saveDump(const QImage& img, const QString& path, int srcW, int srcH);
     void renderThreadMain();
     void reapRetired();
     // §VR-LDIAG（dev）：這一張串流影像要延後幾微秒（沒開注入時恆為 0）。只在影像 render thread 呼叫

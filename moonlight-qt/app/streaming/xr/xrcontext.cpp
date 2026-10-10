@@ -2104,6 +2104,22 @@ void XrContext::frameThreadMain()
                 // buildProjection 只會在寫入 views 之前失敗，不會留下半套），再拿回 queue 鎖。重建只拿 m_StatsMutex。
                 // 關著時 fixed 恆為 false，下面就是原本的計數。
                 bool fixed = false;
+                // §VR-SYNTH（2026-10-10）：這一格原本要顯示合成的那一半（swapchain 影像的下半），但 render thread 又
+                // release 了一張。runtime 用的是最新 release 的那一張，而它如果是下一張影像「第一次發布」的那一張，
+                // 下半不是我們要的合成畫面（那一半沒有重畫，是更早的內容）。改成顯示上半——任何一張影像的上半都是真的；
+                // 姿態用新發布的那一張（快照已經換成它的話），還沒換就沿用原本的。放掉 queue 鎖再重建，做法同下面的 relatch。
+                if (m_Options.pcvrSynth && vcur.synthShown) {
+                    lk.unlock();
+                    XrVideo::Current v2;
+                    const bool haveNew = m_Video->peek(&v2) && v2.seq != vcur.seq && v2.hasMeta && v2.generation == vcur.generation;
+                    XrRect2Di top = vcur.subImage.imageRect;
+                    top.offset.y = 0;
+                    const VIPLE_VR_FRAME_META& gm = haveNew ? v2.meta : vcur.meta;
+                    if (buildProjection(vcur.subImage.swapchain, top, gm.renderRot, gm.renderPos, gm.echoSampleId, &proj, projViews)) {
+                        m_PcvrTiming.synthGuard10s++;
+                    }
+                    lk.lock();
+                }
                 const bool relatchOn = m_Options.pcvrLatchRelatch && !m_Options.pcvrSynth &&
                                        (m_Options.pcvrLatchAbSec == 0 || m_PcvrTiming.abOn);
                 if (relatchOn) {
@@ -2596,7 +2612,7 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         // 2026-10-05：尾端加 frames new／repeat／skip（前段欄位順序不變）
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
-                    " | frames new=%u repeat=%u skip=%u mismatch=%u%s%s%s",
+                    " | frames new=%u repeat=%u skip=%u mismatch=%u%s%s%s%s",
                     n, pctOf(t.mtp10sUs, 0.50) / 1000.0, pctOf(t.mtp10sUs, 0.95) / 1000.0,
                     pctOf(t.mtp10sUs, 0.99) / 1000.0, t.mtpNoSample, t.latchSent,
                     secs > 0 ? t.latchSent / secs : 0.0, t.lastSlackUs, t.timingSent,
@@ -2619,7 +2635,9 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
                                                       : QString()))
                         : "",
                     // §VR-LATCH A/B：這個視窗是哪一邊
-                    m_Options.pcvrLatchAbSec > 0 ? (t.abOn ? " ab=1" : " ab=0") : "");
+                    m_Options.pcvrLatchAbSec > 0 ? (t.abOn ? " ab=1" : " ab=0") : "",
+                    // §VR-SYNTH：要顯示合成那一半時最新的影像已經換掉、改顯示上半的次數（開著合成才印）
+                    m_Options.pcvrSynth ? qUtf8Printable(QString(" synthGuard=%1").arg(t.synthGuard10s)) : "");
         t.trkLateSum = 0.0;
         t.trkPrevSum = 0.0;
         t.trkLateN = 0;
@@ -2629,6 +2647,7 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         t.timingSent = 0;
         t.new10s = t.repeat10s = t.skip10s = t.mismatch10s = 0;
         t.relatch10s = 0;
+        t.synthGuard10s = 0;
         t.windowRolled = true;  // §VR-LATCH-RELATCH：這一格記的那一筆已經印在上面那一行（見 pcvrTimingRelatch）
         // §VR-LDIAG：同一個視窗的逐張量測接在 MTP10 後面印，但等這一格送出去（xrEndFrame 之後，見 frameThreadMain）
         // 才算、才印。A/B 是哪一邊先記下來（下面可能換邊）

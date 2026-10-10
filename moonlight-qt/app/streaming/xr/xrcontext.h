@@ -498,6 +498,8 @@ private:
         // §VR-LATCH-RELATCH：錯配時改用新影像的姿態成功的次數（10 s 視窗）；這一格原本挑的是不是重複上一張；
         // 這一格的 pcvrTimingOnLatch 之後 10 s 視窗有沒有印出並歸零過（有的話原本那一筆已經算在上一個視窗）
         uint32_t relatch10s = 0;
+        // §VR-SYNTH（2026-10-10）：要顯示合成那一半、但 xrEndFrame 之前 render thread 又 release 了一張，改顯示上半的次數
+        uint32_t synthGuard10s = 0;
         bool lastWasRepeat = false;
         bool windowRolled = false;
         // §VR-LATCH A/B：目前是哪一邊（true＝開）、這一邊已經跑了幾秒

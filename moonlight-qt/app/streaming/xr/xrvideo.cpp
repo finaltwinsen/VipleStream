@@ -546,12 +546,12 @@ bool XrVideo::ensureSwapchain(XrSession session, int width, int height)
     return false;
 }
 
-void XrVideo::dumpTexture(pl_tex tex)
+QImage XrVideo::readbackTexture(pl_tex tex)
 {
     if (m_Mode == TargetMode::Float16Linear || !tex->params.host_readable) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] frame dump skipped (mode=%s hostReadable=%d)",
                     modeName(static_cast<int>(m_Mode)), tex->params.host_readable ? 1 : 0);
-        return;
+        return QImage();
     }
     const int w = tex->params.w;
     const int h = tex->params.h;
@@ -562,20 +562,32 @@ void XrVideo::dumpTexture(pl_tex tex)
     tp.row_pitch = static_cast<size_t>(w) * 4;
     if (!pl_tex_download(m_Vulkan->gpu, &tp)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] frame dump: pl_tex_download failed");
-        return;
+        return QImage();
     }
     const bool bgra = m_ViewFormat == VK_FORMAT_B8G8R8A8_UNORM;
     // Format_ARGB32 在 little-endian 記憶體中就是 B,G,R,A
     QImage img(buf.data(), w, h, w * 4, bgra ? QImage::Format_ARGB32 : QImage::Format_RGBA8888);
-    QImage scaled = img.scaled(QSize(1280, 1280), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    if (scaled.save(m_Config.dumpPath, "PNG")) {
+    // copy()：img 借用的是 buf（區域變數），尺寸沒變時 scaled() 可能直接共用同一塊資料
+    return img.scaled(QSize(1280, 1280), Qt::KeepAspectRatio, Qt::SmoothTransformation).copy();
+}
+
+void XrVideo::saveDump(const QImage& img, const QString& path, int srcW, int srcH)
+{
+    if (img.isNull()) {
+        return;
+    }
+    if (img.save(path, "PNG")) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] frame dump: %s (%dx%d from %dx%d, mode=%s)",
-                    qUtf8Printable(m_Config.dumpPath), scaled.width(), scaled.height(), w, h,
-                    modeName(static_cast<int>(m_Mode)));
+                    qUtf8Printable(path), img.width(), img.height(), srcW, srcH, modeName(static_cast<int>(m_Mode)));
     }
     else {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] frame dump: saving %s failed", qUtf8Printable(m_Config.dumpPath));
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] frame dump: saving %s failed", qUtf8Printable(path));
     }
+}
+
+void XrVideo::dumpTexture(pl_tex tex)
+{
+    saveDump(readbackTexture(tex), m_Config.dumpPath, tex->params.w, tex->params.h);
 }
 
 bool XrVideo::renderNewFrame(AVFrame* frame)
@@ -720,6 +732,14 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         m_Dumped = true;
         dumpTexture(tex);  // 必須在 hold 之前（download 需要 libplacebo 仍持有影像）
     }
+    // §VR-SYNTH 的檢查（dev）：開著合成時，第一次發布的這一張（只有真的）也讀回來，等下面確定這一幀有合成影像
+    // 再和第二張一起存——兩張的上半應該一樣。2026-10-10：注視點還原＋合成一起開時這一張畫錯過（renderUnwarp），
+    // 只存第二張看不出來。讀回會卡住這一幀幾十毫秒，只在帶了 --xr-dump-frame 的那一張做。
+    QImage firstDump;
+    const int firstDumpW = tex->params.w, firstDumpH = tex->params.h;
+    if (wantDump && m_Config.synth) {
+        firstDump = readbackTexture(tex);
+    }
 
     const uint64_t tCpuEnd = nowUs();
     const int fin = finishGpu(tex);
@@ -820,6 +840,16 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
     if (r2 && wantDump && (synthOk || m_SynthFailed)) {
         m_Dumped = true;
         dumpTexture(tex2);
+        // 第一次發布的那一張存成 <路徑>-first.png（副檔名之前插 -first）
+        QString firstPath = m_Config.dumpPath;
+        const int dot = firstPath.lastIndexOf(QLatin1Char('.'));
+        if (dot > firstPath.lastIndexOf(QLatin1Char('/'))) {
+            firstPath.insert(dot, QStringLiteral("-first"));
+        }
+        else {
+            firstPath += QStringLiteral("-first");
+        }
+        saveDump(firstDump, firstPath, firstDumpW, firstDumpH);
     }
     const int fin2 = finishGpu(tex2);
     if (fin2 < 0) {
@@ -1214,6 +1244,11 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
 
     pl_frame tFull = *targetProto;
     tFull.planes[0].texture = m_Full;
+    // crop 是 swapchain 上的範圍，不能帶到中間這一張（見 renderUnwarp）：歸零＝畫滿整張 m_Full
+    tFull.crop.x0 = 0.0f;
+    tFull.crop.y0 = 0.0f;
+    tFull.crop.x1 = 0.0f;
+    tFull.crop.y1 = 0.0f;
     if (!pl_render_image(m_Renderer, mapped, &tFull, &pl_render_fast_params)) {
         return false;
     }
@@ -1470,6 +1505,15 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
     if (m_Dp != nullptr && ensureFull(fw, fh)) {
         pl_frame tFull = *targetProto;
         tFull.planes[0].texture = m_Full;
+        // 2026-10-10：targetProto 的 crop 是 swapchain 上的範圍——開著合成（§VR-SYNTH）時是兩倍高影像的上半，比 m_Full
+        // 大。帶到中間這一張，libplacebo 會把目的範圍夾在 m_Full 之內、來源跟著裁：只畫到原始影像左上角的一部分
+        // （每眼 1152、注視點 150% 時是左上 2/3）再放大，右眼看到的大半是左眼的內容。第二次發布的那一張上半是
+        // renderSynth 重畫的（對的），所以只有「第一次顯示時第二次發布還沒完成」的幀會顯示到這一張：配戴實測佔串流幀
+        // 的 16～32%，每秒十幾格整張錯位的畫面。歸零＝畫滿整張 m_Full。
+        tFull.crop.x0 = 0.0f;
+        tFull.crop.y0 = 0.0f;
+        tFull.crop.x1 = 0.0f;
+        tFull.crop.y1 = 0.0f;
         if (!pl_render_image(m_Renderer, mapped, &tFull, &pl_render_fast_params)) {
             return false;
         }
