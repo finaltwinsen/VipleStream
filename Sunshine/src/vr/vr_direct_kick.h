@@ -5,34 +5,51 @@
  *
  * 純邏輯：只用標準函式庫、不碰任何平台標頭、不讀時鐘（時間一律由呼叫端以奈秒整數傳入）、穩態不配置記憶體
  * （樣本放在固定大小的環），可以脫離整個 server 單獨編譯測試（tests/unit/test_vr_direct_kick.cpp）。
- * 只給一條執行緒用（bridge 執行緒：drain_rings() 餵樣本、periodic() 呼叫 poll()），沒有鎖。
+ * 只給一條執行緒用（bridge 執行緒：drain_rings() 餵樣本、periodic() 呼叫 poll()），沒有鎖。回聲年齡是擷取執行緒
+ * 算的，呼叫端要先交接到這條執行緒再餵（vr_bridge.h 的 report_echo_age()）。
  *
  * 背景（docs/steam_frame_client.md「host 直通時的兩種時序」）：SteamVR 的合成器把遊戲的畫面直接交給 driver 時，
  * 有兩種穩定的時序——
  *   A：虛擬 vsync 到了，合成器手上沒有遊戲的新幀 → 等遊戲這一格的幀交出來 → 馬上送；
  *   B：虛擬 vsync 到了，合成器手上已經有一張遊戲上一格就交好的幀 → 立刻送那一張，遊戲這一格畫的要等下一個
  *      vsync 才送：多一個 host 週期的延遲（60 Hz 是 16.7 ms）。
- * 分得出來的量是 presentPhase（driver 的 PRESENT_ENTER 距離上一次 POSTPRESENT_EXIT 的時間）：A 約等於遊戲一幀的
- * 時間（輕負載約 3.3 ms），B 只有合成器自己的時間（0.7～1.1 ms）；另有 S＝host 的 SteamVR 儀表板開著、合成器
- * 自己合成（中位數 1.2～2.1 ms）。遊戲停頓很久或儀表板開過再關會進 B；60 Hz（半速串流）的 B 會一直留著。
+ * 遊戲停頓很久或儀表板開過再關會進 B；60 Hz（半速串流）的 B 會一直留著。分得出來的量有兩個：
+ *   presentPhase（driver 的 PRESENT_ENTER 距離上一次 POSTPRESENT_EXIT 的時間）：A 約等於遊戲一幀的時間（輕負載
+ *     約 3.3 ms），B 只有合成器自己的時間（0.7～1.1 ms）；另有 S＝host 的 SteamVR 儀表板開著、合成器自己合成
+ *     （中位數 1.2～2.1 ms）。
+ *   回聲年齡（擷取端對每一張收下的影像算：這一張 Present 的時刻減掉「它用的那個姿態被發布給 driver 的時刻」；
+ *     沒有對到姿態的影像沒有這個值）：60 Hz 的 A 中位數 4.4～7.7 ms（無人與配戴相同；120 Hz 的 A 是 5～7 ms），
+ *     B 是 17.7～20.7 ms——多出來的就是那一個 host 週期。
+ * 原本只看 presentPhase，2026-10-11 在實際的場次看到誤判：SteamVR 剛啟動、遊戲還在載入的那一兩分鐘，第 0 層是
+ * 合成器自己的畫面（不是遊戲的貼圖），presentPhase 中位數 0.79～1.22 ms、第 90 百分位 1.3～1.4 ms，和 B 分不開——
+ * 連 kick 三次、每次的結果都是沒有變化，才進入退避。那段時間回聲年齡的中位數只有 2.7～5.2 ms：根本沒有多一格。
+ * 所以 (a) 改成兩個量都要成立；回聲年齡量不到的時候寧可不 kick。
  * 推回去的方法（kick）：讓 driver 的 PostPresent 立刻返回一小段時間，合成器在一個週期內多跑一輪，排著的那一張
  * 用掉了，下一輪只能等遊戲的新幀。實際寫節拍的是呼叫端（vr_bridge_win.cpp），這裡只做判斷：
  *
- *   (a) 判定為 B：最近 1 秒內的樣本（至少 24 筆）中位數 < 1.15 ms 而且第 90 百分位 < 2.2 ms。每 100 ms 評估一次，
- *       連續成立滿 3 秒（每一次評估都成立；有一次不成立、或兩次評估隔了超過 1 秒，就重新計時）→ 回報 kick。
- *       沒有 Present 的時候視窗會自己變空（不到 24 筆＝不成立），不必另外清。
+ *   (a) 判定為 B：最近 1 秒內的兩種樣本都成立——
+ *         presentPhase：至少 24 筆，中位數 < 1.15 ms 而且第 90 百分位 < 2.2 ms；
+ *         回聲年齡：至少 24 筆，中位數 ≥ 5.5 ms（A 的典型值）＋半個週期，也就是 A 與 B 的正中間：60 Hz 是
+ *           13.8 ms、72 Hz 12.4、90 Hz 11.1（後兩個是照同一條式子算的，沒有量測）。
+ *       沒有回聲年齡的樣本（呼叫端沒有餵、沒有串流在擷取、影像都沒有對到姿態）就不可能成立。
+ *       每 100 ms 評估一次，連續成立滿 3 秒（每一次評估都成立；有一次不成立、或兩次評估隔了超過 1 秒，就重新計時）
+ *       → 回報 kick。沒有 Present 的時候兩個視窗都會自己變空（不到 24 筆＝不成立），不必另外清。
  *   (b) kick 的長度＝週期 × 1.25，夾在 20～40 ms。
  *   (c) kick 之後前 500 ms 的樣本不看（含 kick 本身那幾張）；接著 1.5 秒的樣本拿來確認：至少 24 筆而且中位數
  *       ≥ 2.0 ms＝回到 A（退避歸零），否則＝沒有變化，下一次最早要等 10、30、90、300 秒之後（之後都是 300 秒）。
  *       樣本不到 24 筆（那 1.5 秒幾乎沒有 Present）量不出結果，照「沒有變化」處理。
+ *       確認只看 presentPhase；同一段的回聲年齡中位數只帶在結果裡給 log 用。
  *   (d) 每一次 kick 離上一次（含呼叫端自己另外做的，見 on_external_kick）至少 5 秒。
  *   (e) 只在週期 ≥ 11 ms（約 90 Hz 以下）時動作：120 Hz 的 B 自己會消失（常有一幀超過 8.3 ms）。
  *   (f) 重負載：成功的那一次，確認用的樣本第 90 百分位 > 週期的 80% → 這個 generation 之後不再 kick。A 要等遊戲
  *       這一幀的 GPU 做完，遊戲的幀佔掉大半個週期時留在 B 不一定比較差；我們沒有辦法把它推回 B，至少不要再動它。
  *   (g) 一個 generation 最多 kick 20 次；reset() 之後前 5 秒不評估（遊戲與 SteamVR 還在起來）。
  *
- * 寫入方（driver）不可信：樣本的時刻與數值都可能是錯的。這裡不會因為它們而溢位、除以零或卡住——時刻在未來的
- * 樣本要等「現在」追上它才算，太舊的不算，負的數值直接丟；最壞的結果是誤判，而誤判的代價有上限（(d)、(g)）。
+ * 寫入方（driver）不可信：樣本的時刻與數值都可能是錯的（回聲年齡用的 Present 時刻也是它寫的）。這裡不會因為它們
+ * 而溢位、除以零或卡住——時刻在未來的樣本要等「現在」追上它才算，太舊的不算，負的數值直接丟；最壞的結果是誤判，
+ * 而誤判的代價有上限（(d)、(g)）。
+ * 回聲年齡的限制：driver 是拿遊戲算圖用的姿態去比對它回報過的樣本，頭部靜止的無人場次每一筆樣本的姿態都一樣，
+ * 分不出是哪一筆，回聲年齡不可靠——那種場次就算在 B 也可能不 kick（要驗這個功能得讓頭動起來）。
  */
 #pragma once
 
@@ -52,9 +69,15 @@ namespace vr::kick {
 
   // (a) 判定為 B
   inline constexpr int64_t k_window_ns = k_ns_per_s;  ///< 判定用的視窗：最近這麼久的樣本
-  inline constexpr int k_min_samples = 24;  ///< 視窗（與確認用的那一段）裡至少要有這麼多筆
-  inline constexpr int64_t k_b_median_max_ns = 1'150'000;  ///< 中位數要小於這個值
-  inline constexpr int64_t k_b_p90_max_ns = 2'200'000;  ///< 第 90 百分位要小於這個值
+  /// 視窗（與確認用的那一段）裡至少要有這麼多筆；presentPhase 與回聲年齡各自算
+  inline constexpr int k_min_samples = 24;
+  inline constexpr int64_t k_b_median_max_ns = 1'150'000;  ///< presentPhase 的中位數要小於這個值
+  inline constexpr int64_t k_b_p90_max_ns = 2'200'000;  ///< presentPhase 的第 90 百分位要小於這個值
+  /// 回聲年齡的中位數要 ≥ 這個值＋週期 × 1/2。這個值＝等遊戲這一格（A）時的典型回聲年齡；多一格（B）時多一個
+  /// 週期，門檻就在兩者的正中間（60 Hz：A 4.4～7.7 ms、門檻 13.8 ms、B 17.7～20.7 ms）
+  inline constexpr int64_t k_echo_a_typical_ns = 5'500'000;
+  inline constexpr int64_t k_echo_period_num = 1;
+  inline constexpr int64_t k_echo_period_den = 2;
   inline constexpr int64_t k_dwell_ns = 3 * k_ns_per_s;  ///< 連續成立這麼久才 kick
   /// 多久評估一次。poll() 每 2 ms 就被呼叫一次，不必每次都排序；不可以超過 k_window_ns
   /// （兩次評估隔得比視窗長時，中間有樣本沒被看到，連續成立的計時會一直重來）
@@ -82,8 +105,8 @@ namespace vr::kick {
   inline constexpr int64_t k_startup_holdoff_ns = 5 * k_ns_per_s;  ///< reset() 之後這麼久不評估
   inline constexpr int k_max_kicks = 20;  ///< 一個 generation 最多 kick 這麼多次
 
-  /// 樣本環的大小。要裝得下確認用的 1.5 秒：會動作的週期最短 11 ms，1.5 秒是 137 筆。寫入方送得比這個密時
-  /// 只留最新的這麼多筆，統計量就用它們算
+  /// 樣本環的大小（presentPhase 與回聲年齡各一個）。要裝得下確認用的 1.5 秒：會動作的週期最短 11 ms，1.5 秒是
+  /// 137 筆。寫入方送得比這個密時只留最新的這麼多筆，統計量就用它們算
   inline constexpr std::size_t k_ring_size = 256;
 
   enum class event_e {
@@ -124,6 +147,13 @@ namespace vr::kick {
     int64_t median_after_ns = 0;
     int64_t p90_after_ns = 0;
     int samples = 0;  ///< kick：判定用的視窗裡有幾筆；兩種 result：確認用的那 1.5 秒裡有幾筆
+    /// 回聲年齡的中位數，視窗和上面 presentPhase 的相同：before＝kick 當下判定用的那 1 秒（kick、兩種 result 都帶），
+    /// after＝確認用的那 1.5 秒（兩種 result；只給 log 用，成不成功不看它）
+    int64_t echo_before_ns = 0;
+    int64_t echo_after_ns = 0;
+    /// 回聲年齡有幾筆。kick：判定用的視窗裡（一定 ≥ k_min_samples）；兩種 result：確認用的那 1.5 秒裡——
+    /// < k_min_samples 時 echo_after_ns 不可信（一筆都沒有時是 0）
+    int echo_samples = 0;
     int kick_no = 0;  ///< 這個 generation 的第幾次 kick（所有事件都帶）
     int64_t next_try_ns = 0;  ///< result_no_change：下一次最早多久以後（從現在算）
   };
@@ -195,9 +225,19 @@ namespace vr::kick {
       if (!active_ || phase_ns < 0) {
         return;
       }
-      ring_[head_] = sample_t {t_ns, phase_ns};
-      head_ = (head_ + 1) % k_ring_size;
-      count_ = std::min(count_ + 1, k_ring_size);
+      phase_.push(t_ns, phase_ns);
+    }
+
+    /**
+     * @brief 每一張對到姿態的擷取影像一筆回聲年齡（(a) 的第二個條件；確認時只給 log 用）。沒有對到姿態的不要餵。
+     * @param t_ns 這一張影像 Present 的時刻（和 on_present_phase 的時刻同一個時鐘）。不必照順序
+     * @param age_ns 那個時刻減掉「它用的那個姿態被發布給 driver 的時刻」；負的丟掉
+     */
+    void on_echo_age(int64_t t_ns, int64_t age_ns) {
+      if (!active_ || age_ns < 0) {
+        return;
+      }
+      echo_.push(t_ns, age_ns);
     }
 
     /**
@@ -252,13 +292,18 @@ namespace vr::kick {
         }
         // (c) 確認：[kick + settle, kick + settle + verify) 這一段的樣本。之後回到 (a)：連續成立的計時在 kick 時
         // 已經歸零，所以又是 B 的話要再滿 3 秒
-        const stats_t s = stats_between(verify_begin_ns_, detail::sub_sat(verify_end_ns_, 1));
+        const stats_t s = phase_.between(verify_begin_ns_, detail::sub_sat(verify_end_ns_, 1));
+        const stats_t e = echo_.between(verify_begin_ns_, detail::sub_sat(verify_end_ns_, 1));
         verifying_ = false;
         d.samples = s.n;
         d.median_before_ns = kick_median_ns_;
         d.p90_before_ns = kick_p90_ns_;
         d.median_after_ns = s.median_ns;
         d.p90_after_ns = s.p90_ns;
+        // 回聲年齡只帶出去給 log：成不成功下面只看 presentPhase
+        d.echo_before_ns = kick_echo_ns_;
+        d.echo_after_ns = e.median_ns;
+        d.echo_samples = e.n;
         if (s.n >= k_min_samples && s.median_ns >= k_a_median_min_ns) {
           d.event = event_e::result_ok;
           backoff_step_ = 0;  // 退避的時刻不必清：能走到 kick 就表示它已經過了
@@ -301,6 +346,13 @@ namespace vr::kick {
         dwell_active_ = false;
         return d;
       }
+      // 回聲年齡也要多了半個週期以上。合成器自己的畫面（遊戲還在載入）presentPhase 和 B 一樣小，只有這個量分得開；
+      // 樣本不夠（沒有餵、沒有串流在擷取、影像沒有對到姿態）一律當成不成立
+      const stats_t e = recent_echo(now);
+      if (e.n < k_min_samples || e.median_ns < echo_min_ns()) {
+        dwell_active_ = false;
+        return d;
+      }
       if (!dwell_active_) {
         dwell_active_ = true;
         dwell_since_ns_ = now;
@@ -321,6 +373,7 @@ namespace vr::kick {
       last_kick_ns_ = now;
       kick_median_ns_ = s.median_ns;
       kick_p90_ns_ = s.p90_ns;
+      kick_echo_ns_ = e.median_ns;
       // (c) 結果出來之前不評估 B：前 k_settle_ns 的樣本不看，接著 k_verify_ns 的拿來確認
       verifying_ = true;
       verify_begin_ns_ = detail::add_sat(now, k_settle_ns);
@@ -332,6 +385,8 @@ namespace vr::kick {
       d.median_before_ns = s.median_ns;
       d.p90_before_ns = s.p90_ns;
       d.samples = s.n;
+      d.echo_before_ns = e.median_ns;
+      d.echo_samples = e.n;
       d.kick_no = kicks_;
       return d;
     }
@@ -390,9 +445,19 @@ namespace vr::kick {
       return stopped_;
     }
 
-    /// (a) 的判定視窗：最近 k_window_ns 內的樣本（on_external_kick 之後那一段不看的除外）
+    /// (a) 的判定視窗裡的 presentPhase：最近 k_window_ns 內的樣本（on_external_kick 之後那一段不看的除外）
     stats_t recent(int64_t now_ns) const {
-      return stats_between(std::max(detail::add_sat(detail::sub_sat(now_ns, k_window_ns), 1), floor_ns_), now_ns);
+      return phase_.between(window_begin(now_ns), now_ns);
+    }
+
+    /// 同一個視窗裡的回聲年齡（p90 沒有人用，只是順便算出來）
+    stats_t recent_echo(int64_t now_ns) const {
+      return echo_.between(window_begin(now_ns), now_ns);
+    }
+
+    /// (a) 回聲年齡的中位數要 ≥ 這個值才算多一格（60 Hz 是 13.83 ms）
+    int64_t echo_min_ns() const {
+      return detail::add_sat(k_echo_a_typical_ns, detail::mul_div(period_ns_, k_echo_period_num, k_echo_period_den));
     }
 
     /// B 已經連續成立多久（目前不成立＝0；以上一次評估為準）
@@ -403,7 +468,40 @@ namespace vr::kick {
   private:
     struct sample_t {
       int64_t t_ns = 0;
-      int64_t phase_ns = 0;
+      int64_t value_ns = 0;
+    };
+
+    /// 樣本環：滿了之前有效的是 [0, count)，滿了之後是全部（只留最新的 k_ring_size 筆）
+    struct ring_t {
+      std::array<sample_t, k_ring_size> buf {};
+      std::size_t head = 0;
+      std::size_t count = 0;
+
+      void push(int64_t t_ns, int64_t value_ns) {
+        buf[head] = sample_t {t_ns, value_ns};
+        head = (head + 1) % k_ring_size;
+        count = std::min(count + 1, k_ring_size);
+      }
+
+      /// 時刻在 [lo_ns, hi_ns]（兩端都含）的樣本的統計量。環裡的順序不重要：每一筆都看自己的時刻
+      stats_t between(int64_t lo_ns, int64_t hi_ns) const {
+        std::array<int64_t, k_ring_size> v {};
+        std::size_t n = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+          if (buf[i].t_ns >= lo_ns && buf[i].t_ns <= hi_ns) {
+            v[n++] = buf[i].value_ns;
+          }
+        }
+        stats_t s;
+        s.n = static_cast<int>(n);
+        if (n == 0) {
+          return s;
+        }
+        std::sort(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(n));
+        s.median_ns = v[detail::quantile_index(n, 1, 2)];
+        s.p90_ns = v[detail::quantile_index(n, 9, 10)];
+        return s;
+      }
     };
 
     enum class pending_e {
@@ -418,24 +516,9 @@ namespace vr::kick {
       return last_now_;
     }
 
-    /// 時刻在 [lo_ns, hi_ns]（兩端都含）的樣本的統計量。環裡的順序不重要：每一筆都看自己的時刻
-    stats_t stats_between(int64_t lo_ns, int64_t hi_ns) const {
-      std::array<int64_t, k_ring_size> v {};
-      std::size_t n = 0;
-      for (std::size_t i = 0; i < count_; ++i) {
-        if (ring_[i].t_ns >= lo_ns && ring_[i].t_ns <= hi_ns) {
-          v[n++] = ring_[i].phase_ns;
-        }
-      }
-      stats_t s;
-      s.n = static_cast<int>(n);
-      if (n == 0) {
-        return s;
-      }
-      std::sort(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(n));
-      s.median_ns = v[detail::quantile_index(n, 1, 2)];
-      s.p90_ns = v[detail::quantile_index(n, 9, 10)];
-      return s;
+    /// (a) 的判定視窗的起點（含）：1 秒前再加 1 ns，或外面做了 kick 之後不看的那一段的結尾，取晚的那個
+    int64_t window_begin(int64_t now_ns) const {
+      return std::max(detail::add_sat(detail::sub_sat(now_ns, k_window_ns), 1), floor_ns_);
     }
 
     // 設定
@@ -445,10 +528,9 @@ namespace vr::kick {
     // 時鐘（只往前）
     int64_t last_now_ = detail::k_i64_min;
 
-    // 樣本（環；滿了之前有效的是 [0, count_)，滿了之後是全部）
-    std::array<sample_t, k_ring_size> ring_ {};
-    std::size_t head_ = 0;
-    std::size_t count_ = 0;
+    // 樣本
+    ring_t phase_;  ///< presentPhase（on_present_phase）
+    ring_t echo_;  ///< 回聲年齡（on_echo_age）
     int64_t floor_ns_ = detail::k_i64_min;  ///< 比這個時刻早的樣本不拿來判定 B（外面做了 kick 之後的那一段）
 
     // (a) 判定
@@ -464,6 +546,7 @@ namespace vr::kick {
     int64_t verify_end_ns_ = 0;
     int64_t kick_median_ns_ = 0;  ///< kick 當下的視窗（結果的 log 要印「之前」）
     int64_t kick_p90_ns_ = 0;
+    int64_t kick_echo_ns_ = 0;  ///< kick 當下的回聲年齡中位數（同上）
     int64_t last_kick_ns_ = detail::k_i64_min;  ///< 上一次 kick 的時刻（含外面做的；還沒有過＝INT64_MIN，離現在無限久）
     int kicks_ = 0;
     std::size_t backoff_step_ = 0;
