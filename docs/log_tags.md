@@ -658,6 +658,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-SESSION] half-rate: display D Hz, stream S Hz                              ← §VR-HALF-RATE（client）：串流跑顯示更新率的一半
 [VIPLE-VR-SYNTH] texture setup failed|flow pass failed|combine pass failed - frame synthesis off for this session   ← §VR-SYNTH（client）：合成失敗，這個 session 改回重送
 [VIPLE-XR] 10s video … synth drawn=N shown=N[ (FAILED: off)]                          ← §VR-SYNTH：這 10 s 合成了幾張、顯示了幾次合成的那一格
+[VIPLE-VR-MTP10] … mismatch=N… synthGuard=N                                           ← §VR-SYNTH（2026-10-10，開著補幀才印）：這一格要顯示合成那一半，但 xrEndFrame 之前
+                                                                                    又 release 了下一張的第一次發布（它的下半不是合成畫面）→ 改顯示上半的次數；穩態每 10 s 0～1
 [VIPLE-VR-ENC] probe: HEVC 10-bit supported|not supported                              ← §VR-10BIT：VR 探測（來源 display_vr）測 HEVC 10-bit 的結果
 [VIPLE-VR-SESSION] 10-bit HEVC (Main10, SDR) requested by the client                    ← §VR-10BIT（server）：這個 VR session 用 10-bit 編碼
 [VIPLE-VR-SESSION] 10-bit was requested (vr10bit) but this device's hardware decoder path only outputs 8-bit - streaming 8-bit   ← client（Frame）：不要求 10-bit
@@ -905,7 +907,10 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 
 - `--display-target xr-desktop` 在 `startConnectionAsync` 開頭（`/launch` 與 relay 之前）bring-up，逾時 5 s；拆除在 decoder 刪除之後、`SDL_DestroyWindow` 之前。
 - 沒有影像時畫 loading quad（前方 1.5 m、寬 60°、深灰）；X2 起影像由 XrRenderer（frontend，只放 mailbox）交給 XR thread，用 `pl_vulkan_import` 共用 XrContext 的 VkDevice（queue lock 同一把）以 libplacebo 畫進影像 quad swapchain。testRenderFrame 在 XR 的 pl_gpu 上實際 map 一次，失敗退回平面。
-- dev：`--xr-dump-frame <path>` 把第 300 幀的影像 quad 讀回存 PNG（最長邊 ≤ 1280）。
+- dev：`--xr-dump-frame <path>` 把第 300 幀的影像 quad 讀回存 PNG（最長邊 ≤ 1280）。補幀（§VR-SYNTH）開著時改成從第 2400 張起
+  每 480 張存一組、一共六組：`<path>` 是第二次發布的那一張（上半真的、下半合成），`<path 去掉副檔名>-first.png` 是第一次
+  發布的那一張；第 2 組起檔名在副檔名之前加 `-2`、`-3`…。兩張的上半必須逐像素相同（2026-10-10 的畫面錯亂就是先發布的
+  那一張畫錯、只存第二張看不出來）。log：`[VIPLE-XR] frame dump: <檔名> (WxH from WxH, mode=…)`。
 - X3：螢幕依頭部水平朝向擺在正前方 1.5 m（第一次 FOCUSED 時；Ctrl+Alt+Shift+R recenter，log `placement(recenter)`）；有 `XR_KHR_composition_layer_cylinder` 送 cylinder，否則 quad。影像在獨立 render thread 畫（XR thread 只送最後 release 的影像＝最後一幀複本），stale 狀態 `no-video/live/stale/lost`：1 s 沒新幀疊橘色狀態條、5 s 改 loading。10s 統計分 XR thread cpu 與 render thread cpu／gpu 等待。dev：`--xr-test-stall-ms`、`--xr-test-recenter-sec`。
 - S2（Windows SteamVR null driver）注意：OpenXR app 只會拉起 vrserver，要先完整啟動 SteamVR（否則 `xrGetVulkanGraphicsDevice2KHR` 回 RUNTIME_FAILURE）；null HMD 不動會進 standby、沒有控制器時 dashboard 搶焦點（停在 VISIBLE），驗測前要關 standby 與 dashboard。
 - `xr-probe --session [--duration N]`：B 段用 XrContext 實跑 session 與 frame loop，回報最高狀態、幀數、miss%、refresh、每眼 FOV、reference space；rc 0 成功、13 runtime 載不起來、14 runtime 錯誤。
