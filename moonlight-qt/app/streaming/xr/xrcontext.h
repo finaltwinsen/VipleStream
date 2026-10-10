@@ -539,6 +539,16 @@ private:
         uint32_t lastMtpUs = 0;
         uint32_t repRun = 0;
         bool lastAgePushed = false;      // 上一次 pcvrTimingOnLatch 有沒有記一筆年齡
+        // §VR-REPAIR-RTT 的量測：目前這張影像已經連續重複了幾格（不看 lastMtpUs，沒量到 MTP 的影像也算）；10 s 視窗裡
+        // 已經結束的那幾段的最大值、長度達到 3 格與 5 格的段數。一段在下一張新影像出現時才結算
+        uint32_t repStreak = 0;
+        uint32_t repRunMax10s = 0;
+        uint32_t repRunGe3 = 0;
+        uint32_t repRunGe5 = 0;
+        // §VR-REPAIR-RTT：10 s 視窗——被補包機制拖晚的幀剛放行、所以沒有拿來更新 LATCH 樣本的新影像張數；這個視窗裡
+        // 補包照過哪一套規則（bit0＝原本的、bit1＝跟著往返時間走的；每個顯示格看一次 LiGetVrRepairRules）
+        uint32_t latchSkip10s = 0;
+        uint32_t rrSeen10s = 0;
         std::vector<int32_t> slack1s;
         std::vector<uint32_t> render1s;
         std::vector<uint32_t> mtp1sUs;

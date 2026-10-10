@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Video.h"
+#include "VrRepairRtt.h"
 
 typedef struct _RTPV_QUEUE_ENTRY {
     struct _RTPV_QUEUE_ENTRY* next;
@@ -24,6 +25,39 @@ typedef struct _RTPV_QUEUE_LIST {
 
 // §VR-LINK-REPAIR：逐條連線記進度的格數（＝VIPLE_VR_LINK_MAX；RtpVideoQueue.c 有編譯期檢查）
 #define RTPV_ML_LINKS 4
+
+// §VR-REPAIR-RTT（量測）：「放棄之後多久才到齊」同時追蹤幾個 block（說明見 RtpVideoQueue.c 的 msLate*）
+#define RTPV_LATE_SLOTS 4
+
+typedef struct _RTPV_LATE_SLOT {
+    bool open;
+    bool needEst;       // need 是估計值（放棄時這個 block 一個封包都沒收到）：第一個晚到的封包帶來真正的 data 數
+    uint8_t block;
+    uint16_t need;      // 還差幾個 shard 才夠還原
+    uint16_t got;       // 放棄之後又到了幾個
+    uint32_t frame;
+    uint64_t gaveUpUs;  // 放棄的時刻
+    uint8_t seen[32];   // 放棄之後到過哪些 shard（去重；256 bit）
+} RTPV_LATE_SLOT;
+
+// §VR-REPAIR-RTT（量測）：補包的累計數（整場累計、不歸零；VideoStream 取差值印 [VIPLE-VR-REPAIR] gate 10s）
+typedef struct _RTPV_REPAIR_TOTALS {
+    uint32_t nack;          // 送出的回報
+    uint32_t repaired;      // 回報之後收齊的 block
+    uint32_t repairedUsed;  // 其中補包真的用上的（收過「可能是補包」的封包）
+    uint32_t used;          // 回報之後才到、可能是補包、而且被採用的封包
+    uint32_t spurious;      // 多餘的回報：回報之後、補包還不可能到的時候，這個 block 自己的封包就到了
+    uint32_t lost;          // 沒收齊就被跳過的幀
+    uint32_t lostNacked;    // 其中：回報過、等到期限還是放棄
+    uint32_t lostUnasked;   // 其中：收到一部分、沒回報過就放棄
+    uint32_t lostWhole;     // 其中：一個封包都沒到、也沒回報過（含連續掉好幾幀時佇列沒等過就跳過的）
+    uint32_t fixCount;      // 回報之後收齊的 block：從第一份回報到收齊的時間（個數、最大值、總和）
+    uint32_t fixUsMax;
+    uint64_t fixUsSum;
+    uint32_t lateDone[5];   // 回報過才放棄的 block，放棄之後多久才到齊：≤5／≤10／≤20／≤33／>33 ms
+    uint32_t lateNever;     // 同上，60 ms 內沒到齊
+    uint32_t stall[5];      // 同一個 block 相鄰兩個封包的到達間隔：3～4／4～6／6～8／8～12／≥12 ms
+} RTPV_REPAIR_TOTALS;
 
 typedef struct _RTP_VIDEO_QUEUE {
     RTPV_QUEUE_LIST pendingFecBlockList;
@@ -111,6 +145,22 @@ typedef struct _RTP_VIDEO_QUEUE {
     uint32_t mlStatRepaired;
     uint32_t mlStatGone;
 
+    // §VR-REPAIR-RTT（量測）：以下只記帳，不分規則、不影響任何判斷。mlMeas（協商了補包就開）與接著三個由 VideoStream
+    // 每次加封包前設定（RtpvSetRepairMeas）。佇列不為了量測多讀時鐘：用交進來的時刻，與它本來就讀過的時刻。
+    bool mlMeas;
+    uint64_t mlMeasNowUs;               // 現在的時刻（這個封包到達的時刻；佇列等到逾時才處理時是那一刻）
+    uint64_t mlMeasRxUs;                // 正在交給內部函式的封包當初到達的時刻（從等待環交出去的才設；0＝就是 mlMeasNowUs）
+    uint32_t mlMeasLoUs;                // 正在送影像的連線最近的最短往返時間（0＝不知道）：分辨補包與晚到的封包用
+    uint64_t nkFirstNackUs;             // 這個 block 第一份回報的時刻（0＝還沒報過）
+    bool nkSpurious;                    // 這個 block 回報之後、補包還不可能到的時候自己的封包就到了（只算一次）
+    bool nkUsedRepair;                  // 這個 block 收過「可能是補包」的封包
+    bool msBlkValid;                    // 以下四個＝block 內停頓的量測：最近收下封包的是哪個（幀, block）、它上一個封包到達的時刻
+    uint8_t msBlkBlock;
+    uint32_t msBlkFrame;
+    uint64_t msBlkLastRxUs;
+    RTPV_LATE_SLOT msLate[RTPV_LATE_SLOTS];
+    RTPV_REPAIR_TOTALS mlTot;
+
     RTP_VIDEO_STATS stats; // the above values are short-lived, this tracks stats for the life of the queue
 
     // VipleStream §K.17: Grace period for late-arriving final shard.
@@ -174,6 +224,17 @@ int RtpvHoldTimeoutMs(PRTP_VIDEO_QUEUE queue);
 void RtpvPollHold(PRTP_VIDEO_QUEUE queue);
 // §VR-LINK-REPAIR：server 回了 REPAIR_GONE（這個 block 補不了）。只在影像接收執行緒呼叫。
 void RtpvRepairGone(PRTP_VIDEO_QUEUE queue, uint32_t frame, uint8_t block);
+// §VR-REPAIR-RTT（量測）：影像有應用層加密時，比佇列目前的幀號舊的封包在解密前就被丟掉、進不了佇列。VideoStream
+// 丟掉之前把幀號交進來，讓「放棄之後多久才到齊」的量測以幀為單位數（分不出 block、也去不了重，數字只能當參考）。
+void RtpvMeasLateFrame(PRTP_VIDEO_QUEUE queue, uint32_t frame);
+
+// §VR-REPAIR-RTT（量測）：每次加封包前設定量測用的輸入（VideoStream 的接收迴圈與模擬器共用）。
+// on＝協商了補包；nowUs＝這個封包到達的時刻；rttLoUs＝正在送影像的連線最近的最短往返時間（0＝不知道）
+VIPLE_VR_INLINE void RtpvSetRepairMeas(PRTP_VIDEO_QUEUE queue, bool on, uint64_t nowUs, uint32_t rttLoUs) {
+    queue->mlMeas = on;
+    queue->mlMeasNowUs = on ? nowUs : 0;
+    queue->mlMeasLoUs = on ? rttLoUs : 0;
+}
 
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue);
 void RtpvCleanupQueue(PRTP_VIDEO_QUEUE queue);

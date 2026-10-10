@@ -10,6 +10,7 @@
 #pragma once
 
 #include "Limelight-internal.h"
+#include "VrRepairRtt.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +58,9 @@ int vrmlSendTracking(const void* sample, int length);
 int vrmlSendCtrl(const unsigned char* tlv, int length);
 // 已確認連線裡最小的往返時間（ms，無條件進位）；沒協商 §VR-LINK-CTRL 或沒有已確認的連線時回 -1
 int vrmlCtrlRttMs(void);
+// §VR-REPAIR-RTT：正在送影像的連線（mask＝vrmlVideoCarryMask()；0＝還不知道哪條在送，看全部）最近 VRRR_RTT_WIN 筆
+// 往返時間的最小／中位數／第二大。只算已確認、有樣本的連線；在送的那條沒有樣本就回 false。只在影像接收執行緒呼叫。
+bool vrmlRepairRtt(unsigned mask, VRRR_RTT_STATS* out);
 // server 同意啟用的連線層功能（VIPLE_VR_LINK_F_*；LINK_READY 之前是 0）
 int vrmlFeatures(void);
 // §VR-LINK-REPAIR：server 回了 REPAIR_GONE（某個 block 補不了）時取出一次。只在影像接收執行緒呼叫。

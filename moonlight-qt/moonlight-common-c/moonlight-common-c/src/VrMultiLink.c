@@ -54,6 +54,20 @@ typedef struct _VRML_LINK {
     volatile uint64_t lastPongMs; // 影像接收執行緒寫
     volatile uint16_t rttMs10;
 
+    // §VR-REPAIR-RTT：最近 VRRR_RTT_WIN 筆往返時間與它的最小／中位數／第二大（只在影像接收執行緒存取；每收到一個 PONG 重算）
+    VRRR_RTT_WINDOW rttWin;
+    VRRR_RTT_STATS rttStats;
+    bool rttHave;
+    // 10 s 統計用（影像接收執行緒寫、ping 執行緒印）：樣本數與總和是累計值，最小／最大每印一次重來（0xFFFF＝還沒有樣本），
+    // 另外留一份上面那組統計的快照（0.1 ms）
+    volatile uint32_t rttSampleCount;
+    volatile uint32_t rttSampleSumMs10;
+    volatile uint16_t rttMinMs10Stats;
+    volatile uint16_t rttMaxMs10Stats;
+    volatile uint16_t rttWinLoMs10, rttWinMidMs10, rttWinHiMs10;
+    uint32_t rttSampleCountPrev;
+    uint32_t rttSampleSumPrev;
+
     // 接收統計（影像接收執行緒寫）
     volatile uint32_t rxPkts;
     volatile uint32_t rxUsed;
@@ -237,6 +251,7 @@ static bool addLink(uint32_t localBe, uint32_t serverBe, const char* ifName, boo
     L->videoSock = INVALID_SOCKET;
     L->audioSock = INVALID_SOCKET;
     L->rttMs10 = VIPLE_VR_LINK_RTT_UNKNOWN;
+    L->rttMinMs10Stats = 0xFFFF;
     if (ifName != NULL) {
         snprintf(L->ifName, sizeof(L->ifName), "%s", ifName);
     }
@@ -405,14 +420,15 @@ static void sendHello(void) {
 }
 
 static void logStats(uint64_t nowMs) {
-    char line[768];
+    char line[1280];
     int off = 0;
     int i;
     uint32_t lg = legacyRxPkts;
 
     off += snprintf(line + off, sizeof(line) - off, "legacy rx=%u", lg - legacyRxPktsPrev);
     legacyRxPktsPrev = lg;
-    for (i = 0; i < linkCount && off < (int)sizeof(line) - 160; i++) {
+    // 每條連線約 150 個字元，四條連線加上行尾的 ctl 與 rtt10s 兩段要留得下（下面兩段各有自己的檢查）
+    for (i = 0; i < linkCount && off < (int)sizeof(line) - 560; i++) {
         VRML_LINK* L = &links[i];
         uint32_t rx = L->rxPkts, used = L->rxUsed, ts = L->trkSent, td = L->trkDrop;
         uint32_t gap = L->gapMaxUsStats;
@@ -446,6 +462,25 @@ static void logStats(uint64_t nowMs) {
         s2cRxPrev = sr;
         s2cDupPrev = sd;
         s2cBadPrev = sb;
+    }
+    // §VR-REPAIR-RTT（量測）：每條連線這 10 秒的往返時間——樣本數、最小／平均／最大，與最近 VRRR_RTT_WIN 筆的
+    // 最小／中位數／第二大（補包的時間預算看的是後面這一組）。上面的 rttMs 只是最近一筆。新欄位加在行尾
+    for (i = 0; i < linkCount && off < (int)sizeof(line) - 112; i++) {
+        VRML_LINK* L = &links[i];
+        const uint32_t count = L->rttSampleCount, sum = L->rttSampleSumMs10;
+        const uint32_t n = count - L->rttSampleCountPrev;
+        const uint16_t mn = L->rttMinMs10Stats, mx = L->rttMaxMs10Stats;
+
+        L->rttMinMs10Stats = 0xFFFF;
+        L->rttMaxMs10Stats = 0;
+        off += snprintf(line + off, sizeof(line) - off, "%s L%d n=%u", i == 0 ? " | rtt10s" : "", (int)L->id, n);
+        if (n != 0 && mn != 0xFFFF) {
+            off += snprintf(line + off, sizeof(line) - off, " min=%.1f avg=%.1f max=%.1f win=%.1f/%.1f/%.1f",
+                            mn / 10.0, (sum - L->rttSampleSumPrev) / 10.0 / n, mx / 10.0,
+                            L->rttWinLoMs10 / 10.0, L->rttWinMidMs10 / 10.0, L->rttWinHiMs10 / 10.0);
+        }
+        L->rttSampleCountPrev = count;
+        L->rttSampleSumPrev = sum;
     }
     Limelog("[VIPLE-VR-LINK] 10s: %s\n", line);
 }
@@ -898,13 +933,33 @@ static void onVideoCtrl(VRML_LINK* L, const char* buffer, int len) {
     }
     if (hdr.type == VIPLE_VR_LINK_T_PONG) {
         uint32_t rttUs = (uint32_t)PltGetMicroseconds() - LE32(hdr.arg);
+        const uint64_t nowMs = PltGetMillis();
         if (rttUs < 2000000) {
-            L->rttMs10 = (uint16_t)(rttUs / 100 >= VIPLE_VR_LINK_RTT_UNKNOWN ? VIPLE_VR_LINK_RTT_UNKNOWN - 1 : rttUs / 100);
+            const uint16_t ms10 = (uint16_t)(rttUs / 100 >= VIPLE_VR_LINK_RTT_UNKNOWN ? VIPLE_VR_LINK_RTT_UNKNOWN - 1 : rttUs / 100);
+            L->rttMs10 = ms10;
+            // §VR-REPAIR-RTT：留最近幾筆。這條連線剛斷過（超過 VRML_CONFIRM_TIMEOUT_MS 沒有 PONG）就重來——斷線前的樣本
+            // 說的是另一段時間的路徑
+            if (L->lastPongMs != 0 && nowMs - L->lastPongMs > VRML_CONFIRM_TIMEOUT_MS) {
+                vrrrRttReset(&L->rttWin);
+            }
+            vrrrRttAdd(&L->rttWin, ms10);
+            L->rttHave = vrrrRttStats(&L->rttWin, &L->rttStats);
+            L->rttWinLoMs10 = (uint16_t)(L->rttStats.loUs / 100);
+            L->rttWinMidMs10 = (uint16_t)(L->rttStats.midUs / 100);
+            L->rttWinHiMs10 = (uint16_t)(L->rttStats.hiUs / 100);
+            L->rttSampleCount++;
+            L->rttSampleSumMs10 += ms10;
+            if (ms10 < L->rttMinMs10Stats) {
+                L->rttMinMs10Stats = ms10;
+            }
+            if (ms10 > L->rttMaxMs10Stats) {
+                L->rttMaxMs10Stats = ms10;
+            }
         }
         if (L->lastPongMs == 0) {
             Limelog("[VIPLE-VR-LINK] link %d confirmed (first PONG, rtt %.1f ms)\n", (int)L->id, rttUs / 1000.0);
         }
-        L->lastPongMs = PltGetMillis();
+        L->lastPongMs = nowMs;
     }
     else if (hdr.type == VIPLE_VR_LINK_T_S2C) {
         onLinkS2C(&hdr, buffer, len);
@@ -1456,6 +1511,26 @@ int vrmlFeatures(void) {
     return hubCaps;
 }
 
+bool vrmlRepairRtt(unsigned mask, VRRR_RTT_STATS* out) {
+    VRRR_RTT_STATS per[VIPLE_VR_LINK_MAX];
+    unsigned have = 0;
+    uint64_t nowMs;
+    int i;
+
+    if (linkCount == 0) {
+        return false;
+    }
+    memset(per, 0, sizeof(per));
+    nowMs = PltGetMillis();
+    for (i = 0; i < linkCount; i++) {
+        if (links[i].rttHave && isConfirmed(&links[i], nowMs)) {
+            per[i] = links[i].rttStats;
+            have |= 1u << i;
+        }
+    }
+    return vrrrRttCombine(per, linkCount, mask, have, out);
+}
+
 bool vrmlTakeGone(uint32_t* frame, uint8_t* block) {
     // 和它同一批收進來的影像封包還沒全部交出去時先不給：GONE 是在暫存階段就解出來的，但同一批裡排在後面交出去
     // 的補包可能就讓那個 block 收齊了；先套用 GONE 會放棄一個其實救得回來的 block
@@ -1487,6 +1562,7 @@ int vrmlSendTracking(const void* sample, int length) { (void)sample; (void)lengt
 int vrmlSendCtrl(const unsigned char* tlv, int length) { (void)tlv; (void)length; return 0; }
 int vrmlCtrlRttMs(void) { return -1; }
 int vrmlFeatures(void) { return 0; }
+bool vrmlRepairRtt(unsigned mask, VRRR_RTT_STATS* out) { (void)mask; (void)out; return false; }
 bool vrmlTakeGone(uint32_t* frame, uint8_t* block) { (void)frame; (void)block; return false; }
 
 #endif

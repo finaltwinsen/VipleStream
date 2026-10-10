@@ -2339,6 +2339,7 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     if (seq == t.lastLatchedSeq) {
         t.repeat10s++;  // 同一張影像重送（沒有新幀）：只計數
         t.lastWasRepeat = true;
+        ++t.repStreak;  // §VR-REPAIR-RTT 的量測：連續重複幾格（和下面的 repRun 不同，沒量到 MTP 的影像也算）
         if (t.lastMtpUs != 0) {
             ++t.repRun;
             m_LatchDiag.age10s.push_back(static_cast<uint32_t>(
@@ -2354,13 +2355,27 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     t.lastWasRepeat = false;
     t.lastLatchedSeq = seq;
     t.presentedTotal++;
+    // §VR-REPAIR-RTT 的量測：上一張影像連續重複的那一段到這裡結束，結算進這個 10 s 視窗
+    t.repRunMax10s = (std::max)(t.repRunMax10s, t.repStreak);
+    t.repRunGe3 += t.repStreak >= 3u ? 1u : 0u;
+    t.repRunGe5 += t.repStreak >= 5u ? 1u : 0u;
+    t.repStreak = 0;
     t.lastMtpUs = 0;  // 這一張的 MTP 還沒量到；下面量到才記
     t.repRun = 0;
     const int64_t slackUs = static_cast<int64_t>(latchNs / 1000ull) - static_cast<int64_t>(lastDrawnUs);
-    t.lastSlackUs = static_cast<int32_t>((std::max<int64_t>)(INT32_MIN, (std::min<int64_t>)(slackUs, INT32_MAX)));
-    t.lastFrameId = static_cast<uint32_t>(seq);
-    t.haveLatch = true;
-    t.slack1s.push_back(t.lastSlackUs);
+    const int32_t slack32 = static_cast<int32_t>((std::max<int64_t>)(INT32_MIN, (std::min<int64_t>)(slackUs, INT32_MAX)));
+    if (LiGetVrRepairQuietMs() < 60u) {
+        // §VR-REPAIR-RTT：被補包機制拖晚的幀剛放行（60 ms 內）。這幾張的到達時刻反映的是補包花的時間、不是 host 的節拍，
+        // 不拿來更新要送給 host 的 LATCH 樣本——上一筆照送（host 的控制器本來就丟重複的 frameId）。只有照
+        // §VR-REPAIR-RTT 的規則等過才會走到這裡，其餘情況那個函式恆回 UINT32_MAX
+        t.latchSkip10s++;
+    }
+    else {
+        t.lastSlackUs = slack32;
+        t.lastFrameId = static_cast<uint32_t>(seq);
+        t.haveLatch = true;
+    }
+    t.slack1s.push_back(slack32);
     t.render1s.push_back(renderUs);
     if (hasMeta) {
         uint64_t sampleNs = 0;
@@ -2395,6 +2410,9 @@ void XrContext::pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
         // 原本算成「重複上一張」的這一格，其實顯示了新影像
         if (!rolled && t.repeat10s > 0) {
             t.repeat10s--;
+        }
+        if (t.repStreak > 0) {
+            t.repStreak--;  // 連續重複的那一段少算這一格（還沒結算，下面的 pcvrTimingOnLatch 才結算）
         }
     }
     else {
@@ -2540,6 +2558,7 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         t.mtpWindowStartNs = nowNs;
         t.lastTimingSendNs = nowNs;
     }
+    t.rrSeen10s |= LiGetVrRepairRules() == 1 ? 2u : 1u;  // §VR-REPAIR-RTT：[VIPLE-VR-MTP10] 的 rr=
 
     // 以固定截止時間排程（下一次＝上一次截止＋間隔），frame thread 每幀呼叫一次時不會因為幀間隔
     // 抖動而把 10 Hz 拖成 8 Hz；落後超過一個間隔就重新對齊到現在。
@@ -2618,7 +2637,8 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         // 2026-10-05：尾端加 frames new／repeat／skip（前段欄位順序不變）
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
-                    " | frames new=%u repeat=%u skip=%u mismatch=%u%s%s%s%s",
+                    " | frames new=%u repeat=%u skip=%u mismatch=%u%s%s%s%s"
+                    " | repRun max=%u ge3=%u ge5=%u latchSkip=%u rr=%s",
                     n, pctOf(t.mtp10sUs, 0.50) / 1000.0, pctOf(t.mtp10sUs, 0.95) / 1000.0,
                     pctOf(t.mtp10sUs, 0.99) / 1000.0, t.mtpNoSample, t.latchSent,
                     secs > 0 ? t.latchSent / secs : 0.0, t.lastSlackUs, t.timingSent,
@@ -2643,7 +2663,16 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
                     // §VR-LATCH A/B：這個視窗是哪一邊
                     m_Options.pcvrLatchAbSec > 0 ? (t.abOn ? " ab=1" : " ab=0") : "",
                     // §VR-SYNTH：要顯示合成那一半時最新的影像已經換掉、改顯示上半的次數（開著合成才印）
-                    m_Options.pcvrSynth ? qUtf8Printable(QString(" synthGuard=%1").arg(t.synthGuard10s)) : "");
+                    m_Options.pcvrSynth ? qUtf8Printable(QString(" synthGuard=%1").arg(t.synthGuard10s)) : "",
+                    // §VR-REPAIR-RTT 的量測：同一張影像連續重複幾格——這 10 s 的最大值（還沒結束的那一段也算）、
+                    // 達到 3 格與 5 格的段數。半速＋補幀時每張真的影像平常就重複 1 格，判讀時要扣掉
+                    (std::max)(t.repRunMax10s, t.repStreak), t.repRunGe3, t.repRunGe5,
+                    // §VR-REPAIR-RTT：latchSkip＝沒有拿來更新 LATCH 樣本的新影像張數；rr＝這 10 s 補包照哪一套規則
+                    // （0 原本的、1 跟著往返時間走的、m 兩種都有）
+                    t.latchSkip10s, t.rrSeen10s == 3u ? "m" : (t.rrSeen10s == 2u ? "1" : "0"));
+        t.repRunMax10s = t.repRunGe3 = t.repRunGe5 = 0;
+        t.latchSkip10s = 0;
+        t.rrSeen10s = 0;
         t.trkLateSum = 0.0;
         t.trkPrevSum = 0.0;
         t.trkLateN = 0;

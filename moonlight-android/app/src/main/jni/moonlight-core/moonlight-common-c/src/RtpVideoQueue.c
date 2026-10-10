@@ -584,6 +584,189 @@ uint32_t RtpvGetCurrentFrameNumber(PRTP_VIDEO_QUEUE queue) {
     return queue->currentFrameNumber;
 }
 
+// §VR-REPAIR-RTT（量測）────────────────────────────────────────────────────────
+// 以下只記帳、不影響任何判斷，queue->mlMeas（協商了補包）時才做；結果由 VideoStream 每 10 秒印成
+// [VIPLE-VR-REPAIR] gate 10s。要回答的是「補包的時間預算該訂多少」：
+//   - 沒收齊就被跳過的幀有幾張、其中回報過的佔多少（msNoteLost）；
+//   - 回報過才放棄的 block，放棄之後多久才到齊（msLate*）——集中在幾毫秒內就是等得太短，一直沒到齊就是補包本身掉了；
+//   - 同一個 block 相鄰兩個封包平常會隔多久（msNoteAccepted）——決定「多久沒有新封包才算尾端掉了」。
+// 不為了量測多讀時鐘：時刻用 VideoStream 交進來的（mlMeasNowUs）與佇列本來就讀過的。
+#define RTPV_LATE_WINDOW_US 60000   // 放棄之後追蹤這麼久，還沒到齊就算「沒到齊」
+
+// 追蹤了超過 RTPV_LATE_WINDOW_US 的：算沒到齊
+static void msLateExpire(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
+    int i;
+
+    for (i = 0; i < RTPV_LATE_SLOTS; i++) {
+        RTPV_LATE_SLOT* s = &queue->msLate[i];
+        if (s->open && (nowUs < s->gaveUpUs || nowUs - s->gaveUpUs > RTPV_LATE_WINDOW_US)) {
+            s->open = false;
+            queue->mlTot.lateNever++;
+        }
+    }
+}
+
+// 佇列正在等的這個 block 回報過、現在要放棄了：記下它還差幾個，之後看晚到的封包什麼時候湊滿。
+// hadPending＝它收到過封包（還差幾個算得出來）；否則先用上一個 block 的 data 數估，第一個晚到的封包會帶來真正的數字
+static void msLateOpen(PRTP_VIDEO_QUEUE queue, bool hadPending, uint64_t nowUs) {
+    RTPV_LATE_SLOT* slot = NULL;
+    uint32_t need = queue->bufferDataPackets;
+    int i;
+
+    if (nowUs == 0) {
+        return;
+    }
+    if (hadPending) {
+        const uint32_t recv = queue->receivedDataPackets + queue->receivedParityPackets;
+        if (queue->bufferDataPackets <= recv) {
+            return;  // 已經夠還原卻沒還原（不支援 FEC 還原的舊 server）：不是等得不夠久
+        }
+        need = queue->bufferDataPackets - recv;
+    }
+    msLateExpire(queue, nowUs);
+    for (i = 0; i < RTPV_LATE_SLOTS; i++) {
+        RTPV_LATE_SLOT* s = &queue->msLate[i];
+        if (!s->open) {
+            slot = s;
+            break;
+        }
+        if (slot == NULL || s->gaveUpUs < slot->gaveUpUs) {
+            slot = s;
+        }
+    }
+    if (slot->open) {
+        queue->mlTot.lateNever++;  // 格子用完了：最舊的那一個不再追蹤
+    }
+    memset(slot, 0, sizeof(*slot));
+    slot->open = true;
+    slot->needEst = !hadPending;
+    slot->frame = queue->currentFrameNumber;
+    slot->block = (uint8_t)queue->multiFecCurrentBlockNumber;
+    slot->need = (uint16_t)(need > 0xFFFF ? 0xFFFF : need);
+    slot->gaveUpUs = nowUs;
+}
+
+// 追蹤中的 block 又到了一個封包（shard＝它在 block 裡的序號；255 以上不去重）。湊滿了就記「放棄之後多久才到齊」
+static void msLateGot(PRTP_VIDEO_QUEUE queue, RTPV_LATE_SLOT* s, uint32_t shard, uint64_t nowUs) {
+    if (shard < 256) {
+        if (s->seen[shard >> 3] & (1u << (shard & 7))) {
+            return;  // 重複的（兩條連線各送一份、或補了兩輪）
+        }
+        s->seen[shard >> 3] |= (uint8_t)(1u << (shard & 7));
+    }
+    s->got++;
+    if (s->got >= (s->need != 0 ? s->need : 1)) {
+        const uint64_t el = nowUs - s->gaveUpUs;
+        queue->mlTot.lateDone[el <= 5000 ? 0 : el <= 10000 ? 1 : el <= 20000 ? 2 : el <= 33000 ? 3 : 4]++;
+        s->open = false;
+    }
+}
+
+// 一個封包因為「比佇列目前等的對象舊」被拒收：它若屬於追蹤中的 block 就算一個晚到的
+static void msLateNote(PRTP_VIDEO_QUEUE queue, uint32_t frame, uint8_t block, uint32_t shard, uint32_t dataShards) {
+    const uint64_t nowUs = queue->mlMeasNowUs;
+    int i;
+
+    if (nowUs == 0) {
+        return;
+    }
+    msLateExpire(queue, nowUs);
+    for (i = 0; i < RTPV_LATE_SLOTS; i++) {
+        RTPV_LATE_SLOT* s = &queue->msLate[i];
+        if (!s->open || s->frame != frame || s->block != block) {
+            continue;
+        }
+        if (s->needEst) {
+            s->need = (uint16_t)dataShards;
+            s->needEst = false;
+        }
+        msLateGot(queue, s, shard, nowUs);
+        return;
+    }
+}
+
+void RtpvMeasLateFrame(PRTP_VIDEO_QUEUE queue, uint32_t frame) {
+    int i;
+
+    if (!queue->mlMeas) {
+        return;
+    }
+    for (i = 0; i < RTPV_LATE_SLOTS; i++) {
+        RTPV_LATE_SLOT* s = &queue->msLate[i];
+        if (s->open && s->frame == frame) {
+            // 只有對得上追蹤中的幀才讀時鐘（平常被丟掉的是已經收齊的幀剩下的 parity，走不到這裡）
+            const uint64_t nowUs = PltGetMicroseconds();
+            if (nowUs < s->gaveUpUs || nowUs - s->gaveUpUs > RTPV_LATE_WINDOW_US) {
+                s->open = false;
+                queue->mlTot.lateNever++;
+            }
+            else {
+                msLateGot(queue, s, 256, nowUs);  // 序號在密文裡：不去重
+            }
+            return;
+        }
+    }
+}
+
+// 佇列正在等的那一幀沒收齊就要換幀了（newFrame＝之後改等哪一幀；hadPending＝正在等的那個 block 收到過封包）。
+// 正在等的那一幀照「回報過沒有」分類；它和 newFrame 之間的幀，佇列沒等過就跳過了。
+// 要在佇列改動 currentFrameNumber、清掉收到的封包數之前呼叫
+static void msNoteLost(PRTP_VIDEO_QUEUE queue, uint32_t newFrame, bool hadPending) {
+    uint32_t n;
+
+    if (!queue->mlMeas || queue->currentFrameNumber == 0) {
+        return;  // currentFrameNumber＝0：§FRZ-RESYNC-SENTINEL，沒有基準幀號，不是掉幀
+    }
+    n = newFrame - queue->currentFrameNumber;
+    if (n == 0 || n > 0x7FFFFFFFu) {
+        return;
+    }
+    if (n > 4096) {
+        n = 4096;  // 和 §FRZ-GAP-FEC 合成回報的上限一致（幀號不可信時不讓計數爆掉）
+    }
+    queue->mlTot.lost += n;
+    queue->mlTot.lostWhole += n - 1;
+    if (queue->nkValid && queue->nkFrame == queue->currentFrameNumber && queue->nkBlock == queue->multiFecCurrentBlockNumber &&
+            queue->nkCount + queue->nkRefunds > 0) {
+        queue->mlTot.lostNacked++;
+        msLateOpen(queue, hadPending, queue->mlMeasNowUs);
+    }
+    else if (hadPending) {
+        queue->mlTot.lostUnasked++;
+    }
+    else {
+        queue->mlTot.lostWhole++;
+    }
+}
+
+// 佇列正在等的這個 block 剛收下一個封包：和它上一個封包隔了多久（block 內的停頓）
+static void msNoteAccepted(PRTP_VIDEO_QUEUE queue) {
+    const uint64_t rxUs = queue->mlMeasRxUs != 0 ? queue->mlMeasRxUs : queue->mlMeasNowUs;
+
+    if (rxUs == 0) {
+        return;
+    }
+    if (!queue->msBlkValid || queue->msBlkFrame != queue->currentFrameNumber || queue->msBlkBlock != queue->multiFecCurrentBlockNumber) {
+        queue->msBlkValid = true;
+        queue->msBlkFrame = queue->currentFrameNumber;
+        queue->msBlkBlock = (uint8_t)queue->multiFecCurrentBlockNumber;
+        queue->msBlkLastRxUs = rxUs;
+        return;
+    }
+    if (rxUs > queue->msBlkLastRxUs) {
+        const uint64_t gap = rxUs - queue->msBlkLastRxUs;
+        if (gap >= VRRR_STALL_MIN_US) {
+            // 回報過的 block：隔了一個往返才到的多半是補包，那不是鏈路自己的停頓
+            const bool asked = queue->nkValid && queue->nkFrame == queue->currentFrameNumber &&
+                               queue->nkBlock == queue->multiFecCurrentBlockNumber && queue->nkFirstNackUs != 0;
+            if (!asked || vrrrCannotBeRepair(rxUs, queue->nkFirstNackUs, queue->mlMeasLoUs)) {
+                queue->mlTot.stall[gap < 4000 ? 0 : gap < 6000 ? 1 : gap < 8000 ? 2 : gap < 12000 ? 3 : 4]++;
+            }
+        }
+        queue->msBlkLastRxUs = rxUs;
+    }
+}
+
 // §K.17: Internal implementation of RtpvAddPacket, used for recursive processing
 // of deferred packets during grace period resolution.
 static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry);
@@ -681,6 +864,9 @@ static void nkSync(PRTP_VIDEO_QUEUE queue) {
         queue->nkRefunds = 0;
         queue->nkLastRxLink = -1;
         queue->nkFirstRxUs = 0;
+        queue->nkFirstNackUs = 0;
+        queue->nkSpurious = false;
+        queue->nkUsedRepair = false;
     }
 }
 
@@ -1009,6 +1195,10 @@ static void nkSend(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
 
     queue->nkCount++;
     queue->nkLastUs = nowUs;
+    if (queue->nkFirstNackUs == 0) {
+        queue->nkFirstNackUs = nowUs;  // §VR-REPAIR-RTT（量測）：之後到的封包是不是補包，從第一份回報起算
+    }
+    queue->mlTot.nack++;
     if (queue->mlStatNack++ == 0 && queue->mlStatWaits == 0) {
         queue->mlStatLogUs = nowUs;
     }
@@ -1065,8 +1255,12 @@ static void nkEvaluate(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
 // 把一個排過隊的封包交給佇列：被採用才算這條連線的「採用數」，被拒收（另一條先到了、或已經過期）就釋放
 static void mlSubmitHeld(PRTP_VIDEO_QUEUE queue, const RTPV_HELD_PACKET* h) {
     const uint16_t seq = h->packet->sequenceNumber;  // 內部函式可能把封包交出去，之後不能再碰它
+    int ret;
 
-    if (RtpvAddPacketInternal(queue, h->packet, h->length, h->entry) == RTPF_RET_QUEUED) {
+    queue->mlMeasRxUs = h->arrivalUs;  // §VR-REPAIR-RTT（量測）：這個封包是更早到的，停頓要照它當初到達的時刻算
+    ret = RtpvAddPacketInternal(queue, h->packet, h->length, h->entry);
+    queue->mlMeasRxUs = 0;
+    if (ret == RTPF_RET_QUEUED) {
         vrmlNoteVideoUsed(h->link);
         // §VR-LINK-REPAIR：從環裡交出去的也是「這個 block 收到的封包」。不記的話，掃完之後還缺 shard 的新對象
         // 沒有任何回報的計時，要等再下一幀的封包到了才會報
@@ -1180,6 +1374,9 @@ static uint64_t mlHeadDeadlineUs(PRTP_VIDEO_QUEUE queue, const RTPV_HELD_PACKET*
 
 // 把排著的封包能放行的都放行。mustPop＝排滿了，最前面那個不管等多久都要處理掉
 static void mlDrain(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool mustPop) {
+    if (queue->mlMeas) {
+        queue->mlMeasNowUs = nowUs;  // §VR-REPAIR-RTT（量測）：等到逾時才放棄時，VideoStream 交進來的是上一個封包的時刻
+    }
     while (queue->mlHoldCount > 0) {
         RTPV_HELD_PACKET* h;
 
@@ -1262,15 +1459,51 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
         const uint16_t seq = packet->sequenceNumber;  // 內部函式可能把封包交出去，之後不能再碰它
         const bool hadNack = queue->mlRepair && queue->nkValid && queue->nkCount > 0 &&
                              queue->nkFrame == prevFrame && queue->nkBlock == prevBlock;
+        // §VR-REPAIR-RTT（量測）：這個 block 上一個被採用的封包什麼時候到的、第一份回報什麼時候送的
+        // （內部函式可能讓對象前進，先記下來）
+        const bool nkMeas = queue->mlRepair && queue->nkValid && queue->nkFrame == prevFrame && queue->nkBlock == prevBlock;
+        const uint64_t prevRxUs = nkMeas ? queue->nkLastRxUs : 0;
+        const uint64_t firstNackUs = nkMeas ? queue->nkFirstNackUs : 0;
         int ret = RtpvAddPacketInternal(queue, packet, length, packetEntry);
 
         if (queue->mlRepair) {
             // §VR-LINK-REPAIR
+            bool usedNow = false;
             nowUs = PltGetMicroseconds();
+            if (nkMeas && ret == RTPF_RET_QUEUED) {
+                // §VR-REPAIR-RTT（量測）：回報過的 block 又收下一個封包。回報送出還不到一個（最短的）往返就到的，是原本就在
+                // 路上、只是晚到的——那份回報是多餘的（每個 block 只算一次）；其餘的當成補包用上了
+                const bool cannot = firstNackUs != 0 && vrrrCannotBeRepair(nowUs, firstNackUs, queue->mlMeasLoUs);
+                if (firstNackUs != 0 && !cannot) {
+                    usedNow = true;
+                    queue->mlTot.used++;
+                }
+                else if (prevRxUs != 0 && nowUs > prevRxUs) {
+                    if (firstNackUs != 0 && !queue->nkSpurious) {
+                        queue->nkSpurious = true;  // 對象已經前進的話這個旗標屬於舊對象，nkSync 會清掉
+                        queue->mlTot.spurious++;
+                    }
+                }
+            }
             if (queue->currentFrameNumber != prevFrame || queue->multiFecCurrentBlockNumber != prevBlock) {
                 if (hadNack) {
                     queue->mlStatRepaired++;  // 回報之後收齊了（非超前的封包不會讓佇列放棄 block，對象前進＝收齊）
+                    queue->mlTot.repaired++;
+                    if (queue->nkUsedRepair || usedNow) {
+                        queue->mlTot.repairedUsed++;  // 補包真的用上的（不是它自己晚到的封包剛好湊齊）
+                    }
+                    if (firstNackUs != 0 && nowUs >= firstNackUs) {
+                        const uint64_t fix = nowUs - firstNackUs;
+                        queue->mlTot.fixCount++;
+                        queue->mlTot.fixUsSum += fix;
+                        if (fix > queue->mlTot.fixUsMax) {
+                            queue->mlTot.fixUsMax = (uint32_t)(fix > UINT32_MAX ? UINT32_MAX : fix);
+                        }
+                    }
                 }
+            }
+            else if (usedNow) {
+                queue->nkUsedRepair = true;
             }
             if (ret == RTPF_RET_QUEUED) {
                 nkNoteAccepted(queue, seq, nowUs, queue->mlRxLink);
@@ -1604,6 +1837,12 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
             }
         }
 
+        if (queue->mlMeas) {
+            // §VR-REPAIR-RTT（量測）：回報過才放棄的 block，之後晚到的封包（多半是補包）什麼時候湊滿
+            msLateNote(queue, nvPacket->frameIndex, (nvPacket->multiFecBlocks >> 4) & 0x3,
+                       (nvPacket->fecInfo & 0x3FF000) >> 12, (nvPacket->fecInfo & 0xFFC00000) >> 22);
+        }
+
         // Reject frames behind our current frame number
         return RTPF_RET_REJECTED;
     }
@@ -1642,6 +1881,9 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
     // if we can't finish a frame before receiving the next one.
     if (queue->pendingFecBlockList.count == 0 || queue->currentFrameNumber != nvPacket->frameIndex ||
             queue->multiFecCurrentBlockNumber != fecCurrentBlockNumber) {
+        // §VR-REPAIR-RTT（量測）：正在等的那個 block 收到過封包沒有（下面會清掉，msNoteLost 要用）
+        const bool hadPending = queue->pendingFecBlockList.count != 0;
+
         if (queue->pendingFecBlockList.count != 0) {
             // Report the final status of the FEC queue before dropping this frame
             reportFinalFrameFecStatus(queue);
@@ -1659,6 +1901,8 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
                 // we must manually advance the queue to the next frame. Parsing this
                 // frame further is not possible.
                 if (queue->currentFrameNumber == nvPacket->frameIndex) {
+                    msNoteLost(queue, queue->currentFrameNumber + 1, hadPending);  // §VR-REPAIR-RTT（量測）
+
                     // Discard any unsubmitted buffers from the previous frame
                     purgeListEntries(&queue->pendingFecBlockList);
                     purgeListEntries(&queue->completedFecBlockList);
@@ -1695,6 +1939,9 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
                     expectedFecBlockNumber + 1,
                     fecCurrentBlockNumber);
 
+            // §VR-REPAIR-RTT（量測）：這個封包所屬的那一幀也救不回來了（前面的 block 沒到），之後改等它的下一幀
+            msNoteLost(queue, nvPacket->frameIndex + 1, hadPending);
+
             // Discard any unsubmitted buffers from the previous frame
             purgeListEntries(&queue->pendingFecBlockList);
             purgeListEntries(&queue->completedFecBlockList);
@@ -1724,6 +1971,8 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         // after successfully processing a frame.
         if (queue->currentFrameNumber != nvPacket->frameIndex) {
             LC_ASSERT_VT(queue->currentFrameNumber < nvPacket->frameIndex);
+
+            msNoteLost(queue, nvPacket->frameIndex, hadPending);  // §VR-REPAIR-RTT（量測）
 
             // If the frame immediately preceding this one was lost, we may have already
             // reported it using our speculative RFI logic. Don't report it again.
@@ -1852,6 +2101,10 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         return RTPF_RET_REJECTED;
     }
     else {
+        if (queue->mlMeas) {
+            msNoteAccepted(queue);  // §VR-REPAIR-RTT（量測）：block 內的停頓
+        }
+
         // Update total missing packet count
         if (queue->pendingFecBlockList.count == 1) {
             // Initialize counts and highest seqnum on the first packet

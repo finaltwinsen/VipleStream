@@ -17,6 +17,86 @@ static RTP_VIDEO_QUEUE rtpQueue;
 
 #include "VrMultiLink.h"
 
+// §VR-REPAIR-RTT（量測）───────────────────────────────────────────────────────
+// 補包（§VR-LINK-REPAIR）的量測：協商了補包就每 10 秒印一行 [VIPLE-VR-REPAIR] gate 10s，不改任何行為。
+// 欄位的意思見 docs/log_tags.md。以下的狀態只在影像接收執行緒存取，每場串流在執行緒開頭歸零。
+#define RR_GATE_WINDOW_US 10000000
+
+typedef struct _RR_GATE_WINDOW {
+    uint64_t startUs;         // 這個視窗從什麼時候開始（0＝還沒開始）
+    uint64_t lastPktUs;       // 上一個封包的時刻
+    uint64_t onUs, totalUs;   // 補包開著的時間、全部的時間（以相鄰兩個封包的間隔累計）
+    uint32_t flips;           // 補包開／關翻了幾次
+    bool prevOn, havePrev;
+    RTPV_REPAIR_TOTALS base;  // 視窗開始時佇列的累計值
+} RR_GATE_WINDOW;
+
+static RR_GATE_WINDOW rrGate;
+
+// 佇列被整個重設了（§FRZ-WATCHDOG）：它的累計值歸零，這裡留的副本跟著重來，不然下一次取差值會是一個很大的數
+static void rrOnQueueReset(void) {
+    memset(&rrGate.base, 0, sizeof(rrGate.base));
+}
+
+static void rrGateLog(uint32_t holdUs) {
+    const RTPV_REPAIR_TOTALS* t = &rtpQueue.mlTot;
+    const RTPV_REPAIR_TOTALS* b = &rrGate.base;
+    VRRR_RTT_STATS st;
+    char rtt[96];
+
+    // 往返時間是印的這一刻的值（正在送影像的連線最近 VRRR_RTT_WIN 筆）；eta／try／cap 是照它算出來、§VR-REPAIR-RTT 會用的值
+    if (vrmlRepairRtt(rtpQueue.mlCarryMask, &st)) {
+        const uint32_t etaUs = vrrrEtaUs(st.hiUs);
+        snprintf(rtt, sizeof(rtt), "lo=%.1f mid=%.1f hi=%.1f eta=%.1f try=%.1f cap=%.1f", st.loUs / 1000.0, st.midUs / 1000.0,
+                 st.hiUs / 1000.0, etaUs / 1000.0, vrrrEtaTryUs(st.midUs) / 1000.0,
+                 vrrrCapUs(holdUs, etaUs, vrrrEtaFastUs(st.loUs), 0) / 1000.0);
+    }
+    else {
+        snprintf(rtt, sizeof(rtt), "lo=- mid=- hi=- eta=- try=- cap=-");
+    }
+    Limelog("[VIPLE-VR-REPAIR] gate 10s: rules=legacy on=%u%% flips=%u paused=0 | lost=%u (nacked=%u unasked=%u whole=%u) repaired=%u used=%u"
+            " | rtt %s | lateDone 5/10/20/33/+=%u/%u/%u/%u/%u never=%u | stall 4/6/8/12/+=%u/%u/%u/%u/%u\n",
+            rrGate.totalUs != 0 ? (unsigned)((rrGate.onUs * 100 + rrGate.totalUs / 2) / rrGate.totalUs) : 0, rrGate.flips,
+            t->lost - b->lost, t->lostNacked - b->lostNacked, t->lostUnasked - b->lostUnasked, t->lostWhole - b->lostWhole,
+            t->repaired - b->repaired, t->repairedUsed - b->repairedUsed, rtt,
+            t->lateDone[0] - b->lateDone[0], t->lateDone[1] - b->lateDone[1], t->lateDone[2] - b->lateDone[2],
+            t->lateDone[3] - b->lateDone[3], t->lateDone[4] - b->lateDone[4], t->lateNever - b->lateNever,
+            t->stall[0] - b->stall[0], t->stall[1] - b->stall[1], t->stall[2] - b->stall[2], t->stall[3] - b->stall[3],
+            t->stall[4] - b->stall[4]);
+}
+
+// 每個影像封包呼叫一次（協商了補包才呼叫）。repairOn＝從這個封包起補包開著沒有（rtpQueue.mlRepair）
+static void rrGateNote(uint64_t nowUs, bool repairOn, uint32_t holdUs) {
+    if (rrGate.startUs == 0) {
+        rrGate.startUs = nowUs;
+        rrGate.base = rtpQueue.mlTot;
+    }
+    if (rrGate.lastPktUs != 0 && nowUs > rrGate.lastPktUs) {
+        // 上一個封包到這一個之間，照上一個封包當時的決定算。影像停了很久（暫停、斷線）的那一段最多算 1 秒
+        uint64_t dt = nowUs - rrGate.lastPktUs;
+        if (dt > 1000000) {
+            dt = 1000000;
+        }
+        rrGate.totalUs += dt;
+        if (rrGate.prevOn) {
+            rrGate.onUs += dt;
+        }
+    }
+    if (rrGate.havePrev && repairOn != rrGate.prevOn) {
+        rrGate.flips++;
+    }
+    rrGate.prevOn = repairOn;
+    rrGate.havePrev = true;
+    rrGate.lastPktUs = nowUs;
+    if (nowUs - rrGate.startUs >= RR_GATE_WINDOW_US) {
+        rrGateLog(holdUs);
+        rrGate.startUs = nowUs;
+        rrGate.base = rtpQueue.mlTot;
+        rrGate.onUs = rrGate.totalUs = 0;
+        rrGate.flips = 0;
+    }
+}
+
 static SOCKET rtpSocket = INVALID_SOCKET;
 static SOCKET firstFrameSocket = INVALID_SOCKET;
 
@@ -233,6 +313,7 @@ static void VideoReceiveThreadProc(void* context) {
         }
     }
     int rxLink = -1;
+    memset(&rrGate, 0, sizeof(rrGate));  // §VR-REPAIR-RTT（量測）：每場串流重來
 
     encrypted = !!(EncryptionFeaturesEnabled & SS_ENC_VIDEO);
     decryptedSize = StreamConfig.packetSize + MAX_RTP_HEADER_SIZE;
@@ -492,6 +573,7 @@ static void VideoReceiveThreadProc(void* context) {
                         prevFireLastFrameUs = lastFrameUs;
                         RtpvCleanupQueue(&rtpQueue);
                         RtpvInitializeQueue(&rtpQueue);
+                        rrOnQueueReset();  // §VR-REPAIR-RTT（量測）：佇列的累計值歸零了
                         if (madeProgress) {
                             rtpQueue.currentFrameNumber = savedFrameNumber;
                             consecutiveIneffectiveFires = 0;
@@ -570,6 +652,8 @@ static void VideoReceiveThreadProc(void* context) {
                     diagPreDecryptFarStalePkts++;
                 }
 #endif
+                // §VR-REPAIR-RTT（量測）：同樣只計數（「放棄之後多久才到齊」；沒協商補包時什麼都不做）
+                RtpvMeasLateFrame(&rtpQueue, LE32(encHeader->frameNumber));
                 continue;
             }
 
@@ -618,6 +702,16 @@ static void VideoReceiveThreadProc(void* context) {
                 }
             }
             rtpQueue.mlHoldMaxUs = (rtpQueue.mlHoldDual || rtpQueue.mlRepair) ? mlHoldUs : 0;
+            if (mlLinks > 0 && (vrmlFeatures() & VIPLE_VR_LINK_F_REPAIR)) {
+                // §VR-REPAIR-RTT（量測）：協商了補包就記帳、每 10 秒印一行，不管補包這一刻開著沒有
+                VRRR_RTT_STATS st;
+                const uint64_t nowUs = PltGetMicroseconds();
+                RtpvSetRepairMeas(&rtpQueue, true, nowUs, vrmlRepairRtt(rtpQueue.mlCarryMask, &st) ? st.loUs : 0);
+                rrGateNote(nowUs, rtpQueue.mlRepair, mlHoldUs);
+            }
+            else {
+                RtpvSetRepairMeas(&rtpQueue, false, 0, 0);
+            }
         }
         rtpQueue.mlRxLink = rxLink;
         queueStatus = RtpvAddPacket(&rtpQueue, packet, err, (PRTPV_QUEUE_ENTRY)&buffer[decryptedSize]);
@@ -844,4 +938,13 @@ int startVideoStream(void* rendererContext, int drFlags) {
 
 const RTP_VIDEO_STATS* LiGetRTPVideoStats(void) {
     return &rtpQueue.stats;
+}
+
+// §VR-REPAIR-RTT：目前只有量測，補包不會把任何一幀拖晚到要讓 XR 那一側知道
+uint32_t LiGetVrRepairQuietMs(void) {
+    return UINT32_MAX;
+}
+
+int LiGetVrRepairRules(void) {
+    return 0;
 }
