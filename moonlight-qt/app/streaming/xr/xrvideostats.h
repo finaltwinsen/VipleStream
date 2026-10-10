@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <initializer_list>
 #include <string>
@@ -118,14 +119,14 @@ struct PassStats {
     bool unavailableLogged = false;  // 印過「這顆驅動沒有計時」了
 
     static int slotForConvert(int index) { return index <= 0 ? Convert0 : (index >= 3 ? Convert3 : Convert0 + index); }
-    // 我們自己的 pass 用 pl_custom_shader 的 description 認（子字串）；"downscale 16" 要排在 "downscale" 前面
+    // 我們自己的 pass 用 pl_custom_shader 的 description 認（子字串）；"downscale 16" 要排在 "downscale" 前面。
+    // 每個 pass 畫完都會進來一次，而且排在這張影像後面幾個 pass 與送出之前，所以直接在 C 字串上找、不配置記憶體
     static int slotForDescription(const char* desc)
     {
         if (desc == nullptr) {
             return Other;
         }
-        const std::string d(desc);
-        auto has = [&d](const char* what) { return d.find(what) != std::string::npos; };
+        auto has = [desc](const char* what) { return std::strstr(desc, what) != nullptr; };
         return has("fovea unwarp") ? Unwarp
                : has("synth downscale 16") ? Down16
                : has("synth downscale") ? Down8
