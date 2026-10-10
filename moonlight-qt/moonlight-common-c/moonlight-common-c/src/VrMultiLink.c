@@ -407,7 +407,10 @@ static void sendHello(void) {
         VIPLE_VR_LINK_DESC d;
         memset(&d, 0, sizeof(d));
         d.linkId = links[i].id;
-        d.flags = VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR;  // 我們支援的；要不要啟用由 server 決定（LINK_READY 的 hubCaps）
+        // 我們支援的；要不要啟用由 server 決定（LINK_READY 的 hubCaps）。§VR-REPAIR-RTT 另外看 client 這一端要不要用
+        // （設定或 --vr-repair-rtt off 可以不提，那就整場照原本的規則）
+        d.flags = VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR |
+                  ((StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) ? VIPLE_VR_LINK_F_REPAIR_RTT : 0);
         d.clientVideoPort = LE16(links[i].localVideoPort);
         d.clientAudioPort = LE16(links[i].localAudioPort);
         memcpy(d.clientAddr, &links[i].local.sin_addr.s_addr, 4);
@@ -645,9 +648,14 @@ void vrmlOnS2C(const unsigned char* tlv, int len) {
                 // §VR-LINK-CTRL：陣列之後多一個 byte＝server 同意啟用的功能（舊 server 不附）
                 int used = 1 + count * (int)sizeof(VIPLE_VR_LINK_PORTS);
                 uint8_t caps = (count >= 0 && used < blen) ? body[used] : 0;
+                // §VR-REPAIR-RTT：我們沒提的（設定或 --vr-repair-rtt off）、或補包本身沒成立的，server 就算回了也不用
+                if (!(StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) || !(caps & VIPLE_VR_LINK_F_REPAIR)) {
+                    caps &= (uint8_t)~VIPLE_VR_LINK_F_REPAIR_RTT;
+                }
                 if (caps != hubCaps) {
-                    Limelog("[VIPLE-VR-LINK] link features agreed by the server: ctrl=%s repair=%s\n",
-                            (caps & VIPLE_VR_LINK_F_CTRL) ? "on" : "off", (caps & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off");
+                    Limelog("[VIPLE-VR-LINK] link features agreed by the server: ctrl=%s repair=%s repairRtt=%s\n",
+                            (caps & VIPLE_VR_LINK_F_CTRL) ? "on" : "off", (caps & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off",
+                            (caps & VIPLE_VR_LINK_F_REPAIR_RTT) ? "on" : "off");
                 }
                 hubCaps = caps;
             }

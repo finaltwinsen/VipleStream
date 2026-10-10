@@ -113,6 +113,13 @@ typedef struct _STREAM_CONFIGURATION {
     // 0 代表一般 session，common-c 的行為與桌面完全相同。
     int vrFlags;
 
+    // VipleStream 2.0 §VR-REPAIR-RTT（docs/vr_protocol.md §4.10）：補包的時間預算跟著量到的往返時間走。以下四個只在
+    // VR session、vrFlags 帶 VIPLE_VR_SF_REPAIR_RTT、而且 server 也同意時有作用；0＝預設。
+    int vrRepairHoldMs;   // 等待上限（後面的幀最多被壓住多久），毫秒：0＝自動（跟著往返時間走，最多 33），否則 8～100
+    int vrRepairAbSec;    // 開發用：同一場每這麼多秒（20～600）在原本的規則與新規則之間切換，從原本的規則開始；0＝不切換
+    int vrRepairIdle;     // 開發用：「多久沒有新封包才回報」的做法，VRRR_IDLE_*（VrRepairRtt.h）；0＝自動
+    int vrRepairNoAhead;  // 開發用：非 0＝後面整幀沒到的幀不一起回報（只給對照用）
+
 #ifdef VIPLE_MPQUIC
     // VipleStream: MP-QUIC multipath transport.
     // Set useQuicTransport = 1 to use QUIC datagrams instead of raw UDP

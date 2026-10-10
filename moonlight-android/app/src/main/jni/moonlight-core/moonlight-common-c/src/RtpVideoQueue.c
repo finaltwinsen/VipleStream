@@ -728,8 +728,11 @@ static void msNoteLost(PRTP_VIDEO_QUEUE queue, uint32_t newFrame, bool hadPendin
     queue->mlTot.lostWhole += n - 1;
     if (queue->nkValid && queue->nkFrame == queue->currentFrameNumber && queue->nkBlock == queue->multiFecCurrentBlockNumber &&
             queue->nkCount + queue->nkRefunds > 0) {
-        queue->mlTot.lostNacked++;
-        msLateOpen(queue, hadPending, queue->mlMeasNowUs);
+        // §VR-REPAIR-RTT：因為後面缺太多幀而放棄的不算「等到期限還是放棄」（那不是補包沒趕上；保險看的是 lostNacked）
+        if (!queue->nkTooMany) {
+            queue->mlTot.lostNacked++;
+            msLateOpen(queue, hadPending, queue->mlMeasNowUs);
+        }
     }
     else if (hadPending) {
         queue->mlTot.lostUnasked++;
@@ -842,6 +845,18 @@ static bool mlIsAhead(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length) {
 // 鏈路整個斷一小段時，空檔裡送出的回報多半落空——回報本身沒到，或 server 補的那一批掉在空檔裡。這幾次不該算：
 // 鏈路一恢復就退還、馬上再報（每個 block 最多退 RTPV_NACK_REFUNDS 次）。否則三次都在空檔裡用完，恢復之後明明補得
 // 回來卻沒得報（2026-10-07 S0：每 500 ms 斷 12 ms，30 秒掉 5 幀）。「落空」的判斷有兩種，見 nkNoteArrival。
+//
+// §VR-REPAIR-RTT（2026-10-10；queue->mlRttMode，只在一條連線送影像、server 與 client 都同意時由 VideoStream 設起來）：
+// 上面這些時間都是用幀週期訂的——往返 10 ms 上下、120 Hz 時，等待上限（下一幀到了之後 8.3 ms）比一個往返還短，
+// 補包多半在放棄之後才到。mlRttMode 為真時改成跟著量到的往返時間走（算式都在 VrRepairRtt.h）：
+//   - 等待上限＝mlHoldCapUs（夠補一輪再重報一輪，最多 33 ms）；沒報過的 block 要「現在報還趕得上」才等，報過就等到上限；
+//   - 第一份回報：時機的三條不變，但「多久沒有新封包」依 mlIdlePolicy（大的 block 改等下一幀，不對晚到的封包誤報），
+//     而且照中位數的往返也趕不上期限就不報；
+//   - 重報：上一份＋mlRepairEtaUs，照最短的往返也趕不上就不報；上一份之後一個封包都沒到（鏈路還是靜默的）不重報，
+//     所以次數不會在空檔裡用完，不用退還；
+//   - 後面整幀沒到的幀一起回報（nkAheadSend）；缺的幀多到補不完就整段不補、立刻放棄（nkAheadPlan）；
+//   - 放棄一個 block 之後的一小段時間（mlLossHoldoffUs）不再替沒報過的 block 回報與等待：那幾幀本來就要等 intra refresh。
+// mlRttMode 為假時這一段完全不走，時間軸和之前逐步相同（moonlight-common-c/tests/vr_repair_sim 的 golden 守著）。
 #define RTPV_NACK_MAX        3
 #define RTPV_NACK_REFUNDS    2
 #define RTPV_NACK_IDLE_US    3000
@@ -867,6 +882,31 @@ static void nkSync(PRTP_VIDEO_QUEUE queue) {
         queue->nkFirstNackUs = 0;
         queue->nkSpurious = false;
         queue->nkUsedRepair = false;
+        queue->nkRttOwned = false;
+        queue->nkTooMany = false;
+        queue->mlAheadDirty = true;
+        {
+            // §VR-REPAIR-RTT：這一幀在它還排在後面的時候已經預先報過（整幀沒到）——當成第一份回報已經送出，
+            // 之後照一般的規則重報、等待；不然一輪到它就會立刻再報一次，server 把整幀重送第二遍。
+            // 已經過去的幀（收齊了、或被跳過）的紀錄順便清掉
+            int i;
+            for (i = 0; i < (int)VRRR_AHEAD_MAX; i++) {
+                if (queue->nkPreUs[i] == 0) {
+                    continue;
+                }
+                if (queue->nkPreFrame[i] == queue->nkFrame && queue->nkBlock == 0 && queue->mlRttMode) {
+                    queue->nkCount = 1;
+                    queue->nkLastUs = queue->nkPreUs[i];
+                    queue->nkFirstNackUs = queue->nkPreUs[i];
+                    queue->nkRttOwned = true;
+                    queue->nkGone = queue->nkPreGone[i];
+                    queue->nkPreUs[i] = 0;
+                }
+                else if (!isBefore32(queue->nkFrame, queue->nkPreFrame[i])) {
+                    queue->nkPreUs[i] = 0;
+                }
+            }
+        }
     }
 }
 
@@ -881,6 +921,12 @@ static void nkNoteArrival(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool ahead) {
     bool lost;
 
     queue->nkAnyRxUs = nowUs;
+    if (queue->mlRttMode) {
+        // §VR-REPAIR-RTT：往返時間比幀週期長時，「回報之後先到的是下一幀」「隔了一個幀週期才又有封包」都是常態，
+        // 拿它們當「鏈路斷過」會每個事件多報一兩份。RTT 規則改用另一個辦法處理空檔：空檔裡根本不重報（見 nkNextDueUs），
+        // 次數不會在空檔裡用完，也就不必退還
+        return;
+    }
     if (prev == 0 || !queue->nkValid || queue->nkFrame != queue->currentFrameNumber ||
             queue->nkBlock != queue->multiFecCurrentBlockNumber || queue->nkCount == 0 || queue->nkGone ||
             queue->nkRefunds >= RTPV_NACK_REFUNDS || queue->nkLastUs == 0) {
@@ -1055,6 +1101,13 @@ static bool nkAheadWaiting(PRTP_VIDEO_QUEUE queue) {
            queue->mlSweptBlock == queue->multiFecCurrentBlockNumber;
 }
 
+// §VR-REPAIR-RTT：在 atUs 回報的話，等待的期限算到哪裡（有後面的封包在排隊＝它到達之後 mlHoldCapUs；還沒有＝估下一幀
+// 最快什麼時候到，再加 mlHoldCapUs）
+static uint64_t nkRttLimitUs(PRTP_VIDEO_QUEUE queue, uint64_t atUs) {
+    const uint64_t head = nkAheadWaiting(queue) ? queue->mlHold[queue->mlHoldHead].arrivalUs : 0;
+    return vrrrLimitUs(atUs, head, queue->nkFirstRxUs, queue->mlFramePeriodUs, queue->mlHoldCapUs);
+}
+
 // 環頭那個封包最晚等到什麼時候（不看補包的狀況）：到達後一個幀週期。
 // 可以補包時，等待期間前面的 block 收齊過（補包救回來的，或另一條連線補上的）就從那一刻起再給一個幀週期，但從到達
 // 起算不超過兩個幀週期：鏈路斷一小段、連續兩幀都沒到時，第一幀救回來已經用掉大半的時間，照原本的期限第二幀一定
@@ -1083,11 +1136,32 @@ static uint64_t nkNextDueUs(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool idleOk)
     if (queue->nkGone || queue->nkCount >= RTPV_NACK_MAX) {
         return 0;
     }
+    if (queue->mlRttMode && queue->nkTooMany) {
+        return 0;  // §VR-REPAIR-RTT：後面缺太多幀，這一輪整個不補
+    }
+    if (queue->mlRttMode && queue->nkCount + queue->nkRefunds == 0 && nowUs < queue->mlLossHoldoffUs) {
+        // §VR-REPAIR-RTT：剛放棄過一個 block，LOSS 已經送出、intra refresh 還沒開始到——這段時間裡的幀本來就會帶著壞掉的
+        // 參考解碼，為了補它們而壓住後面的幀只是把停頓拉長（連續好幾幀都缺的時候會一幀接一幀地等）
+        return 0;
+    }
     ahead = nkAheadWaiting(queue);
     if (queue->pendingFecBlockList.count == 0 && !ahead) {
         return 0;  // 一個封包都還沒到，也沒有後面的封包：這個 block 可能根本還沒送
     }
     if (queue->nkCount != 0) {
+        if (queue->mlRttMode) {
+            // §VR-REPAIR-RTT：上一輪該到了（eta）才重報；再報一輪照最短的往返也趕不上期限就不報（等待照舊）。
+            // 上一份回報之後一個封包都沒到＝鏈路還是靜默的（回報或補包多半掉在空檔裡）：先不重報，等有封包到了再說
+            uint64_t at = queue->nkLastUs != 0 ? queue->nkLastUs + queue->mlRepairEtaUs : nowUs;
+            if (queue->nkLastUs != 0 && queue->nkAnyRxUs <= queue->nkLastUs) {
+                return 0;
+            }
+            if (at < nowUs) {
+                at = nowUs;
+            }
+            return vrrrRetryAtUs(nowUs, queue->nkLastUs, queue->mlRepairEtaUs, queue->mlRepairEtaFastUs, nkRttLimitUs(queue, at),
+                                 queue->nkCount, RTPV_NACK_MAX);
+        }
         return queue->nkLastUs + queue->mlRepairRtoUs;
     }
     if (queue->mlHoldDual) {
@@ -1148,6 +1222,28 @@ static uint64_t nkNextDueUs(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool idleOk)
         }
         return due;
     }
+    if (queue->mlRttMode) {
+        // §VR-REPAIR-RTT：時機的三條規則不變，只有「多久沒有新封包」依設定；照中位數的往返也趕不上期限就不報
+        uint64_t due;
+        if (ahead) {
+            due = nowUs;
+        }
+        else if (queue->nkTailSeen) {
+            due = queue->nkTailUs;
+        }
+        else {
+            due = (idleOk && queue->nkLastRxUs != 0)
+                      ? queue->nkLastRxUs + vrrrIdleUs(queue->mlIdlePolicy, &queue->mlStalls, nowUs, queue->mlFramePeriodUs,
+                                                     queue->bufferDataPackets + queue->bufferParityPackets) : 0;
+        }
+        if (due != 0) {
+            const uint64_t at = due > nowUs ? due : nowUs;
+            if (!vrrrFeasible(at, queue->mlRepairEtaTryUs, nkRttLimitUs(queue, at))) {
+                return 0;
+            }
+        }
+        return due;
+    }
     if (ahead) {
         return nowUs;
     }
@@ -1155,6 +1251,135 @@ static uint64_t nkNextDueUs(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool idleOk)
         return queue->nkTailUs;
     }
     return (idleOk && queue->nkLastRxUs != 0) ? queue->nkLastRxUs + RTPV_NACK_IDLE_US : 0;
+}
+
+// §VR-REPAIR-RTT：10 s 統計（[VIPLE-VR-LINK] hold 10s）的視窗從第一個事件起算。「沒回報就放棄」「後面缺太多幀」可以在
+// 沒有任何等待與回報的視窗裡發生，這種視窗也要印得出來
+static void mlStatRttEvent(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
+    if (queue->mlStatWaits == 0 && queue->mlStatNack == 0 && !queue->mlStatRttEvt) {
+        queue->mlStatLogUs = nowUs;
+    }
+    queue->mlStatRttEvt = true;
+}
+
+// §VR-REPAIR-RTT：下一幀到了才發現缺的時候，排在最前面的若不是「目前這一幀的下一幀」，中間那幾幀就是整幀沒到
+// （同一條路徑上封包照順序到；有任何一個封包到過，它就會在環裡）。等輪到它們才一幀一幀報的話，每一幀都要多等一個
+// 往返時間，後面幾幀一定超過等待上限——白等之後還是放棄。所以和目前這一幀一起報：total＝0（什麼都沒收到），
+// server 用自己的紀錄整個 block 重送；補回來的封包在輪到之前先排在環裡。
+// 但缺的幀太多（超過 vrrrAheadMaxFrames，或照量到的到達速率，那麼多封包在期限前到不齊）就整個不補、也不等：
+// 這一段一定要走 intra refresh，越早放棄、越早恢復。
+static bool nkPreNacked(PRTP_VIDEO_QUEUE queue, uint32_t frame) {
+    int i;
+    for (i = 0; i < (int)VRRR_AHEAD_MAX; i++) {
+        if (queue->nkPreUs[i] != 0 && queue->nkPreFrame[i] == frame) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 環裡最小的幀號比目前這一幀大幾幀（中間整幀沒到的幀數）；環是空的、或最小的就是目前這一幀（同一幀的下一個 block）回 0
+static unsigned nkGapFrames(PRTP_VIDEO_QUEUE queue) {
+    uint32_t lowest = 0;
+    bool have = false;
+    int i;
+
+    for (i = 0; i < queue->mlHoldCount; i++) {
+        const RTPV_HELD_PACKET* e = &queue->mlHold[(queue->mlHoldHead + i) % RTPV_ML_HOLD_MAX];
+        uint32_t frame;
+        uint8_t block;
+        if (mlPeek(queue, e->packet, e->length, &frame, &block) && (!have || isBefore32(frame, lowest))) {
+            lowest = frame;
+            have = true;
+        }
+    }
+    if (!have || !isBefore32(queue->currentFrameNumber, lowest)) {
+        return 0;
+    }
+    return lowest - queue->currentFrameNumber - 1;
+}
+
+// 後面整幀沒到的幀補不補得完（補不完就設 nkTooMany：這一輪不回報、不等）。環裡最小的幀號可能變了的時候才看
+static void nkAheadPlan(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
+    unsigned gap, fresh = 0, k;
+
+    queue->mlAheadDirty = false;
+    if (!nkAheadWaiting(queue) || queue->nkTooMany) {
+        return;
+    }
+    nkSync(queue);
+    queue->mlAheadDirty = false;  // nkSync 可能剛把它設起來
+    gap = nkGapFrames(queue);
+    for (k = 1; k <= gap && k <= VRRR_AHEAD_MAX + 1; k++) {
+        if (!nkPreNacked(queue, queue->currentFrameNumber + k)) {
+            fresh++;
+        }
+    }
+    if (fresh == 0) {
+        return;  // 沒有新的缺幀（都報過了）
+    }
+    {
+        const uint64_t limit = queue->mlHold[queue->mlHoldHead].arrivalUs + queue->mlHoldCapUs;
+        const uint32_t need = queue->pendingFecBlockList.count != 0
+                                  ? (queue->bufferDataPackets > queue->receivedDataPackets + queue->receivedParityPackets
+                                         ? queue->bufferDataPackets - queue->receivedDataPackets - queue->receivedParityPackets : 0)
+                                  : queue->mlFramePkts;
+        if (vrrrGapTooMany(gap, nowUs, queue->mlRepairEtaTryUs, limit, queue->mlFramePeriodUs, need,
+                           queue->mlFramePkts, queue->mlPktGapUs)) {
+            queue->nkTooMany = true;
+            mlStatRttEvent(queue, nowUs);
+            queue->mlStatTooMany++;
+            queue->mlTot.tooMany++;
+            if (queue->nkGiveUpLogCount++ < 30 || (queue->nkGiveUpLogCount % 20) == 0) {
+                Limelog("[VIPLE-VR-REPAIR] skipped frame=%u (+%u whole frames missing behind it: too many to repair in time): cap %.1f ms, "
+                        "about %u pkts/frame, pkt gap %u us\n",
+                        queue->currentFrameNumber, gap, queue->mlHoldCapUs / 1000.0, queue->mlFramePkts, queue->mlPktGapUs);
+            }
+        }
+    }
+}
+
+// 目前這一幀報過之後，替後面每一個還沒報過的「整幀沒到」的幀各送一份 total＝0 的回報
+static void nkAheadSend(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
+    unsigned gap, k;
+
+    if (!nkAheadWaiting(queue) || queue->nkTooMany || queue->nkGone || !queue->nkValid ||
+            queue->nkFrame != queue->currentFrameNumber || queue->nkBlock != queue->multiFecCurrentBlockNumber ||
+            queue->nkCount + queue->nkRefunds == 0) {
+        return;  // 目前這一幀沒有報（不值得試、或還沒到時候）：後面的也不報
+    }
+    gap = nkGapFrames(queue);
+    for (k = 1; k <= gap && k <= VRRR_AHEAD_MAX; k++) {
+        const uint32_t f = queue->currentFrameNumber + k;
+        uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_NACK)];
+        VIPLE_VR_TLV_NACK n;
+
+        if (nkPreNacked(queue, f)) {
+            continue;
+        }
+        memset(&n, 0, sizeof(n));
+        n.frame = f;
+        n.flags = vrrrNackFlags(queue->mlRepairEtaUs);
+        n.attempt = 1;
+        tlv[0] = VIPLE_VR_C2S_NACK;
+        tlv[1] = (uint8_t)sizeof(n);
+        memcpy(&tlv[2], &n, sizeof(n));
+        if (vrmlSendCtrl(tlv, (int)sizeof(tlv)) <= 0) {
+            return;
+        }
+        queue->nkPreFrame[queue->nkPrePos] = f;
+        queue->nkPreUs[queue->nkPrePos] = nowUs;
+        queue->nkPreGone[queue->nkPrePos] = false;
+        queue->nkPrePos = (uint8_t)((queue->nkPrePos + 1) % VRRR_AHEAD_MAX);
+        queue->mlStatNack++;
+        queue->mlStatNackAhead++;
+        queue->mlTot.nack++;
+        queue->mlTot.ahead++;
+        if (queue->nkLogCount++ < 12 || (queue->nkLogCount % 50) == 0) {
+            Limelog("[VIPLE-VR-REPAIR] nack frame=%u block=0 have=0/0 (data 0) attempt=1 (whole frame missing behind frame %u) eta=%.1f\n",
+                    f, queue->currentFrameNumber, queue->mlRepairEtaUs / 1000.0);
+        }
+    }
 }
 
 static void nkSend(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
@@ -1167,6 +1392,7 @@ static void nkSend(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
     n.frame = queue->currentFrameNumber;
     n.block = (uint8_t)queue->multiFecCurrentBlockNumber;
     n.attempt = (uint8_t)(queue->nkCount + 1);
+    n.flags = queue->mlRttMode ? vrrrNackFlags(queue->mlRepairEtaUs) : 0;  // §VR-REPAIR-RTT：server 照這個放寬年齡上限
     if (queue->pendingFecBlockList.count != 0) {
         uint32_t total = queue->bufferDataPackets + queue->bufferParityPackets;
         uint32_t recv = queue->receivedDataPackets + queue->receivedParityPackets;
@@ -1198,6 +1424,9 @@ static void nkSend(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
     if (queue->nkFirstNackUs == 0) {
         queue->nkFirstNackUs = nowUs;  // §VR-REPAIR-RTT（量測）：之後到的封包是不是補包，從第一份回報起算
     }
+    if (queue->mlRttMode) {
+        queue->nkRttOwned = true;  // §VR-REPAIR-RTT：這個 block 照 RTT 規則等到結束（見 RtpvRepairLatched）
+    }
     queue->mlTot.nack++;
     if (queue->mlStatNack++ == 0 && queue->mlStatWaits == 0) {
         queue->mlStatLogUs = nowUs;
@@ -1208,6 +1437,7 @@ static void nkSend(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
     // 每場前 12 筆照印，之後每 50 筆一筆
     if (queue->nkLogCount++ < 12 || (queue->nkLogCount % 50) == 0) {
         const char* why;
+        char rttInfo[64];
         if (n.attempt > 1) {
             why = " (retry)";
         }
@@ -1217,11 +1447,18 @@ static void nkSend(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
         else {
             why = queue->mlHoldCount > 0 ? " (next frame waiting)" : (queue->nkTailSeen ? " (tail seen)" : " (idle)");
         }
-        Limelog("[VIPLE-VR-REPAIR] nack frame=%u block=%u have=%u/%u (data %u) attempt=%u%s%s\n",
+        rttInfo[0] = 0;
+        if (queue->mlRttMode) {
+            // §VR-REPAIR-RTT：這份回報用的 eta，與這個 block「多久沒有新封包才回報」（新欄位加在行尾）
+            snprintf(rttInfo, sizeof(rttInfo), " eta=%.1f idle=%.1f", queue->mlRepairEtaUs / 1000.0,
+                     vrrrIdleUs(queue->mlIdlePolicy, &queue->mlStalls, nowUs, queue->mlFramePeriodUs,
+                                queue->bufferDataPackets + queue->bufferParityPackets) / 1000.0);
+        }
+        Limelog("[VIPLE-VR-REPAIR] nack frame=%u block=%u have=%u/%u (data %u) attempt=%u%s%s%s\n",
                 n.frame, (unsigned)n.block,
                 queue->pendingFecBlockList.count != 0 ? queue->receivedDataPackets + queue->receivedParityPackets : 0,
                 (unsigned)n.total, queue->pendingFecBlockList.count != 0 ? queue->bufferDataPackets : 0, (unsigned)n.attempt,
-                why, queue->nkGone ? " SEND FAILED" : "");
+                why, queue->nkGone ? " SEND FAILED" : "", rttInfo);
     }
 }
 
@@ -1347,8 +1584,20 @@ static void mlSweep(PRTP_VIDEO_QUEUE queue) {
 // 只有一條連線在送影像時，等的不是另一條連線的那一份、而是補包：server 說補不了，或該報的都報了也等過一輪，
 // 就不必等到上限。兩條以上在送、可以補包時也一樣——只要每條都已經走過這個 block（另一條的那一份不會再來了）。
 // 不能補包時維持原樣：等滿上限。（VideoStream 只在「兩條在送」或「可以補包」時才把 mlHoldMaxUs 設成非 0。）
-static uint64_t mlHeadDeadlineUs(PRTP_VIDEO_QUEUE queue, const RTPV_HELD_PACKET* h) {
-    uint64_t limit = mlHeadLimitUs(queue, h);
+// nowUs 只有 §VR-REPAIR-RTT 那一支用得到。
+static uint64_t mlHeadDeadlineUs(PRTP_VIDEO_QUEUE queue, const RTPV_HELD_PACKET* h, uint64_t nowUs) {
+    uint64_t limit;
+
+    if (queue->mlRttMode && !queue->mlHoldDual) {
+        // §VR-REPAIR-RTT：值得試才等；報過之後等到「後面的封包到達之後 mlHoldCapUs」
+        nkSync(queue);
+        if (queue->nkCount + queue->nkRefunds == 0 && nowUs < queue->mlLossHoldoffUs) {
+            return h->arrivalUs;  // 剛放棄過（見 nkNextDueUs）：不回報、不等
+        }
+        return vrrrHeadDeadlineUs(nowUs, h->arrivalUs, queue->mlHoldCapUs, queue->mlRepairEtaTryUs, queue->nkGone, queue->nkTooMany,
+                                  queue->nkCount + queue->nkRefunds > 0);
+    }
+    limit = mlHeadLimitUs(queue, h);
 
     if (!queue->mlHoldDual || (queue->mlRepair && nkAllPassed(queue))) {
         if (!queue->mlRepair) {
@@ -1372,6 +1621,15 @@ static uint64_t mlHeadDeadlineUs(PRTP_VIDEO_QUEUE queue, const RTPV_HELD_PACKET*
     return limit;
 }
 
+// §VR-REPAIR-RTT：等待結束了（等到了、或到期了），排在後面的幀現在才放行。記下這個時刻（XR 那一側暫時不拿這幾張
+// 當 LATCH 的樣本，見 LiGetVrRepairQuietMs）與最前面那一幀從它第一個封包到達起被壓住多久（10 s 統計的 held hist）
+static void mlNoteDelayedRelease(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
+    const uint64_t held = nowUs - queue->mlWaitStartUs;
+
+    queue->mlDelayedReleaseUs = nowUs;
+    queue->mlStatHeldHist[held <= 4000 ? 0 : held <= 8000 ? 1 : held <= 12000 ? 2 : held <= 17000 ? 3 : held <= 25000 ? 4 : 5]++;
+}
+
 // 把排著的封包能放行的都放行。mustPop＝排滿了，最前面那個不管等多久都要處理掉
 static void mlDrain(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool mustPop) {
     if (queue->mlMeas) {
@@ -1393,6 +1651,9 @@ static void mlDrain(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool mustPop) {
                 if (waited > queue->mlStatMaxWaitUs) {
                     queue->mlStatMaxWaitUs = (uint32_t)(waited > UINT32_MAX ? UINT32_MAX : waited);
                 }
+                if (queue->mlRttMode) {
+                    mlNoteDelayedRelease(queue, nowUs);  // §VR-REPAIR-RTT：後面被壓住的幀現在才放行
+                }
             }
             mlSweep(queue);
             if (queue->mlHoldCount < RTPV_ML_HOLD_MAX) {
@@ -1403,7 +1664,10 @@ static void mlDrain(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool mustPop) {
 
         // 掃過之後，環裡剩下的對目前的對象而言都是超前的
         h = &queue->mlHold[queue->mlHoldHead];
-        if (!mustPop && nowUs < mlHeadDeadlineUs(queue, h)) {
+        if (!mustPop && queue->mlRttMode && queue->mlRttAhead && queue->mlAheadDirty) {
+            nkAheadPlan(queue, nowUs);  // §VR-REPAIR-RTT：後面缺太多幀就整個不補（下面的期限會變成「不等」，也不算一次等待）
+        }
+        if (!mustPop && nowUs < mlHeadDeadlineUs(queue, h, nowUs)) {
             if (!queue->mlWaiting) {
                 queue->mlWaiting = true;
                 queue->mlWaitStartUs = h->arrivalUs;
@@ -1413,7 +1677,10 @@ static void mlDrain(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool mustPop) {
             }
             // §VR-LINK-REPAIR：下一幀都到了、這個 block 還沒收齊——該回報了就現在報（環剛掃過）
             nkEvaluate(queue, nowUs);
-            if (nowUs < mlHeadDeadlineUs(queue, h)) {
+            if (queue->mlRttMode && queue->mlRttAhead) {
+                nkAheadSend(queue, nowUs);  // §VR-REPAIR-RTT：後面整幀沒到的幀一起報
+            }
+            if (nowUs < mlHeadDeadlineUs(queue, h, nowUs)) {
                 return;
             }
             // 回報送不出去（沒有可用的連線）：沒有東西可等了，往下走放棄的路
@@ -1422,24 +1689,80 @@ static void mlDrain(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool mustPop) {
         if (queue->mlWaiting) {
             queue->mlWaiting = false;
             queue->mlStatExpired++;
+            if (queue->mlRttMode) {
+                mlNoteDelayedRelease(queue, nowUs);  // §VR-REPAIR-RTT：等到期限才放行
+            }
         }
         nkLogGiveUp(queue, nowUs, mustPop ? "hold full" : "wait expired");
+        if (queue->mlRttMode && queue->nkValid && queue->nkFrame == queue->currentFrameNumber &&
+                queue->nkBlock == queue->multiFecCurrentBlockNumber) {
+            // §VR-REPAIR-RTT：放棄了，接下來一小段時間不再替沒報過的 block 回報與等待（見 nkNextDueUs）。
+            // 這個 block 自己若沒報過，記下是為什麼（回報過還是放棄的由 nkLogGiveUp 印；計數在 msNoteLost）
+            const bool afterLoss = nowUs < queue->mlLossHoldoffUs;  // 前一次放棄之後的暫停還沒結束
+            queue->mlLossHoldoffUs = nowUs + vrrrLossHoldoffUs(queue->mlRttLoUs, queue->mlFramePeriodUs);
+            if (queue->nkCount + queue->nkRefunds == 0 && !queue->nkGone && !queue->nkTooMany) {
+                mlStatRttEvent(queue, nowUs);
+                if (afterLoss) {
+                    queue->mlStatAfterLoss++;
+                    queue->mlTot.afterLoss++;
+                }
+                else {
+                    queue->mlStatLate++;
+                    queue->mlTot.late++;
+                }
+                if (queue->nkGiveUpLogCount++ < 30 || (queue->nkGiveUpLogCount % 20) == 0) {
+                    Limelog("[VIPLE-VR-REPAIR] skipped frame=%u block=%u (%s): try %.1f ms, cap %.1f ms, have=%u/%u\n",
+                            queue->nkFrame, (unsigned)queue->nkBlock, afterLoss ? "after a loss" : "too late to ask",
+                            queue->mlRepairEtaTryUs / 1000.0, queue->mlHoldCapUs / 1000.0,
+                            queue->pendingFecBlockList.count != 0 ? queue->receivedDataPackets + queue->receivedParityPackets : 0,
+                            queue->pendingFecBlockList.count != 0 ? queue->bufferDataPackets : 0);
+                }
+            }
+        }
         mustPop = false;
         mlSubmitLowest(queue);
     }
 }
 
 static void mlLogStats(PRTP_VIDEO_QUEUE queue, uint64_t nowUs) {
-    if ((queue->mlStatWaits == 0 && queue->mlStatNack == 0) || nowUs - queue->mlStatLogUs < 10000000) {
+    if ((queue->mlStatWaits == 0 && queue->mlStatNack == 0 && !queue->mlStatRttEvt) || nowUs - queue->mlStatLogUs < 10000000) {
         return;
     }
-    Limelog("[VIPLE-VR-LINK] hold 10s: waits=%u recovered=%u expired=%u heldPkts=%u maxWaitMs=%.1f limitMs=%.1f"
-            " | nack=%u repaired=%u gone=%u\n",
-            queue->mlStatWaits, queue->mlStatRecovered, queue->mlStatExpired, queue->mlStatHeld,
-            queue->mlStatMaxWaitUs / 1000.0, queue->mlHoldMaxUs / 1000.0,
-            queue->mlStatNack, queue->mlStatRepaired, queue->mlStatGone);
+    {
+        char rttInfo[320];
+        rttInfo[0] = 0;
+        if (queue->mlRttMode || queue->mlStatRttSeen) {
+            // §VR-REPAIR-RTT：這 10 秒照 RTT 規則跑過才印，新欄位加在行尾（舊的解析腳本不受影響）。eta／try／cap／idle 是
+            // 最近一次用的值；hist＝第一份回報到收齊 ≤8／≤12／≤16／≤20／≤25／>25 ms，held hist＝被壓住的幀從它第一個封包
+            // 到達到放行 ≤4／≤8／≤12／≤17／≤25／>25 ms
+            snprintf(rttInfo, sizeof(rttInfo),
+                     " | rtt eta=%.1f try=%.1f cap=%.1f idle=%.1f late=%u afterLoss=%u tooMany=%u spurious=%u used=%u ahead=%u"
+                     " fixMs avg=%.1f max=%.1f hist=%u/%u/%u/%u/%u/%u held hist=%u/%u/%u/%u/%u/%u",
+                     queue->mlRepairEtaUs / 1000.0, queue->mlRepairEtaTryUs / 1000.0, queue->mlHoldCapUs / 1000.0,
+                     vrrrIdleUs(queue->mlIdlePolicy, &queue->mlStalls, nowUs, queue->mlFramePeriodUs, queue->mlFramePkts) / 1000.0,
+                     queue->mlStatLate, queue->mlStatAfterLoss, queue->mlStatTooMany, queue->mlStatSpurious, queue->mlStatRepairUsed,
+                     queue->mlStatNackAhead,
+                     queue->mlStatFixCount != 0 ? queue->mlStatFixUsSum / 1000.0 / queue->mlStatFixCount : 0.0,
+                     queue->mlStatFixUsMax / 1000.0, queue->mlStatFixHist[0], queue->mlStatFixHist[1], queue->mlStatFixHist[2],
+                     queue->mlStatFixHist[3], queue->mlStatFixHist[4], queue->mlStatFixHist[5],
+                     queue->mlStatHeldHist[0], queue->mlStatHeldHist[1], queue->mlStatHeldHist[2], queue->mlStatHeldHist[3],
+                     queue->mlStatHeldHist[4], queue->mlStatHeldHist[5]);
+        }
+        Limelog("[VIPLE-VR-LINK] hold 10s: waits=%u recovered=%u expired=%u heldPkts=%u maxWaitMs=%.1f limitMs=%.1f"
+                " | nack=%u repaired=%u gone=%u%s\n",
+                queue->mlStatWaits, queue->mlStatRecovered, queue->mlStatExpired, queue->mlStatHeld,
+                queue->mlStatMaxWaitUs / 1000.0, queue->mlHoldMaxUs / 1000.0,
+                queue->mlStatNack, queue->mlStatRepaired, queue->mlStatGone, rttInfo);
+    }
     queue->mlStatWaits = queue->mlStatRecovered = queue->mlStatExpired = queue->mlStatHeld = queue->mlStatMaxWaitUs = 0;
     queue->mlStatNack = queue->mlStatRepaired = queue->mlStatGone = 0;
+    queue->mlStatRttSeen = queue->mlStatRttEvt = false;
+    queue->mlStatLate = queue->mlStatAfterLoss = queue->mlStatSpurious = queue->mlStatRepairUsed = queue->mlStatFixCount = 0;
+    queue->mlStatNackAhead = queue->mlStatTooMany = 0;
+    queue->mlStatFixUsSum = 0;
+    queue->mlStatFixUsMax = 0;
+    memset(queue->mlStatFixHist, 0, sizeof(queue->mlStatFixHist));
+    memset(queue->mlStatHeldHist, 0, sizeof(queue->mlStatHeldHist));
 }
 
 static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
@@ -1447,6 +1770,9 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
 
     const bool ahead = mlIsAhead(queue, packet, length);
 
+    if (queue->mlRttMode) {
+        queue->mlStatRttSeen = true;  // §VR-REPAIR-RTT：這 10 秒的統計行要印行尾的 rtt 那一段
+    }
     if (queue->mlRepair) {
         const uint64_t t = PltGetMicroseconds();
         nkNoteArrival(queue, t, ahead);
@@ -1459,11 +1785,16 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
         const uint16_t seq = packet->sequenceNumber;  // 內部函式可能把封包交出去，之後不能再碰它
         const bool hadNack = queue->mlRepair && queue->nkValid && queue->nkCount > 0 &&
                              queue->nkFrame == prevFrame && queue->nkBlock == prevBlock;
-        // §VR-REPAIR-RTT（量測）：這個 block 上一個被採用的封包什麼時候到的、第一份回報什麼時候送的
-        // （內部函式可能讓對象前進，先記下來）
+        // §VR-REPAIR-RTT：這個 block 上一個被採用的封包什麼時候到的、第一份回報什麼時候送的（內部函式可能讓對象前進，
+        // 先記下來）。nkMeas＝量測（不分規則）；nkCur＝會影響之後判斷的那幾樣，只在 RTT 規則下記
         const bool nkMeas = queue->mlRepair && queue->nkValid && queue->nkFrame == prevFrame && queue->nkBlock == prevBlock;
+        const bool nkCur = nkMeas && queue->mlRttMode;
         const uint64_t prevRxUs = nkMeas ? queue->nkLastRxUs : 0;
+        const uint64_t firstRxUs = nkCur ? queue->nkFirstRxUs : 0;
         const uint64_t firstNackUs = nkMeas ? queue->nkFirstNackUs : 0;
+        const uint32_t prevData = queue->pendingFecBlockList.count != 0 ? queue->bufferDataPackets : 0;
+        const uint32_t prevTotal = queue->pendingFecBlockList.count != 0 ? queue->bufferDataPackets + queue->bufferParityPackets : 0;
+        const uint8_t prevLastBlock = queue->multiFecLastBlockNumber;
         int ret = RtpvAddPacketInternal(queue, packet, length, packetEntry);
 
         if (queue->mlRepair) {
@@ -1471,16 +1802,24 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
             bool usedNow = false;
             nowUs = PltGetMicroseconds();
             if (nkMeas && ret == RTPF_RET_QUEUED) {
-                // §VR-REPAIR-RTT（量測）：回報過的 block 又收下一個封包。回報送出還不到一個（最短的）往返就到的，是原本就在
-                // 路上、只是晚到的——那份回報是多餘的（每個 block 只算一次）；其餘的當成補包用上了
-                const bool cannot = firstNackUs != 0 && vrrrCannotBeRepair(nowUs, firstNackUs, queue->mlMeasLoUs);
+                // §VR-REPAIR-RTT：這個 block 又收下一個封包。回報過、而且離第一份回報已經有一個（最短的）往返：當成補包
+                // 用上了。否則是它自己的封包（沒報過，或報了但補包還不可能到——原本就在路上、只是晚到的）：隔了一段時間
+                // 才到就是鏈路自己的停頓，記下來決定「多久沒有新封包才算尾端掉了」；報過的話那份回報是多餘的（每個 block 只算一次）
+                const uint32_t loUs = queue->mlRttMode ? queue->mlRttLoUs : queue->mlMeasLoUs;
+                const bool cannot = firstNackUs != 0 && vrrrCannotBeRepair(nowUs, firstNackUs, loUs);
                 if (firstNackUs != 0 && !cannot) {
                     usedNow = true;
+                    queue->mlStatRepairUsed++;
                     queue->mlTot.used++;
                 }
                 else if (prevRxUs != 0 && nowUs > prevRxUs) {
+                    if (nkCur) {
+                        const uint64_t stall = nowUs - prevRxUs;
+                        vrrrStallAdd(&queue->mlStalls, (uint32_t)(stall > UINT32_MAX ? UINT32_MAX : stall), nowUs);
+                    }
                     if (firstNackUs != 0 && !queue->nkSpurious) {
                         queue->nkSpurious = true;  // 對象已經前進的話這個旗標屬於舊對象，nkSync 會清掉
+                        queue->mlStatSpurious++;
                         queue->mlTot.spurious++;
                     }
                 }
@@ -1489,8 +1828,11 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
                 if (hadNack) {
                     queue->mlStatRepaired++;  // 回報之後收齊了（非超前的封包不會讓佇列放棄 block，對象前進＝收齊）
                     queue->mlTot.repaired++;
+                    if (nkCur) {
+                        queue->mlDelayedReleaseUs = nowUs;  // §VR-REPAIR-RTT：這一幀是等補包才收齊的
+                    }
                     if (queue->nkUsedRepair || usedNow) {
-                        queue->mlTot.repairedUsed++;  // 補包真的用上的（不是它自己晚到的封包剛好湊齊）
+                        queue->mlTot.repairedUsed++;  // 補包真的用上的（不是它自己晚到的封包剛好湊齊）；保險只把這種算成功
                     }
                     if (firstNackUs != 0 && nowUs >= firstNackUs) {
                         const uint64_t fix = nowUs - firstNackUs;
@@ -1499,7 +1841,22 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
                         if (fix > queue->mlTot.fixUsMax) {
                             queue->mlTot.fixUsMax = (uint32_t)(fix > UINT32_MAX ? UINT32_MAX : fix);
                         }
+                        queue->mlStatFixCount++;
+                        queue->mlStatFixUsSum += fix;
+                        if (fix > queue->mlStatFixUsMax) {
+                            queue->mlStatFixUsMax = (uint32_t)(fix > UINT32_MAX ? UINT32_MAX : fix);
+                        }
+                        queue->mlStatFixHist[fix <= 8000 ? 0 : fix <= 12000 ? 1 : fix <= 16000 ? 2 : fix <= 20000 ? 3 : fix <= 25000 ? 4 : 5]++;
                     }
+                }
+                else if (nkCur && firstNackUs == 0 && prevData >= 16 && firstRxUs != 0 && nowUs > firstRxUs) {
+                    // §VR-REPAIR-RTT：沒報過、自己收齊的 block：量同一個 block 相鄰封包平常隔多久到（後面整幀沒到時，估那麼多
+                    // 補包要多久到齊）
+                    const uint32_t gapUs = (uint32_t)((nowUs - firstRxUs) / (prevData - 1));
+                    queue->mlPktGapUs = queue->mlPktGapUs == 0 ? gapUs : (queue->mlPktGapUs * 7 + gapUs) / 8;
+                }
+                if (prevTotal != 0) {
+                    queue->mlFramePkts = prevTotal * ((uint32_t)prevLastBlock + 1);
                 }
             }
             else if (usedNow) {
@@ -1514,7 +1871,8 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
                 mlDrain(queue, nowUs, false);
             }
             nkEvaluate(queue, nowUs);
-            if ((queue->mlStatWaits | queue->mlStatNack) != 0 && (queue->mlHoldCount > 0 || (++queue->mlStatTick & 0xFF) == 0)) {
+            if ((queue->mlStatWaits | queue->mlStatNack | (uint32_t)queue->mlStatRttEvt) != 0 &&
+                    (queue->mlHoldCount > 0 || (++queue->mlStatTick & 0xFF) == 0)) {
                 mlLogStats(queue, nowUs);
             }
             return ret;
@@ -1561,6 +1919,15 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
         slot->arrivalUs = nowUs;
         queue->mlHoldCount++;
         queue->mlStatHeld++;
+        if (queue->mlRttMode) {
+            // §VR-REPAIR-RTT：新的一幀的封包排進環了——後面有沒有整幀沒到的幀要重新看（見 nkAheadPlan）
+            uint32_t hf;
+            uint8_t hb;
+            if (mlPeek(queue, packet, length, &hf, &hb) && hf != queue->mlLastHeldFrame) {
+                queue->mlLastHeldFrame = hf;
+                queue->mlAheadDirty = true;
+            }
+        }
     }
     mlDrain(queue, nowUs, false);
     mlLogStats(queue, nowUs);
@@ -1574,7 +1941,7 @@ int RtpvHoldTimeoutMs(PRTP_VIDEO_QUEUE queue) {
     uint64_t due = 0;
 
     if (queue->mlHoldCount > 0) {
-        due = mlHeadDeadlineUs(queue, &queue->mlHold[queue->mlHoldHead]);
+        due = mlHeadDeadlineUs(queue, &queue->mlHold[queue->mlHoldHead], nowUs);
         if (due == 0) {
             due = 1;
         }
@@ -1607,9 +1974,33 @@ void RtpvPollHold(PRTP_VIDEO_QUEUE queue) {
     }
 }
 
+bool RtpvRepairLatched(PRTP_VIDEO_QUEUE queue) {
+    int i;
+
+    if (queue->nkValid && queue->nkRttOwned && !queue->nkGone && queue->nkFrame == queue->currentFrameNumber &&
+            queue->nkBlock == queue->multiFecCurrentBlockNumber) {
+        return true;
+    }
+    for (i = 0; i < (int)VRRR_AHEAD_MAX; i++) {
+        if (queue->nkPreUs[i] != 0 && !queue->nkPreGone[i] && !isBefore32(queue->nkPreFrame[i], queue->currentFrameNumber)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void RtpvRepairGone(PRTP_VIDEO_QUEUE queue, uint32_t frame, uint8_t block) {
     if (!queue->mlRepair) {
         return;
+    }
+    if (block == 0) {
+        // §VR-REPAIR-RTT：預先報過、還沒輪到的幀——輪到它的時候直接不等（見 nkSync）
+        int i;
+        for (i = 0; i < (int)VRRR_AHEAD_MAX; i++) {
+            if (queue->nkPreUs[i] != 0 && queue->nkPreFrame[i] == frame) {
+                queue->nkPreGone[i] = true;
+            }
+        }
     }
     nkSync(queue);
     if (queue->nkFrame == frame && queue->nkBlock == block && !queue->nkGone) {

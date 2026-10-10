@@ -17,9 +17,14 @@ static RTP_VIDEO_QUEUE rtpQueue;
 
 #include "VrMultiLink.h"
 
-// §VR-REPAIR-RTT（量測）───────────────────────────────────────────────────────
-// 補包（§VR-LINK-REPAIR）的量測：協商了補包就每 10 秒印一行 [VIPLE-VR-REPAIR] gate 10s，不改任何行為。
-// 欄位的意思見 docs/log_tags.md。以下的狀態只在影像接收執行緒存取，每場串流在執行緒開頭歸零。
+// §VR-REPAIR-RTT ─────────────────────────────────────────────────────────────
+// 補包（§VR-LINK-REPAIR）每個封包的決定與量測。決定本身是純函式 vrrrDecide()（VrRepairRtt.h），這裡只負責把
+// 連線層的狀態餵給它、把結果填進佇列，以及：
+//   - 協商了補包就每 10 秒印一行 [VIPLE-VR-REPAIR] gate 10s（量測；不管 server 的主開關）；
+//   - --vr-repair-ab：同一場每隔幾秒在原本的規則與 RTT 規則之間切換，換邊時印那一邊的小結；
+//   - 保險觸發時印一行；
+//   - 佇列回報「被補包拖晚的幀放行了」時記下時刻，給 XR 那一側用（LiGetVrRepairQuietMs）。
+// log 的欄位見 docs/log_tags.md。rr 只在影像接收執行緒存取，每場串流在執行緒開頭歸零。
 #define RR_GATE_WINDOW_US 10000000
 
 typedef struct _RR_GATE_WINDOW {
@@ -27,36 +32,120 @@ typedef struct _RR_GATE_WINDOW {
     uint64_t lastPktUs;       // 上一個封包的時刻
     uint64_t onUs, totalUs;   // 補包開著的時間、全部的時間（以相鄰兩個封包的間隔累計）
     uint32_t flips;           // 補包開／關翻了幾次
+    uint32_t trips;           // 保險觸發了幾次
     bool prevOn, havePrev;
+    bool sawLegacy, sawRtt;   // 這個視窗用過哪一套規則
     RTPV_REPAIR_TOTALS base;  // 視窗開始時佇列的累計值
 } RR_GATE_WINDOW;
 
-static RR_GATE_WINDOW rrGate;
+typedef struct _RR_AB {
+    uint64_t startUs;         // A/B 從什麼時候開始算（第一個協商了 RTT 規則的影像封包；0＝還沒開始）
+    uint64_t armStartUs;      // 目前這一邊從什麼時候開始
+    uint64_t onUs, totalUs;   // 這一邊：補包開著的時間、全部的時間
+    bool armRtt;              // 目前在 RTT 那一邊
+    RTPV_REPAIR_TOTALS base;  // 這一邊開始時佇列的累計值
+} RR_AB;
+
+static struct {
+    VRRR_STATE state;         // vrrrDecide 的狀態（門檻的遲滯、保險）
+    uint32_t seenOk, seenBad; // 已經交給保險的 mlTot.repairedUsed／lostNacked
+    uint64_t seenDelayedUs;   // 已經處理過的 rtpQueue.mlDelayedReleaseUs
+    uint32_t capOverrideMs;   // --vr-repair-hold（0＝自動）
+    RR_GATE_WINDOW gate;
+    RR_AB ab;
+} rr;
+
+// 給別的執行緒讀的（XR 的 frame thread）：最近一次「被補包拖晚的幀放行」的時刻（毫秒時戳的低 32 bit）、有沒有過、
+// 目前照哪一套規則。接收執行緒寫；讀到稍舊的值無妨
+static volatile uint32_t rrDelayedReleaseMs;
+static volatile int rrDelayedAny;
+static volatile int rrRulesNow;
 
 // 佇列被整個重設了（§FRZ-WATCHDOG）：它的累計值歸零，這裡留的副本跟著重來，不然下一次取差值會是一個很大的數
+// （交給保險的那兩個會變成幾十億次失敗）
 static void rrOnQueueReset(void) {
-    memset(&rrGate.base, 0, sizeof(rrGate.base));
+    memset(&rr.gate.base, 0, sizeof(rr.gate.base));
+    memset(&rr.ab.base, 0, sizeof(rr.ab.base));
+    rr.seenOk = rr.seenBad = 0;
+    rr.seenDelayedUs = 0;
+}
+
+// 佇列處理完一批事情之後呼叫：有被補包機制拖晚的幀剛放行，就記下現在的時刻
+static void rrNoteDelayedRelease(void) {
+    if (rtpQueue.mlDelayedReleaseUs != 0 && rtpQueue.mlDelayedReleaseUs != rr.seenDelayedUs) {
+        rr.seenDelayedUs = rtpQueue.mlDelayedReleaseUs;
+        rrDelayedReleaseMs = (uint32_t)PltGetMillis();
+        rrDelayedAny = 1;
+    }
+}
+
+static unsigned rrPct(uint64_t onUs, uint64_t totalUs) {
+    return totalUs != 0 ? (unsigned)((onUs * 100 + totalUs / 2) / totalUs) : 0;
+}
+
+// --vr-repair-ab：剛結束的那一邊的小結（從那一邊開始到現在佇列累計值的差）
+static void rrAbSummary(uint64_t nowUs) {
+    const RTPV_REPAIR_TOTALS* t = &rtpQueue.mlTot;
+    const RTPV_REPAIR_TOTALS* b = &rr.ab.base;
+    const uint32_t fixes = t->fixCount - b->fixCount;
+
+    Limelog("[VIPLE-VR-REPAIR] ab: arm=%s secs=%.0f on=%u%% lost=%u (nacked=%u unasked=%u whole=%u) repaired=%u used=%u nack=%u spurious=%u"
+            " late=%u tooMany=%u fixMs avg=%.1f max=%.1f\n",
+            rr.ab.armRtt ? "rtt" : "legacy", (nowUs - rr.ab.armStartUs) / 1000000.0, rrPct(rr.ab.onUs, rr.ab.totalUs),
+            t->lost - b->lost, t->lostNacked - b->lostNacked, t->lostUnasked - b->lostUnasked, t->lostWhole - b->lostWhole,
+            t->repaired - b->repaired, t->repairedUsed - b->repairedUsed, t->nack - b->nack, t->spurious - b->spurious,
+            t->late - b->late, t->tooMany - b->tooMany,
+            fixes != 0 ? (t->fixUsSum - b->fixUsSum) / 1000.0 / fixes : 0.0, t->fixUsMax / 1000.0);
+}
+
+// 這個時刻在 A/B 的哪一邊（true＝RTT）。沒開 --vr-repair-ab 恆為 true。換邊時印一行，並印剛結束那一邊的小結
+static bool rrArmRtt(uint64_t nowUs) {
+    const uint32_t abSec = StreamConfig.vrRepairAbSec > 0 ? (uint32_t)StreamConfig.vrRepairAbSec : 0;
+    const bool first = rr.ab.startUs == 0;
+    bool arm;
+
+    if (abSec == 0 || nowUs == 0) {
+        return true;
+    }
+    if (first) {
+        rr.ab.startUs = nowUs;
+    }
+    arm = vrrrAbArmRtt(nowUs - rr.ab.startUs, abSec);
+    if (first || arm != rr.ab.armRtt) {
+        if (!first) {
+            rrAbSummary(nowUs);
+        }
+        Limelog("[VIPLE-VR-REPAIR] ab -> %s frame=%u\n", arm ? "rtt" : "legacy", RtpvGetCurrentFrameNumber(&rtpQueue));
+        rr.ab.armRtt = arm;
+        rr.ab.armStartUs = nowUs;
+        rr.ab.onUs = rr.ab.totalUs = 0;
+        rr.ab.base = rtpQueue.mlTot;
+        rtpQueue.mlTot.fixUsMax = 0;  // 最大值沒辦法取差值：每一邊重來（只有這裡的小結在用）
+    }
+    return arm;
 }
 
 static void rrGateLog(uint32_t holdUs) {
     const RTPV_REPAIR_TOTALS* t = &rtpQueue.mlTot;
-    const RTPV_REPAIR_TOTALS* b = &rrGate.base;
+    const RTPV_REPAIR_TOTALS* b = &rr.gate.base;
     VRRR_RTT_STATS st;
     char rtt[96];
 
-    // 往返時間是印的這一刻的值（正在送影像的連線最近 VRRR_RTT_WIN 筆）；eta／try／cap 是照它算出來、§VR-REPAIR-RTT 會用的值
+    // 往返時間是印的這一刻的值（正在送影像的連線最近 VRRR_RTT_WIN 筆）；eta／try／cap 是照它算出來、§VR-REPAIR-RTT 會用
+    // （或正在用）的值，RTT 規則沒開的時候也印，方便事先看它會怎麼訂
     if (vrmlRepairRtt(rtpQueue.mlCarryMask, &st)) {
         const uint32_t etaUs = vrrrEtaUs(st.hiUs);
         snprintf(rtt, sizeof(rtt), "lo=%.1f mid=%.1f hi=%.1f eta=%.1f try=%.1f cap=%.1f", st.loUs / 1000.0, st.midUs / 1000.0,
                  st.hiUs / 1000.0, etaUs / 1000.0, vrrrEtaTryUs(st.midUs) / 1000.0,
-                 vrrrCapUs(holdUs, etaUs, vrrrEtaFastUs(st.loUs), 0) / 1000.0);
+                 vrrrCapUs(holdUs, etaUs, vrrrEtaFastUs(st.loUs), rr.capOverrideMs) / 1000.0);
     }
     else {
         snprintf(rtt, sizeof(rtt), "lo=- mid=- hi=- eta=- try=- cap=-");
     }
-    Limelog("[VIPLE-VR-REPAIR] gate 10s: rules=legacy on=%u%% flips=%u paused=0 | lost=%u (nacked=%u unasked=%u whole=%u) repaired=%u used=%u"
+    Limelog("[VIPLE-VR-REPAIR] gate 10s: rules=%s on=%u%% flips=%u paused=%u | lost=%u (nacked=%u unasked=%u whole=%u) repaired=%u used=%u"
             " | rtt %s | lateDone 5/10/20/33/+=%u/%u/%u/%u/%u never=%u | stall 4/6/8/12/+=%u/%u/%u/%u/%u\n",
-            rrGate.totalUs != 0 ? (unsigned)((rrGate.onUs * 100 + rrGate.totalUs / 2) / rrGate.totalUs) : 0, rrGate.flips,
+            rr.gate.sawRtt ? (rr.gate.sawLegacy ? "mixed" : "rtt") : "legacy", rrPct(rr.gate.onUs, rr.gate.totalUs), rr.gate.flips,
+            rr.gate.trips,
             t->lost - b->lost, t->lostNacked - b->lostNacked, t->lostUnasked - b->lostUnasked, t->lostWhole - b->lostWhole,
             t->repaired - b->repaired, t->repairedUsed - b->repairedUsed, rtt,
             t->lateDone[0] - b->lateDone[0], t->lateDone[1] - b->lateDone[1], t->lateDone[2] - b->lateDone[2],
@@ -65,35 +154,51 @@ static void rrGateLog(uint32_t holdUs) {
             t->stall[4] - b->stall[4]);
 }
 
-// 每個影像封包呼叫一次（協商了補包才呼叫）。repairOn＝從這個封包起補包開著沒有（rtpQueue.mlRepair）
-static void rrGateNote(uint64_t nowUs, bool repairOn, uint32_t holdUs) {
-    if (rrGate.startUs == 0) {
-        rrGate.startUs = nowUs;
-        rrGate.base = rtpQueue.mlTot;
+// 每個影像封包做完決定之後呼叫一次（協商了補包才呼叫）：累計 gate 10s 與 A/B 小結要的時間比例，保險觸發時印一行
+static void rrNote(const VRRR_IN* in, const VRRR_OUT* out) {
+    const uint64_t nowUs = in->nowUs;
+
+    if (out->tripped) {
+        rr.gate.trips++;
+        Limelog("[VIPLE-VR-REPAIR] rtt: paused %.0f ms (level %u)\n",
+                rr.state.brk.pausedUntilUs > nowUs ? (rr.state.brk.pausedUntilUs - nowUs) / 1000.0 : 0.0, (unsigned)rr.state.brk.level);
     }
-    if (rrGate.lastPktUs != 0 && nowUs > rrGate.lastPktUs) {
+    if (rr.gate.startUs == 0) {
+        rr.gate.startUs = nowUs;
+        rr.gate.base = rtpQueue.mlTot;
+    }
+    if (rr.gate.lastPktUs != 0 && nowUs > rr.gate.lastPktUs) {
         // 上一個封包到這一個之間，照上一個封包當時的決定算。影像停了很久（暫停、斷線）的那一段最多算 1 秒
-        uint64_t dt = nowUs - rrGate.lastPktUs;
+        uint64_t dt = nowUs - rr.gate.lastPktUs;
         if (dt > 1000000) {
             dt = 1000000;
         }
-        rrGate.totalUs += dt;
-        if (rrGate.prevOn) {
-            rrGate.onUs += dt;
+        rr.gate.totalUs += dt;
+        rr.ab.totalUs += dt;
+        if (rr.gate.prevOn) {
+            rr.gate.onUs += dt;
+            rr.ab.onUs += dt;
         }
     }
-    if (rrGate.havePrev && repairOn != rrGate.prevOn) {
-        rrGate.flips++;
+    if (rr.gate.havePrev && out->mlRepair != rr.gate.prevOn) {
+        rr.gate.flips++;
     }
-    rrGate.prevOn = repairOn;
-    rrGate.havePrev = true;
-    rrGate.lastPktUs = nowUs;
-    if (nowUs - rrGate.startUs >= RR_GATE_WINDOW_US) {
-        rrGateLog(holdUs);
-        rrGate.startUs = nowUs;
-        rrGate.base = rtpQueue.mlTot;
-        rrGate.onUs = rrGate.totalUs = 0;
-        rrGate.flips = 0;
+    rr.gate.prevOn = out->mlRepair;
+    rr.gate.havePrev = true;
+    rr.gate.lastPktUs = nowUs;
+    if (out->mlRttMode) {
+        rr.gate.sawRtt = true;
+    }
+    else {
+        rr.gate.sawLegacy = true;
+    }
+    if (nowUs - rr.gate.startUs >= RR_GATE_WINDOW_US) {
+        rrGateLog(in->holdUs);
+        rr.gate.startUs = nowUs;
+        rr.gate.base = rtpQueue.mlTot;
+        rr.gate.onUs = rr.gate.totalUs = 0;
+        rr.gate.flips = rr.gate.trips = 0;
+        rr.gate.sawLegacy = rr.gate.sawRtt = false;
     }
 }
 
@@ -216,6 +321,10 @@ void initializeVideoStream(void) {
     receivedDataFromPeer = false;
     firstDataTimeMs = 0;
     receivedFullFrame = false;
+    // §VR-REPAIR-RTT：上一場留下來的不算
+    rrDelayedAny = 0;
+    rrDelayedReleaseMs = 0;
+    rrRulesNow = 0;
 
 #ifdef VIPLE_MPQUIC
     // §Q-VIDEO-RING: 防禦性清空 — 與 AudioStream 同理。
@@ -303,8 +412,10 @@ static void VideoReceiveThreadProc(void* context) {
     // server 每條連線最多把一批留兩個幀週期，等一個週期是延遲與救回率的折衷
     uint32_t mlHoldUs = 0;
     int mlHoldPollMs = 0;
+    // §VR-REPAIR-RTT：串流的幀週期（不夾；上面的 mlHoldUs 是夾在 4～14 ms 的同一個值）
+    const uint32_t mlFramePeriodUs = StreamConfig.fps > 0 ? 1000000u / (uint32_t)StreamConfig.fps : 11111u;
     if (mlLinks > 0) {
-        mlHoldUs = StreamConfig.fps > 0 ? 1000000u / (uint32_t)StreamConfig.fps : 11111u;
+        mlHoldUs = mlFramePeriodUs;
         if (mlHoldUs < 4000) {
             mlHoldUs = 4000;
         }
@@ -313,7 +424,9 @@ static void VideoReceiveThreadProc(void* context) {
         }
     }
     int rxLink = -1;
-    memset(&rrGate, 0, sizeof(rrGate));  // §VR-REPAIR-RTT（量測）：每場串流重來
+    // §VR-REPAIR-RTT：每場串流重來
+    memset(&rr, 0, sizeof(rr));
+    rr.capOverrideMs = StreamConfig.vrRepairHoldMs > 0 ? (uint32_t)StreamConfig.vrRepairHoldMs : 0;
 
     encrypted = !!(EncryptionFeaturesEnabled & SS_ENC_VIDEO);
     decryptedSize = StreamConfig.packetSize + MAX_RTP_HEADER_SIZE;
@@ -356,6 +469,9 @@ static void VideoReceiveThreadProc(void* context) {
                 break;
             }
         }
+
+        // §VR-REPAIR-RTT：上一圈（加封包、等待到期、收到 REPAIR_GONE）若放行了被補包拖晚的幀，在開始等下一個封包之前記下來
+        rrNoteDelayedRelease();
 
 #ifdef VIPLE_MPQUIC
         if (useQuicVideo) {
@@ -679,38 +795,61 @@ static void VideoReceiveThreadProc(void* context) {
 
         rtpQueue.multiLink = mlLinks > 0;
         {
-            // 有東西可等才等：至少兩條連線實際在送影像（另一條的那一份），或 server 會補包（§VR-LINK-REPAIR）。
-            // 只有一條在送、又不能補包時（單網卡、primary、另一條還在探測）等只會讓掉幀回報晚一個幀週期
-            const int repairRttMs = (mlLinks > 0 && (vrmlFeatures() & VIPLE_VR_LINK_F_REPAIR)) ? vrmlCtrlRttMs() : -1;
-            rtpQueue.mlHoldDual = vrmlVideoCarrying() >= 2;
+            // 這個封包的決定：等不等、回不回報、照哪一套規則。判斷全部在 vrrrDecide()（VrRepairRtt.h，有單元測試）：
+            //
+            // 原本的規則（vrrrDecide 的最後一段，和之前寫在這裡的算式逐位元相同）——有東西可等才等：至少兩條連線實際在送
+            // 影像（另一條的那一份），或 server 會補包（§VR-LINK-REPAIR）。只有一條在送、又不能補包時（單網卡、primary、
+            // 另一條還在探測）等只會讓掉幀回報晚一個幀週期。
+            // 往返時間太長也不回報（legacyRttMs＝−1 是沒協商，或沒有已確認的連線、回報送不出去）：回報→補包至少一個往返，
+            // 補包到的時候這一幀早就被放棄了——2026-10-07 在往返 18～39 ms 的 Wi-Fi 上實測，每 10 秒回報 30 次，補的封包
+            // 只是在已經很擠的鏈路上再加碼。門檻＝一個半幀週期減 2 ms（90 Hz 約 14 ms）：缺一段的幀在尾端到的時候就回報了，
+            // 離「下一幀到了之後再等一個幀週期」的期限還有將近兩個週期，往返十毫秒上下仍然來得及。頭盔實測適配器那條的
+            // 往返中位數 3 ms、九成在 10 ms 以內、最大 13 ms；門檻訂在一個幀週期時，另一條剛好卡住的那一刻補包就被關掉，
+            // 本來救得回來的幀掉了。重報間隔＝回報→補包大約一個往返，再給 3 ms（server 排進佇列、送出），夾在 4～10 ms。
+            //
+            // §VR-REPAIR-RTT：server 與 client 都同意（VIPLE_VR_LINK_F_REPAIR_RTT）、只有一條連線在送影像、那條連線有往返
+            // 時間的樣本時，門檻、等待上限與重報改成跟著量到的往返時間走。沒協商時 vrrrDecide 一定走原本那一段。
+            VRRR_IN in;
+            VRRR_OUT out;
+            const int feat = mlLinks > 0 ? vrmlFeatures() : 0;
+            // 上一個封包（與它之後的等待逾時、REPAIR_GONE）是照 RTT 規則處理的，那段時間的結果才交給保險
+            const bool prevRtt = rtpQueue.mlRttMode;
+            bool haveRtt;
+
+            memset(&in, 0, sizeof(in));
+            in.negotiatedRepair = (feat & VIPLE_VR_LINK_F_REPAIR) != 0;
+            in.negotiatedRtt = (feat & VIPLE_VR_LINK_F_REPAIR_RTT) != 0;
+            in.carrying = vrmlVideoCarrying();
+            in.legacyRttMs = in.negotiatedRepair ? vrmlCtrlRttMs() : -1;
             rtpQueue.mlCarryMask = (uint8_t)vrmlVideoCarryMask();
-            // -1＝沒協商，或沒有已確認的連線（回報送不出去）。往返時間太長也不回報：回報→補包至少一個往返，補包到的
-            // 時候這一幀早就被放棄了——2026-10-07 在往返 18～39 ms 的 Wi-Fi 上實測，每 10 秒回報 30 次，補的封包只是
-            // 在已經很擠的鏈路上再加碼。門檻＝一個半幀週期減 2 ms（90 Hz 約 14 ms）：缺一段的幀在尾端到的時候就回報了，
-            // 離「下一幀到了之後再等一個幀週期」的期限還有將近兩個週期，往返十毫秒上下仍然來得及。頭盔實測適配器
-            // 那條的往返中位數 3 ms、九成在 10 ms 以內、最大 13 ms；門檻訂在一個幀週期時，另一條剛好卡住的那一刻
-            // 補包就被關掉，本來救得回來的幀掉了。
-            rtpQueue.mlRepair = repairRttMs >= 0 && (uint32_t)repairRttMs * 1000u + 2000u <= mlHoldUs + mlHoldUs / 2;
-            if (rtpQueue.mlRepair) {
-                // 回報→補包大約一個往返；再給 3 ms（server 排進佇列、送出），夾在 4～10 ms
-                uint32_t rtoUs = 2000u * (uint32_t)repairRttMs + 3000u;
+            in.nowUs = in.negotiatedRepair ? PltGetMicroseconds() : 0;
+            // 往返時間的統計只看正在送影像的連線（補包只從那幾條回來）。沒協商 RTT 規則時也算：量測要用最短的那一筆
+            haveRtt = in.negotiatedRepair && vrmlRepairRtt(rtpQueue.mlCarryMask, &in.st);
+            in.haveStats = in.negotiatedRtt && haveRtt;
+            in.armRtt = !in.negotiatedRtt || rrArmRtt(in.nowUs);
+            in.holdUs = mlHoldUs;
+            in.framePeriodUs = mlFramePeriodUs;
+            in.capOverrideMs = rr.capOverrideMs;
+            in.idlePolicy = (uint8_t)StreamConfig.vrRepairIdle;
+            in.latched = in.negotiatedRtt && RtpvRepairLatched(&rtpQueue);
+            in.okDelta = prevRtt ? rtpQueue.mlTot.repairedUsed - rr.seenOk : 0;
+            in.badDelta = prevRtt ? rtpQueue.mlTot.lostNacked - rr.seenBad : 0;
+            rr.seenOk = rtpQueue.mlTot.repairedUsed;
+            rr.seenBad = rtpQueue.mlTot.lostNacked;
+            vrrrDecide(&in, &rr.state, &out);
+            RtpvSetRepairDecision(&rtpQueue, &out, mlFramePeriodUs, StreamConfig.vrRepairNoAhead == 0);
+            if (out.mlRepair) {
+                // 各條連線平常晚多久（要在算出這個封包的 mlRepair 之後才填，否則剛變成可以補包的那個封包拿到的是舊值）
                 int ml;
-                rtpQueue.mlRepairRtoUs = rtoUs < 4000u ? 4000u : (rtoUs > 10000u ? 10000u : rtoUs);
-                // 各條連線平常晚多久（要在上面算出這個封包的 mlRepair 之後才填，否則剛變成可以補包的那個封包拿到的是舊值）
                 for (ml = 0; ml < RTPV_ML_LINKS; ml++) {
                     rtpQueue.mlLinkLagUs[ml] = vrmlVideoLinkLagUs(ml);
                 }
             }
-            rtpQueue.mlHoldMaxUs = (rtpQueue.mlHoldDual || rtpQueue.mlRepair) ? mlHoldUs : 0;
-            if (mlLinks > 0 && (vrmlFeatures() & VIPLE_VR_LINK_F_REPAIR)) {
-                // §VR-REPAIR-RTT（量測）：協商了補包就記帳、每 10 秒印一行，不管補包這一刻開著沒有
-                VRRR_RTT_STATS st;
-                const uint64_t nowUs = PltGetMicroseconds();
-                RtpvSetRepairMeas(&rtpQueue, true, nowUs, vrmlRepairRtt(rtpQueue.mlCarryMask, &st) ? st.loUs : 0);
-                rrGateNote(nowUs, rtpQueue.mlRepair, mlHoldUs);
-            }
-            else {
-                RtpvSetRepairMeas(&rtpQueue, false, 0, 0);
+            // 量測（不分規則）：協商了補包就記帳、每 10 秒印一行，不管補包這一刻開著沒有
+            RtpvSetRepairMeas(&rtpQueue, in.negotiatedRepair, in.nowUs, haveRtt ? in.st.loUs : 0);
+            rrRulesNow = out.mlRttMode ? 1 : 0;
+            if (in.negotiatedRepair) {
+                rrNote(&in, &out);
             }
         }
         rtpQueue.mlRxLink = rxLink;
@@ -723,6 +862,10 @@ static void VideoReceiveThreadProc(void* context) {
                 vrmlNoteVideoUsed(rxLink);  // 這條連線的這一份先到、被採用（排著的等放行時由佇列自己計）
             }
         }
+    }
+
+    if (rr.ab.startUs != 0) {
+        rrAbSummary(PltGetMicroseconds());  // §VR-REPAIR-RTT：--vr-repair-ab 最後那一邊（多半沒跑滿）的小結
     }
 
     if (buffer != NULL) {
@@ -940,11 +1083,15 @@ const RTP_VIDEO_STATS* LiGetRTPVideoStats(void) {
     return &rtpQueue.stats;
 }
 
-// §VR-REPAIR-RTT：目前只有量測，補包不會把任何一幀拖晚到要讓 XR 那一側知道
+// §VR-REPAIR-RTT：距上一次「被補包機制拖晚的幀放行」幾毫秒。只有照 RTT 規則等待時佇列才會記（見 RtpVideoQueue.c 的
+// mlDelayedReleaseUs），所以 server 的主開關關著時恆為 UINT32_MAX
 uint32_t LiGetVrRepairQuietMs(void) {
-    return UINT32_MAX;
+    if (!rrDelayedAny) {
+        return UINT32_MAX;
+    }
+    return (uint32_t)PltGetMillis() - rrDelayedReleaseMs;  // 都是毫秒時戳的低 32 bit，繞回也正確
 }
 
 int LiGetVrRepairRules(void) {
-    return 0;
+    return rrRulesNow;
 }

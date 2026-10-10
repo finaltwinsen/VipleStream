@@ -47,7 +47,7 @@ typedef struct _RTPV_REPAIR_TOTALS {
     uint32_t repairedUsed;  // 其中補包真的用上的（收過「可能是補包」的封包）
     uint32_t used;          // 回報之後才到、可能是補包、而且被採用的封包
     uint32_t spurious;      // 多餘的回報：回報之後、補包還不可能到的時候，這個 block 自己的封包就到了
-    uint32_t lost;          // 沒收齊就被跳過的幀
+    uint32_t lost;          // 沒收齊就被跳過的幀（＝下面三類；照 §VR-REPAIR-RTT 的規則時另含「回報過、後來因為後面缺太多幀而放棄」的）
     uint32_t lostNacked;    // 其中：回報過、等到期限還是放棄
     uint32_t lostUnasked;   // 其中：收到一部分、沒回報過就放棄
     uint32_t lostWhole;     // 其中：一個封包都沒到、也沒回報過（含連續掉好幾幀時佇列沒等過就跳過的）
@@ -57,6 +57,11 @@ typedef struct _RTPV_REPAIR_TOTALS {
     uint32_t lateDone[5];   // 回報過才放棄的 block，放棄之後多久才到齊：≤5／≤10／≤20／≤33／>33 ms
     uint32_t lateNever;     // 同上，60 ms 內沒到齊
     uint32_t stall[5];      // 同一個 block 相鄰兩個封包的到達間隔：3～4／4～6／6～8／8～12／≥12 ms
+    // 以下只有照 §VR-REPAIR-RTT 的規則時才會動
+    uint32_t late;          // 沒回報就放棄：現在報也趕不上期限
+    uint32_t afterLoss;     // 沒回報就放棄：剛放棄過前面的 block，intra refresh 還沒到
+    uint32_t tooMany;       // 後面整幀沒到的幀多到補不完、直接放棄的次數
+    uint32_t ahead;         // 預先替後面整幀沒到的幀送出的回報（已含在 nack 裡）
 } RTPV_REPAIR_TOTALS;
 
 typedef struct _RTP_VIDEO_QUEUE {
@@ -145,6 +150,46 @@ typedef struct _RTP_VIDEO_QUEUE {
     uint32_t mlStatRepaired;
     uint32_t mlStatGone;
 
+    // §VR-REPAIR-RTT：補包的門檻、等待與重報跟著量到的往返時間走（說明見 VrRepairRtt.h 與 RtpVideoQueue.c）。
+    // 前九個由 VideoStream 每次加封包前設定（RtpvSetRepairDecision：vrrrDecide 的結果）；mlRttMode＝false 時其餘都不看，
+    // 行為與之前完全相同。
+    bool mlRttMode;                     // 這個封包照新規則處理
+    bool mlRttAhead;                    // 後面整幀沒到的幀一起回報
+    uint8_t mlIdlePolicy;               // VRRR_IDLE_*（已經換成實際的做法）
+    uint32_t mlRepairEtaUs;             // 回報送出後，補包最晚多久該到齊（等多久、多久重報）
+    uint32_t mlRepairEtaTryUs;          // 第一份回報值不值得送（中位數）
+    uint32_t mlRepairEtaFastUs;         // 再報一輪值不值得（最短往返）
+    uint32_t mlHoldCapUs;               // 後面的封包最多被壓住多久
+    uint32_t mlRttLoUs;                 // 最近的最短往返時間（判斷「這個封包不可能是補包」、放棄之後暫停多久）
+    uint32_t mlFramePeriodUs;           // 串流的幀週期（不夾）
+    // 以下由佇列自己維護
+    VRRR_STALLS mlStalls;               // block 內的停頓樣本（VRRR_IDLE_LEARNED 用；不跟著對象重設）
+    bool nkRttOwned;                    // 這個 block 是照 RTT 規則回報的（規則切換時沿用到它結束）
+    bool nkTooMany;                     // 後面整幀沒到的幀多到補不完：不回報、不等
+    bool mlAheadDirty;                  // 環裡最小的幀號可能變了：重新看後面有沒有整幀沒到的幀
+    uint32_t mlLastHeldFrame;           // 最近排進環的封包是哪一幀的
+    uint32_t nkPreFrame[VRRR_AHEAD_MAX];// 已經替哪幾幀預先報過
+    uint64_t nkPreUs[VRRR_AHEAD_MAX];   // 什麼時候報的（0＝空格）
+    bool nkPreGone[VRRR_AHEAD_MAX];     // server 對預先報的那一幀回了補不了
+    uint8_t nkPrePos;
+    uint32_t mlFramePkts;               // 最近收齊的一幀大約幾個封包（data＋parity）
+    uint32_t mlPktGapUs;                // 同一個 block 相鄰封包的到達間隔（平滑過；0＝還沒量到）
+    uint64_t mlDelayedReleaseUs;        // 最近一次「被補包機制拖晚的幀」放行的時刻（XR 那一側暫時不拿它當 LATCH 樣本）
+    uint64_t mlLossHoldoffUs;           // 剛放棄一個 block（已經確定要走 intra refresh）：這個時刻之前，還沒報過的 block 不回報、不等
+    bool mlStatRttSeen;                 // 以下是 10 s 統計（行尾的 rtt 那一段）：這 10 秒有沒有照 RTT 規則跑過
+    bool mlStatRttEvt;                  // 這 10 秒有沒有只屬於 RTT 規則的事件（沒回報就放棄、後面缺太多幀）
+    uint32_t mlStatLate;                // 沒回報就放棄（現在報也趕不上期限）
+    uint32_t mlStatAfterLoss;           // 沒回報就放棄（剛放棄過前面的 block）
+    uint32_t mlStatSpurious;            // 多餘的回報（見 nkSpurious）
+    uint32_t mlStatRepairUsed;          // 回報之後才到、而且被採用的封包（補包真的用上的）
+    uint32_t mlStatFixCount;            // 回報之後收齊的 block 數、從第一份回報到收齊的時間總和與最大值
+    uint64_t mlStatFixUsSum;
+    uint32_t mlStatFixUsMax;
+    uint32_t mlStatFixHist[6];          // 第一份回報到收齊：≤8／≤12／≤16／≤20／≤25／>25 ms
+    uint32_t mlStatHeldHist[6];         // 被壓住的幀從它第一個封包到達到放行：≤4／≤8／≤12／≤17／≤25／>25 ms
+    uint32_t mlStatNackAhead;           // 預先替後面的幀送出的回報數
+    uint32_t mlStatTooMany;             // 後面缺太多幀、直接放棄的次數
+
     // §VR-REPAIR-RTT（量測）：以下只記帳，不分規則、不影響任何判斷。mlMeas（協商了補包就開）與接著三個由 VideoStream
     // 每次加封包前設定（RtpvSetRepairMeas）。佇列不為了量測多讀時鐘：用交進來的時刻，與它本來就讀過的時刻。
     bool mlMeas;
@@ -224,6 +269,8 @@ int RtpvHoldTimeoutMs(PRTP_VIDEO_QUEUE queue);
 void RtpvPollHold(PRTP_VIDEO_QUEUE queue);
 // §VR-LINK-REPAIR：server 回了 REPAIR_GONE（這個 block 補不了）。只在影像接收執行緒呼叫。
 void RtpvRepairGone(PRTP_VIDEO_QUEUE queue, uint32_t frame, uint8_t block);
+// §VR-REPAIR-RTT：佇列正在等的 block（或它後面預先報過的幀）是照 RTT 規則回報的——這段期間規則不可以切回去
+bool RtpvRepairLatched(PRTP_VIDEO_QUEUE queue);
 // §VR-REPAIR-RTT（量測）：影像有應用層加密時，比佇列目前的幀號舊的封包在解密前就被丟掉、進不了佇列。VideoStream
 // 丟掉之前把幀號交進來，讓「放棄之後多久才到齊」的量測以幀為單位數（分不出 block、也去不了重，數字只能當參考）。
 void RtpvMeasLateFrame(PRTP_VIDEO_QUEUE queue, uint32_t frame);
@@ -234,6 +281,30 @@ VIPLE_VR_INLINE void RtpvSetRepairMeas(PRTP_VIDEO_QUEUE queue, bool on, uint64_t
     queue->mlMeas = on;
     queue->mlMeasNowUs = on ? nowUs : 0;
     queue->mlMeasLoUs = on ? rttLoUs : 0;
+}
+
+// §VR-REPAIR-RTT：每次加封包前，把這個封包的決定（vrrrDecide 的結果）填進佇列（VideoStream 的接收迴圈與模擬器共用）。
+// framePeriodUs＝串流的幀週期（1e6／fps，不夾）；ahead＝後面整幀沒到的幀要不要一起回報。
+// 各條連線平常晚多久（mlLinkLagUs）由呼叫端在這之後、out->mlRepair 為真時另外填。
+// 協商了補包就一定要同時呼叫 RtpvSetRepairMeas(on＝true)：保險看的「回報過還是放棄」是量測那一邊數的。
+VIPLE_VR_INLINE void RtpvSetRepairDecision(PRTP_VIDEO_QUEUE queue, const VRRR_OUT* out, uint32_t framePeriodUs, bool ahead) {
+    queue->mlHoldDual = out->mlHoldDual;
+    queue->mlRepair = out->mlRepair;
+    if (out->mlRepair) {
+        queue->mlRepairRtoUs = out->mlRepairRtoUs;
+    }
+    queue->mlHoldMaxUs = out->mlHoldMaxUs;
+    queue->mlRttMode = out->mlRttMode;
+    if (out->mlRttMode) {
+        queue->mlRepairEtaUs = out->etaUs;
+        queue->mlRepairEtaTryUs = out->etaTryUs;
+        queue->mlRepairEtaFastUs = out->etaFastUs;
+        queue->mlHoldCapUs = out->capUs;
+        queue->mlRttLoUs = out->loUs;
+        queue->mlFramePeriodUs = framePeriodUs;
+        queue->mlIdlePolicy = out->idlePolicy;
+        queue->mlRttAhead = ahead;
+    }
 }
 
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue);
