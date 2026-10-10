@@ -896,6 +896,13 @@ frame loop（XR 桌面也有）
                                                                                  全速量的（半速＋補幀時被擋的那一段早 0.25～0.5 ms）；顯示不是 120 Hz 時印 -；
                                                                                  synthSub／synthDone＝補幀開著時，補幀那一批送出與做完的相位
 
+decoder 執行緒（VR 走真 XR 才有）
+[VIPLE-VR-DECPOLL] 10s frames=N recvWait p50/p95/max=…/…/… us polls=N pollUs=0 mixed=0
+                                                                              ← decoder 執行緒自己每 10 秒印（視窗和別的行不是同一個）。frames＝這 10 秒取到的解碼輸出幀數；
+                                                                                 recvWait＝取到輸出的那一刻，距最近一次把輸入交給解碼器多久。沒有輸出、也沒有新輸入時迴圈睡 1 ms
+                                                                                 再問，所以這個數字是 1 ms 一格的（預期多數落在 1.1 ms 附近、少數 2.1 ms）；polls＝這樣去睡的次數；
+                                                                                 pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
+
 自測
 [VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> phase-…                           ← `xr-probe --selftest-latch` 在 xrlatchstats.h 原有的案例之後接著跑 xrphase.h 的：相位換算
                                                                                  （LDIAG 相位 ↔ vblank 相位）、120 Hz 的判斷、交出相位的分類、延遲鏈與 events 的算式。

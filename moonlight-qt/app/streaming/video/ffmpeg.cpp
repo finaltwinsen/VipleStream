@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <vector>
 #include "ffmpeg.h"
 #include "bitstreamdump.h"
 #include "utils.h"
@@ -3199,6 +3200,43 @@ int FFmpegVideoDecoder::decoderThreadProcThunk(void *context)
 
 void FFmpegVideoDecoder::decoderThreadProc()
 {
+    // §VR-DECPOLL（量測，2026-10-11）：輸入交給解碼器之後多久才取到輸出。下面的迴圈在「沒有輸出、也沒有新輸入」時
+    // 睡 1 ms 再問，所以取到輸出的時刻是 1 ms 一格的；先有這個數字，之後要動輪詢的間隔才有基準。
+    // 只在 VR 走真 XR（m_VrDropOnMetaMiss）時統計，這條執行緒自己每 10 秒印一行；只量，流程不變。
+    struct {
+        uint64_t lastSubmitUs = 0;         // 最近一次 submitDecodeUnit() 返回的時刻（0＝還沒有）
+        uint64_t windowStartUs = 0;        // 這個 10 秒視窗的起點（0＝還沒開始）
+        std::vector<uint32_t> recvWaitUs;  // 這個視窗每一幀：取到輸出時，距最近一次送輸入多久
+        uint32_t polls = 0;                // 這個視窗：沒有輸出也沒有新輸入、去睡了幾次
+    } vrPoll;
+    // nowUs＝剛取到的那一幀的時刻；那一幀已經交出去之後才呼叫，排序與印 log 不佔它的時間
+    auto vrPollMaybeLog = [&vrPoll](uint64_t nowUs) {
+        if (vrPoll.windowStartUs == 0) {
+            vrPoll.windowStartUs = nowUs;
+            return;
+        }
+        if (nowUs - vrPoll.windowStartUs < 10000000ull) {
+            return;
+        }
+        std::vector<uint32_t>& v = vrPoll.recvWaitUs;
+        auto pct = [&v](double p) -> uint32_t {
+            if (v.empty()) {
+                return 0;
+            }
+            const size_t idx = (std::min)(v.size() - 1, (size_t)(p * (double)(v.size() - 1) + 0.5));
+            std::nth_element(v.begin(), v.begin() + (std::ptrdiff_t)idx, v.end());
+            return v[idx];
+        };
+        const uint32_t maxUs = v.empty() ? 0u : *std::max_element(v.begin(), v.end());
+        // pollUs＝輪詢的間隔（目前固定是 SDL_Delay(1)，印 0 表示沒有另外設）、mixed＝這個視窗裡間隔有沒有變過
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-DECPOLL] 10s frames=%u recvWait p50/p95/max=%u/%u/%u us polls=%u pollUs=0 mixed=0",
+                    (unsigned)v.size(), pct(0.50), pct(0.95), maxUs, vrPoll.polls);
+        vrPoll.windowStartUs = nowUs;
+        v.clear();
+        vrPoll.polls = 0;
+    };
+
     while (!SDL_AtomicGet(&m_DecoderThreadShouldQuit)) {
         if (m_FramesIn == m_FramesOut) {
             VIDEO_FRAME_HANDLE handle;
@@ -3213,7 +3251,11 @@ void FFmpegVideoDecoder::decoderThreadProc()
             }
 
             setDecPhase(DP_SUBMIT);
-            LiCompleteVideoFrame(handle, submitDecodeUnit(du));
+            const int submitStatus = submitDecodeUnit(du);
+            if (m_VrDropOnMetaMiss) {
+                vrPoll.lastSubmitUs = LiGetMicroseconds();  // §VR-DECPOLL
+            }
+            LiCompleteVideoFrame(handle, submitStatus);
         }
 
         if (m_FramesIn != m_FramesOut) {
@@ -3316,7 +3358,13 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     av_log_set_level(AV_LOG_INFO);
 
                     // Capture a frame timestamp to measuring pacing delay
-                    frame->pkt_dts = LiGetMicroseconds();
+                    const uint64_t receivedAtUs = LiGetMicroseconds();
+                    frame->pkt_dts = receivedAtUs;
+                    if (m_VrDropOnMetaMiss && vrPoll.lastSubmitUs != 0) {
+                        // §VR-DECPOLL：沿用上面那一次讀到的時鐘，不另外取
+                        vrPoll.recvWaitUs.push_back((uint32_t)(std::min<uint64_t>)(
+                            receivedAtUs > vrPoll.lastSubmitUs ? receivedAtUs - vrPoll.lastSubmitUs : 0, 0xffffffffu));
+                    }
 
                     if (!m_FrameInfoQueue.isEmpty()) {
                         // Data buffers in the DU are not valid here!
@@ -3405,6 +3453,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // Queue the frame for rendering (or render now if pacer is disabled)
                     setDecPhase(DP_TO_PACER);
                     m_Pacer->submitFrame(frame);
+                    if (m_VrDropOnMetaMiss) {
+                        vrPollMaybeLog(receivedAtUs);  // §VR-DECPOLL：這一幀已經交出去了
+                    }
                 }
                 else if (err == AVERROR(EAGAIN)) {
                     VIDEO_FRAME_HANDLE handle;
@@ -3415,12 +3466,19 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     if (LiPollNextVideoFrame(&handle, &du)) {
                         // FIXME: Handle EAGAIN on avcodec_send_packet() properly?
                         setDecPhase(DP_SUBMIT);
-                        LiCompleteVideoFrame(handle, submitDecodeUnit(du));
+                        const int submitStatus = submitDecodeUnit(du);
+                        if (m_VrDropOnMetaMiss) {
+                            vrPoll.lastSubmitUs = LiGetMicroseconds();  // §VR-DECPOLL
+                        }
+                        LiCompleteVideoFrame(handle, submitStatus);
                     }
                     else {
                         // No output data or input data. Let's wait a little bit.
                         // VIPLE §perf — was 2ms; 1ms halves EAGAIN polling latency
                         // at 120fps (8.3ms budget → 1ms = 12% vs 24%).
+                        if (m_VrDropOnMetaMiss) {
+                            vrPoll.polls++;  // §VR-DECPOLL
+                        }
                         SDL_Delay(1);
                     }
                 }
