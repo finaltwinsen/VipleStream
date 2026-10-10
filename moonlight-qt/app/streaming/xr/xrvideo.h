@@ -162,12 +162,15 @@ public:
         m_FovTanW.store(tanW, std::memory_order_relaxed);
         m_FovTanH.store(tanH, std::memory_order_relaxed);
     }
-    // §VR-FOVEA：a＝正前方的斜率（1＝關）、cxL／cxR／cy＝正前方在左右眼影像裡的位置（0–1，y 從上緣算）。XR thread 每幀設
-    void setFoveation(float a, float cxL, float cxR, float cy)
+    // §VR-FOVEA：a＝正前方的斜率（1＝關）、cxL／cxR、cyL／cyR＝正前方在左右眼影像裡的位置（0–1，y 從上緣算）。
+    // 兩眼的上下視角可以不同（Steam Frame 就是），host 是每眼照自己的中心壓縮的，所以垂直中心也要每眼各給一個。
+    // XR thread 每幀設
+    void setFoveation(float a, float cxL, float cxR, float cyL, float cyR)
     {
         m_FvCxL.store(cxL, std::memory_order_relaxed);
         m_FvCxR.store(cxR, std::memory_order_relaxed);
-        m_FvCy.store(cy, std::memory_order_relaxed);
+        m_FvCyL.store(cyL, std::memory_order_relaxed);
+        m_FvCyR.store(cyR, std::memory_order_relaxed);
         m_FvA.store(a, std::memory_order_relaxed);
     }
     // 暖機：XrContext bring-up 後、第一幀之前可呼叫（目前由 render thread 在第一幀自行處理）
@@ -198,7 +201,8 @@ private:
     // §VR-FOVEA：swapchain 裡一張影像的尺寸（還原後正前方的細節要有地方放，所以比解碼出來的影像大）
     void outputSize(int fw, int fh, int* ow, int* oh) const;
     bool ensureFull(int fw, int fh);
-    void loadFoveation(float fv[4]) const;
+    // fv＝(a, cxL, cxR, cyL)（shader 的 vec4 vs_fv）、*cyR＝右眼的垂直中心（shader 的 float vs_cyr）
+    void loadFoveation(float fv[4], float* cyR) const;
     bool renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh);
     void dumpTexture(pl_tex tex);
     // dev（--xr-dump-frame）：把 tex 讀回成縮過的影像（最長邊 ≤ 1280；失敗回空的影像）；saveDump 存檔並印一行。
@@ -239,7 +243,8 @@ private:
     std::atomic<float> m_FvA{1.0f};
     std::atomic<float> m_FvCxL{0.5f};
     std::atomic<float> m_FvCxR{0.5f};
-    std::atomic<float> m_FvCy{0.5f};
+    std::atomic<float> m_FvCyL{0.5f};
+    std::atomic<float> m_FvCyR{0.5f};
     bool m_UnwarpFailed = false;     // 還原的 shader 或材質失敗過：這個 session 改回直接畫（影像會是壓縮過的樣子）
     pl_tex m_Tex[4] = {};       // XR thread 的 map 材質
     pl_tex m_TestTex[4] = {};   // testMap 用（m_TestMutex）

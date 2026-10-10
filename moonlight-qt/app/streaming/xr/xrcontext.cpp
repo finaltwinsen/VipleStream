@@ -1742,17 +1742,21 @@ void XrContext::frameThreadMain()
                                       ? static_cast<uint32_t>((std::min<uint64_t>)(static_cast<uint64_t>(fs.predictedDisplayPeriod) / 1000ull, 0xffffffffu))
                                       : 0u;
         if (m_Video != nullptr && m_Options.pcvr) {
-            // §VR-FOVEA：正前方（tangent 0）在每隻眼影像裡的位置，和 host 合成器用同一組視角算
+            // §VR-FOVEA：正前方（tangent 0）在每隻眼影像裡的位置，和 host 合成器用同一組視角算。水平、垂直都是每眼
+            // 各自算（host 也是）：垂直原本只用左眼的上下視角，兩眼的上下視角不同時右眼會還原錯位置
+            // （見 xrvideo.cpp 的 kFovHeader）
             const int fpct = m_PcvrFoveaPct.load(std::memory_order_relaxed);
             if (fpct > 100 && fpct <= 250) {
                 const float l0 = std::tan(-m_Fov[0].angleLeft), r0 = std::tan(m_Fov[0].angleRight);
                 const float l1 = std::tan(-m_Fov[1].angleLeft), r1 = std::tan(m_Fov[1].angleRight);
-                const float up = std::tan(m_Fov[0].angleUp), dn = std::tan(-m_Fov[0].angleDown);
+                const float u0 = std::tan(m_Fov[0].angleUp), d0 = std::tan(-m_Fov[0].angleDown);
+                const float u1 = std::tan(m_Fov[1].angleUp), d1 = std::tan(-m_Fov[1].angleDown);
                 m_Video->setFoveation(100.0f / static_cast<float>(fpct), std::clamp(l0 / (l0 + r0), 0.05f, 0.95f),
-                                      std::clamp(l1 / (l1 + r1), 0.05f, 0.95f), std::clamp(up / (up + dn), 0.05f, 0.95f));
+                                      std::clamp(l1 / (l1 + r1), 0.05f, 0.95f), std::clamp(u0 / (u0 + d0), 0.05f, 0.95f),
+                                      std::clamp(u1 / (u1 + d1), 0.05f, 0.95f));
             }
             else {
-                m_Video->setFoveation(1.0f, 0.5f, 0.5f, 0.5f);
+                m_Video->setFoveation(1.0f, 0.5f, 0.5f, 0.5f, 0.5f);
             }
         }
         if (m_Video != nullptr && m_Options.pcvrSynth) {
