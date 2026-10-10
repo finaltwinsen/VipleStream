@@ -364,7 +364,7 @@ private:
             rank.prepare();
         }
         // 組出 [VIPLE-XR] 10s video 行尾的那一段。每個視窗掃一遍取分位數（xrphase::RankScan，不排序）；位置和
-        // takeStatsLine 既有的算法相同（p50＝第 n/2 個、p95＝第 n×95/100 個）。只用標準函式庫，可以單獨測
+        // takeStatsLine 既有的取法相同（p50＝第 n/2 個、p95＝第 n×95/100 個）。只用標準函式庫，可以單獨測
         //   mbox＝解碼幀在 mailbox 裡等多久；swWait＝xrWaitSwapchainImage、swNotOk＝它回的不是 XR_SUCCESS 的次數；
         //   rel＝xrReleaseSwapchainImage；sub／done＝送出（這張影像最後一筆 GPU 工作送出去）與 GPU 做完的相位；
         //   coll／queued＝送出的相位落在「做到一半會被合成器插隊」「排在合成器後面」那兩段的比例。
