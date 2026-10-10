@@ -174,6 +174,12 @@ int main(void) {
     memset(&s, 0, sizeof(s));
     for (i = 0; i < 30; i++) vrrrStallAdd(&s, 2000 + (uint32_t)i * 100, 1000000 + (uint64_t)i);
     EQ(vrrrStallHiUs(&s, 1000100), 4800);                                                               // S11
+    memset(&s, 0, sizeof(s));
+    vrrrStallAdd(&s, 2999, 1000000); vrrrStallAdd(&s, 2999, 1000001);
+    EQ(vrrrStallHiUs(&s, 1000002), 0);                                                                  // S12：短於 3 ms 的不記（記了這裡會是 2999）
+    EQ(vrrrIdleUs(VRRR_IDLE_LEARNED, &s, 1000002, 16666, 80), 3000);
+    vrrrStallAdd(&s, 3000, 1000002); vrrrStallAdd(&s, 3000, 1000003);
+    EQ(vrrrStallHiUs(&s, 1000004), 3000);                                                               //      剛好 3 ms 的要記
 
     // ── B：保險（連續失敗或失敗比例，有退避）──
     memset(&b, 0, sizeof(b));

@@ -270,6 +270,16 @@ TEST(VrRepairRtt, IdlePolicy) {
   EXPECT_EQ(vrrrStallHiUs(&s, 1400000), 4500u);
   EXPECT_EQ(vrrrStallHiUs(&s, 4150000), 4000u);  // 最舊兩筆過期
   EXPECT_EQ(vrrrIdleUs(VRRR_IDLE_LEARNED, &s, 9000000, 16666, 80), 3000u);
+
+  // 短於 3 ms 的不記：清空之後只加兩筆 2999，記了的話第二大會是 2999
+  std::memset(&s, 0, sizeof(s));
+  vrrrStallAdd(&s, 2999, 1000000);
+  vrrrStallAdd(&s, 2999, 1000001);
+  EXPECT_EQ(vrrrStallHiUs(&s, 1000002), 0u);
+  EXPECT_EQ(vrrrIdleUs(VRRR_IDLE_LEARNED, &s, 1000002, 16666, 80), 3000u);
+  vrrrStallAdd(&s, 3000, 1000002);  // 剛好 3 ms 的要記
+  vrrrStallAdd(&s, 3000, 1000003);
+  EXPECT_EQ(vrrrStallHiUs(&s, 1000004), 3000u);
 }
 
 // ── 保險 ───────────────────────────────────────────────────────────

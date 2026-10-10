@@ -5,7 +5,8 @@
 # 要和改動前逐字相同。golden_legacy.txt 是「改動前的佇列＋改動前寫在 VideoStream.c 接收迴圈裡的逐封包設定」
 # （sim_ref_inline）對 scenarios.py 那 2,844 個情境的輸出，每個情境一個 SHA-256。
 #
-#   python golden.py check             目前的佇列對 golden：sim_final（走 vrrrDecide）與 sim_final_inline（走原本那幾行）
+#   python golden.py check             目前的佇列對 golden：sim_final（走 vrrrDecide）、sim_final_inline（走原本那幾行），
+#                                        以及 sim_final 在 server 沒同意新規則時（mode=rtt nego=0：主開關關著的真實狀態）
 #   python golden.py three             不看 golden 檔，三個執行檔直接逐字比（要先 build.sh --ref <提交>）：
 #                                        A＝sim_ref_inline、B＝sim_ref（改動前的佇列＋vrrrDecide）、C＝sim_final
 #   python golden.py generate <提交>   用 sim_ref_inline 重新產生 golden_legacy.txt（<提交> 只是寫進檔頭的說明）
@@ -37,12 +38,18 @@ def need(*names):
                                                               " --ref <commit>" if any("ref" in n for n in missing) else ""))
 
 
-def run_all(names, sc):
+LEGACY = ["mode=legacy"]
+# host 的主開關關著（或舊 host）時的真實狀態：client 願意用新規則（mode=rtt），server 沒同意（nego=0）。
+# mode=legacy 對應的是另一種狀態——協商了、同場 A/B 輪到現行規則那一邊
+NOT_NEGOTIATED = ["mode=rtt", "nego=0"]
+
+
+def run_all(variants, sc):
+    """variants：[(執行檔名, 排在情境參數前面的參數), …]；回傳每個情境各個 variant 的時間軸"""
     jobs = []
     for kind, s in sc:
-        argv = ["mode=legacy"] + s.split()
-        for n in names:
-            jobs.append((exe(n), argv))
+        for n, pre in variants:
+            jobs.append((exe(n), pre + s.split()))
 
     def one(job):
         out, rc = S.run_sim(job[0], job[1])
@@ -52,7 +59,7 @@ def run_all(names, sc):
 
     with ThreadPoolExecutor(max_workers=12) as ex:
         outs = list(ex.map(one, jobs))
-    k = len(names)
+    k = len(variants)
     return [outs[i * k:(i + 1) * k] for i in range(len(sc))]
 
 
@@ -88,24 +95,27 @@ def cmd_check():
     gold = load_golden()
     if len(gold) != len(sc) or any((g[1], g[2]) != s for g, s in zip(gold, sc)):
         sys.exit("golden_legacy.txt does not match scenarios.py (count or order) - regenerate it")
-    rows = run_all(["sim_final", "sim_final_inline"], sc)
+    rows = run_all([("sim_final", LEGACY), ("sim_final_inline", LEGACY), ("sim_final", NOT_NEGOTIATED)], sc)
     stat = {}
     shown = 0
-    for i, ((kind, s), (h, _, _), (a, b)) in enumerate(zip(sc, gold, rows)):
-        st = stat.setdefault(kind, [0, 0, 0, 0])
+    for i, ((kind, s), (h, _, _), (a, b, c)) in enumerate(zip(sc, gold, rows)):
+        st = stat.setdefault(kind, [0, 0, 0, 0, 0])
         st[0] += 1
-        if a is None or b is None:
-            st[3] += 1
+        if a is None or b is None or c is None:
+            st[4] += 1
             continue
         bad_a = digest(a) != h
         bad_b = digest(b) != h
+        bad_c = digest(c) != h
         st[1] += bad_a
         st[2] += bad_b
-        if (bad_a or bad_b) and shown < 8:
+        st[3] += bad_c
+        if (bad_a or bad_b or bad_c) and shown < 8:
             shown += 1
-            print("DIFF #%d (%s)%s%s: %s" % (i + 1, kind, " sim_final" if bad_a else "", " sim_final_inline" if bad_b else "", s))
-    tot = table(stat, ["sim_final ≠ golden", "sim_final_inline ≠ golden"])
-    ok = tot[1] == 0 and tot[2] == 0 and tot[3] == 0
+            print("DIFF #%d (%s)%s%s%s: %s" % (i + 1, kind, " sim_final" if bad_a else "", " sim_final_inline" if bad_b else "",
+                                            " sim_final(mode=rtt nego=0)" if bad_c else "", s))
+    tot = table(stat, ["sim_final ≠ golden", "sim_final_inline ≠ golden", "沒協商（mode=rtt nego=0）≠ golden"])
+    ok = tot[1] == 0 and tot[2] == 0 and tot[3] == 0 and tot[4] == 0
     print("golden check: %s（%d 個情境）" % ("PASS" if ok else "FAIL", tot[0]))
     return 0 if ok else 1
 
@@ -113,7 +123,7 @@ def cmd_check():
 def cmd_three():
     need("sim_ref_inline", "sim_ref", "sim_final")
     sc = S.scenarios()
-    rows = run_all(["sim_ref_inline", "sim_ref", "sim_final"], sc)
+    rows = run_all([("sim_ref_inline", LEGACY), ("sim_ref", LEGACY), ("sim_final", LEGACY)], sc)
     stat = {}
     shown = 0
     lost = nack = 0
@@ -142,7 +152,7 @@ def cmd_three():
 def cmd_generate(ref):
     need("sim_ref_inline")
     sc = S.scenarios()
-    rows = run_all(["sim_ref_inline"], sc)
+    rows = run_all([("sim_ref_inline", LEGACY)], sc)
     if any(r[0] is None for r in rows):
         sys.exit("some scenarios did not finish")
     with open(GOLDEN, "w", encoding="utf-8", newline="\n") as f:
@@ -159,7 +169,7 @@ def cmd_diff(index):
     need("sim_ref_inline", "sim_final")
     sc = S.scenarios()
     kind, s = sc[index - 1]
-    (a, c), = run_all(["sim_ref_inline", "sim_final"], [(kind, s)])
+    (a, c), = run_all([("sim_ref_inline", LEGACY), ("sim_final", LEGACY)], [(kind, s)])
     print("#%d (%s): %s" % (index, kind, s))
     if a is None or c is None:
         print("did not finish")

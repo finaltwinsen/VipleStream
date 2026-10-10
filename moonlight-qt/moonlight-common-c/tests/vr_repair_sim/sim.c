@@ -8,6 +8,8 @@
 //   1. 「開關關著時逐步相同」：現行規則下整份時間軸（含佇列印的每一行 log）要和改動前的佇列逐字相同（golden.py）；
 //   2. 亂數情境的不變式（fuzz.py）、逐項情境（scen.py）、行為表（matrix.py）。
 // 假時鐘每讀一次前進 1 µs：佇列多讀一次時鐘，時間軸就會不同（改動不可以在現行規則的路徑上多讀時鐘）。
+// 代價是「同一微秒」的邊界永遠走不到（真的時鐘連讀兩次可以拿到同一個值）：clock=0 讓時鐘只跟著事件前進，同一批
+// 事件拿到同一個時刻，fuzz.py 的 frozen 用它再跑一遍不變式。
 //
 // 編譯開關（build.sh 會用到）：
 //   -DSIM_QUEUE_ORIG   佇列是還沒有 §VR-REPAIR-RTT 欄位的版本（從某個舊提交取出來產生 golden 用）
@@ -15,6 +17,9 @@
 //
 // 參數（key=value，可重複的有 drop／gap／pause／sched）：
 //   mode=legacy|rtt          現行規則／§VR-REPAIR-RTT（對應 vrrrDecide 的 armRtt）
+//   nego=1|0                 server 有沒有同意 VIPLE_VR_LINK_F_REPAIR_RTT（預設 1）。0＝host 的主開關關著或舊 host：
+//                            mode=rtt 也只會照現行規則（golden.py 拿 mode=rtt nego=0 再對一次 golden）
+//   clock=1|0                假時鐘每讀一次前進幾 µs（預設 1；0＝只跟著事件前進，見上面）
 //   fps=120 rtt=12           串流的更新率、真實的往返時間（ms；上下行各一半）
 //   est=lo:mid:hi            client 手上的往返估計（ms）；預設＝真實值
 //   D=6 blocks=1 fec=40      每個 FEC block 的 data shard 數、每幀幾個 block、FEC 百分比
@@ -23,8 +28,14 @@
 //   repairloss=N             前 N 輪補包在路上全掉
 //   capms=N idle=… ahead=0|1 等待上限（0＝自動）、「多久沒有新封包才回報」的做法、後面整幀沒到的幀要不要一起報
 //   links=2 lag2=5           兩條連線（每個封包各一份）、第二條晚幾毫秒
+//   carrymask=N              哪幾條連線被算成「正在送影像」（bit0＝第一條、bit1＝第二條；預設＝每條都算）。
+//                            links=2 carrymask=2＝第一條是剛開始送、或探測中的連線：有封包來，但還沒被算進去
 //   drop=F:a-b[,F:a-b…]      第一條連線上第 F 幀的第 a～b 個封包掉了；drop2＝第二條
 //   gap=a:b                  下行在相對原點 a～b ms 之間到達的封包全掉；gap2＝第二條；upgap＝上行（回報）
+//   burst=a:b:pct            下行在相對原點 a～b ms 之間到達的封包各以 pct% 的機率掉（成串掉包：連續好幾幀各缺一部分）；
+//                            補包也算。掉不掉由（seed、連線、幀、shard、第幾次送）的雜湊決定，所以同一個封包在兩種規則下
+//                            抽到同一個結果；burst2＝第二條
+//   seed=N                   burst 用的種子（預設 1）
 //   pause=F:k:ms             第 F 幀從第 k 個封包起整個往後延 ms（鏈路停頓，不是掉包）
 //   sched=ms:kind:val        相對原點 ms 的時刻切換：kind 0＝規則（0 現行／1 RTT）、1＝「兩條在送」、2＝估計 hi、
 //                            3＝估計 mid、4＝保險暫停（1）／恢復（0）、5＝估計 lo
@@ -44,7 +55,12 @@ CONNECTION_LISTENER_CALLBACKS ListenerCallbacks;
 
 static uint64_t g_now;
 static uint64_t g_t0;
-uint64_t PltGetMicroseconds(void) { return g_now++; }
+static int P_clockStep = 1;         // 假時鐘每讀一次前進幾 µs（clock=）
+uint64_t PltGetMicroseconds(void) {
+    const uint64_t t = g_now;
+    g_now += (uint64_t) P_clockStep;
+    return t;
+}
 
 static int P_quiet = 0;
 static double rel(uint64_t t) { return ((double) t - (double) g_t0) / 1000.0; }
@@ -77,6 +93,8 @@ int srv_on_nack(const uint8_t* body, size_t len, int64_t now_ns, int rtt_ms10, i
 
 // ── 參數 ──
 static int P_mode = 0;              // 0＝現行規則、1＝§VR-REPAIR-RTT
+static int P_nego = 1;              // server 同意了 VIPLE_VR_LINK_F_REPAIR_RTT（0＝主開關關著或舊 host）
+static uint32_t P_seed = 1;         // burst 的種子
 static int P_fps = 120;
 static double P_rttMs = 12.0;       // 真實往返（上下行各一半）
 static double P_estLo = -1, P_estMid = -1, P_estHi = -1;  // client 手上的估計（ms）；預設＝真實值
@@ -95,6 +113,7 @@ static int P_ahead = 1;             // 後面整幀沒到的幀一起回報
 static int P_idle = 0;              // VRRR_IDLE_*
 static int P_links = 1;             // 1 或 2
 static double P_lag2Ms = 0;         // 第二條連線每個封包晚多久
+static int P_carryMask = 0;         // 非 0＝指定哪幾條連線被算成在送影像（carrymask=）
 // 時間表（相對原點的毫秒）：kind 見檔頭
 static struct { double ms; int kind; double val; } g_sched[32];
 static int g_schedCount;
@@ -122,6 +141,11 @@ static int g_pauseCount;
 typedef struct { uint64_t a, b; } GAP;
 static GAP g_downGap[2][MAXGAP], g_upGap[8];
 static int g_downGapCount[2], g_upGapCount;
+#define MAXBURST 8
+typedef struct { uint64_t a, b; double p; } BURST;
+static BURST g_burst[2][MAXBURST];
+static int g_burstCount[2];
+static uint8_t g_txCount[MAXF + 1][1024];   // 每個 shard 補送過幾次（第一次送算第 0 次；burst 用它決定這一次掉不掉）
 
 enum { EV_PKT = 1, EV_GONE = 2 };
 typedef struct {
@@ -156,6 +180,26 @@ static int inGap(const GAP* g, int count, uint64_t t) {
     return 0;
 }
 
+// 不帶狀態的雜湊（0～1）：同一個（種子、連線、幀、shard、第幾次送）不管照哪一套規則都抽到同一個結果
+static double burstRoll(int link, uint32_t frame, int shard, int nth) {
+    uint64_t z = ((uint64_t) P_seed << 44) ^ ((uint64_t) (unsigned) link << 40) ^ ((uint64_t) frame << 24) ^ ((uint64_t) (unsigned) shard << 8) ^
+                 (uint64_t) (unsigned) nth;
+    z += 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z ^= z >> 31;
+    return (double) (z >> 11) * (1.0 / 9007199254740992.0);
+}
+
+// 在 t 到達的這個封包落在成串掉包的時段裡、而且抽到「掉」
+static int inBurst(int link, uint64_t t, uint32_t frame, int shard, int nth) {
+    int i;
+    for (i = 0; i < g_burstCount[link]; i++) {
+        if (t >= g_burst[link][i].a && t < g_burst[link][i].b && burstRoll(link, frame, shard, nth) < g_burst[link][i].p) return 1;
+    }
+    return 0;
+}
+
 static RTP_VIDEO_QUEUE q;
 static uint32_t g_mlHoldUs;
 static int g_nackRound;
@@ -169,6 +213,23 @@ static VRRR_STATE g_state;
 #endif
 #ifndef SIM_QUEUE_ORIG
 static uint32_t g_seenOk, g_seenBad;
+// LATCH 的靜默（VideoStream.c 的 rrNoteDelayedRelease）：接收迴圈每圈看一次佇列的 mlDelayedReleaseUs，變了就記下時刻，
+// XR 那一側之後 60 ms 不拿新影像更新 LATCH 樣本。這裡數觸發幾次、靜默合起來多久（重疊的只算一次），印在 TOTALS
+#define SIM_LATCH_QUIET_US 60000
+static uint64_t g_seenDelayedUs, g_quietUntilUs, g_quietTotalUs;
+static int g_delayedReleases;
+
+static void noteDelayedRelease(void) {
+    if (q.mlDelayedReleaseUs != 0 && q.mlDelayedReleaseUs != g_seenDelayedUs) {
+        g_seenDelayedUs = q.mlDelayedReleaseUs;
+        g_delayedReleases++;
+        g_quietTotalUs += g_now >= g_quietUntilUs ? SIM_LATCH_QUIET_US : g_now + SIM_LATCH_QUIET_US - g_quietUntilUs;
+        g_quietUntilUs = g_now + SIM_LATCH_QUIET_US;
+        logAt("(LATCH) 被補包拖晚的幀放行了：之後 %d ms 不取 LATCH 樣本\n", SIM_LATCH_QUIET_US / 1000);
+    }
+}
+#else
+static void noteDelayedRelease(void) {}
 #endif
 
 static void applySched(void) {
@@ -192,12 +253,18 @@ static void applySched(void) {
 // VideoStream.c 接收迴圈裡「每個封包的決定」那一段
 static void setQueueFields(int rxLink) {
     const uint32_t T = 1000000u / (uint32_t) P_fps;
-    const int carrying = (P_links >= 2 || g_forceDual) ? 2 : 1;
     const int repairRttMs = (int) (P_estMid + 0.999);   // vrmlCtrlRttMs()：最近一筆、無條件進位
+    // 「幾條在送」在套用時間表之前算（時間表切換的「兩條在送」要到下一個封包才生效；golden 的時間軸是照這個順序產生的）
+    int carrying = (P_links >= 2 || g_forceDual) ? 2 : 1;
+    int mask = carrying >= 2 ? 3 : 1;
     int ml;
+    if (P_carryMask != 0 && !g_forceDual) {
+        mask = P_carryMask & 3;
+        carrying = (mask & 1) + ((mask >> 1) & 1);
+    }
     applySched();
     q.multiLink = true;
-    q.mlCarryMask = (uint8_t) (carrying >= 2 ? 3 : 1);
+    q.mlCarryMask = (uint8_t) mask;
 #ifdef LEGACY_INLINE
     // ── 從改動前的 VideoStream.c 原樣搬來 ──
     q.mlHoldDual = carrying >= 2;
@@ -219,9 +286,9 @@ static void setQueueFields(int rxLink) {
         {
             // 上一個封包（與它之後的逾時處理）是照 RTT 規則跑的，那段時間的結果才交給保險
             const bool prevRtt = q.mlRttMode;
-            in.negotiatedRtt = true;
+            in.negotiatedRtt = P_nego != 0;
             in.armRtt = P_mode == 1;
-            in.latched = RtpvRepairLatched(&q);
+            in.latched = in.negotiatedRtt && RtpvRepairLatched(&q);
             in.okDelta = prevRtt ? q.mlTot.repairedUsed - g_seenOk : 0;
             in.badDelta = prevRtt ? q.mlTot.lostNacked - g_seenBad : 0;
             g_seenOk = q.mlTot.repairedUsed;
@@ -230,7 +297,7 @@ static void setQueueFields(int rxLink) {
 #endif
         in.carrying = carrying;
         in.legacyRttMs = repairRttMs;
-        in.haveStats = true;
+        in.haveStats = in.negotiatedRtt;   // VideoStream.c：沒協商就不算（SIM_QUEUE_ORIG 時 negotiatedRtt 恆為 false）
         in.st.loUs = (uint32_t) (P_estLo * 1000.0);
         in.st.midUs = (uint32_t) (P_estMid * 1000.0);
         in.st.hiUs = (uint32_t) (P_estHi * 1000.0);
@@ -353,13 +420,18 @@ int vrmlSendCtrl(const unsigned char* tlv, int length) {
 #ifdef SIM_QUEUE_ORIG
                     0,
 #else
-                    1,
+                    P_nego != 0,
 #endif
                     shards, &needed, &ageMs, &round, why, sizeof(why));
     if (!P_quiet) printf("  %*s (模型) server %+.2f 收到：block 年齡 %.1f ms、第 %d 輪 → %s\n", 13, "", rel(ts), ageMs, round, why);
     if (r > 0) {
+        uint8_t nth[256];   // 這一輪是每個 shard 的第幾次補送（burst 用）
         g_nackRound++;
         g_repairPkts += r;
+        for (i = 0; i < r && i < 256; i++) {
+            const int fs = (int) n.block * (n.frame <= MAXF ? F[n.frame].bt : 0) + shards[i];
+            nth[i] = (n.frame <= MAXF && fs < 1024) ? ++g_txCount[n.frame][fs] : 1;
+        }
         if (g_nackRound <= P_repairLoss) {
             if (!P_quiet) printf("  %*s (模型) 這一輪補包在路上全掉（repairloss）\n", 13, "");
         } else {
@@ -369,8 +441,9 @@ int vrmlSendCtrl(const unsigned char* tlv, int length) {
                 const uint64_t lagUs = l == 1 ? (uint64_t) (P_lag2Ms * 1000.0) : 0;
                 for (i = 0; i < r; i++) {
                     const uint64_t ta = tb + lagUs + (uint64_t) i * (uint64_t) P_spacingUs;
-                    if (inGap(g_downGap[l], g_downGapCount[l], ta)) continue;
-                    evAdd(ta, EV_PKT, n.frame, (int) n.block * (n.frame <= MAXF ? F[n.frame].bt : 0) + shards[i], 1, l);
+                    const int fs = (int) n.block * (n.frame <= MAXF ? F[n.frame].bt : 0) + shards[i];
+                    if (inGap(g_downGap[l], g_downGapCount[l], ta) || inBurst(l, ta, n.frame, fs, nth[i])) continue;
+                    evAdd(ta, EV_PKT, n.frame, fs, 1, l);
                     kept++;
                 }
             }
@@ -407,7 +480,9 @@ static void buildFrame(int n, uint16_t lowseq, uint64_t sendUs) {
             nv->frameIndex = (uint32_t) n;
             nv->streamPacketIndex = ((uint32_t) lowseq + (uint32_t) (b * bt + x)) << 8;
             nv->multiFecFlags = 0x10;
-            nv->flags = FLAG_CONTAINS_PIC_DATA | ((b == 0 && x == 0) ? FLAG_SOF : 0) | ((b == P_blocks - 1 && x == D - 1) ? FLAG_EOF : 0);
+            // 和 Sunshine 一樣（stream.cpp）：每個 FEC block 的第一個 data 帶 SOF、最後一個帶 EOF。佇列對 FEC 還原出來的封包
+            // 會檢查這兩個旗標，只在整幀頭尾帶的話，還原出非第一個 block 的第 0 個 shard 會被當成壞包
+            nv->flags = FLAG_CONTAINS_PIC_DATA | (x == 0 ? FLAG_SOF : 0) | (x == D - 1 ? FLAG_EOF : 0);
             memset(sp[x] + 32, 0x40 + (x & 0x3f), (size_t) g_blocksize - 32);
         }
         if (par > 0) {
@@ -455,6 +530,7 @@ static void deliver(const EVENT* e) {
               st == RTPF_RET_QUEUED ? "採用" : (st == RTPF_RET_HELD ? "排隊" : "被拒收（那一幀已經放棄或收齊）"));
     }
     if (st == RTPF_RET_REJECTED) free(buffer);
+    noteDelayedRelease();
 }
 
 static void parseDrop(const char* s, int link) {
@@ -473,11 +549,18 @@ int main(int argc, char** argv) {
     int i, x, l;
     uint64_t T, down;
     const char* title = "";
-    static double gapA[2][MAXGAP], gapB[2][MAXGAP], upA[8], upB[8];
-    int nGap[2] = {0, 0}, nUp = 0;
+    static double gapA[2][MAXGAP], gapB[2][MAXGAP], upA[8], upB[8], burstA[2][MAXBURST], burstB[2][MAXBURST], burstP[2][MAXBURST];
+    int nGap[2] = {0, 0}, nUp = 0, nBurst[2] = {0, 0};
     for (i = 1; i < argc; i++) {
         const char* a = argv[i];
         if (!strncmp(a, "mode=", 5)) P_mode = !strcmp(a + 5, "rtt") ? 1 : 0;
+        else if (!strncmp(a, "nego=", 5)) P_nego = atoi(a + 5) != 0;
+        else if (!strncmp(a, "clock=", 6)) P_clockStep = atoi(a + 6) != 0;
+        else if (!strncmp(a, "seed=", 5)) P_seed = (uint32_t) strtoul(a + 5, NULL, 10);
+        else if (!strncmp(a, "burst=", 6) || !strncmp(a, "burst2=", 7)) {
+            const int l = a[5] == '2';
+            if (nBurst[l] < MAXBURST && sscanf(strchr(a, '=') + 1, "%lf:%lf:%lf", &burstA[l][nBurst[l]], &burstB[l][nBurst[l]], &burstP[l][nBurst[l]]) == 3) nBurst[l]++;
+        }
         else if (!strncmp(a, "fps=", 4)) P_fps = atoi(a + 4);
         else if (!strncmp(a, "rtt=", 4)) P_rttMs = atof(a + 4);
         else if (!strncmp(a, "est=", 4)) { sscanf(a + 4, "%lf:%lf:%lf", &P_estLo, &P_estMid, &P_estHi); }
@@ -495,6 +578,7 @@ int main(int argc, char** argv) {
         else if (!strncmp(a, "idle=", 5)) P_idle = !strcmp(a + 5, "fixed") ? 1 : !strcmp(a + 5, "frame") ? 2 : !strcmp(a + 5, "learned") ? 3 : !strcmp(a + 5, "size") ? 4 : atoi(a + 5);
         else if (!strncmp(a, "links=", 6)) P_links = atoi(a + 6);
         else if (!strncmp(a, "lag2=", 5)) P_lag2Ms = atof(a + 5);
+        else if (!strncmp(a, "carrymask=", 10)) P_carryMask = atoi(a + 10);
         else if (!strncmp(a, "quiet=", 6)) P_quiet = atoi(a + 6);
         else if (!strncmp(a, "drop=", 5)) parseDrop(a + 5, 0);
         else if (!strncmp(a, "drop2=", 6)) parseDrop(a + 6, 1);
@@ -558,6 +642,12 @@ int main(int argc, char** argv) {
             g_downGap[l][i].b = g_t0 + (uint64_t) (int64_t) (gapB[l][i] * 1000.0);
         }
         g_downGapCount[l] = nGap[l];
+        for (i = 0; i < nBurst[l]; i++) {
+            g_burst[l][i].a = g_t0 + (uint64_t) (int64_t) (burstA[l][i] * 1000.0);
+            g_burst[l][i].b = g_t0 + (uint64_t) (int64_t) (burstB[l][i] * 1000.0);
+            g_burst[l][i].p = burstP[l][i] / 100.0;
+        }
+        g_burstCount[l] = nBurst[l];
     }
     for (i = 0; i < nUp; i++) { g_upGap[i].a = g_t0 + (uint64_t) (int64_t) (upA[i] * 1000.0); g_upGap[i].b = g_t0 + (uint64_t) (int64_t) (upB[i] * 1000.0); }
     g_upGapCount = nUp;
@@ -578,7 +668,7 @@ int main(int argc, char** argv) {
                 }
                 lastTa = ta;
                 if (l == 0 && ta > F[i].ownUs) F[i].ownUs = ta;
-                if (g_drop[l][i][x] || inGap(g_downGap[l], g_downGapCount[l], ta)) {
+                if (g_drop[l][i][x] || inGap(g_downGap[l], g_downGapCount[l], ta) || inBurst(l, ta, (uint32_t) i, x, 0)) {
                     if (l == 0) { F[i].dropped++; if (!isPar) F[i].lost |= 2; }
                     continue;
                 }
@@ -591,7 +681,7 @@ int main(int argc, char** argv) {
     if (!P_quiet) {
         printf("== %s\n", title);
         printf("   %s｜%d Hz（幀週期 %.2f ms）、真實往返 %.1f ms、client 估計 lo/mid/hi=%.1f/%.1f/%.1f ms；每幀 %d×(%d data＋%d parity)；連線 %d 條；mlRepair=%d mlHoldMaxUs=%u",
-               P_mode ? "§VR-REPAIR-RTT" : "現行規則", P_fps, T / 1000.0, P_rttMs, P_estLo, P_estMid, P_estHi, P_blocks, F[1].D, F[1].P, P_links,
+               (P_mode && P_nego) ? "§VR-REPAIR-RTT" : "現行規則", P_fps, T / 1000.0, P_rttMs, P_estLo, P_estMid, P_estHi, P_blocks, F[1].D, F[1].P, P_links,
                (int) q.mlRepair, q.mlHoldMaxUs);
 #ifndef SIM_QUEUE_ORIG
         if (q.mlRttMode) printf(" eta=%.2f try=%.2f fast=%.2f cap=%.1f ms idle=%d", q.mlRepairEtaUs / 1000.0, q.mlRepairEtaTryUs / 1000.0,
@@ -614,6 +704,7 @@ int main(int argc, char** argv) {
                 logAt("REPAIR_GONE 到（frame=%u block=%d）→ RtpvRepairGone\n", e.frame, e.shard);
                 setQueueFields(0);
                 RtpvRepairGone(&q, e.frame, (uint8_t) e.shard);
+                noteDelayedRelease();
             } else {
                 i++;
             }
@@ -640,6 +731,7 @@ int main(int argc, char** argv) {
             if (pollMs > 0) {
                 setQueueFields(0);
                 RtpvPollHold(&q);
+                noteDelayedRelease();
             }
         }
         if (g_now > F[P_frames].sendUs + 400000ull) break;
@@ -656,12 +748,15 @@ int main(int argc, char** argv) {
            g_firstWaveDone ? rel(g_firstWaveDone) : -1.0, g_firstLossUs ? rel(g_firstLossUs) : -1.0, g_trips);
 #ifndef SIM_QUEUE_ORIG
     // 佇列的累計數（另一行：和改動前的佇列比時間軸時不比這一行）
+    // latchQuiet＝LATCH 靜默觸發幾次；quietMs＝靜默合起來多久（見 noteDelayedRelease）；fix＝回報之後收齊的 block 數、
+    // fixMaxMs＝第一份回報到收齊最久的一次
     printf("TOTALS nack=%u repaired=%u repairedUsed=%u used=%u spurious=%u lost=%u lostNacked=%u lostUnasked=%u lostWhole=%u late=%u afterLoss=%u"
-           " tooMany=%u ahead=%u lateDone=%u/%u/%u/%u/%u lateNever=%u stall=%u/%u/%u/%u/%u\n",
+           " tooMany=%u ahead=%u lateDone=%u/%u/%u/%u/%u lateNever=%u stall=%u/%u/%u/%u/%u latchQuiet=%d quietMs=%.1f fix=%u fixMaxMs=%.1f\n",
            q.mlTot.nack, q.mlTot.repaired, q.mlTot.repairedUsed, q.mlTot.used, q.mlTot.spurious, q.mlTot.lost, q.mlTot.lostNacked,
            q.mlTot.lostUnasked, q.mlTot.lostWhole, q.mlTot.late, q.mlTot.afterLoss, q.mlTot.tooMany, q.mlTot.ahead,
            q.mlTot.lateDone[0], q.mlTot.lateDone[1], q.mlTot.lateDone[2], q.mlTot.lateDone[3], q.mlTot.lateDone[4], q.mlTot.lateNever,
-           q.mlTot.stall[0], q.mlTot.stall[1], q.mlTot.stall[2], q.mlTot.stall[3], q.mlTot.stall[4]);
+           q.mlTot.stall[0], q.mlTot.stall[1], q.mlTot.stall[2], q.mlTot.stall[3], q.mlTot.stall[4],
+           g_delayedReleases, g_quietTotalUs / 1000.0, q.mlTot.fixCount, q.mlTot.fixUsMax / 1000.0);
 #endif
     return 0;
 }

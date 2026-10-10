@@ -30,9 +30,9 @@ bash run_tests.sh --mutate        # 最後再跑變異測試，約多 10～15 �
 | 指令 | 內容 |
 |---|---|
 | `bash build.sh` | 編模擬器（`sim_final`、`sim_final_inline`）與 `VrRepairRtt.h` 的單元測試 |
-| `build/test_vrrr`、`build/test_vrrr_cpp` | `VrRepairRtt.h` 的單元測試，同一份原始碼以 C 與 C++ 各編一次（1,983 項檢查） |
-| `python golden.py check` | 現行規則對 golden：2,844 個情境的時間軸逐字相同 |
-| `python fuzz.py all` | 亂數情境的不變式（1,800 個），並和 `fuzz_expected.txt` 比 |
+| `build/test_vrrr`、`build/test_vrrr_cpp` | `VrRepairRtt.h` 的單元測試，同一份原始碼以 C 與 C++ 各編一次（1,986 項檢查） |
+| `python golden.py check` | 現行規則對 golden：2,844 個情境的時間軸逐字相同（三種跑法，見下面） |
+| `python fuzz.py all` | 亂數情境的不變式（2,500 個），並和 `fuzz_expected.txt` 比 |
 | `python scen.py` | 逐項情境（設計審查時的每一個反例），和 `scen_expected.txt` 逐字比 |
 | `python matrix.py` | 行為表（往返 × 掉法），和 `matrix_expected.txt` 逐字比 |
 | `bash srv_gtest.sh` | server 這一側的 googletest 獨立編譯並執行（見下面） |
@@ -58,10 +58,14 @@ bash run_tests.sh --mutate        # 最後再跑變異測試，約多 10～15 �
 假時鐘每讀一次前進 1 µs，所以佇列在現行規則的路徑上只要多讀一次時鐘、多印一行、早一步回報，時間軸就不同。
 `golden_legacy.txt` 是「改動前的佇列＋改動前寫在 `VideoStream.c` 接收迴圈裡的逐封包設定」對 2,844 個情境的輸出
 （每個情境一個 SHA-256）：單一連線 1,080 個、強制「兩條在送」旗標 660 個、真正兩條連線 720 個、每幀 2～4 個 FEC
-block 288 個、多 block＋兩條連線 96 個；其中 1,122 個有放棄的幀、1,831 個有回報。
+block 288 個、多 block＋兩條連線 96 個；其中 1,082 個有放棄的幀、1,821 個有回報。
 
-`golden.py check` 拿現在的佇列比兩次：`sim_final`（每個封包的決定走 `vrrrDecide()`，和現在的 `VideoStream.c` 一樣）與
-`sim_final_inline`（決定用原樣搬來的舊算式）。兩個都要和 golden 完全相同。
+`golden.py check` 拿現在的佇列比三次，三個都要和 golden 完全相同：
+
+- `sim_final mode=legacy`：每個封包的決定走 `vrrrDecide()`（和現在的 `VideoStream.c` 一樣），協商了新規則、但這一刻
+  輪到現行規則那一邊（同場 A/B 的狀態）；
+- `sim_final_inline mode=legacy`：決定用原樣搬來的舊算式；
+- `sim_final mode=rtt nego=0`：client 願意用新規則、server 沒同意——host 的主開關關著（或舊 host）時真正的狀態。
 
 不想相信 golden 檔的時候，直接和改動前的原始碼比（`4028b316` 是佇列還沒有 §VR-REPAIR-RTT 的提交，golden 就是從它
 產生的）：
@@ -81,7 +85,14 @@ golden 是在 Windows（MSYS2 ucrt64 的 gcc）產生的。別的平台若因為
 - **單元測試**（`test_vrrr.c`）：往返視窗、三個估計、等待上限、門檻與遲滯、重報、期限、放棄後的暫停、預先回報的
   上限、idle 的做法、保險、每個封包的決定（含現行那一支對舊算式的窮舉、規則切換）。
 - **亂數不變式**（`fuzz.py`）：不當掉、不卡住；第一條連線上沒掉任何封包的幀一定收齊；它被補包機制壓住不超過
-  「等待上限＋2 ms」。四種產生器共 1,800 個情境，違反數要是 0。另外印出和現行規則的對照，固定種子下是確定的。
+  「等待上限＋2 ms」。六種產生器共 2,500 個情境，違反數要是 0。另外印出和現行規則的對照，固定種子下是確定的。
+  - `design`／`judge`／`toggle`／`multi`：指定「哪幾幀掉一段」、空白、停頓、估計值脫鉤、途中切換規則、多 block 與兩條連線。
+  - `burst`：成串掉包——一到三段、每段 30～300 ms、段內逐包掉 3～45%，連續好幾幀各缺一部分（補包也照掉）。前四種
+    做不出這種情境；現行規則本來有效的條件（區網、60～90 Hz）佔多數，對照另外依條件分組印。
+  - `frozen`：`judge` 的情境，假時鐘不自動前進（`clock=0`）。平常每讀一次時鐘前進 1 µs，「同一微秒」的邊界永遠
+    走不到；真的時鐘連讀兩次可以拿到同一個值。只拿來檢查不變式，逐項情境不用它逐字比：時鐘不前進時 RTT 規則
+    的結果只差在時間欄位的進位，但現行規則的「退還」（回報的時刻要晚於上一個封包到達的時刻，`nkNoteArrival`）
+    在同一微秒不成立，回報的份數會比平常少。
 - **逐項情境**（`scen.py`）：估計值偏低、補包那一輪掉了、估計取錯連線、目前的 block 先報過後面才發現整幀沒到、長空白、
   幀內停頓、規則切換的那一刻、整段空白與 60 Hz、保險、放棄之後的暫停、預先報的幀收到 `REPAIR_GONE`。
 - **行為表**（`matrix.py`）：往返 5～50 ms × 幾種掉法，現行規則與新規則各跑一次。
