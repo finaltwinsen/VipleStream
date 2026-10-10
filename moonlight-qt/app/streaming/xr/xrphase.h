@@ -171,9 +171,9 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
     }
     {
         const uint32_t a = deferWaitUs(1500, 700, 5300), b = deferWaitUs(600, 700, 5300), c = deferWaitUs(5300, 700, 5300),
-                       d = deferWaitUs(5299, 700, 5300);
-        std::snprintf(buf, sizeof(buf), "1500 -> %u, 600 -> %u, 5300 -> %u, 5299 -> %u", a, b, c, d);
-        caseDone("phase-defer-wait", a == 3800 && b == 0 && c == 0 && d == 1, buf);
+                       d = deferWaitUs(5299, 700, 5300), e = deferWaitUs(700, 700, 5300);
+        std::snprintf(buf, sizeof(buf), "1500 -> %u, 600 -> %u, 5300 -> %u, 5299 -> %u, 700 -> %u", a, b, c, d, e);
+        caseDone("phase-defer-wait", a == 3800 && b == 0 && c == 0 && d == 1 && e == 4600, buf);
     }
     {
         // 兩個方向互為反函數（120 Hz 的整個週期，以及別的更新率——那裡的數字沒有物理意義，但換算不可以出界）
