@@ -78,6 +78,7 @@ HEADERS += \
     $$COMMON_C_DIR/src/Limelight.h \
     $$COMMON_C_DIR/src/VipleVr.h \
     $$COMMON_C_DIR/src/VrMultiLink.h \
+    $$COMMON_C_DIR/src/VrRepairRtt.h \
     $$COMMON_C_DIR/src/HolePunch.h \
     $$COMMON_C_DIR/src/UdpTunnel.h
 INCLUDEPATH += \

@@ -87,6 +87,7 @@ extern "C" {
 #define VIPLE_VR_SF_RECOVERY_INTRA  0x02  // recovery=intra：掉幀送 LOSS，不等 IDR
 #define VIPLE_VR_SF_MULTILINK       0x04  // §VR-MULTILINK：server 在 <VipleStreamVRSession> 回了 multilink=1
 #define VIPLE_VR_SF_MULTILINK_SELFTEST 0x08  // dev：同一張網卡再開一條連線，用單一網卡驗複製與去重
+#define VIPLE_VR_SF_REPAIR_RTT      0x10  // §VR-REPAIR-RTT：client 願意用（只在本機用：決定 LINK_HELLO 帶不帶 VIPLE_VR_LINK_F_REPAIR_RTT）
 
 // ── 控制通道（§4.1、§4.3）──────────────────────────────────────────
 
@@ -398,6 +399,8 @@ typedef struct _VIPLE_VR_TLV_STATS {
 #define VIPLE_VR_LINK_F_CTRL     0x01  // §VR-LINK-CTRL：時間敏感的控制訊息走連線。C→S 的 LOSS／LATCH 放進 DATA（每條已確認的連線各一份），
                                        // S→C 的 REFRESH_START 用 T_S2C。session 位址那條鏈路變弱時，恢復不再被它拖住
 #define VIPLE_VR_LINK_F_REPAIR   0x02  // §VR-LINK-REPAIR：補包。C→S NACK（0x5507/0B）、S→C REPAIR_GONE（0x5508/08）；要同時有 F_CTRL
+#define VIPLE_VR_LINK_F_REPAIR_RTT 0x04  // §VR-REPAIR-RTT：補包的門檻、等待與重報跟著量到的往返時間走（NACK 的 flags 帶 client 的估計）；
+                                         // 要同時有 F_REPAIR。舊的一方不認得這個位元，兩邊就都照原本的規則走
 #define VIPLE_VR_LINK_PING_F_CONFIRMED  0x01  // client 最近 1 s 內在這條連線收過 PONG
 #define VIPLE_VR_LINK_READY_OK       0
 #define VIPLE_VR_LINK_READY_REFUSED  1
@@ -452,11 +455,15 @@ typedef struct _VIPLE_VR_LINK_PING {
 typedef struct _VIPLE_VR_TLV_NACK {
     uint32_t frame;     // 幀號
     uint8_t  block;     // FEC block 序號（0 起）
-    uint8_t  flags;     // 保留
+    uint8_t  flags;     // VIPLE_VR_NACK_F_*｜eta（見下）；沒協商 VIPLE_VR_LINK_F_REPAIR_RTT 時恆為 0
     uint8_t  need;      // 還差幾個 shard 才能還原（total＝0 時填 0）
     uint8_t  total;     // 這個 block 的 shard 總數（data＋parity，≤ 255）
     uint8_t  attempt;   // 這個 block 的第幾份回報（1 起）
 } VIPLE_VR_TLV_NACK;
+
+// §VR-REPAIR-RTT：VIPLE_VR_TLV_NACK.flags（只在協商了 VIPLE_VR_LINK_F_REPAIR_RTT 時有意義）
+#define VIPLE_VR_NACK_F_RTT         0x80  // 這份回報照 §VR-REPAIR-RTT 的規則送出（client 自己照往返時間決定來不來得及）
+#define VIPLE_VR_NACK_ETA_MASK      0x7F  // 同一個 byte 的低 7 bit：client 估的「回報→補包到齊」（毫秒，無條件進位，1～127）
 
 #define VIPLE_VR_GONE_EXPIRED  1  // 太舊，補了也來不及
 #define VIPLE_VR_GONE_BUDGET   2  // 補包額度用完（鏈路已經壅塞，不再加碼）

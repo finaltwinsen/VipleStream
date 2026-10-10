@@ -100,6 +100,9 @@ $QsRequired = @(
     # VipleVr.h：2.0 VR 協定的單一定義來源（ptype、0x81 header、tracking、TLV），
     # stream.cpp 直接 include，三份必須 byte-identical（docs/vr_protocol.md §4.8）。
     'src/VipleVr.h',
+    # VrRepairRtt.h：§VR-REPAIR-RTT 的純邏輯（估計、門檻、等待上限、NACK flags 的編碼）。client 的佇列與
+    # Sunshine/tests/unit/test_vr_repair_rtt.cpp 用同一份；server 解讀 NACK flags 的常數在 VipleVr.h。
+    'src/VrRepairRtt.h',
     'src/Input.h',
     'src/Video.h',
     'src/Rtsp.h',
