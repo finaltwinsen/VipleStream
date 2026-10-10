@@ -3236,6 +3236,10 @@ void FFmpegVideoDecoder::decoderThreadProc()
         v.clear();
         vrPoll.polls = 0;
     };
+    if (m_VrDropOnMetaMiss) {
+        // 一個 10 秒視窗（120 fps 是 1200 筆）先配好：每一筆是在把那一幀交出去之前推的，不讓它在那裡重新配置
+        vrPoll.recvWaitUs.reserve(2048);
+    }
 
     while (!SDL_AtomicGet(&m_DecoderThreadShouldQuit)) {
         if (m_FramesIn == m_FramesOut) {

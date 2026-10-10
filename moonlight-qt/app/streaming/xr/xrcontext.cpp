@@ -2465,9 +2465,12 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     }
     t.slack1s.push_back(slack32);
     t.render1s.push_back(renderUs);
-    // §VR-XRLOOP：延遲鏈的 10 s 版（和上面是同一組值；空間在 bringUp 配好了，這裡不配置記憶體）
-    m_LoopDiag.slack10s.push_back(slack32);
-    m_LoopDiag.render10s.push_back(renderUs);
+    // §VR-XRLOOP：延遲鏈的 10 s 版（和上面是同一組值）。這裡在挑影像到 xrEndFrame 之間，量測不可以在這一段配置記憶體：
+    // 空間在 bringUp 配好了（一個視窗 2048 筆，120 Hz 的 10 秒是 1200 筆），真的滿了就不記這一筆——只少統計的樣本
+    if (m_LoopDiag.slack10s.size() < m_LoopDiag.slack10s.capacity() && m_LoopDiag.render10s.size() < m_LoopDiag.render10s.capacity()) {
+        m_LoopDiag.slack10s.push_back(slack32);
+        m_LoopDiag.render10s.push_back(renderUs);
+    }
     if (hasMeta) {
         uint64_t sampleNs = 0;
         if (VrSampleHistory::lookup(echoSampleId, &sampleNs) && t.predictedDisplayClientNs > sampleNs) {
@@ -2685,8 +2688,9 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         ct.displayPeriodNs = static_cast<uint32_t>((std::min<uint64_t>)(periodNs, 0xffffffffu));
         // 2026-10-05：decoder 執行緒記的單幀解碼延遲（DU 進佇列到解出；沒有樣本時 0）
         uint32_t dec50 = 0, dec95 = 0;
-        if (VrDecodeTiming::take(&dec50, &dec95)) {
-            m_LoopDiag.dec1s.push_back(dec50);  // §VR-XRLOOP：延遲鏈的 dec（這一秒有樣本才記）
+        // §VR-XRLOOP：延遲鏈的 dec（這一秒有樣本才記）。一樣不在這一段配置記憶體：預留 16 筆（10 秒最多 11 筆），滿了不記
+        if (VrDecodeTiming::take(&dec50, &dec95) && m_LoopDiag.dec1s.size() < m_LoopDiag.dec1s.capacity()) {
+            m_LoopDiag.dec1s.push_back(dec50);
         }
         ct.decodeP50Us = sat16u(dec50);
         ct.decodeP95Us = sat16u(dec95);
