@@ -9,7 +9,7 @@
 # 組別：j2a 估計值偏低｜j2b 補包那一輪掉了｜j2c 估計取錯連線｜j2d 目前的 block 先報過、後面才發現整幀沒到｜
 #       j2e 長空白｜j2f 幀內停頓（沒有掉包）之後才有一張真的尾端掉｜j2g 規則切換的那一刻｜j1a 整段空白與 60 Hz｜
 #       brk 補包永遠到不了（保險）｜hold 放棄之後的暫停｜chain 成串掉包（連續好幾幀各缺一段）｜
-#       gone 預先報的幀收到 REPAIR_GONE｜latch LATCH 的靜默什麼時候觸發
+#       gone 預先報的幀收到 REPAIR_GONE｜latch LATCH 的靜默什麼時候觸發｜meas 量測的計數
 import os
 import sys
 
@@ -35,6 +35,16 @@ def run(mode, args):
 def latch_cols(tot):
     """LATCH 的靜默：觸發幾次、合起來多久（模擬器照 VideoStream.c 的做法數的）"""
     return "LATCH 靜默 %d 次（合計 %.0f ms）" % (int(tot.get("latchQuiet", 0)), float(tot.get("quietMs", 0)))
+
+
+def meas_cols(tot):
+    """量測的累計數（[VIPLE-VR-REPAIR] gate 10s 印的那幾欄）"""
+    def n(key):
+        return int(tot.get(key, 0))
+
+    return "lost %d（nacked %d、unasked %d、whole %d）、repaired %d（補包用上 %d）、lateDone %s、never %d、stall %s" % (
+        n("lost"), n("lostNacked"), n("lostUnasked"), n("lostWhole"), n("repaired"), n("repairedUsed"), tot.get("lateDone", "?"),
+        n("lateNever"), tot.get("stall", "?"))
 
 
 def desc(res, summ, tot, upto=20, more=None):
@@ -65,7 +75,7 @@ def desc(res, summ, tot, upto=20, more=None):
 
 
 def table(title, rows, modes=("legacy", "rtt"), upto=20, more=None):
-    # more：這一組另外要印的欄位（latch_cols），從 TOTALS 那一行取
+    # more：這一組另外要印的欄位（latch_cols／meas_cols），從 TOTALS 那一行取
     emit("")
     emit("### " + title)
     for name, args, est_legacy, est_rtt in rows:
@@ -196,6 +206,29 @@ def main():
                 ("120 Hz、往返 10、中段掉、補包全掉（跨幀等待到期才放行）", "fps=120 rtt=10 frames=24 drop=3:0-4 repairloss=99", "", ""),
                 ("120 Hz、往返 10、掉單一封包（FEC 當場補回，沒有回報）", "fps=120 rtt=10 frames=24 drop=3:1-1", "", "")]
         table("LATCH 的靜默什麼時候觸發", rows, modes=("rtt",), more=latch_cols)
+    if want("meas"):
+        # 量測的累計數（[VIPLE-VR-REPAIR] gate 10s 印的那幾欄；不分規則都記）。
+        # lateDone＝回報過才放棄的 block，放棄之後多久才到齊（≤5／≤10／≤20／≤33／>33 ms）；never＝60 ms 內沒到齊
+        st = " ".join("pause=%d:20:%g" % (f, 4 + (f % 2)) for f in range(3, 9))
+        rows = [("補包在放棄之後才到（估計值只有實際的三分之一：視窗 8.1/9.6/10.9、真實往返 32）、整幀沒到",
+                 "fps=120 rtt=32 frames=22 drop=3:0-8", "8.1:10.9:10.9", "8.1:9.6:10.9"),
+                ("補包整輪都掉、中段掉", "fps=120 rtt=8 frames=24 drop=3:0-4 repairloss=99", "", ""),
+                ("幀內停頓（沒有掉包）：每幀 40 個 data、第 3～8 幀各停 4～5 ms；120 Hz、往返 8",
+                 "fps=120 rtt=8 frames=22 D=40 %s idle=fixed" % st, "", ""),
+                ("掉包的洞不算停頓：中段掉 50 個（每幀 72 個 data、封包間隔 70 µs，洞前後兩個封包隔 3.6 ms）",
+                 "fps=120 rtt=8 frames=22 D=72 drop=3:10-59", "", "")]
+        table("量測的計數", rows, more=meas_cols)
+        # 放棄前已經收到的 shard 再到一份（第一輪補包晚到被收下、第二輪又補了同一個）不算進度：這一幀放棄時還差 2 個，
+        # 之後到的兩個補包裡一個是重複的——只到了 1 個，算「沒到齊」，不是「6 ms 後到齊」
+        rows = [("放棄之後到的補包有一個是重複的：估計值偏低（真實往返 24）、逐包掉 30%",
+                 "fps=120 rtt=24 D=20 frames=24 burst=-1:60:30 seed=43", "", "8.1:9.6:10.9"),
+                # 預先報過的第 4、5 幀：補包在輪到它們之前就排進環了（第 3 幀的第一輪補包掉了、要補第二輪），輪到時直接收齊
+                # ——這兩幀也要算進 repaired 與「補包用上」
+                ("三整幀沒到、第 3 幀的第一輪補包掉了（預先報的兩幀在環裡收齊）", "fps=120 rtt=10 frames=30 gap=-1:19 repairloss=1", "", ""),
+                # server 回補不了的那一幀不追蹤（不會再有補包來）：never 不含它
+                ("server 回 REPAIR_GONE 的那一幀（上面「預先報的幀收到 REPAIR_GONE」的情境）",
+                 "fps=120 rtt=10 frames=20 D=180 spacing=20 gap=-1:27", "", "")]
+        table("量測的計數：放棄之後多久才到齊", rows, modes=("rtt",), more=meas_cols)
 
     text = "\n".join(OUT) + "\n"
     sys.stdout.write(text)
