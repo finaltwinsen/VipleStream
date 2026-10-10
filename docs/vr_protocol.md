@@ -36,6 +36,13 @@
    選填 `&vrFovea=<101–250>`（§VR-FOVEA，2026-10-08）：注視點編碼，正前方的像素密度是均勻取樣的幾 %；不帶或 100＝關。
    server 接受而且是真的 driver（`mode=pcvr`）時，在 `<VipleStreamVRSession>` 尾端加 `;fovea=<同一個值>`，client 看到才還原；
    `/resume` 回的是進行中那次編排的值。映射式：每軸以 tangent 0 為中心、每一側各自正規化，`t = a·e + (1−a)·e³`，`a = 100/值`。
+   選填 `&vrDispHz=<60–144>`（§VR-PREDICT，2026-10-10）：頭盔的顯示更新率（Hz，整數）。client 只在它和 `vrHz` 不同時才帶，
+   也就是半速串流（§VR-HALF-RATE：`vrHz`、`vrPeriodNs` 是 host 的 SteamVR 與串流跑的更新率與週期，頭盔照樣全速顯示）；
+   不帶＝和 `vrHz` 相同。範圍同 `vrHz`；超出範圍或比 `vrHz` 低回 400 `VR_BAD_PARAMS`，等於 `vrHz` 視同沒帶。server 只用它
+   決定姿態預測時間（`SecondsFromVsyncToPhotons`）的起始值、以及學到的值存在哪一筆——這兩件事看的是頭盔的顯示週期，不是
+   加倍之後的 host 週期（`Sunshine/src/vr/vr_predict.h`）。回應沒有對應的欄位，`/resume` 也不會重設（沿用那次編排開始時的值）。
+   不帶這個參數的舊 client：起始值的算法和以前一樣——半速時 host 把它當成 60 Hz 的頭盔，偏大約 20 ms，要靠串流中的調整
+   收回來。舊 server 會略過不認得的 key。
    - 全部是十進位定點數，不用 base64。
    - 要有 round-trip 單元測試；server 解碼失敗就回非 200。
    - `vrCaps`：b0 RECOVERY_INTRA、b1 TRACK_THREAD、b2 GAZE、b3 SKELETON。

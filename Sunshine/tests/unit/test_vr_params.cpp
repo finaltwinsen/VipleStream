@@ -243,6 +243,52 @@ TEST(VrParamsTest, Foveation) {
   EXPECT_EQ(vr::format_session_element(neg).find("fovea"), std::string::npos);
 }
 
+// §VR-PREDICT（2026-10-10）：vrDispHz 選填＝頭盔的顯示更新率。client 只在它和 vrHz 不同時才帶（§VR-HALF-RATE 半速串流）；
+// 不帶或等於 vrHz＝相同，query 和以前逐字一樣
+TEST(VrParamsTest, DisplayHz) {
+  const auto plain = parse_map(minimal_args());
+  ASSERT_TRUE(plain.params.has_value()) << plain.error;
+  EXPECT_EQ(plain.params->disp_hz, 0);
+  const auto plain_query = vr::format_launch_params(*plain.params);
+  EXPECT_EQ(plain_query.find("vrDispHz"), std::string::npos) << plain_query;
+
+  // 半速：頭盔 120 Hz、host 與串流 60 Hz
+  const auto half_args = with(with(with(minimal_args(), "vrHz", "60"), "vrPeriodNs", "16666666"), "vrDispHz", "120");
+  auto r = parse_map(half_args);
+  ASSERT_TRUE(r.params.has_value()) << r.error;
+  EXPECT_EQ(r.params->hz, 60);
+  EXPECT_EQ(r.params->period_ns, 16666666);
+  EXPECT_EQ(r.params->disp_hz, 120);
+  const auto query = vr::format_launch_params(*r.params);
+  EXPECT_TRUE(query.ends_with("&vrForce=0&vrDispHz=120")) << query;
+  auto back = parse_map(split_query(query));
+  ASSERT_TRUE(back.params.has_value()) << back.error;
+  EXPECT_EQ(*back.params, *r.params);
+  EXPECT_EQ(vr::format_launch_params(*back.params), query);
+  // 和 vrFovea 一起帶：接在它後面
+  auto both = parse_map(with(half_args, "vrFovea", "150"));
+  ASSERT_TRUE(both.params.has_value()) << both.error;
+  EXPECT_TRUE(vr::format_launch_params(*both.params).ends_with("&vrForce=0&vrFovea=150&vrDispHz=120"));
+  // 上下限都收（VIPLE_VR_HZ_MIN～VIPLE_VR_HZ_MAX）
+  EXPECT_EQ(parse_map(with(with(minimal_args(), "vrHz", "72"), "vrDispHz", "144")).params->disp_hz, 144);
+
+  // 等於 vrHz：視同沒帶（minimal_args 的 vrHz 是 90）
+  auto same = parse_map(with(minimal_args(), "vrDispHz", "90"));
+  ASSERT_TRUE(same.params.has_value()) << same.error;
+  EXPECT_EQ(same.params->disp_hz, 0);
+  EXPECT_EQ(*same.params, *plain.params);
+  EXPECT_EQ(vr::format_launch_params(*same.params), plain_query);
+
+  // 範圍、比 vrHz 低、不是整數
+  expect_error(with(minimal_args(), "vrDispHz", "59"), "vrDispHz=59 out of range");
+  expect_error(with(minimal_args(), "vrDispHz", "145"), "vrDispHz=145 out of range");
+  expect_error(with(minimal_args(), "vrDispHz", "72"), "vrDispHz=72 must not be lower than vrHz=90");
+  expect_error(with(with(minimal_args(), "vrHz", "120"), "vrDispHz", "60"), "vrDispHz=60 must not be lower than vrHz=120");
+  expect_error(with(minimal_args(), "vrDispHz", "-120"), "vrDispHz='-120' is not a non-negative");
+  expect_error(with(minimal_args(), "vrDispHz", "120hz"), "vrDispHz='120hz'");
+  expect_error(with(minimal_args(), "vrDispHz", ""), "vrDispHz=''");
+}
+
 TEST(VrParamsTest, SessionElement) {
   vr::negotiated_t neg;
   neg.params = *parse_map(minimal_args()).params;

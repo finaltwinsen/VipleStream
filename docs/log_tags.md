@@ -441,7 +441,8 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
 ### server 端（sunshine.log）
 
 ```
-[VIPLE-VR-SESSION] accepted /launch caller=… eye=1728x1728 hz=90 … -> proto=1;packed=…;mode=stub (serverIntra=true safetyMs=2000)
+[VIPLE-VR-SESSION] accepted /launch caller=… eye=1728x1728 hz=90 … -> proto=1;packed=…;mode=stub (serverIntra=true safetyMs=2000)[ dispHz=120]
+                                                                                    ← 行尾的 dispHz=<n>：client 帶了 vrDispHz 才有（半速串流：頭盔的顯示更新率和 hz 不同）；沒帶時這一行和以前一樣
 [VIPLE-VR-SESSION] /launch: skipping configure_display (stub captures the current desktop)
 [VIPLE-VR-SESSION] rejected /launch: 503 VR_BUSY: another device's VR session is active on this host (caller uuid=…)
 [VIPLE-VR-SESSION] RTSP ANNOUNCE session=… vrProfile=1 irFrames=8 irPeriodFrames=180 enableIntraRefresh=1 recovery=intra encode=3456x1728@90

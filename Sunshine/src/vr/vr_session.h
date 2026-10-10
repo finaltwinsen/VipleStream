@@ -46,8 +46,8 @@ namespace vr {
   struct launch_params_t {
     int eye_width = 0;  ///< vrEye 的 W（每眼像素）
     int eye_height = 0;  ///< vrEye 的 H
-    int hz = 0;  ///< vrHz：顯示更新率
-    int64_t period_ns = 0;  ///< vrPeriodNs：平均顯示週期（預設 1e9/hz）
+    int hz = 0;  ///< vrHz：host 的 SteamVR 與串流跑的更新率（全速串流時＝頭盔的顯示更新率；半速見 disp_hz）
+    int64_t period_ns = 0;  ///< vrPeriodNs：vrHz 的平均週期（預設 1e9/hz）
     std::array<int, 8> fov {};  ///< vrFov：tan×10000，左眼 left,right,up,down，右眼同順序
     int ipd = 6300;  ///< vrIpd：mm×100
     std::array<int, VIPLE_VR_EYE_TO_HEAD_COUNT> eye_to_head {};  ///< vrEyeToHead：每眼 pos(mm×100)×3＋quat x,y,z,w(×10000)×4，左眼在前
@@ -56,6 +56,7 @@ namespace vr {
     std::string ctrl = "touch";  ///< vrCtrl："touch"|"index"
     int overscan = 0;  ///< vrOverscan：deg×10
     int fovea = 100;  ///< vrFovea（§VR-FOVEA）：正前方的像素密度是均勻取樣的幾 %（100＝關，上限 250）
+    int disp_hz = 0;  ///< vrDispHz：頭盔的顯示更新率，只在和 hz 不同時才有值（§VR-HALF-RATE 半速串流）；0＝沒帶＝和 hz 相同
     bool force = false;  ///< vrForce：0|1
 
     bool operator==(const launch_params_t &) const = default;

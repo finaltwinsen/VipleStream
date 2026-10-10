@@ -1377,7 +1377,9 @@ namespace nvhttp {
                     << " overscan="sv << params.overscan
                     << " force="sv << (params.force ? 1 : 0)
                     << " -> "sv << ::vr::format_session_element_for_log(*neg)
-                    << " (serverIntra="sv << server_intra << " safetyMs="sv << neg->safety_ms << ')';
+                    << " (serverIntra="sv << server_intra << " safetyMs="sv << neg->safety_ms << ')'
+                    // vrDispHz：半速串流才有（頭盔的顯示更新率和 hz 不同）；沒帶時這一行和以前一樣
+                    << (params.disp_hz > 0 ? std::format(" dispHz={}", params.disp_hz) : std::string());
     return neg;
   }
 

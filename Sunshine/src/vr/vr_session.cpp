@@ -298,6 +298,18 @@ namespace vr {
       p.fovea = (int) fovea;
     }
 
+    // vrDispHz（選填）：頭盔的顯示更新率。client 只在它和 vrHz 不同時才帶（半速串流）；不帶或等於 vrHz＝相同
+    if (auto v = lookup("vrDispHz")) {
+      int64_t disp_hz = 0;
+      if (!parse_int_field("vrDispHz", *v, false, VIPLE_VR_HZ_MIN, VIPLE_VR_HZ_MAX, disp_hz, error)) {
+        return fail(error);
+      }
+      if (disp_hz < p.hz) {
+        return fail(std::format("vrDispHz={} must not be lower than vrHz={}", disp_hz, p.hz));
+      }
+      p.disp_hz = disp_hz == p.hz ? 0 : (int) disp_hz;
+    }
+
     // vrForce（選填，預設 0）
     if (auto v = lookup("vrForce")) {
       if (*v != "0" && *v != "1") {
@@ -313,7 +325,7 @@ namespace vr {
 
   std::string format_launch_params(const launch_params_t &p) {
     return std::format(
-      "vr=1&vrEye={}x{}&vrHz={}&vrPeriodNs={}&vrFov={}&vrIpd={}&vrEyeToHead={}&vrCaps={:x}&vrCodecs={}&vrCtrl={}&vrOverscan={}&vrForce={}{}",
+      "vr=1&vrEye={}x{}&vrHz={}&vrPeriodNs={}&vrFov={}&vrIpd={}&vrEyeToHead={}&vrCaps={:x}&vrCodecs={}&vrCtrl={}&vrOverscan={}&vrForce={}{}{}",
       p.eye_width,
       p.eye_height,
       p.hz,
@@ -327,7 +339,9 @@ namespace vr {
       p.overscan,
       p.force ? 1 : 0,
       // §VR-FOVEA：關閉時不帶（舊 server 不認得的 key 會略過，但字串維持和以前一樣）
-      p.fovea > 100 ? std::format("&vrFovea={}", p.fovea) : std::string()
+      p.fovea > 100 ? std::format("&vrFovea={}", p.fovea) : std::string(),
+      // 半速串流才帶（顯示更新率和 vrHz 不同）；其他時候字串維持和以前一樣
+      p.disp_hz > 0 && p.disp_hz != p.hz ? std::format("&vrDispHz={}", p.disp_hz) : std::string()
     );
   }
 
