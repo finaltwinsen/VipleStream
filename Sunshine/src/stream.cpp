@@ -2031,14 +2031,24 @@ namespace stream {
           v3_tail = std::format(" st={} gate={} steps={} bad={}", ::vr::latch::phase_name(ls.phase), ls.gate_open ? 1 : 0, ls.steps, ls.bad_steps);
         }
         // §VR-LATCH-V2：尾端加 err／integ／slips（累計）／dropped（累計，v2 才有）／mode；前面的欄位順序不變
-        // §VR-FENCE-LATE：最尾端再加 overloadHeld＝這 10 s 因為 host 擷取端過載而沒有餵進控制器的 LATCH 筆數（含在 rx 裡）
+        // §VR-FENCE-LATE：最尾端再加 overloadHeld＝這 10 s 走 hold（沒有餵進控制器）的 LATCH 筆數（含在 rx 裡）。
+        // 名稱沿用；§VR-CADENCE 之後「走 hold」看的是擷取端發布的 latch_hold，不一定是過載旗標（見 vr_handle_latch）。
+        // §VR-CADENCE：再往後加 lockR／lockRmin／lockRmax／lockN＝LATCH 樣本的相位一致性（0＝均勻散開、1＝全部同相；
+        // 這個視窗最後一次、最小、最大的值，樣本不到 20 筆印 n/a）與這個視窗收的樣本數。只是診斷（vr_latch_coherence.h）；
+        // 被 hold 的樣本也算在裡面
+        const auto coh = vr_state.take_latch_coherence();
+        const auto lock_r = [](int permille) {
+          return permille < 0 ? std::string {"n/a"} : std::format("{:.2f}", permille / 1000.0);
+        };
         BOOST_LOG(info) << "[VIPLE-VR-LATCH] 10s: rx=" << cur.latch_rx - prev.latch_rx << " slackEma=" << std::format("{:.0f}", ls.slack_ema_us)
                         << "us target=" << std::format("{:.0f}", ls.target_us) << "us ppm=" << ls.ppm
                         << (pcvr ? "" : " (stub: log only)") << " haptics=" << vr_state.haptics_queued()
                         << " err=" << std::format("{:.0f}", ls.err_us) << "us integ=" << std::format("{:.1f}", ls.integral_ppm)
                         << " slips=" << ls.slips << " dropped=" << ls.dropped
                         << " mode=" << ::vr::latch::mode_name(ls.mode) << v3_tail
-                        << " overloadHeld=" << cur.latch_held - prev.latch_held;
+                        << " overloadHeld=" << cur.latch_held - prev.latch_held
+                        << " lockR=" << lock_r(coh.r_last) << " lockRmin=" << lock_r(coh.r_min) << " lockRmax=" << lock_r(coh.r_max)
+                        << " lockN=" << coh.samples;
         // §VR-LATCH-V3：連續追蹤夠久的積分＝兩台機器的時鐘差，記在行程內給下一個 session 當起點
         if (const auto learned = vr_state.latch_learned(vr_steady_ns())) {
           ::vr::latch::remember(ctl.latchHostPeriodNs, *learned);

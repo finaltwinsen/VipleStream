@@ -2926,3 +2926,58 @@ TEST(VrLatchTest, SessionHoldLatchCountsAndLeavesTheIntegral) {
   EXPECT_EQ(after.slips, before.slips);
   EXPECT_EQ(after.mode, mode_e::v2);
 }
+
+// ── §VR-CADENCE：LATCH 樣本的相位一致性（log 的 lockR）經 session_state_t ─────────────
+
+TEST(VrLatchTest, SessionLatchCoherenceSeesFedAndHeldSamples) {
+  vr::session_state_t st {vr::negotiated_t {}, nullptr, 0};
+  st.configure_latch(mode_e::v2, 40, kPeriod120);
+  int64_t now = 10'000'000'000;
+  uint32_t id = 1000;
+  EXPECT_EQ(st.take_latch_coherence().samples, 0u);
+  // on_latch 與 hold_latch 各餵一筆，都算樣本（被擋掉的也要看得到）
+  now += kStepNs;
+  st.on_latch(make_latch(++id, 3300), now);
+  EXPECT_EQ(st.take_latch_coherence().samples, 1u);
+  now += kStepNs;
+  st.hold_latch(make_latch(++id, 3300), now);
+  auto w = st.take_latch_coherence();
+  EXPECT_EQ(w.samples, 1u);
+  EXPECT_EQ(w.r_last, -1);  // 還不到 20 筆
+  // 取走之後歸零
+  w = st.take_latch_coherence();
+  EXPECT_EQ(w.samples, 0u);
+  EXPECT_EQ(w.r_last, -1);
+  // 兩條路交替再餵 18 筆同相位的：滿 20 筆，R＝1
+  for (int i = 0; i < 18; ++i) {
+    now += kStepNs;
+    if (i % 2) {
+      st.on_latch(make_latch(++id, 3300), now);
+    } else {
+      st.hold_latch(make_latch(++id, 3300), now);
+    }
+  }
+  w = st.take_latch_coherence();
+  EXPECT_EQ(w.samples, 18u);
+  EXPECT_EQ(w.r_last, 1000);
+  EXPECT_EQ(w.r_min, 1000);
+  EXPECT_EQ(w.r_max, 1000);
+  // frameId 沒變（client 沒有新幀、重送舊值）：兩條路都不算樣本
+  now += kStepNs;
+  st.hold_latch(make_latch(id, 100), now);
+  now += kStepNs;
+  st.on_latch(make_latch(id, 100), now);
+  EXPECT_EQ(st.take_latch_coherence().samples, 0u);
+  // switch_latch 之後重來：R 回到「樣本不夠」
+  st.switch_latch(mode_e::v2, 50);
+  w = st.take_latch_coherence();
+  EXPECT_EQ(w.samples, 0u);
+  EXPECT_EQ(w.r_last, -1);
+  now += kStepNs;
+  st.on_latch(make_latch(++id, 3300), now);
+  w = st.take_latch_coherence();
+  EXPECT_EQ(w.samples, 1u);
+  EXPECT_EQ(w.r_last, -1);
+  // 只是多算一個診斷量：hold 的計數照舊
+  EXPECT_EQ(st.stats().latch_held, 11u);
+}

@@ -263,6 +263,8 @@ set(SUNSHINE_TARGET_FILES
         # §VR M4a R3：LATCH 相位回授的頻率鎖控制器（純模組）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_latch.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_latch.cpp"
+        # §VR-CADENCE：LATCH 樣本的相位一致性（log 的 lockR；純標頭，只是診斷）
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_latch_coherence.h"
         # §VR-PREDICT：依 client 量到的姿態落後調整 SecondsFromVsyncToPhotons（純模組）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_predict.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_predict.cpp"

@@ -35,6 +35,7 @@
 // local includes
 #include "vr_clock.h"
 #include "vr_latch.h"
+#include "vr_latch_coherence.h"
 
 namespace vr {
 
@@ -415,6 +416,13 @@ namespace vr {
     /// 最近一次 LATCH 控制器狀態（10 s log 用）
     latch::result_t latch_snapshot() const;
 
+    /**
+     * @brief §VR-CADENCE：LATCH 樣本的相位一致性（log 的 lockR，見 vr_latch_coherence.h）這個視窗的統計，取走後歸零
+     *        （10 s log 用）。只是診斷，不參與任何決定。on_latch() 與 hold_latch() 兩條路都餵——被擋掉的樣本也看得到；
+     *        switch_latch() 之後重來。
+     */
+    latch::coherence_t::window_t take_latch_coherence();
+
     /// 一則 CLIENT_TIMING（依 len 能讀多少算多少；缺的欄位為 0）
     void on_client_timing(const uint8_t *body, std::size_t len);
 
@@ -547,6 +555,7 @@ namespace vr {
     mutable std::mutex latch_mtx_;
     latch::controller_t latch_ctl_;
     latch::result_t latch_last_ {};
+    latch::coherence_t latch_coh_;  ///< §VR-CADENCE：LATCH 樣本的相位一致性（診斷；latch_mtx_ 保護）
     mutable std::mutex timing_mtx_;
     std::optional<VIPLE_VR_TLV_CLIENT_TIMING> timing_last_;
     std::atomic<uint32_t> haptic_event_id_ {0};

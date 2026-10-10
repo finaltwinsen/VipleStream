@@ -649,11 +649,14 @@ namespace vr {
     latch_last_.mode = mode;
     latch_last_.phase = latch::kPhaseWait;
     latch_last_.gate_open = false;
+    latch_coh_.reset();  // §VR-CADENCE：目標換了，相位的分佈跟著移動，lockR 重新收樣本
   }
 
   latch::result_t session_state_t::on_latch(const VIPLE_VR_TLV_LATCH &latch, int64_t now_ns) {
     std::lock_guard lk {latch_mtx_};
     latch_last_ = latch_ctl_.on_latch(latch.slackUs, latch.displayPeriodNs, now_ns, latch.frameId);
+    // §VR-CADENCE：lockR（診斷）。在控制器之後：模數用它這一則更新過的顯示週期
+    latch_coh_.on_latch(latch.slackUs, latch.frameId, latch_ctl_.modulus_us(), now_ns);
     return latch_last_;
   }
 
@@ -661,6 +664,8 @@ namespace vr {
     latch_held_.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lk {latch_mtx_};
     latch_last_ = latch_ctl_.on_hold(now_ns, latch.frameId);
+    // §VR-CADENCE：被擋掉的樣本照樣餵給 lockR——擋著的時候樣本還有沒有眾數，就是要看的東西
+    latch_coh_.on_latch(latch.slackUs, latch.frameId, latch_ctl_.modulus_us(), now_ns);
     return latch_last_;
   }
 
@@ -684,6 +689,11 @@ namespace vr {
     r.step_why = 0;
     r.eval_valid = false;
     return r;
+  }
+
+  latch::coherence_t::window_t session_state_t::take_latch_coherence() {
+    std::lock_guard lk {latch_mtx_};
+    return latch_coh_.take_window();
   }
 
   void session_state_t::on_client_timing(const uint8_t *body, std::size_t len) {
