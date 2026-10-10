@@ -296,8 +296,9 @@ client 的每張網卡各開一條連線，影像、音訊、追蹤在每條連�
 - server 把每條連線的 socket 綁在 client 配對到的 server 位址（不是本機位址就拒絕），埠由系統配。
 - client 重送 `LINK_HELLO`（2 s 沒收到 `LINK_READY`，最多 5 次）時，描述相同的連線回原來的埠，不重建。
 - **連線層功能的協商**（2026-10-07）：client 在每個 `VIPLE_VR_LINK_DESC.flags` 填它支援的 `VIPLE_VR_LINK_F_*`
-  （`0x01 CTRL`、`0x02 REPAIR`；舊 server 不讀這一欄），server 把同意啟用的放在 `LINK_READY` 陣列之後的 `hubCaps`
-  （沒有任何功能時不附這個 byte；舊 client 本來就只讀陣列）。`REPAIR` 要同時有 `CTRL`。兩者的內容見本節最後兩段。
+  （`0x01 CTRL`、`0x02 REPAIR`、`0x04 REPAIR_RTT`；舊 server 不讀這一欄），server 把同意啟用的放在 `LINK_READY`
+  陣列之後的 `hubCaps`（沒有任何功能時不附這個 byte；舊 client 本來就只讀陣列）。`REPAIR` 要同時有 `CTRL`，
+  `REPAIR_RTT` 要同時有 `REPAIR`。三者的內容見本節最後三段。
 
 **連線上的資料報**
 
@@ -355,7 +356,7 @@ FEC 補不回來的 block（掉的比 parity 多）原本只能整幀放棄、�
 
 | 方向 | TLV | 本體 |
 |---|---|---|
-| C→S（DATA） | `0x5507/0B NACK` | `VIPLE_VR_TLV_NACK`（9 B：`u32 frame`、`u8 block`、`u8 flags`（保留）、`u8 need`、`u8 total`、`u8 attempt`）＋`have[(total+7)/8]`（bit i＝第 i 個 shard 已收到）。`total＝0`＝這個 block 一個封包都沒收到，不帶位元圖 |
+| C→S（DATA） | `0x5507/0B NACK` | `VIPLE_VR_TLV_NACK`（9 B：`u32 frame`、`u8 block`、`u8 flags`（沒協商 `REPAIR_RTT` 時恆為 0，協商了見 §VR-REPAIR-RTT）、`u8 need`、`u8 total`、`u8 attempt`）＋`have[(total+7)/8]`（bit i＝第 i 個 shard 已收到）。`total＝0`＝這個 block 一個封包都沒收到，不帶位元圖 |
 | S→C（T_S2C） | `0x5508/08 REPAIR_GONE` | `VIPLE_VR_TLV_REPAIR_GONE`（6 B：`u32 frame`、`u8 block`、`u8 reason`）：補不了，不必再等。reason 1＝太舊、2＝額度用完、3＝沒有這個 block 的紀錄 |
 
 - **server**（`vr_multilink.cpp` 的 `on_nack`、純邏輯在 `vr_multilink_logic.h`）
@@ -405,5 +406,78 @@ FEC 補不回來的 block（掉的比 parity 多）原本只能整幀放棄、�
   會走到補包的是成串掉包（Wi-Fi 的短暫空檔），和位元率高低無關——S0 實測照丟包算會把位元率砍到下限。
   收到 NACK 會延後 FEC 百分比的回降（和 LOSS 相同的 30 秒）。
 - LATCH 的相位量測不排除補過包的幀：`frameId` 是 client 的發布序號、不是線上的幀號，server 認不出來；每秒只取
-  10 個樣本，補過包的幀佔極少數。
+  10 個樣本，補過包的幀佔極少數。（照 §VR-REPAIR-RTT 的規則等過的幀改由 client 自己排除，見下一段。）
 - 相容：任何一邊沒有 REPAIR → 不存封包、不回報，行為與只有多連線時相同。
+
+**§VR-REPAIR-RTT：補包的時間預算跟著往返時間走**（2026-10-10，server `vr_multilink_repair_rtt`，要同時開
+`vr_multilink_repair`，預設關閉）
+
+上一段的三道上限都用幀週期訂：門檻（最近一筆往返＋2 ms ≤ 一個半幀週期）、等待（下一幀到了之後一個幀週期，有進展
+時兩個）、server 的年齡（三個幀週期）。往返 10 ms 上下、全速 120 Hz 時三道都剛好卡在邊上，補包多半在放棄之後才到：
+實測這種路徑上補包開與關，救不回的幀數幾乎一樣，八成是「沒回報過就放棄」。這一段把「值不值得報、等多久、多久
+重報」改成由量到的往返時間決定。**只在一條連線送影像時適用**；兩條以上在送時上一段的規則原封不動。
+
+純邏輯在 `VrRepairRtt.h`（Q／A／S3 三份 byte-identical，同步檢查會擋）：估計、門檻、等待上限、重報、保險，以及每個
+封包的決定 `vrrrDecide()`——接收迴圈、佇列模擬器、單元測試呼叫同一份。佇列那一側在 `RtpVideoQueue.c`
+（`queue->mlRttMode`）。
+
+| 位置 | 內容 |
+|---|---|
+| `STREAM_CONFIGURATION.vrFlags` | `0x10 VIPLE_VR_SF_REPAIR_RTT`：本機用，client 願意用（決定 `LINK_HELLO` 帶不帶下一列的位元） |
+| `VIPLE_VR_LINK_DESC.flags`／`hubCaps` | `0x04 VIPLE_VR_LINK_F_REPAIR_RTT`：server 的主開關開著、補包成立、client 有帶，`hubCaps` 才有 |
+| `VIPLE_VR_TLV_NACK.flags` | bit7 `VIPLE_VR_NACK_F_RTT`＝這份回報照這一段的規則送出；低 7 bit（`VIPLE_VR_NACK_ETA_MASK`）＝client 的 `eta`，毫秒、無條件進位、1～127。只有協商了 `REPAIR_RTT` 才看 |
+
+`VIPLE_VR_TLV_NACK` 仍是 9 B，`LINK_HELLO`／`LINK_READY` 的長度不變；預先回報用既有的 `total＝0` NACK。
+
+- **適用**（每個影像封包判斷一次）：協商了 `REPAIR` 與 `REPAIR_RTT`、只有一條連線在送影像、有已確認的連線、
+  正在送影像的那條連線有往返樣本——四項都成立才照這一段，否則照上一段的規則（開發用的同場 A/B 輪到上一段那
+  一邊時也是）。照這一段時，門檻關著或保險暫停中就整個不回報、不等（不是退回上一段的門檻）。已經照這一段回報、還在等的 block（與它後面預先報過的幀）沿用到
+  結束——門檻剛關、保險剛暫停、第二條連線剛開始送都不回頭砍，這段期間佇列不套用「兩條在送」的規則。
+- **往返時間**：每條連線留最近 8 筆 PONG 樣本（250 ms 一筆；超過 1 秒沒有 PONG 之後的第一筆先清空）。`lo`＝最小、
+  `mid`＝中位數（偶數筆取較大的）、`hi`＝第二大（不到 3 筆取最大）。只看正在送影像的連線（補包只從那幾條回來）；
+  還不知道哪條在送時看全部有樣本的；在送的那條沒有樣本就不適用。
+- **三個估計**：`eta`＝hi×1.25＋2 ms（補包「該到了」：多久重報、等待上限多大）；`etaTry`＝mid＋2 ms（第一份回報
+  值不值得送）；`etaFast`＝lo＋2 ms（再報一輪值不值得）。往返 8.1／9.6／10.9 ms 時是 15.6／11.6／10.1 ms。
+- **等待上限 `cap`**（後面的封包最多被壓住多久）＝clamp(eta＋etaFast＋2 ms, 2×hold, 33 ms)，`hold`＝上一段的
+  clamp(幀週期, 4, 14 ms)——所以不會比上一段「等待中有進展」時短。上例是 27.7 ms；區網往返 3 ms、120 Hz 時是
+  16.7 ms。client 可以指定（`--vr-repair-hold`，8～100 ms）。一張完整到達的幀最多被壓住 `cap`。
+- **門檻**：etaTry ≤ min(cap, 25 ms) 才開，關掉之後要 etaTry＋2 ms ≤ 才再開——往返的中位數超過 23 ms 就整個不
+  回報、不等。
+- **第一份回報**：時機和上一段相同（最後一個 shard 到了還不夠；一段時間沒有新封包；下一幀的封包到了），改兩件事。
+  一、「多久沒有新封包」：幀週期 ≤ 10 ms 時，shard 總數 ≤ 32 的 block 3 ms、其餘等一個幀週期（等於交給「下一幀
+  到了」那一條——實驗建置裡大的 block 用 3 ms 時，回報幾乎都是幀內停頓造成的，補包流量是鏈路丟包的十倍）；
+  幀週期更長時維持 3 ms。二、先看值不值得：在時刻 t 回報，要 t＋etaTry ≤ 期限才報；期限＝（有後面的封包在
+  排隊 ? 它到達的時刻 : max(t, 這個 block 第一個封包到達＋幀週期)）＋cap。不值得時，還沒有後面的封包就先不報；
+  已經有、這個 block 又沒報過，就照原本的方式立刻放棄。
+- **重報**：上一份＋eta 才重報，而且「那一刻＋etaFast ≤ 期限」才報；最多 3 次。上一份之後一個封包都沒到（鏈路還是
+  靜默的）就不重報，次數不會在空檔裡用完，所以不用上一段的「退還」。
+- **等到什麼時候**：`REPAIR_GONE`、回報送不出去、後面缺太多幀 → 不等；沒報過 → 現在報還值得試就等到「後面的封包
+  到達＋cap」（馬上會報），不值得就不等；報過了 → 等到「後面的封包到達＋cap」。
+- **後面整幀沒到的幀**：排著的封包裡最小的幀號比目前這一幀大超過 1，中間那幾幀就是整幀沒到。缺的幀數超過
+  min(3, 34 ms÷幀週期)，或照量到的到達間隔那麼多封包在期限前到不齊 → 全部不補、不等，立刻放棄（一定要走
+  intra refresh，越早越好）。否則目前這一幀報過之後，替每一個還沒報過的缺幀各送一份 `total＝0` 的 NACK；輪到
+  那一幀時當成已經報過一次，預先報的那一幀若收到 `REPAIR_GONE`，輪到時直接不等。
+- **放棄之後的暫停**：放棄一個 block 之後的 lo＋幀週期＋2 ms 內，還沒報過的 block 不回報、不等。這段時間 LOSS
+  已經送出、intra refresh 還沒到，後面的幀本來就帶著壞掉的參考解碼，為了補它們壓住更後面的幀只是把停頓拉長。
+- **保險**：ok＝回報過、補包真的用上、收齊；bad＝回報過、等到期限還是放棄（缺太多幀而放棄的不算）。連續 3 次
+  bad，或最近 8 個結果裡 5 個 bad → 暫停 2 秒（等同門檻關著）；暫停結束後第一個結果是 bad 就再暫停、時間加倍
+  （最多 16 秒），是 ok 就歸零。
+- **server**（`on_nack`、`vr_multilink_logic.h`）：帶 `VIPLE_VR_NACK_F_RTT` 的回報，年齡上限是 100 ms（取代三個
+  幀週期），「上一輪還在路上」的視窗是 clamp(eta×0.75, 4, 60 ms)（取代 clamp(往返＋3, 4, 12) ms）。其餘不變：
+  每輪補「還差的＋max(2, 八分之一)」、最多 5 輪、額度 15%／600 個、送出佇列的期限不動。沒帶旗標的回報（例如
+  同場 A/B 在上一段規則那一邊送出的）照上一段處理。
+- **LATCH**：被補包拖晚的幀（回報過才收齊的、等待結束才放行的）放行後 60 ms 內，client 不拿新影像更新要送給
+  host 的 LATCH 樣本，上一筆照送（host 的 v2／v3 相位控制器本來就丟重複的 `frameId`）。那幾張的到達時刻反映的是
+  補包花的時間，不是節拍。
+- **不動的**：自動位元率與 FEC 百分比的規則（上一段的 ABR 那一條照舊）；只是救不回的幀變少、補包變多，訊號的量
+  會跟著變。
+- **client 的選項**：設定 `vrrepairrtt`（預設開＝跟著 host）與 `--vr-repair-rtt on|off`、設定 `vrrepairholdms`
+  （0＝自動）與 `--vr-repair-hold <ms>`；開發用、不存的 `--vr-repair-ab <秒>`（同一場每隔這麼久在兩套規則之間
+  切換，從上一段的規則開始）、`--vr-repair-idle auto|fixed|frame|size|learned`、`--vr-repair-ahead on|off`。
+- **相容**：舊 client × 新 server：沒帶 `0x04` → `hubCaps` 沒有 → 不變。新 client × 舊 server：`hubCaps` 沒有
+  `0x04` → NACK 的 `flags` 恆為 0 → 不變（線上唯一的差別是 `LINK_HELLO` 的 `flags` 由 `0x03` 變 `0x07`，舊 server
+  只挑它認得的位元）。server 的主開關關著時也一樣，佇列的每一步都和之前相同——這一點由
+  `moonlight-qt/moonlight-common-c/tests/vr_repair_sim` 的 golden 守著（2,844 個情境的時間軸逐字相同）。
+- **已知限制**：補回來的那一幀一定晚「發現缺的時間＋一個往返＋約 1 ms」，120 Hz 至少多 1 格重複顯示——換掉的是
+  每次約 90 ms 的破圖，不是重複格數。估計值遠低於事件當下的實際往返時，比上一段多停一個上限才放棄（最多 33 ms）；
+  保險只擋得住連續的失敗。部分收到的後續幀不預先回報。60 Hz（半速）的「多久沒有新封包」維持 3 ms。

@@ -2210,9 +2210,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
 </table>
 
 @note{The on/off VR options ([vr_direct_kick](#vr_direct_kick) and [vr_latch_acquire](#vr_latch_acquire) above and
-`vr_ctrl_pose_offset`, `vr_angvel_local`, `vr_multilink_ctrl`, `vr_multilink_repair`, `vr_capture_late` below) accept
-`enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`; case does not matter). Any other value is
-reported in the log as an invalid value and the option keeps its default.}
+`vr_ctrl_pose_offset`, `vr_angvel_local`, `vr_multilink_ctrl`, `vr_multilink_repair`, `vr_multilink_repair_rtt`,
+`vr_capture_late` below) accept `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`; case does
+not matter). Any other value is reported in the log as an invalid value and the option keeps its default.}
 
 ### vr_ctrl_pose_offset
 
@@ -2427,6 +2427,53 @@ reported in the log as an invalid value and the option keeps its default.}
     </tr>
 </table>
 
+### vr_multilink_repair_rtt
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: let the timing of [vr_multilink_repair](#vr_multilink_repair) follow the round trip the
+            client measures on the link that carries video, instead of the frame period. Without it a resend is only
+            requested while the latest round trip is at most about one frame period, and later frames are held back
+            for one to two frame periods at most - at 120 Hz over a path with a 10 ms round trip, most resends
+            arrive just too late and the frame is dropped anyway.
+            When enabled, and only while a single link carries video:
+            the client asks for resends while the median of the last 8 round-trip samples is at most 23 ms (and
+            starts again once it is back to 21 ms);
+            later frames are held back for up to one resend plus one more request (about 28 ms on a 10 ms path,
+            never more than 33 ms, never less than what the frame-period rules already allow);
+            a request is repeated only once a resend had the time to arrive and something else has arrived since;
+            frames that are missing entirely behind the one being repaired are requested together with it (up to
+            3 at 90 Hz and above, 2 below; none at all when too many are missing to be resent in time);
+            after a frame had to be dropped, frames that were not requested yet are not waited for until the
+            recovery picture can arrive;
+            and the rules switch themselves off for a few seconds when resends keep arriving too late.
+            On the host, requests sent under these rules are served for frames up to 100 ms old (instead of three
+            frame periods).
+            Frames that are repaired this way are shown late, so a repaired loss costs one to three repeated
+            display refreshes instead of a visibly broken picture for about 90 ms.
+            @note{Requires `vr_multilink_repair = enabled` (and with it `vr_multilink_ctrl = enabled`); when only
+            this option is set, a warning is logged and it stays off. Applies only when the client supports it;
+            with `disabled`, with an older client, or while two or more links carry video, the behaviour is
+            identical to earlier versions. The setting applies to all VR sessions of this host, including
+            single-link sessions on the local network. The default will change after headset testing.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_multilink_repair_rtt = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_multilink_fault
 
 <table>
@@ -2437,8 +2484,10 @@ reported in the log as an invalid value and the option keeps its default.}
             a single network interface. Format: `<linkId>:<on_ms>:<off_ms>[:<phase_ms>]`, comma separated.
             Other items, in the same list:
             `r<linkId>:<mbps>` caps the video send rate of that link (a link that is too slow);
-            `d<linkId>:<ms>` (1-40) sends every video batch of that link that much later, and delays its ping
-            replies by twice that (a link that lags behind the others);
+            `d<linkId>:<ms>` (1-40) sends every video batch of that link that much later, handles the control
+            messages received on that link (resend requests, loss reports, display-phase feedback) that much
+            later, and delays its ping replies by twice that (a link that lags behind the others by that much in
+            each direction);
             `b<linkId>:<period_ms>:<packets>` drops that many consecutive video packets of first transmissions
             once per period (burst loss; resent packets are not affected);
             `c:<on_ms>:<off_ms>[:<phase_ms>]` drops the unreliable VR messages on the control connection in both
