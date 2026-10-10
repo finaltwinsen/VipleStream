@@ -50,17 +50,24 @@ Flickable {
     // §UI-SCROLL（2026-10-11）：把這一頁往下（pages > 0）或往上捲，單位是一個可見高度。
     // 手把的右搖桿與 LB／RB（SdlGamepadKeyNavigation.scrollRequested）和鍵盤的 PageUp／PageDown 都走這裡。
     // 原本手把與鍵盤只能靠焦點一項一項移動來帶動捲頁，這一頁有幾十個選項。
+    property real scrollRemainderPx: 0
+
     function scrollByPages(pages) {
-        if (pages === 0) {
+        // 不到 1 px 的量先累著，不動動畫也不動計時器：搖桿只比死區多一點點（飄移）時，每次輪詢都會進來，
+        // 每次都重跑動畫的話滑鼠滾輪會被蓋掉，焦點跟進的計時器也永遠在跑
+        var px = pages * height + scrollRemainderPx
+        if (Math.abs(px) < 1) {
+            scrollRemainderPx = px
             return
         }
+        scrollRemainderPx = 0
 
         var maxY = Math.max(contentHeight - height, 0)
         // 上一段動畫還沒跑完時從它的終點接著算，一直推著搖桿才不會少算距離
         var base = autoScrollAnimation.running ? autoScrollAnimation.to : contentY
-        var target = Math.min(Math.max(base + pages * height, 0), maxY)
+        var target = Math.min(Math.max(base + px, 0), maxY)
 
-        scrollFocusTimer.forward = pages > 0
+        scrollFocusTimer.forward = px > 0
         scrollFocusTimer.restart()
 
         if (target !== contentY) {
@@ -102,10 +109,11 @@ Flickable {
 
     // 用 scrollByPages 捲完之後，焦點如果已經在畫面外，把它移到畫面裡、沿 Tab 順序在捲動方向上的
     // 第一個控制項。焦點留在畫面外的話，下一次按上下，焦點一動頁面就捲回原來的位置。
-    // 焦點本來就不在這一頁的控制項上（例如只用滑鼠）就不動。
+    // 焦點本來就不在這一頁的控制項上（例如只用滑鼠）就不動；焦點在文字輸入欄裡也不動——
+    // 使用者可能正在打字，焦點被搬走的話接下來打的字會進到別的控制項。
     function moveFocusIntoView(forward) {
         var start = Window.activeFocusItem
-        if (!start || !isChildOfFlickable(start) || isInView(start, 0)) {
+        if (!start || !isChildOfFlickable(start) || ("cursorPosition" in start) || isInView(start, 0)) {
             return
         }
 
@@ -143,6 +151,13 @@ Flickable {
     }
 
     Keys.onPressed: function(event) {
+        // 下拉選單開著時不接（ComboBox 自己不處理這兩個鍵，事件會傳上來）：不然整頁在選單後面捲走，
+        // 焦點跟進時選單還會被關掉
+        var focusItem = Window.activeFocusItem
+        if (focusItem && focusItem.popup && focusItem.popup.visible) {
+            return
+        }
+
         if (event.key === Qt.Key_PageDown) {
             scrollByPages(0.8)
             event.accepted = true
@@ -162,10 +177,13 @@ Flickable {
             }
 
             // §UI-SCROLL：剛用右搖桿／LB／RB 捲過、焦點還沒跟進來（計時器還在跑）就按了方向鍵：焦點是從畫面外的
-            // 舊位置移到它的隔壁，照下面的規則頁面會捲回去。改成先把焦點帶進畫面，頁面不動。
-            if (scrollFocusTimer.running && !isInView(item, 0)) {
-                scrollFocusTimer.stop()
-                moveFocusIntoView(scrollFocusTimer.forward)
+            // 舊位置移到它的隔壁，照下面的規則頁面會捲回去。改成把焦點帶進畫面，頁面不動。
+            // 只處理按鍵導覽（Tab／Shift+Tab）造成的移動：用滑鼠或雷射點到的控制項，焦點要留在它身上。
+            // 要等這一次焦點移動整個做完（回到事件迴圈）才能搬：在這裡同步搬的話，外層還沒跑完的
+            // forceActiveFocus 會把焦點拉回去。
+            if (scrollFocusTimer.running && !isInView(item, 0) &&
+                    (item.focusReason === Qt.TabFocusReason || item.focusReason === Qt.BacktabFocusReason)) {
+                Qt.callLater(moveFocusIntoView, scrollFocusTimer.forward)
                 return
             }
 
@@ -193,20 +211,18 @@ Flickable {
         // It is required to shift focus between controls on the settings page.
         SdlGamepadKeyNavigation.setUiNavMode(true)
 
-        var gamepadConnected = SdlGamepadKeyNavigation.getConnectedGamepads() > 0
         if (VrLauncher.available && VrLauncher.vrMode) {
-            // §UI-SCROLL：Steam Frame 的 VR 模式下，這一頁一打開就捲到 VR 那一區。它排在左欄最底下，
-            // 前面有幾十個選項；有手把時焦點也直接落在那一區的第一個選項。其他情況照舊從最上面開始。
-            if (gamepadConnected) {
-                vrEyeComboBox.forceActiveFocus(Qt.TabFocus)
-            }
+            // §UI-SCROLL：Steam Frame 的 VR 模式下，這一頁一打開就捲到 VR 那一區，焦點也放在那一區的第一個選項。
+            // 它排在左欄最底下，前面有幾十個選項。這裡不看有沒有偵測到手把：焦點留在頁面本身的話，
+            // 之後第一次按方向鍵，焦點會走到最上面的控制項、整頁跟著捲回頂端。其他情況照舊從最上面開始。
+            vrEyeComboBox.forceActiveFocus(Qt.TabFocus)
             // 焦點落下去時頁面只會捲到剛好露出那一個選項；這裡捲到整區的標題都看得到
             var groupTop = vrSettingsGroupBox.mapToItem(contentItem, 0, 0).y
             autoScrollAnimation.from = contentY
             autoScrollAnimation.to = Math.max(Math.min(groupTop - 10, contentHeight - height), 0)
             autoScrollAnimation.restart()
         }
-        else if (gamepadConnected) {
+        else if (SdlGamepadKeyNavigation.getConnectedGamepads() > 0) {
             // Highlight the first item if a gamepad is connected
             resolutionComboBox.forceActiveFocus(Qt.TabFocus)
         }

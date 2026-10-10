@@ -22,7 +22,9 @@ static bool s_InitFailed = false;
 // 原本手把只能靠「焦點一項一項往下移」讓頁面跟著捲：設定頁有幾十個選項，VR 那一區排在左欄最底下，
 // 用頭盔的控制器很難走到。這裡只算出要捲多少（單位＝一個可見高度）、發 scrollRequested，由那一頁自己捲。
 // 不合成滑鼠滾輪事件：那要看視窗裡滑鼠座標底下是什麼，也要看 Qt 怎麼處理合成事件的時戳，直接捲比較可靠。
-#define SCROLL_AXIS_DEADZONE 8000          // 右搖桿超過這個值才開始捲（約 25%）
+// 死區要明顯大於搖桿靜止時可能出現的值（XInput 建議的右搖桿死區是 8689）：接著的任何一支手把只要靜止值超過死區，
+// 設定頁就會一直收到捲動要求
+#define SCROLL_AXIS_DEADZONE 12000         // 右搖桿超過這個值才開始捲（約 37%）
 #define SCROLL_MAX_PAGES_PER_SEC 2.0       // 推到底的速度；速度跟推的幅度的平方成正比，輕推可以慢慢對位置
 #define SCROLL_BUTTON_PAGES 0.8            // LB／RB 一次捲多少
 
