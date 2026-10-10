@@ -353,6 +353,21 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         m_ProjFrames = 0;
         m_ProjNoMeta = 0;
     }
+    if (m_Options.pcvr && m_Options.pcvrLatchAbSec > 0) {
+        // §VR-LATCH A/B：會跟著切換的開關有哪幾個。兩個以上一起切就分不出是誰的效果——要比哪一個就只開那一個
+        QStringList armed;
+        if (m_Options.pcvrLatchRelatch && !m_Options.pcvrSynth) {
+            armed << QStringLiteral("latchRelatch");
+        }
+        if (pcvrLatchWaitEffUs() > 0) {
+            armed << QStringLiteral("latchWait");
+        }
+        if (armed.size() >= 2) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LDIAG] ab: %d switches are armed and will toggle together: %s",
+                        static_cast<int>(armed.size()), qUtf8Printable(armed.join(QStringLiteral(", "))));
+        }
+    }
+    pcvrApplyAb();  // §VR-LATCH A/B：起始的那一邊（切換從「關」開始）；frame thread 還沒起跑
     m_FrameThreadRunning.store(true, std::memory_order_release);
     m_FrameThread = std::thread(&XrContext::frameThreadMain, this);
 
@@ -1462,7 +1477,14 @@ void XrContext::maybeLogStats(uint64_t nowNs)
                 cpuP50, cpuP95, m_StaleState);
 #ifdef HAVE_XR_VIDEO
     if (m_Video != nullptr) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] 10s video %s", qUtf8Printable(m_Video->takeStatsLine()));
+        // §VR-LATCH A/B：開了切換時在行尾標這個視窗是哪一邊。這一行的 10 s 視窗是這個函式自己的計時，不是
+        // [VIPLE-VR-MTP10]／[VIPLE-VR-LDIAG] 的那一個：上一次印之後換過邊就標 m（兩邊混在一起，不拿來比）
+        const char* ab = "";
+        if (m_Options.pcvr && m_Options.pcvrLatchAbSec > 0) {
+            ab = m_PcvrTiming.abFlips != m_PcvrTiming.abFlipsAtVideoLog ? " ab=m" : (m_PcvrTiming.abOn ? " ab=1" : " ab=0");
+            m_PcvrTiming.abFlipsAtVideoLog = m_PcvrTiming.abFlips;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] 10s video %s%s", qUtf8Printable(m_Video->takeStatsLine()), ab);
     }
 #endif
     if (m_Options.pcvr) {
@@ -2695,9 +2717,19 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
             if (t.abElapsedSec >= static_cast<double>(m_Options.pcvrLatchAbSec)) {
                 t.abElapsedSec = 0.0;
                 t.abOn = !t.abOn;
+                t.abFlips++;
+                pcvrApplyAb();
             }
         }
     }
+}
+
+// §VR-LATCH A/B：把「受切換控制的開關這一刻開不開」（pcvrAbActive）推給別的執行緒的唯一出口。bringUp 成功後、
+// frame thread 起跑前呼叫一次，之後每次換邊（上面的 10 s 區塊）在 frame thread 呼叫一次。frame thread 自己的功能
+// （relatch、等待）在用到的地方直接讀那個條件，不經這裡。decoder 與影像 render thread 那一側的開關之後接在這裡：
+// 寫各自的 atomic，那一側每張串流影像開頭讀一次、整張沿用。目前還沒有這種開關，所以沒有東西要推。
+void XrContext::pcvrApplyAb()
+{
 }
 
 // §VR-LATCH-WAIT 的 runtime 防護：frame thread，每秒一次（等待開著才呼叫）。「等這一格的影像」讓 frame thread 每一格

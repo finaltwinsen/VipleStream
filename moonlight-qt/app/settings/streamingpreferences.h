@@ -481,8 +481,10 @@ public:
     int cliLatchRelatch = -1;
     bool effectiveLatchRelatch() const { return cliLatchRelatch >= 0 ? cliLatchRelatch == 1 : vrLatchRelatch; }
     // §VR-LATCH A/B：每這麼多秒把 vrLatchRelatch（與 vrLatchWaitMs）在開／關之間切換一次，同一場裡比對；寫入設定
-    // （vrlatchabsec；0＝不切換，20～600）。沒有命令列選項
+    // （vrlatchabsec；0＝不切換，20～600）。--vr-latch-ab <秒> 只覆寫這一次、不存設定（負值＝命令列沒指定）
     int vrLatchAbSec = 0;
+    int cliLatchAbSec = -1;
+    int effectiveLatchAbSec() const { return cliLatchAbSec >= 0 ? cliLatchAbSec : vrLatchAbSec; }
     // §VR-LATCH-WAIT：延後挑影像之後，這一格該有的新影像還沒到就再等它，最多幾毫秒（0～1.0；0＝不等）；寫入設定
     // （vrlatchwaitms，預設 0）。「延後＋等待」超過 6.0 ms 的部分不等。--vr-latch-wait <ms> 只覆寫這一次、不存設定
     // （負值＝命令列沒指定）。補幀（vrSynth）開著時不作用

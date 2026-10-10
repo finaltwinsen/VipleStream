@@ -621,6 +621,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("vr-latch-wait", "PCVR: after --vr-latch-delay, wait up to this many milliseconds (0-1.0) for the stream frame that is due "
                           "on this display refresh when it has not arrived yet; the delay plus the wait never exceeds 6 ms "
                           "(this run only, the saved setting is not changed; no effect with --vr-synth; default 0)");
+    parser.addValueOption("vr-latch-ab", "(dev) PCVR: switch the armed latch experiments on and off every this many seconds (0 = off, 20-600), "
+                          "for a same-session comparison. Not saved.");
     parser.addChoiceOption("vr-repair-rtt", "PCVR multi-link: whether this client offers the repair rules that follow the measured round trip "
                            "(when to ask for lost packets again, how long to wait for them). They are used only when the host has "
                            "vr_multilink_repair_rtt enabled (this run only, the saved setting is not changed)",
@@ -973,6 +975,15 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError(QString("vr-latch-wait must be a number of milliseconds within 0-1.0: %1").arg(parser.value("vr-latch-wait")));
         }
         preferences->cliLatchWaitMs = ms;
+    }
+    if (parser.isSet("vr-latch-ab")) {
+        // §VR-LATCH A/B：只覆寫這一次（不改 vrLatchAbSec）。0＝這一場不切換，即使保存的設定有開
+        bool ok = false;
+        const int sec = parser.value("vr-latch-ab").toInt(&ok);
+        if (!ok || !(sec == 0 || (sec >= 20 && sec <= 600))) {
+            parser.showError(QString("vr-latch-ab must be 0 (off) or a number of seconds within 20-600: %1").arg(parser.value("vr-latch-ab")));
+        }
+        preferences->cliLatchAbSec = sec;
     }
     if (parser.isSet("vr-repair-rtt")) {
         // §VR-REPAIR-RTT：只覆寫這一次（不改 vrRepairRtt）

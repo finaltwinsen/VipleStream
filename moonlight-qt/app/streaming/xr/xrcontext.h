@@ -521,6 +521,10 @@ private:
         // §VR-LATCH A/B：目前是哪一邊（true＝開）、這一邊已經跑了幾秒
         bool abOn = false;
         double abElapsedSec = 0.0;
+        // 換過幾次邊、[VIPLE-XR] 10s video 上一次印的時候是第幾次（那一行的 10 s 視窗是另外計時的，上一次印之後
+        // 換過邊就標成 ab=m，見 maybeLogStats）
+        uint32_t abFlips = 0;
+        uint32_t abFlipsAtVideoLog = 0;
         // §VR-LATCH-WAIT：10 s 視窗——等了幾格、其中等到新影像的、等到逾時的
         uint32_t waited10s = 0;
         uint32_t waitSaved10s = 0;
@@ -560,6 +564,11 @@ private:
     void pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta, uint32_t echoSampleId,
                            const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs);
     void pcvrTimingTick(uint64_t nowNs, uint64_t periodNs);
+    // §VR-LATCH A/B：同場切換只有一個主人——換邊只發生在 pcvrTimingTick 的 10 s 區塊。受它控制的開關這一刻開不開：
+    // 沒開切換（pcvrLatchAbSec＝0）恆為開，否則看現在是哪一邊。只在 frame thread 呼叫
+    bool pcvrAbActive() const { return m_Options.pcvrLatchAbSec == 0 || m_PcvrTiming.abOn; }
+    // §VR-LATCH A/B：把 pcvrAbActive() 推給別的執行緒的唯一出口（見 .cpp）
+    void pcvrApplyAb();
 
     // §VR-LDIAG（2026-10-08）：逐張的發布／latch 量測，只附加、不影響呈現。全部只在 frame thread 存取。
     struct LatchDiag {

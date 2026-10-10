@@ -2763,7 +2763,7 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     xo.pcvrTrackRelock = xo.pcvrTrackLock && m_Preferences->effectiveTrackRelock();  // §VR-TRACK-RELOCK（--vr-track-relock 優先）
     xo.pcvrLatchDelayUs = m_XrPcvr ? static_cast<uint32_t>(m_Preferences->vrLatchDelayMs * 1000.0) : 0u;  // §VR-LATE-LATCH
     xo.pcvrLatchRelatch = m_XrPcvr && m_Preferences->effectiveLatchRelatch();  // §VR-LATCH-RELATCH（--vr-latch-relatch 優先）
-    xo.pcvrLatchAbSec = m_XrPcvr ? m_Preferences->vrLatchAbSec : 0;            // §VR-LATCH A/B
+    xo.pcvrLatchAbSec = m_XrPcvr ? m_Preferences->effectiveLatchAbSec() : 0;   // §VR-LATCH A/B（--vr-latch-ab 優先）
     // §VR-LATCH-WAIT（--vr-latch-wait 優先）。串流是不是半速要等量到更新率才知道，見 setupXrPcvr() 的 setPcvrStreamDiv
     xo.pcvrLatchWaitUs = m_XrPcvr ? static_cast<uint32_t>(std::lround(std::clamp(m_Preferences->effectiveLatchWaitMs(), 0.0, 1.0) * 1000.0)) : 0u;
     xo.pcvrOverscanDeg = m_XrPcvr ? static_cast<float>(m_Preferences->vrOverscanDeg) : 0.0f;  // dev：--vr-overscan

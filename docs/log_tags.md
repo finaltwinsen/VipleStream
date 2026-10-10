@@ -700,7 +700,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
                                                                                        wake2latch＝xrWaitFrame 返回到 latch；latchPhase＝latch 落在顯示格點之後多久；
                                                                                        age＝每個顯示格的內容年齡（**含重複的那幾格**，MTP10 不含）；
                                                                                        slackPub＝每張發布的影像到「第一個挑得到它的 latch」還有多久的直方圖（每格 250 µs；0 附近＝險過，接近一個週期＝剛錯過）；
-                                                                                       wait…＝§VR-LATCH-WAIT 開著時：實際上限、等了幾格、等到幾張、逾時幾次；ab＝vrlatchabsec 的同場 A/B 是哪一邊。
+                                                                                       wait…＝§VR-LATCH-WAIT 開著時：實際上限、等了幾格、等到幾張、逾時幾次；ab＝同場 A/B（vrlatchabsec／--vr-latch-ab）是哪一邊。
                                                                                        分類用每張影像的 pts（host 的 Present 時刻）：Present 間隔偏離半格以上的那幾次可能多算 gap 1＋early 1
 [VIPLE-VR-LDIAG] 60s gpu-by-phase (250 us bins after the display grid; n/avgUs/maxUs) <相位 ms>:<張數>/<平均 µs>/<最大 µs> …
                                                                                     ← client 每 60 s：影像 render thread 開始處理的時刻落在顯示格點之後多久 → 那一格的平均／最大處理時間。
@@ -828,6 +828,22 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
   PONG 晚兩趟、補包只晚一趟，本機模擬會高估補包趕得上的機率）。延後排在去重之後：同一則控制訊息兩條連線各送
   一份時，被延後的那條若先收到，整則訊息就照它晚處理（另一條的那一份被當成重複）——兩條連線的場次不要拿它量
   「控制訊息走快的那條」的時間。
+
+### 5b-6. 頭盔端管線的量測（2026-10-11）
+
+PCVR 走真 XR 時 client 這一側的量測：一律開著、不改變任何一格的呈現，既有欄位的定義、位置、數值都不變，只在既有行的
+行尾加欄位、另加幾種新行。之後要調頭盔端管線的每一步都拿它們當儀表。
+
+```
+同場切換（§VR-LATCH A/B）
+[VIPLE-VR-LDIAG] client cfg: …原樣… abSec=N                                   ← 既有欄位，現在印的是實際生效的值：`--vr-latch-ab <秒>`（dev，0 或 20～600；只覆寫這一次、
+                                                                                 不存設定，0＝這一場不切換）優先，沒帶才用保存的 `vrlatchabsec`
+[VIPLE-VR-LDIAG] ab: N switches are armed and will toggle together: latchRelatch, latchWait
+                                                                              ← warning，bring-up 時一次：開了同場切換、會跟著切的開關卻有兩個以上——分不出是誰的效果，
+                                                                                 要比哪一個就只開那一個
+[VIPLE-XR] 10s video …原樣… ab=<0|1|m>                                        ← 行尾新增（開了同場切換才印）。這一行的 10 秒視窗是它自己的計時，不是 [VIPLE-VR-MTP10]／
+                                                                                 [VIPLE-VR-LDIAG] 的那一個：m＝這個視窗裡換過邊（不拿來比），否則是現在這一邊
+```
 
 ### 探測的開始與結束行
 
