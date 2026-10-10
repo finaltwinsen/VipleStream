@@ -5,6 +5,7 @@
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"
 #include "streaming/vr/vrframemeta.h"
 
+#include <QFile>
 #include <QImage>
 
 #include <SDL.h>
@@ -590,6 +591,59 @@ void XrVideo::dumpTexture(pl_tex tex, const QString& path)
     saveDump(readbackTexture(tex), path, tex->params.w, tex->params.h);
 }
 
+void XrVideo::dumpSynthInputs(const QString& prevPath, const QString& curPath, const QString& flowPath)
+{
+    pl_gpu g = m_Vulkan->gpu;
+    // renderSynth 結束時 m_SmallCur 已經換到下一張要寫的那一格：它現在指的是上一張，另一格才是這一張
+    const pl_tex smalls[2] = {m_Small[m_SmallCur], m_Small[m_SmallCur ^ 1]};
+    const QString* paths[2] = {&prevPath, &curPath};
+    pl_tex flow = m_Flow;
+    for (pl_tex t : {smalls[0], smalls[1], flow}) {
+        if (t == nullptr || !t->params.host_readable) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] synth input dump skipped (texture not readable)");
+            return;
+        }
+    }
+    auto download = [g](pl_tex t, std::vector<uint8_t>* buf) {
+        const size_t texel = t->params.format->texel_size;
+        buf->resize(static_cast<size_t>(t->params.w) * static_cast<size_t>(t->params.h) * texel);
+        pl_tex_transfer_params tp = {};
+        tp.tex = t;
+        tp.ptr = buf->data();
+        tp.row_pitch = static_cast<size_t>(t->params.w) * texel;
+        return pl_tex_download(g, &tp);
+    };
+    for (int i = 0; i < 2; i++) {
+        pl_tex t = smalls[i];
+        std::vector<uint8_t> buf;
+        if (t->params.format->texel_size != 4 || !download(t, &buf)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] synth input dump: reading the 1/8 image failed");
+            return;
+        }
+        // 色版順序照材質的格式（多半是 RGBA）；離線只拿它算亮度，順序不影響比對
+        const QImage img(buf.data(), t->params.w, t->params.h, t->params.w * 4, QImage::Format_RGBA8888);
+        if (!img.save(*paths[i], "PNG")) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] synth input dump: saving %s failed", qUtf8Printable(*paths[i]));
+            return;
+        }
+    }
+    std::vector<uint8_t> fbuf;
+    QFile out(flowPath);
+    if (!download(flow, &fbuf) || !out.open(QIODevice::WriteOnly) ||
+        out.write(reinterpret_cast<const char*>(fbuf.data()), static_cast<qint64>(fbuf.size())) != static_cast<qint64>(fbuf.size())) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] synth input dump: saving %s failed", qUtf8Printable(flowPath));
+        return;
+    }
+    float fv[4];
+    float fvCyR;
+    loadFoveation(fv, &fvCyR);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR] synth input dump: %s small=%dx%d(%s) flow=%dx%d(%s, %d bytes/texel) fv=(%.4f,%.4f,%.4f,%.4f,%.4f)",
+                qUtf8Printable(flowPath), smalls[1]->params.w, smalls[1]->params.h, smalls[1]->params.format->name,
+                flow->params.w, flow->params.h, flow->params.format->name, static_cast<int>(flow->params.format->texel_size),
+                fv[0], fv[1], fv[2], fv[3], fvCyR);
+}
+
 bool XrVideo::renderNewFrame(AVFrame* frame)
 {
     const uint64_t t0 = nowUs();
@@ -859,6 +913,15 @@ bool XrVideo::renderNewFrame(AVFrame* frame)
         dumpTexture(tex2, dumpPathFor(""));
         // 第一次發布的那一張存成 <路徑>-first.png（副檔名之前插 -first）
         saveDump(firstDump, dumpPathFor("-first"), firstDumpW, firstDumpH);
+        if (synthOk) {
+            // 估位移用到的兩張縮圖與位移場：<路徑>-prev8.png、-cur8.png、-flow.bin
+            QString flowPath = dumpPathFor("-flow");
+            if (flowPath.endsWith(QLatin1String(".png"), Qt::CaseInsensitive)) {
+                flowPath.chop(4);
+            }
+            flowPath += QLatin1String(".bin");
+            dumpSynthInputs(dumpPathFor("-prev8"), dumpPathFor("-cur8"), flowPath);
+        }
         m_DumpsDone++;
     }
     const int fin2 = finishGpu(tex2);
@@ -1229,13 +1292,16 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     pl_fmt fmtSmall = pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
     pl_fmt fmtFlow = pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps);
     const int sw = std::max(16, fw / 8), sh = std::max(16, fh / 8);
-    auto mk = [g](pl_tex* t, int w, int h, pl_fmt f) {
+    // dev：帶了 --xr-dump-frame 時這幾張要能讀回（dumpSynthInputs）。格式不支援讀回就照舊建立，只是那幾個檔不會存
+    const bool devRead = !m_Config.dumpPath.isEmpty();
+    auto mk = [g, devRead](pl_tex* t, int w, int h, pl_fmt f) {
         pl_tex_params tp = {};
         tp.w = w;
         tp.h = h;
         tp.format = f;
         tp.sampleable = true;
         tp.renderable = true;
+        tp.host_readable = devRead && (f->caps & PL_FMT_CAP_HOST_READABLE) != 0;
         return pl_tex_recreate(g, t, &tp);
     };
     (void) wantFloat;

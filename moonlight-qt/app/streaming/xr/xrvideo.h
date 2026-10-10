@@ -209,6 +209,10 @@ private:
     // 分成兩步是為了 §VR-SYNTH：第一次發布的那一張要在 hold 之前讀回，等確定這一幀有合成影像才存。
     QImage readbackTexture(pl_tex tex);
     void saveDump(const QImage& img, const QString& path, int srcW, int srcH);
+    // dev（--xr-dump-frame，補幀開著時）：把這一張估位移用到的東西也存下來——上一張與這一張的 1/8 縮圖（PNG）和位移場
+    // （原始資料：寬×高×4 個 float16，xy＝剩餘位移（UV，上一張的位置 − 這一張的位置）、z＝比對成本）。存下來的那一組
+    // 影像只看得出「合成的那一張和真的差在哪」，看不出在動的東西是不是往對的方向、推了對的距離；有這三個檔才能離線核對。
+    void dumpSynthInputs(const QString& prevPath, const QString& curPath, const QString& flowPath);
     void renderThreadMain();
     void reapRetired();
     // §VR-LDIAG（dev）：這一張串流影像要延後幾微秒（沒開注入時恆為 0）。只在影像 render thread 呼叫
