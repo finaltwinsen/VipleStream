@@ -1,0 +1,54 @@
+# §VR-REPAIR-RTT 變異測試的結果（python mutate.py --update 產生，不要手改）。
+# 每行：<變異> | <規則> | <改的檔> | <改了什麼> | <第一個失敗的測試>
+# 測試的順序：VrRepairRtt.h＝unit→scen→matrix→golden→fuzz→gtest；RtpVideoQueue.c＝unit→scen→matrix→golden→fuzz；
+# vr_multilink_logic.h＝gtest→scen→matrix→golden→fuzz；「現行規則不變」那幾列先跑 golden。
+# SURVIVED＝沒有任何測試失敗（不該出現）；標成「等價」的那幾列本來就不該有測試失敗，理由寫在同一列。
+baseline | （對照） | — | 沒有改動 | 全部通過
+gate-limit | 門檻 | VrRepairRtt.h | 門檻由 25 ms 放寬到 35 ms | unit
+gate-hyst | 門檻 | VrRepairRtt.h | 門檻沒有遲滯 | unit
+eta | 估計 eta | VrRepairRtt.h | eta 少了四分之一的餘裕 | unit
+eta-try | 估計 etaTry | VrRepairRtt.h | etaTry 少了 2 ms | unit
+eta-fast | 估計 etaFast | VrRepairRtt.h | etaFast 少了 2 ms | unit
+rtt-hi | 往返的高估值 | VrRepairRtt.h | hi 取最大值而不是第二大 | unit
+rtt-carry | 只看在送的連線 | VrRepairRtt.h | 往返的統計不分連線有沒有在送影像 | unit
+cap-max | 等待上限 | VrRepairRtt.h | 等待上限的封頂由 33 ms 改成 48 ms | unit
+cap-floor | 等待上限 | VrRepairRtt.h | 等待上限的下限由 2×hold 改成 1×hold | unit
+retry-feasible | 重報 | VrRepairRtt.h | 重報不看趕不趕得上期限 | unit
+retry-interval | 重報 | VrRepairRtt.h | 重報的間隔由 eta 改成 etaFast | unit
+deadline-unasked | 等到什麼時候 | VrRepairRtt.h | 沒報過、現在報也趕不上的 block 照樣等到上限 | unit
+holdoff | 放棄後暫停 | VrRepairRtt.h | 放棄之後的暫停長度變成 0 | unit
+ahead-max | 預先回報 | VrRepairRtt.h | 一次最多預先回報 5 幀 | unit
+too-many | 預先回報 | VrRepairRtt.h | 缺的幀數不設上限 | unit
+breaker-streak | 保險 | VrRepairRtt.h | 連續 4 次失敗才暫停 | unit
+breaker-backoff | 保險 | VrRepairRtt.h | 暫停的時間不加倍 | unit
+switch-latched | 規則切換 | VrRepairRtt.h | 規則切換時不沿用到正在等的 block 結束 | unit
+single-link-only | 規則切換 | VrRepairRtt.h | 兩條連線在送時也用 RTT 規則 | unit
+legacy-gate | 現行規則不變 | VrRepairRtt.h | 現行規則的門檻多 1 ms | golden
+idle-auto | 第一份回報 | VrRepairRtt.h | idle 的預設做法一律 3 ms | unit
+idle-size | 第一份回報 | VrRepairRtt.h | 「小的 block」由 32 個 shard 改成 64 個 | unit
+nack-flags | NACK 的旗標 | VrRepairRtt.h | eta 換成毫秒時無條件捨去 | unit
+cannot-be-repair | 量測 | VrRepairRtt.h | 回報之後到的封包一律當成補包 | unit
+q-retry-silent | 重報 | RtpVideoQueue.c | 鏈路靜默時照樣重報 | scen
+q-refund | 重報 | RtpVideoQueue.c | RTT 規則也用「退還」 | scen
+q-deadline-unasked | 等到什麼時候 | RtpVideoQueue.c | 沒報過的 block 也當成報過（現在報趕不上的照樣等到上限） | scen
+q-first-feasible | 第一份回報 | RtpVideoQueue.c | nkNextDueUs 裡第一份回報不看值不值得 | 沒有測試失敗（等價的變異：有後面的封包在排隊時，同一個條件先讓 mlHeadDeadlineUs 不等、直接放棄，走不到回報；沒有時門檻保證 etaTry ≤ cap，恆為值得）
+q-idle-policy | 第一份回報 | RtpVideoQueue.c | 「多久沒有新封包」一律 3 ms | scen
+q-ahead-send | 預先回報 | RtpVideoQueue.c | 後面整幀沒到的幀不預先回報 | scen
+q-too-many | 預先回報 | RtpVideoQueue.c | 缺太多幀時照樣一幀一幀補 | scen
+q-pre-consume | 預先回報 | RtpVideoQueue.c | 預先報過的幀輪到時不算報過 | scen
+q-pre-gone | 預先回報 | RtpVideoQueue.c | 預先報的幀收到 REPAIR_GONE 不記 | scen
+q-holdoff | 放棄後暫停 | RtpVideoQueue.c | 放棄之後不暫停 | scen
+q-deadline-cap | 等待上限 | RtpVideoQueue.c | 等待的期限變成兩倍的上限 | scen
+q-latched | 規則切換 | RtpVideoQueue.c | 正在等的 block 不回報「沿用規則」 | scen
+q-nack-flags | NACK 的旗標 | RtpVideoQueue.c | 回報不帶旗標（server 照原本的年齡上限） | scen
+q-used | 保險 | RtpVideoQueue.c | 自己晚到湊齊的 block 也算「補包用上了」 | scen
+q-legacy-idle | 現行規則不變 | RtpVideoQueue.c | 現行規則的 3 ms 改成 4 ms | golden
+q-legacy-clock | 現行規則不變 | RtpVideoQueue.c | 每個封包多讀一次時鐘（時間軸差 1 µs） | golden
+s-max-age | server 的年齡上限 | vr_multilink_logic.h | 帶旗標的回報的年齡上限由 100 ms 改成 50 ms | gtest
+s-max-age-flag | server 的年齡上限 | vr_multilink_logic.h | 沒帶旗標的回報也放寬到 100 ms | gtest
+s-gap | server「還在路上」的視窗 | vr_multilink_logic.h | 視窗由 eta 的四分之三改成整個 eta | gtest
+s-gap-flag | server「還在路上」的視窗 | vr_multilink_logic.h | 沒帶旗標的回報也用 eta 算視窗 | gtest
+s-master-switch | 協商 | vr_multilink_logic.h | server 的主開關關著也同意 | gtest
+s-needs-repair | 協商 | vr_multilink_logic.h | client 沒提 REPAIR 也同意（RTT 跟著成立） | gtest
+s-flag-negotiated | NACK 的旗標 | vr_multilink_logic.h | 沒協商也看旗標 | gtest
+s-parse-flags | NACK 的旗標 | vr_multilink_logic.h | 解析 NACK 時不讀 flags | gtest
