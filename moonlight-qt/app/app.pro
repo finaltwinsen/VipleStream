@@ -350,6 +350,7 @@ HEADERS += \
     streaming/video/v4l2/v4l2caps.h \
     streaming/xr/xrlatchstats.h \
     streaming/xr/xrphase.h \
+    streaming/xr/xrvideostats.h \
     streaming/xr/xrruntimejson.h
 
 # 上面幾個檔在 Linux 會 dlopen（Vulkan loader、OpenXR runtime 的診斷）。glibc 2.34 起

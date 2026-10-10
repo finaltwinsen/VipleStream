@@ -925,14 +925,17 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
 
 自測
-[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑三組、一共 61 個案例：原有的 27 個（輸出不變）；
-                                                                                 `latch-wait-…`／`latch-flip-…`／`latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到
-                                                                                 計數：差一點、真的晚、150 µs 的邊界、半速、基準過期、兩張擠在同一格、沒有送出時刻、分格的
-                                                                                 邊界、隨機腳本的自洽）；xrphase.h 的 19 個：`phase-…` 17 個（LDIAG 相位 ↔ vblank 相位、
-                                                                                 120 Hz 的判斷、交出相位的分類、延遲鏈與 events 的算式，以及相位的環狀中位數：橫跨接縫的
-                                                                                 一群、整群轉任何角度、散滿整圈的視窗、離群值、不折回的 p95／max、邊界）、
-                                                                                 `rank-scan-matches-sort`（10 秒行那些分位數的取法，逐一和排序的結果比對）與
-                                                                                 `ab-window-side`（同場切換時一個視窗算哪一邊）
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑三個純邏輯 header 的自測、一共 71 個案例。
+                                                                                 xrlatchstats.h：原有的 27 個（輸出不變），加上 `latch-wait-…`／`latch-flip-…`／
+                                                                                 `latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到計數：差一點、真的晚、150 µs 的
+                                                                                 邊界、半速、基準過期、兩張擠在同一格、沒有送出時刻、分格的邊界、隨機腳本的自洽）；
+                                                                                 xrphase.h 的 19 個：`phase-…` 17 個（LDIAG 相位 ↔ vblank 相位、120 Hz 的判斷、交出相位的
+                                                                                 分類、延遲鏈與 events 的算式，以及相位的環狀中位數：橫跨接縫的一群、整群轉任何角度、
+                                                                                 散滿整圈的視窗、離群值、不折回的 p95／max、邊界）、`rank-scan-matches-sort`（10 秒行那些
+                                                                                 分位數的取法，逐一和排序的結果比對）與 `ab-window-side`（同場切換時一個視窗算哪一邊）；
+                                                                                 xrvideostats.h 的 10 個：`video-…` 7 個（`10s video` 行尾那一段：空的視窗、全速、補幀那一批
+                                                                                 橫跨接縫、沒有顯示格點、別的更新率、分位數的位置、視窗的輪替）與 `pass-…` 3 個
+                                                                                 （[VIPLE-VR-PASS]：pass 的名稱怎麼認、60 秒那一行、沒有計時只說一次）
 ```
 
 - 相位有兩種座標：這份文件裡 `latchPhase`、`gpu-by-phase` 與這一節新增的相位欄位都是 **LDIAG 相位**（原點是預測顯示時刻的

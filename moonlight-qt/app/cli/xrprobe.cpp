@@ -20,6 +20,7 @@
 #include "backend/sfenv.h"
 #include "streaming/xr/xrlatchstats.h"  // §VR-LDIAG：--selftest-latch（header-only，沒有 OpenXR 的建置也有）
 #include "streaming/xr/xrphase.h"       // §VR-XRLOOP：相位換算（同上，--selftest-latch 接著跑它的案例）
+#include "streaming/xr/xrvideostats.h"  // §VR-XRLOOP／§VR-PASS：10s video 行尾與 pass 計時的組字串（同上）
 #include "streaming/xr/xrruntimejson.h"
 
 #ifdef HAVE_OPENXR
@@ -378,6 +379,7 @@ int runXrProbe(const XrProbeOptions& options)
         // 純邏輯的 header 各有一個 selfTest()，依序跑（先 xrlatchstats.h 原有的，其餘接在後面）
         int failures = xrlatch::selfTest(report);
         failures += xrphase::selfTest(report);
+        failures += xrvideostats::selfTest(report);
         ProbeUtil::printLine(kTag, "selftest-latch: %lld case(s), %d failure(s)", static_cast<long long>(cases.size()), failures);
         root[QStringLiteral("cases")] = cases;
         root[QStringLiteral("failures")] = failures;

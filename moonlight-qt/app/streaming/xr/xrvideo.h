@@ -32,7 +32,7 @@
 
 #include "xrcontext.h"
 #include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Jitter（dev 的到達抖動注入）
-#include "xrphase.h"       // §VR-XRLOOP：xrphase::RankScan（10s video 行尾的分位數）
+#include "xrvideostats.h"  // §VR-XRLOOP／§VR-PASS：RenderDiag（10s video 行尾那幾欄）、PassStats（header-only）
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"  // §SF-DMABUF-CACHE：DrmTexCache
 
 #include <QImage>
@@ -332,165 +332,15 @@ private:
     std::vector<uint32_t> m_GpuUs;     // 本視窗每新幀等 GPU 做完的時間
     std::vector<uint32_t> m_SynthGpuUs;  // §VR-SYNTH：真的那一張發布之後，到合成那一張做完的時間
     std::vector<uint32_t> m_JitUs;     // §VR-LDIAG（dev）：本視窗被注入延後的影像各延後多久
-    // §VR-XRLOOP（量測）：影像 render thread 這一側的 10 s 視窗（[VIPLE-XR] 10s video 行尾那幾欄）。相位是 LDIAG 的
-    // 座標（顯示格點之後多久，µs），沒有格點時不記
-    struct RenderDiag {
-        std::vector<uint32_t> mboxUs;            // 解碼幀在 mailbox 裡等了多久（放進去 → 影像 render thread 取出）
-        std::vector<uint32_t> swWaitUs;          // xrWaitSwapchainImage 這個呼叫花多久
-        std::vector<uint32_t> subPhaseUs;        // 送出（pl_vulkan_hold_ex 返回）的相位
-        std::vector<uint32_t> donePhaseUs;       // GPU 做完的相位
-        std::vector<uint32_t> synthSubPhaseUs;   // §VR-SYNTH：補幀那一批送出的相位
-        std::vector<uint32_t> synthDonePhaseUs;  //            與做完的相位
-        uint32_t phasePeriodUs = 0;   // 上面四組相位是對哪一個顯示週期取的（最近推進去的那一筆；0＝這個視窗還沒有）
-        uint32_t swNotOk = 0;         // xrWaitSwapchainImage 回的不是 XR_SUCCESS 的次數
-        uint32_t relMaxUs = 0;        // xrReleaseSwapchainImage 這個呼叫的最大值
-        uint32_t handoffN = 0;        // 顯示是 120 Hz 時：分過類的張數，
-        uint32_t handoffPreempt = 0;  //   其中送出的相位落在「做到一半會被合成器插隊」那一段的，
-        uint32_t handoffQueued = 0;   //   與「排在合成器後面」那一段的（見 xrphase::handoffClass）
-        xrphase::RankScan rank;       // statsTail 算分位數用的（緩衝區留著重用；整包交換時跟著換，無妨）
-        void clear()
-        {
-            mboxUs.clear();
-            swWaitUs.clear();
-            subPhaseUs.clear();
-            donePhaseUs.clear();
-            synthSubPhaseUs.clear();
-            synthDonePhaseUs.clear();
-            phasePeriodUs = swNotOk = relMaxUs = handoffN = handoffPreempt = handoffQueued = 0;
-        }
-        // 120 Hz、10 s 約 1200 筆：先配好，之後往裡面推不必配置記憶體（clear() 與整包交換都留著空間）
-        void reserveWindow()
-        {
-            for (std::vector<uint32_t>* v : {&mboxUs, &swWaitUs, &subPhaseUs, &donePhaseUs, &synthSubPhaseUs, &synthDonePhaseUs}) {
-                v->reserve(2048);
-            }
-            rank.prepare();
-        }
-        // 組出 [VIPLE-XR] 10s video 行尾的那一段。每個視窗掃一遍取分位數（xrphase::RankScan，不排序）；位置和
-        // takeStatsLine 既有的取法相同（p50＝第 n/2 個、p95＝第 n×95/100 個）。只用標準函式庫，可以單獨測
-        //   mbox＝解碼幀在 mailbox 裡等多久；swWait＝xrWaitSwapchainImage、swNotOk＝它回的不是 XR_SUCCESS 的次數；
-        //   rel＝xrReleaseSwapchainImage；sub／done＝送出（這張影像最後一筆 GPU 工作送出去）與 GPU 做完的相位；
-        //   coll／queued＝送出的相位落在「做到一半會被合成器插隊」「排在合成器後面」那兩段的比例。
-        //   沒有樣本的相位（沒有顯示格點，例如 XR 桌面）與沒有分過類的比例（顯示不是 120 Hz）印 -
-        // 相位的 p50 不是照數值的大小取的：相位是環，一群樣本橫跨 0／週期的接縫時（補幀那一批做完的時刻就落在那裡）
-        // 照數值取會差好幾毫秒。取的是環狀的中位數（前半圈、後半圈各有一半樣本的那一點），見 xrphase::phaseCut
-        std::string statsTail(bool synth)
-        {
-            auto p95index = [](size_t n) { return n == 0 ? static_cast<size_t>(0) : (std::min)(n - 1, (n * 95) / 100); };
-            auto phase50 = [this](const std::vector<uint32_t>& v) {
-                return v.empty() ? std::string("-") : std::to_string(xrphase::phaseMedianUs(rank, v, phasePeriodUs));
-            };
-            auto share = [&](uint32_t n) {
-                if (handoffN == 0) {
-                    return std::string("-");
-                }
-                char pct[16];
-                std::snprintf(pct, sizeof(pct), "%.1f", 100.0 * static_cast<double>(n) / static_cast<double>(handoffN));
-                return std::string(pct);
-            };
-            rank.scan(mboxUs);
-            const double mbox50 = static_cast<double>(rank.nth(mboxUs.size() / 2)) / 1000.0;
-            const double mbox95 = static_cast<double>(rank.nth(p95index(mboxUs.size()))) / 1000.0;
-            rank.scan(swWaitUs);
-            const double swWait95 = static_cast<double>(rank.nth(p95index(swWaitUs.size()))) / 1000.0;
-            const double swWaitMax = static_cast<double>(rank.maxValue()) / 1000.0;
-            char head[160];
-            std::snprintf(head, sizeof(head), " | mbox p50/p95=%.2f/%.2f ms swWait p95/max=%.2f/%.2f ms swNotOk=%u rel max=%u us", mbox50,
-                          mbox95, swWait95, swWaitMax, swNotOk, relMaxUs);
-            std::string s = head;
-            s += " | sub/done p50=" + phase50(subPhaseUs) + "/" + phase50(donePhaseUs) + " us coll=" + share(handoffPreempt) +
-                 "% queued=" + share(handoffQueued) + "%";
-            if (synth) {
-                // §VR-SYNTH：補幀那一批送出與做完的相位
-                s += " synthSub/synthDone p50=" + phase50(synthSubPhaseUs) + "/" + phase50(synthDonePhaseUs) + " us";
-            }
-            return s;
-        }
-    };
+    // §VR-XRLOOP（量測）：影像 render thread 這一側的 10 s 視窗（[VIPLE-XR] 10s video 行尾那幾欄）。結構本身——分位數
+    // 怎麼取、字串怎麼組——在 xrvideostats.h（純邏輯、有自測）；這裡只管什麼時候推、拿哪把鎖
+    using RenderDiag = xrvideostats::RenderDiag;
     RenderDiag m_Diag;       // m_StatsMutex
     RenderDiag m_DiagTake;   // 只在 XR frame thread（takeStatsLine）：上一個視窗整包換出來，在鎖外算分位數
-    // §VR-PASS（量測）：每個 pass 的 GPU 時間。libplacebo 每個 pass 本來就帶 GPU 計時器、每次執行都查結果，這裡只是掛
-    // callback 把數字接出來，不會多任何 GPU 指令。callback 在 pl_render_image／pl_dispatch_finish 裡同步被呼叫，
-    // 所以這一包只在影像 render thread 用。只用標準函式庫，可以單獨測
-    struct PassStats {
-        // convert＝pl_render_image 的 pass（解碼出來的影像轉成 RGB；依它在那一次算繪裡的序號，3 以上併在 Convert3）；
-        // 其餘是我們自己的 pass。Flow 的粗、細兩層是同一個 shader，記在一起
-        enum Slot { Convert0, Convert1, Convert2, Convert3, Unwarp, Down8, Down16, Flow, Combine, Other, SlotCount };
-        struct Stat {
-            uint32_t n = 0;
-            uint64_t sumNs = 0, minNs = 0, maxNs = 0;
-        };
-        Stat stat[SlotCount];
-        uint64_t windowStartUs = 0;      // 這個 60 秒視窗的起點（0＝還沒開始）
-        bool everSampled = false;        // 印過有數字的一行了
-        bool unavailableLogged = false;  // 印過「這顆驅動沒有計時」了
-
-        static int slotForConvert(int index) { return index <= 0 ? Convert0 : (index >= 3 ? Convert3 : Convert0 + index); }
-        // 我們自己的 pass 用 pl_custom_shader 的 description 認（子字串）；"downscale 16" 要排在 "downscale" 前面
-        static int slotForDescription(const char* desc)
-        {
-            if (desc == nullptr) {
-                return Other;
-            }
-            const std::string d(desc);
-            auto has = [&d](const char* what) { return d.find(what) != std::string::npos; };
-            return has("fovea unwarp") ? Unwarp
-                   : has("synth downscale 16") ? Down16
-                   : has("synth downscale") ? Down8
-                   : has("synth flow") ? Flow
-                   : has("synth combine") ? Combine
-                   : Other;
-        }
-        void note(int slot, uint64_t ns)
-        {
-            if (slot < 0 || slot >= SlotCount) {
-                return;
-            }
-            Stat& s = stat[slot];
-            s.minNs = s.n == 0 ? ns : (std::min)(s.minNs, ns);
-            s.maxNs = (std::max)(s.maxNs, ns);
-            s.sumNs += ns;
-            s.n++;
-        }
-        // 每張影像畫完呼叫一次。滿 60 秒就回傳要印的那一行並清掉視窗；還沒到、或沒有東西要印回空字串。
-        // 只列這 60 秒有樣本的名稱（次數／平均／最小／最大，µs）。開場的 60 秒一筆樣本都沒有＝這顆驅動的佇列
-        // 不支援時間戳查詢（libplacebo 靜默略過）：印一次說明，之後不再印
-        std::string takeLine(uint64_t nowUs)
-        {
-            if (windowStartUs == 0) {
-                windowStartUs = nowUs;
-                return std::string();
-            }
-            if (nowUs - windowStartUs < 60000000ull) {
-                return std::string();
-            }
-            windowStartUs = nowUs;
-            static const char* const kName[SlotCount] = {"convert0", "convert1", "convert2", "convert3", "unwarp",
-                                                         "down8",    "down16",   "flow",     "combine",  "other"};
-            std::string fields;
-            for (int i = 0; i < SlotCount; i++) {
-                const Stat& s = stat[i];
-                if (s.n == 0) {
-                    continue;
-                }
-                char buf[96];
-                std::snprintf(buf, sizeof(buf), " %s:%u/%llu/%llu/%llu", kName[i], s.n,
-                              static_cast<unsigned long long>(s.sumNs / s.n / 1000u), static_cast<unsigned long long>(s.minNs / 1000u),
-                              static_cast<unsigned long long>(s.maxNs / 1000u));
-                fields += buf;
-                stat[i] = Stat();
-            }
-            if (!fields.empty()) {
-                everSampled = true;
-                return "[VIPLE-VR-PASS] 60s" + fields;
-            }
-            if (!everSampled && !unavailableLogged) {
-                unavailableLogged = true;
-                return std::string("[VIPLE-VR-PASS] pass timers unavailable on this driver");
-            }
-            return std::string();
-        }
-    };
+    // §VR-PASS（量測）：每個 pass 的 GPU 時間（結構在 xrvideostats.h）。libplacebo 每個 pass 本來就帶 GPU 計時器、每次
+    // 執行都查結果，這裡只是掛 callback 把數字接出來，不會多任何 GPU 指令。callback 在 pl_render_image／
+    // pl_dispatch_finish 裡同步被呼叫，所以這一包只在影像 render thread 用
+    using PassStats = xrvideostats::PassStats;
     PassStats m_PassStats;
     pl_render_params m_RenderParams = {};  // pl_render_fast_params；passTimers 開著時多掛 info_callback（init() 設）
     static void passInfoCb(void* priv, const pl_dispatch_info* info);   // m_Dp 的 pass
