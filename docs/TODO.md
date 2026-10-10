@@ -133,12 +133,10 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
       再決定要不要做。
     - 讓合成器固定自己合成（與遊戲的幀脫鉤；儀表板開著時就是這個狀態，代價是遊戲幀率再低一些、多一次重新取樣）：只評估。
     - driver 的 `Present()` 等合成器同步貼圖也是寫死的 5 ms（第二個固定門檻，這次沒有踩到）。
-  - **server 停止時偶爾收不乾淨、等滿 10 秒被強制結束**（2026-10-10 發現）：`<host>` 的事件記錄三天內有 68 筆
-    `viplestream-server.exe` 的 APPCRASH（例外 0x80000003），時間都對得上 service 的重啟——那是 `main.cpp` 的
-    「10 seconds passed, yet VipleStream-Server's still running: Forcing shutdown」之後的 `debug_trap()`。不是每次都發生
-    （10-10 的九次重啟裡兩次），也不是哪一版才有。對串流沒有影響（本來就在停止），但每次多等 10 秒、留下一筆當機紀錄，
-    而且表示有執行緒沒有在期限內結束。`sunshine.log` 在下一次啟動時就被清掉，要先停止 service、讀完 log 再啟動才看得到是誰
-    卡住（先懷疑正在進行中的 UPnP 探測）。
+  - server 停止時偶爾收不乾淨、等滿 10 秒被強制結束（`<host>` 的事件記錄三天 68 筆 APPCRASH 0x80000003）：2026-10-10 查到原因並修掉——
+    中繼（`relay.cpp`）與 STUN（`stun.cpp`）兩條執行緒用 `pop()` 等整個行程共用的關閉事件，會把事件取走，自己或別的執行緒就等不到。
+    改成只看不取（`view()`）；STUN 另外明確成「啟動時探測一次」（原本的迴圈條件寫反了，實際上一直就是這樣）。
+    還沒做的：STUN 的公開位址只在啟動時量一次，要週期性更新得先換一種不佔用控制埠的探測方式（現在用 SO_REUSEADDR 綁在控制埠上）。
   - `Sunshine/tests/integration/test_config_consistency.cpp` 的 AllConfigOptionsExistInAllFiles 在 vr_* 的設定鍵上本來就會失敗
     （這些鍵沒有進 web UI 的 config.html／en.json）；要嘛把 vr_* 列進該測試的 internalOptions，要嘛補進 web UI。
   - 開場 30～40 s 的重複，七到九成是 host 在 SteamVR 啟動與遊戲載入時沒出幀（每場 200～250 張），需要 host 給「遊戲開始出幀
@@ -154,6 +152,9 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
     已修、只有單元測試、要等配戴場次的 log 確認：(4) 半速時 `<host>` 的 §VR-PREDICT 不調整、起始值算錯（整場姿態超前約 23 ms；
     `/launch` 新增選填的 `vrDispHz`）。**待使用者重新配戴**。還沒做的：
     - `--vr-synthetic-hmd` 時姿態誤差／落後改拿合成的姿態當基準，讓無人場次量得到姿態落後（第 4 項就是因為量不到才一直沒被看到）。
+    - 不帶 `vrDispHz` 的舊 client 開半速時，`<host>` 把那一場學到的姿態預測時間存成「60 Hz 頭盔」的那一筆，之後同一個 server
+      行程開全速會由它換算（偏小約 11 ms、約 20 秒追回）。只發生在新 server 配舊 client；根治：收到 CLIENT_TIMING 的顯示週期
+      之後把這一場的鍵改對。
     - 補幀的防護觸發後記帳沒有跟著改：下一格會再顯示一次真的那一張、合成那一格晚一格才出現，LDIAG 也多記一次 lateShift
       （穩態每 10 秒 0～1 次）。
     - 半速時 `<host>` 的 v2 LATCH 會吃到「晚一格才顯示」的影像的折返樣本、往反方向修（slips 每分鐘 9～16 次，全速 3～5 次）：
