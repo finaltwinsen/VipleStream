@@ -2918,7 +2918,8 @@ void XrContext::pcvrLatchDiagLog()
 
 // §VR-XRLOOP：10 s 一行，緊接在 [VIPLE-VR-LDIAG] 10s 之後（同一個視窗、同一個 ab=）。frame loop 每一格的時刻；
 // 相位都是 LDIAG 的座標（原點是預測顯示時刻的格點；換成距 vblank 多久見 xrphase.h）。
-//  - wakePhase：xrWaitFrame 返回的相位。latchLead／endLead：挑影像／xrEndFrame 返回的那一刻到這一格的預測顯示時刻
+//  - wakePhase：xrWaitFrame 返回的相位（p50 是環狀的中位數；p95、max 從 p50 往晚的方向數，晚到繞過格點的那一格會
+//    超過一個週期）。latchLead／endLead：挑影像／xrEndFrame 返回的那一刻到這一格的預測顯示時刻
 //    還有多久；p05 與 min 是最晚的那幾格。span：xrWaitFrame 返回 → xrEndFrame 返回（runtime 自己記的
 //    ApplicationTime CPU 最貼近這一段）。
 //  - beginCall／endCall：xrBeginFrame、xrEndFrame 這兩個呼叫本身花多久。
@@ -2935,8 +2936,15 @@ void XrContext::pcvrLoopDiagLog()
     // 一個視窗掃一遍、要幾個分位數就取幾個（位置和 pctOf 相同）。這裡一共十幾個，逐一 nth_element 太久，見 RankScan
     xrphase::RankScan& r = d.rank;
     auto u32 = [](int64_t v) { return static_cast<uint32_t>((std::max<int64_t>)(0, (std::min<int64_t>)(v, 0xffffffffll))); };
+    // wakePhase 是相位，相位是環（見 xrphase::phaseCut）：p50 取環狀的中位數、折回 [0, 週期)；p95 與 max 接在 p50 後面
+    // 往晚的方向數、不折回——晚到繞過格點的那一格會讓 max 超過一個週期，不會折成一個很小的數字而看不出來
     r.scan(d.wakePhaseUs);
-    const uint32_t wakeP50 = u32(r.at(0.50)), wakeP95 = u32(r.at(0.95)), wakeMax = u32(r.maxValue());
+    const xrphase::PhaseCut wakeCut = xrphase::phaseCut(d.wakePhaseUs, d.phasePeriodUs);
+    const int64_t wake50 = xrphase::phaseAtFromCut(r, wakeCut, d.phasePeriodUs, 0.50);
+    const int64_t wakeFolded = d.phasePeriodUs != 0 ? wake50 % static_cast<int64_t>(d.phasePeriodUs) : wake50;
+    const uint32_t wakeP50 = u32(wakeFolded);
+    const uint32_t wakeP95 = u32(wakeFolded + (xrphase::phaseAtFromCut(r, wakeCut, d.phasePeriodUs, 0.95) - wake50));
+    const uint32_t wakeMax = u32(wakeFolded + (xrphase::phaseAtFromCut(r, wakeCut, d.phasePeriodUs, 1.0) - wake50));
     r.scan(d.latchLeadUs);
     const uint32_t leadP50 = u32(r.at(0.50)), leadP05 = u32(r.at(0.05));
     r.scan(d.endLeadUs);
@@ -3088,7 +3096,8 @@ void XrContext::pcvrLoopDiag(uint64_t wakeNs, uint64_t latchNs, uint64_t endCall
     // （沒有擴充時每一格都是估計值，照記，行尾標 approx）
     const uint64_t pdtNs = m_PcvrTiming.predictedDisplayClientNs;
     if (d.frameAheadExact || m_TimeConv == nullptr) {
-        d.wakePhaseUs.push_back(xrphase::phaseUs(wakeNs / 1000ull, pdtNs / 1000ull, sat32(periodNs / 1000ull)));
+        d.phasePeriodUs = sat32(periodNs / 1000ull);  // 印的時候要知道相位是對哪個週期取的（環狀的分位數）
+        d.wakePhaseUs.push_back(xrphase::phaseUs(wakeNs / 1000ull, pdtNs / 1000ull, d.phasePeriodUs));
         d.latchLeadUs.push_back(sat32(pdtNs > latchNs ? (pdtNs - latchNs) / 1000ull : 0));
         d.endLeadUs.push_back(sat32(pdtNs > endNs ? (pdtNs - endNs) / 1000ull : 0));
         d.aheadUs.push_back(sat32(d.frameAheadNs > 0 ? static_cast<uint64_t>(d.frameAheadNs) / 1000ull : 0));

@@ -851,7 +851,10 @@ frame loop（XR 桌面也有）
 [VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=…/…/… us | latchLead p50/p05=…/… ms endLead p50/p05/min=…/…/… ms | span p50/p95/max=…/…/… us | beginCall max=… us endCall p50/p95/max=…/…/… us | ahead p50/min/max=…/…/… ms[ (approx)] | waitShort=N | chain dec/render/slack/lead p50=…/…/…/… ms sum=… ms[ ab=<0|1>]
                                                                               ← PCVR，每 10 秒一行，緊接在 [VIPLE-VR-LDIAG] 10s 之後（視窗與 ab 都相同）。相位是 LDIAG 相位。
                                                                                  order＝frame loop 的呼叫順序，目前固定是 legacy；
-                                                                                 wakePhase＝xrWaitFrame 返回的相位（預期：120 Hz 約 4840，也就是距 vblank 0.22 ms）；
+                                                                                 wakePhase＝xrWaitFrame 返回的相位（預期：120 Hz 約 4840，也就是距 vblank 0.22 ms）。p50 是
+                                                                                 環狀的中位數；p95、max 是從 p50 往晚的方向數的，不折回——晚到繞過格點的那一格會讓 max 超過
+                                                                                 一個週期（例：p50 4840、max 8540＝有一格晚了 3.7 ms 才返回），而不是折成一個很小的數字。
+                                                                                 晚超過半個週期的分不出是晚還是早，那種格看 ahead 的 min；
                                                                                  latchLead／endLead＝挑影像／xrEndFrame 返回的那一刻，到這一格的預測顯示時刻還有多久
                                                                                  （p05、min＝最晚的那幾格；預期延後 6 ms 時 latchLead 約 22.3 ms）；
                                                                                  span＝xrWaitFrame 返回到 xrEndFrame 返回（SteamVR 自己記的 ApplicationTime CPU 最貼近這一段）；

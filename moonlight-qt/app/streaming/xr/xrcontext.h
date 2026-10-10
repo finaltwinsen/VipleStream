@@ -606,6 +606,7 @@ private:
     // 全部只在 frame thread 存取；視窗和 [VIPLE-VR-LDIAG] 相同（pcvrLoopDiagLog 緊接在 pcvrLatchDiagLog 之後）。
     struct LoopDiag {
         std::vector<uint32_t> wakePhaseUs;  // 10 s：xrWaitFrame 返回的時刻落在顯示格點之後多久
+        uint32_t phasePeriodUs = 0;         //       上面那些相位是對哪一個顯示週期取的（最近推進去的那一筆；0＝還沒有）
         std::vector<uint32_t> latchLeadUs;  // 10 s：挑影像（latch）到這一格的預測顯示時刻還有多久
         std::vector<uint32_t> endLeadUs;    // 10 s：xrEndFrame 返回到預測顯示時刻還有多久
         std::vector<uint32_t> spanUs;       // 10 s：xrWaitFrame 返回 → xrEndFrame 返回
