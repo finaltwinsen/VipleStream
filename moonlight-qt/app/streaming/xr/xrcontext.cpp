@@ -2380,6 +2380,25 @@ T pctInPlace(std::vector<T>& v, double p)
 }
 uint16_t sat16u(uint64_t v) { return static_cast<uint16_t>((std::min<uint64_t>)(v, 0xffff)); }
 int16_t sat16s(int64_t v) { return static_cast<int16_t>((std::max<int64_t>)(-32768, (std::min<int64_t>)(v, 32767))); }
+
+// §VR-LDIAG：[VIPLE-VR-LDIAG] 10s 行尾「不看 Classifier 基準」的那一段（各計數的定義見 xrlatch::Counters）。
+//   events＝多出來的重複顯示格數（lateShift＋early＋stride×(late＋gap)）。基準把同一種事件貼成 early 還是 lateShift，
+//           這個總和都一樣，流暢度看它；
+//   waitNew／waitBy／waitSlots＝有等待格之後才顯示的新影像：幾張、比最後一個等待格的 latch 晚多久才發布、等了幾格；
+//   resc／rescBy＝其中在那個 latch 當下已經送出的（那一格就發布的話顯示得到）與它們晚多久；
+//   flip＝沒有等待格、但上一格的 latch 當下已經送出的（一送出就發布的話會搶掉前一張的格）。
+std::string latchWaitTail(const xrlatch::Counters& c)
+{
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+                  " | events=%u stride=%u waitNew=%u waitBy(us<250,500,750,1000,1500,2500,4000,+)=%u,%u,%u,%u,%u,%u,%u,%u"
+                  " waitSlots(1,2,3+)=%u,%u,%u resc=%u rescBy(us<250,500,750,1000,1500,+)=%u,%u,%u,%u,%u,%u flip=%u",
+                  xrphase::eventsTotal(c.late, c.lateShift, c.gap, c.early, c.stride), c.stride, c.waitNew, c.waitBy[0],
+                  c.waitBy[1], c.waitBy[2], c.waitBy[3], c.waitBy[4], c.waitBy[5], c.waitBy[6], c.waitBy[7], c.waitSlots[0],
+                  c.waitSlots[1], c.waitSlots[2], c.resc, c.rescBy[0], c.rescBy[1], c.rescBy[2], c.rescBy[3], c.rescBy[4],
+                  c.rescBy[5], c.flip);
+    return buf;
+}
 }  // namespace
 
 // M4a R3：frame thread，新的一張串流影像第一次被 latch 進 projection layer 時呼叫。
@@ -2826,6 +2845,8 @@ void XrContext::pcvrWaitGuard(uint64_t nowNs, uint64_t periodNs, uint32_t xrMiss
 //  - age：每個顯示格的內容年齡（含重複的格；補幀開著時合成的那一格也算成重複，見 pcvrTimingOnLatch）。
 //  - slackPub：每張影像（含被跳過的）發布到「第一個挑得到它的 latch」還有多久，250 µs 一格；第 0 格附近＝險過，
 //    接近一個週期的那幾格＝剛錯過上一個 latch。尾端的 0 省略。
+//  - events 起的那一段：不看 Classifier 基準的晚到計數，見 latchWaitTail。late／lateShift／early 的分法靠基準，
+//    而基準在每場開頭與事件多的場次會停在另一邊（那時晚到的影像全記成 early、lateMax 是 0）；這一段不受影響。
 void XrContext::pcvrLatchDiagLog()
 {
     auto& d = m_LatchDiag;
@@ -2863,14 +2884,16 @@ void XrContext::pcvrLatchDiagLog()
     t.waited10s = 0;
     t.waitSaved10s = 0;
     t.waitTimeout10s = 0;
+    // 不看 Classifier 基準的那一段（events 起）接在最後面，既有欄位的位置不動
+    const std::string lateTail = latchWaitTail(c);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VR-LDIAG] 10s late=%u lateShift=%u gap=%u early=%u catchup=%u lateMax=%u us | held=%u heldMiss=%u rtyp=%u us "
                 "pubLag p50/p95=%u/%u us | wake2latch p50/p95/max=%u/%u/%u us latchPhase p50=%u us | "
-                "age p50/p95/p99=%.1f/%.1f/%.1f ms | slackPub(250us)=%s%s%s",
+                "age p50/p95/p99=%.1f/%.1f/%.1f ms | slackPub(250us)=%s%s%s%s",
                 c.late, c.lateShift, c.gap, c.early, c.catchup, c.lateMaxUs, d.held10s, d.heldMiss10s, d.rtypUs,
                 pctOf(d.pubLag, 0.50), pctOf(d.pubLag, 0.95), pctOf(d.wake2latch, 0.50), pctOf(d.wake2latch, 0.95), wakeMax,
                 pctOf(d.latchPhase, 0.50), pctOf(d.age10s, 0.50) / 1000.0, pctOf(d.age10s, 0.95) / 1000.0,
-                pctOf(d.age10s, 0.99) / 1000.0, qUtf8Printable(hist), waitTail.constData(),
+                pctOf(d.age10s, 0.99) / 1000.0, qUtf8Printable(hist), waitTail.constData(), lateTail.c_str(),
                 // §VR-LATCH A/B：這個視窗是哪一邊（和同一輪的 [VIPLE-VR-MTP10] 相同；10 s 區塊在換邊之前記下來的）
                 m_Options.pcvrLatchAbSec > 0 ? (d.logAb ? " ab=1" : " ab=0") : "");
     std::fill(std::begin(d.hist), std::end(d.hist), 0u);
@@ -3004,7 +3027,7 @@ void XrContext::pcvrLatchDiag(bool latched, uint64_t seq, uint64_t latchNs, uint
                 break;
             }
             d.drainedSeq = r.seq;
-            d.cls.onPublished(r.seq, r.pts90, r.pubUs);
+            d.cls.onPublished(r.seq, r.pts90, r.pubUs, r.submitUs);
             const uint32_t render = static_cast<uint32_t>(
                 (std::min<uint64_t>)(r.gpuEndUs > r.arriveUs ? r.gpuEndUs - r.arriveUs : 0, 0xffffffffu));
             // 在 latch 與 current() 之間發布的那一張也被挑到了：餘裕算 0

@@ -690,7 +690,7 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-SESSION] 10-bit was requested (vr10bit) but this device's hardware decoder path only outputs 8-bit - streaming 8-bit   ← client（Frame）：不要求 10-bit
 [VIPLE-VR-LDIAG] client cfg: latchDelay=… ms trackLock=… halfRate=… synth=… fovea=… overscan=… jitter=<spec|off> trackRelock=… latchRelatch=… latchWait=… ms abSec=…
                                                                                     ← client，PCVR 第一次建立 XR 時印一次：這一場 client 端的設定值（2026-10-09 起；之前的 log 查不到延後挑影像是幾毫秒）
-[VIPLE-VR-LDIAG] 10s late=N lateShift=N gap=N early=N catchup=N lateMax=N us | held=N heldMiss=N rtyp=N us pubLag p50/p95=… us | wake2latch p50/p95/max=… us latchPhase p50=… us | age p50/p95/p99=… ms | slackPub(250us)=n0,n1,…[ wait=… ms waited=N saved=N timeout=N][ ab=<0|1>]
+[VIPLE-VR-LDIAG] 10s late=N lateShift=N gap=N early=N catchup=N lateMax=N us | held=N heldMiss=N rtyp=N us pubLag p50/p95=… us | wake2latch p50/p95/max=… us latchPhase p50=… us | age p50/p95/p99=… ms | slackPub(250us)=n0,n1,…[ wait=… ms waited=N saved=N timeout=N] | events=N …（2026-10-11 起，見 5b-6）[ ab=<0|1>]
                                                                                     ← client 每 10 s，緊接在 [VIPLE-VR-MTP10] 之後（視窗相同）。量測一律開著，不改變呈現。
                                                                                        late＝有影像但沒趕上自己那一格、被下一張蓋掉（串流幀數）；lateShift＝整條對位晚幾格（顯示格數）；
                                                                                        gap＝那一格根本沒有影像（host 沒出、掉包，或到了 client 沒發布——對照 10s video 的 overwritten／errors）；
@@ -863,6 +863,25 @@ frame loop（XR 桌面也有）
                                                                                  ＋slack（GPU 做完到挑影像，可以是負的）＋lead（挑影像到預測顯示時刻）各自的 p50 與四項的和。
                                                                                  沒有含的只有解碼幀轉手與在 mailbox 裡等的時間；這個視窗沒有解碼樣本時 dec 與 sum 印 `-`。
                                                                                  **同一場裡比延遲看 chain**，不要看 [VIPLE-VR-MTP10] 的 p50（鎖相開著時它只會一次跳半個週期）
+
+逐張的晚到計數（PCVR；不看分類器的基準）
+[VIPLE-VR-LDIAG] 10s …原樣…[ wait=…] | events=N stride=N waitNew=N waitBy(us<250,500,750,1000,1500,2500,4000,+)=n,n,n,n,n,n,n,n waitSlots(1,2,3+)=n,n,n resc=N rescBy(us<250,500,750,1000,1500,+)=n,n,n,n,n,n flip=N[ ab=<0|1>]
+                                                                              ← 行尾新增（排在 wait=… 之後、ab= 之前）。
+                                                                                 events＝多出來的重複顯示格數＝lateShift＋early＋stride×(late＋gap)。**流暢度看它**：late／lateShift／
+                                                                                 early 怎麼分要靠分類器的基準，基準要連 120 張正常才更新，每場開頭與事件多的場次可能整場停在
+                                                                                 另一邊（晚到的影像全記成 early、lateMax 是 0），這個總和不受影響；
+                                                                                 stride＝串流一幀佔幾個顯示格（全速 1、半速 2）；
+                                                                                 下面幾欄用「等待格」（已經輪到下一張影像、它卻還沒發布的重複格）與影像的送出時刻，不看基準：
+                                                                                 waitNew＝有等待格之後才顯示的新影像張數；waitBy＝它比最後一個等待格的 latch 晚多久才發布
+                                                                                 （µs，分八格）；waitSlots＝它等了 1／2／3 格以上；
+                                                                                 resc＝其中在那個 latch 當下已經送出的（GPU 工作都送出去了，比 latch 早 150 µs 以上）——那一格就
+                                                                                 發布的話顯示得到；rescBy＝它們晚多久（前兩格≈多等一下就等得到的張數）；
+                                                                                 flip＝沒有等待格、但上一格的 latch 當下已經送出的新影像——一送出就發布的話會早一格顯示、搶掉
+                                                                                 前一張的格（半速＋補幀時搶掉的是合成的那一格）。
+                                                                                 讀法：waitBy 落在後面幾格（≥2500）的不一定是晚到，前一張提早搶格之後照原本節拍來的下一張也
+                                                                                 落在那裡——不拿 waitBy 的總數當晚到張數，看前面幾格的形狀。waitNew − resc 裡有一塊是補包拖晚的幀，
+                                                                                 大小看同一輪 [VIPLE-VR-MTP10] 的 latchSkip。frame thread 沒回報的格之後的那一張、開場的第二張
+                                                                                 影像不計。自洽：rescBy 各格相加＝resc；waitBy、waitSlots 各格相加＝waitNew；resc ≤ waitNew
 
 影像 render thread（XR 桌面也有；沒有顯示格點時相位與比例印 -）
 [VIPLE-XR] 10s video …原樣… | mbox p50/p95=…/… ms swWait p95/max=…/… ms swNotOk=N rel max=… us | sub/done p50=…/… us coll=P% queued=P%[ synthSub/synthDone p50=…/… us][ ab=<0|1|m>]

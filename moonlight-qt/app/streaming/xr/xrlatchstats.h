@@ -5,9 +5,11 @@
 //
 //   Classifier：把 XR frame thread 每一格「挑到哪一張串流影像」分類成 late／lateShift／gap／early／catchup。
 //               只看發布序號、影像的 pts（host 的 Present 時刻，90 kHz）與顯示格序號，不用固定的毫秒門檻。
+//               另有一組不看基準的晚到計數（waitNew／resc／flip，見 Counters）：用等待格與影像的送出時刻，
+//               回答「差一點沒趕上的有幾張、其中在那個 latch 當下已經送出的有幾張」。
 //   Jitter    ：dev 的到達抖動注入（--vr-test-jitter）。命令列的檢查與影像 render thread 用同一份解析。
 //   selfTest()：腳本序列（正常、晚到被跳過、早到滑格、host 少一幀、連續晚到後追回、半速，以及 frame thread 漏格、
-//               pts 繞回、基準更新等）＋注入器的檢查。
+//               pts 繞回、基準更新等）＋注入器的檢查＋不看基準的那幾個計數的腳本。
 //
 // 執行緒：Classifier、Jitter 都沒有鎖，各自只給一條執行緒用（Classifier＝XR frame thread、Jitter＝影像 render thread）。
 //
@@ -60,18 +62,48 @@ struct Counters {
     uint32_t catchup = 0;
     // 晚到的影像比它該趕上的那個 latch 晚了多久（視窗內最大值，上限 65535）
     uint32_t lateMaxUs = 0;
+
+    // ── 不看基準的晚到計數（2026-10-11）──
+    // 上面的 lateShift 與 early 是同一種事件，差別只在 Classifier 的基準貼哪一個標籤；基準要連 120 張正常才更新，
+    // 每場開頭與事件多的場次可能整場停在另一邊，那時晚到的影像全部記成 early、lateMaxUs 是 0。下面幾個只看
+    // 「等待格」（已經輪到下一張、它卻還沒發布的重複格）與影像的送出時刻（GPU 工作都送出去了的那一刻），不看基準。
+    // 發布紀錄沒有帶送出時刻的影像不計；上一張新影像之後有顯示格沒回報的那一次也不計。
+    //
+    // take() 時抄的：串流一幀佔幾個顯示格（全速 1、半速 2）。重複的顯示格數＝lateShift＋early＋stride×(late＋gap)，
+    // 這個總和不受基準影響
+    uint32_t stride = 1;
+    // 有等待格之後才顯示的新影像張數（每一段等待算一張：上一張之後第一張發布的那一張，它沒被顯示也算）
+    uint32_t waitNew = 0;
+    // 那一張比最後一個等待格的 latch 晚多久才發布：<250、<500、<750、<1000、<1500、<2500、<4000、其餘（µs）。
+    // 落在後面幾格的不一定是晚到——前一張提早搶格之後，照原本節拍來的下一張也會落在這裡。要看的是前面幾格的形狀
+    uint32_t waitBy[8] = {};
+    // 那一段等了幾個等待格：1、2、3 以上
+    uint32_t waitSlots[3] = {};
+    // waitNew 裡，最後一個等待格的 latch 當下已經送出的（送出比那個 latch 早 kRescMarginUs 以上）：GPU 還沒做完、
+    // 但在那一格就發布的話顯示得到。rescBy＝它們比那個 latch 晚多久才發布：<250、<500、<750、<1000、<1500、其餘
+    uint32_t resc = 0;
+    uint32_t rescBy[6] = {};
+    // 沒有等待格、但上一格的 latch 當下已經送出的新影像張數：如果一送出就發布，它會早一格顯示、搶掉前一張的格
+    // （半速時搶掉的是前一張第二次顯示的那一格）
+    uint32_t flip = 0;
 };
+
+// 「在那個 latch 當下已經送出」的餘裕：要趕得上那一格，release 與發布（約 25 µs）得在那一格的 xrBeginFrame 之前完成，
+// 而 xrBeginFrame 比 latch 早約 0.1 ms
+constexpr uint64_t kRescMarginUs = 150;
 
 class Classifier
 {
 public:
-    // 影像 render thread 發布了一張。frame thread 抄錄時依序號呼叫；被跳過、沒顯示的也要給
-    void onPublished(uint64_t seq, int64_t pts90, uint64_t pubUs)
+    // 影像 render thread 發布了一張。frame thread 抄錄時依序號呼叫；被跳過、沒顯示的也要給。
+    // submitUs＝這張影像的 GPU 工作都送出去的時刻（和 pubUs 同一個時鐘）；0＝沒有，這一張不進「不看基準」的計數
+    void onPublished(uint64_t seq, int64_t pts90, uint64_t pubUs, uint64_t submitUs = 0)
     {
         Rec& r = m_Ring[m_RingHead++ % kRing];
         r.seq = seq;
         r.pts90 = pts90;
         r.pubUs = pubUs;
+        r.submitUs = submitUs;
     }
 
     // 這一格送出了 t.seq 這張影像（同一張重複顯示也要呼叫）。t.seq 的 onPublished 要先呼叫過
@@ -90,7 +122,9 @@ public:
                     m_MissLatchUs = t.latchUs;
                 }
                 ++m_WaitSlots;
+                m_LastWaitLatchUs = t.latchUs;
             }
+            notePrevTick(t);
             return;
         }
         const Rec* cur = find(t.seq);
@@ -103,6 +137,7 @@ public:
             m_Pardon = 0;
             m_NormalRun = 0;
             accept(t, cur);
+            notePrevTick(t);
             return;
         }
 
@@ -191,13 +226,39 @@ public:
             m_OffBase = m_Off;
             m_Pardon = 0;
         }
+
+        // 不看基準的晚到計數（見 Counters）：不用 m_Off／m_OffBase，只看等待格與送出時刻。只在上一張新影像之後
+        // 每一格都有回報時計。cand＝上一張之後第一張發布的：平常就是這一張；兩張擠在同一格才到的話是被跳過、沒顯示
+        // 的那一張——在那個 latch 發布就顯示得到的是它。
+        // 開場的第二張新影像不計（m_DjCount 還是 1）：串流一幀佔幾格是到這裡才第一次估出來的，它之前的重複格是照
+        // 預設的 1 格判斷的——半速時第一張本來就該有的第二次顯示會被當成等待格
+        const Rec* cand = find(m_LastSeq + 1);
+        if (!unreported && m_DjCount > 1 && cand != nullptr && cand->submitUs != 0) {
+            if (m_WaitSlots > 0) {
+                // 之前有等待格：已經輪到它、它卻還沒發布
+                add(m_C.waitNew, 1);
+                const uint64_t by = cand->pubUs > m_LastWaitLatchUs ? cand->pubUs - m_LastWaitLatchUs : 0;
+                add(m_C.waitBy[bucket8(by)], 1);
+                add(m_C.waitSlots[(std::min)(m_WaitSlots, static_cast<int64_t>(3)) - 1], 1);
+                if (cand->submitUs + kRescMarginUs <= m_LastWaitLatchUs) {
+                    add(m_C.resc, 1);
+                    add(m_C.rescBy[bucket6(by)], 1);
+                }
+            }
+            else if (m_HavePrevTick && m_PrevTick == t.dispTick - 1 && cand->submitUs + kRescMarginUs <= m_PrevTickLatchUs) {
+                // 上一格不是等待格，而它的 latch 當下這一張已經送出了
+                add(m_C.flip, 1);
+            }
+        }
         accept(t, cur);
+        notePrevTick(t);
     }
 
     // 取出這個視窗的計數並歸零（對位的狀態保留）
     Counters take()
     {
-        const Counters c = m_C;
+        Counters c = m_C;
+        c.stride = static_cast<uint32_t>(m_Stride);
         m_C = Counters();
         return c;
     }
@@ -207,6 +268,7 @@ private:
         uint64_t seq = 0;
         int64_t pts90 = 0;
         uint64_t pubUs = 0;
+        uint64_t submitUs = 0;  // 0＝沒有給
     };
     static constexpr size_t kRing = 64;
     static constexpr size_t kDjWindow = 32;
@@ -232,6 +294,26 @@ private:
         m_LastNewTick = t.dispTick;
         m_RepRun = 0;
         m_WaitSlots = 0;
+    }
+
+    // 每個回報的格（新影像、重複都算）結尾記下來：下一格用它判斷「上一格的 latch 當下送出了沒有」
+    void notePrevTick(const Tick& t)
+    {
+        m_HavePrevTick = true;
+        m_PrevTick = t.dispTick;
+        m_PrevTickLatchUs = t.latchUs;
+    }
+
+    // Counters::waitBy 的格（µs）：<250、<500、<750、<1000、<1500、<2500、<4000、其餘
+    static size_t bucket8(uint64_t us)
+    {
+        return us < 250 ? 0u : us < 500 ? 1u : us < 750 ? 2u : us < 1000 ? 3u : us < 1500 ? 4u : us < 2500 ? 5u : us < 4000 ? 6u : 7u;
+    }
+
+    // Counters::rescBy 的格（µs）：<250、<500、<750、<1000、<1500、其餘
+    static size_t bucket6(uint64_t us)
+    {
+        return us < 250 ? 0u : us < 500 ? 1u : us < 750 ? 2u : us < 1000 ? 3u : us < 1500 ? 4u : 5u;
     }
 
     void pushDj(int64_t dj)
@@ -279,6 +361,10 @@ private:
     int64_t m_RepRun = 0;          // 上一張新影像之後，回報過的重複格有幾格
     int64_t m_WaitSlots = 0;       // 其中已經輪到下一張的（等待格）有幾格
     uint64_t m_MissLatchUs = 0;    // 第一個等待格的 latch 時刻（m_WaitSlots > 0 才有意義）
+    uint64_t m_LastWaitLatchUs = 0;  // 最後一個等待格的 latch 時刻（m_WaitSlots > 0 才有意義）
+    bool m_HavePrevTick = false;   // 上一個回報的格：有沒有、它的顯示格序號與 latch 時刻（見 notePrevTick）
+    int64_t m_PrevTick = 0;
+    uint64_t m_PrevTickLatchUs = 0;
     int64_t m_Off = 0;             // 目前的對位（相對開場；正值＝晚）。不含 m_Pardon
     int64_t m_OffBase = 0;         // 基準對位
     int64_t m_Pardon = 0;          // 跨過沒回報的格造成、還沒被反方向抵掉的對位變化（不分類的那一部分）
@@ -520,6 +606,8 @@ struct ScriptFrame {
     int slot;       // host 的 Present 落在第幾個顯示格（pts＝(slot＋ptsAdj) × 一個顯示週期）
     double pubAt;   // 在 client 發布的時刻，單位＝顯示週期（第 n 格的 latch 在時刻 n）
     double ptsAdj;  // Present 時刻偏離格點多少（顯示週期；正＝晚）
+    // GPU 工作送出的時刻在發布之前多久（顯示週期；0.18 個週期在 120 Hz 約 1.5 ms）。負值＝這一張不給送出時刻
+    double subBefore = 0.18;
 };
 
 // 一段腳本。frames 依發布時刻遞增；第 i 張的發布序號是 i＋1
@@ -531,8 +619,9 @@ struct Script {
     uint64_t noRecordSeq = 0;     // 這個序號的發布紀錄不給（抄錄時已經被洗掉）；0＝都給
 };
 
-// 照 frame thread 的規則跑一段腳本：第 n 格（latch 在 n × 週期）送出當時已經發布的最新一張
-inline Counters runScript(const Script& s, double periodUs)
+// 照 frame thread 的規則跑一段腳本：第 n 格（latch 在 n × 週期）送出當時已經發布的最新一張。
+// afterTake（可以不給）＝取完計數之後緊接著再取一次的結果（應該全部是 0，stride 照抄）
+inline Counters runScript(const Script& s, double periodUs, Counters* afterTake = nullptr)
 {
     Classifier c;
     const double ptsPerSlot = 90000.0 * periodUs / 1e6;
@@ -554,7 +643,9 @@ inline Counters runScript(const Script& s, double periodUs)
             if (seq != s.noRecordSeq) {
                 // pts 和 RTP 時戳一樣只有低 32 bit
                 const int64_t pts = s.ptsBase + static_cast<int64_t>(std::llround((fr.slot + fr.ptsAdj) * ptsPerSlot));
-                c.onPublished(seq, pts & static_cast<int64_t>(0xffffffffll), pubUs);
+                const uint64_t submitUs =
+                    fr.subBefore < 0.0 ? 0 : baseUs + static_cast<uint64_t>(std::llround((fr.pubAt - fr.subBefore) * periodUs));
+                c.onPublished(seq, pts & static_cast<int64_t>(0xffffffffll), pubUs, submitUs);
             }
             ++next;
         }
@@ -567,7 +658,11 @@ inline Counters runScript(const Script& s, double periodUs)
             c.onTick(t);
         }
     }
-    return c.take();
+    const Counters got = c.take();
+    if (afterTake != nullptr) {
+        *afterTake = c.take();
+    }
+    return got;
 }
 
 // 準時的串流：第 i 張在第 i × stride 個顯示格 Present，發布在它該被挑到的那個 latch 之前半個週期
@@ -763,6 +858,261 @@ inline bool runCase(int which, double periodUs, Counters* got)
     }
 }
 
+// ── 不看基準的晚到計數（Counters 的 waitNew 以下）──
+
+inline std::string describeWait(const Counters& c)
+{
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+                  "stride=%u waitNew=%u waitBy=%u,%u,%u,%u,%u,%u,%u,%u waitSlots=%u,%u,%u resc=%u rescBy=%u,%u,%u,%u,%u,%u flip=%u",
+                  c.stride, c.waitNew, c.waitBy[0], c.waitBy[1], c.waitBy[2], c.waitBy[3], c.waitBy[4], c.waitBy[5], c.waitBy[6],
+                  c.waitBy[7], c.waitSlots[0], c.waitSlots[1], c.waitSlots[2], c.resc, c.rescBy[0], c.rescBy[1], c.rescBy[2],
+                  c.rescBy[3], c.rescBy[4], c.rescBy[5], c.flip);
+    return buf;
+}
+
+// waitNew、resc、flip 的值；byIdx／slotIdx／rescIdx＝waitBy／waitSlots／rescBy 裡唯一有計數的那一格（-1＝整組都是 0）
+inline bool waitMatches(const Counters& c, uint32_t waitNew, int byIdx, int slotIdx, uint32_t resc, int rescIdx, uint32_t flip)
+{
+    bool ok = c.waitNew == waitNew && c.resc == resc && c.flip == flip;
+    for (int i = 0; i < 8; i++) {
+        ok = ok && c.waitBy[i] == (i == byIdx ? waitNew : 0u);
+    }
+    for (int i = 0; i < 3; i++) {
+        ok = ok && c.waitSlots[i] == (i == slotIdx ? waitNew : 0u);
+    }
+    for (int i = 0; i < 6; i++) {
+        ok = ok && c.rescBy[i] == (i == rescIdx ? resc : 0u);
+    }
+    return ok;
+}
+
+// 這幾個計數自己對得上：分格的總和等於總數、resc 不超過 waitNew
+inline bool waitConsistent(const Counters& c)
+{
+    // （變數不可以叫 slots：這個檔會被有 Qt 標頭的原始檔 include，那是 Qt 的關鍵字巨集）
+    uint32_t bySum = 0, slotSum = 0, rescBySum = 0;
+    for (uint32_t v : c.waitBy) {
+        bySum += v;
+    }
+    for (uint32_t v : c.waitSlots) {
+        slotSum += v;
+    }
+    for (uint32_t v : c.rescBy) {
+        rescBySum += v;
+    }
+    return bySum == c.waitNew && slotSum == c.waitNew && rescBySum == c.resc && c.resc <= c.waitNew;
+}
+
+constexpr int kWaitCaseCount = 15;
+
+// 腳本序列（120 Hz，時刻寫成「第 k 格的 latch 之後幾微秒」，負值＝之前）。which＝0～kWaitCaseCount−1（名稱在 selfTest
+// 的 kWaitCaseNames）；回傳是否符合預期，*got 是實際計數（一組裡有好幾段時，是第一段不符合的、或最後一段的）。
+// 全速的腳本：第 i 張準時的話在第 i＋1 格被挑到；半速：第 i 張在第 2i＋1 格被挑到、第 2i＋2 格重複。
+inline bool runWaitCase(int which, Counters* got)
+{
+    const int kFrames = 300;
+    const double T = 8333.0;
+    Script s;
+    s.ticks = kFrames + 2;
+    std::vector<ScriptFrame>& f = s.frames;
+    // 第 i 張改成：在第 k 格的 latch 之後 pubUs 發布、subUs 送出
+    auto place = [&](int i, int k, double pubUs, double subUs) {
+        f[static_cast<size_t>(i)].pubAt = k + pubUs / T;
+        f[static_cast<size_t>(i)].subBefore = (pubUs - subUs) / T;
+    };
+    // 第 from 張起整條晚 lateBy 格（照新的對位每一張都準時：發布在自己的 latch 之前半個週期）
+    auto shiftFrom = [&](int from, int stride, int lateBy) {
+        for (size_t i = static_cast<size_t>(from); i < f.size(); i++) {
+            f[i].pubAt = static_cast<double>(i) * stride + lateBy + 0.5;
+        }
+    };
+    auto noSubmitTimes = [&]() {
+        for (ScriptFrame& fr : f) {
+            fr.subBefore = -1.0;
+        }
+    };
+    auto run = [&](uint32_t waitNew, int byIdx, int slotIdx, uint32_t resc, int rescIdx, uint32_t flip) {
+        *got = runScript(s, T);
+        return waitMatches(*got, waitNew, byIdx, slotIdx, resc, rescIdx, flip);
+    };
+    bool ok = true;
+    switch (which) {
+    case 0:  // 全速，差一點：第 100 張在第 101 格的 latch 之前 1200 µs 送出、之後 300 µs 才發布；那一格重複、下一格顯示它
+        f = onTime(kFrames, 1);
+        shiftFrom(101, 1, 1);
+        place(100, 101, 300.0, -1200.0);
+        return run(1, 1, 0, 1, 1, 0);
+    case 1:  // 全速，真的晚：latch 之後 500 µs 才送出、2000 µs 發布——等待格有，但那個 latch 當下還沒送出
+        f = onTime(kFrames, 1);
+        shiftFrom(101, 1, 1);
+        place(100, 101, 2000.0, 500.0);
+        return run(1, 5, 0, 0, -1, 0);
+    case 2:  // 「已經送出」的邊界：早 100 µs、149 µs 不算，正好 150 µs（kRescMarginUs）才算
+        f = onTime(kFrames, 1);
+        shiftFrom(101, 1, 1);
+        place(100, 101, 1400.0, -100.0);
+        ok = run(1, 4, 0, 0, -1, 0);
+        place(100, 101, 1400.0, -149.0);
+        ok = ok && run(1, 4, 0, 0, -1, 0);
+        place(100, 101, 1400.0, -150.0);
+        return ok && run(1, 4, 0, 1, 4, 0);
+    case 3:  // 全速、沒有等待格：第 101 張在第 101 格（顯示第 100 張）的 latch 之前 1000 µs 送出、之後 500 µs 發布，
+             // 照常在第 102 格顯示。一送出就發布的話它會搶掉第 100 張的那一格 → flip
+        f = onTime(kFrames, 1);
+        place(101, 101, 500.0, -1000.0);
+        return run(0, -1, -1, 0, -1, 1);
+    case 4:  // 全速、準時：latch 之後 2000 µs 送出、3600 µs 發布 → 什麼都不計
+        f = onTime(kFrames, 1);
+        place(101, 101, 3600.0, 2000.0);
+        return run(0, -1, -1, 0, -1, 0);
+    case 5:  // 半速、晚一格：第 50 張顯示在第 101、102 格；第 51 張在第 103 格的 latch 之前 1300 µs 送出、之後 200 µs 發布
+             // → 第 103 格重複（等待格）、第 104 格才顯示
+        f = onTime(kFrames / 2, 2);
+        place(51, 103, 200.0, -1300.0);
+        return run(1, 0, 0, 1, 0, 0) && got->stride == 2;
+    case 6:  // 半速、第二次顯示的那一格：第 51 張在第 102 格（第 50 張第二次顯示，不是等待格）的 latch 之前 800 µs 送出、
+             // 之後 700 µs 發布，照常在第 103 格顯示。一送出就發布的話會搶掉那一格（補幀開著時就是合成的那一格）→ flip，
+             // 不算救得到的
+        f = onTime(kFrames / 2, 2);
+        place(51, 102, 700.0, -800.0);
+        return run(0, -1, -1, 0, -1, 1) && got->stride == 2;
+    case 7:  // 半速、晚兩格：第 103、104 格都重複，第 51 張在第 104 格的 latch 之前送出、之後 100 µs 發布，第 105 格顯示。
+             // 晚多久、送出了沒有都對最後一個等待格算
+        f = onTime(kFrames / 2, 2);
+        shiftFrom(52, 2, 2);
+        place(51, 104, 100.0, -1400.0);
+        return run(1, 0, 1, 1, 0, 0);
+    case 8:  // 提早搶格之後的那一張：第 100 張早到、在第 100 格就顯示，第 101 格重複它；第 101 張照原本的節拍
+             // （latch 之後 1900 µs 送出、3500 µs 發布）來。有等待格、發布得很晚，但它其實準時——waitBy 後面幾格
+             // 不能當成晚到的張數
+        f = onTime(kFrames, 1);
+        f[100].pubAt = 99.9;
+        place(101, 101, 3500.0, 1900.0);
+        return run(1, 6, 0, 0, -1, 0);
+    case 9:  // 上一張新影像之後有一格沒有回報：那一格挑得到什麼不知道，都不計
+        f = onTime(kFrames, 1);
+        shiftFrom(101, 1, 1);
+        place(100, 101, 300.0, -1200.0);
+        s.unreported = {101};
+        ok = run(0, -1, -1, 0, -1, 0);
+        f = onTime(kFrames, 1);
+        place(101, 101, 500.0, -1000.0);
+        ok = ok && run(0, -1, -1, 0, -1, 0);
+        // 等待格有回報（第 101 格），但它和新影像之間的第 102 格沒有回報：一樣不計
+        f = onTime(kFrames, 1);
+        shiftFrom(101, 1, 2);
+        place(100, 102, 300.0, -1200.0);
+        s.unreported = {102};
+        return ok && run(0, -1, -1, 0, -1, 0);
+    case 10: {  // 基準停在晚的那一邊：開場起每一張都在 latch 之後 300 µs 才發布（之前 1200 µs 送出），整條對位就是晚一格，
+                // 這也就是 Classifier 的基準。第 150 張難得趕上（提早一格顯示）→ 下一格重複 → 第 151 張照舊晚 300 µs。
+                // 原本的分類把這一次記成 early 1、lateShift 0、lateMax 0；這幾個計數照樣看得到那一張晚了 300 µs、救得到。
+                // flip 很大：每一張都在上一格的 latch 之前就送出了（300 張扣掉開場兩張、事件那兩格＝296）
+        f = onTime(kFrames, 1);
+        for (int i = 0; i < kFrames; i++) {
+            place(i, i + 1, 300.0, -1200.0);
+        }
+        f[150].pubAt = 150.9;
+        *got = runScript(s, T);
+        return matches(*got, 0, 0, 0, 1, 0, 0.0) && waitMatches(*got, 1, 1, 0, 1, 1, 296);
+    }
+    case 11:  // 兩張擠在同一格：第 100 張晚了 200 µs（latch 之前 1000 µs 送出），下一格時第 101 張也到了，顯示的是
+              // 第 101 張。算的是第 100 張——在那個 latch 發布就顯示得到的是它
+        f = onTime(kFrames, 1);
+        place(100, 101, 200.0, -1000.0);
+        return run(1, 0, 0, 1, 0, 0);
+    case 12:  // 沒有送出時刻的發布紀錄：這幾個計數全部不動
+        f = onTime(kFrames, 1);
+        shiftFrom(101, 1, 1);
+        place(100, 101, 300.0, -1200.0);
+        noSubmitTimes();
+        ok = run(0, -1, -1, 0, -1, 0);
+        f = onTime(kFrames, 1);
+        place(101, 101, 500.0, -1000.0);
+        noSubmitTimes();
+        return ok && run(0, -1, -1, 0, -1, 0);
+    case 13: {  // 分格的邊界：晚 249／250 µs（waitBy、rescBy 的第 1／2 格）、1499／1500 µs（第 5／6 格）、3999／4000 µs
+                // （waitBy 的第 7／8 格）；等了 3 格與 4 格都記在 waitSlots 的「3 以上」
+        const struct {
+            double pubUs;
+            int byIdx, rescIdx;
+        } kEdge[] = {{249.0, 0, 0}, {250.0, 1, 1}, {1499.0, 4, 4}, {1500.0, 5, 5}, {3999.0, 6, 5}, {4000.0, 7, 5}};
+        for (const auto& e : kEdge) {
+            f = onTime(kFrames, 1);
+            shiftFrom(101, 1, 1);
+            place(100, 101, e.pubUs, -1200.0);
+            ok = ok && run(1, e.byIdx, 0, 1, e.rescIdx, 0);
+        }
+        for (int waited = 3; waited <= 4; waited++) {  // 第 100 張在最後一個等待格的 latch 之後 300 µs 才發布
+            f = onTime(kFrames, 1);
+            shiftFrom(101, 1, waited);
+            place(100, 100 + waited, 300.0, -1200.0);
+            ok = ok && run(1, 1, 2, 1, 1, 0);
+        }
+        return ok;
+    }
+    default: {  // 固定種子的隨機腳本（全速、半速各 2000 張，有剛錯過、晚到、早到、沒回報的格、沒有送出時刻的影像）：
+                // 分格的總和對得上、取完歸零、stride 有抄到；拿掉送出時刻之後原本的分類一個數字都不變
+        for (int stride = 1; stride <= 2; stride++) {
+            uint32_t rng = stride == 1 ? 0x2545F491u : 0x9E3779B9u;
+            auto uni = [&rng]() {  // [0, 1)
+                rng ^= rng << 13;
+                rng ^= rng >> 17;
+                rng ^= rng << 5;
+                return static_cast<double>(rng >> 8) / 16777216.0;
+            };
+            const int n = 2000;
+            f.clear();
+            double prevPub = -1.0;
+            for (int i = 0; i < n; i++) {
+                const double due = static_cast<double>(i) * stride + 1.0;  // 它該被挑到的那個 latch
+                const double r = uni();
+                double pub = due - 0.5;
+                if (r < 0.10) {
+                    pub = due + uni() * 0.12;  // 剛錯過：latch 之後 1 ms 內
+                }
+                else if (r < 0.14) {
+                    pub = due + uni() * 1.4;   // 晚到
+                }
+                else if (r < 0.17) {
+                    pub = due - 0.5 - uni() * 0.8;  // 早到
+                }
+                pub = (std::max)(pub, prevPub + 0.01);  // 發布的順序就是序號的順序
+                prevPub = pub;
+                ScriptFrame fr = {i * stride, pub, 0.0, 0.03 + uni() * 0.4};
+                if (uni() < 0.02) {
+                    fr.subBefore = -1.0;
+                }
+                f.push_back(fr);
+            }
+            s.ticks = n * stride + 4;
+            s.unreported.clear();
+            for (int t = 50; t < s.ticks; t += 97) {
+                s.unreported.push_back(t);
+            }
+            Counters after;
+            *got = runScript(s, T, &after);
+            const bool cleared = waitMatches(after, 0, -1, -1, 0, -1, 0) && matches(after, 0, 0, 0, 0, 0, 0.0);
+            if (!waitConsistent(*got) || got->stride != static_cast<uint32_t>(stride) || after.stride != got->stride || !cleared ||
+                got->waitNew < 50 || got->resc < 10 || got->flip < 1) {
+                return false;
+            }
+            const Counters with = *got;
+            noSubmitTimes();
+            const Counters without = runScript(s, T);
+            if (!waitMatches(without, 0, -1, -1, 0, -1, 0) || with.late != without.late || with.lateShift != without.lateShift ||
+                with.gap != without.gap || with.early != without.early || with.catchup != without.catchup ||
+                with.lateMaxUs != without.lateMaxUs) {
+                *got = without;
+                return false;
+            }
+        }
+        return true;
+    }
+    }
+}
+
 }  // namespace detail
 
 // 自測；回傳失敗數。每個案例呼叫 report(名稱, 是否通過, 細節)
@@ -942,6 +1292,20 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
             capped = capped && big.nextUs(now) <= Jitter::kMaxTotalUs;
         }
         caseDone("jitter-seed", same && differs && capped, same && differs && capped ? "repeatable, seed-dependent, capped at 30000 us" : "mismatch");
+    }
+
+    // ── Classifier：不看基準的晚到計數（120 Hz 的腳本序列，見 detail::runWaitCase）。排在最後，前面那些案例的輸出不動 ──
+    static const char* const kWaitCaseNames[detail::kWaitCaseCount] = {
+        "latch-wait-just-missed",      "latch-wait-truly-late",      "latch-wait-submit-margin",  "latch-flip-no-wait-slot",
+        "latch-wait-on-time",          "latch-half-wait-just-missed", "latch-half-flip-second-slot", "latch-half-wait-two-slots",
+        "latch-wait-after-early-grab", "latch-wait-unreported-slot", "latch-wait-stale-baseline", "latch-wait-two-in-one-slot",
+        "latch-wait-no-submit-time",   "latch-wait-bucket-edges",    "latch-wait-random-invariants"};
+    for (int i = 0; i < detail::kWaitCaseCount; i++) {
+        Counters got;
+        const bool ok = detail::runWaitCase(i, &got);
+        // 基準過期的那一案兩組都印：原本的分類看不到（early 1、lateMax 0），新的計數看得到
+        caseDone(kWaitCaseNames[i], ok,
+                 i == 10 ? detail::describe(got) + " | " + detail::describeWait(got) : detail::describeWait(got));
     }
     return failures;
 }
