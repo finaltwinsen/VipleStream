@@ -615,9 +615,13 @@ private:
         std::vector<uint32_t> render10s;    // 10 s：每張新影像的 render 時間（CLIENT_TIMING 的 render 的 10 秒版）
         std::vector<int32_t> slack10s;      // 10 s：每張新影像的 slack（GPU 做完 → latch）
         std::vector<uint32_t> dec1s;        // 10 s：每秒的解碼時間中位數（VrDecodeTiming；那一秒沒有樣本就沒有）
+        std::vector<uint32_t> tailUs;       // 10 s：上一格的 xrEndFrame 返回 → 這一格呼叫 xrWaitFrame（兩格之間 frame thread 花多久）
         uint32_t beginCallMaxUs = 0;        // 10 s：xrBeginFrame 這個呼叫的最大值
         uint32_t waitShort = 0;             // 10 s：相鄰兩次 xrWaitFrame 返回的間隔不到半格的次數
         uint64_t lastWakeNs = 0;            // 上一格 xrWaitFrame 返回的時刻
+        uint64_t loopNo = 0;                // frame loop 跑到第幾圈（每圈開頭加一，沒送出影像的圈也算）
+        uint64_t lastEndNs = 0;             // 上一次記帳的那一格 xrEndFrame 返回的時刻（0＝還沒有），
+        uint64_t lastEndLoop = 0;           //   與它是第幾圈：tail 只算緊鄰的兩圈
         int64_t frameAheadNs = 0;           // 這一格的 ahead（pcvrAfterWaitFrame 設）
         bool frameAheadExact = false;       //   是換算出來的，不是「約兩個週期」的估計值
         xrphase::RankScan rank;             // 印 10 s 行時算分位數用的（緩衝區留著重用）
@@ -625,7 +629,7 @@ private:
         // 那一段不可以配置記憶體
         void reserveWindow()
         {
-            for (std::vector<uint32_t>* v : {&wakePhaseUs, &latchLeadUs, &endLeadUs, &spanUs, &endCallUs, &aheadUs, &render10s}) {
+            for (std::vector<uint32_t>* v : {&wakePhaseUs, &latchLeadUs, &endLeadUs, &spanUs, &endCallUs, &aheadUs, &render10s, &tailUs}) {
                 v->reserve(2048);
             }
             slack10s.reserve(2048);

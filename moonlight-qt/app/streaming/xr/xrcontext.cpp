@@ -1594,6 +1594,7 @@ void XrContext::frameThreadMain()
     bool exitRequested = false;
     uint64_t lastViewLocateNs = 0;
     while (true) {
+        m_LoopDiag.loopNo++;  // §VR-XRLOOP（量測）：第幾圈——[VIPLE-VR-XRLOOP] 的 tail 只算緊鄰的兩圈，見 pcvrLoopDiag
         if (m_StopRequested.load()) {
             break;
         }
@@ -2945,6 +2946,9 @@ void XrContext::pcvrLatchDiagLog()
 //    做完）＋slack（GPU 做完到挑影像）＋lead（挑影像到預測顯示時刻），各項的 p50 與四項的和。每一項都是微秒解析度、
 //    可以相加；沒有含的只有解碼幀轉手與在 mailbox 裡等的時間。同一場裡比延遲看它，不看 [VIPLE-VR-MTP10] 的 p50——
 //    鎖相（--vr-track-lock）開著時追蹤樣本取在顯示格點上，那個數字只會一次跳半個週期。
+//  - tail：上一格的 xrEndFrame 返回 → 這一格呼叫 xrWaitFrame，frame thread 在兩格之間花多久（見 pcvrLoopDiag）。
+//    每 10 s 印這幾行的那一格工作最多，而它的 tail 要到下一格才量得到，所以算在下一個視窗（下一行）的 max 裡。
+//    量測本身有沒有擠到下一次放行就看它：max 接近頭盔上的餘裕（約 1.7 ms）＝那一格會晚放行。
 void XrContext::pcvrLoopDiagLog()
 {
     auto& d = m_LoopDiag;
@@ -2974,6 +2978,8 @@ void XrContext::pcvrLoopDiagLog()
     const uint32_t renderP50 = u32(r.at(0.50));
     r.scan(d.slack10s);
     const int32_t slackP50 = static_cast<int32_t>(r.at(0.50));
+    r.scan(d.tailUs);
+    const uint32_t tailP50 = u32(r.at(0.50)), tailMax = u32(r.maxValue());
     // 這個視窗沒有解碼計時的樣本：dec 印 -，少一項的總和沒有意義，也印 -
     char decText[24] = "-", sumText[24] = "-";
     if (!d.dec1s.empty()) {
@@ -2987,11 +2993,11 @@ void XrContext::pcvrLoopDiagLog()
                 "[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=%u/%u/%u us | latchLead p50/p05=%.2f/%.2f ms "
                 "endLead p50/p05/min=%.2f/%.2f/%.2f ms | span p50/p95/max=%u/%u/%u us | beginCall max=%u us "
                 "endCall p50/p95/max=%u/%u/%u us | ahead p50/min/max=%.2f/%.2f/%.2f ms%s | waitShort=%u | "
-                "chain dec/render/slack/lead p50=%s/%.2f/%.2f/%.2f ms sum=%s ms%s",
+                "chain dec/render/slack/lead p50=%s/%.2f/%.2f/%.2f ms sum=%s ms | tail p50/max=%u/%u us%s",
                 wakeP50, wakeP95, wakeMax, leadP50 / 1000.0, leadP05 / 1000.0, endLeadP50 / 1000.0, endLeadP05 / 1000.0,
                 endLeadMin / 1000.0, spanP50, spanP95, spanMax, d.beginCallMaxUs, endCallP50, endCallP95, endCallMax,
                 aheadP50 / 1000.0, aheadMin / 1000.0, aheadMax / 1000.0, m_TimeConv != nullptr ? "" : " (approx)", d.waitShort,
-                decText, renderP50 / 1000.0, slackP50 / 1000.0, leadP50 / 1000.0, sumText,
+                decText, renderP50 / 1000.0, slackP50 / 1000.0, leadP50 / 1000.0, sumText, tailP50, tailMax,
                 // §VR-LATCH A/B：和同一輪的 [VIPLE-VR-LDIAG] 相同（10 s 區塊在換邊之前記下來的那一邊）
                 m_Options.pcvrLatchAbSec > 0 ? (m_LatchDiag.logAb ? " ab=1" : " ab=0") : "");
     d.wakePhaseUs.clear();
@@ -3003,6 +3009,7 @@ void XrContext::pcvrLoopDiagLog()
     d.render10s.clear();
     d.slack10s.clear();
     d.dec1s.clear();
+    d.tailUs.clear();
     d.beginCallMaxUs = 0;
     d.waitShort = 0;
 }
@@ -3124,6 +3131,17 @@ void XrContext::pcvrLoopDiag(uint64_t wakeNs, uint64_t latchNs, uint64_t endCall
         d.waitShort++;
     }
     d.lastWakeNs = wakeNs;
+    // tail：上一格的 xrEndFrame 返回 → 這一格呼叫 xrWaitFrame。frame thread 在兩格之間做的事都算在裡面：frameEnded、
+    // 這裡與 pcvrLatchDiag 的記帳、每 10 s 印的那幾行、pollEvents、xrSyncActions。它吃掉的是「回到 xrWaitFrame 到下一次
+    // 放行」的餘裕（頭盔上 p50 約 1.7 ms）——吃完的那一格會晚放行。不必另外取時鐘：呼叫 xrWaitFrame 的時刻＝返回的
+    // 時刻 − 這個呼叫擋住的時間（m_DiagWaitNs）。只算緊鄰的兩圈；中間有沒送出影像的圈（session 沒在跑、xrWaitFrame
+    // 或 xrBeginFrame 失敗）就不算，那不是記帳花的時間
+    const uint64_t waitCallNs = wakeNs > m_DiagWaitNs ? wakeNs - m_DiagWaitNs : 0;
+    if (d.lastEndNs != 0 && d.lastEndLoop + 1 == d.loopNo && waitCallNs > d.lastEndNs) {
+        d.tailUs.push_back(sat32((waitCallNs - d.lastEndNs) / 1000ull));
+    }
+    d.lastEndNs = endNs;
+    d.lastEndLoop = d.loopNo;
 }
 #endif
 

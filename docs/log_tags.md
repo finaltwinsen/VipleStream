@@ -851,7 +851,7 @@ frame loop（XR 桌面也有）
 [VIPLE-XR] 10s frames=… …原樣… stale=N discarded=N                            ← 行尾新增：這 10 秒 xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（正常是 0）
 [VIPLE-XR] xrBeginFrame returned XR_FRAME_DISCARDED (N so far)                ← warning，一場最多 10 行：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。
                                                                                  它是成功碼，流程照常；以前只檢查失敗碼，這個結果看不到
-[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=…/…/… us | latchLead p50/p05=…/… ms endLead p50/p05/min=…/…/… ms | span p50/p95/max=…/…/… us | beginCall max=… us endCall p50/p95/max=…/…/… us | ahead p50/min/max=…/…/… ms[ (approx)] | waitShort=N | chain dec/render/slack/lead p50=…/…/…/… ms sum=… ms[ ab=<0|1>]
+[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=…/…/… us | latchLead p50/p05=…/… ms endLead p50/p05/min=…/…/… ms | span p50/p95/max=…/…/… us | beginCall max=… us endCall p50/p95/max=…/…/… us | ahead p50/min/max=…/…/… ms[ (approx)] | waitShort=N | chain dec/render/slack/lead p50=…/…/…/… ms sum=… ms | tail p50/max=…/… us[ ab=<0|1>]
                                                                               ← PCVR，每 10 秒一行，緊接在 [VIPLE-VR-LDIAG] 10s 之後（視窗與 ab 都相同）。相位是 LDIAG 相位。
                                                                                  order＝frame loop 的呼叫順序，目前固定是 legacy；
                                                                                  wakePhase＝xrWaitFrame 返回的相位（預期：120 Hz 約 4840，也就是距 vblank 0.22 ms）。p50 是
@@ -869,7 +869,12 @@ frame loop（XR 桌面也有）
                                                                                  chain＝延遲鏈：dec（解碼：DU 進佇列到解出）＋render（影像 render thread 開始處理到 GPU 做完）
                                                                                  ＋slack（GPU 做完到挑影像，可以是負的）＋lead（挑影像到預測顯示時刻）各自的 p50 與四項的和。
                                                                                  沒有含的只有解碼幀轉手與在 mailbox 裡等的時間；這個視窗沒有解碼樣本時 dec 與 sum 印 `-`。
-                                                                                 **同一場裡比延遲看 chain**，不要看 [VIPLE-VR-MTP10] 的 p50（鎖相開著時它只會一次跳半個週期）
+                                                                                 **同一場裡比延遲看 chain**，不要看 [VIPLE-VR-MTP10] 的 p50（鎖相開著時它只會一次跳半個週期）；
+                                                                                 tail＝上一格的 xrEndFrame 返回到這一格呼叫 xrWaitFrame——frame thread 在兩格之間記帳、印 log、
+                                                                                 處理事件花多久（預期 p50 約 0.2 ms）。它吃掉的是「回到 xrWaitFrame 到下一次放行」的餘裕
+                                                                                 （頭盔上 p50 約 1.7 ms、最少約 1.1 ms）：max 接近這個數字＝那一格晚放行，量測本身擠到呈現了。
+                                                                                 每 10 秒印這幾行的那一格工作最多，它的 tail 算在**下一行**的 max 裡；只算緊鄰的兩圈
+                                                                                 （session 沒在跑、xrWaitFrame／xrBeginFrame 失敗的圈之後那一格不算）
 
 逐張的晚到計數（PCVR；不看分類器的基準）
 [VIPLE-VR-LDIAG] 10s …原樣…[ wait=…] | events=N stride=N waitNew=N waitBy(us<250,500,750,1000,1500,2500,4000,+)=n,n,n,n,n,n,n,n waitSlots(1,2,3+)=n,n,n resc=N rescBy(us<250,500,750,1000,1500,+)=n,n,n,n,n,n flip=N[ ab=<0|1>]
