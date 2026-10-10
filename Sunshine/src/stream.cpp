@@ -5459,6 +5459,11 @@ namespace stream {
           if (config::vr.multilink_repair && !opt.ctrl) {
             BOOST_LOG(warning) << "[VIPLE-VR-LINK] vr_multilink_repair needs vr_multilink_ctrl = enabled - repair stays off"sv;
           }
+          // §VR-REPAIR-RTT：要補包本身也開著（client 也要支援才會真的啟用，見 negotiate_link_features）
+          opt.repair_rtt = config::vr.multilink_repair_rtt && opt.repair;
+          if (config::vr.multilink_repair_rtt && !opt.repair) {
+            BOOST_LOG(warning) << "[VIPLE-VR-LINK] vr_multilink_repair_rtt needs vr_multilink_repair and vr_multilink_ctrl = enabled - it stays off"sv;
+          }
           if (!config::vr.multilink_fault.empty()) {
             if (auto f = ::vr::multilink::fault_t::parse(config::vr.multilink_fault)) {
               opt.fault = *f;

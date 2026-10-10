@@ -817,3 +817,79 @@ TEST(VrMultilinkDelivery, ClientCounterWrapAndOvershoot) {
   d.on_ping(41000, 0x00004D20u + 30000u, 2 * s);  // 回報落後補上來，超過 100% 就夾住
   EXPECT_EQ(d.pct, 100);
 }
+
+// ── §VR-REPAIR-RTT：server 這一端的三條規則 ─────────────────────────
+
+TEST(VrMultilinkRepairRtt, NackFlagsAreParsed) {
+  VIPLE_VR_TLV_NACK n {};
+  n.frame = 500;
+  n.block = 1;
+  n.flags = 0x90;  // VIPLE_VR_NACK_F_RTT｜eta 16 ms
+  n.attempt = 2;
+  ml::nack_t out;
+  ASSERT_TRUE(ml::parse_nack((const uint8_t *) &n, sizeof(n), out));
+  EXPECT_EQ(out.flags, 0x90);
+  EXPECT_EQ(out.frame, 500u);
+  EXPECT_EQ(out.block, 1);
+  EXPECT_EQ(out.attempt, 2);
+  EXPECT_EQ(ml::nack_eta_ms(out.flags), 16u);
+
+  // 舊 client（或這一刻走原本規則的 client）不填 flags：解析出來是 0，其餘欄位不受影響
+  const auto legacy = nack_body(77, 0, 3, 9, 1, first_n(4));
+  ASSERT_TRUE(ml::parse_nack(legacy.data(), legacy.size(), out));
+  EXPECT_EQ(out.flags, 0);
+  EXPECT_EQ(out.need, 3);
+  EXPECT_EQ(out.total, 9);
+  EXPECT_EQ(ml::nack_eta_ms(out.flags), 0u);
+}
+
+TEST(VrMultilinkRepairRtt, FlagOnlyCountsWhenNegotiated) {
+  const uint8_t all = VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_REPAIR_RTT;
+  EXPECT_TRUE(ml::nack_rtt_mode(all, 0x90));
+  EXPECT_FALSE(ml::nack_rtt_mode(VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR, 0x90));  // 沒協商：旗標不看
+  EXPECT_FALSE(ml::nack_rtt_mode(all, 0x10));  // 沒帶旗標（低 7 bit 有值也一樣）
+  EXPECT_FALSE(ml::nack_rtt_mode(all, 0x00));
+}
+
+TEST(VrMultilinkRepairRtt, MaxAge) {
+  // 原本：三個幀週期（video_max_age 是兩個，×3/2）
+  EXPECT_EQ(ml::repair_max_age_ns(false, 16'666'000), 24'999'000);
+  EXPECT_EQ(ml::repair_max_age_ns(false, 33'333'000), 49'999'500);
+  EXPECT_EQ(ml::repair_max_age_ns(false, 22'222'000), 33'333'000);
+  // 帶旗標的回報：100 ms，和更新率無關
+  EXPECT_EQ(ml::repair_max_age_ns(true, 16'666'000), 100'000'000);
+  EXPECT_EQ(ml::repair_max_age_ns(true, 40'000'000), 100'000'000);
+}
+
+TEST(VrMultilinkRepairRtt, InFlightGap) {
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(false, 16, 12'000'000), 12'000'000);  // 沒帶旗標：原本的值原樣回來
+  // 沒協商（或沒帶旗標）時低 7 bit 就算有值也不看（上一行的 16×0.75 剛好也是 12 ms，分不出來）
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(false, 28, 9'000'000), 9'000'000);
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(false, 127, 4'000'000), 4'000'000);
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(false, 3, 12'000'000), 12'000'000);
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(true, 0, 9'000'000), 9'000'000);  // 帶了旗標但沒有 eta：也用原本的
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(true, 16, 12'000'000), 12'000'000);  // eta 的四分之三
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(true, 15, 12'000'000), 11'250'000);
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(true, 3, 12'000'000), 4'000'000);  // 下限 4 ms
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(true, 6, 5'000'000), 4'500'000);
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(true, 28, 12'000'000), 21'000'000);
+  EXPECT_EQ(ml::repair_in_flight_gap_ns(true, 127, 12'000'000), 60'000'000);  // 上限 60 ms
+}
+
+TEST(VrMultilinkRepairRtt, FeatureNegotiation) {
+  // (client 提出的, ctrl, repair, repair_rtt)：REPAIR 要 CTRL 成立、REPAIR_RTT 要 REPAIR 成立
+  EXPECT_EQ(ml::negotiate_link_features(0x07, true, true, true), 0x07);
+  EXPECT_EQ(ml::negotiate_link_features(0x03, true, true, true), 0x03);  // 舊 client 沒提：不啟用
+  EXPECT_EQ(ml::negotiate_link_features(0x07, true, true, false), 0x03);  // server 的開關關著（預設）
+  EXPECT_EQ(ml::negotiate_link_features(0x07, true, false, true), 0x01);  // 補包沒開：RTT 也不成立
+  EXPECT_EQ(ml::negotiate_link_features(0x07, false, true, true), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0x05, true, true, true), 0x01);  // client 提了 RTT 卻沒提 REPAIR
+  EXPECT_EQ(ml::negotiate_link_features(0x06, true, true, true), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0xFF, true, true, true), 0x07);  // 不認得的位元不回
+  // 沒有 RTT 的三種組合和原本寫在 on_hello 裡的判斷相同
+  EXPECT_EQ(ml::negotiate_link_features(0x03, true, false, false), 0x01);
+  EXPECT_EQ(ml::negotiate_link_features(0x03, false, false, false), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0x01, true, true, false), 0x01);
+  EXPECT_EQ(ml::negotiate_link_features(0x02, true, true, false), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0x00, true, true, true), 0x00);
+}

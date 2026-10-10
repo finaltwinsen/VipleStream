@@ -325,7 +325,10 @@ namespace vr::multilink {
     };
     std::array<burst_t, kMaxLinks + 1> burst {};
     std::array<int, kMaxLinks + 1> rate_mbps {};  ///< 0＝不限速
-    std::array<int, kMaxLinks + 1> delay_ms {};  ///< 0＝不延遲；這條連線的每一批晚這麼久才送
+    /// d<linkId>:<ms>，0＝不延遲：這條連線的每一批晚這麼久才送；§VR-REPAIR-RTT 起，這條連線收到的 C2S
+    /// （NACK／LOSS／LATCH）也晚這麼久才處理。只延後送出時 PONG 晚兩趟、補包卻只晚一趟，client 量到的往返
+    /// 會比補包實際要花的時間長，本機模擬會高估補包趕得上的機率
+    std::array<int, kMaxLinks + 1> delay_ms {};
 
     bool any() const {
       if (ctrl) {
@@ -576,6 +579,7 @@ namespace vr::multilink {
   struct nack_t {
     uint32_t frame = 0;
     uint8_t block = 0;
+    uint8_t flags = 0;  ///< §VR-REPAIR-RTT：VIPLE_VR_NACK_F_RTT｜eta（毫秒）；沒協商時 client 填 0
     uint8_t need = 0;
     uint8_t total = 0;  ///< 0＝client 一個封包都沒收到（沒有位元圖）
     uint8_t attempt = 0;
@@ -596,6 +600,7 @@ namespace vr::multilink {
     out = nack_t {};
     out.frame = n.frame;
     out.block = n.block;
+    out.flags = n.flags;
     out.need = n.need;
     out.total = n.total;
     out.attempt = n.attempt;
@@ -609,6 +614,63 @@ namespace vr::multilink {
 
   /// 同一個 block 最多補幾輪。client 一般回報 3 次；鏈路整個斷一小段時，空檔裡的回報不算次數、恢復後再報（最多多 2 次）
   inline constexpr unsigned kRepairMaxRounds = 5;
+
+  /// 同一個 block 兩輪補包之間：上一輪補的在這段時間內當成「還在路上」（＝連線的往返時間＋3 ms，夾在這兩個值之間）
+  inline constexpr int64_t kRepairGapMinNs = 4'000'000;
+  inline constexpr int64_t kRepairGapMaxNs = 12'000'000;
+
+  // ── §VR-REPAIR-RTT：帶旗標的回報放寬兩道上限 ─────────────────────────────
+  //
+  // 原本這兩道上限是替「一個幀週期內補得回來」的區網訂的。協商了 VIPLE_VR_LINK_F_REPAIR_RTT 之後，client 自己照量到的
+  // 往返時間決定來不來得及、等多久，並把它的估計（eta）放在 NACK 的 flags；server 這一端只留保險用的上限。
+  // 沒協商、或 client 這一份回報沒帶旗標（它這一刻走的是原本的規則）時，兩道上限都和原本相同。
+
+  /// 帶旗標的回報：block 第一批送出超過這麼久才不補（缺幀 34 ms＋上行＋一次重報的餘裕；封包倉留 24 個 block）
+  inline constexpr int64_t kRepairRttMaxAgeNs = 100'000'000;
+  /// 帶旗標的回報：「上一輪還在路上」的視窗上限
+  inline constexpr int64_t kRepairRttGapMaxNs = 60'000'000;
+
+  /// 這份回報是不是照 §VR-REPAIR-RTT 的規則送的：要協商過（features 有 VIPLE_VR_LINK_F_REPAIR_RTT）才看旗標
+  inline bool nack_rtt_mode(uint8_t features, uint8_t nack_flags) {
+    return (features & VIPLE_VR_LINK_F_REPAIR_RTT) != 0 && (nack_flags & VIPLE_VR_NACK_F_RTT) != 0;
+  }
+
+  /// client 估的「回報→補包到齊」（毫秒；0＝沒帶）
+  inline unsigned nack_eta_ms(uint8_t nack_flags) {
+    return nack_flags & VIPLE_VR_NACK_ETA_MASK;
+  }
+
+  /// block 第一批送出多久之後就不補了。原本＝三個幀週期（video_max_age 是兩個）
+  inline int64_t repair_max_age_ns(bool rtt_mode, int64_t video_max_age_ns) {
+    return rtt_mode ? kRepairRttMaxAgeNs : video_max_age_ns * 3 / 2;
+  }
+
+  /// 上一輪補的封包多久之內算「還在路上」。帶旗標的回報用 client 的 eta 的四分之三（它過了 eta 才會重報，那時上一輪
+  /// 早該到了；提早報的那一份才要擋），沒帶 eta 就照原本的（legacy_gap_ns＝連線的往返時間＋3 ms，已經夾過）
+  inline int64_t repair_in_flight_gap_ns(bool rtt_mode, unsigned eta_ms, int64_t legacy_gap_ns) {
+    if (!rtt_mode || eta_ms == 0) {
+      return legacy_gap_ns;
+    }
+    return std::clamp<int64_t>((int64_t) eta_ms * 750'000, kRepairGapMinNs, kRepairRttGapMaxNs);
+  }
+
+  /**
+   * @brief 連線層功能的協商：client 提出的（每條連線的 flags 取交集）裡，server 的開關也開的才啟用。
+   *        REPAIR 要 CTRL 成立，REPAIR_RTT 要 REPAIR 成立；不認得的位元一律不回。
+   */
+  inline uint8_t negotiate_link_features(uint8_t offered, bool ctrl, bool repair, bool repair_rtt) {
+    uint8_t feat = 0;
+    if (ctrl && (offered & VIPLE_VR_LINK_F_CTRL)) {
+      feat |= VIPLE_VR_LINK_F_CTRL;
+      if (repair && (offered & VIPLE_VR_LINK_F_REPAIR)) {
+        feat |= VIPLE_VR_LINK_F_REPAIR;
+        if (repair_rtt && (offered & VIPLE_VR_LINK_F_REPAIR_RTT)) {
+          feat |= VIPLE_VR_LINK_F_REPAIR_RTT;
+        }
+      }
+    }
+    return feat;
+  }
 
   /**
    * @brief 決定補哪些 shard（回傳 shard 序號，依送出順序）。空＝不用補（client 其實已經夠還原，或倉裡沒有它缺的）。

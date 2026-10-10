@@ -5,6 +5,7 @@
 // standard includes
 #include <algorithm>
 #include <format>
+#include <utility>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -37,8 +38,6 @@ namespace vr::multilink {
     constexpr uint32_t kProbeFastCount = 4;
     constexpr uint32_t kProbeMinPkts = 32;  // 太小的批次量不準，不拿來探測
     constexpr auto kRepairMaxAge = 8ms;  // 補包排進佇列後這麼久還送不出去就丟：補了也來不及
-    constexpr int64_t kRepairGapMinNs = 4'000'000;  // 同一個 block 兩輪補包之間：上一輪補的在這段時間內當成「還在路上」
-    constexpr int64_t kRepairGapMaxNs = 12'000'000;  // （＝連線的往返時間＋3 ms，夾在這兩個值之間）
     constexpr int64_t kProbeSpanNs = 6'000'000;  // 一次探測送這段時間內的所有批次（約一整幀）：只送一批的話，
                                                  // 64 KB 在快的鏈路上是一個 Wi-Fi 聚合框，頭盔端量不出速率
 
@@ -176,8 +175,10 @@ namespace vr::multilink {
     std::atomic<uint32_t> pkt_bytes {0};  // 影像封包的大小（算封包率用）
     struct repair_stats_t {
       uint64_t nack = 0, rounds = 0, pkts = 0, gone_expired = 0, gone_budget = 0, gone_unknown = 0, nothing = 0, exhausted = 0;
+      uint64_t rtt = 0;  // §VR-REPAIR-RTT：其中帶旗標（照 RTT 規則送）的份數
     };
     repair_stats_t rstats;  // 握 store_mtx
+    int64_t nack_age_max_ns = 0;  // §VR-REPAIR-RTT：這 10 秒收到的回報裡，block 年齡最大的一份（握 store_mtx；印的時候歸零）
     uint32_t nack_logs = 0;  // 逐筆 log 的節流（握 store_mtx）
     uint32_t gone_logs = 0;  // 回 GONE 的 log 另外節流（少數事件，要看得到；握 store_mtx）
     repair_stats_t rstats_prev;  // 只在 control 執行緒（take_repair_line）
@@ -416,6 +417,20 @@ namespace vr::multilink {
             return;
           }
           L.rx_ctl.fetch_add(1, std::memory_order_relaxed);
+          if (const int delay_ms = opt.fault.delay(L.id); delay_ms > 0 && on_c2s) {
+            // 故障注入的延遲（開發用）：這條連線收到的 0x5507（NACK／LOSS／LATCH）也晚這麼久才處理（上行那一趟）。
+            // PONG 已經晚「來回各一趟」；回報若是立刻處理，補包只晚下行那一趟，實際的「回報→補包到齊」比 client 量到的
+            // 往返時間短，用這條規則驗 §VR-REPAIR-RTT 會高估補包趕得上的機率
+            auto payload = std::make_shared<std::string>((const char *) plaintext.data() + 2, plaintext.size() - 2);
+            auto timer = std::make_shared<asio::steady_timer>(io, std::chrono::milliseconds {delay_ms});
+            timer->async_wait([this, id = L.id, payload, timer](const boost::system::error_code &tec) {
+              if (tec || stop.load(std::memory_order_relaxed)) {
+                return;
+              }
+              on_c2s(id, VIPLE_VR_PTYPE_C2S, std::string_view {*payload});
+            });
+            return;
+          }
         }
         if (on_c2s && on_c2s(L.id, ptype, std::string_view {(const char *) plaintext.data() + 2, plaintext.size() - 2})) {
           L.trk_first.fetch_add(1, std::memory_order_relaxed);
@@ -756,18 +771,15 @@ namespace vr::multilink {
       for (const auto &h : links) {
         offered &= h.flags;
       }
-      uint8_t feat = 0;
-      if (m.opt.ctrl && (offered & VIPLE_VR_LINK_F_CTRL)) {
-        feat |= VIPLE_VR_LINK_F_CTRL;
-        if (m.opt.repair && (offered & VIPLE_VR_LINK_F_REPAIR)) {
-          feat |= VIPLE_VR_LINK_F_REPAIR;
-        }
-      }
+      // §VR-REPAIR-RTT：REPAIR_RTT 要在 REPAIR 成立之內（規則在 negotiate_link_features，有單元測試）
+      const uint8_t feat = negotiate_link_features(offered, m.opt.ctrl, m.opt.repair, m.opt.repair_rtt);
       if (m.features.exchange(feat, std::memory_order_relaxed) != feat || m.count.load(std::memory_order_relaxed) == 0) {
         BOOST_LOG(info) << "[VIPLE-VR-LINK] link features: ctrl=" << ((feat & VIPLE_VR_LINK_F_CTRL) ? "on" : "off")
                         << " repair=" << ((feat & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off")
+                        << " repairRtt=" << ((feat & VIPLE_VR_LINK_F_REPAIR_RTT) ? "on" : "off")
                         << " (client offered 0x" << std::format("{:02x}", (unsigned) offered)
-                        << ", server ctrl=" << (m.opt.ctrl ? "enabled" : "disabled") << " repair=" << (m.opt.repair ? "enabled" : "disabled") << ')';
+                        << ", server ctrl=" << (m.opt.ctrl ? "enabled" : "disabled") << " repair=" << (m.opt.repair ? "enabled" : "disabled")
+                        << " repairRtt=" << (m.opt.repair_rtt ? "enabled" : "disabled") << ')';
       }
     }
 
@@ -1092,6 +1104,12 @@ namespace vr::multilink {
       }
       gap_ns = std::clamp(gap_ns, kRepairGapMinNs, kRepairGapMaxNs);
     }
+    // §VR-REPAIR-RTT：協商過、而且這一份帶了旗標（client 這一刻照往返時間決定來不來得及）→ 年齡上限與「還在路上」的
+    // 視窗改用放寬的（規則在 vr_multilink_logic.h，有單元測試）。沒帶旗標的照原本的
+    const bool rtt_mode = nack_rtt_mode(m.features.load(std::memory_order_relaxed), nack.flags);
+    const unsigned eta_ms = nack_eta_ms(nack.flags);
+    gap_ns = repair_in_flight_gap_ns(rtt_mode, eta_ms, gap_ns);
+    const int64_t max_age_ns = repair_max_age_ns(rtt_mode, std::chrono::duration_cast<std::chrono::nanoseconds>(m.opt.video_max_age).count());
 
     batch_t rb;
     bool log_it = false;
@@ -1099,8 +1117,12 @@ namespace vr::multilink {
     {
       std::lock_guard lk {m.store_mtx};
       ++m.rstats.nack;
+      m.rstats.rtt += rtt_mode ? 1 : 0;
       log_it = m.nack_logs++ < 12 || m.nack_logs % 50 == 0;  // 每場前 12 筆照印，之後每 50 筆一筆
       auto *b = m.store.find(nack.frame, nack.block);
+      if (b) {
+        m.nack_age_max_ns = std::max(m.nack_age_max_ns, now_ns - b->first_ns);
+      }
       if (log_it && b) {
         unsigned have = 0;
         for (unsigned i = 0; i < b->total && nack.total == b->total; ++i) {
@@ -1112,11 +1134,12 @@ namespace vr::multilink {
       if (!b) {
         res.gone = VIPLE_VR_GONE_UNKNOWN;
         ++m.rstats.gone_unknown;
-      } else if (now_ns - b->first_ns > std::chrono::duration_cast<std::chrono::nanoseconds>(m.opt.video_max_age).count() * 3 / 2) {
+      } else if (now_ns - b->first_ns > max_age_ns) {
         // 三個幀週期以前的 block（video_max_age 是兩個）：補了也來不及。client 的等待上限是「後面的封包到了之後一個
         // 幀週期」，不是從這個 block 送出起算——鏈路斷一小段、連續兩幀整個沒到時，它要等第三幀的封包到了才知道缺，
         // 這時第一幀已經超過兩個幀週期，但它還願意再等一個週期，補得回來（2026-10-07 S0：12 ms 的空檔剛好吞掉
         // 兩整幀的相位，上限是兩個週期時這兩幀都救不回）。空檔再長（三幀以上）就不補了，交給 refresh。
+        // §VR-REPAIR-RTT：帶旗標的回報改用 kRepairRttMaxAgeNs（100 ms）——等多久由 client 照往返時間決定，這裡只留保險
         res.gone = VIPLE_VR_GONE_EXPIRED;
         ++m.rstats.gone_expired;
         if (!log_it && (m.gone_logs++ < 30 || m.gone_logs % 20 == 0)) {  // 每場前 30 筆照印，之後每 20 筆一筆
@@ -1170,7 +1193,9 @@ namespace vr::multilink {
     }
 
     if (log_it) {
+      // §VR-REPAIR-RTT：帶旗標的回報多印 client 的 eta（毫秒）
       BOOST_LOG(info) << "[VIPLE-VR-REPAIR] nack frame=" << nack.frame << " block=" << (int) nack.block << ' ' << (log_detail.empty() ? "(not in store)" : log_detail)
+                      << (rtt_mode ? std::format(" eta={}", eta_ms) : std::string {})
                       << " -> " << (res.gone ? std::format("GONE reason={}", (int) res.gone) : res.resent ? std::format("resend {} pkts", res.resent) : std::string {"nothing to send"});
     }
     if (res.gone != 0) {
@@ -1230,9 +1255,11 @@ namespace vr::multilink {
       return {};
     }
     impl_t::repair_stats_t c;
+    int64_t age_max_ns = 0;
     {
       std::lock_guard lk {m.store_mtx};
       c = m.rstats;
+      age_max_ns = std::exchange(m.nack_age_max_ns, 0);
     }
     const auto &p = m.rstats_prev;
     std::string s;
@@ -1251,6 +1278,10 @@ namespace vr::multilink {
                          L.repair_wait_max_us.exchange(0, std::memory_order_relaxed) / 1000.0);
         L.repair_tx_prev = tx;
         L.repair_drop_prev = drop;
+      }
+      if (m.features.load(std::memory_order_relaxed) & VIPLE_VR_LINK_F_REPAIR_RTT) {
+        // §VR-REPAIR-RTT：帶旗標的回報份數、這 10 秒裡年齡最大的一份回報（block 第一批送出到收到回報；新欄位加在行尾）
+        s += std::format(" | rtt={} ageMaxMs={:.1f}", c.rtt - p.rtt, age_max_ns / 1e6);
       }
     }
     m.rstats_prev = c;

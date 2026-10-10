@@ -58,6 +58,9 @@ namespace vr::multilink {
     std::chrono::microseconds video_max_age {22222};  ///< 影像批次在佇列＋送出的期限（兩個幀週期）
     bool ctrl = false;  ///< §VR-LINK-CTRL（vr_multilink_ctrl）：client 也支援時，LOSS／LATCH／REFRESH_START 走連線
     bool repair = false;  ///< §VR-LINK-REPAIR（vr_multilink_repair）：補包；要 ctrl 也開
+    /// §VR-REPAIR-RTT（vr_multilink_repair_rtt）：client 也支援時，補包的時間預算由它照量到的往返時間決定，
+    /// server 對帶旗標的回報放寬年齡上限與「還在路上」的視窗；要 repair 也開
+    bool repair_rtt = false;
     fault_t fault;
   };
 

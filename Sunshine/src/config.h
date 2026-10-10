@@ -325,6 +325,11 @@ namespace config {
     /// §VR-LINK-REPAIR：vr_multilink_repair（disabled 預設；要 vr_multilink_ctrl 也開）。enabled＝server 保留最近
     /// 幾幀已加密的封包，client 回報某個 FEC block 缺哪些 shard 時原樣補送。
     bool multilink_repair = false;
+    /// §VR-REPAIR-RTT（2026-10-10）：vr_multilink_repair_rtt（disabled 預設；要 vr_multilink_repair 也開）。enabled＝client
+    /// 也支援時，補包的門檻、等待上限與重報由 client 照它量到的往返時間決定（只在一條連線送影像時），server 對這種回報
+    /// 把年齡上限由三個幀週期放寬到 100 ms。原本這幾道上限都用幀週期訂，往返 10 ms 上下、120 Hz 時補包多半趕不上。
+    /// 關著時（或 client 不支援）兩端的行為與之前完全相同。
+    bool multilink_repair_rtt = false;
 
     /// 開發用：vr_multilink_fault = <linkId>:<on_ms>:<off_ms>[:<phase_ms>][,…]，在指定連線上週期性丟掉全部收送，
     /// 用來在單一網卡上模擬鏈路空檔。空字串＝關閉。
