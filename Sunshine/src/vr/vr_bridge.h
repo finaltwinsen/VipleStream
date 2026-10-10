@@ -677,6 +677,19 @@ namespace vr::bridge {
   cadence::info_t present_cadence();
 
   /**
+   * @brief §VR-DIRECT-KICK：擷取執行緒（display_vr_t）把一張影像的回聲年齡交給 bridge 執行緒的偵測器
+   *        （vr_direct_kick.h：判定「多一格」除了 presentPhase 還要這個量）。任何執行緒都可以呼叫：先做一次 atomic 比對，
+   *        對得上才上一把小鎖、放進固定大小的緩衝；bridge 執行緒排空 timing ring 的那一輪（連線中每 2 ms）倒進偵測器。
+   *        `vr_direct_kick = disabled`、這個 generation 的偵測器不動作（沒有 session config、週期短於 11 ms）、
+   *        generation 已經不是目前的：直接返回，什麼都不做。緩衝滿了（bridge 執行緒卡住）就丟掉這一筆。
+   *        宣告在 Windows 專用區，所以 Linux／macOS 的 stub 不必提供。
+   * @param generation 這一張影像所屬的 generation（frame_source_t::generation）
+   * @param present_qpc 這一張影像 Present 的時刻（frame descriptor 的 present_qpc，已通過 §B.8 的時間窗）
+   * @param age_qpc present_qpc − frame_reader_t::last_echo_published_qpc()，QPC tick；沒有對到姿態的影像不要呼叫
+   */
+  void report_echo_age(uint64_t generation, int64_t present_qpc, int64_t age_qpc);
+
+  /**
    * @brief frame ring 的單一消費者輔助（§B.3 讀取方＋§B.8 copy-once-validate）。只能由一條執行緒使用。
    *
    * read_latest() 只取最新一筆（latest-wins）：seqlock 最多試 3 次，失敗算 torn、本輪視為沒有新資料；

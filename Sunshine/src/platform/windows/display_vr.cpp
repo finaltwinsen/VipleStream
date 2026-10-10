@@ -17,6 +17,9 @@
  * - §VR-CADENCE（2026-10-10；config `vr_capture_overload`，預設 late＝決定不變）：`vr_capture_late` 開著時，每次餵健康判定
  *   之前讀 bridge 執行緒發布的 Present 節拍摘要（一次 atomic 讀取，在交出影像之後），由 vr_capture_health.h 合併成
  *   發布給 stream.cpp 的兩個決定（LATCH、PREDICT 各自要不要取樣）。late 模式只是影子：照算、照印，不影響決定。
+ * - §VR-DIRECT-KICK（2026-10-11；config `vr_direct_kick`，預設關）：開著時，每一張對到姿態的影像在交出去之後，把它的
+ *   回聲年齡（Present 的時刻減掉那個姿態被發布給 driver 的時刻；10 s 行的 echoAge 是同一個數）交給 bridge 執行緒的
+ *   偵測器（vr::bridge::report_echo_age()）。關著時不呼叫。
  * - log 衛生（S1-02）：不印 handle 值、完整 GUID、SID。LUID 只印 match／n/a。
  *
  * 結構比照 vr_bridge_win.cpp 的 selftest_consume()（V2 的 T2 消費者），差別在：ring／fence 開在 display 自己的
@@ -438,6 +441,9 @@ namespace platf::dxgi {
     // 有作用）。late（預設）＝過載旗標，決定和之前相同；cadence＝Present 的節拍（見 vr_capture_health.h 的 (e)）
     const auto overload_mode = config::vr.capture_overload == config::vr_t::overload_e::cadence ? vr::capture::overload_mode_e::cadence : vr::capture::overload_mode_e::late;
     const bool cadence_mode = overload_mode == vr::capture::overload_mode_e::cadence;
+    // §VR-DIRECT-KICK：開著時把每一張對到姿態的影像的回聲年齡交給 bridge（它的偵測器要這個量才會判定「多一格」，
+    // 見 vr_direct_kick.h）。同樣在進來時讀一次；關著時下面多的只有一個區域變數的比較
+    const bool kick_echo = config::vr.direct_kick;
     health_.configure(late_enabled, client_frame_rate > 0 ? vr::capture::k_ns_per_s / client_frame_rate : 0, (int64_t) config::vr.capture_late_max_ms * vr::capture::k_ns_per_ms, overload_mode);
     {
       vr::capture::backoff_t restored {};
@@ -1043,6 +1049,7 @@ namespace platf::dxgi {
       }
 
       const int64_t push_qpc = platf::qpc_counter();
+      int64_t echo_age_qpc = 0;  ///< 這一張的回聲年齡（0＝沒有對到姿態）
       {
         std::lock_guard lk {stats_mtx_};
         const double e = qpc_to_ms(push_qpc - evt_qpc);
@@ -1050,7 +1057,8 @@ namespace platf::dxgi {
         window_.evt_to_push_ms.push_back(e);
         window_.present_to_push_ms.push_back(p);
         if (const int64_t pub = cs->reader->last_echo_published_qpc(); pub != 0 && d.present_qpc > pub) {
-          window_.echo_age_ms.push_back(qpc_to_ms(d.present_qpc - pub));
+          echo_age_qpc = d.present_qpc - pub;
+          window_.echo_age_ms.push_back(qpc_to_ms(echo_age_qpc));
         }
         if (stats_.evt_to_push_ms.size() < k_stats_samples_max) {
           stats_.evt_to_push_ms.push_back(e);
@@ -1080,6 +1088,11 @@ namespace platf::dxgi {
       // 複製成功的影像不會觸發拆線，回覆只可能帶「退避歸零」（feed 裡印）
       feed(late ? vr::capture::outcome_e::late : vr::capture::outcome_e::on_time, d, observed, fence_qpc - evt_qpc, push_qpc);
       publish_health(push_qpc);
+      // §VR-DIRECT-KICK：這一張的回聲年齡（上面算給 10 s 行的同一個數）交給 bridge 的偵測器，同樣放在交出影像之後。
+      // bridge 那一頭只在這個 generation 的偵測器會動作時才收，其餘時候是一次 atomic 比對
+      if (kick_echo && echo_age_qpc > 0) {
+        vr::bridge::report_echo_age(cs->src->generation, d.present_qpc, echo_age_qpc);
+      }
       if (!keep_going) {
         return capture_e::ok;
       }

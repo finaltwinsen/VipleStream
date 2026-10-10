@@ -280,6 +280,8 @@ namespace config {
     /// 遊戲上一格就交好的幀，多一個 host 週期的延遲）滿 3 秒時，bridge 自動讓 driver 的 PostPresent 立刻返回一小段
     /// （週期 × 1.25，夾在 20～40 ms），把它推回「等遊戲這一格」；之後確認有沒有成功，沒有就退避再試
     /// （判斷都在 src/vr/vr_direct_kick.h）。只在 host 的週期 ≥ 11 ms（約 90 Hz 以下，例如半速串流的 60 Hz）時動作。
+    /// 2026-10-11 起判定要兩個量都成立：Present 落在格內的位置，加上擷取端交過來的回聲年齡（影像 Present 的時刻減掉
+    /// 它用的姿態被發布的時刻；多一格時多一個週期）——所以只有串流在擷取、影像對得到姿態時才會動作。
     /// 開著時 WELCOME 會帶 dev 旗標（driver 才接受那個節拍模式）。只有 Windows 的 PCVR 會用到。
     bool direct_kick = false;
     /// §VR-A-KICK 的實驗（dev，2026-10-10）：vr_dev_kick_every_s（0 預設＝關，5–600）。每隔這麼多秒讓 driver 的 PostPresent
