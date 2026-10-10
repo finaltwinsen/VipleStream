@@ -7,6 +7,7 @@ import StreamingPreferences 1.0
 import ComputerManager 1.0
 import SdlGamepadKeyNavigation 1.0
 import SystemProperties 1.0
+import VrLauncher 1.0
 
 Flickable {
     id: settingsPage
@@ -20,9 +21,13 @@ Flickable {
     contentHeight: settingsColumn1.height > settingsColumn2.height ? settingsColumn1.height : settingsColumn2.height
 
     ScrollBar.vertical: ScrollBar {
+        // §UI-SCROLL：Steam Frame 上多半用雷射指標（＝滑鼠）操作，搖桿不會變成滾輪。捲軸在那裡一直顯示、
+        // 做寬一點：看得出下面還有內容，也有東西可以用雷射抓著拖。其他平台維持原樣。
+        policy: VrLauncher.available ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
+        width: VrLauncher.available ? 18 : implicitWidth
         anchors {
             left: parent.right
-            leftMargin: -10
+            leftMargin: VrLauncher.available ? -20 : -10
         }
     }
 
@@ -42,11 +47,125 @@ Flickable {
         duration: 100
     }
 
+    // §UI-SCROLL（2026-10-11）：把這一頁往下（pages > 0）或往上捲，單位是一個可見高度。
+    // 手把的右搖桿與 LB／RB（SdlGamepadKeyNavigation.scrollRequested）和鍵盤的 PageUp／PageDown 都走這裡。
+    // 原本手把與鍵盤只能靠焦點一項一項移動來帶動捲頁，這一頁有幾十個選項。
+    function scrollByPages(pages) {
+        if (pages === 0) {
+            return
+        }
+
+        var maxY = Math.max(contentHeight - height, 0)
+        // 上一段動畫還沒跑完時從它的終點接著算，一直推著搖桿才不會少算距離
+        var base = autoScrollAnimation.running ? autoScrollAnimation.to : contentY
+        var target = Math.min(Math.max(base + pages * height, 0), maxY)
+
+        scrollFocusTimer.forward = pages > 0
+        scrollFocusTimer.restart()
+
+        if (target !== contentY) {
+            autoScrollAnimation.from = contentY
+            autoScrollAnimation.to = target
+            autoScrollAnimation.restart()
+        }
+    }
+
+    // 焦點是不是在某個 popup（對話框、選單）裡：往上走不會經過主畫面（main.qml 的 stackView）也不會經過
+    // 工具列（toolBar）的，就是掛在視窗 overlay 底下的 popup。沒有任何控制項有焦點時，焦點是視窗的根，不算。
+    // （這幾個檔案匯入的是 QtQuick.Controls 2.2，沒有 Overlay 可以直接比。）
+    function isFocusInPopup() {
+        var start = Window.activeFocusItem
+        for (var item = start; item; item = item.parent) {
+            if (item === stackView || item === toolBar) {
+                return false
+            }
+        }
+        return !!start && !!start.parent
+    }
+
+    // 手把要求捲動時走這裡。這一頁不在最上層、或上面開著對話框時不捲：不然頁面會在對話框後面動
+    function scrollFromGamepad(pages) {
+        if (StackView.status === StackView.Active && !isFocusInPopup()) {
+            scrollByPages(pages)
+        }
+    }
+
+    // item 是不是完整落在目前看得到的範圍裡（上下各留 margin）。已經捲到頂或到底時，
+    // 貼著那一邊的項目不可能再留出邊距，這時只要求它完整看得到
+    function isInView(item, margin) {
+        var top = item.mapToItem(contentItem, 0, 0).y
+        var bottom = top + item.height
+        var viewBottom = contentY + height
+        return (top - margin >= contentY || (contentY <= 0 && top >= contentY)) &&
+               (bottom + margin <= viewBottom || (viewBottom >= contentHeight && bottom <= viewBottom))
+    }
+
+    // 用 scrollByPages 捲完之後，焦點如果已經在畫面外，把它移到畫面裡、沿 Tab 順序在捲動方向上的
+    // 第一個控制項。焦點留在畫面外的話，下一次按上下，焦點一動頁面就捲回原來的位置。
+    // 焦點本來就不在這一頁的控制項上（例如只用滑鼠）就不動。
+    function moveFocusIntoView(forward) {
+        var start = Window.activeFocusItem
+        if (!start || !isChildOfFlickable(start) || isInView(start, 0)) {
+            return
+        }
+
+        // 和下面焦點改變時自動捲動留的邊距一致，焦點移過去時頁面才不會再動
+        var margin = height > 100 ? 50 : 0
+        var item = start
+        // 次數上限只是防呆
+        for (var i = 0; i < 500; i++) {
+            item = item.nextItemInFocusChain(forward)
+            if (!item || item === start) {
+                return
+            }
+            // 文字輸入欄跳過：手把的 A 在裡面會打出空白；有螢幕鍵盤的裝置上，焦點自己跑進去還可能把鍵盤叫出來
+            if (isChildOfFlickable(item) && !("cursorPosition" in item) && isInView(item, margin)) {
+                item.forceActiveFocus(Qt.TabFocus)
+                return
+            }
+        }
+    }
+
+    Timer {
+        id: scrollFocusTimer
+        property bool forward: true
+        interval: 250
+        onTriggered: moveFocusIntoView(forward)
+    }
+
+    Connections {
+        target: SdlGamepadKeyNavigation
+
+        function onScrollRequested(pages) {
+            // Window／StackView 這類附加屬性要在這一頁自己的函式裡讀（Connections 不是 Item）
+            settingsPage.scrollFromGamepad(pages)
+        }
+    }
+
+    Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_PageDown) {
+            scrollByPages(0.8)
+            event.accepted = true
+        }
+        else if (event.key === Qt.Key_PageUp) {
+            scrollByPages(-0.8)
+            event.accepted = true
+        }
+    }
+
     Window.onActiveFocusItemChanged: {
         var item = Window.activeFocusItem
         if (item) {
             // Ignore non-child elements like the toolbar buttons
             if (!isChildOfFlickable(item)) {
+                return
+            }
+
+            // §UI-SCROLL：剛用右搖桿／LB／RB 捲過、焦點還沒跟進來（計時器還在跑）就按了方向鍵：焦點是從畫面外的
+            // 舊位置移到它的隔壁，照下面的規則頁面會捲回去。改成先把焦點帶進畫面，頁面不動。
+            if (scrollFocusTimer.running && !isInView(item, 0)) {
+                scrollFocusTimer.stop()
+                moveFocusIntoView(scrollFocusTimer.forward)
                 return
             }
 
@@ -74,8 +193,21 @@ Flickable {
         // It is required to shift focus between controls on the settings page.
         SdlGamepadKeyNavigation.setUiNavMode(true)
 
-        // Highlight the first item if a gamepad is connected
-        if (SdlGamepadKeyNavigation.getConnectedGamepads() > 0) {
+        var gamepadConnected = SdlGamepadKeyNavigation.getConnectedGamepads() > 0
+        if (VrLauncher.available && VrLauncher.vrMode) {
+            // §UI-SCROLL：Steam Frame 的 VR 模式下，這一頁一打開就捲到 VR 那一區。它排在左欄最底下，
+            // 前面有幾十個選項；有手把時焦點也直接落在那一區的第一個選項。其他情況照舊從最上面開始。
+            if (gamepadConnected) {
+                vrEyeComboBox.forceActiveFocus(Qt.TabFocus)
+            }
+            // 焦點落下去時頁面只會捲到剛好露出那一個選項；這裡捲到整區的標題都看得到
+            var groupTop = vrSettingsGroupBox.mapToItem(contentItem, 0, 0).y
+            autoScrollAnimation.from = contentY
+            autoScrollAnimation.to = Math.max(Math.min(groupTop - 10, contentHeight - height), 0)
+            autoScrollAnimation.restart()
+        }
+        else if (gamepadConnected) {
+            // Highlight the first item if a gamepad is connected
             resolutionComboBox.forceActiveFocus(Qt.TabFocus)
         }
     }
@@ -894,7 +1026,10 @@ Flickable {
                     wrapMode: Text.Wrap
                 }
 
-                ComboBox {
+                // §UI-SCROLL：用 AutoResizingComboBox 而不是一般的 ComboBox——選單打開時它會把手把導覽切回上下鍵。
+                // 一般的 ComboBox 在這一頁用手把打開之後，按上下送出的是 Tab，選單直接關掉、焦點跳到下一個控制項，
+                // 選不了項目。
+                AutoResizingComboBox {
                     id: rendererSelectionCombo
                     width: parent.width
                     font.pointSize: 12
@@ -938,7 +1073,7 @@ Flickable {
                     wrapMode: Text.Wrap
                 }
 
-                ComboBox {
+                AutoResizingComboBox {
                     id: linuxVideoFrontendCombo
                     visible: Qt.platform.os === "linux"
                     width: parent.width
@@ -1076,7 +1211,7 @@ Flickable {
                     }
                 }
 
-                ComboBox {
+                AutoResizingComboBox {
                     id: frucBackendCombo
                     width: parent.width
                     // Vulkan renderer 的 compute 補幀內建,不需 frucBackend.
@@ -1118,7 +1253,7 @@ Flickable {
                     ToolTip.text: qsTr("Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.\n\nNVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.\n\nDirectML: runs the bundled RIFE 4.25 lite ONNX model on the D3D12 DirectML EP — *real* motion-compensated ML interpolation, best visual quality on dynamic content. Per-op kernel-launch overhead (~25 ms baseline regardless of resolution) means it needs a Tensor-Core-class GPU (RTX 30/40 mainstream or better) to keep up at 720p+ in real time. On weaker GPUs the client auto-cascades the inference resolution down (1080p → 720p → 540p → 480p → 360p) and falls back to Generic if even 360p can't fit the frame budget.")
                 }
 
-                ComboBox {
+                AutoResizingComboBox {
                     id: frucQualityCombo
                     width: parent.width
                     // Quality preset only applies to D3D11 + Generic
@@ -1959,13 +2094,16 @@ Flickable {
                     wrapMode: Text.Wrap
                 }
 
-                ComboBox {
+                // §UI-SCROLL：這一區的四個下拉選單同樣用 AutoResizingComboBox（手把才能在選單裡上下選），
+                // 寬度跟著最長的選項，初始化時要自己算一次
+                AutoResizingComboBox {
                     id: vrEyeComboBox
                     property var values: [1152, 1440, 1728, 2160]
                     model: ["1152 x 1152", "1440 x 1440", "1728 x 1728", "2160 x 2160"]
                     Component.onCompleted: {
                         var i = values.indexOf(StreamingPreferences.vrEyeWidth)
                         currentIndex = i >= 0 ? i : values.length - 1
+                        recalculateWidth()
                     }
                     onActivated: {
                         StreamingPreferences.vrEyeWidth = values[currentIndex]
@@ -1985,13 +2123,14 @@ Flickable {
                     wrapMode: Text.Wrap
                 }
 
-                ComboBox {
+                AutoResizingComboBox {
                     id: vrOverscanComboBox
                     property var values: [0, 2, 3, 4, 5]
                     model: [qsTr("Off"), "2\u00b0", "3\u00b0", "4\u00b0", "5\u00b0"]
                     Component.onCompleted: {
                         var i = values.indexOf(Math.round(StreamingPreferences.vrOverscanDeg))
                         currentIndex = i >= 0 ? i : 0
+                        recalculateWidth()
                     }
                     onActivated: {
                         StreamingPreferences.vrOverscanDeg = values[currentIndex]
@@ -2010,13 +2149,14 @@ Flickable {
                     wrapMode: Text.Wrap
                 }
 
-                ComboBox {
+                AutoResizingComboBox {
                     id: vrLatchDelayComboBox
                     property var values: [0, 3, 5, 6]
                     model: [qsTr("Off"), "3 ms", "5 ms", "6 ms"]
                     Component.onCompleted: {
                         var i = values.indexOf(Math.round(StreamingPreferences.vrLatchDelayMs))
                         currentIndex = i >= 0 ? i : 0
+                        recalculateWidth()
                     }
                     onActivated: {
                         StreamingPreferences.vrLatchDelayMs = values[currentIndex]
@@ -2035,13 +2175,14 @@ Flickable {
                     wrapMode: Text.Wrap
                 }
 
-                ComboBox {
+                AutoResizingComboBox {
                     id: vrFoveationComboBox
                     property var values: [100, 125, 150, 200]
                     model: [qsTr("Off"), "1.25x", "1.5x", "2x"]
                     Component.onCompleted: {
                         var i = values.indexOf(StreamingPreferences.vrFoveation)
                         currentIndex = i >= 0 ? i : 0
+                        recalculateWidth()
                     }
                     onActivated: {
                         StreamingPreferences.vrFoveation = values[currentIndex]

@@ -128,6 +128,9 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
     - **VR 的位元率放進設定頁**：頭盔上「自動位元率關、位元率 50 Mbps」對 VR 沒有作用（VR 用自己的預設，全速 88.9 Mbps、
       實際送出 104 Mbps）。50 Mbps 實測：流量少四成、延遲少 4 ms、救不回的幀少約兩成半，重複顯示不變。要不要做、預設值待使用者決定。
     - 自動位元率被區網用的規則釘在下限（使用者說以後再處理）。
+    - **設定頁用控制器操作（§UI-SCROLL，2026-10-11，使用者回報在頭盔上用雷射指標捲不下去）**：已改——右搖桿與 LB／RB 捲頁、
+      Frame 上捲軸常駐可以用雷射拖、VR 模式下設定頁一打開就在 VR 那一區、下拉選單用手把可以上下選；Windows 上用虛擬手把驗過。
+      **待使用者在頭盔上確認。** 還是不行的話先看介面行程 log 的 `[VIPLE-UI-NAV]`（手把有沒有被看到、輸入有沒有進來）。
   - **10-09 已實作、待頭盔驗證（都在開關後面、預設關；`steam_frame_client.md`「依這三輪做的改動」有下次配戴的順序）**：
     client 量測 `[VIPLE-VR-LDIAG]`（一律開）、host `vr_latch_mode = v3`＋`vr_latch_acquire`（Monado 上驗過：一步到位、約 3 s 進入追蹤、
     driver 沒有多漏格）、client `vrtrackrelock`／`vrlatchrelatch`／`vrlatchwaitms`／`vrlatchabsec`、dev `--vr-test-jitter`。

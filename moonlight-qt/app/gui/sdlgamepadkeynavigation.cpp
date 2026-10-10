@@ -2,6 +2,7 @@
 
 #include <QKeyEvent>
 #include <QGuiApplication>
+#include <QStringList>
 #include <QWindow>
 
 #include "settings/mappingmanager.h"
@@ -13,13 +14,29 @@ static bool s_InitFailed = false;
 
 #define AXIS_NAVIGATION_REPEAT_DELAY 150
 
+// 左搖桿推過這個值才算一次上下左右。原本是 30000（滿量程 32767 的 92%），要幾乎直直推到底才會觸發；
+// 24000 約是 73%，斜一點或沒推到底也算。（沒有實測過哪一支手把到不了 30000，這是放寬、不是對症。）
+#define AXIS_NAVIGATION_THRESHOLD 24000
+
+// §UI-SCROLL（2026-10-11）：設定頁（Tab 導覽模式）下，右搖桿上下＝捲動那一頁，LB／RB＝一次捲大半頁。
+// 原本手把只能靠「焦點一項一項往下移」讓頁面跟著捲：設定頁有幾十個選項，VR 那一區排在左欄最底下，
+// 用頭盔的控制器很難走到。這裡只算出要捲多少（單位＝一個可見高度）、發 scrollRequested，由那一頁自己捲。
+// 不合成滑鼠滾輪事件：那要看視窗裡滑鼠座標底下是什麼，也要看 Qt 怎麼處理合成事件的時戳，直接捲比較可靠。
+#define SCROLL_AXIS_DEADZONE 8000          // 右搖桿超過這個值才開始捲（約 25%）
+#define SCROLL_MAX_PAGES_PER_SEC 2.0       // 推到底的速度；速度跟推的幅度的平方成正比，輕推可以慢慢對位置
+#define SCROLL_BUTTON_PAGES 0.8            // LB／RB 一次捲多少
+
 SdlGamepadKeyNavigation::SdlGamepadKeyNavigation(StreamingPreferences* prefs)
     : m_Prefs(prefs),
       m_Enabled(false),
       m_UiNavMode(false),
       m_FirstPoll(false),
       m_HasFocus(false),
-      m_LastAxisNavigationEventTime(0)
+      m_LastAxisNavigationEventTime(0),
+      m_LastScrollEventTime(0),
+      m_PollLogged(false),
+      m_InputLogged(false),
+      m_ScrollLogged(false)
 {
     m_PollingTimer = new QTimer(this);
     connect(m_PollingTimer, &QTimer::timeout, this, &SdlGamepadKeyNavigation::onPollingTimerFired);
@@ -94,6 +111,23 @@ void SdlGamepadKeyNavigation::enable()
         }
     }
 
+    // §UI-SCROLL：介面收不到手把輸入時，先從這幾行確認手把有沒有被看到、是哪幾支、輸入有沒有進來
+    // （每次 enable() 各印一行：這一行、開始輪詢、第一個輸入、第一次捲動）
+    {
+        QStringList names;
+        for (auto gc : std::as_const(m_Gamepads)) {
+            const char* name = SDL_GameControllerName(gc);
+            names.append(QString::fromUtf8(name != nullptr ? name : "(unnamed)"));
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-UI-NAV] enabled: %d gamepad(s)%s%s",
+                    (int)m_Gamepads.size(), names.isEmpty() ? "" : ": ",
+                    names.join(", ").toUtf8().constData());
+    }
+    m_PollLogged = false;
+    m_InputLogged = false;
+    m_ScrollLogged = false;
+
     m_Enabled = true;
 
     // Start the polling timer if the window is focused
@@ -154,6 +188,13 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             QEvent::Type type =
                     event.type == SDL_CONTROLLERBUTTONDOWN ?
                         QEvent::Type::KeyPress : QEvent::Type::KeyRelease;
+
+            if (!m_InputLogged) {
+                m_InputLogged = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-UI-NAV] first gamepad input: button %d (uiNav=%d)",
+                            (int)event.cbutton.button, m_UiNavMode ? 1 : 0);
+            }
 
             // Swap face buttons if needed
             if (m_Prefs->swapFaceButtons) {
@@ -218,6 +259,14 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
                 // by the control in focus.
                 sendKey(type, Qt::Key_Hangup);
                 break;
+            case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+            case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+                // §UI-SCROLL：LB 往上、RB 往下捲大半頁（只在按下那一刻、只在 Tab 導覽模式）
+                if (m_UiNavMode && type == QEvent::Type::KeyPress) {
+                    emit scrollRequested(event.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER ?
+                                             SCROLL_BUTTON_PAGES : -SCROLL_BUTTON_PAGES);
+                }
+                break;
             default:
                 break;
             }
@@ -232,6 +281,10 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
                 // before we've processed the add event.
                 if (!m_Gamepads.contains(gc)) {
                     m_Gamepads.append(gc);
+                    const char* name = SDL_GameControllerName(gc);
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-UI-NAV] gamepad added: %s (now %d)",
+                                name != nullptr ? name : "(unnamed)", (int)m_Gamepads.size());
                 }
                 else {
                     // We already have this game controller open
@@ -242,6 +295,10 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
         }
     }
 
+    // §UI-SCROLL：右搖桿的捲動每次輪詢只算一次——取所有手把裡推得最深的那一支。逐支各算各發的話，
+    // 第二支會因為共用上一次的時刻而算出 0，還會多發一個方向不明的 0。
+    int scrollAxis = 0;
+
     // Handle analog sticks by polling
     for (auto gc : std::as_const(m_Gamepads)) {
         short leftX = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
@@ -249,7 +306,7 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
         if (SDL_GetTicks() - m_LastAxisNavigationEventTime < AXIS_NAVIGATION_REPEAT_DELAY) {
             // Do nothing
         }
-        else if (leftY < -30000) {
+        else if (leftY < -AXIS_NAVIGATION_THRESHOLD) {
             if (m_UiNavMode) {
                 // Back-tab
                 sendKey(QEvent::Type::KeyPress, Qt::Key_Tab, Qt::ShiftModifier);
@@ -262,7 +319,7 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
 
             m_LastAxisNavigationEventTime = SDL_GetTicks();
         }
-        else if (leftY > 30000) {
+        else if (leftY > AXIS_NAVIGATION_THRESHOLD) {
             if (m_UiNavMode) {
                 sendKey(QEvent::Type::KeyPress, Qt::Key_Tab);
                 sendKey(QEvent::Type::KeyRelease, Qt::Key_Tab);
@@ -274,15 +331,42 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
 
             m_LastAxisNavigationEventTime = SDL_GetTicks();
         }
-        else if (leftX < -30000) {
+        else if (leftX < -AXIS_NAVIGATION_THRESHOLD) {
             sendKey(QEvent::Type::KeyPress, Qt::Key_Left);
             sendKey(QEvent::Type::KeyRelease, Qt::Key_Left);
             m_LastAxisNavigationEventTime = SDL_GetTicks();
         }
-        else if (leftX > 30000) {
+        else if (leftX > AXIS_NAVIGATION_THRESHOLD) {
             sendKey(QEvent::Type::KeyPress, Qt::Key_Right);
             sendKey(QEvent::Type::KeyRelease, Qt::Key_Right);
             m_LastAxisNavigationEventTime = SDL_GetTicks();
+        }
+
+        const int rightY = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY);
+        if (qAbs(rightY) > qAbs(scrollAxis)) {
+            scrollAxis = rightY;
+        }
+    }
+
+    // §UI-SCROLL：右搖桿上下捲動（只在 Tab 導覽模式）。SDL 的搖桿往下是正值＝往下捲。
+    const int scrollMag = qAbs(scrollAxis);
+    if (m_UiNavMode && scrollMag > SCROLL_AXIS_DEADZONE) {
+        // 距離用實際經過的時間算（輪詢名義上 100 ms，計時器不準）；剛開始推的那一次算一個輪詢間隔
+        const Uint32 now = SDL_GetTicks();
+        const Uint32 sinceLast = now - m_LastScrollEventTime;
+        const double dt = (sinceLast > 250 ? 100 : sinceLast) / 1000.0;
+        const double f = qMin(1.0, (scrollMag - SCROLL_AXIS_DEADZONE) / (32767.0 - SCROLL_AXIS_DEADZONE));
+        const double pages = SCROLL_MAX_PAGES_PER_SEC * f * f * dt;
+        m_LastScrollEventTime = now;
+
+        if (!m_ScrollLogged) {
+            m_ScrollLogged = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-UI-NAV] right stick scroll in use (axis=%d)", scrollAxis);
+        }
+
+        if (pages > 0.0) {
+            emit scrollRequested(scrollAxis > 0 ? pages : -pages);
         }
     }
 }
@@ -305,6 +389,12 @@ void SdlGamepadKeyNavigation::updateTimerState()
     else if (!m_PollingTimer->isActive() && m_HasFocus && m_Enabled) {
         // Flush events on the first poll
         m_FirstPoll = true;
+
+        if (!m_PollLogged) {
+            m_PollLogged = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-UI-NAV] polling started (window has focus)");
+        }
 
         // Poll every 100 ms for a new joystick event.
         // VIPLE §perf — was 50 ms (20 Hz).  UI navigation only needs ~10 Hz to
