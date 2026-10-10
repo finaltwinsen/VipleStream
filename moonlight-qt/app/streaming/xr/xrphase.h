@@ -13,7 +13,8 @@
 // 用之前要知道的限制：kPdtAfterVblankUs 與下面那幾個相位窗都只在 Steam Frame 的 120 Hz（SteamVR 2.18.2）量過。
 // 別的更新率、別的頭盔不適用——用到 vblank 相位的判斷一律先看 is120Hz()，不成立就不要算。
 //
-// 另外有 RankScan：10 秒行要印的那些分位數用它算（一次掃過去，不排序）。
+// 另外有 RankScan：10 秒行要印的那些分位數用它算（一次掃過去，不排序）。相位是環，它的分位數不可以照數值的大小取——
+// 先用 phaseCut() 把環從這個視窗的中心的正對面切開（phaseMedianUs／phaseNthFromCut）。
 
 #pragma once
 
@@ -204,6 +205,118 @@ private:
     int64_t m_Min = 0, m_Max = 0;
 };
 
+// 相位是環，不能照數值的大小取分位數：一群樣本橫跨 0／週期的接縫時，照數值排會被切成頭尾兩群，中位數落在兩群的
+// 交界、不是那一群的中心（例：中心在接縫之後 0.4 ms、前後各散 2 ms 的一群，照數值取的中位數是 2.0 ms）。沒有哪一群
+// 正好跨在接縫上也一樣：樣本散滿大半圈時（影像做完的相位就是這樣），照數值取的中位數看接縫落在哪裡，可以差到一毫秒。
+// 要取的是環狀的中位數——到所有樣本的環上距離總和最小的位置，也就是前半圈、後半圈各有一半樣本的那一點。它不看
+// 接縫在哪裡：整個視窗的資料轉一個角度，它就跟著轉同樣的角度。
+// 做法：先估出這個視窗的中心在哪一格（detail::phaseCentreBin），把環從中心的正對面切開，從切點往後排——值不小於
+// 切點的在前，比切點小的（繞過接縫的那一部分）在後——再照這個順序取第幾個（取到的是真的樣本值）。
+struct PhaseCut {
+    uint32_t cutUs = 0;  // 切點，落在 [0, period)。0＝就切在接縫上（等於照數值排）
+    size_t below = 0;    // 值比切點小的筆數：從切點往後排時，排在最後面的那一段
+};
+
+// 估中心用的格數（120 Hz 時一格約 130 µs）。要是偶數
+constexpr size_t kPhaseCutBins = 64;
+
+namespace detail {
+
+// 一個視窗的相位（µs）落在 kPhaseCutBins 格裡各有幾筆。值不在 [0, period) 的樣本（更新率剛換的那幾張）算在最後一格。
+// 一筆只做一次乘法、不做除法；剛好在格線上的值可能歸到前一格，這裡只拿來估中心，無妨。period 不可以是 0
+inline void phaseBins(const std::vector<uint32_t>& phases, uint32_t periodUs, uint32_t bins[kPhaseCutBins])
+{
+    std::fill(bins, bins + kPhaseCutBins, 0u);
+    const uint64_t scale = (static_cast<uint64_t>(kPhaseCutBins) << 32) / periodUs;
+    for (const uint32_t x : phases) {
+        bins[static_cast<size_t>(((std::min)(x, periodUs - 1) * scale) >> 32)]++;
+    }
+}
+
+// 這個視窗的中心在哪一條格線上（第 k 條格線＝第 k 格的起點）：到所有樣本的環上距離總和最小的那一條，樣本算在它那一格
+// 的正中間；一樣小取最前面的。也就是以格為單位取的環狀中位數。
+// 格線往前走一格，總和只差「後半圈的筆數 − 前半圈的筆數」：前面那半圈的格（k＋1 … k＋half−1）各近一格，後面那半圈的
+// （k＋half＋1 … k＋n−1）各遠一格，緊鄰的第 k 格與正對面的第 k＋half 格距離不變——所以掃一圈就好，不必每條格線重算
+inline size_t phaseCentreBin(const uint32_t bins[kPhaseCutBins])
+{
+    const size_t n = kPhaseCutBins, half = kPhaseCutBins / 2;
+    int64_t ahead = 0, behind = 0;
+    for (size_t o = 1; o < half; o++) {
+        ahead += bins[o];
+        behind += bins[half + o];
+    }
+    int64_t cost = 0, bestCost = 0;  // 相對於第 0 條格線的總和
+    size_t best = 0;
+    for (size_t k = 0; k + 1 < n; k++) {
+        cost += behind - ahead;
+        ahead += static_cast<int64_t>(bins[(k + half) % n]) - static_cast<int64_t>(bins[(k + 1) % n]);
+        behind += static_cast<int64_t>(bins[k]) - static_cast<int64_t>(bins[(k + half + 1) % n]);
+        if (cost < bestCost) {
+            bestCost = cost;
+            best = k + 1;
+        }
+    }
+    return best;
+}
+
+}  // namespace detail
+
+// 一個視窗的相位（µs，[0, period)）要從哪裡切開：它的中心的正對面。樣本擠成一群時切點落在那一群的對面，從切點往後排
+// 就是照數值排、只是不會被接縫切開。period＝0 或沒有資料：切在 0
+inline PhaseCut phaseCut(const std::vector<uint32_t>& phases, uint32_t periodUs)
+{
+    PhaseCut out;
+    if (periodUs == 0 || phases.empty()) {
+        return out;
+    }
+    uint32_t bins[kPhaseCutBins];
+    detail::phaseBins(phases, periodUs, bins);
+    const size_t cutBin = (detail::phaseCentreBin(bins) + kPhaseCutBins / 2) % kPhaseCutBins;
+    out.cutUs = static_cast<uint32_t>(static_cast<uint64_t>(cutBin) * periodUs / kPhaseCutBins);
+    for (const uint32_t x : phases) {
+        out.below += x < out.cutUs ? 1u : 0u;
+    }
+    return out;
+}
+
+// 從切點往後數第 idx 個（從 0 算；超過就給最後一個）。scanned 要先對同一個視窗 scan() 過。回傳的值沒有折回：落在
+// [cut, cut＋period)，比切點小的那一段加了一個週期——取 p95、max 這種「比中位數晚多少」的量時才不會倒過來。
+// 沒有資料回 0
+inline int64_t phaseNthFromCut(const RankScan& scanned, const PhaseCut& cut, uint32_t periodUs, size_t idx)
+{
+    const size_t n = scanned.count();
+    if (n == 0) {
+        return 0;
+    }
+    idx = (std::min)(idx, n - 1);
+    const size_t below = (std::min)(cut.below, n);
+    const size_t atOrAbove = n - below;  // 值不小於切點的筆數：照數值排的話它們排在後面，從切點往後排的話在前面
+    if (idx < atOrAbove) {
+        return scanned.nth(below + idx);
+    }
+    return scanned.nth(idx - atOrAbove) + static_cast<int64_t>(periodUs);
+}
+
+// 從切點往後排的第 p 分位數（位置的取法同 RankScan::at），一樣沒有折回。沒有資料回 0
+inline int64_t phaseAtFromCut(const RankScan& scanned, const PhaseCut& cut, uint32_t periodUs, double p)
+{
+    const size_t n = scanned.count();
+    if (n == 0) {
+        return 0;
+    }
+    p = p < 0.0 ? 0.0 : (p > 1.0 ? 1.0 : p);
+    return phaseNthFromCut(scanned, cut, periodUs, static_cast<size_t>(p * static_cast<double>(n - 1) + 0.5));
+}
+
+// 一個視窗的相位的中位數（µs，折回 [0, period)）：從切點往後數第 n/2 個——位置同 [VIPLE-XR] 10s video 既有的 p50。
+// rank 是呼叫端留著重用的 RankScan（這裡會重掃一次）。沒有資料回 0；period＝0 就是照數值取
+inline uint32_t phaseMedianUs(RankScan& rank, const std::vector<uint32_t>& phases, uint32_t periodUs)
+{
+    rank.scan(phases);
+    const int64_t v = phaseNthFromCut(rank, phaseCut(phases, periodUs), periodUs, phases.size() / 2);
+    return static_cast<uint32_t>(periodUs == 0 ? v : v % static_cast<int64_t>(periodUs));
+}
+
 // 自測；回傳失敗數。每個案例呼叫 report(名稱, 是否通過, 細節)（簽名同 xrlatch::selfTest）
 inline int selfTest(const std::function<void(const char* name, bool ok, const std::string& detail)>& report)
 {
@@ -359,6 +472,232 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
         std::snprintf(buf, sizeof(buf), "%d windows checked against a sorted copy, %d mismatch(es)%s", checks, mismatches,
                       unsignedOk ? "" : ", uint32 window wrong");
         caseDone("rank-scan-matches-sort", mismatches == 0 && unsignedOk, buf);
+    }
+
+    // ── 相位的分位數（環狀）──
+    auto ringDist = [](uint32_t a, uint32_t b, uint32_t period) {  // 兩個相位在環上差多少
+        const uint32_t d = a > b ? a - b : b - a;
+        return (std::min)(d, period - d);
+    };
+    {
+        // 估中心的那一步（detail::phaseCentreBin，掃一圈累加）要和照定義算的選到同一條格線：每條格線到每一格正中間的
+        // 環上距離 × 那一格的筆數，取總和最小的、一樣小取最前面的。各種形狀：一群、兩群、散滿、只有一格有、全空
+        uint32_t rng = 0x1234567u;
+        auto rnd = [&rng]() {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            return rng;
+        };
+        const size_t nb = kPhaseCutBins;
+        int checked = 0, wrong = 0;
+        for (int round = 0; round < 500; round++) {
+            uint32_t bins[kPhaseCutBins] = {};
+            const int kind = round % 5;
+            if (kind == 0 || kind == 1) {
+                const size_t centre = rnd() % nb, width = 1 + rnd() % 24;
+                for (int i = 0; i < 600; i++) {
+                    bins[(centre + rnd() % width) % nb]++;
+                }
+                if (kind == 1) {  // 另一群，小一點
+                    const size_t other = (centre + 8 + rnd() % 40) % nb;
+                    for (int i = 0; i < 250; i++) {
+                        bins[(other + rnd() % 4) % nb]++;
+                    }
+                }
+            }
+            else if (kind == 2) {
+                for (int i = 0; i < 600; i++) {
+                    bins[rnd() % nb]++;
+                }
+            }
+            else if (kind == 3) {
+                bins[rnd() % nb] = 1 + rnd() % 1000;
+            }
+            size_t want = 0;
+            uint64_t wantCost = ~static_cast<uint64_t>(0);
+            for (size_t k = 0; k < nb; k++) {
+                uint64_t cost = 0;
+                for (size_t b = 0; b < nb; b++) {
+                    const size_t twice = (2 * b + 1 + 2 * nb - 2 * k) % (2 * nb);  // 2 ×（格的正中間 − 格線），往前量
+                    cost += static_cast<uint64_t>(bins[b]) * (std::min)(twice, 2 * nb - twice);
+                }
+                if (cost < wantCost) {
+                    wantCost = cost;
+                    want = k;
+                }
+            }
+            wrong += detail::phaseCentreBin(bins) == want ? 0 : 1;
+            checked++;
+        }
+        std::snprintf(buf, sizeof(buf), "%d histograms checked against the definition, %d mismatch(es)", checked, wrong);
+        caseDone("phase-centre-matches-definition", wrong == 0, buf);
+    }
+    {
+        // 橫跨 0／週期接縫的一群。照數值排是 10、100、200、8200、8300，中間那個是 200；從它的中心的正對面切開再排是
+        // 8200、8300、10、100、200，中間是 10
+        RankScan rank;
+        const std::vector<uint32_t> v = {8200, 8300, 10, 100, 200};
+        const PhaseCut cut = phaseCut(v, T);
+        const uint32_t m = phaseMedianUs(rank, v, T);
+        std::snprintf(buf, sizeof(buf), "{8200, 8300, 10, 100, 200} -> %u us (cut at %u us, %u below it)", m, cut.cutUs,
+                      static_cast<unsigned>(cut.below));
+        caseDone("phase-median-across-seam", m == 10 && cut.cutUs == 4166 && cut.below == 3, buf);
+    }
+    {
+        // 一群 600 筆（中心 5600、前後各散 1500，沒有跨接縫）：和照數值取的中位數相同。整群轉任何角度——包括轉到
+        // 跨接縫的位置——中位數都跟著轉同樣的角度；照數值取的在跨接縫的那些角度會差到一毫秒以上
+        uint32_t rng = 0x9E3779B9u;
+        auto rnd = [&rng]() {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            return rng;
+        };
+        RankScan rank;
+        std::vector<uint32_t> base, turned, sorted;
+        for (int i = 0; i < 600; i++) {
+            base.push_back(4100 + rnd() % 3001);
+        }
+        sorted = base;
+        std::sort(sorted.begin(), sorted.end());
+        const uint32_t m0 = phaseMedianUs(rank, base, T);
+        bool ok = m0 == sorted[sorted.size() / 2];
+        uint32_t turns = 0, wrong = 0, plainWorst = 0;
+        for (uint32_t turn = 0; turn < T; turn += 97) {
+            turned.clear();
+            for (const uint32_t x : base) {
+                turned.push_back((x + turn) % T);
+            }
+            const uint32_t want = (m0 + turn) % T;
+            wrong += phaseMedianUs(rank, turned, T) == want ? 0u : 1u;
+            sorted = turned;
+            std::sort(sorted.begin(), sorted.end());
+            plainWorst = (std::max)(plainWorst, ringDist(sorted[sorted.size() / 2], want, T));
+            turns++;
+        }
+        ok = ok && wrong == 0 && plainWorst > 1000;
+        std::snprintf(buf, sizeof(buf), "%u turns of one cluster, %u wrong; a plain median would be off by up to %u us", turns, wrong,
+                      plainWorst);
+        caseDone("phase-median-turns-with-data", ok, buf);
+    }
+    {
+        // 影像做完的相位實際上散滿整圈：六成在一段 3 ms 裡，其餘分成兩小群在它的前後（頭盔合成器那一筆的前後）。
+        // 這種形狀的資料，照數值取的中位數看接縫落在哪裡可以差一毫秒以上；環狀的中位數跟著資料轉，只差在估中心的
+        // 那一格以內（不到 0.2 ms）
+        uint32_t rng = 0x6C8E9CF5u;
+        auto rnd = [&rng]() {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            return rng;
+        };
+        RankScan rank;
+        std::vector<uint32_t> base, turned, sorted;
+        for (int i = 0; i < 600; i++) {
+            const uint32_t pick = rnd() % 100;
+            base.push_back(pick < 62 ? 5335 + rnd() % 3000 : (pick < 84 ? 752 + rnd() % 2000 : 2585 + rnd() % 2750));
+        }
+        for (uint32_t& x : base) {
+            x %= T;
+        }
+        const uint32_t m0 = phaseMedianUs(rank, base, T);
+        uint32_t ringWorst = 0, plainWorst = 0;
+        for (uint32_t turn = 0; turn < T; turn += 97) {
+            turned.clear();
+            for (const uint32_t x : base) {
+                turned.push_back((x + turn) % T);
+            }
+            const uint32_t want = (m0 + turn) % T;
+            ringWorst = (std::max)(ringWorst, ringDist(phaseMedianUs(rank, turned, T), want, T));
+            sorted = turned;
+            std::sort(sorted.begin(), sorted.end());
+            plainWorst = (std::max)(plainWorst, ringDist(sorted[sorted.size() / 2], want, T));
+        }
+        std::snprintf(buf, sizeof(buf), "ring-shaped window: median %u us, off by at most %u us as the data turns (a plain median: up to %u us)",
+                      m0, ringWorst, plainWorst);
+        caseDone("phase-median-ring-shaped", m0 > 6335 && m0 < 7335 && ringWorst <= 200 && plainWorst > 1000, buf);
+    }
+    {
+        // 補幀那一批做完的相位大概長這樣：一群在接縫之後 0.4 ms、前後各散 2 ms，另外有幾筆離群值散在對面（晚很多才
+        // 做完的）。離群值分到前面或後面都只差幾個名次
+        uint32_t rng = 0x2545F491u;
+        auto rnd = [&rng]() {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            return rng;
+        };
+        RankScan rank;
+        std::vector<uint32_t> v, sorted;
+        for (int i = 0; i < 580; i++) {
+            v.push_back((T + 400 - 2000 + rnd() % 4001) % T);
+        }
+        for (int i = 0; i < 20; i++) {
+            v.push_back(2600 + rnd() % 3900);
+        }
+        const uint32_t m = phaseMedianUs(rank, v, T);
+        sorted = v;
+        std::sort(sorted.begin(), sorted.end());
+        const uint32_t plain = sorted[sorted.size() / 2];
+        std::snprintf(buf, sizeof(buf), "cluster centred 400 us past the seam: %u us (a plain median reads %u us)", m, plain);
+        caseDone("phase-median-outliers", ringDist(m, 400, T) <= 300 && ringDist(plain, 400, T) > 1000, buf);
+    }
+    {
+        // 從切點往後數、不折回：xrWaitFrame 多半在相位 4800～5099 返回（這裡每個值各一筆），有兩格晚了 3.4 ms 以上、
+        // 繞過格點（相位 207、300）。照數值取的 max 是那一群裡最大的（看不到晚的那兩格）；從切點往後數它們排在最後面，
+        // 值是相位＋一個週期。302 筆：p50 是第 ⌊0.5×301＋0.5⌋＝151 個（4951）、p95 是第 ⌊0.95×301＋0.5⌋＝286 個（5086）
+        RankScan rank;
+        std::vector<uint32_t> v;
+        for (uint32_t i = 0; i < 300; i++) {
+            v.push_back(4800 + i);
+        }
+        v.push_back(207);
+        v.push_back(300);
+        rank.scan(v);
+        const PhaseCut cut = phaseCut(v, T);
+        const int64_t p50 = phaseAtFromCut(rank, cut, T, 0.50), p95 = phaseAtFromCut(rank, cut, T, 0.95);
+        const int64_t last = phaseNthFromCut(rank, cut, T, v.size() - 1), beyond = phaseNthFromCut(rank, cut, T, v.size() + 5);
+        const int64_t first = phaseNthFromCut(rank, cut, T, 0);
+        std::snprintf(buf, sizeof(buf), "p50 %lld, p95 %lld, max %lld us (plain max %lld us), cut at %u us",
+                      static_cast<long long>(p50), static_cast<long long>(p95), static_cast<long long>(last),
+                      static_cast<long long>(rank.maxValue()), cut.cutUs);
+        caseDone("phase-from-cut-unfolded",
+                 first == 4800 && p50 == 4951 && p95 == 5086 && last == 300 + static_cast<int64_t>(T) && beyond == last &&
+                     phaseAtFromCut(rank, cut, T, 1.0) == last && phaseAtFromCut(rank, cut, T, -1.0) == first &&
+                     rank.maxValue() == 5099 && cut.cutUs == 781 && cut.below == 2,
+                 buf);
+    }
+    {
+        // 邊界：沒有資料；period＝0（照數值取）；每一格都一樣多（每條格線的總和相同，取第 0 條當中心 → 切在半個週期）；
+        // 值超過週期的樣本（更新率剛換的那幾張）算在最後一格，不可以出界
+        RankScan rank;
+        const std::vector<uint32_t> none;
+        const PhaseCut cutNone = phaseCut(none, T);
+        rank.scan(none);
+        bool ok = phaseMedianUs(rank, none, T) == 0 && cutNone.cutUs == 0 && cutNone.below == 0 &&
+                  phaseNthFromCut(rank, cutNone, T, 3) == 0 && phaseAtFromCut(rank, cutNone, T, 0.5) == 0;
+        const std::vector<uint32_t> seam = {8200, 8300, 10, 100, 200};
+        const uint32_t noPeriod = phaseMedianUs(rank, seam, 0);
+        ok = ok && noPeriod == 200 && phaseCut(seam, 0).cutUs == 0;
+        std::vector<uint32_t> even;
+        for (uint32_t i = 0; i < static_cast<uint32_t>(kPhaseCutBins); i++) {
+            even.push_back(i * T / static_cast<uint32_t>(kPhaseCutBins) + 5);
+        }
+        const PhaseCut cutEven = phaseCut(even, T);
+        const uint32_t evenMedian = phaseMedianUs(rank, even, T);
+        ok = ok && cutEven.cutUs == T / 2 && cutEven.below == even.size() / 2 && evenMedian == even[0];
+        const std::vector<uint32_t> mixed = {100, 200, 300, 9000, 12000, 4000000000u};
+        const PhaseCut cutMixed = phaseCut(mixed, T);
+        const uint32_t mixedMedian = phaseMedianUs(rank, mixed, T);
+        ok = ok && cutMixed.cutUs < T && cutMixed.below <= mixed.size() && mixedMedian < T;
+        // 剛好落在切點上的樣本排在最前面（「不小於切點」那一段的開頭）：4166、8200、8300、10、100 的中間是 8300
+        const std::vector<uint32_t> onCut = {8200, 8300, 10, 100, 4166};
+        const PhaseCut cutOnCut = phaseCut(onCut, T);
+        ok = ok && cutOnCut.cutUs == 4166 && cutOnCut.below == 2 && phaseMedianUs(rank, onCut, T) == 8300;
+        std::snprintf(buf, sizeof(buf), "empty -> 0, period 0 -> %u us, one sample per bin -> cut at %u us, out-of-range samples -> %u us",
+                      noPeriod, cutEven.cutUs, mixedMedian);
+        caseDone("phase-cut-edge-cases", ok, buf);
     }
     return failures;
 }

@@ -895,7 +895,8 @@ frame loop（XR 桌面也有）
                                                                                  coll／queued＝送出的相位換成 vblank 相位後落在 2.0～3.6 ms（做到一半會被頭盔合成器插隊）
                                                                                  ／3.6～5.2 ms（排在合成器後面）的比例——不必擷取 gpu-trace 就看得到的合成器干擾。這兩段是
                                                                                  全速量的（半速＋補幀時被擋的那一段早 0.25～0.5 ms）；顯示不是 120 Hz 時印 -；
-                                                                                 synthSub／synthDone＝補幀開著時，補幀那一批送出與做完的相位
+                                                                                 synthSub／synthDone＝補幀開著時，補幀那一批送出與做完的相位。
+                                                                                 這四個相位的 p50 是**環狀的中位數**（見下面第二點），不是照數值的大小取的
 
 每個 pass 的 GPU 時間（PCVR）
 [VIPLE-VR-PASS] 60s convert0:n/avgUs/minUs/maxUs[ convert1:…] unwarp:… down8:… down16:… flow:… combine:…[ other:…]
@@ -917,18 +918,24 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
 
 自測
-[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑三組、一共 53 個案例：原有的 27 個（輸出不變）；
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑三組、一共 60 個案例：原有的 27 個（輸出不變）；
                                                                                  `latch-wait-…`／`latch-flip-…`／`latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到
                                                                                  計數：差一點、真的晚、150 µs 的邊界、半速、基準過期、兩張擠在同一格、沒有送出時刻、分格的
-                                                                                 邊界、隨機腳本的自洽）；xrphase.h 的 11 個：`phase-…` 10 個（LDIAG 相位 ↔ vblank 相位、
-                                                                                 120 Hz 的判斷、交出相位的分類、延遲鏈與 events 的算式）與 `rank-scan-matches-sort`（10 秒行
-                                                                                 那些分位數的取法，逐一和排序的結果比對）
+                                                                                 邊界、隨機腳本的自洽）；xrphase.h 的 18 個：`phase-…` 17 個（LDIAG 相位 ↔ vblank 相位、
+                                                                                 120 Hz 的判斷、交出相位的分類、延遲鏈與 events 的算式，以及相位的環狀中位數：橫跨接縫的
+                                                                                 一群、整群轉任何角度、散滿整圈的視窗、離群值、不折回的 p95／max、邊界）與
+                                                                                 `rank-scan-matches-sort`（10 秒行那些分位數的取法，逐一和排序的結果比對）
 ```
 
 - 相位有兩種座標：這份文件裡 `latchPhase`、`gpu-by-phase` 與這一節新增的相位欄位都是 **LDIAG 相位**（原點是預測顯示時刻的
   格點）；頭盔上 gpu-trace 的時間軸是 **vblank 相位**。在 Steam Frame 的 120 Hz 量到預測顯示時刻落在 vblank 之後 3.716 ms，
   所以 vblank 相位＝(LDIAG 相位＋3716) 對週期取餘（例：latch 的 LDIAG 相位 2750 µs＝距 vblank 6.47 ms）。這個常數只量過
   120 Hz，別的更新率不適用。
+- 相位是環，`sub`／`done`／`synthSub`／`synthDone` 的 p50 取的是**環狀的中位數**：到所有樣本的環上距離總和最小的位置，也就是
+  前半圈、後半圈各有一半樣本的那一點（做法：把環從這個視窗的中心的正對面切開，再照順序取中間那一筆）。不可以照數值的
+  大小取——影像做完的相位散滿整圈、補幀那一批做完的時刻又正好橫跨 0／週期的接縫，照數值取的中位數看接縫落在哪裡會差
+  一到四毫秒（拿既有場次的資料重建：`done` 差 0.8 ms 上下，`synthDone` 多數視窗差 1 ms 以上）。資料散得很開時這個數字每個
+  視窗會差幾百微秒，比兩邊時看多個視窗的中位數。`latchPhase` 是既有欄位，仍是照數值取的（它只擠在一小段，沒有差別）。
 
 ### 探測的開始與結束行
 

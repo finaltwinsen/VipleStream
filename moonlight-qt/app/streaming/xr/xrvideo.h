@@ -339,6 +339,7 @@ private:
         std::vector<uint32_t> donePhaseUs;       // GPU 做完的相位
         std::vector<uint32_t> synthSubPhaseUs;   // §VR-SYNTH：補幀那一批送出的相位
         std::vector<uint32_t> synthDonePhaseUs;  //            與做完的相位
+        uint32_t phasePeriodUs = 0;   // 上面四組相位是對哪一個顯示週期取的（最近推進去的那一筆；0＝這個視窗還沒有）
         uint32_t swNotOk = 0;         // xrWaitSwapchainImage 回的不是 XR_SUCCESS 的次數
         uint32_t relMaxUs = 0;        // xrReleaseSwapchainImage 這個呼叫的最大值
         uint32_t handoffN = 0;        // 顯示是 120 Hz 時：分過類的張數，
@@ -353,7 +354,7 @@ private:
             donePhaseUs.clear();
             synthSubPhaseUs.clear();
             synthDonePhaseUs.clear();
-            swNotOk = relMaxUs = handoffN = handoffPreempt = handoffQueued = 0;
+            phasePeriodUs = swNotOk = relMaxUs = handoffN = handoffPreempt = handoffQueued = 0;
         }
         // 120 Hz、10 s 約 1200 筆：先配好，之後往裡面推不必配置記憶體（clear() 與整包交換都留著空間）
         void reserveWindow()
@@ -369,12 +370,13 @@ private:
         //   rel＝xrReleaseSwapchainImage；sub／done＝送出（這張影像最後一筆 GPU 工作送出去）與 GPU 做完的相位；
         //   coll／queued＝送出的相位落在「做到一半會被合成器插隊」「排在合成器後面」那兩段的比例。
         //   沒有樣本的相位（沒有顯示格點，例如 XR 桌面）與沒有分過類的比例（顯示不是 120 Hz）印 -
+        // 相位的 p50 不是照數值的大小取的：相位是環，一群樣本橫跨 0／週期的接縫時（補幀那一批做完的時刻就落在那裡）
+        // 照數值取會差好幾毫秒。取的是環狀的中位數（前半圈、後半圈各有一半樣本的那一點），見 xrphase::phaseCut
         std::string statsTail(bool synth)
         {
             auto p95index = [](size_t n) { return n == 0 ? static_cast<size_t>(0) : (std::min)(n - 1, (n * 95) / 100); };
             auto phase50 = [this](const std::vector<uint32_t>& v) {
-                rank.scan(v);
-                return v.empty() ? std::string("-") : std::to_string(rank.nth(v.size() / 2));
+                return v.empty() ? std::string("-") : std::to_string(xrphase::phaseMedianUs(rank, v, phasePeriodUs));
             };
             auto share = [&](uint32_t n) {
                 if (handoffN == 0) {

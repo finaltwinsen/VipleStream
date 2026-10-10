@@ -972,6 +972,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
             if (phaseOk) {
                 m_Diag.subPhaseUs.push_back(subPhase);
                 m_Diag.donePhaseUs.push_back(donePhase);
+                m_Diag.phasePeriodUs = gridPeriodUs;  // 印的時候要知道這些相位是對哪個週期取的（環狀的中位數）
             }
             if (classify) {
                 m_Diag.handoffN++;
@@ -1043,6 +1044,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         if (synthPhaseOk) {
             m_Diag.synthSubPhaseUs.push_back(synthSubPhase);
             m_Diag.synthDonePhaseUs.push_back(synthDonePhase);
+            m_Diag.phasePeriodUs = gridPeriodUs;
         }
         flushSwLocked();
     }
