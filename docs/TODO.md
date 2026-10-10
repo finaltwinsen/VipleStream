@@ -158,11 +158,14 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
       - 主要的假說（全是旁證，GPU 上誰先誰後沒有直接量）：fence 到值之後 server 才送出的 GPU 工作（複製、色彩轉換、編碼器的
         前處理）搶不過遊戲下一幀已經排著的工作。對得上的事實：VR 擷取期間 server 行程的 GPU 優先權是 HIGH（桌面串流是
         REALTIME），而且同一台 `<host>` 上 GPU 壓滿時合成器與 driver 只多等零點幾到 2 ms，server 這一段多等 4～10 ms。
-      - 下一步，先做不必建置的（`<host>`＋開發機，約 30 分鐘）：查各行程的 GPU 優先權類別；重負載場次中把 server 行程在
-        HIGH 與 REALTIME 之間切；關掉 spatial AQ 交替對照。再做一個診斷建置：NVENC 的兩個呼叫分開計時、逐張時戳跟到送出、
-        同場交替的開關。
-      - 候選解法依序：VR 擷取時用 REALTIME（新鍵、預設維持 HIGH；NVIDIA 在硬體加速 GPU 排程開著時有已知的編碼凍結，要耐久驗）＝
-        VR 時關 spatial AQ（有效才做）＞固定在慢的那一邊（退路，不依賴假說）＞註冊多張編碼輸入貼圖＞driver 直接輸出 NV12。
+      - **2026-10-11 確認並修正（§VR-GPU-PRIO）**：各行程的類別直接讀出來——合成器與 vrserver 是 REALTIME、遊戲 NORMAL、
+        server 在擷取期間是 HIGH；340% 的場次中把 server 在 HIGH／REALTIME 之間來回切，REALTIME 的那幾段進 NVENC 的呼叫
+        由平均 5.05 ms 回到 0.61 ms、`presentToFirstPkt` p50 由 16.8 ms 變 9.5 ms，遊戲幾乎沒有代價。已加設定
+        `vr_gpu_priority = high｜realtime`（預設 high＝不變）；整場 `realtime` 在 100／300／340／400% 都沒有雙峰
+        （數字在 `steam_frame_client.md`）。原本計畫的診斷建置不必做了。
+      - 剩下：耐久：340%、整場 `realtime` 連續 10 分鐘（60 個視窗），`presentToFirstPkt` p50 9.5 ms、p95 11.0～11.8 ms，沒有編碼逾時或卡住的訊息。只有這一場，不能代表顯示記憶體吃緊或更長時間的情況；頭盔無人場次與配戴驗證、第二個比較重的遊戲；驗過才考慮把預設改成 `realtime`。
+      - 其他候選（REALTIME 之後不需要了，留著備查）：VR 時關 spatial AQ、固定在慢的那一邊、註冊多張編碼輸入貼圖、
+        driver 直接輸出 NV12。
     - §VR-PREDICT 在過載時的兩個小洞：旗標設起來之前的那一個 CLIENT_TIMING 視窗仍會被採計（追蹤階段最多改 3 ms，也會寫進
       下一場的起點）；探測走到一半遇到過載時，前後的視窗會隔著過載相比。要補的話由 `stream.cpp` 把旗標由關變開的那一刻通知
       `vr_predict`（探測中就退回重量、追蹤中就把最近那一次修正退回）。
