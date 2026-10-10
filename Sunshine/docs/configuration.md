@@ -2048,7 +2048,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
             finished one period earlier (one extra period of latency) back to the timing where it waits for the
             game's current frame. The driver's vsync schedule does not advance during that time, so the phase is
             unchanged afterwards. While this option is set, the driver handshake carries the development flag that
-            makes the driver accept that pacing mode. A log line (`[VIPLE-VR-KICK] ...`) marks each one.
+            makes the driver accept that pacing mode. A log line (`[VIPLE-VR-KICK] ...`) marks each one. The
+            extra frames are counted separately (`freeRun` in the `[VIPLE-VR-DRV] timing 10s` line) and do not
+            disturb the Present cadence that [vr_capture_overload](#vr_capture_overload) looks at.
             @note{Leave at 0 outside of testing: a few extra frames are produced each time. Accepted values: 0,
             or 5 to 600.}
         </td>
