@@ -600,6 +600,37 @@ private:
     void pcvrLatchDiag(bool latched, uint64_t seq, uint64_t latchNs, uint64_t wakeNs, XrTime predictedDisplayTime,
                        uint64_t periodNs);
     void pcvrLatchDiagLog();
+
+    // §VR-XRLOOP（2026-10-11）：frame loop 每一格的時刻與延遲鏈（[VIPLE-VR-XRLOOP]），只量測、不影響呈現。
+    // 全部只在 frame thread 存取；視窗和 [VIPLE-VR-LDIAG] 相同（pcvrLoopDiagLog 緊接在 pcvrLatchDiagLog 之後）。
+    struct LoopDiag {
+        std::vector<uint32_t> wakePhaseUs;  // 10 s：xrWaitFrame 返回的時刻落在顯示格點之後多久
+        std::vector<uint32_t> latchLeadUs;  // 10 s：挑影像（latch）到這一格的預測顯示時刻還有多久
+        std::vector<uint32_t> endLeadUs;    // 10 s：xrEndFrame 返回到預測顯示時刻還有多久
+        std::vector<uint32_t> spanUs;       // 10 s：xrWaitFrame 返回 → xrEndFrame 返回
+        std::vector<uint32_t> endCallUs;    // 10 s：xrEndFrame 這個呼叫本身
+        std::vector<uint32_t> aheadUs;      // 10 s：這一格的預測顯示時刻 − xrWaitFrame 返回當下（逐格，不是 EMA）
+        std::vector<uint32_t> render10s;    // 10 s：每張新影像的 render 時間（CLIENT_TIMING 的 render 的 10 秒版）
+        std::vector<int32_t> slack10s;      // 10 s：每張新影像的 slack（GPU 做完 → latch）
+        std::vector<uint32_t> dec1s;        // 10 s：每秒的解碼時間中位數（VrDecodeTiming；那一秒沒有樣本就沒有）
+        uint32_t beginCallMaxUs = 0;        // 10 s：xrBeginFrame 這個呼叫的最大值
+        uint32_t waitShort = 0;             // 10 s：相鄰兩次 xrWaitFrame 返回的間隔不到半格的次數
+        uint64_t lastWakeNs = 0;            // 上一格 xrWaitFrame 返回的時刻
+        int64_t frameAheadNs = 0;           // 這一格的 ahead（pcvrAfterWaitFrame 設）
+        bool frameAheadExact = false;       //   是換算出來的，不是「約兩個週期」的估計值
+        // 120 Hz、10 s 約 1200 筆。bringUp 先配好：slack10s／render10s 是在挑影像到 xrEndFrame 之間推進去的，
+        // 那一段不可以配置記憶體
+        void reserveWindow()
+        {
+            for (std::vector<uint32_t>* v : {&wakePhaseUs, &latchLeadUs, &endLeadUs, &spanUs, &endCallUs, &aheadUs, &render10s}) {
+                v->reserve(2048);
+            }
+            slack10s.reserve(2048);
+            dec1s.reserve(16);
+        }
+    } m_LoopDiag;
+    void pcvrLoopDiag(uint64_t wakeNs, uint64_t latchNs, uint64_t endCallNs, uint64_t endNs, uint64_t periodNs);
+    void pcvrLoopDiagLog();
     // §VR-LATCH-WAIT：這個平台能不能用「等這一格的影像」。「延後＋等待 ≤ 6.0 ms」的上限靠 condition_variable 的逾時
     // 準時醒來才守得住；Windows 的逾時是毫秒級的（開發機實測，MSVC 的 STL：計時器刻度 1 ms 時超過截止時間 p50
     // 0.6～0.7 ms、p95 1.5～1.9 ms，系統預設的刻度下約 14 ms），等不到影像的那一格會超過 6 ms 很多，所以 Windows 上

@@ -2,6 +2,7 @@
 
 #include "xrcontext.h"
 #include "xrdesktopscreen.h"
+#include "xrphase.h"  // §VR-XRLOOP：相位換算、延遲鏈（header-only）
 #include <Limelight.h>  // M4a R2：VIPLE_VR_TRACKING（sampleControllers）
 #include "streaming/vr/vrtracking.h"  // M4a R3：VrSampleHistory（MTP）
 #include "streaming/vr/vrframemeta.h"  // 2026-10-05：VrDecodeTiming（CLIENT_TIMING decode 欄位）
@@ -22,6 +23,7 @@
 #include <cmath>
 #include <limits>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <vector>
@@ -340,6 +342,10 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     m_PcvrStale = 0;
     m_PredictAheadNs = 0;
     m_LatchDiag = LatchDiag();  // §VR-LDIAG：XrVideo 是新的，發布序號從頭算
+    m_LoopDiag = LoopDiag();    // §VR-XRLOOP
+    if (m_Options.pcvr) {
+        m_LoopDiag.reserveWindow();
+    }
     {
         std::lock_guard<std::mutex> lk(m_HmdMutex);
         m_Hmd = HmdSample();
@@ -2135,6 +2141,9 @@ void XrContext::frameThreadMain()
         ei.layerCount = layerCount;
         ei.layers = layerCount ? layers : nullptr;
         XrResult er;
+        // §VR-XRLOOP：xrEndFrame 這個呼叫的前、後（te0 只有量測在用，沒有影像路徑的建置用不到）
+        [[maybe_unused]] uint64_t te0 = 0;
+        uint64_t te1 = 0;
         {
             const uint64_t tl0 = steadyNowNs();
             std::unique_lock<std::mutex> lk(m_QueueMutex);  // runtime 可能在 xrEndFrame 用 queue
@@ -2187,9 +2196,11 @@ void XrContext::frameThreadMain()
                 }
             }
 #endif
+            te0 = steadyNowNs();
             er = xrEndFrame(m_Session, &ei);
+            te1 = steadyNowNs();
             m_DiagLockNs += tl1 - tl0;
-            m_DiagEndNs = steadyNowNs() - tl1;
+            m_DiagEndNs = te1 - tl1;
         }
 #ifdef HAVE_XR_VIDEO
         if (videoLayer && XR_SUCCEEDED(er) && m_Video != nullptr) {
@@ -2205,6 +2216,8 @@ void XrContext::frameThreadMain()
             // §VR-LDIAG：這一格送出去之後才記帳（抄發布紀錄、分類），不佔 latch 到 xrEndFrame 的那一段
             pcvrLatchDiag(haveVideo && videoLayer, vcur.seq, cpuT0, wakeNs, fs.predictedDisplayTime,
                           static_cast<uint64_t>(fs.predictedDisplayPeriod));
+            // §VR-XRLOOP：這一格的時刻（返回、挑影像、交幀）一樣等送出去之後才記
+            pcvrLoopDiag(wakeNs, cpuT0, te0, te1, static_cast<uint64_t>(fs.predictedDisplayPeriod));
         }
 #endif
         if (m_LatchDiag.logDue) {
@@ -2212,6 +2225,7 @@ void XrContext::frameThreadMain()
             // 放在這裡（這一格已經送出去），不放在挑影像到 xrEndFrame 之間
             m_LatchDiag.logDue = false;
             pcvrLatchDiagLog();
+            pcvrLoopDiagLog();  // §VR-XRLOOP：同一個視窗，緊接著印
         }
 
         double lateRefreshMeasuredHz = 0.0;  // > 0：鎖外呼叫 requestRefreshLate()
@@ -2353,6 +2367,17 @@ T pctOf(std::vector<T> v, double p)
     std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(idx), v.end());
     return v[idx];
 }
+// pctOf 的就地版：不複製，v 的順序會被打亂（分位數的位置和 pctOf 相同）。給印完就清掉的視窗用
+template <typename T>
+T pctInPlace(std::vector<T>& v, double p)
+{
+    if (v.empty()) {
+        return T{};
+    }
+    const size_t idx = (std::min)(v.size() - 1, static_cast<size_t>(p * static_cast<double>(v.size() - 1) + 0.5));
+    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(idx), v.end());
+    return v[idx];
+}
 uint16_t sat16u(uint64_t v) { return static_cast<uint16_t>((std::min<uint64_t>)(v, 0xffff)); }
 int16_t sat16s(int64_t v) { return static_cast<int16_t>((std::max<int64_t>)(-32768, (std::min<int64_t>)(v, 32767))); }
 }  // namespace
@@ -2414,6 +2439,9 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     }
     t.slack1s.push_back(slack32);
     t.render1s.push_back(renderUs);
+    // §VR-XRLOOP：延遲鏈的 10 s 版（和上面是同一組值；空間在 bringUp 配好了，這裡不配置記憶體）
+    m_LoopDiag.slack10s.push_back(slack32);
+    m_LoopDiag.render10s.push_back(renderUs);
     if (hasMeta) {
         uint64_t sampleNs = 0;
         if (VrSampleHistory::lookup(echoSampleId, &sampleNs) && t.predictedDisplayClientNs > sampleNs) {
@@ -2631,7 +2659,9 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         ct.displayPeriodNs = static_cast<uint32_t>((std::min<uint64_t>)(periodNs, 0xffffffffu));
         // 2026-10-05：decoder 執行緒記的單幀解碼延遲（DU 進佇列到解出；沒有樣本時 0）
         uint32_t dec50 = 0, dec95 = 0;
-        VrDecodeTiming::take(&dec50, &dec95);
+        if (VrDecodeTiming::take(&dec50, &dec95)) {
+            m_LoopDiag.dec1s.push_back(dec50);  // §VR-XRLOOP：延遲鏈的 dec（這一秒有樣本才記）
+        }
         ct.decodeP50Us = sat16u(dec50);
         ct.decodeP95Us = sat16u(dec95);
         ct.renderP50Us = sat16u(pctOf(t.render1s, 0.50));
@@ -2873,6 +2903,64 @@ void XrContext::pcvrLatchDiagLog()
     }
 }
 
+// §VR-XRLOOP：10 s 一行，緊接在 [VIPLE-VR-LDIAG] 10s 之後（同一個視窗、同一個 ab=）。frame loop 每一格的時刻；
+// 相位都是 LDIAG 的座標（原點是預測顯示時刻的格點；換成距 vblank 多久見 xrphase.h）。
+//  - wakePhase：xrWaitFrame 返回的相位。latchLead／endLead：挑影像／xrEndFrame 返回的那一刻到這一格的預測顯示時刻
+//    還有多久；p05 與 min 是最晚的那幾格。span：xrWaitFrame 返回 → xrEndFrame 返回（runtime 自己記的
+//    ApplicationTime CPU 最貼近這一段）。
+//  - beginCall／endCall：xrBeginFrame、xrEndFrame 這兩個呼叫本身花多久。
+//  - ahead：這一格的預測顯示時刻 − xrWaitFrame 返回當下的 XrTime，逐格的值（[VIPLE-XR] 10s pcvr 的 predictAhead 是
+//    平滑過的）；runtime 把預測往後推一格時 max 會直接多一個週期。沒有時間換算擴充時是估計值，行尾標 (approx)。
+//  - waitShort：相鄰兩次 xrWaitFrame 返回的間隔不到半格的次數（正常是 0）。
+//  - chain：延遲鏈——dec（解碼：DU 進佇列到解出，每秒中位數的中位數）＋render（影像 render thread 開始處理到 GPU
+//    做完）＋slack（GPU 做完到挑影像）＋lead（挑影像到預測顯示時刻），各項的 p50 與四項的和。每一項都是微秒解析度、
+//    可以相加；沒有含的只有解碼幀轉手與在 mailbox 裡等的時間。同一場裡比延遲看它，不看 [VIPLE-VR-MTP10] 的 p50——
+//    鎖相（--vr-track-lock）開著時追蹤樣本取在顯示格點上，那個數字只會一次跳半個週期。
+void XrContext::pcvrLoopDiagLog()
+{
+    auto& d = m_LoopDiag;
+    auto vmin = [](const std::vector<uint32_t>& v) { return v.empty() ? 0u : *std::min_element(v.begin(), v.end()); };
+    auto vmax = [](const std::vector<uint32_t>& v) { return v.empty() ? 0u : *std::max_element(v.begin(), v.end()); };
+    const uint32_t wakeMax = vmax(d.wakePhaseUs), endLeadMin = vmin(d.endLeadUs), spanMax = vmax(d.spanUs);
+    const uint32_t endCallMax = vmax(d.endCallUs), aheadMin = vmin(d.aheadUs), aheadMax = vmax(d.aheadUs);
+    const uint32_t leadP50 = pctInPlace(d.latchLeadUs, 0.50);
+    const uint32_t renderP50 = pctInPlace(d.render10s, 0.50);
+    const int32_t slackP50 = pctInPlace(d.slack10s, 0.50);
+    // 這個視窗沒有解碼計時的樣本：dec 印 -，少一項的總和沒有意義，也印 -
+    char decText[24] = "-", sumText[24] = "-";
+    if (!d.dec1s.empty()) {
+        const uint32_t decP50 = pctInPlace(d.dec1s, 0.50);
+        std::snprintf(decText, sizeof(decText), "%.2f", decP50 / 1000.0);
+        std::snprintf(sumText, sizeof(sumText), "%.2f",
+                      static_cast<double>(xrphase::chainSumUs(decP50, renderP50, slackP50, leadP50)) / 1000.0);
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=%u/%u/%u us | latchLead p50/p05=%.2f/%.2f ms "
+                "endLead p50/p05/min=%.2f/%.2f/%.2f ms | span p50/p95/max=%u/%u/%u us | beginCall max=%u us "
+                "endCall p50/p95/max=%u/%u/%u us | ahead p50/min/max=%.2f/%.2f/%.2f ms%s | waitShort=%u | "
+                "chain dec/render/slack/lead p50=%s/%.2f/%.2f/%.2f ms sum=%s ms%s",
+                pctInPlace(d.wakePhaseUs, 0.50), pctInPlace(d.wakePhaseUs, 0.95), wakeMax, leadP50 / 1000.0,
+                pctInPlace(d.latchLeadUs, 0.05) / 1000.0, pctInPlace(d.endLeadUs, 0.50) / 1000.0,
+                pctInPlace(d.endLeadUs, 0.05) / 1000.0, endLeadMin / 1000.0, pctInPlace(d.spanUs, 0.50),
+                pctInPlace(d.spanUs, 0.95), spanMax, d.beginCallMaxUs, pctInPlace(d.endCallUs, 0.50),
+                pctInPlace(d.endCallUs, 0.95), endCallMax, pctInPlace(d.aheadUs, 0.50) / 1000.0, aheadMin / 1000.0,
+                aheadMax / 1000.0, m_TimeConv != nullptr ? "" : " (approx)", d.waitShort, decText, renderP50 / 1000.0,
+                slackP50 / 1000.0, leadP50 / 1000.0, sumText,
+                // §VR-LATCH A/B：和同一輪的 [VIPLE-VR-LDIAG] 相同（10 s 區塊在換邊之前記下來的那一邊）
+                m_Options.pcvrLatchAbSec > 0 ? (m_LatchDiag.logAb ? " ab=1" : " ab=0") : "");
+    d.wakePhaseUs.clear();
+    d.latchLeadUs.clear();
+    d.endLeadUs.clear();
+    d.spanUs.clear();
+    d.endCallUs.clear();
+    d.aheadUs.clear();
+    d.render10s.clear();
+    d.slack10s.clear();
+    d.dec1s.clear();
+    d.beginCallMaxUs = 0;
+    d.waitShort = 0;
+}
+
 #ifdef HAVE_XR_VIDEO
 // §VR-LDIAG：frame thread，每一格在 xrEndFrame 與 frameEnded 之後呼叫。只量測：抄這一格之前發布的影像紀錄、
 // 把這一格挑到的影像交給 xrlatch::Classifier 分類、記 latch 時刻本身的抖動。
@@ -2962,6 +3050,33 @@ void XrContext::pcvrLatchDiag(bool latched, uint64_t seq, uint64_t latchNs, uint
         d.render1s.clear();
     }
 }
+
+// §VR-XRLOOP：frame thread，每一格緊接在 pcvrLatchDiag 之後呼叫（這一格已經送出去）。只量測，見 pcvrLoopDiagLog。
+//   wakeNs＝xrWaitFrame 返回、latchNs＝挑影像（cpuT0）、endCallNs／endNs＝xrEndFrame 這個呼叫的前、後。
+void XrContext::pcvrLoopDiag(uint64_t wakeNs, uint64_t latchNs, uint64_t endCallNs, uint64_t endNs, uint64_t periodNs)
+{
+    if (periodNs < 1000000ull || periodNs > 100000000ull) {
+        return;  // 週期還沒有合理的值（同 pcvrLatchDiag）
+    }
+    auto& d = m_LoopDiag;
+    auto sat32 = [](uint64_t v) { return static_cast<uint32_t>((std::min<uint64_t>)(v, 0xffffffffu)); };
+    // 這一格自己的預測顯示時刻（client steady 時鐘），pcvrAfterWaitFrame 在這一格開頭記的
+    const uint64_t pdtNs = m_PcvrTiming.predictedDisplayClientNs;
+    d.wakePhaseUs.push_back(xrphase::phaseUs(wakeNs / 1000ull, pdtNs / 1000ull, sat32(periodNs / 1000ull)));
+    d.latchLeadUs.push_back(sat32(pdtNs > latchNs ? (pdtNs - latchNs) / 1000ull : 0));
+    d.endLeadUs.push_back(sat32(pdtNs > endNs ? (pdtNs - endNs) / 1000ull : 0));
+    d.spanUs.push_back(sat32(endNs > wakeNs ? (endNs - wakeNs) / 1000ull : 0));
+    d.endCallUs.push_back(sat32(endNs > endCallNs ? (endNs - endCallNs) / 1000ull : 0));
+    d.beginCallMaxUs = (std::max)(d.beginCallMaxUs, sat32(m_DiagBeginNs / 1000ull));
+    // 有時間換算擴充時，這一格換不出來（只有「約兩個週期」的估計值）就不記，免得把 min 拉成假的
+    if (d.frameAheadExact || m_TimeConv == nullptr) {
+        d.aheadUs.push_back(sat32(d.frameAheadNs > 0 ? static_cast<uint64_t>(d.frameAheadNs) / 1000ull : 0));
+    }
+    if (d.lastWakeNs != 0 && wakeNs > d.lastWakeNs && wakeNs - d.lastWakeNs < periodNs / 2) {
+        d.waitShort++;
+    }
+    d.lastWakeNs = wakeNs;
+}
 #endif
 
 // frame thread：xrWaitFrame 之後。更新「預測顯示時間 − 現在」的估計，並 locate 一次 HMD（frameloop 模式樣本）
@@ -2975,6 +3090,9 @@ void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodN
         ahead = static_cast<int64_t>(predictedDisplayTime - xrNow);
         aheadExact = true;
     }
+    // §VR-XRLOOP：這一格自己的值（下面的 m_PredictAheadNs 是平滑過的，runtime 偶爾多預測一格時看不出來）
+    m_LoopDiag.frameAheadNs = ahead;
+    m_LoopDiag.frameAheadExact = aheadExact;
     // M4a R3：預測顯示時間換成 client steady 時鐘（MTP 用）。沒有時間換算擴充時 ahead 是估計值（≈2 週期）
     m_PcvrTiming.predictedDisplayClientNs = steadyNow + static_cast<uint64_t>(ahead);
     if (m_Options.pcvrTrackLock && m_TimeConv != nullptr && periodNs > 0) {

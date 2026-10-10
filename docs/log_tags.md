@@ -848,6 +848,21 @@ frame loop（XR 桌面也有）
 [VIPLE-XR] 10s frames=… …原樣… stale=N discarded=N                            ← 行尾新增：這 10 秒 xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（正常是 0）
 [VIPLE-XR] xrBeginFrame returned XR_FRAME_DISCARDED (N so far)                ← warning，一場最多 10 行：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。
                                                                                  它是成功碼，流程照常；以前只檢查失敗碼，這個結果看不到
+[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=…/…/… us | latchLead p50/p05=…/… ms endLead p50/p05/min=…/…/… ms | span p50/p95/max=…/…/… us | beginCall max=… us endCall p50/p95/max=…/…/… us | ahead p50/min/max=…/…/… ms[ (approx)] | waitShort=N | chain dec/render/slack/lead p50=…/…/…/… ms sum=… ms[ ab=<0|1>]
+                                                                              ← PCVR，每 10 秒一行，緊接在 [VIPLE-VR-LDIAG] 10s 之後（視窗與 ab 都相同）。相位是 LDIAG 相位。
+                                                                                 order＝frame loop 的呼叫順序，目前固定是 legacy；
+                                                                                 wakePhase＝xrWaitFrame 返回的相位（預期：120 Hz 約 4840，也就是距 vblank 0.22 ms）；
+                                                                                 latchLead／endLead＝挑影像／xrEndFrame 返回的那一刻，到這一格的預測顯示時刻還有多久
+                                                                                 （p05、min＝最晚的那幾格；預期延後 6 ms 時 latchLead 約 22.3 ms）；
+                                                                                 span＝xrWaitFrame 返回到 xrEndFrame 返回（SteamVR 自己記的 ApplicationTime CPU 最貼近這一段）；
+                                                                                 beginCall／endCall＝xrBeginFrame、xrEndFrame 這兩個呼叫本身花多久；
+                                                                                 ahead＝這一格的預測顯示時刻 − 返回當下，逐格的值（`10s pcvr` 的 predictAhead 是平滑過的）。
+                                                                                 max 多出一個週期＝runtime 把預測往後推了一格；沒有時間換算擴充時是估計值，標 (approx)；
+                                                                                 waitShort＝相鄰兩次 xrWaitFrame 返回的間隔不到半格的次數（正常是 0）；
+                                                                                 chain＝延遲鏈：dec（解碼：DU 進佇列到解出）＋render（影像 render thread 開始處理到 GPU 做完）
+                                                                                 ＋slack（GPU 做完到挑影像，可以是負的）＋lead（挑影像到預測顯示時刻）各自的 p50 與四項的和。
+                                                                                 沒有含的只有解碼幀轉手與在 mailbox 裡等的時間；這個視窗沒有解碼樣本時 dec 與 sum 印 `-`。
+                                                                                 **同一場裡比延遲看 chain**，不要看 [VIPLE-VR-MTP10] 的 p50（鎖相開著時它只會一次跳半個週期）
 
 自測
 [VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> phase-…                           ← `xr-probe --selftest-latch` 在 xrlatchstats.h 原有的案例之後接著跑 xrphase.h 的：相位換算
