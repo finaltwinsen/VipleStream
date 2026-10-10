@@ -3800,7 +3800,8 @@ bool Session::startConnectionAsync()
             const bool syntheticHmd = m_Preferences->vrSyntheticHmd;
             const bool syntheticHands = m_Preferences->vrSyntheticHands;  // dev：控制器換成在眼前揮動的合成姿態
             const auto synthStart = std::chrono::steady_clock::now();
-            // dev（--vr-synthetic-hmd）：頭的合成軌跡，起點就是 synthStart。下面的來源照它算送給 host 的樣本
+            // dev（--vr-synthetic-hmd）：頭的合成軌跡，起點就是 synthStart。下面的來源照它算送給 host 的樣本，XrContext 量
+            // 姿態誤差／落後時也拿同一條當基準（頭盔真的姿態放著不動，拿來比只會量到一兩公尺的誤差、估不出落後）
             VrSyntheticHeadTrack synthHead;
             synthHead.motion = motion;
             synthHead.startNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(synthStart.time_since_epoch()).count();
@@ -3809,6 +3810,16 @@ bool Session::startConnectionAsync()
                             "[VIPLE-VR-POSE] dev: --vr-synthetic-hmd - the head pose sent to the host is synthetic (%s), not the tracked one. "
                             "The picture will swing in the headset; do not wear it.",
                             vrSyntheticMotionName(motion));
+                if (xr->setPcvrSyntheticPoseRef(synthHead)) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-POSEERR] dev: pose error and lag are measured against the synthetic head pose (--vr-synthetic-hmd)");
+                }
+                else {
+                    // frameloop 模式：這一格的顯示時刻只有估計值（約兩個週期），對不準合成軌跡上的時刻，量出來的落後會差好幾毫秒
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-POSEERR] dev: --vr-synthetic-hmd without an XrTime conversion (frameloop tracking) - the display time "
+                                "cannot be placed on the synthetic motion exactly, so pose error and lag are still measured against the tracked head pose");
+                }
             }
             const double syntheticMenuAt = m_Preferences->vrSyntheticMenuAtSec;  // dev：第幾秒按一下左手 MENU
             m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, syntheticMenuAt, synthHead, synthStart](VIPLE_VR_TRACKING* s) {
@@ -3825,7 +3836,7 @@ bool Session::startConnectionAsync()
                     // 樣本的語意是「sampleTimeNs＋predictNs 那一刻的姿態」：真的樣本是 runtime 預測到那一刻的，host 也把它當成
                     // 那一刻的姿態再往後外插。合成的照同一刻算，位置、方向、速度都是。2026-10-10 之前送的是「現在」的姿態，
                     // host 以為它已經是 predictNs 之後的，少外插了這麼多：算繪姿態在合成軌跡上固定落後一個 predictNs
-                    // （頭盔上約 26 ms）
+                    // （頭盔上約 26 ms），拿合成軌跡當基準量落後、讓 host 的 §VR-PREDICT 去補，收斂的值就和實際配戴不同
                     synthHead.poseAt(s->sampleTimeNs + predict, &hmd);
                 }
                 if (syntheticHands) {

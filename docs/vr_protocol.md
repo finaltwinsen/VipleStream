@@ -264,7 +264,9 @@ stream #0 送一個 `'P'`，靠它的 ACK 讓路徑保持活躍；server 端只�
   XR runtime。無人配戴的場次用來跑「頭在動」才走得到的路徑；畫面會在頭盔裡甩動，不可以戴著用。
   2026-10-10 起，合成姿態（位置、方向、速度）算的是 `sampleTimeNs + predictNs` 那一刻——和真的樣本同一個語意
   （runtime 預測到那一刻的姿態；server 也把樣本當成那一刻的姿態再外插）。之前送的是取樣當下的姿態，server 少外插
-  一個 `predictNs`，算繪姿態在合成軌跡上固定落後這麼多。
+  一個 `predictNs`，算繪姿態在合成軌跡上固定落後這麼多。同時 client 的姿態誤差／落後（`[VIPLE-VR-POSEERR]`、
+  CLIENT_TIMING 的 poseLag）改拿同一條合成軌跡在該幀顯示時刻的姿態當基準（runtime 要有 XrTime 換算；沒有就維持
+  拿頭盔真的姿態比），無人場次才量得到落後、驗得到 §VR-PREDICT 的調整。
 
 ---
 

@@ -435,7 +435,8 @@ public:
     bool vrEmulate = false;          // 以合成 pose 取代 XR runtime（M1a 沒有 XR）
     int  vrSyntheticMotion = 1;      // VrSyntheticMotion：0 still、1 sine、2 yaw30、3 tilt30yaw（dev）、4 fast（dev）
     // dev（--vr-synthetic-hmd，不寫入設定）：真的 XR 連線上，頭的姿態改送 vrSyntheticMotion 的合成運動。
-    // 無人配戴時用來跑「頭在動」才走得到的路徑；畫面會在頭盔裡甩動，不可以戴著用
+    // 無人配戴時用來跑「頭在動」才走得到的路徑；畫面會在頭盔裡甩動，不可以戴著用。
+    // 2026-10-10 起姿態誤差／落後（[VIPLE-VR-POSEERR]、回報給 host 的 poseLag）也改拿這條合成軌跡當基準
     bool vrSyntheticHmd = false;
     bool vrSyntheticHands = false;    // 2026-10-08（dev）：--vr-synthetic-hands，控制器換成在眼前揮動的合成姿態，不寫入設定
     // 2026-10-09（dev，--vr-synthetic-menu-at，不寫入設定）：追蹤開始後第幾秒在左手按一下 MENU（host 當成 SteamVR 系統鍵，

@@ -494,6 +494,16 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
                                                                                  `xr+synthetic-hmd`。2026-10-10 起送的是「取樣時間＋predictNs 那一刻」的合成姿態
                                                                                  （和真的樣本同一個語意）；之前送的是取樣當下的姿態卻帶著 predictNs，host 少外插
                                                                                  這麼多，算繪姿態在合成軌跡上固定落後一個 predictNs（頭盔上約 26 ms）
+[VIPLE-VR-POSEERR] dev: pose error and lag are measured against the synthetic head pose (--vr-synthetic-hmd)
+                                                                              ← client（warning，2026-10-10）：`--vr-synthetic-hmd` 開著時，`[VIPLE-VR-POSEERR]` 與 CLIENT_TIMING
+                                                                                 的 poseLag 兩個欄位改拿「合成軌跡在該幀顯示時刻的頭部姿態」當基準（10 s 行的行尾多
+                                                                                 ` ref=synthetic`）。原本比的是頭盔真的姿態——沒有人戴、放著不動，位置誤差一兩公尺、
+                                                                                 落後 0 筆，host 的 §VR-PREDICT 整場不動。顯示出去的東西（projection 的姿態、重投影、
+                                                                                 LATCH、MTP）不受影響。樣本和基準走的是同一條合成軌跡、同一個時鐘：host 預測得剛好時
+                                                                                 量到的落後是 0（host 會照它調 §VR-PREDICT，學到的值留給之後的場次，和配戴的場次一樣）
+[VIPLE-VR-POSEERR] dev: --vr-synthetic-hmd without an XrTime conversion (frameloop tracking) - …
+                                                                              ← client（warning）：runtime 沒有時間換算擴充，顯示時刻只有估計值，對不準合成軌跡上的時刻：
+                                                                                 基準不換，照舊拿頭盔真的姿態比（量不到落後）
 [VIPLE-VR-INPUT] dev: --vr-synthetic-menu-at - the left MENU button is pressed N s after tracking starts (toggles the host's SteamVR dashboard)[; on a real XR runtime …]
                                                                               ← client（warning）：dev 選項，追蹤開始後第 N 秒在左手按一下 MENU（150 ms；host 當成
                                                                                  系統鍵）。只是「切換」儀表板，關掉之後的時序和配戴不同，不要用來做直通的驗測。
@@ -996,7 +1006,11 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-VR-POSEERR] 10s n=N pos p50=… p95=… mm rot p50=… p95=… deg | lag n=N p05=… p50=… p95=… ms (+behind/-ahead, head moving)
                                                                                     ← client 10 s（§VR-POSEERR）：0x81 算繪姿態對「該幀實際顯示時的頭部姿態」的差。pos 是頭盔
                                                                                        重投影修不掉的平移偏差；lag 是算繪位置在頭部軌跡上對應的時間差（延後 100 ms 估，正＝落後），
-                                                                                       只算頭部 ±50 ms 內移動 ≥ 10 mm、而且是第一次顯示的幀（同一張影像重複顯示時誤差照算、不估 lag）
+                                                                                       只算頭部 ±50 ms 內移動 ≥ 10 mm、而且是第一次顯示的幀（同一張影像重複顯示時誤差照算、不估 lag）。
+                                                                                       行尾有 ` ref=synthetic`（dev `--vr-synthetic-hmd`，2026-10-10）＝這一行是對合成的頭部軌跡量的，
+                                                                                       不是頭盔真的姿態：pos／rot 是「host 預測到顯示時刻準不準」，不是重投影要補的量（rot>…、edge
+                                                                                       也不代表露邊）。合成運動要有位移才估得出 lag：sine 約 67% 的新影像、fast 約 99%、tilt30yaw
+                                                                                       約 41%（集中在某幾秒），yaw30／still 沒有位移＝0 筆
 [VIPLE-VR-PREDICT] session start vsync_to_photons_us=N (<來源>) stream=X.XHz display=Y.YHz minSamples=K
                                                                                     ← server（§VR-PREDICT）。<來源>＝fixed by config｜learned｜converted from the value learned at X Hz
                                                                                        ｜default: period + 30 ms，2026-10-10 起多兩種：same display rate: value learned at X Hz stream、
@@ -1092,7 +1106,8 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 - client 的 `[VIPLE-VR-MTP10]` 尾端（2026-10-05 起）：`frames new=N repeat=N skip=N mismatch=N`——新影像、latch 時沒有新影像
   （重複幀）、兩次 latch 之間到了兩張以上而沒顯示的、xrEndFrame 時 runtime 會用的影像不是 projection 姿態所屬那張（錯配一幀）。
 - client 的 `[VIPLE-VR-POSEERR] 10s` 尾端：`rot>1deg=…% >3deg=…% edge(>Xdeg overscan)=…%`——旋轉誤差超過 overscan 的幀
-  會在重投影時露出沒畫面的邊（dev `--vr-overscan` 0 時任何誤差都會露）。
+  會在重投影時露出沒畫面的邊（dev `--vr-overscan` 0 時任何誤差都會露）。2026-10-10 起，dev `--vr-synthetic-hmd` 的場次
+  在最後面再接 ` ref=synthetic`（整行改對合成的頭部軌跡量，見上面 `[VIPLE-VR-POSEERR]` 的說明）；沒開時這一行不變。
 - client 的 `[VIPLE-VR-INPUT] 10s` 尾端：`vel L n=… linValid=…% angValid=…% |v|max=… |w|max=…`（右手同），runtime 回報的
   控制器速度有效率與最大值（無效時送 0，SteamVR 就不外插拍子）。
 - pcvr 才把 ppm 寫進 driver pacing；stub 只記錄。

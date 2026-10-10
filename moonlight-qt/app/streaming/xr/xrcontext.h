@@ -54,6 +54,7 @@
 
 class XrVideo;
 class XrDesktopScreen;
+struct VrSyntheticHeadTrack;  // streaming/vr/vrsynthetic.h
 
 class XrContext
 {
@@ -240,6 +241,12 @@ public:
     // §VR-LATCH-WAIT：串流一幀佔幾個顯示格（半速串流 2）。main thread 在決定串流更新率之後設，frame thread 讀
     void setPcvrStreamDiv(int div) { m_PcvrStreamDiv.store(div >= 1 ? div : 1, std::memory_order_relaxed); }
     bool trackingThreadMode() const { return m_TimeConv != nullptr; }
+    // 2026-10-10（dev，--vr-synthetic-hmd）：§VR-POSEERR 的基準——「這一格顯示時刻的頭部姿態」——改用合成的頭部軌跡。
+    // 送給 host 的頭部姿態是合成的，頭盔真的姿態（沒有人戴、放著不動）和算繪姿態沒有關係，拿來比量不到落後。
+    // 換掉的只有姿態誤差與落後的統計（[VIPLE-VR-POSEERR]、CLIENT_TIMING 的 poseLag 兩個欄位）；projection 的姿態、
+    // LATCH、MTP 都不看它。track 要和 tracking 來源用的是同一組值。顯示時刻得換成 client 單調時鐘才對得上軌跡：
+    // 沒有 XrTime 換算（frameloop 模式）時只有估計值，不啟用、回 false。任何執行緒呼叫，frame thread 下一格生效。
+    bool setPcvrSyntheticPoseRef(const VrSyntheticHeadTrack& track);
 
     // 執行期載入 Vulkan loader（Linux：libvulkan.so.1；Windows：vulkan-1.dll），app 不連 -lvulkan。
     static PFN_vkGetInstanceProcAddr loadVulkanLoader(QString* error);
@@ -449,6 +456,15 @@ private:
     uint64_t m_PoseErrLastSeq = 0;  // 上一次算誤差的影像（XrVideo::Current::seq）：同一張重複顯示不估落後
     void pcvrPoseErr(const float renderRot[4], const float renderPos[3], bool freshFrame);
     void pcvrPoseLagEval(const PosePending& e);
+    // dev（--vr-synthetic-hmd）：上面的基準改用合成的頭部軌跡（見 setPcvrSyntheticPoseRef）。motion＜0＝沒設
+    std::atomic<int> m_SynthRefMotion{-1};  // VrSyntheticMotion
+    std::atomic<uint64_t> m_SynthRefStartNs{0};
+    // 以下只在 frame thread 存取，和 m_Hmd 在同一個地方更新（pcvrAfterWaitFrame）：現在用的是不是合成基準、最近 locate
+    // 的那一格有沒有算出來（那一格的顯示時刻換不準就沒有）、那一格顯示時刻的合成頭部位置與方向
+    bool m_PoseRefSynth = false;
+    bool m_PoseRefSynthOk = false;
+    float m_PoseRefPos[3] = {};
+    float m_PoseRefRot[4] = {0, 0, 0, 1};
     // PCVR 呈現：stale 淡出用的半透明黑 quad（head-locked）
     XrSwapchain m_FadeSwapchain = XR_NULL_HANDLE;
     uint32_t m_FadeImageCount = 0;

@@ -1508,12 +1508,14 @@ void XrContext::maybeLogStats(uint64_t nowNs)
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VR-POSEERR] 10s n=%zu pos p50=%.1f p95=%.1f mm rot p50=%.2f p95=%.2f deg | "
                         "lag n=%zu p05=%.1f p50=%.1f p95=%.1f ms (+behind/-ahead, head moving) | "
-                        "rot>1deg=%.1f%% >3deg=%.1f%% edge(>%.1fdeg overscan)=%.1f%%",
+                        "rot>1deg=%.1f%% >3deg=%.1f%% edge(>%.1fdeg overscan)=%.1f%%%s",
                         m_PoseErrPosMm.size(), pq(m_PoseErrPosMm, 0.5), pq(m_PoseErrPosMm, 0.95),
                         pq(m_PoseErrRotDeg, 0.5), pq(m_PoseErrRotDeg, 0.95), m_PoseLagMs.size(),
                         pq(m_PoseLagMs, 0.05), pq(m_PoseLagMs, 0.5), pq(m_PoseLagMs, 0.95),
                         above(m_PoseErrRotDeg, 1.0f), above(m_PoseErrRotDeg, 3.0f), static_cast<double>(ov),
-                        above(m_PoseErrRotDeg, ov));
+                        above(m_PoseErrRotDeg, ov),
+                        // dev（--vr-synthetic-hmd）：這一行是對合成的頭部軌跡量的（見 setPcvrSyntheticPoseRef）
+                        m_PoseRefSynth ? " ref=synthetic" : "");
             m_PoseErrPosMm.clear();
             m_PoseErrRotDeg.clear();
             m_PoseLagMs.clear();
@@ -2892,8 +2894,10 @@ void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodN
     const uint64_t steadyNow = steadyNowNs();
     XrTime xrNow = 0;
     int64_t ahead = static_cast<int64_t>(2 * periodNs);  // 沒有時間換算：約兩個顯示週期
+    bool aheadExact = false;  // 這一格的 ahead 是換算出來的，不是上面那個估計值
     if (nowXrTime(&xrNow) && predictedDisplayTime > xrNow) {
         ahead = static_cast<int64_t>(predictedDisplayTime - xrNow);
+        aheadExact = true;
     }
     // M4a R3：預測顯示時間換成 client steady 時鐘（MTP 用）。沒有時間換算擴充時 ahead 是估計值（≈2 週期）
     m_PcvrTiming.predictedDisplayClientNs = steadyNow + static_cast<uint64_t>(ahead);
@@ -2933,16 +2937,56 @@ void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodN
     }
     s.predictNs = static_cast<uint64_t>(std::max<int64_t>(ahead, 0));
     s.displayTime = static_cast<int64_t>(predictedDisplayTime);
-    // §VR-POSEERR：顯示時頭部位置的軌跡（frame thread 專用）
-    PoseTrailPoint& tp = m_PoseTrail[m_PoseTrailHead];
-    tp.t = s.displayTime;
-    for (int i = 0; i < 3; i++) {
-        tp.pos[i] = s.pos[i];
+    // dev（--vr-synthetic-hmd）：§VR-POSEERR 的基準改用合成的頭部軌跡在這一格顯示時刻的值。顯示時刻用上面換成 client
+    // 單調時鐘的那一個（MTP 也用它），和 tracking 來源算樣本用的是同一個時鐘、同一個起點；這一格換不出來
+    // （aheadExact＝false，只有估計值）就沒有基準，軌跡不加點、pcvrPoseErr 也不算這一格
+    const int synthMotion = m_SynthRefMotion.load(std::memory_order_acquire);
+    if ((synthMotion >= 0) != m_PoseRefSynth) {
+        // 換基準：之前記的軌跡、還沒估的幀、視窗裡的統計都是對另一種基準量的，不能混著用
+        m_PoseRefSynth = synthMotion >= 0;
+        m_PoseTrailHead = 0;
+        m_PoseTrailCount = 0;
+        m_PosePendingHead = 0;
+        m_PosePendingCount = 0;
+        m_PoseErrPosMm.clear();
+        m_PoseErrRotDeg.clear();
+        m_PoseLagMs.clear();
+        m_PoseLag1s.clear();
     }
-    m_PoseTrailHead = (m_PoseTrailHead + 1) % kPoseTrailLen;
-    m_PoseTrailCount = (std::min)(m_PoseTrailCount + 1, kPoseTrailLen);
+    m_PoseRefSynthOk = false;
+    if (m_PoseRefSynth && aheadExact) {
+        VrSyntheticHeadTrack track;
+        track.motion = static_cast<VrSyntheticMotion>(synthMotion);
+        track.startNs = m_SynthRefStartNs.load(std::memory_order_relaxed);
+        VIPLE_VR_POSE ref;
+        track.poseAt(m_PcvrTiming.predictedDisplayClientNs, &ref);
+        memcpy(m_PoseRefPos, ref.pos, sizeof(m_PoseRefPos));
+        memcpy(m_PoseRefRot, ref.rot, sizeof(m_PoseRefRot));
+        m_PoseRefSynthOk = true;
+    }
+    // §VR-POSEERR：顯示時頭部位置的軌跡（frame thread 專用）
+    if (!m_PoseRefSynth || m_PoseRefSynthOk) {
+        PoseTrailPoint& tp = m_PoseTrail[m_PoseTrailHead];
+        tp.t = s.displayTime;
+        for (int i = 0; i < 3; i++) {
+            tp.pos[i] = m_PoseRefSynth ? m_PoseRefPos[i] : s.pos[i];
+        }
+        m_PoseTrailHead = (m_PoseTrailHead + 1) % kPoseTrailLen;
+        m_PoseTrailCount = (std::min)(m_PoseTrailCount + 1, kPoseTrailLen);
+    }
     std::lock_guard<std::mutex> lk(m_HmdMutex);
     m_Hmd = s;
+}
+
+bool XrContext::setPcvrSyntheticPoseRef(const VrSyntheticHeadTrack& track)
+{
+    if (!m_Options.pcvr || m_TimeConv == nullptr) {
+        return false;
+    }
+    // 先存起點再存 motion：frame thread 看到 motion ≥ 0 才去讀起點
+    m_SynthRefStartNs.store(track.startNs, std::memory_order_relaxed);
+    m_SynthRefMotion.store(static_cast<int>(track.motion), std::memory_order_release);
+    return true;
 }
 
 bool XrContext::sampleHmd(float pos[3], float rot[4], float linVel[3], float angVel[3], uint32_t* predictNs)
@@ -3174,6 +3218,9 @@ bool XrContext::buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, co
 // 時間差（§VR-PREDICT）要延後約 100 ms 再估：等頭部軌跡延伸到這一幀之後，才分得出算繪姿態是落後還是超前。
 // freshFrame＝false（沒有新影像、同一張重複顯示）：誤差照算（使用者實際看到的），但不估落後——重複顯示的
 // 落後是網路／解碼慢了，不是 SteamVR 預測得不夠遠，拿去調 v2p 會越調越歪（第六輪 a：卡頓那一秒 +16 ms）。
+// dev（--vr-synthetic-hmd，見 setPcvrSyntheticPoseRef）：送給 host 的頭是合成的運動，基準跟著換成合成軌跡在同一個
+// 顯示時刻的姿態（軌跡 m_PoseTrail 也是）。這時量到的是「host 預測到顯示時刻準不準」，不是 runtime 重投影要補的量
+// ——runtime 照樣拿頭盔真的姿態重投影，顯示出去的東西和這裡無關。
 void XrContext::pcvrPoseErr(const float renderRot[4], const float renderPos[3], bool freshFrame)
 {
     HmdSample d;
@@ -3183,6 +3230,19 @@ void XrContext::pcvrPoseErr(const float renderRot[4], const float renderPos[3], 
     }
     if (!d.valid || d.displayTime == 0) {
         return;
+    }
+    if (m_PoseRefSynth) {
+        // dev（--vr-synthetic-hmd）：頭盔真的姿態換成合成軌跡在同一個顯示時刻的值（pcvrAfterWaitFrame 和 m_Hmd 一起算的）；
+        // 那一格沒算出來就不算這一幀
+        if (!m_PoseRefSynthOk) {
+            return;
+        }
+        for (int i = 0; i < 3; i++) {
+            d.pos[i] = m_PoseRefPos[i];
+        }
+        for (int i = 0; i < 4; i++) {
+            d.rot[i] = m_PoseRefRot[i];
+        }
     }
     const float ex = renderPos[0] - d.pos[0];
     const float ey = renderPos[1] - d.pos[1];
