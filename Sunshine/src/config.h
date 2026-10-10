@@ -354,6 +354,18 @@ namespace config {
     };
 
     overload_e capture_overload = overload_e::late;
+
+    /// §VR-GPU-PRIO（2026-10-11）：vr_gpu_priority（只影響 Windows 的 PCVR 擷取期間）。high（預設）＝和之前相同：擷取期間
+    /// 把 server 行程的 GPU 排程優先權由 REALTIME 降成 HIGH。realtime＝擷取期間不降（硬體加速 GPU 排程開著、而且
+    /// nvenc_realtime_hags 關著時仍然用 HIGH，和桌面串流的規則相同）。
+    /// 為什麼要有這個鍵：HIGH 和遊戲在同一個排程層級，遊戲把 GPU 佔滿時 server 的複製、色彩轉換與編碼器的前處理要排在
+    /// 遊戲那一幀後面，Present→第一個封包多一個遊戲幀週期；SteamVR 的合成器與 vrserver 本來就是 REALTIME。
+    enum class gpu_priority_e {
+      high,
+      realtime,
+    };
+
+    gpu_priority_e gpu_priority = gpu_priority_e::high;
   };
 
   struct nvhttp_t {

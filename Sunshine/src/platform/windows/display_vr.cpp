@@ -251,6 +251,11 @@ namespace platf::dxgi {
     /**
      * @brief §C.7：擷取期間把行程的 GPU 排程優先權設成 HIGH（vrcompositor 與遊戲在同一張卡，REALTIME 會搶走遊戲的 GPU）；
      *        結束時還原成「依設定該有的值」（HAGS＋NVIDIA＋!nv_realtime_hags → HIGH，其他 REALTIME；同 display_base.cpp）。
+     *
+     * §VR-GPU-PRIO（2026-10-11）：vr_gpu_priority = realtime 時擷取期間不降，用「依設定該有的值」。量到的依據（重負載、
+     * 同一場由外部來回切）：HIGH 時進 NVENC 的兩個呼叫平均多等約 4.4 ms、Present→第一個封包 p50 16.8 ms；REALTIME 時
+     * 回到輕負載的水準（9.5 ms），遊戲的 presentToFence 只多 0.2 ms、出幀數不變。HIGH 和遊戲在同一個排程層級，
+     * 不會搶佔；合成器與 vrserver 本來就是 REALTIME。預設仍是 high（行為和之前相同）。
      */
     class gpu_priority_guard {
     public:
@@ -261,8 +266,12 @@ namespace platf::dxgi {
           return;
         }
         restore_ = (vendor == 0x10DE && hags_enabled(luid) && !config::video.nv_realtime_hags) ? display_base_t::D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH : display_base_t::D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME;
-        const bool ok = SUCCEEDED(set_(GetCurrentProcess(), display_base_t::D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH));
-        BOOST_LOG(info) << "[VIPLE-VR-CAP] gpu-priority=high (was "sv << (restore_ == display_base_t::D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH ? "high"sv : "realtime"sv) << ')' << (ok ? ""sv : " set-failed"sv);
+        const bool want_realtime = config::vr.gpu_priority == config::vr_t::gpu_priority_e::realtime;
+        const auto during = want_realtime ? restore_ : display_base_t::D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH;
+        const bool ok = SUCCEEDED(set_(GetCurrentProcess(), during));
+        BOOST_LOG(info) << "[VIPLE-VR-CAP] gpu-priority="sv << (during == display_base_t::D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH ? "high"sv : "realtime"sv)
+                        << " (was "sv << (restore_ == display_base_t::D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH ? "high"sv : "realtime"sv) << ')'
+                        << (want_realtime ? " vr_gpu_priority=realtime"sv : ""sv) << (ok ? ""sv : " set-failed"sv);
       }
 
       ~gpu_priority_guard() {

@@ -207,6 +207,17 @@ namespace config {
       return vr_t::overload_e::late;
     }
 
+    vr_t::gpu_priority_e gpu_priority_from_view(const std::string_view value, const std::string_view key) {
+      if (value == "high"sv) {
+        return vr_t::gpu_priority_e::high;
+      }
+      if (value == "realtime"sv) {
+        return vr_t::gpu_priority_e::realtime;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: high, realtime. Falling back to 'high'", key, value));
+      return vr_t::gpu_priority_e::high;
+    }
+
     /**
      * @brief 嚴格解析 vr_* 的整數設定項：不是十進位整數、或不在允許範圍就警告並保留預設值。
      *
@@ -1585,6 +1596,9 @@ namespace config {
     // §VR-CADENCE：過載時 LATCH／PREDICT 看哪個訊號（late｜cadence，預設 late；只在 vr_capture_late = enabled 時有作用）。
     // 值寫錯警告並維持 late。和上面兩個 key 一樣，兩個平台都認得
     generic_f(vars, "vr_capture_overload", vr.capture_overload, vr_opt::overload_from_view);
+    // §VR-GPU-PRIO：PCVR 擷取期間 server 行程的 GPU 排程優先權（high｜realtime，預設 high＝和之前相同）。
+    // 值寫錯警告並維持 high。只有 Windows 會用到；其他平台認得這個 key、不做事
+    generic_f(vars, "vr_gpu_priority", vr.gpu_priority, vr_opt::gpu_priority_from_view);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

@@ -2643,6 +2643,39 @@ not matter). Any other value is reported in the log as an invalid value and the 
     </tr>
 </table>
 
+### vr_gpu_priority
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (Windows): the GPU scheduling priority of the host process while it captures a PCVR
+            session. `high` (default): as in earlier versions, the priority is lowered from realtime to high for
+            the duration of the capture, so that the host cannot take GPU time away from the game.
+            `realtime`: the priority is not lowered. With `high`, the host's own GPU work for each frame (the copy,
+            the colour conversion and the encoder's preparation) is scheduled at the same level as the game: when
+            the game keeps the GPU busy, that work waits behind the game's next frame and every stream frame leaves
+            about one game frame later. SteamVR's compositor and vrserver already run at realtime priority.
+            @note{With hardware-accelerated GPU scheduling on an NVIDIA GPU and
+            [nvenc_realtime_hags](#nvenc_realtime_hags) disabled, the priority stays `high` either way, as for
+            desktop streaming. The session log states the priority that is in effect.}
+            @note{Invalid values are ignored with a warning.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            high
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_gpu_priority = realtime
+            @endcode</td>
+    </tr>
+</table>
+
 ## Config Files
 
 ### file_apps
