@@ -1153,6 +1153,282 @@ TEST(VrPresentCadenceSuspect, OnePercentGarbageIsNeverLocked) {
   EXPECT_FALSE(locked_seen);
 }
 
+// ── PostPresent 不等虛擬 vsync 的那一段（dev 的節拍模式；§VR-A-KICK 的實驗每次約 20 ms）───────
+
+namespace {
+  struct burst_t {
+    int zeros = 0;  ///< 餵了幾筆 slots＝0
+    int zeros_after = 0;  ///< 其中在寫回正式模式之後的
+  };
+
+  /**
+   * @brief 一段「PostPresent 不等虛擬 vsync」：合成器每 round_ns 就再跑一輪，持續 dur_ns。照 driver 的算法
+   *        （steamvr_driver/virtual_vsync.cpp 的 step()）：時間過了下一個格點的那一輪才算跨了幾格，同一格裡其餘的
+   *        幾輪 slots 是 0。寫回正式模式之後 driver 要到下一次 PostPresent 才讀到，所以還會照舊再跑一輪才睡到格點。
+   *        進來時 s.now 當成剛過的格點；出去時停在睡醒的那個格點，那一張（slots 1）已經餵了。
+   * @param announce 呼叫端有沒有用 set_free_run() 先說（false＝偵測器不知道節拍模式被改過）
+   */
+  burst_t free_run_burst(sim_t &s, int64_t dur_ns, int64_t round_ns, bool announce = true) {
+    burst_t b;
+    int64_t next = s.now + s.period;  // 下一個格點
+    bool written_back = false;
+    const auto round = [&]() {
+      s.advance(round_ns);
+      present_t p;
+      p.now_ns = s.now;
+      if (s.now >= next) {
+        p.slots = (s.now - next) / s.period + 1;
+        next += p.slots * s.period;
+      } else {
+        ++b.zeros;  // p.slots 是 0
+        b.zeros_after += written_back ? 1 : 0;
+      }
+      s.d.on_present(p);
+    };
+    if (announce) {
+      s.d.set_free_run(true);
+    }
+    const int64_t end = s.now + dur_ns;
+    while (s.now < end) {
+      round();
+    }
+    if (announce) {
+      s.d.set_free_run(false);
+    }
+    written_back = true;
+    round();
+    s.advance(next - s.now);  // 睡到格點
+    present_t p;
+    p.now_ns = s.now;
+    p.slots = 1;
+    s.d.on_present(p);
+    return b;
+  }
+}  // namespace
+
+TEST(VrPresentCadenceFreeRun, ZerosWhilePostPresentDoesNotWaitAreNotImpossibleValues) {
+  // 一次 20 ms 的實驗、合成器 3 ms 一輪：8 輪裡有 6 筆 0。呼叫端先說了：不算不可能的值，節拍照常
+  sim_t s;
+  s.settle();
+  s.d.take_window();
+  const burst_t b = free_run_burst(s, 20 * kMs, 3 * kMs);
+  ASSERT_EQ(b.zeros, 6);
+  ASSERT_EQ(b.zeros_after, 1);  // 寫回之後 driver 還沒讀到的那一輪
+  EXPECT_EQ(s.st(), state_e::locked);
+  s.run(50);
+  EXPECT_EQ(s.st(), state_e::locked);
+  EXPECT_FALSE(s.d.take_suspect_alert());
+  auto w = s.d.take_window();
+  EXPECT_EQ(w.free_run, 6u);
+  EXPECT_EQ(w.zeros, 0u);
+  EXPECT_EQ(w.slips + w.masked + w.hitches + w.skipped, 0u);
+  EXPECT_EQ(w.ok + w.free_run, w.records);  // 其餘每一筆都在節拍上：每個格點還是恰好一筆
+  EXPECT_EQ(w.ok, 53u);  // 實驗跨過的 2 個格點＋睡醒的那一張＋之後的 50 張
+  // 同樣的紀錄，但沒有人告訴偵測器節拍模式被改過：第 3 筆 0 起整個不信，一直到 10 s 之後
+  sim_t u;
+  u.settle();
+  u.d.take_window();
+  const burst_t ub = free_run_burst(u, 20 * kMs, 3 * kMs, false);
+  EXPECT_EQ(ub.zeros, 6);
+  EXPECT_EQ(u.st(), state_e::unsure);
+  EXPECT_EQ(u.why(), why_e::suspect);
+  EXPECT_TRUE(u.d.take_suspect_alert());
+  u.run_for(9 * kSec);
+  EXPECT_EQ(u.why(), why_e::suspect);
+  w = u.d.take_window();
+  EXPECT_EQ(w.zeros, 6u);
+  EXPECT_EQ(w.free_run, 0u);
+}
+
+TEST(VrPresentCadenceFreeRun, AnExperimentEveryFiveSecondsNeverMakesItSuspect) {
+  // 每 5 s 一次、連續 2 分鐘（vr_dev_kick_every_s 的下限）：整場都是 locked，一次警告都沒有
+  for (const int64_t period : {kT120, kT60}) {
+    SCOPED_TRACE(period);
+    sim_t s(period);
+    s.settle();
+    s.d.take_window();
+    int zeros = 0;
+    for (int i = 0; i < 24; ++i) {
+      s.run_for(5 * kSec);
+      ASSERT_EQ(s.st(), state_e::locked) << i;
+      zeros += free_run_burst(s, 20 * kMs, 3 * kMs).zeros;
+      ASSERT_EQ(s.st(), state_e::locked) << i;
+      ASSERT_FALSE(s.d.take_suspect_alert()) << i;
+    }
+    EXPECT_GE(zeros, 24 * 6);
+    const auto w = s.d.take_window();
+    EXPECT_EQ(w.free_run, static_cast<uint32_t>(zeros));
+    EXPECT_EQ(w.zeros, 0u);
+    EXPECT_EQ(w.slips + w.masked + w.hitches + w.skipped, 0u);
+    EXPECT_EQ(static_cast<int>(s.d.info(s.now).slips_10s), 0);
+  }
+}
+
+TEST(VrPresentCadenceFreeRun, TheGraceAfterWritingTheModeBackIsOneHundredMilliseconds) {
+  detector_t d;
+  int64_t now = kStart;
+  d.reset(kT120, now);
+  present_t p;
+  // 每格一張，到 until 為止（不超過）
+  const auto on_cadence_until = [&](int64_t until) {
+    while (now + kT120 <= until) {
+      now += kT120;
+      p.now_ns = now;
+      p.slots = 1;
+      d.on_present(p);
+    }
+  };
+  const auto zero_at = [&](int64_t at) {
+    p.now_ns = at;
+    p.slots = 0;
+    d.on_present(p);
+  };
+  on_cadence_until(now + 11'700 * kMs);
+  ASSERT_EQ(d.state(), state_e::locked);
+  d.take_window();
+  d.set_free_run(true);
+  d.set_free_run(false);  // 寫回正式模式……
+  d.on_tick(now);  // ……那一段結束的時刻＝之後偵測器第一次看到的時刻
+  const int64_t end = now;
+  on_cadence_until(end + 99 * kMs);
+  // 100 ms 整還算那一段的
+  zero_at(end + 100 * kMs);
+  zero_at(end + 100 * kMs);
+  zero_at(end + 100 * kMs);
+  EXPECT_EQ(d.state(), state_e::locked);
+  auto w = d.take_window();
+  EXPECT_EQ(w.free_run, 3u);
+  EXPECT_EQ(w.zeros, 0u);
+  // 過了就又是不可能的值：第 3 筆起不信
+  zero_at(end + 100 * kMs + 1);
+  zero_at(end + 100 * kMs + 1);
+  EXPECT_EQ(d.state(), state_e::locked);
+  EXPECT_FALSE(d.take_suspect_alert());
+  zero_at(end + 100 * kMs + 1);
+  EXPECT_EQ(d.state(), state_e::unsure);
+  EXPECT_EQ(d.why(), why_e::suspect);
+  EXPECT_TRUE(d.take_suspect_alert());
+  w = d.take_window();
+  EXPECT_EQ(w.free_run, 0u);
+  EXPECT_EQ(w.zeros, 3u);
+}
+
+TEST(VrPresentCadenceFreeRun, CallsThatDoNotChangeTheValueDoNothing) {
+  // bridge 每次寫節拍都會說一次（絕大多數是「會等」之後又是「會等」）：值沒變的呼叫不可以憑空開出一段，
+  // 也不可以讓剛結束的那一段重新起算 100 ms
+  sim_t s;
+  s.settle();
+  s.d.take_window();
+  s.d.set_free_run(false);  // 從來沒開過
+  s.present(0);
+  auto w = s.d.take_window();
+  EXPECT_EQ(w.zeros, 1u);
+  EXPECT_EQ(w.free_run, 0u);
+  s.d.set_free_run(true);
+  s.d.set_free_run(true);
+  s.present(0);
+  s.d.set_free_run(false);
+  s.advance(0);  // 結束的時刻：s.now
+  s.run_for(90 * kMs);
+  s.d.set_free_run(false);  // 約 83 ms 後又寫了一次正式的節拍（LATCH 的修正）
+  s.run_for(50 * kMs);  // 距結束約 133 ms（> 100 ms），距上一行約 50 ms
+  s.present(0);
+  w = s.d.take_window();
+  EXPECT_EQ(w.free_run, 1u);  // 開著的那一筆
+  EXPECT_EQ(w.zeros, 1u);  // 過了 100 ms 的這一筆
+}
+
+TEST(VrPresentCadenceFreeRun, AStalledCallerDoesNotTurnTheBacklogIntoImpossibleValues) {
+  // bridge 執行緒被卡住 300 ms：這段時間 driver 照樣寫紀錄，偵測器什麼都沒看到（連 on_tick 都沒有）。恢復的那一輪
+  // 先把節拍寫回正式模式、再排空積下來的紀錄——時間全是那一輪的時刻。那一段結束的時刻也是那一輪，不是卡住之前
+  sim_t s;
+  s.settle();
+  s.d.take_window();
+  s.d.set_free_run(true);
+  const int64_t resumed = s.now + 300 * kMs;
+  s.d.set_free_run(false);
+  present_t p;
+  p.now_ns = resumed;
+  for (int i = 0; i < 90; ++i) {
+    p.slots = i % 3 == 2 ? 1 : 0;
+    s.d.on_present(p);
+  }
+  s.d.on_tick(resumed);
+  EXPECT_EQ(s.st(), state_e::locked);
+  EXPECT_FALSE(s.d.take_suspect_alert());
+  auto w = s.d.take_window();
+  EXPECT_EQ(w.free_run, 60u);
+  EXPECT_EQ(w.zeros, 0u);
+  EXPECT_EQ(w.ok, 30u);
+  // 那一輪之後 100 ms 起，0 又是不可能的值
+  s.now = resumed;
+  s.run_for(108 * kMs);
+  s.present(0);
+  w = s.d.take_window();
+  EXPECT_EQ(w.free_run, 0u);
+  EXPECT_EQ(w.zeros, 1u);
+}
+
+TEST(VrPresentCadenceFreeRun, OtherImpossibleValuesStillCount) {
+  // 那一段裡只有「有輸出目標而 slots 是 0」不算：負值、一次跨超過 2 s 照樣是不可能的值，沒有輸出目標的照樣另外算
+  sim_t s;
+  s.settle();
+  s.d.take_window();
+  s.d.set_free_run(true);
+  s.present(0, 0, kExitNoTarget);
+  s.present(-1);
+  s.present(242);
+  EXPECT_EQ(s.st(), state_e::unknown);  // 跨 242 格：重來
+  EXPECT_FALSE(s.d.take_suspect_alert());
+  s.present(-1);
+  EXPECT_EQ(s.st(), state_e::unsure);
+  EXPECT_EQ(s.why(), why_e::suspect);
+  EXPECT_TRUE(s.d.take_suspect_alert());
+  const auto w = s.d.take_window();
+  EXPECT_EQ(w.no_target, 1u);
+  EXPECT_EQ(w.invalid, 2u);
+  EXPECT_EQ(w.restarts, 1u);
+  EXPECT_EQ(w.zeros, 0u);
+  EXPECT_EQ(w.free_run, 0u);
+}
+
+TEST(VrPresentCadenceFreeRun, StartingOverKeepsItAndResetForgetsIt) {
+  // 節拍模式是呼叫端自己寫的，不是從紀錄推出來的：紀錄重來（沒有輸出目標、停了超過 2 s）不影響它；新連線（reset）才清
+  sim_t s;
+  s.settle();
+  s.d.set_free_run(true);
+  for (int i = 0; i < 12; ++i) {
+    s.present(1, 0, kExitNoTarget);
+  }
+  ASSERT_EQ(s.st(), state_e::unknown);
+  s.d.take_window();
+  s.run(30, 0);
+  auto w = s.d.take_window();
+  EXPECT_EQ(w.free_run, 30u);
+  EXPECT_EQ(w.zeros, 0u);
+  // 那些 0 不是可用的紀錄：重來之後照樣要 24 筆跨了格的才有輸出
+  EXPECT_EQ(s.st(), state_e::unknown);
+  s.run(23);
+  EXPECT_EQ(s.st(), state_e::unknown);
+  s.present();
+  EXPECT_EQ(s.st(), state_e::unsure);
+  EXPECT_EQ(s.why(), why_e::proving);
+  s.d.take_window();
+  s.advance(2100 * kMs);
+  s.run(3, 0);
+  w = s.d.take_window();
+  EXPECT_EQ(w.free_run, 3u);
+  EXPECT_EQ(w.zeros, 0u);
+  EXPECT_FALSE(s.d.take_suspect_alert());
+  s.d.reset(s.period, s.now);
+  s.run(3, 0);
+  w = s.d.take_window();
+  EXPECT_EQ(w.free_run, 0u);
+  EXPECT_EQ(w.zeros, 3u);
+  EXPECT_EQ(s.st(), state_e::unsure);
+  EXPECT_EQ(s.why(), why_e::suspect);
+}
+
 // ── 組幀：把同一幀的紀錄配起來 ────────────────────────────────────────────
 
 TEST(VrPresentCadenceAssembler, PairsTheRecordsOfOneFrame) {
@@ -1392,12 +1668,13 @@ namespace {
   /// 10 s 計數之間的關係
   ::testing::AssertionResult window_is_consistent(const window_t &w) {
     if (w.slip_secs <= w.slips && w.burst_max <= w.slips && w.slip_gap_max_ns >= 0 && w.throttle_max >= 0 && w.throttle_max <= 255 &&
-        w.ok <= w.records && w.no_target <= w.records && (w.slips == 0) == (w.slip_secs == 0) && (w.slips == 0) == (w.burst_max == 0)) {
+        w.ok <= w.records && w.no_target <= w.records && w.free_run <= w.records && (w.slips == 0) == (w.slip_secs == 0) &&
+        (w.slips == 0) == (w.burst_max == 0)) {
       return ::testing::AssertionSuccess();
     }
     return ::testing::AssertionFailure() << "records " << w.records << " ok " << w.ok << " noTgt " << w.no_target << " slips " << w.slips
                                          << " slipSecs " << w.slip_secs << " burstMax " << w.burst_max << " slipGapMax " << w.slip_gap_max_ns
-                                         << " thrMax " << w.throttle_max;
+                                         << " thrMax " << w.throttle_max << " freeRun " << w.free_run;
   }
 }  // namespace
 
@@ -1521,4 +1798,56 @@ TEST(VrPresentCadenceFuzz, InvariantsHoldUnderPlausibleInput) {
   EXPECT_GT(seen[static_cast<uint8_t>(state_e::slipping)], 100'000u);
   EXPECT_GT(seen[static_cast<uint8_t>(state_e::unsure)], 30'000u);
   EXPECT_GT(adopted, 30u);
+}
+
+TEST(VrPresentCadenceFuzz, AFreeRunExemptsExactlyTheZerosItCovers) {
+  // 亂數時機的 set_free_run()（開、關、值沒變的重複呼叫）加上混在紀錄裡的 0。每一步核對：性質照樣成立；
+  // 有輸出目標的 0 落在那一段裡（含寫回之後的 100 ms）就記在 free_run，否則記在 zeros——不會兩邊都算，也不會漏
+  std::mt19937_64 g(20261012);
+  uint64_t exempt = 0;
+  uint64_t counted = 0;
+  for (int r = 0; r < 40; ++r) {
+    detector_t d;
+    int64_t now = 2'000 * kSec + static_cast<int64_t>(g() % 1'000'000'000ull);
+    d.reset(kT120, now);
+    bool open = false;
+    bool closing = false;  // 剛寫回正式模式：那一段結束的時刻是偵測器下一次看到的時刻
+    bool closed_once = false;
+    int64_t closed_at = 0;
+    for (int i = 0; i < 10000; ++i) {
+      if (g() % 300 == 0) {
+        const bool on = g() % 2 == 0;
+        if (on != open) {
+          closing = !on;
+        }
+        open = on;
+        d.set_free_run(on);
+      }
+      now += static_cast<int64_t>(1 + g() % 12) * kMs;
+      present_t p;
+      p.now_ns = now;
+      const uint64_t k = g() % 100;
+      p.slots = k < 30 ? 0 : (k < 33 ? 2 : (k < 34 ? -1 : 1));
+      p.exit_code = g() % 40 == 0 ? kExitNoTarget : 0;
+      (void) d.take_window();
+      d.on_present(p);
+      if (closing) {
+        closing = false;
+        closed_once = true;
+        closed_at = now;
+      }
+      ASSERT_TRUE(invariants_hold(d, now)) << "round " << r << " step " << i;
+      const auto w = d.take_window();
+      ASSERT_TRUE(window_is_consistent(w)) << "round " << r << " step " << i;
+      const bool zero = p.slots == 0 && p.exit_code != kExitNoTarget;
+      const bool covered = open || (closed_once && now - closed_at <= 100 * kMs);
+      ASSERT_EQ(w.free_run, zero && covered ? 1u : 0u) << "round " << r << " step " << i;
+      ASSERT_EQ(w.zeros, zero && !covered ? 1u : 0u) << "round " << r << " step " << i;
+      exempt += w.free_run;
+      counted += w.zeros;
+    }
+  }
+  // 兩種都真的走到了（數字只是下限）
+  EXPECT_GT(exempt, 10'000u);
+  EXPECT_GT(counted, 10'000u);
 }

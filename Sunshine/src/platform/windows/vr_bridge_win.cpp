@@ -680,6 +680,7 @@ namespace vr::bridge {
       uint64_t cadence_pub = 0;  ///< 上一次寫進 g_present_cadence 的值
       int64_t cadence_pub_qpc = 0;  ///< 上一次寫的時刻
       bool cadence_alerted = false;  ///< 「紀錄裡有不可能的值」的警告印過了（每條連線一次）
+      bool pacing_free = false;  ///< 最後寫進 shm 的節拍模式下，driver 的 PostPresent 不等虛擬 vsync（dev：§VR-A-KICK 的實驗、selftest）
       vripc_driver_status_t last_driver {};  ///< 最近一次複製的 driver_status（已驗證的欄位另存 status_）
     };
 
@@ -1993,6 +1994,15 @@ namespace vr::bridge {
         c.last_pacing = p;  // §VR-A-KICK 的實驗結束後要寫回去的那一份
         c.have_last_pacing = true;
       }
+      // §VR-CADENCE：driver 的 PostPresent 只在這兩種模式睡到虛擬 vsync（steamvr_driver/direct_mode.cpp）。其餘的
+      // （dev：§VR-A-KICK 的實驗每次約 20 ms、selftest 的 E0／E2）合成器在同一格裡會多跑幾輪，多出來的那幾輪
+      // VSYNC_VIRTUAL 的 arg1 是 0。先告訴節拍偵測器，它才不會把這些 0 當成不可能的值（一次實驗就有 3 筆以上，
+      // 偵測器會整個不信 10 s、還印一行誤導的警告）。實驗不論怎麼結束（到期、被 v3 的 burst 提前結束）都是從這裡寫回去的。
+      // 握手時這個函式在偵測器 reset() 之前就被呼叫過：所以另外記在 pacing_free，reset() 之後再說一次
+      c.pacing_free = p.mode != VRIPC_PM_PRODUCTION && p.mode != VRIPC_PM_E3_BOTH;
+      if (c.cadence_on) {
+        c.cadence.set_free_run(c.pacing_free);
+      }
     }
 
     void bridge_t::write_default_pacing(conn_t &c) {
@@ -2173,6 +2183,7 @@ namespace vr::bridge {
       if (gen->has_config && gen->config.refresh_mhz != 0) {
         c.cadence.reset((int64_t) (1'000'000'000'000LL / gen->config.refresh_mhz), platf::qpc_ticks_to_ns(c.welcome_qpc), qpf());
         c.cadence_on = true;
+        c.cadence.set_free_run(c.pacing_free);  // 上面在 WELCOME 之前寫進去的節拍模式（見 write_pacing()）
       }
       g_present_cadence.store(0, std::memory_order_relaxed);
       const bool is_peer = c.selftest_peer;
@@ -2891,13 +2902,14 @@ namespace vr::bridge {
           // §VR-CADENCE：最尾端再加節拍偵測器的結果（這個 generation 沒有 config 時不印；擷取端的兩個開關怎麼設都印）。
           // cadence／why／div＝印的當下偵測器的狀態，其餘是這個視窗的計數（negative＝slots 是負值、noTgt＝沒有輸出目標）。
           // 欄位名刻意不和 driver 自己那一行（presents=／missed=／noTarget=）重複：兩行的開頭相同，分析腳本靠欄位名分辨。
-          // div=1、沒有卡頓時 skipped 應等於 driver 那一行的 missed（兩行的視窗錯開幾秒）——它釘住「arg1 準時是 1」
+          // div=1、沒有卡頓時 skipped 應等於 driver 那一行的 missed（兩行的視窗錯開幾秒）——它釘住「arg1 準時是 1」。
+          // freeRun＝節拍模式被寫成 PostPresent 不等虛擬 vsync 的那一段（§VR-A-KICK 的實驗）裡 arg1＝0 的筆數：不算進 zeros
           if (c.cadence_on) {
             const auto w = c.cadence.take_window();
             const auto ci = c.cadence.info(now_ns);
             tail += std::format(
               " cadence={} why={} div={} slips={} masked={} hitches={} skipped={} early={} slipSecs={} burstMax={} slipGapMaxMs={} edge={} thrMax={}"
-              " noTgt={} zeros={} negative={} restarts={} orphans={}",
+              " noTgt={} zeros={} negative={} restarts={} orphans={} freeRun={}",
               vr::cadence::state_name(ci.state),
               vr::cadence::why_name(ci.why),
               (unsigned) ci.divisor,
@@ -2915,7 +2927,8 @@ namespace vr::bridge {
               w.zeros,
               w.invalid,
               w.restarts,
-              w.orphans
+              w.orphans,
+              w.free_run
             );
           }
           BOOST_LOG(info) << "[VIPLE-VR-DRV] timing 10s: recs=" << c.timing_total << " vsync=" << k[VRIPC_TE_VSYNC_VIRTUAL]

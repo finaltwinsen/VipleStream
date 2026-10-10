@@ -30,6 +30,9 @@
  *
  * 寫入方（driver）不可信：slots、exit_code、throttle、frame_id、時戳都可能是錯的。這裡不會因為它們而除以零、溢位或
  * 跑不完；不可能的值（slots ≤ 0、一次跨超過 2 s）10 s 內出現 3 筆就整個當成說不準（unsure／suspect）。
+ * 例外只有一種，而且要呼叫端先說（set_free_run()）：server 自己把 driver 的節拍模式寫成「PostPresent 不等虛擬 vsync」
+ * 的那一段（dev 的節拍模式；§VR-A-KICK 的實驗每隔一段時間這樣做約 20 ms）。那時合成器在同一格裡會多跑幾輪，
+ * 多出來的那幾輪 slots 就是 0——那是合法的，另外計數、不算不可能的值。
  */
 #pragma once
 
@@ -91,6 +94,10 @@ namespace vr::cadence {
   constexpr int64_t k_suspect_window_ns = 10 * k_ns_per_s;
   /// 連續觀察滿這麼久才可以報 locked（等於臨界的視窗：「10 s 內不到 4 個」要看滿 10 s 才說得出口）
   constexpr int64_t k_prove_ns = 10 * k_ns_per_s;
+  /// 呼叫端把節拍模式由「PostPresent 不等虛擬 vsync」寫回正式模式之後，這麼久以內的 slots＝0 仍然算那一段的
+  /// （set_free_run()）：driver 要到下一次 PostPresent 才讀到寫回去的模式——那一筆在同一格裡也可能是 0——
+  /// 呼叫端再晚一輪才排空。合成器那時一輪只要幾毫秒，100 ms 很寬；過了之後 0 又是不可能的值
+  constexpr int64_t k_free_run_grace_ns = 100 * k_ns_per_ms;
 
   // 整數分之一：連續這麼多張都跨 1 + nFramesToThrottle 格＝SteamVR 把遊戲固定在更新率的整數分之一，當成新的節拍
   constexpr uint32_t k_divisor_run = 24;
@@ -224,7 +231,7 @@ namespace vr::cadence {
     uint32_t edge = 0;  ///< 在節拍上、但 Present 落在格內最後 14% 的
     uint32_t no_target = 0;  ///< 沒有輸出目標的
     uint32_t invalid = 0;  ///< slots 是負值
-    uint32_t zeros = 0;  ///< 有輸出目標而 slots＝0
+    uint32_t zeros = 0;  ///< 有輸出目標而 slots＝0（不可能的值；落在 free_run 那一段的不算在這裡）
     uint32_t restarts = 0;  ///< 一次跨超過 2 s（driver 重新起算了格點）
     uint32_t orphans = 0;  ///< 配不到同一幀的 PRESENT_EXIT／POSTPRESENT_ENTER 的 VSYNC_VIRTUAL（不用）
     uint32_t divisor_changes = 0;  ///< 節拍換了幾次
@@ -232,6 +239,7 @@ namespace vr::cadence {
     uint32_t burst_max = 0;  ///< 單一整秒內最多幾個 slips
     int64_t slip_gap_max_ns = 0;  ///< 這個視窗內相鄰兩個 slips 最久隔多久
     int64_t throttle_max = 0;  ///< 看到的最大節流值（夾在 0～255）
+    uint32_t free_run = 0;  ///< 有輸出目標而 slots＝0，但落在呼叫端說「PostPresent 不等虛擬 vsync」的那一段（不算進 zeros）
   };
 
   namespace detail {
@@ -413,6 +421,12 @@ namespace vr::cadence {
       no_target_run_ = 0;
 
       const int64_t m = p.slots;
+      if (m == 0 && in_free_run(now)) {
+        // 呼叫端說 PostPresent 這時不等虛擬 vsync：同一格裡多跑的那一輪，不是節拍的一部分，也不是不可能的值
+        detail::bump(win_.free_run);
+        evaluate(now);
+        return;
+      }
       if (m <= 0) {
         // 準時是 1：0 只可能出現在 Activate 或重新起算之後的第一筆，負值不可能
         detail::bump(m < 0 ? win_.invalid : win_.zeros);
@@ -503,6 +517,28 @@ namespace vr::cadence {
       evaluate(now);
     }
 
+    /**
+     * @brief 呼叫端把 driver 的節拍模式寫成「PostPresent 不等虛擬 vsync」（true）或寫回會等的模式（false）的時候呼叫。
+     *        值沒變的呼叫沒有作用。
+     *
+     * PostPresent 不等的那一段（dev 的節拍模式，例如 §VR-A-KICK 的實驗每次約 20 ms），合成器在同一格裡會多跑幾輪。
+     * driver 只有在「時間過了下一個格點」時才算這次跨了幾格，同一格裡第二輪以後的 slots 是 0。那種 0 是合法的：
+     * 不記成不可能的值（不然一次實驗就有 3 筆以上，之後 10 s 整個偵測器都不可信），另外計數（window_t::free_run）。
+     * 每個格點仍然恰好有一筆 slots ≥ 1 的紀錄，節拍的判定照常。寫回之後 k_free_run_grace_ns 內的 0 也算這一段的。
+     *
+     * 不帶時間、不推進時鐘：這一段結束的時刻＝寫回之後偵測器第一次看到的時刻（tick()）。呼叫端是「先寫回、再排空
+     * 這一輪的紀錄」，所以就是那一輪排空的時刻——呼叫端被排程卡住再久，卡住期間 driver 寫的 0 也都是在那個時刻
+     * 才交進來的，不會因為「距上一輪太久」被當成不可能的值。
+     * 這是呼叫端自己做的事、不是從紀錄推出來的，所以重來（紀錄停了、沒有輸出目標）不清它；reset() 才清。
+     */
+    void set_free_run(bool on) {
+      if (on == free_open_) {
+        return;
+      }
+      free_open_ = on;
+      free_closing_ = !on;
+    }
+
     state_e state() const {
       if (!have_rec_ || stale_) {
         return state_e::unknown;
@@ -591,11 +627,22 @@ namespace vr::cadence {
         have_now_ = true;
         last_now_ = now_ns;
       }
+      if (free_closing_) {
+        // set_free_run(false) 之後第一次看到時間：那一段到這裡為止，之後的 k_free_run_grace_ns 從這一刻起算
+        free_closing_ = false;
+        have_free_end_ = true;
+        free_end_ns_ = last_now_;
+      }
       return last_now_;
     }
 
+    /// 呼叫端說 PostPresent 不等虛擬 vsync 的那一段，含寫回之後的 k_free_run_grace_ns（見 set_free_run()）
+    bool in_free_run(int64_t now) const {
+      return free_open_ || (have_free_end_ && detail::elapsed(now, free_end_ns_) <= k_free_run_grace_ns);
+    }
+
     /// 重來。不動：設定、時鐘、10 s 計數、不可能的值的紀錄（anomalies_、suspect_、suspect_alert_）、
-    /// no_target_run_、正在組的那一幀、have_rec_
+    /// no_target_run_、正在組的那一幀、have_rec_、呼叫端說的 free run（free_open_ 等）
     void forget() {
       known_ = false;
       stale_ = false;
@@ -768,6 +815,10 @@ namespace vr::cadence {
     detail::stamps_t<k_suspect_events> anomalies_ {};  ///< 不可能的值出現的時刻
     bool suspect_ = false;
     bool suspect_alert_ = false;
+    bool free_open_ = false;  ///< 呼叫端說 PostPresent 現在不等虛擬 vsync（set_free_run()）
+    bool free_closing_ = false;  ///< 剛寫回正式模式，結束的時刻還沒定（等下一次 tick()）
+    bool have_free_end_ = false;
+    int64_t free_end_ns_ = 0;  ///< 上一段結束的時刻（寫回之後偵測器第一次看到的時刻）
 
     // 節拍
     int64_t divisor_ = 1;
