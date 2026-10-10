@@ -1089,10 +1089,28 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
                                                                                            （`steam_frame_client.md`「host 直通時的兩種時序」）。多出來的那幾張在 timing ring 裡
                                                                                            是「跨 0 格」的紀錄：server 知道這一段是自己開的，節拍偵測器不把它們當成不可能的值，
                                                                                            另外計在下面 `timing 10s` 行尾的 `freeRun`（不影響 `cadence`，也不會有 suspect 警告）
-[VIPLE-VR-DRV] timing 10s: recs=… posehistMiss=N periodPpm min/max=a/b presentPhase p50/p95/p99/max=… ms bursts=N
+[VIPLE-VR-KICK] one period behind the game (presentPhase p50=… p90=… ms over N frames, period … ms): free-run for … ms (#n)
+                                                                                    ← server（§VR-DIRECT-KICK，`vr_direct_kick = enabled`，2026-10-10）：host 直通落在多一格的時序（B）
+                                                                                       連續 3 秒，自動做一次 kick 的那一刻。p50／p90＝最近 1 秒那 N 張的 presentPhase（判定為 B：至少
+                                                                                       24 張、p50 < 1.15 ms、p90 < 2.2 ms，每 100 ms 評估一次）；period＝host 的顯示週期；free-run＝
+                                                                                       PostPresent 立即返回多久（週期 × 1.25，夾在 20～40 ms）；#n＝這個 generation 的第幾次。
+                                                                                       只在 host 週期 ≥ 11 ms（約 90 Hz 以下）時會有；握手後前 5 秒不評估；離上一次 kick（含 dev 的）
+                                                                                       至少 5 秒。當下做不了的（另一段定時步進還沒結束）不印，B 再連續成立 3 秒才再試
+[VIPLE-VR-KICK] result: waits for the game again (presentPhase p50 … -> … ms)           ← 那一次的結果（kick 之後 2 秒出來：前 500 ms 的樣本不看，接著 1.5 秒的 p50 ≥ 2.0 ms）：
+                                                                                       回到等遊戲這一格（A）。兩個數＝kick 之前、之後的 p50
+[VIPLE-VR-KICK] result: no change (presentPhase p50=… ms); next try in … s              ← 沒有變化（那 1.5 秒的 p50 < 2.0 ms：還是 B，或剛好開了儀表板）。下一次最早要等 10／30／90／300 s
+                                                                                       （之後都是 300；成功一次就歸零），而且那時還要是 B 才會做。p50=n/a＝那 1.5 秒不到 24 張
+                                                                                       （幾乎沒有 Present），量不出來，照沒有變化退避
+[VIPLE-VR-KICK] the game's frame takes most of the period (presentPhase p90=… of … ms): leaving the timing alone from now on
+                                                                                    ← 跟在 result: waits for the game again 後面：回到 A 之後那 1.5 秒的 p90 超過週期的 80%（遊戲一幀
+                                                                                       佔掉大半個週期，留在 B 不一定比較差，而我們推不回 B）。這個 generation 之後不再 kick
+[VIPLE-VR-KICK] 20 tries on this connection: leaving the timing alone from now on       ← 跟在第 20 次的 result 後面：一個 generation 最多 20 次，用完了，之後不再 kick
+                                                                                       （那一行如果是 no change，它的 next try 不會發生）。driver 重連（新的 generation）才重新算
+[VIPLE-VR-DRV] timing 10s: recs=… posehistMiss=N periodPpm min/max=a/b presentPhase p50/p95/p99/max=… ms bursts=N[ kicks=N]
                                                                                     ← periodPpm＝driver 這個視窗實際採用的週期相對標稱值（v2 在 ±200 內；有步進的視窗約 ±4000）；
                                                                                        presentPhase＝每一幀的 Present 落在虛擬 vsync 格內的位置（遊戲算完的時刻的抖動就在這裡）；
-                                                                                       bursts＝走完的定時步進數
+                                                                                       bursts＝走完的定時步進數（kick 結束時也算一次）；kicks＝這個視窗裡開始了幾次 kick（dev 的定時與
+                                                                                       自動的都算）。kicks 這一欄只在 `vr_direct_kick = enabled` 或 `vr_dev_kick_every_s` 不是 0 時才有
 [VIPLE-VR-TIMING] 10s: … mtp p50/p95=…ms newPer10s=N                                    ← client 這 10 s 顯示了幾張新影像（和 client 的 MTP10 frames new 對照）
 [VIPLE-VR-LATCH] 10s: … mode=<legacy|v2|v3>[ st=… gate=… steps=… bad=…] overloadHeld=N   ← §VR-FENCE-LATE（2026-10-09）：行尾再加 overloadHeld＝這 10 s 走 hold（沒有餵進控制器）的 LATCH 筆數
                                                                                        （含在 rx 裡）。走不走 hold 看擷取端發布的決定：預設（vr_capture_overload = late）就是過載旗標（[VIPLE-VR-CAP] overload on），cadence 時見 [VIPLE-VR-CAP] hold 行。

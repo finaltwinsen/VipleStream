@@ -2036,6 +2036,49 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### vr_direct_kick
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (experimental): when SteamVR passes the game's image straight to the VR driver, its
+            compositor can settle into a timing where every virtual vsync presents a frame the game finished one
+            period earlier. That costs one extra refresh period of latency (16.7 ms at 60 Hz) and, at 60 Hz, it
+            stays that way; it typically starts after the game stalled for a second or the SteamVR dashboard was
+            opened and closed on the host. With this option enabled the host watches where each present falls
+            within the vsync period and, once that timing has lasted 3 seconds, lets the driver's present call
+            return immediately for a moment (1.25 refresh periods, at least 20 and at most 40 ms). The compositor
+            then runs one extra round, uses up the queued frame and goes back to waiting for the game's current
+            frame. The driver's vsync schedule does not advance during that time, so the phase is unchanged
+            afterwards; a few extra frames are produced each time.
+            Two seconds later the host checks the result. If nothing changed it tries again after 10, 30, 90 and
+            then every 300 seconds, as long as the timing is still the late one. It stops for the rest of the
+            driver connection after 20 attempts, or when the game's frames turn out to take more than 80% of the
+            period (then the late timing is not clearly worse and the host leaves it alone).
+            It only acts when the host's refresh period is 11 ms or longer (about 90 Hz and below, for example a
+            half-rate stream at 60 Hz); at 120 Hz the late timing ends by itself. While this option is enabled,
+            the driver handshake carries the development flag that makes the driver accept that pacing mode. Log
+            lines starting with `[VIPLE-VR-KICK]` mark each attempt and its result.
+            Accepts `enabled`/`disabled` like the on/off options below.
+            @note{Windows hosts with `vr_pcvr = enabled` only. The thresholds come from sessions recorded on
+            2026-10-10; the automatic detection itself has only run in unit tests so far, not in a live session.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_direct_kick = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_dev_kick_every_s
 
 <table>
@@ -2051,6 +2094,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
             makes the driver accept that pacing mode. A log line (`[VIPLE-VR-KICK] ...`) marks each one. The
             extra frames are counted separately (`freeRun` in the `[VIPLE-VR-DRV] timing 10s` line) and do not
             disturb the Present cadence that [vr_capture_overload](#vr_capture_overload) looks at.
+            It can be combined with [vr_direct_kick](#vr_direct_kick): the automatic detection ignores the half
+            second after a timed step, does not count it as a success or a failure of its own, and waits at least
+            5 seconds after it before making an attempt itself.
             @note{Leave at 0 outside of testing: a few extra frames are produced each time. Accepted values: 0,
             or 5 to 600.}
         </td>
@@ -2163,10 +2209,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
-@note{The on/off VR options ([vr_latch_acquire](#vr_latch_acquire) above and `vr_ctrl_pose_offset`, `vr_angvel_local`,
-`vr_multilink_ctrl`, `vr_multilink_repair`, `vr_capture_late` below) accept `enabled`/`disabled` (also `true`/`false`,
-`yes`/`no`, `on`/`off`, `1`/`0`; case does not matter). Any other value is reported in the log as an invalid value and
-the option keeps its default.}
+@note{The on/off VR options ([vr_direct_kick](#vr_direct_kick) and [vr_latch_acquire](#vr_latch_acquire) above and
+`vr_ctrl_pose_offset`, `vr_angvel_local`, `vr_multilink_ctrl`, `vr_multilink_repair`, `vr_capture_late` below) accept
+`enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`; case does not matter). Any other value is
+reported in the log as an invalid value and the option keeps its default.}
 
 ### vr_ctrl_pose_offset
 
