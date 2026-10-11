@@ -1371,7 +1371,7 @@ TEST(VrDirectKickLimit, FailedKicksCountToo) {
   EXPECT_EQ(s.count(event_e::kick), 20) << s.dump();
   EXPECT_EQ(s.count(event_e::result_no_change), 20);
   EXPECT_EQ(s.count(event_e::limit_stop), 1);
-  EXPECT_EQ(s.ev.size(), 41u);
+  ASSERT_EQ(s.ev.size(), 41u);  // 下一行要取 back()：一個事件都沒有時要是這個測試失敗，不是整個執行檔存取違規
   EXPECT_EQ(s.ev.back().d.event, event_e::limit_stop);
   EXPECT_TRUE(s.det.stopped());
   s.run(3'000 * kSec);
