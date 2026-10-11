@@ -47,14 +47,20 @@ Flickable {
         duration: 100
     }
 
-    // §UI-SCROLL（2026-10-11）：把這一頁往下（pages > 0）或往上捲，單位是一個可見高度。
-    // 手把的右搖桿與 LB／RB（SdlGamepadKeyNavigation.scrollRequested）和鍵盤的 PageUp／PageDown 都走這裡。
-    // 原本手把與鍵盤只能靠焦點一項一項移動來帶動捲頁，這一頁有幾十個選項。
+    // §UI-SCROLL（2026-10-11）：用手把的右搖桿與 LB／RB（SdlGamepadKeyNavigation.scrollRequested）或鍵盤的
+    // PageUp／PageDown 直接捲這一頁。原本手把與鍵盤只能靠焦點一項一項移動來帶動捲頁，這一頁有幾十個選項。
+    //
+    // 焦點的處理：有焦點的控制項被捲出畫面時，焦點先收到這一頁本身（focusParked；scrollOrigin 記住原本是哪一個）。
+    // 留在原地的話使用者看不到焦點在哪：這時按 A 或左右會改到畫面外的設定，按上下則是焦點一動、頁面捲回原來的位置。
+    // 捲動停下來 250 ms 之後，或使用者先按了上下，再把焦點放到看得到的控制項上（enterView）。
     property real scrollRemainderPx: 0
+    property bool focusParked: false
+    property Item scrollOrigin: null
 
-    function scrollByPages(pages) {
+    // 往下（pages > 0）或往上捲，單位是一個可見高度。fromGamepad＝這一次是手把捲的（差別見 parkFocus）
+    function scrollByPages(pages, fromGamepad) {
         // 不到 1 px 的量先累著，不動動畫也不動計時器：搖桿只比死區多一點點（飄移）時，每次輪詢都會進來，
-        // 每次都重跑動畫的話滑鼠滾輪會被蓋掉，焦點跟進的計時器也永遠在跑
+        // 每次都重跑動畫的話滑鼠滾輪會被蓋掉
         var px = pages * height + scrollRemainderPx
         if (Math.abs(px) < 1) {
             scrollRemainderPx = px
@@ -66,15 +72,18 @@ Flickable {
         // 上一段動畫還沒跑完時從它的終點接著算，一直推著搖桿才不會少算距離
         var base = autoScrollAnimation.running ? autoScrollAnimation.to : contentY
         var target = Math.min(Math.max(base + px, 0), maxY)
+        if (target === contentY) {
+            // 已經在頂或在底：沒有東西要捲，也不要讓下面的計時器一直重來
+            return
+        }
 
+        parkFocus(target, fromGamepad)
         scrollFocusTimer.forward = px > 0
         scrollFocusTimer.restart()
 
-        if (target !== contentY) {
-            autoScrollAnimation.from = contentY
-            autoScrollAnimation.to = target
-            autoScrollAnimation.restart()
-        }
+        autoScrollAnimation.from = contentY
+        autoScrollAnimation.to = target
+        autoScrollAnimation.restart()
     }
 
     // 焦點是不是在某個 popup（對話框、選單）裡：往上走不會經過主畫面（main.qml 的 stackView）也不會經過
@@ -93,52 +102,106 @@ Flickable {
     // 手把要求捲動時走這裡。這一頁不在最上層、或上面開著對話框時不捲：不然頁面會在對話框後面動
     function scrollFromGamepad(pages) {
         if (StackView.status === StackView.Active && !isFocusInPopup()) {
-            scrollByPages(pages)
+            scrollByPages(pages, true)
         }
     }
 
-    // item 是不是完整落在目前看得到的範圍裡（上下各留 margin）。已經捲到頂或到底時，
+    // 頁面捲到 viewTop 時，item 是不是完整看得到（上下各留 margin）。已經捲到頂或到底時，
     // 貼著那一邊的項目不可能再留出邊距，這時只要求它完整看得到
-    function isInView(item, margin) {
+    function isInViewAt(item, margin, viewTop) {
         var top = item.mapToItem(contentItem, 0, 0).y
         var bottom = top + item.height
-        var viewBottom = contentY + height
-        return (top - margin >= contentY || (contentY <= 0 && top >= contentY)) &&
+        var viewBottom = viewTop + height
+        return (top - margin >= viewTop || (viewTop <= 0 && top >= viewTop)) &&
                (bottom + margin <= viewBottom || (viewBottom >= contentHeight && bottom <= viewBottom))
     }
 
-    // 用 scrollByPages 捲完之後，焦點如果已經在畫面外，把它移到畫面裡、沿 Tab 順序在捲動方向上的
-    // 第一個控制項。焦點留在畫面外的話，下一次按上下，焦點一動頁面就捲回原來的位置。
-    // 焦點本來就不在這一頁的控制項上（例如只用滑鼠）就不動；焦點在文字輸入欄裡也不動——
-    // 使用者可能正在打字，焦點被搬走的話接下來打的字會進到別的控制項。
-    function moveFocusIntoView(forward) {
-        var start = Window.activeFocusItem
-        if (!start || !isChildOfFlickable(start) || ("cursorPosition" in start) || isInView(start, 0)) {
+    function isInView(item, margin) {
+        return isInViewAt(item, margin, contentY)
+    }
+
+    // 頁面捲到 viewTop 之後，有焦點的控制項如果不再完整看得到，把焦點收到這一頁本身。
+    // 文字輸入欄只有手把捲動時才收：用鍵盤捲的人可能正在裡面打字，焦點被拿走的話後面打的字會進到別的地方。
+    function parkFocus(viewTop, fromGamepad) {
+        var item = Window.activeFocusItem
+        if (item === settingsPage) {
+            // 焦點本來就在這一頁本身（沒有手把時開頁就是這樣）：之後按上下同樣從看得到的地方進去
+            focusParked = true
+            return
+        }
+        if (!item || !isChildOfFlickable(item) || isInViewAt(item, 0, viewTop)) {
+            return
+        }
+        if (("cursorPosition" in item) && !fromGamepad) {
             return
         }
 
-        // 和下面焦點改變時自動捲動留的邊距一致，焦點移過去時頁面才不會再動
-        var margin = height > 100 ? 50 : 0
-        var item = start
-        // 次數上限只是防呆
-        for (var i = 0; i < 500; i++) {
-            item = item.nextItemInFocusChain(forward)
-            if (!item || item === start) {
-                return
-            }
-            // 文字輸入欄跳過：手把的 A 在裡面會打出空白；有螢幕鍵盤的裝置上，焦點自己跑進去還可能把鍵盤叫出來
-            if (isChildOfFlickable(item) && !("cursorPosition" in item) && isInView(item, margin)) {
-                item.forceActiveFocus(Qt.TabFocus)
-                return
+        settingsPage.forceActiveFocus()
+        // 這兩個要在焦點移過來之後才設：下面焦點改變的處理看到別的項目拿到焦點時會把它們清掉
+        scrollOrigin = item
+        focusParked = true
+    }
+
+    // 把收在這一頁本身的焦點放到看得到的控制項上；有放成功回傳 true。
+    // 原本那一個又完整看得到了（捲走又捲回來）就還給它；否則從它（沒有的話從這一頁的開頭）沿 Tab 順序往 forward 的
+    // 方向找第一個完整看得到的控制項。文字輸入欄跳過：手把的 A 在裡面會打出空白；有螢幕鍵盤的裝置上，
+    // 焦點自己跑進去還可能把鍵盤叫出來。
+    function enterView(forward) {
+        if (!focusParked || Window.activeFocusItem !== settingsPage) {
+            return false
+        }
+
+        var target = null
+        if (scrollOrigin && isInView(scrollOrigin, 0)) {
+            target = scrollOrigin
+        }
+        else {
+            // 和下面焦點改變時自動捲動留的邊距一致，焦點放上去時頁面才不會再動
+            var margin = height > 100 ? 50 : 0
+            var from = scrollOrigin ? scrollOrigin : settingsPage
+            var first = null
+            var item = from
+            // 走完一圈就停；次數上限只是防呆
+            for (var i = 0; i < 500; i++) {
+                item = item.nextItemInFocusChain(forward)
+                if (!item || item === from || item === first) {
+                    break
+                }
+                if (first === null) {
+                    first = item
+                }
+                if (isChildOfFlickable(item) && !("cursorPosition" in item) && isInView(item, margin)) {
+                    target = item
+                    break
+                }
             }
         }
+
+        if (!target) {
+            return false
+        }
+
+        focusParked = false
+        scrollOrigin = null
+        target.forceActiveFocus(Qt.TabFocus)
+        return true
+    }
+
+    // 焦點收在這一頁本身時按了上下：馬上放到看得到的地方，不等計時器
+    function enterViewFromKey(forward) {
+        if (!focusParked) {
+            return false
+        }
+
+        scrollFocusTimer.stop()
+        return enterView(forward)
     }
 
     Timer {
         id: scrollFocusTimer
         property bool forward: true
         interval: 250
-        onTriggered: moveFocusIntoView(forward)
+        onTriggered: enterView(forward)
     }
 
     Connections {
@@ -151,39 +214,45 @@ Flickable {
     }
 
     Keys.onPressed: function(event) {
-        // 下拉選單開著時不接（ComboBox 自己不處理這兩個鍵，事件會傳上來）：不然整頁在選單後面捲走，
-        // 焦點跟進時選單還會被關掉
+        // 下拉選單開著時不接（ComboBox 自己不處理這兩個鍵，事件會傳上來）：不然整頁在選單後面捲走
         var focusItem = Window.activeFocusItem
         if (focusItem && focusItem.popup && focusItem.popup.visible) {
             return
         }
 
         if (event.key === Qt.Key_PageDown) {
-            scrollByPages(0.8)
+            scrollByPages(0.8, false)
             event.accepted = true
         }
         else if (event.key === Qt.Key_PageUp) {
-            scrollByPages(-0.8)
+            scrollByPages(-0.8, false)
             event.accepted = true
         }
+    }
+
+    // 焦點收在這一頁本身時，上下是「進到看得到的地方」，不是從整個視窗的第一個控制項開始走。
+    // 這兩個處理只有焦點就在這一頁本身時才會被叫到（控制項自己會處理 Tab）。手把的方向鍵上送的是帶 Shift 的 Tab，
+    // 實體鍵盤的 Shift+Tab 是 Backtab，兩種都要接；沒有接手時要把 accepted 設回 false，讓原本的導覽照常進行。
+    Keys.onTabPressed: function(event) {
+        event.accepted = enterViewFromKey(!(event.modifiers & Qt.ShiftModifier))
+    }
+
+    Keys.onBacktabPressed: function(event) {
+        event.accepted = enterViewFromKey(false)
     }
 
     Window.onActiveFocusItemChanged: {
         var item = Window.activeFocusItem
         if (item) {
-            // Ignore non-child elements like the toolbar buttons
-            if (!isChildOfFlickable(item)) {
-                return
+            // §UI-SCROLL：焦點到了這一頁本身以外的地方（使用者點了某個控制項，或 enterView 放好了），
+            // 「焦點收在這一頁」的狀態就結束
+            if (item !== settingsPage) {
+                focusParked = false
+                scrollOrigin = null
             }
 
-            // §UI-SCROLL：剛用右搖桿／LB／RB 捲過、焦點還沒跟進來（計時器還在跑）就按了方向鍵：焦點是從畫面外的
-            // 舊位置移到它的隔壁，照下面的規則頁面會捲回去。改成把焦點帶進畫面，頁面不動。
-            // 只處理按鍵導覽（Tab／Shift+Tab）造成的移動：用滑鼠或雷射點到的控制項，焦點要留在它身上。
-            // 要等這一次焦點移動整個做完（回到事件迴圈）才能搬：在這裡同步搬的話，外層還沒跑完的
-            // forceActiveFocus 會把焦點拉回去。
-            if (scrollFocusTimer.running && !isInView(item, 0) &&
-                    (item.focusReason === Qt.TabFocusReason || item.focusReason === Qt.BacktabFocusReason)) {
-                Qt.callLater(moveFocusIntoView, scrollFocusTimer.forward)
+            // Ignore non-child elements like the toolbar buttons
+            if (!isChildOfFlickable(item)) {
                 return
             }
 
