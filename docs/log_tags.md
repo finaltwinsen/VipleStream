@@ -1190,6 +1190,18 @@ decoder 執行緒（VR 走真 XR 才有）
 [VIPLE-VR-LAUNCHER] failed to start the stream process                             ← error
 [VIPLE-VR-LAUNCHER] could not take the single-instance lock back                   ← warning：子行程結束後 GUI 拿不回單一實例鎖（別的實例趁隙拿走）
 [VIPLE-VR-LAUNCHER] waiting for the VR stream process to finish                    ← GUI 結束時子行程還在跑：先等 8 s，再 SIGTERM，最後 SIGKILL
+[VIPLE-VR-LAUNCHER] preflight: checking the round trip to the host (tcp port <埠>)  ← §VR-PREFLIGHT：開子行程前先量到主機的往返時間（下面說明）
+[VIPLE-VR-LAUNCHER] preflight: sample <i>/3: <ms> ms | no answer (<原因>)           ← 開頭最多量 3 次；原因＝timeout／refused／…
+[VIPLE-VR-LAUNCHER] preflight: launch: <ms> ms <= 60 ms (sample <i> of 3, <ms> ms after the request)   ← 決定：夠快，直接開
+[VIPLE-VR-LAUNCHER] preflight: unmeasured: no answer on 3 samples (<原因>, …) - launching as before     ← 決定：量不到，照原本的方式開
+[VIPLE-VR-LAUNCHER] preflight: unmeasured: no address or port to probe - launching as before
+[VIPLE-VR-LAUNCHER] preflight: wait: best of 3 samples is <ms> ms > 60 ms (<a>, <b>, <c>) - asking the user, probing every 2 s   ← 決定：太慢，跳對話框
+[VIPLE-VR-LAUNCHER] preflight: probe <n>: <ms> ms[ (fast enough <k>/3)] | no answer (<原因>)[ (<m> similar probes not logged)]   ← 對話框開著時每 2 秒一次
+[VIPLE-VR-LAUNCHER] preflight: auto-start after <秒> s: 60 ms or less on 3 probes in a row (last <ms> ms)   ← 決定：連續 3 次夠快，自己開
+[VIPLE-VR-LAUNCHER] preflight: override: the user chose to start anyway after <秒> s (last <ms> ms | last no answer (…) | nothing measured yet)
+[VIPLE-VR-LAUNCHER] preflight: cancel: <the user|mode changed> after <秒> s (…)     ← 決定：這一次不開
+[VIPLE-VR-LAUNCHER] preflight: launch dropped (no longer in VR mode, or a stream is already running)   ← warning：檢查通過時狀態已經變了
+[VIPLE-VR-LAUNCHER] preflight: dev --vr-test-preflight "<腳本>": scripted samples replace the measurement (dev-only, not saved)
 [VIPLE-VR-SESSION] PCVR has no flat window to fall back to: <原因>                  ← error：無頭 PCVR 不退回平面，以啟動錯誤結束
 [VIPLE-VR-POSE] tracking sender started: <Hz> …, source=<xr-thread|xr-frameloop|sine|…>
 [VIPLE-VR-POSE] 10s: sent=… fail=… late=… noPose=…    ← noPose：XR 還沒有有效 HMD pose 的拍數（不送）
@@ -1203,6 +1215,17 @@ decoder 執行緒（VR 走真 XR 才有）
 - projection：單一 2W×H swapchain，左右眼各取一半 imageRect；view pose＝0x81 帶回的 renderPose（追蹤參考空間）∘
   eyeToHead，fov 用量測值（＝協商值，overscan 0）。
 - XR 在 VR session 建立之後失效：先停 tracking、拆 XR、結束串流（`/cancel` 與 UI 錯誤訊息待後續切片）。
+- `[VIPLE-VR-LAUNCHER] preflight:`（§VR-PREFLIGHT，`backend/vrpreflightcheck.cpp`、規則在 `backend/vrpreflight.h`）：GUI 行程印的，
+  每一場 VR 啟動一組。量的是對主機目前的位址與 HTTP 埠做一次 TCP 連線的時間（一次握手＝一次往返），log 不印位址。
+  怎麼讀：
+  - `sample` 之後一定接著一行決定：`launch`（夠快，≤ 60 ms）、`unmeasured`（每一次都量不到，照常開）或 `wait`（最小值
+    超過 60 ms，介面跳出對話框）。第一次就夠快時只有一行 `sample 1/3`，不會量滿三次。
+  - `wait` 之後是 `probe <n>`（每 2 秒），最後以 `auto-start`、`override`（使用者選「仍要開始」）或 `cancel` 結束；
+    「after <秒> s」從使用者按下 app 起算。看到 `wait` 而後面的串流破圖，表示使用者選了 `override`。
+  - `probe` 行有省略：前 30 次每次都印，之後每 15 次印一次，另外夠快的、以及跟上一次不同類（夠快／太慢／量不到）
+    的照印，並帶出中間省略了幾次（`similar probes not logged`）。
+  - `no answer (timeout)` 不代表連線好：往返超過 1 秒的路徑每一次都逾時，結果是 `unmeasured`、照常開。
+  - 用 `--vr-test-preflight` 時第一行是 `checking the round trip to the host (scripted samples, dev)`，數字來自腳本、不是量的。
 
 ### `[VIPLE-VR-INPUT]`／`[VIPLE-VR-HAPTIC]` —— PCVR 控制器與震動（M4a R2）
 
