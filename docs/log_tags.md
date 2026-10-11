@@ -1339,7 +1339,8 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
                                                                                        這一格（A）多一個週期（60 Hz：A 4.4～7.7 ms、B 17.7～20.7 ms）。只看 presentPhase 會誤判：遊戲還在
                                                                                        載入、第 0 層是合成器自己的畫面時 presentPhase 一樣小（2026-10-11：p50 0.79～1.22 ms，連推三次都
                                                                                        沒有變化），那時回聲年齡只有 2.7～5.2 ms。沒有串流在擷取、影像都沒有對到姿態時沒有回聲年齡，
-                                                                                       不會有這一行；頭部靜止的無人場次回聲年齡不可靠，也可能不會有。
+                                                                                       不會有這一行；頭部靜止的無人場次回聲年齡不可靠，也可能不會有。presentPhase 像 B 而回聲年齡
+                                                                                       不成立的時候，印的是下面的 not kicking 行。
                                                                                        period＝host 的顯示週期；free-run＝PostPresent 立即返回多久（週期 × 1.25，夾在 20～40 ms）；
                                                                                        #n＝這個 generation 的第幾次。只在 host 週期 ≥ 11 ms（約 90 Hz 以下）時會有；握手後前 5 秒不評估；
                                                                                        離上一次 kick（含 dev 的）至少 5 秒。當下做不了的（另一段定時步進還沒結束）不印，B 再連續成立
@@ -1358,6 +1359,21 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
                                                                                        佔掉大半個週期，留在 B 不一定比較差，而我們推不回 B）。這個 generation 之後不再 kick
 [VIPLE-VR-KICK] 20 tries on this connection: leaving the timing alone from now on       ← 跟在第 20 次的 result 後面：一個 generation 最多 20 次，用完了，之後不再 kick
                                                                                        （那一行如果是 no change，它的 next try 不會發生）。driver 重連（新的 generation）才重新算
+[VIPLE-VR-KICK] not kicking: presentPhase p50=… p90=… ms over N frames looks one period behind, but echoAge p10/p50=…/… ms over M frames does not (needs p50 >= … ms over >= 24 frames)
+                                                                                    ← server（2026-10-11）：只有 presentPhase 那一邊像多一格——已經連續 3 秒，只看它的舊規則這時就 kick 了——
+                                                                                       回聲年齡卻不成立，所以不推。數字＝這一次評估的那 1 秒視窗；needs＝回聲年齡的門檻（5.5 ms＋半個週期）與
+                                                                                       筆數下限。M=0 時 echoAge 印 n/a：一筆回聲年齡都沒有（沒有串流在擷取、client 斷線沒有追蹤樣本、影像
+                                                                                       都沒有對到姿態）。0 < M < 24 時數值照印，擋下來的是筆數。怎麼讀：
+                                                                                       ・M 接近每秒的張數、p50 只有幾毫秒＝合成器自己的畫面（遊戲還在載入）之類，本來就沒有多一格；
+                                                                                       ・M=0 而同一段 [VIPLE-VR-CAP] 10s 的 echoAge 有數值＝回聲年齡沒有交到偵測器（交接壞了）；
+                                                                                       ・p50 離門檻很近、或 M 在 24 上下＝可能真的多一格卻推不出去（頭不動、對到姿態的影像不到四成；
+                                                                                         72／90 Hz 的門檻是外推的）。
+                                                                                       一條連線（generation）最多每 60 秒一行；不看退避與 5 秒的間隔（它說的是判定，不是 kick）；等結果的
+                                                                                       那 2 秒與「leaving the timing alone」之後不評估，不會有。這一行不改變任何狀態
+[VIPLE-VR-KICK] echo ages are arriving from the capture thread (first: … ms)            ← server（2026-10-11）：這條連線第一次收到擷取端交來的回聲年齡（每個 generation 一行）。整場都在等遊戲
+                                                                                       這一格、沒有 kick 也沒有 not kicking 行的時候，靠它知道擷取端 → bridge 的交接是通的；數值應該和
+                                                                                       [VIPLE-VR-CAP] 10s 的 echoAge 差不多。只在偵測器會動作的 generation（host 週期 ≥ 11 ms）才收，所以
+                                                                                       120 Hz 不會有這一行
 [VIPLE-VR-DRV] timing 10s: recs=… posehistMiss=N periodPpm min/max=a/b presentPhase p50/p95/p99/max=… ms bursts=N[ kicks=N]
                                                                                     ← periodPpm＝driver 這個視窗實際採用的週期相對標稱值（v2 在 ±200 內；有步進的視窗約 ±4000）；
                                                                                        presentPhase＝每一幀的 Present 落在虛擬 vsync 格內的位置（遊戲算完的時刻的抖動就在這裡）；

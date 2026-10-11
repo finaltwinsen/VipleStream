@@ -2067,7 +2067,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
             It only acts when the host's refresh period is 11 ms or longer (about 90 Hz and below, for example a
             half-rate stream at 60 Hz); at 120 Hz the late timing ends by itself. While this option is enabled,
             the driver handshake carries the development flag that makes the driver accept that pacing mode. Log
-            lines starting with `[VIPLE-VR-KICK]` mark each attempt and its result.
+            lines starting with `[VIPLE-VR-KICK]` mark each attempt and its result; a `not kicking` line (at most
+            once a minute) shows when the position of the present alone looked late for 3 seconds but the pose
+            age did not confirm it, or was not available.
             Accepts `enabled`/`disabled` like the on/off options below.
             @note{Windows hosts with `vr_pcvr = enabled` only. The thresholds come from sessions recorded on
             2026-10-10 and 2026-10-11. The detection ran in live sessions on 2026-10-10 while it looked at the

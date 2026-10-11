@@ -46,6 +46,11 @@
  *   (f) 重負載：成功的那一次，確認用的樣本第 90 百分位 > 週期的 80% → 這個 generation 之後不再 kick。A 要等遊戲
  *       這一幀的 GPU 做完，遊戲的幀佔掉大半個週期時留在 B 不一定比較差；我們沒有辦法把它推回 B，至少不要再動它。
  *   (g) 一個 generation 最多 kick 20 次；reset() 之後前 5 秒不評估（遊戲與 SteamVR 還在起來）。
+ *   (h) presentPhase 那一邊已經連續成立滿 3 秒（只看它的舊規則這時就 kick 了），這一次評估回聲年齡卻不成立或根本
+ *       沒有：不 kick，回報一次 withheld（帶兩邊的統計量）讓呼叫端印一行。沒有這一行的話，「回聲年齡正確地擋下來」
+ *       和「回聲年齡沒有交接過來」在 log 裡一樣都是什麼都沒有；真的在 B 卻沒有 kick（頭不動、對到姿態的影像不到
+ *       四成）時也無從查起。同一個 generation 最多每 60 秒一次。它說的是判定、不是 kick，所以不看退避與 (d) 的間隔；
+ *       等結果的那 2 秒與「不再 kick」之後不評估，也就不會有。
  *
  * 寫入方（driver）不可信：樣本的時刻與數值都可能是錯的（回聲年齡用的 Present 時刻也是它寫的）。這裡不會因為它們
  * 而溢位、除以零或卡住——時刻在未來的樣本要等「現在」追上它才算，太舊的不算，負的數值直接丟；最壞的結果是誤判，
@@ -118,6 +123,9 @@ namespace vr::kick {
   inline constexpr int64_t k_startup_holdoff_ns = 5 * k_ns_per_s;  ///< reset() 之後這麼久不評估
   inline constexpr int k_max_kicks = 20;  ///< 一個 generation 最多 kick 這麼多次
 
+  // (h)
+  inline constexpr int64_t k_withheld_interval_ns = 60 * k_ns_per_s;  ///< 兩次 withheld 之間至少隔這麼久
+
   /// 樣本環的大小（presentPhase 與回聲年齡各一個）。要裝得下確認用的 1.5 秒：會動作的週期最短 11 ms，1.5 秒是
   /// 137 筆。寫入方送得比這個密時只留最新的這麼多筆，統計量就用它們算
   inline constexpr std::size_t k_ring_size = 256;
@@ -129,6 +137,9 @@ namespace vr::kick {
     result_no_change,  ///< 上一次 kick 的結果：沒有變化（或量不出來）；下一次最早要等 decision_t::next_try_ns
     heavy_stop,  ///< (f) 遊戲的幀佔掉大半個週期：這個 generation 之後不再 kick（跟在那一次的 result_ok 後面）
     limit_stop,  ///< (g) 做滿 k_max_kicks 次：這個 generation 之後不再 kick（跟在最後一次的結果後面）
+    /// (h) 只有 presentPhase 像多一格（已經連續 k_dwell_ns）、回聲年齡不成立或沒有：不 kick。只是通知，給 log 用；
+    /// 呼叫端什麼都不必做
+    withheld,
   };
 
   inline const char *event_name(event_e e) {
@@ -145,6 +156,8 @@ namespace vr::kick {
         return "heavy_stop";
       case event_e::limit_stop:
         return "limit_stop";
+      case event_e::withheld:
+        return "withheld";
     }
     return "?";
   }
@@ -153,22 +166,23 @@ namespace vr::kick {
   struct decision_t {
     event_e event = event_e::none;
     int64_t burst_ns = 0;  ///< kick：PostPresent 立刻返回多久
-    /// kick 當下判定用的那個視窗（kick、兩種 result 都帶；result 帶的是那一次 kick 當下的）
+    /// kick 當下判定用的那個視窗（kick、兩種 result 都帶；result 帶的是那一次 kick 當下的）。withheld：這一次評估的視窗
     int64_t median_before_ns = 0;
     int64_t p90_before_ns = 0;
     /// 兩種 result：確認用的那 1.5 秒；heavy_stop 只帶 p90_after_ns。samples < k_min_samples 時量不出結果，這兩個數不可信
     int64_t median_after_ns = 0;
     int64_t p90_after_ns = 0;
-    int samples = 0;  ///< kick：判定用的視窗裡有幾筆；兩種 result：確認用的那 1.5 秒裡有幾筆
-    /// 回聲年齡的中位數，視窗和上面 presentPhase 的相同：before＝kick 當下判定用的那 1 秒（kick、兩種 result 都帶），
-    /// after＝確認用的那 1.5 秒（兩種 result；只給 log 用，成不成功不看它）
+    int samples = 0;  ///< kick、withheld：判定用的視窗裡有幾筆；兩種 result：確認用的那 1.5 秒裡有幾筆
+    /// 回聲年齡的中位數，視窗和上面 presentPhase 的相同：before＝kick 當下判定用的那 1 秒（kick、兩種 result 都帶；
+    /// withheld 帶的是這一次評估的視窗），after＝確認用的那 1.5 秒（兩種 result；只給 log 用，成不成功不看它）
     int64_t echo_before_ns = 0;
     int64_t echo_after_ns = 0;
-    /// kick：判定用的那 1 秒裡回聲年齡的第 10 百分位。只給 log 用、不參與判定：真的多一格時每一張都舊一格，它和
-    /// 中位數差不多；中位數是被追蹤樣本的到達間隔灌大的時候，它還是只有幾毫秒（檔頭「回聲年齡的限制」）
+    /// kick、withheld：判定用的那 1 秒裡回聲年齡的第 10 百分位。只給 log 用、不參與判定：真的多一格時每一張都舊一格，
+    /// 它和中位數差不多；中位數是被追蹤樣本的到達間隔灌大的時候，它還是只有幾毫秒（檔頭「回聲年齡的限制」）
     int64_t echo_p10_before_ns = 0;
-    /// 回聲年齡有幾筆。kick：判定用的視窗裡（一定 ≥ k_echo_min_samples）；兩種 result：確認用的那 1.5 秒裡——
-    /// < k_echo_min_samples 時 echo_after_ns 不可信（一筆都沒有時是 0）
+    /// 回聲年齡有幾筆。kick：判定用的視窗裡（一定 ≥ k_echo_min_samples）；withheld：同一個視窗裡（可以是 0，那時
+    /// 上面兩個回聲年齡的數也是 0）；兩種 result：確認用的那 1.5 秒裡——< k_echo_min_samples 時 echo_after_ns 不可信
+    /// （一筆都沒有時是 0）
     int echo_samples = 0;
     int kick_no = 0;  ///< 這個 generation 的第幾次 kick（所有事件都帶）
     int64_t next_try_ns = 0;  ///< result_no_change：下一次最早多久以後（從現在算）
@@ -274,6 +288,7 @@ namespace vr::kick {
       const int64_t until = detail::add_sat(now, k_settle_ns + extra);
       last_kick_ns_ = now;
       dwell_active_ = false;
+      phase_dwell_active_ = false;
       // until 之前的樣本都不拿來判定：視窗要重新收滿 k_min_samples 筆，B 才可能再成立
       floor_ns_ = std::max(floor_ns_, until);
       if (verifying_) {
@@ -285,6 +300,7 @@ namespace vr::kick {
     /**
      * @brief 定期呼叫（bridge 的 periodic()，每 2 ms）。一次最多回一個事件，大多數時候是 none。
      *        回 kick 之後，呼叫端要嘛真的做（之後某一次 poll() 會回它的結果），要嘛馬上呼叫 kick_not_done()。
+     *        其他事件都只是通知（給 log 用），呼叫端不必回應。
      */
     decision_t poll(int64_t now_ns) {
       const int64_t now = tick(now_ns);
@@ -355,19 +371,37 @@ namespace vr::kick {
       // （計時在跑的時候 last_eval_ns_ 一定是上一次評估的時刻；沒在跑的時候這一行沒有作用）
       if (detail::elapsed(now, last_eval_ns_) > k_window_ns) {
         dwell_active_ = false;
+        phase_dwell_active_ = false;
       }
       last_eval_ns_ = now;
       next_eval_ns_ = detail::add_sat(now, k_eval_interval_ns);
       const stats_t s = recent(now);
       if (s.n < k_min_samples || s.median_ns >= k_b_median_max_ns || s.p90_ns >= k_b_p90_max_ns) {
         dwell_active_ = false;
+        phase_dwell_active_ = false;
         return d;
+      }
+      // presentPhase 這一邊成立。它自己連續成立了多久另外記著，(h) 要用
+      if (!phase_dwell_active_) {
+        phase_dwell_active_ = true;
+        phase_dwell_since_ns_ = now;
       }
       // 回聲年齡也要多了半個週期以上。合成器自己的畫面（遊戲還在載入）presentPhase 和 B 一樣小，只有這個量分得開；
       // 樣本不夠（沒有餵、沒有串流在擷取、影像沒有對到姿態）一律當成不成立
       const stats_t e = recent_echo(now);
       if (e.n < k_echo_min_samples || e.median_ns < echo_min_ns()) {
         dwell_active_ = false;
+        // (h) 只看 presentPhase 的話這時已經連續成立滿 k_dwell_ns、該 kick 了：不 kick，通知一次（限速）
+        if (detail::elapsed(now, phase_dwell_since_ns_) >= k_dwell_ns && detail::elapsed(now, last_withheld_ns_) >= k_withheld_interval_ns) {
+          last_withheld_ns_ = now;
+          d.event = event_e::withheld;
+          d.median_before_ns = s.median_ns;
+          d.p90_before_ns = s.p90_ns;
+          d.samples = s.n;
+          d.echo_before_ns = e.median_ns;
+          d.echo_p10_before_ns = e.p10_ns;
+          d.echo_samples = e.n;
+        }
         return d;
       }
       if (!dwell_active_) {
@@ -396,6 +430,7 @@ namespace vr::kick {
       verify_begin_ns_ = detail::add_sat(now, k_settle_ns);
       verify_end_ns_ = detail::add_sat(verify_begin_ns_, k_verify_ns);
       dwell_active_ = false;
+      phase_dwell_active_ = false;
 
       d.event = event_e::kick;
       d.burst_ns = burst_ns();
@@ -483,6 +518,11 @@ namespace vr::kick {
       return dwell_active_ ? detail::elapsed(now_ns, dwell_since_ns_) : 0;
     }
 
+    /// (h) 只算 presentPhase 那一邊：已經連續成立多久（目前不成立＝0；以上一次評估為準）。一定 ≥ dwell_ns()
+    int64_t phase_dwell_ns(int64_t now_ns) const {
+      return phase_dwell_active_ ? detail::elapsed(now_ns, phase_dwell_since_ns_) : 0;
+    }
+
   private:
     struct sample_t {
       int64_t t_ns = 0;
@@ -558,6 +598,11 @@ namespace vr::kick {
     int64_t next_eval_ns_ = detail::k_i64_min;
     bool dwell_active_ = false;
     int64_t dwell_since_ns_ = 0;  ///< 這一段連續成立的第一次評估的時刻
+
+    // (h) 只有 presentPhase 那一邊成立的通知
+    bool phase_dwell_active_ = false;  ///< presentPhase 那一邊正在連續成立（回聲年齡成不成立都算）
+    int64_t phase_dwell_since_ns_ = 0;  ///< 那一段的第一次評估的時刻
+    int64_t last_withheld_ns_ = detail::k_i64_min;  ///< 上一次回 withheld 的時刻（還沒有過＝INT64_MIN，離現在無限久）
 
     // (c) kick 與確認
     bool verifying_ = false;

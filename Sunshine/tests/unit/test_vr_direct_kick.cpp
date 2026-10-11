@@ -7,9 +7,9 @@
  * 所以可以脫離整個 server 單獨編譯執行（-Wall -Wextra -Wshadow -Wconversion -Werror 也過得了；
  * tests_common.h 會拉進 logging／platform 的標頭，這組旗標過不了）。放進 test_sunshine 一起建也一樣能跑。
  *
- * 寫法上的四個約定：
+ * 寫法上的五個約定：
  *   - 規格的數字（1.15／2.2／2.0 ms、24 筆、5.5 ms＋半個週期、3 s、500 ms＋1.5 s、5 s、10／30／90／300 s、11 ms、
- *     80%、20 次……）在這裡寫死，不引用標頭的常數：常數被改掉時測試要會失敗。
+ *     80%、20 次、60 s……）在這裡寫死，不引用標頭的常數：常數被改掉時測試要會失敗。
  *   - sim_t 照 bridge 執行緒的走法：每 2 ms 一輪，先 poll()（periodic() 前段）、再把這 2 ms 內的樣本餵進去
  *     （periodic() 尾端的 drain_rings()）。樣本的時刻是它自己的，不是餵的當下。
  *   - 判定要兩種樣本都成立（2026-10-11 起），所以 sim_t 與 hand_t 每餵一筆 presentPhase 就配一筆回聲年齡（擷取端
@@ -17,6 +17,8 @@
  *     另一個條件就靠這個預設成立；要試回聲年齡本身的用 sim_t::echo 或 hand_t 的 echo_* 欄位另外指定。
  *   - 要對到 1 ns 的邊界用 hand_t（每一次 poll() 的時刻都由測試指定）。偵測器每 100 ms 才評估一次，
  *     所以「差 1 ns 不成立」與「剛好成立」要分兩趟跑，不能在同一趟裡連著問。
+ *   - presentPhase 連續 3 秒像多一格、回聲年齡卻不成立的場次，偵測器會回「不推」的通知（withheld，一分鐘最多一次）。
+ *     所以「不可以推」的斷言是 only_withheld()（只有這種通知、次數與時刻都對），不是事件串列是空的。
  */
 #include <gtest/gtest.h>
 
@@ -277,6 +279,25 @@ namespace {
   };
 
   /**
+   * @brief s 的事件從頭到尾只有「不推」的通知（withheld），剛好 n 個：第一個在起點之後 first_ns，之後每 60 秒一個
+   *        （每 100 ms 才評估一次，所以各自最多晚 100 ms）。也就是沒有 kick、沒有結果、沒有停手。
+   *        presentPhase 一路都像多一格、回聲年齡一路都不成立的場次就是這個樣子：暖機 5 秒＋連續 3 秒＝第 8 秒第一次。
+   */
+  ::testing::AssertionResult only_withheld(const sim_t &s, std::size_t n, int64_t first_ns = 8 * kSec) {
+    if (s.ev.size() != n) {
+      return ::testing::AssertionFailure() << s.ev.size() << " events, expected " << n << " (all withheld); " << s.dump();
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      const int64_t want = first_ns + static_cast<int64_t>(i) * 60 * kSec;
+      const int64_t at = s.ev[i].t - s.t0;
+      if (s.ev[i].d.event != event_e::withheld || at < want || at > want + 100 * kMs) {
+        return ::testing::AssertionFailure() << "event " << i << " is not a withheld at +" << want / kMs << " ms; " << s.dump();
+      }
+    }
+    return ::testing::AssertionSuccess();
+  }
+
+  /**
    * @brief 手動驅動：每一次 poll() 的時刻都由測試指定（要對到 1 ns 的邊界時用）。兩種樣本都是每 10 ms 一筆、
    *        時刻相同，預設是 B（60 Hz 的多一格：presentPhase 0.8 ms、回聲年齡 19 ms）。
    */
@@ -334,6 +355,17 @@ namespace {
 }  // namespace
 
 // ── 視窗與統計量 ─────────────────────────────────────────────────────────
+
+TEST(VrDirectKickWindow, EveryEventHasItsOwnName) {
+  // 名字只出現在測試失敗時印出來的事件串列裡；新增事件忘了補名字會印成 "?"
+  EXPECT_STREQ(event_name(event_e::none), "none");
+  EXPECT_STREQ(event_name(event_e::kick), "kick");
+  EXPECT_STREQ(event_name(event_e::result_ok), "result_ok");
+  EXPECT_STREQ(event_name(event_e::result_no_change), "result_no_change");
+  EXPECT_STREQ(event_name(event_e::heavy_stop), "heavy_stop");
+  EXPECT_STREQ(event_name(event_e::limit_stop), "limit_stop");
+  EXPECT_STREQ(event_name(event_e::withheld), "withheld");
+}
 
 TEST(VrDirectKickWindow, MedianP90AndP10UseTheSameRankAsTheTimingSummary) {
   // 排好序的 n 筆裡取第 round(q × (n − 1)) 筆（從 0 數；bridge 10 秒摘要的 presentPhase 也是這樣取）
@@ -1589,7 +1621,8 @@ TEST(VrDirectKickEcho, ALoadingScreenNeverKicks) {
   for (const int64_t period : {kT60, kT72, kT90}) {
     sim_t s(period, mode_e::load);
     s.run(600 * kSec);
-    EXPECT_TRUE(s.ev.empty()) << s.dump();
+    // 十分鐘裡一次都沒有推；有的只是每分鐘一次的「不推」通知（第 8、68、…、548 秒）
+    EXPECT_TRUE(only_withheld(s, 10));
     EXPECT_EQ(s.det.kicks(), 0);
     EXPECT_EQ(s.det.dwell_ns(s.now), 0);
     // presentPhase 這一邊是成立的（只看它就會推）；擋下來的是回聲年齡
@@ -1620,7 +1653,8 @@ TEST(VrDirectKickEcho, NoEchoSamplesNeverKicks) {
     sim_t s(period, mode_e::b);
     s.echo = echo_e::none;
     s.run(600 * kSec);
-    EXPECT_TRUE(s.ev.empty()) << s.dump();
+    EXPECT_TRUE(only_withheld(s, 10));  // 一次都沒有推，只有每分鐘一次的「不推」通知
+    EXPECT_EQ(s.det.kicks(), 0);
     EXPECT_EQ(s.det.recent_echo(s.now).n, 0);
     EXPECT_TRUE(between(s.det.recent(s.now).median_ns, 650'000, 950'000));
     EXPECT_EQ(s.det.dwell_ns(s.now), 0);
@@ -1631,12 +1665,13 @@ TEST(VrDirectKickEcho, NoEchoSamplesNeverKicks) {
   s.echo = echo_e::none;
   s.kick_to(mode_e::a);
   s.run(60 * kSec);
-  EXPECT_TRUE(s.ev.empty()) << s.dump();
+  EXPECT_TRUE(only_withheld(s, 1));
   s.echo = echo_e::by_mode;
   const int64_t back = s.now;
   ASSERT_TRUE(s.run_until(event_e::kick, 20 * kSec)) << s.dump();
   EXPECT_TRUE(between(s.ev.back().t - back, 3'400 * kMs, 3'600 * kMs));
   EXPECT_EQ(s.ev.back().d.kick_no, 1);
+  EXPECT_EQ(s.ev.size(), 2u) << s.dump();  // 那一次通知，接著就是這個 kick
 }
 
 TEST(VrDirectKickEcho, NeedsTwentyFourEchoSamplesInTheWindow) {
@@ -1655,19 +1690,27 @@ TEST(VrDirectKickEcho, NeedsTwentyFourEchoSamplesInTheWindow) {
     EXPECT_EQ(d.echo_samples, 24);
     EXPECT_EQ(d.samples, 100);
   }
-  // 間隔比 1/23 秒長 0.13 ns：每一個視窗裡剛好 23 筆，永遠不成立
+  // 間隔比 1/23 秒長 0.13 ns：每一個視窗裡剛好 23 筆，永遠不成立。presentPhase 那一邊從第 5 秒起一直成立，
+  // 所以第 8 秒有一次「不推」的通知（帶著那 23 筆），其餘都沒有事件
   {
     hand_t h;
     h.echo_step = 43'478'261;
     h.echo_fed = h.t0 + h.echo_step;
     for (int sec = 1; sec <= 30; ++sec) {
-      EXPECT_EQ(h.at(h.t0 + sec * kSec).event, event_e::none) << sec;
+      const decision_t d = h.at(h.t0 + sec * kSec);
+      EXPECT_EQ(d.event, sec == 8 ? event_e::withheld : event_e::none) << sec;
+      if (sec == 8) {
+        EXPECT_EQ(d.echo_samples, 23);
+        EXPECT_EQ(d.echo_before_ns, 19 * kMs);  // 數值夠大，擋下來的是筆數
+        EXPECT_EQ(d.samples, 100);
+      }
       if (sec >= 2) {
         EXPECT_EQ(h.det.recent_echo(h.t0 + sec * kSec).n, 23) << sec;
       }
       EXPECT_EQ(h.det.recent(h.t0 + sec * kSec).n, 100) << sec;
       EXPECT_EQ(h.det.dwell_ns(h.t0 + sec * kSec + 1), 0) << sec;
     }
+    EXPECT_EQ(h.det.kicks(), 0);
   }
 }
 
@@ -1678,12 +1721,13 @@ TEST(VrDirectKickEcho, MedianBoundaryIsTypicalPlusHalfAPeriod) {
     int64_t threshold;
   };
   for (const case_t &c : {case_t {kT60, 13'833'333}, case_t {kT72, 12'444'444}, case_t {kT90, 11'055'555}}) {
-    // 每一筆都比門檻少 1 ns：不成立
+    // 每一筆都比門檻少 1 ns：不成立（不推；第 8 秒那一次「不推」的通知帶著這個中位數）
     sim_t below(c.period, mode_e::b);
     below.echo = echo_e::fixed;
     below.echo_fixed_ns = c.threshold - 1;
     below.run(60 * kSec);
-    EXPECT_TRUE(below.ev.empty()) << "period=" << c.period << " " << below.dump();
+    ASSERT_TRUE(only_withheld(below, 1)) << "period=" << c.period;
+    EXPECT_EQ(below.ev[0].d.echo_before_ns, c.threshold - 1);
     EXPECT_EQ(below.det.dwell_ns(below.now), 0);
     EXPECT_EQ(below.det.recent_echo(below.now).median_ns, c.threshold - 1);
 
@@ -1703,7 +1747,7 @@ TEST(VrDirectKickEcho, MedianBoundaryIsTypicalPlusHalfAPeriod) {
     under.echo_lo = c.threshold - 1'000'000;
     under.echo_hi = c.threshold - 1;
     under.run(600 * kSec);
-    EXPECT_TRUE(under.ev.empty()) << "period=" << c.period << " " << under.dump();
+    EXPECT_TRUE(only_withheld(under, 10)) << "period=" << c.period;
 
     sim_t over(c.period, mode_e::b);
     over.echo = echo_e::band;
@@ -1719,7 +1763,7 @@ TEST(VrDirectKickEcho, MedianBoundaryIsTypicalPlusHalfAPeriod) {
   a_top.echo = echo_e::fixed;
   a_top.echo_fixed_ns = 7'700'000;
   a_top.run(60 * kSec);
-  EXPECT_TRUE(a_top.ev.empty()) << a_top.dump();
+  EXPECT_TRUE(only_withheld(a_top, 1));
   sim_t b_bottom(kT60, mode_e::b);
   b_bottom.echo = echo_e::fixed;
   b_bottom.echo_fixed_ns = 17'700'000;
@@ -1747,7 +1791,8 @@ TEST(VrDirectKickEcho, LooksAtTheMedian) {
   rare.echo_odd_ns = 60 * kMs;
   rare.echo_every = 3;
   rare.run(600 * kSec);
-  EXPECT_TRUE(rare.ev.empty()) << rare.dump();
+  ASSERT_TRUE(only_withheld(rare, 10));
+  EXPECT_EQ(rare.ev[0].d.echo_before_ns, 5 * kMs);
   EXPECT_EQ(rare.det.recent_echo(rare.now).median_ns, 5 * kMs);
   EXPECT_EQ(rare.det.recent_echo(rare.now).p90_ns, 60 * kMs);
 }
@@ -1819,12 +1864,17 @@ TEST(VrDirectKickEcho, StaleEchoSamplesDoNotCount) {
       EXPECT_EQ(d.event, event_e::kick);  // 7.01～7.24 s 的 24 筆還在視窗裡
       EXPECT_EQ(d.echo_samples, 24);
     } else {
-      EXPECT_EQ(d.event, event_e::none);  // 只剩 23 筆：不成立，計時歸零
+      // 只剩 23 筆：不成立，計時歸零。presentPhase 已經連續成立 3 秒，所以這一次評估回的是「不推」的通知
+      EXPECT_EQ(d.event, event_e::withheld);
+      EXPECT_EQ(d.echo_samples, 23);
       EXPECT_EQ(h.det.recent_echo(h.t0 + 8 * kSec).n, 23);
       EXPECT_EQ(h.det.dwell_ns(h.t0 + 8 * kSec + 1), 0);
-      // 之後一直沒有新的回聲年齡：環裡那些舊的再也不會讓它成立
-      for (int sec = 9; sec <= 60; ++sec) {
-        EXPECT_EQ(h.at(h.t0 + sec * kSec).event, event_e::none) << sec;
+      EXPECT_EQ(h.det.kicks(), 0);
+      // 之後一直沒有新的回聲年齡：環裡那些舊的再也不會讓它成立（60 秒後的下一次通知帶的是 0 筆）
+      for (int sec = 9; sec <= 70; ++sec) {
+        const decision_t later = h.at(h.t0 + sec * kSec);
+        EXPECT_EQ(later.event, sec == 68 ? event_e::withheld : event_e::none) << sec;
+        EXPECT_EQ(later.echo_samples, 0) << sec;
         EXPECT_EQ(h.det.recent_echo(h.t0 + sec * kSec).n, 0) << sec;
         EXPECT_EQ(h.det.recent(h.t0 + sec * kSec).n, 100) << sec;  // presentPhase 一直都在
         EXPECT_EQ(h.det.dwell_ns(h.t0 + sec * kSec + 1), 0) << sec;
@@ -1839,12 +1889,19 @@ TEST(VrDirectKickEcho, BackoffIsUnchangedAndStillNeedsBothConditions) {
   ASSERT_TRUE(s.run_until(event_e::result_no_change, 5 * kSec)) << s.dump();
   const int64_t r1 = s.ev.back().t;
   EXPECT_EQ(s.ev.back().d.next_try_ns, 10 * kSec);
-  // 退避期間回聲年齡掉回正常 2 秒（presentPhase 沒變），退避結束前早就又連續成立滿 3 秒：照樣在退避滿的那一刻做，
-  // 沒有提前、沒有延後
+  // 退避期間回聲年齡掉回正常 3 秒（presentPhase 沒變），退避結束前早就又連續成立滿 3 秒：照樣在退避滿的那一刻做，
+  // 沒有提前、沒有延後。掉回正常的那一段有一次「不推」的通知——它不看退避：presentPhase 從結果出來起連續成立
+  // 滿 3 秒、而回聲年齡不成立的那一次評估就回
   s.run(1 * kSec);
   s.mode = mode_e::load;
-  s.run(2 * kSec);
+  s.run(3 * kSec);
   EXPECT_EQ(s.det.dwell_ns(s.now), 0);
+  ASSERT_EQ(s.ev.size(), 3u) << s.dump();
+  EXPECT_EQ(s.ev[2].d.event, event_e::withheld);
+  EXPECT_TRUE(between(s.ev[2].t - r1, 3 * kSec, 3 * kSec + 100 * kMs));
+  EXPECT_EQ(s.ev[2].d.kick_no, 1);  // 做過的那一次；通知本身不算次數
+  EXPECT_EQ(s.det.kicks(), 1);
+  EXPECT_EQ(s.det.backoff_step(), 1);
   s.mode = mode_e::b;
   ASSERT_TRUE(s.run_until(event_e::kick, 20 * kSec)) << s.dump();
   EXPECT_TRUE(between(s.ev.back().t - r1, 10 * kSec, 10 * kSec + 100 * kMs));
@@ -1854,10 +1911,11 @@ TEST(VrDirectKickEcho, BackoffIsUnchangedAndStillNeedsBothConditions) {
   EXPECT_EQ(s.ev.back().d.next_try_ns, 30 * kSec);  // 退避照舊往上走
 
   // 這一次回聲年齡掉回正常之後，一直到退避的 30 秒過了都沒有回來：時間到了也不做
+  // （這 40 秒也沒有第二次通知：離上一次還不到 60 秒）
   s.run(5 * kSec);
   s.mode = mode_e::load;
   s.run(40 * kSec);
-  EXPECT_EQ(s.ev.size(), 4u) << s.dump();
+  EXPECT_EQ(s.ev.size(), 5u) << s.dump();
   EXPECT_EQ(s.det.dwell_ns(s.now), 0);
   // 回到多一格：退避早就過了，但要重新連續成立 3 秒（回聲年齡的視窗先換掉一半，約 0.5 秒）
   s.mode = mode_e::b;
@@ -1983,9 +2041,277 @@ TEST(VrDirectKickEcho, JunkSamplesNeitherBlockNorForgeAKick) {
       s.det.on_echo_age(kStart + 3'600 * kSec + i * kMs, 19 * kMs);
     }
     s.run(120 * kSec);
-    EXPECT_TRUE(s.ev.empty()) << s.dump();
+    ASSERT_TRUE(only_withheld(s, 2));  // 沒有推；兩次「不推」的通知帶的是真的那些回聲年齡
+    EXPECT_TRUE(between(s.ev[0].d.echo_before_ns, 2'700'000, 5'200'000));
+    EXPECT_TRUE(between(s.ev[1].d.echo_before_ns, 2'700'000, 5'200'000));
     EXPECT_TRUE(between(s.det.recent_echo(s.now).median_ns, 2'700'000, 5'200'000));
   }
+}
+
+// ── 15：只有 presentPhase 像多一格時的「不推」通知（2026-10-11）────────────────
+
+TEST(VrDirectKickWithheld, IsReportedAfterThreeSecondsOfPresentPhaseAlone) {
+  // presentPhase 一路像多一格、一筆回聲年齡都沒有（沒有串流在擷取）。只看 presentPhase 的舊規則在第 8 秒 kick；
+  // 現在同一個時刻回的是「不推」的通知，帶著兩邊的統計量——log 才看得出是回聲年齡這一條擋的
+  for (const bool early : {true, false}) {
+    hand_t h;
+    h.echo_feeding = false;
+    h.quiet_until(h.t0 + 5 * kSec);
+    EXPECT_EQ(h.at(h.t0 + 5 * kSec).event, event_e::none);  // 第一次評估：presentPhase 成立，它自己的計時開始
+    EXPECT_EQ(h.det.phase_dwell_ns(h.t0 + 6 * kSec), 1 * kSec);
+    EXPECT_EQ(h.det.dwell_ns(h.t0 + 6 * kSec), 0);  // 兩邊都成立才跑的那個計時沒有在跑
+    h.quiet_until(h.t0 + 8 * kSec);
+    if (early) {
+      EXPECT_EQ(h.at(h.t0 + 8 * kSec - 1).event, event_e::none);  // 差 1 ns
+      EXPECT_EQ(h.det.phase_dwell_ns(h.t0 + 8 * kSec - 1), 3 * kSec - 1);
+    } else {
+      const decision_t d = h.at(h.t0 + 8 * kSec);
+      ASSERT_EQ(d.event, event_e::withheld);
+      EXPECT_EQ(d.samples, 100);  // 每 10 ms 一筆，1 秒 100 筆
+      EXPECT_EQ(d.median_before_ns, 800'000);
+      EXPECT_EQ(d.p90_before_ns, 800'000);
+      EXPECT_EQ(d.echo_samples, 0);
+      EXPECT_EQ(d.echo_before_ns, 0);
+      EXPECT_EQ(d.echo_p10_before_ns, 0);
+      EXPECT_EQ(d.kick_no, 0);
+      EXPECT_EQ(d.burst_ns, 0);  // 沒有提到的欄位是 0
+      EXPECT_EQ(d.median_after_ns, 0);
+      EXPECT_EQ(d.p90_after_ns, 0);
+      EXPECT_EQ(d.echo_after_ns, 0);
+      EXPECT_EQ(d.next_try_ns, 0);
+      // 只是通知：沒有 kick、不等結果、不算次數、沒有退避；呼叫端誤呼叫 kick_not_done() 也沒有作用
+      h.det.kick_not_done();
+      EXPECT_EQ(h.det.kicks(), 0);
+      EXPECT_FALSE(h.det.verifying());
+      EXPECT_FALSE(h.det.stopped());
+      EXPECT_EQ(h.det.backoff_step(), 0);
+      EXPECT_EQ(h.det.phase_dwell_ns(h.t0 + 8 * kSec + 1), 3 * kSec + 1);  // 計時照跑
+      EXPECT_EQ(h.det.recent(h.t0 + 8 * kSec).n, 100);  // 樣本照常看
+    }
+  }
+}
+
+TEST(VrDirectKickWithheld, AtMostOncePerMinute) {
+  for (const bool early : {true, false}) {
+    hand_t h;
+    h.echo_feeding = false;
+    h.quiet_until(h.t0 + 8 * kSec);
+    ASSERT_EQ(h.at(h.t0 + 8 * kSec).event, event_e::withheld);
+    h.quiet_until(h.t0 + 68 * kSec);  // 每 500 ms 問一次：這一分鐘裡沒有第二次
+    if (early) {
+      EXPECT_EQ(h.at(h.t0 + 68 * kSec - 1).event, event_e::none);  // 離上一次還差 1 ns
+    } else {
+      const decision_t d = h.at(h.t0 + 68 * kSec);
+      EXPECT_EQ(d.event, event_e::withheld);
+      EXPECT_EQ(d.samples, 100);
+      EXPECT_EQ(d.echo_samples, 0);
+      h.quiet_until(h.t0 + 128 * kSec);
+      EXPECT_EQ(h.at(h.t0 + 128 * kSec).event, event_e::withheld);  // 間隔固定是 60 秒，不會越拉越長
+      EXPECT_EQ(h.det.kicks(), 0);
+    }
+  }
+}
+
+TEST(VrDirectKickWithheld, CarriesTheEchoAgesThatSaidNo) {
+  // 載入畫面：回聲年齡有、只是沒有多一格。通知帶著那一秒的回聲年齡（筆數、中位數、第 10 百分位），
+  // log 才分得出「這一條擋下來了」和「根本沒有樣本」
+  for (const int64_t period : {kT60, kT72, kT90}) {
+    sim_t s(period, mode_e::load);
+    s.run(9 * kSec);
+    ASSERT_TRUE(only_withheld(s, 1)) << "period=" << period;
+    const decision_t &d = s.ev[0].d;
+    const int per_second = static_cast<int>(kSec / period);
+    EXPECT_TRUE(between(d.samples, per_second - 1, per_second + 1));
+    EXPECT_LT(d.median_before_ns, 1'150'000);
+    EXPECT_LT(d.p90_before_ns, 2'200'000);
+    EXPECT_TRUE(between(d.echo_samples, per_second - 1, per_second + 1));
+    EXPECT_TRUE(between(d.echo_before_ns, 2'700'000, 5'200'000));
+    EXPECT_TRUE(between(d.echo_p10_before_ns, 2'700'000, d.echo_before_ns));
+    EXPECT_LT(d.echo_before_ns, s.det.echo_min_ns());
+    EXPECT_EQ(d.kick_no, 0);
+  }
+}
+
+TEST(VrDirectKickWithheld, NeedsThreeUnbrokenSecondsOfPresentPhase) {
+  // presentPhase 每 2 秒在「像多一格」與「等遊戲這一格」之間換、一筆回聲年齡都沒有：它自己連續成立不到 3 秒，
+  // 不通知（只看 presentPhase 的舊規則在這裡也不會 kick）
+  sim_t s(kT60, mode_e::b);
+  s.echo = echo_e::none;
+  for (int i = 0; i < 300; ++i) {
+    s.mode = (i % 2) == 0 ? mode_e::b : mode_e::a;
+    s.run(2 * kSec);
+    EXPECT_LT(s.det.phase_dwell_ns(s.now), 3 * kSec);
+  }
+  EXPECT_TRUE(s.ev.empty()) << s.dump();
+}
+
+TEST(VrDirectKickWithheld, EchoAgesThatComeAndGoAreReportedToo) {
+  // presentPhase 一路像多一格；回聲年齡每秒在「多一格」與「正常」之間換：兩邊都成立連續不到 3 秒，永遠不會 kick。
+  // presentPhase 自己早就連續成立滿 3 秒，所以回聲年齡不成立的那一次評估就通知，之後一分鐘一次
+  sim_t s(kT60, mode_e::b);
+  s.echo = echo_e::fixed;
+  for (int i = 0; i < 300; ++i) {
+    s.echo_fixed_ns = (i % 2) == 0 ? 19 * kMs : 4 * kMs;
+    s.run(1 * kSec);
+    EXPECT_LT(s.det.dwell_ns(s.now), 3 * kSec);
+  }
+  EXPECT_EQ(s.count(event_e::kick), 0) << s.dump();
+  EXPECT_EQ(static_cast<int>(s.ev.size()), s.count(event_e::withheld)) << s.dump();
+  ASSERT_GE(s.ev.size(), 4u) << s.dump();  // 5 分鐘
+  EXPECT_TRUE(between(s.ev[0].t - kStart, 8 * kSec, 9'100 * kMs));  // 第 8 秒起第一個回聲年齡不成立的評估
+  for (std::size_t i = 1; i < s.ev.size(); ++i) {
+    EXPECT_TRUE(between(s.ev[i].t - s.ev[i - 1].t, 60 * kSec, 61'100 * kMs)) << i;
+  }
+}
+
+TEST(VrDirectKickWithheld, AKickRestartsThePresentPhaseDwell) {
+  // (1) 外面做了一次 kick：presentPhase 那一邊的計時也重來（之後 500 ms 的樣本不看、再收滿 24 筆、再連續 3 秒）
+  {
+    sim_t s(kT60, mode_e::b);
+    s.echo = echo_e::none;
+    s.run(7'900 * kMs);  // 再 100 ms 就要通知了
+    EXPECT_TRUE(s.ev.empty()) << s.dump();
+    EXPECT_TRUE(between(s.det.phase_dwell_ns(s.now), 2'800 * kMs, 2'900 * kMs));
+    const int64_t x = s.now;
+    s.det.on_external_kick(x, 20 * kMs);
+    EXPECT_EQ(s.det.phase_dwell_ns(x + 1), 0);
+    ASSERT_TRUE(s.run_until(event_e::withheld, 20 * kSec)) << s.dump();
+    EXPECT_TRUE(between(s.ev.back().t - x, 3'800 * kMs, 4'100 * kMs));  // 0.5 秒不看＋24 筆（0.4 秒）＋3 秒
+    EXPECT_EQ(s.ev.size(), 1u) << s.dump();
+  }
+  // (2) 自己的 kick：等結果的 2 秒不評估，也就沒有通知；結果出來之後 presentPhase 要重新連續 3 秒
+  {
+    sim_t s(kT60, mode_e::b);  // 真的多一格，kick 沒有用
+    ASSERT_TRUE(s.run_until(event_e::kick, 20 * kSec)) << s.dump();
+    const int64_t k = s.ev.back().t;
+    s.echo = echo_e::none;  // kick 的同時串流停了：之後沒有回聲年齡，presentPhase 還是像多一格
+    ASSERT_TRUE(s.run_until(event_e::result_no_change, 5 * kSec)) << s.dump();
+    const int64_t r = s.ev.back().t;
+    EXPECT_EQ(r - k, 2 * kSec);
+    EXPECT_EQ(s.ev.size(), 2u) << s.dump();  // 等結果的那 2 秒沒有通知
+    ASSERT_TRUE(s.run_until(event_e::withheld, 20 * kSec)) << s.dump();
+    EXPECT_TRUE(between(s.ev.back().t - r, 3 * kSec, 3 * kSec + 100 * kMs));  // 從結果出來重新算 3 秒；不看退避的 10 秒
+    EXPECT_EQ(s.ev.back().d.kick_no, 1);
+    EXPECT_EQ(s.ev.back().d.echo_samples, 0);
+    // 退避過了也不會再推：回聲年齡一直沒有（這 100 秒裡只多一次通知）
+    s.run(100 * kSec);
+    EXPECT_EQ(s.count(event_e::kick), 1) << s.dump();
+    EXPECT_EQ(s.count(event_e::withheld), 2) << s.dump();
+    EXPECT_EQ(s.ev.size(), 4u) << s.dump();
+    EXPECT_EQ(s.det.kicks(), 1);
+    EXPECT_EQ(s.det.backoff_step(), 1);
+  }
+  // (3) kick 沒做成（kick_not_done）：兩個計時都在回 kick 的那一刻歸零了，presentPhase 那一邊也要再連續 3 秒——
+  //     不是回聲年齡一不成立（約 0.6 秒後）就通知
+  {
+    sim_t s(kT60, mode_e::b);
+    s.decline = true;
+    ASSERT_TRUE(s.run_until(event_e::kick, 20 * kSec)) << s.dump();
+    const int64_t k = s.ev.back().t;
+    EXPECT_TRUE(s.ev.back().declined);
+    EXPECT_EQ(s.det.phase_dwell_ns(k + 1), 0);
+    s.echo = echo_e::none;  // 接著回聲年齡沒了
+    ASSERT_TRUE(s.run_until(event_e::withheld, 20 * kSec)) << s.dump();
+    EXPECT_TRUE(between(s.ev.back().t - k, 3 * kSec, 3 * kSec + 200 * kMs));
+    EXPECT_EQ(s.ev.size(), 2u) << s.dump();
+    EXPECT_EQ(s.det.kicks(), 0);
+  }
+}
+
+TEST(VrDirectKickWithheld, DoesNotDelayTheNextKick) {
+  // 通知不算 kick：(d) 的 5 秒間隔、退避、次數都不受它影響。第 8 秒通知之後回聲年齡馬上來了（串流開始擷取，而且
+  // 真的多一格）：收滿 24 筆（0.4 秒）再連續成立 3 秒就推——離那一次通知不到 5 秒
+  sim_t s(kT60, mode_e::b);
+  s.echo = echo_e::none;
+  s.kick_to(mode_e::a);
+  ASSERT_TRUE(s.run_until(event_e::withheld, 20 * kSec)) << s.dump();
+  const int64_t w = s.ev.back().t;
+  EXPECT_TRUE(between(w - kStart, 8 * kSec, 8 * kSec + 100 * kMs));
+  s.echo = echo_e::by_mode;
+  ASSERT_TRUE(s.run_until(event_e::kick, 20 * kSec)) << s.dump();
+  EXPECT_TRUE(between(s.ev.back().t - w, 3'400 * kMs, 3'600 * kMs));
+  EXPECT_EQ(s.ev.back().d.kick_no, 1);
+  ASSERT_TRUE(s.run_until(event_e::result_ok, 5 * kSec)) << s.dump();
+  EXPECT_EQ(s.ev.size(), 3u) << s.dump();
+}
+
+TEST(VrDirectKickWithheld, NothingAfterTheDetectorStopsOrWhenItIsInactive) {
+  // (1) 重負載停手之後不再評估：之後 presentPhase 像多一格、沒有回聲年齡也不通知
+  sim_t s(kT60, mode_e::b);
+  s.kick_to(mode_e::heavy);
+  ASSERT_TRUE(s.run_until(event_e::heavy_stop, 20 * kSec)) << s.dump();
+  const std::size_t before = s.ev.size();
+  s.mode = mode_e::b;
+  s.echo = echo_e::none;
+  s.run(600 * kSec);
+  EXPECT_EQ(s.ev.size(), before) << s.dump();
+  EXPECT_EQ(s.det.phase_dwell_ns(s.now), 0);
+
+  // (2) 不動作的 generation（120 Hz、沒有 config）：什麼都不回
+  for (const int64_t period : {kT120, int64_t {0}}) {
+    sim_t idle(period, mode_e::b);
+    idle.echo = echo_e::none;
+    idle.run(120 * kSec);
+    EXPECT_TRUE(idle.ev.empty()) << "period=" << period << " " << idle.dump();
+    EXPECT_EQ(idle.det.phase_dwell_ns(idle.now), 0);
+  }
+}
+
+TEST(VrDirectKickWithheld, AGapBetweenEvaluationsRestartsIt) {
+  // 同 AGapBetweenEvaluationsRestartsTheDwell：兩次評估隔超過 1 秒（bridge 執行緒被卡住），中間有樣本沒被看到，
+  // presentPhase 那一邊的計時也從這一次重新開始
+  hand_t h;
+  h.echo_feeding = false;
+  h.quiet_until(h.t0 + 5 * kSec);
+  EXPECT_EQ(h.at(h.t0 + 5 * kSec).event, event_e::none);
+  EXPECT_EQ(h.at(h.t0 + 6 * kSec).event, event_e::none);
+  EXPECT_EQ(h.at(h.t0 + 7 * kSec + 1).event, event_e::none);  // 隔了 1 秒又 1 ns
+  EXPECT_EQ(h.det.phase_dwell_ns(h.t0 + 7 * kSec + 2), 1);
+  EXPECT_EQ(h.at(h.t0 + 8 * kSec + 1).event, event_e::none);  // 沒有那個間隔的話第 8 秒就通知了
+  EXPECT_EQ(h.at(h.t0 + 9 * kSec + 1).event, event_e::none);
+  EXPECT_EQ(h.at(h.t0 + 10 * kSec + 1).event, event_e::withheld);
+}
+
+TEST(VrDirectKickWithheld, ANewGenerationStartsOver) {
+  sim_t s(kT60, mode_e::b);
+  s.echo = echo_e::none;
+  s.run(20 * kSec);
+  ASSERT_TRUE(only_withheld(s, 1));
+  // driver 重連：新的 generation 不必等上一個的 60 秒，暖機 5 秒＋3 秒就通知
+  s.det.reset(kT60, s.now);
+  const int64_t r = s.now;
+  EXPECT_EQ(s.det.phase_dwell_ns(s.now), 0);
+  ASSERT_TRUE(s.run_until(event_e::withheld, 20 * kSec)) << s.dump();
+  EXPECT_TRUE(between(s.ev.back().t - r, 8 * kSec, 8 * kSec + 100 * kMs));
+  EXPECT_EQ(s.ev.size(), 2u) << s.dump();
+}
+
+TEST(VrDirectKickWithheld, TimesNearTheEndOfInt64DoNotOverflow) {
+  // 起點離盡頭 80 秒：第 8 與第 68 秒各通知一次；之後離盡頭只剩 12 秒，不到 60 秒就不會有第三次——時間停在盡頭
+  // 再怎麼問也一樣（用 -ftrapv 建這個檔時，有號溢位會直接中止）
+  detector_t d;
+  const int64_t t0 = kI64Max - 80 * kSec;
+  d.reset(kT60, t0);
+  std::vector<int64_t> at;
+  for (int64_t t = t0 + 2 * kMs; t <= kI64Max - 2 * kMs; t += 2 * kMs) {
+    if ((t - t0) % (16 * kMs) == 0) {
+      d.on_present_phase(t, 800 * kUs);
+    }
+    const decision_t r = d.poll(t);
+    if (r.event == event_e::withheld) {
+      at.push_back(t - t0);
+    } else {
+      EXPECT_EQ(r.event, event_e::none);
+    }
+  }
+  ASSERT_EQ(at.size(), 2u);
+  EXPECT_TRUE(between(at[0], 8 * kSec, 8 * kSec + 100 * kMs));
+  EXPECT_TRUE(between(at[1] - at[0], 60 * kSec, 60 * kSec + 100 * kMs));
+  for (int i = 0; i < 100; ++i) {
+    EXPECT_EQ(d.poll(kI64Max).event, event_e::none) << i;
+  }
+  EXPECT_GE(d.phase_dwell_ns(kI64Max), 70 * kSec);  // presentPhase 那一邊一直成立著
+  EXPECT_EQ(d.kicks(), 0);
 }
 
 // ── 一整段像實驗那樣的場次 ────────────────────────────────────────────────────
@@ -1996,37 +2322,38 @@ TEST(VrDirectKickScenario, LoadingScreenThenTheGame) {
   sim_t s(kT60, mode_e::load);
   s.kick_to(mode_e::a);
   s.run(120 * kSec);
-  EXPECT_TRUE(s.ev.empty()) << s.dump();
+  ASSERT_TRUE(only_withheld(s, 2));  // 沒有推；第 8 與第 68 秒各一次「不推」的通知
   s.mode = mode_e::a;
   s.run(60 * kSec);
   s.mode = mode_e::s;
   s.run(10 * kSec);
-  EXPECT_TRUE(s.ev.empty()) << s.dump();
+  EXPECT_EQ(s.ev.size(), 2u) << s.dump();  // 遊戲出幀之後就沒有別的事件了
   EXPECT_EQ(s.det.kicks(), 0);
   EXPECT_EQ(s.det.backoff_step(), 0);
   s.mode = mode_e::b;
   const int64_t tb = s.now;
   s.run(60 * kSec);
-  ASSERT_EQ(s.ev.size(), 2u) << s.dump();
-  EXPECT_EQ(s.ev[0].d.event, event_e::kick);
-  EXPECT_TRUE(between(s.ev[0].t - tb, 3'500 * kMs, 3'800 * kMs));
-  EXPECT_EQ(s.ev[0].d.kick_no, 1);  // 載入的那兩分鐘一次都沒有用掉
-  EXPECT_EQ(s.ev[1].d.event, event_e::result_ok);
-  EXPECT_TRUE(between(s.ev[1].d.echo_before_ns, 17'666'666, 20'666'666));
-  EXPECT_TRUE(between(s.ev[1].d.echo_after_ns, 4'400'000, 7'700'000));
+  ASSERT_EQ(s.ev.size(), 4u) << s.dump();
+  EXPECT_EQ(s.ev[2].d.event, event_e::kick);
+  EXPECT_TRUE(between(s.ev[2].t - tb, 3'500 * kMs, 3'800 * kMs));
+  EXPECT_EQ(s.ev[2].d.kick_no, 1);  // 載入的那兩分鐘一次都沒有用掉
+  EXPECT_EQ(s.ev[3].d.event, event_e::result_ok);
+  EXPECT_TRUE(between(s.ev[3].d.echo_before_ns, 17'666'666, 20'666'666));
+  EXPECT_TRUE(between(s.ev[3].d.echo_after_ns, 4'400'000, 7'700'000));
 
   // 另一種開場：載入完遊戲直接落在多一格 → 回聲年齡的視窗換掉一半（約 0.5 秒）之後連續成立 3 秒就推
   sim_t t(kT60, mode_e::load);
   t.kick_to(mode_e::a);
   t.run(120 * kSec);
-  EXPECT_TRUE(t.ev.empty()) << t.dump();
+  ASSERT_TRUE(only_withheld(t, 2));
   t.mode = mode_e::b;
   const int64_t tb2 = t.now;
   t.run(60 * kSec);
-  ASSERT_EQ(t.ev.size(), 2u) << t.dump();
-  EXPECT_EQ(t.ev[0].d.event, event_e::kick);
-  EXPECT_TRUE(between(t.ev[0].t - tb2, 3'400 * kMs, 3'700 * kMs));
-  EXPECT_EQ(t.ev[1].d.event, event_e::result_ok);
+  ASSERT_EQ(t.ev.size(), 4u) << t.dump();
+  EXPECT_EQ(t.ev[2].d.event, event_e::kick);
+  EXPECT_TRUE(between(t.ev[2].t - tb2, 3'400 * kMs, 3'700 * kMs));
+  EXPECT_EQ(t.ev[2].d.kick_no, 1);
+  EXPECT_EQ(t.ev[3].d.event, event_e::result_ok);
 }
 
 TEST(VrDirectKickScenario, DashboardThenALongPause) {
@@ -2086,6 +2413,8 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
     bool stopped = false;
     int64_t kick_median = 0;  ///< 做了的那一次 kick 帶的 presentPhase 中位數（結果要帶同一個）
     int64_t kick_echo = 0;  ///< 同上，回聲年齡
+    bool have_withheld = false;
+    int64_t last_withheld = 0;  ///< 上一次「不推」的通知
   };
 
   int total_kicks = 0;
@@ -2097,15 +2426,21 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
   int total_external = 0;
   int total_resets = 0;
   int total_loading = 0;  ///< 換成「載入畫面」的次數
+  int total_no_echo = 0;  ///< 換成「presentPhase 像多一格、沒有回聲年齡」的次數
   int total_echo_missing = 0;  ///< 結果出來時確認的那一段回聲年齡不到 24 筆的次數
+  int total_withheld = 0;  ///< 「不推」的通知
+  int total_withheld_empty = 0;  ///< 其中回聲年齡一筆都沒有的
 
-  for (uint64_t seed = 1; seed <= 160; ++seed) {
+  // 種子 1～160 沒有第 7 種段落（走法和加這種段落之前相同）；161～200 多了它：presentPhase 像多一格、完全沒有
+  // 回聲年齡（client 不在、沒有串流在擷取）
+  for (uint64_t seed = 1; seed <= 200; ++seed) {
     SCOPED_TRACE("seed " + std::to_string(seed));
     rng_t rng(seed);
     rng_t erng(seed + 0x5EED);  // 回聲年齡另用一個亂數（presentPhase 那一邊抽的順序不變）
     detector_t det;
     // 每四個種子有一個是「一直掉回 B、不重設」的走法，才走得到 20 次的上限
     const bool grind = (seed % 4) == 0;
+    const bool with_no_echo = seed > 160;
     int64_t now = origins[seed % 4];
     int64_t eff = now;  // 偵測器看到的時間（只往前）
     gen_t g;
@@ -2117,7 +2452,9 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
       det.reset(g.period, now);
     };
     begin_gen();
-    int mode = 1;  // 0 沒有 Present、1 B、2 A、3 S、4 重負載的 A、5 垃圾、6 載入畫面（presentPhase 像 B、回聲年齡沒有多一格）
+    // 0 沒有 Present、1 B、2 A、3 S、4 重負載的 A、5 垃圾、6 載入畫面（presentPhase 像 B、回聲年齡沒有多一格）、
+    // 7 presentPhase 像 B、沒有回聲年齡
+    int mode = 1;
     int64_t mode_since = now;  // mode 換成現在這個值的時刻
     int64_t seg_end = now + 20 * kSec;
     int64_t next_sample = now;
@@ -2125,6 +2462,7 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
       switch (mode) {
         case 1:
         case 6:
+        case 7:
           return rng.range(650'000, 1'100'000);
         case 2:
           return rng.range(2'900'000, 6'000'000);
@@ -2209,8 +2547,9 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
             // 第 10 百分位只是帶出去：不會比中位數大、不會是負的（負的回聲年齡進不了環）
             ASSERT_LE(d.echo_p10_before_ns, d.echo_before_ns);
             ASSERT_GE(d.echo_p10_before_ns, 0);
-            // 載入畫面不會被推：視窗換成它的回聲年齡（半秒多）之後就不成立，連續成立的計時也跟著歸零
-            ASSERT_FALSE(mode == 6 && eff - mode_since > 1'500 * kMs) << "kick " << (eff - mode_since) / kMs << " ms into a loading screen";
+            // 載入畫面不會被推：視窗換成它的回聲年齡（半秒多）之後就不成立，連續成立的計時也跟著歸零。
+            // 沒有回聲年齡的那一種也一樣：之前留下來的樣本一秒內就全部過期
+            ASSERT_FALSE((mode == 6 || mode == 7) && eff - mode_since > 1'500 * kMs) << "kick " << (eff - mode_since) / kMs << " ms into a segment without the extra period (mode " << mode << ")";
             ASSERT_GE(d.burst_ns, 20 * kMs);
             ASSERT_LE(d.burst_ns, 40 * kMs);
             if (rng.range(0, 99) < 30) {
@@ -2279,10 +2618,40 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
           g.due_stop = stop_e::none;
           g.stopped = true;
           break;
+        case event_e::withheld:
+          {
+            // 只有 presentPhase 像多一格、回聲年齡不成立：不推，通知一次。偵測器的狀態不因為它而改變
+            ASSERT_FALSE(g.awaiting);  // 等結果的時候不評估
+            ASSERT_FALSE(det.stopped());  // 「不再 kick」之後也不評估
+            ASSERT_EQ(d.kick_no, g.accepted);
+            ASSERT_EQ(det.kicks(), g.accepted);
+            ASSERT_FALSE(det.verifying());
+            ASSERT_GE(eff - g.start, 8 * kSec);  // 暖機 5 秒＋presentPhase 連續成立 3 秒
+            if (g.have_withheld) {
+              ASSERT_GE(eff - g.last_withheld, 60 * kSec);  // 一個 generation 最多每 60 秒一次
+            }
+            ASSERT_GE(d.samples, 24);
+            ASSERT_LT(d.median_before_ns, 1'150'000);
+            ASSERT_LT(d.p90_before_ns, 2'200'000);
+            // 回聲年齡這一邊不成立：筆數不夠，或中位數沒有多半個週期
+            ASSERT_GE(d.echo_samples, 0);
+            ASSERT_TRUE(d.echo_samples < 24 || d.echo_before_ns < 5'500'000 + g.period / 2);
+            ASSERT_GE(d.echo_p10_before_ns, 0);
+            ASSERT_LE(d.echo_p10_before_ns, d.echo_before_ns);
+            ASSERT_EQ(d.burst_ns, 0);
+            ASSERT_EQ(d.next_try_ns, 0);
+            g.have_withheld = true;
+            g.last_withheld = eff;
+            ++total_withheld;
+            total_withheld_empty += d.echo_samples == 0 ? 1 : 0;
+            break;
+          }
       }
       if (g.stopped) {
         ASSERT_TRUE(det.stopped());
       }
+      // presentPhase 那一邊連續成立的時間不會比兩邊都成立的短
+      ASSERT_GE(det.phase_dwell_ns(eff), det.dwell_ns(eff));
 
       // 樣本（寫入方不可信：偶爾時刻亂跳、數值是垃圾）
       for (; next_sample <= now; next_sample += kT60) {
@@ -2303,7 +2672,7 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
         }
         det.on_present_phase(t, ph);
         // 回聲年齡：這一張影像有對到姿態才有（百張裡三張沒有）。一樣偶爾時刻亂跳、數值是垃圾
-        if (erng.range(0, 99) < 97) {
+        if (mode != 7 && erng.range(0, 99) < 97) {
           int64_t te = next_sample;
           int64_t age = echo_age();
           const int64_t enoise = erng.range(0, 999);
@@ -2324,10 +2693,17 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
       if (now >= seg_end) {
         const int64_t pick = rng.range(0, 99);
         int next_mode = grind ? 1 : (pick < 45 ? 1 : (pick < 65 ? 2 : (pick < 80 ? 3 : (pick < 85 ? 4 : (pick < 90 ? 0 : 5)))));
-        // 每六段「多一格」有一段其實是載入畫面（presentPhase 一樣、回聲年齡不一樣）
-        if (!grind && next_mode == 1 && erng.range(0, 5) == 0) {
-          next_mode = 6;
-          ++total_loading;
+        // 每六段「多一格」有一段其實是載入畫面（presentPhase 一樣、回聲年齡不一樣）；161 號以後的種子另外有一段
+        // 完全沒有回聲年齡
+        if (!grind && next_mode == 1) {
+          const int64_t alt = erng.range(0, 5);
+          if (alt == 0) {
+            next_mode = 6;
+            ++total_loading;
+          } else if (alt == 1 && with_no_echo) {
+            next_mode = 7;
+            ++total_no_echo;
+          }
         }
         set_mode(next_mode);
         seg_end = now + rng.range(1, 25) * kSec;
@@ -2365,7 +2741,10 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
   RecordProperty("external_kicks", total_external);
   RecordProperty("resets", total_resets);
   RecordProperty("loading_segments", total_loading);
+  RecordProperty("no_echo_segments", total_no_echo);
   RecordProperty("results_without_echo", total_echo_missing);
+  RecordProperty("withheld", total_withheld);
+  RecordProperty("withheld_without_echo", total_withheld_empty);
   EXPECT_GT(total_kicks, 1'000);
   EXPECT_GT(total_declined, 300);
   EXPECT_GT(total_ok, 500);
@@ -2376,4 +2755,7 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
   EXPECT_GT(total_resets, 100);
   EXPECT_GT(total_loading, 300);
   EXPECT_GT(total_echo_missing, 20);  // kick 之後沒有 Present 的那幾次
+  EXPECT_GT(total_no_echo, 50);
+  EXPECT_GT(total_withheld, 100);
+  EXPECT_GT(total_withheld_empty, 10);  // 回聲年齡一筆都沒有的那一種也走到了
 }

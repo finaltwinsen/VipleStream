@@ -685,6 +685,7 @@ namespace vr::bridge {
       bool pacing_free = false;  ///< 最後寫進 shm 的節拍模式下，driver 的 PostPresent 不等虛擬 vsync（dev：§VR-A-KICK 的實驗、selftest）
       // §VR-DIRECT-KICK（vr_direct_kick）：host 直通落在「多一格」的時序時自動推回去的判斷（只在 bridge 執行緒用，沒有鎖）
       vr::kick::detector_t kick_det;
+      bool kick_echo_seen = false;  ///< 這條連線收到過擷取端交來的回聲年齡（第一筆印一行 log）
       // 最近一次 kick（dev 的定時與自動的都算）的起訖時刻（QPC；0＝還沒有過，kick_end_qpc 在進行中也是 0）。現在沒有人讀：
       // 留給之後要遮掉 kick 期間 timing 紀錄的程式——kick_active 在那一段的最後幾筆紀錄被 drain 之前就清掉了，不能只看它
       int64_t kick_begin_qpc = 0;
@@ -2859,7 +2860,14 @@ namespace vr::bridge {
       // 換 generation 前後才交到的那一兩筆（帶的是上一個 generation）由 drain() 丟掉，不會餵給新的偵測器
       if (config::vr.direct_kick) {
         echo_handoff_.drain(c.gen->generation, [&c](int64_t present_qpc, int64_t age_qpc) {
-          c.kick_det.on_echo_age(platf::qpc_ticks_to_ns(present_qpc), platf::qpc_ticks_to_ns(age_qpc));
+          const int64_t age_ns = platf::qpc_ticks_to_ns(age_qpc);
+          c.kick_det.on_echo_age(platf::qpc_ticks_to_ns(present_qpc), age_ns);
+          if (!c.kick_echo_seen) {
+            // 這條連線的第一筆：印一行。之後整場都沒有 kick、也沒有「不推」的那一行時，靠它知道擷取端 → bridge 的交接
+            // 是通的、單位也對（數值應該和 [VIPLE-VR-CAP] 10s 的 echoAge 差不多）
+            c.kick_echo_seen = true;
+            BOOST_LOG(info) << std::format("[VIPLE-VR-KICK] echo ages are arriving from the capture thread (first: {:.2f} ms)", (double) age_ns / 1e6);
+          }
         });
       }
 
@@ -3099,6 +3107,22 @@ namespace vr::bridge {
           break;
         case vr::kick::event_e::limit_stop:
           BOOST_LOG(info) << std::format("[VIPLE-VR-KICK] {} tries on this connection: leaving the timing alone from now on", d.kick_no);
+          break;
+        case vr::kick::event_e::withheld:
+          // 只有 presentPhase 像多一格（已經連續 3 秒）、回聲年齡不成立或根本沒有：不推。沒有這一行的話，「回聲年齡擋下來」
+          // 與「回聲年齡沒有交接過來」在 log 裡分不出來。偵測器自己限速（一條連線最多每 60 秒一次）。
+          // 一筆回聲年齡都沒有時數值印 n/a（沒有串流在擷取、影像都沒有對到姿態）
+          BOOST_LOG(info) << std::format(
+            "[VIPLE-VR-KICK] not kicking: presentPhase p50={:.2f} p90={:.2f} ms over {} frames looks one period behind, but echoAge {} over {} frames does not"
+            " (needs p50 >= {:.2f} ms over >= {} frames)",
+            to_ms(d.median_before_ns),
+            to_ms(d.p90_before_ns),
+            d.samples,
+            d.echo_samples > 0 ? std::format("p10/p50={:.2f}/{:.2f} ms", to_ms(d.echo_p10_before_ns), to_ms(d.echo_before_ns)) : std::string {"n/a"},
+            d.echo_samples,
+            to_ms(c.kick_det.echo_min_ns()),
+            vr::kick::k_echo_min_samples
+          );
           break;
       }
     }
