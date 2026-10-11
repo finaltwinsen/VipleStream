@@ -72,12 +72,19 @@ Flickable {
         // 上一段動畫還沒跑完時從它的終點接著算，一直推著搖桿才不會少算距離
         var base = autoScrollAnimation.running ? autoScrollAnimation.to : contentY
         var target = Math.min(Math.max(base + px, 0), maxY)
+
+        var wasParked = focusParked
+        parkFocus(target, fromGamepad)
         if (target === contentY) {
-            // 已經在頂或在底：沒有東西要捲，也不要讓下面的計時器一直重來
+            // 已經在頂或在底：沒有東西要捲，也不要讓計時器一直重來。只有這一次才把焦點收起來時（先前用滾輪或
+            // 捲軸捲走、焦點留在畫面外）照樣起一次計時，等一下把它放回看得到的地方
+            if (focusParked && !wasParked) {
+                scrollFocusTimer.forward = px > 0
+                scrollFocusTimer.restart()
+            }
             return
         }
 
-        parkFocus(target, fromGamepad)
         scrollFocusTimer.forward = px > 0
         scrollFocusTimer.restart()
 
@@ -116,10 +123,6 @@ Flickable {
                (bottom + margin <= viewBottom || (viewBottom >= contentHeight && bottom <= viewBottom))
     }
 
-    function isInView(item, margin) {
-        return isInViewAt(item, margin, contentY)
-    }
-
     // 頁面捲到 viewTop 之後，有焦點的控制項如果不再完整看得到，把焦點收到這一頁本身。
     // 文字輸入欄只有手把捲動時才收：用鍵盤捲的人可能正在裡面打字，焦點被拿走的話後面打的字會進到別的地方。
     function parkFocus(viewTop, fromGamepad) {
@@ -135,6 +138,11 @@ Flickable {
         if (("cursorPosition" in item) && !fromGamepad) {
             return
         }
+        // 正被按著的控制項不收：雷射或滑鼠按下到放開之間剛好來一次捲動的話，焦點一被拿走，那一下點擊就沒有作用。
+        // 一定要寫 === true：TextField 的 pressed 是訊號，直接當條件永遠成立
+        if (item.pressed === true) {
+            return
+        }
 
         settingsPage.forceActiveFocus()
         // 這兩個要在焦點移過來之後才設：下面焦點改變的處理看到別的項目拿到焦點時會把它們清掉
@@ -143,22 +151,29 @@ Flickable {
     }
 
     // 把收在這一頁本身的焦點放到看得到的控制項上；有放成功回傳 true。
-    // 原本那一個又完整看得到了（捲走又捲回來）就還給它；否則從它（沒有的話從這一頁的開頭）沿 Tab 順序往 forward 的
-    // 方向找第一個完整看得到的控制項。文字輸入欄跳過：手把的 A 在裡面會打出空白；有螢幕鍵盤的裝置上，
-    // 焦點自己跑進去還可能把鍵盤叫出來。
+    // 原本那一個又完整看得到了（捲走又捲回來）就還給它；否則從它沿 Tab 順序往畫面所在的方向找第一個完整看得到的
+    // 控制項（沒有原本那一個時，從這一頁的開頭往 forward 的方向找）。文字輸入欄跳過：手把的 A 在裡面會打出空白；
+    // 有螢幕鍵盤的裝置上，焦點自己跑進去還可能把鍵盤叫出來。
     function enterView(forward) {
         if (!focusParked || Window.activeFocusItem !== settingsPage) {
             return false
         }
 
+        // 看不看得到，用捲動的終點判斷（和 parkFocus 一樣）：動畫還在跑時用當下的位置挑，挑到的可能接著就被捲出去
+        var viewTop = autoScrollAnimation.running ? autoScrollAnimation.to : contentY
         var target = null
-        if (scrollOrigin && isInView(scrollOrigin, 0)) {
+        if (scrollOrigin && isInViewAt(scrollOrigin, 0, viewTop)) {
             target = scrollOrigin
         }
         else {
             // 和下面焦點改變時自動捲動留的邊距一致，焦點放上去時頁面才不會再動
             var margin = height > 100 ? 50 : 0
             var from = scrollOrigin ? scrollOrigin : settingsPage
+            if (scrollOrigin) {
+                // 往畫面所在的方向找（原本那一個在畫面上方就往後），不看按鍵或捲動的方向：
+                // 反方向要繞完整圈 Tab 順序，會落在另一欄的另一端
+                forward = scrollOrigin.mapToItem(contentItem, 0, 0).y < viewTop
+            }
             var first = null
             var item = from
             // 走完一圈就停；次數上限只是防呆
@@ -170,7 +185,7 @@ Flickable {
                 if (first === null) {
                     first = item
                 }
-                if (isChildOfFlickable(item) && !("cursorPosition" in item) && isInView(item, margin)) {
+                if (isChildOfFlickable(item) && !("cursorPosition" in item) && isInViewAt(item, margin, viewTop)) {
                     target = item
                     break
                 }
@@ -194,6 +209,10 @@ Flickable {
         }
 
         scrollFocusTimer.stop()
+        // 捲動的動畫還在跑就先讓它到終點：焦點放上去時，下面焦點改變的處理是照頁面當下的位置算要不要再捲
+        if (autoScrollAnimation.running) {
+            autoScrollAnimation.complete()
+        }
         return enterView(forward)
     }
 

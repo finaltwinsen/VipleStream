@@ -1229,8 +1229,14 @@ host `<DisplayModeSwitchable>` 回報的最高 Hz 取小。FRUC 開著時不改 
           相鄰的是文字輸入欄時按鍵沒有反應。收到頁面本身之後這幾種情況都不存在：按鍵由頁面自己接
           （`Keys.onTabPressed`／`onBacktabPressed`；手把的方向鍵上是帶 Shift 的 Tab），點選則直接結束「收著」的狀態。
         - 下拉選單開著時不接 PageUp／PageDown。
+        - 逐項查核時對「收到頁面本身」這一版又找到四個邊界，也補了：正被按著的控制項不收（雷射按下到放開之間剛好來
+          一次捲動，那一下點擊會沒有作用）；放回去時從原本那一個往畫面所在的方向找（照按鍵或捲動的方向找，反方向會繞完
+          整圈 Tab 順序、落在另一欄）；看不看得到用捲動的終點判斷，按鍵接手時先讓捲動動畫到終點（LB／RB 和方向鍵落在同
+          一次輪詢時，用動畫途中的位置挑到的控制項接著就被捲出去）；已經在頂或在底時也檢查要不要收（先前用滾輪或捲軸
+          捲走、焦點留在畫面外的情況）。
         每一批修正後都在 Windows 上用虛擬手把重驗；最後一版驗了捲兩頁後等焦點自己回來、捲走馬上按 A（控制項與偏好設定
         都沒變）、接著按方向鍵、捲走再捲回來焦點還給原本那一個、選單開著按 PageDown、到底後 LB／RB 再按方向鍵上。
+        審查者另外把這一頁的函式原樣搬進獨立的小頁面，用 `qmltestrunner`（offscreen）送真的按鍵與滑鼠事件驗過各種時序。
     - **平台事實：Frame 的桌面模式也架在 SteamVR 上（2026-10-11 唯讀查到）**：桌面（Plasma）與遊戲兩種工作階段都由
       `start-gamescope-session` 啟動；`plasma-session.target` 的說明是「Gamescope VR Session」，`Requires=gamescope-session.service`、
       `Wants=steamvr.service`／`steamvr-plasma.service`。平面視窗一律由 `gamescope --backend openvr` 畫成 SteamVR 的 overlay
