@@ -597,6 +597,34 @@ void testStaleResultIgnored()
     CHECK(w.proceed == 1);
     CHECK(w.cancelled == 1);
     CHECK(!c.busy());
+
+    // 上面那一段遲到的結果回來時下一場已經結束，是「沒有在量」擋掉的。這一段讓它落在下一場正在量的時候：
+    // 這時候擋掉它的只有編號的比對（VrPreflightCheck::onProbeFinished 的 id != m_ProbeId）。少了那個比對，
+    // 取消主機 A 的檢查後馬上開主機 B，A 還在路上的結果會被算成 B 的樣本
+    beginCase("a stale result that arrives while the next check is probing is not counted as its sample");
+    CHECK(VrPreflightCheck::setTestScript(QStringLiteral("500")));
+    VrPreflightCheck d;
+    Watch v(&d);
+    CHECK(d.begin(QString(), 0));
+    spin(100);
+    d.cancel("the user");                                   // 第一場的量測（500 ms）還在路上，約 400 ms 後回來
+    CHECK(v.cancelled == 1);
+
+    CHECK(VrPreflightCheck::setTestScript(QStringLiteral("300")));
+    g_Log.clear();
+    CHECK(d.begin(QString(), 0));
+    // 第二場每次 300 ms：約 300、600、900 ms 各有一次結果。上一場的 500 ms 在約 400 ms 回來，
+    // 正好是第二次量測進行中（前後各有 100 ms 以上的餘裕）
+    CHECK(waitFor([&]() { return d.waiting(); }, 3000));
+    CHECK(!logHas(QStringLiteral("500 ms")));
+    CHECK(sampleLines() == 3);
+    CHECK(logHas(kPrefix + QStringLiteral("sample 2/3: 300 ms")));
+    CHECK(logHas(kPrefix + QStringLiteral("wait: best of 3 samples is 300 ms > 60 ms (300, 300, 300) - asking the user, probing every 2 s")));
+    CHECK(d.measuredRttMs() == 300);
+    CHECK(d.lastRttMs() == 300);
+    CHECK(v.proceed == 0);
+    d.cancel("the user");
+    CHECK(v.cancelled == 2);
     CHECK(VrPreflightCheck::setTestScript(QString()));
 }
 
