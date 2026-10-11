@@ -1358,6 +1358,12 @@ int main(int argc, char *argv[])
         break;
     }
 
+    // §VR-PREFLIGHT（dev）：--vr-test-preflight（只有一般啟動會有值，格式 parse() 已經檢查過）。交給 GUI 的
+    // VR 啟動器，只存在這個行程裡，不寫進設定
+    if (!parser.vrTestPreflight().isEmpty()) {
+        VrLauncher::setTestPreflightScript(parser.vrTestPreflight());
+    }
+
     SDL_version compileVersion;
     SDL_VERSION(&compileVersion);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,

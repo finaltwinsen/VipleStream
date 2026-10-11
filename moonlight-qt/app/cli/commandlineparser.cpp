@@ -1,4 +1,5 @@
 #include "commandlineparser.h"
+#include "backend/vrpreflight.h"            // §VR-PREFLIGHT：--vr-test-preflight 的格式檢查（header-only，不依賴 Qt）
 #include "streaming/video/bitstreamdump.h"  // §SF-PROBE：stream --dump-bitstream
 #include "streaming/xr/xrlatchstats.h"      // §VR-LDIAG：--vr-test-jitter 的格式檢查（header-only，不依賴 OpenXR）
 
@@ -298,6 +299,11 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         "See 'moonlight <action> --help' for help of specific action."
     );
     parser.addPositionalArgument("action", "Action to execute", "<action>");
+    // §VR-PREFLIGHT（dev）：其他 dev 旗標都掛在 stream 動作上，這一個要在一般啟動（GUI）用——往返時間檢查
+    // 只在 GUI 的 VR 啟動器裡，stream 動作（子行程）沒有它
+    parser.addValueOption("vr-test-preflight", "(dev) scripted round-trip samples for the check the GUI runs before it starts a VR stream, "
+                          "instead of measuring (not saved; only without an action): comma-separated <ms>[*<count>] or "
+                          "x[*<count>], x = no answer; the last item repeats, e.g. 150*8,30");
     parser.parse(args);
     auto posArgs = parser.positionalArguments();
 
@@ -306,6 +312,17 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         // or --help is specified
         parser.handleHelpAndVersionOptions();
         parser.handleUnknownOptions();
+        if (parser.isSet("vr-test-preflight")) {
+            // 格式在這裡就檢查（寫錯不可以默默變成照常量測）；實際使用在 VrPreflightCheck
+            const QString spec = parser.value("vr-test-preflight");
+            vrpreflight::TestScript script;
+            std::string scriptErr;
+            if (spec.isEmpty() || !script.configure(spec.toStdString(), &scriptErr)) {
+                parser.showError(QString("vr-test-preflight: %1 (got '%2')")
+                                     .arg(spec.isEmpty() ? QString("a spec is required") : QString::fromStdString(scriptErr), spec));
+            }
+            m_VrTestPreflight = spec;
+        }
         return NormalStartRequested;
     }
     else {

@@ -38,6 +38,13 @@ public:
     // "decode-bench"，指向靜態字串），否則回傳 nullptr。只用 C 字串比較，不碰 Qt 物件。
     static const char* earlyProbeAction(int argc, char* argv[]);
 
+    // §VR-PREFLIGHT（dev）：--vr-test-preflight 的腳本（格式見 backend/vrpreflight.h 的 TestScript，parse() 已經
+    // 檢查過）；沒帶＝空字串。只有一般啟動（GUI，沒有動作名稱）認得這個旗標——往返時間檢查只在 GUI 的 VR 啟動器裡，
+    // 帶在其他動作上會照「不認得的選項」報錯。值不進 StreamingPreferences，不會被存起來。
+    QString vrTestPreflight() const { return m_VrTestPreflight; }
+
+private:
+    QString m_VrTestPreflight;
 };
 
 class QuitCommandLineParser
