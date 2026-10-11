@@ -324,6 +324,7 @@ SOURCES += \
     backend/systemproperties.cpp \
     backend/hidprobe.cpp \
     backend/vrlauncher.cpp \
+    backend/vrpreflightcheck.cpp \
     wm.cpp
 
 # VipleStream 2.0 §SF-PROBE／§SF-ENV（M2a）— Steam Frame 探測動作與執行環境摘要。
@@ -405,7 +406,9 @@ HEADERS += \
     streaming/vr/vrframemeta.h \
     backend/systemproperties.h \
     backend/hidprobe.h \
-    backend/vrlauncher.h
+    backend/vrlauncher.h \
+    backend/vrpreflight.h \
+    backend/vrpreflightcheck.h
 
 # Platform-specific renderers and decoders
 ffmpeg {
