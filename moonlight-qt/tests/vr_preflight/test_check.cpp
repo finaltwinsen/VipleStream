@@ -1,6 +1,6 @@
 // §VR-PREFLIGHT：對真的 VrPreflightCheck／VrRttProbe（app/backend/vrpreflightcheck.cpp）與 VrLauncher 的測試。
 //
-// 需要 Qt（Core＋Network），不需要 QtTest 也不開視窗；建置與執行方式見同目錄的 run_tests.sh。
+// 需要 Qt（Core＋Network），不需要 QtTest 也不開視窗；建置與執行方式見同目錄的 run_tests.ps1。
 // 用法：test_check <moonlight-qt 目錄>
 //
 // 這裡驗得到的：

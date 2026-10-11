@@ -1,6 +1,6 @@
 // §VR-PREFLIGHT 的判斷邏輯測試（moonlight-qt/app/backend/vrpreflight.h）。
 //
-// 只用標準函式庫，g++／MSVC 都能單獨編（建置方式見同目錄的 run_tests.sh）。時間全部是測試自己給的假時鐘：
+// 只用標準函式庫，g++／MSVC 都能單獨編（建置方式見同目錄的 run_tests.ps1）。時間全部是測試自己給的假時鐘：
 // 「往返 150 ms」是直接把 150 交給 Gate，不是真的等 150 ms、也不是靠延後 accept 假裝
 // （延後 accept 不會讓 TCP 握手變慢，量不出往返時間）。真的對 socket 量的部分在 test_check.cpp。
 

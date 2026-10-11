@@ -1,6 +1,6 @@
 // 測試用的替身：產品的 app/SDL_compat.h 會帶進整個 SDL。這裡只提供 vrpreflightcheck.cpp、vrlauncher.cpp
 // 用到的三個 log 函式，把每一行交給測試（test_check.cpp 的 testLogLine）檢查內容。
-// 建置時這個目錄要排在 include 路徑的最前面（見 run_tests.sh）。
+// 建置時這個目錄要排在 include 路徑的最前面（見 run_tests.ps1）。
 
 #pragma once
 

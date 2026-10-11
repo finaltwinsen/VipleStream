@@ -8,7 +8,7 @@ import VrLauncher 1.0
 // 真的檔案（不是照抄一份）：app/gui/VrPreflightDialog.qml，連同它的基底 NavigableDialog.qml
 import "../../../app/gui"
 
-// §VR-PREFLIGHT 對話框的流程測試。VrLauncher 是替身（imports/VrLauncher）；執行方式見 ../run_tests.sh。
+// §VR-PREFLIGHT 對話框的流程測試。VrLauncher 是替身（imports/VrLauncher）；執行方式見 ../run_tests.ps1。
 // 這裡驗的是對話框本身：什麼時候開、顯示什麼、兩個按鈕（滑鼠＝雷射、鍵盤＝手把送出的鍵）、
 // 開著的時候後面那一頁按不到、焦點被搶走會拿回來。
 Item {
