@@ -846,4 +846,10 @@ ApplicationWindow {
         id: vrErrorDialog
         standardButtons: Dialog.Ok
     }
+
+    // §VR-PREFLIGHT：開 VR 串流前到主機的往返時間太慢時的說明與選擇。它自己看 VrLauncher 的狀態開關，
+    // 這裡只要有這一個實例
+    VrPreflightDialog {
+        id: vrPreflightDialog
+    }
 }

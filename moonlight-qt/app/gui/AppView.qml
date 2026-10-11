@@ -99,6 +99,18 @@ CenteredGridView {
         return model
     }
 
+    // §VR-PREFLIGHT：VR 串流一律從這裡開（直接開、先結束舊 app 再開、接管，三條路都是）。回傳一個函式，
+    // 呼叫它才真的開；主機目前的位址與埠在這裡就讀好，因為「先結束舊 app」那條路是結束完成之後才由 QuitSegue
+    // 呼叫的。VrLauncher.launch() 會先量到主機的往返時間，太慢時不開子行程，改由 main.qml 的 vrPreflightDialog
+    // 說明並等使用者決定（對話框放在 main.qml：等待期間這一頁可能已經被收掉）。
+    function vrLaunchFn(appName, takeover) {
+        var launcher = VrLauncher
+        var target = appModel.vrLaunchTarget()
+        return function() {
+            launcher.launch(target.address, target.host, target.port, appName, takeover)
+        }
+    }
+
     model: appModel
 
     // Hero click: launch (or resume) the featured app via the same
@@ -584,7 +596,7 @@ CenteredGridView {
 
             // VipleStream 2.0 §VR-LAUNCHER：VR 模式另開子行程串流（用主機目前的位址；名稱可能重複）
             if (VrLauncher.vrMode) {
-                VrLauncher.launch(appModel.vrLaunchAddress(), model.name, takeover || false)
+                appGrid.vrLaunchFn(model.name, takeover || false)()
                 return
             }
 
@@ -755,9 +767,7 @@ CenteredGridView {
                 params.nextAppName = null
                 params.nextSession = null
                 if (launchVrAfter) {
-                    var vrAddress = appModel.vrLaunchAddress()
-                    var vrAppName = nextAppName
-                    params.nextLaunchFn = function() { VrLauncher.launch(vrAddress, vrAppName, false) }
+                    params.nextLaunchFn = appGrid.vrLaunchFn(nextAppName, false)
                 }
             }
 
@@ -785,7 +795,7 @@ CenteredGridView {
         onAccepted: {
             // §VR-LAUNCHER：VR 模式一律走子行程；使用者已確認接管，子行程帶 --takeover
             if (VrLauncher.vrMode) {
-                VrLauncher.launch(appModel.vrLaunchAddress(), targetAppName, true)
+                appGrid.vrLaunchFn(targetAppName, true)()
                 return
             }
 

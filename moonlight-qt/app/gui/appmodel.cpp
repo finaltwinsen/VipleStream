@@ -35,13 +35,22 @@ void AppModel::initialize(ComputerManager* computerManager, int computerIndex, b
     updateAppList(m_Computer->appList);
 }
 
-QString AppModel::vrLaunchAddress()
+QVariantMap AppModel::vrLaunchTarget()
 {
-    QReadLocker lock(&m_Computer->lock);
-    if (m_Computer->state != NvComputer::CS_ONLINE || m_Computer->activeAddress.isNull()) {
-        return QString();
+    // 先複製一份再放鎖（同 NvComputer::getActiveAddressReachability()）；不在線上時留著空的 NvAddress
+    NvAddress active;
+    {
+        QReadLocker lock(&m_Computer->lock);
+        if (m_Computer->state == NvComputer::CS_ONLINE) {
+            active = m_Computer->activeAddress;
+        }
     }
-    return m_Computer->activeAddress.toString();
+
+    QVariantMap target;
+    target[QStringLiteral("address")] = active.isNull() ? QString() : active.toString();
+    target[QStringLiteral("host")] = active.isNull() ? QString() : active.address();
+    target[QStringLiteral("port")] = active.isNull() ? 0 : static_cast<int>(active.port());
+    return target;
 }
 
 QString AppModel::vrUnavailableReason()

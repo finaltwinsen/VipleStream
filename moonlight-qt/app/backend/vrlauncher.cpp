@@ -1,6 +1,7 @@
 #include "vrlauncher.h"
 
 #include "sfenv.h"
+#include "vrpreflightcheck.h"
 
 #include <QCoreApplication>
 #include <QFile>
@@ -50,8 +51,17 @@ QString userFacingError(const QString& line)
 }  // namespace
 
 VrLauncher::VrLauncher(QObject* parent)
-    : QObject(parent)
+    : QObject(parent),
+      m_Preflight(new VrPreflightCheck(this))
 {
+    // §VR-PREFLIGHT：檢查的結果。proceed＝可以開了（夠快、量不到、連續夠快、使用者堅持）
+    connect(m_Preflight, &VrPreflightCheck::changed, this, &VrLauncher::preflightChanged);
+    connect(m_Preflight, &VrPreflightCheck::proceed, this, &VrLauncher::preflightPassed);
+    connect(m_Preflight, &VrPreflightCheck::cancelled, this, [this]() {
+        m_PendingAddress.clear();
+        m_PendingApp.clear();
+        m_PendingTakeover = false;
+    });
 }
 
 VrLauncher::~VrLauncher()
@@ -110,18 +120,107 @@ bool VrLauncher::setVrMode(bool on)
     if (m_VrMode == on) {
         return false;
     }
+    // §VR-PREFLIGHT：模式換了，還在檢查或等使用者決定的那一場就不開了
+    m_Preflight->cancel("mode changed");
     m_VrMode = on;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] mode=%s", on ? "vr" : "desktop");
     emit vrModeChanged();
     return true;
 }
 
-bool VrLauncher::launch(const QString& hostAddress, const QString& appName, bool takeover)
+bool VrLauncher::preflightChecking() const
+{
+    return m_Preflight->checking();
+}
+
+bool VrLauncher::preflightWaiting() const
+{
+    return m_Preflight->waiting();
+}
+
+int VrLauncher::preflightMeasuredMs() const
+{
+    return m_Preflight->measuredRttMs();
+}
+
+int VrLauncher::preflightRttMs() const
+{
+    return m_Preflight->lastRttMs();
+}
+
+int VrLauncher::preflightGoodStreak() const
+{
+    return m_Preflight->goodStreak();
+}
+
+int VrLauncher::preflightThresholdMs() const
+{
+    return vrpreflight::kThresholdMs;
+}
+
+int VrLauncher::preflightGoodNeeded() const
+{
+    return vrpreflight::kGoodStreakToStart;
+}
+
+int VrLauncher::preflightIntervalSec() const
+{
+    return vrpreflight::kProbeIntervalMs / 1000;
+}
+
+bool VrLauncher::setTestPreflightScript(const QString& spec, QString* error)
+{
+    return VrPreflightCheck::setTestScript(spec, error);
+}
+
+bool VrLauncher::launch(const QString& hostAddress, const QString& probeHost, int probePort,
+                        const QString& appName, bool takeover)
 {
     if (!m_VrMode || running() || hostAddress.isEmpty() || appName.isEmpty() || !blockedReason().isEmpty()) {
         return false;
     }
+    // 上一次按下去的還在檢查、或對話框正開著等使用者決定：不接第二次（對話框是 modal，這裡是最後一道）
+    if (m_Preflight->busy()) {
+        return false;
+    }
 
+    m_PendingAddress = hostAddress;
+    m_PendingApp = appName;
+    m_PendingTakeover = takeover;
+    // 夠快或量不到時 proceed() 幾乎立刻發出（沒有可以量的目標時就在這個呼叫裡），接著 preflightPassed() 開子行程
+    return m_Preflight->begin(probeHost, probePort);
+}
+
+void VrLauncher::preflightStartAnyway()
+{
+    m_Preflight->startAnyway();
+}
+
+void VrLauncher::preflightCancel()
+{
+    m_Preflight->cancel("the user");
+}
+
+void VrLauncher::preflightPassed()
+{
+    const QString hostAddress = m_PendingAddress;
+    const QString appName = m_PendingApp;
+    const bool takeover = m_PendingTakeover;
+    m_PendingAddress.clear();
+    m_PendingApp.clear();
+    m_PendingTakeover = false;
+
+    // 檢查期間狀態可能變了（開頭那幾次還在量的時候介面沒有被擋住）
+    if (!m_VrMode || running() || hostAddress.isEmpty() || appName.isEmpty()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-LAUNCHER] preflight: launch dropped (no longer in VR mode, or a stream is already running)");
+        return;
+    }
+    startProcess(hostAddress, appName, takeover);
+}
+
+bool VrLauncher::startProcess(const QString& hostAddress, const QString& appName, bool takeover)
+{
     // 只帶最少的參數（見 vrlauncher.h）。位置參數放在 "--" 之後：app 名稱以 '-' 開頭時不會被當成選項。
     QStringList args{QStringLiteral("stream"), QStringLiteral("--display-target"), QStringLiteral("pcvr")};
     if (takeover) {

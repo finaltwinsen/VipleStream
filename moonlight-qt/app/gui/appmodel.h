@@ -7,6 +7,8 @@
 
 #include <QAbstractListModel>
 #include <QList>
+#include <QMap>
+#include <QVariant>
 
 class AppModel : public QAbstractListModel
 {
@@ -31,8 +33,12 @@ public:
     Q_INVOKABLE void initialize(ComputerManager* computerManager, int computerIndex, bool showHiddenGames,
                                 bool vrOnly = false);
 
-    // §VR-LAUNCHER：VR 模式的子行程用這個位址找主機（位址比名稱可靠：名稱可能重複，CLI 也會拿它去解析）
-    Q_INVOKABLE QString vrLaunchAddress();
+    // §VR-LAUNCHER／§VR-PREFLIGHT：開 VR 串流要用的主機位址，三個欄位一次讀出（同一把鎖），給 VrLauncher.launch()：
+    //   address  子行程拿來找主機的字串（"位址:埠"；位址比名稱可靠：名稱可能重複，CLI 也會拿它去解析）
+    //   host     同一個位址（不含埠），開子行程之前量往返時間用
+    //   port     同一個埠（主機的 HTTP 埠，來自 NvComputer::activeAddress，不是寫死的）
+    // 主機不在線上時 address、host 是空字串、port 是 0（launch() 會拒絕）
+    Q_INVOKABLE QVariantMap vrLaunchTarget();
 
     // §VR-LAUNCHER：這台主機在 VR 模式不能用的原因（給使用者看）；可以用時回空字串
     Q_INVOKABLE QString vrUnavailableReason();
