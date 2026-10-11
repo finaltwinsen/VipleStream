@@ -214,19 +214,27 @@ Item {
             compare(VrLauncher.startAnywayCalls, 1)
         }
 
-        function test_05b_focus_ring_shows_again_after_a_pointer_click() {
-            // 上一次是用雷射點掉的：那顆按鈕留著焦點。再打開時手把使用者還是要看得到焦點框
+        function test_05b_focus_ring_shows_again_when_it_reopens() {
+            // 上一次關閉時有焦點的那顆按鈕留著焦點：再打開時它收不到新的 focus 事件，焦點框要另外補，
+            // 手把使用者才看得到現在在哪一顆
             openSlow(118, 118)
-            mouseClick(part("cancelButton"))
+            mouseClick(part("cancelButton"))                            // 用雷射點掉（焦點本來就在「取消」上）
             waitClosed()
             openSlow(118, 118)
             compare(part("cancelButton").activeFocus, true)
             compare(part("cancelButton").visualFocus, true)
-            mouseClick(part("startButton"))
+            keyClick(Qt.Key_Return)                                     // 用手把按掉
+            waitClosed()
+            openSlow(118, 118)
+            compare(part("cancelButton").activeFocus, true)
+            compare(part("cancelButton").visualFocus, true)
+            keyClick(Qt.Key_Left)
+            keyClick(Qt.Key_Return)                                     // 這一次停在「仍要開始」
             waitClosed()
             openSlow(118, 118)
             compare(part("cancelButton").activeFocus, true)             // 不管上次停在哪一顆，都回到預設的
             compare(part("cancelButton").visualFocus, true)
+            compare(part("startButton").activeFocus, false)
         }
 
         function test_06_cancel_with_the_pointer() {
@@ -335,6 +343,71 @@ Item {
             tryCompare(dialog, "armed", true, 2000)
             mouseClick(part("startButton"))
             compare(VrLauncher.startAnywayCalls, 1)
+            waitClosed()
+        }
+
+        function test_12b_ignored_click_does_not_change_the_default_button() {
+            // 還不接受按鈕的那一小段裡雷射點到「仍要開始」：那一下不算，預設的按鈕也不可以因此換成它——
+            // 接著手把按 A 要是「取消」，不是開一場會破圖的串流
+            VrLauncher.setPreflight(false, true, 118, 118, 0)
+            compare(dialog.armed, false)
+            var start = part("startButton")
+            var cancel = part("cancelButton")
+            mouseClick(start)
+            compare(VrLauncher.startAnywayCalls, 0)
+            compare(cancel.activeFocus, true)
+            tryCompare(dialog, "armed", true, 2000)
+            tryCompare(dialog, "opened", true, 2000)
+            compare(start.activeFocus, false)
+            compare(cancel.activeFocus, true)
+            compare(cancel.visualFocus, true)
+            keyClick(Qt.Key_Return)                                     // 手把的 A
+            compare(VrLauncher.startAnywayCalls, 0)
+            compare(VrLauncher.cancelCalls, 1)
+            waitClosed()
+        }
+
+        function test_12c_the_pointer_does_not_move_the_focus_ring() {
+            var start = part("startButton")
+            var cancel = part("cancelButton")
+
+            // 雷射按住「仍要開始」、移開才放掉（沒有點成）：焦點框留在原本那一顆上，不會不見
+            openSlow(118, 118)
+            mousePress(start)
+            mouseMove(root, 20, 20)
+            mouseRelease(root, 20, 20)
+            compare(VrLauncher.startAnywayCalls, 0)
+            compare(dialog.opened, true)
+            compare(start.activeFocus, false)
+            compare(cancel.activeFocus, true)
+            compare(cancel.visualFocus, true)
+            keyClick(Qt.Key_Return)
+            compare(VrLauncher.startAnywayCalls, 0)
+            compare(VrLauncher.cancelCalls, 1)
+            waitClosed()
+
+            // 同樣的動作發生在還不接受按鈕的那一小段裡
+            VrLauncher.setPreflight(false, true, 118, 118, 0)
+            compare(dialog.armed, false)
+            mousePress(start)
+            mouseMove(root, 20, 20)
+            mouseRelease(root, 20, 20)
+            tryCompare(dialog, "armed", true, 2000)
+            tryCompare(dialog, "opened", true, 2000)
+            compare(cancel.activeFocus, true)
+            compare(cancel.visualFocus, true)
+            keyClick(Qt.Key_Return)
+            compare(VrLauncher.startAnywayCalls, 0)
+            compare(VrLauncher.cancelCalls, 2)
+            waitClosed()
+
+            // 雷射照樣點得到按鈕：手把先把焦點移到「仍要開始」，再用雷射點「取消」
+            openSlow(118, 118)
+            keyClick(Qt.Key_Left)
+            compare(start.visualFocus, true)
+            mouseClick(cancel)
+            compare(VrLauncher.cancelCalls, 3)
+            compare(VrLauncher.startAnywayCalls, 0)
             waitClosed()
         }
 

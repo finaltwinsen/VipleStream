@@ -330,10 +330,15 @@ NavigableDialog {
             anchors.verticalCenter: parent.verticalCenter
             spacing: 8
 
+            // 兩顆按鈕都不因為被雷射按到而拿焦點（Button 預設會）：焦點框是手把的游標，雷射照樣點得到按鈕，但不搬動它。
+            // 不然剛出現、還不接受按鈕的那一小段裡點到「仍要開始」（那一下不算），或按住之後移開才放掉（沒有點成），
+            // 焦點都會留在「仍要開始」上——預設就不再是「取消」，後一種連焦點框都沒有——接著手把按 A 開的是一場
+            // 會破圖的串流。
             Button {
                 id: startButton
                 objectName: "startButton"
                 flat: true
+                focusPolicy: Qt.TabFocus
                 text: qsTr("Start anyway")
                 onClicked: dialog.startAnyway()
                 onActiveFocusChanged: if (activeFocus) dialog.lastFocusButton = startButton
@@ -346,6 +351,7 @@ NavigableDialog {
                 id: cancelButton
                 objectName: "cancelButton"
                 flat: true
+                focusPolicy: Qt.TabFocus
                 text: qsTr("Cancel")
                 onClicked: dialog.cancelFromButton()
                 onActiveFocusChanged: if (activeFocus) dialog.lastFocusButton = cancelButton
