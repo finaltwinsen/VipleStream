@@ -1,0 +1,2 @@
+module StreamingPreferences
+singleton StreamingPreferences 1.0 StreamingPreferences.qml
