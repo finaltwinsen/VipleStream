@@ -301,6 +301,27 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
                         "[VIPLE-VR-LDIAG] latch wait %.2f ms ignored on this platform: its timed waits are too coarse to keep delay + wait within 6 ms",
                         m_Options.pcvrLatchWaitUs / 1000.0);
         }
+        // §VR-LATCH-FLIGHT：一樣整場維持（同場切換只切 frame thread 那一側）。補幀開著時也開——等的是第一次發布
+        vc.flightNotify = pcvrLatchFlightEffUs() > 0;
+        if (m_Options.pcvr && m_Options.pcvrLatchFlightUs > 0) {
+            if (!vc.flightNotify) {
+                // 設定了卻整場不作用，要讓看 log 的人知道原因（顯示不是 120 Hz 的那一種要跑起來才知道，見 pcvrFlightWait）
+                char why[112];
+                if (!pcvrLatchWaitSupported()) {
+                    std::snprintf(why, sizeof(why), "timed waits on this platform are too coarse");
+                }
+                else {
+                    std::snprintf(why, sizeof(why), "the latch delay of %.1f ms leaves no room before the %.1f ms limit",
+                                  m_Options.pcvrLatchDelayUs / 1000.0, kLatchSpanMaxUs / 1000.0);
+                }
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LDIAG] latch flight %.2f ms ignored: %s",
+                            m_Options.pcvrLatchFlightUs / 1000.0, why);
+            }
+            if (!m_Options.pcvrSynth && m_Options.pcvrLatchWaitUs > 0) {
+                // 兩種等待不疊加：設了 flight，§VR-LATCH-WAIT 就不作用（pcvrLatchWaitEffUs() 回 0）
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LDIAG] latch wait ignored: latch flight is set");
+            }
+        }
         m_Video = new XrVideo(this, vc);
         QString verr;
         if (!m_Video->init(&verr)) {
@@ -344,8 +365,13 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     m_PredictAheadNs = 0;
     m_LatchDiag = LatchDiag();  // §VR-LDIAG：XrVideo 是新的，發布序號從頭算
     m_LoopDiag = LoopDiag();    // §VR-XRLOOP
+    m_Flight = FlightState();   // §VR-LATCH-FLIGHT：顯示紀錄跟著新的發布序號從頭算；防護的基準也重新量
+    m_Flight.guard.start(m_BringUpNs);
     if (m_Options.pcvr) {
         m_LoopDiag.reserveWindow();
+    }
+    if (pcvrLatchFlightEffUs() > 0) {
+        m_Flight.win.reserveWindow();  // 等過的那一格在 xrBeginFrame 之前記帳，那裡不可以配置記憶體
     }
     {
         std::lock_guard<std::mutex> lk(m_HmdMutex);
@@ -368,6 +394,9 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         }
         if (pcvrLatchWaitEffUs() > 0) {
             armed << QStringLiteral("latchWait");
+        }
+        if (pcvrLatchFlightEffUs() > 0) {
+            armed << QStringLiteral("latchFlight");  // §VR-LATCH-FLIGHT（設了它 latchWait 就不會在名單裡）
         }
         if (armed.size() >= 2) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LDIAG] ab: %d switches are armed and will toggle together: %s",
@@ -1688,6 +1717,13 @@ void XrContext::frameThreadMain()
                 m_VrCtl->applyPendingHaptics();
             }
 #ifdef HAVE_XR_VIDEO
+            // §VR-LATCH-FLIGHT：有一張串流影像已經送進 GPU、只差一點就做完的話多等它一下（見 pcvrFlightWait）。和下面的
+            // §VR-LATCH-WAIT 一樣不持任何鎖。關著（預設）時 flightUs 是 0，整段跳過；設了它，下面的 waitUs 一定是 0
+            // （pcvrLatchWaitEffUs），所以兩段不會在同一格都等
+            const uint32_t flightUs = pcvrLatchFlightEffUs();
+            if (flightUs > 0 && fs.shouldRender && m_Video != nullptr) {
+                pcvrFlightWait(wakeNs, fs.predictedDisplayPeriod > 0 ? static_cast<uint64_t>(fs.predictedDisplayPeriod) : 0ull, flightUs);
+            }
             // §VR-LATCH-WAIT：這一格該有的新影像還沒到就等它，最晚等到「xrWaitFrame 返回＋延後＋等待」。準時的影像
             // 照舊在延後那一點被挑，只有差一點沒趕上的才多等。這裡不持任何鎖——絕對不可以持 m_QueueMutex 等，
             // 影像 render thread 要它才 release 得出去。關著（預設）時 waitUs 是 0，整段跳過。
@@ -2236,6 +2272,10 @@ void XrContext::frameThreadMain()
                           static_cast<uint64_t>(fs.predictedDisplayPeriod));
             // §VR-XRLOOP：這一格的時刻（返回、挑影像、交幀）一樣等送出去之後才記
             pcvrLoopDiag(wakeNs, cpuT0, te0, te1, static_cast<uint64_t>(fs.predictedDisplayPeriod));
+            // §VR-LATCH-FLIGHT：這一格顯示了哪一張（空格閘門用；開關關著也照記）。只有真的送出串流影像的 projection、
+            // 而且 xrEndFrame 成功的格才算；用的是最後送出的那一張（relatch 成功時 vcur 已經換成新的那一張；
+            // synthGuard 那一支沒有換 vcur，照帳面記，和 XrVideo::current() 的輪替一致）
+            pcvrFlightAfterFrame(haveVideo && videoLayer && XR_SUCCEEDED(er), vcur.seq);
         }
 #endif
         if (m_LatchDiag.logDue) {
@@ -2721,6 +2761,15 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         if (pcvrLatchWaitEffUs() > 0) {
             pcvrWaitGuard(nowNs, periodNs, ct.xrMissed);  // §VR-LATCH-WAIT：runtime 防護（等待開著才做）
         }
+        if (pcvrLatchFlightEffUs() > 0 && m_Video != nullptr) {
+            // §VR-LATCH-FLIGHT 的 runtime 防護（規則同上面那一個，見 xrguard.h）。同場切換的兩邊都要呼叫：基準與上一次的
+            // 漏幀總數在另一邊也照樣更新，只是那幾秒發生的事不算在它頭上。觸發時那一行等這一格送出去之後才印
+            // （這裡在挑影像到 xrEndFrame 之間）
+            const uint64_t aheadNs = m_PredictAheadNs > 0 ? static_cast<uint64_t>(m_PredictAheadNs) : 0ull;
+            if (m_Flight.guard.tick(nowNs, pcvrAbActive(), aheadNs, periodNs, ct.xrMissed) != xrguard::Trip::NoTrip) {
+                m_Flight.pauseLogDue = true;
+            }
+        }
         pcvrTrackPhaseStep(t.mtp1sUs, periodNs);
         t.slack1s.clear();
         t.render1s.clear();
@@ -2896,14 +2945,22 @@ void XrContext::pcvrLatchDiagLog()
     t.waitTimeout10s = 0;
     // 不看 Classifier 基準的那一段（events 起）接在最後面，既有欄位的位置不動
     const std::string lateTail = latchWaitTail(c);
+    // §VR-LATCH-FLIGHT：設定了才印（沒設定時這一行和原本逐字相同）——實際生效的上限（整場不作用時 0.00）、這 10 s
+    // 等了幾格、等到的、逾時的、有一張在途卻沒等的各種原因、每次等了多久、防護是不是暫停中、GPU 時間的典型值
+    // （組字串在 xrflight.h，有自測）
+    std::string flightTail;
+    if (m_Options.pcvr && m_Options.pcvrLatchFlightUs > 0) {
+        flightTail = m_Flight.win.tail(pcvrLatchFlightEffUs(), m_Flight.guard.paused(steadyNowNs()), m_Flight.gTypUs);
+    }
+    m_Flight.win.clear();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VR-LDIAG] 10s late=%u lateShift=%u gap=%u early=%u catchup=%u lateMax=%u us | held=%u heldMiss=%u rtyp=%u us "
                 "pubLag p50/p95=%u/%u us | wake2latch p50/p95/max=%u/%u/%u us latchPhase p50=%u us | "
-                "age p50/p95/p99=%.1f/%.1f/%.1f ms | slackPub(250us)=%s%s%s%s",
+                "age p50/p95/p99=%.1f/%.1f/%.1f ms | slackPub(250us)=%s%s%s%s%s",
                 c.late, c.lateShift, c.gap, c.early, c.catchup, c.lateMaxUs, d.held10s, d.heldMiss10s, d.rtypUs,
                 pctOf(d.pubLag, 0.50), pctOf(d.pubLag, 0.95), pctOf(d.wake2latch, 0.50), pctOf(d.wake2latch, 0.95), wakeMax,
                 pctOf(d.latchPhase, 0.50), pctOf(d.age10s, 0.50) / 1000.0, pctOf(d.age10s, 0.95) / 1000.0,
-                pctOf(d.age10s, 0.99) / 1000.0, qUtf8Printable(hist), waitTail.constData(), lateTail.c_str(),
+                pctOf(d.age10s, 0.99) / 1000.0, qUtf8Printable(hist), waitTail.constData(), lateTail.c_str(), flightTail.c_str(),
                 // §VR-LATCH A/B：這個視窗是哪一邊（和同一輪的 [VIPLE-VR-MTP10] 相同；10 s 區塊在換邊之前記下來的）
                 m_Options.pcvrLatchAbSec > 0 ? (d.logAb ? " ab=1" : " ab=0") : "");
     std::fill(std::begin(d.hist), std::end(d.hist), 0u);
@@ -3163,6 +3220,86 @@ void XrContext::pcvrLoopDiag(uint64_t wakeNs, uint64_t latchNs, uint64_t endCall
     }
     d.lastEndNs = endNs;
     d.lastEndLoop = d.loopNo;
+}
+
+// §VR-LATCH-FLIGHT：frame thread，延後睡完、控制器快照之後、xrBeginFrame 之前呼叫（flight 生效、這一格要算圖、有影像
+// 路徑才呼叫）。不持任何鎖：等的時候絕對不可以持 m_QueueMutex，影像 render thread 要它才 release 得出去；flightInfo()
+// 與 waitNewerThan() 自己拿 XrVideo 的 m_SwMutex。
+//   wakeNs＝這一格 xrWaitFrame 返回的時刻；periodNs＝顯示週期（0＝runtime 沒給）；capUs＝上限（pcvrLatchFlightEffUs）。
+// 要不要等由 xrflight::decide 判斷（四個條件與順序見 xrflight.h），這裡負責把輸入備齊：
+//  - 這一邊開不開：同場切換只有一個主人，直接讀 pcvrAbActive()；防護暫停中也算關。關著時整段不做（不多拿一次鎖）。
+//  - 最晚等到 xrWaitFrame 返回後 kLatchSpanMaxUs。那個數字只在 120 Hz 量過：顯示不是 120 Hz 的格給 0（一律沒有空間，
+//    記在 noRoom），連續夠久就印一次說明。
+//  - 這一格會不會印 10 秒行：印的那一格在 xrEndFrame 之後要多做零點幾毫秒到一毫秒（排序、組字串、輸出），回到
+//    xrWaitFrame 本來就最晚，再晚交幀會貼到 runtime 的放行點（2026-10-11 量到餘裕最小的幾乎都是這一格）。旗標
+//    （m_LatchDiag.logDue）要到這一格稍後才設，所以用兩個 10 秒視窗的起點預測：[VIPLE-VR-MTP10]／[VIPLE-VR-LDIAG]／
+//    [VIPLE-VR-XRLOOP] 那一組（pcvrTimingTick）與 maybeLogStats 的那一組——各自計時、多半同一格、不保證。往前看
+//    一個顯示週期：每個視窗少等一兩格，換來不必猜這一格還要多久才走到那兩個判斷。
+// 等到或逾時之後照原本的流程往下走（xrBeginFrame → 挑影像）；等到的話 current() 挑到的就是新的那一張。
+void XrContext::pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capUs)
+{
+    auto& f = m_Flight;
+    const uint64_t nowNs = steadyNowNs();
+    const uint32_t periodUs = static_cast<uint32_t>((std::min<uint64_t>)(periodNs / 1000ull, 0xffffffffu));
+    const bool rate120 = xrphase::is120Hz(periodUs);
+    const uint32_t kOffRateFrames = 600;  // 120 Hz 的 5 秒：開場更新率還在切換的那一小段不算
+    if (rate120) {
+        f.offRateRun = 0;
+    }
+    else if (periodUs != 0 && !f.offRateLogged && ++f.offRateRun >= kOffRateFrames) {
+        f.offRateLogged = true;
+        f.offRateLogUs = periodUs;  // 這裡不印 log，pcvrFlightAfterFrame 印
+    }
+    if (!pcvrAbActive() || f.guard.paused(nowNs)) {
+        return;  // xrflight::Why::Off
+    }
+    // 10 s 視窗的長度要和 pcvrTimingTick、maybeLogStats 裡的判斷相同（兩處都是滿 10 s 才印）
+    const uint64_t kWindowNs = 10000000000ull;
+    const uint64_t lookNs = (std::max<uint64_t>)(5000000ull, (std::min<uint64_t>)(periodNs, 20000000ull));
+    xrflight::Input in;
+    in.active = true;
+    in.busy = xrflight::windowDue(nowNs, m_PcvrTiming.mtpWindowStartNs, kWindowNs, lookNs) ||
+              xrflight::windowDue(nowNs, m_StatsWindowStartNs, kWindowNs, lookNs);
+    in.nowUs = nowNs / 1000ull;
+    in.wakeUs = wakeNs / 1000ull;
+    in.capUs = capUs;
+    in.spanMaxUs = rate120 ? kLatchSpanMaxUs : 0u;
+    in.shownSeq = f.shown.seq;
+    in.shownCount = f.shown.count;
+    in.streamDiv = static_cast<uint32_t>((std::max)(1, m_PcvrStreamDiv.load(std::memory_order_relaxed)));
+    m_Video->flightInfo(&in.latestSeq, &in.flightSeq, &in.flightSubmitUs);
+    in.gTypUs = f.gTypUs = m_Video->gpuTypUs();
+    const xrflight::Decision d = xrflight::decide(in);
+    if (d.why != xrflight::Why::Wait) {
+        f.win.note(d.why);
+        return;
+    }
+    const bool got = m_Video->waitNewerThan(in.latestSeq, d.deadlineUs);
+    const uint64_t afterUs = steadyNowNs() / 1000ull;
+    f.win.noteWait(got, static_cast<uint32_t>((std::min<uint64_t>)(afterUs > in.nowUs ? afterUs - in.nowUs : 0, 0xffffffffu)));
+}
+
+// §VR-LATCH-FLIGHT：frame thread，每一格送出去（xrEndFrame）之後呼叫。latched＝這一格真的送出了串流影像的 projection
+// 而且 xrEndFrame 成功，seq 是那一張。不該在等待之前、或挑影像到 xrEndFrame 之間印的 log 也延後到這裡印
+void XrContext::pcvrFlightAfterFrame(bool latched, uint64_t seq)
+{
+    auto& f = m_Flight;
+    if (latched) {
+        f.shown.onLatched(seq);
+    }
+    if (f.pauseLogDue) {
+        // 防護在這一格的 1 Hz 區塊觸發了（見 pcvrTimingTick）；冷卻結束時自動恢復，不另外印
+        f.pauseLogDue = false;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LDIAG] flight paused %u s (predictAhead %.1f ms, missed %u)",
+                    f.guard.lastPauseSec(), static_cast<double>(f.guard.lastAheadNs()) / 1e6, f.guard.lastMissed());
+    }
+    if (f.offRateLogUs != 0) {
+        // 一場只印一次。每一格都重新判斷，之後回到 120 Hz 就照常作用
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-LDIAG] latch flight %.2f ms ignored: the display period is %u us, not 120 Hz (the %.1f ms limit was only measured at 120 Hz)",
+                    pcvrLatchFlightEffUs() / 1000.0, f.offRateLogUs, kLatchSpanMaxUs / 1000.0);
+        f.offRateLogUs = 0;
+    }
 }
 #endif
 

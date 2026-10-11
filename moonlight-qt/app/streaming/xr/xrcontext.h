@@ -48,6 +48,8 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include "xrflight.h"      // §VR-LATCH-FLIGHT：等不等在途的幀（header-only，不依賴 OpenXR）
+#include "xrguard.h"       // §VR-LATCH-FLIGHT：runtime 防護的狀態機（header-only，不依賴 OpenXR）
 #include "xrinput.h"
 #include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Classifier（header-only，不依賴 OpenXR）
 #include "xrphase.h"       // §VR-XRLOOP：相位換算、xrphase::RankScan（header-only，不依賴 OpenXR）
@@ -124,6 +126,11 @@ public:
         // 「延後＋等待」不超過 6.0 ms（量過沒事的最後一列；8 ms 時 runtime 把整幀往後排），超過的部分不等；
         // pcvrSynth 開著時不作用。0＝不等（舊行為）。實際生效的值見 pcvrLatchWaitEffUs()
         uint32_t pcvrLatchWaitUs = 0;
+        // 2026-10-11（§VR-LATCH-FLIGHT）：延後（pcvrLatchDelayUs）之後，有一張串流影像已經送進 GPU、只差一點就做完的話
+        // 多等它，最多這麼久（µs；0＝不等，預設）。和上面的等待不同：沒有東西在途就不等；上限是「xrWaitFrame 返回後
+        // kLatchSpanMaxUs」而不是 6.0 ms；pcvrSynth 開著時也作用。設了它，上面的等待就不作用（兩種不疊加）。
+        // 實際生效的值見 pcvrLatchFlightEffUs()
+        uint32_t pcvrLatchFlightUs = 0;
         // §VR-LATCH-WAIT：串流一幀佔幾個顯示格（半速串流 2）。用協商出來的值——半速是量到更新率之後才決定的，
         // 所以 bring-up 之後由 setPcvrStreamDiv() 設；這裡只是起始值
         int pcvrStreamDiv = 1;
@@ -652,11 +659,11 @@ private:
         return true;
 #endif
     }
-    // §VR-LATCH-WAIT：實際會等多久（µs）。設定值夾在「延後＋等待 ≤ 6.0 ms」之內；非 PCVR、補幀開著、或這個平台
-    // 不能用（見上）時 0
+    // §VR-LATCH-WAIT：實際會等多久（µs）。設定值夾在「延後＋等待 ≤ 6.0 ms」之內；非 PCVR、補幀開著、這個平台
+    // 不能用（見上）、或設了 §VR-LATCH-FLIGHT（pcvrLatchFlightUs > 0，不管它實際作不作用——兩種等待不疊加）時 0
     uint32_t pcvrLatchWaitEffUs() const
     {
-        if (!m_Options.pcvr || m_Options.pcvrSynth || m_Options.pcvrLatchWaitUs == 0) {
+        if (!m_Options.pcvr || m_Options.pcvrSynth || m_Options.pcvrLatchWaitUs == 0 || m_Options.pcvrLatchFlightUs > 0) {
             return 0;
         }
         const uint32_t room = m_Options.pcvrLatchDelayUs < 6000u ? 6000u - m_Options.pcvrLatchDelayUs : 0u;
@@ -664,4 +671,43 @@ private:
         return pcvrLatchWaitSupported() ? waitUs : 0u;
     }
     void pcvrWaitGuard(uint64_t nowNs, uint64_t periodNs, uint32_t xrMissedTotal);
+
+    // ── §VR-LATCH-FLIGHT（2026-10-11）：等在途的幀。判斷在 xrflight.h、防護在 xrguard.h（都是純邏輯、有自測）──
+    // xrWaitFrame 返回之後最晚等到多久（µs）。依據是 2026-10-11 的量測（頭盔無人、全速 120 Hz、每個延後值一場
+    // 110 秒）：把「延後挑影像」穩定設在 6.5 ms，runtime 那一側和 6.0 ms 分不出來（重投影扣掉開場各 3 次、漏幀 0），
+    // frame thread 回到 xrWaitFrame 到下一次放行的餘裕 p5 1.02 ms、最小 0.44 ms；6.8 ms 最小只剩 0.07 ms；
+    // 7.0 ms 一場 71 次重投影。量的是穩定延後；這裡是少數幾格偶爾晚到這個位置，那種間歇的樣式沒有直接量過
+    // （照量到的經驗式——runtime 看的是最近 32 格的最大值——不會比穩定延後更糟），所以另有防護（FlightState::guard）。
+    // 只量過 120 Hz：別的更新率一律不等（見 pcvrFlightWait）。要改大先重量
+    static constexpr uint32_t kLatchSpanMaxUs = 6500;
+    // 實際的上限（µs）：就是設定值；整場不作用時 0——非 PCVR、沒設、這個平台的定時等待太粗（同 §VR-LATCH-WAIT），
+    // 或延後量已經貼到 kLatchSpanMaxUs（留不到 100 µs）。補幀開著時照樣作用
+    uint32_t pcvrLatchFlightEffUs() const
+    {
+        if (!m_Options.pcvr || m_Options.pcvrLatchFlightUs == 0 || !pcvrLatchWaitSupported()) {
+            return 0;
+        }
+        return m_Options.pcvrLatchDelayUs + 100u < kLatchSpanMaxUs ? m_Options.pcvrLatchFlightUs : 0u;
+    }
+    // 全部只在 frame thread 存取（bringUp 重設的時候 frame thread 還沒起跑）
+    struct FlightState {
+        // 正在顯示哪一張串流影像、已經顯示了幾格（空格閘門用）。開關關著、同場切換的另一邊也照記
+        xrflight::Shown shown;
+        // runtime 防護：規則同 pcvrWaitGuard，不設觸發次數的上限
+        xrguard::RuntimeGuard guard;
+        // 10 s 視窗（和 [VIPLE-VR-LDIAG] 10s 同一個）：等了幾格、各種沒等的原因、每次等了多久
+        xrflight::Window win;
+        // 最近一次判斷時讀到的 GPU 時間典型值（XrVideo::gpuTypUs；0＝還沒判斷過），只給 10 s 行印
+        uint32_t gTypUs = 0;
+        // 防護這一格觸發了：等這一格送出去（xrEndFrame 之後）才印那一行
+        bool pauseLogDue = false;
+        // 顯示不是 120 Hz 的連續格數；連續夠久就印一次說明（offRateLogUs＝要印的那一格看到的週期，印完歸零）
+        uint32_t offRateRun = 0;
+        uint32_t offRateLogUs = 0;
+        bool offRateLogged = false;
+    } m_Flight;
+    // frame thread，xrBeginFrame 之前、不持任何鎖：判斷這一格要不要等在途的那一張，要就等（見 .cpp）
+    void pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capUs);
+    // frame thread，這一格送出去之後：記這一格顯示了哪一張，印延後到這裡的 log
+    void pcvrFlightAfterFrame(bool latched, uint64_t seq);
 };
