@@ -1,5 +1,6 @@
 import QtQuick 2.9
 import QtQuick.Controls 2.5
+import QtQuick.Window 2.2
 import QtTest 1.2
 
 import VrLauncher 1.0
@@ -14,6 +15,15 @@ Item {
     id: root
     width: 1280
     height: 800
+
+    // 測試視窗本身（附加屬性要在 Item 自己的函式裡讀）
+    function ownWindow() {
+        return Window.window
+    }
+
+    // 另一個頂層視窗，代表頭盔上蓋到 VipleStream 前面的別的介面：把焦點給它＝測試視窗失去焦點。
+    // 用到的測試才顯示（initTestCase 建立）
+    property var otherWindow: null
 
     // main.qml 的 stackView：NavigableDialog 關閉時會對它 forceActiveFocus()
     FocusScope {
@@ -77,7 +87,30 @@ Item {
             tryCompare(dialog, "armed", true, 2000)
         }
 
+        function initTestCase() {
+            root.otherWindow = Qt.createQmlObject("import QtQuick 2.9; import QtQuick.Window 2.2; Window { width: 160; height: 90 }", root)
+            // 不可以是測試視窗的 transient 子視窗：那樣它拿到焦點時，測試視窗在 Qt 看來仍然是作用中的
+            root.otherWindow.transientParent = null
+        }
+
+        // 測試視窗失去焦點（別的視窗到前景）
+        function deactivateWindow() {
+            root.otherWindow.show()
+            root.otherWindow.requestActivate()
+            tryCompare(root.ownWindow(), "active", false, 3000)
+        }
+
+        // 測試視窗回到前景
+        function activateWindow() {
+            root.ownWindow().requestActivate()
+            tryCompare(root.ownWindow(), "active", true, 3000)
+            root.otherWindow.hide()
+        }
+
         function init() {
+            if (!root.ownWindow().active) {
+                activateWindow()                                        // 上一個測試失敗時可能留在背景
+            }
             VrLauncher.resetForTest()
             if (otherDialog.visible) {
                 otherDialog.close()
@@ -465,6 +498,82 @@ Item {
             compare(part("cancelButton").activeFocus, true)
             mouseClick(part("cancelButton"))
             compare(VrLauncher.cancelCalls, 1)
+            waitClosed()
+        }
+
+        // 視窗失去焦點再回來（等連線變快的時候叫出別的介面再回來；這個對話框可能開很久）：Qt 把焦點還給原本
+        // 那顆按鈕，但不畫焦點框。兩顆按鈕的結果相反，手把使用者要看得到 A 會按在哪一顆上
+        function test_22_focus_ring_comes_back_with_the_window() {
+            openSlow(118, 118)
+            var start = part("startButton")
+            var cancel = part("cancelButton")
+            compare(cancel.visualFocus, true)
+
+            deactivateWindow()
+            compare(dialog.focusPlace(), 0)                             // 視窗不在前景：沒有焦點
+            compare(cancel.visualFocus, false)
+            activateWindow()
+            tryCompare(cancel, "visualFocus", true, 2000)
+            compare(cancel.activeFocus, true)
+            compare(dialog.opened, true)                                // 只是把焦點框補回來，沒有按到任何東西
+            compare(VrLauncher.cancelCalls, 0)
+            compare(VrLauncher.startAnywayCalls, 0)
+
+            // 原本在「仍要開始」上：回來還是那一顆
+            keyClick(Qt.Key_Left)
+            compare(start.visualFocus, true)
+            deactivateWindow()
+            activateWindow()
+            tryCompare(start, "visualFocus", true, 2000)
+            compare(start.activeFocus, true)
+            compare(cancel.activeFocus, false)
+
+            keyClick(Qt.Key_Right)
+            keyClick(Qt.Key_Return)
+            compare(VrLauncher.cancelCalls, 1)
+            compare(VrLauncher.startAnywayCalls, 0)
+            compare(behind.activations, 0)
+            waitClosed()
+        }
+
+        function test_23_appears_while_the_window_is_in_the_background() {
+            deactivateWindow()
+            VrLauncher.setPreflight(false, true, 118, 118, 0)
+            tryCompare(dialog, "opened", true, 2000)
+            tryCompare(dialog, "armed", true, 2000)
+            var cancel = part("cancelButton")
+            compare(cancel.visualFocus, false)                          // 視窗不在前景時誰都沒有焦點
+            activateWindow()
+            tryCompare(cancel, "visualFocus", true, 2000)               // 回來：焦點在預設的按鈕上，而且看得到
+            compare(cancel.activeFocus, true)
+            compare(behind.activeFocus, false)
+            keyClick(Qt.Key_Return)
+            compare(VrLauncher.cancelCalls, 1)
+            compare(VrLauncher.startAnywayCalls, 0)
+            compare(behind.activations, 0)
+            waitClosed()
+        }
+
+        function test_24_window_comes_back_while_another_dialog_is_on_top() {
+            openSlow(118, 118)
+            var cancel = part("cancelButton")
+            otherDialog.open()
+            tryCompare(otherDialog, "opened", true, 2000)
+            compare(dialog.focusPlace(), 2)
+            deactivateWindow()
+            activateWindow()
+            wait(100)                                                   // 留時間給可能發生的搶焦點
+            compare(dialog.focusPlace(), 2)                             // 焦點回到上面那個對話框裡，這裡不搶
+            compare(cancel.activeFocus, false)
+            compare(otherDialog.opened, true)
+
+            keyClick(Qt.Key_Return)                                     // 按掉上面那一個
+            tryCompare(otherDialog, "visible", false, 2000)
+            tryCompare(cancel, "visualFocus", true, 2000)               // 焦點回到這個對話框，看得到
+            compare(VrLauncher.cancelCalls, 0)
+            keyClick(Qt.Key_Return)
+            compare(VrLauncher.cancelCalls, 1)
+            compare(behind.activations, 0)
             waitClosed()
         }
     }

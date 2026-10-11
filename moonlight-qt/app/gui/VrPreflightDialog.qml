@@ -143,6 +143,24 @@ NavigableDialog {
         }
     }
 
+    // 視窗失去焦點再回來（例：等連線變快的時候叫出系統的介面再回來——這個對話框可能開很久），或對話框出現時
+    // 視窗剛好不在前景：Qt 把焦點還給原本那一顆，但原因是「視窗變成作用中」，按鈕不畫焦點框。A 仍然作用在
+    // 那一顆上，畫面上卻看不出是哪一顆，而兩顆的結果相反。視窗回到前景時補上。
+    function windowActiveChanged() {
+        if (content.windowIsActive()) {
+            // 這時候 Qt 已經把焦點還完了；延後一拍，不在它的通知裡面再搬一次焦點
+            Qt.callLater(restoreFocusRing)
+        }
+    }
+
+    function restoreFocusRing() {
+        var button = lastFocusButton || cancelButton
+        // 焦點在別的 popup 裡不動它；在後面那一頁的由 reclaimFocus() 處理
+        if (shown && visible && focusPlace() === 1 && !button.visualFocus) {
+            giveFocus(button)
+        }
+    }
+
     Component.onCompleted: sync()
 
     onOpened: {
@@ -200,7 +218,12 @@ NavigableDialog {
             return Window.activeFocusItem
         }
 
+        function windowIsActive() {
+            return Window.active
+        }
+
         Window.onActiveFocusItemChanged: dialog.focusMoved()
+        Window.onActiveChanged: dialog.windowActiveChanged()
 
         // 文字最寬到這裡就換行（對話框的寬度跟著內容）。上限要設在每一個 Label 上：設在外層的 RowLayout 上
         // 只會限制排版時給的寬度，對話框還是會照沒換行的那一行撐開
