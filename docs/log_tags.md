@@ -1326,12 +1326,15 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
                                                                                            （`steam_frame_client.md`「host 直通時的兩種時序」）。多出來的那幾張在 timing ring 裡
                                                                                            是「跨 0 格」的紀錄：server 知道這一段是自己開的，節拍偵測器不把它們當成不可能的值，
                                                                                            另外計在下面 `timing 10s` 行尾的 `freeRun`（不影響 `cadence`，也不會有 suspect 警告）
-[VIPLE-VR-KICK] one period behind the game (presentPhase p50=… p90=… ms over N frames, echoAge p50=… ms over M frames, period … ms): free-run for … ms (#n)
+[VIPLE-VR-KICK] one period behind the game (presentPhase p50=… p90=… ms over N frames, echoAge p10/p50=…/… ms over M frames, period … ms): free-run for … ms (#n)
                                                                                     ← server（§VR-DIRECT-KICK，`vr_direct_kick = enabled`，2026-10-10；echoAge 是 2026-10-11 加的）：host 直通
                                                                                        落在多一格的時序（B）連續 3 秒，自動做一次 kick 的那一刻。判定為 B 要最近 1 秒的兩個量都成立
                                                                                        （每 100 ms 評估一次）：presentPhase 至少 24 張、p50 < 1.15 ms、p90 < 2.2 ms（印的 p50／p90／N 就是
                                                                                        那一秒的）；回聲年齡至少 24 筆、p50 ≥ 5.5 ms＋半個週期（60 Hz 是 13.8 ms、72 Hz 12.4、90 Hz 11.1；
-                                                                                       印的 echoAge p50／M 就是那一秒的）。回聲年齡＝[VIPLE-VR-CAP] 10s 行的 echoAge 同一個量（影像 Present
+                                                                                       印的 echoAge p50／M 就是那一秒的）。echoAge 的 p10＝同一秒的第 10 百分位，只印不判：判定只比中位數
+                                                                                       的下限，追蹤樣本一陣一陣到（相鄰兩批隔 22 ms 以上）時沒有多一格的畫面 p50 也會過門檻，那時 p10
+                                                                                       還是只有幾毫秒；真的多一格時每一張都舊一格，p10 照理和 p50 差不多（還沒有實際的數據，收到再決定
+                                                                                       要不要把 p10 加進判定）。回聲年齡＝[VIPLE-VR-CAP] 10s 行的 echoAge 同一個量（影像 Present
                                                                                        的時刻減掉它用的姿態被發布給 driver 的時刻），擷取端每收下一張對到姿態的影像交一筆；B 比等遊戲
                                                                                        這一格（A）多一個週期（60 Hz：A 4.4～7.7 ms、B 17.7～20.7 ms）。只看 presentPhase 會誤判：遊戲還在
                                                                                        載入、第 0 層是合成器自己的畫面時 presentPhase 一樣小（2026-10-11：p50 0.79～1.22 ms，連推三次都

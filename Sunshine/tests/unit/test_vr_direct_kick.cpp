@@ -335,14 +335,15 @@ namespace {
 
 // ── 視窗與統計量 ─────────────────────────────────────────────────────────
 
-TEST(VrDirectKickWindow, MedianAndP90UseTheSameRankAsTheTimingSummary) {
+TEST(VrDirectKickWindow, MedianP90AndP10UseTheSameRankAsTheTimingSummary) {
   // 排好序的 n 筆裡取第 round(q × (n − 1)) 筆（從 0 數；bridge 10 秒摘要的 presentPhase 也是這樣取）
   struct case_t {
     int n;
     int median_idx;
     int p90_idx;
+    int p10_idx;
   };
-  for (const case_t &c : {case_t {1, 0, 0}, case_t {2, 1, 1}, case_t {24, 12, 21}, case_t {25, 12, 22}, case_t {60, 30, 53}, case_t {91, 45, 81}, case_t {100, 50, 89}}) {
+  for (const case_t &c : {case_t {1, 0, 0, 0}, case_t {2, 1, 1, 0}, case_t {24, 12, 21, 2}, case_t {25, 12, 22, 2}, case_t {60, 30, 53, 6}, case_t {91, 45, 81, 9}, case_t {100, 50, 89, 10}}) {
     detector_t d;
     d.reset(kT60, kStart);
     const int64_t now = kStart + 10 * kSec;
@@ -354,6 +355,7 @@ TEST(VrDirectKickWindow, MedianAndP90UseTheSameRankAsTheTimingSummary) {
     EXPECT_EQ(s.n, c.n);
     EXPECT_EQ(s.median_ns, (c.median_idx + 1) * kUs) << "n=" << c.n;
     EXPECT_EQ(s.p90_ns, (c.p90_idx + 1) * kUs) << "n=" << c.n;
+    EXPECT_EQ(s.p10_ns, (c.p10_idx + 1) * kUs) << "n=" << c.n;
   }
   // 一筆都沒有
   detector_t empty;
@@ -361,6 +363,7 @@ TEST(VrDirectKickWindow, MedianAndP90UseTheSameRankAsTheTimingSummary) {
   EXPECT_EQ(empty.recent(kStart + kSec).n, 0);
   EXPECT_EQ(empty.recent(kStart + kSec).median_ns, 0);
   EXPECT_EQ(empty.recent(kStart + kSec).p90_ns, 0);
+  EXPECT_EQ(empty.recent(kStart + kSec).p10_ns, 0);
 }
 
 TEST(VrDirectKickWindow, CoversExactlyTheLastSecond) {
@@ -427,6 +430,7 @@ TEST(VrDirectKickWindow, EchoAgesHaveTheirOwnWindowWithTheSameRules) {
     const stats_t e = d.recent_echo(now);
     EXPECT_EQ(e.n, n);
     EXPECT_EQ(e.median_ns, (n / 2 + 1) * kMs) << "n=" << n;  // 排好序的第 round(0.5 × (n − 1)) 筆（從 0 數）＝第 n/2 筆
+    EXPECT_EQ(e.p10_ns, ((n + 4) / 10 + 1) * kMs) << "n=" << n;  // 第 round(0.1 × (n − 1)) 筆＝第 (n + 4)/10 筆
     EXPECT_EQ(d.recent(now).n, n);
     EXPECT_EQ(d.recent(now).median_ns, 800 * kUs);
   }
@@ -609,8 +613,11 @@ TEST(VrDirectKickDetect, KicksOnceAfterThreeSecondsOfB) {
     // 回聲年齡：每一張影像一筆，比等遊戲這一格時多一個週期
     EXPECT_TRUE(between(k.d.echo_samples, c.per_second - 1, c.per_second + 1));
     EXPECT_TRUE(between(k.d.echo_before_ns, c.period + 1'000'000, c.period + 4'000'000));
+    // 每一張都舊一格，所以第 10 百分位也在同一段裡（不大於中位數）
+    EXPECT_TRUE(between(k.d.echo_p10_before_ns, c.period + 1'000'000, k.d.echo_before_ns));
     EXPECT_EQ(k.d.echo_after_ns, 0);  // 結果才有
     EXPECT_EQ(s.ev[1].d.event, event_e::result_ok);
+    EXPECT_EQ(s.ev[1].d.echo_p10_before_ns, 0);  // 第 10 百分位只有 kick 帶
     // 確認用的是 1.5 秒的樣本（90 Hz 是 135 筆：環要裝得下）
     EXPECT_TRUE(between(s.ev[1].d.samples, c.per_second * 3 / 2 - 2, c.per_second * 3 / 2 + 2));
     EXPECT_TRUE(between(s.ev[1].d.echo_samples, c.per_second * 3 / 2 - 2, c.per_second * 3 / 2 + 2));
@@ -676,6 +683,7 @@ TEST(VrDirectKickDetect, DwellIsExactlyThreeSeconds) {
       EXPECT_EQ(d.p90_before_ns, 800'000);
       EXPECT_EQ(d.echo_samples, 100);
       EXPECT_EQ(d.echo_before_ns, 19'000'000);
+      EXPECT_EQ(d.echo_p10_before_ns, 19'000'000);
     }
   }
 }
@@ -1730,6 +1738,7 @@ TEST(VrDirectKickEcho, LooksAtTheMedian) {
   ASSERT_EQ(few.ev.size(), 1u) << few.dump();
   EXPECT_EQ(few.ev[0].d.event, event_e::kick);
   EXPECT_EQ(few.ev[0].d.echo_before_ns, 19 * kMs);
+  EXPECT_EQ(few.ev[0].d.echo_p10_before_ns, 1 * kMs);  // 第 10 百分位落在短的那一群上：只帶出去，不影響判定
 
   // 反過來：三筆裡有一筆很長（姿態樣本晚到），其餘是等遊戲這一格的 5 ms。平均 23 ms，中位數是 5 ms：不推
   sim_t rare(kT60, mode_e::b);
@@ -1741,6 +1750,30 @@ TEST(VrDirectKickEcho, LooksAtTheMedian) {
   EXPECT_TRUE(rare.ev.empty()) << rare.dump();
   EXPECT_EQ(rare.det.recent_echo(rare.now).median_ns, 5 * kMs);
   EXPECT_EQ(rare.det.recent_echo(rare.now).p90_ns, 60 * kMs);
+}
+
+TEST(VrDirectKickEcho, TheLowQuantileIsCarriedButNotDecidedOn) {
+  // 已知的限制（標頭檔頭「回聲年齡的限制」）：判定只比中位數的下限。追蹤樣本一陣一陣到的時候，每一張的回聲年齡都
+  // 多出「離上一批多久」。這裡是合成器自己的畫面（presentPhase 像多一格）＋回聲年齡 2.7～42.7 ms 均勻：沒有多一格，
+  // 但中位數約 22.7 ms、過了門檻，照樣會推。kick 帶的第 10 百分位（約 6.7 ms）看得出這不是真的多一格——目前它只
+  // 帶出去給 log，不參與判定；之後若把它加進條件，這一段要跟著改
+  sim_t gappy(kT60, mode_e::load);
+  gappy.echo = echo_e::band;
+  gappy.echo_lo = 2'700'000;
+  gappy.echo_hi = 42'700'000;
+  gappy.run(9 * kSec);
+  ASSERT_EQ(gappy.ev.size(), 1u) << gappy.dump();
+  EXPECT_EQ(gappy.ev[0].d.event, event_e::kick);
+  EXPECT_TRUE(between(gappy.ev[0].t - kStart, 8 * kSec, 8 * kSec + 100 * kMs));
+  EXPECT_GE(gappy.ev[0].d.echo_before_ns, 13'833'333);
+  EXPECT_TRUE(between(gappy.ev[0].d.echo_p10_before_ns, 2'700'000, 12'000'000));  // 離門檻還遠
+
+  // 對照：真的多一格時每一張都舊一格，第 10 百分位也在門檻以上
+  sim_t real(kT60, mode_e::b);
+  real.run(9 * kSec);
+  ASSERT_EQ(real.ev.size(), 1u) << real.dump();
+  EXPECT_EQ(real.ev[0].d.event, event_e::kick);
+  EXPECT_TRUE(between(real.ev[0].d.echo_p10_before_ns, 17'666'666, real.ev[0].d.echo_before_ns));
 }
 
 TEST(VrDirectKickEcho, DwellStartsWhenBothConditionsHold) {
@@ -2173,6 +2206,9 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
             // 回聲年齡也要成立：至少 24 筆、中位數多了半個週期以上
             ASSERT_GE(d.echo_samples, 24);
             ASSERT_GE(d.echo_before_ns, 5'500'000 + g.period / 2);
+            // 第 10 百分位只是帶出去：不會比中位數大、不會是負的（負的回聲年齡進不了環）
+            ASSERT_LE(d.echo_p10_before_ns, d.echo_before_ns);
+            ASSERT_GE(d.echo_p10_before_ns, 0);
             // 載入畫面不會被推：視窗換成它的回聲年齡（半秒多）之後就不成立，連續成立的計時也跟著歸零
             ASSERT_FALSE(mode == 6 && eff - mode_since > 1'500 * kMs) << "kick " << (eff - mode_since) / kMs << " ms into a loading screen";
             ASSERT_GE(d.burst_ns, 20 * kMs);

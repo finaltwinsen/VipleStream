@@ -3056,12 +3056,15 @@ namespace vr::bridge {
             c.kick_det.kick_not_done();  // 當成沒發生過（不印）：那時還是多一格的話，再連續成立 3 秒會再回一次
             break;
           }
+          // echoAge 多印第 10 百分位（不參與判定）：真的多一格時它和 p50 差不多，p50 是被追蹤樣本的到達間隔灌大的時候
+          // 它只有幾毫秒
           BOOST_LOG(info) << std::format(
-            "[VIPLE-VR-KICK] one period behind the game (presentPhase p50={:.2f} p90={:.2f} ms over {} frames, echoAge p50={:.2f} ms over {} frames,"
-            " period {:.2f} ms): free-run for {:.2f} ms (#{})",
+            "[VIPLE-VR-KICK] one period behind the game (presentPhase p50={:.2f} p90={:.2f} ms over {} frames,"
+            " echoAge p10/p50={:.2f}/{:.2f} ms over {} frames, period {:.2f} ms): free-run for {:.2f} ms (#{})",
             to_ms(d.median_before_ns),
             to_ms(d.p90_before_ns),
             d.samples,
+            to_ms(d.echo_p10_before_ns),
             to_ms(d.echo_before_ns),
             d.echo_samples,
             to_ms(c.kick_det.period_ns()),

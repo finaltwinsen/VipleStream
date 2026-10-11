@@ -50,8 +50,15 @@
  * 寫入方（driver）不可信：樣本的時刻與數值都可能是錯的（回聲年齡用的 Present 時刻也是它寫的）。這裡不會因為它們
  * 而溢位、除以零或卡住——時刻在未來的樣本要等「現在」追上它才算，太舊的不算，負的數值直接丟；最壞的結果是誤判，
  * 而誤判的代價有上限（(d)、(g)）。
- * 回聲年齡的限制：driver 是拿遊戲算圖用的姿態去比對它回報過的樣本，頭部靜止的無人場次每一筆樣本的姿態都一樣，
- * 分不出是哪一筆，回聲年齡不可靠——那種場次就算在 B 也可能不 kick（要驗這個功能得讓頭動起來）。
+ * 回聲年齡的限制：
+ *   - driver 是拿遊戲算圖用的姿態去比對它回報過的樣本，頭部靜止的無人場次每一筆樣本的姿態都一樣，分不出是哪一筆，
+ *     回聲年齡不可靠——那種場次就算在 B 也可能不 kick（要驗這個功能得讓頭動起來）。
+ *   - (a) 只比中位數的下限。回聲年齡是 Present 的時刻減掉姿態被發布的時刻；追蹤樣本一陣一陣到的時候，每一張都多出
+ *     「離上一批多久」（driver 只在 Present 前 100 ms 內的樣本裡找）。用合成的序列試過（60 Hz、合成器自己的畫面、
+ *     回聲年齡＝2.7 ms＋0～G 均勻）：G 在 20 ms 以下不會誤判，22 ms 時 20 場有 12 場，24 ms 以上每一場都和只看
+ *     presentPhase 時一樣每 120 秒推 3 次——這個條件形同不存在（要持續 3 秒以上才會發生；代價仍由退避與 (d)、(g)
+ *     封頂）。真的在 B 時每一張都至少舊一格，最小的那幾筆照理也在門檻以上，所以 kick 另外帶第 10 百分位給 log
+ *     （decision_t::echo_p10_before_ns）。目前只印不判：還沒有實際的數據，等收到再決定要不要把它加進 (a)。
  */
 #pragma once
 
@@ -157,6 +164,9 @@ namespace vr::kick {
     /// after＝確認用的那 1.5 秒（兩種 result；只給 log 用，成不成功不看它）
     int64_t echo_before_ns = 0;
     int64_t echo_after_ns = 0;
+    /// kick：判定用的那 1 秒裡回聲年齡的第 10 百分位。只給 log 用、不參與判定：真的多一格時每一張都舊一格，它和
+    /// 中位數差不多；中位數是被追蹤樣本的到達間隔灌大的時候，它還是只有幾毫秒（檔頭「回聲年齡的限制」）
+    int64_t echo_p10_before_ns = 0;
     /// 回聲年齡有幾筆。kick：判定用的視窗裡（一定 ≥ k_echo_min_samples）；兩種 result：確認用的那 1.5 秒裡——
     /// < k_echo_min_samples 時 echo_after_ns 不可信（一筆都沒有時是 0）
     int echo_samples = 0;
@@ -164,11 +174,12 @@ namespace vr::kick {
     int64_t next_try_ns = 0;  ///< result_no_change：下一次最早多久以後（從現在算）
   };
 
-  /// 一段時間內的樣本的統計量（n == 0 時另外兩個是 0）
+  /// 一段時間內的樣本的統計量（n == 0 時其餘都是 0）
   struct stats_t {
     int n = 0;
     int64_t median_ns = 0;
     int64_t p90_ns = 0;
+    int64_t p10_ns = 0;  ///< 第 10 百分位（只有回聲年齡的 log 用）
   };
 
   namespace detail {
@@ -392,6 +403,7 @@ namespace vr::kick {
       d.p90_before_ns = s.p90_ns;
       d.samples = s.n;
       d.echo_before_ns = e.median_ns;
+      d.echo_p10_before_ns = e.p10_ns;
       d.echo_samples = e.n;
       d.kick_no = kicks_;
       return d;
@@ -456,7 +468,7 @@ namespace vr::kick {
       return phase_.between(window_begin(now_ns), now_ns);
     }
 
-    /// 同一個視窗裡的回聲年齡（p90 沒有人用，只是順便算出來）
+    /// 同一個視窗裡的回聲年齡（判定只看筆數與中位數；p10 給 log 用，p90 沒有人用、只是順便算出來）
     stats_t recent_echo(int64_t now_ns) const {
       return echo_.between(window_begin(now_ns), now_ns);
     }
@@ -506,6 +518,7 @@ namespace vr::kick {
         std::sort(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(n));
         s.median_ns = v[detail::quantile_index(n, 1, 2)];
         s.p90_ns = v[detail::quantile_index(n, 9, 10)];
+        s.p10_ns = v[detail::quantile_index(n, 1, 10)];
         return s;
       }
     };
