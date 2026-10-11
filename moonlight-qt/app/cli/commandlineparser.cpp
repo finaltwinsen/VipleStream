@@ -638,6 +638,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("vr-latch-wait", "PCVR: after --vr-latch-delay, wait up to this many milliseconds (0-1.0) for the stream frame that is due "
                           "on this display refresh when it has not arrived yet; the delay plus the wait never exceeds 6 ms "
                           "(this run only, the saved setting is not changed; no effect with --vr-synth; default 0)");
+    parser.addValueOption("vr-latch-flight", "PCVR: after --vr-latch-delay, when a stream frame has already been handed to the GPU and is about "
+                          "to finish, wait up to this many milliseconds (0-1.0) for it instead of showing the previous frame again. "
+                          "Nothing in flight means no wait; works with --vr-synth; replaces --vr-latch-wait when both are set "
+                          "(this run only, the saved setting is not changed; default 0)");
     parser.addValueOption("vr-latch-ab", "(dev) PCVR: switch the armed latch experiments on and off every this many seconds (0 = off, 20-600), "
                           "for a same-session comparison. Not saved.");
     parser.addChoiceOption("vr-repair-rtt", "PCVR multi-link: whether this client offers the repair rules that follow the measured round trip "
@@ -992,6 +996,15 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError(QString("vr-latch-wait must be a number of milliseconds within 0-1.0: %1").arg(parser.value("vr-latch-wait")));
         }
         preferences->cliLatchWaitMs = ms;
+    }
+    if (parser.isSet("vr-latch-flight")) {
+        // §VR-LATCH-FLIGHT：只覆寫這一次（不改 vrLatchFlightMs）。0＝這一場不等，即使保存的設定有開
+        bool ok = false;
+        const double ms = parser.value("vr-latch-flight").toDouble(&ok);
+        if (!ok || !(ms >= 0.0 && ms <= 1.0)) {
+            parser.showError(QString("vr-latch-flight must be a number of milliseconds within 0-1.0: %1").arg(parser.value("vr-latch-flight")));
+        }
+        preferences->cliLatchFlightMs = ms;
     }
     if (parser.isSet("vr-latch-ab")) {
         // §VR-LATCH A/B：只覆寫這一次（不改 vrLatchAbSec）。0＝這一場不切換，即使保存的設定有開

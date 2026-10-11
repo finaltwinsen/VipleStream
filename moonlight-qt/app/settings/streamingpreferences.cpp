@@ -89,6 +89,7 @@
 #define SER_VRLATCHRELATCH "vrlatchrelatch"
 #define SER_VRLATCHABSEC "vrlatchabsec"
 #define SER_VRLATCHWAITMS "vrlatchwaitms"
+#define SER_VRLATCHFLIGHTMS "vrlatchflightms"
 #define SER_VRREPAIRRTT "vrrepairrtt"
 #define SER_VRREPAIRHOLDMS "vrrepairholdms"
 #define SER_VRSYNTH "vrsynth"
@@ -314,6 +315,11 @@ void StreamingPreferences::reload()
         vrLatchAbSec = (ab >= 20 && ab <= 600) ? ab : 0;
     }
     vrLatchWaitMs = qBound(0.0, settings.value(SER_VRLATCHWAITMS, 0.0).toDouble(), 1.0);
+    {
+        // §VR-LATCH-FLIGHT：0～1.0 ms。超出範圍（或不是數字）當成 0＝關，不夾到上限——手動設錯值時寧可不作用
+        const double flight = settings.value(SER_VRLATCHFLIGHTMS, 0.0).toDouble();
+        vrLatchFlightMs = (flight >= 0.0 && flight <= 1.0) ? flight : 0.0;
+    }
     vrRepairRtt = settings.value(SER_VRREPAIRRTT, true).toBool();
     {
         // 0＝自動；其他值要在 8～100 ms 內，超出範圍當成 0
@@ -624,6 +630,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_VRLATCHRELATCH, vrLatchRelatch);
     settings.setValue(SER_VRLATCHABSEC, vrLatchAbSec);
     settings.setValue(SER_VRLATCHWAITMS, vrLatchWaitMs);
+    settings.setValue(SER_VRLATCHFLIGHTMS, vrLatchFlightMs);
     settings.setValue(SER_VRREPAIRRTT, vrRepairRtt);
     settings.setValue(SER_VRREPAIRHOLDMS, vrRepairHoldMs);
     settings.setValue(SER_VRSYNTH, vrSynth);

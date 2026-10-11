@@ -2766,6 +2766,8 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     xo.pcvrLatchAbSec = m_XrPcvr ? m_Preferences->effectiveLatchAbSec() : 0;   // §VR-LATCH A/B（--vr-latch-ab 優先）
     // §VR-LATCH-WAIT（--vr-latch-wait 優先）。串流是不是半速要等量到更新率才知道，見 setupXrPcvr() 的 setPcvrStreamDiv
     xo.pcvrLatchWaitUs = m_XrPcvr ? static_cast<uint32_t>(std::lround(std::clamp(m_Preferences->effectiveLatchWaitMs(), 0.0, 1.0) * 1000.0)) : 0u;
+    // §VR-LATCH-FLIGHT（--vr-latch-flight 優先）。設了它上面的等待就不作用（XrContext::pcvrLatchWaitEffUs）
+    xo.pcvrLatchFlightUs = m_XrPcvr ? static_cast<uint32_t>(std::lround(std::clamp(m_Preferences->effectiveLatchFlightMs(), 0.0, 1.0) * 1000.0)) : 0u;
     xo.pcvrOverscanDeg = m_XrPcvr ? static_cast<float>(m_Preferences->vrOverscanDeg) : 0.0f;  // dev：--vr-overscan
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
     xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
@@ -2779,13 +2781,18 @@ bool Session::createXrContext(bool isRebuild, QString* error)
         // predictAhead 是猜不準的）。halfRate 是設定值，實際有沒有減半看 [VIPLE-VR-SESSION] half-rate 那一行
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-LDIAG] client cfg: latchDelay=%.1f ms trackLock=%d halfRate=%d synth=%d fovea=%d overscan=%.1f jitter=%s"
-                    " trackRelock=%d latchRelatch=%d latchWait=%.2f ms abSec=%d",
+                    " trackRelock=%d latchRelatch=%d latchWait=%.2f ms abSec=%d flight=%.2f ms",
                     xo.pcvrLatchDelayUs / 1000.0, xo.pcvrTrackLock ? 1 : 0, m_Preferences->vrHalfRate ? 1 : 0, xo.pcvrSynth ? 1 : 0,
                     m_Preferences->vrFoveation, static_cast<double>(xo.pcvrOverscanDeg),
                     xo.testJitter.isEmpty() ? "off" : qUtf8Printable(xo.testJitter), xo.pcvrTrackRelock ? 1 : 0,
                     // 補幀開著時 relatch 與等待都不作用：印實際會用的值（等待另外受「延後＋等待 ≤ 6 ms」限制，
-                    // 而且 Windows 上不作用，見 XrContext::pcvrLatchWaitSupported；生效的上限在 10 s 行的 wait=）
-                    xo.pcvrLatchRelatch && !xo.pcvrSynth ? 1 : 0, xo.pcvrSynth ? 0.0 : xo.pcvrLatchWaitUs / 1000.0, xo.pcvrLatchAbSec);
+                    // 而且 Windows 上不作用，見 XrContext::pcvrLatchWaitSupported；生效的上限在 10 s 行的 wait=）。
+                    // 設了 §VR-LATCH-FLIGHT 時等待也不作用，同樣印 0
+                    xo.pcvrLatchRelatch && !xo.pcvrSynth ? 1 : 0,
+                    (xo.pcvrSynth || xo.pcvrLatchFlightUs > 0) ? 0.0 : xo.pcvrLatchWaitUs / 1000.0, xo.pcvrLatchAbSec,
+                    // §VR-LATCH-FLIGHT：行尾新增，印的是設定值（補幀開著也作用）。平台、延後量、更新率造成的不作用由
+                    // XrContext 另外印一行 `latch flight … ignored`；實際的上限在 10 s 行的 flight=
+                    xo.pcvrLatchFlightUs / 1000.0);
     }
     // X5（dev）：--xr-test-fail。首次：bringup＝直接失敗；loss／loss3／exit＝15 s 後模擬。
     // 重建：loss3＝每次都失敗（驗 3 次後退回平面）；loss＝重建成功且不再注入。

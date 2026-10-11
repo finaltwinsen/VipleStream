@@ -491,6 +491,12 @@ public:
     double vrLatchWaitMs = 0.0;
     double cliLatchWaitMs = -1.0;
     double effectiveLatchWaitMs() const { return cliLatchWaitMs >= 0.0 ? cliLatchWaitMs : vrLatchWaitMs; }
+    // §VR-LATCH-FLIGHT：延後挑影像之後，有一張串流影像已經送進 GPU、只差一點就做完的話多等它，最多幾毫秒
+    // （0～1.0；0＝不等）；寫入設定（vrlatchflightms，預設 0；超出範圍當成 0）。--vr-latch-flight <ms> 只覆寫這一次、
+    // 不存設定（負值＝命令列沒指定）。補幀（vrSynth）開著時也作用；設了它 vrLatchWaitMs 就不作用（兩種等待不疊加）
+    double vrLatchFlightMs = 0.0;
+    double cliLatchFlightMs = -1.0;
+    double effectiveLatchFlightMs() const { return cliLatchFlightMs >= 0.0 ? cliLatchFlightMs : vrLatchFlightMs; }
     // §VR-REPAIR-RTT：client 願不願意讓補包的門檻、等待、重報跟著量到的往返時間走；寫入設定（vrrepairrtt，預設開
     // ＝跟著 host）。實際用不用由 host 的 vr_multilink_repair_rtt 決定。--vr-repair-rtt on|off 只覆寫這一次、不存設定
     // （-1＝命令列沒指定）
