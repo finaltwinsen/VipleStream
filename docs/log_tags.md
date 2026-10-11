@@ -688,9 +688,10 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-ENC] probe: HEVC 10-bit supported|not supported                              ← §VR-10BIT：VR 探測（來源 display_vr）測 HEVC 10-bit 的結果
 [VIPLE-VR-SESSION] 10-bit HEVC (Main10, SDR) requested by the client                    ← §VR-10BIT（server）：這個 VR session 用 10-bit 編碼
 [VIPLE-VR-SESSION] 10-bit was requested (vr10bit) but this device's hardware decoder path only outputs 8-bit - streaming 8-bit   ← client（Frame）：不要求 10-bit
-[VIPLE-VR-LDIAG] client cfg: latchDelay=… ms trackLock=… halfRate=… synth=… fovea=… overscan=… jitter=<spec|off> trackRelock=… latchRelatch=… latchWait=… ms abSec=…
-                                                                                    ← client，PCVR 第一次建立 XR 時印一次：這一場 client 端的設定值（2026-10-09 起；之前的 log 查不到延後挑影像是幾毫秒）
-[VIPLE-VR-LDIAG] 10s late=N lateShift=N gap=N early=N catchup=N lateMax=N us | held=N heldMiss=N rtyp=N us pubLag p50/p95=… us | wake2latch p50/p95/max=… us latchPhase p50=… us | age p50/p95/p99=… ms | slackPub(250us)=n0,n1,…[ wait=… ms waited=N saved=N timeout=N] | events=N …（2026-10-11 起，見 5b-6）[ ab=<0|1>]
+[VIPLE-VR-LDIAG] client cfg: latchDelay=… ms trackLock=… halfRate=… synth=… fovea=… overscan=… jitter=<spec|off> trackRelock=… latchRelatch=… latchWait=… ms abSec=… flight=… ms
+                                                                                    ← client，PCVR 第一次建立 XR 時印一次：這一場 client 端的設定值（2026-10-09 起；之前的 log 查不到延後挑影像是幾毫秒）。
+                                                                                       行尾的 flight＝§VR-LATCH-FLIGHT 的設定值（2026-10-11 起，見 5b-7）
+[VIPLE-VR-LDIAG] 10s late=N lateShift=N gap=N early=N catchup=N lateMax=N us | held=N heldMiss=N rtyp=N us pubLag p50/p95=… us | wake2latch p50/p95/max=… us latchPhase p50=… us | age p50/p95/p99=… ms | slackPub(250us)=n0,n1,…[ wait=… ms waited=N saved=N timeout=N] | events=N …（2026-10-11 起，見 5b-6）[ | flight=… …（設了 vrlatchflightms 才有，見 5b-7）][ ab=<0|1>]
                                                                                     ← client 每 10 s，緊接在 [VIPLE-VR-MTP10] 之後（視窗相同）。量測一律開著，不改變呈現。
                                                                                        late＝有影像但沒趕上自己那一格、被下一張蓋掉（串流幀數）；lateShift＝整條對位晚幾格（顯示格數）；
                                                                                        gap＝那一格根本沒有影像（host 沒出、掉包，或到了 client 沒發布——對照 10s video 的 overwritten／errors）；
@@ -840,7 +841,7 @@ PCVR 走真 XR 時 client 這一側的量測：一律開著、不改變任何一
                                                                                  不存設定，0＝這一場不切換）優先，沒帶才用保存的 `vrlatchabsec`
 [VIPLE-VR-LDIAG] ab: N switches are armed and will toggle together: latchRelatch, latchWait
                                                                               ← warning，bring-up 時一次：開了同場切換、會跟著切的開關卻有兩個以上——分不出是誰的效果，
-                                                                                 要比哪一個就只開那一個
+                                                                                 要比哪一個就只開那一個。名單裡可能出現的名稱：latchRelatch、latchWait、latchFlight（5b-7）
 [VIPLE-XR] 10s video …原樣… ab=<0|1|m>                                        ← 行尾新增（開了同場切換才印）：這個視窗 99% 以上的格跑在哪一邊；m＝兩邊混在一起（換邊落在
                                                                                  視窗中間），不拿來比。這一行的 10 秒視窗是它自己的計時，但和 [VIPLE-VR-MTP10]／[VIPLE-VR-LDIAG]
                                                                                  的視窗一樣從第一格起算，整場只差幾格，所以平常和同一輪的 LDIAG 標的是同一邊：每一邊的最後
@@ -881,7 +882,7 @@ frame loop（XR 桌面也有）
                                                                                  （session 沒在跑、xrWaitFrame／xrBeginFrame 失敗的圈之後那一格不算）
 
 逐張的晚到計數（PCVR；不看分類器的基準）
-[VIPLE-VR-LDIAG] 10s …原樣…[ wait=…] | events=N stride=N waitNew=N waitBy(us<250,500,750,1000,1500,2500,4000,+)=n,n,n,n,n,n,n,n waitSlots(1,2,3+)=n,n,n resc=N rescBy(us<250,500,750,1000,1500,+)=n,n,n,n,n,n flip=N[ ab=<0|1>]
+[VIPLE-VR-LDIAG] 10s …原樣…[ wait=…] | events=N stride=N waitNew=N waitBy(us<250,500,750,1000,1500,2500,4000,+)=n,n,n,n,n,n,n,n waitSlots(1,2,3+)=n,n,n resc=N rescBy(us<250,500,750,1000,1500,+)=n,n,n,n,n,n flip=N[ | flight=…（5b-7）][ ab=<0|1>]
                                                                               ← 行尾新增（排在 wait=… 之後、ab= 之前）。
                                                                                  events＝多出來的重複顯示格數＝lateShift＋early＋stride×(late＋gap)。**流暢度看它**：late／lateShift／
                                                                                  early 怎麼分要靠分類器的基準，基準要連 120 張正常才更新，每場開頭與事件多的場次可能整場停在
@@ -939,7 +940,8 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
 
 自測
-[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑三個純邏輯 header 的自測、一共 71 個案例。
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑五個純邏輯 header 的自測、一共 103 個案例
+                                                                                 （前三個 header 的 71 個是 5b-6 這一批的，輸出不變；xrflight.h 20 個與 xrguard.h 12 個是 5b-7 加的）。
                                                                                  xrlatchstats.h：原有的 27 個（輸出不變），加上 `latch-wait-…`／`latch-flip-…`／
                                                                                  `latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到計數：差一點、真的晚、150 µs 的
                                                                                  邊界、半速、基準過期、兩張擠在同一格、沒有送出時刻、分格的邊界、隨機腳本的自洽）；
@@ -949,7 +951,12 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  分位數的取法，逐一和排序的結果比對）與 `ab-window-side`（同場切換時一個視窗算哪一邊）；
                                                                                  xrvideostats.h 的 10 個：`video-…` 7 個（`10s video` 行尾那一段：空的視窗、全速、補幀那一批
                                                                                  橫跨接縫、沒有顯示格點、別的更新率、分位數的位置、視窗的輪替）與 `pass-…` 3 個
-                                                                                 （[VIPLE-VR-PASS]：pass 的名稱怎麼認、60 秒那一行、沒有計時只說一次）
+                                                                                 （[VIPLE-VR-PASS]：pass 的名稱怎麼認、60 秒那一行、沒有計時只說一次）；
+                                                                                 xrflight.h 的 20 個（`flight-…`，§VR-LATCH-FLIGHT 的判斷：四個條件各自的邊界與先後順序、
+                                                                                 半速＋補幀逐格、印 10 秒行的那一格、開場、顯示紀錄跟著 frame thread 走一段、GPU 時間
+                                                                                 典型值的估計、10 秒行那一段的計數與字串）；
+                                                                                 xrguard.h 的 12 個（`guard-…`，runtime 防護：基準從哪一秒起算、兩種觸發、只偏高一秒、
+                                                                                 另一邊發生的不算、冷卻加倍到上限、次數上限、漏幀的 10 秒視窗、嚴格大於的邊界）
 ```
 
 - 相位有兩種座標：這份文件裡 `latchPhase`、`gpu-by-phase` 與這一節新增的相位欄位都是 **LDIAG 相位**（原點是預測顯示時刻的
@@ -962,6 +969,60 @@ decoder 執行緒（VR 走真 XR 才有）
   橫跨 0／週期的接縫，照數值取的中位數看接縫落在哪裡會差一到四毫秒（拿既有場次的資料重建：`done` 差 0.8 ms 上下，
   `synthDone` 多數視窗差 1 ms 以上）。資料散得很開時這個數字每個視窗會差幾百微秒，比兩邊時看多個視窗的中位數。
   `latchPhase` 是既有欄位，仍是照數值取的（它只擠在一小段，沒有差別）。
+
+### 5b-7. 等在途的幀（§VR-LATCH-FLIGHT，2026-10-11）
+
+PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 GPU、只差一點就做完，多等它最多 `vrlatchflightms` 毫秒
+（保存鍵，0～1.0，預設 0＝關；`--vr-latch-flight <ms>` 只覆寫這一次、不存設定）。**已實作、預設關；還沒有經過正式建置，
+也還沒有在頭盔上跑過**——判斷條件與驗收場次見 `steam_frame_client.md`「頭盔端管線下一輪」裡「等在途的幀」那一項。
+沒設定時下面這些行與欄位都不出現、既有各行逐字不變，唯一的例外是 `client cfg` 行尾固定多一欄。
+
+```
+[VIPLE-VR-LDIAG] client cfg: …原樣… abSec=N flight=F ms                       ← 行尾新增（一律印）：flight＝這一場的設定值（毫秒；`--vr-latch-flight` 優先）。
+                                                                                 設了 flight 時 `latchWait=` 印 0.00：§VR-LATCH-WAIT 不作用，兩種等待不疊加
+[VIPLE-VR-LDIAG] latch flight F ms ignored: <原因>                             ← warning：設定了卻不作用。bring-up 時印的兩種是整場不作用——
+                                                                                 `timed waits on this platform are too coarse`（Windows：定時等待是毫秒級的）、
+                                                                                 `the latch delay of D ms leaves no room before the 6.5 ms limit`（延後＋0.1 ms ≥ 6.5 ms）。
+                                                                                 跑起來之後印的 `the display period is P us, not 120 Hz (…)` 一場最多一次：連續 600 格的
+                                                                                 顯示週期不在 8.17～8.50 ms。那個 6.5 ms 只在 120 Hz 量過，別的更新率一律不等；
+                                                                                 每一格都重新判斷，回到 120 Hz 就照常作用
+[VIPLE-VR-LDIAG] latch wait ignored: latch flight is set                       ← warning，bring-up 時一次：同時設了 `vrlatchwaitms`（而且補幀沒開），它不作用
+[VIPLE-VR-LDIAG] flight paused N s (predictAhead … ms, missed N)               ← warning：runtime 防護觸發。規則同 `wait paused`：predictAhead 連 2 s 高過基準半個週期
+                                                                                 （基準＝bring-up 3 s 之後看過的最小值），或 10 s 內 XR 漏 3 幀 → 暫停 N 秒（60 起每次加倍、
+                                                                                 上限 480），到時自動恢復、不另外印。同場切換的另一邊、暫停期間發生的不算。
+                                                                                 這一行在觸發的那一格送出去（xrEndFrame）之後才印
+[VIPLE-VR-LDIAG] 10s …原樣… flip=N | flight=F ms waited=N got=N timeout=N gate=N far=N noRoom=N wait p50/max=…/… us guard=<ok|paused> busy=N gTyp=… us[ ab=<0|1>]
+                                                                              ← 行尾新增（排在 flip= 之後、ab= 之前；設了 `vrlatchflightms` 才印，整場不作用時照印、數字都是 0）。
+                                                                                 視窗和這一行的其他欄位相同，ab 也是同一個。
+                                                                                 flight＝實際生效的上限（整場不作用時 0.00）；
+                                                                                 waited＝這 10 秒等了幾格（＝got＋timeout）；**got＝等到新影像的格數，主指標**——每一張都是
+                                                                                 不等就會重複上一張、它晚一格才出現的影像；timeout＝等到截止時刻的；
+                                                                                 gate／far／noRoom／busy 只數「有一張在途、卻因為那個條件沒有等」的格，照這個順序判斷，
+                                                                                 兩個條件同時不成立時記前面那一個：
+                                                                                 gate＝這一格不是重複格——最新發布的那一張還沒顯示過，或半速時它才顯示了一格（補幀開著時
+                                                                                 那一格要顯示合成的那一半，等到新影像會把它跳掉）；
+                                                                                 far＝剛送出，照典型的 GPU 時間（gTyp）上限之內做不完；
+                                                                                 noRoom＝離「xrWaitFrame 返回後 6.5 ms」不到 20 µs（延後量太大，或顯示不是 120 Hz）；
+                                                                                 busy＝本來會等，但這一格在 xrEndFrame 之後要印 10 秒行，所以沒等（那一格回到 xrWaitFrame
+                                                                                 本來就最晚）。用兩個 10 秒視窗的起點往前看一個顯示週期預測，每個視窗有 2～4 格受影響，
+                                                                                 這個數字是其中本來會等的；
+                                                                                 wait p50/max＝等過的那幾格實際等了多久（等到的也算；一次都沒等印 0/0）。max 比
+                                                                                 「6.5 ms − 延後 − 約 0.09 ms」多出來的部分，就是定時等待醒來晚了多少（頭盔上還沒有量過）；
+                                                                                 guard＝印這一行的當下防護是不是暫停中；
+                                                                                 gTyp＝frame thread 最近一次判斷時用的 GPU 時間典型值：影像 render thread 每 64 張取一次
+                                                                                 「送出 → 做完」的中位數、和舊值做 1／4 的平滑，夾在 300～5000 µs，起始 1500（0＝還沒判斷過）
+```
+
+- 開著時既有欄位的定義不變，數值會跟著變：等過的那幾格晚一點才挑影像（最多晚一個上限），所以 `wake2latch` 的 max、
+  `[VIPLE-VR-XRLOOP]` 的 `span max` 變大、`endLead min` 變小；被救回的影像在 `slackPub` 由最後幾格搬到第 0 格（生效的直接
+  證據）；`resc`／`rescBy` 變小（被救回的不再有等待格）——預測救得到幾張要看關的那一邊的 `rescBy`；送給 host 的 LATCH slack
+  對被救回的影像是很小的正值。
+- `got` 略為低估：截止時刻剛好落在「影像已經交還給 runtime、還沒發布」的那幾十微秒時記成 timeout，那一格其實挑得到它。
+- 影像那一側的 GPU 工作卡住時（等超過 1 秒才判定，接著 session 當成 lost），那一秒裡在途的標記還掛著，frame thread 每一格
+  都會等到截止時刻（每一格仍不超過 6.5 ms 的上限）。那個視窗若來得及印，`timeout` 會一次多出一百多次——是這個原因，
+  不是閘門壞了。
+- 同時設了 `vrlatchwaitms` 與 `vrlatchflightms` 時，一行裡有兩組 `waited=`／`timeout=`（前一組是 §VR-LATCH-WAIT 的，恆為 0）：
+  解析 flight 的欄位要從 ` | flight=` 之後找。
 
 ### 探測的開始與結束行
 
