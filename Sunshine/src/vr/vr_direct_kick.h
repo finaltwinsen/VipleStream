@@ -31,7 +31,9 @@
  *         presentPhase：至少 24 筆，中位數 < 1.15 ms 而且第 90 百分位 < 2.2 ms；
  *         回聲年齡：至少 24 筆，中位數 ≥ 5.5 ms（A 的典型值）＋半個週期，也就是 A 與 B 的正中間：60 Hz 是
  *           13.8 ms、72 Hz 12.4、90 Hz 11.1（後兩個是照同一條式子算的，沒有量測）。
- *       沒有回聲年齡的樣本（呼叫端沒有餵、沒有串流在擷取、影像都沒有對到姿態）就不可能成立。
+ *       沒有回聲年齡的樣本（呼叫端沒有餵、沒有串流在擷取、影像都沒有對到姿態）就不可能成立。兩邊的 24 筆是各自的
+ *       常數；回聲年齡的那一個在 60 Hz 等於每秒要有四成的影像對到姿態（對到的比例掉到四成上下，真的在 B 也不一定
+ *       kick 得出去；三成以下不會）。
  *       每 100 ms 評估一次，連續成立滿 3 秒（每一次評估都成立；有一次不成立、或兩次評估隔了超過 1 秒，就重新計時）
  *       → 回報 kick。沒有 Present 的時候兩個視窗都會自己變空（不到 24 筆＝不成立），不必另外清。
  *   (b) kick 的長度＝週期 × 1.25，夾在 20～40 ms。
@@ -69,10 +71,14 @@ namespace vr::kick {
 
   // (a) 判定為 B
   inline constexpr int64_t k_window_ns = k_ns_per_s;  ///< 判定用的視窗：最近這麼久的樣本
-  /// 視窗（與確認用的那一段）裡至少要有這麼多筆；presentPhase 與回聲年齡各自算
+  /// presentPhase：視窗（與確認用的那一段）裡至少要有這麼多筆
   inline constexpr int k_min_samples = 24;
   inline constexpr int64_t k_b_median_max_ns = 1'150'000;  ///< presentPhase 的中位數要小於這個值
   inline constexpr int64_t k_b_p90_max_ns = 2'200'000;  ///< presentPhase 的第 90 百分位要小於這個值
+  /// 回聲年齡：視窗裡至少要有這麼多筆。和 k_min_samples 是兩個常數（要調可以各調各的）：回聲年齡只有對到姿態的影像
+  /// 才有，所以這個數等於「每秒至少幾張影像要對到姿態」——60 Hz 是四成、72 Hz 三分之一、90 Hz 27%。
+  /// 確認用的那一段不到這麼多筆時，帶在結果裡的中位數不可信（log 印 n/a）
+  inline constexpr int k_echo_min_samples = 24;
   /// 回聲年齡的中位數要 ≥ 這個值＋週期 × 1/2。這個值＝等遊戲這一格（A）時的典型回聲年齡；多一格（B）時多一個
   /// 週期，門檻就在兩者的正中間（60 Hz：A 4.4～7.7 ms、門檻 13.8 ms、B 17.7～20.7 ms）
   inline constexpr int64_t k_echo_a_typical_ns = 5'500'000;
@@ -151,8 +157,8 @@ namespace vr::kick {
     /// after＝確認用的那 1.5 秒（兩種 result；只給 log 用，成不成功不看它）
     int64_t echo_before_ns = 0;
     int64_t echo_after_ns = 0;
-    /// 回聲年齡有幾筆。kick：判定用的視窗裡（一定 ≥ k_min_samples）；兩種 result：確認用的那 1.5 秒裡——
-    /// < k_min_samples 時 echo_after_ns 不可信（一筆都沒有時是 0）
+    /// 回聲年齡有幾筆。kick：判定用的視窗裡（一定 ≥ k_echo_min_samples）；兩種 result：確認用的那 1.5 秒裡——
+    /// < k_echo_min_samples 時 echo_after_ns 不可信（一筆都沒有時是 0）
     int echo_samples = 0;
     int kick_no = 0;  ///< 這個 generation 的第幾次 kick（所有事件都帶）
     int64_t next_try_ns = 0;  ///< result_no_change：下一次最早多久以後（從現在算）
@@ -349,7 +355,7 @@ namespace vr::kick {
       // 回聲年齡也要多了半個週期以上。合成器自己的畫面（遊戲還在載入）presentPhase 和 B 一樣小，只有這個量分得開；
       // 樣本不夠（沒有餵、沒有串流在擷取、影像沒有對到姿態）一律當成不成立
       const stats_t e = recent_echo(now);
-      if (e.n < k_min_samples || e.median_ns < echo_min_ns()) {
+      if (e.n < k_echo_min_samples || e.median_ns < echo_min_ns()) {
         dwell_active_ = false;
         return d;
       }

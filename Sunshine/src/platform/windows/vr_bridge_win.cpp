@@ -3046,7 +3046,7 @@ namespace vr::bridge {
       // 兩種 result 都印確認用的那 1.5 秒的回聲年齡中位數（只是給人看：成不成功偵測器只看 presentPhase）。
       // 那一段不到 24 筆（串流停了、影像沒有對到姿態）時量不出來：印 n/a
       const auto echo_after = [&]() {
-        return d.echo_samples >= vr::kick::k_min_samples ? std::format("{:.2f}", to_ms(d.echo_after_ns)) : std::string {"n/a"};
+        return d.echo_samples >= vr::kick::k_echo_min_samples ? std::format("{:.2f}", to_ms(d.echo_after_ns)) : std::string {"n/a"};
       };
       switch (d.event) {
         case vr::kick::event_e::none:
