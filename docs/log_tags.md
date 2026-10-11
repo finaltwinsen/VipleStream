@@ -1335,12 +1335,16 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
                                                                                        的下限，追蹤樣本一陣一陣到（相鄰兩批隔 22 ms 以上）時沒有多一格的畫面 p50 也會過門檻，那時 p10
                                                                                        還是只有幾毫秒；真的多一格時每一張都舊一格，p10 照理和 p50 差不多（還沒有實際的數據，收到再決定
                                                                                        要不要把 p10 加進判定）。回聲年齡＝[VIPLE-VR-CAP] 10s 行的 echoAge 同一個量（影像 Present
-                                                                                       的時刻減掉它用的姿態被發布給 driver 的時刻），擷取端每收下一張對到姿態的影像交一筆；B 比等遊戲
-                                                                                       這一格（A）多一個週期（60 Hz：A 4.4～7.7 ms、B 17.7～20.7 ms）。只看 presentPhase 會誤判：遊戲還在
-                                                                                       載入、第 0 層是合成器自己的畫面時 presentPhase 一樣小（2026-10-11：p50 0.79～1.22 ms，連推三次都
-                                                                                       沒有變化），那時回聲年齡只有 2.7～5.2 ms。沒有串流在擷取、影像都沒有對到姿態時沒有回聲年齡，
-                                                                                       不會有這一行；頭部靜止的無人場次回聲年齡不可靠，也可能不會有。presentPhase 像 B 而回聲年齡
-                                                                                       不成立的時候，印的是下面的 not kicking 行。
+                                                                                       的時刻減掉它用的姿態被發布給 driver 的時刻），擷取端每收下一張對到姿態的影像交一筆。60 Hz 量到
+                                                                                       等遊戲這一格（A）4.4～7.7 ms、B 17.7～20.7 ms：B 多 13.0～13.3 ms，不是整整一個週期（B 的 Present
+                                                                                       在格內也早 2～3 ms），所以 13.8 ms 的門檻離 A 的上緣 6.1 ms、離 B 的下緣只有 3.9 ms；72／90 Hz
+                                                                                       沒有量測，照同樣的差外推，B 的下緣離門檻只剩約 2.4 與 1.0 ms。
+                                                                                       只看 presentPhase 會誤判：2026-10-11 遊戲還在載入、第 0 層是合成器自己的畫面的那一兩分鐘連推三次
+                                                                                       都沒有變化（當下 presentPhase p50 0.79～1.00 ms）。對照 log，那三次都在 client 不在的時候——斷線後
+                                                                                       沒有追蹤樣本、影像都對不到姿態，或沒有串流在擷取——判定的視窗裡一筆回聲年齡都沒有；同一段載入、
+                                                                                       追蹤樣本還在到的視窗，回聲年齡 p50 是 2.7～5.2 ms（presentPhase p50 1.17～2.13 ms）。兩種現在都不推：
+                                                                                       沒有回聲年齡、或回聲年齡沒有多一格，就不會有這一行；頭部靜止的無人場次回聲年齡不可靠，也可能
+                                                                                       不會有。presentPhase 像 B 而回聲年齡不成立的時候，印的是下面的 not kicking 行。
                                                                                        period＝host 的顯示週期；free-run＝PostPresent 立即返回多久（週期 × 1.25，夾在 20～40 ms）；
                                                                                        #n＝這個 generation 的第幾次。只在 host 週期 ≥ 11 ms（約 90 Hz 以下）時會有；握手後前 5 秒不評估；
                                                                                        離上一次 kick（含 dev 的）至少 5 秒。當下做不了的（另一段定時步進還沒結束）不印，B 再連續成立
@@ -1348,7 +1352,7 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-VR-KICK] result: waits for the game again (presentPhase p50 … -> … ms, echoAge p50 … -> … ms)
                                                                                     ← 那一次的結果（kick 之後 2 秒出來：前 500 ms 的樣本不看，接著 1.5 秒的 presentPhase p50 ≥ 2.0 ms）：
                                                                                        回到等遊戲這一格（A）。兩組數＝kick 之前、之後的 p50。成不成功只看 presentPhase；echoAge 只是印出來
-                                                                                       對照（回到 A 應該少一個週期），那 1.5 秒的回聲年齡不到 24 筆時箭頭後面印 n/a
+                                                                                       對照（回到 A 應該少將近一個週期：60 Hz 約 13 ms），那 1.5 秒的回聲年齡不到 24 筆時箭頭後面印 n/a
 [VIPLE-VR-KICK] result: no change (presentPhase p50=… ms, echoAge p50=… ms); next try in … s
                                                                                     ← 沒有變化（那 1.5 秒的 presentPhase p50 < 2.0 ms：還是 B，或剛好開了儀表板）。下一次最早要等
                                                                                        10／30／90／300 s（之後都是 300；成功一次就歸零），而且那時還要是 B（兩個量都成立）才會做。

@@ -5,9 +5,10 @@
  * 和 test_vr_direct_kick.cpp 一樣不 include ../tests_common.h：受測的標頭只用標準函式庫，測試只需要 googletest，
  * 可以脫離整個 server 單獨編譯執行（要 -pthread）。放進 test_sunshine 一起建也一樣能跑。
  *
- * 前半是單一執行緒看得出來的語意（閘門、generation、順序、滿了丟新的、重開會清掉）。後半用真的執行緒對打：
+ * 前半是單一執行緒看得出來的語意（閘門、generation、順序、滿了丟新的、重開會清掉）。中間用真的執行緒對打：
  * 次數每次跑都不一樣，斷言的只有不變式——收下的每一筆恰好交出去一次、內容完整、同一個寫入方的順序不變、
- * 不會交給別的 generation。
+ * 不會交給別的 generation。最後把它和偵測器（src/vr/vr_direct_kick.h）照 bridge 執行緒的走法接起來，
+ * 確認緩衝的大小夠：bridge 卡住到會丟樣本的時候，判定不會因此出錯。
  */
 #include <gtest/gtest.h>
 
@@ -15,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <src/vr/vr_direct_kick.h>
 #include <src/vr/vr_echo_handoff.h>
 #include <thread>
 #include <vector>
@@ -24,6 +26,12 @@ using namespace vr::kick;
 namespace {
   constexpr int64_t kI64Max = std::numeric_limits<int64_t>::max();
   constexpr int64_t kI64Min = std::numeric_limits<int64_t>::min();
+  constexpr int64_t kMs = 1'000'000;
+  constexpr int64_t kSec = 1'000'000'000;
+  constexpr int64_t kT60 = 16'666'666;  // 60 Hz
+  constexpr int64_t kT72 = 13'888'888;  // 72 Hz
+  constexpr int64_t kT90 = 11'111'111;  // 90 Hz
+  constexpr int64_t kT120 = 8'333'333;  // 120 Hz：偵測器不動作
 
   struct got_t {
     int64_t t;
@@ -288,4 +296,119 @@ TEST(VrEchoHandoffThreads, NothingCrossesIntoAnotherGeneration) {
   EXPECT_GE(delivered, 1'000u) << "after " << generations << " generations";
   RecordProperty("delivered", static_cast<int>(delivered));
   RecordProperty("generations", static_cast<int>(generations));
+}
+
+// ── 和偵測器接起來：bridge 執行緒卡住的時候緩衝夠不夠 ─────────────────────────
+
+namespace {
+  struct stall_run_t {
+    int64_t kick_at = -1;  ///< 第一次 kick 在起點之後多久（-1＝沒有）
+    int pushed = 0;  ///< 擷取端交了幾筆
+    int accepted = 0;  ///< 緩衝收下幾筆（其餘是滿了被丟掉的）
+  };
+
+  /**
+   * @brief 照 bridge 執行緒的走法把偵測器與交接的緩衝接起來跑 dur：每 2 ms 一輪，先 poll()（periodic() 的前段），
+   *        再把 timing ring 裡的 presentPhase 與緩衝裡的回聲年齡倒進偵測器（drain_rings()）。driver 每個週期寫一筆
+   *        timing、擷取端每一張影像交一筆回聲年齡，兩邊都不等 bridge；一路都是多一格的樣子。
+   *        起點之後 [stall_begin, stall_begin + stall_len) 這一段 bridge 執行緒不跑：presentPhase 留在 timing ring
+   *        （夠大，一筆不少），回聲年齡留在交接的緩衝（64 格，滿了丟新的）。
+   */
+  stall_run_t run_with_stall(int64_t period, int64_t stall_begin, int64_t stall_len, int64_t dur) {
+    const uint64_t generation = 3;
+    const int64_t t0 = 1'000 * kSec;
+    detector_t det;
+    echo_handoff_t h;
+    det.reset(period, t0);
+    h.open(det.active() ? generation : 0);  // 握手時：偵測器會動作才開閘門
+    std::vector<int64_t> timing;  // 還沒倒進偵測器的 presentPhase（它的時刻）
+    stall_run_t r;
+    int64_t next_frame = t0 + period;
+    for (int64_t now = t0 + 2 * kMs; now <= t0 + dur; now += 2 * kMs) {
+      for (; next_frame <= now; next_frame += period) {
+        timing.push_back(next_frame);
+        ++r.pushed;
+        r.accepted += h.push(generation, next_frame, period + 2 * kMs) ? 1 : 0;
+      }
+      const int64_t rel = now - t0;
+      if (rel >= stall_begin && rel < stall_begin + stall_len) {
+        continue;  // bridge 執行緒卡住
+      }
+      const decision_t d = det.poll(now);
+      if (d.event == event_e::kick && r.kick_at < 0) {
+        r.kick_at = rel;
+      }
+      for (const int64_t t : timing) {
+        det.on_present_phase(t, 800'000);
+      }
+      timing.clear();
+      h.drain(generation, [&det](int64_t t, int64_t age) {
+        det.on_echo_age(t, age);
+      });
+    }
+    return r;
+  }
+
+  ::testing::AssertionResult between(int64_t v, int64_t lo, int64_t hi) {
+    if (v >= lo && v <= hi) {
+      return ::testing::AssertionSuccess();
+    }
+    return ::testing::AssertionFailure() << v << " is not in [" << lo << ", " << hi << "]";
+  }
+}  // namespace
+
+TEST(VrEchoHandoffWithDetector, DeliversWhatTheDetectorNeedsToKick) {
+  // 沒有卡住：擷取端交的每一筆都到了偵測器，暖機 5 秒＋連續成立 3 秒就推（每 100 ms 評估一次，最多晚 100 ms）
+  for (const int64_t period : {kT60, kT72, kT90}) {
+    const stall_run_t r = run_with_stall(period, 0, 0, 9 * kSec);
+    EXPECT_EQ(r.accepted, r.pushed) << "period=" << period;
+    EXPECT_TRUE(between(r.kick_at, 8 * kSec, 8 * kSec + 100 * kMs)) << "period=" << period;
+  }
+  // 不動作的 generation（120 Hz）：閘門沒有開，擷取端交的一筆都不收，也不會推
+  const stall_run_t idle = run_with_stall(kT120, 0, 0, 9 * kSec);
+  EXPECT_GT(idle.pushed, 1'000);
+  EXPECT_EQ(idle.accepted, 0);
+  EXPECT_EQ(idle.kick_at, -1);
+}
+
+TEST(VrEchoHandoffWithDetector, AShortStallLosesNothing) {
+  // 第 6 秒起卡 0.5 秒：緩衝放得下（60 Hz 30 筆、90 Hz 45 筆）；恢復後第一次評估的 1 秒視窗裡還有卡住之前的
+  // 半秒樣本，連續成立的計時不中斷，照原來的時刻推
+  for (const int64_t period : {kT60, kT72, kT90}) {
+    const stall_run_t r = run_with_stall(period, 6 * kSec, 500 * kMs, 9 * kSec);
+    EXPECT_EQ(r.accepted, r.pushed) << "period=" << period;
+    EXPECT_TRUE(between(r.kick_at, 8 * kSec, 8 * kSec + 100 * kMs)) << "period=" << period;
+  }
+}
+
+TEST(VrEchoHandoffWithDetector, WhenSamplesAreDroppedTheDwellHasRestartedAnyway) {
+  // 卡到緩衝會放滿（60 Hz 1.07 秒、72 Hz 0.89 秒、90 Hz 0.71 秒）的時候，恢復後的第一次評估——poll() 在倒樣本
+  // 之前——看到的 1 秒視窗裡 presentPhase 不到 24 筆，或兩次評估已經隔超過 1 秒：連續成立的計時不管有沒有丟樣本
+  // 都從恢復後重新開始，被丟掉的那幾筆回聲年齡不影響任何判定。kick 落在「恢復後第一次樣本齊全的評估」
+  // （恢復後 100 ms）＋3 秒
+  struct case_t {
+    int64_t period;
+    int64_t stall_ms;
+    int dropped;
+  };
+  const case_t cases[] = {
+    {kT60, 1'000, 0},  // 61 筆還放得下，但計時已經重來（兩次評估隔了 1.1 秒）
+    {kT60, 1'200, 9},  // 73 筆：丟 9 筆
+    {kT72, 950, 5},  // 69 筆：丟 5 筆
+    {kT90, 900, 18},  // 82 筆：丟 18 筆；兩次評估剛好隔 1 秒（不算超過），擋下來的是視窗裡只剩 8 筆
+  };
+  for (const case_t &c : cases) {
+    const stall_run_t r = run_with_stall(c.period, 6 * kSec, c.stall_ms * kMs, 12 * kSec);
+    EXPECT_EQ(r.pushed - r.accepted, c.dropped) << "period=" << c.period << " stall=" << c.stall_ms;
+    const int64_t resumed = 6 * kSec + c.stall_ms * kMs;
+    EXPECT_TRUE(between(r.kick_at, resumed + 3'100 * kMs, resumed + 3'200 * kMs)) << "period=" << c.period << " stall=" << c.stall_ms;
+  }
+}
+
+TEST(VrEchoHandoffWithDetector, TheOneDropWithoutARestartDoesNotMatter) {
+  // 90 Hz、卡 0.72 秒：65 筆裡丟掉最新的 1 筆，而恢復後第一次評估的視窗裡還有卡住之前的 25 筆（夠 24 筆），
+  // 計時沒有重來。倒出來之後視窗裡有八十幾筆回聲年齡：照原來的時刻推
+  const stall_run_t r = run_with_stall(kT90, 6 * kSec, 720 * kMs, 9 * kSec);
+  EXPECT_EQ(r.pushed - r.accepted, 1);
+  EXPECT_TRUE(between(r.kick_at, 8 * kSec, 8 * kSec + 100 * kMs));
 }

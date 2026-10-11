@@ -85,7 +85,7 @@ namespace {
     a,  ///< 等遊戲這一格：3.3 ms 上下，少數幾張到 7 ms（p50 3.27～4.26、p95 4.44～6.96）
     b,  ///< 多一格：0.8 ms 上下（p50 0.72～1.11、p95 0.98～1.77）
     s,  ///< host 的儀表板開著：1.2～2.1 ms（p95 2.08～3.04）
-    load,  ///< 遊戲還在載入、第 0 層是合成器自己的畫面：和多一格一樣小（2026-10-11：p50 0.79～1.22、p90 1.3～1.4）
+    load,  ///< 遊戲還在載入、第 0 層是合成器自己的畫面：可以和多一格一樣小（2026-10-11 被誤推的那三次：p50 0.79～1.00、p90 1.30～1.41）
     heavy,  ///< A，但遊戲的幀佔掉週期的 82～93%
     fixed,  ///< 每一筆都是 fixed_ns
     band,  ///< [band_lo, band_hi] 均勻
@@ -200,11 +200,11 @@ namespace {
           return erng.range(4'400'000, 7'700'000);
         case mode_e::s:  // 儀表板開著：約 2～5 ms
           return erng.range(2'000'000, 5'000'000);
-        case mode_e::load:  // 合成器自己的畫面：2.7～5.2 ms，沒有多一格
+        case mode_e::load:  // 合成器自己的畫面（追蹤樣本還在到的時候量到的）：2.7～5.2 ms，沒有多一格
           return erng.range(2'700'000, 5'200'000);
         case mode_e::heavy:  // A：遊戲的幀佔掉大半個週期，姿態到 Present 約一個週期
           return erng.range(period / 100 * 85, period / 100 * 105);
-        case mode_e::b:  // 多一格：比 A 多一個週期（60 Hz 量到 17.7～20.7 ms）
+        case mode_e::b:  // 多一格：週期＋1～4 ms（60 Hz 量到 17.7～20.7 ms：比 A 多 13 ms，不是整整一個週期）
         case mode_e::fixed:  // 這三種是拿來試 presentPhase 門檻的形狀：回聲年齡給多一格的樣子，
         case mode_e::band:  // 成不成立就只看 presentPhase
         case mode_e::mix:
@@ -642,7 +642,7 @@ TEST(VrDirectKickDetect, KicksOnceAfterThreeSecondsOfB) {
     EXPECT_TRUE(between(k.d.samples, c.per_second - 1, c.per_second + 1));
     EXPECT_TRUE(between(k.d.median_before_ns, 650'000, 950'000));
     EXPECT_LT(k.d.p90_before_ns, 1'800'001);
-    // 回聲年齡：每一張影像一筆，比等遊戲這一格時多一個週期
+    // 回聲年齡：每一張影像一筆，比等遊戲這一格時多將近一個週期（週期＋1～4 ms）
     EXPECT_TRUE(between(k.d.echo_samples, c.per_second - 1, c.per_second + 1));
     EXPECT_TRUE(between(k.d.echo_before_ns, c.period + 1'000'000, c.period + 4'000'000));
     // 每一張都舊一格，所以第 10 百分位也在同一段裡（不大於中位數）
@@ -654,7 +654,7 @@ TEST(VrDirectKickDetect, KicksOnceAfterThreeSecondsOfB) {
     EXPECT_TRUE(between(s.ev[1].d.samples, c.per_second * 3 / 2 - 2, c.per_second * 3 / 2 + 2));
     EXPECT_TRUE(between(s.ev[1].d.echo_samples, c.per_second * 3 / 2 - 2, c.per_second * 3 / 2 + 2));
     EXPECT_EQ(s.ev[1].d.echo_before_ns, k.d.echo_before_ns);  // kick 當下的那一個
-    EXPECT_TRUE(between(s.ev[1].d.echo_after_ns, 4'400'000, 7'700'000));  // 回到 A：少掉那一個週期
+    EXPECT_TRUE(between(s.ev[1].d.echo_after_ns, 4'400'000, 7'700'000));  // 回到 A：多出來的那一段沒有了
     EXPECT_EQ(s.det.kicks(), 1);
   }
 }
@@ -996,7 +996,7 @@ TEST(VrDirectKickResult, BackToAIsReportedOnceAndLeavesNoBackoff) {
   EXPECT_TRUE(between(r.d.samples, 89, 91));  // 1.5 秒 × 60 Hz
   EXPECT_TRUE(between(r.d.median_before_ns, 650'000, 950'000));
   EXPECT_TRUE(between(r.d.median_after_ns, 2'900'000, 3'900'000));
-  // 回聲年齡跟著少一個週期（只帶出來給 log，成不成功不看它）
+  // 回聲年齡跟著回到等遊戲這一格的值（只帶出來給 log，成不成功不看它）
   EXPECT_TRUE(between(r.d.echo_samples, 89, 91));
   EXPECT_TRUE(between(r.d.echo_before_ns, 17'666'666, 20'666'666));
   EXPECT_TRUE(between(r.d.echo_after_ns, 4'400'000, 7'700'000));
@@ -1616,8 +1616,10 @@ TEST(VrDirectKickDeclined, OnlyAppliesRightAfterTheKick) {
 // ── 14：回聲年齡（判定的第二個條件，2026-10-11）──────────────────────────────
 
 TEST(VrDirectKickEcho, ALoadingScreenNeverKicks) {
-  // 2026-10-11 的誤判：SteamVR 剛啟動、遊戲還在載入，第 0 層是合成器自己的畫面。presentPhase 和多一格一樣小，
-  // 回聲年齡卻只有 2.7～5.2 ms——沒有多一格，不可以推
+  // SteamVR 剛啟動、遊戲還在載入，第 0 層是合成器自己的畫面：presentPhase 可以和多一格一樣小，回聲年齡卻只有
+  // 2.7～5.2 ms（2026-10-11 追蹤樣本還在到的那幾個視窗量到的）——沒有多一格，不可以推。
+  // 那一場實際被誤推的三次是另一種：client 不在、一筆回聲年齡都沒有（NoEchoSamplesNeverKicks 與
+  // VrDirectKickScenario.ClientGoneWhileTheGameLoads）
   for (const int64_t period : {kT60, kT72, kT90}) {
     sim_t s(period, mode_e::load);
     s.run(600 * kSec);
@@ -1648,7 +1650,8 @@ TEST(VrDirectKickEcho, ALoadingScreenNeverKicks) {
 }
 
 TEST(VrDirectKickEcho, NoEchoSamplesNeverKicks) {
-  // 呼叫端沒有餵（沒有串流在擷取、影像都沒有對到姿態）：presentPhase 再怎麼像多一格也不推
+  // 呼叫端沒有餵（沒有串流在擷取、client 斷線沒有追蹤樣本、影像都沒有對到姿態）：presentPhase 再怎麼像多一格也
+  // 不推。2026-10-11 被誤推的三次都是這一種
   for (const int64_t period : {kT60, kT72, kT90}) {
     sim_t s(period, mode_e::b);
     s.echo = echo_e::none;
@@ -2317,7 +2320,7 @@ TEST(VrDirectKickWithheld, TimesNearTheEndOfInt64DoNotOverflow) {
 // ── 一整段像實驗那樣的場次 ────────────────────────────────────────────────────
 
 TEST(VrDirectKickScenario, LoadingScreenThenTheGame) {
-  // 照 2026-10-11 的場次：開場兩分鐘是載入畫面（只看 presentPhase 的時候在這裡連推三次、都沒有變化、進入退避）
+  // 開場兩分鐘是載入畫面、client 一直連著（presentPhase 像多一格，回聲年齡有、但沒有多一格）
   // → 遊戲開始出幀，落在等遊戲這一格 → 之後開關一次儀表板，落在多一格 → 這時才推，而且沒有任何退避要等
   sim_t s(kT60, mode_e::load);
   s.kick_to(mode_e::a);
@@ -2354,6 +2357,49 @@ TEST(VrDirectKickScenario, LoadingScreenThenTheGame) {
   EXPECT_TRUE(between(t.ev[2].t - tb2, 3'400 * kMs, 3'700 * kMs));
   EXPECT_EQ(t.ev[2].d.kick_no, 1);
   EXPECT_EQ(t.ev[3].d.event, event_e::result_ok);
+}
+
+TEST(VrDirectKickScenario, ClientGoneWhileTheGameLoads) {
+  // 照 2026-10-11 那一場 host log 的順序。遊戲在載入（第 0 層是合成器自己的畫面）：client 連著的時候 presentPhase
+  // 的中位數 1.2～2.1 ms、回聲年齡 3～5 ms；client 斷線、追蹤樣本停了之後影像對不到姿態（沒有回聲年齡），
+  // presentPhase 掉到 0.8～1.1 ms。只看 presentPhase 的舊規則在斷線後的 70 秒裡連推三次、都沒有變化、退避排到
+  // 90 秒。現在一次都不推，只有「不推」的通知（回聲年齡 0 筆）
+  sim_t s(kT60, mode_e::s);
+  s.kick_to(mode_e::a);
+  s.run(20 * kSec);
+  EXPECT_TRUE(s.ev.empty()) << s.dump();
+  s.mode = mode_e::b;  // client 斷線
+  s.echo = echo_e::none;
+  const int64_t gone = s.now;
+  s.run(70 * kSec);
+  ASSERT_EQ(s.ev.size(), 2u) << s.dump();
+  for (const ev_t &e : s.ev) {
+    EXPECT_EQ(e.d.event, event_e::withheld);
+    EXPECT_EQ(e.d.echo_samples, 0);
+    EXPECT_LT(e.d.median_before_ns, 1'150'000);
+  }
+  // presentPhase 的視窗先換成小的那一種（約 0.6 秒），再連續 3 秒；之後一分鐘一次
+  EXPECT_TRUE(between(s.ev[0].t - gone, 3'500 * kMs, 3'800 * kMs));
+  EXPECT_TRUE(between(s.ev[1].t - s.ev[0].t, 60 * kSec, 60 * kSec + 100 * kMs));
+  EXPECT_EQ(s.det.kicks(), 0);
+  EXPECT_EQ(s.det.backoff_step(), 0);
+
+  // client 連回來，還在載入；接著遊戲出幀、落在多一格：3～4 秒內推回。斷線那一段沒有用掉次數、也沒有退避要等
+  s.mode = mode_e::s;
+  s.echo = echo_e::by_mode;
+  s.run(20 * kSec);
+  EXPECT_EQ(s.ev.size(), 2u) << s.dump();
+  s.mode = mode_e::b;
+  const int64_t tb = s.now;
+  s.run(30 * kSec);
+  ASSERT_EQ(s.ev.size(), 4u) << s.dump();
+  EXPECT_EQ(s.ev[2].d.event, event_e::kick);
+  EXPECT_TRUE(between(s.ev[2].t - tb, 3'500 * kMs, 3'800 * kMs));
+  EXPECT_EQ(s.ev[2].d.kick_no, 1);
+  EXPECT_EQ(s.ev[3].d.event, event_e::result_ok);
+  EXPECT_TRUE(between(s.ev[3].d.echo_before_ns, 17'666'666, 20'666'666));
+  EXPECT_TRUE(between(s.ev[3].d.echo_after_ns, 4'400'000, 7'700'000));
+  EXPECT_EQ(s.det.backoff_step(), 0);
 }
 
 TEST(VrDirectKickScenario, DashboardThenALongPause) {
@@ -2476,7 +2522,7 @@ TEST(VrDirectKickFuzz, InvariantsHoldForArbitraryInput) {
     };
     const auto echo_age = [&]() -> int64_t {
       switch (mode) {
-        case 1:  // 比等遊戲這一格多一個週期
+        case 1:  // 多一格：週期＋1～4 ms
           return g.period + erng.range(1'000'000, 4'000'000);
         case 2:
           return erng.range(4'400'000, 7'700'000);

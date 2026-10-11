@@ -2048,18 +2048,20 @@ editing the `conf` file in a text editor. Use the examples as reference.
             stays that way; it typically starts after the game stalled for a second or the SteamVR dashboard was
             opened and closed on the host. With this option enabled the host watches two things: where each
             present falls within the vsync period, and how old the head pose behind each captured frame is when
-            that frame is presented (the late timing adds one refresh period to that age). Once both have shown
-            the late timing for 3 seconds, it lets the driver's present call return immediately for a moment
-            (1.25 refresh periods, at least 20 and at most 40 ms). The compositor then runs one extra round, uses
-            up the queued frame and goes back to waiting for the game's current frame. The driver's vsync
-            schedule does not advance during that time, so the phase is unchanged afterwards; a few extra frames
-            are produced each time.
+            that frame is presented (the late timing adds most of a refresh period to that age: about 13 ms at
+            60 Hz). Once both have shown the late timing for 3 seconds, it lets the driver's present call return
+            immediately for a moment (1.25 refresh periods, at least 20 and at most 40 ms). The compositor then
+            runs one extra round, uses up the queued frame and goes back to waiting for the game's current
+            frame. The driver's vsync schedule does not advance during that time, so the phase is unchanged
+            afterwards; a few extra frames are produced each time.
             The pose age is only known while a stream is being captured and its frames can be matched to a head
             pose sent by the client; without it nothing is done. It is required because the position of the
             present alone cannot tell the late timing from SteamVR showing its own image while a game is still
-            loading: on 2026-10-11 that caused three attempts in a row that changed nothing. During loading the
-            pose age stays at its normal value (2.7 to 5.2 ms were measured, against 17.7 to 20.7 ms in the late
-            timing at 60 Hz), so the host now leaves that case alone.
+            loading: on 2026-10-11 that caused three attempts in a row that changed nothing. All three happened
+            while the client was away (disconnected with no head poses arriving, or with no stream being
+            captured), so there was no pose age at all; in the parts of the same loading screen where head poses
+            were still arriving, the pose age stayed at its normal value (2.7 to 5.2 ms were measured, against
+            17.7 to 20.7 ms in the late timing at 60 Hz). The host now leaves both cases alone.
             Two seconds later the host checks the result. If nothing changed it tries again after 10, 30, 90 and
             then every 300 seconds, as long as the timing is still the late one. It stops for the rest of the
             driver connection after 20 attempts, or when the game's frames turn out to take more than 80% of the
@@ -2075,7 +2077,11 @@ editing the `conf` file in a text editor. Use the examples as reference.
             2026-10-10 and 2026-10-11. The detection ran in live sessions on 2026-10-10 while it looked at the
             position of the present only; the pose-age condition added on 2026-10-11 has only run in unit tests
             so far. With a headset that lies still and unattended the pose age is not reliable, so the late
-            timing may go undetected in such a test.}
+            timing may go undetected in such a test. The pose-age threshold (5.5 ms plus half a refresh period)
+            rests on measurements at 60 Hz only, where it lies 6.1 ms above the normal range and 3.9 ms below
+            the late one; at 72 and 90 Hz it is extrapolated and the margin on the late side shrinks to about
+            2.4 and 1.0 ms, so the late timing may go undetected there as well (the `not kicking` line shows
+            how close it was).}
         </td>
     </tr>
     <tr>
