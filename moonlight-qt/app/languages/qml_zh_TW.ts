@@ -1670,4 +1670,67 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <translation>%1 目前離線。</translation>
     </message>
 </context>
+<context>
+    <name>VrPreflightDialog</name>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Connection too slow for VR</source>
+        <translation>連線太慢，不適合 VR</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Checking the connection</source>
+        <translation>正在檢查連線</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>The connection to the host is too slow for VR right now. The picture would break up and lag far behind your head.</source>
+        <translation>目前到主機的連線太慢，不適合 VR。現在開始的話畫面會破圖，而且明顯跟不上頭部的動作。</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Measured round trip: %1 ms. VR needs %2 ms or less.</source>
+        <translation>量到的往返時間：%1 ms。VR 需要 %2 ms 以下。</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>This usually means the VPN is relaying the connection instead of connecting directly.</source>
+        <translation>這通常是因為 VPN 改經中繼轉送，沒有直接連線。</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Checking again every %1 seconds. VR starts automatically as soon as the connection is fast enough.</source>
+        <translation>每 %1 秒重新檢查一次。連線夠快時會自動開始 VR。</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Measuring the round trip to the host…</source>
+        <translation>正在量測到主機的往返時間…</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Latest: %1 ms</source>
+        <translation>最新：%1 ms</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Latest: no answer from the host</source>
+        <translation>最新：主機沒有回應</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Fast enough %1 of %2 times in a row</source>
+        <translation>已連續 %1／%2 次夠快</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Start anyway</source>
+        <translation>仍要開始</translation>
+    </message>
+    <message>
+        <location filename="../gui/VrPreflightDialog.qml"/>
+        <source>Cancel</source>
+        <translation>取消</translation>
+    </message>
+</context>
 </TS>
