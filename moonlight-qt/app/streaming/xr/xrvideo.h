@@ -31,6 +31,7 @@
 #pragma once
 
 #include "xrcontext.h"
+#include "xrflight.h"      // §VR-LATCH-FLIGHT：xrflight::GpuTyp（GPU 時間的典型值；header-only）
 #include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Jitter（dev 的到達抖動注入）
 #include "xrvideostats.h"  // §VR-XRLOOP／§VR-PASS：RenderDiag（10s video 行尾那幾欄）、PassStats（header-only）
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"  // §SF-DMABUF-CACHE：DrmTexCache
@@ -81,6 +82,12 @@ public:
         // §VR-LATCH-WAIT：每發布一張新影像就叫醒 waitNewerThan()（frame thread 在等這一格的影像）。要和 atomicPublish
         // 一起開；同樣不可以和 synth 一起開（建構子會把它關掉）
         bool notifyPublish = false;
+        // §VR-LATCH-FLIGHT：(1) 一張影像的 GPU 工作都送出去之後、發布之前，標出「有一張在途」（flightInfo()）；
+        // (2) 第一次發布（seq 會變的那一次）一律叫醒 waitNewerThan()；(3) 估 GPU 時間的典型值（gpuTypUs()）。
+        // 和上面兩個不同，synth 開著時也作用，建構子不會把它關掉：frame thread 等的是第一次發布，§VR-SYNTH 的第二次
+        // 發布不改 seq，waitNewerThan() 的條件不會被它滿足。也不需要 atomicPublish——等到的那一格 frame thread 是先看到
+        // 新的快照才往下走，而 release 一定排在發布之前。關著（預設）時這三件事都不做
+        bool flightNotify = false;
         // §VR-PASS（量測）：把 libplacebo 每個 pass 的 GPU 計時接出來，影像 render thread 每 60 秒印一行
         // [VIPLE-VR-PASS]。只給 PCVR 開（VR 的 tag 不可以出現在一般 session）
         bool passTimers = false;
@@ -157,9 +164,17 @@ public:
     bool latest(uint64_t* seq, uint64_t* pubUs);
     // §VR-LATCH-WAIT（XR frame thread）：等到發布的影像不是 seq 這一張，或到了 deadlineUs（steady 時鐘，µs）。
     // true＝有新的一張。等的時候不持鎖；呼叫時不可以持 queueMutex（影像 render thread 要它才 release 得出去）。
-    // 要 Config::notifyPublish 才會被叫醒（否則只會等到逾時）。等不到的那一次多久才返回，取決於條件變數逾時的
-    // 精度：Linux 預期數十微秒；Windows 是毫秒級，所以 XrContext 在 Windows 上不用它（pcvrLatchWaitSupported）
+    // 要 Config::notifyPublish 或 Config::flightNotify 才會被叫醒（否則只會等到逾時）。等不到的那一次多久才返回，
+    // 取決於條件變數逾時的精度：Linux 預期數十微秒；Windows 是毫秒級，所以 XrContext 在 Windows 上不用它
+    // （pcvrLatchWaitSupported）
     bool waitNewerThan(uint64_t seq, uint64_t deadlineUs);
+    // §VR-LATCH-FLIGHT（XR frame thread）：目前發布的是哪一張（還沒有發布過＝0）、有沒有一張已經送進 GPU 還沒發布
+    // （flightSeq＝它發布之後的序號，0＝沒有）、它送出的時刻（steady 時鐘，µs；flightSeq 是 0 時沒有意義）。
+    // 沒有副作用（不算成「顯示過一次」）。要 Config::flightNotify，否則 flightSeq 恆為 0。不可以持著 queueMutex 呼叫
+    void flightInfo(uint64_t* latestSeq, uint64_t* flightSeq, uint64_t* flightSubmitUs);
+    // §VR-LATCH-FLIGHT（任何執行緒）：一張影像的 GPU 工作「送出 → 做完」的典型時間（µs），見 xrflight::GpuTyp。
+    // 只有 Config::flightNotify 開著才會更新，否則一直是起始值
+    uint32_t gpuTypUs() const { return m_GpuTypUs.load(std::memory_order_relaxed); }
     // XR frame thread：xrEndFrame 已送出引用 generation 這一代 swapchain 的 layer
     void frameEnded(uint64_t generation);
     // §VR-LDIAG（XR frame thread）：依序抄出序號大於 afterSeq、而且在 notAfterUs 之前（含）發布的紀錄，最多 max 筆；
@@ -302,6 +317,14 @@ private:
     bool m_HavePublished = false;          // 至少 release 過一次
     Current m_Published;                   // XR thread 讀的快照
     std::atomic<uint64_t> m_ReleaseNo{0};  // 2026-10-05：xrReleaseSwapchainImage 次數（在 queueMutex 內遞增）
+    // §VR-LATCH-FLIGHT：在途的標記。只有影像 render thread 寫，XR frame thread 經 flightInfo() 讀。兩個值是一對：
+    // 寫的一側先存送出的時刻、再存序號；讀的一側先讀序號、再讀時刻、再讀一次序號，兩次序號相同才算數。
+    // 這個讀法要全部的存取排得出一個先後順序，所以這兩個一律用預設的 memory order（seq_cst），不要改成 relaxed
+    std::atomic<uint64_t> m_FlightSeq{0};       // 已經送進 GPU、還沒發布的那一張發布之後的序號；0＝沒有
+    std::atomic<uint64_t> m_FlightSubmitUs{0};  // 它送出的時刻（pl_vulkan_hold_ex 返回；steady 時鐘，µs）
+    // §VR-LATCH-FLIGHT：GPU 時間（送出 → 做完）的典型值。估計器只在影像 render thread 用，結果放 atomic 給 frame thread 讀
+    xrflight::GpuTyp m_GpuTyp;
+    std::atomic<uint32_t> m_GpuTypUs{xrflight::kGpuTypInitUs};
     std::vector<SwapchainSet> m_Retired;   // 等 XR thread 送出新一代後銷毀
     uint64_t m_XrAckGeneration = 0;        // XR thread 最近一次 xrEndFrame 引用的 generation
     // §VR-LDIAG：最近 kPubRing 筆發布紀錄（環狀；m_SwMutex 保護）

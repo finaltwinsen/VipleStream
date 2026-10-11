@@ -72,7 +72,8 @@ XrVideo::XrVideo(XrContext* ctx, const Config& config) : m_Ctx(ctx), m_Config(co
     if (m_Config.synth) {
         // §VR-SYNTH 的第二次發布（合成的那一半）不在 queue 鎖內，atomicPublish 的保證（queue 鎖內看到 releaseNo 變了，
         // 快照就一定是新的那一張）對它不成立，它也不叫醒 waitNewerThan()。XrContext::bringUp 本來就不會兩個一起開，
-        // 這裡再擋一次，免得日後只改到其中一邊
+        // 這裡再擋一次，免得日後只改到其中一邊。
+        // flightNotify（§VR-LATCH-FLIGHT）不在這裡關：它只看第一次發布，補幀開著時照樣作用（見 xrvideo.h）
         m_Config.atomicPublish = false;
         m_Config.notifyPublish = false;
     }
@@ -755,7 +756,11 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     // 中死掉時 GPU 工作可能永遠等不到結果，R4 在 S1 卡了 7 分鐘），到了再 pl_gpu_finish（此時立即返回）。
     // 回傳 1＝做完、0＝hold 失敗（照舊 pl_gpu_finish）、-1＝GPU 卡住
     // §VR-XRLOOP：submitUs 帶回 hold 返回的時刻——這張影像的每一筆 GPU 工作到這裡都送出去了（hold 失敗時不動它）
-    auto finishGpu = [&](pl_tex tex, uint64_t& submitUs) {
+    // §VR-LATCH-FLIGHT：flight＝這一批做完就會發布成新的一張（第一批、畫成功了、而且這一場開了 flightNotify）。
+    // 送出之後、等 GPU 之前就標成「在途」——等 GPU 做完才標就沒有意義了。先存時刻、再存序號（兩個是一對，見 xrvideo.h）；
+    // m_Published.seq 只有這條執行緒會寫，不必拿 m_SwMutex 讀。標了之後只有兩條路：發布（下面清掉），或 GPU 卡住
+    // （wedged 清掉）。這兩個 atomic 一律用預設的順序（seq_cst），flightInfo() 的讀法靠它
+    auto finishGpu = [&](pl_tex tex, uint64_t& submitUs, bool flight) {
         pl_vulkan_hold_params hp = {};
         hp.tex = tex;
         hp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -767,6 +772,10 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
             return 0;
         }
         submitUs = nowUs();
+        if (flight) {
+            m_FlightSubmitUs.store(submitUs);
+            m_FlightSeq.store(m_Published.seq + 1);
+        }
         if (!m_Ctx->waitSemaphoreBounded(m_Sem, hp.semaphore.value, 1000000000ull)) {
             return -1;
         }
@@ -782,6 +791,10 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         return m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
     };
     auto wedged = [&](const char* why) {
+        if (m_Config.flightNotify) {
+            // §VR-LATCH-FLIGHT：這一張不會發布了。先清在途的標記，frame thread 才不會繼續為它等（下面印 log 要時間）
+            m_FlightSeq.store(0);
+        }
         m_WedgedFrames.push_back(frame);  // 仍被 GPU 參照：不 unmap、不 free
         m_Ctx->markGpuWedged(why);
         markUnusable("GPU wedged");
@@ -881,7 +894,22 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
 
     const uint64_t tCpuEnd = nowUs();
     uint64_t tSubmit = 0;  // §VR-XRLOOP：送出的時刻（hold 返回）
-    const int fin = finishGpu(tex, tSubmit);
+    // §VR-LATCH-FLIGHT：在途標記的保險。該清的地方（發布之後、wedged）都明確清了；這個物件保證不管之後從哪一條路
+    // 離開這個函式，標記都不會留著——留著的話 frame thread 會為一張不會來的影像每一格等到上限。
+    // 要宣告在函式的作用域（不可以放進 finishGpu：lambda 一返回就清掉了）。這一場沒開 flightNotify 時什麼都不做
+    struct FlightClear {
+        explicit FlightClear(std::atomic<uint64_t>* s) : seq(s) {}
+        ~FlightClear()
+        {
+            if (seq != nullptr) {
+                seq->store(0);
+            }
+        }
+        FlightClear(const FlightClear&) = delete;
+        FlightClear& operator=(const FlightClear&) = delete;
+        std::atomic<uint64_t>* seq;
+    } flightClear(m_Config.flightNotify ? &m_FlightSeq : nullptr);
+    const int fin = finishGpu(tex, tSubmit, m_Config.flightNotify && rendered);
     if (fin < 0) {
         wedged("video render did not finish within 1 s");
         return false;
@@ -945,10 +973,23 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
             publishLocked(releaseNo, tPub);
         }
     }
-    if (m_Config.notifyPublish && rendered && held) {
-        // §VR-LATCH-WAIT：frame thread 可能正在等這一格的影像（waitNewerThan）。鎖都放掉了才叫醒。
+    if (m_Config.flightNotify) {
+        // §VR-LATCH-FLIGHT：發布了（seq 已經加一），或這一張沒有發布：不再是「在途」。排在發布之後才清——frame thread
+        // 若剛好在這兩步之間讀，看到的是 flightSeq == latestSeq，判成沒有在途、不等，接著本來就挑得到新的那一張
+        m_FlightSeq.store(0);
+    }
+    if ((m_Config.notifyPublish || m_Config.flightNotify) && rendered && held) {
+        // §VR-LATCH-WAIT／§VR-LATCH-FLIGHT：frame thread 可能正在等這一格的影像（waitNewerThan）。鎖都放掉了才叫醒。
+        // 以「有發布」為準（上面的 release 是無條件的，沒畫成功的那一張 seq 不會變）。
         // §VR-SYNTH 的第二次發布（下面）沿用同一個 seq，不叫
         m_PubCv.notify_all();
+    }
+    if (m_Config.flightNotify && rendered && held) {
+        // §VR-LATCH-FLIGHT：這一張的 GPU 時間（送出 → 做完）餵給典型值的估計。排在叫醒之後，不拖慢等著的 frame thread；
+        // hold 失敗的那一張沒有送出的時刻，不餵（held 為假）。補幀那一批不算
+        if (m_GpuTyp.push(sat32(tGpuEnd > tSubmit ? tGpuEnd - tSubmit : 0))) {
+            m_GpuTypUs.store(m_GpuTyp.typUs(), std::memory_order_relaxed);
+        }
     }
     // §VR-XRLOOP（量測，這一張已經發布了才算）：送出與 GPU 做完的時刻換成相位。顯示格點由 frame thread 每格更新；
     // 沒有格點（非 PCVR、frame thread 還沒跑到，或這一格的預測顯示時刻換算不出來）就不記。兩批 GPU 工作落在哪個
@@ -1019,7 +1060,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         m_DumpsDone++;
     }
     uint64_t tSynthSubmit = 0;  // §VR-XRLOOP：補幀那一批送出的時刻
-    const int fin2 = finishGpu(tex2, tSynthSubmit);
+    // §VR-LATCH-FLIGHT：這一批不標在途——它做完之後的第二次發布不改 seq，frame thread 等不到它
+    const int fin2 = finishGpu(tex2, tSynthSubmit, false);
     if (fin2 < 0) {
         wedged("synthesized frame did not finish within 1 s");
         return false;
@@ -1161,6 +1203,24 @@ bool XrVideo::waitNewerThan(uint64_t seq, uint64_t deadlineUs)
     const std::chrono::steady_clock::time_point deadline{std::chrono::microseconds(static_cast<int64_t>(deadlineUs))};
     std::unique_lock<std::mutex> lk(m_SwMutex);
     return m_PubCv.wait_until(lk, deadline, [&] { return m_HavePublished && m_Published.seq != seq; });
+}
+
+void XrVideo::flightInfo(uint64_t* latestSeq, uint64_t* flightSeq, uint64_t* flightSubmitUs)
+{
+    {
+        // 快照的任何欄位，影像 render thread 以外的執行緒都要拿 m_SwMutex 讀。還沒有發布過時 seq 是 0
+        std::lock_guard<std::mutex> lk(m_SwMutex);
+        *latestSeq = m_Published.seq;
+    }
+    // 在途的標記是兩個 atomic（鎖外讀，影像 render thread 設、清它們時不拿鎖）：先讀序號、再讀時刻、再讀一次序號。
+    // 不是 0 的序號每次都比上一次大，所以兩次讀到同一個值＝中間沒有換過一張，那個時刻就是這一張的；
+    // 對不上（剛好在換）就當成沒有在途——頂多這一格少等一次。
+    // 先讀到舊的 latestSeq、之後才讀到下一張的標記，xrflight::decide 的 F1（flightSeq == latestSeq + 1）會擋掉
+    const uint64_t seq = m_FlightSeq.load();
+    const uint64_t submitUs = m_FlightSubmitUs.load();
+    const bool same = m_FlightSeq.load() == seq;
+    *flightSeq = same ? seq : 0;
+    *flightSubmitUs = submitUs;
 }
 
 size_t XrVideo::drainPublished(uint64_t afterSeq, uint64_t notAfterUs, PubRec* out, size_t max)
