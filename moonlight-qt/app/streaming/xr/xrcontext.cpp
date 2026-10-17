@@ -1491,7 +1491,7 @@ void XrContext::maybeLogStats(uint64_t nowNs)
             m_PcvrTiming.abVideoOffFrames++;
         }
     }
-    if (nowNs - m_StatsWindowStartNs < 10000000000ull) {
+    if (nowNs - m_StatsWindowStartNs < kStatsWindowNs) {
         return;
     }
     Stats cur, prev;
@@ -2776,7 +2776,7 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         t.mtp1sUs.clear();
     }
 
-    if (nowNs - t.mtpWindowStartNs >= 10000000000ull) {
+    if (nowNs - t.mtpWindowStartNs >= kStatsWindowNs) {
         const double secs = static_cast<double>(nowNs - t.mtpWindowStartNs) / 1e9;
         t.mtpWindowStartNs = nowNs;
         const size_t n = t.mtp10sUs.size();
@@ -2950,7 +2950,9 @@ void XrContext::pcvrLatchDiagLog()
     // （組字串在 xrflight.h，有自測）
     std::string flightTail;
     if (m_Options.pcvr && m_Options.pcvrLatchFlightUs > 0) {
-        flightTail = m_Flight.win.tail(pcvrLatchFlightEffUs(), m_Flight.guard.paused(steadyNowNs()), m_Flight.gTypUs);
+        // 顯示不是 120 Hz 時一格都不等（spanMax 給 0），上限照「不作用」印 0.00
+        flightTail = m_Flight.win.tail(m_Flight.rate120 ? pcvrLatchFlightEffUs() : 0u, m_Flight.guard.paused(steadyNowNs()),
+                                       m_Flight.gTypUs);
     }
     m_Flight.win.clear();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -3242,6 +3244,7 @@ void XrContext::pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capU
     const uint64_t nowNs = steadyNowNs();
     const uint32_t periodUs = static_cast<uint32_t>((std::min<uint64_t>)(periodNs / 1000ull, 0xffffffffu));
     const bool rate120 = xrphase::is120Hz(periodUs);
+    f.rate120 = rate120;
     const uint32_t kOffRateFrames = 600;  // 120 Hz 的 5 秒：開場更新率還在切換的那一小段不算
     if (rate120) {
         f.offRateRun = 0;
@@ -3253,15 +3256,15 @@ void XrContext::pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capU
     if (!pcvrAbActive() || f.guard.paused(nowNs)) {
         return;  // xrflight::Why::Off
     }
-    // 10 s 視窗的長度要和 pcvrTimingTick、maybeLogStats 裡的判斷相同（兩處都是滿 10 s 才印）
-    const uint64_t kWindowNs = 10000000000ull;
     const uint64_t lookNs = (std::max<uint64_t>)(5000000ull, (std::min<uint64_t>)(periodNs, 20000000ull));
     xrflight::Input in;
     in.active = true;
-    in.busy = xrflight::windowDue(nowNs, m_PcvrTiming.mtpWindowStartNs, kWindowNs, lookNs) ||
-              xrflight::windowDue(nowNs, m_StatsWindowStartNs, kWindowNs, lookNs);
+    in.busy = xrflight::windowDue(nowNs, m_PcvrTiming.mtpWindowStartNs, kStatsWindowNs, lookNs) ||
+              xrflight::windowDue(nowNs, m_StatsWindowStartNs, kStatsWindowNs, lookNs);
     in.nowUs = nowNs / 1000ull;
     in.wakeUs = wakeNs / 1000ull;
+    // xrWaitFrame 擋住了多久（frameThreadMain 量的）：幾乎沒擋住＝上一格晚回、這一格返回得晚，不等（xrflight::kMinWakeBlockUs）
+    in.wakeBlockedUs = static_cast<uint32_t>((std::min<uint64_t>)(m_DiagWaitNs / 1000ull, 0xfffffffeull));
     in.capUs = capUs;
     in.spanMaxUs = rate120 ? kLatchSpanMaxUs : 0u;
     in.shownSeq = f.shown.seq;
@@ -3276,7 +3279,10 @@ void XrContext::pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capU
     }
     const bool got = m_Video->waitNewerThan(in.latestSeq, d.deadlineUs);
     const uint64_t afterUs = steadyNowNs() / 1000ull;
-    f.win.noteWait(got, static_cast<uint32_t>((std::min<uint64_t>)(afterUs > in.nowUs ? afterUs - in.nowUs : 0, 0xffffffffu)));
+    // 逾時的那一次醒來比截止時刻晚多少：定時等待準不準，10 秒行的 toLate
+    const uint64_t lateByUs = (!got && afterUs > d.deadlineUs) ? afterUs - d.deadlineUs : 0;
+    f.win.noteWait(got, static_cast<uint32_t>((std::min<uint64_t>)(afterUs > in.nowUs ? afterUs - in.nowUs : 0, 0xffffffffu)),
+                   static_cast<uint32_t>((std::min<uint64_t>)(lateByUs, 0xffffffffu)));
 }
 
 // §VR-LATCH-FLIGHT：frame thread，每一格送出去（xrEndFrame）之後呼叫。latched＝這一格真的送出了串流影像的 projection
@@ -3290,7 +3296,7 @@ void XrContext::pcvrFlightAfterFrame(bool latched, uint64_t seq)
     if (f.pauseLogDue) {
         // 防護在這一格的 1 Hz 區塊觸發了（見 pcvrTimingTick）；冷卻結束時自動恢復，不另外印
         f.pauseLogDue = false;
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LDIAG] flight paused %u s (predictAhead %.1f ms, missed %u)",
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LDIAG] flight paused %u s (predictAhead %.2f ms, missed %u)",
                     f.guard.lastPauseSec(), static_cast<double>(f.guard.lastAheadNs()) / 1e6, f.guard.lastMissed());
     }
     if (f.offRateLogUs != 0) {

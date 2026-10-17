@@ -286,6 +286,40 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
         caseDone("guard-inactive-side", ok, buf);
     }
     {
+        // 換到另一邊時視窗要清掉：生效時偏高一秒、漏 2 幀 → 另一邊一秒 → 回來再偏高一秒、再漏 1 幀。
+        // 清掉了：連續偏高只算 1 秒、10 秒內只算 1 幀，不觸發。沒清的話會是「連 2 秒偏高」而觸發；
+        // 只看漏幀（predictAhead 不高）的那一組沒清的話會是 3 幀而觸發
+        RuntimeGuard g, m;
+        g.start(t0);
+        m.start(t0);
+        g.tick(t0 + 3 * S, true, low, P, 0);
+        m.tick(t0 + 3 * S, true, low, P, 0);
+        bool ok = g.tick(t0 + 4 * S, true, high, P, 0) == Trip::NoTrip && g.tick(t0 + 5 * S, false, high, P, 0) == Trip::NoTrip &&
+                  g.tick(t0 + 6 * S, true, high, P, 0) == Trip::NoTrip;
+        ok = ok && m.tick(t0 + 4 * S, true, low, P, 2) == Trip::NoTrip && m.tick(t0 + 5 * S, false, low, P, 2) == Trip::NoTrip &&
+             m.tick(t0 + 6 * S, true, low, P, 3) == Trip::NoTrip;
+        ok = ok && g.trips() == 0 && m.trips() == 0;
+        caseDone("guard-inactive-clears-window", ok, ok ? "high run and missed frames restart after the other side" : "tripped");
+    }
+    {
+        // Config 的 0＝不看那一項：highSecs＝0 時一直偏高也不觸發；missedPer10s＝0 時一直漏幀也不觸發
+        Config noHigh, noMissed;
+        noHigh.highSecs = 0;
+        noMissed.missedPer10s = 0;
+        RuntimeGuard g(noHigh), m(noMissed);
+        g.start(t0);
+        m.start(t0);
+        g.tick(t0 + 3 * S, true, low, P, 0);
+        m.tick(t0 + 3 * S, true, low, P, 0);
+        bool ok = true;
+        for (uint64_t k = 4; k < 20; k++) {
+            ok = ok && g.tick(t0 + k * S, true, high, P, 0) == Trip::NoTrip;
+            ok = ok && m.tick(t0 + k * S, true, low, P, k * 5) == Trip::NoTrip;
+        }
+        ok = ok && g.trips() == 0 && m.trips() == 0;
+        caseDone("guard-config-zero-disables", ok, ok ? "disabled conditions never trip" : "tripped");
+    }
+    {
         // 連續觸發五次：冷卻 60 → 120 → 240 → 480 → 480 秒；冷卻中再偏高也不觸發；每次到時自動恢復
         RuntimeGuard g;
         g.start(t0);

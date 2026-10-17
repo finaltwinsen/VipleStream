@@ -33,6 +33,15 @@ namespace xrflight {
 
 // F4：離截止時刻不到這麼多就不等（叫一次定時等待本身就要這個量級）
 constexpr uint32_t kMinRoomUs = 20;
+// F3 的上限：送出之後比典型值多過這麼久還沒做完，當成卡住、不等。GPU 卡死要 1 秒才判定，沒有這一條的話
+// 那 1 秒裡每一格都會等到截止時刻
+constexpr uint32_t kStuckUs = 16000;
+// xrWaitFrame 擋住不到這麼久就返回＝上一格晚回、放行點已經過了，這一格的返回時刻本身就晚。截止時刻以返回時刻算，
+// 在這種格等滿會超出 Z2 驗過的範圍（那幾場晚回是 0 格），所以不等（記在 noRoom）
+constexpr uint32_t kMinWakeBlockUs = 150;
+// 等不到這麼久就等到的：判斷點到挑影像之間本來就還有 0.1～0.15 ms，這種多半不等也趕得上這一格。
+// 10 秒行另外數（quick），效果看 got − quick
+constexpr uint32_t kQuickUs = 150;
 // g＝一張影像的 GPU 工作「送出 → 做完」的時間。典型值的估計：起始值、上下限、每幾張更新一次
 // （起始值是頭盔上量到的 1.53 ms；上下限與張數是設計值）
 constexpr uint32_t kGpuTypInitUs = 1500;
@@ -44,6 +53,7 @@ struct Input {
     bool busy = false;            // 這一格 xrEndFrame 之後要做 10 秒彙總、印 log（見 windowDue）
     uint64_t nowUs = 0;           // 現在（steady 時鐘，µs；下面的時刻都是同一個時鐘）
     uint64_t wakeUs = 0;          // 這一格 xrWaitFrame 返回的時刻
+    uint32_t wakeBlockedUs = 0xffffffffu;  // 這一格 xrWaitFrame 擋住了多久（0xffffffff＝不知道，不看這一條）
     uint32_t capUs = 0;           // 設定的上限：最多等多久
     uint32_t spanMaxUs = 0;       // xrWaitFrame 返回之後最晚等到多久（0＝沒有量過可以等到多晚，一律沒有空間）
     uint64_t shownSeq = 0;        // frame thread 正在顯示的那一張
@@ -77,7 +87,7 @@ inline const char* whyName(Why why)
     return "?";
 }
 
-// 判斷順序固定：Off → NoFlight（F1）→ Gate（F2）→ Far（F3）→ NoRoom（F4）→ Busy → Wait
+// 判斷順序固定：Off → NoFlight（F1）→ Gate（F2）→ Far（F3，含卡住）→ NoRoom（F4，含沒擋住就返回的格）→ Busy → Wait
 inline Decision decide(const Input& in)
 {
     Decision d;
@@ -99,13 +109,13 @@ inline Decision decide(const Input& in)
     }
     // F3：兩條執行緒各自取時鐘，送出的時刻可能比 now 晚一點——已經過的時間當成 0，不可以無號相減
     const uint64_t elapsedUs = in.nowUs > in.flightSubmitUs ? in.nowUs - in.flightSubmitUs : 0;
-    if (elapsedUs + in.capUs < in.gTypUs) {
+    if (elapsedUs + in.capUs < in.gTypUs || elapsedUs > static_cast<uint64_t>(in.gTypUs) + kStuckUs) {
         d.why = Why::Far;
         return d;
     }
     // F4
     const uint64_t deadlineUs = (std::min)(in.nowUs + in.capUs, in.wakeUs + in.spanMaxUs);
-    if (deadlineUs <= in.nowUs + kMinRoomUs) {
+    if (in.wakeBlockedUs < kMinWakeBlockUs || deadlineUs <= in.nowUs + kMinRoomUs) {
         d.why = Why::NoRoom;
         return d;
     }
@@ -176,15 +186,21 @@ private:
 // frame thread 的 10 秒視窗：`[VIPLE-VR-LDIAG] 10s` 行尾 flight 那一段的計數，與每次等了多久
 struct Window {
     uint32_t waited = 0;   // 等了幾格（＝got＋timeout）
-    uint32_t got = 0;      //   其中等到新影像的：每一張都是不等就會錯過這一格的
+    uint32_t got = 0;      //   其中等到新影像的。不等就會錯過這一格的是 got − quick
     uint32_t timeout = 0;  //   與等到截止時刻的
+    uint32_t quick = 0;    // got 裡等不到 kQuickUs 就等到的（多半不等也趕得上）
     // 下面四個只數「有一張在途、卻因為那個條件沒有等」的格。「太遠」印出來的欄位叫 far，成員不可以取這個名字：
     // Windows 的標頭把 far／near 定義成空的巨集
     uint32_t gate = 0, tooFar = 0, noRoom = 0, busy = 0;
     std::vector<uint32_t> waitUs;  // 每次等了多久（µs）
+    std::vector<uint32_t> lateUs;  // 逾時的那幾次：醒來比截止時刻晚多少（µs）——定時等待準不準
 
     // 120 Hz 的 10 秒是 1200 格。先配好：noteWait() 在 xrBeginFrame 之前呼叫，那裡不可以配置記憶體
-    void reserveWindow() { waitUs.reserve(2048); }
+    void reserveWindow()
+    {
+        waitUs.reserve(2048);
+        lateUs.reserve(2048);
+    }
 
     // 沒有等的那一格。Wait（由 noteWait 記）、Off、NoFlight 不計
     void note(Why why)
@@ -198,15 +214,21 @@ struct Window {
         }
     }
 
-    // 等過的那一格：有沒有等到、等了多久。預留的空間滿了就不記時間（計數照記）
-    void noteWait(bool gotIt, uint32_t waitedUs)
+    // 等過的那一格：有沒有等到、等了多久、逾時的話醒來比截止時刻晚多少。預留的空間滿了就不記時間（計數照記）
+    void noteWait(bool gotIt, uint32_t waitedUs, uint32_t lateByUs = 0)
     {
         waited++;
         if (gotIt) {
             got++;
+            if (waitedUs < kQuickUs) {
+                quick++;
+            }
         }
         else {
             timeout++;
+            if (lateUs.size() < lateUs.capacity()) {
+                lateUs.push_back(lateByUs);
+            }
         }
         if (waitUs.size() < waitUs.capacity()) {
             waitUs.push_back(waitedUs);
@@ -215,30 +237,36 @@ struct Window {
 
     void clear()
     {
-        waited = got = timeout = gate = tooFar = noRoom = busy = 0;
+        waited = got = timeout = quick = gate = tooFar = noRoom = busy = 0;
         waitUs.clear();
+        lateUs.clear();
     }
 
     // 組出 10 秒行的那一段（不清空；呼叫端印完再 clear()）。effUs＝實際生效的上限（不作用時 0）；paused＝防護暫停中；
     // gTypUs＝frame thread 最近一次判斷時用的 g 典型值（0＝還沒判斷過）。
-    // 到 guard= 為止是設計文件訂的欄位與順序；busy、gTyp 是後來加的，照「新欄位加在後面」接在這一段的最後。
-    // wait p50 的位置同 XrContext 的 pctOf（第 n/2 個）；一次都沒等時印 0/0。會重排 waitUs
+    // 到 guard= 為止是設計文件訂的欄位與順序；busy、gTyp、quick、toLate 是後來加的，照「新欄位加在後面」接在這一段的最後。
+    // p50 的位置同 XrContext 的 pctOf（第 n/2 個）；沒有樣本時印 0/0。會重排 waitUs、lateUs
     std::string tail(uint32_t effUs, bool paused, uint32_t gTypUs)
     {
-        uint32_t p50 = 0, maxUs = 0;
-        if (!waitUs.empty()) {
-            const std::ptrdiff_t mid = static_cast<std::ptrdiff_t>(waitUs.size() / 2);
-            std::nth_element(waitUs.begin(), waitUs.begin() + mid, waitUs.end());
-            p50 = waitUs[static_cast<size_t>(mid)];
-            maxUs = *std::max_element(waitUs.begin(), waitUs.end());
-        }
+        uint32_t p50 = 0, maxUs = 0, lateP50 = 0, lateMax = 0;
+        auto pick = [](std::vector<uint32_t>& v, uint32_t* p, uint32_t* mx) {
+            if (v.empty()) {
+                return;
+            }
+            const std::ptrdiff_t m = static_cast<std::ptrdiff_t>(v.size() / 2);
+            std::nth_element(v.begin(), v.begin() + m, v.end());
+            *p = v[static_cast<size_t>(m)];
+            *mx = *std::max_element(v.begin(), v.end());
+        };
+        pick(waitUs, &p50, &maxUs);
+        pick(lateUs, &lateP50, &lateMax);
         const uint32_t hundredths = (effUs + 5u) / 10u;  // 毫秒、兩位小數（四捨五入），用整數組
-        char buf[288];
+        char buf[352];
         std::snprintf(buf, sizeof(buf),
                       " | flight=%u.%02u ms waited=%u got=%u timeout=%u gate=%u far=%u noRoom=%u wait p50/max=%u/%u us guard=%s"
-                      " busy=%u gTyp=%u us",
+                      " busy=%u gTyp=%u us quick=%u toLate p50/max=%u/%u us",
                       hundredths / 100u, hundredths % 100u, waited, got, timeout, gate, tooFar, noRoom, p50, maxUs,
-                      paused ? "paused" : "ok", busy, gTypUs);
+                      paused ? "paused" : "ok", busy, gTypUs, quick, lateP50, lateMax);
         return buf;
     }
 };
@@ -629,12 +657,13 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
         Window empty;
         const std::string a = empty.tail(500, false, 1500);
         const char* const wantA =
-            " | flight=0.50 ms waited=0 got=0 timeout=0 gate=0 far=0 noRoom=0 wait p50/max=0/0 us guard=ok busy=0 gTyp=1500 us";
+            " | flight=0.50 ms waited=0 got=0 timeout=0 gate=0 far=0 noRoom=0 wait p50/max=0/0 us guard=ok busy=0 gTyp=1500 us"
+            " quick=0 toLate p50/max=0/0 us";
         Window w;
         w.reserveWindow();
         const uint32_t waits[5] = {410, 90, 250, 415, 130};
         for (int i = 0; i < 5; i++) {
-            w.noteWait(i != 3, waits[i]);
+            w.noteWait(i != 3, waits[i], i == 3 ? 70u : 0u);
         }
         for (int i = 0; i < 7; i++) {
             w.note(Why::Gate);
@@ -649,13 +678,56 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
         }
         const std::string b = w.tail(333, true, 1588);
         const char* const wantB =
-            " | flight=0.33 ms waited=5 got=4 timeout=1 gate=7 far=2 noRoom=3 wait p50/max=250/415 us guard=paused busy=4 gTyp=1588 us";
+            " | flight=0.33 ms waited=5 got=4 timeout=1 gate=7 far=2 noRoom=3 wait p50/max=250/415 us guard=paused busy=4 gTyp=1588 us"
+            " quick=2 toLate p50/max=70/70 us";
         const std::string c = empty.tail(0, false, 0), e = empty.tail(1000, false, 0);
         const std::string down = empty.tail(334, false, 0), up = empty.tail(335, false, 0);  // 四捨五入到 0.01 ms
         const bool ok = a == wantA && b == wantB && c.compare(0, 18, " | flight=0.00 ms ") == 0 &&
                         e.compare(0, 18, " | flight=1.00 ms ") == 0 && down.compare(0, 18, " | flight=0.33 ms ") == 0 &&
                         up.compare(0, 18, " | flight=0.34 ms ") == 0;
         caseDone("flight-window-tail", ok, a == wantA ? (b == wantB ? b : "got [" + b + "] want [" + wantB + "]") : "got [" + a + "] want [" + wantA + "]");
+    }
+    {
+        // 卡住：送出之後已經過了典型值＋16 ms（GPU 卡死判定之前的那 1 秒）→ Far，不再每格等滿。邊界不含等號
+        Input a = ready(), b = ready();
+        a.flightSubmitUs = a.nowUs - (1500 + kStuckUs);
+        b.flightSubmitUs = b.nowUs - (1500 + kStuckUs + 1);
+        std::snprintf(buf, sizeof(buf), "typ+16000 us -> %s, typ+16001 us -> %s", whyName(why(a)), whyName(why(b)));
+        caseDone("flight-stuck", why(a) == Why::Wait && why(b) == Why::Far, buf);
+    }
+    {
+        // xrWaitFrame 幾乎沒擋住就返回（上一格晚回）：這一格的截止時刻本身就晚 → NoRoom。擋了 150 µs 照常等；
+        // 不知道擋了多久（預設值）不看這一條
+        Input a = ready(), b = ready(), c = ready();
+        a.wakeBlockedUs = 149;
+        b.wakeBlockedUs = 150;
+        std::snprintf(buf, sizeof(buf), "blocked 149 us -> %s, 150 us -> %s, unknown -> %s", whyName(why(a)), whyName(why(b)),
+                      whyName(why(c)));
+        caseDone("flight-wake-not-blocked", why(a) == Why::NoRoom && why(b) == Why::Wait && why(c) == Why::Wait, buf);
+    }
+    {
+        // quick 只數等到的、而且等不到 150 µs 的；逾時的醒來晚多少記在 toLate（p50 是第 n/2 個）
+        Window w;
+        w.reserveWindow();
+        w.noteWait(true, 149);
+        w.noteWait(true, 150);
+        w.noteWait(false, 100, 30);
+        w.noteWait(false, 415, 90);
+        w.noteWait(false, 415, 60);
+        const std::string t = w.tail(500, false, 1500);
+        const bool ok = w.quick == 1 && w.got == 2 && w.timeout == 3 &&
+                        t.find(" quick=1 toLate p50/max=60/90 us") != std::string::npos;
+        caseDone("flight-window-quick-late", ok, t);
+    }
+    {
+        // g 的典型值取的是中位數：64 個不同的值（1000、1010、…、1630，順序打亂）的第 32 小是 1320 →
+        // (3×1500＋1320＋2)/4＝1455。取平均（1315）、最小、最大都會得到別的數字
+        GpuTyp g;
+        for (uint32_t i = 0; i < 64; i++) {
+            g.push(1000u + 10u * ((i * 37u) % 64u));
+        }
+        std::snprintf(buf, sizeof(buf), "1500 -> %u", g.typUs());
+        caseDone("flight-gpu-typ-median", g.typUs() == 1455, buf);
     }
     return failures;
 }

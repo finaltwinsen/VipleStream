@@ -680,6 +680,8 @@ private:
     // （照量到的經驗式——runtime 看的是最近 32 格的最大值——不會比穩定延後更糟），所以另有防護（FlightState::guard）。
     // 只量過 120 Hz：別的更新率一律不等（見 pcvrFlightWait）。要改大先重量
     static constexpr uint32_t kLatchSpanMaxUs = 6500;
+    // 10 秒彙總視窗的長度：maybeLogStats、pcvrTimingTick 判斷「滿了沒」與 pcvrFlightWait 預測「這一格會不會印」共用這一個
+    static constexpr uint64_t kStatsWindowNs = 10000000000ull;
     // 實際的上限（µs）：就是設定值；整場不作用時 0——非 PCVR、沒設、這個平台的定時等待太粗（同 §VR-LATCH-WAIT），
     // 或延後量已經貼到 kLatchSpanMaxUs（留不到 100 µs）。補幀開著時照樣作用
     uint32_t pcvrLatchFlightEffUs() const
@@ -705,6 +707,8 @@ private:
         uint32_t offRateRun = 0;
         uint32_t offRateLogUs = 0;
         bool offRateLogged = false;
+        // 最近一次判斷時顯示是不是 120 Hz：不是的話這一格一定不等，10 秒行的 flight= 印 0.00
+        bool rate120 = true;
     } m_Flight;
     // frame thread，xrBeginFrame 之前、不持任何鎖：判斷這一格要不要等在途的那一張，要就等（見 .cpp）
     void pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capUs);

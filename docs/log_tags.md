@@ -940,7 +940,7 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
 
 自測
-[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑五個純邏輯 header 的自測、一共 103 個案例
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑五個純邏輯 header 的自測、一共 109 個案例
                                                                                  （前三個 header 的 71 個是 5b-6 這一批的，輸出不變；xrflight.h 20 個與 xrguard.h 12 個是 5b-7 加的）。
                                                                                  xrlatchstats.h：原有的 27 個（輸出不變），加上 `latch-wait-…`／`latch-flip-…`／
                                                                                  `latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到計數：差一點、真的晚、150 µs 的
@@ -991,26 +991,32 @@ PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 
                                                                                  （基準＝bring-up 3 s 之後看過的最小值），或 10 s 內 XR 漏 3 幀 → 暫停 N 秒（60 起每次加倍、
                                                                                  上限 480），到時自動恢復、不另外印。同場切換的另一邊、暫停期間發生的不算。
                                                                                  這一行在觸發的那一格送出去（xrEndFrame）之後才印
-[VIPLE-VR-LDIAG] 10s …原樣… flip=N | flight=F ms waited=N got=N timeout=N gate=N far=N noRoom=N wait p50/max=…/… us guard=<ok|paused> busy=N gTyp=… us[ ab=<0|1>]
+[VIPLE-VR-LDIAG] 10s …原樣… flip=N | flight=F ms waited=N got=N timeout=N gate=N far=N noRoom=N wait p50/max=…/… us guard=<ok|paused> busy=N gTyp=… us quick=N toLate p50/max=…/… us[ ab=<0|1>]
                                                                               ← 行尾新增（排在 flip= 之後、ab= 之前；設了 `vrlatchflightms` 才印，整場不作用時照印、數字都是 0）。
                                                                                  視窗和這一行的其他欄位相同，ab 也是同一個。
-                                                                                 flight＝實際生效的上限（整場不作用時 0.00）；
-                                                                                 waited＝這 10 秒等了幾格（＝got＋timeout）；**got＝等到新影像的格數，主指標**——每一張都是
-                                                                                 不等就會重複上一張、它晚一格才出現的影像；timeout＝等到截止時刻的；
+                                                                                 flight＝實際生效的上限（整場不作用、或這個視窗最後的顯示不是 120 Hz 時 0.00）；
+                                                                                 waited＝這 10 秒等了幾格（＝got＋timeout）；got＝等到新影像的格數；**got − quick 是主指標**
+                                                                                 ——不等就會重複上一張、它晚一格才出現的影像（quick 見下面）；timeout＝等到截止時刻的；
                                                                                  gate／far／noRoom／busy 只數「有一張在途、卻因為那個條件沒有等」的格，照這個順序判斷，
                                                                                  兩個條件同時不成立時記前面那一個：
                                                                                  gate＝這一格不是重複格——最新發布的那一張還沒顯示過，或半速時它才顯示了一格（補幀開著時
                                                                                  那一格要顯示合成的那一半，等到新影像會把它跳掉）；
-                                                                                 far＝剛送出，照典型的 GPU 時間（gTyp）上限之內做不完；
-                                                                                 noRoom＝離「xrWaitFrame 返回後 6.5 ms」不到 20 µs（延後量太大，或顯示不是 120 Hz）；
+                                                                                 far＝剛送出，照典型的 GPU 時間（gTyp）上限之內做不完；或送出之後已經超過 gTyp＋16 ms
+                                                                                 還沒做完（當成卡住，不等）；
+                                                                                 noRoom＝離「xrWaitFrame 返回後 6.5 ms」不到 20 µs（延後量太大，或顯示不是 120 Hz），
+                                                                                 或這一格的 xrWaitFrame 擋住不到 150 µs 就返回（上一格晚回，這一格返回的時刻本身就晚，
+                                                                                 等滿會超出量過的範圍）；
                                                                                  busy＝本來會等，但這一格在 xrEndFrame 之後要印 10 秒行，所以沒等（那一格回到 xrWaitFrame
                                                                                  本來就最晚）。用兩個 10 秒視窗的起點往前看一個顯示週期預測，每個視窗有 2～4 格受影響，
                                                                                  這個數字是其中本來會等的；
-                                                                                 wait p50/max＝等過的那幾格實際等了多久（等到的也算；一次都沒等印 0/0）。max 比
-                                                                                 「6.5 ms − 延後 − 約 0.09 ms」多出來的部分，就是定時等待醒來晚了多少（頭盔上還沒有量過）；
+                                                                                 wait p50/max＝等過的那幾格實際等了多久（等到的也算；一次都沒等印 0/0），從判斷點起算——
+                                                                                 判斷點在延後睡醒、控制器快照之後，所以不能拿「6.5 ms − 延後」去減它；
                                                                                  guard＝印這一行的當下防護是不是暫停中；
                                                                                  gTyp＝frame thread 最近一次判斷時用的 GPU 時間典型值：影像 render thread 每 64 張取一次
-                                                                                 「送出 → 做完」的中位數、和舊值做 1／4 的平滑，夾在 300～5000 µs，起始 1500（0＝還沒判斷過）
+                                                                                 「送出 → 做完」的中位數、和舊值做 1／4 的平滑，夾在 300～5000 µs，起始 1500（0＝還沒判斷過）；
+                                                                                 quick＝got 裡等不到 150 µs 就等到的。判斷點到挑影像之間本來就還有 0.1～0.15 ms，
+                                                                                 這種多半不等也趕得上這一格，所以效果看 got − quick（quick 也會含少數真的救回的，偏保守）；
+                                                                                 toLate p50/max＝逾時的那幾次醒來比截止時刻晚多少（定時等待準不準；頭盔上還沒有量過）
 ```
 
 - 開著時既有欄位的定義不變，數值會跟著變：等過的那幾格晚一點才挑影像（最多晚一個上限），所以 `wake2latch` 的 max、
@@ -1018,9 +1024,8 @@ PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 
   證據）；`resc`／`rescBy` 變小（被救回的不再有等待格）——預測救得到幾張要看關的那一邊的 `rescBy`；送給 host 的 LATCH slack
   對被救回的影像是很小的正值。
 - `got` 略為低估：截止時刻剛好落在「影像已經交還給 runtime、還沒發布」的那幾十微秒時記成 timeout，那一格其實挑得到它。
-- 影像那一側的 GPU 工作卡住時（等超過 1 秒才判定，接著 session 當成 lost），那一秒裡在途的標記還掛著，frame thread 每一格
-  都會等到截止時刻（每一格仍不超過 6.5 ms 的上限）。那個視窗若來得及印，`timeout` 會一次多出一百多次——是這個原因，
-  不是閘門壞了。
+- 影像那一側的 GPU 工作卡住時（等超過 1 秒才判定，接著 session 當成 lost），在途的標記會一直掛著；送出之後超過
+  gTyp＋16 ms 的那一張不再等（記在 `far`），所以只有最初那十幾毫秒的一兩格會等滿。
 - 同時設了 `vrlatchwaitms` 與 `vrlatchflightms` 時，一行裡有兩組 `waited=`／`timeout=`（前一組是 §VR-LATCH-WAIT 的，恆為 0）：
   解析 flight 的欄位要從 ` | flight=` 之後找。
 
