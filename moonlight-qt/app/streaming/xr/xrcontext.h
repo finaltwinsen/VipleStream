@@ -285,7 +285,9 @@ private:
     // 虛擬鍵盤：把 QImage 經 staging buffer 複製進 swapchain 影像（格式需為 8-bit RGBA／BGRA）
     bool uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& img);
     bool createSolidSwapchain(uint32_t w, uint32_t h, XrSwapchain* sc, VkImage** images, uint32_t* count, const char* what);
-    void maybeLogStats(uint64_t nowNs);
+    // 每一格呼叫一次；視窗滿了就印 10 s 行並回 true。deferPrint＝這一格已經印過 [VIPLE-VR-LDIAG] 那一組：滿了也先不印，
+    // 留到下一格（兩組錯開，見 frameThreadMain 的 §VR-LOGSPLIT）
+    bool maybeLogStats(uint64_t nowNs, bool deferPrint = false);
     // §XR-REFRESH-LATE：session 已在跑、量到的幀週期不是想要的更新率時，重新列舉並再要求一次（frame thread）
     void requestRefreshLate(double measuredHz);
 
@@ -625,6 +627,9 @@ private:
         std::vector<uint32_t> tailUs;       // 10 s：上一格的 xrEndFrame 返回 → 這一格呼叫 xrWaitFrame（兩格之間 frame thread 花多久）
         uint32_t beginCallMaxUs = 0;        // 10 s：xrBeginFrame 這個呼叫的最大值
         uint32_t waitShort = 0;             // 10 s：相鄰兩次 xrWaitFrame 返回的間隔不到半格的次數
+        // §VR-LOGSPLIT（量測）：上一次印 10 s 行時，xrEndFrame 之後各組花了多久（µs）：ldiag＝pcvrLatchDiagLog、
+        // loop＝pcvrLoopDiagLog、stats＝maybeLogStats 印的那一格。XRLOOP 行印的是「上一次」的值（印這一行時自己還沒量完）
+        uint32_t logCostLdiagUs = 0, logCostLoopUs = 0, logCostStatsUs = 0;
         uint64_t lastWakeNs = 0;            // 上一格 xrWaitFrame 返回的時刻
         uint64_t loopNo = 0;                // frame loop 跑到第幾圈（每圈開頭加一，沒送出影像的圈也算）
         uint64_t lastEndNs = 0;             // 上一次記帳的那一格 xrEndFrame 返回的時刻（0＝還沒有），
@@ -709,9 +714,13 @@ private:
         bool offRateLogged = false;
         // 最近一次判斷時顯示是不是 120 Hz：不是的話這一格一定不等，10 秒行的 flight= 印 0.00
         bool rate120 = true;
+        // 量測（2026-10-18）：逾時／太遠的那一格在途的那一張，等它發布之後記 missBy／farBy（見 xrflight::Pending）
+        xrflight::Pending pending;
     } m_Flight;
     // frame thread，xrBeginFrame 之前、不持任何鎖：判斷這一格要不要等在途的那一張，要就等（見 .cpp）
     void pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capUs);
+    // frame thread：去發布紀錄找 m_Flight.pending 的那一張，找到或放棄就記進 10 s 視窗（量測）
+    void pcvrFlightResolvePending(uint64_t nowUs);
     // frame thread，這一格送出去之後：記這一格顯示了哪一張，印延後到這裡的 log
     void pcvrFlightAfterFrame(bool latched, uint64_t seq);
 };

@@ -1473,13 +1473,13 @@ bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, con
     return ok;
 }
 
-void XrContext::maybeLogStats(uint64_t nowNs)
+bool XrContext::maybeLogStats(uint64_t nowNs, bool deferPrint)
 {
     if (m_StatsWindowStartNs == 0) {
         m_StatsWindowStartNs = nowNs;
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_StatsAtWindowStart = m_Stats;
-        return;
+        return false;
     }
     // §VR-LATCH A/B：這個函式每一格呼叫一次。下面 10s video 那一行的 10 s 視窗是這裡自己計時的，所以另外數這個視窗裡
     // 「開」「關」兩邊各跑了幾格（行尾的 ab= 照它標）
@@ -1491,8 +1491,8 @@ void XrContext::maybeLogStats(uint64_t nowNs)
             m_PcvrTiming.abVideoOffFrames++;
         }
     }
-    if (nowNs - m_StatsWindowStartNs < kStatsWindowNs) {
-        return;
+    if (nowNs - m_StatsWindowStartNs < kStatsWindowNs || deferPrint) {
+        return false;
     }
     Stats cur, prev;
     {
@@ -1603,6 +1603,7 @@ void XrContext::maybeLogStats(uint64_t nowNs)
     if (m_VrCtl != nullptr) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-INPUT] 10s %s", qUtf8Printable(m_VrCtl->takeStatsLine()));
     }
+    return true;
 }
 
 void XrContext::frameThreadMain()
@@ -2278,12 +2279,22 @@ void XrContext::frameThreadMain()
             pcvrFlightAfterFrame(haveVideo && videoLayer && XR_SUCCEEDED(er), vcur.seq);
         }
 #endif
+        // §VR-LOGSPLIT（2026-10-18）：印 10 s 行的那一格在 xrEndFrame 之後要多做 0.7～1.4 ms（2026-10-17 頭盔 B1 的 tail max；
+        // 排序、組字串、每一行 log 兩次 regex 再丟給 log 執行緒），回到 xrWaitFrame 最晚。兩組 10 s 行原本多半擠在同一格
+        // （[VIPLE-VR-LDIAG]／[VIPLE-VR-XRLOOP] 這一組與 maybeLogStats 那一組各自計時），改成這一格印了前一組，
+        // maybeLogStats 滿了也留到下一格。各組花多久記在 m_LoopDiag，下一次的 XRLOOP 行印出來（logCost）
+        bool diagLoggedNow = false;
         if (m_LatchDiag.logDue) {
             // §VR-LDIAG：pcvrTimingTick 在這一格印了 [VIPLE-VR-MTP10]，同一個視窗的逐張量測接著印。排序與組字串
             // 放在這裡（這一格已經送出去），不放在挑影像到 xrEndFrame 之間
             m_LatchDiag.logDue = false;
+            diagLoggedNow = true;
+            const uint64_t l0 = steadyNowNs();
             pcvrLatchDiagLog();
+            const uint64_t l1 = steadyNowNs();
+            m_LoopDiag.logCostLdiagUs = static_cast<uint32_t>((std::min<uint64_t>)((l1 - l0) / 1000ull, 0xffffffffu));
             pcvrLoopDiagLog();  // §VR-XRLOOP：同一個視窗，接在 LDIAG 的那一行（或兩行）後面印
+            m_LoopDiag.logCostLoopUs = static_cast<uint32_t>((std::min<uint64_t>)((steadyNowNs() - l1) / 1000ull, 0xffffffffu));
         }
 
         double lateRefreshMeasuredHz = 0.0;  // > 0：鎖外呼叫 requestRefreshLate()
@@ -2349,7 +2360,12 @@ void XrContext::frameThreadMain()
         if (lateRefreshMeasuredHz > 0.0) {
             requestRefreshLate(lateRefreshMeasuredHz);
         }
-        maybeLogStats(steadyNowNs());
+        {
+            const uint64_t s0 = steadyNowNs();
+            if (maybeLogStats(s0, m_Options.pcvr && diagLoggedNow)) {
+                m_LoopDiag.logCostStatsUs = static_cast<uint32_t>((std::min<uint64_t>)((steadyNowNs() - s0) / 1000ull, 0xffffffffu));
+            }
+        }
     }
 
     const Stats s = stats();
@@ -3073,11 +3089,14 @@ void XrContext::pcvrLoopDiagLog()
                 "[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=%u/%u/%u us | latchLead p50/p05=%.2f/%.2f ms "
                 "endLead p50/p05/min=%.2f/%.2f/%.2f ms | span p50/p95/max=%u/%u/%u us | beginCall max=%u us "
                 "endCall p50/p95/max=%u/%u/%u us | ahead p50/min/max=%.2f/%.2f/%.2f ms%s | waitShort=%u | "
-                "chain dec/render/slack/lead p50=%s/%s/%s/%s ms sum=%s ms | tail p50/max=%u/%u us%s",
+                "chain dec/render/slack/lead p50=%s/%s/%s/%s ms sum=%s ms | tail p50/max=%u/%u us"
+                " logCost ldiag/loop/stats=%u/%u/%u us%s",
                 wakeP50, wakeP95, wakeMax, leadP50 / 1000.0, leadP05 / 1000.0, endLeadP50 / 1000.0, endLeadP05 / 1000.0,
                 endLeadMin / 1000.0, spanP50, spanP95, spanMax, d.beginCallMaxUs, endCallP50, endCallP95, endCallMax,
                 aheadP50 / 1000.0, aheadMin / 1000.0, aheadMax / 1000.0, m_TimeConv != nullptr ? "" : " (approx)", d.waitShort,
                 decText, renderText, slackText, leadText, sumText, tailP50, tailMax,
+                // §VR-LOGSPLIT：ldiag 是這一次量的（已經印完），loop、stats 是上一次的
+                d.logCostLdiagUs, d.logCostLoopUs, d.logCostStatsUs,
                 // §VR-LATCH A/B：和同一輪的 [VIPLE-VR-LDIAG] 相同（10 s 區塊在換邊之前記下來的那一邊）
                 m_Options.pcvrLatchAbSec > 0 ? (m_LatchDiag.logAb ? " ab=1" : " ab=0") : "");
     d.wakePhaseUs.clear();
@@ -3256,6 +3275,10 @@ void XrContext::pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capU
     if (!pcvrAbActive() || f.guard.paused(nowNs)) {
         return;  // xrflight::Why::Off
     }
+    if (f.pending.seq != 0) {
+        // 上一筆還沒對到的話先對一次：下面可能要記新的一筆（多半是上一格送出之後已經發布了）
+        pcvrFlightResolvePending(nowNs / 1000ull);
+    }
     const uint64_t lookNs = (std::max<uint64_t>)(5000000ull, (std::min<uint64_t>)(periodNs, 20000000ull));
     xrflight::Input in;
     in.active = true;
@@ -3275,6 +3298,14 @@ void XrContext::pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capU
     const xrflight::Decision d = xrflight::decide(in);
     if (d.why != xrflight::Why::Wait) {
         f.win.note(d.why);
+        // 量測：判成太遠、而且不是卡住的那一種（照典型值上限內做不完）→ 記下來，看它其實晚「判斷＋上限」多少才發布
+        const uint64_t elapsedUs = in.nowUs > in.flightSubmitUs ? in.nowUs - in.flightSubmitUs : 0;
+        if (d.why == xrflight::Why::Far && elapsedUs + in.capUs < in.gTypUs) {
+            if (f.pending.seq != 0) {
+                f.win.notePending(f.pending, xrflight::Resolve::Unknown, 0);
+            }
+            f.pending = {in.flightSeq, in.nowUs + in.capUs, in.nowUs, true};
+        }
         return;
     }
     const bool got = m_Video->waitNewerThan(in.latestSeq, d.deadlineUs);
@@ -3283,6 +3314,27 @@ void XrContext::pcvrFlightWait(uint64_t wakeNs, uint64_t periodNs, uint32_t capU
     const uint64_t lateByUs = (!got && afterUs > d.deadlineUs) ? afterUs - d.deadlineUs : 0;
     f.win.noteWait(got, static_cast<uint32_t>((std::min<uint64_t>)(afterUs > in.nowUs ? afterUs - in.nowUs : 0, 0xffffffffu)),
                    static_cast<uint32_t>((std::min<uint64_t>)(lateByUs, 0xffffffffu)));
+    if (!got) {
+        // 量測：逾時的那一張後來什麼時候發布（missBy）。這一格送出去之後才去對（pcvrFlightAfterFrame）
+        if (f.pending.seq != 0) {
+            f.win.notePending(f.pending, xrflight::Resolve::Unknown, 0);
+        }
+        f.pending = {in.flightSeq, d.deadlineUs, afterUs, false};
+    }
+}
+
+void XrContext::pcvrFlightResolvePending(uint64_t nowUs)
+{
+    auto& f = m_Flight;
+    XrVideo::PubRec rec = {};
+    // 序號大於 seq−1 的第一筆就是那一張（如果已經發布）；發布紀錄只留 64 筆，太舊的找不到 → 50 ms 後算 unk
+    const bool found = m_Video->drainPublished(f.pending.seq - 1, UINT64_MAX, &rec, 1) == 1 && rec.seq == f.pending.seq;
+    uint32_t us = 0;
+    const xrflight::Resolve r = xrflight::resolvePending(f.pending, found, rec.pubUs, nowUs, &us);
+    if (r != xrflight::Resolve::Keep) {
+        f.win.notePending(f.pending, r, us);
+        f.pending = {};
+    }
 }
 
 // §VR-LATCH-FLIGHT：frame thread，每一格送出去（xrEndFrame）之後呼叫。latched＝這一格真的送出了串流影像的 projection
@@ -3292,6 +3344,9 @@ void XrContext::pcvrFlightAfterFrame(bool latched, uint64_t seq)
     auto& f = m_Flight;
     if (latched) {
         f.shown.onLatched(seq);
+    }
+    if (f.pending.seq != 0) {
+        pcvrFlightResolvePending(steadyNowNs() / 1000ull);
     }
     if (f.pauseLogDue) {
         // 防護在這一格的 1 Hz 區塊觸發了（見 pcvrTimingTick）；冷卻結束時自動恢復，不另外印

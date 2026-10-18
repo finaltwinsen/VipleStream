@@ -183,6 +183,35 @@ private:
     uint32_t m_TypUs = kGpuTypInitUs;
 };
 
+// 量測（2026-10-18）：逾時、或判成「太遠」（F3 的前半，照典型值上限內做不完）的那一格，在途的那一張後來什麼時候發布。
+// 2026-10-17 的頭盔場次逾時佔等待的三到六成，只知道醒來準不準（toLate），不知道差多少才等得到：
+//   missBy＝逾時的那一張發布的時刻 − 截止時刻（多半只差 0.1～0.3 ms 的話，放寬上限或改 F3 的估法就收得回來）；
+//   farBy ＝太遠的那一張發布的時刻 −（判斷時刻＋上限）（≤ 0 印 0＝其實上限內就做完了，F3 估得太保守）。
+// frame thread 記下一筆，之後每一格去 XrVideo 的發布紀錄找那一張；找不到又過了 kPendingGiveUpUs 就算 unk
+// （發布紀錄只留 64 張，或那一張根本沒發布）
+constexpr uint64_t kPendingGiveUpUs = 50000;
+
+struct Pending {
+    uint64_t seq = 0;    // 在途的那一張發布後的序號；0＝沒有
+    uint64_t refUs = 0;  // 比較的時刻：逾時＝截止時刻；太遠＝判斷時刻＋上限
+    uint64_t setUs = 0;  // 記下的時刻
+    bool tooFar = false; // false＝逾時（missBy）、true＝太遠（farBy）
+};
+
+enum class Resolve { Keep, Done, Unknown };
+
+// found＝發布紀錄裡找到這一張；pubUs＝它發布的時刻。Done 時 *outUs＝pubUs − refUs（早於 refUs 記 0）
+inline Resolve resolvePending(const Pending& p, bool found, uint64_t pubUs, uint64_t nowUs, uint32_t* outUs)
+{
+    if (found) {
+        const uint64_t d = pubUs > p.refUs ? pubUs - p.refUs : 0;
+        *outUs = static_cast<uint32_t>((std::min<uint64_t>)(d, 0xffffffffu));
+        return Resolve::Done;
+    }
+    const uint64_t age = nowUs > p.setUs ? nowUs - p.setUs : 0;
+    return age >= kPendingGiveUpUs ? Resolve::Unknown : Resolve::Keep;
+}
+
 // frame thread 的 10 秒視窗：`[VIPLE-VR-LDIAG] 10s` 行尾 flight 那一段的計數，與每次等了多久
 struct Window {
     uint32_t waited = 0;   // 等了幾格（＝got＋timeout）
@@ -194,12 +223,31 @@ struct Window {
     uint32_t gate = 0, tooFar = 0, noRoom = 0, busy = 0;
     std::vector<uint32_t> waitUs;  // 每次等了多久（µs）
     std::vector<uint32_t> lateUs;  // 逾時的那幾次：醒來比截止時刻晚多少（µs）——定時等待準不準
+    // 量測（見 Pending）：逾時的那一張晚截止時刻多少才發布、太遠的那一張晚「判斷＋上限」多少才發布；unk＝沒對到
+    std::vector<uint32_t> missUs, farByUs;
+    uint32_t missUnk = 0, farUnk = 0;
 
     // 120 Hz 的 10 秒是 1200 格。先配好：noteWait() 在 xrBeginFrame 之前呼叫，那裡不可以配置記憶體
     void reserveWindow()
     {
         waitUs.reserve(2048);
         lateUs.reserve(2048);
+        missUs.reserve(2048);
+        farByUs.reserve(2048);
+    }
+
+    // Pending 有結果了（Done 帶 us；Unknown 只計數）。Keep 不該傳進來
+    void notePending(const Pending& p, Resolve r, uint32_t us)
+    {
+        std::vector<uint32_t>& v = p.tooFar ? farByUs : missUs;
+        if (r == Resolve::Done) {
+            if (v.size() < v.capacity()) {
+                v.push_back(us);
+            }
+        }
+        else if (r == Resolve::Unknown) {
+            (p.tooFar ? farUnk : missUnk)++;
+        }
     }
 
     // 沒有等的那一格。Wait（由 noteWait 記）、Off、NoFlight 不計
@@ -238,14 +286,18 @@ struct Window {
     void clear()
     {
         waited = got = timeout = quick = gate = tooFar = noRoom = busy = 0;
+        missUnk = farUnk = 0;
         waitUs.clear();
         lateUs.clear();
+        missUs.clear();
+        farByUs.clear();
     }
 
     // 組出 10 秒行的那一段（不清空；呼叫端印完再 clear()）。effUs＝實際生效的上限（不作用時 0）；paused＝防護暫停中；
     // gTypUs＝frame thread 最近一次判斷時用的 g 典型值（0＝還沒判斷過）。
     // 到 guard= 為止是設計文件訂的欄位與順序；busy、gTyp、quick、toLate 是後來加的，照「新欄位加在後面」接在這一段的最後。
-    // p50 的位置同 XrContext 的 pctOf（第 n/2 個）；沒有樣本時印 0/0。會重排 waitUs、lateUs
+    // p50 的位置同 XrContext 的 pctOf（第 n/2 個），p90 是第 n*9/10 個；沒有樣本時印 0。會重排各個 vector。
+    // missBy／farBy 是 2026-10-18 加的量測（見 Pending），n＝對到的筆數、unk＝沒對到的
     std::string tail(uint32_t effUs, bool paused, uint32_t gTypUs)
     {
         uint32_t p50 = 0, maxUs = 0, lateP50 = 0, lateMax = 0;
@@ -258,15 +310,30 @@ struct Window {
             *p = v[static_cast<size_t>(m)];
             *mx = *std::max_element(v.begin(), v.end());
         };
+        auto p90 = [](std::vector<uint32_t>& v) -> uint32_t {
+            if (v.empty()) {
+                return 0;
+            }
+            const std::ptrdiff_t m = static_cast<std::ptrdiff_t>(v.size() * 9 / 10);
+            std::nth_element(v.begin(), v.begin() + m, v.end());
+            return v[static_cast<size_t>(m)];
+        };
         pick(waitUs, &p50, &maxUs);
         pick(lateUs, &lateP50, &lateMax);
+        uint32_t missP50 = 0, missMax = 0, farP50 = 0, farMax = 0;
+        const uint32_t missP90 = p90(missUs), farP90 = p90(farByUs);
+        pick(missUs, &missP50, &missMax);
+        pick(farByUs, &farP50, &farMax);
         const uint32_t hundredths = (effUs + 5u) / 10u;  // 毫秒、兩位小數（四捨五入），用整數組
-        char buf[352];
+        char buf[512];
         std::snprintf(buf, sizeof(buf),
                       " | flight=%u.%02u ms waited=%u got=%u timeout=%u gate=%u far=%u noRoom=%u wait p50/max=%u/%u us guard=%s"
-                      " busy=%u gTyp=%u us quick=%u toLate p50/max=%u/%u us",
+                      " busy=%u gTyp=%u us quick=%u toLate p50/max=%u/%u us"
+                      " missBy p50/p90/max=%u/%u/%u us n=%u unk=%u farBy p50/p90/max=%u/%u/%u us n=%u unk=%u",
                       hundredths / 100u, hundredths % 100u, waited, got, timeout, gate, tooFar, noRoom, p50, maxUs,
-                      paused ? "paused" : "ok", busy, gTypUs, quick, lateP50, lateMax);
+                      paused ? "paused" : "ok", busy, gTypUs, quick, lateP50, lateMax,
+                      missP50, missP90, missMax, static_cast<unsigned>(missUs.size()), missUnk,
+                      farP50, farP90, farMax, static_cast<unsigned>(farByUs.size()), farUnk);
         return buf;
     }
 };
@@ -658,7 +725,7 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
         const std::string a = empty.tail(500, false, 1500);
         const char* const wantA =
             " | flight=0.50 ms waited=0 got=0 timeout=0 gate=0 far=0 noRoom=0 wait p50/max=0/0 us guard=ok busy=0 gTyp=1500 us"
-            " quick=0 toLate p50/max=0/0 us";
+            " quick=0 toLate p50/max=0/0 us missBy p50/p90/max=0/0/0 us n=0 unk=0 farBy p50/p90/max=0/0/0 us n=0 unk=0";
         Window w;
         w.reserveWindow();
         const uint32_t waits[5] = {410, 90, 250, 415, 130};
@@ -679,7 +746,7 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
         const std::string b = w.tail(333, true, 1588);
         const char* const wantB =
             " | flight=0.33 ms waited=5 got=4 timeout=1 gate=7 far=2 noRoom=3 wait p50/max=250/415 us guard=paused busy=4 gTyp=1588 us"
-            " quick=2 toLate p50/max=70/70 us";
+            " quick=2 toLate p50/max=70/70 us missBy p50/p90/max=0/0/0 us n=0 unk=0 farBy p50/p90/max=0/0/0 us n=0 unk=0";
         const std::string c = empty.tail(0, false, 0), e = empty.tail(1000, false, 0);
         const std::string down = empty.tail(334, false, 0), up = empty.tail(335, false, 0);  // 四捨五入到 0.01 ms
         const bool ok = a == wantA && b == wantB && c.compare(0, 18, " | flight=0.00 ms ") == 0 &&
@@ -728,6 +795,46 @@ inline int selfTest(const std::function<void(const char* name, bool ok, const st
         }
         std::snprintf(buf, sizeof(buf), "1500 -> %u", g.typUs());
         caseDone("flight-gpu-typ-median", g.typUs() == 1455, buf);
+    }
+    {
+        // 量測：在途的那一張後來發布了 → Done、記「發布 − 比較時刻」（早於比較時刻記 0）；還沒找到、記下不到 50 ms → Keep；
+        // 滿 50 ms → Unknown
+        Pending p;
+        p.seq = 9;
+        p.refUs = 10000;
+        p.setUs = 9800;
+        uint32_t a = 7, b = 7, c = 7;
+        const Resolve ra = resolvePending(p, true, 10230, 10300, &a);
+        const Resolve rb = resolvePending(p, true, 9990, 10300, &b);
+        const Resolve rc = resolvePending(p, false, 0, 9800 + kPendingGiveUpUs - 1, &c);
+        const Resolve rd = resolvePending(p, false, 0, 9800 + kPendingGiveUpUs, &c);
+        const Resolve re = resolvePending(p, false, 0, 9000, &c);  // 時鐘倒退（兩條執行緒各自取的）當成剛記下
+        std::snprintf(buf, sizeof(buf), "found +230 -> %u (%d), found early -> %u (%d), 49.999 ms -> %d, 50 ms -> %d, back -> %d", a,
+                      static_cast<int>(ra), b, static_cast<int>(rb), static_cast<int>(rc), static_cast<int>(rd), static_cast<int>(re));
+        caseDone("flight-pending-resolve", ra == Resolve::Done && a == 230 && rb == Resolve::Done && b == 0 && rc == Resolve::Keep &&
+                                               c == 7 && rd == Resolve::Unknown && re == Resolve::Keep,
+                 buf);
+    }
+    {
+        // missBy／farBy 各自分開記；p50＝第 n/2 個、p90＝第 n*9/10 個（10 筆 → 第 6、10 小的）；unk 只計數
+        Window w;
+        w.reserveWindow();
+        Pending miss, far2;
+        far2.tooFar = true;
+        for (uint32_t i = 0; i < 10; i++) {
+            w.notePending(miss, Resolve::Done, 100u * (10u - i));  // 1000, 900, …, 100
+        }
+        w.notePending(miss, Resolve::Unknown, 0);
+        w.notePending(far2, Resolve::Done, 40);
+        w.notePending(far2, Resolve::Unknown, 0);
+        w.notePending(far2, Resolve::Unknown, 0);
+        const std::string t = w.tail(500, false, 1500);
+        const bool ok = t.find(" missBy p50/p90/max=600/1000/1000 us n=10 unk=1 farBy p50/p90/max=40/40/40 us n=1 unk=2") !=
+                        std::string::npos;
+        w.clear();
+        const std::string t2 = w.tail(500, false, 1500);
+        const bool cleared = t2.find(" missBy p50/p90/max=0/0/0 us n=0 unk=0 farBy p50/p90/max=0/0/0 us n=0 unk=0") != std::string::npos;
+        caseDone("flight-window-missby", ok && cleared, t);
     }
     return failures;
 }

@@ -852,7 +852,7 @@ frame loop（XR 桌面也有）
 [VIPLE-XR] 10s frames=… …原樣… stale=N discarded=N                            ← 行尾新增：這 10 秒 xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（正常是 0）
 [VIPLE-XR] xrBeginFrame returned XR_FRAME_DISCARDED (N so far)                ← warning，一場最多 10 行：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。
                                                                                  它是成功碼，流程照常；以前只檢查失敗碼，這個結果看不到
-[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=…/…/… us | latchLead p50/p05=…/… ms endLead p50/p05/min=…/…/… ms | span p50/p95/max=…/…/… us | beginCall max=… us endCall p50/p95/max=…/…/… us | ahead p50/min/max=…/…/… ms[ (approx)] | waitShort=N | chain dec/render/slack/lead p50=…/…/…/… ms sum=… ms | tail p50/max=…/… us[ ab=<0|1>]
+[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=…/…/… us | latchLead p50/p05=…/… ms endLead p50/p05/min=…/…/… ms | span p50/p95/max=…/…/… us | beginCall max=… us endCall p50/p95/max=…/…/… us | ahead p50/min/max=…/…/… ms[ (approx)] | waitShort=N | chain dec/render/slack/lead p50=…/…/…/… ms sum=… ms | tail p50/max=…/… us logCost ldiag/loop/stats=…/…/… us[ ab=<0|1>]
                                                                               ← PCVR，每 10 秒一行，和 [VIPLE-VR-LDIAG] 10s 同一格印、排在它後面（視窗與 ab 都相同）。
                                                                                  每第 6 個視窗兩行中間隔著一行 [VIPLE-VR-LDIAG] 60s gpu-by-phase，所以要把兩行配成一對就找
                                                                                  「前一行 LDIAG 10s」，不要找「上一行」。相位是 LDIAG 相位。
@@ -878,6 +878,11 @@ frame loop（XR 桌面也有）
                                                                                  tail＝上一格的 xrEndFrame 返回到這一格呼叫 xrWaitFrame——frame thread 在兩格之間記帳、印 log、
                                                                                  處理事件花多久（預期 p50 約 0.2 ms）。它吃掉的是「回到 xrWaitFrame 到下一次放行」的餘裕
                                                                                  （頭盔上 p50 約 1.7 ms、最少約 1.1 ms）：max 接近這個數字＝那一格晚放行，量測本身擠到呈現了。
+                                                                                 2026-10-17 頭盔 B1（每眼 2160）：p50 約 70 µs、印 10 s 行那一格的 max 常 0.9 ms 以上、一次 1.43 ms。
+                                                                                 §VR-LOGSPLIT（2026-10-18）起兩組 10 s 行錯開在不同格印：這一格印了 LDIAG／XRLOOP 這一組，
+                                                                                 maybeLogStats 那一組（[VIPLE-XR] 10s、10s video、pose、input）滿了也留到下一格；
+                                                                                 logCost＝印 10 s 行時 xrEndFrame 之後各組花多久：ldiag＝pcvrLatchDiagLog（這一次的）、
+                                                                                 loop＝pcvrLoopDiagLog、stats＝maybeLogStats 印的那一格（這兩個是上一次的，印這一行時還沒量完）；
                                                                                  每 10 秒印這幾行的那一格工作最多，它的 tail 算在**下一行**的 max 裡；只算緊鄰的兩圈
                                                                                  （session 沒在跑、xrWaitFrame／xrBeginFrame 失敗的圈之後那一格不算）
 
@@ -940,7 +945,7 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
 
 自測
-[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑五個純邏輯 header 的自測、一共 109 個案例
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑五個純邏輯 header 的自測、一共 111 個案例
                                                                                  （前三個 header 的 71 個是 5b-6 這一批的，輸出不變；xrflight.h 20 個與 xrguard.h 12 個是 5b-7 加的）。
                                                                                  xrlatchstats.h：原有的 27 個（輸出不變），加上 `latch-wait-…`／`latch-flip-…`／
                                                                                  `latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到計數：差一點、真的晚、150 µs 的
@@ -991,7 +996,7 @@ PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 
                                                                                  （基準＝bring-up 3 s 之後看過的最小值），或 10 s 內 XR 漏 3 幀 → 暫停 N 秒（60 起每次加倍、
                                                                                  上限 480），到時自動恢復、不另外印。同場切換的另一邊、暫停期間發生的不算。
                                                                                  這一行在觸發的那一格送出去（xrEndFrame）之後才印
-[VIPLE-VR-LDIAG] 10s …原樣… flip=N | flight=F ms waited=N got=N timeout=N gate=N far=N noRoom=N wait p50/max=…/… us guard=<ok|paused> busy=N gTyp=… us quick=N toLate p50/max=…/… us[ ab=<0|1>]
+[VIPLE-VR-LDIAG] 10s …原樣… flip=N | flight=F ms waited=N got=N timeout=N gate=N far=N noRoom=N wait p50/max=…/… us guard=<ok|paused> busy=N gTyp=… us quick=N toLate p50/max=…/… us missBy p50/p90/max=…/…/… us n=N unk=N farBy p50/p90/max=…/…/… us n=N unk=N[ ab=<0|1>]
                                                                               ← 行尾新增（排在 flip= 之後、ab= 之前；設了 `vrlatchflightms` 才印，整場不作用時照印、數字都是 0）。
                                                                                  視窗和這一行的其他欄位相同，ab 也是同一個。
                                                                                  flight＝實際生效的上限（整場不作用、或這個視窗最後的顯示不是 120 Hz 時 0.00）；
@@ -1016,7 +1021,11 @@ PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 
                                                                                  「送出 → 做完」的中位數、和舊值做 1／4 的平滑，夾在 300～5000 µs，起始 1500（0＝還沒判斷過）；
                                                                                  quick＝got 裡等不到 150 µs 就等到的。判斷點到挑影像之間本來就還有 0.1～0.15 ms，
                                                                                  這種多半不等也趕得上這一格，所以效果看 got − quick（quick 也會含少數真的救回的，偏保守）；
-                                                                                 toLate p50/max＝逾時的那幾次醒來比截止時刻晚多少（定時等待準不準；頭盔上還沒有量過）
+                                                                                 toLate p50/max＝逾時的那幾次醒來比截止時刻晚多少（定時等待準不準；2026-10-17 頭盔上 max 77～253 µs）；
+                                                                                 missBy（2026-10-18，量測）＝逾時的那一張後來發布的時刻 − 截止時刻：差多少才等得到；
+                                                                                 farBy＝判成 far（照 gTyp 上限內做不完；卡住的那一種不算）的那一張發布的時刻 −（判斷時刻＋上限），
+                                                                                 0＝其實上限內就做完了（F3 估得太保守）。p90 是第 n*9/10 個；n＝對到的筆數；unk＝50 ms 內在
+                                                                                 發布紀錄裡找不到（只留 64 張，或那一張沒發布），或還沒對到就又記了新的一筆
 ```
 
 - 開著時既有欄位的定義不變，數值會跟著變：等過的那幾格晚一點才挑影像（最多晚一個上限），所以 `wake2latch` 的 max、
