@@ -42,7 +42,7 @@ struct RenderDiag {
     uint32_t handoffN = 0;        // 顯示是 120 Hz 時：分過類的張數，
     uint32_t handoffPreempt = 0;  //   其中送出的相位落在「做到一半會被合成器插隊」那一段的，
     uint32_t handoffQueued = 0;   //   與「排在合成器後面」那一段的（見 xrphase::handoffClass）
-    xrphase::RankScan rank;       // statsTail 算分位數用的（緩衝區留著重用；整包交換時跟著換，無妨）
+    xrphase::RankScan rank;       // statsTail 算分位數用的（第一次用時才配；§VR-LOGASYNC 起每個視窗是新的一包，在 log 執行緒配）
     void clear()
     {
         mboxUs.clear();

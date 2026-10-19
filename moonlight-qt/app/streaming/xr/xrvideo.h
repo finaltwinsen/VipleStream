@@ -45,6 +45,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -210,8 +212,10 @@ public:
     // 暖機：XrContext bring-up 後、第一幀之前可呼叫（目前由 render thread 在第一幀自行處理）
     void setSession(XrSession session);
 
-    // 10 s 統計（XrContext::maybeLogStats 呼叫；回傳後歸零視窗）
-    QString takeStatsLine();
+    // 10 s 統計（XrContext::maybeLogStats 呼叫）。§VR-LOGASYNC：同一行拆兩半——呼叫時（frame thread）只把視窗資料
+    // 整包換出來並歸零，排序與組字串在回傳的函式裡做
+    // （可以在別的執行緒呼叫、只能呼叫一次；不碰 XrVideo 本身，XrVideo 先銷毀也沒關係）
+    std::function<std::string()> takeStatsDeferred();
 
 private:
     enum class TargetMode { None, SrgbMutable, Float16Linear, Unorm8Linear };
@@ -359,7 +363,6 @@ private:
     // 怎麼取、字串怎麼組——在 xrvideostats.h（純邏輯、有自測）；這裡只管什麼時候推、拿哪把鎖
     using RenderDiag = xrvideostats::RenderDiag;
     RenderDiag m_Diag;       // m_StatsMutex
-    RenderDiag m_DiagTake;   // 只在 XR frame thread（takeStatsLine）：上一個視窗整包換出來，在鎖外算分位數
     // §VR-PASS（量測）：每個 pass 的 GPU 時間（結構在 xrvideostats.h）。libplacebo 每個 pass 本來就帶 GPU 計時器、每次
     // 執行都查結果，這裡只是掛 callback 把數字接出來，不會多任何 GPU 指令。callback 在 pl_render_image／
     // pl_dispatch_finish 裡同步被呼叫，所以這一包只在影像 render thread 用

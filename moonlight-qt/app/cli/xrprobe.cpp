@@ -21,6 +21,7 @@
 #include "streaming/xr/xrlatchstats.h"  // §VR-LDIAG：--selftest-latch（header-only，沒有 OpenXR 的建置也有）
 #include "streaming/xr/xrphase.h"       // §VR-XRLOOP：相位換算（同上，--selftest-latch 接著跑它的案例）
 #include "streaming/xr/xrvideostats.h"  // §VR-XRLOOP／§VR-PASS：10s video 行尾與 pass 計時的組字串（同上）
+#include "streaming/xr/xrasynclog.h"    // §VR-LOGASYNC：10 s 行交給另一條執行緒印（同上）
 #include "streaming/xr/xrflight.h"      // §VR-LATCH-FLIGHT：等不等在途的幀（同上）
 #include "streaming/xr/xrguard.h"       // §VR-LATCH-FLIGHT：runtime 防護的狀態機（同上）
 #include "streaming/xr/xrruntimejson.h"
@@ -384,6 +385,7 @@ int runXrProbe(const XrProbeOptions& options)
         failures += xrvideostats::selfTest(report);
         failures += xrflight::selfTest(report);
         failures += xrguard::selfTest(report);
+        failures += xrlog::selfTest(report);
         ProbeUtil::printLine(kTag, "selftest-latch: %lld case(s), %d failure(s)", static_cast<long long>(cases.size()), failures);
         root[QStringLiteral("cases")] = cases;
         root[QStringLiteral("failures")] = failures;

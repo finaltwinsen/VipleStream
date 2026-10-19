@@ -19,6 +19,7 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <memory>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -1473,6 +1474,11 @@ bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, con
     return ok;
 }
 
+void XrContext::asyncLogSink(const std::string& line)
+{
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%s", line.c_str());
+}
+
 bool XrContext::maybeLogStats(uint64_t nowNs, bool deferPrint)
 {
     if (m_StatsWindowStartNs == 0) {
@@ -1494,6 +1500,13 @@ bool XrContext::maybeLogStats(uint64_t nowNs, bool deferPrint)
     if (nowNs - m_StatsWindowStartNs < kStatsWindowNs || deferPrint) {
         return false;
     }
+    // §VR-LOGASYNC（量測）：四段各花多久（m_LoopDiag.statsByUs，下一次的 XRLOOP 行印）
+    uint64_t byMark = steadyNowNs();
+    auto byLap = [&](int i) {
+        const uint64_t t = steadyNowNs();
+        m_LoopDiag.statsByUs[i] = static_cast<uint32_t>((std::min<uint64_t>)((t - byMark) / 1000ull, 0xffffffffu));
+        byMark = t;
+    };
     Stats cur, prev;
     {
         std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -1517,16 +1530,17 @@ bool XrContext::maybeLogStats(uint64_t nowNs, bool deferPrint)
         cpuP50 = v[v.size() / 2] / 1000.0;
         cpuP95 = v[(std::min)(v.size() - 1, (v.size() * 95) / 100)] / 1000.0;
     }
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] 10s frames=%llu missed=%llu (%.2f%%) notRendered=%llu endFrameErr=%llu state=%s period=%.2f ms "
-                "xrThread cpu p50=%.2f p95=%.2f ms stale=%d discarded=%llu",
-                static_cast<unsigned long long>(d.frames), static_cast<unsigned long long>(d.missed), d.missPercent(),
-                static_cast<unsigned long long>(cur.notRendered - prev.notRendered),
-                static_cast<unsigned long long>(cur.endFrameErrors - prev.endFrameErrors),
-                sessionStateName(cur.currentState), static_cast<double>(m_LastPeriod) / 1e6,
-                cpuP50, cpuP95, m_StaleState,
-                // xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（這個視窗的增量；正常是 0）
-                static_cast<unsigned long long>(cur.discarded - prev.discarded));
+    m_AsyncLog.postf(
+                     "[VIPLE-XR] 10s frames=%llu missed=%llu (%.2f%%) notRendered=%llu endFrameErr=%llu state=%s period=%.2f ms "
+                     "xrThread cpu p50=%.2f p95=%.2f ms stale=%d discarded=%llu",
+                     static_cast<unsigned long long>(d.frames), static_cast<unsigned long long>(d.missed), d.missPercent(),
+                     static_cast<unsigned long long>(cur.notRendered - prev.notRendered),
+                     static_cast<unsigned long long>(cur.endFrameErrors - prev.endFrameErrors),
+                     sessionStateName(cur.currentState), static_cast<double>(m_LastPeriod) / 1e6,
+                     cpuP50, cpuP95, m_StaleState,
+                     // xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（這個視窗的增量；正常是 0）
+                     static_cast<unsigned long long>(cur.discarded - prev.discarded));
+    byLap(0);
 #ifdef HAVE_XR_VIDEO
     if (m_Video != nullptr) {
         // §VR-LATCH A/B：開了切換時在行尾標這個視窗是哪一邊。這一行的 10 s 視窗是這個函式自己的計時，但它和
@@ -1538,9 +1552,13 @@ bool XrContext::maybeLogStats(uint64_t nowNs, bool deferPrint)
         if (m_Options.pcvr && m_Options.pcvrLatchAbSec > 0) {
             std::snprintf(ab, sizeof(ab), " ab=%c", xrphase::abWindowSide(abOnFrames, abOffFrames));
         }
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] 10s video %s%s", qUtf8Printable(m_Video->takeStatsLine()), ab);
+        // §VR-LOGASYNC：這裡只把視窗資料換出來，排序與組字串在 log 執行緒做（見 XrVideo::takeStatsDeferred）
+        m_AsyncLog.postTask([fmt = m_Video->takeStatsDeferred(), tail = std::string(ab)]() {
+            return "[VIPLE-XR] 10s video " + fmt() + tail;
+        });
     }
 #endif
+    byLap(1);
     if (m_Options.pcvr) {
         uint64_t proj = 0, noMeta = 0;
         {
@@ -1555,54 +1573,69 @@ bool XrContext::maybeLogStats(uint64_t nowNs, bool deferPrint)
             std::lock_guard<std::mutex> lk(m_HmdMutex);
             h = m_Hmd;
         }
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-XR] 10s pcvr projection=%llu noMeta=%llu state=%d space=%s tracking=%s predictAhead=%.1f ms "
-                    "hmd=(%.3f, %.3f, %.3f | %.3f, %.3f, %.3f, %.3f)",
-                    static_cast<unsigned long long>(proj), static_cast<unsigned long long>(noMeta), m_PcvrStale,
-                    qUtf8Printable(m_TrackSpaceName), m_TimeConv != nullptr ? "thread" : "frameloop",
-                    static_cast<double>(m_PredictAheadNs) / 1e6, static_cast<double>(h.pos[0]),
-                    static_cast<double>(h.pos[1]), static_cast<double>(h.pos[2]), static_cast<double>(h.rot[0]),
-                    static_cast<double>(h.rot[1]), static_cast<double>(h.rot[2]), static_cast<double>(h.rot[3]));
-        // §VR-POSEERR：pcvrPoseErr 與這裡都在 frame thread
+        m_AsyncLog.postf(
+                         "[VIPLE-XR] 10s pcvr projection=%llu noMeta=%llu state=%d space=%s tracking=%s predictAhead=%.1f ms "
+                         "hmd=(%.3f, %.3f, %.3f | %.3f, %.3f, %.3f, %.3f)",
+                         static_cast<unsigned long long>(proj), static_cast<unsigned long long>(noMeta), m_PcvrStale,
+                         qUtf8Printable(m_TrackSpaceName), m_TimeConv != nullptr ? "thread" : "frameloop",
+                         static_cast<double>(m_PredictAheadNs) / 1e6, static_cast<double>(h.pos[0]),
+                         static_cast<double>(h.pos[1]), static_cast<double>(h.pos[2]), static_cast<double>(h.rot[0]),
+                         static_cast<double>(h.rot[1]), static_cast<double>(h.rot[2]), static_cast<double>(h.rot[3]));
+        // §VR-POSEERR：pcvrPoseErr 與這裡都在 frame thread。§VR-LOGASYNC：三組樣本整包換給 log 執行緒算分位數
+        // （頭盔上在這裡算要 220～280 µs）；換進來的是配好空間的新容器
         if (!m_PoseErrPosMm.empty()) {
-            auto pq = [](std::vector<float>& v, double p) -> double {
-                if (v.empty()) {
-                    return 0.0;
-                }
-                std::sort(v.begin(), v.end());
-                return v[(std::min)(v.size() - 1, static_cast<size_t>(p * static_cast<double>(v.size() - 1) + 0.5))];
+            struct PoseSnap {
+                std::vector<float> pos, rot, lag;
+                float ov = 0.0f;
+                bool synthRef = false;
             };
-            // 2026-10-05：露邊比例＝旋轉誤差超過 overscan 的幀（重投影會露出沒畫面的邊；overscan 0 時任何誤差都會露）
-            auto above = [](const std::vector<float>& v, float x) -> double {
-                size_t k = 0;
-                for (float a : v) {
-                    k += a > x ? 1 : 0;
-                }
-                return v.empty() ? 0.0 : 100.0 * static_cast<double>(k) / static_cast<double>(v.size());
-            };
-            const float ov = m_Options.pcvrOverscanDeg;
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VR-POSEERR] 10s n=%zu pos p50=%.1f p95=%.1f mm rot p50=%.2f p95=%.2f deg | "
-                        "lag n=%zu p05=%.1f p50=%.1f p95=%.1f ms (+behind/-ahead, head moving) | "
-                        "rot>1deg=%.1f%% >3deg=%.1f%% edge(>%.1fdeg overscan)=%.1f%%%s",
-                        m_PoseErrPosMm.size(), pq(m_PoseErrPosMm, 0.5), pq(m_PoseErrPosMm, 0.95),
-                        pq(m_PoseErrRotDeg, 0.5), pq(m_PoseErrRotDeg, 0.95), m_PoseLagMs.size(),
-                        pq(m_PoseLagMs, 0.05), pq(m_PoseLagMs, 0.5), pq(m_PoseLagMs, 0.95),
-                        above(m_PoseErrRotDeg, 1.0f), above(m_PoseErrRotDeg, 3.0f), static_cast<double>(ov),
-                        above(m_PoseErrRotDeg, ov),
-                        // dev（--vr-synthetic-hmd）：這一行是對合成的頭部軌跡量的（見 setPcvrSyntheticPoseRef）
-                        m_PoseRefSynth ? " ref=synthetic" : "");
-            m_PoseErrPosMm.clear();
-            m_PoseErrRotDeg.clear();
-            m_PoseLagMs.clear();
+            auto ps = std::make_shared<PoseSnap>();
+            const size_t cap = (std::max)(m_PoseErrPosMm.capacity(), static_cast<size_t>(2048));
+            for (std::vector<float>* v : {&ps->pos, &ps->rot, &ps->lag}) {
+                v->reserve(cap);
+            }
+            ps->pos.swap(m_PoseErrPosMm);
+            ps->rot.swap(m_PoseErrRotDeg);
+            ps->lag.swap(m_PoseLagMs);
+            ps->ov = m_Options.pcvrOverscanDeg;
+            ps->synthRef = m_PoseRefSynth;  // dev（--vr-synthetic-hmd）：這一行是對合成的頭部軌跡量的（見 setPcvrSyntheticPoseRef）
+            m_AsyncLog.postTask([ps]() {
+                auto pq = [](std::vector<float>& v, double p) -> double {
+                    if (v.empty()) {
+                        return 0.0;
+                    }
+                    std::sort(v.begin(), v.end());
+                    return v[(std::min)(v.size() - 1, static_cast<size_t>(p * static_cast<double>(v.size() - 1) + 0.5))];
+                };
+                // 2026-10-05：露邊比例＝旋轉誤差超過 overscan 的幀（重投影會露出沒畫面的邊；overscan 0 時任何誤差都會露）
+                auto above = [](const std::vector<float>& v, float x) -> double {
+                    size_t k = 0;
+                    for (float a : v) {
+                        k += a > x ? 1 : 0;
+                    }
+                    return v.empty() ? 0.0 : 100.0 * static_cast<double>(k) / static_cast<double>(v.size());
+                };
+                char buf[512];
+                std::snprintf(buf, sizeof(buf),
+                              "[VIPLE-VR-POSEERR] 10s n=%zu pos p50=%.1f p95=%.1f mm rot p50=%.2f p95=%.2f deg | "
+                              "lag n=%zu p05=%.1f p50=%.1f p95=%.1f ms (+behind/-ahead, head moving) | "
+                              "rot>1deg=%.1f%% >3deg=%.1f%% edge(>%.1fdeg overscan)=%.1f%%%s",
+                              ps->pos.size(), pq(ps->pos, 0.5), pq(ps->pos, 0.95), pq(ps->rot, 0.5), pq(ps->rot, 0.95),
+                              ps->lag.size(), pq(ps->lag, 0.05), pq(ps->lag, 0.5), pq(ps->lag, 0.95), above(ps->rot, 1.0f),
+                              above(ps->rot, 3.0f), static_cast<double>(ps->ov), above(ps->rot, ps->ov),
+                              ps->synthRef ? " ref=synthetic" : "");
+                return std::string(buf);
+            });
         }
     }
+    byLap(2);
     if (!m_Options.pcvr && m_Input != nullptr) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] 10s %s", qUtf8Printable(m_Input->takeStatsLine()));
+        m_AsyncLog.postf("[VIPLE-XR-INPUT] 10s %s", qUtf8Printable(m_Input->takeStatsLine()));
     }
     if (m_VrCtl != nullptr) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-INPUT] 10s %s", qUtf8Printable(m_VrCtl->takeStatsLine()));
+        m_AsyncLog.postf("[VIPLE-VR-INPUT] 10s %s", qUtf8Printable(m_VrCtl->takeStatsLine()));
     }
+    byLap(3);
     return true;
 }
 
@@ -2283,6 +2316,8 @@ void XrContext::frameThreadMain()
         // 排序、組字串、每一行 log 兩次 regex 再丟給 log 執行緒），回到 xrWaitFrame 最晚。兩組 10 s 行原本多半擠在同一格
         // （[VIPLE-VR-LDIAG]／[VIPLE-VR-XRLOOP] 這一組與 maybeLogStats 那一組各自計時），改成這一格印了前一組，
         // maybeLogStats 滿了也留到下一格。各組花多久記在 m_LoopDiag，下一次的 XRLOOP 行印出來（logCost）
+        // §VR-LOGASYNC（2026-10-18）：錯開之後 maybeLogStats 那一組仍要 0.6～1.1 ms，大半是 log 本身（regex、丟進 thread pool），
+        // 10 s 行改成只在這裡組字串、交給 m_AsyncLog 的執行緒印；logCost 量的就只剩排序與組字串
         bool diagLoggedNow = false;
         if (m_LatchDiag.logDue) {
             // §VR-LDIAG：pcvrTimingTick 在這一格印了 [VIPLE-VR-MTP10]，同一個視窗的逐張量測接著印。排序與組字串
@@ -2797,41 +2832,41 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         t.mtpWindowStartNs = nowNs;
         const size_t n = t.mtp10sUs.size();
         // 2026-10-05：尾端加 frames new／repeat／skip（前段欄位順序不變）
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
-                    " | frames new=%u repeat=%u skip=%u mismatch=%u%s%s%s%s"
-                    " | repRun max=%u ge3=%u ge5=%u latchSkip=%u rr=%s",
-                    n, pctOf(t.mtp10sUs, 0.50) / 1000.0, pctOf(t.mtp10sUs, 0.95) / 1000.0,
-                    pctOf(t.mtp10sUs, 0.99) / 1000.0, t.mtpNoSample, t.latchSent,
-                    secs > 0 ? t.latchSent / secs : 0.0, t.lastSlackUs, t.timingSent,
-                    m_TimeConv != nullptr ? "" : " (mtp approx: no time conversion ext)", t.new10s, t.repeat10s, t.skip10s,
-                    t.mismatch10s,
-                    // §VR-LATCH-RELATCH：錯配時改用新影像的姿態救回來的次數（救回來的不算進 mismatch；開著才印）
-                    m_Options.pcvrLatchRelatch && !m_Options.pcvrSynth
-                        ? qUtf8Printable(QString(" relatch=%1").arg(t.relatch10s))
-                        : "",
-                    // §VR-TRACK-LOCK：相位、這 10 s 用到前一筆樣本的比例、重新搜尋的次數
-                    m_Options.pcvrTrackLock
-                        ? qUtf8Printable(QString(" | trk %1 phase=%2 ms late=%3% researches=%4%5")
-                                             .arg(t.trkMode == 0 ? "search" : "hold")
-                                             .arg(t.trkPhaseNs / 1e6, 0, 'f', 2)
-                                             .arg(t.trkLateN ? 100.0 * t.trkLateSum / t.trkLateN : 0.0, 0, 'f', 1)
-                                             .arg(t.trkBackoffs)
-                                             // §VR-TRACK-RELOCK：這 10 s 用到前一筆樣本的幀（不含晚一格顯示的）
-                                             .arg(m_Options.pcvrTrackRelock
-                                                      ? QString(" prev=%1%").arg(t.trkLateN ? 100.0 * t.trkPrevSum / t.trkLateN : 0.0, 0, 'f', 1)
-                                                      : QString()))
-                        : "",
-                    // §VR-LATCH A/B：這個視窗是哪一邊
-                    m_Options.pcvrLatchAbSec > 0 ? (t.abOn ? " ab=1" : " ab=0") : "",
-                    // §VR-SYNTH：要顯示合成那一半時最新的影像已經換掉、改顯示上半的次數（開著合成才印）
-                    m_Options.pcvrSynth ? qUtf8Printable(QString(" synthGuard=%1").arg(t.synthGuard10s)) : "",
-                    // §VR-REPAIR-RTT 的量測：同一張影像連續重複幾格——這 10 s 的最大值（還沒結束的那一段也算）、
-                    // 達到 3 格與 5 格的段數。半速＋補幀時每張真的影像平常就重複 1 格，判讀時要扣掉
-                    (std::max)(t.repRunMax10s, t.repStreak), t.repRunGe3, t.repRunGe5,
-                    // §VR-REPAIR-RTT：latchSkip＝沒有拿來更新 LATCH 樣本的新影像張數；rr＝這 10 s 補包照哪一套規則
-                    // （0 原本的、1 跟著往返時間走的、m 兩種都有）
-                    t.latchSkip10s, t.rrSeen10s == 3u ? "m" : (t.rrSeen10s == 2u ? "1" : "0"));
+        m_AsyncLog.postf(
+                         "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
+                         " | frames new=%u repeat=%u skip=%u mismatch=%u%s%s%s%s"
+                         " | repRun max=%u ge3=%u ge5=%u latchSkip=%u rr=%s",
+                         n, pctOf(t.mtp10sUs, 0.50) / 1000.0, pctOf(t.mtp10sUs, 0.95) / 1000.0,
+                         pctOf(t.mtp10sUs, 0.99) / 1000.0, t.mtpNoSample, t.latchSent,
+                         secs > 0 ? t.latchSent / secs : 0.0, t.lastSlackUs, t.timingSent,
+                         m_TimeConv != nullptr ? "" : " (mtp approx: no time conversion ext)", t.new10s, t.repeat10s, t.skip10s,
+                         t.mismatch10s,
+                         // §VR-LATCH-RELATCH：錯配時改用新影像的姿態救回來的次數（救回來的不算進 mismatch；開著才印）
+                         m_Options.pcvrLatchRelatch && !m_Options.pcvrSynth
+                             ? qUtf8Printable(QString(" relatch=%1").arg(t.relatch10s))
+                             : "",
+                         // §VR-TRACK-LOCK：相位、這 10 s 用到前一筆樣本的比例、重新搜尋的次數
+                         m_Options.pcvrTrackLock
+                             ? qUtf8Printable(QString(" | trk %1 phase=%2 ms late=%3% researches=%4%5")
+                                                  .arg(t.trkMode == 0 ? "search" : "hold")
+                                                  .arg(t.trkPhaseNs / 1e6, 0, 'f', 2)
+                                                  .arg(t.trkLateN ? 100.0 * t.trkLateSum / t.trkLateN : 0.0, 0, 'f', 1)
+                                                  .arg(t.trkBackoffs)
+                                                  // §VR-TRACK-RELOCK：這 10 s 用到前一筆樣本的幀（不含晚一格顯示的）
+                                                  .arg(m_Options.pcvrTrackRelock
+                                                           ? QString(" prev=%1%").arg(t.trkLateN ? 100.0 * t.trkPrevSum / t.trkLateN : 0.0, 0, 'f', 1)
+                                                           : QString()))
+                             : "",
+                         // §VR-LATCH A/B：這個視窗是哪一邊
+                         m_Options.pcvrLatchAbSec > 0 ? (t.abOn ? " ab=1" : " ab=0") : "",
+                         // §VR-SYNTH：要顯示合成那一半時最新的影像已經換掉、改顯示上半的次數（開著合成才印）
+                         m_Options.pcvrSynth ? qUtf8Printable(QString(" synthGuard=%1").arg(t.synthGuard10s)) : "",
+                         // §VR-REPAIR-RTT 的量測：同一張影像連續重複幾格——這 10 s 的最大值（還沒結束的那一段也算）、
+                         // 達到 3 格與 5 格的段數。半速＋補幀時每張真的影像平常就重複 1 格，判讀時要扣掉
+                         (std::max)(t.repRunMax10s, t.repStreak), t.repRunGe3, t.repRunGe5,
+                         // §VR-REPAIR-RTT：latchSkip＝沒有拿來更新 LATCH 樣本的新影像張數；rr＝這 10 s 補包照哪一套規則
+                         // （0 原本的、1 跟著往返時間走的、m 兩種都有）
+                         t.latchSkip10s, t.rrSeen10s == 3u ? "m" : (t.rrSeen10s == 2u ? "1" : "0"));
         t.repRunMax10s = t.repRunGe3 = t.repRunGe5 = 0;
         t.latchSkip10s = 0;
         t.rrSeen10s = 0;
@@ -2971,16 +3006,16 @@ void XrContext::pcvrLatchDiagLog()
                                        m_Flight.gTypUs);
     }
     m_Flight.win.clear();
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VR-LDIAG] 10s late=%u lateShift=%u gap=%u early=%u catchup=%u lateMax=%u us | held=%u heldMiss=%u rtyp=%u us "
-                "pubLag p50/p95=%u/%u us | wake2latch p50/p95/max=%u/%u/%u us latchPhase p50=%u us | "
-                "age p50/p95/p99=%.1f/%.1f/%.1f ms | slackPub(250us)=%s%s%s%s%s",
-                c.late, c.lateShift, c.gap, c.early, c.catchup, c.lateMaxUs, d.held10s, d.heldMiss10s, d.rtypUs,
-                pctOf(d.pubLag, 0.50), pctOf(d.pubLag, 0.95), pctOf(d.wake2latch, 0.50), pctOf(d.wake2latch, 0.95), wakeMax,
-                pctOf(d.latchPhase, 0.50), pctOf(d.age10s, 0.50) / 1000.0, pctOf(d.age10s, 0.95) / 1000.0,
-                pctOf(d.age10s, 0.99) / 1000.0, qUtf8Printable(hist), waitTail.constData(), lateTail.c_str(), flightTail.c_str(),
-                // §VR-LATCH A/B：這個視窗是哪一邊（和同一輪的 [VIPLE-VR-MTP10] 相同；10 s 區塊在換邊之前記下來的）
-                m_Options.pcvrLatchAbSec > 0 ? (d.logAb ? " ab=1" : " ab=0") : "");
+    m_AsyncLog.postf(
+                     "[VIPLE-VR-LDIAG] 10s late=%u lateShift=%u gap=%u early=%u catchup=%u lateMax=%u us | held=%u heldMiss=%u rtyp=%u us "
+                     "pubLag p50/p95=%u/%u us | wake2latch p50/p95/max=%u/%u/%u us latchPhase p50=%u us | "
+                     "age p50/p95/p99=%.1f/%.1f/%.1f ms | slackPub(250us)=%s%s%s%s%s",
+                     c.late, c.lateShift, c.gap, c.early, c.catchup, c.lateMaxUs, d.held10s, d.heldMiss10s, d.rtypUs,
+                     pctOf(d.pubLag, 0.50), pctOf(d.pubLag, 0.95), pctOf(d.wake2latch, 0.50), pctOf(d.wake2latch, 0.95), wakeMax,
+                     pctOf(d.latchPhase, 0.50), pctOf(d.age10s, 0.50) / 1000.0, pctOf(d.age10s, 0.95) / 1000.0,
+                     pctOf(d.age10s, 0.99) / 1000.0, qUtf8Printable(hist), waitTail.constData(), lateTail.c_str(), flightTail.c_str(),
+                     // §VR-LATCH A/B：這個視窗是哪一邊（和同一輪的 [VIPLE-VR-MTP10] 相同；10 s 區塊在換邊之前記下來的）
+                     m_Options.pcvrLatchAbSec > 0 ? (d.logAb ? " ab=1" : " ab=0") : "");
     std::fill(std::begin(d.hist), std::end(d.hist), 0u);
     d.pubLag.clear();
     d.wake2latch.clear();
@@ -3002,9 +3037,9 @@ void XrContext::pcvrLatchDiagLog()
                      .arg(d.phSum[b] / d.phN[b])
                      .arg(d.phMax[b]);
         }
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VR-LDIAG] 60s gpu-by-phase (250 us bins after the display grid; n/avgUs/maxUs)%s",
-                    s.isEmpty() ? " -" : qUtf8Printable(s));
+        m_AsyncLog.postf(
+                         "[VIPLE-VR-LDIAG] 60s gpu-by-phase (250 us bins after the display grid; n/avgUs/maxUs)%s",
+                         s.isEmpty() ? " -" : qUtf8Printable(s));
         std::fill(std::begin(d.phN), std::end(d.phN), 0u);
         std::fill(std::begin(d.phSum), std::end(d.phSum), static_cast<uint64_t>(0));
         std::fill(std::begin(d.phMax), std::end(d.phMax), 0u);
@@ -3085,20 +3120,21 @@ void XrContext::pcvrLoopDiagLog()
         std::snprintf(sumText, sizeof(sumText), "%.2f",
                       static_cast<double>(xrphase::chainSumUs(decP50, renderP50, slackP50, leadP50)) / 1000.0);
     }
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=%u/%u/%u us | latchLead p50/p05=%.2f/%.2f ms "
-                "endLead p50/p05/min=%.2f/%.2f/%.2f ms | span p50/p95/max=%u/%u/%u us | beginCall max=%u us "
-                "endCall p50/p95/max=%u/%u/%u us | ahead p50/min/max=%.2f/%.2f/%.2f ms%s | waitShort=%u | "
-                "chain dec/render/slack/lead p50=%s/%s/%s/%s ms sum=%s ms | tail p50/max=%u/%u us"
-                " logCost ldiag/loop/stats=%u/%u/%u us%s",
-                wakeP50, wakeP95, wakeMax, leadP50 / 1000.0, leadP05 / 1000.0, endLeadP50 / 1000.0, endLeadP05 / 1000.0,
-                endLeadMin / 1000.0, spanP50, spanP95, spanMax, d.beginCallMaxUs, endCallP50, endCallP95, endCallMax,
-                aheadP50 / 1000.0, aheadMin / 1000.0, aheadMax / 1000.0, m_TimeConv != nullptr ? "" : " (approx)", d.waitShort,
-                decText, renderText, slackText, leadText, sumText, tailP50, tailMax,
-                // §VR-LOGSPLIT：ldiag 是這一次量的（已經印完），loop、stats 是上一次的
-                d.logCostLdiagUs, d.logCostLoopUs, d.logCostStatsUs,
-                // §VR-LATCH A/B：和同一輪的 [VIPLE-VR-LDIAG] 相同（10 s 區塊在換邊之前記下來的那一邊）
-                m_Options.pcvrLatchAbSec > 0 ? (m_LatchDiag.logAb ? " ab=1" : " ab=0") : "");
+    m_AsyncLog.postf(
+                     "[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=%u/%u/%u us | latchLead p50/p05=%.2f/%.2f ms "
+                     "endLead p50/p05/min=%.2f/%.2f/%.2f ms | span p50/p95/max=%u/%u/%u us | beginCall max=%u us "
+                     "endCall p50/p95/max=%u/%u/%u us | ahead p50/min/max=%.2f/%.2f/%.2f ms%s | waitShort=%u | "
+                     "chain dec/render/slack/lead p50=%s/%s/%s/%s ms sum=%s ms | tail p50/max=%u/%u us"
+                     " logCost ldiag/loop/stats=%u/%u/%u us statsBy xr/video/pcvr/input=%u/%u/%u/%u us%s",
+                     wakeP50, wakeP95, wakeMax, leadP50 / 1000.0, leadP05 / 1000.0, endLeadP50 / 1000.0, endLeadP05 / 1000.0,
+                     endLeadMin / 1000.0, spanP50, spanP95, spanMax, d.beginCallMaxUs, endCallP50, endCallP95, endCallMax,
+                     aheadP50 / 1000.0, aheadMin / 1000.0, aheadMax / 1000.0, m_TimeConv != nullptr ? "" : " (approx)", d.waitShort,
+                     decText, renderText, slackText, leadText, sumText, tailP50, tailMax,
+                     // §VR-LOGSPLIT：ldiag 是這一次量的（已經印完），loop、stats 是上一次的
+                     d.logCostLdiagUs, d.logCostLoopUs, d.logCostStatsUs, d.statsByUs[0], d.statsByUs[1], d.statsByUs[2],
+                     d.statsByUs[3],
+                     // §VR-LATCH A/B：和同一輪的 [VIPLE-VR-LDIAG] 相同（10 s 區塊在換邊之前記下來的那一邊）
+                     m_Options.pcvrLatchAbSec > 0 ? (m_LatchDiag.logAb ? " ab=1" : " ab=0") : "");
     d.wakePhaseUs.clear();
     d.latchLeadUs.clear();
     d.endLeadUs.clear();
@@ -3902,6 +3938,7 @@ void XrContext::shutdown()
         m_StopRequested.store(true);
         m_FrameThread.join();
     }
+    m_AsyncLog.stop();  // §VR-LOGASYNC：印完 frame thread 留下的 10 s 行
     destroyAll();
     m_ExitRequested.store(false);
     m_StopRequested.store(false);

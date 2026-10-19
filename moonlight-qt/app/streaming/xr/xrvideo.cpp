@@ -185,8 +185,7 @@ bool XrVideo::init(QString* error)
                         qUtf8Printable(m_Config.testJitter), jerr.c_str());
         }
     }
-    m_Diag.reserveWindow();  // §VR-XRLOOP：量測的兩包視窗（輪流用）
-    m_DiagTake.reserveWindow();
+    m_Diag.reserveWindow();  // §VR-XRLOOP：量測的視窗（每 10 s 由 takeStatsDeferred 整包換掉）
     m_Usable.store(true, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lk(m_MailboxMutex);
@@ -1843,53 +1842,94 @@ void XrVideo::frameEnded(uint64_t generation)
     }
 }
 
-QString XrVideo::takeStatsLine()
+std::function<std::string()> XrVideo::takeStatsDeferred()
 {
-    std::unique_lock<std::mutex> lk(m_StatsMutex);
-    auto pct = [](std::vector<uint32_t> v, double* p50, double* p95) {
-        *p50 = *p95 = 0.0;
-        if (v.empty()) {
-            return;
-        }
-        std::sort(v.begin(), v.end());
-        *p50 = v[v.size() / 2] / 1000.0;
-        *p95 = v[std::min(v.size() - 1, (v.size() * 95) / 100)] / 1000.0;
+    // §VR-LOGASYNC（2026-10-18）：原本整行在 frame thread 算（頭盔上約 200～250 µs，而且三次排序是在 m_StatsMutex 裡做的，
+    // decoder 與影像 render thread 也跟著等）。改成鎖裡只把這個視窗的資料整包換出來，排序與組字串在回傳的函式裡做，
+    // XrContext 交給 log 執行緒呼叫。換進來的是事先配好空間的新容器，render thread 往裡面推不必配置記憶體
+    struct Snap {
+        uint64_t received = 0, drawn = 0, overwritten = 0, renderErrors = 0, stallDropped = 0, noMetaDropped = 0;
+        uint64_t synthDrawn = 0, synthShown = 0;
+        bool synth = false, synthFailed = false, jitter = false;
+        const char* mode = "";
+        uint32_t w = 0, h = 0;
+        std::vector<uint32_t> cpu, gpu, synthGpu, jit;
+        RenderDiag diag;
     };
-    double c50, c95, g50, g95, s50, s95;
-    pct(m_CpuUs, &c50, &c95);
-    pct(m_GpuUs, &g50, &g95);
-    pct(m_SynthGpuUs, &s50, &s95);
-    QString line = QStringLiteral("recv=%1 drawn=%2 overwritten=%3 errors=%4 renderThread cpu p50=%5 p95=%6 ms "
-                                  "gpu p50=%7 p95=%8 ms mode=%9 %10x%11 stallDropped=%12 noMetaDropped=%13")
-                       .arg(m_Received).arg(m_Drawn).arg(m_Overwritten).arg(m_RenderErrors)
-                       .arg(c50, 0, 'f', 2).arg(c95, 0, 'f', 2).arg(g50, 0, 'f', 2).arg(g95, 0, 'f', 2)
-                       .arg(QLatin1String(modeName(static_cast<int>(m_Mode))))
-                       .arg(m_Sw.width).arg(m_Sw.height).arg(m_TestStallDropped).arg(m_NoMetaDropped);
-    if (m_Config.synth) {
-        // §VR-SYNTH：這個視窗合成了幾張、顯示了幾次合成的那一格
-        // 第五版起真的那一張先發布：上面的 gpu 是真的那一張，synthGpu 是之後合成那一張多花的時間
-        line += QStringLiteral(" synth drawn=%1 shown=%2 synthGpu p50=%3 p95=%4 ms%5").arg(m_SynthDrawn)
-                    .arg(m_SynthShown.exchange(0, std::memory_order_relaxed))
-                    .arg(s50, 0, 'f', 2).arg(s95, 0, 'f', 2)
-                    .arg(m_SynthFailed ? QStringLiteral(" (FAILED: off)") : QString());
-        m_SynthDrawn = 0;
-        m_SynthGpuUs.clear();
+    auto snap = std::make_shared<Snap>();
+    for (std::vector<uint32_t>* v : {&snap->cpu, &snap->gpu, &snap->synthGpu, &snap->jit}) {
+        v->reserve(2048);
     }
-    if (m_Jitter.enabled()) {
-        // dev（--vr-test-jitter）：這個視窗有幾張被延後、延後時間的 p95
-        double j50, j95;
-        pct(m_JitUs, &j50, &j95);
-        line += QStringLiteral(" jit n=%1 p95=%2 ms").arg(m_JitUs.size()).arg(j95, 0, 'f', 2);
-        m_JitUs.clear();
+    // 換進 m_Diag 的那一包（鎖外先配好；分位數的緩衝區 rank 不在這裡配，到了算的時候才配，不在 frame thread 清 64 KB）
+    for (std::vector<uint32_t>* v : {&snap->diag.mboxUs, &snap->diag.swWaitUs, &snap->diag.subPhaseUs, &snap->diag.donePhaseUs,
+                                     &snap->diag.synthSubPhaseUs, &snap->diag.synthDonePhaseUs}) {
+        v->reserve(2048);
     }
-    m_Received = m_Drawn = m_Overwritten = m_RenderErrors = 0;
-    m_CpuUs.clear();
-    m_GpuUs.clear();
-    // §VR-XRLOOP：這個視窗的量測整包換出來（只是指標交換），分位數在鎖外算——decoder 與影像 render thread 都會拿
-    // 這把鎖，不讓它們多等幾次排序的時間。m_DiagTake 上一次用完已經清空、空間留著
-    std::swap(m_Diag, m_DiagTake);
-    lk.unlock();
-    line += QString::fromStdString(m_DiagTake.statsTail(m_Config.synth));
-    m_DiagTake.clear();
-    return line;
+    {
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        snap->received = m_Received;
+        snap->drawn = m_Drawn;
+        snap->overwritten = m_Overwritten;
+        snap->renderErrors = m_RenderErrors;
+        snap->stallDropped = m_TestStallDropped;
+        snap->noMetaDropped = m_NoMetaDropped;
+        snap->mode = modeName(static_cast<int>(m_Mode));
+        snap->w = m_Sw.width;
+        snap->h = m_Sw.height;
+        snap->synth = m_Config.synth;
+        snap->jitter = m_Jitter.enabled();
+        snap->cpu.swap(m_CpuUs);
+        snap->gpu.swap(m_GpuUs);
+        if (snap->synth) {
+            // §VR-SYNTH：這個視窗合成了幾張、顯示了幾次合成的那一格
+            snap->synthDrawn = m_SynthDrawn;
+            snap->synthShown = m_SynthShown.exchange(0, std::memory_order_relaxed);
+            snap->synthFailed = m_SynthFailed;
+            snap->synthGpu.swap(m_SynthGpuUs);
+            m_SynthDrawn = 0;
+        }
+        if (snap->jitter) {
+            snap->jit.swap(m_JitUs);
+        }
+        m_Received = m_Drawn = m_Overwritten = m_RenderErrors = 0;
+        std::swap(m_Diag, snap->diag);  // 新的那一包已經配好空間；換出來的這一包交給回傳的函式
+    }
+    return [snap]() -> std::string {
+        auto pct = [](std::vector<uint32_t>& v, double* p50, double* p95) {
+            *p50 = *p95 = 0.0;
+            if (v.empty()) {
+                return;
+            }
+            std::sort(v.begin(), v.end());
+            *p50 = v[v.size() / 2] / 1000.0;
+            *p95 = v[std::min(v.size() - 1, (v.size() * 95) / 100)] / 1000.0;
+        };
+        Snap& d = *snap;
+        double c50, c95, g50, g95, s50, s95;
+        pct(d.cpu, &c50, &c95);
+        pct(d.gpu, &g50, &g95);
+        pct(d.synthGpu, &s50, &s95);
+        QString line = QStringLiteral("recv=%1 drawn=%2 overwritten=%3 errors=%4 renderThread cpu p50=%5 p95=%6 ms "
+                                      "gpu p50=%7 p95=%8 ms mode=%9 %10x%11 stallDropped=%12 noMetaDropped=%13")
+                           .arg(d.received).arg(d.drawn).arg(d.overwritten).arg(d.renderErrors)
+                           .arg(c50, 0, 'f', 2).arg(c95, 0, 'f', 2).arg(g50, 0, 'f', 2).arg(g95, 0, 'f', 2)
+                           .arg(QLatin1String(d.mode))
+                           .arg(d.w).arg(d.h).arg(d.stallDropped).arg(d.noMetaDropped);
+        if (d.synth) {
+            // 第五版起真的那一張先發布：上面的 gpu 是真的那一張，synthGpu 是之後合成那一張多花的時間
+            line += QStringLiteral(" synth drawn=%1 shown=%2 synthGpu p50=%3 p95=%4 ms%5").arg(d.synthDrawn)
+                        .arg(d.synthShown)
+                        .arg(s50, 0, 'f', 2).arg(s95, 0, 'f', 2)
+                        .arg(d.synthFailed ? QStringLiteral(" (FAILED: off)") : QString());
+        }
+        if (d.jitter) {
+            // dev（--vr-test-jitter）：這個視窗有幾張被延後、延後時間的 p95
+            double j50, j95;
+            const size_t n = d.jit.size();
+            pct(d.jit, &j50, &j95);
+            line += QStringLiteral(" jit n=%1 p95=%2 ms").arg(n).arg(j95, 0, 'f', 2);
+        }
+        d.diag.rank.prepare();  // 已經配過的話不會再配
+        return line.toStdString() + d.diag.statsTail(d.synth);
+    };
 }

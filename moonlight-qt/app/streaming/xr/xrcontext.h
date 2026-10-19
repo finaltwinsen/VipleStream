@@ -48,6 +48,7 @@
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 
+#include "xrasynclog.h"    // §VR-LOGASYNC：10 s 彙總行交給另一條執行緒印（header-only）
 #include "xrflight.h"      // §VR-LATCH-FLIGHT：等不等在途的幀（header-only，不依賴 OpenXR）
 #include "xrguard.h"       // §VR-LATCH-FLIGHT：runtime 防護的狀態機（header-only，不依賴 OpenXR）
 #include "xrinput.h"
@@ -390,6 +391,10 @@ private:
     bool m_HaveFeatureChain = false;
     XrVideo* m_Video = nullptr;
 
+    // §VR-LOGASYNC：10 s 彙總行（[VIPLE-XR] 10s、[VIPLE-VR-LDIAG]、[VIPLE-VR-XRLOOP]、[VIPLE-VR-MTP10] 等）frame thread 只組字串，
+    // 由這條佇列的執行緒呼叫 SDL_LogInfo；shutdown() 在 frame thread 結束之後印完剩下的
+    static void asyncLogSink(const std::string& line);
+    xrlog::AsyncLines m_AsyncLog{&XrContext::asyncLogSink};
     std::thread m_FrameThread;
     std::atomic<bool> m_FrameThreadRunning{false};
     std::atomic<bool> m_StopRequested{false};
@@ -630,6 +635,9 @@ private:
         // §VR-LOGSPLIT（量測）：上一次印 10 s 行時，xrEndFrame 之後各組花了多久（µs）：ldiag＝pcvrLatchDiagLog、
         // loop＝pcvrLoopDiagLog、stats＝maybeLogStats 印的那一格。XRLOOP 行印的是「上一次」的值（印這一行時自己還沒量完）
         uint32_t logCostLdiagUs = 0, logCostLoopUs = 0, logCostStatsUs = 0;
+        // §VR-LOGASYNC（量測）：logCostStatsUs 拆成 maybeLogStats 的四段——[VIPLE-XR] 10s（含 cpu 排序）、10s video
+        // （XrVideo::takeStatsLine）、pcvr＋POSEERR、input（XR-INPUT／VR-INPUT）；同樣是上一次的值
+        uint32_t statsByUs[4] = {0, 0, 0, 0};
         uint64_t lastWakeNs = 0;            // 上一格 xrWaitFrame 返回的時刻
         uint64_t loopNo = 0;                // frame loop 跑到第幾圈（每圈開頭加一，沒送出影像的圈也算）
         uint64_t lastEndNs = 0;             // 上一次記帳的那一格 xrEndFrame 返回的時刻（0＝還沒有），

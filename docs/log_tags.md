@@ -852,7 +852,7 @@ frame loop（XR 桌面也有）
 [VIPLE-XR] 10s frames=… …原樣… stale=N discarded=N                            ← 行尾新增：這 10 秒 xrBeginFrame 回 XR_FRAME_DISCARDED 的次數（正常是 0）
 [VIPLE-XR] xrBeginFrame returned XR_FRAME_DISCARDED (N so far)                ← warning，一場最多 10 行：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。
                                                                                  它是成功碼，流程照常；以前只檢查失敗碼，這個結果看不到
-[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=…/…/… us | latchLead p50/p05=…/… ms endLead p50/p05/min=…/…/… ms | span p50/p95/max=…/…/… us | beginCall max=… us endCall p50/p95/max=…/…/… us | ahead p50/min/max=…/…/… ms[ (approx)] | waitShort=N | chain dec/render/slack/lead p50=…/…/…/… ms sum=… ms | tail p50/max=…/… us logCost ldiag/loop/stats=…/…/… us[ ab=<0|1>]
+[VIPLE-VR-XRLOOP] 10s order=legacy | wakePhase p50/p95/max=…/…/… us | latchLead p50/p05=…/… ms endLead p50/p05/min=…/…/… ms | span p50/p95/max=…/…/… us | beginCall max=… us endCall p50/p95/max=…/…/… us | ahead p50/min/max=…/…/… ms[ (approx)] | waitShort=N | chain dec/render/slack/lead p50=…/…/…/… ms sum=… ms | tail p50/max=…/… us logCost ldiag/loop/stats=…/…/… us statsBy xr/video/pcvr/input=…/…/…/… us[ ab=<0|1>]
                                                                               ← PCVR，每 10 秒一行，和 [VIPLE-VR-LDIAG] 10s 同一格印、排在它後面（視窗與 ab 都相同）。
                                                                                  每第 6 個視窗兩行中間隔著一行 [VIPLE-VR-LDIAG] 60s gpu-by-phase，所以要把兩行配成一對就找
                                                                                  「前一行 LDIAG 10s」，不要找「上一行」。相位是 LDIAG 相位。
@@ -883,6 +883,11 @@ frame loop（XR 桌面也有）
                                                                                  maybeLogStats 那一組（[VIPLE-XR] 10s、10s video、pose、input）滿了也留到下一格；
                                                                                  logCost＝印 10 s 行時 xrEndFrame 之後各組花多久：ldiag＝pcvrLatchDiagLog（這一次的）、
                                                                                  loop＝pcvrLoopDiagLog、stats＝maybeLogStats 印的那一格（這兩個是上一次的，印這一行時還沒量完）；
+                                                                                 §VR-LOGASYNC（2026-10-18）起這幾組 10 s 行（含 [VIPLE-VR-MTP10]）frame thread 只組字串，交給另一條執行緒
+                                                                                 呼叫 SDL_LogInfo（log 時間戳記會晚幾毫秒）；logCost 量的只剩排序與組字串。佇列滿了（64 行）會丟、
+                                                                                 結束時印 `[VIPLE-VR-LOGASYNC] dropped N line(s) (queue full)`；
+                                                                                 statsBy＝stats 拆成四段：[VIPLE-XR] 10s（含 cpu 排序）、10s video（XrVideo::takeStatsDeferred：只量換出資料，排序與組字串在 log 執行緒）、
+                                                                                 pcvr＋POSEERR（POSEERR 同樣只換出資料）、input（也是上一次的值）；
                                                                                  每 10 秒印這幾行的那一格工作最多，它的 tail 算在**下一行**的 max 裡；只算緊鄰的兩圈
                                                                                  （session 沒在跑、xrWaitFrame／xrBeginFrame 失敗的圈之後那一格不算）
 
@@ -945,8 +950,10 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
 
 自測
-[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑五個純邏輯 header 的自測、一共 111 個案例
-                                                                                 （前三個 header 的 71 個是 5b-6 這一批的，輸出不變；xrflight.h 20 個與 xrguard.h 12 個是 5b-7 加的）。
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑六個純邏輯 header 的自測、一共 113 個案例
+                                                                                 （前三個 header 的 71 個是 5b-6 這一批的，輸出不變；xrflight.h 26 個與 xrguard.h 14 個是 5b-7 加的；
+                                                                                 xrasynclog.h 2 個是 §VR-LOGASYNC 的：`logasync-order-flush`（照順序、stop 印完、長行、stop 後重起）、
+                                                                                 `logasync-drop-full`（印的執行緒卡住時佇列滿了丟、計數、stop 補一行））。
                                                                                  xrlatchstats.h：原有的 27 個（輸出不變），加上 `latch-wait-…`／`latch-flip-…`／
                                                                                  `latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到計數：差一點、真的晚、150 µs 的
                                                                                  邊界、半速、基準過期、兩張擠在同一格、沒有送出時刻、分格的邊界、隨機腳本的自洽）；

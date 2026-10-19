@@ -2881,14 +2881,19 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
     只剩 0.07 ms，所以不動；判成太遠的那幾張實際晚 0.74～0.84 ms（`farBy`），F3 沒有太保守。runtime 重投影沒有變多。
     `got − quick` 會把真的救回、但等不到 150 µs 的也扣掉，太保守：驗收改看同場關的那一邊的 `rescBy` 前兩格與 `events`；
     同設定兩場之間關的那一邊可差 10 倍，一律同場比。
+    **印 log 那一格（§VR-LOGSPLIT、§VR-LOGASYNC，2026-10-18～19）**：兩組 10 秒行改在不同格印；`maybeLogStats` 那一組量到
+    中位數約 640 µs，大頭是排序與組字串（10s video 的三次排序原本在 `m_StatsMutex` 裡）而不是 log 呼叫。改成 frame thread
+    只把這個視窗的資料整包換出來，排序、組字串與 `SDL_LogInfo` 都在 `xr/xrasynclog.h` 的 log 執行緒做（照順序、佇列 64 行，
+    滿了丟並在結束時印一行）；那一組降到約 125 µs，印 log 那一格的 `tail max` 最多約 0.33 ms（原本 0.93）。
+    自測加 2 案（一共 113 案）；x86_64 與 arm64 建置編過。
   - **驗收**（無人；同一個小時內、頭尾各一場基準；丟掉開場 80 秒與每次換邊後的第一個視窗）：
     全速兩場、使用者的模式（半速＋補幀）兩場，各 420 秒，`--vr-latch-flight 0.5 --vr-latch-ab 40`；
     全速與使用者的模式各一對「整場開對整場關」，各 200 秒（拿 runtime 每場一筆的累計統計）；
     使用者的模式一場驗閘門，260 秒，另加 `--vr-test-jitter "early=<µs>:10"`（讓 1% 的影像在前一張的合成那一格正好還在途中；
     數字跑之前用基準場的 `latchPhase`、`sub p50`、`gpu p50` 重算，名目值 4200）。
-    門檻：runtime 那一側的指標全過、沒有出現 `flight paused`；開的那一邊 `span max` ≤ 7.2 ms；`timeout ÷ waited` ≤ 30%
-    （超過就把上限改 0.3 再跑一場）；開的那一邊 `got − quick` ≥ 關的那一邊 `rescBy` 前兩格合計的 0.6 倍；
-    全速的 `events` 開 ≤ 關 − 0.5×（`got − quick`）；
+    門檻（2026-10-19 改）：runtime 那一側的指標全過、沒有出現 `flight paused`；開的那一邊 `span max` 不比同場關的那一邊
+    多 0.3 ms 以上；開的那一邊 `rescBy` 前兩格（＜500 µs）合計 ≤ 關的那一邊的 0.4 倍；全速的 `events` 開 ≤ 關＋2 個標準誤
+    （原本的 `got − quick` 與 `timeout ÷ waited` 只記錄、不當門檻）；
     使用者的模式 `events` 不變差（差在 2 個標準誤之內）；驗閘門那一場 `gate` > 0 而且 `synth shown` 不比基準場少；
     `chain sum` 兩邊差在 ±0.15 ms 之內；`slackPub` 最後四格變少、第 0 格變多。
     這一步動到三種模式共用的程式（frame loop、XrVideo），驗收另外要跑一次 XR 桌面與結束路徑（`--xr-test-fail gpuwedge`）。

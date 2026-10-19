@@ -354,6 +354,7 @@ HEADERS += \
     streaming/xr/xrvideostats.h \
     streaming/xr/xrflight.h \
     streaming/xr/xrguard.h \
+    streaming/xr/xrasynclog.h \
     streaming/xr/xrruntimejson.h
 
 # 上面幾個檔在 Linux 會 dlopen（Vulkan loader、OpenXR runtime 的診斷）。glibc 2.34 起
