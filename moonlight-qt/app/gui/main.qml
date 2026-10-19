@@ -843,7 +843,16 @@ ApplicationWindow {
         function onRunningChanged() {
             if (VrLauncher.running) {
                 SdlGamepadKeyNavigation.disable()
-                window.hide()
+                // 實驗（2026-10-19）：主視窗一藏，頭盔的 SteamVR 就把 Steam 主選單叫出來（"theater frame destroyed"），
+                // 蓋在 VR 畫面上 2～4 秒。dev 的 hide＝… 比較幾種讓開的方式
+                var mode = VrLauncher.devLaunchHide
+                console.warn("[VIPLE-VR-LAUNCHER] child started: window mode=" + (mode === "" ? "now" : mode))
+                if (mode === "minimize") {
+                    window.showMinimized()
+                }
+                else if (mode !== "never" && mode !== "focused") {
+                    window.hide()
+                }
             }
             else {
                 showMainWindow()
@@ -852,6 +861,13 @@ ApplicationWindow {
                 window.raise()
                 window.requestActivate()
                 SdlGamepadKeyNavigation.enable()
+            }
+        }
+
+        function onChildXrState(state) {
+            if (state === "FOCUSED" && VrLauncher.running && VrLauncher.devLaunchHide === "focused") {
+                console.warn("[VIPLE-VR-LAUNCHER] child XR focused: hiding the window")
+                window.hide()
             }
         }
 

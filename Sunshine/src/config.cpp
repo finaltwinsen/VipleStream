@@ -1463,7 +1463,8 @@ namespace config {
     path_f(vars, "credentials_file", config::sunshine.credentials_file);
 
     string_f(vars, "external_ip", nvhttp.external_ip);
-    string_list_f(vars, "media_dirs", nvhttp.media_dirs);  // §VR-PLAYER（V3）
+    vr_opt::bool_strict_f(vars, "media_share", nvhttp.media_share);  // §VR-PLAYER（V3）
+    string_list_f(vars, "media_dirs", nvhttp.media_dirs);
     list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
 
     string_f(vars, "audio_sink", audio.sink);

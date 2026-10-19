@@ -216,10 +216,11 @@ public:
     // 至少有一張全景影像
     bool immersiveReady();
     // XR frame thread：proj 1＝180°、2＝360°、3＝360° 等角立方體（EAC）；stereo 0 單眼、1 左右、2 上下；yawRad＝內容正前方的朝向（LOCAL 空間，
-    // 置中時的頭部水平朝向）；views＝這一格 xrLocateViews（LOCAL 空間）的結果；eyeW×eyeH＝每眼的像素。成功時 out[0..1]
+    // 置中時的頭部水平朝向）；eyeOffsetRad＝每一眼再往外轉多少（左眼 +、右眼 −；正值景物往遠處退）；views＝這一格
+    // xrLocateViews（LOCAL 空間）的結果；eyeW×eyeH＝每眼的像素。成功時 out[0..1]
     // 是兩眼在投影 swapchain 裡的範圍（同一個 swapchain，左右各半）。projection layer 的 pose／fov 要用同一組 views
-    bool renderImmersive(XrSession session, const XrView views[2], int proj, int stereo, float yawRad, int eyeW, int eyeH,
-                         XrSwapchainSubImage out[2]);
+    bool renderImmersive(XrSession session, const XrView views[2], int proj, int stereo, float yawRad, float eyeOffsetRad, int eyeW,
+                         int eyeH, XrSwapchainSubImage out[2]);
 
     // 暖機：XrContext bring-up 後、第一幀之前可呼叫（目前由 render thread 在第一幀自行處理）
     void setSession(XrSession session);

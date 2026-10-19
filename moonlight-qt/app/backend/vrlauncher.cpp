@@ -103,6 +103,8 @@ struct DevVideo {
     int playSec = 0;
     QString host;
     QString dir;
+    QString hide;
+    bool stripAppEnv = false;
 } s_DevVideo;
 }  // namespace
 
@@ -131,6 +133,12 @@ void VrLauncher::setDevVideo(const QString& spec)
         else if (k == QLatin1String("dir")) {
             s_DevVideo.dir = v;
         }
+        else if (k == QLatin1String("hide")) {
+            s_DevVideo.hide = v;
+        }
+        else if (k == QLatin1String("appenv")) {
+            s_DevVideo.stripAppEnv = v == QLatin1String("strip");
+        }
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] dev video page: tab=%d url=%s grab=%d play=%d host=%s dir=%s",
                 s_DevVideo.tab, qPrintable(s_DevVideo.url), s_DevVideo.grabSec, s_DevVideo.playSec, qPrintable(s_DevVideo.host),
@@ -144,6 +152,7 @@ QString VrLauncher::devVideoGrabPath() const { return s_DevVideo.grabPath; }
 int VrLauncher::devVideoPlaySec() const { return s_DevVideo.playSec; }
 QString VrLauncher::devVideoHost() const { return s_DevVideo.host; }
 QString VrLauncher::devVideoDir() const { return s_DevVideo.dir; }
+QString VrLauncher::devLaunchHide() const { return s_DevVideo.hide; }
 
 bool VrLauncher::playerAvailable() const
 {
@@ -352,6 +361,19 @@ bool VrLauncher::startChild(const QStringList& args, const QString& what)
             env.remove(QString::fromLatin1(name));
         }
     }
+    if (s_DevVideo.stripAppEnv) {
+        // 實驗（dev，--dev-video appenv=strip）：子行程不帶 Steam 給這個捷徑的 app 識別，SteamVR 就不會把它當成跟平面
+        // GUI 同一個 app（同一個 app 的 VR 畫面一出來，SteamVR 會打開選單把平面視窗收進去）
+        int removed = 0;
+        for (const QString& k : env.keys()) {
+            if (k == QLatin1String("SteamAppId") || k == QLatin1String("SteamGameId") || k == QLatin1String("SteamOverlayGameId") ||
+                k == QLatin1String("STEAM_COMPAT_APP_ID")) {
+                env.remove(k);
+                removed++;
+            }
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] dev: removed %d Steam app id variable(s) from the child", removed);
+    }
     m_Proc->setProcessEnvironment(env);
 
     m_StderrPartial.clear();
@@ -376,6 +398,12 @@ void VrLauncher::onStderr()
     while ((nl = m_StderrPartial.indexOf('\n')) >= 0) {
         const QString line = QString::fromUtf8(m_StderrPartial.left(nl)).trimmed();
         m_StderrPartial.remove(0, nl + 1);
+        if (line.startsWith(QLatin1String("VIPLE-XR-STATE "))) {
+            const QString st = line.mid(15);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] child XR session %s", qPrintable(st));
+            emit childXrState(st);
+            continue;
+        }
         const QString err = userFacingError(line);
         if (!err.isEmpty()) {
             m_LastError = err;

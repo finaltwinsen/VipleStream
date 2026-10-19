@@ -119,7 +119,10 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
     - **頭盔影片模式（§VR-PLAYER，2026-10-19 起，使用者要求）**：桌面、VR 之外第三個模式，在頭盔上播影片（本機檔案、
       網址、`<host>` 分享的資料夾、YouTube 等網站），2D 大螢幕、3D 左右／上下、180°、360°。設計與做法在
       `steam_frame_client.md` §11、log 在 `log_tags.md` `[VIPLE-PLAYER]`／`[VIPLE-MEDIA]`。V1～V4、PC 分頁的類檔案總管與內建瀏覽器（Qt WebEngine）都在頭盔無人驗過，**待使用者配戴測**（控制器實際操作還沒驗）。
-      server 的分享預設關（`media_dirs` 空）。
+      server 預設讓配對過的 client 逛整台 PC（`media_dirs` 限定資料夾、`media_share = disabled` 關掉）。
+      2026-10-20 配戴回饋已處理：手把 A／B／扳機／握把、搖桿上下調遠近、PC 清單翻頁鈕、播放中斷線後 server HTTPS 卡死（已修）。
+      **開播時跳出 Steam 選單**程式這邊避不掉；`dashboard.autoShowGameTheater=false` 無人測有效，**待配戴確認**（頭盔目前是 false），
+      不行再做選片頁 VR 化（A）。
     - 解碼輸出改成 100 µs 短輪詢（§VR-DEC-POLL，少 0.1～0.15 ms）；補幀那一批少一次色彩轉換（§VR-SYNTH-LEAN，少約 0.32 ms）。
       其中「上一張的小圖每次都被宣告成無效」是未定義行為（補幀的客觀檢查都過了，表示目前的驅動上內容還在），
       要不要不設開關直接修，**待使用者決定**。

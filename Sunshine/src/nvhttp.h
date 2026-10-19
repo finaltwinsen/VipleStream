@@ -67,7 +67,11 @@ namespace nvhttp {
 
     virtual ~SunshineHTTPS() {
       // Gracefully shutdown the TLS connection
+      // VipleStream §VR-PLAYER：只送出自己的 close_notify、不等對方回。阻塞式的 shutdown 會在 recv 等對方的
+      // close_notify，對方無聲消失時（頭盔 Wi-Fi 換基地台斷線，沒有 FIN 也沒有 RST）會永遠等下去；這個解構子跑在
+      // HTTPS 伺服器唯一的 io 執行緒上，於是 47984 上所有請求都不再回應，要重啟服務（2026-10-20 本機實測）。
       SimpleWeb::error_code ec;
+      lowest_layer().non_blocking(true, ec);
       shutdown(ec);
     }
   };

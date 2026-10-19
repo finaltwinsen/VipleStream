@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -90,6 +91,7 @@ uint64_t steadyNowNs()
 // 讀完這一段才開下一段；seek 只改位置，下一次讀的時候從新的位置開一段。
 struct RangeReader {
     static constexpr int64_t kChunk = 8ll * 1024 * 1024;  // 同 server 的 k_max_chunk
+    static constexpr std::chrono::seconds kRetryFor {30};
     std::string url;
     AVDictionary* base = nullptr;   // 每一段都用的選項（憑證、逾時…）
     AVIOInterruptCB interrupt = {};
@@ -97,6 +99,11 @@ struct RangeReader {
     int64_t pos = 0;                // 下一個要讀的位置
     int64_t subEnd = 0;             // 這一段的結尾（不含）
     int64_t size = -1;
+
+    bool interrupted() const
+    {
+        return interrupt.callback != nullptr && interrupt.callback(interrupt.opaque) != 0;
+    }
 
     ~RangeReader()
     {
@@ -131,13 +138,33 @@ struct RangeReader {
     static int read(void* opaque, uint8_t* buf, int n)
     {
         RangeReader* r = static_cast<RangeReader*>(opaque);
-        for (int attempt = 0; attempt < 4; attempt++) {
+        // 網路斷一下（頭盔 Wi-Fi 換基地台實測斷 13 秒）不要讓影片壞掉：開不了就每秒再試，最多撐 kRetryFor；
+        // 使用者結束或 seek 時 interrupt 會讓這裡馬上返回
+        const auto giveUp = std::chrono::steady_clock::now() + kRetryFor;
+        for (int attempt = 0;; attempt++) {
             if (r->size > 0 && r->pos >= r->size) {
                 return AVERROR_EOF;
             }
+            if (attempt > 0) {
+                if (r->interrupted() || std::chrono::steady_clock::now() >= giveUp) {
+                    break;
+                }
+                if (attempt > 1) {
+                    for (int i = 0; i < 10 && !r->interrupted(); i++) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                }
+            }
             if (r->sub == nullptr || r->pos >= r->subEnd) {
                 if (!r->openAt(r->pos)) {
+                    if (attempt == 1) {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] lost the PC's shared folder at %lld, retrying for up to %d s",
+                                    static_cast<long long>(r->pos), static_cast<int>(kRetryFor.count()));
+                    }
                     continue;
+                }
+                if (attempt > 1) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] reconnected to the PC's shared folder after %d tries", attempt);
                 }
             }
             const int want = static_cast<int>(std::min<int64_t>(n, r->subEnd - r->pos));

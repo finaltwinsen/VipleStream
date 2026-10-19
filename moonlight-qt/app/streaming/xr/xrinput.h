@@ -91,6 +91,10 @@ struct XrInputSink {
     std::function<void()> menu;
     std::function<void(float u, float v)> panel;
     std::function<void(float u, float v)> panelClick;
+    // §VR-PLAYER：任一手按下的上升緣（focused 時每格都讀，不論控制列在不在、有沒有平面螢幕）。有設 playerButton 就不再把
+    // 扳機／B／握把當成滑鼠鍵送出：扳機（沒指在控制列上）、A、B、握把各自交給呼叫端
+    enum class PlayerButton { Trigger, A, B, Grip };
+    std::function<void(PlayerButton b)> playerButton;
 };
 
 class XrInput
@@ -174,6 +178,8 @@ private:
     XrAction m_Trigger = XR_NULL_HANDLE;
     XrAction m_Squeeze = XR_NULL_HANDLE;
     XrAction m_Secondary = XR_NULL_HANDLE;
+    XrAction m_Primary = XR_NULL_HANDLE;  // §VR-PLAYER：A（影片模式的播放／暫停；串流時沒有用到）
+    bool m_PlayerWas[4][2] = {};          // §VR-PLAYER：PlayerButton × 手 的上一格狀態
     XrAction m_Stick = XR_NULL_HANDLE;
     XrAction m_KbToggleAction = XR_NULL_HANDLE;
     bool m_KbToggleWas[2] = {false, false};

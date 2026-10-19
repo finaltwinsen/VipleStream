@@ -1,6 +1,7 @@
 #include "sdlgamepadkeynavigation.h"
 
 #include <QKeyEvent>
+#include <QWheelEvent>
 #include <QGuiApplication>
 #include <QStringList>
 #include <QWindow>
@@ -32,6 +33,7 @@ SdlGamepadKeyNavigation::SdlGamepadKeyNavigation(StreamingPreferences* prefs)
     : m_Prefs(prefs),
       m_Enabled(false),
       m_UiNavMode(false),
+      m_ScrollMode(false),
       m_FirstPoll(false),
       m_HasFocus(false),
       m_LastAxisNavigationEventTime(0),
@@ -264,7 +266,7 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
             case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
                 // §UI-SCROLL：LB 往上、RB 往下捲大半頁（只在按下那一刻、只在 Tab 導覽模式）
-                if (m_UiNavMode && type == QEvent::Type::KeyPress) {
+                if ((m_UiNavMode || m_ScrollMode) && type == QEvent::Type::KeyPress) {
                     emit scrollRequested(event.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER ?
                                              SCROLL_BUTTON_PAGES : -SCROLL_BUTTON_PAGES);
                 }
@@ -305,6 +307,13 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
     for (auto gc : std::as_const(m_Gamepads)) {
         short leftX = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTX);
         short leftY = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY);
+        if (m_ScrollMode) {
+            // 捲動模式：左搖桿的上下也是捲動（下面和右搖桿一起取推得最深的）；左右照舊送方向鍵
+            if (qAbs((int) leftY) > qAbs(scrollAxis)) {
+                scrollAxis = leftY;
+            }
+            leftY = 0;
+        }
         if (SDL_GetTicks() - m_LastAxisNavigationEventTime < AXIS_NAVIGATION_REPEAT_DELAY) {
             // Do nothing
         }
@@ -352,7 +361,7 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
 
     // §UI-SCROLL：右搖桿上下捲動（只在 Tab 導覽模式）。SDL 的搖桿往下是正值＝往下捲。
     const int scrollMag = qAbs(scrollAxis);
-    if (m_UiNavMode && scrollMag > SCROLL_AXIS_DEADZONE) {
+    if ((m_UiNavMode || m_ScrollMode) && scrollMag > SCROLL_AXIS_DEADZONE) {
         // 距離用實際經過的時間算（輪詢名義上 100 ms，計時器不準）；剛開始推的那一次算一個輪詢間隔
         const Uint32 now = SDL_GetTicks();
         const Uint32 sinceLast = now - m_LastScrollEventTime;
@@ -410,6 +419,69 @@ void SdlGamepadKeyNavigation::updateTimerState()
 void SdlGamepadKeyNavigation::setUiNavMode(bool uiNavMode)
 {
     m_UiNavMode = uiNavMode;
+}
+
+void SdlGamepadKeyNavigation::setScrollMode(bool scrollMode)
+{
+    if (scrollMode != m_ScrollMode) {
+        if (scrollMode) {
+            qGuiApp->installEventFilter(this);
+            m_DiagWindowStart = SDL_GetTicks();
+            m_DiagWheel = m_DiagKey = m_DiagButton = 0;
+            m_DiagWheelLogged = m_DiagKeyLogged = false;
+        }
+        else {
+            qGuiApp->removeEventFilter(this);
+        }
+    }
+    m_ScrollMode = scrollMode;
+    m_ScrollLogged = false;  // 每次開啟後第一次捲動各印一行
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-UI-NAV] scroll mode %s (%d gamepad(s))", scrollMode ? "on" : "off",
+                (int) m_Gamepads.size());
+}
+
+bool SdlGamepadKeyNavigation::eventFilter(QObject* obj, QEvent* event)
+{
+    // 只看送到視窗本身的（QQuickWindow 會再轉送給項目，那些不重複算）
+    if (obj->isWindowType()) {
+        switch (event->type()) {
+        case QEvent::Wheel: {
+            m_DiagWheel++;
+            if (!m_DiagWheelLogged) {
+                m_DiagWheelLogged = true;
+                auto* we = static_cast<QWheelEvent*>(event);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-UI-NAV] first wheel event: angle=(%d,%d) pixel=(%d,%d) phase=%d at (%.0f,%.0f)",
+                            we->angleDelta().x(), we->angleDelta().y(), we->pixelDelta().x(), we->pixelDelta().y(),
+                            (int) we->phase(), we->position().x(), we->position().y());
+            }
+            break;
+        }
+        case QEvent::KeyPress: {
+            m_DiagKey++;
+            if (!m_DiagKeyLogged) {
+                m_DiagKeyLogged = true;
+                // 只記第一個鍵的代碼（選片頁沒有密碼欄位；網址列打的字不記）
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-UI-NAV] first key event: key=0x%x", static_cast<QKeyEvent*>(event)->key());
+            }
+            break;
+        }
+        case QEvent::MouseButtonPress:
+            m_DiagButton++;
+            break;
+        default:
+            break;
+        }
+        const Uint32 now = SDL_GetTicks();
+        if (now - m_DiagWindowStart >= 10000) {
+            if (m_DiagWheel + m_DiagKey + m_DiagButton > 0) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-UI-NAV] 10s input: wheel=%d keys=%d clicks=%d", m_DiagWheel, m_DiagKey,
+                            m_DiagButton);
+            }
+            m_DiagWindowStart = now;
+            m_DiagWheel = m_DiagKey = m_DiagButton = 0;
+        }
+    }
+    return QObject::eventFilter(obj, event);
 }
 
 int SdlGamepadKeyNavigation::getConnectedGamepads()

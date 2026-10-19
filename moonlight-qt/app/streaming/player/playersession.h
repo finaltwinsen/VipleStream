@@ -70,7 +70,7 @@ signals:
     void finished(int exitCode, const QString& error);
 
 private:
-    enum class Cmd { TogglePause, Seek, SeekRel, Volume, VolumeRel, Format, Screen, Recenter, Exit, TogglePanel, ShowPanel };
+    enum class Cmd { TogglePause, Seek, SeekRel, Volume, VolumeRel, Format, Screen, Recenter, Exit, TogglePanel, ShowPanel, DepthRel };
     struct Command {
         Cmd cmd;
         double value = 0.0;
@@ -111,6 +111,8 @@ private:
     std::atomic<uint64_t> m_LastInteractNs{0};
     // 搖桿：上一次觸發的時刻與方向（重複觸發用）
     int m_StickXDir = 0, m_StickYDir = 0;
+    // 遠近（搖桿上下；-kDepthMax..kDepthMax，0＝預設）：平面螢幕每格遠 15%（張角不變），180°／360° 每格每眼往外 0.1°。每支片記住
+    int m_Depth = 0;
     uint64_t m_StickXNs = 0, m_StickYNs = 0;
     // 測試腳本
     int m_TestStep = 0;

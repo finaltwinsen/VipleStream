@@ -385,7 +385,9 @@ namespace config {
 
     std::string external_ip;
 
-    // VipleStream 2.0 §VR-PLAYER（V3）：分享給已配對 client（頭盔影片模式）的資料夾；空＝不分享（預設）
+    // VipleStream 2.0 §VR-PLAYER（V3）：已配對的 client（頭盔影片模式）可以瀏覽、播放這台 PC 上的影片。
+    // media_share=false＝整個關掉；media_dirs 空（預設）＝整台 PC（每一個磁碟機，Linux 是 /），有設＝只開放這些資料夾
+    bool media_share = true;
     std::vector<std::string> media_dirs;
   };
 

@@ -2090,8 +2090,8 @@ bool XrVideo::ensureProjSwapchain(XrSession session, int width, int height)
     return false;
 }
 
-bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj, int stereo, float yawRad, int eyeW, int eyeH,
-                              XrSwapchainSubImage out[2])
+bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj, int stereo, float yawRad, float eyeOffsetRad, int eyeW,
+                              int eyeH, XrSwapchainSubImage out[2])
 {
     if (m_ProjFailed || m_Vulkan == nullptr) {
         return false;
@@ -2160,9 +2160,11 @@ bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj
     pl_vulkan_release_ex(g, &rp);
 
     bool ok = true;
-    const float cy = std::cos(-yawRad), sy = std::sin(-yawRad);
     // 一隻眼：畫進 target 的 [x0, x0+eyeW) 那一段（dev 讀回時畫進另一張可讀回的材質）
     auto drawEye = [&](int e, pl_tex target, int x0, bool linear) -> bool {
+        // 遠近：左眼的內容往左轉、右眼往右轉（加一點不交叉的視差，景物往遠處退；使用者 2026-10-19：VR180 的片太近、要鬥雞眼）
+        const float eyeYaw = yawRad + (e == 0 ? eyeOffsetRad : -eyeOffsetRad);
+        const float cy = std::cos(-eyeYaw), sy = std::sin(-eyeYaw);
         // 這一眼的朝向（四元數 → 矩陣），再繞 Y 轉 −yaw：內容的正前方對到置中時的頭部朝向
         const XrQuaternionf& q = views[e].pose.orientation;
         const float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;

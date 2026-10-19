@@ -269,6 +269,8 @@ public:
     void setPlayerLayout(int projection, int stereo, float frameAspect);
     // 任何執行緒：螢幕距離（公尺）與水平張角（度）；frame thread 下一格套用，朝向不變
     void setPlayerScreen(float distanceM, float fovDeg);
+    // 任何執行緒：180°／360° 的遠近（每一眼往外轉的角度，弧度；正值＝左眼往左、右眼往右，景物往遠處退）
+    void setPlayerEyeOffset(float rad) { m_PlayerEyeOffRad.store(rad, std::memory_order_relaxed); }
     // 任何執行緒：控制列貼圖（kPanelW×kPanelH）與顯不顯示；圖換了 frame thread 下一格上傳
     static constexpr int kPanelW = 1024;
     static constexpr int kPanelH = 192;
@@ -380,6 +382,7 @@ private:
     // §VR-PLAYER
     std::atomic<int> m_PlayerProj{0};
     std::atomic<int> m_PlayerStereo{0};
+    std::atomic<float> m_PlayerEyeOffRad{0.0f};
     std::atomic<float> m_PlayerAspect{0.0f};
     std::atomic<float> m_PlayerDistM{0.0f};     // 0＝沒要求
     std::atomic<float> m_PlayerFovDeg{0.0f};

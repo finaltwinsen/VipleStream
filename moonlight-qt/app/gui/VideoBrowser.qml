@@ -38,6 +38,11 @@ Item {
         "for(var j=0;j<vs.length;j++){try{vs[j].pause();}catch(e){}}" +
         "return {src: best?(best.currentSrc||best.src||''):'', title: document.title};})()"
 
+    // 手把捲網頁（VideoView 轉過來；pages＝幾個可見高度）
+    function scrollPages(pages) {
+        view.runJavaScript("window.scrollBy(0," + Math.round(pages * view.height) + ")")
+    }
+
     function playInVr() {
         view.runJavaScript(probeScript, function(r) {
             var src = r && r.src ? r.src : ""

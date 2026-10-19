@@ -232,95 +232,6 @@ QVariantList MediaLibrary::hosts(ComputerManager* cm) const
     return out;
 }
 
-QVariantList MediaLibrary::hostRoots(ComputerManager* cm, int host)
-{
-    m_LastError.clear();
-    NvComputer* c = hostAt(cm, host);
-    if (c == nullptr || !hostOnline(c)) {
-        m_LastError = tr("The PC is not online.");
-        return {};
-    }
-    QVariantList out;
-    try {
-        NvHTTP http(c);
-        const QString xml = http.openConnectionToString(http.httpsBaseUrl(), QStringLiteral("viple/media/roots"), QString(), 4000);
-        NvHTTP::verifyResponseStatus(xml);
-        QXmlStreamReader r(xml);
-        QVariantMap cur;
-        while (!r.atEnd()) {
-            r.readNext();
-            if (r.isStartElement() && r.name() == QLatin1String("Index")) {
-                cur[QStringLiteral("index")] = r.readElementText().toInt();
-            }
-            else if (r.isStartElement() && r.name() == QLatin1String("Name")) {
-                cur[QStringLiteral("name")] = r.readElementText();
-            }
-            else if (r.isEndElement() && r.name() == QLatin1String("Folder")) {
-                out.append(cur);
-                cur.clear();
-            }
-        }
-    }
-    catch (const std::exception&) {
-        m_LastError = tr("Could not read the shared folders from the PC.");
-        return {};
-    }
-    if (out.isEmpty()) {
-        m_LastError = tr("This PC doesn't share any video folders. Set media_dirs in the VipleStream Server settings.");
-    }
-    return out;
-}
-
-QVariantList MediaLibrary::hostList(ComputerManager* cm, int host, int root, const QString& path)
-{
-    m_LastError.clear();
-    NvComputer* c = hostAt(cm, host);
-    if (c == nullptr || !hostOnline(c)) {
-        m_LastError = tr("The PC is not online.");
-        return {};
-    }
-    QVariantList dirs, files;
-    try {
-        NvHTTP http(c);
-        const QString args = QStringLiteral("root=%1&path=%2").arg(root).arg(QString::fromLatin1(QUrl::toPercentEncoding(path)));
-        const QString xml = http.openConnectionToString(http.httpsBaseUrl(), QStringLiteral("viple/media/list"), args, 6000);
-        NvHTTP::verifyResponseStatus(xml);
-        QXmlStreamReader r(xml);
-        QVariantMap cur;
-        while (!r.atEnd()) {
-            r.readNext();
-            if (r.isStartElement()) {
-                if (r.name() == QLatin1String("Name")) {
-                    cur[QStringLiteral("name")] = r.readElementText();
-                }
-                else if (r.name() == QLatin1String("Dir")) {
-                    cur[QStringLiteral("isDir")] = r.readElementText() == QLatin1String("1");
-                }
-                else if (r.name() == QLatin1String("Size")) {
-                    cur[QStringLiteral("size")] = r.readElementText().toLongLong();
-                }
-            }
-            else if (r.isEndElement() && r.name() == QLatin1String("Entry")) {
-                const QString name = cur.value(QStringLiteral("name")).toString();
-                const bool isDir = cur.value(QStringLiteral("isDir")).toBool();
-                QVariantMap m;
-                m[QStringLiteral("name")] = name;
-                m[QStringLiteral("path")] = path.isEmpty() ? name : path + QLatin1Char('/') + name;
-                m[QStringLiteral("isDir")] = isDir;
-                m[QStringLiteral("detail")] = isDir ? QString() : sizeText(cur.value(QStringLiteral("size")).toLongLong());
-                m[QStringLiteral("format")] = isDir ? QString() : guessFormat(name);
-                (isDir ? dirs : files).append(m);
-                cur.clear();
-            }
-        }
-    }
-    catch (const std::exception&) {
-        m_LastError = tr("Could not read this folder from the PC.");
-        return {};
-    }
-    return dirs + files;
-}
-
 void MediaLibrary::hostBrowse(ComputerManager* cm, int host, int root, const QString& path, int requestId)
 {
     NvComputer* c = hostAt(cm, host);
@@ -347,14 +258,18 @@ void MediaLibrary::hostBrowse(ComputerManager* cm, int host, int root, const QSt
                     else if (r.isStartElement() && r.name() == QLatin1String("Name")) {
                         cur[QStringLiteral("name")] = r.readElementText();
                     }
+                    else if (r.isStartElement() && r.name() == QLatin1String("Kind")) {
+                        cur[QStringLiteral("drive")] = r.readElementText() == QLatin1String("drive");
+                    }
                     else if (r.isEndElement() && r.name() == QLatin1String("Folder")) {
                         entries.append(cur);
                         cur.clear();
                     }
                 }
                 if (entries.isEmpty()) {
-                    error = tr("This PC doesn't share any video folders yet. Add media_dirs = <folder> to the VipleStream Server "
-                               "configuration and restart the server.");
+                    // 新版 server 沒設 media_dirs 時是整台 PC；空的＝關掉了分享（media_share = disabled）或 server 太舊
+                    error = tr("This PC doesn't share its videos. Update VipleStream Server on that PC, and check that "
+                               "media_share isn't disabled in its configuration.");
                 }
             }
             else {

@@ -40,6 +40,9 @@ class VrLauncher : public QObject
     Q_PROPERTY(int devVideoPlaySec READ devVideoPlaySec CONSTANT)
     Q_PROPERTY(QString devVideoHost READ devVideoHost CONSTANT)
     Q_PROPERTY(QString devVideoDir READ devVideoDir CONSTANT)
+    // dev（--dev-video hide=…）：VR 子行程啟動時主視窗怎麼讓開（now＝馬上藏、focused＝子行程的 XR 拿到焦點才藏、
+    // never＝不藏、minimize＝最小化）。空＝now
+    Q_PROPERTY(QString devLaunchHide READ devLaunchHide CONSTANT)
 
     // §VR-PREFLIGHT：給 VrPreflightDialog.qml 顯示用
     Q_PROPERTY(bool preflightChecking READ preflightChecking NOTIFY preflightChanged)   // 開頭那幾次還在量（通常不到半秒）
@@ -94,6 +97,7 @@ public:
     int devVideoPlaySec() const;
     QString devVideoHost() const;
     QString devVideoDir() const;
+    QString devLaunchHide() const;
 
     // 切換模式；回傳模式是否真的改變（改變時 QML 再請 ComputerManager.setVrAppLists() 重抓清單）
     Q_INVOKABLE bool setVrMode(bool on);
@@ -120,6 +124,8 @@ signals:
     void preflightChanged();
     // 子行程結束；error 非空＝異常結束（給 GUI 顯示）
     void finished(int exitCode, const QString& error);
+    // 子行程的 XR session 第一次到 VISIBLE／FOCUSED（stderr 的 "VIPLE-XR-STATE <狀態>"）
+    void childXrState(const QString& state);
 
 private:
     void onStderr();

@@ -1232,6 +1232,11 @@ void XrContext::handleStateChange(XrSessionState state)
 {
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] session state %s -> %s",
                 sessionStateName(m_State.load()), sessionStateName(state));
+    if (state == XR_SESSION_STATE_VISIBLE || state == XR_SESSION_STATE_FOCUSED) {
+        // §VR-LAUNCHER：GUI（父行程）讀 stderr，知道 VR 畫面什麼時候接手（決定主視窗什麼時候讓開）
+        fprintf(stderr, "VIPLE-XR-STATE %s\n", sessionStateName(state));
+        fflush(stderr);
+    }
     m_State.store(state);
     {
         std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -2047,7 +2052,8 @@ void XrContext::frameThreadMain()
                     const int eyeH = std::max(256, static_cast<int>(static_cast<float>(rh) * sc));
                     XrSwapchainSubImage sub[2] = {};
                     if (m_Video->renderImmersive(m_Session, views, playerProj, m_PlayerStereo.load(std::memory_order_relaxed),
-                                                 m_Screen->yawRad(), eyeW, eyeH, sub)) {
+                                                 m_Screen->yawRad(), m_PlayerEyeOffRad.load(std::memory_order_relaxed), eyeW, eyeH,
+                                                 sub)) {
                         for (int e = 0; e < 2; e++) {
                             projViews[e].pose = views[e].pose;
                             projViews[e].fov = views[e].fov;

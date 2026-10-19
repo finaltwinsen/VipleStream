@@ -4,6 +4,7 @@ import QtQuick.Layouts 1.3
 
 import ComputerManager 1.0
 import MediaLibrary 1.0
+import SdlGamepadKeyNavigation 1.0
 import VrLauncher 1.0
 
 // VipleStream 2.0 §VR-PLAYER：影片模式的選片頁。選好之後 VrLauncher.launchPlayer() 另開子行程在頭盔裡播
@@ -178,6 +179,46 @@ Item {
         refreshHosts()
         tabs.currentIndex = VrLauncher.devVideoTab >= 0 ? VrLauncher.devVideoTab : (recentModel.count > 0 ? 0 : 1)
         tabs.forceActiveFocus(Qt.TabFocus)
+        SdlGamepadKeyNavigation.setScrollMode(true)
+    }
+
+    StackView.onDeactivating: {
+        SdlGamepadKeyNavigation.setScrollMode(false)
+    }
+
+    // 手把的搖桿上下／LB／RB（SdlGamepadKeyNavigation 的捲動模式）：捲目前這個分頁看得到的清單（瀏覽器分頁＝捲網頁）。
+    // 使用者 2026-10-19 的配戴回饋：清單一頁放不下時要拖右邊的捲軸很麻煩
+    function scrollList(lv, pages) {
+        if (!lv || !lv.visible || lv.contentHeight <= lv.height) {
+            return
+        }
+        var top = lv.originY
+        var bottom = lv.originY + lv.contentHeight - lv.height
+        lv.contentY = Math.max(top, Math.min(bottom, lv.contentY + pages * lv.height))
+    }
+
+    // 捲目前這個分頁（手把的搖桿／LB／RB，或右側的上一頁／下一頁按鈕）
+    function scrollCurrent(pages) {
+        switch (tabs.currentIndex) {
+        case 0: videoView.scrollList(recentList, pages); break
+        case 1: videoView.scrollList(fileList, pages); break
+        case 2: videoView.scrollList(videoView.hostIndex < 0 ? hostListView : hostEntryList, pages); break
+        case 3: videoView.scrollList(webList, pages); break
+        case 4:
+            if (browserLoader.item) {
+                browserLoader.item.scrollPages(pages)
+            }
+            break
+        }
+    }
+
+    Connections {
+        target: SdlGamepadKeyNavigation
+        function onScrollRequested(pages) {
+            if (videoView.StackView.status === StackView.Active) {
+                videoView.scrollCurrent(pages)
+            }
+        }
     }
 
     // 子行程結束、回到這一頁時更新「最近播過」（停在哪裡）
@@ -187,6 +228,16 @@ Item {
             if (!VrLauncher.running) {
                 refreshRecent()
             }
+        }
+    }
+
+    // §VR-PLAYER（dev，--dev-video play=<秒>,url=<檔案或網址>）：瀏覽器以外的分頁，幾秒後直接播 url（無人驗測啟動流程用）
+    Timer {
+        running: VrLauncher.devVideoPlaySec > 0 && VrLauncher.devVideoTab !== 4 && VrLauncher.devVideoUrl !== ""
+        interval: VrLauncher.devVideoPlaySec * 1000
+        onTriggered: {
+            console.warn("[VIPLE-PLAYER] dev: playing " + VrLauncher.devVideoUrl)
+            videoView.play(VrLauncher.devVideoUrl, "")
         }
     }
 
@@ -230,8 +281,9 @@ Item {
             for (var i = 0; i < entries.length; i++) {
                 var e = entries[i]
                 hostModel.append({ "name": e.name, "path": root < 0 ? "" : e.path, "root": root < 0 ? e.index : root,
-                                   "isDir": root < 0 ? true : e.isDir, "detail": root < 0 ? qsTr("Shared folder") : e.detail,
-                                   "format": root < 0 ? "" : e.format })
+                                   "isDir": root < 0 ? true : e.isDir,
+                                   "detail": root < 0 ? (e.drive ? qsTr("Drive") : qsTr("Shared folder")) : e.detail,
+                                   "format": root < 0 ? "" : e.format, "drive": root < 0 && e.drive === true })
             }
             hostMessage.text = error !== "" ? error : (entries.length === 0 ? qsTr("This folder has no videos.") : "")
             hostEntryList.currentIndex = 0
@@ -271,385 +323,418 @@ Item {
             }
         }
 
-        StackLayout {
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: tabs.currentIndex
+            spacing: 8
 
-            // ── 最近播過 ──
-            ListView {
-                id: recentList
-                clip: true
-                model: recentModel
-                keyNavigationEnabled: true
-                ScrollBar.vertical: ScrollBar {}
-                delegate: ItemDelegate {
-                    width: recentList.width
-                    highlighted: recentList.activeFocus && recentList.currentIndex === index
-                    contentItem: ColumnLayout {
-                        spacing: 2
-                        Label { text: model.title; font.pointSize: 14; elide: Text.ElideMiddle; Layout.fillWidth: true }
-                        Label {
-                            text: model.progress + (model.format !== "" ? "   ·   " + model.format : "")
-                            opacity: 0.7
-                            Layout.fillWidth: true
-                            elide: Text.ElideMiddle
-                        }
-                    }
-                    onClicked: play(model.source, model.title)
-                    Keys.onReturnPressed: clicked()
-                    Keys.onEnterPressed: clicked()
-                }
-                Label {
-                    anchors.centerIn: parent
-                    visible: recentModel.count === 0
-                    text: qsTr("Videos you play will show up here.")
-                    opacity: 0.7
-                }
-            }
+            StackLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: tabs.currentIndex
 
-            // ── 這台頭盔上的檔案 ──
-            ColumnLayout {
-                spacing: 6
-                RowLayout {
-                    Layout.fillWidth: true
-                    Button {
-                        text: qsTr("Up")
-                        enabled: videoView.currentDir !== ""
-                        onClicked: {
-                            var up = MediaLibrary.parentDir(videoView.currentDir)
-                            // 回到起點清單（不往檔案系統的根目錄走）
-                            var roots = MediaLibrary.roots()
-                            var isRoot = false
-                            for (var i = 0; i < roots.length; i++) {
-                                if (roots[i].path === videoView.currentDir) {
-                                    isRoot = true
-                                }
-                            }
-                            openDir(isRoot || up === "" ? "" : up)
-                        }
-                    }
-                    Label {
-                        text: videoView.currentDir === "" ? qsTr("Choose a folder") : videoView.currentDir
-                        elide: Text.ElideLeft
-                        Layout.fillWidth: true
-                        opacity: 0.8
-                    }
-                }
+                // ── 最近播過 ──
                 ListView {
-                    id: fileList
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
+                    id: recentList
                     clip: true
-                    model: dirModel
+                    model: recentModel
                     keyNavigationEnabled: true
                     ScrollBar.vertical: ScrollBar {}
                     delegate: ItemDelegate {
-                        width: fileList.width
-                        highlighted: fileList.activeFocus && fileList.currentIndex === index
-                        contentItem: RowLayout {
-                            spacing: 12
+                        width: recentList.width
+                        highlighted: recentList.activeFocus && recentList.currentIndex === index
+                        contentItem: ColumnLayout {
+                            spacing: 2
+                            Label { text: model.title; font.pointSize: 14; elide: Text.ElideMiddle; Layout.fillWidth: true }
                             Label {
-                                text: model.name + (model.isDir ? "/" : "")
-                                font.pointSize: 14
-                                font.bold: model.isDir
-                                elide: Text.ElideMiddle
+                                text: model.progress + (model.format !== "" ? "   ·   " + model.format : "")
+                                opacity: 0.7
                                 Layout.fillWidth: true
+                                elide: Text.ElideMiddle
                             }
-                            Label { text: model.format; opacity: 0.7; visible: model.format !== "" }
-                            Label { text: model.detail; opacity: 0.6; elide: Text.ElideLeft; Layout.maximumWidth: 360 }
                         }
-                        onClicked: model.isDir ? openDir(model.path) : play(model.path, "")
+                        onClicked: play(model.source, model.title)
                         Keys.onReturnPressed: clicked()
                         Keys.onEnterPressed: clicked()
                     }
                     Label {
                         anchors.centerIn: parent
-                        visible: dirModel.count === 0
-                        text: qsTr("No videos here.")
+                        visible: recentModel.count === 0
+                        text: qsTr("Videos you play will show up here.")
                         opacity: 0.7
                     }
                 }
-            }
 
-            // ── 電腦（VipleStream Server 分享的資料夾）──
-            Item {
-                // 第一層：可以連的主機（配對過的）
+                // ── 這台頭盔上的檔案 ──
                 ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 8
-                    visible: videoView.hostIndex < 0
-                    Label {
-                        text: qsTr("Choose a PC to browse its shared video folders")
-                        opacity: 0.8
-                    }
-                    ListView {
-                        id: hostListView
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        clip: true
-                        model: hostsModel
-                        keyNavigationEnabled: true
-                        spacing: 6
-                        delegate: ItemDelegate {
-                            width: hostListView.width
-                            height: 72
-                            highlighted: hostListView.activeFocus && hostListView.currentIndex === index
-                            enabled: model.online
-                            contentItem: RowLayout {
-                                spacing: 16
-                                Rectangle {
-                                    width: 14; height: 14; radius: 7
-                                    color: model.online ? "#4caf50" : "#777777"
-                                }
-                                Label { text: model.name; font.pointSize: 16; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
-                                Label { text: model.online ? qsTr("Online") : qsTr("Offline"); opacity: 0.7 }
-                            }
-                            onClicked: openHost(model.hostIdx, model.name)
-                            Keys.onReturnPressed: clicked()
-                            Keys.onEnterPressed: clicked()
-                        }
-                        Label {
-                            anchors.centerIn: parent
-                            width: parent.width * 0.8
-                            horizontalAlignment: Text.AlignHCenter
-                            wrapMode: Text.Wrap
-                            visible: hostsModel.count === 0
-                            text: qsTr("No paired PCs. Pair a PC in Desktop or VR mode first.")
-                            opacity: 0.7
-                        }
-                    }
-                }
-
-                // 第二層：像檔案總管
-                ColumnLayout {
-                    anchors.fill: parent
                     spacing: 6
-                    visible: videoView.hostIndex >= 0
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 6
                         Button {
-                            text: qsTr("All PCs")
-                            onClicked: closeHost()
-                        }
-                        Button {
-                            text: qsTr("Up one level")
-                            enabled: !videoView.hostLoading
-                            onClicked: hostUp()
-                        }
-                        Button {
-                            text: qsTr("Refresh")
-                            enabled: !videoView.hostLoading
-                            onClicked: openHostDir(videoView.hostRoot, videoView.hostPath, "")
-                        }
-                        BusyIndicator {
-                            running: videoView.hostLoading
-                            visible: running
-                            Layout.preferredHeight: 36
-                            Layout.preferredWidth: 36
-                        }
-                    }
-                    // 路徑列：主機 › 分享資料夾 › 子資料夾…（每一段都可以點）
-                    Flow {
-                        Layout.fillWidth: true
-                        spacing: 2
-                        Button {
-                            flat: true
-                            text: videoView.hostName
-                            font.bold: videoView.hostRoot < 0
-                            onClicked: openHostDir(-1, "", "")
-                        }
-                        Repeater {
-                            model: videoView.hostCrumbs()
-                            delegate: Row {
-                                Label { text: " › "; anchors.verticalCenter: parent.verticalCenter; opacity: 0.6 }
-                                Button {
-                                    flat: true
-                                    text: modelData
-                                    font.bold: index === videoView.hostCrumbs().length - 1
-                                    onClicked: openCrumb(index)
+                            text: qsTr("Up")
+                            enabled: videoView.currentDir !== ""
+                            onClicked: {
+                                var up = MediaLibrary.parentDir(videoView.currentDir)
+                                // 回到起點清單（不往檔案系統的根目錄走）
+                                var roots = MediaLibrary.roots()
+                                var isRoot = false
+                                for (var i = 0; i < roots.length; i++) {
+                                    if (roots[i].path === videoView.currentDir) {
+                                        isRoot = true
+                                    }
                                 }
+                                openDir(isRoot || up === "" ? "" : up)
                             }
+                        }
+                        Label {
+                            text: videoView.currentDir === "" ? qsTr("Choose a folder") : videoView.currentDir
+                            elide: Text.ElideLeft
+                            Layout.fillWidth: true
+                            opacity: 0.8
                         }
                     }
                     ListView {
-                        id: hostEntryList
+                        id: fileList
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        model: hostModel
+                        model: dirModel
                         keyNavigationEnabled: true
                         ScrollBar.vertical: ScrollBar {}
                         delegate: ItemDelegate {
-                            width: hostEntryList.width
-                            height: 56
-                            highlighted: hostEntryList.activeFocus && hostEntryList.currentIndex === index
+                            width: fileList.width
+                            highlighted: fileList.activeFocus && fileList.currentIndex === index
                             contentItem: RowLayout {
                                 spacing: 12
-                                Rectangle {
-                                    // 資料夾／影片的小圖示（字型不一定有 emoji，用色塊）
-                                    width: 28; height: 22; radius: 4
-                                    color: model.isDir ? "#c9a227" : "#3d7be0"
-                                    Label {
-                                        anchors.centerIn: parent
-                                        text: model.isDir ? "" : "VID"
-                                        font.pixelSize: 9
-                                        color: "white"
-                                    }
-                                }
                                 Label {
-                                    text: model.name
+                                    text: model.name + (model.isDir ? "/" : "")
                                     font.pointSize: 14
                                     font.bold: model.isDir
                                     elide: Text.ElideMiddle
                                     Layout.fillWidth: true
                                 }
                                 Label { text: model.format; opacity: 0.7; visible: model.format !== "" }
-                                Label { text: model.detail; opacity: 0.6 }
+                                Label { text: model.detail; opacity: 0.6; elide: Text.ElideLeft; Layout.maximumWidth: 360 }
                             }
-                            onClicked: {
-                                if (model.isDir) {
-                                    openHostDir(model.root, model.path, videoView.hostRoot < 0 ? model.name : "")
-                                }
-                                else {
-                                    play(MediaLibrary.hostFileUrl(ComputerManager, videoView.hostIndex, model.root, model.path), model.name)
-                                }
-                            }
+                            onClicked: model.isDir ? openDir(model.path) : play(model.path, "")
                             Keys.onReturnPressed: clicked()
                             Keys.onEnterPressed: clicked()
                         }
-                        Keys.onBackPressed: hostUp()
-                        Keys.onEscapePressed: hostUp()
                         Label {
-                            id: hostMessage
                             anchors.centerIn: parent
-                            width: parent.width * 0.8
-                            horizontalAlignment: Text.AlignHCenter
-                            wrapMode: Text.Wrap
-                            visible: !videoView.hostLoading && text !== ""
+                            visible: dirModel.count === 0
+                            text: qsTr("No videos here.")
+                            opacity: 0.7
+                        }
+                    }
+                }
+
+                // ── 電腦（VipleStream Server 分享的資料夾）──
+                Item {
+                    // 第一層：可以連的主機（配對過的）
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 8
+                        visible: videoView.hostIndex < 0
+                        Label {
+                            text: qsTr("Choose a PC to browse its shared video folders")
                             opacity: 0.8
                         }
-                    }
-                }
-            }
-
-            // ── YouTube ──
-            ColumnLayout {
-                spacing: 6
-                // 版本要跑一次 python（約 1 秒），第一次切到這一頁才查
-                onVisibleChanged: {
-                    if (visible && webVersionLabel.text === "") {
-                        webVersionLabel.text = qsTr("Helper: %1").arg(MediaLibrary.webVersion() || qsTr("not installed"))
-                    }
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    TextField {
-                        id: webQuery
-                        Layout.fillWidth: true
-                        placeholderText: qsTr("Search YouTube (try \"360 video\" or \"VR180\")")
-                        Keys.onReturnPressed: webSearchButton.clicked()
-                        Keys.onEnterPressed: webSearchButton.clicked()
-                    }
-                    Button {
-                        id: webSearchButton
-                        text: qsTr("Search")
-                        enabled: webQuery.text.trim() !== ""
-                        onClicked: {
-                            enabled = false
-                            webStatus.text = qsTr("Searching…")
-                            MediaLibrary.webSearch(webQuery.text)
+                        ListView {
+                            id: hostListView
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            model: hostsModel
+                            keyNavigationEnabled: true
+                            spacing: 6
+                            delegate: ItemDelegate {
+                                width: hostListView.width
+                                height: 72
+                                highlighted: hostListView.activeFocus && hostListView.currentIndex === index
+                                enabled: model.online
+                                contentItem: RowLayout {
+                                    spacing: 16
+                                    Rectangle {
+                                        width: 14; height: 14; radius: 7
+                                        color: model.online ? "#4caf50" : "#777777"
+                                    }
+                                    Label { text: model.name; font.pointSize: 16; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    Label { text: model.online ? qsTr("Online") : qsTr("Offline"); opacity: 0.7 }
+                                }
+                                onClicked: openHost(model.hostIdx, model.name)
+                                Keys.onReturnPressed: clicked()
+                                Keys.onEnterPressed: clicked()
+                            }
+                            Label {
+                                anchors.centerIn: parent
+                                width: parent.width * 0.8
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.Wrap
+                                visible: hostsModel.count === 0
+                                text: qsTr("No paired PCs. Pair a PC in Desktop or VR mode first.")
+                                opacity: 0.7
+                            }
                         }
                     }
-                }
-                ListView {
-                    id: webList
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    model: webModel
-                    keyNavigationEnabled: true
-                    ScrollBar.vertical: ScrollBar {}
-                    delegate: ItemDelegate {
-                        width: webList.width
-                        highlighted: webList.activeFocus && webList.currentIndex === index
-                        contentItem: ColumnLayout {
+
+                    // 第二層：像檔案總管
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 6
+                        visible: videoView.hostIndex >= 0
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Button {
+                                text: qsTr("All PCs")
+                                onClicked: closeHost()
+                            }
+                            Button {
+                                text: qsTr("Up one level")
+                                enabled: !videoView.hostLoading
+                                onClicked: hostUp()
+                            }
+                            Button {
+                                text: qsTr("Refresh")
+                                enabled: !videoView.hostLoading
+                                onClicked: openHostDir(videoView.hostRoot, videoView.hostPath, "")
+                            }
+                            BusyIndicator {
+                                running: videoView.hostLoading
+                                visible: running
+                                Layout.preferredHeight: 36
+                                Layout.preferredWidth: 36
+                            }
+                        }
+                        // 路徑列：主機 › 分享資料夾 › 子資料夾…（每一段都可以點）
+                        Flow {
+                            Layout.fillWidth: true
                             spacing: 2
-                            Label { text: model.title; font.pointSize: 14; elide: Text.ElideRight; Layout.fillWidth: true }
-                            Label { text: model.channel + (model.duration !== "" ? "   ·   " + model.duration : ""); opacity: 0.7 }
+                            Button {
+                                flat: true
+                                text: videoView.hostName
+                                font.bold: videoView.hostRoot < 0
+                                onClicked: openHostDir(-1, "", "")
+                            }
+                            Repeater {
+                                model: videoView.hostCrumbs()
+                                delegate: Row {
+                                    Label { text: " › "; anchors.verticalCenter: parent.verticalCenter; opacity: 0.6 }
+                                    Button {
+                                        flat: true
+                                        text: modelData
+                                        font.bold: index === videoView.hostCrumbs().length - 1
+                                        onClicked: openCrumb(index)
+                                    }
+                                }
+                            }
                         }
-                        onClicked: play(model.url, model.title)
-                        Keys.onReturnPressed: clicked()
-                        Keys.onEnterPressed: clicked()
+                        ListView {
+                            id: hostEntryList
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            model: hostModel
+                            keyNavigationEnabled: true
+                            ScrollBar.vertical: ScrollBar {}
+                            delegate: ItemDelegate {
+                                width: hostEntryList.width
+                                height: 56
+                                highlighted: hostEntryList.activeFocus && hostEntryList.currentIndex === index
+                                contentItem: RowLayout {
+                                    spacing: 12
+                                    Rectangle {
+                                        // 資料夾／影片的小圖示（字型不一定有 emoji，用色塊）
+                                        width: 28; height: 22; radius: 4
+                                        color: model.drive ? "#7a8a99" : (model.isDir ? "#c9a227" : "#3d7be0")
+                                        Label {
+                                            anchors.centerIn: parent
+                                            text: model.drive ? "DISK" : (model.isDir ? "" : "VID")
+                                            font.pixelSize: 9
+                                            color: "white"
+                                        }
+                                    }
+                                    Label {
+                                        text: model.name
+                                        font.pointSize: 14
+                                        font.bold: model.isDir
+                                        elide: Text.ElideMiddle
+                                        Layout.fillWidth: true
+                                    }
+                                    Label { text: model.format; opacity: 0.7; visible: model.format !== "" }
+                                    Label { text: model.detail; opacity: 0.6 }
+                                }
+                                onClicked: {
+                                    if (model.isDir) {
+                                        openHostDir(model.root, model.path, videoView.hostRoot < 0 ? model.name : "")
+                                    }
+                                    else {
+                                        play(MediaLibrary.hostFileUrl(ComputerManager, videoView.hostIndex, model.root, model.path), model.name)
+                                    }
+                                }
+                                Keys.onReturnPressed: clicked()
+                                Keys.onEnterPressed: clicked()
+                            }
+                            Keys.onBackPressed: hostUp()
+                            Keys.onEscapePressed: hostUp()
+                            Label {
+                                id: hostMessage
+                                anchors.centerIn: parent
+                                width: parent.width * 0.8
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.Wrap
+                                visible: !videoView.hostLoading && text !== ""
+                                opacity: 0.8
+                            }
+                        }
                     }
                 }
-                RowLayout {
-                    Layout.fillWidth: true
-                    Label {
-                        id: webStatus
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        opacity: 0.8
-                    }
-                    Label {
-                        id: webVersionLabel
-                        opacity: 0.6
-                    }
-                    Button {
-                        id: webUpdateButton
-                        text: qsTr("Update")
-                        onClicked: {
-                            enabled = false
-                            webStatus.text = qsTr("Updating the YouTube helper…")
-                            MediaLibrary.webUpdate()
+
+                // ── YouTube ──
+                ColumnLayout {
+                    spacing: 6
+                    // 版本要跑一次 python（約 1 秒），第一次切到這一頁才查
+                    onVisibleChanged: {
+                        if (visible && webVersionLabel.text === "") {
+                            webVersionLabel.text = qsTr("Helper: %1").arg(MediaLibrary.webVersion() || qsTr("not installed"))
                         }
                     }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        TextField {
+                            id: webQuery
+                            Layout.fillWidth: true
+                            placeholderText: qsTr("Search YouTube (try \"360 video\" or \"VR180\")")
+                            Keys.onReturnPressed: webSearchButton.clicked()
+                            Keys.onEnterPressed: webSearchButton.clicked()
+                        }
+                        Button {
+                            id: webSearchButton
+                            text: qsTr("Search")
+                            enabled: webQuery.text.trim() !== ""
+                            onClicked: {
+                                enabled = false
+                                webStatus.text = qsTr("Searching…")
+                                MediaLibrary.webSearch(webQuery.text)
+                            }
+                        }
+                    }
+                    ListView {
+                        id: webList
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        model: webModel
+                        keyNavigationEnabled: true
+                        ScrollBar.vertical: ScrollBar {}
+                        delegate: ItemDelegate {
+                            width: webList.width
+                            highlighted: webList.activeFocus && webList.currentIndex === index
+                            contentItem: ColumnLayout {
+                                spacing: 2
+                                Label { text: model.title; font.pointSize: 14; elide: Text.ElideRight; Layout.fillWidth: true }
+                                Label { text: model.channel + (model.duration !== "" ? "   ·   " + model.duration : ""); opacity: 0.7 }
+                            }
+                            onClicked: play(model.url, model.title)
+                            Keys.onReturnPressed: clicked()
+                            Keys.onEnterPressed: clicked()
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            id: webStatus
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            opacity: 0.8
+                        }
+                        Label {
+                            id: webVersionLabel
+                            opacity: 0.6
+                        }
+                        Button {
+                            id: webUpdateButton
+                            text: qsTr("Update")
+                            onClicked: {
+                                enabled = false
+                                webStatus.text = qsTr("Updating the YouTube helper…")
+                                MediaLibrary.webUpdate()
+                            }
+                        }
+                    }
+                }
+
+                // ── 瀏覽器（有 Qt WebEngine 的建置；VideoBrowser.qml）或貼網址 ──
+                ColumnLayout {
+                    spacing: 12
+                    Loader {
+                        id: browserLoader
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        visible: VrLauncher.browserAvailable
+                        // 第一次切到這一頁才載入（Chromium 很吃記憶體）
+                        active: VrLauncher.browserAvailable && videoView.browserWanted
+                        source: "qrc:/gui/VideoBrowser.qml"
+                        onStatusChanged: console.warn("[VIPLE-PLAYER] browser loader status=" + status
+                                                      + (status === Loader.Error ? " (load error)" : ""))
+                        onLoaded: item.formatName = Qt.binding(function() { return videoView.formatNames[formatBox.currentIndex] })
+                        Connections {
+                            target: browserLoader.item
+                            function onLaunchFailed(message) { errorLabel.text = message }
+                        }
+                    }
+                    Label {
+                        visible: !VrLauncher.browserAvailable
+                        text: qsTr("Paste a link: a video page (YouTube and many other sites) or a video file or stream (MP4, MKV, WebM, HLS .m3u8).")
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
+                    TextField {
+                        id: urlField
+                        visible: !VrLauncher.browserAvailable
+                        Layout.fillWidth: true
+                        placeholderText: "https://"
+                        inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoAutoUppercase
+                        Keys.onReturnPressed: urlPlay.clicked()
+                        Keys.onEnterPressed: urlPlay.clicked()
+                    }
+                    Button {
+                        id: urlPlay
+                        visible: !VrLauncher.browserAvailable
+                        text: qsTr("Play")
+                        enabled: MediaLibrary.isUrl(urlField.text)
+                        onClicked: play(urlField.text.trim(), "")
+                    }
+                    Item { Layout.fillHeight: true; visible: !VrLauncher.browserAvailable }
                 }
             }
 
-            // ── 瀏覽器（有 Qt WebEngine 的建置；VideoBrowser.qml）或貼網址 ──
+            // 上一頁／下一頁：頭盔上用雷射指標時搖桿不會送進來（Steam 自己留著，2026-10-19 量過：滾輪、按鍵、手把輸入都是 0），
+            // 清單一頁放不下時用雷射點這兩顆大按鈕捲
             ColumnLayout {
-                spacing: 12
-                Loader {
-                    id: browserLoader
+                Layout.fillHeight: true
+                Layout.preferredWidth: 72
+                Layout.maximumWidth: 72
+                spacing: 8
+                Button {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    visible: VrLauncher.browserAvailable
-                    // 第一次切到這一頁才載入（Chromium 很吃記憶體）
-                    active: VrLauncher.browserAvailable && videoView.browserWanted
-                    source: "qrc:/gui/VideoBrowser.qml"
-                    onStatusChanged: console.warn("[VIPLE-PLAYER] browser loader status=" + status
-                                                  + (status === Loader.Error ? " (load error)" : ""))
-                    onLoaded: item.formatName = Qt.binding(function() { return videoView.formatNames[formatBox.currentIndex] })
-                    Connections {
-                        target: browserLoader.item
-                        function onLaunchFailed(message) { errorLabel.text = message }
-                    }
-                }
-                Label {
-                    visible: !VrLauncher.browserAvailable
-                    text: qsTr("Paste a link: a video page (YouTube and many other sites) or a video file or stream (MP4, MKV, WebM, HLS .m3u8).")
-                    wrapMode: Text.Wrap
-                    Layout.fillWidth: true
-                }
-                TextField {
-                    id: urlField
-                    visible: !VrLauncher.browserAvailable
-                    Layout.fillWidth: true
-                    placeholderText: "https://"
-                    inputMethodHints: Qt.ImhUrlCharactersOnly | Qt.ImhNoAutoUppercase
-                    Keys.onReturnPressed: urlPlay.clicked()
-                    Keys.onEnterPressed: urlPlay.clicked()
+                    text: "▲"
+                    Layout.maximumWidth: 72
+                    font.pixelSize: 28
+                    focusPolicy: Qt.NoFocus
+                    onClicked: videoView.scrollCurrent(-0.8)
                 }
                 Button {
-                    id: urlPlay
-                    visible: !VrLauncher.browserAvailable
-                    text: qsTr("Play")
-                    enabled: MediaLibrary.isUrl(urlField.text)
-                    onClicked: play(urlField.text.trim(), "")
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    text: "▼"
+                    Layout.maximumWidth: 72
+                    font.pixelSize: 28
+                    focusPolicy: Qt.NoFocus
+                    onClicked: videoView.scrollCurrent(0.8)
                 }
-                Item { Layout.fillHeight: true; visible: !VrLauncher.browserAvailable }
             }
         }
 

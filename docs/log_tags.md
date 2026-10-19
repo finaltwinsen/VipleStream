@@ -273,7 +273,7 @@ Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)
 | `[VIPLE-INPUT-GAP]` / `[VIPLE-INPUT-QUEUE-LAG]` / `[VIPLE-INPUT-SENDINPUT-SLOW]` | **host** `stream.cpp` / `input.cpp` / `platform/windows/input.cpp` | 輸入封包到達間隔 >150 ms（前 1 秒 ≥30 包才算）／task_pool 排隊 ≥50 ms／`SendInput` ≥20 ms（被其他行程的 low-level hook 卡住）。四者對時可分辨停頓在 client、傳輸還是 host 注入 |
 | `[VIPLE-QLOG] §S.19 cooldown armed f=N (K.14 pending\|skipped)` / `IDR-REQ` / `IDR-EMIT` / `IDR-SUPPRESS` | **host** `video.cpp` encode_run | IDR cooldown 閘門：`armed` 標示本 encoder 生命期起點（`K.14 skipped: rebuilt encoder`＝顯示拓樸切換後重建）；client 要 IDR 卻只見 SUPPRESS、無 EMIT 就是 §S.19-INIT-FIX 修掉的永久凍結型態 |
 | `[VIPLE-UPDATE]` | **host** `self_update.cpp` / `system_tray.cpp` | §SELF-UPDATE 常駐圖示兩段式「Check for updates...」→「Install update vX」與 CLI `--check-update`／`--self-update [--force] [package]`：`latest via HEAD: X`（github.com 302 取 tag，免 API 配額）／`falling back to API`／`up to date`／`update available: A → B`／`downloaded … bytes`／`sha256 verified`（GitHub asset digest，拿不到就拒裝）／`updater launched (pid N) … service=1`（Windows：PowerShell 腳本在 `<install>/config/update`，停 service→rename .old→覆蓋→啟 service，失敗回滾；細節在 `config/self_update.log`）／`sudo path rc=` `pkexec path rc=`（Linux：apt-get install .deb；細節在 `~/.config/sunshine/self_update.log`）／`self-update completed: now running X` 或 `last self-update failed: …`（重啟後讀 result 檔） |
-| `[VIPLE-UI-NAV]` | `gui/sdlgamepadkeynavigation.cpp` | 介面（不是串流中）的手把導覽，§UI-SCROLL（2026-10-11）。每次啟用手把導覽（啟動、串流或 VR 子行程結束回到介面）各印一行：`enabled: N gamepad(s): <名稱…>` = 介面行程看到的手把；`polling started (window has focus)` = 視窗拿到焦點、開始輪詢（沒有這一行＝視窗沒有焦點，手把在介面裡不會有反應）；`first gamepad input: button N (uiNav=0\|1)` = 第一個按鍵進來了（`uiNav=1`＝設定頁的 Tab 導覽模式）；`right stick scroll in use (axis=N)` = 第一次用右搖桿捲設定頁。另有 `gamepad added: <名稱> (now N)` = 啟用之後才接上的手把。使用者回報「手把在介面裡沒反應」時，先看有沒有前兩行、手把的名稱是什麼 |
+| `[VIPLE-UI-NAV]` | `gui/sdlgamepadkeynavigation.cpp` | 介面（不是串流中）的手把導覽，§UI-SCROLL（2026-10-11）。每次啟用手把導覽（啟動、串流或 VR 子行程結束回到介面）各印一行：`enabled: N gamepad(s): <名稱…>` = 介面行程看到的手把；`polling started (window has focus)` = 視窗拿到焦點、開始輪詢（沒有這一行＝視窗沒有焦點，手把在介面裡不會有反應）；`first gamepad input: button N (uiNav=0\|1)` = 第一個按鍵進來了（`uiNav=1`＝設定頁的 Tab 導覽模式）；`right stick scroll in use (axis=N)` = 第一次用右搖桿捲設定頁。另有 `gamepad added: <名稱> (now N)` = 啟用之後才接上的手把。使用者回報「手把在介面裡沒反應」時，先看有沒有前兩行、手把的名稱是什麼。影片模式選片頁（捲動模式）另印 `10s input: wheel=N keys=N clicks=N`：雷射指標模式實測只有 clicks，搖桿到不了視窗 |
 | `[VIPLE-HID]` | `backend/hidprobe.cpp` + 四個閘控點（`gamepad.cpp` getUnmappedGamepads / `sdlgamepadkeynavigation.cpp` enable / `input.cpp` SdlInputHandler ctor / `sc_hid.cpp` prepare） | 啟動前與每場開始前的 HID 探測（§HID-PROBE，2026-09-19 Puck 卡死事故）。`probe (startup\|refresh) OK: N HID interface(s) responded in X ms (slowest VID:PID Y ms, limit 1000 ms)` = 正常；`UNRESPONSIVE <name> vid= pid= stuck_at=<CreateFile\|HidD_GetAttributes\|HidD_GetProductString\|enumeration> path=` = 該裝置無回應 → 手把偵測、手把 UI 導覽、串流手把與 SC-HID 停用，各閘控點各印一行 `skipped/refused`；重插裝置後下一次 refresh（開串流／回 UI）自動恢復，不必重啟。**刻意比 SDL 保守**：對所有 HID 介面查字串，卡死的普通鍵鼠也會觸發。`(simulated via VIPLE_HID_PROBE_SIMULATE_HANG, dev-only)` = 測試注入（`VID:PID` 直接注入；`VID:PID:stall` 對實體介面真的卡在字串查詢；`enumerate:stall` 整個列舉逾時），不是真故障 |
 | `[VIPLE-CTRL]` | `ControlStream.c`（common-c，Q／A 兩份相同） | 控制通道的防衛，四種行都代表防衛生效（拒送、改送 IDR 或忽略），不是崩潰。**§F2**（`sendMessageEnet` 加密分支）：`§F2 payload too large (ptype=0x%04x len=%d) — limit 251, dropped (count=N)` ＝ 明文超過 256 B stack buffer（payload 上限 251 B）被拒送、回傳 false；前 10 次都印、之後每 1000 次一筆。現有呼叫端都是固定長度（最大是 input 132 B），**1.5.x 正常 log 不該出現**；出現代表有新呼叫端（2.0 VR 送出 API）組出超長封包。**§F1-DBG-ASSERT**（幀號狀態倒帶，三行都改送 IDR）：`Invalid frame loss range (%u to %u) — requesting IDR frame instead`（`queueFrameInvalidationTuple`，每秒最多 1 筆）、`Non-monotonic RFI ranges (start %u, last end %u) — requesting IDR frame instead`（`referenceFrameControlFunc` 聚合時）、`connectionSawFrame: stale frame=%u (lastSeen=%u) — ignored`（倒退幀號不計入統計，每秒最多 1 筆）。這三行與 `[VIPLE-DEPACK] notifyFrameLost: stale` 同時出現＝§FRZ-WATCHDOG 哨兵重置後採納了 failback 殘留的 stale 幀；舊版 Android（debug native、assert 生效）會在這裡 SIGABRT 閃退 |
 | `[VIPLE-MPQUIC] §M01-C …` | `ControlStream.c`（common-c，Q／A 兩份相同） | §M01-C ENet 斷線後的重連。以前 §Q-ENET-RECONNECT 只在找到有線網卡時才重連，只有 Wi-Fi 的裝置（手機、筆電）斷線後永遠不重連、120 秒後放棄輸入。現在改看「到 host 的路由是否可用」：`route to host available (local=…)` / `route to host lost` / `route to host now via local=… (was …) — backoff reset`（換了出口介面就重設退避）；`host rejected ENet reconnect (stale peer?)` 是 host 端舊 peer 還在，會繼續重試；重連後約 5 秒印 `ENet healthy rtt=…`（或 `NOT healthy`）。`ENet still down after 120 s … input via QUIC datagram (unreliable), still retrying` 代表輸入暫時走 QUIC datagram、不保證送達；`QUIC transport dead while ENet down — terminating` 是兩條都斷、結束連線 |
@@ -1272,6 +1272,8 @@ PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 
 [VIPLE-VR-LAUNCHER] launching VR stream: app="<name>"[ (takeover)]                 ← GUI 另開 `stream --display-target pcvr [--takeover] -- <位址> <app>` 子行程
 [VIPLE-VR-LAUNCHER] stream process finished exit=<rc> status=<0 正常|1 崩潰>[ error=<給使用者看的原因>]
 [VIPLE-VR-LAUNCHER] failed to start the stream process                             ← error
+[VIPLE-VR-LAUNCHER] child XR session <VISIBLE|FOCUSED>                             ← 子行程（播放器）stderr 的 VIPLE-XR-STATE 轉過來；FOCUSED＝拿到手把輸入
+[VIPLE-VR-LAUNCHER] child started: window mode=<now|never|minimize|focused>        ← 開子行程後主視窗怎麼讓開（dev `hide=` 實驗用，預設 now）
 [VIPLE-VR-LAUNCHER] could not take the single-instance lock back                   ← warning：子行程結束後 GUI 拿不回單一實例鎖（別的實例趁隙拿走）
 [VIPLE-VR-LAUNCHER] waiting for the VR stream process to finish                    ← GUI 結束時子行程還在跑：先等 8 s，再 SIGTERM，最後 SIGKILL
 [VIPLE-VR-LAUNCHER] preflight: checking the round trip to the host (tcp port <埠>)  ← §VR-PREFLIGHT：開子行程前先量到主機的往返時間（下面說明）
@@ -1652,6 +1654,8 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-PLAYER] immersive swapchain <W>x<H> fmt=<vk> linear=<0|1> images=<n>   ← 180°／360° 第一次畫
 [VIPLE-PLAYER] reached the end (<s> s) / stopped at <s> s (rc=<n>) / XR session ended (lost|exit)
 [VIPLE-PLAYER] open failed (<原因>): resolving the page again           ← 網站來源開不了（YouTube 偶發 403）：重新解析再開一次
+[VIPLE-PLAYER] screen <S|M|L> depth <+n> (<m>, <deg>)                   ← 搖桿上下調遠近（平面＝距離、180°／360°＝每眼外轉）
+[VIPLE-PLAYER] lost the PC's shared folder at <offset>, retrying for up to 30 s / reconnected to the PC's shared folder after <n> tries   ← 網路斷一下
 [VIPLE-PLAYER] browser play in VR: page=<網址> videoSrc=<網頁 video 的網址前 80 字>   ← 內建瀏覽器按下「Play in VR」（GUI 行程，Qt Warning）
 [VIPLE-PLAYER] browser load status=<0 開始|2 成功|3 失敗> <網址>[ error=…] / browser render process terminated: …
 [VIPLE-PLAYER] dev video page: tab=… / dev grab … / dev: opening PC …    ← --dev-video（無人驗測）
@@ -1671,7 +1675,8 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-MEDIA] serving root=<n> size=<bytes>           ← 某個檔案第一次從頭讀（之後的範圍請求不印）
 [VIPLE-MEDIA] file denied root=<n> (<原因>)            ← 路徑跑出分享資料夾、不存在、或不是檔案
 ```
-- 只有 HTTPS、配對過的 client；`media_dirs` 沒設時 `/viple/media/roots` 回空清單、其他回 404。
+- 只有 HTTPS、配對過的 client。`media_dirs` 沒設時根是整台 PC 的磁碟機（`<Kind>drive</Kind>`，編號＝磁碟機代號 A＝0…；
+  Linux 是 `/`）；有設時是那些資料夾（`folder`）；`media_share = disabled` 時 `/viple/media/roots` 回空清單、其他回 404。
 
 ## 6. 分析工具
 

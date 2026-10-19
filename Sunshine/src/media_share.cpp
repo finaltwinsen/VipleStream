@@ -12,6 +12,10 @@
 #include "config.h"
 #include "logging.h"
 
+#ifdef _WIN32
+  #include <windows.h>
+#endif
+
 namespace fs = std::filesystem;
 using namespace std::literals;
 
@@ -83,6 +87,38 @@ namespace media_share {
 
   std::vector<root_t> roots() {
     std::vector<root_t> out;
+    if (!config::nvhttp.media_share) {
+      return out;
+    }
+    if (config::nvhttp.media_dirs.empty()) {
+      // 整台 PC。編號用磁碟機代號（A＝0…Z＝25），隨身碟插拔不會讓其他磁碟機的編號錯位
+#ifdef _WIN32
+      const DWORD mask = GetLogicalDrives();
+      for (int d = 0; d < 26; d++) {
+        if (!(mask & (1u << d))) {
+          continue;
+        }
+        wchar_t rootw[] = {wchar_t(L'A' + d), L':', L'\\', 0};
+        const UINT type = GetDriveTypeW(rootw);
+        if (type != DRIVE_FIXED && type != DRIVE_REMOVABLE) {
+          continue;  // 光碟、網路磁碟機（service 看不到使用者對應的網路磁碟機）、RAM disk 等略過
+        }
+        wchar_t label[MAX_PATH + 1] = {};
+        if (!GetVolumeInformationW(rootw, label, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0)) {
+          continue;  // 沒有插卡的讀卡機等
+        }
+        auto name = std::string(1, char('A' + d)) + ":";
+        const auto lab = to_utf8(fs::path(label));
+        if (!lab.empty()) {
+          name += " " + lab;
+        }
+        out.push_back({d, name, fs::path(rootw), true});
+      }
+#else
+      out.push_back({0, "/", fs::path("/"), true});
+#endif
+      return out;
+    }
     int i = 0;
     for (const auto &dir : config::nvhttp.media_dirs) {
       std::error_code ec;
@@ -92,7 +128,7 @@ namespace media_share {
         if (name.empty()) {
           name = to_utf8(p);
         }
-        out.push_back({i, name, p});
+        out.push_back({i, name, p, false});
       }
       i++;  // 編號照設定裡的順序（不存在的也佔一個號，client 記住的編號才不會因為某個資料夾暫時不在而錯位）
     }
@@ -145,6 +181,13 @@ namespace media_share {
       if (name.empty() || name[0] == '.' || name[0] == '$') {
         continue;  // 隱藏檔、Windows 的系統資料夾（$RECYCLE.BIN）
       }
+#ifdef _WIN32
+      // 隱藏或系統屬性的（System Volume Information、Documents and Settings 這類連結、pagefile 等）不列
+      const DWORD attrs = GetFileAttributesW(it->path().c_str());
+      if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))) {
+        continue;
+      }
+#endif
       std::error_code ec2;
       const auto st = it->status(ec2);
       if (ec2) {

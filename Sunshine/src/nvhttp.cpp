@@ -2037,6 +2037,7 @@ namespace nvhttp {
       pt::ptree node;
       node.put("Index", r.index);
       node.put("Name", r.name);
+      node.put("Kind", r.drive ? "drive" : "folder");  // §VR-PLAYER：舊 client 不認得這個欄位，會忽略
       tree.add_child("root.Folder", node);
     }
     media_xml_reply(response, tree);

@@ -34,19 +34,15 @@ public:
     // 看起來像不像能播的網址（http／https 開頭）
     Q_INVOKABLE bool isUrl(const QString& text) const;
 
-    // ── §VR-PLAYER（V3）：host 分享的影片（VipleStream Server 的 media_dirs，經 HTTPS、用配對憑證）──
+    // ── §VR-PLAYER（V3）：host 上的影片（VipleStream Server 的 /viple/media/*，經 HTTPS、用配對憑證）──
     // [{index, name, online}]：配對過的主機（index 是 ComputerManager 裡的位置）
     Q_INVOKABLE QVariantList hosts(ComputerManager* cm) const;
-    // [{index, name}]：那台主機分享的資料夾；主機沒開分享、不在線上或連不上時回空清單（原因看 lastError()）
-    Q_INVOKABLE QVariantList hostRoots(ComputerManager* cm, int host);
-    // [{name, path, isDir, detail, format}]：path 是相對於分享資料夾的路徑（用 / 分隔）
-    Q_INVOKABLE QVariantList hostList(ComputerManager* cm, int host, int root, const QString& path);
-    // 非同步版（選片頁用，讀取期間介面不會卡住）：root＝-1 列分享資料夾，否則列那個資料夾裡 path 的內容。
-    // 結果經 hostBrowseFinished(requestId, entries, error)；entries 的格式同 hostRoots（root＝-1）或 hostList
+    // 在背景執行緒讀（主機慢或不通時介面不會卡住）：root＝-1 列這台主機的根（磁碟機或分享資料夾），否則列那個根裡
+    // path（相對路徑，用 / 分隔）的內容。結果經 hostBrowseFinished(requestId, entries, error)：
+    //   root＝-1：[{index, name, drive}]；否則 [{name, path, isDir, detail, format}]（子資料夾在前）
     Q_INVOKABLE void hostBrowse(ComputerManager* cm, int host, int root, const QString& path, int requestId);
     // 播放用的網址（https://<主機>:<埠>/viple/media/file?root=…&path=…）
     Q_INVOKABLE QString hostFileUrl(ComputerManager* cm, int host, int root, const QString& path) const;
-    Q_INVOKABLE QString lastError() const { return m_LastError; }
 
     // ── §VR-PLAYER（V4）：YouTube 等網站（WebResolver）──
     // 非同步：結果經 webSearchFinished(results, error)；results＝[{title, url, channel, duration}]
@@ -62,6 +58,5 @@ signals:
     void hostBrowseFinished(int requestId, const QVariantList& entries, const QString& error);
 
 private:
-    QString m_LastError;
     WebResolver m_Web;
 };

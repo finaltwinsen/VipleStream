@@ -330,6 +330,7 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         !mk("trigger", "Trigger (left click)", XR_ACTION_TYPE_FLOAT_INPUT, &m_Trigger) ||
         !mk("squeeze", "Grip (right click)", XR_ACTION_TYPE_FLOAT_INPUT, &m_Squeeze) ||
         !mk("secondary", "B (right click)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Secondary) ||
+        !mk("primary", "A (video player: play/pause)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Primary) ||
         !mk("scroll", "Thumbstick (scroll)", XR_ACTION_TYPE_VECTOR2F_INPUT, &m_Stick) ||
         !mk("keyboard", "Virtual keyboard (toggle)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_KbToggleAction)) {
         return false;
@@ -394,6 +395,8 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         {m_Squeeze, "/user/hand/right/input/squeeze/value"},
         {m_Secondary, "/user/hand/left/input/y/click"},
         {m_Secondary, "/user/hand/right/input/b/click"},
+        {m_Primary, "/user/hand/left/input/x/click"},
+        {m_Primary, "/user/hand/right/input/a/click"},
         {m_Stick, "/user/hand/left/input/thumbstick"},
         {m_Stick, "/user/hand/right/input/thumbstick"},
     };
@@ -407,6 +410,8 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
              {m_Squeeze, "/user/hand/right/input/squeeze/value"},
              {m_Secondary, "/user/hand/left/input/b/click"},
              {m_Secondary, "/user/hand/right/input/b/click"},
+             {m_Primary, "/user/hand/left/input/a/click"},
+             {m_Primary, "/user/hand/right/input/a/click"},
              {m_Stick, "/user/hand/left/input/thumbstick"},
              {m_Stick, "/user/hand/right/input/thumbstick"}},
             "/user/hand/left/input/thumbstick/click");
@@ -426,6 +431,8 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
                  {m_Squeeze, "/user/hand/right/input/squeeze/value"},
                  {m_Secondary, "/user/hand/left/input/dpad_left/click"},
                  {m_Secondary, "/user/hand/right/input/b/click"},
+                 {m_Primary, "/user/hand/left/input/dpad_down/click"},
+                 {m_Primary, "/user/hand/right/input/a/click"},
                  {m_Stick, "/user/hand/left/input/thumbstick"},
                  {m_Stick, "/user/hand/right/input/thumbstick"}},
                 "/user/hand/left/input/view/click");
@@ -471,7 +478,7 @@ void XrInput::destroy()
             s = XR_NULL_HANDLE;
         }
     }
-    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Stick, &m_KbToggleAction}) {
+    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Primary, &m_Stick, &m_KbToggleAction}) {
         if (*a != XR_NULL_HANDLE) {
             xrDestroyAction(*a);
             *a = XR_NULL_HANDLE;
@@ -610,6 +617,46 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         }
     }
 
+    // ── §VR-PLAYER：影片模式的按鍵與搖桿。180°／360° 沒有平面螢幕、控制列收起來時下面會提早 return，所以在這裡讀 ──
+    const bool playerMode = static_cast<bool>(m_Sink.playerButton);
+    if (playerMode && !m_TestPointer && m_TestKbText.isEmpty()) {
+        const XrAction acts[4] = {m_Trigger, m_Primary, m_Secondary, m_Squeeze};
+        float sx = 0.0f, sy = 0.0f;
+        for (int h = 0; h < 2; h++) {
+            XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
+            gi.subactionPath = m_Hands[h];
+            for (int b = 0; b < 4; b++) {
+                bool now = false;
+                gi.action = acts[b];
+                if (b == 0 || b == 3) {
+                    XrActionStateFloat fs = xrStruct<XrActionStateFloat>(XR_TYPE_ACTION_STATE_FLOAT);
+                    now = XR_SUCCEEDED(xrGetActionStateFloat(m_Session, &gi, &fs)) && fs.isActive &&
+                          fs.currentState > (m_PlayerWas[b][h] ? kPressOff : kPressOn);
+                }
+                else {
+                    XrActionStateBoolean bs = xrStruct<XrActionStateBoolean>(XR_TYPE_ACTION_STATE_BOOLEAN);
+                    now = XR_SUCCEEDED(xrGetActionStateBoolean(m_Session, &gi, &bs)) && bs.isActive && bs.currentState;
+                }
+                // 扳機指在控制列上時是點控制列（panelClick），不另外送
+                if (now && !m_PlayerWas[b][h] && !(b == 0 && m_PanelHit)) {
+                    m_StatButtons++;
+                    m_Sink.playerButton(static_cast<XrInputSink::PlayerButton>(b));
+                }
+                m_PlayerWas[b][h] = now;
+            }
+            // 搖桿：兩隻手取絕對值大的那個（不必先用扳機選慣用手）
+            gi.action = m_Stick;
+            XrActionStateVector2f st = xrStruct<XrActionStateVector2f>(XR_TYPE_ACTION_STATE_VECTOR2F);
+            if (XR_SUCCEEDED(xrGetActionStateVector2f(m_Session, &gi, &st)) && st.isActive) {
+                sx = std::fabs(st.currentState.x) > std::fabs(sx) ? st.currentState.x : sx;
+                sy = std::fabs(st.currentState.y) > std::fabs(sy) ? st.currentState.y : sy;
+            }
+        }
+        if (m_Sink.stick) {
+            m_Sink.stick(std::fabs(sx) > kStickDeadzone ? sx : 0.0f, std::fabs(sy) > kStickDeadzone ? sy : 0.0f);
+        }
+    }
+
     if (!screen.valid && !screen.panelValid) {
         m_Hit = false;
         if (m_PanelHit && m_Sink.panel) {
@@ -674,8 +721,13 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             stickY = st.currentState.y;
             stickX = st.currentState.x;
         }
-        if (m_Sink.stick) {
+        if (m_Sink.stick && !playerMode) {
             m_Sink.stick(std::fabs(stickX) > kStickDeadzone ? stickX : 0.0f, std::fabs(stickY) > kStickDeadzone ? stickY : 0.0f);
+        }
+        if (playerMode) {
+            // 影片模式：扳機／B／握把已經在上面交給呼叫端，不當成滑鼠鍵；搖桿也不捲動
+            rightDesired = false;
+            stickY = 0.0f;
         }
         haveRay = locateAim(d, displayTime, local, &origin, &dir);
     }

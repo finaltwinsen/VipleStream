@@ -2,9 +2,11 @@
  * @file src/media_share.h
  * @brief VipleStream 2.0 §VR-PLAYER（V3）：把 host 上指定的資料夾分享給已配對的 client（頭盔影片模式）。
  *
- * 只開放 sunshine.conf 的 `media_dirs`（逗號分隔的資料夾清單；預設空＝整個功能關閉）裡的資料夾。所有路徑先正規化
- * （解開 . . 與符號連結）再確認還在某一個分享資料夾之內，跑出去的一律拒絕。端點在 nvhttp 的 HTTPS 伺服器上，
- * 只有配對過、而且沒被停用的 client 憑證連得進來（同 /launch）。
+ * sunshine.conf 的 `media_dirs`（逗號分隔的資料夾清單）有設＝只開放這些資料夾；沒設（預設）＝整台 PC：Windows 的
+ * 每一個本機／抽取式磁碟機、Linux 的 /（使用者 2026-10-19 要求「不用設定，直接逛整台 PC」）。`media_share = disabled`
+ * 整個關掉。只列子資料夾與影片檔、唯讀；隱藏與系統的檔案、資料夾不列。所有路徑先正規化（解開 . . 與符號連結）再確認
+ * 還在某一個根之內，跑出去的一律拒絕。端點在 nvhttp 的 HTTPS 伺服器上，只有配對過、而且沒被停用的 client 憑證連得進來
+ * （同 /launch）。
  */
 #pragma once
 
@@ -17,8 +19,9 @@ namespace media_share {
 
   struct root_t {
     int index;
-    std::string name;  // 顯示用：資料夾名稱（UTF-8）
+    std::string name;  // 顯示用：資料夾名稱，或磁碟機（「C: Windows」）（UTF-8）
     std::filesystem::path path;  // 正規化後的絕對路徑
+    bool drive;  // true＝整台 PC 模式的磁碟機（或 Linux 的 /）
   };
 
   struct entry_t {
@@ -31,7 +34,7 @@ namespace media_share {
   /// 功能有沒有開（至少一個存在的分享資料夾）
   bool enabled();
 
-  /// 存在的分享資料夾（設定裡不存在的略過）
+  /// 存在的根：有設 media_dirs 時是那些資料夾（不存在的略過），沒設時是整台 PC 的磁碟機
   std::vector<root_t> roots();
 
   /**

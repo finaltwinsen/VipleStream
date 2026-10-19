@@ -2941,7 +2941,7 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
 `viplestream play [--vr-format F] [--title T] [--audio-url A] -- <來源>`（GUI 隱藏，播完再出現；做法同 VR 模式）。
 
 - **來源**：頭盔本機的檔案（`~/Videos`、`~/Downloads`、`/run/media` 底下的外接儲存裝置、家目錄）；網址（mp4／mkv／
-  webm 檔或 HLS）；`<host>` 分享的資料夾（server 的 `media_dirs`，見下）；YouTube 等網站（yt-dlp 解析，見下）。
+  webm 檔或 HLS）；`<host>` 上的影片（整台 PC 或 `media_dirs` 指定的資料夾，見下）；YouTube 等網站（yt-dlp 解析，見下）。
   選片頁另有「最近播過」，從上次停下的地方接著播（播完的從頭）。
 - **畫面格式**：一般 2D 大螢幕、3D 左右／上下並排（左右眼各取影像的一半，兩個 quad 圖層分眼顯示；半寬／全寬照長寬比判斷）、
   180°、360°（單眼或立體）。判斷順序：使用者指定 > 這支片上次選的 > 容器的中繼資料（spherical／stereo3d）> 檔名標記
@@ -2955,13 +2955,23 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
   （`playersync.h`，有自測；鎖相避免時鐘抖動讓 24 fps 變成 4／6 格交錯）。顯示更新率：25／50 fps 的片要求 100 Hz，其他 120 Hz。
 - **VR 裡的控制**：控制列（螢幕下緣，180°／360° 時在前下方）：−30／−10 秒、播放／暫停、+10／+30 秒、音量、畫面格式、
   螢幕大小（S 2 m／50°、M 3 m／70°、L 4 m／95°）、置中、離開；時間軸可以點。扳機點螢幕或選單鍵開關控制列，播放中 5 秒
-  沒動自動收起、暫停時一直顯示；搖桿左右＝後退／前進 10 秒（按住每 0.5 秒再跳）、上下＝音量。
-- **`<host>` 的分享資料夾（V3）**：server 設定 `media_dirs = <資料夾>,<資料夾>`（預設空＝關閉）。HTTPS 端點
+  沒動自動收起、暫停時一直顯示。手把（兩手都可，2026-10-20 使用者要求）：A＝播放／暫停、B＝離開、扳機＝開關控制列、
+  握把＝置中；搖桿左右＝後退／前進 10 秒（按住每 0.5 秒再跳）、上下＝遠近（±10 格，每支片記住；音量只在控制列）。
+  平面螢幕的遠近是距離 ×1.15^格、視角不變；180°／360° 沒有螢幕距離，改成每格每眼往外轉 0.1°（加未交叉視差，景物往後退，
+  拍得太近、看了會鬥雞眼的 VR180 片用）。控制列的「Screen」鈕顯示格數（例如「M +3」）。
+- **`<host>` 上的影片（V3）**：預設不用設定就能逛整台 PC（使用者 2026-10-19 要求）：Windows 的每一個本機／抽取式磁碟機
+  （光碟與網路磁碟機略過；隱藏、系統屬性的檔案與資料夾不列）、Linux 的 `/`。`media_dirs = <資料夾>,<資料夾>` 有設時只開放
+  這些資料夾；`media_share = disabled` 整個關掉。只列子資料夾與影片檔、唯讀。HTTPS 端點
   `/viple/media/roots`、`/viple/media/list?root=&path=`、`/viple/media/file?root=&path=`，只有配對過的 client 憑證進得來；
   路徑正規化後確認還在分享資料夾之內。檔案每次最多回 8 MB 的 206 範圍（SimpleWeb 會把整個回應先放進記憶體），FFmpeg
   讀完一段會在同一條連線要下一段。頭盔端用配對憑證開這個網址（寫在 app 自己的快取資料夾，播完刪掉）。
-  選片頁的「PC」分頁先列配對過的主機（上線狀態即時更新），點進去是類檔案總管的介面：「All PCs」、「Up one level」、
-  「Refresh」按鈕、可點的路徑列（主機 › 分享資料夾 › 子資料夾）；返回鍵／Esc＝上一層。列資料夾在背景執行緒做
+  網路斷一下（頭盔 Wi-Fi 換基地台實測斷 13 秒）時，播放器每秒重開這一段、最多 30 秒（log `lost the PC's shared folder`／
+  `reconnected`）。server 端：`nvhttp.h` 的 `~SunshineHTTPS()` 原本做阻塞式 TLS shutdown，等對方回 close_notify；對方無聲消失
+  （沒有 FIN、沒有 RST）時會在 HTTPS 唯一的 io 執行緒永遠等下去，47984 上所有請求都不再回應（2026-10-20 本機實測、host 重現）。
+  現在先把 socket 設成 non-blocking，只送出自己的 close_notify、不等對方。
+  選片頁的「PC」分頁先列配對過的主機（上線狀態即時更新），點進去先是磁碟機（或分享資料夾）清單，再往下是類檔案總管的介面：「All PCs」、「Up one level」、
+  「Refresh」按鈕、可點的路徑列（主機 › 分享資料夾 › 子資料夾）；返回鍵／Esc＝上一層。清單右邊有 ▲／▼ 翻頁鈕：雷射指標
+  模式下 Steam 把搖桿留給自己，視窗收不到滾輪、按鍵或手把（實測三種都是 0），只能用點的；手把模式下左搖桿上下也會捲動。列資料夾在背景執行緒做
   （`MediaLibrary::hostBrowse`），不卡介面。
 - **YouTube 等網站（V4）**：Flatpak 帶固定版本的 yt-dlp（`/app/share/viplestream/yt-dlp`），選片頁可以按「Update」從
   yt-dlp 的 GitHub release 下載最新版（核對 SHA2-256SUMS）到 app 資料夾，之後優先用它。選格式：不要 AV1、不要 HDR、
@@ -2979,6 +2989,12 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
   `--xr-runtime-json`。builder 上用 `xr-s1-monado.sh --play <檔案> --play-args "…"` 跑 Monado。圖形介面：
   `--dev-video "<分頁>[,url=<網址>][,grab=<秒>:<png>][,play=<秒>][,host=<主機名>][,dir=<子資料夾>]"`＝一啟動就開影片模式的
   某個分頁、瀏覽器開這個網址、幾秒後把整頁存成 PNG、幾秒後按「Play in VR」、PC 分頁自動點進這台主機與子資料夾（頭盔無人驗測用）。
+- **開播時的 Steam 選單（2026-10-20 實驗）**：選片頁是平面視窗（SteamVR 把它當 desktopgame 劇院 overlay），從它開 VR
+  播放器時：馬上藏視窗 → 劇院 frame 消失，SteamVR 叫出 Steam 主選單（`theater frame destroyed`）；不藏、最小化、等播放器
+  FOCUSED 才藏、或讓播放器在 SteamVR 眼中變成另一個 app → 播放器一 VISIBLE，SteamVR 就打開選單並把選片頁收進去
+  （`SetDockLocation`）。程式這邊避不掉。SteamVR 設定 `dashboard.autoShowGameTheater=false`（vrcmd `--set-settings-bool`）之後，
+  上面兩種都不再叫出選單（無人頭盔 B1／B2），但無人時播放器只到 VISIBLE；選片頁會不會自己出現、手把有沒有作用待配戴確認。
+  實驗參數 `--dev-video "…,hide=now|never|minimize|focused[,appenv=strip]"`，子行程的 XR 狀態從 stderr 的 `VIPLE-XR-STATE` 轉進 GUI log。
 - **不做**：Windows client 不加這個模式；DRM 保護的串流服務播不了；字幕之後再說。
 - **驗到哪裡（2026-10-19，頭盔無人＋builder；使用者還沒配戴）**：
   - 自測 134 案（新增 playerformat.h 15、playersync.h 6）；x86_64 與 arm64 建置編過、沒有新的警告；Windows 與 Linux 的 server 編過。

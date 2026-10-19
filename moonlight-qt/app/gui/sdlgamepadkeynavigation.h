@@ -24,12 +24,20 @@ public:
 
     Q_INVOKABLE void setUiNavMode(bool settingsMode);
 
+    // §VR-PLAYER（影片模式的選片頁）：捲動模式——左右搖桿的上下都變成捲動（scrollRequested），LB／RB 捲大半頁；
+    // 左搖桿的左右照舊送方向鍵。使用者在頭盔上用雷射指標點、用搖桿捲，清單的焦點不一定在清單上，用方向鍵移焦點捲不動
+    Q_INVOKABLE void setScrollMode(bool scrollMode);
+
     Q_INVOKABLE int getConnectedGamepads();
 
 signals:
     // §UI-SCROLL：手把要求捲動目前這一頁。pages＝幾個可見高度，正值往下（看下面的內容）。
-    // 只在 Tab 導覽模式（設定頁、沒有下拉選單開著）發出，由那一頁自己捲（SettingsView.qml 的 scrollByPages）。
+    // 只在 Tab 導覽模式（設定頁、沒有下拉選單開著）或捲動模式（影片選片頁）發出，由那一頁自己捲。
     void scrollRequested(double pages);
+
+protected:
+    // §VR-PLAYER：捲動模式開著時，記下視窗收到的滾輪／按鍵／滑鼠鍵（頭盔上用雷射指標時，搖桿到底變成什麼還沒查證）
+    bool eventFilter(QObject* obj, QEvent* event) override;
 
 private:
     void sendKey(QEvent::Type type, Qt::Key key, Qt::KeyboardModifiers modifiers = Qt::NoModifier);
@@ -45,6 +53,11 @@ private:
     QList<SDL_GameController*> m_Gamepads;
     bool m_Enabled;
     bool m_UiNavMode;
+    bool m_ScrollMode;
+    // §VR-PLAYER：捲動模式下的輸入診斷（每 10 秒一行計數；每一種的第一個事件另外印細節）
+    Uint32 m_DiagWindowStart = 0;
+    int m_DiagWheel = 0, m_DiagKey = 0, m_DiagButton = 0;
+    bool m_DiagWheelLogged = false, m_DiagKeyLogged = false;
     bool m_FirstPoll;
     bool m_HasFocus;
     Uint32 m_LastAxisNavigationEventTime;

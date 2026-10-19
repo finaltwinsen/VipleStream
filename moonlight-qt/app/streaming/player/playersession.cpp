@@ -49,6 +49,9 @@ constexpr uint64_t kPanelRedrawNs = 250000000ull;
 constexpr float kStickOn = 0.7f;
 constexpr uint64_t kStickSeekRepeatNs = 500000000ull;
 constexpr uint64_t kStickVolRepeatNs = 250000000ull;
+constexpr int kDepthMax = 10;
+constexpr float kDepthDistStep = 1.15f;   // 平面螢幕：每格距離乘以這個（張角不變，看起來一樣大、只是比較遠）
+constexpr float kDepthEyeStepDeg = 0.1f;  // 180°／360°：每格每一眼往外轉幾度（10 格＝兩眼共 2°，背景要稍微往外張，再多會不舒服）
 // 沒有聲音的片：落後超過這麼多就把時鐘對齊到目前這一張（網路卡住之後不要一路丟幀追上去）
 constexpr double kVideoOnlyRebaseSec = 0.25;
 
@@ -230,6 +233,9 @@ int PlayerSession::run(QString* error)
                 static_cast<unsigned long long>((steadyNowNs() - m_StartNs) / 1000000ull), m_Media.describe().c_str(),
                 mo.startSec);
 
+    // 遠近：這支片上次調的
+    m_Depth = std::clamp(settings.value(hkey + QStringLiteral("/depth"), 0).toInt(), -kDepthMax, kDepthMax);
+
     // 畫面格式：使用者指定 > 上次在這支片選的 > 中繼資料 > 檔名 > 平面
     QString fmtText = m_Config.format;
     if (fmtText.isEmpty() || fmtText == QLatin1String("auto")) {
@@ -274,10 +280,23 @@ int PlayerSession::run(QString* error)
         xo.preferredRefreshHz = preferredHzFor(info.fps);
         xo.testPointer = m_Config.testPointer;
         xo.dumpFramePath = m_Config.dumpFramePath;
-        xo.inputSink.button = [this](int button, bool pressed) {
-            // 扳機點在螢幕上：切換控制列
-            if (button == BUTTON_LEFT && pressed) {
+        // 手把（使用者 2026-10-19 的配戴回饋：控制列收起來後手把完全沒反應）：扳機（沒指在控制列上）＝開關控制列、
+        // A＝播放／暫停、B＝離開回選片頁、握把＝置中；搖桿左右＝後退／前進 10 秒、上下＝音量（onStick）
+        xo.inputSink.playerButton = [this](XrInputSink::PlayerButton b) {
+            m_LastInteractNs.store(steadyNowNs(), std::memory_order_relaxed);
+            switch (b) {
+            case XrInputSink::PlayerButton::Trigger:
                 post(Cmd::TogglePanel);
+                break;
+            case XrInputSink::PlayerButton::A:
+                post(Cmd::TogglePause);
+                break;
+            case XrInputSink::PlayerButton::B:
+                post(Cmd::Exit);
+                break;
+            case XrInputSink::PlayerButton::Grip:
+                post(Cmd::Recenter);
+                break;
             }
         };
         xo.inputSink.menu = [this]() { post(Cmd::TogglePanel); };
@@ -315,8 +334,8 @@ int PlayerSession::run(QString* error)
         }
     }
     applyFormat();
+    applyScreen();  // 套用這支片記住的遠近（也設好控制列上的標籤）
     m_Media.setPaused(false);
-    m_PanelState.screenLabel = QString::fromLatin1(kScreens[preset].label);
     m_PanelShownNs = steadyNowNs();
     m_LastInteractNs.store(m_PanelShownNs);
     updatePanel(true);
@@ -499,6 +518,12 @@ int PlayerSession::run(QString* error)
     if (m_FormatSource == playerfmt::Source::User) {
         settings.setValue(hkey + QStringLiteral("/format"), QString::fromStdString(playerfmt::name(m_Format)));
     }
+    if (m_Depth != 0) {
+        settings.setValue(hkey + QStringLiteral("/depth"), m_Depth);
+    }
+    else {
+        settings.remove(hkey + QStringLiteral("/depth"));
+    }
     settings.sync();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] stopped at %.1f s (rc=%d)", pos, rc);
     m_Media.close();
@@ -521,12 +546,18 @@ void PlayerSession::applyFormat()
 void PlayerSession::applyScreen()
 {
     const int i = std::clamp(m_Config.screenPreset, 0, 2);
+    const float dist = kScreens[i].distanceM * std::pow(kDepthDistStep, static_cast<float>(m_Depth));
+    const float eyeOffDeg = kDepthEyeStepDeg * static_cast<float>(m_Depth);
     if (m_Xr != nullptr) {
-        m_Xr->setPlayerScreen(kScreens[i].distanceM, kScreens[i].fovDeg);
+        m_Xr->setPlayerScreen(dist, kScreens[i].fovDeg);
+        m_Xr->setPlayerEyeOffset(eyeOffDeg * 3.14159265f / 180.0f);
     }
     m_PanelState.screenLabel = QString::fromLatin1(kScreens[i].label);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] screen %s (%.1f m, %.0f deg)", kScreens[i].label,
-                static_cast<double>(kScreens[i].distanceM), static_cast<double>(kScreens[i].fovDeg));
+    if (m_Depth != 0) {
+        m_PanelState.screenLabel += QStringLiteral(" %1%2").arg(m_Depth > 0 ? QStringLiteral("+") : QString()).arg(m_Depth);
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] screen %s depth %+d (%.2f m, %.0f deg, eye %+.1f deg)", kScreens[i].label,
+                m_Depth, static_cast<double>(dist), static_cast<double>(kScreens[i].fovDeg), static_cast<double>(eyeOffDeg));
 }
 
 void PlayerSession::handleCommands()
@@ -578,6 +609,15 @@ void PlayerSession::handleCommands()
             m_FormatSource = playerfmt::Source::User;
             applyFormat();
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] format -> %s (user)", playerfmt::name(m_Format).c_str());
+            break;
+        }
+        case Cmd::DepthRel: {
+            const int d = std::clamp(m_Depth + static_cast<int>(c.value), -kDepthMax, kDepthMax);
+            if (d != m_Depth) {
+                m_Depth = d;
+                applyScreen();
+            }
+            m_PanelVisible = true;  // 控制列上的「Screen」顯示目前的格數
             break;
         }
         case Cmd::Screen:
@@ -644,9 +684,10 @@ void PlayerSession::onStick(float x, float y)
         post(Cmd::SeekRel, xd * 10.0);
     }
     m_StickXDir = xd;
+    // 上下＝遠近（使用者 2026-10-19：有些片太近；音量留在控制列的按鈕）。往上推＝推遠
     if (yd != 0 && (yd != m_StickYDir || now - m_StickYNs >= kStickVolRepeatNs)) {
         m_StickYNs = now;
-        post(Cmd::VolumeRel, yd * 0.05);
+        post(Cmd::DepthRel, yd);
     }
     m_StickYDir = yd;
 }
@@ -720,7 +761,7 @@ void PlayerSession::logWindow(uint64_t nowNs, bool final)
 void PlayerSession::runTestScript(double elapsedSec)
 {
     // "秒:指令[=值],…"：pause、play、seek=<秒>、seekrel=<秒>、vol=<0..2>、fmt=<名稱>、screen=<0..2>、panel、
-    // click=<u>:<v>（點控制列）、recenter、exit。照時間順序執行，每個只執行一次
+    // depthrel=<格數>（遠近）、click=<u>:<v>（點控制列）、recenter、exit。照時間順序執行，每個只執行一次
     const QStringList steps = m_Config.testScript.split(QLatin1Char(','), Qt::SkipEmptyParts);
     while (m_TestStep < steps.size()) {
         const QString step = steps.at(m_TestStep).trimmed();
@@ -763,6 +804,9 @@ void PlayerSession::runTestScript(double elapsedSec)
         }
         else if (name == QLatin1String("panel")) {
             post(Cmd::TogglePanel);
+        }
+        else if (name == QLatin1String("depthrel")) {
+            post(Cmd::DepthRel, val.toDouble());
         }
         else if (name == QLatin1String("click")) {
             onPanelClick(val.section(QLatin1Char(':'), 0, 0).toFloat(), val.section(QLatin1Char(':'), 1, 1).toFloat());
