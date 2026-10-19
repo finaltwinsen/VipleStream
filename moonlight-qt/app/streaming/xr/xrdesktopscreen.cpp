@@ -34,6 +34,13 @@ XrDesktopScreen::XrDesktopScreen(float distanceM, float fovDeg)
 {
 }
 
+void XrDesktopScreen::setGeometry(float distanceM, float fovDeg)
+{
+    m_Distance = distanceM;
+    m_FovRad = fovDeg * kPi / 180.0f;
+    m_QuadWidth = 2.0f * distanceM * std::tan(fovDeg * 0.5f * kPi / 180.0f);
+}
+
 XrDesktopScreen::Reason XrDesktopScreen::takePendingPlacement(bool focused)
 {
     if (m_RecenterRequested.exchange(false, std::memory_order_acq_rel)) {

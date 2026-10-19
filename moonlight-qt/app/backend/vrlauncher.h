@@ -28,6 +28,18 @@ class VrLauncher : public QObject
     Q_PROPERTY(QString blockedReason READ blockedReason CONSTANT)
     Q_PROPERTY(bool vrMode READ vrMode NOTIFY vrModeChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    // §VR-PLAYER：這個建置有影片模式，而且在 Frame 上（available）
+    Q_PROPERTY(bool playerAvailable READ playerAvailable CONSTANT)
+    // §VR-PLAYER：這個建置有內建瀏覽器（Qt WebEngine）
+    Q_PROPERTY(bool browserAvailable READ browserAvailable CONSTANT)
+    // §VR-PLAYER（dev，--dev-video）：見 commandlineparser.h。devVideoTab＝-1＝沒帶
+    Q_PROPERTY(int devVideoTab READ devVideoTab CONSTANT)
+    Q_PROPERTY(QString devVideoUrl READ devVideoUrl CONSTANT)
+    Q_PROPERTY(int devVideoGrabSec READ devVideoGrabSec CONSTANT)
+    Q_PROPERTY(QString devVideoGrabPath READ devVideoGrabPath CONSTANT)
+    Q_PROPERTY(int devVideoPlaySec READ devVideoPlaySec CONSTANT)
+    Q_PROPERTY(QString devVideoHost READ devVideoHost CONSTANT)
+    Q_PROPERTY(QString devVideoDir READ devVideoDir CONSTANT)
 
     // §VR-PREFLIGHT：給 VrPreflightDialog.qml 顯示用
     Q_PROPERTY(bool preflightChecking READ preflightChecking NOTIFY preflightChanged)   // 開頭那幾次還在量（通常不到半秒）
@@ -51,6 +63,15 @@ public:
 
     bool vrMode() const { return m_VrMode; }
     bool running() const;
+    bool playerAvailable() const;
+    bool browserAvailable() const
+    {
+#ifdef HAVE_WEBENGINE
+        return true;
+#else
+        return false;
+#endif
+    }
 
     bool preflightChecking() const;
     bool preflightWaiting() const;
@@ -64,6 +85,15 @@ public:
     // dev（--vr-test-preflight）：往返時間檢查改用腳本給結果（格式見 vrpreflight.h 的 TestScript），不寫進設定。
     // 格式不對回 false、*error 是英文說明。main() 在建立 QML engine 之前呼叫
     static bool setTestPreflightScript(const QString& spec, QString* error = nullptr);
+    // dev（--dev-video）：main() 在建立 QML engine 之前呼叫
+    static void setDevVideo(const QString& spec);
+    int devVideoTab() const;
+    QString devVideoUrl() const;
+    int devVideoGrabSec() const;
+    QString devVideoGrabPath() const;
+    int devVideoPlaySec() const;
+    QString devVideoHost() const;
+    QString devVideoDir() const;
 
     // 切換模式；回傳模式是否真的改變（改變時 QML 再請 ComputerManager.setVrAppLists() 重抓清單）
     Q_INVOKABLE bool setVrMode(bool on);
@@ -74,6 +104,11 @@ public:
     // 回傳 false＝沒有接受（不是 VR 模式、串流正在跑、上一次的檢查還沒有結果、參數不完整）
     Q_INVOKABLE bool launch(const QString& hostAddress, const QString& probeHost, int probePort,
                             const QString& appName, bool takeover);
+
+    // §VR-PLAYER（2026-10-19）：影片模式。另開子行程 `viplestream play [--vr-format F] [--title T] [--audio-url A] -- <來源>`，
+    // 不需要主機、不做往返時間檢查、和 VR 模式的開關無關（在桌面模式也能用）。GUI 一樣先隱藏、子行程結束再出現。
+    // 回傳 false＝沒有接受（已經有子行程在跑、來源空白、這個環境不能跑 XR）
+    Q_INVOKABLE bool launchPlayer(const QString& source, const QString& format, const QString& title, const QString& audioSource);
 
     // §VR-PREFLIGHT：對話框的兩個按鈕。不在檢查中時不做事
     Q_INVOKABLE void preflightStartAnyway();
@@ -91,11 +126,14 @@ private:
     void processEnded(int exitCode, QProcess::ExitStatus status);
     void preflightPassed();
     bool startProcess(const QString& hostAddress, const QString& appName, bool takeover);
+    // 開子行程（VR 串流與影片模式共用）；what 只給 log
+    bool startChild(const QStringList& args, const QString& what);
 
     bool m_VrMode = false;
     QProcess* m_Proc = nullptr;
     QByteArray m_StderrPartial;   // 還沒湊成一整行的 stderr
     QString m_LastError;          // 子行程最後一行給使用者看的錯誤（"Stream failed:"／"Stream error:" 等）
+    bool m_ChildIsPlayer = false; // 目前（或剛結束）的子行程是影片模式（結束碼的意思不同）
 
     // §VR-PREFLIGHT：檢查通過之後要開的那一場
     VrPreflightCheck* m_Preflight = nullptr;

@@ -309,6 +309,10 @@ void XrVideo::destroy(bool gpuWedged)
         m_Renderer = nullptr;
         m_Dp = nullptr;  // 刻意洩漏（同上）
         m_Full = m_Flow = nullptr;
+        m_Equi[0] = m_Equi[1] = nullptr;
+        m_DpFrame = nullptr;
+        m_Proj = SwapchainSet();
+        m_ProjSem = VK_NULL_HANDLE;
         m_Small[0] = m_Small[1] = nullptr;
         m_Mid[0] = m_Mid[1] = m_FlowC = nullptr;
         m_Sem = VK_NULL_HANDLE;
@@ -331,6 +335,15 @@ void XrVideo::destroy(bool gpuWedged)
             pl_tex_destroy(m_Vulkan->gpu, &t);
         }
         pl_tex_destroy(m_Vulkan->gpu, &m_Full);
+        pl_tex_destroy(m_Vulkan->gpu, &m_Equi[0]);
+        pl_tex_destroy(m_Vulkan->gpu, &m_Equi[1]);
+        destroySwapchainSet(m_Proj);
+        if (m_DpFrame != nullptr) {
+            pl_dispatch_destroy(&m_DpFrame);
+        }
+        if (m_ProjSem != VK_NULL_HANDLE) {
+            pl_vulkan_sem_destroy(m_Vulkan->gpu, &m_ProjSem);
+        }
         pl_tex_destroy(m_Vulkan->gpu, &m_Flow);
         pl_tex_destroy(m_Vulkan->gpu, &m_Small[0]);
         pl_tex_destroy(m_Vulkan->gpu, &m_Small[1]);
@@ -697,6 +710,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_NoMetaDropped++;
         return false;
+    }
+    if (m_Immersive.load(std::memory_order_acquire)) {
+        return renderEquiFrame(frame, t0);  // §VR-PLAYER（V2）
     }
 
     pl_gpu g = m_Vulkan->gpu;
@@ -1832,6 +1848,449 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
                 "[VIPLE-VR-FOVEA] unwarp pass failed - showing the stream without undoing the foveated encoding for this session");
     m_UnwarpFailed = true;
     return pl_render_image(m_Renderer, mapped, targetProto, &m_RenderParams);
+}
+
+// ── §VR-PLAYER（V2）：180°／360° ──
+
+namespace {
+
+// 每個輸出像素：這一眼的視線（view 空間的 tan → 世界方向，扣掉內容的正前方朝向）→ 經緯度 → 全景影像上的位置。
+// vs_tan＝(tan 左, tan 右, tan 上, tan 下)（左、下是負的）；vs_src＝這一眼在全景影像裡的範圍（x0, y0, 寬, 高，0..1）；
+// vs_mode.x＝1（180°）或 2（360°）、vs_mode.y＝1 時輸出要換成線性值（swapchain 不是 sRGB 格式）
+// 等角立方體（EAC，YouTube 的 360°）：方向 → 六個面之一 → 面上的角度（等角）→ 3×2 排法裡的位置。排法與每個面的
+// 轉向照 FFmpeg v360 的 eac（上排左、前、右；下排下、後、上，各轉 270／90／270 度）；座標換成 v360 的（y 朝下、z 朝前）。
+// 2026-10-19 用 v360 轉出來的 EAC 再用這個公式轉回經緯圖驗過（和原圖每像素平均差 1.7／765）
+const char* kEquiHeader = R"GLSL(
+vec2 vs_eac(vec3 d) {
+    vec3 v = vec3(d.x, -d.y, -d.z);
+    float phi = atan(v.x, v.z);
+    float th = asin(clamp(v.y, -1.0, 1.0));
+    int dir = 0;
+    float pn = phi;
+    if (phi >= -0.78539816 && phi < 0.78539816) { dir = 0; pn = phi; }
+    else if (phi >= -2.35619449 && phi < -0.78539816) { dir = 2; pn = phi + 1.57079633; }
+    else if (phi >= 0.78539816 && phi < 2.35619449) { dir = 3; pn = phi - 1.57079633; }
+    else { dir = 1; pn = phi + (phi > 0.0 ? -3.14159265 : 3.14159265); }
+    float t = atan(cos(pn));
+    if (th > t) { dir = 5; } else if (th < -t) { dir = 4; }
+    float uf; float vf; float face; float rot;
+    if (dir == 3) { uf = -v.z / v.x; vf = v.y / v.x; face = 2.0; rot = 0.0; }
+    else if (dir == 2) { uf = -v.z / v.x; vf = -v.y / v.x; face = 0.0; rot = 0.0; }
+    else if (dir == 4) { uf = -v.x / v.y; vf = -v.z / v.y; face = 5.0; rot = 270.0; }
+    else if (dir == 5) { uf = v.x / v.y; vf = -v.z / v.y; face = 3.0; rot = 270.0; }
+    else if (dir == 0) { uf = v.x / v.z; vf = v.y / v.z; face = 1.0; rot = 0.0; }
+    else { uf = v.x / v.z; vf = -v.y / v.z; face = 4.0; rot = 90.0; }
+    if (rot > 45.0 && rot < 135.0) { float tmp = uf; uf = -vf; vf = tmp; }
+    else if (rot > 225.0) { float tmp = -uf; uf = vf; vf = tmp; }
+    uf = 0.63661977 * atan(uf) + 0.5;
+    vf = 0.63661977 * atan(vf) + 0.5;
+    return vec2((uf + mod(face, 3.0)) / 3.0, vf * 0.5 + 0.5 * floor(face / 3.0));
+}
+)GLSL";
+
+const char* kEquiBody = R"GLSL(
+vec2 uv = (gl_FragCoord.xy - vs_off) / vs_esz;
+vec3 dv = vec3(mix(vs_tan.x, vs_tan.y, uv.x), mix(vs_tan.z, vs_tan.w, uv.y), -1.0);
+vec3 d = normalize(vs_rot * dv);
+float lon = atan(d.x, -d.z);
+float lat = asin(clamp(d.y, -1.0, 1.0));
+float ex = vs_mode.x > 1.5 ? fract(0.5 + lon * 0.15915494) : 0.5 + lon * 0.31830989;
+float ey = 0.5 - lat * 0.31830989;
+vec2 e2 = vs_mode.x > 2.5 ? vs_eac(d) : vec2(ex, ey);
+vec3 c = texture(vs_equi, vs_src.xy + e2 * vs_src.zw).rgb;
+if (vs_mode.y > 0.5) {
+    c = pow(c, vec3(2.2));
+}
+bool outside = vs_mode.x < 1.5 && abs(lon) > 1.5707964;
+color = outside ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(c, 1.0);
+)GLSL";
+
+}  // namespace
+
+bool XrVideo::immersiveReady()
+{
+    std::lock_guard<std::mutex> lk(m_EquiMutex);
+    return m_EquiReady >= 0;
+}
+
+bool XrVideo::renderEquiFrame(AVFrame* frame, uint64_t t0)
+{
+    pl_gpu g = m_Vulkan->gpu;
+    int slot = 0;
+    {
+        // 寫另一張；frame thread 正在取樣那一張時等它一下（它每一格只取樣一次，很快）
+        std::unique_lock<std::mutex> lk(m_EquiMutex);
+        slot = m_EquiReady == 0 ? 1 : 0;
+        m_EquiCv.wait_for(lk, std::chrono::milliseconds(50), [&] { return m_EquiInUse != slot; });
+        if (m_EquiInUse == slot) {
+            av_frame_free(&frame);
+            return false;
+        }
+    }
+    const auto caps = static_cast<pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+    pl_fmt fmt = pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
+    pl_tex_params tp = {};
+    tp.w = frame->width;
+    tp.h = frame->height;
+    tp.format = fmt;
+    tp.sampleable = true;
+    tp.renderable = true;
+    if (fmt == nullptr || !pl_tex_recreate(g, &m_Equi[slot], &tp)) {
+        av_frame_free(&frame);
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_RenderErrors++;
+        return false;
+    }
+    pl_frame mapped;
+    std::memset(&mapped, 0, sizeof(mapped));
+    const bool mappedOk = mapFrame(frame, &mapped, m_Tex, true);
+    bool ok = false;
+    if (mappedOk) {
+        // 存 sRGB 編碼的值（和平面模式寫進 swapchain 的值相同），frame thread 取樣時視需要再換成線性
+        pl_frame target;
+        std::memset(&target, 0, sizeof(target));
+        target.num_planes = 1;
+        target.planes[0].texture = m_Equi[slot];
+        target.planes[0].components = 4;
+        target.planes[0].component_mapping[0] = PL_CHANNEL_R;
+        target.planes[0].component_mapping[1] = PL_CHANNEL_G;
+        target.planes[0].component_mapping[2] = PL_CHANNEL_B;
+        target.planes[0].component_mapping[3] = PL_CHANNEL_A;
+        target.repr = pl_color_repr_rgb;
+        target.color = pl_color_space_srgb;
+        ok = pl_render_image(m_Renderer, &mapped, &target, &m_RenderParams);
+        if (!ok) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] equirect: pl_render_image failed");
+        }
+    }
+    const uint64_t tCpu = nowUs();
+    // GPU 做完才發布、才放掉解碼幀（有上限：GPU 卡住時不要永遠等）
+    pl_gpu_flush(g);
+    bool busy = true;
+    for (int i = 0; i < 100 && busy; i++) {
+        busy = pl_tex_poll(g, m_Equi[slot], 10000000ull);
+    }
+    if (busy) {
+        m_WedgedFrames.push_back(frame);
+        m_Ctx->markGpuWedged("equirect render did not finish within 1 s");
+        markUnusable("GPU wedged");
+        return false;
+    }
+    if (mappedOk) {
+        pl_unmap_avframe(g, &mapped);
+    }
+    av_frame_free(&frame);
+    const uint64_t tEnd = nowUs();
+    if (ok) {
+        std::lock_guard<std::mutex> lk(m_EquiMutex);
+        m_EquiReady = slot;
+    }
+    std::lock_guard<std::mutex> lk(m_StatsMutex);
+    if (ok) {
+        m_Drawn++;
+        m_CpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tCpu - t0, 0xffffffffu)));
+        m_GpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tEnd - tCpu, 0xffffffffu)));
+    }
+    else {
+        m_RenderErrors++;
+    }
+    return ok;
+}
+
+bool XrVideo::ensureProjSwapchain(XrSession session, int width, int height)
+{
+    if (m_Proj.swapchain != XR_NULL_HANDLE && m_Proj.width == width && m_Proj.height == height) {
+        return true;
+    }
+    destroySwapchainSet(m_Proj);
+    uint32_t n = 0;
+    xrEnumerateSwapchainFormats(session, 0, &n, nullptr);
+    std::vector<int64_t> formats(n);
+    xrEnumerateSwapchainFormats(session, n, &n, formats.data());
+    struct Cand {
+        VkFormat sw;
+        VkFormat view;
+        bool linear;
+    };
+    // 同影像 swapchain 的順序：sRGB 格式用 UNORM 的 view 寫 sRGB 編碼的值；只有線性格式時把值換回線性
+    const Cand cands[] = {
+        {VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, false},
+        {VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, false},
+        {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, true},
+        {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, true},
+        {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, true},
+    };
+    const VkImageUsageFlags vkUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    for (const Cand& c : cands) {
+        if (std::find(formats.begin(), formats.end(), static_cast<int64_t>(c.sw)) == formats.end()) {
+            continue;
+        }
+        XrSwapchainCreateInfo ci = xrS<XrSwapchainCreateInfo>(XR_TYPE_SWAPCHAIN_CREATE_INFO);
+        ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+        if (c.sw != c.view) {
+            ci.usageFlags |= XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+        }
+        ci.format = c.sw;
+        ci.sampleCount = 1;
+        ci.width = static_cast<uint32_t>(width);
+        ci.height = static_cast<uint32_t>(height);
+        ci.faceCount = 1;
+        ci.arraySize = 1;
+        ci.mipCount = 1;
+        XrSwapchain sc = XR_NULL_HANDLE;
+        if (XR_FAILED(xrCreateSwapchain(session, &ci, &sc))) {
+            continue;
+        }
+        uint32_t count = 0;
+        xrEnumerateSwapchainImages(sc, 0, &count, nullptr);
+        std::vector<XrSwapchainImageVulkan2KHR> imgs(count, xrS<XrSwapchainImageVulkan2KHR>(XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR));
+        if (count == 0 ||
+            XR_FAILED(xrEnumerateSwapchainImages(sc, count, &count, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data())))) {
+            xrDestroySwapchain(sc);
+            continue;
+        }
+        std::vector<pl_tex> wrapped;
+        bool wrapOk = true;
+        for (uint32_t i = 0; i < count; i++) {
+            pl_vulkan_wrap_params wp = {};
+            wp.image = imgs[i].image;
+            wp.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+            wp.width = width;
+            wp.height = height;
+            wp.format = c.view;
+            wp.usage = vkUsage;
+            wp.debug_tag = PL_DEBUG_TAG;
+            pl_tex t = pl_vulkan_wrap(m_Vulkan->gpu, &wp);
+            if (t == nullptr || !t->params.renderable) {
+                if (t != nullptr) {
+                    pl_tex_destroy(m_Vulkan->gpu, &t);
+                }
+                wrapOk = false;
+                break;
+            }
+            wrapped.push_back(t);
+        }
+        if (!wrapOk) {
+            for (pl_tex& t : wrapped) {
+                pl_tex_destroy(m_Vulkan->gpu, &t);
+            }
+            xrDestroySwapchain(sc);
+            continue;
+        }
+        m_Proj.swapchain = sc;
+        m_Proj.width = width;
+        m_Proj.height = height;
+        m_Proj.wrapped = std::move(wrapped);
+        m_ProjLinear = c.linear;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] immersive swapchain %dx%d fmt=%d linear=%d images=%u", width, height,
+                    static_cast<int>(c.sw), c.linear ? 1 : 0, count);
+        return true;
+    }
+    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] no usable immersive swapchain format for %dx%d", width, height);
+    return false;
+}
+
+bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj, int stereo, float yawRad, int eyeW, int eyeH,
+                              XrSwapchainSubImage out[2])
+{
+    if (m_ProjFailed || m_Vulkan == nullptr) {
+        return false;
+    }
+    pl_gpu g = m_Vulkan->gpu;
+    if (m_DpFrame == nullptr) {
+        m_DpFrame = pl_dispatch_create(m_Log, g);
+        pl_vulkan_sem_params sp = {};
+        sp.type = VK_SEMAPHORE_TYPE_TIMELINE;
+        sp.initial_value = 0;
+        m_ProjSem = pl_vulkan_sem_create(g, &sp);
+        if (m_DpFrame == nullptr || m_ProjSem == VK_NULL_HANDLE) {
+            m_ProjFailed = true;
+            return false;
+        }
+    }
+    if (!ensureProjSwapchain(session, eyeW * 2, eyeH)) {
+        m_ProjFailed = true;
+        return false;
+    }
+    int slot = -1;
+    {
+        std::lock_guard<std::mutex> lk(m_EquiMutex);
+        if (m_EquiReady < 0 || m_Equi[m_EquiReady] == nullptr) {
+            return false;
+        }
+        slot = m_EquiReady;
+        m_EquiInUse = slot;
+    }
+    struct InUse {
+        XrVideo* v;
+        ~InUse()
+        {
+            if (v == nullptr) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lk(v->m_EquiMutex);
+                v->m_EquiInUse = -1;
+            }
+            v->m_EquiCv.notify_all();
+        }
+    } inUse{this};
+
+    uint32_t idx = 0;
+    XrSwapchainImageAcquireInfo ai = xrS<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
+    {
+        std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
+        if (XR_FAILED(xrAcquireSwapchainImage(m_Proj.swapchain, &ai, &idx))) {
+            return false;
+        }
+        if (idx >= m_Proj.wrapped.size()) {
+            XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
+            xrReleaseSwapchainImage(m_Proj.swapchain, &ri);
+            return false;
+        }
+    }
+    XrSwapchainImageWaitInfo wi = xrS<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
+    wi.timeout = 50000000;  // 50 ms
+    xrWaitSwapchainImage(m_Proj.swapchain, &wi);
+    pl_tex dst = m_Proj.wrapped[idx];
+    pl_vulkan_release_params rp = {};
+    rp.tex = dst;
+    rp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    rp.qf = VK_QUEUE_FAMILY_IGNORED;
+    pl_vulkan_release_ex(g, &rp);
+
+    bool ok = true;
+    const float cy = std::cos(-yawRad), sy = std::sin(-yawRad);
+    // 一隻眼：畫進 target 的 [x0, x0+eyeW) 那一段（dev 讀回時畫進另一張可讀回的材質）
+    auto drawEye = [&](int e, pl_tex target, int x0, bool linear) -> bool {
+        // 這一眼的朝向（四元數 → 矩陣），再繞 Y 轉 −yaw：內容的正前方對到置中時的頭部朝向
+        const XrQuaternionf& q = views[e].pose.orientation;
+        const float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
+        const float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z, wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
+        const float r[3][3] = {{1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy)},
+                               {2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx)},
+                               {2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)}};
+        // Ry(-yaw)：x' = c·x + s·z、z' = −s·x + c·z
+        float m[3][3];
+        for (int col = 0; col < 3; col++) {
+            m[0][col] = cy * r[0][col] + sy * r[2][col];
+            m[1][col] = r[1][col];
+            m[2][col] = -sy * r[0][col] + cy * r[2][col];
+        }
+        float rot[9];  // GLSL mat3 是 column-major
+        for (int col = 0; col < 3; col++) {
+            for (int row = 0; row < 3; row++) {
+                rot[col * 3 + row] = m[row][col];
+            }
+        }
+        const XrFovf& f = views[e].fov;
+        float tanv[4] = {std::tan(f.angleLeft), std::tan(f.angleRight), std::tan(f.angleUp), std::tan(f.angleDown)};
+        float src[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+        if (stereo == 1) {
+            src[0] = e == 0 ? 0.0f : 0.5f;
+            src[2] = 0.5f;
+        }
+        else if (stereo == 2) {
+            src[1] = e == 0 ? 0.0f : 0.5f;
+            src[3] = 0.5f;
+        }
+        float off[2] = {static_cast<float>(x0), 0.0f};
+        float esz[2] = {static_cast<float>(eyeW), static_cast<float>(eyeH)};
+        float mode[2] = {static_cast<float>(proj), linear ? 1.0f : 0.0f};
+        pl_shader sh = pl_dispatch_begin(m_DpFrame);
+        pl_shader_desc dd[1] = {sampledTex("vs_equi", m_Equi[slot])};
+        pl_shader_var vv[6] = {};
+        vv[0].var = pl_var_mat3("vs_rot");
+        vv[0].data = rot;
+        vv[0].dynamic = true;
+        vv[1].var = pl_var_vec4("vs_tan");
+        vv[1].data = tanv;
+        vv[1].dynamic = true;
+        vv[2].var = pl_var_vec4("vs_src");
+        vv[2].data = src;
+        vv[2].dynamic = true;
+        vv[3].var = pl_var_vec2("vs_off");
+        vv[3].data = off;
+        vv[3].dynamic = true;
+        vv[4].var = pl_var_vec2("vs_esz");
+        vv[4].data = esz;
+        vv[4].dynamic = true;
+        vv[5].var = pl_var_vec2("vs_mode");
+        vv[5].data = mode;
+        vv[5].dynamic = true;
+        pl_custom_shader cs = {};
+        cs.description = "viple player equirect";
+        cs.header = kEquiHeader;
+        cs.body = kEquiBody;
+        cs.input = PL_SHADER_SIG_NONE;
+        cs.output = PL_SHADER_SIG_COLOR;
+        cs.descriptors = dd;
+        cs.num_descriptors = 1;
+        cs.variables = vv;
+        cs.num_variables = 6;
+        if (!pl_shader_custom(sh, &cs)) {
+            pl_dispatch_abort(m_DpFrame, &sh);
+            return false;
+        }
+        pl_dispatch_params dpar = {};
+        dpar.shader = &sh;
+        dpar.target = target;
+        dpar.rect.x0 = x0;
+        dpar.rect.y0 = 0;
+        dpar.rect.x1 = x0 + eyeW;
+        dpar.rect.y1 = eyeH;
+        return pl_dispatch_finish(m_DpFrame, &dpar);
+    };
+    for (int e = 0; e < 2 && ok; e++) {
+        ok = drawEye(e, dst, e * eyeW, m_ProjLinear);
+    }
+    // dev（--xr-dump-frame）：第 600 格把左眼另外畫一張可讀回的存成 PNG（swapchain 影像讀不回來）。只做一次，那一格會卡一下
+    if (ok && !m_Config.dumpPath.isEmpty() && ++m_ImmFrames == 600) {
+        pl_tex_params tp = {};
+        tp.w = eyeW;
+        tp.h = eyeH;
+        tp.format = pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, static_cast<pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+        tp.renderable = true;
+        tp.host_readable = true;
+        pl_tex dumpTex = tp.format != nullptr ? pl_tex_create(g, &tp) : nullptr;
+        if (dumpTex != nullptr && drawEye(0, dumpTex, 0, false)) {
+            QString path = m_Config.dumpPath;
+            const int dot = path.lastIndexOf(QLatin1Char('.'));
+            path.insert(dot > path.lastIndexOf(QLatin1Char('/')) ? dot : path.size(), QStringLiteral("-immersive"));
+            saveDump(readbackTexture(dumpTex), path, eyeW, eyeH);
+        }
+        pl_tex_destroy(g, &dumpTex);
+    }
+    // 還給 runtime 之前：交回影像（layout 回到 COLOR_ATTACHMENT_OPTIMAL，GPU 工作在這裡送出）。不等 GPU 做完：
+    // runtime 會和 session 用的同一條 queue 同步（OpenXR 的 Vulkan 綁定；範例程式也是送出就 release）。2026-10-19 頭盔：
+    // 原本每一格等做完，frame thread 一格要 6.5 ms、漏幀 1.3%（GPU 同時在跑合成器，等的大多是排隊）。
+    // 全景材質不必等：render thread 之後寫它的工作排在這一批後面（同一條 queue，libplacebo 會插 barrier）
+    pl_vulkan_hold_params hp = {};
+    hp.tex = dst;
+    hp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    hp.qf = VK_QUEUE_FAMILY_IGNORED;
+    hp.semaphore.sem = m_ProjSem;
+    hp.semaphore.value = ++m_ProjSemValue;
+    if (!pl_vulkan_hold_ex(g, &hp)) {
+        pl_gpu_finish(g);
+    }
+    {
+        XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
+        std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
+        xrReleaseSwapchainImage(m_Proj.swapchain, &ri);
+    }
+    if (!ok) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] immersive shader failed - 180/360 view disabled for this session");
+        m_ProjFailed = true;
+        return false;
+    }
+    for (int e = 0; e < 2; e++) {
+        out[e].swapchain = m_Proj.swapchain;
+        out[e].imageRect.offset = {e * eyeW, 0};
+        out[e].imageRect.extent = {eyeW, eyeH};
+        out[e].imageArrayIndex = 0;
+    }
+    return true;
 }
 
 void XrVideo::frameEnded(uint64_t generation)

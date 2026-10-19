@@ -206,6 +206,38 @@ void XrContext::requestRecenter()
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] recenter requested");
 }
 
+void XrContext::setPlayerLayout(int projection, int stereo, float frameAspect)
+{
+    m_PlayerProj.store(projection, std::memory_order_relaxed);
+    m_PlayerStereo.store(stereo, std::memory_order_relaxed);
+    m_PlayerAspect.store(frameAspect, std::memory_order_relaxed);
+}
+
+void XrContext::setPlayerScreen(float distanceM, float fovDeg)
+{
+    m_PlayerDistM.store(distanceM, std::memory_order_relaxed);
+    m_PlayerFovDeg.store(fovDeg, std::memory_order_relaxed);
+    m_PlayerScreenDirty.store(true, std::memory_order_release);
+}
+
+void XrContext::setPlayerPanel(const QImage& img, bool visible)
+{
+    {
+        std::lock_guard<std::mutex> lk(m_PanelMutex);
+        if (!img.isNull()) {
+            m_PanelImg = img;
+            m_PanelDirty = true;
+        }
+    }
+    m_PanelVisible.store(visible, std::memory_order_release);
+}
+
+XrContext::DisplayTiming XrContext::displayTiming() const
+{
+    std::lock_guard<std::mutex> lk(m_TimingMutex);
+    return m_DisplayTiming;
+}
+
 void XrContext::requestKeyboardToggle()
 {
     if (m_Input != nullptr) {
@@ -1060,6 +1092,11 @@ bool XrContext::createQuadSwapchain(QString* error)
         createSolidSwapchain(8, 8, &m_KbHoverSwapchain, &m_KbHoverImages, &m_KbHoverImageCount, "keyboard hover");
         createSolidSwapchain(8, 8, &m_KbPressSwapchain, &m_KbPressImages, &m_KbPressImageCount, "keyboard press");
     }
+    // §VR-PLAYER：控制列
+    if (m_Options.player) {
+        createSolidSwapchain(static_cast<uint32_t>(kPanelW), static_cast<uint32_t>(kPanelH), &m_PanelSwapchain, &m_PanelImages,
+                             &m_PanelImageCount, "player panel");
+    }
     // M4a R1：PCVR stale 淡出（head-locked 半透明黑，預乘 alpha）
     if (m_Options.pcvr) {
         createSolidSwapchain(8, 8, &m_FadeSwapchain, &m_FadeImages, &m_FadeImageCount, "pcvr fade");
@@ -1739,6 +1776,24 @@ void XrContext::frameThreadMain()
             m_Lost.store(true);
             break;
         }
+        if (m_Options.player && fs.predictedDisplayPeriod > 0) {
+            // §VR-PLAYER：播放器照這一格的挑影像時刻與預測顯示時刻排每一張影片幀（playersync.h）
+            const uint64_t wake = tw0 + m_DiagWaitNs;
+            const uint64_t per = static_cast<uint64_t>(fs.predictedDisplayPeriod);
+            XrTime xrNow = 0;
+            DisplayTiming dt;
+            dt.wakeNs = wake;
+            dt.periodNs = per;
+            if (nowXrTime(&xrNow) && fs.predictedDisplayTime > xrNow) {
+                dt.displayNs = steadyNowNs() + static_cast<uint64_t>(fs.predictedDisplayTime - xrNow);
+                dt.exact = true;
+            }
+            else {
+                dt.displayNs = wake + 2 * per;
+            }
+            std::lock_guard<std::mutex> lk(m_TimingMutex);
+            m_DisplayTiming = dt;
+        }
         if (m_Options.pcvr) {
             pcvrAfterWaitFrame(fs.predictedDisplayTime, static_cast<uint64_t>(fs.predictedDisplayPeriod));
             if (m_Options.pcvrLatchDelayUs > 0) {
@@ -1860,7 +1915,14 @@ void XrContext::frameThreadMain()
         XrCompositionLayerQuad quad = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerCylinderKHR cyl = xrStruct<XrCompositionLayerCylinderKHR>(XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR);
         XrCompositionLayerQuad status = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
-        const bool useCylinder = m_EnabledExtensions.contains(QLatin1String(kExtCylinder));
+        XrCompositionLayerQuad quadEye2 = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-PLAYER 右眼
+        XrCompositionLayerQuad panelLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        float playerEyeAspect = 0.0f;  // §VR-PLAYER：這一格每眼的畫面比例（螢幕高度＝寬÷它）
+        if (m_Options.player && m_PlayerScreenDirty.exchange(false, std::memory_order_acq_rel)) {
+            m_Screen->setGeometry(m_PlayerDistM.load(std::memory_order_relaxed), m_PlayerFovDeg.load(std::memory_order_relaxed));
+        }
+        // §VR-PLAYER：一律 quad（控制列擺在螢幕下緣、射線求交照 quad 算）
+        const bool useCylinder = !m_Options.player && m_EnabledExtensions.contains(QLatin1String(kExtCylinder));
         const float screenW = m_Screen->quadWidthM();
         bool videoLayer = false;
         bool loadingLayer = false;
@@ -1902,7 +1964,8 @@ void XrContext::frameThreadMain()
         if (haveVideo) {
             const uint64_t nowUs = cpuT0 / 1000ull;
             const uint64_t ageMs = nowUs > vcur.lastDrawnUs ? (nowUs - vcur.lastDrawnUs) / 1000ull : 0;
-            stale = ageMs < 1000 ? 1 : (ageMs < 5000 ? 2 : 3);
+            // §VR-PLAYER：暫停時同一張停多久都正常，一律當成 live
+            stale = m_Options.player ? 1 : (ageMs < 1000 ? 1 : (ageMs < 5000 ? 2 : 3));
         }
         if (m_Options.pcvr && fs.shouldRender) {
             // M4a R1：projection。pose＝0x81 帶回的 renderPose∘eyeToHead；>500 ms 沒新幀疊半透明黑、
@@ -1962,13 +2025,57 @@ void XrContext::frameThreadMain()
         if (m_Options.pcvr) {
             pcvrTimingTick(cpuT0, static_cast<uint64_t>(fs.predictedDisplayPeriod));  // M4a R3
         }
+        // §VR-PLAYER（V2）：180°／360°——影像 render thread 改畫進全景材質，這裡每一格依兩眼的姿態畫投影影像
+        const int playerProj = m_Options.player ? m_PlayerProj.load(std::memory_order_relaxed) : 0;
+        bool immersiveShown = false;
+        if (m_Options.player && m_Video != nullptr) {
+            m_Video->setImmersive(playerProj != 0);
+            if (playerProj != 0 && fs.shouldRender && m_Video->immersiveReady()) {
+                XrViewLocateInfo li = xrStruct<XrViewLocateInfo>(XR_TYPE_VIEW_LOCATE_INFO);
+                li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                li.displayTime = fs.predictedDisplayTime;
+                li.space = m_LocalSpace;
+                XrViewState vs = xrStruct<XrViewState>(XR_TYPE_VIEW_STATE);
+                XrView views[2] = {xrStruct<XrView>(XR_TYPE_VIEW), xrStruct<XrView>(XR_TYPE_VIEW)};
+                uint32_t vc = 0;
+                if (XR_SUCCEEDED(xrLocateViews(m_Session, &li, &vs, 2, &vc, views)) && vc == 2 &&
+                    (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
+                    // 每眼的像素：照 runtime 建議的尺寸，最大 2048（全景影像的細節本來就不多，畫太大只是多耗 GPU）
+                    const uint32_t rw = m_RecW > 0 ? m_RecW : 1600, rh = m_RecH > 0 ? m_RecH : 1600;
+                    const float sc = std::min(1.0f, 2048.0f / static_cast<float>(std::max(rw, rh)));
+                    const int eyeW = std::max(256, static_cast<int>(static_cast<float>(rw) * sc));
+                    const int eyeH = std::max(256, static_cast<int>(static_cast<float>(rh) * sc));
+                    XrSwapchainSubImage sub[2] = {};
+                    if (m_Video->renderImmersive(m_Session, views, playerProj, m_PlayerStereo.load(std::memory_order_relaxed),
+                                                 m_Screen->yawRad(), eyeW, eyeH, sub)) {
+                        for (int e = 0; e < 2; e++) {
+                            projViews[e].pose = views[e].pose;
+                            projViews[e].fov = views[e].fov;
+                            projViews[e].subImage = sub[e];
+                        }
+                        proj.layerFlags = 0;
+                        proj.space = m_LocalSpace;
+                        proj.viewCount = 2;
+                        proj.views = projViews;
+                        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
+                        videoLayer = true;
+                        immersiveShown = true;
+                        if (!m_LoggedLayerKind) {
+                            m_LoggedLayerKind = true;
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video layer: projection (immersive %d) %dx%d per eye",
+                                        playerProj, eyeW, eyeH);
+                        }
+                    }
+                }
+            }
+        }
         if (!m_Options.pcvr && fs.shouldRender && stale != m_StaleState) {
             static const char* const kStaleName[] = {"no-video", "live", "stale", "lost"};
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video state %s -> %s",
                         kStaleName[m_StaleState], kStaleName[stale]);
             m_StaleState = stale;
         }
-        if (!m_Options.pcvr && haveVideo && stale != 3) {
+        if (!m_Options.pcvr && haveVideo && stale != 3 && playerProj == 0) {
             const float screenH = (useCylinder ? m_Screen->cylinderRadiusM() * m_Screen->cylinderAngleRad() : screenW) /
                                   vcur.aspect;
             if (useCylinder) {
@@ -1981,6 +2088,39 @@ void XrContext::frameThreadMain()
                 cyl.centralAngle = m_Screen->cylinderAngleRad();
                 cyl.aspectRatio = vcur.aspect;
                 layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&cyl);
+            }
+            else if (m_Options.player) {
+                // §VR-PLAYER：單眼一個 quad；左右／上下並排時左右眼各一個 quad，各取影像的一半（eyeVisibility）。
+                // 每眼比例的規則同 playerfmt::eyeAspect（全寬／全高並排每一眼是半張，半寬／半高還原成整張的比例）
+                const int st = m_PlayerStereo.load(std::memory_order_relaxed);
+                const float fa = m_PlayerAspect.load(std::memory_order_relaxed);
+                const float frameAspect = fa > 0.0f ? fa : vcur.aspect;
+                playerEyeAspect = frameAspect;
+                if (st == 1) {
+                    playerEyeAspect = frameAspect > 2.5f ? frameAspect * 0.5f : frameAspect;
+                }
+                else if (st == 2) {
+                    playerEyeAspect = frameAspect < 1.2f ? frameAspect * 2.0f : frameAspect;
+                }
+                const XrRect2Di full = vcur.subImage.imageRect;
+                for (int e = 0; e < (st == 0 ? 1 : 2); e++) {
+                    XrCompositionLayerQuad& q = e == 0 ? quad : quadEye2;
+                    q.layerFlags = 0;
+                    q.space = m_LocalSpace;
+                    q.eyeVisibility = st == 0 ? XR_EYE_VISIBILITY_BOTH : (e == 0 ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT);
+                    q.subImage = vcur.subImage;
+                    if (st == 1) {
+                        q.subImage.imageRect.extent.width = full.extent.width / 2;
+                        q.subImage.imageRect.offset.x = full.offset.x + (e == 0 ? 0 : full.extent.width / 2);
+                    }
+                    else if (st == 2) {
+                        q.subImage.imageRect.extent.height = full.extent.height / 2;
+                        q.subImage.imageRect.offset.y = full.offset.y + (e == 0 ? 0 : full.extent.height / 2);
+                    }
+                    q.pose = m_Screen->quadPose();
+                    q.size = {screenW, screenW / playerEyeAspect};
+                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);
+                }
             }
             else {
                 quad.layerFlags = 0;
@@ -2000,7 +2140,7 @@ void XrContext::frameThreadMain()
             }
             videoLayer = true;
             videoGen = vcur.generation;
-            screenAspect = vcur.aspect;
+            screenAspect = playerEyeAspect > 0.0f ? playerEyeAspect : vcur.aspect;
             if (stale == 2 &&
                 ensureSolidQuad(m_StatusSwapchain, m_StatusImages, m_StatusImageCount, &m_StatusReady, 0.85f, 0.45f, 0.05f)) {
                 const float statusW = screenW * 0.3f;
@@ -2104,6 +2244,61 @@ void XrContext::frameThreadMain()
             }
         }
 
+        // §VR-PLAYER：控制列——螢幕下緣再往下 4 cm、往使用者拉近 15 cm、後仰 20 度；寬為螢幕的 55%（最寬 1.1 m）
+        bool panelShown = false;
+        XrPosef panelPose = {};
+        float panelW = 0.0f, panelH = 0.0f;
+        if (m_Options.player && fs.shouldRender && m_PanelSwapchain != XR_NULL_HANDLE && m_Screen->placed() &&
+            m_PanelVisible.load(std::memory_order_acquire)) {
+            QImage img;
+            {
+                std::lock_guard<std::mutex> lk(m_PanelMutex);
+                if (m_PanelDirty) {
+                    img = m_PanelImg;
+                    m_PanelDirty = false;
+                }
+            }
+            if (!img.isNull() && img.width() == kPanelW && img.height() == kPanelH) {
+                m_PanelUploaded = uploadImage(m_PanelSwapchain, m_PanelImages, m_PanelImageCount, img) || m_PanelUploaded;
+            }
+            if (m_PanelUploaded && layerCount < 7) {
+                XrPosef sp = m_Screen->quadPose();
+                float scrH = screenW / screenAspect;
+                panelW = std::min(screenW * 0.55f, 1.1f);
+                if (immersiveShown || playerProj != 0) {
+                    // 180°／360°：沒有螢幕。控制列擺在置中時的頭部前方 1.2 m、往下 0.35 m（當成一面高 0 的「螢幕」的下緣）
+                    const XrVector3f head = m_Screen->headPosition();
+                    const float yaw = m_Screen->yawRad();
+                    sp.position = {head.x - std::sin(yaw) * 1.2f, head.y - 0.31f, head.z - std::cos(yaw) * 1.2f};
+                    scrH = 0.0f;
+                    panelW = 0.9f;
+                }
+                panelH = panelW * static_cast<float>(kPanelH) / static_cast<float>(kPanelW);
+                const float tilt = -20.0f * 3.14159265f / 180.0f;
+                const XrQuaternionf qx = {std::sin(tilt * 0.5f), 0.0f, 0.0f, std::cos(tilt * 0.5f)};
+                const XrQuaternionf& q = sp.orientation;
+                const XrQuaternionf qt = {q.w * qx.x + q.x * qx.w + q.y * qx.z - q.z * qx.y,
+                                          q.w * qx.y - q.x * qx.z + q.y * qx.w + q.z * qx.x,
+                                          q.w * qx.z + q.x * qx.y - q.y * qx.x + q.z * qx.w,
+                                          q.w * qx.w - q.x * qx.x - q.y * qx.y - q.z * qx.z};
+                const XrRay::Vec3 top = XrRay::rotate(q, {0.0f, -scrH * 0.5f - 0.04f, 0.15f});
+                const XrRay::Vec3 down = XrRay::rotate(qt, {0.0f, -panelH * 0.5f, 0.0f});
+                panelPose.orientation = qt;
+                panelPose.position = {sp.position.x + top.x + down.x, sp.position.y + top.y + down.y, sp.position.z + top.z + down.z};
+                panelLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                panelLayer.space = m_LocalSpace;
+                panelLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                panelLayer.subImage.swapchain = m_PanelSwapchain;
+                panelLayer.subImage.imageRect.offset = {0, 0};
+                panelLayer.subImage.imageRect.extent = {kPanelW, kPanelH};
+                panelLayer.subImage.imageArrayIndex = 0;
+                panelLayer.pose = panelPose;
+                panelLayer.size = {panelW, panelH};
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&panelLayer);
+                panelShown = true;
+            }
+        }
+
         // X4：射線滑鼠。螢幕（影像或 loading quad）在畫面上才求交；失去 FOCUSED 時 XrInput 送全部放開
         XrCompositionLayerQuad pointer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         if (!m_Options.pcvr && m_Input != nullptr && fs.shouldRender) {
@@ -2112,7 +2307,11 @@ void XrContext::frameThreadMain()
             scr.kbPose = kbPose;
             scr.kbWidthM = kbW;
             scr.kbHeightM = kbH;
-            scr.valid = m_Screen->placed() && (videoLayer || loadingLayer);
+            scr.panelValid = panelShown;
+            scr.panelPose = panelPose;
+            scr.panelWidthM = panelW;
+            scr.panelHeightM = panelH;
+            scr.valid = m_Screen->placed() && (videoLayer || loadingLayer) && !immersiveShown;
             scr.cylinder = videoLayer && useCylinder;
             scr.pose = scr.cylinder ? m_Screen->cylinderPose() : m_Screen->quadPose();
             scr.widthM = screenW;
@@ -4028,6 +4227,14 @@ void XrContext::destroyAll()
     delete[] m_QuadImages;
     m_QuadImages = nullptr;
     m_QuadImageCount = 0;
+    if (m_PanelSwapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(m_PanelSwapchain);
+        m_PanelSwapchain = XR_NULL_HANDLE;
+    }
+    delete[] m_PanelImages;
+    m_PanelImages = nullptr;
+    m_PanelImageCount = 0;
+    m_PanelUploaded = false;
     for (auto* s : {&m_KbSwapchain, &m_KbHoverSwapchain, &m_KbPressSwapchain}) {
         if (*s != XR_NULL_HANDLE) {
             xrDestroySwapchain(*s);

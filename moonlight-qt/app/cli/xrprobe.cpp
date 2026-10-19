@@ -24,6 +24,8 @@
 #include "streaming/xr/xrasynclog.h"    // §VR-LOGASYNC：10 s 行交給另一條執行緒印（同上）
 #include "streaming/xr/xrflight.h"      // §VR-LATCH-FLIGHT：等不等在途的幀（同上）
 #include "streaming/xr/xrguard.h"       // §VR-LATCH-FLIGHT：runtime 防護的狀態機（同上）
+#include "streaming/player/playerformat.h"  // §VR-PLAYER：影片的畫面格式（同上）
+#include "streaming/player/playersync.h"    // §VR-PLAYER：影片幀的顯示格（同上）
 #include "streaming/xr/xrruntimejson.h"
 
 #ifdef HAVE_OPENXR
@@ -386,6 +388,8 @@ int runXrProbe(const XrProbeOptions& options)
         failures += xrflight::selfTest(report);
         failures += xrguard::selfTest(report);
         failures += xrlog::selfTest(report);
+        failures += playerfmt::selfTest(report);   // §VR-PLAYER
+        failures += playersync::selfTest(report);
         ProbeUtil::printLine(kTag, "selftest-latch: %lld case(s), %d failure(s)", static_cast<long long>(cases.size()), failures);
         root[QStringLiteral("cases")] = cases;
         root[QStringLiteral("failures")] = failures;

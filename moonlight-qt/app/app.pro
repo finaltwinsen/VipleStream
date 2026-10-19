@@ -324,6 +324,8 @@ SOURCES += \
     backend/systemproperties.cpp \
     backend/hidprobe.cpp \
     backend/vrlauncher.cpp \
+    backend/medialibrary.cpp \
+    backend/webresolver.cpp \
     backend/vrpreflightcheck.cpp \
     wm.cpp
 
@@ -410,6 +412,8 @@ HEADERS += \
     backend/systemproperties.h \
     backend/hidprobe.h \
     backend/vrlauncher.h \
+    backend/medialibrary.h \
+    backend/webresolver.h \
     backend/vrpreflight.h \
     backend/vrpreflightcheck.h
 
@@ -702,6 +706,24 @@ openxr:libplacebo:!macx {
     DEFINES += HAVE_XR_VIDEO
     SOURCES += streaming/xr/xrvideo.cpp streaming/video/ffmpeg-renderers/xrrenderer.cpp
     HEADERS += streaming/xr/xrvideo.h streaming/video/ffmpeg-renderers/xrrenderer.h
+}
+# §VR-PLAYER（2026-10-19）：頭盔影片模式（viplestream play）。Linux＋XR 影像路徑，另外要 libavformat 與
+# libswresample（Flatpak 的 FFmpeg 有開容器格式、網路協定與音訊解碼）。Windows client 不做這個模式。
+unix:!macx:openxr:libplacebo {
+    packagesExist(libavformat libswresample) {
+        message(VR video player enabled)
+
+        PKGCONFIG += libavformat libswresample
+        DEFINES += HAVE_VR_PLAYER
+        # 內建瀏覽器（Link 分頁）：有 Qt WebEngine（Flatpak 的 io.qt.qtwebengine.BaseApp）才開
+        qtHaveModule(webenginequick) {
+            message(VR video player: built-in browser enabled)
+            QT += webenginequick
+            DEFINES += HAVE_WEBENGINE
+        }
+        SOURCES += streaming/player/mediapipeline.cpp streaming/player/playerpanel.cpp streaming/player/playersession.cpp
+        HEADERS += streaming/player/mediapipeline.h streaming/player/playerformat.h streaming/player/playerpanel.h                    streaming/player/playersession.h streaming/player/playersync.h
+    }
 }
 
 RESOURCES += \

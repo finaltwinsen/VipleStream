@@ -226,6 +226,9 @@ public:
 
     void setServerCert(QSslCertificate serverCert);
 
+    // §VR-PLAYER（V3）：HTTPS 端點的基底網址（影片模式組 /viple/media/file 的網址用）
+    QUrl httpsBaseUrl() const { return m_BaseUrlHttps; }
+
     void setAddress(NvAddress address);
     void setHttpsPort(uint16_t port);
 

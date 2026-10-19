@@ -209,6 +209,18 @@ public:
         const uint64_t packed = periodUs == 0 ? static_cast<uint64_t>(0) : ((static_cast<uint64_t>(periodUs) << 32) | (gridUs % periodUs));
         m_Grid.store(packed, std::memory_order_relaxed);
     }
+    // ── §VR-PLAYER（V2，180°／360°）──
+    // 任何執行緒：開著時影像 render thread 不畫進影像 swapchain，改畫進自己的全景材質（兩張輪流）；XR frame thread
+    // 每一格用 renderImmersive() 依兩眼這一格的姿態從它畫出投影影像（頭轉到哪裡就畫哪裡）
+    void setImmersive(bool on) { m_Immersive.store(on, std::memory_order_release); }
+    // 至少有一張全景影像
+    bool immersiveReady();
+    // XR frame thread：proj 1＝180°、2＝360°、3＝360° 等角立方體（EAC）；stereo 0 單眼、1 左右、2 上下；yawRad＝內容正前方的朝向（LOCAL 空間，
+    // 置中時的頭部水平朝向）；views＝這一格 xrLocateViews（LOCAL 空間）的結果；eyeW×eyeH＝每眼的像素。成功時 out[0..1]
+    // 是兩眼在投影 swapchain 裡的範圍（同一個 swapchain，左右各半）。projection layer 的 pose／fov 要用同一組 views
+    bool renderImmersive(XrSession session, const XrView views[2], int proj, int stereo, float yawRad, int eyeW, int eyeH,
+                         XrSwapchainSubImage out[2]);
+
     // 暖機：XrContext bring-up 後、第一幀之前可呼叫（目前由 render thread 在第一幀自行處理）
     void setSession(XrSession session);
 
@@ -237,6 +249,10 @@ private:
                      bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk, VIPLE_VR_FRAME_META* synthMeta);
     // mboxUs＝這一幀在 mailbox 裡等了多久（只進統計）
     bool renderNewFrame(AVFrame* frame, uint32_t mboxUs);
+    // §VR-PLAYER（V2）：全景模式下的 renderNewFrame（畫進 m_Equi，不碰影像 swapchain）
+    bool renderEquiFrame(AVFrame* frame, uint64_t t0);
+    // §VR-PLAYER（V2，XR frame thread）：投影 swapchain（兩眼並排）
+    bool ensureProjSwapchain(XrSession session, int width, int height);
     // §VR-FOVEA：swapchain 裡一張影像的尺寸（還原後正前方的細節要有地方放，所以比解碼出來的影像大）
     void outputSize(int fw, int fh, int* ow, int* oh) const;
     bool ensureFull(int fw, int fh);
@@ -373,6 +389,20 @@ private:
     static void renderInfoCb(void* priv, const pl_render_info* info);   // pl_render_image 的 pass
     std::atomic<uint64_t> m_Grid{0};   // 見 setDisplayGrid：（週期 << 32）｜（格點對週期的餘數）；0＝沒有格點
     uint64_t m_TotalDrawn = 0;         // dump 用（XR thread）
+    // §VR-PLAYER（V2）
+    std::atomic<bool> m_Immersive{false};
+    std::mutex m_EquiMutex;
+    std::condition_variable m_EquiCv;
+    pl_tex m_Equi[2] = {};             // 全景影像（render thread 寫；寫哪一張、讀哪一張由 m_EquiMutex 保護的兩個索引決定）
+    int m_EquiReady = -1;              // m_EquiMutex：最新畫好的那一張；-1＝還沒有
+    int m_EquiInUse = -1;              // m_EquiMutex：frame thread 正在取樣的那一張（render thread 不寫它）
+    pl_dispatch m_DpFrame = nullptr;   // frame thread 專用（pl_dispatch 不能兩條執行緒共用）
+    SwapchainSet m_Proj;               // frame thread：投影 swapchain
+    bool m_ProjLinear = false;         // 投影 swapchain 是線性格式（要把 sRGB 值換回線性）
+    bool m_ProjFailed = false;         // 建不起來或 shader 失敗過：這個 session 不再試
+    VkSemaphore m_ProjSem = VK_NULL_HANDLE;  // frame thread 的 timeline semaphore（render thread 的是 m_Sem）
+    uint64_t m_ProjSemValue = 0;
+    uint64_t m_ImmFrames = 0;          // frame thread：畫過幾格全景（dev 讀回用）
     int m_DumpsDone = 0;               // dev：已經存了幾組
     static constexpr int kSynthDumpPairs = 6;  // 補幀開著時 --xr-dump-frame 一共存幾組（每 480 張一組）
 };

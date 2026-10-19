@@ -34,6 +34,9 @@ OUT=""
 KEEP_MONADO=0
 ARCH=$(uname -m)
 BRANCH=""
+PLAY_SRC=""
+PLAY_SEC=30
+PLAY_ARGS=""
 
 usage()
 {
@@ -61,6 +64,10 @@ VipleStream S1（Monado 無頭）XR 驗測（dev-only）
   --kill-runtime-after SEC
                       失敗注入：串流開始 SEC 秒後對 monado-service 送 SIGKILL（模擬 Frame 上 SteamVR 串流中
                       當掉），記錄 client 何時自行結束或進入平面；只在本腳本起 monado 時生效
+  --play SOURCE       §VR-PLAYER：跑一次影片模式（viplestream play）。SOURCE 是本機檔案（會複製到沙箱看得到的地方）
+                      或網址；給了 --play 而沒給 --stream 時不跑 xr-probe
+  --play-sec SEC      影片模式播幾秒（預設 30，帶 --duration）
+  --play-args "..."   影片模式的其他參數（例："--vr-format flat-sbs --test-script 5:pause,7:play"）
   -h, --help          顯示這段說明
 
 結束碼：0 xr-probe 成功（與串流結果無關，串流看摘要）；1 參數錯誤；2 前置條件不足；3 xr-probe 失敗。
@@ -83,6 +90,9 @@ while [ $# -gt 0 ]; do
 		--display-target) TARGET=${2:?}; shift 2 ;;
 		--rotate) ROTATE=1; shift ;;
 		--controllers) CONTROLLERS=${2:?}; shift 2 ;;
+		--play) PLAY_SRC=${2:?}; shift 2 ;;
+		--play-sec) PLAY_SEC=${2:?}; shift 2 ;;
+		--play-args) PLAY_ARGS=${2:?}; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "未知參數：$1（--help 看用法）" 1>&2; exit 1 ;;
 	esac
@@ -153,13 +163,41 @@ EOF
 FRUN=(flatpak run --arch="$ARCH" --filesystem=xdg-run/monado_comp_ipc --env=LD_LIBRARY_PATH="$STAGE" "$APP_ID//$BRANCH")
 
 # ── 3a. xr-probe --session ──
-log "xr-probe --session --duration $DURATION"
-timeout $((DURATION + 60)) "${FRUN[@]}" xr-probe --session --duration "$DURATION" \
-	--xr-runtime-json "$STAGE/openxr_monado_s1.json" --json "$STAGE/xrprobe.json" > "$OUT/xr-probe.out" 2>&1
-PROBE_RC=$?
-cp -f "$STAGE/xrprobe.json" "$OUT/" 2>/dev/null
-log "xr-probe rc=$PROBE_RC"
-grep -E "session|FOCUSED|frames|miss|refresh|vulkan" "$OUT/xr-probe.out" | grep -v "^ext:" | tail -12 | tee -a "$OUT/xr-s1.log"
+PROBE_RC=0
+if [ -z "$PLAY_SRC" ] || [ -n "$STREAM_HOST" ]; then
+	log "xr-probe --session --duration $DURATION"
+	timeout $((DURATION + 60)) "${FRUN[@]}" xr-probe --session --duration "$DURATION" \
+		--xr-runtime-json "$STAGE/openxr_monado_s1.json" --json "$STAGE/xrprobe.json" > "$OUT/xr-probe.out" 2>&1
+	PROBE_RC=$?
+	cp -f "$STAGE/xrprobe.json" "$OUT/" 2>/dev/null
+	log "xr-probe rc=$PROBE_RC"
+	grep -E "session|FOCUSED|frames|miss|refresh|vulkan" "$OUT/xr-probe.out" | grep -v "^ext:" | tail -12 | tee -a "$OUT/xr-s1.log"
+fi
+
+# ── 3c. 影片模式（可選，§VR-PLAYER）──
+if [ -n "$PLAY_SRC" ]; then
+	SRC="$PLAY_SRC"
+	if [ -f "$SRC" ]; then
+		cp -f "$SRC" "$STAGE/" && SRC="$STAGE/$(basename "$SRC")"
+	fi
+	rm -f "$STAGE/dump.png" "$STAGE/panel.png"
+	log "play $SRC（$PLAY_SEC s）$PLAY_ARGS"
+	# shellcheck disable=SC2086
+	timeout -s KILL $((PLAY_SEC + 90)) "${FRUN[@]}" play "$SRC" --duration "$PLAY_SEC" \
+		--xr-runtime-json "$STAGE/openxr_monado_s1.json" --xr-dump-frame "$STAGE/dump.png" --dump-panel "$STAGE/panel.png" \
+		$PLAY_ARGS > "$OUT/play.out" 2>&1
+	PLAY_RC=$?
+	log "play rc=$PLAY_RC"
+	cp -f "$STAGE/dump.png" "$OUT/play-dump.png" 2>/dev/null && log "讀回畫面：$OUT/play-dump.png"
+	cp -f "$STAGE/panel.png" "$OUT/play-panel.png" 2>/dev/null && log "控制列：$OUT/play-panel.png"
+	APPLOG=$(sed -n 's/^Redirecting log output to //p' "$OUT/play.out" | head -1)
+	if [ -n "$APPLOG" ] && [ -f "$APPLOG" ]; then
+		cp -f "$APPLOG" "$OUT/play-app.log"
+	else
+		cp -f "$OUT/play.out" "$OUT/play-app.log"
+	fi
+	grep -E "VIPLE-PLAYER|\[VIPLE-XR\] (bring-up|10s|session ended|video layer|placement)|Play error" "$OUT/play-app.log" | tail -30 | tee -a "$OUT/xr-s1.log"
+fi
 
 # ── 3b. 串流（可選）──
 if [ -n "$STREAM_HOST" ]; then

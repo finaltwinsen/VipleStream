@@ -27,8 +27,13 @@
 | 13 | `--filesystem=~/.steam:ro` | `~/.steam/root`、`~/.steam/steam` 是指向 Steam 安裝位置的 symlink，SteamVR 與 vrclient 會經由它找路徑 | **會暴露 `~/.steam/registry.vdf`（含 Steam 帳號名）**；唯讀但仍是個資。**PoC-F 之後收窄**成實際需要的子路徑或拿掉 | 新增；**收窄**：Frame 上 SteamVR 經 `openvrpaths.vrpath` 找到 `/opt/steamvr`，沒有用到 `~/.steam`；M3a 精簡時拿掉 |
 | 14 | `--env=LIBVA_DRIVER_NAME=` ＋ `--unset-env=LIBVA_DRIVER_NAME` | host 設的 VAAPI driver 名稱對 runtime 內的 Mesa／driver 不一定適用；清掉讓 libva 自己偵測。先設空再 unset 是為了相容舊版 flatpak（沒有 `--unset-env`） | 使用者想在 host 強制指定 VAAPI driver 時，要改用 `flatpak run --env=LIBVA_DRIVER_NAME=…` | 同 Flathub |
 | 15 | `--env=LIBVA_DRIVERS_PATH=` ＋ `--unset-env=LIBVA_DRIVERS_PATH` | host 的 driver 路徑在沙箱內不存在或 ABI 不合 | 同上 | 同 Flathub |
+| 16 | `--filesystem=xdg-videos:ro` | §VR-PLAYER 影片模式「This headset」分頁列影片資料夾 | 唯讀 | 新增（2026-10-19，頭盔驗過） |
+| 17 | `--filesystem=xdg-download:ro` | 同上，下載資料夾 | 唯讀 | 新增（2026-10-19） |
+| 18 | `--filesystem=/run/media:ro` | 同上，外接儲存裝置 | 唯讀 | 新增（2026-10-19）；**UNVERIFIED**（頭盔沒有插外接裝置測過） |
+| 19 | `--env=QTWEBENGINE_DISABLE_SANDBOX=1` | §VR-PLAYER 內建瀏覽器（Qt WebEngine）：Chromium 自己的沙箱在 Flatpak 內要再開一層 bwrap，頭盔上建不了 PID namespace（`bwrap: Setting pidns failed`），建立網頁時 UI 執行緒卡在 `WebContentsAdapter` 建構式永遠不回來 | 網頁的 renderer 少一層 Chromium 沙箱；Flatpak 的沙箱仍在。Flathub 上用 QtWebEngine 的 app 普遍這樣做 | 新增（2026-10-19，頭盔驗過：關掉後 YouTube 3 秒內載入） |
 
-`--env=` 只用來**清掉** host 的變數（不變式 7：不以環境變數當使用者設定）。任何功能開關都走 Settings UI 或 CLI 旗標。
+`--env=` 原則上只用來**清掉** host 的變數（不變式 7：不以環境變數當使用者設定）。任何功能開關都走 Settings UI 或 CLI 旗標。
+唯一例外是 #19：它不是使用者設定，是 Qt WebEngine 在 Flatpak 內能跑起來的前提（固定值，沒有開關的意義）。
 
 ## 2. 刻意不帶
 

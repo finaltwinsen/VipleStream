@@ -141,6 +141,9 @@ public:
         // 這個值的那個（PCVR 用 90；runtime 不支援擴充就沿用目前的）。waitViews 會等 predictedDisplayPeriod
         // 穩定、與要求一致後才回報（不一致時以量到的週期為準）。
         float preferredRefreshHz = 0.0f;
+        // §VR-PLAYER（2026-10-19）：頭盔影片模式。影像不是串流：暫停時同一張停很久是正常的，不顯示 stale／lost；
+        // 螢幕一律用 quad（控制列與射線求交都照 quad 算）；畫面格式由 setPlayerLayout() 在執行期改
+        bool player = false;
     };
 
     // M4a R1：bring-up 後量到的顯示參數（/launch 的 vrFov、vrIpd、vrEyeToHead、vrHz、vrPeriodNs 來源）
@@ -260,6 +263,26 @@ public:
     // 沒有 XrTime 換算（frameloop 模式）時只有估計值，不啟用、回 false。任何執行緒呼叫，frame thread 下一格生效。
     bool setPcvrSyntheticPoseRef(const VrSyntheticHeadTrack& track);
 
+    // ── §VR-PLAYER（頭盔影片模式）──
+    // 任何執行緒：畫面格式。projection 0 平面（1＝180°、2＝360°，V2）；stereo 0 單眼、1 左右、2 上下（每一眼取影像的
+    // 哪一半）；frameAspect＝整張影像的顯示比例（含 SAR），0＝照影像尺寸
+    void setPlayerLayout(int projection, int stereo, float frameAspect);
+    // 任何執行緒：螢幕距離（公尺）與水平張角（度）；frame thread 下一格套用，朝向不變
+    void setPlayerScreen(float distanceM, float fovDeg);
+    // 任何執行緒：控制列貼圖（kPanelW×kPanelH）與顯不顯示；圖換了 frame thread 下一格上傳
+    static constexpr int kPanelW = 1024;
+    static constexpr int kPanelH = 192;
+    void setPlayerPanel(const QImage& img, bool visible);
+    // 最近一格 xrWaitFrame 返回的時刻、那一格的預測顯示時刻（steady ns；沒有時間換算時是「返回後兩個週期」的估計值）
+    // 與週期。播放器照它決定每一張影片幀什麼時候交出去（playersync.h）。還沒有＝全部 0
+    struct DisplayTiming {
+        uint64_t wakeNs = 0;
+        uint64_t displayNs = 0;
+        uint64_t periodNs = 0;
+        bool exact = false;
+    };
+    DisplayTiming displayTiming() const;
+
     // 執行期載入 Vulkan loader（Linux：libvulkan.so.1；Windows：vulkan-1.dll），app 不連 -lvulkan。
     static PFN_vkGetInstanceProcAddr loadVulkanLoader(QString* error);
 
@@ -354,6 +377,23 @@ private:
     bool m_StatusReady = false;
     static constexpr uint32_t kStatusW = 256;
     static constexpr uint32_t kStatusH = 32;
+    // §VR-PLAYER
+    std::atomic<int> m_PlayerProj{0};
+    std::atomic<int> m_PlayerStereo{0};
+    std::atomic<float> m_PlayerAspect{0.0f};
+    std::atomic<float> m_PlayerDistM{0.0f};     // 0＝沒要求
+    std::atomic<float> m_PlayerFovDeg{0.0f};
+    std::atomic<bool> m_PlayerScreenDirty{false};
+    std::mutex m_PanelMutex;
+    QImage m_PanelImg;                          // m_PanelMutex
+    bool m_PanelDirty = false;                  // m_PanelMutex
+    std::atomic<bool> m_PanelVisible{false};
+    XrSwapchain m_PanelSwapchain = XR_NULL_HANDLE;
+    uint32_t m_PanelImageCount = 0;
+    VkImage* m_PanelImages = nullptr;
+    bool m_PanelUploaded = false;               // frame thread
+    mutable std::mutex m_TimingMutex;
+    DisplayTiming m_DisplayTiming;              // m_TimingMutex
     XrDesktopScreen* m_Screen = nullptr;  // X3 擺放（frame thread 用；requestRecenter 任何執行緒）
     int m_StaleState = 0;                 // 0 無影像、1 正常、2 stale（>1 s）、3 lost（>5 s，顯示 loading）
     bool m_LoggedLayerKind = false;

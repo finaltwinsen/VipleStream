@@ -267,6 +267,7 @@ const ActionEntry k_Actions[] = {
     {"xr-probe",     GlobalCommandLineParser::XrProbeRequested,     true},
     {"v4l2-probe",   GlobalCommandLineParser::V4l2ProbeRequested,   true},
     {"decode-bench", GlobalCommandLineParser::DecodeBenchRequested, true},
+    {"play",         GlobalCommandLineParser::PlayRequested,        false},
 };
 }
 
@@ -295,6 +296,7 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         "  xr-probe        Probe the OpenXR runtime (Steam Frame bring-up)\n"
         "  v4l2-probe      Probe V4L2 stateful video decoders (Steam Frame bring-up)\n"
         "  decode-bench    Benchmark a video decoder on a recorded bitstream (dev)\n"
+        "  play            Play a video file or URL in the headset (Steam Frame)\n"
         "\n"
         "See 'moonlight <action> --help' for help of specific action."
     );
@@ -304,6 +306,7 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
     parser.addValueOption("vr-test-preflight", "(dev) scripted round-trip samples for the check the GUI runs before it starts a VR stream, "
                           "instead of measuring (not saved; only without an action): comma-separated <ms>[*<count>] or "
                           "x[*<count>], x = no answer; the last item repeats, e.g. 150*8,30");
+    parser.addValueOption("dev-video", "(dev) open the video mode page at start: \"<tab>[,url=<url>][,grab=<sec>:<png>][,play=<sec>][,host=<name>][,dir=<path>]\"");
     parser.parse(args);
     auto posArgs = parser.positionalArguments();
 
@@ -323,6 +326,7 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
             }
             m_VrTestPreflight = spec;
         }
+        m_DevVideo = parser.value("dev-video");
         return NormalStartRequested;
     }
     else {
@@ -1190,6 +1194,75 @@ bool ListCommandLineParser::isVerbose() const
 // VipleStream §FRUC-VALIDATE — 離線 FRUC 品質量測（dev-only）。
 FrucOfflineCommandLineParser::FrucOfflineCommandLineParser()
 {
+}
+
+void PlayCommandLineParser::parse(const QStringList &args)
+{
+    CommandLineParser parser;
+    parser.setupCommonOptions();
+    parser.setApplicationDescription(
+        "\n"
+        "Plays a video file or URL in the headset (VR video mode).\n"
+        "Formats: auto, flat, flat-sbs, flat-tb, 180-mono, 180-sbs, 180-tb, 360-mono, 360-sbs, 360-tb.");
+    parser.addPositionalArgument("play", "play a video in the headset");
+    parser.addPositionalArgument("source", "local file path or URL", "<file-or-url>");
+    parser.addValueOption("vr-format", "picture format (auto|flat|flat-sbs|flat-tb|180-sbs|360-mono|...)");
+    parser.addValueOption("start", "start position in seconds");
+    parser.addValueOption("volume", "volume (0-200, percent)");
+    parser.addChoiceOption("screen", "screen size", {"s", "m", "l"});
+    parser.addValueOption("audio-url", "separate audio URL (sites that serve audio and video separately)");
+    parser.addValueOption("title", "title shown on the control bar");
+    parser.addFlagOption("no-hw-decode", "always decode in software");
+    parser.addValueOption("user-agent", "HTTP user agent");
+    parser.addValueOption("http-headers", "extra HTTP headers (\"Key: value\\r\\n...\")");
+    parser.addValueOption("duration", "(dev) stop after N seconds");
+    parser.addFlagOption("no-xr", "(dev) run the whole pipeline without XR on a simulated 120 Hz display");
+    parser.addValueOption("test-script", "(dev) scripted controls: \"<sec>:<cmd>[=<value>],...\"");
+    parser.addValueOption("dump-panel", "(dev) save the first control-bar image as PNG");
+    parser.addValueOption("xr-dump-frame", "(dev) save the 300th video frame as PNG");
+    parser.addFlagOption("xr-test-pointer", "(dev) synthetic XR pointer ray");
+    parser.addValueOption("xr-runtime-json", "(dev) OpenXR runtime manifest (in-process only)");
+    parser.addValueOption("trace-frames", "(dev) log the scheduling of the first N submitted frames");
+
+    if (!parser.parse(args)) {
+        parser.showError(parser.errorText());
+    }
+    parser.handleUnknownOptions();
+    parser.handleHelpAndVersionOptions();
+
+    const QStringList pos = parser.positionalArguments();
+    if (pos.length() < 2) {
+        parser.showError("Usage: play <file-or-url>");
+    }
+    source = pos.at(1);
+    if (parser.isSet("vr-format")) {
+        format = parser.value("vr-format");
+    }
+    if (parser.isSet("start")) {
+        startSec = parser.value("start").toDouble();
+    }
+    if (parser.isSet("volume")) {
+        volume = qBound(0, parser.value("volume").toInt(), 200) / 100.0f;
+    }
+    if (parser.isSet("screen")) {
+        const QString v = parser.getChoiceOptionValue("screen");
+        screenPreset = v == QLatin1String("s") ? 0 : (v == QLatin1String("l") ? 2 : 1);
+    }
+    audioSource = parser.value("audio-url");
+    title = parser.value("title");
+    hwDecode = !parser.isSet("no-hw-decode");
+    userAgent = parser.value("user-agent");
+    httpHeaders = parser.value("http-headers").replace(QLatin1String("\\r\\n"), QLatin1String("\r\n"));
+    durationSec = parser.value("duration").toInt();
+    noXr = parser.isSet("no-xr");
+    testScript = parser.value("test-script");
+    dumpPanelPath = parser.value("dump-panel");
+    dumpFramePath = parser.value("xr-dump-frame");
+    testPointer = parser.isSet("xr-test-pointer");
+    traceFrames = parser.value("trace-frames").toInt();
+    if (parser.isSet("xr-runtime-json")) {
+        xrRuntimeJson = QFileInfo(parser.value("xr-runtime-json")).absoluteFilePath();
+    }
 }
 
 FrucOfflineCommandLineParser::~FrucOfflineCommandLineParser()

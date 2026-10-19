@@ -38,7 +38,7 @@ bool inPidNamespacedSandbox()
 // 子行程（main.cpp 的 CLI stream 路徑）印到 stderr、給使用者看的錯誤行
 QString userFacingError(const QString& line)
 {
-    static const char* const k_Prefixes[] = {"Stream failed: ", "Stream error: ", "Error: "};
+    static const char* const k_Prefixes[] = {"Stream failed: ", "Stream error: ", "Play error: ", "Error: "};
     for (const char* p : k_Prefixes) {
         const QString prefix = QString::fromLatin1(p);
         if (line.startsWith(prefix)) {
@@ -89,6 +89,66 @@ bool VrLauncher::available() const
 #if defined(Q_OS_LINUX) && defined(HAVE_OPENXR)
     // Frame 從收藏庫開的 app 都跑在 gamescope 裡；一般 Linux 桌面不跳模式選擇
     return !qEnvironmentVariableIsEmpty("GAMESCOPE_WAYLAND_DISPLAY");
+#else
+    return false;
+#endif
+}
+
+namespace {
+struct DevVideo {
+    int tab = -1;
+    QString url;
+    int grabSec = 0;
+    QString grabPath;
+    int playSec = 0;
+    QString host;
+    QString dir;
+} s_DevVideo;
+}  // namespace
+
+void VrLauncher::setDevVideo(const QString& spec)
+{
+    if (spec.isEmpty()) {
+        return;
+    }
+    const QStringList parts = spec.split(QLatin1Char(','));
+    s_DevVideo.tab = parts.value(0).toInt();
+    for (const QString& p : parts.mid(1)) {
+        const QString k = p.section(QLatin1Char('='), 0, 0), v = p.section(QLatin1Char('='), 1);
+        if (k == QLatin1String("url")) {
+            s_DevVideo.url = v;
+        }
+        else if (k == QLatin1String("grab")) {
+            s_DevVideo.grabSec = v.section(QLatin1Char(':'), 0, 0).toInt();
+            s_DevVideo.grabPath = v.section(QLatin1Char(':'), 1);
+        }
+        else if (k == QLatin1String("play")) {
+            s_DevVideo.playSec = v.toInt();
+        }
+        else if (k == QLatin1String("host")) {
+            s_DevVideo.host = v;
+        }
+        else if (k == QLatin1String("dir")) {
+            s_DevVideo.dir = v;
+        }
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] dev video page: tab=%d url=%s grab=%d play=%d host=%s dir=%s",
+                s_DevVideo.tab, qPrintable(s_DevVideo.url), s_DevVideo.grabSec, s_DevVideo.playSec, qPrintable(s_DevVideo.host),
+                qPrintable(s_DevVideo.dir));
+}
+
+int VrLauncher::devVideoTab() const { return s_DevVideo.tab; }
+QString VrLauncher::devVideoUrl() const { return s_DevVideo.url; }
+int VrLauncher::devVideoGrabSec() const { return s_DevVideo.grabSec; }
+QString VrLauncher::devVideoGrabPath() const { return s_DevVideo.grabPath; }
+int VrLauncher::devVideoPlaySec() const { return s_DevVideo.playSec; }
+QString VrLauncher::devVideoHost() const { return s_DevVideo.host; }
+QString VrLauncher::devVideoDir() const { return s_DevVideo.dir; }
+
+bool VrLauncher::playerAvailable() const
+{
+#ifdef HAVE_VR_PLAYER
+    return available();
 #else
     return false;
 #endif
@@ -219,6 +279,27 @@ void VrLauncher::preflightPassed()
     startProcess(hostAddress, appName, takeover);
 }
 
+bool VrLauncher::launchPlayer(const QString& source, const QString& format, const QString& title, const QString& audioSource)
+{
+    if (running() || source.trimmed().isEmpty() || !available() || !blockedReason().isEmpty()) {
+        return false;
+    }
+    QStringList args{QStringLiteral("play")};
+    if (!format.isEmpty() && format != QLatin1String("auto")) {
+        args << QStringLiteral("--vr-format") << format;
+    }
+    if (!title.isEmpty()) {
+        args << QStringLiteral("--title") << title;
+    }
+    if (!audioSource.isEmpty()) {
+        args << QStringLiteral("--audio-url") << audioSource;
+    }
+    // 來源放在 "--" 之後：以 '-' 開頭的檔名不會被當成選項
+    args << QStringLiteral("--") << source.trimmed();
+    m_ChildIsPlayer = true;
+    return startChild(args, QStringLiteral("video player"));
+}
+
 bool VrLauncher::startProcess(const QString& hostAddress, const QString& appName, bool takeover)
 {
     // 只帶最少的參數（見 vrlauncher.h）。位置參數放在 "--" 之後：app 名稱以 '-' 開頭時不會被當成選項。
@@ -227,6 +308,14 @@ bool VrLauncher::startProcess(const QString& hostAddress, const QString& appName
         args << QStringLiteral("--takeover");
     }
     args << QStringLiteral("--") << hostAddress << appName;
+    m_ChildIsPlayer = false;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] launching VR stream: app=\"%s\"%s",
+                qPrintable(appName), takeover ? " (takeover)" : "");
+    return startChild(args, QStringLiteral("VR stream"));
+}
+
+bool VrLauncher::startChild(const QStringList& args, const QString& what)
+{
 
     if (m_Proc == nullptr) {
         m_Proc = new QProcess(this);
@@ -268,8 +357,7 @@ bool VrLauncher::startProcess(const QString& hostAddress, const QString& appName
     m_StderrPartial.clear();
     m_LastError.clear();
 
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] launching VR stream: app=\"%s\"%s",
-                qPrintable(appName), takeover ? " (takeover)" : "");
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] starting the %s process", qPrintable(what));
     // 子行程是同一支程式，會自己拿單一實例鎖：開之前先放掉，結束後再拿回
     singleInstanceReleaseForChild();
     m_Proc->start(QCoreApplication::applicationFilePath(), args);
@@ -313,7 +401,22 @@ void VrLauncher::processEnded(int exitCode, QProcess::ExitStatus status)
     }
 
     QString error;
-    if (status != QProcess::NormalExit) {
+    if (m_ChildIsPlayer) {
+        // §VR-PLAYER 的結束碼（playersession.h）：0 正常、2 XR 起不來、3 影片開不了或讀取失敗、4 XR session 中途結束
+        if (status != QProcess::NormalExit) {
+            error = tr("The video player stopped unexpectedly.");
+        }
+        else if (exitCode == 2) {
+            error = tr("Could not start VR for the video player.") + (m_LastError.isEmpty() ? QString() : QStringLiteral("\n") + m_LastError);
+        }
+        else if (exitCode == 3) {
+            error = tr("Could not play this video.") + (m_LastError.isEmpty() ? QString() : QStringLiteral("\n") + m_LastError);
+        }
+        else if (exitCode != 0 && exitCode != 4) {
+            error = !m_LastError.isEmpty() ? m_LastError : tr("The video player ended with an error (code %1).").arg(exitCode);
+        }
+    }
+    else if (status != QProcess::NormalExit) {
         error = tr("The VR stream stopped unexpectedly.");
     }
     else if (exitCode == 2) {

@@ -950,10 +950,12 @@ decoder 執行緒（VR 走真 XR 才有）
                                                                                  pollUs＝輪詢的間隔（目前沒有另外設，固定印 0）；mixed＝這個視窗裡間隔有沒有變過（目前固定 0）
 
 自測
-[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑六個純邏輯 header 的自測、一共 113 個案例
+[VIPLE-XR-PROBE] selftest-latch <PASS|FAIL> <案例> (…)                        ← `xr-probe --selftest-latch` 現在依序跑八個純邏輯 header 的自測、一共 134 個案例
                                                                                  （前三個 header 的 71 個是 5b-6 這一批的，輸出不變；xrflight.h 26 個與 xrguard.h 14 個是 5b-7 加的；
                                                                                  xrasynclog.h 2 個是 §VR-LOGASYNC 的：`logasync-order-flush`（照順序、stop 印完、長行、stop 後重起）、
                                                                                  `logasync-drop-full`（印的執行緒卡住時佇列滿了丟、計數、stop 補一行））。
+                                                                                 playerformat.h 15 個與 playersync.h 6 個是 §VR-PLAYER 的（檔名標記、名稱來回、判斷順序、中繼資料、
+                                                                                 每眼比例；24／25／30／60／120 fps 的格數分布、時鐘抖動下的鎖相、交出／丟掉／等待的判斷）。
                                                                                  xrlatchstats.h：原有的 27 個（輸出不變），加上 `latch-wait-…`／`latch-flip-…`／
                                                                                  `latch-half-wait-…`／`latch-half-flip-…` 15 個（不看基準的晚到計數：差一點、真的晚、150 µs 的
                                                                                  邊界、半速、基準過期、兩張擠在同一格、沒有送出時刻、分格的邊界、隨機腳本的自洽）；
@@ -1637,6 +1639,39 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 
 - `reason=format-change` 之後會再有一行 `open <base>-<n>.<ext>`（decoder 重建、格式或解析度改變）。
 - 開檔或寫檔失敗就整個停用（`dump disabled …`），不會每幀刷錯誤。一般 session 沒帶 `--dump-bitstream` 時一行都不會有。
+
+### `[VIPLE-PLAYER]` —— 頭盔影片模式（§VR-PLAYER，2026-10-19）
+
+```
+[VIPLE-PLAYER] opened in <ms> ms: container=<c> video=<codec>/<profile> <bits>bit <W>x<H> aspect=<a> fps=<f> decoder=<name>(hw|sw) audio=<codec|none> duration=<s> s seekable=<0|1> start=<s> s
+[VIPLE-PLAYER] web resolved in <ms> ms: <single stream|video+audio>[ (live)][ - title known]   ← YouTube 等網站經 yt-dlp
+[VIPLE-PLAYER] format <name> (from user|metadata|filename|default)       ← 名稱見 playerformat.h（flat、flat-sbs、360-tb…）
+[VIPLE-PLAYER] 10s pos=<s>/<dur> <playing|paused|ended> submitted=<n> (<fps>) dropped=<n> late=<n> preview=<n> slots(0,1..6,7+)=… leadMin=<ms> | decoded=<n> decErr=<n> decMax=<µs> seekDrop=<n> | clkErr=<ms> underrun=<n> buffered=<s> fq=<n> rx=<Mbps> | hz=<Hz>[ (approx)]
+[VIPLE-PLAYER] final …                                                   ← 同上，結束時那一段
+[VIPLE-PLAYER] pause|play at <s> s / seek to <s> s / format -> <name> (user) / screen <S|M|L> (<m>, <deg>) / exit requested
+[VIPLE-PLAYER] immersive swapchain <W>x<H> fmt=<vk> linear=<0|1> images=<n>   ← 180°／360° 第一次畫
+[VIPLE-PLAYER] reached the end (<s> s) / stopped at <s> s (rc=<n>) / XR session ended (lost|exit)
+[VIPLE-PLAYER] open failed (<原因>): resolving the page again           ← 網站來源開不了（YouTube 偶發 403）：重新解析再開一次
+[VIPLE-PLAYER] browser play in VR: page=<網址> videoSrc=<網頁 video 的網址前 80 字>   ← 內建瀏覽器按下「Play in VR」（GUI 行程，Qt Warning）
+[VIPLE-PLAYER] browser load status=<0 開始|2 成功|3 失敗> <網址>[ error=…] / browser render process terminated: …
+[VIPLE-PLAYER] dev video page: tab=… / dev grab … / dev: opening PC …    ← --dev-video（無人驗測）
+```
+- `submitted`：交給 XrVideo 的幀；`dropped`：輪不到的幀（幀率比顯示高、或晚了而且下一張也晚了）；`late`：交出時已經過了
+  「挑影像前 2.5 ms」（可能晚一格出現）。`slots`：相鄰兩張相差幾個顯示格的分布——24 fps 在 120 Hz 應該全部是 5，30 fps
+  全部是 4；0 是同一格或倒退（seek 之後），7+ 是中間斷了。`leadMin`：交出時距離挑影像最少還有多久。
+- `decMax`：一個封包送進解碼器到幀出來最長多久（不含等佇列空位）；`seekDrop`：seek 之後在目標時間之前、丟掉的幀。
+- `clkErr`：聲音回呼量到的時刻和平滑後的時鐘差最多多少（大＝音訊回呼抖動大）；`underrun`：播放中聲音不夠（網路卡住）；
+  `buffered`：讀取領先播放位置幾秒；`rx`：讀進來的位元率。`hz`：XR 的顯示更新率（`--no-xr` 時 0）。
+- 結束碼：0 正常（播完、離開、XR session 由使用者結束）、2 XR 起不來、3 影片開不了或讀取失敗、4 XR session 中途失效。
+  錯誤原因同時印在 stderr（`Play error: …`），GUI 的對話框顯示它。
+
+### `[VIPLE-MEDIA]` —— host 的影片分享（server，§VR-PLAYER V3）
+
+```
+[VIPLE-MEDIA] serving root=<n> size=<bytes>           ← 某個檔案第一次從頭讀（之後的範圍請求不印）
+[VIPLE-MEDIA] file denied root=<n> (<原因>)            ← 路徑跑出分享資料夾、不存在、或不是檔案
+```
+- 只有 HTTPS、配對過的 client；`media_dirs` 沒設時 `/viple/media/roots` 回空清單、其他回 404。
 
 ## 6. 分析工具
 

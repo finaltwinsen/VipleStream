@@ -19,6 +19,8 @@
         <file>gui/NavigableDialog.qml</file>
         <file>gui/UpdateDialog.qml</file>
         <file>gui/VrPreflightDialog.qml</file>
+        <file>gui/VideoView.qml</file>
+        <file>gui/VideoBrowser.qml</file>
         <file>gui/CenteredGridView.qml</file>
         <file>gui/CliPair.qml</file>
         <file>gui/Theme.qml</file>

@@ -384,6 +384,9 @@ namespace config {
     std::string file_state;
 
     std::string external_ip;
+
+    // VipleStream 2.0 §VR-PLAYER（V3）：分享給已配對 client（頭盔影片模式）的資料夾；空＝不分享（預設）
+    std::vector<std::string> media_dirs;
   };
 
   struct input_t {

@@ -320,7 +320,8 @@ preflight()
 {
 	local mode=$1
 	local host_arch tool ref free_kb df_target
-	local -a tools=(flatpak flatpak-builder) refs=(org.kde.Sdk org.kde.Platform)
+	# io.qt.qtwebengine.BaseApp：manifest 的 base（§VR-PLAYER 內建瀏覽器），版本跟 KDE runtime 一樣
+	local -a tools=(flatpak flatpak-builder) refs=(org.kde.Sdk org.kde.Platform io.qt.qtwebengine.BaseApp)
 	host_arch=$(uname -m)
 	MISSING=()
 	HINTS=()

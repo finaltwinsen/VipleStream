@@ -38,6 +38,7 @@
 #include "display_device.h"
 #include "file_handler.h"
 #include "file_transfer.h"
+#include "media_share.h"  // §VR-PLAYER（V3）
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
@@ -2019,6 +2020,113 @@ namespace nvhttp {
     display_device::revert_configuration();
   }
 
+  // ── VipleStream 2.0 §VR-PLAYER（V3）：host 的影片分享（media_share.h）。只在 HTTPS（已配對的 client 憑證）──
+
+  void media_xml_reply(resp_https_t &response, pt::ptree &tree) {
+    std::ostringstream data;
+    pt::write_xml(data, tree);
+    response->write(data.str());
+    response->close_connection_after_response = true;
+  }
+
+  void media_roots(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+    pt::ptree tree;
+    tree.put("root.<xmlattr>.status_code", 200);
+    for (const auto &r : media_share::roots()) {
+      pt::ptree node;
+      node.put("Index", r.index);
+      node.put("Name", r.name);
+      tree.add_child("root.Folder", node);
+    }
+    media_xml_reply(response, tree);
+  }
+
+  void media_list(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+    pt::ptree tree;
+    auto args = request->parse_query_string();
+    int root = -1;
+    try {
+      root = std::stoi(get_arg(args, "root"));
+    } catch (...) {
+      root = -1;
+    }
+    const auto rel = get_arg(args, "path", "");
+    std::vector<media_share::entry_t> entries;
+    std::string err;
+    if (!media_share::list(root, rel, &entries, &err)) {
+      tree.put("root.<xmlattr>.status_code", 404);
+      tree.put("root.<xmlattr>.status_message", err);
+      media_xml_reply(response, tree);
+      return;
+    }
+    tree.put("root.<xmlattr>.status_code", 200);
+    for (const auto &e : entries) {
+      pt::ptree node;
+      node.put("Name", e.name);
+      node.put("Dir", e.is_dir ? 1 : 0);
+      node.put("Size", e.size);
+      node.put("Mtime", e.mtime);
+      tree.add_child("root.Entry", node);
+    }
+    media_xml_reply(response, tree);
+  }
+
+  void media_file(resp_https_t response, req_https_t request) {
+    // 一次最多回這麼多（206 的範圍可能比要求的短，Content-Range 照實際的寫；client 一段一段要，見頭盔端的
+    // mediapipeline.cpp 的 RangeReader）。整段先讀進記憶體再交給 SimpleWeb 的一般寫法：
+    //   - SimpleWeb 的回應是先寫進緩衝區、處理完才送，一次送整個檔案會把整支影片放進記憶體；
+    //   - 2026-10-19 試過用 Response::send() 一塊一塊接著送（不設上限），client seek 換連線之後整個 HTTPS 伺服器
+    //     不再回應任何連線（連 /serverinfo 都不回，要重啟服務），原因沒有查清楚——所以不用那種寫法。
+    constexpr std::uint64_t k_max_chunk = 8ull * 1024 * 1024;
+    auto args = request->parse_query_string();
+    int root = -1;
+    try {
+      root = std::stoi(get_arg(args, "root"));
+    } catch (...) {
+      root = -1;
+    }
+    const auto rel = get_arg(args, "path", "");
+    std::filesystem::path p;
+    std::string err;
+    std::error_code ec;
+    if (!media_share::resolve(root, rel, &p, &err) || !std::filesystem::is_regular_file(p, ec)) {
+      BOOST_LOG(info) << "[VIPLE-MEDIA] file denied root="sv << root << " ("sv << (err.empty() ? "not a file"s : err) << ')';
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+      return;
+    }
+    const std::uint64_t size = std::filesystem::file_size(p, ec);
+    std::string range;
+    if (auto it = request->header.find("Range"); it != request->header.end()) {
+      range = it->second;
+    }
+    std::uint64_t b = 0, e = 0;
+    if (ec || !media_share::parse_range(range, size, k_max_chunk, &b, &e)) {
+      SimpleWeb::CaseInsensitiveMultimap h;
+      h.emplace("Content-Range", "bytes */" + std::to_string(size));
+      response->write(SimpleWeb::StatusCode::client_error_range_not_satisfiable, h);
+      return;
+    }
+    std::ifstream in(p, std::ios::binary);
+    std::string buf(e - b + 1, '\0');
+    in.seekg((std::streamoff) b);
+    in.read(buf.data(), (std::streamsize) buf.size());
+    if ((std::uint64_t) in.gcount() != buf.size()) {
+      response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
+      return;
+    }
+    if (b == 0) {
+      BOOST_LOG(info) << "[VIPLE-MEDIA] serving root="sv << root << " size="sv << size;
+    }
+    SimpleWeb::CaseInsensitiveMultimap h;
+    h.emplace("Content-Type", media_share::content_type(p));
+    h.emplace("Accept-Ranges", "bytes");
+    h.emplace("Content-Range", "bytes " + std::to_string(b) + "-" + std::to_string(e) + "/" + std::to_string(size));
+    response->write(SimpleWeb::StatusCode::success_partial_content, buf, h);
+    response->close_connection_after_response = true;
+  }
+
   void appasset(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
@@ -3070,6 +3178,10 @@ namespace nvhttp {
     };
     https_server.resource["^/applist$"]["GET"] = applist<SunshineHTTPS>;
     https_server.resource["^/appasset$"]["GET"] = appasset;
+    // §VR-PLAYER（V3）：沒有設定 media_dirs 時這三個端點照樣存在，只是沒有資料夾可看（roots 回空清單、其他回 404）
+    https_server.resource["^/viple/media/roots$"]["GET"] = media_roots;
+    https_server.resource["^/viple/media/list$"]["GET"] = media_list;
+    https_server.resource["^/viple/media/file$"]["GET"] = media_file;
     https_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) {
       launch<SunshineHTTPS>(host_audio, resp, req);
     };

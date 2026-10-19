@@ -2933,3 +2933,64 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
 - 每幀分散送出（pacing）重複量測後再決定要不要改 server 的節拍。
 - CLIENT_TIMING（1 Hz 統計）仍只走 ENet（不急，掉了也不影響行為）。
 - USB 卡死的觸發條件。
+
+## 11. 頭盔影片模式（§VR-PLAYER，2026-10-19）
+
+在桌面模式、VR 模式之外的第三個模式：在頭盔上播影片，不需要主機。主畫面的模式對話框多一個「Video mode」，
+進選片頁（`gui/VideoView.qml`）選好之後，`VrLauncher::launchPlayer()` 另開子行程
+`viplestream play [--vr-format F] [--title T] [--audio-url A] -- <來源>`（GUI 隱藏，播完再出現；做法同 VR 模式）。
+
+- **來源**：頭盔本機的檔案（`~/Videos`、`~/Downloads`、`/run/media` 底下的外接儲存裝置、家目錄）；網址（mp4／mkv／
+  webm 檔或 HLS）；`<host>` 分享的資料夾（server 的 `media_dirs`，見下）；YouTube 等網站（yt-dlp 解析，見下）。
+  選片頁另有「最近播過」，從上次停下的地方接著播（播完的從頭）。
+- **畫面格式**：一般 2D 大螢幕、3D 左右／上下並排（左右眼各取影像的一半，兩個 quad 圖層分眼顯示；半寬／全寬照長寬比判斷）、
+  180°、360°（單眼或立體）。判斷順序：使用者指定 > 這支片上次選的 > 容器的中繼資料（spherical／stereo3d）> 檔名標記
+  （`_360`、`_180`、`_SBS`、`_LR`、`_TB`、`_OU`、`_3DH`…）> 平面。規則在 `streaming/player/playerformat.h`（有自測）。
+- **180°／360° 的畫法**：頭盔的 SteamVR 沒有 equirect／cylinder 圖層，所以影像 render thread 把每一張影片幀畫進自己的
+  全景材質（兩張輪流），XR frame thread 每一格照兩眼這一格的姿態與視角，用 libplacebo 的自訂 shader 從全景材質畫出投影
+  影像（每眼最大 2048 px），送 projection 圖層。內容的正前方是置中時的頭部水平朝向（控制列的「Center」重設）。
+- **影音同步與節拍**：`streaming/player/mediapipeline.*`（不依賴 Qt／OpenXR）：demux、影像解碼（H.264／HEVC 8-bit／VP9 用
+  頭盔的 v4l2m2m 硬體解碼，10-bit、AV1 與其他編碼軟解）、音訊（swresample → 48 kHz 立體聲 → SDL）。時鐘以聲音為準
+  （回呼抖動用 5% 的增益平滑，差超過 60 ms 才直接對齊）；每張影片幀照 XR 的顯示格點決定在哪一格出現、什麼時候交出去
+  （`playersync.h`，有自測；鎖相避免時鐘抖動讓 24 fps 變成 4／6 格交錯）。顯示更新率：25／50 fps 的片要求 100 Hz，其他 120 Hz。
+- **VR 裡的控制**：控制列（螢幕下緣，180°／360° 時在前下方）：−30／−10 秒、播放／暫停、+10／+30 秒、音量、畫面格式、
+  螢幕大小（S 2 m／50°、M 3 m／70°、L 4 m／95°）、置中、離開；時間軸可以點。扳機點螢幕或選單鍵開關控制列，播放中 5 秒
+  沒動自動收起、暫停時一直顯示；搖桿左右＝後退／前進 10 秒（按住每 0.5 秒再跳）、上下＝音量。
+- **`<host>` 的分享資料夾（V3）**：server 設定 `media_dirs = <資料夾>,<資料夾>`（預設空＝關閉）。HTTPS 端點
+  `/viple/media/roots`、`/viple/media/list?root=&path=`、`/viple/media/file?root=&path=`，只有配對過的 client 憑證進得來；
+  路徑正規化後確認還在分享資料夾之內。檔案每次最多回 8 MB 的 206 範圍（SimpleWeb 會把整個回應先放進記憶體），FFmpeg
+  讀完一段會在同一條連線要下一段。頭盔端用配對憑證開這個網址（寫在 app 自己的快取資料夾，播完刪掉）。
+  選片頁的「PC」分頁先列配對過的主機（上線狀態即時更新），點進去是類檔案總管的介面：「All PCs」、「Up one level」、
+  「Refresh」按鈕、可點的路徑列（主機 › 分享資料夾 › 子資料夾）；返回鍵／Esc＝上一層。列資料夾在背景執行緒做
+  （`MediaLibrary::hostBrowse`），不卡介面。
+- **YouTube 等網站（V4）**：Flatpak 帶固定版本的 yt-dlp（`/app/share/viplestream/yt-dlp`），選片頁可以按「Update」從
+  yt-dlp 的 GitHub release 下載最新版（核對 SHA2-256SUMS）到 app 資料夾，之後優先用它。選格式：不要 AV1、不要 HDR、
+  最高 2160p，影像與音訊分開兩條（播放器開兩個輸入）。選片頁可以搜尋 YouTube。YouTube 偶爾給出一開就 403 的網址：
+  網站來源開失敗時重新解析一次再開。
+- **內建瀏覽器**：Flatpak 建置的最後一個分頁是瀏覽器（`gui/VideoBrowser.qml`，Qt WebEngine＝Chromium；manifest 用
+  `io.qt.qtwebengine.BaseApp` 6.11 當 base）。上一頁／下一頁／重新整理／首頁、網址列（不像網址的字當 YouTube 搜尋）、cookie
+  與登入會留著。「Play in VR」：先暫停網頁裡的影片；影片是直接的 http(s) 網址就直接播，不是（YouTube 等用 MediaSource 的
+  `blob:`）就把這一頁的網址交給播放器經 yt-dlp 解析，所以 180°／360°／EAC 的判斷與 VR 播放和其他來源一樣。沒有 WebEngine
+  的建置這一頁是「Link」（貼網址）。Chromium 自己的沙箱在頭盔上起不來（`bwrap: Setting pidns failed`，建立網頁時 UI 執行緒
+  永遠卡住），manifest 用 `--env=QTWEBENGINE_DISABLE_SANDBOX=1` 關掉（Flatpak 的沙箱仍在；理由見 `finish-args.md` #19）。
+  WebEngine 只在一般啟動（圖形介面）初始化，`stream`／`play` 子行程不載入。
+- **dev 參數**：`--no-xr`（不開 XR，用假的 120 Hz 格點跑整條管線）、`--duration`、`--test-script "<秒>:<指令>,…"`
+  （pause、play、seek=、seekrel=、vol=、fmt=、screen=、panel、click=u:v、recenter、exit）、`--dump-panel`、`--xr-dump-frame`、
+  `--xr-runtime-json`。builder 上用 `xr-s1-monado.sh --play <檔案> --play-args "…"` 跑 Monado。圖形介面：
+  `--dev-video "<分頁>[,url=<網址>][,grab=<秒>:<png>][,play=<秒>][,host=<主機名>][,dir=<子資料夾>]"`＝一啟動就開影片模式的
+  某個分頁、瀏覽器開這個網址、幾秒後把整頁存成 PNG、幾秒後按「Play in VR」、PC 分頁自動點進這台主機與子資料夾（頭盔無人驗測用）。
+- **不做**：Windows client 不加這個模式；DRM 保護的串流服務播不了；字幕之後再說。
+- **驗到哪裡（2026-10-19，頭盔無人＋builder；使用者還沒配戴）**：
+  - 自測 134 案（新增 playerformat.h 15、playersync.h 6）；x86_64 與 arm64 建置編過、沒有新的警告；Windows 與 Linux 的 server 編過。
+  - 開發機／builder 的測試程式（不開 XR）：播放、seek（0.3 秒恢復）、暫停、播完、沒有聲音的片、聲音時鐘的平滑與鎖相。
+  - builder 的 Monado：XR 路徑、控制列、切格式、換螢幕大小。
+  - 頭盔：H.264 1080p24、HEVC 4K60、VP9（硬體解碼）；24 fps 每張 5 格、30 fps 4 格、60 fps 2 格；360°（經緯、上下並排、
+    EAC）與 180° 左右並排的投影讀回畫面方向正確；360° 時 XR 執行緒每格約 0.3 ms、漏幀 0（原本每格等 GPU 做完，6.5 ms、漏 1.3%）；
+    `<host>` 的分享檔案（3D 並排從檔名認出、seek 0.5 秒）；YouTube 4K60、YouTube 360°（EAC）、從片中開始播與 seek。
+  - 修掉的坑：影像結尾持鎖自鎖；seek 之後舊序號的結尾旗標；聲音斷段時時鐘不補；XR 起來之前時鐘先走（開頭 2 秒的幀全晚）；
+    統計相鄰格數的方法錯（相位在半格附近時把 2 格算成 1／3 交錯）；FFmpeg 9 預設驗 server 憑證；FFmpeg 把比要求短的 206
+    當成斷線（改自己的 RangeReader）；server 用 `Response::send()` 邊讀邊送會讓整個 HTTPS 伺服器不再回應（改回每次 8 MB）；
+    YouTube 的 webm 一律標 StereoMode＝mono（不再當成中繼資料的決定）；頭盔的 VP9 硬體解碼從片中開始時一直出錯（自動改軟解，
+    頭盔 CPU 解 4K30 VP9 跟得上）。
+  - 內建瀏覽器（頭盔無人，`--dev-video`）：YouTube 2–3 秒載入；「Play in VR」→ 解析 → 360° EAC、VP9 硬解、每秒 30 張穩定。
+  - 還沒驗：選片頁與瀏覽器用控制器的實際操作（雷射指標點、捲動、網址列打字）、真的控制器操作控制列、配戴時的影音同步觀感。

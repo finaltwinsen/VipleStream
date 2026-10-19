@@ -62,6 +62,9 @@
 #include "cli/probeutil.h"
 #include "cli/v4l2probe.h"
 #include "cli/xrprobe.h"
+#ifdef HAVE_VR_PLAYER
+#include "streaming/player/playersession.h"  // §VR-PLAYER
+#endif
 #include "backend/sfenv.h"      // §SF-ENV（M2a）
 #include "path.h"
 #include "streaming/video/ffmpeg-renderers/rife_native_vk.h"
@@ -77,6 +80,10 @@
 #include "gui/sdlgamepadkeynavigation.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
 #include "backend/vrlauncher.h"  // §VR-LAUNCHER
+#include "backend/medialibrary.h"  // §VR-PLAYER
+#ifdef HAVE_WEBENGINE
+#include <QtWebEngineQuick/qtwebenginequickglobal.h>
+#endif
 
 #if defined(Q_OS_WIN32)
 #define IS_UNSPECIFIED_HANDLE(x) ((x) == INVALID_HANDLE_VALUE || (x) == NULL)
@@ -154,6 +161,8 @@ extern "C" bool g_DisableDrmHooks;
 // 非 nullptr 時：不取單一實例鎖、log 檔改名、不輪替串流 log，並在 QGuiApplication
 // 之前以 QCoreApplication 派發後 std::_Exit。
 static const char* s_ProbeAction = nullptr;
+// §VR-PLAYER：一般啟動（圖形介面，沒有任何動作名稱、也不是 --help／--version）。內建瀏覽器的 Qt WebEngine 只在這種啟動初始化
+static bool s_GuiStart = false;
 
 class LoggerTask : public QRunnable
 {
@@ -570,6 +579,7 @@ int main(int argc, char *argv[])
         bool isPcvr = false;  // --display-target pcvr（§VR-HEADLESS 只套用 PCVR）
         bool isStream = false;
         bool isVrEmulate = false;  // §VR M4a R1：--vr-emulate 的 PCVR 是平面，不走無頭 offscreen
+        bool isPlay = false;  // §VR-PLAYER：play（影片模式）全在 XR 裡，同 PCVR 走無頭路徑
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0 ||
                 strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
@@ -581,6 +591,10 @@ int main(int argc, char *argv[])
             }
             if (strcmp(argv[i], "stream") == 0) {
                 isStream = true;
+            }
+            if (strcmp(argv[i], "play") == 0) {
+                isPlay = true;
+                isCliMode = true;
             }
             // M4a R1：PCVR（非 --vr-emulate）同樣全在 XR 裡
             if ((strcmp(argv[i], "--display-target") == 0 && i + 1 < argc &&
@@ -597,6 +611,10 @@ int main(int argc, char *argv[])
             }
         }
         isXrDesktopStream = isXrDesktopStream && isStream && !isVrEmulate;
+        if (isPlay) {
+            isXrDesktopStream = true;
+            isPcvr = true;
+        }
 
 #if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
         // §VR-HEADLESS（2026-10-04，Frame 第六輪 a）：PCVR 在 gamescope 裡（Steam Frame 從收藏庫啟動 Linux app 都經
@@ -613,6 +631,13 @@ int main(int argc, char *argv[])
         // QGuiApplication 之前）以 QCoreApplication 派發。它們不串流、不開視窗，Frame 上
         // GUI 開著時也要能跑，所以不取單一實例鎖。判斷規則與 GlobalCommandLineParser 共用。
         s_ProbeAction = GlobalCommandLineParser::earlyProbeAction(argc, argv);
+        {
+            bool anyAction = isInfoOnly || isCliMode || s_ProbeAction != nullptr;
+            for (int i = 1; i < argc && !anyAction; i++) {
+                anyAction = strcmp(argv[i], "fruc-offline") == 0;
+            }
+            s_GuiStart = !anyAction;
+        }
 
 #if defined(Q_OS_LINUX) && !defined(STEAM_LINK)
         // §SF-PROBE（M2a R2）：--help／--version 仍走完整的 QGuiApplication 路徑（smoke test
@@ -1266,6 +1291,14 @@ int main(int argc, char *argv[])
     // 用產生式 header 而不是命令列 -D，理由同 version_string.h（nmake 不追蹤命令列）。
     QGuiApplication::setDesktopFileName(VIPLE_DESKTOP_ID);
 
+#ifdef HAVE_WEBENGINE
+    // §VR-PLAYER（內建瀏覽器）：Qt WebEngine 必須在 QGuiApplication 之前初始化（它要設 AA_ShareOpenGLContexts）。只有一般
+    // 啟動需要：CLI 動作與 VR／影片的子行程（stream、play）不載入它
+    if (s_GuiStart) {
+        QtWebEngineQuick::initialize();
+    }
+#endif
+
     QGuiApplication app(argc, argv);
 
     // VipleStream editorial font stack — ship Space Grotesk / Inter /
@@ -1363,6 +1396,7 @@ int main(int argc, char *argv[])
     if (!parser.vrTestPreflight().isEmpty()) {
         VrLauncher::setTestPreflightScript(parser.vrTestPreflight());
     }
+    VrLauncher::setDevVideo(parser.devVideo());  // §VR-PLAYER（dev）
 
     SDL_version compileVersion;
     SDL_VERSION(&compileVersion);
@@ -1560,6 +1594,13 @@ int main(int argc, char *argv[])
                                              return new VrLauncher();
                                          });
 
+    // VipleStream 2.0 §VR-PLAYER：影片模式選片頁的資料來源
+    qmlRegisterSingletonType<MediaLibrary>("MediaLibrary", 1, 0,
+                                           "MediaLibrary",
+                                           [](QQmlEngine*, QJSEngine*) -> QObject* {
+                                               return new MediaLibrary();
+                                           });
+
     // Create the identity manager on the main thread
     IdentityManager::get();
 
@@ -1752,6 +1793,47 @@ int main(int argc, char *argv[])
             frucParser.parse(app.arguments());
             int rc = runFrucOffline(frucParser);
             std::_Exit(rc);
+        }
+    case GlobalCommandLineParser::PlayRequested:
+        {
+            // VipleStream 2.0 §VR-PLAYER：頭盔影片模式。整場在 PlayerSession 自己的執行緒，這裡只等它結束
+            PlayCommandLineParser playParser;
+            playParser.parse(app.arguments());
+#ifdef HAVE_VR_PLAYER
+            player::PlayerSession::Config pc;
+            pc.source = playParser.source;
+            pc.audioSource = playParser.audioSource;
+            pc.title = playParser.title;
+            pc.format = playParser.format;
+            pc.startSec = playParser.startSec;
+            pc.volume = playParser.volume;
+            pc.screenPreset = playParser.screenPreset;
+            pc.hwDecode = playParser.hwDecode;
+            pc.durationSec = playParser.durationSec;
+            pc.noXr = playParser.noXr;
+            pc.testScript = playParser.testScript;
+            pc.dumpPanelPath = playParser.dumpPanelPath;
+            pc.dumpFramePath = playParser.dumpFramePath;
+            pc.testPointer = playParser.testPointer;
+            pc.userAgent = playParser.userAgent;
+            pc.httpHeaders = playParser.httpHeaders;
+            pc.xrRuntimeJson = playParser.xrRuntimeJson;
+            pc.traceFrames = playParser.traceFrames;
+            auto playerSession = new player::PlayerSession(pc, &app);
+            QObject::connect(playerSession, &player::PlayerSession::finished, &app, [&app](int rc, const QString& error) {
+                if (!error.isEmpty()) {
+                    fprintf(stderr, "Play error: %s\n", qPrintable(error));
+                }
+                app.exit(rc);
+            });
+            playerSession->start();
+            hasGUI = false;
+            break;
+#else
+            fprintf(stderr, "Error: 'play' needs the Steam Frame (Linux OpenXR) build.\n");
+            fflush(stderr);
+            std::_Exit(1);
+#endif
         }
     case GlobalCommandLineParser::XrProbeRequested:
     case GlobalCommandLineParser::V4l2ProbeRequested:

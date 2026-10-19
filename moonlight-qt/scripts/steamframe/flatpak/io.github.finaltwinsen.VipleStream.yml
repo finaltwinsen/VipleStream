@@ -31,6 +31,9 @@ runtime: org.kde.Platform
 # （同為 freedesktop 25.08 基底、仍在維護），build-steamframe.sh 的 KDE_BRANCH 要一起改。
 runtime-version: '6.11'
 sdk: org.kde.Sdk
+# §VR-PLAYER：影片模式的內建瀏覽器用 Qt WebEngine（Chromium）。Flathub 的 base app，和 runtime 同一個 Qt 版本
+base: io.qt.qtwebengine.BaseApp
+base-version: '6.11'
 command: viplestream
 rename-desktop-file: viplestream.desktop
 rename-icon: viplestream
@@ -53,6 +56,14 @@ finish-args:
   - --filesystem=xdg-config/openvr:ro
   - --filesystem=xdg-data/Steam/steamapps/common/SteamVR:ro
   - --filesystem=~/.steam:ro
+  # §VR-PLAYER（影片模式）：選片頁列得到的影片資料夾與外接儲存裝置（唯讀）
+  - --filesystem=xdg-videos:ro
+  - --filesystem=xdg-download:ro
+  - --filesystem=/run/media:ro
+  # §VR-PLAYER（內建瀏覽器）：Chromium 自己的沙箱在 Flatpak 裡要再開一層 bwrap，頭盔上建不了 PID namespace
+  # （bwrap: Setting pidns failed）→ 建立網頁時 UI 執行緒永遠卡住。關掉它（Flathub 用 QtWebEngine 的 app 也這樣做）；
+  # Flatpak 本身的沙箱仍在
+  - --env=QTWEBENGINE_DISABLE_SANDBOX=1
   - --env=LIBVA_DRIVER_NAME=
   - --unset-env=LIBVA_DRIVER_NAME
   - --env=LIBVA_DRIVERS_PATH=
@@ -186,6 +197,17 @@ modules:
       - --enable-parser=h264
       - --enable-parser=hevc
       - --enable-parser=av1
+      # §VR-PLAYER（頭盔影片模式）：容器格式、網路（http／https／HLS，TLS 用 runtime 的 gnutls，維持 LGPL）、
+      # 常見的影像與音訊解碼、v4l2m2m 吃 mp4／mkv 封包要的 bitstream filter、轉成 48 kHz 立體聲的 swresample
+      - --enable-swresample
+      - --enable-network
+      - --enable-gnutls
+      - --enable-protocol=file,http,https,tls,tcp,hls,crypto,httpproxy,data
+      - --enable-demuxer=mov,matroska,mpegts,hls,avi,flv,mp3,aac,ogg,wav,flac
+      - --enable-decoder=vp9,vp8,mpeg4,mpeg2video,aac,aac_latm,mp3,mp3float,opus,vorbis,ac3,eac3,flac,alac,pcm_s16le,pcm_s24le,pcm_f32le
+      - --enable-decoder=vp9_v4l2m2m
+      - --enable-parser=vp9,vp8,aac,aac_latm,mpegaudio,opus,vorbis,ac3,flac,mpeg4video,mpegvideo
+      - --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe_split
       - --enable-hwaccel=h264_vaapi
       - --enable-hwaccel=hevc_vaapi
       - --enable-hwaccel=av1_vaapi
@@ -253,6 +275,17 @@ modules:
   # VipleStream 本體（moonlight-qt）＋ picoquic／picotls（靜態連結）。
   # buildsystem: simple 不會像 qmake buildsystem 那樣自動注入 SDK 的 CFLAGS／LDFLAGS，
   # build-viplestream.sh 會明確傳 QMAKE_CFLAGS+= 等參數。
+  # §VR-PLAYER（V4）：YouTube 等網站的網址解析（Python zipapp，runtime 有 python3）。固定版本與 sha256；網站改版時
+  # 使用者可以在選片頁按「更新」下載新版到 app 資料夾（webresolver.cpp 優先用那一份）
+  - name: yt-dlp
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 yt-dlp /app/share/viplestream/yt-dlp
+    sources:
+      - type: file
+        url: https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp
+        sha256: 1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6
+
   - name: viplestream
     buildsystem: simple
     build-options:
@@ -262,6 +295,9 @@ modules:
         # PICOQUIC_FETCH_PTLS_DEFAULT_TAG（非 AEGIS 分支）比對，不一致就失敗
         # （FETCHCONTENT_SOURCE_DIR 會忽略 GIT_TAG，不比對會靜默漂移）。
         VIPLE_PICOTLS_PIN: &picotls-pin 'bfa67875982afc4c24f21e146cef4747fa189c2f'
+        # base（io.qt.qtwebengine.BaseApp）的 Qt 模組裝在 /app：qmake 照 QMAKEPATH 找 /app/mkspecs/modules，
+        # app.pro 的 qtHaveModule(webenginequick) 才看得到
+        QMAKEPATH: /app
     build-commands:
       - bash moonlight-qt/scripts/steamframe/flatpak/build-viplestream.sh
     sources:

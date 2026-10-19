@@ -84,6 +84,13 @@ struct XrInputSink {
     std::function<void(int button, bool pressed)> button;  // Limelight BUTTON_LEFT／BUTTON_RIGHT
     std::function<void(int amount)> scroll;                 // 高解析捲動量（120＝一格）
     std::function<void(int vk, bool down, uint8_t modifiers)> key;  // 虛擬鍵盤：Win32 VK＋Limelight MODIFIER_*
+    // §VR-PLAYER（影片模式）：有設才用。stick＝慣用手搖桿（每格，focused 時；死區內為 0）；menu＝鍵盤開關那顆鍵的上升緣
+    // （設了就不開虛擬鍵盤，交給呼叫端，例如切換控制列）；panel＝射線指在控制列上的位置（沒指在上面 u＝v＝-1）、
+    // panelClick＝在控制列上按下扳機（那一次的按壓不會變成螢幕上的左鍵）
+    std::function<void(float x, float y)> stick;
+    std::function<void()> menu;
+    std::function<void(float u, float v)> panel;
+    std::function<void(float u, float v)> panelClick;
 };
 
 class XrInput
@@ -103,6 +110,11 @@ public:
         XrPosef kbPose = {};
         float kbWidthM = 0.0f;
         float kbHeightM = 0.0f;
+        // §VR-PLAYER：控制列 quad（優先於影像螢幕；360° 模式沒有螢幕、只有它）
+        bool panelValid = false;
+        XrPosef panelPose = {};
+        float panelWidthM = 0.0f;
+        float panelHeightM = 0.0f;
     };
 
     XrInput(const XrInputSink& sink, bool testPointer, const QString& testKeyboardText = QString());
@@ -198,6 +210,9 @@ private:
     bool m_TrigOnKb = false;       // 這次 trigger 按下發生在鍵盤上：放開前不轉成滑鼠左鍵
     bool m_KbHit = false;
     uint64_t m_StatKeys = 0;
+    // §VR-PLAYER：控制列
+    bool m_PanelHit = false;
+    bool m_TrigOnPanel = false;    // 這次扳機按下發生在控制列上：放開前不轉成螢幕上的左鍵
 
     // dev --xr-test-keyboard
     struct TestKbStep {

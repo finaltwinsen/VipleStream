@@ -599,14 +599,23 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             XrActionStateBoolean bs = xrStruct<XrActionStateBoolean>(XR_TYPE_ACTION_STATE_BOOLEAN);
             const bool now = XR_SUCCEEDED(xrGetActionStateBoolean(m_Session, &gi, &bs)) && bs.isActive && bs.currentState;
             if (now && !m_KbToggleWas[h]) {
-                setKeyboardOpen(!m_KbOpen, "controller");
+                if (m_Sink.menu) {
+                    m_Sink.menu();  // §VR-PLAYER：這顆鍵交給呼叫端（切換控制列）
+                }
+                else {
+                    setKeyboardOpen(!m_KbOpen, "controller");
+                }
             }
             m_KbToggleWas[h] = now;
         }
     }
 
-    if (!screen.valid) {
+    if (!screen.valid && !screen.panelValid) {
         m_Hit = false;
+        if (m_PanelHit && m_Sink.panel) {
+            m_Sink.panel(-1.0f, -1.0f);
+        }
+        m_PanelHit = false;
         return;
     }
 
@@ -660,10 +669,64 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         rightDesired = squeeze || secondary;
         gi.action = m_Stick;
         XrActionStateVector2f st = xrStruct<XrActionStateVector2f>(XR_TYPE_ACTION_STATE_VECTOR2F);
+        float stickX = 0.0f;
         if (XR_SUCCEEDED(xrGetActionStateVector2f(m_Session, &gi, &st)) && st.isActive) {
             stickY = st.currentState.y;
+            stickX = st.currentState.x;
+        }
+        if (m_Sink.stick) {
+            m_Sink.stick(std::fabs(stickX) > kStickDeadzone ? stickX : 0.0f, std::fabs(stickY) > kStickDeadzone ? stickY : 0.0f);
         }
         haveRay = locateAim(d, displayTime, local, &origin, &dir);
+    }
+
+    // ── §VR-PLAYER：控制列（優先於鍵盤與影像螢幕）──
+    if (screen.panelValid && haveRay) {
+        float pu = 0.0f, pv = 0.0f, pt = 0.0f;
+        if (XrRay::intersectQuad(screen.panelPose, screen.panelWidthM, screen.panelHeightM, origin, dir, &pu, &pv, &pt)) {
+            m_PanelHit = true;
+            if (m_Sink.panel) {
+                m_Sink.panel(pu, pv);
+            }
+            if (leftDesired && !m_KbTrigPrev && !m_Pressed[0]) {
+                m_TrigOnPanel = true;
+                if (m_Sink.panelClick) {
+                    m_Sink.panelClick(pu, pv);
+                }
+            }
+            const XrRay::Vec3 p = XrRay::quadPoint(screen.panelPose, screen.panelWidthM, screen.panelHeightM, pu, pv);
+            m_HitPose.position = {p.x, p.y, p.z};
+            m_HitPose.orientation = screen.panelPose.orientation;
+            m_Hit = true;
+            if (!leftDesired) {
+                m_TrigOnPanel = false;
+            }
+            m_KbTrigPrev = leftDesired;
+            if (!leftDesired && m_Pressed[0]) {
+                setButton(0, false);
+            }
+            if (!rightDesired && m_Pressed[1]) {
+                setButton(1, false);
+            }
+            m_FiltU.reset();
+            m_FiltV.reset();
+            m_LastFilterNs = nowNs;
+            return;
+        }
+    }
+    if (m_PanelHit) {
+        m_PanelHit = false;
+        if (m_Sink.panel) {
+            m_Sink.panel(-1.0f, -1.0f);
+        }
+    }
+    if (!leftDesired) {
+        m_TrigOnPanel = false;
+    }
+    if (!screen.valid) {
+        m_Hit = false;
+        m_KbTrigPrev = leftDesired;
+        return;
     }
 
     // ── 虛擬鍵盤（優先於影像螢幕）──
@@ -753,7 +816,7 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     m_Hit = hit;
 
     // ── 按鍵：按下只在命中時；放開隨時。按下始於鍵盤的這次 trigger 不轉成滑鼠左鍵 ──
-    if (leftDesired && !m_Pressed[0] && hit && !m_TrigOnKb) {
+    if (leftDesired && !m_Pressed[0] && hit && !m_TrigOnKb && !m_TrigOnPanel) {
         setButton(0, true);
     }
     else if (!leftDesired && m_Pressed[0]) {

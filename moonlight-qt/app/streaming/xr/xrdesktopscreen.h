@@ -27,6 +27,11 @@ public:
 
     // frame thread：依頭部 pose（LOCAL 空間）擺放
     void place(const XrPosef& head);
+    // frame thread（§VR-PLAYER）：改距離與張角，朝向與頭部位置照舊（已經擺過的螢幕就地跟著變）
+    void setGeometry(float distanceM, float fovDeg);
+    float distanceM() const { return m_Distance; }
+    // §VR-PLAYER（V2）：擺放時的頭部位置（LOCAL 空間；180°／360° 的控制列擺在它前方）
+    XrVector3f headPosition() const { return m_Head; }
 
     bool placed() const { return m_Placed; }
     float yawRad() const { return m_Yaw; }

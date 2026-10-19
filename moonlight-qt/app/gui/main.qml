@@ -99,7 +99,12 @@ ApplicationWindow {
         // VipleStream 2.0 §VR-LAUNCHER：Steam Frame 上（gamescope＋OpenXR 建置）一開始先選桌面或 VR 模式。
         // CLI 路徑（runConfigChecks=false）不跳；VR 模式不能用（PID 隔離的 Flatpak）時也不跳——沒有選擇可做，
         // 工具列的模式按鈕仍可開來看原因。
-        if (runConfigChecks && VrLauncher.available && VrLauncher.blockedReason === "") {
+        if (VrLauncher.devVideoTab >= 0) {
+            // §VR-PLAYER（dev，--dev-video）：直接開影片模式
+            console.warn("[VIPLE-PLAYER] dev video: opening the video page")
+            Qt.callLater(function() { navigateTo("qrc:/gui/VideoView.qml", VideoView) })
+        }
+        else if (runConfigChecks && VrLauncher.available && VrLauncher.blockedReason === "") {
             modeDialog.open()
         }
 
@@ -799,9 +804,26 @@ ApplicationWindow {
                 enabled: VrLauncher.blockedReason === ""
                 text: qsTr("VR mode") + "\n" + qsTr("Play SteamVR games from your PC")
                 KeyNavigation.up: desktopModeButton
+                KeyNavigation.down: videoModeButton
                 Keys.onReturnPressed: clicked()
                 Keys.onEnterPressed: clicked()
                 onClicked: modeDialog.choose(true)
+            }
+
+            // §VR-PLAYER：影片模式不改桌面／VR 的設定，直接進選片頁
+            Button {
+                id: videoModeButton
+                Layout.fillWidth: true
+                visible: VrLauncher.playerAvailable
+                enabled: VrLauncher.blockedReason === ""
+                text: qsTr("Video mode") + "\n" + qsTr("Watch videos, 3D, 180° and 360° videos in the headset")
+                KeyNavigation.up: vrModeButton
+                Keys.onReturnPressed: clicked()
+                Keys.onEnterPressed: clicked()
+                onClicked: {
+                    modeDialog.close()
+                    navigateTo("qrc:/gui/VideoView.qml", VideoView)
+                }
             }
 
             Label {

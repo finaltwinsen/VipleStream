@@ -25,6 +25,8 @@ public:
         XrProbeRequested,
         V4l2ProbeRequested,
         DecodeBenchRequested,
+        // VipleStream 2.0 §VR-PLAYER — 頭盔影片模式（VrLauncher 開的子行程，也可以直接從命令列跑）
+        PlayRequested,
     };
 
     GlobalCommandLineParser();
@@ -42,9 +44,14 @@ public:
     // 檢查過）；沒帶＝空字串。只有一般啟動（GUI，沒有動作名稱）認得這個旗標——往返時間檢查只在 GUI 的 VR 啟動器裡，
     // 帶在其他動作上會照「不認得的選項」報錯。值不進 StreamingPreferences，不會被存起來。
     QString vrTestPreflight() const { return m_VrTestPreflight; }
+    // §VR-PLAYER（dev）：--dev-video "<分頁>[,url=<網址>][,grab=<秒>:<png>][,play=<秒>][,host=<主機名>][,dir=<子資料夾>]"——
+    // 一般啟動時直接開影片模式的某個分頁、瀏覽器開這個網址、幾秒後把畫面存成 PNG、幾秒後按「Play in VR」、PC 分頁上線後
+    // 自動點進這台主機（帶 dir＝再進第一個分享資料夾裡的這個子資料夾，「.」＝分享資料夾本身）（無人驗測用）。沒帶＝空字串
+    QString devVideo() const { return m_DevVideo; }
 
 private:
     QString m_VrTestPreflight;
+    QString m_DevVideo;
 };
 
 class QuitCommandLineParser
@@ -104,6 +111,32 @@ private:
     // VipleStream §K — MP-QUIC scheduler selector. mpQuicScheduler is plain int
     // (0=auto, 1=min-rtt, 2=aggregate, 3=redundant, 4=ecf — see QuicTransport.h).
     QMap<QString, int> m_QuicSchedulerMap;
+};
+
+// VipleStream 2.0 §VR-PLAYER：viplestream play <檔案或網址> [選項]。選項不寫回偏好設定。
+class PlayCommandLineParser
+{
+public:
+    void parse(const QStringList &args);
+
+    QString source;
+    QString audioSource;
+    QString title;
+    QString format = QStringLiteral("auto");
+    double startSec = 0.0;
+    float volume = 1.0f;
+    int screenPreset = 1;
+    bool hwDecode = true;
+    int durationSec = 0;
+    bool noXr = false;
+    QString testScript;
+    QString dumpPanelPath;
+    QString dumpFramePath;
+    bool testPointer = false;
+    QString userAgent;
+    QString httpHeaders;
+    QString xrRuntimeJson;
+    int traceFrames = 0;
 };
 
 class ListCommandLineParser
