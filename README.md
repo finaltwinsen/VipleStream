@@ -17,7 +17,7 @@ Project home: <https://github.com/finaltwinsen/VipleStream>
 | **VipleStream** (PC client) | Moonlight-Qt | Windows x64 | `VipleStream-Client-X.Y.Z.zip` → `VipleStream.exe` | `C:\Program Files\Moonlight Game Streaming\` |
 | | | Linux x64 | `VipleStream-Client-X.Y.Z-linux-x64.AppImage` | portable, no install step |
 | **VipleStream Android** | Moonlight-Android | Android | `VipleStream-Android-X.Y.Z.apk` (application id `com.piinsta`) | sideload only |
-| **VipleStream for Steam Frame** | — | Steam Frame headset (Linux arm64) | `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` (app id `io.github.finaltwinsen.VipleStream`) | Flatpak, per-user |
+| **VipleStream for Steam Frame** | — | Steam Frame headset (Linux arm64) | `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` (app id `io.github.finaltwinsen.VipleStream`) + `VipleStream-SteamFrame-Install-X.Y.Z.sh` | Flatpak, per-user, installed by the script |
 | **viplestream-relay** | — | any (Python 3.10+) | `tools/viplestream-relay/relay_server.py` (source only, not a release asset) | any always-on host |
 
 The wire protocol on `_nvstream._tcp` mDNS, `/serverinfo` `/launch` `/applist`, RTSP, and the client cert chain are unchanged from upstream. A VipleStream client can connect to a vanilla Sunshine host, and a vanilla Moonlight client can connect to a VipleStream-Server host — VipleStream-only features (Steam profile dropdown, FRUC backends, etc.) are quietly hidden when the peer doesn't advertise the `<VipleStreamProtocol>` capability marker.
@@ -69,18 +69,17 @@ The package enables a systemd user service for the installing user, so the serve
 
 **Steam Frame headset**
 
-1. Copy `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` to the headset and open a terminal there (desktop mode, or SSH with Developer Mode on).
-2. Install it for your user (the first install pulls the KDE 6.11 runtime from Flathub):
-   ```bash
-   flatpak --user install --bundle VipleStream-Client-X.Y.Z-linux-arm64.flatpak
-   ```
-3. Add it to your Steam library as a non-Steam game — Steam → *Add a Non-Steam Game* → **VipleStream**, or:
-   ```bash
-   steamos-add-to-steam ~/.local/share/flatpak/exports/share/applications/io.github.finaltwinsen.VipleStream.desktop
-   ```
-4. Launch VipleStream from your library inside the headset. It opens on a virtual screen.
+Use the installer script, not `flatpak install` alone. A plain Flatpak install only gets Desktop mode: Flatpak always runs apps in their own process-ID sandbox, and the headset's SteamVR can't work with an app inside one, so VipleStream turns VR and Video mode off. The installer adds a launcher that starts VipleStream without that one isolation (the rest of the Flatpak sandbox stays) and with access to SteamVR.
 
-Updating: install the new `.flatpak` the same way; it replaces the old one.
+1. Download `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` and `VipleStream-SteamFrame-Install-X.Y.Z.sh` into the same folder on the headset, and open a terminal there (desktop mode, or SSH with Developer Mode on).
+2. Run the installer as your normal user (no `sudo`). The first install also downloads the KDE 6.11 runtime from Flathub:
+   ```bash
+   bash VipleStream-SteamFrame-Install-X.Y.Z.sh
+   ```
+   It installs the Flatpak, sets up the launcher, checks that the launcher really runs without the process-ID sandbox, and adds **VipleStream** to your Steam library (Steam must be running).
+3. Launch **VipleStream** from your Steam library inside the headset. It opens on a virtual screen.
+
+Updating: download both files of the new release and run the new installer the same way. To remove everything: `bash VipleStream-SteamFrame-Install-X.Y.Z.sh --uninstall`, then delete the shortcut from your Steam library.
 
 ---
 
@@ -223,6 +222,7 @@ PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1`
 
 | Version | Changes |
 |---|---|
+| **2.0.2** | **Steam Frame 安裝腳本**：2.0.0／2.0.1 的頭盔版照說明只裝 `.flatpak`，Flatpak 一定開獨立的 PID 沙盒、頭盔的 SteamVR 對不上，程式會自己停用 VR 模式與影片模式，**只剩桌面模式能用**。新增 asset `VipleStream-SteamFrame-Install-X.Y.Z.sh`：安裝 Flatpak、裝一個只拿掉 PID 隔離（Flatpak 其他隔離不變）並開放 SteamVR 路徑的啟動器、自我檢查後加進 Steam 收藏庫；`--uninstall` 移除。停用時的提示改成指向這個捷徑。README 的頭盔安裝步驟改用腳本。 |
 | **2.0.1** | **VR 串流預設開啟**：host 的 `vr_pcvr` 預設改成 `enabled`（2.0.0 漏改、出貨仍是 `disabled`，頭盔的 VR 模式要手動開）；對平面串流沒有影響，VR app 只列給 VR client、SteamVR driver 只在 VR session 開始時才部署，沒裝 SteamVR 的 host 不會宣告 VR。README 加安裝與使用指引；修正 `docs/setup_guide.md` 的 Windows zip 安裝步驟（服務程式要放 `tools\`、要自己加防火牆規則）。 |
 | **2.0.0** | **Steam Frame 頭盔 client（第六件 asset：`-linux-arm64.flatpak`）**：頭盔上的 VipleStream 可以 VR 串流 PC 的 SteamVR 遊戲（host 自帶 SteamVR driver `driver_viplestream`，`vr_pcvr = enabled` 開啟；多連線＋補包跟著往返時間走、姿態預測、半速＋補幀、注視點編碼、進 VR 前量往返時間），也有**頭盔影片模式**（本機／網址／配對 PC 的磁碟機／YouTube 與內建瀏覽器；2D／3D／180°／360°；手把 A／B／扳機／握把、搖桿調遠近）。修正 server HTTPS 在 client 無聲斷線後整個卡死（阻塞式 TLS shutdown）。另附 `VipleStream-Drivers-2.0.0-windows.zip`（VipleSCHid＋SteamVR driver 獨立包）；同時首度發佈 1.5.276（§SELF-UPDATE、§UPDATE-HEAD）。 |
 | **1.5.275** | **§S.19-INIT-FIX 永久凍結修復（host）**：IDR cooldown 初值 `steady_clock::time_point::min()` 相減溢位→「cooldown active」永遠成立；§K.14 在 frame 16 掩蓋，但 encoder 重建（顯示拓樸切換）後 frame_nr 已過 16 → 該 encoder 生命期內 client 的每一次 IDR 請求都被壓制（log：每個 session 的 f=1 都 IDR-SUPPRESS、事故 14 秒 22 次 SUPPRESS／0 次 EMIT），網路閃斷 3 秒後畫面永久凍結直到重連。初值改「一個 cooldown 之前」、比較式改不溢位；刻意不補發被壓掉的請求（client 每 ≤1 s 自行重送，補發會在每次復原後多一張糊 IDR）。host 假 ARP 黑洞 3 秒重現：修前 14 秒不復原，修後鏈路恢復 28 ms 即 IDR-EMIT。**鍵鼠斷續診斷儀器**：client 主迴圈 watchdog `[VIPLE-INPUT-STALL]`（停頓 ≥50 ms 且期間有使用者輸入才記，≥300 ms 抄主執行緒堆疊）、host `[VIPLE-INPUT-GAP]`／`[VIPLE-INPUT-QUEUE-LAG]`／`[VIPLE-INPUT-SENDINPUT-SLOW]`、`§S.19 cooldown armed` 行。**§RSHIFT-DUP-FIX**：IME Right Shift 補償沒排除本事件就是 RShift → host 收到 DOWN,DOWN,UP,UP、中文輸入法切換兩次等於沒切。**§SC-HID-LOG-RATE**：控制器休眠時「Feature SET failed」曾佔 client log 92% 撞 10 MB 上限，改前 8 筆＋每 30 秒一筆。本版同時首度發佈 1.5.272（§K.dd.select 顯示器選擇修復＋§CFG.defer 設定警告救回）、1.5.273（§HID-PROBE 卡死 HID 裝置啟動防護＋§UPNP-DIAG）、1.5.274（§SC-THREAD-OWNER SC-HID 執行緒所有權＋SDL 忽略清單＋連結警告清零）；五件同版號（Linux 兩件自 1.5.270 後首次重建）。 |

@@ -1623,8 +1623,8 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
     <name>VrLauncher</name>
     <message>
         <location filename="../backend/vrlauncher.cpp"/>
-        <source>VR mode is not available when VipleStream is started this way (Flatpak PID sandbox). Start it from the VipleStream VR shortcut instead.</source>
-        <translation>用這種方式啟動 VipleStream 時無法使用 VR 模式（Flatpak 的 PID 沙盒）。請改從 VipleStream VR 捷徑啟動。</translation>
+        <source>VR and video mode are not available when VipleStream is started this way (Flatpak PID sandbox). Start it from the VipleStream shortcut in your Steam library, which the Steam Frame installer (install-steamframe.sh) adds.</source>
+        <translation>用這種方式啟動 VipleStream 時無法使用 VR 模式與影片模式（Flatpak 的 PID 沙盒）。請改從 Steam 收藏庫裡的 VipleStream 捷徑啟動（由 Steam Frame 安裝腳本 install-steamframe.sh 加入）。</translation>
     </message>
     <message>
         <location filename="../backend/vrlauncher.cpp"/>

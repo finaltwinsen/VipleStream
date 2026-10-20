@@ -17,6 +17,8 @@
    `stream --dump-bitstream`，是 Frame 到貨後 Day 1 的主要工具。所有平台都編得進去，用不到的建置回 10。
 4. Frame 上的證據一律用 `frame-poc-collect.sh` 在本機打包，再由 `<dev-client>` 用 scp 拉回。
 5. S3／PoC-F-pre（需要 Steam 登入）**延到 M3a 開頭**（使用者 2026-09-28 決定）。
+6. **使用者安裝一律走 `install-steamframe.sh`**（2.0.2 起，release asset `VipleStream-SteamFrame-Install-X.Y.Z.sh`），
+   不要只裝 `.flatpak`：Flatpak 一定開 PID namespace，VR 模式與影片模式會被程式停用，只剩桌面模式。見 §5.1。
 
 ---
 
@@ -357,6 +359,33 @@ manifest 必須同步修改）。
 | 刻意不帶 | `IGNORE_RFI_LATENCY_BUG`（C30，我們的 fork 不讀）、`QT_QUICK_CONTROLS_STYLE`（程式內已設）、`--filesystem=home`、`host-etc`（Monado S1 測試時才臨時加）、`--socket=session-bus` 等 |
 
 測試時才需要的權限一律在命令列臨時加（`flatpak run --filesystem=<dir>:ro …`），不進 manifest。
+
+### 5.1 使用者安裝：`install-steamframe.sh`（2.0.2 起）
+
+2.0.0／2.0.1 的說明只叫使用者裝 `.flatpak`，結果從收藏庫開起來 VR 模式與影片模式都停用（2026-10-20 發現：頭盔實測
+一般 `flatpak run` 時沙盒的 `/proc/1/comm` 是 `bwrap`，`vrlauncher.cpp` 的 `inPidNamespacedSandbox()` 成立）。開發時一直
+沒露出來，是因為使用者平常開的是 dev 捷徑（`~/viplestream-galpha/VipleStream-GAlpha`，自帶不隔 PID 的 bwrap）。
+
+`moonlight-qt/scripts/steamframe/install-steamframe.sh`（release 時改名成 `VipleStream-SteamFrame-Install-X.Y.Z.sh` 上傳）：
+
+- `flatpak --user install --reinstall --bundle`（branch `stable`）。
+- `~/.local/share/viplestream-frame/bwrap-nopid`：轉呼叫 `/usr/bin/bwrap`，只拿掉 `--unshare-pid`（`--args <fd>` 與命令列兩種
+  都處理），Flatpak 的其他隔離不變。
+- `~/.local/share/viplestream-frame/VipleStream`：`FLATPAK_BWRAP=<上面那支> flatpak run --branch=stable
+  --filesystem=/opt/steamvr:ro --filesystem=/tmp --device=shm …`（finish-args.md §6 的三條，執行期才加、不進 manifest）。
+- `~/.local/share/applications/io.github.finaltwinsen.VipleStream.desktop`：和 Flatpak 匯出的同名，排在 exports 前面，選單的
+  捷徑也改走啟動器；再把它交給 `steamos-add-to-steam` 加進收藏庫（`shortcuts.vdf` 已有啟動器路徑就跳過）。
+- 自我檢查：經啟動器跑一次 `cat /proc/1/comm`，不是 `systemd`（是 `bwrap` 或空的）就失敗結束。
+- `--uninstall`：刪啟動器、`.desktop` 與 `stable` 分支；Steam 捷徑要使用者自己刪。`--no-steam`：不加捷徑。
+
+**實測（2026-10-20，頭盔在外、走 Tailscale，沒人戴）**：用 2.0.1 正式 bundle 跑腳本，自我檢查 PID 1＝`systemd`，Steam
+收藏庫多了「VipleStream」（Exe＝啟動器）。再經 Steam 啟動啟動器開影片模式（`--dev-video 1,url=<本機 1080p h264>,play=8`，
+暫時借 dev 捷徑的 wrapper 轉呼叫啟動器）：`[VIPLE-SF-ENV] app=2.0.1`、`h264_v4l2m2m(hw)`、OpenXR instance／session 建立、
+狀態到 VISIBLE（沒人戴時本來就停在這裡），vrserver 沒有重啟。VR 串流沒有端到端測：當時 host 到頭盔只有經中繼站
+（180–240 ms），進 VR 前的往返檢查本來就會擋；VR 模式與影片模式用的是同一個 `available()` 判斷與同一條 OpenXR 路徑。
+
+已知限制：換掉 bwrap 用的是 Flatpak 的 `FLATPAK_BWRAP`（給開發用的介面，非正式支援），Flatpak 或 SteamOS 更新後可能失效；
+自我檢查會在重跑安裝時抓到。長期方向仍是 finish-args.md §6 的 P2（Steam Linux Runtime，不隔 PID）。
 
 ---
 

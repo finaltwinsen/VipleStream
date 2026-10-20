@@ -100,5 +100,7 @@ Frame 上也碰到同一類問題（utzcoz/chromium-webxr-linux#7）。
 - β／rc 的 OpenXR 不能直接靠 P1 Flatpak；M3a 開頭用「同一支程式、隔 PID 與不隔 PID 的 bwrap」對照實驗確認 PID namespace 是
   主因，再決定 P2（Steam Linux Runtime／pressure-vessel，不隔 PID）或其他形態。`/opt/steamvr:ro`、`--device=shm`、`/tmp`
   這三條先**不進** manifest。
+- **2.0.2 起的正式做法**：使用者用 `install-steamframe.sh` 安裝，它裝的啟動器以 `FLATPAK_BWRAP` 換上只拿掉 `--unshare-pid` 的
+  bwrap，並在執行期加上這三條（`docs/steam_frame_client.md` §5.1）。P2 仍是長期方向。
 - 在 Frame 上跑任何會連 SteamVR 的程式前，先通知使用者（會打斷他的 VR session）。
 - `xr-probe` 待修：`xrGetSystem` 遇到 `FORM_FACTOR_UNAVAILABLE` 依規格重試數秒，退出前給 runtime 收尾時間。

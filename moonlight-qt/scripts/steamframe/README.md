@@ -13,6 +13,7 @@ G-BUILD 結果、probe 用法、Day 0／Day 1 清單）在 **`docs/steam_frame_c
 | `flatpak/build-viplestream.sh` | viplestream 模組在沙箱內的建置步驟（picoquic／picotls 離線建置 → qmake → make → 授權） |
 | `flatpak/gamescope-wsi/*.json` | gamescope WSI implicit layer（x86_64、aarch64 各一；aarch64 版 UNVERIFIED） |
 | `s3/` | S3／PoC-F-pre 前置：gamescope openvr backend 偵測、SteamVR null driver 設定、沙箱內 `xr-probe` 對 SteamVR runtime（見 `s3/README.md`） |
+| `install-steamframe.sh` | **使用者在頭盔上執行的安裝腳本**（release asset `VipleStream-SteamFrame-Install-X.Y.Z.sh`）：裝 Flatpak、不隔 PID 的啟動器、Steam 捷徑；只裝 `.flatpak` 會讓 VR 與影片模式停用（`docs/steam_frame_client.md` §5.1） |
 | `../build-steamframe.sh` | 建置入口（`--arch x86_64|aarch64 --flavor dev|release`） |
 | `../frame-poc-collect.sh` | Frame 實機證據收集（Day 0／Day 1），只在本機產生 tarball |
 | `synth-check/` | 補幀（§VR-SYNTH）與注視點還原的離線檢查，吃 `--xr-dump-frame` 存下的檔（Python 3＋numpy＋Pillow）：`series_check.py`（每組兩張畫得對不對）、`flow_check.py`（在動的東西被往哪個方向推、推了多少；`--selftest` 先驗方向的定義）、`fovea_check.py`（注視點開與關的影像位置）。用法見各檔開頭與 `docs/steam_frame_client.md`「半速串流與補幀」 |

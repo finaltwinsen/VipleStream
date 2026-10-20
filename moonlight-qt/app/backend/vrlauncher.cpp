@@ -167,8 +167,10 @@ QString VrLauncher::blockedReason() const
 {
 #if defined(Q_OS_LINUX) && defined(HAVE_OPENXR)
     if (inPidNamespacedSandbox()) {
-        return tr("VR mode is not available when VipleStream is started this way (Flatpak PID sandbox). "
-                  "Start it from the VipleStream VR shortcut instead.");
+        // 正式的入口是 install-steamframe.sh 裝的啟動器（Steam 收藏庫的捷徑、選單裡的 VipleStream）；直接 flatpak run 才會走到這裡
+        return tr("VR and video mode are not available when VipleStream is started this way (Flatpak PID sandbox). "
+                  "Start it from the VipleStream shortcut in your Steam library, which the Steam Frame installer "
+                  "(install-steamframe.sh) adds.");
     }
     return QString();
 #else
