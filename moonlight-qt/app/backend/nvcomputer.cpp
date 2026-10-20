@@ -1,4 +1,5 @@
 #include "nvcomputer.h"
+#include <QHostAddress>
 #include "nvapp.h"
 #include "settings/compatfetcher.h"
 #include "settings/streamingpreferences.h"
@@ -39,6 +40,8 @@ bool logOnceOnChange(const QString& key, const QString& signature)
 #define SER_MANUALPORT "manualport"
 #define SER_IPV6ADDR "ipv6address"
 #define SER_IPV6PORT "ipv6port"
+#define SER_VPNADDR "vpnaddress"
+#define SER_VPNPORT "vpnport"
 #define SER_STUNADDR "stunaddress"
 #define SER_STUNPORT "stunport"
 #define SER_STUNNATTYPE "stunnattype"
@@ -66,6 +69,8 @@ NvComputer::NvComputer(QSettings& settings)
     this->stunNatType = settings.value(SER_STUNNATTYPE).toString();
     this->manualAddress = NvAddress(settings.value(SER_MANUALADDR).toString(),
                                     settings.value(SER_MANUALPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
+    this->vpnAddress = NvAddress(settings.value(SER_VPNADDR).toString(),
+                                 settings.value(SER_VPNPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->serverCert = QSslCertificate(settings.value(SER_SRVCERT).toByteArray());
     this->isNvidiaServerSoftware = settings.value(SER_NVIDIASOFTWARE).toBool();
     this->directLaunchDesktop = settings.value(SER_DIRECT_LAUNCH_DESKTOP, false).toBool();
@@ -120,6 +125,8 @@ void NvComputer::serialize(QSettings& settings, bool serializeApps) const
     settings.setValue(SER_IPV6PORT, ipv6Address.port());
     settings.setValue(SER_MANUALADDR, manualAddress.address());
     settings.setValue(SER_MANUALPORT, manualAddress.port());
+    settings.setValue(SER_VPNADDR, vpnAddress.address());
+    settings.setValue(SER_VPNPORT, vpnAddress.port());
     settings.setValue(SER_STUNADDR, stunAddress.address());
     settings.setValue(SER_STUNPORT, stunAddress.port());
     settings.setValue(SER_STUNNATTYPE, stunNatType);
@@ -149,6 +156,7 @@ bool NvComputer::isEqualSerialized(const NvComputer &that) const
            this->remoteAddress == that.remoteAddress &&
            this->ipv6Address == that.ipv6Address &&
            this->manualAddress == that.manualAddress &&
+           this->vpnAddress == that.vpnAddress &&
            this->serverCert == that.serverCert &&
            this->isNvidiaServerSoftware == that.isNvidiaServerSoftware &&
            this->directLaunchDesktop == that.directLaunchDesktop &&
@@ -285,6 +293,18 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
             qInfo() << "Server advertised" << this->serverAdvertisedInterfaces.size() << "network interface(s):";
             for (const auto& iface : std::as_const(this->serverAdvertisedInterfaces)) {
                 qInfo() << "  " << iface.name << "(" << iface.type << "):" << iface.address;
+            }
+        }
+    }
+
+    // §VPN-ADDR：host 廣告的 VPN 位址，只收 Tailscale 等 CGNAT 範圍（100.64.0.0/10；Cloudflare WARP 之類的本機位址不收）
+    {
+        const QStringList vpnAddrs = NvHTTP::getXmlStringList(serverInfo, "VipleStreamVpnAddress");
+        for (const QString& a : vpnAddrs) {
+            const QHostAddress ha(a);
+            if (ha.protocol() == QAbstractSocket::IPv4Protocol && ha.isInSubnet(QHostAddress(QStringLiteral("100.64.0.0")), 10)) {
+                this->vpnAddress = NvAddress(a, http.httpPort());
+                break;
             }
         }
     }
@@ -668,6 +688,7 @@ QVector<NvAddress> NvComputer::uniqueAddresses() const
     uniqueAddressList.append(stunAddress);  // VipleStream: STUN endpoint as fallback
     uniqueAddressList.append(ipv6Address);
     uniqueAddressList.append(manualAddress);
+    uniqueAddressList.append(vpnAddress);  // §VPN-ADDR：其他都連不到時（離開區網）
 
     // Prune duplicates (always giving precedence to the first)
     for (int i = 0; i < uniqueAddressList.count(); i++) {
@@ -731,6 +752,7 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED_AND_NONNULL(remoteAddress);
     ASSIGN_IF_CHANGED_AND_NONNULL(ipv6Address);
     ASSIGN_IF_CHANGED_AND_NONNULL(manualAddress);
+    ASSIGN_IF_CHANGED_AND_NONNULL(vpnAddress);
     ASSIGN_IF_CHANGED(activeHttpsPort);
     ASSIGN_IF_CHANGED(externalPort);
     ASSIGN_IF_CHANGED(pairState);

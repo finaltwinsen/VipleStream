@@ -1148,6 +1148,13 @@ namespace nvhttp {
         tree.add_child("root.NetworkInterface", node);
       }
     }
+    // §VPN-ADDR（2026-10-21）：VPN 介面（Tailscale 等）的位址一律廣告，不受上面兩個開關影響。client 記下來，離開區網時
+    // （頭盔帶出門）用它連；本來 client 只記得區網、熱點與公網位址，Tailscale 連得通卻顯示離線
+    for (const auto &iface : platf::enum_net_interfaces()) {
+      if (iface.type == "vpn") {
+        tree.add("root.VipleStreamVpnAddress", iface.address);
+      }
+    }
 
     std::ostringstream data;
 

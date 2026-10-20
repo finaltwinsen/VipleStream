@@ -48,10 +48,14 @@ public:
     // 一般啟動時直接開影片模式的某個分頁、瀏覽器開這個網址、幾秒後把畫面存成 PNG、幾秒後按「Play in VR」、PC 分頁上線後
     // 自動點進這台主機（帶 dir＝再進第一個分享資料夾裡的這個子資料夾，「.」＝分享資料夾本身）（無人驗測用）。沒帶＝空字串
     QString devVideo() const { return m_DevVideo; }
+    // §VR-SHELL（dev）：--vr-shell "<xr|noxr|off>[,dump=<秒>:<png>][,test=<腳本>]"——頭盔 VR 介面（Frame 上預設就是 xr；
+    // 格式見 backend/xrshell.h，parse() 已經檢查過）。沒帶＝空字串
+    QString vrShell() const { return m_VrShell; }
 
 private:
     QString m_VrTestPreflight;
     QString m_DevVideo;
+    QString m_VrShell;
 };
 
 class QuitCommandLineParser
@@ -95,11 +99,13 @@ public:
     QString getHost() const;
     QString getAppName() const;
     bool isTakeover() const;
+    bool isXrHandBack() const { return m_XrHandBack; }
 
 private:
     QString m_Host;
     QString m_AppName;
     bool m_Takeover = false;
+    bool m_XrHandBack = false;  // §VR-SHELL：--xr-handback（頭盔 VR 介面開的子行程）
     QMap<QString, StreamingPreferences::WindowMode> m_WindowModeMap;
     QMap<QString, StreamingPreferences::AudioConfig> m_AudioConfigMap;
     QMap<QString, StreamingPreferences::VideoCodecConfig> m_VideoCodecMap;
@@ -137,6 +143,7 @@ public:
     QString httpHeaders;
     QString xrRuntimeJson;
     int traceFrames = 0;
+    bool xrHandBack = false;  // §VR-SHELL：--xr-handback（頭盔 VR 介面開的子行程）
 };
 
 class ListCommandLineParser

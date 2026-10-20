@@ -95,6 +95,15 @@ struct XrInputSink {
     // 扳機／B／握把當成滑鼠鍵送出：扳機（沒指在控制列上）、A、B、握把各自交給呼叫端
     enum class PlayerButton { Trigger, A, B, Grip };
     std::function<void(PlayerButton b)> playerButton;
+    // §VR-SHELL（頭盔 VR 介面，backend/xrshell.cpp）：介面與影片模式共用同一個 session，上面這組影片模式的出口一直都設著，
+    // 由 playerActive 在執行期決定用哪一套：true＝影片模式（同只設 playerButton 的行為）；false＝一般射線滑鼠（扳機＝左鍵、
+    // 握把＝右鍵、搖桿捲動、選單鍵開關鍵盤；不呼叫 playerButton／menu／stick）。沒設＝看 playerButton 有沒有設
+    std::function<bool()> playerActive;
+    // §VR-SHELL：一般模式下 B 的上升緣交給呼叫端（介面的「返回」），不當成右鍵。沒設＝B 照舊是右鍵
+    std::function<void()> back;
+    // §VR-EXIT-COMBO：A＋X＋扳機＋握把同時按住（各取任一手）的上升緣＝結束串流。VR 串流與 XR 桌面沒有平面視窗，
+    // 實體鍵盤的 Ctrl+Alt+Shift+Q 收不到、頭盔手把也不是 SDL 手把（Start+Select+L1+R1 不會觸發）。沒設＝不偵測
+    std::function<void()> exitCombo;
 };
 
 class XrInput
@@ -145,6 +154,8 @@ public:
     // ── 虛擬鍵盤 ──
     // 任何執行緒：要求切換開關（熱鍵），frame thread 下一幀處理
     void requestKeyboardToggle() { m_KbToggleReq.fetch_add(1, std::memory_order_acq_rel); }
+    // §VR-SHELL：任何執行緒：要求開（true）或關鍵盤（介面的文字欄位拿到／失去焦點），frame thread 下一幀處理
+    void requestKeyboardOpen(bool open) { m_KbSetReq.store(open ? 1 : 0, std::memory_order_release); }
     // frame thread
     bool keyboardOpen() const { return m_KbOpen; }
     const XrKeyboard& keyboard() const { return m_Kb; }
@@ -179,6 +190,7 @@ private:
     XrAction m_Squeeze = XR_NULL_HANDLE;
     XrAction m_Secondary = XR_NULL_HANDLE;
     XrAction m_Primary = XR_NULL_HANDLE;  // §VR-PLAYER：A（影片模式的播放／暫停；串流時沒有用到）
+    XrAction m_ComboX = XR_NULL_HANDLE;   // §VR-EXIT-COMBO：X（Frame 在右手、Touch 在左手；Index 沒有）
     bool m_PlayerWas[4][2] = {};          // §VR-PLAYER：PlayerButton × 手 的上一格狀態
     XrAction m_Stick = XR_NULL_HANDLE;
     XrAction m_KbToggleAction = XR_NULL_HANDLE;
@@ -208,6 +220,9 @@ private:
     bool m_KbOpen = false;
     bool m_KbDirty = true;
     std::atomic<int> m_KbToggleReq{0};
+    std::atomic<int> m_KbSetReq{-1};  // §VR-SHELL：-1＝沒有要求、0＝關、1＝開
+    bool m_BackWas = false;           // §VR-SHELL：B 上一格（back 的上升緣）
+    bool m_ComboWas = false;          // §VR-EXIT-COMBO：上一格是否整組按住
     uint8_t m_Sticky = 0;          // 黏滯修飾鍵（XrKeyboard::kMod*）
     int m_KbHover = -1;            // 射線指著的鍵
     int m_KbActiveKey = -1;        // 已送出按下、尚未放開的一般鍵

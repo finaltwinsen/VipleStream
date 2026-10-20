@@ -272,7 +272,20 @@ int PlayerSession::run(QString* error)
 
     // ── 2. XR ──
     const int preset = std::clamp(m_Config.screenPreset, 0, 2);
-    if (!m_Config.noXr) {
+    if (m_Config.sharedXr != nullptr) {
+        // §VR-SHELL：VR 介面的 session。螢幕先留著介面（載入中），第一張影像要交出去時才換（showVideo）
+        m_Xr = m_Config.sharedXr;
+        m_OwnXr = false;
+        if (!m_Xr->isRunning() || m_Xr->video() == nullptr) {
+            *error = QStringLiteral("XR video path unavailable");
+            m_Xr = nullptr;
+            m_Media.close();
+            return 2;
+        }
+        m_Xr->setPreferredRefreshHz(preferredHzFor(info.fps));
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] using the VR interface's XR session");
+    }
+    else if (!m_Config.noXr) {
         XrContext::Options xo;
         xo.player = true;
         xo.quadDistanceM = kScreens[preset].distanceM;
@@ -282,35 +295,11 @@ int PlayerSession::run(QString* error)
         xo.dumpFramePath = m_Config.dumpFramePath;
         // 手把（使用者 2026-10-19 的配戴回饋：控制列收起來後手把完全沒反應）：扳機（沒指在控制列上）＝開關控制列、
         // A＝播放／暫停、B＝離開回選片頁、握把＝置中；搖桿左右＝後退／前進 10 秒、上下＝音量（onStick）
-        xo.inputSink.playerButton = [this](XrInputSink::PlayerButton b) {
-            m_LastInteractNs.store(steadyNowNs(), std::memory_order_relaxed);
-            switch (b) {
-            case XrInputSink::PlayerButton::Trigger:
-                post(Cmd::TogglePanel);
-                break;
-            case XrInputSink::PlayerButton::A:
-                post(Cmd::TogglePause);
-                break;
-            case XrInputSink::PlayerButton::B:
-                post(Cmd::Exit);
-                break;
-            case XrInputSink::PlayerButton::Grip:
-                post(Cmd::Recenter);
-                break;
-            }
-        };
-        xo.inputSink.menu = [this]() { post(Cmd::TogglePanel); };
-        xo.inputSink.stick = [this](float x, float y) { onStick(x, y); };
-        xo.inputSink.panel = [this](float u, float v) {
-            float frac = -1.0f;
-            const int a = u < 0.0f ? PlayerPanel::None : PlayerPanel::hitTest(u, v, &frac);
-            m_Hover.store(a == PlayerPanel::Timeline ? PlayerPanel::None : a, std::memory_order_relaxed);
-            m_HoverTimeline.store(a == PlayerPanel::Timeline ? frac : -1.0f, std::memory_order_relaxed);
-            if (u >= 0.0f) {
-                m_LastInteractNs.store(steadyNowNs(), std::memory_order_relaxed);
-            }
-        };
-        xo.inputSink.panelClick = [this](float u, float v) { onPanelClick(u, v); };
+        xo.inputSink.playerButton = [this](XrInputSink::PlayerButton b) { inputButton(static_cast<int>(b)); };
+        xo.inputSink.menu = [this]() { inputMenu(); };
+        xo.inputSink.stick = [this](float x, float y) { inputStick(x, y); };
+        xo.inputSink.panel = [this](float u, float v) { inputPanel(u, v); };
+        xo.inputSink.panelClick = [this](float u, float v) { inputPanelClick(u, v); };
         if (!m_Config.xrRuntimeJson.isEmpty()) {
             qputenv("XR_RUNTIME_JSON", QFile::encodeName(m_Config.xrRuntimeJson));
         }
@@ -431,6 +420,7 @@ int PlayerSession::run(QString* error)
                 previewPending = false;
                 AVFrame* f = m_Media.takeVideo();
                 if (m_Xr != nullptr && f != nullptr) {
+                    showVideo();
                     m_Xr->video()->submit(f);
                 }
                 av_frame_free(&f);
@@ -473,6 +463,7 @@ int PlayerSession::run(QString* error)
             continue;
         }
         if (m_Xr != nullptr) {
+            showVideo();
             m_Xr->video()->submit(f);
         }
         av_frame_free(&f);
@@ -527,12 +518,78 @@ int PlayerSession::run(QString* error)
     settings.sync();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] stopped at %.1f s (rc=%d)", pos, rc);
     m_Media.close();
-    if (m_Xr != nullptr) {
+    if (m_Xr != nullptr && m_OwnXr) {
         m_Xr->shutdown();
         delete m_Xr;
-        m_Xr = nullptr;
     }
+    else if (m_Xr != nullptr) {
+        // §VR-SHELL：session 還給 VR 介面：收控制列、格式回平面、不再要求片子的更新率，螢幕換回介面
+        m_Xr->setPlayerPanel(QImage(), false);
+        m_Xr->setPlayerLayout(0, 0, 0.0f);
+        m_Xr->setPlayerEyeOffset(0.0f);
+        m_Xr->setPreferredRefreshHz(0.0f);
+        m_Xr->setShellActive(true);
+    }
+    m_Xr = nullptr;
     return rc;
+}
+
+void PlayerSession::showVideo()
+{
+    if (m_VideoShown) {
+        return;
+    }
+    m_VideoShown = true;
+    if (!m_OwnXr) {
+        m_Xr->setShellActive(false);
+    }
+}
+
+void PlayerSession::inputButton(int button)
+{
+    // 手把（使用者 2026-10-19 的配戴回饋：控制列收起來後手把完全沒反應）：扳機（沒指在控制列上）＝開關控制列、
+    // A＝播放／暫停、B＝離開回選片頁、握把＝置中；搖桿左右＝後退／前進 10 秒、上下＝音量（onStick）
+    m_LastInteractNs.store(steadyNowNs(), std::memory_order_relaxed);
+    switch (static_cast<XrInputSink::PlayerButton>(button)) {
+    case XrInputSink::PlayerButton::Trigger:
+        post(Cmd::TogglePanel);
+        break;
+    case XrInputSink::PlayerButton::A:
+        post(Cmd::TogglePause);
+        break;
+    case XrInputSink::PlayerButton::B:
+        post(Cmd::Exit);
+        break;
+    case XrInputSink::PlayerButton::Grip:
+        post(Cmd::Recenter);
+        break;
+    }
+}
+
+void PlayerSession::inputMenu()
+{
+    post(Cmd::TogglePanel);
+}
+
+void PlayerSession::inputStick(float x, float y)
+{
+    onStick(x, y);
+}
+
+void PlayerSession::inputPanel(float u, float v)
+{
+    float frac = -1.0f;
+    const int a = u < 0.0f ? PlayerPanel::None : PlayerPanel::hitTest(u, v, &frac);
+    m_Hover.store(a == PlayerPanel::Timeline ? PlayerPanel::None : a, std::memory_order_relaxed);
+    m_HoverTimeline.store(a == PlayerPanel::Timeline ? frac : -1.0f, std::memory_order_relaxed);
+    if (u >= 0.0f) {
+        m_LastInteractNs.store(steadyNowNs(), std::memory_order_relaxed);
+    }
+}
+
+void PlayerSession::inputPanelClick(float u, float v)
+{
+    onPanelClick(u, v);
 }
 
 void PlayerSession::applyFormat()

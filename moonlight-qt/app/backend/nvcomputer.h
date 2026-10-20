@@ -118,6 +118,7 @@ public:
     NvAddress remoteAddress;
     NvAddress ipv6Address;
     NvAddress manualAddress;
+    NvAddress vpnAddress;       // §VPN-ADDR：host 廣告的 Tailscale 等 VPN 位址（100.64.0.0/10），最後才試
     NvAddress stunAddress;      // VipleStream: STUN-discovered public endpoint
     QString stunNatType;        // "punchable" or "symmetric"
     QByteArray macAddress;

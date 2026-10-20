@@ -3,6 +3,8 @@
 #include <QSemaphore>
 #include <QQuickWindow>
 
+#include <functional>
+
 #include <Limelight.h>
 #include <opus_multistream.h>
 #include "settings/streamingpreferences.h"
@@ -121,6 +123,10 @@ public:
     {
         return s_ActiveSession;
     }
+
+    // §VR-SHELL：同一個程式只能有一個 XR session。頭盔 VR 介面（backend/xrshell.cpp）設這個鉤子：串流第一次要開
+    // XrContext 之前呼叫 hook(true)（同步，介面先關掉自己的 session），整場串流結束後呼叫 hook(false)。任何執行緒呼叫
+    static void setXrOwnerHook(std::function<void(bool sessionWantsXr)> hook);
 
     Overlay::OverlayManager& getOverlayManager()
     {
@@ -337,6 +343,8 @@ private:
     bool m_XrPcvr = false;  // M4a R1：XrContext 是 PCVR 模式（projection＋XR tracking）
     void setupXrDesktop();
     void destroyXrContext();
+    void releaseXrOwner();  // §VR-SHELL：整場結束，XR 還給 VR 介面
+    bool m_XrOwnerHeld = false;
     bool setupXrPcvr();  // M4a R1
     // §VR M3a X5：XR 生命週期（LOSS 重建 ≤3 次、runtime EXITING 退回平面）
     bool createXrContext(bool isRebuild, QString* error);

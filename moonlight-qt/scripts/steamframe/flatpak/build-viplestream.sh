@@ -244,6 +244,13 @@ for dep in cifra micro-ecc; do
 	done
 done
 
+# Steam 收藏庫的封面圖與圖示（install-steamframe.sh 從安裝好的 app 裡複製到 Steam 的 grid 資料夾；
+# Flatpak 匯出的圖示只有 SVG 主題名稱，Steam 捷徑認不得）
+for f in capsule portrait hero logo icon; do
+	install -Dm644 "$ROOT/moonlight-qt/scripts/steamframe/art/$f.png" "/app/share/viplestream/steam/$f.png" \
+		|| die "安裝 Steam 封面圖 $f.png 失敗"
+done
+
 INFO_OUT="/app/share/VipleStream/SOURCE_INFO"
 mkdir -p "$(dirname "$INFO_OUT")" || die "無法建立 $(dirname "$INFO_OUT")"
 {

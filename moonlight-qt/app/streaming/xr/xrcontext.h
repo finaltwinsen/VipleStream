@@ -144,6 +144,11 @@ public:
         // §VR-PLAYER（2026-10-19）：頭盔影片模式。影像不是串流：暫停時同一張停很久是正常的，不顯示 stale／lost；
         // 螢幕一律用 quad（控制列與射線求交都照 quad 算）；畫面格式由 setPlayerLayout() 在執行期改
         bool player = false;
+        // §VR-SHELL（2026-10-20，頭盔 VR 介面）：>0＝建一個這麼大的介面面板 swapchain（像素）。setShellActive(true) 時螢幕的
+        // 位置改顯示 setShellImage() 給的介面畫面（不顯示影像、控制列），射線照一般射線滑鼠送進 inputSink。要搭配 player＝true
+        // （之後影片模式直接用同一個 session）
+        uint32_t shellWidth = 0;
+        uint32_t shellHeight = 0;
     };
 
     // M4a R1：bring-up 後量到的顯示參數（/launch 的 vrFov、vrIpd、vrEyeToHead、vrHz、vrPeriodNs 來源）
@@ -275,6 +280,24 @@ public:
     static constexpr int kPanelW = 1024;
     static constexpr int kPanelH = 192;
     void setPlayerPanel(const QImage& img, bool visible);
+
+    // ── §VR-SHELL（頭盔 VR 介面）──
+    // 任何執行緒：介面畫面（Options.shellWidth×shellHeight；格式用 shellImageFormat() 才不會在 frame thread 轉換）。
+    // 圖換了 frame thread 下一格上傳
+    void setShellImage(const QImage& img);
+    // 任何執行緒：顯示介面（true）或影像（false，影片模式）
+    void setShellActive(bool on) { m_ShellActive.store(on, std::memory_order_release); }
+    bool shellActive() const { return m_ShellActive.load(std::memory_order_acquire); }
+    // bring-up 之後：上傳不必轉換的 QImage 格式（swapchain 是 BGRA＝ARGB32，RGBA＝RGBA8888）
+    QImage::Format shellImageFormat() const;
+    // 任何執行緒：開／關虛擬鍵盤（介面的文字欄位拿到／失去焦點）
+    void requestKeyboard(bool open);
+    // §VR-SHELL：任何執行緒：session 已在跑時換想要的顯示更新率（同 Options.preferredRefreshHz；影片模式依片子的 fps，
+    // 回介面時 0＝不再要求）。frame thread 下一格經 XR_FB_display_refresh_rate 要求最接近的值
+    void setPreferredRefreshHz(float hz) { m_PendingRefreshHz.store(hz, std::memory_order_release); }
+    // §VR-SHELL：任何執行緒：true＝之後每一格都不送任何圖層（xrEndFrame 的 layerCount＝0）。結束之前先清空畫面，讓 SteamVR
+    // 在我們還活著的時候拆掉它替 quad 圖層建的覆蓋層（openxr_quadlayer_*）；見 xrshell.cpp 的 shutdownXrForExit
+    void setBlank(bool on) { m_Blank.store(on, std::memory_order_release); }
     // 最近一格 xrWaitFrame 返回的時刻、那一格的預測顯示時刻（steady ns；沒有時間換算時是「返回後兩個週期」的估計值）
     // 與週期。播放器照它決定每一張影片幀什麼時候交出去（playersync.h）。還沒有＝全部 0
     struct DisplayTiming {
@@ -284,6 +307,11 @@ public:
         bool exact = false;
     };
     DisplayTiming displayTiming() const;
+
+    // §VR-SHELL：這個行程是頭盔 VR 介面開的子行程（stream／play 的 --xr-handback）。shutdown() 時先在 stderr 印
+    // "VIPLE-XR-STATE HANDBACK"，最多等 6 秒讓介面開回它的 session（SteamVR 直接把這邊的 session 結束掉，中間不會沒有
+    // XR 程式而叫出儀表板），等不到才自己結束。main() 在建立 XrContext 之前設
+    static void setHandBackOnShutdown(bool on);
 
     // 執行期載入 Vulkan loader（Linux：libvulkan.so.1；Windows：vulkan-1.dll），app 不連 -lvulkan。
     static PFN_vkGetInstanceProcAddr loadVulkanLoader(QString* error);
@@ -395,6 +423,18 @@ private:
     uint32_t m_PanelImageCount = 0;
     VkImage* m_PanelImages = nullptr;
     bool m_PanelUploaded = false;               // frame thread
+    // §VR-SHELL
+    std::mutex m_ShellMutex;
+    QImage m_ShellImg;                          // m_ShellMutex
+    bool m_ShellDirty = false;                  // m_ShellMutex
+    std::atomic<bool> m_ShellActive{false};
+    std::atomic<float> m_PendingRefreshHz{-1.0f};  // -1＝沒有新要求
+    std::atomic<bool> m_Blank{false};
+    XrSwapchain m_ShellSwapchain = XR_NULL_HANDLE;
+    uint32_t m_ShellImageCount = 0;
+    VkImage* m_ShellImages = nullptr;
+    bool m_ShellUploaded = false;               // frame thread
+    bool m_ShellLogged = false;                 // frame thread
     mutable std::mutex m_TimingMutex;
     DisplayTiming m_DisplayTiming;              // m_TimingMutex
     XrDesktopScreen* m_Screen = nullptr;  // X3 擺放（frame thread 用；requestRecenter 任何執行緒）
@@ -442,6 +482,7 @@ private:
     std::atomic<bool> m_FrameThreadRunning{false};
     std::atomic<bool> m_StopRequested{false};
     std::atomic<bool> m_ExitRequested{false};  // shutdown() 要求 frame thread 走正常退出流程
+    std::atomic<bool> m_HandingBack{false};    // §VR-SHELL：shutdown() 正在等 VR 介面接手（runtime 結束 session 不算意外）
     std::atomic<bool> m_Lost{false};
     std::atomic<bool> m_SessionBegun{false};
     std::atomic<int> m_State{0};

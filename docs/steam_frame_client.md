@@ -19,6 +19,8 @@
 5. S3／PoC-F-pre（需要 Steam 登入）**延到 M3a 開頭**（使用者 2026-09-28 決定）。
 6. **使用者安裝一律走 `install-steamframe.sh`**（2.0.2 起，release asset `VipleStream-SteamFrame-Install-X.Y.Z.sh`），
    不要只裝 `.flatpak`：Flatpak 一定開 PID namespace，VR 模式與影片模式會被程式停用，只剩桌面模式。見 §5.1。
+7. **頭盔上的介面是全 VR 的**（2.0.3 起，§VR-SHELL）：主畫面不再是平面視窗，而是畫進 XR 面板、用雷射操作；影片模式在同一個
+   XR session 裡播，SteamVR 不必換程式。見 §12。
 
 ---
 
@@ -3022,7 +3024,8 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
   播放器時：馬上藏視窗 → 劇院 frame 消失，SteamVR 叫出 Steam 主選單（`theater frame destroyed`）；不藏、最小化、等播放器
   FOCUSED 才藏、或讓播放器在 SteamVR 眼中變成另一個 app → 播放器一 VISIBLE，SteamVR 就打開選單並把選片頁收進去
   （`SetDockLocation`）。程式這邊避不掉。SteamVR 設定 `dashboard.autoShowGameTheater=false`（vrcmd `--set-settings-bool`）之後，
-  上面兩種都不再叫出選單（無人頭盔 B1／B2），但無人時播放器只到 VISIBLE；選片頁會不會自己出現、手把有沒有作用待配戴確認。
+  上面兩種都不再叫出選單（無人頭盔 B1／B2），但無人時播放器只到 VISIBLE。使用者配戴（10-20）：還是會跳出 SteamVR 介面、
+  切換慢 → 這個設定已改回預設，改做全 VR 介面（§12）。
   實驗參數 `--dev-video "…,hide=now|never|minimize|focused[,appenv=strip]"`，子行程的 XR 狀態從 stderr 的 `VIPLE-XR-STATE` 轉進 GUI log。
 - **不做**：Windows client 不加這個模式；DRM 保護的串流服務播不了；字幕之後再說。
 - **驗到哪裡（2026-10-19，頭盔無人＋builder；使用者還沒配戴）**：
@@ -3039,3 +3042,61 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
     頭盔 CPU 解 4K30 VP9 跟得上）。
   - 內建瀏覽器（頭盔無人，`--dev-video`）：YouTube 2–3 秒載入；「Play in VR」→ 解析 → 360° EAC、VP9 硬解、每秒 30 張穩定。
   - 還沒驗：選片頁與瀏覽器用控制器的實際操作（雷射指標點、捲動、網址列打字）、真的控制器操作控制列、配戴時的影音同步觀感。
+
+## 12. 頭盔全 VR 介面（§VR-SHELL，2026-10-20）
+
+使用者 10-20 配戴回饋：「2D 切換成 VR 時仍然會跳出 SteamVR 的介面，速度慢體感差」。原因是主畫面是平面視窗（SteamVR 當成
+平面遊戲放在劇院裡），開始播影片或 VR 串流時換成另一個 XR 程式，SteamVR 每次都要切換。§11 的各種讓開方式都擋不住，所以
+改成程式從一開始就是 XR 程式：
+
+- **介面**：`gui/main.qml` 拆成內容 `AppContent.qml`（Page：工具列、StackView、對話框）與外殼。平面視窗的外殼是
+  `main.qml`（ApplicationWindow）；VR 的外殼是 `gui/VrShell.qml`（Item），由 `backend/xrshell.cpp` 用 `QQuickRenderControl`
+  ＋OpenGL 畫在離屏的 `QQuickWindow`（1280×800），`glReadPixels` 讀回（上下要翻）交給 XrContext 的介面面板
+  （`Options.shellWidth/Height`、`setShellImage()`、`setShellActive()`；位置與寬度同影像螢幕，前方 1.5 m、水平 62°）。
+  兩個外殼的根物件都叫 `window`，各頁面照舊用 `window.theme` 等。介面有動畫時一直重畫，最多每秒 30 張。
+- **操作**：XrInput 的一般射線滑鼠轉成 Qt 事件——指到＝移動（hover）、扳機＝左鍵、握把＝右鍵、搖桿上下＝捲動、
+  B＝Esc（關對話框／上一頁；`XrInputSink::back`）、選單鍵＝開關虛擬鍵盤；文字欄位拿到焦點時自動開鍵盤
+  （`requestKeyboard()`），虛擬鍵盤的 Win32 VK 轉成 Qt 按鍵與文字（US 版面）。
+- **影片模式（A2）**：`VrLauncher::launchPlayer()` 在 VR 介面裡不開子行程，交給 `XrShell::startPlayer()` 用同一個 XrContext
+  跑 `PlayerSession`（`Config.sharedXr`）。載入時面板還是介面；第一張影像要顯示時才換成影片（`setShellActive(false)`），
+  這時按鍵與搖桿依 `XrInputSink::playerActive()` 改成影片模式的配置（同 `viplestream play`）；播完或按 B 換回介面，螢幕
+  距離與更新率要求也換回來（`setPreferredRefreshHz()`：session 在跑時換想要的更新率）。
+- **VR 串流：子行程換手（A3）**：VR 串流仍是子行程（`stream --display-target pcvr`；延遲調校都在 PCVR 那條路上，不搬）。
+  頭盔實驗（2026-10-20 X1）：介面的 session 還在時子行程開 session，SteamVR 會把介面的結束掉（systemui log
+  `[HideDashboard] transition_app_quitting`）並**收起儀表板**，子行程直接 FOCUSED；反過來如果介面先關、中間沒有任何 XR
+  程式，SteamVR 會 `NoMoreSceneAppTransition` → 打開儀表板，這就是「跳出 SteamVR 介面」。所以兩個方向都換手：
+  - 開：介面不關 session（`VrLauncher::ChildEvent::Starting`）；runtime 結束介面的 session 時（`onXrEnded`）當成交出去，不結束程式。
+  - 回：子行程帶 `--xr-handback`；它的 `XrContext::shutdown()` 先在 stderr 印 `VIPLE-XR-STATE HANDBACK`、最多等 6 秒，
+    介面收到（`ChildEvent::HandBack`）就開回 session，SteamVR 再把子行程的結束掉。子行程沒交還就結束時（出錯、被關）介面照樣開回來。
+- **桌面模式的串流**（2026-10-21，使用者：「全部做成 VR 介面，不要再用 2D」）：原本在介面行程裡開 SDL 平面視窗（SteamVR 的
+  劇院）。VR 介面裡改成和 VR 串流一樣開子行程 `stream --display-target xr-desktop --xr-handback`（`VrLauncher::launchDesktop`、
+  `AppView.qml` 的 `streamInChild()`）：XR 虛擬螢幕（β）、**不開平面視窗**（main.cpp 的 §VR-HEADLESS 對 `--xr-handback` 的 XR 桌面
+  也套用）、同樣換手。代價：實體鍵盤收不到（沒有視窗焦點），打字用虛擬鍵盤。`Session::setXrOwnerHook` 只剩平面介面以外的備援。
+- **開關**：Frame 上一般啟動預設就是 VR 介面（`VrLauncher::vrShellByDefault()`：gamescope 裡、沒有 PID 沙盒）；XR 帶不起來
+  就退回平面視窗。dev：`--vr-shell "<xr|noxr|off>[,dump=<秒>:<png>][,test=<秒>:<指令>;…]"`，off＝強制平面視窗，noxr＝不開 XR、
+  只離屏畫（開發機驗介面與事件），childplayer＝影片模式也走子行程（驗換手）；指令 move／click／rclick:x:y、wheel:量、
+  type:文字、key:vk、back、pbutton:n、dump:png、quit。
+  頭盔無人驗測：`scripts/vr/shell_run.sh <tag> <秒> "<--vr-shell 的值>[ --dev-video …]"`，同時每 0.5 秒記一次 SteamVR 可見的
+  覆蓋層（`vrcmd --overlays`；劇院是 `valve.steam.desktopgame.*`）。
+- **驗到哪裡（2026-10-20，頭盔無人）**：
+  - 開發機 noxr：畫面方向、字型、點擊、捲動、返回、新增主機對話框打字、文字欄位自動開鍵盤的偵測。
+  - 頭盔：XR 2.3 秒帶起；120 Hz、漏幀 0；介面每張畫＋讀回 2.3–2.9 ms。從收藏庫啟動時**沒有出現劇院**；Steam 主介面在我們
+    的畫面出現時自動收起，但 Steam 底部工具列與一個 450×1200 的側邊選單（`valve.steam.gamepadui.frame.menu.*`）留著，
+    session 因此只到 VISIBLE——是不是一般遊戲啟動也會這樣、配戴時按 Steam 鍵能不能收掉，待配戴確認。
+  - 頭盔：VR 介面裡播 1080p24（`--dev-video`）：同一個 session、沒有子行程，每張 5 格、丟幀 0、漏幀 0；手把 B（`pbutton:2`）
+    結束播放 → 同一個 session 立刻換回選片頁，SteamVR 的覆蓋層全程沒有變化。不帶參數啟動＝VR 介面；SIGTERM 收尾正常。
+  - 頭盔：換手（`childplayer`，影片模式走子行程代替 VR 串流）：介面保留 session → 子行程的 session 起來時 SteamVR 結束介面的
+    （介面不關程式）→ 子行程 FOCUSED；對子行程送 SIGTERM → 印 HANDBACK → 介面 2.3 秒開回 → 子行程結束，兩個方向都沒有
+    `NoMoreSceneAppTransition`、沒開儀表板（H2）。真的 VR 串流（`stream --display-target pcvr`）的換手還沒測（頭盔在外、
+    只有 Tailscale 中繼）。
+  - **steamwebhelper 會當掉重啟**（Steam 用戶端介面消失約 2 秒再出來、回到主介面）：無人測試時，XR 場景程式結束（我們的程式
+    結束 7 次有 4 次）或換手（2 次有 1 次）的那一刻最常發生；10-20 21:39 使用者拿下頭盔（跑的是 2.0.2 平面版）時也發生過。
+    `/tmp/dumps/completed/*.dmp` 都是 steamwebhelper 的 SIGABRT：glibc 偵測到 heap 損壞，呼叫端一次在 Mesa 的
+    libgallium、一次在 libcef——Steam 用戶端在 Frame 上的 bug，我們這邊只能少觸發（影片模式在同一個 session 裡播就完全沒有切換）。
+- **結束串流（§VR-EXIT-COMBO，2026-10-21）**：VR 串流與 XR 桌面子行程沒有平面視窗，實體鍵盤的 Ctrl+Alt+Shift+Q 收不到，頭盔手把
+  也不是 SDL 手把（Start+Select+L1+R1 不會觸發）。改由 `XrInput` 偵測 **A＋X＋扳機＋握把**同時按住（各取任一手；Frame 的 A、X
+  都在右手，Touch 的 X 在左手，Index 沒有 X）的上升緣，推 `SDL_QUIT`（log `[VIPLE-XR-INPUT] exit combo`）。VR 介面開子行程時
+  在面板底部提示這個按法；平面的 StreamSegue 在頭盔上也多一行。
+- **SteamVR 快速選單的「結束」**：SIGINT 會同時送到子行程與 VR 介面（頭盔 10-21：介面跟著結束、回到 SteamVR）。子行程在跑或剛結束
+  3 秒內，介面的訊號處理不理會 SIGINT／SIGTERM（`VrLauncher::childGuardActive`，log `[VIPLE-SHELL] ignoring signal`），
+  子行程照常換手回介面。

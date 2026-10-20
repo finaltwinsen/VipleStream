@@ -324,6 +324,7 @@ SOURCES += \
     backend/systemproperties.cpp \
     backend/hidprobe.cpp \
     backend/vrlauncher.cpp \
+    backend/xrshell.cpp \
     backend/medialibrary.cpp \
     backend/webresolver.cpp \
     backend/vrpreflightcheck.cpp \
@@ -412,6 +413,7 @@ HEADERS += \
     backend/systemproperties.h \
     backend/hidprobe.h \
     backend/vrlauncher.h \
+    backend/xrshell.h \
     backend/medialibrary.h \
     backend/webresolver.h \
     backend/vrpreflight.h \

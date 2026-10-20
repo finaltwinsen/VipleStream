@@ -7,6 +7,10 @@
 #include <QFile>
 #include <QProcessEnvironment>
 
+#include <atomic>
+#include <chrono>
+#include <climits>
+
 #include <cstdio>
 
 #if defined(Q_OS_LINUX)
@@ -48,12 +52,48 @@ QString userFacingError(const QString& line)
     return QString();
 }
 
+std::function<void(VrLauncher::ChildEvent)> s_ChildHook;  // §VR-SHELL
+std::function<bool(const VrLauncher::PlayRequest&)> s_PlayerHandler;  // §VR-SHELL（A2）
+VrLauncher* s_Instance = nullptr;  // QML singleton（playerFinished 用）
+
 }  // namespace
+
+void VrLauncher::setChildHook(std::function<void(ChildEvent)> hook)
+{
+    s_ChildHook = std::move(hook);
+}
+
+void VrLauncher::setPlayerHandler(std::function<bool(const PlayRequest&)> handler)
+{
+    s_PlayerHandler = std::move(handler);
+}
+
+void VrLauncher::playerFinished(int exitCode, const QString& error)
+{
+    if (s_Instance != nullptr) {
+        s_Instance->inProcessPlayerEnded(exitCode, error);
+    }
+}
+
+void VrLauncher::inProcessPlayerEnded(int exitCode, const QString& error)
+{
+    if (!m_InProcessPlayer) {
+        return;
+    }
+    m_InProcessPlayer = false;
+    m_LastError = error;
+    const QString shown = playerError(exitCode, false);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] video player (in the VR interface) finished exit=%d%s%s", exitCode,
+                shown.isEmpty() ? "" : " error=", qPrintable(shown));
+    emit runningChanged();
+    emit finished(exitCode, shown);
+}
 
 VrLauncher::VrLauncher(QObject* parent)
     : QObject(parent),
       m_Preflight(new VrPreflightCheck(this))
 {
+    s_Instance = this;
     // §VR-PREFLIGHT：檢查的結果。proceed＝可以開了（夠快、量不到、連續夠快、使用者堅持）
     connect(m_Preflight, &VrPreflightCheck::changed, this, &VrLauncher::preflightChanged);
     connect(m_Preflight, &VrPreflightCheck::proceed, this, &VrLauncher::preflightPassed);
@@ -66,6 +106,9 @@ VrLauncher::VrLauncher(QObject* parent)
 
 VrLauncher::~VrLauncher()
 {
+    if (s_Instance == this) {
+        s_Instance = nullptr;
+    }
     if (m_Proc == nullptr) {
         return;
     }
@@ -82,6 +125,15 @@ VrLauncher::~VrLauncher()
             }
         }
     }
+}
+
+bool VrLauncher::vrShellByDefault()
+{
+#if defined(Q_OS_LINUX) && defined(HAVE_OPENXR)
+    return !qEnvironmentVariableIsEmpty("GAMESCOPE_WAYLAND_DISPLAY") && !inPidNamespacedSandbox();
+#else
+    return false;
+#endif
 }
 
 bool VrLauncher::available() const
@@ -154,6 +206,27 @@ QString VrLauncher::devVideoHost() const { return s_DevVideo.host; }
 QString VrLauncher::devVideoDir() const { return s_DevVideo.dir; }
 QString VrLauncher::devLaunchHide() const { return s_DevVideo.hide; }
 
+bool VrLauncher::shellActive() const
+{
+    return static_cast<bool>(s_ChildHook);
+}
+
+bool VrLauncher::launchDesktop(const QString& hostAddress, const QString& appName, bool takeover)
+{
+    if (!s_ChildHook || running() || hostAddress.isEmpty() || appName.isEmpty()) {
+        return false;
+    }
+    QStringList args{QStringLiteral("stream"), QStringLiteral("--display-target"), QStringLiteral("xr-desktop")};
+    if (takeover) {
+        args << QStringLiteral("--takeover");
+    }
+    args << QStringLiteral("--xr-handback") << QStringLiteral("--") << hostAddress << appName;
+    m_ChildIsPlayer = false;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] launching desktop stream (XR screen): app=\"%s\"%s",
+                qPrintable(appName), takeover ? " (takeover)" : "");
+    return startChild(args, QStringLiteral("desktop stream"));
+}
+
 bool VrLauncher::playerAvailable() const
 {
 #ifdef HAVE_VR_PLAYER
@@ -180,7 +253,12 @@ QString VrLauncher::blockedReason() const
 
 bool VrLauncher::running() const
 {
-    return m_Proc != nullptr && m_Proc->state() != QProcess::NotRunning;
+    return m_InProcessPlayer || (m_Proc != nullptr && m_Proc->state() != QProcess::NotRunning);
+}
+
+bool VrLauncher::streamRunning() const
+{
+    return !m_ChildIsPlayer && m_Proc != nullptr && m_Proc->state() != QProcess::NotRunning;
 }
 
 bool VrLauncher::setVrMode(bool on)
@@ -295,6 +373,19 @@ bool VrLauncher::launchPlayer(const QString& source, const QString& format, cons
     if (running() || source.trimmed().isEmpty() || !available() || !blockedReason().isEmpty()) {
         return false;
     }
+    if (s_PlayerHandler) {
+        // §VR-SHELL（A2）：在 VR 介面的 XR session 裡播，SteamVR 不必換程式
+        const PlayRequest req{source.trimmed(), format, title, audioSource};
+        if (!s_PlayerHandler(req)) {
+            return false;
+        }
+        m_ChildIsPlayer = true;
+        m_InProcessPlayer = true;
+        m_LastError.clear();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] video player started in the VR interface");
+        emit runningChanged();
+        return true;
+    }
     QStringList args{QStringLiteral("play")};
     if (!format.isEmpty() && format != QLatin1String("auto")) {
         args << QStringLiteral("--vr-format") << format;
@@ -304,6 +395,9 @@ bool VrLauncher::launchPlayer(const QString& source, const QString& format, cons
     }
     if (!audioSource.isEmpty()) {
         args << QStringLiteral("--audio-url") << audioSource;
+    }
+    if (s_ChildHook) {
+        args << QStringLiteral("--xr-handback");  // §VR-SHELL
     }
     // 來源放在 "--" 之後：以 '-' 開頭的檔名不會被當成選項
     args << QStringLiteral("--") << source.trimmed();
@@ -318,11 +412,28 @@ bool VrLauncher::startProcess(const QString& hostAddress, const QString& appName
     if (takeover) {
         args << QStringLiteral("--takeover");
     }
+    if (s_ChildHook) {
+        args << QStringLiteral("--xr-handback");  // §VR-SHELL
+    }
     args << QStringLiteral("--") << hostAddress << appName;
     m_ChildIsPlayer = false;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] launching VR stream: app=\"%s\"%s",
                 qPrintable(appName), takeover ? " (takeover)" : "");
     return startChild(args, QStringLiteral("VR stream"));
+}
+
+namespace {
+// 0＝沒有子行程；INT64_MAX＝子行程在跑；其他＝結束之後的保護期限（steady clock 毫秒）
+std::atomic<int64_t> s_ChildGuardUntilMs{0};
+int64_t steadyMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}
+
+bool VrLauncher::childGuardActive()
+{
+    return steadyMs() < s_ChildGuardUntilMs.load(std::memory_order_acquire);
 }
 
 bool VrLauncher::startChild(const QStringList& args, const QString& what)
@@ -345,6 +456,10 @@ bool VrLauncher::startChild(const QStringList& args, const QString& what)
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] failed to start the stream process");
                 if (!singleInstanceReacquire()) {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] could not take the single-instance lock back");
+                }
+                s_ChildGuardUntilMs.store(0, std::memory_order_release);
+                if (s_ChildHook) {
+                    s_ChildHook(ChildEvent::Ended);
                 }
                 emit runningChanged();
                 emit finished(-1, tr("Could not start the VR stream."));
@@ -382,11 +497,34 @@ bool VrLauncher::startChild(const QStringList& args, const QString& what)
     m_LastError.clear();
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] starting the %s process", qPrintable(what));
+    // §VR-SHELL：告訴 VR 介面（它保留自己的 XR session，等子行程的接手）
+    if (s_ChildHook) {
+        s_ChildHook(ChildEvent::Starting);
+    }
     // 子行程是同一支程式，會自己拿單一實例鎖：開之前先放掉，結束後再拿回
     singleInstanceReleaseForChild();
+    s_ChildGuardUntilMs.store(INT64_MAX, std::memory_order_release);
     m_Proc->start(QCoreApplication::applicationFilePath(), args);
     emit runningChanged();
     return true;
+}
+
+QString VrLauncher::playerError(int exitCode, bool crashed) const
+{
+    // §VR-PLAYER 的結束碼（playersession.h）：0 正常、2 XR 起不來、3 影片開不了或讀取失敗、4 XR session 中途結束
+    if (crashed) {
+        return tr("The video player stopped unexpectedly.");
+    }
+    if (exitCode == 2) {
+        return tr("Could not start VR for the video player.") + (m_LastError.isEmpty() ? QString() : QStringLiteral("\n") + m_LastError);
+    }
+    if (exitCode == 3) {
+        return tr("Could not play this video.") + (m_LastError.isEmpty() ? QString() : QStringLiteral("\n") + m_LastError);
+    }
+    if (exitCode != 0 && exitCode != 4) {
+        return !m_LastError.isEmpty() ? m_LastError : tr("The video player ended with an error (code %1).").arg(exitCode);
+    }
+    return QString();
 }
 
 void VrLauncher::onStderr()
@@ -403,6 +541,9 @@ void VrLauncher::onStderr()
         if (line.startsWith(QLatin1String("VIPLE-XR-STATE "))) {
             const QString st = line.mid(15);
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] child XR session %s", qPrintable(st));
+            if (st == QLatin1String("HANDBACK") && s_ChildHook) {
+                s_ChildHook(ChildEvent::HandBack);
+            }
             emit childXrState(st);
             continue;
         }
@@ -429,22 +570,14 @@ void VrLauncher::processEnded(int exitCode, QProcess::ExitStatus status)
     if (!singleInstanceReacquire()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] could not take the single-instance lock back");
     }
+    s_ChildGuardUntilMs.store(steadyMs() + 3000, std::memory_order_release);
+    if (s_ChildHook) {
+        s_ChildHook(ChildEvent::Ended);
+    }
 
     QString error;
     if (m_ChildIsPlayer) {
-        // §VR-PLAYER 的結束碼（playersession.h）：0 正常、2 XR 起不來、3 影片開不了或讀取失敗、4 XR session 中途結束
-        if (status != QProcess::NormalExit) {
-            error = tr("The video player stopped unexpectedly.");
-        }
-        else if (exitCode == 2) {
-            error = tr("Could not start VR for the video player.") + (m_LastError.isEmpty() ? QString() : QStringLiteral("\n") + m_LastError);
-        }
-        else if (exitCode == 3) {
-            error = tr("Could not play this video.") + (m_LastError.isEmpty() ? QString() : QStringLiteral("\n") + m_LastError);
-        }
-        else if (exitCode != 0 && exitCode != 4) {
-            error = !m_LastError.isEmpty() ? m_LastError : tr("The video player ended with an error (code %1).").arg(exitCode);
-        }
+        error = playerError(exitCode, status != QProcess::NormalExit);
     }
     else if (status != QProcess::NormalExit) {
         error = tr("The VR stream stopped unexpectedly.");

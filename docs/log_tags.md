@@ -1669,6 +1669,25 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 - 結束碼：0 正常（播完、離開、XR session 由使用者結束）、2 XR 起不來、3 影片開不了或讀取失敗、4 XR session 中途失效。
   錯誤原因同時印在 stderr（`Play error: …`），GUI 的對話框顯示它。
 
+### `[VIPLE-SHELL]` —— 頭盔全 VR 介面（§VR-SHELL，2026-10-20）
+
+```
+[VIPLE-SHELL] UI loaded (1280x800, GL <major>.<minor>[ ES])            ← VrShell.qml 已載入離屏畫面
+[VIPLE-SHELL] XR up in <ms> ms                                       ← 介面的 XR session 起來了（之後是 [VIPLE-XR] shell layer: quad …）
+[VIPLE-SHELL] could not start the VR interface (<原因>); using the window   ← 退回平面視窗
+[VIPLE-SHELL] 10s: <n> frames, render+readback avg <ms> ms           ← 介面重畫（最多 30 張／秒）
+[VIPLE-SHELL] text field focused: opening the keyboard / text field unfocused
+[VIPLE-SHELL] starting the video player in this XR session / video player finished (rc=<n>)
+[VIPLE-SHELL] VR stream process starting: keeping the shell XR session until it takes over / the VR stream process took over the headset
+[VIPLE-SHELL] <the VR stream process is handing the headset back|the VR stream process ended|desktop stream ended>: reopening the shell XR session
+[VIPLE-SHELL] desktop stream starting: closing the shell XR session
+[VIPLE-XR] handing the headset back to the VR interface / the VR interface took over after <ms> ms / … did not take over within <ms> ms   ← 子行程（--xr-handback）
+[VIPLE-SHELL] XR session ended (lost|exit); quitting                 ← 使用者從 SteamVR 離開＝程式結束
+[VIPLE-SHELL] dev step <n>: … / dev dump …                           ← --vr-shell 的 test=／dump=
+```
+- 同時會有 `[VIPLE-VR-LAUNCHER] video player started in the VR interface`／`video player (in the VR interface) finished exit=<n>`
+  與 `[VIPLE-PLAYER] using the VR interface's XR session`。
+
 ### `[VIPLE-MEDIA]` —— host 的影片分享（server，§VR-PLAYER V3）
 
 ```

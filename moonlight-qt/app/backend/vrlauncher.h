@@ -5,6 +5,8 @@
 #include <QProcess>
 #include <QString>
 
+#include <functional>
+
 class VrPreflightCheck;
 
 // VipleStream 2.0 §VR-LAUNCHER（2026-10-04）：在 Steam Frame 上從收藏庫開 VipleStream 時，可以選「桌面模式」
@@ -28,8 +30,12 @@ class VrLauncher : public QObject
     Q_PROPERTY(QString blockedReason READ blockedReason CONSTANT)
     Q_PROPERTY(bool vrMode READ vrMode NOTIFY vrModeChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    // 串流子行程在跑（VR 串流或 XR 桌面；不含影片模式）
+    Q_PROPERTY(bool streamRunning READ streamRunning NOTIFY runningChanged)
     // §VR-PLAYER：這個建置有影片模式，而且在 Frame 上（available）
     Q_PROPERTY(bool playerAvailable READ playerAvailable CONSTANT)
+    // §VR-SHELL：頭盔 VR 介面在跑（桌面模式也改開 XR 桌面子行程，不在這個程式裡開平面視窗串流）
+    Q_PROPERTY(bool shellActive READ shellActive CONSTANT)
     // §VR-PLAYER：這個建置有內建瀏覽器（Qt WebEngine）
     Q_PROPERTY(bool browserAvailable READ browserAvailable CONSTANT)
     // §VR-PLAYER（dev，--dev-video）：見 commandlineparser.h。devVideoTab＝-1＝沒帶
@@ -60,6 +66,9 @@ public:
 
     // 這個環境可以提供模式選擇（Frame 上）
     bool available() const;
+    bool streamRunning() const;
+    // §VR-SHELL：一般啟動時預設開頭盔 VR 介面（Frame 上、VR 沒有被 PID 沙盒停用）。main() 在建立 QML engine 之前呼叫
+    static bool vrShellByDefault();
 
     // 非空＝VR 模式不能用（原因給使用者看）
     QString blockedReason() const;
@@ -67,6 +76,7 @@ public:
     bool vrMode() const { return m_VrMode; }
     bool running() const;
     bool playerAvailable() const;
+    bool shellActive() const;
     bool browserAvailable() const
     {
 #ifdef HAVE_WEBENGINE
@@ -90,6 +100,22 @@ public:
     static bool setTestPreflightScript(const QString& spec, QString* error = nullptr);
     // dev（--dev-video）：main() 在建立 QML engine 之前呼叫
     static void setDevVideo(const QString& spec);
+    // §VR-SHELL：子行程的事件給頭盔 VR 介面。Starting＝開之前（同步）；HandBack＝子行程要結束 XR 了（stderr 的
+    // "VIPLE-XR-STATE HANDBACK"，介面該開回它的 session）；Ended＝子行程結束了。設了鉤子時子行程帶 --xr-handback。
+    // nullptr＝取消
+    enum class ChildEvent { Starting, HandBack, Ended };
+    static void setChildHook(std::function<void(ChildEvent)> hook);
+    // §VR-SHELL：子行程在跑、或剛結束不到 3 秒（任何執行緒都可呼叫；main.cpp 的訊號處理用）。SteamVR 快速選單的
+    // 「結束」會把 SIGINT 同時送給 VR 介面與子行程（頭盔 10-21：介面跟著結束、回到 SteamVR），這段期間介面不理會
+    static bool childGuardActive();
+    // §VR-SHELL（A2）：VR 介面在跑時，影片模式不開子行程，改交給這個 handler 在 VR 介面的 XR session 裡播。
+    // handler 回 false＝沒接受；接受之後播完由 VR 介面呼叫 playerFinished()。nullptr＝取消（回到子行程）
+    struct PlayRequest {
+        QString source, format, title, audioSource;
+    };
+    static void setPlayerHandler(std::function<bool(const PlayRequest&)> handler);
+    // §VR-SHELL：VR 介面裡的那一場播完（GUI 執行緒）。exitCode 同 viplestream play 的結束碼，error 是播放器給的說明
+    static void playerFinished(int exitCode, const QString& error);
     int devVideoTab() const;
     QString devVideoUrl() const;
     int devVideoGrabSec() const;
@@ -106,6 +132,10 @@ public:
     // probeHost／probePort 是量往返時間用的同一組位址與埠（三個都來自 AppModel.vrLaunchTarget()）；
     // takeover＝使用者已在 GUI 確認接管別的裝置的 session。
     // 回傳 false＝沒有接受（不是 VR 模式、串流正在跑、上一次的檢查還沒有結果、參數不完整）
+    // §VR-SHELL：VR 介面裡的桌面模式：另開 `stream --display-target xr-desktop --xr-handback` 子行程（XR 虛擬螢幕、
+    // 無平面視窗、和 VR 串流一樣換手）。不做往返時間檢查（桌面串流不像 VR 那麼怕延遲）。回傳 false＝沒有接受
+    Q_INVOKABLE bool launchDesktop(const QString& hostAddress, const QString& appName, bool takeover);
+
     Q_INVOKABLE bool launch(const QString& hostAddress, const QString& probeHost, int probePort,
                             const QString& appName, bool takeover);
 
@@ -134,12 +164,16 @@ private:
     bool startProcess(const QString& hostAddress, const QString& appName, bool takeover);
     // 開子行程（VR 串流與影片模式共用）；what 只給 log
     bool startChild(const QStringList& args, const QString& what);
+    // 影片模式的結束碼 → 給使用者看的錯誤（空＝正常結束）
+    QString playerError(int exitCode, bool crashed) const;
+    void inProcessPlayerEnded(int exitCode, const QString& error);
 
     bool m_VrMode = false;
     QProcess* m_Proc = nullptr;
     QByteArray m_StderrPartial;   // 還沒湊成一整行的 stderr
     QString m_LastError;          // 子行程最後一行給使用者看的錯誤（"Stream failed:"／"Stream error:" 等）
     bool m_ChildIsPlayer = false; // 目前（或剛結束）的子行程是影片模式（結束碼的意思不同）
+    bool m_InProcessPlayer = false; // §VR-SHELL：影片模式正在 VR 介面的 session 裡播（沒有子行程）
 
     // §VR-PREFLIGHT：檢查通過之後要開的那一場
     VrPreflightCheck* m_Preflight = nullptr;

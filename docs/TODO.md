@@ -121,8 +121,14 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
       `steam_frame_client.md` §11、log 在 `log_tags.md` `[VIPLE-PLAYER]`／`[VIPLE-MEDIA]`。V1～V4、PC 分頁的類檔案總管與內建瀏覽器（Qt WebEngine）都在頭盔無人驗過，**待使用者配戴測**（控制器實際操作還沒驗）。
       server 預設讓配對過的 client 逛整台 PC（`media_dirs` 限定資料夾、`media_share = disabled` 關掉）。
       2026-10-20 配戴回饋已處理：手把 A／B／扳機／握把、搖桿上下調遠近、PC 清單翻頁鈕、播放中斷線後 server HTTPS 卡死（已修）。
-      **開播時跳出 Steam 選單**程式這邊避不掉；`dashboard.autoShowGameTheater=false` 無人測有效，**待配戴確認**（頭盔目前是 false），
-      不行再做選片頁 VR 化（A）。
+      **開播時跳出 Steam 選單**：`dashboard.autoShowGameTheater=false` 配戴無效（已改回），改做全 VR 介面（下一項）。
+    - **頭盔全 VR 介面（§VR-SHELL，2026-10-20 起，使用者要求）**：介面畫進 XR 面板、影片模式在同一個 XR session 播
+      （`steam_frame_client.md` §12、log `[VIPLE-SHELL]`）。A1 介面、A2 影片模式已在頭盔無人驗過，**待配戴確認**（從收藏庫啟動時
+      Steam 工具列與側邊選單會不會留著、雷射操作手感）。**A3 待做**：VR 串流與桌面模式也改用同一個 session（目前開始前先關掉介面的
+      session、結束後再開回來，切換仍經過 SteamVR）。**10-21**：VR 串流改「換手」（不經過儀表板）、桌面模式改開 XR 桌面子行程
+      （不再有平面視窗）；結束時 steamwebhelper 當掉判定是 Steam 測試版的問題（使用者已切回穩定版，待對照）。
+    - **§VPN-ADDR（10-21）**：server 一律在 `/serverinfo` 廣告 VPN 介面位址（`VipleStreamVpnAddress`），client 只收 100.64.0.0/10、
+      存成 `vpnaddress`、當最後的候選位址——頭盔帶出門時主機不再顯示離線。待在外面實測。
     - 解碼輸出改成 100 µs 短輪詢（§VR-DEC-POLL，少 0.1～0.15 ms）；補幀那一批少一次色彩轉換（§VR-SYNTH-LEAN，少約 0.32 ms）。
       其中「上一張的小圖每次都被宣告成無效」是未定義行為（補幀的客觀檢查都過了，表示目前的驅動上內容還在），
       要不要不設開關直接修，**待使用者決定**。

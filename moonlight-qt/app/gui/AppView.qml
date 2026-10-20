@@ -106,9 +106,21 @@ CenteredGridView {
     function vrLaunchFn(appName, takeover) {
         var launcher = VrLauncher
         var target = appModel.vrLaunchTarget()
+        // §VR-SHELL：VR 介面裡的桌面模式也開子行程（XR 虛擬螢幕），不在介面行程裡開平面視窗
+        var desktop = !VrLauncher.vrMode
         return function() {
-            launcher.launch(target.address, target.host, target.port, appName, takeover)
+            if (desktop) {
+                launcher.launchDesktop(target.address, appName, takeover)
+            }
+            else {
+                launcher.launch(target.address, target.host, target.port, appName, takeover)
+            }
         }
+    }
+
+    // §VR-SHELL：這一次串流開子行程（VR 模式，或頭盔 VR 介面裡的桌面模式）
+    function streamInChild() {
+        return VrLauncher.vrMode || VrLauncher.shellActive
     }
 
     model: appModel
@@ -584,8 +596,8 @@ CenteredGridView {
                 if (quitExistingApp) {
                     quitAppDialog.appName = appModel.getRunningAppName()
                     // §VR-LAUNCHER：VR 模式結束舊 app 後不在 GUI 行程裡串流，改開 VR 串流子行程
-                    quitAppDialog.segueToStream = !VrLauncher.vrMode
-                    quitAppDialog.launchVrAfter = VrLauncher.vrMode
+                    quitAppDialog.segueToStream = !appGrid.streamInChild()
+                    quitAppDialog.launchVrAfter = appGrid.streamInChild()
                     quitAppDialog.nextAppName = model.name
                     quitAppDialog.nextAppIndex = index
                     quitAppDialog.open()
@@ -595,7 +607,7 @@ CenteredGridView {
             }
 
             // VipleStream 2.0 §VR-LAUNCHER：VR 模式另開子行程串流（用主機目前的位址；名稱可能重複）
-            if (VrLauncher.vrMode) {
+            if (appGrid.streamInChild()) {
                 appGrid.vrLaunchFn(model.name, takeover || false)()
                 return
             }
@@ -794,7 +806,7 @@ CenteredGridView {
 
         onAccepted: {
             // §VR-LAUNCHER：VR 模式一律走子行程；使用者已確認接管，子行程帶 --takeover
-            if (VrLauncher.vrMode) {
+            if (appGrid.streamInChild()) {
                 appGrid.vrLaunchFn(targetAppName, true)()
                 return
             }

@@ -1,4 +1,5 @@
 #include "commandlineparser.h"
+#include "backend/xrshell.h"                // §VR-SHELL：--vr-shell 的格式檢查
 #include "backend/vrpreflight.h"            // §VR-PREFLIGHT：--vr-test-preflight 的格式檢查（header-only，不依賴 Qt）
 #include "streaming/video/bitstreamdump.h"  // §SF-PROBE：stream --dump-bitstream
 #include "streaming/xr/xrlatchstats.h"      // §VR-LDIAG：--vr-test-jitter 的格式檢查（header-only，不依賴 OpenXR）
@@ -306,6 +307,7 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
     parser.addValueOption("vr-test-preflight", "(dev) scripted round-trip samples for the check the GUI runs before it starts a VR stream, "
                           "instead of measuring (not saved; only without an action): comma-separated <ms>[*<count>] or "
                           "x[*<count>], x = no answer; the last item repeats, e.g. 150*8,30");
+    parser.addValueOption("vr-shell", "(dev) headset VR interface: \"<xr|noxr|off>[,dump=<sec>:<png>][,test=<script>]\" (xr is the default on the Steam Frame; off = use the window)");
     parser.addValueOption("dev-video", "(dev) open the video mode page at start: \"<tab>[,url=<url>][,grab=<sec>:<png>][,play=<sec>][,host=<name>][,dir=<path>]\"");
     parser.parse(args);
     auto posArgs = parser.positionalArguments();
@@ -327,6 +329,14 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
             m_VrTestPreflight = spec;
         }
         m_DevVideo = parser.value("dev-video");
+        if (parser.isSet("vr-shell")) {
+            XrShell::Config shellConfig;
+            QString shellErr;
+            if (!XrShell::parseSpec(parser.value("vr-shell"), &shellConfig, &shellErr)) {
+                parser.showError(QString("vr-shell: %1 (got '%2')").arg(shellErr, parser.value("vr-shell")));
+            }
+            m_VrShell = parser.value("vr-shell");
+        }
         return NormalStartRequested;
     }
     else {
@@ -675,6 +685,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                                          "the host renders the extra margin so head turns do not expose blank edges");
     // §VR-LAUNCHER：GUI 的 VR 模式以子行程串流，接管確認在 GUI 做完後帶這個旗標（不寫入設定）
     parser.addFlagOption("takeover", "take over the host even if another device is streaming from it (that device is disconnected)");
+    parser.addFlagOption("xr-handback", "(internal) started by the headset VR interface: hand the headset back to it when the stream ends");
 
     // VipleStream 2.0 §SF-PROBE（M2a）dev-only：把 decoder 實際收到的 bitstream 錄成
     // decode-bench 的樣本。值只存在 BitstreamDump 的行程內全域，絕不進 StreamingPreferences
@@ -1106,6 +1117,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     m_AppName = parser.positionalArguments().at(2);
     m_Takeover = parser.isSet("takeover");
+    m_XrHandBack = parser.isSet("xr-handback");
 
     // §SF-PROBE（M2a）：參數都驗過、確定要串流才開啟 dump（session 開始前）。
     if (parser.isSet("dump-bitstream")) {
@@ -1213,6 +1225,7 @@ void PlayCommandLineParser::parse(const QStringList &args)
     parser.addValueOption("audio-url", "separate audio URL (sites that serve audio and video separately)");
     parser.addValueOption("title", "title shown on the control bar");
     parser.addFlagOption("no-hw-decode", "always decode in software");
+    parser.addFlagOption("xr-handback", "(internal) started by the headset VR interface: hand the headset back to it when playback ends");
     parser.addValueOption("user-agent", "HTTP user agent");
     parser.addValueOption("http-headers", "extra HTTP headers (\"Key: value\\r\\n...\")");
     parser.addValueOption("duration", "(dev) stop after N seconds");
@@ -1251,6 +1264,7 @@ void PlayCommandLineParser::parse(const QStringList &args)
     audioSource = parser.value("audio-url");
     title = parser.value("title");
     hwDecode = !parser.isSet("no-hw-decode");
+    xrHandBack = parser.isSet("xr-handback");
     userAgent = parser.value("user-agent");
     httpHeaders = parser.value("http-headers").replace(QLatin1String("\\r\\n"), QLatin1String("\r\n"));
     durationSec = parser.value("duration").toInt();

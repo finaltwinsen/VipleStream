@@ -95,7 +95,15 @@ Pairing is per device; each client pairs once.
 
 ### Stream a game or the desktop
 
-Pick the host, then an app (**Desktop** streams the whole screen). Resolution, frame rate, bitrate, codec and frame interpolation (FRUC) are in **Settings**; the defaults are a good start. To end a session, quit from the in-stream menu or press `Ctrl+Alt+Shift+Q` on the PC client.
+Pick the host, then an app (**Desktop** streams the whole screen). Resolution, frame rate, bitrate, codec and frame interpolation (FRUC) are in **Settings**; the defaults are a good start. To end a session:
+
+| Input | Exit |
+|---|---|
+| Keyboard | `Ctrl+Alt+Shift+Q` |
+| Gamepad | hold `Start+Select+L1+R1` |
+| VR controller (Steam Frame, desktop and VR mode) | hold `A+X+trigger+grip` (on the Frame controller A and X are both on the right hand; trigger and grip can be on either hand) |
+
+The tip is also shown on the screen while the stream starts.
 
 ### On the Steam Frame
 
@@ -108,6 +116,8 @@ When VipleStream starts it asks for a mode (you can switch later from the top ba
 | **Video mode** | Plays videos in the headset — flat, 3D side-by-side / top-bottom, 180° and 360°. Sources: files on the headset, a URL, folders on a paired PC (the whole PC by default; limit it with `media_dirs`, or turn it off with `media_share = disabled` in the host's `sunshine.conf`), and YouTube and other sites through the built-in browser's **Play in VR**. |
 
 Video mode controls: **A** play/pause · **B** exit · **trigger** show the control bar · **grip** recentre the screen · **stick left/right** skip ±10 s · **stick up/down** move the screen nearer/farther (handy when a VR180 video is shot too close).
+
+To leave a desktop or VR stream, hold **A+X+trigger+grip**; you return to the VipleStream VR interface. Quitting the stream from the SteamVR quick menu also brings you back to VipleStream.
 
 When you start a video or VR session, SteamVR may open the Steam menu over it — press the Steam button to dismiss it.
 
@@ -222,6 +232,7 @@ PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1`
 
 | Version | Changes |
 |---|---|
+| **2.0.9** | **頭盔全 VR 介面**：Steam Frame 上的 VipleStream 整個在 VR 裡操作（不再用 SteamVR 劇院裡的平面視窗）：雷射指標點選、扳機＝左鍵、握把＝右鍵、B＝返回、虛擬鍵盤；影片模式在同一個 VR 畫面裡播；VR 串流與桌面模式另開串流程式、進出時換手，不會跳出 SteamVR 介面（桌面模式改用 XR 虛擬螢幕，打字改用虛擬鍵盤）。**VR 控制器結束串流**：按住 A+X+扳機+握把；從 SteamVR 快速選單結束串流也會回到 VipleStream。啟動轉場的提示加上 VR 控制器的按法。**離開區網也連得到主機**：host 在主機資訊裡附上自己的 Tailscale 位址，client 記下來當最後一個嘗試的位址。Steam 收藏庫加上圖示與封面。 |
 | **2.0.2** | **Steam Frame 安裝腳本**：2.0.0／2.0.1 的頭盔版照說明只裝 `.flatpak`，Flatpak 一定開獨立的 PID 沙盒、頭盔的 SteamVR 對不上，程式會自己停用 VR 模式與影片模式，**只剩桌面模式能用**。新增 asset `VipleStream-SteamFrame-Install-X.Y.Z.sh`：安裝 Flatpak、裝一個只拿掉 PID 隔離（Flatpak 其他隔離不變）並開放 SteamVR 路徑的啟動器、自我檢查後加進 Steam 收藏庫；`--uninstall` 移除。停用時的提示改成指向這個捷徑。README 的頭盔安裝步驟改用腳本。 |
 | **2.0.1** | **VR 串流預設開啟**：host 的 `vr_pcvr` 預設改成 `enabled`（2.0.0 漏改、出貨仍是 `disabled`，頭盔的 VR 模式要手動開）；對平面串流沒有影響，VR app 只列給 VR client、SteamVR driver 只在 VR session 開始時才部署，沒裝 SteamVR 的 host 不會宣告 VR。README 加安裝與使用指引；修正 `docs/setup_guide.md` 的 Windows zip 安裝步驟（服務程式要放 `tools\`、要自己加防火牆規則）。 |
 | **2.0.0** | **Steam Frame 頭盔 client（第六件 asset：`-linux-arm64.flatpak`）**：頭盔上的 VipleStream 可以 VR 串流 PC 的 SteamVR 遊戲（host 自帶 SteamVR driver `driver_viplestream`，`vr_pcvr = enabled` 開啟；多連線＋補包跟著往返時間走、姿態預測、半速＋補幀、注視點編碼、進 VR 前量往返時間），也有**頭盔影片模式**（本機／網址／配對 PC 的磁碟機／YouTube 與內建瀏覽器；2D／3D／180°／360°；手把 A／B／扳機／握把、搖桿調遠近）。修正 server HTTPS 在 client 無聲斷線後整個卡死（阻塞式 TLS shutdown）。另附 `VipleStream-Drivers-2.0.0-windows.zip`（VipleSCHid＋SteamVR driver 獨立包）；同時首度發佈 1.5.276（§SELF-UPDATE、§UPDATE-HEAD）。 |

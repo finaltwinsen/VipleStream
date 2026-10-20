@@ -1170,6 +1170,7 @@ Session::~Session()
 
     // §VR M3a X1：正常情況 exec() 已拆掉；這裡只防 exec() 沒跑到的路徑讓 XR session 殘留
     destroyXrContext();
+    releaseXrOwner();
 
     // VipleStream: safety net for the relay UDP tunnel — normally torn
     // down in the deferred cleanup task after LiStopConnection, but
@@ -2750,9 +2751,34 @@ void Session::setupXrDesktop()
 }
 
 // §VR M3a X5：建立並 bring-up XrContext（首次與 LOSS 後重建共用）。失敗時 m_XrContext 維持 nullptr。
+namespace {
+std::function<void(bool)> s_XrOwnerHook;  // §VR-SHELL
+}
+
+void Session::setXrOwnerHook(std::function<void(bool sessionWantsXr)> hook)
+{
+    s_XrOwnerHook = std::move(hook);
+}
+
+void Session::releaseXrOwner()
+{
+    if (m_XrOwnerHeld) {
+        m_XrOwnerHeld = false;
+        if (s_XrOwnerHook) {
+            s_XrOwnerHook(false);
+        }
+    }
+}
+
 bool Session::createXrContext(bool isRebuild, QString* error)
 {
 #ifdef HAVE_OPENXR
+    if (!m_XrOwnerHeld && s_XrOwnerHook) {
+        // §VR-SHELL：VR 介面先讓出它的 XR session（重建時已經拿著，不必再要）
+        m_XrOwnerHeld = true;
+        s_XrOwnerHook(true);
+    }
+    Q_UNUSED(isRebuild)
     XrContext::Options xo;
     xo.pcvr = m_XrPcvr;  // M4a R1
     // M4a 收尾：PCVR 明確要求更新率（偏好 vrRefreshHz，預設 90；取 runtime 可用值中最接近的）
@@ -2848,6 +2874,13 @@ bool Session::createXrContext(bool isRebuild, QString* error)
         ev.user.code = SDL_CODE_XR_KEY;
         ev.user.data1 = (void*)(uintptr_t)(((uint32_t)modifiers << 16) | ((uint32_t)vk & 0xFFFFu));
         ev.user.data2 = (void*)(uintptr_t)(down ? 1 : 0);
+        SDL_PushEvent(&ev);
+    };
+    // §VR-EXIT-COMBO：頭盔手把 A＋X＋扳機＋握把＝結束串流（同手把的 Start+Select+L1+R1：推 SDL_QUIT）
+    xo.inputSink.exitCombo = []() {
+        SDL_Event ev = {};
+        ev.type = SDL_QUIT;
+        ev.quit.timestamp = SDL_GetTicks();
         SDL_PushEvent(&ev);
     };
     // X5：runtime 結束 session（frame thread 呼叫，只推事件）
@@ -4019,6 +4052,7 @@ void Session::exec()
         delete m_InputHandler;
         m_InputHandler = nullptr;
         destroyXrContext();  // §VR M3a X1
+        releaseXrOwner();
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
         return;
@@ -4107,6 +4141,7 @@ void Session::exec()
             delete m_InputHandler;
             m_InputHandler = nullptr;
             destroyXrContext();  // §VR M3a X1
+            releaseXrOwner();
             SDL_QuitSubSystem(SDL_INIT_VIDEO);
             QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
             return;
@@ -4799,6 +4834,7 @@ DispatchDeferredCleanup:
     // §VR M3a X1：XrContext 在 decoder 之後、視窗之前拆（設計 §2.4 ④；X2 起 XrRenderer 屬於
     // decoder，先刪 decoder 才能停 XR frame thread）
     destroyXrContext();
+    releaseXrOwner();
 
     // This must be called after the decoder is deleted, because
     // the renderer may want to interact with the window

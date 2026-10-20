@@ -245,6 +245,30 @@ void XrContext::requestKeyboardToggle()
     }
 }
 
+void XrContext::requestKeyboard(bool open)
+{
+    if (m_Input != nullptr) {
+        m_Input->requestKeyboardOpen(open);
+    }
+}
+
+void XrContext::setShellImage(const QImage& img)
+{
+    if (img.isNull()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lk(m_ShellMutex);
+    m_ShellImg = img;
+    m_ShellDirty = true;
+}
+
+QImage::Format XrContext::shellImageFormat() const
+{
+    // uploadImage 的對照：BGRA swapchain 用 ARGB32（little-endian 記憶體裡是 B,G,R,A），其他用 RGBA8888
+    return m_QuadFormat == VK_FORMAT_B8G8R8A8_SRGB || m_QuadFormat == VK_FORMAT_B8G8R8A8_UNORM ? QImage::Format_ARGB32
+                                                                                                : QImage::Format_RGBA8888;
+}
+
 XrContext::~XrContext()
 {
     shutdown();
@@ -1097,6 +1121,11 @@ bool XrContext::createQuadSwapchain(QString* error)
         createSolidSwapchain(static_cast<uint32_t>(kPanelW), static_cast<uint32_t>(kPanelH), &m_PanelSwapchain, &m_PanelImages,
                              &m_PanelImageCount, "player panel");
     }
+    // §VR-SHELL：介面面板
+    if (m_Options.shellWidth > 0 && m_Options.shellHeight > 0) {
+        createSolidSwapchain(m_Options.shellWidth, m_Options.shellHeight, &m_ShellSwapchain, &m_ShellImages, &m_ShellImageCount,
+                             "shell");
+    }
     // M4a R1：PCVR stale 淡出（head-locked 半透明黑，預乘 alpha）
     if (m_Options.pcvr) {
         createSolidSwapchain(8, 8, &m_FadeSwapchain, &m_FadeImages, &m_FadeImageCount, "pcvr fade");
@@ -1928,6 +1957,9 @@ void XrContext::frameThreadMain()
         }
         // §VR-PLAYER：一律 quad（控制列擺在螢幕下緣、射線求交照 quad 算）
         const bool useCylinder = !m_Options.player && m_EnabledExtensions.contains(QLatin1String(kExtCylinder));
+        // §VR-SHELL：顯示介面時螢幕的位置改放介面畫面，不碰影像（影片模式結束後留下的最後一張也不顯示）
+        const bool shellOn = m_ShellSwapchain != XR_NULL_HANDLE && m_ShellActive.load(std::memory_order_acquire);
+        bool shellLayer = false;
         const float screenW = m_Screen->quadWidthM();
         bool videoLayer = false;
         bool loadingLayer = false;
@@ -1964,7 +1996,7 @@ void XrContext::frameThreadMain()
             m_Video->setEyeFovTan(std::tan(-m_Fov[0].angleLeft) + std::tan(m_Fov[0].angleRight),
                                   std::tan(m_Fov[0].angleUp) + std::tan(-m_Fov[0].angleDown));
         }
-        const bool haveVideo = fs.shouldRender && m_Video != nullptr && m_Video->current(&vcur);
+        const bool haveVideo = !shellOn && fs.shouldRender && m_Video != nullptr && m_Video->current(&vcur);
         int stale = 0;
         if (haveVideo) {
             const uint64_t nowUs = cpuT0 / 1000ull;
@@ -2033,7 +2065,7 @@ void XrContext::frameThreadMain()
         // §VR-PLAYER（V2）：180°／360°——影像 render thread 改畫進全景材質，這裡每一格依兩眼的姿態畫投影影像
         const int playerProj = m_Options.player ? m_PlayerProj.load(std::memory_order_relaxed) : 0;
         bool immersiveShown = false;
-        if (m_Options.player && m_Video != nullptr) {
+        if (m_Options.player && m_Video != nullptr && !shellOn) {
             m_Video->setImmersive(playerProj != 0);
             if (playerProj != 0 && fs.shouldRender && m_Video->immersiveReady()) {
                 XrViewLocateInfo li = xrStruct<XrViewLocateInfo>(XR_TYPE_VIEW_LOCATE_INFO);
@@ -2164,7 +2196,43 @@ void XrContext::frameThreadMain()
             }
         }
 #endif
-        if (fs.shouldRender && !videoLayer &&
+        if (shellOn && fs.shouldRender) {
+            // §VR-SHELL：介面畫面（不透明 quad，位置與寬同影像螢幕；高＝寬÷面板比例）
+            QImage img;
+            {
+                std::lock_guard<std::mutex> lk(m_ShellMutex);
+                if (m_ShellDirty) {
+                    img = m_ShellImg;
+                    m_ShellDirty = false;
+                }
+            }
+            if (!img.isNull() && static_cast<uint32_t>(img.width()) == m_Options.shellWidth &&
+                static_cast<uint32_t>(img.height()) == m_Options.shellHeight) {
+                m_ShellUploaded = uploadImage(m_ShellSwapchain, m_ShellImages, m_ShellImageCount, img) || m_ShellUploaded;
+            }
+            if (m_ShellUploaded && m_Screen->placed()) {
+                screenAspect = static_cast<float>(m_Options.shellWidth) / static_cast<float>(m_Options.shellHeight);
+                quad.layerFlags = 0;
+                quad.space = m_LocalSpace;
+                quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quad.subImage.swapchain = m_ShellSwapchain;
+                quad.subImage.imageRect.offset = {0, 0};
+                quad.subImage.imageRect.extent = {static_cast<int32_t>(m_Options.shellWidth),
+                                                  static_cast<int32_t>(m_Options.shellHeight)};
+                quad.subImage.imageArrayIndex = 0;
+                quad.pose = m_Screen->quadPose();
+                quad.size = {screenW, screenW / screenAspect};
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+                shellLayer = true;
+                if (!m_ShellLogged) {
+                    m_ShellLogged = true;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] shell layer: quad %ux%u, %.2f x %.2f m",
+                                m_Options.shellWidth, m_Options.shellHeight, static_cast<double>(screenW),
+                                static_cast<double>(screenW / screenAspect));
+                }
+            }
+        }
+        if (fs.shouldRender && !videoLayer && !shellLayer &&
             ensureSolidQuad(m_QuadSwapchain, m_QuadImages, m_QuadImageCount, &m_QuadReady, 0.08f, 0.08f, 0.08f)) {
             // loading 環境：深灰 quad（只清一次色）
             quad.layerFlags = 0;
@@ -2188,7 +2256,7 @@ void XrContext::frameThreadMain()
         XrPosef kbPose = {};
         float kbW = 0.0f, kbH = 0.0f;
         if (!m_Options.pcvr && m_Input != nullptr && fs.shouldRender && m_Input->keyboardOpen() && m_Screen->placed() &&
-            (videoLayer || loadingLayer) && m_KbSwapchain != XR_NULL_HANDLE) {
+            (videoLayer || loadingLayer || shellLayer) && m_KbSwapchain != XR_NULL_HANDLE) {
             const XrKeyboard& kb = m_Input->keyboard();
             m_Input->takeKeyboardDirty();
             const int wantMods = m_Input->stickyModifiers() & 0x0F;
@@ -2254,7 +2322,7 @@ void XrContext::frameThreadMain()
         bool panelShown = false;
         XrPosef panelPose = {};
         float panelW = 0.0f, panelH = 0.0f;
-        if (m_Options.player && fs.shouldRender && m_PanelSwapchain != XR_NULL_HANDLE && m_Screen->placed() &&
+        if (m_Options.player && !shellOn && fs.shouldRender && m_PanelSwapchain != XR_NULL_HANDLE && m_Screen->placed() &&
             m_PanelVisible.load(std::memory_order_acquire)) {
             QImage img;
             {
@@ -2317,7 +2385,7 @@ void XrContext::frameThreadMain()
             scr.panelPose = panelPose;
             scr.panelWidthM = panelW;
             scr.panelHeightM = panelH;
-            scr.valid = m_Screen->placed() && (videoLayer || loadingLayer) && !immersiveShown;
+            scr.valid = m_Screen->placed() && (videoLayer || loadingLayer || shellLayer) && !immersiveShown;
             scr.cylinder = videoLayer && useCylinder;
             scr.pose = scr.cylinder ? m_Screen->cylinderPose() : m_Screen->quadPose();
             scr.widthM = screenW;
@@ -2431,6 +2499,9 @@ void XrContext::frameThreadMain()
         XrFrameEndInfo ei = xrStruct<XrFrameEndInfo>(XR_TYPE_FRAME_END_INFO);
         ei.displayTime = fs.predictedDisplayTime;
         ei.environmentBlendMode = blend;
+        if (m_Blank.load(std::memory_order_acquire)) {
+            layerCount = 0;  // §VR-SHELL：結束前清空畫面
+        }
         ei.layerCount = layerCount;
         ei.layers = layerCount ? layers : nullptr;
         XrResult er;
@@ -2597,6 +2668,15 @@ void XrContext::frameThreadMain()
                 }
             }
         }
+        // §VR-SHELL：執行期換想要的更新率（影片模式開始／結束）：當成「量到的不是想要的」，馬上要求一次
+        const float newWantHz = m_PendingRefreshHz.exchange(-1.0f, std::memory_order_acq_rel);
+        if (newWantHz >= 0.0f && newWantHz != m_Options.preferredRefreshHz) {
+            m_Options.preferredRefreshHz = newWantHz;
+            m_LateRefreshTries = 0;
+            if (newWantHz > 0.0f && m_LastPeriod > 0 && m_HasRefreshRate) {
+                lateRefreshMeasuredHz = 1e9 / static_cast<double>(m_LastPeriod);
+            }
+        }
         if (lateRefreshMeasuredHz > 0.0) {
             requestRefreshLate(lateRefreshMeasuredHz);
         }
@@ -2615,8 +2695,8 @@ void XrContext::frameThreadMain()
                 static_cast<unsigned long long>(s.warmupMissed),
                 sessionStateName(s.highestState), sessionStateName(s.currentState), m_Lost.load() ? 1 : 0);
 
-    // X5：不是 shutdown() 要求的結束 → 通知 Session（β：重建或退回平面）
-    if (!m_ExitRequested.load() && !m_StopRequested.load()) {
+    // X5：不是 shutdown() 要求的結束 → 通知 Session（β：重建或退回平面）。交還給 VR 介面時 runtime 結束 session 是預期的
+    if (!m_ExitRequested.load() && !m_StopRequested.load() && !m_HandingBack.load()) {
         int reason = 0;
         if (m_Lost.load()) {
             reason = kEndedLoss;
@@ -4128,8 +4208,38 @@ QJsonObject XrContext::describe() const
 
 // ── shutdown ──
 
+namespace {
+std::atomic<bool> s_HandBackOnShutdown{false};  // §VR-SHELL
+}
+
+void XrContext::setHandBackOnShutdown(bool on)
+{
+    s_HandBackOnShutdown.store(on, std::memory_order_release);
+}
+
 void XrContext::shutdown()
 {
+    if (m_FrameThread.joinable() && s_HandBackOnShutdown.load(std::memory_order_acquire) &&
+        m_FrameThreadRunning.load(std::memory_order_acquire) && !m_Lost.load()) {
+        // §VR-SHELL：先請 VR 介面開回它的 session；它一開，runtime 就把這邊的結束掉（frame thread 自己跑完 EXITING）
+        m_HandingBack.store(true);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] handing the headset back to the VR interface");
+        fputs("VIPLE-XR-STATE HANDBACK\n", stderr);
+        fflush(stderr);
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto deadline = t0 + std::chrono::seconds(6);  // 介面開 session 約 2.3 秒
+        while (m_FrameThreadRunning.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        const long long ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        if (m_FrameThreadRunning.load(std::memory_order_acquire)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] the VR interface did not take over within %lld ms; exiting the session", ms);
+        }
+        else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] the VR interface took over after %lld ms", ms);
+        }
+    }
     if (m_FrameThread.joinable()) {
         // frame thread 自己呼叫 xrRequestExitSession 並跑完 STOPPING→xrEndSession→IDLE／EXITING
         m_ExitRequested.store(true);
@@ -4147,6 +4257,7 @@ void XrContext::shutdown()
     destroyAll();
     m_ExitRequested.store(false);
     m_StopRequested.store(false);
+    m_HandingBack.store(false);
 }
 
 bool XrContext::waitSemaphoreBounded(VkSemaphore sem, uint64_t value, uint64_t timeoutNs)
@@ -4241,6 +4352,15 @@ void XrContext::destroyAll()
     m_PanelImages = nullptr;
     m_PanelImageCount = 0;
     m_PanelUploaded = false;
+    if (m_ShellSwapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(m_ShellSwapchain);
+        m_ShellSwapchain = XR_NULL_HANDLE;
+    }
+    delete[] m_ShellImages;
+    m_ShellImages = nullptr;
+    m_ShellImageCount = 0;
+    m_ShellUploaded = false;
+    m_ShellLogged = false;
     for (auto* s : {&m_KbSwapchain, &m_KbHoverSwapchain, &m_KbPressSwapchain}) {
         if (*s != XR_NULL_HANDLE) {
             xrDestroySwapchain(*s);

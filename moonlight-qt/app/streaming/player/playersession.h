@@ -56,6 +56,9 @@ public:
         QString userAgent;
         QString httpHeaders;
         QString xrRuntimeJson;     // dev：只影響這個行程的 OpenXR runtime（同 stream 的 --xr-runtime-json）
+        // §VR-SHELL（A2）：用頭盔 VR 介面（backend/xrshell.cpp）已經在跑的 XR session，不自己帶起、結束時不關（只把介面
+        // 換回來）。這時控制器輸入由 VR 介面轉進下面的 input*()。nullptr＝自己開（viplestream play）
+        XrContext* sharedXr = nullptr;
     };
 
     explicit PlayerSession(const Config& config, QObject* parent = nullptr);
@@ -64,6 +67,16 @@ public:
     void start();
     // 任何執行緒：要求結束（GUI 被關、收到 SIGTERM）
     void requestStop();
+
+    // 控制器輸入（XR frame thread 呼叫；自己開 XR 時由自己的 inputSink 轉進來，共用 VR 介面的 session 時由 VR 介面轉進來）。
+    // button 是 XrInputSink::PlayerButton 的值
+    void inputButton(int button);
+    void inputMenu();
+    void inputStick(float x, float y);
+    void inputPanel(float u, float v);
+    void inputPanelClick(float u, float v);
+    // §VR-SHELL：螢幕已經換成影像（之前控制器輸入還是給 VR 介面）。任何執行緒
+    bool videoShown() const { return m_VideoShown.load(std::memory_order_acquire); }
 
 signals:
     // exitCode：0 正常（播完、使用者離開）、2 XR 起不來、3 影片開不了或讀取失敗、4 XR session 中途結束
@@ -92,6 +105,9 @@ private:
     std::thread m_Thread;
     std::atomic<bool> m_Stop{false};
     XrContext* m_Xr = nullptr;
+    bool m_OwnXr = true;        // §VR-SHELL：m_Xr 是自己帶起的（false＝VR 介面的，結束時不關）
+    std::atomic<bool> m_VideoShown{false};  // §VR-SHELL：已經把螢幕從介面換成影像（第一張要交出去的時候才換，載入時介面還在）
+    void showVideo();
     MediaPipeline m_Media;
 
     std::mutex m_CmdMutex;

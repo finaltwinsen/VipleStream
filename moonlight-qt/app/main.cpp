@@ -65,6 +65,9 @@
 #ifdef HAVE_VR_PLAYER
 #include "streaming/player/playersession.h"  // §VR-PLAYER
 #endif
+#ifdef HAVE_OPENXR
+#include "streaming/xr/xrcontext.h"  // §VR-SHELL：子行程的 --xr-handback
+#endif
 #include "backend/sfenv.h"      // §SF-ENV（M2a）
 #include "path.h"
 #include "streaming/video/ffmpeg-renderers/rife_native_vk.h"
@@ -81,6 +84,11 @@
 #include "backend/hidprobe.h"   // §HID-PROBE
 #include "backend/vrlauncher.h"  // §VR-LAUNCHER
 #include "backend/medialibrary.h"  // §VR-PLAYER
+#include "backend/xrshell.h"  // §VR-SHELL
+
+#include <QQuickWindow>
+#include <QSGRendererInterface>
+#include <memory>
 #ifdef HAVE_WEBENGINE
 #include <QtWebEngineQuick/qtwebenginequickglobal.h>
 #endif
@@ -491,6 +499,12 @@ int SDLCALL signalHandlerThread(void* data)
         switch (sig) {
         case SIGINT:
         case SIGTERM:
+            // §VR-SHELL：VR 介面開著串流子行程時，SteamVR 快速選單的「結束」連介面也送了 SIGINT——只讓子行程結束，
+            // 介面換手回來（VrLauncher::childGuardActive）
+            if (VrLauncher::childGuardActive()) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] ignoring signal %d: it is for the stream process", sig);
+                break;
+            }
             // Check if we have an active streaming session
             session = Session::get();
             if (session != nullptr) {
@@ -580,6 +594,7 @@ int main(int argc, char *argv[])
         bool isStream = false;
         bool isVrEmulate = false;  // §VR M4a R1：--vr-emulate 的 PCVR 是平面，不走無頭 offscreen
         bool isPlay = false;  // §VR-PLAYER：play（影片模式）全在 XR 裡，同 PCVR 走無頭路徑
+        bool isHandBack = false;  // §VR-SHELL：頭盔 VR 介面開的子行程（--xr-handback）
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0 ||
                 strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
@@ -609,6 +624,9 @@ int main(int argc, char *argv[])
             if (strcmp(argv[i], "--vr-emulate") == 0) {
                 isVrEmulate = true;
             }
+            if (strcmp(argv[i], "--xr-handback") == 0) {
+                isHandBack = true;
+            }
         }
         isXrDesktopStream = isXrDesktopStream && isStream && !isVrEmulate;
         if (isPlay) {
@@ -620,8 +638,10 @@ int main(int argc, char *argv[])
         // §VR-HEADLESS（2026-10-04，Frame 第六輪 a）：PCVR 在 gamescope 裡（Steam Frame 從收藏庫啟動 Linux app 都經
         // gamescope）不開平面視窗。開了的話 Frame 把它當平面遊戲：進 XR 後 42～67 ms 又加回「手把模式＋雷射滑鼠」，
         // Frame 自己的介面疊在串流畫面上。在任何 X11／Wayland 探測之前清掉 DISPLAY／WAYLAND_DISPLAY，下面的
-        // offscreen 規則（Qt）與 session.cpp（SDL）就走實測過的無頭路徑。XR 桌面不套用：實體鍵盤要靠視窗焦點。
-        if (isPcvr && isXrDesktopStream && !qEnvironmentVariableIsEmpty("GAMESCOPE_WAYLAND_DISPLAY")) {
+        // offscreen 規則（Qt）與 session.cpp（SDL）就走實測過的無頭路徑。XR 桌面一般不套用：實體鍵盤要靠視窗焦點；
+        // 但頭盔 VR 介面開的 XR 桌面子行程（§VR-SHELL，--xr-handback）也不開平面視窗——使用者要全程 VR，
+        // 打字用虛擬鍵盤（2026-10-21）
+        if ((isPcvr || isHandBack) && isXrDesktopStream && !qEnvironmentVariableIsEmpty("GAMESCOPE_WAYLAND_DISPLAY")) {
             qunsetenv("DISPLAY");
             qunsetenv("WAYLAND_DISPLAY");
         }
@@ -1625,6 +1645,8 @@ int main(int argc, char *argv[])
     }
 
     QQmlApplicationEngine engine;
+    // §VR-SHELL：頭盔 VR 介面（取代 main.qml 的平面視窗）。在 engine 之後宣告：先拆它（它的 QML 物件屬於 engine）
+    std::unique_ptr<XrShell> vrShell;
     QString initialView;
     bool hasGUI = true;
 
@@ -1646,6 +1668,9 @@ int main(int argc, char *argv[])
             QString appName = streamParser.getAppName();
             auto launcher   = new CliStartStream::Launcher(host, appName, preferences, &app);
             launcher->setTakeover(streamParser.isTakeover());
+#ifdef HAVE_OPENXR
+            XrContext::setHandBackOnShutdown(streamParser.isXrHandBack());  // §VR-SHELL
+#endif
             engine.rootContext()->setContextProperty("launcher", launcher);
 
             QObject::connect(launcher, &CliStartStream::Launcher::searchingComputer,
@@ -1819,6 +1844,7 @@ int main(int argc, char *argv[])
             pc.httpHeaders = playParser.httpHeaders;
             pc.xrRuntimeJson = playParser.xrRuntimeJson;
             pc.traceFrames = playParser.traceFrames;
+            XrContext::setHandBackOnShutdown(playParser.xrHandBack);  // §VR-SHELL
             auto playerSession = new player::PlayerSession(pc, &app);
             QObject::connect(playerSession, &player::PlayerSession::finished, &app, [&app](int rc, const QString& error) {
                 if (!error.isEmpty()) {
@@ -1850,13 +1876,45 @@ int main(int argc, char *argv[])
         engine.rootContext()->setContextProperty("initialView", initialView);
         engine.rootContext()->setContextProperty("runConfigChecks", commandLineParserResult == GlobalCommandLineParser::NormalStartRequested);
 
-        // Load the main.qml file
-        engine.load(QUrl(QStringLiteral("qrc:/gui/main.qml")));
-        if (engine.rootObjects().isEmpty())
-            return -1;
+        // §VR-SHELL：Frame 上一般啟動預設開頭盔 VR 介面（--vr-shell 可以指定 xr／noxr／off）
+        XrShell::Config shellConfig;
+        bool wantShell = false;
+        if (!parser.vrShell().isEmpty()) {
+            QString specErr;
+            XrShell::parseSpec(parser.vrShell(), &shellConfig, &specErr);  // 格式 parse() 已經檢查過
+            wantShell = !shellConfig.off;
+        }
+        else {
+            wantShell = commandLineParserResult == GlobalCommandLineParser::NormalStartRequested && VrLauncher::vrShellByDefault();
+        }
+        if (wantShell) {
+            // 介面畫在離屏的 QQuickWindow，用 OpenGL（Windows 預設是 D3D11）。這個行程不會有別的 Qt Quick 視窗
+            // （退回平面視窗時 Linux 本來就是 OpenGL），全域設定只影響它
+            QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+            vrShell.reset(new XrShell(&engine, shellConfig));
+            QString shellErr;
+            if (!vrShell->start(&shellErr)) {
+                // SteamVR 沒在跑、runtime 出錯等：退回平面視窗，不要讓程式開不起來
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] could not start the VR interface (%s); using the window",
+                             qPrintable(shellErr));
+                vrShell.reset();
+                wantShell = false;
+            }
+        }
+        if (!wantShell) {
+            // Load the main.qml file
+            engine.load(QUrl(QStringLiteral("qrc:/gui/main.qml")));
+            if (engine.rootObjects().isEmpty())
+                return -1;
+        }
     }
 
     int err = app.exec();
+
+    // §VR-SHELL：先停播放器等，XR session 留到最後（見下面 return 之前）
+    if (vrShell) {
+        vrShell->prepareExit();
+    }
 
     // Give worker tasks time to properly exit. Fixes PendingQuitTask
     // sometimes freezing and blocking process exit.
@@ -1894,6 +1952,16 @@ int main(int argc, char *argv[])
     fflush(stderr);
     fflush(stdout);
 #endif
+
+    if (vrShell) {
+        // §VR-SHELL：XR session 一結束就馬上結束行程，不跑後面的解構（QML engine、內建瀏覽器等要將近 1 秒）——
+        // XR 結束後程式還在超過約 1 秒，Steam 的 steamwebhelper 會當掉重啟（xrshell.h 的 shutdownXrForExit）。
+        // 設定都已經在各自的 QSettings 解構時寫回；log 執行緒上面已經等完
+        vrShell->shutdownXrForExit();
+        fflush(stderr);
+        fflush(stdout);
+        std::_Exit(err);
+    }
 
     return err;
 }

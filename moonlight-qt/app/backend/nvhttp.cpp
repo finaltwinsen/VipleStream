@@ -480,6 +480,20 @@ NvHTTP::getXmlString(QString xml,
     return nullptr;
 }
 
+QStringList
+NvHTTP::getXmlStringList(QString xml,
+                         QString tagName)
+{
+    QStringList out;
+    QXmlStreamReader xmlReader(xml);
+    while (!xmlReader.atEnd()) {
+        if (xmlReader.readNext() == QXmlStreamReader::StartElement && xmlReader.name() == tagName) {
+            out.append(xmlReader.readElementText());
+        }
+    }
+    return out;
+}
+
 void NvHTTP::handleSslErrors(QNetworkReply* reply, const QList<QSslError>& errors)
 {
     bool ignoreErrors = true;

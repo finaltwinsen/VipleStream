@@ -6,7 +6,9 @@
 # VR 模式與影片模式（vrlauncher.cpp 的 inPidNamespacedSandbox），只剩桌面模式。這支腳本另外裝一個啟動器：
 #   - 以 FLATPAK_BWRAP 換上只拿掉 --unshare-pid 的 bwrap 包裝（Flatpak 的其他隔離都還在）；
 #   - 執行期加上 OpenXR 連 SteamVR 需要的 /opt/steamvr（唯讀）、/tmp、/dev/shm（這三條不進 manifest，理由同上）；
-#   - 把啟動器加進 Steam 收藏庫，並蓋掉選單裡 Flatpak 匯出的捷徑，兩個入口開的都是同一個啟動器。
+#   - 把啟動器加進 Steam 收藏庫，並蓋掉選單裡 Flatpak 匯出的捷徑，兩個入口開的都是同一個啟動器；
+#   - 收藏庫（與 SteamVR）的封面圖與圖示：從安裝好的 app 複製（/app/share/viplestream/steam/）。Flatpak 匯出的圖示只有
+#     SVG 主題名稱，Steam 捷徑認不得，沒有這一步捷徑就沒有圖。
 #
 # 用法：
 #   bash install-steamframe.sh [VipleStream-Client-X.Y.Z-linux-arm64.flatpak]   安裝或更新
@@ -98,13 +100,21 @@ exec /usr/bin/flatpak run --branch=$BRANCH --arch=aarch64 \\
 EOF
 chmod 755 "$SHIM" "$LAUNCHER"
 
+# Steam 用的封面圖與圖示（2.0.3 起的 bundle 才有）
+ART="$(flatpak --user info --show-location "$APP_ID//$BRANCH" 2>/dev/null)/files/share/viplestream/steam"
+ICON="$APP_ID"
+if [ -f "$ART/icon.png" ]; then
+    cp "$ART/icon.png" "$DEST/icon.png"
+    ICON="$DEST/icon.png"
+fi
+
 # 和 Flatpak 匯出的 .desktop 同名：~/.local/share/applications 排在 exports 前面，選單裡的捷徑也改走啟動器
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Name=VipleStream
 Comment=Stream games, SteamVR and videos from your PC
 Exec=$LAUNCHER
-Icon=$APP_ID
+Icon=$ICON
 StartupWMClass=viplestream
 Terminal=false
 Type=Application
@@ -118,13 +128,73 @@ if [ "$pid1" = bwrap ] || [ -z "$pid1" ]; then
 fi
 say "launcher check OK (sandbox PID 1 = $pid1)"
 
+# 捷徑的 appid（Steam 寫在 shortcuts.vdf，binary VDF）：印出「<userdata 的 config 資料夾> <appid>」，每個找到的一行
+shortcut_ids() {
+    python3 - "$LAUNCHER" "$HOME"/.local/share/Steam/userdata/*/config/shortcuts.vdf <<'PY' 2>/dev/null
+import os, struct, sys
+
+def parse(d, i):
+    obj = {}
+    while True:
+        t = d[i]; i += 1
+        if t == 0x08:
+            return obj, i
+        j = d.index(b"\0", i); key = d[i:j].decode("utf-8", "replace").lower(); i = j + 1
+        if t == 0x00:
+            v, i = parse(d, i)
+        elif t == 0x01:
+            j = d.index(b"\0", i); v = d[i:j]; i = j + 1
+        elif t == 0x02:
+            v = struct.unpack("<i", d[i:i + 4])[0]; i += 4
+        elif t == 0x07:
+            v = d[i:i + 8]; i += 8
+        else:
+            raise ValueError(t)
+        obj[key] = v
+
+launcher = sys.argv[1].encode()
+for path in sys.argv[2:]:
+    try:
+        root, _ = parse(open(path, "rb").read(), 0)
+    except Exception:
+        continue
+    for e in root.get("shortcuts", {}).values():
+        if isinstance(e, dict) and launcher in e.get("exe", b"") and "appid" in e:
+            print(os.path.dirname(path), e["appid"] & 0xFFFFFFFF)
+PY
+}
+
+# 封面圖放進 Steam 的 grid 資料夾（<appid>.png 橫幅、p 直式、_hero、_logo）。Steam 開著時可能要重開才看得到
+install_art() {
+    [ -f "$ART/capsule.png" ] || return 0
+    local ids="" i
+    for i in $(seq 1 15); do  # steamos-add-to-steam 是請執行中的 Steam 加，寫進 shortcuts.vdf 要一點時間
+        ids="$(shortcut_ids)"
+        [ -n "$ids" ] && break
+        sleep 1
+    done
+    if [ -z "$ids" ]; then
+        say "the Steam shortcut is not saved yet: run this script again later to add its library artwork"
+        return 0
+    fi
+    while read -r cfg appid; do
+        mkdir -p "$cfg/grid"
+        cp "$ART/capsule.png" "$cfg/grid/$appid.png"
+        cp "$ART/portrait.png" "$cfg/grid/${appid}p.png"
+        cp "$ART/hero.png" "$cfg/grid/${appid}_hero.png"
+        cp "$ART/logo.png" "$cfg/grid/${appid}_logo.png"
+        say "Steam library artwork set (shortcut $appid)"
+    done <<< "$ids"
+}
+
 if [ "$ADD_STEAM" = 1 ]; then
     if grep -qs -- "$LAUNCHER" "$HOME"/.local/share/Steam/userdata/*/config/shortcuts.vdf; then
         say "Steam shortcut already present"
+        install_art
     elif command -v steamos-add-to-steam >/dev/null && pgrep -x steam >/dev/null; then
-        steamos-add-to-steam "$DESKTOP" && say "added VipleStream to your Steam library"
+        steamos-add-to-steam "$DESKTOP" && say "added VipleStream to your Steam library" && install_art
     else
-        say "Steam is not running: add it later with  steamos-add-to-steam $DESKTOP"
+        say "Steam is not running: add it later with  steamos-add-to-steam $DESKTOP  and run this script again for the artwork"
     fi
 fi
 

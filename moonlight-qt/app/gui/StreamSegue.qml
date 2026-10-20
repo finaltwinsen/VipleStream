@@ -186,6 +186,10 @@ Item {
             // gamepad usage.
             hintText.text = qsTr("Tip:") + " " + qsTr("Press %1 to disconnect your session").arg(SdlGamepadKeyNavigation.getConnectedGamepads() > 0 ?
                                                   qsTr("Start+Select+L1+R1") : qsTr("Ctrl+Alt+Shift+Q"))
+            // §VR-EXIT-COMBO：頭盔上（XR 桌面）也能用 VR 控制器結束
+            if (VrLauncher.available) {
+                hintText.text += "\n" + qsTr("VR controller: hold A+X+trigger+grip")
+            }
 
             // Stop GUI gamepad usage now
             SdlGamepadKeyNavigation.disable()
@@ -255,6 +259,7 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         font.pointSize: 18
         verticalAlignment: Text.AlignVCenter
+        horizontalAlignment: Text.AlignHCenter
 
         wrapMode: Text.Wrap
     }

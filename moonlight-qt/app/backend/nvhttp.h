@@ -212,6 +212,12 @@ public:
     getXmlString(QString xml,
                  QString tagName);
 
+    // 同名元素的所有值（例：VipleStreamVpnAddress 可以有好幾個）
+    static
+    QStringList
+    getXmlStringList(QString xml,
+                     QString tagName);
+
     static
     QByteArray
     getXmlStringFromHex(QString xml,

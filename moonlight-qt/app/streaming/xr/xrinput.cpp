@@ -331,6 +331,7 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         !mk("squeeze", "Grip (right click)", XR_ACTION_TYPE_FLOAT_INPUT, &m_Squeeze) ||
         !mk("secondary", "B (right click)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Secondary) ||
         !mk("primary", "A (video player: play/pause)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Primary) ||
+        !mk("combo_x", "X (with A, trigger and grip: end the stream)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_ComboX) ||
         !mk("scroll", "Thumbstick (scroll)", XR_ACTION_TYPE_VECTOR2F_INPUT, &m_Stick) ||
         !mk("keyboard", "Virtual keyboard (toggle)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_KbToggleAction)) {
         return false;
@@ -397,6 +398,7 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         {m_Secondary, "/user/hand/right/input/b/click"},
         {m_Primary, "/user/hand/left/input/x/click"},
         {m_Primary, "/user/hand/right/input/a/click"},
+        {m_ComboX, "/user/hand/left/input/x/click"},
         {m_Stick, "/user/hand/left/input/thumbstick"},
         {m_Stick, "/user/hand/right/input/thumbstick"},
     };
@@ -433,6 +435,7 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
                  {m_Secondary, "/user/hand/right/input/b/click"},
                  {m_Primary, "/user/hand/left/input/dpad_down/click"},
                  {m_Primary, "/user/hand/right/input/a/click"},
+                 {m_ComboX, "/user/hand/right/input/x/click"},
                  {m_Stick, "/user/hand/left/input/thumbstick"},
                  {m_Stick, "/user/hand/right/input/thumbstick"}},
                 "/user/hand/left/input/view/click");
@@ -478,7 +481,7 @@ void XrInput::destroy()
             s = XR_NULL_HANDLE;
         }
     }
-    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Primary, &m_Stick, &m_KbToggleAction}) {
+    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Primary, &m_ComboX, &m_Stick, &m_KbToggleAction}) {
         if (*a != XR_NULL_HANDLE) {
             xrDestroyAction(*a);
             *a = XR_NULL_HANDLE;
@@ -594,10 +597,51 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
     m_WasFocused = true;
 
+    // §VR-EXIT-COMBO：A＋X＋扳機＋握把（各取任一手）整組按住的上升緣
+    if (m_Sink.exitCombo && !m_TestPointer && m_TestKbText.isEmpty()) {
+        auto anyBool = [&](XrAction a) {
+            for (int h = 0; h < 2; h++) {
+                XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
+                gi.action = a;
+                gi.subactionPath = m_Hands[h];
+                XrActionStateBoolean bs = xrStruct<XrActionStateBoolean>(XR_TYPE_ACTION_STATE_BOOLEAN);
+                if (XR_SUCCEEDED(xrGetActionStateBoolean(m_Session, &gi, &bs)) && bs.isActive && bs.currentState) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        auto anyFloat = [&](XrAction a) {
+            for (int h = 0; h < 2; h++) {
+                XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
+                gi.action = a;
+                gi.subactionPath = m_Hands[h];
+                XrActionStateFloat fs = xrStruct<XrActionStateFloat>(XR_TYPE_ACTION_STATE_FLOAT);
+                if (XR_SUCCEEDED(xrGetActionStateFloat(m_Session, &gi, &fs)) && fs.isActive && fs.currentState > kPressOn) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const bool combo = anyBool(m_Primary) && anyBool(m_ComboX) && anyFloat(m_Trigger) && anyFloat(m_Squeeze);
+        if (combo && !m_ComboWas) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] exit combo (A+X+trigger+grip)");
+            releaseAll("exit combo");
+            m_Sink.exitCombo();
+        }
+        m_ComboWas = combo;
+    }
+
     // ── 鍵盤開關：熱鍵要求與控制器（任一手）上升緣 ──
     for (int n = m_KbToggleReq.exchange(0, std::memory_order_acq_rel); n > 0; n--) {
         setKeyboardOpen(!m_KbOpen, "hotkey");
     }
+    const int kbSet = m_KbSetReq.exchange(-1, std::memory_order_acq_rel);
+    if (kbSet >= 0) {
+        setKeyboardOpen(kbSet == 1, "app");
+    }
+    // §VR-PLAYER／§VR-SHELL：影片模式（按鍵與搖桿交給呼叫端）。playerActive 有設時在執行期切換（介面與影片模式共用 session）
+    const bool playerMode = m_Sink.playerButton && (m_Sink.playerActive ? m_Sink.playerActive() : true);
     if (!m_TestPointer && m_TestKbText.isEmpty() && m_KbToggleAction != XR_NULL_HANDLE) {
         for (int h = 0; h < 2; h++) {
             XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
@@ -606,7 +650,7 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             XrActionStateBoolean bs = xrStruct<XrActionStateBoolean>(XR_TYPE_ACTION_STATE_BOOLEAN);
             const bool now = XR_SUCCEEDED(xrGetActionStateBoolean(m_Session, &gi, &bs)) && bs.isActive && bs.currentState;
             if (now && !m_KbToggleWas[h]) {
-                if (m_Sink.menu) {
+                if (m_Sink.menu && (playerMode || !m_Sink.playerActive)) {
                     m_Sink.menu();  // §VR-PLAYER：這顆鍵交給呼叫端（切換控制列）
                 }
                 else {
@@ -618,7 +662,6 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
 
     // ── §VR-PLAYER：影片模式的按鍵與搖桿。180°／360° 沒有平面螢幕、控制列收起來時下面會提早 return，所以在這裡讀 ──
-    const bool playerMode = static_cast<bool>(m_Sink.playerButton);
     if (playerMode && !m_TestPointer && m_TestKbText.isEmpty()) {
         const XrAction acts[4] = {m_Trigger, m_Primary, m_Secondary, m_Squeeze};
         float sx = 0.0f, sy = 0.0f;
@@ -714,6 +757,15 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         XrActionStateBoolean sb = xrStruct<XrActionStateBoolean>(XR_TYPE_ACTION_STATE_BOOLEAN);
         const bool secondary = XR_SUCCEEDED(xrGetActionStateBoolean(m_Session, &gi, &sb)) && sb.isActive && sb.currentState;
         rightDesired = squeeze || secondary;
+        if (m_Sink.back && !playerMode) {
+            // §VR-SHELL：B＝返回（上升緣交給呼叫端），不當成右鍵
+            if (secondary && !m_BackWas) {
+                m_StatButtons++;
+                m_Sink.back();
+            }
+            rightDesired = squeeze;
+        }
+        m_BackWas = secondary;
         gi.action = m_Stick;
         XrActionStateVector2f st = xrStruct<XrActionStateVector2f>(XR_TYPE_ACTION_STATE_VECTOR2F);
         float stickX = 0.0f;
