@@ -2,7 +2,7 @@
 
 A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
 
-> **Current version:** see the [latest release](https://github.com/finaltwinsen/VipleStream/releases/latest). Releases ship the Windows client and server, the Android APK, and the Linux x64 client and server at one shared version number.
+> **Current version:** see the [latest release](https://github.com/finaltwinsen/VipleStream/releases/latest). Releases ship the Windows client and server, the Android APK, the Linux x64 client and server, and (from 2.0.0) the Steam Frame headset client at one shared version number.
 
 Project home: <https://github.com/finaltwinsen/VipleStream>
 
@@ -17,9 +17,102 @@ Project home: <https://github.com/finaltwinsen/VipleStream>
 | **VipleStream** (PC client) | Moonlight-Qt | Windows x64 | `VipleStream-Client-X.Y.Z.zip` → `VipleStream.exe` | `C:\Program Files\Moonlight Game Streaming\` |
 | | | Linux x64 | `VipleStream-Client-X.Y.Z-linux-x64.AppImage` | portable, no install step |
 | **VipleStream Android** | Moonlight-Android | Android | `VipleStream-Android-X.Y.Z.apk` (application id `com.piinsta`) | sideload only |
+| **VipleStream for Steam Frame** | — | Steam Frame headset (Linux arm64) | `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` (app id `io.github.finaltwinsen.VipleStream`) | Flatpak, per-user |
 | **viplestream-relay** | — | any (Python 3.10+) | `tools/viplestream-relay/relay_server.py` (source only, not a release asset) | any always-on host |
 
 The wire protocol on `_nvstream._tcp` mDNS, `/serverinfo` `/launch` `/applist`, RTSP, and the client cert chain are unchanged from upstream. A VipleStream client can connect to a vanilla Sunshine host, and a vanilla Moonlight client can connect to a VipleStream-Server host — VipleStream-only features (Steam profile dropdown, FRUC backends, etc.) are quietly hidden when the peer doesn't advertise the `<VipleStreamProtocol>` capability marker.
+
+---
+
+## Install
+
+Download everything from the [latest release](https://github.com/finaltwinsen/VipleStream/releases/latest). The host runs the server; every device you stream to runs a client. All pieces carry the same version number — update them together.
+
+### Host (the PC you stream from)
+
+**Windows** — Windows 10/11 with an NVIDIA, AMD or Intel GPU that has a hardware video encoder.
+
+1. Extract `VipleStream-Server-X.Y.Z.zip` to `C:\Program Files\VipleStream-Server\`.
+2. In an **Administrator** PowerShell, register the service and open the firewall:
+   ```powershell
+   cd "C:\Program Files\VipleStream-Server"
+   New-Item -ItemType Directory tools -Force | Out-Null
+   Copy-Item viplestream-svc.exe tools\      # the service wrapper must live one folder below the install dir
+   New-Service -Name VipleStreamServer -DisplayName "VipleStream Server" -StartupType Automatic `
+     -BinaryPathName '"C:\Program Files\VipleStream-Server\tools\viplestream-svc.exe"'
+   New-NetFirewallRule -DisplayName "VipleStream Server" -Direction Inbound -Action Allow `
+     -Program "C:\Program Files\VipleStream-Server\viplestream-server.exe"
+   Start-Service VipleStreamServer
+   ```
+3. Open `https://localhost:47990` (accept the self-signed certificate warning) and create the Web UI login. Settings are saved to `config\sunshine.conf`.
+4. *Optional* — Steam Controller passthrough: run `.\Install-VipleSCHid.ps1` from the same Administrator PowerShell.
+5. *For VR on Steam Frame* — install Steam and SteamVR on the host and keep a user signed in to Windows (a locked or signed-out desktop streams a solid colour). The server deploys and registers its own SteamVR driver when a VR session starts; you don't install it by hand. **2.0.0 only:** add `vr_pcvr = enabled` to `config\sunshine.conf` and restart the service — 2.0.0 shipped with VR turned off by default; later versions turn it on.
+
+Updating: right-click the tray icon → **Check for updates...**, or stop the service, extract the new zip over the old one, and start it again. `VipleStream-Drivers-X.Y.Z-windows.zip` holds the same two drivers as the server zip, for reinstalling or repairing them on their own (see its `README.txt`).
+
+**Linux** — Ubuntu 26.04 (x64). VR streaming is Windows-only.
+
+```bash
+sudo apt install ./VipleStream-Server-X.Y.Z-linux-x64.deb
+```
+
+The package enables a systemd user service for the installing user, so the server starts at boot without a desktop login. The Web UI is at `https://localhost:47990`. On a headless GNOME/Wayland host set `capture = kms`.
+
+### Clients
+
+| Device | Install |
+|---|---|
+| Windows | Extract `VipleStream-Client-X.Y.Z.zip` anywhere and run `VipleStream.exe`. No installer or admin rights needed. |
+| Linux x64 | `chmod +x VipleStream-Client-X.Y.Z-linux-x64.AppImage` and run it. |
+| Android | Sideload `VipleStream-Android-X.Y.Z.apk` (file manager, or `adb install -r`). |
+| Steam Frame | See below. |
+
+**Steam Frame headset**
+
+1. Copy `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` to the headset and open a terminal there (desktop mode, or SSH with Developer Mode on).
+2. Install it for your user (the first install pulls the KDE 6.11 runtime from Flathub):
+   ```bash
+   flatpak --user install --bundle VipleStream-Client-X.Y.Z-linux-arm64.flatpak
+   ```
+3. Add it to your Steam library as a non-Steam game — Steam → *Add a Non-Steam Game* → **VipleStream**, or:
+   ```bash
+   steamos-add-to-steam ~/.local/share/flatpak/exports/share/applications/io.github.finaltwinsen.VipleStream.desktop
+   ```
+4. Launch VipleStream from your library inside the headset. It opens on a virtual screen.
+
+Updating: install the new `.flatpak` the same way; it replaces the old one.
+
+---
+
+## Using it
+
+### Pair once
+
+1. In the client, add the host: it usually shows up on its own on the same network; otherwise press **+** (*Add PC manually*) and type the host's IP address.
+2. The client shows a 4-digit PIN. On the host's Web UI (`https://<host-ip>:47990`) open **PIN** and enter it.
+3. The host appears with its apps. Installed Steam games are listed automatically.
+
+Pairing is per device; each client pairs once.
+
+### Stream a game or the desktop
+
+Pick the host, then an app (**Desktop** streams the whole screen). Resolution, frame rate, bitrate, codec and frame interpolation (FRUC) are in **Settings**; the defaults are a good start. To end a session, quit from the in-stream menu or press `Ctrl+Alt+Shift+Q` on the PC client.
+
+### On the Steam Frame
+
+When VipleStream starts it asks for a mode (you can switch later from the top bar):
+
+| Mode | What it does |
+|---|---|
+| **Desktop mode** | Your PC's desktop or a game on a large virtual screen, same as the PC client. |
+| **VR mode** | Plays SteamVR games from your PC in the headset. Pick the host, then **SteamVR Home** or a VR game; the host starts SteamVR and the game. Before starting, the client checks the round trip to the host and waits if the connection is too slow for VR (for example, a VPN going through a relay). |
+| **Video mode** | Plays videos in the headset — flat, 3D side-by-side / top-bottom, 180° and 360°. Sources: files on the headset, a URL, folders on a paired PC (the whole PC by default; limit it with `media_dirs`, or turn it off with `media_share = disabled` in the host's `sunshine.conf`), and YouTube and other sites through the built-in browser's **Play in VR**. |
+
+Video mode controls: **A** play/pause · **B** exit · **trigger** show the control bar · **grip** recentre the screen · **stick left/right** skip ±10 s · **stick up/down** move the screen nearer/farther (handy when a VR180 video is shot too close).
+
+When you start a video or VR session, SteamVR may open the Steam menu over it — press the Steam button to dismiss it.
+
+More detail: [`docs/setup_guide.md`](docs/setup_guide.md) (configuration and troubleshooting), [`docs/steam_frame_client.md`](docs/steam_frame_client.md) (headset client), [`docs/steamvr_driver.md`](docs/steamvr_driver.md) (VR on the host).
 
 ---
 
@@ -130,6 +223,7 @@ PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1`
 
 | Version | Changes |
 |---|---|
+| **2.0.1** | **VR 串流預設開啟**：host 的 `vr_pcvr` 預設改成 `enabled`（2.0.0 漏改、出貨仍是 `disabled`，頭盔的 VR 模式要手動開）；對平面串流沒有影響，VR app 只列給 VR client、SteamVR driver 只在 VR session 開始時才部署，沒裝 SteamVR 的 host 不會宣告 VR。README 加安裝與使用指引；修正 `docs/setup_guide.md` 的 Windows zip 安裝步驟（服務程式要放 `tools\`、要自己加防火牆規則）。 |
 | **2.0.0** | **Steam Frame 頭盔 client（第六件 asset：`-linux-arm64.flatpak`）**：頭盔上的 VipleStream 可以 VR 串流 PC 的 SteamVR 遊戲（host 自帶 SteamVR driver `driver_viplestream`，`vr_pcvr = enabled` 開啟；多連線＋補包跟著往返時間走、姿態預測、半速＋補幀、注視點編碼、進 VR 前量往返時間），也有**頭盔影片模式**（本機／網址／配對 PC 的磁碟機／YouTube 與內建瀏覽器；2D／3D／180°／360°；手把 A／B／扳機／握把、搖桿調遠近）。修正 server HTTPS 在 client 無聲斷線後整個卡死（阻塞式 TLS shutdown）。另附 `VipleStream-Drivers-2.0.0-windows.zip`（VipleSCHid＋SteamVR driver 獨立包）；同時首度發佈 1.5.276（§SELF-UPDATE、§UPDATE-HEAD）。 |
 | **1.5.275** | **§S.19-INIT-FIX 永久凍結修復（host）**：IDR cooldown 初值 `steady_clock::time_point::min()` 相減溢位→「cooldown active」永遠成立；§K.14 在 frame 16 掩蓋，但 encoder 重建（顯示拓樸切換）後 frame_nr 已過 16 → 該 encoder 生命期內 client 的每一次 IDR 請求都被壓制（log：每個 session 的 f=1 都 IDR-SUPPRESS、事故 14 秒 22 次 SUPPRESS／0 次 EMIT），網路閃斷 3 秒後畫面永久凍結直到重連。初值改「一個 cooldown 之前」、比較式改不溢位；刻意不補發被壓掉的請求（client 每 ≤1 s 自行重送，補發會在每次復原後多一張糊 IDR）。host 假 ARP 黑洞 3 秒重現：修前 14 秒不復原，修後鏈路恢復 28 ms 即 IDR-EMIT。**鍵鼠斷續診斷儀器**：client 主迴圈 watchdog `[VIPLE-INPUT-STALL]`（停頓 ≥50 ms 且期間有使用者輸入才記，≥300 ms 抄主執行緒堆疊）、host `[VIPLE-INPUT-GAP]`／`[VIPLE-INPUT-QUEUE-LAG]`／`[VIPLE-INPUT-SENDINPUT-SLOW]`、`§S.19 cooldown armed` 行。**§RSHIFT-DUP-FIX**：IME Right Shift 補償沒排除本事件就是 RShift → host 收到 DOWN,DOWN,UP,UP、中文輸入法切換兩次等於沒切。**§SC-HID-LOG-RATE**：控制器休眠時「Feature SET failed」曾佔 client log 92% 撞 10 MB 上限，改前 8 筆＋每 30 秒一筆。本版同時首度發佈 1.5.272（§K.dd.select 顯示器選擇修復＋§CFG.defer 設定警告救回）、1.5.273（§HID-PROBE 卡死 HID 裝置啟動防護＋§UPNP-DIAG）、1.5.274（§SC-THREAD-OWNER SC-HID 執行緒所有權＋SDL 忽略清單＋連結警告清零）；五件同版號（Linux 兩件自 1.5.270 後首次重建）。 |
 | **1.5.271** | Android client 的 §SC-HID Steam Controller 轉發對齊桌面修法（USB-C 直連／Puck、Nereid 接收器經 OTG）：`0x42` 改標轉發、feature 查詢改 SET 後 1 ms 輪詢 GET＋型別比對＋快取、不回零、`rx stats`／`Feature req` 可觀測 log、活躍介面優先。**藍牙 SC 在 Android 屬平台限制**（系統獨佔 HID over GATT、描述符無 gamepad，Pixel 5 實測只建出 KEYBOARD|MOUSE）——client 偵測到 `0x28DE:0x1303` 時以 toast 明講改用 USB-C／OTG。本版只發 Windows Client／Server＋Android 三件（Windows 重 stamp；Linux 兩件無改動、沿用 1.5.270）。 |

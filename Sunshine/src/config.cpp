@@ -796,7 +796,7 @@ namespace config {
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
   };
 
-  vr_t vr {};  // VipleStream 2.0 §VR：預設值見 config.h（vr_pcvr=disabled）
+  vr_t vr {};  // VipleStream 2.0 §VR：預設值見 config.h（vr_pcvr=enabled）
 
   nvhttp_t nvhttp {
     "lan",  // origin web manager
@@ -1555,7 +1555,10 @@ namespace config {
       ));
     }
 
-    // VipleStream 2.0 §VR（M1a）：vr_pcvr 預設 disabled；stub 只供開發驗證。
+    // VipleStream 2.0 §VR：vr_pcvr 預設 enabled（2.0.0 發佈時還是 disabled，那是開發期的保守值；設計原訂 GA 改 auto，
+    // 但 enabled 對不用 VR 的 client 沒有影響：VR app 只在 `?vr=1` 時列出、driver 只在 VR /launch 時才部署與註冊，
+    // 沒有裝 SteamVR 的 host 不會宣告 PCVR，所以直接開）。stub 只供開發驗證。vr_pcvr 寫錯是下面「維持預設」的例外：
+    // 退回 disabled（pcvr_from_view），寫錯的值不該讓 host 開始接受 VR。
     // enum 與整數選項（vr_opt::*_from_view、vr_opt::int_strict_f）值寫錯一律警告並維持預設
     // （壞值絕不靜靜地變成「開啟」或「關閉安全網」）。
     // 八個布林選項（vr_latch_acquire、vr_direct_kick、vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、

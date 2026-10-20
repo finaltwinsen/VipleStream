@@ -662,7 +662,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
   3. 備妥 release 候選，交使用者決定是否 push 和發佈。
   - **α-lite（只有軟體解碼）不切 2.0.0**，繼續出 1.5.x。
   - versionCode 為 20000+x，由 F10 防護。
-  - `vr_pcvr`：rc 以前預設 `disabled`；GA 改 `auto`。
+  - `vr_pcvr`：rc 以前預設 `disabled`；原訂 GA 改 `auto`。實際上 2.0.0 發佈時漏改、仍是 `disabled`；2.0.0 之後直接改成 `enabled`（沒有另做 `auto`：`enabled` 本來就只在 host 裝了 SteamVR 時才宣告 PCVR，VR app 只列給 VR client，對平面串流沒有影響）。
 - **asset**
   - **從 2.0.0 起六件為強制**：Win Client zip、Win Server zip、Android apk、`-linux-x64.AppImage`、`-linux-x64.deb`、`VipleStream-Client-X.Y.Z-linux-arm64.flatpak`（G-PKG 改 P2 時是 `-linux-arm64.zip`）。
   - 本機 CLAUDE.md 的 Release 規範、必備 asset 表、「同版號」條款同步改成六件。

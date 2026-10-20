@@ -239,12 +239,12 @@ namespace config {
    */
   struct vr_t {
     enum class pcvr_e {
-      disabled,  ///< 不接受 VR session（預設）
+      disabled,  ///< 不接受 VR session
       stub,  ///< M1a 開發驗證：桌面擷取＋tracking 回聲
-      enabled,  ///< M1b V5（S1-11）：真正的 PCVR（SteamVR driver＋display_vr_t＋編排器）
+      enabled,  ///< M1b V5（S1-11）：真正的 PCVR（SteamVR driver＋display_vr_t＋編排器）（預設，2.0.0 發佈後改）
     };
 
-    pcvr_e pcvr = pcvr_e::disabled;  ///< vr_pcvr
+    pcvr_e pcvr = pcvr_e::enabled;  ///< vr_pcvr
     int intra_refresh_frames = 8;  ///< vr_intra_refresh_frames：LOSS 觸發的 intra-refresh wave 長度（2–60 幀）
     int intra_refresh_safety_ms = 2000;  ///< vr_intra_refresh_safety_ms：週期性 intra refresh 安全網（0 = 關閉；否則 500–10000 ms）
     /// vr_vsync_to_photons_us：HMD 的 Prop_SecondsFromVsyncToPhotons（µs）。SteamVR 依它決定遊戲的姿態要預測到多久之後。

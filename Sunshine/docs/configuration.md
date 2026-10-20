@@ -1792,7 +1792,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td colspan="2">
             VipleStream 2.0: whether this host accepts PCVR sessions (a VipleStream VR client launching
             with `vr=1`). When disabled, VR launches are rejected with `VR_DISABLED` and `/serverinfo`
-            does not advertise the PCVR capability. Normal (non-VR) streaming is not affected by this option.
+            does not advertise the PCVR capability. Normal (non-VR) streaming is not affected by this option:
+            the synthesized "SteamVR Home" app is only listed for VR clients, and the SteamVR driver is only
+            deployed and registered when a VR session starts. A host without SteamVR installed never advertises
+            PCVR, even when this is `enabled`.
             @note{Only supported on Windows hosts. On Linux and macOS PCVR is always unavailable regardless
             of this option.}
             @warning{`stub` is for development and protocol validation only: there is no SteamVR driver yet,
@@ -1803,19 +1806,23 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            disabled
+            enabled
             @endcode</td>
     </tr>
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            vr_pcvr = stub
+            vr_pcvr = disabled
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="2">Choices</td>
+        <td rowspan="3">Choices</td>
         <td>disabled</td>
-        <td>Reject VR sessions.</td>
+        <td>Reject VR sessions. VipleStream 2.0.0 shipped with this as the default.</td>
+    </tr>
+    <tr>
+        <td>enabled</td>
+        <td>Accept VR sessions: the server deploys and registers its SteamVR driver, starts SteamVR and streams it.</td>
     </tr>
     <tr>
         <td>stub</td>

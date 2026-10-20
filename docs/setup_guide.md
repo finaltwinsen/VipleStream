@@ -28,10 +28,19 @@ is not yet shipped (see [`docs/TODO.md`](./TODO.md) §J.4 for status).
    page.
 2. Extract to `C:\Program Files\VipleStream-Server\` (any path works as
    long as the service can read it; this is the canonical location).
-3. From an **Administrator** Command Prompt or PowerShell:
+3. From an **Administrator** PowerShell. The service wrapper treats the
+   folder one level above its own as the install dir, so it goes into
+   `tools\` (the zip has it at the top level); the zip also doesn't create
+   a firewall rule:
    ```powershell
-   sc create VipleStreamServer binPath= "C:\Program Files\VipleStream-Server\tools\viplestream-svc.exe" start= auto
-   sc start VipleStreamServer
+   cd "C:\Program Files\VipleStream-Server"
+   New-Item -ItemType Directory tools -Force | Out-Null
+   Copy-Item viplestream-svc.exe tools\
+   New-Service -Name VipleStreamServer -DisplayName "VipleStream Server" -StartupType Automatic `
+     -BinaryPathName '"C:\Program Files\VipleStream-Server\tools\viplestream-svc.exe"'
+   New-NetFirewallRule -DisplayName "VipleStream Server" -Direction Inbound -Action Allow `
+     -Program "C:\Program Files\VipleStream-Server\viplestream-server.exe"
+   Start-Service VipleStreamServer
    ```
 4. Open `https://localhost:47990` in a browser. You'll get a TLS warning
    (self-signed cert — expected; click through). The Web UI prompts for a
