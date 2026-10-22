@@ -9,8 +9,8 @@
 static int stage = STAGE_NONE;
 static ConnListenerConnectionTerminated originalTerminationCallback;
 static bool alreadyTerminated;
-static PLT_THREAD terminationCallbackThread;
-static int terminationCallbackErrorCode;
+static PLT_MUTEX termMutex;
+static bool termMutexInitialized = false;
 
 // Common globals
 char* RemoteAddrString;
@@ -91,8 +91,14 @@ void LiInterruptConnection(void) {
 
 // Stop the connection by undoing the step at the current stage and those before it
 void LiStopConnection(void) {
-    // Disable termination callbacks now
+    // Disable termination callbacks now under lock
+    if (termMutexInitialized) {
+        PltLockMutex(&termMutex);
+    }
     alreadyTerminated = true;
+    if (termMutexInitialized) {
+        PltUnlockMutex(&termMutex);
+    }
 
     // Set the interrupted flag
     LiInterruptConnection();
@@ -158,6 +164,10 @@ void LiStopConnection(void) {
         stage--;
     }
     if (stage == STAGE_PLATFORM_INIT) {
+        if (termMutexInitialized) {
+            PltDeleteMutex(&termMutex);
+            termMutexInitialized = false;
+        }
         Limelog("Cleaning up platform...");
         cleanupPlatform();
         stage--;
@@ -180,8 +190,9 @@ void LiStopConnection(void) {
 
 static void terminationCallbackThreadFunc(void* context)
 {
+    int errorCode = (int)(intptr_t)context;
     // Invoke the client's termination callback
-    originalTerminationCallback(terminationCallbackErrorCode);
+    originalTerminationCallback(errorCode);
 }
 
 // This shim callback runs the client's connectionTerminated() callback on a
@@ -193,25 +204,37 @@ static void terminationCallbackThreadFunc(void* context)
 static void ClInternalConnectionTerminated(int errorCode)
 {
     int err;
+    PLT_THREAD termThread;
+
+    if (termMutexInitialized) {
+        PltLockMutex(&termMutex);
+    }
 
     // Avoid recursion and issuing multiple callbacks
     if (alreadyTerminated || ConnectionInterrupted) {
+        if (termMutexInitialized) {
+            PltUnlockMutex(&termMutex);
+        }
         return;
     }
 
-    terminationCallbackErrorCode = errorCode;
     alreadyTerminated = true;
 
+    if (termMutexInitialized) {
+        PltUnlockMutex(&termMutex);
+    }
+
     // Invoke the termination callback on a separate thread
-    err = PltCreateThread("AsyncTerm", terminationCallbackThreadFunc, NULL, &terminationCallbackThread);
+    err = PltCreateThread("AsyncTerm", terminationCallbackThreadFunc, (void*)(intptr_t)errorCode, &termThread);
     if (err != 0) {
         // Nothing we can safely do here, so we'll just assert on debug builds
         Limelog("Failed to create termination thread: %d\n", err);
         LC_ASSERT(err == 0);
     }
-
-    // Detach the thread since we never wait on it
-    PltDetachThread(&terminationCallbackThread);
+    else {
+        // Detach the thread since we never wait on it
+        PltDetachThread(&termThread);
+    }
 }
 
 static bool parseRtspPortNumberFromUrl(const char* rtspSessionUrl, uint16_t* port)
@@ -413,6 +436,10 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
         Limelog("failed: %d\n", err);
         ListenerCallbacks.stageFailed(STAGE_PLATFORM_INIT, err);
         goto Cleanup;
+    }
+    if (!termMutexInitialized) {
+        PltCreateMutex(&termMutex);
+        termMutexInitialized = true;
     }
     stage++;
     LC_ASSERT(stage == STAGE_PLATFORM_INIT);

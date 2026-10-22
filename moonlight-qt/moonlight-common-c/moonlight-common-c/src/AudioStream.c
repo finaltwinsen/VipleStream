@@ -207,12 +207,13 @@ static void freePacketList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
 
 // Tear down the audio stream once we're done with it
 void destroyAudioStream(void) {
-    if (rtpSocket != INVALID_SOCKET) {
-        if (pingThreadStarted) {
-            PltInterruptThread(&udpPingThread);
-            PltJoinThread(&udpPingThread);
-        }
+    if (pingThreadStarted) {
+        PltInterruptThread(&udpPingThread);
+        PltJoinThread(&udpPingThread);
+        pingThreadStarted = false;
+    }
 
+    if (rtpSocket != INVALID_SOCKET) {
         closeSocket(rtpSocket);
         rtpSocket = INVALID_SOCKET;
     }
@@ -609,7 +610,10 @@ int startAudioStream(void* audioContext, int arFlags) {
     err = PltCreateThread("AudioRecv", AudioReceiveThreadProc, NULL, &receiveThread);
     if (err != 0) {
         AudioCallbacks.stop();
-        closeSocket(rtpSocket);
+        if (rtpSocket != INVALID_SOCKET) {
+            closeSocket(rtpSocket);
+            rtpSocket = INVALID_SOCKET;
+        }
         AudioCallbacks.cleanup();
         return err;
     }
@@ -620,7 +624,10 @@ int startAudioStream(void* audioContext, int arFlags) {
             AudioCallbacks.stop();
             PltInterruptThread(&receiveThread);
             PltJoinThread(&receiveThread);
-            closeSocket(rtpSocket);
+            if (rtpSocket != INVALID_SOCKET) {
+                closeSocket(rtpSocket);
+                rtpSocket = INVALID_SOCKET;
+            }
             AudioCallbacks.cleanup();
             return err;
         }
