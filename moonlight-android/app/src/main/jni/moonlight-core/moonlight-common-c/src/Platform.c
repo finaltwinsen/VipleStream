@@ -447,7 +447,12 @@ uint64_t PltGetMicroseconds(void) {
     }
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    return (uint64_t)(((now.QuadPart - start_ticks.QuadPart) * 1000000) / ticks_per_second.QuadPart);
+    if (ticks_per_second.QuadPart <= 0) {
+        return 0;
+    }
+    uint64_t delta = (uint64_t)(now.QuadPart > start_ticks.QuadPart ? (now.QuadPart - start_ticks.QuadPart) : 0);
+    uint64_t freq = (uint64_t)ticks_per_second.QuadPart;
+    return (delta / freq) * 1000000ULL + ((delta % freq) * 1000000ULL) / freq;
 }
 
 #elif defined(LC_DARWIN)
