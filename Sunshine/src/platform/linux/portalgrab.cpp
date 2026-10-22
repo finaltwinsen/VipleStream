@@ -674,7 +674,11 @@ namespace portal {
 
       if (valid_) {
         // Return cached session data
-        pipewire_fd = dup(pipewire_fd_);  // Duplicate FD for each caller
+        pipewire_fd = fcntl(pipewire_fd_, F_DUPFD_CLOEXEC, 0);
+        if (pipewire_fd < 0) {
+          BOOST_LOG(error) << "Failed to duplicate cached pipewire FD: "sv << std::strerror(errno);
+          return -1;
+        }
         pipewire_node = pipewire_node_;
         width = width_;
         height = height_;
@@ -700,7 +704,11 @@ namespace portal {
       valid_ = true;
 
       // Return to caller (duplicate FD so each caller has their own)
-      pipewire_fd = dup(pipewire_fd_);
+      pipewire_fd = fcntl(pipewire_fd_, F_DUPFD_CLOEXEC, 0);
+      if (pipewire_fd < 0) {
+        BOOST_LOG(error) << "Failed to duplicate new pipewire FD: "sv << std::strerror(errno);
+        return -1;
+      }
       pipewire_node = pipewire_node_;
       width = width_;
       height = height_;
@@ -829,7 +837,10 @@ namespace portal {
 
       context = pw_context_new(pw_thread_loop_get_loop(loop), nullptr, 0);
       if (context) {
-        core = pw_context_connect_fd(context, dup(fd), nullptr, 0);
+        int connect_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+        if (connect_fd >= 0) {
+          core = pw_context_connect_fd(context, connect_fd, nullptr, 0);
+        }
         if (core) {
           pw_core_add_listener(core, &core_listener, &core_events, nullptr);
         }
@@ -939,7 +950,7 @@ namespace portal {
       img_descriptor->sd.modifier = d.format.info.raw.modifier;
       img_descriptor->sd.fourcc = d.drm_format;
       for (int i = 0; i < MIN(buf->n_datas, 4); i++) {
-        img_descriptor->sd.fds[i] = dup(buf->datas[i].fd);
+        img_descriptor->sd.fds[i] = (buf->datas[i].fd >= 0) ? fcntl(buf->datas[i].fd, F_DUPFD_CLOEXEC, 0) : -1;
         img_descriptor->sd.pitches[i] = buf->datas[i].chunk->stride;
         img_descriptor->sd.offsets[i] = buf->datas[i].chunk->offset;
       }
@@ -1261,6 +1272,9 @@ namespace portal {
       int negotiated_h = 0;
 
       while (timeout_ms > 0) {
+        if (shared_state->stream_dead.load()) {
+          break;
+        }
         negotiated_w = shared_state->negotiated_width.load();
         negotiated_h = shared_state->negotiated_height.load();
         if (negotiated_w > 0 && negotiated_h > 0) {
@@ -1540,6 +1554,11 @@ namespace portal {
           BOOST_LOG(warning) << "Some DMA-BUF modifiers are being ignored"sv;
         }
 
+        if (n_dmabuf_infos >= MAX_DMABUF_FORMATS) {
+          BOOST_LOG(warning) << "Some DMA-BUF formats exceed storage limit"sv;
+          break;
+        }
+
         dmabuf_infos[n_dmabuf_infos].format = pw_format;
         dmabuf_infos[n_dmabuf_infos].n_modifiers = MIN(num_modifiers, MAX_DMABUF_MODIFIERS);
         dmabuf_infos[n_dmabuf_infos].modifiers =
@@ -1549,6 +1568,7 @@ namespace portal {
     }
 
     int get_dmabuf_modifiers() {
+      clear_dmabuf_modifiers();
       if (wl_display.init() < 0) {
         return -1;
       }
@@ -1600,7 +1620,17 @@ namespace portal {
     wl::display_t wl_display;
     pipewire_t pipewire;
     std::array<struct dmabuf_format_info_t, MAX_DMABUF_FORMATS> dmabuf_infos;
-    int n_dmabuf_infos;
+    void clear_dmabuf_modifiers() {
+      for (int i = 0; i < n_dmabuf_infos; ++i) {
+        if (dmabuf_infos[i].modifiers) {
+          g_free(dmabuf_infos[i].modifiers);
+          dmabuf_infos[i].modifiers = nullptr;
+        }
+      }
+      n_dmabuf_infos = 0;
+    }
+
+    int n_dmabuf_infos = 0;
     bool display_is_nvidia = false;  // Track if display GPU is NVIDIA
     std::chrono::nanoseconds delay;
     std::optional<std::uint64_t> last_pts {};

@@ -332,6 +332,10 @@ namespace va {
       }
 
       // Keep track of file descriptors
+      if (prime.num_objects > egl::nv12_img_t::num_fds) {
+        BOOST_LOG(error) << "Invalid object count for VA surface: "sv << prime.num_objects;
+        return -1;
+      }
       std::array<file_t, egl::nv12_img_t::num_fds> fds;
       for (int x = 0; x < prime.num_objects; ++x) {
         fds[x] = prime.objects[x].fd;
@@ -354,10 +358,22 @@ namespace va {
         sd.height = prime.height / (plane == 0 ? 1 : 2);
 
         // The modifier must be the same for all planes
+        if (layer.object_index[0] >= (uint32_t) prime.num_objects) {
+          BOOST_LOG(error) << "Invalid object index for VA modifier: "sv << layer.object_index[0];
+          return -1;
+        }
         sd.modifier = prime.objects[layer.object_index[0]].drm_format_modifier;
 
         std::fill_n(sd.fds, 4, -1);
+        if (layer.num_planes > 4) {
+          BOOST_LOG(error) << "Invalid plane count for VA layer: "sv << layer.num_planes;
+          return -1;
+        }
         for (int x = 0; x < layer.num_planes; ++x) {
+          if (layer.object_index[x] >= (uint32_t) prime.num_objects) {
+            BOOST_LOG(error) << "Invalid object index for VA plane: "sv << layer.object_index[x];
+            return -1;
+          }
           sd.fds[x] = prime.objects[layer.object_index[x]].fd;
           sd.pitches[x] = layer.pitch[x];
           sd.offsets[x] = layer.offset[x];
@@ -384,7 +400,7 @@ namespace va {
       sws.apply_colorspace(colorspace);
     }
 
-    va::display_t::pointer va_display;
+    va::display_t::pointer va_display {nullptr};
     file_t file;
 
     gbm::gbm_t gbm;
@@ -398,8 +414,8 @@ namespace va {
     egl::sws_t sws;
     egl::nv12_t nv12;
 
-    int width;
-    int height;
+    int width {0};
+    int height {0};
   };
 
   class va_ram_t: public va_t {
@@ -453,11 +469,11 @@ namespace va {
       return 0;
     }
 
-    std::uint64_t sequence;
+    std::uint64_t sequence {0};
     egl::rgb_t rgb;
 
-    int offset_x;
-    int offset_y;
+    int offset_x {0};
+    int offset_y {0};
   };
 
   /**
@@ -510,7 +526,11 @@ namespace va {
 
   int vaapi_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *base, AVBufferRef **hw_device_buf) {
     auto va = (va::va_t *) base;
-    auto fd = dup(va->file.el);
+    auto fd = fcntl(va->file.el, F_DUPFD_CLOEXEC, 0);
+    if (fd < 0) {
+      BOOST_LOG(error) << "Failed to duplicate DRM fd for VAAPI: "sv << std::strerror(errno);
+      return -1;
+    }
 
     auto *priv = (VAAPIDevicePriv *) av_mallocz(sizeof(VAAPIDevicePriv));
     priv->drm_fd = fd;
@@ -531,7 +551,7 @@ namespace va {
     va->va_display = display.get();
 
     vaSetErrorCallback(display.get(), __log, &error);
-    vaSetErrorCallback(display.get(), __log, &info);
+    vaSetInfoCallback(display.get(), __log, &info);
 
     int major;
     int minor;
@@ -592,7 +612,12 @@ namespace va {
 
       auto bytes = readlink(std::format("/proc/self/fd/{}", fd).c_str(), string, sizeof(string));
 
-      std::string_view render_device {string, (std::size_t) bytes};
+      std::string render_device;
+      if (bytes > 0 && bytes < (ssize_t) sizeof(string)) {
+        render_device.assign(string, (std::size_t) bytes);
+      } else {
+        render_device = std::format("/proc/self/fd/{}", fd);
+      }
 
       BOOST_LOG(error) << "Couldn't open a va display from DRM with device: "sv << render_device;
       return false;
@@ -644,7 +669,7 @@ namespace va {
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device(int width, int height, int offset_x, int offset_y, bool vram) {
     auto render_device = config::video.adapter_name.empty() ? "/dev/dri/renderD128" : config::video.adapter_name.c_str();
 
-    file_t file = open(render_device, O_RDWR);
+    file_t file = open(render_device, O_RDWR | O_CLOEXEC);
     if (file.el < 0) {
       char string[1024];
       BOOST_LOG(error) << "Couldn't open "sv << render_device << ": " << strerror_r(errno, string, sizeof(string));
