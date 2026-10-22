@@ -6,12 +6,14 @@
 #include <array>
 #include <cstdint>
 #include <drm_fourcc.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #if defined(__FreeBSD__)
   #include <sys/types.h>
 #else
   #include <sys/sysmacros.h>
 #endif
+#include <unistd.h>
 #include <vector>
 #include <vulkan/vulkan.h>
 
@@ -58,9 +60,15 @@ namespace vk {
     }
 
     uint32_t count = 0;
-    vkEnumeratePhysicalDevices(inst, &count, nullptr);
+    if (vkEnumeratePhysicalDevices(inst, &count, nullptr) != VK_SUCCESS || count == 0) {
+      vkDestroyInstance(inst, nullptr);
+      return {};
+    }
     std::vector<VkPhysicalDevice> devs(count);
-    vkEnumeratePhysicalDevices(inst, &count, devs.data());
+    if (vkEnumeratePhysicalDevices(inst, &count, devs.data()) != VK_SUCCESS) {
+      vkDestroyInstance(inst, nullptr);
+      return {};
+    }
 
     std::string result;
     for (uint32_t i = 0; i < count; i++) {
@@ -407,7 +415,10 @@ namespace vk {
     bool import_dmabuf(const egl::surface_descriptor_t &sd) {
       destroy_src_image();
 
-      int fd = dup(sd.fds[0]);
+      if (sd.fds[0] < 0) {
+        return false;
+      }
+      int fd = fcntl(sd.fds[0], F_DUPFD_CLOEXEC, 0);
       if (fd < 0) {
         return false;
       }
@@ -486,13 +497,21 @@ namespace vk {
       VkDeviceMemory src_mem = VK_NULL_HANDLE;
       res = vkAllocateMemory(vk_dev.dev, &alloc_info, nullptr, &src_mem);
       if (res != VK_SUCCESS) {
+        close(fd);
         BOOST_LOG(error) << "vkAllocateMemory for DMA-BUF failed: " << res;
         vkDestroyImage(vk_dev.dev, src.image, nullptr);
         src.image = VK_NULL_HANDLE;
         return false;
       }
 
-      vkBindImageMemory(vk_dev.dev, src.image, src_mem, 0);
+      res = vkBindImageMemory(vk_dev.dev, src.image, src_mem, 0);
+      if (res != VK_SUCCESS) {
+        BOOST_LOG(error) << "vkBindImageMemory for DMA-BUF failed: " << res;
+        vkDestroyImage(vk_dev.dev, src.image, nullptr);
+        src.image = VK_NULL_HANDLE;
+        vkFreeMemory(vk_dev.dev, src_mem, nullptr);
+        return false;
+      }
 
       // Create image view (Vulkan sampling always returns RGBA order regardless of memory layout)
       VkImageViewCreateInfo view_ci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -500,7 +519,14 @@ namespace vk {
       view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
       view_ci.format = vk_format;
       view_ci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-      VK_CHECK_BOOL(vkCreateImageView(vk_dev.dev, &view_ci, nullptr, &src.view));
+      res = vkCreateImageView(vk_dev.dev, &view_ci, nullptr, &src.view);
+      if (res != VK_SUCCESS) {
+        BOOST_LOG(error) << "vkCreateImageView for DMA-BUF failed: " << res;
+        vkDestroyImage(vk_dev.dev, src.image, nullptr);
+        src.image = VK_NULL_HANDLE;
+        vkFreeMemory(vk_dev.dev, src_mem, nullptr);
+        return false;
+      }
 
       src.mem = src_mem;
       return true;

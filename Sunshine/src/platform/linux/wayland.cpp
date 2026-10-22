@@ -243,22 +243,22 @@ namespace wl {
       BOOST_LOG(info) << "[wayland] Found interface: "sv << interface << '(' << id << ") version "sv << version;
       monitors.emplace_back(
         std::make_unique<monitor_t>(
-          (wl_output *) wl_registry_bind(registry, id, &wl_output_interface, 2)
+          (wl_output *) wl_registry_bind(registry, id, &wl_output_interface, std::min<std::uint32_t>(version, 2))
         )
       );
     } else if (!std::strcmp(interface, zxdg_output_manager_v1_interface.name)) {
       BOOST_LOG(info) << "[wayland] Found interface: "sv << interface << '(' << id << ") version "sv << version;
-      output_manager = (zxdg_output_manager_v1 *) wl_registry_bind(registry, id, &zxdg_output_manager_v1_interface, version);
+      output_manager = (zxdg_output_manager_v1 *) wl_registry_bind(registry, id, &zxdg_output_manager_v1_interface, std::min<std::uint32_t>(version, 3));
 
       this->interface[XDG_OUTPUT] = true;
     } else if (!std::strcmp(interface, zwlr_screencopy_manager_v1_interface.name)) {
       BOOST_LOG(info) << "[wayland] Found interface: "sv << interface << '(' << id << ") version "sv << version;
-      screencopy_manager = (zwlr_screencopy_manager_v1 *) wl_registry_bind(registry, id, &zwlr_screencopy_manager_v1_interface, version);
+      screencopy_manager = (zwlr_screencopy_manager_v1 *) wl_registry_bind(registry, id, &zwlr_screencopy_manager_v1_interface, std::min<std::uint32_t>(version, 3));
 
       this->interface[WLR_EXPORT_DMABUF] = true;
     } else if (!std::strcmp(interface, zwp_linux_dmabuf_v1_interface.name)) {
       BOOST_LOG(info) << "[wayland] Found interface: "sv << interface << '(' << id << ") version "sv << version;
-      dmabuf_interface = (zwp_linux_dmabuf_v1 *) wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, version);
+      dmabuf_interface = (zwp_linux_dmabuf_v1 *) wl_registry_bind(registry, id, &zwp_linux_dmabuf_v1_interface, std::min<std::uint32_t>(version, 3));
 
       this->interface[LINUX_DMABUF] = true;
     }
@@ -285,7 +285,7 @@ namespace wl {
     int drm_fd = -1;
     for (int i = 0; i < n; i++) {
       if (devices[i]->available_nodes & (1 << DRM_NODE_RENDER)) {
-        drm_fd = open(devices[i]->nodes[DRM_NODE_RENDER], O_RDWR);
+        drm_fd = open(devices[i]->nodes[DRM_NODE_RENDER], O_RDWR | O_CLOEXEC);
         if (drm_fd >= 0) {
           break;
         }
@@ -299,8 +299,10 @@ namespace wl {
     }
 
     gbm_device = gbm_create_device(drm_fd);
+    this->drm_fd = drm_fd;
     if (!gbm_device) {
       close(drm_fd);
+      this->drm_fd = -1;
       BOOST_LOG(error) << "[wayland] Failed to create GBM device"sv;
       return false;
     }
@@ -372,9 +374,13 @@ namespace wl {
     }
 
     if (gbm_device) {
-      // We should close the DRM FD, but it's owned by GBM
+      // Close DRM FD after destroying GBM device
       gbm_device_destroy(gbm_device);
       gbm_device = nullptr;
+    }
+    if (drm_fd >= 0) {
+      close(drm_fd);
+      drm_fd = -1;
     }
   }
 
@@ -445,6 +451,7 @@ namespace wl {
     uint64_t modifier = gbm_bo_get_modifier(current_bo);
 
     // Store in surface descriptor for later use
+    get_next_frame()->destroy();
     auto next_frame = get_next_frame();
     next_frame->sd.fds[0] = fd;
     next_frame->sd.pitches[0] = stride;
@@ -604,7 +611,9 @@ namespace wl {
     }
 
     for (auto &monitor : interface.monitors) {
-      monitor->listen(interface.output_manager);
+      if (interface.output_manager && monitor) {
+        monitor->listen(interface.output_manager);
+      }
     }
 
     display.roundtrip();

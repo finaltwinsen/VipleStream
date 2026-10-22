@@ -62,6 +62,11 @@ namespace wl {
         return -1;
       }
 
+      if (interface.monitors.empty()) {
+        BOOST_LOG(error) << "[wlgrab] No monitors found on Wayland display"sv;
+        return -1;
+      }
+
       auto monitor = interface.monitors[0].get();
 
       if (!display_name.empty()) {
