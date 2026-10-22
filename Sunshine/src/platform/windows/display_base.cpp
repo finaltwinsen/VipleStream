@@ -209,8 +209,12 @@ namespace platf::dxgi {
       if (client_frame_rate_strict.Numerator > 0) {
         return client_frame_rate_strict;
       }
+      // 防呆：幀率非正值時預設為 60fps，防範除以零
+      if (client_frame_rate <= 0) {
+        return {60, 1};
+      }
       // Adjust capture frame interval when display refresh rate is not integral but very close to requested fps.
-      if (display_refresh_rate.Denominator > 1) {
+      if (display_refresh_rate.Denominator > 1 && display_refresh_rate_rounded > 0) {
         DXGI_RATIONAL candidate = display_refresh_rate;
         if (client_frame_rate % display_refresh_rate_rounded == 0) {
           candidate.Numerator *= client_frame_rate / display_refresh_rate_rounded;
@@ -601,7 +605,7 @@ namespace platf::dxgi {
   }
 
   int display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
-    std::once_flag windows_cpp_once_flag;
+    static std::once_flag windows_cpp_once_flag;
 
     std::call_once(windows_cpp_once_flag, []() {
       DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
@@ -641,9 +645,9 @@ namespace platf::dxgi {
     auto adapter_name = utf_utils::from_utf8(config::video.adapter_name);
     auto output_name = utf_utils::from_utf8(display_name);
 
-    adapter_t::pointer adapter_p;
+    adapter_t::pointer adapter_p = nullptr;
     for (int tries = 0; tries < 2; ++tries) {
-      for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
+      for (int x = 0; SUCCEEDED(factory->EnumAdapters1(x, &adapter_p)) && adapter_p != nullptr; ++x) {
         dxgi::adapter_t adapter_tmp {adapter_p};
 
         DXGI_ADAPTER_DESC1 adapter_desc;
@@ -653,8 +657,8 @@ namespace platf::dxgi {
           continue;
         }
 
-        dxgi::output_t::pointer output_p;
-        for (int y = 0; adapter_tmp->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
+        dxgi::output_t::pointer output_p = nullptr;
+        for (int y = 0; SUCCEEDED(adapter_tmp->EnumOutputs(y, &output_p)) && output_p != nullptr; ++y) {
           dxgi::output_t output_tmp {output_p};
 
           DXGI_OUTPUT_DESC desc;
@@ -740,21 +744,21 @@ namespace platf::dxgi {
     {
       const DWORD flags = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
       TOKEN_PRIVILEGES tp;
-      HANDLE token;
+      HANDLE token = nullptr;
       LUID val;
 
-      if (OpenProcessToken(GetCurrentProcess(), flags, &token) &&
-          !!LookupPrivilegeValue(nullptr, SE_INC_BASE_PRIORITY_NAME, &val)) {
-        tp.PrivilegeCount = 1;
-        tp.Privileges[0].Luid = val;
-        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+      if (OpenProcessToken(GetCurrentProcess(), flags, &token)) {
+        if (LookupPrivilegeValue(nullptr, SE_INC_BASE_PRIORITY_NAME, &val)) {
+          tp.PrivilegeCount = 1;
+          tp.Privileges[0].Luid = val;
+          tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-        if (!AdjustTokenPrivileges(token, false, &tp, sizeof(tp), nullptr, nullptr)) {
-          BOOST_LOG(warning) << "Could not set privilege to increase GPU priority";
+          if (!AdjustTokenPrivileges(token, false, &tp, sizeof(tp), nullptr, nullptr)) {
+            BOOST_LOG(warning) << "Could not set privilege to increase GPU priority";
+          }
         }
+        CloseHandle(token);
       }
-
-      CloseHandle(token);
 
       HMODULE gdi32 = GetModuleHandleA("GDI32");
       if (gdi32) {
@@ -1079,7 +1083,11 @@ namespace platf::dxgi {
   };
 
   const char *display_base_t::dxgi_format_to_string(DXGI_FORMAT format) {
-    return format_str[format];
+    auto idx = static_cast<std::size_t>(format);
+    if (idx < std::size(format_str) && format_str[idx] != nullptr) {
+      return format_str[idx];
+    }
+    return "DXGI_FORMAT_UNKNOWN";
   }
 
   const char *display_base_t::colorspace_to_string(DXGI_COLOR_SPACE_TYPE type) {
@@ -1196,8 +1204,8 @@ namespace platf {
       return {};
     }
 
-    dxgi::adapter_t::pointer adapter_p;
-    for (int x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
+    dxgi::adapter_t::pointer adapter_p = nullptr;
+    for (int x = 0; SUCCEEDED(factory->EnumAdapters1(x, &adapter_p)) && adapter_p != nullptr; ++x) {
       dxgi::adapter_t adapter {adapter_p};
       DXGI_ADAPTER_DESC1 adapter_desc;
       adapter->GetDesc1(&adapter_desc);
@@ -1214,8 +1222,8 @@ namespace platf {
         << std::endl
         << "    ====== OUTPUT ======"sv << std::endl;
 
-      dxgi::output_t::pointer output_p {};
-      for (int y = 0; adapter->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
+      dxgi::output_t::pointer output_p = nullptr;
+      for (int y = 0; SUCCEEDED(adapter->EnumOutputs(y, &output_p)) && output_p != nullptr; ++y) {
         dxgi::output_t output {output_p};
 
         DXGI_OUTPUT_DESC desc;

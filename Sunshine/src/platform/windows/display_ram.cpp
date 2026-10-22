@@ -2,6 +2,9 @@
  * @file src/platform/windows/display_ram.cpp
  * @brief Definitions for handling ram.
  */
+// standard includes
+#include <algorithm>
+
 // local includes
 #include "display.h"
 #include "misc.h"
@@ -24,6 +27,10 @@ namespace platf::dxgi {
     int width = cursor.shape_info.Width;
     int pitch = cursor.shape_info.Pitch;
 
+    if (height <= 0 || width <= 0 || pitch <= 0 || !img.data || img.pixel_pitch <= 0) {
+      return;
+    }
+
     // img cursor.{x,y} < 0, skip parts of the cursor.img_data
     auto cursor_skip_y = -std::min(0, cursor.y);
     auto cursor_skip_x = -std::min(0, cursor.x);
@@ -35,19 +42,30 @@ namespace platf::dxgi {
     auto cursor_width = width - cursor_skip_x - cursor_truncate_x;
     auto cursor_height = height - cursor_skip_y - cursor_truncate_y;
 
-    if (cursor_height > height || cursor_width > width) {
+    if (cursor_height <= 0 || cursor_width <= 0 || cursor_height > height || cursor_width > width) {
       return;
     }
 
     auto img_skip_y = std::max(0, cursor.y);
     auto img_skip_x = std::max(0, cursor.x);
 
+    if (static_cast<std::size_t>(cursor_skip_y * pitch + height * pitch) > cursor.img_data.size()) {
+      return;
+    }
+
     auto cursor_img_data = cursor.img_data.data() + cursor_skip_y * pitch;
 
     int delta_height = std::min(cursor_height - cursor_truncate_y, std::max(0, img.height - img_skip_y));
     int delta_width = std::min(cursor_width - cursor_truncate_x, std::max(0, img.width - img_skip_x));
 
+    if (delta_height <= 0 || delta_width <= 0) {
+      return;
+    }
+
     auto pixels_per_byte = width / pitch;
+    if (pixels_per_byte <= 0) {
+      pixels_per_byte = 8;
+    }
     auto bytes_per_row = delta_width / pixels_per_byte;
 
     auto img_data = (int *) img.data;
@@ -111,6 +129,10 @@ namespace platf::dxgi {
     int width = cursor.shape_info.Width;
     int pitch = cursor.shape_info.Pitch;
 
+    if (height <= 0 || width <= 0 || pitch <= 0 || !img.data || img.pixel_pitch <= 0) {
+      return;
+    }
+
     // img cursor.y < 0, skip parts of the cursor.img_data
     auto cursor_skip_y = -std::min(0, cursor.y);
     auto cursor_skip_x = -std::min(0, cursor.x);
@@ -119,21 +141,28 @@ namespace platf::dxgi {
     auto cursor_truncate_y = std::max(0, cursor.y - img.height);
     auto cursor_truncate_x = std::max(0, cursor.x - img.width);
 
-    auto img_skip_y = std::max(0, cursor.y);
-    auto img_skip_x = std::max(0, cursor.x);
-
     auto cursor_width = width - cursor_skip_x - cursor_truncate_x;
     auto cursor_height = height - cursor_skip_y - cursor_truncate_y;
 
-    if (cursor_height > height || cursor_width > width) {
+    if (cursor_height <= 0 || cursor_width <= 0 || cursor_height > height || cursor_width > width) {
       return;
     }
 
-    auto cursor_img_data = (int *) &cursor.img_data[cursor_skip_y * pitch];
+    if (static_cast<std::size_t>(cursor_skip_y * pitch) >= cursor.img_data.size()) {
+      return;
+    }
+
+    auto img_skip_y = std::max(0, cursor.y);
+    auto img_skip_x = std::max(0, cursor.x);
 
     int delta_height = std::min(cursor_height - cursor_truncate_y, std::max(0, img.height - img_skip_y));
     int delta_width = std::min(cursor_width - cursor_truncate_x, std::max(0, img.width - img_skip_x));
 
+    if (delta_height <= 0 || delta_width <= 0) {
+      return;
+    }
+
+    auto cursor_img_data = (const int *) &cursor.img_data[cursor_skip_y * pitch];
     auto img_data = (int *) img.data;
 
     for (int i = 0; i < delta_height; ++i) {
@@ -298,6 +327,12 @@ namespace platf::dxgi {
         return capture_e::error;
       }
 
+      if (!img_info.pData || !img->data) {
+        device_ctx->Unmap(texture.get(), 0);
+        img_info.pData = nullptr;
+        return capture_e::error;
+      }
+
       std::copy_n((std::uint8_t *) img_info.pData, height * img_info.RowPitch, (std::uint8_t *) img->data);
 
       // Unmap the staging texture to allow GPU access again
@@ -347,7 +382,7 @@ namespace platf::dxgi {
     // Reallocate the image buffer if the pitch changes
     if (!dummy && img->row_pitch != img_info.RowPitch) {
       img->row_pitch = img_info.RowPitch;
-      delete img->data;
+      delete[] img->data;
       img->data = nullptr;
     }
 

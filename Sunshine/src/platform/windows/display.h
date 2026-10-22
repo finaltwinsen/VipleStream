@@ -178,18 +178,18 @@ namespace platf::dxgi {
     device_t device;
     device_ctx_t device_ctx;
     device_ctx4_t device_ctx4;  // D3D11.4 context for fence-based synchronization
-    DXGI_RATIONAL display_refresh_rate;
-    int display_refresh_rate_rounded;
+    DXGI_RATIONAL display_refresh_rate {};
+    int display_refresh_rate_rounded {};
 
     DXGI_MODE_ROTATION display_rotation = DXGI_MODE_ROTATION_UNSPECIFIED;
-    int width_before_rotation;
-    int height_before_rotation;
+    int width_before_rotation {};
+    int height_before_rotation {};
 
-    int client_frame_rate;
-    DXGI_RATIONAL client_frame_rate_strict;
+    int client_frame_rate {};
+    DXGI_RATIONAL client_frame_rate_strict {};
 
-    DXGI_FORMAT capture_format;
-    D3D_FEATURE_LEVEL feature_level;
+    DXGI_FORMAT capture_format {DXGI_FORMAT_UNKNOWN};
+    D3D_FEATURE_LEVEL feature_level {};
 
     std::unique_ptr<high_precision_timer> timer = create_high_precision_timer();
 
