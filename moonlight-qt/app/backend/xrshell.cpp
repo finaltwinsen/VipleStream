@@ -2,6 +2,8 @@
 
 #include "vrlauncher.h"
 
+#include "gui/sdlgamepadkeynavigation.h"
+
 #include "streaming/session.h"
 
 #include <QCoreApplication>
@@ -48,6 +50,53 @@ constexpr uint64_t kMinFrameNs = 33000000ull;
 // 介面面板的距離與水平張角（影片模式結束後換回來）
 constexpr float kShellDistanceM = 1.5f;
 constexpr float kShellFovDeg = 62.0f;
+// §VR-SHELL-SCROLL：搖桿一格（120）捲多少面板像素。XrInput 推到底是每秒 10 格 → 每秒 2000 像素（面板 800 高）
+constexpr qreal kScrollPxPerNotch = 200.0;
+
+// 面板座標底下最上層的 item。不能用 childAt 一層層往下：QML 的外層容器常常是 0×0（子項目畫在外面），
+// childAt 在第一層就停了。這裡照畫的順序（z 大的在上）整棵樹往下找，只有 clip 的項目才用自己的範圍擋
+QQuickItem* deepestItemAt(QQuickItem* item, const QPointF& scenePos)
+{
+    if (!item->isVisible()) {
+        return nullptr;
+    }
+    const QPointF local = item->mapFromScene(scenePos);
+    const bool inside = item->contains(local);
+    if (item->clip() && !inside) {
+        return nullptr;
+    }
+    QList<QQuickItem*> kids = item->childItems();
+    std::stable_sort(kids.begin(), kids.end(), [](QQuickItem* a, QQuickItem* b) { return a->z() < b->z(); });
+    for (auto it = kids.crbegin(); it != kids.crend(); ++it) {
+        if (QQuickItem* hit = deepestItemAt(*it, scenePos)) {
+            return hit;
+        }
+    }
+    // Popup 的圖層（QQuickOverlay）有任何 popup（含 ToolTip）時是整個視窗大小：它本身不算命中，裡面的 popup、
+    // modal 的遮罩才算
+    if (item->inherits("QQuickOverlay")) {
+        return nullptr;
+    }
+    return inside && item->width() > 0 && item->height() > 0 ? item : nullptr;
+}
+
+// 直接改 Flickable 的 contentY。可以上下捲（內容比可視區高）就回 true（到底了也算，不再交給外層）
+bool scrollFlickable(QQuickItem* f, qreal dy)
+{
+    const qreal contentH = f->property("contentHeight").toReal();
+    const qreal minY = f->property("originY").toReal() - f->property("topMargin").toReal();
+    const qreal maxY = f->property("originY").toReal() + contentH + f->property("bottomMargin").toReal() - f->height();
+    if (maxY <= minY + 0.5) {
+        return false;
+    }
+    const qreal cur = f->property("contentY").toReal();
+    const qreal next = std::clamp(cur + dy, minY, maxY);
+    if (next != cur) {
+        QMetaObject::invokeMethod(f, "cancelFlick");
+        f->setProperty("contentY", next);
+    }
+    return true;
+}
 
 uint64_t steadyNowNs()
 {
@@ -630,6 +679,21 @@ void XrShell::wheel(int amount)
 {
     if (m_Pointer.x() < 0) {
         return;
+    }
+    // §VR-SHELL-SCROLL（2026-10-22 使用者：VR 模式下搖桿上下不會捲頁面）：Qt 的 Flickable 對合成的滾輪事件
+    // （沒有 pixelDelta、每次只有 1/12 格）幾乎不動——開發機實測 AppView 送 10 格只捲 57 像素。改成找游標底下
+    // 可以上下捲的 Flickable（GridView／ListView／ScrollView）直接改 contentY；找不到（內建瀏覽器等）才照舊送滾輪事件
+    for (QQuickItem* it = deepestItemAt(m_Win->contentItem(), m_Pointer); it != nullptr; it = it->parentItem()) {
+        if (it->inherits("QQuickFlickable") && scrollFlickable(it, -amount * kScrollPxPerNotch / 120.0)) {
+            if (it != m_LastScrollTarget) {
+                m_LastScrollTarget = it;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] stick scroll -> %s \"%s\"", it->metaObject()->className(),
+                            qPrintable(it->objectName()));
+            }
+            // 同一支搖桿可能也被 SDL 當成手把讀到（影片模式選片頁的捲動模式），那邊先讓開，不要兩邊一起捲
+            SdlGamepadKeyNavigation::noteExternalScroll();
+            return;
+        }
     }
     QWheelEvent ev(m_Pointer, m_Pointer, QPoint(), QPoint(0, amount), m_Buttons, Qt::NoModifier, Qt::NoScrollPhase, false);
     QCoreApplication::sendEvent(m_Win, &ev);

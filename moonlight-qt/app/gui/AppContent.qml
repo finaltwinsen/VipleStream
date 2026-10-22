@@ -720,21 +720,58 @@ Page {
         }
     }
 
-    // §VR-EXIT-COMBO：頭盔 VR 介面開串流子行程時，在子行程接手頭盔之前提示怎麼結束串流
-    Label {
-        visible: VrLauncher.shellActive && VrLauncher.streamRunning
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 40
-        anchors.horizontalCenter: parent.horizontalCenter
-        horizontalAlignment: Text.AlignHCenter
-        font.pointSize: 18
-        padding: 12
-        background: Rectangle {
-            color: "#CC000000"
-            radius: 8
+    // §VR-SHELL-LAUNCHING（2026-10-22 使用者：點了遊戲完全看不出有沒有按到，要等幾秒啟動畫面出來才知道）：
+    // 頭盔 VR 介面裡一按下串流就蓋住整頁，直到子行程的 XR session 接手頭盔（或失敗、取消）。蓋住期間吃掉點擊與滾輪，
+    // 不會重複啟動。往返時間太慢的對話框出現時先讓開（對話框自己會說明）。
+    // §VR-EXIT-COMBO：同時提示怎麼結束串流
+    Rectangle {
+        id: launchingOverlay
+        // 掛在 Page 本身（不是 contentItem）底下：連工具列（返回、設定）一起蓋住
+        parent: appContent
+        z: 1000
+        anchors.fill: parent
+        visible: VrLauncher.shellActive && VrLauncher.launching && !VrLauncher.preflightWaiting
+        color: "#E60D0F0B"
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.AllButtons
+            onClicked: {/* swallow */}
+            onWheel: function(wheel) { wheel.accepted = true }
         }
-        text: qsTr("Starting the stream...") + "\n" + qsTr("Tip:") + " " +
-              qsTr("To end the stream, hold A+X+trigger+grip on the VR controller")
+
+        Column {
+            anchors.centerIn: parent
+            width: parent.width - 120
+            spacing: 24
+
+            BusyIndicator {
+                running: launchingOverlay.visible
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 96
+                height: 96
+            }
+            Label {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                font.pointSize: 26
+                font.bold: true
+                color: "#D4FF3A"
+                text: VrLauncher.launchingApp !== "" ? qsTr("Starting %1...").arg(VrLauncher.launchingApp)
+                                                    : qsTr("Starting the stream...")
+            }
+            Label {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                font.pointSize: 16
+                color: "#C8CBB8"
+                text: qsTr("The headset switches to the stream when it is ready. This can take a few seconds.") + "\n\n" +
+                      qsTr("Tip:") + " " + qsTr("To end the stream, hold A+X+trigger+grip on the VR controller")
+            }
+        }
     }
 
     // §VR-LAUNCHER：VR 串流的錯誤。只有「確定」（ErrorMessageDialog 的 Help 鈕會連到上游 wiki，跟這裡無關）

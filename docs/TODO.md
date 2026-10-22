@@ -127,6 +127,8 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
       Steam 工具列與側邊選單會不會留著、雷射操作手感）。**A3 待做**：VR 串流與桌面模式也改用同一個 session（目前開始前先關掉介面的
       session、結束後再開回來，切換仍經過 SteamVR）。**10-21**：VR 串流改「換手」（不經過儀表板）、桌面模式改開 XR 桌面子行程
       （不再有平面視窗）；結束時 steamwebhelper 當掉判定是 Steam 測試版的問題（使用者已切回穩定版，待對照）。
+      **10-22**：使用者回饋三項已改（§VR-SHELL-SCROLL：XR 搖桿直接捲游標底下的清單；影片模式 SDL 捲動加快；
+      §VR-SHELL-LAUNCHING：點遊戲立刻蓋上「啟動中」、擋重複點擊），開發機驗過，**待配戴確認**。A+X+扳機+握把結束組合鍵**頭盔還沒驗**。
     - **§VPN-ADDR（10-21）**：server 一律在 `/serverinfo` 廣告 VPN 介面位址（`VipleStreamVpnAddress`），client 只收 100.64.0.0/10、
       存成 `vpnaddress`、當最後的候選位址——頭盔帶出門時主機不再顯示離線。待在外面實測。
     - 解碼輸出改成 100 µs 短輪詢（§VR-DEC-POLL，少 0.1～0.15 ms）；補幀那一批少一次色彩轉換（§VR-SYNTH-LEAN，少約 0.32 ms）。

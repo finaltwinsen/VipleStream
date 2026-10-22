@@ -5,6 +5,7 @@
 #include <QGuiApplication>
 #include <QStringList>
 #include <QWindow>
+#include <QtMath>
 
 #include "settings/mappingmanager.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
@@ -12,6 +13,16 @@
 // §HID-PROBE：enable() 因 SDL_InitSubSystem 失敗而放棄時記一筆，讓 getConnectedGamepads()
 // 的「未 enable 就呼叫」斷言只對真正的程式錯誤觸發（審查建議）。本類別是 QML 單例。
 static bool s_InitFailed = false;
+
+// §VR-SHELL-SCROLL：頭盔 VR 介面自己用 XR 搖桿捲了頁面的時刻（SDL_GetTicks）。同一支搖桿也可能被 SDL 當成手把讀到，
+// 這段時間內這裡不再發 scrollRequested，免得兩邊一起捲（速度變兩倍、方向打架）
+static Uint32 s_ExternalScrollTicks = 0;
+static constexpr Uint32 EXTERNAL_SCROLL_HOLD_MS = 300;
+
+void SdlGamepadKeyNavigation::noteExternalScroll()
+{
+    s_ExternalScrollTicks = SDL_GetTicks();
+}
 
 #define AXIS_NAVIGATION_REPEAT_DELAY 150
 
@@ -26,7 +37,10 @@ static bool s_InitFailed = false;
 // 死區要明顯大於搖桿靜止時可能出現的值（XInput 建議的右搖桿死區是 8689）：接著的任何一支手把只要靜止值超過死區，
 // 設定頁就會一直收到捲動要求
 #define SCROLL_AXIS_DEADZONE 12000         // 右搖桿超過這個值才開始捲（約 37%）
-#define SCROLL_MAX_PAGES_PER_SEC 2.0       // 推到底的速度；速度跟推的幅度的平方成正比，輕推可以慢慢對位置
+// 推到底的速度。2026-10-22 使用者：影片模式搖桿捲頁太慢 → 2.0 改 4.0，幅度曲線從平方改 1.5 次方（推七成約 1.5 頁／秒，
+// 原本約 0.5），捲動模式／Tab 導覽模式下輪詢也從 100 ms 改 33 ms（一次跳的距離小、看起來是連續捲）
+#define SCROLL_MAX_PAGES_PER_SEC 4.0
+#define SCROLL_POLL_MS 33
 #define SCROLL_BUTTON_PAGES 0.8            // LB／RB 一次捲多少
 
 SdlGamepadKeyNavigation::SdlGamepadKeyNavigation(StreamingPreferences* prefs)
@@ -362,13 +376,16 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
     // §UI-SCROLL：右搖桿上下捲動（只在 Tab 導覽模式）。SDL 的搖桿往下是正值＝往下捲。
     const int scrollMag = qAbs(scrollAxis);
     if ((m_UiNavMode || m_ScrollMode) && scrollMag > SCROLL_AXIS_DEADZONE) {
-        // 距離用實際經過的時間算（輪詢名義上 100 ms，計時器不準）；剛開始推的那一次算一個輪詢間隔
+        // 距離用實際經過的時間算（輪詢名義上 SCROLL_POLL_MS，計時器不準）；剛開始推的那一次算一個輪詢間隔
         const Uint32 now = SDL_GetTicks();
         const Uint32 sinceLast = now - m_LastScrollEventTime;
-        const double dt = (sinceLast > 250 ? 100 : sinceLast) / 1000.0;
+        const double dt = (sinceLast > 250 ? SCROLL_POLL_MS : sinceLast) / 1000.0;
         const double f = qMin(1.0, (scrollMag - SCROLL_AXIS_DEADZONE) / (32767.0 - SCROLL_AXIS_DEADZONE));
-        const double pages = SCROLL_MAX_PAGES_PER_SEC * f * f * dt;
+        const double pages = SCROLL_MAX_PAGES_PER_SEC * f * qSqrt(f) * dt;
         m_LastScrollEventTime = now;
+        if (s_ExternalScrollTicks != 0 && now - s_ExternalScrollTicks < EXTERNAL_SCROLL_HOLD_MS) {
+            return;  // §VR-SHELL-SCROLL：頭盔 VR 介面剛用 XR 搖桿捲過
+        }
 
         if (!m_ScrollLogged) {
             m_ScrollLogged = true;
@@ -412,13 +429,20 @@ void SdlGamepadKeyNavigation::updateTimerState()
         // feel responsive; halving the poll rate cuts SDL_GameControllerUpdate
         // calls without observable latency to a human pressing menu buttons.
         // Streaming-time gamepad input goes through a separate higher-rate path.
-        m_PollingTimer->start(100);
+        m_PollingTimer->start(pollIntervalMs());
     }
+}
+
+int SdlGamepadKeyNavigation::pollIntervalMs() const
+{
+    // 捲動要連續，捲動模式／Tab 導覽模式輪詢快一點；其他時候維持 100 ms
+    return (m_ScrollMode || m_UiNavMode) ? SCROLL_POLL_MS : 100;
 }
 
 void SdlGamepadKeyNavigation::setUiNavMode(bool uiNavMode)
 {
     m_UiNavMode = uiNavMode;
+    m_PollingTimer->setInterval(pollIntervalMs());
 }
 
 void SdlGamepadKeyNavigation::setScrollMode(bool scrollMode)
@@ -435,6 +459,7 @@ void SdlGamepadKeyNavigation::setScrollMode(bool scrollMode)
         }
     }
     m_ScrollMode = scrollMode;
+    m_PollingTimer->setInterval(pollIntervalMs());
     m_ScrollLogged = false;  // 每次開啟後第一次捲動各印一行
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-UI-NAV] scroll mode %s (%d gamepad(s))", scrollMode ? "on" : "off",
                 (int) m_Gamepads.size());

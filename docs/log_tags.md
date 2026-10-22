@@ -1271,6 +1271,7 @@ PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 
 [VIPLE-VR-LAUNCHER] mode=<vr|desktop>                                              ← Frame GUI 的模式選單（steam_frame_client.md §8.6）
 [VIPLE-VR-LAUNCHER] launching VR stream: app="<name>"[ (takeover)]                 ← GUI 另開 `stream --display-target pcvr [--takeover] -- <位址> <app>` 子行程
 [VIPLE-VR-LAUNCHER] stream process finished exit=<rc> status=<0 正常|1 崩潰>[ error=<給使用者看的原因>]
+[VIPLE-VR-LAUNCHER] launching=<1|0> (<原因>)                                        ← §VR-SHELL-LAUNCHING（2026-10-22）：頭盔 VR 介面的「啟動中」遮罩；1＝按下串流，0＝子行程 XR 接手／結束／取消／沒開成
 [VIPLE-VR-LAUNCHER] failed to start the stream process                             ← error
 [VIPLE-VR-LAUNCHER] child XR session <VISIBLE|FOCUSED>                             ← 子行程（播放器）stderr 的 VIPLE-XR-STATE 轉過來；FOCUSED＝拿到手把輸入
 [VIPLE-VR-LAUNCHER] child started: window mode=<now|never|minimize|focused>        ← 開子行程後主視窗怎麼讓開（dev `hide=` 實驗用，預設 now）
@@ -1677,6 +1678,7 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-SHELL] could not start the VR interface (<原因>); using the window   ← 退回平面視窗
 [VIPLE-SHELL] 10s: <n> frames, render+readback avg <ms> ms           ← 介面重畫（最多 30 張／秒）
 [VIPLE-SHELL] text field focused: opening the keyboard / text field unfocused
+[VIPLE-SHELL] stick scroll -> <類別> "<objectName>"                     ← §VR-SHELL-SCROLL（2026-10-22）：XR 搖桿直接捲游標底下的 Flickable（換了對象才印一次）；沒有這行＝游標底下沒有可捲的清單，退回送滾輪事件
 [VIPLE-SHELL] starting the video player in this XR session / video player finished (rc=<n>)
 [VIPLE-SHELL] VR stream process starting: keeping the shell XR session until it takes over / the VR stream process took over the headset
 [VIPLE-SHELL] <the VR stream process is handing the headset back|the VR stream process ended|desktop stream ended>: reopening the shell XR session

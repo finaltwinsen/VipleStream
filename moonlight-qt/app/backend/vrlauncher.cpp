@@ -101,7 +101,19 @@ VrLauncher::VrLauncher(QObject* parent)
         m_PendingAddress.clear();
         m_PendingApp.clear();
         m_PendingTakeover = false;
+        setLaunching(false, QString(), "preflight cancelled");
     });
+}
+
+void VrLauncher::setLaunching(bool on, const QString& app, const char* why)
+{
+    if (on == m_Launching && app == m_LaunchingApp) {
+        return;
+    }
+    m_Launching = on;
+    m_LaunchingApp = app;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] launching=%d (%s)", on ? 1 : 0, why);
+    emit launchingChanged();
 }
 
 VrLauncher::~VrLauncher()
@@ -224,7 +236,11 @@ bool VrLauncher::launchDesktop(const QString& hostAddress, const QString& appNam
     m_ChildIsPlayer = false;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] launching desktop stream (XR screen): app=\"%s\"%s",
                 qPrintable(appName), takeover ? " (takeover)" : "");
-    return startChild(args, QStringLiteral("desktop stream"));
+    if (!startChild(args, QStringLiteral("desktop stream"))) {
+        return false;
+    }
+    setLaunching(true, appName, "desktop stream started");
+    return true;
 }
 
 bool VrLauncher::playerAvailable() const
@@ -336,8 +352,14 @@ bool VrLauncher::launch(const QString& hostAddress, const QString& probeHost, in
     m_PendingAddress = hostAddress;
     m_PendingApp = appName;
     m_PendingTakeover = takeover;
-    // 夠快或量不到時 proceed() 幾乎立刻發出（沒有可以量的目標時就在這個呼叫裡），接著 preflightPassed() 開子行程
-    return m_Preflight->begin(probeHost, probePort);
+    // 夠快或量不到時 proceed() 幾乎立刻發出（沒有可以量的目標時就在這個呼叫裡），接著 preflightPassed() 開子行程。
+    // 先設 launching：begin() 可能在這個呼叫裡就開了子行程，之後的取消／丟棄會把它清掉
+    setLaunching(true, appName, "VR stream requested");
+    if (!m_Preflight->begin(probeHost, probePort)) {
+        setLaunching(false, QString(), "preflight not started");
+        return false;
+    }
+    return true;
 }
 
 void VrLauncher::preflightStartAnyway()
@@ -363,9 +385,12 @@ void VrLauncher::preflightPassed()
     if (!m_VrMode || running() || hostAddress.isEmpty() || appName.isEmpty()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-LAUNCHER] preflight: launch dropped (no longer in VR mode, or a stream is already running)");
+        setLaunching(false, QString(), "launch dropped");
         return;
     }
-    startProcess(hostAddress, appName, takeover);
+    if (!startProcess(hostAddress, appName, takeover)) {
+        setLaunching(false, QString(), "process not started");
+    }
 }
 
 bool VrLauncher::launchPlayer(const QString& source, const QString& format, const QString& title, const QString& audioSource)
@@ -461,6 +486,7 @@ bool VrLauncher::startChild(const QStringList& args, const QString& what)
                 if (s_ChildHook) {
                     s_ChildHook(ChildEvent::Ended);
                 }
+                setLaunching(false, QString(), "failed to start");
                 emit runningChanged();
                 emit finished(-1, tr("Could not start the VR stream."));
             }
@@ -544,6 +570,8 @@ void VrLauncher::onStderr()
             if (st == QLatin1String("HANDBACK") && s_ChildHook) {
                 s_ChildHook(ChildEvent::HandBack);
             }
+            // 子行程的 XR session 到了 VISIBLE／FOCUSED（或已經要交回）：頭盔畫面已經換成它的，「啟動中」到此為止
+            setLaunching(false, QString(), "child XR session up");
             emit childXrState(st);
             continue;
         }
@@ -592,6 +620,7 @@ void VrLauncher::processEnded(int exitCode, QProcess::ExitStatus status)
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] stream process finished exit=%d status=%d%s%s",
                 exitCode, static_cast<int>(status), error.isEmpty() ? "" : " error=", qPrintable(error));
+    setLaunching(false, QString(), "process ended");
     emit runningChanged();
     emit finished(exitCode, error);
 }

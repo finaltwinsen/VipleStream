@@ -30,6 +30,9 @@ public:
 
     Q_INVOKABLE int getConnectedGamepads();
 
+    // §VR-SHELL-SCROLL：頭盔 VR 介面剛用 XR 搖桿捲了頁面（GUI 執行緒）。之後 300 ms 內這裡不發 scrollRequested
+    static void noteExternalScroll();
+
 signals:
     // §UI-SCROLL：手把要求捲動目前這一頁。pages＝幾個可見高度，正值往下（看下面的內容）。
     // 只在 Tab 導覽模式（設定頁、沒有下拉選單開著）或捲動模式（影片選片頁）發出，由那一頁自己捲。
@@ -43,6 +46,7 @@ private:
     void sendKey(QEvent::Type type, Qt::Key key, Qt::KeyboardModifiers modifiers = Qt::NoModifier);
 
     void updateTimerState();
+    int pollIntervalMs() const;
 
 private slots:
     void onPollingTimerFired();

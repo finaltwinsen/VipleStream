@@ -32,6 +32,10 @@ class VrLauncher : public QObject
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     // 串流子行程在跑（VR 串流或 XR 桌面；不含影片模式）
     Q_PROPERTY(bool streamRunning READ streamRunning NOTIFY runningChanged)
+    // §VR-SHELL-LAUNCHING：按下 VR／桌面串流之後、子行程的 XR session 接手頭盔之前（含往返時間檢查）。
+    // 頭盔 VR 介面用它馬上蓋上「啟動中」，不然要等好幾秒才知道有沒有按到，還會重複點
+    Q_PROPERTY(bool launching READ launching NOTIFY launchingChanged)
+    Q_PROPERTY(QString launchingApp READ launchingApp NOTIFY launchingChanged)
     // §VR-PLAYER：這個建置有影片模式，而且在 Frame 上（available）
     Q_PROPERTY(bool playerAvailable READ playerAvailable CONSTANT)
     // §VR-SHELL：頭盔 VR 介面在跑（桌面模式也改開 XR 桌面子行程，不在這個程式裡開平面視窗串流）
@@ -67,6 +71,8 @@ public:
     // 這個環境可以提供模式選擇（Frame 上）
     bool available() const;
     bool streamRunning() const;
+    bool launching() const { return m_Launching; }
+    QString launchingApp() const { return m_LaunchingApp; }
     // §VR-SHELL：一般啟動時預設開頭盔 VR 介面（Frame 上、VR 沒有被 PID 沙盒停用）。main() 在建立 QML engine 之前呼叫
     static bool vrShellByDefault();
 
@@ -150,6 +156,7 @@ public:
 
 signals:
     void vrModeChanged();
+    void launchingChanged();
     void runningChanged();
     void preflightChanged();
     // 子行程結束；error 非空＝異常結束（給 GUI 顯示）
@@ -167,6 +174,8 @@ private:
     // 影片模式的結束碼 → 給使用者看的錯誤（空＝正常結束）
     QString playerError(int exitCode, bool crashed) const;
     void inProcessPlayerEnded(int exitCode, const QString& error);
+    // §VR-SHELL-LAUNCHING：why 只給 log
+    void setLaunching(bool on, const QString& app, const char* why);
 
     bool m_VrMode = false;
     QProcess* m_Proc = nullptr;
@@ -174,6 +183,8 @@ private:
     QString m_LastError;          // 子行程最後一行給使用者看的錯誤（"Stream failed:"／"Stream error:" 等）
     bool m_ChildIsPlayer = false; // 目前（或剛結束）的子行程是影片模式（結束碼的意思不同）
     bool m_InProcessPlayer = false; // §VR-SHELL：影片模式正在 VR 介面的 session 裡播（沒有子行程）
+    bool m_Launching = false;       // §VR-SHELL-LAUNCHING
+    QString m_LaunchingApp;
 
     // §VR-PREFLIGHT：檢查通過之後要開的那一場
     VrPreflightCheck* m_Preflight = nullptr;

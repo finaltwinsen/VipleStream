@@ -3,6 +3,7 @@
 #include <QImage>
 #include <QObject>
 #include <QPointF>
+#include <QPointer>
 #include <QString>
 #include <QTimer>
 
@@ -131,6 +132,7 @@ private:
     QPointF m_PressPos{-1, -1};
     bool m_PressSlopExceeded = false;
     bool m_TextFocus = false;
+    QPointer<QQuickItem> m_LastScrollTarget;  // §VR-SHELL-SCROLL：只給 log（換了捲動對象才印）
 
     // §VR-SHELL（A2）：在這個 session 裡播的那一場。m_Route 是 XR frame thread 轉輸入用的（m_RouteMutex）
     player::PlayerSession* m_Player = nullptr;
