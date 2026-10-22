@@ -10,7 +10,6 @@
 #include "HolePunch.h"
 
 #include <string.h>
-#include <time.h>
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -22,10 +21,6 @@
   #include <netdb.h>
   #include <unistd.h>
   #include <fcntl.h>
-  #define SOCKET int
-  #define INVALID_SOCKET (-1)
-  #define SOCKET_ERROR (-1)
-  #define closesocket close
 #endif
 
 #define PUNCH_SEND_INTERVAL_MS 200
@@ -36,19 +31,13 @@
 unsigned short LocalControlPort = 0;
 
 int isHolePunchPacket(const void *data, int len) {
-    if (len < (int)sizeof(HOLEPUNCH_PACKET)) return 0;
+    if (!data || len < (int)sizeof(HOLEPUNCH_PACKET)) return 0;
     const HOLEPUNCH_PACKET *pkt = (const HOLEPUNCH_PACKET *)data;
     return (pkt->magic == HOLEPUNCH_MAGIC && pkt->version == HOLEPUNCH_VERSION);
 }
 
 static uint32_t getTimestampMs(void) {
-#ifdef _WIN32
-    return (uint32_t)GetTickCount();
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-#endif
+    return (uint32_t)PltGetMillis();
 }
 
 int LiHolePunch(const char *serverAddr, unsigned short serverPort,
@@ -61,8 +50,11 @@ int LiHolePunch(const char *serverAddr, unsigned short serverPort,
     HOLEPUNCH_PACKET pkt;
     char recvBuf[256];
 
-    if (!serverAddr || serverPort == 0) {
-        Limelog("[PUNCH] No server address\n");
+    // 新連線或重試前先將殘留 port 歸零，防止未成功 punch 時殘留舊 port
+    LocalControlPort = 0;
+
+    if (!serverAddr || serverPort == 0 || !serverUuid || !clientUuid) {
+        Limelog("[PUNCH] Invalid parameters\n");
         return -1;
     }
 
@@ -96,7 +88,7 @@ int LiHolePunch(const char *serverAddr, unsigned short serverPort,
         bindAddr.sin_port = 0;
         if (bind(sock, (struct sockaddr *)&bindAddr, sizeof(bindAddr)) == 0) {
             struct sockaddr_in assigned;
-            socklen_t alen = sizeof(assigned);
+            SOCKADDR_LEN alen = sizeof(assigned);
             if (getsockname(sock, (struct sockaddr *)&assigned, &alen) == 0) {
                 LocalControlPort = ntohs(assigned.sin_port);
                 Limelog("[PUNCH] Bound punch socket to local port %u (ENet will reuse)\n",
@@ -147,6 +139,12 @@ int LiHolePunch(const char *serverAddr, unsigned short serverPort,
                 resp->version == HOLEPUNCH_VERSION &&
                 resp->type == HOLEPUNCH_ACK) {
 
+                /* 核對 UUID 防止網路非預期封包或冒充攻擊 (CWE-345/CWE-287) */
+                if (memcmp(resp->serverUuid, serverUuid, 16) != 0 ||
+                    memcmp(resp->clientUuid, clientUuid, 16) != 0) {
+                    continue;
+                }
+
                 uint32_t rtt = getTimestampMs() - pkt.timestamp;
                 Limelog("[PUNCH] Received ACK (RTT=%ums, attempt=%d)\n", rtt, i + 1);
 
@@ -158,11 +156,7 @@ int LiHolePunch(const char *serverAddr, unsigned short serverPort,
 
                 /* Send a few more CONFIRMs to be safe */
                 for (int j = 0; j < 3; j++) {
-#ifdef _WIN32
-                    Sleep(50);
-#else
-                    usleep(50000);
-#endif
+                    PltSleepMs(50);
                     sendto(sock, (const char *)&pkt, sizeof(pkt), 0,
                            res->ai_addr, (int)res->ai_addrlen);
                 }
@@ -178,7 +172,7 @@ int LiHolePunch(const char *serverAddr, unsigned short serverPort,
     err = -4;
 
 Exit:
-    closesocket(sock);
+    closeSocket(sock);
     freeaddrinfo(res);
     return err;
 }

@@ -170,6 +170,7 @@ int initializeInputStream(void) {
     memset(currentGamepadSensorState, 0, sizeof(currentGamepadSensorState));
     memset(&currentRelativeMouseState, 0, sizeof(currentRelativeMouseState));
     memset(&currentAbsoluteMouseState, 0, sizeof(currentAbsoluteMouseState));
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
     PltCreateMutex(&batchedInputMutex);
 
 #ifdef VIPLE_MPQUIC
@@ -208,6 +209,10 @@ void destroyInputStream(void) {
 
         entry = nextEntry;
     }
+
+    PltLockMutex(&batchedInputMutex);
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
+    PltUnlockMutex(&batchedInputMutex);
 
     PltDeleteMutex(&batchedInputMutex);
 }
@@ -672,6 +677,11 @@ static void inputSendThreadProc(void* context) {
                     break;
                 }
 
+                if (i + codePointLength > totalLength) {
+                    Limelog("Truncated UTF-8 code point in input packet\n");
+                    break;
+                }
+
                 // Use the original packet as a template and fixup to send one code point at a time
                 splitPacket = *holder;
                 splitPacket.packet.unicode.header.size = BE32(sizeof(uint32_t) + codePointLength);
@@ -821,6 +831,10 @@ int stopInputStream(void) {
     // input packets before shutting down.
     LbqSignalQueueDrain(&packetQueue);
     PltJoinThread(&inputSendThread);
+
+    PltLockMutex(&batchedInputMutex);
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
+    PltUnlockMutex(&batchedInputMutex);
 
     if (inputSock != INVALID_SOCKET) {
         shutdownTcpSocket(inputSock);
@@ -1145,6 +1159,10 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
     // with these clients, we will detect this condition by checking if the sign bit is set.
     // Since we know there's no valid button flag that uses the 31st bit, any case where the
     // input value is negative is an instance of bug so only the botton 16 bits are valid.
+    if (controllerNumber < 0) {
+        return -3;
+    }
+
     if (buttonFlags < 0) {
         buttonFlags &= 0xFFFF;
     }

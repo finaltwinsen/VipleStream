@@ -15,9 +15,9 @@ namespace nvprefs {
 
   class undo_file_t {
   public:
-    static std::optional<undo_file_t> open_existing_file(std::filesystem::path file_path, bool &access_denied);
+    static std::optional<undo_file_t> open_existing_file(const std::filesystem::path &file_path, bool &access_denied);
 
-    static std::optional<undo_file_t> create_new_file(std::filesystem::path file_path);
+    static std::optional<undo_file_t> create_new_file(const std::filesystem::path &file_path);
 
     bool delete_file();
 

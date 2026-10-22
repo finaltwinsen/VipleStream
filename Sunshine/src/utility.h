@@ -354,7 +354,8 @@ namespace util {
     static char constexpr shift_bit = 'a' - 'A';
 
     auto is_convertable = [](char ch) -> bool {
-      if (isdigit(ch)) {
+      auto uch = static_cast<unsigned char>(ch);
+      if (isdigit(uch)) {
         return true;
       }
 
@@ -368,9 +369,13 @@ namespace util {
     };
 
     auto buf_size = std::count_if(std::begin(hex), std::end(hex), is_convertable) / 2;
+    if (buf_size > sizeof(T)) {
+      buf_size = sizeof(T);
+    }
     auto padding = sizeof(T) - buf_size;
 
     const char *data = hex.data() + hex.size() - 1;
+    const char *data_start = hex.data();
 
     auto convert = [](char ch) -> std::uint8_t {
       if (ch >= '0' && ch <= '9') {
@@ -383,15 +388,15 @@ namespace util {
     std::fill_n(buf + buf_size, padding, 0);
 
     std::for_each_n(buf, buf_size, [&](auto &el) {
-      while (!is_convertable(*data)) {
+      while (data >= data_start && !is_convertable(*data)) {
         --data;
       }
-      std::uint8_t ch_r = convert(*data--);
+      std::uint8_t ch_r = (data >= data_start) ? convert(*data--) : 0;
 
-      while (!is_convertable(*data)) {
+      while (data >= data_start && !is_convertable(*data)) {
         --data;
       }
-      std::uint8_t ch_l = convert(*data--);
+      std::uint8_t ch_l = (data >= data_start) ? convert(*data--) : 0;
 
       el = (ch_l << 4) | ch_r;
     });
@@ -408,7 +413,8 @@ namespace util {
 
     static char constexpr shift_bit = 'a' - 'A';
     auto is_convertable = [](char ch) -> bool {
-      if (isdigit(ch)) {
+      auto uch = static_cast<unsigned char>(ch);
+      if (isdigit(uch)) {
         return true;
       }
 
@@ -425,6 +431,7 @@ namespace util {
     buf.resize(buf_size);
 
     const char *data = hex.data() + hex.size() - 1;
+    const char *data_start = hex.data();
 
     auto convert = [](char ch) -> std::uint8_t {
       if (ch >= '0' && ch <= '9') {
@@ -435,15 +442,15 @@ namespace util {
     };
 
     for (auto &el : buf) {
-      while (!is_convertable(*data)) {
+      while (data >= data_start && !is_convertable(*data)) {
         --data;
       }
-      std::uint8_t ch_r = convert(*data--);
+      std::uint8_t ch_r = (data >= data_start) ? convert(*data--) : 0;
 
-      while (!is_convertable(*data)) {
+      while (data >= data_start && !is_convertable(*data)) {
         --data;
       }
-      std::uint8_t ch_l = convert(*data--);
+      std::uint8_t ch_l = (data >= data_start) ? convert(*data--) : 0;
 
       el = (ch_l << 4) | ch_r;
     }
@@ -741,6 +748,10 @@ namespace util {
     }
 
     wrap_ptr &operator=(wrap_ptr &&other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
       if (_own_ptr) {
         delete _p;
       }

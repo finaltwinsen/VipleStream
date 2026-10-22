@@ -320,7 +320,7 @@ namespace platf {
 
       int init(const char *path) {
         cap_sys_admin admin;
-        fd.el = open(path, O_RDWR);
+        fd.el = open(path, O_RDWR | O_CLOEXEC);
 
         if (fd.el < 0) {
           BOOST_LOG(error) << "Couldn't open: "sv << path << ": "sv << strerror(errno);
@@ -335,7 +335,7 @@ namespace platf {
         char *rendernode_path = drmGetRenderDeviceNameFromFd(fd.el);
         if (rendernode_path) {
           BOOST_LOG(debug) << "Opening render node: "sv << rendernode_path;
-          render_fd.el = open(rendernode_path, O_RDWR);
+          render_fd.el = open(rendernode_path, O_RDWR | O_CLOEXEC);
           if (render_fd.el < 0) {
             BOOST_LOG(warning) << "Couldn't open render node: "sv << rendernode_path << ": "sv << strerror(errno);
             render_fd.el = dup(fd.el);
@@ -443,6 +443,9 @@ namespace platf {
 
       int get_crtc_index_by_id(std::uint32_t crtc_id) {
         auto resources = res();
+        if (!resources) {
+          return -1;
+        }
         for (int i = 0; i < resources->count_crtcs; i++) {
           if (resources->crtcs[i] == crtc_id) {
             return i;
@@ -465,6 +468,10 @@ namespace platf {
         std::vector<connector_t> monitors;
         std::for_each_n(resources->connectors, resources->count_connectors, [this, &conn_type_count, &monitors](std::uint32_t id) {
           auto conn = connector(id);
+          if (!conn) {
+            BOOST_LOG(warning) << "Couldn't get drm connector for ID ["sv << id << ']';
+            return;
+          }
 
           std::uint32_t crtc_id = 0;
 
@@ -1254,6 +1261,11 @@ namespace platf {
       }
 
       void blend_cursor(img_t &img) {
+        if (!img.data || captured_cursor.src_w == 0 || captured_cursor.src_h == 0 ||
+            captured_cursor.pixels.size() < (size_t) captured_cursor.src_w * captured_cursor.src_h * 4) {
+          return;
+        }
+
         // TODO: Cursor scaling is not supported in this codepath.
         // We always draw the cursor at the source size.
         auto pixels = (int *) img.data;
@@ -1264,6 +1276,9 @@ namespace platf {
         // This is the position in the target that we will start drawing the cursor
         auto cursor_x = std::max<int32_t>(0, captured_cursor.x - img_offset_x);
         auto cursor_y = std::max<int32_t>(0, captured_cursor.y - img_offset_y);
+        if (cursor_x >= screen_width || cursor_y >= screen_height) {
+          return;
+        }
 
         // If the cursor is partially off screen, the coordinates may be negative
         // which means we will draw the top-right visible portion of the cursor only.

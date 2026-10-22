@@ -203,8 +203,12 @@ namespace vr::selftest::platform {
       if (!sid || !IsValidSid(sid)) {
         return 0;
       }
-      const UCHAR n = *GetSidSubAuthorityCount(sid);
-      return n ? *GetSidSubAuthority(sid, n - 1) : 0;
+      const PUCHAR n_ptr = GetSidSubAuthorityCount(sid);
+      if (!n_ptr || *n_ptr == 0) {
+        return 0;
+      }
+      const PDWORD sub_auth = GetSidSubAuthority(sid, static_cast<DWORD>(*n_ptr) - 1);
+      return sub_auth ? *sub_auth : 0;
     }
 
     /// S-1-5-5-X-Y
@@ -212,10 +216,20 @@ namespace vr::selftest::platform {
       if (!sid || !IsValidSid(sid)) {
         return false;
       }
-      const SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
       const auto *auth = GetSidIdentifierAuthority(sid);
-      return std::equal(std::begin(auth->Value), std::end(auth->Value), std::begin(nt.Value)) &&
-             *GetSidSubAuthorityCount(sid) == SECURITY_LOGON_IDS_RID_COUNT && *GetSidSubAuthority(sid, 0) == SECURITY_LOGON_IDS_RID;
+      if (!auth) {
+        return false;
+      }
+      const PUCHAR n_ptr = GetSidSubAuthorityCount(sid);
+      if (!n_ptr || *n_ptr != SECURITY_LOGON_IDS_RID_COUNT) {
+        return false;
+      }
+      const PDWORD sub0 = GetSidSubAuthority(sid, 0);
+      if (!sub0 || *sub0 != SECURITY_LOGON_IDS_RID) {
+        return false;
+      }
+      const SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
+      return std::equal(std::begin(auth->Value), std::end(auth->Value), std::begin(nt.Value));
     }
 
     std::vector<BYTE> copy_sid(PSID sid) {
@@ -223,8 +237,13 @@ namespace vr::selftest::platform {
         return {};
       }
       const DWORD len = GetLengthSid(sid);
+      if (len == 0) {
+        return {};
+      }
       std::vector<BYTE> out(len);
-      CopySid(len, out.data(), sid);
+      if (!CopySid(len, out.data(), sid)) {
+        return {};
+      }
       return out;
     }
 
@@ -250,20 +269,31 @@ namespace vr::selftest::platform {
 
       DWORD len = 0;
       GetTokenInformation(token.h, TokenUser, nullptr, 0, &len);
-      std::vector<BYTE> buf(len ? len : 1);
-      if (len && GetTokenInformation(token.h, TokenUser, buf.data(), len, &len)) {
-        u.user_rid = sid_rid(reinterpret_cast<TOKEN_USER *>(buf.data())->User.Sid);
+      if (len >= sizeof(TOKEN_USER)) {
+        std::vector<BYTE> buf(len);
+        if (GetTokenInformation(token.h, TokenUser, buf.data(), len, &len)) {
+          const auto *user_tok = reinterpret_cast<const TOKEN_USER *>(buf.data());
+          if (user_tok->User.Sid && IsValidSid(user_tok->User.Sid)) {
+            u.user_rid = sid_rid(user_tok->User.Sid);
+          }
+        }
       }
 
       len = 0;
       GetTokenInformation(token.h, TokenGroups, nullptr, 0, &len);
-      buf.assign(len ? len : 1, 0);
-      if (len && GetTokenInformation(token.h, TokenGroups, buf.data(), len, &len)) {
-        const auto *groups = reinterpret_cast<TOKEN_GROUPS *>(buf.data());
-        for (DWORD i = 0; i < groups->GroupCount; ++i) {
-          if ((groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID) {
-            u.logon_sid = copy_sid(groups->Groups[i].Sid);
-            break;
+      if (len >= sizeof(TOKEN_GROUPS)) {
+        std::vector<BYTE> buf(len);
+        if (GetTokenInformation(token.h, TokenGroups, buf.data(), len, &len)) {
+          const auto *groups = reinterpret_cast<const TOKEN_GROUPS *>(buf.data());
+          const DWORD max_count = (len - offsetof(TOKEN_GROUPS, Groups)) / sizeof(SID_AND_ATTRIBUTES);
+          const DWORD count = std::min(groups->GroupCount, max_count);
+          for (DWORD i = 0; i < count; ++i) {
+            if ((groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID) {
+              if (groups->Groups[i].Sid && IsValidSid(groups->Groups[i].Sid)) {
+                u.logon_sid = copy_sid(groups->Groups[i].Sid);
+              }
+              break;
+            }
           }
         }
       }
@@ -275,9 +305,14 @@ namespace vr::selftest::platform {
 
       len = 0;
       GetTokenInformation(token.h, TokenIntegrityLevel, nullptr, 0, &len);
-      buf.assign(len ? len : 1, 0);
-      if (len && GetTokenInformation(token.h, TokenIntegrityLevel, buf.data(), len, &len)) {
-        u.il_rid = sid_rid(reinterpret_cast<TOKEN_MANDATORY_LABEL *>(buf.data())->Label.Sid);
+      if (len >= sizeof(TOKEN_MANDATORY_LABEL)) {
+        std::vector<BYTE> buf(len);
+        if (GetTokenInformation(token.h, TokenIntegrityLevel, buf.data(), len, &len)) {
+          const auto *label = reinterpret_cast<const TOKEN_MANDATORY_LABEL *>(buf.data());
+          if (label->Label.Sid && IsValidSid(label->Label.Sid)) {
+            u.il_rid = sid_rid(label->Label.Sid);
+          }
+        }
       }
       return u;
     }
@@ -375,7 +410,7 @@ namespace vr::selftest::platform {
         out.dacl_bytes.assign(reinterpret_cast<const BYTE *>(dacl), reinterpret_cast<const BYTE *>(dacl) + dacl->AclSize);
         for (DWORD i = 0; i < dacl->AceCount; ++i) {
           void *p = nullptr;
-          if (!GetAce(dacl, i, &p)) {
+          if (!GetAce(dacl, i, &p) || !p) {
             continue;
           }
           const auto *hdr = static_cast<const ACE_HEADER *>(p);
@@ -383,8 +418,14 @@ namespace vr::selftest::platform {
           a.type = hdr->AceType;
           a.flags = hdr->AceFlags;
           if (hdr->AceType == ACCESS_ALLOWED_ACE_TYPE || hdr->AceType == ACCESS_DENIED_ACE_TYPE) {
+            if (hdr->AceSize < sizeof(ACCESS_ALLOWED_ACE)) {
+              continue;
+            }
             const auto *ace = static_cast<const ACCESS_ALLOWED_ACE *>(p);
             PSID sid = const_cast<DWORD *>(&ace->SidStart);
+            if (!sid || !IsValidSid(sid)) {
+              continue;
+            }
             a.mask = ace->Mask;
             a.rid = sid_rid(sid);
             if (IsWellKnownSid(sid, WinLocalSystemSid)) {
@@ -392,7 +433,7 @@ namespace vr::selftest::platform {
             } else if (IsWellKnownSid(sid, WinBuiltinAdministratorsSid)) {
               a.who = who_e::ba;
             } else if (is_logon_sid(sid)) {
-              a.who = !console_logon_sid.empty() && EqualSid(sid, const_cast<BYTE *>(console_logon_sid.data())) ? who_e::logon_match : who_e::logon_other;
+              a.who = !console_logon_sid.empty() && IsValidSid(const_cast<BYTE *>(console_logon_sid.data())) && EqualSid(sid, const_cast<BYTE *>(console_logon_sid.data())) ? who_e::logon_match : who_e::logon_other;
             }
           }
           out.aces.push_back(a);
@@ -402,15 +443,21 @@ namespace vr::selftest::platform {
       if (sacl) {
         for (DWORD i = 0; i < sacl->AceCount; ++i) {
           void *p = nullptr;
-          if (!GetAce(sacl, i, &p)) {
+          if (!GetAce(sacl, i, &p) || !p) {
             continue;
           }
           const auto *hdr = static_cast<const ACE_HEADER *>(p);
           if (hdr->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE) {
+            if (hdr->AceSize < sizeof(SYSTEM_MANDATORY_LABEL_ACE)) {
+              continue;
+            }
             const auto *ace = static_cast<const SYSTEM_MANDATORY_LABEL_ACE *>(p);
-            out.label_present = true;
-            out.label_rid = sid_rid(const_cast<DWORD *>(&ace->SidStart));
-            out.label_policy = ace->Mask;
+            PSID sid = const_cast<DWORD *>(&ace->SidStart);
+            if (sid && IsValidSid(sid)) {
+              out.label_present = true;
+              out.label_rid = sid_rid(sid);
+              out.label_policy = ace->Mask;
+            }
           }
         }
       }
@@ -547,6 +594,9 @@ namespace vr::selftest::platform {
         return {};
       }
       const auto *info = reinterpret_cast<const FILE_NAME_INFO *>(buf.data());
+      if (info->FileNameLength > buf.size() - offsetof(FILE_NAME_INFO, FileName)) {
+        return {};
+      }
       return std::wstring(info->FileName, info->FileNameLength / sizeof(wchar_t));
     }
 
@@ -683,7 +733,10 @@ namespace vr::selftest::platform {
         return out;
       }
       IDXGIAdapter1 *adapter = nullptr;
-      for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+      for (UINT i = 0; SUCCEEDED(factory->EnumAdapters1(i, &adapter)); ++i) {
+        if (!adapter) {
+          continue;
+        }
         DXGI_ADAPTER_DESC1 d {};
         if (SUCCEEDED(adapter->GetDesc1(&d))) {
           adapter_info_t a;
@@ -696,6 +749,7 @@ namespace vr::selftest::platform {
           out.push_back(std::move(a));
         }
         adapter->Release();
+        adapter = nullptr;
       }
       factory->Release();
       return out;
@@ -834,7 +888,7 @@ namespace vr::selftest::platform {
         if (!group_) {
           return;
         }
-        if (ok_ && WaitForSingleObject(child_.native_handle(), 0) == WAIT_TIMEOUT) {
+        if (child_.valid() && WaitForSingleObject(child_.native_handle(), 0) == WAIT_TIMEOUT) {
           TerminateJobObject(group_->native_handle(), 1);
           WaitForSingleObject(child_.native_handle(), 2000);
         }
@@ -842,7 +896,10 @@ namespace vr::selftest::platform {
 
       std::optional<DWORD> exit_code() const {
         DWORD code = 0;
-        if (!ok_ || !GetExitCodeProcess(child_.native_handle(), &code) || code == STILL_ACTIVE) {
+        if (!ok_ || !child_.valid() || !GetExitCodeProcess(child_.native_handle(), &code)) {
+          return std::nullopt;
+        }
+        if (code == STILL_ACTIVE && WaitForSingleObject(child_.native_handle(), 0) == WAIT_TIMEOUT) {
           return std::nullopt;
         }
         return code;
@@ -2360,12 +2417,16 @@ namespace vr::selftest::platform {
 
     // ── M1b V3：T1／T1b／T2.live ────────────────────────────────────────
 
-    double pct(std::vector<double> v, double q) {
+    double pct_sorted(const std::vector<double> &v, double q) {
       if (v.empty()) {
         return 0;
       }
-      std::sort(v.begin(), v.end());
       return v[std::min(v.size() - 1, (size_t) (q * (double) (v.size() - 1) + 0.5))];
+    }
+
+    double pct(std::vector<double> v, double q) {
+      std::sort(v.begin(), v.end());
+      return pct_sorted(v, q);
     }
 
     /// T1／T1b 的 VR 探測形狀：預設每眼 1728²＠90 Hz、HEVC（設計 §C.6、一頁摘要第 5 點）
@@ -2471,6 +2532,9 @@ namespace vr::selftest::platform {
           for (auto &slot : pool) {
             if (!slot) {
               slot = disp->alloc_img();
+              if (!slot) {
+                continue;
+              }
             }
             if (slot.use_count() == 1) {
               out = slot;
@@ -2496,11 +2560,13 @@ namespace vr::selftest::platform {
       if (c.stop.load()) {
         return;
       }
-      const auto s = disp->stats();
+      auto s = disp->stats();
+      std::sort(s.evt_to_push_ms.begin(), s.evt_to_push_ms.end());
+      std::sort(s.present_to_push_ms.begin(), s.present_to_push_ms.end());
       const uint64_t seen = s.last_frame_id >= s.first_frame_id && s.first_frame_id != 0 ? s.last_frame_id - s.first_frame_id + 1 : 0;
       const double consumption = seen ? (double) s.copied / (double) seen : 0.0;
-      const double evt_p50 = pct(s.evt_to_push_ms, 0.5), evt_p95 = pct(s.evt_to_push_ms, 0.95), evt_max = pct(s.evt_to_push_ms, 1.0);
-      const double pr_p50 = pct(s.present_to_push_ms, 0.5), pr_p95 = pct(s.present_to_push_ms, 0.95);
+      const double evt_p50 = pct_sorted(s.evt_to_push_ms, 0.5), evt_p95 = pct_sorted(s.evt_to_push_ms, 0.95), evt_max = pct_sorted(s.evt_to_push_ms, 1.0);
+      const double pr_p50 = pct_sorted(s.present_to_push_ms, 0.5), pr_p95 = pct_sorted(s.present_to_push_ms, 0.95);
       const bool pass = status == platf::capture_e::ok && s.copied > 0 && consumption >= 0.99 && evt_p95 <= 1.5 && s.invalid == 0 && s.fence_lost == 0;
       c.r.check(id, pass, std::format("ms={} status={} gen={} copied={} seen={} consumption={:.4f} skipped={} stale={} fenceTimeout={} invalid={} torn={} fenceLost={} black={} pushed={} evtToPushMs p50={:.3f} p95={:.3f} max={:.3f} presentToPushMs p50={:.3f} p95={:.3f} {}", elapsed_ms, (int) status, s.generation, s.copied, seen, consumption, s.skipped, s.stale, s.fence_timeout, s.invalid, s.torn, s.fence_lost, s.black, pushed, evt_p50, evt_p95, evt_max, pr_p50, pr_p95, peer_diag(*p)));
       disp.reset();
@@ -2583,8 +2649,17 @@ namespace vr::selftest::platform {
       if (j.is_discarded() || !j.is_object() || !j.contains("runtime") || !j["runtime"].is_array() || j["runtime"].empty() || !j["runtime"][0].is_string()) {
         return {};
       }
-      const auto runtime = utf_utils::from_utf8(j["runtime"][0].get<std::string>());
-      return (std::filesystem::path {runtime} / L"bin" / L"win64" / L"vrserver.exe").wstring();
+      const std::filesystem::path rt {utf_utils::from_utf8(j["runtime"][0].get<std::string>())};
+      const auto rts = rt.wstring();
+      // 拒絕 UNC 網路路徑、非絕對路徑或包含 .. 的路徑，防止強迫驗證洩漏 (NTLM Relay) 與目錄走訪
+      if (!rt.is_absolute() || rts.starts_with(L"\\\\") || rts.find(L"..") != std::wstring::npos) {
+        return {};
+      }
+      const auto exe = rt / L"bin" / L"win64" / L"vrserver.exe";
+      if (!std::filesystem::is_regular_file(exe, ec)) {
+        return {};
+      }
+      return exe.wstring();
     }
 
     /// 路徑只印 SteamVR 之後的尾端（前面可能含使用者名稱）
@@ -2623,15 +2698,19 @@ namespace vr::selftest::platform {
       void run() {
         platf::set_thread_name("vr_selftest_t4_synth");
         handle_t timer {CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS)};
+        if (!timer) {
+          timer = handle_t {CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS)};
+        }
         const int64_t f = platf::qpc_frequency();
+        const int64_t f_safe = f > 0 ? f : 10'000'000;
         const int64_t t0 = platf::qpc_counter();
         uint32_t id = 1;
         constexpr double k_pi = 3.14159265358979323846;
         while (!stop_.load()) {
           vr::bridge::tracked_sample_t s;
           const int64_t now = platf::qpc_counter();
-          const int64_t predict = f / 50;  // 20 ms
-          const double t = (double) (now - t0) / (double) f;
+          const int64_t predict = f_safe / 50;  // 20 ms
+          const double t = (double) (now - t0) / (double) f_safe;
           double yaw = 0.0, yaw_rate = 0.0;
           if (motion_ == "yaw30") {
             yaw = std::fmod(30.0 * t, 360.0) * k_pi / 180.0;
@@ -2690,7 +2769,7 @@ namespace vr::selftest::platform {
       std::string first_mismatch;
       int dumps = 0;
       int dumps_ok = 0;
-      std::string dump_dir;  ///< 非空才寫診斷用的 PGM（兩眼角落的亮度）
+      std::filesystem::path dump_dir;  ///< 非空才寫診斷用的 PGM（兩眼角落的亮度）
 
       /// 診斷：把讀回的角落區域（兩眼並排）寫成 PGM；只寫 SYSTEM／管理員的 config\steamvr\selftest
       void dump(const uint8_t *base, UINT pitch, const char *what) {
@@ -2700,7 +2779,7 @@ namespace vr::selftest::platform {
         ++dumps;
         std::error_code ec;
         std::filesystem::create_directories(dump_dir, ec);
-        const auto file = std::filesystem::path {dump_dir} / std::format("t4-{}-{}-{}.pgm", what, frames, dumps);
+        const auto file = dump_dir / std::format("t4-{}-{}-{}.pgm", what, frames, dumps);
         FILE *f = _wfopen(file.c_str(), L"wb");
         if (!f) {
           return;
@@ -3299,7 +3378,7 @@ namespace vr::selftest::platform {
       return;
     }
     t4_readback_t rb {*disp, cfg.eye_width, cfg.eye_height};
-    rb.dump_dir = (install_dir() / L"config" / L"steamvr" / L"selftest").string();
+    rb.dump_dir = install_dir() / L"config" / L"steamvr" / L"selftest";
     const bool do_readback = req.probe == "scene"sv;
     if (do_readback && !rb.init()) {
       r.check("T4.readback"sv, false, "staging texture creation failed"sv);
@@ -3315,6 +3394,9 @@ namespace vr::selftest::platform {
         for (auto &slot : pool) {
           if (!slot) {
             slot = disp->alloc_img();
+            if (!slot) {
+              continue;
+            }
           }
           if (slot.use_count() == 1) {
             out = slot;
@@ -3349,13 +3431,15 @@ namespace vr::selftest::platform {
     if (stop.load()) {
       return;
     }
-    const auto s = disp->stats();
+    auto s = disp->stats();
+    std::sort(s.evt_to_push_ms.begin(), s.evt_to_push_ms.end());
+    std::sort(s.present_to_push_ms.begin(), s.present_to_push_ms.end());
     const uint64_t seen = s.last_frame_id >= s.first_frame_id && s.first_frame_id != 0 ? s.last_frame_id - s.first_frame_id + 1 : 0;
     const double consumption = seen ? (double) s.copied / (double) seen : 0.0;
     r.check("T4.consume"sv, status == platf::capture_e::ok && s.copied > 0 && s.invalid == 0 && s.fence_lost == 0,
             std::format("ms={} status={} gen={} copied={} seen={} consumption={:.4f} skipped={} fenceTimeout={} invalid={} torn={} fenceLost={} black={} evtToPushMs p50={:.3f} p95={:.3f} presentToPushMs p50={:.3f} p95={:.3f} synth={}",
-                        elapsed_ms, (int) status, s.generation, s.copied, seen, consumption, s.skipped, s.fence_timeout, s.invalid, s.torn, s.fence_lost, s.black, pct(s.evt_to_push_ms, 0.5), pct(s.evt_to_push_ms, 0.95),
-                        pct(s.present_to_push_ms, 0.5), pct(s.present_to_push_ms, 0.95), synth.published()));
+                        elapsed_ms, (int) status, s.generation, s.copied, seen, consumption, s.skipped, s.fence_timeout, s.invalid, s.torn, s.fence_lost, s.black, pct_sorted(s.evt_to_push_ms, 0.5), pct_sorted(s.evt_to_push_ms, 0.95),
+                        pct_sorted(s.present_to_push_ms, 0.5), pct_sorted(s.present_to_push_ms, 0.95), synth.published()));
     // STEP0-1（V4 未解 1）：vrcompositor 自己重畫第 0 層（系統層，尺寸不是 session 的每眼尺寸）時圖案解不出來；
     // 以 driver 的 `layer0 eye=… src pid=… size=WxH` 行判定，這種 session 另列 INCONCLUSIVE，不算 FAIL
     std::string layer0;
@@ -3369,12 +3453,26 @@ namespace vr::selftest::platform {
         last_w = (*it)[2].str();
         last_h = (*it)[3].str();
       }
-      if (!last_w.empty()) {
+      if (!last_w.empty() && !last_h.empty()) {
         bool is_comp = false;
-        for (const auto pid : pids_of(L"vrcompositor.exe")) {
-          is_comp = is_comp || std::to_string(pid) == last_pid;
+        DWORD target_pid = 0;
+        try {
+          target_pid = static_cast<DWORD>(std::stoul(last_pid));
+        } catch (...) {
         }
-        system_layer = std::stoul(last_w) != cfg.eye_width || std::stoul(last_h) != cfg.eye_height;
+        for (const auto pid : pids_of(L"vrcompositor.exe")) {
+          if (pid == target_pid) {
+            is_comp = true;
+            break;
+          }
+        }
+        try {
+          const unsigned long lw = std::stoul(last_w);
+          const unsigned long lh = std::stoul(last_h);
+          system_layer = lw != cfg.eye_width || lh != cfg.eye_height;
+        } catch (...) {
+          system_layer = false;
+        }
         layer0 = std::format(" layer0Src={} layer0Size={}x{} layer0FromCompositor={}", last_pid, last_w, last_h, is_comp ? 1 : 0);
       }
     }

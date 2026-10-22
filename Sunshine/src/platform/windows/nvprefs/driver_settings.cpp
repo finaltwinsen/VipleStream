@@ -20,12 +20,19 @@ namespace {
   void nvapi_error_message(NvAPI_Status status) {
     NvAPI_ShortString message = {};
     NvAPI_GetErrorMessage(status, message);
+    message[sizeof(message) - 1] = '\0';
     nvprefs::error_message(std::string("NvAPI error: ") + message);
   }
 
   void fill_nvapi_string(NvAPI_UnicodeString &dest, const wchar_t *src) {
     static_assert(sizeof(NvU16) == sizeof(wchar_t));
-    memcpy_s(dest, NVAPI_UNICODE_STRING_MAX * sizeof(NvU16), src, (wcslen(src) + 1) * sizeof(wchar_t));
+    if (!src) {
+      dest[0] = 0;
+      return;
+    }
+    size_t len = wcsnlen_s(src, NVAPI_UNICODE_STRING_MAX - 1);
+    memcpy_s(dest, NVAPI_UNICODE_STRING_MAX * sizeof(NvU16), src, len * sizeof(wchar_t));
+    dest[len] = 0;
   }
 
 }  // namespace
@@ -254,6 +261,7 @@ namespace nvprefs {
 
     if (status != NVAPI_OK) {
       // Add application to application profile if missing
+      application = {};
       application.version = NVDRS_APPLICATION_VER_V1;
       application.isPredefined = 0;
       fill_nvapi_string(application.appName, sunshine_application_path);

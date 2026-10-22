@@ -16,8 +16,16 @@
 
 namespace nvprefs {
 
-  struct safe_handle: public util::safe_ptr_v2<void, BOOL, CloseHandle> {
-    using util::safe_ptr_v2<void, BOOL, CloseHandle>::safe_ptr_v2;
+  struct safe_handle_deleter {
+    void operator()(void *handle) const {
+      if (handle && handle != INVALID_HANDLE_VALUE) {
+        CloseHandle((HANDLE) handle);
+      }
+    }
+  };
+
+  struct safe_handle: public util::uniq_ptr<void, safe_handle_deleter> {
+    using util::uniq_ptr<void, safe_handle_deleter>::uniq_ptr;
 
     explicit operator bool() const {
       auto handle = get();

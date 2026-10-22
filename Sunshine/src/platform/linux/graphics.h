@@ -190,16 +190,16 @@ namespace egl {
   using display_t = util::dyn_safe_ptr_v2<void, EGLBoolean, &eglTerminate>;
 
   struct rgb_img_t {
-    display_t::pointer display;
-    EGLImage xrgb8;
+    display_t::pointer display {nullptr};
+    EGLImage xrgb8 {EGL_NO_IMAGE};
 
     gl::tex_t tex;
   };
 
   struct nv12_img_t {
-    display_t::pointer display;
-    EGLImage r8;
-    EGLImage bg88;
+    display_t::pointer display {nullptr};
+    EGLImage r8 {EGL_NO_IMAGE};
+    EGLImage bg88 {EGL_NO_IMAGE};
 
     gl::tex_t tex;
     gl::frame_buf_t buf;
@@ -207,7 +207,7 @@ namespace egl {
     // sizeof(va::DRMPRIMESurfaceDescriptor::objects) / sizeof(va::DRMPRIMESurfaceDescriptor::objects[0]);
     static constexpr std::size_t num_fds = 4;
 
-    std::array<file_t, num_fds> fds;
+    std::array<file_t, num_fds> fds {};
   };
 
   KITTY_USING_MOVE_T(rgb_t, rgb_img_t, , {
@@ -237,11 +237,11 @@ namespace egl {
   struct surface_descriptor_t {
     int width;
     int height;
-    int fds[4];
-    std::uint32_t fourcc;
-    std::uint64_t modifier;
-    std::uint32_t pitches[4];
-    std::uint32_t offsets[4];
+    int fds[4] {-1, -1, -1, -1};
+    std::uint32_t fourcc {0};
+    std::uint64_t modifier {0};
+    std::uint32_t pitches[4] {0, 0, 0, 0};
+    std::uint32_t offsets[4] {0, 0, 0, 0};
   };
 
   display_t make_display(std::variant<gbm::gbm_t::pointer, wl_display *, _XDisplay *> native_display);
@@ -275,10 +275,10 @@ namespace egl {
   public:
     int x;
     int y;
-    int src_w;
-    int src_h;
+    int src_w {0};
+    int src_h {0};
 
-    unsigned long serial;
+    unsigned long serial {0};
 
     std::vector<std::uint8_t> buffer;
   };
@@ -300,10 +300,10 @@ namespace egl {
       }
     }
 
-    surface_descriptor_t sd;
+    surface_descriptor_t sd {};
 
     // Increment sequence when new rgb_t needs to be created
-    std::uint64_t sequence;
+    std::uint64_t sequence {0};
 
     // Frame is vertically flipped (GL convention)
     bool y_invert {false};
@@ -343,18 +343,18 @@ namespace egl {
     gl::program_t program[3];
     gl::buffer_t color_matrix;
 
-    int out_width;
-    int out_height;
-    int in_width;
-    int in_height;
-    int offsetX;
-    int offsetY;
+    int out_width {0};
+    int out_height {0};
+    int in_width {0};
+    int in_height {0};
+    int offsetX {0};
+    int offsetY {0};
 
     // Pointer to the texture to be converted to nv12
-    int loaded_texture;
+    int loaded_texture {0};
 
     // Store latest cursor for load_vram
-    std::uint64_t serial;
+    std::uint64_t serial {0};
   };
 
   bool fail();

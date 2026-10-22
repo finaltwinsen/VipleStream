@@ -49,10 +49,11 @@ namespace {
 
 namespace nvprefs {
 
-  std::optional<undo_file_t> undo_file_t::open_existing_file(std::filesystem::path file_path, bool &access_denied) {
+  std::optional<undo_file_t> undo_file_t::open_existing_file(const std::filesystem::path &file_path, bool &access_denied) {
     undo_file_t file;
-    file.file_handle.reset(CreateFileW(file_path.c_str(), GENERIC_READ | DELETE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (file.file_handle) {
+    HANDLE handle = CreateFileW(file_path.c_str(), GENERIC_READ | DELETE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+      file.file_handle.reset(handle);
       access_denied = false;
       return file;
     } else {
@@ -62,11 +63,12 @@ namespace nvprefs {
     }
   }
 
-  std::optional<undo_file_t> undo_file_t::create_new_file(std::filesystem::path file_path) {
+  std::optional<undo_file_t> undo_file_t::create_new_file(const std::filesystem::path &file_path) {
     undo_file_t file;
-    file.file_handle.reset(CreateFileW(file_path.c_str(), GENERIC_WRITE | STANDARD_RIGHTS_ALL, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+    HANDLE handle = CreateFileW(file_path.c_str(), GENERIC_WRITE | STANDARD_RIGHTS_ALL, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
 
-    if (file.file_handle) {
+    if (handle != INVALID_HANDLE_VALUE) {
+      file.file_handle.reset(handle);
       // give GENERIC_READ, GENERIC_WRITE and DELETE permissions to Users group
       if (relax_permissions(file.file_handle.get()) != 0) {
         error_message("Failed to relax permissions on undo file");
@@ -87,6 +89,7 @@ namespace nvprefs {
       file_handle.reset();
       return true;
     } else {
+      error_message("SetFileInformationByHandle(FileDispositionInfo) failed with error: " + std::to_string(GetLastError()));
       return false;
     }
   }
@@ -104,13 +107,19 @@ namespace nvprefs {
       return false;
     }
 
-    if (!SetFilePointerEx(file_handle.get(), {}, nullptr, FILE_BEGIN) || !SetEndOfFile(file_handle.get())) {
+    if (buffer.empty()) {
+      error_message("Serialized undo data is empty");
+      return false;
+    }
+
+    LARGE_INTEGER zero_offset = {};
+    if (!SetFilePointerEx(file_handle.get(), zero_offset, nullptr, FILE_BEGIN) || !SetEndOfFile(file_handle.get())) {
       error_message("Couldn't clear undo file");
       return false;
     }
 
     DWORD bytes_written = 0;
-    if (!WriteFile(file_handle.get(), buffer.data(), buffer.size(), &bytes_written, nullptr) || bytes_written != buffer.size()) {
+    if (!WriteFile(file_handle.get(), buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_written, nullptr) || bytes_written != buffer.size()) {
       error_message("Couldn't write undo file");
       return false;
     }
@@ -127,20 +136,26 @@ namespace nvprefs {
       return std::nullopt;
     }
 
+    LARGE_INTEGER zero_offset = {};
+    if (!SetFilePointerEx(file_handle.get(), zero_offset, nullptr, FILE_BEGIN)) {
+      error_message("Couldn't seek to beginning of undo file");
+      return std::nullopt;
+    }
+
     LARGE_INTEGER file_size;
     if (!GetFileSizeEx(file_handle.get(), &file_size)) {
       error_message("Couldn't get undo file size");
       return std::nullopt;
     }
 
-    if ((size_t) file_size.QuadPart > 1024) {
-      error_message("Undo file size is unexpectedly large, aborting");
+    if (file_size.QuadPart <= 0 || file_size.QuadPart > 1024) {
+      error_message("Undo file size is invalid or unexpectedly large, aborting");
       return std::nullopt;
     }
 
-    std::vector<char> buffer(file_size.QuadPart);
+    std::vector<char> buffer(static_cast<size_t>(file_size.QuadPart));
     DWORD bytes_read = 0;
-    if (!ReadFile(file_handle.get(), buffer.data(), buffer.size(), &bytes_read, nullptr) || bytes_read != buffer.size()) {
+    if (!ReadFile(file_handle.get(), buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, nullptr) || bytes_read != buffer.size()) {
       error_message("Couldn't read undo file");
       return std::nullopt;
     }

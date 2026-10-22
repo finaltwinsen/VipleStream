@@ -94,6 +94,7 @@ namespace wl {
     } dmabuf_info;
 
     struct gbm_device *gbm_device {nullptr};
+    int drm_fd {-1};
     struct gbm_bo *current_bo {nullptr};
     struct wl_buffer *current_wl_buffer {nullptr};
   };

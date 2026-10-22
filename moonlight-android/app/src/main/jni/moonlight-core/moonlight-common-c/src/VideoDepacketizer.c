@@ -523,6 +523,12 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             qdu = &qduDS;
         }
 
+        if (qdu == NULL) {
+            Limelog("Failed to allocate decode unit holder\n");
+            dropFrameState();
+            return;
+        }
+
         if (qdu != NULL) {
             qdu->decodeUnit.bufferList = nalChainHead;
             qdu->decodeUnit.fullLength = nalChainDataLength;

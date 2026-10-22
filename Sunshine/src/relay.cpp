@@ -182,7 +182,15 @@ namespace relay {
     }
 
     int send(const void *data, int len) override {
-      return SSL_write(_ssl, data, len);
+      const char *p = (const char *)data;
+      int remaining = len;
+      while (remaining > 0) {
+        int n = SSL_write(_ssl, p, remaining);
+        if (n <= 0) return (remaining == len) ? n : (len - remaining);
+        p += n;
+        remaining -= n;
+      }
+      return len;
     }
     int recv(void *buf, int len) override {
       return SSL_read(_ssl, buf, len);
@@ -315,6 +323,17 @@ namespace relay {
   //   0xFE — recv timed out (no data yet, carrier still alive)
   //   0xFF — connection closed or fatal read error
   // Real WebSocket opcodes are 0x0–0xA so these values can never collide.
+  static bool recv_exact(Transport &tr, void *buf, size_t len) {
+    uint8_t *p = static_cast<uint8_t *>(buf);
+    size_t done = 0;
+    while (done < len) {
+      int n = tr.recv(p + done, static_cast<int>(len - done));
+      if (n <= 0) return false;
+      done += static_cast<size_t>(n);
+    }
+    return true;
+  }
+
   struct WsFrame {
     uint8_t opcode = 0xFF;
     std::vector<uint8_t> payload;
@@ -326,19 +345,19 @@ namespace relay {
     int n = tr.recv(hdr, 1);
     if (n == 0) { f.opcode = 0xFF; return f; }
     if (n < 0)  { f.opcode = 0xFE; return f; }
-    int n2 = tr.recv(hdr + 1, 1);
-    if (n2 == 0) { f.opcode = 0xFF; return f; }
-    if (n2 < 0)  { f.opcode = 0xFF; return f; }
+    if (!recv_exact(tr, hdr + 1, 1)) { f.opcode = 0xFF; return f; }
+
+
 
     uint8_t opcode = hdr[0] & 0x0F;
     uint64_t len = hdr[1] & 0x7F;
     if (len == 126) {
       uint8_t ext[2];
-      if (tr.recv(ext, 2) != 2) return f;
+      if (!recv_exact(tr, ext, 2)) return f;
       len = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
     } else if (len == 127) {
       uint8_t ext[8];
-      if (tr.recv(ext, 8) != 8) return f;
+      if (!recv_exact(tr, ext, 8)) return f;
       len = 0;
       for (int i = 0; i < 8; i++) len = (len << 8) | ext[i];
     }
@@ -352,13 +371,7 @@ namespace relay {
     if (opcode == 0x8) { f.opcode = 0xFF; return f; }  // close
 
     f.payload.resize(static_cast<size_t>(len));
-    size_t total = 0;
-    while (total < len) {
-      int m = tr.recv(f.payload.data() + total,
-                      static_cast<int>(len - total));
-      if (m <= 0) { f.opcode = 0xFF; return f; }
-      total += static_cast<size_t>(m);
-    }
+    if (!recv_exact(tr, f.payload.data(), static_cast<size_t>(len))) { f.opcode = 0xFF; return f; }
     f.opcode = opcode;
     return f;
   }
@@ -408,9 +421,9 @@ namespace relay {
     while (resp.size() < 4096) {
       if (tr.recv(&c, 1) != 1) break;
       resp.push_back(c);
-      if (resp.size() >= 4 && resp.substr(resp.size() - 4) == "\r\n\r\n") break;
+      if (resp.size() >= 4 && resp[resp.size() - 4] == '\r' && resp[resp.size() - 3] == '\n' && resp[resp.size() - 2] == '\r' && resp[resp.size() - 1] == '\n') break;
     }
-    return resp.find("101") != std::string::npos;
+    return (resp.rfind("HTTP/1.1 101", 0) == 0 || resp.rfind("HTTP/1.0 101", 0) == 0 || resp.find(" 101 ") != std::string::npos);
   }
 
   // ============================================================
@@ -654,7 +667,10 @@ namespace relay {
       auto colonPos = url.rfind(':');
       if (colonPos != std::string::npos) {
         host = url.substr(0, colonPos);
-        port = (uint16_t)std::stoi(url.substr(colonPos + 1));
+        try {
+          int p = std::stoi(url.substr(colonPos + 1));
+          if (p > 0 && p <= 65535) port = (uint16_t)p;
+        } catch (...) {}
       } else {
         host = url;
       }
@@ -888,6 +904,10 @@ namespace relay {
           std::string requestId = extractField("request_id");
           std::string fromUuid = extractField("from_uuid");
           std::string path = extractField("path");
+          if (path.empty() || path[0] != '/' || path.find_first_of("\r\n") != std::string::npos) {
+            BOOST_LOG(warning) << "[RELAY-PROXY] Malformed or unsafe path rejected: " << path;
+            continue;
+          }
 
           BOOST_LOG(info) << "[RELAY-PROXY] Request: " << path << " (from=" << fromUuid.substr(0, 12) << ")";
 
@@ -930,7 +950,7 @@ namespace relay {
                 if (headerEnd != std::string::npos) {
                   auto statusPos = rawResp.find(" ");
                   if (statusPos != std::string::npos)
-                    httpStatus = std::stoi(rawResp.substr(statusPos + 1, 3));
+                    try { httpStatus = std::stoi(rawResp.substr(statusPos + 1, 3)); } catch (...) { httpStatus = 500; }
                   responseBody = rawResp.substr(headerEnd + 4);
                 }
               } else {
@@ -973,7 +993,9 @@ namespace relay {
           auto portPos = msg.find("\"target_port\"");
           if (portPos != std::string::npos) {
             auto numStart = msg.find_first_of("0123456789", portPos);
-            if (numStart != std::string::npos) targetPort = std::stoi(msg.substr(numStart));
+            if (numStart != std::string::npos) {
+              try { targetPort = std::stoi(msg.substr(numStart)); } catch (...) { targetPort = 0; }
+            }
           }
 
           BOOST_LOG(info) << "[RELAY-TUNNEL] Opening TCP tunnel to localhost:" << targetPort
@@ -1093,6 +1115,13 @@ namespace relay {
               } else if (tunnelMsg.find("ping") != std::string::npos) {
                 std::lock_guard<std::mutex> l(g_send_mtx);
                 ws_send(*transport, "{\"type\":\"pong\"}");
+              } else if (tunnelMsg.find("udp_tunnel_allocated") != std::string::npos) {
+                handle_allocated(tunnelMsg);
+              } else if (tunnelMsg.find("udp_tunnel_closed") != std::string::npos) {
+                int64_t fid = 0;
+                if (json_int(tunnelMsg, "flow_id", fid)) {
+                  BOOST_LOG(info) << "[RELAY-TUNNEL] Flow " << fid << " closed by relay";
+                }
               } else if (!tunnelMsg.empty()) {
                 // §RELAY-OBS: 非本 tunnel 的 control 訊息在 polling loop 內被讀到且無法
                 // route 給正確 handler（e.g. udp_tunnel_allocated 會讓 allocate_flow 死鎖）。

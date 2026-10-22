@@ -18,7 +18,7 @@ namespace round_robin_util {
   public:
     using iterator_category = std::random_access_iterator_tag;
     using value_type = V;
-    using difference_type = V;
+    using difference_type = std::ptrdiff_t;
     using pointer = V *;
     using const_pointer = V const *;
     using reference = V &;
@@ -125,7 +125,7 @@ namespace round_robin_util {
 
     bool operator==(const iterator &other) const {
       return _this().eq(other);
-    };
+    }
 
     bool operator>(const iterator &other) const {
       return _this().gt(other);

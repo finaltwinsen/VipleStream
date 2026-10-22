@@ -42,7 +42,7 @@ namespace platf::dxgi {
     uint32_t id = 0;
 
     // DXGI format of this image texture
-    DXGI_FORMAT format;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 
     virtual ~img_d3d_t() override {
       if (fence_shared_handle) {
@@ -75,12 +75,14 @@ namespace platf::dxgi {
     }
 
     texture_fence_helper &operator=(texture_fence_helper &&other) noexcept {
-      signal_if_armed();
-      _ctx4 = std::move(other._ctx4);
-      _img = other._img;
-      _armed = other._armed;
-      other._armed = false;
-      other._img = nullptr;
+      if (this != &other) {
+        signal_if_armed();
+        _ctx4 = std::move(other._ctx4);
+        _img = other._img;
+        _armed = other._armed;
+        other._armed = false;
+        other._img = nullptr;
+      }
       return *this;
     }
 

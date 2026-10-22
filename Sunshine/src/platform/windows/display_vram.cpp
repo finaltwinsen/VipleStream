@@ -167,7 +167,13 @@ namespace platf::dxgi {
         return {};
     }
 
+    if (shape_info.Width == 0 || shape_info.Height <= 1 || shape_info.Pitch <= 0) {
+      return {};
+    }
     shape_info.Height /= 2;
+    if (img_data.size() < static_cast<std::size_t>(shape_info.Pitch) * shape_info.Height * 2) {
+      return {};
+    }
 
     util::buffer_t<std::uint8_t> cursor_img {shape_info.Width * shape_info.Height * 4};
 
@@ -238,7 +244,13 @@ namespace platf::dxgi {
         return {};
     }
 
+    if (shape_info.Width == 0 || shape_info.Height <= 1 || shape_info.Pitch <= 0) {
+      return {};
+    }
     shape_info.Height /= 2;
+    if (img_data.size() < static_cast<std::size_t>(shape_info.Pitch) * shape_info.Height * 2) {
+      return {};
+    }
 
     util::buffer_t<std::uint8_t> cursor_img {shape_info.Width * shape_info.Height * 4};
 
@@ -512,8 +524,13 @@ namespace platf::dxgi {
       auto out_width = width;
       auto out_height = height;
 
-      float in_width = display->width;
-      float in_height = display->height;
+      float in_width = display ? (float) display->width : 0.0f;
+      float in_height = display ? (float) display->height : 0.0f;
+      if (in_width <= 0.0f || in_height <= 0.0f || out_width <= 0 || out_height <= 0) {
+        BOOST_LOG(error) << "Invalid dimensions for init_output: in=" << in_width << 'x' << in_height << " out=" << out_width << 'x' << out_height;
+        return -1;
+      }
+
 
       // Ensure aspect ratio is maintained
       auto scalar = std::fminf(out_width / in_width, out_height / in_height);
@@ -969,6 +986,10 @@ namespace platf::dxgi {
       ID3D11Texture2D *frame_texture;
       if (frame->format != AV_PIX_FMT_D3D11) {
         frame_t d3d11_frame {av_frame_alloc()};
+        if (!d3d11_frame) {
+          BOOST_LOG(error) << "Failed to allocate D3D11 frame for mapping"sv;
+          return -1;
+        }
 
         d3d11_frame->format = AV_PIX_FMT_D3D11;
 
@@ -1043,7 +1064,7 @@ namespace platf::dxgi {
 
   bool set_cursor_texture(device_t::pointer device, gpu_cursor_t &cursor, util::buffer_t<std::uint8_t> &&cursor_img, DXGI_OUTDUPL_POINTER_SHAPE_INFO &shape_info) {
     // This cursor image may not be used
-    if (cursor_img.size() == 0) {
+    if (cursor_img.size() == 0 || shape_info.Width == 0 || shape_info.Height == 0) {
       cursor.input_res.reset();
       cursor.set_texture(0, 0, nullptr);
       return true;
@@ -1151,6 +1172,9 @@ namespace platf::dxgi {
         return capture_e::error;
       }
 
+      if (!src) {
+        return capture_e::error;
+      }
       D3D11_TEXTURE2D_DESC desc;
       src->GetDesc(&desc);
 
@@ -1596,6 +1620,10 @@ namespace platf::dxgi {
 
     // M1b S1-01：frame_qpc 已由 next_frame() 換成 QPC tick；改走共用換算（修正後的公式＋防呆＋K9 錨點取樣）
     auto frame_timestamp = frame_timestamp_from_qpc((int64_t) frame_qpc);
+    if (!src) {
+      return capture_e::error;
+    }
+
     D3D11_TEXTURE2D_DESC desc;
     src->GetDesc(&desc);
 
@@ -1802,6 +1830,10 @@ namespace platf::dxgi {
    * @return `true` if supported, `false` otherwise.
    */
   bool display_vram_t::is_codec_supported(std::string_view name, const ::video::config_t &config) {
+    if (!adapter) {
+      return false;
+    }
+
     DXGI_ADAPTER_DESC adapter_desc;
     adapter->GetDesc(&adapter_desc);
 

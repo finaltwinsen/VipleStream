@@ -302,6 +302,9 @@ namespace video {
   };
 
   struct packet_raw_avcodec: packet_raw_t {
+    packet_raw_avcodec(const packet_raw_avcodec &) = delete;
+    packet_raw_avcodec &operator=(const packet_raw_avcodec &) = delete;
+
     packet_raw_avcodec() {
       av_packet = av_packet_alloc();
     }
@@ -311,22 +314,22 @@ namespace video {
     }
 
     bool is_idr() override {
-      return av_packet->flags & AV_PKT_FLAG_KEY;
+      return av_packet && (av_packet->flags & AV_PKT_FLAG_KEY);
     }
 
     int64_t frame_index() override {
-      return av_packet->pts;
+      return av_packet ? av_packet->pts : 0;
     }
 
     uint8_t *data() override {
-      return av_packet->data;
+      return av_packet ? av_packet->data : nullptr;
     }
 
     size_t data_size() override {
-      return av_packet->size;
+      return av_packet ? av_packet->size : 0;
     }
 
-    AVPacket *av_packet;
+    AVPacket *av_packet {nullptr};
   };
 
   struct packet_raw_generic: packet_raw_t {
@@ -453,6 +456,9 @@ namespace video {
   // support for 23.976 film in case someone wants to stream a film at the perfect
   // framerate.
   inline AVRational framerateX100_to_rational(const int framerateX100) {
+    if (framerateX100 <= 0) {
+      return AVRational {60, 1};
+    }
     if (framerateX100 % 2997 == 0) {
       // Multiples of NTSC 29.97 e.g. 59.94, 119.88
       return AVRational {(framerateX100 / 2997) * 30000, 1001};

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <deque>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -106,12 +107,17 @@ namespace self_update {
     std::string log_tail(const std::filesystem::path &file, int lines) {
       std::ifstream in(file);
       if (!in) return {};
-      std::vector<std::string> all;
+      if (lines <= 0) return {};
+      std::deque<std::string> ring;
       std::string line;
-      while (std::getline(in, line)) all.push_back(line);
+      while (std::getline(in, line)) {
+        if ((int) ring.size() >= lines) ring.pop_front();
+        ring.push_back(std::move(line));
+      }
       std::string out;
-      for (size_t i = all.size() > (size_t) lines ? all.size() - lines : 0; i < all.size(); i++) {
-        out += all[i] + "\n";
+      for (const auto &l : ring) {
+        out += l;
+        out += '\n';
       }
       return out;
     }
@@ -849,7 +855,9 @@ exit 0
       if (digest.rfind("sha256:", 0) == 0) {
         digest.erase(0, 7);
         std::transform(digest.begin(), digest.end(), digest.begin(), [](unsigned char c) { return (char) std::tolower(c); });
-        rel.asset_sha256 = digest;
+        if (digest.size() == 64 && digest.find_first_not_of("0123456789abcdef") == std::string::npos) {
+          rel.asset_sha256 = digest;
+        }
       }
       return true;
     }

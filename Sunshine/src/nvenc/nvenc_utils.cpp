@@ -51,7 +51,7 @@ namespace nvenc {
   }
 
   nvenc_colorspace_t nvenc_colorspace_from_sunshine_colorspace(const video::sunshine_colorspace_t &sunshine_colorspace) {
-    nvenc_colorspace_t colorspace;
+    nvenc_colorspace_t colorspace {};
 
     switch (sunshine_colorspace.colorspace) {
       case video::colorspace_e::rec601:
@@ -62,7 +62,8 @@ namespace nvenc {
         break;
 
       case video::colorspace_e::rec709:
-        // Rec. 709
+      default:
+        // Rec. 709 (亦作為未預期色彩空間之安全預設值)
         colorspace.primaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
         colorspace.tranfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
         colorspace.matrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;

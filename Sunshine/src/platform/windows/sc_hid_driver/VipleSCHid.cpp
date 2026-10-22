@@ -69,6 +69,10 @@ static void diagAppend(const char* fmt, ...) {
 // "#{interface-class-guid}" (identical for every HID interface) to save diag
 // space — what identifies the device is the middle hid#...#instance part.
 static void diagAppendPath(const wchar_t* path) {
+    if (!path) {
+        diagAppend("(null)");
+        return;
+    }
     const wchar_t* p = path;
     if (wcsncmp(p, L"\\\\?\\", 4) == 0) p += 4;
     const wchar_t* end = wcsstr(p, L"#{");
@@ -162,7 +166,7 @@ static HANDLE openViaSetupDi(const GUID* hidGuid, USHORT vid, USHORT pid) {
         // the virtual device" failure; account/session/ACL never mattered.
         DWORD requiredSize = 0;
         SetupDiGetDeviceInterfaceDetailW(devInfo, &ifaceData, nullptr, 0, &requiredSize, nullptr);
-        if (requiredSize == 0) continue;
+        if (requiredSize < sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)) continue;
 
         auto* detail = static_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(
             HeapAlloc(GetProcessHeap(), 0, requiredSize));
@@ -204,7 +208,8 @@ static HANDLE openViaCfgMgr(const GUID* hidGuid, USHORT vid, USHORT pid) {
     }
 
     HANDLE found = INVALID_HANDLE_VALUE;
-    for (wchar_t* id = ids; *id && found == INVALID_HANDLE_VALUE; id += wcslen(id) + 1) {
+    ids[sz - 1] = L'\0'; // 防禦式終結多字串緩衝區邊界
+    for (wchar_t* id = ids; id < ids + sz && *id && found == INVALID_HANDLE_VALUE; id += wcslen(id) + 1) {
         diagAppend(" {%.64ls", id);
         ULONG isz = 0;
         cr = CM_Get_Device_Interface_List_SizeW(&isz, const_cast<GUID*>(hidGuid), id,
@@ -218,7 +223,8 @@ static HANDLE openViaCfgMgr(const GUID* hidGuid, USHORT vid, USHORT pid) {
         cr = CM_Get_Device_Interface_ListW(const_cast<GUID*>(hidGuid), id, ifs, isz,
             CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
         if (cr == CR_SUCCESS) {
-            for (wchar_t* p = ifs; *p && found == INVALID_HANDLE_VALUE; p += wcslen(p) + 1)
+            ifs[isz - 1] = L'\0'; // 防禦式終結多字串緩衝區邊界
+            for (wchar_t* p = ifs; p < ifs + isz && *p && found == INVALID_HANDLE_VALUE; p += wcslen(p) + 1)
                 found = probeAndOpen(p, vid, pid);
         }
         HeapFree(GetProcessHeap(), 0, ifs);
@@ -358,7 +364,14 @@ static void installDriverWorker(std::wstring scriptPath) {
 static const char* tryInstallDriverAsync(void) {
     static thread_local char status[MAX_PATH * 2 + 96];
     wchar_t exePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    DWORD exeLen = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (exeLen == 0 || exeLen >= MAX_PATH) {
+        setInstallDiag("installer: exe dir unresolved");
+        g_installReported.store(true, std::memory_order_relaxed);
+        g_installDone.store(true, std::memory_order_release);
+        return "installer: exe dir unresolved";
+    }
+    exePath[MAX_PATH - 1] = L'\0';
     wchar_t* lastSlash = wcsrchr(exePath, L'\\');
     if (!lastSlash) {
         // 同步失敗：狀態由呼叫端當場 append，標記 reported 避免同一行再印一次。
@@ -408,10 +421,10 @@ static const char* tryInstallDriverAsync(void) {
 }
 
 // Throttle timestamp for VipleSCHidOpen (file-scope so VipleSCHidResetOpenThrottle can reset it).
-static ULONGLONG g_openLastAttempt = 0;
+static std::atomic<ULONGLONG> g_openLastAttempt{0};
 
 void VipleSCHidResetOpenThrottle(void) {
-    g_openLastAttempt = 0;
+    g_openLastAttempt.store(0, std::memory_order_release);
 }
 
 // Opens a direct handle bypassing the per-session throttle.
@@ -444,7 +457,7 @@ int VipleSCHidForceReconnect(void) {
 
         DWORD requiredSize = 0;
         SetupDiGetDeviceInterfaceDetailW(devInfo, &ifaceData, nullptr, 0, &requiredSize, nullptr);
-        if (!requiredSize) continue;
+        if (requiredSize < sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)) continue;
 
         auto* detail = static_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(
             HeapAlloc(GetProcessHeap(), 0, requiredSize));
@@ -500,11 +513,12 @@ VIPLE_SCHID_HANDLE VipleSCHidOpen(void) {
     // the logs came from). Real attempts at most every 5 s; throttled calls
     // leave the diag empty so the caller knows not to log them.
     ULONGLONG now = GetTickCount64();
-    if (g_openLastAttempt != 0 && now - g_openLastAttempt < 5000) {
+    ULONGLONG last = g_openLastAttempt.load(std::memory_order_acquire);
+    if (last != 0 && now - last < 5000) {
         g_diag[0] = '\0';
         return nullptr;
     }
-    g_openLastAttempt = now;
+    g_openLastAttempt.store(now, std::memory_order_release);
 
     HANDLE hDev = openHidByVidPid(SC_VID, SC_PID);
     if (hDev == INVALID_HANDLE_VALUE) {
@@ -581,7 +595,7 @@ const char* VipleSCHidFeatureDiag(void) {
 }
 
 int VipleSCHidWrite(VIPLE_SCHID_HANDLE h, const uint8_t* data, int len) {
-    if (!h || len <= 0) return 0;
+    if (!h || !data || len <= 0) return 0;
     auto* ctx = static_cast<VipleSCHidCtx*>(h);
 
     // The virtual device's descriptor declares OUTPUT report ids 0x45 and
@@ -683,7 +697,10 @@ int VipleSCHidReadDriverStats(VIPLE_SCHID_HANDLE h, VipleSCHidDrvStats* out, uns
     buf[0] = 0x05;  // requested report id = driver stats
     if (!HidD_GetFeature(ctx->hDev, buf, sizeof(buf))) {
         // 舊 driver（1.0.4.0）沒宣告 0x05 → HIDClass 直接拒絕（typ. 87 / 1784）。
-        if (err) *err = GetLastError();
+        if (err) {
+            DWORD e = GetLastError();
+            *err = e ? e : ERROR_GEN_FAILURE;
+        }
         return 0;
     }
     auto le16 = [](const uint8_t* p) -> uint16_t {

@@ -13,10 +13,10 @@ namespace nvenc {
    * @brief YUV colorspace and color range.
    */
   struct nvenc_colorspace_t {
-    NV_ENC_VUI_COLOR_PRIMARIES primaries;
-    NV_ENC_VUI_TRANSFER_CHARACTERISTIC tranfer_function;
-    NV_ENC_VUI_MATRIX_COEFFS matrix;
-    bool full_range;
+    NV_ENC_VUI_COLOR_PRIMARIES primaries {NV_ENC_VUI_COLOR_PRIMARIES_BT709};
+    NV_ENC_VUI_TRANSFER_CHARACTERISTIC tranfer_function {NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709};
+    NV_ENC_VUI_MATRIX_COEFFS matrix {NV_ENC_VUI_MATRIX_COEFFS_BT709};
+    bool full_range {false};
   };
 
 }  // namespace nvenc

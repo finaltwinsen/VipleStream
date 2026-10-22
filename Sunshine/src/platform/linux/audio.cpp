@@ -248,7 +248,13 @@ namespace platf {
         };
 
         auto event = events->pop();
-        if (event == failed) {
+        if (event != ready) {
+          BOOST_LOG(error) << "Pulseaudio context initialization failed (event: "sv << (event ? (int) *event : -1) << ')';
+          if (worker.joinable()) {
+            pa_context_disconnect(ctx.get());
+            pa_mainloop_quit(loop.get(), 0);
+            worker.join();
+          }
           return -1;
         }
 
@@ -268,6 +274,11 @@ namespace platf {
           ),
         };
 
+        if (!op) {
+          BOOST_LOG(error) << "Couldn't create load module operation: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          return -1;
+        }
+
         alarm->wait();
         return *alarm->status();
       }
@@ -282,6 +293,11 @@ namespace platf {
         op_t op {
           pa_context_unload_module(ctx.get(), i, success_cb, alarm.get())
         };
+
+        if (!op) {
+          BOOST_LOG(error) << "Couldn't create unload module operation: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          return -1;
+        }
 
         alarm->wait();
 
@@ -311,6 +327,7 @@ namespace platf {
               BOOST_LOG(error) << "Couldn't get pulseaudio sink info: "sv << pa_strerror(pa_context_errno(ctx));
 
               alarm->ring(-1);
+              return;
             }
 
             alarm->ring(0);
@@ -405,6 +422,11 @@ namespace platf {
         };
 
         op_t server_op {pa_context_get_server_info(ctx.get(), cb<pa_server_info *>, &server_f)};
+        if (!server_op) {
+          BOOST_LOG(error) << "Couldn't create server info operation: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          return sink_name;
+        }
+
         alarm->wait();
         // No need to check status. If it failed just return default name.
         return sink_name;
@@ -424,16 +446,23 @@ namespace platf {
               BOOST_LOG(error) << "Couldn't get pulseaudio sink info for ["sv << sink_name
                                << "]: "sv << pa_strerror(pa_context_errno(ctx));
               alarm->ring(-1);
+              return;
             }
 
             alarm->ring(0);
             return;
           }
 
-          monitor_name = sink_info->monitor_source_name;
+          if (sink_info->monitor_source_name) {
+            monitor_name = sink_info->monitor_source_name;
+          }
         };
 
         op_t sink_op {pa_context_get_sink_info_by_name(ctx.get(), sink_name.c_str(), cb<pa_sink_info *>, &sink_f)};
+        if (!sink_op) {
+          BOOST_LOG(error) << "Couldn't create sink info operation: "sv << pa_strerror(pa_context_errno(ctx.get()));
+          return monitor_name;
+        }
 
         alarm->wait();
         // No need to check status. If it failed just return default name.

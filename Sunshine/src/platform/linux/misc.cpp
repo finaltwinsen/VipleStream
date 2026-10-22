@@ -75,7 +75,11 @@ window_system_e window_system;
 
 namespace dyn {
   void *handle(const std::vector<const char *> &libs) {
-    void *handle;
+    if (libs.empty()) {
+      return nullptr;
+    }
+
+    void *handle = nullptr;
 
     for (auto lib : libs) {
       handle = dlopen(lib, RTLD_LAZY | RTLD_LOCAL);
@@ -98,6 +102,10 @@ namespace dyn {
   }
 
   int load(void *handle, const std::vector<std::tuple<apiproc *, const char *>> &funcs, bool strict) {
+    if (!handle) {
+      return -1;
+    }
+
     int err = 0;
     for (auto &func : funcs) {
       TUPLE_2D_REF(fn, name, func);
@@ -210,6 +218,9 @@ namespace platf {
   }
 
   std::string from_sockaddr(const sockaddr *const ip_addr) {
+    if (!ip_addr) {
+      return {};
+    }
     char data[INET6_ADDRSTRLEN] = {};
 
     auto family = ip_addr->sa_family;
@@ -223,6 +234,9 @@ namespace platf {
   }
 
   std::pair<std::uint16_t, std::string> from_sockaddr_ex(const sockaddr *const ip_addr) {
+    if (!ip_addr) {
+      return {0, {}};
+    }
     char data[INET6_ADDRSTRLEN] = {};
 
     auto family = ip_addr->sa_family;
@@ -252,6 +266,7 @@ namespace platf {
       if (!(pos->ifa_flags & IFF_UP)) continue;
       if (pos->ifa_flags & IFF_LOOPBACK) continue;
 
+      if (!pos->ifa_name) continue;
       std::string ifname(pos->ifa_name);
 
       // 跳過虛擬介面
@@ -329,6 +344,7 @@ namespace platf {
     // On Linux, read MAC address from sysfs
     for (auto pos = ifaddrs.get(); pos != nullptr; pos = pos->ifa_next) {
       if (pos->ifa_addr && address == from_sockaddr(pos->ifa_addr)) {
+        if (!pos->ifa_name) continue;
         std::ifstream mac_file("/sys/class/net/"s + pos->ifa_name + "/address");
         if (mac_file.good()) {
           std::string mac_address;
@@ -370,7 +386,13 @@ namespace platf {
    */
   void open_url(const std::string &url) {
     // set working dir to user home directory
-    auto working_dir = boost::filesystem::path(std::getenv("HOME"));
+    const char *home = std::getenv("HOME");
+    auto working_dir = boost::filesystem::path(home ? home : "/tmp");
+    // Sanitize url to avoid command injection with quotes or newlines
+    if (url.find('"') != std::string::npos || url.find('\n') != std::string::npos || url.find('\r') != std::string::npos) {
+      BOOST_LOG(warning) << "Invalid characters in URL: "sv << url;
+      return;
+    }
     std::string cmd = R"(xdg-open ")" + url + R"(")";
 
     boost::process::v1::environment _env = boost::this_process::environment();
@@ -694,6 +716,9 @@ namespace platf {
             pfd.events = POLLOUT;
 
             if (poll(&pfd, 1, -1) != 1) {
+              if (errno == EINTR) {
+                continue;
+              }
               BOOST_LOG(warning) << "poll() failed: "sv << errno;
               break;
             }
@@ -760,6 +785,9 @@ namespace platf {
             pfd.events = POLLOUT;
 
             if (poll(&pfd, 1, -1) != 1) {
+              if (errno == EINTR) {
+                continue;
+              }
               BOOST_LOG(warning) << "poll() failed: "sv << errno;
               break;
             }
@@ -806,7 +834,7 @@ namespace platf {
       char buf[std::max(CMSG_SPACE(sizeof(struct in_addr)), CMSG_SPACE(sizeof(struct in6_pktinfo)))];
 #endif
       struct cmsghdr alignment;
-    } cmbuf;
+    } cmbuf = {};
 
     socklen_t cmbuflen = 0;
 
@@ -881,6 +909,9 @@ namespace platf {
       pfd.events = POLLOUT;
 
       if (poll(&pfd, 1, -1) != 1) {
+        if (errno == EINTR) {
+          continue;
+        }
         BOOST_LOG(warning) << "poll() failed: "sv << errno;
         break;
       }
@@ -906,7 +937,7 @@ namespace platf {
   public:
     qos_t(int sockfd, std::vector<std::tuple<int, int, int>> options):
         sockfd(sockfd),
-        options(options) {
+        options(std::move(options)) {
       qos_ref_count++;
     }
 

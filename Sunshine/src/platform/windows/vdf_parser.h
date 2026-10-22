@@ -35,7 +35,7 @@ namespace viple::vdf {
   // technically order-preserving (appmanifest keys have a documented
   // order) but nothing we read depends on order, so std::map is fine.
   class Node;
-  using NodeMap = std::map<std::string, Node>;
+  using NodeMap = std::map<std::string, Node, std::less<>>;
 
   class Node {
   public:
@@ -72,12 +72,15 @@ namespace viple::vdf {
     /**
      * Case-insensitive lookup of a child node. Steam files mix casing
      * ("appid" vs "AppID" between Steam versions); callers shouldn't
-     * care.
+     * care. Fast-paths an exact match via heterogeneous map lookup first.
      * @return pointer to child Node, or nullptr if absent / this is a leaf.
      */
     const Node *child(std::string_view key) const {
       if (!is_map()) {
         return nullptr;
+      }
+      if (auto it = as_map().find(key); it != as_map().end()) {
+        return &it->second;
       }
       for (const auto &[k, v] : as_map()) {
         if (k.size() == key.size() &&
@@ -108,12 +111,12 @@ namespace viple::vdf {
     /**
      * Leaf value as string; empty if absent or not a leaf.
      */
-    std::string leaf_or(std::string_view key, std::string fallback = {}) const {
+    std::string leaf_or(std::string_view key, std::string_view fallback = {}) const {
       const auto *c = child(key);
       if (c && c->is_leaf()) {
         return c->as_string();
       }
-      return fallback;
+      return std::string {fallback};
     }
 
   private:
@@ -121,6 +124,8 @@ namespace viple::vdf {
   };
 
   namespace detail {
+    constexpr size_t k_max_vdf_depth = 64;
+
     struct Lexer {
       std::string_view text;
       size_t pos = 0;
@@ -149,6 +154,7 @@ namespace viple::vdf {
         }
         pos++;  // skip opening "
         std::string out;
+        out.reserve(32);
         while (pos < text.size() && text[pos] != '"') {
           char c = text[pos];
           if (c == '\\' && pos + 1 < text.size()) {
@@ -185,8 +191,12 @@ namespace viple::vdf {
     };
 
     /** Parse a sequence of "key" {value|{block}} pairs until EOF or a
-     *  closing '}'. */
-    inline std::optional<NodeMap> parse_body(Lexer &lex) {
+     *  closing '}'. Enforces a recursion depth limit to protect against
+     *  stack exhaustion DoS (CWE-674). */
+    inline std::optional<NodeMap> parse_body(Lexer &lex, size_t depth = 0) {
+      if (depth > k_max_vdf_depth) {
+        return std::nullopt;
+      }
       NodeMap out;
       while (true) {
         lex.skip_ws();
@@ -203,7 +213,7 @@ namespace viple::vdf {
         }
         if (lex.text[lex.pos] == '{') {
           lex.pos++;
-          auto children = parse_body(lex);
+          auto children = parse_body(lex, depth + 1);
           if (!children) {
             return std::nullopt;
           }
@@ -236,6 +246,9 @@ namespace viple::vdf {
    * that).
    */
   inline std::optional<Node> parse(std::string_view text) {
+    if (text.starts_with("\xEF\xBB\xBF")) {
+      text.remove_prefix(3);
+    }
     detail::Lexer lex {text};
     auto body = detail::parse_body(lex);
     if (!body) {

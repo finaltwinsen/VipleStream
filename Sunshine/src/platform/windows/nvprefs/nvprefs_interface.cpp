@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <cassert>
+#include <system_error>
 
 // local includes
 #include "driver_settings.h"
@@ -44,8 +45,14 @@ namespace nvprefs {
       // Check %ProgramData% variable, need it for storing undo file
       wchar_t program_data_env[MAX_PATH];
       auto get_env_result = GetEnvironmentVariableW(L"ProgramData", program_data_env, MAX_PATH);
-      if (get_env_result == 0 || get_env_result >= MAX_PATH || !std::filesystem::is_directory(program_data_env)) {
+      if (get_env_result == 0 || get_env_result >= MAX_PATH) {
         error_message("Missing or malformed %ProgramData% environment variable");
+        return false;
+      }
+
+      std::error_code ec;
+      if (!std::filesystem::is_directory(program_data_env, ec) || ec) {
+        error_message("Missing or malformed %ProgramData% environment variable directory");
         return false;
       }
 
@@ -85,7 +92,7 @@ namespace nvprefs {
           error_message("Failed to restore global profile settings from undo file, deleting the file anyway");
         }
       } else {
-        error_message("Coulnd't read undo file, deleting the file anyway");
+        error_message("Couldn't read undo file, deleting the file anyway");
       }
 
       if (!undo_file->delete_file()) {
@@ -143,8 +150,9 @@ namespace nvprefs {
       // Create and lock undo file if it hasn't been done yet
       if (!pimpl->undo_file) {
         // Prepare Sunshine folder in ProgramData if it doesn't exist
-        if (!CreateDirectoryW(pimpl->undo_folder_path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
-          error_message("Couldn't create undo folder");
+        std::error_code ec;
+        if (!std::filesystem::create_directories(pimpl->undo_folder_path, ec) && ec) {
+          error_message("Couldn't create undo folder: " + ec.message());
           return false;
         }
 
@@ -203,7 +211,7 @@ namespace nvprefs {
     // Restore global profile settings with undo data
     if (pimpl->driver_settings.restore_global_profile_to_undo(*pimpl->undo_data) &&
         pimpl->driver_settings.save_settings()) {
-      // Global profile settings sucessfully restored, can delete undo file
+      // Global profile settings successfully restored, can delete undo file
       if (!pimpl->undo_file->delete_file()) {
         error_message("Couldn't delete undo file");
         return false;

@@ -18,6 +18,10 @@
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
 #endif
 
+#ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
+#define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
+#endif
+
 static HMODULE WlanApiLibraryHandle;
 static HANDLE WlanHandle;
 
@@ -64,6 +68,9 @@ void addrToUrlSafeString(struct sockaddr_storage* addr, char* string, size_t str
 }
 
 void shutdownTcpSocket(SOCKET s) {
+    if (s == INVALID_SOCKET) {
+        return;
+    }
     // Calling shutdown() prior to close wakes up callers
     // blocked in connect(), recv(), and friends.
     shutdown(s, SHUT_RDWR);
@@ -85,8 +92,8 @@ int setNonFatalRecvTimeoutMs(SOCKET s, int timeoutMs) {
 #else
     struct timeval val;
 
-    val.tv_sec = 0;
-    val.tv_usec = timeoutMs * 1000;
+    val.tv_sec = timeoutMs / 1000;
+    val.tv_usec = (timeoutMs % 1000) * 1000;
 
     return setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&val, sizeof(val));
 #endif
@@ -231,6 +238,9 @@ int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect) {
 }
 
 void closeSocket(SOCKET s) {
+    if (s == INVALID_SOCKET) {
+        return;
+    }
 #if defined(LC_WINDOWS)
     closesocket(s);
 #else
@@ -624,11 +634,12 @@ int sendMtuSafe(SOCKET s, char* buffer, int size) {
         int bytesToSend = size - bytesSent > TCPv4_MSS ?
                           TCPv4_MSS : size - bytesSent;
 
-        if (send(s, &buffer[bytesSent], bytesToSend, 0) < 0) {
+        int ret = (int)send(s, &buffer[bytesSent], bytesToSend, 0);
+        if (ret <= 0) {
             return -1;
         }
 
-        bytesSent += bytesToSend;
+        bytesSent += ret;
     }
 
     return bytesSent;
@@ -763,7 +774,7 @@ bool isInSubnetV6(struct sockaddr_in6* sin6, unsigned char* subnet, int prefixLe
     int i;
 
     for (i = 0; i < prefixLength; i++) {
-        unsigned char mask = 1 << (i % 8);
+        unsigned char mask = (unsigned char)(0x80 >> (i % 8));
         if ((sin6->sin6_addr.s6_addr[i / 8] & mask) != (subnet[i / 8] & mask)) {
             return false;
         }
@@ -919,14 +930,17 @@ bool isNat64SynthesizedAddress(struct sockaddr_storage* address) {
 void enterLowLatencyMode(void) {
 #if defined(LC_WINDOWS_DESKTOP)
     DWORD negotiatedVersion;
-    PWLAN_INTERFACE_INFO_LIST wlanInterfaceList;
+    PWLAN_INTERFACE_INFO_LIST wlanInterfaceList = NULL;
     DWORD i;
 
     // Reduce timer period to increase wait precision
     timeBeginPeriod(1);
 
-    // Load wlanapi.dll dynamically because it will not always be present on Windows Server SKUs.
-    WlanApiLibraryHandle = LoadLibraryA("wlanapi.dll");
+    // Load wlanapi.dll dynamically using secure search path to prevent DLL hijacking (CWE-427).
+    WlanApiLibraryHandle = LoadLibraryExA("wlanapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (WlanApiLibraryHandle == NULL) {
+        WlanApiLibraryHandle = LoadLibraryA("wlanapi.dll");
+    }
     if (WlanApiLibraryHandle == NULL) {
         Limelog("WLANAPI is not supported on this OS\n");
         return;

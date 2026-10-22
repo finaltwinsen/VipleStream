@@ -27,23 +27,29 @@ namespace sync_util {
     }
 
     sync_t &operator=(sync_t &&other) noexcept {
-      std::lock(_lock, other._lock);
+      if (this == &other) {
+        return *this;
+      }
+
+      std::unique_lock<mutex_t> l1(_lock, std::defer_lock);
+      std::unique_lock<mutex_t> l2(other._lock, std::defer_lock);
+      std::lock(l1, l2);
 
       raw = std::move(other.raw);
-
-      _lock.unlock();
-      other._lock.unlock();
 
       return *this;
     }
 
     sync_t &operator=(sync_t &other) noexcept {
-      std::lock(_lock, other._lock);
+      if (this == &other) {
+        return *this;
+      }
+
+      std::unique_lock<mutex_t> l1(_lock, std::defer_lock);
+      std::unique_lock<mutex_t> l2(other._lock, std::defer_lock);
+      std::lock(l1, l2);
 
       raw = other.raw;
-
-      _lock.unlock();
-      other._lock.unlock();
 
       return *this;
     }

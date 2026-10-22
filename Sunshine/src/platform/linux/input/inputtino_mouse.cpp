@@ -2,6 +2,9 @@
  * @file src/platform/linux/input/inputtino_mouse.cpp
  * @brief Definitions for inputtino mouse input handling.
  */
+// standard includes
+#include <cmath>
+
 // lib includes
 #include <boost/locale.hpp>
 #include <inputtino/input.hpp>
@@ -20,19 +23,21 @@ using namespace std::literals;
 namespace platf::mouse {
 
   void move(input_raw_t *raw, int deltaX, int deltaY) {
-    if (raw->mouse) {
+    if (raw && raw->mouse) {
       (*raw->mouse).move(deltaX, deltaY);
     }
   }
 
   void move_abs(input_raw_t *raw, const touch_port_t &touch_port, float x, float y) {
-    if (raw->mouse) {
-      (*raw->mouse).move_abs(x, y, touch_port.width, touch_port.height);
+    if (raw && raw->mouse) {
+      if (std::isfinite(x) && std::isfinite(y) && touch_port.width > 0 && touch_port.height > 0) {
+        (*raw->mouse).move_abs(x, y, touch_port.width, touch_port.height);
+      }
     }
   }
 
   void button(input_raw_t *raw, int button, bool release) {
-    if (raw->mouse) {
+    if (raw && raw->mouse) {
       inputtino::Mouse::MOUSE_BUTTON btn_type;
       switch (button) {
         case BUTTON_LEFT:
@@ -63,19 +68,19 @@ namespace platf::mouse {
   }
 
   void scroll(input_raw_t *raw, int high_res_distance) {
-    if (raw->mouse) {
+    if (raw && raw->mouse) {
       (*raw->mouse).vertical_scroll(high_res_distance);
     }
   }
 
   void hscroll(input_raw_t *raw, int high_res_distance) {
-    if (raw->mouse) {
+    if (raw && raw->mouse) {
       (*raw->mouse).horizontal_scroll(high_res_distance);
     }
   }
 
   util::point_t get_location(input_raw_t *raw) {
-    if (raw->mouse) {
+    if (raw && raw->mouse) {
       // TODO: decide what to do after https://github.com/games-on-whales/inputtino/issues/6 is resolved.
       // TODO: auto x = (*raw->mouse).get_absolute_x();
       // TODO: auto y = (*raw->mouse).get_absolute_y();

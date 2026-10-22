@@ -18,9 +18,9 @@ namespace video {
   };
 
   struct sunshine_colorspace_t {
-    colorspace_e colorspace;
-    bool full_range;
-    unsigned bit_depth;
+    colorspace_e colorspace {colorspace_e::rec709};
+    bool full_range {false};
+    unsigned bit_depth {8};
   };
 
   bool colorspace_is_hdr(const sunshine_colorspace_t &colorspace);

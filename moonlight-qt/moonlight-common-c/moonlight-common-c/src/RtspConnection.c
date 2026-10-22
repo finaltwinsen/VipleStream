@@ -903,6 +903,8 @@ bool parseSdpAttributeToUInt(const char* payload, const char* name, unsigned int
     }
 
     // Read the integer up to the newline at the end of the SDP attribute
+    char* lineEnd = strpbrk(attribute, "\r\n");
+    if (lineEnd && valst > lineEnd) { return false; }
     *val = strtoul(valst + 1, NULL, 0);
 
     return true;
@@ -922,6 +924,8 @@ bool parseSdpAttributeToInt(const char* payload, const char* name, int* val) {
     }
 
     // Read the integer up to the newline at the end of the SDP attribute
+    char* lineEnd = strpbrk(attribute, "\r\n");
+    if (lineEnd && valst > lineEnd) { return false; }
     *val = strtol(valst + 1, NULL, 0);
 
     return true;
@@ -1215,7 +1219,13 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         // resolves any 454 session not found errors on
         // standard RTSP server implementations.
         // (i.e - sessionId = "DEADBEEFCAFE;timeout = 90")
-        sessionIdString = strdup(strtok_r(sessionId, ";", &strtokCtx));
+        char* sessionToken = strtok_r(sessionId, ";", &strtokCtx);
+        if (sessionToken == NULL) {
+            Limelog("RTSP SETUP streamid=audio session attribute is empty\n");
+            ret = -1;
+            goto Exit;
+        }
+        sessionIdString = strdup(sessionToken);
         if (sessionIdString == NULL) {
             Limelog("Failed to duplicate session ID string\n");
             ret = -1;

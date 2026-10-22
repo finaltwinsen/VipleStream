@@ -213,7 +213,15 @@ namespace platf::dxgi {
     if (capture_access == nullptr) {
       return capture_e::error;
     }
-    capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out);
+    if (!out) {
+      return capture_e::error;
+    }
+    *out = nullptr;
+    auto status = capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out);
+    if (FAILED(status) || !*out) {
+      BOOST_LOG(error) << "Failed to acquire ID3D11Texture2D from captured surface [0x"sv << util::hex(status).to_string_view() << ']';
+      return capture_e::error;
+    }
     // M1b S1-01（ops-m3）：SystemRelativeTime() 是 TimeSpan（100 ns 單位、QPC 時基），不是 raw QPC tick；
     // 明確換成 QPC tick（QPF = 10 MHz 時數值不變，但不再依賴這個巧合）
     out_time = qpc_from_100ns(consumed_frame.SystemRelativeTime().count());
@@ -267,6 +275,10 @@ namespace platf::dxgi {
 
     // M1b S1-01：frame_qpc 已由 next_frame() 換成 QPC tick；改走共用換算（修正後的公式＋防呆＋K9 錨點取樣）
     auto frame_timestamp = frame_timestamp_from_qpc((int64_t) frame_qpc);
+    if (!src) {
+      return capture_e::error;
+    }
+
     D3D11_TEXTURE2D_DESC desc;
     src->GetDesc(&desc);
 

@@ -42,7 +42,7 @@ class DECLSPEC_UUID("870af99c-171d-4f9e-af0d-e63df40c2bc9") CPolicyConfigClient;
 // ----------------------------------------------------------------------------
 interface IPolicyConfig: public IUnknown {
 public:
-  virtual HRESULT GetMixFormat(
+  virtual HRESULT STDMETHODCALLTYPE GetMixFormat(
     PCWSTR,
     WAVEFORMATEX **
   );

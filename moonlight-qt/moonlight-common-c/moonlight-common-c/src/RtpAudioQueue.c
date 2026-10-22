@@ -76,6 +76,11 @@ void RtpaInitializeQueue(PRTP_AUDIO_QUEUE queue) {
     // The number of data and parity shards is constant, so we can reuse
     // the same RS matrices for all traffic.
     queue->rs = reed_solomon_new(RTPA_DATA_SHARDS, RTPA_FEC_SHARDS);
+    if (queue->rs == NULL) {
+        Limelog("Failed to allocate Reed-Solomon codec for audio FEC; disabling FEC\n");
+        queue->incompatibleServer = true;
+    }
+    else {
 
     // For unknown reasons, the RS parity matrix computed by our RS implementation
     // doesn't match the one Nvidia uses for audio data. I'm not exactly sure why,
@@ -84,6 +89,7 @@ void RtpaInitializeQueue(PRTP_AUDIO_QUEUE queue) {
     // constant and known in advance.
     const unsigned char parity[] = { 0x77, 0x40, 0x38, 0x0e, 0xc7, 0xa7, 0x0d, 0x6c };
     memcpy(queue->rs->p, parity, sizeof(parity));
+    }
 }
 
 static void validateFecBlockState(PRTP_AUDIO_QUEUE queue) {
@@ -178,8 +184,8 @@ static PRTPA_FEC_BLOCK allocateFecBlock(PRTP_AUDIO_QUEUE queue, uint16_t blockSi
 
     // We either didn't have any free entries or the block
     // size didn't match, so allocate a new FEC block now.
-    uint16_t dataPacketSize = blockSize + sizeof(RTP_PACKET);
-    return malloc(sizeof(*block) + (RTPA_DATA_SHARDS * dataPacketSize) + (RTPA_FEC_SHARDS * blockSize));
+    size_t dataPacketSize = (size_t)blockSize + sizeof(RTP_PACKET);
+    return malloc(sizeof(*block) + (RTPA_DATA_SHARDS * dataPacketSize) + (RTPA_FEC_SHARDS * (size_t)blockSize));
 }
 
 static void freeFecBlockHead(PRTP_AUDIO_QUEUE queue) {
@@ -233,7 +239,9 @@ void RtpaCleanupQueue(PRTP_AUDIO_QUEUE queue) {
 
     LC_ASSERT(queue->freeBlockCount == 0);
 
-    reed_solomon_release(queue->rs);
+    if (queue->rs != NULL) {
+        reed_solomon_release(queue->rs);
+    }
     queue->rs = NULL;
 }
 
@@ -422,7 +430,7 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
     }
 
     // We didn't find an existing FEC block, so we'll have to allocate one
-    uint16_t dataPacketSize = blockSize + sizeof(RTP_PACKET);
+    size_t dataPacketSize = (size_t)blockSize + sizeof(RTP_PACKET);
     PRTPA_FEC_BLOCK block = allocateFecBlock(queue, blockSize);
     if (block == NULL) {
         return NULL;

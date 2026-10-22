@@ -4,6 +4,7 @@
  * @note Adapted from https://www.avahi.org/doxygen/html/client-publish-service_8c-example.html
  */
 // standard includes
+#include <mutex>
 #include <thread>
 
 // local includes
@@ -204,6 +205,8 @@ namespace avahi {
   simple_poll_free_fn simple_poll_free;
 
   int init_common() {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
     static void *handle {nullptr};
     static bool funcs_loaded = false;
 
@@ -239,6 +242,8 @@ namespace avahi {
   }
 
   int init_client() {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
     if (init_common()) {
       return -1;
     }
@@ -355,7 +360,12 @@ namespace platf::publish {
       if (ret < 0) {
         if (ret == avahi::ERR_COLLISION) {
           // A service name collision with a local service happened. Let's pick a new name
-          name.reset(avahi::alternative_service_name(name.get()));
+          char *n = name ? avahi::alternative_service_name(name.get()) : nullptr;
+          if (!n) {
+            BOOST_LOG(error) << "Failed to allocate alternative service name on collision";
+            return;
+          }
+          name.reset(n);
           BOOST_LOG(info) << "Service name collision, renaming service to "sv << name.get();
 
           avahi::entry_group_reset(group);
@@ -414,6 +424,11 @@ namespace platf::publish {
 
       if (poll_thread.joinable()) {
         poll_thread.join();
+
+        client.reset();
+        poll.reset();
+        group = nullptr;
+        name.reset();
       }
     }
   };
@@ -435,6 +450,10 @@ namespace platf::publish {
 
     auto instance_name = net::mdns_instance_name(platf::get_host_name());
     name.reset(avahi::strdup(instance_name.c_str()));
+    if (!name) {
+      BOOST_LOG(error) << "Failed to allocate service name."sv;
+      return nullptr;
+    }
 
     client.reset(
       avahi::client_new(avahi::simple_poll_get(poll.get()), avahi::ClientFlags(0), client_callback, nullptr, &avhi_error)

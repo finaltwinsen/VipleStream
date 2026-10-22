@@ -221,6 +221,10 @@ namespace platf {
      * @return 0 on success.
      */
     int alloc_gamepad_internal(const gamepad_id_t &id, feedback_queue_t &feedback_queue, VIGEM_TARGET_TYPE gp_type) {
+      if (id.globalIndex >= gamepads.size()) {
+        BOOST_LOG(error) << "Gamepad index out of bounds: "sv << id.globalIndex;
+        return -1;
+      }
       auto &gamepad = gamepads[id.globalIndex];
       assert(!gamepad.gp);
 
@@ -288,6 +292,9 @@ namespace platf {
      * @param nr The gamepad.
      */
     void free_target(int nr) {
+      if (nr < 0 || (size_t) nr >= gamepads.size()) {
+        return;
+      }
       auto &gamepad = gamepads[nr];
 
       if (gamepad.repeat_task) {
@@ -474,6 +481,7 @@ namespace platf {
     // 忙碌時本呼叫最長卡到 LowLevelHooksTimeout；task_pool 只有一條執行緒，之後所有
     // 鍵鼠封包都跟著排隊。量一下就知道停頓是不是發生在這一步。
     auto t0 = std::chrono::steady_clock::now();
+    int retries = 0;
   retry:
     auto send = SendInput(1, &i, sizeof(INPUT));
     {
@@ -496,7 +504,7 @@ namespace platf {
     }
     if (send != 1) {
       auto hDesk = syncThreadDesktop();
-      if (_lastKnownInputDesktop != hDesk) {
+      if (_lastKnownInputDesktop != hDesk && ++retries <= 2) {
         _lastKnownInputDesktop = hDesk;
         goto retry;
       }
@@ -514,10 +522,14 @@ namespace platf {
    * @return true if input was successfully injected.
    */
   bool inject_synthetic_pointer_input(input_raw_t *input, HSYNTHETICPOINTERDEVICE device, const POINTER_TYPE_INFO *pointerInfo, UINT32 count) {
+    if (!input || !input->fnInjectSyntheticPointerInput) {
+      return false;
+    }
+    int retries = 0;
   retry:
     if (!input->fnInjectSyntheticPointerInput(device, pointerInfo, count)) {
       auto hDesk = syncThreadDesktop();
-      if (_lastKnownInputDesktop != hDesk) {
+      if (_lastKnownInputDesktop != hDesk && ++retries <= 2) {
         _lastKnownInputDesktop = hDesk;
         goto retry;
       }
@@ -527,6 +539,9 @@ namespace platf {
   }
 
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y) {
+    if (touch_port.width <= 0 || touch_port.height <= 0) {
+      return;
+    }
     INPUT i {};
 
     i.type = INPUT_MOUSE;
@@ -952,7 +967,13 @@ namespace platf {
    * @param touch The touch event.
    */
   void touch_update(client_input_t *input, const touch_port_t &touch_port, const touch_input_t &touch) {
+    if (!input) {
+      return;
+    }
     auto raw = (client_input_raw_t *) input;
+    if (!raw->global) {
+      return;
+    }
 
     // Bail if we're not running on an OS that supports virtual touch input
     if (!raw->global->fnCreateSyntheticPointerDevice ||
@@ -996,6 +1017,9 @@ namespace platf {
       BOOST_LOG(error) << "No unused pointer entries! Cancelling all active touches!"sv;
       cancel_all_active_touches(raw);
       pointer = pointer_by_id(raw, touch.pointerId, touch.eventType);
+      if (!pointer) {
+        return;
+      }
     }
 
     pointer->type = PT_TOUCH;
@@ -1078,7 +1102,13 @@ namespace platf {
    * @param pen The pen event.
    */
   void pen_update(client_input_t *input, const touch_port_t &touch_port, const pen_input_t &pen) {
+    if (!input) {
+      return;
+    }
     auto raw = (client_input_raw_t *) input;
+    if (!raw->global) {
+      return;
+    }
 
     // Bail if we're not running on an OS that supports virtual pen input
     if (!raw->global->fnCreateSyntheticPointerDevice ||
@@ -1191,6 +1221,9 @@ namespace platf {
   }
 
   void unicode(input_t &input, char *utf8, int size) {
+    if (!utf8 || size <= 0) {
+      return;
+    }
     // We can do no worse than one UTF-16 character per byte of UTF-8
     std::vector<WCHAR> wide(size);
 
@@ -1221,7 +1254,7 @@ namespace platf {
   int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
     auto raw = (input_raw_t *) input.get();
 
-    if (!raw->vigem) {
+    if (!raw || !raw->vigem) {
       return 0;
     }
 
@@ -1282,7 +1315,7 @@ namespace platf {
   void free_gamepad(input_t &input, int nr) {
     auto raw = (input_raw_t *) input.get();
 
-    if (!raw->vigem) {
+    if (!raw || !raw->vigem) {
       return;
     }
 
@@ -1505,6 +1538,10 @@ namespace platf {
    * @param nr The global gamepad index.
    */
   void ds4_update_ts_and_send(vigem_t *vigem, int nr) {
+    if (!vigem || nr < 0 || (size_t) nr >= vigem->gamepads.size()) {
+      return;
+    }
+
     auto &gamepad = vigem->gamepads[nr];
 
     // Cancel any pending updates. We will requeue one here when we're finished.
@@ -1540,10 +1577,17 @@ namespace platf {
    * @param gamepad_state The gamepad button/axis state sent from the client.
    */
   void gamepad_update(input_t &input, int nr, const gamepad_state_t &gamepad_state) {
+    if (nr < 0) {
+      return;
+    }
     auto vigem = ((input_raw_t *) input.get())->vigem;
 
     // If there is no gamepad support
     if (!vigem) {
+      return;
+    }
+
+    if ((size_t) nr >= vigem->gamepads.size()) {
       return;
     }
 
@@ -1576,6 +1620,10 @@ namespace platf {
 
     // If there is no gamepad support
     if (!vigem) {
+      return;
+    }
+
+    if (touch.id.globalIndex >= vigem->gamepads.size()) {
       return;
     }
 
@@ -1652,8 +1700,10 @@ namespace platf {
     }
 
     // Touchpad is 1920x943 according to ViGEm
-    uint16_t x = touch.x * 1920;
-    uint16_t y = touch.y * 943;
+    float clamped_x = std::clamp(touch.x, 0.0f, 1.0f);
+    float clamped_y = std::clamp(touch.y, 0.0f, 1.0f);
+    uint16_t x = (uint16_t) std::lround(clamped_x * 1920.0f);
+    uint16_t y = (uint16_t) std::lround(clamped_y * 943.0f);
     uint8_t touchData[] = {
       (uint8_t) (x & 0xFF),  // Low 8 bits of X
       (uint8_t) ((x >> 8 & 0x0F) | (y & 0x0F) << 4),  // High 4 bits of X and low 4 bits of Y
@@ -1685,6 +1735,10 @@ namespace platf {
       return;
     }
 
+    if (motion.id.globalIndex >= vigem->gamepads.size()) {
+      return;
+    }
+
     auto &gamepad = vigem->gamepads[motion.id.globalIndex];
     if (!gamepad.gp) {
       return;
@@ -1709,6 +1763,10 @@ namespace platf {
 
     // If there is no gamepad support
     if (!vigem) {
+      return;
+    }
+
+    if (battery.id.globalIndex >= vigem->gamepads.size()) {
       return;
     }
 

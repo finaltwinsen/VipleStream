@@ -313,7 +313,7 @@ namespace stream {
    * Returns 1 to consume the packet (don't pass to ENet), 0 to let ENet handle it.
    */
   static int holePunchIntercept(ENetHost *host, ENetEvent *event) {
-    if (host->receivedDataLength >= 38) { // sizeof(HOLEPUNCH_PACKET)
+    if (host && host->receivedData && host->receivedDataLength >= 38) { // sizeof(HOLEPUNCH_PACKET)
       uint32_t magic;
       memcpy(&magic, host->receivedData, 4);
       if (magic == HOLEPUNCH_MAGIC) {
@@ -1009,6 +1009,10 @@ namespace stream {
         case ENET_EVENT_TYPE_RECEIVE:
           {
             net::packet_t packet {event.packet};
+            if (!packet || !packet->data || packet->dataLength < sizeof(std::uint16_t)) {
+              BOOST_LOG(warning) << "Dropping runt or invalid ENet control packet"sv;
+              break;
+            }
 
             auto type = *(std::uint16_t *) packet->data;
             std::string_view payload {(char *) packet->data + sizeof(type), packet->dataLength - sizeof(type)};
@@ -1112,12 +1116,18 @@ namespace stream {
     };
 
     static fec_t encode(const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize) {
+      if (blocksize == 0) {
+        return {};
+      }
       auto payload_size = payload.size();
 
       auto pad = payload_size % blocksize != 0;
 
       auto aligned_data_shards = payload_size / blocksize;
       auto data_shards = aligned_data_shards + (pad ? 1 : 0);
+      if (data_shards == 0) {
+        return {};
+      }
       auto parity_shards = (data_shards * fecpercentage + 99) / 100;
 
       // increase the FEC percentage for this frame if the parity shard minimum is not met
@@ -1210,6 +1220,10 @@ namespace stream {
    * @param data2 The second data buffer.
    */
   void concat_and_insert(std::vector<uint8_t> &result, uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
+    if (slice_size == 0) {
+      result.clear();
+      return;
+    }
     auto data_size = data1.size() + data2.size();
     auto pad = data_size % slice_size != 0;
     auto elements = data_size / slice_size + (pad ? 1 : 0);
@@ -1230,23 +1244,30 @@ namespace stream {
       if (next + slice_size > end) {
         // Copy the first portion from the first buffer
         auto copy_len = end - next;
-        std::copy(next, end, (char *) p + insert_size);
+        std::memcpy((char *) p + insert_size, next, copy_len);
 
         // Copy the remaining portion from the second buffer
         next = std::begin(data2);
         end = std::end(data2);
-        std::copy(next, next + (slice_size - copy_len), (char *) p + copy_len + insert_size);
+        std::memcpy((char *) p + copy_len + insert_size, next, slice_size - copy_len);
         next += slice_size - copy_len;
       } else {
-        std::copy(next, next + slice_size, (char *) p + insert_size);
+        std::memcpy((char *) p + insert_size, next, slice_size);
         next += slice_size;
       }
     }
   }
 
   std::vector<uint8_t> replace(const std::string_view &original, const std::string_view &old, const std::string_view &_new) {
+    if (old.empty()) {
+      return {original.begin(), original.end()};
+    }
     std::vector<uint8_t> replaced;
-    replaced.reserve(original.size() + _new.size() - old.size());
+    if (original.size() + _new.size() >= old.size()) {
+      replaced.reserve(original.size() + _new.size() - old.size());
+    } else {
+      replaced.reserve(original.size());
+    }
 
     auto begin = std::begin(original);
     auto end = std::end(original);
@@ -1268,7 +1289,7 @@ namespace stream {
    * @return 0 on success.
    */
   int send_feedback_msg(session_t *session, platf::gamepad_feedback_msg_t &msg) {
-    if (!session->control.peer) {
+    if (!session || !session->broadcast_ref || !session->control.peer) {
       BOOST_LOG(warning) << "Couldn't send gamepad feedback data, still waiting for PING from Moonlight"sv;
       // Still waiting for PING from Moonlight
       return -1;
@@ -1395,7 +1416,7 @@ namespace stream {
   }
 
   int send_hdr_mode(session_t *session, video::hdr_info_t hdr_info) {
-    if (!session->control.peer) {
+    if (!session || !session->broadcast_ref || !session->control.peer) {
       BOOST_LOG(warning) << "Couldn't send HDR mode, still waiting for PING from Moonlight"sv;
       // Still waiting for PING from Moonlight
       return -1;
@@ -2593,6 +2614,10 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_LOSS_STATS], [&](session_t *session, const std::string_view &payload) {
+      if (payload.size() < 4 * sizeof(int32_t)) {
+        BOOST_LOG(warning) << "Invalid IDX_LOSS_STATS payload size: "sv << payload.size();
+        return;
+      }
       int32_t *stats = (int32_t *) payload.data();
       auto count = stats[0];
       std::chrono::milliseconds t {stats[1]};
@@ -2925,6 +2950,10 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
+      if (payload.size() < 2 * sizeof(std::int64_t)) {
+        BOOST_LOG(warning) << "Invalid IDX_INVALIDATE_REF_FRAMES payload size: "sv << payload.size();
+        return;
+      }
       auto frames = (std::int64_t *) payload.data();
       auto firstFrame = frames[0];
       auto lastFrame = frames[1];
@@ -2967,7 +2996,16 @@ namespace stream {
         s_lastArrival = now;
       }
 
+      if (payload.size() < sizeof(int32_t)) {
+        BOOST_LOG(warning) << "Invalid IDX_INPUT_DATA payload size: "sv << payload.size();
+        return;
+      }
+
       auto tagged_cipher_length = util::endian::big(*(int32_t *) payload.data());
+      if (tagged_cipher_length < 0 || (size_t) tagged_cipher_length > payload.size() - sizeof(int32_t)) {
+        BOOST_LOG(warning) << "Corrupted IDX_INPUT_DATA cipher length: "sv << tagged_cipher_length;
+        return;
+      }
       std::string_view tagged_cipher {payload.data() + sizeof(tagged_cipher_length), (size_t) tagged_cipher_length};
 
       std::vector<uint8_t> plaintext;
@@ -2980,7 +3018,7 @@ namespace stream {
         auto &cipher = session->control.cipher;
         auto &iv = session->control.legacy_input_enc_iv;
         decryptFailed = cipher.decrypt(tagged_cipher, plaintext, &iv) != 0;
-        if (!decryptFailed && tagged_cipher_length >= 16 + iv.size()) {
+        if (!decryptFailed && tagged_cipher_length >= 16 + iv.size() && payload.size() >= 16) {
           // legacy 鏈式 IV 更新必須留在鎖內（順序敏感），且維持
           // 「解密成功才更新」語意。
           std::copy(payload.end() - 16, payload.end(), std::begin(iv));
@@ -3001,6 +3039,11 @@ namespace stream {
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_ENCRYPTED]"sv;
 
+      if (payload.size() < sizeof(control_encrypted_t) - sizeof(std::uint16_t)) {
+        BOOST_LOG(warning) << "Control: Truncated encrypted header"sv;
+        return;
+      }
+
       auto header = (control_encrypted_p) (payload.data() - 2);
 
       auto length = util::endian::little(header->length);
@@ -3012,6 +3055,10 @@ namespace stream {
       }
 
       auto tagged_cipher_length = length - 4;
+      if (tagged_cipher_length > payload.size() - (sizeof(control_encrypted_t) - sizeof(std::uint16_t))) {
+        BOOST_LOG(warning) << "Control: Encrypted payload length exceeds packet boundary"sv;
+        return;
+      }
       std::string_view tagged_cipher {(char *) header->payload(), (size_t) tagged_cipher_length};
 
       std::vector<uint8_t> plaintext;
@@ -3057,6 +3104,11 @@ namespace stream {
                          << tagged_cipher_length << ")";
 
         session::stop(*session);
+        return;
+      }
+
+      if (plaintext.size() < sizeof(control_header_v2)) {
+        BOOST_LOG(warning) << "Control: Decrypted plaintext too short for control header: "sv << plaintext.size();
         return;
       }
 
@@ -4013,7 +4065,10 @@ namespace stream {
 
       // Compute the number of FEC blocks needed for this frame using the block size and max shards
       auto max_data_per_fec_block = max_data_shards_per_fec_block * blocksize;
-      auto fec_blocks_needed = (payload.size() + (max_data_per_fec_block - 1)) / max_data_per_fec_block;
+      auto fec_blocks_needed = max_data_per_fec_block > 0 ? (payload.size() + (max_data_per_fec_block - 1)) / max_data_per_fec_block : 1;
+      if (fec_blocks_needed == 0) {
+        fec_blocks_needed = 1;
+      }
 
       // If the number of FEC blocks needed exceeds the protocol limit, turn off FEC for this frame.
       // For normal FEC percentages, this should only happen for enormous frames (over 800 packets at 20%).
@@ -4031,11 +4086,11 @@ namespace stream {
 
       // Align individual FEC blocks to blocksize
       auto unaligned_size = payload.size() / fec_blocks_needed;
-      auto aligned_size = ((unaligned_size + (blocksize - 1)) / blocksize) * blocksize;
+      auto aligned_size = blocksize > 0 ? ((unaligned_size + (blocksize - 1)) / blocksize) * blocksize : unaligned_size;
 
       // If we exceed the 10-bit FEC packet index (which means our frame exceeded 4096 packets),
       // the frame will be unrecoverable. Log an error for this case.
-      if (aligned_size / blocksize >= 1024) {
+      if (blocksize > 0 && aligned_size / blocksize >= 1024) {
         BOOST_LOG(error) << "Encoder produced a frame too large to send! Is the encoder broken? (needed "sv << (aligned_size / blocksize) << " packets)"sv;
       }
 

@@ -1240,14 +1240,38 @@ void connectionSawFrame(uint32_t frameIndex) {
     lastSeenFrame = frameIndex;
 }
 
+// Helper function for full TCP read (CWE-252 partial read prevention)
+static bool recvExactTcp(SOCKET s, char* buf, int len) {
+    int total = 0;
+    while (total < len) {
+        SOCK_RET err = recv(s, buf + total, len - total, 0);
+        if (err <= 0) {
+            return false;
+        }
+        total += err;
+    }
+    return true;
+}
+
+// Helper function for full TCP send (CWE-252 partial send prevention)
+static bool sendExactTcp(SOCKET s, const char* buf, int len) {
+    int total = 0;
+    while (total < len) {
+        SOCK_RET err = send(s, buf + total, len - total, 0);
+        if (err <= 0) {
+            return false;
+        }
+        total += err;
+    }
+    return true;
+}
+
 // Reads an NV control stream packet from the TCP connection
 static PNVCTL_TCP_PACKET_HEADER readNvctlPacketTcp(void) {
     NVCTL_TCP_PACKET_HEADER staticHeader;
     PNVCTL_TCP_PACKET_HEADER fullPacket;
-    SOCK_RET err;
 
-    err = recv(ctlSock, (char*)&staticHeader, sizeof(staticHeader), 0);
-    if (err != sizeof(staticHeader)) {
+    if (!recvExactTcp(ctlSock, (char*)&staticHeader, sizeof(staticHeader))) {
         return NULL;
     }
 
@@ -1261,8 +1285,7 @@ static PNVCTL_TCP_PACKET_HEADER readNvctlPacketTcp(void) {
 
     memcpy(fullPacket, &staticHeader, sizeof(staticHeader));
     if (staticHeader.payloadLength != 0) {
-        err = recv(ctlSock, (char*)(fullPacket + 1), staticHeader.payloadLength, 0);
-        if (err != staticHeader.payloadLength) {
+        if (!recvExactTcp(ctlSock, (char*)(fullPacket + 1), staticHeader.payloadLength)) {
             free(fullPacket);
             return NULL;
         }
@@ -1690,7 +1713,7 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
 
 static bool sendMessageTcp(short ptype, short paylen, const void* payload) {
     PNVCTL_TCP_PACKET_HEADER packet;
-    SOCK_RET err;
+    bool ret;
 
     LC_ASSERT(AppVersionQuad[0] < 5);
 
@@ -1703,14 +1726,10 @@ static bool sendMessageTcp(short ptype, short paylen, const void* payload) {
     packet->payloadLength = LE16(paylen);
     memcpy(&packet[1], payload, paylen);
 
-    err = send(ctlSock, (char*) packet, sizeof(*packet) + paylen, 0);
+    ret = sendExactTcp(ctlSock, (char*) packet, sizeof(*packet) + paylen);
     free(packet);
 
-    if (err != (SOCK_RET)(sizeof(*packet) + paylen)) {
-        return false;
-    }
-
-    return true;
+    return ret;
 }
 
 static bool sendMessageAndForget(short ptype, short paylen, const void* payload, uint8_t channelId, uint32_t flags, bool moreData) {

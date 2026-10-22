@@ -1434,6 +1434,9 @@ namespace platf {
     bool success;
     DWORD required_length = sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST);
     auto process_id_list = (PJOBOBJECT_BASIC_PROCESS_ID_LIST) calloc(1, required_length);
+    if (!process_id_list) {
+      return false;
+    }
     auto fg = util::fail_guard([&process_id_list]() {
       free(process_id_list);
     });
@@ -1549,8 +1552,17 @@ namespace platf {
       auto payload_length = payload_offset + (send_info.block_count * send_info.payload_size);
       while (payload_offset < payload_length) {
         auto payload_desc = send_info.buffer_for_payload_offset(payload_offset);
+        if (payload_desc.size == 0) {
+          break;
+        }
+        if (bufcount >= bufs.size()) {
+          bufs.resize(bufcount + max_bufs_per_msg + 1);
+        }
         bufs[bufcount].buf = (char *) payload_desc.buffer;
         bufs[bufcount].len = std::min(payload_desc.size, payload_length - payload_offset);
+        if (bufs[bufcount].len == 0) {
+          break;
+        }
         payload_offset += bufs[bufcount].len;
         bufcount++;
       }
@@ -1568,6 +1580,9 @@ namespace platf {
     msg.Control.len = sizeof(cmbuf);
 
     auto cm = WSA_CMSG_FIRSTHDR(&msg);
+    if (!cm) {
+      return false;
+    }
     if (send_info.source_address.is_v6()) {
       IN6_PKTINFO pktInfo;
 
@@ -1600,10 +1615,12 @@ namespace platf {
       cmbuflen += WSA_CMSG_SPACE(sizeof(DWORD));
 
       cm = WSA_CMSG_NXTHDR(&msg, cm);
+      if (cm) {
       cm->cmsg_level = IPPROTO_UDP;
       cm->cmsg_type = UDP_SEND_MSG_SIZE;
       cm->cmsg_len = WSA_CMSG_LEN(sizeof(DWORD));
       *((DWORD *) WSA_CMSG_DATA(cm)) = send_info.header_size + send_info.payload_size;
+      }
     }
 
     msg.Control.len = cmbuflen;
@@ -1653,6 +1670,9 @@ namespace platf {
     msg.Control.len = sizeof(cmbuf);
 
     auto cm = WSA_CMSG_FIRSTHDR(&msg);
+    if (!cm) {
+      return false;
+    }
     if (send_info.source_address.is_v6()) {
       IN6_PKTINFO pktInfo;
 
@@ -1985,7 +2005,7 @@ namespace platf {
     }
 
     VS_FIXEDFILEINFO *file_info = nullptr;
-    if (UINT file_info_size = 0; !VerQueryValueW(buffer.data(), L"\\", (LPVOID *) &file_info, &file_info_size)) {
+    if (UINT file_info_size = 0; !VerQueryValueW(buffer.data(), L"\\", (LPVOID *) &file_info, &file_info_size) || !file_info) {
       return false;
     }
 

@@ -297,7 +297,7 @@ namespace platf::audio {
     {
       wave_format_t mixer_waveformat;
       status = audio_client->GetMixFormat(&mixer_waveformat);
-      if (FAILED(status)) {
+      if (FAILED(status) || !mixer_waveformat) {
         BOOST_LOG(error) << "Couldn't get mix format for audio device: [0x"sv << util::hex(status).to_string_view() << ']';
         return nullptr;
       }
@@ -647,8 +647,10 @@ namespace platf::audio {
 
         if (buffer_flags & AUDCLNT_BUFFERFLAGS_SILENT) {
           std::fill_n(sample_buf_pos, n, 0);
-        } else {
+        } else if (sample_aligned.samples != nullptr) {
           std::copy_n(sample_aligned.samples, n, sample_buf_pos);
+        } else {
+          std::fill_n(sample_buf_pos, n, 0);
         }
 
         sample_buf_pos += n;
@@ -701,9 +703,9 @@ namespace platf::audio {
         }
 
         audio::wstring_t id;
-        device->GetId(&id);
-
-        sink.host = utf_utils::to_utf8(id.get());
+        if (SUCCEEDED(device->GetId(&id)) && id.get()) {
+          sink.host = utf_utils::to_utf8(id.get());
+        }
       }
 
       // Prepare to search for the device_id of the virtual audio sink device,
@@ -823,10 +825,22 @@ namespace platf::audio {
         audio::prop_t prop;
         prop_var_t current_device_format;
 
-        if (SUCCEEDED(current_default_dev->OpenPropertyStore(STGM_READ, &prop)) && SUCCEEDED(prop->GetValue(PKEY_AudioEngine_DeviceFormat, &current_device_format.prop))) {
-          auto *format = (WAVEFORMATEXTENSIBLE *) current_device_format.prop.blob.pBlobData;
-          wanted_bits_per_sample = format->Samples.wValidBitsPerSample;
-          BOOST_LOG(info) << "Virtual audio device will use "sv << wanted_bits_per_sample << "-bit to match default device"sv;
+        if (SUCCEEDED(current_default_dev->OpenPropertyStore(STGM_READ, &prop)) &&
+            prop &&
+            SUCCEEDED(prop->GetValue(PKEY_AudioEngine_DeviceFormat, &current_device_format.prop))) {
+          if (current_device_format.prop.vt == VT_BLOB &&
+              current_device_format.prop.blob.pBlobData != nullptr &&
+              current_device_format.prop.blob.cbSize >= sizeof(WAVEFORMATEX)) {
+            auto *wf = reinterpret_cast<const WAVEFORMATEX *>(current_device_format.prop.blob.pBlobData);
+            if (wf->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                current_device_format.prop.blob.cbSize >= sizeof(WAVEFORMATEXTENSIBLE)) {
+              auto *wfe = reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(wf);
+              wanted_bits_per_sample = wfe->Samples.wValidBitsPerSample;
+            } else {
+              wanted_bits_per_sample = wf->wBitsPerSample;
+            }
+            BOOST_LOG(info) << "Virtual audio device will use "sv << wanted_bits_per_sample << "-bit to match default device"sv;
+          }
         }
       }
 
@@ -930,16 +944,22 @@ namespace platf::audio {
       collection->GetCount(&count);
 
       std::vector<std::wstring> matched(match_list.size());
-      for (auto x = 0; x < count; ++x) {
+      for (UINT x = 0; x < count; ++x) {
         audio::device_t device;
-        collection->Item(x, &device);
+        if (FAILED(collection->Item(x, &device)) || !device) {
+          continue;
+        }
 
         audio::wstring_t wstring_id;
-        device->GetId(&wstring_id);
+        if (FAILED(device->GetId(&wstring_id)) || !wstring_id.get()) {
+          continue;
+        }
         std::wstring device_id = wstring_id.get();
 
         audio::prop_t prop;
-        device->OpenPropertyStore(STGM_READ, &prop);
+        if (FAILED(device->OpenPropertyStore(STGM_READ, &prop)) || !prop) {
+          continue;
+        }
 
         prop_var_t adapter_friendly_name;
         prop_var_t device_friendly_name;
@@ -958,15 +978,21 @@ namespace platf::audio {
                 break;
 
               case match_field_e::device_friendly_name:
-                match_value = device_friendly_name.prop.pwszVal;
+                if (device_friendly_name.prop.vt == VT_LPWSTR) {
+                  match_value = device_friendly_name.prop.pwszVal;
+                }
                 break;
 
               case match_field_e::adapter_friendly_name:
-                match_value = adapter_friendly_name.prop.pwszVal;
+                if (adapter_friendly_name.prop.vt == VT_LPWSTR) {
+                  match_value = adapter_friendly_name.prop.pwszVal;
+                }
                 break;
 
               case match_field_e::device_description:
-                match_value = device_desc.prop.pwszVal;
+                if (device_desc.prop.vt == VT_LPWSTR) {
+                  match_value = device_desc.prop.pwszVal;
+                }
                 break;
             }
             if (match_value && std::wcscmp(match_value, match_list[i].second.c_str()) == 0) {
@@ -1003,7 +1029,9 @@ namespace platf::audio {
         }
 
         audio::wstring_t current_default_id;
-        current_default_dev->GetId(&current_default_id);
+        if (FAILED(current_default_dev->GetId(&current_default_id)) || !current_default_id.get()) {
+          return;
+        }
 
         // If Steam Streaming Speakers are already not default, we're done.
         if (steam_device_id != current_default_id.get()) {
@@ -1035,11 +1063,11 @@ namespace platf::audio {
       }
 
       audio::wstring_t new_default_id;
-      new_default_dev->GetId(&new_default_id);
-
-      // Set the new default audio device
-      for (int x = 0; x < (int) ERole_enum_count; ++x) {
-        policy->SetDefaultEndpoint(new_default_id.get(), (ERole) x);
+      if (SUCCEEDED(new_default_dev->GetId(&new_default_id)) && new_default_id.get()) {
+        // Set the new default audio device
+        for (int x = 0; x < (int) ERole_enum_count; ++x) {
+          policy->SetDefaultEndpoint(new_default_id.get(), (ERole) x);
+        }
       }
 
       BOOST_LOG(info) << "Successfully reset default audio device"sv;
@@ -1085,10 +1113,10 @@ namespace platf::audio {
         // default output device just in case installing the new one changed it.
         if (old_default_dev) {
           audio::wstring_t old_default_id;
-          old_default_dev->GetId(&old_default_id);
-
-          for (int x = 0; x < (int) ERole_enum_count; ++x) {
-            policy->SetDefaultEndpoint(old_default_id.get(), (ERole) x);
+          if (SUCCEEDED(old_default_dev->GetId(&old_default_id)) && old_default_id.get()) {
+            for (int x = 0; x < (int) ERole_enum_count; ++x) {
+              policy->SetDefaultEndpoint(old_default_id.get(), (ERole) x);
+            }
           }
         }
 

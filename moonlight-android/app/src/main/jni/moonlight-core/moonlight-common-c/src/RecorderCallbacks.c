@@ -14,8 +14,12 @@ static AUDIO_RENDERER_CALLBACKS realArCallbacks;
 static int recDrSetup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags)
 {
     const char* path = context;
-    
+
     if (path != NULL) {
+        if (videoFile != NULL) {
+            fclose(videoFile);
+            videoFile = NULL;
+        }
         videoFile = fopen(path, "wb");
         if (videoFile == NULL) {
             return -1;
@@ -25,7 +29,12 @@ static int recDrSetup(int videoFormat, int width, int height, int redrawRate, vo
         Limelog("Video recording will not be enabled - file path not specified in drContext!\n");
     }
 
-    return realDrCallbacks.setup(videoFormat, width, height, redrawRate, NULL, drFlags);
+    int ret = realDrCallbacks.setup(videoFormat, width, height, redrawRate, NULL, drFlags);
+    if (ret != 0 && videoFile != NULL) {
+        fclose(videoFile);
+        videoFile = NULL;
+    }
+    return ret;
 }
 
 static void recDrCleanup(void)
@@ -35,15 +44,23 @@ static void recDrCleanup(void)
         videoFile = NULL;
     }
 
-    realDrCallbacks.cleanup();
+    if (realDrCallbacks.cleanup != NULL) {
+        realDrCallbacks.cleanup();
+    }
 }
 
 static int recDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit)
 {
+    if (decodeUnit == NULL) {
+        return -1;
+    }
+
     if (videoFile != NULL) {
         PLENTRY entry = decodeUnit->bufferList;
         while (entry != NULL) {
-            fwrite(entry->data, 1, entry->length, videoFile);
+            if (entry->data != NULL && entry->length > 0) {
+                fwrite(entry->data, 1, entry->length, videoFile);
+            }
             entry = entry->next;
         }
     }
@@ -56,6 +73,10 @@ static int recArInit(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opu
     const char* path = context;
 
     if (path != NULL) {
+        if (audioFile != NULL) {
+            fclose(audioFile);
+            audioFile = NULL;
+        }
         audioFile = fopen(path, "wb");
         if (audioFile == NULL) {
             return -1;
@@ -65,7 +86,12 @@ static int recArInit(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opu
         Limelog("Audio recording will not be enabled - file path not specified in arContext!\n");
     }
 
-    return realArCallbacks.init(audioConfiguration, opusConfig, NULL, arFlags);
+    int ret = realArCallbacks.init(audioConfiguration, opusConfig, NULL, arFlags);
+    if (ret != 0 && audioFile != NULL) {
+        fclose(audioFile);
+        audioFile = NULL;
+    }
+    return ret;
 }
 
 static void recArCleanup(void)
@@ -75,28 +101,37 @@ static void recArCleanup(void)
         audioFile = NULL;
     }
 
-    realArCallbacks.cleanup();
+    if (realArCallbacks.cleanup != NULL) {
+        realArCallbacks.cleanup();
+    }
 }
 
 static void recArDecodeAndPlaySample(char* sampleData, int sampleLength)
 {
-    if (audioFile != NULL) {
+    if (audioFile != NULL && sampleData != NULL && sampleLength > 0) {
         fwrite(sampleData, 1, sampleLength, audioFile);
     }
 
-    realArCallbacks.decodeAndPlaySample(sampleData, sampleLength);
+    if (realArCallbacks.decodeAndPlaySample != NULL) {
+        realArCallbacks.decodeAndPlaySample(sampleData, sampleLength);
+    }
 }
 
 void setRecorderCallbacks(PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks)
 {
-    realDrCallbacks = *drCallbacks;
-    realArCallbacks = *arCallbacks;
+    if (drCallbacks != NULL) {
+        realDrCallbacks = *drCallbacks;
 
-    drCallbacks->setup = recDrSetup;
-    drCallbacks->cleanup = recDrCleanup;
-    drCallbacks->submitDecodeUnit = recDrSubmitDecodeUnit;
+        drCallbacks->setup = recDrSetup;
+        drCallbacks->cleanup = recDrCleanup;
+        drCallbacks->submitDecodeUnit = recDrSubmitDecodeUnit;
+    }
 
-    arCallbacks->init = recArInit;
-    arCallbacks->cleanup = recArCleanup;
-    arCallbacks->decodeAndPlaySample = recArDecodeAndPlaySample;
+    if (arCallbacks != NULL) {
+        realArCallbacks = *arCallbacks;
+
+        arCallbacks->init = recArInit;
+        arCallbacks->cleanup = recArCleanup;
+        arCallbacks->decodeAndPlaySample = recArDecodeAndPlaySample;
+    }
 }

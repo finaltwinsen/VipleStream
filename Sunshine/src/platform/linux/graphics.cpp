@@ -99,13 +99,20 @@ namespace gl {
   std::string shader_t::err_str() {
     int length;
     ctx.GetShaderiv(handle(), GL_INFO_LOG_LENGTH, &length);
+    if (length <= 1) {
+      return {};
+    }
 
     std::string string;
     string.resize(length);
 
     ctx.GetShaderInfoLog(handle(), length, &length, string.data());
 
-    string.resize(length - 1);
+    if (!string.empty() && string.back() == '\0') {
+      string.pop_back();
+    } else {
+      string.resize(length);
+    }
 
     return string;
   }
@@ -165,6 +172,9 @@ namespace gl {
 
     for (int x = 0; x < count; ++x) {
       auto val = members[x];
+      if (_offsets[x] < 0 || (std::size_t) _offsets[x] + val.size() > _size) {
+        continue;
+      }
 
       std::copy_n((const std::uint8_t *) val.data(), val.size(), &buffer[_offsets[x]]);
     }
@@ -175,13 +185,20 @@ namespace gl {
   std::string program_t::err_str() {
     int length;
     ctx.GetProgramiv(handle(), GL_INFO_LOG_LENGTH, &length);
+    if (length <= 1) {
+      return {};
+    }
 
     std::string string;
     string.resize(length);
 
-    ctx.GetShaderInfoLog(handle(), length, &length, string.data());
+    ctx.GetProgramInfoLog(handle(), length, &length, string.data());
 
-    string.resize(length - 1);
+    if (!string.empty() && string.back() == '\0') {
+      string.pop_back();
+    } else {
+      string.resize(length);
+    }
 
     return string;
   }
@@ -261,6 +278,10 @@ namespace gl {
 
     for (int x = 0; x < count; ++x) {
       auto val = std::get<1>(members[x]);
+      if (offsets[x] < 0 || (std::size_t) offsets[x] + val.size() > (std::size_t) size) {
+        BOOST_LOG(error) << "Uniform offset out of bounds: ["sv << members[x].first << ']';
+        return std::nullopt;
+      }
 
       std::copy_n((const std::uint8_t *) val.data(), val.size(), &buffer[offsets[x]]);
     }
@@ -367,12 +388,17 @@ namespace egl {
     }
 
     const char *extension_st = eglQueryString(display.get(), EGL_EXTENSIONS);
+    if (!extension_st) {
+      BOOST_LOG(error) << "Couldn't get EGL extensions string"sv;
+      return nullptr;
+    }
+
     const char *version = eglQueryString(display.get(), EGL_VERSION);
     const char *vendor = eglQueryString(display.get(), EGL_VENDOR);
     const char *apis = eglQueryString(display.get(), EGL_CLIENT_APIS);
 
-    BOOST_LOG(debug) << "EGL: ["sv << vendor << "]: version ["sv << version << ']';
-    BOOST_LOG(debug) << "API's supported: ["sv << apis << ']';
+    BOOST_LOG(debug) << "EGL: ["sv << (vendor ? vendor : "UNKNOWN") << "]: version ["sv << (version ? version : "UNKNOWN") << ']';
+    BOOST_LOG(debug) << "API's supported: ["sv << (apis ? apis : "UNKNOWN") << ']';
 
     const char *extensions[] {
       "EGL_KHR_create_context",
