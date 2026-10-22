@@ -34,6 +34,7 @@ namespace viple::steam {
 
     /**
      * Read UTF-16 REG_SZ from HKCU / HKLM. Returns empty string on miss.
+     * Supports long paths dynamically if buffer exceeds MAX_PATH.
      */
     std::wstring read_reg_sz(HKEY root, const wchar_t *subkey, const wchar_t *value) {
       HKEY hk {};
@@ -44,6 +45,20 @@ namespace viple::steam {
       DWORD   sz   = sizeof(buf);
       DWORD   type = 0;
       LSTATUS st   = RegQueryValueExW(hk, value, nullptr, &type, reinterpret_cast<LPBYTE>(buf), &sz);
+      if (st == ERROR_MORE_DATA && sz > sizeof(buf)) {
+        std::vector<wchar_t> dyn_buf(sz / sizeof(wchar_t) + 1, L'\0');
+        DWORD dyn_sz = static_cast<DWORD>(dyn_buf.size() * sizeof(wchar_t));
+        st = RegQueryValueExW(hk, value, nullptr, &type, reinterpret_cast<LPBYTE>(dyn_buf.data()), &dyn_sz);
+        RegCloseKey(hk);
+        if (st != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+          return {};
+        }
+        size_t len = dyn_sz ? (dyn_sz / sizeof(wchar_t)) : 0;
+        while (len > 0 && dyn_buf[len - 1] == L'\0') {
+          len--;
+        }
+        return std::wstring {dyn_buf.data(), len};
+      }
       RegCloseKey(hk);
       if (st != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) {
         return {};
@@ -97,13 +112,24 @@ namespace viple::steam {
     }
 
     std::optional<std::string> slurp_file(const fs::path &p) {
-      std::ifstream f {p, std::ios::binary};
+      std::ifstream f {p, std::ios::binary | std::ios::ate};
       if (!f) {
         return std::nullopt;
       }
-      std::ostringstream ss;
-      ss << f.rdbuf();
-      return ss.str();
+      const auto size = f.tellg();
+      if (size <= 0) {
+        return std::string {};
+      }
+      // 防禦性檢查：VDF / ACF 設定檔一般小於 128 MB，防止畸形超大檔案耗盡記憶體 (CWE-400)
+      if (size > 128 * 1024 * 1024) {
+        return std::nullopt;
+      }
+      std::string s(static_cast<std::size_t>(size), '\0');
+      f.seekg(0, std::ios::beg);
+      if (!f.read(s.data(), size)) {
+        return std::nullopt;
+      }
+      return s;
     }
 
     /**
@@ -140,9 +166,7 @@ namespace viple::steam {
       bool found = false;
       if (Process32FirstW(snap, &pe)) {
         do {
-          std::wstring name {pe.szExeFile};
-          std::transform(name.begin(), name.end(), name.begin(), ::towlower);
-          if (name == L"steam.exe") {
+          if (_wcsicmp(pe.szExeFile, L"steam.exe") == 0) {
             found = true;
             break;
           }
@@ -213,11 +237,15 @@ namespace viple::steam {
       for (DWORD i = 0;; ++i) {
         wchar_t sid[256];
         DWORD sid_len = 256;
-        if (RegEnumKeyExW(users_root, i, sid, &sid_len, nullptr, nullptr,
-                          nullptr, nullptr) != ERROR_SUCCESS) {
+        auto enum_rc = RegEnumKeyExW(users_root, i, sid, &sid_len, nullptr, nullptr,
+                                     nullptr, nullptr);
+        if (enum_rc == ERROR_NO_MORE_ITEMS) {
           break;
         }
-        if (wcsstr(sid, L"_Classes")) continue;
+        if (enum_rc != ERROR_SUCCESS) {
+          continue;
+        }
+        if (wcsstr(sid, L"_Classes") || _wcsicmp(sid, L".DEFAULT") == 0) continue;
         std::wstring path = std::wstring(sid) + L"\\Software\\Valve\\Steam\\ActiveProcess";
         HKEY ap = nullptr;
         if (RegOpenKeyExW(users_root, path.c_str(), 0, KEY_READ, &ap) != ERROR_SUCCESS) {
@@ -328,24 +356,28 @@ namespace viple::steam {
     std::error_code ec;
     fs::path userdata = steam / "userdata";
     if (fs::exists(userdata, ec)) {
-      for (auto &de : fs::directory_iterator {userdata, ec}) {
-        if (!de.is_directory()) {
-          continue;
+      try {
+        for (auto &de : fs::directory_iterator {userdata, ec}) {
+          if (!de.is_directory()) {
+            continue;
+          }
+          auto id3 = path_to_utf8(de.path().filename());
+          if (id3 == "0" || id3 == "anonymous") {
+            continue;
+          }
+          if (profile_idx.count(id3)) {
+            continue;
+          }
+          Profile p;
+          p.steam_id3     = id3;
+          p.steam_id64    = steamid3_to_id64(id3);
+          p.persona_name  = "(unknown #" + id3 + ")";
+          p.switchable    = false;
+          profile_idx[id3] = r.profiles.size();
+          r.profiles.emplace_back(std::move(p));
         }
-        auto id3 = path_to_utf8(de.path().filename());
-        if (id3 == "0" || id3 == "anonymous") {
-          continue;
-        }
-        if (profile_idx.count(id3)) {
-          continue;
-        }
-        Profile p;
-        p.steam_id3     = id3;
-        p.steam_id64    = steamid3_to_id64(id3);
-        p.persona_name  = "(unknown #" + id3 + ")";
-        p.switchable    = false;
-        profile_idx[id3] = r.profiles.size();
-        r.profiles.emplace_back(std::move(p));
+      } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << "[steam-scan] error enumerating userdata: " << e.what();
       }
     }
 
@@ -441,76 +473,80 @@ namespace viple::steam {
       if (!fs::exists(sa, ec)) {
         continue;
       }
-      for (auto &de : fs::directory_iterator {sa, ec}) {
-        if (!de.is_regular_file()) {
-          continue;
-        }
-        auto fname = path_to_utf8(de.path().filename());
-        if (fname.size() < 18 || fname.rfind("appmanifest_", 0) != 0 ||
-            fname.substr(fname.size() - 4) != ".acf") {
-          continue;
-        }
-        auto txt = slurp_file(de.path());
-        if (!txt) {
-          continue;
-        }
-        auto root = vdf::parse(*txt);
-        if (!root) {
-          continue;
-        }
-        const auto *st = root->child("AppState");
-        if (!st || !st->is_map()) {
-          continue;
-        }
-        auto app_id = st->leaf_or("appid");
-        if (app_id.empty()) {
-          continue;
-        }
-        // StateFlags: bit 2 (= 4) means "fully installed". Filter the
-        // rest (queued / downloading / validating / corrupt).
-        int state = 0;
-        try {
-          state = std::stoi(st->leaf_or("StateFlags", "0"));
-        } catch (...) {}
-        if ((state & 4) == 0) {
-          continue;
-        }
+      try {
+        for (auto &de : fs::directory_iterator {sa, ec}) {
+          if (!de.is_regular_file()) {
+            continue;
+          }
+          auto fname = path_to_utf8(de.path().filename());
+          if (fname.size() < 18 || fname.rfind("appmanifest_", 0) != 0 ||
+              fname.substr(fname.size() - 4) != ".acf") {
+            continue;
+          }
+          auto txt = slurp_file(de.path());
+          if (!txt) {
+            continue;
+          }
+          auto root = vdf::parse(*txt);
+          if (!root) {
+            continue;
+          }
+          const auto *st = root->child("AppState");
+          if (!st || !st->is_map()) {
+            continue;
+          }
+          auto app_id = st->leaf_or("appid");
+          if (app_id.empty()) {
+            continue;
+          }
+          // StateFlags: bit 2 (= 4) means "fully installed". Filter the
+          // rest (queued / downloading / validating / corrupt).
+          int state = 0;
+          try {
+            state = std::stoi(st->leaf_or("StateFlags", "0"));
+          } catch (...) {}
+          if ((state & 4) == 0) {
+            continue;
+          }
 
-        App a;
-        a.app_id      = app_id;
-        a.name        = st->leaf_or("name");
-        auto dir      = st->leaf_or("installdir");
-        a.install_dir = path_to_utf8(lib / "steamapps" / "common" / fs::path {utf8_to_wstr(dir)});
-        try {
-          a.size_on_disk = std::stoll(st->leaf_or("SizeOnDisk", "0"));
-        } catch (...) {}
-        a.launch_url = "steam://rungameid/" + app_id;
+          App a;
+          a.app_id      = app_id;
+          a.name        = st->leaf_or("name");
+          auto dir      = st->leaf_or("installdir");
+          a.install_dir = path_to_utf8(lib / "steamapps" / "common" / fs::path {utf8_to_wstr(dir)});
+          try {
+            a.size_on_disk = std::stoll(st->leaf_or("SizeOnDisk", "0"));
+          } catch (...) {}
+          a.launch_url = "steam://rungameid/" + app_id;
 
-        // Image lookup — Steam 2024+ uses per-AppID subfolders
-        fs::path newHeader  = steam / "appcache" / "librarycache" / app_id / "header.jpg";
-        fs::path newLibrary = steam / "appcache" / "librarycache" / app_id / "library_600x900.jpg";
-        fs::path oldHeader  = steam / "appcache" / "librarycache" / (app_id + "_header.jpg");
-        fs::path oldLibrary = steam / "appcache" / "librarycache" / (app_id + "_library_600x900.jpg");
-        if (fs::exists(newHeader, ec)) {
-          a.image_header = path_to_utf8(newHeader);
-        } else if (fs::exists(oldHeader, ec)) {
-          a.image_header = path_to_utf8(oldHeader);
-        }
-        if (fs::exists(newLibrary, ec)) {
-          a.image_library = path_to_utf8(newLibrary);
-        } else if (fs::exists(oldLibrary, ec)) {
-          a.image_library = path_to_utf8(oldLibrary);
-        }
+          // Image lookup — Steam 2024+ uses per-AppID subfolders
+          fs::path newHeader  = steam / "appcache" / "librarycache" / app_id / "header.jpg";
+          fs::path newLibrary = steam / "appcache" / "librarycache" / app_id / "library_600x900.jpg";
+          fs::path oldHeader  = steam / "appcache" / "librarycache" / (app_id + "_header.jpg");
+          fs::path oldLibrary = steam / "appcache" / "librarycache" / (app_id + "_library_600x900.jpg");
+          if (fs::exists(newHeader, ec)) {
+            a.image_header = path_to_utf8(newHeader);
+          } else if (fs::exists(oldHeader, ec)) {
+            a.image_header = path_to_utf8(oldHeader);
+          }
+          if (fs::exists(newLibrary, ec)) {
+            a.image_library = path_to_utf8(newLibrary);
+          } else if (fs::exists(oldLibrary, ec)) {
+            a.image_library = path_to_utf8(oldLibrary);
+          }
 
-        if (auto it = ownership.find(app_id); it != ownership.end()) {
-          a.owners = it->second;
-        }
-        if (auto it = playstats.find(app_id); it != playstats.end()) {
-          a.last_played      = it->second.last_played;
-          a.playtime_minutes = it->second.playtime_minutes;
-        }
+          if (auto it = ownership.find(app_id); it != ownership.end()) {
+            a.owners = it->second;
+          }
+          if (auto it = playstats.find(app_id); it != playstats.end()) {
+            a.last_played      = it->second.last_played;
+            a.playtime_minutes = it->second.playtime_minutes;
+          }
 
-        r.apps.emplace_back(std::move(a));
+          r.apps.emplace_back(std::move(a));
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << "[steam-scan] error enumerating steamapps in " << path_to_utf8(lib) << ": " << e.what();
       }
     }
 
@@ -532,6 +568,7 @@ namespace viple::steam {
 
     std::mutex                                        g_cache_mtx;
     std::optional<Result>                             g_cached;
+    bool                                              g_cache_valid = false;
     std::chrono::steady_clock::time_point             g_cached_at {};
 
   }  // namespace
@@ -539,17 +576,19 @@ namespace viple::steam {
   std::optional<Result> scan_cached(std::chrono::seconds ttl) {
     std::lock_guard<std::mutex> lk {g_cache_mtx};
     auto now = std::chrono::steady_clock::now();
-    if (g_cached && (now - g_cached_at) < ttl) {
+    if (g_cache_valid && (now - g_cached_at) < ttl) {
       return g_cached;
     }
-    g_cached    = scan();
-    g_cached_at = now;
+    g_cached      = scan();
+    g_cached_at   = now;
+    g_cache_valid = true;
     return g_cached;
   }
 
   void invalidate_cache() {
     std::lock_guard<std::mutex> lk {g_cache_mtx};
     g_cached.reset();
+    g_cache_valid = false;
   }
 
 }  // namespace viple::steam

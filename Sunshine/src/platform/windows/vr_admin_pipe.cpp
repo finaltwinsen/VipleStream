@@ -208,6 +208,10 @@ namespace platf::vr_admin {
             }
             const auto *ace = static_cast<const ACCESS_ALLOWED_ACE *>(p);
             PSID sid = const_cast<DWORD *>(&ace->SidStart);
+            if (!IsValidSid(sid)) {
+              why = "dacl";
+              break;
+            }
             const bool admin = IsWellKnownSid(sid, WinLocalSystemSid) || IsWellKnownSid(sid, WinBuiltinAdministratorsSid);
             if (!admin && (ace->Mask & k_write_rights)) {
               why = "dacl";
@@ -506,8 +510,9 @@ namespace platf::vr_admin {
 
     private:
       void drain_rest() {
+        ovl_t o;
         for (int i = 0; i < 64; ++i) {
-          ovl_t o;
+          o.reset();
           DWORD n = 0;
           BOOL ok = ReadFile(pipe_, buf_.data(), static_cast<DWORD>(buf_.size()), nullptr, &o.o);
           DWORD err = ok ? 0 : GetLastError();
@@ -1302,8 +1307,9 @@ namespace platf::vr_admin {
     read_e cli_read(HANDLE h, std::string &out, DWORD timeout_ms) {
       out.clear();
       std::vector<char> buf(65536);
+      ovl_t o;
       for (int part = 0; part < 64; ++part) {
-        ovl_t o;
+        o.reset();
         DWORD n = 0;
         BOOL ok = ReadFile(h, buf.data(), static_cast<DWORD>(buf.size()), nullptr, &o.o);
         DWORD err = ok ? 0 : GetLastError();

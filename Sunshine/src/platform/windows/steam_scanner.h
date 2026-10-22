@@ -28,17 +28,17 @@ namespace viple::steam {
     std::string account_name;       ///< Steam username used for -login
     std::string persona_name;       ///< Display name (shown in Steam friends)
     std::string avatar_path;        ///< Local path to avatar.png, "" if missing
-    bool        remember_password;  ///< true if `-login <user>` can skip password
-    bool        switchable;         ///< alias for remember_password (future-proof)
-    bool        most_recent;        ///< most recently logged-in account
-    int64_t     last_login;         ///< unix timestamp of last login
+    bool        remember_password = false;  ///< true if `-login <user>` can skip password
+    bool        switchable        = false;  ///< alias for remember_password (future-proof)
+    bool        most_recent       = false;  ///< most recently logged-in account
+    int64_t     last_login        = 0;      ///< unix timestamp of last login
   };
 
   struct App {
     std::string              app_id;         ///< Steam AppID as decimal string
     std::string              name;           ///< human-readable title from appmanifest
     std::string              install_dir;    ///< absolute path on disk
-    int64_t                  size_on_disk;   ///< bytes
+    int64_t                  size_on_disk = 0;   ///< bytes
     std::string              image_header;   ///< local path to header.jpg, "" if absent
     std::string              image_library;  ///< local path to library_600x900.jpg, "" if absent
     std::vector<std::string> owners;         ///< steam_id3 list — which profiles own this app
