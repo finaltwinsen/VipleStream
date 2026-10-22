@@ -347,7 +347,9 @@ namespace vr::bridge {
       if (r.logon.empty()) {
         if (auto gr = token_info(tok, TokenGroups); gr.size() >= sizeof(TOKEN_GROUPS)) {
           auto *g = reinterpret_cast<TOKEN_GROUPS *>(gr.data());
-          for (DWORD i = 0; i < g->GroupCount; ++i) {
+          const size_t max_groups = gr.size() >= offsetof(TOKEN_GROUPS, Groups) ? (gr.size() - offsetof(TOKEN_GROUPS, Groups)) / sizeof(SID_AND_ATTRIBUTES) : 0;
+          const DWORD count = std::min<DWORD>(g->GroupCount, static_cast<DWORD>(max_groups));
+          for (DWORD i = 0; i < count; ++i) {
             if ((g->Groups[i].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID) {
               r.logon = copy_sid(g->Groups[i].Sid);
               break;
@@ -473,6 +475,9 @@ namespace vr::bridge {
 
     /// 不可信字串進 log 之前：只留可列印 ASCII，'[' 與其他字元換成 '?'（§B.8 第 8、10 條）
     std::string sanitize(const char *s, size_t max_len) {
+      if (!s) {
+        return {};
+      }
       std::string out;
       out.reserve(max_len);
       for (size_t i = 0; i < max_len && s[i] != '\0'; ++i) {
@@ -1627,6 +1632,9 @@ namespace vr::bridge {
         return e != ERROR_SUCCESS ? e : ERROR_INVALID_ACL;
       }
       std::lock_guard lk(pipe_mtx_);
+      if (!pipe_) {
+        return ERROR_INVALID_HANDLE;
+      }
       return SetSecurityInfo(pipe_.get(), SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr, acl, nullptr);
     }
 
@@ -1643,7 +1651,11 @@ namespace vr::bridge {
       bool found = false;
       for (DWORD i = 0; dacl && i < dacl->AceCount && !found; ++i) {
         void *p = nullptr;
-        if (!GetAce(dacl, i, &p) || static_cast<const ACE_HEADER *>(p)->AceType != ACCESS_ALLOWED_ACE_TYPE) {
+        if (!GetAce(dacl, i, &p)) {
+          continue;
+        }
+        const auto *h = static_cast<const ACE_HEADER *>(p);
+        if (h->AceType != ACCESS_ALLOWED_ACE_TYPE || h->AceSize < sizeof(ACCESS_ALLOWED_ACE)) {
           continue;
         }
         auto *a = static_cast<ACCESS_ALLOWED_ACE *>(p);
@@ -2235,6 +2247,7 @@ namespace vr::bridge {
         is_peer ? "selftest-peer" : "vrserver",
         hex32(c.driver_caps)
       );
+      c.present_phase_ms.reserve(1024);
       conn_ = std::move(c);
       {
         std::lock_guard lk(mtx_);
@@ -3237,6 +3250,12 @@ namespace vr::bridge {
           hs[n++] = timer_.get();
         }
         const DWORD w = WaitForMultipleObjects(n, hs, FALSE, compute_timeout(now_qpc(), next_pipe_try, next_user_poll));
+        if (w == WAIT_FAILED) {
+          const DWORD err = GetLastError();
+          BOOST_LOG(error) << "[VIPLE-VR-IPC] WaitForMultipleObjects failed err=" << err;
+          Sleep(10);
+          continue;
+        }
         if (w == WAIT_OBJECT_0) {
           break;
         }
@@ -3308,7 +3327,7 @@ namespace vr::bridge {
             continue;
           }
           const auto *h = static_cast<const ACE_HEADER *>(p);
-          if (h->AceType != ACCESS_ALLOWED_ACE_TYPE) {
+          if (h->AceType != ACCESS_ALLOWED_ACE_TYPE || h->AceSize < sizeof(ACCESS_ALLOWED_ACE)) {
             continue;
           }
           auto *a = static_cast<ACCESS_ALLOWED_ACE *>(p);
@@ -3331,7 +3350,7 @@ namespace vr::bridge {
             continue;
           }
           const auto *h = static_cast<const ACE_HEADER *>(p);
-          if (h->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE) {
+          if (h->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE || h->AceSize < sizeof(SYSTEM_MANDATORY_LABEL_ACE)) {
             continue;
           }
           auto *l = static_cast<SYSTEM_MANDATORY_LABEL_ACE *>(p);
