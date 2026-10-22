@@ -190,6 +190,9 @@ private:
     XrAction m_Squeeze = XR_NULL_HANDLE;
     XrAction m_Secondary = XR_NULL_HANDLE;
     XrAction m_Primary = XR_NULL_HANDLE;  // §VR-PLAYER：A（影片模式的播放／暫停；串流時沒有用到）
+    // §VR-EXIT-COMBO：A 只綁右手 a。不能沿用 m_Primary：Touch 的 m_Primary 也綁左手 x，
+    // 單手 X＋扳機＋握把就會成立（code review 抓到）
+    XrAction m_ComboA = XR_NULL_HANDLE;
     XrAction m_ComboX = XR_NULL_HANDLE;   // §VR-EXIT-COMBO：X（Frame 在右手、Touch 在左手；Index 沒有）
     bool m_PlayerWas[4][2] = {};          // §VR-PLAYER：PlayerButton × 手 的上一格狀態
     XrAction m_Stick = XR_NULL_HANDLE;

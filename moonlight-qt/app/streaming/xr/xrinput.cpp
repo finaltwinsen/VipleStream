@@ -331,6 +331,7 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         !mk("squeeze", "Grip (right click)", XR_ACTION_TYPE_FLOAT_INPUT, &m_Squeeze) ||
         !mk("secondary", "B (right click)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Secondary) ||
         !mk("primary", "A (video player: play/pause)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Primary) ||
+        !mk("combo_a", "A (with X, trigger and grip: end the stream)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_ComboA) ||
         !mk("combo_x", "X (with A, trigger and grip: end the stream)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_ComboX) ||
         !mk("scroll", "Thumbstick (scroll)", XR_ACTION_TYPE_VECTOR2F_INPUT, &m_Stick) ||
         !mk("keyboard", "Virtual keyboard (toggle)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_KbToggleAction)) {
@@ -398,6 +399,7 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         {m_Secondary, "/user/hand/right/input/b/click"},
         {m_Primary, "/user/hand/left/input/x/click"},
         {m_Primary, "/user/hand/right/input/a/click"},
+        {m_ComboA, "/user/hand/right/input/a/click"},
         {m_ComboX, "/user/hand/left/input/x/click"},
         {m_Stick, "/user/hand/left/input/thumbstick"},
         {m_Stick, "/user/hand/right/input/thumbstick"},
@@ -435,6 +437,7 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
                  {m_Secondary, "/user/hand/right/input/b/click"},
                  {m_Primary, "/user/hand/left/input/dpad_down/click"},
                  {m_Primary, "/user/hand/right/input/a/click"},
+                 {m_ComboA, "/user/hand/right/input/a/click"},
                  {m_ComboX, "/user/hand/right/input/x/click"},
                  {m_Stick, "/user/hand/left/input/thumbstick"},
                  {m_Stick, "/user/hand/right/input/thumbstick"}},
@@ -481,7 +484,7 @@ void XrInput::destroy()
             s = XR_NULL_HANDLE;
         }
     }
-    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Primary, &m_ComboX, &m_Stick, &m_KbToggleAction}) {
+    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Primary, &m_ComboA, &m_ComboX, &m_Stick, &m_KbToggleAction}) {
         if (*a != XR_NULL_HANDLE) {
             xrDestroyAction(*a);
             *a = XR_NULL_HANDLE;
@@ -623,7 +626,7 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             }
             return false;
         };
-        const bool combo = anyBool(m_Primary) && anyBool(m_ComboX) && anyFloat(m_Trigger) && anyFloat(m_Squeeze);
+        const bool combo = anyBool(m_ComboA) && anyBool(m_ComboX) && anyFloat(m_Trigger) && anyFloat(m_Squeeze);
         if (combo && !m_ComboWas) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] exit combo (A+X+trigger+grip)");
             releaseAll("exit combo");
