@@ -71,8 +71,9 @@ namespace fs_picker {
         return {};
       }
       std::filesystem::path p {mod};
-      p.replace_filename("viple-fs-picker.exe");
-      if (!std::filesystem::exists(p)) {
+      p.replace_filename(L"viple-fs-picker.exe");
+      std::error_code ec;
+      if (!std::filesystem::exists(p, ec) || ec) {
         return {};
       }
       return p.wstring();
@@ -83,7 +84,7 @@ namespace fs_picker {
      * SYSTEM 與 user 都讀得到的位置；不用 user TEMP 因為 SYSTEM 不一定能讀。
      */
     std::string make_temp_result_path() {
-      static std::mt19937_64 rng {std::random_device {}()};
+      thread_local std::mt19937_64 rng {std::random_device {}()};
       std::ostringstream oss;
       oss << "C:\\Windows\\Temp\\viple-picker-"
           << ::GetCurrentProcessId() << "-"
@@ -92,11 +93,29 @@ namespace fs_picker {
     }
 
     /**
-     * 雙引號包裝單一 argv，假設內容不含 `"` 或 trailing `\`（對我們的
-     * 用例足夠：title 是英文字 + 中文字，dir 是檔案系統路徑無 `"`）。
+     * 依據 Windows CommandLineToArgvW 規範安全跳脫與雙引號包裝單一 argv。
+     * 正確處理內部雙引號與結尾反斜線，防止引數截斷與命令引數注入（CWE-88）。
+
      */
     std::string quote_arg(const std::string &s) {
-      return "\"" + s + "\"";
+      std::string result = "\"";
+      int backslashes = 0;
+      for (char c : s) {
+        if (c == '\\') {
+          ++backslashes;
+        } else if (c == '"') {
+          result.append(backslashes * 2 + 1, '\\');
+          result.push_back('"');
+          backslashes = 0;
+        } else {
+          result.append(backslashes, '\\');
+          result.push_back(c);
+          backslashes = 0;
+        }
+      }
+      result.append(backslashes * 2, '\\');
+      result.push_back('"');
+      return result;
     }
 
     /**
@@ -125,6 +144,14 @@ namespace fs_picker {
       }
 
       std::string result_path = make_temp_result_path();
+      struct temp_file_guard {
+        std::string path;
+        ~temp_file_guard() {
+          if (!path.empty()) {
+            ::DeleteFileA(path.c_str());
+          }
+        }
+      } guard {result_path};
 
       std::string cmd = quote_arg(helper_exe_utf8) +
                         " --result " + quote_arg(result_path) +
@@ -144,7 +171,7 @@ namespace fs_picker {
       auto child = platf::run_command(false, false, cmd, work_dir, env, nullptr, ec, nullptr);
       if (ec) {
         BOOST_LOG(warning) << "[VIPLE-XFER] fs_picker: spawn failed: " << ec.message();
-        ::DeleteFileA(result_path.c_str());
+
         return std::nullopt;
       }
 
@@ -163,7 +190,7 @@ namespace fs_picker {
           picked_path = buf.str();
         }
       }
-      ::DeleteFileA(result_path.c_str());
+
 
       BOOST_LOG(info) << "[VIPLE-XFER] fs_picker: helper rc=" << rc
                       << " path_len=" << picked_path.size();

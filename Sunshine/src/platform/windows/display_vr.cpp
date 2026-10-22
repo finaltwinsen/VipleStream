@@ -167,7 +167,7 @@ namespace platf::dxgi {
       std::vector<adapter_t> candidates;
       int skipped_indirect = 0;
       adapter_t::pointer adapter_p {};
-      for (UINT i = 0; factory->EnumAdapters1(i, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++i) {
+      for (UINT i = 0; SUCCEEDED(factory->EnumAdapters1(i, &adapter_p)) && adapter_p; ++i) {
         adapter_t a {adapter_p};
         DXGI_ADAPTER_DESC1 desc {};
         if (FAILED(a->GetDesc1(&desc))) {
