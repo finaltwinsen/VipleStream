@@ -325,7 +325,9 @@ namespace video {
       // Flush any remaining frames in the encoder
       if (avcodec_send_frame(avcodec_ctx.get(), nullptr) == 0) {
         packet_raw_avcodec pkt;
-        while (avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet) == 0);
+        while (pkt.av_packet && avcodec_receive_packet(avcodec_ctx.get(), pkt.av_packet) == 0) {
+          av_packet_unref(pkt.av_packet);
+        }
       }
 
       // Order matters here because the context relies on the hwdevice still being valid
@@ -334,12 +336,20 @@ namespace video {
     }
 
     // Ensure objects are destroyed in the correct order
-    avcodec_encode_session_t &operator=(avcodec_encode_session_t &&other) {
+    avcodec_encode_session_t &operator=(avcodec_encode_session_t &&other) noexcept {
+      if (this == &other) {
+        return *this;
+      }
+
+      // Order matters: reset avcodec_ctx while hwdevice is still valid
+      avcodec_ctx.reset();
+      device.reset();
       device = std::move(other.device);
       avcodec_ctx = std::move(other.avcodec_ctx);
       replacements = std::move(other.replacements);
       sps = std::move(other.sps);
       vps = std::move(other.vps);
+      spare_packet = std::move(other.spare_packet);
 
       inject = other.inject;
 
@@ -384,6 +394,9 @@ namespace video {
 
     // inject sps/vps data into idr pictures
     int inject;
+
+    // 緩存每幀結尾 EAGAIN 產生的空封包，避免熱路徑重複 heap alloc/free
+    std::unique_ptr<packet_raw_avcodec> spare_packet;
   };
 
   class nvenc_encode_session_t: public encode_session_t {
@@ -801,12 +814,12 @@ namespace video {
         {"vbaq"s, &config::video.amd.amd_vbaq},
         {"enforce_hrd"s, &config::video.amd.amd_enforce_hrd},
         {"level"s, [](const config_t &cfg) {
-           auto size = cfg.width * cfg.height;
+           auto size = (int64_t) cfg.width * cfg.height;
            // For 4K and below, try to use level 5.1 or 5.2 if possible
            if (size <= 8912896) {
-             if (size * cfg.framerate <= 534773760) {
+             if (size * cfg.framerate <= 534773760LL) {
                return "5.1"s;
-             } else if (size * cfg.framerate <= 1069547520) {
+             } else if (size * cfg.framerate <= 1069547520LL) {
                return "5.2"s;
              }
            }
@@ -1552,8 +1565,8 @@ namespace video {
             img_out = *it;
             if (it != imgs.begin()) {
               // move image to the front of the list to prioritize its reusal
-              imgs.erase(it);
-              imgs.push_front(img_out);
+              imgs.splice(imgs.begin(), imgs, it);
+
             }
             break;
           }
@@ -1567,8 +1580,8 @@ namespace video {
               img_out = *it;
               if (it != imgs.begin()) {
                 // move image to the front of the list to prioritize its reusal
-                imgs.erase(it);
-                imgs.push_front(img_out);
+                imgs.splice(imgs.begin(), imgs, it);
+  
               }
               break;
             }
@@ -1744,11 +1757,18 @@ namespace video {
     }
 
     while (ret >= 0) {
-      auto packet = std::make_unique<packet_raw_avcodec>();
+      std::unique_ptr<packet_raw_avcodec> packet = std::move(session.spare_packet);
+      if (!packet) {
+        packet = std::make_unique<packet_raw_avcodec>();
+      }
+      if (!packet || !packet->av_packet) {
+        return -1;
+      }
       auto av_packet = packet.get()->av_packet;
 
       ret = avcodec_receive_packet(ctx.get(), av_packet);
       if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+        session.spare_packet = std::move(packet);
         return 0;
       } else if (ret < 0) {
         return ret;
@@ -2010,6 +2030,9 @@ namespace video {
         // Initialize avcodec hardware frames
         {
           avcodec_buffer_t frame_ref {av_hwframe_ctx_alloc(encoding_stream_context.get())};
+          if (!frame_ref) {
+            return nullptr;
+          }
 
           auto frame_ctx = (AVHWFramesContext *) frame_ref->data;
           frame_ctx->format = ctx->pix_fmt;
@@ -2119,9 +2142,10 @@ namespace video {
           // because libx264 can severely degrade quality if the buffer is too small.
           // libx265 encounters this issue more frequently, so always scale the
           // buffer by 1.5x for software HEVC encoding.
-          ctx->rc_buffer_size = bitrate / ((config.framerate * 10) / 15);
+          auto divisor = std::max(1, (config.framerate * 10) / 15);
+          ctx->rc_buffer_size = bitrate / divisor;
         } else {
-          ctx->rc_buffer_size = bitrate / config.framerate;
+          ctx->rc_buffer_size = bitrate / std::max(1, config.framerate);
 
 #ifndef __APPLE__
           if (encoder.name == "nvenc" && config::video.nv_legacy.vbv_percentage_increase > 0) {
@@ -2136,6 +2160,8 @@ namespace video {
 
       if (auto status = avcodec_open2(ctx.get(), codec, &options)) {
         char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
+
+        av_dict_free(&options);
 
         if (!video_format.fallback_options.empty() && retries == 0) {
           BOOST_LOG(info)
@@ -2153,11 +2179,16 @@ namespace video {
         }
       }
 
+      av_dict_free(&options);
+
       // Successfully opened the codec
       break;
     }
 
     avcodec_frame_t frame {av_frame_alloc()};
+    if (!frame) {
+      return nullptr;
+    }
     frame->format = ctx->pix_fmt;
     frame->width = ctx->width;
     frame->height = ctx->height;
@@ -2543,7 +2574,7 @@ namespace video {
             ctx->bit_rate = newBitrate;
             ctx->rc_max_rate = newBitrate;
             if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
-              ctx->rc_buffer_size = newBitrate / config.framerate;
+              ctx->rc_buffer_size = newBitrate / std::max(1, config.framerate);
             }
             BOOST_LOG(info) << "[VIPLE-ABR] AVCodec bitrate updated to " << *newBitrateKbps
                             << " kbps (" << (isDecrease ? "cut" : "ramp") << ")";
@@ -2583,7 +2614,7 @@ namespace video {
 
               // Update rc_buffer_size for the new framerate
               if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
-                ctx->rc_buffer_size = ctx->bit_rate / config.framerate;
+                ctx->rc_buffer_size = ctx->bit_rate / std::max(1, config.framerate);
               }
 
               BOOST_LOG(info) << "[VIPLE-FPS] Encoder framerate updated: " << oldFps << " -> " << *newFps << " fps";
@@ -2715,7 +2746,14 @@ namespace video {
     float wt = config.width;
     float ht = config.height;
 
+    if (wd <= 0.0f || hd <= 0.0f) {
+      return {};
+    }
+
     auto scalar = std::fminf(wt / wd, ht / hd);
+    if (scalar <= 0.0f) {
+      scalar = 1.0f;
+    }
 
     // we initialize scalar_tpcoords and logical dimensions to default values in case they are not set (non-KMS)
     float scalar_tpcoords = 1.0f;
@@ -3777,7 +3815,13 @@ void do_nothing(void *) {
 
 namespace video {
   util::Either<avcodec_buffer_t, int> dxgi_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *encode_device) {
+    if (!encode_device || !encode_device->data) {
+      return -1;
+    }
     avcodec_buffer_t ctx_buf {av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA)};
+    if (!ctx_buf || !ctx_buf->data) {
+      return -1;
+    }
     auto ctx = (AVD3D11VADeviceContext *) ((AVHWDeviceContext *) ctx_buf->data)->hwctx;
 
     std::fill_n((std::uint8_t *) ctx, sizeof(AVD3D11VADeviceContext), 0);

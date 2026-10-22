@@ -77,7 +77,12 @@ namespace video {
   }
 
   avcodec_colorspace_t avcodec_colorspace_from_sunshine_colorspace(const sunshine_colorspace_t &sunshine_colorspace) {
-    avcodec_colorspace_t avcodec_colorspace;
+    avcodec_colorspace_t avcodec_colorspace {};
+    // 預設為 Rec. 709 安全值，防範未預期之 colorspace 枚舉值
+    avcodec_colorspace.primaries = AVCOL_PRI_BT709;
+    avcodec_colorspace.transfer_function = AVCOL_TRC_BT709;
+    avcodec_colorspace.matrix = AVCOL_SPC_BT709;
+    avcodec_colorspace.software_format = SWS_CS_ITU709;
 
     switch (sunshine_colorspace.colorspace) {
       case colorspace_e::rec601:
