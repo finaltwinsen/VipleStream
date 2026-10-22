@@ -227,7 +227,7 @@ namespace upnp {
             auto shutdown_event = mail::man->event<bool>(mail::shutdown);
 
             for (auto it = std::begin(mappings); it != std::end(mappings) && !shutdown_event->peek(); ++it) {
-              auto mapping = *it;
+              const auto &mapping = *it;
               char uniqueId[8];
 
               // Open a pinhole for the LAN port, since there will be no WAN->LAN port mapping on IPv6

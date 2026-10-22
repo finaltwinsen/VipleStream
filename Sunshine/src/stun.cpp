@@ -228,14 +228,14 @@ namespace stun {
    * If different, NAT is Symmetric (not hole-punchable).
    */
   static nat_type_e detect_nat_type(uint16_t local_port,
-                                     const std::string &stun1, const std::string &stun2) {
-    std::string ip1, ip2;
-    uint16_t port1 = 0, port2 = 0;
+                                     const std::string &ip1, uint16_t port1, const std::string &stun2, uint16_t stun_port_2 = DEFAULT_STUN_PORT) {
+    std::string ip2;
+    uint16_t port2 = 0;
 
-    bool ok1 = probe_once(stun1.c_str(), DEFAULT_STUN_PORT, local_port, ip1, port1);
-    bool ok2 = probe_once(stun2.c_str(), DEFAULT_STUN_PORT, local_port, ip2, port2);
 
-    if (!ok1 || !ok2) return NAT_UNKNOWN;
+    bool ok2 = probe_once(stun2.c_str(), stun_port_2, local_port, ip2, port2);
+
+    if (!ok2) return NAT_UNKNOWN;
 
     if (ip1 == ip2 && port1 == port2) {
       // Same mapping for different destinations → Endpoint Independent Mapping
@@ -289,7 +289,7 @@ namespace stun {
       uint16_t port = 0;
 
       if (probe_once(stun_server_1.c_str(), stun_port_1, control_port, ip, port)) {
-        nat_type_e nat = detect_nat_type(control_port, stun_server_1, stun_server_2);
+        nat_type_e nat = detect_nat_type(control_port, ip, port, stun_server_2);
 
         endpoint_t ep;
         ep.ip = ip;

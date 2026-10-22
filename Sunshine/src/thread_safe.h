@@ -117,6 +117,7 @@ namespace safe {
     }
 
     bool peek() {
+      std::lock_guard lg {_lock};
       return _continue && (bool) _status;
     }
 
@@ -276,6 +277,7 @@ namespace safe {
     }
 
     bool peek() {
+      std::lock_guard ul {_lock};
       return _continue && !_queue.empty();
     }
 
@@ -387,7 +389,7 @@ namespace safe {
           return *this;
         }
 
-        return *this = std::move(*ptr.owner->ref());
+        return *this = ptr.owner->ref();
       }
 
       ptr_t &operator=(ptr_t &&ptr) noexcept {
@@ -538,13 +540,11 @@ namespace safe {
     void cleanup() {
       std::lock_guard lg {mutex};
 
-      for (auto it = std::begin(id_to_post); it != std::end(id_to_post); ++it) {
-        auto &weak = it->second;
-
-        if (weak.expired()) {
-          id_to_post.erase(it);
-
-          return;
+      for (auto it = id_to_post.begin(); it != id_to_post.end();) {
+        if (it->second.expired()) {
+          it = id_to_post.erase(it);
+        } else {
+          ++it;
         }
       }
     }

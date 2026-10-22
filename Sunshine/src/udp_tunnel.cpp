@@ -66,7 +66,16 @@ namespace udp_tunnel {
       const uint8_t *part2, size_t len2,
       uint8_t out[HMAC_LEN]) {
     // Thread-local context reused across calls — avoids per-packet heap alloc.
-    static thread_local HMAC_CTX *s_ctx = HMAC_CTX_new();
+    struct hmac_ctx_holder {
+      HMAC_CTX *ctx = HMAC_CTX_new();
+      ~hmac_ctx_holder() {
+        if (ctx) {
+          HMAC_CTX_free(ctx);
+        }
+      }
+    };
+    static thread_local hmac_ctx_holder s_holder;
+    HMAC_CTX *s_ctx = s_holder.ctx;
 
     HMAC_Init_ex(s_ctx, token.data(), static_cast<int>(token.size()),
                  EVP_sha256(), nullptr);

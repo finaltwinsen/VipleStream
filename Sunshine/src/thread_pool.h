@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <atomic>
 #include <thread>
 
 // local includes
@@ -25,7 +26,7 @@ namespace thread_pool_util {
     std::condition_variable _cv;
     std::mutex _lock;
 
-    bool _continue;
+    std::atomic<bool> _continue;
 
   public:
     ThreadPool():
@@ -62,6 +63,8 @@ namespace thread_pool_util {
       std::lock_guard lg(_lock);
 
       TaskPool::pushDelayed(std::move(task));
+
+      _cv.notify_all();
     }
 
     template<class Function, class X, class Y, class... Args>
@@ -93,14 +96,16 @@ namespace thread_pool_util {
 
     void join() {
       for (auto &t : _thread) {
-        t.join();
+        if (t.joinable()) {
+          t.join();
+        }
       }
     }
 
   public:
     void _main() {
       platf::set_thread_name("TaskPool::worker");
-      while (_continue) {
+      while (_continue.load(std::memory_order_relaxed)) {
         if (auto task = this->pop()) {
           (*task)->run();
         } else {
@@ -110,7 +115,7 @@ namespace thread_pool_util {
             continue;
           }
 
-          if (!_continue) {
+          if (!_continue.load(std::memory_order_relaxed)) {
             break;
           }
 

@@ -67,7 +67,10 @@ namespace tunnel_session {
           boost::system::error_code ec;
           _udp_sock->close(ec);
         }
-        _udp_sock.reset();
+        {
+      std::lock_guard<std::mutex> l(_udp_send_mtx);
+      _udp_sock.reset();
+    }
         _udp_io.reset();
       }
     }
@@ -84,6 +87,11 @@ namespace tunnel_session {
   }
 
   void TunnelSession::stop() {
+    {
+      std::lock_guard<std::mutex> l(_handlers_mtx);
+      _handlers.clear();
+    }
+
     // Tear down the ENet loopback bridge first so its send path no
     // longer touches the tunnel state we're about to clear.
     _bridge_running.store(false);
@@ -93,7 +101,10 @@ namespace tunnel_session {
     }
     if (_bridge_io) _bridge_io->stop();
     if (_bridge_thread.joinable()) _bridge_thread.join();
-    _bridge_sock.reset();
+    {
+      std::lock_guard<std::mutex> l(_bridge_send_mtx);
+      _bridge_sock.reset();
+    }
     _bridge_io.reset();
     _bridge_server_port = 0;
     _bridge_peer_port.store(0);
@@ -105,7 +116,10 @@ namespace tunnel_session {
     }
     if (_udp_io) _udp_io->stop();
     if (_udp_thread.joinable()) _udp_thread.join();
-    _udp_sock.reset();
+    {
+      std::lock_guard<std::mutex> l(_udp_send_mtx);
+      _udp_sock.reset();
+    }
     _udp_io.reset();
 
     if (_flow.valid()) {
@@ -161,9 +175,10 @@ namespace tunnel_session {
             BOOST_LOG(info) << "[TUNNEL/BRIDGE] learned client ENet "
                                "port " << src_port;
           }
-          if (!_bridge_sock) return;
+
           boost::system::error_code ec;
           std::lock_guard<std::mutex> l(_bridge_send_mtx);
+          if (!_bridge_sock) return;
           _bridge_sock->send_to(asio::buffer(data, len),
                                 _bridge_loopback, 0, ec);
         });
@@ -178,7 +193,10 @@ namespace tunnel_session {
         boost::system::error_code ec;
         _bridge_sock->close(ec);
       }
+      {
+      std::lock_guard<std::mutex> l(_bridge_send_mtx);
       _bridge_sock.reset();
+    }
       _bridge_io.reset();
       _bridge_server_port = 0;
       return false;

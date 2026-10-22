@@ -463,7 +463,8 @@ namespace system_tray {
     tray.icon = TRAY_ICON_PLAYING;
     tray.notification_title = "Stream Started";
 
-    static std::string msg = std::format("Streaming started for {}", app_name);
+    static std::string msg;
+    msg = std::format("Streaming started for {}", app_name);
     tray.notification_text = msg.c_str();
     tray.tooltip = msg.c_str();
     tray.notification_icon = TRAY_ICON_PLAYING;
@@ -483,7 +484,8 @@ namespace system_tray {
     tray.icon = TRAY_ICON_PAUSING;
     tray_update(&tray);
 
-    static std::string msg = std::format("Streaming paused for {}", app_name);
+    static std::string msg;
+    msg = std::format("Streaming paused for {}", app_name);
     tray.icon = TRAY_ICON_PAUSING;
     tray.notification_title = "Stream Paused";
     tray.notification_text = msg.c_str();
@@ -510,7 +512,8 @@ namespace system_tray {
     tray.icon = TRAY_ICON;
     tray_update(&tray);
 
-    static std::string msg = std::format("Application {} successfully stopped", app_name);
+    static std::string msg;
+    msg = std::format("Application {} successfully stopped", app_name);
     tray.icon = TRAY_ICON;
     tray.notification_icon = TRAY_ICON;
     tray.notification_title = "Application Stopped";

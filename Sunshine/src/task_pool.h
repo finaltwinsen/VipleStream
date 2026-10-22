@@ -162,7 +162,7 @@ namespace task_pool_util {
       for (; it < _timer_tasks.cend(); ++it) {
         const __task &task = std::get<1>(*it);
 
-        if (&*task == task_id) {
+        if (task && &*task == task_id) {
           std::get<0>(*it) = std::chrono::steady_clock::now() + duration;
 
           break;
@@ -178,6 +178,8 @@ namespace task_pool_util {
       while (it > _timer_tasks.cbegin()) {
         if (std::get<0>(*it) > std::get<0>(*prev)) {
           std::swap(*it, *prev);
+        } else {
+          break;
         }
 
         --prev;
@@ -192,7 +194,7 @@ namespace task_pool_util {
       for (; it < _timer_tasks.cend(); ++it) {
         const __task &task = std::get<1>(*it);
 
-        if (&*task == task_id) {
+        if (task && &*task == task_id) {
           _timer_tasks.erase(it);
 
           return true;
@@ -213,7 +215,9 @@ namespace task_pool_util {
         return std::nullopt;
       }
 
-      return std::move(*pos);
+      auto task = std::move(*pos);
+      _timer_tasks.erase(pos);
+      return task;
     }
 
     std::optional<__task> pop() {
