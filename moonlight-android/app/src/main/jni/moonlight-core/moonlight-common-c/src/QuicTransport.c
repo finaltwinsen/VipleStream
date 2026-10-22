@@ -286,6 +286,7 @@ typedef struct _QUIC_TRANSPORT_CTX {
     // prepare_next_packet) 同時存取會破壞內部狀態，導致 ACK 路由
     // 錯誤→假性 loss→畫面靜止。
     PLT_MUTEX picoquicMutex;
+    bool picoquicMutexCreated;
 
     // §Q.path-recovery: 背景復原執行緒。IO thread 不能做 ICMP（200ms
     // 阻塞掉幀），此執行緒每 10 秒掃描介面，對 deleted/新介面做
@@ -696,13 +697,20 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
         return -1;
     }
 
+    g_ctx.picoquicMutexCreated = true;
+
     // Start the I/O thread
     g_ctx.ioRunning = true;
     g_ctx.ioDead = 0; // §Q-K13-ZOMBIE-FIX：新連線清除殭屍旗標
     ret = PltCreateThread("QuicIO", quicIoThreadProc, &g_ctx, &g_ctx.ioThread);
     if (ret != 0) {
         Limelog("[VIPLE-MPQUIC] Failed to create I/O thread\n");
-        PltDeleteMutex(&g_ctx.picoquicMutex);
+
+
+        if (g_ctx.picoquicMutexCreated) {
+            PltDeleteMutex(&g_ctx.picoquicMutex);
+            g_ctx.picoquicMutexCreated = false;
+        }
         picoquic_delete_cnx(g_ctx.cnx);
         g_ctx.cnx = NULL;
         picoquic_free(g_ctx.quic);
@@ -786,7 +794,10 @@ void quicDisconnect(void) {
         g_ctx.quic = NULL;
     }
 
-    PltDeleteMutex(&g_ctx.picoquicMutex);
+    if (g_ctx.picoquicMutexCreated) {
+        PltDeleteMutex(&g_ctx.picoquicMutex);
+        g_ctx.picoquicMutexCreated = false;
+    }
 }
 
 bool quicIsConnected(void) {
@@ -798,6 +809,9 @@ bool quicIsConnected(void) {
 }
 
 int quicWaitReady(unsigned int timeoutMs) {
+    if (!g_ctx.cnx || g_ctx.ioDead) {
+        return -2;
+    }
     if (!g_ctx.cnx) {
         return -2;
     }
@@ -807,6 +821,9 @@ int quicWaitReady(unsigned int timeoutMs) {
     unsigned int elapsed = 0;
     picoquic_state_enum lastSt = -1;
     while (elapsed < timeoutMs) {
+        if (!g_ctx.cnx || g_ctx.ioDead) {
+            return -2;
+        }
         picoquic_state_enum st = picoquic_get_cnx_state(g_ctx.cnx);
         if (st != lastSt) {
             Limelog("[VIPLE-MPQUIC] handshake state -> %d (after %u ms)\n",
@@ -3354,6 +3371,9 @@ static void quicFecOnShard(QUIC_TRANSPORT_CTX* ctx, unsigned char ft,
     uint8_t fecInfo, uint16_t seq, uint8_t* payload, int payloadLen) {
 
     int isParity = (fecInfo & QUIC_FEC_PARITY_FLAG) != 0;
+    int shardNum = (int)(fecInfo & 0x7F);
+    if (shardNum < 1)
+        return;
     int shardIndex;
     uint16_t baseSeq;
 
@@ -3399,7 +3419,7 @@ static void quicFecOnShard(QUIC_TRANSPORT_CTX* ctx, unsigned char ft,
 
     if (isParity) {
         int pi = shardIndex - QUIC_FEC_DATA_SHARDS;
-        if (pi < QUIC_FEC_PARITY_SHARDS &&
+        if (pi >= 0 && pi < QUIC_FEC_PARITY_SHARDS &&
             !(grp->parityPresent & (1 << pi)) &&
             payloadLen > QUIC_FEC_META_SIZE) {
             for (int i = 0; i < QUIC_FEC_DATA_SHARDS; i++) {
