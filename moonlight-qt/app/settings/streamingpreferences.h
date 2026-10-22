@@ -347,6 +347,9 @@ public:
 
     Q_INVOKABLE bool retranslate();
 
+    // 目前介面語言的地區名稱（例如 zh_TW；自動＝系統地區）。QML 用來照介面語言格式化日期
+    Q_INVOKABLE QString uiLocaleName() { return getSuffixFromLanguage(language); }
+
     // §F6 — 把 linuxVideoFrontend（含 LVF_AUTO）解析成「是否優先 PlVk frontend」。
     // 只在 Linux + HAVE_LIBPLACEBO_VULKAN 時可能回 true；其他平台恆為 false，
     // 所以呼叫端（ffmpeg.cpp / vdpau.cpp）在 Windows 與 macOS 上行為完全不變。

@@ -201,7 +201,7 @@ CenteredGridView {
                 }
                 Text {
                     text: qsTr("LOCAL NETWORK") + " · " +
-                          Qt.formatDateTime(new Date(), "ddd HH:mm").toUpperCase()
+                          new Date().toLocaleString(Qt.locale(StreamingPreferences.uiLocaleName()), "ddd HH:mm").toUpperCase()
                     font.family: "IBM Plex Mono"
                     font.pointSize: 10
                     font.letterSpacing: 1.8
@@ -210,7 +210,7 @@ CenteredGridView {
                 // Mono stat strip — network + found count. Gives the
                 // cover a data-dense feel matching the §01 mock.
                 Text {
-                    text: (StreamingPreferences.enableMdns ? "MDNS ON" : "MDNS OFF") +
+                    text: (StreamingPreferences.enableMdns ? qsTr("MDNS ON") : qsTr("MDNS OFF")) +
                           "   ·   " +
                           pcGrid.count + " " + qsTr("FOUND") +
                           "   ·   " +
@@ -238,7 +238,7 @@ CenteredGridView {
                                         : heroBanner.width - 64)
 
                 Text {
-                    text: "FEATURED · 01 / " + ("0" + pcGrid.count).slice(-2)
+                    text: qsTr("FEATURED") + " · 01 / " + ("0" + pcGrid.count).slice(-2)
                     font.family: "IBM Plex Mono"
                     font.pointSize: 9
                     font.letterSpacing: 1.8
@@ -283,7 +283,7 @@ CenteredGridView {
 
                 Text {
                     anchors.centerIn: parent
-                    text: "STREAM · PATCH · 2026"
+                    text: qsTr("STREAM · PATCH · 2026")
                     font.family: "IBM Plex Mono"
                     font.pointSize: 11
                     font.bold: true
@@ -594,8 +594,8 @@ CenteredGridView {
                 // 時隱藏（沒有 applist 可說的場景）。
                 NavigableMenuItem {
                     text: model.directLaunchDesktop
-                          ? qsTr("點擊直接進桌面：開")
-                          : qsTr("點擊直接進桌面：關")
+                          ? qsTr("Click goes straight to desktop: On")
+                          : qsTr("Click goes straight to desktop: Off")
                     onTriggered: {
                         computerModel.setDirectLaunchDesktop(index, !model.directLaunchDesktop)
                     }

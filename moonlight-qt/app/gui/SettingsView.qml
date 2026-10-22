@@ -1125,7 +1125,7 @@ Flickable {
                 // v1.4.137 加 RS_AUTO 並改成預設，行為 = 走標準 hwaccel cascade.
                 Label {
                     width: parent.width
-                    text: qsTr("Renderer 渲染器")
+                    text: qsTr("Renderer")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
                 }
@@ -1142,9 +1142,9 @@ Flickable {
                         id: rendererSelectionModel
                     }
                     Component.onCompleted: {
-                        rendererSelectionModel.append({text: qsTr("自動 (Auto) — 推薦：讓系統挑最穩定的硬解路徑"), val: 2})
-                        rendererSelectionModel.append({text: qsTr("Direct3D 11 — 鎖死 D3D11VA，可搭配 NV-OF / DirectML / NCNN 補幀引擎"), val: 1})
-                        rendererSelectionModel.append({text: qsTr("Vulkan [實驗性] — 內建補幀，部分機種 (AMD APU / 舊 NV driver) 有相容性問題"), val: 0})
+                        rendererSelectionModel.append({text: qsTr("Auto (recommended) — let the system pick the most stable hardware decoding path"), val: 2})
+                        rendererSelectionModel.append({text: qsTr("Direct3D 11 — always use D3D11VA; works with the NV-OF / DirectML / NCNN interpolation engines"), val: 1})
+                        rendererSelectionModel.append({text: qsTr("Vulkan [experimental] — built-in frame interpolation; compatibility issues on some systems (AMD APU / older NVIDIA drivers)"), val: 0})
                         // Lookup currentIndex by val (enum value) — model
                         // order is no longer 1:1 with enum integer.
                         for (var i = 0; i < rendererSelectionModel.count; i++) {
@@ -1161,7 +1161,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("自動（推薦）：等同上游 Moonlight 的 hwaccel cascade，由 ffmpeg 挑第一個能 init 的硬解（Windows 通常 = D3D11VA）。沒有特殊需求就選這個。\n\nDirect3D 11：明確鎖死 D3D11VA，補幀引擎可選 Generic / NV-OF / DirectML / NCNN。跟「自動」目前行為相同，但保留為將來「禁止 helper 切到 Vulkan」的 hard-pin.\n\nVulkan [實驗性]：強制 Vulkan-first cascade + 原生 Vulkan 渲染管線 + dual-present，補幀引擎內建（等同 Generic）。已知問題：NV driver 596.36 上 native vkCmdDecodeVideoKHR 在 ONLY mode 會 NVDEC device-lost；AMD APU 上 video session memory bind 226MB 階段 driver crash；PARALLEL+SW upload 路徑 perf 偏低（80+ ms/frame）。穩定後會回到推薦選項。")
+                    ToolTip.text: qsTr("Auto (recommended): same as upstream Moonlight's hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.\n\nDirect3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.\n\nVulkan [experimental]: forces the Vulkan-first cascade + native Vulkan rendering pipeline + dual-present, with the built-in interpolation engine (same as Generic). Known issues: native vkCmdDecodeVideoKHR in ONLY mode causes an NVDEC device-lost on NVIDIA driver 596.36; the driver crashes during the 226 MB video session memory bind on AMD APUs; the PARALLEL+SW upload path is slow (80+ ms/frame). It will return to the recommended options once it is stable.")
                 }
 
                 // §F6 — Linux 視訊 frontend（畫面呈現端）。只在 Linux 顯示。
@@ -1172,7 +1172,7 @@ Flickable {
                 Label {
                     width: parent.width
                     visible: Qt.platform.os === "linux"
-                    text: qsTr("Linux 視訊呈現 (frontend)")
+                    text: qsTr("Linux video output (frontend)")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
                 }
@@ -1187,9 +1187,9 @@ Flickable {
                         id: linuxVideoFrontendModel
                     }
                     Component.onCompleted: {
-                        linuxVideoFrontendModel.append({text: qsTr("自動 (Auto) — 推薦：aarch64 或 Zink 走 Vulkan，其餘維持原本順序"), val: StreamingPreferences.LVF_AUTO})
-                        linuxVideoFrontendModel.append({text: qsTr("Vulkan (libplacebo) — 優先用 Vulkan 呈現"), val: StreamingPreferences.LVF_VULKAN})
-                        linuxVideoFrontendModel.append({text: qsTr("EGL — 維持原本順序 (EGL / DRM / SDL)"), val: StreamingPreferences.LVF_EGL})
+                        linuxVideoFrontendModel.append({text: qsTr("Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order"), val: StreamingPreferences.LVF_AUTO})
+                        linuxVideoFrontendModel.append({text: qsTr("Vulkan (libplacebo) — prefer Vulkan output"), val: StreamingPreferences.LVF_VULKAN})
+                        linuxVideoFrontendModel.append({text: qsTr("EGL — keep the original order (EGL / DRM / SDL)"), val: StreamingPreferences.LVF_EGL})
                         currentIndex = 0
                         for (var i = 0; i < linuxVideoFrontendModel.count; i++) {
                             if (linuxVideoFrontendModel.get(i).val === StreamingPreferences.linuxVideoFrontend) {
@@ -1205,7 +1205,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("只決定畫面呈現用哪個 frontend；解碼路徑仍由上面的「Renderer 渲染器」決定。\n\n自動（推薦）：aarch64（例如 Steam Frame）或 GL 跑在 Zink 上時優先 Vulkan (libplacebo)，其餘平台維持原本的 EGL / DRM / SDL 順序。\n\nVulkan：一律優先 Vulkan (libplacebo) 呈現，失敗時自動退回原本順序。\n\nEGL：維持原本順序，不主動偏好 Vulkan。")
+                    ToolTip.text: qsTr("Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.\n\nAuto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.\n\nVulkan: always prefer Vulkan (libplacebo) output, falling back to the original order if it fails.\n\nEGL: keep the original order without preferring Vulkan.")
                 }
 
                 CheckBox {
@@ -1261,7 +1261,7 @@ Flickable {
                     width: parent.width
                     visible: frameInterpolationCheck.checked
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
-                    text: qsTr("Vulkan 渲染器使用內建補幀引擎（等同 Generic）。要選擇其他補幀引擎請切到 Direct3D 11。")
+                    text: qsTr("The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.")
                     font.pointSize: 10
                     font.italic: true
                     opacity: 0.75
@@ -1279,13 +1279,13 @@ Flickable {
                     visible: frameInterpolationCheck.checked
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
                     Label {
-                        text: qsTr("補幀模式:")
+                        text: qsTr("Interpolation mode:")
                         font.pointSize: 12
                         anchors.verticalCenter: parent.verticalCenter
                     }
                     RadioButton {
                         id: frucActiveRadio
-                        text: qsTr("主動 (推薦)")
+                        text: qsTr("Active (recommended)")
                         font.pointSize: 12
                         checked: !StreamingPreferences.vkfrucPassiveMode
                         onCheckedChanged: {
@@ -1296,11 +1296,11 @@ Flickable {
                         ToolTip.delay: 1000
                         ToolTip.timeout: 5000
                         ToolTip.visible: hovered
-                        ToolTip.text: qsTr("Server 推 UI fps / 2 (或 / 3 高刷新顯示器), client always-on dual/triple 補幀. 低 server 負載, 需 client GPU 夠強.")
+                        ToolTip.text: qsTr("The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.")
                     }
                     RadioButton {
                         id: frucPassiveRadio
-                        text: qsTr("被動")
+                        text: qsTr("Passive")
                         font.pointSize: 12
                         checked: StreamingPreferences.vkfrucPassiveMode
                         onCheckedChanged: {
@@ -1311,7 +1311,7 @@ Flickable {
                         ToolTip.delay: 1000
                         ToolTip.timeout: 5000
                         ToolTip.visible: hovered
-                        ToolTip.text: qsTr("Server 全力推 UI fps. 客戶端依 recv% 動態升 ratio: ≥ 70% pass-through, 40-70% 2x, < 40% 3x. 適合 server 不一定能滿推時.")
+                        ToolTip.text: qsTr("The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, < 40% 3x. Good when the host cannot always keep up.")
                     }
                 }
 
@@ -1407,29 +1407,29 @@ Flickable {
                     wrapMode: Text.Wrap
                     text: {
                         var tier = StreamingPreferences.vkfrucDetectedTier
-                        var tierName = tier === StreamingPreferences.VGT_ENTRY       ? "ENTRY (內顯/老卡)"        :
+                        var tierName = tier === StreamingPreferences.VGT_ENTRY       ? qsTr("ENTRY (integrated / older GPUs)") :
                                        tier === StreamingPreferences.VGT_PERFORMANCE ? "PERFORMANCE (GTX 16xx, RX 5xxx)" :
                                        tier === StreamingPreferences.VGT_BALANCED    ? "BALANCED (RTX 20/30, RX 6700+, Arc A7)" :
                                        tier === StreamingPreferences.VGT_QUALITY     ? "QUALITY (RTX 40+, RX 7800+)" :
-                                                                                       "UNKNOWN (未偵測 — 重啟 client 觸發)"
+                                                                                       qsTr("UNKNOWN (not detected; restart the client to detect)")
                         var gpu = StreamingPreferences.vkfrucDetectedGpuName === ""
-                                  ? "(尚未偵測)"
+                                  ? qsTr("(not detected yet)")
                                   : StreamingPreferences.vkfrucDetectedGpuName
                         var benchMs = StreamingPreferences.vkfrucBenchmarkNs > 0
                                       ? (StreamingPreferences.vkfrucBenchmarkNs / 1e6).toFixed(2) + " ms"
-                                      : "(待測)"
-                        return qsTr("FRUC 自動分級 (Vulkan unified autotier v1.4.127):") + "\n"
-                             + qsTr("   GPU：")       + gpu      + "\n"
-                             + qsTr("   偵測 tier：") + tierName + "\n"
-                             + qsTr("   benchmark：") + benchMs  + "\n\n"
-                             + qsTr("Runtime 沿 7 階 (T-1..T5) 自動升降:") + "\n"
+                                      : qsTr("(not measured)")
+                        return qsTr("FRUC auto tiering (Vulkan unified autotier v1.4.127):") + "\n"
+                             + qsTr("   GPU: ")       + gpu      + "\n"
+                             + qsTr("   Detected tier: ") + tierName + "\n"
+                             + qsTr("   Benchmark: ") + benchMs  + "\n\n"
+                             + qsTr("At runtime it moves up and down 7 tiers (T-1..T5):") + "\n"
                              + qsTr("  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)") + "\n"
                              + qsTr("  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)") + "\n"
-                             + qsTr("  T3 = NVOF + chain_lv2 (NVOF GPU 中 chain 偏重)") + "\n"
-                             + qsTr("  T2 = chain_lv2 (AMD/Intel 無 NVOF)") + "\n"
+                             + qsTr("  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)") + "\n"
+                             + qsTr("  T2 = chain_lv2 (AMD/Intel, no NVOF)") + "\n"
                              + qsTr("  T1 = chain_lv1 (PERFORMANCE GPU)") + "\n"
-                             + qsTr("  T0 = SYNC chain (最低 FRUC)") + "\n"
-                             + qsTr("  T-1 = 暫停 FRUC (GPU 跑不動, hold 5min 重試)")
+                             + qsTr("  T0 = SYNC chain (minimum FRUC)") + "\n"
+                             + qsTr("  T-1 = FRUC paused (GPU too slow; retry after 5 min)")
                     }
                 }
                 // (NV-OF / TRIPLE / Auto-tier / Manual RIFE / inferDim) 舊選項移除.
@@ -1441,7 +1441,7 @@ Flickable {
                     visible: frameInterpolationCheck.checked
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
                     Label {
-                        text: qsTr("邊緣 MV 閾值 (Edge MV threshold):")
+                        text: qsTr("Edge MV threshold:")
                         font.pointSize: 11
                         anchors.verticalCenter: parent.verticalCenter
                     }
@@ -1457,11 +1457,11 @@ Flickable {
                         ToolTip.delay: 1000
                         ToolTip.timeout: 7000
                         ToolTip.visible: hovered
-                        ToolTip.text: qsTr("Warp shader 的 motion vector 邊緣偵測閾值（L² diff 單位）。\n"
-                            + "預設 8（= 2.83px L2 diff）。\n"
-                            + "低值（4）：更多邊緣保護，抑制方塊 mosaic，但邊界可能偏糊。\n"
-                            + "高值（12-16）：邊緣更銳利，但高對比 motion boundary 可能殘留 mosaic。\n"
-                            + "建議先用預設值，若補幀邊緣有方塊感再降到 4-6。")
+                        ToolTip.text: qsTr("Edge-detection threshold for motion vectors in the warp shader (in L² diff units).\n"
+                            + "Default 8 (= 2.83 px L2 diff).\n"
+                            + "Lower (4): more edge protection and less blocky mosaic, but edges may look softer.\n"
+                            + "Higher (12-16): sharper edges, but high-contrast motion boundaries may keep some mosaic.\n"
+                            + "Start with the default; if interpolated edges look blocky, lower it to 4-6.")
                     }
                 }
 

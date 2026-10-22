@@ -550,7 +550,7 @@ Item {
                                         color: model.drive ? "#7a8a99" : (model.isDir ? "#c9a227" : "#3d7be0")
                                         Label {
                                             anchors.centerIn: parent
-                                            text: model.drive ? "DISK" : (model.isDir ? "" : "VID")
+                                            text: model.drive ? qsTr("DISK") : (model.isDir ? "" : qsTr("VID"))
                                             font.pixelSize: 9
                                             color: "white"
                                         }

@@ -217,17 +217,17 @@ Page {
             property var _ci: stackView.currentItem
             property string sectionMeta: {
                 if (!_ci) return "VIPLESTREAM"
-                if (_ci instanceof PcView)       return "§ 01 · HOSTS"
-                if (_ci instanceof AppView)      return "§ 03 · LIBRARY · " + (_ci.objectName || "")
-                if (_ci instanceof SettingsView) return "§ 04 · SETTINGS"
+                if (_ci instanceof PcView)       return "§ 01 · " + qsTr("HOSTS")
+                if (_ci instanceof AppView)      return "§ 03 · " + qsTr("LIBRARY") + " · " + (_ci.objectName || "")
+                if (_ci instanceof SettingsView) return "§ 04 · " + qsTr("SETTINGS")
                 // Segue pages + misc — fall back to a generic lead-in.
                 return "VIPLESTREAM · " + (_ci.objectName || "")
             }
             property string displayTitle: {
                 if (!_ci) return "VipleStream"
-                if (_ci instanceof PcView)       return "Hosts"
-                if (_ci instanceof AppView)      return _ci.objectName || "Library"
-                if (_ci instanceof SettingsView) return "Settings"
+                if (_ci instanceof PcView)       return qsTr("Hosts")
+                if (_ci instanceof AppView)      return _ci.objectName || qsTr("Library")
+                if (_ci instanceof SettingsView) return qsTr("Settings")
                 return _ci.objectName || "VipleStream"
             }
 

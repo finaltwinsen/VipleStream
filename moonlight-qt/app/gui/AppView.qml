@@ -246,7 +246,7 @@ CenteredGridView {
                                            : libraryBanner.width - 64)
 
                 Text {
-                    text: "FEATURED · 01 / " + ("0" + appGrid.count).slice(-2)
+                    text: qsTr("FEATURED") + " · 01 / " + ("0" + appGrid.count).slice(-2)
                     font.family: "IBM Plex Mono"
                     font.pointSize: 9
                     font.letterSpacing: 1.8
@@ -289,7 +289,7 @@ CenteredGridView {
 
                 Text {
                     anchors.centerIn: parent
-                    text: "LAUNCH · TO · STREAM"
+                    text: qsTr("LAUNCH · TO · STREAM")
                     font.family: "IBM Plex Mono"
                     font.pointSize: 11
                     font.bold: true
@@ -861,7 +861,7 @@ CenteredGridView {
                 anchors.verticalCenter: parent.verticalCenter
             }
             Text {
-                text: "STEAM PROFILE"
+                text: qsTr("STEAM PROFILE")
                 font.family: "IBM Plex Mono"
                 font.pointSize: 11
                 font.bold: true

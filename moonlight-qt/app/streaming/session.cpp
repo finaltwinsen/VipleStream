@@ -384,7 +384,7 @@ void Session::clConnectionTerminated(int errorCode)
         // 原本 -1 落入 default 只給 generic 錯誤碼，使用者無從行動。
         // （qmake mkspec 已注入 -utf-8，中文字面量可直寫。）
         s_ActiveSession->m_UnexpectedTermination = true;
-        emit s_ActiveSession->displayLaunchError(tr("與伺服器的控制連線中斷——可能是網路瞬斷或伺服器離線，可稍後嘗試繼續串流（resume）"));
+        emit s_ActiveSession->displayLaunchError(tr("The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later."));
         break;
 
     default:
