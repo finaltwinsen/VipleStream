@@ -213,13 +213,18 @@ namespace vr {
         std::vector<BYTE> buf(len ? len : 1);
         if (len && GetTokenInformation(tok.h, TokenUser, buf.data(), len, &len)) {
           PSID sid = reinterpret_cast<TOKEN_USER *>(buf.data())->User.Sid;
-          LPWSTR str = nullptr;
-          if (ConvertSidToStringSidW(sid, &str)) {
-            u.sid = str;
-            LocalFree(str);
+          if (sid && IsValidSid(sid)) {
+            LPWSTR str = nullptr;
+            if (ConvertSidToStringSidW(sid, &str)) {
+              u.sid = str;
+              LocalFree(str);
+            }
+            PUCHAR count_ptr = GetSidSubAuthorityCount(sid);
+            if (count_ptr && *count_ptr > 0) {
+              PDWORD sub_auth = GetSidSubAuthority(sid, static_cast<DWORD>(*count_ptr - 1));
+              u.rid = sub_auth ? *sub_auth : 0;
+            }
           }
-          const UCHAR n = *GetSidSubAuthorityCount(sid);
-          u.rid = n ? *GetSidSubAuthority(sid, n - 1) : 0;
         }
         u.token = std::move(tok);
         if (u.sid.empty()) {
@@ -504,13 +509,20 @@ namespace vr {
       }
 
       bool sid_is_ti(PSID sid) {
-        LPSTR s = nullptr;
-        if (!ConvertSidToStringSidA(sid, &s)) {
+        static const auto ti = []() -> std::vector<BYTE> {
+          PSID psid = nullptr;
+          if (ConvertStringSidToSidA(k_ti_sid, &psid)) {
+            const DWORD len = GetLengthSid(psid);
+            std::vector<BYTE> b(reinterpret_cast<BYTE *>(psid), reinterpret_cast<BYTE *>(psid) + len);
+            LocalFree(psid);
+            return b;
+          }
+          return {};
+        }();
+        if (ti.empty() || !sid || !IsValidSid(sid)) {
           return false;
         }
-        const bool ti = std::string_view {s} == k_ti_sid;
-        LocalFree(s);
-        return ti;
+        return EqualSid(sid, const_cast<BYTE *>(ti.data())) != FALSE;
       }
 
       bool sid_admin(PSID sid) {
@@ -556,8 +568,16 @@ namespace vr {
             if (!GetAce(dacl, i, reinterpret_cast<void **>(&ace)) || ace->AceType != ACCESS_ALLOWED_ACE_TYPE) {
               continue;
             }
+            if (ace->AceSize < sizeof(ACCESS_ALLOWED_ACE)) {
+              bad = "dacl"s;
+              break;
+            }
             auto *a = reinterpret_cast<ACCESS_ALLOWED_ACE *>(ace);
-            PSID sid = &a->SidStart;
+            PSID sid = reinterpret_cast<PSID>(&a->SidStart);
+            if (!IsValidSid(sid)) {
+              bad = "dacl"s;
+              break;
+            }
             if (sid_admin(sid)) {
               continue;
             }
@@ -700,11 +720,15 @@ namespace vr {
         // openvrpaths runtime[0] 交叉比對：不一致時以 openvrpaths 為準（兩個都記 log）
         if (auto o = read_openvrpaths(); o && !o->runtime.empty()) {
           const fs::path rt {o->runtime.front()};
-          std::error_code ec;
-          if (fs::is_regular_file(rt / L"bin" / L"win64" / L"vrserver.exe", ec) && !same_path(rt, f.runtime)) {
-            BOOST_LOG(info) << "[VIPLE-VR-ORCH] steamvr runtime differs: appmanifest=" << tail(f.runtime) << " openvrpaths=" << tail(rt) << " (using openvrpaths)";
-            f.runtime = rt;
-            f.installed = true;
+          const auto rts = rt.wstring();
+          // 拒絕 UNC 網路路徑、非絕對路徑或包含 .. 的路徑，防止強迫驗證洩漏 (NTLM Relay) 與目錄走訪
+          if (rt.is_absolute() && !rts.starts_with(L"\\\\") && rts.find(L"..") == std::wstring::npos) {
+            std::error_code ec;
+            if (fs::is_regular_file(rt / L"bin" / L"win64" / L"vrserver.exe", ec) && !same_path(rt, f.runtime)) {
+              BOOST_LOG(info) << "[VIPLE-VR-ORCH] steamvr runtime differs: appmanifest=" << tail(f.runtime) << " openvrpaths=" << tail(rt) << " (using openvrpaths)";
+              f.runtime = rt;
+              f.installed = true;
+            }
           }
         }
         return f;
@@ -988,6 +1012,11 @@ namespace vr {
         if (up == 0 || up >= settle_ms) {
           break;
         }
+        // 防止系統時間異常調整或行程時間計算停滯導致無窮等待（逾時上限設為 settle_ms + 5000ms）
+        if (steady::now() - t0 >= std::chrono::milliseconds(settle_ms + 5000)) {
+          BOOST_LOG(warning) << "[VIPLE-VR-ORCH] wait_steamvr_settled timed out waiting for uptime";
+          break;
+        }
         std::this_thread::sleep_for(100ms);
       }
       const auto waited = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - t0).count());
@@ -1120,7 +1149,7 @@ namespace vr {
         return r;
       }
       const auto e = cached_environment();
-      if (e.steamvr_runtime.empty() || path_utf8.find('"') != std::string::npos) {
+      if (e.steamvr_runtime.empty() || path_utf8.find_first_of("\"\r\n") != std::string::npos) {
         return r;
       }
       const fs::path bin = fs::path {utf_utils::from_utf8(e.steamvr_runtime)} / L"bin" / L"win64";
@@ -1135,9 +1164,12 @@ namespace vr {
       }
       r.started = true;
       HANDLE h = child.native_handle();
-      if (WaitForSingleObject(h, 15000) != WAIT_OBJECT_0) {
-        r.timed_out = true;
-        TerminateProcess(h, 1);
+      const DWORD wait_res = WaitForSingleObject(h, 15000);
+      if (wait_res != WAIT_OBJECT_0) {
+        r.timed_out = (wait_res == WAIT_TIMEOUT);
+        if (TerminateProcess(h, 1)) {
+          WaitForSingleObject(h, 2000);
+        }
       }
       DWORD code = 0;
       if (GetExitCodeProcess(h, &code)) {
@@ -1440,6 +1472,9 @@ namespace vr {
       bool changed = false;
       std::string skipped;
       for (const auto &k : (*marker)["keys"]) {
+        if (!k.is_object()) {
+          continue;
+        }
         const auto sec = k.value("section", "");
         const auto key = k.value("key", "");
         const auto cur = get_key(j, sec.c_str(), key.c_str());
