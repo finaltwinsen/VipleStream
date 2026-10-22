@@ -143,18 +143,27 @@ int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, un
     }
 
     attribute = (PSTUN_ATTRIBUTE_HEADER)(&resp.hdr + 1);
-    bytesRead -= sizeof(resp.hdr);
+    uint16_t stunMsgLen = htons(resp.hdr.messageLength);
+    if (bytesRead - (int)sizeof(resp.hdr) < (int)stunMsgLen) {
+        Limelog("STUN message truncated: payload %d < header length %u\n",
+                bytesRead - (int)sizeof(resp.hdr), stunMsgLen);
+        err = -3;
+        goto Exit;
+    }
+    bytesRead = (int)stunMsgLen;
     while (bytesRead > (int)sizeof(*attribute)) {
-        if (bytesRead < (int)(sizeof(*attribute) + htons(attribute->length))) {
-            Limelog("STUN attribute out of bounds: %d\n", htons(attribute->length));
+        uint16_t rawAttrLen = htons(attribute->length);
+        uint32_t paddedAttrLen = (rawAttrLen + 3u) & ~3u;
+        if (bytesRead < (int)(sizeof(*attribute) + paddedAttrLen)) {
+            Limelog("STUN attribute out of bounds: raw=%u, padded=%u\n", rawAttrLen, paddedAttrLen);
             err = -5;
             goto Exit;
         }
         // Mask off the comprehension bit
         else if ((htons(attribute->type) & 0x7FFF) != STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS) {
             // Continue searching if this wasn't our address
-            bytesRead -= sizeof(*attribute) + htons(attribute->length);
-            attribute = (PSTUN_ATTRIBUTE_HEADER)(((char*)attribute) + sizeof(*attribute) + htons(attribute->length));
+            bytesRead -= (int)(sizeof(*attribute) + paddedAttrLen);
+            attribute = (PSTUN_ATTRIBUTE_HEADER)(((char*)attribute) + sizeof(*attribute) + paddedAttrLen);
             continue;
         }
 
