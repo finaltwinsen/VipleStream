@@ -112,10 +112,10 @@
 
 #include "rswrapper.h"
 
-reed_solomon_new_t reed_solomon_new_fn;
-reed_solomon_release_t reed_solomon_release_fn;
-reed_solomon_encode_t reed_solomon_encode_fn;
-reed_solomon_decode_t reed_solomon_decode_fn;
+reed_solomon_new_t reed_solomon_new_fn = reed_solomon_new_def;
+reed_solomon_release_t reed_solomon_release_fn = reed_solomon_release_def;
+reed_solomon_encode_t reed_solomon_encode_fn = reed_solomon_encode_def;
+reed_solomon_decode_t reed_solomon_decode_fn = reed_solomon_decode_def;
 
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_AMD64))
 
@@ -124,9 +124,17 @@ reed_solomon_decode_t reed_solomon_decode_fn;
   # define _AMD64_
   #endif
   #include <processthreadsapi.h>
+  #include <intrin.h>
   BOOL _msc_supports_ssse3(void)   { return IsProcessorFeaturePresent(PF_SSSE3_INSTRUCTIONS_AVAILABLE); }
   BOOL _msc_supports_avx2(void)    { return IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE); }
-  BOOL _msc_supports_avx512f(void) { return IsProcessorFeaturePresent(PF_AVX512F_INSTRUCTIONS_AVAILABLE); }
+  BOOL _msc_supports_avx512(void)  {
+    if (!IsProcessorFeaturePresent(PF_AVX512F_INSTRUCTIONS_AVAILABLE)) {
+      return FALSE;
+    }
+    int cpuInfo[4] = {0};
+    __cpuidex(cpuInfo, 7, 0);
+    return (cpuInfo[1] & (1 << 30)) != 0; // EBX bit 30: AVX512BW
+  }
 
 #endif
 
@@ -137,7 +145,7 @@ reed_solomon_decode_t reed_solomon_decode_fn;
 void reed_solomon_init(void) {
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_AMD64))
   // Visual Studio
-  if (_msc_supports_avx512f()) {
+  if (_msc_supports_avx512()) {
     reed_solomon_new_fn = reed_solomon_new_avx512;
     reed_solomon_release_fn = reed_solomon_release_avx512;
     reed_solomon_encode_fn = reed_solomon_encode_avx512;

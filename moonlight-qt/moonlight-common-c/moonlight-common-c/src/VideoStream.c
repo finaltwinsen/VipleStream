@@ -1009,6 +1009,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
     if (err != 0) {
         VideoCallbacks.stop();
         closeSocket(rtpSocket);
+        rtpSocket = INVALID_SOCKET;
         VideoCallbacks.cleanup();
         return err;
     }
@@ -1020,6 +1021,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
             PltInterruptThread(&receiveThread);
             PltJoinThread(&receiveThread);
             closeSocket(rtpSocket);
+            rtpSocket = INVALID_SOCKET;
             VideoCallbacks.cleanup();
             return err;
         }
@@ -1041,6 +1043,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
                 PltJoinThread(&decoderThread);
             }
             closeSocket(rtpSocket);
+            rtpSocket = INVALID_SOCKET;
             VideoCallbacks.cleanup();
             return LastSocketError();
         }
@@ -1061,6 +1064,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
             PltJoinThread(&decoderThread);
         }
         closeSocket(rtpSocket);
+        rtpSocket = INVALID_SOCKET;
         if (firstFrameSocket != INVALID_SOCKET) {
             closeSocket(firstFrameSocket);
             firstFrameSocket = INVALID_SOCKET;
