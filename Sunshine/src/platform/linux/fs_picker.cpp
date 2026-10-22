@@ -106,7 +106,13 @@ namespace fs_picker {
       return std::nullopt;
     }
     // Defensive trim in case any version of zenity emits CRLF.
-    if (path_str.back() == '\r') path_str.pop_back();
+    while (!path_str.empty() && (path_str.back() == '\r' || path_str.back() == '\n')) {
+      path_str.pop_back();
+    }
+    if (path_str.empty()) {
+      BOOST_LOG(warning) << "[VIPLE-XFER] Linux fs_picker: zenity exit=0 but empty stdout after trim";
+      return std::nullopt;
+    }
 
     BOOST_LOG(info) << "[VIPLE-XFER] Linux fs_picker: picked '" << path_str << "'";
     return std::filesystem::path(path_str);

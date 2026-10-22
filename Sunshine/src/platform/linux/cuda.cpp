@@ -264,7 +264,7 @@ namespace cuda {
 
         fs::path dri_path {"/dev/dri"sv};
         auto device_path = dri_path / file;
-        return open(device_path.c_str(), O_RDWR);
+        return open(device_path.c_str(), O_RDWR | O_CLOEXEC);
       }
     } catch (const std::filesystem::filesystem_error &err) {
       BOOST_LOG(error) << "Failed to read sysfs: "sv << err.what();
@@ -407,6 +407,9 @@ namespace cuda {
       // Map the GL textures to read for CUDA
       CUgraphicsResource resources[2] = {y_res.get(), uv_res.get()};
       CU_CHECK(cdf->cuGraphicsMapResources(2, resources, stream.get()), "Couldn't map GL textures in CUDA");
+      auto unmap_guard = util::fail_guard([&]() {
+        CU_CHECK_IGNORE(cdf->cuGraphicsUnmapResources(2, resources, stream.get()), "Couldn't unmap GL textures from CUDA");
+      });
 
       // Copy from the GL textures to the target CUDA frame
       for (int i = 0; i < 2; i++) {
@@ -423,6 +426,7 @@ namespace cuda {
         CU_CHECK_IGNORE(cdf->cuMemcpy2DAsync(&cpy, stream.get()), "Couldn't copy texture to CUDA frame");
       }
 
+      unmap_guard.disable();
       // Unmap the textures to allow modification from GL again
       CU_CHECK(cdf->cuGraphicsUnmapResources(2, resources, stream.get()), "Couldn't unmap GL textures from CUDA");
       return 0;

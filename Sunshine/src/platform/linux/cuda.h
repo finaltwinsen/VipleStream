@@ -69,10 +69,10 @@ namespace cuda {
   stream_t make_stream(int flags = 0);
 
   struct viewport_t {
-    int width;
-    int height;
-    int offsetX;
-    int offsetY;
+    int width {0};
+    int height {0};
+    int offsetX {0};
+    int offsetY {0};
   };
 
   class tex_t {
@@ -88,12 +88,12 @@ namespace cuda {
 
     int copy(std::uint8_t *src, int height, int pitch);
 
-    cudaArray_t array;
+    cudaArray_t array {nullptr};
 
     struct texture {
-      cudaTextureObject_t point;
-      cudaTextureObject_t linear;
-    } texture;
+      cudaTextureObject_t point {0};
+      cudaTextureObject_t linear {0};
+    } texture {};
   };
 
   class sws_t {
@@ -119,11 +119,11 @@ namespace cuda {
 
     ptr_t color_matrix;
 
-    int threadsPerBlock;
+    int threadsPerBlock {0};
 
-    viewport_t viewport;
+    viewport_t viewport {};
 
-    float scale;
+    float scale {1.0f};
   };
 }  // namespace cuda
 
