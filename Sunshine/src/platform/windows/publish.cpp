@@ -215,7 +215,7 @@ namespace platf::publish {
   }
 
   std::unique_ptr<::platf::deinit_t> start() {
-    HMODULE handle = LoadLibrary("dnsapi.dll");
+    HMODULE handle = LoadLibraryExA("dnsapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
 
     if (!handle || load_funcs(handle)) {
       BOOST_LOG(error) << "Couldn't load dnsapi.dll, You'll need to add PC manually from Moonlight"sv;
