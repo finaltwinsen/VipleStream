@@ -83,14 +83,18 @@ namespace nvprefs {
       const json json_data = data;
       return json_data.dump();
     } catch (const std::exception &err) {
-      error_message(std::string {"failed to serialize json data"});
+      error_message(std::string {"failed to serialize json data: "} + err.what());
       return {};
     }
   }
 
   void undo_data_t::read(const std::vector<char> &buffer) {
+    if (buffer.empty()) {
+      data = {};
+      return;
+    }
     try {
-      data = json::parse(std::begin(buffer), std::end(buffer));
+      data = json::parse(buffer.data(), buffer.data() + buffer.size());
     } catch (const std::exception &err) {
       error_message(std::string {"failed to parse json data: "} + err.what());
       data = {};

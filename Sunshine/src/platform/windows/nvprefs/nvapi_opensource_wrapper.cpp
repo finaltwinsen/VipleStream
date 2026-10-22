@@ -3,6 +3,7 @@
  * @brief Definitions for the NVAPI wrapper.
  */
 // standard includes
+#include <cstring>
 #include <map>
 
 // local includes
@@ -14,12 +15,19 @@
 
 namespace {
 
-  std::map<const char *, void *> interfaces;
+  struct cstr_cmp {
+    bool operator()(const char *a, const char *b) const noexcept {
+      return std::strcmp(a, b) < 0;
+    }
+  };
+
+  std::map<const char *, void *, cstr_cmp> interfaces;
   HMODULE dll = nullptr;
 
   template<typename Func, typename... Args>
   NvAPI_Status call_interface(const char *name, Args... args) {
-    auto func = (Func *) interfaces[name];
+    auto it = interfaces.find(name);
+    auto func = (it != interfaces.end()) ? (Func *) it->second : nullptr;
 
     if (!func) {
       return interfaces.empty() ? NVAPI_API_NOT_INITIALIZED : NVAPI_NOT_SUPPORTED;
@@ -50,7 +58,9 @@ NvAPI_Initialize() {
   if ((dll = LoadLibraryEx(dll_name, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))) {
     if (auto query_interface = (decltype(nvapi_QueryInterface) *) GetProcAddress(dll, "nvapi_QueryInterface")) {
       for (const auto &item : nvapi_interface_table) {
-        interfaces[item.func] = query_interface(item.id);
+        if (auto ptr = query_interface(item.id)) {
+          interfaces.emplace(item.func, ptr);
+        }
       }
       return NVAPI_OK;
     }
