@@ -13,15 +13,23 @@ namespace nvenc {
   nvenc_d3d11::nvenc_d3d11(NV_ENC_DEVICE_TYPE device_type):
       nvenc_base(device_type) {
     async_event_handle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (!async_event_handle) {
+      BOOST_LOG(error) << "NvEnc: CreateEvent() failed for async event handle";
+    }
   }
 
   nvenc_d3d11::~nvenc_d3d11() {
+    // 確保在卸載 nvEncodeAPI DLL 之前銷毀 encoder，避免調用已卸載模組之函式指針崩潰
+    if (encoder) {
+      destroy_encoder();
+    }
     if (dll) {
       FreeLibrary(dll);
       dll = nullptr;
     }
     if (async_event_handle) {
       CloseHandle(async_event_handle);
+      async_event_handle = nullptr;
     }
   }
 

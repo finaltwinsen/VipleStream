@@ -29,18 +29,29 @@ namespace nvenc {
   }
 
   bool nvenc_d3d11_native::create_and_register_input_buffer() {
+    if (!d3d_device) {
+      BOOST_LOG(error) << "NvEnc: invalid null D3D11 device";
+      return false;
+    }
+
     if (encoder_params.buffer_format == NV_ENC_BUFFER_FORMAT_YUV444_10BIT) {
       BOOST_LOG(error) << "NvEnc: 10-bit 4:4:4 encoding is incompatible with D3D11 surface formats, use CUDA interop";
       return false;
     }
 
     if (!d3d_input_texture) {
+      auto format = dxgi_format_from_nvenc_format(encoder_params.buffer_format);
+      if (format == DXGI_FORMAT_UNKNOWN) {
+        BOOST_LOG(error) << "NvEnc: unsupported buffer format " << encoder_params.buffer_format;
+        return false;
+      }
+
       D3D11_TEXTURE2D_DESC desc = {};
       desc.Width = encoder_params.width;
       desc.Height = encoder_params.height;
       desc.MipLevels = 1;
       desc.ArraySize = 1;
-      desc.Format = dxgi_format_from_nvenc_format(encoder_params.buffer_format);
+      desc.Format = format;
       desc.SampleDesc.Count = 1;
       desc.Usage = D3D11_USAGE_DEFAULT;
       desc.BindFlags = D3D11_BIND_RENDER_TARGET;

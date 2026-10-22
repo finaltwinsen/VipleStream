@@ -247,7 +247,7 @@ namespace nvenc {
   }
 
   nvenc_d3d11_on_cuda::autopop_context::~autopop_context() {
-    if (pushed_context) {
+    if (pushed_context && parent.cuda_functions.cuCtxPopCurrent) {
       CUcontext popped_context;
       if (parent.cuda_failed(parent.cuda_functions.cuCtxPopCurrent(&popped_context))) {
         BOOST_LOG(error) << "NvEnc: cuCtxPopCurrent() failed: error " << parent.last_cuda_error;

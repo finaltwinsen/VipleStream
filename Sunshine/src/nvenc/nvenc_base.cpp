@@ -7,6 +7,7 @@
 
 // standard includes
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <string>
 #include <vector>
@@ -143,6 +144,11 @@ namespace nvenc {
       return false;
     };
 
+    if (encode_guid_count == 0 || encode_guid_count > 256) {
+      BOOST_LOG(error) << "NvEnc: invalid encode guid count " << encode_guid_count;
+      return false;
+    }
+
     std::vector<GUID> encode_guids(encode_guid_count);
     if (nvenc_failed(nvenc->nvEncGetEncodeGUIDs(encoder, encode_guids.data(), (uint32_t) encode_guids.size(), &encode_guid_count))) {
       BOOST_LOG(error) << "NvEnc: NvEncGetEncodeGUIDs() failed: " << last_nvenc_error_string;
@@ -263,9 +269,10 @@ namespace nvenc {
     enc_config.rcParams.averageBitRate = client_config.bitrate * 1000;
 
     if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE)) {
-      enc_config.rcParams.vbvBufferSize = client_config.bitrate * 1000 / client_config.framerate;
+      const auto safe_framerate = std::max(1, client_config.framerate);
+      enc_config.rcParams.vbvBufferSize = static_cast<uint32_t>(static_cast<uint64_t>(client_config.bitrate) * 1000 / safe_framerate);
       if (config.vbv_percentage_increase > 0) {
-        enc_config.rcParams.vbvBufferSize += enc_config.rcParams.vbvBufferSize * config.vbv_percentage_increase / 100;
+        enc_config.rcParams.vbvBufferSize += static_cast<uint32_t>(static_cast<uint64_t>(enc_config.rcParams.vbvBufferSize) * config.vbv_percentage_increase / 100);
       }
       // §K.nvenc.vbvinit v1.5.201 (Fix Q.4)：vbvInitialDelay 預設 0 → VBV buffer
       // 啟動時是空的 → 第一個 GOP 幾乎沒有 bit 配額 → 串流前幾秒嚴重壓縮（模糊），
@@ -458,8 +465,11 @@ namespace nvenc {
           if (client_config.slicesPerFrame > 1) {
             // NVENC only supports slice counts that are powers of two, so we'll pick powers of two
             // with bias to rows due to hopefully more similar macroblocks with a row vs a column.
-            format_config.numTileRows = std::pow(2, std::ceil(std::log2(client_config.slicesPerFrame) / 2));
-            format_config.numTileColumns = std::pow(2, std::floor(std::log2(client_config.slicesPerFrame) / 2));
+            const auto log2_val = std::log2(client_config.slicesPerFrame);
+            const auto rows_exp = static_cast<uint32_t>(std::ceil(log2_val / 2.0));
+            const auto cols_exp = static_cast<uint32_t>(std::floor(log2_val / 2.0));
+            format_config.numTileRows = 1u << rows_exp;
+            format_config.numTileColumns = 1u << cols_exp;
           }
           break;
         }
@@ -500,7 +510,7 @@ namespace nvenc {
 
     {
       auto f = stat_trackers::two_digits_after_decimal();
-      BOOST_LOG(debug) << "NvEnc: requested encoded frame size " << f % (client_config.bitrate / 8. / client_config.framerate) << " kB";
+      BOOST_LOG(debug) << "NvEnc: requested encoded frame size " << f % (client_config.bitrate / 8. / std::max(1, client_config.framerate)) << " kB";
     }
 
     {
@@ -577,6 +587,12 @@ namespace nvenc {
 
     encoder_state = {};
     encoder_params = {};
+    stored_init_params = {};
+    stored_enc_config = {};
+    level_pinned = false;
+    pinned_video_format = -1;
+    unpinned_level = 0;
+    unpinned_tier = 0;
   }
 
   nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr, uint32_t force_intra_refresh_frames) {
@@ -662,7 +678,19 @@ namespace nvenc {
     }
     auto _profAfterLock = std::chrono::steady_clock::now();
 
+    // RAII 保證：在 bitstream lock 成功後，無論後續拷貝或狀態更新是否發生異常，均能可靠解鎖輸出緩衝區
+    auto unlock_guard = util::fail_guard([&] {
+      if (nvenc_failed(nvenc->nvEncUnlockBitstream(encoder, lock_bitstream.outputBitstream))) {
+        BOOST_LOG(error) << "NvEnc: NvEncUnlockBitstream() failed: " << last_nvenc_error_string;
+      }
+    });
+
     auto data_pointer = (uint8_t *) lock_bitstream.bitstreamBufferPtr;
+    if (!data_pointer || lock_bitstream.bitstreamSizeInBytes == 0) {
+      BOOST_LOG(error) << "NvEnc: locked bitstream buffer is null or empty";
+      return {};
+    }
+
     nvenc_encoded_frame encoded_frame {
       {data_pointer, data_pointer + lock_bitstream.bitstreamSizeInBytes},
       lock_bitstream.outputTimeStamp,
@@ -681,6 +709,8 @@ namespace nvenc {
       BOOST_LOG(debug) << "NvEnc: idr frame " << encoded_frame.frame_index;
     }
 
+    // 拷貝完成後主動解鎖
+    unlock_guard.disable();
     if (nvenc_failed(nvenc->nvEncUnlockBitstream(encoder, lock_bitstream.outputBitstream))) {
       BOOST_LOG(error) << "NvEnc: NvEncUnlockBitstream() failed: " << last_nvenc_error_string;
     }
@@ -801,6 +831,10 @@ namespace nvenc {
       }
       int zeros = 0;
       for (size_t k = nal + (hevc ? 2 : 1); k < header.size() && rbsp.size() < 16; k++) {
+        if (zeros >= 2 && header[k] <= 1) {
+          // 遇到下一個 NAL unit 的 start code 前綴 (00 00 01 或 00 00 00)，終止抽取當前 NAL
+          break;
+        }
         if (zeros >= 2 && header[k] == 3) {
           zeros = 0;
           continue;
@@ -849,7 +883,7 @@ namespace nvenc {
       stored_enc_config.encodeCodecConfig.hevcConfig.level = unpinned_level;
       stored_enc_config.encodeCodecConfig.hevcConfig.tier = unpinned_tier;
     }
-    else {
+    else if (pinned_video_format == 0) {
       stored_enc_config.encodeCodecConfig.h264Config.level = unpinned_level;
     }
     level_pinned = false;
@@ -942,7 +976,6 @@ namespace nvenc {
       }
     };
 
-    last_nvenc_error_string.clear();
     if (status != NV_ENC_SUCCESS) {
       /* This API function gives broken strings more often than not
       if (nvenc && encoder) {
@@ -950,7 +983,7 @@ namespace nvenc {
         if (!last_nvenc_error_string.empty()) last_nvenc_error_string += " ";
       }
       */
-      last_nvenc_error_string += status_string(status);
+      last_nvenc_error_string = status_string(status);
       return true;
     }
 
