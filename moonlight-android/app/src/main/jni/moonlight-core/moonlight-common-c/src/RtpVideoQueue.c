@@ -335,6 +335,11 @@ static int reconstructFrame(PRTP_VIDEO_QUEUE queue) {
     while (entry != NULL) {
         unsigned int index = U16(entry->packet->sequenceNumber - queue->bufferLowestSequenceNumber);
 
+        if (index >= totalPackets) {
+            ret = -5;
+            goto cleanup;
+        }
+
 #ifdef FEC_VALIDATION_MODE
         if (index == dropIndex) {
             // If this was the drop choice, remember the original contents
@@ -378,24 +383,11 @@ static int reconstructFrame(PRTP_VIDEO_QUEUE queue) {
     // If this fails, something is probably wrong with our FEC state.
     LC_ASSERT(ret == 0);
 
-    if (queue->bufferDataPackets != queue->receivedDataPackets) {
-#ifdef FEC_VERBOSE
-        Limelog("Recovered %d video data shards from frame %d\n",
-                queue->bufferDataPackets - queue->receivedDataPackets,
-                queue->currentFrameNumber);
-#endif
-
-        // Report the final FEC status if we needed to perform a recovery
-        reportFinalFrameFecStatus(queue);
-    }
-
-cleanup_packets:
-    for (i = 0; i < totalPackets; i++) {
-        if (marks[i]) {
-            // Only submit frame data, not FEC packets
-            if (ret == 0 && i < queue->bufferDataPackets) {
-                PRTPV_QUEUE_ENTRY queueEntry = (PRTPV_QUEUE_ENTRY)&packets[i][receiveSize];
-                PRTP_PACKET rtpPacket = (PRTP_PACKET) packets[i];
+    if (ret == 0) {
+        // 第一階段：校驗所有需恢復的 data shards 標頭與完整性，任一損毀即判定失敗（防止部分損毀封包污染佇列）
+        for (i = 0; i < queue->bufferDataPackets; i++) {
+            if (marks[i]) {
+                PRTP_PACKET rtpPacket = (PRTP_PACKET)packets[i];
                 rtpPacket->sequenceNumber = U16(i + queue->bufferLowestSequenceNumber);
                 rtpPacket->header = queue->pendingFecBlockList.head->packet->header;
                 rtpPacket->timestamp = queue->pendingFecBlockList.head->packet->timestamp;
@@ -410,7 +402,6 @@ cleanup_packets:
                 nvPacket->frameIndex = queue->currentFrameNumber;
                 nvPacket->multiFecBlocks =
                         ((queue->multiFecLastBlockNumber << 2) | queue->multiFecCurrentBlockNumber) << 4;
-                // TODO: nvPacket->multiFecFlags?
 
 #ifdef FEC_VALIDATION_MODE
                 if (i == dropIndex && droppedRtpPacket != NULL) {
@@ -455,41 +446,75 @@ cleanup_packets:
                     }
 
                     LC_ASSERT_VT(recoveryErrors == 0);
-
-                    // This drop was fake, so we don't want to actually submit it to the depacketizer.
-                    // It will get confused because it's already seen this packet before.
-                    free(packets[i]);
                     continue;
                 }
 #endif
 
-                // Do some rudamentary checks to see that the recovered packet is sane.
-                // In some cases (4K 30 FPS 80 Mbps), we seem to get some odd failures
-                // here in rare cases where FEC recovery is required. I'm unsure if it
-                // is our bug, NVIDIA's, or something else, but we don't want the corrupt
-                // packet to by ingested by our depacketizer (or worse, the decoder).
+                // 檢查恢復封包健全性，任一不符則整幀放棄恢復
                 if (i == 0 && !(nvPacket->flags & FLAG_SOF)) {
-                    PACKET_RECOVERY_FAILURE();
+                    ret = -1;
+                    Limelog("FEC recovery returned corrupt packet %d (frame %d): missing SOF\n",
+                            rtpPacket->sequenceNumber, queue->currentFrameNumber);
+                    break;
                 }
                 if (i == queue->bufferDataPackets - 1 && !(nvPacket->flags & FLAG_EOF)) {
-                    PACKET_RECOVERY_FAILURE();
+                    ret = -1;
+                    Limelog("FEC recovery returned corrupt packet %d (frame %d): missing EOF\n",
+                            rtpPacket->sequenceNumber, queue->currentFrameNumber);
+                    break;
                 }
                 if (i > 0 && i < queue->bufferDataPackets - 1 && !(nvPacket->flags & FLAG_CONTAINS_PIC_DATA)) {
-                    PACKET_RECOVERY_FAILURE();
+                    ret = -1;
+                    Limelog("FEC recovery returned corrupt packet %d (frame %d): missing PIC_DATA\n",
+                            rtpPacket->sequenceNumber, queue->currentFrameNumber);
+                    break;
                 }
                 if (nvPacket->flags & ~(FLAG_SOF | FLAG_EOF | FLAG_CONTAINS_PIC_DATA)) {
-                    PACKET_RECOVERY_FAILURE();
+                    ret = -1;
+                    Limelog("FEC recovery returned corrupt packet %d (frame %d): invalid flags 0x%x\n",
+                            rtpPacket->sequenceNumber, queue->currentFrameNumber, nvPacket->flags);
+                    break;
                 }
+            }
+        }
+    }
 
-                // FEC recovered frames may have extra zero padding at the end. This is
-                // fine per H.264 Annex B which states trailing zero bytes must be
-                // discarded by decoders. It's not safe to strip all zero padding because
-                // it may be a legitimate part of the H.264 bytestream.
+    if (ret == 0 && queue->bufferDataPackets != queue->receivedDataPackets) {
+#ifdef FEC_VERBOSE
+        Limelog("Recovered %d video data shards from frame %d\n",
+                queue->bufferDataPackets - queue->receivedDataPackets,
+                queue->currentFrameNumber);
+#endif
 
+        // Report the final FEC status if we needed to perform a recovery
+        reportFinalFrameFecStatus(queue);
+    }
+
+cleanup_packets:
+    for (i = 0; i < totalPackets; i++) {
+        if (marks[i]) {
+#ifdef FEC_VALIDATION_MODE
+            if (i == dropIndex) {
+                if (packets[i] != NULL) {
+                    free(packets[i]);
+                    packets[i] = NULL;
+                }
+                continue;
+            }
+#endif
+            // 第二階段：唯有全部恢復封包均通過校驗時，才正式提交至佇列
+            if (ret == 0 && i < queue->bufferDataPackets) {
+                PRTPV_QUEUE_ENTRY queueEntry = (PRTPV_QUEUE_ENTRY)&packets[i][receiveSize];
+                PRTP_PACKET rtpPacket = (PRTP_PACKET) packets[i];
+                int dataOffset = sizeof(*rtpPacket);
+                if (rtpPacket->header & FLAG_EXTENSION) {
+                    dataOffset += 4;
+                }
                 LC_ASSERT(isBefore16(rtpPacket->sequenceNumber, queue->bufferFirstParitySequenceNumber));
                 queuePacket(queue, queueEntry, rtpPacket, StreamConfig.packetSize + dataOffset, false, true);
             } else if (packets[i] != NULL) {
                 free(packets[i]);
+                packets[i] = NULL;
             }
         }
     }
