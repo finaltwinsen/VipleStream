@@ -8,11 +8,13 @@
 namespace stat_trackers {
 
   boost::format one_digit_after_decimal() {
-    return boost::format("%1$.1f");
+    static const boost::format fmt("%1$.1f");
+    return fmt;
   }
 
   boost::format two_digits_after_decimal() {
-    return boost::format("%1$.2f");
+    static const boost::format fmt("%1$.2f");
+    return fmt;
   }
 
 }  // namespace stat_trackers

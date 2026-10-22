@@ -314,7 +314,7 @@ namespace rtsp_stream {
 
           // If content_length > bytes read, then we need to store current data read,
           // to be appended by the next read.
-          std::string_view content {option->content};
+          std::string_view content {option->content ? option->content : ""};
           auto begin_it = std::find_if(content.begin(), content.end(), [](auto ch) {
             return (bool) std::isdigit(ch);
           });
@@ -365,13 +365,13 @@ namespace rtsp_stream {
         socket->read();
       });
 
-      auto begin = std::max(socket->begin - 4, socket->begin);
-      auto buf_size = bytes + (begin - socket->begin);
-      auto end = begin + buf_size;
+      auto search_start = (socket->begin - socket->msg_buf.data() >= 3) ? socket->begin - 3 : socket->msg_buf.data();
+      auto end = socket->begin + bytes;
+
 
       constexpr auto needle = "\r\n\r\n"sv;
 
-      auto it = std::search(begin, begin + buf_size, std::begin(needle), std::end(needle));
+      auto it = std::search(search_start, end, std::begin(needle), std::end(needle));
       if (it == end) {
         socket->begin = end;
 
@@ -381,7 +381,7 @@ namespace rtsp_stream {
       // Emulate read completion for payload data
       socket->begin = it + needle.size();
       socket->crlf = socket->begin;
-      buf_size = end - socket->begin;
+      auto buf_size = (std::size_t) (end - socket->begin);
 
       fg.disable();
       handle_plaintext_payload(socket, ec, buf_size);
@@ -446,6 +446,12 @@ namespace rtsp_stream {
     }
 
     void handle_msg(tcp::socket &sock, launch_session_t &session, msg_t &&req) {
+      if (!req || !req->message.request.command) {
+        cmd_not_found(sock, session, std::move(req));
+        boost::system::error_code ec;
+        sock.shutdown(boost::asio::socket_base::shutdown_type::shutdown_both, ec);
+        return;
+      }
       auto func = _map_cmd_cb.find(req->message.request.command);
       if (func != std::end(_map_cmd_cb)) {
         func->second(this, sock, session, std::move(req));
@@ -819,12 +825,12 @@ namespace rtsp_stream {
 
       // Allocate the message with an empty header and reserved space for the payload
       auto payload_length = serialized_len + payload.second;
-      std::vector<uint8_t> message(sizeof(encrypted_rtsp_header_t));
-      message.reserve(message.size() + payload_length);
+      std::vector<uint8_t> message(sizeof(encrypted_rtsp_header_t) + payload_length);
+
 
       // Copy the complete plaintext into the message
-      std::copy_n(raw_resp.get(), serialized_len, std::back_inserter(message));
-      std::copy_n(payload.first, payload.second, std::back_inserter(message));
+      std::memcpy(message.data() + sizeof(encrypted_rtsp_header_t), raw_resp.get(), serialized_len);
+      if (payload.second > 0) std::memcpy(message.data() + sizeof(encrypted_rtsp_header_t) + serialized_len, payload.first, payload.second);
 
       // Initialize the message header
       auto header = (encrypted_rtsp_header_t *) message.data();
@@ -968,10 +974,17 @@ namespace rtsp_stream {
     auto seqn_str = std::to_string(req->sequenceNumber);
     seqn.content = const_cast<char *>(seqn_str.c_str());
 
-    std::string_view target {req->message.request.target};
-    auto begin_it = std::find(target.begin(), target.end(), '=') + 1;
-    auto end_it = std::find(begin_it, target.end(), '/');
-    std::string_view type {&*begin_it, (size_t) std::distance(begin_it, end_it)};
+    std::string_view target {req->message.request.target ? req->message.request.target : ""};
+    auto eq_pos = target.find('=');
+    if (eq_pos == std::string_view::npos || eq_pos + 1 >= target.size()) {
+      cmd_not_found(sock, session, std::move(req));
+      return;
+    }
+    auto slash_pos = target.find('/', eq_pos + 1);
+    std::string_view type = (slash_pos == std::string_view::npos) ? target.substr(eq_pos + 1) : target.substr(eq_pos + 1, slash_pos - (eq_pos + 1));
+
+
+
 
     std::uint16_t port;
     if (type == "audio"sv) {
@@ -1158,7 +1171,7 @@ namespace rtsp_stream {
     if (config.audio.channels == 2) {
       for (auto option = req->options; option != nullptr; option = option->next) {
         if ("Host"sv == option->option) {
-          std::string_view content {option->content};
+          std::string_view content {option->content ? option->content : ""};
           BOOST_LOG(debug) << "Found Host: "sv << content;
           config.audio.flags[audio::config_t::HIGH_QUALITY] = (content.find("0.0.0.0"sv) == std::string::npos);
         }
@@ -1377,12 +1390,13 @@ namespace rtsp_stream {
   }
 
   void print_msg(PRTSP_MESSAGE msg) {
+    if (!msg) return;
     std::string_view type = msg->type == TYPE_RESPONSE ? "RESPONSE"sv : "REQUEST"sv;
 
-    std::string_view payload {msg->payload, (size_t) msg->payloadLength};
-    std::string_view protocol {msg->protocol};
+    std::string_view payload {msg->payload ? msg->payload : "", (size_t) (msg->payload ? msg->payloadLength : 0)};
+    std::string_view protocol {msg->protocol ? msg->protocol : ""};
     auto seqnm = msg->sequenceNumber;
-    std::string_view messageBuffer {msg->messageBuffer};
+    std::string_view messageBuffer {msg->messageBuffer ? msg->messageBuffer : ""};
 
     BOOST_LOG(debug) << "type ["sv << type << ']';
     BOOST_LOG(debug) << "sequence number ["sv << seqnm << ']';
@@ -1393,23 +1407,23 @@ namespace rtsp_stream {
       auto &resp = msg->message.response;
 
       auto statuscode = resp.statusCode;
-      std::string_view status {resp.statusString};
+      std::string_view status {resp.statusString ? resp.statusString : ""};
 
       BOOST_LOG(debug) << "statuscode :: "sv << statuscode;
       BOOST_LOG(debug) << "status :: "sv << status;
     } else {
       auto &req = msg->message.request;
 
-      std::string_view command {req.command};
-      std::string_view target {req.target};
+      std::string_view command {req.command ? req.command : ""};
+      std::string_view target {req.target ? req.target : ""};
 
       BOOST_LOG(debug) << "command :: "sv << command;
       BOOST_LOG(debug) << "target :: "sv << target;
     }
 
     for (auto option = msg->options; option != nullptr; option = option->next) {
-      std::string_view content {option->content};
-      std::string_view name {option->option};
+      std::string_view content {option->content ? option->content : ""};
+      std::string_view name {option->option ? option->option : ""};
 
       BOOST_LOG(debug) << name << " :: "sv << content;
     }

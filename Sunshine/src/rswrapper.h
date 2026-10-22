@@ -10,6 +10,10 @@
 
 #define DATA_SHARDS_MAX 255
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct _reed_solomon reed_solomon;
 
 typedef reed_solomon *(*reed_solomon_new_t)(int data_shards, int parity_shards);
@@ -32,3 +36,7 @@ extern reed_solomon_decode_t reed_solomon_decode_fn;
  * @details The streaming code will directly invoke these function pointers during encoding.
  */
 void reed_solomon_init(void);
+
+#ifdef __cplusplus
+}
+#endif
