@@ -1707,6 +1707,17 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 - 只有 HTTPS、配對過的 client。`media_dirs` 沒設時根是整台 PC 的磁碟機（`<Kind>drive</Kind>`，編號＝磁碟機代號 A＝0…；
   Linux 是 `/`）；有設時是那些資料夾（`folder`）；`media_share = disabled` 時 `/viple/media/roots` 回空清單、其他回 404。
 
+### `[VIPLE-STEAM-QUIT]` —— 「結束 APP」關掉 Steam 遊戲（server，§STEAM-QUIT，2.0.22）
+
+```
+[VIPLE-STEAM-QUIT] <遊戲>: asking <n> process(es) to close: taskkill.exe /PID ...   ← /cancel 時找到安裝資料夾底下的程式，以登入使用者身分請它們正常關閉
+[VIPLE-STEAM-QUIT] <遊戲>: closed gracefully                                      ← 10 秒內全部關掉
+[VIPLE-STEAM-QUIT] <遊戲>: graceful close timed out — force-terminated <n> process(es)   ← 10 秒沒關的強制結束
+[VIPLE-STEAM-QUIT] <遊戲>: no running process under install dir                   ← 遊戲早已結束
+[VIPLE-STEAM-QUIT] refusing unexpected install dir: <路徑>                        ← 防呆：不在 steamapps\common 底下、或是 SteamVR
+```
+- 只在 /cancel（使用者按「結束 APP」）觸發；斷線、快捷鍵中斷串流、閒置收尾都不會關遊戲。
+
 ## 6. 分析工具
 
 ```powershell

@@ -43,6 +43,9 @@
   // _SH constants for _wfsopen()
   #include <share.h>
 
+  // CreateToolhelp32Snapshot：§STEAM-QUIT 找遊戲的程式
+  #include <tlhelp32.h>
+
   // RegOpenKeyExW / RegEnumKeyExW for the Steam-game-exit watchdog —
   // we read RunningAppID from HKEY_USERS\<active SID>\... because
   // Sunshine runs as LocalSystem and HKCU points to the SYSTEM hive
@@ -662,6 +665,125 @@ namespace proc {
       _owner_name.clear();
     }
     stop_idle_watchdog_();
+  }
+
+#ifdef _WIN32
+  namespace {
+    // §STEAM-QUIT：image 路徑在 dir 底下的所有程式（不分大小寫）
+    std::vector<DWORD> pids_under_dir(const std::wstring &dirIn) {
+      std::vector<DWORD> out;
+      std::wstring dir = dirIn;
+      if (!dir.empty() && dir.back() != L'\\') {
+        dir += L'\\';
+      }
+      std::transform(dir.begin(), dir.end(), dir.begin(), ::towlower);
+      HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+      if (snap == INVALID_HANDLE_VALUE) {
+        return out;
+      }
+      PROCESSENTRY32W pe {};
+      pe.dwSize = sizeof(pe);
+      for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+        if (!h) {
+          continue;
+        }
+        wchar_t buf[MAX_PATH * 2];
+        DWORD len = (DWORD) (sizeof(buf) / sizeof(buf[0]));
+        if (QueryFullProcessImageNameW(h, 0, buf, &len)) {
+          std::wstring path(buf, len);
+          std::transform(path.begin(), path.end(), path.begin(), ::towlower);
+          if (path.rfind(dir, 0) == 0) {
+            out.push_back(pe.th32ProcessID);
+          }
+        }
+        CloseHandle(h);
+      }
+      CloseHandle(snap);
+      return out;
+    }
+
+    bool pid_alive(DWORD pid) {
+      HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+      if (!h) {
+        return false;
+      }
+      bool alive = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+      CloseHandle(h);
+      return alive;
+    }
+  }  // namespace
+#endif
+
+  void proc_t::quit_steam_game() {
+#ifdef _WIN32
+    if (_app_id <= 0 || _app.source != "steam" || _app.steam_install_dir.empty()) {
+      return;
+    }
+    const std::wstring dir = utf_utils::from_utf8(_app.steam_install_dir);
+    // 防呆：只動 ...\steamapps\common\<遊戲> 底下（絕不碰 Steam 本體或 SteamVR）
+    std::wstring lower = dir;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+    if (lower.find(L"\\steamapps\\common\\") == std::wstring::npos ||
+        lower.find(L"\\steamapps\\common\\steamvr") != std::wstring::npos) {
+      BOOST_LOG(warning) << "[VIPLE-STEAM-QUIT] refusing unexpected install dir: "sv << _app.steam_install_dir;
+      return;
+    }
+    const std::string name = _app.name;
+    const auto env = _env;
+    std::thread([dir, name, env]() {
+      auto pids = pids_under_dir(dir);
+      if (pids.empty()) {
+        BOOST_LOG(info) << "[VIPLE-STEAM-QUIT] "sv << name << ": no running process under install dir"sv;
+        return;
+      }
+      // 1) 以登入使用者身分 taskkill（不加 /F＝送 WM_CLOSE，讓遊戲正常存檔關閉）。服務在
+      //    session 0，跨 session 送不到視窗訊息，所以交給使用者 session 的 taskkill。
+      std::string cmd = "taskkill.exe";
+      for (auto pid : pids) {
+        cmd += " /PID " + std::to_string(pid);
+      }
+      BOOST_LOG(info) << "[VIPLE-STEAM-QUIT] "sv << name << ": asking "sv << pids.size()
+                      << " process(es) to close: "sv << cmd;
+      std::error_code ec;
+      boost::filesystem::path wd = boost::filesystem::path(std::string("C:\\Windows\\System32"));
+      auto child = platf::run_command(false, true, cmd, wd, env, nullptr, ec, nullptr);
+      if (ec) {
+        BOOST_LOG(warning) << "[VIPLE-STEAM-QUIT] taskkill failed to start: "sv << ec.message();
+      } else {
+        child.wait();
+      }
+      // 2) 最多等 10 秒
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      while (std::chrono::steady_clock::now() < deadline) {
+        bool any = false;
+        for (auto pid : pids) {
+          any = any || pid_alive(pid);
+        }
+        if (!any) {
+          BOOST_LOG(info) << "[VIPLE-STEAM-QUIT] "sv << name << ": closed gracefully"sv;
+          return;
+        }
+        std::this_thread::sleep_for(250ms);
+      }
+      // 3) 還在的強制結束
+      int forced = 0;
+      for (auto pid : pids) {
+        if (!pid_alive(pid)) {
+          continue;
+        }
+        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if (h) {
+          if (TerminateProcess(h, 1)) {
+            forced++;
+          }
+          CloseHandle(h);
+        }
+      }
+      BOOST_LOG(warning) << "[VIPLE-STEAM-QUIT] "sv << name << ": graceful close timed out — force-terminated "sv
+                         << forced << " process(es)"sv;
+    }).detach();
+#endif
   }
 
   bool proc_t::is_running_steam_source() const {
@@ -1337,6 +1459,7 @@ namespace proc {
           proc::ctx_t ctx;
           ctx.name         = sa.name;
           ctx.cmd          = sa.launch_url;
+          ctx.steam_install_dir = sa.install_dir;  // §STEAM-QUIT
           ctx.image_path   = !sa.image_library.empty() ? sa.image_library : sa.image_header;
           ctx.source                 = "steam";
           ctx.steam_app_id           = sa.app_id;

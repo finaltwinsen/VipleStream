@@ -297,4 +297,58 @@
         <item>Équilibré — recommandé</item>
         <item>Performance — plus rapide, suivi de mouvement plus faible</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Auto (selon le type de flux)</item>
+        <item>Latence la plus faible</item>
+        <item>Agrégation de bande passante</item>
+        <item>Redondant (tous les chemins)</item>
+        <item>Achèvement le plus rapide</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">Le Steam Controller en Bluetooth ne peut pas être relayé sur Android (le HID Bluetooth est géré par le système). Connectez-le avec un câble USB-C ou branchez le récepteur Puck via OTG.</string>
+    <string name="perf_overlay_fruc_separator">--- Interpolation d\'images (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">État : actif (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">État : en pause</string>
+    <string name="perf_overlay_fruc_pending">État : en attente…</string>
+    <string name="perf_overlay_fruc_off">État : désactivé</string>
+    <string name="perf_overlay_fruc_count">Images interpolées : %1$d / %2$d (ratio : %3$.0f %%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Sortie effective : %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Ordre de tri des applis</string>
+    <string name="summary_app_sort_mode">Façon dont les jeux sont classés dans la liste des applis. Les applis définies manuellement (Bureau, Steam Big Picture) restent toujours épinglées en haut.</string>
+    <string name="app_sort_mode_default">Par défaut (ordre de l\'hôte)</string>
+    <string name="app_sort_mode_recent">Joués récemment</string>
+    <string name="app_sort_mode_playtime">Les plus joués</string>
+    <string name="app_sort_mode_name">Nom (A–Z)</string>
+    <string name="title_show_guide_button">Afficher le bouton Guide</string>
+    <string name="summary_show_guide_button">Afficher le bouton Guide à l\'écran</string>
+    <string name="title_enable_mpquic">Activer le transport multichemin MP-QUIC</string>
+    <string name="summary_enable_mpquic">Utiliser QUIC multichemin (RFC 9443) pour le streaming. Permet la bascule entre Wi-Fi et réseau mobile ainsi que l\'agrégation de bande passante sur deux cartes réseau (NIC).</string>
+    <string name="title_mpquic_scheduler">Planificateur de chemins</string>
+    <string name="summary_mpquic_scheduler">Façon de répartir le trafic sur plusieurs chemins réseau</string>
+    <string name="resolution_custom">Personnalisée (valeur à définir ci-dessous)</string>
+    <string name="title_custom_resolution">Résolution personnalisée</string>
+    <string name="summary_custom_resolution">Utilisée lorsque la liste de résolutions ci-dessus est réglée sur Personnalisée. Format : largeur x hauteur (ex. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Saisissez une résolution personnalisée au format LARGEURxHAUTEUR, ex. 1600x900. Ignorée si la liste n\'est pas réglée sur Personnalisée.</string>
+    <string name="title_enable_yuv444">Préférer la chrominance 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Demande la chrominance 4:4:4 lorsque le décodeur de l\'appareil indique la prendre en charge. La plupart des décodeurs mobiles ne la prennent pas en charge, et l\'option est alors sans effet.</string>
+    <string name="title_cancel_file_transfer">Annuler le transfert de fichiers ?</string>
+    <string name="message_cancel_file_transfer">Arrêter le transfert de fichiers en cours ?</string>
+    <string name="file_transfer_overlay_content_description">Progression du transfert de fichiers. Appuyez pour annuler.</string>
+    <string name="title_packet_size">Taille des paquets réseau</string>
+    <string name="summary_packet_size">Nombre maximal d\'octets par paquet envoyé à l\'hôte. 1392 est la valeur par défaut sûre pour un LAN Ethernet. Réduisez-la pour les liaisons contraintes (Wi-Fi, VPN) ; augmentez-la sur les réseaux à trames jumbo.</string>
+    <string name="suffix_packet_size">octets</string>
+    <string name="relay_url_title">URL du serveur relais</string>
+    <string name="relay_url_summary">Relais WebSocket pour la traversée de NAT (ex. wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK du relais</string>
+    <string name="relay_psk_summary">Clé pré-partagée pour l\'authentification auprès du relais</string>
+    <string name="steam_account_label">COMPTE STEAM</string>
+    <string name="steam_switch_title">Changement de compte Steam…</string>
+    <string name="steam_switch_starting">Démarrage…</string>
+    <string name="steam_switch_helper">Steam va se fermer et se reconnecter sur l\'hôte. Cela peut prendre 60–90 secondes. En cas de blocage, vérifiez l\'hôte — Steam Guard demande peut-être une validation 2FA.</string>
+    <string name="steam_switch_error_title">Échec du changement de compte Steam</string>
+    <string name="steam_switch_error_no_taskid">Le serveur n\'a renvoyé aucun identifiant de tâche</string>
+    <string name="steam_switch_error_taskgone">La tâche de changement a disparu sur l\'hôte</string>
+    <string name="steam_switch_error_timeout">Délai dépassé pour le changement (&gt;150 s sans que le serveur atteigne un état final)</string>
+    <string name="steam_switch_account_unavailable">Ce compte n\'a aucun identifiant enregistré sur l\'hôte. Connectez-vous d\'abord une fois sur l\'hôte, puis réessayez.</string>
 </resources>

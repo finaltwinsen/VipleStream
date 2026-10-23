@@ -223,4 +223,120 @@
         <item>Seimbang — direkomendasikan</item>
         <item>Performa — tercepat, pelacakan gerakan lebih lemah</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Otomatis (per jenis stream)</item>
+        <item>Latensi terendah</item>
+        <item>Agregasi bandwidth</item>
+        <item>Redundan (semua jalur)</item>
+        <item>Selesai paling awal</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">Steam Controller melalui Bluetooth tidak dapat diteruskan di Android (sistem menguasai HID Bluetooth). Hubungkan dengan kabel USB-C atau colokkan penerima Puck melalui OTG.</string>
+    <string name="error_code_prefix">Kode kesalahan:</string>
+    <string name="perf_overlay_hostprocessinglatency">Latensi pemrosesan host min/maks/rata-rata: %1$.1f/%2$.1f/%3$.1f ms</string>
+    <string name="perf_overlay_fruc_separator">--- Interpolasi Frame (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Status: Aktif (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Status: Dijeda</string>
+    <string name="perf_overlay_fruc_pending">Status: Menunggu…</string>
+    <string name="perf_overlay_fruc_off">Status: Mati</string>
+    <string name="perf_overlay_fruc_count">Diinterpolasi: %1$d / %2$d (rasio: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Keluaran efektif: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Urutan aplikasi</string>
+    <string name="summary_app_sort_mode">Cara game diatur di daftar aplikasi. Aplikasi yang ditentukan secara manual (Desktop, Steam Big Picture) selalu disematkan di atas.</string>
+    <string name="app_sort_mode_default">Bawaan (urutan host)</string>
+    <string name="app_sort_mode_recent">Baru dimainkan</string>
+    <string name="app_sort_mode_playtime">Paling sering dimainkan</string>
+    <string name="app_sort_mode_name">Nama (A–Z)</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="title_native_fps_dialog">Peringatan FPS asli</string>
+    <string name="category_gamepad_settings">§ 06 · Pengaturan Gamepad</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Atur intensitas getaran emulasi</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Perkuat atau kurangi intensitas getaran di perangkat Anda</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Selalu kendalikan mouse dengan touchpad</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Memaksa input touchpad gamepad untuk mengendalikan mouse host, bahkan saat mengemulasi gamepad dengan touchpad.</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Izinkan penggunaan sensor gerak gamepad</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Memungkinkan host yang didukung meminta data sensor gerak saat mengemulasi gamepad dengan sensor gerak. Menonaktifkannya dapat sedikit mengurangi penggunaan daya dan jaringan jika sensor gerak tidak digunakan dalam game.</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Emulasikan dukungan sensor gerak gamepad</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Menggunakan sensor gerak bawaan perangkat Anda jika sensor gamepad tidak didukung oleh gamepad yang terhubung atau versi Android Anda.\nCatatan: Mengaktifkan opsi ini dapat membuat gamepad Anda terlihat sebagai kontroler PlayStation di host.</string>
+    <string name="title_show_guide_button">Tampilkan tombol Guide</string>
+    <string name="summary_show_guide_button">Tampilkan tombol Guide di layar</string>
+    <string name="title_disable_frame_drop">Jangan pernah membuang frame</string>
+    <string name="summary_disable_frame_drop">Dapat mengurangi patah-patah mikro di beberapa perangkat, tetapi dapat meningkatkan latensi</string>
+    <string name="title_video_format">Ubah pengaturan codec</string>
+    <string name="summary_video_format">Codec yang lebih baru dapat menurunkan kebutuhan bandwidth video jika perangkat Anda mendukungnya. Pilihan codec dapat diabaikan jika tidak didukung oleh perangkat lunak host atau GPU.</string>
+    <string name="title_enable_hdr">Aktifkan HDR (Eksperimental)</string>
+    <string name="summary_enable_hdr">Streaming HDR saat game dan GPU PC mendukungnya. HDR memerlukan GPU yang mendukung encoding HEVC Main 10.</string>
+    <string name="title_full_range">Paksa video rentang penuh (Eksperimental)</string>
+    <string name="summary_full_range">Ini akan menyebabkan hilangnya detail di area terang dan gelap jika perangkat Anda tidak menampilkan konten video rentang penuh dengan benar.</string>
+    <string name="title_enable_mpquic">Aktifkan transportasi multijalur MP-QUIC</string>
+    <string name="summary_enable_mpquic">Gunakan QUIC multijalur (RFC 9443) untuk streaming. Memungkinkan peralihan otomatis WiFi + seluler dan agregasi bandwidth dua kartu jaringan.</string>
+    <string name="title_mpquic_scheduler">Penjadwal jalur</string>
+    <string name="summary_mpquic_scheduler">Cara mendistribusikan lalu lintas ke beberapa jalur jaringan</string>
+    <string name="title_enable_perf_overlay">Tampilkan statistik kinerja saat streaming</string>
+    <string name="summary_enable_perf_overlay">Tampilkan informasi kinerja stream secara real-time saat streaming</string>
+    <string name="title_enable_post_stream_toast">Tampilkan pesan latensi setelah streaming</string>
+    <string name="summary_enable_post_stream_toast">Tampilkan pesan informasi latensi setelah stream berakhir</string>
+    <string name="category_help">§ 09 · Bantuan</string>
+    <string name="title_setup_guide">Panduan penyiapan</string>
+    <string name="summary_setup_guide">Lihat petunjuk cara menyiapkan PC gaming Anda untuk streaming</string>
+    <string name="title_troubleshooting">Panduan pemecahan masalah</string>
+    <string name="summary_troubleshooting">Lihat tips untuk mendiagnosis dan memperbaiki masalah streaming umum</string>
+    <string name="title_privacy_policy">Kebijakan privasi</string>
+    <string name="summary_privacy_policy">Lihat kebijakan privasi VipleStream</string>
+    <string name="toast_controller_type_changed">Jenis gamepad mungkin berubah karena emulasi sensor gerak</string>
+    <string name="resolution_360p">360p</string>
+    <string name="resolution_480p">480p</string>
+    <string name="resolution_720p">720p</string>
+    <string name="resolution_1080p">1080p</string>
+    <string name="resolution_1440p">1440p</string>
+    <string name="resolution_4k">4K</string>
+    <string name="resolution_custom">Kustom (atur nilai di bawah)</string>
+    <string name="title_custom_resolution">Resolusi kustom</string>
+    <string name="summary_custom_resolution">Digunakan saat menu resolusi di atas diatur ke Kustom. Format: lebar x tinggi (mis. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Masukkan resolusi kustom sebagai LEBARxTINGGI, mis. 1600x900. Diabaikan kecuali menu diatur ke Kustom.</string>
+    <string name="title_enable_yuv444">Utamakan kroma 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Minta kroma 4:4:4 jika dekoder perangkat menyatakan dukungan. Sebagian besar dekoder seluler tidak mendukungnya sehingga opsi ini tidak berpengaruh.</string>
+    <string name="title_cancel_file_transfer">Batalkan transfer file?</string>
+    <string name="message_cancel_file_transfer">Hentikan transfer file yang sedang berlangsung?</string>
+    <string name="file_transfer_overlay_content_description">Progres transfer file. Ketuk untuk membatalkan.</string>
+    <string name="title_packet_size">Ukuran paket jaringan</string>
+    <string name="summary_packet_size">Byte maksimum per paket yang dikirim ke host. 1392 adalah nilai bawaan yang aman untuk LAN Ethernet. Turunkan untuk koneksi terbatas (Wi-Fi, VPN); naikkan pada jaringan jumbo frame.</string>
+    <string name="suffix_packet_size">byte</string>
+    <string name="fps_30">30 FPS</string>
+    <string name="fps_60">60 FPS</string>
+    <string name="fps_90">90 FPS</string>
+    <string name="fps_120">120 FPS</string>
+    <string name="audioconf_stereo">Stereo</string>
+    <string name="audioconf_51surround">Suara surround 5.1</string>
+    <string name="audioconf_71surround">Suara surround 7.1</string>
+    <string name="videoformat_auto">Otomatis (Disarankan)</string>
+    <string name="videoformat_av1always">Utamakan AV1 (Eksperimental)</string>
+    <string name="videoformat_hevcalways">Utamakan HEVC</string>
+    <string name="videoformat_h264always">Utamakan H.264</string>
+    <string name="title_frame_pacing">Ritme frame video</string>
+    <string name="summary_frame_pacing">Tentukan keseimbangan antara latensi dan kelancaran video</string>
+    <string name="pacing_latency">Utamakan latensi terendah</string>
+    <string name="pacing_balanced">Seimbang</string>
+    <string name="pacing_balanced_alt">Seimbang dengan batas FPS</string>
+    <string name="pacing_smoothness">Utamakan video paling lancar (dapat meningkatkan latensi secara signifikan)</string>
+    <string name="title_analog_scrolling">Gunakan stik analog untuk menggulir</string>
+    <string name="summary_analog_scrolling">Pilih stik analog untuk menggulir saat dalam mode emulasi mouse</string>
+    <string name="analogscroll_none">Tidak ada (kedua stik menggerakkan mouse)</string>
+    <string name="analogscroll_right">Stik analog kanan</string>
+    <string name="analogscroll_left">Stik analog kiri</string>
+    <string name="relay_url_title">URL server relai</string>
+    <string name="relay_url_summary">Relai WebSocket untuk menembus NAT (mis. wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK relai</string>
+    <string name="relay_psk_summary">Kunci pra-bagi untuk autentikasi relai</string>
+    <string name="steam_account_label">AKUN STEAM</string>
+    <string name="steam_switch_title">Mengganti akun Steam…</string>
+    <string name="steam_switch_starting">Memulai…</string>
+    <string name="steam_switch_helper">Steam akan ditutup dan masuk ulang di host. Ini bisa memakan waktu 60–90 detik. Jika macet, periksa host — Steam Guard mungkin meminta verifikasi dua langkah.</string>
+    <string name="steam_switch_error_title">Gagal mengganti akun Steam</string>
+    <string name="steam_switch_error_no_taskid">Server tidak mengembalikan ID tugas</string>
+    <string name="steam_switch_error_taskgone">Tugas penggantian hilang di host</string>
+    <string name="steam_switch_error_timeout">Waktu penggantian habis (&gt;150 dtk tanpa server mencapai status akhir)</string>
+    <string name="steam_switch_account_unavailable">Akun ini tidak memiliki kredensial tersimpan di host. Masuk sekali di host terlebih dahulu, lalu coba lagi.</string>
 </resources>

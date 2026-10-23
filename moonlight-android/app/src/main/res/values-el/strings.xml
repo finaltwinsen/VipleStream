@@ -224,4 +224,120 @@
         <item>Ισορροπημένο — συνιστάται</item>
         <item>Απόδοση — ταχύτερο, ασθενέστερη παρακολούθηση κίνησης</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Αυτόματο (ανά τύπο ροής)</item>
+        <item>Χαμηλότερη καθυστέρηση</item>
+        <item>Συνάθροιση εύρους ζώνης</item>
+        <item>Πλεονάζον (όλες οι διαδρομές)</item>
+        <item>Συντομότερη ολοκλήρωση</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">Το Steam Controller μέσω Bluetooth δεν μπορεί να διαβιβαστεί στο Android (το Bluetooth HID το ελέγχει το σύστημα). Συνδέστε το με καλώδιο USB-C ή συνδέστε τον δέκτη Puck μέσω OTG.</string>
+    <string name="perf_overlay_renderingfps">Ρυθμός καρέ απόδοσης: %1$.2f FPS</string>
+    <string name="perf_overlay_hostprocessinglatency">Καθυστέρηση επεξεργασίας κεντρικού υπολογιστή ελάχ./μέγ./μέση: %1$.1f/%2$.1f/%3$.1f ms</string>
+    <string name="perf_overlay_fruc_separator">--- Παρεμβολή καρέ (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Κατάσταση: Ενεργή (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Κατάσταση: Σε παύση</string>
+    <string name="perf_overlay_fruc_pending">Κατάσταση: Αναμονή…</string>
+    <string name="perf_overlay_fruc_off">Κατάσταση: Ανενεργή</string>
+    <string name="perf_overlay_fruc_count">Παρεμβαλλόμενα: %1$d / %2$d (αναλογία: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Πραγματική έξοδος: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Σειρά ταξινόμησης εφαρμογών</string>
+    <string name="summary_app_sort_mode">Πώς ταξινομούνται τα παιχνίδια στη λίστα εφαρμογών. Οι εφαρμογές που ορίζονται χειροκίνητα (Επιφάνεια εργασίας, Steam Big Picture) καρφιτσώνονται πάντα στην κορυφή.</string>
+    <string name="app_sort_mode_default">Προεπιλογή (σειρά κεντρικού υπολογιστή)</string>
+    <string name="app_sort_mode_recent">Παίχτηκαν πρόσφατα</string>
+    <string name="app_sort_mode_playtime">Παίζονται περισσότερο</string>
+    <string name="app_sort_mode_name">Όνομα (A–Z)</string>
+    <string name="resolution_prefix_native_landscape">(Οριζόντια)</string>
+    <string name="resolution_prefix_native_portrait">(Κατακόρυφα)</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="title_native_fps_dialog">Προειδοποίηση εγγενών FPS</string>
+    <string name="title_checkbox_enable_audiofx">Ενεργοποίηση υποστήριξης ισοσταθμιστή συστήματος</string>
+    <string name="summary_checkbox_enable_audiofx">Επιτρέπει τη λειτουργία των εφέ ήχου κατά τη ροή, αλλά μπορεί να αυξήσει την καθυστέρηση ήχου</string>
+    <string name="category_gamepad_settings">§ 06 · Ρυθμίσεις χειριστηρίου</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Ρύθμιση έντασης προσομοιωμένης δόνησης</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Ενισχύστε ή μειώστε την ένταση της δόνησης στη συσκευή σας</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="summary_seekbar_deadzone">Σημείωση: Ορισμένα παιχνίδια μπορεί να επιβάλλουν μεγαλύτερη νεκρή ζώνη από αυτή που έχει ρυθμιστεί στο VipleStream.</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Έλεγχος ποντικιού πάντα με την επιφάνεια αφής</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Αναγκάζει την είσοδο από την επιφάνεια αφής του χειριστηρίου να ελέγχει το ποντίκι του κεντρικού υπολογιστή, ακόμη και όταν προσομοιώνεται χειριστήριο με επιφάνεια αφής.</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Να επιτρέπεται η χρήση αισθητήρων κίνησης του χειριστηρίου</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Επιτρέπει στους υποστηριζόμενους κεντρικούς υπολογιστές να ζητούν δεδομένα αισθητήρων κίνησης όταν προσομοιώνεται χειριστήριο με αισθητήρες κίνησης. Η απενεργοποίηση μπορεί να μειώσει ελαφρώς την κατανάλωση ενέργειας και δεδομένων δικτύου, αν οι αισθητήρες κίνησης δεν χρησιμοποιούνται στο παιχνίδι.</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Προσομοίωση υποστήριξης αισθητήρων κίνησης χειριστηρίου</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Χρησιμοποιεί τους ενσωματωμένους αισθητήρες κίνησης της συσκευής σας, αν οι αισθητήρες του χειριστηρίου δεν υποστηρίζονται από το συνδεδεμένο χειριστήριο ή από την έκδοση Android.\nΣημείωση: Η ενεργοποίηση αυτής της επιλογής μπορεί να κάνει το χειριστήριό σας να εμφανίζεται ως χειριστήριο PlayStation στον κεντρικό υπολογιστή.</string>
+    <string name="title_checkbox_absolute_mouse_mode">Λειτουργία ποντικιού απομακρυσμένης επιφάνειας εργασίας</string>
+    <string name="summary_checkbox_absolute_mouse_mode">Μπορεί να κάνει την επιτάχυνση του ποντικιού να συμπεριφέρεται πιο φυσικά κατά τη χρήση απομακρυσμένης επιφάνειας εργασίας, αλλά δεν είναι συμβατή με πολλά παιχνίδια.</string>
+    <string name="title_show_guide_button">Εμφάνιση κουμπιού οδηγού</string>
+    <string name="summary_show_guide_button">Εμφάνιση του κουμπιού οδηγού στην οθόνη</string>
+    <string name="title_checkbox_reduce_refresh_rate">Να επιτρέπεται μείωση του ρυθμού ανανέωσης</string>
+    <string name="summary_checkbox_reduce_refresh_rate">Οι χαμηλότεροι ρυθμοί ανανέωσης οθόνης μπορούν να εξοικονομήσουν ενέργεια, με κόστος λίγη επιπλέον καθυστέρηση βίντεο</string>
+    <string name="title_disable_frame_drop">Να μην απορρίπτονται ποτέ καρέ</string>
+    <string name="title_full_range">Επιβολή βίντεο πλήρους εύρους (Πειραματικό)</string>
+    <string name="summary_full_range">Θα προκληθεί απώλεια λεπτομέρειας σε φωτεινές και σκοτεινές περιοχές, αν η συσκευή σας δεν εμφανίζει σωστά περιεχόμενο βίντεο πλήρους εύρους.</string>
+    <string name="title_enable_mpquic">Ενεργοποίηση μεταφοράς πολλαπλών διαδρομών MP-QUIC</string>
+    <string name="summary_enable_mpquic">Χρήση QUIC πολλαπλών διαδρομών (RFC 9443) για τη ροή. Ενεργοποιεί την εναλλαγή μεταξύ Wi-Fi και δικτύου κινητής σε περίπτωση αποτυχίας και τη συνάθροιση εύρους ζώνης με δύο κάρτες δικτύου (NIC).</string>
+    <string name="title_mpquic_scheduler">Χρονοπρογραμματιστής διαδρομών</string>
+    <string name="summary_mpquic_scheduler">Πώς κατανέμεται η κίνηση σε πολλαπλές διαδρομές δικτύου</string>
+    <string name="category_help">§ 09 · Βοήθεια</string>
+    <string name="title_setup_guide">Οδηγός ρύθμισης</string>
+    <string name="summary_setup_guide">Προβολή οδηγιών για τη ρύθμιση του υπολογιστή παιχνιδιών σας για ροή</string>
+    <string name="title_troubleshooting">Οδηγός αντιμετώπισης προβλημάτων</string>
+    <string name="summary_troubleshooting">Προβολή συμβουλών για τη διάγνωση και την επίλυση συνηθισμένων προβλημάτων ροής</string>
+    <string name="title_privacy_policy">Πολιτική απορρήτου</string>
+    <string name="summary_privacy_policy">Προβολή της πολιτικής απορρήτου του VipleStream</string>
+    <string name="toast_controller_type_changed">Ο τύπος χειριστηρίου μπορεί να αλλάξει λόγω της προσομοίωσης αισθητήρων κίνησης</string>
+    <string name="resolution_360p">360p</string>
+    <string name="resolution_480p">480p</string>
+    <string name="resolution_720p">720p</string>
+    <string name="resolution_1080p">1080p</string>
+    <string name="resolution_1440p">1440p</string>
+    <string name="resolution_4k">4K</string>
+    <string name="resolution_custom">Προσαρμοσμένη (ορίστε τιμή παρακάτω)</string>
+    <string name="title_custom_resolution">Προσαρμοσμένη ανάλυση</string>
+    <string name="summary_custom_resolution">Χρησιμοποιείται όταν η παραπάνω λίστα ανάλυσης έχει οριστεί σε Προσαρμοσμένη. Μορφή: πλάτος x ύψος (π.χ. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Εισαγάγετε μια προσαρμοσμένη ανάλυση ως ΠΛΑΤΟΣxΥΨΟΣ, π.χ. 1600x900. Αγνοείται εκτός αν η λίστα έχει οριστεί σε Προσαρμοσμένη.</string>
+    <string name="title_enable_yuv444">Προτίμηση χρωματικότητας 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Ζητά χρωματικότητα 4:4:4 όταν ο αποκωδικοποιητής της συσκευής δηλώνει υποστήριξη. Οι περισσότεροι αποκωδικοποιητές κινητών δεν την υποστηρίζουν και τότε η επιλογή δεν έχει καμία επίδραση.</string>
+    <string name="title_cancel_file_transfer">Ακύρωση μεταφοράς αρχείων;</string>
+    <string name="message_cancel_file_transfer">Διακοπή της μεταφοράς αρχείων που βρίσκεται σε εξέλιξη;</string>
+    <string name="file_transfer_overlay_content_description">Πρόοδος μεταφοράς αρχείων. Πατήστε για ακύρωση.</string>
+    <string name="title_packet_size">Μέγεθος πακέτου δικτύου</string>
+    <string name="summary_packet_size">Μέγιστος αριθμός byte ανά πακέτο που αποστέλλεται στον κεντρικό υπολογιστή. Το 1392 είναι η ασφαλής προεπιλογή για Ethernet LAN. Μειώστε το για περιορισμένες συνδέσεις (Wi-Fi, VPN)· αυξήστε το σε δίκτυα με jumbo frames.</string>
+    <string name="suffix_packet_size">byte</string>
+    <string name="fps_30">30 FPS</string>
+    <string name="fps_60">60 FPS</string>
+    <string name="fps_90">90 FPS</string>
+    <string name="fps_120">120 FPS</string>
+    <string name="audioconf_stereo">Στερεοφωνικός</string>
+    <string name="audioconf_51surround">Περιφερειακός ήχος 5.1</string>
+    <string name="audioconf_71surround">Περιφερειακός ήχος 7.1</string>
+    <string name="videoformat_auto">Αυτόματο (Συνιστάται)</string>
+    <string name="videoformat_av1always">Προτίμηση AV1 (Πειραματικό)</string>
+    <string name="videoformat_hevcalways">Προτίμηση HEVC</string>
+    <string name="videoformat_h264always">Προτίμηση H.264</string>
+    <string name="title_frame_pacing">Ρυθμός παρουσίασης καρέ βίντεο</string>
+    <string name="summary_frame_pacing">Καθορίστε την ισορροπία μεταξύ καθυστέρησης και ομαλότητας του βίντεο</string>
+    <string name="pacing_latency">Προτίμηση χαμηλότερης καθυστέρησης</string>
+    <string name="pacing_balanced">Ισορροπημένο</string>
+    <string name="pacing_balanced_alt">Ισορροπημένο με όριο FPS</string>
+    <string name="pacing_smoothness">Προτίμηση ομαλότερου βίντεο (μπορεί να αυξήσει σημαντικά την καθυστέρηση)</string>
+    <string name="title_analog_scrolling">Κύλιση με αναλογικό μοχλό</string>
+    <string name="summary_analog_scrolling">Επιλέξτε αναλογικό μοχλό για κύλιση στη λειτουργία προσομοίωσης ποντικιού</string>
+    <string name="analogscroll_none">Κανένας (και οι δύο μοχλοί κινούν το ποντίκι)</string>
+    <string name="analogscroll_right">Δεξιός αναλογικός μοχλός</string>
+    <string name="analogscroll_left">Αριστερός αναλογικός μοχλός</string>
+    <string name="relay_url_title">URL διακομιστή αναμετάδοσης</string>
+    <string name="relay_url_summary">Αναμετάδοση WebSocket για διάσχιση NAT (π.χ. wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK αναμετάδοσης</string>
+    <string name="relay_psk_summary">Προκοινοποιημένο κλειδί για τον έλεγχο ταυτότητας στην αναμετάδοση</string>
+    <string name="steam_account_label">ΛΟΓΑΡΙΑΣΜΟΣ STEAM</string>
+    <string name="steam_switch_title">Εναλλαγή λογαριασμού Steam…</string>
+    <string name="steam_switch_starting">Εκκίνηση…</string>
+    <string name="steam_switch_helper">Το Steam θα κλείσει και θα συνδεθεί ξανά στον κεντρικό υπολογιστή. Αυτό μπορεί να διαρκέσει 60–90 δευτερόλεπτα. Αν κολλήσει, ελέγξτε τον κεντρικό υπολογιστή — μπορεί να ζητείται έλεγχος ταυτότητας δύο παραγόντων (2FA) του Steam Guard.</string>
+    <string name="steam_switch_error_title">Η εναλλαγή λογαριασμού Steam απέτυχε</string>
+    <string name="steam_switch_error_no_taskid">Ο διακομιστής δεν επέστρεψε αναγνωριστικό εργασίας</string>
+    <string name="steam_switch_error_taskgone">Η εργασία εναλλαγής εξαφανίστηκε από τον κεντρικό υπολογιστή</string>
+    <string name="steam_switch_error_timeout">Λήξη χρονικού ορίου εναλλαγής (&gt;150 s χωρίς ο διακομιστής να φτάσει σε τελική κατάσταση)</string>
+    <string name="steam_switch_account_unavailable">Αυτός ο λογαριασμός δεν έχει αποθηκευμένα διαπιστευτήρια στον κεντρικό υπολογιστή. Συνδεθείτε πρώτα μία φορά στον κεντρικό υπολογιστή και δοκιμάστε ξανά.</string>
 </resources>

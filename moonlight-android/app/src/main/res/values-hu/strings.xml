@@ -271,4 +271,70 @@
         <item>Kiegyensúlyozott — javasolt</item>
         <item>Teljesítmény — leggyorsabb, gyengébb mozgáskövetés</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Automatikus (adatfolyam-típusonként)</item>
+        <item>Legkisebb késleltetés</item>
+        <item>Sávszélesség-összevonás</item>
+        <item>Redundáns (minden útvonal)</item>
+        <item>Leghamarabbi befejezés</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">A Bluetooth-on csatlakoztatott Steam Controller nem adható át Androidon (a Bluetooth HID-et a rendszer kezeli). Csatlakoztasd USB-C kábellel, vagy dugd be a Puck vevőt OTG-n keresztül.</string>
+    <string name="error_code_prefix">Hibakód:</string>
+    <string name="perf_overlay_fruc_separator">--- Képkocka-interpoláció (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Állapot: Aktív (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Állapot: Szüneteltetve</string>
+    <string name="perf_overlay_fruc_pending">Állapot: Várakozás…</string>
+    <string name="perf_overlay_fruc_off">Állapot: Kikapcsolva</string>
+    <string name="perf_overlay_fruc_count">Interpolált: %1$d / %2$d (arány: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Tényleges kimenet: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Alkalmazások rendezése</string>
+    <string name="summary_app_sort_mode">Meghatározza a játékok sorrendjét az alkalmazáslistában. A kézzel megadott alkalmazások (Desktop, Steam Big Picture) mindig felül maradnak.</string>
+    <string name="app_sort_mode_default">Alapértelmezett (gazdagép sorrendje)</string>
+    <string name="app_sort_mode_recent">Legutóbb játszott</string>
+    <string name="app_sort_mode_playtime">Legtöbbet játszott</string>
+    <string name="app_sort_mode_name">Név (A–Z)</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Az emulált rezgés erősségének beállítása</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">A rezgés erősségének növelése vagy csökkentése a készüléken</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Kontroller mozgásérzékelő-támogatásának emulálása</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">A készülék beépített mozgásérzékelőit használja, ha a csatlakoztatott kontroller vagy az Android-verzió nem támogatja a kontroller érzékelőit.\nMegjegyzés: Ha bekapcsolod ezt az opciót, a kontroller PlayStation-kontrollerként jelenhet meg a gazdagépen.</string>
+    <string name="title_show_guide_button">Guide gomb megjelenítése</string>
+    <string name="summary_show_guide_button">A Guide gomb megjelenítése a képernyőn</string>
+    <string name="title_enable_mpquic">MP-QUIC többutas átvitel engedélyezése</string>
+    <string name="summary_enable_mpquic">QUIC többutas átvitel (RFC 9443) használata a streameléshez. Lehetővé teszi a Wi-Fi és a mobilhálózat közötti átváltást hiba esetén, valamint két hálózati kártya sávszélességének összevonását.</string>
+    <string name="title_mpquic_scheduler">Útvonalütemező</string>
+    <string name="summary_mpquic_scheduler">A forgalom elosztásának módja több hálózati útvonal között</string>
+    <string name="toast_controller_type_changed">A kontroller típusa megváltozhat a mozgásérzékelő emulálása miatt</string>
+    <string name="resolution_custom">Egyéni (az értéket lent adhatod meg)</string>
+    <string name="title_custom_resolution">Egyéni felbontás</string>
+    <string name="summary_custom_resolution">Akkor használatos, ha a fenti felbontásválasztó Egyéni értékre van állítva. Formátum: szélesség x magasság (pl. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Add meg az egyéni felbontást SZÉLESSÉGxMAGASSÁG formában, pl. 1600x900. Figyelmen kívül marad, ha a választó nincs Egyéni értékre állítva.</string>
+    <string name="title_enable_yuv444">4:4:4 színmintavétel előnyben részesítése (YUV444)</string>
+    <string name="summary_enable_yuv444">4:4:4 színmintavételt kér, ha a készülék dekódere jelzi a támogatást. A legtöbb mobil dekóder ezt nem támogatja, ilyenkor a beállításnak nincs hatása.</string>
+    <string name="title_cancel_file_transfer">Megszakítod a fájlátvitelt?</string>
+    <string name="message_cancel_file_transfer">Leállítod a folyamatban lévő fájlátvitelt?</string>
+    <string name="file_transfer_overlay_content_description">Fájlátvitel állapota. Koppints a megszakításhoz.</string>
+    <string name="title_packet_size">Hálózati csomagméret</string>
+    <string name="summary_packet_size">A gazdagépnek küldött csomagonkénti maximális bájtszám. Az 1392 a biztonságos alapértelmezés Ethernet LAN-hoz. Korlátozott kapcsolatoknál (Wi-Fi, VPN) csökkentsd, jumbo frame-et támogató hálózatokon növeld.</string>
+    <string name="suffix_packet_size">bájt</string>
+    <string name="title_analog_scrolling">Görgetés analóg karral</string>
+    <string name="summary_analog_scrolling">Válaszd ki, melyik analóg kar görgessen egéremulációs módban</string>
+    <string name="analogscroll_none">Nincs (mindkét kar az egeret mozgatja)</string>
+    <string name="analogscroll_right">Jobb analóg kar</string>
+    <string name="analogscroll_left">Bal analóg kar</string>
+    <string name="relay_url_title">Továbbító szerver URL</string>
+    <string name="relay_url_summary">WebSocket-továbbító a NAT-on való áthaladáshoz (pl. wss://relay.example.com)</string>
+    <string name="relay_psk_title">Továbbító PSK</string>
+    <string name="relay_psk_summary">Előre megosztott kulcs a továbbító hitelesítéséhez</string>
+    <string name="steam_account_label">STEAM-FIÓK</string>
+    <string name="steam_switch_title">Steam-fiók váltása…</string>
+    <string name="steam_switch_starting">Indítás…</string>
+    <string name="steam_switch_helper">A Steam bezárul, majd újra bejelentkezik a gazdagépen. Ez 60–90 másodpercig tarthat. Ha elakad, nézd meg a gazdagépet — lehet, hogy a Steam Guard kétlépcsős azonosítást kér.</string>
+    <string name="steam_switch_error_title">A Steam-fiókváltás sikertelen</string>
+    <string name="steam_switch_error_no_taskid">A szerver nem adott vissza feladatazonosítót</string>
+    <string name="steam_switch_error_taskgone">A váltási feladat eltűnt a gazdagépen</string>
+    <string name="steam_switch_error_timeout">A váltás időtúllépés miatt megszakadt (&gt;150 s alatt a szerver nem jutott végállapotba)</string>
+    <string name="steam_switch_account_unavailable">Ehhez a fiókhoz nincsenek mentett hitelesítő adatok a gazdagépen. Előbb jelentkezz be egyszer a gazdagépen, majd próbáld újra.</string>
 </resources>

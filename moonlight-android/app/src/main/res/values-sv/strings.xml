@@ -284,4 +284,58 @@
         <item>Balanserad — rekommenderad</item>
         <item>Prestanda — snabbast, svagare rörelsespårning</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Auto (per strömtyp)</item>
+        <item>Lägsta latens</item>
+        <item>Bandbreddsaggregering</item>
+        <item>Redundant (alla vägar)</item>
+        <item>Tidigast slutförd</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">Steam Controller via Bluetooth kan inte vidarebefordras på Android (systemet äger Bluetooth HID). Anslut den med en USB-C-kabel eller koppla in Puck-mottagaren via OTG.</string>
+    <string name="perf_overlay_fruc_separator">--- Bildinterpolering (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Status: Aktiv (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Status: Pausad</string>
+    <string name="perf_overlay_fruc_pending">Status: Väntar…</string>
+    <string name="perf_overlay_fruc_off">Status: Av</string>
+    <string name="perf_overlay_fruc_count">Interpolerade: %1$d / %2$d (andel: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Effektiv utdata: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Sorteringsordning för appar</string>
+    <string name="summary_app_sort_mode">Hur spel ordnas i applistan. Manuellt definierade appar (Desktop, Steam Big Picture) fästs alltid överst.</string>
+    <string name="app_sort_mode_default">Standard (värdens ordning)</string>
+    <string name="app_sort_mode_recent">Senast spelade</string>
+    <string name="app_sort_mode_playtime">Mest spelade</string>
+    <string name="app_sort_mode_name">Namn (A–Ö)</string>
+    <string name="title_show_guide_button">Visa Guide-knappen</string>
+    <string name="summary_show_guide_button">Visa Guide-knappen på skärmen</string>
+    <string name="title_enable_mpquic">Aktivera MP-QUIC-flervägstransport</string>
+    <string name="summary_enable_mpquic">Använd QUIC multipath (RFC 9443) för streaming. Möjliggör failover mellan Wi-Fi och mobildata samt bandbreddsaggregering med två nätverkskort.</string>
+    <string name="title_mpquic_scheduler">Vägschemaläggare</string>
+    <string name="summary_mpquic_scheduler">Hur trafiken fördelas över flera nätverksvägar</string>
+    <string name="resolution_custom">Anpassad (ange värde nedan)</string>
+    <string name="title_custom_resolution">Anpassad upplösning</string>
+    <string name="summary_custom_resolution">Används när upplösningslistan ovan är inställd på Anpassad. Format: bredd x höjd (t.ex. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Ange en anpassad upplösning som BREDDxHÖJD, t.ex. 1600x900. Ignoreras om inte listan är inställd på Anpassad.</string>
+    <string name="title_enable_yuv444">Föredra 4:4:4-kroma (YUV444)</string>
+    <string name="summary_enable_yuv444">Begär 4:4:4-kroma när enhetens avkodare anger stöd. De flesta mobila avkodare stöder inte detta, och då har alternativet ingen effekt.</string>
+    <string name="title_cancel_file_transfer">Avbryta filöverföringen?</string>
+    <string name="message_cancel_file_transfer">Stoppa den pågående filöverföringen?</string>
+    <string name="file_transfer_overlay_content_description">Filöverföringens förlopp. Tryck för att avbryta.</string>
+    <string name="title_packet_size">Nätverkspaketstorlek</string>
+    <string name="summary_packet_size">Maximalt antal byte per paket som skickas till värden. 1392 är det säkra standardvärdet för Ethernet-LAN. Sänk det för begränsade länkar (Wi-Fi, VPN); höj det i nätverk med jumboramar.</string>
+    <string name="suffix_packet_size">byte</string>
+    <string name="relay_url_title">Reläserverns URL</string>
+    <string name="relay_url_summary">WebSocket-relä för NAT-traversering (t.ex. wss://relay.example.com)</string>
+    <string name="relay_psk_title">Relä-PSK</string>
+    <string name="relay_psk_summary">I förväg delad nyckel för reläautentisering</string>
+    <string name="steam_account_label">STEAM-KONTO</string>
+    <string name="steam_switch_title">Byter Steam-konto…</string>
+    <string name="steam_switch_starting">Startar…</string>
+    <string name="steam_switch_helper">Steam stängs och loggar in igen på värden. Det kan ta 60–90 sekunder. Om det fastnar, kontrollera värden — Steam Guard 2FA kan begära bekräftelse.</string>
+    <string name="steam_switch_error_title">Steam-bytet misslyckades</string>
+    <string name="steam_switch_error_no_taskid">Servern returnerade inget uppgifts-ID</string>
+    <string name="steam_switch_error_taskgone">Bytesuppgiften försvann på värden</string>
+    <string name="steam_switch_error_timeout">Tidsgränsen för bytet överskreds (&gt;150 s utan att servern nådde ett slutligt tillstånd)</string>
+    <string name="steam_switch_account_unavailable">Det här kontot har inga sparade inloggningsuppgifter på värden. Logga in en gång på värden först och försök sedan igen.</string>
 </resources>

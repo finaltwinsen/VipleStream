@@ -266,4 +266,84 @@
         <item>Сбалансированно — рекомендуется</item>
         <item>Производительность — самое быстрое, более слабое отслеживание движения</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Авто (по типу потока)</item>
+        <item>Минимальная задержка</item>
+        <item>Объединение пропускной способности</item>
+        <item>Резервирование (все пути)</item>
+        <item>Самое раннее завершение</item>
+    </string-array>
+    <string name="pcview_menu_eol">Прекращение поддержки NVIDIA GameStream</string>
+    <string name="pair_pairing_help">Если на вашем хост-компьютере работает VipleStream-Server (или исходный Sunshine), откройте веб-интерфейс сервера, чтобы ввести PIN.</string>
+    <string name="sc_hid_bt_unsupported">Steam Controller, подключённый по Bluetooth, нельзя передать на Android (Bluetooth HID занят системой). Подключите его кабелем USB-C или вставьте приёмник Puck через OTG.</string>
+    <string name="error_code_prefix">Код ошибки:</string>
+    <string name="perf_overlay_hostprocessinglatency">Задержка обработки на хосте мин./макс./сред.: %1$.1f/%2$.1f/%3$.1f мс</string>
+    <string name="perf_overlay_fruc_separator">--- Интерполяция кадров (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Состояние: активна (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Состояние: приостановлена</string>
+    <string name="perf_overlay_fruc_pending">Состояние: ожидание…</string>
+    <string name="perf_overlay_fruc_off">Состояние: выключена</string>
+    <string name="perf_overlay_fruc_count">Интерполировано: %1$d / %2$d (доля: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Фактический вывод: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Порядок сортировки приложений</string>
+    <string name="summary_app_sort_mode">Как располагаются игры в списке приложений. Приложения, заданные вручную (Desktop, Steam Big Picture), всегда закреплены сверху.</string>
+    <string name="app_sort_mode_default">По умолчанию (порядок хоста)</string>
+    <string name="app_sort_mode_recent">Недавно запущенные</string>
+    <string name="app_sort_mode_playtime">Чаще всего запускаемые</string>
+    <string name="app_sort_mode_name">Название (A–Z)</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="title_native_fps_dialog">Предупреждение о нативной частоте кадров</string>
+    <string name="category_gamepad_settings">§ 06 · Настройки геймпада</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Интенсивность эмулируемой вибрации</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Усиление или ослабление вибрации вашего устройства</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Всегда управлять мышью с тачпада</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Ввод с тачпада геймпада всегда управляет мышью хоста, даже при эмуляции геймпада с тачпадом.</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Разрешить датчики движения геймпада</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Позволяет поддерживаемым хостам запрашивать данные датчиков движения при эмуляции геймпада с такими датчиками. Отключение может немного снизить расход энергии и трафика, если игра не использует датчики движения.</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Эмулировать датчики движения геймпада</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Использует встроенные датчики движения устройства, если подключённый геймпад или ваша версия Android не поддерживают датчики геймпада.\nПримечание: при включении этой опции геймпад может определяться на хосте как контроллер PlayStation.</string>
+    <string name="title_show_guide_button">Показывать кнопку Guide</string>
+    <string name="summary_show_guide_button">Показывать кнопку Guide на экране</string>
+    <string name="title_full_range">Принудительно полный диапазон видео (экспериментально)</string>
+    <string name="summary_full_range">Если ваше устройство неправильно отображает видео с полным диапазоном, это приведёт к потере деталей в светлых и тёмных областях.</string>
+    <string name="title_enable_mpquic">Включить многопутевую передачу MP-QUIC</string>
+    <string name="summary_enable_mpquic">Использовать многопутевой QUIC (RFC 9443) для трансляции. Обеспечивает переключение между Wi-Fi и мобильной сетью и объединение пропускной способности двух сетевых адаптеров.</string>
+    <string name="title_mpquic_scheduler">Планировщик путей</string>
+    <string name="summary_mpquic_scheduler">Как распределять трафик между несколькими сетевыми путями</string>
+    <string name="toast_controller_type_changed">Тип геймпада может измениться из-за эмуляции датчиков движения</string>
+    <string name="resolution_custom">Своё (задайте значение ниже)</string>
+    <string name="title_custom_resolution">Своё разрешение</string>
+    <string name="summary_custom_resolution">Используется, если в списке разрешений выше выбрано «Своё». Формат: ширина x высота (например, 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Введите своё разрешение в виде WIDTHxHEIGHT, например 1600x900. Не учитывается, если в списке не выбрано «Своё».</string>
+    <string name="title_enable_yuv444">Предпочитать цветность 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Запрашивать цветность 4:4:4, если декодер устройства заявляет её поддержку. Большинство мобильных декодеров её не поддерживают, и тогда опция ни на что не влияет.</string>
+    <string name="title_cancel_file_transfer">Отменить передачу файла?</string>
+    <string name="message_cancel_file_transfer">Остановить текущую передачу файла?</string>
+    <string name="file_transfer_overlay_content_description">Ход передачи файла. Нажмите, чтобы отменить.</string>
+    <string name="title_packet_size">Размер сетевого пакета</string>
+    <string name="summary_packet_size">Максимальное число байт в пакете, отправляемом на хост. 1392 — безопасное значение по умолчанию для Ethernet LAN. Уменьшите для ограниченных каналов (Wi-Fi, VPN); увеличьте в сетях с jumbo frame.</string>
+    <string name="suffix_packet_size">байт</string>
+    <string name="videoformat_av1always">Предпочитать AV1 (экспериментально)</string>
+    <string name="videoformat_h264always">Предпочитать H.264</string>
+    <string name="title_analog_scrolling">Прокрутка аналоговым стиком</string>
+    <string name="summary_analog_scrolling">Выберите аналоговый стик для прокрутки в режиме эмуляции мыши</string>
+    <string name="analogscroll_none">Нет (оба стика двигают мышь)</string>
+    <string name="analogscroll_right">Правый аналоговый стик</string>
+    <string name="analogscroll_left">Левый аналоговый стик</string>
+    <string name="relay_url_title">URL сервера-ретранслятора</string>
+    <string name="relay_url_summary">WebSocket-ретранслятор для обхода NAT (например, wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK ретранслятора</string>
+    <string name="relay_psk_summary">Общий ключ для аутентификации на ретрансляторе</string>
+    <string name="steam_account_label">АККАУНТ STEAM</string>
+    <string name="steam_switch_title">Смена аккаунта Steam…</string>
+    <string name="steam_switch_starting">Запуск…</string>
+    <string name="steam_switch_helper">Steam закроется и заново войдёт в аккаунт на хосте. Это может занять 60–90 секунд. Если процесс завис, проверьте хост — возможно, Steam Guard 2FA ждёт подтверждения.</string>
+    <string name="steam_switch_error_title">Не удалось сменить аккаунт Steam</string>
+    <string name="steam_switch_error_no_taskid">Сервер не вернул идентификатор задачи</string>
+    <string name="steam_switch_error_taskgone">Задача смены исчезла на хосте</string>
+    <string name="steam_switch_error_timeout">Время смены истекло (&gt;150 с, а сервер так и не перешёл в конечное состояние)</string>
+    <string name="steam_switch_account_unavailable">Для этого аккаунта на хосте нет сохранённых учётных данных. Сначала один раз войдите на хосте, затем повторите попытку.</string>
 </resources>

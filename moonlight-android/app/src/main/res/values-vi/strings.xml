@@ -245,4 +245,98 @@
         <item>Cân bằng — khuyến nghị</item>
         <item>Hiệu suất — nhanh nhất, theo dõi chuyển động yếu hơn</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Tự động (theo loại luồng)</item>
+        <item>Độ trễ thấp nhất</item>
+        <item>Gộp băng thông</item>
+        <item>Dự phòng (mọi đường)</item>
+        <item>Hoàn thành sớm nhất</item>
+    </string-array>
+    <string name="pcview_menu_eol">NVIDIA GameStream ngừng hoạt động</string>
+    <string name="pair_pairing_help">Nếu PC máy chủ đang chạy VipleStream-Server (hoặc Sunshine gốc), hãy mở giao diện web của máy chủ để nhập mã PIN.</string>
+    <string name="sc_hid_bt_unsupported">Không thể chuyển tiếp Steam Controller qua Bluetooth trên Android (hệ thống nắm quyền Bluetooth HID). Hãy kết nối bằng cáp USB-C hoặc cắm bộ thu Puck qua OTG.</string>
+    <string name="error_code_prefix">Mã lỗi:</string>
+    <string name="perf_overlay_hostprocessinglatency">Độ trễ xử lý của máy chủ tối thiểu/tối đa/trung bình: %1$.1f/%2$.1f/%3$.1f ms</string>
+    <string name="perf_overlay_fruc_separator">--- Nội suy khung hình (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Trạng thái: Đang hoạt động (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Trạng thái: Tạm dừng</string>
+    <string name="perf_overlay_fruc_pending">Trạng thái: Đang chờ…</string>
+    <string name="perf_overlay_fruc_off">Trạng thái: Tắt</string>
+    <string name="perf_overlay_fruc_count">Đã nội suy: %1$d / %2$d (tỷ lệ: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Đầu ra thực tế: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Thứ tự sắp xếp ứng dụng</string>
+    <string name="summary_app_sort_mode">Cách sắp xếp trò chơi trong danh sách ứng dụng. Ứng dụng được định nghĩa thủ công (Desktop, Steam Big Picture) luôn được ghim lên đầu.</string>
+    <string name="app_sort_mode_default">Mặc định (thứ tự của máy chủ)</string>
+    <string name="app_sort_mode_recent">Chơi gần đây</string>
+    <string name="app_sort_mode_playtime">Chơi nhiều nhất</string>
+    <string name="app_sort_mode_name">Tên (A–Z)</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="title_native_fps_dialog">Cảnh báo FPS gốc</string>
+    <string name="category_gamepad_settings">§ 06 · Cài đặt tay cầm</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Điều chỉnh cường độ rung giả lập</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Tăng hoặc giảm cường độ rung trên thiết bị của bạn</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="summary_seekbar_deadzone">Lưu ý: Một số trò chơi có thể áp đặt vùng chết lớn hơn mức VipleStream được cấu hình.</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Luôn điều khiển chuột bằng touchpad</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Buộc touchpad của tay cầm điều khiển chuột trên máy chủ, kể cả khi giả lập tay cầm có touchpad.</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Cho phép dùng cảm biến chuyển động của tay cầm</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Cho phép máy chủ được hỗ trợ yêu cầu dữ liệu cảm biến chuyển động khi giả lập tay cầm có cảm biến chuyển động. Tắt tùy chọn này có thể giảm nhẹ mức tiêu thụ điện và mạng nếu trò chơi không dùng cảm biến chuyển động.</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Giả lập hỗ trợ cảm biến chuyển động cho tay cầm</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Dùng cảm biến chuyển động tích hợp của thiết bị nếu tay cầm đang kết nối hoặc phiên bản Android của bạn không hỗ trợ cảm biến tay cầm.\nLưu ý: Bật tùy chọn này có thể khiến tay cầm của bạn hiện thành tay cầm PlayStation trên máy chủ.</string>
+    <string name="title_checkbox_absolute_mouse_mode">Chế độ chuột cho máy tính từ xa</string>
+    <string name="summary_checkbox_absolute_mouse_mode">Tùy chọn này có thể giúp gia tốc chuột hoạt động tự nhiên hơn khi dùng máy tính từ xa, nhưng không tương thích với nhiều trò chơi.</string>
+    <string name="title_show_guide_button">Hiện nút Guide</string>
+    <string name="summary_show_guide_button">Hiện nút Guide trên màn hình</string>
+    <string name="title_checkbox_reduce_refresh_rate">Cho phép giảm tần số quét</string>
+    <string name="summary_checkbox_reduce_refresh_rate">Tần số quét thấp hơn có thể tiết kiệm điện nhưng làm tăng thêm một chút độ trễ video</string>
+    <string name="title_full_range">Buộc video dải màu đầy đủ (Thử nghiệm)</string>
+    <string name="summary_full_range">Tùy chọn này sẽ làm mất chi tiết ở vùng sáng và tối nếu thiết bị của bạn không hiển thị đúng nội dung video dải màu đầy đủ.</string>
+    <string name="title_enable_mpquic">Bật truyền tải đa đường MP-QUIC</string>
+    <string name="summary_enable_mpquic">Dùng QUIC đa đường (RFC 9443) để stream. Cho phép tự động chuyển đổi giữa WiFi và di động, và gộp băng thông qua hai card mạng.</string>
+    <string name="title_mpquic_scheduler">Bộ lập lịch đường truyền</string>
+    <string name="summary_mpquic_scheduler">Cách phân phối lưu lượng qua nhiều đường mạng</string>
+    <string name="category_help">§ 09 · Trợ giúp</string>
+    <string name="title_setup_guide">Hướng dẫn thiết lập</string>
+    <string name="summary_setup_guide">Xem hướng dẫn cách thiết lập PC chơi game của bạn để stream</string>
+    <string name="title_troubleshooting">Hướng dẫn khắc phục sự cố</string>
+    <string name="summary_troubleshooting">Xem mẹo chẩn đoán và khắc phục các sự cố stream thường gặp</string>
+    <string name="title_privacy_policy">Chính sách quyền riêng tư</string>
+    <string name="summary_privacy_policy">Xem chính sách quyền riêng tư của VipleStream</string>
+    <string name="toast_controller_type_changed">Loại tay cầm có thể bị thay đổi do giả lập cảm biến chuyển động</string>
+    <string name="resolution_custom">Tùy chỉnh (đặt giá trị bên dưới)</string>
+    <string name="title_custom_resolution">Độ phân giải tùy chỉnh</string>
+    <string name="summary_custom_resolution">Được dùng khi danh sách độ phân giải ở trên được đặt thành Tùy chỉnh. Định dạng: rộng x cao (ví dụ 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Nhập độ phân giải tùy chỉnh theo dạng RỘNGxCAO, ví dụ 1600x900. Bị bỏ qua trừ khi danh sách được đặt thành Tùy chỉnh.</string>
+    <string name="title_enable_yuv444">Ưu tiên sắc độ 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Yêu cầu sắc độ 4:4:4 khi bộ giải mã của thiết bị báo có hỗ trợ. Phần lớn bộ giải mã di động không hỗ trợ, khi đó tùy chọn này không có tác dụng.</string>
+    <string name="title_cancel_file_transfer">Hủy truyền tệp?</string>
+    <string name="message_cancel_file_transfer">Dừng quá trình truyền tệp đang diễn ra?</string>
+    <string name="file_transfer_overlay_content_description">Tiến trình truyền tệp. Nhấn để hủy.</string>
+    <string name="title_packet_size">Kích thước gói mạng</string>
+    <string name="summary_packet_size">Số byte tối đa mỗi gói gửi đến máy chủ. 1392 là giá trị mặc định an toàn cho mạng LAN Ethernet. Giảm giá trị này với kết nối hạn chế (Wi-Fi, VPN); tăng lên trên mạng hỗ trợ jumbo frame.</string>
+    <string name="suffix_packet_size">byte</string>
+    <string name="videoformat_auto">Tự động (Khuyến nghị)</string>
+    <string name="videoformat_av1always">Ưu tiên AV1 (Thử nghiệm)</string>
+    <string name="videoformat_h264always">Ưu tiên H.264</string>
+    <string name="pacing_balanced_alt">Cân bằng với giới hạn FPS</string>
+    <string name="title_analog_scrolling">Dùng cần analog để cuộn</string>
+    <string name="summary_analog_scrolling">Chọn cần analog để cuộn khi ở chế độ giả lập chuột</string>
+    <string name="analogscroll_none">Không (cả hai cần đều di chuyển chuột)</string>
+    <string name="analogscroll_right">Cần analog phải</string>
+    <string name="analogscroll_left">Cần analog trái</string>
+    <string name="relay_url_title">URL máy chủ chuyển tiếp</string>
+    <string name="relay_url_summary">Máy chủ chuyển tiếp WebSocket để vượt NAT (ví dụ wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK chuyển tiếp</string>
+    <string name="relay_psk_summary">Khóa chia sẻ trước để xác thực máy chủ chuyển tiếp</string>
+    <string name="steam_account_label">TÀI KHOẢN STEAM</string>
+    <string name="steam_switch_title">Đang chuyển tài khoản Steam…</string>
+    <string name="steam_switch_starting">Đang bắt đầu…</string>
+    <string name="steam_switch_helper">Steam sẽ đóng và đăng nhập lại trên máy chủ. Quá trình này có thể mất 60–90 giây. Nếu bị treo, hãy kiểm tra máy chủ — Steam Guard có thể đang yêu cầu xác thực hai lớp.</string>
+    <string name="steam_switch_error_title">Chuyển tài khoản Steam thất bại</string>
+    <string name="steam_switch_error_no_taskid">Máy chủ không trả về ID tác vụ</string>
+    <string name="steam_switch_error_taskgone">Tác vụ chuyển tài khoản đã biến mất trên máy chủ</string>
+    <string name="steam_switch_error_timeout">Hết thời gian chuyển (&gt;150 giây mà máy chủ chưa đạt trạng thái kết thúc)</string>
+    <string name="steam_switch_account_unavailable">Tài khoản này chưa có thông tin đăng nhập được lưu trên máy chủ. Hãy đăng nhập một lần trên máy chủ trước rồi thử lại.</string>
 </resources>

@@ -219,4 +219,122 @@
         <item>Balansert — anbefalt</item>
         <item>Ytelse — raskest, svakere bevegelsessporing</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Automatisk (per strømtype)</item>
+        <item>Lavest forsinkelse</item>
+        <item>Båndbreddeaggregering</item>
+        <item>Redundant (alle stier)</item>
+        <item>Tidligst fullført</item>
+    </string-array>
+    <string name="pcview_menu_eol">NVIDIA GameStream avviklet</string>
+    <string name="pair_pairing_help">Hvis verts-PC-en kjører VipleStream-Server (eller forløperen Sunshine), går du til serverens nettgrensesnitt for å skrive inn PIN-koden.</string>
+    <string name="sc_hid_bt_unsupported">Steam Controller via Bluetooth kan ikke videresendes på Android (systemet eier Bluetooth-HID). Koble den til med en USB-C-kabel, eller koble til Puck-mottakeren via OTG.</string>
+    <string name="frame_conversion_error">Verts-PC-en rapporterte en kritisk feil ved videokoding.\n\nPrøv å slå av HDR-modus, endre strømmeoppløsningen eller endre skjermoppløsningen på verts-PC-en.</string>
+    <string name="error_code_prefix">Feilkode:</string>
+    <string name="perf_overlay_hostprocessinglatency">Behandlingsforsinkelse på vert min/maks/snitt: %1$.1f/%2$.1f/%3$.1f ms</string>
+    <string name="perf_overlay_fruc_separator">--- Bildeinterpolering (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Status: Aktiv (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Status: Satt på pause</string>
+    <string name="perf_overlay_fruc_pending">Status: Venter…</string>
+    <string name="perf_overlay_fruc_off">Status: Av</string>
+    <string name="perf_overlay_fruc_count">Interpolert: %1$d / %2$d (andel: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Effektiv utgang: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Sorteringsrekkefølge for apper</string>
+    <string name="summary_app_sort_mode">Hvordan spill ordnes i applisten. Manuelt definerte apper (Desktop, Steam Big Picture) festes alltid øverst.</string>
+    <string name="app_sort_mode_default">Standard (vertens rekkefølge)</string>
+    <string name="app_sort_mode_recent">Nylig spilt</string>
+    <string name="app_sort_mode_playtime">Mest spilt</string>
+    <string name="app_sort_mode_name">Navn (A–Å)</string>
+    <string name="resolution_prefix_native_landscape">(Liggende)</string>
+    <string name="resolution_prefix_native_portrait">(Stående)</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="title_native_fps_dialog">Advarsel om innebygd FPS</string>
+    <string name="title_checkbox_enable_audiofx">Aktiver støtte for systemets equalizer</string>
+    <string name="summary_checkbox_enable_audiofx">Lar lydeffekter fungere under strømming, men kan øke lydforsinkelsen</string>
+    <string name="category_gamepad_settings">§ 06 · Spillkontrollerinnstillinger</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Juster intensiteten på emulert vibrasjon</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Forsterk eller reduser vibrasjonsintensiteten på enheten</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="summary_seekbar_deadzone">Merk: Noen spill kan tvinge en større dødsone enn det VipleStream er konfigurert til å bruke.</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Styr alltid musen med styreflaten</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Tvinger styreflaten på spillkontrolleren til å styre musen på verten, selv når en spillkontroller med styreflate emuleres.</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Tillat bruk av bevegelsessensorer i spillkontrolleren</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Lar støttede verter be om data fra bevegelsessensorer når en spillkontroller med bevegelsessensorer emuleres. Å slå av dette kan redusere strøm- og nettverksbruken litt hvis bevegelsessensorene ikke brukes i spillet.</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Emuler støtte for bevegelsessensorer i spillkontrolleren</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Bruker enhetens innebygde bevegelsessensorer hvis sensorene ikke støttes av den tilkoblede spillkontrolleren eller Android-versjonen din.\nMerk: Når dette er slått på, kan spillkontrolleren vises som en PlayStation-kontroller på verten.</string>
+    <string name="title_checkbox_absolute_mouse_mode">Musemodus for eksternt skrivebord</string>
+    <string name="summary_checkbox_absolute_mouse_mode">Dette kan gjøre at museakselerasjon oppfører seg mer naturlig ved bruk av eksternt skrivebord, men er ikke kompatibelt med mange spill.</string>
+    <string name="title_show_guide_button">Vis Guide-knapp</string>
+    <string name="summary_show_guide_button">Vis Guide-knappen på skjermen</string>
+    <string name="title_checkbox_reduce_refresh_rate">Tillat redusert oppdateringsfrekvens</string>
+    <string name="summary_checkbox_reduce_refresh_rate">Lavere oppdateringsfrekvens på skjermen kan spare strøm, på bekostning av litt ekstra videoforsinkelse</string>
+    <string name="title_full_range">Tving fullt fargeområde for video (eksperimentell)</string>
+    <string name="summary_full_range">Dette fører til tap av detaljer i lyse og mørke områder hvis enheten ikke viser videoinnhold med fullt område riktig.</string>
+    <string name="title_enable_mpquic">Aktiver MP-QUIC-flerstitransport</string>
+    <string name="summary_enable_mpquic">Bruk QUIC med flere stier (RFC 9443) til strømming. Gir automatisk overgang mellom WiFi og mobilnett samt båndbreddeaggregering med to nettverkskort.</string>
+    <string name="title_mpquic_scheduler">Stiplanlegger</string>
+    <string name="summary_mpquic_scheduler">Hvordan trafikken fordeles over flere nettverksstier</string>
+    <string name="category_help">§ 09 · Hjelp</string>
+    <string name="title_setup_guide">Oppsettsveiledning</string>
+    <string name="summary_setup_guide">Se instruksjoner for hvordan du setter opp spill-PC-en for strømming</string>
+    <string name="title_troubleshooting">Feilsøkingsveiledning</string>
+    <string name="summary_troubleshooting">Se tips for å finne og løse vanlige strømmeproblemer</string>
+    <string name="title_privacy_policy">Personvernerklæring</string>
+    <string name="summary_privacy_policy">Se personvernerklæringen til VipleStream</string>
+    <string name="toast_controller_type_changed">Spillkontrollertypen kan bli endret på grunn av emulering av bevegelsessensorer</string>
+    <string name="resolution_360p">360p</string>
+    <string name="resolution_480p">480p</string>
+    <string name="resolution_720p">720p</string>
+    <string name="resolution_1080p">1080p</string>
+    <string name="resolution_1440p">1440p</string>
+    <string name="resolution_4k">4K</string>
+    <string name="resolution_custom">Egendefinert (angi verdi nedenfor)</string>
+    <string name="title_custom_resolution">Egendefinert oppløsning</string>
+    <string name="summary_custom_resolution">Brukes når nedtrekkslisten for oppløsning ovenfor er satt til Egendefinert. Format: bredde x høyde (f.eks. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Angi en egendefinert oppløsning som BREDDExHØYDE, f.eks. 1600x900. Ignoreres med mindre nedtrekkslisten er satt til Egendefinert.</string>
+    <string name="title_enable_yuv444">Foretrekk 4:4:4-krominans (YUV444)</string>
+    <string name="summary_enable_yuv444">Be om 4:4:4-krominans når enhetens dekoder oppgir støtte for det. De fleste mobile dekodere støtter ikke dette, og da har innstillingen ingen effekt.</string>
+    <string name="title_cancel_file_transfer">Avbryte filoverføringen?</string>
+    <string name="message_cancel_file_transfer">Stoppe filoverføringen som pågår?</string>
+    <string name="file_transfer_overlay_content_description">Fremdrift for filoverføring. Trykk for å avbryte.</string>
+    <string name="title_packet_size">Nettverkspakkestørrelse</string>
+    <string name="summary_packet_size">Maksimalt antall byte per pakke som sendes til verten. 1392 er en trygg standard for kablet LAN (Ethernet). Senk verdien for begrensede forbindelser (Wi-Fi, VPN); øk den på nettverk med jumborammer.</string>
+    <string name="suffix_packet_size">byte</string>
+    <string name="fps_30">30 FPS</string>
+    <string name="fps_60">60 FPS</string>
+    <string name="fps_90">90 FPS</string>
+    <string name="fps_120">120 FPS</string>
+    <string name="audioconf_stereo">Stereo</string>
+    <string name="audioconf_51surround">5.1 surroundlyd</string>
+    <string name="audioconf_71surround">7.1 surroundlyd</string>
+    <string name="videoformat_auto">Automatisk (anbefalt)</string>
+    <string name="videoformat_av1always">Foretrekk AV1 (eksperimentell)</string>
+    <string name="videoformat_hevcalways">Foretrekk HEVC</string>
+    <string name="videoformat_h264always">Foretrekk H.264</string>
+    <string name="title_frame_pacing">Bildetakt for video</string>
+    <string name="summary_frame_pacing">Angi hvordan videoforsinkelse og jevnhet skal balanseres</string>
+    <string name="pacing_latency">Foretrekk lavest forsinkelse</string>
+    <string name="pacing_balanced">Balansert</string>
+    <string name="pacing_balanced_alt">Balansert med FPS-grense</string>
+    <string name="pacing_smoothness">Foretrekk jevnest video (kan øke forsinkelsen betydelig)</string>
+    <string name="title_analog_scrolling">Bruk en analogstikke til å rulle</string>
+    <string name="summary_analog_scrolling">Velg en analogstikke for rulling i musemuleringsmodus</string>
+    <string name="analogscroll_none">Ingen (begge stikkene beveger musen)</string>
+    <string name="analogscroll_right">Høyre analogstikke</string>
+    <string name="analogscroll_left">Venstre analogstikke</string>
+    <string name="relay_url_title">URL til reléserver</string>
+    <string name="relay_url_summary">WebSocket-relé for NAT-traversering (f.eks. wss://relay.example.com)</string>
+    <string name="relay_psk_title">Relé-PSK</string>
+    <string name="relay_psk_summary">Forhåndsdelt nøkkel for autentisering mot reléet</string>
+    <string name="steam_account_label">STEAM-KONTO</string>
+    <string name="steam_switch_title">Bytter Steam-konto…</string>
+    <string name="steam_switch_starting">Starter…</string>
+    <string name="steam_switch_helper">Steam lukkes og logger inn på nytt på verten. Dette kan ta 60–90 sekunder. Hvis det stopper opp, sjekk verten – Steam Guard kan be om tofaktorautentisering.</string>
+    <string name="steam_switch_error_title">Bytte av Steam-konto mislyktes</string>
+    <string name="steam_switch_error_no_taskid">Serveren returnerte ingen oppgave-ID</string>
+    <string name="steam_switch_error_taskgone">Bytteoppgaven forsvant på verten</string>
+    <string name="steam_switch_error_timeout">Tidsavbrudd for byttet (&gt;150 s uten at serveren nådde en slutttilstand)</string>
+    <string name="steam_switch_account_unavailable">Denne kontoen har ingen lagrede påloggingsopplysninger på verten. Logg inn én gang på verten først, og prøv deretter igjen.</string>
 </resources>

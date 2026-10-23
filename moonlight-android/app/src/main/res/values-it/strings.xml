@@ -291,4 +291,67 @@
         <item>Bilanciato — consigliato</item>
         <item>Prestazioni — più veloce, tracciamento movimento più debole</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Automatico (per tipo di flusso)</item>
+        <item>Latenza minima</item>
+        <item>Aggregazione della banda</item>
+        <item>Ridondante (tutti i percorsi)</item>
+        <item>Completamento più rapido</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">Lo Steam Controller via Bluetooth non può essere inoltrato su Android (il sistema gestisce l\'HID Bluetooth). Collegalo con un cavo USB-C o collega il ricevitore Puck tramite OTG.</string>
+    <string name="error_code_prefix">Codice di errore:</string>
+    <string name="perf_overlay_fruc_separator">--- Interpolazione dei fotogrammi (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Stato: Attivo (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Stato: In pausa</string>
+    <string name="perf_overlay_fruc_pending">Stato: In attesa…</string>
+    <string name="perf_overlay_fruc_off">Stato: Disattivato</string>
+    <string name="perf_overlay_fruc_count">Interpolati: %1$d / %2$d (rapporto: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Output effettivo: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Ordinamento app</string>
+    <string name="summary_app_sort_mode">Come vengono disposti i giochi nell\'elenco delle app. Le app definite manualmente (Desktop, Steam Big Picture) restano sempre in cima.</string>
+    <string name="app_sort_mode_default">Predefinito (ordine dell\'host)</string>
+    <string name="app_sort_mode_recent">Giocati di recente</string>
+    <string name="app_sort_mode_playtime">Più giocati</string>
+    <string name="app_sort_mode_name">Nome (A–Z)</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Regola l\'intensità della vibrazione emulata</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Aumenta o riduci l\'intensità della vibrazione sul dispositivo</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="title_show_guide_button">Mostra pulsante Guide</string>
+    <string name="summary_show_guide_button">Mostra il pulsante Guide sullo schermo</string>
+    <string name="title_enable_mpquic">Abilita il trasporto multipath MP-QUIC</string>
+    <string name="summary_enable_mpquic">Usa QUIC multipath (RFC 9443) per lo streaming. Consente il failover tra Wi-Fi e rete cellulare e l\'aggregazione della banda su due schede di rete.</string>
+    <string name="title_mpquic_scheduler">Pianificatore dei percorsi</string>
+    <string name="summary_mpquic_scheduler">Come distribuire il traffico su più percorsi di rete</string>
+    <string name="resolution_custom">Personalizzata (imposta il valore sotto)</string>
+    <string name="title_custom_resolution">Risoluzione personalizzata</string>
+    <string name="summary_custom_resolution">Usata quando il menu della risoluzione qui sopra è impostato su Personalizzata. Formato: larghezza x altezza (es. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Inserisci una risoluzione personalizzata nel formato LARGHEZZAxALTEZZA, es. 1600x900. Viene ignorata se il menu non è impostato su Personalizzata.</string>
+    <string name="title_enable_yuv444">Preferisci crominanza 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Richiede la crominanza 4:4:4 quando il decoder del dispositivo ne dichiara il supporto. La maggior parte dei decoder mobili non la supporta e in tal caso l\'opzione non ha effetto.</string>
+    <string name="title_cancel_file_transfer">Annullare il trasferimento file?</string>
+    <string name="message_cancel_file_transfer">Interrompere il trasferimento file in corso?</string>
+    <string name="file_transfer_overlay_content_description">Avanzamento del trasferimento file. Tocca per annullare.</string>
+    <string name="title_packet_size">Dimensione pacchetti di rete</string>
+    <string name="summary_packet_size">Byte massimi per pacchetto inviato all\'host. 1392 è il valore predefinito sicuro per LAN Ethernet. Riducilo per collegamenti limitati (Wi-Fi, VPN); aumentalo su reti con jumbo frame.</string>
+    <string name="suffix_packet_size">byte</string>
+    <string name="title_analog_scrolling">Usa una levetta analogica per scorrere</string>
+    <string name="summary_analog_scrolling">Seleziona una levetta analogica per scorrere in modalità emulazione mouse</string>
+    <string name="analogscroll_none">Nessuna (entrambe le levette muovono il mouse)</string>
+    <string name="analogscroll_right">Levetta analogica destra</string>
+    <string name="analogscroll_left">Levetta analogica sinistra</string>
+    <string name="relay_url_title">URL del server relay</string>
+    <string name="relay_url_summary">Relay WebSocket per l\'attraversamento del NAT (es. wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK del relay</string>
+    <string name="relay_psk_summary">Chiave precondivisa per l\'autenticazione del relay</string>
+    <string name="steam_account_label">ACCOUNT STEAM</string>
+    <string name="steam_switch_title">Cambio account Steam…</string>
+    <string name="steam_switch_starting">Avvio…</string>
+    <string name="steam_switch_helper">Steam verrà chiuso e rieseguirà l\'accesso sull\'host. L\'operazione può richiedere 60–90 secondi. Se si blocca, controlla l\'host — Steam Guard potrebbe richiedere l\'autenticazione a due fattori.</string>
+    <string name="steam_switch_error_title">Cambio account Steam non riuscito</string>
+    <string name="steam_switch_error_no_taskid">Il server non ha restituito alcun ID attività</string>
+    <string name="steam_switch_error_taskgone">L\'attività di cambio è scomparsa sull\'host</string>
+    <string name="steam_switch_error_timeout">Timeout del cambio (&gt;150 s senza che il server raggiungesse uno stato finale)</string>
+    <string name="steam_switch_account_unavailable">Questo account non ha credenziali salvate sull\'host. Accedi prima una volta sull\'host, quindi riprova.</string>
 </resources>

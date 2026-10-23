@@ -259,4 +259,84 @@
         <item>Vyvážené — doporučeno</item>
         <item>Výkon — nejrychlejší, slabší sledování pohybu</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Automaticky (podle typu proudu)</item>
+        <item>Nejnižší zpoždění</item>
+        <item>Agregace šířky pásma</item>
+        <item>Redundantní (všechny cesty)</item>
+        <item>Nejdřívější dokončení</item>
+    </string-array>
+    <string name="pcview_menu_eol">Ukončení služby NVIDIA GameStream</string>
+    <string name="pair_pairing_help">Pokud na hostitelském PC běží VipleStream-Server (nebo jeho předloha Sunshine), zadejte PIN ve webovém rozhraní serveru.</string>
+    <string name="sc_hid_bt_unsupported">Steam Controller přes Bluetooth nelze na Androidu předávat (Bluetooth HID ovládá systém). Připojte ho kabelem USB-C nebo zapojte přijímač Puck přes OTG.</string>
+    <string name="error_code_prefix">Kód chyby:</string>
+    <string name="perf_overlay_hostprocessinglatency">Zpoždění zpracování na hostiteli min/max/průměr: %1$.1f/%2$.1f/%3$.1f ms</string>
+    <string name="perf_overlay_fruc_separator">--- Interpolace snímků (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Stav: aktivní (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Stav: pozastaveno</string>
+    <string name="perf_overlay_fruc_pending">Stav: čekání…</string>
+    <string name="perf_overlay_fruc_off">Stav: vypnuto</string>
+    <string name="perf_overlay_fruc_count">Interpolováno: %1$d / %2$d (poměr: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Efektivní výstup: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Řazení aplikací</string>
+    <string name="summary_app_sort_mode">Jak jsou hry uspořádány v seznamu aplikací. Ručně definované aplikace (Desktop, Steam Big Picture) jsou vždy připnuté nahoře.</string>
+    <string name="app_sort_mode_default">Výchozí (pořadí hostitele)</string>
+    <string name="app_sort_mode_recent">Nedávno hrané</string>
+    <string name="app_sort_mode_playtime">Nejhranější</string>
+    <string name="app_sort_mode_name">Název (A–Z)</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="title_native_fps_dialog">Upozornění na nativní FPS</string>
+    <string name="category_gamepad_settings">§ 06 · Nastavení gamepadu</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Upravit intenzitu emulovaných vibrací</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Zesílit nebo zeslabit intenzitu vibrací na vašem zařízení</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Vždy ovládat myš touchpadem</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Vynutí, aby touchpad gamepadu ovládal myš hostitele, i když se emuluje gamepad s touchpadem.</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Povolit pohybové senzory gamepadu</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Umožní podporovaným hostitelům žádat data z pohybových senzorů při emulaci gamepadu s pohybovými senzory. Vypnutí může mírně snížit spotřebu energie a síťový provoz, pokud hra pohybové senzory nevyužívá.</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Emulovat podporu pohybových senzorů gamepadu</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Použije vestavěné pohybové senzory vašeho zařízení, pokud připojený gamepad nebo vaše verze Androidu senzory gamepadu nepodporuje.\nPoznámka: Zapnutí této volby může způsobit, že se gamepad na hostiteli zobrazí jako ovladač PlayStation.</string>
+    <string name="title_show_guide_button">Zobrazit tlačítko Guide</string>
+    <string name="summary_show_guide_button">Zobrazit tlačítko Guide na obrazovce</string>
+    <string name="title_full_range">Vynutit video v plném rozsahu (experimentální)</string>
+    <string name="summary_full_range">Pokud vaše zařízení nezobrazuje video v plném rozsahu správně, dojde ke ztrátě detailů ve světlých a tmavých oblastech.</string>
+    <string name="title_enable_mpquic">Povolit vícecestný přenos MP-QUIC</string>
+    <string name="summary_enable_mpquic">Používat pro streamování QUIC multipath (RFC 9443). Umožňuje přepínání mezi Wi-Fi a mobilními daty a sloučení šířky pásma dvou síťových karet.</string>
+    <string name="title_mpquic_scheduler">Plánovač cest</string>
+    <string name="summary_mpquic_scheduler">Jak rozdělovat provoz mezi více síťových cest</string>
+    <string name="toast_controller_type_changed">Typ gamepadu se může změnit kvůli emulaci pohybových senzorů</string>
+    <string name="resolution_custom">Vlastní (nastavte hodnotu níže)</string>
+    <string name="title_custom_resolution">Vlastní rozlišení</string>
+    <string name="summary_custom_resolution">Použije se, když je výše v nabídce rozlišení zvoleno Vlastní. Formát: šířka x výška (např. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Zadejte vlastní rozlišení ve tvaru ŠÍŘKAxVÝŠKA, např. 1600x900. Ignoruje se, pokud v nabídce není zvoleno Vlastní.</string>
+    <string name="title_enable_yuv444">Preferovat chroma 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Žádat o chroma 4:4:4, pokud dekodér zařízení hlásí podporu. Většina mobilních dekodérů ji nepodporuje a volba pak nemá žádný účinek.</string>
+    <string name="title_cancel_file_transfer">Zrušit přenos souboru?</string>
+    <string name="message_cancel_file_transfer">Zastavit probíhající přenos souboru?</string>
+    <string name="file_transfer_overlay_content_description">Průběh přenosu souboru. Klepnutím zrušíte.</string>
+    <string name="title_packet_size">Velikost síťového paketu</string>
+    <string name="summary_packet_size">Maximální počet bajtů v paketu odesílaném hostiteli. 1392 je bezpečná výchozí hodnota pro Ethernet LAN. Snižte ji pro omezené linky (Wi-Fi, VPN); zvyšte ji v sítích s jumbo rámci.</string>
+    <string name="suffix_packet_size">bajtů</string>
+    <string name="videoformat_av1always">Preferovat AV1 (experimentální)</string>
+    <string name="videoformat_h264always">Preferovat H.264</string>
+    <string name="title_analog_scrolling">Posouvat analogovou páčkou</string>
+    <string name="summary_analog_scrolling">Vyberte analogovou páčku pro posouvání v režimu emulace myši</string>
+    <string name="analogscroll_none">Žádná (obě páčky pohybují myší)</string>
+    <string name="analogscroll_right">Pravá analogová páčka</string>
+    <string name="analogscroll_left">Levá analogová páčka</string>
+    <string name="relay_url_title">URL přenosového serveru</string>
+    <string name="relay_url_summary">Přenosový server WebSocket pro průchod přes NAT (např. wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK přenosového serveru</string>
+    <string name="relay_psk_summary">Předsdílený klíč pro ověření u přenosového serveru</string>
+    <string name="steam_account_label">ÚČET STEAM</string>
+    <string name="steam_switch_title">Přepínání účtu Steam…</string>
+    <string name="steam_switch_starting">Spouštění…</string>
+    <string name="steam_switch_helper">Steam se na hostiteli zavře a znovu přihlásí. Může to trvat 60–90 sekund. Pokud se to zasekne, zkontrolujte hostitele — může se ptát Steam Guard 2FA.</string>
+    <string name="steam_switch_error_title">Přepnutí účtu Steam se nezdařilo</string>
+    <string name="steam_switch_error_no_taskid">Server nevrátil ID úlohy</string>
+    <string name="steam_switch_error_taskgone">Úloha přepnutí na hostiteli zmizela</string>
+    <string name="steam_switch_error_timeout">Časový limit přepnutí vypršel (&gt;150 s, aniž server dosáhl konečného stavu)</string>
+    <string name="steam_switch_account_unavailable">Tento účet nemá na hostiteli uložené přihlašovací údaje. Nejprve se jednou přihlaste na hostiteli a pak to zkuste znovu.</string>
 </resources>

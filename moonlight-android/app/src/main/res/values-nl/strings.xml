@@ -235,4 +235,121 @@
         <item>Gebalanceerd — aanbevolen</item>
         <item>Prestaties — snelst, zwakkere bewegingsdetectie</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Automatisch (per streamtype)</item>
+        <item>Laagste latentie</item>
+        <item>Bandbreedte bundelen</item>
+        <item>Redundant (alle paden)</item>
+        <item>Vroegste voltooiing</item>
+    </string-array>
+    <string name="pcview_menu_eol">Einde ondersteuning NVIDIA GameStream</string>
+    <string name="pair_pairing_help">Als je host-pc VipleStream-Server (of de upstream-versie Sunshine) draait, ga dan naar de webinterface van de server om de PIN in te voeren.</string>
+    <string name="sc_hid_bt_unsupported">Een Steam Controller via Bluetooth kan op Android niet worden doorgegeven (het systeem beheert Bluetooth-HID). Sluit hem aan met een USB-C-kabel of sluit de Puck-ontvanger aan via OTG.</string>
+    <string name="frame_conversion_error">De host-pc meldde een fatale fout bij het coderen van video.\n\nProbeer de HDR-modus uit te schakelen, de streamresolutie te wijzigen of de schermresolutie van je host-pc te wijzigen.</string>
+    <string name="error_code_prefix">Foutcode:</string>
+    <string name="perf_overlay_hostprocessinglatency">Verwerkingslatentie host min/max/gem.: %1$.1f/%2$.1f/%3$.1f ms</string>
+    <string name="perf_overlay_fruc_separator">--- Frame-interpolatie (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Status: Actief (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Status: Gepauzeerd</string>
+    <string name="perf_overlay_fruc_pending">Status: Wachten…</string>
+    <string name="perf_overlay_fruc_off">Status: Uit</string>
+    <string name="perf_overlay_fruc_count">Geïnterpoleerd: %1$d / %2$d (verhouding: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Effectieve uitvoer: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Sorteervolgorde apps</string>
+    <string name="summary_app_sort_mode">Hoe games in de app-lijst worden gerangschikt. Handmatig gedefinieerde apps (Desktop, Steam Big Picture) staan altijd bovenaan.</string>
+    <string name="app_sort_mode_default">Standaard (volgorde van host)</string>
+    <string name="app_sort_mode_recent">Recent gespeeld</string>
+    <string name="app_sort_mode_playtime">Meest gespeeld</string>
+    <string name="app_sort_mode_name">Naam (A–Z)</string>
+    <string name="resolution_prefix_native_landscape">(Liggend)</string>
+    <string name="resolution_prefix_native_portrait">(Staand)</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="title_native_fps_dialog">Waarschuwing native FPS</string>
+    <string name="title_checkbox_enable_audiofx">Ondersteuning voor systeemequalizer inschakelen</string>
+    <string name="summary_checkbox_enable_audiofx">Laat audio-effecten werken tijdens het streamen, maar kan de audiolatentie verhogen</string>
+    <string name="category_gamepad_settings">§ 06 · Gamepadinstellingen</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Intensiteit van geëmuleerde trilling aanpassen</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Versterk of verminder de trilintensiteit op je apparaat</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="summary_seekbar_deadzone">Let op: sommige games kunnen een grotere dode zone afdwingen dan VipleStream is ingesteld om te gebruiken.</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Muis altijd met touchpad besturen</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Dwingt de touchpad van de gamepad om de muis van de host te besturen, zelfs bij het emuleren van een gamepad met touchpad.</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Gebruik van bewegingssensoren van gamepad toestaan</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Staat ondersteunde hosts toe bewegingssensordata op te vragen bij het emuleren van een gamepad met bewegingssensoren. Uitschakelen kan het stroom- en netwerkgebruik iets verminderen als bewegingssensoren niet in de game worden gebruikt.</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Bewegingssensoren van gamepad emuleren</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Gebruikt de ingebouwde bewegingssensoren van je apparaat als gamepadsensoren niet worden ondersteund door je aangesloten gamepad of je Android-versie.\nLet op: als je deze optie inschakelt, kan je gamepad op de host als een PlayStation-controller worden weergegeven.</string>
+    <string name="title_checkbox_absolute_mouse_mode">Muismodus voor extern bureaublad</string>
+    <string name="summary_checkbox_absolute_mouse_mode">Hierdoor kan muisversnelling natuurlijker aanvoelen bij gebruik als extern bureaublad, maar het is niet compatibel met veel games.</string>
+    <string name="title_show_guide_button">Guide-knop weergeven</string>
+    <string name="summary_show_guide_button">Toon de Guide-knop op het scherm</string>
+    <string name="title_checkbox_reduce_refresh_rate">Verlaging van verversingssnelheid toestaan</string>
+    <string name="summary_checkbox_reduce_refresh_rate">Lagere verversingssnelheden kunnen stroom besparen ten koste van wat extra videolatentie</string>
+    <string name="title_full_range">Volledig bereik voor video afdwingen (experimenteel)</string>
+    <string name="summary_full_range">Dit veroorzaakt detailverlies in lichte en donkere gebieden als je apparaat video met volledig bereik niet correct weergeeft.</string>
+    <string name="title_enable_mpquic">MP-QUIC-multipadtransport inschakelen</string>
+    <string name="summary_enable_mpquic">Gebruik QUIC-multipad (RFC 9443) voor streaming. Maakt failover tussen WiFi en mobiel netwerk en bandbreedtebundeling via twee netwerkkaarten mogelijk.</string>
+    <string name="title_mpquic_scheduler">Padplanner</string>
+    <string name="summary_mpquic_scheduler">Hoe verkeer over meerdere netwerkpaden wordt verdeeld</string>
+    <string name="category_help">§ 09 · Help</string>
+    <string name="title_setup_guide">Installatiehandleiding</string>
+    <string name="summary_setup_guide">Bekijk instructies om je game-pc in te stellen voor streaming</string>
+    <string name="title_troubleshooting">Handleiding probleemoplossing</string>
+    <string name="summary_troubleshooting">Bekijk tips om veelvoorkomende streamingproblemen te diagnosticeren en op te lossen</string>
+    <string name="title_privacy_policy">Privacybeleid</string>
+    <string name="summary_privacy_policy">Bekijk het privacybeleid van VipleStream</string>
+    <string name="toast_controller_type_changed">Gamepadtype kan veranderen door emulatie van bewegingssensoren</string>
+    <string name="resolution_360p">360p</string>
+    <string name="resolution_480p">480p</string>
+    <string name="resolution_720p">720p</string>
+    <string name="resolution_1080p">1080p</string>
+    <string name="resolution_1440p">1440p</string>
+    <string name="resolution_4k">4K</string>
+    <string name="resolution_custom">Aangepast (stel waarde hieronder in)</string>
+    <string name="title_custom_resolution">Aangepaste resolutie</string>
+    <string name="summary_custom_resolution">Gebruikt wanneer de resolutielijst hierboven op Aangepast staat. Formaat: breedte x hoogte (bijv. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Voer een aangepaste resolutie in als BREEDTExHOOGTE, bijv. 1600x900. Wordt genegeerd tenzij de lijst op Aangepast staat.</string>
+    <string name="title_enable_yuv444">Voorkeur voor 4:4:4-chroma (YUV444)</string>
+    <string name="summary_enable_yuv444">Vraag 4:4:4-chroma aan wanneer de decoder van het apparaat ondersteuning aangeeft. De meeste mobiele decoders ondersteunen dit niet; de optie heeft dan geen effect.</string>
+    <string name="title_cancel_file_transfer">Bestandsoverdracht annuleren?</string>
+    <string name="message_cancel_file_transfer">De lopende bestandsoverdracht stoppen?</string>
+    <string name="file_transfer_overlay_content_description">Voortgang bestandsoverdracht. Tik om te annuleren.</string>
+    <string name="title_packet_size">Netwerkpakketgrootte</string>
+    <string name="summary_packet_size">Maximaal aantal bytes per pakket dat naar de host wordt verzonden. 1392 is de veilige standaard voor Ethernet-LAN. Verlaag dit bij beperkte verbindingen (Wi-Fi, VPN); verhoog het op netwerken met jumboframes.</string>
+    <string name="suffix_packet_size">bytes</string>
+    <string name="fps_30">30 FPS</string>
+    <string name="fps_60">60 FPS</string>
+    <string name="fps_90">90 FPS</string>
+    <string name="fps_120">120 FPS</string>
+    <string name="audioconf_stereo">Stereo</string>
+    <string name="audioconf_51surround">5.1-surroundgeluid</string>
+    <string name="audioconf_71surround">7.1-surroundgeluid</string>
+    <string name="videoformat_auto">Automatisch (aanbevolen)</string>
+    <string name="videoformat_av1always">Voorkeur voor AV1 (experimenteel)</string>
+    <string name="videoformat_h264always">Voorkeur voor H.264</string>
+    <string name="title_frame_pacing">Framepacing van video</string>
+    <string name="summary_frame_pacing">Bepaal hoe videolatentie en vloeiendheid in balans worden gebracht</string>
+    <string name="pacing_latency">Voorkeur voor laagste latentie</string>
+    <string name="pacing_balanced">Gebalanceerd</string>
+    <string name="pacing_balanced_alt">Gebalanceerd met FPS-limiet</string>
+    <string name="pacing_smoothness">Voorkeur voor vloeiendste video (kan latentie aanzienlijk verhogen)</string>
+    <string name="title_analog_scrolling">Analoge stick gebruiken om te scrollen</string>
+    <string name="summary_analog_scrolling">Kies een analoge stick om te scrollen in muisemulatiemodus</string>
+    <string name="analogscroll_none">Geen (beide sticks bewegen de muis)</string>
+    <string name="analogscroll_right">Rechter analoge stick</string>
+    <string name="analogscroll_left">Linker analoge stick</string>
+    <string name="relay_url_title">URL van relayserver</string>
+    <string name="relay_url_summary">WebSocket-relay voor NAT-traversal (bijv. wss://relay.example.com)</string>
+    <string name="relay_psk_title">Relay-PSK</string>
+    <string name="relay_psk_summary">Vooraf gedeelde sleutel voor relay-authenticatie</string>
+    <string name="steam_account_label">STEAM-ACCOUNT</string>
+    <string name="steam_switch_title">Steam-account wisselen…</string>
+    <string name="steam_switch_starting">Starten…</string>
+    <string name="steam_switch_helper">Steam wordt op de host afgesloten en opnieuw aangemeld. Dit kan 60–90 seconden duren. Als het blijft hangen, controleer dan de host — Steam Guard kan om tweestapsverificatie vragen.</string>
+    <string name="steam_switch_error_title">Wisselen van Steam-account mislukt</string>
+    <string name="steam_switch_error_no_taskid">Server gaf geen taak-ID terug</string>
+    <string name="steam_switch_error_taskgone">Wisseltaak is verdwenen op de host</string>
+    <string name="steam_switch_error_timeout">Wisselen verlopen (&gt;150 s zonder dat de server een eindtoestand bereikte)</string>
+    <string name="steam_switch_account_unavailable">Voor dit account zijn geen inloggegevens opgeslagen op de host. Meld je eerst één keer aan op de host en probeer het daarna opnieuw.</string>
 </resources>

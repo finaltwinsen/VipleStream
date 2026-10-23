@@ -296,4 +296,59 @@
         <item>標準 — 建議</item>
         <item>效能 — 最快，motion 追蹤較弱</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>自動（依串流類型）</item>
+        <item>最低延遲</item>
+        <item>頻寬合併</item>
+        <item>備援（所有路徑）</item>
+        <item>最早完成</item>
+    </string-array>
+    <string name="error_code_prefix">錯誤代碼：</string>
+    <string name="title_app_sort_mode">應用程式排序方式</string>
+    <string name="summary_app_sort_mode">遊戲在應用程式清單中的排列方式。手動定義的應用程式（Desktop、Steam Big Picture）一律固定在最上方。</string>
+    <string name="app_sort_mode_default">預設（主機順序）</string>
+    <string name="app_sort_mode_recent">最近遊玩</string>
+    <string name="app_sort_mode_playtime">最常遊玩</string>
+    <string name="app_sort_mode_name">名稱（A–Z）</string>
+    <string name="title_seekbar_vibrate_fallback_strength">調整模擬震動強度</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">增強或減弱裝置上的震動強度</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="title_show_guide_button">顯示 Guide 按鈕</string>
+    <string name="summary_show_guide_button">在螢幕上顯示 Guide 按鈕</string>
+    <string name="title_enable_mpquic">啟用 MP-QUIC 多路徑傳輸</string>
+    <string name="summary_enable_mpquic">串流時使用 QUIC 多路徑（RFC 9443）。可在 Wi-Fi 與行動網路之間自動切換，並合併雙網路卡的頻寬。</string>
+    <string name="title_mpquic_scheduler">路徑排程器</string>
+    <string name="summary_mpquic_scheduler">如何將流量分配到多條網路路徑</string>
+    <string name="resolution_custom">自訂（於下方設定數值）</string>
+    <string name="title_custom_resolution">自訂解析度</string>
+    <string name="summary_custom_resolution">上方解析度選單設為「自訂」時使用。格式：寬 x 高（例如 1600x900）。</string>
+    <string name="dialog_message_custom_resolution">請以「寬x高」格式輸入自訂解析度，例如 1600x900。選單未設為「自訂」時會忽略此值。</string>
+    <string name="title_enable_yuv444">優先使用 4:4:4 色度（YUV444）</string>
+    <string name="summary_enable_yuv444">裝置解碼器宣告支援時，要求使用 4:4:4 色度。大多數行動裝置的解碼器不支援，此時這個選項不會有任何作用。</string>
+    <string name="title_cancel_file_transfer">要取消檔案傳輸嗎？</string>
+    <string name="message_cancel_file_transfer">要停止進行中的檔案傳輸嗎？</string>
+    <string name="file_transfer_overlay_content_description">檔案傳輸進度。輕觸即可取消。</string>
+    <string name="title_packet_size">網路封包大小</string>
+    <string name="summary_packet_size">傳送到主機的每個封包最大位元組數。1392 是乙太網路 LAN 的安全預設值。連線受限（Wi-Fi、VPN）時請調低；在支援巨型訊框的網路上可調高。</string>
+    <string name="suffix_packet_size">位元組</string>
+    <string name="title_analog_scrolling">使用類比搖桿捲動</string>
+    <string name="summary_analog_scrolling">選擇在滑鼠模擬模式下用來捲動的類比搖桿</string>
+    <string name="analogscroll_none">無（兩支搖桿都移動滑鼠）</string>
+    <string name="analogscroll_right">右類比搖桿</string>
+    <string name="analogscroll_left">左類比搖桿</string>
+    <string name="relay_url_title">中繼伺服器 URL</string>
+    <string name="relay_url_summary">用於 NAT 穿透的 WebSocket 中繼（例如 wss://relay.example.com）</string>
+    <string name="relay_psk_title">中繼 PSK</string>
+    <string name="relay_psk_summary">用於中繼驗證的預先共用金鑰</string>
+    <string name="steam_account_label">STEAM 帳號</string>
+    <string name="steam_switch_title">正在切換 Steam 帳號…</string>
+    <string name="steam_switch_starting">正在啟動…</string>
+    <string name="steam_switch_helper">主機上的 Steam 會關閉並重新登入，可能需要 60–90 秒。如果卡住，請檢查主機 — Steam Guard 可能正在要求兩步驟驗證。</string>
+    <string name="steam_switch_error_title">Steam 帳號切換失敗</string>
+    <string name="steam_switch_error_no_taskid">伺服器未傳回工作 ID</string>
+    <string name="steam_switch_error_taskgone">主機上的切換工作已消失</string>
+    <string name="steam_switch_error_timeout">切換逾時（&gt;150 秒伺服器仍未進入最終狀態）</string>
+    <string name="steam_switch_account_unavailable">這個帳號在主機上沒有已儲存的登入資訊。請先在主機上登入一次，然後再試一次。</string>
 </resources>

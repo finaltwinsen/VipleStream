@@ -266,4 +266,77 @@
         <item>Balanceado — recomendado</item>
         <item>Desempenho — mais rápido, rastreamento de movimento mais fraco</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Automático (por tipo de fluxo)</item>
+        <item>Menor latência</item>
+        <item>Agregação de largura de banda</item>
+        <item>Redundante (todos os caminhos)</item>
+        <item>Conclusão mais rápida</item>
+    </string-array>
+    <string name="pcview_menu_eol">Fim do serviço NVIDIA GameStream</string>
+    <string name="pair_pairing_help">Se o PC host estiver executando o VipleStream-Server (ou o Sunshine, no qual ele se baseia), acesse a interface web do servidor para inserir o PIN.</string>
+    <string name="sc_hid_bt_unsupported">Não é possível repassar o Steam Controller via Bluetooth no Android (o sistema controla o HID Bluetooth). Conecte-o com um cabo USB-C ou conecte o receptor Puck via OTG.</string>
+    <string name="error_code_prefix">Código de erro:</string>
+    <string name="perf_overlay_hostprocessinglatency">Latência de processamento do host mín./máx./média: %1$.1f/%2$.1f/%3$.1f ms</string>
+    <string name="perf_overlay_fruc_separator">--- Interpolação de quadros (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Status: Ativo (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Status: Pausado</string>
+    <string name="perf_overlay_fruc_pending">Status: Aguardando…</string>
+    <string name="perf_overlay_fruc_off">Status: Desligado</string>
+    <string name="perf_overlay_fruc_count">Interpolados: %1$d / %2$d (proporção: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Saída efetiva: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Ordem dos aplicativos</string>
+    <string name="summary_app_sort_mode">Como os jogos são organizados na lista de aplicativos. Aplicativos definidos manualmente (Desktop, Steam Big Picture) ficam sempre fixados no topo.</string>
+    <string name="app_sort_mode_default">Padrão (ordem do host)</string>
+    <string name="app_sort_mode_recent">Jogados recentemente</string>
+    <string name="app_sort_mode_playtime">Mais jogados</string>
+    <string name="app_sort_mode_name">Nome (A–Z)</string>
+    <string name="fps_suffix_fps">FPS</string>
+    <string name="title_native_fps_dialog">Aviso de FPS nativo</string>
+    <string name="category_gamepad_settings">§ 06 · Configurações do controle</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Ajustar a intensidade da vibração emulada</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Amplifica ou reduz a intensidade da vibração no seu dispositivo</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="title_checkbox_gamepad_touchpad_as_mouse">Sempre controlar o mouse com o touchpad</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Força o touchpad do controle a controlar o mouse do host, mesmo ao emular um controle com touchpad.</string>
+    <string name="title_checkbox_gamepad_motion_sensors">Permitir o uso dos sensores de movimento do controle</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Permite que hosts compatíveis solicitem dados dos sensores de movimento ao emular um controle com sensores de movimento. Desativar pode reduzir um pouco o consumo de energia e de rede se os sensores de movimento não forem usados no jogo.</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Emular sensores de movimento do controle</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Usa os sensores de movimento integrados do dispositivo se os sensores do controle não forem suportados pelo controle conectado ou pela sua versão do Android.\nObservação: ativar esta opção pode fazer o controle aparecer como um controle PlayStation no host.</string>
+    <string name="title_show_guide_button">Mostrar botão Guia</string>
+    <string name="summary_show_guide_button">Mostrar o botão Guia na tela</string>
+    <string name="title_enable_mpquic">Ativar transporte multicaminho MP-QUIC</string>
+    <string name="summary_enable_mpquic">Usa QUIC multicaminho (RFC 9443) na transmissão. Permite alternância automática entre WiFi e rede celular e agregação de largura de banda com duas placas de rede.</string>
+    <string name="title_mpquic_scheduler">Escalonador de caminhos</string>
+    <string name="summary_mpquic_scheduler">Como distribuir o tráfego por vários caminhos de rede</string>
+    <string name="toast_controller_type_changed">O tipo de controle pode mudar devido à emulação dos sensores de movimento</string>
+    <string name="resolution_custom">Personalizada (defina o valor abaixo)</string>
+    <string name="title_custom_resolution">Resolução personalizada</string>
+    <string name="summary_custom_resolution">Usada quando a lista de resolução acima está definida como Personalizada. Formato: largura x altura (ex.: 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Digite uma resolução personalizada no formato LARGURAxALTURA, ex.: 1600x900. É ignorada, a menos que a lista esteja definida como Personalizada.</string>
+    <string name="title_enable_yuv444">Preferir crominância 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Solicita crominância 4:4:4 quando o decodificador do dispositivo indicar suporte. A maioria dos decodificadores móveis não oferece suporte e, nesse caso, a opção não tem efeito.</string>
+    <string name="title_cancel_file_transfer">Cancelar a transferência de arquivos?</string>
+    <string name="message_cancel_file_transfer">Interromper a transferência de arquivos em andamento?</string>
+    <string name="file_transfer_overlay_content_description">Progresso da transferência de arquivos. Toque para cancelar.</string>
+    <string name="title_packet_size">Tamanho dos pacotes de rede</string>
+    <string name="summary_packet_size">Número máximo de bytes por pacote enviado ao host. 1392 é o padrão seguro para LAN Ethernet. Reduza-o em conexões limitadas (Wi-Fi, VPN); aumente-o em redes com jumbo frames.</string>
+    <string name="suffix_packet_size">bytes</string>
+    <string name="videoformat_av1always">Preferir AV1 (Experimental)</string>
+    <string name="videoformat_h264always">Preferir H.264</string>
+    <string name="relay_url_title">URL do servidor de retransmissão</string>
+    <string name="relay_url_summary">Retransmissor WebSocket para travessia de NAT (ex.: wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK de retransmissão</string>
+    <string name="relay_psk_summary">Chave pré-compartilhada para autenticação na retransmissão</string>
+    <string name="steam_account_label">CONTA STEAM</string>
+    <string name="steam_switch_title">Trocando de conta Steam…</string>
+    <string name="steam_switch_starting">Iniciando…</string>
+    <string name="steam_switch_helper">O Steam será fechado e fará login novamente no host. Isso pode levar 60–90 segundos. Se travar, verifique o host — o Steam Guard pode estar solicitando a autenticação de dois fatores.</string>
+    <string name="steam_switch_error_title">Falha ao trocar de conta Steam</string>
+    <string name="steam_switch_error_no_taskid">O servidor não retornou nenhum ID de tarefa</string>
+    <string name="steam_switch_error_taskgone">A tarefa de troca desapareceu no host</string>
+    <string name="steam_switch_error_timeout">Tempo esgotado na troca (&gt;150 s sem o servidor atingir um estado final)</string>
+    <string name="steam_switch_account_unavailable">Esta conta não tem credenciais salvas no host. Faça login uma vez no host primeiro e tente novamente.</string>
 </resources>

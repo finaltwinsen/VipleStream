@@ -295,4 +295,58 @@
         <item>Збалансовано — рекомендовано</item>
         <item>Продуктивність — найшвидше, слабше відстеження руху</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Авто (за типом потоку)</item>
+        <item>Найменша затримка</item>
+        <item>Агрегація пропускної здатності</item>
+        <item>Резервування (усі шляхи)</item>
+        <item>Найшвидше завершення</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">Steam Controller через Bluetooth не можна передавати на Android (Bluetooth HID контролює система). Підключіть його кабелем USB-C або під\'єднайте приймач Puck через OTG.</string>
+    <string name="perf_overlay_fruc_separator">--- Інтерполяція кадрів (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Стан: активна (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Стан: призупинена</string>
+    <string name="perf_overlay_fruc_pending">Стан: очікування…</string>
+    <string name="perf_overlay_fruc_off">Стан: вимкнена</string>
+    <string name="perf_overlay_fruc_count">Інтерпольовано: %1$d / %2$d (частка: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Ефективний вивід: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Порядок сортування застосунків</string>
+    <string name="summary_app_sort_mode">Як ігри впорядковано в переліку застосунків. Застосунки, визначені вручну (Desktop, Steam Big Picture), завжди закріплені вгорі.</string>
+    <string name="app_sort_mode_default">Типовий (порядок хоста)</string>
+    <string name="app_sort_mode_recent">Нещодавно запущені</string>
+    <string name="app_sort_mode_playtime">Найчастіше запущені</string>
+    <string name="app_sort_mode_name">Назва (А–Я)</string>
+    <string name="title_show_guide_button">Показувати кнопку Guide</string>
+    <string name="summary_show_guide_button">Показувати кнопку Guide на екрані</string>
+    <string name="title_enable_mpquic">Увімкнути багатошляховий транспорт MP-QUIC</string>
+    <string name="summary_enable_mpquic">Використовувати QUIC multipath (RFC 9443) для трансляції. Дає змогу перемикатися між Wi-Fi і мобільною мережею та об\'єднувати пропускну здатність двох мережевих адаптерів.</string>
+    <string name="title_mpquic_scheduler">Планувальник шляхів</string>
+    <string name="summary_mpquic_scheduler">Як розподіляти трафік між кількома мережевими шляхами</string>
+    <string name="resolution_custom">Власна (вкажіть значення нижче)</string>
+    <string name="title_custom_resolution">Власна роздільна здатність</string>
+    <string name="summary_custom_resolution">Використовується, коли в списку роздільної здатності вище вибрано «Власна». Формат: ширина x висота (напр. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Введіть власну роздільну здатність у форматі ШИРИНАxВИСОТА, напр. 1600x900. Ігнорується, якщо у списку не вибрано «Власна».</string>
+    <string name="title_enable_yuv444">Надавати перевагу кольоровості 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Запитувати кольоровість 4:4:4, коли декодер пристрою заявляє підтримку. Більшість мобільних декодерів її не підтримують, і тоді параметр нічого не змінює.</string>
+    <string name="title_cancel_file_transfer">Скасувати передавання файлу?</string>
+    <string name="message_cancel_file_transfer">Зупинити поточне передавання файлу?</string>
+    <string name="file_transfer_overlay_content_description">Перебіг передавання файлу. Торкніться, щоб скасувати.</string>
+    <string name="title_packet_size">Розмір мережевого пакета</string>
+    <string name="summary_packet_size">Максимальна кількість байтів у пакеті, що надсилається хосту. 1392 — безпечне типове значення для Ethernet LAN. Зменште для обмежених каналів (Wi-Fi, VPN); збільште в мережах із jumbo-кадрами.</string>
+    <string name="suffix_packet_size">байтів</string>
+    <string name="relay_url_title">URL сервера-ретранслятора</string>
+    <string name="relay_url_summary">Ретранслятор WebSocket для обходу NAT (напр. wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK ретранслятора</string>
+    <string name="relay_psk_summary">Попередньо спільний ключ для автентифікації на ретрансляторі</string>
+    <string name="steam_account_label">ОБЛІКОВИЙ ЗАПИС STEAM</string>
+    <string name="steam_switch_title">Перемикання облікового запису Steam…</string>
+    <string name="steam_switch_starting">Запуск…</string>
+    <string name="steam_switch_helper">Steam закриється й повторно ввійде на хості. Це може тривати 60–90 секунд. Якщо процес зупинився, перевірте хост — можливо, Steam Guard 2FA чекає підтвердження.</string>
+    <string name="steam_switch_error_title">Не вдалося перемкнути Steam</string>
+    <string name="steam_switch_error_no_taskid">Сервер не повернув ідентифікатор завдання</string>
+    <string name="steam_switch_error_taskgone">Завдання перемикання зникло на хості</string>
+    <string name="steam_switch_error_timeout">Час перемикання вичерпано (&gt;150 с, а сервер не дійшов до кінцевого стану)</string>
+    <string name="steam_switch_account_unavailable">Для цього облікового запису на хості немає збережених облікових даних. Спершу один раз увійдіть на хості, а потім повторіть спробу.</string>
 </resources>

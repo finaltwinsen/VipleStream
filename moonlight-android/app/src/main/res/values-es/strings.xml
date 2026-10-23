@@ -299,4 +299,58 @@
         <item>Equilibrado — recomendado</item>
         <item>Rendimiento — más rápido, seguimiento de movimiento más débil</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Automático (según tipo de flujo)</item>
+        <item>Latencia mínima</item>
+        <item>Agregación de ancho de banda</item>
+        <item>Redundante (todas las rutas)</item>
+        <item>Finalización más temprana</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">El Steam Controller por Bluetooth no se puede transferir en Android (el sistema controla el HID Bluetooth). Conéctalo con un cable USB-C o conecta el receptor Puck mediante OTG.</string>
+    <string name="perf_overlay_fruc_separator">--- Interpolación de frames (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Estado: activa (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Estado: en pausa</string>
+    <string name="perf_overlay_fruc_pending">Estado: esperando…</string>
+    <string name="perf_overlay_fruc_off">Estado: desactivada</string>
+    <string name="perf_overlay_fruc_count">Interpolados: %1$d / %2$d (proporción: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Salida efectiva: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Orden de las aplicaciones</string>
+    <string name="summary_app_sort_mode">Cómo se ordenan los juegos en la lista de aplicaciones. Las aplicaciones definidas manualmente (Desktop, Steam Big Picture) siempre quedan fijadas arriba.</string>
+    <string name="app_sort_mode_default">Predeterminado (orden del host)</string>
+    <string name="app_sort_mode_recent">Jugados recientemente</string>
+    <string name="app_sort_mode_playtime">Más jugados</string>
+    <string name="app_sort_mode_name">Nombre (A–Z)</string>
+    <string name="title_show_guide_button">Mostrar botón Guide</string>
+    <string name="summary_show_guide_button">Muestra el botón Guide en pantalla</string>
+    <string name="title_enable_mpquic">Activar transporte multiruta MP-QUIC</string>
+    <string name="summary_enable_mpquic">Usa QUIC multiruta (RFC 9443) para la transmisión. Permite la conmutación entre Wi-Fi y datos móviles y la agregación de ancho de banda con dos tarjetas de red.</string>
+    <string name="title_mpquic_scheduler">Planificador de rutas</string>
+    <string name="summary_mpquic_scheduler">Cómo repartir el tráfico entre varias rutas de red</string>
+    <string name="resolution_custom">Personalizada (indica el valor abajo)</string>
+    <string name="title_custom_resolution">Resolución personalizada</string>
+    <string name="summary_custom_resolution">Se usa cuando la lista de resoluciones de arriba está en Personalizada. Formato: ancho x alto (p. ej., 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Introduce una resolución personalizada como WIDTHxHEIGHT, p. ej., 1600x900. Se ignora salvo que la lista esté en Personalizada.</string>
+    <string name="title_enable_yuv444">Preferir croma 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Solicita croma 4:4:4 cuando el decodificador del dispositivo indique que lo admite. La mayoría de los decodificadores móviles no lo admiten y la opción no tiene efecto.</string>
+    <string name="title_cancel_file_transfer">¿Cancelar la transferencia de archivo?</string>
+    <string name="message_cancel_file_transfer">¿Detener la transferencia de archivo en curso?</string>
+    <string name="file_transfer_overlay_content_description">Progreso de la transferencia de archivo. Toca para cancelar.</string>
+    <string name="title_packet_size">Tamaño de paquete de red</string>
+    <string name="summary_packet_size">Máximo de bytes por paquete enviado al host. 1392 es el valor predeterminado seguro para Ethernet LAN. Redúcelo en enlaces limitados (Wi-Fi, VPN); auméntalo en redes con jumbo frames.</string>
+    <string name="suffix_packet_size">bytes</string>
+    <string name="relay_url_title">URL del servidor de retransmisión</string>
+    <string name="relay_url_summary">Retransmisión WebSocket para atravesar NAT (p. ej., wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK de retransmisión</string>
+    <string name="relay_psk_summary">Clave precompartida para la autenticación en el servidor de retransmisión</string>
+    <string name="steam_account_label">CUENTA DE STEAM</string>
+    <string name="steam_switch_title">Cambiando de cuenta de Steam…</string>
+    <string name="steam_switch_starting">Iniciando…</string>
+    <string name="steam_switch_helper">Steam se cerrará y volverá a iniciar sesión en el host. Esto puede tardar entre 60 y 90 segundos. Si se queda atascado, revisa el host — puede que Steam Guard 2FA esté pidiendo confirmación.</string>
+    <string name="steam_switch_error_title">No se pudo cambiar la cuenta de Steam</string>
+    <string name="steam_switch_error_no_taskid">El servidor no devolvió ningún ID de tarea</string>
+    <string name="steam_switch_error_taskgone">La tarea de cambio desapareció en el host</string>
+    <string name="steam_switch_error_timeout">Se agotó el tiempo del cambio (&gt;150 s sin que el servidor llegara a un estado final)</string>
+    <string name="steam_switch_account_unavailable">Esta cuenta no tiene credenciales guardadas en el host. Inicia sesión una vez en el host y vuelve a intentarlo.</string>
 </resources>

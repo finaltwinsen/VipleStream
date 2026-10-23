@@ -303,4 +303,51 @@
         <item>标准 — 建议</item>
         <item>性能 — 最快，motion 追踪较弱</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>自动（按流类型）</item>
+        <item>最低延迟</item>
+        <item>带宽聚合</item>
+        <item>冗余（所有路径）</item>
+        <item>最早完成</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">Android 无法直通通过蓝牙连接的 Steam Controller（系统独占蓝牙 HID）。请改用 USB-C 线直连，或通过 OTG 接入 Puck 接收器。</string>
+    <string name="title_app_sort_mode">应用排序方式</string>
+    <string name="summary_app_sort_mode">游戏在应用列表中的排列方式。手动定义的应用（Desktop、Steam Big Picture）始终置顶。</string>
+    <string name="app_sort_mode_default">默认（主机顺序）</string>
+    <string name="app_sort_mode_recent">最近游玩</string>
+    <string name="app_sort_mode_playtime">最常游玩</string>
+    <string name="app_sort_mode_name">名称（A–Z）</string>
+    <string name="title_show_guide_button">显示 Guide 按钮</string>
+    <string name="summary_show_guide_button">在屏幕上显示 Guide 按钮</string>
+    <string name="title_enable_mpquic">启用 MP-QUIC 多路径传输</string>
+    <string name="summary_enable_mpquic">串流时使用 QUIC 多路径（RFC 9443）。支持 Wi-Fi 与蜂窝网络之间的故障切换，以及双网卡带宽聚合。</string>
+    <string name="title_mpquic_scheduler">路径调度器</string>
+    <string name="summary_mpquic_scheduler">如何在多条网络路径之间分配流量</string>
+    <string name="resolution_custom">自定义（在下方设置数值）</string>
+    <string name="title_custom_resolution">自定义分辨率</string>
+    <string name="summary_custom_resolution">当上方分辨率下拉菜单设为“自定义”时使用。格式：宽 x 高（例如 1600x900）。</string>
+    <string name="dialog_message_custom_resolution">请以“宽x高”格式输入自定义分辨率，例如 1600x900。下拉菜单未设为“自定义”时将忽略此值。</string>
+    <string name="title_enable_yuv444">优先使用 4:4:4 色度（YUV444）</string>
+    <string name="summary_enable_yuv444">设备解码器声明支持时，请求使用 4:4:4 色度。大多数移动设备解码器不支持，此时该选项不起作用。</string>
+    <string name="title_cancel_file_transfer">要取消文件传输吗？</string>
+    <string name="message_cancel_file_transfer">要停止正在进行的文件传输吗？</string>
+    <string name="file_transfer_overlay_content_description">文件传输进度。点按即可取消。</string>
+    <string name="title_packet_size">网络数据包大小</string>
+    <string name="summary_packet_size">发送到主机的每个数据包的最大字节数。1392 是以太网 LAN 的安全默认值。链路受限（Wi-Fi、VPN）时请调低；在支持巨型帧的网络上可调高。</string>
+    <string name="suffix_packet_size">字节</string>
+    <string name="relay_url_title">中继服务器 URL</string>
+    <string name="relay_url_summary">用于 NAT 穿透的 WebSocket 中继（例如 wss://relay.example.com）</string>
+    <string name="relay_psk_title">中继 PSK</string>
+    <string name="relay_psk_summary">用于中继身份验证的预共享密钥</string>
+    <string name="steam_account_label">STEAM 账户</string>
+    <string name="steam_switch_title">正在切换 Steam 账户…</string>
+    <string name="steam_switch_starting">正在启动…</string>
+    <string name="steam_switch_helper">主机上的 Steam 将关闭并重新登录，可能需要 60–90 秒。如果卡住，请检查主机 — Steam Guard 可能正在要求双重验证。</string>
+    <string name="steam_switch_error_title">Steam 账户切换失败</string>
+    <string name="steam_switch_error_no_taskid">服务器未返回任务 ID</string>
+    <string name="steam_switch_error_taskgone">主机上的切换任务已消失</string>
+    <string name="steam_switch_error_timeout">切换超时（&gt;150 秒服务器仍未进入最终状态）</string>
+    <string name="steam_switch_account_unavailable">此账户在主机上没有已保存的凭据。请先在主机上登录一次，然后重试。</string>
 </resources>

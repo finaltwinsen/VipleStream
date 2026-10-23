@@ -79,6 +79,10 @@ namespace proc {
     // touched by the auto-import layer.
     std::string source;
     std::string steam_app_id;
+    // §STEAM-QUIT（2026-10-23）：Steam 遊戲的安裝資料夾（steam_scanner 的 install_dir）。
+    // /cancel（使用者按「結束 APP」）時用它找出遊戲的程式關掉——steam:// 網址啟動的
+    // 遊戲是 Steam 的子程式，terminate() 只關得到網址處理器。
+    std::string steam_install_dir;
     // steam_owners is the list of SteamID3 strings that have this app in
     // their localconfig.vdf entitlement. Used client-side (Phase 3) to
     // filter the apps list by profile.
@@ -146,6 +150,14 @@ namespace proc {
     std::string running_owner_name() const;
     bool is_running_steam_source() const;
     void detach();
+
+    /**
+     * §STEAM-QUIT：使用者明確結束 app（/cancel）時呼叫，在 terminate() 之前。
+     * 目前的 app 是 Steam 遊戲時，在背景先請它安裝資料夾底下的程式正常關閉
+     *（以登入使用者身分跑 taskkill），10 秒內沒關的才強制結束。不會阻塞呼叫端。
+     * 只能從 /cancel 呼叫：terminate() 也會在啟動器結束、換 app 等時機被呼叫。
+     */
+    void quit_steam_game();
 
     /**
      * §M.1.f defensive fix (2026-05-14) — clear `_owner_uuid` / `_owner_name`

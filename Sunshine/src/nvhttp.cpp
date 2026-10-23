@@ -2019,6 +2019,9 @@ namespace nvhttp {
                         << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid})
                         << " owner="sv << owner_name
                         << " admin="sv << caller_admin;
+        // §STEAM-QUIT：使用者明確結束 app → Steam 遊戲本身也要關（terminate 只關得到
+        // steam:// 網址處理器，遊戲是 Steam 的子程式）。背景執行，不擋這個 HTTP 回應。
+        proc::proc.quit_steam_game();
         proc::proc.terminate();
       }
     }

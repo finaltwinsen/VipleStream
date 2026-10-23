@@ -284,4 +284,58 @@
         <item>Zrównoważona — zalecana</item>
         <item>Wydajność — najszybsza, słabsze śledzenie ruchu</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Automatycznie (wg typu strumienia)</item>
+        <item>Najniższe opóźnienie</item>
+        <item>Agregacja przepustowości</item>
+        <item>Nadmiarowo (wszystkie ścieżki)</item>
+        <item>Najwcześniejsze ukończenie</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">Steam Controller połączonego przez Bluetooth nie można przekazać na Androidzie (system przejmuje Bluetooth HID). Podłącz go kablem USB-C lub podłącz odbiornik Puck przez OTG.</string>
+    <string name="perf_overlay_fruc_separator">--- Interpolacja klatek (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Stan: aktywna (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Stan: wstrzymana</string>
+    <string name="perf_overlay_fruc_pending">Stan: oczekiwanie…</string>
+    <string name="perf_overlay_fruc_off">Stan: wyłączona</string>
+    <string name="perf_overlay_fruc_count">Interpolowane: %1$d / %2$d (udział: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Efektywne wyjście: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Kolejność sortowania aplikacji</string>
+    <string name="summary_app_sort_mode">Sposób ułożenia gier na liście aplikacji. Aplikacje zdefiniowane ręcznie (Desktop, Steam Big Picture) są zawsze przypięte na górze.</string>
+    <string name="app_sort_mode_default">Domyślnie (kolejność hosta)</string>
+    <string name="app_sort_mode_recent">Ostatnio grane</string>
+    <string name="app_sort_mode_playtime">Najczęściej grane</string>
+    <string name="app_sort_mode_name">Nazwa (A–Z)</string>
+    <string name="title_show_guide_button">Pokaż przycisk Guide</string>
+    <string name="summary_show_guide_button">Pokazuj przycisk Guide na ekranie</string>
+    <string name="title_enable_mpquic">Włącz transmisję wielościeżkową MP-QUIC</string>
+    <string name="summary_enable_mpquic">Używaj wielościeżkowego QUIC (RFC 9443) do strumieniowania. Umożliwia przełączanie awaryjne między Wi-Fi a siecią komórkową oraz agregację przepustowości dwóch kart sieciowych.</string>
+    <string name="title_mpquic_scheduler">Harmonogram ścieżek</string>
+    <string name="summary_mpquic_scheduler">Sposób rozdzielania ruchu między wiele ścieżek sieciowych</string>
+    <string name="resolution_custom">Niestandardowa (ustaw wartość poniżej)</string>
+    <string name="title_custom_resolution">Rozdzielczość niestandardowa</string>
+    <string name="summary_custom_resolution">Używana, gdy na liście rozdzielczości powyżej wybrano „Niestandardowa”. Format: szerokość x wysokość (np. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Wpisz niestandardową rozdzielczość jako WIDTHxHEIGHT, np. 1600x900. Ignorowane, jeśli na liście nie wybrano „Niestandardowa”.</string>
+    <string name="title_enable_yuv444">Preferuj chrominancję 4:4:4 (YUV444)</string>
+    <string name="summary_enable_yuv444">Żądaj chrominancji 4:4:4, gdy dekoder urządzenia deklaruje jej obsługę. Większość dekoderów mobilnych jej nie obsługuje i wtedy opcja nic nie zmienia.</string>
+    <string name="title_cancel_file_transfer">Anulować przesyłanie pliku?</string>
+    <string name="message_cancel_file_transfer">Zatrzymać trwające przesyłanie pliku?</string>
+    <string name="file_transfer_overlay_content_description">Postęp przesyłania pliku. Dotknij, aby anulować.</string>
+    <string name="title_packet_size">Rozmiar pakietu sieciowego</string>
+    <string name="summary_packet_size">Maksymalna liczba bajtów w pakiecie wysyłanym do hosta. 1392 to bezpieczna wartość domyślna dla Ethernet LAN. Zmniejsz ją dla ograniczonych łączy (Wi-Fi, VPN); zwiększ w sieciach z jumbo frame.</string>
+    <string name="suffix_packet_size">bajtów</string>
+    <string name="relay_url_title">URL serwera przekaźnikowego</string>
+    <string name="relay_url_summary">Przekaźnik WebSocket do omijania NAT (np. wss://relay.example.com)</string>
+    <string name="relay_psk_title">PSK przekaźnika</string>
+    <string name="relay_psk_summary">Klucz współdzielony do uwierzytelniania w przekaźniku</string>
+    <string name="steam_account_label">KONTO STEAM</string>
+    <string name="steam_switch_title">Przełączanie konta Steam…</string>
+    <string name="steam_switch_starting">Uruchamianie…</string>
+    <string name="steam_switch_helper">Steam zostanie zamknięty i ponownie zaloguje się na hoście. Może to potrwać 60–90 sekund. Jeśli proces utknie, sprawdź host — Steam Guard 2FA może prosić o potwierdzenie.</string>
+    <string name="steam_switch_error_title">Nie udało się przełączyć konta Steam</string>
+    <string name="steam_switch_error_no_taskid">Serwer nie zwrócił identyfikatora zadania</string>
+    <string name="steam_switch_error_taskgone">Zadanie przełączania zniknęło z hosta</string>
+    <string name="steam_switch_error_timeout">Przekroczono czas przełączania (&gt;150 s, a serwer nie osiągnął stanu końcowego)</string>
+    <string name="steam_switch_account_unavailable">To konto nie ma zapisanych danych logowania na hoście. Najpierw zaloguj się raz na hoście, a potem spróbuj ponownie.</string>
 </resources>

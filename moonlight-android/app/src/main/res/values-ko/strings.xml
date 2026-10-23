@@ -290,4 +290,67 @@
         <item>균형 — 권장</item>
         <item>성능 — 가장 빠름, 모션 추적은 약함</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>자동 (스트림 유형별)</item>
+        <item>최저 지연</item>
+        <item>대역폭 통합</item>
+        <item>중복 전송 (모든 경로)</item>
+        <item>가장 빠른 완료</item>
+    </string-array>
+    <string name="sc_hid_bt_unsupported">Bluetooth로 연결된 Steam Controller는 Android에서 패스스루할 수 없습니다(시스템이 Bluetooth HID를 점유합니다). USB-C 케이블로 연결하거나 Puck 수신기를 OTG로 연결하세요.</string>
+    <string name="error_code_prefix">오류 코드:</string>
+    <string name="perf_overlay_fruc_separator">--- 프레임 보간 (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">상태: 활성 (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">상태: 일시 중지됨</string>
+    <string name="perf_overlay_fruc_pending">상태: 대기 중…</string>
+    <string name="perf_overlay_fruc_off">상태: 꺼짐</string>
+    <string name="perf_overlay_fruc_count">보간됨: %1$d / %2$d (비율: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">실제 출력: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">앱 정렬 순서</string>
+    <string name="summary_app_sort_mode">앱 목록에서 게임을 정렬하는 방식입니다. 수동으로 정의한 앱(Desktop, Steam Big Picture)은 항상 맨 위에 고정됩니다.</string>
+    <string name="app_sort_mode_default">기본값 (호스트 순서)</string>
+    <string name="app_sort_mode_recent">최근 플레이</string>
+    <string name="app_sort_mode_playtime">가장 많이 플레이</string>
+    <string name="app_sort_mode_name">이름 (A–Z)</string>
+    <string name="title_seekbar_vibrate_fallback_strength">에뮬레이트된 진동 세기 조정</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">기기의 진동 세기를 높이거나 낮춥니다</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="title_show_guide_button">가이드 버튼 표시</string>
+    <string name="summary_show_guide_button">화면에 가이드 버튼을 표시합니다</string>
+    <string name="title_enable_mpquic">MP-QUIC 멀티패스 전송 사용</string>
+    <string name="summary_enable_mpquic">스트리밍에 QUIC 멀티패스(RFC 9443)를 사용합니다. Wi-Fi와 셀룰러 간 장애 조치 및 이중 NIC 대역폭 통합을 지원합니다.</string>
+    <string name="title_mpquic_scheduler">경로 스케줄러</string>
+    <string name="summary_mpquic_scheduler">여러 네트워크 경로에 트래픽을 분배하는 방식</string>
+    <string name="resolution_custom">사용자 지정 (아래에서 값 설정)</string>
+    <string name="title_custom_resolution">사용자 지정 해상도</string>
+    <string name="summary_custom_resolution">위의 해상도 목록이 사용자 지정으로 설정된 경우 사용됩니다. 형식: 너비 x 높이 (예: 1600x900).</string>
+    <string name="dialog_message_custom_resolution">사용자 지정 해상도를 너비x높이 형식으로 입력하세요(예: 1600x900). 목록이 사용자 지정으로 설정되지 않으면 무시됩니다.</string>
+    <string name="title_enable_yuv444">4:4:4 크로마 우선 (YUV444)</string>
+    <string name="summary_enable_yuv444">기기 디코더가 지원을 알리는 경우 4:4:4 크로마를 요청합니다. 대부분의 모바일 디코더는 이를 지원하지 않으며, 이 경우 옵션은 아무 효과가 없습니다.</string>
+    <string name="title_cancel_file_transfer">파일 전송을 취소할까요?</string>
+    <string name="message_cancel_file_transfer">진행 중인 파일 전송을 중지할까요?</string>
+    <string name="file_transfer_overlay_content_description">파일 전송 진행률. 탭하여 취소합니다.</string>
+    <string name="title_packet_size">네트워크 패킷 크기</string>
+    <string name="summary_packet_size">호스트로 보내는 패킷당 최대 바이트 수입니다. 1392는 이더넷 LAN에 안전한 기본값입니다. 제약이 있는 연결(Wi-Fi, VPN)에서는 낮추고, 점보 프레임 네트워크에서는 높이세요.</string>
+    <string name="suffix_packet_size">바이트</string>
+    <string name="title_analog_scrolling">아날로그 스틱으로 스크롤</string>
+    <string name="summary_analog_scrolling">마우스 에뮬레이션 모드에서 스크롤에 사용할 아날로그 스틱을 선택합니다</string>
+    <string name="analogscroll_none">없음 (두 스틱 모두 마우스 이동)</string>
+    <string name="analogscroll_right">오른쪽 아날로그 스틱</string>
+    <string name="analogscroll_left">왼쪽 아날로그 스틱</string>
+    <string name="relay_url_title">릴레이 서버 URL</string>
+    <string name="relay_url_summary">NAT 통과를 위한 WebSocket 릴레이 (예: wss://relay.example.com)</string>
+    <string name="relay_psk_title">릴레이 PSK</string>
+    <string name="relay_psk_summary">릴레이 인증용 사전 공유 키</string>
+    <string name="steam_account_label">STEAM 계정</string>
+    <string name="steam_switch_title">Steam 계정 전환 중…</string>
+    <string name="steam_switch_starting">시작 중…</string>
+    <string name="steam_switch_helper">호스트에서 Steam이 종료된 후 다시 로그인합니다. 60–90초 정도 걸릴 수 있습니다. 멈춘 것 같으면 호스트를 확인하세요 — Steam Guard 2단계 인증을 요청하고 있을 수 있습니다.</string>
+    <string name="steam_switch_error_title">Steam 계정 전환 실패</string>
+    <string name="steam_switch_error_no_taskid">서버가 작업 ID를 반환하지 않았습니다</string>
+    <string name="steam_switch_error_taskgone">호스트에서 전환 작업이 사라졌습니다</string>
+    <string name="steam_switch_error_timeout">전환 시간 초과 (&gt;150초 동안 서버가 최종 상태에 도달하지 않음)</string>
+    <string name="steam_switch_account_unavailable">이 계정은 호스트에 저장된 자격 증명이 없습니다. 먼저 호스트에서 한 번 로그인한 후 다시 시도하세요.</string>
 </resources>

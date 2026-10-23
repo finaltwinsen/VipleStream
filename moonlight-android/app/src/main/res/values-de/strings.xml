@@ -287,4 +287,70 @@
         <item>Ausgeglichen — empfohlen</item>
         <item>Leistung — am schnellsten, schwächere Bewegungsverfolgung</item>
     </string-array>
+
+    <!-- 2026-10-23：補齊缺漏的翻譯 -->
+    <string-array name="mpquic_scheduler_names">
+        <item>Automatisch (je Stream-Typ)</item>
+        <item>Geringste Latenz</item>
+        <item>Bandbreitenbündelung</item>
+        <item>Redundant (alle Pfade)</item>
+        <item>Früheste Fertigstellung</item>
+    </string-array>
+    <string name="pcview_menu_eol">NVIDIA GameStream – Ende des Dienstes</string>
+    <string name="sc_hid_bt_unsupported">Ein über Bluetooth verbundener Steam Controller kann unter Android nicht durchgereicht werden (das System beansprucht Bluetooth-HID). Verbinde ihn per USB-C-Kabel oder schließe den Puck-Empfänger über OTG an.</string>
+    <string name="error_code_prefix">Fehlercode:</string>
+    <string name="perf_overlay_fruc_separator">--- Zwischenbildberechnung (FRUC) ---</string>
+    <string name="perf_overlay_fruc_active">Status: Aktiv (%1$s)</string>
+    <string name="perf_overlay_fruc_paused">Status: Pausiert</string>
+    <string name="perf_overlay_fruc_pending">Status: Warte…</string>
+    <string name="perf_overlay_fruc_off">Status: Aus</string>
+    <string name="perf_overlay_fruc_count">Interpoliert: %1$d / %2$d (Anteil: %3$.0f%%)</string>
+    <string name="perf_overlay_fruc_effective_fps">Effektive Ausgabe: %1$.1f FPS</string>
+    <string name="title_app_sort_mode">Sortierung der Apps</string>
+    <string name="summary_app_sort_mode">Legt fest, wie Spiele in der App-Liste angeordnet werden. Manuell definierte Apps (Desktop, Steam Big Picture) stehen immer ganz oben.</string>
+    <string name="app_sort_mode_default">Standard (Reihenfolge des Hosts)</string>
+    <string name="app_sort_mode_recent">Zuletzt gespielt</string>
+    <string name="app_sort_mode_playtime">Meistgespielt</string>
+    <string name="app_sort_mode_name">Name (A–Z)</string>
+    <string name="title_seekbar_vibrate_fallback_strength">Stärke der emulierten Vibration anpassen</string>
+    <string name="summary_seekbar_vibrate_fallback_strength">Verstärkt oder verringert die Vibrationsstärke auf deinem Gerät</string>
+    <string name="suffix_seekbar_vibrate_fallback_strength">%</string>
+    <string name="summary_checkbox_gamepad_touchpad_as_mouse">Erzwingt, dass die Touchpad-Eingabe des Gamepads die Maus des Hosts steuert, selbst wenn ein Gamepad mit Touchpad emuliert wird.</string>
+    <string name="summary_checkbox_gamepad_motion_sensors">Ermöglicht unterstützten Hosts, Bewegungssensordaten anzufordern, wenn ein Gamepad mit Bewegungssensoren emuliert wird. Das Deaktivieren kann den Strom- und Netzwerkverbrauch leicht senken, wenn im Spiel keine Bewegungssensoren genutzt werden.</string>
+    <string name="title_checkbox_gamepad_motion_fallback">Bewegungssensoren des Gamepads emulieren</string>
+    <string name="summary_checkbox_gamepad_motion_fallback">Verwendet die integrierten Bewegungssensoren deines Geräts, wenn dein verbundenes Gamepad oder deine Android-Version keine Gamepad-Sensoren unterstützt.\nHinweis: Wenn diese Option aktiviert ist, kann dein Gamepad auf dem Host als PlayStation-Controller erscheinen.</string>
+    <string name="title_show_guide_button">Guide-Taste anzeigen</string>
+    <string name="summary_show_guide_button">Zeigt die Guide-Taste auf dem Bildschirm an</string>
+    <string name="title_full_range">Full-Range-Video erzwingen (experimentell)</string>
+    <string name="summary_full_range">Dadurch gehen Details in hellen und dunklen Bereichen verloren, wenn dein Gerät Full-Range-Videoinhalte nicht korrekt darstellt.</string>
+    <string name="title_enable_mpquic">MP-QUIC-Mehrwegübertragung aktivieren</string>
+    <string name="summary_enable_mpquic">Verwendet QUIC Multipath (RFC 9443) zum Streamen. Ermöglicht Ausfallsicherheit zwischen Wi-Fi und Mobilfunk sowie Bandbreitenbündelung über zwei Netzwerkkarten.</string>
+    <string name="title_mpquic_scheduler">Pfad-Scheduler</string>
+    <string name="summary_mpquic_scheduler">Wie der Datenverkehr auf mehrere Netzwerkpfade verteilt wird</string>
+    <string name="toast_controller_type_changed">Der Gamepad-Typ kann sich aufgrund der Bewegungssensor-Emulation ändern</string>
+    <string name="resolution_custom">Benutzerdefiniert (Wert unten festlegen)</string>
+    <string name="title_custom_resolution">Benutzerdefinierte Auflösung</string>
+    <string name="summary_custom_resolution">Wird verwendet, wenn die Auflösungsauswahl oben auf „Benutzerdefiniert“ steht. Format: Breite x Höhe (z. B. 1600x900).</string>
+    <string name="dialog_message_custom_resolution">Gib eine benutzerdefinierte Auflösung als BREITExHÖHE ein, z. B. 1600x900. Wird ignoriert, solange die Auswahl nicht auf „Benutzerdefiniert“ steht.</string>
+    <string name="title_enable_yuv444">4:4:4-Chroma bevorzugen (YUV444)</string>
+    <string name="summary_enable_yuv444">Fordert 4:4:4-Chroma an, wenn der Decoder des Geräts dies unterstützt. Die meisten mobilen Decoder unterstützen das nicht; dann bleibt die Option wirkungslos.</string>
+    <string name="title_cancel_file_transfer">Dateiübertragung abbrechen?</string>
+    <string name="message_cancel_file_transfer">Laufende Dateiübertragung beenden?</string>
+    <string name="file_transfer_overlay_content_description">Fortschritt der Dateiübertragung. Zum Abbrechen tippen.</string>
+    <string name="title_packet_size">Netzwerk-Paketgröße</string>
+    <string name="summary_packet_size">Maximale Bytes pro Paket, das an den Host gesendet wird. 1392 ist der sichere Standardwert für Ethernet-LAN. Für eingeschränkte Verbindungen (Wi-Fi, VPN) verringern, in Netzwerken mit Jumbo-Frames erhöhen.</string>
+    <string name="suffix_packet_size">Bytes</string>
+    <string name="relay_url_title">Relay-Server-URL</string>
+    <string name="relay_url_summary">WebSocket-Relay für NAT-Traversal (z. B. wss://relay.example.com)</string>
+    <string name="relay_psk_title">Relay-PSK</string>
+    <string name="relay_psk_summary">Vorab geteilter Schlüssel für die Relay-Authentifizierung</string>
+    <string name="steam_account_label">STEAM-KONTO</string>
+    <string name="steam_switch_title">Steam-Konto wird gewechselt…</string>
+    <string name="steam_switch_starting">Wird gestartet…</string>
+    <string name="steam_switch_helper">Steam wird auf dem Host geschlossen und meldet sich neu an. Das kann 60–90 Sekunden dauern. Wenn es hängen bleibt, prüfe den Host — möglicherweise fragt Steam Guard nach der Zwei-Faktor-Authentifizierung.</string>
+    <string name="steam_switch_error_title">Steam-Kontowechsel fehlgeschlagen</string>
+    <string name="steam_switch_error_no_taskid">Der Server hat keine Task-ID zurückgegeben</string>
+    <string name="steam_switch_error_taskgone">Der Wechselvorgang ist auf dem Host verschwunden</string>
+    <string name="steam_switch_error_timeout">Zeitüberschreitung beim Wechsel (&gt;150 s, ohne dass der Server einen Endzustand erreicht hat)</string>
+    <string name="steam_switch_account_unavailable">Für dieses Konto sind auf dem Host keine Anmeldedaten gespeichert. Melde dich zuerst einmal auf dem Host an und versuche es dann erneut.</string>
 </resources>
