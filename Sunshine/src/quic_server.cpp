@@ -47,6 +47,8 @@
   #define SOCKET int
   #define INVALID_SOCKET (-1)
   #define closesocket(fd) (::close(fd))
+  #include <cerrno>
+  #include <fcntl.h>
 #endif
 
 #include <algorithm>
@@ -251,6 +253,56 @@ namespace quic_server {
   //
   // 用途：PATH-SWITCH 後送 IDR frame——IDR 透過 datagram 在切換縫隙
   // 容易遺失，多路同送確保至少一條 path 送達。
+  // §MP-PURGE／§MP-BACKUP-FLIP 共用：刪掉某條路徑 per-path queue 裡的 video
+  // datagram，並把 approxVQ 扣回來（IO 執行緒專用）。回傳刪掉的數量。
+  int QuicSession::purgeVideoFromPath(picoquic_path_t *p) {
+    int purged = 0;
+    picoquic_misc_frame_header_t *f = p->first_datagram;
+    while (f != nullptr) {
+      picoquic_misc_frame_header_t *next = f->next_misc_frame;
+      if (picoquic_queued_datagram_flow(f) == FLOW_VIDEO) {
+        picoquic_delete_misc_or_dg(&p->first_datagram, &p->last_datagram, f);
+        purged++;
+      }
+      f = next;
+    }
+    _approxVideoQueueDepth = std::max<int64_t>(0, (int64_t) _approxVideoQueueDepth - purged);
+    return purged;
+  }
+
+  void QuicSession::feedControlStream(const uint8_t *data, size_t len) {
+    // 訊息格式（client ControlStream.c）：'I'＝IDR 請求、'P'＝ping，各 1 byte；
+    // 'U'＋SS_FRAME_FEC_STATUS（21 bytes）＝22 bytes。
+    constexpr size_t FEC_MSG_LEN = 1 + 21;
+    _ctrlStreamBuf.insert(_ctrlStreamBuf.end(), data, data + len);
+    size_t off = 0;
+    while (off < _ctrlStreamBuf.size()) {
+      const uint8_t m = _ctrlStreamBuf[off];
+      size_t need;
+      if (m == 0x49 || m == 0x50) {
+        need = 1;
+      } else if (m == 0x55) {
+        need = FEC_MSG_LEN;
+      } else {
+        // 不認得的標記：無法再對齊，整段丟掉（舊 client 只會送上面三種）
+        static int unknownLogs = 0;
+        if (unknownLogs++ < 10) {
+          BOOST_LOG(warning) << "[VIPLE-MPQUIC] §Q-CTRL-FRAMING: unknown stream #0 marker 0x"
+                             << std::hex << (int) m << std::dec << " — dropping "
+                             << (_ctrlStreamBuf.size() - off) << " byte(s)";
+        }
+        off = _ctrlStreamBuf.size();
+        break;
+      }
+      if (_ctrlStreamBuf.size() - off < need) {
+        break;  // 還沒到齊，等下一段
+      }
+      invokeRecvHandler(FLOW_CONTROL, _ctrlStreamBuf.data() + off, need);
+      off += need;
+    }
+    _ctrlStreamBuf.erase(_ctrlStreamBuf.begin(), _ctrlStreamBuf.begin() + off);
+  }
+
   bool QuicSession::sendDatagramReinject(uint8_t flowType,
                                          const uint8_t *data, size_t len) {
     if (!isReady())
@@ -444,6 +496,29 @@ namespace quic_server {
     // bestVideoPath 在這裡預宣告（初始 -1），§K.11 diagnostic block
     // 需要引用它；實際值在下方 Pass 1/2/3 選擇後更新。
     int bestVideoPath = -1;
+
+    // §Q-VIDEOPATH-ID：依 unique_path_id 把上一輪的影像路徑換算回目前的 index。
+    // 找不到（那條被刪了）就設成 nb_paths——下游既有的「index 超界＝路徑不存在」
+    // 判斷照常生效。
+    if (_lastVideoPath >= 0 && _lastVideoPathId != UINT64_MAX) {
+      int found = -1;
+      for (int i = 0; i < _cnx->nb_paths; i++) {
+        if (_cnx->path[i] != nullptr && _cnx->path[i]->unique_path_id == _lastVideoPathId) {
+          found = i;
+          break;
+        }
+      }
+      int resolved = (found >= 0) ? found : _cnx->nb_paths;
+      if (resolved != _lastVideoPath) {
+        static int remapLogs = 0;
+        if (remapLogs++ < 20) {
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-VIDEOPATH-ID: video path id=" << _lastVideoPathId
+                          << " index " << _lastVideoPath << " -> "
+                          << (found >= 0 ? std::to_string(found) : std::string("gone"));
+        }
+        _lastVideoPath = resolved;
+      }
+    }
 
     // §K.11 DIAG: 監控 picoquic datagram queue 深度和 cwnd 狀態。
     // §K.11-PERF 2026-05-27: 修正效能死亡螺旋——v1.5.159 發現 queue
@@ -748,17 +823,7 @@ namespace quic_server {
     if (!_failoverCnxQueue && _lastVideoPath >= 0 && _lastVideoPath < _cnx->nb_paths &&
         _cnx->path[_lastVideoPath] != nullptr && _cnx->path[_lastVideoPath]->path_is_backup) {
       auto *bp = _cnx->path[_lastVideoPath];
-      int purged = 0;
-      picoquic_misc_frame_header_t *f = bp->first_datagram;
-      while (f != nullptr) {
-        picoquic_misc_frame_header_t *next = f->next_misc_frame;
-        if (picoquic_queued_datagram_flow(f) == FLOW_VIDEO) {
-          picoquic_delete_misc_or_dg(&bp->first_datagram, &bp->last_datagram, f);
-          purged++;
-        }
-        f = next;
-      }
-      _approxVideoQueueDepth = std::max<int64_t>(0, (int64_t) _approxVideoQueueDepth - purged);
+      int purged = purgeVideoFromPath(bp);
       _failoverCnxQueue = true;
       _cnxQueueMinUntil = picoquic_current_time() + 3000000;
       BOOST_LOG(warning) << "[VIPLE-MPQUIC] §MP-BACKUP-FLIP: video path id=" << bp->unique_path_id
@@ -1109,18 +1174,8 @@ namespace quic_server {
     if (bestVideoPath != _lastVideoPath && _lastVideoPath >= 0 &&
         _lastVideoPath < _cnx->nb_paths && _cnx->path[_lastVideoPath] != nullptr) {
       auto *op = _cnx->path[_lastVideoPath];
-      int purged = 0;
-      picoquic_misc_frame_header_t *f = op->first_datagram;
-      while (f != nullptr) {
-        picoquic_misc_frame_header_t *next = f->next_misc_frame;
-        if (picoquic_queued_datagram_flow(f) == FLOW_VIDEO) {
-          picoquic_delete_misc_or_dg(&op->first_datagram, &op->last_datagram, f);
-          purged++;
-        }
-        f = next;
-      }
+      int purged = purgeVideoFromPath(op);
       if (purged > 0) {
-        _approxVideoQueueDepth = std::max<int64_t>(0, (int64_t) _approxVideoQueueDepth - purged);
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §MP-PURGE: dropped " << purged
                         << " stale video datagrams queued on old path id=" << op->unique_path_id;
       }
@@ -1199,10 +1254,24 @@ namespace quic_server {
           (_lastVideoPath >= 0 || recoveredFromTotalLoss) &&
           bestVideoPath >= 0;
 
+      constexpr uint64_t GRACE_REARM_MAX_US = 20000000;  // §Q-GRACE-CAP：20 s
+      const bool graceLocked = _pathSwitchGraceCycles > 0 && _graceActiveSinceUs != 0 &&
+                               nowUsForEpisode - _graceActiveSinceUs > GRACE_REARM_MAX_US;
+      if (graceLocked) {
+        static int graceCapLogs = 0;
+        if (graceCapLogs++ < 20) {
+          BOOST_LOG(warning) << "[VIPLE-MPQUIC] §Q-GRACE-CAP: grace active "
+                             << (nowUsForEpisode - _graceActiveSinceUs) / 1000000
+                             << " s continuously (path-switch oscillation) — not re-arming, remaining="
+                             << _pathSwitchGraceCycles;
+        }
+      }
       if (newEpisode) {
         _failoverEpisodeStartTime = nowUsForEpisode;
         _approxVideoQueueDepth = 0;
-        _pathSwitchGraceCycles = 2000;  // v1.5.177: 配合 §Q-FAILOVER-IDR-LOOP 10s 視窗
+        if (!graceLocked) {
+          _pathSwitchGraceCycles = 2000;  // v1.5.177: 配合 §Q-FAILOVER-IDR-LOOP 10s 視窗
+        }
         _dgramDroppedStale.store(0);  // 重置計數，方便診斷新 episode baseline
         BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-GRACE-FIX: new failover episode started — resetting grace + approxVQ";
       } else if (isRealFailover) {
@@ -1242,7 +1311,7 @@ namespace quic_server {
         // 保證失效。給一個最低 grace 下限確保 IDR 通過（300 次 drain
         // ≈ 2-3 秒，足夠 IDR loop 前幾發；不像 newEpisode 的 2000 那麼
         // 寬，避免振盪期間 §Q-STALE 失效的老問題）。
-        if (_pathSwitchGraceCycles < 300) {
+        if (_pathSwitchGraceCycles < 300 && !graceLocked) {
           _pathSwitchGraceCycles = 300;
         }
       }
@@ -1254,19 +1323,45 @@ namespace quic_server {
         _videoPathLostTime = 0;  // 恢復 → 清除 -1 進入時刻
       }
       else if (_lastVideoPath >= 0) {
-        // M → -1：記錄全 path 失效的起點，供 -1 → M 恢復時計算駐留時間
-        _videoPathLostTime = nowUsForEpisode;
+        // §Q-SINGLE-SURVIVOR (ultrareview #6)：載影像的路徑被刪、只剩一條健康路徑
+        //（nb_paths==1 不選路 → -1＝cnx-level queue）時，影像其實照常在那條上送，
+        // 不是全斷。以前一律記成全斷：切換當下不發 IDR，介面 1 s 後回來時
+        // -1 → 0 又被當成「從全斷恢復」→ 完整 10 s IDR loop＋reinject，串流明明
+        // 沒中斷。改成：倖存的不是原本那條 → 當成換路，發一次 light IDR；
+        // 不記全斷起點。
+        auto *survivor = (_cnx->nb_paths == 1) ? _cnx->path[0] : nullptr;
+        if (survivor != nullptr && !survivor->path_is_demoted) {
+          if (survivor->unique_path_id != _lastVideoPathId) {
+            _pathSwitchIdrKind.store(2, std::memory_order_release);
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SINGLE-SURVIVOR: video path id=" << _lastVideoPathId
+                            << " gone, continuing on path id=" << survivor->unique_path_id
+                            << " (cnx-level) — light IDR, not counted as total loss";
+          }
+        }
+        else {
+          // M → -1：記錄全 path 失效的起點，供 -1 → M 恢復時計算駐留時間
+          _videoPathLostTime = nowUsForEpisode;
+        }
       }
 
       _lastSwitchWasInitial = (_lastVideoPath < 0);  // §MP-SINGLE-AVAIL：-2／-1 → M 不算換路
       _lastVideoPath = bestVideoPath;
+      _lastVideoPathId = (bestVideoPath >= 0 && bestVideoPath < _cnx->nb_paths && _cnx->path[bestVideoPath])
+                             ? _cnx->path[bestVideoPath]->unique_path_id : UINT64_MAX;
       _lastPathSwitchTime = nowUsForEpisode;
       _escapeIdrLight = false;  // §Q-STICKY-ESCAPE: kind 已消費，清除
     }
 
     // §Q-PATH-SWITCH-FLUSH: 每次 drain 遞減寬限計數
-    if (_pathSwitchGraceCycles > 0)
+    // §Q-GRACE-CAP：記錄 grace 連續生效的起點（重設上限見 PATH-SWITCH 區塊）
+    if (_pathSwitchGraceCycles > 0) {
+      if (_graceActiveSinceUs == 0) {
+        _graceActiveSinceUs = picoquic_current_time();
+      }
       _pathSwitchGraceCycles--;
+    } else {
+      _graceActiveSinceUs = 0;
+    }
 
     // §Q-STALE-HEADROOM-GATE v1.5.199：只在 picoquic 真的塞住（cwnd 滿）時
     // 才讓 §Q-STALE 丟 video。實測（8 Mbps/1080p30）§Q-STALE 在 cwnd 健康
@@ -1397,13 +1492,23 @@ namespace quic_server {
       // 佇列深過 STALE_STARVE_THRESHOLD 時不看 backpressure 直接淘汰
       //（BBR bw_lo 自陷時 inFlight=0、cwnd 未滿，quicBackpressured 恆假，
       // 原條件漏接 → 佇列無界成長 → 秒級畫面延遲）。
-      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 &&
+      //
+      // §Q-STALE: video datagram 佇列深度超限 → 丟棄，不入 picoquic queue。
+      // picoquic 的 datagram linked list 是 FIFO，如果 server 編碼速率
+      // 高於 picoquic 送出速率（180fps 編碼 vs ~60fps 送出），差額堆積
+      // 導致 client 看到越來越舊的畫面。丟棄多餘 video 讓 client 始終
+      // 看到最新 frame。Audio 和 control 不丟。
+      // §Q-PATH-SWITCH-FLUSH: PATH-SWITCH 後寬限期內不丟（IDR 與一般 video
+      // 同為 FLOW_VIDEO，丟了 client 就永遠收不到 IDR）。
+      // §ABR-QSTALE-FEEDBACK 2026-07-16：server 自己丟掉的 video datagram
+      // ＝下行壅塞最直接的證據，回饋 run_abr_aimd。
+      // §Q-STALE-ONCE (ultrareview #6)：條件與丟棄帳本以前寫了兩份，合成一份。
+      const bool staleDrop = ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 &&
           ((quicBackpressured && _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) ||
-           _approxVideoQueueDepth > STALE_STARVE_THRESHOLD)) {
+           _approxVideoQueueDepth > STALE_STARVE_THRESHOLD);
+      if (staleDrop) {
         uint64_t nowStale = picoquic_current_time();
-        if (_staleStallStart == 0) {
-          _staleStallStart = nowStale;
-        } else if (nowStale - _staleStallStart > 3000000) {  // 3 秒
+        if (_staleStallStart != 0 && nowStale - _staleStallStart > 3000000) {  // 3 秒
           _approxVideoQueueDepth = 0;
           _pathSwitchGraceCycles = 500;  // ~3 秒 grace
           _staleStallStart = 0;
@@ -1412,11 +1517,12 @@ namespace quic_server {
                              << "(dgramDroppedStale=" << _dgramDroppedStale << ")";
           // 不 continue — 讓這個 datagram 通過（grace 剛恢復）
         } else {
-          // 仍在 3 秒內 → 照常丟棄
+          if (_staleStallStart == 0) {
+            _staleStallStart = nowStale;
+          }
           _dgramDroppedStale++;
-          // §ABR-QSTALE-FEEDBACK：丟棄量回饋 ABR
           _staleDropsForAbr++;
-          _lastStaleDropUs.store(picoquic_current_time(), std::memory_order_release);
+          _lastStaleDropUs.store(nowStale, std::memory_order_release);
           continue;
         }
       } else if (ft == FLOW_VIDEO) {
@@ -1425,29 +1531,6 @@ namespace quic_server {
         // 不受 §Q-STALE 丟棄）清零 → stall 計時永遠累積不到 3 秒 → 安全閥
         // 在 audio 開啟的所有實際場景中是死的（與 R.3 殭屍態症狀相符）。
         _staleStallStart = 0;  // video 非 stale 狀態 → 重置計時器
-      }
-
-      // §Q-STALE: video datagram 佇列深度超限 → 丟棄，不入 picoquic queue。
-      // picoquic 的 datagram linked list 是 FIFO，如果 server 編碼速率
-      // 高於 picoquic 送出速率（180fps 編碼 vs ~60fps 送出），差額堆積
-      // 導致 client 看到越來越舊的畫面。丟棄多餘 video 讓 client 始終
-      // 看到最新 frame。Audio 和 control 不丟。
-      //
-      // §Q-PATH-SWITCH-FLUSH: PATH-SWITCH 後寬限期內不丟 video datagram。
-      // 理由：PATH-SWITCH 觸發 IDR，但 IDR frame 的 datagram 和普通
-      // video datagram 格式相同（都是 FLOW_VIDEO）。若 approxVQ 仍高
-      // （舊路徑堆積的 stale P-frame 從 encoder pipeline 持續入隊），
-      // IDR datagram 會被丟棄 → client 永遠收不到 IDR → 影像凍結。
-      if (ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 &&
-          ((quicBackpressured && _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) ||
-           _approxVideoQueueDepth > STALE_STARVE_THRESHOLD)) {
-        _dgramDroppedStale++;
-        // §ABR-QSTALE-FEEDBACK 2026-07-16：server 自己丟掉的 video
-        // datagram = 下行壅塞最直接的證據，回饋 run_abr_aimd（client
-        // 的整幀跳號不發 FEC status，ABR 對這批丟失原本全盲）。
-        _staleDropsForAbr++;
-        _lastStaleDropUs.store(picoquic_current_time(), std::memory_order_release);
-        continue;
       }
 
       int qret;
@@ -1467,6 +1550,20 @@ namespace quic_server {
         int sentCount = 0;
         int targetPath = (bestVideoPath >= 0) ? bestVideoPath : -1;
         constexpr int REINJECT_COPIES = 3;
+        // §Q-REINJECT-CNXQ (ultrareview #6)：reinject 視窗只在真 failover 時打開，
+        // 而那時 _failoverCnxQueue 一定是 true（剛升級／仍是 backup 的路徑
+        // per-path queue 不被排程）。照舊推 per-path 會讓 IDR 三份都卡住、
+        // P-frame 卻走 cnx queue 送到 → client 有 P 沒 IDR。這段期間改推
+        // cnx-level queue（同樣 3 份）。
+        if (_failoverCnxQueue) {
+          for (int rep = 0; rep < REINJECT_COPIES; rep++) {
+            if (picoquic_queue_datagram_frame(_cnx, dg.data.size(), dg.data.data()) == 0) {
+              sentCount++;
+              qret = 0;
+            }
+          }
+          targetPath = -1;
+        }
         if (targetPath >= 0 && _cnx->path[targetPath] != nullptr) {
           for (int rep = 0; rep < REINJECT_COPIES; rep++) {
             int r = picoquic_queue_datagram_frame_on_path(
@@ -1706,7 +1803,14 @@ namespace quic_server {
 
       // Write key
       FILE *fk = fopen(ecKey.c_str(), "wb");
-      if (fk) { PEM_write_PrivateKey(fk, pkey, NULL, NULL, 0, NULL, NULL); fclose(fk); }
+      if (fk) {
+        PEM_write_PrivateKey(fk, pkey, NULL, NULL, 0, NULL, NULL);
+        fclose(fk);
+        // §Q-KEY-PERMS (ultrareview #6)：同 httpcommon.cpp 的 TLS 私鑰，只給擁有者讀寫
+        std::error_code permErr;
+        std::filesystem::permissions(ecKey, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                     std::filesystem::perm_options::replace, permErr);
+      }
       // Write cert
       FILE *fc = fopen(ecCert.c_str(), "wb");
       if (fc) { PEM_write_X509(fc, x); fclose(fc); }
@@ -1750,6 +1854,10 @@ namespace quic_server {
           if (fw) {
             fwrite(s_ticketKey, 1, sizeof(s_ticketKey), fw);
             fclose(fw);
+            // §Q-KEY-PERMS：ticket 加密金鑰同樣只給擁有者讀寫
+            std::error_code permErr;
+            std::filesystem::permissions(ticketKeyFile, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                         std::filesystem::perm_options::replace, permErr);
             BOOST_LOG(info) << "[VIPLE-MPQUIC] Ticket key generated: " << ticketKeyFile;
           } else {
             BOOST_LOG(warning) << "[VIPLE-MPQUIC] Failed to write " << ticketKeyFile
@@ -2036,6 +2144,26 @@ namespace quic_server {
       return;
     }
 
+    // §Q-SOCK-NONBLOCK (ultrareview #6)：所有路徑共用這一個 socket 與一條 IO
+    // 執行緒。阻塞的 sendto 碰上卡住的 Wi-Fi 介面（實測一次可卡 10 s，見
+    // vr_multilink_logic.h）會讓收、drain、其他健康路徑的送出全部停擺 →
+    // client 看到所有路徑同時停滯、failover 失效。改非阻塞：送不出去就丟這
+    // 一包（picoquic 會當遺失重傳），不讓一條壞路徑拖住整個 IO 迴圈。
+    // 收的那邊本來就先 select 再讀，不受影響。
+#ifdef _WIN32
+    {
+      u_long nonBlocking = 1;
+      ioctlsocket(sock, FIONBIO, &nonBlocking);
+    }
+#else
+    {
+      int fl = fcntl(sock, F_GETFL, 0);
+      if (fl >= 0) {
+        fcntl(sock, F_SETFL, fl | O_NONBLOCK);
+      }
+    }
+#endif
+
 #ifdef _WIN32
     // §Q-MP-PKTINFO: 動態載入 WSARecvMsg（Windows 要求透過
     // WSAIoctl 取得函式指標，無法直接呼叫）。
@@ -2234,7 +2362,22 @@ namespace quic_server {
                             << " len=" << sendLen;
           }
         } else {
+#ifdef _WIN32
           int err = WSAGetLastError();
+          const bool wouldBlock = (err == WSAEWOULDBLOCK);
+#else
+          int err = errno;
+          const bool wouldBlock = (err == EWOULDBLOCK || err == EAGAIN);
+#endif
+          if (wouldBlock) {
+            // §Q-SOCK-NONBLOCK：送出緩衝滿（多半是某張網卡卡住）——丟這一包
+            static uint64_t wouldBlockDrops = 0;
+            if ((++wouldBlockDrops & (wouldBlockDrops - 1)) == 0) {  // 1,2,4,8… 次才印
+              BOOST_LOG(warning) << "[VIPLE-MPQUIC] §Q-SOCK-NONBLOCK: sendto would block — dropped "
+                                 << wouldBlockDrops << " packet(s) so far";
+            }
+            continue;
+          }
           BOOST_LOG(error) << "[VIPLE-MPQUIC] sendto failed pkt #"
                            << (totalSent + 1) << " len=" << sendLen
                            << " err=" << err
@@ -2549,7 +2692,7 @@ namespace quic_server {
         break;
       auto session = findSession(cnx);
       if (session) {
-        session->invokeRecvHandler(FLOW_CONTROL, bytes, length); // §Q-RECVHANDLER-FIX
+        session->feedControlStream(bytes, length); // §Q-CTRL-FRAMING
       }
       break;
     }

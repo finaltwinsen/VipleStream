@@ -50,6 +50,10 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 
 ## 各章節待辦補充
 
+### §Q 雲端審查（2026-10-23，PR #4～#7）延後項目
+- **QUIC FEC 不滿 4 片的群組**（審查 #6，nit）：server 的 §5b FEC 每 4 片資料才產生 parity、群組跨幀累積，一幀結尾 1～3 片要等下一幀才有保護（靜態畫面時可能很久）。修法要在幀尾補發不滿群組的 parity，client 需能辨識不滿 4 片的群組＝**兩端線上格式要一起改**，要先規劃相容性（舊 client 對新 server）。
+- **failover 實測**：2.0.18 server 的 §Q-REINJECT-CNXQ／§Q-VIDEOPATH-ID／§Q-SINGLE-SURVIVOR／§Q-GRACE-CAP 還沒用 `scripts/failover_regain_test.ps1` 跑過（要按 UAC）；審查 #5 的 VR 相關修正要戴頭盔驗。
+
 ### §VR 補充（2.0 Steam Frame）
 
 - **§VR-MULTILINK 多連線（2026-10-06 起，預設關閉）**：實測與設計見 `docs/steam_frame_client.md` §8.7、線上格式見

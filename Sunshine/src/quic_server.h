@@ -116,6 +116,11 @@ namespace quic_server {
     // 在鎖內取一份 copy 再於鎖外呼叫，避免 std::function 撕裂讀。
     void invokeRecvHandler(uint8_t flowType, const uint8_t *data, size_t len);
 
+    // §Q-CTRL-FRAMING (ultrareview #6)：stream #0 是位元組流，picoquic 可能把
+    // client 連續寫入的多則訊息合成一次 callback、或把一則切成兩段。依標記
+    // 切成一則一則再交給 handler（IO 執行緒專用）。
+    void feedControlStream(const uint8_t *data, size_t len);
+
     std::vector<SubflowStats> getStats() const;
 
     bool isReady() const;
@@ -139,6 +144,8 @@ namespace quic_server {
     std::atomic<bool> _ready{false};
 
     RecvHandler _recvHandler;
+    std::vector<uint8_t> _ctrlStreamBuf;  // §Q-CTRL-FRAMING：還沒湊滿的那一則（IO 執行緒專用）
+    int purgeVideoFromPath(picoquic_path_t *p);  // §MP-PURGE／§MP-BACKUP-FLIP 共用（IO 執行緒專用）
     const void *_recvHandlerOwner = nullptr; // §F3：_recvHandler 的 owner 標記（僅比對用）
     mutable std::mutex _recvHandlerMutex; // §Q-RECVHANDLER-FIX：保護 _recvHandler / _recvHandlerOwner 跨執行緒讀寫
 
@@ -183,6 +190,10 @@ namespace quic_server {
     // mid-stream diagnostic logging. -2 = uninitialized, -1 = fallback
     // to cnx-level queue (single path), 0+ = picoquic path index.
     int _lastVideoPath = -2;
+    // §Q-VIDEOPATH-ID (ultrareview #6)：_lastVideoPath 是 picoquic path 陣列的
+    // index，picoquic 刪掉較前面的 path 時會壓縮陣列 → index 指到別條或超界。
+    // 另存 unique_path_id，每次 drain 開頭重新換算 index。
+    uint64_t _lastVideoPathId = UINT64_MAX;
 
     // §Q-PATH-SWITCH-STICKY 2026-05-27: bestVideoPath 一旦選定就 sticky，
     // 只在當前路徑不健康時才允許切換。v1.5.163 實測：dwell 時間策略
@@ -345,6 +356,11 @@ namespace quic_server {
     // §Q-PATH-SWITCH-FLUSH 2026-05-27: PATH-SWITCH 後寬限期計數器。
     // 非零期間 §Q-STALE 不丟 video datagram，確保 IDR 通過。
     int _pathSwitchGraceCycles = 0;
+    // §Q-GRACE-CAP (ultrareview #6)：grace 連續生效的起點。換路週期介於 5 s 與
+    // grace 長度之間時，每次都開新 episode 重設 grace → §Q-STALE 永遠停用。
+    // grace 已連續生效超過 GRACE_REARM_MAX_US 時不准再重設，讓它自然倒數到 0
+    //（不強制結束：靜態畫面時 drain 少，單次 grace 本來就可能撐超過 20 s）。
+    uint64_t _graceActiveSinceUs = 0;
 
     // §Q-STALE-SAFETY-VALVE v1.5.181: video stall 偵測計時器。
     // 當 §Q-STALE 持續丟棄 video 超過 3 秒，表示陷入死亡螺旋
