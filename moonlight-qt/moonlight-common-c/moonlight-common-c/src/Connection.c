@@ -1,0 +1,967 @@
+#include "Limelight-internal.h"
+#include "VrMultiLink.h"
+
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#include "PlatformNetIf.h"
+#endif
+
+static int stage = STAGE_NONE;
+static ConnListenerConnectionTerminated originalTerminationCallback;
+static bool alreadyTerminated;
+static PLT_MUTEX termMutex;
+static bool termMutexInitialized = false;
+
+// Common globals
+char* RemoteAddrString;
+char* RtspAddrString;  // VipleStream: RTSP host override for tunnel (NULL = use RemoteAddr)
+struct sockaddr_storage RemoteAddr;
+struct sockaddr_storage LocalAddr;
+SOCKADDR_LEN AddrLen;
+int AppVersionQuad[4];
+STREAM_CONFIGURATION StreamConfig;
+CONNECTION_LISTENER_CALLBACKS ListenerCallbacks;
+DECODER_RENDERER_CALLBACKS VideoCallbacks;
+AUDIO_RENDERER_CALLBACKS AudioCallbacks;
+int NegotiatedVideoFormat;
+volatile bool ConnectionInterrupted;
+bool HighQualitySurroundSupported;
+bool HighQualitySurroundEnabled;
+OPUS_MULTISTREAM_CONFIGURATION NormalQualityOpusConfig;
+OPUS_MULTISTREAM_CONFIGURATION HighQualityOpusConfig;
+int AudioPacketDuration;
+bool AudioEncryptionEnabled;
+bool ReferenceFrameInvalidationSupported;
+int VrFlags;
+uint16_t RtspPortNumber;
+uint16_t ControlPortNumber;
+uint16_t AudioPortNumber;
+uint16_t VideoPortNumber;
+
+// VipleStream: optional UDP port overrides. When non-zero, these replace
+// the values parsed from the RTSP SETUP Transport headers. Used when the
+// client is tunneling UDP through a local proxy bound on an OS-assigned
+// ephemeral port (Windows Hyper-V / winnat can reserve the canonical
+// 47998/47999/48000 range out from under us). Set via
+// LiOverrideUdpPorts before LiStartConnection.
+uint16_t OverrideVideoPort;
+uint16_t OverrideAudioPort;
+uint16_t OverrideControlPort;
+
+void LiOverrideUdpPorts(uint16_t videoPort, uint16_t audioPort, uint16_t controlPort) {
+    OverrideVideoPort = videoPort;
+    OverrideAudioPort = audioPort;
+    OverrideControlPort = controlPort;
+}
+SS_PING AudioPingPayload;
+SS_PING VideoPingPayload;
+uint32_t ControlConnectData;
+uint32_t SunshineFeatureFlags;
+uint32_t EncryptionFeaturesSupported;
+uint32_t EncryptionFeaturesRequested;
+uint32_t EncryptionFeaturesEnabled;
+
+// Connection stages
+static const char* stageNames[STAGE_MAX] = {
+    "none",
+    "platform initialization",
+    "name resolution",
+    "audio stream initialization",
+    "RTSP handshake",
+    "control stream initialization",
+    "video stream initialization",
+    "input stream initialization",
+    "control stream establishment",
+    "video stream establishment",
+    "audio stream establishment",
+    "input stream establishment"
+};
+
+// Get the name of the current stage based on its number
+const char* LiGetStageName(int stage) {
+    return stageNames[stage];
+}
+
+// Interrupt a pending connection attempt. This interruption happens asynchronously
+// so it is not safe to start another connection before LiStartConnection() returns.
+void LiInterruptConnection(void) {
+    // Signal anyone waiting on the global interrupted flag
+    ConnectionInterrupted = true;
+}
+
+// Stop the connection by undoing the step at the current stage and those before it
+void LiStopConnection(void) {
+    // Disable termination callbacks now under lock
+    if (termMutexInitialized) {
+        PltLockMutex(&termMutex);
+    }
+    alreadyTerminated = true;
+    if (termMutexInitialized) {
+        PltUnlockMutex(&termMutex);
+    }
+
+    // Set the interrupted flag
+    LiInterruptConnection();
+
+    if (stage == STAGE_INPUT_STREAM_START) {
+        Limelog("Stopping input stream...");
+        stopInputStream();
+        stage--;
+        Limelog("done\n");
+    }
+    if (stage == STAGE_AUDIO_STREAM_START) {
+        Limelog("Stopping audio stream...");
+        stopAudioStream();
+        stage--;
+        Limelog("done\n");
+    }
+    if (stage == STAGE_VIDEO_STREAM_START) {
+        Limelog("Stopping video stream...");
+        stopVideoStream();
+        stage--;
+        Limelog("done\n");
+    }
+    if (stage == STAGE_CONTROL_STREAM_START) {
+        // §VR-MULTILINK：影像與音訊的接收執行緒到這裡都已經停了
+        vrmlStop();
+        Limelog("Stopping control stream...");
+        stopControlStream();
+        stage--;
+        Limelog("done\n");
+    }
+    if (stage == STAGE_INPUT_STREAM_INIT) {
+        Limelog("Cleaning up input stream...");
+        destroyInputStream();
+        stage--;
+        Limelog("done\n");
+    }
+    if (stage == STAGE_VIDEO_STREAM_INIT) {
+        Limelog("Cleaning up video stream...");
+        destroyVideoStream();
+        stage--;
+        Limelog("done\n");
+    }
+    if (stage == STAGE_CONTROL_STREAM_INIT) {
+        Limelog("Cleaning up control stream...");
+        destroyControlStream();
+        stage--;
+        Limelog("done\n");
+    }
+    if (stage == STAGE_RTSP_HANDSHAKE) {
+#ifdef VIPLE_MPQUIC
+        quicTransportCleanup();
+#endif
+        stage--;
+    }
+    if (stage == STAGE_AUDIO_STREAM_INIT) {
+        Limelog("Cleaning up audio stream...");
+        destroyAudioStream();
+        stage--;
+        Limelog("done\n");
+    }
+    if (stage == STAGE_NAME_RESOLUTION) {
+        // Nothing to do
+        stage--;
+    }
+    if (stage == STAGE_PLATFORM_INIT) {
+        if (termMutexInitialized) {
+            PltDeleteMutex(&termMutex);
+            termMutexInitialized = false;
+        }
+        Limelog("Cleaning up platform...");
+        cleanupPlatform();
+        stage--;
+        Limelog("done\n");
+    }
+    LC_ASSERT(stage == STAGE_NONE);
+    
+    if (RemoteAddrString != NULL) {
+        free(RemoteAddrString);
+        RemoteAddrString = NULL;
+    }
+    if (RtspAddrString != NULL) {
+        free(RtspAddrString);
+        RtspAddrString = NULL;
+    }
+
+    // §VR：連線已拆完，之後誤呼叫的 VR API 一律變成 no-op（不碰已銷毀的 mutex）
+    VrFlags = 0;
+}
+
+static void terminationCallbackThreadFunc(void* context)
+{
+    int errorCode = (int)(intptr_t)context;
+    // Invoke the client's termination callback
+    originalTerminationCallback(errorCode);
+}
+
+// This shim callback runs the client's connectionTerminated() callback on a
+// separate thread. This is neccessary because other internal threads directly
+// invoke this callback. That can result in a deadlock if the client
+// calls LiStopConnection() in the callback when the cleanup code
+// attempts to join the thread that the termination callback (and LiStopConnection)
+// is running on.
+static void ClInternalConnectionTerminated(int errorCode)
+{
+    int err;
+    PLT_THREAD termThread;
+
+    if (termMutexInitialized) {
+        PltLockMutex(&termMutex);
+    }
+
+    // Avoid recursion and issuing multiple callbacks
+    if (alreadyTerminated || ConnectionInterrupted) {
+        if (termMutexInitialized) {
+            PltUnlockMutex(&termMutex);
+        }
+        return;
+    }
+
+    alreadyTerminated = true;
+
+    if (termMutexInitialized) {
+        PltUnlockMutex(&termMutex);
+    }
+
+    // Invoke the termination callback on a separate thread
+    err = PltCreateThread("AsyncTerm", terminationCallbackThreadFunc, (void*)(intptr_t)errorCode, &termThread);
+    if (err != 0) {
+        // Nothing we can safely do here, so we'll just assert on debug builds
+        Limelog("Failed to create termination thread: %d\n", err);
+        LC_ASSERT(err == 0);
+    }
+    else {
+        // Detach the thread since we never wait on it
+        PltDetachThread(&termThread);
+    }
+}
+
+static bool parseRtspPortNumberFromUrl(const char* rtspSessionUrl, uint16_t* port)
+{
+    // If the session URL is not present, we will just use the well known port
+    if (rtspSessionUrl == NULL) {
+        return false;
+    }
+
+    // Pick the last colon in the string to match the port number
+    char* portNumberStart = strrchr(rtspSessionUrl, ':');
+    if (portNumberStart == NULL) {
+        return false;
+    }
+
+    // Skip the colon
+    portNumberStart++;
+
+    // Validate the port number
+    long int rawPort = strtol(portNumberStart, NULL, 10);
+    if (rawPort <= 0 || rawPort > 65535) {
+        return false;
+    }
+
+    *port = (uint16_t)rawPort;
+    return true;
+}
+
+// Starts the connection to the streaming machine
+int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
+    PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
+    void* audioContext, int arFlags) {
+    int err;
+
+    if (drCallbacks != NULL && (drCallbacks->capabilities & CAPABILITY_PULL_RENDERER) && drCallbacks->submitDecodeUnit) {
+        Limelog("CAPABILITY_PULL_RENDERER cannot be set with a submitDecodeUnit callback\n");
+        LC_ASSERT(false);
+        err = -1;
+        goto Cleanup;
+    }
+
+    if (drCallbacks != NULL && (drCallbacks->capabilities & CAPABILITY_PULL_RENDERER) && (drCallbacks->capabilities & CAPABILITY_DIRECT_SUBMIT)) {
+        Limelog("CAPABILITY_PULL_RENDERER and CAPABILITY_DIRECT_SUBMIT cannot be set together\n");
+        LC_ASSERT(false);
+        err = -1;
+        goto Cleanup;
+    }
+
+    if (serverInfo->serverCodecModeSupport == 0) {
+        Limelog("serverCodecModeSupport field in SERVER_INFORMATION must be set!\n");
+        LC_ASSERT(false);
+        err = -1;
+        goto Cleanup;
+    }
+
+    // Extract the appversion from the supplied string
+    if (extractVersionQuadFromString(serverInfo->serverInfoAppVersion,
+                                     AppVersionQuad) < 0) {
+        Limelog("Invalid appversion string: %s\n", serverInfo->serverInfoAppVersion);
+        err = -1;
+        goto Cleanup;
+    }
+
+    // Replace missing callbacks with placeholders
+    fixupMissingCallbacks(&drCallbacks, &arCallbacks, &clCallbacks);
+    memcpy(&VideoCallbacks, drCallbacks, sizeof(VideoCallbacks));
+    memcpy(&AudioCallbacks, arCallbacks, sizeof(AudioCallbacks));
+
+#ifdef LC_DEBUG_RECORD_MODE
+    // Install the pass-through recorder callbacks
+    setRecorderCallbacks(&VideoCallbacks, &AudioCallbacks);
+#endif
+
+    // Hook the termination callback so we can avoid issuing a termination callback
+    // after LiStopConnection() is called.
+    //
+    // Initialize ListenerCallbacks before anything that could call Limelog().
+    originalTerminationCallback = clCallbacks->connectionTerminated;
+    memcpy(&ListenerCallbacks, clCallbacks, sizeof(ListenerCallbacks));
+    ListenerCallbacks.connectionTerminated = ClInternalConnectionTerminated;
+
+    memset(&LocalAddr, 0, sizeof(LocalAddr));
+    NegotiatedVideoFormat = 0;
+    memcpy(&StreamConfig, streamConfig, sizeof(StreamConfig));
+    RemoteAddrString = strdup(serverInfo->address);
+
+    // §VR：每次連線都依 StreamConfig 重設。VR 結構直接以 little-endian 版面
+    // 上線，大端平台不啟用（docs/vr_protocol.md §4）。
+    VrFlags = IS_LITTLE_ENDIAN() ? StreamConfig.vrFlags : 0;
+    if (VrFlags != 0) {
+        if (!(VrFlags & VIPLE_VR_SF_ENABLED)) {
+            // 只有恢復旗標、沒有 ENABLED 是呼叫端錯誤：當成一般 session
+            Limelog("[VIPLE-VR-SESSION] vrFlags=0x%x without ENABLED — ignored\n", StreamConfig.vrFlags);
+            VrFlags = 0;
+        }
+        else {
+            Limelog("[VIPLE-VR-SESSION] VR session: vrFlags=0x%x (recovery=%s)\n",
+                    VrFlags, (VrFlags & VIPLE_VR_SF_RECOVERY_INTRA) ? "intra" : "idr");
+        }
+    }
+    else if (StreamConfig.vrFlags != 0) {
+        Limelog("[VIPLE-VR-SESSION] big-endian platform — VR disabled\n");
+    }
+
+    // The values in RTSP SETUP will be used to populate these.
+    VideoPortNumber = 0;
+    ControlPortNumber = 0;
+    AudioPortNumber = 0;
+
+    // Parse RTSP port number and optional host from RTSP session URL
+    if (!parseRtspPortNumberFromUrl(serverInfo->rtspSessionUrl, &RtspPortNumber)) {
+        // Use the well known port if parsing fails
+        RtspPortNumber = 48010;
+
+        Limelog("RTSP port: %u (RTSP URL parsing failed)\n", RtspPortNumber);
+    }
+    else {
+        Limelog("RTSP port: %u\n", RtspPortNumber);
+    }
+
+    // VipleStream: Parse RTSP host from URL if it differs from server address
+    // This allows RTSP tunnel (rtspenc://127.0.0.1:port) while keeping RemoteAddr for UDP
+    RtspAddrString = NULL;
+    if (serverInfo->rtspSessionUrl) {
+        const char *url = serverInfo->rtspSessionUrl;
+        const char *hostStart = strstr(url, "://");
+        if (hostStart) {
+            hostStart += 3;
+            const char *hostEnd = strrchr(hostStart, ':');
+            if (hostEnd && hostEnd > hostStart) {
+                int hostLen = (int)(hostEnd - hostStart);
+                char hostBuf[256] = {0};
+                if (hostLen < (int)sizeof(hostBuf)) {
+                    memcpy(hostBuf, hostStart, hostLen);
+                    // Only override if RTSP host differs from server address
+                    if (strcmp(hostBuf, serverInfo->address) != 0) {
+                        RtspAddrString = strdup(hostBuf);
+                        Limelog("RTSP host override: %s (tunnel)\n", RtspAddrString);
+                    }
+                }
+            }
+        }
+    }
+
+    alreadyTerminated = false;
+    ConnectionInterrupted = false;
+    
+    // Validate the audio configuration
+    if (MAGIC_BYTE_FROM_AUDIO_CONFIG(StreamConfig.audioConfiguration) != 0xCA ||
+            CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) > AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT) {
+        Limelog("Invalid audio configuration specified\n");
+        err = -1;
+        goto Cleanup;
+    }
+
+    // FEC only works in 16 byte chunks, so we must round down
+    // the given packet size to the nearest multiple of 16.
+    StreamConfig.packetSize -= StreamConfig.packetSize % 16;
+
+    if (StreamConfig.packetSize == 0) {
+        Limelog("Invalid packet size specified\n");
+        err = -1;
+        goto Cleanup;
+    }
+
+    // Height must not be odd or NVENC will fail to initialize
+    if (StreamConfig.height & 0x1) {
+        Limelog("Encoder height must not be odd. Rounding %d to %d\n",
+                StreamConfig.height,
+                StreamConfig.height & ~0x1);
+        StreamConfig.height = StreamConfig.height & ~0x1;
+    }
+
+    // Dimensions over 4096 are only supported with HEVC on NVENC
+    if (!(StreamConfig.supportedVideoFormats & ~VIDEO_FORMAT_MASK_H264) &&
+            (StreamConfig.width > 4096 || StreamConfig.height > 4096)) {
+        Limelog("WARNING: Streaming at resolutions above 4K using H.264 will likely fail! Trying anyway!\n");
+    }
+    // Dimensions over 8192 aren't supported at all (even on Turing)
+    else if (StreamConfig.width > 8192 || StreamConfig.height > 8192) {
+        Limelog("WARNING: Streaming at resolutions above 8K will likely fail! Trying anyway!\n");
+    }
+
+    // Reference frame invalidation doesn't seem to work with resolutions much
+    // higher than 1440p. I haven't figured out a pattern to indicate which
+    // resolutions will work and which won't, but we can at least exclude
+    // 4K from RFI to avoid significant persistent artifacts after frame loss.
+    if (StreamConfig.width == 3840 && StreamConfig.height == 2160 &&
+            (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC) &&
+            !IS_SUNSHINE()) {
+        Limelog("Disabling reference frame invalidation for 4K streaming with GFE\n");
+        VideoCallbacks.capabilities &= ~CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC;
+    }
+    
+    Limelog("Initializing platform...");
+    ListenerCallbacks.stageStarting(STAGE_PLATFORM_INIT);
+    err = initializePlatform();
+    if (err != 0) {
+        Limelog("failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_PLATFORM_INIT, err);
+        goto Cleanup;
+    }
+    if (!termMutexInitialized) {
+        PltCreateMutex(&termMutex);
+        termMutexInitialized = true;
+    }
+    stage++;
+    LC_ASSERT(stage == STAGE_PLATFORM_INIT);
+    ListenerCallbacks.stageComplete(STAGE_PLATFORM_INIT);
+    Limelog("done\n");
+
+    Limelog("Resolving host name...");
+    ListenerCallbacks.stageStarting(STAGE_NAME_RESOLUTION);
+    LC_ASSERT(RtspPortNumber != 0);
+    if (RtspPortNumber != 48010) {
+        // If we have an alternate RTSP port, use that as our test port. The host probably
+        // isn't listening on 47989 or 47984 anyway, since they're using alternate ports.
+        err = resolveHostName(serverInfo->address, AF_UNSPEC, RtspPortNumber, &RemoteAddr, &AddrLen);
+        if (err != 0) {
+            // Sleep for a second and try again. It's possible that we've attempt to connect
+            // before the host has gotten around to listening on the RTSP port. Give it some
+            // time before retrying.
+            PltSleepMs(1000);
+            err = resolveHostName(serverInfo->address, AF_UNSPEC, RtspPortNumber, &RemoteAddr, &AddrLen);
+        }
+    }
+    else {
+        // We use TCP 47984 and 47989 first here because we know those should always be listening
+        // on hosts using the standard ports.
+        //
+        // TCP 48010 is a last resort because:
+        // a) it's not always listening and there's a race between listen() on the host and our connect()
+        // b) it's not used at all by certain host versions which perform RTSP over ENet
+        err = resolveHostName(serverInfo->address, AF_UNSPEC, 47984, &RemoteAddr, &AddrLen);
+        if (err != 0) {
+            err = resolveHostName(serverInfo->address, AF_UNSPEC, 47989, &RemoteAddr, &AddrLen);
+        }
+        if (err != 0) {
+            err = resolveHostName(serverInfo->address, AF_UNSPEC, 48010, &RemoteAddr, &AddrLen);
+        }
+    }
+    if (err != 0) {
+        Limelog("failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_NAME_RESOLUTION, err);
+        goto Cleanup;
+    }
+
+    // Resolve LocalAddr by RemoteAddr.
+    {
+        SOCKADDR_LEN localAddrLen;
+        err = getLocalAddressByUdpConnect(&RemoteAddr, AddrLen, RtspPortNumber, &LocalAddr, &localAddrLen);
+        if (err != 0) {
+            Limelog("failed to resolve local addr: %d\n", err);
+            ListenerCallbacks.stageFailed(STAGE_NAME_RESOLUTION, err);
+            goto Cleanup;
+        }
+        LC_ASSERT(localAddrLen == AddrLen);
+    }
+
+    stage++;
+    LC_ASSERT(stage == STAGE_NAME_RESOLUTION);
+    ListenerCallbacks.stageComplete(STAGE_NAME_RESOLUTION);
+    Limelog("done\n");
+
+    // If STREAM_CFG_AUTO was requested, determine the streamingRemotely value
+    // now that we have resolved the target address and impose the video packet
+    // size cap if required.
+    if (StreamConfig.streamingRemotely == STREAM_CFG_AUTO) {
+        bool isNat64 = isNat64SynthesizedAddress(&RemoteAddr);
+
+        // It's possible to have a NAT64 prefix on a ULA or other private range,
+        // so we must exclude NAT64 addresses from our local address checks.
+        if (!isNat64 && isPrivateNetworkAddress(&RemoteAddr)) {
+            StreamConfig.streamingRemotely = STREAM_CFG_LOCAL;
+        }
+        else {
+            StreamConfig.streamingRemotely = STREAM_CFG_REMOTE;
+
+            if (RemoteAddr.ss_family == AF_INET || isNat64) {
+                // Cap packet size at 1024 for remote IPv4 streaming to avoid fragmentation.
+                Limelog("Packet size capped at 1024 bytes for remote IPv4 streaming\n");
+                StreamConfig.packetSize = 1024;
+            }
+            else {
+                // IPv6 guarantees a minimum MTU of 1280 before fragmentation, so use a higher
+                // packet size cap for remote IPv6 streaming (when not using NAT64 which isn't
+                // end-to-end IPv6 traffic).
+                Limelog("Packet size capped at 1184 bytes for remote IPv6 streaming\n");
+                StreamConfig.packetSize = 1184;
+            }
+        }
+    }
+
+    Limelog("Initializing audio stream...");
+    ListenerCallbacks.stageStarting(STAGE_AUDIO_STREAM_INIT);
+    err = initializeAudioStream();
+    if (err != 0) {
+        Limelog("failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_AUDIO_STREAM_INIT, err);
+        goto Cleanup;
+    }
+    stage++;
+    LC_ASSERT(stage == STAGE_AUDIO_STREAM_INIT);
+    ListenerCallbacks.stageComplete(STAGE_AUDIO_STREAM_INIT);
+    Limelog("done\n");
+
+    Limelog("Starting RTSP handshake...");
+    ListenerCallbacks.stageStarting(STAGE_RTSP_HANDSHAKE);
+    err = performRtspHandshake(serverInfo);
+    if (err != 0) {
+        Limelog("failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_RTSP_HANDSHAKE, err);
+        goto Cleanup;
+    }
+    stage++;
+    LC_ASSERT(stage == STAGE_RTSP_HANDSHAKE);
+    ListenerCallbacks.stageComplete(STAGE_RTSP_HANDSHAKE);
+    Limelog("done\n");
+
+#ifdef VIPLE_MPQUIC
+    // Initialize QUIC transport after RTSP handshake (which negotiates the QUIC port)
+    if (StreamConfig.useQuicTransport) {
+        Limelog("[VIPLE-MPQUIC] Initializing QUIC transport...\n");
+        if (quicTransportInit() == 0) {
+            quicSetCongestionAlgo(StreamConfig.quicCongestion);
+            QUIC_CONNECT_PARAMS qparams;
+            memset(&qparams, 0, sizeof(qparams));
+            memcpy(&qparams.remoteAddr, &RemoteAddr, AddrLen);
+            qparams.remoteAddrLen = AddrLen;
+            qparams.sni = RemoteAddrString;
+            qparams.quicPort = (unsigned short)StreamConfig.quicPort;
+
+            if (quicConnect(&qparams) == 0) {
+                // §Q-REVIEW-P2 fix (dev/cli-quic-linux): split subflow
+                // setup into two phases around the TLS handshake.
+                //
+                //   Phase A — BEFORE handshake (this block):
+                //     Add the FIRST matching local interface as the
+                //     initial subflow.  quicAddSubflow's first call
+                //     binds path 0 (cnx's initial path) and does NOT
+                //     call picoquic_probe_new_path, so no crypto
+                //     state is required.  Without this, QuicIO has no
+                //     socket to send the Client Hello on and the
+                //     handshake stalls in picoquic_state_client_init
+                //     forever.
+                //
+                //   Phase B — AFTER quicWaitReady() returns 0:
+                //     Add the remaining interfaces as additional
+                //     paths via picoquic_probe_new_path.  Those probes
+                //     fire packets immediately, and the AEAD context
+                //     for the path doesn't exist until the connection
+                //     reaches picoquic_state_ready — which is exactly
+                //     the segfault the original §Q-REVIEW-P2 comment
+                //     warned about.
+                //
+                //   The 5000 ms ceiling covers LAN (~30-60 ms) + WAN
+                //   (~150-500 ms) + Tailscale derp relay (1-3 s observed),
+                //   with headroom for slow Sunshine hosts.
+                int serverFamily = RemoteAddr.ss_family;
+                LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
+                int ifCount = lcEnumNetInterfaces(interfaces, LC_NETIF_MAX_COUNT);
+
+                // §SINGLE-INST-NET diag: dump all enumerated interfaces
+                Limelog("[VIPLE-MPQUIC] Enumerated %d network interfaces:\n", ifCount);
+                for (int i = 0; i < ifCount; i++) {
+                    char addrStr[64] = "?";
+                    if (interfaces[i].family == AF_INET) {
+                        struct sockaddr_in* sa4 = (struct sockaddr_in*)&interfaces[i].addr;
+                        inet_ntop(AF_INET, &sa4->sin_addr, addrStr, sizeof(addrStr));
+                    }
+                    Limelog("[VIPLE-MPQUIC]   if=%d '%s' type=%s(%d) family=%s addr=%s up=%d\n",
+                            interfaces[i].index, interfaces[i].name,
+                            lcNetIfTypeName(interfaces[i].type), interfaces[i].type,
+                            interfaces[i].family == AF_INET ? "IPv4" : "IPv6",
+                            addrStr, (int)interfaces[i].up);
+                }
+
+                // §Q-RT-PREFER 2026-05-30 — Route-table-preferred interface.
+                //
+                // LocalAddr was resolved at STAGE_NAME_RESOLUTION via
+                // getLocalAddressByUdpConnect(), which does unbound UDP
+                // connect()+getsockname() to ask the kernel: "which local
+                // IP would you use to reach RemoteAddr?"  Match that IP
+                // against the enumerated interfaces to find the one the
+                // kernel actually prefers.  If found, try it first as
+                // path 0 — this avoids the "WiFi before Tailscale"
+                // misordering that causes handshake stalls when the server
+                // is on a VPN overlay (100.x CGNAT) but WiFi is enumerated
+                // first.
+                int routePreferredIdx = -1;
+                for (int i = 0; i < ifCount; i++) {
+                    if (!interfaces[i].up) continue;
+                    if (interfaces[i].family != serverFamily) continue;
+                    // Compare only IP, ignore port (LocalAddr has RTSP port set)
+                    if (serverFamily == AF_INET) {
+                        struct sockaddr_in* la = (struct sockaddr_in*)&LocalAddr;
+                        struct sockaddr_in* ia = (struct sockaddr_in*)&interfaces[i].addr;
+                        if (la->sin_addr.s_addr == ia->sin_addr.s_addr) {
+                            routePreferredIdx = i;
+                            break;
+                        }
+                    } else if (serverFamily == AF_INET6) {
+                        struct sockaddr_in6* la = (struct sockaddr_in6*)&LocalAddr;
+                        struct sockaddr_in6* ia = (struct sockaddr_in6*)&interfaces[i].addr;
+                        if (memcmp(&la->sin6_addr, &ia->sin6_addr, 16) == 0) {
+                            routePreferredIdx = i;
+                            break;
+                        }
+                    }
+                }
+                Limelog("[VIPLE-MPQUIC] Route-preferred interface: %s\n",
+                        routePreferredIdx >= 0
+                            ? interfaces[routePreferredIdx].name
+                            : "(none, using first-match)");
+
+                // §Q-MP-REACH 2026-05-23 — Pick the interface that can
+                // actually reach the peer.  Skip virtual/unknown adapters
+                // (Hyper-V, UsbNcm, VMware) for initial path — they typically
+                // can't reach the LAN peer and waste probe time.
+                //
+                // Two-pass selection:
+                //   Pass 1: Try the route-preferred interface (§Q-RT-PREFER)
+                //   Pass 2: Fallback to first-match scan (original behavior)
+                int addedInitial = 0;
+                int initialIfIdx = -1;
+
+                // Pass 1: Route-preferred interface
+                if (routePreferredIdx >= 0) {
+                    int rp = routePreferredIdx;
+                    if (interfaces[rp].up &&
+                        interfaces[rp].type != LC_NETIF_TYPE_LOOPBACK &&
+                        interfaces[rp].type != LC_NETIF_TYPE_VIRTUAL &&
+                        interfaces[rp].type != LC_NETIF_TYPE_UNKNOWN &&
+                        interfaces[rp].family == serverFamily) {
+                        if (quicAddSubflow(interfaces[rp].index,
+                                           interfaces[rp].name,
+                                           interfaces[rp].type,
+                                           &interfaces[rp].addr,
+                                           interfaces[rp].addrLen) >= 0) {
+                            initialIfIdx = rp;
+                            addedInitial = 1;
+                            Limelog("[VIPLE-MPQUIC] Initial subflow bound on "
+                                    "route-preferred if %d '%s', waiting for handshake\n",
+                                    interfaces[rp].index, interfaces[rp].name);
+                        } else {
+                            Limelog("[VIPLE-MPQUIC] Route-preferred if %d '%s' "
+                                    "failed subflow add; trying other interfaces\n",
+                                    interfaces[rp].index, interfaces[rp].name);
+                        }
+                    }
+                }
+
+                // Pass 2: Fallback — first-match scan (original behavior)
+                if (!addedInitial) {
+                    for (int i = 0; i < ifCount; i++) {
+                        if (i == routePreferredIdx)
+                            continue;  // already tried in Pass 1
+                        if (!interfaces[i].up)
+                            continue;
+                        if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
+                            continue;
+                        if (interfaces[i].type == LC_NETIF_TYPE_VIRTUAL ||
+                            interfaces[i].type == LC_NETIF_TYPE_UNKNOWN)
+                            continue;
+                        if (interfaces[i].family != serverFamily)
+                            continue;
+                        if (quicAddSubflow(interfaces[i].index,
+                                           interfaces[i].name,
+                                           interfaces[i].type,
+                                           &interfaces[i].addr,
+                                           interfaces[i].addrLen) >= 0) {
+                            initialIfIdx = i;
+                            addedInitial = 1;
+                            Limelog("[VIPLE-MPQUIC] Initial subflow bound on "
+                                    "if %d (first-match fallback), waiting for handshake\n",
+                                    interfaces[i].index);
+                            break;
+                        }
+                        // Probe failed (no route to peer) — try next interface.
+                    }
+                }
+                if (!addedInitial) {
+                    Limelog("[VIPLE-MPQUIC] No usable local interface, falling back to UDP\n");
+                    StreamConfig.useQuicTransport = 0;
+                    quicDisconnect(); // §Q-FALLBACK-CLEANUP-FIX (review)
+                } else if (quicWaitReady(5000) != 0) {
+                    Limelog("[VIPLE-MPQUIC] QUIC handshake didn't complete in 5000ms, falling back to UDP\n");
+                    StreamConfig.useQuicTransport = 0;
+                    // §Q-FALLBACK-CLEANUP-FIX (review)：必須關閉背景 QUIC 連線。
+                    // 否則 IO thread 續跑、handshake 可能 5-30s 後才完成 →
+                    // quicIsConnected() 變 true 但 video/audio 已走 UDP，server
+                    // 端看到健康 QUIC session 後把 video 路由進沒人消費的
+                    // datagram → 黑畫面；且 ControlStream 的 R.3 閘門被誤觸發。
+                    quicDisconnect();
+                } else {
+                    Limelog("[VIPLE-MPQUIC] QUIC handshake complete, adding additional subflows\n");
+                    int added = 1;  // initial subflow already counted
+
+                    // §MP-ADV 2026-05-24 — 解析所有 alt peer（伺服器廣告
+                    // 的介面 IP + 客戶端探測到的位址）。每個 alt peer 都
+                    // 會在 Phase B 迴圈中與每個客戶端介面嘗試配對。
+                    struct sockaddr_storage altPeers[QUIC_MAX_ALT_PEERS];
+                    SOCKADDR_LEN altPeerLens[QUIC_MAX_ALT_PEERS];
+                    int altPeerCount = 0;
+
+                    for (int ap = 0; ap < StreamConfig.quicAltPeerCount && ap < QUIC_MAX_ALT_PEERS; ap++) {
+                        const char* apStr = StreamConfig.quicAltPeers[ap];
+                        if (apStr[0] == '\0') continue;
+                        struct sockaddr_in* sa4 = (struct sockaddr_in*)&altPeers[altPeerCount];
+                        memset(sa4, 0, sizeof(struct sockaddr_in));
+                        if (inet_pton(AF_INET, apStr, &sa4->sin_addr) == 1) {
+                            sa4->sin_family = AF_INET;
+                            sa4->sin_port = htons((unsigned short)StreamConfig.quicPort);
+                            altPeerLens[altPeerCount] = (SOCKADDR_LEN)sizeof(struct sockaddr_in);
+                            Limelog("[VIPLE-MPQUIC] Alt peer[%d]: %s:%u\n",
+                                    altPeerCount, apStr, (unsigned)StreamConfig.quicPort);
+                            altPeerCount++;
+                        }
+                    }
+
+                    // 儲存到全域狀態，供未來 quicRecheckPaths 動態路徑管理用
+                    if (altPeerCount > 0) {
+                        quicSetAltPeers(altPeers, altPeerLens, altPeerCount);
+                    }
+
+                    for (int i = 0; i < ifCount; i++) {
+                        if (i == initialIfIdx)
+                            continue;  // already added as path 0
+                        if (!interfaces[i].up)
+                            continue;
+                        if (interfaces[i].type == LC_NETIF_TYPE_LOOPBACK)
+                            continue;
+                        // §SINGLE-INST-NET: skip virtual/unknown adapters in
+                        // Phase B — they create dead paths that waste picoquic
+                        // probes and can interfere with the initial data flow.
+                        if (interfaces[i].type == LC_NETIF_TYPE_VIRTUAL ||
+                            interfaces[i].type == LC_NETIF_TYPE_UNKNOWN) {
+                            Limelog("[VIPLE-MPQUIC] Skipping if %d '%s' for multipath (type=%s)\n",
+                                    interfaces[i].index, interfaces[i].name,
+                                    lcNetIfTypeName(interfaces[i].type));
+                            continue;
+                        }
+                        if (interfaces[i].family != serverFamily)
+                            continue;
+                        // §Q-MP-ALT-PEER 2026-05-24 — Try BOTH primary
+                        // AND alt endpoint for each interface.  UsbNcm
+                        // (USB tethering) has a default route through the
+                        // phone, so UDP connect() passes for ANY dest —
+                        // the old "primary fails → try alt" fallback never
+                        // triggers.  By trying both we cover:
+                        //   • Phone on LAN WiFi → primary peer works
+                        //   • Phone on cellular → alt peer (Tailscale) works
+                        // Each attempt creates a separate socket (bound to
+                        // the same local addr, different ephemeral port) and
+                        // a separate picoquic path.  picoquic validates
+                        // which paths are alive; dead ones get marked
+                        // inactive without affecting live paths.
+                        //
+                        // §MP-ONLINK：server 有位址和這張網卡同子網路時只配那一個。
+                        // 其他組合在 Linux（weak host、SO_BINDTODEVICE 的 on-link
+                        // 退路）會變成不對稱或單向的死路，還會吃光 picoquic 的
+                        // path ID，讓真正的專用鏈路（Steam Frame 適配器 wlanap ↔
+                        // host 10.35.78.x）落得 PATH_ID_BLOCKED。
+                        int onlink = quicOnLinkAltPeerIndex(&interfaces[i].addr,
+                                                            interfaces[i].prefixLen);
+                        if (onlink != -1) {
+                            SOCKADDR_LEN olLen = 0;
+                            const struct sockaddr_storage* ol =
+                                (onlink >= 0) ? quicGetAltPeer(onlink, &olLen) : NULL;
+                            int rc3 = quicAddSubflowEx(interfaces[i].index,
+                                                       interfaces[i].name,
+                                                       interfaces[i].type,
+                                                       &interfaces[i].addr,
+                                                       interfaces[i].addrLen,
+                                                       ol, olLen);
+                            Limelog("[VIPLE-MPQUIC] §MP-ONLINK: if %d '%s' /%d shares subnet with "
+                                    "peer %d (-2=primary) — pairing only that peer (%s)\n",
+                                    interfaces[i].index, interfaces[i].name,
+                                    interfaces[i].prefixLen, onlink,
+                                    rc3 >= 0 ? "added" : "failed");
+                            if (rc3 >= 0)
+                                added++;
+                            continue;
+                        }
+                        int rc = quicAddSubflow(interfaces[i].index,
+                                                interfaces[i].name,
+                                                interfaces[i].type,
+                                                &interfaces[i].addr,
+                                                interfaces[i].addrLen);
+                        if (rc >= 0) {
+                            added++;
+                        }
+                        // §MP-ADV: 嘗試所有 alt peer（不只一個）
+                        for (int ap = 0; ap < altPeerCount; ap++) {
+                            int rc2 = quicAddSubflowEx(interfaces[i].index,
+                                                       interfaces[i].name,
+                                                       interfaces[i].type,
+                                                       &interfaces[i].addr,
+                                                       interfaces[i].addrLen,
+                                                       &altPeers[ap], altPeerLens[ap]);
+                            if (rc2 >= 0) {
+                                Limelog("[VIPLE-MPQUIC] Subflow on if %d joined via alt peer[%d]\n",
+                                        interfaces[i].index, ap);
+                                added++;
+                            }
+                        }
+                    }
+                    Limelog("[VIPLE-MPQUIC] QUIC connected with %d subflow(s) (family=%s)\n",
+                            added, serverFamily == AF_INET6 ? "IPv6" : "IPv4");
+                }
+            } else {
+                Limelog("[VIPLE-MPQUIC] QUIC connect failed, falling back to UDP\n");
+                StreamConfig.useQuicTransport = 0;
+                quicDisconnect(); // §Q-FALLBACK-CLEANUP-FIX：idempotent，確保無殘留 cnx
+            }
+        } else {
+            Limelog("[VIPLE-MPQUIC] QUIC init failed, falling back to UDP\n");
+            StreamConfig.useQuicTransport = 0;
+        }
+    }
+#endif
+
+    Limelog("Initializing control stream...");
+    ListenerCallbacks.stageStarting(STAGE_CONTROL_STREAM_INIT);
+    err = initializeControlStream();
+    if (err != 0) {
+        Limelog("failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_CONTROL_STREAM_INIT, err);
+        goto Cleanup;
+    }
+    stage++;
+    LC_ASSERT(stage == STAGE_CONTROL_STREAM_INIT);
+    ListenerCallbacks.stageComplete(STAGE_CONTROL_STREAM_INIT);
+    Limelog("done\n");
+
+    Limelog("Initializing video stream...");
+    ListenerCallbacks.stageStarting(STAGE_VIDEO_STREAM_INIT);
+    initializeVideoStream();
+    stage++;
+    LC_ASSERT(stage == STAGE_VIDEO_STREAM_INIT);
+    ListenerCallbacks.stageComplete(STAGE_VIDEO_STREAM_INIT);
+    Limelog("done\n");
+
+    Limelog("Initializing input stream...");
+    ListenerCallbacks.stageStarting(STAGE_INPUT_STREAM_INIT);
+    initializeInputStream();
+    stage++;
+    LC_ASSERT(stage == STAGE_INPUT_STREAM_INIT);
+    ListenerCallbacks.stageComplete(STAGE_INPUT_STREAM_INIT);
+    Limelog("done\n");
+
+    Limelog("Starting control stream...");
+    ListenerCallbacks.stageStarting(STAGE_CONTROL_STREAM_START);
+    err = startControlStream();
+    if (err != 0) {
+        Limelog("failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_CONTROL_STREAM_START, err);
+        goto Cleanup;
+    }
+    stage++;
+    LC_ASSERT(stage == STAGE_CONTROL_STREAM_START);
+    ListenerCallbacks.stageComplete(STAGE_CONTROL_STREAM_START);
+    Limelog("done\n");
+
+    // §VR-MULTILINK：控制通道連上之後、影像接收執行緒啟動之前，把每張網卡的連線建好並通知 server。
+    // 沒協商多連線（或只找得到不能用的位址）時回 0，後面完全走原本的單一路徑。
+    if (vrmlPrepare() > 0) {
+        vrmlStart();
+    }
+
+    Limelog("Starting video stream...");
+    ListenerCallbacks.stageStarting(STAGE_VIDEO_STREAM_START);
+    err = startVideoStream(renderContext, drFlags);
+    if (err != 0) {
+        Limelog("Video stream start failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_VIDEO_STREAM_START, err);
+        goto Cleanup;
+    }
+    stage++;
+    LC_ASSERT(stage == STAGE_VIDEO_STREAM_START);
+    ListenerCallbacks.stageComplete(STAGE_VIDEO_STREAM_START);
+    Limelog("done\n");
+
+    Limelog("Starting audio stream...");
+    ListenerCallbacks.stageStarting(STAGE_AUDIO_STREAM_START);
+    err = startAudioStream(audioContext, arFlags);
+    if (err != 0) {
+        Limelog("Audio stream start failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_AUDIO_STREAM_START, err);
+        goto Cleanup;
+    }
+    stage++;
+    LC_ASSERT(stage == STAGE_AUDIO_STREAM_START);
+    ListenerCallbacks.stageComplete(STAGE_AUDIO_STREAM_START);
+    Limelog("done\n");
+
+    Limelog("Starting input stream...");
+    ListenerCallbacks.stageStarting(STAGE_INPUT_STREAM_START);
+    err = startInputStream();
+    if (err != 0) {
+        Limelog("Input stream start failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_INPUT_STREAM_START, err);
+        goto Cleanup;
+    }
+    stage++;
+    LC_ASSERT(stage == STAGE_INPUT_STREAM_START);
+    ListenerCallbacks.stageComplete(STAGE_INPUT_STREAM_START);
+    Limelog("done\n");
+    
+    // Wiggle the mouse a bit to wake the display up
+    LiSendMouseMoveEvent(1, 1);
+    PltSleepMs(10);
+    LiSendMouseMoveEvent(-1, -1);
+    PltSleepMs(10);
+
+    ListenerCallbacks.connectionStarted();
+
+Cleanup:
+    if (err != 0) {
+        // Undo any work we've done here before failing
+        LiStopConnection();
+    }
+    return err;
+}
+
+const char* LiGetLaunchUrlQueryParameters(void) {
+    // v0 = Video encryption and control stream encryption v2
+    // v1 = RTSP encryption
+    return "&corever=1";
+}
