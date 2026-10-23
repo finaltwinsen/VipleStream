@@ -937,10 +937,9 @@ void enterLowLatencyMode(void) {
     timeBeginPeriod(1);
 
     // Load wlanapi.dll dynamically using secure search path to prevent DLL hijacking (CWE-427).
+    // 不退回 LoadLibraryA：預設搜尋順序含程式目錄與工作目錄，等於把上面的防護
+    // 拿掉（ultrareview #4）。System32 沒有 wlanapi.dll 就當不支援。
     WlanApiLibraryHandle = LoadLibraryExA("wlanapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (WlanApiLibraryHandle == NULL) {
-        WlanApiLibraryHandle = LoadLibraryA("wlanapi.dll");
-    }
     if (WlanApiLibraryHandle == NULL) {
         Limelog("WLANAPI is not supported on this OS\n");
         return;

@@ -145,6 +145,9 @@ typedef struct _QUIC_SUBFLOW {
     unsigned int icmpRttMs;
     // 若為 true，path_available 不升級此路徑（維持 backup failover）
     bool keepAsStandby;
+    // §Q-DYN-STANDBY-RECOVER (ultrareview #4)：這次 standby 是 §Q-MP-DYN-STANDBY
+    // 因 RTT 短暫超標降的（只有這種才走 RTT 滯後恢復）；設成 available 時清掉。
+    bool dynRttStandby;
     // §Q-PATH-RECOVERY-STANDBY 2026-05-27: 恢復的路徑以 standby 加入，
     // 設寬限期（5 秒）讓 cwnd warm up，防止 server 端 bestVideoPath
     // 立即切回低 RTT 但 cwnd 冷的恢復路徑導致震盪。
@@ -269,6 +272,11 @@ typedef struct _QUIC_TRANSPORT_CTX {
     int breakerTripCount;
     int lastBreakerIf;       // -1 = 尚無跳閘紀錄
     uint64_t lastBreakerTripTime;
+    // §Q-BREAKER-FORGIVE-PROMOTE (ultrareview #4)：只記「真的 REGAIN 升回
+    // available」的那一次。lastRegainTime 也被 §Q-REVIVE-STANDBY 蓋章（revive
+    // 進 standby、還沒載過流量），拿它判 forgiveness 會在 revive 60 s 後就大赦。
+    int lastPromoteRegainIf; // -1 = 尚無
+    uint64_t lastPromoteRegainTime;
 
     // §Q-FAILOVER-SETTLED (Fix A6)：failover 承載者連續健康的起算時刻。
     // 連續健康 30s → failoverPromotedSlot=-1 宣告新常態（不切路徑）。
@@ -456,6 +464,8 @@ static int  quicFecGapStillCompletable(uint16_t startSeq, int count,
 // 漏掉的直呼叫會讓快取 stale，§5c 可能跳過必要的重設。
 // 呼叫端必須持 picoquicMutex（與原本直呼叫的前提相同）。
 static int quicSetPathStatusTracked(QUIC_SUBFLOW* sf, picoquic_path_status_enum st) {
+    if (st == picoquic_path_status_available)
+        sf->dynRttStandby = false;  // §Q-DYN-STANDBY-RECOVER
     uint8_t plus1 = (uint8_t)(st + 1);
     if (sf->lastSetStatusPlus1 == plus1)
         return 0;
@@ -492,6 +502,7 @@ int quicTransportInit(void) {
     g_ctx.failoverPromotedSlot = -1; // §Q-MP-FAILBACK: 無 failover 進行中
     g_ctx.lastRegainIf = -1;         // §Q-STANDBY-REGAIN: 尚無 regain 紀錄
     g_ctx.lastBreakerIf = -1;        // §Q-BREAKER-ESC: 尚無跳閘紀錄
+    g_ctx.lastPromoteRegainIf = -1;  // §Q-BREAKER-FORGIVE-PROMOTE
 
     // Default scheduler per flow type
     g_ctx.scheduler[0] = QUIC_SCHED_AUTO;
@@ -1013,8 +1024,83 @@ static unsigned int quicIcmpProbeReachable(
             (dst->sin_addr.s_addr >> 24) & 0xFF,
             timeoutMs);
     return 0;  // 失敗
+#elif defined(__linux__)
+    // §Q-ICMP-LINUX (ultrareview #4)：Linux／Android（含 Steam Frame）以前
+    // 一律回 1，REGAIN 存活章、INACTIVE-REVIVE「ICMP 通兩次」與 Phase B 的
+    // 可達性／RTT standby 判斷在這些平台全部形同虛設——介面沒斷但到不了
+    // server 的路徑照樣被升回 available。改用免 root 的 ICMP datagram socket
+    // （net.ipv4.ping_group_range；kernel 填 id 與 checksum）。開不了 socket
+    // （ping_group_range 不含本使用者）才退回舊行為「不擋、RTT=1」。
+    // 只有「kernel 明確說到不了」（送出就回 ENETUNREACH 等）才判失敗；
+    // 單純收不到回應仍當可達——Windows host 預設防火牆不回 echo（實測 .226
+    // 區網 ping 全丟、QUIC 照通），逾時就擋會把能通的路徑全部拒掉。
+    if (localAddr->ss_family != AF_INET || peerAddr->ss_family != AF_INET)
+        return 1;
+
+    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    if (fd < 0) {
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            Limelog("[VIPLE-MPQUIC] ICMP datagram socket unavailable (errno %d); "
+                    "reachability probe skipped\n", errno);
+        }
+        return 1;
+    }
+    struct sockaddr_in src = *(const struct sockaddr_in*)localAddr;
+    src.sin_port = 0;
+    if (bind(fd, (const struct sockaddr*)&src, sizeof(src)) != 0) {
+        close(fd);
+        return 1;
+    }
+    static uint16_t icmpSeq = 0;
+    uint16_t seq = ++icmpSeq;
+    unsigned char req[16] = { 8 /* echo request */, 0 };
+    req[6] = (unsigned char)(seq >> 8);
+    req[7] = (unsigned char)(seq & 0xFF);
+    memcpy(req + 8, "VIPLEPRB", 8);
+    const struct sockaddr_in* dst = (const struct sockaddr_in*)peerAddr;
+    uint64_t t0 = PltGetMillis();
+    unsigned int rtt = 0;
+    bool hardFail = false;
+    if (sendto(fd, (const char*)req, sizeof(req), 0,
+               (const struct sockaddr*)dst, sizeof(*dst)) != (ssize_t)sizeof(req)) {
+        int e = errno;
+        hardFail = (e == ENETUNREACH || e == EHOSTUNREACH || e == ENETDOWN ||
+                    e == EADDRNOTAVAIL);
+    }
+    else {
+        for (;;) {
+            uint64_t el = PltGetMillis() - t0;
+            if (el >= timeoutMs)
+                break;
+            struct pollfd pfd = { fd, POLLIN, 0 };
+            if (poll(&pfd, 1, (int)(timeoutMs - el)) <= 0)
+                break;
+            unsigned char rep[64];
+            ssize_t n = recv(fd, (char*)rep, sizeof(rep), 0);
+            // datagram ICMP socket 收到的是不含 IP 標頭的 ICMP 訊息
+            if (n >= 8 && rep[0] == 0 /* echo reply */ &&
+                rep[6] == req[6] && rep[7] == req[7]) {
+                rtt = (unsigned int)(PltGetMillis() - t0);
+                if (rtt == 0) rtt = 1;  // 0 保留給失敗
+                break;
+            }
+        }
+    }
+    close(fd);
+    Limelog("[VIPLE-MPQUIC] ICMP probe %s: %u.%u.%u.%u -> %u.%u.%u.%u (RTT=%u ms, timeout=%u ms)\n",
+            rtt ? "OK" : (hardFail ? "FAILED" : "no reply (treated as reachable)"),
+            (src.sin_addr.s_addr) & 0xFF, (src.sin_addr.s_addr >> 8) & 0xFF,
+            (src.sin_addr.s_addr >> 16) & 0xFF, (src.sin_addr.s_addr >> 24) & 0xFF,
+            (dst->sin_addr.s_addr) & 0xFF, (dst->sin_addr.s_addr >> 8) & 0xFF,
+            (dst->sin_addr.s_addr >> 16) & 0xFF, (dst->sin_addr.s_addr >> 24) & 0xFF,
+            rtt, timeoutMs);
+    if (rtt == 0 && !hardFail)
+        return 1;  // 不知道：照舊放行、假 RTT=1
+    return rtt;
 #else
-    // Linux/macOS: 暫不實作 ICMP probe，預設允許，假 RTT=1ms
+    // macOS: 暫不實作 ICMP probe，預設允許，假 RTT=1ms
     (void)localAddr; (void)peerAddr; (void)timeoutMs;
     return 1;
 #endif
@@ -1301,6 +1387,12 @@ int quicAddSubflowEx(int interfaceIndex,
             Limelog("[VIPLE-MPQUIC] probe_new_path failed (%d) for if %d\n",
                     ret, interfaceIndex);
             closeSocket(sock);
+            // §Q-PROBE-FAIL-SLOT (ultrareview #4)：回收的死 slot 已被上面
+            // memset 成「活的」並指向剛關掉的 socket；不還原的話 IO thread
+            // 每輪把失效 handle 放進 select()，select 直接失敗 → 所有路徑都收
+            // 不到封包。標回 deleted＋INVALID_SOCKET，slot 保持可回收。
+            sf->sock = INVALID_SOCKET;
+            sf->picoquicDeleted = true;
             PltUnlockMutex(&g_ctx.picoquicMutex);
             return -1;
         }
@@ -1802,9 +1894,11 @@ static void quicMaybeRegainStandby(QUIC_SUBFLOW* sf, int slot, uint64_t now) {
     // 滿 flap 視窗才全赦。沒有 lastRegainTime > lastBreakerTripTime 這個
     // 條件，斷路期間沒有任何 regain、lastRegainTime 陳舊，會被視窗條件
     // 誤當「存活滿視窗」而立刻大赦。
-    if (g_ctx.breakerTripCount > 0 && g_ctx.lastRegainTime > 0 &&
-        g_ctx.lastRegainTime > g_ctx.lastBreakerTripTime &&
-        (now - g_ctx.lastRegainTime) >
+    // §Q-BREAKER-FORGIVE-PROMOTE：只認跳閘介面本身的真 REGAIN 升級。
+    if (g_ctx.breakerTripCount > 0 && g_ctx.lastPromoteRegainTime > 0 &&
+        g_ctx.lastPromoteRegainIf == g_ctx.lastBreakerIf &&
+        g_ctx.lastPromoteRegainTime > g_ctx.lastBreakerTripTime &&
+        (now - g_ctx.lastPromoteRegainTime) >
             (uint64_t)REGAIN_FLAP_WINDOW_S * 1000000) {
         Limelog("[VIPLE-MPQUIC] §Q-BREAKER-ESC: if %d survived full flap "
                 "window after breaker — forgiving trip history\n",
@@ -1889,6 +1983,8 @@ static void quicMaybeRegainStandby(QUIC_SUBFLOW* sf, int slot, uint64_t now) {
     g_ctx.failoverPromotedSlot = -1;
     g_ctx.lastRegainTime = now;
     g_ctx.lastRegainIf = sf->interfaceIndex;
+    g_ctx.lastPromoteRegainTime = now;
+    g_ctx.lastPromoteRegainIf = sf->interfaceIndex;
 
     Limelog("[VIPLE-MPQUIC] §Q-STANDBY-REGAIN: subflow %d (if %d, slot %d, "
             "%s, RTT=%.1fms) promoted after healthy dwell — demoted %d "
@@ -1902,6 +1998,51 @@ static void quicMaybeRegainStandby(QUIC_SUBFLOW* sf, int slot, uint64_t now) {
         g_ctx.failoverCallback(sf->id, sf->interfaceIndex,
                                true, g_ctx.failoverContext);
     }
+}
+
+// §Q-DYN-STANDBY-RECOVER (ultrareview #4)：§Q-MP-DYN-STANDBY 因 RTT 超標降成
+// standby 的路徑，RTT 降回 best + 一半門檻內就重新 available。原本這段寫在
+// 健康檢查後段，但 active 的 standby 路徑在前面就 continue 了、到不了 →
+// 同等級路徑（兩張乙太網路、Wi-Fi 配 Wi-Fi）一次 RTT 尖峰就整場卡 standby。
+// 回傳 true＝已升回。
+static bool quicDynStandbyTryRecover(QUIC_SUBFLOW* sf, int i, uint64_t now) {
+    if (!sf->dynRttStandby || !sf->active || sf->rttMs <= 0 || i == 0)
+        return false;
+    float bestRttMs = -1.0f;
+    for (int j = 0; j < g_ctx.subflowCount; j++) {
+        QUIC_SUBFLOW* best = &g_ctx.subflows[j];
+        if (j != i && best->active && !best->keepAsStandby &&
+            !best->picoquicDeleted && best->rttMs > 0 &&
+            best->consecutiveTimeouts == 0 &&
+            best->lastRecvTime > 0 &&
+            (now - best->lastRecvTime) < 2000000) {
+            if (bestRttMs < 0 || best->rttMs < bestRttMs)
+                bestRttMs = best->rttMs;
+        }
+    }
+    if (bestRttMs <= 0)
+        return false;
+    float excess = sf->rttMs - bestRttMs;
+    if (excess > ((float)DYN_STANDBY_RTT_EXCESS_MS / 2.0f))
+        return false;
+    // §Q-MP-WIFI-STANDBY guard v1.5.179: WiFi 在 Ethernet primary 仍活躍時不 promote。
+    if (sf->type == LC_NETIF_TYPE_WIFI &&
+        g_ctx.subflowCount > 0 &&
+        g_ctx.subflows[0].type == LC_NETIF_TYPE_ETHERNET &&
+        g_ctx.subflows[0].active && !g_ctx.subflows[0].keepAsStandby &&
+        !g_ctx.subflows[0].picoquicDeleted &&
+        g_ctx.subflows[0].consecutiveTimeouts == 0)
+        return false;
+    // §Q-PATH-RECOVERY-STANDBY: 寬限期內不 promote
+    if (sf->recoveryStandbyUntil > 0 && now < sf->recoveryStandbyUntil)
+        return false;
+    sf->keepAsStandby = false;
+    sf->recoveryStandbyUntil = 0;
+    quicSetPathStatusTracked(sf, picoquic_path_status_available);
+    Limelog("[VIPLE-MPQUIC] §Q-MP-DYN-STANDBY: subflow %d (if %d) "
+            "-> active (QUIC RTT=%.1fms, best=%.1fms, excess=%.1f recovered)\n",
+            sf->id, sf->interfaceIndex, sf->rttMs, bestRttMs, excess);
+    return true;
 }
 
 static void quicCheckPathHealth(void) {
@@ -2016,7 +2157,8 @@ static void quicCheckPathHealth(void) {
                     // standby（§Q-INTERFACE-FAILBACK 要求 !keepAsStandby、
                     // DYN-STANDBY 的 promote 分支也到不了）。2026-07-01
                     // 事故：視訊因此在高 loss VPN 上困 86 分鐘。
-                    quicMaybeRegainStandby(sf, i, now);
+                    if (!quicDynStandbyTryRecover(sf, i, now))
+                        quicMaybeRegainStandby(sf, i, now);
                     continue;
                 }
             } else {
@@ -2381,6 +2523,7 @@ static void quicCheckPathHealth(void) {
                     } else {
                     sf->keepAsStandby = true;
                     quicSetPathStatusTracked(sf, picoquic_path_status_backup);
+                    sf->dynRttStandby = true;  // §Q-DYN-STANDBY-RECOVER
                     Limelog("[VIPLE-MPQUIC] §Q-MP-DYN-STANDBY: subflow %d (if %d) "
                             "→ standby (QUIC RTT=%.1fms, best=%.1fms, "
                             "excess=%.1f > %dms)\n",
@@ -2388,35 +2531,10 @@ static void quicCheckPathHealth(void) {
                             sf->rttMs, bestRttMs, excess,
                             DYN_STANDBY_RTT_EXCESS_MS);
                     }
-                } else if (sf->keepAsStandby &&
-                           excess <= ((float)DYN_STANDBY_RTT_EXCESS_MS / 2.0f)) {
-                    // §Q-MP-WIFI-STANDBY guard v1.5.179: WiFi 在 Ethernet primary
-                    // 仍活躍時不 promote。WiFi 只在 failover/emergency 時才升級。
-                    // 檢查條件：Ethernet primary 活著、非 standby、無連續 timeout。
-                    if (sf->type == LC_NETIF_TYPE_WIFI &&
-                        g_ctx.subflowCount > 0 &&
-                        g_ctx.subflows[0].type == LC_NETIF_TYPE_ETHERNET &&
-                        g_ctx.subflows[0].active && !g_ctx.subflows[0].keepAsStandby &&
-                        !g_ctx.subflows[0].picoquicDeleted &&
-                        g_ctx.subflows[0].consecutiveTimeouts == 0) {
-                        // Ethernet primary alive → WiFi 維持 standby，不 promote
-                    }
-                    // §Q-PATH-RECOVERY-STANDBY: 寬限期內不 promote
-                    else if (sf->recoveryStandbyUntil > 0 &&
-                        picoquic_current_time() < sf->recoveryStandbyUntil) {
-                        // 寬限期未過，維持 standby
-                    } else {
-                        // RTT 恢復：重新 available（50% 滯後防抖動）
-                        sf->keepAsStandby = false;
-                        sf->recoveryStandbyUntil = 0;
-                        quicSetPathStatusTracked(sf, picoquic_path_status_available);
-                        Limelog("[VIPLE-MPQUIC] §Q-MP-DYN-STANDBY: subflow %d (if %d) "
-                                "→ active (QUIC RTT=%.1fms, best=%.1fms, "
-                                "excess=%.1f recovered)\n",
-                                sf->id, sf->interfaceIndex,
-                                sf->rttMs, bestRttMs, excess);
-                    }
                 }
+                // RTT 恢復（50% 滯後）改在前面 standby 分支的
+                // quicDynStandbyTryRecover() 做——這裡 keepAsStandby 的 active
+                // 路徑永遠到不了（§Q-DYN-STANDBY-RECOVER）。
             }
 
             // §Q-MP-WIFI-STANDBY re-demote v1.5.179: Failover 曾升級 WiFi 為 active，
@@ -2596,6 +2714,67 @@ static void quicCheckPathHealth(void) {
 // rejectedIfs / rejectedCount：route-check 或 ICMP 失敗的介面快取。
 // 避免每 10 秒重複探測永遠到不了 server 的介面（如 Tailscale 100.x
 // 只能透過 alt peer 連）。當介面集合變動時清空快取重試。
+// 恢復的路徑：強制 standby＋寬限期＋武裝 REGAIN 駐留（§Q.path-recovery 共用）
+static void quicArmRecoveredStandby(int subflowId) {
+    // §Q-PATH-RECOVERY-STANDBY 2026-05-27: 恢復的路徑強制以
+    // standby 加入，設 5 秒寬限期。防止 server 端 bestVideoPath
+    // 立即切到 cwnd 冷的恢復路徑，造成震盪 + IDR 風暴。
+    // v1.5.161 實測：Ethernet 恢復後 cwin=72KB 勉強過 64KB 門檻，
+    // 但 RTT 與 WiFi 相近（都 ~1ms），server 每 3-8ms 在兩者間
+    // 切換 bestVideoPath → 每次都觸發 IDR → 影像永久凍結。
+    PltLockMutex(&g_ctx.picoquicMutex);
+    for (int s = 0; s < g_ctx.subflowCount; s++) {
+        if (g_ctx.subflows[s].id == subflowId) {
+            g_ctx.subflows[s].keepAsStandby = true;
+            g_ctx.subflows[s].recoveryStandbyUntil =
+                picoquic_current_time() +
+                (uint64_t)RECOVERY_STANDBY_GRACE_S * 1000000;
+            // §Q-STANDBY-REGAIN: 武裝回歸駐留計時——grace 之後再
+            // 觀察 REGAIN_HEALTH_S（flap 退避 ×2^count）才有資格
+            // 升回 available。
+            {
+                int backoff = g_ctx.regainFlapCount;
+                // §Q-BREAKER-ESC：跳閘史存在 → 直接用最大 dwell
+                if (g_ctx.breakerTripCount > 0)
+                    backoff = REGAIN_FLAP_MAX;
+                if (backoff > REGAIN_FLAP_MAX)
+                    backoff = REGAIN_FLAP_MAX;
+                g_ctx.subflows[s].regainEligibleAt =
+                    picoquic_current_time() +
+                    (uint64_t)(RECOVERY_STANDBY_GRACE_S +
+                               (REGAIN_HEALTH_S << backoff)) * 1000000;
+            }
+            if (g_ctx.cnx) {
+                quicSetPathStatusTracked(&g_ctx.subflows[s],
+                                         picoquic_path_status_backup);
+            }
+            Limelog("[VIPLE-MPQUIC] §Q-PATH-RECOVERY-STANDBY: "
+                    "subflow %d forced standby for %d seconds "
+                    "(cwnd warm-up grace)\n",
+                    subflowId, RECOVERY_STANDBY_GRACE_S);
+            break;
+        }
+    }
+    PltUnlockMutex(&g_ctx.picoquicMutex);
+}
+
+// §Q-RECOVER-ALT-PEER：同一個位址＋埠
+static bool quicSamePeer(const struct sockaddr_storage* a, const struct sockaddr_storage* b) {
+    if (a->ss_family != b->ss_family)
+        return false;
+    if (a->ss_family == AF_INET) {
+        const struct sockaddr_in* x = (const struct sockaddr_in*)a;
+        const struct sockaddr_in* y = (const struct sockaddr_in*)b;
+        return x->sin_port == y->sin_port && x->sin_addr.s_addr == y->sin_addr.s_addr;
+    }
+    if (a->ss_family == AF_INET6) {
+        const struct sockaddr_in6* x = (const struct sockaddr_in6*)a;
+        const struct sockaddr_in6* y = (const struct sockaddr_in6*)b;
+        return x->sin6_port == y->sin6_port && memcmp(&x->sin6_addr, &y->sin6_addr, 16) == 0;
+    }
+    return false;
+}
+
 static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
     if (!g_ctx.cnx)
         return;
@@ -2759,6 +2938,71 @@ static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
         PltUnlockMutex(&g_ctx.picoquicMutex);
     }
 
+    // §Q-RECOVER-ALT-PEER (ultrareview #4)：Phase B 會在跟 server 不同子網路
+    // 的網卡上建「網卡 → alt peer」路徑（手機行動網路、USB 共享走 Tailscale／
+    // WAN 位址）。下面的主迴圈只會往 primary／on-link peer 重建，而且同網卡上
+    // 只要還有一條沒刪的路徑（例如死掉的 primary 路徑）就整張跳過 → 唯一能通
+    // 的路徑永遠回不來。這裡先依 (網卡, 原本的 peer) 重建；要在主迴圈之前做，
+    // 因為主迴圈的 quicAddSubflowEx 會回收同網卡的死 slot、把 peerUsed 洗掉。
+    {
+        struct { int ifIndex; struct sockaddr_storage peer; SOCKADDR_LEN len; } alt[QUIC_MAX_SUBFLOWS];
+        int altCount = 0;
+        PltLockMutex(&g_ctx.picoquicMutex);
+        for (int s = 0; s < g_ctx.subflowCount && altCount < QUIC_MAX_SUBFLOWS; s++) {
+            const QUIC_SUBFLOW* sf = &g_ctx.subflows[s];
+            if (!sf->picoquicDeleted || sf->peerUsedLen == 0 ||
+                quicSamePeer(&sf->peerUsed, &g_ctx.peerAddr))
+                continue;
+            bool dup = false;
+            for (int k = 0; k < altCount; k++) {
+                if (alt[k].ifIndex == sf->interfaceIndex && quicSamePeer(&alt[k].peer, &sf->peerUsed)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup)
+                continue;
+            alt[altCount].ifIndex = sf->interfaceIndex;
+            memcpy(&alt[altCount].peer, &sf->peerUsed, sizeof(alt[altCount].peer));
+            alt[altCount].len = sf->peerUsedLen;
+            altCount++;
+        }
+        PltUnlockMutex(&g_ctx.picoquicMutex);
+
+        for (int k = 0; k < altCount; k++) {
+            int ii = -1;
+            for (int i = 0; i < ifCount; i++) {
+                if (interfaces[i].index == alt[k].ifIndex && interfaces[i].up &&
+                    interfaces[i].family == alt[k].peer.ss_family) {
+                    ii = i;
+                    break;
+                }
+            }
+            if (ii < 0)
+                continue;
+            bool covered = false;
+            for (int s = 0; s < g_ctx.subflowCount; s++) {
+                if (g_ctx.subflows[s].interfaceIndex == alt[k].ifIndex &&
+                    !g_ctx.subflows[s].picoquicDeleted &&
+                    quicSamePeer(&g_ctx.subflows[s].peerUsed, &alt[k].peer)) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered)
+                continue;
+            int ret = quicAddSubflowEx(interfaces[ii].index, interfaces[ii].name,
+                                       interfaces[ii].type, &interfaces[ii].addr,
+                                       interfaces[ii].addrLen, &alt[k].peer, alt[k].len);
+            if (ret >= 0) {
+                recovered++;
+                Limelog("[VIPLE-MPQUIC] §Q.path-recovery: recovered alt-peer subflow %d "
+                        "on if %d '%s'\n", ret, interfaces[ii].index, interfaces[ii].name);
+                quicArmRecoveredStandby(ret);
+            }
+        }
+    }
+
     for (int i = 0; i < ifCount; i++) {
         if (!interfaces[i].up)
             continue;
@@ -2814,46 +3058,7 @@ static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
                     "on if %d '%s'\n",
                     ret, interfaces[i].index, interfaces[i].name);
 
-            // §Q-PATH-RECOVERY-STANDBY 2026-05-27: 恢復的路徑強制以
-            // standby 加入，設 5 秒寬限期。防止 server 端 bestVideoPath
-            // 立即切到 cwnd 冷的恢復路徑，造成震盪 + IDR 風暴。
-            // v1.5.161 實測：Ethernet 恢復後 cwin=72KB 勉強過 64KB 門檻，
-            // 但 RTT 與 WiFi 相近（都 ~1ms），server 每 3-8ms 在兩者間
-            // 切換 bestVideoPath → 每次都觸發 IDR → 影像永久凍結。
-            PltLockMutex(&g_ctx.picoquicMutex);
-            for (int s = 0; s < g_ctx.subflowCount; s++) {
-                if (g_ctx.subflows[s].id == ret) {
-                    g_ctx.subflows[s].keepAsStandby = true;
-                    g_ctx.subflows[s].recoveryStandbyUntil =
-                        picoquic_current_time() +
-                        (uint64_t)RECOVERY_STANDBY_GRACE_S * 1000000;
-                    // §Q-STANDBY-REGAIN: 武裝回歸駐留計時——grace 之後再
-                    // 觀察 REGAIN_HEALTH_S（flap 退避 ×2^count）才有資格
-                    // 升回 available。
-                    {
-                        int backoff = g_ctx.regainFlapCount;
-                        // §Q-BREAKER-ESC：跳閘史存在 → 直接用最大 dwell
-                        if (g_ctx.breakerTripCount > 0)
-                            backoff = REGAIN_FLAP_MAX;
-                        if (backoff > REGAIN_FLAP_MAX)
-                            backoff = REGAIN_FLAP_MAX;
-                        g_ctx.subflows[s].regainEligibleAt =
-                            picoquic_current_time() +
-                            (uint64_t)(RECOVERY_STANDBY_GRACE_S +
-                                       (REGAIN_HEALTH_S << backoff)) * 1000000;
-                    }
-                    if (g_ctx.cnx) {
-                        quicSetPathStatusTracked(&g_ctx.subflows[s],
-                                                 picoquic_path_status_backup);
-                    }
-                    Limelog("[VIPLE-MPQUIC] §Q-PATH-RECOVERY-STANDBY: "
-                            "subflow %d forced standby for %d seconds "
-                            "(cwnd warm-up grace)\n",
-                            ret, RECOVERY_STANDBY_GRACE_S);
-                    break;
-                }
-            }
-            PltUnlockMutex(&g_ctx.picoquicMutex);
+            quicArmRecoveredStandby(ret);
 
             for (int r = 0; r < g_ctx.icmpRejectedCount; r++) {
                 if (g_ctx.icmpRejectedIfs[r] == interfaces[i].index) {
@@ -3136,6 +3341,22 @@ static void quicJitterInsert(QUIC_TRANSPORT_CTX* ctx,
 
     int16_t diff = (int16_t)(seq - jb->deliverNextSeq);
 
+    // §Q-JITTER-RESYNC (ultrareview #4)：中斷期間 server 的 seq 前進超過
+    // 32768（200 Mbps 約 1.8 s）時，恢復後每個新封包的 int16 diff 都是負的，
+    // 會被當遲到全丟，要等 seq 再繞回來才恢復（凍結時間最多加倍）。真正的
+    // 遲到封包只會落在最近交付附近；距離超過整個 buffer、且已經
+    // QUIC_JITTER_MAX_WAIT_CAP_US 沒交付任何東西，就視為中斷後重新對齊。
+    if (diff <= -QUIC_JITTER_BUF_SIZE &&
+        now - jb->lastDeliverUs >= (uint64_t)QUIC_JITTER_MAX_WAIT_CAP_US) {
+        Limelog("[VIPLE-MPQUIC] jitter resync flow=%u expected=%u got=%u idle=%llums\n",
+                (unsigned)ft, (unsigned)jb->deliverNextSeq, (unsigned)seq,
+                (unsigned long long)((now - jb->lastDeliverUs) / 1000));
+        quicJitterFlush(ctx, jb, ft);
+        jb->deliverNextSeq = seq;
+        jb->lastSkipCount = 0;
+        diff = 0;
+    }
+
     if (diff < 0) {
         jb->dropped++;
         // §Q-PERF.8：FEC 重建插入但該 seq 已被跳過/交付——獨立計數，
@@ -3209,18 +3430,28 @@ static void quicJitterCheckTimeout(QUIC_TRANSPORT_CTX* ctx, QUIC_JITTER_BUF* jb,
                                    unsigned char ft, uint64_t now) {
     int jitterMaxWait = quicJitterComputeMaxWait(ctx);
     jb->lastJitterMaxWait = (uint32_t)jitterMaxWait; // §5a.r3 診斷
+    if (jb->bufferedCount == 0)
+        return;
     if (now - jb->lastDeliverUs >= (uint64_t)jitterMaxWait) {
         for (int i = 0; i < QUIC_JITTER_BUF_SIZE; i++) {
             uint16_t trySeq = (uint16_t)(jb->deliverNextSeq + i);
             int tidx = trySeq & QUIC_JITTER_BUF_MASK;
             if (jb->slots[tidx].len > 0) {
+                // §Q-JITTER-GAP-AGE (ultrareview #4)：等待從缺口後第一個
+                // 封包到達（＝缺口被看見）起算。只看 lastDeliverUs 的話，
+                // 幀間空檔（60 fps 16.7 ms）已超過 10 ms floor，下一幀頭兩包
+                // 只要在兩條路徑間亂序就立刻被跳過，晚 1 ms 到的那包變遺失。
+                uint64_t gapBase = jb->slots[tidx].arrivalUs > jb->lastDeliverUs ?
+                                   jb->slots[tidx].arrivalUs : jb->lastDeliverUs;
+                if (now - gapBase < (uint64_t)jitterMaxWait)
+                    return;
                 // §Q-PERF.7: 跳過前先看缺口是否屬於「仍有機會重建」的
                 // FEC 群組——是的話讓一拍（quicJitterPoll 每 ~1ms 再來），
                 // 否則 timeout 把馬上能重建的封包跳掉，重建變 late 插入
                 // 白做工（T2 實測 8% 丟包下 906 次輸給 10ms floor）。
                 // 絕對上限 3×maxWait 防止 parity 也全丟時卡住交付。
                 if (ft == QUIC_FLOW_VIDEO &&
-                    now - jb->lastDeliverUs < (uint64_t)jitterMaxWait * 3 &&
+                    now - gapBase < (uint64_t)jitterMaxWait * 3 &&
                     quicFecGapStillCompletable(jb->deliverNextSeq, i, now,
                                                jitterMaxWait)) {
                     jb->fecDeferred++;
@@ -3989,12 +4220,17 @@ static void quicIoThreadProc(void* context) {
             //      packet where path 0 is unvalidated and picoquic gives
             //      INADDR_ANY / 0-ifIndex
             //   4. subflows[0] — last resort to keep the cnx alive
+            // §Q-DISPATCH-SKIP-DELETED (ultrareview #4)：1～3 跳過 picoquic
+            // 已刪除的 slot。slot 0 刪除後不回收（§Q-SLOT0-FAILBACK-FIX）、
+            // socket 仍開著；同介面恢復的新路徑若被派到舊 socket，回包也落在
+            // 舊 slot，新 slot 的 lastRecvTime 不前進 → REGAIN 後 3 s 被判停滯。
             SOCKET outSock = INVALID_SOCKET;
 
             // 1. ifIndex match (most precise; populated for established paths)
             if (ifIndex != 0) {
                 for (int i = 0; i < ctx->subflowCount; i++) {
                     if (ctx->subflows[i].sock != INVALID_SOCKET &&
+                        !ctx->subflows[i].picoquicDeleted &&
                         ctx->subflows[i].interfaceIndex == ifIndex) {
                         outSock = ctx->subflows[i].sock;
                         break;
@@ -4006,6 +4242,7 @@ static void quicIoThreadProc(void* context) {
             if (outSock == INVALID_SOCKET && localAddr.ss_family != 0) {
                 for (int i = 0; i < ctx->subflowCount; i++) {
                     if (ctx->subflows[i].sock == INVALID_SOCKET) continue;
+                    if (ctx->subflows[i].picoquicDeleted) continue;
                     if (ctx->subflows[i].localAddr.ss_family != localAddr.ss_family) continue;
                     if (localAddr.ss_family == AF_INET) {
                         const struct sockaddr_in* sa = (const struct sockaddr_in*)&ctx->subflows[i].localAddr;
@@ -4035,6 +4272,7 @@ static void quicIoThreadProc(void* context) {
             if (outSock == INVALID_SOCKET) {
                 for (int i = 0; i < ctx->subflowCount; i++) {
                     if (ctx->subflows[i].sock != INVALID_SOCKET &&
+                        !ctx->subflows[i].picoquicDeleted &&
                         ctx->subflows[i].localAddr.ss_family == destAddr.ss_family) {
                         outSock = ctx->subflows[i].sock;
                         break;

@@ -109,6 +109,8 @@ typedef struct _VRML_RXSET {
     int8_t link[VIPLE_VR_LINK_MAX + 1];   // -1＝原本的 socket
     bool readable[VIPLE_VR_LINK_MAX + 1];
     bool dead[VIPLE_VR_LINK_MAX + 1];
+    uint64_t deadAtMs[VIPLE_VR_LINK_MAX + 1];  // §VR-LINK-RX-RETRY：停收的時間，過 VRML_DEAD_RETRY_MS 再試
+    int deadLogs;
     int count;
     int next;
     int sincePoll;
@@ -691,12 +693,19 @@ static bool wouldBlock(int err) {
         ;
 }
 
+// §VR-LINK-RX-RETRY (ultrareview #4)：其他錯誤只停收這麼久，之後重新加回 poll。
+// 以前是整場永久停收：一次暫時性錯誤（ICMP TTL 逾時、介面短暫斷線）就讓這條
+// 連線的 PONG 再也讀不到 → 永遠「未確認」、影像副本被忽略，備援整場消失。
+#define VRML_DEAD_RETRY_MS 2000
+
 static bool icmpNoise(int err) {
-    // 之前送出的封包換來 ICMP port unreachable：忽略，繼續收
+    // 之前送出的封包換來 ICMP port unreachable／TTL 逾時、過大的資料報、
+    // 介面短暫斷線：都是暫時的，忽略，繼續收
 #if defined(LC_WINDOWS)
-    return err == WSAECONNRESET;
+    return err == WSAECONNRESET || err == WSAENETRESET || err == WSAEMSGSIZE ||
+           err == WSAENETDOWN || err == WSAENETUNREACH || err == WSAEHOSTUNREACH;
 #else
-    return err == ECONNREFUSED;
+    return err == ECONNREFUSED || err == ENETDOWN || err == ENETUNREACH || err == EHOSTUNREACH;
 #endif
 }
 
@@ -743,7 +752,10 @@ static int pollRxSet(VRML_RXSET* set, int timeoutMs) {
 
     for (i = 0; i < set->count; i++) {
         if (set->dead[i]) {
-            continue;
+            if (PltGetMillis() - set->deadAtMs[i] < VRML_DEAD_RETRY_MS) {
+                continue;
+            }
+            set->dead[i] = false;  // §VR-LINK-RX-RETRY：再試一次
         }
         pfds[n].fd = set->socks[i];
         pfds[n].events = POLLIN;
@@ -804,8 +816,14 @@ static int recvRxSet(VRML_RXSET* set, char* buffer, int size, int* slot, bool wa
                 return -1;  // 原本的 socket 出錯：和單一路徑時一樣交給呼叫端處理
             }
             else {
-                Limelog("[VIPLE-VR-LINK] link %d socket error %d - dropping this link's receive side\n", (int)links[set->link[i]].id, err);
+                if (set->deadLogs < 20) {
+                    set->deadLogs++;
+                    Limelog("[VIPLE-VR-LINK] link %d socket error %d - pausing this link's receive side for %d ms\n",
+                            (int)links[set->link[i]].id, err, VRML_DEAD_RETRY_MS);
+                }
                 set->dead[i] = true;
+                set->deadAtMs[i] = PltGetMillis();
+                set->readable[i] = false;
             }
         }
         if (any) {
