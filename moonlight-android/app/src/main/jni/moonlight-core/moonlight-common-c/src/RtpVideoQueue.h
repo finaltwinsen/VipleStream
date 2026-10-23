@@ -22,6 +22,7 @@ typedef struct _RTPV_QUEUE_LIST {
 
 // §K.17: Max new-frame packets to defer while waiting for old frame's last shard
 #define RTPV_MAX_GRACE_PACKETS 4
+#define RTPV_GRACE_MAX_US 10000  // §K.17-GRACE-TIMEOUT：延後封包最多等 10 ms
 
 // §VR-LINK-REPAIR：逐條連線記進度的格數（＝VIPLE_VR_LINK_MAX；RtpVideoQueue.c 有編譯期檢查）
 #define RTPV_ML_LINKS 4
@@ -220,6 +221,7 @@ typedef struct _RTP_VIDEO_QUEUE {
         int length;
     } deferredPackets[RTPV_MAX_GRACE_PACKETS];
     int deferredCount;
+    uint64_t deferredSinceUs;  // §K.17-GRACE-TIMEOUT：開始延後的時間
     uint32_t deferredFrameNumber; // The new frame whose packets are deferred
 
     // §M01-B：佇列重置後還沒用真實封包建立序號基準。只用來印 re-anchor log，
@@ -267,6 +269,7 @@ typedef struct _RTP_VIDEO_QUEUE {
 // （0＝沒有在等）；接收逾時後呼叫 RtpvPollHold 把到期的放行。
 int RtpvHoldTimeoutMs(PRTP_VIDEO_QUEUE queue);
 void RtpvPollHold(PRTP_VIDEO_QUEUE queue);
+void RtpvPollGrace(PRTP_VIDEO_QUEUE queue);  // §K.17-GRACE-TIMEOUT
 // §VR-LINK-REPAIR：server 回了 REPAIR_GONE（這個 block 補不了）。只在影像接收執行緒呼叫。
 void RtpvRepairGone(PRTP_VIDEO_QUEUE queue, uint32_t frame, uint8_t block);
 // §VR-REPAIR-RTT：佇列正在等的 block（或它後面預先報過的幀）是照 RTT 規則回報的——這段期間規則不可以切回去

@@ -111,6 +111,13 @@ static PLT_MUTEX enetMutex;
 static bool usePeriodicPing;
 
 static PLT_THREAD lossStatsThread;
+// §LOSSSTATS-RESTART (ultrareview #5)：lossStats 執行緒在 ENet 重連（Fix F）與
+// 數個 grace 分支會自己結束，以前沒有任何地方重開 → 重連成功後整場沒有 FEC
+// 狀態與 0x0200 定期 ping（host 的 ABR 失去回饋；以 ping 判逾時的 host 會在
+// 使用者沒輸入時約 10 s 後結束 session）。結束時立旗標，重連成功後重開。
+static volatile bool lossStatsExited;
+static bool lossStatsJoined;  // 已 join 且重開失敗：stopControlStream 不可再 join
+static void lossStatsThreadFunc(void* context);
 static PLT_THREAD invalidateRefFramesThread;
 static PLT_THREAD requestIdrFrameThread;
 static PLT_THREAD controlReceiveThread;
@@ -417,6 +424,18 @@ static void vrHandleS2CInline(const uint8_t* tlv, int length);
 static void configureVrThrottle(ENetPeer* p);
 
 // Initializes the control stream
+// §VR-API-GATE (ultrareview #5)：VR 公開 API（LiSendVrMessage／Tracking／
+// ReportVrLoss）的閘門。VrFlags 在 LiStartConnection 一開頭就設、在
+// LiStopConnection 最後才清，比 enetMutex 與加密內容的生命週期寬：XR
+// 執行緒每幀都在呼叫，重連建線那幾秒或收尾時會用到已刪除的 mutex 與
+// 已釋放的 encryptionCtx。只在 initializeControlStream 建好之後打開，
+// LiStopConnection 一進來就關。
+static volatile bool vrApiReady = false;
+
+void vrApiSetReady(bool ready) {
+    vrApiReady = ready;
+}
+
 int initializeControlStream(void) {
     stopping = false;
     PltCreateEvent(&idrFrameRequiredEvent);
@@ -482,6 +501,7 @@ int initializeControlStream(void) {
     hdrEnabled = false;
     memset(&hdrMetadata, 0, sizeof(hdrMetadata));
 
+    vrApiReady = true;  // §VR-API-GATE
     return 0;
 }
 
@@ -498,6 +518,7 @@ static void freeBasicLbqList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
 // Cleans up control stream
 void destroyControlStream(void) {
     LC_ASSERT(stopping);
+    vrApiReady = false;  // §VR-API-GATE
     PltDestroyCryptoContext(encryptionCtx);
     PltDestroyCryptoContext(decryptionCtx);
     PltCloseEvent(&idrFrameRequiredEvent);
@@ -762,6 +783,20 @@ static VR_RECOVERY_ACTION vrEvaluateTimersLocked(uint64_t now, uint32_t rttMs,
     }
 
     if (vrRec.idrRequested) {
+#ifdef VIPLE_MPQUIC
+        // §VR-LOSS-NO-IDR-PATH：IDR 鎖住之後 ENet 才斷——解鎖、回到走連線的 LOSS
+        if (enetControlChannelDown() && !quicControlFallbackAvailable() && vrLinksAlive()) {
+            vrRec.idrRequested = false;
+            vrRec.refreshSeen = false;
+            vrRec.pendingSinceMs = now;
+            vrRec.resendCount = 0;
+            vrRec.lossResends++;
+            vrRec.lastLossSendMs = now;
+            *firstLost = vrRec.firstLost;
+            *lastLost = vrRec.lastLost;
+            return VR_ACTION_RESEND_LOSS;
+        }
+#endif
         if (now - vrRec.idrRequestedMs >= VR_IDR_RETRY_MS) {
             vrRec.idrRequestedMs = now;
             return VR_ACTION_REQUEST_IDR;
@@ -781,6 +816,21 @@ static VR_RECOVERY_ACTION vrEvaluateTimersLocked(uint64_t now, uint32_t rttMs,
     }
 
     if (vrRec.resendCount >= VR_LOSS_RESEND_MAX || now - vrRec.pendingSinceMs >= VR_UNANSWERED_IDR_MS) {
+#ifdef VIPLE_MPQUIC
+        // §VR-LOSS-NO-IDR-PATH (ultrareview #5)：ENet 斷、QUIC 不能當控制通道、只剩多連線
+        // 活著（§VR-LINK-GRACE）時，IDR 請求一定被 requestIdrFrame 丟掉；照舊鎖進
+        // idrRequested 會停掉唯一還送得到的 LOSS（走連線）並忽略 REFRESH_START，
+        // 畫面一路花到 ENet 重連。改成重新開始這一輪 LOSS 重送。
+        if (enetControlChannelDown() && !quicControlFallbackAvailable() && vrLinksAlive()) {
+            vrRec.pendingSinceMs = now;
+            vrRec.resendCount = 0;
+            vrRec.lossResends++;
+            vrRec.lastLossSendMs = now;
+            *firstLost = vrRec.firstLost;
+            *lastLost = vrRec.lastLost;
+            return VR_ACTION_RESEND_LOSS;
+        }
+#endif
         vrRec.idrRequested = true;
         vrRec.idrRequestedMs = now;
         vrRec.idrFallbacks++;
@@ -1059,7 +1109,7 @@ int LiGetVrFlags(void) {
 int LiSendVrTracking(const VIPLE_VR_TRACKING* sample) {
     uint64_t now;
 
-    if (!(VrFlags & VIPLE_VR_SF_ENABLED) || sample == NULL) {
+    if (!(VrFlags & VIPLE_VR_SF_ENABLED) || !vrApiReady || sample == NULL) {
         return -1;
     }
 
@@ -1098,7 +1148,7 @@ int LiSendVrTracking(const VIPLE_VR_TRACKING* sample) {
 }
 
 int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable) {
-    if (!(VrFlags & VIPLE_VR_SF_ENABLED) || tlv == NULL ||
+    if (!(VrFlags & VIPLE_VR_SF_ENABLED) || !vrApiReady || tlv == NULL ||
             length <= 0 || length > VIPLE_VR_MAX_CTRL_PAYLOAD) {
         return -1;
     }
@@ -1116,7 +1166,7 @@ int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable) {
 }
 
 void LiReportVrLoss(uint32_t firstLost, uint32_t lastLost, uint8_t reason) {
-    if (!(VrFlags & VIPLE_VR_SF_ENABLED)) {
+    if (!(VrFlags & VIPLE_VR_SF_ENABLED) || !vrApiReady) {
         return;
     }
     if (!(VrFlags & VIPLE_VR_SF_RECOVERY_INTRA)) {
@@ -2851,6 +2901,18 @@ enet_reconnect_wait:
                         }
                         enetHealthReconnectedAtMs = doneMs;
                         enetHealthLogAtMs = doneMs + 5000;
+                        // §LOSSSTATS-RESTART：重連前 lossStats 執行緒已依 Fix F 結束
+                        if (lossStatsExited && !lossStatsJoined && !stopping) {
+                            PltJoinThread(&lossStatsThread);
+                            lossStatsExited = false;
+                            if (PltCreateThread("LossStats", lossStatsThreadFunc, NULL, &lossStatsThread) == 0) {
+                                Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: lossStats thread restarted\n");
+                            }
+                            else {
+                                lossStatsJoined = true;
+                                Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: lossStats thread restart FAILED\n");
+                            }
+                        }
                         goto enet_main_loop;  // 回到主事件迴圈
                     }
 
@@ -2904,7 +2966,14 @@ enet_reconnect_wait:
 #endif
 }
 
+static void lossStatsThreadMain(void* context);
+
 static void lossStatsThreadFunc(void* context) {
+    lossStatsThreadMain(context);
+    lossStatsExited = true;  // §LOSSSTATS-RESTART
+}
+
+static void lossStatsThreadMain(void* context) {
     BYTE_BUFFER byteBuffer;
 
     if (usePeriodicPing) {
@@ -2915,6 +2984,11 @@ static void lossStatsThreadFunc(void* context) {
         BbPut32(&byteBuffer, 0); // Timestamp?
 
         while (!PltIsThreadInterrupted(&lossStatsThread)) {
+            // §VR-SEND-FALLBACK (ultrareview #5)：VrSend 執行緒沒起來時，恢復狀態機的
+            // 逾時（重送 LOSS、500 ms 退回 IDR）只能在這裡跑，否則永遠不重試
+            if (!vrSendThreadStarted && (VrFlags & VIPLE_VR_SF_ENABLED)) {
+                vrSendTick();
+            }
             // For Sunshine servers, send the more detailed per-frame FEC messages
             if (IS_SUNSHINE()) {
                 PQUEUED_FRAME_FEC_STATUS queuedFrameStatus;
@@ -3077,6 +3151,11 @@ static void lossStatsThreadFunc(void* context) {
         }
 
         while (!PltIsThreadInterrupted(&lossStatsThread)) {
+            // §VR-SEND-FALLBACK (ultrareview #5)：VrSend 執行緒沒起來時，恢復狀態機的
+            // 逾時（重送 LOSS、500 ms 退回 IDR）只能在這裡跑，否則永遠不重試
+            if (!vrSendThreadStarted && (VrFlags & VIPLE_VR_SF_ENABLED)) {
+                vrSendTick();
+            }
             // Construct the payload
             BbInitializeWrappedBuffer(&byteBuffer, lossStatsPayload, 0, payloadLengths[IDX_LOSS_STATS], BYTE_ORDER_LITTLE);
             BbPut32(&byteBuffer, 0);
@@ -3448,7 +3527,9 @@ int stopControlStream(void) {
         shutdownTcpSocket(ctlSock);
     }
 
-    PltInterruptThread(&lossStatsThread);
+    if (!lossStatsJoined) {
+        PltInterruptThread(&lossStatsThread);
+    }
     PltInterruptThread(&requestIdrFrameThread);
     PltInterruptThread(&controlReceiveThread);
     PltInterruptThread(&asyncCallbackThread);
@@ -3456,7 +3537,9 @@ int stopControlStream(void) {
         PltInterruptThread(&vrSendThread);
     }
 
-    PltJoinThread(&lossStatsThread);
+    if (!lossStatsJoined) {
+        PltJoinThread(&lossStatsThread);
+    }
     PltJoinThread(&requestIdrFrameThread);
     PltJoinThread(&controlReceiveThread);
     PltJoinThread(&asyncCallbackThread);
@@ -3791,6 +3874,8 @@ int startControlStream(void) {
         return err;
     }
 
+    lossStatsExited = false;
+    lossStatsJoined = false;
     err = PltCreateThread("LossStats", lossStatsThreadFunc, NULL, &lossStatsThread);
     if (err != 0) {
         stopping = true;

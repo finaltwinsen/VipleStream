@@ -91,6 +91,9 @@ void LiInterruptConnection(void) {
 
 // Stop the connection by undoing the step at the current stage and those before it
 void LiStopConnection(void) {
+    // §VR-API-GATE：先關 VR 公開 API，再拆控制串流
+    vrApiSetReady(false);
+
     // Disable termination callbacks now under lock
     if (termMutexInitialized) {
         PltLockMutex(&termMutex);
@@ -370,7 +373,15 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                 if (hostLen < (int)sizeof(hostBuf)) {
                     memcpy(hostBuf, hostStart, hostLen);
                     // Only override if RTSP host differs from server address
-                    if (strcmp(hostBuf, serverInfo->address) != 0) {
+                    // §RTSP-HOST-LOOPBACK (ultrareview #5)：只認 relay 通道的 loopback。
+                    // Sunshine 的 sessionUrl0 用的是 host 自己看到的本機位址
+                    //（IPv6 還帶中括號）——經 NAT／轉埠或 IPv6 連線時跟撥出的位址
+                    // 不同，照覆寫的話 RTSP 會連到解析不了或到不了的位址。
+                    bool loopback = strncmp(hostBuf, "127.", 4) == 0 ||
+                                    strcmp(hostBuf, "localhost") == 0 ||
+                                    strcmp(hostBuf, "[::1]") == 0 ||
+                                    strcmp(hostBuf, "::1") == 0;
+                    if (loopback && strcmp(hostBuf, serverInfo->address) != 0) {
                         RtspAddrString = strdup(hostBuf);
                         Limelog("RTSP host override: %s (tunnel)\n", RtspAddrString);
                     }

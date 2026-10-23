@@ -87,6 +87,11 @@
 #define LOSS_DEMOTE_PCT        40.0f
 #define LOSS_DEMOTE_HOLD_US    4000000ull   // 4s（promote 後 probation 內 2s）
 #define LOSS_MIN_DELTA_SENT    20
+// §Q-LOSS-WINDOW（2026-10-23）：client 每 100 ms 只送 ~6 個封包（多半是
+// ACK），單一 tick 的 loss% 在 0～71% 間跳，假丟包又常在下一個 tick 才被
+// 認出；累積到 50 個送出封包（~0.8 s）再判一次，§Q-LOSS-SPURIOUS 的扣除
+// 才收斂。高流量路徑一個 tick 就滿，行為和以前一樣。
+#define LOSS_WINDOW_SENT       50
 #define LOSS_PROBATION_US      10000000ull  // 促升後 10s probation
 
 // ── Internal state ──────────────────────────────────────────
@@ -128,6 +133,15 @@ typedef struct _QUIC_SUBFLOW {
     // §K.19: 上一次更新的累積計數器，用於計算瞬時 loss%
     uint64_t prevSent;
     uint64_t prevLost;
+    uint64_t prevSpurious;  // §Q-LOSS-SPURIOUS
+    // §Q-LOSS-WINDOW：降級判斷用的累積視窗（滿 LOSS_WINDOW_SENT 個送出封包才評估一次）
+    uint64_t lossWinSent;
+    uint64_t lossWinLost;
+    // §Q-LOSS-DIAG：picoquic 累積值（§K.10 診斷用）
+    uint64_t pqSentTotal;
+    uint64_t pqLostTotal;
+    uint64_t pqTimerLosses;
+    uint64_t pqSpuriousLosses;
     char name[LC_NETIF_MAX_NAME];
     int type;
 
@@ -483,6 +497,8 @@ static void quicResetSubflowHealthOnPromote(QUIC_SUBFLOW* sf, uint64_t now) {
     sf->lastRecvTime = now;        // §Q-MP-FAILOVER-GRACE: 防立即 stall 誤判
     sf->consecutiveTimeouts = 0;
     sf->lossBadSinceUs = 0;        // 舊任期的 loss 帳不帶入新任期
+    sf->lossWinSent = 0;           // §Q-LOSS-WINDOW
+    sf->lossWinLost = 0;
     sf->lastPromotedAtUs = now;    // §Q-LOSS-DEMOTE probation 起算
 }
 
@@ -1106,6 +1122,90 @@ static unsigned int quicIcmpProbeReachable(
 #endif
 }
 
+// §Q-PROBE-TCP（2026-10-23）：ICMP 被擋時的後備可達性探測。
+// Windows host 預設防火牆不回 ICMP echo（實測 .226 重灌後區網 ping 全丟、
+// QUIC 照通）→ Windows client 的 Phase B 把能通的第二路徑全拒掉，REGAIN
+// 存活章永遠蓋不到，failover 到 VPN 後整場回不了乙太網路。改從同一個本地
+// 位址對 server 的 RTSP TCP 埠做非阻塞 connect：三向交握完成（或被 RST
+// 拒絕——封包也到了）就算可達，耗時當 RTT。
+// 回傳值同 quicIcmpProbeReachable：0＝不可達，>0＝RTT（毫秒）。
+static unsigned int quicTcpProbeReachable(
+    const struct sockaddr_storage* localAddr,
+    const struct sockaddr_storage* peerAddr,
+    unsigned int timeoutMs) {
+    if (localAddr->ss_family != peerAddr->ss_family ||
+        (peerAddr->ss_family != AF_INET && peerAddr->ss_family != AF_INET6))
+        return 0;
+    unsigned short port = RtspPortNumber != 0 ? RtspPortNumber : 48010;
+    SOCKET s = socket(peerAddr->ss_family, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET)
+        return 0;
+
+    struct sockaddr_storage src, dst;
+    SOCKADDR_LEN len = peerAddr->ss_family == AF_INET ?
+                       (SOCKADDR_LEN)sizeof(struct sockaddr_in) :
+                       (SOCKADDR_LEN)sizeof(struct sockaddr_in6);
+    memcpy(&src, localAddr, len);
+    memcpy(&dst, peerAddr, len);
+    if (src.ss_family == AF_INET) {
+        ((struct sockaddr_in*)&src)->sin_port = 0;
+        ((struct sockaddr_in*)&dst)->sin_port = htons(port);
+    } else {
+        ((struct sockaddr_in6*)&src)->sin6_port = 0;
+        ((struct sockaddr_in6*)&dst)->sin6_port = htons(port);
+    }
+    if (bind(s, (struct sockaddr*)&src, len) != 0) {
+        closeSocket(s);
+        return 0;
+    }
+    setSocketNonBlocking(s, true);
+
+    uint64_t t0 = PltGetMillis();
+    bool reached = false;
+    int err = connect(s, (struct sockaddr*)&dst, len);
+    if (err == 0) {
+        reached = true;
+    } else {
+        fd_set wr, ex;
+        struct timeval tv;
+        FD_ZERO(&wr);
+        FD_ZERO(&ex);
+        FD_SET(s, &wr);
+        FD_SET(s, &ex);
+        tv.tv_sec = (long)(timeoutMs / 1000);
+        tv.tv_usec = (long)((timeoutMs % 1000) * 1000);
+        if (select((int)(s + 1), NULL, &wr, &ex, &tv) > 0) {
+            int soErr = 0;
+            socklen_t soLen = sizeof(soErr);
+            getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&soErr, &soLen);
+#if defined(LC_WINDOWS)
+            reached = soErr == 0 || soErr == WSAECONNREFUSED;
+#else
+            reached = soErr == 0 || soErr == ECONNREFUSED;
+#endif
+        }
+    }
+    closeSocket(s);
+    if (!reached)
+        return 0;
+    unsigned int rtt = (unsigned int)(PltGetMillis() - t0);
+    return rtt == 0 ? 1 : rtt;  // 0 保留給失敗
+}
+
+// ICMP 優先（舊行為與 RTT 語意不變）；ICMP 判失敗時改用 TCP 再確認一次。
+static unsigned int quicProbeReachable(
+    const struct sockaddr_storage* localAddr,
+    const struct sockaddr_storage* peerAddr,
+    unsigned int timeoutMs) {
+    unsigned int rtt = quicIcmpProbeReachable(localAddr, peerAddr, timeoutMs);
+    if (rtt > 0)
+        return rtt;
+    rtt = quicTcpProbeReachable(localAddr, peerAddr, timeoutMs);
+    Limelog("[VIPLE-MPQUIC] §Q-PROBE-TCP: ICMP failed, TCP probe %s (RTT=%u ms)\n",
+            rtt ? "OK" : "FAILED", rtt);
+    return rtt;
+}
+
 #if defined(__linux__) && !defined(__ANDROID__)
 // §MP-ROUTECHK：/proc/net/route 裡是否有 Iface==ifname 且涵蓋 peerNet（網路位元組序）
 // 的路由（含 0.0.0.0/0）。欄位是 16 進位、與記憶體同位元組序，可直接和
@@ -1327,8 +1427,8 @@ int quicAddSubflowEx(int interfaceIndex,
         // ICMP ping 確認雙向連通：封包能到達 server 且 server 能回來。
         // path 0 不做此檢查（它是 handshake 用的初始路徑）。
         if (g_ctx.subflowCount > 0) {
-            icmpRtt = quicIcmpProbeReachable(localAddr, effPeer,
-                                              ICMP_PROBE_TIMEOUT_MS);
+            icmpRtt = quicProbeReachable(localAddr, effPeer,
+                                         ICMP_PROBE_TIMEOUT_MS);
             if (icmpRtt == 0) {
                 Limelog("[VIPLE-MPQUIC] Subflow on if %d cannot reach peer "
                         "(ICMP probe failed); skipping path\n",
@@ -1732,32 +1832,54 @@ static void quicUpdatePathStats(void) {
         {
             uint64_t deltaSent = pq.sent - g_ctx.subflows[i].prevSent;
             uint64_t deltaLost = pq.lost - g_ctx.subflows[i].prevLost;
+            // §Q-LOSS-SPURIOUS（2026-10-23）：扣掉「判遺失後又被 ACK」的假丟包。
+            // client 送的多半是 ACK／小封包，LAN RTT 0.2 ms 時 picoquic 的計時器
+            // 遠比 host 回 ACK 的延遲短，大量封包先被判遺失、之後才確認：實測
+            // .195→.226 乙太網路 lost=1163 中 spurious=880，loss% 在 25～71%
+            // 間跳，每場第 36 秒觸發 §Q-LOSS-DEMOTE 把影像踢到 Tailscale。
+            // 假丟包常在下一個 tick 才被認出，單一 tick 可能扣成負的 → 夾 0。
+            {
+                uint64_t deltaSpurious = pq.spurious_losses - g_ctx.subflows[i].prevSpurious;
+                deltaLost = deltaLost > deltaSpurious ? deltaLost - deltaSpurious : 0;
+                g_ctx.subflows[i].prevSpurious = pq.spurious_losses;
+            }
             if (deltaSent > 0) {
                 float lp = (float)((double)deltaLost / (double)deltaSent * 100.0);
                 // §K.19.clamp: 路徑死亡時 picoquic 把所有未 ACK 封包計為 lost，
                 // 導致 deltaLost > deltaSent（loss > 100%）。Clamp 避免顯示誤導。
                 g_ctx.subflows[i].lossPercent = lp > 100.0f ? 100.0f : lp;
             } else if (g_ctx.subflows[i].prevSent == 0 && pq.sent > 0) {
-                // 第一次：用累積值作為初始值
-                float lp = (float)((double)pq.lost / (double)pq.sent * 100.0);
+                // 第一次：用累積值作為初始值（同樣扣掉假丟包）
+                uint64_t realLost = pq.lost > pq.spurious_losses ? pq.lost - pq.spurious_losses : 0;
+                float lp = (float)((double)realLost / (double)pq.sent * 100.0);
                 g_ctx.subflows[i].lossPercent = lp > 100.0f ? 100.0f : lp;
             }
             // 否則 deltaSent==0 表示這段期間沒送任何封包，保留上次的值
 
-            // §Q-LOSS-DEMOTE: 合格樣本（≥LOSS_MIN_DELTA_SENT 封包）的越檻
+            // §Q-LOSS-DEMOTE: 合格樣本（§Q-LOSS-WINDOW：累積 ≥LOSS_WINDOW_SENT 封包）的越檻
             // 計時。任一合格樣本低於門檻即歸零 → 等效「連續超標」，天然
             // 濾掉 ABR/BBR 探測造成的秒級 loss 尖峰；樣本不足不改判。
-            if (deltaSent >= LOSS_MIN_DELTA_SENT) {
-                if (g_ctx.subflows[i].lossPercent >= LOSS_DEMOTE_PCT) {
+            g_ctx.subflows[i].lossWinSent += deltaSent;
+            g_ctx.subflows[i].lossWinLost += deltaLost;
+            if (g_ctx.subflows[i].lossWinSent >= LOSS_WINDOW_SENT) {
+                float winPct = (float)((double)g_ctx.subflows[i].lossWinLost /
+                                       (double)g_ctx.subflows[i].lossWinSent * 100.0);
+                if (winPct >= LOSS_DEMOTE_PCT) {
                     if (g_ctx.subflows[i].lossBadSinceUs == 0)
                         g_ctx.subflows[i].lossBadSinceUs = now;
                 } else {
                     g_ctx.subflows[i].lossBadSinceUs = 0;
                 }
+                g_ctx.subflows[i].lossWinSent = 0;
+                g_ctx.subflows[i].lossWinLost = 0;
             }
 
             g_ctx.subflows[i].prevSent = pq.sent;
             g_ctx.subflows[i].prevLost = pq.lost;
+            g_ctx.subflows[i].pqSentTotal = pq.sent;
+            g_ctx.subflows[i].pqLostTotal = pq.lost;
+            g_ctx.subflows[i].pqTimerLosses = pq.timer_losses;
+            g_ctx.subflows[i].pqSpuriousLosses = pq.spurious_losses;
         }
 
         // Surface byte counters too so health monitor can see fresh activity
@@ -2868,7 +2990,7 @@ static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
         }
         unsigned int rtt = 0;
         if (ifUp) {
-            rtt = quicIcmpProbeReachable(&sf->localAddr, &sf->peerUsed, 200);
+            rtt = quicProbeReachable(&sf->localAddr, &sf->peerUsed, 200);
         }
 
         uint64_t nowP = picoquic_current_time();
@@ -4370,13 +4492,17 @@ static void quicIoThreadProc(void* context) {
                 // Per-path 摘要
                 for (int pi = 0; pi < ctx->subflowCount; pi++) {
                     QUIC_SUBFLOW* sf = &ctx->subflows[pi];
-                    Limelog("[VIPLE-MPQUIC] §K.10 path[%d] if=%d %s RTT=%.1fms %.1fMbps loss=%.1f%% tx=%lluKB rx=%lluKB rxPkts=%llu\n",
+                    Limelog("[VIPLE-MPQUIC] §K.10 path[%d] if=%d %s RTT=%.1fms %.1fMbps loss=%.1f%% tx=%lluKB rx=%lluKB rxPkts=%llu sent=%llu lost=%llu timerLost=%llu spurious=%llu\n",
                             pi, sf->interfaceIndex,
                             sf->active ? "ACTIVE" : "DEAD",
                             sf->rttMs, sf->throughputMbps, sf->lossPercent,
                             (unsigned long long)(sf->bytesSent / 1024),
                             (unsigned long long)(sf->bytesRecv / 1024),
-                            (unsigned long long)sf->pktsRecv);
+                            (unsigned long long)sf->pktsRecv,
+                            (unsigned long long)sf->pqSentTotal,
+                            (unsigned long long)sf->pqLostTotal,
+                            (unsigned long long)sf->pqTimerLosses,
+                            (unsigned long long)sf->pqSpuriousLosses);
                 }
                 // §Q-ACCT 2026-09-29：和 server 的 pqSent 對帳。Σ rxPkts（socket 取得）
                 // 與 pqRecv（picoquic 成功處理）的差＝client picoquic 丟掉的封包

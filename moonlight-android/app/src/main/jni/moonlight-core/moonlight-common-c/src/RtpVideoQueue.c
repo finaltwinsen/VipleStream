@@ -2044,10 +2044,17 @@ int RtpvHoldTimeoutMs(PRTP_VIDEO_QUEUE queue) {
     uint64_t nowUs = PltGetMicroseconds();
     uint64_t due = 0;
 
+    if (queue->deferredCount > 0) {
+        due = queue->deferredSinceUs + RTPV_GRACE_MAX_US;  // §K.17-GRACE-TIMEOUT
+    }
+
     if (queue->mlHoldCount > 0) {
-        due = mlHeadDeadlineUs(queue, &queue->mlHold[queue->mlHoldHead], nowUs);
-        if (due == 0) {
-            due = 1;
+        uint64_t hd = mlHeadDeadlineUs(queue, &queue->mlHold[queue->mlHoldHead], nowUs);
+        if (hd == 0) {
+            hd = 1;
+        }
+        if (due == 0 || hd < due) {
+            due = hd;
         }
     }
     if (queue->mlRepair) {
@@ -2066,6 +2073,7 @@ int RtpvHoldTimeoutMs(PRTP_VIDEO_QUEUE queue) {
 }
 
 void RtpvPollHold(PRTP_VIDEO_QUEUE queue) {
+    RtpvPollGrace(queue);
     if (queue->mlHoldCount > 0 || queue->mlRepair) {
         uint64_t nowUs = PltGetMicroseconds();
         queue->nkPolling = true;  // 接收逾時才會走到這裡：socket 與暫存都是空的
@@ -2116,6 +2124,47 @@ void RtpvRepairGone(PRTP_VIDEO_QUEUE queue, uint32_t frame, uint8_t block) {
     }
 }
 
+// §K.17-GRACE-TIMEOUT (ultrareview #5)：延後的下一幀封包以前只在「再來一個
+// 封包」時才放行——host 只在畫面變化時才送（靜態桌面、VR 沒變化時 100 ms
+// 一幀）且下一幀 ≤4 包時，下一幀與上一幀的遺失回報都卡到 host 再送東西為止。
+// 加時間上限，由接收逾時路徑（RtpvPollGrace）與下一個封包到達時檢查。
+// 放行延後的封包（§K.17 兩個收尾分支共用）。recovered＝缺的那片到了
+//（呼叫端先處理它、再呼叫這裡）；否則是放棄上一幀。
+static void graceFlush(PRTP_VIDEO_QUEUE queue, bool recovered, const char* why) {
+    int savedCount = queue->deferredCount;
+    struct {
+        PRTP_PACKET packet;
+        PRTPV_QUEUE_ENTRY entry;
+        int length;
+    } saved[RTPV_MAX_GRACE_PACKETS];
+    memcpy(saved, queue->deferredPackets, sizeof(saved[0]) * savedCount);
+    queue->deferredCount = 0;
+
+    if (recovered) {
+        Limelog("§K.17 grace: frame %u recovered — late shard arrived after %d deferred packet(s)\n",
+                queue->currentFrameNumber, savedCount);
+    }
+    else {
+        Limelog("§K.17 grace: frame %u NOT recovered after %d deferred packet(s), giving up (%s)\n",
+                queue->currentFrameNumber, savedCount, why);
+    }
+
+    // 放棄時：第一個延後封包觸發舊幀丟棄＋新幀初始化
+    for (int i = 0; i < savedCount; i++) {
+        int dret = RtpvAddPacketInternal(queue, saved[i].packet, saved[i].length, saved[i].entry);
+        if (dret != RTPF_RET_QUEUED) {
+            free(saved[i].packet);
+        }
+    }
+}
+
+void RtpvPollGrace(PRTP_VIDEO_QUEUE queue) {
+    if (queue->deferredCount > 0 &&
+            PltGetMicroseconds() - queue->deferredSinceUs >= RTPV_GRACE_MAX_US) {
+        graceFlush(queue, false, "timeout");
+    }
+}
+
 int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
     // §VR-MULTILINK-HOLD：多連線走自己的等待邏輯（§K.17 還有延後中的封包時先讓它收尾）
     if (queue->deferredCount == 0) {
@@ -2151,37 +2200,18 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         uint32_t peekFrame = LE32(peekNv->frameIndex);
 
         if (peekFrame == queue->currentFrameNumber) {
-            // The missing shard arrived! Process it for the old frame first.
-            int savedCount = queue->deferredCount;
-            struct {
-                PRTP_PACKET packet;
-                PRTPV_QUEUE_ENTRY entry;
-                int length;
-            } saved[RTPV_MAX_GRACE_PACKETS];
-            memcpy(saved, queue->deferredPackets, sizeof(saved[0]) * savedCount);
-            queue->deferredCount = 0;
-
-            Limelog("§K.17 grace: frame %u recovered — late shard arrived after %d deferred packet(s)\n",
-                    queue->currentFrameNumber, savedCount);
-
-            // Process the old frame's missing shard
+            // The missing shard arrived! Process it for the old frame first,
+            // then all deferred packets (they belong to the next frame).
             int ret = RtpvAddPacketInternal(queue, packet, length, packetEntry);
-
-            // Now process all deferred packets (they belong to the next frame)
-            for (int i = 0; i < savedCount; i++) {
-                int dret = RtpvAddPacketInternal(queue, saved[i].packet, saved[i].length, saved[i].entry);
-                if (dret != RTPF_RET_QUEUED) {
-                    free(saved[i].packet);
-                }
-            }
-
+            graceFlush(queue, true, NULL);
             return ret;
         }
         else {
             // Not the missing shard. Could be more new-frame packets or even
             // a frame beyond the deferred one.
             if (peekFrame == queue->deferredFrameNumber &&
-                queue->deferredCount < RTPV_MAX_GRACE_PACKETS) {
+                queue->deferredCount < RTPV_MAX_GRACE_PACKETS &&
+                PltGetMicroseconds() - queue->deferredSinceUs < RTPV_GRACE_MAX_US) {
                 // Same new frame, still within grace budget — defer this one too
                 queue->deferredPackets[queue->deferredCount].packet = packet;
                 queue->deferredPackets[queue->deferredCount].entry = packetEntry;
@@ -2190,27 +2220,9 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
                 return RTPF_RET_QUEUED;
             }
 
-            // Grace period exhausted (budget full or different frame entirely).
+            // Grace period exhausted (budget full, time limit, or different frame entirely).
             // Give up on the old frame and process all deferred + this packet.
-            int savedCount = queue->deferredCount;
-            struct {
-                PRTP_PACKET packet;
-                PRTPV_QUEUE_ENTRY entry;
-                int length;
-            } saved[RTPV_MAX_GRACE_PACKETS];
-            memcpy(saved, queue->deferredPackets, sizeof(saved[0]) * savedCount);
-            queue->deferredCount = 0;
-
-            Limelog("§K.17 grace: frame %u NOT recovered after %d deferred packet(s), giving up\n",
-                    queue->currentFrameNumber, savedCount);
-
-            // Process deferred packets first (triggers old frame discard + new frame init)
-            for (int i = 0; i < savedCount; i++) {
-                int dret = RtpvAddPacketInternal(queue, saved[i].packet, saved[i].length, saved[i].entry);
-                if (dret != RTPF_RET_QUEUED) {
-                    free(saved[i].packet);
-                }
-            }
+            graceFlush(queue, false, "budget");
 
             // Fall through to process this packet normally
         }
@@ -2246,6 +2258,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
                     queue->deferredPackets[0].length = length;
                     queue->deferredCount = 1;
                     queue->deferredFrameNumber = peekFrame;
+                    queue->deferredSinceUs = PltGetMicroseconds();
                     return RTPF_RET_QUEUED;
                 }
             }

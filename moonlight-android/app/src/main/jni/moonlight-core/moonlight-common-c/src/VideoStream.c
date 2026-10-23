@@ -530,6 +530,7 @@ static void VideoReceiveThreadProc(void* context) {
             break;
         }
         else if  (err == 0) {
+            RtpvPollGrace(&rtpQueue);  // §K.17-GRACE-TIMEOUT：接收逾時也要放行延後的封包
             if (mlHoldPollMs > 0) {
                 // 為了等待期限而縮短的逾時：把到期的放行，不算進「一直沒有影像」的計時
                 RtpvPollHold(&rtpQueue);
