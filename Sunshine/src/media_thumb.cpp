@@ -5,9 +5,12 @@
  * server 連結的 FFmpeg 只有編碼用的 libavcodec／libswscale／libavutil，沒有 libavformat，拆不開 mp4／mkv，
  * 所以改用作業系統本來就有的縮圖：
  *   - Windows：Shell 的 IShellItemImageFactory（檔案總管用的同一套，系統自己快取），WIC 縮成寬 320 的 JPEG。
- *     server 行程跑在使用者的工作階段（不是 Session 0），拿得到使用者的縮圖快取與解碼器。
- *   - Linux：先找 freedesktop 縮圖快取（~/.cache/thumbnails），沒有就呼叫 ffmpegthumbnailer 或 ffmpeg（有裝才有）。
- * 都拿不到時回 false（端點回 404，client 顯示預設圖示）。一次只做一張（排隊），單張最多等 8 秒。
+ *     server 以 SYSTEM 執行，縮圖一定在「模擬目前登入的使用者」之下做（code review 2026-10-23）：Shell 與第三方縮圖
+ *     處理程式、解碼器會解析分享資料夾裡別人放進去的檔案，不能用 SYSTEM 權限跑；模擬之後也才拿得到使用者的縮圖快取
+ *     與 HKCU 註冊的處理程式。沒有登入的使用者就不做。
+ *   - Linux：先找 freedesktop 縮圖快取（~/.cache/thumbnails，過期的不用），沒有就呼叫 ffmpegthumbnailer 或 ffmpeg。
+ * 都拿不到時回 false（端點回 404，client 顯示預設圖示）。工作執行緒自己拿序列鎖，一次只做一張；同時排隊的最多
+ * k_max_pending 個（超過直接回失敗）；單張整體期限 k_thumb_timeout（Linux 的幾個工具共用），呼叫端最多等 k_wait_timeout。
  */
 #include "media_share.h"
 
@@ -26,6 +29,8 @@
 #include "logging.h"
 
 #ifdef _WIN32
+  #include "src/platform/windows/misc.h"
+
   #include <windows.h>
   #include <shlwapi.h>
   #include <shobjidl.h>
@@ -49,7 +54,9 @@ namespace media_share {
 
   namespace {
     constexpr int k_thumb_width = 320;
-    constexpr auto k_thumb_timeout = 8s;
+    constexpr auto k_thumb_timeout = 8s;   // 單張的整體期限（Linux 的幾個工具共用）
+    constexpr auto k_wait_timeout = 20s;   // 呼叫端最多等這麼久（含排隊）
+    constexpr int k_max_pending = 6;       // 同時排隊／進行中的上限
 
     struct thumb_result_t {
       bool ok = false;
@@ -82,7 +89,7 @@ namespace media_share {
       }
     };
 
-    thumb_result_t shell_thumbnail(const fs::path &path) {
+    thumb_result_t shell_thumbnail_as_current_thread(const fs::path &path) {
       thumb_result_t r;
       const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
       HBITMAP hbmp = nullptr;
@@ -215,6 +222,28 @@ namespace media_share {
       }
       return r;
     }
+
+    thumb_result_t shell_thumbnail(const fs::path &path) {
+      if (!platf::is_running_as_system()) {
+        // 已經是使用者身分（例如直接執行 exe 而不是服務）
+        return shell_thumbnail_as_current_thread(path);
+      }
+      thumb_result_t r;
+      HANDLE token = platf::retrieve_users_token(false);
+      if (token == nullptr) {
+        r.error = "no signed-in user to generate thumbnails as";
+        return r;
+      }
+      const auto ec = platf::impersonate_current_user(token, [&]() {
+        r = shell_thumbnail_as_current_thread(path);
+      });
+      CloseHandle(token);
+      if (ec) {
+        r = {};
+        r.error = "could not impersonate the signed-in user";
+      }
+      return r;
+    }
 #elif defined(__linux__)
     bool read_file(const fs::path &p, std::string *out) {
       std::ifstream in(p, std::ios::binary);
@@ -227,9 +256,11 @@ namespace media_share {
 
     // freedesktop 縮圖規格：~/.cache/thumbnails/<大小>/<md5("file://" + 百分比編碼的絕對路徑)>.png
     bool freedesktop_thumbnail(const fs::path &path, thumb_result_t *r) {
+      // 編碼方式同 GLib 的 g_filename_to_uri（縮圖程式用它算 MD5）：unreserved、'/'、子分隔符號與 ':' '@' 不編碼
       std::string uri = "file://";
+      static const std::string keep = "-_.~/!$&'()*+,;=:@";
       for (const unsigned char c : path.string()) {
-        if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~') {
+        if (std::isalnum(c) || keep.find(static_cast<char>(c)) != std::string::npos) {
           uri += static_cast<char>(c);
         }
         else {
@@ -259,8 +290,17 @@ namespace media_share {
       else {
         return false;
       }
+      std::error_code ec;
+      const auto video_mtime = fs::last_write_time(path, ec);
       for (const char *dir : {"large", "normal", "x-large", "xx-large"}) {
-        if (read_file(base / "thumbnails" / dir / (hex + ".png"), &r->data)) {
+        const fs::path png = base / "thumbnails" / dir / (hex + ".png");
+        // 規格要比對 PNG 裡的 Thumb::MTime；這裡用檔案時間近似：影片比縮圖新＝過期，不用
+        std::error_code ec2;
+        const auto png_mtime = fs::last_write_time(png, ec2);
+        if (ec2 || (!ec && video_mtime > png_mtime)) {
+          continue;
+        }
+        if (read_file(png, &r->data)) {
           r->content_type = "image/png";
           r->ok = true;
           return true;
@@ -269,13 +309,19 @@ namespace media_share {
       return false;
     }
 
-    bool run_tool(const fs::path &tool, const std::vector<std::string> &args, const fs::path &out, thumb_result_t *r) {
+    bool run_tool(const fs::path &tool, const std::vector<std::string> &args, const fs::path &out,
+                  std::chrono::steady_clock::time_point deadline, thumb_result_t *r) {
       namespace bp = boost::process::v1;
+      const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+      if (left.count() <= 0) {
+        r->error = "out of time";
+        return false;
+      }
       std::error_code ec;
       fs::remove(out, ec);
       try {
         bp::child c(tool.string(), bp::args(args), bp::std_out > bp::null, bp::std_err > bp::null, bp::std_in < bp::null);
-        if (!c.wait_for(std::chrono::duration_cast<std::chrono::milliseconds>(k_thumb_timeout))) {
+        if (!c.wait_for(left)) {
           c.terminate();
           r->error = tool.filename().string() + " timed out";
           return false;
@@ -299,18 +345,19 @@ namespace media_share {
       if (freedesktop_thumbnail(path, &r)) {
         return r;
       }
+      const auto deadline = std::chrono::steady_clock::now() + k_thumb_timeout;
       static std::atomic<unsigned> counter {0};
       const fs::path out = fs::temp_directory_path() / ("viple-thumb-" + std::to_string(getpid()) + "-" + std::to_string(counter++) + ".jpg");
       const std::string w = std::to_string(k_thumb_width);
       if (const auto t = bp::search_path("ffmpegthumbnailer"); !t.empty()) {
-        if (run_tool(t.string(), {"-i", path.string(), "-o", out.string(), "-c", "jpeg", "-s", w, "-q", "7"}, out, &r)) {
+        if (run_tool(t.string(), {"-i", path.string(), "-o", out.string(), "-c", "jpeg", "-s", w, "-q", "7"}, out, deadline, &r)) {
           return r;
         }
       }
       if (const auto t = bp::search_path("ffmpeg"); !t.empty()) {
         // 先跳到第 15 秒（片頭常是黑畫面），片子太短抓不到再從頭
         for (const char *ss : {"15", "0"}) {
-          if (run_tool(t.string(), {"-v", "error", "-y", "-ss", ss, "-i", path.string(), "-frames:v", "1", "-vf", "scale=" + w + ":-2", "-q:v", "5", out.string()}, out, &r)) {
+          if (run_tool(t.string(), {"-v", "error", "-y", "-ss", ss, "-i", path.string(), "-frames:v", "1", "-vf", "scale=" + w + ":-2", "-q:v", "5", out.string()}, out, deadline, &r)) {
             return r;
           }
         }
@@ -325,20 +372,32 @@ namespace media_share {
 
   bool thumbnail(const fs::path &path, std::string *data, std::string *content_type, std::string *error) {
 #if defined(_WIN32) || defined(__linux__)
-    // 一次只做一張：頭盔一頁可能一口氣要幾十張，不要同時開幾十個解碼
+    // 一次只做一張：頭盔一頁可能一口氣要幾十張，不要同時開幾十個解碼。鎖由工作執行緒自己拿，呼叫端逾時離開之後，
+    // 那條執行緒還在做的期間下一張照樣排隊（不會疊起好幾個 ffmpeg）；排隊的數量有上限（處理程式卡死時不會一直累積執行緒）
     static std::mutex serial;
-    std::lock_guard<std::mutex> lk(serial);
-    // 在自己的執行緒做（Windows 要 STA；卡住時這條請求照樣在期限內回應，那條執行緒自己收尾）
+    static std::atomic<int> pending {0};
+    if (pending.fetch_add(1) >= k_max_pending) {
+      pending.fetch_sub(1);
+      *error = "too many thumbnail requests in progress";
+      return false;
+    }
     auto prom = std::make_shared<std::promise<thumb_result_t>>();
     auto fut = prom->get_future();
+    // 在自己的執行緒做（Windows 要 STA；卡住時這條請求照樣在期限內回應，那條執行緒自己收尾）
     std::thread([prom, path]() {
+      thumb_result_t r;
+      {
+        std::lock_guard<std::mutex> lk(serial);
   #ifdef _WIN32
-      prom->set_value(shell_thumbnail(path));
+        r = shell_thumbnail(path);
   #else
-      prom->set_value(linux_thumbnail(path));
+        r = linux_thumbnail(path);
   #endif
+      }
+      pending.fetch_sub(1);
+      prom->set_value(std::move(r));
     }).detach();
-    if (fut.wait_for(k_thumb_timeout + 1s) != std::future_status::ready) {
+    if (fut.wait_for(k_wait_timeout) != std::future_status::ready) {
       *error = "timed out";
       return false;
     }

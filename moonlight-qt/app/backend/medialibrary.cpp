@@ -292,6 +292,9 @@ void MediaLibrary::hostBrowse(ComputerManager* cm, int host, int root, const QSt
                         else if (r.name() == QLatin1String("Size")) {
                             cur[QStringLiteral("size")] = r.readElementText().toLongLong();
                         }
+                        else if (r.name() == QLatin1String("Mtime")) {
+                            cur[QStringLiteral("mtime")] = r.readElementText().toLongLong();
+                        }
                     }
                     else if (r.isEndElement() && r.name() == QLatin1String("Entry")) {
                         const QString name = cur.value(QStringLiteral("name")).toString();
@@ -302,6 +305,9 @@ void MediaLibrary::hostBrowse(ComputerManager* cm, int host, int root, const QSt
                         m[QStringLiteral("isDir")] = isDir;
                         m[QStringLiteral("detail")] = isDir ? QString() : sizeText(cur.value(QStringLiteral("size")).toLongLong());
                         m[QStringLiteral("format")] = isDir ? QString() : guessFormat(name);
+                        // §VR-PLAYER-THUMB：縮圖快取鍵的戳記（主機上同名檔案換掉時換新縮圖）
+                        m[QStringLiteral("stamp")] = QStringLiteral("%1_%2").arg(cur.value(QStringLiteral("size")).toLongLong())
+                                                         .arg(cur.value(QStringLiteral("mtime")).toLongLong());
                         (isDir ? dirs : files).append(m);
                         cur.clear();
                     }
@@ -332,7 +338,7 @@ QString MediaLibrary::hostFileUrl(ComputerManager* cm, int host, int root, const
     return url.toString(QUrl::FullyEncoded);
 }
 
-QString MediaLibrary::hostThumbId(ComputerManager* cm, int host, int root, const QString& path) const
+QString MediaLibrary::hostThumbId(ComputerManager* cm, int host, int root, const QString& path, const QString& stamp) const
 {
     NvComputer* c = hostAt(cm, host);
     if (c == nullptr) {
@@ -344,7 +350,7 @@ QString MediaLibrary::hostThumbId(ComputerManager* cm, int host, int root, const
         uuid = c->uuid;
     }
     // 清單的索引會變（主機上下線、排序），id 用 uuid
-    return QStringLiteral("host/%1/%2/%3").arg(uuid).arg(root).arg(VideoThumbProvider::encodeId(path));
+    return QStringLiteral("host/%1/%2/%3/%4").arg(uuid).arg(root).arg(VideoThumbProvider::encodeId(stamp)).arg(VideoThumbProvider::encodeId(path));
 }
 
 bool MediaLibrary::isUrl(const QString& text) const

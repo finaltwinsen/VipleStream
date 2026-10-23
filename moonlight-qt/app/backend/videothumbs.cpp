@@ -19,10 +19,12 @@
 #include <QQuickTextureFactory>
 #include <QReadLocker>
 #include <QRegularExpression>
-#include <QRunnable>
+#include <QThread>
 #include <QThreadPool>
 #include <QUrl>
 #include <QUrlQuery>
+
+#include <chrono>
 
 #include "SDL_compat.h"
 
@@ -37,15 +39,34 @@ extern "C" {
 namespace {
 
 constexpr int kThumbWidth = 320;
-constexpr int kHostTimeoutMs = 15000;  // host 一次只做一張，一頁幾十張時後面的要排隊
+constexpr int kHostTimeoutMs = 25000;  // host 一次只做一張（最多等 20 s，含排隊），這邊等久一點
+
+using CancelFlag = std::shared_ptr<std::atomic<bool>>;
 
 #ifdef HAVE_VR_PLAYER
-// 頭盔本機檔：跳到片長 10% 的位置（片頭常是黑畫面）解一張，縮成寬 kThumbWidth 的 RGB
-QImage extractLocalFrame(const QString& path)
+// FFmpeg 的中斷回呼：取消了、或超過期限就中斷（避免卡在讀不到的檔案上）
+struct InterruptCtx {
+    CancelFlag cancel;
+    std::chrono::steady_clock::time_point deadline;
+};
+int interruptCb(void* opaque)
 {
-    AVFormatContext* fmt = nullptr;
-    if (avformat_open_input(&fmt, path.toUtf8().constData(), nullptr, nullptr) < 0) {
+    auto* ctx = static_cast<InterruptCtx*>(opaque);
+    return (ctx->cancel && ctx->cancel->load()) || std::chrono::steady_clock::now() > ctx->deadline ? 1 : 0;
+}
+
+// 頭盔本機檔：跳到片長 10% 的位置（片頭常是黑畫面）解一張，縮成寬 kThumbWidth 的 RGB
+QImage extractLocalFrame(const QString& path, const CancelFlag& cancel)
+{
+    InterruptCtx ictx {cancel, std::chrono::steady_clock::now() + std::chrono::seconds(10)};
+    AVFormatContext* fmt = avformat_alloc_context();
+    if (fmt == nullptr) {
         return {};
+    }
+    fmt->interrupt_callback.callback = interruptCb;
+    fmt->interrupt_callback.opaque = &ictx;
+    if (avformat_open_input(&fmt, path.toUtf8().constData(), nullptr, nullptr) < 0) {
+        return {};  // 失敗時 FFmpeg 已經釋放 fmt
     }
     QImage out;
     AVCodecContext* cc = nullptr;
@@ -72,13 +93,13 @@ QImage extractLocalFrame(const QString& path)
             av_seek_frame(fmt, -1, fmt->duration / 10, AVSEEK_FLAG_BACKWARD);
         }
         bool got = false;
-        for (int packets = 0; !got && packets < 600 && av_read_frame(fmt, pkt) >= 0; packets++) {
+        for (int packets = 0; !got && packets < 600 && !interruptCb(&ictx) && av_read_frame(fmt, pkt) >= 0; packets++) {
             if (pkt->stream_index == si && avcodec_send_packet(cc, pkt) >= 0 && avcodec_receive_frame(cc, frame) >= 0) {
                 got = true;
             }
             av_packet_unref(pkt);
         }
-        if (!got) {
+        if (!got && !interruptCb(&ictx)) {
             avcodec_send_packet(cc, nullptr);
             got = avcodec_receive_frame(cc, frame) >= 0;
         }
@@ -128,22 +149,61 @@ QString youtubeId(const QUrl& u)
     return QString();
 }
 
-bool computerOnline(NvComputer* c)
+// 背景工作的結果排回 GUI 執行緒；provider 已經不在就丟掉
+void post(const std::shared_ptr<bool>& alive, VideoThumbProvider* provider, const QString& key, const QImage& img, const QString& err,
+          bool definitive, const char* kind)
 {
-    QReadLocker lock(&c->lock);
-    return c->state == NvComputer::CS_ONLINE && c->pairState == NvComputer::PS_PAIRED && !c->activeAddress.isNull();
+    QMetaObject::invokeMethod(
+        QCoreApplication::instance(),
+        [alive, provider, key, img, err, definitive, kind]() {
+            if (*alive) {
+                provider->complete(key, img, err, definitive, kind);
+            }
+        },
+        Qt::QueuedConnection);
 }
 
 class VideoThumbResponse : public QQuickImageResponse
 {
 public:
-    VideoThumbResponse(VideoThumbProvider* provider, const QString& id) : m_Provider(provider), m_Id(id) {}
+    VideoThumbResponse(VideoThumbProvider* provider, const QString& id) : m_Provider(provider), m_Alive(provider->alive()), m_Id(id) {}
+
+    ~VideoThumbResponse() override
+    {
+        // 在 GUI 執行緒（這個物件搬到那裡了）；還掛在某個工作上就撤掉
+        if (m_Joined && *m_Alive) {
+            m_Provider->withdraw(m_Key, this);
+        }
+    }
 
     QQuickTextureFactory* textureFactory() const override
     {
         return m_Image.isNull() ? nullptr : QQuickTextureFactory::textureFactoryForImage(m_Image);
     }
     QString errorString() const override { return m_Error; }
+
+    // QML 不要了（捲出畫面、換頁、切回清單）：可能從載圖執行緒呼叫，排回 GUI 執行緒撤掉
+    void cancel() override
+    {
+        QMetaObject::invokeMethod(
+            this,
+            [this]() {
+                if (m_Joined && *m_Alive) {
+                    m_Provider->withdraw(m_Key, this);
+                }
+                m_Joined = false;
+            },
+            Qt::QueuedConnection);
+    }
+
+    // provider 交結果（GUI 執行緒）
+    void deliver(const QImage& img, const QString& err)
+    {
+        m_Joined = false;
+        m_Image = img;
+        m_Error = img.isNull() ? (err.isEmpty() ? QStringLiteral("no thumbnail") : err) : QString();
+        emit finished();
+    }
 
     // GUI 執行緒
     void start()
@@ -155,127 +215,138 @@ public:
         }
         else if (kind == QLatin1String("host")) {
             startHost(rest.section(QLatin1Char('/'), 0, 0), rest.section(QLatin1Char('/'), 1, 1).toInt(),
-                      VideoThumbProvider::decodeId(rest.section(QLatin1Char('/'), 2)));
+                      rest.section(QLatin1Char('/'), 2, 2), VideoThumbProvider::decodeId(rest.section(QLatin1Char('/'), 3)));
         }
         else if (kind == QLatin1String("src")) {
             startSource(VideoThumbProvider::decodeId(rest));
         }
         else {
-            finish({}, QStringLiteral("unknown thumbnail id"), nullptr);
+            deliver({}, QStringLiteral("unknown thumbnail id"));
         }
     }
 
 private:
-    // 快取命中就直接回；回 true＝已處理（命中或已知拿不到）
-    bool fromCache()
+    // 快取命中、已知拿不到、或已經有人在抓：回 true（已處理）。否則回 false，m_Cancel 是新工作的取消旗標
+    bool prepare(const QString& key)
     {
-        if (m_Provider->knownMissing(m_Key)) {
-            finish({}, QStringLiteral("no thumbnail"), nullptr);
+        m_Key = key;
+        if (m_Provider->knownMissing(key)) {
+            deliver({}, QStringLiteral("no thumbnail"));
             return true;
         }
-        QImage img(m_Provider->cachePath(m_Key));
+        QImage img(m_Provider->cachePath(key));
         if (!img.isNull()) {
-            finish(img, QString(), nullptr);
+            deliver(img, QString());
             return true;
         }
+        m_Joined = true;
+        if (m_Provider->joinPending(key, this)) {
+            return true;
+        }
+        m_Cancel = m_Provider->beginPending(key, this);
         return false;
     }
 
-public:
-    // 背景結果（任何執行緒）排回 GUI 執行緒；QPointer 只在 GUI 執行緒上看（回應可能已被 QML 取消、刪掉）
-    static void deliver(QPointer<VideoThumbResponse> self, const QImage& img, const QString& err, const char* kind)
+    void startLocal(QString path)
     {
-        QMetaObject::invokeMethod(
-            QCoreApplication::instance(),
-            [self, img, err, kind]() {
-                if (self) {
-                    self->finish(img, err, kind);
-                }
-            },
-            Qt::QueuedConnection);
-    }
-
-private:
-    void finish(const QImage& img, const QString& err, const char* kind)
-    {
-        m_Image = img;
-        m_Error = img.isNull() ? (err.isEmpty() ? QStringLiteral("no thumbnail") : err) : QString();
-        if (kind != nullptr) {
-            // 新產生的：存快取或記下拿不到
-            if (!img.isNull()) {
-                img.save(m_Provider->cachePath(m_Key), "JPG", 82);
-            }
-            else if (!m_Key.isEmpty()) {
-                m_Provider->markMissing(m_Key);
-            }
-            m_Provider->noteResult(!img.isNull(), kind);
-            if (img.isNull() && !m_LoggedFail) {
-                m_LoggedFail = true;
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-THUMB] %s: no thumbnail (%s)", kind, qPrintable(m_Error));
-            }
+        // 本機檔只接受一般路徑或 file:（code review：rtsp://、udp:// 這類來源交給 FFmpeg 會一直卡在連線上）
+        static const QRegularExpression scheme(QStringLiteral("^[A-Za-z][A-Za-z0-9+.-]*:"));
+        if (path.startsWith(QLatin1String("file:"), Qt::CaseInsensitive)) {
+            path = QUrl(path).toLocalFile();
         }
-        emit finished();
-    }
-
-    void startLocal(const QString& path)
-    {
+        else if (scheme.match(path).hasMatch() && !(path.size() > 2 && path.at(1) == QLatin1Char(':'))) {
+            deliver({}, QStringLiteral("no thumbnail for this kind of source"));
+            return;
+        }
         const QFileInfo fi(path);
-        m_Key = QStringLiteral("local|%1|%2|%3").arg(fi.absoluteFilePath()).arg(fi.size()).arg(fi.lastModified().toSecsSinceEpoch());
-        if (fromCache()) {
+        if (!fi.isFile()) {
+            deliver({}, QStringLiteral("file not found"));
+            return;
+        }
+        if (prepare(QStringLiteral("local|%1|%2|%3").arg(fi.absoluteFilePath()).arg(fi.size()).arg(fi.lastModified().toSecsSinceEpoch()))) {
             return;
         }
 #ifdef HAVE_VR_PLAYER
-        QPointer<VideoThumbResponse> self(this);
-        m_Provider->decodePool()->start([self, path]() {
-            const QImage img = extractLocalFrame(path);
-            deliver(self, img, QStringLiteral("could not decode a frame"), "local");
+        const auto alive = m_Alive;
+        VideoThumbProvider* provider = m_Provider;
+        const QString key = m_Key;
+        const CancelFlag cancel = m_Cancel;
+        m_Provider->decodePool()->start([alive, provider, key, cancel, path]() {
+            if (cancel->load()) {
+                return;  // 沒人等了
+            }
+            const QImage img = extractLocalFrame(path, cancel);
+            if (!cancel->load()) {
+                post(alive, provider, key, img, QStringLiteral("could not decode a frame"), true, "local");
+            }
         });
 #else
-        finish({}, QStringLiteral("local thumbnails need the video player build"), "local");
+        m_Provider->complete(m_Key, {}, QStringLiteral("local thumbnails need the video player build"), true, "local");
 #endif
     }
 
-    void startHost(const QString& uuid, int root, const QString& path)
+    void startHost(const QString& uuid, int root, const QString& stamp, const QString& path)
     {
-        m_Key = QStringLiteral("host|%1|%2|%3").arg(uuid).arg(root).arg(path);
-        if (fromCache()) {
-            return;
-        }
+        // 戳記（大小_修改時間）放進快取鍵：主機上同名檔案換掉之後會重新產生（code review）
         auto* cm = m_Provider->engine()->singletonInstance<ComputerManager*>("ComputerManager", "ComputerManager");
-        NvComputer* c = nullptr;
+        NvAddress address;
+        uint16_t httpsPort = 0;
+        QSslCertificate serverCert;
+        bool online = false;
         if (cm != nullptr) {
             for (NvComputer* x : cm->getComputers()) {
                 QReadLocker lock(&x->lock);
                 if (x->uuid == uuid) {
-                    c = x;
+                    // 背景工作不拿 NvComputer*（主機可能在工作排隊時被刪掉）：在這裡把連線需要的東西複製下來
+                    online = x->state == NvComputer::CS_ONLINE && x->pairState == NvComputer::PS_PAIRED && !x->activeAddress.isNull();
+                    address = x->activeAddress;
+                    httpsPort = x->activeHttpsPort;
+                    serverCert = x->serverCert;
                     break;
                 }
             }
         }
-        if (c == nullptr || !computerOnline(c)) {
+        if (!online) {
             // 沒在線上不記成拿不到：主機上線後再捲回來要能補上
-            finish({}, QStringLiteral("the PC is not online"), nullptr);
+            deliver({}, QStringLiteral("the PC is not online"));
             return;
         }
-        QPointer<VideoThumbResponse> self(this);
+        if (prepare(QStringLiteral("host|%1|%2|%3|%4").arg(uuid).arg(root).arg(stamp).arg(path))) {
+            return;
+        }
+        const auto alive = m_Alive;
+        VideoThumbProvider* provider = m_Provider;
+        const QString key = m_Key;
+        const CancelFlag cancel = m_Cancel;
         const QString query = QStringLiteral("root=%1&path=%2").arg(root).arg(QString::fromLatin1(QUrl::toPercentEncoding(path)));
-        m_Provider->hostPool()->start([self, c, query]() {
+        m_Provider->hostPool()->start([alive, provider, key, cancel, query, address, httpsPort, serverCert]() {
+            if (cancel->load()) {
+                return;
+            }
             QImage img;
             QString err;
+            bool definitive = false;
             try {
-                NvHTTP http(c);
+                NvHTTP http(address, httpsPort, serverCert);
                 const QByteArray data = http.openConnectionToBytes(http.httpsBaseUrl(), QStringLiteral("viple/media/thumb"), query,
                                                                    kHostTimeoutMs, NvHTTP::NvLogLevel::NVLL_NONE);
                 img = QImage::fromData(data);
                 if (img.isNull()) {
+                    // 舊 server 對不認得的路徑回 HTTP 200＋404 的 XML：確定沒有
                     err = QStringLiteral("bad image data");
+                    definitive = true;
                 }
+            } catch (const QtNetworkReplyException& e) {
+                err = QString::fromUtf8(e.what());
+                definitive = e.getError() == QNetworkReply::ContentNotFoundError;
             } catch (const std::exception& e) {
                 err = QString::fromUtf8(e.what());
             } catch (...) {
                 err = QStringLiteral("request failed");
             }
-            deliver(self, img, err, "host");
+            if (!cancel->load() || !img.isNull()) {
+                post(alive, provider, key, img, err, definitive, "host");
+            }
         });
     }
 
@@ -289,7 +360,7 @@ private:
                 return;
             }
             if (u.path() == QLatin1String("/viple/media/file")) {
-                // 主機分享的檔案：用網址的位址找到那台主機，換成跟「電腦」分頁同一個快取鍵
+                // 主機分享的檔案：用網址的位址找到那台主機，換成跟「電腦」分頁同一套快取鍵（沒有戳記）
                 const QUrlQuery q(u);
                 const int root = q.queryItemValue(QStringLiteral("root")).toInt();
                 const QString path = q.queryItemValue(QStringLiteral("path"), QUrl::FullyDecoded);
@@ -304,22 +375,21 @@ private:
                             match = match || (!a.isNull() && a.address().compare(addr, Qt::CaseInsensitive) == 0);
                         }
                         // 播放網址可能是當時的另一個位址（例如在外面用 Tailscale、在家用區網）：主機自己廣告的網卡位址也算
-                        // （2026-10-23 頭盔：區網位址的最近播放全部 unknown PC）
                         for (const NvNetworkInterface& nic : x->serverAdvertisedInterfaces) {
                             match = match || nic.address.compare(addr, Qt::CaseInsensitive) == 0;
                         }
                         if (match) {
                             const QString uuid = x->uuid;
                             lock.unlock();
-                            startHost(uuid, root, path);
+                            startHost(uuid, root, QString(), path);
                             return;
                         }
                     }
                 }
-                finish({}, QStringLiteral("unknown PC"), nullptr);
+                deliver({}, QStringLiteral("unknown PC"));
                 return;
             }
-            finish({}, QStringLiteral("no thumbnail for this link"), nullptr);
+            deliver({}, QStringLiteral("no thumbnail for this link"));
             return;
         }
         startLocal(source);
@@ -327,38 +397,50 @@ private:
 
     void startYoutube(const QString& videoId)
     {
-        m_Key = QStringLiteral("yt|%1").arg(videoId);
-        if (fromCache()) {
+        if (prepare(QStringLiteral("yt|%1").arg(videoId))) {
             return;
         }
         QNetworkRequest req(QUrl(QStringLiteral("https://i.ytimg.com/vi/%1/mqdefault.jpg").arg(videoId)));
         req.setTransferTimeout(10000);
         QNetworkReply* reply = m_Provider->network()->get(req);
-        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        const auto alive = m_Alive;
+        VideoThumbProvider* provider = m_Provider;
+        const QString key = m_Key;
+        // 回應物件可能先被刪掉：結果交給 provider（以 reply 為 context，provider 在就處理）
+        QObject::connect(reply, &QNetworkReply::finished, reply, [alive, provider, key, reply]() {
             reply->deleteLater();
+            if (!*alive) {
+                return;
+            }
             QImage img;
+            bool definitive = reply->error() == QNetworkReply::ContentNotFoundError;
             if (reply->error() == QNetworkReply::NoError) {
                 img = QImage::fromData(reply->readAll());
-                if (img.width() > kThumbWidth) {
+                if (img.isNull()) {
+                    definitive = true;
+                }
+                else if (img.width() > kThumbWidth) {
                     img = img.scaledToWidth(kThumbWidth, Qt::SmoothTransformation);
                 }
             }
-            finish(img, reply->errorString(), "youtube");
+            provider->complete(key, img, reply->errorString(), definitive, "youtube");
         });
     }
 
     VideoThumbProvider* m_Provider;
+    std::shared_ptr<bool> m_Alive;
     QString m_Id;
     QString m_Key;
+    CancelFlag m_Cancel;
+    bool m_Joined = false;
     QImage m_Image;
     QString m_Error;
-    bool m_LoggedFail = false;
 };
 
 }  // namespace
 
 VideoThumbProvider::VideoThumbProvider(QQmlEngine* engine)
-    : m_Engine(engine), m_DecodePool(new QThreadPool()), m_HostPool(new QThreadPool())
+    : m_Engine(engine), m_DecodePool(new QThreadPool()), m_HostPool(new QThreadPool()), m_Alive(std::make_shared<bool>(true))
 {
     // 頭盔上解碼吃 CPU，一次一張；主機那邊本來就一次只做一張，這邊最多兩個請求在路上
     m_DecodePool->setMaxThreadCount(1);
@@ -371,12 +453,23 @@ VideoThumbProvider::VideoThumbProvider(QQmlEngine* engine)
 
 VideoThumbProvider::~VideoThumbProvider()
 {
+    // 之後排回來的結果都丟掉；還在排隊的工作清掉，進行中的設取消旗標
+    *m_Alive = false;
+    for (auto it = m_Pending.begin(); it != m_Pending.end(); ++it) {
+        it->cancel->store(true);
+    }
+    m_Pending.clear();
     m_DecodePool->clear();
     m_HostPool->clear();
-    m_DecodePool->waitForDone(2000);
-    m_HostPool->waitForDone(2000);
-    delete m_DecodePool;
-    delete m_HostPool;
+    // 結束程式時不要等卡住的連線（code review：~QThreadPool 會無限等）：短暫等一下，做不完就讓它們跟著行程結束
+    const bool decodeDone = m_DecodePool->waitForDone(1000);
+    const bool hostDone = m_HostPool->waitForDone(1000);
+    if (decodeDone) {
+        delete m_DecodePool;
+    }
+    if (hostDone) {
+        delete m_HostPool;
+    }
     delete m_Network;
 }
 
@@ -419,11 +512,65 @@ QString VideoThumbProvider::cachePath(const QString& key) const
     return m_CacheDir + QLatin1Char('/') + QString::fromLatin1(h) + QStringLiteral(".jpg");
 }
 
-void VideoThumbProvider::noteResult(bool ok, const char* kind)
+bool VideoThumbProvider::joinPending(const QString& key, QQuickImageResponse* r)
 {
-    (ok ? m_StatOk : m_StatFail)++;
+    auto it = m_Pending.find(key);
+    if (it == m_Pending.end()) {
+        return false;
+    }
+    it->waiters.append(QPointer<QQuickImageResponse>(r));
+    return true;
+}
+
+std::shared_ptr<std::atomic<bool>> VideoThumbProvider::beginPending(const QString& key, QQuickImageResponse* r)
+{
+    Pending p;
+    p.waiters.append(QPointer<QQuickImageResponse>(r));
+    p.cancel = std::make_shared<std::atomic<bool>>(false);
+    m_Pending.insert(key, p);
+    return p.cancel;
+}
+
+void VideoThumbProvider::withdraw(const QString& key, QQuickImageResponse* r)
+{
+    auto it = m_Pending.find(key);
+    if (it == m_Pending.end()) {
+        return;
+    }
+    it->waiters.removeIf([r](const QPointer<QQuickImageResponse>& w) { return w.isNull() || w.data() == r; });
+    if (it->waiters.isEmpty()) {
+        // 沒人等了：還沒開始的工作會直接跳過，進行中的做完也不交
+        it->cancel->store(true);
+        m_Pending.erase(it);
+    }
+}
+
+void VideoThumbProvider::complete(const QString& key, const QImage& img, const QString& err, bool definitive, const char* kind)
+{
+    if (!img.isNull()) {
+        img.save(cachePath(key), "JPG", 82);
+    }
+    else if (definitive) {
+        m_Missing.insert(key);
+    }
+    (img.isNull() ? m_StatFail : m_StatOk)++;
     if ((m_StatOk + m_StatFail) % 20 == 1) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-THUMB] generated ok=%d failed=%d (last: %s %s)", m_StatOk, m_StatFail,
-                    kind, ok ? "ok" : "failed");
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-THUMB] generated ok=%d failed=%d (last: %s %s)", m_StatOk, m_StatFail, kind,
+                    img.isNull() ? "failed" : "ok");
+    }
+    if (img.isNull() && m_StatFail <= 3) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-THUMB] %s: no thumbnail (%s%s)", kind, qPrintable(err),
+                    definitive ? "" : "; will retry later");
+    }
+    const auto it = m_Pending.find(key);
+    if (it == m_Pending.end()) {
+        return;  // 沒人等了（全都取消）
+    }
+    const QList<QPointer<QQuickImageResponse>> waiters = it->waiters;
+    m_Pending.erase(it);
+    for (const auto& w : waiters) {
+        if (!w.isNull()) {
+            static_cast<VideoThumbResponse*>(w.data())->deliver(img, err);
+        }
     }
 }

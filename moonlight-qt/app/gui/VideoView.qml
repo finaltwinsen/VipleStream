@@ -30,8 +30,8 @@ Item {
     function thumbKey(s) { return encodeURIComponent(s).replace(/~/g, "%7E").replace(/%/g, "~") }
     function localThumb(path) { return "image://vthumb/local/" + thumbKey(path) }
     function sourceThumb(source) { return "image://vthumb/src/" + thumbKey(source) }
-    function hostThumb(root, path) {
-        var id = MediaLibrary.hostThumbId(ComputerManager, videoView.hostIndex, root, path)
+    function hostThumb(root, path, stamp) {
+        var id = MediaLibrary.hostThumbId(ComputerManager, videoView.hostIndex, root, path, stamp || "")
         return id !== "" ? "image://vthumb/" + id : ""
     }
     function cellW(view) { return gridMode ? Math.floor(view.width / gridColumns) : view.width }
@@ -357,7 +357,8 @@ Item {
                 hostModel.append({ "name": e.name, "path": root < 0 ? "" : e.path, "root": root < 0 ? e.index : root,
                                    "isDir": root < 0 ? true : e.isDir,
                                    "detail": root < 0 ? (e.drive ? qsTr("Drive") : qsTr("Shared folder")) : e.detail,
-                                   "format": root < 0 ? "" : e.format, "drive": root < 0 && e.drive === true })
+                                   "format": root < 0 ? "" : e.format, "drive": root < 0 && e.drive === true,
+                                   "stamp": root < 0 ? "" : (e.stamp || "") })
             }
             hostMessage.text = error !== "" ? error : (entries.length === 0 ? qsTr("This folder has no videos.") : "")
             hostEntryList.currentIndex = 0
@@ -656,7 +657,7 @@ Item {
                                 ThumbCard {
                                     anchors.fill: parent
                                     visible: videoView.gridMode
-                                    thumb: visible && !model.isDir && !model.drive ? videoView.hostThumb(model.root, model.path) : ""
+                                    thumb: visible && !model.isDir && !model.drive ? videoView.hostThumb(model.root, model.path, model.stamp) : ""
                                     title: model.name
                                     subtitle: model.isDir ? "" : (model.format !== "" ? model.format + " · " : "") + model.detail
                                     folder: model.isDir && !model.drive

@@ -2154,19 +2154,24 @@ namespace nvhttp {
       response->write(SimpleWeb::StatusCode::client_error_not_found);
       return;
     }
-    std::string data, type;
-    const auto t0 = std::chrono::steady_clock::now();
-    if (!media_share::thumbnail(p, &data, &type, &err)) {
-      BOOST_LOG(info) << "[VIPLE-MEDIA] thumb unavailable root="sv << root << ": "sv << err;
-      response->write(SimpleWeb::StatusCode::client_error_not_found);
-      return;
-    }
-    BOOST_LOG(debug) << "[VIPLE-MEDIA] thumb root="sv << root << " bytes="sv << data.size() << " in "sv
-                     << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() << " ms"sv;
-    SimpleWeb::CaseInsensitiveMultimap h;
-    h.emplace("Content-Type", type);
-    h.emplace("Cache-Control", "private, max-age=86400");
-    response->write(SimpleWeb::StatusCode::success_ok, data, h);
+    // 縮圖可能要好幾秒：https_server 只有一條執行緒，不能在這裡等（code review 2026-10-23：會卡住 /serverinfo、/launch、
+    // 影片的範圍請求）。改在自己的執行緒產生，做完再寫回應——Simple-Web-Server 的回應在最後一個 shared_ptr 釋放時才送出，
+    // 支援從別的執行緒寫（官方範例的做法）；不是 Response::send() 的邊讀邊送（那個 10-19 曾讓整個 HTTPS 卡死）。
+    std::thread([response, p, root]() {
+      std::string data, type, err;
+      const auto t0 = std::chrono::steady_clock::now();
+      if (!media_share::thumbnail(p, &data, &type, &err)) {
+        BOOST_LOG(info) << "[VIPLE-MEDIA] thumb unavailable root="sv << root << ": "sv << err;
+        response->write(SimpleWeb::StatusCode::client_error_not_found);
+        return;
+      }
+      BOOST_LOG(debug) << "[VIPLE-MEDIA] thumb root="sv << root << " bytes="sv << data.size() << " in "sv
+                       << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() << " ms"sv;
+      SimpleWeb::CaseInsensitiveMultimap h;
+      h.emplace("Content-Type", type);
+      h.emplace("Cache-Control", "private, max-age=86400");
+      response->write(SimpleWeb::StatusCode::success_ok, data, h);
+    }).detach();
   }
 
   void appasset(resp_https_t response, req_https_t request) {
