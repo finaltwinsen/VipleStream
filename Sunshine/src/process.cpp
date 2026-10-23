@@ -208,6 +208,47 @@ namespace proc {
     }
     return running;
   }
+
+  // §STEAM-WATCHDOG-RUNNING（2026-10-23）：Steam 對每個 app 另外記 Apps\<AppID>\Running（REG_DWORD，執行中＝1）。
+  // RunningAppID 只是「Steam 當下認為的目前遊戲」，旁邊的程式進出就會跳：頭盔實測上一場 Eleven Table Tennis 殘留的
+  // UnityCrashHandler64.exe 結束時，RunningAppID 從剑途跳成 250820（SteamVR），剑途其實還在跑，監看器卻把串流收掉；
+  // 沒有遊戲時 RunningAppID 也會停在舊值。所以判斷遊戲有沒有在跑以這個旗標為準。
+  // 回傳 1＝執行中、0＝沒在跑、-1＝找不到這個 app 的鍵（舊版 Steam 等；呼叫端退回只看 RunningAppID）
+  int read_steam_app_running(uint32_t app_id) {
+    HKEY users_root = nullptr;
+    if (RegOpenKeyExW(HKEY_USERS, nullptr, 0, KEY_ENUMERATE_SUB_KEYS | KEY_READ, &users_root) != ERROR_SUCCESS) {
+      return -1;
+    }
+    auto root_guard = util::fail_guard([&]() {
+      RegCloseKey(users_root);
+    });
+
+    int result = -1;
+    for (DWORD i = 0; result != 1; ++i) {
+      wchar_t sid_name[256];
+      DWORD sid_len = 256;
+      if (RegEnumKeyExW(users_root, i, sid_name, &sid_len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
+        break;
+      }
+      if (wcsstr(sid_name, L"_Classes")) {
+        continue;
+      }
+      const std::wstring path = std::wstring(sid_name) + L"\\Software\\Valve\\Steam\\Apps\\" + std::to_wstring(app_id);
+      HKEY app_key = nullptr;
+      if (RegOpenKeyExW(users_root, path.c_str(), 0, KEY_READ, &app_key) != ERROR_SUCCESS) {
+        continue;
+      }
+      DWORD value = 0;
+      DWORD value_size = sizeof(value);
+      DWORD value_type = 0;
+      if (RegQueryValueExW(app_key, L"Running", nullptr, &value_type, reinterpret_cast<BYTE *>(&value), &value_size) == ERROR_SUCCESS &&
+          value_type == REG_DWORD) {
+        result = value != 0 ? 1 : 0;
+      }
+      RegCloseKey(app_key);
+    }
+    return result;
+  }
 #endif  // _WIN32
 
   // VipleStream H Phase 2.4: when the Steam game we launched exits,
@@ -245,23 +286,39 @@ namespace proc {
 
       BOOST_LOG(info) << "[steam-watchdog "sv << app_id << "] started, waiting for game to launch"sv;
 
+      // §STEAM-WATCHDOG-RUNNING：遊戲結束要「這個 app 的 Running 旗標是 0、而且 RunningAppID 也不是它」連續這麼久
+      // （VR 遊戲啟動時 Steam 會在 SteamVR 與遊戲之間切換；找不到旗標的鍵時退回只看 RunningAppID）
+      constexpr int k_exit_polls = 12;  // 12 × 250 ms ＝ 3 秒
       bool game_started = false;
+      int gone_polls = 0;
+      uint32_t ignored_running_id = 0;
       while (_steam_watchdog_gen.load() == my_gen) {
-        uint32_t cur = read_steam_running_app_id();
+        const uint32_t cur = read_steam_running_app_id();
+        const int app_running = read_steam_app_running(app_id);
 
         if (!game_started) {
-          if (cur == app_id) {
+          if (cur == app_id || app_running == 1) {
             game_started = true;
-            BOOST_LOG(info) << "[steam-watchdog "sv << app_id << "] game running"sv;
+            BOOST_LOG(info) << "[steam-watchdog "sv << app_id << "] game running"sv
+                            << (app_running < 0 ? " (no Apps\\Running flag; using RunningAppID only)"sv : ""sv);
           } else if (std::chrono::steady_clock::now() > start_deadline) {
             BOOST_LOG(warning) << "[steam-watchdog "sv << app_id
                                << "] game never started in 5 min; giving up"sv;
             return;
           }
         } else {
-          if (cur != app_id) {
+          const bool gone = cur != app_id && app_running != 1;
+          if (!gone) {
+            if (cur != app_id && cur != ignored_running_id) {
+              // RunningAppID 跳走了、但遊戲本身還在跑：不收串流（每個新值記一次）
+              ignored_running_id = cur;
+              BOOST_LOG(info) << "[steam-watchdog "sv << app_id << "] RunningAppID changed to "sv << cur
+                              << " but the game is still running; keeping the stream"sv;
+            }
+            gone_polls = 0;
+          } else if (++gone_polls >= k_exit_polls) {
             BOOST_LOG(info) << "[steam-watchdog "sv << app_id
-                            << "] game exited (RunningAppID="sv << cur << "); ending stream"sv;
+                            << "] game exited (RunningAppID="sv << cur << ", Running="sv << app_running << "); ending stream"sv;
             break;
           }
         }
