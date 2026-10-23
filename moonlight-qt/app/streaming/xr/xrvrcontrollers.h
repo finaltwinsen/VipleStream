@@ -27,6 +27,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 
 struct _VIPLE_VR_TRACKING;
@@ -35,7 +36,8 @@ class XrVrControllers
 {
 public:
     // testInput（dev）：不讀控制器按鍵，改用固定的合成按鍵序列（走同一條 0x5506 打包）
-    explicit XrVrControllers(bool testInput);
+    // exitCombo：§VR-EXIT-COMBO，A＋X＋扳機＋握把整組按住的上升緣（frame thread 呼叫）；空＝不偵測
+    explicit XrVrControllers(bool testInput, std::function<void()> exitCombo = {});
     ~XrVrControllers();
 
     XrVrControllers(const XrVrControllers&) = delete;
@@ -96,6 +98,8 @@ private:
                         float* sx, float* sy, uint64_t nowNs);
 
     bool m_TestInput;
+    std::function<void()> m_ExitCombo;  // §VR-EXIT-COMBO
+    bool m_ExitComboWas = false;        // 上一格是否整組按住（frame thread）
     XrInstance m_Instance = XR_NULL_HANDLE;
     XrSession m_Session = XR_NULL_HANDLE;
     XrPath m_Hands[2] = {XR_NULL_PATH, XR_NULL_PATH};
@@ -117,6 +121,8 @@ private:
     XrAction m_System = XR_NULL_HANDLE;
     XrAction m_ThumbrestTouch = XR_NULL_HANDLE;
     XrAction m_Haptic = XR_NULL_HANDLE;
+    // §VR-EXIT-COMBO：X（Touch 在左手、Frame 在右手）。只給結束組合鍵用、不轉送；Frame 右手的 x 本來沒有綁
+    XrAction m_ComboX = XR_NULL_HANDLE;
     XrSpace m_GripSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
 
     mutable std::mutex m_Mutex;
