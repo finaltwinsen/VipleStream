@@ -1,6 +1,7 @@
 import QtQuick 2.9
 import QtQuick.Controls 2.2
 import QtQuick.Layouts 1.3
+import QtCore
 
 import ComputerManager 1.0
 import MediaLibrary 1.0
@@ -14,6 +15,79 @@ import VrLauncher 1.0
 Item {
     id: videoView
     objectName: qsTr("Videos")
+
+    // §VR-PLAYER-THUMB（2026-10-23 使用者要求）：格狀檢視（縮圖＋片名），下方的按鈕可切回清單，選擇記在設定裡。
+    // 四個清單都是 GridView：清單模式時一格＝整列寬（看起來跟以前的 ListView 一樣），格狀模式一列 gridColumns 格。
+    // 縮圖來自 image://vthumb/（backend/videothumbs.h）：本機檔頭盔自己抽、主機的檔案主機產生、YouTube 用搜尋結果的縮圖
+    Settings {
+        id: viewSettings
+        category: "VideoView"
+        property bool grid: true
+    }
+    readonly property bool gridMode: viewSettings.grid
+    readonly property int gridColumns: 4
+    // 同 VideoThumbProvider::encodeId()
+    function thumbKey(s) { return encodeURIComponent(s).replace(/~/g, "%7E").replace(/%/g, "~") }
+    function localThumb(path) { return "image://vthumb/local/" + thumbKey(path) }
+    function sourceThumb(source) { return "image://vthumb/src/" + thumbKey(source) }
+    function hostThumb(root, path) {
+        var id = MediaLibrary.hostThumbId(ComputerManager, videoView.hostIndex, root, path)
+        return id !== "" ? "image://vthumb/" + id : ""
+    }
+    function cellW(view) { return gridMode ? Math.floor(view.width / gridColumns) : view.width }
+    function cellH(view, rowHeight) { return gridMode ? Math.round((Math.floor(view.width / gridColumns) - 12) * 9 / 16) + 72 : rowHeight }
+
+    // 格狀模式的一格：16:9 縮圖（拿不到時是色塊＋標籤）、片名（最多兩行）、副標
+    component ThumbCard: ColumnLayout {
+        property string thumb: ""
+        property string title: ""
+        property string subtitle: ""
+        property bool folder: false
+        property string badge: ""
+        spacing: 4
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.round(width * 9 / 16)
+            radius: 6
+            clip: true
+            color: folder ? "#c9a227" : "#2a3446"
+            Image {
+                id: thumbImage
+                anchors.fill: parent
+                source: parent.parent.thumb
+                asynchronous: true
+                fillMode: Image.PreserveAspectCrop
+                sourceSize.width: 320
+                visible: status === Image.Ready
+            }
+            Label {
+                anchors.centerIn: parent
+                visible: thumbImage.status !== Image.Ready && parent.parent.badge !== ""
+                text: parent.parent.badge
+                font.pixelSize: 18
+                color: "white"
+                opacity: 0.8
+            }
+        }
+        Label {
+            text: parent.title
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            maximumLineCount: 2
+            elide: Text.ElideRight
+            font.pointSize: 11
+            font.bold: parent.folder
+        }
+        Label {
+            text: parent.subtitle
+            visible: text !== ""
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+            font.pointSize: 9
+            opacity: 0.65
+        }
+        Item { Layout.fillHeight: true }
+    }
 
     property string currentDir: ""
     // 電腦分頁：先選主機（hostIndex＝-1），再像檔案總管一樣瀏覽：hostRoot＝-1 是那台主機的分享資料夾清單，
@@ -334,23 +408,39 @@ Item {
                 currentIndex: tabs.currentIndex
 
                 // ── 最近播過 ──
-                ListView {
+                GridView {
                     id: recentList
                     clip: true
                     model: recentModel
                     keyNavigationEnabled: true
+                    cellWidth: videoView.cellW(recentList)
+                    cellHeight: videoView.cellH(recentList, 64)
                     ScrollBar.vertical: ScrollBar {}
                     delegate: ItemDelegate {
-                        width: recentList.width
+                        width: recentList.cellWidth
+                        height: recentList.cellHeight
+                        padding: videoView.gridMode ? 6 : 12
                         highlighted: recentList.activeFocus && recentList.currentIndex === index
-                        contentItem: ColumnLayout {
-                            spacing: 2
-                            Label { text: model.title; font.pointSize: 14; elide: Text.ElideMiddle; Layout.fillWidth: true }
-                            Label {
-                                text: model.progress + (model.format !== "" ? "   ·   " + model.format : "")
-                                opacity: 0.7
-                                Layout.fillWidth: true
-                                elide: Text.ElideMiddle
+                        contentItem: Item {
+                            ColumnLayout {
+                                anchors.fill: parent
+                                visible: !videoView.gridMode
+                                spacing: 2
+                                Label { text: model.title; font.pointSize: 14; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                                Label {
+                                    text: model.progress + (model.format !== "" ? "   ·   " + model.format : "")
+                                    opacity: 0.7
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideMiddle
+                                }
+                            }
+                            ThumbCard {
+                                anchors.fill: parent
+                                visible: videoView.gridMode
+                                thumb: visible ? videoView.sourceThumb(model.source) : ""
+                                title: model.title
+                                subtitle: model.progress + (model.format !== "" ? " · " + model.format : "")
+                                badge: qsTr("VID")
                             }
                         }
                         onClicked: play(model.source, model.title)
@@ -393,28 +483,45 @@ Item {
                             opacity: 0.8
                         }
                     }
-                    ListView {
+                    GridView {
                         id: fileList
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
                         model: dirModel
                         keyNavigationEnabled: true
+                        cellWidth: videoView.cellW(fileList)
+                        cellHeight: videoView.cellH(fileList, 52)
                         ScrollBar.vertical: ScrollBar {}
                         delegate: ItemDelegate {
-                            width: fileList.width
+                            width: fileList.cellWidth
+                            height: fileList.cellHeight
+                            padding: videoView.gridMode ? 6 : 12
                             highlighted: fileList.activeFocus && fileList.currentIndex === index
-                            contentItem: RowLayout {
-                                spacing: 12
-                                Label {
-                                    text: model.name + (model.isDir ? "/" : "")
-                                    font.pointSize: 14
-                                    font.bold: model.isDir
-                                    elide: Text.ElideMiddle
-                                    Layout.fillWidth: true
+                            contentItem: Item {
+                                RowLayout {
+                                    anchors.fill: parent
+                                    visible: !videoView.gridMode
+                                    spacing: 12
+                                    Label {
+                                        text: model.name + (model.isDir ? "/" : "")
+                                        font.pointSize: 14
+                                        font.bold: model.isDir
+                                        elide: Text.ElideMiddle
+                                        Layout.fillWidth: true
+                                    }
+                                    Label { text: model.format; opacity: 0.7; visible: model.format !== "" }
+                                    Label { text: model.detail; opacity: 0.6; elide: Text.ElideLeft; Layout.maximumWidth: 360 }
                                 }
-                                Label { text: model.format; opacity: 0.7; visible: model.format !== "" }
-                                Label { text: model.detail; opacity: 0.6; elide: Text.ElideLeft; Layout.maximumWidth: 360 }
+                                ThumbCard {
+                                    anchors.fill: parent
+                                    visible: videoView.gridMode
+                                    thumb: visible && !model.isDir ? videoView.localThumb(model.path) : ""
+                                    title: model.name
+                                    subtitle: model.isDir ? "" : (model.format !== "" ? model.format + " · " : "") + model.detail
+                                    folder: model.isDir
+                                    badge: model.isDir ? "" : qsTr("VID")
+                                }
                             }
                             onClicked: model.isDir ? openDir(model.path) : play(model.path, "")
                             Keys.onReturnPressed: clicked()
@@ -530,19 +637,34 @@ Item {
                                 }
                             }
                         }
-                        ListView {
+                        GridView {
                             id: hostEntryList
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
                             model: hostModel
                             keyNavigationEnabled: true
+                            cellWidth: videoView.cellW(hostEntryList)
+                            cellHeight: videoView.cellH(hostEntryList, 56)
                             ScrollBar.vertical: ScrollBar {}
                             delegate: ItemDelegate {
-                                width: hostEntryList.width
-                                height: 56
+                                width: hostEntryList.cellWidth
+                                height: hostEntryList.cellHeight
+                                padding: videoView.gridMode ? 6 : 12
                                 highlighted: hostEntryList.activeFocus && hostEntryList.currentIndex === index
-                                contentItem: RowLayout {
+                                contentItem: Item {
+                                ThumbCard {
+                                    anchors.fill: parent
+                                    visible: videoView.gridMode
+                                    thumb: visible && !model.isDir && !model.drive ? videoView.hostThumb(model.root, model.path) : ""
+                                    title: model.name
+                                    subtitle: model.isDir ? "" : (model.format !== "" ? model.format + " · " : "") + model.detail
+                                    folder: model.isDir && !model.drive
+                                    badge: model.drive ? qsTr("DISK") : (model.isDir ? "" : qsTr("VID"))
+                                }
+                                RowLayout {
+                                    anchors.fill: parent
+                                    visible: !videoView.gridMode
                                     spacing: 12
                                     Rectangle {
                                         // 資料夾／影片的小圖示（字型不一定有 emoji，用色塊）
@@ -564,6 +686,7 @@ Item {
                                     }
                                     Label { text: model.format; opacity: 0.7; visible: model.format !== "" }
                                     Label { text: model.detail; opacity: 0.6 }
+                                }
                                 }
                                 onClicked: {
                                     if (model.isDir) {
@@ -620,21 +743,37 @@ Item {
                             }
                         }
                     }
-                    ListView {
+                    GridView {
                         id: webList
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
                         model: webModel
                         keyNavigationEnabled: true
+                        cellWidth: videoView.cellW(webList)
+                        cellHeight: videoView.cellH(webList, 64)
                         ScrollBar.vertical: ScrollBar {}
                         delegate: ItemDelegate {
-                            width: webList.width
+                            width: webList.cellWidth
+                            height: webList.cellHeight
+                            padding: videoView.gridMode ? 6 : 12
                             highlighted: webList.activeFocus && webList.currentIndex === index
-                            contentItem: ColumnLayout {
-                                spacing: 2
-                                Label { text: model.title; font.pointSize: 14; elide: Text.ElideRight; Layout.fillWidth: true }
-                                Label { text: model.channel + (model.duration !== "" ? "   ·   " + model.duration : ""); opacity: 0.7 }
+                            contentItem: Item {
+                                ColumnLayout {
+                                    anchors.fill: parent
+                                    visible: !videoView.gridMode
+                                    spacing: 2
+                                    Label { text: model.title; font.pointSize: 14; elide: Text.ElideRight; Layout.fillWidth: true }
+                                    Label { text: model.channel + (model.duration !== "" ? "   ·   " + model.duration : ""); opacity: 0.7 }
+                                }
+                                ThumbCard {
+                                    anchors.fill: parent
+                                    visible: videoView.gridMode
+                                    thumb: visible ? videoView.sourceThumb(model.url) : ""
+                                    title: model.title
+                                    subtitle: model.channel + (model.duration !== "" ? " · " + model.duration : "")
+                                    badge: qsTr("VID")
+                                }
                             }
                             onClicked: play(model.url, model.title)
                             Keys.onReturnPressed: clicked()
@@ -754,6 +893,11 @@ Item {
                 color: "#ff8080"
                 Layout.fillWidth: true
                 elide: Text.ElideRight
+            }
+            Button {
+                text: videoView.gridMode ? qsTr("List view") : qsTr("Grid view")
+                focusPolicy: Qt.NoFocus
+                onClicked: viewSettings.grid = !viewSettings.grid
             }
         }
     }

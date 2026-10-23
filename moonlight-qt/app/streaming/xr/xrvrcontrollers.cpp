@@ -61,8 +61,8 @@ const char* handName(int h)
 
 } // namespace
 
-XrVrControllers::XrVrControllers(bool testInput)
-    : m_TestInput(testInput)
+XrVrControllers::XrVrControllers(bool testInput, std::function<void()> exitCombo)
+    : m_TestInput(testInput), m_ExitCombo(std::move(exitCombo))
 {
 }
 
@@ -117,7 +117,8 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
         !mk("menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Menu) ||
         !mk("system", "System", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_System) ||
         !mk("thumbrest_touch", "Thumbrest touch", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_ThumbrestTouch) ||
-        !mk("haptic", "Haptics", XR_ACTION_TYPE_VIBRATION_OUTPUT, &m_Haptic)) {
+        !mk("haptic", "Haptics", XR_ACTION_TYPE_VIBRATION_OUTPUT, &m_Haptic) ||
+        !mk("combo_x", "X (with A, trigger and grip: end the stream)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_ComboX)) {
         return false;
     }
 
@@ -183,6 +184,7 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
             {m_BtnLo, "/user/hand/left/input/x/click"},        {m_BtnLo, "/user/hand/right/input/a/click"},
             {m_BtnHi, "/user/hand/left/input/y/click"},        {m_BtnHi, "/user/hand/right/input/b/click"},
             {m_Menu, "/user/hand/left/input/menu/click"},
+            {m_ComboX, "/user/hand/left/input/x/click"},
             {m_Haptic, "/user/hand/left/output/haptic"},       {m_Haptic, "/user/hand/right/output/haptic"},
         };
         std::vector<B> full = core;
@@ -234,6 +236,7 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
             {m_BtnLo, "/user/hand/left/input/dpad_down/click"}, {m_BtnLo, "/user/hand/right/input/a/click"},
             {m_BtnHi, "/user/hand/left/input/dpad_up/click"},  {m_BtnHi, "/user/hand/right/input/b/click"},
             {m_Menu, "/user/hand/left/input/view/click"},      {m_Menu, "/user/hand/right/input/menu/click"},
+            {m_ComboX, "/user/hand/right/input/x/click"},
             {m_Haptic, "/user/hand/left/output/haptic"},       {m_Haptic, "/user/hand/right/output/haptic"},
         };
         std::vector<B> full = core;
@@ -283,7 +286,7 @@ void XrVrControllers::destroy()
     }
     for (XrAction* a : {&m_GripPose, &m_TriggerValue, &m_TriggerClick, &m_TriggerTouch, &m_SqueezeValue,
                         &m_SqueezeClick, &m_Stick, &m_StickClick, &m_StickTouch, &m_BtnLo, &m_BtnLoTouch,
-                        &m_BtnHi, &m_BtnHiTouch, &m_Menu, &m_System, &m_ThumbrestTouch, &m_Haptic}) {
+                        &m_BtnHi, &m_BtnHiTouch, &m_Menu, &m_System, &m_ThumbrestTouch, &m_Haptic, &m_ComboX}) {
         if (*a != XR_NULL_HANDLE) {
             xrDestroyAction(*a);
             *a = XR_NULL_HANDLE;
@@ -422,6 +425,22 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
             m_StatFocusLoss++;
         }
         m_Focused = focused;
+    }
+
+    // §VR-EXIT-COMBO（2026-10-22 頭盔實測：VR 串流裡按了沒反應）：PCVR 不建 XrInput，組合鍵原本只在 XR 桌面有效。
+    // 右手 A＋X（Touch 左手、Frame 右手）＋任一手扳機＋任一手握把整組按住的上升緣；這幾鍵照樣轉送給主機
+    if (m_ExitCombo && focused && !m_TestInput) {
+        const bool combo = boolState(m_BtnLo, 1) && (boolState(m_ComboX, 0) || boolState(m_ComboX, 1)) &&
+                           std::max(floatState(m_TriggerValue, 0), floatState(m_TriggerValue, 1)) >= kClickOn &&
+                           std::max(floatState(m_SqueezeValue, 0), floatState(m_SqueezeValue, 1)) >= kClickOn;
+        if (combo && !m_ExitComboWas) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-INPUT] exit combo (A+X+trigger+grip)");
+            m_ExitCombo();
+        }
+        m_ExitComboWas = combo;
+    }
+    else {
+        m_ExitComboWas = false;
     }
 
     for (int h = 0; h < 2; h++) {

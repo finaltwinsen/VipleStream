@@ -1173,7 +1173,7 @@ bool XrContext::createActions(QString* error)
 {
     if (m_Options.pcvr) {
         // M4a R2：PCVR 的控制器（grip pose、按鍵、haptic）→ 0x5506
-        m_VrCtl = new XrVrControllers(m_Options.testVrInput);
+        m_VrCtl = new XrVrControllers(m_Options.testVrInput, m_Options.inputSink.exitCombo);
         if (!m_VrCtl->create(m_Instance, m_Session, m_EnabledExtensions, error)) {
             return false;
         }

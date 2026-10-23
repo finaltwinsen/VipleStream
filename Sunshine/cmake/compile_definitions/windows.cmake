@@ -129,8 +129,11 @@ if(MSVC)
             ${MINHOOK_LIBRARY}
             ntdll
             setupapi
+            ole32
             shell32
             shlwapi
+            uuid
+            windowscodecs
             synchronization.lib
             userenv
             ws2_32
@@ -155,8 +158,11 @@ else()
             minhook::minhook
             ntdll
             setupapi
+            ole32
             shell32
             shlwapi
+            uuid
+            windowscodecs
             synchronization.lib
             userenv
             ws2_32

@@ -129,6 +129,7 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
       （不再有平面視窗）；結束時 steamwebhelper 當掉判定是 Steam 測試版的問題（使用者已切回穩定版，待對照）。
       **10-22**：使用者回饋三項已改（§VR-SHELL-SCROLL：XR 搖桿直接捲游標底下的清單；影片模式 SDL 捲動加快；
       §VR-SHELL-LAUNCHING：點遊戲立刻蓋上「啟動中」、擋重複點擊），開發機驗過，**待配戴確認**。A+X+扳機+握把結束組合鍵**頭盔還沒驗**。
+      **10-23（v2.0.11）**：發現 2.0.9／2.0.10 從介面點遊戲串流都卡在「正在啟動」（StreamSegue.qml 漏 import VrLauncher）、遮罩的 shellActive 是 CONSTANT、PCVR 沒偵測組合鍵，三項修好並經使用者配戴確認；另加影片縮圖格狀檢視（§VR-PLAYER-THUMB，主機產縮圖），使用者確認。
     - **§VPN-ADDR（10-21）**：server 一律在 `/serverinfo` 廣告 VPN 介面位址（`VipleStreamVpnAddress`），client 只收 100.64.0.0/10、
       存成 `vpnaddress`、當最後的候選位址——頭盔帶出門時主機不再顯示離線。待在外面實測。
     - 解碼輸出改成 100 µs 短輪詢（§VR-DEC-POLL，少 0.1～0.15 ms）；補幀那一批少一次色彩轉換（§VR-SYNTH-LEAN，少約 0.32 ms）。

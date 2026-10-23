@@ -203,6 +203,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/file_handler.h"
         "${CMAKE_SOURCE_DIR}/src/media_share.cpp"
         "${CMAKE_SOURCE_DIR}/src/media_share.h"
+        "${CMAKE_SOURCE_DIR}/src/media_thumb.cpp"
         "${CMAKE_SOURCE_DIR}/src/file_transfer.cpp"
         "${CMAKE_SOURCE_DIR}/src/file_transfer.h"
         "${CMAKE_SOURCE_DIR}/src/globals.cpp"

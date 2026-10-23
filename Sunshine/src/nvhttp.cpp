@@ -2135,6 +2135,40 @@ namespace nvhttp {
     response->close_connection_after_response = true;
   }
 
+  // §VR-PLAYER-THUMB（2026-10-23）：影片檔的縮圖（頭盔影片模式「電腦」分頁的格狀檢視）。路徑檢查同 media_file；
+  // 拿不到縮圖回 404（client 顯示預設圖示）。舊 server 沒有這個端點也是 404，client 一樣處理
+  void media_thumb(resp_https_t response, req_https_t request) {
+    auto args = request->parse_query_string();
+    int root = -1;
+    try {
+      root = std::stoi(get_arg(args, "root"));
+    } catch (...) {
+      root = -1;
+    }
+    const auto rel = get_arg(args, "path", "");
+    std::filesystem::path p;
+    std::string err;
+    std::error_code ec;
+    if (!media_share::resolve(root, rel, &p, &err) || !std::filesystem::is_regular_file(p, ec)) {
+      BOOST_LOG(info) << "[VIPLE-MEDIA] thumb denied root="sv << root << " ("sv << (err.empty() ? "not a file"s : err) << ')';
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+      return;
+    }
+    std::string data, type;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!media_share::thumbnail(p, &data, &type, &err)) {
+      BOOST_LOG(info) << "[VIPLE-MEDIA] thumb unavailable root="sv << root << ": "sv << err;
+      response->write(SimpleWeb::StatusCode::client_error_not_found);
+      return;
+    }
+    BOOST_LOG(debug) << "[VIPLE-MEDIA] thumb root="sv << root << " bytes="sv << data.size() << " in "sv
+                     << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() << " ms"sv;
+    SimpleWeb::CaseInsensitiveMultimap h;
+    h.emplace("Content-Type", type);
+    h.emplace("Cache-Control", "private, max-age=86400");
+    response->write(SimpleWeb::StatusCode::success_ok, data, h);
+  }
+
   void appasset(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
 
@@ -3190,6 +3224,7 @@ namespace nvhttp {
     https_server.resource["^/viple/media/roots$"]["GET"] = media_roots;
     https_server.resource["^/viple/media/list$"]["GET"] = media_list;
     https_server.resource["^/viple/media/file$"]["GET"] = media_file;
+    https_server.resource["^/viple/media/thumb$"]["GET"] = media_thumb;  // §VR-PLAYER-THUMB
     https_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) {
       launch<SunshineHTTPS>(host_audio, resp, req);
     };

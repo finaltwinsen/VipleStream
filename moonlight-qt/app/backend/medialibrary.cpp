@@ -1,6 +1,7 @@
 // VipleStream 2.0 §VR-PLAYER — 見 medialibrary.h。
 
 #include "medialibrary.h"
+#include "videothumbs.h"
 
 #include "streaming/player/playerformat.h"
 #include "backend/computermanager.h"
@@ -329,6 +330,21 @@ QString MediaLibrary::hostFileUrl(ComputerManager* cm, int host, int root, const
     url.setQuery(QStringLiteral("root=%1&path=%2").arg(root).arg(QString::fromLatin1(QUrl::toPercentEncoding(path))),
                  QUrl::StrictMode);
     return url.toString(QUrl::FullyEncoded);
+}
+
+QString MediaLibrary::hostThumbId(ComputerManager* cm, int host, int root, const QString& path) const
+{
+    NvComputer* c = hostAt(cm, host);
+    if (c == nullptr) {
+        return QString();
+    }
+    QString uuid;
+    {
+        QReadLocker lock(&c->lock);
+        uuid = c->uuid;
+    }
+    // 清單的索引會變（主機上下線、排序），id 用 uuid
+    return QStringLiteral("host/%1/%2/%3").arg(uuid).arg(root).arg(VideoThumbProvider::encodeId(path));
 }
 
 bool MediaLibrary::isUrl(const QString& text) const

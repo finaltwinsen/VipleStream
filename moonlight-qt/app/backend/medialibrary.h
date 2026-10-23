@@ -43,6 +43,8 @@ public:
     Q_INVOKABLE void hostBrowse(ComputerManager* cm, int host, int root, const QString& path, int requestId);
     // 播放用的網址（https://<主機>:<埠>/viple/media/file?root=…&path=…）
     Q_INVOKABLE QString hostFileUrl(ComputerManager* cm, int host, int root, const QString& path) const;
+    // §VR-PLAYER-THUMB：主機分享檔案的縮圖 id（image://vthumb/<這個>，見 videothumbs.h）；主機找不到回空字串
+    Q_INVOKABLE QString hostThumbId(ComputerManager* cm, int host, int root, const QString& path) const;
 
     // ── §VR-PLAYER（V4）：YouTube 等網站（WebResolver）──
     // 非同步：結果經 webSearchFinished(results, error)；results＝[{title, url, channel, duration}]

@@ -39,7 +39,9 @@ class VrLauncher : public QObject
     // §VR-PLAYER：這個建置有影片模式，而且在 Frame 上（available）
     Q_PROPERTY(bool playerAvailable READ playerAvailable CONSTANT)
     // §VR-SHELL：頭盔 VR 介面在跑（桌面模式也改開 XR 桌面子行程，不在這個程式裡開平面視窗串流）
-    Q_PROPERTY(bool shellActive READ shellActive CONSTANT)
+    // 不能是 CONSTANT：XrShell 先建 QML、之後才 setChildHook()，CONSTANT 的綁定在載入時讀到 false 就再也不更新
+    // （2026-10-22 頭盔實測：「正在啟動」遮罩因此從來沒出現）
+    Q_PROPERTY(bool shellActive READ shellActive NOTIFY shellActiveChanged)
     // §VR-PLAYER：這個建置有內建瀏覽器（Qt WebEngine）
     Q_PROPERTY(bool browserAvailable READ browserAvailable CONSTANT)
     // §VR-PLAYER（dev，--dev-video）：見 commandlineparser.h。devVideoTab＝-1＝沒帶
@@ -157,6 +159,7 @@ public:
 signals:
     void vrModeChanged();
     void launchingChanged();
+    void shellActiveChanged();
     void runningChanged();
     void preflightChanged();
     // 子行程結束；error 非空＝異常結束（給 GUI 顯示）

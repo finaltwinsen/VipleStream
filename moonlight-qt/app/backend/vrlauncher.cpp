@@ -61,6 +61,9 @@ VrLauncher* s_Instance = nullptr;  // QML singleton（playerFinished 用）
 void VrLauncher::setChildHook(std::function<void(ChildEvent)> hook)
 {
     s_ChildHook = std::move(hook);
+    if (s_Instance != nullptr) {
+        emit s_Instance->shellActiveChanged();
+    }
 }
 
 void VrLauncher::setPlayerHandler(std::function<bool(const PlayRequest&)> handler)

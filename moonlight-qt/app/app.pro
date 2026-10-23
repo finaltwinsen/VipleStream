@@ -326,6 +326,7 @@ SOURCES += \
     backend/vrlauncher.cpp \
     backend/xrshell.cpp \
     backend/medialibrary.cpp \
+    backend/videothumbs.cpp \
     backend/webresolver.cpp \
     backend/vrpreflightcheck.cpp \
     wm.cpp
@@ -415,6 +416,7 @@ HEADERS += \
     backend/vrlauncher.h \
     backend/xrshell.h \
     backend/medialibrary.h \
+    backend/videothumbs.h \
     backend/webresolver.h \
     backend/vrpreflight.h \
     backend/vrpreflightcheck.h

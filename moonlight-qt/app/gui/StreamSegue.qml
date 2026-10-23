@@ -5,6 +5,7 @@ import QtQuick.Window 2.2
 import SdlGamepadKeyNavigation 1.0
 import Session 1.0
 import SystemProperties 1.0
+import VrLauncher 1.0   // §VR-EXIT-COMBO 的提示用；漏了會在 onLoaded 丟例外，session 根本不會開始
 
 Item {
     property Session session
