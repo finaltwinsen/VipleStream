@@ -1678,6 +1678,9 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-SHELL] could not start the VR interface (<原因>); using the window   ← 退回平面視窗
 [VIPLE-SHELL] 10s: <n> frames, render+readback avg <ms> ms           ← 介面重畫（最多 30 張／秒）
 [VIPLE-SHELL] text field focused: opening the keyboard / text field unfocused
+[VIPLE-THUMB] generated ok=<n> failed=<n> (last: <local|host|youtube> <ok|failed>)   ← §VR-PLAYER-THUMB（2026-10-23）：影片格狀檢視的縮圖，每 20 張印一次
+[VIPLE-THUMB] <local|host|youtube>: no thumbnail (<原因>)        ← 每個回應第一次拿不到時；host 回「bad image data」＝那台主機的 server 太舊（沒有 /viple/media/thumb）
+[VIPLE-VR-INPUT] exit combo (A+X+trigger+grip)                   ← §VR-EXIT-COMBO：VR 串流（PCVR）裡偵測到結束組合鍵（XR 桌面是 [VIPLE-XR-INPUT] exit combo）
 [VIPLE-SHELL] stick scroll -> <類別> "<objectName>"                     ← §VR-SHELL-SCROLL（2026-10-22）：XR 搖桿直接捲游標底下的 Flickable（換了對象才印一次）；沒有這行＝游標底下沒有可捲的清單，退回送滾輪事件
 [VIPLE-SHELL] starting the video player in this XR session / video player finished (rc=<n>)
 [VIPLE-SHELL] VR stream process starting: keeping the shell XR session until it takes over / the VR stream process took over the headset
@@ -1695,6 +1698,7 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 ```
 [VIPLE-MEDIA] serving root=<n> size=<bytes>           ← 某個檔案第一次從頭讀（之後的範圍請求不印）
 [VIPLE-MEDIA] file denied root=<n> (<原因>)            ← 路徑跑出分享資料夾、不存在、或不是檔案
+[VIPLE-MEDIA] thumb denied root=<n> (<原因>) / thumb unavailable root=<n>: <原因>   ← §VR-PLAYER-THUMB：縮圖的路徑不對，或系統拿不到縮圖（Windows Shell／Linux 快取與 ffmpeg 都沒有）；成功的只在 debug 等級印耗時
 ```
 - 只有 HTTPS、配對過的 client。`media_dirs` 沒設時根是整台 PC 的磁碟機（`<Kind>drive</Kind>`，編號＝磁碟機代號 A＝0…；
   Linux 是 `/`）；有設時是那些資料夾（`folder`）；`media_share = disabled` 時 `/viple/media/roots` 回空清單、其他回 404。
