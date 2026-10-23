@@ -84,6 +84,7 @@
 #include "backend/hidprobe.h"   // §HID-PROBE
 #include "backend/vrlauncher.h"  // §VR-LAUNCHER
 #include "backend/medialibrary.h"  // §VR-PLAYER
+#include "backend/videothumbs.h"  // §VR-PLAYER-THUMB
 #include "backend/xrshell.h"  // §VR-SHELL
 
 #include <QQuickWindow>
@@ -1645,6 +1646,8 @@ int main(int argc, char *argv[])
     }
 
     QQmlApplicationEngine engine;
+    // §VR-PLAYER-THUMB：影片模式格狀檢視的縮圖（image://vthumb/…）；engine 擁有它
+    engine.addImageProvider(QStringLiteral("vthumb"), new VideoThumbProvider(&engine));
     // §VR-SHELL：頭盔 VR 介面（取代 main.qml 的平面視窗）。在 engine 之後宣告：先拆它（它的 QML 物件屬於 engine）
     std::unique_ptr<XrShell> vrShell;
     QString initialView;

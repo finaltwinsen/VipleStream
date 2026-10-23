@@ -55,6 +55,13 @@ namespace media_share {
    */
   bool parse_range(const std::string &header, std::uint64_t size, std::uint64_t max_len, std::uint64_t *begin, std::uint64_t *end);
 
+  /**
+   * @brief §VR-PLAYER-THUMB：影片檔的縮圖（寬約 320）。Windows 用 Shell 縮圖、Linux 用 freedesktop 快取或
+   * ffmpegthumbnailer／ffmpeg（media_thumb.cpp）。同時只做一張、最多等約 9 秒。
+   * @return false＝拿不到（*error 是英文原因）；true 時 *data 是影像、*content_type 是 image/jpeg 或 image/png
+   */
+  bool thumbnail(const std::filesystem::path &path, std::string *data, std::string *content_type, std::string *error);
+
   /// 純邏輯的自測（路徑檢查與 Range 解析）；回傳失敗數
   int self_test();
 

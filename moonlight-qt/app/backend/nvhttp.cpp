@@ -540,6 +540,19 @@ NvHTTP::openConnectionToString(QUrl baseUrl,
     return ret;
 }
 
+QByteArray
+NvHTTP::openConnectionToBytes(QUrl baseUrl,
+                              QString command,
+                              QString arguments,
+                              int timeoutMs,
+                              NvLogLevel logLevel)
+{
+    QNetworkReply* reply = openConnection(baseUrl, command, arguments, timeoutMs, logLevel);
+    const QByteArray ret = reply->readAll();
+    delete reply;
+    return ret;
+}
+
 QNetworkReply*
 NvHTTP::openConnection(QUrl baseUrl,
                        QString command,

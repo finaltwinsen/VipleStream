@@ -230,6 +230,14 @@ public:
                            int timeoutMs,
                            NvLogLevel logLevel = NvLogLevel::NVLL_VERBOSE);
 
+    // §VR-PLAYER-THUMB：同 openConnectionToString，但回傳原始位元組（影像等二進位回應）。HTTP 錯誤一樣丟例外
+    QByteArray
+    openConnectionToBytes(QUrl baseUrl,
+                          QString command,
+                          QString arguments,
+                          int timeoutMs,
+                          NvLogLevel logLevel = NvLogLevel::NVLL_VERBOSE);
+
     void setServerCert(QSslCertificate serverCert);
 
     // §VR-PLAYER（V3）：HTTPS 端點的基底網址（影片模式組 /viple/media/file 的網址用）
