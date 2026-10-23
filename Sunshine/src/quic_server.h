@@ -1,0 +1,513 @@
+/**
+ * @file src/quic_server.h
+ * @brief VipleStream MP-QUIC server: QUIC listener + multipath subflow
+ *        management for streaming sessions.
+ *
+ * When MP-QUIC is negotiated, the server opens a QUIC listener on
+ * config::stream.mpquic_port. Each streaming session gets a dedicated
+ * picoquic connection. Video and audio are sent as QUIC DATAGRAMs
+ * (RFC 9221); control uses a reliable QUIC stream (#0).
+ *
+ * The server drives multipath from its side by probing paths that the
+ * client advertises through QUIC path validation (RFC 9443 §5).
+ */
+#pragma once
+
+#ifdef VIPLE_MPQUIC
+
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include <boost/asio.hpp>
+
+// picoquic uses anonymous-enum typedefs and tag-name typedefs that
+// can't be forward-declared cleanly. Just include the full header.
+#include <picoquic.h>
+
+struct _reed_solomon;
+
+namespace quic_server {
+
+  struct SubflowStats {
+    int pathId;
+    float rttMs;
+    float throughputMbps;
+    float lossPercent;
+    bool active;
+    uint64_t bytesSent;
+    uint64_t bytesRecv;
+    // §ABR-SHADOW 2026-07-16：delay/throughput 觀測欄位（僅 log，不進
+    // 控制迴路）。為下一輪 delay-based ABR 訊號設計累積實測數據——
+    // rtt 對 rttMin 的膨脹量是壅塞指標，receiveRate 是對端實收估計。
+    float rttMinMs;
+    float receiveRateMbps;
+  };
+
+  using RecvHandler = std::function<void(uint8_t flowType,
+                                         const uint8_t *data, size_t len)>;
+
+  class QuicSession {
+  public:
+    QuicSession(picoquic_cnx_t *cnx);
+    ~QuicSession();
+
+    QuicSession(const QuicSession &) = delete;
+    QuicSession &operator=(const QuicSession &) = delete;
+
+    bool sendDatagram(uint8_t flowType, const uint8_t *data, size_t len);
+
+    // Scheduler-aware datagram send (picks best path based on strategy)
+    bool sendDatagramScheduled(uint8_t flowType, const uint8_t *data,
+                               size_t len, int scheduler);
+
+    // §Q-REINJECT v1.5.172: 對所有 active path 同送同一個 datagram
+    // （XLINK SIGCOMM 2021 reinjection 模式）。用於 PATH-SWITCH 後
+    // 送 IDR frame，確保至少一條 path 送達。client depacketizer 用
+    // sequence number 去重，先到的勝出。
+    bool sendDatagramReinject(uint8_t flowType, const uint8_t *data,
+                              size_t len);
+
+    // §Q-REINJECT v1.5.172: 判定當前是否在 PATH-SWITCH 後 2 秒
+    // reinjection 視窗內。stream.cpp 偵測 IDR frame 時，若此函式回
+    // true 就用 sendDatagramReinject 送 IDR shards。
+    bool isInReinjectionWindow() const;
+
+    bool sendStream(const uint8_t *data, size_t len);
+
+    // 無 owner 的舊式設定（owner 一律清成 nullptr）。§F3 起 stream.cpp
+    // 改走下面帶 owner 的 CAS / 條件清除，這個保留給相容用途。
+    void setRecvHandler(RecvHandler handler);
+
+    // §Q-RECVHANDLER-FIX (review)：handler 是否已註冊。stream.cpp 原本
+    // 用 process 級 static 旗標守註冊，導致第二條 session 起的新
+    // QuicSession 永遠拿不到 handler（QUIC failover/IDR/FEC/ping 全
+    // 靜默失效）。改由各 session 自身狀態回報，呼叫端每幀檢查重註冊。
+    bool hasRecvHandler() const;
+
+    // §F3 2026-09-23：帶 owner 標記的 handler 管理。owner 是呼叫端
+    // （stream.cpp 的 per-session 閘門）的不透明指標，這裡只拿來比對、
+    // 絕不解參考。目的：
+    //   1. 不重複註冊——呼叫端先比 owner，已是自己就不再裝。
+    //   2. teardown 對稱——session 結束只拆「自己裝的」handler，
+    //      不會誤拆同一個 client 位址上新 session 剛裝好的 handler。
+    // 目前 handler 的 owner；沒有 handler 時回 nullptr。
+    const void *recvHandlerOwner() const;
+
+    // CAS 語意：目前 owner 等於 expectedOwner 才換上 (handler, newOwner)。
+    // expectedOwner == nullptr 表示「目前必須沒有任何 handler」——用舊式
+    // setRecvHandler 裝的匿名 handler 不會被覆蓋。回傳是否換成功。
+    bool compareAndSetRecvHandler(const void *expectedOwner,
+                                  RecvHandler handler,
+                                  const void *newOwner);
+
+    // owner 相符才清除 handler；回傳是否有清掉。
+    bool clearRecvHandlerIfOwner(const void *owner);
+
+    // §Q-RECVHANDLER-FIX：IO thread 在 callback 內呼叫 handler，與
+    // broadcast thread 的 setRecvHandler 賦值跨執行緒——透過此函式
+    // 在鎖內取一份 copy 再於鎖外呼叫，避免 std::function 撕裂讀。
+    void invokeRecvHandler(uint8_t flowType, const uint8_t *data, size_t len);
+
+    std::vector<SubflowStats> getStats() const;
+
+    bool isReady() const;
+
+    // Drain all pending datagrams into picoquic — MUST be called from
+    // the IO thread only (picoquic is single-threaded).
+    void drainPendingToQuic();
+
+  private:
+    friend class QuicListener;
+
+    // §Q-CNX-ATOMIC-FIX (review batch 2)：_cnx 僅限 IO 執行緒存取
+    // （drainPendingToQuic / picoquicCallback / stop() join 之後）。
+    // sender / stats 執行緒一律改讀 _ready——IO 執行緒在 callback_close
+    // 寫 nullptr 後 picoquic 隨即 free cnx，跨執行緒讀是 TOCTOU UAF。
+    picoquic_cnx_t *_cnx;
+
+    // §Q-CNX-ATOMIC-FIX：連線是否 ready。IO 執行緒在 session 建立時
+    // 設 true、偵測到 disconnecting / callback_close / stop() 設 false；
+    // 其他執行緒只讀此 atomic，不得 dereference _cnx。
+    std::atomic<bool> _ready{false};
+
+    RecvHandler _recvHandler;
+    const void *_recvHandlerOwner = nullptr; // §F3：_recvHandler 的 owner 標記（僅比對用）
+    mutable std::mutex _recvHandlerMutex; // §Q-RECVHANDLER-FIX：保護 _recvHandler / _recvHandlerOwner 跨執行緒讀寫
+
+    // §K.4 fix: video/audio threads enqueue into _pendingQueue;
+    // the IO thread drains it via drainPendingToQuic().
+    // All picoquic_queue_datagram_frame calls happen on the IO thread.
+    struct PendingDgram {
+      uint8_t flowType;
+      int scheduler;
+      bool isStream;          // true → reliable stream #0; false → datagram
+      bool reinject;          // §Q-REINJECT v1.5.172: true → 對所有 active path
+                              //   同送 datagram（XLINK reinjection 模式，用於
+                              //   PATH-SWITCH 後送 IDR 提高送達率）
+      std::vector<uint8_t> data;
+    };
+    std::mutex _pendingMutex;
+    std::vector<PendingDgram> _pendingQueue;
+
+    uint16_t _seqCounters[4] = {};
+
+    // Picoquic does not expose a public "get number of paths" API, so we
+    // track active path ids ourselves via picoquic_callback_path_available
+    // / _suspended / _deleted. Path 0 is always present (the initial cnx
+    // path), so we start at 1.
+    mutable std::mutex _pathMutex;
+    std::vector<uint64_t> _activePaths{0};
+
+    // §Q-STATS-CACHE-FIX (review batch 2)：path quality 快取。
+    // picoquic_get_path_quality 只能在 IO 執行緒呼叫（picoquic 單執行緒
+    // 約束）；statsLoop 原本直接呼叫會與 ioLoop 並行走訪可能正被刪除
+    // 的 path 物件。改由 IO 執行緒在 drainPendingToQuic 的 §K.11 限頻
+    // 區塊內更新快取，getStats() 只讀快取。
+    mutable std::mutex _statsCacheMutex;
+    std::vector<SubflowStats> _statsCache;
+    void updateStatsCache();  // 僅限 IO 執行緒呼叫
+
+    // RR cursor for REDUNDANT scheduler (rotates the preferred path so
+    // picoquic spreads load across subflows over consecutive frames).
+    int _redundantRR = 0;
+
+    // §Q-PATH-SWITCH 2026-05-27: track bestVideoPath transitions for
+    // mid-stream diagnostic logging. -2 = uninitialized, -1 = fallback
+    // to cnx-level queue (single path), 0+ = picoquic path index.
+    int _lastVideoPath = -2;
+
+    // §Q-PATH-SWITCH-STICKY 2026-05-27: bestVideoPath 一旦選定就 sticky，
+    // 只在當前路徑不健康時才允許切換。v1.5.163 實測：dwell 時間策略
+    // 只延遲震盪不防止震盪 → 改為無條件 sticky。
+    // _lastPathSwitchTime 僅用於 diagnostic log。
+    uint64_t _lastPathSwitchTime = 0;  // picoquic_current_time() µs
+    bool _lastSwitchWasInitial = false;  // §MP-SINGLE-AVAIL：上次切換是 -2／-1 → M
+
+    // §Q-RECOVERY-IDR-FIX (review batch 2)：是否曾經選定過有效 video
+    // path（bestVideoPath ≥ 0）。用於區分「初始 path 選定的 -1 → 0」
+    // （不可觸發 IDR——見 §Q-IDR-INIT-FIX 啟動期 IDR 風暴教訓）與
+    // 「全 path 失效後恢復的 -1 → M」（必須觸發 IDR + reinject 視窗，
+    // 否則 client decoder 凍結，R.3 殭屍態）。僅 IO 執行緒
+    // （drainPendingToQuic）讀寫，不需同步。
+    bool _hadVideoPathBefore = false;
+
+    // §Q-RECOVERY-IDR-FIX：M → -1 轉換的時刻（µs）。-1 → M 恢復時
+    // 要求 -1 駐留 ≥1s 才觸發 IDR loop——亞秒級的全 path 抖動（單輪
+    // RTO spike、nb_paths 縮放）期間 video 仍經 cnx-level queue 正常
+    // 送出，不需要 IDR。僅 IO 執行緒讀寫。
+    uint64_t _videoPathLostTime = 0;
+
+    // §Q-PATH-SWITCH-IDR 2026-05-27: bestVideoPath 切換時自動要求 IDR。
+    // drainPendingToQuic() 設 flag → stream.cpp video 送出迴圈消費。
+    // §Q-STICKY-ESCAPE 2026-07-02: bool 改為 kind——
+    //   0 = 無、1 = full（真 failover，10s IDR loop）、
+    //   2 = light（escape 主動切往已驗證的更好路徑，2s 短視窗）。
+    std::atomic<int> _pathSwitchIdrKind{0};
+
+    // §Q-FAILOVER-CNXQ 2026-05-27: failover 期間改用 cnx-level datagram
+    // queue（不用 per-path queue）。picoquic 對剛從 backup 升級的路徑
+    // 有 scheduler 排程缺陷——per-path queue 的資料堆積但不被排程發送。
+    // 改用 cnx-level queue 讓 picoquic 內部排程器自行路由到可用路徑。
+    // Pass 3 / EMERGENCY-PROMOTE / 任何 real failover 切換設 true；
+    // 現載流路徑 warm 且過 §Q-CNXQ-WARMUP 時間下限後清除。
+    bool _failoverCnxQueue = false;
+    // §Q-CNXQ-WARMUP 2026-07-02: cnx-level queue 的最短持續時刻。新
+    // path 初始 cwin ~72KB 會騙過 64KB warm 門檻，需要時間下限。
+    uint64_t _cnxQueueMinUntil = 0;
+
+    // §Q-STICKY-ESCAPE 2026-07-02: sticky 選路品質逃生門的狀態。
+    // 2026-07-01 事故：failover 到 VPN 後乙太恢復，sticky「不死不換」+
+    // Pass 1 warm-cwin 門檻（閒置 path 永遠冷）讓視訊留在持續 loss 的
+    // VPN 上 86 分鐘。每 500ms 對每條 path 取 nb_losses_found delta，
+    // 以 unique_path_id 為 key（防 path 增刪 index 漂移）維護 6 視窗
+    // lossy 位元圖。僅 IO 執行緒讀寫。
+    struct EscSnap {
+      bool used = false;
+      uint64_t pathId = 0;
+      uint64_t lossSnap = 0;
+      uint8_t lossyBits = 0;   // bit0 = 最近視窗是否有 loss
+      uint8_t samples = 0;     // 已觀測視窗數（新 path 需滿 6 才可信）
+      // §MP-MEASURE 2026-09-30：比例式量測。閒置路徑沒有樣本不等於乾淨
+      // （M7：閒置的家用 Wi-Fi「6 視窗零 loss」被選中，接手後立刻崩）。
+      uint64_t bytesSnap = 0;
+      uint64_t spurSnap = 0;
+      uint8_t measuredBits = 0;  // bit0 = 最近視窗樣本數足夠
+      uint32_t winPk[6] = {};    // 近 6 視窗送出封包數（估）
+      uint32_t winLoss[6] = {};  // 近 6 視窗真實 loss（扣 spurious）
+      uint8_t winPos = 0;
+      uint64_t availSinceUs = 0;  // §MP-SINGLE-AVAIL 寬限起點
+    };
+    EscSnap _escSnaps[16] {};
+    uint64_t _lastEscapeEval = 0;      // 上次評估時刻（500ms 節流）
+    int _escapeStreak = 0;             // 連續滿足逃生條件的輪數
+    uint64_t _escLastCandidateId = 0;  // streak 綁定的候選 path id
+    uint64_t _lastEscapeSwitch = 0;    // escape 專屬 30s 冷卻
+    uint64_t _escNoCandWarn = 0;       // 「無候選」log 節流
+    uint64_t _schedDiagLastUs = 0;      // §MP-SCHED-DIAG 節流
+    int _schedPrev[8][4] = {};
+    bool _escapeIdrLight = false;      // 本輪切換使用 light IDR
+
+    // §Q-ABR-FLOOR-ESCAPE (Fix C): stream.cpp ABR 執行緒設，IO 執行緒
+    // 的 escape 評估消費。true = 放寬 hysteresis（streak 1、免 30s 冷
+    // 卻；候選品質與 10s 駐留不放寬）。
+    std::atomic<bool> _pathReevalRequested{false};
+  public:
+    // stream.cpp 調用：若 bestVideoPath 切換過則回非 0 並清除 flag。
+    // 回傳值 = IDR kind（1=full 10s loop、2=light 2s 視窗）。
+    int consumePathSwitchIdr() {
+      return _pathSwitchIdrKind.exchange(0, std::memory_order_acq_rel);
+    }
+
+    // §Q-ABR-FLOOR-ESCAPE (Fix C): ABR 在 floor-stuck（低檔 + 持續
+    // loss ≥30s）時呼叫，請求 MP-QUIC 層重評估視訊路徑。
+    void requestPathReevaluation() {
+      _pathReevalRequested.store(true, std::memory_order_release);
+    }
+
+    // §ABR-QSTALE-FEEDBACK 2026-07-16：把 §Q-STALE 在 server 端丟棄的
+    // video datagram 量回饋給 ABR。07-15 事故：DERP 窄路徑（2-3Mbps）
+    // 上 §Q-STALE 以「整幀」為單位丟掉 ~85% video，client 的整幀跳號
+    // 只發 RFI 不發 FEC status → run_abr_aimd 看不到 99% 丟失，
+    // bitrate 釘死 max。server 自己丟的量是下行壅塞最直接的證據。
+    // ABR 執行緒（持 abrMutex）每輪 consume；exchange 語意讓視窗自動
+    // 對齊「上次 AIMD 輪至今」。
+    uint64_t consumeStaleDropsForAbr() {
+      return _staleDropsForAbr.exchange(0, std::memory_order_acq_rel);
+    }
+
+    // §ABR-RAMP-GATE 2026-07-16：近 windowUs 內是否觀測過 QUIC 壅塞
+    // （cwin 滿的 backpressure 或 §Q-STALE 丟棄）。ABR 用來凍結零丟包
+    // 回升——§Q-STALE-SAFETY-VALVE 的 3s grace 期間丟棄暫停，但
+    // backpressure 持續刷新，不會出現誤回升空窗。recency 設計只寫
+    // 不清，時間窗自動過期，session 收尾不會把回升凍死。
+    bool isRecentlyCongested(uint64_t windowUs = 2000000) const {
+      uint64_t now = picoquic_current_time();
+      uint64_t bp = _lastBackpressureUs.load(std::memory_order_acquire);
+      uint64_t sd = _lastStaleDropUs.load(std::memory_order_acquire);
+      return (bp != 0 && now - bp < windowUs) ||
+             (sd != 0 && now - sd < windowUs);
+    }
+  private:
+
+    // §K.7 diag: datagram queue/send 計數器
+    std::atomic<uint64_t> _dgramQueued{0};
+    std::atomic<uint64_t> _dgramPushed{0};
+    std::atomic<uint64_t> _dgramDroppedStale{0};
+    std::atomic<uint64_t> _dgramPendingPeak{0};
+    // §Q-ACCT：picoquic 連線層級計數的快照（IO 執行緒寫、統計執行緒讀）
+    std::atomic<uint64_t> _acctPqSent{0}, _acctPqRecv{0}, _acctRetx{0}, _acctSpurious{0};
+    // §Q-ACCT：影像資料 shard 逐序號的最終狀態（0 未見、1 已排入、2 已確認、3 判遺失、
+    // 4 誤判遺失）。只在 IO 執行緒存取；session 關閉時列出 3 與 1 的序號，和 client 的
+    // `§Q-ACCT skip seq=` 對帳。
+    std::vector<uint8_t> _acctSeqState = std::vector<uint8_t>(65536, 0);
+    uint64_t _acctDgAcked = 0, _acctDgLost = 0, _acctDgSpurious = 0;
+    void acctMark(const uint8_t *dgram, size_t len, uint8_t state);
+    void acctDump();
+
+    // §ABR-QSTALE-FEEDBACK：ABR 專用 consume 計數器。不重用
+    // _dgramDroppedStale——它是累積診斷值且會在 §Q-GRACE-FIX 新
+    // episode 時歸零，delta 會失真。IO 執行緒 ++，ABR 執行緒 exchange。
+    std::atomic<uint64_t> _staleDropsForAbr{0};
+    std::atomic<uint64_t> _lastBackpressureUs{0};  // IO 執行緒 drain 判定 backpressure 時刷新
+    std::atomic<uint64_t> _lastStaleDropUs{0};     // IO 執行緒 §Q-STALE 丟棄時刷新
+
+    // §Q-STALE 2026-05-27: approximate picoquic video queue depth tracking.
+    // 防止 picoquic datagram queue 無限堆積。server 以 120-156fps 編碼
+    // 但 picoquic 只能送 ~60fps → 差額 FIFO 堆積 → 200K+ datagrams →
+    // client 看到 2 分鐘前的畫面 → 滑鼠「慢半拍、越來越差」。
+    // approxVideoQueueDepth 用 bytes_sent delta 估算 picoquic 已送量，
+    // 超過 MAX 就丟棄多餘 video datagram 不入 picoquic queue。
+    int64_t _approxVideoQueueDepth = 0;
+    uint64_t _lastTotalBytesSent = 0;
+    static constexpr int64_t MAX_VIDEO_QUEUE_DEPTH = 60; // ~4 frames × 14 dgrams/frame
+
+    // §Q-STALE-STARVE 2026-07-17：pacing 飢餓型無條件淘汰門檻。
+    // 07-17 晚間 lag 事故：BBR bw_lo 自陷讓 pacing 掐死輸出，
+    // inFlight=0、cwnd 未滿 → quicBackpressured 恆假 → §Q-STALE
+    // 不觸發，video 佇列 20 秒 1471→8652 無界成長（秒級畫面延遲）。
+    // 佇列深過此值（≈0.5-1 秒份量，遠大於單張大 IDR 的 ~36-40 個
+    // dgram burst）就不看 backpressure 直接淘汰。
+    static constexpr int64_t STALE_STARVE_THRESHOLD = 240;
+
+    // §K.16-BBR-REVIVE 2026-07-17：BBR 崩塌偵測狀態（連續兩次
+    // 500-drain 取樣成立才觸發 reset；10 秒限頻）。
+    int _bbrCollapseSamples = 0;
+    uint64_t _lastBbrReviveUs = 0;
+
+    // §Q-PATH-SWITCH-FLUSH 2026-05-27: PATH-SWITCH 後寬限期計數器。
+    // 非零期間 §Q-STALE 不丟 video datagram，確保 IDR 通過。
+    int _pathSwitchGraceCycles = 0;
+
+    // §Q-STALE-SAFETY-VALVE v1.5.181: video stall 偵測計時器。
+    // 當 §Q-STALE 持續丟棄 video 超過 3 秒，表示陷入死亡螺旋
+    // （沒有 PATH-SWITCH → grace 不重設 → 永遠丟棄）。
+    // 安全閥重設 approxVQ + 恢復 grace 來打破循環。
+    uint64_t _staleStallStart = 0;
+
+    // §K.9-PMTUD-FIX 2026-07-16：MTU boost 黑名單（unique_path_id）。
+    // 某 path 一旦觀測到 nb_mtu_losses>0，永久停止對它強制 send_mtu=1500，
+    // 讓 picoquic 的 reset_path_mtu + PMTUD（required）收斂真實 MTU。
+    // 僅 IO 執行緒（drainPendingToQuic）存取，無鎖需求。
+    std::unordered_set<uint64_t> _mtuBoostBlocked;
+
+    // §K.9-PAROLE 2026-07-17：boost 假釋制。07-17 事故證實 nb_mtu_losses
+    // 的遞增條件在 RACK 支配的路徑上實質聾了 60 秒（只計「丟失包長度
+    // 精確 ==send_mtu」或 PTO；coalesced 1281-1499B 黑洞包一律不計，
+    // 而 boost 鎖 1500=mtu_max 又讓 PMTUD probe 永不發送）。改為正向
+    // 確認：path 首次被 boost 納管時記錄時刻，1.5 秒內沒觀測到任何
+    // ≥1300B 封包被 ACK（picoquic path->max_acked_packet_size），就
+    // 撤銷 boost + reset_path_mtu + 黑名單，交還 PMTUD（required）。
+    // 真 1500 路徑上 video 大包毫秒級就會被 ACK，不受影響；誤撤銷的
+    // 代價只是 PMTUD 花幾個 RTT 探回 1500。僅 IO 執行緒存取。
+    std::unordered_map<uint64_t, uint64_t> _mtuBoostParoleStartUs;
+    static constexpr uint64_t MTU_PAROLE_TIMEOUT_US = 1500000;   // 1.5s（遠端 RTT 300ms ≈ 5 RTT）
+    static constexpr size_t MTU_PAROLE_CONFIRM_LEN = 1300;       // > Tailscale/DERP 1280
+    // §K.9-PAROLE-IDLE：路徑累計送量低於此值（約一張 IDR）視為閒置，
+    // 假釋時鐘不啟動——standby 路徑沒送過大包，不能當黑洞證據。
+    static constexpr uint64_t MTU_PAROLE_MIN_SENT_BYTES = 65536;
+
+    // §AUD-Q-TRIM 2026-07-17：audio datagram 佇列 stale 淘汰上限。
+    // audio 豁免 §Q-STALE（丟 video 的邏輯），但在窄路徑壅塞時會在
+    // picoquic cnx FIFO 無上限積壓數秒、再以 2.4× 實時排空吃滿頻寬
+    //（07-17 事故：93→715 dgram/s、2.03Mbps，把 video 擠到餓死）。
+    // 每次 drain 完把 audio 佇列修剪到最新 75 個（HQ 5ms + 4+2 parity
+    // ≈ 300 dgram/s → 約 250ms），從最舊端淘汰——遲到 250ms 的 audio
+    // 本來就沒有播放價值。
+    static constexpr size_t AUDIO_QUEUE_MAX_DEPTH = 75;
+    std::atomic<uint64_t> _dgramTrimmedStaleAudio{0};
+
+    // §Q-GRACE-FIX 2026-05-27 (v1.5.172): per-failover-episode grace
+    // 重設邏輯。原版每次 PATH-SWITCH 都重設 grace → 振盪期間 grace
+    // 永不過期 → §Q-STALE 失效。改為「同 episode 內振盪不續命」。
+    uint64_t _failoverEpisodeStartTime = 0;
+
+    // §Q-REINJECT-WINDOW 2026-05-27 (v1.5.172 bug fix)：reinject 視窗
+    // 只在「真正的 failover 切換」開（_lastVideoPath ≥ 0 → 新 path ≥ 0）。
+    // 不能用 _lastPathSwitchTime，因為連線剛建立時的初始 path 選定
+    // （-2 → -1 → 0）也會觸發 PATH-SWITCH 邏輯，誤把 reinject 開了
+    // → IDR 推到所有 standby path 的 picoquic queue → 堆積塞爆。
+    // §Q-PERF：atomic——IO 執行緒在 drain 內寫入，video 執行緒經
+    // isInReinjectionWindow()（stream.cpp 每 frame）讀取，裸 uint64_t
+    // 是跨執行緒 data race（與 _pathSwitchIdrNeeded 同型問題）。
+    std::atomic<uint64_t> _reinjectWindowUntil{0};
+
+    // §Q-PROMOTE-DEBOUNCE 2026-05-27: 防止 Pass 3 emergency-promote
+    // 對同一 path 在短時間內重複呼叫。picoquic_set_path_status 是
+    // async，期間 path 仍顯示 backup，會觸發 Pass 3 連續多次 promote。
+    uint64_t _lastEmergencyPromoteTime = 0;
+    uint64_t _lastEmergencyPromotedId = UINT64_MAX;
+
+    // §K.10 diag: per-flow 計數器 (index = flowType: 0=unused, 1=video, 2=audio, 3=control)
+    std::atomic<uint64_t> _dgramQueuedByFlow[4]{};
+    std::atomic<uint64_t> _dgramFailedByFlow[4]{};
+    std::atomic<uint64_t> _bytesByFlow[4]{};
+    // 上次 stats snapshot（用於計算 delta 速率）
+    uint64_t _prevBytesByFlow[4] = {};
+    std::chrono::steady_clock::time_point _prevStatsTime = std::chrono::steady_clock::now();
+
+    // §5b FEC: video datagram RS encoding (4 data + 2 parity)
+    struct FecGroupState {
+      std::vector<uint8_t> payloads[4];
+      uint16_t seqs[4] = {};
+      int count = 0;
+      uint16_t baseSeq = 0;
+    };
+    FecGroupState _fecGroup;
+    ::_reed_solomon *_fecRs = nullptr;
+    void flushFecParity(int scheduler);
+  };
+
+  class QuicListener {
+  public:
+    QuicListener();
+    ~QuicListener();
+
+    QuicListener(const QuicListener &) = delete;
+    QuicListener &operator=(const QuicListener &) = delete;
+
+    /**
+     * Start the QUIC listener.
+     * @param port       UDP port to bind
+     * @param certPath   PEM certificate path
+     * @param keyPath    PEM private key path
+     * @return true on success
+     */
+    bool start(uint16_t port,
+               const std::string &certPath,
+               const std::string &keyPath);
+
+    void stop();
+
+    bool isRunning() const { return _running.load(); }
+
+    /**
+     * Get the active session for a given client address, or nullptr.
+     * Thread-safe.
+     */
+    std::shared_ptr<QuicSession> getSession(
+        const boost::asio::ip::address &clientAddr);
+
+    /**
+     * §M01-D A2 2026-09-23：把 qs 從 session map 退役（以 value 比對，
+     * 找到就 erase 並設 _ready=false）。Thread-safe（取 _sessionMutex）。
+     *
+     * 用途：被同一 client 的新 /resume、/launch 取代的 stream session，
+     * 它的 QUIC 連線屬於已死的 client；map 只以 IP 當 key，留著會被
+     * 同 IP 的新 session 用 getSession() 撿走。
+     *
+     * 刻意不 close、不碰 _cnx（_cnx 僅限 IO 執行緒，§Q-CNX-ATOMIC-FIX）：
+     * cnx 交給 picoquic 的 idle timeout 回收；之後的 callback 以 _cnx 走訪
+     * map 找不到它，自然變成 no-op（與同 IP 重連被擠出的舊連線相同）。
+     * IO 執行緒只在 _sessionMutex 內 drain map 裡的 session，erase 之後
+     * 不會再碰它。
+     * @return 是否在 map 中找到並移除。
+     */
+    bool retireSession(const std::shared_ptr<QuicSession> &qs);
+
+    /**
+     * Called when a new QUIC session is accepted (after handshake).
+     */
+    using SessionCallback = std::function<void(std::shared_ptr<QuicSession>)>;
+    void setSessionCallback(SessionCallback cb);
+
+    // Log aggregate stats for all sessions (called periodically)
+    void logStats();
+
+  private:
+    void ioLoop();
+
+    static int picoquicCallback(picoquic_cnx_t *cnx,
+        uint64_t stream_id, uint8_t *bytes, size_t length,
+        picoquic_call_back_event_t fin_or_event,
+        void *callback_ctx, void *stream_ctx);
+
+    picoquic_quic_t *_quic = nullptr;
+    std::thread _ioThread;
+    std::atomic<bool> _running{false};
+
+    std::mutex _sessionMutex;
+    std::unordered_map<std::string, std::shared_ptr<QuicSession>> _sessions;
+
+    SessionCallback _sessionCallback;
+    uint16_t _port = 0;
+
+    // Periodic stats logging
+    std::thread _statsThread;
+    std::atomic<bool> _statsRunning{false};
+    void statsLoop();
+  };
+
+  // Global listener instance (created by stream.cpp when MP-QUIC is active)
+  inline QuicListener *g_listener = nullptr;
+
+}  // namespace quic_server
+
+#endif  // VIPLE_MPQUIC
