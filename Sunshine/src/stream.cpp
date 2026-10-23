@@ -317,22 +317,51 @@ namespace stream {
       uint32_t magic;
       memcpy(&magic, host->receivedData, 4);
       if (magic == HOLEPUNCH_MAGIC) {
+        // §PUNCH-RATELIMIT (ultrareview #7)：這裡在任何 session 查詢與驗證之前執行，控制埠
+        // 對外開放時任何人都能灌。以前每包都 info log＋回 ACK（無界 log、UDP 反射）。正常
+        // 打洞一個 session 只要幾個 SYN／CONFIRM：每秒最多回 20 個 ACK、印 5 行，多的靜默丟。
+        // 只在 controlBroadcastThread 上執行，不需要鎖。
+        static auto windowStart = std::chrono::steady_clock::now();
+        static int repliesInWindow = 0;
+        static int logsInWindow = 0;
+        static uint64_t suppressed = 0;
+        auto nowPunch = std::chrono::steady_clock::now();
+        if (nowPunch - windowStart >= std::chrono::seconds(1)) {
+          if (suppressed > 0 && logsInWindow < 5) {
+            BOOST_LOG(warning) << "[PUNCH] rate limit: suppressed " << suppressed << " hole-punch packet(s)";
+          }
+          windowStart = nowPunch;
+          repliesInWindow = 0;
+          logsInWindow = 0;
+          suppressed = 0;
+        }
         uint8_t type = host->receivedData[5];
         if (type == 0) { // SYN → reply ACK
-          // Modify type to ACK and send back
+          if (repliesInWindow >= 20) {
+            suppressed++;
+            return 1;
+          }
+          repliesInWindow++;
+          // Modify type to ACK and send back（只回固定長度，不反射多出來的資料）
           host->receivedData[5] = 1; // ACK
-          // Send ACK back to sender
           ENetBuffer buf;
           buf.data = host->receivedData;
-          buf.dataLength = host->receivedDataLength;
+          buf.dataLength = 38;
           enet_socket_send(host->socket, &host->address, &host->receivedPeerAddress, &buf, 1);
 
-          auto addr_str = platf::from_sockaddr((sockaddr *)&host->receivedPeerAddress.address);
-          BOOST_LOG(info) << "[PUNCH] Received SYN from " << addr_str << ", sent ACK";
+          if (logsInWindow++ < 5) {
+            auto addr_str = platf::from_sockaddr((sockaddr *)&host->receivedPeerAddress.address);
+            BOOST_LOG(info) << "[PUNCH] Received SYN from " << addr_str << ", sent ACK";
+          }
         }
         else if (type == 2) { // CONFIRM
-          auto addr_str = platf::from_sockaddr((sockaddr *)&host->receivedPeerAddress.address);
-          BOOST_LOG(info) << "[PUNCH] Received CONFIRM from " << addr_str << " — hole punched!";
+          if (logsInWindow++ < 5) {
+            auto addr_str = platf::from_sockaddr((sockaddr *)&host->receivedPeerAddress.address);
+            BOOST_LOG(info) << "[PUNCH] Received CONFIRM from " << addr_str << " — hole punched!";
+          }
+          else {
+            suppressed++;
+          }
         }
         return 1; // Consume packet (don't pass to ENet)
       }
@@ -661,6 +690,17 @@ namespace stream {
 
       audio_fec_packet_t fec_packet;
       std::unique_ptr<platf::deinit_t> qos;
+
+      // §AUDIO-PORT-LEARN (ultrareview #7)：§Q-REMOTE Fix R.1 略過 recv_ping 時 peer.port()
+      // 一直是 0；背景執行緒稍後從 client 的 UDP ping 學到的 port 放這裡，QUIC 中途消失、
+      // 退回 UDP 時才送得到（以前整場送往 port 0）。
+      std::atomic<uint16_t> learnedPort {0};
+#ifdef VIPLE_MPQUIC
+      // §AUDIO-QUIC-CACHE (ultrareview #7)：getSession 的結果快取 100 ms（只有音訊廣播
+      // 執行緒讀寫）。以前每個音訊封包（~200/s）都去拿 listener 的 session map 鎖。
+      std::shared_ptr<quic_server::QuicSession> quicCache;
+      std::chrono::steady_clock::time_point quicCacheAt {};
+#endif
     } audio;
 
     struct {
@@ -783,6 +823,8 @@ namespace stream {
   // IDX_ENCRYPTED → reinject 全程在同一個 picoquic IO 執行緒上，所以用 thread_local 標記，
   // VR handler 據此把 viaQuic 計入統計。
   static thread_local bool t_ctrl_via_quic = false;
+
+  void abr_forget_enet_rtt(session_t *session);  // §ABR-RTT-STALE（定義在 abr_sample_rtt 前）
 
   /**
    * First part of cipher must be struct of type control_encrypted_t
@@ -1036,6 +1078,7 @@ namespace stream {
             }
             enet_peer_reset(session->control.peer);
             session->control.peer = nullptr;
+            abr_forget_enet_rtt(session);  // §ABR-RTT-STALE
             session->pingTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             break;
           }
@@ -1063,12 +1106,16 @@ namespace stream {
               }
               enet_peer_reset(session->control.peer);
               session->control.peer = nullptr;
+              abr_forget_enet_rtt(session);  // §ABR-RTT-STALE
               BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-ENET-RECONNECT: cleared stale "
                   << "control.peer — ready for client ENet reconnect";
 
-              // 延長 pingTimeout 30 秒，等 client 重連
+              // §Q-SERVER-GRACE-SHORT (ultrareview #7)：以前一次延 30 秒等重連。正常結束串流時
+              // client 先拆 ENet、後關 QUIC，這裡一定看到 QUIC 還活著 → session 多撐 30 s
+              //（繼續擷取編碼、把影像送給已離開的 client、VR /launch 被 BUSY 擋）。改延 5 s：
+              // 到期時控制迴圈會再查 QUIC，還活著就再延 5 s，等重連的時間不變。
               session->pingTimeout = std::chrono::steady_clock::now()
-                  + std::chrono::seconds(30);
+                  + std::chrono::seconds(5);
               break;
             }
           }
@@ -2154,6 +2201,15 @@ namespace stream {
   // **只能從 controlBroadcastThread（ENet 執行緒）呼叫** —— session->control.peer
   // 由 ENet 管理，斷線後指標失效；從 picoquic ioLoop 讀會是 use-after-free。
   // 呼叫者需持有 video.abrMutex。
+  // §ABR-RTT-STALE (ultrareview #7)：ENet peer 消失時作廢 RTT 樣本。abr_sample_rtt 只在
+  // ENet ping 時取樣，peer 沒了之後 abrRttLastMs 凍結在斷線前（常是被壅塞撐大的值）→
+  // QUIC-only failover 期間 run_abr_aimd 每輪都判壅塞、回升被擋或一路砍到底。作廢後走
+  // 既有的 NO-SAMPLE 分支（不做延遲判斷）；ENet 重連後第一個 ping 重新取樣。
+  void abr_forget_enet_rtt(session_t *session) {
+    std::lock_guard<std::mutex> lk(session->video.abrMutex);
+    session->video.abrRttSampled = false;
+  }
+
   void abr_sample_rtt(session_t *session) {
     using namespace std::chrono_literals;
     auto peer = session->control.peer;
@@ -2547,6 +2603,10 @@ namespace stream {
     if (now - session->video.lastFecStatusTime > 600ms &&
         now - session->video.lastAbrPingTick >= 500ms) {
       session->video.lastAbrPingTick = now;
+      // §FEC-WINDOW-RESET (ultrareview #7)：安靜期也要推進 FEC 窗起點。以前只有 FEC status
+      // handler 會重設 fecAccumStart，安靜幾分鐘後第一個真的 loss burst 的 elapsed 橫跨整段
+      // 安靜期 → lossPerSec 被稀釋到近 0（桌面 hold 不降、VR 判 <1% 忽略），反應晚一個窗。
+      session->video.fecAccumStart = now;
       // 排掉丟包尾巴殘留的 accum（最後一批 status 進來時 elapsed<500ms
       // 沒觸發排空），避免滯留污染下次計算；通常為 0。
       int residual = session->video.fecLossAccum.exchange(0);
@@ -2567,6 +2627,82 @@ namespace stream {
       }
       run_abr_aimd(session, residual, 500,
                    residual > 0 ? "ping-tick-residual" : "ping-tick");
+    }
+  }
+
+  // §FEC-STATUS-ONE (ultrareview #7)：ENet SS_FRAME_FEC 與 QUIC 0x55 兩個 handler 共用的
+  // 「累積 → 500 ms 排空 → §FRZ-GAP-CLAMP → 自適應 FEC → run_abr_aimd」。以前兩份各 ~60 行，
+  // 已經漂移（QUIC 那份少了 FEC 降回的 log），每個修正都得改兩次。呼叫者需持有 video.abrMutex。
+  // fec 指向 SS_FRAME_FEC_STATUS（大端），lost＝missingPacketsBeforeHighestReceived。
+  void on_fec_status_locked(session_t *session, const uint8_t *fec, int lost, const char *src) {
+    vr_note_fec_status_locked(session, fec);  // §VR-REPAIR-RTT（量測）：只記帳，下面的調整不看它
+    session->video.fecLossAccum.fetch_add(lost);
+    session->video.fecFrameAccum.fetch_add(1);
+
+    auto now = std::chrono::steady_clock::now();
+    session->video.lastFecStatusTime = now;  // §ABR-RAMP-TICK：ping tick 讓位依據
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now - session->video.fecAccumStart).count();
+
+    // Run AIMD every ~500ms worth of accumulated frames
+    if (elapsed >= 500) {
+      int count = session->video.fecLossAccum.exchange(0);
+      int frames = session->video.fecFrameAccum.exchange(0);
+      int sentWindow = session->video.videoShardsSentAccum.exchange(0);
+      session->video.fecAccumStart = now;
+
+      (void)frames;  // available for future per-frame-loss-rate computation
+
+      // §FRZ-GAP-CLAMP：client 回報的 missing 不可能超過同期實發量
+      //（synthetic gap status 在 client 佇列重置後會虛報數萬）。
+      if (count > sentWindow) {
+        static int clampLogCount = 0;
+        if (clampLogCount++ < 20) {
+          BOOST_LOG(info) << "[VIPLE-FEC] §FRZ-GAP-CLAMP (" << src << "): reported missing "
+            << count << " > shards sent " << sentWindow
+            << " this window — clamped";
+        }
+        count = sentWindow;
+      }
+
+      // Feed the same AIMD algorithm as IDX_LOSS_STATS handler
+      auto currentFec = session->video.adaptiveFecPercentage.load();
+      if (currentFec == 0) currentFec = config::stream.fec_percentage;
+
+      // §VR-ABR-RATIO：VR session 丟包比例 < 1% 時不加 FEC（當成零丟包，讓 FEC 能降回基準）
+      const float vrLossPct = vr_abr_loss_pct(session, count, elapsed);
+      const bool lossSignificant = count > 0 && !(vrLossPct >= 0.0f && vrLossPct < kVrAbrIgnorePct);
+      if (lossSignificant && session->vr) {
+        vr_fec_hold_locked(session, now);  // §VR-FEC-LOSS：VR 的 FEC 只跟著 LOSS 升，這裡只延後回降
+      } else if (lossSignificant) {
+        int newFec = std::min(currentFec + 10, 50);
+        if (newFec != currentFec) {
+          session->video.adaptiveFecPercentage.store(newFec);
+          BOOST_LOG(info) << "[VIPLE-FEC] FEC status (" << src << "): " << count << " lost in " << elapsed
+            << "ms, FEC: " << currentFec << "% -> " << newFec << "%";
+        }
+        session->video.lastLossTime = now;
+        session->video.zeroLossStreak = 0;
+      } else if (session->vr) {
+        session->video.zeroLossStreak++;
+        vr_fec_decay_locked(session, now);  // §VR-FEC-LOSS：30 s 沒有救不回的幀才開始降
+      } else {
+        session->video.zeroLossStreak++;
+        auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
+          now - session->video.lastLossTime).count();
+        if (sinceLastLoss > 5 && session->video.zeroLossStreak >= 3) {
+          int baseFec = config::stream.fec_percentage;
+          int newFec = std::max(currentFec - 5, baseFec);
+          if (newFec != currentFec) {
+            session->video.adaptiveFecPercentage.store(newFec);
+            BOOST_LOG(info) << "[VIPLE-FEC] No loss for " << sinceLastLoss
+              << "s, FEC: " << currentFec << "% -> " << newFec << "%";
+          }
+        }
+      }
+
+      // AIMD bitrate adjustment — 共用 §ABR-RAMP 邏輯
+      run_abr_aimd(session, count, elapsed, src);
     }
   }
 
@@ -2724,76 +2860,7 @@ namespace stream {
       //（lastFecStatusTime 寫入、500ms 排空、FEC 調整、run_abr_aimd
       // 全在鎖內，與 QUIC quic-fec 路徑、ping-tick 互斥）。
       std::lock_guard<std::mutex> lk(session->video.abrMutex);
-
-      vr_note_fec_status_locked(session, fec);  // §VR-REPAIR-RTT（量測）：只記帳，下面的調整不看它
-      session->video.fecLossAccum.fetch_add(lost);
-      session->video.fecFrameAccum.fetch_add(1);
-
-      auto now = std::chrono::steady_clock::now();
-      session->video.lastFecStatusTime = now;  // §ABR-RAMP-TICK：ping tick 讓位依據
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now - session->video.fecAccumStart).count();
-
-      // Run AIMD every ~500ms worth of accumulated frames
-      if (elapsed >= 500) {
-        int count = session->video.fecLossAccum.exchange(0);
-        int frames = session->video.fecFrameAccum.exchange(0);
-        int sentWindow = session->video.videoShardsSentAccum.exchange(0);
-        session->video.fecAccumStart = now;
-
-        (void)frames;  // available for future per-frame-loss-rate computation
-
-        // §FRZ-GAP-CLAMP：client 回報的 missing 不可能超過同期實發量
-        //（synthetic gap status 在 client 佇列重置後會虛報數萬）。
-        if (count > sentWindow) {
-          static int clampLogCount = 0;
-          if (clampLogCount++ < 20) {
-            BOOST_LOG(info) << "[VIPLE-FEC] §FRZ-GAP-CLAMP: reported missing "
-              << count << " > shards sent " << sentWindow
-              << " this window — clamped";
-          }
-          count = sentWindow;
-        }
-
-        // Feed the same AIMD algorithm as IDX_LOSS_STATS handler
-        auto currentFec = session->video.adaptiveFecPercentage.load();
-        if (currentFec == 0) currentFec = config::stream.fec_percentage;
-
-        // §VR-ABR-RATIO：VR session 丟包比例 < 1% 時不加 FEC（當成零丟包，讓 FEC 能降回基準）
-        const float vrLossPct = vr_abr_loss_pct(session, count, elapsed);
-        const bool lossSignificant = count > 0 && !(vrLossPct >= 0.0f && vrLossPct < kVrAbrIgnorePct);
-        if (lossSignificant && session->vr) {
-          vr_fec_hold_locked(session, now);  // §VR-FEC-LOSS：VR 的 FEC 只跟著 LOSS 升，這裡只延後回降
-        } else if (lossSignificant) {
-          int newFec = std::min(currentFec + 10, 50);
-          if (newFec != currentFec) {
-            session->video.adaptiveFecPercentage.store(newFec);
-            BOOST_LOG(info) << "[VIPLE-FEC] FEC status: " << count << " lost in " << elapsed
-              << "ms, FEC: " << currentFec << "% -> " << newFec << "%";
-          }
-          session->video.lastLossTime = now;
-          session->video.zeroLossStreak = 0;
-        } else if (session->vr) {
-          session->video.zeroLossStreak++;
-          vr_fec_decay_locked(session, now);  // §VR-FEC-LOSS：30 s 沒有救不回的幀才開始降
-        } else {
-          session->video.zeroLossStreak++;
-          auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
-            now - session->video.lastLossTime).count();
-          if (sinceLastLoss > 5 && session->video.zeroLossStreak >= 3) {
-            int baseFec = config::stream.fec_percentage;
-            int newFec = std::max(currentFec - 5, baseFec);
-            if (newFec != currentFec) {
-              session->video.adaptiveFecPercentage.store(newFec);
-              BOOST_LOG(info) << "[VIPLE-FEC] No loss for " << sinceLastLoss
-                << "s, FEC: " << currentFec << "% -> " << newFec << "%";
-            }
-          }
-        }
-
-        // AIMD bitrate adjustment — 共用 §ABR-RAMP 邏輯
-        run_abr_aimd(session, count, elapsed, "enet-fec");
-      }
+      on_fec_status_locked(session, fec, lost, "enet-fec");  // §FEC-STATUS-ONE
     });
 
     // VipleStream 2.0 §VR（M1a）：0x5506 TRACKING。照 SS_FRAME_FEC_PTYPE 的方式直接用常數
@@ -3228,6 +3295,11 @@ namespace stream {
           // the app terminates before they finish connecting.
           if (!session->control.peer) {
             has_session_awaiting_peer = true;
+            // §VR-STATE-RESEND (ultrareview #5 of #7)：peer 斷開：重連後即使 ENet 重用同一個
+            // peer 指標，也要重送 STATE。以前寫在下面 peer 非空的分支裡，永遠執行不到。
+            if (session->vr) {
+              session->vrCtrl.statePeer = nullptr;
+            }
           } else {
             auto &feedback_queue = session->control.feedback_queue;
             while (feedback_queue->peek()) {
@@ -3244,13 +3316,8 @@ namespace stream {
             }
 
             // VipleStream 2.0 §VR：S→C 只能在這條執行緒送（STATE／STATS／REFRESH_START 等）
-            if (session->vr) {
-              if (session->control.peer) {
-                vr_control_tick(session, now);
-              } else {
-                // peer 斷開：重連後即使 ENet 重用同一個 peer 指標，也要重送 STATE
-                session->vrCtrl.statePeer = nullptr;
-              }
+            if (session->vr && session->control.peer) {
+              vr_control_tick(session, now);
             }
           }
 
@@ -3476,11 +3543,6 @@ namespace stream {
           // picoquic ioLoop 執行緒執行，與 controlBroadcastThread
           // 的 ENet FEC / loss-stats / ping-tick 共用 ABR 狀態。
           std::lock_guard<std::mutex> lk(session->video.abrMutex);
-          vr_note_fec_status_locked(session, fec);  // §VR-REPAIR-RTT（量測）：同 ENet 路徑，只記帳
-          session->video.fecLossAccum.fetch_add(missing);
-          session->video.fecFrameAccum.fetch_add(1);
-          session->video.lastFecStatusTime = std::chrono::steady_clock::now();  // §ABR-RAMP-TICK
-
           static bool loggedOnce = false;
           if (!loggedOnce) {
             BOOST_LOG(info)
@@ -3489,66 +3551,7 @@ namespace stream {
                 << ", len=" << fecLen << ")";
             loggedOnce = true;
           }
-
-          // Run same AIMD cycle as ENet SS_FRAME_FEC handler
-          auto now = std::chrono::steady_clock::now();
-          auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - session->video.fecAccumStart).count();
-          if (elapsed >= 500) {
-            int count = session->video.fecLossAccum.exchange(0);
-            session->video.fecFrameAccum.exchange(0);
-            int sentWindow = session->video.videoShardsSentAccum.exchange(0);
-            session->video.fecAccumStart = now;
-
-            // §FRZ-GAP-CLAMP：同 ENet 路徑——missing 以同期
-            // 實發 shard 數為上限，擋 synthetic 虛報。
-            if (count > sentWindow) {
-              static int clampLogCount = 0;
-              if (clampLogCount++ < 20) {
-                BOOST_LOG(info) << "[VIPLE-FEC] §FRZ-GAP-CLAMP (QUIC): "
-                  << "reported missing " << count << " > shards sent "
-                  << sentWindow << " this window — clamped";
-              }
-              count = sentWindow;
-            }
-
-            // Adaptive FEC
-            auto currentFec = session->video.adaptiveFecPercentage.load();
-            if (currentFec == 0) currentFec = config::stream.fec_percentage;
-            // §VR-ABR-RATIO：同 ENet 路徑
-            const float vrLossPct = vr_abr_loss_pct(session, count, elapsed);
-            const bool lossSignificant = count > 0 && !(vrLossPct >= 0.0f && vrLossPct < kVrAbrIgnorePct);
-            if (lossSignificant && session->vr) {
-              vr_fec_hold_locked(session, now);  // §VR-FEC-LOSS：同 ENet 路徑
-            } else if (lossSignificant) {
-              int newFec = std::min(currentFec + 10, 50);
-              if (newFec != currentFec) {
-                session->video.adaptiveFecPercentage.store(newFec);
-                BOOST_LOG(info) << "[VIPLE-FEC] QUIC FEC status: " << count
-                  << " lost in " << elapsed << "ms, FEC: " << currentFec
-                  << "% -> " << newFec << "%";
-              }
-              session->video.lastLossTime = now;
-              session->video.zeroLossStreak = 0;
-            } else if (session->vr) {
-              session->video.zeroLossStreak++;
-              vr_fec_decay_locked(session, now);  // §VR-FEC-LOSS：同 ENet 路徑
-            } else {
-              session->video.zeroLossStreak++;
-              auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
-                now - session->video.lastLossTime).count();
-              if (sinceLastLoss > 5 && session->video.zeroLossStreak >= 3) {
-                int baseFec = config::stream.fec_percentage;
-                int newFec = std::max(currentFec - 5, baseFec);
-                if (newFec != currentFec) {
-                  session->video.adaptiveFecPercentage.store(newFec);
-                }
-              }
-            }
-
-            // AIMD bitrate — 共用 §ABR-RAMP 邏輯
-            run_abr_aimd(session, count, elapsed, "quic-fec");
-          }
+          on_fec_status_locked(session, fec, missing, "quic-fec");  // §FEC-STATUS-ONE
         }
       }
       // §Q-REMOTE Fix R.2: periodic ping via QUIC stream #0
@@ -4624,10 +4627,16 @@ namespace stream {
       try {
 #ifdef VIPLE_MPQUIC
         // §K.5 fix: 同 video 路徑 — 以 QUIC session 存在與否決定
+        // §AUDIO-QUIC-CACHE：每 100 ms 才重新查一次
         std::shared_ptr<quic_server::QuicSession> quicAudioSession;
         if (config::stream.mpquic_enabled && quic_server::g_listener) {
-          quicAudioSession = quic_server::g_listener->getSession(
-              session->audio.peer.address());
+          auto nowAq = std::chrono::steady_clock::now();
+          if (nowAq - session->audio.quicCacheAt >= 100ms) {
+            session->audio.quicCache = quic_server::g_listener->getSession(
+                session->audio.peer.address());
+            session->audio.quicCacheAt = nowAq;
+          }
+          quicAudioSession = session->audio.quicCache;
         }
         const bool use_quic_audio = (quicAudioSession != nullptr);
         {
@@ -4666,6 +4675,10 @@ namespace stream {
           session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
           session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
         const uint16_t server_audio_port = net::map_port(AUDIO_STREAM_PORT);
+        // §AUDIO-PORT-LEARN：R.1 略過 ping 時 peer.port()==0，改用背景學到的 port；
+        // 兩者都沒有就先不走 UDP／通道（送往 port 0 只是白丟）
+        const uint16_t audio_port = session->audio.peer.port() != 0 ?
+                                    session->audio.peer.port() : session->audio.learnedPort.load();
         // §VR-MULTILINK：有連線可用時，音訊在每條連線各送一份，原本的單一路徑暫停
         const auto vr_links_keep = session->vrLinks;
         auto *const vr_links = (!use_quic_audio && !use_tunnel) ? vr_links_keep.get() : nullptr;
@@ -4690,8 +4703,10 @@ namespace stream {
           std::memcpy(audioScratch.data(), &audio_packet, sizeof(audio_packet));
           std::memcpy(audioScratch.data() + sizeof(audio_packet),
                       shards_p[sequenceNumber % RTPA_DATA_SHARDS], bytes);
-          session->tunnel->send(server_audio_port, session->audio.peer.port(),
-                                audioScratch.data(), audioScratch.size());
+          if (audio_port != 0) {
+            session->tunnel->send(server_audio_port, audio_port,
+                                  audioScratch.data(), audioScratch.size());
+          }
         } else if (use_links) {
           vr_links->send_audio((const uint8_t *) &audio_packet, sizeof(audio_packet),
                                (const uint8_t *) shards_p[sequenceNumber % RTPA_DATA_SHARDS], (size_t) bytes);
@@ -4703,10 +4718,12 @@ namespace stream {
             (size_t) bytes,
             (uintptr_t) sock.native_handle(),
             peer_address,
-            session->audio.peer.port(),
+            audio_port,
             session->localAddress,
           };
-          platf::send(send_info);
+          if (audio_port != 0) {
+            platf::send(send_info);
+          }
         }
 
         auto &fec_packet = session->audio.fec_packet;
@@ -4742,9 +4759,10 @@ namespace stream {
               std::memcpy(audioScratch.data(), &fec_packet, sizeof(fec_packet));
               std::memcpy(audioScratch.data() + sizeof(fec_packet),
                           shards_p[RTPA_DATA_SHARDS + x], bytes);
-              session->tunnel->send(server_audio_port,
-                                    session->audio.peer.port(),
-                                    audioScratch.data(), audioScratch.size());
+              if (audio_port != 0) {
+                session->tunnel->send(server_audio_port, audio_port,
+                                      audioScratch.data(), audioScratch.size());
+              }
             } else if (use_links) {
               vr_links->send_audio((const uint8_t *) &fec_packet, sizeof(fec_packet),
                                    (const uint8_t *) shards_p[RTPA_DATA_SHARDS + x], (size_t) bytes);
@@ -4756,10 +4774,12 @@ namespace stream {
                 (size_t) bytes,
                 (uintptr_t) sock.native_handle(),
                 peer_address,
-                session->audio.peer.port(),
+                audio_port,
                 session->localAddress,
               };
-              platf::send(send_info);
+              if (audio_port != 0) {
+                platf::send(send_info);
+              }
             }
             BOOST_LOG(verbose) << "Audio FEC ["sv << (sequenceNumber & ~(RTPA_DATA_SHARDS - 1)) << ' ' << x << "] ::  send..."sv;
           }
@@ -5078,6 +5098,32 @@ namespace stream {
             << ") — skipping UDP audio ping, entering capture directly";
       }
     }
+    // §AUDIO-PORT-LEARN：略過 ping 時在背景繼續等 client 的 UDP audio ping，學到 port 就記下
+    //（只寫 learnedPort，不碰 audio.peer——送出端同時在讀它）。session 結束時 recv_ping 會因
+    // shutdown_event 返回 -1，下面 join。
+    std::thread audioPortLearner;
+    if (quicAudioBypass) {
+      audioPortLearner = std::thread([session, ref]() {
+        platf::set_thread_name("session::audio-port");
+        udp::endpoint learned = session->audio.peer;
+        while (!session->shutdown_event->peek()) {
+          if (recv_ping(session, ref, socket_e::audio, session->audio.ping_payload, learned, config::stream.ping_timeout) == 0) {
+            session->audio.learnedPort.store(learned.port());
+            BOOST_LOG(info) << "[VIPLE-MPQUIC] §AUDIO-PORT-LEARN: learned client audio port "
+                            << learned.port() << " (UDP fallback ready)";
+            return;
+          }
+        }
+      });
+    }
+    auto audioPortLearnerJoin = util::fail_guard([&]() {
+      if (audioPortLearner.joinable()) {
+        // 先 stop（冪等）讓 shutdown_event 舉起，learner 才會從 recv_ping 返回；
+        // 否則 audioThread 因別的原因提早返回時，這裡的 join 會等不到。
+        session::stop(*session);
+        audioPortLearner.join();
+      }
+    });
     if (!quicAudioBypass)
 #endif
     {

@@ -277,6 +277,11 @@ static int quicVideoRecv(char* buf, int bufLen) {
 }
 
 static bool useQuicVideo = false;
+// §Q-MEDIA-UDP-FALLBACK (ultrareview #7)：QUIC 中途死掉時 server 每一幀都會重新判斷、
+// 改送 RTP/UDP（getSession 找不到 QUIC session），client 以前只在開場決定一次 →
+// 繼續只讀 QUIC ring，畫面永久凍結。接收執行緒看到 QUIC 已死就改讀 UDP socket
+//（開場本來就有綁、ping 也一直在送）。只由接收執行緒寫。
+static bool quicVideoFellBack = false;
 
 void quicVideoGetRingStats(int* depth, int* capacity, uint64_t* drops) {
     int h = quicVideoRing.head;
@@ -476,13 +481,18 @@ static void VideoReceiveThreadProc(void* context) {
         rrNoteDelayedRelease();
 
 #ifdef VIPLE_MPQUIC
-        if (useQuicVideo) {
+        if (useQuicVideo && !quicVideoFellBack) {
             // §K.10: 不在此層加背壓 — ring buffer 必須盡快清空，
             // 否則 QUIC IO 線程持續推入會讓 ring 溢出（4096 entries
             // ≈ 5s @30fps），造成幀丟失。decode queue 容量 240
             // 已足夠吸收解碼器啟動延遲。
             err = quicVideoRecv(encrypted ? encryptedBuffer : buffer, receiveSize);
             if (err == 0) {
+                if (!quicIsConnected()) {
+                    quicVideoFellBack = true;  // §Q-MEDIA-UDP-FALLBACK
+                    Limelog("[VIPLE-MPQUIC] §Q-MEDIA-UDP-FALLBACK: QUIC transport gone — video now read from RTP/UDP\n");
+                    continue;
+                }
                 // QUIC ring 空時 sleep 1ms，計時器按實際經過時間遞增
                 PltSleepMs(1);
             }
@@ -543,7 +553,7 @@ static void VideoReceiveThreadProc(void* context) {
 #ifdef VIPLE_MPQUIC
                 // §K.10：QUIC 模式每圈只 sleep 1ms，UDP 模式每圈
                 // recvUdpSocket 阻塞 ~100ms。用正確的步進值。
-                waitingForVideoMs += useQuicVideo ? 1 : UDP_RECV_POLL_TIMEOUT_MS;
+                waitingForVideoMs += (useQuicVideo && !quicVideoFellBack) ? 1 : UDP_RECV_POLL_TIMEOUT_MS;
 #else
                 waitingForVideoMs += UDP_RECV_POLL_TIMEOUT_MS;
 #endif
@@ -983,6 +993,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
     // 接收執行緒在 useQuicVideo 時只讀 QUIC ring、不讀 UDP socket，所以兩端必須一致。
     useQuicVideo = (StreamConfig.useQuicTransport && quicIsConnected() &&
                     !(VrFlags & VIPLE_VR_SF_ENABLED));
+    quicVideoFellBack = false;
     if (StreamConfig.useQuicTransport && (VrFlags & VIPLE_VR_SF_ENABLED)) {
         Limelog("[VIPLE-VR-SESSION] VR session: video over RTP/UDP (QUIC kept for control/tracking)\n");
     }

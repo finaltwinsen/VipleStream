@@ -1201,8 +1201,13 @@ static unsigned int quicProbeReachable(
     if (rtt > 0)
         return rtt;
     rtt = quicTcpProbeReachable(localAddr, peerAddr, timeoutMs);
-    Limelog("[VIPLE-MPQUIC] §Q-PROBE-TCP: ICMP failed, TCP probe %s (RTT=%u ms)\n",
+    // TCP 三向交握的時間不等於路徑 RTT（實測 LAN 0.2 ms 的路徑量到 12 ms），
+    // 拿去套 §Q-MP-STANDBY 的「比 path0 慢 10 ms」會把好路徑誤放 standby。
+    // 只用它判斷通不通（回 1＝RTT 不明）；實際延遲交給 QUIC 的 RTT（§Q-MP-DYN-STANDBY）。
+    Limelog("[VIPLE-MPQUIC] §Q-PROBE-TCP: ICMP failed, TCP probe %s (connect=%u ms, reported as RTT unknown)\n",
             rtt ? "OK" : "FAILED", rtt);
+    if (rtt > 0)
+        rtt = 1;
     return rtt;
 }
 

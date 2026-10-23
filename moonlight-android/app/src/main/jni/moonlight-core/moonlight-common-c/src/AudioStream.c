@@ -90,6 +90,7 @@ static int quicAudioRecv(char* buf, int bufLen) {
 }
 
 static bool useQuicAudio = false;
+static bool quicAudioFellBack = false;  // §Q-MEDIA-UDP-FALLBACK：同 VideoStream.c，只由接收執行緒寫
 #endif
 
 typedef struct _QUEUE_AUDIO_PACKET_HEADER {
@@ -387,9 +388,14 @@ static void AudioReceiveThreadProc(void* context) {
         }
 
 #ifdef VIPLE_MPQUIC
-        if (useQuicAudio) {
+        if (useQuicAudio && !quicAudioFellBack) {
             packet->header.size = quicAudioRecv((char*)&packet->data[0], MAX_PACKET_SIZE);
             if (packet->header.size == 0) {
+                if (!quicIsConnected()) {
+                    quicAudioFellBack = true;  // §Q-MEDIA-UDP-FALLBACK
+                    Limelog("[VIPLE-MPQUIC] §Q-MEDIA-UDP-FALLBACK: QUIC transport gone — audio now read from RTP/UDP\n");
+                    continue;
+                }
                 PltSleepMs(1);
                 continue;
             }
@@ -599,6 +605,7 @@ int startAudioStream(void* audioContext, int arFlags) {
 
 #ifdef VIPLE_MPQUIC
     useQuicAudio = (StreamConfig.useQuicTransport && quicIsConnected());
+    quicAudioFellBack = false;
     if (useQuicAudio) {
         quicAudioRing.head = 0;
         quicAudioRing.tail = 0;
