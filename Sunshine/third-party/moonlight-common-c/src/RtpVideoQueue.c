@@ -605,13 +605,36 @@ static void submitCompletedFrame(PRTP_VIDEO_QUEUE queue) {
     }
 }
 
+// §PYROWAVE：收不齊的那個 block 只交出「從 block 第一個封包起、序號連續」的那一段。
+// stageCompleteFecBlock() 會跳過缺口把後面的封包接上；PyroWave 的位元流是連續的，一旦錯位，
+// 後面的資料會被當成封包解析（可能解出垃圾）。只交連續前綴的話，缺的區塊在解碼端補 0，
+// 畫面只是局部變糊。剩下沒交出去的封包由呼叫端的 purgeListEntries() 釋放。
+static void stagePyroWaveContiguousPrefix(PRTP_VIDEO_QUEUE queue) {
+    unsigned int nextSeqNum = queue->bufferLowestSequenceNumber;
+
+    for (;;) {
+        PRTPV_QUEUE_ENTRY entry = queue->pendingFecBlockList.head;
+        while (entry != NULL && (entry->isParity || entry->packet->sequenceNumber != nextSeqNum)) {
+            entry = entry->next;
+        }
+        if (entry == NULL) {
+            break;
+        }
+
+        removeEntryFromList(&queue->pendingFecBlockList, entry);
+        entry->receiveTimeUs = queue->bufferFirstRecvTimeUs;
+        insertEntryIntoList(&queue->completedFecBlockList, entry);
+        nextSeqNum = U16(nextSeqNum + 1);
+    }
+}
+
 static bool salvagePartialPyroWaveFrame(PRTP_VIDEO_QUEUE queue) {
     if (!(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE)) {
         return false;
     }
 
     if (queue->pendingFecBlockList.count > 0) {
-        stageCompleteFecBlock(queue);
+        stagePyroWaveContiguousPrefix(queue);
     }
 
     if (queue->completedFecBlockList.head == NULL) {

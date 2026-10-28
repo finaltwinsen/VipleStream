@@ -232,18 +232,10 @@ int PyroWaveDecoderBridge::submitDecodeUnit(PDECODE_UNIT du, AVFrame* outFrame)
     }
 
     // server 送的是連續位元流，單一 PyroWave 封包可能跨好幾個 RTP 片段，所以先把整幀
-    // 接成一段再 push。不完整的幀（中間缺 RTP 封包）接起來會錯位，decoder 可能把缺口後的
-    // 資料當成封包解，所以先整幀丟掉：每幀都是 intra，下一幀就恢復，不要求 IDR。
-    if (du->flags & DU_FLAG_PARTIAL_FRAME) {
-        static std::atomic<int> s_PartialCount{0};
-        int n = s_PartialCount.fetch_add(1);
-        if (n < 5 || (n % 300) == 0) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-PYROWAVE] dropping partial frame %d (total %d)",
-                        du->frameNumber, n + 1);
-        }
-        return DR_OK;
-    }
+    // 接成一段再 push。不完整的幀（DU_FLAG_PARTIAL_FRAME）由 common-c 保證是「從頭開始、
+    // 沒有缺口的前綴」（RtpVideoQueue 的 stagePyroWaveContiguousPrefix），最後一個封包可能
+    // 被截斷：push 會在那裡失敗，但前面已解析的區塊會留著，缺的區塊解碼時補 0。
+    const bool isPartial = (du->flags & DU_FLAG_PARTIAL_FRAME) != 0;
 
     m_FrameBuffer.clear();
     m_FrameBuffer.reserve((size_t)du->fullLength);
@@ -258,7 +250,7 @@ int PyroWaveDecoderBridge::submitDecodeUnit(PDECODE_UNIT du, AVFrame* outFrame)
     pyrowave_decoder_clear(m_Decoder);
 
     pyrowave_result pushRes = pyrowave_decoder_push_packet(m_Decoder, m_FrameBuffer.data(), m_FrameBuffer.size());
-    if (pushRes != PYROWAVE_SUCCESS) {
+    if (pushRes != PYROWAVE_SUCCESS && !isPartial) {
         static std::atomic<int> s_DiagCount{0};
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[PyroWave] push_packet failed on frame %d (len=%zu, err=%d)",
@@ -271,13 +263,30 @@ int PyroWaveDecoderBridge::submitDecodeUnit(PDECODE_UNIT du, AVFrame* outFrame)
         return DR_OK;
     }
 
-    const bool allowPartial = false;
-    if (!pyrowave_decoder_decode_is_ready(m_Decoder, allowPartial)) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[PyroWave] Frame %d not ready for decode (partial=%d)",
-                    du->frameNumber, allowPartial ? 1 : 0);
-        // PyroWave uses stateless wavelet intra-refresh; do not request IDR on partial loss
+    // 不完整的幀：區塊編號從最粗的小波層排到最細的，前綴缺的一定是最細層（畫面下方的高頻細節）。
+    // PyroWave 預設 90% 門檻是給「隨機丟」用的，這裡最低兩個頻帶照樣要求完整、區塊比例放寬到 50%：
+    // 一幀局部稍糊勝過整幀丟掉（畫面停一格）。不夠就丟，重複上一幀。
+    const bool ready = isPartial
+        ? pyrowave_decoder_decode_is_ready_with_sideband(m_Decoder, true, 2, 0.5f, nullptr, 0)
+        : pyrowave_decoder_decode_is_ready(m_Decoder, false);
+    if (!ready) {
+        static std::atomic<int> s_NotReadyCount{0};
+        const int n = s_NotReadyCount.fetch_add(1);
+        if (n < 5 || (n % 300) == 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-PYROWAVE] frame %d not decodable (partial=%d, %zu B received; total %d)",
+                        du->frameNumber, isPartial ? 1 : 0, m_FrameBuffer.size(), n + 1);
+        }
         return DR_OK;
+    }
+    if (isPartial) {
+        static std::atomic<int> s_PartialDecoded{0};
+        const int n = s_PartialDecoded.fetch_add(1);
+        if (n < 5 || (n % 300) == 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-PYROWAVE] decoding partial frame %d (%zu B received; total %d)",
+                        du->frameNumber, m_FrameBuffer.size(), n + 1);
+        }
     }
 
     if (m_ZeroCopy) {

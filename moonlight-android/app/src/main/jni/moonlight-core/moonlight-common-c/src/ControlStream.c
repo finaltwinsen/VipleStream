@@ -578,6 +578,12 @@ static void queueFrameInvalidationTuple(uint32_t startFrame, uint32_t endFrame) 
 
 // Request an IDR frame on demand by the decoder
 void LiRequestIdrFrame(void) {
+    // §PYROWAVE：每一幀都是 intra（server 每幀標 IDR），要 IDR 沒有意義；丟包時各條路徑
+    // （frame loss、看門狗、解碼失敗）都會走到這裡，略過免得一直洗控制通道。
+    if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
+        return;
+    }
+
     // Any reference frame invalidation requests should be dropped now.
     // We require a full IDR frame to recover.
     freeBasicLbqList(LbqFlushQueueItems(&referenceFrameControlQueue));

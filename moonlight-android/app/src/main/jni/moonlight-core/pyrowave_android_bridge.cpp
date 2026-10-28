@@ -466,13 +466,13 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveDecodeAndRender(
     g_session->decoder.clear();
 
     // server 送連續位元流，單一 PyroWave 封包可能跨好幾個 RTP 片段：整幀接成一段再 push。
-    // 不完整的幀接起來會錯位，先整幀丟掉（每幀都是 intra，下一幀就恢復）。
-    const bool allow_partial = false;
+    // 不完整的幀由 common-c 保證是「沒有缺口的前綴」，最後一個封包可能被截斷：push 在那裡
+    // 失敗也照樣解，缺的區塊補 0；PyroWave 預設門檻（90% 區塊＋低頻帶完整）不夠就不解。
+    bool allow_partial = false;
     PDECODE_UNIT du = g_tls_decode_unit;
     if (du != nullptr)
     {
-        if (du->flags & DU_FLAG_PARTIAL_FRAME)
-            return DR_OK;
+        allow_partial = (du->flags & DU_FLAG_PARTIAL_FRAME) != 0;
 
         auto &buf = g_session->frame_buffer;
         buf.clear();
@@ -485,7 +485,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveDecodeAndRender(
                 buf.insert(buf.end(), p, p + entry->length);
             }
         }
-        if (!g_session->decoder.push_packet(buf.data(), buf.size()))
+        if (!g_session->decoder.push_packet(buf.data(), buf.size()) && !allow_partial)
         {
             PW_LOGW("push_packet failed on frame %d (len=%zu)", du->frameNumber, buf.size());
             return DR_OK;
@@ -509,7 +509,11 @@ Java_com_limelight_nvstream_jni_MoonBridge_pyroWaveDecodeAndRender(
         return DR_OK;
     }
 
-    if (!g_session->decoder.decode_is_ready(allow_partial))
+    // 不完整的幀缺的一定是最細層：低頻兩帶照樣要求完整、區塊比例放寬到 50%（同 qt bridge）
+    const bool ready = allow_partial
+        ? g_session->decoder.decode_is_ready(true, 2, 0.5f, nullptr, 0)
+        : g_session->decoder.decode_is_ready(false);
+    if (!ready)
     {
         return DR_OK;
     }
