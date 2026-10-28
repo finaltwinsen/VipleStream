@@ -68,6 +68,9 @@ QString PlayerPanel::formatTime(double sec)
     if (!(sec >= 0.0)) {
         sec = 0.0;
     }
+    else if (sec > 8640000.0) {   // 片長未知時可能是 +inf／極大值，轉 int 前夾住（opt B048）
+        sec = 8640000.0;
+    }
     const int t = static_cast<int>(sec);
     const int h = t / 3600, m = (t / 60) % 60, s = t % 60;
     return h > 0 ? QString::asprintf("%d:%02d:%02d", h, m, s) : QString::asprintf("%d:%02d", m, s);

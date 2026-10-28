@@ -4379,6 +4379,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         entry = entry->next;
     }
 
+    // FFmpeg 要求封包後面 AV_INPUT_BUFFER_PADDING_SIZE 個位元組是 0（SIMD 解析器會讀過頭）；
+    // 上面只 reserve 了空間沒清零，那裡是堆積殘值（opt B050）
+    memset(&m_DecodeBuffer.data()[offset], 0, AV_INPUT_BUFFER_PADDING_SIZE);
     m_Pkt->data = reinterpret_cast<uint8_t*>(m_DecodeBuffer.data());
     m_Pkt->size = offset;
 

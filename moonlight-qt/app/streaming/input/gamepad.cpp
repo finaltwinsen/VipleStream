@@ -979,7 +979,7 @@ void SdlInputHandler::setAdaptiveTriggers(uint16_t controllerNumber, DualSenseOu
 
 #if SDL_VERSION_ATLEAST(2, 0, 16)
         // Make sure the controller number is within our supported count
-    if (controllerNumber <= MAX_GAMEPADS &&
+    if (controllerNumber < MAX_GAMEPADS &&   // wire 來的值；<= 會讀到 m_GamepadState[16]（opt B047）
         // and we have a valid controller
         m_GamepadState[controllerNumber].controller != nullptr &&
         // and it's a PS5 controller

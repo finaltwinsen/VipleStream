@@ -49,7 +49,8 @@ public:
     /**
      * 由 hotkey 觸發。中止當前傳輸（若有），通知 server。
      */
-    void cancelCurrent();
+    // 主執行緒呼叫時會用 invokeMethod 轉到 worker（opt B049）
+    Q_INVOKABLE void cancelCurrent();
 
 signals:
     /**

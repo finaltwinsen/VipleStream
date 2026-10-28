@@ -338,7 +338,8 @@ private:
     IVideoDecoder* m_VideoDecoder;
     SDL_mutex* m_DecoderLock;
     bool m_AudioDisabled;
-    bool m_AudioMuted;
+    // 主執行緒（焦點變化）寫、音訊解碼執行緒每包讀（opt B042）
+    std::atomic<bool> m_AudioMuted;
     Uint32 m_FullScreenFlag;
     QQuickWindow* m_QtWindow;
     bool m_UnexpectedTermination;
@@ -376,10 +377,11 @@ private:
     // the relay for the entire streaming session.
     class RelayUdpTunnel* m_UdpTunnel = nullptr;
 
-    int m_ActiveVideoFormat;
-    int m_ActiveVideoWidth;
-    int m_ActiveVideoHeight;
-    int m_ActiveVideoFrameRate;
+    // drSetup 之前 updateOptimalWindowDisplayMode() 就會讀到（opt B045）
+    int m_ActiveVideoFormat = 0;
+    int m_ActiveVideoWidth = 0;
+    int m_ActiveVideoHeight = 0;
+    int m_ActiveVideoFrameRate = 0;
 
     OpusMSDecoder* m_OpusDecoder;
     IAudioRenderer* m_AudioRenderer;

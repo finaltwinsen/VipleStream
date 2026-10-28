@@ -1,6 +1,7 @@
 #include "overlaymanager.h"
 #include "path.h"
 
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QStringList>
@@ -320,9 +321,11 @@ static bool tryMapCJKFont(MappedFile& out)
     // Microsoft JhengHei (微軟正黑體, Trad) — available on all modern Windows.
     // 加 YaHei (Simp) / SimSun 當二三順位 fallback, 老版 Windows / Server SKU
     // 缺 JhengHei 時還有得救.
-    candidates << "C:/Windows/Fonts/msjh.ttc"      // Microsoft JhengHei (Trad)
-               << "C:/Windows/Fonts/msyh.ttc"      // Microsoft YaHei (Simp)
-               << "C:/Windows/Fonts/simsun.ttc";   // SimSun
+    // Windows 不一定裝在 C:（opt B051）：用系統的 SystemRoot，取不到才退回 C:/Windows
+    const QString fontsDir = QDir::fromNativeSeparators(qEnvironmentVariable("SystemRoot", QStringLiteral("C:/Windows"))) + QStringLiteral("/Fonts/");
+    candidates << fontsDir + "msjh.ttc"      // Microsoft JhengHei (Trad)
+               << fontsDir + "msyh.ttc"      // Microsoft YaHei (Simp)
+               << fontsDir + "simsun.ttc";   // SimSun
 #elif defined(Q_OS_DARWIN)
     candidates << "/System/Library/Fonts/PingFang.ttc"
                << "/System/Library/Fonts/STHeiti Light.ttc"

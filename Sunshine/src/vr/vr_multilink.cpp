@@ -1233,6 +1233,17 @@ namespace vr::multilink {
       copy.enq = rb.enq;
       {
         std::lock_guard lk {L.mtx};
+        while (L.rq.size() >= 32) {
+          auto old = std::move(L.rq.front());
+          L.rq.pop_front();
+          L.repair_drop.fetch_add(old.count, std::memory_order_relaxed);
+          if (L.pool.size() < 16) {
+            L.pool.push_back(std::move(old.data));
+          }
+        }
+      }
+      {
+        std::lock_guard lk {L.mtx};
         if (!L.pool.empty()) {
           copy.data = std::move(L.pool.back());
           L.pool.pop_back();

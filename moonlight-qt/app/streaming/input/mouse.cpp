@@ -150,7 +150,8 @@ void SdlInputHandler::handleMouseMotionEvent(SDL_MouseMotionEvent* event)
         m_MouseWasInVideoRegion = mouseInVideoRegion;
     }
     else {
-        LiSendMouseMoveEvent(xrel, yrel);
+        // 協定是 short；超出範圍的 Sint32 窄化會反向暴衝，先夾住（opt B047）
+        LiSendMouseMoveEvent((short)qBound<Sint32>(-32768, xrel, 32767), (short)qBound<Sint32>(-32768, yrel, 32767));
     }
 }
 
@@ -193,7 +194,7 @@ void SdlInputHandler::handleMouseWheelEvent(SDL_MouseWheelEvent* event)
     if (event->preciseX != 0.0f) {
         // Invert the scroll direction if needed
         if (m_ReverseScrollDirection) {
-            event->preciseX = -event->preciseY;
+            event->preciseX = -event->preciseX;   // 原本誤用 Y 軸（opt B047）
         }
 
 #ifdef Q_OS_DARWIN
