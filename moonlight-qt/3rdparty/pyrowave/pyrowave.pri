@@ -1,5 +1,5 @@
 # VipleStream PyroWave bundled static sources for qmake (moonlight-qt)
-DEFINES += VIPLESTREAM_HAVE_PYROWAVE PYROWAVE_PRECISION=1 GRANITE_SHIPPING=1
+DEFINES += VIPLESTREAM_HAVE_PYROWAVE PYROWAVE_PRECISION=1 GRANITE_SHIPPING=1 VOLK_NAMESPACE
 
 INCLUDEPATH += \
     $$PWD \
@@ -67,4 +67,4 @@ SOURCES += \
     $$PWD/Granite/math/muglm/muglm.cpp \
     $$PWD/Granite/math/transforms.cpp \
     $$PWD/Granite/application/global/global_managers.cpp \
-    $$PWD/Granite/third_party/volk/volk.c
+    $$PWD/Granite/third_party/volk/volk.cpp

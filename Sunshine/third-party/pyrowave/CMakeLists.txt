@@ -55,7 +55,7 @@ set(PYROWAVE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/Granite/math/muglm/muglm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Granite/math/transforms.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Granite/application/global/global_managers.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Granite/third_party/volk/volk.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Granite/third_party/volk/volk.cpp
 )
 
 add_library(pyrowave STATIC ${PYROWAVE_SOURCES})
@@ -85,6 +85,7 @@ target_compile_definitions(pyrowave
         PYROWAVE_PRECISION=1
         GRANITE_SHIPPING=1
         VK_NO_PROTOTYPES
+        VOLK_NAMESPACE
 )
 
 if(WIN32)
