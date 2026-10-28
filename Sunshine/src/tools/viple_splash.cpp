@@ -109,6 +109,15 @@ namespace {
         FillRect(dc, &rc, black);
         return 1;
       }
+      case WM_DISPLAYCHANGE: {
+        // 遊戲啟動時改解析度、或 VDD 出現時 virtual screen 會變，重新蓋滿，不然 client 會看到桌面（opt B037）
+        SetWindowPos(hwnd, HWND_TOPMOST,
+                     GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                     GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                     SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+      }
       case WM_CLOSE:
       case WM_DESTROY:
         PostQuitMessage(0);
@@ -239,7 +248,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int) {
       }
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds {50});
+    // 有訊息就醒、沒有就等到下一次要檢查的時間：沒有 target_pid 時一路睡到逾時，不再每 50 ms 空轉（opt B037）
+    const auto remain_ms = std::chrono::duration_cast<std::chrono::milliseconds>(st.timeout - elapsed).count();
+    const long long wait_ms = st.target_pid != 0 ? (remain_ms < 50 ? remain_ms : 50) : remain_ms;
+    MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(wait_ms > 0 ? wait_ms : 0), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
   }
 
   DestroyWindow(hwnd);

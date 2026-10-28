@@ -48,17 +48,25 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
   src.GetDimensions(tw, th);
   const float2 dx = ddx(suv);
   const float2 dy = ddy(suv);
+  // 導數已在上面算好（quad 內一致），之後才 discard；SampleLevel 是明確 LOD，不用隱含導數
+  if (!inside) {
+    discard;
+  }
   const float fp = max(length(dx * float2(tw, th)), length(dy * float2(tw, th)));
   const float k = 0.25 * saturate(fp - 1.0);
   const float2 lo = min(uv_rect.xy, uv_rect.zw);
   const float2 hi = max(uv_rect.xy, uv_rect.zw);
-  float4 c = src.SampleLevel(samp, clamp(suv - k * dx - k * dy, lo, hi), 0.0);
-  c += src.SampleLevel(samp, clamp(suv + k * dx - k * dy, lo, hi), 0.0);
-  c += src.SampleLevel(samp, clamp(suv - k * dx + k * dy, lo, hi), 0.0);
-  c += src.SampleLevel(samp, clamp(suv + k * dx + k * dy, lo, hi), 0.0);
-  c *= 0.25;
-  if (!inside) {
-    discard;
+  float4 c;
+  [branch]
+  if (k > 0.0) {
+    c = src.SampleLevel(samp, clamp(suv - k * dx - k * dy, lo, hi), 0.0);
+    c += src.SampleLevel(samp, clamp(suv + k * dx - k * dy, lo, hi), 0.0);
+    c += src.SampleLevel(samp, clamp(suv - k * dx + k * dy, lo, hi), 0.0);
+    c += src.SampleLevel(samp, clamp(suv + k * dx + k * dy, lo, hi), 0.0);
+    c *= 0.25;
+  } else {
+    // k == 0：四點重合，四個相同值相加再乘 0.25 與單點完全相等，只取一次（opt B036）
+    c = src.SampleLevel(samp, clamp(suv, lo, hi), 0.0);
   }
   if (force_alpha != 0) {
     c.a = 1.0;

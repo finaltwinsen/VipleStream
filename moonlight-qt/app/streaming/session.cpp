@@ -533,6 +533,9 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
     // Based on the following SDL code:
     // https://github.com/libsdl-org/SDL/blob/120c76c84bbce4c1bfed4e9eb74e10678bd83120/test/testgamecontroller.c#L286-L307
     DualSenseOutputReport *state = (DualSenseOutputReport *) SDL_malloc(sizeof(DualSenseOutputReport));
+    if (state == nullptr) {
+        return;
+    }
     SDL_zero(*state);
     state->validFlag0 = (eventFlags & DS_EFFECT_RIGHT_TRIGGER) | (eventFlags & DS_EFFECT_LEFT_TRIGGER);
     state->rightTriggerEffectType = typeRight;
@@ -541,7 +544,10 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
     SDL_memcpy(state->leftTriggerEffect, left, sizeof(state->leftTriggerEffect));
 
     setControllerLEDEvent.user.data2 = (void *) state;
-    SDL_PushEvent(&setControllerLEDEvent);
+    // 佇列滿或被過濾時事件沒進去，report 要自己收（opt B045；同 clVrMessage）
+    if (SDL_PushEvent(&setControllerLEDEvent) <= 0) {
+        SDL_free(state);
+    }
 }
 
 void Session::clVrMessage(const uint8_t* tlv, int length)
@@ -2614,7 +2620,7 @@ void Session::updateOptimalWindowDisplayMode()
     // aspect ratio closest to the video stream.
     if (bestMode.refresh_rate == 0) {
         float bestModeAspectRatio = 0;
-        float videoAspectRatio = (float)m_ActiveVideoWidth / (float)m_ActiveVideoHeight;
+        float videoAspectRatio = m_ActiveVideoHeight > 0 ? (float)m_ActiveVideoWidth / (float)m_ActiveVideoHeight : 16.0f / 9.0f;
         int numDisplayModes = SDL_GetNumDisplayModes(displayIndex);
         for (int i = 0; i < numDisplayModes; i++) {
             if (SDL_GetDisplayMode(displayIndex, i, &mode) == 0) {
@@ -4853,7 +4859,8 @@ DispatchDeferredCleanup:
                                    SDL_USEREVENT, SDL_USEREVENT)) > 0) {
             bool freedAny = false;
             for (int i = 0; i < n; i++) {
-                if (pending[i].user.code == SDL_CODE_VR_MESSAGE) {
+                if (pending[i].user.code == SDL_CODE_VR_MESSAGE ||
+                    pending[i].user.code == SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS) {
                     SDL_free(pending[i].user.data2);
                     freedAny = true;
                 }

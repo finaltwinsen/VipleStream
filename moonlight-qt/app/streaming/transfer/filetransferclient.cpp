@@ -89,9 +89,14 @@ void FileTransferClient::onWorkerStopping()
         }
     }
     if (m_ActiveFile) {
+        const QString path = m_ActiveFile->fileName();
         m_ActiveFile->close();
         delete m_ActiveFile;
         m_ActiveFile = nullptr;
+        // 串流結束時下載還沒完成：半個檔案留著沒用（opt B049）；上傳的原始檔不動
+        if (m_ActiveDirection == QStringLiteral("in")) {
+            QFile::remove(path);
+        }
     }
     if (m_Nam) {
         m_Nam->deleteLater();
@@ -171,17 +176,28 @@ void FileTransferClient::stop()
 
 void FileTransferClient::cancelCurrent()
 {
+    // 熱鍵在主執行緒呼叫，但 reply／QFile 屬於 worker 執行緒：轉到 worker 上執行（opt B049）
+    if (m_Worker && QThread::currentThread() != m_Worker) {
+        QMetaObject::invokeMethod(this, "cancelCurrent", Qt::QueuedConnection);
+        return;
+    }
     if (m_ActiveToken.isEmpty()) {
         emit statusChanged(tr("File transfer: nothing to cancel"));
         return;
     }
-    qCInfo(lcXfer) << "[VIPLE-XFER] cancel requested token=" << m_ActiveToken;
+    // abort() 會同步觸發 finished，上傳的處理函式在那裡就清掉 m_ActiveToken，先留一份
+    const QString token = m_ActiveToken;
+    const bool isDownload = (m_ActiveDirection == QStringLiteral("in"));
+    qCInfo(lcXfer) << "[VIPLE-XFER] cancel requested token=" << token;
     if (m_ActiveTransferReply) {
-        m_ActiveTransferReply->abort();
+        auto *p = m_ActiveTransferReply.data();
+        m_ActiveTransferReply.clear();
+        p->abort();
+        p->deleteLater();
     }
     QJsonObject obj;
     obj["kind"] = QStringLiteral("canceled");
-    obj["token"] = m_ActiveToken;
+    obj["token"] = token;
     postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
     emit statusChanged(tr("File transfer cancelled"));
     m_ActiveToken.clear();
@@ -190,7 +206,10 @@ void FileTransferClient::cancelCurrent()
         m_ActiveFile->close();
         delete m_ActiveFile;
         m_ActiveFile = nullptr;
-        QFile::remove(tmpPath);  // 半寫入的暫存清掉
+        // 只刪下載到一半的檔案：上傳時 m_ActiveFile 是使用者的原始檔，刪了就是資料遺失（opt B049）
+        if (isDownload) {
+            QFile::remove(tmpPath);
+        }
     }
     m_ActiveTotalBytes = 0;
     m_ActiveBytesDone = 0;
@@ -354,6 +373,12 @@ void FileTransferClient::handleDownloadToClient(const PendingCommand &cmd)
     QString safeName = sanitizeFilename(cmd.filename);
     if (safeName.isEmpty()) {
         qCWarning(lcXfer) << "[VIPLE-XFER] download: rejected filename" << cmd.filename;
+        // 回報失敗，server 不必等到逾時（opt B049）
+        QJsonObject obj;
+        obj["kind"] = QStringLiteral("failed");
+        obj["token"] = cmd.token;
+        obj["error"] = QStringLiteral("invalid_filename");
+        postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
         return;
     }
     QString dir = downloadsDir();
@@ -363,6 +388,12 @@ void FileTransferClient::handleDownloadToClient(const PendingCommand &cmd)
         qCWarning(lcXfer) << "[VIPLE-XFER] open write failed" << target;
         delete m_ActiveFile;
         m_ActiveFile = nullptr;
+        // 回報失敗，server 不必等到逾時（opt B049）
+        QJsonObject obj;
+        obj["kind"] = QStringLiteral("failed");
+        obj["token"] = cmd.token;
+        obj["error"] = QStringLiteral("open_write_failed");
+        postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
         return;
     }
     m_ActiveToken = cmd.token;
@@ -451,6 +482,12 @@ void FileTransferClient::handleUploadFromClient(const PendingCommand &cmd)
     QString safeName = sanitizeFilename(cmd.filename);
     if (safeName.isEmpty()) {
         qCWarning(lcXfer) << "[VIPLE-XFER] upload: rejected filename" << cmd.filename;
+        // 回報失敗，server 不必等到逾時（opt B049）
+        QJsonObject obj;
+        obj["kind"] = QStringLiteral("failed");
+        obj["token"] = cmd.token;
+        obj["error"] = QStringLiteral("invalid_filename");
+        postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
         return;
     }
     QString baseDir = cmd.path.isEmpty() ? downloadsDir() : cmd.path;
@@ -523,6 +560,12 @@ void FileTransferClient::handleUploadFromClient(const PendingCommand &cmd)
         delete m_ActiveFile;
         m_ActiveFile = nullptr;
         if (zipTempCreated) QFile::remove(uploadPath);
+        // 回報失敗，server 不必等到逾時（opt B049）
+        QJsonObject obj;
+        obj["kind"] = QStringLiteral("failed");
+        obj["token"] = cmd.token;
+        obj["error"] = QStringLiteral("open_read_failed");
+        postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
         return;
     }
     m_ActiveToken = cmd.token;
