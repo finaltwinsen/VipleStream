@@ -30,6 +30,7 @@ extern "C" {
 #include "platform/common.h"
 #include "sync.h"
 #include "video.h"
+#include "pyrowave_encode.h"
 #include "vr/vr_session.h"
 
 #ifdef _WIN32
@@ -1863,6 +1864,8 @@ namespace video {
       return encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp, vr_meta);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
       return encode_nvenc(frame_nr, *nvenc_session, packets, channel_data, frame_timestamp, vr_meta);
+    } else if (auto pyro_session = dynamic_cast<pyrowave::pyrowave_encode_session_t *>(&session)) {
+      return pyrowave::encode_pyrowave(frame_nr, *pyro_session, packets, channel_data, frame_timestamp, vr_meta);
     }
 
     return -1;
@@ -2278,6 +2281,8 @@ namespace video {
     } else if (dynamic_cast<platf::nvenc_encode_device_t *>(encode_device.get())) {
       auto nvenc_encode_device = boost::dynamic_pointer_cast<platf::nvenc_encode_device_t>(std::move(encode_device));
       return make_nvenc_encode_session(config, std::move(nvenc_encode_device));
+    } else if (config.videoFormat == 3) {
+      return pyrowave::make_encode_session(disp, config, width, height, std::move(encode_device));
     }
 
     return nullptr;
@@ -2588,6 +2593,8 @@ namespace video {
                 // 就是一次明顯卡頓，恢復交給 intra refresh。一般 session 行為不變。
                 nvenc_dev->nvenc->reconfigure_bitrate(*newBitrateKbps, config.framerate, isDecrease && !config.vrProfile);
               }
+            } else if (auto pyro_session = dynamic_cast<pyrowave::pyrowave_encode_session_t *>(session.get())) {
+              pyro_session->reconfigure_bitrate(*newBitrateKbps, config.framerate);
             }
           }
         }
@@ -2618,6 +2625,8 @@ namespace video {
               }
 
               BOOST_LOG(info) << "[VIPLE-FPS] Encoder framerate updated: " << oldFps << " -> " << *newFps << " fps";
+            } else if (auto pyro_session = dynamic_cast<pyrowave::pyrowave_encode_session_t *>(session.get())) {
+              pyro_session->reconfigure_fps(*newFps);
             } else {
               BOOST_LOG(warning) << "[VIPLE-FPS] Non-avcodec encoder (e.g. NVENC): framerate change may require stream restart. "
                                  << "Capture timing updated: " << oldFps << " -> " << *newFps << " fps";
@@ -2795,6 +2804,13 @@ namespace video {
     std::unique_ptr<platf::encode_device_t> result;
 
     auto colorspace = colorspace_from_client_config(config, disp.is_hdr());
+
+    if (config.videoFormat == 3) {
+      BOOST_LOG(info) << "Creating encoder [pyrowave]";
+      result = std::make_unique<pyrowave::pyrowave_encode_device_t>();
+      result->colorspace = colorspace;
+      return result;
+    }
 
     platf::pix_fmt_e pix_fmt;
     if (config.chromaSamplingType == 1) {

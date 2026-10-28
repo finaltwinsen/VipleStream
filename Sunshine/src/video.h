@@ -51,6 +51,7 @@ namespace video {
     int vrIntraRefreshFrames = 0;  // LOSS 觸發的 intra-refresh wave 長度（幀）
     int vrIntraRefreshPeriodFrames = 0;  // 週期性 intra refresh 安全網的間隔（幀），0 = 關閉
     int captureSource = 0;  // M1b S1-08：0 = 桌面（DDA／WGC），1 = VR（display_vr_t，driver 交來的 SBS ring）
+    int packetSize = 1392;  // RTP packet size for PyroWave slot-aligned packetization
   };
 
   /**

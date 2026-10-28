@@ -605,6 +605,47 @@ static void submitCompletedFrame(PRTP_VIDEO_QUEUE queue) {
     }
 }
 
+static bool salvagePartialPyroWaveFrame(PRTP_VIDEO_QUEUE queue) {
+    if (!(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE)) {
+        return false;
+    }
+
+    if (queue->pendingFecBlockList.count > 0) {
+        stageCompleteFecBlock(queue);
+    }
+
+    if (queue->completedFecBlockList.head == NULL) {
+        return false;
+    }
+
+    PRTP_PACKET firstRtp = queue->completedFecBlockList.head->packet;
+    int firstOffset = sizeof(*firstRtp) + ((firstRtp->header & FLAG_EXTENSION) ? 4 : 0);
+    PNV_VIDEO_PACKET firstNv = (PNV_VIDEO_PACKET)(((char*)firstRtp) + firstOffset);
+    uint8_t firstBlock = (firstNv->multiFecBlocks >> 4) & 0x3;
+    if (!(firstNv->flags & FLAG_SOF) || firstBlock != 0) {
+        return false;
+    }
+
+    PRTP_PACKET lastRtp = queue->completedFecBlockList.tail->packet;
+    int lastOffset = sizeof(*lastRtp) + ((lastRtp->header & FLAG_EXTENSION) ? 4 : 0);
+    PNV_VIDEO_PACKET lastNv = (PNV_VIDEO_PACKET)(((char*)lastRtp) + lastOffset);
+    uint8_t lastBlock = (lastNv->multiFecBlocks >> 4) & 0x3;
+    uint8_t origLastBlock = (lastNv->multiFecBlocks >> 6) & 0x3;
+    bool isTrueEof = (lastNv->flags & FLAG_EOF) && (lastBlock == origLastBlock);
+
+    if (!isTrueEof) {
+        lastNv->flags |= FLAG_EOF;
+        lastNv->extraFlags |= NV_VIDEO_PACKET_EXTRA_FLAG_PYROWAVE_PARTIAL;
+        lastNv->multiFecBlocks = (uint8_t)((lastBlock << 6) | (lastBlock << 4) | (lastNv->multiFecBlocks & 0x0F));
+    }
+
+    Limelog("[PyroWave] Salvaging partial frame %u (%u packets)\n",
+            queue->currentFrameNumber, queue->completedFecBlockList.count);
+
+    submitCompletedFrame(queue);
+    return true;
+}
+
 uint32_t RtpvGetCurrentFrameNumber(PRTP_VIDEO_QUEUE queue) {
     return queue->currentFrameNumber;
 }
@@ -2417,6 +2458,7 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
                 // frame further is not possible.
                 if (queue->currentFrameNumber == nvPacket->frameIndex) {
                     msNoteLost(queue, queue->currentFrameNumber + 1, hadPending, have);  // §VR-REPAIR-RTT（量測）
+                    salvagePartialPyroWaveFrame(queue);
 
                     // Discard any unsubmitted buffers from the previous frame
                     purgeListEntries(&queue->pendingFecBlockList);
@@ -2456,6 +2498,7 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
 
             // §VR-REPAIR-RTT（量測）：這個封包所屬的那一幀也救不回來了（前面的 block 沒到），之後改等它的下一幀
             msNoteLost(queue, nvPacket->frameIndex + 1, hadPending, have);
+            salvagePartialPyroWaveFrame(queue);
 
             // Discard any unsubmitted buffers from the previous frame
             purgeListEntries(&queue->pendingFecBlockList);
@@ -2471,6 +2514,10 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
             queue->currentFrameNumber = nvPacket->frameIndex + 1;
             queue->multiFecCurrentBlockNumber = 0;
             return RTPF_RET_REJECTED;
+        }
+
+        if (queue->currentFrameNumber != nvPacket->frameIndex) {
+            salvagePartialPyroWaveFrame(queue);
         }
 
         // Discard any pending buffers from the previous FEC block

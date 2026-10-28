@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// VipleStream 2.0：VR 協定定義（ptype、0x81 header、tracking 結構、TLV）
+#include "VipleVr.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -100,6 +103,41 @@ typedef struct _STREAM_CONFIGURATION {
     // in /launch and /resume requests.
     char remoteInputAesKey[16];
     char remoteInputAesIv[16];
+
+    // VipleStream §ABR: enable server-side adaptive bitrate (AIMD).
+    // 1 = enabled (default), 0 = fixed bitrate.
+    int autoAdjustBitrate;
+
+    // VipleStream 2.0 §VR：VIPLE_VR_SF_* 旗標。只有 client 在 /launch 帶了
+    // vr=1、而且 server 回應了 <VipleStreamVRSession> 時才可以設（不變式 1）；
+    // 0 代表一般 session，common-c 的行為與桌面完全相同。
+    int vrFlags;
+
+    // VipleStream 2.0 §VR-REPAIR-RTT（docs/vr_protocol.md §4.10）：補包的時間預算跟著量到的往返時間走。以下四個只在
+    // VR session、vrFlags 帶 VIPLE_VR_SF_REPAIR_RTT、而且 server 也同意時有作用；0＝預設。
+    int vrRepairHoldMs;   // 等待上限（後面的幀最多被壓住多久），毫秒：0＝自動（跟著往返時間走，最多 33），否則 8～100
+    int vrRepairAbSec;    // 開發用：同一場每這麼多秒（20～600）在原本的規則與新規則之間切換，從原本的規則開始；0＝不切換
+    int vrRepairIdle;     // 開發用：「多久沒有新封包才回報」的做法，VRRR_IDLE_*（VrRepairRtt.h）；0＝自動
+    int vrRepairNoAhead;  // 開發用：非 0＝後面整幀沒到的幀不一起回報（只給對照用）
+
+#ifdef VIPLE_MPQUIC
+    // VipleStream: MP-QUIC multipath transport.
+    // Set useQuicTransport = 1 to use QUIC datagrams instead of raw UDP
+    // for video/audio, and a QUIC stream for control.
+    int useQuicTransport;
+    int quicPort;
+    int quicScheduler;
+    int quicCongestion; // QUIC_CC_NEWRENO=0, QUIC_CC_BBR=1, QUIC_CC_CUBIC=2
+
+    // Alt peer addresses for multipath — server 的所有可用 IP。
+    // §MP-ADV: 由 Qt 層優先從伺服器廣告的 NetworkInterface 填入，
+    // 再 fallback 到 NvComputer 的 localAddress / remoteAddress 等。
+    // 從 4 擴大到 8，因為伺服器可能有多張介面（LAN×2 + WiFi + Tailscale + WireGuard 等）。
+    #define QUIC_MAX_ALT_PEERS 8
+    #define QUIC_ALT_PEER_LEN  64
+    char quicAltPeers[QUIC_MAX_ALT_PEERS][QUIC_ALT_PEER_LEN];
+    int quicAltPeerCount;
+#endif
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 
 // Use this function to zero the stream configuration when allocated on the stack or heap
@@ -191,7 +229,17 @@ typedef struct _DECODE_UNIT {
     // Note: This is not currently parsed from the actual bitstream, so if your
     // client has access to a bitstream parser, prefer that over this field.
     uint8_t colorspace;
+
+    // VipleStream §PYROWAVE: Per-frame decode unit flags (e.g. DU_FLAG_PARTIAL_FRAME)
+    uint8_t flags;
+
+    // VipleStream 2.0 §VR：這一幀 0x81 VR header 的內容。一般 session 的
+    // vrMeta.present 永遠是 0。decoder 可能丟幀，所以 client 不能用 FIFO
+    // 對應 DU 與解出來的幀，要以 frameNumber 為 key 查表（docs/vr_architecture.md §2.3）。
+    VIPLE_VR_FRAME_META vrMeta;
 } DECODE_UNIT, *PDECODE_UNIT;
+
+#define DU_FLAG_PARTIAL_FRAME 0x01
 
 // Specifies that the audio stream should be encoded in stereo (default)
 #define AUDIO_CONFIGURATION_STEREO MAKE_AUDIO_CONFIGURATION(2, 0x3)
@@ -232,13 +280,18 @@ typedef struct _DECODE_UNIT {
 #define VIDEO_FORMAT_AV1_MAIN10      0x2000 // AV1 Main 10-bit profile
 #define VIDEO_FORMAT_AV1_HIGH8_444   0x4000 // AV1 High 4:4:4 8-bit profile
 #define VIDEO_FORMAT_AV1_HIGH10_444  0x8000 // AV1 High 4:4:4 10-bit profile
+#define VIDEO_FORMAT_PYROWAVE_MAIN8  0x00100000 // PyroWave 4:2:0 8-bit profile
+#define VIDEO_FORMAT_PYROWAVE_MAIN10 0x00200000 // PyroWave 4:2:0 10-bit profile
+#define VIDEO_FORMAT_PYROWAVE_444_8  0x00400000 // PyroWave 4:4:4 8-bit profile
+#define VIDEO_FORMAT_PYROWAVE_444_10 0x00800000 // PyroWave 4:4:4 10-bit profile
 
 // Masks for clients to use to match video codecs without profile-specific details.
 #define VIDEO_FORMAT_MASK_H264   0x000F
 #define VIDEO_FORMAT_MASK_H265   0x0F00
 #define VIDEO_FORMAT_MASK_AV1    0xF000
-#define VIDEO_FORMAT_MASK_10BIT  0xAA00
-#define VIDEO_FORMAT_MASK_YUV444 0xCC04
+#define VIDEO_FORMAT_MASK_PYROWAVE 0x00F00000
+#define VIDEO_FORMAT_MASK_10BIT  0x00A0AA00
+#define VIDEO_FORMAT_MASK_YUV444 0x00C0CC04
 
 // If set in the renderer capabilities field, this flag will cause audio/video data to
 // be submitted directly from the receive thread. This should only be specified if the
@@ -439,6 +492,14 @@ typedef void(*ConnListenerConnectionTerminated)(int errorCode);
 // supported on GFE 3.22+.
 #define ML_ERROR_FRAME_CONVERSION -104
 
+// ENet 控制連線非預期斷線（unexpected disconnect / service timeout）。
+// 值固定 -1：歷史上以魔術數字 -1 傳給 connectionTerminated()，client 端
+// （session.cpp）依同名常數對應顯示訊息，不可改值。
+// 已知重疊：AudioStream.c / VideoStream.c / ControlStream.c 的 malloc 失敗
+// 路徑也傳 -1（OOM 實務上幾乎不發生）；若照 dialog 文字追事故，記得先排
+// 除這幾個 site。
+#define ML_ERROR_CONTROL_STREAM_DISCONNECT (-1)
+
 // This callback is invoked to log debug message
 typedef void(*ConnListenerLogMessage)(const char* format, ...);
 
@@ -483,6 +544,20 @@ typedef void(*ConnListenerSetAdaptiveTriggers)(uint16_t controllerNumber, uint8_
 // This callback is invoked to set a controller's RGB LED (if present).
 typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b);
 
+// §SC-HID Phase 2C: invoked when the host relays a Steam feature op to the real SC
+// (transparent proxy). op: 1=GET (SDL_hid_get_feature_report on the real SC),
+// 2=SET (SDL_hid_send_feature_report(query) to the real SC, then read back).
+// reportId: HID report id; seq: round-trip cookie; query/queryLen: bytes Steam sent.
+// The client forwards the real SC's response via LiSendScHidFeatureReport(seq, ...).
+typedef void(*ConnListenerScHidFeatureRequest)(uint8_t reportId, uint8_t op, uint8_t seq,
+                                               const uint8_t* query, uint8_t queryLen);
+
+// VipleStream 2.0 §VR：server 送來的 0x5508 VR_S2C（TLV 串，長度 1–251 B）。
+// 只在 VR session 呼叫，執行緒是 common-c 的 async callback 執行緒；buffer 在
+// 回呼返回後失效，要保留就自己複製。REFRESH_START 已由 common-c 先行處理
+// （恢復狀態機），這裡仍會收到，供 client 統計。
+typedef void(*ConnListenerVrMessage)(const uint8_t* tlv, int length);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -497,6 +572,8 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetMotionEventState setMotionEventState;
     ConnListenerSetControllerLED setControllerLED;
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
+    ConnListenerScHidFeatureRequest scHidFeatureRequest;  // §SC-HID feature tunnel
+    ConnListenerVrMessage vrMessage;  // §VR：只能加在尾端（Qt 以位置初始化這個 struct）
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -513,13 +590,18 @@ void LiInitializeConnectionCallbacks(PCONNECTION_LISTENER_CALLBACKS clCallbacks)
 #define SCM_HEVC_REXT10_444 0x00100000 // Sunshine extension
 #define SCM_AV1_HIGH8_444   0x00200000 // Sunshine extension
 #define SCM_AV1_HIGH10_444  0x00400000 // Sunshine extension
+#define SCM_PYROWAVE_MAIN8  0x01000000 // VipleStream PyroWave 4:2:0 8-bit
+#define SCM_PYROWAVE_MAIN10 0x02000000 // VipleStream PyroWave 4:2:0 10-bit
+#define SCM_PYROWAVE_444_8  0x04000000 // VipleStream PyroWave 4:4:4 8-bit
+#define SCM_PYROWAVE_444_10 0x08000000 // VipleStream PyroWave 4:4:4 10-bit
 
 // SCM masks to identify various codec capabilities
 #define SCM_MASK_H264   (SCM_H264 | SCM_H264_HIGH8_444)
 #define SCM_MASK_HEVC   (SCM_HEVC | SCM_HEVC_MAIN10 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444)
 #define SCM_MASK_AV1    (SCM_AV1_MAIN8 | SCM_AV1_MAIN10 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)
-#define SCM_MASK_10BIT  (SCM_HEVC_MAIN10 | SCM_HEVC_REXT10_444 | SCM_AV1_MAIN10 | SCM_AV1_HIGH10_444)
-#define SCM_MASK_YUV444 (SCM_H264_HIGH8_444 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)
+#define SCM_MASK_PYROWAVE (SCM_PYROWAVE_MAIN8 | SCM_PYROWAVE_MAIN10 | SCM_PYROWAVE_444_8 | SCM_PYROWAVE_444_10)
+#define SCM_MASK_10BIT  (SCM_HEVC_MAIN10 | SCM_HEVC_REXT10_444 | SCM_AV1_MAIN10 | SCM_AV1_HIGH10_444 | SCM_PYROWAVE_MAIN10 | SCM_PYROWAVE_444_10)
+#define SCM_MASK_YUV444 (SCM_H264_HIGH8_444 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444 | SCM_PYROWAVE_444_8 | SCM_PYROWAVE_444_10)
 
 typedef struct _SERVER_INFORMATION {
     // Server host name or IP address in text form
@@ -554,6 +636,14 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
 
 // This function stops streaming. This function is not thread-safe.
 void LiStopConnection(void);
+
+// VipleStream: override the UDP port values that would normally be parsed
+// from the RTSP SETUP Transport headers. When non-zero, these replace
+// VideoPortNumber / AudioPortNumber / ControlPortNumber after RTSP
+// parsing. Zero means "use the parsed value". Used by the Qt client when
+// it proxies the streaming UDP through a loopback tunnel bound on
+// OS-assigned ephemeral ports. Must be called before LiStartConnection.
+void LiOverrideUdpPorts(uint16_t videoPort, uint16_t audioPort, uint16_t controlPort);
 
 // This function interrupts a pending LiStartConnection() call. This interruption happens asynchronously
 // so it is not safe to start another connection before the first LiStartConnection() call returns.
@@ -822,8 +912,6 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
 int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState, uint8_t batteryPercentage);
 
 // §SC-HID: Send a raw 64-byte Steam Controller HID input report to the host.
-// data must point to exactly 64 bytes (SS_SC_HID_REPORT_MAX).
-// This is a VipleStream protocol extension; returns LI_ERR_UNSUPPORTED on GFE.
 int LiSendScHidInputReport(const uint8_t* data, int dataLen);
 
 // §SC-HID Phase 2C: Send the real SC's 64-byte feature RESPONSE back to the host
@@ -860,6 +948,13 @@ uint64_t LiGetMillis(void);
 // address for streaming after GFE stopped sending it a while back. wanAddr is returned in
 // network byte order.
 int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, unsigned int* wanAddr);
+
+// VipleStream: Attempt UDP hole punch to server's STUN-discovered endpoint.
+// Call before LiStartConnection() when connecting through NAT.
+// Returns 0 on success, negative on failure (connection can still be attempted).
+int LiHolePunch(const char *serverAddr, unsigned short serverPort,
+                const uint8_t *serverUuid, const uint8_t *clientUuid,
+                int timeoutMs);
 
 // Returns the number of queued video frames ready for delivery. Only relevant
 // if CAPABILITY_DIRECT_SUBMIT is not set for the video renderer.
@@ -1008,6 +1103,40 @@ bool LiGetHdrMetadata(PSS_HDR_METADATA metadata);
 // call this API instead. Note that this function does not guarantee that the *next* frame will be an IDR
 // frame, just that an IDR frame will arrive soon.
 void LiRequestIdrFrame(void);
+
+// VipleStream: Request the server to change its encoding framerate mid-stream.
+// Used when toggling FRUC on/off via hotkey to switch between halved and full FPS.
+void LiRequestFpsChange(int newFps);
+
+// ── VipleStream 2.0 §VR（docs/vr_protocol.md §4）──────────────────
+// 以下 API 只在 VR session（StreamConfig.vrFlags 含 VIPLE_VR_SF_ENABLED）有效，
+// 一般 session 呼叫一律回傳 -1、不送任何東西。
+
+// 回傳這次連線生效的 VIPLE_VR_SF_* 旗標（非 VR session 為 0）。
+int LiGetVrFlags(void);
+
+// 送一筆 0x5506 tracking 樣本：ENet VR channel、UNSEQUENCED，ENet 不通時
+// 自動改走 QUIC datagram。回傳 0 表示已送出；負值表示這筆樣本被丟棄
+// （呼叫端只要繼續送下一筆，不可據此終止連線）。可從任何執行緒呼叫。
+int LiSendVrTracking(const VIPLE_VR_TRACKING* sample);
+
+// 送一則 0x5507 VR_C2S（TLV 串，1–251 B）。reliable=true 走一般控制 channel
+// 的可靠傳輸；false 走 VR channel UNSEQUENCED。回傳 0 表示已送出。
+int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable);
+
+// decoder 端回報掉幀（例如解碼錯誤）。recovery=intra 時送 LOSS 並進入恢復
+// 狀態機（逾時會重送，最後退回 IDR）；recovery=idr 時等同 LiRequestIdrFrame()。
+// reason 是 VIPLE_VR_LOSS_*。
+void LiReportVrLoss(uint32_t firstLost, uint32_t lastLost, uint8_t reason);
+
+// §VR-REPAIR-RTT：距上一次「被補包機制拖晚的幀放行」幾毫秒（補包用上才收齊的、等待結束才放行的；報了但補包沒用上、
+// 自己收齊的不算）；沒有過回 UINT32_MAX。XR 那一側用它暫時不更新送給 host 的 LATCH 樣本：那幾張的到達時刻反映的是
+// 補包花的時間，不是節拍。
+// 只在照 §VR-REPAIR-RTT 的規則等待時才會有值，其餘情況恆為 UINT32_MAX。可從任何執行緒呼叫。
+uint32_t LiGetVrRepairQuietMs(void);
+
+// §VR-REPAIR-RTT：補包目前照哪一套規則（0＝原本的規則、1＝跟著往返時間走的規則）。只給 log 用。可從任何執行緒呼叫。
+int LiGetVrRepairRules(void);
 
 // This function returns any extended feature flags supported by the host.
 #define LI_FF_PEN_TOUCH_EVENTS        0x01 // LiSendTouchEvent()/LiSendPenEvent() supported

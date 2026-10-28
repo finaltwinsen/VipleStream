@@ -386,12 +386,25 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
     responseBuffer = NULL;
     connectRetries = 0;
 
+    // VipleStream: If RTSP host override exists (tunnel), resolve it instead of RemoteAddr
+    struct sockaddr_storage rtspAddr;
+    SOCKADDR_LEN rtspAddrLen = AddrLen;
+    extern char* RtspAddrString;
+    if (RtspAddrString) {
+        if (resolveHostName(RtspAddrString, AF_UNSPEC, RtspPortNumber, &rtspAddr, &rtspAddrLen) != 0) {
+            Limelog("Failed to resolve RTSP tunnel host: %s\n", RtspAddrString);
+            *error = -1;
+            return false;
+        }
+        Limelog("RTSP connecting to tunnel: %s:%u\n", RtspAddrString, RtspPortNumber);
+    } else {
+        memcpy(&rtspAddr, &RemoteAddr, sizeof(rtspAddr));
+        rtspAddrLen = AddrLen;
+    }
+
     // Retry up to 10 seconds if we receive ECONNREFUSED errors from the host PC.
-    // This can happen with GFE 3.22 when initially launching a session because it
-    // returns HTTP 200 OK for the /launch request before the RTSP handshake port
-    // is listening.
     do {
-        sock = connectTcpSocket(&RemoteAddr, AddrLen, RtspPortNumber, RTSP_CONNECT_TIMEOUT_SEC);
+        sock = connectTcpSocket(&rtspAddr, rtspAddrLen, RtspPortNumber, RTSP_CONNECT_TIMEOUT_SEC);
         if (sock == INVALID_SOCKET) {
             *error = LastSocketError();
             if (*error == ECONNREFUSED) {
@@ -890,6 +903,8 @@ bool parseSdpAttributeToUInt(const char* payload, const char* name, unsigned int
     }
 
     // Read the integer up to the newline at the end of the SDP attribute
+    char* lineEnd = strpbrk(attribute, "\r\n");
+    if (lineEnd && valst > lineEnd) { return false; }
     *val = strtoul(valst + 1, NULL, 0);
 
     return true;
@@ -909,6 +924,8 @@ bool parseSdpAttributeToInt(const char* payload, const char* name, int* val) {
     }
 
     // Read the integer up to the newline at the end of the SDP attribute
+    char* lineEnd = strpbrk(attribute, "\r\n");
+    if (lineEnd && valst > lineEnd) { return false; }
     *val = strtol(valst + 1, NULL, 0);
 
     return true;
@@ -1061,7 +1078,21 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             goto Exit;
         }
 
-        if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
+        if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_PYROWAVE) && strstr(response.payload, "PYROWAVE/90000")) {
+            if ((serverInfo->serverCodecModeSupport & SCM_PYROWAVE_444_10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_444_10)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_444_10;
+            }
+            else if ((serverInfo->serverCodecModeSupport & SCM_PYROWAVE_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_MAIN10)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_MAIN10;
+            }
+            else if ((serverInfo->serverCodecModeSupport & SCM_PYROWAVE_444_8) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_444_8)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_444_8;
+            }
+            else {
+                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_MAIN8;
+            }
+        }
+        else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
             if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)) {
                 NegotiatedVideoFormat = VIDEO_FORMAT_AV1_HIGH10_444;
             }
@@ -1171,6 +1202,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         else {
             Limelog("Audio port: %u\n", AudioPortNumber);
         }
+        // VipleStream: caller-supplied override for local UDP proxies.
+        if (OverrideAudioPort != 0) {
+            Limelog("Audio port override: %u -> %u\n", AudioPortNumber, OverrideAudioPort);
+            AudioPortNumber = OverrideAudioPort;
+        }
 
         // Parse the Sunshine ping payload protocol extension if present
         memset(&AudioPingPayload, 0, sizeof(AudioPingPayload));
@@ -1197,7 +1233,13 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         // resolves any 454 session not found errors on
         // standard RTSP server implementations.
         // (i.e - sessionId = "DEADBEEFCAFE;timeout = 90")
-        sessionIdString = strdup(strtok_r(sessionId, ";", &strtokCtx));
+        char* sessionToken = strtok_r(sessionId, ";", &strtokCtx);
+        if (sessionToken == NULL) {
+            Limelog("RTSP SETUP streamid=audio session attribute is empty\n");
+            ret = -1;
+            goto Exit;
+        }
+        sessionIdString = strdup(sessionToken);
         if (sessionIdString == NULL) {
             Limelog("Failed to duplicate session ID string\n");
             ret = -1;
@@ -1247,6 +1289,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         else {
             Limelog("Video port: %u\n", VideoPortNumber);
         }
+        // VipleStream: caller-supplied override for local UDP proxies.
+        if (OverrideVideoPort != 0) {
+            Limelog("Video port override: %u -> %u\n", VideoPortNumber, OverrideVideoPort);
+            VideoPortNumber = OverrideVideoPort;
+        }
 
         freeMessage(&response);
     }
@@ -1290,6 +1337,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
         else {
             Limelog("Control port: %u\n", ControlPortNumber);
+        }
+        // VipleStream: caller-supplied override for local UDP proxies.
+        if (OverrideControlPort != 0) {
+            Limelog("Control port override: %u -> %u\n", ControlPortNumber, OverrideControlPort);
+            ControlPortNumber = OverrideControlPort;
         }
 
         freeMessage(&response);

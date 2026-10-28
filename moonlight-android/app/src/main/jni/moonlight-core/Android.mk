@@ -37,6 +37,88 @@ include $(PREBUILT_STATIC_LIBRARY)
 
 endif # PICOQUIC_AVAILABLE
 
+# ── VipleStream PyroWave + Granite static library (arm64-v8a) ─
+LOCAL_PATH := $(MY_LOCAL_PATH)
+
+ifeq ($(TARGET_ARCH_ABI),arm64-v8a)
+include $(CLEAR_VARS)
+LOCAL_MODULE := pyrowave
+
+PYROWAVE_DIR := pyrowave
+LOCAL_SRC_FILES := \
+    $(PYROWAVE_DIR)/pyrowave_encoder.cpp \
+    $(PYROWAVE_DIR)/pyrowave_decoder.cpp \
+    $(PYROWAVE_DIR)/pyrowave_common.cpp \
+    $(PYROWAVE_DIR)/pyrowave_c.cpp \
+    $(PYROWAVE_DIR)/Granite/video/scaler.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/context.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/device.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/wsi.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/wsi_pacer.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/buffer_pool.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/image.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/cookie.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/sampler.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/command_pool.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/fence_manager.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/descriptor_set.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/semaphore_manager.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/command_buffer.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/shader.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/render_pass.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/buffer.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/rtas.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/indirect_layout.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/pipeline_cache.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/semaphore.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/memory_allocator.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/fence.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/event_manager.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/breadcrumbs.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/pipeline_event.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/query_pool.cpp \
+    $(PYROWAVE_DIR)/Granite/vulkan/texture/texture_format.cpp \
+    $(PYROWAVE_DIR)/Granite/util/logging.cpp \
+    $(PYROWAVE_DIR)/Granite/util/aligned_alloc.cpp \
+    $(PYROWAVE_DIR)/Granite/util/timer.cpp \
+    $(PYROWAVE_DIR)/Granite/util/thread_id.cpp \
+    $(PYROWAVE_DIR)/Granite/util/string_helpers.cpp \
+    $(PYROWAVE_DIR)/Granite/util/timeline_trace_file.cpp \
+    $(PYROWAVE_DIR)/Granite/util/thread_name.cpp \
+    $(PYROWAVE_DIR)/Granite/util/thread_priority.cpp \
+    $(PYROWAVE_DIR)/Granite/util/cli_parser.cpp \
+    $(PYROWAVE_DIR)/Granite/util/dynamic_library.cpp \
+    $(PYROWAVE_DIR)/Granite/util/message_queue.cpp \
+    $(PYROWAVE_DIR)/Granite/util/arena_allocator.cpp \
+    $(PYROWAVE_DIR)/Granite/util/environment.cpp \
+    $(PYROWAVE_DIR)/Granite/util/slab_allocator.cpp \
+    $(PYROWAVE_DIR)/Granite/math/math.cpp \
+    $(PYROWAVE_DIR)/Granite/math/frustum.cpp \
+    $(PYROWAVE_DIR)/Granite/math/aabb.cpp \
+    $(PYROWAVE_DIR)/Granite/math/interpolation.cpp \
+    $(PYROWAVE_DIR)/Granite/math/muglm/muglm.cpp \
+    $(PYROWAVE_DIR)/Granite/math/transforms.cpp \
+    $(PYROWAVE_DIR)/Granite/application/global/global_managers.cpp \
+    $(PYROWAVE_DIR)/Granite/third_party/volk/volk.c
+
+PYROWAVE_INCLUDES := \
+    $(LOCAL_PATH)/pyrowave \
+    $(LOCAL_PATH)/pyrowave/shaders \
+    $(LOCAL_PATH)/pyrowave/Granite/video \
+    $(LOCAL_PATH)/pyrowave/Granite/vulkan \
+    $(LOCAL_PATH)/pyrowave/Granite/vulkan/texture \
+    $(LOCAL_PATH)/pyrowave/Granite/util \
+    $(LOCAL_PATH)/pyrowave/Granite/math \
+    $(LOCAL_PATH)/pyrowave/Granite/application/global \
+    $(LOCAL_PATH)/pyrowave/Granite/third_party/volk \
+    $(LOCAL_PATH)/pyrowave/Granite/third_party/khronos/vulkan-headers/include
+
+LOCAL_C_INCLUDES := $(PYROWAVE_INCLUDES)
+LOCAL_EXPORT_C_INCLUDES := $(PYROWAVE_INCLUDES)
+LOCAL_CFLAGS := -DVK_NO_PROTOTYPES -DVK_USE_PLATFORM_ANDROID_KHR -DGRANITE_SHIPPING=1 -DPYROWAVE_PRECISION=1 -w
+include $(BUILD_STATIC_LIBRARY)
+endif # arm64-v8a
+
 # ── moonlight-core ────────────────────────────────────────────
 LOCAL_PATH := $(MY_LOCAL_PATH)
 
@@ -82,6 +164,7 @@ LOCAL_SRC_FILES := moonlight-common-c/src/AudioStream.c \
                    minisdl.c \
                    vk_probe.c \
                    vk_backend.c \
+                   pyrowave_android_bridge.cpp \
 
 
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/moonlight-common-c/enet/include \
@@ -103,9 +186,13 @@ ifeq ($(NDK_DEBUG),1)
 LOCAL_CFLAGS += -DLC_DEBUG
 endif
 
-LOCAL_LDLIBS := -llog -landroid
+LOCAL_LDLIBS := -llog -landroid -ldl
 
 LOCAL_STATIC_LIBRARIES := libopus libssl libcrypto cpufeatures
+ifeq ($(TARGET_ARCH_ABI),arm64-v8a)
+LOCAL_CFLAGS += -DVIPLESTREAM_HAVE_PYROWAVE=1 -DVK_NO_PROTOTYPES -DVK_USE_PLATFORM_ANDROID_KHR -DGRANITE_SHIPPING=1 -DPYROWAVE_PRECISION=1
+LOCAL_STATIC_LIBRARIES += pyrowave
+endif
 ifneq ($(PICOQUIC_AVAILABLE),)
 LOCAL_STATIC_LIBRARIES += picoquic-core picotls-openssl picotls-core picotls-minicrypto
 endif

@@ -1497,7 +1497,7 @@ Flickable {
 
                         stepSize: 500
                         from : 500
-                        to: StreamingPreferences.unlockBitrate ? 500000 : 150000
+                        to: (StreamingPreferences.unlockBitrate || StreamingPreferences.videoCodecConfig === StreamingPreferences.VCC_FORCE_PYROWAVE) ? 500000 : 150000
 
                         snapMode: "SnapOnRelease"
                         width: Math.min(bitrateDesc.implicitWidth, parent.width - (resetBitrateButton.visible ? resetBitrateButton.width + parent.spacing : 0))
@@ -2734,6 +2734,10 @@ Flickable {
                         ListElement {
                             text: qsTr("AV1 (Experimental)")
                             val: StreamingPreferences.VCC_FORCE_AV1
+                        }
+                        ListElement {
+                            text: qsTr("PyroWave (Ultra-Low Latency LAN)")
+                            val: StreamingPreferences.VCC_FORCE_PYROWAVE
                         }
                     }
                     // ::onActivated must be used, as it only listens for when the index is changed by a human

@@ -77,6 +77,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     // wiring. Concrete type chosen at init based on prefs / fallback.
     private IFrucBackend frucRenderer;
     private boolean frucEnabled = false;
+    private boolean pyroWaveActive = false;
 
     // VipleStream v17: pass connection quality to FRUC renderer
     public void setConnectionPoor(boolean poor) {
@@ -797,6 +798,22 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
             refFrameInvalidationActive = refFrameInvalidationAv1;
         }
+        else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE) != 0) {
+            int err = MoonBridge.pyroWaveInit(
+                    renderTarget.getSurface(),
+                    videoFormat,
+                    initialWidth,
+                    initialHeight,
+                    getPreferredColorSpace(),
+                    getPreferredColorRange());
+            if (err != 0) {
+                LimeLog.severe("PyroWave Vulkan decoder initialization failed: " + err);
+                return err;
+            }
+            pyroWaveActive = true;
+            LimeLog.info("Initialized PyroWave (Vulkan GPU) decoder for " + initialWidth + "x" + initialHeight);
+            return 0;
+        }
         else {
             // Unknown format
             LimeLog.severe("Unknown format");
@@ -1387,6 +1404,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     @Override
     public void start() {
+        if (pyroWaveActive) {
+            return;
+        }
         startRendererThread();
         startChoreographerThread();
     }
@@ -1425,6 +1445,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     @Override
     public void stop() {
         // VipleStream: Cleanup FRUC
+        if (pyroWaveActive) {
+            stopping = true;
+            return;
+        }
         if (frucRenderer != null) {
             frucRenderer.destroy();
             frucRenderer = null;
@@ -1463,12 +1487,20 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     @Override
     public void cleanup() {
+        if (pyroWaveActive) {
+            MoonBridge.pyroWaveCleanup();
+            pyroWaveActive = false;
+            return;
+        }
         videoDecoder.release();
     }
 
     @Override
     public void setHdrMode(boolean enabled, byte[] hdrMetadata) {
         // HDR metadata is only supported in Android 7.0 and later, so don't bother
+        if (pyroWaveActive) {
+            return;
+        }
         // restarting the codec on anything earlier than that.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             if (currentHdrMetadata != null && (!enabled || hdrMetadata == null)) {
@@ -1601,6 +1633,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     decoder = hevcDecoder.getName();
                 } else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_AV1) != 0) {
                     decoder = av1Decoder.getName();
+                } else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE) != 0) {
+                    decoder = "PyroWave (Vulkan GPU)";
                 } else {
                     decoder = "(unknown)";
                 }
@@ -1891,6 +1925,27 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             activeWindowVideoStats.totalTimeMs += enqueueTimeMs - receiveTimeMs;
         }
 
+        if (pyroWaveActive) {
+            if (decodeUnitType != MoonBridge.BUFFER_TYPE_PICDATA) {
+                return MoonBridge.DR_OK;
+            }
+            long startNs = System.nanoTime();
+            int res = MoonBridge.pyroWaveDecodeAndRender(decodeUnitData, decodeUnitLength, frameType);
+            long deltaUs = (System.nanoTime() - startNs) / 1000;
+            if (deltaUs >= 0 && deltaUs < 1_000_000) {
+                activeWindowVideoStats.decoderTimeUs += deltaUs;
+                if (!USE_FRAME_RENDER_TIME) {
+                    activeWindowVideoStats.totalTimeMs += deltaUs / 1000;
+                }
+            }
+            if (res == MoonBridge.DR_OK) {
+                numFramesIn++;
+                numFramesOut++;
+                activeWindowVideoStats.totalFramesRendered++;
+            }
+            return res;
+        }
+
         if (!fetchNextInputBuffer()) {
             return MoonBridge.DR_NEED_IDR;
         }
@@ -1997,7 +2052,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
 
         // Enable direct submit on supported hardware
-        if (directSubmit) {
+        // PyroWave 的 Vulkan 解碼＋present 會阻塞（acquire／submit／present），不能跑在
+        // 收 RTP 的執行緒上，所以一律走 common-c 的 decode queue。
+        if (directSubmit && prefs.videoFormat != PreferenceConfiguration.FormatOption.FORCE_PYROWAVE) {
             capabilities |= MoonBridge.CAPABILITY_DIRECT_SUBMIT;
         }
 

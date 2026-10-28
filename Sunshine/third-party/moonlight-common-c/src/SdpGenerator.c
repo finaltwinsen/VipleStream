@@ -369,6 +369,10 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         if (IS_SUNSHINE()) {
             snprintf(payloadStr, sizeof(payloadStr), "%u", StreamConfig.bitrate);
             err |= addAttributeString(&optionHead, "x-ml-video.configuredBitrateKbps", payloadStr);
+
+            // VipleStream §ABR: tell server whether client wants adaptive bitrate
+            snprintf(payloadStr, sizeof(payloadStr), "%d", StreamConfig.autoAdjustBitrate);
+            err |= addAttributeString(&optionHead, "x-ml-video.autoAdjustBitrate", payloadStr);
         }
     }
     else {
@@ -430,7 +434,10 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         snprintf(payloadStr, sizeof(payloadStr), "%d", slicesPerFrame);
         err |= addAttributeString(&optionHead, "x-nv-video[0].videoEncoderSlicesPerFrame", payloadStr);
 
-        if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_AV1) {
+        if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
+            err |= addAttributeString(&optionHead, "x-nv-vqos[0].bitStreamFormat", "3");
+        }
+        else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_AV1) {
             err |= addAttributeString(&optionHead, "x-nv-vqos[0].bitStreamFormat", "2");
         }
         else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_H265) {
@@ -533,6 +540,16 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         snprintf(payloadStr, sizeof(payloadStr), "%d", (StreamConfig.colorSpace << 1) | StreamConfig.colorRange);
         err |= addAttributeString(&optionHead, "x-nv-video[0].encoderCscMode", payloadStr);
     }
+
+    // VipleStream: advertise MP-QUIC capability in SDP if enabled
+#ifdef VIPLE_MPQUIC
+    if (IS_SUNSHINE() && StreamConfig.useQuicTransport) {
+        err |= addAttributeString(&optionHead, "x-viple-mpquic", "1");
+
+        snprintf(payloadStr, sizeof(payloadStr), "%d", StreamConfig.quicPort);
+        err |= addAttributeString(&optionHead, "x-viple-mpquic-port", payloadStr);
+    }
+#endif
 
     if (err == 0) {
         return optionHead;

@@ -1456,8 +1456,10 @@ bool Session::initialize(QQuickWindow* qtWindow)
         if (!m_Preferences->bitrateFromCli) {
             const double pixRate = static_cast<double>(m_StreamConfig.width) * m_StreamConfig.height * m_StreamConfig.fps;
             const double ref = 3456.0 * 1728.0 * 90.0;
-            const int vrDefault = static_cast<int>(std::lround(150000.0 * pixRate / ref));
-            m_StreamConfig.bitrate = std::clamp(vrDefault, 10000, 200000);
+            const double baseKbps = (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_PYROWAVE) ? 250000.0 : 150000.0;
+            const int vrDefault = static_cast<int>(std::lround(baseKbps * pixRate / ref));
+            const int maxKbps = (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_PYROWAVE) ? 350000 : 200000;
+            m_StreamConfig.bitrate = std::clamp(vrDefault, 10000, maxKbps);
             source = "VR default";
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -1658,6 +1660,15 @@ bool Session::initialize(QQuickWindow* qtWindow)
         // straight to H.264 if the user asked for AV1 and the host doesn't support it.
         m_SupportedVideoFormats.removeByMask(~(VIDEO_FORMAT_MASK_AV1 | VIDEO_FORMAT_MASK_H265));
         break;
+    case StreamingPreferences::VCC_FORCE_PYROWAVE:
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] M3b VCC_FORCE_PYROWAVE entered");
+        m_SupportedVideoFormats.prepend(VIDEO_FORMAT_PYROWAVE_MAIN8);
+        m_SupportedVideoFormats.prepend(VIDEO_FORMAT_PYROWAVE_444_8);
+        m_SupportedVideoFormats.prepend(VIDEO_FORMAT_PYROWAVE_MAIN10);
+        m_SupportedVideoFormats.prepend(VIDEO_FORMAT_PYROWAVE_444_10);
+        // Keep HEVC as fallback if the paired host does not support PyroWave
+        m_SupportedVideoFormats.removeByMask(~(VIDEO_FORMAT_MASK_PYROWAVE | VIDEO_FORMAT_MASK_H265));
+        break;
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-DIAG] session::initialize M3c switch exited");
 
@@ -1825,6 +1836,29 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         emitLaunchWarning(tr("Your settings selection to force software decoding may cause poor streaming performance."));
     }
 
+    if (m_SupportedVideoFormats & VIDEO_FORMAT_MASK_PYROWAVE) {
+        if (m_SupportedVideoFormats.maskByServerCodecModes(m_Computer->serverCodecModeSupport & SCM_MASK_PYROWAVE) == 0) {
+            if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_PYROWAVE) {
+                emitLaunchWarning(tr("Your host software or GPU doesn't support encoding PyroWave."));
+            }
+            m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_PYROWAVE);
+        }
+        else {
+            if (getDecoderAvailability(testWindow,
+                                       m_Preferences->videoDecoderSelection,
+                                       VIDEO_FORMAT_PYROWAVE_MAIN8,
+                                       m_StreamConfig.width,
+                                       m_StreamConfig.height,
+                                       m_StreamConfig.fps) == DecoderAvailability::None) {
+                emitLaunchWarning(tr("Your client GPU doesn't support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264."));
+                m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_MASK_PYROWAVE);
+            }
+            else if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_PYROWAVE) {
+                m_SupportedVideoFormats.removeByMask(~VIDEO_FORMAT_MASK_PYROWAVE);
+            }
+        }
+    }
+
     if (m_SupportedVideoFormats & VIDEO_FORMAT_MASK_AV1) {
         if (m_SupportedVideoFormats.maskByServerCodecModes(m_Computer->serverCodecModeSupport & SCM_MASK_AV1) == 0) {
             if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_AV1) {
@@ -1930,6 +1964,18 @@ bool Session::validateLaunch(SDL_Window* testWindow)
             bool displayedHdrSoftwareDecodeWarning = false;
 
             // Check that the available HDR-capable codecs on the client and server are compatible
+            if (m_SupportedVideoFormats.maskByServerCodecModes(m_Computer->serverCodecModeSupport & SCM_PYROWAVE_MAIN10)) {
+                auto da = getDecoderAvailability(testWindow,
+                                                 m_Preferences->videoDecoderSelection,
+                                                 VIDEO_FORMAT_PYROWAVE_MAIN10,
+                                                 m_StreamConfig.width,
+                                                 m_StreamConfig.height,
+                                                 m_StreamConfig.fps);
+                if (da == DecoderAvailability::None) {
+                    emitLaunchWarning(tr("This PC's GPU doesn't support PyroWave Main10 decoding for HDR streaming."));
+                    m_SupportedVideoFormats.removeByMask(VIDEO_FORMAT_PYROWAVE_MAIN10);
+                }
+            }
             if (m_SupportedVideoFormats.maskByServerCodecModes(m_Computer->serverCodecModeSupport & SCM_AV1_MAIN10)) {
                 auto da = getDecoderAvailability(testWindow,
                                                  m_Preferences->videoDecoderSelection,

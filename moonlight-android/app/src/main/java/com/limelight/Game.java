@@ -433,7 +433,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 this);
 
         // Don't stream HDR if the decoder can't support it
-        if (willStreamHdr && !decoderRenderer.isHevcMain10Hdr10Supported() && !decoderRenderer.isAv1Main10Supported()) {
+        boolean pyroWaveSupported = (prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE && MoonBridge.isPyroWaveSupported());
+        if (willStreamHdr && !decoderRenderer.isHevcMain10Hdr10Supported() && !decoderRenderer.isAv1Main10Supported() && !pyroWaveSupported) {
             willStreamHdr = false;
             Toast.makeText(this, "Decoder does not support HDR10 profile", Toast.LENGTH_LONG).show();
         }
@@ -447,9 +448,25 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         if (prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_AV1 && !decoderRenderer.isAv1Supported()) {
             Toast.makeText(this, "No AV1 decoder found", Toast.LENGTH_LONG).show();
         }
+        if (prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE && !pyroWaveSupported) {
+            Toast.makeText(this, "PyroWave (Vulkan 1.1+) is not supported on this device", Toast.LENGTH_LONG).show();
+        }
 
         // H.264 is always supported
         int supportedVideoFormats = MoonBridge.VIDEO_FORMAT_H264;
+        // VipleStream PyroWave: only negotiated when explicitly selected (never in Auto)
+        if (pyroWaveSupported) {
+            supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE_MAIN8;
+            if (willStreamHdr) {
+                supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE_MAIN10;
+            }
+            if (prefConfig.enableYuv444) {
+                supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE_444_8;
+                if (willStreamHdr) {
+                    supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE_444_10;
+                }
+            }
+        }
         if (decoderRenderer.isHevcSupported()) {
             supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_H265;
             if (willStreamHdr && decoderRenderer.isHevcMain10Hdr10Supported()) {
@@ -1221,6 +1238,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     }
                     else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_H265) != 0) {
                         message += "HEVC";
+                    }
+                    else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE) != 0) {
+                        message += "PyroWave";
                     }
                     else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_AV1) != 0) {
                         message += "AV1";

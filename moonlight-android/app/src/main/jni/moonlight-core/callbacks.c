@@ -5,6 +5,7 @@
 
 #include <Limelight.h>
 #include "HolePunch.h"  // VipleStream: LiHolePunch + LocalControlPort
+extern void PyroWaveAndroid_SetCurrentDecodeUnit(PDECODE_UNIT du);
 #ifdef VIPLE_MPQUIC
 #include "PlatformNetIf.h"
 // §Q Phase 5 (5f) — forward decl, avoids pulling picoquic headers here.
@@ -173,10 +174,12 @@ int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
             // invocation of the decoder each time.
             (*env)->SetByteArrayRegion(env, DecodedFrameBuffer, 0, currentEntry->length, (jbyte*)currentEntry->data);
 
-            ret = (*env)->CallStaticIntMethod(env, GlobalBridgeClass, BridgeDrSubmitDecodeUnitMethod,
+            PyroWaveAndroid_SetCurrentDecodeUnit(decodeUnit);
+    ret = (*env)->CallStaticIntMethod(env, GlobalBridgeClass, BridgeDrSubmitDecodeUnitMethod,
                                               DecodedFrameBuffer, currentEntry->length, currentEntry->bufferType,
                                               decodeUnit->frameNumber, decodeUnit->frameType, (jchar)decodeUnit->frameHostProcessingLatency,
                                               (jlong)(decodeUnit->receiveTimeUs / 1000), (jlong)(decodeUnit->enqueueTimeUs / 1000));
+    PyroWaveAndroid_SetCurrentDecodeUnit(NULL);
             if ((*env)->ExceptionCheck(env)) {
                 // We will crash here
                 (*JVM)->DetachCurrentThread(JVM);
@@ -194,10 +197,12 @@ int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
         currentEntry = currentEntry->next;
     }
 
+    PyroWaveAndroid_SetCurrentDecodeUnit(decodeUnit);
     ret = (*env)->CallStaticIntMethod(env, GlobalBridgeClass, BridgeDrSubmitDecodeUnitMethod,
                                        DecodedFrameBuffer, offset, BUFFER_TYPE_PICDATA,
                                        decodeUnit->frameNumber, decodeUnit->frameType, (jchar)decodeUnit->frameHostProcessingLatency,
                                        (jlong)(decodeUnit->receiveTimeUs / 1000), (jlong)(decodeUnit->enqueueTimeUs / 1000));
+    PyroWaveAndroid_SetCurrentDecodeUnit(NULL);
     if ((*env)->ExceptionCheck(env)) {
         // We will crash here
         (*JVM)->DetachCurrentThread(JVM);

@@ -50,6 +50,14 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 
 ## 各章節待辦補充
 
+### §PYROWAVE 小波編碼（2.0.23 起；只能手動選，不進 Auto）
+- Windows server → Windows qt client 端到端已通（4:2:0 8-bit、4:4:4 10-bit），qt client 走零複製 §PYROWAVE-ZC。
+- **局部幀容錯暫停**：位元流改成連續後，缺 RTP 封包會讓解析錯位，目前整幀丟棄（不要求 IDR）。要恢復得讓 client 知道缺口位置（例如以 RTP 邊界重新同步）。
+- 丟包時 client 仍送 IDR 請求：PyroWave 每幀都是 IDR，這些請求多餘，應在 common-c 對 PyroWave 略過（三份同步）。
+- ABR：Wi-Fi 下會把 179 Mbps 砍到 14–40 Mbps，PyroWave 在這個位元率畫質差；需要 PyroWave 專屬的下限或改用固定位元率。
+- 10-bit 亮度用已知灰階做一次定量比對（目前只有目視）。
+- 未驗證：Android 實機（bridge 已建置）、Linux server／client、Steam Frame（fragment path 偏好的 GPU 目前退回拷貝版）。
+
 ### §Q 雲端審查（2026-10-23，PR #4～#7）延後項目
 - **QUIC FEC 不滿 4 片的群組**（審查 #6，nit）：server 的 §5b FEC 每 4 片資料才產生 parity、群組跨幀累積，一幀結尾 1～3 片要等下一幀才有保護（靜態畫面時可能很久）。修法要在幀尾補發不滿群組的 parity，client 需能辨識不滿 4 片的群組＝**兩端線上格式要一起改**，要先規劃相容性（舊 client 對新 server）。
 - **failover 實測**：2.0.18 server 的 §Q-REINJECT-CNXQ／§Q-VIDEOPATH-ID／§Q-SINGLE-SURVIVOR／§Q-GRACE-CAP 還沒用 `scripts/failover_regain_test.ps1` 跑過（要按 UAC）；審查 #5 的 VR 相關修正要戴頭盔驗。

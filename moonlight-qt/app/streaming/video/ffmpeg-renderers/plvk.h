@@ -11,6 +11,9 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/vulkan.h>
 
+// 放在 VK_USE_PLATFORM_WIN32_KHR 與 libplacebo 之後，vulkan.h 才會帶平台定義
+#include "../pyrowave_decoder_bridge.h"  // §PYROWAVE-ZC：PyroWaveVkInterop
+
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -50,13 +53,23 @@ public:
     virtual bool isPixelFormatSupported(int videoFormat, enum AVPixelFormat pixelFormat) override;
     virtual AVPixelFormat getPreferredPixelFormat(int videoFormat) override;
 
+    // §PYROWAVE-ZC：PyroWave 零複製。要在 initialize() 之前呼叫：建 device 時多開 PyroWave
+    // 解碼器需要的功能，並建一個 FFmpeg Vulkan device context 給 bridge 配 AVVkFrame。
+    void enablePyroWaveInterop() { m_PyroWaveInterop = true; }
+    // initialize() 成功後取共用資訊；沒開啟或建立失敗時回 false（呼叫端改走拷貝版）
+    bool getPyroWaveInterop(PyroWaveVkInterop* out);
+
 private:
+    static void pyroWaveLockQueue(void* opaque, uint32_t queueFamily, uint32_t index);
+    static void pyroWaveUnlockQueue(void* opaque, uint32_t queueFamily, uint32_t index);
+    bool createPyroWaveHwDeviceCtx();
+
     static void lockQueue(AVHWDeviceContext *dev_ctx, uint32_t queue_family, uint32_t index);
     static void unlockQueue(AVHWDeviceContext *dev_ctx, uint32_t queue_family, uint32_t index);
     static void overlayUploadComplete(void* opaque);
 
     bool mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
-    bool populateQueues(int videoFormat);
+    bool populateQueues(AVBufferRef* hwDeviceCtx, int videoFormat);
     bool chooseVulkanDevice(PDECODER_PARAMETERS params, bool hdrOutputRequired);
     bool tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDeviceProperties* deviceProps,
                              PDECODER_PARAMETERS decoderParams, bool hdrOutputRequired);
@@ -213,6 +226,10 @@ private:
 
     // Device context used for hwaccel decoders
     AVBufferRef* m_HwDeviceCtx = nullptr;
+
+    // §PYROWAVE-ZC
+    bool m_PyroWaveInterop = false;
+    AVBufferRef* m_PyroWaveHwDeviceCtx = nullptr;
 
     // Vulkan functions we call directly
     PFN_vkDestroySurfaceKHR fn_vkDestroySurfaceKHR = nullptr;

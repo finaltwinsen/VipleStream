@@ -11,6 +11,7 @@
 #include <memory>
 #include "ffmpeg-renderers/renderer.h"
 #include "ffmpeg-renderers/pacer/pacer.h"
+#include "pyrowave_decoder_bridge.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -56,6 +57,8 @@ private:
     // §LOGHYG-A5 — initialize() 本體；public initialize() 變薄殼，
     // 負責依「前次是否失敗」決定 av_log level 再轉呼叫這裡。
     bool initializeInternal(PDECODER_PARAMETERS params);
+
+    bool initializePyroWave(PDECODER_PARAMETERS params);
 
     bool completeInitialization(const AVCodec* decoder,
                                 enum AVPixelFormat requiredFormat,
@@ -221,6 +224,9 @@ private:
 
     // Data buffers in the queued DU are not valid
     QQueue<DECODE_UNIT> m_FrameInfoQueue;
+
+    std::unique_ptr<PyroWaveDecoderBridge> m_PyroWaveBridge;
+    QQueue<AVFrame*> m_PyroWaveFrameQueue;
 
     // §VR（M1a）：VR session 的串流 decoder 才建立（test decoder 永遠是 nullptr）
     std::unique_ptr<VrFrameMetaTracker> m_VrTracker;

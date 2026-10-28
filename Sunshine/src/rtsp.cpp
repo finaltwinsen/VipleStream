@@ -34,6 +34,7 @@ extern "C" {
 #include "stream.h"
 #include "sync.h"
 #include "video.h"
+#include "pyrowave_encode.h"
 #include "vr/vr_session.h"
 
 namespace asio = boost::asio;
@@ -925,6 +926,10 @@ namespace rtsp_stream {
       ss << "a=rtpmap:98 AV1/90000"sv << std::endl;
     }
 
+    if (pyrowave::is_available()) {
+      ss << "a=rtpmap:100 PYROWAVE/90000"sv << std::endl;
+    }
+
     if (!session.surround_params.empty()) {
       // If we have our own surround parameters, advertise them twice first
       ss << "a=fmtp:97 surround-params="sv << session.surround_params << std::endl;
@@ -1149,6 +1154,7 @@ namespace rtsp_stream {
       config.monitor.dynamicRange = (int) util::from_view(args.at("x-nv-video[0].dynamicRangeMode"sv));
       config.monitor.chromaSamplingType = (int) util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
       config.monitor.enableIntraRefresh = (int) util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
+      config.monitor.packetSize = config.packetsize;
 
       configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
       config.autoAdjustBitrate = util::from_view(args.at("x-ml-video.autoAdjustBitrate"sv)) != 0;
@@ -1243,6 +1249,13 @@ namespace rtsp_stream {
 
     if (config.monitor.videoFormat == 2 && video::active_av1_mode == 1) {
       BOOST_LOG(warning) << "AV1 is disabled, yet the client requested AV1"sv;
+
+      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+
+    if (config.monitor.videoFormat == 3 && !pyrowave::is_available()) {
+      BOOST_LOG(warning) << "PyroWave is unavailable, yet the client requested PyroWave"sv;
 
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;

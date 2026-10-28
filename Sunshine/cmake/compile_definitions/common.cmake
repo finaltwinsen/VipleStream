@@ -57,6 +57,8 @@ endif()
 
 include_directories(BEFORE SYSTEM "${CMAKE_SOURCE_DIR}/third-party/nv-codec-headers/include")
 file(GLOB NVENC_SOURCES CONFIGURE_DEPENDS "src/nvenc/*.cpp" "src/nvenc/*.h")
+add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/pyrowave" EXCLUDE_FROM_ALL)
+list(APPEND PLATFORM_LIBRARIES pyrowave)
 list(APPEND PLATFORM_TARGET_FILES ${NVENC_SOURCES})
 
 # VipleStream: MP-QUIC multipath transport (opt-in)
@@ -225,6 +227,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/stream.cpp"
         "${CMAKE_SOURCE_DIR}/src/stream.h"
         "${CMAKE_SOURCE_DIR}/src/video.cpp"
+        "${CMAKE_SOURCE_DIR}/src/pyrowave_encode.cpp"
+        "${CMAKE_SOURCE_DIR}/src/pyrowave_encode.h"
         "${CMAKE_SOURCE_DIR}/src/video.h"
         "${CMAKE_SOURCE_DIR}/src/video_colorspace.cpp"
         "${CMAKE_SOURCE_DIR}/src/video_colorspace.h"

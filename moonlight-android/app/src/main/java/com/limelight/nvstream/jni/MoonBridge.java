@@ -21,12 +21,17 @@ public class MoonBridge {
     public static final int VIDEO_FORMAT_AV1_MAIN10 = 0x2000;
     public static final int VIDEO_FORMAT_AV1_HIGH8_444 = 0x4000;
     public static final int VIDEO_FORMAT_AV1_HIGH10_444 = 0x8000;
+    public static final int VIDEO_FORMAT_PYROWAVE_MAIN8 = 0x00100000;
+    public static final int VIDEO_FORMAT_PYROWAVE_MAIN10 = 0x00200000;
+    public static final int VIDEO_FORMAT_PYROWAVE_444_8 = 0x00400000;
+    public static final int VIDEO_FORMAT_PYROWAVE_444_10 = 0x00800000;
 
     public static final int VIDEO_FORMAT_MASK_H264 = 0x000F;
     public static final int VIDEO_FORMAT_MASK_H265 = 0x0F00;
     public static final int VIDEO_FORMAT_MASK_AV1 = 0xF000;
-    public static final int VIDEO_FORMAT_MASK_10BIT = 0xAA00;
-    public static final int VIDEO_FORMAT_MASK_YUV444 = 0xCC04;
+    public static final int VIDEO_FORMAT_MASK_PYROWAVE = 0x00F00000;
+    public static final int VIDEO_FORMAT_MASK_10BIT = 0x00A0AA00;
+    public static final int VIDEO_FORMAT_MASK_YUV444 = 0x00C0CC04;
 
     public static final int BUFFER_TYPE_PICDATA = 0;
     public static final int BUFFER_TYPE_SPS = 1;
@@ -492,4 +497,10 @@ public class MoonBridge {
     public static native boolean guessControllerHasShareButton(int vendorId, int productId);
 
     public static native void init();
+
+    // VipleStream PyroWave Vulkan GPU decoder JNI entry points
+    public static native boolean isPyroWaveSupported();
+    public static native int pyroWaveInit(Object surface, int videoFormat, int width, int height, int colorSpace, int colorRange);
+    public static native int pyroWaveDecodeAndRender(byte[] data, int length, int frameType);
+    public static native void pyroWaveCleanup();
 }

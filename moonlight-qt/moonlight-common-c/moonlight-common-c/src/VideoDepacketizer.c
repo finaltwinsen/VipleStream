@@ -24,6 +24,7 @@ static uint64_t firstPacketPresentationTime;
 static uint32_t firstPacketRtpTimestamp;
 static bool dropStatePending;
 static bool idrFrameProcessed;
+static bool currentFrameIsPartial;
 // §VR：VR session 解析 0x81 header 的 VR 欄位；recovery=intra 時掉幀不等 IDR／RFI
 static bool vrSession;
 static bool vrIntraRecovery;
@@ -100,7 +101,8 @@ void initializeVideoDepacketizer(int pktSize) {
     vrIntraRecovery = vrSession && (VrFlags & VIPLE_VR_SF_RECOVERY_INTRA) != 0;
     memset(&frameVrMeta, 0, sizeof(frameVrMeta));
     // §VR：recovery=intra 時第一個 IDR 之後不再嚴格等 IDR（掉幀改送 LOSS）
-    strictIdrFrameWait = !isReferenceFrameInvalidationEnabled() && !vrIntraRecovery;
+    currentFrameIsPartial = false;
+    strictIdrFrameWait = !isReferenceFrameInvalidationEnabled() && !vrIntraRecovery && !(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE);
     dropFrameCallCount = 0;
     lastQueuedFrameTimeUs = 0;          // §FRZ-WATCHDOG
     resyncFrameNumberPending = false;   // §FRZ-WATCHDOG
@@ -140,7 +142,7 @@ static void dropFrameStateFrom(int caller) {
     if (willWaitIdr) {
         waitingForIdrFrame = true;
     }
-    else if (!vrIntraRecovery) {
+    else if (!vrIntraRecovery && !(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE)) {
         waitingForRefInvalFrame = true;
     }
     // §VR：recovery=intra 不等 RFI 幀——server 以 intra refresh 恢復，後續幀照常送進 decoder
@@ -258,7 +260,7 @@ void validateDecodeUnitForPlayback(PDECODE_UNIT decodeUnit) {
             LC_ASSERT_VT(decodeUnit->bufferList->next->next->bufferType == BUFFER_TYPE_PPS);
             LC_ASSERT_VT(decodeUnit->bufferList->next->next->next != NULL);
         }
-        else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_AV1) {
+        else if (NegotiatedVideoFormat & (VIDEO_FORMAT_MASK_AV1 | VIDEO_FORMAT_MASK_PYROWAVE)) {
             // We don't parse the AV1 bitstream
             LC_ASSERT_VT(decodeUnit->bufferList->bufferType == BUFFER_TYPE_PICDATA);
         }
@@ -546,6 +548,7 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             // If we start sending this state in the frame header, we can make it 100% accurate.
             qdu->decodeUnit.hdrActive = LiGetCurrentHostDisplayHdrMode();
             qdu->decodeUnit.colorspace = (uint8_t)(qdu->decodeUnit.hdrActive ? COLORSPACE_REC_2020 : StreamConfig.colorSpace);
+            qdu->decodeUnit.flags = currentFrameIsPartial ? DU_FLAG_PARTIAL_FRAME : 0;
 
             // Invoke the key frame callback if needed
             if (nalChainHead->bufferType != BUFFER_TYPE_PICDATA || qdu->decodeUnit.frameType == FRAME_TYPE_IDR) {
@@ -874,7 +877,8 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
     // It almost always detects them before they get to us, but in case it doesn't
     // the streamPacketIndex not matching correctly should find nearly all of the rest.
     if (isBefore24(streamPacketIndex, U24(lastPacketInStream + 1)) ||
-            (!(flags & FLAG_SOF) && streamPacketIndex != U24(lastPacketInStream + 1))) {
+            (!(flags & FLAG_SOF) && streamPacketIndex != U24(lastPacketInStream + 1) &&
+             !(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE))) {
         Limelog("Depacketizer detected corrupt frame: %d", frameIndex);
         decodingFrame = false;
         nextFrameNumber = frameIndex + 1;
@@ -886,6 +890,11 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             connectionDetectedFrameLoss(startFrameNumber, frameIndex);
         }
         return;
+    }
+
+    if ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) &&
+        !(flags & FLAG_SOF) && streamPacketIndex != U24(lastPacketInStream + 1)) {
+        currentFrameIsPartial = true;
     }
 
     // Verify that we didn't receive an incomplete frame
@@ -906,7 +915,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                         frameIndex - 1);
             }
 
-            if (vrIntraRecovery && idrFrameProcessed && !waitingForIdrFrame) {
+            if ((vrIntraRecovery || (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE)) && idrFrameProcessed && !waitingForIdrFrame) {
                 // §VR：recovery=intra 回報掉的範圍（送 LOSS）後照常組這一幀，
                 // 破圖由 intra refresh 自癒；不等下一個完整幀、也不丟棄這一幀。
                 uint32_t lostFirst = nextFrameNumber;
@@ -929,6 +938,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         decodingFrame = true;
         frameType = FRAME_TYPE_PFRAME;
         firstPacketReceiveTimeUs = receiveTimeUs;
+        currentFrameIsPartial = false;
         memset(&frameVrMeta, 0, sizeof(frameVrMeta));
 
         // Some versions of Sunshine don't send a valid PTS, so we will
@@ -1143,7 +1153,11 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
     else {
         // We fixup the length of the last packet for other codecs since they may not be tolerant
         // of trailing zero padding like H.264/HEVC Annex B bitstream parsers are.
-        if (lastPacket) {
+        if (lastPacket && (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) &&
+            (extraFlags & NV_VIDEO_PACKET_EXTRA_FLAG_PYROWAVE_PARTIAL)) {
+            currentFrameIsPartial = true;
+        }
+        else if (lastPacket) {
             // The payload length includes the frame header, so it cannot be smaller than that
             LC_ASSERT_VT(lastPacketPayloadLength > frameHeaderSize);
 

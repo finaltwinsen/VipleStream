@@ -167,6 +167,10 @@ PlVkRenderer::~PlVkRenderer()
 
     pl_renderer_destroy(&m_Renderer);
     pl_swapchain_destroy(&m_Swapchain);
+    // §PYROWAVE-ZC：綁同一個 VkDevice 的 FFmpeg device context 在 device 還活著時釋放。
+    // 此時 bridge、Pacer 手上的 AVVkFrame 都已經在 FFmpegVideoDecoder::reset() 釋放完。
+    av_buffer_unref(&m_PyroWaveHwDeviceCtx);
+
     pl_vulkan_destroy(&m_Vulkan);
 
     // This surface was created by SDL, so there's no libplacebo API to destroy it
@@ -355,6 +359,34 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
     vkParams.num_opt_extensions = SDL_arraysize(k_OptionalDeviceExtensions);
 #endif
     vkParams.extra_queues = m_HwAccelBackend ? VK_QUEUE_FLAG_BITS_MAX_ENUM : 0;
+
+    // §PYROWAVE-ZC：PyroWave 解碼器（compute path）需要的功能。libplacebo 只在硬體支援時開，
+    // 不支援就維持關閉；之後 pyrowave_decoder_create 會失敗、bridge 自動退回拷貝版。
+    VkPhysicalDeviceVulkan13Features pwVk13 = {};
+    pwVk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    pwVk13.subgroupSizeControl = VK_TRUE;
+    pwVk13.computeFullSubgroups = VK_TRUE;
+    pwVk13.synchronization2 = VK_TRUE;
+    VkPhysicalDeviceVulkan12Features pwVk12 = {};
+    pwVk12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    pwVk12.pNext = &pwVk13;
+    pwVk12.storageBuffer8BitAccess = VK_TRUE;
+    pwVk12.shaderFloat16 = VK_TRUE;
+    pwVk12.timelineSemaphore = VK_TRUE;
+    VkPhysicalDeviceVulkan11Features pwVk11 = {};
+    pwVk11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    pwVk11.pNext = &pwVk12;
+    pwVk11.storageBuffer16BitAccess = VK_TRUE;
+    VkPhysicalDeviceFeatures2 pwFeatures = {};
+    pwFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    pwFeatures.pNext = &pwVk11;
+    pwFeatures.features.shaderInt16 = VK_TRUE;
+    pwFeatures.features.shaderStorageImageExtendedFormats = VK_TRUE;
+    pwFeatures.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+    if (m_PyroWaveInterop) {
+        vkParams.features = &pwFeatures;
+    }
+
     m_Vulkan = pl_vulkan_create(m_Log, &vkParams);
 #if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(60, 26, 100)
     av_free((void*)vkParams.opt_extensions);
@@ -548,7 +580,7 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
 #endif
 
         // Populate the device queues for decoding this video format
-        populateQueues(params->videoFormat);
+        populateQueues(m_HwDeviceCtx, params->videoFormat);
 
         int err = av_hwdevice_ctx_init(m_HwDeviceCtx);
         if (err < 0) {
@@ -557,6 +589,12 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
                          err);
             return false;
         }
+    }
+
+    // §PYROWAVE-ZC：失敗不致命，getPyroWaveInterop() 會回 false、呼叫端改走拷貝版
+    if (m_PyroWaveInterop && !createPyroWaveHwDeviceCtx()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-PYROWAVE-ZC] FFmpeg Vulkan device context for PyroWave failed; copy path will be used");
     }
 
     // §J.3.e.1.d — opt-in: hand libplacebo's VkInstance/PhysDev/Device to
@@ -5857,9 +5895,102 @@ bool PlVkRenderer::mapAvFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFra
     return true;
 }
 
-bool PlVkRenderer::populateQueues(int videoFormat)
+void PlVkRenderer::pyroWaveLockQueue(void* opaque, uint32_t queueFamily, uint32_t index)
 {
-    auto vkDeviceContext = (AVVulkanDeviceContext*)((AVHWDeviceContext *)m_HwDeviceCtx->data)->hwctx;
+    auto me = (PlVkRenderer*)opaque;
+    me->m_Vulkan->lock_queue(me->m_Vulkan, queueFamily, index);
+}
+
+void PlVkRenderer::pyroWaveUnlockQueue(void* opaque, uint32_t queueFamily, uint32_t index)
+{
+    auto me = (PlVkRenderer*)opaque;
+    me->m_Vulkan->unlock_queue(me->m_Vulkan, queueFamily, index);
+}
+
+bool PlVkRenderer::createPyroWaveHwDeviceCtx()
+{
+    if (m_HwAccelBackend) {
+        // 已經有給硬體解碼用的 device context，共用它就好
+        m_PyroWaveHwDeviceCtx = av_buffer_ref(m_HwDeviceCtx);
+        return m_PyroWaveHwDeviceCtx != nullptr;
+    }
+
+    m_PyroWaveHwDeviceCtx = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VULKAN);
+    if (m_PyroWaveHwDeviceCtx == nullptr) {
+        return false;
+    }
+
+    auto hwDeviceContext = (AVHWDeviceContext *)m_PyroWaveHwDeviceCtx->data;
+    hwDeviceContext->user_opaque = this; // Used by lockQueue()/unlockQueue()
+
+    auto vkDeviceContext = (AVVulkanDeviceContext*)hwDeviceContext->hwctx;
+    vkDeviceContext->get_proc_addr = m_PlVkInstance->get_proc_addr;
+    vkDeviceContext->inst = m_PlVkInstance->instance;
+    vkDeviceContext->phys_dev = m_Vulkan->phys_device;
+    vkDeviceContext->act_dev = m_Vulkan->device;
+    vkDeviceContext->device_features = *m_Vulkan->features;
+    vkDeviceContext->enabled_inst_extensions = m_PlVkInstance->extensions;
+    vkDeviceContext->nb_enabled_inst_extensions = m_PlVkInstance->num_extensions;
+    vkDeviceContext->enabled_dev_extensions = m_Vulkan->extensions;
+    vkDeviceContext->nb_enabled_dev_extensions = m_Vulkan->num_extensions;
+#if LIBAVUTIL_VERSION_INT > AV_VERSION_INT(58, 9, 100)
+    vkDeviceContext->lock_queue = lockQueue;
+    vkDeviceContext->unlock_queue = unlockQueue;
+#endif
+
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 34, 100)
+    populateQueues(m_PyroWaveHwDeviceCtx, 0);
+#else
+    // 舊版 FFmpeg 的 populateQueues 一定要找 video decode queue，PyroWave 不需要
+    vkDeviceContext->queue_family_index = m_Vulkan->queue_graphics.index;
+    vkDeviceContext->nb_graphics_queues = m_Vulkan->queue_graphics.count;
+    vkDeviceContext->queue_family_tx_index = m_Vulkan->queue_transfer.index;
+    vkDeviceContext->nb_tx_queues = m_Vulkan->queue_transfer.count;
+    vkDeviceContext->queue_family_comp_index = m_Vulkan->queue_compute.index;
+    vkDeviceContext->nb_comp_queues = m_Vulkan->queue_compute.count;
+#endif
+
+    int err = av_hwdevice_ctx_init(m_PyroWaveHwDeviceCtx);
+    if (err < 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-PYROWAVE-ZC] av_hwdevice_ctx_init() failed: %d", err);
+        av_buffer_unref(&m_PyroWaveHwDeviceCtx);
+        return false;
+    }
+    return true;
+}
+
+bool PlVkRenderer::getPyroWaveInterop(PyroWaveVkInterop* out)
+{
+    if (!m_PyroWaveInterop || m_Vulkan == nullptr || m_PyroWaveHwDeviceCtx == nullptr) {
+        return false;
+    }
+
+    PyroWaveVkInterop info;
+    info.getInstanceProcAddr = m_PlVkInstance->get_proc_addr;
+    info.instance = m_PlVkInstance->instance;
+    info.physicalDevice = m_Vulkan->phys_device;
+    info.device = m_Vulkan->device;
+    info.apiVersion = m_Vulkan->api_version;
+    info.instanceExtensions = m_PlVkInstance->extensions;
+    info.numInstanceExtensions = m_PlVkInstance->num_extensions;
+    info.deviceExtensions = m_Vulkan->extensions;
+    info.numDeviceExtensions = m_Vulkan->num_extensions;
+    info.features = m_Vulkan->features;
+    info.graphics = { (uint32_t)m_Vulkan->queue_graphics.index, (uint32_t)m_Vulkan->queue_graphics.count };
+    info.compute = { (uint32_t)m_Vulkan->queue_compute.index, (uint32_t)m_Vulkan->queue_compute.count };
+    info.transfer = { (uint32_t)m_Vulkan->queue_transfer.index, (uint32_t)m_Vulkan->queue_transfer.count };
+    info.lockQueue = pyroWaveLockQueue;
+    info.unlockQueue = pyroWaveUnlockQueue;
+    info.lockOpaque = this;
+    info.hwDeviceCtx = m_PyroWaveHwDeviceCtx;
+    *out = info;
+    return true;
+}
+
+bool PlVkRenderer::populateQueues(AVBufferRef* hwDeviceCtx, int videoFormat)
+{
+    auto vkDeviceContext = (AVVulkanDeviceContext*)((AVHWDeviceContext *)hwDeviceCtx->data)->hwctx;
 
     uint32_t queueFamilyCount = 0;
     fn_vkGetPhysicalDeviceQueueFamilyProperties2(m_Vulkan->phys_device, &queueFamilyCount, nullptr);

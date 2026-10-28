@@ -324,6 +324,9 @@ bool FFmpegVideoDecoder::isHardwareAccelerated()
     // current codec falls through to FFmpeg, e.g. AV1 with submit gated off).
     // Use the finer-grained probe so the SystemProperties HW probe only
     // reports HW when an actual GPU decode pipeline is producing frames.
+    if (m_PyroWaveBridge) {
+        return true;
+    }
     if (m_BackendRenderer && m_BackendRenderer->isNativelyDecodingCurrentCodec()) {
         return true;
     }
@@ -378,6 +381,9 @@ int FFmpegVideoDecoder::getDecoderCapabilities()
             // Enable AV1 RFI when using the libdav1d software decoder
             capabilities |= CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1;
         }
+        else if (m_PyroWaveBridge) {
+            capabilities = m_BackendRenderer ? m_BackendRenderer->getDecoderCapabilities() : 0;
+        }
         else if (m_HwDecodeCfg == nullptr) {
             // Note: This is NOT an exhaustive list of all decoders
             // that Moonlight could pick. It will pick any working
@@ -423,6 +429,9 @@ int FFmpegVideoDecoder::getDecoderCapabilities()
 
 int FFmpegVideoDecoder::getDecoderColorspace()
 {
+    if (m_PyroWaveBridge) {
+        return (m_VideoFormat & VIDEO_FORMAT_MASK_10BIT) ? COLORSPACE_REC_2020 : COLORSPACE_REC_709;
+    }
     return m_FrontendRenderer->getDecoderColorspace();
 }
 
@@ -631,6 +640,11 @@ void FFmpegVideoDecoder::reset()
 
     m_FramesIn = m_FramesOut = 0;
     m_FrameInfoQueue.clear();
+    while (!m_PyroWaveFrameQueue.isEmpty()) {
+        AVFrame* pwFrame = m_PyroWaveFrameQueue.dequeue();
+        av_frame_free(&pwFrame);
+    }
+    m_PyroWaveBridge.reset();
 
     // §VR：m_VrTracker 刻意不在這裡清——reset() 也會在 initialize() 的 renderer
     // cascade 中途被呼叫（例如「Not reusing test decoder」），清掉會讓 VR 配對
@@ -1503,6 +1517,32 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         }
         break;
 
+    case VIDEO_FORMAT_PYROWAVE_MAIN8:
+        codecString = "PyroWave 4:2:0";
+        break;
+
+    case VIDEO_FORMAT_PYROWAVE_444_8:
+        codecString = "PyroWave 4:4:4";
+        break;
+
+    case VIDEO_FORMAT_PYROWAVE_MAIN10:
+        if (LiGetCurrentHostDisplayHdrMode()) {
+            codecString = "PyroWave 10-bit HDR";
+        }
+        else {
+            codecString = "PyroWave 10-bit SDR";
+        }
+        break;
+
+    case VIDEO_FORMAT_PYROWAVE_444_10:
+        if (LiGetCurrentHostDisplayHdrMode()) {
+            codecString = "PyroWave 10-bit HDR 4:4:4";
+        }
+        else {
+            codecString = "PyroWave 10-bit SDR 4:4:4";
+        }
+        break;
+
     default:
         SDL_assert(false);
         codecString = "UNKNOWN";
@@ -1589,7 +1629,9 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             //   HW   = FFmpeg 走 hwaccel (m_HwDecodeCfg != nullptr)
             //   SW   = FFmpeg 純軟解 (libdav1d / hevc / h264 等 SW codec)
             const char* decoderType =
-                (m_BackendRenderer && m_BackendRenderer->isNativelyDecodingCurrentCodec())
+                m_PyroWaveBridge
+                    ? u8"Vulkan Wavelet"
+                    : (m_BackendRenderer && m_BackendRenderer->isNativelyDecodingCurrentCodec())
                     ? u8"原生"
                     : (m_HwDecodeCfg != nullptr ? u8"HW" : u8"SW");
 
@@ -2815,8 +2857,200 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
     return ok;
 }
 
+bool FFmpegVideoDecoder::initializePyroWave(PDECODER_PARAMETERS params)
+{
+    if (!PyroWaveDecoderBridge::isHardwareAvailable()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[PyroWave] Vulkan hardware decoder unavailable on this device");
+        return false;
+    }
+
+    const AVPixelFormat requiredFormat = PyroWaveDecoderBridge::getOutputPixelFormat(params->videoFormat);
+
+    auto tryInitBackend = [&](std::function<IFFmpegRenderer*()> createRendererFunc) -> bool {
+        DECODER_PARAMETERS initParams = *params;
+        initParams.testFrameOnly = m_TestOnly;
+
+        m_HwDecodeCfg = nullptr;
+        m_PyroWaveBridge = std::make_unique<PyroWaveDecoderBridge>();
+
+        m_BackendRenderer = createRendererFunc();
+        if (!m_BackendRenderer) {
+            reset();
+            return false;
+        }
+
+        // §PYROWAVE-ZC：libplacebo renderer 要在 initialize 之前就知道，建 device 時才會開
+        // PyroWave 需要的 Vulkan 功能
+#ifdef HAVE_LIBPLACEBO_VULKAN
+        // 開發／A/B 量測專用：VIPLE_PYROWAVE_FORCE_COPY=1 強制走拷貝版（同 VIPLE_VK_FRUC_PROBE 一類，非使用者設定）
+        static const bool s_PwForceCopy = qEnvironmentVariableIntValue("VIPLE_PYROWAVE_FORCE_COPY") != 0;
+        auto* pwPlVk = s_PwForceCopy ? nullptr : dynamic_cast<PlVkRenderer*>(m_BackendRenderer);
+        if (pwPlVk) {
+            pwPlVk->enablePyroWaveInterop();
+        }
+#endif
+
+        if (!initializeRendererInternal(m_BackendRenderer, &initParams)) {
+            reset();
+            return false;
+        }
+
+        // 先試零複製（共用 renderer 的 VkDevice、直接解碼進 AVVkFrame），不行就退回拷貝版
+        bool pwZeroCopy = false;
+#ifdef HAVE_LIBPLACEBO_VULKAN
+        PyroWaveVkInterop pwInterop;
+        if (pwPlVk && pwPlVk->getPyroWaveInterop(&pwInterop)) {
+            pwZeroCopy = m_PyroWaveBridge->initializeZeroCopy(pwInterop, initParams.videoFormat,
+                                                              initParams.width, initParams.height);
+        }
+#endif
+        if (!pwZeroCopy &&
+            !m_PyroWaveBridge->initialize(initParams.videoFormat, initParams.width, initParams.height)) {
+            reset();
+            return false;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-PYROWAVE-ZC] renderer '%s': %s path",
+                    m_BackendRenderer->getRendererName(), pwZeroCopy ? "zero-copy" : "copy");
+
+        if (!createFrontendRenderer(&initParams, false)) {
+            reset();
+            return false;
+        }
+
+        if (!m_FrontendRenderer->isPixelFormatSupported(initParams.videoFormat, requiredFormat)) {
+            reset();
+            return false;
+        }
+
+        m_RequiredPixelFormat = requiredFormat;
+        m_OriginalVideoWidth = initParams.width;
+        m_OriginalVideoHeight = initParams.height;
+        m_StreamFps = initParams.frameRate;
+        m_VideoFormat = initParams.videoFormat;
+        m_CurrentTestMode = m_TestOnly ? TestMode::TestFrameOnly : TestMode::NoTesting;
+
+        m_VideoDecoderCtx = avcodec_alloc_context3(nullptr);
+        if (!m_VideoDecoderCtx) {
+            reset();
+            return false;
+        }
+        m_VideoDecoderCtx->width = initParams.width;
+        m_VideoDecoderCtx->height = initParams.height;
+        m_VideoDecoderCtx->pix_fmt = requiredFormat;
+
+        AVDictionary* options = nullptr;
+        bool prepOk = m_BackendRenderer->prepareDecoderContext(m_VideoDecoderCtx, &options);
+        av_dict_free(&options);
+        if (!prepOk) {
+            reset();
+            return false;
+        }
+
+        AVFrame* testFrame = av_frame_alloc();
+        if (!testFrame) {
+            reset();
+            return false;
+        }
+        bool testOk = m_PyroWaveBridge->createTestFrame(testFrame) &&
+                      m_FrontendRenderer->testRenderFrame(testFrame);
+        av_frame_free(&testFrame);
+        if (!testOk) {
+            reset();
+            return false;
+        }
+
+        if (!m_TestOnly) {
+            m_Pacer = new Pacer(m_FrontendRenderer, &m_ActiveWndVideoStats);
+            const bool xrPacingOff = initParams.xr != nullptr;
+            if (!m_Pacer->initialize(initParams.window, initParams.frameRate,
+                                     !xrPacingOff &&
+                                     (initParams.enableFramePacing ||
+                                      (initParams.enableVsync &&
+                                       (m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FORCE_PACING))))) {
+                reset();
+                return false;
+            }
+
+            m_NeedsSpsFixup = false;
+            Session::get()->getOverlayManager().setOverlayRenderer(m_FrontendRenderer);
+            m_FrontendRenderer->prepareToRender();
+
+            m_DecoderThread = SDL_CreateThread(FFmpegVideoDecoder::decoderThreadProcThunk, "FFDecoder", (void*)this);
+            if (!m_DecoderThread) {
+                reset();
+                return false;
+            }
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[PyroWave] Renderer '%s' chosen for PyroWave format 0x%x (%dx%d@%d)",
+                        m_FrontendRenderer->getRendererName(),
+                        initParams.videoFormat,
+                        initParams.width,
+                        initParams.height,
+                        initParams.frameRate);
+        }
+
+        return true;
+    };
+
+#ifdef HAVE_XR_VIDEO
+    if (params->xr != nullptr && !m_TestOnly && XrRenderer::available(params->xr)) {
+        XrContext* xr = params->xr;
+        if (tryInitBackend([xr]() -> IFFmpegRenderer* { return new XrSwBackend(xr); })) {
+            return true;
+        }
+    }
+#endif
+
+#ifdef HAVE_LIBPLACEBO_VULKAN
+    auto* vkPrefs = StreamingPreferences::get(nullptr);
+    bool prefsForceD3D11 = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_D3D11;
+    bool prefsWantVulkan = vkPrefs && vkPrefs->rendererSelection == StreamingPreferences::RS_VULKAN;
+    if (!prefsForceD3D11 && prefsWantVulkan &&
+        !(params->videoFormat & (VIDEO_FORMAT_MASK_10BIT | VIDEO_FORMAT_MASK_YUV444))) {
+        if (tryInitBackend([]() -> IFFmpegRenderer* { return new VkFrucRenderer(0); })) {
+            return true;
+        }
+    }
+    if (!prefsForceD3D11) {
+        if (tryInitBackend([]() -> IFFmpegRenderer* { return new PlVkRenderer(); })) {
+            return true;
+        }
+    }
+#endif
+
+#ifdef HAVE_DRM
+    if (tryInitBackend([]() -> IFFmpegRenderer* { return new DrmRenderer(); })) {
+        return true;
+    }
+#endif
+
+    if (tryInitBackend([]() -> IFFmpegRenderer* { return new SdlRenderer(); })) {
+        return true;
+    }
+
+#ifdef HAVE_LIBPLACEBO_VULKAN
+    if (prefsForceD3D11 && (params->videoFormat & VIDEO_FORMAT_MASK_10BIT)) {
+        if (tryInitBackend([]() -> IFFmpegRenderer* { return new PlVkRenderer(); })) {
+            return true;
+        }
+    }
+#endif
+
+    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                 "[PyroWave] No suitable renderer found for PyroWave format 0x%x",
+                 params->videoFormat);
+    return false;
+}
+
 bool FFmpegVideoDecoder::initializeInternal(PDECODER_PARAMETERS params)
 {
+
+    if (params->videoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
+        return initializePyroWave(params);
+    }
 
     // §J.3.e.2.i.3.e-SW — RS_VULKAN 設定 (default) 或 VIPLE_VKFRUC_SW=1
     // 觸發時，force SW h264/hevc/av1 decoder BEFORE HW cascade.  原因是
@@ -3279,7 +3513,20 @@ void FFmpegVideoDecoder::decoderThreadProc()
             int err;
             do {
                 setDecPhase(DP_RECEIVE);
-                err = avcodec_receive_frame(m_VideoDecoderCtx, frame);
+                if (m_PyroWaveBridge) {
+                    if (!m_PyroWaveFrameQueue.isEmpty()) {
+                        AVFrame* pwFrame = m_PyroWaveFrameQueue.dequeue();
+                        av_frame_move_ref(frame, pwFrame);
+                        av_frame_free(&pwFrame);
+                        err = 0;
+                    }
+                    else {
+                        err = AVERROR(EAGAIN);
+                    }
+                }
+                else {
+                    err = avcodec_receive_frame(m_VideoDecoderCtx, frame);
+                }
                 if (err == 0) {
                     SDL_assert(m_FrameInfoQueue.size() == m_FramesIn - m_FramesOut);
                     m_FramesOut++;
@@ -3621,7 +3868,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     SDL_assert(m_CurrentTestMode != TestMode::TestFrameOnly);
 
     // If this is the first frame, reject anything that's not an IDR frame
-    if (m_FramesIn == 0 && du->frameType != FRAME_TYPE_IDR) {
+    if (m_FramesIn == 0 && du->frameType != FRAME_TYPE_IDR && !m_PyroWaveBridge) {
         return DR_NEED_IDR;
     }
 
@@ -4092,6 +4339,30 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     m_ActiveWndVideoStats.receivedFrames++;
     m_ActiveWndVideoStats.totalFrames++;
+
+    if (m_PyroWaveBridge) {
+        if (m_VrTracker) {
+            m_VrTracker->onSubmit(du);
+        }
+        m_ActiveWndVideoStats.totalReassemblyTimeUs += (du->enqueueTimeUs - du->receiveTimeUs);
+
+        AVFrame* decodedFrame = av_frame_alloc();
+        if (!decodedFrame) {
+            return DR_OK;
+        }
+        int status = m_PyroWaveBridge->submitDecodeUnit(du, decodedFrame);
+        if (status != DR_OK || decodedFrame->data[0] == nullptr) {
+            av_frame_free(&decodedFrame);
+            return status;
+        }
+        if (m_VrTracker) {
+            decodedFrame->pts = du->frameNumber;
+        }
+        m_PyroWaveFrameQueue.enqueue(decodedFrame);
+        m_FrameInfoQueue.enqueue(*du);
+        m_FramesIn++;
+        return DR_OK;
+    }
 
     int requiredBufferSize = du->fullLength;
     if (du->frameType == FRAME_TYPE_IDR) {

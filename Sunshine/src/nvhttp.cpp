@@ -52,6 +52,7 @@
 #include "utility.h"
 #include "uuid.h"
 #include "video.h"
+#include "pyrowave_encode.h"
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_platform.h"
 #include "vr/vr_selftest.h"
@@ -1038,6 +1039,9 @@ namespace nvhttp {
       if (video::last_encoder_probe_supported_yuv444_for_codec[2]) {
         codec_mode_flags |= SCM_AV1_HIGH10_444;
       }
+    }
+    if (pyrowave::is_available()) {
+      codec_mode_flags |= SCM_PYROWAVE_MAIN8 | SCM_PYROWAVE_MAIN10 | SCM_PYROWAVE_444_8 | SCM_PYROWAVE_444_10;
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
     BOOST_LOG(info) << "[VIPLE-DIAG] ServerCodecModeSupport=0x" << std::hex << codec_mode_flags << std::dec

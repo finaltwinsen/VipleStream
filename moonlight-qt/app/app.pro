@@ -428,6 +428,7 @@ ffmpeg {
     DEFINES += HAVE_FFMPEG
     SOURCES += \
         streaming/video/ffmpeg.cpp \
+        streaming/video/pyrowave_decoder_bridge.cpp \
         streaming/video/ffmpeg-renderers/genhwaccel.cpp \
         streaming/video/ffmpeg-renderers/sdlvid.cpp \
         streaming/video/ffmpeg-renderers/swframemapper.cpp \
@@ -435,6 +436,7 @@ ffmpeg {
 
     HEADERS += \
         streaming/video/ffmpeg.h \
+        streaming/video/pyrowave_decoder_bridge.h \
         streaming/video/ffmpeg-renderers/renderer.h \
         streaming/video/ffmpeg-renderers/genhwaccel.h \
         streaming/video/ffmpeg-renderers/sdlvid.h \
@@ -836,6 +838,16 @@ INCLUDEPATH += \
     $$PWD/../3rdparty/nvvideoparser/include/vkvideo_parser \
     $$PWD/../3rdparty/nvvideoparser/include/VkCodecUtils
 DEPENDPATH += $$PWD/../3rdparty/nvvideoparser/include
+
+# PyroWave GPU wavelet codec (MIT)
+win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../3rdparty/pyrowave/release/ -lpyrowave
+else:win32:CONFIG(debug, debug|release): LIBS += -L$$OUT_PWD/../3rdparty/pyrowave/debug/ -lpyrowave
+else:unix: LIBS += -L$$OUT_PWD/../3rdparty/pyrowave/ -lpyrowave
+
+INCLUDEPATH += \
+    $$PWD/../3rdparty/pyrowave \
+    $$PWD/../3rdparty/pyrowave/Granite/third_party/khronos/vulkan-headers/include
+DEPENDPATH += $$PWD/../3rdparty/pyrowave
 
 !winrt {
     win32:CONFIG(release, debug|release): LIBS += -L$$OUT_PWD/../AntiHooking/release/ -lAntiHooking
