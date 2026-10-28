@@ -173,16 +173,9 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     // （vendor 介面開起來了）→ 把 gen-2 SC 全家族加進忽略清單。SDL 的 Steam hidapi 驅動在
     // HIDAPI_GetDeviceDriver() 就被擋下（SDL 3.4.2 已核對：在 SDL_hid_open_path 之前），連開都
     // 不開，不再與 passthrough 搶 feature 暫存器。session 結束由解構子還原舊清單；
-    // gamepad.cpp 的 isActive() 抑制保留當第二道防線。SDL3 仍認這個 SDL2 hint 名（SDL_hints.h）。
-    if (Session::get() != nullptr && Session::get()->m_ScHid.isPrepared()) {
-        if (!streamIgnoreDevices.isEmpty() && !streamIgnoreDevices.endsWith(',')) {
-            streamIgnoreDevices += ',';
-        }
-        streamIgnoreDevices += ScHidPassthrough::sdlIgnoreDevicesSpec();
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[SC-HID] passthrough prepared - SDL gamepad path disabled for %s this session",
-                    ScHidPassthrough::sdlIgnoreDevicesSpec());
-    }
+    // gamepad.cpp 的 isPrepared() 抑制保留當第二道防線。SDL3 仍認這個 SDL2 hint 名（SDL_hints.h）。
+    // §SC-HOTPLUG：串流中 SC 接上／消失時 setScHidPassthroughPrepared() 會用同一份基底重建。
+    m_StreamIgnoreDevicesBase = streamIgnoreDevices;
 
     // STREAM_IGNORE_DEVICE_GUIDS allows to specify additional devices to be ignored when starting
     // the stream in case the scope of STREAM_GAMECONTROLLER_IGNORE_DEVICES is too broad. One such
@@ -201,7 +194,7 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     // For SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, we use the union of SDL_GAMECONTROLLER_IGNORE_DEVICES
     // and STREAM_GAMECONTROLLER_IGNORE_DEVICES while streaming. STREAM_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT
     // overrides SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT while streaming.
-    SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, streamIgnoreDevices.toUtf8());
+    applyGamepadIgnoreHint(Session::get() != nullptr && Session::get()->m_ScHid.isPrepared());
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT, streamIgnoreDevicesExcept.toUtf8());
 
     // §HID-PROBE：有 HID 裝置卡死時，SDL_INIT_JOYSTICK / GAMECONTROLLER 的 hidapi 列舉
@@ -543,5 +536,22 @@ void SdlInputHandler::handleTouchFingerEvent(SDL_TouchFingerEvent* event)
     }
     else {
         handleRelativeFingerEvent(event);
+    }
+}
+
+void SdlInputHandler::applyGamepadIgnoreHint(bool scHidPrepared)
+{
+    QString devices = m_StreamIgnoreDevicesBase;
+    if (scHidPrepared) {
+        if (!devices.isEmpty() && !devices.endsWith(',')) {
+            devices += ',';
+        }
+        devices += ScHidPassthrough::sdlIgnoreDevicesSpec();
+    }
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, devices.toUtf8());
+    if (scHidPrepared) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[SC-HID] passthrough prepared - SDL gamepad path disabled for %s this session",
+                    ScHidPassthrough::sdlIgnoreDevicesSpec());
     }
 }

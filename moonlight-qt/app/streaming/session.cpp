@@ -4018,6 +4018,7 @@ void Session::start()
     // 搶一次性暫存器。開不到（沒插、Linux 沒 hidraw 權限）就不加，SC 照舊當一般 SDL 手把。
     // validateLaunch() 已 HidProbe::refresh() 過：卡死的 SC 在 prepare() 內就被拒絕。
     m_ScHid.prepare();
+    m_ScHid.hidDevicesChanged();   // §SC-HOTPLUG：記下 HID 變動計數的基準
 
     // Initialize the gamepad code with our preferences
     // NB: m_InputHandler must be initialize before starting the connection.
@@ -4043,6 +4044,55 @@ void Session::interrupt()
     event.type = SDL_QUIT;
     event.quit.timestamp = SDL_GetTicks();
     SDL_PushEvent(&event);
+}
+
+// §SC-HOTPLUG（2026-10-24）：passthrough 原本只在 Session::start() 列舉一次，串流開始後才
+// 連上的 Steam Controller（藍牙 SC 從休眠醒來最常見）整場都不會被接手；中途斷線的 SC
+// 也接不回來。主迴圈每秒看一次：
+//   - passthrough 在跑、讀取執行緒回報裝置不在了 → stop()，SDL 忽略清單拿掉 SC 家族
+//   - passthrough 沒在跑、SDL 偵測到 HID 裝置變動 → 重新 prepare()；開到就把已走 SDL
+//     路徑的 Valve 手把收掉、加回忽略清單，再 start()
+// 全部在主執行緒，與 Session::start() 的 prepare() 同一條執行緒；hidapi 的同步呼叫仍只在
+// SC-HID 讀取執行緒上（prepare 只做列舉與開 handle）。
+void Session::pollScHidHotplug()
+{
+    const Uint32 now = SDL_GetTicks();
+    if (m_ScHidHotplugTick != 0 && now - m_ScHidHotplugTick < 1000) {
+        return;
+    }
+    m_ScHidHotplugTick = now ? now : 1;
+    if (m_InputHandler == nullptr) {
+        return;
+    }
+
+    if (m_ScHid.isPrepared()) {
+        if (m_ScHid.devicesGone()) {
+            m_ScHid.stop();
+            m_InputHandler->setScHidPassthroughPrepared(false);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[SC-HID] hotplug: Steam Controller gone - passthrough stopped, waiting for it to come back");
+        }
+        else {
+            // 在跑時也更新基準，免得之後一次把累積的變動當成新裝置
+            m_ScHid.hidDevicesChanged();
+        }
+        return;
+    }
+
+    if (!m_ScHid.hidDevicesChanged()) {
+        return;
+    }
+#ifdef Q_OS_WIN32
+    // 新接上的裝置沒被 validateLaunch 探測過；卡死的 Puck 會讓列舉在核心永久阻塞
+    HidProbe::refresh();
+#endif
+    if (!m_ScHid.prepare(true /* quiet */)) {
+        return;
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[SC-HID] hotplug: Steam Controller appeared mid-session - taking it over");
+    m_InputHandler->setScHidPassthroughPrepared(true);
+    m_ScHid.start();
 }
 
 void Session::exec()
@@ -4268,6 +4318,7 @@ void Session::exec()
     for (;;) {
         s_LoopBeat.fetch_add(1);
         s_LoopPhase.store(-1);
+        pollScHidHotplug();
         if (!audioSilenceChecked && SDL_TICKS_PASSED(SDL_GetTicks(), audioSilenceCheckTime)) {
             audioSilenceChecked = true;
             if (m_AudioSampleCount == 0) {

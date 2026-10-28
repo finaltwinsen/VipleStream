@@ -44,7 +44,8 @@ public:
     // 回傳是否開到至少一個介面；SdlInputHandler 據此把 SC 家族加進 SDL 的
     // 忽略清單，讓 SDL 的 hidapi 驅動（SDL 3.4.x SDL_hidapi_steam_triton）連開都不開，
     // 不再與 passthrough 搶同一組 feature 暫存器。沒有 SC 時 no-op。
-    bool prepare();
+    // quiet=true（§SC-HOTPLUG 串流中重試）：找不到 SC 時不印 log，避免每次 HID 變動就洗一行。
+    bool prepare(bool quiet = false);
 
     // 階段 2：LiStartConnection() 成功後呼叫。排入暖機查詢並啟動讀取執行緒。
     // 沒 prepare 到裝置時 no-op。
@@ -56,6 +57,14 @@ public:
 
     bool isActive() const;
     bool isPrepared() const { return m_devCount.load() > 0; }
+
+    // §SC-HOTPLUG：讀取執行緒發現所有開著的介面都持續讀取失敗（藍牙 SC 斷線／休眠、
+    // USB 拔掉）時設起、執行緒自行結束；Session 看到後 stop()，等裝置回來再 prepare()。
+    bool devicesGone() const { return m_devicesGone.load(); }
+
+    // §SC-HOTPLUG：主執行緒呼叫；回傳上次呼叫以來 SDL 是否偵測到 HID 裝置變動
+    // （SDL_hid_device_change_count）。第一次呼叫只記下基準、回 false。
+    bool hidDevicesChanged();
 
     // SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES 用的 "0xVID/0xPID,…" 清單：gen-2 SC 全家族
     // （1302 USB／1303 BLE／1304 Puck／1305 Nereid）。SdlInputHandler 在 isPrepared() 時併入。
@@ -103,6 +112,9 @@ private:
     SDL_Thread* m_thread = nullptr;
     ScHidThreadCtx* m_threadCtx = nullptr;      // 正常 join 後 stop() 釋放；遺棄時連同執行緒一起漏掉
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_devicesGone{false};     // §SC-HOTPLUG：見 devicesGone()
+    Uint32 m_hidChangeCount = 0;                // §SC-HOTPLUG：hidDevicesChanged() 的基準
+    bool m_hidChangeCountValid = false;
     // 世代：每次 prepare() +1。被遺棄的執行緒醒來後比對世代不符就退出，不碰任何成員。
     std::atomic<uint32_t> m_gen{0};
     bool m_abandoned = false;                   // 上一場 stop() 逾時遺棄了執行緒＋handle（只供 log）

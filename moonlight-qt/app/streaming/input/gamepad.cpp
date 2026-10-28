@@ -549,13 +549,16 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             return;
         }
 
-        // §SC-HID：若 raw HID passthrough 已啟動且此手把是 Valve Steam Controller (VID 0x28DE)，
+        // §SC-HID：若 raw HID passthrough 已開到裝置且此手把是 Valve 裝置 (VID 0x28DE)，
         // 抑制標準 SDL gamepad 路徑。保留此路徑會讓 host 同時有 VipleSCHid 虛擬裝置 ＋
         // ViGEm Xbox360，Steam 顯示 Xbox360 而非 Steam Controller。
         // 改為只走 raw HID：input 透過 VipleSCHid 注入，Steam 透過 VID/PID + GetControllerInfo 識別。
+        // §SC-TYPE-FIX：用 isPrepared() 而非 isActive()——手把 arrival 在 LiStartConnection 期間
+        // 就到，那時讀取執行緒還沒起（isActive 為 false），本機 Steam 鏡像 SC 的「Steam Virtual
+        // Gamepad」(28DE:11FF) 會漏過去變成第二份輸入。
         if (SDL_GameControllerGetVendor(controller) == 0x28DE) {
             Session* sess = Session::get();
-            if (sess != nullptr && sess->m_ScHid.isActive()) {
+            if (sess != nullptr && sess->m_ScHid.isPrepared()) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[SC-HID] Suppressing SDL gamepad for Steam Controller "
                             "(VID 0x28DE) — raw HID passthrough active, skipping ViGEm path");
@@ -714,8 +717,16 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             type = LI_CTYPE_NINTENDO;
             break;
         default:
+            // §SC-TYPE-FIX（2026-10-24）：host 把 LI_CTYPE_STEAM 解讀成「輸入走 SC-HID 原始通道」，
+            // 不建 ViGEm 手把——SDL 路徑的標準手把狀態因此整個被丟掉。走到這裡的 Valve 裝置
+            // 都不是 passthrough 在處理的（passthrough 開著時上面已抑制）：Steam Virtual Gamepad
+            // (28DE:11FF)、passthrough 沒開到的 SC、Steam Deck 等，一律當 Xbox 手把回報。
             if (SDL_GameControllerGetVendor(state->controller) == 0x28DE) {
-                type = LI_CTYPE_STEAM;
+                type = LI_CTYPE_XBOX;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[SC-HID] Valve gamepad 0x28de/0x%04x is not on the raw HID passthrough - "
+                            "reporting it as an Xbox controller so the host creates a virtual gamepad",
+                            SDL_GameControllerGetProduct(state->controller));
             } else {
                 type = LI_CTYPE_UNKNOWN;
             }
@@ -745,39 +756,81 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
     else if (event->type == SDL_CONTROLLERDEVICEREMOVED) {
         state = findStateForGamepad(event->which);
         if (state != NULL) {
-            if (state->mouseEmulationTimer != 0) {
-                Session::get()->notifyMouseEmulationMode(false);
-                SDL_RemoveTimer(state->mouseEmulationTimer);
-            }
+            releaseGamepadState(state);
+        }
+    }
+}
 
-            SDL_GameControllerClose(state->controller);
+void SdlInputHandler::releaseGamepadState(GamepadState* state)
+{
+    if (state->mouseEmulationTimer != 0) {
+        Session::get()->notifyMouseEmulationMode(false);
+        SDL_RemoveTimer(state->mouseEmulationTimer);
+    }
+
+    SDL_GameControllerClose(state->controller);
 
 #if !SDL_VERSION_ATLEAST(2, 0, 9)
-            if (state->haptic != nullptr) {
-                SDL_HapticClose(state->haptic);
-            }
+    if (state->haptic != nullptr) {
+        SDL_HapticClose(state->haptic);
+    }
 #endif
 
-            // Remove this from the gamepad mask in MC-mode
-            if (m_MultiController) {
-                SDL_assert(m_GamepadMask & (1 << state->index));
-                m_GamepadMask &= ~(1 << state->index);
-            }
-            else {
-                SDL_assert(m_GamepadMask == 0x1);
-            }
+    // Remove this from the gamepad mask in MC-mode
+    if (m_MultiController) {
+        SDL_assert(m_GamepadMask & (1 << state->index));
+        m_GamepadMask &= ~(1 << state->index);
+    }
+    else {
+        SDL_assert(m_GamepadMask == 0x1);
+    }
 
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Gamepad %d is gone",
-                        state->index);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Gamepad %d is gone",
+                state->index);
 
-            // Send a final event to let the PC know this gamepad is gone
-            LiSendMultiControllerEvent(state->index, m_GamepadMask,
-                                       0, 0, 0, 0, 0, 0, 0);
+    // Send a final event to let the PC know this gamepad is gone
+    LiSendMultiControllerEvent(state->index, m_GamepadMask,
+                               0, 0, 0, 0, 0, 0, 0);
 
-            // Clear all remaining state from this slot
-            SDL_memset(state, 0, sizeof(*state));
+    // Clear all remaining state from this slot
+    SDL_memset(state, 0, sizeof(*state));
+}
+
+void SdlInputHandler::setScHidPassthroughPrepared(bool prepared)
+{
+    // §SC-HOTPLUG：串流中 Steam Controller 接上／消失時，Session 依 passthrough 狀態重建
+    // SDL 忽略清單；開到時再把已經走 SDL 路徑的 Valve 手把（SC 本身或本機 Steam 鏡像它的
+    // Steam Virtual Gamepad）收掉，避免 host 同時收到原始通道與 ViGEm 兩份輸入。
+    applyGamepadIgnoreHint(prepared);
+    if (!prepared) {
+        // passthrough 收掉了：之前被抑制的 Valve 手把（例如 Steam Virtual Gamepad）重新走
+        // SDL 路徑。重複的 add 由 handleControllerDeviceEvent 自己濾掉。
+        if (m_GamepadDisabled) {
+            return;
         }
+        for (int i = 0; i < SDL_NumJoysticks(); i++) {
+            if (!SDL_IsGameController(i) || SDL_JoystickGetDeviceVendor(i) != 0x28DE) {
+                continue;
+            }
+            SDL_ControllerDeviceEvent ev = {};
+            ev.type = SDL_CONTROLLERDEVICEADDED;
+            ev.timestamp = SDL_GetTicks();
+            ev.which = i;
+            handleControllerDeviceEvent(&ev);
+        }
+        return;
+    }
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        GamepadState* state = &m_GamepadState[i];
+        if (state->controller == nullptr ||
+                SDL_GameControllerGetVendor(state->controller) != 0x28DE) {
+            continue;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[SC-HID] Releasing SDL gamepad %d (0x28de/0x%04x) - raw HID passthrough took over",
+                    state->index, SDL_GameControllerGetProduct(state->controller));
+        releaseGamepadState(state);
     }
 }
 

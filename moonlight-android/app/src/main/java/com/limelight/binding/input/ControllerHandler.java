@@ -3071,8 +3071,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 case 0x057e: // Nintendo
                     type = MoonBridge.LI_CTYPE_NINTENDO;
                     break;
-                case 0x28de: // Valve (Steam Controller)
-                    type = MoonBridge.LI_CTYPE_STEAM;
+                case 0x28de: // Valve
+                    // §SC-TYPE-FIX：host 把 LI_CTYPE_STEAM 解讀成「輸入走 SC-HID 原始通道」、不建
+                    // 虛擬手把。走到這裡的 Valve 裝置是 Android InputDevice（USB SC 由
+                    // SteamControllerDriver 另外處理、不經這裡），標準手把狀態才是它唯一的輸入，
+                    // 所以當 Xbox 手把回報，host 才會建虛擬手把。
+                    type = MoonBridge.LI_CTYPE_XBOX;
                     break;
                 default:
                     // Consult SDL's controller type list to see if it knows

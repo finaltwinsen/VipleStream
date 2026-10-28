@@ -179,6 +179,8 @@ signals:
 private:
     void exec();
 
+    void pollScHidHotplug();   // §SC-HOTPLUG
+
     bool startConnectionAsync();
 
     bool validateLaunch(SDL_Window* testWindow);
@@ -356,6 +358,7 @@ private:
     uint32_t m_XrRebuildGeneration = 0;
     SDL_TimerID m_XrRebuildTimer = 0;
     ScHidPassthrough m_ScHid;
+    Uint32 m_ScHidHotplugTick = 0;   // §SC-HOTPLUG：pollScHidHotplug() 的節流
     int m_MouseEmulationRefCount;
     int m_FlushingWindowEventsRef;
     QStringList m_LaunchWarnings;

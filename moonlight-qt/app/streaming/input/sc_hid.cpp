@@ -79,6 +79,7 @@ static constexpr Uint32 kFeatPollStepMs     = 1;
 static constexpr Uint32 kStatsPeriodMs  = 5000;   // 有變才印
 static constexpr Uint32 kHeartbeatMs    = 60000;  // 沒變也印一次
 static constexpr Uint32 kNoPacketWarnMs = 3000;   // 啟動後仍 total=0 → warning 一次
+static constexpr Uint32 kDevicesGoneMs = 1500;    // §SC-HOTPLUG：所有介面持續讀取失敗這麼久＝裝置不在了
 static constexpr Uint32 kStopPollStepMs = 2;      // stop() 等執行緒退出的輪詢間隔
 
 // §SC-THREAD-OWNER：讀取執行緒的 context 由執行緒自己擁有。正常 join 後由 stop() 釋放；
@@ -475,7 +476,7 @@ int ScHidPassthrough::runFeatureRequest(uint8_t reportId, uint8_t op, uint8_t se
     return result;
 }
 
-bool ScHidPassthrough::prepare() {
+bool ScHidPassthrough::prepare(bool quiet) {
     if (m_running || m_devCount > 0) return isPrepared();   // 已 prepare／已在跑
 
     // §HID-PROBE：探測若發現 Valve（0x28DE）介面對 control transfer 無回應，下面的
@@ -509,6 +510,7 @@ bool ScHidPassthrough::prepare() {
 
     // 新的一場：世代 +1，上一場若有被遺棄的執行緒，醒來看到世代不符就自行退出。
     m_gen++;
+    m_devicesGone = false;
     resetStats();   // 每場歸零（含 seen mask 與 feature 佇列）
     if (m_abandoned) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -539,7 +541,7 @@ bool ScHidPassthrough::prepare() {
         const bool byUsage = (d->usage_page == SC_USAGE_PAGE && d->usage == SC_USAGE);
         const bool byPidUnknownUsage = (d->usage_page == 0 && d->usage == 0 && isGen2Pid(d->product_id));
         if (!byUsage && !byPidUnknownUsage) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+            if (!quiet) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[SC-HID] Skipping 28DE device pid=0x%04x if=%d usage=0x%04x/0x%04x path=%s (not the vendor collection)",
                 d->product_id, d->interface_number, d->usage_page, d->usage, d->path);
             continue;
@@ -592,7 +594,7 @@ bool ScHidPassthrough::prepare() {
 #endif
                 " - Steam Controller stays a regular SDL gamepad this session", matched);
         }
-        else {
+        else if (!quiet) {
             // No Steam Controller attached — that's fine
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[SC-HID] No Steam Controller vendor interface found (0x28DE FF00/01)");
@@ -723,6 +725,20 @@ void ScHidPassthrough::stop() {
 
 bool ScHidPassthrough::isActive() const {
     return m_running && m_devCount > 0;
+}
+
+bool ScHidPassthrough::hidDevicesChanged() {
+    // SDL_hid_device_change_count 在 hidapi 尚未初始化時會自己 init；不在這裡呼叫
+    // SDL_hid_init（它有參考計數，每秒呼叫一次會一路累加）。
+    const Uint32 cc = SDL_hid_device_change_count();
+    if (!m_hidChangeCountValid) {
+        m_hidChangeCountValid = true;
+        m_hidChangeCount = cc;
+        return false;
+    }
+    if (cc == m_hidChangeCount) return false;
+    m_hidChangeCount = cc;
+    return true;
 }
 
 int SDLCALL ScHidPassthrough::readThreadFunc(void* p) {
@@ -873,6 +889,7 @@ void ScHidPassthrough::readLoop(ScHidThreadCtx* ctx) {
     uint32_t printedTotal = 0;          // 上次印出時的 m_rxTotal / m_featReq（有變才印）
     uint32_t printedFeat = 0;
     bool warnedNoPackets = false;
+    Uint32 allErrSince = 0;             // §SC-HOTPLUG：所有介面同時讀取失敗的起點（0 = 沒有）
 
     while (alive()) {
         // gotAny 語義（Round 1）：只有「本輪真的有轉發」才不讓步；只讀到雜訊
@@ -883,12 +900,14 @@ void ScHidPassthrough::readLoop(ScHidThreadCtx* ctx) {
         // interface actually delivers reports (the others stay silent).
         // read 是 non-blocking（prepare() 已 SDL_hid_set_nonblocking），健康裝置不會久待。
         const int count = m_devCount.load();
+        int errCount = 0;
         for (int i = 0; i < count; i++) {
             if (!alive()) return;
             m_lastOp = OpRead;
             m_lastOpTick = SDL_GetTicks();
             const int n = SDL_hid_read(m_devs[i], buf, sizeof(buf));
             m_lastOp = OpIdle;
+            if (n < 0) errCount++;
             if (n <= 0) {
                 continue;  // 0 = no data (non-blocking); <0 = error on this handle
             }
@@ -911,6 +930,23 @@ void ScHidPassthrough::readLoop(ScHidThreadCtx* ctx) {
         }
 
         const Uint32 now = SDL_GetTicks();
+
+        // §SC-HOTPLUG：所有介面持續 kDevicesGoneMs 都讀取失敗＝裝置不在了（藍牙 SC 斷線／休眠時
+        // hidraw 節點被移除、USB 拔掉）。結束執行緒，讓 Session 收掉 handle、等裝置回來再接手；
+        // 不結束的話這一場就算 SC 重新連上也永遠接不回來。
+        if (count > 0 && errCount == count) {
+            if (allErrSince == 0) allErrSince = now ? now : 1;
+            if (now - allErrSince >= kDevicesGoneMs) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[SC-HID] all %d Steam Controller interface(s) failing to read for %u ms - "
+                    "controller disconnected; passthrough ends and resumes when it comes back",
+                    count, (unsigned)(now - allErrSince));
+                m_devicesGone = true;
+                break;
+            }
+        } else {
+            allErrSince = 0;
+        }
 
         // 啟動後 kNoPacketWarnMs 仍一筆都沒有 → 一次 warning（控制器睡眠 / 沒對上 slot）
         if (!warnedNoPackets && m_rxTotal == 0 && (now - startTick) >= kNoPacketWarnMs) {

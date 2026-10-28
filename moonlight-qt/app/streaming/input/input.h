@@ -112,6 +112,9 @@ public:
 
     void handleControllerDeviceEvent(SDL_ControllerDeviceEvent* event);
 
+    // §SC-HOTPLUG：Steam Controller passthrough 在串流中開到／收掉時由 Session 呼叫
+    void setScHidPassthroughPrepared(bool prepared);
+
 #if SDL_VERSION_ATLEAST(2, 0, 14)
     void handleControllerSensorEvent(SDL_ControllerSensorEvent* event);
 
@@ -187,6 +190,11 @@ private:
 
     void sendGamepadState(GamepadState* state);
 
+    // 關掉一個手把 slot 並通知 host 它已移除（SDL 移除事件與 §SC-HOTPLUG 共用）
+    void releaseGamepadState(GamepadState* state);
+
+    void applyGamepadIgnoreHint(bool scHidPrepared);
+
     void sendGamepadBatteryState(GamepadState* state, SDL_JoystickPowerLevel level);
 
     void handleAbsoluteFingerEvent(SDL_TouchFingerEvent* event);
@@ -235,6 +243,7 @@ private:
     QSet<short> m_KeysDown;
     bool m_FakeCaptureActive;
     QString m_OldIgnoreDevices;
+    QString m_StreamIgnoreDevicesBase;   // 串流期間的忽略清單（不含 SC 家族）
     QString m_OldIgnoreDevicesExcept;
     QStringList m_IgnoreDeviceGuids;
     StreamingPreferences::CaptureSysKeysMode m_CaptureSystemKeysMode;
