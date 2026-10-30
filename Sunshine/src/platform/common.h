@@ -961,4 +961,12 @@ namespace platf {
    */
   int64_t vr_clock_frequency();
 
+  /**
+   * @brief §VR-HOTSPOT-AUTO（2026-10-30）：自動把主機無線介面連上頭盔熱點。
+   * @details Windows 上透過 Native Wi-Fi API (wlanapi) 挑選看得到該 SSID 且未被佔用的介面，
+   *          設定 all-user profile 並連線；Linux / macOS 則記 log 並忽略。
+   *          金鑰絕不輸出於任何 log。
+   */
+  void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key);
+
 }  // namespace platf

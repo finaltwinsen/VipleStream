@@ -60,6 +60,8 @@ extern "C" {
 #define VIPLE_VR_CODEC_H264  0x01
 #define VIPLE_VR_CODEC_HEVC  0x02
 #define VIPLE_VR_CODEC_AV1   0x04
+// §PYROWAVE-VR（2026-10-28）：PyroWave 小波編碼（每幀 intra，LOSS 不需要 refresh）；server 要 pyrowave::is_available()
+#define VIPLE_VR_CODEC_PYROWAVE 0x08
 
 // launch 失敗時回應的錯誤碼：沿用 Sunshine 慣例，放在 XML root 的 status_code（非 200）
 // 與 status_message（以這些字串開頭，後接 ": 說明"）；HTTP 狀態本身仍是 200。
@@ -80,6 +82,22 @@ extern "C" {
 #define VIPLE_VR_IPD_MAX         8000     // mm×100
 #define VIPLE_VR_EYE_TO_HEAD_COUNT 14     // 每眼 pos(mm×100)×3＋quat(×10000)×4
 #define VIPLE_VR_OVERSCAN_MAX    200      // deg×10
+
+// §VR-PLAYAREA（2026-10-30）：真實遊玩區與坐姿零點範圍
+#define VIPLE_VR_PLAYAREA_MIN_MM        500      // 寬深下限 0.5 m（mm）
+#define VIPLE_VR_PLAYAREA_MAX_MM        20000    // 寬深上限 20 m（mm）
+#define VIPLE_VR_SEATED_POS_MIN_MM      (-20000) // 坐姿水平 x/z 範圍 ±20 m（mm）
+#define VIPLE_VR_SEATED_POS_MAX_MM      20000
+#define VIPLE_VR_SEATED_HEIGHT_MIN_MM   0        // 坐姿高度 y 範圍 0～3 m（mm）
+#define VIPLE_VR_SEATED_HEIGHT_MAX_MM   3000
+#define VIPLE_VR_SEATED_YAW_MDEG_MIN    (-180000) // 坐姿 yaw 範圍 ±180°（毫度，deg×1000）
+#define VIPLE_VR_SEATED_YAW_MDEG_MAX    180000
+#define VIPLE_VR_PLAYAREA_DEFAULT_W_MM  10000    // 預設遊玩區 10 m × 10 m
+#define VIPLE_VR_PLAYAREA_DEFAULT_D_MM  10000
+#define VIPLE_VR_SEATED_DEFAULT_X_MM    0        // 預設坐姿零點 (0, 1.2, 0) m
+#define VIPLE_VR_SEATED_DEFAULT_Y_MM    1200
+#define VIPLE_VR_SEATED_DEFAULT_Z_MM    0
+#define VIPLE_VR_SEATED_DEFAULT_YAW_MDEG 0
 
 // STREAM_CONFIGURATION.vrFlags／common-c 全域 VrFlags：由 client 在收到
 // <VipleStreamVRSession> 之後設定。0 代表一般 session，行為與桌面完全相同。
@@ -109,8 +127,9 @@ extern "C" {
 #define VIPLE_VR_ENET_THROTTLE_ACCELERATION  2
 #define VIPLE_VR_ENET_THROTTLE_DECELERATION  0
 
-// tracking 送出頻率 = 顯示 Hz × 這個倍數
-#define VIPLE_VR_TRACKING_RATE_MUL  2
+// tracking 送出頻率 = 顯示 Hz × 這個倍數。2026-10-29 §VR-TRACK-RATE：2 → 4（144 Hz 時 576 Hz）。相位鎖定下仍有約 14% 的格
+// 用到前一筆樣本（多老一個取樣間隔），間隔減半讓那些格少老一半；上行約 0.42 → 0.84 Mbps。server 不依賴這個倍數
+#define VIPLE_VR_TRACKING_RATE_MUL  4
 
 // ── 0x5506 TRACKING（232 B）────────────────────────────────────────
 
@@ -140,7 +159,12 @@ extern "C" {
 #define VIPLE_VR_BTN_GRIP              0x0040
 #define VIPLE_VR_BTN_TRACKPAD          0x0080
 #define VIPLE_VR_BTN_THUMBREST         0x0100
-// 0x0200–0x8000 保留；pressCtr 以同樣的 bit 序每鍵 2 bit（鍵 i 在 bit 2i..2i+1）
+// §VR-FRAME-CTRL：Steam Frame 手把每手四個面鍵＋肩鍵。A／B／C／D 依 SteamVR frame_controller 的鏡像對應：
+// 右手 a／b／x／y，左手 dpad_down／dpad_right／dpad_left／dpad_up（Touch 的左手只有 A＝X、B＝Y）
+#define VIPLE_VR_BTN_C                 0x0200  // Frame：右 x、左 dpad_left
+#define VIPLE_VR_BTN_D                 0x0400  // Frame：右 y、左 dpad_up
+#define VIPLE_VR_BTN_BUMPER            0x0800  // Frame：shoulder（SteamVR 的 /input/bumper）
+// 0x1000–0x8000 保留；pressCtr 以同樣的 bit 序每鍵 2 bit（鍵 i 在 bit 2i..2i+1）
 
 // VIPLE_VR_CONTROLLER_INPUT.flags
 #define VIPLE_VR_CTRL_ACTIVE   0x01
@@ -249,6 +273,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER {
 #define VIPLE_VR_C2S_LOSS              0x09  // VR channel unsequenced，送 2 次
 #define VIPLE_VR_C2S_LINK_HELLO        0x0A  // reliable，§VR-MULTILINK
 #define VIPLE_VR_C2S_NACK              0x0B  // §VR-LINK-REPAIR：只走連線的 DATA（不走 ENet）
+#define VIPLE_VR_C2S_HOTSPOT_INFO      0x0C  // reliable，§VR-HOTSPOT-AUTO
 #define VIPLE_VR_C2S_RESERVED_MIC      0x7F
 
 // S→C subtype
@@ -338,6 +363,12 @@ typedef struct _VIPLE_VR_TLV_CLIENT_TIMING {
     // 這 1 s 樣本不足時 poseLagP50_100us＝VIPLE_VR_POSE_LAG_NONE、poseLagCount＝0。
     int16_t  poseLagP50_100us;
     uint16_t poseLagCount;
+    // §VR-BUFFER-REFILL（2026-10-29，44 B；舊 server 只讀前 36 B，舊 client 送 36 B＝這兩欄當 0）：client 開了 §VR-BUFFER
+    // （--vr-buffer-frames 1）時，session 開始以來顯示的新串流幀裡，選「最新那張的前一張」（緩衝裡有一張）與「最新那張」
+    // （緩衝空了）的累計次數；重複顯示同一張不算。沒開緩衝時兩個都是 0。server 看相鄰兩則的差：一直空著就把虛擬 vsync 的
+    // 相位提前一整格（host 多送一張），把緩衝補回來。
+    uint32_t bufLag1Total;
+    uint32_t bufLag0Total;
 } VIPLE_VR_TLV_CLIENT_TIMING;
 
 #define VIPLE_VR_POSE_LAG_NONE 0x7FFF
@@ -353,6 +384,30 @@ typedef struct _VIPLE_VR_TLV_STATE {
     uint8_t  progress;  // 0–100
     uint16_t code;      // VIPLE_VR_STATE_CODE_*
 } VIPLE_VR_TLV_STATE;
+
+// §VR-HOTSPOT-AUTO（2026-10-30）：頭盔熱點憑證與頻段資訊
+#define VIPLE_VR_HOTSPOT_VERSION_1         1
+
+#define VIPLE_VR_HOTSPOT_AUTH_WPA2_PSK     1
+#define VIPLE_VR_HOTSPOT_AUTH_WPA3_SAE     2
+
+#define VIPLE_VR_HOTSPOT_BAND_UNKNOWN      0
+#define VIPLE_VR_HOTSPOT_BAND_2GHZ         2
+#define VIPLE_VR_HOTSPOT_BAND_5GHZ         5
+#define VIPLE_VR_HOTSPOT_BAND_6GHZ         6
+
+// §VR-HOTSPOT-AUTO（2026-10-30，102 B，reliable）：頭盔熱點憑證與頻段資訊（C→S）
+// 經由已加密的 VR 控制通道（ENet reliable AES-GCM）傳輸。
+typedef struct _VIPLE_VR_TLV_HOTSPOT_INFO {
+    uint8_t version;       // VIPLE_VR_HOTSPOT_VERSION_1
+    uint8_t authType;      // VIPLE_VR_HOTSPOT_AUTH_*（1=WPA2-PSK, 2=WPA3-SAE）
+    uint8_t band;          // VIPLE_VR_HOTSPOT_BAND_*（6=6 GHz, 5=5 GHz, 2=2.4 GHz）
+    uint8_t channel;       // 頻道編號（例如 37；0＝未知）
+    uint8_t ssidLen;       // SSID 長度（<= 32）
+    uint8_t keyLen;        // 金鑰長度（<= 64）
+    uint8_t ssid[32];      // SSID 字串（以 ssidLen 為準）
+    uint8_t key[64];       // 金鑰字串（PSK，以 keyLen 為準）
+} VIPLE_VR_TLV_HOTSPOT_INFO;
 
 typedef struct _VIPLE_VR_TLV_HAPTIC {
     uint8_t  device;      // VIPLE_VR_POSE_LEFT／RIGHT
@@ -487,7 +542,7 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_FRAME_HEADER) == VIPLE_VR_FRAME_HEADER_SI
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LOSS) == 9, tlv_loss_9);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LATCH) == 12, tlv_latch_12);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_REFRESH_START) == 6, tlv_refresh_6);
-VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_CLIENT_TIMING) == 36, tlv_client_timing_36);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_CLIENT_TIMING) == 44, tlv_client_timing_44);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATE) == 4, tlv_state_4);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HAPTIC) == 20, tlv_haptic_20);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATS) == 40, tlv_stats_40);
@@ -498,6 +553,8 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_PING) == 16, link_ping_16);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_NACK) == 9, tlv_nack_9);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_REPAIR_GONE) == 6, tlv_repair_gone_6);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TRACKING) <= VIPLE_VR_MAX_CTRL_PAYLOAD, tracking_fits);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_INFO) == 102, tlv_hotspot_102);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_INFO) <= VIPLE_VR_MAX_CTRL_PAYLOAD, hotspot_fits);
 
 // ── 解碼後的每幀 VR metadata（client 內部，不上線）─────────────────
 

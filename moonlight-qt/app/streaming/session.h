@@ -433,6 +433,10 @@ private:
     SDL_TimerID m_VrTestHapticTimer = 0;
     std::atomic<uint32_t> m_VrTestHapticSeq { 0 };
 
+    // §VR-HOTSPOT-AUTO：讀取頭盔熱點資訊並以 reliable TLV 同步至 host
+    void checkAndSendVrHotspotInfo();
+    QByteArray m_LastVrHotspotPayload;
+
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;
     static QSemaphore s_ActiveSessionSemaphore;

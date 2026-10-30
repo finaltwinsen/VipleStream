@@ -227,6 +227,11 @@ private:
 
     std::unique_ptr<PyroWaveDecoderBridge> m_PyroWaveBridge;
     QQueue<AVFrame*> m_PyroWaveFrameQueue;
+    // §PYROWAVE-SKIP-STALE（2026-10-29）：解碼跟不上時跳過已經有更新幀在後面等的舊幀（decoder thread 專用）
+    bool pyroWaveSkipStale(VIDEO_FRAME_HANDLE handle, PDECODE_UNIT du);
+    uint32_t m_PwStaleSkipped = 0;
+    int m_PwStaleMaxDepth = 0;
+    uint64_t m_PwStaleWindowUs = 0;
 
     // §VR（M1a）：VR session 的串流 decoder 才建立（test decoder 永遠是 nullptr）
     std::unique_ptr<VrFrameMetaTracker> m_VrTracker;

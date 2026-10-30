@@ -998,6 +998,14 @@ namespace vr::bridge {
           cfg.dev_arg = 0;
         }
         cfg.audio_endpoint_id[127] = 0;  // 強制 NUL 結尾
+        // §VR-PLAYAREA（2026-10-30）：真實遊玩區與坐姿零點（未設定或無效時補上預設值 10x10 m、坐姿 (0, 1.2, 0) m、yaw 0）
+        if (cfg.play_area_m[0] <= 0.0f || cfg.play_area_m[1] <= 0.0f) {
+          cfg.play_area_m[0] = 10.0f;
+          cfg.play_area_m[1] = 10.0f;
+        }
+        if (cfg.seated_pos_m[0] == 0.0f && cfg.seated_pos_m[1] == 0.0f && cfg.seated_pos_m[2] == 0.0f) {
+          cfg.seated_pos_m[1] = 1.2f;
+        }
         desired_config_ = cfg;
         explicit_pacing_.reset();
         last_refresh_mhz_ = cfg.refresh_mhz;

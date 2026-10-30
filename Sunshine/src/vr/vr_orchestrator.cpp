@@ -201,6 +201,16 @@ namespace vr::orchestrator {
         }
       }
       c.ipd_m = p.ipd / 100000.0f;
+      // §VR-PLAYAREA（2026-10-30）：頭盔的真實遊玩區與坐姿零點；client 沒帶時 p 裡是預設值（10×10 m、(0, 1.2, 0)、yaw 0）
+      c.play_area_m[0] = p.play_area_w_mm / 1000.0f;
+      c.play_area_m[1] = p.play_area_d_mm / 1000.0f;
+      for (int i = 0; i < 3; ++i) {
+        c.seated_pos_m[i] = p.seated_pos_mm[i] / 1000.0f;
+      }
+      c.seated_yaw_rad = p.seated_yaw_mdeg / 1000.0f * 3.14159265f / 180.0f;
+      BOOST_LOG(info) << "[VIPLE-VR-PLAYAREA] area=" << p.play_area_w_mm << 'x' << p.play_area_d_mm << "mm"
+                      << (p.has_play_area ? "" : " (default)") << " seated=" << p.seated_pos_mm[0] << ',' << p.seated_pos_mm[1] << ','
+                      << p.seated_pos_mm[2] << "mm yaw=" << p.seated_yaw_mdeg / 1000.0 << "deg" << (p.has_seated ? "" : " (default)");
       c.overscan_deg = p.overscan / 10.0f;
       c.controller_profile = 0;
       c.vr_caps = p.caps;
@@ -264,6 +274,11 @@ namespace vr::orchestrator {
                       << " angvelLocal=" << (config::vr.angvel_local ? 1 : 0);
       // §VR-RENDER-SCALE：算圖尺寸與串流尺寸分開（100＝相同）
       c.render_scale_pct = (uint16_t) (config::vr.render_scale_pct < 100 ? 100 : config::vr.render_scale_pct > 250 ? 250 : config::vr.render_scale_pct);
+      // §VR-RENDER-CAP（2026-10-30）：算圖尺寸上限 vr_render_target_max（不低於串流尺寸）——倍率固定時每眼 2160 會要遊戲算 4060
+      if (const int cap = std::max<int>(config::vr.render_target_max, (int) c.eye_width);
+          c.eye_width > 0 && (int) c.eye_width * c.render_scale_pct / 100 > cap) {
+        c.render_scale_pct = (uint16_t) std::max(100, cap * 100 / (int) c.eye_width);
+      }
       // §VR-FOVEA：client 要求、而且是真的 driver 才開（協商回應裡的 fovea= 用同一個條件）
       c.fovea_pct = (uint16_t) (neg.pcvr && p.fovea > 100 && p.fovea <= 250 ? p.fovea : 100);
       if (c.fovea_pct > 100) {
@@ -676,6 +691,27 @@ namespace vr::orchestrator {
 #endif
     }
 
+    /// §VR-YIELD-STEAMLINK（2026-10-30，Frame 實測）：頭盔改用 Steam 內建串流時，host 的 Steam 每次嘗試都會重新初始化
+    /// Valve 網卡的 VR 模式，remote_connections.txt 多一行 `CRemoteClientDongle::OnRemoteClientUSBTriggerHotplug`
+    /// （失敗時再記 `CRemoteClientJobStartStream timed out`）。回傳尾端最後一行這類紀錄（沒有回空字串），
+    /// 跟等待開始時記下的那一行不同＝等待期間使用者在頭盔上要了 Steam 串流
+    std::string last_steamlink_request_line() {
+      const std::string tail = platform::steamvr_log_tail("remote_connections.txt", 16 * 1024);
+      size_t best = std::string::npos;
+      for (const char *key : {"OnRemoteClientUSBTriggerHotplug", "CRemoteClientJobStartStream"}) {
+        const size_t at = tail.rfind(key);
+        if (at != std::string::npos && (best == std::string::npos || at > best)) {
+          best = at;
+        }
+      }
+      if (best == std::string::npos) {
+        return {};
+      }
+      const size_t b = tail.rfind('\n', best);
+      const size_t e = tail.find('\n', best);
+      return tail.substr(b == std::string::npos ? 0 : b + 1, (e == std::string::npos ? tail.size() : e) - (b == std::string::npos ? 0 : b + 1));
+    }
+
     /// §VR-RESTORE-IDLE（2026-10-04，Frame 實測）：session 結束後 SteamVR 還開著時 guard 還原不了——host 的
     /// `forcedDriver` 還是 viplestream、vrlink 被我們關著，使用者改用 Steam 自己的串流就開不起來。我們的 HMD 在 standby、
     /// 沒有 VR 遊戲在跑滿 k_idle_quit 就結束 SteamVR（下一個維護 tick 還原設定）。遊戲還在跑時不動（留給斷線後接回）；
@@ -687,21 +723,60 @@ namespace vr::orchestrator {
       const auto c = platform::cached_conflicts();
       // 遊戲結束後 RunningAppID 常變成 SteamVR 本身（250820，也在 vrmanifest 裡）——那不算還有遊戲在跑
       const bool game_running = c.vr_app_running && c.running_app_id != platform::k_steamvr_app_id;
-      const bool idle_ours = st == state_e::restore_pending && platform::guard_pending() && platform::vrserver_pid() != 0 &&
-                             bs.connected && !bs.peer_is_selftest && !bs.hmd_presenting && !game_running;
-      if (!idle_ours) {
+      const bool pending = st == state_e::restore_pending && platform::guard_pending() && platform::vrserver_pid() != 0;
+      const bool idle_ours = pending && bs.connected && !bs.peer_is_selftest && !bs.hmd_presenting && !game_running;
+      const auto now = steady::now();
+      // §VR-RESTORE-CAP（2026-10-30，Frame 實測）：session 結束、遊戲也退出了，idle-quit 卻 7 分鐘沒觸發，guard 一直套著，
+      // 使用者改用 Steam 內建串流開不起來。原因當時沒有 log 可查 → 等待中每 30 秒記一次是哪個條件擋住；另外加上限：
+      // 沒有遊戲 90 秒、遊戲還在跑（留給斷線接回）2 分鐘，到了就照樣結束 SteamVR 讓 guard 還原。自我測試連著時不動。
+      static steady::time_point pending_since {};
+      static steady::time_point last_why {};
+      constexpr auto k_cap_idle = 90s;
+      constexpr auto k_cap_game = 2min;  // 10-30：頭盔沒電斷線、遊戲還開著，5 分鐘內使用者改開 Steam 內建串流都會失敗 → 縮成 2 分鐘
+      static std::string steamlink_baseline;
+      static steady::time_point last_steamlink_check {};
+      if (!pending || bs.peer_is_selftest) {
+        pending_since = {};
         idle_since = {};
         return;
       }
-      const auto now = steady::now();
-      if (idle_since == steady::time_point {}) {
-        idle_since = now;
+      if (pending_since == steady::time_point {}) {
+        pending_since = now;
+        steamlink_baseline = last_steamlink_request_line();
+        last_steamlink_check = now;
+      }
+      // §VR-YIELD-STEAMLINK：沒有 VR 串流連著（HMD 不在顯示）時，使用者在頭盔上要了 Steam 串流就立刻讓路
+      bool steamlink_wanted = false;
+      if (!bs.hmd_presenting && now - last_steamlink_check >= 2s) {
+        last_steamlink_check = now;
+        const std::string line = last_steamlink_request_line();
+        if (!line.empty() && line != steamlink_baseline) {
+          steamlink_wanted = true;
+          BOOST_LOG(info) << "[VIPLE-VR-ORCH] idle-quit: Steam Link VR request seen while waiting - yielding SteamVR now";
+        }
+      }
+      const bool capped = steamlink_wanted || now - pending_since >= (game_running ? k_cap_game : k_cap_idle);
+      if (!idle_ours && !capped) {
+        idle_since = {};
+        if (now - last_why >= 30s) {
+          last_why = now;
+          BOOST_LOG(info) << "[VIPLE-VR-ORCH] idle-quit waiting: connected=" << bs.connected << " presenting=" << bs.hmd_presenting
+                          << " game=" << (game_running ? c.running_app_id : 0u)
+                          << " pending=" << std::chrono::duration_cast<std::chrono::seconds>(now - pending_since).count() << "s";
+        }
         return;
       }
-      if (now - idle_since < k_idle_quit) {
-        return;
+      if (!capped) {
+        if (idle_since == steady::time_point {}) {
+          idle_since = now;
+          return;
+        }
+        if (now - idle_since < k_idle_quit) {
+          return;
+        }
       }
       idle_since = {};
+      pending_since = {};
       const auto t0 = steady::now();
       platform::wait_steamvr_settled();  // §QUIT-SETTLE
       bool quit = false;
@@ -715,7 +790,11 @@ namespace vr::orchestrator {
         const auto q = platform::quit_steamvr(false);
         quit = q == platform::quit_e::exited || q == platform::quit_e::killed || q == platform::quit_e::not_running;
       }
-      step("idle-quit-steamvr", quit, "no VR app, HMD in standby", t0);
+      step("idle-quit-steamvr", quit,
+           steamlink_wanted ? "Steam Link VR requested" :
+           capped           ? (game_running ? "cap reached, VR app left running" : "cap reached") :
+                              "no VR app, HMD in standby",
+           t0);
     }
 
     /// 維護（IDLE／RESTORE_PENDING／ERROR 時）：環境、衝突快取、guard 還原

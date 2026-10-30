@@ -188,6 +188,9 @@ QMAKE_ARGS=(
 # release 保留，G-BUILD 以 release 設定判定。
 if [ "$FLAVOR" = "dev" ]; then
 	QMAKE_ARGS+=("CONFIG+=disable-lto")
+	# 2026-10-29：dev 不產生除錯資訊。SDK 的 CFLAGS／CXXFLAGS 帶 -g，上面已經併進 QMAKE_*FLAGS；排在後面的 -g0 會蓋掉它。
+	# qemu 下產生與寫出除錯資訊佔編譯時間的一成到兩成；release 保留 -g（之後拆成 .Debug 擴充）
+	QMAKE_ARGS+=("QMAKE_CFLAGS+=-g0" "QMAKE_CXXFLAGS+=-g0")
 fi
 
 log "qmake: $QMAKE_BIN ${QMAKE_ARGS[*]}"

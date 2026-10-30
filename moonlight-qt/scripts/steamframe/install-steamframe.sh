@@ -45,7 +45,10 @@ command -v flatpak >/dev/null || die "flatpak not found"
 [ -x /usr/bin/bwrap ] || die "/usr/bin/bwrap not found"
 
 if [ "$UNINSTALL" = 1 ]; then
-    rm -f "$LAUNCHER" "$SHIM" "$DESKTOP"
+    systemctl --user disable --now viplestream-hotspot.service 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/viplestream-hotspot.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    rm -f "$LAUNCHER" "$SHIM" "$DEST/update-hotspot.sh" "$DESKTOP"
     rmdir "$DEST" 2>/dev/null || true
     flatpak --user uninstall -y "$APP_ID//$BRANCH" 2>/dev/null || true
     say "removed. Delete the VipleStream shortcut from your Steam library by hand."
@@ -99,6 +102,20 @@ exec /usr/bin/flatpak run --branch=$BRANCH --arch=aarch64 \\
     $APP_ID "\$@"
 EOF
 chmod 755 "$SHIM" "$LAUNCHER"
+
+# 安裝頭盔熱點更新小工具與 systemd user service（§VR-HOTSPOT-AUTO）
+here="$(dirname "$(readlink -f "$0")")"
+if [ -f "$here/update-hotspot.sh" ]; then
+    cp "$here/update-hotspot.sh" "$DEST/update-hotspot.sh"
+    chmod 755 "$DEST/update-hotspot.sh"
+fi
+if [ -f "$here/viplestream-hotspot.service" ]; then
+    mkdir -p "$HOME/.config/systemd/user"
+    cp "$here/viplestream-hotspot.service" "$HOME/.config/systemd/user/viplestream-hotspot.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable --now viplestream-hotspot.service 2>/dev/null || true
+    say "installed and enabled viplestream-hotspot.service"
+fi
 
 # Steam 用的封面圖與圖示（2.0.3 起的 bundle 才有）
 ART="$(flatpak --user info --show-location "$APP_ID//$BRANCH" 2>/dev/null)/files/share/viplestream/steam"

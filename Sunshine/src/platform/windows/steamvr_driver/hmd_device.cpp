@@ -65,14 +65,63 @@ namespace vrdrv {
     std::snprintf(t, sizeof(t), "%s %s %02u %02u:%02u:%02u %04u", k_wday[st.wDayOfWeek % 7], k_mon[(st.wMonth + 11) % 12], st.wDay, st.wHour, st.wMinute,
                   st.wSecond, st.wYear);
     const unsigned universe = (unsigned) (cfg_.universe_id & 0xFFFFFFFFu);
-    char buf[1024];
+
+    // §VR-PLAYAREA（2026-10-30）：採用真實遊玩區與坐姿零點；無效（0 或 NaN）時退回預設寫死值
+    float w = cfg_.play_area_m[0];
+    float d = cfg_.play_area_m[1];
+    if (std::isnan(w) || std::isnan(d) || w <= 0.0f || d <= 0.0f) {
+      w = 10.0f;
+      d = 10.0f;
+    }
+
+    float sx = cfg_.seated_pos_m[0];
+    float sy = cfg_.seated_pos_m[1];
+    float sz = cfg_.seated_pos_m[2];
+    float syaw = cfg_.seated_yaw_rad;
+    if (std::isnan(sx) || std::isnan(sy) || std::isnan(sz) || std::isnan(syaw) ||
+        (sx == 0.0f && sy == 0.0f && sz == 0.0f && syaw == 0.0f)) {
+      sx = 0.0f;
+      sy = 1.2f;
+      sz = 0.0f;
+      syaw = 0.0f;
+    }
+
+    VRDRV_LOG_INFO("chaperone: play_area=%.2fx%.2fm seated=[%.3f,%.3f,%.3f] yaw=%.3frad",
+                   w, d, sx, sy, sz, syaw);
+    // §VR-SEATED-SIGN（2026-10-31，Frame 實測）：vrchap 的 translation 是「raw 座標轉到該 universe」的位移
+    // （p_univ = R·p_raw + t；Lighthouse 的 standing 存的就是基地台高度的正值），不是原點位置。直接填坐姿原點
+    // (0,1.65,0) 會把 seated 原點放到地板下 1.65 m，用 LOCAL 的遊戲（Pixel Dungeon VR）頭變成 3.3 m 高。
+    // 存 t = -R(-yaw)·原點
+    {
+      const float c = std::cos(syaw);
+      const float sn = std::sin(syaw);
+      const float rx = c * sx - sn * sz;
+      const float rz = sn * sx + c * sz;
+      sx = -rx;
+      sy = -sy;
+      sz = -rz;
+    }
+
+    const float hw = w * 0.5f;
+    const float hd = d * 0.5f;
+
+    char buf[2048];
     std::snprintf(buf, sizeof(buf),
                   "{\"jsonid\":\"chaperone_info\",\"universes\":[{"
-                  "\"collision_bounds\":[[[-5,0,-5],[-5,2.5,-5],[-5,2.5,5],[-5,0,5]],[[-5,0,5],[-5,2.5,5],[5,2.5,5],[5,0,5]],"
-                  "[[5,0,5],[5,2.5,5],[5,2.5,-5],[5,0,-5]],[[5,0,-5],[5,2.5,-5],[-5,2.5,-5],[-5,0,-5]]],"
-                  "\"play_area\":[10.0,10.0],"
-                  "\"seated\":{\"translation\":[0,1.2,0],\"yaw\":0},\"standing\":{\"translation\":[0,0,0],\"yaw\":0},"
+                  "\"collision_bounds\":[[[%.4f,0,%.4f],[%.4f,2.5,%.4f],[%.4f,2.5,%.4f],[%.4f,0,%.4f]],"
+                  "[[%.4f,0,%.4f],[%.4f,2.5,%.4f],[%.4f,2.5,%.4f],[%.4f,0,%.4f]],"
+                  "[[%.4f,0,%.4f],[%.4f,2.5,%.4f],[%.4f,2.5,%.4f],[%.4f,0,%.4f]],"
+                  "[[%.4f,0,%.4f],[%.4f,2.5,%.4f],[%.4f,2.5,%.4f],[%.4f,0,%.4f]]],"
+                  "\"play_area\":[%.2f,%.2f],"
+                  "\"seated\":{\"translation\":[%.4f,%.4f,%.4f],\"yaw\":%.4f},"
+                  "\"standing\":{\"translation\":[0,0,0],\"yaw\":0},"
                   "\"time\":\"%s\",\"universeID\":\"%u\"}],\"version\":5}",
+                  -hw, -hd, -hw, -hd, -hw, hd, -hw, hd,
+                  -hw, hd, -hw, hd, hw, hd, hw, hd,
+                  hw, hd, hw, hd, hw, -hd, hw, -hd,
+                  hw, -hd, hw, -hd, -hw, -hd, -hw, -hd,
+                  w, d,
+                  sx, sy, sz, syaw,
                   t, universe);
     return buf;
   }

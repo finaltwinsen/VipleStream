@@ -611,6 +611,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("xr-runtime-json", "(dev) OpenXR runtime manifest for --display-target xr-desktop (in-process only)");
     parser.addValueOption("xr-dump-frame", "(dev) save the 300th XR video frame as PNG (longest side <= 1280) for --display-target xr-desktop");
     parser.addValueOption("xr-test-stall-ms", "(dev) drop video frames for N ms starting 20 s after the first XR frame (stale-state test)");
+    parser.addValueOption("vr-gpu-priority", "(dev) PCVR: global priority of the XR Vulkan queue: default | high | realtime "
+                                             "(falls back to default when the driver refuses). Not saved.");
     parser.addValueOption("vr-test-jitter", "(dev) PCVR arrival-jitter injection that delays each stream frame before it is rendered (not saved): "
                           "worn | light | early[=<baseUs>:<permille>] | scan=<maxUs>, optionally followed by "
                           ",shift=<startSec>:<us>:<durSec> and ,seed=<n>");
@@ -645,7 +647,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("vr-foveation", "PCVR: foveated encoding - pixel density straight ahead as a percentage of uniform sampling "
                           "(100 = off, up to 250; the edges get fewer pixels, the stream size stays the same)");
     parser.addValueOption("vr-latch-delay", "PCVR: wait this many milliseconds (0-20) after the XR runtime wakes the frame loop before picking the "
-                          "newest decoded frame, so each displayed frame is fresher (default 0)");
+                          "newest decoded frame, so each displayed frame is fresher (default 3). Saved.");
     parser.addChoiceOption("vr-latch-relatch", "PCVR: whether to re-check the newest frame right before the XR frame is submitted and, when a newer "
                            "one was released in between, show it with its own render pose (this run only, the saved setting is not "
                            "changed; no effect with --vr-synth)",
@@ -682,6 +684,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
     parser.addValueOption("vr-inject-loss", "(dev) N: inject a VR LOSS report every N seconds");
     parser.addFlagOption("vr-link-selftest", "(dev) PCVR multi-link: open a second link on the same network interface to exercise duplication and de-duplication. Not saved.");
+    parser.addValueOption("vr-buffer-frames", "PCVR: hold this many extra frames on the headset (0 or 1) to absorb network jitter; "
+                                              "adds one display period of latency (default 1). Saved.");
     parser.addValueOption("vr-overscan", "(dev) PCVR: widen each eye's field of view by this many degrees on every side (0-10); "
                                          "the host renders the extra margin so head turns do not expose blank edges");
     // §VR-LAUNCHER：GUI 的 VR 模式以子行程串流，接管確認在 GUI 做完後帶這個旗標（不寫入設定）
@@ -914,6 +918,21 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         }
         preferences->xrTestStallMs = v;
     }
+    if (parser.isSet("vr-gpu-priority")) {
+        const QString v = parser.value("vr-gpu-priority");
+        if (v == QLatin1String("default")) {
+            preferences->vrGpuPriority = 0;
+        }
+        else if (v == QLatin1String("high")) {
+            preferences->vrGpuPriority = 1;
+        }
+        else if (v == QLatin1String("realtime")) {
+            preferences->vrGpuPriority = 2;
+        }
+        else {
+            parser.showError(QString("vr-gpu-priority must be default, high or realtime: %1").arg(v));
+        }
+    }
     if (parser.isSet("vr-test-jitter")) {
         // §VR-LDIAG（dev）：格式在這裡就檢查（寫錯不可以默默變成不注入）；實際的延後在 XrVideo 的影像 render thread
         const QString spec = parser.value("vr-test-jitter");
@@ -1086,6 +1105,14 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     if (parser.isSet("vr-link-selftest")) {
         preferences->vrLinkSelftest = true;
+    }
+    if (parser.isSet("vr-buffer-frames")) {
+        bool ok = false;
+        const int n = parser.value("vr-buffer-frames").toInt(&ok);
+        if (!ok || n < 0 || n > 1) {
+            parser.showError(QString("vr-buffer-frames must be 0 or 1: %1").arg(parser.value("vr-buffer-frames")));
+        }
+        preferences->vrBufferFrames = n;
     }
     if (parser.isSet("vr-overscan")) {
         bool ok = false;

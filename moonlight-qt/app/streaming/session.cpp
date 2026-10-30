@@ -11,6 +11,11 @@
 #include "backend/richpresencemanager.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
 #include "backend/sfenv.h"      // §SF-ENV（M2a）
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QStandardPaths>
+#include <QDir>
+#include <QFile>
 #ifdef HAVE_OPENXR
 #include "streaming/xr/xrcontext.h"  // §VR M3a X1
 #include <QFile>
@@ -3183,6 +3188,21 @@ bool Session::setupXrPcvr()
     if (!vi.timeConversion) {
         m_VrLaunch.caps &= ~VIPLE_VR_CLIENT_CAP_TRACK_THREAD;  // frameloop 模式
     }
+    // §VR-PLAYAREA：真實遊玩區與坐姿零點交給 server 的 chaperone（拿不到就不帶，server 用預設值）
+    float areaW = 0.0f, areaD = 0.0f;
+    if (m_XrContext->playAreaBounds(&areaW, &areaD)) {
+        m_VrLaunch.playAreaWidthMm = (int)std::lround(areaW * 1000.0f);
+        m_VrLaunch.playAreaDepthMm = (int)std::lround(areaD * 1000.0f);
+    }
+    float seatPos[3] = {};
+    float seatYaw = 0.0f;
+    if (m_XrContext->seatedPose(seatPos, &seatYaw)) {
+        m_VrLaunch.hasSeated = true;
+        for (int i = 0; i < 3; i++) {
+            m_VrLaunch.seatedPosMm[i] = (int)std::lround(seatPos[i] * 1000.0f);
+        }
+        m_VrLaunch.seatedYawMdeg = (int)std::lround(seatYaw * 57295.7795f);
+    }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VR-SESSION] PCVR XR measured: space=%s tracking=%s hz=%.2f%s period=%lld ns recommended=%ux%u "
                 "ipd=%.2f mm fov L[%.1f %.1f %.1f %.1f] R[%.1f %.1f %.1f %.1f] deg%s -> launch eye=%dx%d hz=%d",
@@ -3340,6 +3360,7 @@ bool Session::startConnectionAsync()
             return false;
         }
     } else {
+    retryVrLaunch:
         try {
             NvHTTP http(m_Computer);
             QString launchResponse;
@@ -3430,6 +3451,14 @@ bool Session::startConnectionAsync()
                 return false;
             }
         } catch (const GfeHttpResponseException& e) {
+            // 2026-10-30：host 上 Steam 自己的串流（vrlink）的 SteamVR 還開著時 /launch 回 503 VRLINK_ACTIVE。
+            // 實務上那就是同一個使用者剛從 Steam 內建串流切回來（使用者回報切回來開遊戲 503）→ 自動帶 vrForce=1 重試一次，
+            // 讓 host 重啟 SteamVR 改用我們的 driver
+            if (m_VrRequested && !m_VrLaunch.force && e.toQString().contains(QStringLiteral(VIPLE_VR_ERR_VRLINK_ACTIVE))) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SESSION] host busy with Steam's own VR streaming; retrying /launch with vrForce=1");
+                m_VrLaunch.force = true;
+                goto retryVrLaunch;
+            }
             emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));
             return false;
         }
@@ -3900,6 +3929,7 @@ bool Session::startConnectionAsync()
 
     // §VR：tracking 上行（M1a 為合成 pose）。LiStartConnection 已依 vrFlags 生效
     if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
+        checkAndSendVrHotspotInfo();
         VrSyntheticMotion motion = (VrSyntheticMotion)m_Preferences->vrSyntheticMotion;
 #ifdef HAVE_OPENXR
         if (m_XrPcvr && m_XrContext != nullptr) {
@@ -4371,6 +4401,13 @@ void Session::exec()
         s_LoopBeat.fetch_add(1);
         s_LoopPhase.store(-1);
         pollScHidHotplug();
+        if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
+            static Uint32 lastHotspotPollTime = 0;
+            if (SDL_TICKS_PASSED(SDL_GetTicks(), lastHotspotPollTime + 5000)) {
+                lastHotspotPollTime = SDL_GetTicks();
+                checkAndSendVrHotspotInfo();
+            }
+        }
         if (!audioSilenceChecked && SDL_TICKS_PASSED(SDL_GetTicks(), audioSilenceCheckTime)) {
             audioSilenceChecked = true;
             if (m_AudioSampleCount == 0) {
@@ -4954,4 +4991,110 @@ DispatchDeferredCleanup:
     // When it is complete, it will release our s_ActiveSessionSemaphore
     // reference.
     QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
+}
+
+
+void Session::checkAndSendVrHotspotInfo()
+{
+    // §VR-HOTSPOT-AUTO：只在 VR session 生效
+    if (!(m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED)) {
+        return;
+    }
+
+    // 取得 Flatpak 內路徑 $XDG_DATA_HOME/viplestream/hotspot.json
+    QString dataHome = qEnvironmentVariable("XDG_DATA_HOME");
+    if (dataHome.isEmpty()) {
+        dataHome = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    }
+    if (dataHome.isEmpty()) {
+        return;
+    }
+
+    QString hotspotPath = QDir(dataHome).filePath(QStringLiteral("viplestream/hotspot.json"));
+    QFile file(hotspotPath);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+        return;
+    }
+
+    QByteArray rawJson = file.readAll();
+    file.close();
+    if (rawJson.isEmpty()) {
+        return;
+    }
+
+    QJsonParseError parseErr;
+    QJsonDocument doc = QJsonDocument::fromJson(rawJson, &parseErr);
+    if (doc.isNull() || !doc.isObject()) {
+        return;
+    }
+
+    QJsonObject obj = doc.object();
+    QString ssid = obj.value(QStringLiteral("ssid")).toString();
+    QString key = obj.value(QStringLiteral("key")).toString();
+    QString bandStr = obj.value(QStringLiteral("band")).toString();
+    int channel = obj.value(QStringLiteral("channel")).toInt(0);
+    int authType = obj.value(QStringLiteral("auth_type")).toInt(VIPLE_VR_HOTSPOT_AUTH_WPA2_PSK);
+
+    QByteArray ssidBytes = ssid.toUtf8();
+    QByteArray keyBytes = key.toUtf8();
+
+    if (ssidBytes.isEmpty() || ssidBytes.size() > 32 || keyBytes.isEmpty() || keyBytes.size() > 64) {
+        return;
+    }
+
+    VIPLE_VR_TLV_HOTSPOT_INFO info {};
+    info.version = VIPLE_VR_HOTSPOT_VERSION_1;
+    info.authType = static_cast<uint8_t>(authType);
+    if (bandStr.contains(QStringLiteral("6G"), Qt::CaseInsensitive)) {
+        info.band = VIPLE_VR_HOTSPOT_BAND_6GHZ;
+    } else if (bandStr.contains(QStringLiteral("5G"), Qt::CaseInsensitive)) {
+        info.band = VIPLE_VR_HOTSPOT_BAND_5GHZ;
+    } else if (bandStr.contains(QStringLiteral("2"), Qt::CaseInsensitive)) {
+        info.band = VIPLE_VR_HOTSPOT_BAND_2GHZ;
+    } else {
+        info.band = VIPLE_VR_HOTSPOT_BAND_6GHZ;
+    }
+    info.channel = static_cast<uint8_t>(channel);
+    info.ssidLen = static_cast<uint8_t>(ssidBytes.size());
+    info.keyLen = static_cast<uint8_t>(keyBytes.size());
+    std::memcpy(info.ssid, ssidBytes.constData(), info.ssidLen);
+    std::memcpy(info.key, keyBytes.constData(), info.keyLen);
+
+    uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_HOTSPOT_INFO)];
+    tlv[0] = VIPLE_VR_C2S_HOTSPOT_INFO;
+    tlv[1] = static_cast<uint8_t>(sizeof(info));
+    std::memcpy(tlv + 2, &info, sizeof(info));
+
+    QByteArray currentPayload(reinterpret_cast<const char*>(tlv), sizeof(tlv));
+    if (currentPayload == m_LastVrHotspotPayload) {
+        // 內容未變更，不重複發送；立即抹除暫存記憶體
+#if defined(_WIN32)
+        SecureZeroMemory(&info, sizeof(info));
+        SecureZeroMemory(tlv, sizeof(tlv));
+#else
+        explicit_bzero(&info, sizeof(info));
+        explicit_bzero(tlv, sizeof(tlv));
+#endif
+        return;
+    }
+
+    // 發送 reliable TLV
+    if (LiSendVrMessage(tlv, sizeof(tlv), true) == 0) {
+        m_LastVrHotspotPayload = currentPayload;
+        // 安全鐵律：log 只能印 SSID 的前 3 個字元＋***、金鑰長度
+        QString prefix = ssid.left(3);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-HOTSPOT] sent hotspot info ssid=%s*** keylen=%d band=6GHz",
+                    prefix.toUtf8().constData(),
+                    static_cast<int>(keyBytes.size()));
+    }
+
+    // 抹除記憶體中的機密金鑰
+#if defined(_WIN32)
+    SecureZeroMemory(&info, sizeof(info));
+    SecureZeroMemory(tlv, sizeof(tlv));
+#else
+    explicit_bzero(&info, sizeof(info));
+    explicit_bzero(tlv, sizeof(tlv));
+#endif
 }

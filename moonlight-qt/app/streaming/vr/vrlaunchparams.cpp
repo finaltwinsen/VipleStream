@@ -42,7 +42,7 @@ QString VrLaunchConfig::toQuery() const
 {
     const qint64 period = periodNs > 0 ? periodNs
                                        : (refreshHz > 0 ? 1000000000LL / refreshHz : 0);
-    return QStringLiteral("&vr=1") +
+    QString q = QStringLiteral("&vr=1") +
            "&vrEye=" + QString::number(eyeWidth) + "x" + QString::number(eyeHeight) +
            "&vrHz=" + QString::number(refreshHz) +
            "&vrPeriodNs=" + QString::number(period) +
@@ -57,6 +57,19 @@ QString VrLaunchConfig::toQuery() const
            (fovea > 100 ? "&vrFovea=" + QString::number(fovea) : QString()) +
            // §VR-HALF-RATE：和 vrHz 不同才帶（其他情況字串和以前一樣；舊 server 不認得的 key 會略過）
            (displayHz > 0 && displayHz != refreshHz ? "&vrDispHz=" + QString::number(displayHz) : QString());
+
+    // §VR-PLAYAREA：遊玩區已知時加 &vrPlayArea=<寬mm>x<深mm>
+    if (playAreaWidthMm > 0 && playAreaDepthMm > 0) {
+        q += "&vrPlayArea=" + QString::number(playAreaWidthMm) + "x" + QString::number(playAreaDepthMm);
+    }
+    // §VR-PLAYAREA：坐姿零點已知時加 &vrSeated=<x_mm>,<y_mm>,<z_mm>,<yaw 毫度>
+    if (hasSeated) {
+        q += "&vrSeated=" + QString::number(seatedPosMm[0]) + "," +
+                            QString::number(seatedPosMm[1]) + "," +
+                            QString::number(seatedPosMm[2]) + "," +
+                            QString::number(seatedYawMdeg);
+    }
+    return q;
 }
 
 VrSessionInfo VrSessionInfo::parse(const QString& text)

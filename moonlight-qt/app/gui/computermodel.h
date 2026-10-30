@@ -23,7 +23,10 @@ class ComputerModel : public QAbstractListModel
         // VipleStream — per-host toggle: 點該 host tile 跳過 applist 直接串流 Desktop
         DirectLaunchDesktopRole,
         DetailsRole,
-        ServerVersionRole
+        ServerVersionRole,
+        // §UI-MULTILINK-BADGE（2026-10-29）：host 的 /serverinfo 宣告了 VR 多連線（<VipleStreamVR> 帶
+        // VIPLE_VR_SERVER_CAP_MULTILINK，server 的 vr_multilink 沒關才會帶）。PcView 在主機卡片上多一個「多連線」標籤
+        MultiLinkRole
     };
 
 public:
@@ -37,6 +40,9 @@ public:
     int rowCount(const QModelIndex &parent) const override;
 
     virtual QHash<int, QByteArray> roleNames() const override;
+
+    // §UI-HIDE-SELF：主機頁的序號（濾掉這台電腦自己）換成 ComputerManager::getComputers() 的序號（AppModel 用那一份）
+    Q_INVOKABLE int managerIndex(int computerIndex) const;
 
     Q_INVOKABLE void deleteComputer(int computerIndex);
 
@@ -86,6 +92,10 @@ private slots:
     void handlePairingCompleted(NvComputer* computer, QString error);
 
 private:
+    // §UI-HIDE-SELF：主機頁不列這台電腦自己的 server
+    static bool isThisMachine(const NvComputer* computer);
+    QVector<NvComputer*> visibleComputers() const;
+
     QVector<NvComputer*> m_Computers;
     ComputerManager* m_ComputerManager;
 };

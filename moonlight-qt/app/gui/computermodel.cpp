@@ -1,6 +1,13 @@
 #include "computermodel.h"
 
+#include <algorithm>
+
+#include <QHostAddress>
+#include <QHostInfo>
+#include <QNetworkInterface>
 #include <QThreadPool>
+
+#include <Limelight.h>  // VipleVr.h：VIPLE_VR_SERVER_CAP_MULTILINK
 
 ComputerModel::ComputerModel(QObject* object)
     : QAbstractListModel(object) {}
@@ -13,7 +20,56 @@ void ComputerModel::initialize(ComputerManager* computerManager)
     connect(m_ComputerManager, &ComputerManager::pairingCompleted,
             this, &ComputerModel::handlePairingCompleted);
 
-    m_Computers = m_ComputerManager->getComputers();
+    m_Computers = visibleComputers();
+}
+
+// §UI-HIDE-SELF（2026-10-29）：這台電腦自己也跑著 server 時，區網探索會把它加進主機列表（使用者：「在筆電上
+// 開客戶端會看到筆電自己，這樣是不必要的」）。名稱等於本機名稱、或任一位址是本機網卡的位址，就當成自己不列出來。
+// 只影響主機頁：儲存的主機不刪，命令列直接指定位址串流照常可用
+bool ComputerModel::isThisMachine(const NvComputer* computer)
+{
+    static const QString s_LocalName = QHostInfo::localHostName();
+    if (!computer->name.isEmpty() && !s_LocalName.isEmpty() &&
+        computer->name.compare(s_LocalName, Qt::CaseInsensitive) == 0) {
+        return true;
+    }
+    const QList<QHostAddress> mine = QNetworkInterface::allAddresses();
+    // 公網位址（remote／stun）不比：同一個區網的每一台都共用它
+    for (const NvAddress* a : {&computer->localAddress, &computer->activeAddress, &computer->manualAddress,
+                               &computer->ipv6Address, &computer->vpnAddress}) {
+        if (a->isNull()) {
+            continue;
+        }
+        const QHostAddress host(a->address());
+        if (host.isNull()) {
+            continue;
+        }
+        if (host.isLoopback()) {
+            return true;
+        }
+        for (const QHostAddress& m : mine) {
+            if (m.isEqual(host, QHostAddress::TolerantConversion)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int ComputerModel::managerIndex(int computerIndex) const
+{
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) {
+        return -1;
+    }
+    return m_ComputerManager->getComputers().indexOf(m_Computers[computerIndex]);
+}
+
+QVector<NvComputer*> ComputerModel::visibleComputers() const
+{
+    QVector<NvComputer*> list = m_ComputerManager->getComputers();
+    list.erase(std::remove_if(list.begin(), list.end(), [](NvComputer* c) { return c == nullptr || isThisMachine(c); }),
+               list.end());
+    return list;
 }
 
 QVariant ComputerModel::data(const QModelIndex& index, int role) const
@@ -48,6 +104,8 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
         return computer->directLaunchDesktop;
     case ServerVersionRole:
         return computer->vipleStreamVersion;
+    case MultiLinkRole:
+        return (computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_MULTILINK) != 0;
     case DetailsRole: {
         QString state, pairState;
 
@@ -147,6 +205,7 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
     names[DirectLaunchDesktopRole] = "directLaunchDesktop";
     names[DetailsRole] = "details";
     names[ServerVersionRole] = "serverVersion";
+    names[MultiLinkRole] = "multiLink";  // §UI-MULTILINK-BADGE
 
     return names;
 }
@@ -314,7 +373,7 @@ void ComputerModel::handlePairingCompleted(NvComputer*, QString error)
 
 void ComputerModel::handleComputerStateChanged(NvComputer* computer)
 {
-    QVector<NvComputer*> newComputerList = m_ComputerManager->getComputers();
+    QVector<NvComputer*> newComputerList = visibleComputers();  // §UI-HIDE-SELF
 
     // Reset the model if the structural layout of the list has changed
     if (m_Computers != newComputerList) {
@@ -325,7 +384,9 @@ void ComputerModel::handleComputerStateChanged(NvComputer* computer)
     else {
         // Let the view know that this specific computer changed
         int index = m_Computers.indexOf(computer);
-        emit dataChanged(createIndex(index, 0), createIndex(index, 0));
+        if (index >= 0) {  // §UI-HIDE-SELF：被濾掉的（這台電腦自己）不在列表裡
+            emit dataChanged(createIndex(index, 0), createIndex(index, 0));
+        }
     }
 }
 

@@ -31,6 +31,13 @@ struct VrLaunchConfig {
     int displayHz = 0;
     bool force = false;
 
+    // §VR-PLAYAREA（2026-10-30）：真實遊玩區與坐姿零點（未知時 0／false，不帶參數）
+    int playAreaWidthMm = 0;       // 0＝未知（不帶 vrPlayArea）
+    int playAreaDepthMm = 0;
+    bool hasSeated = false;        // true＝已知坐姿零點（帶 vrSeated）
+    std::array<int, 3> seatedPosMm = {}; // x, y, z (mm)
+    int seatedYawMdeg = 0;         // 繞 +Y 的 yaw（毫度，deg×1000）
+
     // 預設值：對稱 90° FOV、IPD 63 mm、兩眼只有水平位移
     VrLaunchConfig();
 

@@ -121,6 +121,10 @@ namespace platf {
   decltype(WlanFreeMemory) *fn_WlanFreeMemory = nullptr;
   decltype(WlanEnumInterfaces) *fn_WlanEnumInterfaces = nullptr;
   decltype(WlanSetInterface) *fn_WlanSetInterface = nullptr;
+  decltype(WlanQueryInterface) *fn_WlanQueryInterface = nullptr;
+  decltype(WlanGetAvailableNetworkList) *fn_WlanGetAvailableNetworkList = nullptr;
+  decltype(WlanSetProfile) *fn_WlanSetProfile = nullptr;
+  decltype(WlanConnect) *fn_WlanConnect = nullptr;
 
   std::filesystem::path appdata() {
     WCHAR sunshine_path[MAX_PATH];
@@ -1204,8 +1208,8 @@ namespace platf {
     }
   }
 
-  void streaming_will_start() {
-    static std::once_flag load_wlanapi_once_flag;
+  static std::once_flag load_wlanapi_once_flag;
+  static void ensure_wlanapi_loaded() {
     std::call_once(load_wlanapi_once_flag, []() {
       // wlanapi.dll is not installed by default on Windows Server, so we load it dynamically
       HMODULE wlanapi = LoadLibraryExA("wlanapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -1219,6 +1223,10 @@ namespace platf {
       fn_WlanFreeMemory = (decltype(fn_WlanFreeMemory)) GetProcAddress(wlanapi, "WlanFreeMemory");
       fn_WlanEnumInterfaces = (decltype(fn_WlanEnumInterfaces)) GetProcAddress(wlanapi, "WlanEnumInterfaces");
       fn_WlanSetInterface = (decltype(fn_WlanSetInterface)) GetProcAddress(wlanapi, "WlanSetInterface");
+      fn_WlanQueryInterface = (decltype(fn_WlanQueryInterface)) GetProcAddress(wlanapi, "WlanQueryInterface");
+      fn_WlanGetAvailableNetworkList = (decltype(fn_WlanGetAvailableNetworkList)) GetProcAddress(wlanapi, "WlanGetAvailableNetworkList");
+      fn_WlanSetProfile = (decltype(fn_WlanSetProfile)) GetProcAddress(wlanapi, "WlanSetProfile");
+      fn_WlanConnect = (decltype(fn_WlanConnect)) GetProcAddress(wlanapi, "WlanConnect");
 
       if (!fn_WlanOpenHandle || !fn_WlanCloseHandle || !fn_WlanFreeMemory || !fn_WlanEnumInterfaces || !fn_WlanSetInterface) {
         BOOST_LOG(error) << "wlanapi.dll is missing exports?"sv;
@@ -1228,11 +1236,19 @@ namespace platf {
         fn_WlanFreeMemory = nullptr;
         fn_WlanEnumInterfaces = nullptr;
         fn_WlanSetInterface = nullptr;
+        fn_WlanQueryInterface = nullptr;
+        fn_WlanGetAvailableNetworkList = nullptr;
+        fn_WlanSetProfile = nullptr;
+        fn_WlanConnect = nullptr;
 
         FreeLibrary(wlanapi);
         return;
       }
     });
+  }
+
+  void streaming_will_start() {
+    ensure_wlanapi_loaded();
 
     // Enable MMCSS scheduling for DWM
     DwmEnableMMCSS(true);
@@ -2017,5 +2033,163 @@ namespace platf {
     version_str = std::format("{}.{}.{}.{}", major, minor, build, revision);
 
     return true;
+  }
+
+  void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key) {
+    (void) version;
+    (void) channel;
+    ensure_wlanapi_loaded();
+    if (!fn_WlanOpenHandle || !fn_WlanCloseHandle || !fn_WlanFreeMemory || !fn_WlanEnumInterfaces ||
+        !fn_WlanQueryInterface || !fn_WlanGetAvailableNetworkList || !fn_WlanSetProfile || !fn_WlanConnect) {
+      BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] connect failed err=wlanapi not available"sv;
+      SecureZeroMemory(key.data(), key.size());
+      return;
+    }
+
+    HANDLE hClient = nullptr;
+    DWORD negotiatedVersion = 0;
+    DWORD res = fn_WlanOpenHandle(WLAN_API_MAKE_VERSION(2, 0), nullptr, &negotiatedVersion, &hClient);
+    if (res != ERROR_SUCCESS || !hClient) {
+      BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] connect failed err=" << res;
+      SecureZeroMemory(key.data(), key.size());
+      return;
+    }
+
+    PWLAN_INTERFACE_INFO_LIST ifList = nullptr;
+    res = fn_WlanEnumInterfaces(hClient, nullptr, &ifList);
+    if (res != ERROR_SUCCESS || !ifList) {
+      BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] connect failed err=" << res;
+      fn_WlanCloseHandle(hClient, nullptr);
+      SecureZeroMemory(key.data(), key.size());
+      return;
+    }
+
+    GUID selectedGuid {};
+    bool found = false;
+
+    for (DWORD i = 0; i < ifList->dwNumberOfItems; ++i) {
+      const auto &ifInfo = ifList->InterfaceInfo[i];
+      if (ifInfo.isState == wlan_interface_state_connected) {
+        DWORD dwSize = 0;
+        PWLAN_CONNECTION_ATTRIBUTES pConn = nullptr;
+        WLAN_OPCODE_VALUE_TYPE opType;
+        if (fn_WlanQueryInterface(hClient, &ifInfo.InterfaceGuid, wlan_intf_opcode_current_connection, nullptr, &dwSize, (PVOID*) &pConn, &opType) == ERROR_SUCCESS && pConn) {
+          bool already = false;
+          if (pConn->wlanAssociationAttributes.dot11Ssid.uSSIDLength == ssid.size()) {
+            if (std::memcmp(pConn->wlanAssociationAttributes.dot11Ssid.ucSSID, ssid.data(), ssid.size()) == 0) {
+              already = true;
+            }
+          }
+          fn_WlanFreeMemory(pConn);
+          if (already) {
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] already connected"sv;
+            fn_WlanFreeMemory(ifList);
+            fn_WlanCloseHandle(hClient, nullptr);
+            SecureZeroMemory(key.data(), key.size());
+            return;
+          }
+        }
+        // 目前連到其他網路的介面排除
+        continue;
+      }
+
+      // 沒有連到其他網路的無線介面就用它。頭盔的熱點是隱藏的（softapmanager create … --hidden，2026-10-30 在頭盔上確認），
+      // 掃描清單看不到 SSID，所以不能用「看得到目標 SSID」來挑（不看網卡型號，見專案規則）
+      selectedGuid = ifInfo.InterfaceGuid;
+      found = true;
+      break;
+    }
+
+    fn_WlanFreeMemory(ifList);
+
+    if (!found) {
+      BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] connect failed err=no suitable interface found"sv;
+      fn_WlanCloseHandle(hClient, nullptr);
+      SecureZeroMemory(key.data(), key.size());
+      return;
+    }
+
+    // 建立或更新 all-user 設定檔（名稱 VipleStream-Frame，WPA2/WPA3-Personal，自動連線）
+    std::string authStr = (auth_type == VIPLE_VR_HOTSPOT_AUTH_WPA3_SAE) ? "WPA3SAE" : "WPA2PSK";
+    auto xml_escape = [](const std::string &s) {
+      std::string o;
+      for (char ch : s) {
+        switch (ch) {
+          case '&': o += "&amp;"; break;
+          case '<': o += "&lt;"; break;
+          case '>': o += "&gt;"; break;
+          case '"': o += "&quot;"; break;
+          case '\'': o += "&apos;"; break;
+          default: o += ch;
+        }
+      }
+      return o;
+    };
+    std::string profileXml =
+      "<?xml version=\"1.0\"?>\n"
+      "<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">\n"
+      "    <name>VipleStream-Frame</name>\n"
+      "    <SSIDConfig>\n"
+      "        <SSID>\n"
+      "            <name>" + xml_escape(ssid) + "</name>\n"
+      "        </SSID>\n"
+      "        <nonBroadcast>true</nonBroadcast>\n"
+      "    </SSIDConfig>\n"
+      "    <connectionType>ESS</connectionType>\n"
+      "    <connectionMode>auto</connectionMode>\n"
+      "    <MSM>\n"
+      "        <security>\n"
+      "            <authEncryption>\n"
+      "                <authentication>" + authStr + "</authentication>\n"
+      "                <encryption>AES</encryption>\n"
+      "                <useOneX>false</useOneX>\n"
+      "            </authEncryption>\n"
+      "            <sharedKey>\n"
+      "                <keyType>passPhrase</keyType>\n"
+      "                <protected>false</protected>\n"
+      "                <keyMaterial>" + xml_escape(key) + "</keyMaterial>\n"
+      "            </sharedKey>\n"
+      "        </security>\n"
+      "    </MSM>\n"
+      "</WLANProfile>\n";
+
+    std::wstring profileXmlW = utf_utils::from_utf8(profileXml);
+    DWORD reasonCode = 0;
+    DWORD setRes = fn_WlanSetProfile(hClient, &selectedGuid, 0, profileXmlW.c_str(), nullptr, TRUE, nullptr, &reasonCode);
+
+    // 呼叫完畢後立即覆寫抹除包含金鑰之 XML 字串記憶體
+    SecureZeroMemory(profileXml.data(), profileXml.size());
+    SecureZeroMemory(profileXmlW.data(), profileXmlW.size() * sizeof(wchar_t));
+
+    if (setRes != ERROR_SUCCESS) {
+      BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] connect failed err=" << setRes;
+      fn_WlanCloseHandle(hClient, nullptr);
+      SecureZeroMemory(key.data(), key.size());
+      return;
+    }
+
+    BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] profile set"sv;
+
+    // 發起 WlanConnect
+    DOT11_SSID dot11Ssid {};
+    dot11Ssid.uSSIDLength = static_cast<ULONG>(ssid.size());
+    std::memcpy(dot11Ssid.ucSSID, ssid.data(), ssid.size());
+
+    WLAN_CONNECTION_PARAMETERS connParams {};
+    connParams.wlanConnectionMode = wlan_connection_mode_profile;
+    connParams.strProfile = L"VipleStream-Frame";
+    connParams.pDot11Ssid = &dot11Ssid;
+    connParams.dot11BssType = dot11_BSS_type_infrastructure;
+    connParams.dwFlags = 0;
+
+    DWORD connRes = fn_WlanConnect(hClient, &selectedGuid, &connParams, nullptr);
+    if (connRes == ERROR_SUCCESS) {
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] connect ok"sv;
+    } else {
+      BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] connect failed err=" << connRes;
+    }
+
+    fn_WlanCloseHandle(hClient, nullptr);
+    SecureZeroMemory(key.data(), key.size());
   }
 }  // namespace platf

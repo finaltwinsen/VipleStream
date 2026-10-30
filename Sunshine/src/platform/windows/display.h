@@ -522,5 +522,10 @@ namespace platf::dxgi {
     /// 退避要活過 generation 更換（拆線就是換 generation）。captureThread 在 capture_e::reinit 時會重建整個 display，
     /// 那一段由 display_vr.cpp 的行程層級備份接上。
     ::vr::capture::health_t health_;
+    /// §VR-RAWDUMP（dev，config vr_dev_rawdump）：原始畫面傾印。沒開是 nullptr（擷取路徑只多一次判斷）
+    struct rawdump_t;
+    std::shared_ptr<rawdump_t> rawdump_;
+    void rawdump_copy(ID3D11Texture2D *src, uint64_t frame_id);  ///< 在 signal_consumed 之前呼叫（同一個 context，讀到的一定是這一張）
+    void rawdump_after_frame(ID3D11Texture2D *src);  ///< signal_consumed 之後：第一次配 staging；抓滿了就讀回寫檔（會停住擷取執行緒幾秒）
   };
 }  // namespace platf::dxgi

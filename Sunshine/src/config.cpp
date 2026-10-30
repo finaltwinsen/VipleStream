@@ -1561,7 +1561,7 @@ namespace config {
     // 退回 disabled（pcvr_from_view），寫錯的值不該讓 host 開始接受 VR。
     // enum 與整數選項（vr_opt::*_from_view、vr_opt::int_strict_f）值寫錯一律警告並維持預設
     // （壞值絕不靜靜地變成「開啟」或「關閉安全網」）。
-    // 八個布林選項（vr_latch_acquire、vr_direct_kick、vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、
+    // 十個布林選項（vr_abr_fast、vr_latch_acquire、vr_buffer_refill、vr_direct_kick、vr_ctrl_pose_offset、vr_angvel_local、vr_multilink_ctrl、
     // vr_multilink_repair、vr_multilink_repair_rtt、vr_capture_late）走 vr_opt::bool_strict_f（2026-10-08）：只接受明確的
     // 開／關字樣，其他警告並維持預設。
     // vr_multilink_fault 是原樣字串，格式錯誤要到多連線的 VR session 建立時才警告（stream.cpp）；
@@ -1577,13 +1577,18 @@ namespace config {
     string_f(vars, "vr_latch_ab", vr.latch_ab);
     vr_opt::bool_strict_f(vars, "vr_latch_acquire", vr.latch_acquire);
     vr_opt::int_strict_f(vars, "vr_latch_acquire_ppm", vr.latch_acquire_ppm, 1000, 5000, false);
+    vr_opt::bool_strict_f(vars, "vr_buffer_refill", vr.buffer_refill);  // §VR-BUFFER-REFILL
     vr_opt::int_strict_f(vars, "vr_render_scale_pct", vr.render_scale_pct, 100, 250, false);
+    vr_opt::int_strict_f(vars, "vr_render_target_max", vr.render_target_max, 1000, 8192, false);
     // §VR-DIRECT-KICK：兩個平台都認得這個 key（Linux 沒有 PCVR，設了沒有作用，但不會被當成不認得的選項）
     vr_opt::bool_strict_f(vars, "vr_direct_kick", vr.direct_kick);
     vr_opt::int_strict_f(vars, "vr_dev_kick_every_s", vr.dev_kick_every_s, 5, 600, true);
     vr_opt::int_strict_f(vars, "vr_dev_kick_ms", vr.dev_kick_ms, 1, 200, false);
+    string_f(vars, "vr_dev_rawdump", vr.dev_rawdump);  // §VR-RAWDUMP（dev）：原樣字串，VR 擷取 init 時才驗
     vr_opt::bool_strict_f(vars, "vr_ctrl_pose_offset", vr.ctrl_pose_offset);
     vr_opt::bool_strict_f(vars, "vr_angvel_local", vr.angvel_local);
+    vr_opt::bool_strict_f(vars, "vr_abr_fast", vr.abr_fast);
+    vr_opt::bool_strict_f(vars, "vr_hotspot_autoconnect", vr.hotspot_autoconnect);
     generic_f(vars, "vr_stale_policy", vr.stale_policy, vr_opt::stale_from_view);
     generic_f(vars, "vr_multilink", vr.multilink, vr_opt::multilink_from_view);
     string_f(vars, "vr_multilink_fault", vr.multilink_fault);

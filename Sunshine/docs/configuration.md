@@ -2165,6 +2165,35 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### vr_dev_rawdump
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Development only: save raw VR frames for offline encoder comparisons. The value is
+            `<startSec>:<frames>`: starting that many seconds after the first VR frame, the next `<frames>`
+            frames handed over by the SteamVR driver (before encoding, 8-bit BGRA at the stream's packed size)
+            are copied on the GPU and, once all are captured, written to
+            `rawdump_<width>x<height>_<frames>f.bgra` in the config directory (each frame width × height × 4 bytes,
+            rows without padding). Capture stops for a few seconds while the file is written. Only one dump is
+            made per server process. Needs a lot of memory: 144 frames at 4608x2304 are about 6 GB.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            (empty: off)
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_dev_rawdump = 40:144
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_latch_acquire
 
 <table>
@@ -2203,6 +2232,41 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### vr_buffer_refill
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: keep the headset's one-frame buffer (the client's `--vr-buffer-frames 1`, on by
+            default) filled. When the delay along the path steps up by a few milliseconds, the buffer absorbs it
+            and is left empty; getting it back needs the host to send one extra frame, which the latch controller
+            cannot see a need for on its own. With this option, when the client reports that it showed the newest
+            frame (an empty buffer) for at least 90% of the frames in each of 2 seconds in a row, the server
+            shortens the virtual vsync period by 4500 ppm for exactly one stream frame period (1.5 seconds at
+            144 Hz; at most 2 seconds), so the host produces one extra frame and the headset receives two frames
+            in one refresh: the buffer is filled again without a repeated or skipped frame. Reports are ignored
+            and the period is left alone while this is in progress and for 500 ms after it. Another refill waits
+            at least 5 seconds, doubling up to 60 seconds while the buffer stays empty.
+            Accepts `enabled`/`disabled` like the on/off options below.
+            @note{Only has an effect with `vr_latch_mode = v2`, and only with clients from 2026-10-29 on (older
+            clients do not report the buffer).}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_buffer_refill = disabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_latch_acquire_ppm
 
 <table>
@@ -2236,7 +2300,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
 </table>
 
 @note{The on/off VR options ([vr_direct_kick](#vr_direct_kick) and [vr_latch_acquire](#vr_latch_acquire) above and
-`vr_ctrl_pose_offset`, `vr_angvel_local`, `vr_multilink_ctrl`, `vr_multilink_repair`, `vr_multilink_repair_rtt`,
+`vr_ctrl_pose_offset`, `vr_angvel_local`, `vr_abr_fast`, `vr_hotspot_autoconnect`, `vr_multilink_ctrl`, `vr_multilink_repair`, `vr_multilink_repair_rtt`,
 `vr_capture_late` below) accept `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`; case does
 not matter). Any other value is reported in the log as an invalid value and the option keeps its default.}
 
@@ -2295,6 +2359,68 @@ not matter). Any other value is reported in the log as an invalid value and the 
     </tr>
 </table>
 
+### vr_abr_fast
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (§VR-ABR-FAST): Reactive fast bitrate reduction for VR streaming.
+            When unrecoverable packet loss, missing FEC blocks, network queue blocking (dropBlock),
+            or bufferbloat delay spikes are detected, the target bitrate is immediately reduced
+            (cutting by 10% to 40%) without waiting for coarse loss ratios. After a 2.0-second cooldown
+            hold period, the bitrate smoothly ramps up by 4% of the cap every 1.5 seconds. Anti-oscillation
+            penalizes frequent cuts during ramp-up by clamping the bitrate cap to 85% of applied bitrate
+            for 30 seconds.
+            Accepts `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
+            When disabled, the legacy AIMD ABR behavior is retained.
+            @note{Applies to VR sessions only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_abr_fast = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_hotspot_autoconnect
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (§VR-HOTSPOT-AUTO): Automatic connection of dedicated host Wi-Fi adapter to headset hotspot.
+            When the host receives a hotspot information TLV from a VR client over the encrypted control channel,
+            it inspects available Wi-Fi interfaces via the Windows Native Wi-Fi API (wlanapi), selects an interface
+            that sees the target SSID and is not currently connected to any network, establishes an all-user profile
+            named `VipleStream-Frame` (WPA2/WPA3-Personal), and initiates automatic connection.
+            Accepts `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
+            When disabled, incoming hotspot information TLVs are acknowledged but no connection is attempted.
+            @note{Windows hosts only; on Linux hosts, a diagnostic message is logged and the TLV is ignored.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_hotspot_autoconnect = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_render_scale_pct
 
 <table>
@@ -2320,6 +2446,34 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td>Example</td>
         <td colspan="2">@code{}
             vr_render_scale_pct = 188
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_render_target_max
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: upper limit, in pixels per eye, for the render size that `vr_render_scale_pct`
+            produces. A fixed percentage grows the render size with the streamed size (2160x2160 per eye at
+            `188` would ask games for 4060x4060), which heavier games cannot hold at the headset's refresh rate.
+            The render size never goes below the streamed size. The default is close to what Steam's own
+            streaming renders for Steam Frame.
+            @note{Applies to VR sessions only. Takes effect the next time SteamVR starts.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            2700
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_render_target_max = 3000
             @endcode</td>
     </tr>
 </table>
@@ -2375,13 +2529,13 @@ not matter). Any other value is reported in the log as an invalid value and the 
             Sending video on a link that is too slow costs the headset radio time and degrades the other link as
             well, which is why `auto` measures first.
             @note{Applies to VR sessions only, and only when the client supports it. With `disabled` the behaviour
-            is identical to earlier versions. The default will change after headset testing.}
+            is identical to earlier versions.}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            disabled
+            auto
             @endcode</td>
     </tr>
     <tr>
@@ -2404,13 +2558,13 @@ not matter). Any other value is reported in the log as an invalid value and the 
             "refresh started" reply. Without it a weak link that happens to be the session address delays loss
             recovery by hundreds of milliseconds even while another link is healthy.
             @note{Only has an effect when `vr_multilink` is not `disabled` and the client supports it; older
-            clients keep using the control connection. The default will change after headset testing.}
+            clients keep using the control connection.}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            disabled
+            enabled
             @endcode</td>
     </tr>
     <tr>
@@ -2436,13 +2590,13 @@ not matter). Any other value is reported in the log as an invalid value and the 
             too old, the host tells the client not to wait and the normal loss recovery takes over.
             Packets recovered this way are not treated as packet loss by the automatic bitrate control; a large
             amount of them (3% or more) only stops the bitrate from rising.
-            @note{Requires `vr_multilink_ctrl = enabled`. The default will change after headset testing.}
+            @note{Requires `vr_multilink_ctrl = enabled`.}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            disabled
+            enabled
             @endcode</td>
     </tr>
     <tr>

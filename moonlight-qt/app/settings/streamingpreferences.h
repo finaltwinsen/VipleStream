@@ -465,6 +465,7 @@ public:
     QString xrDumpFramePath;         // dev（M3a X2）：XR 影像 quad 第 300 幀讀回存 PNG（最長邊 ≤ 1280），不存設定
     int xrTestStallMs = 0;           // dev（M3a X3）：第一幀 20 s 後丟 N ms 影像幀，驗 stale 轉換，不存設定
     QString vrTestJitter;            // dev（§VR-LDIAG）：--vr-test-jitter，PCVR 影像的到達抖動注入（xrlatch::Jitter 的格式），不存設定
+    int vrGpuPriority = 0;           // dev（§VR-GPU-PRIO）：--vr-gpu-priority，XR VkDevice queue 的全域優先權（0 預設／1 high／2 realtime），不存設定
     int xrTestRecenterSec = 0;       // dev（M3a X3）：bring-up 後第 N 秒自動 recenter 一次，不存設定
     bool xrTestPointer = false;       // §VR M3a X4（dev）：--xr-test-pointer，不寫入設定
     bool vrTestInput = false;         // §VR M4a R2（dev）：--vr-test-input 合成控制器按鍵，不寫入設定
@@ -519,7 +520,10 @@ public:
     int cliRepairIdle = 0;
     bool cliRepairNoAhead = false;
     bool vrHalfRate = false;          // §VR-HALF-RATE：--vr-half-rate，串流跑顯示更新率的一半；寫入設定（vrhalfrate）
-    double vrLatchDelayMs = 0.0;      // §VR-LATE-LATCH：--vr-latch-delay，frame thread 晚幾毫秒才挑影像（0～20）；寫入設定（vrlatchdelayms）
+    double vrLatchDelayMs = 3.0;      // §VR-LATE-LATCH：--vr-latch-delay，frame thread 晚幾毫秒才挑影像（0～20）；寫入設定（vrlatchdelayms）。
+                                      // 2026-10-29 預設 0→3（使用者指示；頭盔實測解碼→顯示 −3.1 ms），舊版存著的 0 遷移一次
+    int vrBufferFrames = 1;           // §VR-BUFFER（2026-10-29）：--vr-buffer-frames，頭盔端多緩衝幾格（0＝關、1）；寫入設定（vrbufferframes）。
+                                      // 預設開（使用者 10-29 指示；頭盔實測每張 0～7 ms 抖動時重複幀 13%→0.8%，MTP +3～7 ms）
     double vrOverscanDeg = 0.0;       // --vr-overscan：每眼 FOV 四邊各放大幾度（0～10）。2026-10-07 起寫入設定（vroverscandeg），GUI 啟動的 VR 也吃得到
     bool vrTestHaptic = false;        // §VR M4a R2（dev）：--vr-test-haptic 本地注入 HAPTIC，不寫入設定
     QString xrTestKeyboard;           // §VR M3a（dev）：--xr-test-keyboard 的文字，不寫入設定

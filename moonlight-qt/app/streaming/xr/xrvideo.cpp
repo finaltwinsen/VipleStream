@@ -5,6 +5,8 @@
 #include "xrphase.h"  // §VR-XRLOOP：相位換算（header-only）
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"
 #include "streaming/vr/vrframemeta.h"
+#include "streaming/video/pyrowave_decoder_bridge.h"  // §PYROWAVE-XR-ZC：PyroWaveVkInterop
+#include "streaming/video/bitstreamdump.h"  // §VR-REC：開了 --dump-bitstream 時記下每一格顯示哪一張
 
 #include <QFile>
 #include <QImage>
@@ -20,6 +22,8 @@ extern "C" {
 #include <libavutil/buffer.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_vulkan.h>
 }
 
 // Implementation in plvk_c.c
@@ -38,6 +42,17 @@ void lockQueueCb(void* ctx, uint32_t, uint32_t)
 void unlockQueueCb(void* ctx, uint32_t, uint32_t)
 {
     static_cast<XrContext*>(ctx)->queueMutex().unlock();
+}
+
+// §PYROWAVE-XR-ZC：FFmpeg（hwcontext_vulkan）對共用 queue 的鎖，同一把 queueMutex
+void avLockQueueCb(AVHWDeviceContext* dev, uint32_t, uint32_t)
+{
+    static_cast<XrContext*>(dev->user_opaque)->queueMutex().lock();
+}
+
+void avUnlockQueueCb(AVHWDeviceContext* dev, uint32_t, uint32_t)
+{
+    static_cast<XrContext*>(dev->user_opaque)->queueMutex().unlock();
 }
 
 uint64_t nowUs()
@@ -150,6 +165,11 @@ bool XrVideo::init(QString* error)
     // §VR-PASS：pl_render_image 一律用這一份參數（內容就是 pl_render_fast_params）；量測開著時多掛一個 callback，
     // libplacebo 每畫完一個 pass 把它的 GPU 計時交給我們
     m_RenderParams = pl_render_fast_params;
+    // §VR-UPSCALE（2026-10-29）：串流影像放大改用 Catmull-Rom（pl_render_fast_params 是 GPU 取樣的雙線性）。離線評估
+    // （scripts/benchmark/layered/p2_pw_res.py）每眼 1152 放大到 2160 時 Lanczos／bicubic 比雙線性 VMAF 高 4～10、同位元率
+    // 追平 2160 原生。Lanczos（libplacebo，全解析度中間圖＋兩趟）頭盔實測 GPU 3.4→7.4 ms、超過 144 Hz 週期，不能用。
+    // 注視點路徑（renderUnwarp）的放大在還原 shader 裡做（kUnwarpBody 的 9 次取樣 Catmull-Rom），這裡只管沒開注視點時
+    m_RenderParams.upscaler = &pl_filter_catmull_rom;
     if (m_Config.passTimers) {
         m_RenderParams.info_callback = &XrVideo::renderInfoCb;
         m_RenderParams.info_priv = this;
@@ -193,7 +213,7 @@ bool XrVideo::init(QString* error)
     }
     m_Thread = std::thread(&XrVideo::renderThreadMain, this);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] video: libplacebo imported the XR VkDevice (api %u.%u, %d device exts)",
+                "[VIPLE-XR] video: libplacebo imported the XR VkDevice (api %u.%u, %d device exts) upscaler=catmull-rom",
                 VK_API_VERSION_MAJOR(m_Vulkan->api_version), VK_API_VERSION_MINOR(m_Vulkan->api_version),
                 ip.num_extensions);
     return true;
@@ -241,6 +261,17 @@ void XrVideo::destroyAllSwapchains()
         destroySwapchainSet(s);
     }
     destroySwapchainSet(m_Sw);
+    for (int i = 0; i < kRing; i++) {  // §VR-BUFFER
+        destroySwapchainSet(m_RingSets[i]);
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_SwMutex);
+        for (Current& c : m_RingPub) {
+            c = Current();
+        }
+        m_BufLastShown = 0;
+    }
+    m_RingNext = 0;
     m_SwFormat = 0;
     m_ViewFormat = VK_FORMAT_UNDEFINED;
     m_Mode = TargetMode::None;
@@ -316,6 +347,7 @@ void XrVideo::destroy(bool gpuWedged)
         m_Small[0] = m_Small[1] = nullptr;
         m_Mid[0] = m_Mid[1] = m_FlowC = nullptr;
         m_Sem = VK_NULL_HANDLE;
+        m_PwHwDeviceCtx = nullptr;  // 刻意洩漏（同上）
         m_Log = nullptr;
         return;
     }
@@ -366,6 +398,8 @@ void XrVideo::destroy(bool gpuWedged)
         // 匯入的 device 不會被銷毀（只釋放 libplacebo 自己的資源）
         pl_vulkan_destroy(&m_Vulkan);
     }
+    // PyroWave 的幀（frames context）在 decoder 與上面的 mailbox 都放掉了，這裡只剩 device context（不會銷毀 device）
+    av_buffer_unref(&m_PwHwDeviceCtx);
     m_Sem = VK_NULL_HANDLE;
     pl_log_destroy(&m_Log);
 }
@@ -459,6 +493,79 @@ bool XrVideo::mapFrame(const AVFrame* frame, pl_frame* out, pl_tex* texSet, bool
         }
     }
     return ok;
+}
+
+bool XrVideo::pyroWaveInterop(PyroWaveVkInterop* out)
+{
+    if (m_Vulkan == nullptr || !m_Ctx->pyroWaveReady() || m_Ctx->vkEnabledFeatures() == nullptr) {
+        return false;
+    }
+    const std::vector<const char*>& exts = m_Ctx->vkEnabledDeviceExtensions();
+    if (m_PwHwDeviceCtx == nullptr) {
+        AVBufferRef* ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VULKAN);
+        if (ref == nullptr) {
+            return false;
+        }
+        auto* dev = reinterpret_cast<AVHWDeviceContext*>(ref->data);
+        dev->user_opaque = m_Ctx;  // avLockQueueCb
+        auto* vk = static_cast<AVVulkanDeviceContext*>(dev->hwctx);
+        vk->get_proc_addr = m_Ctx->vkGetInstanceProcAddr();
+        vk->inst = m_Ctx->vkInstance();
+        vk->phys_dev = m_Ctx->vkPhysicalDevice();
+        vk->act_dev = m_Ctx->vkDevice();
+        vk->device_features = *m_Ctx->vkEnabledFeatures();
+        vk->enabled_inst_extensions = nullptr;  // XrContext 沒有自己開 instance 擴充（runtime 加的我們不知道）
+        vk->nb_enabled_inst_extensions = 0;
+        vk->enabled_dev_extensions = exts.empty() ? nullptr : exts.data();
+        vk->nb_enabled_dev_extensions = static_cast<int>(exts.size());
+#if LIBAVUTIL_VERSION_INT > AV_VERSION_INT(58, 9, 100)
+        vk->lock_queue = avLockQueueCb;
+        vk->unlock_queue = avUnlockQueueCb;
+#endif
+        // XrContext 只建了一個 graphics queue（同 family 也有 compute／transfer），全部指向它
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(59, 34, 100)
+        vk->qf[0].idx = static_cast<int>(m_Ctx->vkQueueFamily());
+        vk->qf[0].num = 1;
+        vk->qf[0].flags = static_cast<VkQueueFlagBits>(VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT);
+        vk->qf[0].video_caps = static_cast<VkVideoCodecOperationFlagBitsKHR>(0);
+        vk->nb_qf = 1;
+#else
+        vk->queue_family_index = static_cast<int>(m_Ctx->vkQueueFamily());
+        vk->nb_graphics_queues = 1;
+        vk->queue_family_tx_index = static_cast<int>(m_Ctx->vkQueueFamily());
+        vk->nb_tx_queues = 1;
+        vk->queue_family_comp_index = static_cast<int>(m_Ctx->vkQueueFamily());
+        vk->nb_comp_queues = 1;
+#endif
+        const int err = av_hwdevice_ctx_init(ref);
+        if (err < 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-PYROWAVE-ZC] av_hwdevice_ctx_init on the XR VkDevice failed: %d - copy path", err);
+            av_buffer_unref(&ref);
+            return false;
+        }
+        m_PwHwDeviceCtx = ref;
+    }
+
+    PyroWaveVkInterop info;
+    info.getInstanceProcAddr = m_Ctx->vkGetInstanceProcAddr();
+    info.instance = m_Ctx->vkInstance();
+    info.physicalDevice = m_Ctx->vkPhysicalDevice();
+    info.device = m_Ctx->vkDevice();
+    info.apiVersion = m_Ctx->vkApiVersion();
+    info.instanceExtensions = nullptr;
+    info.numInstanceExtensions = 0;
+    info.deviceExtensions = exts.empty() ? nullptr : exts.data();
+    info.numDeviceExtensions = static_cast<int>(exts.size());
+    info.features = m_Ctx->vkEnabledFeatures();
+    // 只有一個 queue：compute／transfer 留空（bridge 依 family 去重、submit 一律用 graphics）
+    info.graphics = {m_Ctx->vkQueueFamily(), 1};
+    info.lockQueue = lockQueueCb;
+    info.unlockQueue = unlockQueueCb;
+    info.lockOpaque = m_Ctx;
+    info.hwDeviceCtx = m_PwHwDeviceCtx;
+    *out = info;
+    return true;
 }
 
 bool XrVideo::testMap(const AVFrame* frame)
@@ -803,7 +910,11 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         const uint64_t tr0 = nowUs();  // §VR-XRLOOP：這個呼叫本身花多久（前後各取一次時鐘，都在 queue 鎖內）
         xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
         swm.relMaxUs = std::max(swm.relMaxUs, sat32(nowUs() - tr0));
-        return m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
+        const uint64_t no = m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (m_CurSlot >= 0) {
+            m_RingRel[m_CurSlot].store(no, std::memory_order_relaxed);  // §VR-BUFFER
+        }
+        return no;
     };
     auto wedged = [&](const char* why) {
         if (m_Config.flightNotify) {
@@ -961,8 +1072,12 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         m_Published.meta = meta;
         m_HavePublished = true;
         m_Published.publishedUs = tPub;
+        m_Published.slot = m_CurSlot;  // §VR-BUFFER
         // §VR-LDIAG：每一張發布的影像記一筆（被跳過、沒顯示的也有），frame thread 用 drainPublished() 抄走
         m_PubRing[m_PubHead++ % kPubRing] = {m_Published.seq, pts90, t0, tGpuEnd, tPub, tSubmit};
+        if (m_CurSlot >= 0) {
+            m_RingPub[m_CurSlot] = m_Published;  // §VR-BUFFER
+        }
     };
     if (m_Config.atomicPublish) {
         // §VR-LATCH-RELATCH：release 與發布放進同一段 queue 鎖。原本 release 之後、發布之前有一小段空窗——frame thread
@@ -973,6 +1088,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         const uint64_t tr0 = nowUs();  // §VR-XRLOOP：release 這個呼叫本身花多久（「之後」的時刻就用下面的 tPub）
         xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
         const uint64_t releaseNo = m_ReleaseNo.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (m_CurSlot >= 0) {
+            m_RingRel[m_CurSlot].store(releaseNo, std::memory_order_relaxed);  // §VR-BUFFER
+        }
         const uint64_t tPub = nowUs();
         if (rendered && held) {
             std::lock_guard<std::mutex> lk(m_SwMutex);
@@ -1109,6 +1227,35 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     return true;
 }
 
+bool XrVideo::bufferTotals(uint32_t* lag1, uint32_t* lag0) const
+{
+    if (m_Config.buffer <= 0) {
+        return false;
+    }
+    *lag1 = m_BufLag1Total.load(std::memory_order_relaxed);
+    *lag0 = m_BufLag0Total.load(std::memory_order_relaxed);
+    return true;
+}
+
+// §VR-BUFFER：每 10 s 印一行 frame thread 的挑選結果（影像 render thread 呼叫，不佔 frame thread 的時間）
+void XrVideo::bufferMaybeLog()
+{
+    const uint64_t now = nowUs();
+    if (m_BufLogUs == 0) {
+        m_BufLogUs = now;
+        return;
+    }
+    if (now - m_BufLogUs < 10000000ull) {
+        return;
+    }
+    m_BufLogUs = now;
+    const uint32_t lag1 = m_BufLag1.exchange(0), lag0 = m_BufLag0.exchange(0);
+    const uint32_t rep = m_BufRepeat.exchange(0), skip = m_BufSkipped.exchange(0);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VR-BUFFER] 10s buffer=%d shown lag1=%u lag0=%u repeat=%u skipped=%u",
+                m_Config.buffer, lag1, lag0, rep, skip);
+}
+
 void XrVideo::renderThreadMain()
 {
     while (true) {
@@ -1149,6 +1296,34 @@ void XrVideo::renderThreadMain()
         }
         int outW = f->width, outH = f->height;
         outputSize(f->width, f->height, &outW, &outH);
+        // §VR-BUFFER：這一張寫進下一條 swapchain（換進 m_Sw，畫完換回去；見 xrvideo.h 的 m_RingSets）
+        const int slot = m_Config.buffer > 0 ? m_RingNext : -1;
+        if (slot >= 0) {
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            std::swap(m_Sw, m_RingSets[slot]);
+            m_CurSlot = slot;
+        }
+        // 只有真的發布了才換下一條：沒畫成功時下一張還是寫這一條（它仍是第三新的），不會輪到正要顯示的那一條。
+        // m_Published.seq 只有這條執行緒會寫，不必拿鎖讀
+        struct RingRestore {
+            XrVideo* v;
+            int slot;
+            uint64_t seqBefore;
+            ~RingRestore()
+            {
+                if (slot >= 0) {
+                    std::lock_guard<std::mutex> lk(v->m_StatsMutex);
+                    std::swap(v->m_Sw, v->m_RingSets[slot]);
+                    v->m_CurSlot = -1;
+                    if (v->m_Published.seq != seqBefore) {
+                        v->m_RingNext = (slot + 1) % kRing;
+                    }
+                }
+            }
+        } ringRestore{this, slot, m_Published.seq};
+        if (slot >= 0) {
+            bufferMaybeLog();
+        }
         if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, outW, m_Config.synth ? outH * 2 : outH)) {
             renderNewFrame(f, mboxUs);
             if (m_Config.passTimers) {
@@ -1171,10 +1346,62 @@ void XrVideo::renderThreadMain()
 bool XrVideo::current(Current* out)
 {
     std::lock_guard<std::mutex> lk(m_SwMutex);
+    // §VR-REC：開了 --dump-bitstream 時記下這一格顯示的是哪一張（從發布紀錄查它的 rtpTimestamp），給離線重建用
+    const auto logShown = [this](uint64_t seq, uint64_t newest, bool synth) {
+        int64_t pts = -1;
+        const uint64_t n = std::min<uint64_t>(m_PubHead, kPubRing);
+        for (uint64_t i = 0; i < n; ++i) {
+            const PubRec& p = m_PubRing[(m_PubHead - 1 - i) % kPubRing];
+            if (p.seq == seq) {
+                pts = p.pts90;
+                break;
+            }
+        }
+        BitstreamDump::logDisplay(nowUs(), seq, pts, newest, synth);
+    };
     if (!m_HavePublished || m_Published.aspect <= 0.0f) {
         return false;
     }
     *out = m_Published;
+    out->fbSeq = m_Published.seq;  // §VR-BUFFER：host 節拍一律照最新的一張
+    out->fbDrawnUs = m_Published.lastDrawnUs;
+    if (m_Config.buffer > 0) {
+        // §VR-BUFFER：要顯示的序號＝max(上次顯示的下一張, 最新的前一張)，不超過最新。最新的前一張必定還在它那條
+        // swapchain 上（寫入的是第三新的那一條）；找不到（那一張沒畫成功）就退回最新的一張
+        const uint64_t newest = m_Published.seq;
+        uint64_t want = std::max(m_BufLastShown + 1, newest > 0 ? newest - 1 : 0);
+        if (want > newest) {
+            want = newest;
+        }
+        bool found = false;
+        if (want != newest) {
+            for (const Current& c : m_RingPub) {
+                if (c.seq == want && c.aspect > 0.0f && c.generation != 0) {
+                    *out = c;
+                    out->fbSeq = m_Published.seq;
+                    out->fbDrawnUs = m_Published.lastDrawnUs;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        const uint64_t shown = found ? want : newest;
+        if (shown == m_BufLastShown) {
+            m_BufRepeat.fetch_add(1, std::memory_order_relaxed);
+        }
+        else {
+            (shown == newest ? m_BufLag0 : m_BufLag1).fetch_add(1, std::memory_order_relaxed);
+            (shown == newest ? m_BufLag0Total : m_BufLag1Total).fetch_add(1, std::memory_order_relaxed);
+            if (m_BufLastShown != 0 && shown > m_BufLastShown + 1) {
+                m_BufSkipped.fetch_add(static_cast<uint32_t>(shown - m_BufLastShown - 1), std::memory_order_relaxed);
+            }
+        }
+        m_BufLastShown = shown;
+        if (BitstreamDump::isEnabled()) {
+            logShown(shown, newest, false);
+        }
+        return true;
+    }
     if (m_Config.synth) {
         // §VR-SYNTH：一張新影像第一次被顯示用真的那一半；同一張再被顯示（半速串流時每張會顯示兩次）就換成
         // 合成的那一半與外插的姿態。沒有合成影像（第一張、掉過幀、合成失敗）時照舊重送真的那一半。
@@ -1188,7 +1415,18 @@ bool XrVideo::current(Current* out)
             m_SynthShown.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    if (BitstreamDump::isEnabled()) {
+        logShown(out->seq, m_Published.seq, out->synthShown);
+    }
     return true;
+}
+
+uint64_t XrVideo::releaseNoFor(const Current& cur) const
+{
+    if (cur.slot >= 0 && cur.slot < kRing) {
+        return m_RingRel[cur.slot].load(std::memory_order_relaxed);
+    }
+    return releaseNo();
 }
 
 bool XrVideo::peek(Current* out)
@@ -1437,8 +1675,36 @@ vec2 vs_unwarp(vec2 uv, vec4 fv, float cyR) {
 }
 )GLSL";
 
+// §VR-UPSCALE：Catmull-Rom 放大，借硬體雙線性把 4x4 個點併成 9 次取樣（中間兩個權重同號，可合成一次雙線性）。
+// vs_fsz＝vs_full 的像素尺寸。只在還原 pass 用（每眼 1152 放大到 2304 那一步）
+const char* kCatromHeader = R"GLSL(
+vec4 vs_catrom(vec2 uv) {
+    vec2 sp = uv * vs_fsz;
+    vec2 p1 = floor(sp - 0.5) + 0.5;
+    vec2 f = sp - p1;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 t0 = (p1 - 1.0) / vs_fsz;
+    vec2 t3 = (p1 + 2.0) / vs_fsz;
+    vec2 t12 = (p1 + w2 / w12) / vs_fsz;
+    vec4 r = texture(vs_full, vec2(t0.x, t0.y)) * (w0.x * w0.y)
+           + texture(vs_full, vec2(t12.x, t0.y)) * (w12.x * w0.y)
+           + texture(vs_full, vec2(t3.x, t0.y)) * (w3.x * w0.y)
+           + texture(vs_full, vec2(t0.x, t12.y)) * (w0.x * w12.y)
+           + texture(vs_full, vec2(t12.x, t12.y)) * (w12.x * w12.y)
+           + texture(vs_full, vec2(t3.x, t12.y)) * (w3.x * w12.y)
+           + texture(vs_full, vec2(t0.x, t3.y)) * (w0.x * w3.y)
+           + texture(vs_full, vec2(t12.x, t3.y)) * (w12.x * w3.y)
+           + texture(vs_full, vec2(t3.x, t3.y)) * (w3.x * w3.y);
+    return clamp(r, 0.0, 1.0);
+}
+)GLSL";
+
 const char* kUnwarpBody = R"GLSL(
-color = texture(vs_full, vs_unwarp(gl_FragCoord.xy / vs_osz, vs_fv, vs_cyr));
+color = vs_catrom(vs_unwarp(gl_FragCoord.xy / vs_osz, vs_fv, vs_cyr));
 )GLSL";
 
 // 縮到 1/8：每個輸出像素取來源 8x8 區塊的平均（4x4 個雙線性取樣點，各涵蓋 2x2）。直接雙線性縮 8 倍只看得到其中
@@ -1811,7 +2077,8 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         float osz[2] = {static_cast<float>(m_Sw.width), static_cast<float>(m_Config.synth ? m_Sw.height / 2 : m_Sw.height)};
         pl_shader sh = pl_dispatch_begin(m_Dp);
         pl_shader_desc dd[1] = {sampledTex("vs_full", m_Full)};
-        pl_shader_var vv[3] = {};
+        float fsz[2] = {static_cast<float>(fw), static_cast<float>(fh)};
+        pl_shader_var vv[4] = {};
         vv[0].var = pl_var_vec2("vs_osz");
         vv[0].data = osz;
         vv[0].dynamic = true;
@@ -1821,16 +2088,20 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         vv[2].var = pl_var_float("vs_cyr");
         vv[2].data = &fvCyR;
         vv[2].dynamic = true;
+        vv[3].var = pl_var_vec2("vs_fsz");  // §VR-UPSCALE
+        vv[3].data = fsz;
+        vv[3].dynamic = true;
+        static const std::string s_UnwarpHeader = std::string(kFovHeader) + kCatromHeader;
         pl_custom_shader cs = {};
         cs.description = "viple vr fovea unwarp";
-        cs.header = kFovHeader;
+        cs.header = s_UnwarpHeader.c_str();
         cs.body = kUnwarpBody;
         cs.input = PL_SHADER_SIG_NONE;
         cs.output = PL_SHADER_SIG_COLOR;
         cs.descriptors = dd;
         cs.num_descriptors = 1;
         cs.variables = vv;
-        cs.num_variables = 3;
+        cs.num_variables = 4;
         if (pl_shader_custom(sh, &cs)) {
             pl_dispatch_params dpar = {};
             dpar.shader = &sh;

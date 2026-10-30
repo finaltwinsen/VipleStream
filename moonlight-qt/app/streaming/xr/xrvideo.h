@@ -59,6 +59,8 @@
 #include <libplacebo/vulkan.h>
 
 struct AVFrame;
+struct AVBufferRef;
+struct PyroWaveVkInterop;
 
 class XrVideo
 {
@@ -93,6 +95,11 @@ public:
         // §VR-PASS（量測）：把 libplacebo 每個 pass 的 GPU 計時接出來，影像 render thread 每 60 秒印一行
         // [VIPLE-VR-PASS]。只給 PCVR 開（VR 的 tag 不可以出現在一般 session）
         bool passTimers = false;
+        // §VR-BUFFER（2026-10-29）：頭盔端多緩衝幾格（0＝關、1）。開著時影像輪流畫進 kRing 條 swapchain，frame thread
+        // 每格顯示「上次顯示的下一張」與「最新的前一張」之中較新的一張（不超過最新）：平常晚一格顯示，某一張晚到時
+        // 直接顯示最新的（不重複），晚到的那張和下一張一起到時馬上回到晚一格（不跳）。OpenXR 的 layer 用的是 swapchain
+        // 「最後 release 的那張」，所以要顯示較舊的影像只能讓它待在另一條 swapchain。不可以和 synth 一起開
+        int buffer = 0;
     };
 
     // §VR-LDIAG：每發布一張新影像記一筆（§VR-SYNTH 的第二次發布沿用同一個 seq，不另記）。時刻都是 steady 時鐘的微秒
@@ -126,6 +133,12 @@ public:
         XrRect2Di synthRect = {};
         VIPLE_VR_FRAME_META synthMeta = {};
         bool synthShown = false;  // current() 這次回傳的是合成那一格
+        int slot = -1;            // §VR-BUFFER：畫在第幾條 swapchain（-1＝沒開緩衝）
+        // §VR-BUFFER：給 host 節拍用的那一張（＝最新發布的）。開緩衝時顯示的是較舊的一張，LATCH 的 slack 要照
+        // 「最新的那一張到得多早」算，host 的節拍才和沒開緩衝時一樣（照顯示的那張算會早一整格，host 會把出圖越調越晚，
+        // 最後新影像剛好在挑選前才到、緩衝被吃光——10-29 nb1 實測後半場 lag0 100%）。current() 填；沒開緩衝時同 seq／lastDrawnUs
+        uint64_t fbSeq = 0;
+        uint64_t fbDrawnUs = 0;
     };
 
     // 2026-10-05：目前最後一次 xrReleaseSwapchainImage 的序號（呼叫端持 XrContext::queueMutex() 讀，與 release 互斥）。
@@ -135,6 +148,12 @@ public:
     {
         return m_ReleaseNo.load(std::memory_order_relaxed);
     }
+    // §VR-BUFFER：cur 那條 swapchain 最後一次 release 的序號（沒開緩衝時同 releaseNo()）。錯配計數要比的是
+    // xrEndFrame 會用的那張——開緩衝時顯示的不是最新的一張，比全域的序號會一直不相等
+    uint64_t releaseNoFor(const Current& cur) const;
+    // §VR-BUFFER-REFILL：開了緩衝時回傳 true 與累計的挑選結果（顯示「最新的前一張」／「最新的一張」的次數，不歸零）；
+    // 沒開緩衝回 false。XR frame thread 每秒放進 CLIENT_TIMING 帶給 host
+    bool bufferTotals(uint32_t* lag1, uint32_t* lag0) const;
 
     XrVideo(XrContext* ctx, const Config& config);
     ~XrVideo();
@@ -156,6 +175,10 @@ public:
     // decoder／render thread
     void submit(const AVFrame* frame);
     bool testMap(const AVFrame* frame);
+    // §PYROWAVE-XR-ZC（decoder 初始化時呼叫）：讓 PyroWave 直接解碼進 XR 的 VkDevice 所需的共用資訊。第一次呼叫時
+    // 在這個 device 上建 FFmpeg Vulkan device context（之後重用，XrVideo 銷毀時釋放）；XrContext 不是 pyroWaveReady
+    // 或建立失敗時回 false，呼叫端走拷貝版
+    bool pyroWaveInterop(PyroWaveVkInterop* out);
 
     // XR frame thread：有可顯示的影像（至少 release 過一次）就回 true
     bool current(Current* out);
@@ -250,6 +273,7 @@ private:
                      bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk, VIPLE_VR_FRAME_META* synthMeta);
     // mboxUs＝這一幀在 mailbox 裡等了多久（只進統計）
     bool renderNewFrame(AVFrame* frame, uint32_t mboxUs);
+    void bufferMaybeLog();  // §VR-BUFFER
     // §VR-PLAYER（V2）：全景模式下的 renderNewFrame（畫進 m_Equi，不碰影像 swapchain）
     bool renderEquiFrame(AVFrame* frame, uint64_t t0);
     // §VR-PLAYER（V2，XR frame thread）：投影 swapchain（兩眼並排）
@@ -281,6 +305,7 @@ private:
     pl_log m_Log = nullptr;
     pl_vulkan m_Vulkan = nullptr;
     pl_renderer m_Renderer = nullptr;
+    AVBufferRef* m_PwHwDeviceCtx = nullptr;  // §PYROWAVE-XR-ZC：XR device 的 FFmpeg Vulkan device context
     // §VR-SYNTH（都只在 render thread 用）
     pl_dispatch m_Dp = nullptr;
     pl_tex m_Full = nullptr;         // 這一張的 RGB（和寫進 swapchain 的值相同）
@@ -347,6 +372,22 @@ private:
     xrflight::GpuTyp m_GpuTyp;
     std::atomic<uint32_t> m_GpuTypUs{xrflight::kGpuTypInitUs};
     std::vector<SwapchainSet> m_Retired;   // 等 XR thread 送出新一代後銷毀
+    // §VR-BUFFER：輪流使用的 swapchain。影像 render thread 畫第 i 張之前把 m_RingSets[i % kRing] 換進 m_Sw（持
+    // m_StatsMutex，takeStatsDeferred 會讀 m_Sw 的尺寸），畫完換回去。寫入的永遠是第三新的那一條，frame thread 只會
+    // 選最新的兩張之一，所以不會撞到正要顯示的那一條
+    static constexpr int kRing = 3;
+    SwapchainSet m_RingSets[kRing];
+    int m_RingNext = 0;                    // 影像 render thread：下一張寫進哪一條
+    int m_CurSlot = -1;                    // 影像 render thread：正在畫的那一條（-1＝沒開緩衝）
+    Current m_RingPub[kRing];              // 每一條最後發布的那張（m_SwMutex）
+    std::atomic<uint64_t> m_RingRel[kRing] = {};  // 每一條最後 release 的序號（queueMutex 內寫）
+    uint64_t m_BufLastShown = 0;           // frame thread（m_SwMutex）：current() 上次回傳的 seq
+    // §VR-BUFFER 量測（frame thread 寫、影像 render thread 每 10 s 印）：顯示「最新的前一張」／最新的一張（新的）／
+    // 重複上一張／跳過的張數
+    std::atomic<uint32_t> m_BufLag1{0}, m_BufLag0{0}, m_BufRepeat{0}, m_BufSkipped{0};
+    // §VR-BUFFER-REFILL：前兩項的累計值（不歸零；見 bufferTotals）
+    std::atomic<uint32_t> m_BufLag1Total{0}, m_BufLag0Total{0};
+    uint64_t m_BufLogUs = 0;
     uint64_t m_XrAckGeneration = 0;        // XR thread 最近一次 xrEndFrame 引用的 generation
     // §VR-LDIAG：最近 kPubRing 筆發布紀錄（環狀；m_SwMutex 保護）
     static constexpr size_t kPubRing = 64;

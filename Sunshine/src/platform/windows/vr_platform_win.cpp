@@ -1575,6 +1575,14 @@ namespace vr {
           c.running_app_id = *id;
           const auto ids = vr_manifest_app_ids(false);
           c.vr_app_running = ids.contains(std::to_string(*id));
+          // 2026-10-30 實測：遊戲退出後 RunningAppID 還停在 488310 好幾分鐘（steam-watchdog 看的 Apps\<id>\Running 已經是 0），
+          // idle-quit 以為遊戲還在跑、等滿 5 分鐘，使用者這段時間改開 Steam 內建串流就開不起來 → 兩個都要成立才算在跑
+          if (c.vr_app_running) {
+            const auto running = reg_dword(HKEY_USERS, u->sid + L"\\Software\\Valve\\Steam\\Apps\\" + std::to_wstring(*id), L"Running");
+            if (running && *running == 0) {
+              c.vr_app_running = false;
+            }
+          }
         }
       }
       if (driver_connected && other_hmd == VRIPC_OTHER_HMD_PRESENT) {

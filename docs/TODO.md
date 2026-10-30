@@ -53,7 +53,17 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 ### §PYROWAVE 小波編碼（2.0.23 起；只能手動選，不進 Auto）
 - Windows server → Windows qt client 端到端已通（4:2:0 8-bit、4:4:4 10-bit），qt client 走零複製 §PYROWAVE-ZC；丟包時不完整的幀以「無缺口前綴」解碼（缺最細層、局部稍糊），不要求 IDR。
 - ABR 刻意不設 PyroWave 專屬下限（流暢優先）：網路撐不住時照常降位元率、畫質變差但不斷流；要畫質就改用 HEVC 或改善網路。
-- 未驗證（需實機）：Android 手機（bridge 已建置）、Steam Frame（偏好 fragment path 的 GPU 目前退回拷貝版，零複製只做 compute path）。
+- **Steam Frame 已驗（2026-10-28，2.0.23，2D 桌面模式 1080p60 80 Mbps、家用 Wi-Fi）**：零複製 compute path 成立、局部幀搶救正常、丟幀 0.16%。
+  待查：頭盔上主機處理延遲只在暖機回報一次、之後都是 n/a（Linux 有持續回報，所以是頭盔端的問題）。
+- **Linux qt 已驗（2026-10-28，2.0.23 AppImage，AMD Vega／RADV，1080p60 50 Mbps 經 Tailscale）**：零複製成立、丟幀 0、
+  解碼 p50 0.53 ms、主機處理延遲 1.1～1.7 ms、繪製 60 fps。有一段約 6 秒解碼升到 14～24 ms 後自行恢復（原因未明，網路與 host 正常）。
+- 未驗證（需實機）：Android 手機（bridge 已建置）。Frame 的 GPU 是 Adreno 750＋Mesa Turnip：
+  PyroWave 原始碼註明 Turnip 跑 compute path 較好，2026-10-28 頭盔實測 compute 也比 fragment 快（4K 殘差 3.7～4.2 對 5.6 ms），
+  所以 Frame 直接走現有的 compute 零複製即可，不必補 fragment 版。
+
+### §LAYERED 分層增強（2026-10-28 暫時放棄）
+- 低解析度硬體基底＋全解析度殘差層：同位元率畫質輸原生解析度；Steam Frame 上殘差層解碼（GPU 3.7～4.6 ms）
+  比硬體解碼器直接解 4K（約 3.7 ms、不佔 CPU／GPU）貴，暫不做。
 
 ### §Q 雲端審查（2026-10-23，PR #4～#7）延後項目
 - **QUIC FEC 不滿 4 片的群組**（審查 #6，nit）：server 的 §5b FEC 每 4 片資料才產生 parity、群組跨幀累積，一幀結尾 1～3 片要等下一幀才有保護（靜態畫面時可能很久）。修法要在幀尾補發不滿群組的 parity，client 需能辨識不滿 4 片的群組＝**兩端線上格式要一起改**，要先規劃相容性（舊 client 對新 server）。

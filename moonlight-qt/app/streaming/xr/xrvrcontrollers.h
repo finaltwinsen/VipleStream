@@ -113,10 +113,13 @@ private:
     XrAction m_Stick = XR_NULL_HANDLE;
     XrAction m_StickClick = XR_NULL_HANDLE;
     XrAction m_StickTouch = XR_NULL_HANDLE;
-    XrAction m_BtnLo = XR_NULL_HANDLE;       // A／X（左手 Frame：dpad_down）
+    XrAction m_BtnLo = XR_NULL_HANDLE;       // A／X（Frame：右 a、左 dpad_down）
     XrAction m_BtnLoTouch = XR_NULL_HANDLE;
-    XrAction m_BtnHi = XR_NULL_HANDLE;       // B／Y（左手 Frame：dpad_up）
+    XrAction m_BtnHi = XR_NULL_HANDLE;       // B／Y（Frame：右 b、左 dpad_right）
     XrAction m_BtnHiTouch = XR_NULL_HANDLE;
+    XrAction m_BtnC = XR_NULL_HANDLE;        // §VR-FRAME-CTRL：Frame 右 x、左 dpad_left
+    XrAction m_BtnD = XR_NULL_HANDLE;        // §VR-FRAME-CTRL：Frame 右 y、左 dpad_up
+    XrAction m_Bumper = XR_NULL_HANDLE;      // §VR-FRAME-CTRL：Frame shoulder
     XrAction m_Menu = XR_NULL_HANDLE;
     XrAction m_System = XR_NULL_HANDLE;
     XrAction m_ThumbrestTouch = XR_NULL_HANDLE;

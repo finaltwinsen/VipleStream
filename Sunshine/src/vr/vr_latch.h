@@ -88,6 +88,7 @@ namespace vr::latch {
   constexpr uint8_t kStepAcq = 1;  ///< 第一批樣本量完，誤差超過進入門檻
   constexpr uint8_t kStepTrim = 2;  ///< 上一步之後還差超過修整門檻：再補一步
   constexpr uint8_t kStepReacq = 3;  ///< 追蹤中誤差連續幾筆超過進入門檻（負載改變）
+  constexpr uint8_t kStepRefill = 4;  ///< §VR-BUFFER-REFILL（v2）：client 的緩衝一直空著，相位提前一整個串流週期（host 多送一張）
 
   inline const char *step_why_name(uint8_t why) {
     switch (why) {
@@ -97,6 +98,8 @@ namespace vr::latch {
         return "trim";
       case kStepReacq:
         return "reacq";
+      case kStepRefill:
+        return "refill";
     }
     return "none";
   }
@@ -123,9 +126,10 @@ namespace vr::latch {
     return "?";
   }
 
-  /// §VR-LATCH-V3：configure() 的選配項（只有 v3 會用；reset() 保留）
+  /// §VR-LATCH-V3：configure() 的選配項（refill 只有 v2 會用，其餘只有 v3 會用；reset() 保留）
   struct options_t {
     bool acquire = false;  ///< vr_latch_acquire：誤差大時用定時 burst 把相位一次移到位
+    bool refill = false;  ///< §VR-BUFFER-REFILL：vr_buffer_refill（v2）。request_refill() 才會被接受
     int step_ppm = 4000;  ///< vr_latch_acquire_ppm：burst 相對基準的週期修正量（夾在 kV3StepPpmMin～kV3StepPpmMax）
     bool have_seed = false;  ///< seed_integral_ppm 有效（上一個 session 學到的積分）
     double seed_integral_ppm = 0;
@@ -161,6 +165,8 @@ namespace vr::latch {
     double eval_cmd_us = 0;  ///< 這一步要求的移動量
     double eval_err_us = 0;  ///< 這一步之後的誤差
     uint8_t eval_outcome = kEvalTrack;  ///< kEval*（kEvalVoid 時 eval_moved_us／eval_err_us 是 0，沒有量測值）
+
+    uint32_t refills = 0;  ///< §VR-BUFFER-REFILL：累計的補緩衝次數（v2；step_why＝kStepRefill 的 burst）
   };
 
   /// §VR-LATCH-V3：circ_median() 的結果
@@ -320,6 +326,26 @@ namespace vr::latch {
      */
     void switch_mode(mode_e mode, int target_pct);
 
+    /**
+     * @brief §VR-BUFFER-REFILL（2026-10-29）：client 的 §VR-BUFFER 一直空著（顯示的幾乎都是最新那張）。v2 且
+     *        options_t::refill 時排定一次補緩衝：下一則新幀的 LATCH 回傳一次 burst（step_why＝kStepRefill），把 host 的相位
+     *        提前一整個串流週期——host 多送一張、client 在同一個 latch 收到兩張，緩衝補回一張（不重複也不跳張）。
+     *        burst 期間與之後 kRefillSettleNs 不取樣本、不寫 pacing（盲區）；誤差的平滑值與積分照舊（提前一整格之後，
+     *        取模一個週期的相位不變）。
+     *
+     * 緩衝會空，是因為延遲往上跳一階時它把那一下吸收掉了（設計如此）；要補回來得 host 多送一張，而 v2 只看最新那張的
+     * slack、看不到緩衝的深度，不靠這個就只有延遲碰巧往下跳時才會補回來（2026-10-29 頭盔 7 場有 5 場整段空著）。
+     * @return 有沒有排進去（不是 v2、沒開、還沒收到過樣本、已經排了、或盲區內：false）
+     */
+    bool request_refill(int64_t now_ns);
+
+    // §VR-BUFFER-REFILL 參數
+    static constexpr int kRefillPpm = 4500;  ///< burst 相對基準的週期修正量；基準在 ±200 以內，加起來不超過 bridge 的 ±5000
+    /// bridge 的 burst 上限（2 s）。4500 ppm 下 144 Hz 一整格 1.54 s、120 Hz 1.85 s；90 Hz 要 2.47 s，夾住之後移 9 ms，
+    /// 仍超過「串流週期 − 目標 slack」（6.7 ms），跨得過 latch，剩下的交給 PI
+    static constexpr int64_t kRefillMaxUs = 2'000'000;
+    static constexpr int64_t kRefillSettleNs = 500'000'000;  ///< burst 結束後再等多久才取樣本（管線裡還有舊節拍的幀）
+
   private:
     result_t decide(int64_t now_ns, int32_t ppm);
     result_t on_latch_legacy(int32_t slack_us, int64_t now_ns);
@@ -400,6 +426,59 @@ namespace vr::latch {
     uint32_t steps_ = 0;
     uint32_t bad_steps_ = 0;
     std::array<int64_t, kV3StepsPerMin> step_times_ {};  ///< 環狀：最近幾次步進的時刻（60 s 內的步數上限）
+
+    // §VR-BUFFER-REFILL（v2）
+    result_t start_refill(int64_t now_ns);
+    bool refill_pending_ = false;  ///< 排定了，等下一則新幀的 LATCH 發出
+    int64_t refill_blind_until_ns_ = 0;  ///< 盲區：在這之前不取樣本、不寫 pacing
+    uint32_t refills_ = 0;
+  };
+
+  /**
+   * @brief §VR-BUFFER-REFILL：從 client 每秒一則的 CLIENT_TIMING（緩衝的累計挑選結果）判斷緩衝是不是一直空著。
+   *        純邏輯，可單元測試；呼叫端（session_state_t）在 on_report() 回傳 true 時去問控制器，被接受了再呼叫 on_requested()。
+   *
+   * 判斷用相鄰兩則的差（這一秒）：顯示的新幀少於 kMinShown（影像停住、暖機、沒開緩衝＝兩個都是 0）不判；至少一半是
+   * 「最新的前一張」＝緩衝在（退避回到最短）；九成以上是「最新那張」＝空著，連續 kEmptyRun 秒就該補；介於兩者之間是在
+   * 吸收抖動，不算。補過之後 kBackoffMinNs 內不再補，沒補回來就每次加倍，最長 kBackoffMaxNs；緩衝回來過一次，退避就回到
+   * 最短（已經排到更後面的下一次也拉回「上一次補之後 kBackoffMinNs」）。
+   */
+  class refill_watch_t {
+  public:
+    /// 一則 CLIENT_TIMING 的兩個累計值。回傳 true＝該補了
+    bool on_report(uint32_t lag1_total, uint32_t lag0_total, int64_t now_ns);
+
+    /// 控制器接受了這次補緩衝
+    void on_requested(int64_t now_ns);
+
+    uint32_t requests() const {
+      return requests_;
+    }
+
+    uint32_t last_lag1() const {
+      return d1_;
+    }
+
+    uint32_t last_lag0() const {
+      return d0_;
+    }
+
+    static constexpr uint32_t kMinShown = 30;
+    static constexpr int kEmptyRun = 2;
+    static constexpr int64_t kBackoffMinNs = 5'000'000'000;
+    static constexpr int64_t kBackoffMaxNs = 60'000'000'000;
+
+  private:
+    bool have_ = false;
+    uint32_t lag1_ = 0;  ///< 上一則的累計值
+    uint32_t lag0_ = 0;
+    uint32_t d1_ = 0;  ///< 最近一秒的差
+    uint32_t d0_ = 0;
+    int empty_run_ = 0;
+    int64_t next_ok_ns_ = 0;
+    int64_t last_req_ns_ = 0;
+    int64_t backoff_ns_ = kBackoffMinNs;
+    uint32_t requests_ = 0;
   };
 
   // ── §VR-LATCH-V3：行程內記住的積分（上一個 session 學到的時鐘差，下一個 session 當起點）──

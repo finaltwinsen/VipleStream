@@ -1333,6 +1333,21 @@ namespace vr::multilink {
     return false;
   }
 
+  int hub_t::alive_count() const {
+    if (!impl_) {
+      return 0;
+    }
+    const int64_t now_ns = to_ns(clock::now());
+    const int n = impl_->count.load(std::memory_order_acquire);
+    int alive = 0;
+    for (int i = 0; i < n; ++i) {
+      if (impl_->alive(*impl_->links[i], now_ns)) {
+        ++alive;
+      }
+    }
+    return alive;
+  }
+
   std::string hub_t::take_stats_line() {
     auto &m = *impl_;
     const int n = m.count.load(std::memory_order_acquire);

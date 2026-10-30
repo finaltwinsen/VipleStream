@@ -139,6 +139,9 @@ namespace vr::multilink {
     /// §VR-LINK-GRACE：有沒有任何一條連線還活著（最近 2 s 內收過帶 CONFIRMED 的 PING）。任何執行緒
     bool any_alive() const;
 
+    /// §VR-ABR-FAST（2026-10-30）：現在活著的連線數（定義同 any_alive）。任何執行緒
+    int alive_count() const;
+
   private:
     struct link_t;
     struct impl_t;

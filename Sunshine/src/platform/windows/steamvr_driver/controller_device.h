@@ -1,7 +1,9 @@
 // controller_device.h - VipleStream §VR（M1b S2-09）：最小 Touch 控制器（設計 §E.2 controller_device）。
 //
-// 左右各一個 TrackedDeviceClass_Controller，ControllerType=oculus_touch、InputProfilePath 借用 SteamVR 內建 oculus driver 的
-// touch_profile.json（不自帶 binding）。沒有 skeleton。
+// 左右各一個 TrackedDeviceClass_Controller。§VR-FRAME-CTRL（2026-10-30）：SteamVR 有 frame_controller driver 時以
+// Steam Frame 手把身分出現（ControllerType=frame_controller、借用它的 input profile 與 render model），跟 Steam 內建串流
+// （vrlink）一樣；沒有 Frame 對應檔的遊戲由 SteamVR 的相容層模擬成 Touch（例：PowerBeatsVR 只認 Oculus 名稱的手把）。
+// 舊版 SteamVR 沒有 frame_controller 時退回 oculus_touch（借用 oculus driver 的 touch_profile.json）。沒有 skeleton。
 // 執行緒：update() 在 tracking 執行緒（持 ctx.pose_lock 共享呼叫 TrackedDevicePoseUpdated／UpdateXxxComponent），
 // Deactivate 以獨佔取得後把 index 設成無效；haptic 事件在 RunFrame 由 driver_main 轉給 on_haptic()。
 #pragma once
@@ -51,9 +53,9 @@ namespace vrdrv {
   private:
     enum comp_e : uint32_t {
       c_system_click,
-      c_ab_lo_click,  ///< A（右）／X（左）
+      c_ab_lo_click,  ///< A（右）／X（左）；Frame：右 a、左 dpad_down
       c_ab_lo_touch,
-      c_ab_hi_click,  ///< B（右）／Y（左）
+      c_ab_hi_click,  ///< B（右）／Y（左）；Frame：右 b、左 dpad_right
       c_ab_hi_touch,
       c_stick_click,
       c_stick_touch,
@@ -61,6 +63,16 @@ namespace vrdrv {
       c_trigger_touch,
       c_grip_touch,
       c_thumbrest_touch,
+      // 以下只有 Frame 模式建立（Touch 模式維持 invalid handle）
+      c_menu_click,  ///< Frame：右 menu、左 view（Touch 模式併進 system）
+      c_menu_touch,
+      c_c_click,  ///< Frame：右 x、左 dpad_left
+      c_c_touch,
+      c_d_click,  ///< Frame：右 y、左 dpad_up
+      c_d_touch,
+      c_bumper_click,
+      c_bumper_touch,
+      c_grip_click,
       c_bool_count,
     };
 
@@ -79,6 +91,7 @@ namespace vrdrv {
 
     driver_ctx_t &ctx_;
     const bool right_;
+    bool frame_ = false;  ///< §VR-FRAME-CTRL：Activate 時決定（SteamVR 有 frame_controller 的 input profile）
     std::atomic<uint32_t> index_ {k_invalid_index};
     vr::PropertyContainerHandle_t container_ = vr::k_ulInvalidPropertyContainer;
     vr::VRInputComponentHandle_t bools_[c_bool_count] {};

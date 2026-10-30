@@ -20,10 +20,22 @@ namespace vrdrv {
     constexpr uint32_t k_btn_trigger = 1u << 5;
     constexpr uint32_t k_btn_grip = 1u << 6;
     constexpr uint32_t k_btn_thumbrest = 1u << 8;
+    constexpr uint32_t k_btn_c = 1u << 9;  // §VR-FRAME-CTRL：Frame 右 x、左 dpad_left
+    constexpr uint32_t k_btn_d = 1u << 10;  // Frame 右 y、左 dpad_up
+    constexpr uint32_t k_btn_bumper = 1u << 11;
     constexpr uint8_t k_in_active = 0x01;
 
     // raw_from_grip：Touch 的 raw 原點在 grip 前方 11 cm（旋轉 0）；以 DriverFromHead 交給 SteamVR 套用（速度的槓桿臂也由它處理）
     constexpr double k_raw_from_grip_z = -0.11;
+
+    // §VR-FRAME-CTRL：Frame 手把 render model 的 openxr_grip 元件（raw 座標）＝原點 (±0.003117, -0.004277, 0.099501)、
+    // 繞 X 2.8091°（左手 x 為負，2026-10-30 從 host 的 frame_controller_left/right.json 讀出）。client 送的是 OpenXR grip，
+    // 反推 raw：DriverFromHead＝grip 座標下的 raw＝(-Rᵀt, Rᵀ)
+    constexpr double k_frame_raw_from_grip_x = 0.003117;  // 左手；右手取負
+    constexpr double k_frame_raw_from_grip_y = -0.000604;
+    constexpr double k_frame_raw_from_grip_z = -0.099591;
+    constexpr double k_frame_raw_from_grip_qx = -0.024512;  // 繞 X -2.8091°
+    constexpr double k_frame_raw_from_grip_qw = 0.999700;
 
     float unorm16(uint16_t v) {
       return (float) v / 65535.0f;
@@ -73,22 +85,43 @@ namespace vrdrv {
       auto *p = vr::VRProperties();
       container_ = p->TrackedDeviceToPropertyContainer(unObjectId);
       const auto c = container_;
+      // §VR-FRAME-CTRL：有 frame_controller 的 input profile 就以 Frame 手把出現（ModelNumber 與 vrlink 相同）
+      {
+        char full[MAX_PATH] = {};
+        auto *res = vr::VRResources();
+        frame_ = res != nullptr && res->GetResourceFullPath("{frame_controller}/input/frame_controller_profile.json", "", full, sizeof(full)) != 0 && full[0] != 0;
+      }
       p->SetStringProperty(c, vr::Prop_TrackingSystemName_String, "viplestream");
-      p->SetStringProperty(c, vr::Prop_ManufacturerName_String, "VipleStream");
-      p->SetStringProperty(c, vr::Prop_ModelNumber_String, right_ ? "VipleStream Touch (Right)" : "VipleStream Touch (Left)");
       p->SetStringProperty(c, vr::Prop_SerialNumber_String, serial());
       p->SetInt32Property(c, vr::Prop_ControllerRoleHint_Int32, right_ ? vr::TrackedControllerRole_RightHand : vr::TrackedControllerRole_LeftHand);
       p->SetInt32Property(c, vr::Prop_DeviceClass_Int32, vr::TrackedDeviceClass_Controller);
-      p->SetStringProperty(c, vr::Prop_ControllerType_String, "oculus_touch");
-      p->SetStringProperty(c, vr::Prop_InputProfilePath_String, "{oculus}/input/touch_profile.json");
+      if (frame_) {
+        p->SetStringProperty(c, vr::Prop_ManufacturerName_String, "Valve");
+        p->SetStringProperty(c, vr::Prop_ModelNumber_String, right_ ? "Roy_Right" : "Roy_Left");
+        p->SetStringProperty(c, vr::Prop_ControllerType_String, "frame_controller");
+        p->SetStringProperty(c, vr::Prop_InputProfilePath_String, "{frame_controller}/input/frame_controller_profile.json");
+        AcquireSRWLockExclusive(&pose_mtx_);
+        last_pose_.vecDriverFromHeadTranslation[0] = right_ ? -k_frame_raw_from_grip_x : k_frame_raw_from_grip_x;
+        last_pose_.vecDriverFromHeadTranslation[1] = k_frame_raw_from_grip_y;
+        last_pose_.vecDriverFromHeadTranslation[2] = k_frame_raw_from_grip_z;
+        last_pose_.qDriverFromHeadRotation.x = k_frame_raw_from_grip_qx;
+        last_pose_.qDriverFromHeadRotation.w = k_frame_raw_from_grip_qw;
+        ReleaseSRWLockExclusive(&pose_mtx_);
+      } else {
+        p->SetStringProperty(c, vr::Prop_ManufacturerName_String, "VipleStream");
+        p->SetStringProperty(c, vr::Prop_ModelNumber_String, right_ ? "VipleStream Touch (Right)" : "VipleStream Touch (Left)");
+        p->SetStringProperty(c, vr::Prop_ControllerType_String, "oculus_touch");
+        p->SetStringProperty(c, vr::Prop_InputProfilePath_String, "{oculus}/input/touch_profile.json");
+      }
       p->SetBoolProperty(c, vr::Prop_DeviceProvidesBatteryStatus_Bool, true);
       // M4a 收尾（Frame 實測：沒設 render model，SteamVR Home 顯示成一般手把）。先用 Touch 的外觀，
       // 收到 client 的 interaction profile 後在 update() 換成對應的（apply_render_model）
-      apply_render_model(VRIPC_CTRL_PROFILE_UNKNOWN);
+      apply_render_model(frame_ ? VRIPC_CTRL_PROFILE_FRAME : VRIPC_CTRL_PROFILE_UNKNOWN);
 
       auto *in = vr::VRDriverInput();
-      const char *lo = right_ ? "/input/a" : "/input/x";
-      const char *hi = right_ ? "/input/b" : "/input/y";
+      const char *lo = frame_ ? (right_ ? "/input/a" : "/input/dpad_down") : (right_ ? "/input/a" : "/input/x");
+      const char *hi = frame_ ? (right_ ? "/input/b" : "/input/dpad_right") : (right_ ? "/input/b" : "/input/y");
+      const char *stick = frame_ ? "/input/thumbstick" : "/input/joystick";
       char path[64];
       in->CreateBooleanComponent(c, "/input/system/click", &bools_[c_system_click]);
       std::snprintf(path, sizeof(path), "%s/click", lo);
@@ -99,22 +132,43 @@ namespace vrdrv {
       in->CreateBooleanComponent(c, path, &bools_[c_ab_hi_click]);
       std::snprintf(path, sizeof(path), "%s/touch", hi);
       in->CreateBooleanComponent(c, path, &bools_[c_ab_hi_touch]);
-      in->CreateBooleanComponent(c, "/input/joystick/click", &bools_[c_stick_click]);
-      in->CreateBooleanComponent(c, "/input/joystick/touch", &bools_[c_stick_touch]);
+      std::snprintf(path, sizeof(path), "%s/click", stick);
+      in->CreateBooleanComponent(c, path, &bools_[c_stick_click]);
+      std::snprintf(path, sizeof(path), "%s/touch", stick);
+      in->CreateBooleanComponent(c, path, &bools_[c_stick_touch]);
       in->CreateBooleanComponent(c, "/input/trigger/click", &bools_[c_trigger_click]);
       in->CreateBooleanComponent(c, "/input/trigger/touch", &bools_[c_trigger_touch]);
       in->CreateBooleanComponent(c, "/input/grip/touch", &bools_[c_grip_touch]);
       in->CreateBooleanComponent(c, "/input/thumbrest/touch", &bools_[c_thumbrest_touch]);
-      in->CreateScalarComponent(c, "/input/joystick/x", &scalars_[s_stick_x], vr::VRScalarType_Absolute, vr::VRScalarUnits_NormalizedTwoSided);
-      in->CreateScalarComponent(c, "/input/joystick/y", &scalars_[s_stick_y], vr::VRScalarType_Absolute, vr::VRScalarUnits_NormalizedTwoSided);
+      std::snprintf(path, sizeof(path), "%s/x", stick);
+      in->CreateScalarComponent(c, path, &scalars_[s_stick_x], vr::VRScalarType_Absolute, vr::VRScalarUnits_NormalizedTwoSided);
+      std::snprintf(path, sizeof(path), "%s/y", stick);
+      in->CreateScalarComponent(c, path, &scalars_[s_stick_y], vr::VRScalarType_Absolute, vr::VRScalarUnits_NormalizedTwoSided);
       in->CreateScalarComponent(c, "/input/trigger/value", &scalars_[s_trigger_value], vr::VRScalarType_Absolute, vr::VRScalarUnits_NormalizedOneSided);
       in->CreateScalarComponent(c, "/input/grip/value", &scalars_[s_grip_value], vr::VRScalarType_Absolute, vr::VRScalarUnits_NormalizedOneSided);
       in->CreateHapticComponent(c, "/output/haptic", &haptic_);
+      if (frame_) {
+        const char *menu = right_ ? "/input/menu" : "/input/view";
+        const char *cc = right_ ? "/input/x" : "/input/dpad_left";
+        const char *dd = right_ ? "/input/y" : "/input/dpad_up";
+        const struct {
+          const char *base;
+          comp_e click, touch;
+        } extra[] = {{menu, c_menu_click, c_menu_touch}, {cc, c_c_click, c_c_touch}, {dd, c_d_click, c_d_touch}, {"/input/bumper", c_bumper_click, c_bumper_touch}};
+        for (const auto &e : extra) {
+          std::snprintf(path, sizeof(path), "%s/click", e.base);
+          in->CreateBooleanComponent(c, path, &bools_[e.click]);
+          std::snprintf(path, sizeof(path), "%s/touch", e.base);
+          in->CreateBooleanComponent(c, path, &bools_[e.touch]);
+        }
+        in->CreateBooleanComponent(c, "/input/grip/click", &bools_[c_grip_click]);
+      }
 
       AcquireSRWLockExclusive(&ctx_.pose_lock);
       index_.store(unObjectId);
       ReleaseSRWLockExclusive(&ctx_.pose_lock);
-      VRDRV_LOG_INFO("controller activate hand=%s index=%u", right_ ? "right" : "left", unObjectId);
+      VRDRV_LOG_INFO("[VIPLE-VR-FRAME-CTRL] controller activate hand=%s index=%u type=%s", right_ ? "right" : "left", unObjectId,
+                     frame_ ? "frame_controller" : "oculus_touch");
     });
     if (degraded()) {
       rc = vr::VRInitError_Driver_Failed;
@@ -150,6 +204,9 @@ namespace vrdrv {
   }
 
   void controller_device_t::apply_render_model(uint8_t profile) {
+    if (frame_) {
+      profile = VRIPC_CTRL_PROFILE_FRAME;  // §VR-FRAME-CTRL：裝置類型已是 Frame，外觀跟著固定
+    }
     if (container_ == vr::k_ulInvalidPropertyContainer || (int) profile == render_profile_) {
       return;
     }
@@ -299,7 +356,8 @@ namespace vrdrv {
     } else {
       auto *vin = vr::VRDriverInput();
       const uint32_t b = in.buttons, t = in.touches;
-      vin->UpdateBooleanComponent(bools_[c_system_click], (b & (k_btn_system | k_btn_menu)) != 0, 0.0);
+      // Touch 模式沒有獨立的 menu 元件：menu 併進 system（舊行為）
+      vin->UpdateBooleanComponent(bools_[c_system_click], (b & (frame_ ? k_btn_system : (k_btn_system | k_btn_menu))) != 0, 0.0);
       vin->UpdateBooleanComponent(bools_[c_ab_lo_click], (b & k_btn_ab_lo) != 0, 0.0);
       vin->UpdateBooleanComponent(bools_[c_ab_lo_touch], (t & k_btn_ab_lo) != 0, 0.0);
       vin->UpdateBooleanComponent(bools_[c_ab_hi_click], (b & k_btn_ab_hi) != 0, 0.0);
@@ -314,6 +372,17 @@ namespace vrdrv {
       vin->UpdateScalarComponent(scalars_[s_stick_y], snorm16(in.stick_y), 0.0);
       vin->UpdateScalarComponent(scalars_[s_trigger_value], unorm16(in.trigger), 0.0);
       vin->UpdateScalarComponent(scalars_[s_grip_value], unorm16(in.grip), 0.0);
+      if (frame_) {
+        vin->UpdateBooleanComponent(bools_[c_menu_click], (b & k_btn_menu) != 0, 0.0);
+        vin->UpdateBooleanComponent(bools_[c_menu_touch], (b & k_btn_menu) != 0, 0.0);
+        vin->UpdateBooleanComponent(bools_[c_c_click], (b & k_btn_c) != 0, 0.0);
+        vin->UpdateBooleanComponent(bools_[c_c_touch], (t & k_btn_c) != 0, 0.0);
+        vin->UpdateBooleanComponent(bools_[c_d_click], (b & k_btn_d) != 0, 0.0);
+        vin->UpdateBooleanComponent(bools_[c_d_touch], (t & k_btn_d) != 0, 0.0);
+        vin->UpdateBooleanComponent(bools_[c_bumper_click], (b & k_btn_bumper) != 0, 0.0);
+        vin->UpdateBooleanComponent(bools_[c_bumper_touch], (t & k_btn_bumper) != 0, 0.0);
+        vin->UpdateBooleanComponent(bools_[c_grip_click], (b & k_btn_grip) != 0, 0.0);
+      }
       inputs_released_ = false;
     }
     ReleaseSRWLockShared(&ctx_.pose_lock);

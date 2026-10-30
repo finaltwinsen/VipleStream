@@ -347,6 +347,7 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         vc.testStallMs = m_Options.testStallMs;
         vc.requireMeta = m_Options.pcvr;  // M4a R4：PCVR 不發布無 render pose 的影像
         vc.synth = m_Options.pcvr && m_Options.pcvrSynth;  // §VR-SYNTH
+        vc.buffer = m_Options.pcvr && !vc.synth ? m_Options.pcvrBufferFrames : 0;  // §VR-BUFFER：和補幀互斥（都用 swapchain 的配置）
         vc.testJitter = m_Options.testJitter;  // §VR-LDIAG（dev）：--vr-test-jitter
         vc.passTimers = m_Options.pcvr;        // §VR-PASS：每個 pass 的 GPU 時間（[VIPLE-VR-PASS]；VR 的 tag，XR 桌面不開）
         // §VR-LATCH-RELATCH／§VR-LATCH-WAIT：整場維持（A/B 切換只切 frame thread 那一側，發布的方式不跟著變）
@@ -613,6 +614,43 @@ bool XrContext::createSystem(QString* error)
 
 bool XrContext::createVulkan(QString* error)
 {
+    m_PyroWaveVk13 = false;
+    if (m_Options.pyroWaveInterop) {
+        QString err13;
+        if (createVulkanAt(&err13, true)) {
+            return true;
+        }
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-PYROWAVE-ZC] XR Vulkan 1.3 device failed (%s) - retrying at the runtime's version; "
+                    "PyroWave will use the copy path",
+                    qUtf8Printable(err13));
+        destroyVulkanObjects();
+    }
+    return createVulkanAt(error, false);
+}
+
+void XrContext::destroyVulkanObjects()
+{
+    if (m_VkDevice != VK_NULL_HANDLE) {
+        if (m_Fence != VK_NULL_HANDLE && s_Vk.DestroyFence) s_Vk.DestroyFence(m_VkDevice, m_Fence, nullptr);
+        if (m_CmdPool != VK_NULL_HANDLE && s_Vk.DestroyCommandPool) s_Vk.DestroyCommandPool(m_VkDevice, m_CmdPool, nullptr);
+        if (s_Vk.DestroyDevice) s_Vk.DestroyDevice(m_VkDevice, nullptr);
+    }
+    m_Fence = VK_NULL_HANDLE;
+    m_CmdPool = VK_NULL_HANDLE;
+    m_Cmd = VK_NULL_HANDLE;
+    m_VkDevice = VK_NULL_HANDLE;
+    m_Queue = VK_NULL_HANDLE;
+    if (m_VkInstance != VK_NULL_HANDLE && s_Vk.DestroyInstance) {
+        s_Vk.DestroyInstance(m_VkInstance, nullptr);
+    }
+    m_VkInstance = VK_NULL_HANDLE;
+    m_VkPhysicalDevice = VK_NULL_HANDLE;
+    m_PyroWaveVk13 = false;
+}
+
+bool XrContext::createVulkanAt(QString* error, bool pyroWave13)
+{
     auto pfnReq = xrProc<PFN_xrGetVulkanGraphicsRequirements2KHR>(m_Instance, "xrGetVulkanGraphicsRequirements2KHR");
     auto pfnCreateInst = xrProc<PFN_xrCreateVulkanInstanceKHR>(m_Instance, "xrCreateVulkanInstanceKHR");
     auto pfnGetDev = xrProc<PFN_xrGetVulkanGraphicsDevice2KHR>(m_Instance, "xrGetVulkanGraphicsDevice2KHR");
@@ -635,14 +673,19 @@ bool XrContext::createVulkan(QString* error)
     }
 
     // Vulkan 1.2（libplacebo 需要 timeline semaphore 等 1.2 功能），受 runtime 上限約束
-    uint32_t api = VK_API_VERSION_1_2;
+    // §PYROWAVE-XR-ZC：pyroWave13 時固定要 1.3（不受 runtime 標的上限約束；loader 不到 1.3 就失敗、由呼叫端退回）
+    uint32_t api = pyroWave13 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
     const uint32_t maxApi = vkApiFromXr(req.maxApiVersionSupported);
     const uint32_t minApi = vkApiFromXr(req.minApiVersionSupported);
-    if (maxApi != 0 && api > maxApi) api = maxApi;
+    if (!pyroWave13 && maxApi != 0 && api > maxApi) api = maxApi;
     if (api < minApi) api = minApi;
     auto pfnEnumVer = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(m_Gipa(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
     uint32_t loaderApi = VK_API_VERSION_1_0;
     if (pfnEnumVer) pfnEnumVer(&loaderApi);
+    if (pyroWave13 && loaderApi < VK_API_VERSION_1_3) {
+        *error = QStringLiteral("Vulkan loader is below 1.3");
+        return false;
+    }
     if (api > loaderApi) api = loaderApi;
 
     VkApplicationInfo ai = vkStruct<VkApplicationInfo>(VK_STRUCTURE_TYPE_APPLICATION_INFO);
@@ -705,6 +748,10 @@ bool XrContext::createVulkan(QString* error)
     VkPhysicalDeviceProperties pdp;
     std::memset(&pdp, 0, sizeof(pdp));
     s_Vk.GetPhysicalDeviceProperties(m_VkPhysicalDevice, &pdp);
+    if (pyroWave13 && (pdp.apiVersion < VK_API_VERSION_1_3 || s_Vk.GetPhysicalDeviceFeatures2 == nullptr)) {
+        *error = QStringLiteral("GPU is below Vulkan 1.3");
+        return false;
+    }
 
     // X2：device 擴充與 features 依 libplacebo（pl_vulkan_import）需求啟用——required 必須全開，
     // recommended 有支援就開；外部記憶體擴充給 Linux／Frame 的 DRM_PRIME 匯入。只在 Vulkan 1.2
@@ -716,11 +763,16 @@ bool XrContext::createVulkan(QString* error)
     m_EnFeat2 = vkStruct<VkPhysicalDeviceFeatures2>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
     m_EnF11 = vkStruct<VkPhysicalDeviceVulkan11Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
     m_EnF12 = vkStruct<VkPhysicalDeviceVulkan12Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
+    VkPhysicalDeviceVulkan13Features sup13 = vkStruct<VkPhysicalDeviceVulkan13Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
+    m_EnF13 = vkStruct<VkPhysicalDeviceVulkan13Features>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
     m_HaveFeatureChain = false;
     int missingRequired = 0;
     if (use12) {
         sup2.pNext = &sup11;
         sup11.pNext = &sup12;
+        if (pyroWave13) {
+            sup12.pNext = &sup13;
+        }
         s_Vk.GetPhysicalDeviceFeatures2(m_VkPhysicalDevice, &sup2);
         m_EnFeat2.pNext = &m_EnF11;
         m_EnF11.pNext = &m_EnF12;
@@ -740,6 +792,30 @@ bool XrContext::createVulkan(QString* error)
         if (sup12.timelineSemaphore) m_EnF12.timelineSemaphore = VK_TRUE;
         if (sup12.hostQueryReset) m_EnF12.hostQueryReset = VK_TRUE;
         m_HaveFeatureChain = true;
+        if (pyroWave13) {
+            // §PYROWAVE-XR-ZC：PyroWave 解碼器（compute path）與 FFmpeg Vulkan 幀要的功能，同 PlVkRenderer 的 pwFeatures。
+            // 不支援的不開；少任何一項就不標 ready，PyroWave 走拷貝版（device 照用）
+            m_EnF12.pNext = &m_EnF13;
+            int pwMissing = 0;
+            auto want = [&pwMissing](VkBool32 sup, VkBool32& en) {
+                if (sup) en = VK_TRUE; else pwMissing++;
+            };
+            want(sup13.subgroupSizeControl, m_EnF13.subgroupSizeControl);
+            want(sup13.computeFullSubgroups, m_EnF13.computeFullSubgroups);
+            want(sup13.synchronization2, m_EnF13.synchronization2);
+            want(sup12.storageBuffer8BitAccess, m_EnF12.storageBuffer8BitAccess);
+            want(sup12.shaderFloat16, m_EnF12.shaderFloat16);
+            want(sup12.timelineSemaphore, m_EnF12.timelineSemaphore);
+            want(sup11.storageBuffer16BitAccess, m_EnF11.storageBuffer16BitAccess);
+            want(sup2.features.shaderInt16, m_EnFeat2.features.shaderInt16);
+            want(sup2.features.shaderStorageImageExtendedFormats, m_EnFeat2.features.shaderStorageImageExtendedFormats);
+            want(sup2.features.shaderStorageImageWriteWithoutFormat, m_EnFeat2.features.shaderStorageImageWriteWithoutFormat);
+            m_PyroWaveVk13 = pwMissing == 0;
+            if (pwMissing != 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-PYROWAVE-ZC] XR GPU lacks %d PyroWave feature(s) - PyroWave will use the copy path", pwMissing);
+            }
+        }
     }
 
     // device 擴充：固定清單 ∩ 裝置支援（刻意不照抄 pl_vulkan_recommended_extensions——其中有些依賴
@@ -792,11 +868,56 @@ bool XrContext::createVulkan(QString* error)
     xdci.pfnGetInstanceProcAddr = m_Gipa;
     xdci.vulkanPhysicalDevice = m_VkPhysicalDevice;
     xdci.vulkanCreateInfo = &dci;
+    // §VR-GPU-PRIO（2026-10-29，dev）：影像的 GPU 工作（轉色約 0.64 ms）在頭盔上實際要 2.3 ms 才做完——送出的相位剛好在
+    // SteamVR 合成器用 GPU 的時候（送出 5.7 ms／做完 1.05 ms，週期 6.94），排在它後面。試著把這個 queue 的全域優先權拉高。
+    // 驅動不給（VK_ERROR_NOT_PERMITTED，msm 的高優先權 submitqueue 可能要 CAP_SYS_NICE）就照原本的建
+    VkDeviceQueueGlobalPriorityCreateInfoEXT qprio = vkStruct<VkDeviceQueueGlobalPriorityCreateInfoEXT>(
+        VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_EXT);
+    bool prioOn = false;
+    if (m_Options.gpuQueuePriority > 0 && s_Vk.EnumerateDeviceExtensionProperties != nullptr) {
+        uint32_t n = 0;
+        std::vector<VkExtensionProperties> exts;
+        if (s_Vk.EnumerateDeviceExtensionProperties(m_VkPhysicalDevice, nullptr, &n, nullptr) == VK_SUCCESS) {
+            exts.resize(n);
+            s_Vk.EnumerateDeviceExtensionProperties(m_VkPhysicalDevice, nullptr, &n, exts.data());
+        }
+        for (const VkExtensionProperties& e : exts) {
+            if (std::strcmp(e.extensionName, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME) == 0) {
+                prioOn = true;
+                break;
+            }
+        }
+        if (prioOn) {
+            qprio.globalPriority = m_Options.gpuQueuePriority >= 2 ? VK_QUEUE_GLOBAL_PRIORITY_REALTIME_EXT
+                                                                   : VK_QUEUE_GLOBAL_PRIORITY_HIGH_EXT;
+            qci.pNext = &qprio;
+            m_DevExts.push_back(VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
+            dci.enabledExtensionCount = static_cast<uint32_t>(m_DevExts.size());
+            dci.ppEnabledExtensionNames = m_DevExts.data();
+        }
+    }
     r = pfnCreateDev(m_Instance, &xdci, &m_VkDevice, &vr);
+    if (prioOn && (XR_FAILED(r) || vr != VK_SUCCESS)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] GPU queue priority %s refused (xr=%d vk=%d) - creating the device at the default priority",
+                    m_Options.gpuQueuePriority >= 2 ? "realtime" : "high", static_cast<int>(r), static_cast<int>(vr));
+        prioOn = false;
+        qci.pNext = nullptr;
+        m_DevExts.pop_back();
+        dci.enabledExtensionCount = static_cast<uint32_t>(m_DevExts.size());
+        dci.ppEnabledExtensionNames = m_DevExts.empty() ? nullptr : m_DevExts.data();
+        m_VkDevice = VK_NULL_HANDLE;
+        vr = VK_SUCCESS;
+        r = pfnCreateDev(m_Instance, &xdci, &m_VkDevice, &vr);
+    }
     if (XR_FAILED(r) || vr != VK_SUCCESS) {
         m_VkDevice = VK_NULL_HANDLE;
         *error = QStringLiteral("xrCreateVulkanDeviceKHR: %1 vk=%2").arg(xrResultStr(m_Instance, r)).arg(static_cast<int>(vr));
         return false;
+    }
+    if (prioOn) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] GPU queue priority: %s",
+                    m_Options.gpuQueuePriority >= 2 ? "realtime" : "high");
     }
 
 #define LOAD_DEV(name) s_Vk.name = reinterpret_cast<PFN_vk##name>(s_Vk.GetDeviceProcAddr(m_VkDevice, "vk" #name))
@@ -855,12 +976,12 @@ bool XrContext::createVulkan(QString* error)
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] vulkan: gpu=\"%s\" api=%u.%u (runtime %u.%u-%u.%u) queueFamily=%u timeline=%d devExts=%d missingRequiredFeatures=%d",
+                "[VIPLE-XR] vulkan: gpu=\"%s\" api=%u.%u (runtime %u.%u-%u.%u) queueFamily=%u timeline=%d devExts=%d missingRequiredFeatures=%d pyroWave=%d",
                 pdp.deviceName, VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api),
                 VK_API_VERSION_MAJOR(minApi), VK_API_VERSION_MINOR(minApi),
                 VK_API_VERSION_MAJOR(maxApi), VK_API_VERSION_MINOR(maxApi),
                 m_QueueFamily, m_HaveFeatureChain ? static_cast<int>(m_EnF12.timelineSemaphore) : 0,
-                static_cast<int>(m_DevExts.size()), missingRequired);
+                static_cast<int>(m_DevExts.size()), missingRequired, m_PyroWaveVk13 ? 1 : 0);
     return true;
 }
 
@@ -914,6 +1035,9 @@ bool XrContext::createSession(QString* error)
 
     // M4a R1：PCVR 的追蹤／投影參考空間 STAGE → LOCAL_FLOOR → LOCAL（設計「參考空間」）
     m_TrackSpaceName.clear();
+    m_HavePlayArea = false;
+    m_PlayAreaWidthM = 0.0f;
+    m_PlayAreaHeightM = 0.0f;
     if (m_Options.pcvr) {
         if (m_ViewSpace == XR_NULL_HANDLE) {
             *error = QStringLiteral("PCVR needs the VIEW reference space");
@@ -932,6 +1056,27 @@ bool XrContext::createSession(QString* error)
             rci.referenceSpaceType = c.t;
             if (XR_SUCCEEDED(xrCreateReferenceSpace(m_Session, &rci, &m_TrackSpace))) {
                 m_TrackSpaceName = QString::fromLatin1(c.name);
+                if (c.t == XR_REFERENCE_SPACE_TYPE_STAGE) {
+                    XrExtent2Df extent = {};
+                    const XrResult rExt = xrGetReferenceSpaceBoundsRect(m_Session, XR_REFERENCE_SPACE_TYPE_STAGE, &extent);
+                    if (rExt == XR_SUCCESS &&
+                        extent.width >= (VIPLE_VR_PLAYAREA_MIN_MM / 1000.0f) &&
+                        extent.width <= (VIPLE_VR_PLAYAREA_MAX_MM / 1000.0f) &&
+                        extent.height >= (VIPLE_VR_PLAYAREA_MIN_MM / 1000.0f) &&
+                        extent.height <= (VIPLE_VR_PLAYAREA_MAX_MM / 1000.0f)) {
+                        m_HavePlayArea = true;
+                        m_PlayAreaWidthM = extent.width;
+                        m_PlayAreaHeightM = extent.height;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-XR] STAGE play area bounds: %.2f x %.2f m",
+                                    extent.width, extent.height);
+                    } else {
+                        m_HavePlayArea = false;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-XR] STAGE play area bounds unavailable or out of range (res=%d, w=%.2f, h=%.2f)",
+                                    static_cast<int>(rExt), extent.width, extent.height);
+                    }
+                }
                 break;
             }
             m_TrackSpace = XR_NULL_HANDLE;
@@ -2037,7 +2182,7 @@ void XrContext::frameThreadMain()
                     videoLayer = true;
                     videoGen = vcur.generation;
                     pcvrTimingOnLatch(vcur.seq, vcur.lastDrawnUs, vcur.renderUs, vcur.hasMeta,
-                                      vcur.meta.echoSampleId, cpuT0, periodUs);
+                                      vcur.meta.echoSampleId, cpuT0, periodUs, vcur.fbSeq, vcur.fbDrawnUs);
                     pcvrPoseErr(vcur.meta.renderRot, vcur.meta.renderPos, vcur.seq != m_PoseErrLastSeq);
                     m_PoseErrLastSeq = vcur.seq;
                     std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -2514,7 +2659,8 @@ void XrContext::frameThreadMain()
             const uint64_t tl1 = steadyNowNs();
 #ifdef HAVE_XR_VIDEO
             // 2026-10-05（§VR 錯配計數）：release 也在這把鎖內，所以這裡讀到的就是 xrEndFrame 會用的那張
-            if (m_Options.pcvr && videoLayer && m_Video != nullptr && m_Video->releaseNo() != vcur.releaseNo) {
+            // §VR-BUFFER：開緩衝時比的是顯示的那一條 swapchain 自己的序號（releaseNoFor）
+            if (m_Options.pcvr && videoLayer && m_Video != nullptr && m_Video->releaseNoFor(vcur) != vcur.releaseNo) {
                 // §VR-LATCH-RELATCH：開著時試一次——放掉 queue 鎖，看新發布的那一張（XrVideo 的 atomicPublish 保證
                 // 快照已經是它），把 projection 原地改成它自己的姿態（proj 已經在 layers[] 裡，存的是指標；
                 // buildProjection 只會在寫入 views 之前失敗，不會留下半套），再拿回 queue 鎖。重建只拿 m_StatsMutex。
@@ -2552,7 +2698,7 @@ void XrContext::frameThreadMain()
                     }
                     lk.lock();
                 }
-                if (m_Video->releaseNo() != vcur.releaseNo) {
+                if (m_Video->releaseNoFor(vcur) != vcur.releaseNo) {
                     m_PcvrTiming.mismatch10s++;  // 沒修到，或放掉鎖的這一小段又 release 了一張
                 }
                 else if (fixed) {
@@ -2792,7 +2938,8 @@ std::string latchWaitTail(const xrlatch::Counters& c)
 // 補幀（§VR-SYNTH）開著時，同一張影像第二次顯示的是合成的那一半，這裡照樣走「重複」那一支：那一格的年齡記成
 // 真的那一張＋一個週期（它的內容來自那一張，外插補回來的部分不算）。所以拿 age 比補幀開／關會低估補幀。
 void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
-                                  uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs)
+                                  uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs,
+                                  uint64_t fbSeq, uint64_t fbDrawnUs)
 {
     auto& t = m_PcvrTiming;
     t.lastAgePushed = false;
@@ -2826,9 +2973,18 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     t.repStreak = 0;
     t.lastMtpUs = 0;  // 這一張的 MTP 還沒量到；下面量到才記
     t.repRun = 0;
-    const int64_t slackUs = static_cast<int64_t>(latchNs / 1000ull) - static_cast<int64_t>(lastDrawnUs);
+    // §VR-BUFFER：slack 照「最新發布的那一張」算（沒開緩衝時就是顯示的這一張）。開緩衝時這一格顯示的雖然是新的，
+    // 最新的那一張卻可能上一格就到了（這一格沒有新影像到）——那等於沒開緩衝時的重複格，不更新要送給 host 的樣本
+    const uint64_t fbS = fbSeq != 0 ? fbSeq : seq;
+    const uint64_t fbUs = fbSeq != 0 ? fbDrawnUs : lastDrawnUs;
+    const bool fbNew = fbS != t.lastFbSeq;
+    t.lastFbSeq = fbS;
+    const int64_t slackUs = static_cast<int64_t>(latchNs / 1000ull) - static_cast<int64_t>(fbUs);
     const int32_t slack32 = static_cast<int32_t>((std::max<int64_t>)(INT32_MIN, (std::min<int64_t>)(slackUs, INT32_MAX)));
-    if (LiGetVrRepairQuietMs() < 60u) {
+    if (!fbNew) {
+        // §VR-BUFFER：沒有新影像到——上一筆照送（host 丟重複的 frameId）
+    }
+    else if (LiGetVrRepairQuietMs() < 60u) {
         // §VR-REPAIR-RTT：被補包機制拖晚的幀剛放行（60 ms 內）。這幾張的到達時刻反映的是補包花的時間、不是 host 的節拍，
         // 不拿來更新要送給 host 的 LATCH 樣本——上一筆照送（host 的控制器本來就丟重複的 frameId）。只有照
         // §VR-REPAIR-RTT 的規則等過才會走到這裡，其餘情況那個函式恆回 UINT32_MAX
@@ -2836,16 +2992,19 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     }
     else {
         t.lastSlackUs = slack32;
-        t.lastFrameId = static_cast<uint32_t>(seq);
+        t.lastFrameId = static_cast<uint32_t>(fbS);
         t.haveLatch = true;
     }
-    t.slack1s.push_back(slack32);
-    t.render1s.push_back(renderUs);
-    // §VR-XRLOOP：延遲鏈的 10 s 版（和上面是同一組值）。這裡在挑影像到 xrEndFrame 之間，量測不可以在這一段配置記憶體：
-    // 空間在 bringUp 配好了（一個視窗 2048 筆，120 Hz 的 10 秒是 1200 筆），真的滿了就不記這一筆——只少統計的樣本
-    if (m_LoopDiag.slack10s.size() < m_LoopDiag.slack10s.capacity() && m_LoopDiag.render10s.size() < m_LoopDiag.render10s.capacity()) {
-        m_LoopDiag.slack10s.push_back(slack32);
-        m_LoopDiag.render10s.push_back(renderUs);
+    // §VR-BUFFER：slack／render 的統計只記有新影像到的格（同沒開緩衝時的重複格）；顯示的這一張的 MTP 照常在下面量
+    if (fbNew) {
+        t.slack1s.push_back(slack32);
+        t.render1s.push_back(renderUs);
+        // §VR-XRLOOP：延遲鏈的 10 s 版（和上面是同一組值）。這裡在挑影像到 xrEndFrame 之間，量測不可以在這一段配置記憶體：
+        // 空間在 bringUp 配好了（一個視窗 2048 筆，120 Hz 的 10 秒是 1200 筆），真的滿了就不記這一筆——只少統計的樣本
+        if (m_LoopDiag.slack10s.size() < m_LoopDiag.slack10s.capacity() && m_LoopDiag.render10s.size() < m_LoopDiag.render10s.capacity()) {
+            m_LoopDiag.slack10s.push_back(slack32);
+            m_LoopDiag.render10s.push_back(renderUs);
+        }
     }
     if (hasMeta) {
         uint64_t sampleNs = 0;
@@ -3087,6 +3246,12 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
             ct.poseLagCount = 0;
         }
         m_PoseLag1s.clear();
+        // §VR-BUFFER-REFILL：緩衝的累計挑選結果（沒開緩衝是 0）。host 看到一直空著，就把相位提前一整格、多送一張補回來
+        uint32_t bufLag1 = 0, bufLag0 = 0;
+        if (m_Video != nullptr && m_Video->bufferTotals(&bufLag1, &bufLag0)) {
+            ct.bufLag1Total = bufLag1;
+            ct.bufLag0Total = bufLag0;
+        }
         uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_CLIENT_TIMING)];
         tlv[0] = VIPLE_VR_C2S_CLIENT_TIMING;
         tlv[1] = sizeof(ct);
@@ -3846,6 +4011,54 @@ bool XrContext::sampleHmd(float pos[3], float rot[4], float linVel[3], float ang
     return true;
 }
 
+bool XrContext::seatedPose(float pos[3], float* yawRad) const
+{
+    float rot[4] = {};
+    // §VR-SEATED-LOCAL（2026-10-30）：優先用 runtime 自己的坐姿零點＝LOCAL 空間原點在追蹤空間（STAGE）中的姿態。
+    // SteamVR 把 OpenXR LOCAL 對到 seated universe，用 LOCAL 的遊戲（Pixel Dungeon VR）身高取決於這個零點；
+    // 頭盔的 LOCAL 原點在眼睛高度，與 Steam 內建串流相同。高度不合理（< 0.5 m）或定位失敗才退回當下頭部姿態
+    bool haveLocal = false;
+    XrTime now = 0;
+    if (m_LocalSpace != XR_NULL_HANDLE && m_TrackSpace != XR_NULL_HANDLE && nowXrTime(&now)) {
+        XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
+        const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (XR_SUCCEEDED(xrLocateSpace(m_LocalSpace, m_TrackSpace, now, &loc)) && (loc.locationFlags & need) == need &&
+            loc.pose.position.y >= 0.5f) {
+            pos[0] = loc.pose.position.x;
+            pos[1] = loc.pose.position.y;
+            pos[2] = loc.pose.position.z;
+            rot[0] = loc.pose.orientation.x;
+            rot[1] = loc.pose.orientation.y;
+            rot[2] = loc.pose.orientation.z;
+            rot[3] = loc.pose.orientation.w;
+            haveLocal = true;
+        }
+    }
+    if (!haveLocal) {
+        float linVel[3] = {};
+        float angVel[3] = {};
+        uint32_t predictNs = 0;
+        if (!const_cast<XrContext*>(this)->sampleHmd(pos, rot, linVel, angVel, &predictNs)) {
+            return false;
+        }
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-PLAYAREA] seated zero from %s: (%.3f, %.3f, %.3f)",
+                haveLocal ? "LOCAL space" : "current head pose", pos[0], pos[1], pos[2]);
+    if (std::isnan(pos[0]) || std::isnan(pos[1]) || std::isnan(pos[2])) {
+        return false;
+    }
+    if (yawRad != nullptr) {
+        const float x = rot[0], y = rot[1], z = rot[2], w = rot[3];
+        const float siny = 2.0f * (w * y + x * z);
+        const float cosy = 1.0f - 2.0f * (x * x + y * y);
+        *yawRad = std::atan2(siny, cosy);
+        if (std::isnan(*yawRad)) {
+            *yawRad = 0.0f;
+        }
+    }
+    return true;
+}
+
 void XrContext::sampleControllers(VIPLE_VR_TRACKING* sample)
 {
     if (m_VrCtl == nullptr || !m_SessionBegun.load()) {
@@ -4413,6 +4626,9 @@ void XrContext::destroyAll()
         xrDestroySpace(m_TrackSpace);
         m_TrackSpace = XR_NULL_HANDLE;
     }
+    m_HavePlayArea = false;
+    m_PlayAreaWidthM = 0.0f;
+    m_PlayAreaHeightM = 0.0f;
     {
         std::lock_guard<std::mutex> lk(m_HmdMutex);
         m_Hmd = HmdSample();

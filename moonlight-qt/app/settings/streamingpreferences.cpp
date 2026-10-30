@@ -81,7 +81,9 @@
 #define SER_CAPTURESYSKEYS "capturesyskeys"
 #define SER_KEEPAWAKE "keepawake"
 #define SER_VROVERSCANDEG "vroverscandeg"
+#define SER_VRBUFFERFRAMES "vrbufferframes"
 #define SER_VRLATCHDELAYMS "vrlatchdelayms"
+#define SER_VRLATCHDELAYMIG "vrlatchdelaymig1029"
 #define SER_VRHALFRATE "vrhalfrate"
 #define SER_VR10BIT "vr10bit"
 #define SER_VRTRACKLOCK "vrtracklock"
@@ -303,7 +305,18 @@ void StreamingPreferences::reload()
     swapFaceButtons = settings.value(SER_SWAPFACEBUTTONS, false).toBool();
     keepAwake = settings.value(SER_KEEPAWAKE, true).toBool();
     vrOverscanDeg = qBound(0.0, settings.value(SER_VROVERSCANDEG, 0.0).toDouble(), 10.0);
-    vrLatchDelayMs = qBound(0.0, settings.value(SER_VRLATCHDELAYMS, 0.0).toDouble(), 20.0);
+    vrBufferFrames = qBound(0, settings.value(SER_VRBUFFERFRAMES, 1).toInt(), 1);
+    vrLatchDelayMs = qBound(0.0, settings.value(SER_VRLATCHDELAYMS, 3.0).toDouble(), 20.0);
+    // 2026-10-29：預設從 0 改成 3 ms（頭盔實測：解碼→顯示 −3.1 ms，繪製時間與漏幀不變；6 ms 會撞上 GPU 忙碌的那段）。
+    // save() 每次都寫入全部設定，舊版存著的 0 多半只是當時的預設值：只遷移一次，把存著的 0 改成 3；
+    // 之後使用者在設定裡選「關」，就照存的值
+    if (!settings.value(SER_VRLATCHDELAYMIG, false).toBool()) {
+        if (settings.contains(SER_VRLATCHDELAYMS) && vrLatchDelayMs == 0.0) {
+            vrLatchDelayMs = 3.0;
+            settings.setValue(SER_VRLATCHDELAYMS, vrLatchDelayMs);
+        }
+        settings.setValue(SER_VRLATCHDELAYMIG, true);
+    }
     vrHalfRate = settings.value(SER_VRHALFRATE, false).toBool();
     vr10Bit = settings.value(SER_VR10BIT, false).toBool();
     vrTrackLock = settings.value(SER_VRTRACKLOCK, false).toBool();
@@ -622,6 +635,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
     settings.setValue(SER_VROVERSCANDEG, vrOverscanDeg);
+    settings.setValue(SER_VRBUFFERFRAMES, vrBufferFrames);
     settings.setValue(SER_VRLATCHDELAYMS, vrLatchDelayMs);
     settings.setValue(SER_VRHALFRATE, vrHalfRate);
     settings.setValue(SER_VR10BIT, vr10Bit);

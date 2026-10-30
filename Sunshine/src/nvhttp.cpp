@@ -1356,7 +1356,10 @@ namespace nvhttp {
 
     auto neg = std::make_shared<::vr::negotiated_t>();
     neg->params = params;
-    if ((params.codecs & VIPLE_VR_CODEC_HEVC) && server_hevc) {
+    // §PYROWAVE-VR：client 只在使用者選了 PyroWave 時才送這一位，所以放最前面
+    if ((params.codecs & VIPLE_VR_CODEC_PYROWAVE) && pyrowave::is_available()) {
+      neg->codec = ::vr::codec_e::pyrowave;
+    } else if ((params.codecs & VIPLE_VR_CODEC_HEVC) && server_hevc) {
       neg->codec = ::vr::codec_e::hevc;
     } else if (params.codecs & VIPLE_VR_CODEC_H264) {
       neg->codec = ::vr::codec_e::h264;
@@ -1366,7 +1369,8 @@ namespace nvhttp {
     }
 
     const bool server_intra = video::last_encoder_probe_supported_vr_intra_refresh;
-    neg->recovery_intra = (params.caps & VIPLE_VR_CLIENT_CAP_RECOVERY_INTRA) && server_intra;
+    // PyroWave 每幀都是 intra，沒有 intra-refresh wave 可做（LOSS 照 IDR 路徑走，encoder 本來就每幀 IDR）
+    neg->recovery_intra = (params.caps & VIPLE_VR_CLIENT_CAP_RECOVERY_INTRA) && server_intra && neg->codec != ::vr::codec_e::pyrowave;
     neg->ir_frames = config::vr.intra_refresh_frames;
     neg->safety_ms = config::vr.intra_refresh_safety_ms;
     neg->guid = uuid_util::uuid_t::generate().string();

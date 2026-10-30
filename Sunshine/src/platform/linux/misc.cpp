@@ -1285,4 +1285,14 @@ namespace platf {
   int64_t vr_clock_frequency() {
     return 1'000'000'000;
   }
+
+  void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key) {
+    (void) version;
+    (void) auth_type;
+    (void) band;
+    (void) channel;
+    (void) ssid;
+    explicit_bzero(key.data(), key.size());
+    BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not supported"sv;
+  }
 }  // namespace platf

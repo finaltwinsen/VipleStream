@@ -154,6 +154,7 @@ namespace vr::latch {
 
   void controller_t::fill_observability(result_t &r) const {
     r.integral_ppm = integral_;
+    r.refills = refills_;
     r.slips = slips_;
     r.dropped = dropped_;
     r.mode = mode_;
@@ -257,6 +258,15 @@ namespace vr::latch {
   }
 
   result_t controller_t::on_latch_v2(int32_t slack_us, int64_t now_ns, uint32_t frame_id) {
+    // §VR-BUFFER-REFILL：補緩衝的 burst 還在走（或剛走完，管線裡還有舊節拍的幀）：不取樣本、不寫 pacing（寫了 bridge 會把
+    // burst 取消）。時刻與 frameId 照記——on_idle() 才不會把盲區當成 LATCH 停了，盲區後第一筆的積分 dt 也是正常的間隔
+    if (now_ns < refill_blind_until_ns_) {
+      last_latch_ns_ = now_ns;
+      have_frame_ = true;
+      last_frame_id_ = frame_id;
+      have_prev_slack_ = false;  // 相位滑移只比相鄰兩筆量測；隔著 burst 的兩筆不比
+      return hold();
+    }
     // client 沒有新幀時每 100 ms 重送上一筆（同一個 frameId）：不是新的相位量測
     if (have_frame_ && frame_id == last_frame_id_) {
       ++dropped_;
@@ -267,6 +277,12 @@ namespace vr::latch {
     }
     have_frame_ = true;
     last_frame_id_ = frame_id;
+    // §VR-BUFFER-REFILL：排定的補緩衝在這一則新幀的 LATCH 發出（session 每秒看一次 CLIENT_TIMING，這裡最多晚 100 ms）
+    if (refill_pending_) {
+      refill_pending_ = false;
+      last_latch_ns_ = now_ns;
+      return start_refill(now_ns);
+    }
 
     const double period_us = modulus_us();
     const double s = (double) slack_us;
@@ -315,6 +331,9 @@ namespace vr::latch {
     if (mode_ == mode_e::v3) {
       return on_idle_v3(now_ns);
     }
+    if (now_ns < refill_blind_until_ns_) {
+      return hold();  // §VR-BUFFER-REFILL：bridge 的 burst 還在走，寫 pacing 會把它取消
+    }
     if (!sent_once_ || last_latch_ns_ == 0 || now_ns - last_latch_ns_ < kStaleNs) {
       result_t r;
       r.ppm = sent_ppm_;
@@ -345,7 +364,8 @@ namespace vr::latch {
       // 那個被帶偏的輸出會維持到過載結束（200 ppm＝每秒漂 0.2 ms）。誤差的平滑值也是髒的：作廢，恢復後從第一筆
       // 新樣本重新開始。
       have_ema_ = false;
-      return decide(now_ns, (int32_t) std::lround(integral_));
+      // §VR-BUFFER-REFILL：補緩衝的盲區內不寫 pacing（bridge 的 burst 還在走，寫了會把它取消）
+      return now_ns < refill_blind_until_ns_ ? hold() : decide(now_ns, (int32_t) std::lround(integral_));
     }
     // v3：和節拍閘門關著同樣處理（v3_gate_closed），另外把閘門的紀錄清掉——暫停前的間隔與樣本都不沿用
     const bool voided = v3_abort_round();
@@ -444,6 +464,88 @@ namespace vr::latch {
     // 照舊等它走完、盲區過了才重新取樣本（提早取會量到移動中的相位）；v2／legacy 不看盲區，它們的輸出一變就寫
     // pacing（通常是切換後第一則新幀的 LATCH），那一次寫入會讓 bridge 把還沒結束的 burst 取消掉。
     v3_abort_round();
+    refill_pending_ = false;  // §VR-BUFFER-REFILL：排定、還沒發的那一次作廢（盲區同上，不取消）
+  }
+
+  // ── §VR-BUFFER-REFILL ─────────────────────────────────────────────────
+
+  bool controller_t::request_refill(int64_t now_ns) {
+    if (mode_ != mode_e::v2 || !options_.refill || !have_ema_ || !sent_once_ || refill_pending_ || now_ns < refill_blind_until_ns_) {
+      return false;
+    }
+    refill_pending_ = true;
+    return true;
+  }
+
+  result_t controller_t::start_refill(int64_t now_ns) {
+    // 基準＝目前送出的週期修正（PI 的輸出，含學到的時鐘差）。burst 期間週期再短 kRefillPpm，之後的幀一張比一張早到；
+    // 走滿「一個串流週期 ÷ kRefillPpm」這麼久，相位剛好提前一整格（取模不變，PI 的狀態照舊可用），多出來的那一張補進
+    // client 的緩衝。半速串流的串流週期是顯示週期的兩倍（stream_period_ns）
+    const int32_t base = sent_ppm_;
+    const double period_us = (double) stream_period_ns() / 1000.0;
+    const int64_t dur_us = std::min<int64_t>(std::llround(period_us * 1e6 / (double) kRefillPpm), kRefillMaxUs);
+
+    result_t r;
+    r.update = true;
+    r.ppm = base;
+    r.burst_ppm = base - kRefillPpm;
+    r.burst_us = (uint32_t) dur_us;
+    r.step_why = kStepRefill;
+    r.step_err_us = -(double) dur_us * (double) kRefillPpm / 1e6;  // 這次要移的量（負＝提前）
+
+    refill_blind_until_ns_ = now_ns + dur_us * 1000 + kRefillSettleNs;
+    ++refills_;
+    // burst 結束時由 bridge 改回基準。「已送出」記成基準，例行重送排在盲區一結束（第二道保險，同 start_step）
+    sent_ppm_ = base;
+    sent_once_ = true;
+    last_sent_ns_ = refill_blind_until_ns_ - kRefreshNs;
+    fill_observability(r);
+    return r;
+  }
+
+  bool refill_watch_t::on_report(uint32_t lag1_total, uint32_t lag0_total, int64_t now_ns) {
+    if (!have_ || lag1_total < lag1_ || lag0_total < lag0_) {
+      // 第一則、或累計值倒退（client 重建了影像管線）：從這一則重新起算
+      have_ = true;
+      lag1_ = lag1_total;
+      lag0_ = lag0_total;
+      d1_ = 0;
+      d0_ = 0;
+      empty_run_ = 0;
+      return false;
+    }
+    d1_ = lag1_total - lag1_;
+    d0_ = lag0_total - lag0_;
+    lag1_ = lag1_total;
+    lag0_ = lag0_total;
+    const uint64_t shown = (uint64_t) d1_ + d0_;
+    if (shown < kMinShown) {
+      empty_run_ = 0;  // 影像停住、暖機，或沒開緩衝（兩個都是 0）
+      return false;
+    }
+    if ((uint64_t) d1_ * 2 >= shown) {
+      // 緩衝在：上一次補過的話算成功，退避回到最短（已經排到更後面的下一次也拉回來）
+      empty_run_ = 0;
+      backoff_ns_ = kBackoffMinNs;
+      if (requests_ > 0) {
+        next_ok_ns_ = std::min(next_ok_ns_, last_req_ns_ + kBackoffMinNs);
+      }
+      return false;
+    }
+    if ((uint64_t) d0_ * 10 < shown * 9) {
+      empty_run_ = 0;  // 一半以上是最新那張、但不到九成：在吸收抖動，不是空著
+      return false;
+    }
+    ++empty_run_;
+    return empty_run_ >= kEmptyRun && now_ns >= next_ok_ns_;
+  }
+
+  void refill_watch_t::on_requested(int64_t now_ns) {
+    ++requests_;
+    empty_run_ = 0;
+    last_req_ns_ = now_ns;
+    next_ok_ns_ = now_ns + backoff_ns_;
+    backoff_ns_ = std::min(backoff_ns_ * 2, kBackoffMaxNs);
   }
 
   bool controller_t::can_step(int64_t now_ns) const {

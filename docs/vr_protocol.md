@@ -45,6 +45,13 @@
    120 Hz 的值時由它換算、約多 20 ms；沒學過時是 host 週期＋30 ms、約多 16 ms），要靠串流中的調整收回來。另外那一場學到的值
    會存成「60 Hz 頭盔」的那一筆：同一個 server 行程之後開全速、而全速的值還沒學過時，起始值由它換算、會偏小約 11 ms，
    約 20 秒才追回來。`/resume` 帶的值和進行中的編排不同時沿用進行中的（log 一行）。舊 server 會略過不認得的 key。
+   選填 &vrPlayArea=<寬mm>x<深mm>（§VR-PLAYAREA，2026-10-30）：頭盔真實遊玩區矩形大小（寬深 500～20000 mm，即 0.5～20 m）。
+   client 在選到 STAGE 參考空間且 xrGetReferenceSpaceBoundsRect 成功時送出；不帶、格式錯誤或超出範圍時 server 不讓 launch 失敗，
+   退回預設值 10000x10000 mm（10 m × 10 m）並記一行警告。
+   選填 &vrSeated=<x_mm>,<y_mm>,<z_mm>,<yaw 毫度>（§VR-PLAYAREA，2026-10-30）：頭盔坐姿零點位置（pos 各分量 ±20000 mm、高度 y 0～3000 mm）
+   與繞 +Y 軸偏航角（yaw ±180000 毫度，即 ±180°）。client 在送 /launch 當下能取得有效頭部姿態（VIEW space）時送出；不帶、格式錯誤或
+   超出範圍時 server 不讓 launch 失敗，退回預設值 (0, 1200, 0) mm、yaw 0 並記一行警告。
+   兩者皆成功解析時 server 記錄 [VIPLE-VR-PLAYAREA] area=<w>x<d>mm seated=<x>,<y>,<z>mm yaw=<deg>。
    - 全部是十進位定點數，不用 base64。
    - 要有 round-trip 單元測試；server 解碼失敗就回非 200。
    - `vrCaps`：b0 RECOVERY_INTRA、b1 TRACK_THREAD、b2 GAZE、b3 SKELETON。
@@ -68,6 +75,7 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 rsv                           
   （`VIPLE_VR_CTRL_PROFILE_*`：0 未知、1 Touch、2 Index、3 Frame、4 其他）。server 原樣 memcpy 進 IPC
   `vripc_ctrl_input_t.profile`（同位移，不 bump ABI），driver 依此選控制器 render model。舊 client 送 0，driver
   維持 Touch 外觀。
+- **IPC ABI 版本（§VR-PLAYAREA，2026-10-30）**：ripc_session_config_t 尾端加入 play_area_m[2]、seated_pos_m[3] 與 seated_yaw_rad（補齊 512 B，VRIPC_ABI_VERSION 升至 2）。
 
 - **頻率**：2×顯示 Hz。b5 相位對齊取樣從 GA **提前到 rc**：每幀依 latch 回授多送 1 個樣本。
 - **通道**：ch 0x07 UNSEQUENCED，沿用 C5 的 fallback。
@@ -104,10 +112,13 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 rsv                           
 | | 02 RECENTER | 新 spaceEpoch | reliable |
 | | 03 PRESENCE、04 CONTROLLER_STATE | — | reliable |
 | | 05 REFRESH_CHANGED | u16 Hz，觸發重開 session | reliable |
-| | 06 CLIENT_TIMING | 1 Hz 統計（M4a R3 定義 32 B；§VR-PREDICT 2026-10-03 尾端加 4 B＝36 B，舊 server 只讀前 32 B）：`{framesPresented u32, xrMissed u32, metaMiss u32（三者累計）, displayPeriodNs u32, decodeP50Us u16, decodeP95Us u16, renderP50Us u16, renderP95Us u16, slackP50Us i16, slackP05Us i16, mtpP50_100us u16, mtpP95_100us u16, poseLagP50_100us i16（遊戲算繪姿態相對實際顯示的時間差，正＝落後、負＝超前；樣本不足＝0x7FFF）, poseLagCount u16}` | ch 0x07 unseq |
+| | 06 CLIENT_TIMING | 1 Hz 統計（M4a R3 定義 32 B；§VR-PREDICT 2026-10-03 尾端加 4 B＝36 B，舊 server 只讀前 32 B；§VR-BUFFER-REFILL 2026-10-29 再加 8 B＝44 B，舊 server 只讀前 36 B）：`{framesPresented u32, xrMissed u32, metaMiss u32（三者累計）, displayPeriodNs u32, decodeP50Us u16, decodeP95Us u16, renderP50Us u16, renderP95Us u16, slackP50Us i16, slackP05Us i16, mtpP50_100us u16, mtpP95_100us u16, poseLagP50_100us i16（遊戲算繪姿態相對實際顯示的時間差，正＝落後、負＝超前；樣本不足＝0x7FFF）, poseLagCount u16, bufLag1Total u32, bufLag0Total u32（§VR-BUFFER 開著時累計顯示「最新的前一張」／「最新那張」的次數，沒開＝0；server 看相鄰兩則的差，緩衝連續 2 秒九成以上空著就用 burst 把相位提前一整格，見 `vr_buffer_refill`）}` | ch 0x07 unseq |
 | | 07 FRAME_FEEDBACK（GA） | 每 8 幀一批 | ch 0x07 unseq |
 | | **08 LATCH** | 10 Hz：`{frameId u32, slackUs i32, displayPeriodNs u32}` | ch 0x07 unseq |
 | | **09 LOSS** | `{firstLost u32, lastLost u32, reason u8}`，送 2 次 | ch 0x07 unseq |
+| | **0A LINK_HELLO** | 連線宣告（§VR-MULTILINK，見 §7） | reliable |
+| | **0B NACK** | 補包請求（§VR-LINK-REPAIR，走連線 DATA，見 §7） | 連線 DATA |
+| | **0C HOTSPOT_INFO** | §VR-HOTSPOT-AUTO（2026-10-30，102 B）：頭盔熱點憑證與頻段資訊。`{version u8, authType u8, band u8, channel u8, ssidLen u8, keyLen u8, ssid[32] u8, key[64] u8}`。底層經由已加密的 ENet reliable 控制通道（AES-GCM）傳輸；舊 server 依 TLV len 自動忽略。 | reliable |
 | | 7F | 保留：麥克風 | — |
 | 0x5508 S→C | 01 HAPTIC | `{device, durationUs, freqHz, amp, eventId}`（M4a R3：pcvr session 由 `bridge::set_haptic_sink` 把 driver 推進 IPC 的震動打包送出） | ch 0x07 unseq |
 | | 02 STATE | `{state, code, progress}`：編排進度、HMD 就緒、safe mode、`VRLINK_ACTIVE`、`ABI_MISMATCH_RESTART_STEAMVR` | reliable |
@@ -201,15 +212,17 @@ session（§M01-D）、`session_count()==0`、codec 交集（放在 `probe_encod
 `VrFlags`，`LiStopConnection` 結束時清零。大端平台一律 0。
 
 **TLV payload 大小**（`static_assert` 鎖定）：LOSS 9 B、LATCH 12 B、REFRESH_START 6 B、STATE 4 B、
-HAPTIC 20 B、STATS 40 B、CLIENT_TIMING 36 B。
+HAPTIC 20 B、STATS 40 B、CLIENT_TIMING 44 B（舊 client 送 36 B；server 讀姿態欄位時比的是 `offsetof(bufLag1Total)`，不是整個結構）。
 
-**LATCH 與頻率鎖（M4a R3）**：client 在 XR frame thread 記下每張新串流影像第一次被 latch 進 projection layer 的時刻，`slackUs`＝latch 時刻 − 影像就緒時刻，正值＝幀比 latch 早到；就緒時刻是影像 render thread 等到這張影像的 GPU 工作做完的那一刻（`xrvideo.cpp` 的 `tGpuEnd`，在 release swapchain image **之前**取，不是 release 的時刻——release 還要再晚一小段）；`frameId` 是 client 的影像發布序號（legacy 只記錄；v2 用它認出重送的舊值，v3 另外拿它當節拍，見後）；10 Hz 送最近一張。server 以 EMA（α 0.2）平滑 slack，目標＝顯示週期 / 4（夾 1～4 ms），PI 控制（Kp 0.05 ppm/µs、Ki 0.004、積分上限 150）算出週期修正 ppm（夾 ±200；正值＝週期變長），pcvr 模式以 `bridge::set_pacing_ppm` 寫 driver pacing（epoch 不變、不重新對齊）；ppm 變化 ≥ 2 或距上次 ≥ 1 s 才更新；超過 2 s 沒 LATCH 每秒減半回到 0。stub 模式只記錄。**`slackUs` 是取模一個週期的相位**（2026-10-05 Frame 實測確認）：只在新幀第一次被 latch 時量，晚到 δ 的幀會被下一個 latch 接走、量成「週期 − δ」，實際上不會出現負值；沒有新幀時 client 每 100 ms 重送同一個 `frameId` 的舊值。wire 格式不變，server 的 `vr_latch_mode = v2`（§VR-LATCH-V2）依此處理：誤差在上側折返（≥ 半週期就減一個週期）、丟掉重複 `frameId` 與 |slack| > 1.5 週期的樣本、輸出飽和時不積分、目標＝模數（host 虛擬 vsync 週期與顯示週期的較小值）× `vr_latch_target_pct`（預設 40%）、Kp 0.12、Ki 0.008；預設仍是 legacy。`vr_latch_mode = v3`（§VR-LATCH-V3，2026-10-08；wire 格式同樣不變，LATCH 仍是 12 B，舊 client 也適用）：`slackUs` 先取模到 0～模數，相位＝最近 7 筆的環狀中位數（參考點取到其他樣本的環狀距離總和最小的那一筆），誤差＝相位到目標的最短路徑（±半個模數）；|誤差| 超過 0.35 個模數時鎖住方向、回到 0.15 內才放開（反相點附近不來回翻）；PI 的增益、anti-windup、±200 ppm 與 v2 相同。`frameId` 在 v3 另外當節拍用：最近 5 個 LATCH 間隔裡 `frameId` 前進的張數不到協商幀率的七成、或其中一個間隔超過 300 ms（黑幀每 100 ms 一張、host 沒在出幀、LATCH 中斷），就不取樣本、輸出只留積分項；閘門開了先收 5 筆才開始追蹤。重複 `frameId` 與 |slack| > 1.5 個模數的樣本照樣丟棄；重複的 LATCH 仍然記成「前進 0 張」的間隔，所以影像停住、只剩重複的 LATCH 時，兩三則之後閘門關上，同樣把比例項拿掉、只留積分項（閘門還開著時單獨一則重複的只是不當樣本）。超過 2 s 沒 LATCH 只把比例項歸零，停滿 60 s 積分才每秒減半；連續追蹤滿 60 s 的積分（兩台機器的時鐘差）記在 server 行程內，下一個 session 當起點。v3 的目標可用 `vr_latch_target_v3_pct` 另外設（25～65%，0＝沿用 `vr_latch_target_pct`）。`vr_latch_acquire = enabled`（只在 v3）時，量到的誤差超過 0.15 個模數就把週期暫時改成「積分 ± `vr_latch_acquire_ppm`（預設 4000）」一段 |誤差| ÷ ppm 的時間（`bridge::set_pacing_step`；driver 與 IPC ABI 不變，走的是同一個週期欄位），結束後改回積分、再等 250 ms 才重新量 5 筆；還差超過 0.12 個模數就再補一步（一輪最多兩步），走完仍在 0.15 外記一次失敗並退避（5 s 起加倍、上限 60 s），任何 60 s 內最多 8 步；burst 期間與之後 250 ms 不取樣本、不寫 pacing。一步之後、量完之前閘門關了或 LATCH 停了，那一步不評估（log 的結果是 void，不算成敗），之後量到的相位算新的一輪。每步最長 1.5 s，所以一輪最多移 3 µs／ppm：`vr_latch_acquire_ppm` 低於 0.35 個模數 ÷ 3（120 Hz 972、90 Hz 1296、72 Hz 1620）時，從反相點起步的那一輪走不完，會記一次失敗，剩下的交給退避期間的 PI 與退避之後的下一輪。相位還沒穩定（不在追蹤狀態、或進入追蹤未滿 3 s）時，§VR-PREDICT 不採用 CLIENT_TIMING 的姿態落後視窗。**MTP_content**＝顯示該幀的 predictedDisplayTime（換成 client steady 時鐘）− echoSampleId 的 sampleTime；沒有時間換算擴充的 runtime 以 ≈2 週期估 predictedDisplayTime。**STATS 的計數欄位一律是 session 累計值**：STATS 走 UNSEQUENCED，掉一筆也不會
+**LATCH 與頻率鎖（M4a R3）**：client 在 XR frame thread 記下每張新串流影像第一次被 latch 進 projection layer 的時刻，`slackUs`＝latch 時刻 − 影像就緒時刻，正值＝幀比 latch 早到；就緒時刻是影像 render thread 等到這張影像的 GPU 工作做完的那一刻（`xrvideo.cpp` 的 `tGpuEnd`，在 release swapchain image **之前**取，不是 release 的時刻——release 還要再晚一小段）；`frameId` 是 client 的影像發布序號（legacy 只記錄；v2 用它認出重送的舊值，v3 另外拿它當節拍，見後）；10 Hz 送最近一張。server 以 EMA（α 0.2）平滑 slack，目標＝顯示週期 / 4（夾 1～4 ms），PI 控制（Kp 0.05 ppm/µs、Ki 0.004、積分上限 150）算出週期修正 ppm（夾 ±200；正值＝週期變長），pcvr 模式以 `bridge::set_pacing_ppm` 寫 driver pacing（epoch 不變、不重新對齊）；ppm 變化 ≥ 2 或距上次 ≥ 1 s 才更新；超過 2 s 沒 LATCH 每秒減半回到 0。stub 模式只記錄。**`slackUs` 是取模一個週期的相位**（2026-10-05 Frame 實測確認）：只在新幀第一次被 latch 時量，晚到 δ 的幀會被下一個 latch 接走、量成「週期 − δ」，實際上不會出現負值；沒有新幀時 client 每 100 ms 重送同一個 `frameId` 的舊值。wire 格式不變，server 的 `vr_latch_mode = v2`（§VR-LATCH-V2）依此處理：誤差在上側折返（≥ 半週期就減一個週期）、丟掉重複 `frameId` 與 |slack| > 1.5 週期的樣本、輸出飽和時不積分、目標＝模數（host 虛擬 vsync 週期與顯示週期的較小值）× `vr_latch_target_pct`（預設 40%）、Kp 0.12、Ki 0.008；預設仍是 legacy。v2 另有 `vr_buffer_refill`（§VR-BUFFER-REFILL，2026-10-29，預設 enabled）：CLIENT_TIMING 顯示 client 的緩衝連續 2 秒都有九成以上是空的（顯示的是最新那張），就在下一則新幀的 LATCH 把週期暫時改成「目前輸出 − 4500 ppm」，走「一個串流週期 ÷ 4500 ppm」那麼久（最長 2 s），相位提前一整格、host 多送一張，client 在同一個 latch 收到兩張，緩衝補回來；期間與之後 500 ms 不取樣本、不寫 pacing，誤差的平滑值與積分照舊，補過之後 5 s 內不再補、緩衝沒回來就加倍退避（上限 60 s）。`vr_latch_mode = v3`（§VR-LATCH-V3，2026-10-08；wire 格式同樣不變，LATCH 仍是 12 B，舊 client 也適用）：`slackUs` 先取模到 0～模數，相位＝最近 7 筆的環狀中位數（參考點取到其他樣本的環狀距離總和最小的那一筆），誤差＝相位到目標的最短路徑（±半個模數）；|誤差| 超過 0.35 個模數時鎖住方向、回到 0.15 內才放開（反相點附近不來回翻）；PI 的增益、anti-windup、±200 ppm 與 v2 相同。`frameId` 在 v3 另外當節拍用：最近 5 個 LATCH 間隔裡 `frameId` 前進的張數不到協商幀率的七成、或其中一個間隔超過 300 ms（黑幀每 100 ms 一張、host 沒在出幀、LATCH 中斷），就不取樣本、輸出只留積分項；閘門開了先收 5 筆才開始追蹤。重複 `frameId` 與 |slack| > 1.5 個模數的樣本照樣丟棄；重複的 LATCH 仍然記成「前進 0 張」的間隔，所以影像停住、只剩重複的 LATCH 時，兩三則之後閘門關上，同樣把比例項拿掉、只留積分項（閘門還開著時單獨一則重複的只是不當樣本）。超過 2 s 沒 LATCH 只把比例項歸零，停滿 60 s 積分才每秒減半；連續追蹤滿 60 s 的積分（兩台機器的時鐘差）記在 server 行程內，下一個 session 當起點。v3 的目標可用 `vr_latch_target_v3_pct` 另外設（25～65%，0＝沿用 `vr_latch_target_pct`）。`vr_latch_acquire = enabled`（只在 v3）時，量到的誤差超過 0.15 個模數就把週期暫時改成「積分 ± `vr_latch_acquire_ppm`（預設 4000）」一段 |誤差| ÷ ppm 的時間（`bridge::set_pacing_step`；driver 與 IPC ABI 不變，走的是同一個週期欄位），結束後改回積分、再等 250 ms 才重新量 5 筆；還差超過 0.12 個模數就再補一步（一輪最多兩步），走完仍在 0.15 外記一次失敗並退避（5 s 起加倍、上限 60 s），任何 60 s 內最多 8 步；burst 期間與之後 250 ms 不取樣本、不寫 pacing。一步之後、量完之前閘門關了或 LATCH 停了，那一步不評估（log 的結果是 void，不算成敗），之後量到的相位算新的一輪。每步最長 1.5 s，所以一輪最多移 3 µs／ppm：`vr_latch_acquire_ppm` 低於 0.35 個模數 ÷ 3（120 Hz 972、90 Hz 1296、72 Hz 1620）時，從反相點起步的那一輪走不完，會記一次失敗，剩下的交給退避期間的 PI 與退避之後的下一輪。相位還沒穩定（不在追蹤狀態、或進入追蹤未滿 3 s）時，§VR-PREDICT 不採用 CLIENT_TIMING 的姿態落後視窗。**MTP_content**＝顯示該幀的 predictedDisplayTime（換成 client steady 時鐘）− echoSampleId 的 sampleTime；沒有時間換算擴充的 runtime 以 ≈2 週期估 predictedDisplayTime。**STATS 的計數欄位一律是 session 累計值**：STATS 走 UNSEQUENCED，掉一筆也不會
 漏算，client 以相鄰兩筆相減得到區間值。欄位只往後加，client 依 len 能讀多少算多少。
 
 **STATE.state**：0 IDLE、1 ORCHESTRATING、2 HMD_ACTIVE、3 **STUB_ECHO**（M1a）、0xFF ERROR。
 
 **控制器按鍵 bit**：buttons 與 touches 共用同一套，pressCtr 每鍵 2 bit、順序相同。b0 SYSTEM、b1 MENU、
-b2 A/X、b3 B/Y、b4 THUMBSTICK、b5 TRIGGER、b6 GRIP、b7 TRACKPAD、b8 THUMBREST；b9–b15 保留。
+b2 A/X、b3 B/Y、b4 THUMBSTICK、b5 TRIGGER、b6 GRIP、b7 TRACKPAD、b8 THUMBREST、b9 C、b10 D、b11 BUMPER；
+b12–b15 保留。§VR-FRAME-CTRL（2.0.25）：Steam Frame 手把每手四個面鍵依 SteamVR frame_controller 的鏡像對應——
+A／B／C／D＝右 a／b／x／y、左 dpad_down／dpad_right／dpad_left／dpad_up；BUMPER＝shoulder。舊 client 不送 b9–b11。
 
 **0x81 header 的 renderRot**：smallest-three 編碼，2 bit 最大分量索引加 3×15 bit，以 48 bit little-endian
 存放，最大分量取正號。往返誤差實測最差 0.007°（20 萬組隨機四元數）。
@@ -333,7 +346,7 @@ client 的每張網卡各開一條連線，影像、音訊、追蹤在每條連�
   ≥ max(50, 影像位元率 × 1.5) Mbps 才開始在這條連線送影像。送不動（飽和偵測）的連線退回探測。
 - 沒有協商 CTRL 時，LOSS／LATCH／CLIENT_TIMING 與 S→C 的 VR 訊息只走 ENet（session 本身那個位址）。
 
-**§VR-LINK-CTRL：時間敏感的控制訊息走連線**（2026-10-07，server `vr_multilink_ctrl`，預設關閉）
+**§VR-LINK-CTRL：時間敏感的控制訊息走連線**（2026-10-07，server `vr_multilink_ctrl`；2026-10-29 起預設開啟，`vr_multilink` 預設 `auto`）
 
 ENet 只走 session 開啟時的那個位址。那條鏈路變差時（實測：使用者走到適配器收訊差的位置），影像已經改由另一條連線
 送，LOSS 與 REFRESH_START 卻還困在差的那條上——一筆 LOSS 等了 832 ms 才退回 IDR，另一筆根本沒送到。
@@ -349,7 +362,7 @@ ENet 只走 session 開啟時的那個位址。那條鏈路變差時（實測：
 - client 重送 LOSS 的門檻（2×RTT＋20 ms）改用連線量到的最短 RTT。
 - 相容：舊 client 的 `flags` 是 0 → `hubCaps` 沒有 CTRL → 兩邊都照舊走 ENet。
 
-**§VR-LINK-REPAIR：補包**（2026-10-07，server `vr_multilink_repair`，要同時開 `vr_multilink_ctrl`，預設關閉）
+**§VR-LINK-REPAIR：補包**（2026-10-07，server `vr_multilink_repair`，要同時開 `vr_multilink_ctrl`；2026-10-29 起預設開啟）
 
 FEC 補不回來的 block（掉的比 parity 多）原本只能整幀放棄、報 LOSS、等一波 intra refresh。server 留著原封包、
 也看得到每條鏈路的狀況，所以改成：頭盔只描述現況，補哪些、走哪條、補不補由 server 決定。

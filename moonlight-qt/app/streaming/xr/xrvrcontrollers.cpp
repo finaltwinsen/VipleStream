@@ -114,6 +114,9 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
         !mk("button_a_touch", "A / X touch", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_BtnLoTouch) ||
         !mk("button_b", "B / Y", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_BtnHi) ||
         !mk("button_b_touch", "B / Y touch", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_BtnHiTouch) ||
+        !mk("button_c", "Steam Frame X / D-pad left", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_BtnC) ||
+        !mk("button_d", "Steam Frame Y / D-pad up", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_BtnD) ||
+        !mk("bumper", "Steam Frame bumper", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Bumper) ||
         !mk("menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_Menu) ||
         !mk("system", "System", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_System) ||
         !mk("thumbrest_touch", "Thumbrest touch", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_ThumbrestTouch) ||
@@ -222,8 +225,10 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
         suggest("/interaction_profiles/valve/index_controller", full, core);
     }
     // ── valve/frame_controller_valve（Valve OpenXR Unity 套件文件，見 xrinput.cpp）──
-    // 右手 a/b（x/y 未用）＋menu；左手面鍵是 dpad，暫定 dpad_down→A/X、dpad_up→B/Y（左右鍵未用），
-    // view→MENU——實際按鍵幾何待實機確認。兩手 trigger／squeeze 有 value 與 click，thumbstick 同 Touch。
+    // §VR-FRAME-CTRL：四個面鍵照 SteamVR frame_controller_profile 的鏡像對應送 A／B／C／D——右 a/b/x/y、
+    // 左 dpad_down/right/left/up；shoulder→BUMPER；menu（右）／view（左）→MENU。server 的 driver 以 Frame 手把
+    // 身分出現，沒有 Frame 對應檔的遊戲由 SteamVR 自己的相容層（模擬 Touch）處理，與 Steam 內建串流相同。
+    // 兩手 trigger／squeeze 有 value 與 click，thumbstick 同 Touch。
     if (enabledExts.contains(QStringLiteral("XR_VALVE_frame_controller_interaction"))) {
         std::vector<B> core = {
             {m_GripPose, "/user/hand/left/input/grip/pose"},   {m_GripPose, "/user/hand/right/input/grip/pose"},
@@ -234,7 +239,7 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
             {m_Stick, "/user/hand/left/input/thumbstick"},     {m_Stick, "/user/hand/right/input/thumbstick"},
             {m_StickClick, "/user/hand/left/input/thumbstick/click"}, {m_StickClick, "/user/hand/right/input/thumbstick/click"},
             {m_BtnLo, "/user/hand/left/input/dpad_down/click"}, {m_BtnLo, "/user/hand/right/input/a/click"},
-            {m_BtnHi, "/user/hand/left/input/dpad_up/click"},  {m_BtnHi, "/user/hand/right/input/b/click"},
+            {m_BtnHi, "/user/hand/left/input/dpad_right/click"}, {m_BtnHi, "/user/hand/right/input/b/click"},
             {m_Menu, "/user/hand/left/input/view/click"},      {m_Menu, "/user/hand/right/input/menu/click"},
             {m_ComboX, "/user/hand/right/input/x/click"},
             {m_Haptic, "/user/hand/left/output/haptic"},       {m_Haptic, "/user/hand/right/output/haptic"},
@@ -245,7 +250,18 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
             {m_StickTouch, "/user/hand/left/input/thumbstick/touch"}, {m_StickTouch, "/user/hand/right/input/thumbstick/touch"},
             {m_System, "/user/hand/left/input/system/click"},  {m_System, "/user/hand/right/input/system/click"},
         });
-        suggest("/interaction_profiles/valve/frame_controller_valve", full, core);
+        // C／D／bumper 的路徑還沒在實機確認過：多一層，被拒時退回原本的核心清單（不影響既有按鍵）
+        const std::vector<B> extra = {
+            {m_BtnC, "/user/hand/left/input/dpad_left/click"}, {m_BtnC, "/user/hand/right/input/x/click"},
+            {m_BtnD, "/user/hand/left/input/dpad_up/click"},   {m_BtnD, "/user/hand/right/input/y/click"},
+            {m_Bumper, "/user/hand/left/input/shoulder/click"}, {m_Bumper, "/user/hand/right/input/shoulder/click"},
+        };
+        full.insert(full.end(), extra.begin(), extra.end());
+        std::vector<B> coreExtra = core;
+        coreExtra.insert(coreExtra.end(), extra.begin(), extra.end());
+        if (!suggestOnce("/interaction_profiles/valve/frame_controller_valve", full, true)) {
+            suggest("/interaction_profiles/valve/frame_controller_valve", coreExtra, core);
+        }
     }
 
     XrSessionActionSetsAttachInfo ai = xrStruct<XrSessionActionSetsAttachInfo>(XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO);
@@ -286,7 +302,7 @@ void XrVrControllers::destroy()
     }
     for (XrAction* a : {&m_GripPose, &m_TriggerValue, &m_TriggerClick, &m_TriggerTouch, &m_SqueezeValue,
                         &m_SqueezeClick, &m_Stick, &m_StickClick, &m_StickTouch, &m_BtnLo, &m_BtnLoTouch,
-                        &m_BtnHi, &m_BtnHiTouch, &m_Menu, &m_System, &m_ThumbrestTouch, &m_Haptic, &m_ComboX}) {
+                        &m_BtnHi, &m_BtnHiTouch, &m_BtnC, &m_BtnD, &m_Bumper, &m_Menu, &m_System, &m_ThumbrestTouch, &m_Haptic, &m_ComboX}) {
         if (*a != XR_NULL_HANDLE) {
             xrDestroyAction(*a);
             *a = XR_NULL_HANDLE;
@@ -474,6 +490,9 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
             if (boolState(m_Menu, h)) buttons |= VIPLE_VR_BTN_MENU;
             if (boolState(m_BtnLo, h)) buttons |= VIPLE_VR_BTN_A;
             if (boolState(m_BtnHi, h)) buttons |= VIPLE_VR_BTN_B;
+            if (boolState(m_BtnC, h)) buttons |= VIPLE_VR_BTN_C;
+            if (boolState(m_BtnD, h)) buttons |= VIPLE_VR_BTN_D;
+            if (boolState(m_Bumper, h)) buttons |= VIPLE_VR_BTN_BUMPER;
             if (boolState(m_StickClick, h)) buttons |= VIPLE_VR_BTN_THUMBSTICK;
             if (boolState(m_TriggerClick, h)) buttons |= VIPLE_VR_BTN_TRIGGER;
             if (boolState(m_SqueezeClick, h)) buttons |= VIPLE_VR_BTN_GRIP;
@@ -488,7 +507,8 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
         if (grip >= kClickOn) buttons |= VIPLE_VR_BTN_GRIP;
         if (trigger > kTouchOn) touches |= VIPLE_VR_BTN_TRIGGER;
         if (grip > kTouchOn) touches |= VIPLE_VR_BTN_GRIP;
-        touches |= buttons & (VIPLE_VR_BTN_A | VIPLE_VR_BTN_B | VIPLE_VR_BTN_THUMBSTICK | VIPLE_VR_BTN_TRIGGER);
+        touches |= buttons & (VIPLE_VR_BTN_A | VIPLE_VR_BTN_B | VIPLE_VR_BTN_C | VIPLE_VR_BTN_D | VIPLE_VR_BTN_BUMPER |
+                              VIPLE_VR_BTN_THUMBSTICK | VIPLE_VR_BTN_TRIGGER);
 
         if (!focused && !m_TestInput) {
             // 沒有輸入焦點：全部放開（pressCtr 不動）

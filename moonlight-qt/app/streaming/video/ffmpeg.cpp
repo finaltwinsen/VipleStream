@@ -1,8 +1,10 @@
 #include <Limelight.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>  // §VR-DECPOLL2
 #include <cstring>
 #include <mutex>
+#include <thread>  // §VR-DECPOLL2
 #include <vector>
 #include "ffmpeg.h"
 #include "bitstreamdump.h"
@@ -45,6 +47,8 @@ extern "C" {
 #include "ffmpeg-renderers/sdlvid.h"
 #ifdef HAVE_XR_VIDEO
 #include "ffmpeg-renderers/xrrenderer.h"  // §VR M3a X2
+#include "streaming/xr/xrcontext.h"  // §PYROWAVE-XR-ZC
+#include "streaming/xr/xrvideo.h"
 #endif
 #include "ffmpeg-renderers/genhwaccel.h"
 
@@ -2905,6 +2909,17 @@ bool FFmpegVideoDecoder::initializePyroWave(PDECODER_PARAMETERS params)
                                                               initParams.width, initParams.height);
         }
 #endif
+#ifdef HAVE_XR_VIDEO
+        // §PYROWAVE-XR-ZC：XR 串流（XrSwBackend）直接解碼進 XR 的 VkDevice，XrVideo 原地 map、不回讀 CPU
+        if (!pwZeroCopy && initParams.xr != nullptr && dynamic_cast<XrSwBackend*>(m_BackendRenderer) != nullptr &&
+            initParams.xr->video() != nullptr) {
+            PyroWaveVkInterop xrInterop;
+            if (initParams.xr->video()->pyroWaveInterop(&xrInterop)) {
+                pwZeroCopy = m_PyroWaveBridge->initializeZeroCopy(xrInterop, initParams.videoFormat,
+                                                                  initParams.width, initParams.height);
+            }
+        }
+#endif
         if (!pwZeroCopy &&
             !m_PyroWaveBridge->initialize(initParams.videoFormat, initParams.width, initParams.height)) {
             reset();
@@ -3426,6 +3441,41 @@ void FFmpegVideoDecoder::freezeWatchdogProc()
     }
 }
 
+// §PYROWAVE-SKIP-STALE（2026-10-29）：PyroWave 每幀都是 intra，跳過任何一幀都不影響後面的幀。解碼（拷貝版每眼 2160
+// 時約 10 ms）跟不上 144 Hz 時，common-c 的 decode unit 佇列（上限 240）會一路堆、延遲累積到 1 秒以上（10-29 配戴實測）。
+// 後面已經有更新的幀在等就不解這一幀：VR（XR 的 mailbox 只顯示最新的一張，這張解了也會被蓋掉）有 1 張就跳，
+// 平面要 2 張以上（兩幀一起到是常態的網路抖動，交給 Pacer）。回 true＝已經丟掉並 complete，呼叫端不要再送。
+bool FFmpegVideoDecoder::pyroWaveSkipStale(VIDEO_FRAME_HANDLE handle, PDECODE_UNIT du)
+{
+    const int pending = LiGetPendingVideoFrames();
+    const int frameNumber = du->frameNumber;  // complete 之後 du 可能已釋放
+    const int threshold = m_VrDropOnMetaMiss ? 1 : 2;
+    const bool skip = pending >= threshold;
+    if (skip) {
+        m_ActiveWndVideoStats.receivedFrames++;
+        m_ActiveWndVideoStats.totalFrames++;
+        m_ActiveWndVideoStats.pacerDroppedFrames++;
+        m_PwStaleSkipped++;
+        m_PwStaleMaxDepth = (std::max)(m_PwStaleMaxDepth, pending);
+        LiCompleteVideoFrame(handle, DR_OK);
+    }
+    const uint64_t nowUs = LiGetMicroseconds();
+    if (m_PwStaleWindowUs == 0) {
+        m_PwStaleWindowUs = nowUs;
+    }
+    else if (nowUs - m_PwStaleWindowUs >= 10000000ull) {
+        if (m_PwStaleSkipped > 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-PYROWAVE] 10s skipped %u stale frame(s) (decode behind; queue depth max %d, threshold %d, last frame %d)",
+                        m_PwStaleSkipped, m_PwStaleMaxDepth, threshold, frameNumber);
+        }
+        m_PwStaleSkipped = 0;
+        m_PwStaleMaxDepth = 0;
+        m_PwStaleWindowUs = nowUs;
+    }
+    return skip;
+}
+
 int FFmpegVideoDecoder::decoderThreadProcThunk(void *context)
 {
     ((FFmpegVideoDecoder*)context)->decoderThreadProc();
@@ -3442,9 +3492,30 @@ void FFmpegVideoDecoder::decoderThreadProc()
         uint64_t windowStartUs = 0;        // 這個 10 秒視窗的起點（0＝還沒開始）
         std::vector<uint32_t> recvWaitUs;  // 這個視窗每一幀：取到輸出時，距最近一次送輸入多久
         uint32_t polls = 0;                // 這個視窗：沒有輸出也沒有新輸入、去睡了幾次
+        // §VR-DECPOLL2（2026-10-29）：dec（重組完 → 取到輸出）3.5 ms 裡 recvWait 只有 1.07 ms，剩下的 2.4 ms 拆成
+        // 「在解碼佇列等了多久」與「submitDecodeUnit 本身花多久」（v4l2m2m 的 send_packet 可能在裡面就等解碼）
+        std::vector<uint32_t> queueWaitUs;
+        std::vector<uint32_t> submitUs;
     } vrPoll;
+    // §VR-DECPOLL2：VR（真 XR）時「沒有輸出也沒有新輸入」改成每 100 µs 問一次（原本 SDL_Delay(1)：頭盔 HEVC 幾乎每幀都
+    // 睡一次、recvWait p50 1065 µs＝等滿 1 ms 才拿到早就解好的幀）。平面串流照舊 1 ms
+    const uint32_t vrPollUs = m_VrDropOnMetaMiss ? 100u : 0u;
+    // VR：送一個 decode unit 進解碼器，順便記佇列等待與送出本身的時間
+    auto vrTimedSubmit = [&](PDECODE_UNIT du) -> int {
+        if (!m_VrDropOnMetaMiss) {
+            return submitDecodeUnit(du);
+        }
+        const uint64_t t0 = LiGetMicroseconds();
+        const uint64_t enq = du->enqueueTimeUs;
+        const int st = submitDecodeUnit(du);
+        const uint64_t t1 = LiGetMicroseconds();
+        vrPoll.lastSubmitUs = t1;
+        vrPoll.queueWaitUs.push_back((uint32_t)(std::min<uint64_t>)(t0 > enq ? t0 - enq : 0, 0xffffffffu));
+        vrPoll.submitUs.push_back((uint32_t)(std::min<uint64_t>)(t1 - t0, 0xffffffffu));
+        return st;
+    };
     // nowUs＝剛取到的那一幀的時刻；那一幀已經交出去之後才呼叫，排序與印 log 不佔它的時間
-    auto vrPollMaybeLog = [&vrPoll](uint64_t nowUs) {
+    auto vrPollMaybeLog = [&vrPoll, vrPollUs](uint64_t nowUs) {
         if (vrPoll.windowStartUs == 0) {
             vrPoll.windowStartUs = nowUs;
             return;
@@ -3453,26 +3524,34 @@ void FFmpegVideoDecoder::decoderThreadProc()
             return;
         }
         std::vector<uint32_t>& v = vrPoll.recvWaitUs;
-        auto pct = [&v](double p) -> uint32_t {
-            if (v.empty()) {
+        auto pctOf = [](std::vector<uint32_t>& w, double p) -> uint32_t {
+            if (w.empty()) {
                 return 0;
             }
-            const size_t idx = (std::min)(v.size() - 1, (size_t)(p * (double)(v.size() - 1) + 0.5));
-            std::nth_element(v.begin(), v.begin() + (std::ptrdiff_t)idx, v.end());
-            return v[idx];
+            const size_t idx = (std::min)(w.size() - 1, (size_t)(p * (double)(w.size() - 1) + 0.5));
+            std::nth_element(w.begin(), w.begin() + (std::ptrdiff_t)idx, w.end());
+            return w[idx];
         };
+        auto pct = [&](double p) -> uint32_t { return pctOf(v, p); };
         const uint32_t maxUs = v.empty() ? 0u : *std::max_element(v.begin(), v.end());
-        // pollUs＝輪詢的間隔（目前固定是 SDL_Delay(1)，印 0 表示沒有另外設）、mixed＝這個視窗裡間隔有沒有變過
+        // pollUs＝輪詢的間隔（0＝SDL_Delay(1)）、mixed＝這個視窗裡間隔有沒有變過。§VR-DECPOLL2 的兩欄加在行尾
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VR-DECPOLL] 10s frames=%u recvWait p50/p95/max=%u/%u/%u us polls=%u pollUs=0 mixed=0",
-                    (unsigned)v.size(), pct(0.50), pct(0.95), maxUs, vrPoll.polls);
+                    "[VIPLE-VR-DECPOLL] 10s frames=%u recvWait p50/p95/max=%u/%u/%u us polls=%u pollUs=%u mixed=0"
+                    " queueWait p50/p95=%u/%u us submit p50/p95=%u/%u us",
+                    (unsigned)v.size(), pct(0.50), pct(0.95), maxUs, vrPoll.polls, vrPollUs,
+                    pctOf(vrPoll.queueWaitUs, 0.50), pctOf(vrPoll.queueWaitUs, 0.95),
+                    pctOf(vrPoll.submitUs, 0.50), pctOf(vrPoll.submitUs, 0.95));
         vrPoll.windowStartUs = nowUs;
         v.clear();
+        vrPoll.queueWaitUs.clear();
+        vrPoll.submitUs.clear();
         vrPoll.polls = 0;
     };
     if (m_VrDropOnMetaMiss) {
         // 一個 10 秒視窗（120 fps 是 1200 筆）先配好：每一筆是在把那一幀交出去之前推的，不讓它在那裡重新配置
         vrPoll.recvWaitUs.reserve(2048);
+        vrPoll.queueWaitUs.reserve(2048);  // §VR-DECPOLL2
+        vrPoll.submitUs.reserve(2048);
     }
 
     while (!SDL_AtomicGet(&m_DecoderThreadShouldQuit)) {
@@ -3487,12 +3566,12 @@ void FFmpegVideoDecoder::decoderThreadProc()
                 // This might be a signal from the main thread to exit
                 continue;
             }
+            if (m_PyroWaveBridge && pyroWaveSkipStale(handle, du)) {
+                continue;
+            }
 
             setDecPhase(DP_SUBMIT);
-            const int submitStatus = submitDecodeUnit(du);
-            if (m_VrDropOnMetaMiss) {
-                vrPoll.lastSubmitUs = LiGetMicroseconds();  // §VR-DECPOLL
-            }
+            const int submitStatus = vrTimedSubmit(du);  // §VR-DECPOLL／DECPOLL2：VR 時記時刻
             LiCompleteVideoFrame(handle, submitStatus);
         }
 
@@ -3717,10 +3796,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     if (LiPollNextVideoFrame(&handle, &du)) {
                         // FIXME: Handle EAGAIN on avcodec_send_packet() properly?
                         setDecPhase(DP_SUBMIT);
-                        const int submitStatus = submitDecodeUnit(du);
-                        if (m_VrDropOnMetaMiss) {
-                            vrPoll.lastSubmitUs = LiGetMicroseconds();  // §VR-DECPOLL
-                        }
+                        const int submitStatus = vrTimedSubmit(du);  // §VR-DECPOLL／DECPOLL2
                         LiCompleteVideoFrame(handle, submitStatus);
                     }
                     else {
@@ -3730,7 +3806,12 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         if (m_VrDropOnMetaMiss) {
                             vrPoll.polls++;  // §VR-DECPOLL
                         }
-                        SDL_Delay(1);
+                        if (vrPollUs != 0) {
+                            std::this_thread::sleep_for(std::chrono::microseconds(vrPollUs));  // §VR-DECPOLL2
+                        }
+                        else {
+                            SDL_Delay(1);
+                        }
                     }
                 }
                 else {
@@ -4399,7 +4480,8 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     // !m_TestOnly 只是保險。
     if (BitstreamDump::isEnabled() && !m_TestOnly) {
         BitstreamDump::writeAccessUnit(m_Pkt->data, m_Pkt->size, m_VideoFormat,
-                                       m_OriginalVideoWidth, m_OriginalVideoHeight);
+                                       m_OriginalVideoWidth, m_OriginalVideoHeight,
+                                       (uint32_t)du->frameNumber, du->rtpTimestamp);
     }
 
     // §VR：pts 帶 frameNumber，解出來後用它查 0x81 metadata（不靠 FIFO）

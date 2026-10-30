@@ -36,12 +36,19 @@ using Clock = std::chrono::steady_clock;
 std::atomic<bool> s_Enabled{false};
 
 std::mutex s_Lock;
+// §VR-REC：顯示紀錄（XR frame thread 寫）用自己的鎖，不等 decoder 執行緒的 dump 寫檔
+std::mutex s_DispLock;
+FILE* s_DispLog = nullptr;
+bool s_DispTried = false;
+uint64_t s_DispFlushUs = 0;
 QString s_Base;            // 絕對路徑，已去掉使用者給的已知副檔名
 QString s_UserExt;         // 使用者給的已知副檔名（小寫、不含點）；沒有就是空字串
 int s_NextIndex = 0;       // 0 → <base>.<ext>；n ≥ 1 → <base>-<n>.<ext>
 bool s_ExtWarned = false;
 
 FILE* s_File = nullptr;
+FILE* s_AuLog = nullptr;     // §VR-REC：<dump 檔>.au.txt（s_Lock）
+unsigned long long s_AuIndex = 0;
 QString s_CurPath;
 int s_CurFormat = 0;
 int s_CurWidth = 0;
@@ -147,6 +154,10 @@ void closeLocked(const char* reason)
 
     fclose(s_File);
     s_File = nullptr;
+    if (s_AuLog != nullptr) {
+        fclose(s_AuLog);
+        s_AuLog = nullptr;
+    }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-BSDUMP] closed frames=%llu bytes=%llu path=%s reason=%s",
@@ -209,6 +220,13 @@ bool openLocked(int videoFormat, int width, int height)
     }
 
     s_File = f;
+    // §VR-REC：AU 旁檔（失敗只是沒有旁檔，dump 照錄）
+#ifdef Q_OS_WIN32
+    s_AuLog = _wfsopen((path + QStringLiteral(".au.txt")).toStdWString().c_str(), L"w", _SH_DENYNO);
+#else
+    s_AuLog = fopen(QFile::encodeName(path + QStringLiteral(".au.txt")).constData(), "w");
+#endif
+    s_AuIndex = 0;
     s_CurPath = path;
     s_CurFormat = videoFormat;
     s_CurWidth = width;
@@ -300,7 +318,8 @@ bool isEnabled()
     return s_Enabled.load(std::memory_order_relaxed);
 }
 
-void writeAccessUnit(const uint8_t* data, int length, int videoFormat, int width, int height)
+void writeAccessUnit(const uint8_t* data, int length, int videoFormat, int width, int height,
+                     uint32_t frameNumber, uint32_t rtpTimestamp)
 {
     if (data == nullptr || length <= 0) {
         return;
@@ -349,6 +368,11 @@ void writeAccessUnit(const uint8_t* data, int length, int videoFormat, int width
         return;
     }
 
+    if (s_AuLog != nullptr) {
+        fprintf(s_AuLog, "%llu %u %u %d\n", s_AuIndex, frameNumber, rtpTimestamp, length);
+        fflush(s_AuLog);
+    }
+    s_AuIndex++;
     s_Frames++;
     s_Bytes += (unsigned long long)length;
     if (s_CurFormat & VIDEO_FORMAT_MASK_AV1) {
@@ -365,8 +389,51 @@ void writeAccessUnit(const uint8_t* data, int length, int videoFormat, int width
 
 void close()
 {
-    std::lock_guard<std::mutex> lock(s_Lock);
-    closeLocked("decoder-destroyed");
+    {
+        std::lock_guard<std::mutex> lock(s_Lock);
+        closeLocked("decoder-destroyed");
+    }
+    // §VR-REC：顯示紀錄只 flush、不關：decoder 重建（換格式或解析度）時也會走到這裡，之後 frame thread 還要接著寫；
+    // 行程結束時由系統關檔
+    std::lock_guard<std::mutex> lock(s_DispLock);
+    if (s_DispLog != nullptr) {
+        fflush(s_DispLog);
+    }
+}
+
+void logDisplay(uint64_t nowUs, uint64_t shownSeq, int64_t shownPts, uint64_t newestSeq, bool synth)
+{
+    std::lock_guard<std::mutex> lock(s_DispLock);
+    if (s_DispLog == nullptr) {
+        if (s_DispTried) {
+            return;
+        }
+        s_DispTried = true;
+        QString base;
+        {
+            std::lock_guard<std::mutex> baseLock(s_Lock);
+            base = s_Base;
+        }
+        if (base.isEmpty()) {
+            return;
+        }
+#ifdef Q_OS_WIN32
+        s_DispLog = _wfsopen((base + QStringLiteral(".display.txt")).toStdWString().c_str(), L"w", _SH_DENYNO);
+#else
+        s_DispLog = fopen(QFile::encodeName(base + QStringLiteral(".display.txt")).constData(), "w");
+#endif
+        if (s_DispLog == nullptr) {
+            return;
+        }
+        s_DispFlushUs = nowUs;
+    }
+    fprintf(s_DispLog, "%llu %llu %lld %llu %d\n", (unsigned long long)nowUs, (unsigned long long)shownSeq,
+            (long long)shownPts, (unsigned long long)newestSeq, synth ? 1 : 0);
+    // 每秒 flush 一次（約 144 行、幾 KB）：frame thread 不每格做系統呼叫，被強制結束也最多掉一秒
+    if (nowUs - s_DispFlushUs >= 1000000ull) {
+        s_DispFlushUs = nowUs;
+        fflush(s_DispLog);
+    }
 }
 
 } // namespace BitstreamDump

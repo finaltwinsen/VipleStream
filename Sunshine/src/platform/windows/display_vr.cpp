@@ -27,11 +27,15 @@
  */
 // standard includes
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <format>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 // platform includes
 #include <d3d11_4.h>
@@ -306,6 +310,110 @@ namespace platf::dxgi {
     bool deferred_logged = false;  ///< §VR-FENCE-LATE：這個 generation 的「判定成立但還在退避期」已經印過
   };
 
+  // §VR-RAWDUMP（dev，config vr_dev_rawdump = <開始秒>:<張數>）：第一張影像之後先配好 staging 貼圖（在 signal_consumed 之後配，
+  // 不拖住 driver），到 <開始秒> 起每張在 GPU 複製一份（signal_consumed 之前，讀到的一定是這一張）；抓滿才 Map 讀回，寫成一個
+  // 原始 BGRA 檔（每張 width×height×4，逐列無間隔）。一個行程只傾印一次（擷取重建時不再抓）。
+  struct display_vr_t::rawdump_t {
+    int start_sec = 0;
+    int frames = 0;
+    int64_t first_qpc = 0;
+    int next = 0;
+    bool full = false;
+    bool done = false;
+    uint64_t first_frame_id = 0;
+    uint64_t last_frame_id = 0;
+    std::vector<texture2d_t> staging;
+  };
+
+  namespace {
+    std::atomic<bool> g_rawdump_written {false};
+  }  // namespace
+
+  void display_vr_t::rawdump_copy(ID3D11Texture2D *src, uint64_t frame_id) {
+    auto &r = *rawdump_;
+    if (r.done || r.full) {
+      return;
+    }
+    const int64_t now = platf::qpc_counter();
+    if (r.first_qpc == 0) {
+      r.first_qpc = now;
+      return;
+    }
+    if (r.staging.empty() || qpc_to_ms(now - r.first_qpc) < r.start_sec * 1000.0) {
+      return;
+    }
+    if (r.next == 0) {
+      r.first_frame_id = frame_id;
+    }
+    r.last_frame_id = frame_id;
+    device_ctx->CopyResource(r.staging[r.next].get(), src);
+    if (++r.next == r.frames) {
+      r.full = true;
+    }
+  }
+
+  void display_vr_t::rawdump_after_frame(ID3D11Texture2D *src) {
+    auto &r = *rawdump_;
+    if (r.done || r.first_qpc == 0) {
+      return;
+    }
+    if (r.staging.empty()) {
+      D3D11_TEXTURE2D_DESC desc {};
+      src->GetDesc(&desc);
+      desc.MipLevels = 1;
+      desc.ArraySize = 1;
+      desc.SampleDesc = {1, 0};
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.BindFlags = 0;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      desc.MiscFlags = 0;
+      r.staging.resize(r.frames);
+      for (auto &t : r.staging) {
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &t))) {
+          BOOST_LOG(error) << "[VIPLE-VR-RAWDUMP] CreateTexture2D(staging) failed; dump disabled"sv;
+          r.staging.clear();
+          r.done = true;
+          return;
+        }
+      }
+      BOOST_LOG(info) << "[VIPLE-VR-RAWDUMP] armed: "sv << r.frames << " frames "sv << desc.Width << 'x' << desc.Height
+                      << " BGRA from "sv << r.start_sec << " s after the first frame"sv;
+      return;
+    }
+    if (!r.full) {
+      return;
+    }
+    r.done = true;
+    g_rawdump_written = true;
+    D3D11_TEXTURE2D_DESC desc {};
+    r.staging[0]->GetDesc(&desc);
+    const auto path = platf::appdata() / std::format("rawdump_{}x{}_{}f.bgra", desc.Width, desc.Height, r.frames);
+    const int64_t t0 = platf::qpc_counter();
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    const size_t row = (size_t) desc.Width * 4;
+    bool ok = (bool) out;
+    for (int i = 0; i < r.frames && ok; ++i) {
+      D3D11_MAPPED_SUBRESOURCE m {};
+      if (FAILED(device_ctx->Map(r.staging[i].get(), 0, D3D11_MAP_READ, 0, &m))) {
+        ok = false;
+        break;
+      }
+      const auto *p = static_cast<const char *>(m.pData);
+      for (UINT y = 0; y < desc.Height && ok; ++y) {
+        out.write(p + (size_t) y * m.RowPitch, (std::streamsize) row);
+        ok = (bool) out;
+      }
+      device_ctx->Unmap(r.staging[i].get(), 0);
+    }
+    out.close();
+    r.staging.clear();
+    const bool contiguous = r.last_frame_id - r.first_frame_id + 1 == (uint64_t) r.frames;
+    BOOST_LOG(info) << "[VIPLE-VR-RAWDUMP] "sv << (ok ? "wrote "sv : "FAILED writing "sv) << r.frames << " frames "sv << desc.Width << 'x'
+                    << desc.Height << " BGRA frame_id "sv << r.first_frame_id << ".."sv << r.last_frame_id << " ("sv
+                    << (contiguous ? "contiguous"sv : "GAPS"sv) << ") to "sv << path.string() << " in "sv
+                    << std::format("{:.0f}", qpc_to_ms(platf::qpc_counter() - t0)) << " ms"sv;
+  }
+
   int display_vr_t::init(const ::video::config_t &config) {
     if (config.width <= 0 || config.height <= 0 || config.framerate <= 0) {
       BOOST_LOG(error) << "[VIPLE-VR-CAP] init: invalid shape "sv << config.width << 'x' << config.height << '@' << config.framerate;
@@ -374,6 +482,21 @@ namespace platf::dxgi {
                     << " luid="sv << (luid_match ? "match"sv : "n/a"sv)
                     << " size="sv << width << 'x' << height << '@' << config.framerate
                     << " mode="sv << (live ? "live"sv : "probe"sv);
+
+    // §VR-RAWDUMP（dev）：一個行程只傾印一次；格式不對只警告。不看 live：init 時 driver 常常還沒接上（mode=probe），
+    // 之後收到真的影像時沿用同一個物件、不會再 init；probe 階段只有黑幀，走不到 rawdump_copy
+    rawdump_.reset();
+    if (!config::vr.dev_rawdump.empty() && !g_rawdump_written) {
+      int start_sec = -1;
+      int frames = -1;
+      if (std::sscanf(config::vr.dev_rawdump.c_str(), "%d:%d", &start_sec, &frames) == 2 && start_sec >= 0 && frames > 0 && frames <= 2000) {
+        rawdump_ = std::make_shared<rawdump_t>();
+        rawdump_->start_sec = start_sec;
+        rawdump_->frames = frames;
+      } else {
+        BOOST_LOG(warning) << "[VIPLE-VR-RAWDUMP] invalid vr_dev_rawdump '"sv << config::vr.dev_rawdump << "' (want <startSec>:<frames>, frames 1-2000)"sv;
+      }
+    }
     return 0;
   }
 
@@ -1010,10 +1133,16 @@ namespace platf::dxgi {
           return capture_e::error;
         }
         device_ctx->CopyResource(img->capture_texture.get(), cs->tex[d.tex_idx].get());
+        if (rawdump_) {
+          rawdump_copy(cs->tex[d.tex_idx].get(), d.frame_id);  // §VR-RAWDUMP：要在 signal_consumed 之前（driver 之後才會覆寫這一張）
+        }
         // 解構時 Signal(capture_fence, ++fence_value)：encoder 端以 GPU Wait 自己行程的這個 fence（同行程，允許）
       }
       signal_consumed(d.fence_value);  // 含 Flush：CopyResource 與兩個 Signal 一起送出
       img->blank = false;
+      if (rawdump_) {
+        rawdump_after_frame(cs->tex[d.tex_idx].get());
+      }
 
       ::video::vr_frame_meta_t meta {};
       meta.valid = (d.flags & VRIPC_FRM_POSE_VALID) != 0;

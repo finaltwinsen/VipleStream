@@ -3109,3 +3109,169 @@ TEST(VrLatchTest, SessionTakingTheCoherenceWindowKeepsTheSamples) {
   EXPECT_EQ(w.samples, 1u);
   EXPECT_EQ(w.r_last, 1000);
 }
+
+// ── §VR-BUFFER-REFILL ─────────────────────────────────────────────────
+
+namespace {
+  constexpr uint32_t kPeriod144 = 6'944'444;  // 144 Hz
+
+  vr::latch::options_t refill_on() {
+    vr::latch::options_t o;
+    o.refill = true;
+    return o;
+  }
+}  // namespace
+
+TEST(VrLatchTest, V2RefillBurstAdvancesOneStreamPeriod) {
+  controller_t c;
+  c.configure(mode_e::v2, 40, kPeriod144, refill_on());
+  int64_t now = 0;
+  uint32_t id = 0;
+  auto r = feed_v2(c, 2778, 30, now, id, kPeriod144);  // 鎖在目標（0.4 × 6944 µs）附近
+  const int32_t base = c.last_sent_ppm();
+  ASSERT_TRUE(c.request_refill(now));
+  EXPECT_FALSE(c.request_refill(now));  // 已經排了
+  // 重送的舊 frameId 不發
+  now += kStepNs;
+  r = c.on_latch(2778, kPeriod144, now, id);
+  EXPECT_EQ(r.burst_us, 0u);
+  // 下一則新幀發出：週期短 4500 ppm，走 6944.4 µs ÷ 4500 ppm＝1.543 s，相位提前一整格
+  now += kStepNs;
+  r = c.on_latch(2778, kPeriod144, now, ++id);
+  EXPECT_TRUE(r.update);
+  EXPECT_EQ(r.step_why, vr::latch::kStepRefill);
+  EXPECT_EQ(r.ppm, base);
+  EXPECT_EQ(r.burst_ppm, base - controller_t::kRefillPpm);
+  EXPECT_NEAR((double) r.burst_us, 6944.444 / 0.0045, 2.0);
+  EXPECT_NEAR(r.step_err_us, -6944.4, 1.0);
+  EXPECT_EQ(r.refills, 1u);
+  // 盲區（burst＋500 ms）內：不寫 pacing、不收樣本（移動中的相位）、不接受新的要求，on_idle 也不寫
+  const int64_t blind_end = now + (int64_t) r.burst_us * 1000 + controller_t::kRefillSettleNs;
+  const uint64_t count = c.latch_count();
+  while (now + kStepNs < blind_end) {
+    now += kStepNs;
+    r = c.on_latch(6000, kPeriod144, now, ++id);
+    EXPECT_FALSE(r.update);
+    EXPECT_EQ(r.burst_us, 0u);
+    EXPECT_FALSE(c.request_refill(now));
+    EXPECT_FALSE(c.on_idle(now).update);
+  }
+  EXPECT_EQ(c.latch_count(), count);
+  // 盲區後照常：相位回到目標附近，輸出接著原本的值
+  now = blind_end + kStepNs;
+  r = c.on_latch(2778, kPeriod144, now, ++id);
+  EXPECT_EQ(c.latch_count(), count + 1);
+  EXPECT_EQ(r.burst_us, 0u);
+  EXPECT_NEAR(r.ppm, base, 20);
+  EXPECT_EQ(r.refills, 1u);
+  EXPECT_TRUE(c.request_refill(now));  // 盲區過了可以再排
+}
+
+TEST(VrLatchTest, V2RefillOnlyWhenEnabledV2AndMeasured) {
+  int64_t now = 0;
+  uint32_t id = 0;
+  controller_t off;  // 沒開 vr_buffer_refill
+  off.configure(mode_e::v2, 40, kPeriod144);
+  feed_v2(off, 2778, 10, now, id, kPeriod144);
+  EXPECT_FALSE(off.request_refill(now));
+
+  controller_t v3;  // 只有 v2 會補
+  v3.configure(mode_e::v3, 40, kPeriod144, refill_on());
+  feed_v2(v3, 2778, 10, now, id, kPeriod144);
+  EXPECT_FALSE(v3.request_refill(now));
+
+  controller_t legacy;
+  legacy.configure(mode_e::legacy, 40, kPeriod144, refill_on());
+  feed_v2(legacy, 2778, 10, now, id, kPeriod144);
+  EXPECT_FALSE(legacy.request_refill(now));
+
+  controller_t fresh;  // 還沒收到過樣本：沒有相位可以提前
+  fresh.configure(mode_e::v2, 40, kPeriod144, refill_on());
+  EXPECT_FALSE(fresh.request_refill(now));
+}
+
+TEST(VrLatchTest, V2RefillCappedAtBridgeLimit) {
+  // 90 Hz 一整格 11.1 ms ÷ 4500 ppm＝2.47 s，超過 bridge 的 2 s：夾在 2 s（移 9 ms，仍超過「週期 − 目標」6.7 ms）
+  controller_t c;
+  c.configure(mode_e::v2, 40, kPeriod90, refill_on());
+  int64_t now = 0;
+  uint32_t id = 0;
+  feed_v2(c, 4444, 30, now, id);
+  ASSERT_TRUE(c.request_refill(now));
+  const auto r = feed_v2(c, 4444, 1, now, id);
+  EXPECT_EQ(r.step_why, vr::latch::kStepRefill);
+  EXPECT_EQ(r.burst_us, 2'000'000u);
+  EXPECT_NEAR(r.step_err_us, -9000.0, 0.5);
+}
+
+TEST(VrLatchTest, V2RefillPendingDroppedBySwitchAndBlindHoldsOverload) {
+  controller_t c;
+  c.configure(mode_e::v2, 40, kPeriod144, refill_on());
+  int64_t now = 0;
+  uint32_t id = 0;
+  feed_v2(c, 2778, 30, now, id, kPeriod144);
+  ASSERT_TRUE(c.request_refill(now));
+  c.switch_mode(mode_e::v2, 40);  // 排定、還沒發的那一次作廢
+  auto r = feed_v2(c, 2778, 1, now, id, kPeriod144);
+  EXPECT_EQ(r.burst_us, 0u);
+  ASSERT_TRUE(c.request_refill(now));
+  r = feed_v2(c, 2778, 1, now, id, kPeriod144);
+  ASSERT_EQ(r.step_why, vr::latch::kStepRefill);
+  // §VR-FENCE-LATE 的過載旗標在盲區內也不寫 pacing（寫了 bridge 會把 burst 取消）
+  now += kStepNs;
+  EXPECT_FALSE(c.on_hold(now, ++id).update);
+}
+
+TEST(VrLatchTest, RefillWatchNeedsTwoEmptySecondsAndBacksOff) {
+  vr::latch::refill_watch_t w;
+  constexpr int64_t kSec = 1'000'000'000;
+  int64_t now = 0;
+  uint32_t l1 = 0;
+  uint32_t l0 = 0;
+  const auto tick = [&](uint32_t d1, uint32_t d0) {
+    now += kSec;
+    l1 += d1;
+    l0 += d0;
+    return w.on_report(l1, l0, now);
+  };
+  EXPECT_FALSE(tick(0, 0));  // 第一則只記起點
+  EXPECT_FALSE(tick(144, 0));  // 緩衝在
+  EXPECT_FALSE(tick(0, 144));  // 空 1 s
+  EXPECT_TRUE(tick(0, 144));  // 空 2 s：該補
+  EXPECT_EQ(w.last_lag1(), 0u);
+  EXPECT_EQ(w.last_lag0(), 144u);
+  w.on_requested(now);  // t＝4 s
+  EXPECT_EQ(w.requests(), 1u);
+  // 沒補回來：5 s 內不再要求，之後退避加倍成 10 s
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_FALSE(tick(0, 144));
+  }
+  EXPECT_TRUE(tick(0, 144));  // t＝9 s
+  w.on_requested(now);
+  for (int i = 0; i < 9; ++i) {
+    EXPECT_FALSE(tick(0, 144));
+  }
+  EXPECT_TRUE(tick(0, 144));  // t＝19 s
+  w.on_requested(now);  // 下一次排到 39 s、退避 40 s
+  // 緩衝回來一次：退避回到 5 s，下一次也拉回「上一次 + 5 s」＝24 s
+  EXPECT_FALSE(tick(144, 0));  // t＝20 s
+  EXPECT_FALSE(tick(0, 144));
+  EXPECT_FALSE(tick(0, 144));  // t＝22 s：空 2 s，但還沒到 24 s
+  EXPECT_FALSE(tick(0, 144));
+  EXPECT_TRUE(tick(0, 144));  // t＝24 s
+  w.on_requested(now);
+  // 一半以上是最新那張、但不到九成：在吸收抖動，不算空著；顯示太少（影像停住、沒開緩衝）也不判
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_FALSE(tick(40, 104));
+  }
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_FALSE(tick(0, 20));
+  }
+  // 累計值倒退（client 重建）：從這一則重新起算
+  now += kSec;
+  EXPECT_FALSE(w.on_report(0, 0, now));
+  l1 = 0;
+  l0 = 0;
+  EXPECT_FALSE(tick(0, 144));
+  EXPECT_TRUE(tick(0, 144));
+}

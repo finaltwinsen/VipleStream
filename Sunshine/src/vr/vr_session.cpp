@@ -318,6 +318,65 @@ namespace vr {
       p.force = (*v == "1");
     }
 
+    // §VR-PLAYAREA（選填）：vrPlayArea=<寬mm>x<深mm>
+    bool play_area_ok = false;
+    if (auto v = lookup("vrPlayArea")) {
+      auto sep = v->find('x');
+      if (sep == std::string::npos) {
+        sep = v->find('X');
+      }
+      if (sep != std::string::npos) {
+        auto w_str = std::string_view(*v).substr(0, sep);
+        auto d_str = std::string_view(*v).substr(sep + 1);
+        int64_t w = 0, d = 0;
+        if (parse_dec(w_str, false, w) && parse_dec(d_str, false, d) &&
+            w >= VIPLE_VR_PLAYAREA_MIN_MM && w <= VIPLE_VR_PLAYAREA_MAX_MM &&
+            d >= VIPLE_VR_PLAYAREA_MIN_MM && d <= VIPLE_VR_PLAYAREA_MAX_MM) {
+          p.play_area_w_mm = (int) w;
+          p.play_area_d_mm = (int) d;
+          p.has_play_area = true;
+          play_area_ok = true;
+        }
+      }
+      if (!play_area_ok) {
+        p.play_area_w_mm = VIPLE_VR_PLAYAREA_DEFAULT_W_MM;
+        p.play_area_d_mm = VIPLE_VR_PLAYAREA_DEFAULT_D_MM;
+      }
+    } else {
+      p.play_area_w_mm = VIPLE_VR_PLAYAREA_DEFAULT_W_MM;
+      p.play_area_d_mm = VIPLE_VR_PLAYAREA_DEFAULT_D_MM;
+    }
+
+    // §VR-PLAYAREA（選填）：vrSeated=<x_mm>,<y_mm>,<z_mm>,<yaw 毫度>
+    bool seated_ok = false;
+    if (auto v = lookup("vrSeated")) {
+      std::array<int, 4> seated_raw {};
+      std::string seated_err;
+      if (parse_int_list<4>("vrSeated", *v, -100000000, 100000000, seated_raw, seated_err)) {
+        const int x = seated_raw[0];
+        const int y = seated_raw[1];
+        const int z = seated_raw[2];
+        const int yaw = seated_raw[3];
+        if (x >= VIPLE_VR_SEATED_POS_MIN_MM && x <= VIPLE_VR_SEATED_POS_MAX_MM &&
+            y >= VIPLE_VR_SEATED_HEIGHT_MIN_MM && y <= VIPLE_VR_SEATED_HEIGHT_MAX_MM &&
+            z >= VIPLE_VR_SEATED_POS_MIN_MM && z <= VIPLE_VR_SEATED_POS_MAX_MM &&
+            yaw >= VIPLE_VR_SEATED_YAW_MDEG_MIN && yaw <= VIPLE_VR_SEATED_YAW_MDEG_MAX) {
+          p.seated_pos_mm = {x, y, z};
+          p.seated_yaw_mdeg = yaw;
+          p.has_seated = true;
+          seated_ok = true;
+        }
+      }
+      if (!seated_ok) {
+        p.seated_pos_mm = {VIPLE_VR_SEATED_DEFAULT_X_MM, VIPLE_VR_SEATED_DEFAULT_Y_MM, VIPLE_VR_SEATED_DEFAULT_Z_MM};
+        p.seated_yaw_mdeg = VIPLE_VR_SEATED_DEFAULT_YAW_MDEG;
+      }
+    } else {
+      p.seated_pos_mm = {VIPLE_VR_SEATED_DEFAULT_X_MM, VIPLE_VR_SEATED_DEFAULT_Y_MM, VIPLE_VR_SEATED_DEFAULT_Z_MM};
+      p.seated_yaw_mdeg = VIPLE_VR_SEATED_DEFAULT_YAW_MDEG;
+    }
+
+
     result.params = std::move(p);
     result.error.clear();
     return result;
@@ -325,7 +384,7 @@ namespace vr {
 
   std::string format_launch_params(const launch_params_t &p) {
     return std::format(
-      "vr=1&vrEye={}x{}&vrHz={}&vrPeriodNs={}&vrFov={}&vrIpd={}&vrEyeToHead={}&vrCaps={:x}&vrCodecs={}&vrCtrl={}&vrOverscan={}&vrForce={}{}{}",
+      "vr=1&vrEye={}x{}&vrHz={}&vrPeriodNs={}&vrFov={}&vrIpd={}&vrEyeToHead={}&vrCaps={:x}&vrCodecs={}&vrCtrl={}&vrOverscan={}&vrForce={}{}{}{}{}",
       p.eye_width,
       p.eye_height,
       p.hz,
@@ -341,12 +400,16 @@ namespace vr {
       // §VR-FOVEA：關閉時不帶（舊 server 不認得的 key 會略過，但字串維持和以前一樣）
       p.fovea > 100 ? std::format("&vrFovea={}", p.fovea) : std::string(),
       // 半速串流才帶（顯示更新率和 vrHz 不同）；其他時候字串維持和以前一樣
-      p.disp_hz > 0 && p.disp_hz != p.hz ? std::format("&vrDispHz={}", p.disp_hz) : std::string()
+      p.disp_hz > 0 && p.disp_hz != p.hz ? std::format("&vrDispHz={}", p.disp_hz) : std::string(),
+      // §VR-PLAYAREA：有指定遊玩區時帶上
+      p.has_play_area ? std::format("&vrPlayArea={}x{}", p.play_area_w_mm, p.play_area_d_mm) : std::string(),
+      // §VR-PLAYAREA：有指定坐姿零點時帶上
+      p.has_seated ? std::format("&vrSeated={},{},{},{}", p.seated_pos_mm[0], p.seated_pos_mm[1], p.seated_pos_mm[2], p.seated_yaw_mdeg) : std::string()
     );
   }
 
   const char *codec_name(codec_e codec) {
-    return codec == codec_e::hevc ? "hevc" : "h264";
+    return codec == codec_e::hevc ? "hevc" : codec == codec_e::pyrowave ? "pyrowave" : "h264";
   }
 
   std::string format_session_element(const negotiated_t &neg) {
@@ -709,11 +772,32 @@ namespace vr {
     return latch_coh_.take_window();
   }
 
-  void session_state_t::on_client_timing(const uint8_t *body, std::size_t len) {
+  std::optional<session_state_t::refill_request_t> session_state_t::on_client_timing(const uint8_t *body, std::size_t len, int64_t now_ns) {
     VIPLE_VR_TLV_CLIENT_TIMING t {};
     std::memcpy(&t, body, std::min(len, sizeof(t)));
+    bool want = false;
+    {
+      std::lock_guard lk {timing_mtx_};
+      timing_last_ = t;
+      // §VR-BUFFER-REFILL：2026-10-29 起的 client 送整個結構（44 B），才有緩衝的累計值；舊 client 送 36 B
+      if (len >= sizeof(t)) {
+        want = refill_watch_.on_report(t.bufLag1Total, t.bufLag0Total, now_ns);
+      }
+    }
+    if (!want) {
+      return std::nullopt;
+    }
+    bool accepted = false;
+    {
+      std::lock_guard lk {latch_mtx_};  // 兩把鎖不同時拿
+      accepted = latch_ctl_.request_refill(now_ns);
+    }
+    if (!accepted) {
+      return std::nullopt;  // 不是 v2、沒開 vr_buffer_refill、或還在上一次的盲區：下一秒再問
+    }
     std::lock_guard lk {timing_mtx_};
-    timing_last_ = t;
+    refill_watch_.on_requested(now_ns);
+    return refill_request_t {refill_watch_.last_lag1(), refill_watch_.last_lag0(), refill_watch_.requests()};
   }
 
   std::optional<VIPLE_VR_TLV_CLIENT_TIMING> session_state_t::last_client_timing() const {

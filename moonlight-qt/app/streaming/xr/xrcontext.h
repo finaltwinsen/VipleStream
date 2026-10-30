@@ -104,6 +104,14 @@ public:
         // 2026-10-05（dev）：--vr-overscan。PCVR 每眼 FOV 四邊各放大這麼多度：/launch 的 vrFov 與 projection 用同一組
         // 放大後的值（vrOverscan 仍送 0），host 多畫一圈，轉頭時 Frame 端重投影不會露出沒畫面的邊。0＝不放大。
         float pcvrOverscanDeg = 0.0f;
+        // §PYROWAVE-XR-ZC（2026-10-29）：這一場要求 PyroWave。VkDevice 改用 Vulkan 1.3 並開 PyroWave 解碼器要的功能，
+        // 讓它直接解碼進 XR 的 device（XrVideo::pyroWaveInterop）。runtime 標的上限只有 1.2（OpenXR：那是「測過的」
+        // 版本，不是禁止），1.3 建不起來就退回原本的 1.2 device、PyroWave 走拷貝版。
+        bool pyroWaveInterop = false;
+        // §VR-BUFFER（2026-10-29）：PCVR 頭盔端多緩衝幾格（0／1），見 XrVideo::Config::buffer
+        int pcvrBufferFrames = 0;
+        // §VR-GPU-PRIO（2026-10-29，dev）：XR VkDevice 那條 queue 的全域優先權（0＝驅動預設、1＝high、2＝realtime）
+        int gpuQueuePriority = 0;
         // 2026-10-08（§VR-LATE-LATCH）：PCVR 的 frame thread 在 xrWaitFrame 返回後先等這麼久，才挑最新的串流影像交給
         // runtime。我們的「算圖」只是把解碼好的影像貼上去，幾乎不花時間；runtime 卻在顯示前約 3 個週期就叫醒我們
         // （Frame 實測 predictAhead 約 26 ms）。晚一點挑，同一個顯示時刻就能用到更新的影像。0＝不等（舊行為）。
@@ -233,6 +241,8 @@ public:
     // pl_vulkan_import 要求：device 建立時實際啟用的 device 擴充與 features（required∪recommended∩支援）
     const std::vector<const char*>& vkEnabledDeviceExtensions() const { return m_DevExts; }
     const VkPhysicalDeviceFeatures2* vkEnabledFeatures() const { return m_HaveFeatureChain ? &m_EnFeat2 : nullptr; }
+    // §PYROWAVE-XR-ZC：PyroWave 能不能直接解碼進這個 device（見 Options::pyroWaveInterop）
+    bool pyroWaveReady() const { return m_PyroWaveVk13; }
     XrInstance xrInstance() const { return m_Instance; }
     XrSession xrSession() const { return m_Session; }
 
@@ -261,6 +271,18 @@ public:
     // §VR-LATCH-WAIT：串流一幀佔幾個顯示格（半速串流 2）。main thread 在決定串流更新率之後設，frame thread 讀
     void setPcvrStreamDiv(int div) { m_PcvrStreamDiv.store(div >= 1 ? div : 1, std::memory_order_relaxed); }
     bool trackingThreadMode() const { return m_TimeConv != nullptr; }
+    // §VR-PLAYAREA（2026-10-30）：真實遊玩區範圍（公尺）；STAGE 且成功取得有效矩形（0.5～20 m）時回傳 true
+    bool playAreaBounds(float* widthM, float* heightM) const {
+        if (!m_HavePlayArea || widthM == nullptr || heightM == nullptr) {
+            return false;
+        }
+        *widthM = m_PlayAreaWidthM;
+        *heightM = m_PlayAreaHeightM;
+        return true;
+    }
+    // §VR-PLAYAREA（2026-10-30）：坐姿零點（位置 x, y, z 公尺，以及繞 +Y 的 yaw 弧度）
+    // 用現有的 sampleHmd 定位頭部姿態，拿不到有效姿態時回傳 false
+    bool seatedPose(float pos[3], float* yawRad) const;
     // 2026-10-10（dev，--vr-synthetic-hmd）：§VR-POSEERR 的基準——「這一格顯示時刻的頭部姿態」——改用合成的頭部軌跡。
     // 送給 host 的頭部姿態是合成的，頭盔真的姿態（沒有人戴、放著不動）和算繪姿態沒有關係，拿來比量不到落後。
     // 換掉的只有姿態誤差與落後的統計（[VIPLE-VR-POSEERR]、CLIENT_TIMING 的 poseLag 兩個欄位）；projection 的姿態、
@@ -322,6 +344,8 @@ private:
     bool createInstance(QString* error);
     bool createSystem(QString* error);
     bool createVulkan(QString* error);
+    bool createVulkanAt(QString* error, bool pyroWave13);  // §PYROWAVE-XR-ZC：createVulkan 的本體
+    void destroyVulkanObjects();                           // 建到一半失敗時清掉（不碰 XrInstance）
     bool createSession(QString* error);
     bool createQuadSwapchain(QString* error);
     bool createActions(QString* error);
@@ -471,6 +495,8 @@ private:
     VkPhysicalDeviceFeatures2 m_EnFeat2 = {};
     VkPhysicalDeviceVulkan11Features m_EnF11 = {};
     VkPhysicalDeviceVulkan12Features m_EnF12 = {};
+    VkPhysicalDeviceVulkan13Features m_EnF13 = {};  // §PYROWAVE-XR-ZC：只在 1.3 device 掛上鏈
+    bool m_PyroWaveVk13 = false;                    // §PYROWAVE-XR-ZC：device 是 1.3 且 PyroWave 要的功能都開了
     bool m_HaveFeatureChain = false;
     XrVideo* m_Video = nullptr;
 
@@ -506,6 +532,10 @@ private:
     // ── M4a R1（PCVR）──
     XrSpace m_TrackSpace = XR_NULL_HANDLE;   // PCVR：STAGE→LOCAL_FLOOR→LOCAL（β 不用）
     QString m_TrackSpaceName;
+    // §VR-PLAYAREA：STAGE 參考空間的遊玩區矩形邊界（公尺）
+    bool m_HavePlayArea = false;
+    float m_PlayAreaWidthM = 0.0f;
+    float m_PlayAreaHeightM = 0.0f;
     XrPosef m_EyeToHead[2] = {};              // m_StatsMutex 保護（與 m_Fov 一起）
     bool m_HaveEyeToHead = false;
     uint32_t m_RecW = 0, m_RecH = 0;
@@ -599,6 +629,7 @@ private:
         bool haveLatch = false;
         uint32_t lastFrameId = 0;
         int32_t lastSlackUs = 0;
+        uint64_t lastFbSeq = 0;  // §VR-BUFFER：上一次拿來算 LATCH slack 的那一張（最新發布的）
         uint64_t lastLatchSendNs = 0;
         uint64_t lastTimingSendNs = 0;
         uint64_t mtpWindowStartNs = 0;
@@ -660,8 +691,10 @@ private:
         std::vector<uint32_t> mtp1sUs;
         std::vector<uint32_t> mtp10sUs;
     } m_PcvrTiming;
+    // fbSeq／fbDrawnUs（§VR-BUFFER）：LATCH slack 照這一張算（開緩衝時＝最新發布的，不是顯示的那張）；0＝同 seq／lastDrawnUs
     void pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
-                           uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs);
+                           uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs,
+                           uint64_t fbSeq = 0, uint64_t fbDrawnUs = 0);
     // §VR-LATCH-RELATCH：這一格改送另一張影像（參數是新的那一張）——把 pcvrTimingOnLatch 對原本那張記的帳改過來
     void pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta, uint32_t echoSampleId,
                            const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs);

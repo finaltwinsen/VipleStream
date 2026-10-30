@@ -13,6 +13,12 @@
 //
 // log：`[VIPLE-BSDUMP] open <path> codec=<…> <W>x<H>`、每 10 秒 `progress frames=… bytes=…`、
 // `closed frames=… bytes=…`。
+//
+// §VR-REC（2026-10-29）：另外寫兩個文字旁檔，給離線重建「頭盔實際顯示的畫面」用（頭盔上錄不到 SteamVR 的畫面）：
+//   <dump 檔>.au.txt    每個 AU 一行：<AU 序號> <frameNumber> <rtpTimestamp> <bytes>（跟著 dump 檔開關、每行 flush）
+//   <base>.display.txt  XR frame thread 每一格一行：<steady µs> <顯示的發布序號> <它的 rtpTimestamp（查不到 -1）>
+//                       <最新的發布序號> <1＝補幀合成的那一半>。每秒 flush 一次；一個行程只開一次（close() 只 flush）
+// 解碼後 frame->pts 就是 rtpTimestamp（ffmpeg.cpp），所以兩個旁檔用 rtpTimestamp 對得起來。
 
 #pragma once
 
@@ -30,7 +36,10 @@ bool isEnabled();
 
 // 寫一個完整 AU。videoFormat 是 Limelight.h 的 VIDEO_FORMAT_*；第一次呼叫時開檔。
 // 只會在 decoder 執行緒呼叫。
-void writeAccessUnit(const uint8_t* data, int length, int videoFormat, int width, int height);
+void writeAccessUnit(const uint8_t* data, int length, int videoFormat, int width, int height,
+                     uint32_t frameNumber, uint32_t rtpTimestamp);
+// §VR-REC：XR frame thread 每一格呼叫一次（開著 dump 才呼叫）。和 writeAccessUnit 用不同的鎖，不會等 decoder 的寫檔
+void logDisplay(uint64_t nowUs, uint64_t shownSeq, int64_t shownPts, uint64_t newestSeq, bool synth);
 
 // decoder 解構時呼叫：關檔並印 closed 行。沒開檔時不做事。
 void close();

@@ -68,7 +68,7 @@ static inline void vripc_seq_write_begin(uint64_t *p, uint64_t v) {
 }
 
 /* ── 常數 ─────────────────────────────────────────────────────────────── */
-#define VRIPC_ABI_VERSION 1u
+#define VRIPC_ABI_VERSION 2u
 #define VRIPC_MAGIC_PIPE 0x50525356u /* "VSRP"（little-endian） */
 #define VRIPC_MAGIC_SHM 0x4D485356u /* "VSHM" */
 #define VRIPC_SHM_SECTION_SIZE 65536u /* server 建立的 section 大小；driver 以 VirtualQuery 驗證 ≥ sizeof(vripc_shm_t) */
@@ -364,6 +364,10 @@ typedef struct vripc_session_config_t { /* 寫入方：server，WELCOME 前寫�
   uint32_t pose_flags; /* VRIPC_POSE_F_*；0＝舊行為 */
   uint16_t render_scale_pct; /* 2026-10-08：建議算圖尺寸＝每眼尺寸 × 這個百分比（driver 夾在 100–250）；0＝100（舊行為，原 reserved2） */
   uint16_t fovea_pct; /* 2026-10-08（§VR-FOVEA）：注視點編碼，正前方的像素密度是均勻取樣的幾 %（101–250 才啟用；原 render_scale_pct 的高 16 位元，以前一律是 0） */
+  float play_area_m[2]; /* §VR-PLAYAREA（2026-10-30）：真實遊玩區：寬（x）、深（z），公尺；無效時為 0 */
+  float seated_pos_m[3]; /* 坐姿零點位置（x, y, z），公尺 */
+  float seated_yaw_rad; /* 坐姿零點繞 +Y 的 yaw，弧度 */
+  uint8_t reserved[40]; /* 補齊至 64 位元組倍數（512 B） */
 } vripc_session_config_t;
 
 typedef struct vripc_pacing_t { /* 寫入方：server；單格 seqlock（seq 偶數 = 完成）；idle generation 也必須寫有效週期。
@@ -557,11 +561,14 @@ VRIPC_STATIC_ASSERT(sizeof(vripc_shm_header_t) == 64, "header");
 VRIPC_STATIC_ASSERT(sizeof(vripc_driver_status_t) == 192, "driver_status");
 VRIPC_STATIC_ASSERT(offsetof(vripc_driver_status_t, act_refresh_mhz) == 128, "driver_status.act");
 VRIPC_STATIC_ASSERT(offsetof(vripc_driver_status_t, other_hmd_system) == 112, "driver_status.other");
-VRIPC_STATIC_ASSERT(sizeof(vripc_session_config_t) == 448, "config");
+VRIPC_STATIC_ASSERT(sizeof(vripc_session_config_t) == 512, "config");
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, audio_endpoint_id) == 160, "config.audio");
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, vsync_to_photons_us) == 416, "config.v2p");
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, stale_oor_hmd_us) == 436, "config.oor_hmd");
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, pose_flags) == 440, "config.pose_flags");
+VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, play_area_m) == 448, "config.play_area");
+VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, seated_pos_m) == 456, "config.seated_pos");
+VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, seated_yaw_rad) == 468, "config.seated_yaw");
 VRIPC_STATIC_ASSERT(sizeof(vripc_pacing_t) == 64, "pacing");
 VRIPC_STATIC_ASSERT(sizeof(vripc_pose_t) == 52, "pose");
 VRIPC_STATIC_ASSERT(sizeof(vripc_ctrl_input_t) == 24, "ctrl_input");
@@ -577,14 +584,14 @@ VRIPC_STATIC_ASSERT(sizeof(vripc_log_line_t) == 256, "log_line");
 
 VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, driver) == 64, "shm.driver");
 VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, config) == 256, "shm.config");
-VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, pacing) == 704, "shm.pacing");
-VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, tracking) == 768, "shm.tracking");
-VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, frames) == 3392, "shm.frames");
-VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, consume) == 4480, "shm.consume");
-VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, haptic) == 4544, "shm.haptic");
-VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, timing) == 5440, "shm.timing");
-VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, log) == 21952, "shm.log");
-VRIPC_STATIC_ASSERT(sizeof(vripc_shm_t) == 38464, "shm");
+VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, pacing) == 768, "shm.pacing");
+VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, tracking) == 832, "shm.tracking");
+VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, frames) == 3456, "shm.frames");
+VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, consume) == 4544, "shm.consume");
+VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, haptic) == 4608, "shm.haptic");
+VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, timing) == 5504, "shm.timing");
+VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, log) == 22016, "shm.log");
+VRIPC_STATIC_ASSERT(sizeof(vripc_shm_t) == 38528, "shm");
 VRIPC_STATIC_ASSERT(sizeof(vripc_shm_t) <= VRIPC_SHM_SECTION_SIZE, "shm fits section");
 VRIPC_STATIC_ASSERT(offsetof(vripc_shm_t, driver) % 64 == 0 && offsetof(vripc_shm_t, config) % 64 == 0 &&
                       offsetof(vripc_shm_t, pacing) % 64 == 0 && offsetof(vripc_shm_t, tracking) % 64 == 0 &&

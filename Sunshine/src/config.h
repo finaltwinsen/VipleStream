@@ -272,10 +272,17 @@ namespace config {
     /// 的週期暫時改 ±vr_latch_acquire_ppm 一段算好的時間（burst），一次把相位移到位
     bool latch_acquire = false;
     int latch_acquire_ppm = 4000;  ///< vr_latch_acquire_ppm：burst 相對基準的週期修正量（1000–5000 ppm）
+    /// §VR-BUFFER-REFILL（2026-10-29）：vr_buffer_refill（enabled 預設；vr_latch_mode = v2 才有作用）。client 開了緩衝
+    /// （§VR-BUFFER）而它連續 2 秒幾乎都空著時，用一次 burst 把虛擬 vsync 的相位提前一整格——host 多送一張，緩衝補回來
+    /// （不重複也不跳張）。disabled＝舊行為：緩衝空了只有延遲碰巧往下跳時才會補回來
+    bool buffer_refill = true;
     /// §VR-RENDER-SCALE（2026-10-08）：vr_render_scale_pct。告訴 SteamVR 的建議算圖尺寸＝串流的每眼尺寸 × 這個百分比
     /// （100–250）。串流尺寸決定編碼、傳輸、解碼的負擔（也就是延遲），算圖尺寸決定畫面細節；Steam 內建串流是
     /// 算圖 2160、編碼寬度 1152。100＝舊行為（兩者相同）。改了要等 SteamVR 重啟才生效。
     int render_scale_pct = 100;
+    /// §VR-RENDER-CAP（2026-10-30）：vr_render_target_max。上面倍率算出來的每眼算圖尺寸上限（像素，不低於串流尺寸）。
+    /// 倍率固定時串流尺寸一大算圖跟著暴增（每眼 2160 × 188%＝4060），較重的遊戲撐不住 144 fps；2700 約等於 Steam 內建串流的算圖。
+    int render_target_max = 2700;
     /// §VR-DIRECT-KICK（2026-10-10）：vr_direct_kick（disabled 預設）。enabled＝host 直通落在「多一格」的時序（合成器送的是
     /// 遊戲上一格就交好的幀，多一個 host 週期的延遲）滿 3 秒時，bridge 自動讓 driver 的 PostPresent 立刻返回一小段
     /// （週期 × 1.25，夾在 20～40 ms），把它推回「等遊戲這一格」；之後確認有沒有成功，沒有就退避再試
@@ -290,6 +297,10 @@ namespace config {
     /// （docs/steam_frame_client.md「host 直通時的兩種時序」）。開著時 WELCOME 會帶 dev 旗標（driver 才接受這個節拍模式）。
     int dev_kick_every_s = 0;
     int dev_kick_ms = 20;
+    /// §VR-RAWDUMP（dev，2026-10-29）：vr_dev_rawdump = <開始秒>:<張數>（預設空＝關）。VR 擷取收到第一張影像後第 <開始秒> 秒起，
+    /// 把 driver 交來的原始畫面（編碼前、BGRA 8-bit、打包尺寸）連續存 <張數> 張到 config 目錄的 rawdump_<寬>x<高>_<張數>f.bgra。
+    /// 先在 GPU 複製到 staging 貼圖、抓滿才讀回寫檔（寫檔那幾秒擷取會停）。給離線比較編碼器用
+    std::string dev_rawdump;
 
     /// §VR-CTRL-OFFSET：vr_ctrl_pose_offset（disabled 預設）。enabled＝控制器也設 poseTimeOffset（driver pose_flags bit0）
     bool ctrl_pose_offset = false;
@@ -297,6 +308,14 @@ namespace config {
     /// §VR-ANGVEL-LOCAL：vr_angvel_local（disabled 預設）。enabled＝driver 把 client 的世界座標角速度轉成機體座標再交給
     /// SteamVR（pose_flags bit2；SteamVR 把 vecAngularVelocity 當本地座標，10-05 vr_probe --mode predict 實測）
     bool angvel_local = false;
+
+    /// §VR-ABR-FAST（2026-10-30）：vr_abr_fast（enabled 預設）。enabled＝VR 反應式快速降碼率（學 Steam 策略）；
+    /// disabled＝完全舊行為。
+    bool abr_fast = true;
+
+    /// §VR-HOTSPOT-AUTO（2026-10-30）：vr_hotspot_autoconnect。enabled（預設）＝收到頭盔熱點 TLV 時
+    /// 自動以 Windows Native Wifi API 挑選可見該 SSID 且未連線的無線網卡設定 all-user profile 並連線。
+    bool hotspot_autoconnect = true;
 
     /// §VR-STALE-HOLD：vr_stale_policy。legacy（預設）＝超過 2T 沒新樣本就速度與 offset 歸零；
     /// hold＝100 ms 內的空窗保留速度與 offset（driver pose_flags bit1）
@@ -319,15 +338,17 @@ namespace config {
       always,  ///< always：每條都一直送，送不完的批次過期就丟，不暫停任何一條（2026-10-07 對照 Steam 的做法）
     };
 
-    multilink_e multilink = multilink_e::disabled;
+    /// 2026-10-29：預設改 auto（使用者指示「以後預設都是多連線」）。頭盔只有一顆無線電、家用 Wi-Fi 與熱點輪流切頻道，
+    /// 兩條各送一份才能讓空檔互補（Steam 內建串流也是這樣做）；auto 先量第二條的速率、送不動就退回量測
+    multilink_e multilink = multilink_e::automatic;
 
-    /// §VR-LINK-CTRL：vr_multilink_ctrl（disabled 預設）。enabled＝client 也支援時，時間敏感的控制訊息走連線：
+    /// §VR-LINK-CTRL：vr_multilink_ctrl（2026-10-29 起 enabled 預設，跟著多連線一起開）。enabled＝client 也支援時，時間敏感的控制訊息走連線：
     /// client 的 LOSS／LATCH 在每條已確認的連線各送一份，server 的 REFRESH_START 也是。session 位址那條鏈路
     /// 變弱時，掉幀的恢復不再被它拖住（2026-10-07 頭盔實測：走開後 LOSS 送不到，退回 IDR 花了 832 ms）。
-    bool multilink_ctrl = false;
-    /// §VR-LINK-REPAIR：vr_multilink_repair（disabled 預設；要 vr_multilink_ctrl 也開）。enabled＝server 保留最近
+    bool multilink_ctrl = true;
+    /// §VR-LINK-REPAIR：vr_multilink_repair（2026-10-29 起 enabled 預設；要 vr_multilink_ctrl 也開）。enabled＝server 保留最近
     /// 幾幀已加密的封包，client 回報某個 FEC block 缺哪些 shard 時原樣補送。
-    bool multilink_repair = false;
+    bool multilink_repair = true;
     /// §VR-REPAIR-RTT（2026-10-10）：vr_multilink_repair_rtt（disabled 預設；要 vr_multilink_repair 也開）。enabled＝client
     /// 也支援時，補包的門檻、等待上限與重報由 client 照它量到的往返時間決定（只在一條連線送影像時），server 對這種回報
     /// 把年齡上限由三個幀週期放寬到 100 ms。原本這幾道上限都用幀週期訂，往返 10 ms 上下、120 Hz 時補包多半趕不上。

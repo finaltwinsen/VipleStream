@@ -59,6 +59,13 @@ namespace vr {
     int fovea = 100;  ///< vrFovea（§VR-FOVEA）：正前方的像素密度是均勻取樣的幾 %（100＝關，上限 250）
     int disp_hz = 0;  ///< vrDispHz：頭盔的顯示更新率，只在和 hz 不同時才有值（§VR-HALF-RATE 半速串流）；0＝沒帶＝和 hz 相同
     bool force = false;  ///< vrForce：0|1
+    // §VR-PLAYAREA（2026-10-30）：遊玩區（寬、深 mm）與坐姿零點（pos x,y,z mm、yaw 毫度）
+    int play_area_w_mm = VIPLE_VR_PLAYAREA_DEFAULT_W_MM;  ///< vrPlayArea 寬（mm，預設 10000）
+    int play_area_d_mm = VIPLE_VR_PLAYAREA_DEFAULT_D_MM;  ///< vrPlayArea 深（mm，預設 10000）
+    std::array<int, 3> seated_pos_mm = {VIPLE_VR_SEATED_DEFAULT_X_MM, VIPLE_VR_SEATED_DEFAULT_Y_MM, VIPLE_VR_SEATED_DEFAULT_Z_MM};  ///< vrSeated 位置 (x,y,z)（mm，預設 0, 1200, 0）
+    int seated_yaw_mdeg = VIPLE_VR_SEATED_DEFAULT_YAW_MDEG;  ///< vrSeated yaw（毫度，deg×1000，預設 0）
+    bool has_play_area = false;  ///< 請求是否帶有有效的 vrPlayArea
+    bool has_seated = false;     ///< 請求是否帶有有效的 vrSeated
 
     bool operator==(const launch_params_t &) const = default;
   };
@@ -101,6 +108,7 @@ namespace vr {
   enum class codec_e {
     h264,  ///< H.264
     hevc,  ///< HEVC
+    pyrowave,  ///< §PYROWAVE-VR：PyroWave 小波（每幀 intra）
   };
 
   const char *codec_name(codec_e codec);
@@ -132,9 +140,9 @@ namespace vr {
       return params.eye_height;
     }
 
-    /// video::config_t::videoFormat 的編號（0 = H.264、1 = HEVC）
+    /// video::config_t::videoFormat 的編號（0 = H.264、1 = HEVC、3 = PyroWave）
     int video_format() const {
-      return codec == codec_e::hevc ? 1 : 0;
+      return codec == codec_e::hevc ? 1 : codec == codec_e::pyrowave ? 3 : 0;
     }
   };
 
@@ -423,8 +431,16 @@ namespace vr {
      */
     latch::coherence_t::window_t take_latch_coherence();
 
-    /// 一則 CLIENT_TIMING（依 len 能讀多少算多少；缺的欄位為 0）
-    void on_client_timing(const uint8_t *body, std::size_t len);
+    /// §VR-BUFFER-REFILL：on_client_timing() 這一則要求了補緩衝（latch 控制器接受了）時的資訊，給呼叫端印 log
+    struct refill_request_t {
+      uint32_t lag1 = 0;  ///< 最近一秒顯示「最新的前一張」的次數
+      uint32_t lag0 = 0;  ///< 最近一秒顯示「最新那張」的次數
+      uint32_t number = 0;  ///< 這個 session 的第幾次
+    };
+
+    /// 一則 CLIENT_TIMING（依 len 能讀多少算多少；缺的欄位為 0）。§VR-BUFFER-REFILL：整個結構（44 B）才帶緩衝的累計值，
+    /// 一直空著就請 latch 控制器補一張；被接受時回傳 refill_request_t
+    std::optional<refill_request_t> on_client_timing(const uint8_t *body, std::size_t len, int64_t now_ns);
 
     /// 最近一則 CLIENT_TIMING（沒收過回 nullopt）
     std::optional<VIPLE_VR_TLV_CLIENT_TIMING> last_client_timing() const;
@@ -559,6 +575,7 @@ namespace vr {
     uint32_t latch_host_period_ns_ = 0;  ///< configure_latch() 給的 host 虛擬 vsync 週期（0＝不知道；hold_latch() 算 lockR 的模數用；latch_mtx_）
     mutable std::mutex timing_mtx_;
     std::optional<VIPLE_VR_TLV_CLIENT_TIMING> timing_last_;
+    latch::refill_watch_t refill_watch_;  ///< §VR-BUFFER-REFILL：client 的緩衝是不是一直空著（timing_mtx_）
     std::atomic<uint32_t> haptic_event_id_ {0};
     std::atomic<uint64_t> haptic_tx_ {0};
   };

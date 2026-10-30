@@ -409,6 +409,30 @@ CenteredGridView {
                         color: "#D4FF3A"
                     }
                 }
+
+                // §UI-MULTILINK-BADGE（2026-10-29）：這台主機開了 VR 多連線（server 的 vr_multilink 沒關、/serverinfo 帶
+                // VIPLE_VR_SERVER_CAP_MULTILINK）。和 "V" 同樣是純視覺標籤，不掛任何行為（見上面 v1.2.105 的說明）
+                Rectangle {
+                    visible: model.multiLink === true
+                    width: multiLinkBadgeText.implicitWidth + 8
+                    height: 14
+                    radius: 0
+                    color: "#1F2916"           // ink3
+                    border.color: "#D4FF3A"    // lime
+                    border.width: 1
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        id: multiLinkBadgeText
+                        anchors.centerIn: parent
+                        text: qsTr("MULTI-LINK")
+                        font.family: "IBM Plex Mono"
+                        font.pointSize: 8
+                        font.bold: true
+                        font.letterSpacing: 0.8
+                        color: "#D4FF3A"
+                    }
+                }
             }
         }
 
@@ -546,7 +570,8 @@ CenteredGridView {
                     text: qsTr("View All Apps")
                     onTriggered: {
                         var component = Qt.createComponent("AppView.qml")
-                        var appView = component.createObject(stackView, {"computerIndex": index, "objectName": model.name, "showHiddenGames": true})
+                        // §UI-HIDE-SELF：主機頁的序號要換成 ComputerManager 的序號（AppModel 用完整清單）
+                        var appView = component.createObject(stackView, {"computerIndex": computerModel.managerIndex(index), "objectName": model.name, "showHiddenGames": true})
                         stackView.push(appView)
                     }
                     visible: model.online && model.paired
@@ -638,7 +663,8 @@ CenteredGridView {
                 else if (model.paired) {
                     // go to game view
                     var component = Qt.createComponent("AppView.qml")
-                    var appView = component.createObject(stackView, {"computerIndex": index, "objectName": model.name})
+                    // §UI-HIDE-SELF：同上，換成 ComputerManager 的序號
+                    var appView = component.createObject(stackView, {"computerIndex": computerModel.managerIndex(index), "objectName": model.name})
                     stackView.push(appView)
                 }
                 else {
