@@ -810,6 +810,9 @@ namespace stream {
       int latchAbPctB = 0;
       std::chrono::steady_clock::time_point latchAbStart {};  // 第一次 tick 的時間
       bool latchAbOnB = false;
+      // §VR-MULTILINK-HOTADD：上一次送出的 server 位址快照（1 Hz 比對；只在 control 執行緒存取）
+      std::vector<std::array<uint8_t, 4>> linkAddrs;
+      bool linkAddrsSent = false;
     } vrCtrl;
 
     // 只在 videoBroadcastThread 存取：[VIPLE-VR-TX] 每個 session 印一次
@@ -1852,6 +1855,7 @@ namespace stream {
     t.gaze_pitch_f16 = sample.gaze.pitchF16;
     t.gaze_conf = sample.gaze.confidence;
     t.gaze_flags = sample.gaze.flags;
+    t.gaze_sample_age_ms = sample.gaze.sampleAgeMs;
 
     // target = sampleTime + predictNs + offset（時鐘對映已換成 server tick 並夾在到達 ±1 s 內）。
     // 時鐘對映停用（不該發生：session::alloc 一律給頻率）時退回 arrival + predict，與 selftest 合成來源同一個定義。
@@ -1890,6 +1894,10 @@ namespace stream {
                         << std::format("{:.0f}", r.eval_cmd_us) << "us err=" << std::format("{:.0f}", r.eval_err_us) << "us -> "
                         << ::vr::latch::eval_outcome_name(r.eval_outcome);
       }
+    }
+    if (r.acq_closed) {
+      // §VR-LATCH-V2-ACQ：開場的一次對準到此為止（換更新率才會重新開放）
+      BOOST_LOG(info) << "[VIPLE-VR-LATCH] opening acquire closed after " << std::format("{:.1f}", r.acq_open_s) << " s (phase settled)";
     }
     if (!r.update) {
       return;
@@ -2092,11 +2100,44 @@ namespace stream {
         }
       }
       vr_apply_latch(session, vr_state, vr_state.latch_idle(vr_steady_ns()));  // M4a R3：LATCH 停了就衰減
+
+      // §VR-MULTILINK-HOTADD：1 Hz 比對主機網卡，位址集合變了就送一則 LINK_ADDRS（完整快照，ENet reliable）。
+      // 不在 vr_hotspot_connect 裡直接送：那是 worker 執行緒，而 send_vr_s2c 限定 control 執行緒。
+      // 只在 client 也協商了 F_HOTADD 時才送（舊 client 完全不會收到 0x09）。
+      if (session->vrLinks && (session->vrLinks->features() & VIPLE_VR_LINK_F_HOTADD)) {
+        std::vector<std::array<uint8_t, 4>> addrs;
+        for (const auto &iface : platf::enum_net_interfaces()) {
+          boost::system::error_code ec;
+          const auto a = boost::asio::ip::make_address_v4(iface.address, ec);
+          if (!ec) {
+            addrs.push_back(a.to_bytes());
+          }
+        }
+        std::sort(addrs.begin(), addrs.end());
+        addrs.erase(std::unique(addrs.begin(), addrs.end()), addrs.end());
+        if (!ctl.linkAddrsSent || addrs != ctl.linkAddrs) {
+          ::vr::s2c_msg_t msg;
+          msg.tlv = ::vr::multilink::format_addrs_tlv(addrs);
+          msg.reliable = true;
+          if (send_vr_s2c(session, msg)) {
+            if (ctl.sendFailLogs++ < 5) {
+              BOOST_LOG(warning) << "[VIPLE-VR-LINK] hot-add could not send LINK_ADDRS (" << addrs.size() << " addresses)";
+            }
+          } else {
+            ctl.linkAddrs = addrs;
+            ctl.linkAddrsSent = true;
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add server link addresses updated (" << addrs.size() << ")";
+          }
+        }
+      }
     }
 
     for (const auto &msg : vr_state.drain_s2c()) {
       if (!msg.reliable && session->vrLinks && session->vrLinks->fault_ctrl_blocked()) {
         continue;  // 開發用故障注入（c: 規則）：ENet 上的即時訊息在這段期間送不到
+      }
+      if (!msg.tlv.empty() && msg.tlv[0] == VIPLE_VR_S2C_HAPTIC && vr_link_ctrl(session)) {
+        session->vrLinks->send_s2c(std::string_view {(const char *) msg.tlv.data(), msg.tlv.size()});
       }
       if (send_vr_s2c(session, msg) && ctl.sendFailLogs < 5) {
         ++ctl.sendFailLogs;
@@ -2207,7 +2248,7 @@ namespace stream {
         };
         BOOST_LOG(info) << "[VIPLE-VR-LATCH] 10s: rx=" << cur.latch_rx - prev.latch_rx << " slackEma=" << std::format("{:.0f}", ls.slack_ema_us)
                         << "us target=" << std::format("{:.0f}", ls.target_us) << "us ppm=" << ls.ppm
-                        << (pcvr ? "" : " (stub: log only)") << " haptics=" << vr_state.haptics_queued()
+                        << (pcvr ? "" : " (stub: log only)") << " haptics=" << vr_state.haptics_queued() << " resend=" << vr_state.haptics_resend_queued()
                         << " err=" << std::format("{:.0f}", ls.err_us) << "us integ=" << std::format("{:.1f}", ls.integral_ppm)
                         << " slips=" << ls.slips << " dropped=" << ls.dropped << " refills=" << ls.refills
                         << " mode=" << ::vr::latch::mode_name(ls.mode) << v3_tail
@@ -3976,6 +4017,9 @@ namespace stream {
     if (meta.wave_done) {
       flags |= VIPLE_VR_FF_REFRESH_DONE;
     }
+    if (meta.foveated) {
+      flags |= VIPLE_VR_FF_FOVEATED;
+    }
     h.vrFlags = flags;
     // M1b S1-08（§C.4）：layoutEpoch 取 display_vr_t 帶來的 driver descriptor 值；stub 與一般 session 維持 0
     h.layoutEpoch = meta.layout_epoch;
@@ -4000,6 +4044,66 @@ namespace stream {
       const long units = std::lround(p * VIPLE_VR_POS_UNITS_PER_M);
       h.renderPos[i] = (std::int16_t) std::clamp<long>(units, -32767, 32767);
     }
+  }
+
+  /**
+   * @brief VipleStream 2.0 §VR：組 32 B 的 0x82 VR frame header（docs/vr_protocol.md §4.4）。
+   */
+  static void fill_vr_frame_header_gaze(VIPLE_VR_FRAME_HEADER_GAZE &h, video::packet_raw_t &packet, std::size_t payload_size, int packetsize, std::uint16_t latency) {
+    static_assert(std::endian::native == std::endian::little, "VR frame header is sent in native (little-endian) layout");
+
+    const auto &meta = packet.vr_meta;
+
+    h.headerType = VIPLE_VR_FRAME_HEADER_TYPE_GAZE;
+    h.frameProcessingLatency = latency;
+    h.frameType = packet.is_idr()                     ? 2 :
+                  meta.in_wave                        ? 4 :
+                  packet.after_ref_frame_invalidation ? 5 :
+                                                        1;
+
+    const std::size_t max_payload = packetsize - sizeof(NV_VIDEO_PACKET);
+    h.lastPayloadLen = (std::uint16_t) ((payload_size + sizeof(VIPLE_VR_FRAME_HEADER_GAZE)) % max_payload);
+    if (h.lastPayloadLen == 0) {
+      h.lastPayloadLen = (std::uint16_t) max_payload;
+    }
+
+    std::uint8_t flags = meta.valid ? meta.flags : VIPLE_VR_FF_POSE_FALLBACK;
+    if (meta.wave_done) {
+      flags |= VIPLE_VR_FF_REFRESH_DONE;
+    }
+    if (meta.foveated) {
+      flags |= VIPLE_VR_FF_FOVEATED;
+    }
+    h.vrFlags = flags;
+    h.layoutEpoch = meta.layout_epoch;
+    h.echoSampleId = meta.valid ? meta.echoSampleId : 0;
+
+    float q[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    if (meta.valid) {
+      const float norm = std::sqrt(meta.rot[0] * meta.rot[0] + meta.rot[1] * meta.rot[1] + meta.rot[2] * meta.rot[2] + meta.rot[3] * meta.rot[3]);
+      if (norm > 1e-6f && std::isfinite(norm)) {
+        for (int i = 0; i < 4; ++i) {
+          q[i] = meta.rot[i] / norm;
+        }
+      }
+    }
+    VipleVrPackQuat48(q, h.renderRot);
+
+    for (int i = 0; i < 3; ++i) {
+      float p = meta.valid && std::isfinite(meta.pos[i]) ? meta.pos[i] : 0.0f;
+      p = std::clamp(p, -VIPLE_VR_POS_MAX_M, VIPLE_VR_POS_MAX_M);
+      const long units = std::lround(p * VIPLE_VR_POS_UNITS_PER_M);
+      h.renderPos[i] = (std::int16_t) std::clamp<long>(units, -32767, 32767);
+    }
+
+    auto to_u16 = [](float v) -> uint16_t {
+      float c = std::clamp(v, 0.0f, 1.0f);
+      return (uint16_t) std::lround(c * 65535.0f);
+    };
+    h.foveaCxL = to_u16(meta.fovea_centre[0][0]);
+    h.foveaCyL = to_u16(meta.fovea_centre[0][1]);
+    h.foveaCxR = to_u16(meta.fovea_centre[1][0]);
+    h.foveaCyR = to_u16(meta.fovea_centre[1][1]);
   }
 
   void videoBroadcastThread(udp::socket &sock) {
@@ -4106,6 +4210,7 @@ namespace stream {
 
       video_short_frame_header_t frame_header = {};
       VIPLE_VR_FRAME_HEADER vr_frame_header {};
+      VIPLE_VR_FRAME_HEADER_GAZE vr_gaze_header {};
       std::string_view frame_header_bytes;
       if (!session->vr) {
         // 一般 session：上游的 8 B short header（行為不變）
@@ -4119,6 +4224,14 @@ namespace stream {
         }
         frame_header.frame_processing_latency = frame_latency;
         frame_header_bytes = std::string_view {(char *) &frame_header, sizeof(frame_header)};
+      } else if (session->vr->negotiated().gaze_fovea) {
+        // §VR-GAZE-FOVEA：協商啟用 gaze fovea，每幀送 32 B 的 0x82 header
+        fill_vr_frame_header_gaze(vr_gaze_header, *packet, payload.size(), session->config.packetsize, frame_latency);
+        frame_header_bytes = std::string_view {(char *) &vr_gaze_header, sizeof(vr_gaze_header)};
+
+        if (packet->vr_meta.wave_start && packet->vr_meta.wave_reason == VIPLE_VR_REFRESH_IDR) {
+          session->vr->queue_refresh_start({(uint32_t) packet->frame_index(), packet->vr_meta.wave_len, packet->vr_meta.wave_reason});
+        }
       } else {
         // VipleStream 2.0 §VR：24 B 的 0x81 header（echoSampleId＋render pose＋wave 旗標）
         fill_vr_frame_header(vr_frame_header, *packet, payload.size(), session->config.packetsize, frame_latency);
@@ -5380,6 +5493,8 @@ namespace stream {
                         << " waves=" << s.refresh_waves
                         << " latch=" << s.latch_rx
                         << " timing=" << s.timing_rx
+                        << " haptics=" << session.vr->haptics_queued()
+                        << " resend=" << session.vr->haptics_resend_queued()
                         << " otherC2S=" << s.other_c2s
                         << " truncatedC2S=" << s.c2s_truncated
                         << " s2cDropped=" << s.s2c_dropped;
@@ -5551,7 +5666,16 @@ namespace stream {
         if (neg.pcvr) {
           ::vr::bridge::set_haptic_sink([](const vripc_haptic_evt_t &e) {
             if (auto s = ::vr::active(); s && s->negotiated().pcvr) {
-              s->queue_haptic((uint8_t) e.device, e.duration_us, e.frequency_hz, e.amplitude);
+              uint64_t ts_ns = 0;
+              if (const auto cs = s->clock_stats(false); cs && cs->ready) {
+                const int64_t now_ticks = platf::vr_clock_ticks();
+                const int64_t now_server_ns = ::vr::clk::ticks_to_ns(now_ticks, platf::vr_clock_frequency());
+                const int64_t client_now_ns = now_server_ns - cs->offset_ns;
+                if (client_now_ns > 0) {
+                  ts_ns = (uint64_t) client_now_ns;
+                }
+              }
+              s->queue_haptic((uint8_t) e.device, e.duration_us, e.frequency_hz, e.amplitude, ts_ns);
             }
           });
         }
@@ -5676,7 +5800,7 @@ namespace stream {
           const auto host_period_u32 = (uint32_t) std::clamp<int64_t>(host_period, 0, 50'000'000);
           auto &ctl = session->vrCtrl;
           ctl.latchHostPeriodNs = host_period_u32;
-          // §VR-LATCH-V3：定時 burst（vr_latch_acquire）與上一個 session 學到的積分；兩者都只有 v3 會用
+          // §VR-LATCH-V3：定時 burst（vr_latch_acquire，v3 與 v2 都會用）與上一個 session 學到的積分（只有 v3 會用）
           ::vr::latch::options_t latch_opt;
           latch_opt.acquire = config::vr.latch_acquire;
           latch_opt.step_ppm = config::vr.latch_acquire_ppm;
@@ -5733,6 +5857,8 @@ namespace stream {
           if (config::vr.multilink_repair_rtt && !opt.repair) {
             BOOST_LOG(warning) << "[VIPLE-VR-LINK] vr_multilink_repair_rtt needs vr_multilink_repair and vr_multilink_ctrl = enabled - it stays off"sv;
           }
+          // §VR-MULTILINK-HOTADD：串流中途插上適配器／主機後連熱點（client 也要支援才會啟用）
+          opt.hotadd = config::vr.multilink_hotadd;
           if (!config::vr.multilink_fault.empty()) {
             if (auto f = ::vr::multilink::fault_t::parse(config::vr.multilink_fault)) {
               opt.fault = *f;

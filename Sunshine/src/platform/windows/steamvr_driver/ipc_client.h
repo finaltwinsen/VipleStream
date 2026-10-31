@@ -73,6 +73,8 @@ namespace vrdrv {
     // ── 讀 server 寫的區塊（任何執行緒；讀端 wait-free、重試有上限） ──
     // 最新一筆 tracking；回傳 false 表示沒有資料或 torn（torn 另外計數在 *torn）。
     bool read_latest_tracking(vripc_tracking_slot_t &out, uint64_t &idx, bool *torn = nullptr);
+    // 目標 QPC 最接近的 tracking（用於注視點配對）；回傳 false 表示沒有資料或 torn（torn 另外計數在 *torn）。
+    bool read_tracking_closest_target(int64_t t_target_qpc, vripc_tracking_slot_t &out, uint64_t &idx, bool *torn = nullptr);
     // pacing（單格 seqlock）；失敗由呼叫端沿用上一份。
     bool read_pacing(vripc_pacing_t &out);
     // header 的本地副本（整份複製；呼叫端自己驗）。

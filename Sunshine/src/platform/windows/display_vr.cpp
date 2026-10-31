@@ -1149,7 +1149,9 @@ namespace platf::dxgi {
       meta.echoSampleId = d.echo_sample_id;
       std::copy(std::begin(d.render_pos), std::end(d.render_pos), std::begin(meta.pos));
       std::copy(std::begin(d.render_rot), std::end(d.render_rot), std::begin(meta.rot));
-      meta.flags = (uint8_t) (d.flags & 0x2Fu);  // VIPLE_VR_FF_* 與 VRIPC_FRM_* 的低位相同；SPACE_DELTA（0x100）只供診斷
+      meta.flags = (uint8_t) (d.flags & 0x6Fu);  // VIPLE_VR_FF_* 與 VRIPC_FRM_* 的低位相同；0x6F 保留 0x40 (FOVEATED)；SPACE_DELTA（0x100）只供診斷
+      meta.foveated = (d.flags & VRIPC_FRM_FOVEATED) != 0;
+      std::memcpy(meta.fovea_centre, d.fovea_centre, sizeof(meta.fovea_centre));
       meta.layout_epoch = d.layout_epoch;
       meta.space_epoch = d.space_epoch;
       meta.frame_id = d.frame_id;

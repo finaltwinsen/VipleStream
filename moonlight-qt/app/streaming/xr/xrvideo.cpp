@@ -968,7 +968,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
             t1.crop.y1 = static_cast<float>(frameH);
         }
         if (fovea && !m_UnwarpFailed) {
-            rendered = renderUnwarp(&mapped, &t1, tex, frame->width, frame->height);
+            rendered = renderUnwarp(&mapped, &t1, tex, frame->width, frame->height, hasMeta, meta);
         }
         else {
             rendered = pl_render_image(m_Renderer, &mapped, &t1, &m_RenderParams);
@@ -1749,6 +1749,12 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     float fv[4];
     float fvCyR;
     loadFoveation(fv, &fvCyR);
+    if (hasMeta && meta.foveated) {
+        fv[1] = meta.foveaCentre[0][0];
+        fv[2] = meta.foveaCentre[1][0];
+        fv[3] = meta.foveaCentre[0][1];
+        fvCyR = meta.foveaCentre[1][1];
+    }
     float osz[2] = {ow, oh};
     pl_fmt fmtSmall = pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
     pl_fmt fmtFlow = pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps);
@@ -2046,7 +2052,8 @@ bool XrVideo::ensureFull(int fw, int fh)
 }
 
 // §VR-FOVEA（不合成中間格時）：mapped → m_Full → 還原後寫進 swapchain。失敗就改回直接畫（影像是壓縮過的樣子）。
-bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh)
+bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
+                           bool hasMeta, const VIPLE_VR_FRAME_META& meta)
 {
     bool ok = false;
     if (m_Dp == nullptr) {
@@ -2073,6 +2080,12 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         float fv[4];
         float fvCyR;
         loadFoveation(fv, &fvCyR);
+        if (hasMeta && meta.foveated) {
+            fv[1] = meta.foveaCentre[0][0];
+            fv[2] = meta.foveaCentre[1][0];
+            fv[3] = meta.foveaCentre[0][1];
+            fvCyR = meta.foveaCentre[1][1];
+        }
         // swapchain 可能是兩倍高（合成壞掉之後）：一張影像的高度由寬度照比例算
         float osz[2] = {static_cast<float>(m_Sw.width), static_cast<float>(m_Config.synth ? m_Sw.height / 2 : m_Sw.height)};
         pl_shader sh = pl_dispatch_begin(m_Dp);

@@ -70,6 +70,15 @@ namespace vr::multilink {
     udp::endpoint client_audio;
     udp::socket video_sock;
     udp::socket audio_sock;
+    /// §VR-MULTILINK-HOTADD：單條連線的停止旗標。tx_loop 只看 hub 全域的 stop 時，rebind 無法安全地換掉
+    /// 同一條連線的 socket（舊 tx 還會送舊 socket）。重綁前先 retire，join 之後才碰 socket。
+    std::atomic<bool> retire {false};
+    /// 接收鏈世代：每次重綁 socket 先加一，讓已在佇列裡的舊 completion 全部作廢（避免兩條鏈共用 rx_buf）。
+    std::atomic<uint32_t> rx_gen {0};
+    /// 最後接受的 LINK_HELLO epoch（只在 control 執行緒、握 hello_mtx 存取）
+    uint8_t epoch = 0;
+    /// 這條 slot 被就地重建過幾次（10 秒統計；只在 control 執行緒寫）
+    uint32_t rebinds = 0;
     // 影像 socket 有三個送出者（tx 執行緒送影像、接收執行緒回 PONG、任何執行緒的 send_s2c）：每次 send_to 都先拿這把鎖。
     // 只包住單一次非阻塞的 send_to，不會把別人擋在 would_block 的重試後面
     std::mutex sock_mtx;
@@ -282,26 +291,162 @@ namespace vr::multilink {
       return to_ns(clock::now()) / 1'000'000;
     }
 
-    void arm_video(link_t &L) {
-      L.video_sock.async_receive_from(asio::buffer(L.rx_buf_v), L.rx_peer_v, [this, &L](const boost::system::error_code &ec, size_t n) {
+    void arm_video(link_t &L, uint32_t gen) {
+      L.video_sock.async_receive_from(asio::buffer(L.rx_buf_v), L.rx_peer_v, [this, &L, gen](const boost::system::error_code &ec, size_t n) {
+        // §VR-MULTILINK-HOTADD：先比對世代再碰 socket／緩衝區。重綁之後舊 socket 的 completion 一律作廢，
+        // 否則它會重新 arm 舊 socket，兩條接收鏈共用同一個 rx_buf_v。
+        if (L.rx_gen.load(std::memory_order_relaxed) != gen) {
+          return;
+        }
         if (stop.load(std::memory_order_relaxed) || ec == asio::error::operation_aborted) {
           return;
         }
         if (!ec) {
           on_video_rx(L, n);
         }
-        arm_video(L);
+        arm_video(L, gen);
       });
     }
 
-    void arm_audio(link_t &L) {
+    void arm_audio(link_t &L, uint32_t gen) {
       // 音訊 socket 只會收到 PING（讓 client 端的防火牆狀態維持住），內容不用看
-      L.audio_sock.async_receive_from(asio::buffer(L.rx_buf_a), L.rx_peer_a, [this, &L](const boost::system::error_code &ec, size_t) {
+      L.audio_sock.async_receive_from(asio::buffer(L.rx_buf_a), L.rx_peer_a, [this, &L, gen](const boost::system::error_code &ec, size_t) {
+        if (L.rx_gen.load(std::memory_order_relaxed) != gen) {
+          return;
+        }
         if (stop.load(std::memory_order_relaxed) || ec == asio::error::operation_aborted) {
           return;
         }
-        arm_audio(L);
+        arm_audio(L, gen);
       });
+    }
+
+    /**
+     * §VR-MULTILINK-HOTADD：在 io 執行緒上把一條連線的 socket 與接收鏈整個換掉（呼叫端已停掉 tx）。
+     * 順序：先 ++rx_gen（讓已在佇列裡的舊 completion 全部作廢）→ 關舊 socket → 開新 socket →
+     * 換端點與埠 → 重設狀態 → 重新 arm。回 false＝bind 失敗（舊 socket 已關，這條連線死亡）。
+     */
+    bool reset_link_sockets(link_t &L, const hello_link_t &h) {
+      const uint32_t gen = L.rx_gen.fetch_add(1, std::memory_order_acq_rel) + 1;
+      try {
+        std::lock_guard sk {L.sock_mtx};
+        // QoS flow 綁在舊的 native handle 上，先釋放再關
+        L.qos_v.reset();
+        L.qos_a.reset();
+        boost::system::error_code ec;
+        L.video_sock.cancel(ec);
+        L.video_sock.close(ec);
+        L.audio_sock.cancel(ec);
+        L.audio_sock.close(ec);
+
+        // 綁在 client 配對到的 server 位址：不是本機位址就會 bind 失敗（拒絕這條連線）
+        const auto local = to_v4(h.server_addr);
+        for (auto *s : {&L.video_sock, &L.audio_sock}) {
+          s->open(udp::v4());
+          s->bind(udp::endpoint {local, 0});
+          s->non_blocking(true);
+          boost::system::error_code sec;
+          s->set_option(asio::socket_base::send_buffer_size {kSockSndBuf}, sec);
+        }
+        L.client_video = udp::endpoint {to_v4(h.client_addr), h.client_video_port};
+        L.client_audio = udp::endpoint {to_v4(h.client_addr), h.client_audio_port};
+        L.rx_peer_v = {};
+        L.rx_peer_a = {};
+        L.server_video_port = L.video_sock.local_endpoint().port();
+        L.server_audio_port = L.audio_sock.local_endpoint().port();
+
+        // 和單一路徑一致：新的 socket 也要加入 QoS flow
+        if (opt.video_qos) {
+          boost::asio::ip::address a = L.client_video.address();
+          L.qos_v = platf::enable_socket_qos((uintptr_t) L.video_sock.native_handle(), a, L.client_video.port(), platf::qos_data_type_e::video, true);
+        }
+        if (opt.audio_qos) {
+          boost::asio::ip::address a = L.client_audio.address();
+          L.qos_a = platf::enable_socket_qos((uintptr_t) L.audio_sock.native_handle(), a, L.client_audio.port(), platf::qos_data_type_e::audio, true);
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "[VIPLE-VR-LINK] hot-add link " << (int) L.id << " socket rebuild failed: " << e.what();
+        return false;
+      }
+
+      // 重設這條連線的狀態：舊的確認、佇列與統計都不能帶到新的路徑上
+      L.last_confirmed_ns.store(0, std::memory_order_relaxed);
+      L.last_ping_ns.store(0, std::memory_order_relaxed);
+      L.muted_until_ns.store(0, std::memory_order_relaxed);
+      L.probing.store(opt.video == options_t::video_e::automatic && !L.primary, std::memory_order_relaxed);
+      L.gate_reset.store(true, std::memory_order_relaxed);
+      L.sat_reset.store(true, std::memory_order_relaxed);
+      L.fast_probes.store((int) kProbeFastCount, std::memory_order_relaxed);
+      L.strikes.store(0, std::memory_order_relaxed);
+      L.promoted_ns.store(0, std::memory_order_relaxed);
+      L.last_probe_ns.store(0, std::memory_order_relaxed);
+      L.probe_until_ns.store(0, std::memory_order_relaxed);
+      L.small_since_ns.store(0, std::memory_order_relaxed);
+      L.deliv = {};
+      L.deliv_pct.store(-1, std::memory_order_relaxed);
+      L.gate.reset();
+      L.sat.restart();  // tx 已停：這不是 tx 執行緒的資料競爭
+      {
+        std::lock_guard lk {L.mtx};
+        L.q.clear();
+        L.rq.clear();
+        L.q_bytes = 0;
+        L.rq_pending.store(false, std::memory_order_relaxed);
+      }
+      arm_video(L, gen);
+      arm_audio(L, gen);
+      return true;
+    }
+
+    /**
+     * §VR-MULTILINK-HOTADD：停掉舊 tx，在 io 執行緒就地換 socket，再起新的 tx（沿用同一個 link_t 物件位址）。
+     * 呼叫端（control 執行緒，握 hello_mtx）已決定要重綁／回收哪個 slot。
+     */
+    bool rebuild_link(link_t &L, const hello_link_t &h, uint8_t old_id) {
+      const auto begin = clock::now();
+      L.retire.store(true, std::memory_order_relaxed);
+      L.cv.notify_all();
+      if (L.tx.joinable()) {
+        L.tx.join();
+      }
+      L.retire.store(false, std::memory_order_relaxed);
+
+      auto done = std::make_shared<std::promise<bool>>();
+      auto future = done->get_future();
+      asio::post(io, [this, &L, h, done] {
+        bool ok = false;
+        try {
+          ok = reset_link_sockets(L, h);
+        } catch (...) {
+        }
+        done->set_value(ok);
+      });
+
+      bool ok = false;
+      if (future.wait_for(500ms) == std::future_status::ready) {
+        ok = future.get();
+      } else {
+        BOOST_LOG(warning) << "[VIPLE-VR-LINK] hot-add link " << (int) old_id << " socket rebuild timed out (io thread busy)";
+      }
+      if (!ok) {
+        L.server_video_port = 0;
+        L.server_audio_port = 0;
+        return false;
+      }
+
+      L.id = h.id;
+      L.desc = h;
+      L.epoch = h.epoch;
+      ++L.rebinds;
+      L.tx = std::thread {[this, &L] {
+        tx_loop(L);
+      }};
+      BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add " << (old_id == h.id ? "rebind" : "slot reclaim") << " link " << (int) h.id
+                      << " epoch=" << (int) h.epoch << " server " << to_v4(h.server_addr).to_string() << " video:" << L.server_video_port
+                      << " audio:" << L.server_audio_port << " <-> client " << to_v4(h.client_addr).to_string() << " video:"
+                      << h.client_video_port << " audio:" << h.client_audio_port
+                      << " rebindMs=" << std::format("{:.1f}", std::chrono::duration<double, std::milli>(clock::now() - begin).count());
+      return true;
     }
 
     void on_video_rx(link_t &L, size_t n) {
@@ -488,7 +633,7 @@ namespace vr::multilink {
           return 1;
         }
         if (ec == asio::error::would_block || ec == asio::error::try_again) {
-          if (clock::now() >= deadline || stop.load(std::memory_order_relaxed)) {
+          if (clock::now() >= deadline || stop.load(std::memory_order_relaxed) || L.retire.load(std::memory_order_relaxed)) {
             return -1;
           }
           precise_sleep(L, kBlockRetry);
@@ -548,6 +693,9 @@ namespace vr::multilink {
     /// 補包佇列裡有東西就全部送掉（tx 執行緒）
     void flush_repairs(link_t &L) {
       for (;;) {
+        if (L.retire.load(std::memory_order_relaxed)) {
+          return;
+        }
         batch_t r;
         {
           std::lock_guard lk {L.mtx};
@@ -569,14 +717,14 @@ namespace vr::multilink {
     void tx_loop(link_t &L) {
       platf::set_thread_name("vr::link" + std::to_string((int) L.id));
       L.hp = platf::create_high_precision_timer();
-      while (!stop.load(std::memory_order_relaxed)) {
+      while (!stop.load(std::memory_order_relaxed) && !L.retire.load(std::memory_order_relaxed)) {
         batch_t b;
         {
           std::unique_lock lk {L.mtx};
           L.cv.wait_for(lk, 100ms, [&] {
-            return stop.load(std::memory_order_relaxed) || !L.q.empty() || !L.rq.empty();
+            return stop.load(std::memory_order_relaxed) || L.retire.load(std::memory_order_relaxed) || !L.q.empty() || !L.rq.empty();
           });
-          if (stop.load(std::memory_order_relaxed)) {
+          if (stop.load(std::memory_order_relaxed) || L.retire.load(std::memory_order_relaxed)) {
             break;
           }
           if (!L.rq.empty()) {
@@ -764,22 +912,23 @@ namespace vr::multilink {
     if (m.stop.load(std::memory_order_relaxed)) {
       return out;
     }
+    const int64_t now_ns = to_ns(clock::now());
 
-    // §VR-LINK-CTRL：client 在每條連線的 flags 填它支援的功能；server 的開關也開才啟用
+    // §VR-LINK-CTRL／§VR-MULTILINK-HOTADD：client 在每條連線的 flags 填它支援的功能；server 的開關也開才啟用
     if (!links.empty()) {
       uint8_t offered = 0xFF;
       for (const auto &h : links) {
         offered &= h.flags;
       }
-      // §VR-REPAIR-RTT：REPAIR_RTT 要在 REPAIR 成立之內（規則在 negotiate_link_features，有單元測試）
-      const uint8_t feat = negotiate_link_features(offered, m.opt.ctrl, m.opt.repair, m.opt.repair_rtt);
+      const uint8_t feat = negotiate_link_features(offered, m.opt.ctrl, m.opt.repair, m.opt.repair_rtt, m.opt.hotadd);
       if (m.features.exchange(feat, std::memory_order_relaxed) != feat || m.count.load(std::memory_order_relaxed) == 0) {
         BOOST_LOG(info) << "[VIPLE-VR-LINK] link features: ctrl=" << ((feat & VIPLE_VR_LINK_F_CTRL) ? "on" : "off")
                         << " repair=" << ((feat & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off")
                         << " repairRtt=" << ((feat & VIPLE_VR_LINK_F_REPAIR_RTT) ? "on" : "off")
+                        << " hotadd=" << ((feat & VIPLE_VR_LINK_F_HOTADD) ? "on" : "off")
                         << " (client offered 0x" << std::format("{:02x}", (unsigned) offered)
                         << ", server ctrl=" << (m.opt.ctrl ? "enabled" : "disabled") << " repair=" << (m.opt.repair ? "enabled" : "disabled")
-                        << " repairRtt=" << (m.opt.repair_rtt ? "enabled" : "disabled") << ')';
+                        << " repairRtt=" << (m.opt.repair_rtt ? "enabled" : "disabled") << " hotadd=" << (m.opt.hotadd ? "enabled" : "disabled") << ')';
       }
     }
 
@@ -787,7 +936,6 @@ namespace vr::multilink {
       ready_link_t r;
       r.id = h.id;
 
-      // client 重送 HELLO（例如控制通道重連）：描述相同就回原來的埠，不重建
       link_t *existing = nullptr;
       const int n = m.count.load(std::memory_order_acquire);
       for (int i = 0; i < n; ++i) {
@@ -795,16 +943,104 @@ namespace vr::multilink {
           existing = m.links[i].get();
         }
       }
+
+      // 同一個 linkId 已經存在：描述相同就回原來的埠；描述不同只在 §VR-MULTILINK-HOTADD 開啟時才可能重綁。
       if (existing) {
         if (existing->desc == h) {
-          r.status = VIPLE_VR_LINK_READY_OK;
-          r.server_video_port = existing->server_video_port;
-          r.server_audio_port = existing->server_audio_port;
+          // epoch 不影響「描述相同」；只把防重放的值往前推，重播舊 HELLO 不會讓它倒退
+          if (h.epoch > existing->epoch) {
+            existing->epoch = h.epoch;
+          }
+          if (existing->server_video_port != 0) {
+            r.status = VIPLE_VR_LINK_READY_OK;
+            r.server_video_port = existing->server_video_port;
+            r.server_audio_port = existing->server_audio_port;
+            out.push_back(r);
+            continue;
+          }
+          // 上一次重建失敗（socket 已關、埠清成 0）：同一份描述再送來時就地重建
+        } else {
+          if (!m.opt.hotadd) {
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add rebind refused: link " << (int) h.id << " description changed but hot-add is disabled";
+            out.push_back(r);
+            continue;
+          }
+          if (h.epoch <= existing->epoch) {
+            // 重播或亂序：不讓舊的 HELLO 把 endpoint 拉回上一個位址
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add rebind refused: link " << (int) h.id << " epoch " << (int) h.epoch
+                            << " <= last accepted " << (int) existing->epoch;
+            out.push_back(r);
+            continue;
+          }
+          if (!hotadd_rebind_allowed(now_ns, existing->last_confirmed_ns.load(std::memory_order_relaxed),
+                                     existing->last_ping_ns.load(std::memory_order_relaxed))) {
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add rebind refused: link " << (int) h.id
+                            << " still confirmed or pinged within 2 s (dead only "
+                            << std::format("{:.1f}", (now_ns - hotadd_last_activity_ns(existing->last_confirmed_ns.load(std::memory_order_relaxed),
+                                                                                         existing->last_ping_ns.load(std::memory_order_relaxed))) / 1e9 * 1000.0)
+                            << " ms)";
+            out.push_back(r);
+            continue;
+          }
+          BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add rebind link " << (int) h.id << " epoch " << (int) existing->epoch << " -> " << (int) h.epoch;
         }
+
+        // 就地重綁：沿用同一個 link_t 物件與同一個 linkId（client 的索引＝linkIdx）
+        bool prim = h.client_addr == primary_client_addr;
+        for (int i = 0; i < n; ++i) {
+          if (m.links[i].get() != existing && m.links[i]->primary) {
+            prim = false;
+          }
+        }
+        existing->primary = prim;
+        if (!m.rebuild_link(*existing, h, existing->id)) {
+          out.push_back(r);
+          continue;
+        }
+        r.status = VIPLE_VR_LINK_READY_OK;
+        r.server_video_port = existing->server_video_port;
+        r.server_audio_port = existing->server_audio_port;
         out.push_back(r);
         continue;
       }
+
+      // 新 linkId、slot 已滿：§VR-MULTILINK-HOTADD 開啟時只回收「死亡 ≥ 10 s」的 slot（就地在同一個索引重建）
       if (n >= kMaxLinks) {
+        link_t *victim = nullptr;
+        if (m.opt.hotadd) {
+          for (int i = 0; i < n; ++i) {
+            auto &L = *m.links[i];
+            if (!L.primary && hotadd_reclaim_allowed(now_ns, L.last_confirmed_ns.load(std::memory_order_relaxed), L.last_ping_ns.load(std::memory_order_relaxed))) {
+              victim = &L;
+              break;
+            }
+          }
+        }
+        if (!victim) {
+          BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add refused: link " << (int) h.id << " needs a slot but all " << n
+                          << " are in use and none has been dead for 10 s";
+          out.push_back(r);
+          continue;
+        }
+        const uint8_t old_id = victim->id;
+        bool prim = h.client_addr == primary_client_addr;
+        for (int i = 0; i < n; ++i) {
+          if (m.links[i].get() != victim && m.links[i]->primary) {
+            prim = false;
+          }
+        }
+        victim->primary = prim;
+        BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add slot reclaim: slot id " << (int) old_id << " is dead for "
+                        << std::format("{:.1f}", (now_ns - hotadd_last_activity_ns(victim->last_confirmed_ns.load(std::memory_order_relaxed),
+                                                                                    victim->last_ping_ns.load(std::memory_order_relaxed))) / 1e9)
+                        << " s - reusing it for link " << (int) h.id;
+        if (!m.rebuild_link(*victim, h, old_id)) {
+          out.push_back(r);
+          continue;
+        }
+        r.status = VIPLE_VR_LINK_READY_OK;
+        r.server_video_port = victim->server_video_port;
+        r.server_audio_port = victim->server_audio_port;
         out.push_back(r);
         continue;
       }
@@ -813,6 +1049,7 @@ namespace vr::multilink {
         auto L = std::make_unique<link_t>(m.io);
         L->id = h.id;
         L->desc = h;
+        L->epoch = h.epoch;
         L->primary = h.client_addr == primary_client_addr;
         for (int i = 0; i < n; ++i) {
           L->primary = L->primary && !m.links[i]->primary;  // 主連線只有一條（同位址有好幾條時取最早的，例如 selftest）
@@ -854,14 +1091,16 @@ namespace vr::multilink {
         }};
         m.links[n] = std::move(L);
         m.count.store(n + 1, std::memory_order_release);
-        asio::post(m.io, [&m, p] {
-          m.arm_video(*p);
-          m.arm_audio(*p);
+        const uint32_t gen = p->rx_gen.load(std::memory_order_relaxed);
+        asio::post(m.io, [&m, p, gen] {
+          m.arm_video(*p, gen);
+          m.arm_audio(*p, gen);
         });
 
         BOOST_LOG(info) << "[VIPLE-VR-LINK] link " << (int) h.id << " created: server " << local.to_string() << " video:" << p->server_video_port
                         << " audio:" << p->server_audio_port << " <-> client " << p->client_video.address().to_string() << " video:"
-                        << h.client_video_port << " audio:" << h.client_audio_port << (p->primary ? " (session address)" : "");
+                        << h.client_video_port << " audio:" << h.client_audio_port << (p->primary ? " (session address)" : "")
+                        << " epoch=" << (int) h.epoch;
       } catch (const std::exception &e) {
         BOOST_LOG(warning) << "[VIPLE-VR-LINK] link " << (int) h.id << " refused: " << e.what();
         r = ready_link_t {};
@@ -1314,7 +1553,10 @@ namespace vr::multilink {
         continue;
       }
       boost::system::error_code ec;
-      L.audio_sock.send_to(bufs, L.client_audio, 0, ec);
+      {
+        std::lock_guard sk {L.sock_mtx};  // §VR-MULTILINK-HOTADD：rebind 會 close／重開同一個 socket 物件
+        L.audio_sock.send_to(bufs, L.client_audio, 0, ec);
+      }
       (ec ? L.audio_drop : L.audio_pkts).fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -1392,7 +1634,7 @@ namespace vr::multilink {
       const int64_t muted_ns = L.muted_until_ns.load() - now_ns;
       s += std::format(
         " | L{} {}{}{} tx={} ({:.1f} Mbps) dropAge={} dropBlock={} dropFull={} paused={} standby={} fault={} err={} sendMaxMs={:.1f} audio={}/{} mutes={}"
-        " probes={} starts={} forced={} deliv={} rx ping={} trk={} dup={} bad={} trkFirst={} ctl={} s2c={}/{} client rx={} used={} rttMs={} gapMaxMs={} burstMbps={}",
+        " probes={} starts={} forced={} deliv={} rx ping={} trk={} dup={} bad={} trkFirst={} ctl={} s2c={}/{} client rx={} used={} rttMs={} gapMaxMs={} burstMbps={} epoch={} rebinds={}",
         (int) L.id,
         m.alive(L, now_ns) ? "up" : "down",
         L.probing.load() ? "(probing)" : "",
@@ -1426,7 +1668,9 @@ namespace vr::multilink {
         (uint32_t) (c.cl_rx_used - p.cl_rx_used),
         rtt == VIPLE_VR_LINK_RTT_UNKNOWN ? std::string {"-"} : std::format("{:.1f}", rtt / 10.0),
         L.cl_gap_max_ms.exchange(0),
-        L.cl_burst_mbps.load()
+        L.cl_burst_mbps.load(),
+        (unsigned) L.epoch,
+        L.rebinds
       );
       L.prev = c;
     }

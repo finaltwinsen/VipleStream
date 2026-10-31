@@ -17,6 +17,34 @@ namespace vrdrv {
       return v.QuadPart;
     }
 
+    float half_to_float(uint16_t val) {
+      uint32_t sign = ((uint32_t) val & 0x8000) << 16;
+      uint32_t exp = (val >> 10) & 0x1F;
+      uint32_t mant = val & 0x03FF;
+      uint32_t f;
+
+      if (exp == 0) {
+        if (mant == 0) {
+          f = sign;
+        } else {
+          exp = 1;
+          while ((mant & 0x0400) == 0) {
+            mant <<= 1;
+            exp++;
+          }
+          mant &= 0x03FF;
+          f = sign | ((127 - 15 - exp + 1) << 23) | (mant << 13);
+        }
+      } else if (exp == 31) {
+        f = sign | 0x7F800000 | (mant << 13);
+      } else {
+        f = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+      }
+      float out = 0.0f;
+      std::memcpy(&out, &f, sizeof(out));
+      return out;
+    }
+
     bool is_depth_format(uint32_t f) {
       switch (f) {
         case DXGI_FORMAT_R32G8X24_TYPELESS:
@@ -104,6 +132,13 @@ namespace vrdrv {
     eye_rect_[0] = math::fov_to_rect(cfg.fov_tan[0]);
     eye_rect_[1] = math::fov_to_rect(cfg.fov_tan[1]);
     fovea_a_ = cfg.fovea_pct > 100 && cfg.fovea_pct <= 250 ? 100.0f / (float) cfg.fovea_pct : 0.0f;
+    fovea_flags_ = cfg.fovea_flags;
+    fovea_slew_dps_ = cfg.fovea_slew_dps ? cfg.fovea_slew_dps : 200;
+    fovea_max_mdeg_ = cfg.fovea_max_mdeg ? cfg.fovea_max_mdeg : 20000;
+    fovea_deadband_mdeg_ = cfg.fovea_deadband_mdeg ? cfg.fovea_deadband_mdeg : 1500;
+    fovea_centre_init_ = false;
+    saccade_frozen_ = false;
+    low_vel_samples_ = 0;
     act_luid_ = luid;
     unlock();
     vsync_.activate(ctx_.qpf, cfg.refresh_mhz, now_qpc());
@@ -455,8 +490,169 @@ namespace vrdrv {
       st.drop_format.fetch_add(1, std::memory_order_relaxed);
     }
 
+    int64_t t_target_qpc = present_qpc;
+    if (layer_count_ > 0) {
+      const float pred = std::isfinite(layers_[0].pred_s) ? layers_[0].pred_s : 0.0f;
+      t_target_qpc = layers_[0].submit_qpc + (int64_t) ((double) pred * (double) ctx_.qpf);
+    }
+
+    const bool fovea_active = (fovea_a_ >= 0.4f && fovea_a_ < 0.999f) && ((fovea_flags_ & VRIPC_FOVEA_F_GAZE) != 0);
+    float fovea_out_centre[2][2] = {{0.5f, 0.5f}, {0.5f, 0.5f}};
+    if (fovea_active) {
+      float optical_axis[2][2];
+      for (int e = 0; e < 2; ++e) {
+        const float ew = eye_rect_[e].right - eye_rect_[e].left;
+        const float eh = eye_rect_[e].bottom - eye_rect_[e].top;
+        optical_axis[e][0] = (ew > 1e-6f) ? (-eye_rect_[e].left / ew) : 0.5f;
+        optical_axis[e][1] = (eh > 1e-6f) ? (eye_rect_[e].bottom / eh) : 0.5f;
+      }
+
+      vripc_tracking_slot_t trk_slot {};
+      uint64_t trk_idx = 0;
+      bool torn = false;
+      const bool read_ok = gen_->read_tracking_closest_target(t_target_qpc, trk_slot, trk_idx, &torn);
+
+      const bool gaze_valid = read_ok &&
+                              ((trk_slot.flags & VRIPC_TRK_F_GAZE) != 0) &&
+                              trk_slot.gaze_conf > 0 &&
+                              trk_slot.gaze_sample_age_ms < 250;
+
+      float target_px[2] = {optical_axis[0][0], optical_axis[1][0]};
+      float target_py[2] = {optical_axis[0][1], optical_axis[1][1]};
+
+      float yaw = 0.0f;
+      float pitch = 0.0f;
+      if (gaze_valid) {
+        ++stat_gaze_valid_;
+        yaw = half_to_float(trk_slot.gaze_yaw_f16);
+        pitch = half_to_float(trk_slot.gaze_pitch_f16);
+
+        const float tx = std::tan(yaw);
+        const float ty = std::tan(pitch);
+
+        for (int e = 0; e < 2; ++e) {
+          const float ew = eye_rect_[e].right - eye_rect_[e].left;
+          const float eh = eye_rect_[e].bottom - eye_rect_[e].top;
+          if (ew > 1e-6f && eh > 1e-6f) {
+            const float raw_x = (tx - eye_rect_[e].left) / ew;
+            const float raw_y = (eye_rect_[e].bottom - ty) / eh;
+            const float clamped_x = std::clamp(raw_x, 0.15f, 0.85f);
+            const float clamped_y = std::clamp(raw_y, 0.15f, 0.85f);
+            if (clamped_x != raw_x || clamped_y != raw_y) {
+              ++stat_gaze_clamped_;
+            }
+            target_px[e] = clamped_x;
+            target_py[e] = clamped_y;
+          }
+        }
+      } else {
+        ++stat_gaze_stale_;
+      }
+
+      // Saccade 狀態機：速度 > 250°/s 凍結，< 50°/s 連續 2 樣本解凍
+      const double dt_s = (last_fovea_qpc_ > 0 && present_qpc > last_fovea_qpc_)
+                            ? ((double) (present_qpc - last_fovea_qpc_) / (double) ctx_.qpf)
+                            : (1.0 / 90.0);
+      if (gaze_valid && last_gaze_sample_qpc_ > 0) {
+        const float d_yaw = yaw - last_gaze_yaw_[0];
+        const float d_pitch = pitch - last_gaze_pitch_[0];
+        const float ang_dist_deg = std::sqrt(d_yaw * d_yaw + d_pitch * d_pitch) * (180.0f / 3.14159265358979323846f);
+        const float ang_vel_dps = (dt_s > 1e-4) ? (ang_dist_deg / (float) dt_s) : 0.0f;
+
+        if (ang_vel_dps > 250.0f) {
+          saccade_frozen_ = true;
+          low_vel_samples_ = 0;
+          ++stat_gaze_frozen_;
+        } else if (saccade_frozen_) {
+          if (ang_vel_dps < 50.0f) {
+            ++low_vel_samples_;
+            if (low_vel_samples_ >= 2) {
+              saccade_frozen_ = false;
+            }
+          } else {
+            low_vel_samples_ = 0;
+          }
+        }
+      } else if (!gaze_valid) {
+        saccade_frozen_ = false;
+        low_vel_samples_ = 0;
+      }
+
+      if (gaze_valid) {
+        last_gaze_yaw_[0] = yaw;
+        last_gaze_pitch_[0] = pitch;
+        last_gaze_sample_qpc_ = present_qpc;
+      }
+
+      if (saccade_frozen_) {
+        target_px[0] = pre_saccade_target_[0][0];
+        target_py[0] = pre_saccade_target_[0][1];
+        target_px[1] = pre_saccade_target_[1][0];
+        target_py[1] = pre_saccade_target_[1][1];
+      } else {
+        pre_saccade_target_[0][0] = target_px[0];
+        pre_saccade_target_[0][1] = target_py[0];
+        pre_saccade_target_[1][0] = target_px[1];
+        pre_saccade_target_[1][1] = target_py[1];
+      }
+
+      // 初始化第一幀中心
+      if (!fovea_centre_init_) {
+        current_fovea_centre_[0][0] = target_px[0];
+        current_fovea_centre_[0][1] = target_py[0];
+        current_fovea_centre_[1][0] = target_px[1];
+        current_fovea_centre_[1][1] = target_py[1];
+        fovea_centre_init_ = true;
+      } else {
+        // 死區與 Slew rate 限制（每眼各自計算）
+        const float deadband_deg = (float) fovea_deadband_mdeg_ / 1000.0f;
+        const float max_step_deg = (float) fovea_slew_dps_ * (float) dt_s;
+
+        for (int e = 0; e < 2; ++e) {
+          const float ew = eye_rect_[e].right - eye_rect_[e].left;
+          const float eh = eye_rect_[e].bottom - eye_rect_[e].top;
+          const float dcx = target_px[e] - current_fovea_centre_[e][0];
+          const float dcy = target_py[e] - current_fovea_centre_[e][1];
+          const float dtx = dcx * ew;
+          const float dty = dcy * eh;
+          const float diff_rad = std::sqrt(dtx * dtx + dty * dty);
+          const float diff_deg = diff_rad * (180.0f / 3.14159265358979323846f);
+
+          if (diff_deg >= deadband_deg) {
+            if (diff_deg > max_step_deg && diff_deg > 1e-4f) {
+              const float frac = max_step_deg / diff_deg;
+              current_fovea_centre_[e][0] += dcx * frac;
+              current_fovea_centre_[e][1] += dcy * frac;
+            } else {
+              current_fovea_centre_[e][0] = target_px[e];
+              current_fovea_centre_[e][1] = target_py[e];
+            }
+          }
+          current_fovea_centre_[e][0] = std::clamp(current_fovea_centre_[e][0], 0.15f, 0.85f);
+          current_fovea_centre_[e][1] = std::clamp(current_fovea_centre_[e][1], 0.15f, 0.85f);
+        }
+      }
+
+      last_fovea_qpc_ = present_qpc;
+      std::memcpy(fovea_out_centre, current_fovea_centre_, sizeof(fovea_out_centre));
+
+      // 10 秒統計日誌 [VIPLE-VR-GAZE]
+      if (stat_gaze_last_log_ == 0 || present_qpc - stat_gaze_last_log_ >= (int64_t) (10 * ctx_.qpf)) {
+        VRDRV_LOG_INFO("[VIPLE-VR-GAZE] host: centreL=(%.3f,%.3f) centreR=(%.3f,%.3f) valid=%llu stale=%llu frozen=%llu clamped=%llu",
+                       current_fovea_centre_[0][0], current_fovea_centre_[0][1],
+                       current_fovea_centre_[1][0], current_fovea_centre_[1][1],
+                       (unsigned long long) stat_gaze_valid_, (unsigned long long) stat_gaze_stale_,
+                       (unsigned long long) stat_gaze_frozen_, (unsigned long long) stat_gaze_clamped_);
+        stat_gaze_last_log_ = present_qpc;
+        stat_gaze_valid_ = 0;
+        stat_gaze_stale_ = 0;
+        stat_gaze_frozen_ = 0;
+        stat_gaze_clamped_ = 0;
+      }
+    }
+
     auto *ctx = device_.ctx();
-    comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, fovea_a_);
+    comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, fovea_a_, fovea_active ? fovea_out_centre : nullptr);
     const uint64_t value = ++R.fence_n;
     HRESULT hr = device_.ctx4()->Signal(R.shared_fence.Get(), value);
     ctx->Flush();  // 跨行程 CPU 觀察需要（§B.7）
@@ -485,12 +681,15 @@ namespace vrdrv {
     d.present_qpc = present_qpc;
     d.submit_qpc = submit_qpc;
     d.render_rot[3] = 1.0f;
+    std::memcpy(d.fovea_centre, fovea_out_centre, sizeof(d.fovea_centre));
+    if (fovea_active) {
+      d.flags |= VRIPC_FRM_FOVEATED;
+    }
     if (layer_count_ > 0) {
       // 第 0 層＝scene：mHmdPose 是 SteamVR 世界空間；renderPose(client 空間) = Δ_cur⁻¹ · mHmdPose（S2-06、§E.2）
       ph_pose_t app;
       math::matrix34_to_pose(layers_[0].pose, app.rot, app.pos);
-      const float pred = std::isfinite(layers_[0].pred_s) ? layers_[0].pred_s : 0.0f;
-      d.t_target_qpc = layers_[0].submit_qpc + (int64_t) ((double) pred * (double) ctx_.qpf);
+      d.t_target_qpc = t_target_qpc;
       const ph_match_t m = ctx_.pose_hist.match(app, d.t_target_qpc, present_qpc);
       d.render_rot[0] = (float) m.client_pose.rot.x;
       d.render_rot[1] = (float) m.client_pose.rot.y;
@@ -499,12 +698,13 @@ namespace vrdrv {
       d.render_pos[0] = (float) m.client_pose.pos.x;
       d.render_pos[1] = (float) m.client_pose.pos.y;
       d.render_pos[2] = (float) m.client_pose.pos.z;
-      d.flags = VRIPC_FRM_POSE_VALID;
-      d.echo_sample_id = m.echo;
+      d.flags |= VRIPC_FRM_POSE_VALID;
       if (m.hit) {
         d.flags |= VRIPC_FRM_ECHO_MATCHED;
+        d.echo_sample_id = m.echo;
       } else {
         d.flags |= VRIPC_FRM_POSE_FALLBACK;
+        d.echo_sample_id = 0;  // H5 修正：FALLBACK 時 echo=0（明確表示沒有回聲），避免污染 client echoAge 統計
         st.posehist_miss.fetch_add(1, std::memory_order_relaxed);
       }
       if (m.delta_nonidentity) {
@@ -519,8 +719,8 @@ namespace vrdrv {
                        m.adopted_delta.pos.y * 1000.0, m.adopted_delta.pos.z * 1000.0, m.adopted_trigger.c_str());
       }
     } else {
-      d.t_target_qpc = present_qpc;
-      d.flags = VRIPC_FRM_POSE_FALLBACK;
+      d.t_target_qpc = t_target_qpc;
+      d.flags |= VRIPC_FRM_POSE_FALLBACK;
     }
     gen_->publish_frame(d);
     st.frames_composited.fetch_add(1, std::memory_order_relaxed);

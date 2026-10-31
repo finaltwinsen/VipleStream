@@ -193,6 +193,17 @@ namespace vrdrv {
     return r == proto::seq_read_e::ok;
   }
 
+  bool generation_t::read_tracking_closest_target(int64_t t_target_qpc, vripc_tracking_slot_t &out, uint64_t &idx, bool *torn) {
+    const auto r = proto::seq_read_closest_target<vripc_tracking_slot_t, VRIPC_TRK_SLOTS>(&shm_->tracking.write_index, shm_->tracking.slot, t_target_qpc, out, idx);
+    if (torn) {
+      *torn = (r == proto::seq_read_e::torn);
+    }
+    if (r == proto::seq_read_e::torn) {
+      tracking_torn_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return r == proto::seq_read_e::ok;
+  }
+
   bool generation_t::read_pacing(vripc_pacing_t &out) {
     return proto::seq_read_single(&shm_->pacing, out);
   }

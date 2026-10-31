@@ -61,6 +61,7 @@ struct VrSessionInfo {
     int fovea = 100;          // §VR-FOVEA：server 回了 fovea=N 才是 N（否則 100：影像沒有壓縮，不必還原）
     bool recoveryIntra = false;
     bool multilink = false;   // §VR-MULTILINK：server 回了 multilink=1（雙方都支援）
+    bool gazeFovea = false;   // §VR-GAZE-FOVEA：server 回了 gazeFovea=1
     int irFrames = 0;
     QString transport;
     QString universeId;

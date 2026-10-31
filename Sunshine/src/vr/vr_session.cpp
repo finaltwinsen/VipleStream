@@ -414,7 +414,7 @@ namespace vr {
 
   std::string format_session_element(const negotiated_t &neg) {
     return std::format(
-      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId={};session={};mode={}{}{}",
+      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId={};session={};mode={}{}{}{}",
       VIPLE_VR_PROTO_VERSION,
       neg.packed_width(),
       neg.packed_height(),
@@ -430,7 +430,9 @@ namespace vr {
       // §VR-MULTILINK：只在協商成立時多這一項（舊 client 不認得的 key 會略過）
       neg.multilink ? ";multilink=1" : "",
       // §VR-FOVEA：只有真的 driver 會做（stub 不合成影像）；回了這一項 client 才還原
-      neg.pcvr && neg.params.fovea > 100 ? std::format(";fovea={}", neg.params.fovea) : std::string()
+      neg.pcvr && neg.params.fovea > 100 ? std::format(";fovea={}", neg.params.fovea) : std::string(),
+      // §VR-GAZE-FOVEA：注視點動態中心協商成功時標註
+      neg.gaze_fovea ? ";gazeFovea=1" : ""
     );
   }
 
@@ -805,7 +807,7 @@ namespace vr {
     return timing_last_;
   }
 
-  bool session_state_t::queue_haptic(uint8_t device, uint32_t duration_us, float frequency_hz, float amplitude) {
+  bool session_state_t::queue_haptic(uint8_t device, uint32_t duration_us, float frequency_hz, float amplitude, uint64_t timestamp_ns) {
     if (device != VIPLE_VR_POSE_LEFT && device != VIPLE_VR_POSE_RIGHT) {
       return false;
     }
@@ -815,8 +817,20 @@ namespace vr {
     h.frequencyHz = frequency_hz;
     h.amplitude = amplitude;
     h.eventId = haptic_event_id_.fetch_add(1, std::memory_order_relaxed) + 1;
-    queue_s2c(make_tlv(VIPLE_VR_S2C_HAPTIC, &h, sizeof(h)), false);
+    h.timestampNs = timestamp_ns;
+    auto tlv = make_tlv(VIPLE_VR_S2C_HAPTIC, &h, sizeof(h));
+    queue_s2c(tlv, false);
     haptic_tx_.fetch_add(1, std::memory_order_relaxed);
+
+    if (neg_.haptic_redundancy) {
+      const auto now = std::chrono::steady_clock::now();
+      std::lock_guard lk {outbox_mtx_};
+      if (delayed_haptics_.size() >= 128) {
+        delayed_haptics_.erase(delayed_haptics_.begin(), delayed_haptics_.begin() + 2);
+      }
+      delayed_haptics_.push_back({now + std::chrono::milliseconds(8), tlv});
+      delayed_haptics_.push_back({now + std::chrono::milliseconds(20), std::move(tlv)});
+    }
     return true;
   }
 
@@ -922,6 +936,19 @@ namespace vr {
   std::vector<s2c_msg_t> session_state_t::drain_s2c() {
     std::vector<s2c_msg_t> out;
     std::lock_guard lk {outbox_mtx_};
+    const auto now = std::chrono::steady_clock::now();
+    if (!delayed_haptics_.empty()) {
+      auto it = delayed_haptics_.begin();
+      while (it != delayed_haptics_.end()) {
+        if (it->send_at <= now) {
+          outbox_.push_back({std::move(it->tlv), false});
+          haptic_resend_tx_.fetch_add(1, std::memory_order_relaxed);
+          it = delayed_haptics_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
     out.swap(outbox_);
     // 延後的那一份留到下一次 drain
     outbox_.swap(outbox_next_);

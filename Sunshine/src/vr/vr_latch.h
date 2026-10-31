@@ -167,6 +167,9 @@ namespace vr::latch {
     uint8_t eval_outcome = kEvalTrack;  ///< kEval*（kEvalVoid 時 eval_moved_us／eval_err_us 是 0，沒有量測值）
 
     uint32_t refills = 0;  ///< §VR-BUFFER-REFILL：累計的補緩衝次數（v2；step_why＝kStepRefill 的 burst）
+    /// §VR-LATCH-V2-ACQ：這一筆把開場的一次對準關掉了（每個開場最多一次；acq_open_s＝開場到關掉幾秒）
+    bool acq_closed = false;
+    double acq_open_s = 0;
   };
 
   /// §VR-LATCH-V3：circ_median() 的結果
@@ -426,6 +429,21 @@ namespace vr::latch {
     uint32_t steps_ = 0;
     uint32_t bad_steps_ = 0;
     std::array<int64_t, kV3StepsPerMin> step_times_ {};  ///< 環狀：最近幾次步進的時刻（60 s 內的步數上限）
+
+    // §VR-LATCH-V2-ACQ（v2＋options_t::acquire）：最近 kV3AcqN 筆誤差的中位數（分散不大時）超過進入門檻，就借 v3 的定時
+    // burst 一次移到位。盲區共用 refill_blind_until_ns_；步數上限與 v3 共用 can_step()（v2 不用 v3 的其他狀態）
+    result_t start_acquire_v2(double err_us, int64_t now_ns);
+    std::array<double, kV3AcqN> acq_e_ {};  ///< 環狀：最近幾筆折返後的誤差（µs）
+    std::size_t acq_n_ = 0;
+    std::size_t acq_head_ = 0;
+    int64_t acq_no_until_ns_ = 0;  ///< 上一次 burst 的盲區結束後再隔 kV3StepGapNs 才能再步進
+    // 只在開場作用（2026-10-31 配戴：穩態也一直觸發，144 Hz 的正常抖動被當成偏離）：開場滿 kAcqMinOpenNs、
+    // 而且平滑誤差連續 kAcqSettledNs 都在進入門檻內，就關掉，直到換更新率（新的開場）
+    static constexpr int64_t kAcqMinOpenNs = 30'000'000'000;
+    static constexpr int64_t kAcqSettledNs = 10'000'000'000;
+    int64_t acq_open_ns_ = 0;  ///< 這個開場第一筆樣本的時刻（0＝還沒開始）
+    int64_t acq_ok_since_ns_ = 0;  ///< 平滑誤差回到門檻內的時刻（0＝目前不在門檻內）
+    bool acq_done_ = false;  ///< 這個開場的一次對準已經關掉
 
     // §VR-BUFFER-REFILL（v2）
     result_t start_refill(int64_t now_ns);

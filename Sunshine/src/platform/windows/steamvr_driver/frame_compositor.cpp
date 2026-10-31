@@ -108,7 +108,7 @@ namespace vrdrv {
     return dev->CreateBuffer(&cbd, nullptr, &cb_);
   }
 
-  void frame_compositor_t::compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a) {
+  void frame_compositor_t::compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a, const float fovea_centre[2][2]) {
     const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     ctx->ClearRenderTargetView(rtv, black);
     if (count == 0 || !ready()) {
@@ -162,6 +162,18 @@ namespace vrdrv {
         c.mode = L.mode;
         c.force_alpha = L.force_alpha ? 1u : 0u;
         if (fovea_a >= 0.4f && fovea_a < 0.999f) {
+          // 正前方（tangent 0）在本眼影像裡的位置；若有傳入動態中心則使用傳入值
+          float cx = -E.left / ew;
+          float cy = E.bottom / eh;
+          if (fovea_centre != nullptr) {
+            cx = fovea_centre[e][0];
+            cy = fovea_centre[e][1];
+          }
+          c.fovea[0] = fovea_a;
+          c.fovea[1] = cx < 0.05f ? 0.05f : cx > 0.95f ? 0.95f : cx;
+          c.fovea[2] = cy < 0.05f ? 0.05f : cy > 0.95f ? 0.95f : cy;
+        }
+        /*
           // 正前方（tangent 0）在本眼影像裡的位置；rect 的 top 是下緣的 tangent、bottom 是上緣（影像上方＝up）
           const float cx = -E.left / ew;
           const float cy = E.bottom / eh;
@@ -169,6 +181,7 @@ namespace vrdrv {
           c.fovea[1] = cx < 0.05f ? 0.05f : cx > 0.95f ? 0.95f : cx;
           c.fovea[2] = cy < 0.05f ? 0.05f : cy > 0.95f ? 0.95f : cy;
         }
+        */
         D3D11_MAPPED_SUBRESOURCE m {};
         if (FAILED(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
           continue;

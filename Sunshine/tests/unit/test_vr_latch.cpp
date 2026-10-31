@@ -3275,3 +3275,109 @@ TEST(VrLatchTest, RefillWatchNeedsTwoEmptySecondsAndBacksOff) {
   EXPECT_FALSE(tick(0, 144));
   EXPECT_TRUE(tick(0, 144));
 }
+
+// ── §VR-LATCH-V2-ACQ ──────────────────────────────────────────────────
+
+namespace {
+  vr::latch::options_t v2_acq_on() {
+    vr::latch::options_t o;
+    o.acquire = true;
+    o.refill = true;
+    return o;
+  }
+}  // namespace
+
+TEST(VrLatchTest, V2AcquireStepsOnceWhenFarFromTarget) {
+  controller_t c;
+  c.configure(mode_e::v2, 40, kPeriod144, v2_acq_on());
+  int64_t now = 0;
+  uint32_t id = 0;
+  // 目標 2778 µs；影像早到 5500 µs → 誤差 +2722 µs（0.39T），前 4 筆還不夠樣本
+  auto r = feed_v2(c, 5500, 4, now, id, kPeriod144);
+  EXPECT_EQ(r.burst_us, 0u);
+  now += kStepNs;
+  r = c.on_latch(5500, kPeriod144, now, ++id);
+  ASSERT_EQ(r.step_why, vr::latch::kStepAcq);
+  EXPECT_TRUE(r.update);
+  EXPECT_GT(r.burst_ppm, r.ppm);  // 太早到 → 週期暫時變長
+  EXPECT_NEAR((double) r.burst_us, (5500.0 - 6944.444 * 0.4) / 0.004, 2.0);
+  // 盲區內不再步進、不寫 pacing
+  const int64_t blind_end = now + (int64_t) r.burst_us * 1000 + controller_t::kV3SettleNs;
+  while (now + kStepNs < blind_end) {
+    now += kStepNs;
+    r = c.on_latch(5500, kPeriod144, now, ++id);
+    EXPECT_FALSE(r.update);
+    EXPECT_EQ(r.burst_us, 0u);
+  }
+  // 盲區後 kV3StepGapNs 內就算還偏，也只交給 PI
+  for (int i = 0; i < 10; ++i) {
+    now += kStepNs;
+    r = c.on_latch(5500, kPeriod144, now, ++id);
+    EXPECT_EQ(r.burst_us, 0u);
+  }
+}
+
+TEST(VrLatchTest, V2AcquireLateFramesStepEarlier) {
+  controller_t c;
+  c.configure(mode_e::v2, 40, kPeriod144, v2_acq_on());
+  int64_t now = 0;
+  uint32_t id = 0;
+  // slack 600 µs：誤差 −2178 µs（太晚到）→ 週期暫時變短
+  auto r = feed_v2(c, 600, 5, now, id, kPeriod144);
+  ASSERT_EQ(r.step_why, vr::latch::kStepAcq);
+  EXPECT_LT(r.burst_ppm, r.ppm);
+  EXPECT_NEAR(r.step_err_us, 600.0 - 2777.8, 1.0);
+}
+
+TEST(VrLatchTest, V2AcquireIgnoresSmallOrIncoherentOrDisabled) {
+  int64_t now = 0;
+  uint32_t id = 0;
+  controller_t near;  // 誤差 0.1T：不到進入門檻
+  near.configure(mode_e::v2, 40, kPeriod144, v2_acq_on());
+  EXPECT_EQ(feed_v2(near, 2778 + 700, 20, now, id, kPeriod144).burst_us, 0u);
+
+  controller_t noisy;  // 分散很大（host 還沒穩定出幀）：不步進
+  noisy.configure(mode_e::v2, 40, kPeriod144, v2_acq_on());
+  for (int i = 0; i < 20; ++i) {
+    now += kStepNs;
+    const auto r = noisy.on_latch(i % 2 ? 6500 : 4300, kPeriod144, now, ++id);
+    EXPECT_EQ(r.burst_us, 0u);
+  }
+
+  controller_t off;  // 沒開 vr_latch_acquire
+  off.configure(mode_e::v2, 40, kPeriod144, refill_on());
+  EXPECT_EQ(feed_v2(off, 5500, 20, now, id, kPeriod144).burst_us, 0u);
+}
+
+TEST(VrLatchTest, V2AcquireOnlyDuringOpening) {
+  controller_t c;
+  c.configure(mode_e::v2, 40, kPeriod144, v2_acq_on());
+  int64_t now = 0;
+  uint32_t id = 0;
+  // 開場 40 s 都在目標附近：滿 30 s 且連續 10 s 在門檻內時關掉，只報一次
+  int closed = 0;
+  double open_s = 0;
+  for (int i = 0; i < 400; ++i) {
+    now += kStepNs;
+    const auto r = c.on_latch(2778, kPeriod144, now, ++id);
+    if (r.acq_closed) {
+      ++closed;
+      open_s = r.acq_open_s;
+    }
+  }
+  EXPECT_EQ(closed, 1);
+  EXPECT_NEAR(open_s, 30.0, 0.2);
+  // 關掉之後誤差再大也不步進（交給 PI）
+  for (int i = 0; i < 50; ++i) {
+    now += kStepNs;
+    EXPECT_EQ(c.on_latch(5500, kPeriod144, now, ++id).burst_us, 0u);
+  }
+  // 換更新率＝新的開場：重新開放
+  constexpr uint32_t kPeriod120b = 8'333'333;
+  vr::latch::result_t r;
+  for (int i = 0; i < 6 && r.burst_us == 0; ++i) {
+    now += kStepNs;
+    r = c.on_latch(6500, kPeriod120b, now, ++id);
+  }
+  EXPECT_EQ(r.step_why, vr::latch::kStepAcq);
+}

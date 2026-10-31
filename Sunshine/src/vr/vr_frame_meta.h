@@ -47,6 +47,9 @@ namespace video {
     uint16_t space_epoch = 0;  // 空間 epoch（space-delta／recenter 換代時遞增）
     uint64_t frame_id = 0;  // driver descriptor 的 frame_id（單調遞增，用來算 skipped／連續性）
     int64_t present_qpc = 0;  // driver Present() 進入時的時鐘 tick（platf::vr_clock_ticks() 時基；Windows = raw QPC）
+    // §VR-GAZE-FOVEA：注視點渲染資訊（由 driver frame descriptor 帶出）
+    bool foveated = false;
+    float fovea_centre[2][2] = {{0.5f, 0.5f}, {0.5f, 0.5f}};
   };
 
 }  // namespace video

@@ -283,7 +283,8 @@ private:
     bool ensureFull(int fw, int fh);
     // fv＝(a, cxL, cxR, cyL)（shader 的 vec4 vs_fv）、*cyR＝右眼的垂直中心（shader 的 float vs_cyr）
     void loadFoveation(float fv[4], float* cyR) const;
-    bool renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh);
+    bool renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
+                      bool hasMeta = false, const VIPLE_VR_FRAME_META& meta = {});
     void dumpTexture(pl_tex tex, const QString& path);
     // dev（--xr-dump-frame）：把 tex 讀回成縮過的影像（最長邊 ≤ 1280；失敗回空的影像）；saveDump 存檔並印一行。
     // 分成兩步是為了 §VR-SYNTH：第一次發布的那一張要在 hold 之前讀回，等確定這一幀有合成影像才存。

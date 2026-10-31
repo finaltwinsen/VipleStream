@@ -131,6 +131,10 @@ namespace vr {
     /// §VR-MULTILINK：client 帶了 VIPLE_VR_CLIENT_CAP_MULTILINK 且 vr_multilink 不是 disabled。
     /// true 時 <VipleStreamVRSession> 多一個 multilink=1，client 才會送 LINK_HELLO。
     bool multilink = false;
+    /// §VR-HAPTIC-REDUNDANT：vr_haptic_redundancy。true 時 S2C HAPTIC 以 0/8/20 ms 三次冗餘發送
+    bool haptic_redundancy = true;
+    /// §VR-GAZE-FOVEA：眼動追蹤驅動注視點渲染協商結果。
+    bool gaze_fovea = false;
 
     int packed_width() const {
       return params.eye_width * 2;  // layout=sbs
@@ -449,10 +453,14 @@ namespace vr {
      * @brief bridge 執行緒（haptic sink）：把 driver 的一則 haptic 打包成 0x5508/01（unsequenced）排入 outbox。
      *        device：VIPLE_VR_POSE_LEFT／RIGHT；其他值丟棄。回傳是否排入。
      */
-    bool queue_haptic(uint8_t device, uint32_t duration_us, float frequency_hz, float amplitude);
+    bool queue_haptic(uint8_t device, uint32_t duration_us, float frequency_hz, float amplitude, uint64_t timestamp_ns = 0);
 
     uint64_t haptics_queued() const {
       return haptic_tx_.load(std::memory_order_relaxed);
+    }
+
+    uint64_t haptics_resend_queued() const {
+      return haptic_resend_tx_.load(std::memory_order_relaxed);
     }
 
     /// control 執行緒：TLV 長度超出剩餘長度
@@ -546,6 +554,11 @@ namespace vr {
     std::mutex outbox_mtx_;
     std::vector<s2c_msg_t> outbox_;
     std::vector<s2c_msg_t> outbox_next_;  ///< 下一次 drain 才送（REFRESH_START 的第二份）
+    struct delayed_haptic_t {
+      std::chrono::steady_clock::time_point send_at;
+      std::vector<uint8_t> tlv;
+    };
+    std::vector<delayed_haptic_t> delayed_haptics_;
 
     // 統計
     std::atomic<uint32_t> next_frame_ {0};
@@ -578,6 +591,7 @@ namespace vr {
     latch::refill_watch_t refill_watch_;  ///< §VR-BUFFER-REFILL：client 的緩衝是不是一直空著（timing_mtx_）
     std::atomic<uint32_t> haptic_event_id_ {0};
     std::atomic<uint64_t> haptic_tx_ {0};
+    std::atomic<uint64_t> haptic_resend_tx_ {0};
   };
 
   // ── 全域「目前的 VR session」（VR 獨佔：同時最多一個）──────────────────

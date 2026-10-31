@@ -1282,6 +1282,7 @@ namespace vr::bridge {
       tmp.gaze_pitch_f16 = s.gaze_pitch_f16;
       tmp.gaze_conf = s.gaze_conf;
       tmp.gaze_flags = s.gaze_flags;
+      tmp.gaze_sample_age_ms = s.gaze_sample_age_ms;
 
       std::lock_guard lk(trk_mtx_);
       const auto g = trk_gen_;

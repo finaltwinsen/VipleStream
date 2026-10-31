@@ -877,19 +877,102 @@ TEST(VrMultilinkRepairRtt, InFlightGap) {
 }
 
 TEST(VrMultilinkRepairRtt, FeatureNegotiation) {
-  // (client 提出的, ctrl, repair, repair_rtt)：REPAIR 要 CTRL 成立、REPAIR_RTT 要 REPAIR 成立
-  EXPECT_EQ(ml::negotiate_link_features(0x07, true, true, true), 0x07);
-  EXPECT_EQ(ml::negotiate_link_features(0x03, true, true, true), 0x03);  // 舊 client 沒提：不啟用
-  EXPECT_EQ(ml::negotiate_link_features(0x07, true, true, false), 0x03);  // server 的開關關著（預設）
-  EXPECT_EQ(ml::negotiate_link_features(0x07, true, false, true), 0x01);  // 補包沒開：RTT 也不成立
-  EXPECT_EQ(ml::negotiate_link_features(0x07, false, true, true), 0x00);
-  EXPECT_EQ(ml::negotiate_link_features(0x05, true, true, true), 0x01);  // client 提了 RTT 卻沒提 REPAIR
-  EXPECT_EQ(ml::negotiate_link_features(0x06, true, true, true), 0x00);
-  EXPECT_EQ(ml::negotiate_link_features(0xFF, true, true, true), 0x07);  // 不認得的位元不回
+  // (client 提出的, ctrl, repair, repair_rtt, hotadd)：REPAIR 要 CTRL 成立、REPAIR_RTT 要 REPAIR 成立
+  EXPECT_EQ(ml::negotiate_link_features(0x07, true, true, true, false), 0x07);
+  EXPECT_EQ(ml::negotiate_link_features(0x03, true, true, true, false), 0x03);  // 舊 client 沒提：不啟用
+  EXPECT_EQ(ml::negotiate_link_features(0x07, true, true, false, false), 0x03);  // server 的開關關著（預設）
+  EXPECT_EQ(ml::negotiate_link_features(0x07, true, false, true, false), 0x01);  // 補包沒開：RTT 也不成立
+  EXPECT_EQ(ml::negotiate_link_features(0x07, false, true, true, false), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0x05, true, true, true, false), 0x01);  // client 提了 RTT 卻沒提 REPAIR
+  EXPECT_EQ(ml::negotiate_link_features(0x06, true, true, true, false), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0xFF, true, true, true, false), 0x07);  // 不認得的位元不回
   // 沒有 RTT 的三種組合和原本寫在 on_hello 裡的判斷相同
-  EXPECT_EQ(ml::negotiate_link_features(0x03, true, false, false), 0x01);
-  EXPECT_EQ(ml::negotiate_link_features(0x03, false, false, false), 0x00);
-  EXPECT_EQ(ml::negotiate_link_features(0x01, true, true, false), 0x01);
-  EXPECT_EQ(ml::negotiate_link_features(0x02, true, true, false), 0x00);
-  EXPECT_EQ(ml::negotiate_link_features(0x00, true, true, true), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0x03, true, false, false, false), 0x01);
+  EXPECT_EQ(ml::negotiate_link_features(0x03, false, false, false, false), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0x01, true, true, false, false), 0x01);
+  EXPECT_EQ(ml::negotiate_link_features(0x02, true, true, false, false), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0x00, true, true, true, false), 0x00);
+}
+
+// ── §VR-MULTILINK-HOTADD ─────────────────────────────────────────
+
+TEST(VrMultilinkHotadd, HelloEpochTrailer) {
+  auto body = hello_body({desc(1, 50000, 50001, 70), desc(2, 50002, 50003, 71)});
+  std::vector<ml::hello_link_t> out;
+
+  // 舊 client：沒有尾端 epoch，兩條都當 0
+  ASSERT_TRUE(ml::parse_hello(body.data(), body.size(), out));
+  ASSERT_EQ(out.size(), 2u);
+  EXPECT_EQ(out[0].epoch, 0);
+  EXPECT_EQ(out[1].epoch, 0);
+
+  // 只多一個 byte（不足 count 個）：整批當 legacy，不讀半套
+  auto partial = body;
+  partial.push_back(7);
+  ASSERT_TRUE(ml::parse_hello(partial.data(), partial.size(), out));
+  EXPECT_EQ(out[0].epoch, 0);
+  EXPECT_EQ(out[1].epoch, 0);
+
+  // 完整的 epoch[count]
+  body.push_back(3);
+  body.push_back(9);
+  ASSERT_TRUE(ml::parse_hello(body.data(), body.size(), out));
+  EXPECT_EQ(out[0].epoch, 3);
+  EXPECT_EQ(out[1].epoch, 9);
+
+  // epoch 不影響「描述相同」的比較（同 id 重送時仍回原埠，不算 rebind）
+  auto h = out[0];
+  h.epoch = 99;
+  EXPECT_TRUE(h == out[0]);
+}
+
+TEST(VrMultilinkHotadd, LinkAddrsTlv) {
+  const std::vector<std::array<uint8_t, 4>> addrs {
+    {192, 168, 1, 1},
+    {10, 0, 0, 2},
+  };
+  const auto tlv = ml::format_addrs_tlv(addrs);
+  ASSERT_EQ(tlv.size(), 2u + 1u + 2u * 4u);
+  EXPECT_EQ(tlv[0], VIPLE_VR_S2C_LINK_ADDRS);
+  EXPECT_EQ(tlv[1], tlv.size() - 2);
+  EXPECT_EQ(tlv[2], 2);
+  EXPECT_EQ(tlv[3], 192);
+  EXPECT_EQ(tlv[6], 1);
+  EXPECT_EQ(tlv[7], 10);
+  EXPECT_EQ(tlv[10], 2);
+
+  // 超過上限只送前 VIPLE_VR_LINK_ADDR_MAX 個
+  std::vector<std::array<uint8_t, 4>> many(VIPLE_VR_LINK_ADDR_MAX + 3, std::array<uint8_t, 4> {1, 2, 3, 4});
+  const auto capped = ml::format_addrs_tlv(many);
+  ASSERT_EQ(capped.size(), 2u + 1u + VIPLE_VR_LINK_ADDR_MAX * 4u);
+  EXPECT_EQ(capped[2], VIPLE_VR_LINK_ADDR_MAX);
+  EXPECT_EQ(sizeof(VIPLE_VR_LINK_ADDRS), 33u);
+}
+
+TEST(VrMultilinkHotadd, RebindAndReclaimDeadlines) {
+  const int64_t now = 100'000'000'000;
+  // 還活著、或 2 s 內有 PING：不准重綁（防搶佔）
+  EXPECT_FALSE(ml::hotadd_rebind_allowed(now, now - 1'000'000'000, now - 1'000'000'000));
+  EXPECT_FALSE(ml::hotadd_rebind_allowed(now, 0, now - 1'000'000'000));
+  // alive() 過了（CONFIRMED 超過 2 s）、但 PING 還在：仍不准
+  EXPECT_FALSE(ml::hotadd_rebind_allowed(now, now - 3'000'000'000, now - 1'000'000'000));
+  // 兩個都超過 2 s：可以重綁
+  EXPECT_TRUE(ml::hotadd_rebind_allowed(now, now - 3'000'000'000, now - 3'000'000'000));
+  // 從來沒有動靜：視為死亡
+  EXPECT_TRUE(ml::hotadd_rebind_allowed(now, 0, 0));
+
+  // slot 回收另外要求 10 s
+  EXPECT_FALSE(ml::hotadd_reclaim_allowed(now, now - 3'000'000'000, now - 3'000'000'000));
+  EXPECT_TRUE(ml::hotadd_reclaim_allowed(now, now - 11'000'000'000, now - 11'000'000'000));
+  EXPECT_FALSE(ml::hotadd_reclaim_allowed(now, now - 11'000'000'000, now - 1'000'000'000));
+}
+
+TEST(VrMultilinkHotadd, FeatureIsIndependent) {
+  // HOTADD 不依賴 CTRL／REPAIR：只要兩邊都支援就成立
+  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_HOTADD, false, false, false, true), VIPLE_VR_LINK_F_HOTADD);
+  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_HOTADD | VIPLE_VR_LINK_F_CTRL, true, true, true, true),
+            VIPLE_VR_LINK_F_HOTADD | VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_REPAIR_RTT);
+  // server 的開關關著、或舊 client 沒提：都不回
+  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_HOTADD, true, true, true, false), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0x00, true, true, true, true), 0x00);
 }

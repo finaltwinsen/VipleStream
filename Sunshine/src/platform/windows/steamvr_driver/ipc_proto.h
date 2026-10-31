@@ -299,6 +299,53 @@ namespace vrdrv::proto {
     return seq_read_e::torn;
   }
 
+  // 多格 seqlock 讀取「target_server_qpc 最接近 t_target_qpc」的有效 slot（Slot 需有 uint64_t seq 與 int64_t target_server_qpc）。
+  template<class Slot, uint32_t N>
+  inline seq_read_e seq_read_closest_target(uint64_t *write_index, Slot *slots, int64_t t_target_qpc, Slot &out, uint64_t &idx_out) {
+    static_assert(offsetof(Slot, seq) == 0, "seq must be first");
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      const uint64_t w = vripc_load_acquire_u64(write_index);
+      if (w == 0) {
+        return seq_read_e::empty;
+      }
+      const uint64_t count = (w < N) ? w : N;
+      bool found = false;
+      uint64_t min_diff = 0;
+      Slot best_slot {};
+      uint64_t best_idx = 0;
+
+      for (uint64_t i = 0; i < count; ++i) {
+        const uint64_t idx = w - 1 - i;
+        Slot *s = &slots[idx % N];
+        const uint64_t s1 = vripc_load_acquire_u64(&s->seq);
+        if (s1 != 2 * idx + 2) {
+          continue;
+        }
+        Slot candidate;
+        std::memcpy(&candidate, (const void *) s, sizeof(Slot));
+        VRIPC_COMPILER_BARRIER();
+        const uint64_t s2 = vripc_load_acquire_u64(&s->seq);
+        if (s1 == s2 && candidate.seq == s1) {
+          const uint64_t diff = (candidate.target_server_qpc >= t_target_qpc)
+                                  ? (uint64_t)(candidate.target_server_qpc - t_target_qpc)
+                                  : (uint64_t)(t_target_qpc - candidate.target_server_qpc);
+          if (!found || diff < min_diff) {
+            min_diff = diff;
+            best_slot = candidate;
+            best_idx = idx;
+            found = true;
+          }
+        }
+      }
+      if (found) {
+        out = best_slot;
+        idx_out = best_idx;
+        return seq_read_e::ok;
+      }
+    }
+    return seq_read_e::torn;
+  }
+
   // 多格 seqlock 寫（單一寫入臨界區內呼叫）。payload 取 in 的第 8 B 之後；local_index 是寫入方自己的計數器。
   template<class Slot, uint32_t N>
   inline void seq_write(uint64_t *write_index, Slot *slots, uint64_t &local_index, const Slot &in) {

@@ -35,7 +35,7 @@ namespace vrdrv {
      * angvel_local：§VR-ANGVEL-LOCAL，把 client 的世界座標角速度轉成機體座標（SteamVR 的語意）
      */
     void update(const vripc_pose_t &pose, const vripc_ctrl_input_t &in, bool have, int64_t age_us, uint32_t oor_us, bool zero_vel,
-                double pose_time_offset, double ang_scale, bool angvel_local);
+                double pose_time_offset, double ang_scale, bool angvel_local, bool keep_offset = false);
     /// 連線中斷／standby：poseIsValid=false、放開所有輸入
     void invalidate();
 

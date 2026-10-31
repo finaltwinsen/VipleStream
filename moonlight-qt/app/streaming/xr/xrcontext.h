@@ -263,11 +263,15 @@ public:
     // M4a R2：tracking 送出執行緒填左右控制器（pose[LEFT/RIGHT]、input[0/1]、flags 的 LEFT/RIGHT）。
     // thread 模式當下 locate grip；frameloop 模式沿用 frame loop 最近一次的 grip pose。
     void sampleControllers(struct _VIPLE_VR_TRACKING* sample);
+    bool sampleEyeGaze(struct _VIPLE_VR_TRACKING* sample);
+    bool eyeGazeSupported() const { return m_EyeGazeSupported; }
     // M4a R2：main thread 放進 haptic 佇列，XR frame thread 呼叫 xrApplyHapticFeedback。
     // device 1＝左、2＝右（VIPLE_VR_POSE_LEFT/RIGHT）
     void queueHaptic(uint8_t device, uint32_t durationUs, float frequencyHz, float amplitude);
     // §VR-FOVEA：server 在協商回應裡確認的注視點編碼強度（%，100＝關）。main thread 在 /launch 之後設，frame thread 讀
     void setPcvrFoveation(int pct) { m_PcvrFoveaPct.store(pct, std::memory_order_relaxed); }
+    void setPcvrGazeFovea(bool enabled) { m_PcvrGazeFovea.store(enabled, std::memory_order_relaxed); }
+    bool pcvrGazeFovea() const { return m_PcvrGazeFovea.load(std::memory_order_relaxed); }
     // §VR-LATCH-WAIT：串流一幀佔幾個顯示格（半速串流 2）。main thread 在決定串流更新率之後設，frame thread 讀
     void setPcvrStreamDiv(int div) { m_PcvrStreamDiv.store(div >= 1 ? div : 1, std::memory_order_relaxed); }
     bool trackingThreadMode() const { return m_TimeConv != nullptr; }
@@ -475,6 +479,19 @@ private:
     QStringList m_EnabledExtensions;
     QStringList m_ReferenceSpaces;
     bool m_HasRefreshRate = false;
+    bool m_EyeGazeSupported = false;
+    std::atomic<bool> m_PcvrGazeFovea{false};
+    struct GazeClientStats {
+        uint32_t totalSamples = 0;
+        uint32_t validSamples = 0;
+        std::vector<uint32_t> ageMs10s;
+        uint32_t noTime = 0;        // runtime 沒填 XrEyeGazeSampleTimeEXT.time（=0）
+        uint32_t futureTime = 0;    // time 比查詢當下還晚（runtime 回的是預測時間，不是取樣時間）
+        int64_t deltaMinUs = INT64_MAX;  // xrNow - time（有填時），可為負
+        int64_t deltaMaxUs = INT64_MIN;
+        uint64_t lastLogNs = 0;
+    } m_GazeStats;
+    std::mutex m_GazeMutex;  // m_GazeStats（tracking thread 寫、10 s 記一次）
 
     PFN_vkGetInstanceProcAddr m_Gipa = nullptr;
     VkInstance m_VkInstance = VK_NULL_HANDLE;

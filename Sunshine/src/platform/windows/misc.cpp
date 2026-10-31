@@ -2066,6 +2066,7 @@ namespace platf {
 
     GUID selectedGuid {};
     bool found = false;
+    bool already_connected = false;
 
     for (DWORD i = 0; i < ifList->dwNumberOfItems; ++i) {
       const auto &ifInfo = ifList->InterfaceInfo[i];
@@ -2082,11 +2083,14 @@ namespace platf {
           }
           fn_WlanFreeMemory(pConn);
           if (already) {
-            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] already connected"sv;
-            fn_WlanFreeMemory(ifList);
-            fn_WlanCloseHandle(hClient, nullptr);
-            SecureZeroMemory(key.data(), key.size());
-            return;
+            // §VR-HOTSPOT-RECONNECT（2026-10-31 實測）：已連上通常是 Steam 自己用臨時連線接的（host 上沒有任何設定檔）。
+            // 以前這裡直接返回，網卡一斷（拔插、Restart-NetAdapter）就沒有設定檔可以自動重連，多連線少一條直到下一場。
+            // 現在照樣把我們的 all-user 設定檔（connectionMode=auto）建在這張網卡上，只是不再主動 WlanConnect。
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] already connected - ensuring the auto-reconnect profile"sv;
+            selectedGuid = ifInfo.InterfaceGuid;
+            found = true;
+            already_connected = true;
+            break;
           }
         }
         // 目前連到其他網路的介面排除
@@ -2169,6 +2173,11 @@ namespace platf {
     }
 
     BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] profile set"sv;
+    if (already_connected) {
+      fn_WlanCloseHandle(hClient, nullptr);
+      SecureZeroMemory(key.data(), key.size());
+      return;
+    }
 
     // 發起 WlanConnect
     DOT11_SSID dot11Ssid {};

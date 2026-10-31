@@ -1130,6 +1130,16 @@ int main(int argc, char *argv[])
     SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
     qputenv("QT_XCB_GL_INTEGRATION", "xcb_egl");
 
+#ifdef Q_OS_LINUX
+    // §PORTAL-HOLO-CRASH（2026-10-31，Steam Frame 實測）：SteamOS 的 gamescope session 匯出 QT_QPA_PLATFORMTHEME=kde，
+    // 我們從 Steam 啟動時繼承它，Flatpak 裡的 KDE Plasma 平台主題就經 portal 用 Settings.ReadOne 讀 kdeglobals 的鍵；
+    // xdg-desktop-portal-holo 對「不存在的鍵」不是回 NotFound 而是 SIGSEGV（每次開介面崩一次，已回報 ValveSoftware/SteamOS#3013）。
+    // 介面是 QML 自己的樣式，用不到 KDE 主題：在 Flatpak 內改用 Qt 內建的 portal 主題（只讀 org.freedesktop.appearance）
+    if (QFile::exists(QStringLiteral("/.flatpak-info")) && qgetenv("QT_QPA_PLATFORMTHEME") == "kde") {
+        qputenv("QT_QPA_PLATFORMTHEME", "xdgdesktopportal");
+    }
+#endif
+
 #ifdef Q_OS_WIN32
     // Let us see the true VBlank rather than DWM's approximation. We do this here
     // because this API must be called before the first swapchain (which Qt will

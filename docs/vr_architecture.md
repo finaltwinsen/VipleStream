@@ -504,7 +504,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 | fps | 一個 session 固定；換 Hz 要重開 session | — |
 | HDR | 固定 8-bit SDR | — |
 | GPU 優先權 | 由 vr_session 在行程層級設為 HIGH，每次 probe 之後重設，結束時還原（C23） | `SS/vr/vr_session.cpp` |
-| foveation（GA） | QP map 的中心 = 依協商 FOV tangent 算出**光軸在影像中的位置**，不是影像中心；PoC-8 通過後才用 gaze | — |
+| foveation（GA／T4b） | 合成器幾何三次式重取樣（非 QP map）；靜態中心 = 依協商 FOV tangent 算出光軸；動態眼動（T4b，`vr_gaze_fovea`）由 client 上報 eye gaze pose，host 經死區（1.5°）、角速度限制（200°/s）、saccade 凍結（>250°/s 凍結直至 <50°/s 連續 2 樣本）、邊界夾制（[0.15, 0.85]）及平滑回退，以 0x82 header（32 B）逐幀下行每眼中心，client 依幀 meta 進行 unwarp 還原 | `SS/.../direct_mode.cpp`、`SS/.../frame_compositor.cpp`、`Q/.../xrvideo.cpp` |
 | sub-frame、split-encode | GA 之後的選配 | — |
 
 ### 3.5 傳輸與控制迴圈

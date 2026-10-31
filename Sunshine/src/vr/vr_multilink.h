@@ -61,6 +61,8 @@ namespace vr::multilink {
     /// §VR-REPAIR-RTT（vr_multilink_repair_rtt）：client 也支援時，補包的時間預算由它照量到的往返時間決定，
     /// server 對帶旗標的回報放寬年齡上限與「還在路上」的視窗；要 repair 也開
     bool repair_rtt = false;
+    /// §VR-MULTILINK-HOTADD（vr_multilink_hotadd）：client 也支援時，允許同 id 重綁與死亡 slot 回收
+    bool hotadd = false;
     fault_t fault;
   };
 

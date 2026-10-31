@@ -138,6 +138,7 @@ public:
     void destroy();
 
     XrActionSet actionSet() const { return m_Set; }
+    XrSpace eyeGazeSpace() const { return m_EyeGazeSpace; }
 
     // frame thread：XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED
     void onProfileChanged();
@@ -199,6 +200,8 @@ private:
     XrAction m_KbToggleAction = XR_NULL_HANDLE;
     bool m_KbToggleWas[2] = {false, false};
     XrSpace m_AimSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    XrAction m_EyeGazeAction = XR_NULL_HANDLE;
+    XrSpace m_EyeGazeSpace = XR_NULL_HANDLE;
 
     int m_Dominant = 1;  // 0 左、1 右
     bool m_TriggerDown[2] = {false, false};

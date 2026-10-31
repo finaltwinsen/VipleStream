@@ -83,7 +83,10 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
     §VR-LATE-LATCH（`--vr-latch-delay`）省 2～4 ms。
   - **使用者 2026-10-08 定的優先順序：流暢第一、解析度可以降，但一定要贏過 Steam 內建串流。**
     §VR-RENDER-SCALE（`vr_render_scale_pct`）已做：串流每眼 1152、算圖 2160，頭盔無人場次 MTP 41～45 ms。
-    注視點編碼已做（§VR-FOVEA，client `--vr-foveation`／設定頁，預設關閉；頭盔無人場次通過，清晰度待使用者戴眼鏡看）。
+    注視點編碼已做（§VR-FOVEA，client `--vr-foveation`／設定頁）。**2.0.31 起預設開（200%）＋眼動注視點（§VR-GAZE-FOVEA，
+    host `vr_gaze_fovea` 預設 enabled），10-31 配戴驗過**；client 預設每眼改 1440（10-31 同遊戲 2160 對照：頭盔解碼 7.0～7.4 ms
+    超過 144 Hz 一格、算圖 GPU 隨時間由 4.4 爬到 6.2 ms，MTP p50 多 6～7 ms、第 4 分鐘起抖動變多）。
+    SteamVR 在 Frame 上不給眼動取樣時間（noTime 100%），sampleAge 永遠 0，非我們的 bug。
     10-bit：host 端已做（§VR-10BIT），Frame 的 iris 解碼路徑只給 8-bit 輸出、Main10 會讓 client 崩潰，頭盔上先擋掉；
     **使用者 2026-10-08 決定不做 Frame 的 10-bit**（來源是 8-bit、只對暗處色帶有幫助）；host 端的支援留著不動。
     接著：和 Steam 比延遲（要使用者讀頭盔裡的進階效能圖表）。補幀已做

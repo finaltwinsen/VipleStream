@@ -96,6 +96,7 @@
 #define SER_VRREPAIRHOLDMS "vrrepairholdms"
 #define SER_VRSYNTH "vrsynth"
 #define SER_VRFOVEATION "vrfoveation"
+#define SER_VRDEFAULTSMIG2030 "vrdefaultsmig2030"
 #define SER_VREYEWIDTH "vreyewidth"
 #define SER_VREYEHEIGHT "vreyeheight"
 #define SER_LANGUAGE "language"
@@ -304,7 +305,7 @@ void StreamingPreferences::reload()
     reverseScrollDirection = settings.value(SER_REVERSESCROLL, false).toBool();
     swapFaceButtons = settings.value(SER_SWAPFACEBUTTONS, false).toBool();
     keepAwake = settings.value(SER_KEEPAWAKE, true).toBool();
-    vrOverscanDeg = qBound(0.0, settings.value(SER_VROVERSCANDEG, 0.0).toDouble(), 10.0);
+    vrOverscanDeg = qBound(0.0, settings.value(SER_VROVERSCANDEG, 3.0).toDouble(), 10.0);
     vrBufferFrames = qBound(0, settings.value(SER_VRBUFFERFRAMES, 1).toInt(), 1);
     vrLatchDelayMs = qBound(0.0, settings.value(SER_VRLATCHDELAYMS, 3.0).toDouble(), 20.0);
     // 2026-10-29：預設從 0 改成 3 ms（頭盔實測：解碼→顯示 −3.1 ms，繪製時間與漏幀不變；6 ms 會撞上 GPU 忙碌的那段）。
@@ -319,7 +320,7 @@ void StreamingPreferences::reload()
     }
     vrHalfRate = settings.value(SER_VRHALFRATE, false).toBool();
     vr10Bit = settings.value(SER_VR10BIT, false).toBool();
-    vrTrackLock = settings.value(SER_VRTRACKLOCK, false).toBool();
+    vrTrackLock = settings.value(SER_VRTRACKLOCK, true).toBool();
     vrTrackRelock = settings.value(SER_VRTRACKRELOCK, false).toBool();
     vrLatchRelatch = settings.value(SER_VRLATCHRELATCH, false).toBool();
     {
@@ -340,14 +341,37 @@ void StreamingPreferences::reload()
         vrRepairHoldMs = (hold >= 8 && hold <= 100) ? hold : 0;
     }
     vrSynth = settings.value(SER_VRSYNTH, false).toBool();
-    vrFoveation = qBound(100, settings.value(SER_VRFOVEATION, 100).toInt(), 250);
+    vrFoveation = qBound(100, settings.value(SER_VRFOVEATION, 200).toInt(), 250);
     // 每眼解析度（2026-10-07 起寫入設定，GUI 啟動的 VR 也吃得到）。範圍同 --vr-eye；超出範圍就用預設
     {
-        const int w = settings.value(SER_VREYEWIDTH, 2160).toInt();
-        const int h = settings.value(SER_VREYEHEIGHT, 2160).toInt();
+        const int w = settings.value(SER_VREYEWIDTH, 1440).toInt();
+        const int h = settings.value(SER_VREYEHEIGHT, 1440).toInt();
         const bool ok = w >= 640 && w <= 4096 && h >= 640 && h <= 4096 && (w % 2) == 0 && (h % 2) == 0;
-        vrEyeWidth = ok ? w : 2160;
-        vrEyeHeight = ok ? h : 2160;
+        vrEyeWidth = ok ? w : 1440;
+        vrEyeHeight = ok ? h : 1440;
+    }
+    // 2026-10-31（2.0.30）：VR 預設改成頭盔上實際驗過的值——每眼 1440（>1720 會卡頓破圖、原因未定）、注視點 200%
+    // （眼動注視點要 >100 才會協商）、追蹤樣本鎖相、FOV 四邊各放大 3°。save() 每次都寫入全部設定，舊版存著的多半只是
+    // 當時的預設值：只遷移一次，存的值還等於舊預設才改；之後使用者自己改的就照存的值（同 SER_VRLATCHDELAYMIG）
+    if (!settings.value(SER_VRDEFAULTSMIG2030, false).toBool()) {
+        if (settings.contains(SER_VREYEWIDTH) && vrEyeWidth == 2160 && vrEyeHeight == 2160) {
+            vrEyeWidth = vrEyeHeight = 1440;
+            settings.setValue(SER_VREYEWIDTH, vrEyeWidth);
+            settings.setValue(SER_VREYEHEIGHT, vrEyeHeight);
+        }
+        if (settings.contains(SER_VRFOVEATION) && vrFoveation == 100) {
+            vrFoveation = 200;
+            settings.setValue(SER_VRFOVEATION, vrFoveation);
+        }
+        if (settings.contains(SER_VRTRACKLOCK) && !vrTrackLock) {
+            vrTrackLock = true;
+            settings.setValue(SER_VRTRACKLOCK, vrTrackLock);
+        }
+        if (settings.contains(SER_VROVERSCANDEG) && vrOverscanDeg == 0.0) {
+            vrOverscanDeg = 3.0;
+            settings.setValue(SER_VROVERSCANDEG, vrOverscanDeg);
+        }
+        settings.setValue(SER_VRDEFAULTSMIG2030, true);
     }
     enableHdr = settings.value(SER_HDR, false).toBool();
     captureSysKeysMode = static_cast<CaptureSysKeysMode>(settings.value(SER_CAPTURESYSKEYS,

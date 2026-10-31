@@ -1935,7 +1935,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
             with [vr_latch_target_v3_pct](#vr_latch_target_v3_pct), and
             [vr_latch_acquire](#vr_latch_acquire) lets it move the phase in one timed step instead of drifting
             there at 200 ppm.
-            @note{Applies to VR sessions only. The default will change after headset A/B testing. Servers older
+            @note{Applies to VR sessions only. Default `v2` since 2.0.30 (used on the headset for weeks). Servers older
             than the one that introduced `v3` treat it as an invalid value and fall back to `legacy`: set the
             option back to `v2` before downgrading.}
         </td>
@@ -1943,7 +1943,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            legacy
+            v2
             @endcode</td>
     </tr>
     <tr>
@@ -2200,7 +2200,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            VipleStream 2.0 (experimental): let [vr_latch_mode](#vr_latch_mode) `v3` correct a large phase error
+            VipleStream 2.0: let [vr_latch_mode](#vr_latch_mode) `v3` (and `v2` at session start) correct a large phase error
             in one timed step. When the measured phase is more than 15% of the period away from the target
             (after start-up, or when the host's frame pipeline suddenly takes longer, for example when a game
             starts rendering), the server changes the virtual vsync period by
@@ -2214,14 +2214,23 @@ editing the `conf` file in a text editor. Use the examples as reference.
             measured, that step is not judged at all (`void` in the log) and the next measurement starts a
             new round.
             Accepts `enabled`/`disabled` like the on/off options below.
-            @note{Only has an effect with `vr_latch_mode = v3`. Not yet verified on a headset: SteamVR and games
-            see the frame period change by up to 0.5% during a step.}
+            With `vr_latch_mode = v2` (the mode that also has [vr_buffer_refill](#vr_buffer_refill)) the same
+            timed step is taken when the last 5 reports agree (spread under a third of the period) and their
+            median is more than 15% of the period away from the target; there is no follow-up step or backoff,
+            only a 1.5 second gap after each step and the limit of 8 steps per minute. In v2 this only works at
+            the start of a session: once the session is at least 30 seconds old and the smoothed error has stayed
+            within 15% for 10 seconds in a row, it is switched off until the display refresh rate changes
+            (logged as `opening acquire closed`). This roughly halves the repeated/skipped frames of the first
+            40 seconds after a game starts rendering (headset test 2026-10-31, 144 Hz); left on for the whole
+            session it kept stepping on normal arrival jitter.
+            @note{Has no effect with `vr_latch_mode = legacy`. SteamVR and games see the frame period change by
+            up to 0.5% during a step.}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            disabled
+            enabled
             @endcode</td>
     </tr>
     <tr>
@@ -2300,7 +2309,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
 </table>
 
 @note{The on/off VR options ([vr_direct_kick](#vr_direct_kick) and [vr_latch_acquire](#vr_latch_acquire) above and
-`vr_ctrl_pose_offset`, `vr_angvel_local`, `vr_abr_fast`, `vr_hotspot_autoconnect`, `vr_multilink_ctrl`, `vr_multilink_repair`, `vr_multilink_repair_rtt`,
+`vr_ctrl_pose_offset`, `vr_angvel_local`, `vr_abr_fast`, `vr_hotspot_autoconnect`, `vr_haptic_redundancy`, `vr_multilink_hotadd`, `vr_multilink_ctrl`, `vr_multilink_repair`, `vr_multilink_repair_rtt`,
 `vr_capture_late` below) accept `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`; case does
 not matter). Any other value is reported in the log as an invalid value and the option keeps its default.}
 
@@ -2314,7 +2323,17 @@ not matter). Any other value is reported in the log as an invalid value and the 
             (the same pose time offset the headset uses). When disabled, SteamVR treats the already-predicted
             controller pose as the current one and extrapolates it again, so the controllers run ahead of the
             head by roughly the client's prediction time.
-            @note{Applies to VR sessions only. The default will change after headset A/B testing.}
+            @note{Applies to VR sessions only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <!--
+            @note{Applies to VR sessions only.}
         </td>
     </tr>
     <tr>
@@ -2323,6 +2342,10 @@ not matter). Any other value is reported in the log as an invalid value and the 
             disabled
             @endcode</td>
     </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+-->
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
@@ -2342,13 +2365,13 @@ not matter). Any other value is reported in the log as an invalid value and the 
             treats the angular velocity as body-frame, while OpenXR clients report it in the tracking (world)
             frame. When disabled, SteamVR rotates around the wrong axis whenever the device is tilted, so the
             predicted controller (paddle, racket) angle is off during fast swings.
-            @note{Applies to VR sessions only. The default will change after headset A/B testing.}
+            @note{Applies to VR sessions only.}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            disabled
+            enabled
             @endcode</td>
     </tr>
     <tr>
@@ -2485,11 +2508,21 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td>Description</td>
         <td colspan="2">
             VipleStream 2.0: what the SteamVR driver does when no new tracking sample arrives for more than two
-            display periods. `legacy` zeroes the velocities and the pose time offset, which makes the head and the
+            display periods (stale threshold: max(2T, 25 ms)). `blend` (default) linearly decays linear and angular velocities to zero over 40 ms without zeroing the pose time offset, holding the pose at the extrapolated end point, and smoothly interpolates (linear for position, slerp for rotation) back to new tracking samples over 40 ms upon recovery (short gaps under 2T without entering stale do not blend). `legacy` zeroes the velocities and the pose time offset, which makes the head and the
             controllers jump back and then forward again when the next sample arrives. `hold` keeps extrapolating
-            from the last sample for gaps of up to 100 ms (the angular velocity fades out over 50 ms) and only
+            from the last sample for gaps of up to 300 ms (the angular velocity fades out over 50 ms) and only
             then falls back to `legacy`.
-            @note{Applies to VR sessions only. The default will change after headset A/B testing.}
+            @note{Applies to VR sessions only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            blend
+            @endcode</td>
+    </tr>
+    <!--
+            @note{Applies to VR sessions only.}
         </td>
     </tr>
     <tr>
@@ -2501,7 +2534,11 @@ not matter). Any other value is reported in the log as an invalid value and the 
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            vr_stale_policy = hold
+-->
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_stale_policy = blend
             @endcode</td>
     </tr>
 </table>
@@ -2542,6 +2579,65 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td>Example</td>
         <td colspan="2">@code{}
             vr_multilink = auto
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_haptic_redundancy
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (§VR-HAPTIC-REDUNDANT): Haptic pulse delivery redundancy.
+            When enabled, haptic vibration pulses from host VR games are transmitted with triple redundancy
+            at offsets of 0 ms, 8 ms, and 20 ms. Furthermore, if multilink control is active, each pulse
+            is transmitted across all active multilink connections. The client deduplicates pulses by event ID
+            and drops pulses that arrive later than durationUs + 50 ms.
+            Accepts `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
+            When disabled, haptic pulses are transmitted only once over ENet.
+            @note{Applies to VR sessions only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_haptic_redundancy = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_multilink_hotadd
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (§VR-ML-HOTADD): Add multilink paths mid-stream.
+            When enabled, a network interface that appears during a VR stream (for example the Valve wireless
+            adapter plugged in after the stream started, or the host joining the headset hotspot) is added as an
+            extra link, and a dead link can be rebound to a new address. Requires a client that advertises the
+            capability; older clients keep the links they opened at stream start.
+            Accepts `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
+            @note{Applies to VR sessions only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_multilink_hotadd = enabled
             @endcode</td>
     </tr>
 </table>
@@ -2740,7 +2836,7 @@ not matter). Any other value is reported in the log as an invalid value and the 
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            disabled
+            enabled
             @endcode</td>
     </tr>
     <tr>
@@ -2852,6 +2948,57 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td>Example</td>
         <td colspan="2">@code{}
             vr_gpu_priority = realtime
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_gaze_fovea
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (Windows): enable eye-gaze driven foveated rendering. When enabled and negotiated with a
+            compatible client declaring eye gaze capabilities, the host compositor dynamically steers the fovea centre
+            based on client gaze samples.
+            @note{Applies to VR sessions only. Requires client eye gaze tracking support.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_gaze_fovea = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_fovea_gaze_slew_dps
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: maximum angular slew rate for eye-gaze foveation centre motion, in degrees per second (30-600).
+            Limits how fast the foveation centre moves to prevent visual distraction and overshoot.
+            @note{Applies when vr_gaze_fovea is enabled.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            200
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_fovea_gaze_slew_dps = 200
             @endcode</td>
     </tr>
 </table>

@@ -214,6 +214,12 @@ namespace vr::latch {
         have_ema_ = false;
         integral_ = 0;
         have_prev_slack_ = false;
+        // §VR-LATCH-V2-ACQ：換更新率＝新的開場，一次對準重新開放
+        acq_done_ = false;
+        acq_open_ns_ = 0;
+        acq_ok_since_ns_ = 0;
+        acq_n_ = 0;
+        acq_head_ = 0;
         if (mode_ == mode_e::v3) {
           // 樣本是取模舊週期的相位、閘門的幀率也是舊的：全部重來；走到一半的步進不再評估（不帶出結果）
           v3_to_wait();
@@ -307,6 +313,27 @@ namespace vr::latch {
     }
     e = std::max(e, -period_us / 2);
 
+    // §VR-LATCH-V2-ACQ（2026-10-31，頭盔實測）：開場遊戲開始出幀後相位常差 2～3 ms，±200 ppm 每秒只移 0.2 ms，
+    // 每場前 10～20 s client 都在重複／跳張。最近 kV3AcqN 筆一致地偏離目標超過 0.15 個週期就一次移到位
+    if (options_.acquire && !acq_done_) {
+      if (acq_open_ns_ == 0) {
+        acq_open_ns_ = now_ns;
+      }
+      acq_e_[acq_head_] = e;
+      acq_head_ = (acq_head_ + 1) % kV3AcqN;
+      acq_n_ = std::min(acq_n_ + 1, kV3AcqN);
+      if (acq_n_ == kV3AcqN && now_ns >= acq_no_until_ns_ && can_step(now_ns)) {
+        std::array<double, kV3AcqN> v = acq_e_;
+        std::sort(v.begin(), v.end());
+        const double med = v[kV3AcqN / 2];
+        // 分散太大（靠近反相點時折返兩邊都有、或 host 還沒穩定出幀）：相位不可信，交給 PI
+        const bool coherent = v.back() - v.front() < 2.0 * kV3MadMaxFrac * period_us;
+        if (coherent && std::abs(med) > kV3StepEnterFrac * period_us) {
+          return start_acquire_v2(med, now_ns);
+        }
+      }
+    }
+
     if (!have_ema_) {
       ema_ = e;
       have_ema_ = true;
@@ -314,6 +341,22 @@ namespace vr::latch {
       ema_ += kEmaAlpha * (e - ema_);
     }
     const double err = ema_;  // 正值：幀太早到 → 放慢（ppm > 0）
+
+    // §VR-LATCH-V2-ACQ：開場滿 kAcqMinOpenNs、平滑誤差又連續 kAcqSettledNs 在進入門檻內 → 這個開場不再一次對準
+    bool acq_closed_now = false;
+    if (options_.acquire && !acq_done_ && acq_open_ns_ != 0) {
+      if (std::abs(err) <= kV3StepEnterFrac * period_us) {
+        if (acq_ok_since_ns_ == 0) {
+          acq_ok_since_ns_ = now_ns;
+        }
+        if (now_ns - acq_open_ns_ >= kAcqMinOpenNs && now_ns - acq_ok_since_ns_ >= kAcqSettledNs) {
+          acq_done_ = true;
+          acq_closed_now = true;
+        }
+      } else {
+        acq_ok_since_ns_ = 0;
+      }
+    }
 
     // 條件式 anti-windup：輸出已經飽和、而且誤差同向時不再積分（legacy 的積分在飽和時照樣累加，鋸齒的成因之一）
     const double max = (double) VR_LATCH_PPM_MAX;
@@ -324,7 +367,12 @@ namespace vr::latch {
     }
     const double raw = kKpV2 * err + integral_;
     const int32_t ppm = (int32_t) std::lround(std::clamp(raw, -max, max));
-    return decide(now_ns, ppm);
+    result_t r = decide(now_ns, ppm);
+    if (acq_closed_now) {
+      r.acq_closed = true;
+      r.acq_open_s = (double) (now_ns - acq_open_ns_) / 1e9;
+    }
+    return r;
   }
 
   result_t controller_t::on_idle(int64_t now_ns) {
@@ -465,6 +513,41 @@ namespace vr::latch {
     // pacing（通常是切換後第一則新幀的 LATCH），那一次寫入會讓 bridge 把還沒結束的 burst 取消掉。
     v3_abort_round();
     refill_pending_ = false;  // §VR-BUFFER-REFILL：排定、還沒發的那一次作廢（盲區同上，不取消）
+  }
+
+  // ── §VR-LATCH-V2-ACQ ─────────────────────────────────────────────────
+
+  result_t controller_t::start_acquire_v2(double err_us, int64_t now_ns) {
+    // 同 start_step：基準＝積分（學到的時鐘差），誤差 > 0＝影像太早到 → 週期暫時變長；走 |誤差|／step_ppm 這麼久
+    const int32_t base = (int32_t) std::lround(integral_);
+    const int sgn = err_us > 0 ? 1 : -1;
+    const double step_ppm = (double) options_.step_ppm;
+    const int64_t dur_us = std::min<int64_t>(std::llround(std::abs(err_us) * 1e6 / step_ppm), kV3StepMaxUs);
+
+    result_t r;
+    r.update = true;
+    r.ppm = base;
+    r.burst_ppm = base + sgn * options_.step_ppm;
+    r.burst_us = (uint32_t) dur_us;
+    r.step_why = kStepAcq;
+    r.step_err_us = err_us;
+
+    refill_blind_until_ns_ = now_ns + dur_us * 1000 + kV3SettleNs;
+    acq_no_until_ns_ = refill_blind_until_ns_ + kV3StepGapNs;
+    step_times_[steps_ % kV3StepsPerMin] = now_ns;
+    ++steps_;
+    // 移完之後的相位和之前的樣本無關：誤差的平滑值與樣本重來，積分不動
+    acq_n_ = 0;
+    acq_head_ = 0;
+    have_ema_ = false;
+    have_prev_slack_ = false;
+    // burst 結束時由 bridge 改回基準。「已送出」記成基準，例行重送排在盲區一結束（同 start_step）
+    sent_ppm_ = base;
+    sent_once_ = true;
+    last_sent_ns_ = refill_blind_until_ns_ - kRefreshNs;
+    fill_observability(r);
+    r.center_us = r.target_us + err_us;
+    return r;
   }
 
   // ── §VR-BUFFER-REFILL ─────────────────────────────────────────────────

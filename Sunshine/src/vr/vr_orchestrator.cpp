@@ -262,15 +262,16 @@ namespace vr::orchestrator {
       }
       c.hmd_extrap_cap_us = 50000;
       c.ctrl_extrap_cap_us = 50000;
-      c.stale_oor_ctrl_us = 100000;
-      c.stale_zero_vel_us = 2 * period_us;
+      c.stale_oor_ctrl_us = 300000;
+      c.stale_zero_vel_us = std::max<uint32_t>(2 * period_us, 25000);
       c.stale_oor_hmd_us = 1000000;
-      // §VR-CTRL-OFFSET／§VR-STALE-HOLD（2026-10-05）：預設都關，Frame A/B 後再決定預設值
+      // §VR-CTRL-OFFSET／§VR-STALE-HOLD／§VR-STALE-BLEND（2026-10-31）：預設 blend＋ctrlOffset
       c.pose_flags = (config::vr.ctrl_pose_offset ? VRIPC_POSE_F_CTRL_OFFSET : 0u) |
                      (config::vr.stale_policy == config::vr_t::stale_e::hold ? VRIPC_POSE_F_STALE_HOLD : 0u) |
+                     (config::vr.stale_policy == config::vr_t::stale_e::blend ? VRIPC_POSE_F_STALE_BLEND : 0u) |
                      (config::vr.angvel_local ? VRIPC_POSE_F_ANGVEL_LOCAL : 0u);
       BOOST_LOG(info) << "[VIPLE-VR-ORCH] pose flags ctrlOffset=" << (config::vr.ctrl_pose_offset ? 1 : 0)
-                      << " stalePolicy=" << (config::vr.stale_policy == config::vr_t::stale_e::hold ? "hold" : "legacy")
+                      << " stalePolicy=" << (config::vr.stale_policy == config::vr_t::stale_e::blend ? "blend" : config::vr.stale_policy == config::vr_t::stale_e::hold ? "hold" : "legacy")
                       << " angvelLocal=" << (config::vr.angvel_local ? 1 : 0);
       // §VR-RENDER-SCALE：算圖尺寸與串流尺寸分開（100＝相同）
       c.render_scale_pct = (uint16_t) (config::vr.render_scale_pct < 100 ? 100 : config::vr.render_scale_pct > 250 ? 250 : config::vr.render_scale_pct);
@@ -284,6 +285,15 @@ namespace vr::orchestrator {
       if (c.fovea_pct > 100) {
         BOOST_LOG(info) << "[VIPLE-VR-ORCH] foveated encoding: centre density " << c.fovea_pct << "% of uniform (edge "
                         << (int) (100.0f / (3.0f - 200.0f / c.fovea_pct) + 0.5f) << "%)";
+      }
+      // §VR-GAZE-FOVEA：眼動追蹤驅動注視點渲染參數（B3 / C7）
+      if (neg.gaze_fovea) {
+        c.fovea_flags = VRIPC_FOVEA_F_GAZE;
+        c.fovea_slew_dps = (uint32_t) (config::vr.fovea_gaze_slew_dps < 30 ? 30 : config::vr.fovea_gaze_slew_dps > 600 ? 600 : config::vr.fovea_gaze_slew_dps);
+        c.fovea_max_mdeg = 20000;
+        c.fovea_deadband_mdeg = 1500;
+        BOOST_LOG(info) << "[VIPLE-VR-GAZE] session config: flags=0x" << std::hex << c.fovea_flags << std::dec
+                        << " slew=" << c.fovea_slew_dps << "dps deadband=" << c.fovea_deadband_mdeg << "mdeg max=" << c.fovea_max_mdeg << "mdeg";
       }
       if (c.render_scale_pct != 100) {
         BOOST_LOG(info) << "[VIPLE-VR-ORCH] render scale " << c.render_scale_pct << "% (recommended render target "

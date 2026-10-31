@@ -186,14 +186,17 @@ namespace config {
     }
 
     vr_t::stale_e stale_from_view(const std::string_view value, const std::string_view key) {
+      if (value == "blend"sv) {
+        return vr_t::stale_e::blend;
+      }
       if (value == "legacy"sv) {
         return vr_t::stale_e::legacy;
       }
       if (value == "hold"sv) {
         return vr_t::stale_e::hold;
       }
-      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: legacy, hold. Falling back to 'legacy'", key, value));
-      return vr_t::stale_e::legacy;
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: blend, legacy, hold. Falling back to 'blend'", key, value));
+      return vr_t::stale_e::blend;
     }
 
     vr_t::overload_e overload_from_view(const std::string_view value, const std::string_view key) {
@@ -1597,6 +1600,9 @@ namespace config {
     // §VR-REPAIR-RTT：要 vr_multilink_repair（與 vr_multilink_ctrl）也開；只設這一個時在多連線的 VR session 建立時警告、
     // 維持關閉（stream.cpp）。預設關＝兩端的行為與之前完全相同
     vr_opt::bool_strict_f(vars, "vr_multilink_repair_rtt", vr.multilink_repair_rtt);
+    // §VR-HAPTIC-REDUNDANT（2026-10-31）：HAPTIC S2C 冗餘發送開關，預設 enabled
+    vr_opt::bool_strict_f(vars, "vr_haptic_redundancy", vr.haptic_redundancy);
+    vr_opt::bool_strict_f(vars, "vr_multilink_hotadd", vr.multilink_hotadd);
     // §VR-FENCE-LATE：擷取端「fence 晚到照收」的開關與等待上限。範圍直接用 vr_capture_health.h 的常數（在這個
     // namespace 裡 `vr` 是設定變數，所以要寫 `::vr::`）；config.h 的預設值是寫死的數字，由下面的 static_assert 對住。
     // 兩個平台都認得這兩個 key（Linux 沒有 PCVR 擷取，設了沒有作用，但不會被當成不認得的選項）
@@ -1609,6 +1615,9 @@ namespace config {
     // §VR-GPU-PRIO：PCVR 擷取期間 server 行程的 GPU 排程優先權（high｜realtime，預設 high＝和之前相同）。
     // 值寫錯警告並維持 high。只有 Windows 會用到；其他平台認得這個 key、不做事
     generic_f(vars, "vr_gpu_priority", vr.gpu_priority, vr_opt::gpu_priority_from_view);
+    // §VR-GAZE-FOVEA（2026-10-31）：眼動追蹤驅動注視點渲染開關（預設 disabled）與角速度上限（30–600 dps）
+    vr_opt::bool_strict_f(vars, "vr_gaze_fovea", vr.gaze_fovea);
+    vr_opt::int_strict_f(vars, "vr_fovea_gaze_slew_dps", vr.fovea_gaze_slew_dps, 30, 600, false);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

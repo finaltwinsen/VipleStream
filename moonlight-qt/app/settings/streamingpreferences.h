@@ -449,8 +449,8 @@ public:
     // 每眼解析度（打包尺寸為 2W×H，SBS）。預設 2160x2160＝Steam Frame 面板每眼的原生解析度。
     // 2026-10-03 Frame 實測：每眼 1728 清晰度不夠；iris 解 4320x2160@120（200 Mbps）每幀 p50 8.1 ms、
     // 吞吐量 120 fps 無誤，RTX 5060 Ti 編碼約 7 ms。--vr-eye 可改。
-    int  vrEyeWidth = 2160;
-    int  vrEyeHeight = 2160;
+    int  vrEyeWidth = 1440;
+    int  vrEyeHeight = 1440;
     int  vrRefreshHz = 90;
     // §H.4-AUTO：CLI 這次的解析度／更新率覆寫（不存設定，不會把 GUI 的「自動」改掉）。
     // -1＝CLI 沒指定、0＝指定明確值、1＝指定 auto。
@@ -470,10 +470,10 @@ public:
     bool xrTestPointer = false;       // §VR M3a X4（dev）：--xr-test-pointer，不寫入設定
     bool vrTestInput = false;         // §VR M4a R2（dev）：--vr-test-input 合成控制器按鍵，不寫入設定
     bool vrLinkSelftest = false;      // §VR-MULTILINK（dev）：--vr-link-selftest 在同一張網卡再開一條連線，不寫入設定
-    int  vrFoveation = 100;           // §VR-FOVEA：--vr-foveation，正前方的像素密度（%，100＝關）；寫入設定（vrfoveation）
+    int  vrFoveation = 200;           // §VR-FOVEA（2.0.30 起預設 200）：--vr-foveation，正前方的像素密度（%，100＝關）；寫入設定（vrfoveation）
     bool vrSynth = false;             // §VR-SYNTH：--vr-synth，半速串流時合成中間那一格；寫入設定（vrsynth）
     bool vr10Bit = false;             // §VR-10BIT：--vr-10bit，PCVR 要求 HEVC Main10（SDR）；寫入設定（vr10bit）。PCVR 不看 enableHdr
-    bool vrTrackLock = false;         // §VR-TRACK-LOCK：--vr-track-lock，追蹤樣本鎖到顯示的節拍；寫入設定（vrtracklock）
+    bool vrTrackLock = true;          // §VR-TRACK-LOCK（2.0.30 起預設開）：--vr-track-lock，追蹤樣本鎖到顯示的節拍；寫入設定（vrtracklock）
     // §VR-TRACK-RELOCK：鎖相之後有一部分的幀開始用到前一筆樣本就重新搜尋（只在 vrTrackLock 開著時有作用）；寫入設定
     // （vrtrackrelock，預設關）。--vr-track-relock on|off 只覆寫這一次、不存設定（-1＝命令列沒指定）：session 開始時
     // 整份偏好會被存檔，無人場次的參數不可以留在頭盔上
@@ -524,7 +524,7 @@ public:
                                       // 2026-10-29 預設 0→3（使用者指示；頭盔實測解碼→顯示 −3.1 ms），舊版存著的 0 遷移一次
     int vrBufferFrames = 1;           // §VR-BUFFER（2026-10-29）：--vr-buffer-frames，頭盔端多緩衝幾格（0＝關、1）；寫入設定（vrbufferframes）。
                                       // 預設開（使用者 10-29 指示；頭盔實測每張 0～7 ms 抖動時重複幀 13%→0.8%，MTP +3～7 ms）
-    double vrOverscanDeg = 0.0;       // --vr-overscan：每眼 FOV 四邊各放大幾度（0～10）。2026-10-07 起寫入設定（vroverscandeg），GUI 啟動的 VR 也吃得到
+    double vrOverscanDeg = 3.0;       // --vr-overscan（2.0.30 起預設 3）：每眼 FOV 四邊各放大幾度（0～10）。2026-10-07 起寫入設定（vroverscandeg），GUI 啟動的 VR 也吃得到
     bool vrTestHaptic = false;        // §VR M4a R2（dev）：--vr-test-haptic 本地注入 HAPTIC，不寫入設定
     QString xrTestKeyboard;           // §VR M3a（dev）：--xr-test-keyboard 的文字，不寫入設定
     QString xrDumpKeyboardPath;       // §VR M3a（dev）：--xr-dump-keyboard 的 PNG 路徑，不寫入設定

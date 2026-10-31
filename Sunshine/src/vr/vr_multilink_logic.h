@@ -656,10 +656,13 @@ namespace vr::multilink {
 
   /**
    * @brief 連線層功能的協商：client 提出的（每條連線的 flags 取交集）裡，server 的開關也開的才啟用。
-   *        REPAIR 要 CTRL 成立，REPAIR_RTT 要 REPAIR 成立；不認得的位元一律不回。
+   *        REPAIR 要 CTRL 成立，REPAIR_RTT 要 REPAIR 成立；HOTADD 獨立（不依賴 CTRL／REPAIR）。不認得的位元一律不回。
    */
-  inline uint8_t negotiate_link_features(uint8_t offered, bool ctrl, bool repair, bool repair_rtt) {
+  inline uint8_t negotiate_link_features(uint8_t offered, bool ctrl, bool repair, bool repair_rtt, bool hotadd) {
     uint8_t feat = 0;
+    if (hotadd && (offered & VIPLE_VR_LINK_F_HOTADD)) {
+      feat |= VIPLE_VR_LINK_F_HOTADD;
+    }
     if (ctrl && (offered & VIPLE_VR_LINK_F_CTRL)) {
       feat |= VIPLE_VR_LINK_F_CTRL;
       if (repair && (offered & VIPLE_VR_LINK_F_REPAIR)) {
@@ -758,8 +761,13 @@ namespace vr::multilink {
     uint16_t client_video_port = 0;
     uint16_t client_audio_port = 0;
     uint8_t flags = 0;  ///< VIPLE_VR_LINK_F_*：client 支援的連線層功能
+    uint8_t epoch = 0;  ///< §VR-MULTILINK-HOTADD：LINK_HELLO 尾端可選的 epoch；舊 client 沒有＝0
 
-    bool operator==(const hello_link_t &) const = default;
+    /// epoch 不參與「描述相同」的比較：同 id 重送（epoch 不變或只是更新防重放值）仍回原埠，不算 rebind。
+    bool operator==(const hello_link_t &o) const {
+      return id == o.id && client_addr == o.client_addr && server_addr == o.server_addr &&
+             client_video_port == o.client_video_port && client_audio_port == o.client_audio_port && flags == o.flags;
+    }
   };
 
   struct ready_link_t {
@@ -769,15 +777,17 @@ namespace vr::multilink {
     uint16_t server_audio_port = 0;
   };
 
-  /// 解析 LINK_HELLO 的 TLV 本體：{u8 count, VIPLE_VR_LINK_DESC[count]}。
+  /// 解析 LINK_HELLO 的 TLV 本體：{u8 count, VIPLE_VR_LINK_DESC[count], [u8 epoch[count]]}。
   /// 長度不符、count 超過上限、linkId 超出範圍或重複、埠為 0 都回 false。
+  /// §VR-MULTILINK-HOTADD：只有 len 足夠（多出 count 個 byte）才讀 epoch；否則整批當 legacy（epoch＝0）。
   inline bool parse_hello(const uint8_t *body, size_t len, std::vector<hello_link_t> &out) {
     out.clear();
     if (len < 1) {
       return false;
     }
     const size_t count = body[0];
-    if (count == 0 || count > (size_t) kMaxLinks || len < 1 + count * sizeof(VIPLE_VR_LINK_DESC)) {
+    const size_t desc_bytes = count * sizeof(VIPLE_VR_LINK_DESC);
+    if (count == 0 || count > (size_t) kMaxLinks || len < 1 + desc_bytes) {
       return false;
     }
     bool seen[kMaxLinks + 1] = {};
@@ -797,6 +807,13 @@ namespace vr::multilink {
       h.client_audio_port = d.clientAudioPort;
       h.flags = d.flags;
       out.push_back(h);
+    }
+    // §VR-MULTILINK-HOTADD：尾端可選的 epoch[count]（舊 server 只檢查最小長度，會自然忽略）
+    if (len >= 1 + desc_bytes + count) {
+      const uint8_t *epochs = body + 1 + desc_bytes;
+      for (size_t i = 0; i < count; ++i) {
+        out[i].epoch = epochs[i];
+      }
     }
     return true;
   }
@@ -821,6 +838,43 @@ namespace vr::multilink {
       p.serverVideoPort = links[i].server_video_port;
       p.serverAudioPort = links[i].server_audio_port;
       std::memcpy(tlv.data() + 3 + i * sizeof(p), &p, sizeof(p));
+    }
+    return tlv;
+  }
+
+  // ── §VR-MULTILINK-HOTADD：熱插拔的判定與 LINK_ADDRS ─────────────────
+
+  /// 同 id、desc 不同時，要「該連線已沒有 CONFIRMED 且 2 s 內也沒有 PING」才允許 rebind（防搶佔）。
+  inline constexpr int64_t kHotaddRebindDeadNs = 2'000'000'000;
+  /// slot 已滿時，只回收「整整 10 s 沒有任何動靜」的 slot（避免長場多次拔插後加不回來）。
+  inline constexpr int64_t kHotaddReclaimDeadNs = 10'000'000'000;
+
+  /// 這條連線最近一次有動靜是什麼時候（CONFIRMED 的 PING 或任何 PING）。0＝從來沒有。
+  inline int64_t hotadd_last_activity_ns(int64_t last_confirmed_ns, int64_t last_ping_ns) {
+    return std::max(last_confirmed_ns, last_ping_ns);
+  }
+
+  /// 同 id 重綁：死亡 ≥ 2 s（alive() 的 2 s 視窗過了，而且 2 s 內沒有 PING）。
+  inline bool hotadd_rebind_allowed(int64_t now_ns, int64_t last_confirmed_ns, int64_t last_ping_ns) {
+    const int64_t t = hotadd_last_activity_ns(last_confirmed_ns, last_ping_ns);
+    return t == 0 || now_ns - t >= kHotaddRebindDeadNs;
+  }
+
+  /// slot 回收：死亡 ≥ 10 s。回傳 true 才可以就地重建那個 slot。
+  inline bool hotadd_reclaim_allowed(int64_t now_ns, int64_t last_confirmed_ns, int64_t last_ping_ns) {
+    const int64_t t = hotadd_last_activity_ns(last_confirmed_ns, last_ping_ns);
+    return t == 0 || now_ns - t >= kHotaddReclaimDeadNs;
+  }
+
+  /// 組 LINK_ADDRS 的 TLV（含 subtype 與 len）：server 目前可廣告位址的完整快照。
+  inline std::vector<uint8_t> format_addrs_tlv(const std::vector<std::array<uint8_t, 4>> &addrs) {
+    const size_t n = std::min<size_t>(addrs.size(), VIPLE_VR_LINK_ADDR_MAX);
+    std::vector<uint8_t> tlv(2 + 1 + n * 4);
+    tlv[0] = VIPLE_VR_S2C_LINK_ADDRS;
+    tlv[1] = (uint8_t) (1 + n * 4);
+    tlv[2] = (uint8_t) n;
+    for (size_t i = 0; i < n; ++i) {
+      std::memcpy(tlv.data() + 3 + i * 4, addrs[i].data(), 4);
     }
     return tlv;
   }

@@ -1,4 +1,5 @@
 #include "session.h"
+#include <chrono>
 #include "backend/nvcomputer.h"
 #include "backend/identitymanager.h"
 #include "backend/relaylookup.h"
@@ -630,12 +631,13 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
                 const VIPLE_VR_TLV_STATS& a = m_VrServerStatsAtLog;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VR-STATS] server %.1fs (%u msgs): poseRx=%u ooo=%u gap=%u tagged=%u fallback=%u "
-                            "lossRx=%u waves=%u | refreshStartRx=%u",
+                            "lossRx=%u waves=%u | refreshStartRx=%u | haptics rx=%u queued=%u dupDrop=%u expiredDrop=%u",
                             (now - m_VrServerStatsLastLogMs) / 1000.0, m_VrServerStatsCount,
                             st.poseRx - a.poseRx, st.poseOutOfOrder - a.poseOutOfOrder,
                             st.poseGap - a.poseGap, st.framesTagged - a.framesTagged,
                             st.framesFallback - a.framesFallback, st.lossRx - a.lossRx,
-                            st.refreshWaves - a.refreshWaves, m_VrRefreshStartRx);
+                            st.refreshWaves - a.refreshWaves, m_VrRefreshStartRx,
+                            m_VrHapticRx, m_VrHapticQueued, m_VrHapticDroppedDup, m_VrHapticDroppedExpired);
                 m_VrServerStatsAtLog = st;
                 m_VrServerStatsCount = 0;
                 m_VrRefreshStartRx = 0;
@@ -650,10 +652,39 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
         case VIPLE_VR_S2C_HAPTIC:
             // M4a R2：控制器震動 → XrContext haptic 佇列 → XR frame thread xrApplyHapticFeedback。
             // 本函式與 destroyXrContext 都在 main thread，不會與拆除競爭
-            if (len >= sizeof(VIPLE_VR_TLV_HAPTIC)) {
+            if (len >= 20) {
                 VIPLE_VR_TLV_HAPTIC h;
-                memcpy(&h, payload, sizeof(h));
+                memset(&h, 0, sizeof(h));
+                memcpy(&h, payload, (std::min)((size_t)len, sizeof(h)));
                 m_VrHapticRx++;
+
+                // §VR-HAPTIC-REDUNDANT：去重（分左右手，32-bit 序號安全迴繞比對）。device 是 VIPLE_VR_POSE_LEFT(1)／RIGHT(2)
+                const unsigned dev = (unsigned)h.device - VIPLE_VR_POSE_LEFT;
+                if (dev < 2) {
+                    if (m_VrHapticHaveEventId[dev]) {
+                        if ((int32_t)(h.eventId - m_VrHapticLastEventId[dev]) <= 0) {
+                            m_VrHapticDroppedDup++;
+                            break;
+                        }
+                    }
+                    m_VrHapticLastEventId[dev] = h.eventId;
+                    m_VrHapticHaveEventId[dev] = true;
+                }
+
+                // §VR-HAPTIC-REDUNDANT：過期判定（超過 durationUs + 50 ms 寬限丟棄）。寬限要蓋過正常的單程延遲與時鐘
+                // 估計誤差，否則短促的震動（幾 ms）在一般網路下第一份就會被丟掉
+                if (h.timestampNs != 0) {
+                    const uint64_t nowNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    if (nowNs > h.timestampNs) {
+                        const uint64_t ageNs = nowNs - h.timestampNs;
+                        const uint64_t maxAgeNs = ((uint64_t)h.durationUs + 50000ull) * 1000ull;
+                        if (ageNs > maxAgeNs) {
+                            m_VrHapticDroppedExpired++;
+                            break;
+                        }
+                    }
+                }
 #ifdef HAVE_OPENXR
                 if (m_XrPcvr && m_XrContext != nullptr) {
                     m_XrContext->queueHaptic(h.device, h.durationUs, h.frequencyHz, h.amplitude);
@@ -662,8 +693,8 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
 #endif
                 if (m_VrHapticRx <= 3 || m_VrHapticRx % 50 == 0) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-VR-HAPTIC] rx=%u queued=%u device=%u dur=%u us freq=%.0f Hz amp=%.2f id=%u",
-                                m_VrHapticRx, m_VrHapticQueued, h.device, h.durationUs,
+                                "[VIPLE-VR-HAPTIC] rx=%u queued=%u dupDrop=%u expiredDrop=%u device=%u dur=%u us freq=%.0f Hz amp=%.2f id=%u",
+                                m_VrHapticRx, m_VrHapticQueued, m_VrHapticDroppedDup, m_VrHapticDroppedExpired, h.device, h.durationUs,
                                 (double)h.frequencyHz, (double)h.amplitude, h.eventId);
                 }
             }
@@ -3188,6 +3219,9 @@ bool Session::setupXrPcvr()
     if (!vi.timeConversion) {
         m_VrLaunch.caps &= ~VIPLE_VR_CLIENT_CAP_TRACK_THREAD;  // frameloop 模式
     }
+    if (m_XrContext != nullptr && m_XrContext->eyeGazeSupported()) {
+        m_VrLaunch.caps |= VIPLE_VR_CLIENT_CAP_GAZE | VIPLE_VR_CLIENT_CAP_GAZE_FOVEA;
+    }
     // §VR-PLAYAREA：真實遊玩區與坐姿零點交給 server 的 chaperone（拿不到就不帶，server 用預設值）
     float areaW = 0.0f, areaD = 0.0f;
     if (m_XrContext->playAreaBounds(&areaW, &areaD)) {
@@ -3410,6 +3444,7 @@ bool Session::startConnectionAsync()
 #ifdef HAVE_OPENXR
                     if (m_XrPcvr && m_XrContext != nullptr) {
                         m_XrContext->setPcvrFoveation(m_VrSession.fovea);  // §VR-FOVEA：server 確認了才還原
+                        m_XrContext->setPcvrGazeFovea(m_VrSession.gazeFovea);
                     }
 #endif
                     if (m_VrSession.packedWidth != m_StreamConfig.width ||
@@ -3972,6 +4007,9 @@ bool Session::startConnectionAsync()
                 s->predictNs = predict;
                 // M4a R2：左右控制器（pose、按鍵、pressCtr、flags active／focused）
                 xr->sampleControllers(s);
+                if (xr->pcvrGazeFovea()) {  // §VR-GAZE-FOVEA：協商成功才取樣（沒開時省掉每秒 ~576 次 xrLocateSpace）
+                    xr->sampleEyeGaze(s);
+                }
                 if (syntheticHmd) {
                     // 樣本的語意是「sampleTimeNs＋predictNs 那一刻的姿態」：真的樣本是 runtime 預測到那一刻的，host 也把它當成
                     // 那一刻的姿態再往後外插。合成的照同一刻算，位置、方向、速度都是。2026-10-10 之前送的是「現在」的姿態，
@@ -4018,6 +4056,8 @@ bool Session::startConnectionAsync()
                 h.frequencyHz = 160.0f;
                 h.amplitude = 0.6f;
                 h.eventId = n;
+                h.timestampNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
                 memcpy(tlv + 2, &h, sizeof(h));
                 self->clVrMessage(tlv, (int)sizeof(tlv));
                 return interval;

@@ -125,6 +125,21 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
         return false;
     }
 
+    if (enabledExts.contains(QStringLiteral("XR_EXT_eye_gaze_interaction"))) {
+        XrActionCreateInfo aci = xrStruct<XrActionCreateInfo>(XR_TYPE_ACTION_CREATE_INFO);
+        qstrncpy(aci.actionName, "eye_gaze_pose", sizeof(aci.actionName));
+        qstrncpy(aci.localizedActionName, "Eye Gaze Pose", sizeof(aci.localizedActionName));
+        aci.actionType = XR_ACTION_TYPE_POSE_INPUT;
+        aci.countSubactionPaths = 0;
+        aci.subactionPaths = nullptr;
+        const XrResult rr = xrCreateAction(m_Set, &aci, &m_EyeGazeAction);
+        if (XR_FAILED(rr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAZE] xrCreateAction(eye_gaze): %s",
+                        qUtf8Printable(xrStr(instance, rr)));
+            m_EyeGazeAction = XR_NULL_HANDLE;
+        }
+    }
+
     struct B {
         XrAction action;
         const char* path;
@@ -264,6 +279,27 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
         }
     }
 
+    if (m_EyeGazeAction != XR_NULL_HANDLE) {
+        XrPath gazeProf = XR_NULL_PATH;
+        XrPath gazePath = XR_NULL_PATH;
+        if (XR_SUCCEEDED(xrStringToPath(instance, "/interaction_profiles/ext/eye_gaze_interaction", &gazeProf)) &&
+            XR_SUCCEEDED(xrStringToPath(instance, "/user/eyes_ext/input/gaze_ext/pose", &gazePath))) {
+            XrActionSuggestedBinding sb = {m_EyeGazeAction, gazePath};
+            XrInteractionProfileSuggestedBinding isb =
+                xrStruct<XrInteractionProfileSuggestedBinding>(XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING);
+            isb.interactionProfile = gazeProf;
+            isb.countSuggestedBindings = 1;
+            isb.suggestedBindings = &sb;
+            const XrResult rr = xrSuggestInteractionProfileBindings(instance, &isb);
+            if (XR_SUCCEEDED(rr)) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAZE] eye gaze bindings accepted: /interaction_profiles/ext/eye_gaze_interaction");
+            } else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAZE] eye gaze bindings rejected: %s",
+                            qUtf8Printable(xrStr(instance, rr)));
+            }
+        }
+    }
+
     XrSessionActionSetsAttachInfo ai = xrStruct<XrSessionActionSetsAttachInfo>(XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO);
     ai.countActionSets = 1;
     ai.actionSets = &m_Set;
@@ -284,6 +320,21 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
                         qUtf8Printable(xrStr(instance, r)));
         }
     }
+    if (m_EyeGazeAction != XR_NULL_HANDLE) {
+        XrActionSpaceCreateInfo sci = xrStruct<XrActionSpaceCreateInfo>(XR_TYPE_ACTION_SPACE_CREATE_INFO);
+        sci.action = m_EyeGazeAction;
+        sci.subactionPath = XR_NULL_PATH;
+        sci.poseInActionSpace.orientation.w = 1.0f;
+        r = xrCreateActionSpace(session, &sci, &m_EyeGazeSpace);
+        if (XR_FAILED(r)) {
+            m_EyeGazeSpace = XR_NULL_HANDLE;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAZE] eye gaze action space failed: %s",
+                        qUtf8Printable(xrStr(instance, r)));
+        } else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAZE] eye gaze action space created");
+        }
+    }
+
     if (m_TestInput) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-INPUT] dev --vr-test-input: synthetic 8 s button sequence overrides controller buttons "
@@ -294,6 +345,14 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
 
 void XrVrControllers::destroy()
 {
+    if (m_EyeGazeSpace != XR_NULL_HANDLE) {
+        xrDestroySpace(m_EyeGazeSpace);
+        m_EyeGazeSpace = XR_NULL_HANDLE;
+    }
+    if (m_EyeGazeAction != XR_NULL_HANDLE) {
+        xrDestroyAction(m_EyeGazeAction);
+        m_EyeGazeAction = XR_NULL_HANDLE;
+    }
     for (XrSpace& s : m_GripSpace) {
         if (s != XR_NULL_HANDLE) {
             xrDestroySpace(s);

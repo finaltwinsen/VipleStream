@@ -92,6 +92,60 @@ namespace vrdrv::math {
     return 2.0 * std::acos(d) * 57.29577951308232;
   }
 
+  // 線性內插向量
+  inline vec3_t lerp(const vec3_t &a, const vec3_t &b, double t) {
+    return vec3_t {
+      a.x + (b.x - a.x) * t,
+      a.y + (b.y - a.y) * t,
+      a.z + (b.z - a.z) * t,
+    };
+  }
+
+  // 四元數球面線性插值（slerp），最短路徑（q 與 −q 等價）
+  inline quat_t slerp(const quat_t &qa, const quat_t &qb, double t) {
+    quat_t a = normalize(qa);
+    quat_t b = normalize(qb);
+    double cos_theta = dot(a, b);
+
+    if (cos_theta < 0.0) {
+      b = quat_t {-b.x, -b.y, -b.z, -b.w};
+      cos_theta = -cos_theta;
+    }
+
+    if (cos_theta > 0.9995) {
+      quat_t r {
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+        a.w + (b.w - a.w) * t,
+      };
+      return normalize(r);
+    }
+
+    const double theta = std::acos(cos_theta);
+    const double sin_theta = std::sin(theta);
+    const double wa = std::sin((1.0 - t) * theta) / sin_theta;
+    const double wb = std::sin(t * theta) / sin_theta;
+
+    return quat_t {
+      wa * a.x + wb * b.x,
+      wa * a.y + wb * b.y,
+      wa * a.z + wb * b.z,
+      wa * a.w + wb * b.w,
+    };
+  }
+
+  // 從角速度向量與時間間隔生成旋轉四元數增量
+  inline quat_t quat_from_angvel(const vec3_t &w, double dt) {
+    const double angle = std::sqrt(w.x * w.x + w.y * w.y + w.z * w.z) * dt;
+    if (angle < 1e-9) {
+      return quat_t {0.0, 0.0, 0.0, 1.0};
+    }
+    const double half_angle = angle * 0.5;
+    const double s = std::sin(half_angle) / (angle / dt);
+    return quat_t {w.x * s, w.y * s, w.z * s, std::cos(half_angle)};
+  }
+
   // 3x4 列主序剛體矩陣（HmdMatrix34_t 的 m[3][4]）→ 旋轉四元數＋位置。不假設矩陣已正交化以外的任何事。
   inline void matrix34_to_pose(const float m[3][4], quat_t &q, vec3_t &p) {
     const double m00 = m[0][0], m01 = m[0][1], m02 = m[0][2];

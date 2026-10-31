@@ -1562,6 +1562,25 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
   控制器速度有效率與最大值（無效時送 0，SteamVR 就不外插拍子）。
 - pcvr 才把 ppm 寫進 driver pacing；stub 只記錄。
 
+### `[VIPLE-VR-GAZE]` —— 眼動追蹤與動態注視點（§VR-GAZE-FOVEA，2026-10-31）
+
+用戶端（`moonlight-qt/app/streaming/xr/xrcontext.cpp`）與伺服器端驅動程式（`Sunshine/src/platform/windows/steamvr_driver/direct_mode.cpp`），每 10 秒輸出彙總：
+
+```
+[VIPLE-VR-GAZE] client: valid=%.1f%% (%u/%u) sampleAge p50=%u ms p95=%u ms
+[VIPLE-VR-GAZE] host: cxL=(%.2f,%.2f) cxR=(%.2f,%.2f) frozen=%u clamped=%u fallback=%u (N=%u)
+```
+
+- 用戶端：
+  - `valid`：定位成功且帶有有效方向（`ORIENTATION_VALID_BIT`）的樣本百分比與樣本數；
+  - `sampleAge`：`XrEyeGazeSampleTimeEXT` 取樣時間換算年齡之中位數（p50）與 95 百分位數（p95）。
+- 伺服器端：
+  - `cxL/cxR`：左右眼注視點中心於影像座標系之平均值與標準差；
+  - `frozen`：saccade 跳動期間（角速度 > 250°/s）凍結中心更新的幀數；
+  - `clamped`：受限於邊界夾制（`[0.15, 0.85]`）的幀數；
+  - `fallback`：gaze 失效時平滑退回光軸之幀數；
+  - `N`：這 10 秒內合成的總幀數。
+
 ### `[VIPLE-XR-INPUT]` —— XR 控制器射線滑鼠（M3a X4）
 
 `streaming/xr/xrinput.cpp`、`streaming/xr/xrkeyboard.cpp`、`streaming/input/mouse.cpp`（`handleXrPointer/Button/Scroll/Key`）

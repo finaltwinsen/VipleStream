@@ -50,8 +50,17 @@ const char* const kExtFrameController = "XR_VALVE_frame_controller_interaction";
 // M4a R1：XrTime ↔ client 單調時鐘（tracking thread 模式）
 const char* const kExtTimespec = "XR_KHR_convert_timespec_time";
 const char* const kExtQpc = "XR_KHR_win32_convert_performance_counter_time";
+const char* const kExtEyeGaze = "XR_EXT_eye_gaze_interaction";
 // XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR（1.1 核心／XR_EXT_local_floor 同值）；舊標頭沒有這個列舉值
 const XrReferenceSpaceType kRefSpaceLocalFloor = static_cast<XrReferenceSpaceType>(1000426000);
+// §VR-GAZE-FOVEA：XrEyeGazeSampleTimeEXT 的同佈局版本（XR_EXT_eye_gaze_interaction）。用自己的名字：新標頭已有同名型別，
+// 舊標頭（Windows 建置）沒有；兩邊都能編
+struct VipleEyeGazeSampleTime {
+    XrStructureType type;
+    void* next;
+    XrTime time;
+};
+const XrStructureType kXrTypeEyeGazeSampleTime = static_cast<XrStructureType>(1000031001);  // XR_TYPE_EYE_GAZE_SAMPLE_TIME_EXT
 // 自訂函式指標型別：避免為了 XR_USE_TIMESPEC／XR_USE_PLATFORM_WIN32 在標頭拉進 <time.h>／<windows.h>
 typedef XrResult(XRAPI_PTR* PfnConvTimespec)(XrInstance, const struct timespec*, XrTime*);
 typedef XrResult(XRAPI_PTR* PfnConvQpc)(XrInstance, const void* /* LARGE_INTEGER* */, XrTime*);
@@ -520,7 +529,7 @@ bool XrContext::createInstance(QString* error)
         return false;
     }
     enable.push_back(kExtVulkan2);
-    for (const char* opt : {kExtRefresh, kExtCylinder, kExtLocalFloor, kExtFrameController}) {
+    for (const char* opt : {kExtRefresh, kExtCylinder, kExtLocalFloor, kExtFrameController, kExtEyeGaze}) {
         if (has(opt)) {
             enable.push_back(opt);
         }
@@ -606,9 +615,17 @@ bool XrContext::createSystem(QString* error)
         return false;
     }
     XrSystemProperties sp = xrStruct<XrSystemProperties>(XR_TYPE_SYSTEM_PROPERTIES);
+    XrSystemEyeGazeInteractionPropertiesEXT eyeGaze =
+        xrStruct<XrSystemEyeGazeInteractionPropertiesEXT>(XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT);
+    if (m_EnabledExtensions.contains(QLatin1String(kExtEyeGaze))) {
+        sp.next = &eyeGaze;
+    }
     xrGetSystemProperties(m_Instance, m_SystemId, &sp);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] system: \"%s\" vendor=0x%x layers=%u",
-                sp.systemName, sp.vendorId, sp.graphicsProperties.maxLayerCount);
+    if (m_EnabledExtensions.contains(QLatin1String(kExtEyeGaze))) {
+        m_EyeGazeSupported = (eyeGaze.supportsEyeGazeInteraction != XR_FALSE);
+    }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] system: \"%s\" vendor=0x%x layers=%u eyeGaze=%d",
+                sp.systemName, sp.vendorId, sp.graphicsProperties.maxLayerCount, m_EyeGazeSupported ? 1 : 0);
     return true;
 }
 
@@ -4070,6 +4087,127 @@ void XrContext::sampleControllers(VIPLE_VR_TRACKING* sample)
         xrTime = xrNow + (m_PredictAheadNs > 0 ? m_PredictAheadNs : 20000000);
     }
     m_VrCtl->fill(sample, m_TrackSpace, xrTime);
+}
+
+bool XrContext::sampleEyeGaze(VIPLE_VR_TRACKING* sample)
+{
+    if (!m_EyeGazeSupported || !m_SessionBegun.load() || sample == nullptr) {
+        return false;
+    }
+    XrSpace gazeSpace = m_VrCtl != nullptr ? m_VrCtl->eyeGazeSpace()
+                      : (m_Input != nullptr ? m_Input->eyeGazeSpace() : XR_NULL_HANDLE);
+    if (gazeSpace == XR_NULL_HANDLE || m_TrackSpace == XR_NULL_HANDLE) {
+        return false;
+    }
+
+    XrTime xrNow = 0;
+    XrTime xrTime = 0;
+    if (m_TimeConv != nullptr && nowXrTime(&xrNow)) {
+        xrTime = xrNow + (m_PredictAheadNs > 0 ? m_PredictAheadNs : 20000000);
+    } else {
+        std::lock_guard<std::mutex> lk(m_HmdMutex);
+        xrNow = m_Hmd.displayTime;
+        xrTime = xrNow;
+    }
+    if (xrTime == 0) {
+        return false;
+    }
+
+    VipleEyeGazeSampleTime gazeTime {kXrTypeEyeGazeSampleTime, nullptr, 0};
+    XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
+    loc.next = &gazeTime;
+
+    XrResult r = xrLocateSpace(gazeSpace, m_TrackSpace, xrTime, &loc);
+    const bool valid = XR_SUCCEEDED(r) && (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+
+    uint16_t ageMs = 0;
+    if (valid) {
+        if (gazeTime.time > 0 && xrNow >= gazeTime.time) {
+            uint64_t ageNs = static_cast<uint64_t>(xrNow - gazeTime.time);
+            ageMs = static_cast<uint16_t>(std::min<uint64_t>(ageNs / 1000000ULL, 65535ULL));
+        }
+
+        const float hx = sample->pose[VIPLE_VR_POSE_HMD].rot[0];
+        const float hy = sample->pose[VIPLE_VR_POSE_HMD].rot[1];
+        const float hz = sample->pose[VIPLE_VR_POSE_HMD].rot[2];
+        const float hw = sample->pose[VIPLE_VR_POSE_HMD].rot[3];
+
+        const float inv_hx = -hx, inv_hy = -hy, inv_hz = -hz, inv_hw = hw;
+        const float gx = loc.pose.orientation.x;
+        const float gy = loc.pose.orientation.y;
+        const float gz = loc.pose.orientation.z;
+        const float gw = loc.pose.orientation.w;
+
+        const float rx = inv_hw * gx + inv_hx * gw + inv_hy * gz - inv_hz * gy;
+        const float ry = inv_hw * gy - inv_hx * gz + inv_hy * gw + inv_hz * gx;
+        const float rz = inv_hw * gz + inv_hx * gy - inv_hy * gx + inv_hz * gw;
+        const float rw = inv_hw * gw - inv_hx * gx - inv_hy * gy - inv_hz * gz;
+
+        const float dx = -2.0f * (rx * rz + rw * ry);
+        const float dy = -2.0f * (ry * rz - rw * rx);
+        const float dz = -1.0f + 2.0f * (rx * rx + ry * ry);
+
+        const float yaw = std::atan2(dx, -dz);
+        const float pitch = std::asin(std::clamp(dy, -1.0f, 1.0f));
+
+        sample->gaze.yawF16 = VipleVrFloatToHalf(yaw);
+        sample->gaze.pitchF16 = VipleVrFloatToHalf(pitch);
+        sample->gaze.confidence = 255;
+        sample->gaze.sampleAgeMs = ageMs;
+        sample->gaze.flags = (ageMs > 0 || (gazeTime.time > 0)) ? VIPLE_VR_GAZE_F_SAMPLE_TIME : 0;
+        sample->flags |= VIPLE_VR_TRK_GAZE;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_GazeMutex);
+        m_GazeStats.totalSamples++;
+        if (valid) {
+            m_GazeStats.validSamples++;
+            if (gazeTime.time > 0) {
+                m_GazeStats.ageMs10s.push_back(ageMs);
+                const int64_t dUs = static_cast<int64_t>(xrNow - gazeTime.time) / 1000;
+                m_GazeStats.deltaMinUs = (std::min)(m_GazeStats.deltaMinUs, dUs);
+                m_GazeStats.deltaMaxUs = (std::max)(m_GazeStats.deltaMaxUs, dUs);
+                if (gazeTime.time > xrNow) {
+                    m_GazeStats.futureTime++;
+                }
+            } else {
+                m_GazeStats.noTime++;
+            }
+        }
+        const uint64_t now = steadyNowNs();
+        if (m_GazeStats.lastLogNs == 0) {
+            m_GazeStats.lastLogNs = now;
+        }
+        if (now - m_GazeStats.lastLogNs >= 10000000000ull) {
+            float validPct = m_GazeStats.totalSamples > 0 ? (100.0f * m_GazeStats.validSamples / m_GazeStats.totalSamples) : 0.0f;
+            uint32_t p50 = 0, p95 = 0;
+            if (!m_GazeStats.ageMs10s.empty()) {
+                std::sort(m_GazeStats.ageMs10s.begin(), m_GazeStats.ageMs10s.end());
+                p50 = m_GazeStats.ageMs10s[m_GazeStats.ageMs10s.size() * 50 / 100];
+                p95 = m_GazeStats.ageMs10s[m_GazeStats.ageMs10s.size() * 95 / 100];
+            }
+            // noTime＝runtime 沒給取樣時間（age 無從得知，不算進 p50/p95）；future＝給的是預測時間；
+            // delta＝查詢當下 - 取樣時間（µs，負值＝未來）
+            const bool haveDelta = m_GazeStats.deltaMinUs != INT64_MAX;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-GAZE] client: valid=%.1f%% (%u/%u) sampleAge p50=%u ms p95=%u ms (n=%u) noTime=%u future=%u delta min/max=%lld/%lld us",
+                        validPct, m_GazeStats.validSamples, m_GazeStats.totalSamples, p50, p95,
+                        static_cast<unsigned>(m_GazeStats.ageMs10s.size()), m_GazeStats.noTime, m_GazeStats.futureTime,
+                        haveDelta ? static_cast<long long>(m_GazeStats.deltaMinUs) : 0LL,
+                        haveDelta ? static_cast<long long>(m_GazeStats.deltaMaxUs) : 0LL);
+            m_GazeStats.totalSamples = 0;
+            m_GazeStats.validSamples = 0;
+            m_GazeStats.ageMs10s.clear();
+            m_GazeStats.noTime = 0;
+            m_GazeStats.futureTime = 0;
+            m_GazeStats.deltaMinUs = INT64_MAX;
+            m_GazeStats.deltaMaxUs = INT64_MIN;
+            m_GazeStats.lastLogNs = now;
+        }
+    }
+
+    return valid;
 }
 
 void XrContext::queueHaptic(uint8_t device, uint32_t durationUs, float frequencyHz, float amplitude)

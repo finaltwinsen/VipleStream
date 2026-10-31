@@ -260,6 +260,7 @@ namespace vr::bridge {
     uint16_t gaze_pitch_f16 = 0;
     uint8_t gaze_conf = 0;
     uint8_t gaze_flags = 0;
+    uint16_t gaze_sample_age_ms = 0;
   };
 #endif  // VIPLE_VR_BRIDGE_HAS_ABI
 
@@ -561,7 +562,8 @@ namespace vr::bridge {
     if (d.tex_idx >= VRIPC_TEX_COUNT) {
       return frame_invalid_e::tex_idx;
     }
-    if ((d.flags & ~0x12Fu) != 0) {
+    // 允許的旗標：POSE_VALID|ECHO_MATCHED|POSE_FALLBACK|REPEATED|DERIVED_POSE|FOVEATED|SPACE_DELTA（0x10 保留）
+    if ((d.flags & ~0x16Fu) != 0) {
       return frame_invalid_e::flags;
     }
     if (d.layer_count > 16) {

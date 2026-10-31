@@ -169,6 +169,7 @@ static inline void vripc_seq_write_begin(uint64_t *p, uint64_t v) {
 /* config.pose_flags（2026-10-05，由原本的 reserved2 拆出：版面不變、不升 ABI 版號；0＝舊行為，舊 driver 讀不到這個欄位） */
 #define VRIPC_POSE_F_CTRL_OFFSET 0x1u /* §VR-CTRL-OFFSET：控制器也設 poseTimeOffset（與 HMD 同一個目標時間，上限 ctrl_extrap_cap_us） */
 #define VRIPC_POSE_F_STALE_HOLD 0x2u /* §VR-STALE-HOLD：短空窗（2T～stale_oor_ctrl_us，預設 100 ms）保留速度與 poseTimeOffset，不歸零 */
+#define VRIPC_POSE_F_STALE_BLEND 0x8u /* §VR-STALE-BLEND（2026-10-31）：stale 期間速度線性衰減、恢復時 40 ms 平滑混合（預設） */
 #define VRIPC_POSE_F_ANGVEL_LOCAL 0x4u /* §VR-ANGVEL-LOCAL：角速度轉成機體座標再交給 SteamVR（SteamVR 把 vecAngularVelocity 當本地座標，
                                          10-05 vr_probe --mode predict 實測；client／OpenXR 給的是世界座標） */
 
@@ -178,6 +179,9 @@ static inline void vripc_seq_write_begin(uint64_t *p, uint64_t v) {
 #define VRIPC_FRM_POSE_FALLBACK 0x04u
 #define VRIPC_FRM_REPEATED 0x08u
 #define VRIPC_FRM_DERIVED_POSE 0x20u
+#define VRIPC_FRM_FOVEATED 0x40u /* §VR-GAZE-FOVEA：注視點編碼（帶 fovea_centre，與 VIPLE_VR_FF_FOVEATED 同值） */
+#define VRIPC_FOVEA_F_GAZE 0x1u /* 動態注視點追蹤 */
+#define VRIPC_TRK_F_GAZE 0x08u /* vripc_tracking_slot_t.flags：樣本帶有效 gaze（與 VipleVr.h 的 VIPLE_VR_TRK_GAZE 同值；driver 不 include common-c） */
 #define VRIPC_FRM_SPACE_DELTA 0x100u /* 診斷：renderPose 已套 space-delta 修正 */
 
 /* pacing.pacing_flags／pacing.mode */
@@ -367,7 +371,11 @@ typedef struct vripc_session_config_t { /* 寫入方：server，WELCOME 前寫�
   float play_area_m[2]; /* §VR-PLAYAREA（2026-10-30）：真實遊玩區：寬（x）、深（z），公尺；無效時為 0 */
   float seated_pos_m[3]; /* 坐姿零點位置（x, y, z），公尺 */
   float seated_yaw_rad; /* 坐姿零點繞 +Y 的 yaw，弧度 */
-  uint8_t reserved[40]; /* 補齊至 64 位元組倍數（512 B） */
+  uint32_t fovea_flags; /* VRIPC_FOVEA_F_*（0x1=GAZE 動態注視點） */
+  uint32_t fovea_slew_dps; /* 注視點中心角速度上限（deg/s，預設 200） */
+  uint32_t fovea_max_mdeg; /* 注視點偏離上限（mdeg，預設 20000） */
+  uint32_t fovea_deadband_mdeg; /* 死區（mdeg，預設 1500 = 1.5°） */
+  uint8_t reserved[24]; /* 補齊至 64 位元組倍數（512 B） */
 } vripc_session_config_t;
 
 typedef struct vripc_pacing_t { /* 寫入方：server；單格 seqlock（seq 偶數 = 完成）；idle generation 也必須寫有效週期。
@@ -431,7 +439,7 @@ typedef struct vripc_tracking_slot_t { /* 寫入方：server（bridge 的 writer
   uint16_t gaze_pitch_f16;
   uint8_t gaze_conf;
   uint8_t gaze_flags;
-  uint16_t reserved3;
+  uint16_t gaze_sample_age_ms; /* 樣本年齡（ms） */
   uint8_t reserved4[56];
 } vripc_tracking_slot_t;
 
@@ -460,7 +468,7 @@ typedef struct vripc_frame_desc_t { /* 寫入方：driver（Present 內，持 di
   int64_t submit_qpc; /* Signal + Flush 之後、SetEvent 之前 */
   uint32_t compose_gpu_us; /* 抽樣的 GPU timestamp；0 = 沒量 */
   uint32_t reserved1;
-  uint64_t reserved2[2];
+  float fovea_centre[2][2]; /* [eye][0=x, 1=y]，正規化 [0..1]，y 由上緣算起（原 reserved2） */
 } vripc_frame_desc_t;
 
 typedef struct vripc_frame_ring_t {
@@ -569,14 +577,17 @@ VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, pose_flags) == 440, "config
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, play_area_m) == 448, "config.play_area");
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, seated_pos_m) == 456, "config.seated_pos");
 VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, seated_yaw_rad) == 468, "config.seated_yaw");
+VRIPC_STATIC_ASSERT(offsetof(vripc_session_config_t, fovea_flags) == 472, "config.fovea_flags");
 VRIPC_STATIC_ASSERT(sizeof(vripc_pacing_t) == 64, "pacing");
 VRIPC_STATIC_ASSERT(sizeof(vripc_pose_t) == 52, "pose");
 VRIPC_STATIC_ASSERT(sizeof(vripc_ctrl_input_t) == 24, "ctrl_input");
 VRIPC_STATIC_ASSERT(sizeof(vripc_tracking_slot_t) == 320, "tracking_slot");
 VRIPC_STATIC_ASSERT(offsetof(vripc_tracking_slot_t, pose) == 48, "tracking_slot.pose");
 VRIPC_STATIC_ASSERT(offsetof(vripc_tracking_slot_t, input) == 204, "tracking_slot.input");
+VRIPC_STATIC_ASSERT(offsetof(vripc_tracking_slot_t, gaze_sample_age_ms) == 262, "tracking_slot.gaze_sample_age_ms");
 VRIPC_STATIC_ASSERT(sizeof(vripc_frame_desc_t) == 128, "frame_desc");
 VRIPC_STATIC_ASSERT(offsetof(vripc_frame_desc_t, t_target_qpc) == 80, "frame_desc.t_target");
+VRIPC_STATIC_ASSERT(offsetof(vripc_frame_desc_t, fovea_centre) == 112, "frame_desc.fovea_centre");
 VRIPC_STATIC_ASSERT(sizeof(vripc_consume_status_t) == 64, "consume");
 VRIPC_STATIC_ASSERT(sizeof(vripc_haptic_evt_t) == 24, "haptic_evt");
 VRIPC_STATIC_ASSERT(sizeof(vripc_timing_rec_t) == 32, "timing_rec");

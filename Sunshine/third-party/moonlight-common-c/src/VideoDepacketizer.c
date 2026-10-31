@@ -1050,8 +1050,31 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             // [7.1.415, 7.1.446) uses 2 different header lengths based on the first byte:
             // 0x01 indicates an 8 byte header
             // 0x81 indicates a 24 byte header
+            // 0x82 indicates a 32 byte header with eye gaze foveation
             if (currentPos.data[0] == 0x01) {
                 frameHeaderSize = 8;
+            }
+            else if (vrSession && currentPos.data[0] == (char)VIPLE_VR_FRAME_HEADER_TYPE_GAZE) {
+                frameHeaderSize = VIPLE_VR_FRAME_HEADER_GAZE_SIZE;
+
+                // §VR：VR session 的 32 B header 帶注視點中心（VipleVr.h VIPLE_VR_FRAME_HEADER_GAZE）
+                if (currentPos.length >= VIPLE_VR_FRAME_HEADER_GAZE_SIZE) {
+                    VIPLE_VR_FRAME_HEADER_GAZE hdr;
+                    memcpy(&hdr, &currentPos.data[currentPos.offset], sizeof(hdr));
+                    frameVrMeta.present = 1;
+                    frameVrMeta.vrFlags = hdr.vrFlags;
+                    frameVrMeta.layoutEpoch = hdr.layoutEpoch;
+                    frameVrMeta.foveated = (hdr.vrFlags & VIPLE_VR_FF_FOVEATED) ? 1 : 0;
+                    frameVrMeta.echoSampleId = hdr.echoSampleId;
+                    VipleVrUnpackQuat48(hdr.renderRot, frameVrMeta.renderRot);
+                    for (int i = 0; i < 3; i++) {
+                        frameVrMeta.renderPos[i] = (float)hdr.renderPos[i] / VIPLE_VR_POS_UNITS_PER_M;
+                    }
+                    frameVrMeta.foveaCentre[0][0] = (float)hdr.foveaCxL / 65535.0f;
+                    frameVrMeta.foveaCentre[0][1] = (float)hdr.foveaCyL / 65535.0f;
+                    frameVrMeta.foveaCentre[1][0] = (float)hdr.foveaCxR / 65535.0f;
+                    frameVrMeta.foveaCentre[1][1] = (float)hdr.foveaCyR / 65535.0f;
+                }
             }
             else {
                 LC_ASSERT_VT(currentPos.data[0] == (char)0x81);
@@ -1065,11 +1088,16 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                     frameVrMeta.present = 1;
                     frameVrMeta.vrFlags = hdr.vrFlags;
                     frameVrMeta.layoutEpoch = hdr.layoutEpoch;
+                    frameVrMeta.foveated = 0;
                     frameVrMeta.echoSampleId = hdr.echoSampleId;
                     VipleVrUnpackQuat48(hdr.renderRot, frameVrMeta.renderRot);
                     for (int i = 0; i < 3; i++) {
                         frameVrMeta.renderPos[i] = (float)hdr.renderPos[i] / VIPLE_VR_POS_UNITS_PER_M;
                     }
+                    frameVrMeta.foveaCentre[0][0] = 0.5f;
+                    frameVrMeta.foveaCentre[0][1] = 0.5f;
+                    frameVrMeta.foveaCentre[1][0] = 0.5f;
+                    frameVrMeta.foveaCentre[1][1] = 0.5f;
                 }
             }
         }

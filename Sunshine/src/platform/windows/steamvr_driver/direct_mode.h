@@ -123,6 +123,26 @@ namespace vrdrv {
     float fovea_a_ = 0.0f;  // §VR-FOVEA：正前方的斜率 a＝100/fovea_pct；0＝關
     LUID act_luid_ {};
 
+    // §VR-GAZE-FOVEA：眼動追蹤驅動注視點渲染參數與保護狀態
+    uint32_t fovea_flags_ = 0;
+    uint32_t fovea_slew_dps_ = 200;
+    uint32_t fovea_max_mdeg_ = 20000;
+    uint32_t fovea_deadband_mdeg_ = 1500;
+    float current_fovea_centre_[2][2] = {{0.5f, 0.5f}, {0.5f, 0.5f}};
+    bool fovea_centre_init_ = false;
+    int64_t last_fovea_qpc_ = 0;
+    bool saccade_frozen_ = false;
+    float pre_saccade_target_[2][2] = {{0.5f, 0.5f}, {0.5f, 0.5f}};
+    int low_vel_samples_ = 0;
+    float last_gaze_yaw_[2] = {0.0f, 0.0f};
+    float last_gaze_pitch_[2] = {0.0f, 0.0f};
+    int64_t last_gaze_sample_qpc_ = 0;
+    uint64_t stat_gaze_valid_ = 0;
+    uint64_t stat_gaze_stale_ = 0;
+    uint64_t stat_gaze_frozen_ = 0;
+    uint64_t stat_gaze_clamped_ = 0;
+    int64_t stat_gaze_last_log_ = 0;
+
     // PostPresent／GetFrameTiming（同一條 compositor 執行緒依序呼叫）
     virtual_vsync_t vsync_;
     void *timer_ = nullptr;

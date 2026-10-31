@@ -1094,6 +1094,13 @@ static void vrHandleS2CInline(const uint8_t* tlv, int length) {
 void vrLinkS2C(const uint8_t* tlv, int length) {
     // 恢復狀態機自己有鎖（vrRecMutex），可以在影像接收執行緒直接呼叫
     vrHandleS2CInline(tlv, length);
+
+    // §VR-HAPTIC-REDUNDANT：連線層鏡像送來的 HAPTIC 轉給 client（client 依 eventId 去重）。只轉 HAPTIC——同一條路上的
+    // REFRESH_START 已在上面處理、REPAIR_GONE 由連線層自己處理，轉上去會被處理兩次
+    if (ListenerCallbacks.vrMessage != NULL && tlv != NULL && length > 0 && length <= VIPLE_VR_MAX_CTRL_PAYLOAD &&
+        tlv[0] == VIPLE_VR_S2C_HAPTIC) {
+        ListenerCallbacks.vrMessage(tlv, length);
+    }
 }
 
 static void configureVrThrottle(ENetPeer* p) {

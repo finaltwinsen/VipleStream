@@ -978,6 +978,10 @@ namespace nvhttp {
       if ((vr_caps & VIPLE_VR_SERVER_CAP_PCVR) && config::vr.multilink != config::vr_t::multilink_e::disabled) {
         vr_caps |= VIPLE_VR_SERVER_CAP_MULTILINK;
       }
+      // §VR-GAZE-FOVEA：只在 pcvr 且 vr_gaze_fovea 開啟時宣告
+      if ((vr_caps & VIPLE_VR_SERVER_CAP_PCVR) && config::vr.gaze_fovea) {
+        vr_caps |= VIPLE_VR_SERVER_CAP_GAZE_UPLINK | VIPLE_VR_SERVER_CAP_GAZE_FOVEA;
+      }
       tree.put("root.VipleStreamVR", vr_caps);
       tree.put("root.VipleStreamVRProto", VIPLE_VR_PROTO_VERSION);
     }
@@ -1378,6 +1382,13 @@ namespace nvhttp {
     // §VR-MULTILINK：雙方都支援才啟用
     neg->multilink = (params.caps & VIPLE_VR_CLIENT_CAP_MULTILINK) && config::vr.multilink != config::vr_t::multilink_e::disabled;
     neg->pcvr = config::vr.pcvr == config::vr_t::pcvr_e::enabled;  // M1b V5：enabled 才是真的 SteamVR 串流
+    neg->haptic_redundancy = config::vr.haptic_redundancy;
+    // §VR-GAZE-FOVEA：三方同時成立才啟用：client 支援 gaze + gaze fovea、server 開啟 vr_gaze_fovea、pcvr 模式、vrFovea > 100
+    neg->gaze_fovea = (params.caps & VIPLE_VR_CLIENT_CAP_GAZE_FOVEA) &&
+                      (params.caps & VIPLE_VR_CLIENT_CAP_GAZE) &&
+                      config::vr.gaze_fovea &&
+                      neg->pcvr &&
+                      (params.fovea > 100);
 
     BOOST_LOG(info) << "[VIPLE-VR-SESSION] accepted "sv << (is_resume ? "/resume"sv : "/launch"sv)
                     << " caller="sv << (caller_uuid.empty() ? "<unknown>"s : caller_uuid)
@@ -1834,6 +1845,18 @@ namespace nvhttp {
         BOOST_LOG(info) << "[VIPLE-VR-SESSION] /resume: display rate for pose prediction stays at "sv << (cur->disp_hz > 0 ? cur->disp_hz : cur->hz)
                         << " Hz (running orchestration; client reported "sv << (vr_params->disp_hz > 0 ? vr_params->disp_hz : vr_params->hz) << " Hz)"sv;
         vr_params->disp_hz = cur->disp_hz;
+      }
+      // §VR-GAZE-FOVEA：/resume 沿用進行中的注視點協商設定（避免中途認知不一致）
+      const bool cur_gaze = (cur->caps & VIPLE_VR_CLIENT_CAP_GAZE_FOVEA) && (cur->caps & VIPLE_VR_CLIENT_CAP_GAZE);
+      const bool req_gaze = (vr_params->caps & VIPLE_VR_CLIENT_CAP_GAZE_FOVEA) && (vr_params->caps & VIPLE_VR_CLIENT_CAP_GAZE);
+      if (cur_gaze != req_gaze) {
+        BOOST_LOG(info) << "[VIPLE-VR-SESSION] /resume: gaze foveation stays "sv << (cur_gaze ? "enabled"sv : "disabled"sv)
+                        << " (running orchestration)"sv;
+        if (cur_gaze) {
+          vr_params->caps |= VIPLE_VR_CLIENT_CAP_GAZE_FOVEA | VIPLE_VR_CLIENT_CAP_GAZE;
+        } else {
+          vr_params->caps &= ~VIPLE_VR_CLIENT_CAP_GAZE_FOVEA;
+        }
       }
     }
 

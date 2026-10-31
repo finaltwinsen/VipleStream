@@ -44,17 +44,19 @@ extern "C" {
 #define VIPLE_VR_SERVER_CAP_PROTO_V1        0x01
 #define VIPLE_VR_SERVER_CAP_PCVR            0x02  // 只有 Windows server 會設
 #define VIPLE_VR_SERVER_CAP_HAPTICS         0x04
-#define VIPLE_VR_SERVER_CAP_GAZE_UPLINK     0x08
+#define VIPLE_VR_SERVER_CAP_GAZE_UPLINK     0x08  // §VR-GAZE：支援上行注視點資料
 #define VIPLE_VR_SERVER_CAP_QP_FOVEATION    0x10
 #define VIPLE_VR_SERVER_CAP_RECOVERY_INTRA  0x20  // encoder 支援 intra refresh
 #define VIPLE_VR_SERVER_CAP_MULTILINK       0x40  // §VR-MULTILINK：支援多連線
+#define VIPLE_VR_SERVER_CAP_GAZE_FOVEA      0x80  // §VR-GAZE-FOVEA：支援 0x82 幀標頭（逐幀動態注視點中心）
 
 // /launch 的 vrCaps（十六進位）
 #define VIPLE_VR_CLIENT_CAP_RECOVERY_INTRA  0x01
 #define VIPLE_VR_CLIENT_CAP_TRACK_THREAD    0x02
-#define VIPLE_VR_CLIENT_CAP_GAZE            0x04
+#define VIPLE_VR_CLIENT_CAP_GAZE            0x04  // 上行送出 VIPLE_VR_GAZE
 #define VIPLE_VR_CLIENT_CAP_SKELETON        0x08
 #define VIPLE_VR_CLIENT_CAP_MULTILINK       0x10  // §VR-MULTILINK
+#define VIPLE_VR_CLIENT_CAP_GAZE_FOVEA      0x20  // §VR-GAZE-FOVEA：能接收 0x82 幀標頭並還原動態中心
 
 // /launch 的 vrCodecs（client 能解的 codec）
 #define VIPLE_VR_CODEC_H264  0x01
@@ -201,12 +203,17 @@ typedef struct _VIPLE_VR_CONTROLLER_INPUT {
     uint8_t  reserved;
 } VIPLE_VR_CONTROLLER_INPUT;
 
+// VIPLE_VR_GAZE.flags
+#define VIPLE_VR_GAZE_F_SAMPLE_TIME   0x01  // sampleAgeMs 欄位有效（非 0 即有意義）
+#define VIPLE_VR_GAZE_F_PREDICTED     0x02  // 樣本為 runtime 預測值（非夾值）
+#define VIPLE_VR_GAZE_F_BINOCULAR     0x04  // 雙眼注視點一致（非單眼回退）
+
 typedef struct _VIPLE_VR_GAZE {
-    uint16_t yawF16;    // IEEE half，弧度
-    uint16_t pitchF16;
+    uint16_t yawF16;    // IEEE half，弧度，相對頭部（正 = 往右）
+    uint16_t pitchF16;  // IEEE half，弧度，相對頭部（正 = 往上）
     uint8_t  confidence;
-    uint8_t  flags;
-    uint16_t reserved;
+    uint8_t  flags;     // VIPLE_VR_GAZE_F_*
+    uint16_t sampleAgeMs;   // 樣本年齡（0–65535 ms，以取樣時刻與傳送時刻計算；flags 有 SAMPLE_TIME 才有效；原 reserved）
 } VIPLE_VR_GAZE;
 
 typedef struct _VIPLE_VR_TRACKING {
@@ -229,6 +236,8 @@ typedef struct _VIPLE_VR_TRACKING {
 
 #define VIPLE_VR_FRAME_HEADER_TYPE  0x81
 #define VIPLE_VR_FRAME_HEADER_SIZE  24
+#define VIPLE_VR_FRAME_HEADER_TYPE_GAZE 0x82
+#define VIPLE_VR_FRAME_HEADER_GAZE_SIZE 32
 
 // VIPLE_VR_FRAME_HEADER.vrFlags
 #define VIPLE_VR_FF_POSE_VALID     0x01
@@ -255,6 +264,22 @@ typedef struct _VIPLE_VR_FRAME_HEADER {
     uint8_t  renderRot[6];            // smallest-three，48 bit little-endian
     int16_t  renderPos[3];            // 0.1 mm
 } VIPLE_VR_FRAME_HEADER;
+
+typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
+    uint8_t  headerType;              // VIPLE_VR_FRAME_HEADER_TYPE_GAZE (0x82)
+    uint16_t frameProcessingLatency;  // 1/10 ms
+    uint8_t  frameType;               // 同 short header
+    uint16_t lastPayloadLen;
+    uint8_t  vrFlags;                 // VIPLE_VR_FF_*（注視點時含 VIPLE_VR_FF_FOVEATED）
+    uint8_t  layoutEpoch;
+    uint32_t echoSampleId;
+    uint8_t  renderRot[6];            // smallest-three，48 bit little-endian
+    int16_t  renderPos[3];            // 0.1 mm
+    uint16_t foveaCxL;                // 這一幀的注視點中心（0–65535 對應 [0.0, 1.0]，y 由上緣算）
+    uint16_t foveaCyL;
+    uint16_t foveaCxR;
+    uint16_t foveaCyR;
+} VIPLE_VR_FRAME_HEADER_GAZE;
 
 // ── TLV 容器：0x5507 VR_C2S、0x5508 VR_S2C（§4.5）──────────────────
 //
@@ -285,6 +310,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER {
 #define VIPLE_VR_S2C_REFRESH_START     0x06  // VR channel unsequenced，送 2 次
 #define VIPLE_VR_S2C_LINK_READY        0x07  // reliable，§VR-MULTILINK
 #define VIPLE_VR_S2C_REPAIR_GONE       0x08  // §VR-LINK-REPAIR：只走連線的 T_S2C
+#define VIPLE_VR_S2C_LINK_ADDRS        0x09  // reliable，§VR-MULTILINK-HOTADD：server 目前可廣告的位址完整快照
 
 // LOSS.reason
 #define VIPLE_VR_LOSS_NETWORK       1  // depacketizer 偵測到掉幀
@@ -416,6 +442,7 @@ typedef struct _VIPLE_VR_TLV_HAPTIC {
     float    frequencyHz;
     float    amplitude;   // 0–1
     uint32_t eventId;
+    uint64_t timestampNs; // §VR-HAPTIC-REDUNDANT（2026-10-31，28 B）：原始送出時間（client 單調時鐘 ns，0＝未提供）
 } VIPLE_VR_TLV_HAPTIC;
 
 // 1 Hz server 統計。欄位只往後加；client 依 len 讀得到多少算多少。
@@ -439,8 +466,9 @@ typedef struct _VIPLE_VR_TLV_STATS {
 // client 的每張網卡一條連線（link）：兩端各一組專用 UDP socket（影像、音訊各一）。影像與音訊的 RTP
 // 封包在每條連線各送一份（位元組與單一路徑時完全相同，接收端靠既有的 RTP 序號去重）；追蹤
 // （0x5506）以 VIPLE_VR_LINK_T_DATA 加密後在每條連線各送一份。連線清單走既有的加密控制通道交換：
-//   C→S 0x5507/0A LINK_HELLO：{u8 count, VIPLE_VR_LINK_DESC[count]}
+//   C→S 0x5507/0A LINK_HELLO：{u8 count, VIPLE_VR_LINK_DESC[count], [u8 epoch[count]]}
 //   S→C 0x5508/07 LINK_READY：{u8 count, VIPLE_VR_LINK_PORTS[count], [u8 hubCaps]}
+//   S→C 0x5508/09 LINK_ADDRS：VIPLE_VR_LINK_ADDRS（§VR-MULTILINK-HOTADD）
 // hubCaps（VIPLE_VR_LINK_F_*）是 server 同意啟用的連線層功能；沒有任何功能時不附這個 byte（舊 client 本來就只讀陣列）。
 // 只支援 IPv4。位址欄位是網路位元組序的 4 個 byte；其餘整數 little-endian。
 #define VIPLE_VR_LINK_MAX        4
@@ -456,6 +484,8 @@ typedef struct _VIPLE_VR_TLV_STATS {
 #define VIPLE_VR_LINK_F_REPAIR   0x02  // §VR-LINK-REPAIR：補包。C→S NACK（0x5507/0B）、S→C REPAIR_GONE（0x5508/08）；要同時有 F_CTRL
 #define VIPLE_VR_LINK_F_REPAIR_RTT 0x04  // §VR-REPAIR-RTT：補包的門檻、等待與重報跟著量到的往返時間走（NACK 的 flags 帶 client 的估計）；
                                          // 要同時有 F_REPAIR。舊的一方不認得這個位元，兩邊就都照原本的規則走
+#define VIPLE_VR_LINK_F_HOTADD   0x08  // §VR-MULTILINK-HOTADD：串流中途熱插拔（client 定期掃描網卡、同 id 重綁、死亡 slot 回收）。
+                                       // 不依賴 CTRL／REPAIR，可獨立成立；舊的一方不認得這個位元就不做熱插拔
 #define VIPLE_VR_LINK_PING_F_CONFIRMED  0x01  // client 最近 1 s 內在這條連線收過 PONG
 #define VIPLE_VR_LINK_READY_OK       0
 #define VIPLE_VR_LINK_READY_REFUSED  1
@@ -531,6 +561,15 @@ typedef struct _VIPLE_VR_TLV_REPAIR_GONE {
     uint8_t  reason;    // VIPLE_VR_GONE_*
 } VIPLE_VR_TLV_REPAIR_GONE;
 
+// §VR-MULTILINK-HOTADD：S→C 的 LINK_ADDRS（0x5508/09，reliable）。內容是 server 目前所有可廣告位址的
+// 「完整快照」（不是增量）：client 直接覆蓋自己的候選清單，掉一份或亂序都不會累積錯誤。
+// addr 是網路位元組序的 IPv4；count 上限 8（與 QUIC_MAX_ALT_PEERS 相同）。舊 client 依 len 跳過這個 subtype。
+#define VIPLE_VR_LINK_ADDR_MAX   8
+typedef struct _VIPLE_VR_LINK_ADDRS {
+    uint8_t count;              // 0..VIPLE_VR_LINK_ADDR_MAX
+    uint8_t addr[VIPLE_VR_LINK_ADDR_MAX][4];
+} VIPLE_VR_LINK_ADDRS;
+
 
 #pragma pack(pop)
 
@@ -539,12 +578,13 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_CONTROLLER_INPUT) == 24, input_24);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_GAZE) == 8, gaze_8);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TRACKING) == 232, tracking_232);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_FRAME_HEADER) == VIPLE_VR_FRAME_HEADER_SIZE, frame_header_24);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_FRAME_HEADER_GAZE) == VIPLE_VR_FRAME_HEADER_GAZE_SIZE, frame_header_gaze_32);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LOSS) == 9, tlv_loss_9);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LATCH) == 12, tlv_latch_12);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_REFRESH_START) == 6, tlv_refresh_6);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_CLIENT_TIMING) == 44, tlv_client_timing_44);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATE) == 4, tlv_state_4);
-VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HAPTIC) == 20, tlv_haptic_20);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HAPTIC) == 28, tlv_haptic_28);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATS) == 40, tlv_stats_40);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_DESC) == 14, link_desc_14);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_PORTS) == 6, link_ports_6);
@@ -552,6 +592,7 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_HDR) == 12, link_hdr_12);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_PING) == 16, link_ping_16);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_NACK) == 9, tlv_nack_9);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_REPAIR_GONE) == 6, tlv_repair_gone_6);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_ADDRS) == 33, link_addrs_33);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TRACKING) <= VIPLE_VR_MAX_CTRL_PAYLOAD, tracking_fits);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_INFO) == 102, tlv_hotspot_102);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_INFO) <= VIPLE_VR_MAX_CTRL_PAYLOAD, hotspot_fits);
@@ -559,13 +600,14 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_INFO) <= VIPLE_VR_MAX_CTRL_PA
 // ── 解碼後的每幀 VR metadata（client 內部，不上線）─────────────────
 
 typedef struct _VIPLE_VR_FRAME_META {
-    uint8_t  present;       // 1：這一幀帶了 0x81 VR header
+    uint8_t  present;       // 1：這一幀帶了 0x81 或 0x82 VR header
     uint8_t  vrFlags;
     uint8_t  layoutEpoch;
-    uint8_t  reserved;
+    uint8_t  foveated;      // 0x82 header 且帶 VIPLE_VR_FF_FOVEATED 時為 1（原 reserved）
     uint32_t echoSampleId;
     float    renderRot[4];  // x, y, z, w
     float    renderPos[3];  // 公尺（POS_RELATIVE 時是位移）
+    float    foveaCentre[2][2]; // [eye][0=x, 1=y]，正規化 [0..1]，y 由上緣算起（foveated == 0 時為 0.5f）
 } VIPLE_VR_FRAME_META;
 
 // ── 共用小工具 ───────────────────────────────────────────────────
@@ -634,6 +676,78 @@ VIPLE_VR_INLINE void VipleVrUnpackQuat48(const uint8_t in[6], float q[4]) {
     }
     // 最大分量由單位長度還原；數值誤差讓 sumSq 略大於 1 時取 0。
     q[largest] = sumSq < 1.0f ? sqrtf(1.0f - sumSq) : 0.0f;
+}
+
+// IEEE 754 half-precision float（binary16）轉換工具
+VIPLE_VR_INLINE uint16_t VipleVrFloatToHalf(float val) {
+    uint32_t f;
+    memcpy(&f, &val, sizeof(f));
+    uint32_t sign = (f >> 16) & 0x8000;
+    uint32_t rawExp = (f >> 23) & 0xFF;
+    uint32_t mant = f & 0x007FFFFF;
+
+    if (rawExp == 0xFF) {
+        // Inf or NaN
+        if (mant != 0) {
+            uint16_t nanMant = (uint16_t)(mant >> 13);
+            return (uint16_t)(sign | 0x7C00 | (nanMant ? nanMant : 1));
+        }
+        return (uint16_t)(sign | 0x7C00);
+    }
+
+    int32_t exp = (int32_t)rawExp - 127;
+
+    if (exp > 15) {
+        // Overflow to infinity
+        return (uint16_t)(sign | 0x7C00);
+    }
+    if (exp < -24) {
+        // Underflow to zero
+        return (uint16_t)sign;
+    }
+    if (exp < -14) {
+        // Denormalized
+        uint32_t fullMant = mant | 0x00800000;
+        int shift = 13 + (-14 - exp);
+        uint16_t halfMant = (uint16_t)(fullMant >> shift);
+        return (uint16_t)(sign | halfMant);
+    }
+
+    uint16_t halfExp = (uint16_t)((exp + 15) << 10);
+    uint16_t halfMant = (uint16_t)(mant >> 13);
+    return (uint16_t)(sign | halfExp | halfMant);
+}
+
+VIPLE_VR_INLINE float VipleVrHalfToFloat(uint16_t val) {
+    uint32_t sign = ((uint32_t)val & 0x8000) << 16;
+    uint32_t exp = (val >> 10) & 0x1F;
+    uint32_t mant = val & 0x03FF;
+    uint32_t f;
+
+    if (exp == 0) {
+        if (mant == 0) {
+            f = sign;
+        } else {
+            // Denormalized half to float
+            uint32_t biasedExp = 113;
+            while ((mant & 0x0400) == 0) {
+                mant <<= 1;
+                biasedExp--;
+            }
+            mant &= 0x03FF;
+            f = sign | (biasedExp << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1F) {
+        // Inf / NaN
+        f = sign | 0x7F800000 | (mant << 13);
+    } else {
+        // Normalized
+        f = sign | ((exp + 112) << 23) | (mant << 13);
+    }
+
+    float res;
+    memcpy(&res, &f, sizeof(res));
+    return res;
 }
 
 #ifdef __cplusplus

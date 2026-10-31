@@ -252,15 +252,16 @@ namespace config {
     /// 姿態落後調整；1000–200000＝固定、不調。
     int vsync_to_photons_us = 0;
 
-    /// §VR-LATCH-V2：vr_latch_mode。legacy（預設）＝M4a R3 原版；v2＝相位取模、anti-windup、目標 vr_latch_target_pct；
+    /// §VR-LATCH-V2：vr_latch_mode。legacy＝M4a R3 原版；v2（2.0.30 起預設）＝相位取模、anti-windup、目標 vr_latch_target_pct；
     /// v3（§VR-LATCH-V3）＝環狀中位數＋最短路徑、節拍閘門、積分保留並跨場沿用（src/vr/vr_latch.h）
     enum class latch_e {
+
       legacy,
       v2,
       v3,
     };
 
-    latch_e latch_mode = latch_e::legacy;
+    latch_e latch_mode = latch_e::v2;
     int latch_target_pct = 40;  ///< vr_latch_target_pct：v2 的目標 slack，佔週期的百分比（25–50）
     /// §VR-LATCH-V3：vr_latch_target_v3_pct。v3 的目標（25–65）；0（預設）＝沿用 vr_latch_target_pct。
     /// 50 以上會把影像往「早到」那一側推，要先看過 client 的早到分佈再用。
@@ -268,9 +269,9 @@ namespace config {
     /// §VR-LATCH-V3：vr_latch_ab（預設空＝關）。開發用的同場 A/B：`<秒>:<模式>:<target%>`（例 `60:v2:50`），每隔這麼多秒
     /// 在設定的模式與這裡指定的模式之間切換一次。原樣字串，格式錯誤要到 VR session 建立時才警告（stream.cpp）。
     std::string latch_ab;
-    /// §VR-LATCH-V3：vr_latch_acquire（disabled 預設；只在 vr_latch_mode = v3 時有作用）。enabled＝相位誤差大時把虛擬 vsync
+    /// §VR-LATCH-V3／§VR-LATCH-V2-ACQ：vr_latch_acquire（2.0.30 起 enabled 預設；v3 與 v2 有作用，v2 只在開場）。enabled＝相位誤差大時把虛擬 vsync
     /// 的週期暫時改 ±vr_latch_acquire_ppm 一段算好的時間（burst），一次把相位移到位
-    bool latch_acquire = false;
+    bool latch_acquire = true;
     int latch_acquire_ppm = 4000;  ///< vr_latch_acquire_ppm：burst 相對基準的週期修正量（1000–5000 ppm）
     /// §VR-BUFFER-REFILL（2026-10-29）：vr_buffer_refill（enabled 預設；vr_latch_mode = v2 才有作用）。client 開了緩衝
     /// （§VR-BUFFER）而它連續 2 秒幾乎都空著時，用一次 burst 把虛擬 vsync 的相位提前一整格——host 多送一張，緩衝補回來
@@ -302,12 +303,12 @@ namespace config {
     /// 先在 GPU 複製到 staging 貼圖、抓滿才讀回寫檔（寫檔那幾秒擷取會停）。給離線比較編碼器用
     std::string dev_rawdump;
 
-    /// §VR-CTRL-OFFSET：vr_ctrl_pose_offset（disabled 預設）。enabled＝控制器也設 poseTimeOffset（driver pose_flags bit0）
-    bool ctrl_pose_offset = false;
+    /// §VR-CTRL-OFFSET：vr_ctrl_pose_offset（enabled 預設）。enabled＝控制器也設 poseTimeOffset（driver pose_flags bit0）
+    bool ctrl_pose_offset = true;
 
-    /// §VR-ANGVEL-LOCAL：vr_angvel_local（disabled 預設）。enabled＝driver 把 client 的世界座標角速度轉成機體座標再交給
+    /// §VR-ANGVEL-LOCAL：vr_angvel_local（2.0.30 起 enabled 預設）。enabled＝driver 把 client 的世界座標角速度轉成機體座標再交給
     /// SteamVR（pose_flags bit2；SteamVR 把 vecAngularVelocity 當本地座標，10-05 vr_probe --mode predict 實測）
-    bool angvel_local = false;
+    bool angvel_local = true;
 
     /// §VR-ABR-FAST（2026-10-30）：vr_abr_fast（enabled 預設）。enabled＝VR 反應式快速降碼率（學 Steam 策略）；
     /// disabled＝完全舊行為。
@@ -317,14 +318,24 @@ namespace config {
     /// 自動以 Windows Native Wifi API 挑選可見該 SSID 且未連線的無線網卡設定 all-user profile 並連線。
     bool hotspot_autoconnect = true;
 
-    /// §VR-STALE-HOLD：vr_stale_policy。legacy（預設）＝超過 2T 沒新樣本就速度與 offset 歸零；
+    /// §VR-HAPTIC-REDUNDANT（2026-10-31）：vr_haptic_redundancy。enabled（預設）＝HAPTIC S2C 採用 0/8/20 ms
+    /// 三次冗餘發送，並在 multilink_ctrl 啟用時鏡像至每條活連線；disabled＝舊行為（單次發送、只走 ENet）。
+    bool haptic_redundancy = true;
+
+    /// §VR-ML-HOTADD（2026-10-31）：vr_multilink_hotadd。enabled（預設）＝串流中途新出現的網卡（插上適配器、主機連上頭盔
+    /// 熱點）會加入多連線，死掉的連線可重新綁定；disabled＝只在串流開始時建立連線（舊行為）。
+    bool multilink_hotadd = true;
+
+    /// §VR-STALE-HOLD／§VR-STALE-BLEND（2026-10-31）：vr_stale_policy。blend（預設）＝平滑混合＋速度衰減；
     /// hold＝100 ms 內的空窗保留速度與 offset（driver pose_flags bit1）
     enum class stale_e {
+      blend,
+
       legacy,
       hold,
     };
 
-    stale_e stale_policy = stale_e::legacy;
+    stale_e stale_policy = stale_e::blend;
 
     /// §VR-MULTILINK：vr_multilink。disabled（預設）＝單一路徑，行為與之前相同；
     /// all＝client 的每張網卡各一條連線，影像、音訊、追蹤每條各送一份（送不動的連線會自動暫停送影像）；
@@ -359,10 +370,10 @@ namespace config {
     /// 用來在單一網卡上模擬鏈路空檔。空字串＝關閉。
     std::string multilink_fault;
 
-    /// §VR-FENCE-LATE（2026-10-09）：vr_capture_late（disabled 預設）。enabled＝擷取端等 driver 的 fence 逾時後不丟這一張，
+    /// §VR-FENCE-LATE（2026-10-09）：vr_capture_late（2.0.30 起 enabled 預設）。enabled＝擷取端等 driver 的 fence 逾時後不丟這一張，
     /// 繼續等到它到值或超過等待預算（晚到照收）；拆線改由「完成值 3 s 不動」「5 s 沒有一張複製成功」判定並有退避，
     /// 不再用「連續逾時滿 1 s」。disabled＝行為與之前相同（只多 log）。只有 Windows 的 PCVR 擷取會用到。
-    bool capture_late = false;
+    bool capture_late = true;
     /// vr_capture_late_max_ms：一張影像從被叫醒起最多等多久（20–250 ms）；實際的等待預算是
     /// 3 個發布間隔，夾在 3 個顯示週期與這個值之間（src/vr/vr_capture_health.h）。
     /// 預設值要等於 vr::capture::k_max_wait_ms_default（config.cpp 有 static_assert 對住那個常數；要改兩邊一起改）
@@ -390,6 +401,11 @@ namespace config {
     };
 
     gpu_priority_e gpu_priority = gpu_priority_e::high;
+
+    /// §VR-GAZE-FOVEA（2026-10-31）：vr_gaze_fovea（2.0.30 起 enabled 預設）。enabled＝眼動追蹤驅動注視點渲染（需 client 宣告支援）。
+    bool gaze_fovea = true;
+    /// vr_fovea_gaze_slew_dps：注視點中心角速度上限（30–600 deg/s，預設 200）。
+    int fovea_gaze_slew_dps = 200;
   };
 
   struct nvhttp_t {

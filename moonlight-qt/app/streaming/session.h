@@ -430,6 +430,11 @@ private:
     // M4a R2：HAPTIC 接收／交給 XrContext 的計數；--vr-test-haptic（dev）的注入計時器與序號
     uint32_t m_VrHapticRx = 0;
     uint32_t m_VrHapticQueued = 0;
+    // §VR-HAPTIC-REDUNDANT（2026-10-31）：去重與過期丟棄計數，及左右手最後 eventId
+    uint32_t m_VrHapticDroppedDup = 0;
+    uint32_t m_VrHapticDroppedExpired = 0;
+    uint32_t m_VrHapticLastEventId[2] { 0, 0 };
+    bool m_VrHapticHaveEventId[2] { false, false };
     SDL_TimerID m_VrTestHapticTimer = 0;
     std::atomic<uint32_t> m_VrTestHapticSeq { 0 };
 

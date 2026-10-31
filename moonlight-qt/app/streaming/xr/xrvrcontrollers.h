@@ -47,6 +47,7 @@ public:
     void destroy();  // 要在 xrDestroySession 之前
 
     XrActionSet actionSet() const { return m_Set; }
+    XrSpace eyeGazeSpace() const { return m_EyeGazeSpace; }
 
     // frame thread，xrSyncActions 之後：讀按鍵狀態；trackSpace 非空時以 predictedDisplayTime locate
     // grip（frameloop 模式的 pose 樣本）
@@ -127,6 +128,8 @@ private:
     // §VR-EXIT-COMBO：X（Touch 在左手、Frame 在右手）。只給結束組合鍵用、不轉送；Frame 右手的 x 本來沒有綁
     XrAction m_ComboX = XR_NULL_HANDLE;
     XrSpace m_GripSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    XrAction m_EyeGazeAction = XR_NULL_HANDLE;
+    XrSpace m_EyeGazeSpace = XR_NULL_HANDLE;
 
     mutable std::mutex m_Mutex;
     Hand m_Hand[2];

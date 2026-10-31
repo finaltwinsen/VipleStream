@@ -290,7 +290,7 @@ namespace vrdrv {
   }
 
   void controller_device_t::update(const vripc_pose_t &hp, const vripc_ctrl_input_t &in, bool have, int64_t age_us, uint32_t oor_us, bool zero_vel,
-                                   double pose_time_offset, double ang_scale, bool angvel_local) {
+                                   double pose_time_offset, double ang_scale, bool angvel_local, bool keep_offset) {
     AcquireSRWLockShared(&ctx_.pose_lock);
     if (index_.load() == k_invalid_index) {
       ReleaseSRWLockShared(&ctx_.pose_lock);
@@ -312,8 +312,8 @@ namespace vrdrv {
       p.qRotation.z = q.z;
       p.qRotation.w = q.w;
       for (int i = 0; i < 3; ++i) {
-        p.vecVelocity[i] = (zero_vel || oor || !std::isfinite(hp.lin_vel[i])) ? 0.0 : hp.lin_vel[i];
-        p.vecAngularVelocity[i] = (zero_vel || oor || !std::isfinite(hp.ang_vel[i])) ? 0.0 : hp.ang_vel[i] * ang_scale;
+        p.vecVelocity[i] = ((zero_vel && !keep_offset) || oor || !std::isfinite(hp.lin_vel[i])) ? 0.0 : hp.lin_vel[i];
+        p.vecAngularVelocity[i] = ((zero_vel && !keep_offset) || oor || !std::isfinite(hp.ang_vel[i])) ? 0.0 : hp.ang_vel[i] * ang_scale;
       }
       if (angvel_local) {
         // §VR-ANGVEL-LOCAL：SteamVR 把角速度當機體座標；client（OpenXR grip space 對追蹤空間）給的是世界座標。
@@ -324,7 +324,7 @@ namespace vrdrv {
         p.vecAngularVelocity[2] = wl.z;
       }
       // §VR-CTRL-OFFSET：速度歸零（stale、OutOfRange）時 offset 也歸零，與 HMD 的舊規則一致
-      p.poseTimeOffset = (zero_vel || oor || !std::isfinite(pose_time_offset)) ? 0.0 : pose_time_offset;
+      p.poseTimeOffset = ((zero_vel && !keep_offset) || oor || !std::isfinite(pose_time_offset)) ? 0.0 : pose_time_offset;
       p.poseIsValid = true;
     } else {
       for (int i = 0; i < 3; ++i) {

@@ -31,7 +31,7 @@
 
 ### 4.2 能力協商
 
-1. **`/serverinfo`**：`<VipleStreamVR>` 是 bitmask。b0 PROTO_V1、b1 PCVR（只有 Windows）、b2 HAPTICS、b3 GAZE_UPLINK、b4 QP_FOVEATION、b5 RECOVERY_INTRA（encoder 支援 IR）。
+1. **`/serverinfo`**：`<VipleStreamVR>` 是 bitmask。b0 PROTO_V1、b1 PCVR（只有 Windows）、b2 HAPTICS、b3 GAZE_UPLINK、b4 QP_FOVEATION、b5 RECOVERY_INTRA（encoder 支援 IR）、b7 GAZE_FOVEA (0x80)。
 2. **`/launch`**：`&vr=1&vrEye=WxH&vrHz=N&vrPeriodNs=<平均週期>&vrFov=<8 個 tan×10000，逗號分隔>&vrIpd=<mm×100>&vrEyeToHead=<14 個逗號分隔整數：每眼 pos mm×100 ×3、quat×10000 ×4>&vrCaps=<hex>&vrCodecs=<mask>&vrCtrl=touch|index&vrOverscan=<deg×10>&vrForce=0|1`。
    選填 `&vrFovea=<101–250>`（§VR-FOVEA，2026-10-08）：注視點編碼，正前方的像素密度是均勻取樣的幾 %；不帶或 100＝關。
    server 接受而且是真的 driver（`mode=pcvr`）時，在 `<VipleStreamVRSession>` 尾端加 `;fovea=<同一個值>`，client 看到才還原；
@@ -54,7 +54,7 @@
    兩者皆成功解析時 server 記錄 [VIPLE-VR-PLAYAREA] area=<w>x<d>mm seated=<x>,<y>,<z>mm yaw=<deg>。
    - 全部是十進位定點數，不用 base64。
    - 要有 round-trip 單元測試；server 解碼失敗就回非 200。
-   - `vrCaps`：b0 RECOVERY_INTRA、b1 TRACK_THREAD、b2 GAZE、b3 SKELETON。
+   - `vrCaps`：b0 RECOVERY_INTRA、b1 TRACK_THREAD、b2 GAZE、b3 SKELETON、b4 MULTILINK (0x10)、b5 GAZE_FOVEA (0x20)。
    - 送這些參數之前，XrContext 必須已經 running。
 3. **launch 回應**：`<VipleStreamVRSession>` 內容包括 proto、打包尺寸、Hz、codec、layout=sbs、overscan、`recovery=intra|idr`、`irFrames=N`、`transport=rtp`、`universeId`、sessionGuid。
    - server 做不到時回非 200，附明確錯誤碼：`VR_BUSY`、`VR_TRANSPORT_UNSUPPORTED`、`VR_CODEC_LIMIT`、`VRLINK_ACTIVE`。
@@ -68,7 +68,7 @@ u32 sampleId | u64 sampleTimeNs(client 時鐘) | u32 predictNs(target − sample
 pose×3（HMD、L、R）：f32 pos[3], f32 rot[4], f32 linVel[3], f32 angVel[3]                        = 156
 input×2：u32 buttons, u32 touches, u32 pressCtr(16 鍵 × 2 bit), u16 trigger, u16 grip,
          i16 sx, i16 sy, u8 battery, u8 flags(b0 active,b1 focused), u8 profile, u8 rsv           = 48
-gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 rsv                                            = 8
+gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 sampleAgeMs                                    = 8
 ```
 
 - **input.profile（M4a 收尾，原 u16 rsv 的低位元組）**：client 目前的 OpenXR interaction profile
@@ -102,6 +102,22 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 rsv                           
 - **client**：`Q/VideoDepacketizer.c:1002-1013` 在 `VrFlags != 0` 時解析；`DECODE_UNIT` 尾端加 `vrMeta` 和 `frameNumber` 的對應。
 - **相容**：vanilla 和舊版 client 永遠不會協商 VR，所以看不到這個 header。
 
+### 4.4.1 每幀眼動注視點 metadata：0x82 header（32 B，VIPLE_VR_FRAME_HEADER_GAZE，`static_assert == 32`）
+
+當雙方成功協商眼動注視點（server cap 0x80、client cap 0x20 且 server 配置 `vr_gaze_fovea=true`、回應帶 `;gazeFovea=1`）時，server 逐幀發送 0x82 標頭。
+
+| byte | 欄位 |
+|---|---|
+| 0 | `0x82`（VIPLE_VR_FRAME_HEADER_TYPE_GAZE） |
+| 1–23 | 與 0x81 header 逐位元組相同（lastPayloadLen 改以 32 B 計算；vrFlags 一定含 `VIPLE_VR_FF_FOVEATED 0x40`） |
+| 24–25 | foveaCxL（u16，左眼中心 X，0–65535 對應正規化 0–1） |
+| 26–27 | foveaCyL（u16，左眼中心 Y，0–65535 對應正規化 0–1，y 由上緣算） |
+| 28–29 | foveaCxR（u16，右眼中心 X，0–65535 對應正規化 0–1） |
+| 30–31 | foveaCyR（u16，右眼中心 Y，0–65535 對應正規化 0–1，y 由上緣算） |
+
+- **client**：`VideoDepacketizer.c` 0x82 分支解包並正規化填入 `VIPLE_VR_FRAME_META.foveated` 與 `foveaCentre[2][2]`。
+- **相容**：未協商成功之 client 永遠只會收到 0x81（24 B）。
+
 ### 4.5 VR_C2S（0x5507）與 VR_S2C（0x5508）：TLV 容器
 
 - **格式**：`u8 subtype, u8 len, payload[len]`，總長 ≤ 251 B，不認得的 subtype 依 len 跳過。
@@ -120,7 +136,7 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 rsv                           
 | | **0B NACK** | 補包請求（§VR-LINK-REPAIR，走連線 DATA，見 §7） | 連線 DATA |
 | | **0C HOTSPOT_INFO** | §VR-HOTSPOT-AUTO（2026-10-30，102 B）：頭盔熱點憑證與頻段資訊。`{version u8, authType u8, band u8, channel u8, ssidLen u8, keyLen u8, ssid[32] u8, key[64] u8}`。底層經由已加密的 ENet reliable 控制通道（AES-GCM）傳輸；舊 server 依 TLV len 自動忽略。 | reliable |
 | | 7F | 保留：麥克風 | — |
-| 0x5508 S→C | 01 HAPTIC | `{device, durationUs, freqHz, amp, eventId}`（M4a R3：pcvr session 由 `bridge::set_haptic_sink` 把 driver 推進 IPC 的震動打包送出） | ch 0x07 unseq |
+| 0x5508 S→C | 01 HAPTIC | 28 B（舊版 20 B）：`{device u8, reserved[3] u8, durationUs u32, frequencyHz f32, amplitude f32, eventId u32, timestampNs u64}`（§VR-HAPTIC-REDUNDANT 2026-10-31；`timestampNs` 為 client 單調時鐘 ns，0＝未提供）。client 依 `eventId` 分左右手去重，若 `timestampNs != 0` 且時差超過 `durationUs + 10 ms` 則過期丟棄；server 採 0/8/20 ms 三次冗餘發送，multilink 啟用時鏡像至每條活連線 | ch 0x07 unseq |
 | | 02 STATE | `{state, code, progress}`：編排進度、HMD 就緒、safe mode、`VRLINK_ACTIVE`、`ABI_MISMATCH_RESTART_STEAMVR` | reliable |
 | | 03 STATS | 1 Hz 統計，含 `clkOffsetJitter`、`staleCount` | ch 0x07 unseq |
 | | 04 CONFIG_ACK、05 LAYOUT | epoch 對應的 FoV、overscan、foveation、**eyeToHead** | reliable |
@@ -513,3 +529,84 @@ FEC 補不回來的 block（掉的比 parity 多）原本只能整幀放棄、�
     的幀數整體少三成，但 60 Hz、往返 12～17 ms 那一組多 15%（74 → 85 張）。驗收半速與區網的場次時看 `hold 10s`
     的 `afterLoss`：成串出現就是這種掉包。
   - 另一條連線先送來較新的幀時，「下一幀到了就回報」對輪到的每一幀仍會誤報一次（和上一段相同）。
+
+**§VR-MULTILINK-HOTADD：多連線中途加入（2026-10-31，server `vr_multilink_hotadd`，預設開啟）**
+
+session 開始時才建立連線，之後插上的網卡（或主機後來才連上的頭盔熱點）原本不會被使用；四條 slot 用滿、其中一條死亡時
+也加不回來。這一段補上「client 定期掃描、同 id 重綁、死亡 slot 回收」，wire 只往後加三樣，兩端都支援才啟用。
+
+| 位置 | 內容 |
+|---|---|
+| `VIPLE_VR_LINK_DESC.flags`／`hubCaps` | bit `0x08 VIPLE_VR_LINK_F_HOTADD`：client 每條都填，server 的開關（`config::vr.multilink_hotadd`）開著才放進 `hubCaps`。不依賴 CTRL／REPAIR，可獨立成立 |
+| `LINK_HELLO` 本體 | `{u8 count, VIPLE_VR_LINK_DESC[count], [u8 epoch[count]]}`：尾端是每個 link 一個 byte 的防重放值 |
+| S→C `0x5508/09 LINK_ADDRS` | `VIPLE_VR_LINK_ADDRS`（33 B：`u8 count`＋最多 8 個 IPv4），reliable、走 ENet |
+
+- **硬性條件**：client 只有在 `hubCaps & F_HOTADD` 時才掃描、才重綁；server 的開關關著時完全不做（可當回滾開關）。
+  舊 client 的 `flags` 沒有 `0x08` → `hubCaps` 也沒有 → 不推 `0x09`、不重綁；新 client 對舊 server 也一樣。
+  舊 server 的 `parse_hello()` 只檢查 `1 + count*14`，HELLO 尾端多出的 epoch 自然被忽略。
+
+**觸發**
+
+- client：ping 執行緒每 8 圈（約 2 s）呼叫一次 `lcEnumNetInterfaces()`。介面要 `up`、IPv4、非 loopback、非 Linux 的
+  `usb*`／`rndis*`／`ncm*`，而且能在 server 位址清單裡找到同子網路的位址，才是候選。同一組候選要**連續兩次**掃描
+  （約 4 s）都成立才動手（USB 列舉的瞬間會冒出假介面）；一次最多新增或重綁一條。
+- 介面消失或 IP 變了：該條標記 `ifGone`、停止送 PING（server 的 2 s 存活判定自然讓它變不可用）。同一個 IP 回來時
+  只要重送 HELLO；換了 IP 就帶著新描述與 `epoch+1` 重綁。
+- host：control 迴圈的 1 Hz tick 比對 `platf::enum_net_interfaces()`；hub 建立後的第一個 tick 無條件送一次，
+  之後位址集合變動才送。`LINK_ADDRS` 是**完整快照**，client 直接覆蓋候選清單，掉一份或亂序都不會累積錯誤。
+  不在 `vr_hotspot_connect` 裡直接送：那是 worker 執行緒，`send_vr_s2c()` 限定 control 執行緒。
+
+**同 id 重綁與 slot 回收**（server 的 `on_hello()`；沿用同一個 `link_t` 物件與索引，client 的索引＝`linkIdx`）
+
+| 情況 | server 行為 |
+|---|---|
+| 新 id、slot 未滿 | 建線（和原本相同） |
+| 新 id、slot 已滿、有死亡 ≥ 10 s 的非主連線 slot | 回收該 slot 就地重建（同一索引；`rebinds` 加一） |
+| 新 id、slot 已滿、沒有可回收 | `REFUSED`；client 10 s 後重試，最多 3 次 |
+| 同 id、desc 完全相同 | `OK` ＋原埠（epoch 只用來把防重放值往前推） |
+| 同 id、desc 不同、`epoch <= 上次接受的值` | `REFUSED`（重播或亂序） |
+| 同 id、desc 不同、該條仍 `alive()` 或 2 s 內有 PING | `REFUSED`（防搶佔；log 會寫死亡幾秒） |
+| 同 id、desc 不同、已死亡 ≥ 2 s | 就地重綁，`OK` ＋新埠 |
+
+「死亡」以最後一次 `CONFIRMED`／PING 的較大值起算，所以合法連線還活著時不會被別人的 HELLO 搶走；重綁一定要
+`epoch` 嚴格遞增，舊 HELLO 重播不會把 endpoint 拉回上一個位址。`epoch` 不列入「描述相同」的比較。
+
+server 的重綁順序（不能讓兩條接收鏈並存）：`retire` 單條 tx 並 join → `asio::post` 到 io 執行緒，在同一個 lambda
+內 `++rx_gen`、關舊 socket、開新 socket（綁 client 配對到的 server 位址）、換端點與埠、重設確認／探測／佇列狀態、
+用新的 `rx_gen` 重新 arm → 等 promise（上限 500 ms）→ 起新的 tx → 回 `OK`。`arm_video`／`arm_audio` 在第一行比對
+`rx_gen`，舊 socket 的 completion 直接作廢；`send_audio()` 也在 `sock_mtx` 下送出，不和 `close()` 搶同一個物件。
+
+**client 的 fd 交換**（不要在 ping 執行緒直接關接收執行緒正在 poll 的 fd）
+
+1. ping 執行緒用既有的 `openLinkSocket()` 在新位址開一組 socket，放進該條的 `pending`，先不動 `videoSock`／`audioSock`。
+2. `epoch++`，送整份 `LINK_HELLO`（重綁那條用 pending 的埠與位址）。
+3. control 接收執行緒收到該 id 的 `OK`：只記下新埠並設 `activateGen`，`ready` 還是 false（PING 暫停）。
+4. 影像／音訊接收執行緒在迴圈頂端、且沒有暫存封包時，把 pending fd 換進自己的 poll set，再寫 `ackVideo`／`ackAudio`。
+5. ping 執行緒等到兩邊都 ack 才關舊 fd、換上新的位址與埠、`ready = true`，並把確認、RTT 窗、到達速率與 lag 樣本重來。
+   等超過 1 s 只記一則 log、繼續等（寧可留著兩組 fd，也不要讓 `poll` 拿到已關閉的 handle）。
+
+新增連線（append）不需要 ack：ping 執行緒先把 `links[linkCount]` 寫好，再以 release 屏障公開 `linkCount`；兩條接收
+執行緒在迴圈頂端看到 `set->count < 1 + linkCount` 時自行 append。`refused` 不再是永久：hot-add 開啟時記
+`refusedAtMs`／`refuseTries`，10 s 後再試、最多 3 次，之後等介面狀態改變。HELLO 重送也改成每條連線自己計數
+（初始與重綁共用，最多 5 次），否則熱插拔後全域計數早已用完。
+
+**相容性與已知限制**
+
+| client ＼ server | 舊 server | 新 server（`hotadd` 開） |
+|---|---|---|
+| 舊 client | 完全不變 | `flags` 沒有 `0x08` → `hubCaps` 沒有 → 不推 `0x09`、不重綁 |
+| 新 client | `hubCaps` 沒有 `0x08` → 完全不做熱插拔；epoch trailer 被忽略 | 全功能 |
+
+1. **ENet 先死就來不及**：`LINK_ADDRS` 與 `LINK_HELLO` 都走 ENet。使用者若在「Wi-Fi 已切換、ENet 已斷」之後才插
+   適配器，要等 ENet 重連；本階段不把 HELLO 改走已確認連線的 `T_DATA`。
+2. 一次重綁的可觀察中斷：`automatic` 約 3～5 s（新連線先探測），`all`／`always` 約 0.5～1 s（等第一次 CONFIRMED）。
+3. `prefixLen == 0`（例如 Android JNI 未填）無法配對同子網路，該介面會被跳過。
+4. 全場最多 4 條；四條都活著時，第 5 個介面只能等，或被明確拒絕。
+5. **主連線（session 位址那條）不參與重綁**：換掉它會讓 ENet 與 `primary` 模式失去意義；它的介面消失時由 session
+   既有的重連機制處理。
+6. 重綁後 `alive_count()` 要等第一次 CONFIRMED 才回到 2，ABR 的單連線 75 Mbps 上限也到那時才解除（之後照
+   `fast_controller_t` 的 ramp 爬升）。連線數在 1↔2 抖動時的 ABR 上限遲滯（設計 §2.7 標為可選）尚未實作。
+
+log：`[VIPLE-VR-LINK] hot-add ...`（新增、rebind、refused 的原因、slot 回收、fd 交換）；server 的 10 s 統計行尾多
+`epoch=`／`rebinds=`（重綁時間另見事件行的 `rebindMs=`），client 的 10 s 統計在協商了 HOTADD 時多
+`hotadd scans=… rebinds=… refused=…`。

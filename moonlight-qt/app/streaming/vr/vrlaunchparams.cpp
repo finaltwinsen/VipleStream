@@ -130,6 +130,9 @@ VrSessionInfo VrSessionInfo::parse(const QString& text)
         else if (key == "multilink") {
             info.multilink = (value == "1");
         }
+        else if (key == "gazeFovea") {
+            info.gazeFovea = (value == "1");
+        }
         // 不認得的 key 直接略過（server 之後可以往後加欄位）
     }
 
@@ -142,11 +145,12 @@ VrSessionInfo VrSessionInfo::parse(const QString& text)
 QString VrSessionInfo::describe() const
 {
     return QString("proto=%1 packed=%2x%3 hz=%4 codec=%5 layout=%6 overscan=%7 recovery=%8 "
-                   "irFrames=%9 transport=%10 mode=%11 session=%12%13%14")
+                   "irFrames=%9 transport=%10 mode=%11 session=%12%13%14%15")
         .arg(proto).arg(packedWidth).arg(packedHeight).arg(refreshHz)
         .arg(codec, layout).arg(overscan)
         .arg(recoveryIntra ? "intra" : "idr").arg(irFrames)
         .arg(transport, mode, sessionGuid)
         .arg(multilink ? " multilink=1" : "")
-        .arg(fovea > 100 ? QString(" fovea=%1").arg(fovea) : QString());
+        .arg(fovea > 100 ? QString(" fovea=%1").arg(fovea) : QString())
+        .arg(gazeFovea ? " gazeFovea=1" : "");
 }

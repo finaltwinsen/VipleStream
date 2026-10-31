@@ -163,6 +163,11 @@ namespace vrdrv {
     int64_t arrival_max_us = 0;
     uint64_t n_arrival_gt2t = 0, n_hold = 0, n_hold_expired = 0;
     bool in_hold = false;
+    stale_blender_t hmd_blender;
+    stale_blender_t ctrl_blender[2];
+    rate_limiter_t limiter_enter;
+    rate_limiter_t limiter_recover;
+    uint64_t n_blend_recoveries = 0;
     const int64_t f = ctx_.qpf;
 
     for (;;) {
@@ -187,6 +192,9 @@ namespace vrdrv {
           invalid_sent = true;
           ++n_invalid;
           ctx_.presence.store(false);
+          hmd_blender.reset();
+          ctrl_blender[0].reset();
+          ctrl_blender[1].reset();
           push_timing(ctx_, VRIPC_TE_STALE, 0, 3, 0);
         }
         have = false;
@@ -200,6 +208,9 @@ namespace vrdrv {
         last_idx = UINT64_MAX;
         have = false;
         stale = oor = false;
+        hmd_blender.reset();
+        ctrl_blender[0].reset();
+        ctrl_blender[1].reset();
       }
       const vripc_session_config_t &cfg = gen->config();
       uint32_t zero_vel_us = cfg.stale_zero_vel_us != 0 ? cfg.stale_zero_vel_us : 22222;
@@ -225,6 +236,9 @@ namespace vrdrv {
             push_timing(ctx_, VRIPC_TE_STALE, 0, 3, 0);
           }
           ctx_.presence.store(false);
+          hmd_blender.reset();
+          ctrl_blender[0].reset();
+          ctrl_blender[1].reset();
           return;
         }
         vripc_tracking_slot_t s {};
@@ -278,13 +292,13 @@ namespace vrdrv {
         pin.hold_max_us = ctrl_oor_us;
         pin.ctrl_offset = (cfg.pose_flags & VRIPC_POSE_F_CTRL_OFFSET) != 0;
         pin.stale_hold = (cfg.pose_flags & VRIPC_POSE_F_STALE_HOLD) != 0;
+        pin.stale_blend = (cfg.pose_flags & VRIPC_POSE_F_STALE_BLEND) != 0;
         pin.raw_off_s = (double) (last.target_server_qpc - now) / (double) f;
         pin.hmd_cap_us = cfg.hmd_extrap_cap_us;
         pin.ctrl_cap_us = cfg.ctrl_extrap_cap_us;
         const pose_policy_t pol = decide_pose_policy(pin);
         const bool hold = pol.hold;
         const bool zero_vel = pol.zero_vel;
-        const double ang_scale = pol.ang_scale;
         const double off = pol.hmd_off_s;
         const double ctrl_off = pol.ctrl_off_s;
         if (hold && !in_hold) {
@@ -295,58 +309,111 @@ namespace vrdrv {
           ++n_hold_expired;  // 空窗超過 hold 上限：回到舊規則
         }
 
-        // S2-09：控制器跟 HMD 同一個節奏（新樣本或 stale 重送）；> stale_oor_ctrl_us（預設 100 ms）OutOfRange
+        // S2-09：控制器跟 HMD 同一個節奏（新樣本或 stale 重送）；> stale_oor_ctrl_us（300 ms）OutOfRange
         {
           const uint8_t hand_flag[2] = {0x02, 0x04};  // VIPLE_VR_TRK_LEFT／RIGHT
+          const char *hand_name[2] = {"ctrl left", "ctrl right"};
           for (int h = 0; h < 2; ++h) {
             if (auto *d = ctrl_[h].load()) {
-              d->update(last.pose[1 + h], last.input[h], (last.flags & hand_flag[h]) != 0, age_us, ctrl_oor_us, zero_vel, ctrl_off, ang_scale,
-                        (cfg.pose_flags & VRIPC_POSE_F_ANGVEL_LOCAL) != 0);
+              const bool hand_have = (last.flags & hand_flag[h]) != 0;
+              const bool hand_fresh = fresh && hand_have;
+              const vripc_pose_t &cp = last.pose[1 + h];
+
+              const auto cres = ctrl_blender[h].process(hand_fresh, cp.pos, cp.rot, cp.lin_vel, cp.ang_vel, pol, ctrl_off, now, f);
+
+              if (cres.log_enter && limiter_enter.allow(now, f, 5)) {
+                VRDRV_LOG_INFO("[VIPLE-VR-STALE] %s enter age=%.1fms off0=%+.1fms v=%.2fm/s",
+                               hand_name[h], cres.enter_age_ms, cres.enter_off0_ms, cres.enter_speed_mps);
+              }
+              if (cres.log_recover) {
+                if (limiter_recover.allow(now, f, 5)) {
+                  VRDRV_LOG_INFO("[VIPLE-VR-STALE] %s recover gap=%.1fms jumpMm=%.1f blend=%d",
+                                 hand_name[h], cres.recover_gap_ms, cres.recover_jump_mm, cres.recover_blended ? 1 : 0);
+                }
+                if (cres.recover_blended) {
+                  ++n_blend_recoveries;
+                }
+              }
+
+              vripc_pose_t blended_cp = cp;
+              blended_cp.pos[0] = (float) cres.pos.x;
+              blended_cp.pos[1] = (float) cres.pos.y;
+              blended_cp.pos[2] = (float) cres.pos.z;
+              blended_cp.rot[0] = (float) cres.rot.x;
+              blended_cp.rot[1] = (float) cres.rot.y;
+              blended_cp.rot[2] = (float) cres.rot.z;
+              blended_cp.rot[3] = (float) cres.rot.w;
+              blended_cp.lin_vel[0] = (float) cres.lin_vel.x;
+              blended_cp.lin_vel[1] = (float) cres.lin_vel.y;
+              blended_cp.lin_vel[2] = (float) cres.lin_vel.z;
+              blended_cp.ang_vel[0] = (float) cres.ang_vel.x;
+              blended_cp.ang_vel[1] = (float) cres.ang_vel.y;
+              blended_cp.ang_vel[2] = (float) cres.ang_vel.z;
+
+              // ang_scale 傳 1.0：blender 的輸出（hold／blend 分支）已經乘過衰減倍率，再乘一次會變成平方衰減
+              d->update(blended_cp, last.input[h], hand_have, age_us, ctrl_oor_us, zero_vel, cres.off_s, 1.0,
+                        (cfg.pose_flags & VRIPC_POSE_F_ANGVEL_LOCAL) != 0, pol.keep_offset);
             }
           }
         }
         const vripc_pose_t &hp = last.pose[0];
+        const auto hres = hmd_blender.process(fresh, hp.pos, hp.rot, hp.lin_vel, hp.ang_vel, pol, off, now, f);
+
+        if (hres.log_enter && limiter_enter.allow(now, f, 5)) {
+          VRDRV_LOG_INFO("[VIPLE-VR-STALE] hmd enter age=%.1fms off0=%+.1fms v=%.2fm/s",
+                         hres.enter_age_ms, hres.enter_off0_ms, hres.enter_speed_mps);
+        }
+        if (hres.log_recover) {
+          if (limiter_recover.allow(now, f, 5)) {
+            VRDRV_LOG_INFO("[VIPLE-VR-STALE] hmd recover gap=%.1fms jumpMm=%.1f blend=%d",
+                           hres.recover_gap_ms, hres.recover_jump_mm, hres.recover_blended ? 1 : 0);
+          }
+          if (hres.recover_blended) {
+            ++n_blend_recoveries;
+          }
+        }
+
         vr::DriverPose_t p = base_pose();
-        p.vecPosition[0] = hp.pos[0];
-        p.vecPosition[1] = hp.pos[1];
-        p.vecPosition[2] = hp.pos[2];
-        math::quat_t q = math::normalize(math::quat_t {hp.rot[0], hp.rot[1], hp.rot[2], hp.rot[3]});
+        p.vecPosition[0] = hres.pos.x;
+        p.vecPosition[1] = hres.pos.y;
+        p.vecPosition[2] = hres.pos.z;
+        math::quat_t q = hres.rot;
         p.qRotation.x = q.x;
         p.qRotation.y = q.y;
         p.qRotation.z = q.z;
         p.qRotation.w = q.w;
-        // H:546：SteamVR 的預測只靠我們給的速度；stale 期間速度歸零 = 關掉 SteamVR 外插（hold 時保留）
-        if (!zero_vel) {
-          math::vec3_t w {hp.ang_vel[0] * ang_scale, hp.ang_vel[1] * ang_scale, hp.ang_vel[2] * ang_scale};
+        // H:546：SteamVR 的預測只靠我們給的速度；stale 期間速度歸零 = 關掉 SteamVR 外插（hold 時保留，blend 衰減）
+        if (!zero_vel || pol.keep_offset) {
+          math::vec3_t w = hres.ang_vel;
           if ((cfg.pose_flags & VRIPC_POSE_F_ANGVEL_LOCAL) != 0) {
             // §VR-ANGVEL-LOCAL：SteamVR 以 q·exp(ω t) 外插（ω 是機體座標）；client 給的是世界座標 → ω_local = q⁻¹ ω q。
             // 舊版頭一傾斜（或拍子任何姿態）就繞錯的軸外插；pose_history 仍記世界座標（它以 exp(ω t)·q 外插，結果相同）
             w = math::rotate(math::conj(q), w);
           }
-          for (int i = 0; i < 3; ++i) {
-            p.vecVelocity[i] = hp.lin_vel[i];
-          }
+          p.vecVelocity[0] = hres.lin_vel.x;
+          p.vecVelocity[1] = hres.lin_vel.y;
+          p.vecVelocity[2] = hres.lin_vel.z;
           p.vecAngularVelocity[0] = w.x;
           p.vecAngularVelocity[1] = w.y;
           p.vecAngularVelocity[2] = w.z;
         }
-        p.poseTimeOffset = off;
+        p.poseTimeOffset = hres.off_s;
         p.result = now_oor ? vr::TrackingResult_Running_OutOfRange : vr::TrackingResult_Running_OK;
         p.poseIsValid = true;
         report(p);
         invalid_sent = false;
         last_send_qpc = now;
         ctx_.presence.store((last.flags & VIPLE_TRK_PRESENCE_FLAG) != 0);
-        if (fresh || hold) {
-          // hold 重送也記進 pose_history：SteamVR 這段時間 render 的姿態是從重送的速度（角速度已衰減）外插出來的
+        if (fresh || hold || pol.blend) {
+          // hold 與 blend 重送也記進 pose_history：SteamVR 這段時間 render 的姿態是從重送的速度（角速度已衰減）外插出來的
           ph_sample_t hs;
           hs.sample_id = last.sample_id;
           hs.pose.rot = q;
-          hs.pose.pos = {hp.pos[0], hp.pos[1], hp.pos[2]};
-          hs.lin_vel = {hp.lin_vel[0], hp.lin_vel[1], hp.lin_vel[2]};
-          hs.ang_vel = {hp.ang_vel[0] * ang_scale, hp.ang_vel[1] * ang_scale, hp.ang_vel[2] * ang_scale};
+          hs.pose.pos = {p.vecPosition[0], p.vecPosition[1], p.vecPosition[2]};
+          hs.lin_vel = {p.vecVelocity[0], p.vecVelocity[1], p.vecVelocity[2]};
+          hs.ang_vel = {hres.ang_vel.x, hres.ang_vel.y, hres.ang_vel.z};
           hs.reported_qpc = now;
-          hs.offset_s = off;
+          hs.offset_s = p.poseTimeOffset;
           ctx_.pose_hist.record(hs);
         }
         if (fresh) {
@@ -380,15 +447,17 @@ namespace vrdrv {
         break;
       }
       if (now - t0 >= 10 * f) {
-        // 前段欄位順序不變（docs/log_tags.md）；2026-10-05 起尾端加 offset 分布、到達間隔、hold 與 pose_flags
+        // 前段欄位順序不變（docs/log_tags.md）；2026-10-05 起尾端加 offset 分布、到達間隔、hold 與 pose_flags；2026-10-31 加 blendRecoveries
         VRDRV_LOG_INFO("tracking 10s: new=%llu staleSends=%llu stale=%llu oor=%llu invalid=%llu torn=%llu offsetUs min=%lld max=%lld"
-                       " p50=%d ctrlOffUs p50=%d p95=%d arrivalMaxMs=%.1f gt2T=%llu hold=%llu holdExpired=%llu poseFlags=0x%x",
+                       " p50=%d ctrlOffUs p50=%d p95=%d arrivalMaxMs=%.1f gt2T=%llu hold=%llu holdExpired=%llu poseFlags=0x%x blendRecoveries=%llu",
                        (unsigned long long) n_new, (unsigned long long) n_stale_sends, (unsigned long long) n_stale, (unsigned long long) n_oor,
                        (unsigned long long) n_invalid, (unsigned long long) n_torn, (long long) (n_new ? offset_min_us : 0), (long long) (n_new ? offset_max_us : 0),
                        hmd_off_us.pct(0.50), ctrl_off_us.pct(0.50), ctrl_off_us.pct(0.95), (double) arrival_max_us / 1000.0,
-                       (unsigned long long) n_arrival_gt2t, (unsigned long long) n_hold, (unsigned long long) n_hold_expired, cfg.pose_flags);
+                       (unsigned long long) n_arrival_gt2t, (unsigned long long) n_hold, (unsigned long long) n_hold_expired, cfg.pose_flags,
+                       (unsigned long long) n_blend_recoveries);
         t0 = now;
         n_new = n_stale_sends = n_stale = n_oor = n_invalid = n_torn = 0;
+        n_blend_recoveries = 0;
         offset_min_us = INT64_MAX;
         offset_max_us = INT64_MIN;
         hmd_off_us.v.clear();
