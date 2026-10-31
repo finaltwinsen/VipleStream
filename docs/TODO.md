@@ -71,6 +71,11 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 
 ### §VR 補充（2.0 Steam Frame）
 
+- **§VR-HOTSPOT-WATCHDOG（2.0.32，已做）**：VR 串流中，host 連頭盔熱點的網卡斷線 30 s 就重啟驅動，每場最多
+  `vr_hotspot_restart_max` 次（預設 2）、間隔 ≥2 min，用完就在 log 提示實體重插。10-31 用 WLAN 封鎖過濾器模擬卡死，
+  無人場次驗過完整流程。待做：真的卡住時（8002 不斷重複、收送計數歸零）看重啟能不能救回；網路上還沒有 Windows 端同類回報，
+  再發生就存 WLAN-AutoConfig 事件 log（約 40 分鐘會被洗掉），考慮回報 Valve。
+
 - **§VR-MULTILINK 多連線（2026-10-06 起，預設關閉）**：實測與設計見 `docs/steam_frame_client.md` §8.7、線上格式見
   `docs/vr_protocol.md` §4.10。已完成：每張網卡一條連線、`auto`（量過才送影像）、跨幀等待、頭盔兩次實測；
   **§VR-LINK-CTRL（LOSS／LATCH／REFRESH_START 走連線）與 §VR-LINK-REPAIR（補包）**（2026-10-07，server 開關

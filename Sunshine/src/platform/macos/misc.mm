@@ -637,6 +637,8 @@ namespace platf {
     memset(key.data(), 0, key.size());
     BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not supported"sv;
   }
+
+  void vr_hotspot_keepalive() {}
 }  // namespace platf
 
 namespace dyn {

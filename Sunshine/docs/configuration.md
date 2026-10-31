@@ -2444,6 +2444,35 @@ not matter). Any other value is reported in the log as an invalid value and the 
     </tr>
 </table>
 
+### vr_hotspot_restart_max
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (§VR-HOTSPOT-WATCHDOG): Recovery of the Wi-Fi adapter connected to the headset hotspot.
+            While a VR session is streaming, the host watches the adapter selected by `vr_hotspot_autoconnect`. If it stays
+            disconnected for 30 seconds, the host restarts the adapter's driver (the same as `Restart-NetAdapter`), at most
+            this many times per session and at least 2 minutes apart. When the limit is reached it stops and logs that the
+            adapter must be unplugged and plugged back in; repeated software resets of a USB device can leave it in a
+            "Port Reset Failed" state. An unplugged adapter is never restarted. `0` disables the restarts; range 1–5.
+            @note{Windows hosts only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            2
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_hotspot_restart_max = 2
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_render_scale_pct
 
 <table>

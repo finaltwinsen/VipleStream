@@ -2147,6 +2147,7 @@ namespace stream {
     }
 
     if (now - ctl.lastLog >= 10s) {
+      platf::vr_hotspot_keepalive();  // §VR-HOTSPOT-WATCHDOG：串流還在，熱點網卡繼續監看
       const auto cur = vr_state.stats();
       const auto &prev = ctl.lastLogStats;
       const double secs = std::chrono::duration<double>(now - ctl.lastLog).count();

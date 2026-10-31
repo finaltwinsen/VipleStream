@@ -969,4 +969,11 @@ namespace platf {
    */
   void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key);
 
+  /**
+   * @brief §VR-HOTSPOT-WATCHDOG（2026-10-31）：VR session 每 10 s 呼叫一次，表示「串流還在」。
+   * @details 看門狗只在最近 25 s 內有人呼叫時才監看熱點網卡；串流結束（或頭盔關機）就自然停手。
+   *          Linux / macOS 為空函式。
+   */
+  void vr_hotspot_keepalive();
+
 }  // namespace platf

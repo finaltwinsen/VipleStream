@@ -1592,6 +1592,7 @@ namespace config {
     vr_opt::bool_strict_f(vars, "vr_angvel_local", vr.angvel_local);
     vr_opt::bool_strict_f(vars, "vr_abr_fast", vr.abr_fast);
     vr_opt::bool_strict_f(vars, "vr_hotspot_autoconnect", vr.hotspot_autoconnect);
+    vr_opt::int_strict_f(vars, "vr_hotspot_restart_max", vr.hotspot_restart_max, 1, 5, true);
     generic_f(vars, "vr_stale_policy", vr.stale_policy, vr_opt::stale_from_view);
     generic_f(vars, "vr_multilink", vr.multilink, vr_opt::multilink_from_view);
     string_f(vars, "vr_multilink_fault", vr.multilink_fault);

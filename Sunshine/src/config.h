@@ -318,6 +318,11 @@ namespace config {
     /// 自動以 Windows Native Wifi API 挑選可見該 SSID 且未連線的無線網卡設定 all-user profile 並連線。
     bool hotspot_autoconnect = true;
 
+    /// §VR-HOTSPOT-WATCHDOG（2026-10-31）：vr_hotspot_restart_max。VR 串流中，連頭盔熱點的那張網卡斷線連續
+    /// 30 s 就重啟網卡（停用再啟用驅動），每場最多這麼多次、兩次間隔至少 2 min；0＝不重啟。
+    /// 上限要小：USB 裝置連續軟體重置可能卡成 Port Reset Failed，只剩實體重插救得回來。
+    int hotspot_restart_max = 2;
+
     /// §VR-HAPTIC-REDUNDANT（2026-10-31）：vr_haptic_redundancy。enabled（預設）＝HAPTIC S2C 採用 0/8/20 ms
     /// 三次冗餘發送，並在 multilink_ctrl 啟用時鏡像至每條活連線；disabled＝舊行為（單次發送、只走 ENet）。
     bool haptic_redundancy = true;

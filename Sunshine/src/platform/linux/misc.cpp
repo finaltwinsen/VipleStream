@@ -1295,4 +1295,6 @@ namespace platf {
     explicit_bzero(key.data(), key.size());
     BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not supported"sv;
   }
+
+  void vr_hotspot_keepalive() {}
 }  // namespace platf

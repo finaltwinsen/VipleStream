@@ -1562,6 +1562,20 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
   控制器速度有效率與最大值（無效時送 0，SteamVR 就不外插拍子）。
 - pcvr 才把 ppm 寫進 driver pacing；stub 只記錄。
 
+### `[VIPLE-VR-HOTSPOT]` —— host 自動連頭盔熱點與看門狗（§VR-HOTSPOT-AUTO／§VR-HOTSPOT-WATCHDOG，2026-10-31）
+伺服器端（`Sunshine/src/platform/windows/misc.cpp`）。SSID 只印前 3 字元、金鑰只印長度。
+```
+[VIPLE-VR-HOTSPOT] received ssid=abc*** keylen=%d band=6GHz
+[VIPLE-VR-HOTSPOT] profile set | connect ok | already connected - ensuring the auto-reconnect profile
+[VIPLE-VR-HOTSPOT] watchdog: adapter disconnected from the headset hotspot
+[VIPLE-VR-HOTSPOT] watchdog: disconnected for %d s - restarting the adapter (n/max)
+[VIPLE-VR-HOTSPOT] watchdog: adapter restart done|failed
+[VIPLE-VR-HOTSPOT] watchdog: adapter connected again after %d s
+[VIPLE-VR-HOTSPOT] watchdog: still disconnected after %d restart(s) - giving up for this session; unplug and replug the adapter
+[VIPLE-VR-HOTSPOT] watchdog: adapter not present - not restarting
+```
+  - 看門狗只在 VR 串流中監看；斷線連續 30 s 才重啟、每場最多 `vr_hotspot_restart_max` 次（預設 2）、間隔至少 2 min。
+
 ### `[VIPLE-VR-GAZE]` —— 眼動追蹤與動態注視點（§VR-GAZE-FOVEA，2026-10-31）
 
 用戶端（`moonlight-qt/app/streaming/xr/xrcontext.cpp`）與伺服器端驅動程式（`Sunshine/src/platform/windows/steamvr_driver/direct_mode.cpp`），每 10 秒輸出彙總：

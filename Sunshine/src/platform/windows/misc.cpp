@@ -8,7 +8,11 @@
 #include <filesystem>
 #include <iomanip>
 #include <iterator>
+#include <chrono>
 #include <limits>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -34,6 +38,7 @@
 #include <WS2tcpip.h>
 #include <WtsApi32.h>
 #include <sddl.h>
+#include <setupapi.h>
 // clang-format on
 
 // Boost overrides NTDDI_VERSION, so we re-override it here
@@ -44,6 +49,7 @@
 // local includes
 #include "misc.h"
 #include "nvprefs/nvprefs_interface.h"
+#include "src/config.h"
 #include "src/entry_handler.h"
 #include "src/globals.h"
 #include "src/logging.h"
@@ -2035,6 +2041,184 @@ namespace platf {
     return true;
   }
 
+  // §VR-HOTSPOT-WATCHDOG（2026-10-31）：連頭盔熱點的網卡在串流中斷線就重啟它（有門檻、有上限）。
+  // 10-31 實測：host 的 USB 無線網卡串流中離開熱點後，每 5 s 自動重連都回「無法使用指定的網路」、收發計數停在 0，
+  // 整場只剩家用 Wi-Fi；Restart-NetAdapter 後 20 s 內連回。這裡做同一件事（停用再啟用驅動），但：
+  //   - 只在 VR 串流進行中（vr_hotspot_keepalive 最近 25 s 有呼叫）才監看，關頭盔、串流結束都不動作；
+  //   - 斷線連續 kDownNs 才動手，每場最多 vr_hotspot_restart_max 次、間隔至少 kGapNs；
+  //   - 用完次數就停手並記一行要人重插：USB 裝置連續軟體重置可能卡成 Port Reset Failed，越重置越糟。
+  namespace hotspot_wd {
+    using clock = std::chrono::steady_clock;
+    constexpr auto kPoll = std::chrono::seconds(5);
+    constexpr auto kAlive = std::chrono::seconds(25);
+    constexpr auto kDown = std::chrono::seconds(30);
+    constexpr auto kGap = std::chrono::minutes(2);
+
+    std::mutex mtx;
+    GUID guid {};
+    bool armed = false;
+    bool running = false;
+    clock::time_point alive_until {};
+    int restarts = 0;
+    bool gave_up = false;
+
+    // 依 wlan 介面 GUID（＝網路卡的 NetCfgInstanceId）找到裝置節點，送 DICS_PROPCHANGE（停止＋啟動，等同 devcon restart）
+    bool restart_adapter(const GUID &ifGuid) {
+      wchar_t want[64] {};
+      if (StringFromGUID2(ifGuid, want, 64) == 0) {
+        return false;
+      }
+      static const GUID kNetClass = {0x4d36e972, 0xe325, 0x11ce, {0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}};
+      HDEVINFO devs = SetupDiGetClassDevsW(&kNetClass, nullptr, nullptr, DIGCF_PRESENT);
+      if (devs == INVALID_HANDLE_VALUE) {
+        return false;
+      }
+      bool ok = false;
+      SP_DEVINFO_DATA dev {sizeof(SP_DEVINFO_DATA)};
+      for (DWORD i = 0; SetupDiEnumDeviceInfo(devs, i, &dev); ++i) {
+        HKEY key = SetupDiOpenDevRegKey(devs, &dev, DICS_FLAG_GLOBAL, 0, DIREG_DRV, KEY_READ);
+        if (key == INVALID_HANDLE_VALUE) {
+          continue;
+        }
+        wchar_t id[64] {};
+        DWORD sz = sizeof(id) - sizeof(wchar_t);
+        DWORD type = 0;
+        const bool match = RegQueryValueExW(key, L"NetCfgInstanceId", nullptr, &type, (LPBYTE) id, &sz) == ERROR_SUCCESS &&
+                           type == REG_SZ && _wcsicmp(id, want) == 0;
+        RegCloseKey(key);
+        if (!match) {
+          continue;
+        }
+        SP_PROPCHANGE_PARAMS pc {};
+        pc.ClassInstallHeader.cbSize = sizeof(SP_CLASSINSTALL_HEADER);
+        pc.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+        pc.StateChange = DICS_PROPCHANGE;
+        pc.Scope = DICS_FLAG_GLOBAL;
+        ok = SetupDiSetClassInstallParamsW(devs, &dev, &pc.ClassInstallHeader, sizeof(pc)) &&
+             SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, devs, &dev);
+        if (!ok) {
+          BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: adapter restart failed err=" << GetLastError();
+        }
+        break;
+      }
+      SetupDiDestroyDeviceInfoList(devs);
+      return ok;
+    }
+
+    // 介面狀態：1＝已連線、0＝沒連線、-1＝查不到（網卡被拔掉）
+    int query_state(HANDLE hClient, const GUID &ifGuid) {
+      DWORD sz = 0;
+      PVOID data = nullptr;
+      WLAN_OPCODE_VALUE_TYPE vt;
+      if (fn_WlanQueryInterface(hClient, &ifGuid, wlan_intf_opcode_interface_state, nullptr, &sz, &data, &vt) != ERROR_SUCCESS || !data) {
+        return -1;
+      }
+      const auto st = *static_cast<WLAN_INTERFACE_STATE *>(data);
+      fn_WlanFreeMemory(data);
+      return st == wlan_interface_state_connected ? 1 : 0;
+    }
+
+    void loop() {
+      HANDLE hClient = nullptr;
+      DWORD ver = 0;
+      if (fn_WlanOpenHandle(WLAN_API_MAKE_VERSION(2, 0), nullptr, &ver, &hClient) != ERROR_SUCCESS || !hClient) {
+        std::lock_guard lk(mtx);
+        running = false;
+        return;
+      }
+      std::optional<clock::time_point> down_since;
+      std::optional<clock::time_point> last_restart;
+      bool missing_logged = false;
+      while (true) {
+        std::this_thread::sleep_for(kPoll);
+        const auto now = clock::now();
+        GUID g;
+        int max_restarts;
+        {
+          std::lock_guard lk(mtx);
+          if (now > alive_until) {
+            running = false;  // 串流結束：收工，下一場 vr_hotspot_connect 再叫起來
+            break;
+          }
+          g = guid;
+          max_restarts = config::vr.hotspot_restart_max;
+        }
+        const int st = query_state(hClient, g);
+        if (st == 1) {
+          if (down_since) {
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter connected again after "
+                            << std::chrono::duration_cast<std::chrono::seconds>(now - *down_since).count() << " s";
+          }
+          down_since.reset();
+          missing_logged = false;
+          continue;
+        }
+        if (st < 0) {
+          // 網卡不在（被拔掉）：不重啟，插回來後由 Windows 依設定檔自動重連
+          if (!missing_logged) {
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter not present - not restarting"sv;
+            missing_logged = true;
+          }
+          down_since.reset();
+          continue;
+        }
+        if (!down_since) {
+          down_since = now;
+          BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter disconnected from the headset hotspot"sv;
+          continue;
+        }
+        if (now - *down_since < kDown || (last_restart && now - *last_restart < kGap)) {
+          continue;
+        }
+        std::unique_lock lk(mtx);
+        if (restarts >= max_restarts) {
+          if (!gave_up) {
+            gave_up = true;
+            lk.unlock();
+            BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: still disconnected after " << max_restarts
+                               << " restart(s) - giving up for this session; unplug and replug the adapter";
+          }
+          continue;
+        }
+        const int n = ++restarts;
+        lk.unlock();
+        BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: disconnected for "
+                           << std::chrono::duration_cast<std::chrono::seconds>(now - *down_since).count() << " s - restarting the adapter ("
+                           << n << '/' << max_restarts << ')';
+        const bool ok = restart_adapter(g);
+        BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter restart " << (ok ? "done" : "failed");
+        last_restart = clock::now();
+        down_since = last_restart;  // 重新起算：給它 kDown 自己連回去
+      }
+      fn_WlanCloseHandle(hClient, nullptr);
+    }
+
+    // vr_hotspot_connect 選定網卡後呼叫：每場重新起算次數
+    void arm(const GUID &g) {
+      if (config::vr.hotspot_restart_max <= 0) {
+        return;
+      }
+      std::lock_guard lk(mtx);
+      guid = g;
+      armed = true;
+      restarts = 0;
+      gave_up = false;
+      alive_until = clock::now() + kAlive;
+      if (!running) {
+        running = true;
+        std::thread(loop).detach();
+      }
+    }
+  }  // namespace hotspot_wd
+
+  void vr_hotspot_keepalive() {
+    std::lock_guard lk(hotspot_wd::mtx);
+    // 只延長期限、不叫起執行緒：執行緒由這一場的 HOTSPOT_INFO（arm）啟動，沒送熱點資訊的場次不監看
+    if (hotspot_wd::armed && hotspot_wd::running) {
+      hotspot_wd::alive_until = hotspot_wd::clock::now() + hotspot_wd::kAlive;
+    }
+  }
+
   void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key) {
     (void) version;
     (void) channel;
@@ -2173,6 +2357,7 @@ namespace platf {
     }
 
     BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] profile set"sv;
+    hotspot_wd::arm(selectedGuid);
     if (already_connected) {
       fn_WlanCloseHandle(hClient, nullptr);
       SecureZeroMemory(key.data(), key.size());
