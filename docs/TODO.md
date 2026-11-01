@@ -50,6 +50,19 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 
 ## 各章節待辦補充
 
+### Linux 安裝包與更新摘要（2.0.33）
+
+- **§PKG-SYSTEMD（已做）**：Ubuntu 24.04 起 systemd.pc／udev.pc 在 `systemd-dev`，linux-builder 沒裝 → .deb 默默漏掉
+  `app-app.viplestream.server.service`、udev 規則、modules-load；CachyOS 只好手寫單元檔（名稱不對 → portal 認不出程式、
+  權限對話框沒有名稱）。`linux_build.sh` 已補依賴並在打包後檢查三個檔案；CachyOS 已裝新包驗過 cgroup。
+  待做：使用者撤銷授權後重登入，目視對話框顯示「VipleStream-Server」；`cachy_install.sh` 用 bsdtar 解包不跑 postinst
+  （沒有 setcap，KMS 擷取拿不到 CAP_SYS_ADMIN、一律走 portal）。
+- **§PORTAL-DENY-BACKOFF（已做）**：拒絕授權後 30 s 起加倍、上限 10 min 才再問（原本 200 ms 就重開對話框）。
+- **字型／圖示（已做）**：串流 overlay 先用 AppImage 內建 Noto CJK、補 Arch 路徑（待串流中目視）；server SVG 圖示
+  `<svg` 移到檔頭（§K.4-ICON-SNIFF，gdk-pixbuf 已驗可解）。
+- **§UPDATE-NOTES（已做）**：電腦版 client 更新對話框顯示 release notes 摘要（標題＋開頭＋What's new），30 語系已翻；
+  實際流程要等下一版發佈才看得到。Android 與 host 常駐圖示的更新檢查還沒有摘要。
+
 ### §PYROWAVE 小波編碼（2.0.23 起；只能手動選，不進 Auto）
 - Windows server → Windows qt client 端到端已通（4:2:0 8-bit、4:4:4 10-bit），qt client 走零複製 §PYROWAVE-ZC；丟包時不完整的幀以「無缺口前綴」解碼（缺最細層、局部稍糊），不要求 IDR。
 - ABR 刻意不設 PyroWave 專屬下限（流暢優先）：網路撐不住時照常降位元率、畫質變差但不斷流；要畫質就改用 HEVC 或改善網路。

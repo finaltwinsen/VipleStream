@@ -931,27 +931,27 @@ Daha uzun sürerse ana bilgisayarı kontrol edin — Steam Guard 2FA onay istiyo
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1438"/>
+        <location filename="../main.cpp" line="1450"/>
         <source>&amp;Yes</source>
         <translation>&amp;Evet</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1439"/>
+        <location filename="../main.cpp" line="1451"/>
         <source>&amp;No</source>
         <translation>&amp;Hayır</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1440"/>
+        <location filename="../main.cpp" line="1452"/>
         <source>OK</source>
         <translation>Tamam</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1441"/>
+        <location filename="../main.cpp" line="1453"/>
         <source>Help</source>
         <translation>Yardım</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1442"/>
+        <location filename="../main.cpp" line="1454"/>
         <source>Cancel</source>
         <translation>İptal</translation>
     </message>
@@ -967,339 +967,339 @@ Daha uzun sürerse ana bilgisayarı kontrol edin — Steam Guard 2FA onay istiyo
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="361"/>
+        <location filename="../streaming/session.cpp" line="367"/>
         <source>No video received from host.</source>
         <translation>Ana bilgisayardan görüntü alınmadı.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="362"/>
+        <location filename="../streaming/session.cpp" line="368"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>Bağlantı noktaları için güvenlik duvarınızı ve bağlantı noktası iletme kurallarınızı kontrol edin: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="367"/>
+        <location filename="../streaming/session.cpp" line="373"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>Ağ bağlantınız iyi performans göstermiyor. Video bit hızı ayarınızı azaltın veya daha hızlı bir bağlantı deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="373"/>
+        <location filename="../streaming/session.cpp" line="379"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>Akışı başlatırken ana bilgisayarınızda bir şeyler ters gitti.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="374"/>
+        <location filename="../streaming/session.cpp" line="380"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>Ana bilgisayarınızda DRM korumalı içeriğin açık olmadığından emin olun. Ana bilgisayarınızı yeniden başlatmayı da deneyebilirsiniz.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="387"/>
+        <location filename="../streaming/session.cpp" line="393"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>Sunucuyla kontrol bağlantısı kesildi — anlık bir ağ kesintisi olabilir veya sunucu çevrimdışı olmuş olabilir. Daha sonra yayına devam etmeyi (resume) deneyebilirsiniz.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="395"/>
+        <location filename="../streaming/session.cpp" line="401"/>
         <source>Connection terminated</source>
         <translation>Bağlantı sonlandırıldı</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1834"/>
+        <location filename="../streaming/session.cpp" line="1868"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>%1 üzerindeki GeForce Experience sürümü, bu Moonlight yapısı tarafından desteklenmiyor. %1 kaynağından akış yapmak için Moonlight&apos;ı güncellemelisiniz.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1840"/>
+        <location filename="../streaming/session.cpp" line="1874"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>Uzak masaüstü fare modu oyunlarda sorunlara neden olabilir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1844"/>
+        <location filename="../streaming/session.cpp" line="1878"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>Yazılım kod çözme için yaptığınız ayar seçimi, yayın performansında sorunlara neden olabilir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1903"/>
+        <location filename="../streaming/session.cpp" line="1937"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>Ana bilgisayarınız HEVC kodlamayı desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1921"/>
+        <location filename="../streaming/session.cpp" line="1955"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>GPU desteği olmadan HEVC&apos;yi zorlamak için yaptığınız seçim nedeniyle yazılım kod çözme kullanılıyor. Bu, düşük yayın performansına neden olabilir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1873"/>
+        <location filename="../streaming/session.cpp" line="1907"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>Ana bilgisayar yazılımınız veya ekran kartınız AV1 kodlamayı desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1891"/>
+        <location filename="../streaming/session.cpp" line="1925"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>Ekran kartı desteği olmadan AV1&apos;i zorlamak için yaptığınız seçim nedeniyle yazılım kod çözme kullanılıyor. Bu, düşük yayın performansına neden olabilir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1968"/>
+        <location filename="../streaming/session.cpp" line="2002"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>Ana bilgisayarınız HDR akışını desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1960"/>
+        <location filename="../streaming/session.cpp" line="1994"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>HDR, H.264 codec bileşeni tarafından desteklenmiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1995"/>
+        <location filename="../streaming/session.cpp" line="2029"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>Bu bilgisayarın ekran kartı, HDR akış için AV1 Main10 kod çözmeyi desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1964"/>
+        <location filename="../streaming/session.cpp" line="1998"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>Bu bilgisayarın ekran artı HDR yayını için 10-bit HEVC veya AV1 kod çözmesini desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2028"/>
+        <location filename="../streaming/session.cpp" line="2062"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>Ana bilgisayarınız ve istemci bilgisayarınız aynı HDR video codeclerini desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2131"/>
+        <location filename="../streaming/session.cpp" line="2165"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>4K&apos;nın üzerindeki video çözünürlükleri H.264 codec bileşeni tarafından desteklenmiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3441"/>
+        <location filename="../streaming/session.cpp" line="3497"/>
         <source>Host returned error: %1</source>
         <translation>Ana bilgisayar hata verdi: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="379"/>
+        <location filename="../streaming/session.cpp" line="385"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>Ana bilgisayar ölümcül bir video kodlama hatası bildirdi.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="380"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>HDR modunu devre dışı bırakmayı, akış çözünürlüğünü değiştirmeyi veya ana bilgisayarınızın ekran çözünürlüğünü değiştirmeyi deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="396"/>
+        <location filename="../streaming/session.cpp" line="402"/>
         <source>Error code: %1</source>
         <translation>Hata kodu: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="697"/>
+        <location filename="../streaming/session.cpp" line="733"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>%1 üzerinde başka bir başlık SteamVR kullanıyor (örneğin Steam Link). Bağlantısını kesin ve tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="699"/>
+        <location filename="../streaming/session.cpp" line="735"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>%1 üzerinde VipleStream olmadan çalışan bir VR oyunu var. Oyunu kapatın ve tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="701"/>
+        <location filename="../streaming/session.cpp" line="737"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>%1 üzerindeki SteamVR&apos;ın yeniden başlatılması gerekiyor, ancak orada hâlâ bir VR oyunu çalışıyor. Önce oyundan çıkın (uygulama listesinde Oyundan çık), ardından tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="704"/>
+        <location filename="../streaming/session.cpp" line="740"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>%1 üzerindeki SteamVR güvenli modda başladı ve VipleStream sürücüsünü engelledi. Ana bilgisayarda SteamVR&apos;ı yeniden başlatın ve tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="706"/>
+        <location filename="../streaming/session.cpp" line="742"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>%1 üzerinde SteamVR yüklü değil.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="708"/>
+        <location filename="../streaming/session.cpp" line="744"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>%1 üzerinde Steam&apos;de oturum açılmamış. Ana bilgisayarda Steam&apos;de oturum açın (örneğin masaüstü modunda) ve tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="710"/>
+        <location filename="../streaming/session.cpp" line="746"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>%1 üzerinde kimse Windows&apos;ta oturum açmamış.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="712"/>
+        <location filename="../streaming/session.cpp" line="748"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1, Windows oturum açma veya kilit ekranında. Ana bilgisayarda oturum açın ve tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="715"/>
+        <location filename="../streaming/session.cpp" line="751"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>%1 üzerindeki SteamVR zamanında başlamadı. Tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="717"/>
+        <location filename="../streaming/session.cpp" line="753"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1 VR&apos;ı başlatamadı (hata %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="742"/>
+        <location filename="../streaming/session.cpp" line="778"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 VR yayını sunmuyor. PCVR etkin VipleStream Server 2.0 veya üstü gereklidir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="752"/>
+        <location filename="../streaming/session.cpp" line="788"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1 yalnızca röle üzerinden erişilebilir. VR yayını doğrudan bağlantı gerektirir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="760"/>
+        <location filename="../streaming/session.cpp" line="796"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>Video codec ayarı AV1&apos;i zorluyor, ancak VR yayını HEVC veya H.264 gerektirir. Ayarlar&apos;dan video codec&apos;i değiştirin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1781"/>
+        <location filename="../streaming/session.cpp" line="1817"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>Bu cihazda VR yayını için 8 bit HEVC veya H.264 video kod çözücü yok.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1850"/>
+        <location filename="../streaming/session.cpp" line="1884"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>Ana bilgisayar yazılımınız veya ekran kartınız PyroWave kodlamayı desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1861"/>
+        <location filename="../streaming/session.cpp" line="1895"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>İstemcinizin GPU&apos;su Vulkan 1.3 ile PyroWave kod çözmeyi desteklemiyor. HEVC/H.264&apos;e geri dönülüyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1940"/>
+        <location filename="../streaming/session.cpp" line="1974"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>Ekran kartı desteği olmadan H.264&apos;ü zorlamaya çalıştığınız için yazılım kod çözme kullanılıyor. Bu, düşük yayın performansına neden olabilir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1950"/>
+        <location filename="../streaming/session.cpp" line="1984"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>Ana bilgisayarınız ve istemci bilgisayarınız aynı video codeclerini desteklemiyor. Bu, düşük yayın performansına neden olabilir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1953"/>
+        <location filename="../streaming/session.cpp" line="1987"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>İstemci ekran kartınız H.264 kod çözmeyi desteklemiyor. Bu, düşük yayın performansına neden olabilir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1983"/>
+        <location filename="../streaming/session.cpp" line="2017"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>Bu bilgisayarın ekran kartı, HDR akış için PyroWave Main10 kod çözmeyi desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2001"/>
-        <location filename="../streaming/session.cpp" line="2019"/>
+        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2053"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>Ekran kartı desteği olmadan HDR&apos;yi zorlamak için yaptığınız seçim nedeniyle yazılım kod çözme kullanılıyor. Bu, düşük yayın performansına neden olabilir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2013"/>
+        <location filename="../streaming/session.cpp" line="2047"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>Bu bilgisayarın ekran kartı HDR yayını için HEVC Main10 kod çözmesini desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2069"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>Ana bilgisayarınız YUV 4:4:4 akışını desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2043"/>
+        <location filename="../streaming/session.cpp" line="2077"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>Ana bilgisayarınız seçilen video codec&apos;i için YUV 4:4:4 akışını desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2058"/>
+        <location filename="../streaming/session.cpp" line="2092"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>GPU desteği olmadan YUV 4:4:4&apos;ü zorlamak için yaptığınız seçim nedeniyle yazılım kod çözme kullanılıyor. Bu düşük akış performansına neden olabilir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2064"/>
+        <location filename="../streaming/session.cpp" line="2098"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>Bu bilgisayarın ekran kartı seçilen video codec&apos;i için YUV 4:4:4 kod çözmeyi desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2073"/>
+        <location filename="../streaming/session.cpp" line="2107"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>4K yayın için GeForce Experience 3.0 veya üstü gereklidir.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2090"/>
+        <location filename="../streaming/session.cpp" line="2124"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>Seçtiğiniz surround ses ayarı mevcut ses cihazı tarafından desteklenmiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2096"/>
+        <location filename="../streaming/session.cpp" line="2130"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>Ses cihazı açılamadı. Bu oturum sırasında ses kullanılamayacaktır.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2105"/>
+        <location filename="../streaming/session.cpp" line="2139"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>Bir HID cihazı yanıt vermiyor (%1). Bu oturum için oyun kumandası girişi ve Steam Controller aktarımı devre dışı. Cihazı çıkarıp yeniden takın, ardından yayını yeniden başlatın.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2109"/>
+        <location filename="../streaming/session.cpp" line="2143"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>Takılı bir gamepad&apos;in haritalaması yoktur ve kullanılamayacaktır. Bunu çözmek için Moonlight yardımını ziyaret edin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2127"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>Ana bilgisayarınızın ekran kartı 4K&apos;nın üzerindeki video çözünürlüklerini desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2145"/>
+        <location filename="../streaming/session.cpp" line="2179"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>Donanım kod çözmeyi zorlama seçiminiz, bu bilgisayarın ekran kartındaki eksik donanım kod çözme desteği nedeniyle yerine getirilemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2148"/>
+        <location filename="../streaming/session.cpp" line="2182"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>Codec seçiminiz ve donanım kod çözüm zorlama ayarları uyumlu değil. Bu bilgisayarın ekran kartı, seçtiğiniz codec&apos;in kod çözümünü desteklemiyor.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2985"/>
+        <location filename="../streaming/session.cpp" line="3013"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>XR çalışma zamanı, VR oturumu başladıktan sonra %1; bu nedenle yayın sonlandırıldı.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>exited</source>
         <translation>kapandı</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>stopped responding or was lost</source>
         <translation>yanıt vermeyi durdurdu veya bağlantısı koptu</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3141"/>
+        <location filename="../streaming/session.cpp" line="3169"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>Bu başlıkta VR başlatılamadı (%1). SteamVR&apos;ın çalıştığından emin olun ve tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3150"/>
+        <location filename="../streaming/session.cpp" line="3178"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>Başlığın VR çalışma zamanı zamanında yanıt vermedi. SteamVR&apos;ın çalıştığından emin olun ve tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3347"/>
+        <location filename="../streaming/session.cpp" line="3393"/>
         <source>Failed to launch via relay proxy</source>
         <translation>Röle proxy&apos;si üzerinden başlatılamadı</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3421"/>
+        <location filename="../streaming/session.cpp" line="3469"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 bir VR oturumu başlatmadı. Ana bilgisayarda PCVR&apos;ın etkin olduğundan emin olun ve tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3430"/>
-        <location filename="../streaming/session.cpp" line="3437"/>
+        <location filename="../streaming/session.cpp" line="3478"/>
+        <location filename="../streaming/session.cpp" line="3485"/>
         <source>Connection to host failed</source>
         <translation>Ana bilgisayara bağlantı başarısız</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4725"/>
+        <location filename="../streaming/session.cpp" line="4794"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>Video kod çözücü başlatılamıyor. Lütfen yayın ayarlarınızı kontrol edin ve tekrar deneyin.</translation>
     </message>
@@ -2345,67 +2345,77 @@ Performans: 4 komşu arama + minimum işleme (iGPU&apos;da ~6 ms)</translation>
 <context>
     <name>UpdateDialog</name>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="60"/>
+        <location filename="../gui/UpdateDialog.qml" line="68"/>
         <source>Download and install VipleStream %1?</source>
         <translation>VipleStream %1 indirilip kurulsun mu?</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="63"/>
+        <location filename="../gui/UpdateDialog.qml" line="71"/>
         <source>Working…</source>
         <translation>İşleniyor…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="66"/>
+        <location filename="../gui/UpdateDialog.qml" line="74"/>
         <source>VipleStream %1 is available.</source>
         <translation>VipleStream %1 mevcut.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="68"/>
+        <location filename="../gui/UpdateDialog.qml" line="76"/>
         <source>Update failed</source>
         <translation>Güncelleme başarısız</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="77"/>
+        <location filename="../gui/UpdateDialog.qml" line="88"/>
+        <source>Loading release notes…</source>
+        <translation>Sürüm notları yükleniyor…</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="89"/>
+        <source>Couldn&apos;t load the release notes.</source>
+        <translation>Sürüm notları yüklenemedi.</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="118"/>
         <source>VipleStream will close and relaunch automatically after the update is applied. On Windows you may be prompted by UAC if installed to Program Files.</source>
         <translation>Güncelleme uygulandıktan sonra VipleStream kapanıp otomatik olarak yeniden başlayacak. Program Files&apos;a kurulduysa Windows&apos;ta UAC onayı istenebilir.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="113"/>
+        <location filename="../gui/UpdateDialog.qml" line="154"/>
         <source>%1 / %2 MB</source>
         <translation>%1 / %2 MB</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="115"/>
+        <location filename="../gui/UpdateDialog.qml" line="156"/>
         <source>Connecting…</source>
         <translation>Bağlanıyor…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="137"/>
+        <location filename="../gui/UpdateDialog.qml" line="178"/>
         <source>Click &apos;Open release page&apos; to download manually.</source>
         <translation>Elle indirmek için &apos;Sürüm sayfasını aç&apos;a tıklayın.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="155"/>
+        <location filename="../gui/UpdateDialog.qml" line="198"/>
         <source>Yes</source>
         <translation>Evet</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="168"/>
+        <location filename="../gui/UpdateDialog.qml" line="213"/>
         <source>No</source>
         <translation>Hayır</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="180"/>
+        <location filename="../gui/UpdateDialog.qml" line="225"/>
         <source>Cancel</source>
         <translation>İptal</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="191"/>
+        <location filename="../gui/UpdateDialog.qml" line="238"/>
         <source>Open release page</source>
         <translation>Sürüm sayfasını aç</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="204"/>
+        <location filename="../gui/UpdateDialog.qml" line="253"/>
         <source>Close</source>
         <translation>Kapat</translation>
     </message>
@@ -2413,129 +2423,129 @@ Performans: 4 komşu arama + minimum işleme (iGPU&apos;da ~6 ms)</translation>
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="64"/>
+        <location filename="../backend/updater.cpp" line="66"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>Bu VipleStream kopyası Flatpak olarak kurulmuş. Sürüm sayfasından yeni .flatpak dosyasını indirip &quot;flatpak install --bundle &lt;file&gt;&quot; ile kurun. Bir Flatpak deposundan kurduysanız bunun yerine &quot;flatpak update&quot; çalıştırın.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="70"/>
+        <location filename="../backend/updater.cpp" line="72"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>VipleStream bir AppImage&apos;den çalışmadığı için kendini değiştiremez. Yeni sürümü sürüm sayfasından indirin.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="73"/>
+        <location filename="../backend/updater.cpp" line="75"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>Linux arm64 için otomatik kurulum henüz mevcut değil. Yeni sürümü sürüm sayfasından indirin.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="77"/>
+        <location filename="../backend/updater.cpp" line="79"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>Bu platformda (%1) otomatik kurulum mevcut değil. Yeni sürümü sürüm sayfasından indirin.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="142"/>
+        <location filename="../backend/updater.cpp" line="144"/>
         <source>Querying release assets…</source>
         <translation>Sürüm dosyaları sorgulanıyor…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="210"/>
-        <location filename="../backend/updater.cpp" line="343"/>
+        <location filename="../backend/updater.cpp" line="269"/>
+        <location filename="../backend/updater.cpp" line="402"/>
         <source>Update cancelled.</source>
         <translation>Güncelleme iptal edildi.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="214"/>
+        <location filename="../backend/updater.cpp" line="273"/>
         <source>Failed to query release info: %1</source>
         <translation>Sürüm bilgisi sorgulanamadı: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="222"/>
+        <location filename="../backend/updater.cpp" line="281"/>
         <source>Release JSON malformed: %1</source>
         <translation>Sürüm JSON&apos;u hatalı: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="247"/>
+        <location filename="../backend/updater.cpp" line="306"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>GitHub&apos;dan gelen sürüm bilgisinde etiket yok.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="250"/>
+        <location filename="../backend/updater.cpp" line="309"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>En son sürüm etiketi &quot;%1&quot; bir sürüm numarası değil.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="255"/>
+        <location filename="../backend/updater.cpp" line="314"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>GitHub&apos;ın sürüm bilgisi henüz güncel değil: hâlâ bu sürümden (%2) yeni olmayan %1 bildiriyor. Lütfen birkaç dakika sonra tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="260"/>
+        <location filename="../backend/updater.cpp" line="319"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>%1 sürümüne henüz dosya eklenmemiş. Lütfen birkaç dakika sonra tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="267"/>
+        <location filename="../backend/updater.cpp" line="326"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>%1 sürümünde bu platform (%2) için kurulabilir paket yok.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="276"/>
+        <location filename="../backend/updater.cpp" line="335"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>VipleStream %1, %2 olarak mevcut, ancak elle kurulması gerekiyor. %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="291"/>
+        <location filename="../backend/updater.cpp" line="350"/>
         <source>Cannot open download file: %1</source>
         <translation>İndirme dosyası açılamıyor: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="295"/>
+        <location filename="../backend/updater.cpp" line="354"/>
         <source>Downloading %1…</source>
         <translation>%1 indiriliyor…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="354"/>
+        <location filename="../backend/updater.cpp" line="413"/>
         <source>Download failed: %1</source>
         <translation>İndirme başarısız: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="364"/>
+        <location filename="../backend/updater.cpp" line="423"/>
         <source>Preparing installer…</source>
         <translation>Yükleyici hazırlanıyor…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="370"/>
+        <location filename="../backend/updater.cpp" line="429"/>
         <source>Restarting to apply update…</source>
         <translation>Güncellemeyi uygulamak için yeniden başlatılıyor…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="452"/>
-        <location filename="../backend/updater.cpp" line="520"/>
+        <location filename="../backend/updater.cpp" line="511"/>
+        <location filename="../backend/updater.cpp" line="579"/>
         <source>Cannot write helper script: %1</source>
         <translation>Yardımcı betik yazılamıyor: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="474"/>
+        <location filename="../backend/updater.cpp" line="533"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>Güncelleyici başlatılamadı (UAC reddedildi veya PowerShell yok).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="484"/>
+        <location filename="../backend/updater.cpp" line="543"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>AppImage&apos;den çalışmıyor — APPIMAGE ortam değişkeni ayarlı değil. Lütfen elle yeniden kurun.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="494"/>
+        <location filename="../backend/updater.cpp" line="553"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>AppImage dizini yazılabilir değil: %1. VipleStream&apos;i kullanıcının yazabileceği bir konuma (örn. ~/Applications/) taşıyıp tekrar deneyin.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="533"/>
+        <location filename="../backend/updater.cpp" line="592"/>
         <source>Failed to launch updater helper script.</source>
         <translation>Güncelleyici yardımcı betiği başlatılamadı.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="539"/>
+        <location filename="../backend/updater.cpp" line="598"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>Bu platformda otomatik güncelleme desteklenmiyor.</translation>
     </message>

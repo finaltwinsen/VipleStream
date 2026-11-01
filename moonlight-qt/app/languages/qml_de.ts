@@ -931,27 +931,27 @@ Wenn es länger hängt, prüfen Sie den Host — möglicherweise wartet Steam Gu
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1438"/>
+        <location filename="../main.cpp" line="1450"/>
         <source>&amp;Yes</source>
         <translation>&amp;Ja</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1439"/>
+        <location filename="../main.cpp" line="1451"/>
         <source>&amp;No</source>
         <translation>&amp;Nein</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1440"/>
+        <location filename="../main.cpp" line="1452"/>
         <source>OK</source>
         <translation>OK</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1441"/>
+        <location filename="../main.cpp" line="1453"/>
         <source>Help</source>
         <translation>Hilfe</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1442"/>
+        <location filename="../main.cpp" line="1454"/>
         <source>Cancel</source>
         <translation>Abbrechen</translation>
     </message>
@@ -967,339 +967,339 @@ Wenn es länger hängt, prüfen Sie den Host — möglicherweise wartet Steam Gu
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="361"/>
+        <location filename="../streaming/session.cpp" line="367"/>
         <source>No video received from host.</source>
         <translation>Kein Video vom Host empfangen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="362"/>
+        <location filename="../streaming/session.cpp" line="368"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>Prüfen Sie die Host-Firewall und Port-Weiterleitungsregeln für die Ports: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="367"/>
+        <location filename="../streaming/session.cpp" line="373"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>Ihre Netzwerkverbindung ist nicht gut genug. Reduzieren Sie die Video Bitrate oder wechseln Sie zu einer schnelleren Verbindung.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="373"/>
+        <location filename="../streaming/session.cpp" line="379"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>Beim Starten des Streams ist auf Ihrem Host-PC etwas schiefgelaufen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="374"/>
+        <location filename="../streaming/session.cpp" line="380"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>Stellen Sie sicher, dass Sie keine DRM-geschützten Inhalte auf Ihrem Host-PC geöffnet haben. Sie können auch versuchen, Ihren Host-PC neu zu starten.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="379"/>
+        <location filename="../streaming/session.cpp" line="385"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>Der Host-PC hat einen schwerwiegenden Videokodierungsfehler gemeldet.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="380"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>Versuchen Sie, den HDR-Modus zu deaktivieren, die Streaming-Auflösung zu ändern oder die Bildschirmauflösung des Host-PCs zu ändern.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="387"/>
+        <location filename="../streaming/session.cpp" line="393"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>Die Steuerverbindung zum Server wurde unterbrochen — möglicherweise ein kurzer Netzwerkausfall oder der Server ist offline. Sie können später versuchen, das Streaming fortzusetzen (resume).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="395"/>
+        <location filename="../streaming/session.cpp" line="401"/>
         <source>Connection terminated</source>
         <translation>Verbindung getrennt</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="396"/>
+        <location filename="../streaming/session.cpp" line="402"/>
         <source>Error code: %1</source>
         <translation>Fehlercode: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1834"/>
+        <location filename="../streaming/session.cpp" line="1868"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>Diese Version von GeForce Experience auf %1 wird von diesem Build von Moonlight nicht unterstützt. Sie müssen Moonlight aktualisieren, um von %1 zu streamen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1840"/>
+        <location filename="../streaming/session.cpp" line="1874"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>Die Auswahl des Remote Desktop Maus Modus kann in Spielen zu Problemen führen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1844"/>
+        <location filename="../streaming/session.cpp" line="1878"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>Software Dekodierung kann zu schlechter Streaming Leitung führen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1903"/>
+        <location filename="../streaming/session.cpp" line="1937"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>Ihr Host-PC unterstützt die HEVC-Kodierung nicht.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1921"/>
+        <location filename="../streaming/session.cpp" line="1955"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>Da Ihre Grafikkarte keine HEVC Decodierung unterstützt wird Software Dekodierung benutzt. Dies kann zu einer schlechten Streaming-Leistung führen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1873"/>
+        <location filename="../streaming/session.cpp" line="1907"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>Ihre Host-Software oder Ihre GPU unterstützt die AV1-Kodierung nicht.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1891"/>
+        <location filename="../streaming/session.cpp" line="1925"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>Nutze Software-Dekodierung wegen der Auswahl, AV1 ohne GPU-Unterstützung zu erzwingen. Dies kann eine schlechte Streaming-Leistung verursachen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1968"/>
+        <location filename="../streaming/session.cpp" line="2002"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>Ihr Host-PC unterstützt kein HDR-Streaming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1960"/>
+        <location filename="../streaming/session.cpp" line="1994"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>Der h.264 Codec unterstützt kein HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1995"/>
+        <location filename="../streaming/session.cpp" line="2029"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>Die GPU des Client-PCs unterstützt keine HEVC Main10 Dekodierung für HDR Streaming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1964"/>
+        <location filename="../streaming/session.cpp" line="1998"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>Die GPU des Client-PCs unterstützt keine 10-Bit HEVC oder AV1 Dekodierung für HDR Streaming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2028"/>
+        <location filename="../streaming/session.cpp" line="2062"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>Ihr Host-PC und Ihr Client-PC unterstützen nicht die gleichen HDR-Videocodecs.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2131"/>
+        <location filename="../streaming/session.cpp" line="2165"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>Videoauflösungen über 4K werden vom H.264 Codec nicht unterstützt.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3441"/>
+        <location filename="../streaming/session.cpp" line="3497"/>
         <source>Host returned error: %1</source>
         <translation>Host hat einen Fehler zurückgegeben: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1940"/>
+        <location filename="../streaming/session.cpp" line="1974"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>Verwendung der Software-Decodierung aufgrund Ihrer Auswahl, H.264 ohne GPU-Unterstützung zu erzwingen. Dies kann zu einer schlechten Streaming-Leistung führen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="697"/>
+        <location filename="../streaming/session.cpp" line="733"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>Ein anderes Headset verwendet SteamVR auf %1 (zum Beispiel Steam Link). Trennen Sie es und versuchen Sie es dann erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="699"/>
+        <location filename="../streaming/session.cpp" line="735"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>Auf %1 läuft bereits ein VR-Spiel ohne VipleStream. Beenden Sie es und versuchen Sie es dann erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="701"/>
+        <location filename="../streaming/session.cpp" line="737"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>SteamVR auf %1 muss neu gestartet werden, aber dort läuft noch ein VR-Spiel. Beenden Sie zuerst das Spiel (App beenden in der App-Liste) und versuchen Sie es dann erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="704"/>
+        <location filename="../streaming/session.cpp" line="740"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>SteamVR auf %1 wurde im abgesicherten Modus gestartet und hat den VipleStream-Treiber blockiert. Starten Sie SteamVR auf dem Host neu und versuchen Sie es dann erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="706"/>
+        <location filename="../streaming/session.cpp" line="742"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>SteamVR ist auf %1 nicht installiert.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="708"/>
+        <location filename="../streaming/session.cpp" line="744"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>Steam ist auf %1 nicht angemeldet. Melden Sie sich auf dem Host bei Steam an (zum Beispiel im Desktop-Modus) und versuchen Sie es dann erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="710"/>
+        <location filename="../streaming/session.cpp" line="746"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>Auf %1 ist niemand bei Windows angemeldet.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="712"/>
+        <location filename="../streaming/session.cpp" line="748"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 befindet sich auf dem Windows-Anmelde- oder Sperrbildschirm. Melden Sie sich auf dem Host an und versuchen Sie es dann erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="715"/>
+        <location filename="../streaming/session.cpp" line="751"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>SteamVR auf %1 wurde nicht rechtzeitig gestartet. Versuchen Sie es erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="717"/>
+        <location filename="../streaming/session.cpp" line="753"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1 konnte VR nicht starten (Fehler %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="742"/>
+        <location filename="../streaming/session.cpp" line="778"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 bietet kein VR-Streaming an. Erforderlich ist VipleStream Server 2.0 oder neuer mit aktiviertem PCVR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="752"/>
+        <location filename="../streaming/session.cpp" line="788"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1 ist nur über das Relay erreichbar. VR-Streaming erfordert eine direkte Verbindung.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="760"/>
+        <location filename="../streaming/session.cpp" line="796"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>Die Video-Codec-Einstellung erzwingt AV1, VR-Streaming benötigt jedoch HEVC oder H.264. Ändern Sie den Video-Codec in den Einstellungen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1781"/>
+        <location filename="../streaming/session.cpp" line="1817"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>Dieses Gerät hat keinen 8-Bit-HEVC- oder H.264-Videodecoder für VR-Streaming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1850"/>
+        <location filename="../streaming/session.cpp" line="1884"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>Ihre Host-Software oder Ihre GPU unterstützt die PyroWave-Kodierung nicht.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1861"/>
+        <location filename="../streaming/session.cpp" line="1895"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>Die GPU deines Clients unterstützt keine PyroWave-Decodierung mit Vulkan 1.3. Es wird auf HEVC/H.264 zurückgegriffen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1950"/>
+        <location filename="../streaming/session.cpp" line="1984"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>Ihr Host-PC und Client-PC unterstützen nicht die gleichen Videocodecs. Dies kann zu einer schlechten Streaming-Leistung führen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1953"/>
+        <location filename="../streaming/session.cpp" line="1987"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>Ihr Client-GPU unterstützt die H.264-Dekodierung nicht. Dies kann zu einer schlechten Streaming-Leistung führen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1983"/>
+        <location filename="../streaming/session.cpp" line="2017"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>Die GPU dieses PCs unterstützt keine PyroWave-Main10-Decodierung für HDR-Streaming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2001"/>
-        <location filename="../streaming/session.cpp" line="2019"/>
+        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2053"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>Verwendung der Software-Decodierung aufgrund Ihrer Auswahl, HDR ohne GPU-Unterstützung zu erzwingen. Dies kann zu einer schlechten Streaming-Leistung führen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2013"/>
+        <location filename="../streaming/session.cpp" line="2047"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>Die Grafikkarte des PCs unterstützt keine HEVC Main10 Dekodierung für HDR Streaming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2069"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>Ihr Host-PC unterstützt kein YUV 4:4:4 streaming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2043"/>
+        <location filename="../streaming/session.cpp" line="2077"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>Ihr Host-PC unterstützt kein YUV 4:4:4 streaming für den gewählten Video-Codec.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2058"/>
+        <location filename="../streaming/session.cpp" line="2092"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>YUV 4:4:4 ausgewählt, aber nicht von der GPU unterstützt. Softwaredekodierung wird verwendet. Dies kann zu schlechter Streaming-Leistung führen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2064"/>
+        <location filename="../streaming/session.cpp" line="2098"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>Die GPU dieses PCs unterstützt für den ausgewählten Video-Codec keine YUV 4:4:4-Dekodierung.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2073"/>
+        <location filename="../streaming/session.cpp" line="2107"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>Für 4K Streaming wird mindestens GeForce Experience 3.0 benötigt.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2090"/>
+        <location filename="../streaming/session.cpp" line="2124"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>Ihre ausgewählte Surround Sound Einstellung wird von dem momentanen Audiogerät nicht unterstützt.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2096"/>
+        <location filename="../streaming/session.cpp" line="2130"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>Zugriff auf das Audiogerät fehlgeschlagen. Es wird kein Ton für diese Session verfügbar sein.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2105"/>
+        <location filename="../streaming/session.cpp" line="2139"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>Ein HID-Gerät reagiert nicht (%1). Controller-Eingaben und Steam-Controller-Durchreichung sind für diese Sitzung deaktiviert. Trennen Sie das Gerät, schließen Sie es erneut an und starten Sie den Stream dann neu.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2109"/>
+        <location filename="../streaming/session.cpp" line="2143"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>Ein angeschlossener Controller hat keine Tastenbelegung und ist somit nicht nutzbar. Besuchen Sie bitte die Moonlight Hilfe um dies zu lösen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2127"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>Die GPU Ihres Host-PCs unterstützt keine Streaming-Videoauflösungen über 4K.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2145"/>
+        <location filename="../streaming/session.cpp" line="2179"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>Erzwungene Hardware Dekodierung kann nicht ausgewählt werden, da der PC keine Hardware Decodierung unterstützt.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2148"/>
+        <location filename="../streaming/session.cpp" line="2182"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>Erzwungene Hardware Dekodierung ist nicht mit deinem ausgewähltem Codec kompatibel, da die Grafikkarte des PCs den ausgewählten Codec nicht unterstützt.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2985"/>
+        <location filename="../streaming/session.cpp" line="3013"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>Die XR-Runtime %1, nachdem die VR-Sitzung gestartet war; der Stream wurde daher beendet.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>exited</source>
         <translation>wurde beendet</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>stopped responding or was lost</source>
         <translation>reagierte nicht mehr oder ging verloren</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3141"/>
+        <location filename="../streaming/session.cpp" line="3169"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>VR konnte auf diesem Headset nicht gestartet werden (%1). Stellen Sie sicher, dass SteamVR läuft, und versuchen Sie es dann erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3150"/>
+        <location filename="../streaming/session.cpp" line="3178"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>Die VR-Runtime des Headsets hat nicht rechtzeitig reagiert. Stellen Sie sicher, dass SteamVR läuft, und versuchen Sie es dann erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3347"/>
+        <location filename="../streaming/session.cpp" line="3393"/>
         <source>Failed to launch via relay proxy</source>
         <translation>Start über Relay-Proxy fehlgeschlagen</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3421"/>
+        <location filename="../streaming/session.cpp" line="3469"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 hat keine VR-Sitzung gestartet. Stellen Sie sicher, dass PCVR auf dem Host aktiviert ist, und versuchen Sie es dann erneut.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3430"/>
-        <location filename="../streaming/session.cpp" line="3437"/>
+        <location filename="../streaming/session.cpp" line="3478"/>
+        <location filename="../streaming/session.cpp" line="3485"/>
         <source>Connection to host failed</source>
         <translation>Verbindung zum Host fehlgeschlagen</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4725"/>
+        <location filename="../streaming/session.cpp" line="4794"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>Videodecoder konnte nicht initialisiert werden. Bitte prüfen Sie Ihre Streaming-Einstellungen und versuchen Sie es erneut.</translation>
     </message>
@@ -2345,67 +2345,77 @@ Leistung: 4-Nachbarn-Suche + minimale Verarbeitung (~6 ms auf iGPU)</translation
 <context>
     <name>UpdateDialog</name>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="60"/>
+        <location filename="../gui/UpdateDialog.qml" line="68"/>
         <source>Download and install VipleStream %1?</source>
         <translation>VipleStream %1 herunterladen und installieren?</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="63"/>
+        <location filename="../gui/UpdateDialog.qml" line="71"/>
         <source>Working…</source>
         <translation>Wird ausgeführt …</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="66"/>
+        <location filename="../gui/UpdateDialog.qml" line="74"/>
         <source>VipleStream %1 is available.</source>
         <translation>VipleStream %1 ist verfügbar.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="68"/>
+        <location filename="../gui/UpdateDialog.qml" line="76"/>
         <source>Update failed</source>
         <translation>Update fehlgeschlagen</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="77"/>
+        <location filename="../gui/UpdateDialog.qml" line="88"/>
+        <source>Loading release notes…</source>
+        <translation>Versionshinweise werden geladen…</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="89"/>
+        <source>Couldn&apos;t load the release notes.</source>
+        <translation>Die Versionshinweise konnten nicht geladen werden.</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="118"/>
         <source>VipleStream will close and relaunch automatically after the update is applied. On Windows you may be prompted by UAC if installed to Program Files.</source>
         <translation>VipleStream wird geschlossen und nach dem Anwenden des Updates automatisch neu gestartet. Unter Windows werden Sie möglicherweise von der Benutzerkontensteuerung (UAC) gefragt, wenn es unter Program Files installiert ist.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="113"/>
+        <location filename="../gui/UpdateDialog.qml" line="154"/>
         <source>%1 / %2 MB</source>
         <translation>%1 / %2 MB</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="115"/>
+        <location filename="../gui/UpdateDialog.qml" line="156"/>
         <source>Connecting…</source>
         <translation>Verbinde …</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="137"/>
+        <location filename="../gui/UpdateDialog.qml" line="178"/>
         <source>Click &apos;Open release page&apos; to download manually.</source>
         <translation>Klicken Sie auf „Release-Seite öffnen“, um manuell herunterzuladen.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="155"/>
+        <location filename="../gui/UpdateDialog.qml" line="198"/>
         <source>Yes</source>
         <translation>Ja</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="168"/>
+        <location filename="../gui/UpdateDialog.qml" line="213"/>
         <source>No</source>
         <translation>Nein</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="180"/>
+        <location filename="../gui/UpdateDialog.qml" line="225"/>
         <source>Cancel</source>
         <translation>Abbrechen</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="191"/>
+        <location filename="../gui/UpdateDialog.qml" line="238"/>
         <source>Open release page</source>
         <translation>Release-Seite öffnen</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="204"/>
+        <location filename="../gui/UpdateDialog.qml" line="253"/>
         <source>Close</source>
         <translation>Schließen</translation>
     </message>
@@ -2413,129 +2423,129 @@ Leistung: 4-Nachbarn-Suche + minimale Verarbeitung (~6 ms auf iGPU)</translation
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="64"/>
+        <location filename="../backend/updater.cpp" line="66"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>Diese Kopie von VipleStream ist als Flatpak installiert. Laden Sie die neue .flatpak-Datei von der Release-Seite herunter und installieren Sie sie mit „flatpak install --bundle &lt;file&gt;“. Wenn Sie sie aus einem Flatpak-Repository installiert haben, führen Sie stattdessen „flatpak update“ aus.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="70"/>
+        <location filename="../backend/updater.cpp" line="72"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>VipleStream läuft nicht aus einem AppImage und kann sich daher nicht selbst ersetzen. Laden Sie die neue Version von der Release-Seite herunter.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="73"/>
+        <location filename="../backend/updater.cpp" line="75"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>Die automatische Installation ist für Linux arm64 noch nicht verfügbar. Laden Sie die neue Version von der Release-Seite herunter.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="77"/>
+        <location filename="../backend/updater.cpp" line="79"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>Die automatische Installation ist auf dieser Plattform (%1) nicht verfügbar. Laden Sie die neue Version von der Release-Seite herunter.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="142"/>
+        <location filename="../backend/updater.cpp" line="144"/>
         <source>Querying release assets…</source>
         <translation>Release-Dateien werden abgefragt …</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="210"/>
-        <location filename="../backend/updater.cpp" line="343"/>
+        <location filename="../backend/updater.cpp" line="269"/>
+        <location filename="../backend/updater.cpp" line="402"/>
         <source>Update cancelled.</source>
         <translation>Update abgebrochen.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="214"/>
+        <location filename="../backend/updater.cpp" line="273"/>
         <source>Failed to query release info: %1</source>
         <translation>Release-Informationen konnten nicht abgefragt werden: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="222"/>
+        <location filename="../backend/updater.cpp" line="281"/>
         <source>Release JSON malformed: %1</source>
         <translation>Release-JSON fehlerhaft: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="247"/>
+        <location filename="../backend/updater.cpp" line="306"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>Die Release-Informationen von GitHub enthalten keinen Tag.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="250"/>
+        <location filename="../backend/updater.cpp" line="309"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>Der neueste Release-Tag „%1“ ist keine Versionsnummer.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="255"/>
+        <location filename="../backend/updater.cpp" line="314"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>Die Release-Informationen von GitHub sind noch nicht aktuell: Sie melden noch %1, was nicht neuer als diese Version (%2) ist. Bitte versuchen Sie es in einigen Minuten erneut.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="260"/>
+        <location filename="../backend/updater.cpp" line="319"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>Release %1 hat noch keine angehängten Dateien. Bitte versuchen Sie es in einigen Minuten erneut.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="267"/>
+        <location filename="../backend/updater.cpp" line="326"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>Release %1 enthält kein installierbares Paket für diese Plattform (%2).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="276"/>
+        <location filename="../backend/updater.cpp" line="335"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>VipleStream %1 ist als %2 verfügbar, muss aber manuell installiert werden. %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="291"/>
+        <location filename="../backend/updater.cpp" line="350"/>
         <source>Cannot open download file: %1</source>
         <translation>Download-Datei kann nicht geöffnet werden: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="295"/>
+        <location filename="../backend/updater.cpp" line="354"/>
         <source>Downloading %1…</source>
         <translation>Lade %1 herunter …</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="354"/>
+        <location filename="../backend/updater.cpp" line="413"/>
         <source>Download failed: %1</source>
         <translation>Download fehlgeschlagen: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="364"/>
+        <location filename="../backend/updater.cpp" line="423"/>
         <source>Preparing installer…</source>
         <translation>Installationsprogramm wird vorbereitet …</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="370"/>
+        <location filename="../backend/updater.cpp" line="429"/>
         <source>Restarting to apply update…</source>
         <translation>Neustart zum Anwenden des Updates …</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="452"/>
-        <location filename="../backend/updater.cpp" line="520"/>
+        <location filename="../backend/updater.cpp" line="511"/>
+        <location filename="../backend/updater.cpp" line="579"/>
         <source>Cannot write helper script: %1</source>
         <translation>Hilfsskript kann nicht geschrieben werden: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="474"/>
+        <location filename="../backend/updater.cpp" line="533"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>Updater konnte nicht gestartet werden (UAC abgelehnt oder PowerShell fehlt).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="484"/>
+        <location filename="../backend/updater.cpp" line="543"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>Läuft nicht aus einem AppImage — Umgebungsvariable APPIMAGE nicht gesetzt. Bitte manuell neu installieren.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="494"/>
+        <location filename="../backend/updater.cpp" line="553"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>AppImage-Verzeichnis nicht beschreibbar: %1. Verschieben Sie VipleStream an einen für den Benutzer beschreibbaren Ort (z. B. ~/Applications/) und versuchen Sie es erneut.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="533"/>
+        <location filename="../backend/updater.cpp" line="592"/>
         <source>Failed to launch updater helper script.</source>
         <translation>Das Hilfsskript des Updaters konnte nicht gestartet werden.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="539"/>
+        <location filename="../backend/updater.cpp" line="598"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>Automatische Updates werden auf dieser Plattform nicht unterstützt.</translation>
     </message>

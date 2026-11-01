@@ -1576,6 +1576,16 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 ```
   - 看門狗只在 VR 串流中監看；斷線連續 30 s 才重啟、每場最多 `vr_hotspot_restart_max` 次（預設 2）、間隔至少 2 min。
 
+### `[VIPLE-PORTAL]` —— Linux 擷取權限對話框被拒（§PORTAL-DENY-BACKOFF，2026-11-01）
+伺服器端（`Sunshine/src/platform/linux/portalgrab.cpp`）。使用者在 XDG portal 的權限對話框按取消（回應碼 1）後，
+擷取重試迴圈原本每 ~200 ms 就再開一次對話框。
+```
+[VIPLE-PORTAL] permission dialog cancelled by the user (CreateSession|SelectDevices|SelectSources|Start) - not asking again for %d s
+[VIPLE-PORTAL] skipping portal request, user cancelled %d s before the retry window ends
+```
+  - 冷卻 30 s 起、連續取消每次加倍、上限 10 min；授權成功就歸零。
+  - 對話框要顯示程式名稱，systemd 單元必須叫 `app-app.viplestream.server.service`（portal 用 cgroup 單元名稱找 app ID）。
+
 ### `[VIPLE-VR-GAZE]` —— 眼動追蹤與動態注視點（§VR-GAZE-FOVEA，2026-10-31）
 
 用戶端（`moonlight-qt/app/streaming/xr/xrcontext.cpp`）與伺服器端驅動程式（`Sunshine/src/platform/windows/steamvr_driver/direct_mode.cpp`），每 10 秒輸出彙總：

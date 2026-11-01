@@ -1,4 +1,5 @@
 #include "updater.h"
+#include "updatenotes.h"
 
 #include <QCoreApplication>
 #include <QStandardPaths>
@@ -30,7 +31,8 @@ Updater::Updater(QObject *parent)
       m_BytesReceived(0),
       m_BytesTotal(0),
       m_Cancelled(false),
-      m_Platform(UpdateAssetRules::detectPlatform())
+      m_Platform(UpdateAssetRules::detectPlatform()),
+      m_NotesReply(nullptr)
 {
     m_Nam->setStrictTransportSecurityEnabled(true);
     m_Nam->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -155,6 +157,63 @@ void Updater::startUpdate(const QString& version)
     m_CurrentReply = m_Nam->get(request);
     connect(m_CurrentReply, &QNetworkReply::finished,
             this, &Updater::handleAssetListFinished);
+}
+
+void Updater::fetchReleaseNotes(const QString& version)
+{
+    if (version.isEmpty()) {
+        return;
+    }
+    if (version == m_NotesVersion && (m_NotesState == QLatin1String("ready") || m_NotesState == QLatin1String("loading"))) {
+        return;
+    }
+    if (m_NotesReply) {
+        m_NotesReply->abort();  // handleNotesFinished 會因為版號不同而丟掉
+    }
+    m_NotesVersion = version;
+    m_NotesText.clear();
+    m_NotesState = QStringLiteral("loading");
+    emit releaseNotesChanged();
+
+    QNetworkRequest request(QUrl(QStringLiteral(
+        "https://api.github.com/repos/finaltwinsen/VipleStream/releases/tags/v%1").arg(version)));
+    request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
+    request.setRawHeader("User-Agent", "VipleStream-Qt-Updater/1.0");
+    request.setTransferTimeout(15000);
+    m_NotesReply = m_Nam->get(request);
+    m_NotesReply->setProperty("notesVersion", version);
+    connect(m_NotesReply, &QNetworkReply::finished, this, &Updater::handleNotesFinished);
+}
+
+void Updater::handleNotesFinished()
+{
+    auto* reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) {
+        return;
+    }
+    reply->deleteLater();
+    if (reply == m_NotesReply) {
+        m_NotesReply = nullptr;
+    }
+    if (reply->property("notesVersion").toString() != m_NotesVersion) {
+        return;  // 已經改查別的版本
+    }
+
+    QString body;
+    if (reply->error() == QNetworkReply::NoError) {
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        body = doc.object().value(QStringLiteral("body")).toString();
+    }
+    else {
+        qWarning() << "[VIPLE-UPDATE] release notes for" << m_NotesVersion << "failed:" << reply->errorString();
+    }
+
+    m_NotesText = UpdateNotes::summarize(body);
+    m_NotesState = m_NotesText.isEmpty() ? QStringLiteral("failed") : QStringLiteral("ready");
+    qDebug() << "[VIPLE-UPDATE] release notes for" << m_NotesVersion << m_NotesState
+             << "(" << body.size() << "->" << m_NotesText.size() << "chars)";
+    emit releaseNotesChanged();
 }
 
 void Updater::cancel()

@@ -931,27 +931,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1438"/>
+        <location filename="../main.cpp" line="1450"/>
         <source>&amp;Yes</source>
         <translation>&amp;Ναι</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1439"/>
+        <location filename="../main.cpp" line="1451"/>
         <source>&amp;No</source>
         <translation>&amp;Όχι</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1440"/>
+        <location filename="../main.cpp" line="1452"/>
         <source>OK</source>
         <translation>OK</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1441"/>
+        <location filename="../main.cpp" line="1453"/>
         <source>Help</source>
         <translation>Βοήθεια</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1442"/>
+        <location filename="../main.cpp" line="1454"/>
         <source>Cancel</source>
         <translation>Άκυρο</translation>
     </message>
@@ -967,339 +967,339 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="361"/>
+        <location filename="../streaming/session.cpp" line="367"/>
         <source>No video received from host.</source>
         <translation>Δεν ελήφθη βίντεο από τον κεντρικό υπολογιστή.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="362"/>
+        <location filename="../streaming/session.cpp" line="368"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>Ελέγξτε το τείχος προστασίας και τους κανόνες προώθησης θυρών για τη θύρα (τις θύρες): %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="367"/>
+        <location filename="../streaming/session.cpp" line="373"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>Η σύνδεσή σας στο δίκτυο δεν αποδίδει καλά. Μειώστε το bitrate ή δοκιμάστε μια ταχύτερη σύνδεση.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="373"/>
+        <location filename="../streaming/session.cpp" line="379"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>Κάτι πήγε στραβά στον κεντρικό υπολογιστή σας κατά την έναρξη της ροής.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="374"/>
+        <location filename="../streaming/session.cpp" line="380"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>Βεβαιωθείτε ότι δεν έχετε ανοιχτό περιεχόμενο με προστασία DRM στον κεντρικό υπολογιστή σας. Μπορείτε επίσης να δοκιμάσετε να επανεκκινήσετε τον κεντρικό υπολογιστή σας.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="379"/>
+        <location filename="../streaming/session.cpp" line="385"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>Ο κεντρικός υπολογιστής ανέφερε ανεπανόρθωτο σφάλμα κωδικοποίησης βίντεο.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="380"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>Δοκιμάστε να απενεργοποιήσετε τη λειτουργία HDR, να αλλάξετε την ανάλυση ροής ή να αλλάξετε την ανάλυση οθόνης του κεντρικού υπολογιστή σας.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="387"/>
+        <location filename="../streaming/session.cpp" line="393"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>Η σύνδεση ελέγχου με τον διακομιστή διακόπηκε — πιθανώς στιγμιαία διακοπή δικτύου ή ο διακομιστής είναι εκτός σύνδεσης. Μπορείτε να δοκιμάσετε να συνεχίσετε τη ροή αργότερα (resume)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="395"/>
+        <location filename="../streaming/session.cpp" line="401"/>
         <source>Connection terminated</source>
         <translation>Η σύνδεση τερματίστηκε</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="396"/>
+        <location filename="../streaming/session.cpp" line="402"/>
         <source>Error code: %1</source>
         <translation>Κωδικός σφάλματος: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1834"/>
+        <location filename="../streaming/session.cpp" line="1868"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>Η έκδοση του GeForce Experience στο %1 δεν υποστηρίζεται από αυτήν την έκδοση του Moonlight. Πρέπει να ενημερώσετε το Moonlight για ροή από το %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1840"/>
+        <location filename="../streaming/session.cpp" line="1874"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>Η επιλογή σας για ενεργοποίηση της λειτουργίας ποντικιού απομακρυσμένης επιφάνειας εργασίας ενδέχεται να προκαλέσει προβλήματα στα παιχνίδια.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1844"/>
+        <location filename="../streaming/session.cpp" line="1878"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>Η επιλογή των ρυθμίσεών σας για αναγκαστική αποκωδικοποίηση λογισμικού μπορεί να προκαλέσει κακή απόδοση ροής.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1903"/>
+        <location filename="../streaming/session.cpp" line="1937"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>Ο κεντρικός υπολογιστής σας δεν υποστηρίζει κωδικοποίηση HEVC.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1921"/>
+        <location filename="../streaming/session.cpp" line="1955"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>Χρήση αποκωδικοποίησης λογισμικού λόγω της επιλογής σας να επιβάλλετε HEVC χωρίς υποστήριξη GPU. Αυτό μπορεί να προκαλέσει κακή απόδοση ροής.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1873"/>
+        <location filename="../streaming/session.cpp" line="1907"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>Το λογισμικό ή η GPU του κεντρικού υπολογιστή σας δεν υποστηρίζει κωδικοποίηση AV1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1891"/>
+        <location filename="../streaming/session.cpp" line="1925"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>Χρήση αποκωδικοποίησης λογισμικού λόγω της επιλογής σας να επιβάλλετε AV1 χωρίς υποστήριξη GPU. Αυτό μπορεί να προκαλέσει κακή απόδοση ροής.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1968"/>
+        <location filename="../streaming/session.cpp" line="2002"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>Ο κεντρικός υπολογιστής σας δεν υποστηρίζει ροή HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1960"/>
+        <location filename="../streaming/session.cpp" line="1994"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>Το HDR δεν υποστηρίζεται με τον κωδικοποιητή H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1995"/>
+        <location filename="../streaming/session.cpp" line="2029"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>Η κάρτα γραφικών αυτού του υπολογιστή δεν υποστηρίζει αποκωδικοποίηση AV1 Main10 για ροή HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1964"/>
+        <location filename="../streaming/session.cpp" line="1998"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>Η κάρτα γραφικών αυτού του υπολογιστή δεν υποστηρίζει αποκωδικοποίηση HEVC ή AV1 10-bit για ροή HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2028"/>
+        <location filename="../streaming/session.cpp" line="2062"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>Ο κεντρικός υπολογιστής σας και ο υπολογιστής-πελάτης δεν υποστηρίζουν τους ίδιους κωδικοποιητές βίντεο HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2131"/>
+        <location filename="../streaming/session.cpp" line="2165"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>Οι αναλύσεις βίντεο πάνω από 4K δεν υποστηρίζονται από τον κωδικοποιητή H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3441"/>
+        <location filename="../streaming/session.cpp" line="3497"/>
         <source>Host returned error: %1</source>
         <translation>Ο κεντρικός υπολογιστής επέστρεψε σφάλμα: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1940"/>
+        <location filename="../streaming/session.cpp" line="1974"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>Χρήση αποκωδικοποίησης λογισμικού λόγω της επιλογής σας να επιβάλλετε την έκδοση H.264 χωρίς υποστήριξη από την κάρτα γραφικών. Αυτό μπορεί να προκαλέσει κακή απόδοση ροής.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="697"/>
+        <location filename="../streaming/session.cpp" line="733"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>Ένα άλλο headset χρησιμοποιεί το SteamVR στο %1 (για παράδειγμα το Steam Link). Αποσυνδέστε το και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="699"/>
+        <location filename="../streaming/session.cpp" line="735"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>Ένα παιχνίδι VR εκτελείται ήδη στο %1 χωρίς το VipleStream. Κλείστε το και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="701"/>
+        <location filename="../streaming/session.cpp" line="737"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>Το SteamVR στο %1 πρέπει να επανεκκινηθεί, αλλά ένα παιχνίδι VR εκτελείται ακόμα εκεί. Κλείστε πρώτα το παιχνίδι (Έξοδος από το παιχνίδι στη λίστα εφαρμογών) και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="704"/>
+        <location filename="../streaming/session.cpp" line="740"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>Το SteamVR στο %1 ξεκίνησε σε ασφαλή λειτουργία και μπλόκαρε το πρόγραμμα οδήγησης του VipleStream. Επανεκκινήστε το SteamVR στον κεντρικό υπολογιστή και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="706"/>
+        <location filename="../streaming/session.cpp" line="742"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>Το SteamVR δεν είναι εγκατεστημένο στο %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="708"/>
+        <location filename="../streaming/session.cpp" line="744"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>Δεν έχει γίνει σύνδεση στο Steam στο %1. Συνδεθείτε στο Steam στον κεντρικό υπολογιστή (για παράδειγμα σε λειτουργία επιφάνειας εργασίας) και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="710"/>
+        <location filename="../streaming/session.cpp" line="746"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>Κανείς δεν έχει συνδεθεί στα Windows στο %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="712"/>
+        <location filename="../streaming/session.cpp" line="748"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>Το %1 βρίσκεται στην οθόνη σύνδεσης ή κλειδώματος των Windows. Συνδεθείτε στον κεντρικό υπολογιστή και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="715"/>
+        <location filename="../streaming/session.cpp" line="751"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>Το SteamVR στο %1 δεν ξεκίνησε εγκαίρως. Δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="717"/>
+        <location filename="../streaming/session.cpp" line="753"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>Το %1 δεν μπόρεσε να ξεκινήσει το VR (σφάλμα %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="742"/>
+        <location filename="../streaming/session.cpp" line="778"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>Το %1 δεν προσφέρει ροή VR. Απαιτείται VipleStream Server 2.0 ή νεότερο με ενεργοποιημένο το PCVR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="752"/>
+        <location filename="../streaming/session.cpp" line="788"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>Το %1 είναι προσβάσιμο μόνο μέσω του αναμεταδότη. Η ροή VR απαιτεί άμεση σύνδεση.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="760"/>
+        <location filename="../streaming/session.cpp" line="796"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>Η ρύθμιση κωδικοποιητή βίντεο επιβάλλει AV1, αλλά η ροή VR απαιτεί HEVC ή H.264. Αλλάξτε τον κωδικοποιητή βίντεο στις Ρυθμίσεις.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1781"/>
+        <location filename="../streaming/session.cpp" line="1817"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>Αυτή η συσκευή δεν διαθέτει αποκωδικοποιητή βίντεο HEVC ή H.264 8-bit για ροή VR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1850"/>
+        <location filename="../streaming/session.cpp" line="1884"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>Το λογισμικό ή η GPU του κεντρικού υπολογιστή σας δεν υποστηρίζει κωδικοποίηση PyroWave.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1861"/>
+        <location filename="../streaming/session.cpp" line="1895"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>Η GPU του πελάτη δεν υποστηρίζει αποκωδικοποίηση PyroWave με Vulkan 1.3. Γίνεται επιστροφή σε HEVC/H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1950"/>
+        <location filename="../streaming/session.cpp" line="1984"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>Ο κεντρικός υπολογιστής σας και ο υπολογιστής-πελάτης δεν υποστηρίζουν τους ίδιους κωδικοποιητές βίντεο. Αυτό μπορεί να προκαλέσει κακή απόδοση ροής.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1953"/>
+        <location filename="../streaming/session.cpp" line="1987"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>Η κάρτα γραφικών του υπολογιστή πελάτη σας δεν υποστηρίζει την αποκωδικοποίηση H.264. Αυτό μπορεί να προκαλέσει κακή απόδοση ροής.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1983"/>
+        <location filename="../streaming/session.cpp" line="2017"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>Η κάρτα γραφικών αυτού του υπολογιστή δεν υποστηρίζει αποκωδικοποίηση PyroWave Main10 για ροή HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2001"/>
-        <location filename="../streaming/session.cpp" line="2019"/>
+        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2053"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>Χρήση αποκωδικοποίησης λογισμικού λόγω της επιλογής σας να επιβάλλετε HDR χωρίς υποστήριξη GPU. Αυτό μπορεί να προκαλέσει κακή απόδοση ροής.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2013"/>
+        <location filename="../streaming/session.cpp" line="2047"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>Η κάρτα γραφικών αυτού του υπολογιστή δεν υποστηρίζει την αποκωδικοποίηση HEVC Main10 για ροή HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2069"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>Ο κεντρικός υπολογιστής σας δεν υποστηρίζει ροή YUV 4:4:4.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2043"/>
+        <location filename="../streaming/session.cpp" line="2077"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>Ο κεντρικός υπολογιστής σας δεν υποστηρίζει ροή YUV 4:4:4 για τον επιλεγμένο κωδικοποιητή βίντεο.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2058"/>
+        <location filename="../streaming/session.cpp" line="2092"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>Χρήση αποκωδικοποίησης λογισμικού λόγω της επιλογής σας να επιβάλλετε YUV 4:4:4 χωρίς υποστήριξη GPU. Αυτό μπορεί να προκαλέσει κακή απόδοση ροής.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2064"/>
+        <location filename="../streaming/session.cpp" line="2098"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>Η κάρτα γραφικών αυτού του υπολογιστή δεν υποστηρίζει αποκωδικοποίηση YUV 4:4:4 για τον επιλεγμένο κωδικοποιητή βίντεο.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2073"/>
+        <location filename="../streaming/session.cpp" line="2107"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>Για ροή 4K απαιτείται GeForce Experience 3.0 ή νεότερη έκδοση.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2090"/>
+        <location filename="../streaming/session.cpp" line="2124"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>Η επιλεγμένη ρύθμιση ήχου surround δεν υποστηρίζεται από την τρέχουσα συσκευή ήχου.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2096"/>
+        <location filename="../streaming/session.cpp" line="2130"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>Απέτυχε το άνοιγμα συσκευής ήχου. Ο ήχος δεν θα είναι διαθέσιμος κατά τη διάρκεια αυτής της συνεδρίας.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2105"/>
+        <location filename="../streaming/session.cpp" line="2139"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>Μια συσκευή HID δεν αποκρίνεται (%1). Η είσοδος gamepad και η διέλευση του Steam Controller είναι απενεργοποιημένες για αυτή τη συνεδρία. Αποσυνδέστε και επανασυνδέστε τη συσκευή και ξεκινήστε ξανά τη ροή.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2109"/>
+        <location filename="../streaming/session.cpp" line="2143"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>Ένα συνδεδεμένο gamepad δεν έχει χαρτογράφηση και δεν μπορεί να χρησιμοποιηθεί. Επισκεφτείτε τη βοήθεια του Moonlight για να το επιλύσετε.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2127"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>Η κάρτα γραφικών του κεντρικού υπολογιστή σας δεν υποστηρίζει αναλύσεις βίντεο ροής πάνω από 4K.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2145"/>
+        <location filename="../streaming/session.cpp" line="2179"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>Η επιλογή σας για επιβολή αποκωδικοποίησης υλικού δεν μπορεί να ικανοποιηθεί λόγω έλλειψης υποστήριξης αποκωδικοποίησης υλικού στη κάρτα γραφικών αυτού του υπολογιστή.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2148"/>
+        <location filename="../streaming/session.cpp" line="2182"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>Η επιλογή κωδικοποιητή και η αναγκαστική αποκωδικοποίηση υλικού δεν είναι συμβατές. Η κάρτα γραφικών αυτού του υπολογιστή δεν υποστηρίζει την αποκωδικοποίηση του κωδικοποιητή που έχετε επιλέξει.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2985"/>
+        <location filename="../streaming/session.cpp" line="3013"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>Το XR runtime %1 μετά την έναρξη της συνεδρίας VR, οπότε η ροή τερματίστηκε.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>exited</source>
         <translation>τερματίστηκε</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>stopped responding or was lost</source>
         <translation>σταμάτησε να αποκρίνεται ή χάθηκε</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3141"/>
+        <location filename="../streaming/session.cpp" line="3169"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>Δεν ήταν δυνατή η έναρξη του VR σε αυτό το headset (%1). Βεβαιωθείτε ότι εκτελείται το SteamVR και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3150"/>
+        <location filename="../streaming/session.cpp" line="3178"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>Το VR runtime του headset δεν αποκρίθηκε εγκαίρως. Βεβαιωθείτε ότι εκτελείται το SteamVR και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3347"/>
+        <location filename="../streaming/session.cpp" line="3393"/>
         <source>Failed to launch via relay proxy</source>
         <translation>Αποτυχία εκκίνησης μέσω του διακομιστή μεσολάβησης του αναμεταδότη</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3421"/>
+        <location filename="../streaming/session.cpp" line="3469"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>Το %1 δεν ξεκίνησε συνεδρία VR. Βεβαιωθείτε ότι το PCVR είναι ενεργοποιημένο στον κεντρικό υπολογιστή και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3430"/>
-        <location filename="../streaming/session.cpp" line="3437"/>
+        <location filename="../streaming/session.cpp" line="3478"/>
+        <location filename="../streaming/session.cpp" line="3485"/>
         <source>Connection to host failed</source>
         <translation>Η σύνδεση με τον κεντρικό υπολογιστή απέτυχε</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4725"/>
+        <location filename="../streaming/session.cpp" line="4794"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>Αδυναμία αρχικοποίησης του αποκωδικοποιητή βίντεο. Ελέγξτε τις ρυθμίσεις ροής και δοκιμάστε ξανά.</translation>
     </message>
@@ -2345,67 +2345,77 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>UpdateDialog</name>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="60"/>
+        <location filename="../gui/UpdateDialog.qml" line="68"/>
         <source>Download and install VipleStream %1?</source>
         <translation>Λήψη και εγκατάσταση του VipleStream %1;</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="63"/>
+        <location filename="../gui/UpdateDialog.qml" line="71"/>
         <source>Working…</source>
         <translation>Σε εξέλιξη…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="66"/>
+        <location filename="../gui/UpdateDialog.qml" line="74"/>
         <source>VipleStream %1 is available.</source>
         <translation>Το VipleStream %1 είναι διαθέσιμο.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="68"/>
+        <location filename="../gui/UpdateDialog.qml" line="76"/>
         <source>Update failed</source>
         <translation>Η ενημέρωση απέτυχε</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="77"/>
+        <location filename="../gui/UpdateDialog.qml" line="88"/>
+        <source>Loading release notes…</source>
+        <translation>Φόρτωση σημειώσεων έκδοσης…</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="89"/>
+        <source>Couldn&apos;t load the release notes.</source>
+        <translation>Δεν ήταν δυνατή η φόρτωση των σημειώσεων έκδοσης.</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="118"/>
         <source>VipleStream will close and relaunch automatically after the update is applied. On Windows you may be prompted by UAC if installed to Program Files.</source>
         <translation>Το VipleStream θα κλείσει και θα επανεκκινηθεί αυτόματα μετά την εφαρμογή της ενημέρωσης. Στα Windows ενδέχεται να εμφανιστεί προτροπή UAC αν είναι εγκατεστημένο στο Program Files.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="113"/>
+        <location filename="../gui/UpdateDialog.qml" line="154"/>
         <source>%1 / %2 MB</source>
         <translation>%1 / %2 MB</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="115"/>
+        <location filename="../gui/UpdateDialog.qml" line="156"/>
         <source>Connecting…</source>
         <translation>Σύνδεση…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="137"/>
+        <location filename="../gui/UpdateDialog.qml" line="178"/>
         <source>Click &apos;Open release page&apos; to download manually.</source>
         <translation>Κάντε κλικ στο «Άνοιγμα σελίδας έκδοσης» για χειροκίνητη λήψη.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="155"/>
+        <location filename="../gui/UpdateDialog.qml" line="198"/>
         <source>Yes</source>
         <translation>Ναι</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="168"/>
+        <location filename="../gui/UpdateDialog.qml" line="213"/>
         <source>No</source>
         <translation>Όχι</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="180"/>
+        <location filename="../gui/UpdateDialog.qml" line="225"/>
         <source>Cancel</source>
         <translation>Άκυρο</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="191"/>
+        <location filename="../gui/UpdateDialog.qml" line="238"/>
         <source>Open release page</source>
         <translation>Άνοιγμα σελίδας έκδοσης</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="204"/>
+        <location filename="../gui/UpdateDialog.qml" line="253"/>
         <source>Close</source>
         <translation>Κλείσιμο</translation>
     </message>
@@ -2413,129 +2423,129 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="64"/>
+        <location filename="../backend/updater.cpp" line="66"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>Αυτό το αντίγραφο του VipleStream είναι εγκατεστημένο ως Flatpak. Κατεβάστε το νέο .flatpak από τη σελίδα έκδοσης και εγκαταστήστε το με &quot;flatpak install --bundle &lt;file&gt;&quot;. Αν το εγκαταστήσατε από αποθετήριο Flatpak, εκτελέστε &quot;flatpak update&quot;.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="70"/>
+        <location filename="../backend/updater.cpp" line="72"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>Το VipleStream δεν εκτελείται από AppImage, επομένως δεν μπορεί να αντικαταστήσει τον εαυτό του. Κατεβάστε τη νέα έκδοση από τη σελίδα έκδοσης.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="73"/>
+        <location filename="../backend/updater.cpp" line="75"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>Η αυτόματη εγκατάσταση δεν είναι ακόμα διαθέσιμη για Linux arm64. Κατεβάστε τη νέα έκδοση από τη σελίδα έκδοσης.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="77"/>
+        <location filename="../backend/updater.cpp" line="79"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>Η αυτόματη εγκατάσταση δεν είναι διαθέσιμη σε αυτήν την πλατφόρμα (%1). Κατεβάστε τη νέα έκδοση από τη σελίδα έκδοσης.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="142"/>
+        <location filename="../backend/updater.cpp" line="144"/>
         <source>Querying release assets…</source>
         <translation>Αναζήτηση αρχείων έκδοσης…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="210"/>
-        <location filename="../backend/updater.cpp" line="343"/>
+        <location filename="../backend/updater.cpp" line="269"/>
+        <location filename="../backend/updater.cpp" line="402"/>
         <source>Update cancelled.</source>
         <translation>Η ενημέρωση ακυρώθηκε.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="214"/>
+        <location filename="../backend/updater.cpp" line="273"/>
         <source>Failed to query release info: %1</source>
         <translation>Αποτυχία ανάκτησης πληροφοριών έκδοσης: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="222"/>
+        <location filename="../backend/updater.cpp" line="281"/>
         <source>Release JSON malformed: %1</source>
         <translation>Μη έγκυρο JSON έκδοσης: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="247"/>
+        <location filename="../backend/updater.cpp" line="306"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>Οι πληροφορίες έκδοσης από το GitHub δεν έχουν ετικέτα.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="250"/>
+        <location filename="../backend/updater.cpp" line="309"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>Η ετικέτα της τελευταίας έκδοσης &quot;%1&quot; δεν είναι αριθμός έκδοσης.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="255"/>
+        <location filename="../backend/updater.cpp" line="314"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>Οι πληροφορίες έκδοσης του GitHub δεν έχουν ενημερωθεί ακόμα: αναφέρουν ακόμα %1, που δεν είναι νεότερη από αυτήν την έκδοση (%2). Δοκιμάστε ξανά σε λίγα λεπτά.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="260"/>
+        <location filename="../backend/updater.cpp" line="319"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>Η έκδοση %1 δεν έχει ακόμα συνημμένα αρχεία. Δοκιμάστε ξανά σε λίγα λεπτά.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="267"/>
+        <location filename="../backend/updater.cpp" line="326"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>Η έκδοση %1 δεν έχει πακέτο εγκατάστασης για αυτήν την πλατφόρμα (%2).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="276"/>
+        <location filename="../backend/updater.cpp" line="335"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>Το VipleStream %1 είναι διαθέσιμο ως %2, αλλά πρέπει να εγκατασταθεί χειροκίνητα. %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="291"/>
+        <location filename="../backend/updater.cpp" line="350"/>
         <source>Cannot open download file: %1</source>
         <translation>Δεν είναι δυνατό το άνοιγμα του αρχείου λήψης: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="295"/>
+        <location filename="../backend/updater.cpp" line="354"/>
         <source>Downloading %1…</source>
         <translation>Λήψη %1…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="354"/>
+        <location filename="../backend/updater.cpp" line="413"/>
         <source>Download failed: %1</source>
         <translation>Η λήψη απέτυχε: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="364"/>
+        <location filename="../backend/updater.cpp" line="423"/>
         <source>Preparing installer…</source>
         <translation>Προετοιμασία προγράμματος εγκατάστασης…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="370"/>
+        <location filename="../backend/updater.cpp" line="429"/>
         <source>Restarting to apply update…</source>
         <translation>Επανεκκίνηση για εφαρμογή της ενημέρωσης…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="452"/>
-        <location filename="../backend/updater.cpp" line="520"/>
+        <location filename="../backend/updater.cpp" line="511"/>
+        <location filename="../backend/updater.cpp" line="579"/>
         <source>Cannot write helper script: %1</source>
         <translation>Δεν είναι δυνατή η εγγραφή του βοηθητικού script: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="474"/>
+        <location filename="../backend/updater.cpp" line="533"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>Αποτυχία εκκίνησης του προγράμματος ενημέρωσης (το UAC απορρίφθηκε ή λείπει το PowerShell).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="484"/>
+        <location filename="../backend/updater.cpp" line="543"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>Δεν εκτελείται από AppImage — η μεταβλητή APPIMAGE δεν έχει οριστεί. Εγκαταστήστε ξανά χειροκίνητα.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="494"/>
+        <location filename="../backend/updater.cpp" line="553"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>Ο φάκελος του AppImage δεν είναι εγγράψιμος: %1. Μετακινήστε το VipleStream σε θέση εγγράψιμη από τον χρήστη (π.χ. ~/Applications/) και δοκιμάστε ξανά.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="533"/>
+        <location filename="../backend/updater.cpp" line="592"/>
         <source>Failed to launch updater helper script.</source>
         <translation>Αποτυχία εκκίνησης του βοηθητικού script ενημέρωσης.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="539"/>
+        <location filename="../backend/updater.cpp" line="598"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>Η αυτόματη ενημέρωση δεν υποστηρίζεται σε αυτήν την πλατφόρμα.</translation>
     </message>

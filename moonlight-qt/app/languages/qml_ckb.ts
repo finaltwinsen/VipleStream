@@ -931,27 +931,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1438"/>
+        <location filename="../main.cpp" line="1450"/>
         <source>&amp;Yes</source>
         <translation>&amp;بەڵێ</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1439"/>
+        <location filename="../main.cpp" line="1451"/>
         <source>&amp;No</source>
         <translation>&amp;نەخێر</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1440"/>
+        <location filename="../main.cpp" line="1452"/>
         <source>OK</source>
         <translation>باشە</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1441"/>
+        <location filename="../main.cpp" line="1453"/>
         <source>Help</source>
         <translation>یارمەتی</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1442"/>
+        <location filename="../main.cpp" line="1454"/>
         <source>Cancel</source>
         <translation>هەڵوەشاندنەوە</translation>
     </message>
@@ -967,339 +967,339 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="361"/>
+        <location filename="../streaming/session.cpp" line="367"/>
         <source>No video received from host.</source>
         <translation>هیچ ڤیدیۆیەک لە هۆستەوە وەرنەگیرا.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="362"/>
+        <location filename="../streaming/session.cpp" line="368"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>فایەروۆڵ و یاساکانی ئاڕاستەکردنی دەروازەکەت بپشکنە بۆ دەروازە(کان)ی: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="367"/>
+        <location filename="../streaming/session.cpp" line="373"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>پەیوەندیی تۆڕەکەت باش کار ناکات. ڕێکخستنی بیت‌ڕەیتی ڤیدیۆ کەم بکەرەوە یان پەیوەندییەکی خێراتر تاقی بکەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="373"/>
+        <location filename="../streaming/session.cpp" line="379"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>لە کاتی دەستپێکردنی پەخشدا شتێک لەسەر کۆمپیوتەری هۆستەکەت هەڵە بوو.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="374"/>
+        <location filename="../streaming/session.cpp" line="380"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>دڵنیابە کە هیچ ناوەڕۆکێکی پارێزراو بە DRM لەسەر کۆمپیوتەری هۆستەکەت کراوە نییە. هەروەها دەتوانیت کۆمپیوتەری هۆستەکەت دووبارە دەستپێبکەیتەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="379"/>
+        <location filename="../streaming/session.cpp" line="385"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>کۆمپیوتەری هۆست هەڵەیەکی کوشندەی ئینکۆدکردنی ڤیدیۆی ڕاگەیاند.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="380"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>هەوڵبدە دۆخی HDR ناچالاک بکەیت، ڕەزۆلوشنی پەخش بگۆڕیت، یان ڕەزۆلوشنی شاشەی کۆمپیوتەری هۆستەکەت بگۆڕیت.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="387"/>
+        <location filename="../streaming/session.cpp" line="393"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>پەیوەندیی کۆنترۆڵ لەگەڵ سێرڤەر پچڕا — لەوانەیە بەهۆی پچڕانێکی کورتی تۆڕ بێت یان سێرڤەر ئۆفلاین بێت. دەتوانیت دواتر هەوڵی درێژەدانی پەخش (resume) بدەیت.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="395"/>
+        <location filename="../streaming/session.cpp" line="401"/>
         <source>Connection terminated</source>
         <translation>پەیوەندی کۆتایی پێهات</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="396"/>
+        <location filename="../streaming/session.cpp" line="402"/>
         <source>Error code: %1</source>
         <translation>کۆدی هەڵە: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1834"/>
+        <location filename="../streaming/session.cpp" line="1868"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>وەشانی GeForce Experience لەسەر %1 لەلایەن ئەم وەشانەی Moonlight پشتگیری ناکرێت. بۆ پەخشکردن لە %1 دەبێت Moonlight نوێ بکەیتەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1840"/>
+        <location filename="../streaming/session.cpp" line="1874"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>هەڵبژاردنت بۆ چالاککردنی دۆخی ماوسی دێسکتۆپی دوور لەوانەیە لە یارییەکاندا کێشە دروست بکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1844"/>
+        <location filename="../streaming/session.cpp" line="1878"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>هەڵبژاردنت بۆ ناچارکردنی دیکۆدکردنی نەرمەکاڵا لەوانەیە ببێتە هۆی کارایی خراپی پەخشکردن.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1903"/>
+        <location filename="../streaming/session.cpp" line="1937"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>کۆمپیوتەری هۆستەکەت پشتگیری ئینکۆدکردنی HEVC ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1921"/>
+        <location filename="../streaming/session.cpp" line="1955"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>بەهۆی هەڵبژاردنت بۆ ناچارکردنی HEVC بێ پشتگیریی GPU، دیکۆدکردنی نەرمەکاڵا بەکاردێت. ئەمە لەوانەیە ببێتە هۆی کارایی خراپی پەخشکردن.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1873"/>
+        <location filename="../streaming/session.cpp" line="1907"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>نەرمەکاڵا یان GPU ی هۆستەکەت پشتگیری ئینکۆدکردنی AV1 ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1891"/>
+        <location filename="../streaming/session.cpp" line="1925"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>بەهۆی هەڵبژاردنت بۆ ناچارکردنی AV1 بێ پشتگیریی GPU، دیکۆدکردنی نەرمەکاڵا بەکاردێت. ئەمە لەوانەیە ببێتە هۆی کارایی خراپی پەخشکردن.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1968"/>
+        <location filename="../streaming/session.cpp" line="2002"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>کۆمپیوتەری هۆستەکەت پشتگیری پەخشی HDR ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1960"/>
+        <location filename="../streaming/session.cpp" line="1994"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>HDR لەگەڵ کۆدێکی H.264 پشتگیری ناکرێت.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1995"/>
+        <location filename="../streaming/session.cpp" line="2029"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>GPU ی ئەم کۆمپیوتەرە پشتگیری دیکۆدکردنی AV1 Main10 بۆ پەخشی HDR ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1964"/>
+        <location filename="../streaming/session.cpp" line="1998"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>GPU ی ئەم کۆمپیوتەرە پشتگیری دیکۆدکردنی HEVC یان AV1 ی 10-بیت بۆ پەخشی HDR ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2028"/>
+        <location filename="../streaming/session.cpp" line="2062"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>کۆمپیوتەری هۆست و کۆمپیوتەری کڕیار پشتگیری هەمان کۆدێکەکانی ڤیدیۆی HDR ناکەن.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2131"/>
+        <location filename="../streaming/session.cpp" line="2165"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>ڕەزۆلوشنی ڤیدیۆی سەرووی 4K لەلایەن کۆدێکی H.264 پشتگیری ناکرێت.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3441"/>
+        <location filename="../streaming/session.cpp" line="3497"/>
         <source>Host returned error: %1</source>
         <translation>هۆست ئەم هەڵەیەی گەڕاندەوە: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1940"/>
+        <location filename="../streaming/session.cpp" line="1974"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>بەهۆی هەڵبژاردنت بۆ ناچارکردنی H.264 بێ پشتگیریی GPU، دیکۆدکردنی نەرمەکاڵا بەکاردێت. ئەمە لەوانەیە ببێتە هۆی کارایی خراپی پەخشکردن.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="697"/>
+        <location filename="../streaming/session.cpp" line="733"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>هێدسێتێکی تر SteamVR لەسەر %1 بەکاردەهێنێت (بۆ نموونە Steam Link). پەیوەندییەکەی بپچڕێنە، پاشان دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="699"/>
+        <location filename="../streaming/session.cpp" line="735"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>یارییەکی VR پێشتر لەسەر %1 بەبێ VipleStream کاردەکات. دایبخە، پاشان دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="701"/>
+        <location filename="../streaming/session.cpp" line="737"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>SteamVR لەسەر %1 دەبێت دووبارە دەستپێبکاتەوە، بەڵام یارییەکی VR هێشتا لەوێ کاردەکات. سەرەتا یارییەکە دابخە (داخستنی یاری لە لیستی ئەپەکاندا)، پاشان دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="704"/>
+        <location filename="../streaming/session.cpp" line="740"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>SteamVR لەسەر %1 لە دۆخی سەلامەتدا دەستیپێکرد و درایڤەری VipleStream ی بلۆک کرد. SteamVR لەسەر هۆست دووبارە دەستپێبکەرەوە، پاشان دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="706"/>
+        <location filename="../streaming/session.cpp" line="742"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>SteamVR لەسەر %1 دانەمەزراوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="708"/>
+        <location filename="../streaming/session.cpp" line="744"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>Steam لەسەر %1 نەچووەتە ژوورەوە. لەسەر هۆست بچۆ ژوورەوەی Steam (بۆ نموونە لە دۆخی دێسکتۆپدا)، پاشان دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="710"/>
+        <location filename="../streaming/session.cpp" line="746"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>کەس لەسەر %1 نەچووەتە ژوورەوەی Windows.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="712"/>
+        <location filename="../streaming/session.cpp" line="748"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 لەسەر شاشەی چوونەژوورەوە یان قوفڵی Windows ە. لەسەر هۆست بچۆ ژوورەوە، پاشان دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="715"/>
+        <location filename="../streaming/session.cpp" line="751"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>SteamVR لەسەر %1 لە کاتی خۆیدا دەستی پێنەکرد. دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="717"/>
+        <location filename="../streaming/session.cpp" line="753"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1 نەیتوانی VR دەستپێبکات (هەڵەی %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="742"/>
+        <location filename="../streaming/session.cpp" line="778"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 پەخشی VR پێشکەش ناکات. پێویستی بە VipleStream Server 2.0 یان نوێتر هەیە لەگەڵ چالاککردنی PCVR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="752"/>
+        <location filename="../streaming/session.cpp" line="788"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1 تەنها لە ڕێی ڕیلییەوە دەگاتێ. پەخشی VR پێویستی بە پەیوەندیی ڕاستەوخۆ هەیە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="760"/>
+        <location filename="../streaming/session.cpp" line="796"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>ڕێکخستنی کۆدێکی ڤیدیۆ AV1 ناچار دەکات، بەڵام پەخشی VR پێویستی بە HEVC یان H.264 هەیە. کۆدێکی ڤیدیۆ لە ڕێکخستنەکاندا بگۆڕە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1781"/>
+        <location filename="../streaming/session.cpp" line="1817"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>ئەم ئامێرە هیچ دیکۆدەرێکی ڤیدیۆی HEVC یان H.264 ی 8-بیتی نییە بۆ پەخشی VR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1850"/>
+        <location filename="../streaming/session.cpp" line="1884"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>نەرمەکاڵا یان GPU ی هۆستەکەت پشتگیری ئینکۆدکردنی PyroWave ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1861"/>
+        <location filename="../streaming/session.cpp" line="1895"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>GPU ی کڕیارەکەت پشتگیری لە کۆدکردنەوەی PyroWave بە Vulkan 1.3 ناکات. دەگەڕێتەوە بۆ HEVC/H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1950"/>
+        <location filename="../streaming/session.cpp" line="1984"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>کۆمپیوتەری هۆست و کۆمپیوتەری کڕیار پشتگیری هەمان کۆدێکەکانی ڤیدیۆ ناکەن. ئەمە لەوانەیە ببێتە هۆی کارایی خراپی پەخشکردن.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1953"/>
+        <location filename="../streaming/session.cpp" line="1987"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>GPU ی کڕیارەکەت پشتگیری دیکۆدکردنی H.264 ناکات. ئەمە لەوانەیە ببێتە هۆی کارایی خراپی پەخشکردن.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1983"/>
+        <location filename="../streaming/session.cpp" line="2017"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>GPU ی ئەم کۆمپیوتەرە پشتگیری دیکۆدکردنی PyroWave Main10 بۆ پەخشی HDR ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2001"/>
-        <location filename="../streaming/session.cpp" line="2019"/>
+        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2053"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>بەهۆی هەڵبژاردنت بۆ ناچارکردنی HDR بێ پشتگیریی GPU، دیکۆدکردنی نەرمەکاڵا بەکاردێت. ئەمە لەوانەیە ببێتە هۆی کارایی خراپی پەخشکردن.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2013"/>
+        <location filename="../streaming/session.cpp" line="2047"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>GPU ی ئەم کۆمپیوتەرە پشتگیری دیکۆدکردنی HEVC Main10 بۆ پەخشی HDR ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2069"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>کۆمپیوتەری هۆستەکەت پشتگیری پەخشی YUV 4:4:4 ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2043"/>
+        <location filename="../streaming/session.cpp" line="2077"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>کۆمپیوتەری هۆستەکەت پشتگیری پەخشی YUV 4:4:4 بۆ کۆدێکی ڤیدیۆی هەڵبژێردراو ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2058"/>
+        <location filename="../streaming/session.cpp" line="2092"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>بەهۆی هەڵبژاردنت بۆ ناچارکردنی YUV 4:4:4 بێ پشتگیریی GPU، دیکۆدکردنی نەرمەکاڵا بەکاردێت. ئەمە لەوانەیە ببێتە هۆی کارایی خراپی پەخشکردن.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2064"/>
+        <location filename="../streaming/session.cpp" line="2098"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>GPU ی ئەم کۆمپیوتەرە پشتگیری دیکۆدکردنی YUV 4:4:4 بۆ کۆدێکی ڤیدیۆی هەڵبژێردراو ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2073"/>
+        <location filename="../streaming/session.cpp" line="2107"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>بۆ پەخشی 4K پێویستت بە GeForce Experience 3.0 یان بەرزتر هەیە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2090"/>
+        <location filename="../streaming/session.cpp" line="2124"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>ڕێکخستنی دەنگی دەوروبەری هەڵبژێردراوت لەلایەن ئامێری دەنگی ئێستاوە پشتگیری ناکرێت.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2096"/>
+        <location filename="../streaming/session.cpp" line="2130"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>کردنەوەی ئامێری دەنگ سەرکەوتوو نەبوو. لەم دانیشتنەدا دەنگ بەردەست نابێت.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2105"/>
+        <location filename="../streaming/session.cpp" line="2139"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>ئامێرێکی HID وەڵام ناداتەوە (%1). تێخستنی دەستەی یاری و گواستنەوەی Steam Controller بۆ ئەم دانیشتنە ناچالاکن. ئامێرەکە دەربهێنە و دووبارە بیبەستەوە، پاشان پەخشەکە دووبارە دەستپێبکەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2109"/>
+        <location filename="../streaming/session.cpp" line="2143"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>دەستەیەکی یاریی بەستراو هیچ نەخشەیەکی دوگمەی نییە و بەکارنایەت. بۆ چارەسەرکردنی ئەمە سەردانی یارمەتیی Moonlight بکە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2127"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>GPU ی کۆمپیوتەری هۆستەکەت پشتگیری پەخشی ڕەزۆلوشنی ڤیدیۆی سەرووی 4K ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2145"/>
+        <location filename="../streaming/session.cpp" line="2179"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>هەڵبژاردنت بۆ ناچارکردنی دیکۆدکردنی ڕەقەکاڵا جێبەجێ ناکرێت چونکە GPU ی ئەم کۆمپیوتەرە پشتگیری دیکۆدکردنی ڕەقەکاڵای نییە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2148"/>
+        <location filename="../streaming/session.cpp" line="2182"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>کۆدێکی هەڵبژێردراوت و ڕێکخستنی ناچارکردنی دیکۆدکردنی ڕەقەکاڵا لەگەڵ یەک ناگونجێن. GPU ی ئەم کۆمپیوتەرە پشتگیری دیکۆدکردنی کۆدێکی هەڵبژێردراوت ناکات.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2985"/>
+        <location filename="../streaming/session.cpp" line="3013"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>ڕەنتایمی XR %1 دوای دەستپێکردنی دانیشتنی VR، بۆیە پەخشەکە کۆتایی پێهێنرا.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>exited</source>
         <translation>داخرا</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>stopped responding or was lost</source>
         <translation>وەڵامی نەدایەوە یان ون بوو</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3141"/>
+        <location filename="../streaming/session.cpp" line="3169"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>نەتوانرا VR لەسەر ئەم هێدسێتە دەستپێبکرێت (%1). دڵنیابە کە SteamVR کاردەکات، پاشان دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3150"/>
+        <location filename="../streaming/session.cpp" line="3178"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>ڕەنتایمی VR ی هێدسێتەکە لە کاتی خۆیدا وەڵامی نەدایەوە. دڵنیابە کە SteamVR کاردەکات، پاشان دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3347"/>
+        <location filename="../streaming/session.cpp" line="3393"/>
         <source>Failed to launch via relay proxy</source>
         <translation>دەستپێکردن لە ڕێی پرۆکسیی ڕیلییەوە سەرکەوتوو نەبوو</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3421"/>
+        <location filename="../streaming/session.cpp" line="3469"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 هیچ دانیشتنێکی VR ی دەستپێنەکرد. دڵنیابە کە PCVR لەسەر هۆست چالاکە، پاشان دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3430"/>
-        <location filename="../streaming/session.cpp" line="3437"/>
+        <location filename="../streaming/session.cpp" line="3478"/>
+        <location filename="../streaming/session.cpp" line="3485"/>
         <source>Connection to host failed</source>
         <translation>پەیوەندیکردن بە هۆستەوە سەرکەوتوو نەبوو</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4725"/>
+        <location filename="../streaming/session.cpp" line="4794"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>دەستپێکردنی دیکۆدەری ڤیدیۆ سەرکەوتوو نەبوو. تکایە ڕێکخستنەکانی پەخش بپشکنە و دووبارە هەوڵبدەرەوە.</translation>
     </message>
@@ -2345,67 +2345,77 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>UpdateDialog</name>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="60"/>
+        <location filename="../gui/UpdateDialog.qml" line="68"/>
         <source>Download and install VipleStream %1?</source>
         <translation>VipleStream %1 دابگیرێت و دابمەزرێت؟</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="63"/>
+        <location filename="../gui/UpdateDialog.qml" line="71"/>
         <source>Working…</source>
         <translation>کاردەکات…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="66"/>
+        <location filename="../gui/UpdateDialog.qml" line="74"/>
         <source>VipleStream %1 is available.</source>
         <translation>VipleStream %1 بەردەستە.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="68"/>
+        <location filename="../gui/UpdateDialog.qml" line="76"/>
         <source>Update failed</source>
         <translation>نوێکردنەوە سەرکەوتوو نەبوو</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="77"/>
+        <location filename="../gui/UpdateDialog.qml" line="88"/>
+        <source>Loading release notes…</source>
+        <translation>بارکردنی تێبینییەکانی وەشان…</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="89"/>
+        <source>Couldn&apos;t load the release notes.</source>
+        <translation>نەتوانرا تێبینییەکانی وەشان بار بکرێن.</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="118"/>
         <source>VipleStream will close and relaunch automatically after the update is applied. On Windows you may be prompted by UAC if installed to Program Files.</source>
         <translation>VipleStream دادەخرێت و دوای جێبەجێکردنی نوێکردنەوەکە خۆکارانە دەکرێتەوە. لە Windows ئەگەر لە Program Files دامەزرابێت لەوانەیە UAC داوای ڕەزامەندی بکات.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="113"/>
+        <location filename="../gui/UpdateDialog.qml" line="154"/>
         <source>%1 / %2 MB</source>
         <translation>%1 / %2 MB</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="115"/>
+        <location filename="../gui/UpdateDialog.qml" line="156"/>
         <source>Connecting…</source>
         <translation>پەیوەندیکردن…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="137"/>
+        <location filename="../gui/UpdateDialog.qml" line="178"/>
         <source>Click &apos;Open release page&apos; to download manually.</source>
         <translation>بۆ داگرتنی دەستی کرتە لە &apos;کردنەوەی پەڕەی بڵاوکردنەوە&apos; بکە.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="155"/>
+        <location filename="../gui/UpdateDialog.qml" line="198"/>
         <source>Yes</source>
         <translation>بەڵێ</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="168"/>
+        <location filename="../gui/UpdateDialog.qml" line="213"/>
         <source>No</source>
         <translation>نەخێر</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="180"/>
+        <location filename="../gui/UpdateDialog.qml" line="225"/>
         <source>Cancel</source>
         <translation>هەڵوەشاندنەوە</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="191"/>
+        <location filename="../gui/UpdateDialog.qml" line="238"/>
         <source>Open release page</source>
         <translation>کردنەوەی پەڕەی بڵاوکردنەوە</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="204"/>
+        <location filename="../gui/UpdateDialog.qml" line="253"/>
         <source>Close</source>
         <translation>داخستن</translation>
     </message>
@@ -2413,129 +2423,129 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="64"/>
+        <location filename="../backend/updater.cpp" line="66"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>ئەم کۆپییەی VipleStream وەک Flatpak دامەزراوە. پەڕگەی .flatpak ی نوێ لە پەڕەی بڵاوکردنەوە دابگرە و بە &quot;flatpak install --bundle &lt;file&gt;&quot; دایبمەزرێنە. ئەگەر لە کۆگایەکی Flatpak ەوە دامەزراندووە، لە جیاتی ئەوە &quot;flatpak update&quot; بەڕێوەببە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="70"/>
+        <location filename="../backend/updater.cpp" line="72"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>VipleStream لە AppImage ەوە کارناکات، بۆیە ناتوانێت خۆی بگۆڕێت. وەشانی نوێ لە پەڕەی بڵاوکردنەوە دابگرە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="73"/>
+        <location filename="../backend/updater.cpp" line="75"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>دامەزراندنی خۆکار هێشتا بۆ Linux arm64 بەردەست نییە. وەشانی نوێ لە پەڕەی بڵاوکردنەوە دابگرە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="77"/>
+        <location filename="../backend/updater.cpp" line="79"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>دامەزراندنی خۆکار لەسەر ئەم پلاتفۆرمە (%1) بەردەست نییە. وەشانی نوێ لە پەڕەی بڵاوکردنەوە دابگرە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="142"/>
+        <location filename="../backend/updater.cpp" line="144"/>
         <source>Querying release assets…</source>
         <translation>پرسینی پەڕگەکانی بڵاوکردنەوە…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="210"/>
-        <location filename="../backend/updater.cpp" line="343"/>
+        <location filename="../backend/updater.cpp" line="269"/>
+        <location filename="../backend/updater.cpp" line="402"/>
         <source>Update cancelled.</source>
         <translation>نوێکردنەوە هەڵوەشێنرایەوە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="214"/>
+        <location filename="../backend/updater.cpp" line="273"/>
         <source>Failed to query release info: %1</source>
         <translation>وەرگرتنی زانیاریی بڵاوکردنەوە سەرکەوتوو نەبوو: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="222"/>
+        <location filename="../backend/updater.cpp" line="281"/>
         <source>Release JSON malformed: %1</source>
         <translation>JSON ی بڵاوکردنەوە نادروستە: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="247"/>
+        <location filename="../backend/updater.cpp" line="306"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>زانیاریی بڵاوکردنەوە لە GitHub ەوە هیچ tag ێکی نییە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="250"/>
+        <location filename="../backend/updater.cpp" line="309"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>نوێترین tag ی بڵاوکردنەوە &quot;%1&quot; ژمارەی وەشان نییە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="255"/>
+        <location filename="../backend/updater.cpp" line="314"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>زانیاریی بڵاوکردنەوەی GitHub هێشتا نوێ نەکراوەتەوە: هێشتا %1 نیشان دەدات، کە لەم وەشانە (%2) نوێتر نییە. تکایە دوای چەند خولەکێک دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="260"/>
+        <location filename="../backend/updater.cpp" line="319"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>بڵاوکردنەوەی %1 هێشتا هیچ پەڕگەیەکی پێوە نییە. تکایە دوای چەند خولەکێک دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="267"/>
+        <location filename="../backend/updater.cpp" line="326"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>بڵاوکردنەوەی %1 هیچ پاکێجێکی دامەزراندنی بۆ ئەم پلاتفۆرمە (%2) نییە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="276"/>
+        <location filename="../backend/updater.cpp" line="335"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>VipleStream %1 وەک %2 بەردەستە، بەڵام دەبێت بە دەستی دابمەزرێت. %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="291"/>
+        <location filename="../backend/updater.cpp" line="350"/>
         <source>Cannot open download file: %1</source>
         <translation>ناتوانرێت پەڕگەی داگرتن بکرێتەوە: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="295"/>
+        <location filename="../backend/updater.cpp" line="354"/>
         <source>Downloading %1…</source>
         <translation>داگرتنی %1…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="354"/>
+        <location filename="../backend/updater.cpp" line="413"/>
         <source>Download failed: %1</source>
         <translation>داگرتن سەرکەوتوو نەبوو: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="364"/>
+        <location filename="../backend/updater.cpp" line="423"/>
         <source>Preparing installer…</source>
         <translation>ئامادەکردنی دامەزرێنەر…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="370"/>
+        <location filename="../backend/updater.cpp" line="429"/>
         <source>Restarting to apply update…</source>
         <translation>دووبارە دەستپێکردنەوە بۆ جێبەجێکردنی نوێکردنەوە…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="452"/>
-        <location filename="../backend/updater.cpp" line="520"/>
+        <location filename="../backend/updater.cpp" line="511"/>
+        <location filename="../backend/updater.cpp" line="579"/>
         <source>Cannot write helper script: %1</source>
         <translation>ناتوانرێت سکریپتی یاریدەدەر بنووسرێت: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="474"/>
+        <location filename="../backend/updater.cpp" line="533"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>دەستپێکردنی نوێکەرەوە سەرکەوتوو نەبوو (UAC ڕەتکرایەوە یان PowerShell نییە).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="484"/>
+        <location filename="../backend/updater.cpp" line="543"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>لە AppImage ەوە کارناکات — گۆڕاوی ژینگەی APPIMAGE دانەنراوە. تکایە بە دەستی دووبارە دایبمەزرێنەوە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="494"/>
+        <location filename="../backend/updater.cpp" line="553"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>فۆڵدەری AppImage ناتوانرێت تێیدا بنووسرێت: %1. VipleStream بگوازەرەوە بۆ شوێنێک کە بەکارهێنەر بتوانێت تێیدا بنووسێت (بۆ نموونە ~/Applications/) و دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="533"/>
+        <location filename="../backend/updater.cpp" line="592"/>
         <source>Failed to launch updater helper script.</source>
         <translation>دەستپێکردنی سکریپتی یاریدەدەری نوێکردنەوە سەرکەوتوو نەبوو.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="539"/>
+        <location filename="../backend/updater.cpp" line="598"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>نوێکردنەوەی خۆکار لەسەر ئەم پلاتفۆرمە پشتگیری ناکرێت.</translation>
     </message>

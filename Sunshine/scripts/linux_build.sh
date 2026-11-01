@@ -295,6 +295,13 @@ function add_ubuntu_deps() {
   dependencies+=(
     "libappindicator3-dev"
   )
+  # VipleStream §PKG-SYSTEMD: Ubuntu 24.04 起 systemd.pc／udev.pc 移到 systemd-dev；少了它 FindSystemd／FindUdev
+  # 找不到，.deb 會默默漏掉 systemd 使用者單元、udev 規則與 modules-load 設定。
+  if [[ "$version" != "22.04" ]]; then
+    dependencies+=(
+      "systemd-dev"
+    )
+  fi
   return 0
 }
 
@@ -665,6 +672,16 @@ function run_step_package() {
   if [[ "$skip_package" == 0 ]]; then
     if [[ "$distro" == "debian" ]] || [[ "$distro" == "ubuntu" ]]; then
       cpack -G DEB --config ./build/CPackConfig.cmake
+      # VipleStream §PKG-SYSTEMD：單元檔名要是 app-<FQDN>.service，portal 才認得出程式（權限對話框才有名稱）
+      local deb="./build/cpack_artifacts/VipleStream-Server.deb"
+      local f listing
+      listing=$(dpkg-deb -c "$deb")  # 先存起來：直接接 grep -q 會讓 dpkg-deb 吃到 SIGPIPE、印一堆錯誤
+      for f in "/systemd/user/app-app.viplestream.server.service" "/rules.d/60-sunshine.rules" "/modules-load.d/60-sunshine.conf"; do
+        if ! grep -q -- "$f\$" <<< "$listing"; then
+          echo "error: $deb is missing *$f (systemd-dev / pkg-config systemd udev not found?)"
+          return 1
+        fi
+      done
     elif [[ "$distro" == "fedora" ]]; then
       cpack -G RPM --config ./build/CPackConfig.cmake
     fi

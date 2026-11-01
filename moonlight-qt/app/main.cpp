@@ -1378,6 +1378,8 @@ int main(int argc, char *argv[])
         // 2. System fontconfig path (.deb / native build) — Ubuntu / Debian
         candidatePaths << QStringLiteral("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
         candidatePaths << QStringLiteral("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc");
+        // Arch／CachyOS（noto-fonts-cjk）
+        candidatePaths << QStringLiteral("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc");
 
         bool loaded = false;
         for (const QString& p : candidatePaths) {

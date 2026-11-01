@@ -1,6 +1,7 @@
 #include "overlaymanager.h"
 #include "path.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -331,14 +332,22 @@ static bool tryMapCJKFont(MappedFile& out)
                << "/System/Library/Fonts/STHeiti Light.ttc"
                << "/Library/Fonts/Songti.ttc";
 #else
+    // §FONT-ARCH：AppImage 自己帶了一份 Noto Sans CJK（build-appimage-native.sh 放在 usr/share/fonts/），
+    // 先用它，系統有沒有裝、裝在哪都不影響；main.cpp 給 QML 用的是同一份。
+    candidates << QCoreApplication::applicationDirPath() + "/../share/fonts/opentype/NotoSansCJK-Regular.ttc"
+               << QCoreApplication::applicationDirPath() + "/../share/fonts/truetype/NotoSansCJK-Regular.ttc";
     // Linux: Noto CJK 在 Ubuntu / Debian / Fedora 都是 default; WQY 是 fallback
     // 給沒裝 Noto 的舊發行版.  Ubuntu deb path 通常是 opentype/noto/, fedora
     // 也是 opentype/, 個別發行版可能落在 truetype/ — 兩個都試.
+    // Arch／CachyOS（noto-fonts-cjk、wqy-zenhei 套件）的路徑不一樣，另外列。
     candidates << "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
                << "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+               << "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"
                << "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc"
                << "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
                << "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+               << "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc"
+               << "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc"
                << "/usr/share/fonts/truetype/arphic/uming.ttc";
 #endif
     for (const QString& path : candidates) {

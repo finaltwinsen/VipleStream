@@ -32,7 +32,15 @@ NavigableDialog {
         dialog.releasePageUrl = pageUrl
         dialog.mode           = Updater.autoInstallSupported ? "confirm" : "notify"
         dialog.errorMessage   = ""
+        Updater.fetchReleaseNotes(version)   // §UPDATE-NOTES：更新摘要
         dialog.open()
+    }
+
+    // 手把／鍵盤：焦點在按鈕上時，上下鍵捲動更新摘要
+    function scrollNotes(step) {
+        if (!notesView.visible) return
+        var bar = notesView.ScrollBar.vertical
+        bar.position = Math.max(0, Math.min(1 - bar.size, bar.position + step))
     }
 
     Connections {
@@ -66,6 +74,39 @@ NavigableDialog {
                     return qsTr("VipleStream %1 is available.").arg(dialog.newVersion)
                 }
                 return qsTr("Update failed")
+            }
+        }
+
+        // §UPDATE-NOTES：更新摘要（release notes 的開頭說明＋What's new）
+        Label {
+            Layout.fillWidth: true
+            Layout.maximumWidth: 560
+            visible: (dialog.mode === "confirm" || dialog.mode === "notify") &&
+                     (Updater.releaseNotesState === "loading" || Updater.releaseNotesState === "failed")
+            font.pixelSize: 12
+            opacity: 0.7
+            text: Updater.releaseNotesState === "loading" ? qsTr("Loading release notes…")
+                                                          : qsTr("Couldn't load the release notes.")
+        }
+
+        ScrollView {
+            id: notesView
+            Layout.fillWidth: true
+            Layout.preferredWidth: 560
+            Layout.maximumWidth: 560
+            Layout.preferredHeight: Math.min(notesLabel.implicitHeight, 320)
+            visible: (dialog.mode === "confirm" || dialog.mode === "notify") &&
+                     Updater.releaseNotesState === "ready"
+            clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+            Label {
+                id: notesLabel
+                width: notesView.availableWidth
+                wrapMode: Text.Wrap
+                textFormat: Text.MarkdownText
+                text: Updater.releaseNotes
+                onLinkActivated: function(link) { Qt.openUrlExternally(link) }
             }
         }
 
@@ -150,6 +191,8 @@ NavigableDialog {
             // confirm mode: Yes / No
             Button {
                 id: btnYes
+                Keys.onUpPressed:   dialog.scrollNotes(-0.15)
+                Keys.onDownPressed: dialog.scrollNotes(0.15)
                 visible: dialog.mode === "confirm"
                 flat: true
                 text: qsTr("Yes")
@@ -163,6 +206,8 @@ NavigableDialog {
             }
             Button {
                 id: btnNo
+                Keys.onUpPressed:   dialog.scrollNotes(-0.15)
+                Keys.onDownPressed: dialog.scrollNotes(0.15)
                 visible: dialog.mode === "confirm"
                 flat: true
                 text: qsTr("No")
@@ -186,6 +231,8 @@ NavigableDialog {
             // failed / notify mode: Open release page / Close
             Button {
                 id: btnOpen
+                Keys.onUpPressed:   dialog.scrollNotes(-0.15)
+                Keys.onDownPressed: dialog.scrollNotes(0.15)
                 visible: dialog.mode === "failed" || dialog.mode === "notify"
                 flat: true
                 text: qsTr("Open release page")
@@ -199,6 +246,8 @@ NavigableDialog {
             }
             Button {
                 id: btnClose
+                Keys.onUpPressed:   dialog.scrollNotes(-0.15)
+                Keys.onDownPressed: dialog.scrollNotes(0.15)
                 visible: dialog.mode === "failed" || dialog.mode === "notify"
                 flat: true
                 text: qsTr("Close")

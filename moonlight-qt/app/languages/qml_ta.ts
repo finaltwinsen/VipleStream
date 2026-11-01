@@ -931,27 +931,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1438"/>
+        <location filename="../main.cpp" line="1450"/>
         <source>&amp;Yes</source>
         <translation>&amp;ஆம்</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1439"/>
+        <location filename="../main.cpp" line="1451"/>
         <source>&amp;No</source>
         <translation>&amp;இல்லை</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1440"/>
+        <location filename="../main.cpp" line="1452"/>
         <source>OK</source>
         <translation>சரி</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1441"/>
+        <location filename="../main.cpp" line="1453"/>
         <source>Help</source>
         <translation>உதவி</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1442"/>
+        <location filename="../main.cpp" line="1454"/>
         <source>Cancel</source>
         <translation>ரத்துசெய்</translation>
     </message>
@@ -967,339 +967,339 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="361"/>
+        <location filename="../streaming/session.cpp" line="367"/>
         <source>No video received from host.</source>
         <translation>ஓச்டிலிருந்து எந்த வீடியோவும் பெறப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="362"/>
+        <location filename="../streaming/session.cpp" line="368"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>துறைமுகம் (கள்) க்கான உங்கள் ஃபயர்வால் மற்றும் துறைமுகம் பகிர்தல் விதிகளை சரிபார்க்கவும்: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="367"/>
+        <location filename="../streaming/session.cpp" line="373"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>உங்கள் பிணைய இணைப்பு சிறப்பாக செயல்படவில்லை. உங்கள் வீடியோ பிட்ரேட் அமைப்பைக் குறைக்கவும் அல்லது வேகமான இணைப்பை முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="373"/>
+        <location filename="../streaming/session.cpp" line="379"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>ச்ட்ரீமைத் தொடங்கும்போது உங்கள் புரவலன் கணினியில் ஏதோ தவறு ஏற்பட்டது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="374"/>
+        <location filename="../streaming/session.cpp" line="380"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>உங்கள் புரவலன் கணினியில் டி.ஆர்.எம்-பாதுகாக்கப்பட்ட உள்ளடக்கம் திறக்கப்படவில்லை என்பதை உறுதிப்படுத்திக் கொள்ளுங்கள். உங்கள் புரவலன் கணினியை மறுதொடக்கம் செய்ய முயற்சி செய்யலாம்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="379"/>
+        <location filename="../streaming/session.cpp" line="385"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>புரவலன் பிசி ஒரு அபாயகரமான வீடியோ குறியீட்டு பிழையை அறிவித்தது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="380"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>எச்டிஆர் பயன்முறையை முடக்க முயற்சிக்கவும், ச்ட்ரீமிங் தீர்மானத்தை மாற்றவும் அல்லது உங்கள் புரவலன் கணினியின் காட்சி தெளிவுத்திறனை மாற்றவும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="387"/>
+        <location filename="../streaming/session.cpp" line="393"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>சேவையகத்துடனான கட்டுப்பாட்டு இணைப்பு துண்டிக்கப்பட்டது — நெட்வொர்க்கில் தற்காலிகத் தடங்கல் அல்லது சேவையகம் இணையத்தில் இல்லாமல் இருக்கலாம். சிறிது நேரம் கழித்து ஸ்ட்ரீமைத் தொடர (resume) முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="395"/>
+        <location filename="../streaming/session.cpp" line="401"/>
         <source>Connection terminated</source>
         <translation>இணைப்பு நிறுத்தப்பட்டது</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="396"/>
+        <location filename="../streaming/session.cpp" line="402"/>
         <source>Error code: %1</source>
         <translation>பிழை குறியீடு: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1834"/>
+        <location filename="../streaming/session.cpp" line="1868"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>%1 இல் உள்ள சியிபோர்ச் அனுபவத்தின் பதிப்பு இந்த நிலவொளியால் ஆதரிக்கப்படவில்லை. %1 இலிருந்து ச்ட்ரீம் செய்ய நீங்கள் நிலவொளியைப் புதுப்பிக்க வேண்டும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1840"/>
+        <location filename="../streaming/session.cpp" line="1874"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>தொலைநிலை டெச்க்டாப் மவுச் பயன்முறையை இயக்குவதற்கான உங்கள் தேர்வு விளையாட்டுகளில் சிக்கல்களை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1844"/>
+        <location filename="../streaming/session.cpp" line="1878"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>மென்பொருள் டிகோடிங்கை கட்டாயப்படுத்த உங்கள் அமைப்புகள் தேர்வு மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1903"/>
+        <location filename="../streaming/session.cpp" line="1937"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>உங்கள் புரவலன் பிசி குறியீட்டு HEVC ஐ ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1921"/>
+        <location filename="../streaming/session.cpp" line="1955"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் HEVC ஐ கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1873"/>
+        <location filename="../streaming/session.cpp" line="1907"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>உங்கள் புரவலன் மென்பொருள் அல்லது சி.பீ.யூ குறியீட்டு ஏ.வி 1 ஐ ஆதரிக்காது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1891"/>
+        <location filename="../streaming/session.cpp" line="1925"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் ஏ.வி 1 ஐ கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1968"/>
+        <location filename="../streaming/session.cpp" line="2002"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>உங்கள் புரவலன் பிசி எச்டிஆர் ச்ட்ரீமிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1960"/>
+        <location filename="../streaming/session.cpp" line="1994"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>H.264 கோடெக்கைப் பயன்படுத்தி HDR ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1995"/>
+        <location filename="../streaming/session.cpp" line="2029"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>இந்த கணினியின் சி.பீ.யூ எச்டிஆர் ச்ட்ரீமிங்கிற்கான ஏ.வி 1 மெயின் 10 டிகோடிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1964"/>
+        <location filename="../streaming/session.cpp" line="1998"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>இந்த கணினியின் சி.பீ.யூ எச்டிஆர் ச்ட்ரீமிங்கிற்கான 10-பிட் எவிசி அல்லது ஏ.வி 1 டிகோடிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2028"/>
+        <location filename="../streaming/session.cpp" line="2062"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>உங்கள் புரவலன் பிசி மற்றும் வாங்கி பிசி அதே எச்டிஆர் வீடியோ கோடெக்குகளை ஆதரிக்காது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2131"/>
+        <location filename="../streaming/session.cpp" line="2165"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>4K க்கு மேல் வீடியோ தீர்மானங்கள் H.264 கோடெக்கால் ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3441"/>
+        <location filename="../streaming/session.cpp" line="3497"/>
         <source>Host returned error: %1</source>
         <translation>புரவலன் திரும்பிய பிழை: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1940"/>
+        <location filename="../streaming/session.cpp" line="1974"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் H.264 ஐ கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="697"/>
+        <location filename="../streaming/session.cpp" line="733"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>%1-இல் வேறொரு ஹெட்செட் SteamVR-ஐப் பயன்படுத்துகிறது (எடுத்துக்காட்டாக Steam Link). அதைத் துண்டித்துவிட்டு மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="699"/>
+        <location filename="../streaming/session.cpp" line="735"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>%1-இல் VipleStream இல்லாமல் ஒரு VR விளையாட்டு ஏற்கனவே இயங்குகிறது. அதை மூடிவிட்டு மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="701"/>
+        <location filename="../streaming/session.cpp" line="737"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>%1-இல் SteamVR மறுதொடக்கம் செய்யப்பட வேண்டும், ஆனால் அங்கே ஒரு VR விளையாட்டு இன்னும் இயங்குகிறது. முதலில் விளையாட்டை மூடவும் (பயன்பாட்டுப் பட்டியலில் &quot;விளையாட்டை விட்டு&quot;), பிறகு மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="704"/>
+        <location filename="../streaming/session.cpp" line="740"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>%1-இல் SteamVR பாதுகாப்புப் பயன்முறையில் தொடங்கி VipleStream இயக்கியைத் தடுத்தது. புரவலனில் SteamVR-ஐ மறுதொடக்கம் செய்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="706"/>
+        <location filename="../streaming/session.cpp" line="742"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>%1-இல் SteamVR நிறுவப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="708"/>
+        <location filename="../streaming/session.cpp" line="744"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>%1-இல் Steam-இல் உள்நுழையவில்லை. புரவலனில் Steam-இல் உள்நுழைந்து (எடுத்துக்காட்டாக டெஸ்க்டாப் பயன்முறையில்) மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="710"/>
+        <location filename="../streaming/session.cpp" line="746"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>%1-இல் யாரும் Windows-இல் உள்நுழையவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="712"/>
+        <location filename="../streaming/session.cpp" line="748"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 Windows உள்நுழைவு அல்லது பூட்டுத் திரையில் உள்ளது. புரவலனில் உள்நுழைந்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="715"/>
+        <location filename="../streaming/session.cpp" line="751"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>%1-இல் SteamVR உரிய நேரத்தில் தொடங்கவில்லை. மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="717"/>
+        <location filename="../streaming/session.cpp" line="753"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1-ஆல் VR-ஐத் தொடங்க முடியவில்லை (பிழை %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="742"/>
+        <location filename="../streaming/session.cpp" line="778"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 VR ஸ்ட்ரீமிங்கை வழங்கவில்லை. PCVR இயக்கப்பட்ட VipleStream Server 2.0 அல்லது அதற்குப் பிந்தைய பதிப்பு தேவை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="752"/>
+        <location filename="../streaming/session.cpp" line="788"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1-ஐ ரிலே வழியாக மட்டுமே அணுக முடியும். VR ஸ்ட்ரீமிங்கிற்கு நேரடி இணைப்பு தேவை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="760"/>
+        <location filename="../streaming/session.cpp" line="796"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>வீடியோ கோடெக் அமைப்பு AV1-ஐக் கட்டாயப்படுத்துகிறது, ஆனால் VR ஸ்ட்ரீமிங்கிற்கு HEVC அல்லது H.264 தேவை. அமைப்புகளில் வீடியோ கோடெக்கை மாற்றவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1781"/>
+        <location filename="../streaming/session.cpp" line="1817"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>VR ஸ்ட்ரீமிங்கிற்கான 8-பிட் HEVC அல்லது H.264 வீடியோ டிகோடர் இந்தச் சாதனத்தில் இல்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1850"/>
+        <location filename="../streaming/session.cpp" line="1884"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>உங்கள் ஹோஸ்ட் மென்பொருள் அல்லது GPU, PyroWave குறியாக்கத்தை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1861"/>
+        <location filename="../streaming/session.cpp" line="1895"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>உங்கள் கிளையண்ட் GPU, Vulkan 1.3 மூலம் PyroWave குறிவிலக்கத்தை ஆதரிக்கவில்லை. HEVC/H.264-க்கு மாறுகிறது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1950"/>
+        <location filename="../streaming/session.cpp" line="1984"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>உங்கள் புரவலன் பிசி மற்றும் வாங்கி பிசி அதே வீடியோ கோடெக்குகளை ஆதரிக்காது. இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1953"/>
+        <location filename="../streaming/session.cpp" line="1987"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>உங்கள் கிளையன்ட் சி.பீ.யூ எச் .264 டிகோடிங்கை ஆதரிக்கவில்லை. இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1983"/>
+        <location filename="../streaming/session.cpp" line="2017"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>இந்த PC-யின் GPU, HDR ஸ்ட்ரீமிங்கிற்கான PyroWave Main10 குறிவிலக்கத்தை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2001"/>
-        <location filename="../streaming/session.cpp" line="2019"/>
+        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2053"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் எச்.டி.ஆரை கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2013"/>
+        <location filename="../streaming/session.cpp" line="2047"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>இந்த கணினியின் சி.பீ.யூ எச்.டி.ஆர் ச்ட்ரீமிங்கிற்கான HEVC மெயின் 10 டிகோடிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2035"/>
+        <location filename="../streaming/session.cpp" line="2069"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>உங்கள் புரவலன் பிசி YUV 4:4:4 ச்ட்ரீமிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2043"/>
+        <location filename="../streaming/session.cpp" line="2077"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>தேர்ந்தெடுக்கப்பட்ட வீடியோ கோடெக்கிற்கான உங்கள் புரவலன் பிசி YUV 4:4:4 ச்ட்ரீமிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2058"/>
+        <location filename="../streaming/session.cpp" line="2092"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் YUV 4:4:4 ஐ கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2064"/>
+        <location filename="../streaming/session.cpp" line="2098"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>இந்தக் கணினியின் சி.பீ.யூ YUV 4:4:4 தேர்ந்தெடுக்கப்பட்ட வீடியோ கோடெக்கிற்கான டிகோடிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2073"/>
+        <location filename="../streaming/session.cpp" line="2107"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>4K ச்ட்ரீமிங்கிற்கு சியிபோர்ச் பட்டறிவு 3.0 அல்லது அதற்கு மேற்பட்டது தேவை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2090"/>
+        <location filename="../streaming/session.cpp" line="2124"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>நீங்கள் தேர்ந்தெடுக்கப்பட்ட சரவுண்ட் ஒலி அமைப்பை தற்போதைய ஆடியோ சாதனத்தால் ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2096"/>
+        <location filename="../streaming/session.cpp" line="2130"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>ஆடியோ சாதனத்தைத் திறக்கத் தவறிவிட்டது. இந்த அமர்வின் போது ஆடியோ கிடைக்காது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2105"/>
+        <location filename="../streaming/session.cpp" line="2139"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>ஒரு HID சாதனம் பதிலளிக்கவில்லை (%1). இந்த அமர்வில் கேம்பேட் உள்ளீடும் Steam Controller பாஸ்த்ரூவும் முடக்கப்பட்டுள்ளன. சாதனத்தைத் துண்டித்து மீண்டும் இணைத்து, ஸ்ட்ரீமை மீண்டும் தொடங்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2109"/>
+        <location filename="../streaming/session.cpp" line="2143"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>இணைக்கப்பட்ட கேம்பேடிற்கு மேப்பிங் இல்லை, பயன்படுத்தக்கூடியதாக இருக்காது. இதைத் தீர்க்க மூன்லைட் உதவியைப் பார்வையிடவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2127"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>உங்கள் புரவலன் கணினியின் சி.பீ.யூ 4K க்கு மேல் ச்ட்ரீமிங் வீடியோ தீர்மானங்களை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2145"/>
+        <location filename="../streaming/session.cpp" line="2179"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>இந்த கணினியின் சி.பீ.யுவில் வன்பொருள் டிகோடிங் ஆதரவைக் காணவில்லை என்பதால் வன்பொருள் டிகோடிங்கை கட்டாயப்படுத்துவதற்கான உங்கள் தேர்வை திருப்திப்படுத்த முடியாது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2148"/>
+        <location filename="../streaming/session.cpp" line="2182"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>உங்கள் கோடெக் தேர்வு மற்றும் படை வன்பொருள் டிகோடிங் அமைப்பு பொருந்தாது. இந்த கணினியின் சி.பீ.யுவின் நீங்கள் தேர்ந்தெடுத்த கோடெக்கை டிகோடிங் செய்வதற்கான உதவி இல்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2985"/>
+        <location filename="../streaming/session.cpp" line="3013"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>VR அமர்வு தொடங்கிய பிறகு XR ரன்டைம் %1, எனவே ஸ்ட்ரீம் முடிக்கப்பட்டது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>exited</source>
         <translation>வெளியேறியது</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2986"/>
+        <location filename="../streaming/session.cpp" line="3014"/>
         <source>stopped responding or was lost</source>
         <translation>பதிலளிப்பதை நிறுத்தியது அல்லது தொலைந்தது</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3141"/>
+        <location filename="../streaming/session.cpp" line="3169"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>இந்த ஹெட்செட்டில் VR-ஐத் தொடங்க முடியவில்லை (%1). SteamVR இயங்குகிறதா என்பதை உறுதிசெய்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3150"/>
+        <location filename="../streaming/session.cpp" line="3178"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>ஹெட்செட்டின் VR ரன்டைம் உரிய நேரத்தில் பதிலளிக்கவில்லை. SteamVR இயங்குகிறதா என்பதை உறுதிசெய்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3347"/>
+        <location filename="../streaming/session.cpp" line="3393"/>
         <source>Failed to launch via relay proxy</source>
         <translation>ரிலே ப்ராக்ஸி வழியாகத் தொடங்க முடியவில்லை</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3421"/>
+        <location filename="../streaming/session.cpp" line="3469"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 VR அமர்வைத் தொடங்கவில்லை. புரவலனில் PCVR இயக்கப்பட்டுள்ளதா என்பதை உறுதிசெய்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3430"/>
-        <location filename="../streaming/session.cpp" line="3437"/>
+        <location filename="../streaming/session.cpp" line="3478"/>
+        <location filename="../streaming/session.cpp" line="3485"/>
         <source>Connection to host failed</source>
         <translation>புரவலனுடன் இணைப்பு தோல்வியடைந்தது</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4725"/>
+        <location filename="../streaming/session.cpp" line="4794"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>வீடியோ டிகோடரை துவக்க முடியவில்லை. உங்கள் ச்ட்ரீமிங் அமைப்புகளை சரிபார்த்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
@@ -2345,67 +2345,77 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>UpdateDialog</name>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="60"/>
+        <location filename="../gui/UpdateDialog.qml" line="68"/>
         <source>Download and install VipleStream %1?</source>
         <translation>VipleStream %1-ஐப் பதிவிறக்கி நிறுவவா?</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="63"/>
+        <location filename="../gui/UpdateDialog.qml" line="71"/>
         <source>Working…</source>
         <translation>செயலாக்கப்படுகிறது…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="66"/>
+        <location filename="../gui/UpdateDialog.qml" line="74"/>
         <source>VipleStream %1 is available.</source>
         <translation>VipleStream %1 கிடைக்கிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="68"/>
+        <location filename="../gui/UpdateDialog.qml" line="76"/>
         <source>Update failed</source>
         <translation>புதுப்பிப்பு தோல்வியடைந்தது</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="77"/>
+        <location filename="../gui/UpdateDialog.qml" line="88"/>
+        <source>Loading release notes…</source>
+        <translation>வெளியீட்டுக் குறிப்புகள் ஏற்றப்படுகின்றன…</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="89"/>
+        <source>Couldn&apos;t load the release notes.</source>
+        <translation>வெளியீட்டுக் குறிப்புகளை ஏற்ற முடியவில்லை.</translation>
+    </message>
+    <message>
+        <location filename="../gui/UpdateDialog.qml" line="118"/>
         <source>VipleStream will close and relaunch automatically after the update is applied. On Windows you may be prompted by UAC if installed to Program Files.</source>
         <translation>புதுப்பிப்பு பயன்படுத்தப்பட்ட பிறகு VipleStream மூடப்பட்டுத் தானாக மீண்டும் தொடங்கும். Program Files-இல் நிறுவப்பட்டிருந்தால், Windows-இல் UAC அனுமதி கேட்கலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="113"/>
+        <location filename="../gui/UpdateDialog.qml" line="154"/>
         <source>%1 / %2 MB</source>
         <translation>%1 / %2 MB</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="115"/>
+        <location filename="../gui/UpdateDialog.qml" line="156"/>
         <source>Connecting…</source>
         <translation>இணைக்கிறது…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="137"/>
+        <location filename="../gui/UpdateDialog.qml" line="178"/>
         <source>Click &apos;Open release page&apos; to download manually.</source>
         <translation>கைமுறையாகப் பதிவிறக்க &apos;வெளியீட்டுப் பக்கத்தைத் திற&apos; என்பதைக் கிளிக் செய்யவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="155"/>
+        <location filename="../gui/UpdateDialog.qml" line="198"/>
         <source>Yes</source>
         <translation>ஆம்</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="168"/>
+        <location filename="../gui/UpdateDialog.qml" line="213"/>
         <source>No</source>
         <translation>இல்லை</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="180"/>
+        <location filename="../gui/UpdateDialog.qml" line="225"/>
         <source>Cancel</source>
         <translation>ரத்துசெய்</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="191"/>
+        <location filename="../gui/UpdateDialog.qml" line="238"/>
         <source>Open release page</source>
         <translation>வெளியீட்டுப் பக்கத்தைத் திற</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="204"/>
+        <location filename="../gui/UpdateDialog.qml" line="253"/>
         <source>Close</source>
         <translation>மூடு</translation>
     </message>
@@ -2413,129 +2423,129 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="64"/>
+        <location filename="../backend/updater.cpp" line="66"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>இந்த VipleStream நகல் Flatpak ஆக நிறுவப்பட்டுள்ளது. வெளியீட்டுப் பக்கத்திலிருந்து புதிய .flatpak கோப்பைப் பதிவிறக்கி &quot;flatpak install --bundle &lt;file&gt;&quot; மூலம் நிறுவவும். Flatpak களஞ்சியத்திலிருந்து நிறுவியிருந்தால், அதற்குப் பதிலாக &quot;flatpak update&quot; இயக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="70"/>
+        <location filename="../backend/updater.cpp" line="72"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>VipleStream ஒரு AppImage-இலிருந்து இயங்காததால் தன்னைத்தானே மாற்ற முடியாது. வெளியீட்டுப் பக்கத்திலிருந்து புதிய பதிப்பைப் பதிவிறக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="73"/>
+        <location filename="../backend/updater.cpp" line="75"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>Linux arm64-க்கு தானியங்கி நிறுவல் இன்னும் கிடைக்கவில்லை. வெளியீட்டுப் பக்கத்திலிருந்து புதிய பதிப்பைப் பதிவிறக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="77"/>
+        <location filename="../backend/updater.cpp" line="79"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>இந்தத் தளத்தில் (%1) தானியங்கி நிறுவல் கிடைக்கவில்லை. வெளியீட்டுப் பக்கத்திலிருந்து புதிய பதிப்பைப் பதிவிறக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="142"/>
+        <location filename="../backend/updater.cpp" line="144"/>
         <source>Querying release assets…</source>
         <translation>வெளியீட்டுக் கோப்புகள் வினவப்படுகின்றன…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="210"/>
-        <location filename="../backend/updater.cpp" line="343"/>
+        <location filename="../backend/updater.cpp" line="269"/>
+        <location filename="../backend/updater.cpp" line="402"/>
         <source>Update cancelled.</source>
         <translation>புதுப்பிப்பு ரத்துசெய்யப்பட்டது.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="214"/>
+        <location filename="../backend/updater.cpp" line="273"/>
         <source>Failed to query release info: %1</source>
         <translation>வெளியீட்டுத் தகவலை வினவ முடியவில்லை: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="222"/>
+        <location filename="../backend/updater.cpp" line="281"/>
         <source>Release JSON malformed: %1</source>
         <translation>வெளியீட்டு JSON தவறான வடிவில் உள்ளது: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="247"/>
+        <location filename="../backend/updater.cpp" line="306"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>GitHub-இலிருந்து வந்த வெளியீட்டுத் தகவலில் குறிச்சொல் இல்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="250"/>
+        <location filename="../backend/updater.cpp" line="309"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>சமீபத்திய வெளியீட்டுக் குறிச்சொல் &quot;%1&quot; ஒரு பதிப்பு எண் அல்ல.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="255"/>
+        <location filename="../backend/updater.cpp" line="314"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>GitHub-இன் வெளியீட்டுத் தகவல் இன்னும் புதுப்பிக்கப்படவில்லை: அது இன்னும் %1 எனக் காட்டுகிறது, இது இந்தப் பதிப்பை (%2) விடப் புதியது அல்ல. சில நிமிடங்களில் மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="260"/>
+        <location filename="../backend/updater.cpp" line="319"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>வெளியீடு %1-இல் இன்னும் கோப்புகள் இணைக்கப்படவில்லை. சில நிமிடங்களில் மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="267"/>
+        <location filename="../backend/updater.cpp" line="326"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>வெளியீடு %1-இல் இந்தத் தளத்திற்கு (%2) நிறுவக்கூடிய தொகுப்பு இல்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="276"/>
+        <location filename="../backend/updater.cpp" line="335"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>VipleStream %1, %2 ஆகக் கிடைக்கிறது, ஆனால் அதைக் கைமுறையாக நிறுவ வேண்டும். %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="291"/>
+        <location filename="../backend/updater.cpp" line="350"/>
         <source>Cannot open download file: %1</source>
         <translation>பதிவிறக்கக் கோப்பைத் திறக்க முடியவில்லை: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="295"/>
+        <location filename="../backend/updater.cpp" line="354"/>
         <source>Downloading %1…</source>
         <translation>%1 பதிவிறக்கப்படுகிறது…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="354"/>
+        <location filename="../backend/updater.cpp" line="413"/>
         <source>Download failed: %1</source>
         <translation>பதிவிறக்கம் தோல்வியடைந்தது: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="364"/>
+        <location filename="../backend/updater.cpp" line="423"/>
         <source>Preparing installer…</source>
         <translation>நிறுவி தயாராகிறது…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="370"/>
+        <location filename="../backend/updater.cpp" line="429"/>
         <source>Restarting to apply update…</source>
         <translation>புதுப்பிப்பைப் பயன்படுத்த மறுதொடக்கம் செய்யப்படுகிறது…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="452"/>
-        <location filename="../backend/updater.cpp" line="520"/>
+        <location filename="../backend/updater.cpp" line="511"/>
+        <location filename="../backend/updater.cpp" line="579"/>
         <source>Cannot write helper script: %1</source>
         <translation>உதவி ஸ்கிரிப்டை எழுத முடியவில்லை: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="474"/>
+        <location filename="../backend/updater.cpp" line="533"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>புதுப்பிப்பியைத் தொடங்க முடியவில்லை (UAC மறுக்கப்பட்டது அல்லது PowerShell இல்லை).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="484"/>
+        <location filename="../backend/updater.cpp" line="543"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>AppImage-இலிருந்து இயங்கவில்லை — APPIMAGE சூழல் மாறி அமைக்கப்படவில்லை. கைமுறையாக மீண்டும் நிறுவவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="494"/>
+        <location filename="../backend/updater.cpp" line="553"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>AppImage கோப்பகத்தில் எழுத முடியாது: %1. VipleStream-ஐப் பயனர் எழுதக்கூடிய இடத்திற்கு (எ.கா. ~/Applications/) நகர்த்தி மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="533"/>
+        <location filename="../backend/updater.cpp" line="592"/>
         <source>Failed to launch updater helper script.</source>
         <translation>புதுப்பிப்பி உதவி ஸ்கிரிப்டைத் தொடங்க முடியவில்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="539"/>
+        <location filename="../backend/updater.cpp" line="598"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>இந்தத் தளத்தில் தானியங்கி புதுப்பிப்பு ஆதரிக்கப்படவில்லை.</translation>
     </message>

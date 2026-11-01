@@ -3,7 +3,9 @@
  * @brief Definitions for XDG portal grab.
  */
 // standard includes
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <fcntl.h>
 #include <format>
 #include <fstream>
@@ -117,6 +119,52 @@ namespace portal {
     static std::string get_file_path() {
       return platf::appdata().string() + "/portal_token";
     }
+  };
+
+  /**
+   * @brief §PORTAL-DENY-BACKOFF: remember that the user cancelled the portal permission dialog.
+   *
+   * The capture re-init loop retries a failed display every ~200 ms, so without this a
+   * "Deny" brings the dialog straight back.  After a cancel (response code 1) we do not
+   * ask again for 30 s, doubling per consecutive cancel up to 10 min; a granted session resets it.
+   */
+  class user_cancel_t {
+  public:
+    static void note(std::string_view step) {
+      std::scoped_lock lock(mtx_);
+      const auto delay = std::min<std::chrono::seconds>(30s * (1 << std::min(count_, 5)), 10min);
+      ++count_;
+      until_ = std::chrono::steady_clock::now() + delay;
+      reported_ = false;
+      BOOST_LOG(warning) << "[VIPLE-PORTAL] permission dialog cancelled by the user ("sv << step
+                         << ") - not asking again for "sv << delay.count() << " s"sv;
+    }
+
+    static bool blocked() {
+      std::scoped_lock lock(mtx_);
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= until_) {
+        return false;
+      }
+      if (!reported_) {
+        reported_ = true;
+        BOOST_LOG(info) << "[VIPLE-PORTAL] skipping portal request, user cancelled "sv
+                        << std::chrono::duration_cast<std::chrono::seconds>(until_ - now).count() << " s before the retry window ends"sv;
+      }
+      return true;
+    }
+
+    static void clear() {
+      std::scoped_lock lock(mtx_);
+      count_ = 0;
+      until_ = {};
+    }
+
+  private:
+    static inline std::mutex mtx_;
+    static inline int count_ = 0;
+    static inline std::chrono::steady_clock::time_point until_ {};
+    static inline bool reported_ = false;
   };
 
   struct format_map_t {
@@ -386,6 +434,9 @@ namespace portal {
 
       if (response_code != 0) {
         BOOST_LOG(error) << session_type << " CreateSession failed with response code: "sv << response_code;
+        if (response_code == 1) {
+          user_cancel_t::note("CreateSession");
+        }
         return -1;
       }
 
@@ -452,6 +503,9 @@ namespace portal {
 
       if (response_code != 0) {
         BOOST_LOG(error) << "SelectDevices failed with response code: "sv << response_code;
+        if (response_code == 1) {
+          user_cancel_t::note("SelectDevices");
+        }
         return -1;
       }
 
@@ -504,6 +558,9 @@ namespace portal {
 
       if (response_code != 0) {
         BOOST_LOG(error) << "SelectSources failed with response code: "sv << response_code;
+        if (response_code == 1) {
+          user_cancel_t::note("SelectSources");
+        }
         return -1;
       }
 
@@ -555,6 +612,9 @@ namespace portal {
 
       if (response_code != 0) {
         BOOST_LOG(error) << session_type << " Start failed with response code: "sv << response_code;
+        if (response_code == 1) {
+          user_cancel_t::note("Start");
+        }
         return -1;
       }
 
@@ -563,6 +623,7 @@ namespace portal {
         BOOST_LOG(error) << session_type << " Start: no streams in response"sv;
         return -1;
       }
+      user_cancel_t::clear();
 
       if (const gchar *new_token = nullptr; g_variant_lookup(dict, "restore_token", "s", &new_token) && new_token && new_token[0] != '\0' && restore_token_t::get() != new_token) {
         restore_token_t::set(new_token);
@@ -687,6 +748,9 @@ namespace portal {
       }
 
       // Create new session
+      if (user_cancel_t::blocked()) {
+        return -1;
+      }
       dbus_ = std::make_unique<dbus_t>();
       if (dbus_->init() < 0) {
         return -1;

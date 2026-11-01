@@ -402,6 +402,7 @@ HEADERS += \
     backend/autoupdatechecker.h \
     backend/updater.h \
     backend/updateassetrules.h \
+    backend/updatenotes.h \
     path.h \
     settings/mappingmanager.h \
     gui/sdlgamepadkeynavigation.h \

@@ -29,6 +29,10 @@ class Updater : public QObject
     // false 時 UpdateDialog 只通知新版＋顯示 manualUpdateHint，不下載。
     Q_PROPERTY(bool autoInstallSupported READ autoInstallSupported CONSTANT)
     Q_PROPERTY(QString manualUpdateHint  READ manualUpdateHint     CONSTANT)
+    // §UPDATE-NOTES：更新對話框顯示的更新摘要（Markdown）。
+    // releaseNotesState："" 未查／"loading"／"ready"／"failed"
+    Q_PROPERTY(QString releaseNotes      READ releaseNotes      NOTIFY releaseNotesChanged)
+    Q_PROPERTY(QString releaseNotesState READ releaseNotesState NOTIFY releaseNotesChanged)
 
 public:
     explicit Updater(QObject *parent = nullptr);
@@ -42,9 +46,16 @@ public:
     // 任何時間呼叫都安全 — 進度未過 readyToRestart 之前都能取消。
     Q_INVOKABLE void cancel();
 
+    // §UPDATE-NOTES：抓 v<version> 的 release notes 並整理成摘要。只在使用者打開
+    // 更新對話框時呼叫（吃一次 GitHub API 配額）；同一版已抓到就不再打。
+    // 摘要規則在 updatenotes.h。
+    Q_INVOKABLE void fetchReleaseNotes(const QString& version);
+
     qint64 bytesReceived() const { return m_BytesReceived; }
     qint64 bytesTotal()    const { return m_BytesTotal; }
     QString status()       const { return m_Status; }
+    QString releaseNotes()      const { return m_NotesText; }
+    QString releaseNotesState() const { return m_NotesState; }
     bool autoInstallSupported() const;
     QString manualUpdateHint() const;
 
@@ -53,11 +64,13 @@ signals:
     void statusChanged();
     void updateFailed(QString errorMessage);
     void readyToRestart();
+    void releaseNotesChanged();
 
 private slots:
     void handleAssetListFinished();
     void handleDownloadProgress(qint64 bytesReceived, qint64 bytesTotal);
     void handleDownloadFinished();
+    void handleNotesFinished();
 
 private:
     void setStatus(const QString& s);
@@ -79,4 +92,8 @@ private:
     QString                m_Status;
     bool                   m_Cancelled;
     UpdateAssetRules::Platform m_Platform;  // §F9：建構時偵測一次
+    QNetworkReply*         m_NotesReply;     // §UPDATE-NOTES：跟下載流程分開
+    QString                m_NotesVersion;
+    QString                m_NotesText;
+    QString                m_NotesState;
 };

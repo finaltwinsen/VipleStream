@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
 <!--
     VipleStream primary app icon — variant "Stripe Cut" from the
     Claude-Design mock (temp/design_bundle/viplestream/project/
@@ -21,8 +22,10 @@
       - Android mipmap-*dpi/ic_launcher.png
       - Android mipmap-*dpi/ic_launcher_foreground.png
       - macOS .icns (via a separate tool, not wired yet)
+    §K.4-ICON-SNIFF：這段註解必須放在 <svg> 開頭「之後」——gdk-pixbuf 判斷檔案格式時只讀開頭一小段，
+    <svg 被長註解推出去就會「Couldn't recognize the image file format」，GTK／GNOME 與走 gdk-pixbuf 的
+    系統匣、選單圖示會變空白（client 的 moonlight.svg 同一個問題已修過）。
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <!-- Square ink ground -->
   <rect width="512" height="512" fill="#0D0F0B"/>
 
