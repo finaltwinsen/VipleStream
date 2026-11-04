@@ -139,6 +139,9 @@ public:
         return s_ActiveSession;
     }
 
+    // §FRUC-444-NOTICE：解碼器發現補幀因串流格式無法使用時呼叫（任意執行緒），主迴圈顯示一次提示
+    void notifyFrucUnavailable() { m_FrucUnavailablePending.store(true); }
+
     // §VR-SHELL：同一個程式只能有一個 XR session。頭盔 VR 介面（backend/xrshell.cpp）設這個鉤子：串流第一次要開
     // XrContext 之前呼叫 hook(true)（同步，介面先關掉自己的 session），整場串流結束後呼叫 hook(false)。任何執行緒呼叫
     static void setXrOwnerHook(std::function<void(bool sessionWantsXr)> hook);
@@ -404,6 +407,8 @@ private:
     Uint32 m_DropAudioEndTime;
 
     Overlay::OverlayManager m_OverlayManager;
+
+    std::atomic<bool> m_FrucUnavailablePending{false};  // §FRUC-444-NOTICE
 
     // VipleStream §N — in-stream 雙向檔案傳輸 client（OWNS：session 生命週期內活著）
     class FileTransferClient *m_FileTransferClient = nullptr;

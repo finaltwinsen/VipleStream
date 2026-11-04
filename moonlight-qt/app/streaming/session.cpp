@@ -4496,6 +4496,8 @@ void Session::exec()
     // 收掉前比對文字仍是自己寫的那份，避免誤關別人的通知）。
     static const char* k_AudioStalledOverlayMsg =
         "⚠ 主機正在播放聲音，但伺服器擷取不到（已自動重試）";
+    static const char* k_FrucUnavailableOverlayMsg =
+        "⚠ 補幀在 YUV 4:4:4 串流下無法使用（這次改由 Vulkan 解碼顯示）。要補幀請關閉 4:4:4";
     static const char* k_AudioInitFailedOverlayMsg =
         "⚠ 主機的音訊擷取無法啟動，這次串流沒有聲音";
     static const char* k_AudioRecoveredOverlayMsg =
@@ -4577,6 +4579,15 @@ void Session::exec()
                     audioOverlayHideTime = SDL_GetTicks() + showMs;
                 }
             }
+        }
+        // §FRUC-444-NOTICE：補幀因 4:4:4 無法使用時提示 10 秒。不受「連線警告」開關影響（這是回應使用者自己開的補幀，
+        // 不是連線狀態）；只避開 mouse emulation 的常駐提示
+        if (m_FrucUnavailablePending.exchange(false) && m_MouseEmulationRefCount == 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FRUC] showing 4:4:4 frame interpolation notice");
+            m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate, k_FrucUnavailableOverlayMsg);
+            m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+            audioOverlayMsg = k_FrucUnavailableOverlayMsg;  // 共用計時收掉的邏輯（比對文字才關）
+            audioOverlayHideTime = SDL_GetTicks() + 10000;
         }
         if (audioOverlayHideTime != 0 &&
             SDL_TICKS_PASSED(SDL_GetTicks(), audioOverlayHideTime)) {

@@ -292,8 +292,12 @@ function add_debian_deps() {
 function add_ubuntu_deps() {
   add_test_ppa
   add_debian_based_deps
+  # VipleStream §PKG-AYATANA（2026-11-04）：改用 ayatana。原本裝 libappindicator3-dev，CMake 找不到 ayatana 就連結舊的
+  # libappindicator3，dpkg-shlibdeps 於是在 Depends 硬加一條 libappindicator3-1——它和桌面預設的
+  # libayatana-appindicator3-1 互相 Conflicts，Ubuntu 26.04 桌面上 apt 會拒裝或要求移除 ayatana。
+  # 22.04 起的 Ubuntu 都有 libayatana-appindicator3-dev；CMake 本來就優先找 ayatana。
   dependencies+=(
-    "libappindicator3-dev"
+    "libayatana-appindicator3-dev"
   )
   # VipleStream §PKG-SYSTEMD: Ubuntu 24.04 起 systemd.pc／udev.pc 移到 systemd-dev；少了它 FindSystemd／FindUdev
   # 找不到，.deb 會默默漏掉 systemd 使用者單元、udev 規則與 modules-load 設定。

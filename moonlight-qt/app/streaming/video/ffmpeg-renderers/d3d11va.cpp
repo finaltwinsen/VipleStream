@@ -1102,6 +1102,17 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
     // tripped. Removing the gate future-proofs and makes the intent
     // explicit: if the user enabled FRUC, initialize FRUC regardless of
     // rate.
+    // §REVIEW-1104（診斷）：CLI 開串流時 D3D11 補幀從沒初始化，印一次這個閘門的每個條件
+    {
+        static std::atomic<bool> s_FrucGateLogged{false};
+        bool expected = false;
+        if (s_FrucGateLogged.compare_exchange_strong(expected, true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-FRUC] D3D11 gate (first frame): enable=%d vrFlags=0x%x fruc=%p generic=%p initFailed=%d prefs=%p",
+                        (int)StreamingPreferences::get(nullptr)->enableFrameInterpolation, (unsigned)LiGetVrFlags(),
+                        (void*)m_FRUC, (void*)m_GenericFRUC, (int)m_FRUCInitFailed, (void*)StreamingPreferences::get(nullptr));
+        }
+    }
     // §VR：VR session 不做 FRUC（幀與 0x81 pose 一一對應，補幀會破壞配對）
     if (!m_FRUC && !m_GenericFRUC && !m_FRUCInitFailed
         && StreamingPreferences::get(nullptr)->enableFrameInterpolation

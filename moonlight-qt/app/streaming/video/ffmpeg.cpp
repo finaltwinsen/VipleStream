@@ -1350,6 +1350,24 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
                         m_FrontendRenderer->getRendererName());
         }
 
+#ifdef HAVE_LIBPLACEBO_VULKAN
+        // §FRUC-444-NOTICE（2026-11-04）：開了補幀但串流是 4:4:4 時，D3D11VA 解不了（NVIDIA 回 Operation not permitted），
+        // 會改由 Vulkan 解碼＋libplacebo 顯示，而這條路沒有補幀——原本默默不作用。通知 session 顯示提示
+        {
+            auto* frucPrefs = StreamingPreferences::get(nullptr);
+            if (frucPrefs != nullptr && frucPrefs->enableFrameInterpolation &&
+                    !(LiGetVrFlags() & VIPLE_VR_SF_ENABLED) &&
+                    (params->videoFormat & VIDEO_FORMAT_MASK_YUV444) &&
+                    dynamic_cast<PlVkRenderer*>(m_FrontendRenderer) != nullptr &&
+                    Session::get() != nullptr) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-FRUC] frame interpolation unavailable: YUV 4:4:4 stream (format 0x%x) is rendered by libplacebo, which has no FRUC",
+                            params->videoFormat);
+                Session::get()->notifyFrucUnavailable();
+            }
+        }
+#endif
+
 #ifdef Q_OS_LINUX
         // §F6 — G-α 驗收用摘要：decoder / 像素格式 / frontend / isGpuSlow
         // （fullscreenFlag 與 matchVideo 由 session.cpp 的 [VIPLE-LNXFE] 記錄）
