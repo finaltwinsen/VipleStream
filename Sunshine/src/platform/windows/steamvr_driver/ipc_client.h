@@ -149,6 +149,7 @@ namespace vrdrv {
     std::atomic<uint64_t> next_index_calls {0};
     std::atomic<uint64_t> drop_unknown_layer {0};
     std::atomic<uint32_t> max_layer_count {0};
+    std::atomic<uint32_t> scene_pid {0};  ///< §VR-PADMODE：VREvent_SceneApplicationChanged 的新 PID
   };
 
   // HMD 已 Activate 的不可變參數（K20）。

@@ -4,216 +4,235 @@
 <context>
     <name>AppContent</name>
     <message>
-        <location filename="../gui/AppContent.qml" line="343"/>
+        <location filename="../gui/AppContent.qml" line="349"/>
         <source>Add PC manually</source>
         <translation>பிசி கைமுறையாக சேர்க்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="373"/>
+        <location filename="../gui/AppContent.qml" line="379"/>
         <source>VR mode (switch mode)</source>
         <translation>VR பயன்முறை (பயன்முறையை மாற்று)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="373"/>
+        <location filename="../gui/AppContent.qml" line="379"/>
         <source>Desktop mode (switch mode)</source>
         <translation>டெஸ்க்டாப் பயன்முறை (பயன்முறையை மாற்று)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="410"/>
+        <location filename="../gui/AppContent.qml" line="417"/>
         <source>Update available for VipleStream: Version %1</source>
         <translation>VipleStream-க்குப் புதுப்பிப்பு கிடைக்கிறது: பதிப்பு %1</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="439"/>
+        <location filename="../gui/AppContent.qml" line="446"/>
         <source>Help</source>
         <translation>உதவி</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="465"/>
+        <location filename="../gui/AppContent.qml" line="472"/>
         <source>Gamepad Mapper</source>
         <translation>கேம்பேட் மேப்பர்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="230"/>
-        <location filename="../gui/AppContent.qml" line="496"/>
+        <location filename="../gui/AppContent.qml" line="236"/>
+        <location filename="../gui/AppContent.qml" line="503"/>
         <source>Settings</source>
         <translation>அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="220"/>
+        <location filename="../gui/AppContent.qml" line="226"/>
         <source>HOSTS</source>
         <translation>புரவலன்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="221"/>
+        <location filename="../gui/AppContent.qml" line="227"/>
         <source>LIBRARY</source>
         <translation>நூலகம்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="222"/>
+        <location filename="../gui/AppContent.qml" line="228"/>
         <source>SETTINGS</source>
         <translation>அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="228"/>
+        <location filename="../gui/AppContent.qml" line="234"/>
         <source>Hosts</source>
         <translation>ஹோஸ்ட்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="229"/>
+        <location filename="../gui/AppContent.qml" line="235"/>
         <source>Library</source>
         <translation>நூலகம்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="503"/>
+        <location filename="../gui/AppContent.qml" line="510"/>
         <source>No functioning hardware accelerated video decoder was detected by VipleStream. Your streaming performance may be severely degraded in this configuration.</source>
         <translation>செயல்படும் வன்பொருள் முடுக்கப்பட்ட வீடியோ டிகோடர் எதையும் VipleStream கண்டறியவில்லை. இந்த உள்ளமைவில் உங்கள் ஸ்ட்ரீமிங் செயல்திறன் கடுமையாகக் குறையலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="505"/>
+        <location filename="../gui/AppContent.qml" line="512"/>
         <source>Click the Help button for more information on solving this problem.</source>
         <translation>இந்த சிக்கலைத் தீர்ப்பது குறித்த கூடுதல் தகவலுக்கு உதவி பொத்தானைக் சொடுக்கு செய்க.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="512"/>
+        <location filename="../gui/AppContent.qml" line="519"/>
         <source>Hardware acceleration doesn&apos;t work on XWayland. Continuing on XWayland may result in poor streaming performance. Try running with QT_QPA_PLATFORM=wayland or switch to X11.</source>
         <translation>வன்பொருள் முடுக்கம் XWayland இல் வேலை செய்யாது. XWayland இல் தொடர்வது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும். Qt_qpa_platform = wayland உடன் இயங்க முயற்சிக்கவும் அல்லது x11 க்கு மாறவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="514"/>
+        <location filename="../gui/AppContent.qml" line="521"/>
         <source>Click the Help button for more information.</source>
         <translation>மேலும் தகவலுக்கு உதவி பொத்தானைக் சொடுக்கு செய்க.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="522"/>
+        <location filename="../gui/AppContent.qml" line="529"/>
         <source>This version of VipleStream isn&apos;t optimized for your PC. Please download the &apos;%1&apos; version of VipleStream for the best streaming performance.</source>
         <translation>VipleStream-இன் இந்தப் பதிப்பு உங்கள் கணினிக்கு மேம்படுத்தப்படவில்லை. சிறந்த ஸ்ட்ரீமிங் செயல்திறனுக்கு VipleStream-இன் &apos;%1&apos; பதிப்பைப் பதிவிறக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="536"/>
+        <location filename="../gui/AppContent.qml" line="544"/>
         <source>VipleStream detected gamepads without a mapping:</source>
         <translation>மேப்பிங் இல்லாத கேம்பேடுகளை VipleStream கண்டறிந்தது:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="538"/>
+        <location filename="../gui/AppContent.qml" line="546"/>
         <source>Click the Help button for information on how to map your gamepads.</source>
         <translation>உங்கள் கேம்பேட்களை எவ்வாறு வரைபடமாக்குவது என்பது குறித்த தகவலுக்கு உதவி பொத்தானைக் சொடுக்கு செய்க.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="549"/>
+        <location filename="../gui/AppContent.qml" line="557"/>
         <source>VipleStream found a HID device that is not responding:</source>
         <translation>பதிலளிக்காத HID சாதனம் ஒன்றை VipleStream கண்டறிந்தது:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="550"/>
+        <location filename="../gui/AppContent.qml" line="558"/>
         <source>Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.</source>
         <translation>அது மீண்டும் பதிலளிக்கும் வரை கேம்பேட் கண்டறிதலும் Steam Controller பாஸ்த்ரூவும் முடக்கப்பட்டுள்ளன. சாதனத்தைத் துண்டித்து மீண்டும் இணைக்கவும்; அப்போதும் VipleStream அதைக் காணவில்லை என்றால், VipleStream-ஐ மறுதொடக்கம் செய்யவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="558"/>
+        <location filename="../gui/AppContent.qml" line="566"/>
         <source>Are you sure you want to quit?</source>
         <translation>நீங்கள் நிச்சயமாக வெளியேற விரும்புகிறீர்களா?</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="588"/>
+        <location filename="../gui/AppContent.qml" line="596"/>
         <source>Enter the IP address of your host PC:</source>
         <translation>உங்கள் புரவலன் கணினியின் ஐபி முகவரியை உள்ளிடவும்:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="632"/>
+        <location filename="../gui/AppContent.qml" line="640"/>
         <source>Choose a mode</source>
         <translation>ஒரு பயன்முறையைத் தேர்ந்தெடுக்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="667"/>
+        <location filename="../gui/AppContent.qml" line="675"/>
         <source>Desktop mode</source>
         <translation>டெஸ்க்டாப் பயன்முறை</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="667"/>
+        <location filename="../gui/AppContent.qml" line="675"/>
         <source>Your PC&apos;s desktop on a virtual screen</source>
         <translation>மெய்நிகர் திரையில் உங்கள் கணினியின் டெஸ்க்டாப்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="678"/>
+        <location filename="../gui/AppContent.qml" line="686"/>
         <source>VR mode</source>
         <translation>VR பயன்முறை</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="678"/>
+        <location filename="../gui/AppContent.qml" line="686"/>
         <source>Play SteamVR games from your PC</source>
         <translation>உங்கள் கணினியிலிருந்து SteamVR விளையாட்டுகளை விளையாடுங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="692"/>
+        <location filename="../gui/AppContent.qml" line="700"/>
         <source>Video mode</source>
         <translation>வீடியோ பயன்முறை</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="692"/>
+        <location filename="../gui/AppContent.qml" line="700"/>
         <source>Watch videos, 3D, 180° and 360° videos in the headset</source>
         <translation>ஹெட்செட்டில் வீடியோக்கள், 3D, 180° மற்றும் 360° வீடியோக்களைப் பாருங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="762"/>
+        <location filename="../gui/AppContent.qml" line="770"/>
         <source>Starting %1...</source>
         <translation>தொடங்கி %1 ...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="763"/>
+        <location filename="../gui/AppContent.qml" line="771"/>
         <source>Starting the stream...</source>
         <translation>ஸ்ட்ரீம் தொடங்குகிறது...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="771"/>
+        <location filename="../gui/AppContent.qml" line="779"/>
         <source>The headset switches to the stream when it is ready. This can take a few seconds.</source>
         <translation>ஸ்ட்ரீம் தயாரானதும் ஹெட்செட் அதற்கு மாறும். இதற்குச் சில வினாடிகள் ஆகலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="772"/>
+        <location filename="../gui/AppContent.qml" line="780"/>
         <source>Tip:</source>
         <translation>உதவிக்குறிப்பு:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="772"/>
+        <location filename="../gui/AppContent.qml" line="780"/>
         <source>To end the stream, hold A+X+trigger+grip on the VR controller</source>
         <translation>ஸ்ட்ரீமை முடிக்க, VR கட்டுப்படுத்தியில் A+X+டிரிகர்+கிரிப் ஆகியவற்றை அழுத்திப் பிடிக்கவும்</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="821"/>
+        <source>Opening the video...</source>
+        <translation>வீடியோ திறக்கப்படுகிறது...</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="829"/>
+        <source>Press B to cancel.</source>
+        <translation>ரத்து செய்ய B ஐ அழுத்தவும்.</translation>
     </message>
 </context>
 <context>
     <name>AppModel</name>
     <message>
-        <location filename="../gui/appmodel.cpp" line="61"/>
+        <location filename="../gui/appmodel.cpp" line="70"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 VR ஸ்ட்ரீமிங்கை வழங்கவில்லை. PCVR இயக்கப்பட்ட VipleStream Server 2.0 அல்லது அதற்குப் பிந்தைய பதிப்பு தேவை.</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="65"/>
+        <location filename="../gui/appmodel.cpp" line="74"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1-ஐ ரிலே வழியாக மட்டுமே அணுக முடியும். VR ஸ்ட்ரீமிங்கிற்கு நேரடி இணைப்பு தேவை.</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="69"/>
+        <location filename="../gui/appmodel.cpp" line="78"/>
         <source>%1 is offline.</source>
         <translation>%1 இணையத்தில் இல்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="543"/>
+        <location filename="../gui/appmodel.cpp" line="650"/>
+        <location filename="../gui/appmodel.cpp" line="658"/>
+        <location filename="../gui/appmodel.cpp" line="667"/>
+        <location filename="../gui/appmodel.cpp" line="681"/>
+        <location filename="../gui/appmodel.cpp" line="811"/>
+        <source>Switch cancelled</source>
+        <translation>மாற்றம் ரத்து செய்யப்பட்டது</translation>
+    </message>
+    <message>
+        <location filename="../gui/appmodel.cpp" line="714"/>
         <source>No host selected</source>
         <translation>புரவலன் எதுவும் தேர்ந்தெடுக்கப்படவில்லை</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="570"/>
+        <location filename="../gui/appmodel.cpp" line="750"/>
         <source>Server returned no task id</source>
         <translation>சேவையகம் பணி ஐடி எதையும் தரவில்லை</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="592"/>
+        <location filename="../gui/appmodel.cpp" line="671"/>
         <source>Switch task disappeared on host</source>
         <translation>மாற்றும் பணி புரவலனில் காணாமல் போனது</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="621"/>
+        <location filename="../gui/appmodel.cpp" line="706"/>
         <source>Switch timed out (&gt;150s without server reaching a terminal state)</source>
         <translation>மாற்றுதல் நேரம் கடந்தது (150 வினாடிகளுக்கு மேல் சேவையகம் இறுதி நிலையை அடையவில்லை)</translation>
     </message>
@@ -222,8 +241,8 @@
     <name>AppView</name>
     <message>
         <location filename="../gui/AppView.qml" line="205"/>
-        <location filename="../gui/AppView.qml" line="513"/>
-        <location filename="../gui/AppView.qml" line="737"/>
+        <location filename="../gui/AppView.qml" line="514"/>
+        <location filename="../gui/AppView.qml" line="738"/>
         <source>LIBRARY</source>
         <translation>நூலகம்</translation>
     </message>
@@ -273,89 +292,94 @@
         <translation>தொடங்கு · மற்றும் · ஸ்ட்ரீம்</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="450"/>
-        <location filename="../gui/AppView.qml" line="694"/>
+        <location filename="../gui/AppView.qml" line="451"/>
+        <location filename="../gui/AppView.qml" line="695"/>
         <source>Resume Game</source>
         <translation>விளையாட்டை மீண்டும் தொடங்குங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="476"/>
-        <location filename="../gui/AppView.qml" line="698"/>
+        <location filename="../gui/AppView.qml" line="477"/>
+        <location filename="../gui/AppView.qml" line="699"/>
         <source>Quit Game</source>
         <translation>விளையாட்டை விட்டு</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="555"/>
+        <location filename="../gui/AppView.qml" line="556"/>
         <source>PLAYING</source>
         <translation>விளையாடுகிறது</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="694"/>
+        <location filename="../gui/AppView.qml" line="695"/>
         <source>Launch Game</source>
         <translation>அறிமுகம்</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="705"/>
+        <location filename="../gui/AppView.qml" line="706"/>
         <source>Direct Launch</source>
         <translation>நேரடி வெளியீடு</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="709"/>
+        <location filename="../gui/AppView.qml" line="710"/>
         <source>Launch this app immediately when the host is selected, bypassing the app selection grid.</source>
         <translation>பயன்பாட்டு தேர்வு கட்டத்தைத் தவிர்த்து, புரவலன் தேர்ந்தெடுக்கப்பட்டவுடன் உடனடியாக இந்த பயன்பாட்டைத் தொடங்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="717"/>
+        <location filename="../gui/AppView.qml" line="718"/>
         <source>Hide Game</source>
         <translation>விளையாட்டை மறைக்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="721"/>
+        <location filename="../gui/AppView.qml" line="722"/>
         <source>Hide this game from the app grid. To access hidden games, right-click on the host and choose %1.</source>
         <translation>பயன்பாட்டு கட்டத்திலிருந்து இந்த விளையாட்டை மறைக்கவும். மறைக்கப்பட்ட விளையாட்டுகளை அணுக, ஓச்டில் வலது சொடுக்கு செய்து %1 ஐத் தேர்வுசெய்க.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="721"/>
+        <location filename="../gui/AppView.qml" line="722"/>
         <source>View All Apps</source>
         <translation>எல்லா பயன்பாடுகளையும் காண்க</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="737"/>
+        <location filename="../gui/AppView.qml" line="738"/>
         <source>EMPTY</source>
         <translation>காலி</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="747"/>
+        <location filename="../gui/AppView.qml" line="748"/>
         <source>This computer doesn&apos;t seem to have any applications or some applications are hidden</source>
         <translation>இந்த கணினியில் எந்த பயன்பாடுகளும் இருப்பதாகத் தெரியவில்லை அல்லது சில பயன்பாடுகள் மறைக்கப்பட்டுள்ளன</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="750"/>
+        <location filename="../gui/AppView.qml" line="751"/>
         <source>No VR apps were found on this computer. Switch to desktop mode to see all apps.</source>
         <translation>இந்தக் கணினியில் VR பயன்பாடுகள் எதுவும் காணப்படவில்லை. எல்லாப் பயன்பாடுகளையும் காண டெஸ்க்டாப் பயன்முறைக்கு மாறவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="766"/>
+        <location filename="../gui/AppView.qml" line="767"/>
         <source>Are you sure you want to quit %1? Any unsaved progress will be lost.</source>
         <translation>%1 ஐ விட்டு வெளியேற விரும்புகிறீர்களா? சேமிக்கப்படாத எந்த முன்னேற்றமும் இழக்கப்படும்.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="804"/>
+        <location filename="../gui/AppView.qml" line="805"/>
         <source>%1 is currently using this host. Do you want to take over the session? Their session will be disconnected.</source>
         <translation>%1 தற்போது இந்தப் புரவலனைப் பயன்படுத்துகிறார். அமர்வை நீங்கள் எடுத்துக்கொள்ள விரும்புகிறீர்களா? அவருடைய அமர்வு துண்டிக்கப்படும்.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="864"/>
+        <location filename="../gui/AppView.qml" line="871"/>
         <source>STEAM PROFILE</source>
         <translation>STEAM கணக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="990"/>
+        <location filename="../gui/AppView.qml" line="896"/>
+        <source>This Steam account has no saved password on the host. Sign in on the host once before switching to it.</source>
+        <translation>இந்த Steam கணக்கிற்கு புரவலனில் சேமித்த கடவுச்சொல் இல்லை. இதற்கு மாறுவதற்கு முன் புரவலனில் ஒருமுறை உள்நுழையவும்.</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppView.qml" line="1035"/>
         <source>Switching Steam account…</source>
         <translation>Steam கணக்கு மாற்றப்படுகிறது…</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="1003"/>
+        <location filename="../gui/AppView.qml" line="1048"/>
         <source>Steam will close and re-login on the host.
 This can take 60–90 seconds on a typical box.
 If it stalls longer, check the host — Steam Guard 2FA may be prompting.</source>
@@ -386,11 +410,12 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
     <name>CliQuitStreamSegue</name>
     <message>
         <location filename="../gui/CliQuitStreamSegue.qml" line="9"/>
+        <location filename="../gui/CliQuitStreamSegue.qml" line="12"/>
         <source>Establishing connection to PC...</source>
         <translation>கணினியுடன் இணைப்பை நிறுவுதல் ...</translation>
     </message>
     <message>
-        <location filename="../gui/CliQuitStreamSegue.qml" line="13"/>
+        <location filename="../gui/CliQuitStreamSegue.qml" line="16"/>
         <source>Quitting app...</source>
         <translation>பயன்பாட்டை விட்டு வெளியேறுதல் ...</translation>
     </message>
@@ -416,91 +441,91 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>ComputerModel</name>
     <message>
-        <location filename="../gui/computermodel.cpp" line="114"/>
+        <location filename="../gui/computermodel.cpp" line="143"/>
         <source>Online</source>
         <translation>ஆன்லைனில்</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="117"/>
+        <location filename="../gui/computermodel.cpp" line="146"/>
         <source>Offline</source>
         <translation>இணையமில்லாமல்</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="120"/>
-        <location filename="../gui/computermodel.cpp" line="132"/>
-        <location filename="../gui/computermodel.cpp" line="144"/>
-        <location filename="../gui/computermodel.cpp" line="146"/>
-        <location filename="../gui/computermodel.cpp" line="147"/>
+        <location filename="../gui/computermodel.cpp" line="149"/>
+        <location filename="../gui/computermodel.cpp" line="161"/>
+        <location filename="../gui/computermodel.cpp" line="173"/>
+        <location filename="../gui/computermodel.cpp" line="175"/>
+        <location filename="../gui/computermodel.cpp" line="176"/>
         <source>Unknown</source>
         <translation>தெரியவில்லை</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="126"/>
+        <location filename="../gui/computermodel.cpp" line="155"/>
         <source>Paired</source>
         <translation>இணை</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="129"/>
+        <location filename="../gui/computermodel.cpp" line="158"/>
         <source>Unpaired</source>
         <translation>இணைக்கப்படாதது</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="136"/>
+        <location filename="../gui/computermodel.cpp" line="165"/>
         <source>Name: %1</source>
         <translation>பெயர்: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="137"/>
+        <location filename="../gui/computermodel.cpp" line="166"/>
         <source>Status: %1</source>
         <translation>நிலை: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="138"/>
+        <location filename="../gui/computermodel.cpp" line="167"/>
         <source>Active Address: %1</source>
         <translation>செயலில் முகவரி: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="139"/>
+        <location filename="../gui/computermodel.cpp" line="168"/>
         <source>UUID: %1</source>
         <translation>UUID: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="140"/>
+        <location filename="../gui/computermodel.cpp" line="169"/>
         <source>Local Address: %1</source>
         <translation>உள்ளக முகவரி: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="141"/>
+        <location filename="../gui/computermodel.cpp" line="170"/>
         <source>Remote Address: %1</source>
         <translation>தொலை முகவரி: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="142"/>
+        <location filename="../gui/computermodel.cpp" line="171"/>
         <source>IPv6 Address: %1</source>
         <translation>IPv6 முகவரி: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="143"/>
+        <location filename="../gui/computermodel.cpp" line="172"/>
         <source>Manual Address: %1</source>
         <translation>கையேடு முகவரி: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="144"/>
+        <location filename="../gui/computermodel.cpp" line="173"/>
         <source>MAC Address: %1</source>
         <translation>மேக் முகவரி: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="145"/>
+        <location filename="../gui/computermodel.cpp" line="174"/>
         <source>Pair State: %1</source>
         <translation>இணை நிலை: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="146"/>
+        <location filename="../gui/computermodel.cpp" line="175"/>
         <source>Running Game ID: %1</source>
         <translation>விளையாட்டு ஐடி இயங்கும்: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="147"/>
+        <location filename="../gui/computermodel.cpp" line="176"/>
         <source>HTTPS Port: %1</source>
         <translation>HTTPS போர்ட்: %1</translation>
     </message>
@@ -508,52 +533,52 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>FileTransferClient</name>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="185"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="198"/>
         <source>File transfer: nothing to cancel</source>
         <translation>கோப்புப் பரிமாற்றம்: ரத்துசெய்ய எதுவும் இல்லை</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="202"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="216"/>
         <source>File transfer cancelled</source>
         <translation>கோப்புப் பரிமாற்றம் ரத்துசெய்யப்பட்டது</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="410"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="432"/>
         <source>Receiving file: %1 (0%)</source>
         <translation>கோப்பு பெறப்படுகிறது: %1 (0%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="428"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="456"/>
         <source>Receiving file: %1 (%2%)</source>
         <translation>கோப்பு பெறப்படுகிறது: %1 (%2%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="454"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="501"/>
         <source>Received: %1 → Downloads</source>
         <translation>பெறப்பட்டது: %1 → பதிவிறக்கங்கள்</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="512"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="580"/>
         <source>Zipping folder: %1…</source>
         <translation>கோப்புறை சுருக்கப்படுகிறது: %1…</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="586"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="683"/>
         <source>Sending: %1 (0%)</source>
         <translation>அனுப்பப்படுகிறது: %1 (0%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="602"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="698"/>
         <source>Sending: %1 (%2%)</source>
         <translation>அனுப்பப்படுகிறது: %1 (%2%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="625"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="722"/>
         <source>Sent: %1</source>
         <translation>அனுப்பப்பட்டது: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="627"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="724"/>
         <source>Send failed: %1 (%2)</source>
         <translation>அனுப்புதல் தோல்வியடைந்தது: %1 (%2)</translation>
     </message>
@@ -584,22 +609,22 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>முகப்புக் கோப்புறை</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="240"/>
+        <location filename="../backend/medialibrary.cpp" line="249"/>
         <source>The PC is not online.</source>
         <translation>கணினி இணையத்தில் இல்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="272"/>
+        <location filename="../backend/medialibrary.cpp" line="281"/>
         <source>This PC doesn&apos;t share its videos. Update VipleStream Server on that PC, and check that media_share isn&apos;t disabled in its configuration.</source>
         <translation>இந்தக் கணினி தன் வீடியோக்களைப் பகிரவில்லை. அந்தக் கணினியில் VipleStream Server-ஐப் புதுப்பித்து, அதன் உள்ளமைவில் media_share முடக்கப்படவில்லை என்பதைச் சரிபார்க்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="319"/>
+        <location filename="../backend/medialibrary.cpp" line="328"/>
         <source>Could not reach the PC. Make sure VipleStream Server is running.</source>
         <translation>கணினியை அணுக முடியவில்லை. VipleStream Server இயங்குகிறதா என்பதை உறுதிசெய்யவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="320"/>
+        <location filename="../backend/medialibrary.cpp" line="329"/>
         <source>Could not read this folder from the PC.</source>
         <translation>இந்தக் கோப்புறையைக் கணினியிலிருந்து படிக்க முடியவில்லை.</translation>
     </message>
@@ -620,237 +645,237 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>கணினிகள்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="68"/>
+        <location filename="../gui/PcView.qml" line="77"/>
         <source>Unable to connect to the specified PC.</source>
         <translation>குறிப்பிட்ட கணினியுடன் இணைக்க முடியவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="74"/>
+        <location filename="../gui/PcView.qml" line="83"/>
         <source>Click the Help button for possible solutions.</source>
         <translation>சாத்தியமான தீர்வுகளுக்கு உதவி பொத்தானைக் சொடுக்கு செய்க.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="105"/>
+        <location filename="../gui/PcView.qml" line="114"/>
         <source>Automatic PC discovery is disabled. Add your PC manually.</source>
         <translation>தானியங்கி பிசி கண்டுபிடிப்பு முடக்கப்பட்டுள்ளது. உங்கள் கணினியை கைமுறையாக சேர்க்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="104"/>
+        <location filename="../gui/PcView.qml" line="113"/>
         <source>Searching for compatible hosts on your local network...</source>
         <translation>உங்கள் உள்ளக நெட்வொர்க்கில் இணக்கமான ஓச்ட்களைத் தேடுகிறது ...</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="71"/>
+        <location filename="../gui/PcView.qml" line="80"/>
         <source>This PC&apos;s Internet connection is blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
         <translation>இந்தக் கணினியின் இணைய இணைப்பு VipleStream-ஐத் தடுக்கிறது. இந்த நெட்வொர்க்கில் இணைந்திருக்கும்போது இணையம் வழியான ஸ்ட்ரீமிங் வேலை செய்யாமல் போகலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="195"/>
+        <location filename="../gui/PcView.qml" line="204"/>
         <source>HOSTS</source>
         <translation>புரவலன்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="203"/>
+        <location filename="../gui/PcView.qml" line="212"/>
         <source>LOCAL NETWORK</source>
         <translation>உள்ளூர் நெட்வொர்க்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="213"/>
+        <location filename="../gui/PcView.qml" line="222"/>
         <source>MDNS ON</source>
         <translation>MDNS இயக்கம்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="213"/>
+        <location filename="../gui/PcView.qml" line="222"/>
         <source>MDNS OFF</source>
         <translation>MDNS முடக்கம்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="215"/>
+        <location filename="../gui/PcView.qml" line="224"/>
         <source>FOUND</source>
         <translation>கண்டறியப்பட்டது</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="218"/>
+        <location filename="../gui/PcView.qml" line="227"/>
         <source>READY TO LAUNCH</source>
         <translation>தொடங்கத் தயார்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="219"/>
+        <location filename="../gui/PcView.qml" line="228"/>
         <source>NO PAIRED HOST</source>
         <translation>இணைக்கப்பட்ட புரவலன் இல்லை</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="241"/>
+        <location filename="../gui/PcView.qml" line="250"/>
         <source>FEATURED</source>
         <translation>சிறப்பு</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="261"/>
+        <location filename="../gui/PcView.qml" line="270"/>
         <source>PICK A HOST TO CONNECT</source>
         <translation>இணைக்க ஒரு புரவலனைத் தேர்ந்தெடுக்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="286"/>
+        <location filename="../gui/PcView.qml" line="295"/>
         <source>STREAM · PATCH · 2026</source>
         <translation>ஸ்ட்ரீம் · பேட்ச் · 2026</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="367"/>
+        <location filename="../gui/PcView.qml" line="376"/>
         <source>OFFLINE</source>
         <translation>இணையத்தில் இல்லை</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="368"/>
+        <location filename="../gui/PcView.qml" line="377"/>
         <source>UNPAIRED</source>
         <translation>இணைக்கப்படவில்லை</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="369"/>
+        <location filename="../gui/PcView.qml" line="378"/>
         <source>READY</source>
         <translation>தயார்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="428"/>
+        <location filename="../gui/PcView.qml" line="437"/>
         <source>MULTI-LINK</source>
         <translation>பல இணைப்பு</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="580"/>
+        <location filename="../gui/PcView.qml" line="589"/>
         <source>Wake PC</source>
         <translation>எழுந்த பிசி</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="586"/>
+        <location filename="../gui/PcView.qml" line="595"/>
         <source>Auto Wake-on-LAN: ON</source>
         <translation>தானியங்கி Wake-on-LAN: இயக்கத்தில்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="587"/>
+        <location filename="../gui/PcView.qml" line="596"/>
         <source>Auto Wake-on-LAN: OFF</source>
         <translation>தானியங்கி Wake-on-LAN: முடக்கத்தில்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="607"/>
+        <location filename="../gui/PcView.qml" line="616"/>
         <source>Test Network</source>
         <translation>சோதனை பிணையம்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="631"/>
+        <location filename="../gui/PcView.qml" line="640"/>
         <source>Rename PC</source>
         <translation>பிசி மறுபெயரிடுங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="639"/>
+        <location filename="../gui/PcView.qml" line="649"/>
         <source>Delete PC</source>
         <translation>பிசி நீக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="647"/>
+        <location filename="../gui/PcView.qml" line="658"/>
         <source>View Details</source>
         <translation>விவரங்களைக் காண்க</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="659"/>
+        <location filename="../gui/PcView.qml" line="670"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of VipleStream. You must update VipleStream to stream from %1.</source>
         <translation>%1-இல் உள்ள GeForce Experience பதிப்பு இந்த VipleStream பதிப்பால் ஆதரிக்கப்படவில்லை. %1-இலிருந்து ஸ்ட்ரீம் செய்ய VipleStream-ஐப் புதுப்பிக்க வேண்டும்.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="758"/>
+        <location filename="../gui/PcView.qml" line="777"/>
         <source>PAIRING</source>
         <translation>இணைத்தல்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="758"/>
+        <location filename="../gui/PcView.qml" line="777"/>
         <source>STEP 02 / 03</source>
         <translation>படி 02 / 03</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="767"/>
+        <location filename="../gui/PcView.qml" line="786"/>
         <source>Enter PIN on host</source>
         <translation>புரவலனில் PIN-ஐ உள்ளிடவும்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="807"/>
+        <location filename="../gui/PcView.qml" line="826"/>
         <source>If your host PC is running VipleStream-Server, navigate to the VipleStream-Server web UI to enter the PIN.</source>
         <translation>உங்கள் புரவலன் கணினியில் VipleStream-Server இயங்கினால், PIN-ஐ உள்ளிட VipleStream-Server வலை இடைமுகத்திற்குச் செல்லவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="826"/>
+        <location filename="../gui/PcView.qml" line="845"/>
         <source>WAITING FOR HOST</source>
         <translation>புரவலனுக்காகக் காத்திருக்கிறது</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="855"/>
+        <location filename="../gui/PcView.qml" line="878"/>
         <source>VipleStream is testing your network connection to determine if any required ports are blocked.</source>
         <translation>தேவையான போர்ட்கள் ஏதேனும் தடுக்கப்பட்டுள்ளனவா என்பதைக் கண்டறிய VipleStream உங்கள் நெட்வொர்க் இணைப்பைச் சோதிக்கிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="862"/>
+        <location filename="../gui/PcView.qml" line="885"/>
         <source>The network test could not be performed because none of VipleStream&apos;s connection testing servers were reachable from this PC. Check your Internet connection or try again later.</source>
         <translation>VipleStream-இன் இணைப்புச் சோதனை சேவையகங்கள் எதையும் இந்தக் கணினியிலிருந்து அணுக முடியாததால் நெட்வொர்க் சோதனையைச் செய்ய முடியவில்லை. உங்கள் இணைய இணைப்பைச் சரிபார்க்கவும் அல்லது பின்னர் மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="866"/>
+        <location filename="../gui/PcView.qml" line="889"/>
         <source>This network does not appear to be blocking VipleStream. If you still have trouble connecting, check your PC&apos;s firewall settings.</source>
         <translation>இந்த நெட்வொர்க் VipleStream-ஐத் தடுப்பதாகத் தெரியவில்லை. இன்னும் இணைப்பதில் சிக்கல் இருந்தால், உங்கள் கணினியின் ஃபயர்வால் அமைப்புகளைச் சரிபார்க்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="866"/>
+        <location filename="../gui/PcView.qml" line="889"/>
         <source>If you are trying to stream over the Internet, install the VipleStream-Server Internet Hosting Tool on your gaming PC and run the included Internet Streaming Tester to check your gaming PC&apos;s Internet connection.</source>
         <translation>இணையம் வழியாக ஸ்ட்ரீம் செய்ய முயன்றால், உங்கள் கேமிங் கணினியில் VipleStream-Server Internet Hosting Tool-ஐ நிறுவி, அதில் உள்ள Internet Streaming Tester-ஐ இயக்கி உங்கள் கேமிங் கணினியின் இணைய இணைப்பைச் சரிபார்க்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="870"/>
+        <location filename="../gui/PcView.qml" line="893"/>
         <source>Your PC&apos;s current network connection seems to be blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
         <translation>உங்கள் கணினியின் தற்போதைய நெட்வொர்க் இணைப்பு VipleStream-ஐத் தடுப்பதாகத் தெரிகிறது. இந்த நெட்வொர்க்கில் இணைந்திருக்கும்போது இணையம் வழியான ஸ்ட்ரீமிங் வேலை செய்யாமல் போகலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="855"/>
+        <location filename="../gui/PcView.qml" line="878"/>
         <source>This may take a few seconds…</source>
         <translation>இதற்கு சில வினாடிகள் ஆகலாம்…</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="870"/>
+        <location filename="../gui/PcView.qml" line="893"/>
         <source>The following network ports were blocked:</source>
         <translation>பின்வரும் பிணைய துறைமுகங்கள் தடுக்கப்பட்டன:</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="565"/>
+        <location filename="../gui/PcView.qml" line="574"/>
         <source>PC Status: %1</source>
         <translation>பிசி நிலை: %1</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="565"/>
+        <location filename="../gui/PcView.qml" line="574"/>
         <source>Online</source>
         <translation>ஆன்லைனில்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="565"/>
+        <location filename="../gui/PcView.qml" line="574"/>
         <source>Offline</source>
         <translation>இணையமில்லாமல்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="570"/>
+        <location filename="../gui/PcView.qml" line="579"/>
         <source>View All Apps</source>
         <translation>எல்லா பயன்பாடுகளையும் காண்க</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="622"/>
+        <location filename="../gui/PcView.qml" line="631"/>
         <source>Click goes straight to desktop: On</source>
         <translation>தட்டினால் நேரடியாக டெஸ்க்டாப்: இயக்கத்தில்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="623"/>
+        <location filename="../gui/PcView.qml" line="632"/>
         <source>Click goes straight to desktop: Off</source>
         <translation>தட்டினால் நேரடியாக டெஸ்க்டாப்: முடக்கத்தில்</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="841"/>
+        <location filename="../gui/PcView.qml" line="861"/>
         <source>Are you sure you want to remove &apos;%1&apos;?</source>
         <translation>&apos;%1&apos; ஐ அகற்ற விரும்புகிறீர்களா?</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="882"/>
+        <location filename="../gui/PcView.qml" line="905"/>
         <source>Enter the new name for this PC:</source>
         <translation>இந்த கணினிக்கான புதிய பெயரை உள்ளிடவும்:</translation>
     </message>
@@ -858,27 +883,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>PendingPairingTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="881"/>
+        <location filename="../backend/computermanager.cpp" line="926"/>
         <source>The PIN from the PC didn&apos;t match. Please try again.</source>
         <translation>கணினியிலிருந்து முள் பொருந்தவில்லை. மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="885"/>
+        <location filename="../backend/computermanager.cpp" line="930"/>
         <source>You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again.</source>
         <translation>முந்தைய அமர்வு புரவலன் கணினியில் இயங்கும்போது நீங்கள் இணைக்க முடியாது. இயங்கும் எந்த விளையாட்டுகளையும் விட்டுவிடுங்கள் அல்லது புரவலன் கணினியை மீண்டும் துவக்கவும், பின்னர் மீண்டும் இணைக்க முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="888"/>
+        <location filename="../backend/computermanager.cpp" line="933"/>
         <source>Pairing failed. Please try again.</source>
         <translation>இணைத்தல் தோல்வியுற்றது. மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="892"/>
+        <location filename="../backend/computermanager.cpp" line="937"/>
         <source>Another pairing attempt is already in progress.</source>
         <translation>மற்றொரு இணைத்தல் முயற்சி ஏற்கனவே நடந்து வருகிறது.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="902"/>
+        <location filename="../backend/computermanager.cpp" line="947"/>
         <source>GeForce Experience returned error: %1</source>
         <translation>சியிபோர்ச் பட்டறிவு திரும்பியது பிழை: %1</translation>
     </message>
@@ -886,7 +911,7 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>PendingQuitTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="952"/>
+        <location filename="../backend/computermanager.cpp" line="997"/>
         <source>The running game wasn&apos;t started by this PC. You must quit the game on the host PC manually or use the device that originally started the game.</source>
         <translation>இயங்கும் விளையாட்டு இந்த கணினியால் தொடங்கப்படவில்லை. நீங்கள் புரவலன் கணினியில் கைமுறையாக விளையாட்டை விட்டு வெளியேற வேண்டும் அல்லது முதலில் விளையாட்டைத் தொடங்கிய சாதனத்தைப் பயன்படுத்த வேண்டும்.</translation>
     </message>
@@ -900,19 +925,24 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
     </message>
     <message>
         <location filename="../cli/pair.cpp" line="109"/>
-        <location filename="../cli/quitstream.cpp" line="76"/>
+        <location filename="../cli/quitstream.cpp" line="80"/>
         <location filename="../cli/startstream.cpp" line="133"/>
         <source>Failed to connect to %1</source>
         <translation>%1 உடன் இணைக்கத் தவறிவிட்டது</translation>
     </message>
     <message>
-        <location filename="../cli/quitstream.cpp" line="88"/>
+        <location filename="../cli/quitstream.cpp" line="85"/>
+        <source>Quitting app timed out</source>
+        <translation>பயன்பாட்டை மூடும் நேரம் முடிந்தது</translation>
+    </message>
+    <message>
+        <location filename="../cli/quitstream.cpp" line="102"/>
         <location filename="../cli/startstream.cpp" line="89"/>
         <source>Computer %1 has not been paired. Please open Moonlight to pair before streaming.</source>
         <translation>கணினி %1 சோடியாக இல்லை. ச்ட்ரீமிங்கிற்கு முன் இணைக்க நிலவொளியைத் திறக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../cli/quitstream.cpp" line="102"/>
+        <location filename="../cli/quitstream.cpp" line="118"/>
         <location filename="../cli/startstream.cpp" line="126"/>
         <source>Quitting app failed, reason: %1</source>
         <translation>பயன்பாட்டை விட்டு வெளியேறுவது தோல்வியுற்றது, காரணம்: %1</translation>
@@ -923,7 +953,7 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>பயன்பாடு %1 ஐக் கண்டுபிடிப்பதில் தோல்வி</translation>
     </message>
     <message>
-        <location filename="../cli/listapps.cpp" line="108"/>
+        <location filename="../cli/listapps.cpp" line="122"/>
         <source>Computer %1 has not been paired. Please open Moonlight to pair before retrieving games list.</source>
         <translation>கணினி %1 சோடியாக இல்லை. விளையாட்டு பட்டியலை மீட்டெடுப்பதற்கு முன் இணைக்க மூன்லைட்டைத் திறக்கவும்.</translation>
     </message>
@@ -931,27 +961,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1450"/>
+        <location filename="../main.cpp" line="1464"/>
         <source>&amp;Yes</source>
         <translation>&amp;ஆம்</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1451"/>
+        <location filename="../main.cpp" line="1465"/>
         <source>&amp;No</source>
         <translation>&amp;இல்லை</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1452"/>
+        <location filename="../main.cpp" line="1466"/>
         <source>OK</source>
         <translation>சரி</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1453"/>
+        <location filename="../main.cpp" line="1467"/>
         <source>Help</source>
         <translation>உதவி</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1454"/>
+        <location filename="../main.cpp" line="1468"/>
         <source>Cancel</source>
         <translation>ரத்துசெய்</translation>
     </message>
@@ -967,339 +997,379 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="367"/>
+        <location filename="../streaming/session.cpp" line="373"/>
         <source>No video received from host.</source>
         <translation>ஓச்டிலிருந்து எந்த வீடியோவும் பெறப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="368"/>
+        <location filename="../streaming/session.cpp" line="374"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>துறைமுகம் (கள்) க்கான உங்கள் ஃபயர்வால் மற்றும் துறைமுகம் பகிர்தல் விதிகளை சரிபார்க்கவும்: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="373"/>
+        <location filename="../streaming/session.cpp" line="379"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>உங்கள் பிணைய இணைப்பு சிறப்பாக செயல்படவில்லை. உங்கள் வீடியோ பிட்ரேட் அமைப்பைக் குறைக்கவும் அல்லது வேகமான இணைப்பை முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="379"/>
+        <location filename="../streaming/session.cpp" line="385"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>ச்ட்ரீமைத் தொடங்கும்போது உங்கள் புரவலன் கணினியில் ஏதோ தவறு ஏற்பட்டது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="380"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>உங்கள் புரவலன் கணினியில் டி.ஆர்.எம்-பாதுகாக்கப்பட்ட உள்ளடக்கம் திறக்கப்படவில்லை என்பதை உறுதிப்படுத்திக் கொள்ளுங்கள். உங்கள் புரவலன் கணினியை மறுதொடக்கம் செய்ய முயற்சி செய்யலாம்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="385"/>
+        <location filename="../streaming/session.cpp" line="391"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>புரவலன் பிசி ஒரு அபாயகரமான வீடியோ குறியீட்டு பிழையை அறிவித்தது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="386"/>
+        <location filename="../streaming/session.cpp" line="392"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>எச்டிஆர் பயன்முறையை முடக்க முயற்சிக்கவும், ச்ட்ரீமிங் தீர்மானத்தை மாற்றவும் அல்லது உங்கள் புரவலன் கணினியின் காட்சி தெளிவுத்திறனை மாற்றவும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="393"/>
+        <location filename="../streaming/session.cpp" line="399"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>சேவையகத்துடனான கட்டுப்பாட்டு இணைப்பு துண்டிக்கப்பட்டது — நெட்வொர்க்கில் தற்காலிகத் தடங்கல் அல்லது சேவையகம் இணையத்தில் இல்லாமல் இருக்கலாம். சிறிது நேரம் கழித்து ஸ்ட்ரீமைத் தொடர (resume) முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="401"/>
+        <location filename="../streaming/session.cpp" line="407"/>
         <source>Connection terminated</source>
         <translation>இணைப்பு நிறுத்தப்பட்டது</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="402"/>
+        <location filename="../streaming/session.cpp" line="408"/>
         <source>Error code: %1</source>
         <translation>பிழை குறியீடு: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1868"/>
+        <location filename="../streaming/session.cpp" line="1922"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>%1 இல் உள்ள சியிபோர்ச் அனுபவத்தின் பதிப்பு இந்த நிலவொளியால் ஆதரிக்கப்படவில்லை. %1 இலிருந்து ச்ட்ரீம் செய்ய நீங்கள் நிலவொளியைப் புதுப்பிக்க வேண்டும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1874"/>
+        <location filename="../streaming/session.cpp" line="1928"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>தொலைநிலை டெச்க்டாப் மவுச் பயன்முறையை இயக்குவதற்கான உங்கள் தேர்வு விளையாட்டுகளில் சிக்கல்களை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1878"/>
+        <location filename="../streaming/session.cpp" line="1932"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>மென்பொருள் டிகோடிங்கை கட்டாயப்படுத்த உங்கள் அமைப்புகள் தேர்வு மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1937"/>
+        <location filename="../streaming/session.cpp" line="1991"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>உங்கள் புரவலன் பிசி குறியீட்டு HEVC ஐ ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1955"/>
+        <location filename="../streaming/session.cpp" line="2009"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் HEVC ஐ கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1907"/>
+        <location filename="../streaming/session.cpp" line="1961"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>உங்கள் புரவலன் மென்பொருள் அல்லது சி.பீ.யூ குறியீட்டு ஏ.வி 1 ஐ ஆதரிக்காது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1925"/>
+        <location filename="../streaming/session.cpp" line="1979"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் ஏ.வி 1 ஐ கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2002"/>
+        <location filename="../streaming/session.cpp" line="2056"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>உங்கள் புரவலன் பிசி எச்டிஆர் ச்ட்ரீமிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1994"/>
+        <location filename="../streaming/session.cpp" line="2048"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>H.264 கோடெக்கைப் பயன்படுத்தி HDR ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2029"/>
+        <location filename="../streaming/session.cpp" line="2083"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>இந்த கணினியின் சி.பீ.யூ எச்டிஆர் ச்ட்ரீமிங்கிற்கான ஏ.வி 1 மெயின் 10 டிகோடிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1998"/>
+        <location filename="../streaming/session.cpp" line="2052"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>இந்த கணினியின் சி.பீ.யூ எச்டிஆர் ச்ட்ரீமிங்கிற்கான 10-பிட் எவிசி அல்லது ஏ.வி 1 டிகோடிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2062"/>
+        <location filename="../streaming/session.cpp" line="2116"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>உங்கள் புரவலன் பிசி மற்றும் வாங்கி பிசி அதே எச்டிஆர் வீடியோ கோடெக்குகளை ஆதரிக்காது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2165"/>
+        <location filename="../streaming/session.cpp" line="2219"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>4K க்கு மேல் வீடியோ தீர்மானங்கள் H.264 கோடெக்கால் ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3497"/>
+        <location filename="../streaming/session.cpp" line="3567"/>
         <source>Host returned error: %1</source>
         <translation>புரவலன் திரும்பிய பிழை: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1974"/>
+        <location filename="../streaming/session.cpp" line="2028"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் H.264 ஐ கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="733"/>
+        <location filename="../streaming/session.cpp" line="609"/>
+        <source>This game doesn&apos;t use VR controllers - switched to Xbox controller mode</source>
+        <translation>இந்த விளையாட்டு VR கட்டுப்படுத்திகளைப் பயன்படுத்தாது - Xbox கட்டுப்படுத்தி பயன்முறைக்கு மாற்றப்பட்டது</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="612"/>
+        <source>Xbox controller mode: on</source>
+        <translation>Xbox கட்டுப்படுத்தி பயன்முறை: இயக்கம்</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="615"/>
+        <source>Xbox controller mode: off (VR controllers)</source>
+        <translation>Xbox கட்டுப்படுத்தி பயன்முறை: முடக்கம் (VR கட்டுப்படுத்திகள்)</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="618"/>
+        <source>Xbox controller mode unavailable: install ViGEmBus on the host</source>
+        <translation>Xbox கட்டுப்படுத்தி பயன்முறை கிடைக்கவில்லை: புரவலனில் ViGEmBus ஐ நிறுவவும்</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="767"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>%1-இல் வேறொரு ஹெட்செட் SteamVR-ஐப் பயன்படுத்துகிறது (எடுத்துக்காட்டாக Steam Link). அதைத் துண்டித்துவிட்டு மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="735"/>
+        <location filename="../streaming/session.cpp" line="769"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>%1-இல் VipleStream இல்லாமல் ஒரு VR விளையாட்டு ஏற்கனவே இயங்குகிறது. அதை மூடிவிட்டு மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="737"/>
+        <location filename="../streaming/session.cpp" line="771"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>%1-இல் SteamVR மறுதொடக்கம் செய்யப்பட வேண்டும், ஆனால் அங்கே ஒரு VR விளையாட்டு இன்னும் இயங்குகிறது. முதலில் விளையாட்டை மூடவும் (பயன்பாட்டுப் பட்டியலில் &quot;விளையாட்டை விட்டு&quot;), பிறகு மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="740"/>
+        <location filename="../streaming/session.cpp" line="774"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>%1-இல் SteamVR பாதுகாப்புப் பயன்முறையில் தொடங்கி VipleStream இயக்கியைத் தடுத்தது. புரவலனில் SteamVR-ஐ மறுதொடக்கம் செய்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="742"/>
+        <location filename="../streaming/session.cpp" line="776"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>%1-இல் SteamVR நிறுவப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="744"/>
+        <location filename="../streaming/session.cpp" line="778"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>%1-இல் Steam-இல் உள்நுழையவில்லை. புரவலனில் Steam-இல் உள்நுழைந்து (எடுத்துக்காட்டாக டெஸ்க்டாப் பயன்முறையில்) மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="746"/>
+        <location filename="../streaming/session.cpp" line="780"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>%1-இல் யாரும் Windows-இல் உள்நுழையவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="748"/>
+        <location filename="../streaming/session.cpp" line="782"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 Windows உள்நுழைவு அல்லது பூட்டுத் திரையில் உள்ளது. புரவலனில் உள்நுழைந்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="751"/>
+        <location filename="../streaming/session.cpp" line="785"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>%1-இல் SteamVR உரிய நேரத்தில் தொடங்கவில்லை. மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="753"/>
+        <location filename="../streaming/session.cpp" line="787"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1-ஆல் VR-ஐத் தொடங்க முடியவில்லை (பிழை %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="778"/>
+        <location filename="../streaming/session.cpp" line="812"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 VR ஸ்ட்ரீமிங்கை வழங்கவில்லை. PCVR இயக்கப்பட்ட VipleStream Server 2.0 அல்லது அதற்குப் பிந்தைய பதிப்பு தேவை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="788"/>
+        <location filename="../streaming/session.cpp" line="822"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1-ஐ ரிலே வழியாக மட்டுமே அணுக முடியும். VR ஸ்ட்ரீமிங்கிற்கு நேரடி இணைப்பு தேவை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="796"/>
+        <location filename="../streaming/session.cpp" line="830"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>வீடியோ கோடெக் அமைப்பு AV1-ஐக் கட்டாயப்படுத்துகிறது, ஆனால் VR ஸ்ட்ரீமிங்கிற்கு HEVC அல்லது H.264 தேவை. அமைப்புகளில் வீடியோ கோடெக்கை மாற்றவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1817"/>
+        <location filename="../streaming/session.cpp" line="1330"/>
+        <source>Failed to initialize video subsystem: %1</source>
+        <translation>வீடியோ துணை அமைப்பைத் தொடங்க முடியவில்லை: %1</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="1415"/>
+        <source>Failed to create window for hardware decode test: %1</source>
+        <translation>வன்பொருள் டிகோட் சோதனைக்கான சாளரத்தை உருவாக்க முடியவில்லை: %1</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="1521"/>
+        <source>Invalid stream frame rate (%1 FPS).</source>
+        <translation>தவறான ஸ்ட்ரீம் பிரேம் வீதம் (%1 FPS).</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="1867"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>VR ஸ்ட்ரீமிங்கிற்கான 8-பிட் HEVC அல்லது H.264 வீடியோ டிகோடர் இந்தச் சாதனத்தில் இல்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1884"/>
+        <location filename="../streaming/session.cpp" line="1896"/>
+        <source>Failed to initialize video decoder.</source>
+        <translation>வீடியோ டிகோடரைத் தொடங்க முடியவில்லை.</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="1938"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>உங்கள் ஹோஸ்ட் மென்பொருள் அல்லது GPU, PyroWave குறியாக்கத்தை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1895"/>
+        <location filename="../streaming/session.cpp" line="1949"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>உங்கள் கிளையண்ட் GPU, Vulkan 1.3 மூலம் PyroWave குறிவிலக்கத்தை ஆதரிக்கவில்லை. HEVC/H.264-க்கு மாறுகிறது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1984"/>
+        <location filename="../streaming/session.cpp" line="2038"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>உங்கள் புரவலன் பிசி மற்றும் வாங்கி பிசி அதே வீடியோ கோடெக்குகளை ஆதரிக்காது. இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1987"/>
+        <location filename="../streaming/session.cpp" line="2041"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>உங்கள் கிளையன்ட் சி.பீ.யூ எச் .264 டிகோடிங்கை ஆதரிக்கவில்லை. இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2017"/>
+        <location filename="../streaming/session.cpp" line="2071"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>இந்த PC-யின் GPU, HDR ஸ்ட்ரீமிங்கிற்கான PyroWave Main10 குறிவிலக்கத்தை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2035"/>
-        <location filename="../streaming/session.cpp" line="2053"/>
+        <location filename="../streaming/session.cpp" line="2089"/>
+        <location filename="../streaming/session.cpp" line="2107"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் எச்.டி.ஆரை கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2047"/>
+        <location filename="../streaming/session.cpp" line="2101"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>இந்த கணினியின் சி.பீ.யூ எச்.டி.ஆர் ச்ட்ரீமிங்கிற்கான HEVC மெயின் 10 டிகோடிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2069"/>
+        <location filename="../streaming/session.cpp" line="2123"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>உங்கள் புரவலன் பிசி YUV 4:4:4 ச்ட்ரீமிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2077"/>
+        <location filename="../streaming/session.cpp" line="2131"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>தேர்ந்தெடுக்கப்பட்ட வீடியோ கோடெக்கிற்கான உங்கள் புரவலன் பிசி YUV 4:4:4 ச்ட்ரீமிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2092"/>
+        <location filename="../streaming/session.cpp" line="2146"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>சி.பீ.யூ உதவி இல்லாமல் YUV 4:4:4 ஐ கட்டாயப்படுத்த உங்கள் தேர்வு காரணமாக மென்பொருள் டிகோடிங்கைப் பயன்படுத்துதல். இது மோசமான ச்ட்ரீமிங் செயல்திறனை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2098"/>
+        <location filename="../streaming/session.cpp" line="2152"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>இந்தக் கணினியின் சி.பீ.யூ YUV 4:4:4 தேர்ந்தெடுக்கப்பட்ட வீடியோ கோடெக்கிற்கான டிகோடிங்கை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2107"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>4K ச்ட்ரீமிங்கிற்கு சியிபோர்ச் பட்டறிவு 3.0 அல்லது அதற்கு மேற்பட்டது தேவை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2124"/>
+        <location filename="../streaming/session.cpp" line="2178"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>நீங்கள் தேர்ந்தெடுக்கப்பட்ட சரவுண்ட் ஒலி அமைப்பை தற்போதைய ஆடியோ சாதனத்தால் ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2130"/>
+        <location filename="../streaming/session.cpp" line="2184"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>ஆடியோ சாதனத்தைத் திறக்கத் தவறிவிட்டது. இந்த அமர்வின் போது ஆடியோ கிடைக்காது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2139"/>
+        <location filename="../streaming/session.cpp" line="2193"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>ஒரு HID சாதனம் பதிலளிக்கவில்லை (%1). இந்த அமர்வில் கேம்பேட் உள்ளீடும் Steam Controller பாஸ்த்ரூவும் முடக்கப்பட்டுள்ளன. சாதனத்தைத் துண்டித்து மீண்டும் இணைத்து, ஸ்ட்ரீமை மீண்டும் தொடங்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2143"/>
+        <location filename="../streaming/session.cpp" line="2197"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>இணைக்கப்பட்ட கேம்பேடிற்கு மேப்பிங் இல்லை, பயன்படுத்தக்கூடியதாக இருக்காது. இதைத் தீர்க்க மூன்லைட் உதவியைப் பார்வையிடவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2161"/>
+        <location filename="../streaming/session.cpp" line="2215"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>உங்கள் புரவலன் கணினியின் சி.பீ.யூ 4K க்கு மேல் ச்ட்ரீமிங் வீடியோ தீர்மானங்களை ஆதரிக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2179"/>
+        <location filename="../streaming/session.cpp" line="2233"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>இந்த கணினியின் சி.பீ.யுவில் வன்பொருள் டிகோடிங் ஆதரவைக் காணவில்லை என்பதால் வன்பொருள் டிகோடிங்கை கட்டாயப்படுத்துவதற்கான உங்கள் தேர்வை திருப்திப்படுத்த முடியாது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2182"/>
+        <location filename="../streaming/session.cpp" line="2236"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>உங்கள் கோடெக் தேர்வு மற்றும் படை வன்பொருள் டிகோடிங் அமைப்பு பொருந்தாது. இந்த கணினியின் சி.பீ.யுவின் நீங்கள் தேர்ந்தெடுத்த கோடெக்கை டிகோடிங் செய்வதற்கான உதவி இல்லை.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3013"/>
+        <location filename="../streaming/session.cpp" line="3082"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>VR அமர்வு தொடங்கிய பிறகு XR ரன்டைம் %1, எனவே ஸ்ட்ரீம் முடிக்கப்பட்டது.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3014"/>
+        <location filename="../streaming/session.cpp" line="3083"/>
         <source>exited</source>
         <translation>வெளியேறியது</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3014"/>
+        <location filename="../streaming/session.cpp" line="3083"/>
         <source>stopped responding or was lost</source>
         <translation>பதிலளிப்பதை நிறுத்தியது அல்லது தொலைந்தது</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3169"/>
+        <location filename="../streaming/session.cpp" line="3239"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>இந்த ஹெட்செட்டில் VR-ஐத் தொடங்க முடியவில்லை (%1). SteamVR இயங்குகிறதா என்பதை உறுதிசெய்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3178"/>
+        <location filename="../streaming/session.cpp" line="3248"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>ஹெட்செட்டின் VR ரன்டைம் உரிய நேரத்தில் பதிலளிக்கவில்லை. SteamVR இயங்குகிறதா என்பதை உறுதிசெய்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3393"/>
+        <location filename="../streaming/session.cpp" line="3463"/>
         <source>Failed to launch via relay proxy</source>
         <translation>ரிலே ப்ராக்ஸி வழியாகத் தொடங்க முடியவில்லை</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3469"/>
+        <location filename="../streaming/session.cpp" line="3539"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 VR அமர்வைத் தொடங்கவில்லை. புரவலனில் PCVR இயக்கப்பட்டுள்ளதா என்பதை உறுதிசெய்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3478"/>
-        <location filename="../streaming/session.cpp" line="3485"/>
+        <location filename="../streaming/session.cpp" line="3548"/>
+        <location filename="../streaming/session.cpp" line="3555"/>
         <source>Connection to host failed</source>
         <translation>புரவலனுடன் இணைப்பு தோல்வியடைந்தது</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4794"/>
+        <location filename="../streaming/session.cpp" line="4956"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>வீடியோ டிகோடரை துவக்க முடியவில்லை. உங்கள் ச்ட்ரீமிங் அமைப்புகளை சரிபார்த்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
@@ -1367,43 +1437,43 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>%1 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1651"/>
+        <location filename="../gui/SettingsView.qml" line="1681"/>
         <source>Video bitrate:</source>
         <translation>வீடியோ பிட்ரேட்:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1659"/>
+        <location filename="../gui/SettingsView.qml" line="1689"/>
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>மெதுவான இணைப்புகளில் பிட்ரேட்டை குறைக்கவும். படத்தின் தரத்தை அதிகரிக்க பிட்ரேட்டை உயர்த்தவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1681"/>
+        <location filename="../gui/SettingsView.qml" line="1711"/>
         <source>Video bitrate: %1 Mbps</source>
         <translation>வீடியோ பிட்ரேட்: %1 எம்.பி.பி.எச்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1711"/>
+        <location filename="../gui/SettingsView.qml" line="1758"/>
         <source>Display mode</source>
         <translation>காட்சி முறை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1741"/>
+        <location filename="../gui/SettingsView.qml" line="1788"/>
         <source>(Recommended)</source>
         <translation>(பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1722"/>
-        <location filename="../gui/SettingsView.qml" line="2291"/>
+        <location filename="../gui/SettingsView.qml" line="1769"/>
+        <location filename="../gui/SettingsView.qml" line="2338"/>
         <source>Fullscreen</source>
         <translation>முழு திரை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1791"/>
+        <location filename="../gui/SettingsView.qml" line="1838"/>
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>ஃபுல்ச்கிரீன் பொதுவாக சிறந்த செயல்திறனை வழங்குகிறது, ஆனால் எல்லையற்ற சாளரங்கள் மேகோச் இடைவெளிகள், ஆல்ட்+தாவல், திரைக்காட்சி கருவிகள், திரையில் மேலடுக்குகள் போன்ற அம்சங்களுடன் சிறப்பாக செயல்படக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1727"/>
+        <location filename="../gui/SettingsView.qml" line="1774"/>
         <source>Borderless windowed</source>
         <translation>எல்லையற்ற சாளர</translation>
     </message>
@@ -1448,7 +1518,7 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>Vulkan [சோதனை] — உள்ளமைந்த பிரேம் இடைச்செருகல்; சில கணினிகளில் (AMD APU / பழைய NV இயக்கி) இணக்கச் சிக்கல்கள் உள்ளன</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1339"/>
+        <location filename="../gui/SettingsView.qml" line="1349"/>
         <source>Auto (recommended): same as upstream Moonlight&apos;s hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
@@ -1461,27 +1531,27 @@ Direct3D 11: D3D11VA-வில் வெளிப்படையாக நில
 Vulkan [சோதனை]: கட்டாய Vulkan-first cascade + நேட்டிவ் Vulkan ரெண்டரிங் பைப்லைன் + dual-present; உள்ளமைந்த பிரேம் இடைச்செருகல் எஞ்சின் (Generic-க்குச் சமம்). அறியப்பட்ட சிக்கல்கள்: NV இயக்கி 596.36-இல் நேட்டிவ் vkCmdDecodeVideoKHR ONLY பயன்முறையில் NVDEC device-lost ஏற்படுத்துகிறது; AMD APU-வில் video session memory bind 226 MB கட்டத்தில் இயக்கி செயலிழக்கிறது; PARALLEL+SW upload பாதையின் செயல்திறன் குறைவு (80+ ms/பிரேம்). நிலையானதும் பரிந்துரைக்கப்பட்ட விருப்பத்திற்குத் திரும்பும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1350"/>
+        <location filename="../gui/SettingsView.qml" line="1360"/>
         <source>Linux video output (frontend)</source>
         <translation>Linux வீடியோ காட்சிப்படுத்தல் (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1365"/>
+        <location filename="../gui/SettingsView.qml" line="1375"/>
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>தானியங்கி — பரிந்துரைக்கப்படுகிறது: aarch64 அல்லது Zink எனில் Vulkan, மற்றவை பழைய வரிசையைத் தக்கவைக்கும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1366"/>
+        <location filename="../gui/SettingsView.qml" line="1376"/>
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — காட்சிப்படுத்தலுக்கு Vulkan-க்கு முன்னுரிமை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1367"/>
+        <location filename="../gui/SettingsView.qml" line="1377"/>
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — பழைய வரிசையைத் தக்கவை (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1383"/>
+        <location filename="../gui/SettingsView.qml" line="1393"/>
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -1498,107 +1568,107 @@ Vulkan: எப்போதும் Vulkan (libplacebo) காட்சிப்
 EGL: பழைய வரிசையைத் தக்கவைக்கும், Vulkan-க்குத் தனி முன்னுரிமை இல்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1439"/>
+        <location filename="../gui/SettingsView.qml" line="1449"/>
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>Vulkan ரெண்டரர் உள்ளமைந்த பிரேம் இடைச்செருகல் எஞ்சினைப் பயன்படுத்துகிறது (Generic-க்குச் சமம்). வேறு எஞ்சினைத் தேர்ந்தெடுக்க Direct3D 11-க்கு மாறவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1457"/>
+        <location filename="../gui/SettingsView.qml" line="1467"/>
         <source>Interpolation mode:</source>
         <translation>இடைச்செருகல் பயன்முறை:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1463"/>
+        <location filename="../gui/SettingsView.qml" line="1473"/>
         <source>Active (recommended)</source>
         <translation>செயலில் (பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1474"/>
+        <location filename="../gui/SettingsView.qml" line="1494"/>
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>சேவையகம் UI fps / 2 (உயர் புதுப்பிப்பு வீதத் திரைகளுக்கு / 3) அனுப்பும், கிளையன்ட் எப்போதும் dual/triple இடைச்செருகல் செய்யும். சேவையகச் சுமை குறைவு, கிளையன்ட் GPU வலுவாக இருக்க வேண்டும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1478"/>
+        <location filename="../gui/SettingsView.qml" line="1498"/>
         <source>Passive</source>
         <translation>செயலற்ற</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1489"/>
+        <location filename="../gui/SettingsView.qml" line="1519"/>
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>சேவையகம் முழு UI fps-ஐ அனுப்பும். கிளையன்ட் recv%-க்கு ஏற்ப ratio-வை மாறும் வகையில் உயர்த்தும்: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. சேவையகம் எப்போதும் முழு வீதத்தில் அனுப்ப முடியாதபோது பொருத்தமானது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1585"/>
+        <location filename="../gui/SettingsView.qml" line="1615"/>
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY (ஒருங்கிணைந்த / பழைய GPU-கள்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1589"/>
+        <location filename="../gui/SettingsView.qml" line="1619"/>
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN (கண்டறியப்படவில்லை; கண்டறிய கிளையன்டை மீண்டும் தொடங்கவும்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1591"/>
+        <location filename="../gui/SettingsView.qml" line="1621"/>
         <source>(not detected yet)</source>
         <translation>(இன்னும் கண்டறியப்படவில்லை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1595"/>
+        <location filename="../gui/SettingsView.qml" line="1625"/>
         <source>(not measured)</source>
         <translation>(அளவிடப்படவில்லை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1596"/>
+        <location filename="../gui/SettingsView.qml" line="1626"/>
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>FRUC தானியங்கி நிலைப்படுத்தல் (Vulkan unified autotier v1.4.127):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1597"/>
+        <location filename="../gui/SettingsView.qml" line="1627"/>
         <source>   GPU: </source>
         <translation>   GPU: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1598"/>
+        <location filename="../gui/SettingsView.qml" line="1628"/>
         <source>   Detected tier: </source>
         <translation>   கண்டறியப்பட்ட tier: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1599"/>
+        <location filename="../gui/SettingsView.qml" line="1629"/>
         <source>   Benchmark: </source>
         <translation>   benchmark: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1600"/>
+        <location filename="../gui/SettingsView.qml" line="1630"/>
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>இயக்க நேரத்தில் 7 நிலைகளில் (T-1..T5) தானாக ஏறும்/இறங்கும்:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1603"/>
+        <location filename="../gui/SettingsView.qml" line="1633"/>
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (NVOF GPU, chain சற்றுக் கனமானது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1604"/>
+        <location filename="../gui/SettingsView.qml" line="1634"/>
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (NVOF இல்லாத AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1606"/>
+        <location filename="../gui/SettingsView.qml" line="1636"/>
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (மிகக் குறைந்த FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1607"/>
+        <location filename="../gui/SettingsView.qml" line="1637"/>
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = FRUC இடைநிறுத்தம் (GPU ஈடுகொடுக்கவில்லை, 5 நிமிடத்தில் மீண்டும் முயற்சி)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1619"/>
+        <location filename="../gui/SettingsView.qml" line="1649"/>
         <source>Edge MV threshold:</source>
         <translation>விளிம்பு MV வரம்பு (Edge MV threshold):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1635"/>
+        <location filename="../gui/SettingsView.qml" line="1665"/>
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -1611,228 +1681,238 @@ Start with the default; if interpolated edges look blocky, lower it to 4-6.</sou
 முதலில் இயல்புநிலையைப் பயன்படுத்தவும்; இடைச்செருகப்பட்ட விளிம்புகளில் கட்டங்கள் தெரிந்தால் 4-6 ஆகக் குறைக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1697"/>
+        <location filename="../gui/SettingsView.qml" line="1727"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>இயல்புநிலையைப் பயன்படுத்து (%1 Mbps)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1732"/>
-        <location filename="../gui/SettingsView.qml" line="2283"/>
+        <location filename="../gui/SettingsView.qml" line="1742"/>
+        <source>Adjust bitrate automatically while streaming</source>
+        <translation>ஸ்ட்ரீம் செய்யும்போது பிட்ரேட்டை தானாக சரிசெய்யவும்</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="1752"/>
+        <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers. The bitrate above is the maximum.</source>
+        <translation>நெட்வொர்க் பாக்கெட்டுகளை இழக்கும்போது பிட்ரேட்டைக் குறைக்கிறது, நெட்வொர்க் மீண்டதும் மீண்டும் உயர்த்துகிறது. மேலே உள்ள பிட்ரேட்டே அதிகபட்சம்.</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="1779"/>
+        <location filename="../gui/SettingsView.qml" line="2330"/>
         <source>Windowed</source>
         <translation>சாளரம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1798"/>
+        <location filename="../gui/SettingsView.qml" line="1845"/>
         <source>V-Sync</source>
         <translation>வி-ஒத்திசைவு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1808"/>
+        <location filename="../gui/SettingsView.qml" line="1855"/>
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>V-Sync ஐ முடக்குவது துணை-சட்டரீதியான வழங்குதல் தாமதத்தை அனுமதிக்கிறது, ஆனால் இது புலப்படும் கிழிப்பைக் காட்டலாம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1815"/>
+        <location filename="../gui/SettingsView.qml" line="1862"/>
         <source>Frame pacing</source>
         <translation>பிரேம் வேகக்கட்டுப்பாடு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1838"/>
+        <location filename="../gui/SettingsView.qml" line="1885"/>
         <source>Audio Settings</source>
         <translation>ஆடியோ அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1873"/>
+        <location filename="../gui/SettingsView.qml" line="1920"/>
         <source>Stereo</source>
         <translation>ச்டீரியோ</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1877"/>
+        <location filename="../gui/SettingsView.qml" line="1924"/>
         <source>5.1 surround sound</source>
         <translation>5.1 சுற்று ஒலி</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1881"/>
+        <location filename="../gui/SettingsView.qml" line="1928"/>
         <source>7.1 surround sound</source>
         <translation>7.1 சரவுண்ட் ஒலி</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1895"/>
+        <location filename="../gui/SettingsView.qml" line="1942"/>
         <source>Mute host PC speakers while streaming</source>
         <translation>ச்ட்ரீமிங் செய்யும் போது முடக்கு புரவலன் பிசி ச்பீக்கர்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1905"/>
+        <location filename="../gui/SettingsView.qml" line="1952"/>
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>இந்த அமைப்பு நடைமுறைக்கு வர தற்போது முன்னேற்றத்தில் உள்ள எந்த விளையாட்டையும் நீங்கள் மறுதொடக்கம் செய்ய வேண்டும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2027"/>
+        <location filename="../gui/SettingsView.qml" line="2074"/>
         <source>UI Settings</source>
         <translation>இடைமுகம் அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2072"/>
+        <location filename="../gui/SettingsView.qml" line="2119"/>
         <source>Language</source>
         <translation>மொழி</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2098"/>
+        <location filename="../gui/SettingsView.qml" line="2145"/>
         <source>Automatic</source>
         <translation>தானியங்கி</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2250"/>
+        <location filename="../gui/SettingsView.qml" line="2297"/>
         <source>GUI display mode</source>
         <translation>GUI காட்சி முறை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2287"/>
+        <location filename="../gui/SettingsView.qml" line="2334"/>
         <source>Maximized</source>
         <translation>அதிகபட்சம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2315"/>
+        <location filename="../gui/SettingsView.qml" line="2362"/>
         <source>Show configuration warnings</source>
         <translation>உள்ளமைவு எச்சரிக்கைகளைக் காட்டு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2371"/>
+        <location filename="../gui/SettingsView.qml" line="2418"/>
         <source>Input Settings</source>
         <translation>உள்ளீட்டு அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2392"/>
+        <location filename="../gui/SettingsView.qml" line="2439"/>
         <source>This enables seamless mouse control without capturing the client&apos;s mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>இது வாடிக்கையாளரின் மவுச் கர்சரைக் கைப்பற்றாமல் தடையற்ற சுட்டி கட்டுப்பாட்டை செயல்படுத்துகிறது. தொலைநிலை டெச்க்டாப் பயன்பாட்டிற்கு இது ஏற்றது, ஆனால் பெரும்பாலான விளையாட்டுகளில் வேலை செய்யாது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2394"/>
+        <location filename="../gui/SettingsView.qml" line="2441"/>
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>குறிப்பு: சியிபோர்ச் அனுபவத்தில் ஒரு பிழை காரணமாக, உங்கள் புரவலன் கணினியில் பல மானிட்டர்கள் இருந்தால் இந்த விருப்பம் சரியாக வேலை செய்யாது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2779"/>
+        <location filename="../gui/SettingsView.qml" line="2826"/>
         <source>Enable HDR (Experimental)</source>
         <translation>HDR ஐ இயக்கவும் (சோதனை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2794"/>
+        <location filename="../gui/SettingsView.qml" line="2844"/>
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>ச்ட்ரீம் எச்டிஆர்-திறன் கொண்டதாக இருக்கும், ஆனால் சில விளையாட்டுகளுக்கு எச்டிஆர் பயன்முறையை இயக்க உங்கள் புரவலன் கணினியில் எச்டிஆர் மானிட்டர் தேவைப்படலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2796"/>
+        <location filename="../gui/SettingsView.qml" line="2846"/>
         <source>HDR streaming is not supported on this PC.</source>
         <translation>இந்த கணினியில் எச்டிஆர் ச்ட்ரீமிங் ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2848"/>
+        <location filename="../gui/SettingsView.qml" line="2898"/>
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>VipleStream-Server புரவலன்களுடன் பயன்படுத்த மிக உயர்ந்த வீடியோ பிட்ரேட்களைத் திறக்கிறது. ஈதர்நெட் LAN இணைப்பில் ஸ்ட்ரீம் செய்யும்போது மட்டுமே பயன்படுத்த வேண்டும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2886"/>
+        <location filename="../gui/SettingsView.qml" line="2936"/>
         <source>Show performance stats while streaming</source>
         <translation>ச்ட்ரீமிங் செய்யும் போது செயல்திறன் புள்ளிவிவரங்களைக் காட்டு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2896"/>
+        <location filename="../gui/SettingsView.qml" line="2946"/>
         <source>Display real-time stream performance information while streaming.</source>
         <translation>ச்ட்ரீமிங் செய்யும் போது நிகழ்நேர ச்ட்ரீம் செயல்திறன் தகவலைக் காண்பி.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2897"/>
+        <location filename="../gui/SettingsView.qml" line="2947"/>
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>Ctrl+Alt+Shift+S ஐப் பயன்படுத்தி ச்ட்ரீமிங் செய்யும் போது எந்த நேரத்திலும் அதை மாற்றலாம் அல்லது+L1+R1+X ஐத் தேர்ந்தெடுக்கலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2898"/>
+        <location filename="../gui/SettingsView.qml" line="2948"/>
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>செயல்திறன் மேலடுக்கு நீராவி இணைப்பு அல்லது ராச்பெர்ரி பையில் ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2477"/>
+        <location filename="../gui/SettingsView.qml" line="2524"/>
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>தொடுதிரையை மெய்நிகர் டிராக்பேடாகப் பயன்படுத்தவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2494"/>
+        <location filename="../gui/SettingsView.qml" line="2541"/>
         <source>Swap left and right mouse buttons</source>
         <translation>இடது மற்றும் வலது சுட்டி பொத்தான்களை மாற்றவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2506"/>
+        <location filename="../gui/SettingsView.qml" line="2553"/>
         <source>Reverse mouse scrolling direction</source>
         <translation>தலைகீழ் சுட்டி ச்க்ரோலிங் திசை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2520"/>
+        <location filename="../gui/SettingsView.qml" line="2567"/>
         <source>Gamepad Settings</source>
         <translation>கேம்பேட் அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2530"/>
+        <location filename="../gui/SettingsView.qml" line="2577"/>
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>A/B மற்றும் X/y கேம்பேட் பொத்தான்களை மாற்றவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2540"/>
+        <location filename="../gui/SettingsView.qml" line="2587"/>
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>இது கேம்பேட்களை நிண்டெண்டோ-பாணி பொத்தானை அமைப்பாக மாற்றுகிறது</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2546"/>
+        <location filename="../gui/SettingsView.qml" line="2593"/>
         <source>Force gamepad #1 always connected</source>
         <translation>கேம்பேட் #1 எப்போதும் இணைக்கப்பட்டுள்ளது</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2556"/>
+        <location filename="../gui/SettingsView.qml" line="2603"/>
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>இந்த கணினியுடன் உண்மையில் கேம்பேடுகள் எதுவும் இணைக்கப்படாவிட்டாலும், ஓச்டுடன் எப்போதும் இணைந்திருக்க ஒரு கேம்பேடை கட்டாயப்படுத்துகிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2393"/>
+        <location filename="../gui/SettingsView.qml" line="2440"/>
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>Ctrl+Alt+Shift+M ஐப் பயன்படுத்தி ச்ட்ரீமிங் செய்யும் போது இதை மாற்றலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2564"/>
+        <location filename="../gui/SettingsView.qml" line="2611"/>
         <source>Enable mouse control with gamepads by holding the &apos;Start&apos; button</source>
         <translation>&apos;தொடக்க&apos; பொத்தானை வைத்திருப்பதன் மூலம் கேம்பேடுகளுடன் சுட்டி கட்டுப்பாட்டை இயக்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1931"/>
+        <location filename="../gui/SettingsView.qml" line="1978"/>
         <source>Host Settings</source>
         <translation>புரவலன் அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2658"/>
+        <location filename="../gui/SettingsView.qml" line="2705"/>
         <source>Advanced Settings</source>
         <translation>மேம்பட்ட அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1848"/>
+        <location filename="../gui/SettingsView.qml" line="1895"/>
         <source>Audio configuration</source>
         <translation>ஆடியோ உள்ளமைவு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2304"/>
+        <location filename="../gui/SettingsView.qml" line="2351"/>
         <source>Show connection quality warnings</source>
         <translation>இணைப்பு தர எச்சரிக்கைகளைக் காட்டு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2327"/>
+        <location filename="../gui/SettingsView.qml" line="2374"/>
         <source>Discord Rich Presence integration</source>
         <translation>முரண்பாடு பணக்கார இருப்பு ஒருங்கிணைப்பு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2557"/>
+        <location filename="../gui/SettingsView.qml" line="2604"/>
         <source>Only enable this option when streaming a game that doesn&apos;t support gamepads being connected after startup.</source>
         <translation>தொடக்கத்திற்குப் பிறகு கேம்பேடுகள் இணைக்கப்படுவதை ஆதரிக்காத ஒரு விளையாட்டை ச்ட்ரீமிங் செய்யும் போது மட்டுமே இந்த விருப்பத்தை இயக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2382"/>
+        <location filename="../gui/SettingsView.qml" line="2429"/>
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>விளையாட்டுகளுக்கு பதிலாக ரிமோட் டெச்க்டாப்பிற்கு சுட்டியை மேம்படுத்தவும்</translation>
     </message>
@@ -1866,42 +1946,42 @@ Start with the default; if interpolated edges look blocky, lower it to 4-6.</sou
         <translation>60 எஃப்.பி.எச்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2343"/>
+        <location filename="../gui/SettingsView.qml" line="2390"/>
         <source>Keep the display awake while streaming</source>
         <translation>ச்ட்ரீமிங் செய்யும் போது காட்சியை விழித்திருங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2353"/>
+        <location filename="../gui/SettingsView.qml" line="2400"/>
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>ச்கிரீன்சேவர் தொடங்குவதைத் தடுக்கிறது அல்லது ச்ட்ரீமிங் செய்யும் போது காட்சி தூங்குவதைத் தடுக்கிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2404"/>
+        <location filename="../gui/SettingsView.qml" line="2451"/>
         <source>Capture system keyboard shortcuts</source>
         <translation>கணினி விசைப்பலகை குறுக்குவழிகளைப் பிடிக்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2412"/>
+        <location filename="../gui/SettingsView.qml" line="2459"/>
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>இது ச்ட்ரீமிங் செய்யும் போது கிளையன்ட் OS ஆல் கையாளப்படும் Alt+TAB போன்ற கணினி அளவிலான விசைப்பலகை குறுக்குவழிகளைக் கைப்பற்ற உதவுகிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2442"/>
+        <location filename="../gui/SettingsView.qml" line="2489"/>
         <source>in fullscreen</source>
         <translation>முழுத் திரையில்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2446"/>
+        <location filename="../gui/SettingsView.qml" line="2493"/>
         <source>always</source>
         <translation>எப்போதும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2487"/>
+        <location filename="../gui/SettingsView.qml" line="2534"/>
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>சரிபார்க்கும்போது, தொடுதிரை டிராக்பேட் போல செயல்படுகிறது. தேர்வு செய்யப்படும்போது, தொடுதிரை சுட்டி சுட்டிக்காட்டி நேரடியாகக் கட்டுப்படுத்தும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1941"/>
+        <location filename="../gui/SettingsView.qml" line="1988"/>
         <source>Optimize game settings for streaming</source>
         <translation>ச்ட்ரீமிங்கிற்கான விளையாட்டு அமைப்புகளை மேம்படுத்தவும்</translation>
     </message>
@@ -1916,37 +1996,37 @@ Start with the default; if interpolated edges look blocky, lower it to 4-6.</sou
         <translation>தானியங்கி (இந்தத் திரை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1389"/>
+        <location filename="../gui/SettingsView.qml" line="1399"/>
         <source>Frame interpolation (FRUC)</source>
         <translation>பிரேம் இடைச்செருகல் (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1429"/>
+        <location filename="../gui/SettingsView.qml" line="1439"/>
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>ஒவ்வொரு உண்மையான பிரேமுக்கும் இடையே ஒரு இடைச்செருகப்பட்ட பிரேமைச் சேர்த்து, வெளியீட்டு பிரேம் வீதத்தை இரட்டிப்பாக்குகிறது. சேவையகத்தின் உண்மையான பிரேம் வீதம் பாதியாகிறது (எ.கா. 120 FPS அமைப்பு → 60 FPS கோரப்படும் → 120 FPS வெளியீடு).</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1519"/>
+        <location filename="../gui/SettingsView.qml" line="1549"/>
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute (பரிந்துரைக்கப்படுகிறது — மிகக் குறைந்த தாமதம், எந்த GPU-வும்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1520"/>
+        <location filename="../gui/SettingsView.qml" line="1550"/>
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow (வன்பொருள் flow + warp; NVIDIA RTX 20+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1521"/>
+        <location filename="../gui/SettingsView.qml" line="1551"/>
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — RIFE ML மாதிரி (வலுவான GPU தேவை; Tensor Core RTX 30/40+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1522"/>
+        <location filename="../gui/SettingsView.qml" line="1552"/>
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE (சோதனை; எல்லா உற்பத்தியாளர்களும்: NV/AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1532"/>
+        <location filename="../gui/SettingsView.qml" line="1562"/>
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
@@ -1959,74 +2039,74 @@ NVIDIA Optical Flow: Turing+ (RTX 20/30/40 தொடர்) இல் உள்�
 DirectML: உடன் வரும் RIFE 4.25 lite ONNX மாதிரியை D3D12 DirectML EP-இல் இயக்குகிறது — *உண்மையான* இயக்க ஈடுசெய்த ML இடைச்செருகல், இயக்கமிக்க உள்ளடக்கத்தில் சிறந்த காட்சித் தரம். ஒவ்வொரு செயல்பாட்டுக்குமான kernel-launch மேல்செலவு (~25 ms அடிப்படை, தெளிவுத்திறனைப் பொருட்படுத்தாமல்) காரணமாக, 720p+ இல் நிகழ்நேரத்தில் ஈடுகொடுக்க Tensor Core வகை GPU (RTX 30/40 நடுத்தர வகை அல்லது அதற்கு மேல்) தேவை. வலுக்குறைந்த GPU-களில் கிளையன்ட் inference தெளிவுத்திறனைத் தானாகப் படிப்படியாகக் குறைக்கும் (1080p → 720p → 540p → 480p → 360p), 360p கூட பிரேம் வரவுக்குள் பொருந்தவில்லை என்றால் Generic-க்குத் திரும்பும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1601"/>
+        <location filename="../gui/SettingsView.qml" line="1631"/>
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1602"/>
+        <location filename="../gui/SettingsView.qml" line="1632"/>
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1605"/>
+        <location filename="../gui/SettingsView.qml" line="1635"/>
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (PERFORMANCE GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1828"/>
+        <location filename="../gui/SettingsView.qml" line="1875"/>
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>மிக முன்னதாக வரும் பிரேம்களைத் தாமதப்படுத்துவதன் மூலம் பிரேம் வேகக்கட்டுப்பாடு சிறு தடுமாற்றங்களைக் குறைக்கிறது. V-Sync முடக்கத்திலும் இது வேலை செய்யும், எனவே குறைந்த தாமதத்தைத் தக்கவைத்தபடியே சீரற்ற பிரேம் வருகையை மென்மையாக்கலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1911"/>
+        <location filename="../gui/SettingsView.qml" line="1958"/>
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>VipleStream செயலில் உள்ள சாளரமாக இல்லாதபோது ஸ்ட்ரீம் ஆடியோவை முடக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1922"/>
+        <location filename="../gui/SettingsView.qml" line="1969"/>
         <source>Mutes VipleStream&apos;s audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>Alt+Tab மூலம் ஸ்ட்ரீமிலிருந்து வெளியேறும்போது அல்லது வேறு சாளரத்தைக் கிளிக் செய்யும்போது VipleStream-இன் ஆடியோவை முடக்குகிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1952"/>
+        <location filename="../gui/SettingsView.qml" line="1999"/>
         <source>Quit app on host PC after ending stream</source>
         <translation>ச்ட்ரீம் முடித்த பிறகு புரவலன் கணினியில் பயன்பாட்டை விட்டு வெளியேறவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1962"/>
+        <location filename="../gui/SettingsView.qml" line="2009"/>
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>இது உங்கள் ச்ட்ரீமை முடிக்கும்போது நீங்கள் ச்ட்ரீமிங் செய்யும் பயன்பாடு அல்லது விளையாட்டை மூடும். நீங்கள் சேமிக்கப்படாத முன்னேற்றத்தை இழப்பீர்கள்!</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2041"/>
+        <location filename="../gui/SettingsView.qml" line="2088"/>
         <source>Design</source>
         <translation>வடிவமைப்பு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2048"/>
+        <location filename="../gui/SettingsView.qml" line="2095"/>
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>எளிமை: பத்திரிகை கட்டமைப்பு, அமைதியான தலைப்புப் பகுதி.
 துணிவு: இதழ் அட்டை பாணி, பெரிய தலைப்புகள்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2064"/>
+        <location filename="../gui/SettingsView.qml" line="2111"/>
         <source>Safe</source>
         <translation>எளிமை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2065"/>
+        <location filename="../gui/SettingsView.qml" line="2112"/>
         <source>Bold</source>
         <translation>துணிவு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2233"/>
+        <location filename="../gui/SettingsView.qml" line="2280"/>
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>இந்த மாற்றம் நடைமுறைக்கு வர VipleStream-ஐ மறுதொடக்கம் செய்ய வேண்டும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2337"/>
+        <location filename="../gui/SettingsView.qml" line="2384"/>
         <source>Updates your Discord status to display the name of the game you&apos;re streaming. The status reads &quot;Playing &lt;game&gt; · via VipleStream&quot; with the VipleStream icon.</source>
         <translation>நீங்கள் ஸ்ட்ரீம் செய்யும் விளையாட்டின் பெயரைக் காட்ட உங்கள் Discord நிலையைப் புதுப்பிக்கிறது. நிலை VipleStream ஐகானுடன் &quot;Playing &lt;game&gt; · via VipleStream&quot; என்று காட்டப்படும்.</translation>
     </message>
@@ -2103,188 +2183,188 @@ Bold: magazine-cover energy, oversized display titles.</source>
         <translation>பாதி வீத ஸ்ட்ரீமிங்கில், புதிய பிரேம் இல்லாத புதுப்பிப்புகளில் முந்தைய பிரேமை மீண்டும் காட்டுவதற்குப் பதிலாக, நகரும் பொருள்கள் முன்னோக்கி நகர்த்தப்படுகின்றன.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2413"/>
+        <location filename="../gui/SettingsView.qml" line="2460"/>
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>குறிப்பு: Windows-இல் Ctrl+Alt+Del போன்ற சில விசைப்பலகைக் குறுக்குவழிகளை VipleStream உட்பட எந்தப் பயன்பாடும் இடைமறிக்க முடியாது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2575"/>
+        <location filename="../gui/SettingsView.qml" line="2622"/>
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>VipleStream பின்னணியில் இருக்கும்போது கேம்பேட் உள்ளீட்டைச் செயலாக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2586"/>
+        <location filename="../gui/SettingsView.qml" line="2633"/>
         <source>Allows VipleStream to capture gamepad inputs even if it&apos;s not the current window in focus</source>
         <translation>கவனத்தில் உள்ள சாளரமாக இல்லாவிட்டாலும் கேம்பேட் உள்ளீடுகளைப் பெற VipleStream-ஐ அனுமதிக்கிறது</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2595"/>
+        <location filename="../gui/SettingsView.qml" line="2642"/>
         <source>Network (MP-QUIC)</source>
         <translation>நெட்வொர்க் (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2605"/>
+        <location filename="../gui/SettingsView.qml" line="2652"/>
         <source>Enable MP-QUIC multipath transport</source>
         <translation>MP-QUIC பல்வழிப் பரிமாற்றத்தை இயக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2615"/>
+        <location filename="../gui/SettingsView.qml" line="2662"/>
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>ஸ்ட்ரீமிங்கிற்கு QUIC பல்வழியை (RFC 9443) பயன்படுத்துகிறது. Wi-Fi + செல்லுலார் மாற்றுவழி மற்றும் இரண்டு நெட்வொர்க் அட்டைகளின் அலைவரிசை ஒருங்கிணைப்பை இயக்குகிறது. சேவையக ஆதரவு தேவை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2620"/>
+        <location filename="../gui/SettingsView.qml" line="2667"/>
         <source>Path scheduler</source>
         <translation>பாதை திட்டமிடுபவர்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2636"/>
+        <location filename="../gui/SettingsView.qml" line="2683"/>
         <source>Auto (per stream type)</source>
         <translation>தானியங்கி (ஸ்ட்ரீம் வகைக்கு ஏற்ப)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2637"/>
+        <location filename="../gui/SettingsView.qml" line="2684"/>
         <source>Lowest latency</source>
         <translation>மிகக் குறைந்த தாமதம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2638"/>
+        <location filename="../gui/SettingsView.qml" line="2685"/>
         <source>Bandwidth aggregation</source>
         <translation>அலைவரிசை ஒருங்கிணைப்பு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2639"/>
+        <location filename="../gui/SettingsView.qml" line="2686"/>
         <source>Redundant (all paths)</source>
         <translation>மிகைநிலை (எல்லாப் பாதைகளும்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2640"/>
+        <location filename="../gui/SettingsView.qml" line="2687"/>
         <source>Earliest completion</source>
         <translation>முதலில் நிறைவடைவது</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2649"/>
+        <location filename="../gui/SettingsView.qml" line="2696"/>
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>தானியங்கி: வீடியோ=ECF, ஆடியோ=மிகைநிலை, கட்டுப்பாடு=min-RTT. ஒருங்கிணைப்பு: அதிகபட்ச அலைவரிசைக்கு எல்லா நெட்வொர்க் அட்டைகளிலும் round-robin.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2669"/>
+        <location filename="../gui/SettingsView.qml" line="2716"/>
         <source>Video decoder</source>
         <translation>வீடியோ டிகோடர்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2695"/>
-        <location filename="../gui/SettingsView.qml" line="2748"/>
+        <location filename="../gui/SettingsView.qml" line="2742"/>
+        <location filename="../gui/SettingsView.qml" line="2795"/>
         <source>Automatic (Recommended)</source>
         <translation>தானியங்கி (பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2699"/>
+        <location filename="../gui/SettingsView.qml" line="2746"/>
         <source>Force software decoding</source>
         <translation>மென்பொருள் டிகோடிங்கை கட்டாயப்படுத்துங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2703"/>
+        <location filename="../gui/SettingsView.qml" line="2750"/>
         <source>Force hardware decoding</source>
         <translation>வன்பொருள் டிகோடிங்கை கட்டாயப்படுத்துங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2718"/>
+        <location filename="../gui/SettingsView.qml" line="2765"/>
         <source>Video codec</source>
         <translation>வீடியோ கோடெக்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2752"/>
+        <location filename="../gui/SettingsView.qml" line="2799"/>
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2756"/>
+        <location filename="../gui/SettingsView.qml" line="2803"/>
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2760"/>
+        <location filename="../gui/SettingsView.qml" line="2807"/>
         <source>AV1 (Experimental)</source>
         <translation>ஏ.வி 1 (சோதனை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2764"/>
+        <location filename="../gui/SettingsView.qml" line="2811"/>
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave (மிகக் குறைந்த தாமதம், LAN)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2803"/>
+        <location filename="../gui/SettingsView.qml" line="2853"/>
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>YUV 4:4:4 ஐ இயக்கவும் (சோதனை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2826"/>
+        <location filename="../gui/SettingsView.qml" line="2876"/>
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>டெச்க்டாப் மற்றும் உரை-கனமான விளையாட்டுகளை ச்ட்ரீமிங் செய்வது நல்லது, ஆனால் வேகமான விளையாட்டுகளுக்கு பரிந்துரைக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2828"/>
+        <location filename="../gui/SettingsView.qml" line="2878"/>
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>YUV 4:4:4 இந்தக் கணினியில் ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2835"/>
+        <location filename="../gui/SettingsView.qml" line="2885"/>
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>பிட்ரேட் வரம்பைத் திறக்கவும் (சோதனை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2854"/>
+        <location filename="../gui/SettingsView.qml" line="2904"/>
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>உள்ளக நெட்வொர்க்கில் பிசிக்களை தானாகவே கண்டறியவும் (பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2875"/>
+        <location filename="../gui/SettingsView.qml" line="2925"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>தடுக்கப்பட்ட இணைப்புகளை தானாக கண்டறியவும் (பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1553"/>
+        <location filename="../gui/SettingsView.qml" line="1583"/>
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>தரம் — சிறந்த காட்சி தரம், அதிக GPU சுமை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1554"/>
+        <location filename="../gui/SettingsView.qml" line="1584"/>
         <source>Balanced — Recommended (default)</source>
         <translation>சமநிலை — பரிந்துரைக்கப்படுகிறது (இயல்புநிலை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1555"/>
+        <location filename="../gui/SettingsView.qml" line="1585"/>
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>செயல்திறன் — மிகக் குறைந்த தாமதம், iGPU-க்கு பொருத்தம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1967"/>
+        <location filename="../gui/SettingsView.qml" line="2014"/>
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>NAT கடப்பு (சிக்னல் ரிலே)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1977"/>
+        <location filename="../gui/SettingsView.qml" line="2024"/>
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>ரிலே URL (எ.கா. ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1988"/>
+        <location filename="../gui/SettingsView.qml" line="2035"/>
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>ரிலே PSK (முன்பகிரப்பட்ட விசை, இல்லையென்றால் காலியாக விடவும்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1998"/>
+        <location filename="../gui/SettingsView.qml" line="2045"/>
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>விருப்பம்: இரு பக்கங்களும் NAT பின்னணியில் இருக்கும்போது இணைக்க உதவும். பொது IP உள்ள சேவையகத்தில் viplestream-relay ஐ இயக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2008"/>
+        <location filename="../gui/SettingsView.qml" line="2055"/>
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>ரிலே வழியாக ஸ்ட்ரீம் கட்டாயப்படுத்து (UDP சுரங்கம் சோதனைக்கு)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1564"/>
+        <location filename="../gui/SettingsView.qml" line="1594"/>
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2293,7 +2373,7 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 செயல்திறன்: 4-அண்டை தேடல் + குறைந்தபட்ச செயலாக்கம் (iGPU-வில் ~6 ms)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2018"/>
+        <location filename="../gui/SettingsView.qml" line="2065"/>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>ஹோஸ்டை நேரடியாக அடையக்கூடியதாக இருந்தாலும் எப்போதும் ரிலே வழியாக ஸ்ட்ரீம் செய்க. VPN (உ.ம். Cloudflare WARP) /launch-ஐ நேரடியாக இயக்கிவிடும் சூழலில் ரிலே UDP சுரங்கத்தைச் சரிபார்க்கப் பயனுள்ளது.</translation>
     </message>
@@ -2330,6 +2410,11 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <location filename="../gui/StreamSegue.qml" line="192"/>
         <source>VR controller: hold A+X+trigger+grip</source>
         <translation>VR கட்டுப்படுத்தி: A+X+டிரிகர்+கிரிப் அழுத்திப் பிடிக்கவும்</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="202"/>
+        <source>Failed to start the stream.</source>
+        <translation>ஸ்ட்ரீமைத் தொடங்க முடியவில்லை.</translation>
     </message>
     <message>
         <location filename="../gui/StreamSegue.qml" line="188"/>
@@ -2433,129 +2518,139 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="66"/>
+        <location filename="../backend/updater.cpp" line="67"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>இந்த VipleStream நகல் Flatpak ஆக நிறுவப்பட்டுள்ளது. வெளியீட்டுப் பக்கத்திலிருந்து புதிய .flatpak கோப்பைப் பதிவிறக்கி &quot;flatpak install --bundle &lt;file&gt;&quot; மூலம் நிறுவவும். Flatpak களஞ்சியத்திலிருந்து நிறுவியிருந்தால், அதற்குப் பதிலாக &quot;flatpak update&quot; இயக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="72"/>
+        <location filename="../backend/updater.cpp" line="73"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>VipleStream ஒரு AppImage-இலிருந்து இயங்காததால் தன்னைத்தானே மாற்ற முடியாது. வெளியீட்டுப் பக்கத்திலிருந்து புதிய பதிப்பைப் பதிவிறக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="75"/>
+        <location filename="../backend/updater.cpp" line="76"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>Linux arm64-க்கு தானியங்கி நிறுவல் இன்னும் கிடைக்கவில்லை. வெளியீட்டுப் பக்கத்திலிருந்து புதிய பதிப்பைப் பதிவிறக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="79"/>
+        <location filename="../backend/updater.cpp" line="80"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>இந்தத் தளத்தில் (%1) தானியங்கி நிறுவல் கிடைக்கவில்லை. வெளியீட்டுப் பக்கத்திலிருந்து புதிய பதிப்பைப் பதிவிறக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="144"/>
+        <location filename="../backend/updater.cpp" line="146"/>
         <source>Querying release assets…</source>
         <translation>வெளியீட்டுக் கோப்புகள் வினவப்படுகின்றன…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="269"/>
-        <location filename="../backend/updater.cpp" line="402"/>
+        <location filename="../backend/updater.cpp" line="271"/>
+        <location filename="../backend/updater.cpp" line="415"/>
         <source>Update cancelled.</source>
         <translation>புதுப்பிப்பு ரத்துசெய்யப்பட்டது.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="273"/>
+        <location filename="../backend/updater.cpp" line="275"/>
         <source>Failed to query release info: %1</source>
         <translation>வெளியீட்டுத் தகவலை வினவ முடியவில்லை: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="281"/>
+        <location filename="../backend/updater.cpp" line="283"/>
         <source>Release JSON malformed: %1</source>
         <translation>வெளியீட்டு JSON தவறான வடிவில் உள்ளது: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="306"/>
+        <location filename="../backend/updater.cpp" line="308"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>GitHub-இலிருந்து வந்த வெளியீட்டுத் தகவலில் குறிச்சொல் இல்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="309"/>
+        <location filename="../backend/updater.cpp" line="311"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>சமீபத்திய வெளியீட்டுக் குறிச்சொல் &quot;%1&quot; ஒரு பதிப்பு எண் அல்ல.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="314"/>
+        <location filename="../backend/updater.cpp" line="316"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>GitHub-இன் வெளியீட்டுத் தகவல் இன்னும் புதுப்பிக்கப்படவில்லை: அது இன்னும் %1 எனக் காட்டுகிறது, இது இந்தப் பதிப்பை (%2) விடப் புதியது அல்ல. சில நிமிடங்களில் மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="319"/>
+        <location filename="../backend/updater.cpp" line="321"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>வெளியீடு %1-இல் இன்னும் கோப்புகள் இணைக்கப்படவில்லை. சில நிமிடங்களில் மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="326"/>
+        <location filename="../backend/updater.cpp" line="328"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>வெளியீடு %1-இல் இந்தத் தளத்திற்கு (%2) நிறுவக்கூடிய தொகுப்பு இல்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="335"/>
+        <location filename="../backend/updater.cpp" line="337"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>VipleStream %1, %2 ஆகக் கிடைக்கிறது, ஆனால் அதைக் கைமுறையாக நிறுவ வேண்டும். %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="350"/>
+        <location filename="../backend/updater.cpp" line="352"/>
         <source>Cannot open download file: %1</source>
         <translation>பதிவிறக்கக் கோப்பைத் திறக்க முடியவில்லை: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="354"/>
+        <location filename="../backend/updater.cpp" line="356"/>
         <source>Downloading %1…</source>
         <translation>%1 பதிவிறக்கப்படுகிறது…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="413"/>
+        <location filename="../backend/updater.cpp" line="426"/>
         <source>Download failed: %1</source>
         <translation>பதிவிறக்கம் தோல்வியடைந்தது: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="423"/>
+        <location filename="../backend/updater.cpp" line="432"/>
+        <source>Could not save the downloaded update. The disk may be full.</source>
+        <translation>பதிவிறக்கிய புதுப்பிப்பைச் சேமிக்க முடியவில்லை. வட்டு நிரம்பியிருக்கலாம்.</translation>
+    </message>
+    <message>
+        <location filename="../backend/updater.cpp" line="441"/>
         <source>Preparing installer…</source>
         <translation>நிறுவி தயாராகிறது…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="429"/>
+        <location filename="../backend/updater.cpp" line="447"/>
         <source>Restarting to apply update…</source>
         <translation>புதுப்பிப்பைப் பயன்படுத்த மறுதொடக்கம் செய்யப்படுகிறது…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="511"/>
-        <location filename="../backend/updater.cpp" line="579"/>
+        <location filename="../backend/updater.cpp" line="544"/>
+        <source>The update was not installed because VipleStream did not exit in time. Please close VipleStream and try updating again.</source>
+        <translation>VipleStream சரியான நேரத்தில் வெளியேறாததால் புதுப்பிப்பு நிறுவப்படவில்லை. VipleStream ஐ மூடிவிட்டு மீண்டும் புதுப்பிக்க முயலவும்.</translation>
+    </message>
+    <message>
+        <location filename="../backend/updater.cpp" line="551"/>
+        <location filename="../backend/updater.cpp" line="622"/>
         <source>Cannot write helper script: %1</source>
         <translation>உதவி ஸ்கிரிப்டை எழுத முடியவில்லை: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="533"/>
+        <location filename="../backend/updater.cpp" line="576"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>புதுப்பிப்பியைத் தொடங்க முடியவில்லை (UAC மறுக்கப்பட்டது அல்லது PowerShell இல்லை).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="543"/>
+        <location filename="../backend/updater.cpp" line="586"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>AppImage-இலிருந்து இயங்கவில்லை — APPIMAGE சூழல் மாறி அமைக்கப்படவில்லை. கைமுறையாக மீண்டும் நிறுவவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="553"/>
+        <location filename="../backend/updater.cpp" line="596"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>AppImage கோப்பகத்தில் எழுத முடியாது: %1. VipleStream-ஐப் பயனர் எழுதக்கூடிய இடத்திற்கு (எ.கா. ~/Applications/) நகர்த்தி மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="592"/>
+        <location filename="../backend/updater.cpp" line="635"/>
         <source>Failed to launch updater helper script.</source>
         <translation>புதுப்பிப்பி உதவி ஸ்கிரிப்டைத் தொடங்க முடியவில்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="598"/>
+        <location filename="../backend/updater.cpp" line="641"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>இந்தத் தளத்தில் தானியங்கி புதுப்பிப்பு ஆதரிக்கப்படவில்லை.</translation>
     </message>
@@ -2563,42 +2658,42 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>VideoBrowser</name>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="53"/>
+        <location filename="../gui/VideoBrowser.qml" line="79"/>
         <source>Could not start the video player.</source>
         <translation>வீடியோ பிளேயரைத் தொடங்க முடியவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="80"/>
+        <location filename="../gui/VideoBrowser.qml" line="126"/>
         <source>Back</source>
         <translation>பின்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="81"/>
+        <location filename="../gui/VideoBrowser.qml" line="127"/>
         <source>Forward</source>
         <translation>முன்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="82"/>
+        <location filename="../gui/VideoBrowser.qml" line="128"/>
         <source>Stop</source>
         <translation>நிறுத்து</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="82"/>
+        <location filename="../gui/VideoBrowser.qml" line="128"/>
         <source>Reload</source>
         <translation>மீண்டும் ஏற்று</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="83"/>
+        <location filename="../gui/VideoBrowser.qml" line="129"/>
         <source>Home</source>
         <translation>முகப்புக் கோப்புறை</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="89"/>
+        <location filename="../gui/VideoBrowser.qml" line="135"/>
         <source>Search or type a web address</source>
         <translation>தேடவும் அல்லது வலை முகவரியை உள்ளிடவும்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="94"/>
+        <location filename="../gui/VideoBrowser.qml" line="140"/>
         <source>Play in VR</source>
         <translation>VR-இல் இயக்கு</translation>
     </message>
@@ -2606,239 +2701,223 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>VideoView</name>
     <message>
-        <location filename="../gui/VideoView.qml" line="17"/>
+        <location filename="../gui/VideoView.qml" line="19"/>
         <source>Videos</source>
         <translation>வீடியோக்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="110"/>
+        <location filename="../gui/VideoView.qml" line="134"/>
         <source>Could not start the video player.</source>
         <translation>வீடியோ பிளேயரைத் தொடங்க முடியவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="345"/>
+        <location filename="../gui/VideoView.qml" line="360"/>
         <source>Nothing found.</source>
         <translation>எதுவும் கிடைக்கவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="359"/>
+        <location filename="../gui/VideoView.qml" line="374"/>
         <source>Drive</source>
         <translation>இயக்ககம்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="359"/>
+        <location filename="../gui/VideoView.qml" line="374"/>
         <source>Shared folder</source>
         <translation>பகிரப்பட்ட கோப்புறை</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="363"/>
+        <location filename="../gui/VideoView.qml" line="378"/>
         <source>This folder has no videos.</source>
         <translation>இந்தக் கோப்புறையில் வீடியோக்கள் இல்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="374"/>
-        <location filename="../gui/VideoView.qml" line="724"/>
+        <location filename="../gui/VideoView.qml" line="389"/>
+        <location filename="../gui/VideoView.qml" line="720"/>
         <source>Helper: %1</source>
         <translation>உதவிக் கருவி: %1</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="374"/>
-        <location filename="../gui/VideoView.qml" line="724"/>
+        <location filename="../gui/VideoView.qml" line="389"/>
+        <location filename="../gui/VideoView.qml" line="720"/>
         <source>not installed</source>
         <translation>நிறுவப்படவில்லை</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="386"/>
-        <source>Recent</source>
-        <translation>சமீபத்தியவை</translation>
-    </message>
-    <message>
-        <location filename="../gui/VideoView.qml" line="387"/>
+        <location filename="../gui/VideoView.qml" line="401"/>
         <source>This headset</source>
         <translation>இந்த ஹெட்செட்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="388"/>
+        <location filename="../gui/VideoView.qml" line="402"/>
         <source>PC</source>
         <translation>கணினி</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="390"/>
-        <source>Browser</source>
-        <translation>உலாவி</translation>
-    </message>
-    <message>
-        <location filename="../gui/VideoView.qml" line="390"/>
+        <location filename="../gui/VideoView.qml" line="404"/>
         <source>Link</source>
         <translation>இணைப்பு</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="454"/>
-        <source>Videos you play will show up here.</source>
-        <translation>நீங்கள் இயக்கும் வீடியோக்கள் இங்கே தோன்றும்.</translation>
-    </message>
-    <message>
-        <location filename="../gui/VideoView.qml" line="465"/>
+        <location filename="../gui/VideoView.qml" line="440"/>
         <source>Up</source>
         <translation>மேலே</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="481"/>
+        <location filename="../gui/VideoView.qml" line="456"/>
         <source>Choose a folder</source>
         <translation>ஒரு கோப்புறையைத் தேர்ந்தெடுக்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="534"/>
+        <location filename="../gui/VideoView.qml" line="509"/>
         <source>No videos here.</source>
         <translation>இங்கே வீடியோக்கள் இல்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="548"/>
+        <location filename="../gui/VideoView.qml" line="524"/>
         <source>Choose a PC to browse its shared video folders</source>
         <translation>பகிரப்பட்ட வீடியோ கோப்புறைகளை உலாவ ஒரு கணினியைத் தேர்ந்தெடுக்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="571"/>
+        <location filename="../gui/VideoView.qml" line="547"/>
         <source>Online</source>
         <translation>ஆன்லைனில்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="571"/>
+        <location filename="../gui/VideoView.qml" line="547"/>
         <source>Offline</source>
         <translation>இணையமில்லாமல்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="583"/>
+        <location filename="../gui/VideoView.qml" line="559"/>
         <source>No paired PCs. Pair a PC in Desktop or VR mode first.</source>
         <translation>இணைக்கப்பட்ட கணினிகள் இல்லை. முதலில் டெஸ்க்டாப் அல்லது VR பயன்முறையில் ஒரு கணினியை இணைக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="598"/>
+        <location filename="../gui/VideoView.qml" line="575"/>
         <source>All PCs</source>
         <translation>எல்லாக் கணினிகளும்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="602"/>
+        <location filename="../gui/VideoView.qml" line="579"/>
         <source>Up one level</source>
         <translation>ஒரு நிலை மேலே</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="607"/>
+        <location filename="../gui/VideoView.qml" line="584"/>
         <source>Refresh</source>
         <translation>புதுப்பி</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="664"/>
-        <location filename="../gui/VideoView.qml" line="676"/>
+        <location filename="../gui/VideoView.qml" line="641"/>
+        <location filename="../gui/VideoView.qml" line="653"/>
         <source>DISK</source>
         <translation>இயக்ககம்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="899"/>
+        <location filename="../gui/VideoView.qml" line="877"/>
         <source>List view</source>
         <translation>பட்டியல் காட்சி</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="899"/>
+        <location filename="../gui/VideoView.qml" line="877"/>
         <source>Grid view</source>
         <translation>கட்டக் காட்சி</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="444"/>
-        <location filename="../gui/VideoView.qml" line="524"/>
-        <location filename="../gui/VideoView.qml" line="664"/>
-        <location filename="../gui/VideoView.qml" line="676"/>
-        <location filename="../gui/VideoView.qml" line="776"/>
+        <location filename="../gui/VideoView.qml" line="499"/>
+        <location filename="../gui/VideoView.qml" line="641"/>
+        <location filename="../gui/VideoView.qml" line="653"/>
+        <location filename="../gui/VideoView.qml" line="772"/>
         <source>VID</source>
         <translation>வீடியோ</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="732"/>
+        <location filename="../gui/VideoView.qml" line="728"/>
         <source>Search YouTube (try &quot;360 video&quot; or &quot;VR180&quot;)</source>
         <translation>YouTube-இல் தேடவும் (&quot;360 video&quot; அல்லது &quot;VR180&quot; முயற்சிக்கவும்)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="738"/>
+        <location filename="../gui/VideoView.qml" line="734"/>
         <source>Search</source>
         <translation>தேடு</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="742"/>
+        <location filename="../gui/VideoView.qml" line="738"/>
         <source>Searching…</source>
         <translation>தேடுகிறது…</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="798"/>
+        <location filename="../gui/VideoView.qml" line="794"/>
         <source>Update</source>
         <translation>புதுப்பி</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="801"/>
+        <location filename="../gui/VideoView.qml" line="797"/>
         <source>Updating the YouTube helper…</source>
         <translation>YouTube உதவிக் கருவி புதுப்பிக்கப்படுகிறது…</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="829"/>
+        <location filename="../gui/VideoView.qml" line="809"/>
         <source>Paste a link: a video page (YouTube and many other sites) or a video file or stream (MP4, MKV, WebM, HLS .m3u8).</source>
         <translation>ஒரு இணைப்பை ஒட்டவும்: வீடியோ பக்கம் (YouTube மற்றும் பல தளங்கள்) அல்லது வீடியோ கோப்பு அல்லது ஸ்ட்ரீம் (MP4, MKV, WebM, HLS .m3u8).</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="845"/>
+        <location filename="../gui/VideoView.qml" line="823"/>
         <source>Play</source>
         <translation>இயக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="884"/>
+        <location filename="../gui/VideoView.qml" line="862"/>
         <source>Picture format</source>
         <translation>பட வடிவம்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>Auto</source>
         <translation>தானியங்கி</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>2D</source>
         <translation>2D</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>3D side-by-side</source>
         <translation>3D பக்கவாட்டு</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>3D top-bottom</source>
         <translation>3D மேல்-கீழ்</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>180° 3D (side-by-side)</source>
         <translation>180° 3D (பக்கவாட்டு)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="889"/>
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>180° 2D</source>
         <translation>180° 2D</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="889"/>
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>360° 2D</source>
         <translation>360° 2D</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="889"/>
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>360° 3D (top-bottom)</source>
         <translation>360° 3D (மேல்-கீழ்)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="889"/>
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>360° 3D (side-by-side)</source>
         <translation>360° 3D (பக்கவாட்டு)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="890"/>
+        <location filename="../gui/VideoView.qml" line="868"/>
         <source>360° cubemap (YouTube EAC)</source>
         <translation>360° கியூப்மேப் (YouTube EAC)</translation>
     </message>
@@ -2962,37 +3041,40 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>WebResolver</name>
     <message>
-        <location filename="../backend/webresolver.cpp" line="173"/>
+        <location filename="../backend/webresolver.cpp" line="379"/>
         <source>The web video helper (yt-dlp) is not installed. Use Update to download it.</source>
         <translation>வலை வீடியோ உதவிக் கருவி (yt-dlp) நிறுவப்படவில்லை. அதைப் பதிவிறக்க &quot;புதுப்பி&quot; என்பதைப் பயன்படுத்தவும்.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="206"/>
+        <location filename="../backend/webresolver.cpp" line="412"/>
         <source>Search failed.</source>
         <translation>தேடல் தோல்வியடைந்தது.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="233"/>
+        <location filename="../backend/webresolver.cpp" line="439"/>
         <source>Could not get the checksum list.</source>
         <translation>செக்சம் பட்டியலைப் பெற முடியவில்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="241"/>
+        <location filename="../backend/webresolver.cpp" line="447"/>
         <source>Download failed.</source>
         <translation>பதிவிறக்கம் தோல்வியடைந்தது.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="245"/>
+        <location filename="../backend/webresolver.cpp" line="451"/>
         <source>The download did not match its checksum.</source>
         <translation>பதிவிறக்கம் அதன் செக்சத்துடன் பொருந்தவில்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="252"/>
+        <location filename="../backend/webresolver.cpp" line="458"/>
+        <location filename="../backend/webresolver.cpp" line="466"/>
+        <location filename="../backend/webresolver.cpp" line="471"/>
+        <location filename="../backend/webresolver.cpp" line="478"/>
         <source>Could not save the update.</source>
         <translation>புதுப்பிப்பைச் சேமிக்க முடியவில்லை.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="260"/>
+        <location filename="../backend/webresolver.cpp" line="486"/>
         <source>Updated to %1.</source>
         <translation>%1-க்குப் புதுப்பிக்கப்பட்டது.</translation>
     </message>

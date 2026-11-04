@@ -1597,6 +1597,7 @@ namespace config {
     vr_opt::bool_strict_f(vars, "vr_latch_acquire", vr.latch_acquire);
     vr_opt::int_strict_f(vars, "vr_latch_acquire_ppm", vr.latch_acquire_ppm, 1000, 5000, false);
     vr_opt::bool_strict_f(vars, "vr_buffer_refill", vr.buffer_refill);  // §VR-BUFFER-REFILL
+    vr_opt::bool_strict_f(vars, "vr_padmode", vr.padmode);  // §VR-PADMODE
     vr_opt::int_strict_f(vars, "vr_render_scale_pct", vr.render_scale_pct, 100, 250, false);
     vr_opt::int_strict_f(vars, "vr_render_target_max", vr.render_target_max, 1000, 8192, false);
     // §VR-DIRECT-KICK：兩個平台都認得這個 key（Linux 沒有 PCVR，設了沒有作用，但不會被當成不認得的選項）

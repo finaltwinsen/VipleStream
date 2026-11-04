@@ -139,6 +139,7 @@ namespace vr::bridge {
     uint32_t act_eye_h = 0;
     luid_t act_luid;
     uint32_t degraded_code = 0;
+    uint32_t scene_pid = 0;  ///< §VR-PADMODE：driver 回報的 SteamVR 場景程式 PID（0＝沒有／舊 driver）
 
     uint64_t handshakes = 0;  ///< 成功握手次數
     uint64_t teardowns = 0;

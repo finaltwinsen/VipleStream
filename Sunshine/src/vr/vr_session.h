@@ -269,6 +269,10 @@ namespace vr {
    * videoBroadcast 執行緒與 encode 執行緒同時存取：協商結果建立後唯讀；pose、wave、
    * outbox 各自一把 mutex；統計一律 atomic。
    */
+  namespace padmode {
+    class controller_t;
+  }
+
   class session_state_t {
   public:
     /**
@@ -504,6 +508,22 @@ namespace vr {
     /// STATE（reliable）
     void queue_state(uint8_t state, uint8_t progress, uint16_t code);
 
+    /// §VR-PADMODE：NOTICE（reliable），頭盔顯示短暫提示
+    void queue_notice(uint8_t code) {
+      queue_s2c(make_tlv(VIPLE_VR_S2C_NOTICE, &code, 1), true);
+    }
+
+    /// §VR-PADMODE：手把模式控制器（只有 pcvr；stream.cpp 建 session 時設、結束時清掉）
+    void set_padmode(std::shared_ptr<padmode::controller_t> p) {
+      std::lock_guard lk(padmode_mtx_);
+      padmode_ = std::move(p);
+    }
+
+    std::shared_ptr<padmode::controller_t> padmode() const {
+      std::lock_guard lk(padmode_mtx_);
+      return padmode_;
+    }
+
     /// 1 Hz STATS（unsequenced）；所有計數欄位都是累計值
     void queue_stats();
 
@@ -513,6 +533,9 @@ namespace vr {
     static std::vector<uint8_t> make_tlv(uint8_t subtype, const void *payload, std::size_t len);
 
   private:
+    mutable std::mutex padmode_mtx_;
+    std::shared_ptr<padmode::controller_t> padmode_;
+
     enum class wave_phase_e {
       idle,
       pending,  ///< 已要求 encoder 開 wave，第一幀還沒編

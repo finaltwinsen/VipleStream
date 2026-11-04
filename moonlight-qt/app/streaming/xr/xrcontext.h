@@ -313,6 +313,11 @@ public:
     static constexpr int kSubH = 192;
     void setPlayerSubtitle(const QImage& img);
 
+    // §VR-PADMODE：PCVR 的短暫提示（任何執行緒）：在視野正前方偏下 1 m 顯示 durationMs，再呼叫就換掉
+    static constexpr int kToastW = 1280;
+    static constexpr int kToastH = 160;
+    void showToast(const QString& text, int durationMs);
+
     // ── §VR-SHELL（頭盔 VR 介面）──
     // 任何執行緒：介面畫面（Options.shellWidth×shellHeight；格式用 shellImageFormat() 才不會在 frame thread 轉換）。
     // 圖換了 frame thread 下一格上傳
@@ -468,6 +473,15 @@ private:
     uint32_t m_SubImageCount = 0;
     VkImage* m_SubImages = nullptr;
     bool m_SubUploaded = false;                 // frame thread
+    // §VR-PADMODE：PCVR 提示
+    std::mutex m_ToastMutex;
+    QImage m_ToastImg;                          // m_ToastMutex
+    bool m_ToastDirty = false;                  // m_ToastMutex
+    std::atomic<int64_t> m_ToastUntilMs{0};     // steady_clock 毫秒；0＝不顯示
+    XrSwapchain m_ToastSwapchain = XR_NULL_HANDLE;
+    uint32_t m_ToastImageCount = 0;
+    VkImage* m_ToastImages = nullptr;
+    bool m_ToastUploaded = false;               // frame thread
     // §VR-SHELL
     std::mutex m_ShellMutex;
     QImage m_ShellImg;                          // m_ShellMutex

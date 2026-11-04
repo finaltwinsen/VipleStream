@@ -141,6 +141,7 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 sampleAgeMs                   
 | | 03 STATS | 1 Hz 統計，含 `clkOffsetJitter`、`staleCount` | ch 0x07 unseq |
 | | 04 CONFIG_ACK、05 LAYOUT | epoch 對應的 FoV、overscan、foveation、**eyeToHead** | reliable |
 | | **06 REFRESH_START** | `{startFrame u32, frameCnt u8, reason u8}`，送 2 次 | ch 0x07 unseq |
+| | 0A NOTICE | §VR-PADMODE（2026-11-04）：`{code u8}`，頭盔短暫顯示提示（1＝這款遊戲不使用 VR 手把、已切 Xbox 手把模式；2／3＝手動開／關；4＝host 沒有 ViGEmBus）。舊 client 依 len 跳過 | reliable |
 
 - **client 接收（`Q/ControlStream.c`）**：
   - 新增偽 typeIndex `IDX_VIPLE_VR_S2C = 0x100`（不進 packetTypes 表）；

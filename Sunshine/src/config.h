@@ -277,6 +277,10 @@ namespace config {
     /// （§VR-BUFFER）而它連續 2 秒幾乎都空著時，用一次 burst 把虛擬 vsync 的相位提前一整格——host 多送一張，緩衝補回來
     /// （不重複也不跳張）。disabled＝舊行為：緩衝空了只有延遲碰巧往下跳時才會補回來
     bool buffer_refill = true;
+    /// §VR-PADMODE（2026-11-04）：vr_padmode（enabled 預設）。SteamVR 的場景程式是 Steam 商店沒有「Tracked Controller Support」的
+    /// 遊戲（例：Assetto Corsa、ACC、GRIP——只吃手把或方向盤）時，另外插一支虛擬 Xbox 360 手把，把 Frame 兩手的狀態送過去；
+    /// 兩支選單鍵長按 2 秒手動切換並記住。disabled＝不做（Frame 手把只交給 SteamVR）
+    bool padmode = true;
     /// §VR-RENDER-SCALE（2026-10-08）：vr_render_scale_pct。告訴 SteamVR 的建議算圖尺寸＝串流的每眼尺寸 × 這個百分比
     /// （100–250）。串流尺寸決定編碼、傳輸、解碼的負擔（也就是延遲），算圖尺寸決定畫面細節；Steam 內建串流是
     /// 算圖 2160、編碼寬度 1152。100＝舊行為（兩者相同）。改了要等 SteamVR 重啟才生效。

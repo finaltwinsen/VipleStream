@@ -2240,6 +2240,48 @@ namespace input {
     return true;
   }
 
+  int vr_pad_alloc(const std::shared_ptr<input_t> &input) {
+    if (!input) {
+      return -1;
+    }
+    // 在 task pool 執行緒上建立並等結果（一般手把的 alloc／update／free 都在這條執行緒，避免與它們並行碰 ViGEm 的陣列）
+    auto fut = task_pool.push([input]() -> int {
+      const int id = alloc_id(gamepadMask);
+      if (id < 0) {
+        return -1;
+      }
+      platf::gamepad_arrival_t arrival {LI_CTYPE_XBOX, 0, 0};
+      if (platf::alloc_gamepad(platf_input, {id, VR_PAD_CONTROLLER_NUMBER}, arrival, input->feedback_queue)) {
+        free_id(gamepadMask, id);
+        return -1;
+      }
+      return id;
+    });
+    if (fut.wait_for(2s) != std::future_status::ready) {
+      BOOST_LOG(warning) << "[VIPLE-VR-PADMODE] task pool busy, virtual pad allocation timed out"sv;
+      return -1;
+    }
+    return fut.get();
+  }
+
+  void vr_pad_update(int id, const platf::gamepad_state_t &state) {
+    if (id < 0) {
+      return;
+    }
+    task_pool.push([id, state]() {
+      platf::gamepad_update(platf_input, id, state);
+    });
+  }
+
+  void vr_pad_free(int id) {
+    if (id < 0) {
+      return;
+    }
+    task_pool.push([id]() {
+      free_gamepad(platf_input, id);
+    });
+  }
+
   std::shared_ptr<input_t> alloc(safe::mail_t mail) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),

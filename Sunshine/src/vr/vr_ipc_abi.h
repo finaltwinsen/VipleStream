@@ -333,7 +333,7 @@ typedef struct vripc_driver_status_t { /* 寫入方：driver；server 整份複�
   uint64_t next_index_calls; /* GetNextSwapTextureSetIndex 呼叫數（P-B2：2116 生效證據） */
   uint64_t drop_unknown_layer; /* SubmitLayer 的 handle 不在 swap set map、或超過 16 層 */
   uint32_t max_layer_count; /* 目前看過的最大 layer 數 */
-  uint32_t reserved0;
+  uint32_t scene_pid; /* §VR-PADMODE：SteamVR 目前的場景程式 PID（VREvent_SceneApplicationChanged）；0＝沒有（舊 driver 恆為 0，原 reserved0） */
   uint64_t reserved1[2];
 } vripc_driver_status_t;
 

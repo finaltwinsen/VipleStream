@@ -323,6 +323,9 @@ namespace vrdrv {
             break;
           case vr::VREvent_SceneApplicationChanged:
             ctx_->pose_hist.note_event("SceneApplicationChanged", now_qpc());
+            // §VR-PADMODE：server 依場景程式決定要不要開 Xbox 手把模式
+            ipc_->status().scene_pid.store(ev.data.process.pid, std::memory_order_relaxed);
+            VRDRV_LOG_INFO("padmode: scene application pid=%u (old %u)", ev.data.process.pid, ev.data.process.oldPid);
             break;
           default:
             break;

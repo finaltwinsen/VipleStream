@@ -1,5 +1,6 @@
 // controller_device.cpp - 見 controller_device.h（設計 §E.2 controller_device、S2-09）。
 #include "controller_device.h"
+#include "hand_skeleton.h"
 
 #include <cmath>
 #include <cstdio>
@@ -147,6 +148,19 @@ namespace vrdrv {
       in->CreateScalarComponent(c, "/input/trigger/value", &scalars_[s_trigger_value], vr::VRScalarType_Absolute, vr::VRScalarUnits_NormalizedOneSided);
       in->CreateScalarComponent(c, "/input/grip/value", &scalars_[s_grip_value], vr::VRScalarType_Absolute, vr::VRScalarUnits_NormalizedOneSided);
       in->CreateHapticComponent(c, "/output/haptic", &haptic_);
+      // §VR-SKELETON：Frame 與 Touch 的 input profile 都有手部骨架。沒有手指追蹤 → Partial（由按鍵觸碰推估）。
+      // SteamVR 要求建立後立刻有資料，先送一次張開的手
+      {
+        const vr::EVRInputError se = in->CreateSkeletonComponent(c, right_ ? "/input/skeleton/right" : "/input/skeleton/left",
+                                                                 right_ ? "/skeleton/hand/right" : "/skeleton/hand/left", "/pose/raw",
+                                                                 vr::VRSkeletalTracking_Partial, nullptr, 0, &skeleton_);
+        if (se != vr::VRInputError_None) {
+          skeleton_ = vr::k_ulInvalidInputComponentHandle;
+          VRDRV_LOG_WARN("[VIPLE-VR-SKELETON] hand=%s CreateSkeletonComponent failed err=%d", right_ ? "right" : "left", (int) se);
+        } else {
+          update_skeleton(nullptr);
+        }
+      }
       if (frame_) {
         const char *menu = right_ ? "/input/menu" : "/input/view";
         const char *cc = right_ ? "/input/x" : "/input/dpad_left";
@@ -272,6 +286,34 @@ namespace vrdrv {
       }
     }
     inputs_released_ = true;
+    update_skeleton(nullptr);  // §VR-SKELETON：放開時手也張開
+  }
+
+  void controller_device_t::update_skeleton(const vripc_ctrl_input_t *in) {
+    if (skeleton_ == vr::k_ulInvalidInputComponentHandle) {
+      return;
+    }
+    hand::curls_t cu;
+    if (in != nullptr) {
+      const uint32_t b = in->buttons, t = in->touches;
+      // 食指：扳機的行程；只是摸著扳機時微彎
+      const float trig = unorm16(in->trigger);
+      cu.index = trig > 0.0f ? trig : ((t & k_btn_trigger) != 0 ? 0.25f : 0.0f);
+      // 中指～小指：握把的行程；摸著握把時半握
+      const float grip = (b & k_btn_grip) != 0 ? 1.0f : unorm16(in->grip);
+      const float g = grip > 0.0f ? grip : ((t & k_btn_grip) != 0 ? 0.35f : 0.0f);
+      cu.middle = g;
+      cu.ring = g;
+      cu.pinky = g;
+      // 拇指：放在搖桿、面板按鍵或拇指托上就彎下
+      const uint32_t thumb_bits = k_btn_stick | k_btn_ab_lo | k_btn_ab_hi | k_btn_thumbrest | k_btn_c | k_btn_d;
+      cu.thumb = ((t | b) & thumb_bits) != 0 ? 0.7f : 0.0f;
+    }
+    vr::VRBoneTransform_t bones[hand::k_bone_count];
+    hand::compute(right_, cu, bones);
+    auto *vin = vr::VRDriverInput();
+    vin->UpdateSkeletonComponent(skeleton_, vr::VRSkeletalMotionRange_WithController, bones, hand::k_bone_count);
+    vin->UpdateSkeletonComponent(skeleton_, vr::VRSkeletalMotionRange_WithoutController, bones, hand::k_bone_count);
   }
 
   void controller_device_t::invalidate() {
@@ -383,6 +425,7 @@ namespace vrdrv {
         vin->UpdateBooleanComponent(bools_[c_bumper_touch], (t & k_btn_bumper) != 0, 0.0);
         vin->UpdateBooleanComponent(bools_[c_grip_click], (b & k_btn_grip) != 0, 0.0);
       }
+      update_skeleton(&in);  // §VR-SKELETON
       inputs_released_ = false;
     }
     ReleaseSRWLockShared(&ctx_.pose_lock);

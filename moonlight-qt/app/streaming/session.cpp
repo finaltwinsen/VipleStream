@@ -600,6 +600,34 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
         const uint8_t* payload = tlv + off + 2;
 
         switch (type) {
+        case VIPLE_VR_S2C_NOTICE:
+            // §VR-PADMODE：server 切換了 Xbox 手把模式（或建不了虛擬手把），頭盔裡提示 3 秒
+            if (len >= 1) {
+                QString text;
+                switch (payload[0]) {
+                case VIPLE_VR_NOTICE_PAD_ON_AUTO:
+                    text = tr("This game doesn't use VR controllers - switched to Xbox controller mode");
+                    break;
+                case VIPLE_VR_NOTICE_PAD_ON_MANUAL:
+                    text = tr("Xbox controller mode: on");
+                    break;
+                case VIPLE_VR_NOTICE_PAD_OFF_MANUAL:
+                    text = tr("Xbox controller mode: off (VR controllers)");
+                    break;
+                case VIPLE_VR_NOTICE_PAD_UNAVAILABLE:
+                    text = tr("Xbox controller mode unavailable: install ViGEmBus on the host");
+                    break;
+                default:
+                    break;
+                }
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-PADMODE] server notice %u", payload[0]);
+#ifdef HAVE_OPENXR
+                if (!text.isEmpty() && m_XrContext != nullptr) {
+                    m_XrContext->showToast(text, 3000);
+                }
+#endif
+            }
+            break;
         case VIPLE_VR_S2C_STATE:
             if (len >= sizeof(VIPLE_VR_TLV_STATE)) {
                 VIPLE_VR_TLV_STATE st;
@@ -4076,6 +4104,13 @@ bool Session::startConnectionAsync()
 #endif
         m_VrTracking.setSyntheticHands(m_Preferences->vrSyntheticHands);
         m_VrTracking.setSyntheticMenuAt(m_Preferences->vrSyntheticMenuAtSec);
+        m_VrTracking.setSyntheticPadTest(m_Preferences->vrSyntheticPadTestSec);
+        if (m_Preferences->vrSyntheticPadTestSec > 0.0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-PADMODE] dev: --vr-synthetic-pad-test - the Xbox controller mode button sequence starts %.1f s after tracking "
+                        "starts (only with --vr-emulate)",
+                        m_Preferences->vrSyntheticPadTestSec);
+        }
         if (m_Preferences->vrSyntheticMenuAtSec > 0.0) {
             // host 只在左手控制器 active 時才看按鍵：--vr-emulate 一定是；真的 XR 連線上沒被追蹤、又沒有合成的手，這一下會被丟掉
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,

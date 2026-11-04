@@ -4,216 +4,235 @@
 <context>
     <name>AppContent</name>
     <message>
-        <location filename="../gui/AppContent.qml" line="343"/>
+        <location filename="../gui/AppContent.qml" line="349"/>
         <source>Add PC manually</source>
         <translation>הוספת מחשב ידנית</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="373"/>
+        <location filename="../gui/AppContent.qml" line="379"/>
         <source>VR mode (switch mode)</source>
         <translation>מצב VR (החלפת מצב)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="373"/>
+        <location filename="../gui/AppContent.qml" line="379"/>
         <source>Desktop mode (switch mode)</source>
         <translation>מצב שולחן עבודה (החלפת מצב)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="410"/>
+        <location filename="../gui/AppContent.qml" line="417"/>
         <source>Update available for VipleStream: Version %1</source>
         <translation>עדכון זמין עבור VipleStream: גרסה %1</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="439"/>
+        <location filename="../gui/AppContent.qml" line="446"/>
         <source>Help</source>
         <translation>עזרה</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="465"/>
+        <location filename="../gui/AppContent.qml" line="472"/>
         <source>Gamepad Mapper</source>
         <translation>מיפוי בקר משחק</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="230"/>
-        <location filename="../gui/AppContent.qml" line="496"/>
+        <location filename="../gui/AppContent.qml" line="236"/>
+        <location filename="../gui/AppContent.qml" line="503"/>
         <source>Settings</source>
         <translation>הגדרות</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="220"/>
+        <location filename="../gui/AppContent.qml" line="226"/>
         <source>HOSTS</source>
         <translation>מארחים</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="221"/>
+        <location filename="../gui/AppContent.qml" line="227"/>
         <source>LIBRARY</source>
         <translation>ספרייה</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="222"/>
+        <location filename="../gui/AppContent.qml" line="228"/>
         <source>SETTINGS</source>
         <translation>הגדרות</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="228"/>
+        <location filename="../gui/AppContent.qml" line="234"/>
         <source>Hosts</source>
         <translation>מארחים</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="229"/>
+        <location filename="../gui/AppContent.qml" line="235"/>
         <source>Library</source>
         <translation>ספרייה</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="503"/>
+        <location filename="../gui/AppContent.qml" line="510"/>
         <source>No functioning hardware accelerated video decoder was detected by VipleStream. Your streaming performance may be severely degraded in this configuration.</source>
         <translation>VipleStream לא זיהה מפענח וידאו עם האצת חומרה תקין. ביצועי ההזרמה עלולים להיפגע קשות בתצורה זו.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="505"/>
+        <location filename="../gui/AppContent.qml" line="512"/>
         <source>Click the Help button for more information on solving this problem.</source>
         <translation>לחצו על כפתור העזרה למידע נוסף על פתרון הבעיה.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="512"/>
+        <location filename="../gui/AppContent.qml" line="519"/>
         <source>Hardware acceleration doesn&apos;t work on XWayland. Continuing on XWayland may result in poor streaming performance. Try running with QT_QPA_PLATFORM=wayland or switch to X11.</source>
         <translation>האצת חומרה אינה פועלת ב-XWayland. המשך עבודה ב-XWayland עלול לגרום לביצועי הזרמה ירודים. נסו להפעיל עם QT_QPA_PLATFORM=wayland או לעבור ל-X11.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="514"/>
+        <location filename="../gui/AppContent.qml" line="521"/>
         <source>Click the Help button for more information.</source>
         <translation>לחצו על כפתור העזרה למידע נוסף.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="522"/>
+        <location filename="../gui/AppContent.qml" line="529"/>
         <source>This version of VipleStream isn&apos;t optimized for your PC. Please download the &apos;%1&apos; version of VipleStream for the best streaming performance.</source>
         <translation>גרסה זו של VipleStream אינה מותאמת למחשב שלך. הורידו את גרסת &apos;%1&apos; של VipleStream לקבלת ביצועי ההזרמה הטובים ביותר.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="536"/>
+        <location filename="../gui/AppContent.qml" line="544"/>
         <source>VipleStream detected gamepads without a mapping:</source>
         <translation>VipleStream זיהה בקרי משחק ללא מיפוי:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="538"/>
+        <location filename="../gui/AppContent.qml" line="546"/>
         <source>Click the Help button for information on how to map your gamepads.</source>
         <translation>לחצו על כפתור העזרה למידע על מיפוי בקרי המשחק.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="549"/>
+        <location filename="../gui/AppContent.qml" line="557"/>
         <source>VipleStream found a HID device that is not responding:</source>
         <translation>VipleStream מצא התקן HID שאינו מגיב:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="550"/>
+        <location filename="../gui/AppContent.qml" line="558"/>
         <source>Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.</source>
         <translation>זיהוי בקרי משחק והעברת Steam Controller מושבתים עד שההתקן יגיב שוב. נתקו וחברו מחדש את ההתקן; אם VipleStream עדיין לא מזהה אותו, הפעילו מחדש את VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="558"/>
+        <location filename="../gui/AppContent.qml" line="566"/>
         <source>Are you sure you want to quit?</source>
         <translation>האם אתם בטוחים שברצונכם לצאת?</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="588"/>
+        <location filename="../gui/AppContent.qml" line="596"/>
         <source>Enter the IP address of your host PC:</source>
         <translation>הזינו את כתובת ה-IP של המחשב המארח:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="632"/>
+        <location filename="../gui/AppContent.qml" line="640"/>
         <source>Choose a mode</source>
         <translation>בחירת מצב</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="667"/>
+        <location filename="../gui/AppContent.qml" line="675"/>
         <source>Desktop mode</source>
         <translation>מצב שולחן עבודה</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="667"/>
+        <location filename="../gui/AppContent.qml" line="675"/>
         <source>Your PC&apos;s desktop on a virtual screen</source>
         <translation>שולחן העבודה של המחשב שלך על מסך וירטואלי</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="678"/>
+        <location filename="../gui/AppContent.qml" line="686"/>
         <source>VR mode</source>
         <translation>מצב VR</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="678"/>
+        <location filename="../gui/AppContent.qml" line="686"/>
         <source>Play SteamVR games from your PC</source>
         <translation>שחקו במשחקי SteamVR מהמחשב שלך</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="692"/>
+        <location filename="../gui/AppContent.qml" line="700"/>
         <source>Video mode</source>
         <translation>מצב וידאו</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="692"/>
+        <location filename="../gui/AppContent.qml" line="700"/>
         <source>Watch videos, 3D, 180° and 360° videos in the headset</source>
         <translation>צפו בסרטונים, בווידאו תלת-ממדי, 180° ו-360° בתוך המשקפיים</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="762"/>
+        <location filename="../gui/AppContent.qml" line="770"/>
         <source>Starting %1...</source>
         <translation>מפעיל את %1...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="763"/>
+        <location filename="../gui/AppContent.qml" line="771"/>
         <source>Starting the stream...</source>
         <translation>מתחיל את ההזרמה...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="771"/>
+        <location filename="../gui/AppContent.qml" line="779"/>
         <source>The headset switches to the stream when it is ready. This can take a few seconds.</source>
         <translation>המשקפיים יעברו להזרמה כשהיא תהיה מוכנה. זה עשוי לקחת כמה שניות.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="772"/>
+        <location filename="../gui/AppContent.qml" line="780"/>
         <source>Tip:</source>
         <translation>טיפ:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="772"/>
+        <location filename="../gui/AppContent.qml" line="780"/>
         <source>To end the stream, hold A+X+trigger+grip on the VR controller</source>
         <translation>לסיום ההזרמה, החזיקו A+X+הדק+אחיזה בבקר ה-VR</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="821"/>
+        <source>Opening the video...</source>
+        <translation>פותח את הווידאו...</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="829"/>
+        <source>Press B to cancel.</source>
+        <translation>לחצו על B לביטול.</translation>
     </message>
 </context>
 <context>
     <name>AppModel</name>
     <message>
-        <location filename="../gui/appmodel.cpp" line="61"/>
+        <location filename="../gui/appmodel.cpp" line="70"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 אינו מציע הזרמת VR. נדרש VipleStream Server 2.0 ומעלה עם PCVR מופעל.</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="65"/>
+        <location filename="../gui/appmodel.cpp" line="74"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>ניתן להגיע אל %1 רק דרך הממסר. הזרמת VR דורשת חיבור ישיר.</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="69"/>
+        <location filename="../gui/appmodel.cpp" line="78"/>
         <source>%1 is offline.</source>
         <translation>%1 אינו מקוון.</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="543"/>
+        <location filename="../gui/appmodel.cpp" line="650"/>
+        <location filename="../gui/appmodel.cpp" line="658"/>
+        <location filename="../gui/appmodel.cpp" line="667"/>
+        <location filename="../gui/appmodel.cpp" line="681"/>
+        <location filename="../gui/appmodel.cpp" line="811"/>
+        <source>Switch cancelled</source>
+        <translation>המעבר בוטל</translation>
+    </message>
+    <message>
+        <location filename="../gui/appmodel.cpp" line="714"/>
         <source>No host selected</source>
         <translation>לא נבחר מחשב מארח</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="570"/>
+        <location filename="../gui/appmodel.cpp" line="750"/>
         <source>Server returned no task id</source>
         <translation>השרת לא החזיר מזהה משימה</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="592"/>
+        <location filename="../gui/appmodel.cpp" line="671"/>
         <source>Switch task disappeared on host</source>
         <translation>משימת ההחלפה נעלמה במחשב המארח</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="621"/>
+        <location filename="../gui/appmodel.cpp" line="706"/>
         <source>Switch timed out (&gt;150s without server reaching a terminal state)</source>
         <translation>תם הזמן להחלפה (יותר מ-150 שניות בלי שהשרת הגיע למצב סופי)</translation>
     </message>
@@ -222,8 +241,8 @@
     <name>AppView</name>
     <message>
         <location filename="../gui/AppView.qml" line="205"/>
-        <location filename="../gui/AppView.qml" line="513"/>
-        <location filename="../gui/AppView.qml" line="737"/>
+        <location filename="../gui/AppView.qml" line="514"/>
+        <location filename="../gui/AppView.qml" line="738"/>
         <source>LIBRARY</source>
         <translation>ספרייה</translation>
     </message>
@@ -273,89 +292,94 @@
         <translation>הפעלה · ו · הזרמה</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="450"/>
-        <location filename="../gui/AppView.qml" line="694"/>
+        <location filename="../gui/AppView.qml" line="451"/>
+        <location filename="../gui/AppView.qml" line="695"/>
         <source>Resume Game</source>
         <translation>חזרה למשחק</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="476"/>
-        <location filename="../gui/AppView.qml" line="698"/>
+        <location filename="../gui/AppView.qml" line="477"/>
+        <location filename="../gui/AppView.qml" line="699"/>
         <source>Quit Game</source>
         <translation>יציאה מהמשחק</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="555"/>
+        <location filename="../gui/AppView.qml" line="556"/>
         <source>PLAYING</source>
         <translation>משחק כעת</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="694"/>
+        <location filename="../gui/AppView.qml" line="695"/>
         <source>Launch Game</source>
         <translation>הפעלת משחק</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="705"/>
+        <location filename="../gui/AppView.qml" line="706"/>
         <source>Direct Launch</source>
         <translation>הפעלה ישירה</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="709"/>
+        <location filename="../gui/AppView.qml" line="710"/>
         <source>Launch this app immediately when the host is selected, bypassing the app selection grid.</source>
         <translation>הפעלת אפליקציה זו מיידית כאשר נבחר מחשב מארח זה, עוקף את עמוד בחירת אפליקציות.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="717"/>
+        <location filename="../gui/AppView.qml" line="718"/>
         <source>Hide Game</source>
         <translation>הסתר משחק</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="721"/>
+        <location filename="../gui/AppView.qml" line="722"/>
         <source>Hide this game from the app grid. To access hidden games, right-click on the host and choose %1.</source>
         <translation>הסתרת משחק זה מרשת האפליקציות. כדי לגשת למשחקים מוסתרים, לחצו לחיצה ימנית על המחשב המארח ובחרו %1.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="721"/>
+        <location filename="../gui/AppView.qml" line="722"/>
         <source>View All Apps</source>
         <translation>הצגת כל האפליקציות</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="737"/>
+        <location filename="../gui/AppView.qml" line="738"/>
         <source>EMPTY</source>
         <translation>ריק</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="747"/>
+        <location filename="../gui/AppView.qml" line="748"/>
         <source>This computer doesn&apos;t seem to have any applications or some applications are hidden</source>
         <translation>נראה שאין במחשב זה אפליקציות, או שחלק מהאפליקציות מוסתרות</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="750"/>
+        <location filename="../gui/AppView.qml" line="751"/>
         <source>No VR apps were found on this computer. Switch to desktop mode to see all apps.</source>
         <translation>לא נמצאו אפליקציות VR במחשב זה. עברו למצב שולחן עבודה כדי לראות את כל האפליקציות.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="766"/>
+        <location filename="../gui/AppView.qml" line="767"/>
         <source>Are you sure you want to quit %1? Any unsaved progress will be lost.</source>
         <translation>האם אתם בטוחים שברצונכם לצאת מ-%1? כל התקדמות שלא נשמרה תאבד.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="804"/>
+        <location filename="../gui/AppView.qml" line="805"/>
         <source>%1 is currently using this host. Do you want to take over the session? Their session will be disconnected.</source>
         <translation>%1 משתמש כעת במחשב מארח זה. האם להשתלט על ההפעלה? ההפעלה שלו תנותק.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="864"/>
+        <location filename="../gui/AppView.qml" line="871"/>
         <source>STEAM PROFILE</source>
         <translation>חשבון STEAM</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="990"/>
+        <location filename="../gui/AppView.qml" line="896"/>
+        <source>This Steam account has no saved password on the host. Sign in on the host once before switching to it.</source>
+        <translation>לחשבון Steam הזה אין סיסמה שמורה במחשב המארח. היכנסו פעם אחת במחשב המארח לפני המעבר אליו.</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppView.qml" line="1035"/>
         <source>Switching Steam account…</source>
         <translation>מחליף חשבון Steam…</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="1003"/>
+        <location filename="../gui/AppView.qml" line="1048"/>
         <source>Steam will close and re-login on the host.
 This can take 60–90 seconds on a typical box.
 If it stalls longer, check the host — Steam Guard 2FA may be prompting.</source>
@@ -386,11 +410,12 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
     <name>CliQuitStreamSegue</name>
     <message>
         <location filename="../gui/CliQuitStreamSegue.qml" line="9"/>
+        <location filename="../gui/CliQuitStreamSegue.qml" line="12"/>
         <source>Establishing connection to PC...</source>
         <translation>יוצר חיבור למחשב...</translation>
     </message>
     <message>
-        <location filename="../gui/CliQuitStreamSegue.qml" line="13"/>
+        <location filename="../gui/CliQuitStreamSegue.qml" line="16"/>
         <source>Quitting app...</source>
         <translation>יוצא מהאפליקציה...</translation>
     </message>
@@ -416,91 +441,91 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>ComputerModel</name>
     <message>
-        <location filename="../gui/computermodel.cpp" line="114"/>
+        <location filename="../gui/computermodel.cpp" line="143"/>
         <source>Online</source>
         <translation>מקוון</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="117"/>
+        <location filename="../gui/computermodel.cpp" line="146"/>
         <source>Offline</source>
         <translation>לא מקוון</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="120"/>
-        <location filename="../gui/computermodel.cpp" line="132"/>
-        <location filename="../gui/computermodel.cpp" line="144"/>
-        <location filename="../gui/computermodel.cpp" line="146"/>
-        <location filename="../gui/computermodel.cpp" line="147"/>
+        <location filename="../gui/computermodel.cpp" line="149"/>
+        <location filename="../gui/computermodel.cpp" line="161"/>
+        <location filename="../gui/computermodel.cpp" line="173"/>
+        <location filename="../gui/computermodel.cpp" line="175"/>
+        <location filename="../gui/computermodel.cpp" line="176"/>
         <source>Unknown</source>
         <translation>לא ידוע</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="126"/>
+        <location filename="../gui/computermodel.cpp" line="155"/>
         <source>Paired</source>
         <translation>מצומד</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="129"/>
+        <location filename="../gui/computermodel.cpp" line="158"/>
         <source>Unpaired</source>
         <translation>לא מצומד</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="136"/>
+        <location filename="../gui/computermodel.cpp" line="165"/>
         <source>Name: %1</source>
         <translation>שם: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="137"/>
+        <location filename="../gui/computermodel.cpp" line="166"/>
         <source>Status: %1</source>
         <translation>מצב: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="138"/>
+        <location filename="../gui/computermodel.cpp" line="167"/>
         <source>Active Address: %1</source>
         <translation>כתובת פעילה: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="139"/>
+        <location filename="../gui/computermodel.cpp" line="168"/>
         <source>UUID: %1</source>
         <translation>UUID: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="140"/>
+        <location filename="../gui/computermodel.cpp" line="169"/>
         <source>Local Address: %1</source>
         <translation>כתובת מקומית: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="141"/>
+        <location filename="../gui/computermodel.cpp" line="170"/>
         <source>Remote Address: %1</source>
         <translation>כתובת מרוחקת: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="142"/>
+        <location filename="../gui/computermodel.cpp" line="171"/>
         <source>IPv6 Address: %1</source>
         <translation>כתובת IPv6: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="143"/>
+        <location filename="../gui/computermodel.cpp" line="172"/>
         <source>Manual Address: %1</source>
         <translation>כתובת ידנית: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="144"/>
+        <location filename="../gui/computermodel.cpp" line="173"/>
         <source>MAC Address: %1</source>
         <translation>כתובת MAC: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="145"/>
+        <location filename="../gui/computermodel.cpp" line="174"/>
         <source>Pair State: %1</source>
         <translation>מצב צימוד: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="146"/>
+        <location filename="../gui/computermodel.cpp" line="175"/>
         <source>Running Game ID: %1</source>
         <translation>מזהה המשחק הפועל: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="147"/>
+        <location filename="../gui/computermodel.cpp" line="176"/>
         <source>HTTPS Port: %1</source>
         <translation>יציאת HTTPS: %1</translation>
     </message>
@@ -508,52 +533,52 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>FileTransferClient</name>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="185"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="198"/>
         <source>File transfer: nothing to cancel</source>
         <translation>העברת קבצים: אין מה לבטל</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="202"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="216"/>
         <source>File transfer cancelled</source>
         <translation>העברת הקובץ בוטלה</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="410"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="432"/>
         <source>Receiving file: %1 (0%)</source>
         <translation>מקבל קובץ: %1 (0%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="428"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="456"/>
         <source>Receiving file: %1 (%2%)</source>
         <translation>מקבל קובץ: %1 (%2%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="454"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="501"/>
         <source>Received: %1 → Downloads</source>
         <translation>התקבל: %1 → הורדות</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="512"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="580"/>
         <source>Zipping folder: %1…</source>
         <translation>מכווץ תיקייה: %1…</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="586"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="683"/>
         <source>Sending: %1 (0%)</source>
         <translation>שולח: %1 (0%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="602"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="698"/>
         <source>Sending: %1 (%2%)</source>
         <translation>שולח: %1 (%2%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="625"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="722"/>
         <source>Sent: %1</source>
         <translation>נשלח: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="627"/>
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="724"/>
         <source>Send failed: %1 (%2)</source>
         <translation>השליחה נכשלה: %1 (%2)</translation>
     </message>
@@ -584,22 +609,22 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>בית</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="240"/>
+        <location filename="../backend/medialibrary.cpp" line="249"/>
         <source>The PC is not online.</source>
         <translation>המחשב אינו מקוון.</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="272"/>
+        <location filename="../backend/medialibrary.cpp" line="281"/>
         <source>This PC doesn&apos;t share its videos. Update VipleStream Server on that PC, and check that media_share isn&apos;t disabled in its configuration.</source>
         <translation>מחשב זה אינו משתף את הסרטונים שלו. עדכנו את VipleStream Server במחשב זה, וודאו ש-media_share אינו מושבת בתצורה שלו.</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="319"/>
+        <location filename="../backend/medialibrary.cpp" line="328"/>
         <source>Could not reach the PC. Make sure VipleStream Server is running.</source>
         <translation>לא ניתן להגיע למחשב. ודאו ש-VipleStream Server פועל.</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="320"/>
+        <location filename="../backend/medialibrary.cpp" line="329"/>
         <source>Could not read this folder from the PC.</source>
         <translation>לא ניתן לקרוא תיקייה זו מהמחשב.</translation>
     </message>
@@ -620,237 +645,237 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>Hosts</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="68"/>
+        <location filename="../gui/PcView.qml" line="77"/>
         <source>Unable to connect to the specified PC.</source>
         <translation>לא ניתן להתחבר למחשב שצוין.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="74"/>
+        <location filename="../gui/PcView.qml" line="83"/>
         <source>Click the Help button for possible solutions.</source>
         <translation>לחצו על כפתור העזרה לפתרונות אפשריים.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="105"/>
+        <location filename="../gui/PcView.qml" line="114"/>
         <source>Automatic PC discovery is disabled. Add your PC manually.</source>
         <translation>גילוי מחשבים אוטומטי מושבת. הוסיפו את המחשב שלכם ידנית.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="104"/>
+        <location filename="../gui/PcView.qml" line="113"/>
         <source>Searching for compatible hosts on your local network...</source>
         <translation>מחפש מחשבים מארחים תואמים ברשת המקומית...</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="71"/>
+        <location filename="../gui/PcView.qml" line="80"/>
         <source>This PC&apos;s Internet connection is blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
         <translation>חיבור האינטרנט של מחשב זה חוסם את VipleStream. ייתכן שהזרמה דרך האינטרנט לא תעבוד בזמן החיבור לרשת זו.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="195"/>
+        <location filename="../gui/PcView.qml" line="204"/>
         <source>HOSTS</source>
         <translation>מארחים</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="203"/>
+        <location filename="../gui/PcView.qml" line="212"/>
         <source>LOCAL NETWORK</source>
         <translation>רשת מקומית</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="213"/>
+        <location filename="../gui/PcView.qml" line="222"/>
         <source>MDNS ON</source>
         <translation>MDNS פעיל</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="213"/>
+        <location filename="../gui/PcView.qml" line="222"/>
         <source>MDNS OFF</source>
         <translation>MDNS כבוי</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="215"/>
+        <location filename="../gui/PcView.qml" line="224"/>
         <source>FOUND</source>
         <translation>נמצאו</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="218"/>
+        <location filename="../gui/PcView.qml" line="227"/>
         <source>READY TO LAUNCH</source>
         <translation>מוכן להפעלה</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="219"/>
+        <location filename="../gui/PcView.qml" line="228"/>
         <source>NO PAIRED HOST</source>
         <translation>אין מארח מצומד</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="241"/>
+        <location filename="../gui/PcView.qml" line="250"/>
         <source>FEATURED</source>
         <translation>מומלץ</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="261"/>
+        <location filename="../gui/PcView.qml" line="270"/>
         <source>PICK A HOST TO CONNECT</source>
         <translation>בחרו מארח להתחברות</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="286"/>
+        <location filename="../gui/PcView.qml" line="295"/>
         <source>STREAM · PATCH · 2026</source>
         <translation>הזרמה · עדכון · 2026</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="367"/>
+        <location filename="../gui/PcView.qml" line="376"/>
         <source>OFFLINE</source>
         <translation>לא מקוון</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="368"/>
+        <location filename="../gui/PcView.qml" line="377"/>
         <source>UNPAIRED</source>
         <translation>לא מצומד</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="369"/>
+        <location filename="../gui/PcView.qml" line="378"/>
         <source>READY</source>
         <translation>מוכן</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="428"/>
+        <location filename="../gui/PcView.qml" line="437"/>
         <source>MULTI-LINK</source>
         <translation>ריבוי חיבורים</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="580"/>
+        <location filename="../gui/PcView.qml" line="589"/>
         <source>Wake PC</source>
         <translation>הערת המחשב</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="586"/>
+        <location filename="../gui/PcView.qml" line="595"/>
         <source>Auto Wake-on-LAN: ON</source>
         <translation>Wake-on-LAN אוטומטי: מופעל</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="587"/>
+        <location filename="../gui/PcView.qml" line="596"/>
         <source>Auto Wake-on-LAN: OFF</source>
         <translation>Wake-on-LAN אוטומטי: כבוי</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="607"/>
+        <location filename="../gui/PcView.qml" line="616"/>
         <source>Test Network</source>
         <translation>בדיקת רשת</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="631"/>
+        <location filename="../gui/PcView.qml" line="640"/>
         <source>Rename PC</source>
         <translation>שינוי שם המחשב</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="639"/>
+        <location filename="../gui/PcView.qml" line="649"/>
         <source>Delete PC</source>
         <translation>מחיקת המחשב</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="647"/>
+        <location filename="../gui/PcView.qml" line="658"/>
         <source>View Details</source>
         <translation>הצגת פרטים</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="659"/>
+        <location filename="../gui/PcView.qml" line="670"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of VipleStream. You must update VipleStream to stream from %1.</source>
         <translation>גרסת GeForce Experience ב-%1 אינה נתמכת בגרסה זו של VipleStream. יש לעדכן את VipleStream כדי להזרים מ-%1.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="758"/>
+        <location filename="../gui/PcView.qml" line="777"/>
         <source>PAIRING</source>
         <translation>צימוד</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="758"/>
+        <location filename="../gui/PcView.qml" line="777"/>
         <source>STEP 02 / 03</source>
         <translation>שלב 02 / 03</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="767"/>
+        <location filename="../gui/PcView.qml" line="786"/>
         <source>Enter PIN on host</source>
         <translation>הזינו את ה-PIN במחשב המארח</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="807"/>
+        <location filename="../gui/PcView.qml" line="826"/>
         <source>If your host PC is running VipleStream-Server, navigate to the VipleStream-Server web UI to enter the PIN.</source>
         <translation>אם במחשב המארח פועל VipleStream-Server, היכנסו לממשק האינטרנט של VipleStream-Server כדי להזין את ה-PIN.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="826"/>
+        <location filename="../gui/PcView.qml" line="845"/>
         <source>WAITING FOR HOST</source>
         <translation>ממתין למחשב המארח</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="855"/>
+        <location filename="../gui/PcView.qml" line="878"/>
         <source>VipleStream is testing your network connection to determine if any required ports are blocked.</source>
         <translation>VipleStream בודק את חיבור הרשת שלך כדי לקבוע אם יציאות נדרשות חסומות.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="862"/>
+        <location filename="../gui/PcView.qml" line="885"/>
         <source>The network test could not be performed because none of VipleStream&apos;s connection testing servers were reachable from this PC. Check your Internet connection or try again later.</source>
         <translation>לא ניתן היה לבצע את בדיקת הרשת כי אף אחד משרתי בדיקת החיבור של VipleStream לא היה נגיש ממחשב זה. בדקו את חיבור האינטרנט או נסו שוב מאוחר יותר.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="866"/>
+        <location filename="../gui/PcView.qml" line="889"/>
         <source>This network does not appear to be blocking VipleStream. If you still have trouble connecting, check your PC&apos;s firewall settings.</source>
         <translation>נראה שרשת זו אינה חוסמת את VipleStream. אם עדיין יש בעיות בהתחברות, בדקו את הגדרות חומת האש של המחשב.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="866"/>
+        <location filename="../gui/PcView.qml" line="889"/>
         <source>If you are trying to stream over the Internet, install the VipleStream-Server Internet Hosting Tool on your gaming PC and run the included Internet Streaming Tester to check your gaming PC&apos;s Internet connection.</source>
         <translation>אם אתם מנסים להזרים דרך האינטרנט, התקינו את כלי האירוח באינטרנט של VipleStream-Server במחשב המשחקים והפעילו את בודק ההזרמה באינטרנט המצורף כדי לבדוק את חיבור האינטרנט של מחשב המשחקים.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="870"/>
+        <location filename="../gui/PcView.qml" line="893"/>
         <source>Your PC&apos;s current network connection seems to be blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
         <translation>נראה שחיבור הרשת הנוכחי של המחשב שלך חוסם את VipleStream. ייתכן שהזרמה דרך האינטרנט לא תעבוד בזמן החיבור לרשת זו.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="855"/>
+        <location filename="../gui/PcView.qml" line="878"/>
         <source>This may take a few seconds…</source>
         <translation>זה עשוי לקחת כמה שניות…</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="870"/>
+        <location filename="../gui/PcView.qml" line="893"/>
         <source>The following network ports were blocked:</source>
         <translation>יציאות הרשת הבאות נחסמו:</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="565"/>
+        <location filename="../gui/PcView.qml" line="574"/>
         <source>PC Status: %1</source>
         <translation>מצב המחשב: %1</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="565"/>
+        <location filename="../gui/PcView.qml" line="574"/>
         <source>Online</source>
         <translation>מקוון</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="565"/>
+        <location filename="../gui/PcView.qml" line="574"/>
         <source>Offline</source>
         <translation>לא מקוון</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="570"/>
+        <location filename="../gui/PcView.qml" line="579"/>
         <source>View All Apps</source>
         <translation>הצגת כל האפליקציות</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="622"/>
+        <location filename="../gui/PcView.qml" line="631"/>
         <source>Click goes straight to desktop: On</source>
         <translation>לחיצה נכנסת ישר לשולחן העבודה: מופעל</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="623"/>
+        <location filename="../gui/PcView.qml" line="632"/>
         <source>Click goes straight to desktop: Off</source>
         <translation>לחיצה נכנסת ישר לשולחן העבודה: כבוי</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="841"/>
+        <location filename="../gui/PcView.qml" line="861"/>
         <source>Are you sure you want to remove &apos;%1&apos;?</source>
         <translation>האם אתם בטוחים שברצונכם להסיר את &apos;%1&apos;?</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="882"/>
+        <location filename="../gui/PcView.qml" line="905"/>
         <source>Enter the new name for this PC:</source>
         <translation>הזינו שם חדש למחשב זה:</translation>
     </message>
@@ -858,27 +883,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>PendingPairingTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="881"/>
+        <location filename="../backend/computermanager.cpp" line="926"/>
         <source>The PIN from the PC didn&apos;t match. Please try again.</source>
         <translation>ה-PIN מהמחשב לא תאם. נסו שוב.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="885"/>
+        <location filename="../backend/computermanager.cpp" line="930"/>
         <source>You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again.</source>
         <translation>לא ניתן לבצע צימוד בזמן שהפעלה קודמת עדיין רצה במחשב המארח. צאו מכל משחק פועל או הפעילו מחדש את המחשב המארח, ואז נסו לבצע צימוד שוב.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="888"/>
+        <location filename="../backend/computermanager.cpp" line="933"/>
         <source>Pairing failed. Please try again.</source>
         <translation>הצימוד נכשל. נסו שוב.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="892"/>
+        <location filename="../backend/computermanager.cpp" line="937"/>
         <source>Another pairing attempt is already in progress.</source>
         <translation>ניסיון צימוד אחר כבר מתבצע.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="902"/>
+        <location filename="../backend/computermanager.cpp" line="947"/>
         <source>GeForce Experience returned error: %1</source>
         <translation>GeForce Experience החזיר שגיאה: %1</translation>
     </message>
@@ -886,7 +911,7 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>PendingQuitTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="952"/>
+        <location filename="../backend/computermanager.cpp" line="997"/>
         <source>The running game wasn&apos;t started by this PC. You must quit the game on the host PC manually or use the device that originally started the game.</source>
         <translation>המשחק הפועל לא הופעל ממחשב זה. יש לצאת מהמשחק במחשב המארח ידנית או להשתמש בהתקן שהפעיל את המשחק במקור.</translation>
     </message>
@@ -900,19 +925,24 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
     </message>
     <message>
         <location filename="../cli/pair.cpp" line="109"/>
-        <location filename="../cli/quitstream.cpp" line="76"/>
+        <location filename="../cli/quitstream.cpp" line="80"/>
         <location filename="../cli/startstream.cpp" line="133"/>
         <source>Failed to connect to %1</source>
         <translation>ההתחברות אל %1 נכשלה</translation>
     </message>
     <message>
-        <location filename="../cli/quitstream.cpp" line="88"/>
+        <location filename="../cli/quitstream.cpp" line="85"/>
+        <source>Quitting app timed out</source>
+        <translation>היציאה מהאפליקציה חרגה מהזמן המותר</translation>
+    </message>
+    <message>
+        <location filename="../cli/quitstream.cpp" line="102"/>
         <location filename="../cli/startstream.cpp" line="89"/>
         <source>Computer %1 has not been paired. Please open Moonlight to pair before streaming.</source>
         <translation>המחשב %1 לא צומד. פתחו את Moonlight לביצוע צימוד לפני ההזרמה.</translation>
     </message>
     <message>
-        <location filename="../cli/quitstream.cpp" line="102"/>
+        <location filename="../cli/quitstream.cpp" line="118"/>
         <location filename="../cli/startstream.cpp" line="126"/>
         <source>Quitting app failed, reason: %1</source>
         <translation>היציאה מהאפליקציה נכשלה, סיבה: %1</translation>
@@ -923,7 +953,7 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>האפליקציה %1 לא נמצאה</translation>
     </message>
     <message>
-        <location filename="../cli/listapps.cpp" line="108"/>
+        <location filename="../cli/listapps.cpp" line="122"/>
         <source>Computer %1 has not been paired. Please open Moonlight to pair before retrieving games list.</source>
         <translation>המחשב %1 לא צומד. פתחו את Moonlight לביצוע צימוד לפני אחזור רשימת המשחקים.</translation>
     </message>
@@ -931,27 +961,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1450"/>
+        <location filename="../main.cpp" line="1464"/>
         <source>&amp;Yes</source>
         <translation>&amp;כן</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1451"/>
+        <location filename="../main.cpp" line="1465"/>
         <source>&amp;No</source>
         <translation>&amp;לא</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1452"/>
+        <location filename="../main.cpp" line="1466"/>
         <source>OK</source>
         <translation>אישור</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1453"/>
+        <location filename="../main.cpp" line="1467"/>
         <source>Help</source>
         <translation>עזרה</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1454"/>
+        <location filename="../main.cpp" line="1468"/>
         <source>Cancel</source>
         <translation>ביטול</translation>
     </message>
@@ -967,339 +997,379 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="367"/>
+        <location filename="../streaming/session.cpp" line="373"/>
         <source>No video received from host.</source>
         <translation>לא התקבל וידאו מהמחשב המארח.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="368"/>
+        <location filename="../streaming/session.cpp" line="374"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>בדקו את חומת האש ואת כללי העברת היציאות עבור היציאות: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="373"/>
+        <location filename="../streaming/session.cpp" line="379"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>חיבור הרשת שלך אינו מתפקד היטב. הקטינו את קצב הסיביות של הווידאו או נסו חיבור מהיר יותר.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="379"/>
+        <location filename="../streaming/session.cpp" line="385"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>משהו השתבש במחשב המארח בעת התחלת ההזרמה.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="380"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>ודאו שאין תוכן מוגן DRM פתוח במחשב המארח. אפשר גם לנסות להפעיל מחדש את המחשב המארח.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="385"/>
+        <location filename="../streaming/session.cpp" line="391"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>המחשב המארח דיווח על שגיאת קידוד וידאו חמורה.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="386"/>
+        <location filename="../streaming/session.cpp" line="392"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>נסו להשבית את מצב HDR, לשנות את רזולוציית ההזרמה, או לשנות את רזולוציית התצוגה של המחשב המארח.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="393"/>
+        <location filename="../streaming/session.cpp" line="399"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>חיבור הבקרה לשרת נותק — ייתכן שזו הפרעת רשת רגעית או שהשרת אינו מקוון. אפשר לנסות להמשיך את ההזרמה (resume) מאוחר יותר</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="401"/>
+        <location filename="../streaming/session.cpp" line="407"/>
         <source>Connection terminated</source>
         <translation>החיבור נותק</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="402"/>
+        <location filename="../streaming/session.cpp" line="408"/>
         <source>Error code: %1</source>
         <translation>קוד שגיאה: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1868"/>
+        <location filename="../streaming/session.cpp" line="1922"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>גרסת GeForce Experience ב-%1 אינה נתמכת בגרסה זו של Moonlight. יש לעדכן את Moonlight כדי להזרים מ-%1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1874"/>
+        <location filename="../streaming/session.cpp" line="1928"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>הבחירה להפעיל מצב עכבר לשולחן עבודה מרוחק עלולה לגרום לבעיות במשחקים.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1878"/>
+        <location filename="../streaming/session.cpp" line="1932"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>בחירת ההגדרה לכפיית פענוח תוכנה עלולה לגרום לביצועי הזרמה ירודים.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1937"/>
+        <location filename="../streaming/session.cpp" line="1991"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>המחשב המארח אינו תומך בקידוד HEVC.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1955"/>
+        <location filename="../streaming/session.cpp" line="2009"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>נעשה שימוש בפענוח תוכנה עקב הבחירה לכפות HEVC ללא תמיכת GPU. הדבר עלול לגרום לביצועי הזרמה ירודים.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1907"/>
+        <location filename="../streaming/session.cpp" line="1961"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>תוכנת המארח או ה-GPU אינם תומכים בקידוד AV1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1925"/>
+        <location filename="../streaming/session.cpp" line="1979"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>נעשה שימוש בפענוח תוכנה עקב הבחירה לכפות AV1 ללא תמיכת GPU. הדבר עלול לגרום לביצועי הזרמה ירודים.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2002"/>
+        <location filename="../streaming/session.cpp" line="2056"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>המחשב המארח אינו תומך בהזרמת HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1994"/>
+        <location filename="../streaming/session.cpp" line="2048"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>HDR אינו נתמך עם קודק H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2029"/>
+        <location filename="../streaming/session.cpp" line="2083"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>ה-GPU של מחשב זה אינו תומך בפענוח AV1 Main10 להזרמת HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1998"/>
+        <location filename="../streaming/session.cpp" line="2052"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>ה-GPU של מחשב זה אינו תומך בפענוח HEVC או AV1 של 10 סיביות להזרמת HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2062"/>
+        <location filename="../streaming/session.cpp" line="2116"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>המחשב המארח ומחשב הלקוח אינם תומכים באותם קודקי וידאו של HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2165"/>
+        <location filename="../streaming/session.cpp" line="2219"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>רזולוציות וידאו מעל 4K אינן נתמכות בקודק H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3497"/>
+        <location filename="../streaming/session.cpp" line="3567"/>
         <source>Host returned error: %1</source>
         <translation>המחשב המארח החזיר שגיאה: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1974"/>
+        <location filename="../streaming/session.cpp" line="2028"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>נעשה שימוש בפענוח תוכנה עקב הבחירה לכפות H.264 ללא תמיכת GPU. הדבר עלול לגרום לביצועי הזרמה ירודים.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="733"/>
+        <location filename="../streaming/session.cpp" line="609"/>
+        <source>This game doesn&apos;t use VR controllers - switched to Xbox controller mode</source>
+        <translation>המשחק הזה לא משתמש בבקרי VR - עברנו למצב בקר Xbox</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="612"/>
+        <source>Xbox controller mode: on</source>
+        <translation>מצב בקר Xbox: פועל</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="615"/>
+        <source>Xbox controller mode: off (VR controllers)</source>
+        <translation>מצב בקר Xbox: כבוי (בקרי VR)</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="618"/>
+        <source>Xbox controller mode unavailable: install ViGEmBus on the host</source>
+        <translation>מצב בקר Xbox אינו זמין: התקינו את ViGEmBus במחשב המארח</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="767"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>משקפיים אחרים משתמשים ב-SteamVR ב-%1 (לדוגמה Steam Link). נתקו אותם ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="735"/>
+        <location filename="../streaming/session.cpp" line="769"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>משחק VR כבר פועל ב-%1 ללא VipleStream. צאו ממנו ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="737"/>
+        <location filename="../streaming/session.cpp" line="771"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>יש להפעיל מחדש את SteamVR ב-%1, אבל משחק VR עדיין פועל שם. צאו קודם מהמשחק (יציאה מהמשחק ברשימת האפליקציות) ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="740"/>
+        <location filename="../streaming/session.cpp" line="774"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>SteamVR ב-%1 הופעל במצב בטוח וחסם את מנהל ההתקן של VipleStream. הפעילו מחדש את SteamVR במחשב המארח ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="742"/>
+        <location filename="../streaming/session.cpp" line="776"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>SteamVR אינו מותקן ב-%1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="744"/>
+        <location filename="../streaming/session.cpp" line="778"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>Steam אינו מחובר ב-%1. התחברו ל-Steam במחשב המארח (לדוגמה במצב שולחן עבודה) ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="746"/>
+        <location filename="../streaming/session.cpp" line="780"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>אף משתמש אינו מחובר ל-Windows ב-%1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="748"/>
+        <location filename="../streaming/session.cpp" line="782"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 נמצא במסך הכניסה או הנעילה של Windows. התחברו במחשב המארח ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="751"/>
+        <location filename="../streaming/session.cpp" line="785"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>SteamVR ב-%1 לא הופעל בזמן. נסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="753"/>
+        <location filename="../streaming/session.cpp" line="787"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1 לא הצליח להפעיל VR (שגיאה %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="778"/>
+        <location filename="../streaming/session.cpp" line="812"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 אינו מציע הזרמת VR. נדרש VipleStream Server 2.0 ומעלה עם PCVR מופעל.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="788"/>
+        <location filename="../streaming/session.cpp" line="822"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>ניתן להגיע אל %1 רק דרך הממסר. הזרמת VR דורשת חיבור ישיר.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="796"/>
+        <location filename="../streaming/session.cpp" line="830"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>הגדרת קודק הווידאו כופה AV1, אבל הזרמת VR דורשת HEVC או H.264. שנו את קודק הווידאו בהגדרות.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1817"/>
+        <location filename="../streaming/session.cpp" line="1330"/>
+        <source>Failed to initialize video subsystem: %1</source>
+        <translation>אתחול מערכת המשנה של הווידאו נכשל: %1</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="1415"/>
+        <source>Failed to create window for hardware decode test: %1</source>
+        <translation>יצירת חלון לבדיקת פענוח חומרה נכשלה: %1</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="1521"/>
+        <source>Invalid stream frame rate (%1 FPS).</source>
+        <translation>קצב פריימים לא תקין להזרמה (%1 FPS).</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="1867"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>בהתקן זה אין מפענח וידאו HEVC או H.264 של 8 סיביות להזרמת VR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1884"/>
+        <location filename="../streaming/session.cpp" line="1896"/>
+        <source>Failed to initialize video decoder.</source>
+        <translation>אתחול מפענח הווידאו נכשל.</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="1938"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>תוכנת המארח או ה-GPU אינם תומכים בקידוד PyroWave.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1895"/>
+        <location filename="../streaming/session.cpp" line="1949"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>ה-GPU של הלקוח אינו תומך בפענוח PyroWave עם Vulkan 1.3. חוזרים ל-HEVC/H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1984"/>
+        <location filename="../streaming/session.cpp" line="2038"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>המחשב המארח ומחשב הלקוח אינם תומכים באותם קודקי וידאו. הדבר עלול לגרום לביצועי הזרמה ירודים.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1987"/>
+        <location filename="../streaming/session.cpp" line="2041"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>ה-GPU של הלקוח אינו תומך בפענוח H.264. הדבר עלול לגרום לביצועי הזרמה ירודים.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2017"/>
+        <location filename="../streaming/session.cpp" line="2071"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>ה-GPU של מחשב זה אינו תומך בפענוח PyroWave Main10 להזרמת HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2035"/>
-        <location filename="../streaming/session.cpp" line="2053"/>
+        <location filename="../streaming/session.cpp" line="2089"/>
+        <location filename="../streaming/session.cpp" line="2107"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>נעשה שימוש בפענוח תוכנה עקב הבחירה לכפות HDR ללא תמיכת GPU. הדבר עלול לגרום לביצועי הזרמה ירודים.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2047"/>
+        <location filename="../streaming/session.cpp" line="2101"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>ה-GPU של מחשב זה אינו תומך בפענוח HEVC Main10 להזרמת HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2069"/>
+        <location filename="../streaming/session.cpp" line="2123"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>המחשב המארח אינו תומך בהזרמת YUV 4:4:4.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2077"/>
+        <location filename="../streaming/session.cpp" line="2131"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>המחשב המארח אינו תומך בהזרמת YUV 4:4:4 עבור קודק הווידאו שנבחר.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2092"/>
+        <location filename="../streaming/session.cpp" line="2146"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>נעשה שימוש בפענוח תוכנה עקב הבחירה לכפות YUV 4:4:4 ללא תמיכת GPU. הדבר עלול לגרום לביצועי הזרמה ירודים.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2098"/>
+        <location filename="../streaming/session.cpp" line="2152"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>ה-GPU של מחשב זה אינו תומך בפענוח YUV 4:4:4 עבור קודק הווידאו שנבחר.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2107"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>נדרש GeForce Experience 3.0 ומעלה להזרמת 4K.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2124"/>
+        <location filename="../streaming/session.cpp" line="2178"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>הגדרת שמע הסראונד שנבחרה אינה נתמכת בהתקן השמע הנוכחי.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2130"/>
+        <location filename="../streaming/session.cpp" line="2184"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>פתיחת התקן השמע נכשלה. השמע לא יהיה זמין בהפעלה זו.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2139"/>
+        <location filename="../streaming/session.cpp" line="2193"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>התקן HID אינו מגיב (%1). קלט בקר משחק והעברת Steam Controller מושבתים בהפעלה זו. נתקו וחברו מחדש את ההתקן, ואז התחילו את ההזרמה שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2143"/>
+        <location filename="../streaming/session.cpp" line="2197"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>בקר משחק מחובר אינו ממופה ולא יהיה שמיש. בקרו בעזרה של Moonlight כדי לפתור זאת.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2161"/>
+        <location filename="../streaming/session.cpp" line="2215"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>ה-GPU של המחשב המארח אינו תומך בהזרמת רזולוציות וידאו מעל 4K.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2179"/>
+        <location filename="../streaming/session.cpp" line="2233"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>לא ניתן לכפות פענוח חומרה כי ה-GPU של מחשב זה חסר תמיכה בפענוח חומרה.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2182"/>
+        <location filename="../streaming/session.cpp" line="2236"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>בחירת הקודק והגדרת כפיית פענוח החומרה אינן תואמות. ה-GPU של מחשב זה אינו תומך בפענוח הקודק שנבחר.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3013"/>
+        <location filename="../streaming/session.cpp" line="3082"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>סביבת הריצה של XR %1 לאחר שהפעלת ה-VR התחילה, ולכן ההזרמה הסתיימה.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3014"/>
+        <location filename="../streaming/session.cpp" line="3083"/>
         <source>exited</source>
         <translation>יצאה</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3014"/>
+        <location filename="../streaming/session.cpp" line="3083"/>
         <source>stopped responding or was lost</source>
         <translation>הפסיקה להגיב או אבדה</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3169"/>
+        <location filename="../streaming/session.cpp" line="3239"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>לא ניתן להפעיל VR במשקפיים אלה (%1). ודאו ש-SteamVR פועל ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3178"/>
+        <location filename="../streaming/session.cpp" line="3248"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>סביבת הריצה של ה-VR במשקפיים לא הגיבה בזמן. ודאו ש-SteamVR פועל ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3393"/>
+        <location filename="../streaming/session.cpp" line="3463"/>
         <source>Failed to launch via relay proxy</source>
         <translation>ההפעלה דרך שרת הממסר נכשלה</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3469"/>
+        <location filename="../streaming/session.cpp" line="3539"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 לא התחיל הפעלת VR. ודאו ש-PCVR מופעל במחשב המארח ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3478"/>
-        <location filename="../streaming/session.cpp" line="3485"/>
+        <location filename="../streaming/session.cpp" line="3548"/>
+        <location filename="../streaming/session.cpp" line="3555"/>
         <source>Connection to host failed</source>
         <translation>החיבור למחשב המארח נכשל</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4794"/>
+        <location filename="../streaming/session.cpp" line="4956"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>לא ניתן לאתחל את מפענח הווידאו. בדקו את הגדרות ההזרמה ונסו שוב.</translation>
     </message>
@@ -1377,37 +1447,37 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>אוטומטי (תצוגה זו)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1389"/>
+        <location filename="../gui/SettingsView.qml" line="1399"/>
         <source>Frame interpolation (FRUC)</source>
         <translation>שילוב פריימים (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1429"/>
+        <location filename="../gui/SettingsView.qml" line="1439"/>
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>מוסיף פריים משולב בין כל שני פריימים אמיתיים, ומכפיל את קצב הפריימים האפקטיבי. קצב הפריימים בפועל מהשרת מוקטן בחצי (לדוגמה הגדרה של 120 FPS ← בקשה של 60 FPS ← פלט של 120 FPS).</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1519"/>
+        <location filename="../gui/SettingsView.qml" line="1549"/>
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute (מומלץ — השהיה הנמוכה ביותר, כל GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1520"/>
+        <location filename="../gui/SettingsView.qml" line="1550"/>
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow (זרימה בחומרה + warp; NVIDIA RTX 20 ומעלה)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1521"/>
+        <location filename="../gui/SettingsView.qml" line="1551"/>
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — מודל ML של RIFE (דורש GPU חזק; Tensor Core RTX 30/40 ומעלה)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1522"/>
+        <location filename="../gui/SettingsView.qml" line="1552"/>
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE (ניסיוני; בין יצרנים: NV/AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1532"/>
+        <location filename="../gui/SettingsView.qml" line="1562"/>
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
@@ -1420,53 +1490,53 @@ NVIDIA Optical Flow: חומרת NVOFA ייעודית ב-Turing ומעלה (סד�
 DirectML: מריץ את מודל ה-ONNX המצורף RIFE 4.25 lite על DirectML EP של D3D12 — שילוב ML *אמיתי* עם פיצוי תנועה, האיכות הוויזואלית הטובה ביותר בתוכן דינמי. תקורת הפעלת kernel לכל פעולה (כ-25 ms בסיס ללא תלות ברזולוציה) פירושה שנדרש GPU ברמת Tensor Core (RTX 30/40 מיינסטרים ומעלה) כדי לעמוד בקצב ב-720p ומעלה בזמן אמת. ב-GPU חלשים יותר הלקוח מוריד אוטומטית את רזולוציית ההסקה בהדרגה (1080p ← 720p ← 540p ← 480p ← 360p) וחוזר ל-Generic אם אפילו 360p לא נכנס בתקציב הפריים.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1601"/>
+        <location filename="../gui/SettingsView.qml" line="1631"/>
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1602"/>
+        <location filename="../gui/SettingsView.qml" line="1632"/>
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1605"/>
+        <location filename="../gui/SettingsView.qml" line="1635"/>
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (PERFORMANCE GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1651"/>
+        <location filename="../gui/SettingsView.qml" line="1681"/>
         <source>Video bitrate:</source>
         <translation>קצב סיביות של הווידאו:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1659"/>
+        <location filename="../gui/SettingsView.qml" line="1689"/>
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>הקטינו את קצב הסיביות בחיבורים איטיים. הגדילו את קצב הסיביות לשיפור איכות התמונה.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1681"/>
+        <location filename="../gui/SettingsView.qml" line="1711"/>
         <source>Video bitrate: %1 Mbps</source>
         <translation>קצב סיביות של הווידאו: %1 Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1711"/>
+        <location filename="../gui/SettingsView.qml" line="1758"/>
         <source>Display mode</source>
         <translation>מצב תצוגה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1722"/>
-        <location filename="../gui/SettingsView.qml" line="2291"/>
+        <location filename="../gui/SettingsView.qml" line="1769"/>
+        <location filename="../gui/SettingsView.qml" line="2338"/>
         <source>Fullscreen</source>
         <translation>מסך מלא</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1791"/>
+        <location filename="../gui/SettingsView.qml" line="1838"/>
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>מסך מלא מספק בדרך כלל את הביצועים הטובים ביותר, אך חלון ללא מסגרת עשוי לעבוד טוב יותר עם תכונות כמו macOS Spaces,‏ Alt+Tab, כלי צילום מסך, שכבות על המסך וכו&apos;.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1727"/>
+        <location filename="../gui/SettingsView.qml" line="1774"/>
         <source>Borderless windowed</source>
         <translation>חלון ללא מסגרת</translation>
     </message>
@@ -1481,233 +1551,233 @@ DirectML: מריץ את מודל ה-ONNX המצורף RIFE 4.25 lite על Direct
         <translation>מקורי (ללא החריץ)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1697"/>
+        <location filename="../gui/SettingsView.qml" line="1727"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>ברירת מחדל (%1 Mbps)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1732"/>
-        <location filename="../gui/SettingsView.qml" line="2283"/>
+        <location filename="../gui/SettingsView.qml" line="1779"/>
+        <location filename="../gui/SettingsView.qml" line="2330"/>
         <source>Windowed</source>
         <translation>חלון</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1741"/>
+        <location filename="../gui/SettingsView.qml" line="1788"/>
         <source>(Recommended)</source>
         <translation>(מומלץ)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1798"/>
+        <location filename="../gui/SettingsView.qml" line="1845"/>
         <source>V-Sync</source>
         <translation>V-Sync</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1808"/>
+        <location filename="../gui/SettingsView.qml" line="1855"/>
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>השבתת V-Sync מאפשרת השהיית רינדור של פחות מפריים, אך עלולה לגרום לקריעת תמונה נראית</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1815"/>
+        <location filename="../gui/SettingsView.qml" line="1862"/>
         <source>Frame pacing</source>
         <translation>קצב פריימים אחיד (Frame pacing)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1838"/>
+        <location filename="../gui/SettingsView.qml" line="1885"/>
         <source>Audio Settings</source>
         <translation>הגדרות שמע</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1873"/>
+        <location filename="../gui/SettingsView.qml" line="1920"/>
         <source>Stereo</source>
         <translation>סטריאו</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1877"/>
+        <location filename="../gui/SettingsView.qml" line="1924"/>
         <source>5.1 surround sound</source>
         <translation>סראונד 5.1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1881"/>
+        <location filename="../gui/SettingsView.qml" line="1928"/>
         <source>7.1 surround sound</source>
         <translation>סראונד 7.1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1895"/>
+        <location filename="../gui/SettingsView.qml" line="1942"/>
         <source>Mute host PC speakers while streaming</source>
         <translation>השתקת הרמקולים של המחשב המארח בזמן ההזרמה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1905"/>
+        <location filename="../gui/SettingsView.qml" line="1952"/>
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>יש להפעיל מחדש כל משחק שפועל כעת כדי שהגדרה זו תיכנס לתוקף</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2027"/>
+        <location filename="../gui/SettingsView.qml" line="2074"/>
         <source>UI Settings</source>
         <translation>הגדרות ממשק</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2072"/>
+        <location filename="../gui/SettingsView.qml" line="2119"/>
         <source>Language</source>
         <translation>שפה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2098"/>
+        <location filename="../gui/SettingsView.qml" line="2145"/>
         <source>Automatic</source>
         <translation>אוטומטי</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2250"/>
+        <location filename="../gui/SettingsView.qml" line="2297"/>
         <source>GUI display mode</source>
         <translation>מצב תצוגת הממשק</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2287"/>
+        <location filename="../gui/SettingsView.qml" line="2334"/>
         <source>Maximized</source>
         <translation>מוגדל</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2315"/>
+        <location filename="../gui/SettingsView.qml" line="2362"/>
         <source>Show configuration warnings</source>
         <translation>הצגת אזהרות תצורה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2371"/>
+        <location filename="../gui/SettingsView.qml" line="2418"/>
         <source>Input Settings</source>
         <translation>הגדרות קלט</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2392"/>
+        <location filename="../gui/SettingsView.qml" line="2439"/>
         <source>This enables seamless mouse control without capturing the client&apos;s mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>מאפשר שליטה חלקה בעכבר בלי ללכוד את סמן העכבר של הלקוח. אידיאלי לשימוש בשולחן עבודה מרוחק אך לא יעבוד ברוב המשחקים.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2394"/>
+        <location filename="../gui/SettingsView.qml" line="2441"/>
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>הערה: עקב באג ב-GeForce Experience, ייתכן שאפשרות זו לא תעבוד כראוי אם למחשב המארח יש כמה צגים.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2779"/>
+        <location filename="../gui/SettingsView.qml" line="2826"/>
         <source>Enable HDR (Experimental)</source>
         <translation>הפעלת HDR (ניסיוני)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2794"/>
+        <location filename="../gui/SettingsView.qml" line="2844"/>
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>ההזרמה תתמוך ב-HDR, אך חלק מהמשחקים עשויים לדרוש צג HDR במחשב המארח כדי להפעיל מצב HDR.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2796"/>
+        <location filename="../gui/SettingsView.qml" line="2846"/>
         <source>HDR streaming is not supported on this PC.</source>
         <translation>הזרמת HDR אינה נתמכת במחשב זה.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2848"/>
+        <location filename="../gui/SettingsView.qml" line="2898"/>
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>פותח קצבי סיביות גבוהים במיוחד לשימוש עם מחשבים מארחים של VipleStream-Server. יש להשתמש בזה רק בהזרמה דרך חיבור Ethernet ברשת מקומית.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2886"/>
+        <location filename="../gui/SettingsView.qml" line="2936"/>
         <source>Show performance stats while streaming</source>
         <translation>הצגת נתוני ביצועים בזמן ההזרמה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2896"/>
+        <location filename="../gui/SettingsView.qml" line="2946"/>
         <source>Display real-time stream performance information while streaming.</source>
         <translation>הצגת מידע ביצועים של ההזרמה בזמן אמת.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2897"/>
+        <location filename="../gui/SettingsView.qml" line="2947"/>
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>ניתן להפעיל ולכבות זאת בכל עת בזמן ההזרמה באמצעות Ctrl+Alt+Shift+S או Select+L1+R1+X.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2898"/>
+        <location filename="../gui/SettingsView.qml" line="2948"/>
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>שכבת הביצועים אינה נתמכת ב-Steam Link או ב-Raspberry Pi.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2477"/>
+        <location filename="../gui/SettingsView.qml" line="2524"/>
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>שימוש במסך המגע כמשטח מגע וירטואלי</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2494"/>
+        <location filename="../gui/SettingsView.qml" line="2541"/>
         <source>Swap left and right mouse buttons</source>
         <translation>החלפת לחצני העכבר השמאלי והימני</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2506"/>
+        <location filename="../gui/SettingsView.qml" line="2553"/>
         <source>Reverse mouse scrolling direction</source>
         <translation>היפוך כיוון הגלילה של העכבר</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2520"/>
+        <location filename="../gui/SettingsView.qml" line="2567"/>
         <source>Gamepad Settings</source>
         <translation>הגדרות בקר משחק</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2530"/>
+        <location filename="../gui/SettingsView.qml" line="2577"/>
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>החלפת לחצני A/B ו-X/Y בבקר</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2540"/>
+        <location filename="../gui/SettingsView.qml" line="2587"/>
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>מעביר את בקרי המשחק לפריסת לחצנים בסגנון Nintendo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2546"/>
+        <location filename="../gui/SettingsView.qml" line="2593"/>
         <source>Force gamepad #1 always connected</source>
         <translation>בקר משחק #1 מחובר תמיד</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2556"/>
+        <location filename="../gui/SettingsView.qml" line="2603"/>
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>כופה על בקר משחק יחיד להישאר מחובר תמיד למחשב המארח, גם אם אין בקרים מחוברים בפועל למחשב זה.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2393"/>
+        <location filename="../gui/SettingsView.qml" line="2440"/>
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>ניתן להפעיל ולכבות זאת בזמן ההזרמה באמצעות Ctrl+Alt+Shift+M.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2564"/>
+        <location filename="../gui/SettingsView.qml" line="2611"/>
         <source>Enable mouse control with gamepads by holding the &apos;Start&apos; button</source>
         <translation>הפעלת שליטה בעכבר באמצעות בקר משחק בהחזקת לחצן &apos;Start&apos;</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1931"/>
+        <location filename="../gui/SettingsView.qml" line="1978"/>
         <source>Host Settings</source>
         <translation>הגדרות מחשב מארח</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2658"/>
+        <location filename="../gui/SettingsView.qml" line="2705"/>
         <source>Advanced Settings</source>
         <translation>הגדרות מתקדמות</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1848"/>
+        <location filename="../gui/SettingsView.qml" line="1895"/>
         <source>Audio configuration</source>
         <translation>תצורת שמע</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2304"/>
+        <location filename="../gui/SettingsView.qml" line="2351"/>
         <source>Show connection quality warnings</source>
         <translation>הצגת אזהרות על איכות החיבור</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2327"/>
+        <location filename="../gui/SettingsView.qml" line="2374"/>
         <source>Discord Rich Presence integration</source>
         <translation>שילוב Discord Rich Presence</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2557"/>
+        <location filename="../gui/SettingsView.qml" line="2604"/>
         <source>Only enable this option when streaming a game that doesn&apos;t support gamepads being connected after startup.</source>
         <translation>הפעילו אפשרות זו רק בהזרמת משחק שאינו תומך בחיבור בקרי משחק לאחר ההפעלה.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2382"/>
+        <location filename="../gui/SettingsView.qml" line="2429"/>
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>מיטוב העכבר לשולחן עבודה מרוחק במקום למשחקים</translation>
     </message>
@@ -1741,42 +1811,42 @@ DirectML: מריץ את מודל ה-ONNX המצורף RIFE 4.25 lite על Direct
         <translation>60 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2343"/>
+        <location filename="../gui/SettingsView.qml" line="2390"/>
         <source>Keep the display awake while streaming</source>
         <translation>השארת התצוגה ערה בזמן ההזרמה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2353"/>
+        <location filename="../gui/SettingsView.qml" line="2400"/>
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>מונע את הפעלת שומר המסך או את כניסת התצוגה למצב שינה בזמן ההזרמה.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2404"/>
+        <location filename="../gui/SettingsView.qml" line="2451"/>
         <source>Capture system keyboard shortcuts</source>
         <translation>לכידת קיצורי מקלדת של המערכת</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2412"/>
+        <location filename="../gui/SettingsView.qml" line="2459"/>
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>מאפשר לכידה של קיצורי מקלדת כלל-מערכתיים כמו Alt+Tab, שבדרך כלל מטופלים על ידי מערכת ההפעלה של הלקוח, בזמן ההזרמה.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2442"/>
+        <location filename="../gui/SettingsView.qml" line="2489"/>
         <source>in fullscreen</source>
         <translation>במסך מלא</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2446"/>
+        <location filename="../gui/SettingsView.qml" line="2493"/>
         <source>always</source>
         <translation>תמיד</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2487"/>
+        <location filename="../gui/SettingsView.qml" line="2534"/>
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>כשמסומן, מסך המגע מתנהג כמו משטח מגע. כשלא מסומן, מסך המגע שולט ישירות בסמן העכבר.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1941"/>
+        <location filename="../gui/SettingsView.qml" line="1988"/>
         <source>Optimize game settings for streaming</source>
         <translation>מיטוב הגדרות המשחק להזרמה</translation>
     </message>
@@ -1811,7 +1881,7 @@ DirectML: מריץ את מודל ה-ONNX המצורף RIFE 4.25 lite על Direct
         <translation>Vulkan [ניסיוני] — שילוב פריימים מובנה, בחלק מהמכשירים (AMD APU / מנהלי התקן NV ישנים) יש בעיות תאימות</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1339"/>
+        <location filename="../gui/SettingsView.qml" line="1349"/>
         <source>Auto (recommended): same as upstream Moonlight&apos;s hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
@@ -1824,27 +1894,27 @@ Direct3D 11: נועל במפורש את D3D11VA; מנוע שילוב הפריי�
 Vulkan [ניסיוני]: כופה Vulkan-first cascade + צינור רינדור Vulkan מקורי + dual-present, עם מנוע שילוב פריימים מובנה (זהה ל-Generic). בעיות ידועות: במנהל התקן NV 596.36, vkCmdDecodeVideoKHR המקורי במצב ONLY גורם ל-NVDEC device-lost; ב-AMD APU מנהל ההתקן קורס בשלב video session memory bind של 226MB; נתיב PARALLEL+SW upload איטי (80+ ms לפריים). כשיתייצב, יחזור להיות האפשרות המומלצת.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1350"/>
+        <location filename="../gui/SettingsView.qml" line="1360"/>
         <source>Linux video output (frontend)</source>
         <translation>הצגת וידאו ב-Linux (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1365"/>
+        <location filename="../gui/SettingsView.qml" line="1375"/>
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>אוטומטי (Auto) — מומלץ: aarch64 או Zink משתמשים ב-Vulkan, השאר שומרים על הסדר המקורי</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1366"/>
+        <location filename="../gui/SettingsView.qml" line="1376"/>
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — העדפת הצגה דרך Vulkan</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1367"/>
+        <location filename="../gui/SettingsView.qml" line="1377"/>
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — שמירה על הסדר המקורי (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1383"/>
+        <location filename="../gui/SettingsView.qml" line="1393"/>
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -1861,107 +1931,107 @@ Vulkan: תמיד מעדיף הצגה דרך Vulkan (libplacebo), ובמקרה כ
 EGL: שומר על הסדר המקורי ואינו מעדיף את Vulkan.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1439"/>
+        <location filename="../gui/SettingsView.qml" line="1449"/>
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>מעבד התצוגה Vulkan משתמש במנוע שילוב פריימים מובנה (זהה ל-Generic). כדי לבחור מנוע שילוב אחר, עברו ל-Direct3D 11.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1457"/>
+        <location filename="../gui/SettingsView.qml" line="1467"/>
         <source>Interpolation mode:</source>
         <translation>מצב שילוב פריימים:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1463"/>
+        <location filename="../gui/SettingsView.qml" line="1473"/>
         <source>Active (recommended)</source>
         <translation>אקטיבי (מומלץ)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1474"/>
+        <location filename="../gui/SettingsView.qml" line="1494"/>
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>השרת שולח FPS של הממשק / 2 (או / 3 בתצוגות בקצב רענון גבוה), והלקוח משלב תמיד פי 2 / פי 3. עומס נמוך על השרת, אך דורש GPU חזק בצד הלקוח.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1478"/>
+        <location filename="../gui/SettingsView.qml" line="1498"/>
         <source>Passive</source>
         <translation>פסיבי</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1489"/>
+        <location filename="../gui/SettingsView.qml" line="1519"/>
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>השרת שולח את מלוא ה-FPS של הממשק. הלקוח מעלה את היחס באופן דינמי לפי recv%: ‏≥ 70% ללא שילוב, 40-70% פי 2, ‏&lt; 40% פי 3. מתאים כשהשרת לא תמיד מצליח לשלוח בקצב מלא.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1585"/>
+        <location filename="../gui/SettingsView.qml" line="1615"/>
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY (מעבדים גרפיים משולבים / ישנים)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1589"/>
+        <location filename="../gui/SettingsView.qml" line="1619"/>
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN (לא זוהה; הפעילו מחדש את הלקוח כדי לזהות)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1591"/>
+        <location filename="../gui/SettingsView.qml" line="1621"/>
         <source>(not detected yet)</source>
         <translation>(טרם זוהה)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1595"/>
+        <location filename="../gui/SettingsView.qml" line="1625"/>
         <source>(not measured)</source>
         <translation>(לא נמדד)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1596"/>
+        <location filename="../gui/SettingsView.qml" line="1626"/>
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>דירוג אוטומטי של FRUC (Vulkan unified autotier v1.4.127):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1597"/>
+        <location filename="../gui/SettingsView.qml" line="1627"/>
         <source>   GPU: </source>
         <translation>   GPU: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1598"/>
+        <location filename="../gui/SettingsView.qml" line="1628"/>
         <source>   Detected tier: </source>
         <translation>   רמה שזוהתה: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1599"/>
+        <location filename="../gui/SettingsView.qml" line="1629"/>
         <source>   Benchmark: </source>
         <translation>   benchmark: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1600"/>
+        <location filename="../gui/SettingsView.qml" line="1630"/>
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>בזמן ריצה עולה ויורד אוטומטית לאורך 7 רמות (T-1..T5):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1603"/>
+        <location filename="../gui/SettingsView.qml" line="1633"/>
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (NVOF GPU, דגש על chain)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1604"/>
+        <location filename="../gui/SettingsView.qml" line="1634"/>
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (AMD/Intel ללא NVOF)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1606"/>
+        <location filename="../gui/SettingsView.qml" line="1636"/>
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (FRUC מינימלי)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1607"/>
+        <location filename="../gui/SettingsView.qml" line="1637"/>
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = FRUC מושהה (ה-GPU לא עומד בעומס, ניסיון חוזר אחרי 5 דקות)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1619"/>
+        <location filename="../gui/SettingsView.qml" line="1649"/>
         <source>Edge MV threshold:</source>
         <translation>סף MV בקצוות (Edge MV threshold):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1635"/>
+        <location filename="../gui/SettingsView.qml" line="1665"/>
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -1974,59 +2044,69 @@ Start with the default; if interpolated edges look blocky, lower it to 4-6.</sou
 מומלץ להתחיל בברירת המחדל; אם יש ריבועים בקצוות הפריימים המשולבים, הורידו ל-4-6.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1828"/>
+        <location filename="../gui/SettingsView.qml" line="1742"/>
+        <source>Adjust bitrate automatically while streaming</source>
+        <translation>התאמה אוטומטית של קצב הסיביות במהלך ההזרמה</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="1752"/>
+        <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers. The bitrate above is the maximum.</source>
+        <translation>מוריד את קצב הסיביות כשהרשת מאבדת מנות ומעלה אותו חזרה כשהרשת מתאוששת. קצב הסיביות שלמעלה הוא המרבי.</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="1875"/>
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>קצב פריימים אחיד מפחית מיקרו-גמגומים על ידי השהיית פריימים שמגיעים מוקדם מדי. הוא עובד גם כש-V-Sync כבוי, כך שנשמרת השהיה נמוכה תוך החלקת הגעה לא אחידה של פריימים.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1911"/>
+        <location filename="../gui/SettingsView.qml" line="1958"/>
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>השתקת שמע ההזרמה כש-VipleStream אינו החלון הפעיל</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1922"/>
+        <location filename="../gui/SettingsView.qml" line="1969"/>
         <source>Mutes VipleStream&apos;s audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>משתיק את השמע של VipleStream כשעוברים עם Alt+Tab מחוץ להזרמה או לוחצים על חלון אחר.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1952"/>
+        <location filename="../gui/SettingsView.qml" line="1999"/>
         <source>Quit app on host PC after ending stream</source>
         <translation>יציאה מהאפליקציה במחשב המארח לאחר סיום ההזרמה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1962"/>
+        <location filename="../gui/SettingsView.qml" line="2009"/>
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>פעולה זו תסגור את האפליקציה או המשחק שאתם מזרימים בסיום ההזרמה. כל התקדמות שלא נשמרה תאבד!</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2041"/>
+        <location filename="../gui/SettingsView.qml" line="2088"/>
         <source>Design</source>
         <translation>עיצוב</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2048"/>
+        <location filename="../gui/SettingsView.qml" line="2095"/>
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>בטוח: רשת עריכתית, כותרת עליונה שקטה יותר.
 נועז: אנרגיה של שער מגזין, כותרות תצוגה גדולות במיוחד.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2064"/>
+        <location filename="../gui/SettingsView.qml" line="2111"/>
         <source>Safe</source>
         <translation>בטוח</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2065"/>
+        <location filename="../gui/SettingsView.qml" line="2112"/>
         <source>Bold</source>
         <translation>נועז</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2233"/>
+        <location filename="../gui/SettingsView.qml" line="2280"/>
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>יש להפעיל מחדש את VipleStream כדי שהשינוי ייכנס לתוקף</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2337"/>
+        <location filename="../gui/SettingsView.qml" line="2384"/>
         <source>Updates your Discord status to display the name of the game you&apos;re streaming. The status reads &quot;Playing &lt;game&gt; · via VipleStream&quot; with the VipleStream icon.</source>
         <translation>מעדכן את הסטטוס שלך ב-Discord כך שיציג את שם המשחק שאתם מזרימים. הסטטוס יהיה &quot;Playing &lt;game&gt; · via VipleStream&quot; עם הסמל של VipleStream.</translation>
     </message>
@@ -2103,188 +2183,188 @@ Bold: magazine-cover energy, oversized display titles.</source>
         <translation>בהזרמה בחצי קצב, עצמים בתנועה מוזזים קדימה ברענונים שאין בהם פריים חדש, במקום להציג שוב את הפריים הקודם.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2413"/>
+        <location filename="../gui/SettingsView.qml" line="2460"/>
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>הערה: קיצורי מקלדת מסוימים כמו Ctrl+Alt+Del ב-Windows אינם ניתנים ליירוט על ידי אף אפליקציה, כולל VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2575"/>
+        <location filename="../gui/SettingsView.qml" line="2622"/>
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>עיבוד קלט בקר משחק כש-VipleStream ברקע</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2586"/>
+        <location filename="../gui/SettingsView.qml" line="2633"/>
         <source>Allows VipleStream to capture gamepad inputs even if it&apos;s not the current window in focus</source>
         <translation>מאפשר ל-VipleStream ללכוד קלט מבקרי משחק גם כשהוא אינו החלון שבמיקוד</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2595"/>
+        <location filename="../gui/SettingsView.qml" line="2642"/>
         <source>Network (MP-QUIC)</source>
         <translation>רשת (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2605"/>
+        <location filename="../gui/SettingsView.qml" line="2652"/>
         <source>Enable MP-QUIC multipath transport</source>
         <translation>הפעלת תעבורה מרובת נתיבים MP-QUIC</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2615"/>
+        <location filename="../gui/SettingsView.qml" line="2662"/>
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>משתמש ב-QUIC מרובה נתיבים (RFC 9443) להזרמה. מאפשר מעבר בין WiFi לרשת סלולרית וצירוף רוחב פס משני כרטיסי רשת. דורש תמיכה בצד השרת.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2620"/>
+        <location filename="../gui/SettingsView.qml" line="2667"/>
         <source>Path scheduler</source>
         <translation>מתזמן נתיבים</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2636"/>
+        <location filename="../gui/SettingsView.qml" line="2683"/>
         <source>Auto (per stream type)</source>
         <translation>אוטומטי (לפי סוג זרם)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2637"/>
+        <location filename="../gui/SettingsView.qml" line="2684"/>
         <source>Lowest latency</source>
         <translation>השהיה נמוכה ביותר</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2638"/>
+        <location filename="../gui/SettingsView.qml" line="2685"/>
         <source>Bandwidth aggregation</source>
         <translation>צירוף רוחב פס</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2639"/>
+        <location filename="../gui/SettingsView.qml" line="2686"/>
         <source>Redundant (all paths)</source>
         <translation>יתירות (כל הנתיבים)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2640"/>
+        <location filename="../gui/SettingsView.qml" line="2687"/>
         <source>Earliest completion</source>
         <translation>השלמה מוקדמת ביותר</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2649"/>
+        <location filename="../gui/SettingsView.qml" line="2696"/>
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>אוטומטי: וידאו=ECF, שמע=יתירות, בקרה=min-RTT. צירוף: סבב (round-robin) בין כל כרטיסי הרשת לרוחב פס מרבי.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2669"/>
+        <location filename="../gui/SettingsView.qml" line="2716"/>
         <source>Video decoder</source>
         <translation>מפענח וידאו</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2695"/>
-        <location filename="../gui/SettingsView.qml" line="2748"/>
+        <location filename="../gui/SettingsView.qml" line="2742"/>
+        <location filename="../gui/SettingsView.qml" line="2795"/>
         <source>Automatic (Recommended)</source>
         <translation>אוטומטי (מומלץ)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2699"/>
+        <location filename="../gui/SettingsView.qml" line="2746"/>
         <source>Force software decoding</source>
         <translation>כפיית פענוח תוכנה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2703"/>
+        <location filename="../gui/SettingsView.qml" line="2750"/>
         <source>Force hardware decoding</source>
         <translation>כפיית פענוח חומרה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2718"/>
+        <location filename="../gui/SettingsView.qml" line="2765"/>
         <source>Video codec</source>
         <translation>קודק וידאו</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2752"/>
+        <location filename="../gui/SettingsView.qml" line="2799"/>
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2756"/>
+        <location filename="../gui/SettingsView.qml" line="2803"/>
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2760"/>
+        <location filename="../gui/SettingsView.qml" line="2807"/>
         <source>AV1 (Experimental)</source>
         <translation>AV1 (ניסיוני)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2764"/>
+        <location filename="../gui/SettingsView.qml" line="2811"/>
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave (השהיה נמוכה במיוחד, רשת מקומית)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2803"/>
+        <location filename="../gui/SettingsView.qml" line="2853"/>
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>הפעלת YUV 4:4:4 (ניסיוני)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2826"/>
+        <location filename="../gui/SettingsView.qml" line="2876"/>
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>טוב להזרמת שולחן עבודה ומשחקים עם הרבה טקסט, אך לא מומלץ למשחקים מהירים.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2828"/>
+        <location filename="../gui/SettingsView.qml" line="2878"/>
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>YUV 4:4:4 אינו נתמך במחשב זה.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2835"/>
+        <location filename="../gui/SettingsView.qml" line="2885"/>
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>ביטול מגבלת קצב הסיביות (ניסיוני)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2854"/>
+        <location filename="../gui/SettingsView.qml" line="2904"/>
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>איתור אוטומטי של מחשבים ברשת המקומית (מומלץ)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2875"/>
+        <location filename="../gui/SettingsView.qml" line="2925"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>זיהוי אוטומטי של חיבורים חסומים (מומלץ)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1553"/>
+        <location filename="../gui/SettingsView.qml" line="1583"/>
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>איכות — האיכות הויזואלית הטובה ביותר, עומס GPU גבוה</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1554"/>
+        <location filename="../gui/SettingsView.qml" line="1584"/>
         <source>Balanced — Recommended (default)</source>
         <translation>מאוזן — מומלץ (ברירת מחדל)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1555"/>
+        <location filename="../gui/SettingsView.qml" line="1585"/>
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>ביצועים — השהיה הנמוכה ביותר, מתאים ל-iGPU</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1967"/>
+        <location filename="../gui/SettingsView.qml" line="2014"/>
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>חצית NAT (ממסר איתות)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1977"/>
+        <location filename="../gui/SettingsView.qml" line="2024"/>
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>כתובת ממסר (לדוגמה ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1988"/>
+        <location filename="../gui/SettingsView.qml" line="2035"/>
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>PSK של הממסר (מפתח מוגדר מראש, ריק אם אין)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1998"/>
+        <location filename="../gui/SettingsView.qml" line="2045"/>
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>אופציונלי: עוזר להתחבר כששני הצדדים מאחורי NAT. הפעל את viplestream-relay על שרת עם IP ציבורי.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2008"/>
+        <location filename="../gui/SettingsView.qml" line="2055"/>
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>כפה הזרמה דרך ממסר (לבדיקת מנהרת UDP)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1564"/>
+        <location filename="../gui/SettingsView.qml" line="1594"/>
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2293,7 +2373,7 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 ביצועים: חיפוש 4 שכנים + עיבוד מינימלי (~6 מ&quot;ש ב-iGPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2018"/>
+        <location filename="../gui/SettingsView.qml" line="2065"/>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>תמיד הזרם דרך הממסר גם כשהמארח זמין ישירות. שימושי לאימות מנהרת UDP של הממסר כש-VPN (כגון Cloudflare WARP) היה אחרת משאיר /launch ישיר תקין.</translation>
     </message>
@@ -2330,6 +2410,11 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <location filename="../gui/StreamSegue.qml" line="192"/>
         <source>VR controller: hold A+X+trigger+grip</source>
         <translation>בקר VR: החזיקו A+X+הדק+אחיזה</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="202"/>
+        <source>Failed to start the stream.</source>
+        <translation>התחלת ההזרמה נכשלה.</translation>
     </message>
     <message>
         <location filename="../gui/StreamSegue.qml" line="188"/>
@@ -2433,129 +2518,139 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="66"/>
+        <location filename="../backend/updater.cpp" line="67"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>עותק זה של VipleStream מותקן כ-Flatpak. הורידו את קובץ ה-.flatpak החדש מדף הגרסה והתקינו אותו באמצעות &quot;flatpak install --bundle &lt;file&gt;&quot;. אם התקנתם אותו ממאגר Flatpak, הריצו במקום זאת &quot;flatpak update&quot;.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="72"/>
+        <location filename="../backend/updater.cpp" line="73"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>VipleStream אינו פועל מתוך AppImage, ולכן אינו יכול להחליף את עצמו. הורידו את הגרסה החדשה מדף הגרסה.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="75"/>
+        <location filename="../backend/updater.cpp" line="76"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>התקנה אוטומטית עדיין אינה זמינה עבור Linux arm64. הורידו את הגרסה החדשה מדף הגרסה.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="79"/>
+        <location filename="../backend/updater.cpp" line="80"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>התקנה אוטומטית אינה זמינה בפלטפורמה זו (%1). הורידו את הגרסה החדשה מדף הגרסה.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="144"/>
+        <location filename="../backend/updater.cpp" line="146"/>
         <source>Querying release assets…</source>
         <translation>שולף את קובצי הגרסה…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="269"/>
-        <location filename="../backend/updater.cpp" line="402"/>
+        <location filename="../backend/updater.cpp" line="271"/>
+        <location filename="../backend/updater.cpp" line="415"/>
         <source>Update cancelled.</source>
         <translation>העדכון בוטל.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="273"/>
+        <location filename="../backend/updater.cpp" line="275"/>
         <source>Failed to query release info: %1</source>
         <translation>שליפת פרטי הגרסה נכשלה: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="281"/>
+        <location filename="../backend/updater.cpp" line="283"/>
         <source>Release JSON malformed: %1</source>
         <translation>JSON של הגרסה פגום: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="306"/>
+        <location filename="../backend/updater.cpp" line="308"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>בפרטי הגרסה מ-GitHub אין תג.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="309"/>
+        <location filename="../backend/updater.cpp" line="311"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>תג הגרסה האחרון &quot;%1&quot; אינו מספר גרסה.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="314"/>
+        <location filename="../backend/updater.cpp" line="316"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>פרטי הגרסה ב-GitHub עדיין לא עודכנו: הם עדיין מדווחים על %1, שאינה חדשה יותר מגרסה זו (%2). נסו שוב בעוד כמה דקות.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="319"/>
+        <location filename="../backend/updater.cpp" line="321"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>לגרסה %1 עדיין לא צורפו קבצים. נסו שוב בעוד כמה דקות.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="326"/>
+        <location filename="../backend/updater.cpp" line="328"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>לגרסה %1 אין חבילה להתקנה בפלטפורמה זו (%2).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="335"/>
+        <location filename="../backend/updater.cpp" line="337"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>VipleStream %1 זמין כ-%2, אך יש להתקין אותו ידנית. %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="350"/>
+        <location filename="../backend/updater.cpp" line="352"/>
         <source>Cannot open download file: %1</source>
         <translation>לא ניתן לפתוח את קובץ ההורדה: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="354"/>
+        <location filename="../backend/updater.cpp" line="356"/>
         <source>Downloading %1…</source>
         <translation>מוריד את %1…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="413"/>
+        <location filename="../backend/updater.cpp" line="426"/>
         <source>Download failed: %1</source>
         <translation>ההורדה נכשלה: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="423"/>
+        <location filename="../backend/updater.cpp" line="432"/>
+        <source>Could not save the downloaded update. The disk may be full.</source>
+        <translation>לא ניתן היה לשמור את העדכון שהורד. ייתכן שהדיסק מלא.</translation>
+    </message>
+    <message>
+        <location filename="../backend/updater.cpp" line="441"/>
         <source>Preparing installer…</source>
         <translation>מכין את תוכנית ההתקנה…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="429"/>
+        <location filename="../backend/updater.cpp" line="447"/>
         <source>Restarting to apply update…</source>
         <translation>מפעיל מחדש להחלת העדכון…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="511"/>
-        <location filename="../backend/updater.cpp" line="579"/>
+        <location filename="../backend/updater.cpp" line="544"/>
+        <source>The update was not installed because VipleStream did not exit in time. Please close VipleStream and try updating again.</source>
+        <translation>העדכון לא הותקן כי VipleStream לא נסגר בזמן. סגרו את VipleStream ונסו לעדכן שוב.</translation>
+    </message>
+    <message>
+        <location filename="../backend/updater.cpp" line="551"/>
+        <location filename="../backend/updater.cpp" line="622"/>
         <source>Cannot write helper script: %1</source>
         <translation>לא ניתן לכתוב את סקריפט העזר: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="533"/>
+        <location filename="../backend/updater.cpp" line="576"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>הפעלת המעדכן נכשלה (UAC נדחה או ש-PowerShell חסר).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="543"/>
+        <location filename="../backend/updater.cpp" line="586"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>לא פועל מתוך AppImage — משתנה הסביבה APPIMAGE אינו מוגדר. התקינו מחדש ידנית.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="553"/>
+        <location filename="../backend/updater.cpp" line="596"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>אין הרשאת כתיבה לתיקיית ה-AppImage: %1. העבירו את VipleStream למיקום שהמשתמש יכול לכתוב בו (לדוגמה ~/Applications/) ונסו שוב.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="592"/>
+        <location filename="../backend/updater.cpp" line="635"/>
         <source>Failed to launch updater helper script.</source>
         <translation>הפעלת סקריפט העזר של המעדכן נכשלה.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="598"/>
+        <location filename="../backend/updater.cpp" line="641"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>עדכון אוטומטי אינו נתמך בפלטפורמה זו.</translation>
     </message>
@@ -2563,42 +2658,42 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>VideoBrowser</name>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="53"/>
+        <location filename="../gui/VideoBrowser.qml" line="79"/>
         <source>Could not start the video player.</source>
         <translation>לא ניתן להפעיל את נגן הווידאו.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="80"/>
+        <location filename="../gui/VideoBrowser.qml" line="126"/>
         <source>Back</source>
         <translation>הקודם</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="81"/>
+        <location filename="../gui/VideoBrowser.qml" line="127"/>
         <source>Forward</source>
         <translation>הבא</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="82"/>
+        <location filename="../gui/VideoBrowser.qml" line="128"/>
         <source>Stop</source>
         <translation>עצירה</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="82"/>
+        <location filename="../gui/VideoBrowser.qml" line="128"/>
         <source>Reload</source>
         <translation>טעינה מחדש</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="83"/>
+        <location filename="../gui/VideoBrowser.qml" line="129"/>
         <source>Home</source>
         <translation>בית</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="89"/>
+        <location filename="../gui/VideoBrowser.qml" line="135"/>
         <source>Search or type a web address</source>
         <translation>חפשו או הקלידו כתובת אינטרנט</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="94"/>
+        <location filename="../gui/VideoBrowser.qml" line="140"/>
         <source>Play in VR</source>
         <translation>ניגון ב-VR</translation>
     </message>
@@ -2606,239 +2701,223 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>VideoView</name>
     <message>
-        <location filename="../gui/VideoView.qml" line="17"/>
+        <location filename="../gui/VideoView.qml" line="19"/>
         <source>Videos</source>
         <translation>סרטונים</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="110"/>
+        <location filename="../gui/VideoView.qml" line="134"/>
         <source>Could not start the video player.</source>
         <translation>לא ניתן להפעיל את נגן הווידאו.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="345"/>
+        <location filename="../gui/VideoView.qml" line="360"/>
         <source>Nothing found.</source>
         <translation>לא נמצא דבר.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="359"/>
+        <location filename="../gui/VideoView.qml" line="374"/>
         <source>Drive</source>
         <translation>כונן</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="359"/>
+        <location filename="../gui/VideoView.qml" line="374"/>
         <source>Shared folder</source>
         <translation>תיקייה משותפת</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="363"/>
+        <location filename="../gui/VideoView.qml" line="378"/>
         <source>This folder has no videos.</source>
         <translation>אין סרטונים בתיקייה זו.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="374"/>
-        <location filename="../gui/VideoView.qml" line="724"/>
+        <location filename="../gui/VideoView.qml" line="389"/>
+        <location filename="../gui/VideoView.qml" line="720"/>
         <source>Helper: %1</source>
         <translation>כלי עזר: %1</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="374"/>
-        <location filename="../gui/VideoView.qml" line="724"/>
+        <location filename="../gui/VideoView.qml" line="389"/>
+        <location filename="../gui/VideoView.qml" line="720"/>
         <source>not installed</source>
         <translation>לא מותקן</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="386"/>
-        <source>Recent</source>
-        <translation>אחרונים</translation>
-    </message>
-    <message>
-        <location filename="../gui/VideoView.qml" line="387"/>
+        <location filename="../gui/VideoView.qml" line="401"/>
         <source>This headset</source>
         <translation>המשקפיים האלה</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="388"/>
+        <location filename="../gui/VideoView.qml" line="402"/>
         <source>PC</source>
         <translation>מחשב</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="390"/>
-        <source>Browser</source>
-        <translation>דפדפן</translation>
-    </message>
-    <message>
-        <location filename="../gui/VideoView.qml" line="390"/>
+        <location filename="../gui/VideoView.qml" line="404"/>
         <source>Link</source>
         <translation>קישור</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="454"/>
-        <source>Videos you play will show up here.</source>
-        <translation>סרטונים שתנגנו יופיעו כאן.</translation>
-    </message>
-    <message>
-        <location filename="../gui/VideoView.qml" line="465"/>
+        <location filename="../gui/VideoView.qml" line="440"/>
         <source>Up</source>
         <translation>למעלה</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="481"/>
+        <location filename="../gui/VideoView.qml" line="456"/>
         <source>Choose a folder</source>
         <translation>בחירת תיקייה</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="534"/>
+        <location filename="../gui/VideoView.qml" line="509"/>
         <source>No videos here.</source>
         <translation>אין כאן סרטונים.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="548"/>
+        <location filename="../gui/VideoView.qml" line="524"/>
         <source>Choose a PC to browse its shared video folders</source>
         <translation>בחרו מחשב כדי לעיין בתיקיות הווידאו המשותפות שלו</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="571"/>
+        <location filename="../gui/VideoView.qml" line="547"/>
         <source>Online</source>
         <translation>מקוון</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="571"/>
+        <location filename="../gui/VideoView.qml" line="547"/>
         <source>Offline</source>
         <translation>לא מקוון</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="583"/>
+        <location filename="../gui/VideoView.qml" line="559"/>
         <source>No paired PCs. Pair a PC in Desktop or VR mode first.</source>
         <translation>אין מחשבים מצומדים. בצעו קודם צימוד למחשב במצב שולחן עבודה או במצב VR.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="598"/>
+        <location filename="../gui/VideoView.qml" line="575"/>
         <source>All PCs</source>
         <translation>כל המחשבים</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="602"/>
+        <location filename="../gui/VideoView.qml" line="579"/>
         <source>Up one level</source>
         <translation>רמה אחת למעלה</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="607"/>
+        <location filename="../gui/VideoView.qml" line="584"/>
         <source>Refresh</source>
         <translation>רענון</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="664"/>
-        <location filename="../gui/VideoView.qml" line="676"/>
+        <location filename="../gui/VideoView.qml" line="641"/>
+        <location filename="../gui/VideoView.qml" line="653"/>
         <source>DISK</source>
         <translation>כונן</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="899"/>
+        <location filename="../gui/VideoView.qml" line="877"/>
         <source>List view</source>
         <translation>תצוגת רשימה</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="899"/>
+        <location filename="../gui/VideoView.qml" line="877"/>
         <source>Grid view</source>
         <translation>תצוגת רשת</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="444"/>
-        <location filename="../gui/VideoView.qml" line="524"/>
-        <location filename="../gui/VideoView.qml" line="664"/>
-        <location filename="../gui/VideoView.qml" line="676"/>
-        <location filename="../gui/VideoView.qml" line="776"/>
+        <location filename="../gui/VideoView.qml" line="499"/>
+        <location filename="../gui/VideoView.qml" line="641"/>
+        <location filename="../gui/VideoView.qml" line="653"/>
+        <location filename="../gui/VideoView.qml" line="772"/>
         <source>VID</source>
         <translation>וידאו</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="732"/>
+        <location filename="../gui/VideoView.qml" line="728"/>
         <source>Search YouTube (try &quot;360 video&quot; or &quot;VR180&quot;)</source>
         <translation>חיפוש ב-YouTube (נסו &quot;360 video&quot; או &quot;VR180&quot;)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="738"/>
+        <location filename="../gui/VideoView.qml" line="734"/>
         <source>Search</source>
         <translation>חיפוש</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="742"/>
+        <location filename="../gui/VideoView.qml" line="738"/>
         <source>Searching…</source>
         <translation>מחפש…</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="798"/>
+        <location filename="../gui/VideoView.qml" line="794"/>
         <source>Update</source>
         <translation>עדכון</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="801"/>
+        <location filename="../gui/VideoView.qml" line="797"/>
         <source>Updating the YouTube helper…</source>
         <translation>מעדכן את כלי העזר של YouTube…</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="829"/>
+        <location filename="../gui/VideoView.qml" line="809"/>
         <source>Paste a link: a video page (YouTube and many other sites) or a video file or stream (MP4, MKV, WebM, HLS .m3u8).</source>
         <translation>הדביקו קישור: דף וידאו (YouTube ואתרים רבים אחרים) או קובץ וידאו או זרם (MP4,‏ MKV,‏ WebM,‏ HLS .m3u8).</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="845"/>
+        <location filename="../gui/VideoView.qml" line="823"/>
         <source>Play</source>
         <translation>ניגון</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="884"/>
+        <location filename="../gui/VideoView.qml" line="862"/>
         <source>Picture format</source>
         <translation>פורמט תמונה</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>Auto</source>
         <translation>אוטומטי</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>2D</source>
         <translation>2D</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>3D side-by-side</source>
         <translation>3D זה לצד זה</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>3D top-bottom</source>
         <translation>3D למעלה-למטה</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="888"/>
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>180° 3D (side-by-side)</source>
         <translation>180° 3D (זה לצד זה)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="889"/>
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>180° 2D</source>
         <translation>180° 2D</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="889"/>
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>360° 2D</source>
         <translation>360° 2D</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="889"/>
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>360° 3D (top-bottom)</source>
         <translation>360° 3D (למעלה-למטה)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="889"/>
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>360° 3D (side-by-side)</source>
         <translation>360° 3D (זה לצד זה)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="890"/>
+        <location filename="../gui/VideoView.qml" line="868"/>
         <source>360° cubemap (YouTube EAC)</source>
         <translation>360° cubemap ‏(YouTube EAC)</translation>
     </message>
@@ -2962,37 +3041,40 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>WebResolver</name>
     <message>
-        <location filename="../backend/webresolver.cpp" line="173"/>
+        <location filename="../backend/webresolver.cpp" line="379"/>
         <source>The web video helper (yt-dlp) is not installed. Use Update to download it.</source>
         <translation>כלי העזר לווידאו מהאינטרנט (yt-dlp) אינו מותקן. השתמשו ב&quot;עדכון&quot; כדי להוריד אותו.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="206"/>
+        <location filename="../backend/webresolver.cpp" line="412"/>
         <source>Search failed.</source>
         <translation>החיפוש נכשל.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="233"/>
+        <location filename="../backend/webresolver.cpp" line="439"/>
         <source>Could not get the checksum list.</source>
         <translation>לא ניתן לקבל את רשימת סכומי הביקורת.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="241"/>
+        <location filename="../backend/webresolver.cpp" line="447"/>
         <source>Download failed.</source>
         <translation>ההורדה נכשלה.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="245"/>
+        <location filename="../backend/webresolver.cpp" line="451"/>
         <source>The download did not match its checksum.</source>
         <translation>ההורדה לא תאמה לסכום הביקורת שלה.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="252"/>
+        <location filename="../backend/webresolver.cpp" line="458"/>
+        <location filename="../backend/webresolver.cpp" line="466"/>
+        <location filename="../backend/webresolver.cpp" line="471"/>
+        <location filename="../backend/webresolver.cpp" line="478"/>
         <source>Could not save the update.</source>
         <translation>לא ניתן לשמור את העדכון.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="260"/>
+        <location filename="../backend/webresolver.cpp" line="486"/>
         <source>Updated to %1.</source>
         <translation>עודכן ל-%1.</translation>
     </message>

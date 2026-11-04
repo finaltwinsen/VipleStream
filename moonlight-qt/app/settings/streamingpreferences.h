@@ -454,6 +454,7 @@ public:
     // 2026-10-09（dev，--vr-synthetic-menu-at，不寫入設定）：追蹤開始後第幾秒在左手按一下 MENU（host 當成 SteamVR 系統鍵，
     // 只是「切換」儀表板：開著就關、關著就開）。0＝不按。用按鍵關掉之後 host 的時序和有人配戴時不同，量測請改用停用儀表板
     double vrSyntheticMenuAtSec = 0.0;
+    double vrSyntheticPadTestSec = 0.0;  // dev（--vr-synthetic-pad-test）：不存檔
     // 每眼解析度（打包尺寸為 2W×H，SBS）。預設 2160x2160＝Steam Frame 面板每眼的原生解析度。
     // 2026-10-03 Frame 實測：每眼 1728 清晰度不夠；iris 解 4320x2160@120（200 Mbps）每幀 p50 8.1 ms、
     // 吞吐量 120 fps 無誤，RTX 5060 Ti 編碼約 7 ms。--vr-eye 可改。

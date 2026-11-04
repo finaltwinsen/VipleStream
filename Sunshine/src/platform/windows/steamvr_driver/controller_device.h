@@ -85,6 +85,8 @@ namespace vrdrv {
     };
 
     void release_inputs();
+    /// §VR-SKELETON：依輸入推手指彎曲程度、更新骨架（兩種 motion range 給同一份）
+    void update_skeleton(const vripc_ctrl_input_t *in);
     void report(const vr::DriverPose_t &p);
     /// M4a 收尾：依 client 的 interaction profile 設 Prop_RenderModelName_String（profile 變了才設）
     void apply_render_model(uint8_t profile);
@@ -97,6 +99,7 @@ namespace vrdrv {
     vr::VRInputComponentHandle_t bools_[c_bool_count] {};
     vr::VRInputComponentHandle_t scalars_[s_scalar_count] {};
     vr::VRInputComponentHandle_t haptic_ = vr::k_ulInvalidInputComponentHandle;
+    vr::VRInputComponentHandle_t skeleton_ = vr::k_ulInvalidInputComponentHandle;  ///< §VR-SKELETON
     bool inputs_released_ = true;
     bool oor_logged_ = false;
     const char *render_model_ = nullptr;  ///< 目前設定的 render model（字串常值）；nullptr＝還沒設

@@ -50,6 +50,7 @@ extern "C" {
 #include "vr/vr_multilink.h"
 #include "vr/vr_bridge.h"
 #include "vr/vr_orchestrator.h"
+#include "vr/vr_padmode.h"
 #include "vr/vr_abr_outage.h"
 #include "vr/vr_abr_fast.h"
 #include "vr/vr_fec_spread.h"
@@ -1900,6 +1901,11 @@ namespace stream {
     const bool latest = vr_state.on_tracking(sample, via_quic, arrival, &timing);
     vr_log_clock_events(vr_state, timing, via_quic);
     if (latest) {
+      // §VR-PADMODE：手把模式時把兩手的狀態轉給虛擬 Xbox 手把（只做對應與長按偵測，不阻塞）
+      if (const auto pad = vr_state.padmode()) {
+        pad->on_sample(sample.input,
+                       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+      }
       // pcvr：接受為最新樣本之後才寫進 bridge（stub／disabled 時 tracking_wanted() 恆為 false，立即返回）
       vr_publish_tracking(sample, timing);
     }
@@ -5748,6 +5754,7 @@ namespace stream {
         if (const auto cs = session.vr->clock_stats(true)) {
           BOOST_LOG(info) << "[VIPLE-VR-CLK] (final) " << ::vr::clk::format_stats(*cs);
         }
+        session.vr->set_padmode(nullptr);  // §VR-PADMODE：移除虛擬 Xbox 手把（解構時）
 #if VIPLE_VR_BRIDGE_HAS_ABI
         if (session.vr->negotiated().pcvr) {
           ::vr::bridge::set_haptic_sink(nullptr);  // M4a R3：先摘 sink，再清 active
@@ -5887,6 +5894,35 @@ namespace stream {
 
     int start(session_t &session, const std::string &addr_string) {
       session.input = input::alloc(session.mail);
+
+#if VIPLE_VR_BRIDGE_HAS_ABI
+      // §VR-PADMODE：PCVR session 依 SteamVR 的場景程式自動切換 Xbox 手把模式
+      if (session.vr && session.vr->negotiated().pcvr && config::vr.padmode) {
+        ::vr::padmode::hooks_t h;
+        h.scene_pid = []() {
+          return ::vr::bridge::status().scene_pid;
+        };
+        h.resolve = ::vr::padmode::resolve_pid;
+        h.tracked = ::vr::padmode::tracked_controller;
+        h.get_override = ::vr::padmode::manual_override;
+        h.set_override = ::vr::padmode::set_manual_override;
+        h.pad_alloc = [in = session.input]() {
+          return input::vr_pad_alloc(in);
+        };
+        h.pad_update = [](int id, const ::vr::padmode::xpad_t &x) {
+          input::vr_pad_update(id, platf::gamepad_state_t {x.buttons, x.lt, x.rt, x.lx, x.ly, x.rx, x.ry});
+        };
+        h.pad_free = [](int id) {
+          input::vr_pad_free(id);
+        };
+        // 控制器由 session.vr 持有、session 結束時先拆掉，raw pointer 不會懸空
+        h.notice = [vs = session.vr.get()](::vr::padmode::notice_e c) {
+          vs->queue_notice(static_cast<uint8_t>(c));
+        };
+        session.vr->set_padmode(std::make_shared<::vr::padmode::controller_t>(std::move(h)));
+        BOOST_LOG(info) << "[VIPLE-VR-PADMODE] enabled for this PCVR session";
+      }
+#endif
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {

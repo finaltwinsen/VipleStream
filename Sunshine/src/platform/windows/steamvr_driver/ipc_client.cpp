@@ -745,6 +745,7 @@ namespace vrdrv {
     d.next_index_calls = status_.next_index_calls.load(std::memory_order_relaxed);
     d.drop_unknown_layer = status_.drop_unknown_layer.load(std::memory_order_relaxed);
     d.max_layer_count = status_.max_layer_count.load(std::memory_order_relaxed);
+    d.scene_pid = status_.scene_pid.load(std::memory_order_relaxed);
     {
       std::lock_guard<std::mutex> lk(status_mtx_);
       std::memcpy(d.other_hmd_system, other_hmd_system_, sizeof(d.other_hmd_system));

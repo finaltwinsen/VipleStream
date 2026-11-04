@@ -670,6 +670,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                           "(the usual state with nobody wearing the headset) and opens one that is closed. Closing it this way does not give the timing "
                           "of a worn session - to measure, disable the dashboard on the host instead. Needs an active left controller: always the case "
                           "with --vr-emulate; on a real XR runtime add --vr-synthetic-hands unless the controller is tracked. Not saved.");
+    parser.addValueOption("vr-synthetic-pad-test", "(dev) PCVR with --vr-emulate: starting this many seconds after tracking starts, play a fixed "
+                          "button sequence for the host's Xbox controller mode (A, trigger + left stick, d-pad up + bumper, then both menu buttons "
+                          "held 2.5 s, repeated three times over 20 s), to check the host's virtual pad unattended (0 = off). Not saved.");
     parser.addToggleOption("vr-10bit", "PCVR: ask the host for 10-bit HEVC (Main10, SDR) instead of 8-bit");
     parser.addToggleOption("vr-track-lock", "PCVR: lock the tracking samples to the display refresh and tune their phase from the measured latency");
     parser.addChoiceOption("vr-track-relock", "PCVR with --vr-track-lock: whether to search for the tracking phase again when part of the frames "
@@ -1037,6 +1040,14 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError(QString("vr-synthetic-menu-at must be a number of seconds within 0-3600 (0 = off): %1").arg(parser.value("vr-synthetic-menu-at")));
         }
         preferences->vrSyntheticMenuAtSec = sec;
+    }
+    if (parser.isSet("vr-synthetic-pad-test")) {
+        bool ok = false;
+        const double sec = parser.value("vr-synthetic-pad-test").toDouble(&ok);
+        if (!ok || !(sec >= 0.0 && sec <= 3600.0)) {
+            parser.showError(QString("vr-synthetic-pad-test must be a number of seconds within 0-3600 (0 = off): %1").arg(parser.value("vr-synthetic-pad-test")));
+        }
+        preferences->vrSyntheticPadTestSec = sec;
     }
     preferences->vrHalfRate = parser.getToggleOptionValue("vr-half-rate", preferences->vrHalfRate);
     preferences->vr10Bit = parser.getToggleOptionValue("vr-10bit", preferences->vr10Bit);

@@ -13,6 +13,8 @@
 #endif
 
 #include <QGuiApplication>
+#include <QPainter>
+#include <QPainterPath>
 #include <QJsonArray>
 #include <QtGlobal>
 
@@ -251,6 +253,35 @@ void XrContext::setPlayerSubtitle(const QImage& img)
         }
     }
     m_SubVisible.store(!img.isNull(), std::memory_order_release);
+}
+
+void XrContext::showToast(const QString& text, int durationMs)
+{
+    // 深色半透明圓角底、白字置中；格式跟 swapchain 對齊，frame thread 上傳時不必轉換
+    QImage img(kToastW, kToastH, shellImageFormat());
+    img.fill(Qt::transparent);
+    {
+        QPainter p(&img);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setRenderHint(QPainter::TextAntialiasing, true);
+        QPainterPath bg;
+        bg.addRoundedRect(QRectF(4, 4, kToastW - 8, kToastH - 8), 36, 36);
+        p.fillPath(bg, QColor(20, 20, 24, 215));
+        QFont f = p.font();
+        f.setPixelSize(52);
+        f.setBold(true);
+        p.setFont(f);
+        p.setPen(Qt::white);
+        p.drawText(QRect(40, 0, kToastW - 80, kToastH), Qt::AlignCenter | Qt::TextWordWrap, text);
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_ToastMutex);
+        m_ToastImg = img;
+        m_ToastDirty = true;
+    }
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+    m_ToastUntilMs.store(now + (durationMs > 0 ? durationMs : 3000), std::memory_order_release);
 }
 
 XrContext::DisplayTiming XrContext::displayTiming() const
@@ -1283,6 +1314,12 @@ bool XrContext::createQuadSwapchain(QString* error)
                     xrResultStr(m_Instance, r).toUtf8().constData());
     }
 
+    // §VR-PADMODE：PCVR 提示。建不起來只是看不到提示
+    if (m_Options.pcvr) {
+        createSolidSwapchain(static_cast<uint32_t>(kToastW), static_cast<uint32_t>(kToastH), &m_ToastSwapchain, &m_ToastImages,
+                             &m_ToastImageCount, "pcvr notice");
+    }
+
     // 虛擬鍵盤：貼圖（尺寸同 XrKeyboard）＋hover／按下高亮。建不起來只是沒有鍵盤，其他照常
     {
         const XrKeyboard kb;
@@ -2178,6 +2215,7 @@ void XrContext::frameThreadMain()
         XrCompositionLayerQuad quadEye2 = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-PLAYER 右眼
         XrCompositionLayerQuad panelLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerQuad subLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        XrCompositionLayerQuad toastLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-PADMODE
         float playerEyeAspect = 0.0f;  // §VR-PLAYER：這一格每眼的畫面比例（螢幕高度＝寬÷它）
         if (m_Options.player && m_PlayerScreenDirty.exchange(false, std::memory_order_acq_rel)) {
             m_Screen->setGeometry(m_PlayerDistM.load(std::memory_order_relaxed), m_PlayerFovDeg.load(std::memory_order_relaxed));
@@ -2288,6 +2326,40 @@ void XrContext::frameThreadMain()
         }
         if (m_Options.pcvr) {
             pcvrTimingTick(cpuT0, static_cast<uint64_t>(fs.predictedDisplayPeriod));  // M4a R3
+        }
+        // §VR-PADMODE：PCVR 提示——跟著頭（view space），正前方 1 m、往下 0.18 m、寬 0.62 m，蓋在遊戲畫面上
+        if (m_Options.pcvr && fs.shouldRender && m_ToastSwapchain != XR_NULL_HANDLE && m_ViewSpace != XR_NULL_HANDLE &&
+            layerCount < 9) {
+            const int64_t until = m_ToastUntilMs.load(std::memory_order_acquire);
+            const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (until != 0 && nowMs < until) {
+                QImage img;
+                {
+                    std::lock_guard<std::mutex> lk(m_ToastMutex);
+                    if (m_ToastDirty) {
+                        img = m_ToastImg;
+                        m_ToastDirty = false;
+                    }
+                }
+                if (!img.isNull() && img.width() == kToastW && img.height() == kToastH) {
+                    m_ToastUploaded = uploadImage(m_ToastSwapchain, m_ToastImages, m_ToastImageCount, img) || m_ToastUploaded;
+                }
+                if (m_ToastUploaded) {
+                    const float w = 0.62f;
+                    toastLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                    toastLayer.space = m_ViewSpace;
+                    toastLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                    toastLayer.subImage.swapchain = m_ToastSwapchain;
+                    toastLayer.subImage.imageRect.offset = {0, 0};
+                    toastLayer.subImage.imageRect.extent = {kToastW, kToastH};
+                    toastLayer.subImage.imageArrayIndex = 0;
+                    toastLayer.pose.orientation.w = 1.0f;
+                    toastLayer.pose.position = {0.0f, -0.18f, -1.0f};
+                    toastLayer.size = {w, w * static_cast<float>(kToastH) / static_cast<float>(kToastW)};
+                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&toastLayer);
+                }
+            }
         }
         // §VR-PLAYER（V2）：180°／360°——影像 render thread 改畫進全景材質，這裡每一格依兩眼的姿態畫投影影像
         const int playerProj = m_Options.player ? m_PlayerProj.load(std::memory_order_relaxed) : 0;
@@ -4856,6 +4928,14 @@ void XrContext::destroyAll()
     m_SubImages = nullptr;
     m_SubImageCount = 0;
     m_SubUploaded = false;
+    if (m_ToastSwapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(m_ToastSwapchain);
+        m_ToastSwapchain = XR_NULL_HANDLE;
+    }
+    delete[] m_ToastImages;
+    m_ToastImages = nullptr;
+    m_ToastImageCount = 0;
+    m_ToastUploaded = false;
     if (m_ShellSwapchain != XR_NULL_HANDLE) {
         xrDestroySwapchain(m_ShellSwapchain);
         m_ShellSwapchain = XR_NULL_HANDLE;

@@ -50,13 +50,26 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 
 ## 各章節待辦補充
 
+### VR 手把相容性（§VR-PADMODE、§VR-SKELETON，2.0.68）
+- **§VR-PADMODE**：不使用 VR 手把的遊戲（商店沒有 Tracked Controller Support）自動插虛擬 Xbox 360 手把；ACC、GRIP 用模擬頭盔
+  端到端驗過（XInput 對照、手動長按切換、結束移除）。**待驗**：配戴實玩 ACC／GRIP 的操控手感；頭盔 dev 版的切換提示圖層（還沒人看過）。
+- **Assetto Corsa**：經 `steam://launch/244210/VR` 啟動時 Steam 卡在「啟動中」，遊戲沒有起來（跟手把模式無關，待查）；
+  AC 要先過 2D 啟動器、進賽道（acs.exe）才是 VR 場景程式，手把模式在那之後才會開。
+- **§VR-SKELETON**：driver 補手部骨架（由扳機、握把、拇指觸碰推彎曲程度）；ACC 的 `invalid device path for skeleton output` 已消失。
+  **待驗**：配戴時遊戲裡的手指動作（Alyx、Moss 這類會顯示手的遊戲）。
+- **不修（已查明無害）**：遊戲啟動時 `Failed to find device container 100000001` 等滿 2 秒 `Initial config load timed out`。
+  時好時壞、跟手把加入時機無關（手把在遊戲連上前 10 s 就啟用了）；逾時後 binding 照常載入，11-04 那場桌球就是逾時的場次、手把正常。
+- **可做（使用者有興趣再做）**：手把模式裡用手把滾轉角當左搖桿 X（像握方向盤轉向，取代陀螺儀）。
+
 ### 2.0.59 待驗（§ABR-ADAPT、§TS-PATH、§VR-BUFFER-AUTO、§REVIEW-1104）
-- **頭盔配戴**：2.0.59 dev 還沒裝。要看：緩衝自動 1↔2 格（`[VIPLE-VR-BUFFER] … depth= up= down=`）在家會不會停在 1 格、遠端是否開場就升 2 格；§ABR-RATCHET（30 s 沒塞車後放寬塞車點）有沒有讓遠端碼率不再一路往下記。
+- **頭盔配戴**：11-04 晚網路差的時段（單向延遲常跳 250 ms）緩衝自動停在 2 格、塞車點放寬有作用，使用者認為比舊版穩。
+  **還沒驗**：網路好（在家）時會不會回到並停在 1 格。
 - **頭盔 Tailscale operator**：頭盔端 rebind 要 `sudo tailscale set --operator=steamos` 一次（使用者執行），沒做的話頭盔只能 ping、中繼恢復較慢。
 - **§ABR-ADAPT 第 4 期（自動半速／降解析度）**：VR 要重開 session 才能切，需使用者決定要不要做成設定裡的「自動」。
-- **補幀畫面目視**：RIFE ncnn 的 flow_y 改用 flow 自己的 cstep；vkfruc_interp 4-tap shader 第一次真的生效（5 月 24e98950 的 .frag 從沒重編）。
-- **沒有環境驗的**：relay 打洞改用 STUN 實際埠（Qt＋Android，要沒有 Tailscale 的外網）；Android 開 MP-QUIC 時行動網路保活與 Wi-Fi→行動網路接手（要有 SIM 的手機、host 可從外網連）；Windows 更新等 90 s 不覆蓋的提示視窗（要真的發新版）；Linux VAAPI 實機。
-- **Android 最低改 Android 9（minSdk 28）**：release notes 要寫。低於 28 的相容分支可另外清（不要夾在 bug 修正裡）。
+- **補幀畫面目視**：vkfruc_interp 4-tap shader 第一次真的生效（5 月 24e98950 的 .frag 從沒重編）。NCNN（RIFE）後端輸出全黑仍在。
+- **沒有環境驗的**：relay 打洞改用 STUN 實際埠（Qt＋Android，要沒有 Tailscale 的外網）；Android 開 MP-QUIC 時行動網路保活與 Wi-Fi→行動網路接手（要有 SIM 的手機、host 可從外網連）；Linux VAAPI 實機。
+- **2.0.63 發佈後可驗**：host 常駐圖示走一次真實的「Check for updates」（§SELF-UPDATE）、電腦版 client 更新對話框的摘要（§UPDATE-NOTES）、Windows 更新等 90 s 不覆蓋的提示視窗。
+- **Android 低於 9 的相容分支**：minSdk 已是 28，舊分支可另外清（不要夾在 bug 修正裡）。
 - **審查剩下沒修的**：B062 nvvideoparser 第三方 parser 補 `IdrPicFlag`／`idr_pic_id`（原生 Vulkan 解碼預設關）；relay 經 proxy 時的身分（/resume、/cancel 會被擋，決策維持）。
 
 ### Linux 安裝包與更新摘要（2.0.33）

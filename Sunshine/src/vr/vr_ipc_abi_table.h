@@ -40,7 +40,7 @@ namespace vripc_abi_table {
 #define VRIPC_ABI_ROW_ALIGN(s) row_t {"align." #s, static_cast<unsigned long long>(alignof(s))}
 #define VRIPC_ABI_ROW_OFF(s, f) row_t {"off." #s "." #f, static_cast<unsigned long long>(offsetof(s, f))}
 
-  // 機械產生：vr_ipc_abi.h（ABI v1）的 26 個 struct、共 308 列（2026-10-08：render_scale_pct 的高 16 位元拆出 fovea_pct；2026-10-05：config.reserved2 拆出 pose_flags；2026-10-08：剩下的 reserved2 改名 render_scale_pct）
+  // 機械產生：vr_ipc_abi.h（ABI v1）的 26 個 struct、共 308 列（2026-11-04：driver_status.reserved0 改名 scene_pid；2026-10-08：render_scale_pct 的高 16 位元拆出 fovea_pct；2026-10-05：config.reserved2 拆出 pose_flags；2026-10-08：剩下的 reserved2 改名 render_scale_pct）
   inline constexpr row_t k_rows[] = {
       VRIPC_ABI_ROW_CONST(VRIPC_ABI_VERSION),
       VRIPC_ABI_ROW_CONST(VRIPC_MAGIC_PIPE),
@@ -168,7 +168,7 @@ namespace vripc_abi_table {
       VRIPC_ABI_ROW_OFF(vripc_driver_status_t, next_index_calls),
       VRIPC_ABI_ROW_OFF(vripc_driver_status_t, drop_unknown_layer),
       VRIPC_ABI_ROW_OFF(vripc_driver_status_t, max_layer_count),
-      VRIPC_ABI_ROW_OFF(vripc_driver_status_t, reserved0),
+      VRIPC_ABI_ROW_OFF(vripc_driver_status_t, scene_pid),
       VRIPC_ABI_ROW_OFF(vripc_driver_status_t, reserved1),
       VRIPC_ABI_ROW_SIZE(vripc_session_config_t),
       VRIPC_ABI_ROW_ALIGN(vripc_session_config_t),

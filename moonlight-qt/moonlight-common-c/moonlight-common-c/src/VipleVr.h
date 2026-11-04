@@ -311,6 +311,13 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
 #define VIPLE_VR_S2C_LINK_READY        0x07  // reliable，§VR-MULTILINK
 #define VIPLE_VR_S2C_REPAIR_GONE       0x08  // §VR-LINK-REPAIR：只走連線的 T_S2C
 #define VIPLE_VR_S2C_LINK_ADDRS        0x09  // reliable，§VR-MULTILINK-HOTADD：server 目前可廣告的位址完整快照
+#define VIPLE_VR_S2C_NOTICE            0x0A  // reliable，§VR-PADMODE：要在頭盔裡短暫顯示的提示，payload {u8 code}（VIPLE_VR_NOTICE_*）
+
+// NOTICE.code（不認得的代碼略過）
+#define VIPLE_VR_NOTICE_PAD_ON_AUTO      1  // 這款遊戲不使用 VR 手把，已切成 Xbox 手把模式
+#define VIPLE_VR_NOTICE_PAD_ON_MANUAL    2  // 手動切成 Xbox 手把模式（兩支選單鍵長按 2 秒）
+#define VIPLE_VR_NOTICE_PAD_OFF_MANUAL   3  // 手動切回 VR 手把
+#define VIPLE_VR_NOTICE_PAD_UNAVAILABLE  4  // 要切成手把模式，但 host 建不了虛擬手把（沒有 ViGEmBus）
 
 // LOSS.reason
 #define VIPLE_VR_LOSS_NETWORK       1  // depacketizer 偵測到掉幀

@@ -224,6 +224,53 @@ void vrSyntheticHands(double t, VIPLE_VR_TRACKING* out)
     out->flags |= VIPLE_VR_TRK_LEFT | VIPLE_VR_TRK_RIGHT;
 }
 
+void vrSyntheticPadTest(double t, double startAt, VIPLE_VR_TRACKING* out)
+{
+    if (!(startAt > 0.0) || t < startAt) {
+        return;
+    }
+    const double r = t - startAt;
+    VIPLE_VR_CONTROLLER_INPUT& left = out->input[0];
+    VIPLE_VR_CONTROLLER_INPUT& right = out->input[1];
+    left.flags |= VIPLE_VR_CTRL_ACTIVE | VIPLE_VR_CTRL_FOCUSED;
+    right.flags |= VIPLE_VR_CTRL_ACTIVE | VIPLE_VR_CTRL_FOCUSED;
+    left.profile = VIPLE_VR_CTRL_PROFILE_FRAME;
+    right.profile = VIPLE_VR_CTRL_PROFILE_FRAME;
+    auto cycle = [&](double c) {
+        if (c < 1.0) {
+            right.buttons |= VIPLE_VR_BTN_A;
+        }
+        else if (c < 2.0) {
+            right.buttons |= VIPLE_VR_BTN_TRIGGER;
+            right.trigger = 0xFFFF;
+            left.stickX = -32767;
+        }
+        else if (c < 3.0) {
+            left.buttons |= VIPLE_VR_BTN_D;  // Frame 左手 dpad 上
+            right.buttons |= VIPLE_VR_BTN_BUMPER;
+        }
+    };
+    auto combo = [&]() {
+        left.buttons |= VIPLE_VR_BTN_MENU;
+        right.buttons |= VIPLE_VR_BTN_MENU;
+    };
+    if (r < 4.0) {
+        cycle(r);
+    }
+    else if (r < 6.5) {
+        combo();
+    }
+    else if (r >= 8.0 && r < 12.0) {
+        cycle(r - 8.0);
+    }
+    else if (r >= 12.0 && r < 14.5) {
+        combo();
+    }
+    else if (r >= 16.0 && r < 20.0) {
+        cycle(r - 16.0);
+    }
+}
+
 void vrSyntheticMenu(double t, double pressAt, VIPLE_VR_TRACKING* out)
 {
     if (!(pressAt > 0.0) || t < pressAt) {

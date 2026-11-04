@@ -2276,6 +2276,39 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### vr_padmode
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: Xbox controller mode for games that do not use VR controllers. Some VR games
+            (racing games such as Assetto Corsa, Assetto Corsa Competizione and GRIP) only read a gamepad or a
+            wheel, so the headset's controllers do nothing in them. When the SteamVR scene application is a Steam
+            game whose store page does not list "Tracked Controller Support", the server plugs in a virtual
+            Xbox 360 controller (needs ViGEmBus) and feeds it from both headset controllers: right A/B/X/Y,
+            left d-pad, bumpers to LB/RB, triggers to LT/RT, sticks (and stick clicks) to LS/RS, right menu to
+            Start and left view to Back. Grips and the system button are not mapped and the VR controllers keep
+            working in SteamVR. Holding both menu buttons for 2 seconds switches the mode by hand and remembers the
+            choice for that game. Store lookups and choices are kept in `vr_padmode.json` next to this file; when
+            the store cannot be reached, or for non-Steam games, the VR controllers are used.
+            Accepts `enabled`/`disabled` like the on/off options below.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_padmode = disabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_latch_acquire_ppm
 
 <table>

@@ -2754,6 +2754,7 @@ namespace vr::bridge {
         status_.act_eye_w = act_ok ? d.act_eye_width : 0;
         status_.act_eye_h = act_ok ? d.act_eye_height : 0;
         status_.act_luid = act_ok ? luid_t {d.act_luid_low, d.act_luid_high} : luid_t {};
+        status_.scene_pid = d.scene_pid;
         if (d.degraded_code) {
           status_.degraded_code = d.degraded_code;
         }

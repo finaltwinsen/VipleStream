@@ -53,3 +53,9 @@ void vrSyntheticHands(double tSec, VIPLE_VR_TRACKING* out);
 // 之後 pressCtr 的 MENU 計數比原值多 1（照協定填；host 目前只看 buttons 的準位）。pressAtSec <= 0＝不做。其餘輸入不動。
 // 只寫按鍵：左手控制器沒有 active（沒被追蹤、也沒有合成的手）時 host 會整個忽略。
 void vrSyntheticMenu(double tSec, double pressAtSec, VIPLE_VR_TRACKING* out);
+
+// 2026-11-04（dev，--vr-synthetic-pad-test，§VR-PADMODE）：從 startSec 起跑一段固定的按鍵序列，給 host 的 Xbox 手把模式
+// 做無人驗證（host 端讀 XInput 對照）。每輪 4 s：[0,1) 右手 A、[1,2) 右扳機全壓＋左搖桿推到最左、[2,3) 左手 dpad 上＋
+// 右 bumper、[3,4) 放開。第 1 輪 [0,4)；[4,6.5) 兩支選單鍵長按（手動切換）；第 2 輪 [8,12)；[12,14.5) 再長按一次；
+// 第 3 輪 [16,20)。之後不動。startSec <= 0＝不做。兩手都標 active。
+void vrSyntheticPadTest(double tSec, double startSec, VIPLE_VR_TRACKING* out);
