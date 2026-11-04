@@ -409,6 +409,11 @@ private:
     Overlay::OverlayManager m_OverlayManager;
 
     std::atomic<bool> m_FrucUnavailablePending{false};  // §FRUC-444-NOTICE
+public:
+    // §VR-LOWBATT：音訊回呼在下一批聲音裡混入「嘟嘟」兩聲（主迴圈要求、音訊執行緒播放）
+    std::atomic<bool> m_BeepRequest{false};
+    int m_BeepPos = -1;  // 音訊執行緒：目前播到第幾個取樣；-1＝沒在播
+private:
 
     // VipleStream §N — in-stream 雙向檔案傳輸 client（OWNS：session 生命週期內活著）
     class FileTransferClient *m_FileTransferClient = nullptr;

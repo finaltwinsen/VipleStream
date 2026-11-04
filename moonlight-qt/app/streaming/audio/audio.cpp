@@ -9,6 +9,8 @@
 
 #include <Limelight.h>
 
+#include <cmath>
+
 #define TRY_INIT_RENDERER(renderer, opusConfig)        \
 {                                                      \
     IAudioRenderer* __renderer = new renderer();       \
@@ -217,6 +219,49 @@ void Session::arDecodeAndPlaySample(char* sampleData, int sampleLength)
         if (samplesDecoded > 0) {
             SDL_assert(desiredBufferSize >= frameSize * samplesDecoded);
             desiredBufferSize = frameSize * samplesDecoded;
+
+            // §VR-LOWBATT：嘟一聲（150 ms），880 Hz、音量約 -12 dBFS，頭尾 5 ms 淡入淡出免得爆音（11-04 使用者：兩聲改一聲）。
+            // 混在串流聲音上：host 沒聲音時也有靜音封包，所以照樣聽得到
+            Session* s = s_ActiveSession;
+            if (s->m_BeepRequest.exchange(false)) {
+                s->m_BeepPos = 0;
+            }
+            if (s->m_BeepPos >= 0) {
+                const int rate = s->m_ActiveAudioConfig.sampleRate > 0 ? s->m_ActiveAudioConfig.sampleRate : 48000;
+                const int ch = s->m_ActiveAudioConfig.channelCount;
+                const int on = rate * 150 / 1000, gap = 0, ramp = rate * 5 / 1000;
+                const int total = on;
+                const bool isFloat = s->m_AudioRenderer->getAudioBufferFormat() == IAudioRenderer::AudioFormat::Float32NE;
+                for (int i = 0; i < samplesDecoded && s->m_BeepPos < total; ++i, ++s->m_BeepPos) {
+                    const int p = s->m_BeepPos;
+                    const int k = p < on ? p : (p >= on + gap ? p - on - gap : -1);
+                    if (k < 0) {
+                        continue;
+                    }
+                    float env = 1.0f;
+                    if (k < ramp) {
+                        env = static_cast<float>(k) / ramp;
+                    }
+                    else if (k > on - ramp) {
+                        env = static_cast<float>(on - k) / ramp;
+                    }
+                    const float v = 0.25f * env * std::sin(2.0f * 3.14159265f * 880.0f * static_cast<float>(k) / rate);
+                    for (int c = 0; c < ch; ++c) {
+                        if (isFloat) {
+                            float& x = static_cast<float*>(buffer)[i * ch + c];
+                            x = std::fmax(-1.0f, std::fmin(1.0f, x + v));
+                        }
+                        else {
+                            short& x = static_cast<short*>(buffer)[i * ch + c];
+                            const int y = x + static_cast<int>(v * 32767.0f);
+                            x = static_cast<short>(y > 32767 ? 32767 : (y < -32768 ? -32768 : y));
+                        }
+                    }
+                }
+                if (s->m_BeepPos >= total) {
+                    s->m_BeepPos = -1;
+                }
+            }
         }
         else {
             desiredBufferSize = 0;

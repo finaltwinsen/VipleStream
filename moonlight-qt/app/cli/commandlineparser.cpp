@@ -673,6 +673,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("vr-synthetic-pad-test", "(dev) PCVR with --vr-emulate: starting this many seconds after tracking starts, play a fixed "
                           "button sequence for the host's Xbox controller mode (A, trigger + left stick, d-pad up + bumper, then both menu buttons "
                           "held 2.5 s, repeated three times over 20 s), to check the host's virtual pad unattended (0 = off). Not saved.");
+    parser.addValueOption("vr-fake-battery", "(dev) headset: pretend the battery is at this percentage (0-100) and not charging, to check the "
+                          "low-battery icon and beeps (shown at 15% or less). Not saved.");
+    parser.addValueOption("vr-low-battery-at", "(dev) headset: show the low-battery icon (and beep) at this percentage or less instead of 15%, "
+                          "even while charging - to check how it looks. Not saved.");
     parser.addToggleOption("vr-10bit", "PCVR: ask the host for 10-bit HEVC (Main10, SDR) instead of 8-bit");
     parser.addToggleOption("vr-track-lock", "PCVR: lock the tracking samples to the display refresh and tune their phase from the measured latency");
     parser.addChoiceOption("vr-track-relock", "PCVR with --vr-track-lock: whether to search for the tracking phase again when part of the frames "
@@ -1040,6 +1044,22 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError(QString("vr-synthetic-menu-at must be a number of seconds within 0-3600 (0 = off): %1").arg(parser.value("vr-synthetic-menu-at")));
         }
         preferences->vrSyntheticMenuAtSec = sec;
+    }
+    if (parser.isSet("vr-fake-battery")) {
+        bool ok = false;
+        const int pct = parser.value("vr-fake-battery").toInt(&ok);
+        if (!ok || pct < 0 || pct > 100) {
+            parser.showError(QString("vr-fake-battery must be 0-100: %1").arg(parser.value("vr-fake-battery")));
+        }
+        preferences->vrFakeBatteryPct = pct;
+    }
+    if (parser.isSet("vr-low-battery-at")) {
+        bool ok = false;
+        const int pct = parser.value("vr-low-battery-at").toInt(&ok);
+        if (!ok || pct < 0 || pct > 100) {
+            parser.showError(QString("vr-low-battery-at must be 0-100: %1").arg(parser.value("vr-low-battery-at")));
+        }
+        preferences->vrLowBatteryAtPct = pct;
     }
     if (parser.isSet("vr-synthetic-pad-test")) {
         bool ok = false;

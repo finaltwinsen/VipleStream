@@ -33,6 +33,7 @@
 #ifdef HAVE_FFMPEG
 #include "video/ffmpeg.h"
 #include "backend/tailscalepath.h"
+#include "streaming/batterymonitor.h"  // §VR-LOWBATT
 #endif
 
 #ifdef HAVE_SLVIDEO
@@ -4560,10 +4561,39 @@ void Session::exec()
     s_StallWatchdogRun.store(true);
     SDL_Thread* stallWatchdog = SDL_CreateThread(inputStallWatchdogProc, "InputStallWD", nullptr);
 
+    // §VR-LOWBATT：XR（頭盔）時才看電量
+    BatteryMonitor battery(m_Preferences->vrFakeBatteryPct, m_Preferences->vrLowBatteryAtPct);
+    Uint32 batteryPollTime = 0, batteryLogTime = 0;
+    int batteryIconPct = -1;
+
     for (;;) {
         s_LoopBeat.fetch_add(1);
         s_LoopPhase.store(-1);
         pollScHidHotplug();
+#ifdef HAVE_OPENXR
+        if (m_XrContext != nullptr && SDL_TICKS_PASSED(SDL_GetTicks(), batteryPollTime)) {
+            batteryPollTime = SDL_GetTicks() + 10000;
+            if (const auto br = battery.read()) {
+                const bool entered = battery.update(*br);
+                if (batteryLogTime == 0 || SDL_TICKS_PASSED(SDL_GetTicks(), batteryLogTime)) {
+                    batteryLogTime = SDL_GetTicks() + 60000;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-BATT] %d%% %s current=%d mA voltage=%d mV%s",
+                                br->capacity, br->charging ? "charging" : "discharging", br->currentMa, br->voltageMv,
+                                battery.low() ? " LOW" : "");
+                }
+                const int want = battery.low() ? br->capacity : -1;
+                if (want != batteryIconPct) {
+                    batteryIconPct = want;
+                    m_XrContext->setBatteryIcon(want);
+                }
+                if (entered) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-BATT] low battery: %d%% - showing the icon and beeping",
+                                br->capacity);
+                    m_BeepRequest.store(true);
+                }
+            }
+        }
+#endif
         if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
             static Uint32 lastHotspotPollTime = 0;
             if (SDL_TICKS_PASSED(SDL_GetTicks(), lastHotspotPollTime + 5000)) {

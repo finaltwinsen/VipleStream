@@ -1,286 +1,312 @@
 # VipleStream
 
-A self-hosted game-streaming stack — a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients) with built-in NAT traversal, AI frame interpolation, Steam library auto-import, and a Traditional Chinese UI. Wire-protocol-compatible with vanilla Sunshine / Moonlight so VipleStream and upstream installs interoperate.
+A self-hosted game-streaming stack for Windows, Linux, Android and the **Steam Frame** headset. It is a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients), extended with PC VR streaming to the Steam Frame, internet play without port forwarding, multi-path networking, frame interpolation and Steam integration. It stays wire-compatible with upstream Sunshine and Moonlight.
 
-> **Current version:** see the [latest release](https://github.com/finaltwinsen/VipleStream/releases/latest). Releases ship the Windows client and server, the Android APK, the Linux x64 client and server, and (from 2.0.0) the Steam Frame headset client at one shared version number.
+自架的遊戲串流套件，支援 Windows、Linux、Android 與 **Steam Frame** 頭盔。以 [Sunshine](https://github.com/LizardByte/Sunshine)（主機端）與 [Moonlight](https://github.com/moonlight-stream)（用戶端）為基礎分支，加上 Steam Frame 的 PC VR 串流、不必設定連接埠轉送的外網連線、多路徑傳輸、補幀與 Steam 整合，並維持與原版 Sunshine／Moonlight 的通訊協定相容。
 
-Project home: <https://github.com/finaltwinsen/VipleStream>
+> **Download / 下載：** [latest release / 最新版](https://github.com/finaltwinsen/VipleStream/releases/latest). Every release ships all parts at one version number; update them together. 每次發佈的所有元件都是同一個版號，請一起更新。
+
+**Contents / 目錄：** [Comparison / 比較](#comparison--比較) · [Components / 元件](#components--元件) · [Install / 安裝](#install--安裝) · [Using it / 使用](#using-it--使用) · [Playing from outside / 從外面連回家](#playing-from-outside--從外面連回家) · [Features / 功能](#features-beyond-upstream--比上游多的功能) · [Version highlights / 版本摘要](#version-highlights--版本摘要) · [License / 授權](#license--授權)
 
 ---
 
-## Components
+## Comparison / 比較
 
-| Component | Replaces | Platform | Release asset → binary | Install location |
+How VipleStream compares with Steam's built-in streaming (Steam Link / Remote Play, including PC VR streaming to the Steam Frame) and with upstream Sunshine + Moonlight. Steam changes often; cells marked *not verified* are things we have not tested ourselves. (As of 2026-11.)
+
+VipleStream 與 Steam 內建串流（Steam Link／遠端暢玩，含串流到 Steam Frame 的 PC VR）以及原版 Sunshine＋Moonlight 的差異。Steam 常常更新，標「未驗證」的是我們沒有親自測過的項目。（2026-11 的狀況）
+
+| | VipleStream | Steam built-in<br>Steam 內建串流 | Sunshine + Moonlight |
+|---|---|---|---|
+| **Source / license**<br>原始碼／授權 | Open source, GPL-3.0, self-hosted<br>開源 GPL-3.0、自架 | Proprietary, needs a Steam account<br>封閉、需要 Steam 帳號 | Open source, GPL-3.0<br>開源 GPL-3.0 |
+| **Host OS**<br>主機系統 | Windows (2D + VR), Linux (2D)<br>Windows（2D＋VR）、Linux（2D） | Wherever Steam runs<br>能跑 Steam 的系統 | Windows, Linux, macOS |
+| **Clients**<br>用戶端 | Windows, Linux x64, Android 9+, Steam Frame | Steam / Steam Link apps, Steam Frame<br>Steam／Steam Link app、Steam Frame | Many platforms (incl. iOS, macOS, TV)<br>平台很多（含 iOS、macOS、電視） |
+| **PC VR to Steam Frame**<br>Steam Frame 的 PC VR | ✓ own SteamVR driver<br>✓ 自帶 SteamVR driver | ✓ | — |
+| **Eye-tracked foveated encoding**<br>眼動注視點編碼 | ✓ | ✓ | — |
+| **Streams any app or the whole desktop**<br>任何程式或整個桌面 | ✓ | ✓ | ✓ |
+| **Internet play without port forwarding or VPN**<br>外網免轉送連接埠、免 VPN | ✓ relay + UDP hole punching; Tailscale-aware<br>✓ 中繼＋UDP 打洞，認得 Tailscale | ✓ 2D (Remote Play); VR *not verified*<br>✓ 2D（遠端暢玩）；VR 未驗證 | Needs port forwarding, UPnP or a VPN<br>要轉送連接埠、UPnP 或 VPN |
+| **Several network paths at once**<br>同時走多條網路 | ✓ 2D: MP-QUIC over every interface; VR: one full copy per link<br>✓ 2D：MP-QUIC 走所有網卡；VR：每條連線各送一份 | ✓ VR: adapter + Wi-Fi<br>✓ VR：串流轉接器＋Wi-Fi | — |
+| **Adaptive bitrate**<br>自適應碼率 | ✓ delay trend + loss type<br>✓ 看延遲趨勢與丟包類型 | ✓ | — (fixed bitrate)<br>—（固定碼率） |
+| **Frame interpolation on 2D clients**<br>2D 用戶端補幀 | ✓ Windows (D3D11 / Vulkan), Android | — | — |
+| **Steam library auto-import, account switching**<br>自動匯入 Steam 遊戲、切換 Steam 帳號 | ✓ | (native)<br>（本來就是 Steam） | Manual app list<br>手動加入程式 |
+| **Frame controllers as an Xbox pad for games that ignore VR controllers**<br>不用 VR 手把的遊戲自動把 Frame 手把當 Xbox 手把 | ✓ automatic (Steam store category), 2.0.68+<br>✓ 自動判斷（Steam 商店分類），2.0.68 起 | *not verified*<br>未驗證 | — |
+| **Video player in the headset (files, PC folders, URLs, YouTube; 2D/3D/180°/360°)**<br>頭盔影片播放（本機、PC 資料夾、網址、YouTube；2D／3D／180°／360°） | ✓ | *not verified*<br>未驗證 | — |
+| **Low-battery icon in the headset while streaming**<br>串流中頭盔低電量圖示 | ✓ at 15 %, 2.0.70+<br>✓ 15% 顯示，2.0.70 起 | *not verified*<br>未驗證 | — |
+| **Steam Controller passthrough (native HID)**<br>Steam Controller 原生轉發 | ✓ | ✓ | — |
+| **Works with upstream Moonlight / Sunshine**<br>與原版 Moonlight／Sunshine 互通 | ✓ | — | ✓ |
+| **UI languages**<br>介面語言 | 30 (incl. Traditional Chinese)<br>30 種（含繁體中文） | Many<br>很多 | Many<br>很多 |
+
+### Which one should I use? / 該用哪一個？
+
+- **Steam built-in** is the zero-setup choice when you only play Steam games at home and are happy with what it offers.
+- **VipleStream** fits when you want to play from outside without opening ports, use several networks at once, stream to Android or Linux devices with frame interpolation, watch videos in the headset, or play VR games that only take a gamepad. It also helps when you want to see and tune everything yourself (logs, host settings, source).
+- **Sunshine + Moonlight** is the choice for the widest range of client devices (iOS, Apple TV, smart TVs). VipleStream clients and hosts interoperate with them.
+
+- **Steam 內建串流**：只在家玩 Steam 遊戲、現有功能就夠用時，免設定最省事。
+- **VipleStream**：想從外面連回家又不想開連接埠、想同時用多條網路、要串流到 Android 或 Linux 裝置並補幀、要在頭盔看影片，或玩只吃手把的 VR 遊戲時適合；想自己看 log、調主機設定、讀原始碼的也適合。
+- **Sunshine＋Moonlight**：需要最多種用戶端（iOS、Apple TV、智慧電視）時。VipleStream 的主機與用戶端都能和它們互通。
+
+---
+
+## Components / 元件
+
+| Component<br>元件 | Replaces<br>取代 | Platform<br>平台 | Release asset<br>下載檔 | Installed to<br>安裝位置 |
 |---|---|---|---|---|
-| **VipleStream-Server** | Sunshine | Windows x64 | `VipleStream-Server-X.Y.Z.zip` → `viplestream-server.exe` + `viplestream-svc.exe` | `C:\Program Files\VipleStream-Server\` (service `VipleStreamServer`) |
-| | | Linux x64 | `VipleStream-Server-X.Y.Z-linux-x64.deb` → `viplestream-server` | `/usr/bin/` (systemd user service) |
-| **VipleStream** (PC client) | Moonlight-Qt | Windows x64 | `VipleStream-Client-X.Y.Z.zip` → `VipleStream.exe` | `C:\Program Files\Moonlight Game Streaming\` |
-| | | Linux x64 | `VipleStream-Client-X.Y.Z-linux-x64.AppImage` | portable, no install step |
-| **VipleStream Android** | Moonlight-Android | Android | `VipleStream-Android-X.Y.Z.apk` (application id `com.piinsta`) | sideload only |
-| **VipleStream for Steam Frame** | — | Steam Frame headset (Linux arm64) | `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` (app id `io.github.finaltwinsen.VipleStream`) + `VipleStream-SteamFrame-Install-X.Y.Z.sh` | Flatpak, per-user, installed by the script |
-| **viplestream-relay** | — | any (Python 3.10+) | `tools/viplestream-relay/relay_server.py` (source only, not a release asset) | any always-on host |
+| **VipleStream-Server** | Sunshine | Windows x64 | `VipleStream-Server-X.Y.Z.zip` | `C:\Program Files\VipleStream-Server\` (service 服務 `VipleStreamServer`) |
+| | | Linux x64 (Ubuntu 26.04) | `VipleStream-Server-X.Y.Z-linux-x64.deb` | `/usr/bin/viplestream-server` (systemd user service 使用者服務) |
+| **VipleStream** (PC client 電腦版) | Moonlight-Qt | Windows x64 | `VipleStream-Client-X.Y.Z.zip` | any folder 任何資料夾 |
+| | | Linux x64 | `VipleStream-Client-X.Y.Z-linux-x64.AppImage` | portable 免安裝 |
+| **VipleStream Android** | Moonlight-Android | Android 9+ | `VipleStream-Android-X.Y.Z.apk` (`com.piinsta`) | sideload 側載 |
+| **VipleStream for Steam Frame** | — | Steam Frame (Linux arm64) | `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` + `VipleStream-SteamFrame-Install-X.Y.Z.sh` | per-user Flatpak 個人 Flatpak |
+| **Windows drivers** 驅動程式 | — | Windows x64 | `VipleStream-Drivers-X.Y.Z-windows.zip` (same drivers as in the server zip 與 Server zip 內相同) | for repair only 修復用 |
+| **viplestream-relay** | — | any, Python 3.10+ | `tools/viplestream-relay/relay_server.py` (source only 只有原始碼) | an always-on machine 一台常開的機器 |
 
-The wire protocol on `_nvstream._tcp` mDNS, `/serverinfo` `/launch` `/applist`, RTSP, and the client cert chain are unchanged from upstream. A VipleStream client can connect to a vanilla Sunshine host, and a vanilla Moonlight client can connect to a VipleStream-Server host — VipleStream-only features (Steam profile dropdown, FRUC backends, etc.) are quietly hidden when the peer doesn't advertise the `<VipleStreamProtocol>` capability marker.
+The protocol (`_nvstream._tcp` mDNS, `/serverinfo`, `/launch`, `/applist`, RTSP, client certificates) is unchanged from upstream. VipleStream-only features are hidden automatically when the other side is plain Sunshine or Moonlight.
+
+通訊協定（mDNS、`/serverinfo`、`/launch`、`/applist`、RTSP、用戶端憑證）與上游相同。對方是原版 Sunshine 或 Moonlight 時，VipleStream 專屬功能會自動隱藏。
 
 ---
 
-## Install
+## Install / 安裝
 
-Download everything from the [latest release](https://github.com/finaltwinsen/VipleStream/releases/latest). The host runs the server; every device you stream to runs a client. All pieces carry the same version number — update them together.
+The **host** is the PC that runs your games; every device you play on is a **client**.
+**主機（host）**是跑遊戲的電腦；你拿來玩的每台裝置都是**用戶端（client）**。
 
-### Host (the PC you stream from)
+### Host on Windows / Windows 主機
 
-**Windows** — Windows 10/11 with an NVIDIA, AMD or Intel GPU that has a hardware video encoder.
+Windows 10/11 with an NVIDIA, AMD or Intel GPU that has a hardware video encoder.
+Windows 10／11，顯示卡（NVIDIA、AMD 或 Intel）要有硬體影像編碼器。
 
 1. Extract `VipleStream-Server-X.Y.Z.zip` to `C:\Program Files\VipleStream-Server\`.
-2. In an **Administrator** PowerShell, register the service and open the firewall:
+   把 `VipleStream-Server-X.Y.Z.zip` 解壓縮到 `C:\Program Files\VipleStream-Server\`。
+2. In an **Administrator** PowerShell, register the service and allow it through the firewall:
+   用**系統管理員**身分開 PowerShell，註冊服務並允許通過防火牆：
    ```powershell
    cd "C:\Program Files\VipleStream-Server"
    New-Item -ItemType Directory tools -Force | Out-Null
-   Copy-Item viplestream-svc.exe tools\      # the service wrapper must live one folder below the install dir
+   Copy-Item viplestream-svc.exe tools\      # the service wrapper lives one folder below / 服務程式要放在下一層
    New-Service -Name VipleStreamServer -DisplayName "VipleStream Server" -StartupType Automatic `
      -BinaryPathName '"C:\Program Files\VipleStream-Server\tools\viplestream-svc.exe"'
    New-NetFirewallRule -DisplayName "VipleStream Server" -Direction Inbound -Action Allow `
      -Program "C:\Program Files\VipleStream-Server\viplestream-server.exe"
    Start-Service VipleStreamServer
    ```
-3. Open `https://localhost:47990` (accept the self-signed certificate warning) and create the Web UI login. Settings are saved to `config\sunshine.conf`.
-4. *Optional* — Steam Controller passthrough: run `.\Install-VipleSCHid.ps1` from the same Administrator PowerShell.
-5. *For VR on Steam Frame* — install Steam and SteamVR on the host and keep a user signed in to Windows (a locked or signed-out desktop streams a solid colour). The server deploys and registers its own SteamVR driver when a VR session starts; you don't install it by hand. **2.0.0 only:** add `vr_pcvr = enabled` to `config\sunshine.conf` and restart the service — 2.0.0 shipped with VR turned off by default; later versions turn it on.
+3. Open `https://localhost:47990`, accept the self-signed certificate warning, and create the Web UI login. Settings are stored in `config\sunshine.conf`.
+   開啟 `https://localhost:47990`，接受自簽憑證的警告，建立 Web UI 的帳號密碼。設定存在 `config\sunshine.conf`。
+4. *Optional:* Steam Controller passthrough. Run `.\Install-VipleSCHid.ps1` in the same Administrator PowerShell.
+   *選用：* Steam Controller 轉發。在同一個系統管理員 PowerShell 執行 `.\Install-VipleSCHid.ps1`。
+5. *Optional:* Xbox controller mode for VR games that ignore VR controllers needs [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) on the host.
+   *選用：* 「Xbox 手把模式」（給不用 VR 手把的 VR 遊戲）需要在主機裝 [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)。
+6. *For VR on the Steam Frame:* install Steam and SteamVR, and keep a Windows user signed in (a locked or signed-out desktop streams a solid colour). The server installs and registers its own SteamVR driver when a VR session starts.
+   *要在 Steam Frame 玩 VR：* 裝好 Steam 與 SteamVR，並保持有 Windows 使用者登入（鎖定或登出時畫面會是一整片單色）。VR 串流開始時，server 會自己部署並註冊 SteamVR driver，不必手動安裝。
 
-Updating: right-click the tray icon → **Check for updates...**, or stop the service, extract the new zip over the old one, and start it again. `VipleStream-Drivers-X.Y.Z-windows.zip` holds the same two drivers as the server zip, for reinstalling or repairing them on their own (see its `README.txt`).
+**Updating / 更新：** right-click the tray icon → **Check for updates...**, or stop the service, extract the new zip over the old one, and start it again.
+在系統匣圖示按右鍵 →「**Check for updates...**」；或停止服務、把新的 zip 解壓縮覆蓋，再啟動服務。
 
-**Linux** — Ubuntu 26.04 (x64). VR streaming is Windows-only.
+### Host on Linux / Linux 主機
+
+Ubuntu 26.04 x64. 2D streaming only (VR streaming needs a Windows host).
+Ubuntu 26.04 x64，只支援 2D 串流（VR 串流需要 Windows 主機）。
 
 ```bash
 sudo apt install ./VipleStream-Server-X.Y.Z-linux-x64.deb
 ```
 
-The package enables a systemd user service for the installing user, so the server starts at boot without a desktop login. The Web UI is at `https://localhost:47990`. On a headless GNOME/Wayland host set `capture = kms`.
+The package enables a systemd user service for the installing user, so the server starts at boot without a desktop login. The Web UI is at `https://localhost:47990`. On a headless GNOME/Wayland host, set `capture = kms`.
 
-### Clients
+安裝時會替安裝者啟用 systemd 使用者服務，開機後不必登入桌面就會啟動。Web UI 在 `https://localhost:47990`。沒接螢幕的 GNOME／Wayland 主機請設 `capture = kms`。
 
-| Device | Install |
+### Clients / 用戶端
+
+| Device<br>裝置 | Install<br>安裝 |
 |---|---|
-| Windows | Extract `VipleStream-Client-X.Y.Z.zip` anywhere and run `VipleStream.exe`. No installer or admin rights needed. |
-| Linux x64 | `chmod +x VipleStream-Client-X.Y.Z-linux-x64.AppImage` and run it. |
-| Android | Sideload `VipleStream-Android-X.Y.Z.apk` (file manager, or `adb install -r`). |
-| Steam Frame | See below. |
+| Windows | Extract `VipleStream-Client-X.Y.Z.zip` anywhere and run `VipleStream.exe`. No installer, no admin rights.<br>解壓縮到任何資料夾，執行 `VipleStream.exe`。不需要安裝程式或系統管理員權限。 |
+| Linux x64 | `chmod +x VipleStream-Client-X.Y.Z-linux-x64.AppImage`, then run it.<br>加上執行權限後直接執行。 |
+| Android 9+ | Sideload `VipleStream-Android-X.Y.Z.apk` (file manager, or `adb install -r`).<br>用檔案管理員或 `adb install -r` 側載安裝。 |
+| Steam Frame | See below. 見下方。 |
 
-**Steam Frame headset**
+### Steam Frame headset / Steam Frame 頭盔
 
-Use the installer script, not `flatpak install` alone. A plain Flatpak install only gets Desktop mode: Flatpak always runs apps in their own process-ID sandbox, and the headset's SteamVR can't work with an app inside one, so VipleStream turns VR and Video mode off. The installer adds a launcher that starts VipleStream without that one isolation (the rest of the Flatpak sandbox stays) and with access to SteamVR.
+Use the installer script, not `flatpak install` alone. A plain Flatpak install only gives you Desktop mode: Flatpak always runs apps in their own process-ID sandbox, and the headset's SteamVR cannot work with an app inside one, so VipleStream turns VR mode and Video mode off. The installer adds a launcher that drops only that one isolation (the rest of the Flatpak sandbox stays) and gives access to SteamVR.
 
-1. Download `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` and `VipleStream-SteamFrame-Install-X.Y.Z.sh` into the same folder on the headset, and open a terminal there (desktop mode, or SSH with Developer Mode on).
-2. Run the installer as your normal user (no `sudo`). The first install also downloads the KDE 6.11 runtime from Flathub:
+請用安裝腳本，不要只執行 `flatpak install`。單純裝 Flatpak 只能用桌面模式：Flatpak 一定會把程式放進獨立的行程 ID 沙盒，頭盔的 SteamVR 無法跟沙盒裡的程式合作，VipleStream 就會停用 VR 模式與影片模式。安裝腳本會加一個啟動器，只拿掉這一項隔離（Flatpak 其他隔離不變），並開放 SteamVR 的存取。
+
+1. Put `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` and `VipleStream-SteamFrame-Install-X.Y.Z.sh` in the same folder on the headset, and open a terminal there (desktop mode, or SSH with Developer Mode on).
+   把這兩個檔案放在頭盔上的同一個資料夾，在那裡開終端機（桌面模式，或開啟開發者模式後用 SSH）。
+2. Run the installer as your normal user (no `sudo`). The first install also downloads the KDE runtime from Flathub.
+   以一般使用者執行安裝腳本（不要 `sudo`）。第一次安裝會從 Flathub 下載 KDE runtime。
    ```bash
    bash VipleStream-SteamFrame-Install-X.Y.Z.sh
    ```
-   It installs the Flatpak, sets up the launcher, checks that the launcher really runs without the process-ID sandbox, and adds **VipleStream** to your Steam library (Steam must be running).
-3. Launch **VipleStream** from your Steam library inside the headset. It opens on a virtual screen.
+   It installs the Flatpak, sets up and checks the launcher, and adds **VipleStream** to your Steam library (Steam must be running).
+   它會安裝 Flatpak、設定並檢查啟動器，然後把 **VipleStream** 加進 Steam 收藏庫（Steam 要開著）。
+3. Launch **VipleStream** from your Steam library inside the headset.
+   在頭盔裡從 Steam 收藏庫開啟 **VipleStream**。
 
-Updating: download both files of the new release and run the new installer the same way. To remove everything: `bash VipleStream-SteamFrame-Install-X.Y.Z.sh --uninstall`, then delete the shortcut from your Steam library.
+**Updating / 更新：** download both files of the new release and run the new installer the same way. **Removing / 移除：** `bash VipleStream-SteamFrame-Install-X.Y.Z.sh --uninstall`, then delete the shortcut from your Steam library. 執行 `--uninstall` 後，再從 Steam 收藏庫刪掉捷徑。
 
 ---
 
-## Using it
+## Using it / 使用
 
-### Pair once
+### Pair once / 第一次配對
 
-1. In the client, add the host: it usually shows up on its own on the same network; otherwise press **+** (*Add PC manually*) and type the host's IP address.
-2. The client shows a 4-digit PIN. On the host's Web UI (`https://<host-ip>:47990`) open **PIN** and enter it.
-3. The host appears with its apps. Installed Steam games are listed automatically.
+1. In the client, add the host. It usually appears by itself on the same network; otherwise press **+** (*Add PC manually*) and type the host's address.
+   在用戶端加入主機。同一個網路通常會自動出現；沒有的話按 **+**（手動加入電腦）輸入主機位址。
+2. The client shows a 4-digit PIN. On the host's Web UI (`https://<host>:47990`) open **PIN** and enter it.
+   用戶端會顯示 4 位數 PIN 碼，到主機的 Web UI（`https://<主機>:47990`）的 **PIN** 頁輸入。
+3. The host appears with its apps; installed Steam games are listed automatically. Each device pairs once.
+   主機和它的程式會出現，已安裝的 Steam 遊戲會自動列出。每台裝置只要配對一次。
 
-Pairing is per device; each client pairs once.
+### Stream / 開始串流
 
-### Stream a game or the desktop
+Pick the host, then an app (**Desktop** streams the whole screen). Resolution, frame rate, bitrate, codec and frame interpolation are in **Settings**; the defaults are a good start.
+選主機、再選程式（**Desktop** 是整個桌面）。解析度、更新率、碼率、編碼格式與補幀在**設定**裡，預設值就能用。
 
-Pick the host, then an app (**Desktop** streams the whole screen). Resolution, frame rate, bitrate, codec and frame interpolation (FRUC) are in **Settings**; the defaults are a good start. To end a session:
-
-| Input | Exit |
+| Input<br>輸入 | End the stream<br>結束串流 |
 |---|---|
-| Keyboard | `Ctrl+Alt+Shift+Q` |
-| Gamepad | hold `Start+Select+L1+R1` |
-| VR controller (Steam Frame, desktop and VR mode) | hold `A+X+trigger+grip` (on the Frame controller A and X are both on the right hand; trigger and grip can be on either hand) |
+| Keyboard<br>鍵盤 | `Ctrl+Alt+Shift+Q` |
+| Gamepad<br>手把 | hold `Start+Select+L1+R1`<br>按住 `Start+Select+L1+R1` |
+| Steam Frame controllers<br>Steam Frame 手把 | hold `A+X+trigger+grip` (A and X are both on the right controller)<br>按住 `A+X+扳機+握把`（A 與 X 都在右手） |
 
-The tip is also shown on the screen while the stream starts.
+### On the Steam Frame / 在 Steam Frame 上
 
-### On the Steam Frame
+VipleStream opens in its own VR interface (laser pointer: trigger = click, grip = right click, B = back). Pick a mode; you can switch later from the top bar.
+VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、握把＝右鍵、B＝返回）。選一個模式，之後可以從上方列切換。
 
-When VipleStream starts it asks for a mode (you can switch later from the top bar):
-
-| Mode | What it does |
+| Mode<br>模式 | What it does<br>用途 |
 |---|---|
-| **Desktop mode** | Your PC's desktop or a game on a large virtual screen, same as the PC client. |
-| **VR mode** | Plays SteamVR games from your PC in the headset. Pick the host, then **SteamVR Home** or a VR game; the host starts SteamVR and the game. Before starting, the client checks the round trip to the host and waits if the connection is too slow for VR (for example, a VPN going through a relay). |
-| **Video mode** | Plays videos in the headset — flat, 3D side-by-side / top-bottom, 180° and 360°. Sources: files on the headset, a URL, folders on a paired PC (the whole PC by default; limit it with `media_dirs`, or turn it off with `media_share = disabled` in the host's `sunshine.conf`), and YouTube and other sites through the built-in browser's **Play in VR**. |
+| **VR mode**<br>VR 模式 | SteamVR games from your PC. Pick the host, then **SteamVR Home** or a VR game; the host starts SteamVR and the game. Before starting, the client measures the round trip and waits if the connection is too slow for VR.<br>在頭盔玩 PC 上的 SteamVR 遊戲。選主機，再選 **SteamVR Home** 或 VR 遊戲，主機會啟動 SteamVR 和遊戲。開始前會先量往返時間，連線太慢時會先等。 |
+| **Desktop mode**<br>桌面模式 | Your PC desktop or a game on a large virtual screen.<br>把電腦桌面或遊戲放在大型虛擬螢幕上。 |
+| **Video mode**<br>影片模式 | Flat, 3D side-by-side / top-bottom, 180° and 360° videos from the headset, a URL, folders shared by a paired PC (turn off with `media_share = disabled`), or YouTube through the built-in browser's **Play in VR**.<br>播放平面、3D 左右／上下、180°、360° 影片；來源可以是頭盔本機、網址、配對 PC 分享的資料夾（`media_share = disabled` 可關閉），或內建瀏覽器的「**在 VR 播放**」（YouTube 等）。 |
 
-Video mode controls: **A** play/pause · **B** exit · **trigger** show the control bar · **grip** recentre the screen · **stick left/right** skip ±10 s · **stick up/down** move the screen nearer/farther (handy when a VR180 video is shot too close).
+**Video mode controls / 影片模式操作：** A play/pause 播放／暫停 · B exit 離開 · trigger control bar 控制列 · grip recentre 重新置中 · stick left/right ±10 s 搖桿左右快轉 ±10 秒 · stick up/down nearer/farther 搖桿上下調遠近.
 
-To leave a desktop or VR stream, hold **A+X+trigger+grip**; you return to the VipleStream VR interface. Quitting the stream from the SteamVR quick menu also brings you back to VipleStream.
+**Xbox controller mode (2.0.68+) / Xbox 手把模式（2.0.68 起）：** some VR games (for example Assetto Corsa, Assetto Corsa Competizione, GRIP) only read a gamepad or wheel, so VR controllers do nothing in them. When the running game's Steam store page does not list *Tracked Controller Support*, the host plugs in a virtual Xbox 360 controller and drives it from both Frame controllers (right A/B/X/Y, left d-pad, bumpers → LB/RB, triggers → LT/RT, sticks → LS/RS, right menu → Start, left view → Back). Hold **both menu buttons for 2 seconds** to switch by hand; the choice is remembered per game. Needs ViGEmBus on the host; turn it off with `vr_padmode = disabled`.
 
-When you start a video or VR session, SteamVR may open the Steam menu over it — press the Steam button to dismiss it.
+有些 VR 遊戲（例如 Assetto Corsa、Assetto Corsa Competizione、GRIP）只讀手把或方向盤，VR 手把在裡面完全沒反應。執行中的遊戲在 Steam 商店沒有標「Tracked Controller Support」時，主機會插上一支虛擬 Xbox 360 手把，用兩支 Frame 手把操作（右手 A／B／X／Y、左手十字鍵、肩鍵→LB／RB、扳機→LT／RT、搖桿→LS／RS、右手 menu→Start、左手 view→Back）。**兩支選單鍵同時按住 2 秒**可以手動切換，每款遊戲會記住你的選擇。主機要裝 ViGEmBus；用 `vr_padmode = disabled` 可以關閉。
 
-More detail: [`docs/setup_guide.md`](docs/setup_guide.md) (configuration and troubleshooting), [`docs/steam_frame_client.md`](docs/steam_frame_client.md) (headset client), [`docs/steamvr_driver.md`](docs/steamvr_driver.md) (VR on the host).
+**Low battery (2.0.70+) / 低電量（2.0.70 起）：** while streaming, a small battery icon appears at the top right of your view at 15 % or less (not charging), with one beep. Note that under a heavy streaming load the Frame can power off well above 15 % (see [SteamOS#3040](https://github.com/ValveSoftware/SteamOS/issues/3040)); keep a power bank at hand for long sessions.
 
----
+串流時電量 ≤ 15% 且沒在充電，視野右上角會出現小電池圖示並嘟一聲。注意：高負載串流時 Frame 可能在電量遠高於 15% 時就斷電（見 [SteamOS#3040](https://github.com/ValveSoftware/SteamOS/issues/3040)），長時間遊玩建議準備行動電源。
 
-## Features beyond upstream
+To leave a desktop or VR stream, hold **A+X+trigger+grip**; you return to the VipleStream interface. If SteamVR opens the Steam menu over a new session, press the Steam button to close it.
+要離開桌面或 VR 串流，按住 **A+X+扳機+握把**，會回到 VipleStream 介面。新場次開始時如果 SteamVR 的 Steam 選單蓋在上面，按 Steam 鍵關掉即可。
 
-### NAT traversal (zero hardware cost)
-Stream over the public internet with no port forwarding, UPnP, or VPN.
-
-- **STUN prober** detects public IP + NAT type at startup
-- **Relay signaling server** — lightweight Python WebSocket service, terminate TLS via Cloudflare Tunnel / nginx
-- **HTTP proxy** — `/serverinfo` / `/launch` / `/cancel` go through the relay in relay-only mode
-- **RTSP TCP tunnel** — wraps the 7-connection RTSP handshake (OPTIONS → DESCRIBE → SETUP×3 → ANNOUNCE → PLAY) over a single WebSocket
-- **UDP hole-punch** — direct peer-to-peer UDP for video / audio / control after RTSP succeeds
-- **PSK auth** — relay rejects any client whose `HMAC-SHA256(psk, uuid)[:16]` doesn't match
-- Fully ported to the Android client (RelayClient + RelayTcpTunnel)
-
-### MP-QUIC multi-path streaming
-When the host advertises multiple reachable interfaces (e.g. Tailscale, Ethernet, WiFi), the client streams across all of them simultaneously for higher throughput and seamless failover when a single path degrades. Capability-negotiated — falls back to ENet transport against vanilla Moonlight / Sunshine.
-
-### Frame Rate Up-Conversion (FRUC)
-2× frame interpolation on the PC client. Two renderer paths, each with its own backend menu:
-
-| Renderer | Backends | Notes |
-|---|---|---|
-| **Direct3D 11** (default) | Generic Compute / NVIDIA Optical Flow / DirectML RIFE / NCNN-Vulkan RIFE | Generic is the recommended low-latency default; NVOF needs RTX 20+; DirectML / NCNN run RIFE 4.25-lite on capable GPUs |
-| **Vulkan** (experimental) | Built-in compute (Generic-equivalent) + Native RIFE β opt-in | Vulkan renderer bundles its own FRUC compute pipeline (9 shaders + 389-layer RIFE graph executor); Active / Passive mode toggle |
-
-Android client uses its own Vulkan FRUC backend (AHardwareBuffer zero-copy import, smart-mode dual present 60→120 FPS, VK_GOOGLE_display_timing, SIGSEGV canary fallback to GLES on driver crash).
-
-DirectML / NCNN diagnostics:
-- `VIPLE_DIRECTML_DEBUG=1` / `VIPLE_DIRECTML_VERBOSE=1` — D3D12 debug layer + ORT VERBOSE log
-- `VIPLE_DML_RES=540|720|1080|native` — caps DirectML tensor resolution
-- `VIPLE_FRUC_MODEL=fp16|fp32|auto` — overrides model cascade order
-- `[VIPLE-FRUC-DML]` / `[VIPLE-FRUC-NCNN]` / `[VIPLE-VKFRUC-Stats]` log lines print per-stage timings
-
-### Steam library auto-import (host)
-Server scans the local Steam install at startup and auto-injects every installed game into `/applist` as a launchable app. No manual configuration — click `Counter-Strike 2` in the client and the host runs `steam://rungameid/730`.
-
-- Reads `loginusers.vdf` for accounts, `libraryfolders.vdf` for install paths, each `appmanifest_*.acf` for per-app metadata
-- Per-app `<Source>` `<SteamAppId>` `<SteamOwners>` `<LastPlayed>` `<Playtime>` XML tags fed back to clients
-- Clients sort by `RECENT` / `PLAYTIME` / `NAME` (manual entries still pinned to top)
-
-### Steam account switch (client → host)
-A `STEAM ACCOUNT` dropdown sits above the apps grid (PC + Android). Pick a different account → host runs `steam.exe -shutdown` then `-login <account>`. Live progress (`Asking Steam to shut down…` → `Logging in as XXX…`) shown in a busy overlay.
-
-- Only accounts with `RememberPassword=1` are switchable; others rejected client-side
-- Server-side switch is **async** (returns `202 + task_id` in <100 ms) — client polls `/steamswitch/status` every ~1 s until terminal state, so the long-running switch never starves `/serverinfo` polls or causes spurious "host disconnected" UI
-- Force-kills straggler `steam.exe` / `steamwebhelper.exe` before re-login (otherwise the new `-login` gets intercepted by Steam's stuck login window and silently no-ops)
-- Detects Steam Guard 2FA prompts and surfaces a specific error
-- 60 s task GC keeps the registry small
-
-### HDR support (Android)
-End-to-end HDR pipeline on Android Vulkan FRUC backend:
-- `VK_EXT_swapchain_colorspace` (instance) + `VK_EXT_hdr_metadata` (device) — capability-gated by user opt-in (`Settings → Enable HDR`) + driver advertise
-- HDR10 swapchain — `VK_FORMAT_A2B10G10R10_UNORM_PACK32` + `VK_COLOR_SPACE_HDR10_ST2084_EXT` when capable
-- `vkSetHdrMetadataEXT` — BT.2020 primaries, 1000 nits MaxCLL, 400 nits MaxFALL
-- Fragment shader sRGB → linear → ST.2084 PQ encoding for HDR10 swapchain on SDR content (BT.2408 100-nit reference white)
-- Three-tier safety: user opt-in + capability probe + SIGSEGV canary fallback (Pixel 9 Mali-G715 driver bug history)
-
-PC client HDR is upstream Moonlight-Qt's existing HDR path (Sunshine `hdrMode=1` launch param + MediaCodec / D3D11 HDR colorspace negotiation).
-
-### Other
-- Single-instance guard on PC client — second launch shows a notice instead of silently fighting over QUIC ports / server session
-- Traditional Chinese UI translation (`qml_zh_TW.ts`) on PC client; Android pulls system locale
-- Web UI English + Traditional Chinese strings rebranded to VipleStream
-- Editorial-style PcView / AppView design with IBM Plex Mono + Space Grotesk + lime accent (`#D4FF3A`)
-- Performance overlay (Android v1.2.184+) — lime-on-ink2 monospace, PC §05 NET HUD style, FRUC stats (interpolated count, dual-mode ratio, effective output FPS)
-- `/serverinfo` advertises `<VipleStreamProtocol>` capability marker so clients can hide VipleStream-only features when connected to vanilla Sunshine
-- Adaptive bitrate, network-status overlay (LAN / Relay / DERP), debug pairing tool (ADB-based PIN-free)
-- Status log to `Downloads/viple_vkbe_status.log.txt` on Android — adb-less diagnostic for Pixel 9 / locked-down devices
+More: [`docs/setup_guide.md`](docs/setup_guide.md) (configuration and troubleshooting 設定與疑難排解) · [`docs/steam_frame_client.md`](docs/steam_frame_client.md) (headset client 頭盔用戶端) · [`docs/steamvr_driver.md`](docs/steamvr_driver.md) (VR on the host 主機端 VR).
 
 ---
 
-## Architecture
+## Playing from outside / 從外面連回家
+
+- **Tailscale (recommended):** install Tailscale on the host and the client. The host advertises its Tailscale address, and clients remember it as a fallback, so the same pairing works at home and away. If the connection falls back to a Tailscale relay (DERP), VipleStream keeps streaming and switches back to a direct path when one becomes available.
+- **Relay server (no VPN):** run `tools/viplestream-relay/relay_server.py` on an always-on machine (TLS can be terminated by Cloudflare Tunnel or nginx). The client finds the host through the relay, tunnels the RTSP handshake over one WebSocket, then punches a direct UDP path for video, audio and input. Connections must present a pre-shared key.
+- **VR over the internet:** works, but a relayed path adds latency; the client measures the round trip before entering VR and tells you when it is too slow.
+
+- **Tailscale（建議）：** 主機和用戶端都裝 Tailscale。主機會公告自己的 Tailscale 位址，用戶端記下來當備用，在家和出門用同一組配對。連線退到 Tailscale 中繼（DERP）時，串流不中斷，有直連路徑時會自動換回直連。
+- **中繼伺服器（不用 VPN）：** 在一台常開的機器跑 `tools/viplestream-relay/relay_server.py`（TLS 可交給 Cloudflare Tunnel 或 nginx）。用戶端經中繼找到主機，RTSP 握手走一條 WebSocket，影音與輸入再用 UDP 打洞直連。連線要提供預先共享的金鑰。
+- **外網玩 VR：** 可以，但走中繼會增加延遲；進 VR 前用戶端會先量往返時間，太慢時會明確告訴你。
+
+---
+
+## Features beyond upstream / 比上游多的功能
+
+**Steam Frame / VR**
+- PC VR streaming with its own SteamVR driver; pose prediction, latency-aware pacing, adaptive buffer (1 or 2 frames), eye-tracked foveated encoding, half-rate streaming with frame synthesis.
+  自帶 SteamVR driver 的 PC VR 串流；姿態預測、依延遲調整的節拍、自動 1／2 格緩衝、眼動注視點編碼、半速串流加補幀。
+- Multi-link: one full copy of the stream per network link (home Wi-Fi, the headset hotspot to the host's adapter, Ethernet), with repair requests that follow the measured round trip.
+  多連線：每條網路連線（家用 Wi-Fi、頭盔熱點到主機網卡、有線）各送一份完整串流，補包時機跟著實測往返時間走。
+- Full VR interface on the headset, video mode, Frame controllers exposed as Frame controllers (with hand skeleton, 2.0.68+), Xbox controller mode, low-battery icon.
+  頭盔全 VR 介面、影片模式、Frame 手把以 Frame 手把身分出現（含手部骨架，2.0.68 起）、Xbox 手把模式、低電量圖示。
+- Coexists with Steam's own streaming: when Steam Link asks for SteamVR, the host hands it over.
+  與 Steam 內建串流共存：Steam Link 要用 SteamVR 時，主機會讓出來。
+
+**Networking / 網路**
+- NAT traversal without port forwarding (STUN, relay signalling, RTSP-over-WebSocket, UDP hole punching, PSK).
+  免轉送連接埠的 NAT 穿越（STUN、中繼信令、RTSP 經 WebSocket、UDP 打洞、PSK 驗證）。
+- MP-QUIC multi-path for 2D streams with failover and path regain; falls back to ENet against upstream peers.
+  2D 串流的 MP-QUIC 多路徑，含故障轉移與路徑回歸；對方是上游版本時退回 ENet。
+- Adaptive bitrate driven by delay trend and loss classification; Tailscale relay-to-direct recovery.
+  依延遲趨勢與丟包分類的自適應碼率；Tailscale 中繼自動恢復直連。
+
+**Image / 畫面**
+- Frame interpolation (FRUC) on Windows (D3D11: generic compute, NVIDIA Optical Flow, DirectML / NCNN RIFE; Vulkan renderer) and Android (Vulkan, zero-copy).
+  補幀：Windows（D3D11：通用運算、NVIDIA Optical Flow、DirectML／NCNN RIFE；Vulkan 繪製器）與 Android（Vulkan、零複製）。
+- HDR on Android; PyroWave wavelet codec (Windows, manual selection).
+  Android HDR；PyroWave 小波編碼（Windows，需手動選）。
+
+**Steam & host / Steam 與主機**
+- Steam library auto-import with playtime and last-played sorting; switch the host's Steam account from the client.
+  自動匯入 Steam 遊戲庫，可依遊玩時間、最近遊玩排序；從用戶端切換主機的 Steam 帳號。
+- Ending an app closes the Steam game gracefully; Steam Controller native HID passthrough; host self-update from the tray icon; file transfer during a stream.
+  結束程式會正常關閉 Steam 遊戲；Steam Controller 原生 HID 轉發；主機從系統匣自我更新；串流中傳檔。
+- 30 UI languages, including Traditional Chinese.
+  30 種介面語言，含繁體中文。
+
+---
+
+## Architecture / 架構
 
 ```
-┌──────────────────────┐        relay or direct       ┌──────────────────────┐
-│  VipleStream client  │ ◄──────────────────────────► │  VipleStream-Server  │
-│  (PC / Android)      │                              │  (Windows / Linux)   │
-│                      │   1. STUN → public IP        │                      │
-│  RelayClient.java    │   2. relay lookup            │  stun.cpp            │
-│  RelayTcpTunnel.java │   3. HTTP proxy /launch      │  relay.cpp           │
-│  relaytcptunnel.cpp  │   4. TCP tunnel (RTSP)       │  rtsp.cpp            │
-│  relaylookup.cpp     │   5. UDP hole-punch          │  stream.cpp          │
-└──────────────────────┘                              └──────────────────────┘
+┌──────────────────────┐   direct, Tailscale or relay   ┌──────────────────────┐
+│  VipleStream client  │ ◄────────────────────────────► │  VipleStream-Server  │
+│  PC / Android /      │   1. STUN → public address     │  Windows / Linux     │
+│  Steam Frame         │   2. relay lookup              │                      │
+│                      │   3. HTTP proxy /launch        │  + SteamVR driver    │
+│                      │   4. RTSP over WebSocket       │    (Windows, VR)     │
+│                      │   5. UDP hole punch / MP-QUIC  │                      │
+└──────────────────────┘                                └──────────────────────┘
                                       ▲
                                       │ WebSocket (ws:// or wss://)
                               ┌───────┴────────┐
                               │  Relay server  │
                               │ relay_server.py│
-                              │  (Python 3.10+)│
                               └────────────────┘
 ```
 
 ---
 
-## Security notes
+## Security notes / 安全
 
-- **PSK auth** — every relay WebSocket connection must present `HMAC-SHA256(psk, uuid)[:16]`; without the right PSK the relay rejects registration.
-- **No credentials in source** — PSK + relay URL live in `build-config.local.cmd` or app preferences.
-- **Trust-all SSL on Android relay** — the relay WebSocket uses a trust-all `SSLContext` because TLS is terminated by a reverse proxy. The Moonlight ↔ Sunshine game-streaming channel still uses upstream Moonlight's certificate pinning — that part is unchanged.
-- **Sunshine pairing unchanged** — the PIN pairing flow and client cert trust chain are untouched.
-- **Steam credentials** — the host never sees the Steam password; the host only invokes `steam.exe -login <account>`, which uses Steam's own RememberPassword cookie. Accounts that haven't been signed in once on the host are rejected with HTTP 409.
+- **Pairing unchanged:** the PIN pairing flow and client certificate trust chain are the same as upstream.
+  **配對流程不變：** PIN 配對與用戶端憑證信任鏈跟上游相同。
+- **Relay authentication:** every relay connection must present `HMAC-SHA256(psk, uuid)[:16]`. No keys or relay addresses are stored in the source.
+  **中繼驗證：** 每條中繼連線都要提供 `HMAC-SHA256(psk, uuid)[:16]`；原始碼裡沒有任何金鑰或中繼位址。
+- **Android relay TLS:** the relay WebSocket trusts any certificate because TLS is terminated by a reverse proxy; the game stream itself keeps Moonlight's certificate pinning.
+  **Android 中繼 TLS：** 中繼的 WebSocket 不驗憑證（TLS 由反向代理處理）；遊戲串流本身仍是 Moonlight 的憑證綁定。
+- **Steam credentials:** the host never sees your Steam password. Account switching only runs `steam.exe -login <account>`, which relies on Steam's own remembered sign-in.
+  **Steam 帳密：** 主機不會看到 Steam 密碼；切換帳號只執行 `steam.exe -login <帳號>`，靠 Steam 自己記住的登入。
+- **Hotspot keys:** the headset passes its hotspot details to the host over the encrypted control channel; keys are never written to logs.
+  **熱點金鑰：** 頭盔經加密控制通道把熱點資訊交給主機，金鑰不會寫進任何 log。
 
 ---
 
-## Version highlights
+## Version highlights / 版本摘要
 
-| Version | Changes |
+| Version<br>版本 | Highlights<br>重點 |
 |---|---|
-| **2.0.63** | **碼率全自動、依網路環境自適應**：延遲趨勢判斷取代固定門檻，零星丟包不再降碼、跟碼率有關的丟包才降，塞車後慢慢爬回且不會一路往下記；VR 編碼器上限 150 Mbps、以畫質（QP）決定夠不夠。**Tailscale 掉到中繼時自動恢復直連**（不中斷串流）。**頭盔緩衝修好並自動切換 1／2 格**（2.0.25 起緩衝其實沒接上），遠端重複幀約少 80%。全程式碼審查修正一批（補幀卡死、Android 連線中途離開、自訂解析度崩潰、主機清單刪錯台、Windows 更新解到一半等）；**Android 最低改為 Android 9**；開多路徑時 Android 讓行動網路保持待命；Linux server .deb 改依賴 ayatana，Ubuntu 26.04 桌面可直接安裝。另含 2.0.32 熱點網卡看門狗、2.0.33 Linux 安裝包單元檔與授權對話框退避。 |
-| **2.0.31** | **Steam Frame 眼動注視點**：畫面最清楚的區域跟著視線移動（死區 1.5°、每秒 200° 上限）；**剛進遊戲更快穩定**：影像節拍對不上時開場一次推到正確位置，穩定後自動關閉；配戴驗過的 VR 設定改為預設（主機 v2 節拍對準、角速度修正、延後擷取、眼動注視點；頭盔注視點 200%、追蹤鎖相、視野多 3°、每眼 1440），舊版升級時仍是舊預設的值自動換新；串流中途新增網卡或熱點會自動加入多連線；手把震動冗餘發送。 |
-| **2.0.25** | **VR 串流在訊號差時不再卡頓**：新的 VR 快速降碼率（訊號一變差立刻降、穩定後逐步爬回），只有一條連線時先壓在 75 Mbps；頭盔把熱點資訊經加密通道交給主機，主機的 Valve 網卡可自動連上頭盔熱點（金鑰不寫進任何 log）。**Steam Frame 手把以 Frame 手把身分出現**：沒有 Frame 對應的遊戲（例：PowerBeatsVR）由 SteamVR 自己的相容層處理，按鍵恢復正常，Frame 多出的面鍵、十字鍵與肩鍵也會送到主機。**遊玩區與身高正確**：主機改用頭盔真實的遊玩區與坐姿零點（拳擊場地、Pixel Dungeon VR 身高）。**跟 Steam 內建串流共存**：結束我們的串流後立刻可用 Steam 串流（主機偵測到就讓出 SteamVR），切回時自動接手、不再 503。另含 2.0.23 的 PyroWave 小波編碼（Windows）、Steam Controller 串流中熱插拔與一批程式碼審查修正。 |
-| **2.0.22** | **介面上按「結束 APP」會關掉 Steam 遊戲**：以前 Steam 遊戲是透過 Steam 啟動的，host 只關得到啟動網址，遊戲會繼續在主機上跑；現在 host 會先請遊戲正常關閉（可以存檔），10 秒沒關才強制結束（SteamVR 與 Steam 本體不會被動到）。用快捷鍵中斷串流仍然只是斷線、不會關遊戲。**多路徑傳輸穩定性**：修正有線網路在串流第 36 秒左右被誤判丟包、改走 Tailscale（扣掉 picoquic 的假丟包；host 不回 ping 時改用 TCP 探測），以及一批雲端程式碼審查找到的問題（QUIC 中途斷掉時影音改走 UDP 不再凍結、控制訊息分段、路徑恢復與斷路器、寬限期上限、音訊備援埠、FEC 統計重置等）。**Android 翻譯補齊**：27 種語言補上缺漏的 2,700 多條字串。 |
-| **2.0.11** | **修正 2.0.9／2.0.10 從介面點遊戲串流會卡在「正在啟動」**（Windows、Linux 的介面與頭盔的 VR 串流、桌面模式都受影響）。頭盔 VR 介面點遊戲後的「正在啟動」畫面現在會出現；**A+X+扳機+握把**在 VR 串流裡也能結束串流（之前只在桌面模式有效）。修正啟動 VR 遊戲幾秒後串流被誤判「遊戲已結束」而中斷（host 改看 Steam 對該遊戲的執行旗標）。**影片模式縮圖格狀檢視**：影片頁預設改為縮圖方格（可切回清單），頭盔本機的影片在頭盔上產生縮圖、主機分享的影片由主機產生（需要主機也更新到 2.0.11）、YouTube 搜尋結果用 YouTube 的縮圖。 |
-| **2.0.10** | **頭盔 VR 介面操作改善**：搖桿上下直接捲動雷射指著的清單（VR 模式原本捲不動），影片模式選片頁捲動加快；點遊戲後立刻顯示「正在啟動」畫面並擋住重複點擊。**A+X+扳機+握把**結束串流在 Touch 控制器上不再被單手 X 誤觸。**全語系翻譯補齊**：30 種語言全部翻完（含 VR 介面、影片模式、自動更新），修正 2.0.9 主畫面在各語言都顯示英文的問題，英文介面不再夾雜中文，星期依介面語言顯示。**穩定性修正**：合併一批程式碼審查修正（手把輸入跨連線的記憶體錯誤、音訊連線重複關閉、IPv6 私人網段判斷錯誤、影像錯誤修正的恢復流程、控制訊息長度檢查、Linux 音訊初始化失敗時卡死等）。 |
-| **2.0.9** | **頭盔全 VR 介面**：Steam Frame 上的 VipleStream 整個在 VR 裡操作（不再用 SteamVR 劇院裡的平面視窗）：雷射指標點選、扳機＝左鍵、握把＝右鍵、B＝返回、虛擬鍵盤；影片模式在同一個 VR 畫面裡播；VR 串流與桌面模式另開串流程式、進出時換手，不會跳出 SteamVR 介面（桌面模式改用 XR 虛擬螢幕，打字改用虛擬鍵盤）。**VR 控制器結束串流**：按住 A+X+扳機+握把；從 SteamVR 快速選單結束串流也會回到 VipleStream。啟動轉場的提示加上 VR 控制器的按法。**離開區網也連得到主機**：host 在主機資訊裡附上自己的 Tailscale 位址，client 記下來當最後一個嘗試的位址。Steam 收藏庫加上圖示與封面。 |
-| **2.0.2** | **Steam Frame 安裝腳本**：2.0.0／2.0.1 的頭盔版照說明只裝 `.flatpak`，Flatpak 一定開獨立的 PID 沙盒、頭盔的 SteamVR 對不上，程式會自己停用 VR 模式與影片模式，**只剩桌面模式能用**。新增 asset `VipleStream-SteamFrame-Install-X.Y.Z.sh`：安裝 Flatpak、裝一個只拿掉 PID 隔離（Flatpak 其他隔離不變）並開放 SteamVR 路徑的啟動器、自我檢查後加進 Steam 收藏庫；`--uninstall` 移除。停用時的提示改成指向這個捷徑。README 的頭盔安裝步驟改用腳本。 |
-| **2.0.1** | **VR 串流預設開啟**：host 的 `vr_pcvr` 預設改成 `enabled`（2.0.0 漏改、出貨仍是 `disabled`，頭盔的 VR 模式要手動開）；對平面串流沒有影響，VR app 只列給 VR client、SteamVR driver 只在 VR session 開始時才部署，沒裝 SteamVR 的 host 不會宣告 VR。README 加安裝與使用指引；修正 `docs/setup_guide.md` 的 Windows zip 安裝步驟（服務程式要放 `tools\`、要自己加防火牆規則）。 |
-| **2.0.0** | **Steam Frame 頭盔 client（第六件 asset：`-linux-arm64.flatpak`）**：頭盔上的 VipleStream 可以 VR 串流 PC 的 SteamVR 遊戲（host 自帶 SteamVR driver `driver_viplestream`，`vr_pcvr = enabled` 開啟；多連線＋補包跟著往返時間走、姿態預測、半速＋補幀、注視點編碼、進 VR 前量往返時間），也有**頭盔影片模式**（本機／網址／配對 PC 的磁碟機／YouTube 與內建瀏覽器；2D／3D／180°／360°；手把 A／B／扳機／握把、搖桿調遠近）。修正 server HTTPS 在 client 無聲斷線後整個卡死（阻塞式 TLS shutdown）。另附 `VipleStream-Drivers-2.0.0-windows.zip`（VipleSCHid＋SteamVR driver 獨立包）；同時首度發佈 1.5.276（§SELF-UPDATE、§UPDATE-HEAD）。 |
-| **1.5.275** | **§S.19-INIT-FIX 永久凍結修復（host）**：IDR cooldown 初值 `steady_clock::time_point::min()` 相減溢位→「cooldown active」永遠成立；§K.14 在 frame 16 掩蓋，但 encoder 重建（顯示拓樸切換）後 frame_nr 已過 16 → 該 encoder 生命期內 client 的每一次 IDR 請求都被壓制（log：每個 session 的 f=1 都 IDR-SUPPRESS、事故 14 秒 22 次 SUPPRESS／0 次 EMIT），網路閃斷 3 秒後畫面永久凍結直到重連。初值改「一個 cooldown 之前」、比較式改不溢位；刻意不補發被壓掉的請求（client 每 ≤1 s 自行重送，補發會在每次復原後多一張糊 IDR）。host 假 ARP 黑洞 3 秒重現：修前 14 秒不復原，修後鏈路恢復 28 ms 即 IDR-EMIT。**鍵鼠斷續診斷儀器**：client 主迴圈 watchdog `[VIPLE-INPUT-STALL]`（停頓 ≥50 ms 且期間有使用者輸入才記，≥300 ms 抄主執行緒堆疊）、host `[VIPLE-INPUT-GAP]`／`[VIPLE-INPUT-QUEUE-LAG]`／`[VIPLE-INPUT-SENDINPUT-SLOW]`、`§S.19 cooldown armed` 行。**§RSHIFT-DUP-FIX**：IME Right Shift 補償沒排除本事件就是 RShift → host 收到 DOWN,DOWN,UP,UP、中文輸入法切換兩次等於沒切。**§SC-HID-LOG-RATE**：控制器休眠時「Feature SET failed」曾佔 client log 92% 撞 10 MB 上限，改前 8 筆＋每 30 秒一筆。本版同時首度發佈 1.5.272（§K.dd.select 顯示器選擇修復＋§CFG.defer 設定警告救回）、1.5.273（§HID-PROBE 卡死 HID 裝置啟動防護＋§UPNP-DIAG）、1.5.274（§SC-THREAD-OWNER SC-HID 執行緒所有權＋SDL 忽略清單＋連結警告清零）；五件同版號（Linux 兩件自 1.5.270 後首次重建）。 |
-| **1.5.271** | Android client 的 §SC-HID Steam Controller 轉發對齊桌面修法（USB-C 直連／Puck、Nereid 接收器經 OTG）：`0x42` 改標轉發、feature 查詢改 SET 後 1 ms 輪詢 GET＋型別比對＋快取、不回零、`rx stats`／`Feature req` 可觀測 log、活躍介面優先。**藍牙 SC 在 Android 屬平台限制**（系統獨佔 HID over GATT、描述符無 gamepad，Pixel 5 實測只建出 KEYBOARD|MOUSE）——client 偵測到 `0x28DE:0x1303` 時以 toast 明講改用 USB-C／OTG。本版只發 Windows Client／Server＋Android 三件（Windows 重 stamp；Linux 兩件無改動、沿用 1.5.270）。 |
-| **1.5.270** | §SC-HID Steam Controller 原生轉發全傳輸修復（Puck 無線接收器／藍牙／USB 直連，Windows 與 Linux client）。實測定案四根因：client 只放行 0x45 而 Puck/USB 吐的是 `0x42`（同佈局，改標轉發）；feature 回應是一次性暫存器（SET 後 13～21 ms 內要輪詢 GET，舊碼必失）；**host UMDF driver 的 feature IOCTL buffer 慣例誤解**（GET/SET handler 從未執行，Steam 握手 100% 失敗、每 12 秒 zombie 重開——USB 直連時同樣壞，v1.5.263 的「已辨識」只是 path 身分）；部署鏈從不重裝 driver。driver 1.0.5.0：handler 依 vhidmini2 UMDF2 慣例重寫、GET(0x01) 閘控模擬實體一次性語義（400 ms 逾時）、0x42 通道、Feature 0x05 統計；client：Valve report id 家族、feature 1 ms 輪詢＋型別比對、rx/feature 統計 log、Linux hidraw 後備（Ubuntu 26.04 的 SDL 2.32 不回報 usage）；server：per-session 統計、driver 統計；部署：Install 腳本版本不符自動 -Reinstall（以 DLL 簽章者為信任依據）、deploy 停服務後重裝、zip 補 .cer、`sc_hid_driver/diag/` 兩支診斷腳本。實測：Windows Puck 6 分鐘 87,688 筆 0x42 零丟、host Steam 取得真實序號／韌體、零 Read failure；Linux 藍牙與 USB 直連皆通。 |
-| **1.5.269** | §P1-PACE 幀節拍解除 V-Sync 綁定——上游把 frame pacing 綁死在 V-Sync 上，使用者為求低延遲關掉 V-Sync 就連帶失去唯一能吸收網路到達抖動的機制（log 實證「Frame pacing disabled: target 60 Hz with 60 FPS stream」）。代價是 LAN 1080p60 有 25-75% 的 5 秒視窗 p99 幀間隔 > 33ms（＝60Hz 掉兩幀），且限縮到「server 全速交付」的視窗仍有 42.8%。同 codebase 直接對照：179Hz/180fps 那台 `V-sync enabled` + `Frame pacing: target 180 Hz`（節拍開）卡頓 0%，60Hz/60fps 那台兩者皆關卡頓 25-75%。現改為兩者解耦：Pacer 照真實 vblank 發幀（順），Present 仍走 tearing 立即模式（不多等一次交換），串流快過螢幕時維持關閉。另附 client log 分析器 `scripts/benchmark/analyze_client_log.ps1` 與 log tag 字典 `docs/log_tags.md`；修正 `failover_flap_test.ps1` 因 §LOGHYG-NET10 改格式而失效的視訊中斷偵測（改用 NET10 節奏重建，實測消除 200s/32s/8s 三筆假陽性）。 |
-| **1.5.263** | §Q-REGAIN MP-QUIC failover 後路徑自動回歸（standby 回歸 / INACTIVE 復活 / rejected 快取 TTL + 斷路器；server sticky 逃生門 + ABR floor 脫困 + CNXQ 暖機）——修有線 LAN 瞬斷後視訊困在 VPN 備援造成的間歇變糊；§SC-HID 虛擬裝置身分修復（`HID\VID_28DE&PID_1302` HWID/path + product string），host Steam 正式辨識為 Steam Controller，附 read-pipe keepalive 與 session 收尾崩潰修復；SC passthrough 對齊 Linux（hidraw udev rules）與 Android（USB 驅動 + feature tunnel）。五平台同版號釋出。 |
-| **1.5.254** | §Q MP-QUIC 多路徑 failover/failback + Reed–Solomon FEC / jitter buffer 強化（控制通道故障改走 QUIC stream #0）；§FRUC-XPLAT 跨平台補幀（NVIDIA NVOF/RIFE、AMD RADV native RIFE、Android GLES compute）；§ABR 自適應位元率（AIMD + 方向性 IDR + ping-tick 零丟包回升）；§SC-HID Steam Controller HID 轉發；§K AMD VAAPI-VK / RADV 串流修復（nil-buffer 守門、綠線 plane layout、10-bit 黑畫面、Vulkan decode-queue probe）。五平台（Win Client/Server、Android、Linux Client AppImage / Server .deb）同版號釋出。 |
-| **1.5.114** | 每台主機獨立「點擊直接進桌面」開關（PcView 右鍵選單）+ Send file to client picker 改在 user session 內展開（解 LocalSystem 跳 systemprofile\Desktop 警示窗 + cmd 黑窗）。 |
-| **1.5.108** | MP-QUIC multi-path streaming + single-instance guard. Linux Client AppImage + Server `.deb` re-aligned in release. |
-| **1.4.41** | Idle reconcile watchdog (auto-release owner lock after 60s); real zenity `fs_picker` on Linux; CJK font bundle path wired. |
-| **1.4.40** | Vulkan+FRUC budget regression fix; multi-user ownership guards; in-stream bidirectional file transfer; quit-key release graceful exit. |
-| **1.4.0** | Native RIFE Vulkan ships (Path β); Android FRUC port aligned to Windows; NVIDIA Optical Flow Vulkan extension; UI i18n × 27 locales. |
-| **1.3.337** | First Linux ship — Server `.deb` + Client AppImage aligned in release; icon rebrand finalised; FRUC hotkey override fix. |
-| **1.3.314–336** | FFmpeg 8.1 Vulkan HW decode (`h264_vulkan` / `hevc_vulkan` / `av1_vulkan`); Android async-compute FRUC stable on Pixel 5. |
-| **1.3.311–312** | DirectML ONNX models moved out of release zip to on-demand fetch (`%LOCALAPPDATA%\VipleStream\fruc_models\`). |
-| **1.3.295–310** | NVIDIA Aftermath GPU crash decoder; Sunshine Web UI rebrand + 19-locale i18n; SSH one-tap server deploy. |
-| **1.3.250–294** | Native `VK_KHR_video_decode` integration (H.265 / H.264 / AV1); 84 fps PARALLEL stable / 5000+ frames zero device-lost. |
-| **1.3.40–249** | NCNN-Vulkan FRUC backend (cross-vendor RIFE) with custom `rife.Warp` layer. |
-| **1.2.186–189** | HDR end-to-end pipeline on Android (HDR10 swapchain + BT.2020 metadata + ST.2084 PQ encoding). |
-| **1.2.185** | SIGSEGV canary fallback — driver-crash auto fall through to GLES on next launch. |
-| **1.2.165–183** | Android Vulkan FRUC §I.C/D — smart-mode dual present 60→120 FPS + Pixel 9 Mali-G715 driver compatibility chain. |
-| **1.2.150–164** | Android Vulkan FRUC §I.B — AHardwareBuffer zero-copy import. |
-| **1.2.124–149** | DirectML cascade rewrite — native-res model variant cascade (fp16 → fp32 → Generic). |
-| **1.2.108–123** | Steam profile dropdown on PC + Android; Steam-switch async rewrite eliminates "host disconnected" during 9s restart. |
-| **1.2.93–96** | VipleStream rebrand — Sunshine→VipleStream-Server, Moonlight-Qt→VipleStream, Android `com.piinsta`; capability marker added. |
-| **1.2.59–91** | DirectML RIFE backend ships with auto-cascade probe; reset-race fix takes submitFrame 50ms → 3ms. |
-| **1.2.67** | Steam library auto-import (Phase 2) — host scans Steam install + injects games into `/applist`. |
-| **1.1.60–80** | Full NAT traversal (PC + Android) — relay lookup, HTTP proxy, RTSP TCP tunnel, UDP hole-punch. |
-| **1.1.30s–50s** | Initial VipleStream fork; Traditional Chinese UI; NVIDIA Optical Flow FRUC; presets + adaptive bitrate. |
+| **2.0.63** | Automatic bitrate that adapts to the network (delay trend, loss type, QP-based cap); Tailscale relay-to-direct recovery during a stream; headset buffer fixed and switching between 1 and 2 frames automatically; a large batch of review fixes; Android minimum is now Android 9; Linux .deb depends on Ayatana AppIndicator.<br>碼率依網路自動調整（延遲趨勢、丟包類型、以 QP 決定上限）；串流中 Tailscale 從中繼自動恢復直連；頭盔緩衝修好並自動在 1／2 格之間切換；大批程式碼審查修正；Android 最低改為 Android 9；Linux .deb 改依賴 Ayatana AppIndicator。 |
+| **2.0.31** | Eye-tracked foveated encoding on the Steam Frame; faster pacing lock at session start; worn-tested VR settings become the defaults; links added mid-stream join multi-link; redundant haptics.<br>Steam Frame 眼動注視點編碼；開場更快鎖定節拍；配戴驗過的 VR 設定改為預設；串流中新增的連線自動加入多連線；震動冗餘發送。 |
+| **2.0.25** | Fast VR bitrate drop and recovery on weak signal; Frame controllers exposed as Frame controllers; real play area and seated height; coexistence with Steam's built-in streaming.<br>訊號差時 VR 快速降碼與回升；Frame 手把以 Frame 手把身分出現；正確的遊玩區與坐姿高度；與 Steam 內建串流共存。 |
+| **2.0.22** | Ending an app closes the Steam game; multi-path stability fixes; Android translations completed.<br>結束程式會關閉 Steam 遊戲；多路徑穩定性修正；Android 翻譯補齊。 |
+| **2.0.9 – 2.0.11** | Full VR interface on the headset; VR-controller exit combo; reach the host from outside via its Tailscale address; video thumbnails; 30 languages.<br>頭盔全 VR 介面；VR 手把結束串流；離開區網也能用 Tailscale 位址連主機；影片縮圖；30 種語言。 |
+| **2.0.0 – 2.0.2** | Steam Frame client (VR, desktop and video mode) with the host's own SteamVR driver; headset installer script.<br>Steam Frame 用戶端（VR、桌面、影片模式）與主機自帶的 SteamVR driver；頭盔安裝腳本。 |
+| **1.x** | NAT traversal, MP-QUIC multi-path, FRUC, Steam library import and account switching, Steam Controller passthrough, Linux and Android ports.<br>NAT 穿越、MP-QUIC 多路徑、補幀、Steam 遊戲庫匯入與帳號切換、Steam Controller 轉發、Linux 與 Android 版。 |
 
-Full per-version notes: `git log --oneline`.
+Full notes: [Releases](https://github.com/finaltwinsen/VipleStream/releases) and `git log`.
+完整說明見 [Releases](https://github.com/finaltwinsen/VipleStream/releases) 與 `git log`。
 
 ---
 
-## License
+## License / 授權
 
-VipleStream is licensed under **GPL-3.0** ([LICENSE](LICENSE)) — the same license as its upstream components, as required for derivative works:
+VipleStream is licensed under **GPL-3.0** ([LICENSE](LICENSE)), the same license as its upstream components:
+VipleStream 採用 **GPL-3.0**（[LICENSE](LICENSE)），與上游元件相同：
 
 - [Sunshine](https://github.com/LizardByte/Sunshine) — GPL-3.0
 - [Moonlight](https://github.com/moonlight-stream/moonlight-qt) — GPL-3.0
 - [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c) — LGPL-3.0
 
-The `moonlight-common-c` portions remain under LGPL-3.0; everything else (server, Qt client, Android client, build scripts, relay server) is GPL-3.0. Per GPL-3.0 you may run, study, share, and modify the software, including for commercial use, provided derivative works are distributed under the same terms with source code available.
+The `moonlight-common-c` portions remain under LGPL-3.0; everything else (server, Qt client, Android client, build scripts, relay server) is GPL-3.0. The SteamVR driver's hand-skeleton code is adapted from Valve's OpenVR SDK sample (BSD-3-Clause).
+
+`moonlight-common-c` 的部分維持 LGPL-3.0，其餘（server、Qt 用戶端、Android 用戶端、建置腳本、中繼伺服器）是 GPL-3.0。SteamVR driver 的手部骨架程式改寫自 Valve OpenVR SDK 範例（BSD-3-Clause）。

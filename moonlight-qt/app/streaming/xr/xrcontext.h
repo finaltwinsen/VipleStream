@@ -318,6 +318,11 @@ public:
     static constexpr int kToastH = 160;
     void showToast(const QString& text, int durationMs);
 
+    // §VR-LOWBATT：視野右上角的低電量圖示（任何執行緒）。pct < 0＝收起來
+    static constexpr int kBattW = 256;
+    static constexpr int kBattH = 112;
+    void setBatteryIcon(int pct);
+
     // ── §VR-SHELL（頭盔 VR 介面）──
     // 任何執行緒：介面畫面（Options.shellWidth×shellHeight；格式用 shellImageFormat() 才不會在 frame thread 轉換）。
     // 圖換了 frame thread 下一格上傳
@@ -482,6 +487,15 @@ private:
     uint32_t m_ToastImageCount = 0;
     VkImage* m_ToastImages = nullptr;
     bool m_ToastUploaded = false;               // frame thread
+    // §VR-LOWBATT
+    std::mutex m_BattMutex;
+    QImage m_BattImg;                           // m_BattMutex
+    bool m_BattDirty = false;                   // m_BattMutex
+    std::atomic<bool> m_BattVisible{false};
+    XrSwapchain m_BattSwapchain = XR_NULL_HANDLE;
+    uint32_t m_BattImageCount = 0;
+    VkImage* m_BattImages = nullptr;
+    bool m_BattUploaded = false;                // frame thread
     // §VR-SHELL
     std::mutex m_ShellMutex;
     QImage m_ShellImg;                          // m_ShellMutex

@@ -284,6 +284,46 @@ void XrContext::showToast(const QString& text, int durationMs)
     m_ToastUntilMs.store(now + (durationMs > 0 ? durationMs : 3000), std::memory_order_release);
 }
 
+void XrContext::setBatteryIcon(int pct)
+{
+    if (pct < 0) {
+        m_BattVisible.store(false, std::memory_order_release);
+        return;
+    }
+    // 半透明深色圓角底＋紅色電池外框（剩一小格）＋百分比
+    QImage img(kBattW, kBattH, shellImageFormat());
+    img.fill(Qt::transparent);
+    {
+        QPainter p(&img);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setRenderHint(QPainter::TextAntialiasing, true);
+        QPainterPath bg;
+        bg.addRoundedRect(QRectF(2, 2, kBattW - 4, kBattH - 4), 26, 26);
+        p.fillPath(bg, QColor(20, 20, 24, 200));
+        const QColor red(235, 64, 52);
+        QPen pen(red);
+        pen.setWidthF(7.0);
+        p.setPen(pen);
+        p.setBrush(Qt::NoBrush);
+        const QRectF body(22, 30, 104, 52);
+        p.drawRoundedRect(body, 9, 9);
+        p.fillRect(QRectF(body.right() + 3, body.center().y() - 11, 9, 22), red);
+        p.fillRect(QRectF(body.left() + 9, body.top() + 9, 18, body.height() - 18), red);
+        QFont f = p.font();
+        f.setPixelSize(50);
+        f.setBold(true);
+        p.setFont(f);
+        p.setPen(Qt::white);
+        p.drawText(QRectF(140, 0, kBattW - 146, kBattH), Qt::AlignVCenter | Qt::AlignLeft, QString::number(pct) + "%");
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_BattMutex);
+        m_BattImg = img;
+        m_BattDirty = true;
+    }
+    m_BattVisible.store(true, std::memory_order_release);
+}
+
 XrContext::DisplayTiming XrContext::displayTiming() const
 {
     std::lock_guard<std::mutex> lk(m_TimingMutex);
@@ -1314,6 +1354,10 @@ bool XrContext::createQuadSwapchain(QString* error)
                     xrResultStr(m_Instance, r).toUtf8().constData());
     }
 
+    // §VR-LOWBATT：低電量圖示（每種 XR 模式都有）。建不起來只是看不到圖示
+    createSolidSwapchain(static_cast<uint32_t>(kBattW), static_cast<uint32_t>(kBattH), &m_BattSwapchain, &m_BattImages,
+                         &m_BattImageCount, "battery icon");
+
     // §VR-PADMODE：PCVR 提示。建不起來只是看不到提示
     if (m_Options.pcvr) {
         createSolidSwapchain(static_cast<uint32_t>(kToastW), static_cast<uint32_t>(kToastH), &m_ToastSwapchain, &m_ToastImages,
@@ -2216,6 +2260,7 @@ void XrContext::frameThreadMain()
         XrCompositionLayerQuad panelLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerQuad subLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerQuad toastLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-PADMODE
+        XrCompositionLayerQuad battLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-LOWBATT
         float playerEyeAspect = 0.0f;  // §VR-PLAYER：這一格每眼的畫面比例（螢幕高度＝寬÷它）
         if (m_Options.player && m_PlayerScreenDirty.exchange(false, std::memory_order_acq_rel)) {
             m_Screen->setGeometry(m_PlayerDistM.load(std::memory_order_relaxed), m_PlayerFovDeg.load(std::memory_order_relaxed));
@@ -2359,6 +2404,35 @@ void XrContext::frameThreadMain()
                     toastLayer.size = {w, w * static_cast<float>(kToastH) / static_cast<float>(kToastW)};
                     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&toastLayer);
                 }
+            }
+        }
+        // §VR-LOWBATT：低電量圖示——跟著頭（view space），前方 1 m、右 0.30 m、上 0.22 m，寬 0.13 m（約 7.4°）
+        if (fs.shouldRender && m_BattSwapchain != XR_NULL_HANDLE && m_ViewSpace != XR_NULL_HANDLE &&
+            m_BattVisible.load(std::memory_order_acquire) && layerCount < 9) {
+            QImage img;
+            {
+                std::lock_guard<std::mutex> lk(m_BattMutex);
+                if (m_BattDirty) {
+                    img = m_BattImg;
+                    m_BattDirty = false;
+                }
+            }
+            if (!img.isNull() && img.width() == kBattW && img.height() == kBattH) {
+                m_BattUploaded = uploadImage(m_BattSwapchain, m_BattImages, m_BattImageCount, img) || m_BattUploaded;
+            }
+            if (m_BattUploaded) {
+                const float w = 0.13f;
+                battLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                battLayer.space = m_ViewSpace;
+                battLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                battLayer.subImage.swapchain = m_BattSwapchain;
+                battLayer.subImage.imageRect.offset = {0, 0};
+                battLayer.subImage.imageRect.extent = {kBattW, kBattH};
+                battLayer.subImage.imageArrayIndex = 0;
+                battLayer.pose.orientation.w = 1.0f;
+                battLayer.pose.position = {0.30f, 0.22f, -1.0f};
+                battLayer.size = {w, w * static_cast<float>(kBattH) / static_cast<float>(kBattW)};
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&battLayer);
             }
         }
         // §VR-PLAYER（V2）：180°／360°——影像 render thread 改畫進全景材質，這裡每一格依兩眼的姿態畫投影影像
@@ -4936,6 +5010,14 @@ void XrContext::destroyAll()
     m_ToastImages = nullptr;
     m_ToastImageCount = 0;
     m_ToastUploaded = false;
+    if (m_BattSwapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(m_BattSwapchain);
+        m_BattSwapchain = XR_NULL_HANDLE;
+    }
+    delete[] m_BattImages;
+    m_BattImages = nullptr;
+    m_BattImageCount = 0;
+    m_BattUploaded = false;
     if (m_ShellSwapchain != XR_NULL_HANDLE) {
         xrDestroySwapchain(m_ShellSwapchain);
         m_ShellSwapchain = XR_NULL_HANDLE;
