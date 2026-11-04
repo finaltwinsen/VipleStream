@@ -124,7 +124,8 @@ void VrTrackingSender::run()
             havePose = m_Source(&sample);
         }
         else {
-            const double t = std::chrono::duration<double>(now - start).count();
+            // §REVIEW-1104：合成姿態要對到 sampleTimeNs+predictNs，否則 host 不再補這一段，畫面固定落後約 3 個顯示週期
+            const double t = std::chrono::duration<double>(now - start).count() + predictNs * 1e-9;
             vrSyntheticFill(m_Motion, t, &sample);
             if (m_SyntheticHands) {
                 vrSyntheticHands(t, &sample);

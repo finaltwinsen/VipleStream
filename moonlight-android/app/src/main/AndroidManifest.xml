@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- §REVIEW-1104：開多路徑時串流期間要求系統讓行動網路保持待命（requestNetwork）；一般權限，安裝時自動授予 -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -116,10 +118,13 @@
              after launching Game, which happens AFTER onResume(). Theme.NoDisplay
              forbids reaching onResume() without finish() → "did not call finish()
              prior to onResume() completing" crash. Translucent has no such rule. -->
+        <!-- §REVIEW-1104：CLI 串流入口原本對所有 App 開放（任何 App 都能叫它對已配對的電腦開串流）。
+             要求 DUMP 權限：adb shell 有、一般 App 拿不到，adb am start 的測試流程不受影響 -->
         <activity
             android:name=".CliStreamActivity"
             android:noHistory="true"
             android:exported="true"
+            android:permission="android.permission.DUMP"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <!-- Small hack to support launcher shortcuts without relaunching over and over again when the back button is pressed -->
         <activity

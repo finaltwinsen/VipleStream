@@ -16,6 +16,7 @@ extern void quicSetTicketStorePath(const char* path);
 #include <android/log.h>
 
 #include <cpu-features.h>
+#include <net/if.h>  // §REVIEW-1104：if_nametoindex
 
 static OpusMSDecoder* Decoder;
 static OPUS_MULTISTREAM_CONFIGURATION OpusConfig;
@@ -609,6 +610,14 @@ Java_com_limelight_nvstream_jni_MoonBridge_getLocalControlPort(JNIEnv *env, jcla
     return (jint)LocalControlPort;
 }
 
+// §REVIEW-1104：將殘留的 LocalControlPort 歸零，避免跳過 NAT 打洞時 ENet socket 綁死上一場連線的舊 port
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_resetLocalControlPort(JNIEnv *env, jclass clazz) {
+    (void)env;
+    (void)clazz;
+    LocalControlPort = 0;
+}
+
 // VipleStream §Q: inject Android network interface list into native MPQUIC layer.
 // Called from Java before startConnection() so that lcEnumNetInterfaces() returns
 // the real WiFi / Cellular / Ethernet interfaces for QUIC subflow creation.
@@ -648,7 +657,12 @@ Java_com_limelight_nvstream_jni_MoonBridge_setNetInterfaces(JNIEnv *env, jclass 
         // Address family and sockaddr
         interfaces[i].family = familyArr[i];
         interfaces[i].up = true;
-        interfaces[i].index = i;
+        // §REVIEW-1104：用系統的介面編號，不用陣列順序。網路變動時清單會重交，順序會變；
+        // QUIC 的路徑復原靠編號判斷「介面集合變了沒」與「這條 subflow 綁哪張網卡」
+        {
+            unsigned int osIndex = if_nametoindex(interfaces[i].name);
+            interfaces[i].index = osIndex != 0 ? (int)osIndex : 1000 + i;
+        }
 
         // Raw address bytes → sockaddr_storage
         jbyteArray addrBytes = (jbyteArray)(*env)->GetObjectArrayElement(env, addrs, i);

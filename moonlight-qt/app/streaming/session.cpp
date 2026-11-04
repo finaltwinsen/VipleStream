@@ -32,6 +32,7 @@
 
 #ifdef HAVE_FFMPEG
 #include "video/ffmpeg.h"
+#include "backend/tailscalepath.h"
 #endif
 
 #ifdef HAVE_SLVIDEO
@@ -208,6 +209,11 @@ static int inputStallWatchdogProc(void*)
         if (inputPending && s_StallWatchdogHwnd != nullptr && GetForegroundWindow() != s_StallWatchdogHwnd) {
             inputPending = false;   // 使用者在別的視窗操作，主迴圈閒置是正常的
         }
+#else
+        // §REVIEW-1103：非 Windows 沒有 GetLastInputInfo，原本 inputPending 恆真 → 主迴圈在
+        // SDL_WaitEventTimeout 正常閒置（最多 1 s）也成對印 unresponsive／recovered，CachyOS、頭盔 log 被洗版。
+        // 只在卡在我們自己的事件處理（相位不是等事件）時才報。
+        inputPending = (s_LoopPhase.load() >= 0);
 #endif
         if (!inputPending) continue;
         reported = true;
@@ -1292,6 +1298,8 @@ bool Session::initialize(QQuickWindow* qtWindow)
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_VIDEO) failed: %s",
                      SDL_GetError());
+        // §REVIEW-1104：SDL_InitSubSystem 失敗時補發 displayLaunchError，讓 GUI 與 CLI 都能拿到啟動錯誤原因
+        emit displayLaunchError(tr("Failed to initialize video subsystem: %1").arg(QString::fromUtf8(SDL_GetError())));
         return false;
     }
 
@@ -1375,6 +1383,8 @@ bool Session::initialize(QQuickWindow* qtWindow)
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Failed to create window for hardware decode test: %s",
                          SDL_GetError());
+            // §REVIEW-1104：測試視窗兩次建立都失敗時補發 displayLaunchError
+            emit displayLaunchError(tr("Failed to create window for hardware decode test: %1").arg(QString::fromUtf8(SDL_GetError())));
             SDL_QuitSubSystem(SDL_INIT_VIDEO);
             return false;
         }
@@ -1432,7 +1442,9 @@ bool Session::initialize(QQuickWindow* qtWindow)
                     m_Preferences->enableFrameInterpolation ? "ignored" : "off");
     }
     else if (m_Preferences->enableFrameInterpolation) {
-        const bool passive = m_Preferences && m_Preferences->vkfrucPassiveMode;
+        // §REVIEW-1104：只有 rendererSelection == RS_VULKAN 才啟用被動補幀，其他 renderer 視為關閉以與預設位元率計算一致
+        const bool isVulkan = m_Preferences && m_Preferences->rendererSelection == StreamingPreferences::RS_VULKAN;
+        const bool passive = isVulkan && m_Preferences->vkfrucPassiveMode;
         if (passive) {
             m_StreamConfig.fps = m_Preferences->fps;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -1440,8 +1452,10 @@ bool Session::initialize(QQuickWindow* qtWindow)
                         "client 依 recv%% 動態升 ratio (≥70%% 1x, 40-70%% 2x, <40%% 3x)",
                         m_StreamConfig.fps);
         } else {
-            const bool tripleEnv = (qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0)
-                                  || (m_Preferences && m_Preferences->vkfrucEnableTriple);
+            // §REVIEW-1104：只有 RS_VULKAN 且啟用 triple 時才會 Present 三張，移除未開 triple 的 240Hz 自動 /3 並限制 tripleEnv 於 Vulkan
+            const bool tripleEnv = isVulkan
+                                  && ((qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0)
+                                      || m_Preferences->vkfrucEnableTriple);
             // 抓 primary display refresh (best-effort, multi-monitor 可能不準).
             SDL_DisplayMode dispMode;
             int displayHz = 0;
@@ -1453,9 +1467,6 @@ bool Session::initialize(QQuickWindow* qtWindow)
             if (tripleEnv) {
                 frucRatio = 3;
                 reason = "user override (env/pref)";
-            } else if (displayHz >= 240 && m_Preferences->fps / 3 >= 30) {
-                frucRatio = 3;
-                reason = "auto-triple (high-refresh display)";
             }
             // Floor: server fps < 30 不允許, 改回 dual.
             if (m_Preferences->fps / frucRatio < 30 && frucRatio == 3) {
@@ -1474,6 +1485,16 @@ bool Session::initialize(QQuickWindow* qtWindow)
                     "[VIPLE-FRUC] FRUC disabled — requesting %d FPS from server (pass-through).",
                     m_StreamConfig.fps);
     }
+    // §REVIEW-1104：算出的 server fps <= 0 時（含主動補幀整除變 0 或被動／直通偏好本身 <= 0）拒絕開串流
+    if (m_StreamConfig.fps <= 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "Invalid stream FPS: %d (preference FPS: %d)",
+                     m_StreamConfig.fps, m_Preferences ? m_Preferences->fps : 0);
+        emit displayLaunchError(tr("Invalid stream frame rate (%1 FPS).").arg(m_StreamConfig.fps));
+        SDL_DestroyWindow(testWindow);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        return false;
+    }
     // §J.3.e.2.i.8 Phase 1.5c — note: ONLY mode + FRUC pref ON → FRUC pref
     // gives us 30fps stream (FRUC 2x halving above), which happens to match
     // ONLY mode's max stable submission rate on NV 596.84 + RTX 3060.  60fps
@@ -1482,7 +1503,8 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // throttling to match swapchain/display rate; deferred.
 
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
-    m_StreamConfig.autoAdjustBitrate = m_Preferences->autoAdjustBitrate ? 1 : 0;
+    // §ABR-AUTO：送給 server 的是「串流中依網路調整」，不是滑桿跟預設值的那個旗標
+    m_StreamConfig.autoAdjustBitrate = m_Preferences->adaptiveBitrate ? 1 : 0;
     if (m_VrRequested) {
         // M4a 收尾（Frame 實測）：平面串流的位元率（預設 20 Mbps 上下）對 3456x1728@72～120 太低（清晰度差）。
         // VR 用自己的預設：以 3456x1728@90＝150 Mbps 按像素率線性縮放，上限 200 Mbps；只有 CLI 明確帶
@@ -1841,6 +1863,10 @@ bool Session::initialize(QQuickWindow* qtWindow)
         // Populate decoder-dependent properties.
         // Must be done after validateLaunch() since m_StreamConfig is finalized.
         ret = populateDecoderProperties(testWindow);
+        // §REVIEW-1104：populateDecoderProperties（chooseDecoder）失敗時補發 displayLaunchError
+        if (!ret) {
+            emit displayLaunchError(tr("Failed to initialize video decoder."));
+        }
     }
 
     SDL_DestroyWindow(testWindow);
@@ -2260,6 +2286,7 @@ private:
         m_Session->m_ScHid.stop();
         // §VR：tracking 執行緒會呼叫 LiSendVrTracking，必須在 LiStopConnection 之前停
         m_Session->m_VrTracking.stop();
+        TailscalePath::stop();  // §TS-PATH
 
         // Finish cleanup of the connection state
         LiStopConnection();
@@ -2636,8 +2663,9 @@ void Session::updateOptimalWindowDisplayMode()
         int numDisplayModes = SDL_GetNumDisplayModes(displayIndex);
         for (int i = 0; i < numDisplayModes; i++) {
             if (SDL_GetDisplayMode(displayIndex, i, &mode) == 0) {
+                // §REVIEW-1104：取餘數前先確認 m_StreamConfig.fps > 0，避免除以零
                 if (mode.w == desktopMode.w && mode.h == desktopMode.h &&
-                    mode.refresh_rate % m_StreamConfig.fps == 0) {
+                    m_StreamConfig.fps > 0 && mode.refresh_rate % m_StreamConfig.fps == 0) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "Found display mode with desktop resolution: %dx%dx%d",
                                 mode.w, mode.h, mode.refresh_rate);
@@ -2661,8 +2689,9 @@ void Session::updateOptimalWindowDisplayMode()
         for (int i = 0; i < numDisplayModes; i++) {
             if (SDL_GetDisplayMode(displayIndex, i, &mode) == 0) {
                 float modeAspectRatio = (float)mode.w / (float)mode.h;
+                // §REVIEW-1104：取餘數前先確認 m_StreamConfig.fps > 0，避免除以零
                 if (mode.w >= m_ActiveVideoWidth && mode.h >= m_ActiveVideoHeight &&
-                        mode.refresh_rate % m_StreamConfig.fps == 0) {
+                        m_StreamConfig.fps > 0 && mode.refresh_rate % m_StreamConfig.fps == 0) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "Found display mode with video resolution: %dx%dx%d",
                                 mode.w, mode.h, mode.refresh_rate);
@@ -2774,11 +2803,11 @@ void Session::toggleFullscreen()
 
 void Session::notifyMouseEmulationMode(bool enabled)
 {
-    m_MouseEmulationRefCount += enabled ? 1 : -1;
-    SDL_assert(m_MouseEmulationRefCount >= 0);
+    const int refCount = (m_MouseEmulationRefCount += enabled ? 1 : -1);
+    SDL_assert(refCount >= 0);
 
     // We re-use the status update overlay for mouse mode notification
-    if (m_MouseEmulationRefCount > 0) {
+    if (refCount > 0) {
         m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate, "Gamepad mouse mode active\nLong press Start to deactivate");
         m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
     }
@@ -2827,6 +2856,9 @@ void Session::setupXrDesktop()
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-XR] xr-desktop unavailable (%s) - falling back to the flat window (invariant 5)",
                     qUtf8Printable(err));
+        // §REVIEW-1103：createXrContext 一開頭就請 VR 介面讓出 XR；退回平面後原本要等整場結束才歸還，
+        // 這段時間頭盔裡沒有任何 XR 畫面。退回平面就歸還。
+        releaseXrOwner();
         return;
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2873,6 +2905,15 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     xo.preferredRefreshHz = m_XrPcvr ? static_cast<float>(m_Preferences->vrRefreshHz) : 0.0f;
     xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
     xo.pcvrSynth = m_XrPcvr && m_Preferences->vrHalfRate && m_Preferences->vrSynth;  // §VR-SYNTH：只在半速串流時有意義
+    // §VR-BUFFER：頭盔端多緩衝一格吸收到達抖動（設定 vrbufferframes，預設 1）。2.0.25 加了設定與 XR 端，這裡一直漏接，
+    // 緩衝實際上從沒開過——遠端（行動網路，到達抖動約 10 ms＞一格 8.3 ms）每 10 s 約 200 張重複＋200 張跳過（2026-11-04）
+    // §VR-BUFFER-AUTO（11-04）：自動時 swapchain 照最多 2 格配置，實際深度由 XrVideo 依重複幀在 1、2 之間切換
+    xo.pcvrBufferAuto = m_XrPcvr && m_Preferences->vrBufferAuto && m_Preferences->vrBufferFrames > 0;
+    xo.pcvrBufferFrames = m_XrPcvr ? (xo.pcvrBufferAuto ? 2 : m_Preferences->vrBufferFrames) : 0;
+    if (m_XrPcvr && !isRebuild) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LDIAG] buffer=%d%s (effective %d: off while synth is on)", xo.pcvrBufferFrames,
+                    xo.pcvrBufferAuto ? " auto(1-2)" : "", xo.pcvrSynth ? 0 : xo.pcvrBufferFrames);
+    }
     xo.pcvrTrackLock = m_XrPcvr && m_Preferences->vrTrackLock;  // §VR-TRACK-LOCK
     xo.pcvrTrackRelock = xo.pcvrTrackLock && m_Preferences->effectiveTrackRelock();  // §VR-TRACK-RELOCK（--vr-track-relock 優先）
     xo.pcvrLatchDelayUs = m_XrPcvr ? static_cast<uint32_t>(m_Preferences->vrLatchDelayMs * 1000.0) : 0u;  // §VR-LATE-LATCH
@@ -3083,6 +3124,7 @@ void Session::handleXrRebuild(uint32_t generation)
     }
     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-XR] giving up on XR after 3 attempts - falling back to the flat window");
+    releaseXrOwner();  // §REVIEW-1103：同 setupXrDesktop，放棄 XR 就把它還給 VR 介面
     requestDecoderRecreate();
 }
 
@@ -3729,6 +3771,7 @@ bool Session::startConnectionAsync()
                                     m_Computer->activeAddress.port() : 47989;
                 m_Computer->stunAddress = NvAddress(result.stunIp, httpPort);
                 m_Computer->stunNatType = result.natType;
+                m_Computer->stunPunchPort = result.stunPort;  // §REVIEW-1104：打洞用 relay 回報的實際埠
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-NAT] Relay provided endpoint: %s:%d",
                             qPrintable(result.stunIp), httpPort);
@@ -3764,7 +3807,10 @@ bool Session::startConnectionAsync()
             // intercept on Sunshine lives on the ENet control port = HTTP port + 10
             // (see Sunshine/src/stream.h CONTROL_PORT = 10). Previously this sent
             // SYNs to the HTTP port where they were silently dropped.
-            uint16_t controlPort = static_cast<uint16_t>(m_Computer->stunAddress.port() + 10);
+            // §REVIEW-1104（使用者決策 B）：有 STUN 回報的實際埠就打它（NAT 換埠時 +10 會打錯）；舊版 server 沒給才退回 +10
+            uint16_t controlPort = m_Computer->stunPunchPort != 0 ?
+                                   m_Computer->stunPunchPort :
+                                   static_cast<uint16_t>(m_Computer->stunAddress.port() + 10);
 
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] Attempting hole punch to %s:%d (NAT: %s)",
@@ -3932,6 +3978,9 @@ bool Session::startConnectionAsync()
         // listener.
         return false;
     }
+
+    // §TS-PATH：host 走 Tailscale（100.64.0.0/10）時在背景監看路徑；掉到中繼就由輕到重嘗試恢復直連（直連時什麼都不做）
+    TailscalePath::start(m_Computer->activeAddress.address());
 
     // VipleStream §N — 啟動 in-stream file transfer client。對應 server tray
     // Send/Receive 行為，每 2s 對 host /transfer/poll 拿命令、透過 OSD overlay
@@ -4107,7 +4156,10 @@ void Session::flushWindowEvents()
     SDL_Event flushEvent = {};
     flushEvent.type = SDL_USEREVENT;
     flushEvent.user.code = SDL_CODE_FLUSH_WINDOW_EVENT_BARRIER;
-    SDL_PushEvent(&flushEvent);
+    // §REVIEW-1103：推不進去（佇列滿或被 filter 擋）時 ref 永遠不會歸零，之後所有視窗事件都被丟掉
+    if (SDL_PushEvent(&flushEvent) <= 0) {
+        m_FlushingWindowEventsRef--;
+    }
 }
 
 void Session::setShouldExit(bool quitHostApp)
@@ -4201,12 +4253,39 @@ void Session::pollScHidHotplug()
         return;
     }
 
+#ifdef Q_OS_WIN32
+    // §REVIEW-1104：不在 SDL 主迴圈同步等待 HidProbe::refresh()，改由工作執行緒探測完再於後續輪詢 prepare
+    static std::atomic<bool> s_HotplugProbeRunning {false};
+    static std::atomic<bool> s_HotplugProbeReady {false};
+    if (s_HotplugProbeRunning.load()) {
+        return;
+    }
+    if (!s_HotplugProbeReady.exchange(false)) {
+        if (!m_ScHid.hidDevicesChanged()) {
+            return;
+        }
+        s_HotplugProbeRunning.store(true);
+        struct ProbeTask {
+            static int SDLCALL run(void*) {
+                HidProbe::refresh();
+                s_HotplugProbeReady.store(true);
+                s_HotplugProbeRunning.store(false);
+                return 0;
+            }
+        };
+        SDL_Thread* probeThread = SDL_CreateThread(&ProbeTask::run, "ScHidHotplugProbe", nullptr);
+        if (probeThread != nullptr) {
+            SDL_DetachThread(probeThread);
+        }
+        else {
+            s_HotplugProbeRunning.store(false);
+        }
+        return;
+    }
+#else
     if (!m_ScHid.hidDevicesChanged()) {
         return;
     }
-#ifdef Q_OS_WIN32
-    // 新接上的裝置沒被 validateLaunch 探測過；卡死的 Puck 會讓列舉在核心永久阻塞
-    HidProbe::refresh();
 #endif
     if (!m_ScHid.prepare(true /* quiet */)) {
         return;
@@ -4404,19 +4483,26 @@ void Session::exec()
     // Switch to async logging mode when we enter the SDL loop
     StreamUtils::enterAsyncLoggingMode();
 
-    // 零音訊偵測：開串 60 秒後 m_AudioSampleCount 仍為 0 就警告一次。
-    // 計數來源與結束 stats 的「No audio traffic was ever received」判斷
-    // 同源（audio 解碼回呼），讓使用者當下就知道是 server 端擷取異常，
-    // 不必等串流結束才發現。主執行緒 Qt event loop 在串流期間被 starve，
-    // QTimer 不會動，所以掛在 SDL loop 上（WaitEventTimeout 保證至少每秒
-    // 迭代一次，逾時 continue 也會回到迴圈頂端）。
+    // 零音訊紀錄：開串 60 秒後 m_AudioSampleCount 仍為 0 只寫一行 log。
+    // server 在主機沒出聲時本來就不送音訊封包，所以「沒收到」多半只是
+    // 靜音，不再拿它跳警告（§AUD-MON 之前的作法，誤報太多）。
+    // 主執行緒 Qt event loop 在串流期間被 starve，QTimer 不會動，所以掛在
+    // SDL loop 上（WaitEventTimeout 保證至少每秒迭代一次）。
     const Uint32 audioSilenceCheckTime = SDL_GetTicks() + 60000;
     bool audioSilenceChecked = false;
-    // overlay 顯示 15 秒後自動收掉（OverlayStatusUpdate 是共用 slot，收掉前
-    // 比對文字仍是自己寫的那份，避免誤關別人的通知）。
-    static const char* k_ZeroAudioOverlayMsg =
-        "⚠ 未收到任何音訊——伺服器端音訊擷取可能異常";
-    Uint32 audioSilenceOverlayHideTime = 0;
+    // §AUD-MON：server 比對播放裝置的音量計與擷取結果，真的擷取不到才回報
+    // （LiGetServerAudioStatus）。這裡只在狀態變化時顯示提示；舊 server 不回報
+    // 就永遠不顯示。overlay 到時自動收掉（OverlayStatusUpdate 是共用 slot，
+    // 收掉前比對文字仍是自己寫的那份，避免誤關別人的通知）。
+    static const char* k_AudioStalledOverlayMsg =
+        "⚠ 主機正在播放聲音，但伺服器擷取不到（已自動重試）";
+    static const char* k_AudioInitFailedOverlayMsg =
+        "⚠ 主機的音訊擷取無法啟動，這次串流沒有聲音";
+    static const char* k_AudioRecoveredOverlayMsg =
+        "音訊擷取已恢復";
+    const char* audioOverlayMsg = nullptr;
+    Uint32 audioOverlayHideTime = 0;
+    uint32_t audioStatusSeq = 0;
 
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
@@ -4451,26 +4537,56 @@ void Session::exec()
         if (!audioSilenceChecked && SDL_TICKS_PASSED(SDL_GetTicks(), audioSilenceCheckTime)) {
             audioSilenceChecked = true;
             if (m_AudioSampleCount == 0) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-AUD] No audio traffic received in first 60 seconds — "
-                            "server-side audio capture may be broken");
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-AUD] No audio traffic in the first 60 seconds "
+                            "(host silent, or capture broken — server status %d)",
+                            LiGetServerAudioStatus(nullptr));
+            }
+        }
+        {
+            uint32_t seq;
+            int audioStatus = LiGetServerAudioStatus(&seq);
+            if (seq != audioStatusSeq) {
+                audioStatusSeq = seq;
+                const char* msg = nullptr;
+                Uint32 showMs = 0;
+                switch (audioStatus) {
+                case LI_AUDIO_STATUS_STALLED:
+                    msg = k_AudioStalledOverlayMsg;
+                    showMs = 15000;
+                    break;
+                case LI_AUDIO_STATUS_INIT_FAILED:
+                    msg = k_AudioInitFailedOverlayMsg;
+                    showMs = 15000;
+                    break;
+                case LI_AUDIO_STATUS_RECOVERED:
+                    msg = k_AudioRecoveredOverlayMsg;
+                    showMs = 5000;
+                    break;
+                default:
+                    break;
+                }
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-AUD-MON] server audio status %d", audioStatus);
                 // gate 同 clConnectionStatusUpdate：尊重 connectionWarnings
                 // 偏好、不蓋掉 mouse emulation 的常駐提示。
-                if (m_Preferences->connectionWarnings && m_MouseEmulationRefCount == 0) {
-                    m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
-                                                       k_ZeroAudioOverlayMsg);
+                if (msg != nullptr && m_Preferences->connectionWarnings && m_MouseEmulationRefCount == 0) {
+                    m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate, msg);
                     m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
-                    audioSilenceOverlayHideTime = SDL_GetTicks() + 15000;
+                    audioOverlayMsg = msg;
+                    audioOverlayHideTime = SDL_GetTicks() + showMs;
                 }
             }
         }
-        if (audioSilenceOverlayHideTime != 0 &&
-            SDL_TICKS_PASSED(SDL_GetTicks(), audioSilenceOverlayHideTime)) {
-            audioSilenceOverlayHideTime = 0;
-            if (strcmp(m_OverlayManager.getOverlayText(Overlay::OverlayStatusUpdate),
-                       k_ZeroAudioOverlayMsg) == 0) {
+        if (audioOverlayHideTime != 0 &&
+            SDL_TICKS_PASSED(SDL_GetTicks(), audioOverlayHideTime)) {
+            audioOverlayHideTime = 0;
+            if (audioOverlayMsg != nullptr &&
+                strcmp(m_OverlayManager.getOverlayText(Overlay::OverlayStatusUpdate),
+                       audioOverlayMsg) == 0) {
                 m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
             }
+            audioOverlayMsg = nullptr;
         }
 #if SDL_VERSION_ATLEAST(2, 0, 18) && !defined(STEAM_LINK)
         // SDL 2.0.18 has a proper wait event implementation that uses platform

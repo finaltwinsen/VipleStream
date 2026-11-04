@@ -74,6 +74,12 @@ public class ShieldCaptureProvider extends InputCaptureProvider {
     }
 
     @Override
+    public void destroy() {
+        // §REVIEW-1104：Home 離開不會走到 showCursor，這裡把 NVIDIA 游標可見性還原
+        showCursor();
+    }
+
+    @Override
     public boolean eventHasRelativeMouseAxes(MotionEvent event) {
         // All mouse events should use relative axes, even if they are zero. This avoids triggering
         // cursor jumps if we get an event with no associated motion, like ACTION_DOWN or ACTION_UP.

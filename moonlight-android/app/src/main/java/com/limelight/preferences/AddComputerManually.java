@@ -50,8 +50,13 @@ public class AddComputerManually extends Activity {
         }
 
         public void onServiceDisconnected(ComponentName className) {
-            joinAddThread();
-            managerBinder = null;
+            joinAddThread(); /*
+
+
+
+
+            }
+            */ managerBinder = null;
         }
     };
 
@@ -76,7 +81,8 @@ public class AddComputerManually extends Activity {
                     // Compare prefix to ensure it's the same
                     boolean addressMatches = true;
                     for (int i = 0; i < addr.getNetworkPrefixLength(); i++) {
-                        if ((ifaceAddrBytes[i / 8] & (1 << (i % 8))) != (targetAddrBytes[i / 8] & (1 << (i % 8)))) {
+                        // §REVIEW-1104：網路位址前綴應由高位元（MSB）開始比對，修正原由低位元（LSB）比對導致非 8 倍數 prefix 判斷錯誤
+                        if ((ifaceAddrBytes[i / 8] & (0x80 >> (i % 8))) != (targetAddrBytes[i / 8] & (0x80 >> (i % 8)))) {
                             addressMatches = false;
                             break;
                         }
@@ -259,8 +265,21 @@ public class AddComputerManually extends Activity {
         super.onDestroy();
 
         if (managerBinder != null) {
-            joinAddThread();
-            unbindService(serviceConnection);
+
+
+
+
+            // §REVIEW-1104：onDestroy 僅中斷加入執行緒，不在主執行緒阻塞 join 避免連線測試與 DNS 逾時造成 ANR
+            if (addThread != null) {
+                addThread.interrupt();
+                addThread = null; } /*
+            }
+
+
+
+
+            }
+            */ unbindService(serviceConnection);
         }
     }
 

@@ -22,7 +22,9 @@ import com.limelight.LimeLog;
 public class JmDNSDiscoveryAgent extends MdnsDiscoveryAgent implements ServiceListener {
     private static final String SERVICE_TYPE = "_nvstream._tcp.local.";
     private WifiManager.MulticastLock multicastLock;
-    private Thread discoveryThread;
+    // §REVIEW-1104：加上 volatile 與 discoveryLock 同步鎖，確保 start/stopDiscovery 執行緒安全
+    private volatile Thread discoveryThread;
+    private final Object discoveryLock = new Object();
     private HashSet<String> pendingResolution = new HashSet<>();
     
     // The resolver factory's instance member has a static lifetime which
@@ -167,6 +169,8 @@ public class JmDNSDiscoveryAgent extends MdnsDiscoveryAgent implements ServiceLi
     }
     
     public void startDiscovery(final int discoveryIntervalMs) {
+        // §REVIEW-1104：使用 discoveryLock 同步包覆停止舊執行緒、鎖定狀態變更及啟動新執行緒，防止狀態競爭
+        synchronized (discoveryLock) {
         // Kill any existing discovery before starting a new one
         stopDiscovery();
 
@@ -222,11 +226,16 @@ public class JmDNSDiscoveryAgent extends MdnsDiscoveryAgent implements ServiceLi
         };
         discoveryThread.setName("mDNS Discovery Thread");
         discoveryThread.start();
+        }
     }
     
     public void stopDiscovery() {
+        // §REVIEW-1104：在 discoveryLock 保護下安全釋放 multicastLock 並中斷執行緒，清空 pendingResolution
+        synchronized (discoveryLock) {
         // Release the multicast lock to stop receiving mDNS traffic
-        multicastLock.release();
+        if (multicastLock.isHeld()) {
+            multicastLock.release();
+        }
 
         // Remove our listener from the set
         synchronized (listeners) {
@@ -237,6 +246,11 @@ public class JmDNSDiscoveryAgent extends MdnsDiscoveryAgent implements ServiceLi
         if (discoveryThread != null) {
             discoveryThread.interrupt();
             discoveryThread = null;
+        }
+
+        synchronized (pendingResolution) {
+            pendingResolution.clear();
+        }
         }
     }
 
@@ -260,6 +274,12 @@ public class JmDNSDiscoveryAgent extends MdnsDiscoveryAgent implements ServiceLi
     @Override
     public void serviceRemoved(ServiceEvent event) {
         LimeLog.info("mDNS: Machine disappeared: "+event.getInfo().getName());
+        // §REVIEW-1104：服務消失時將名稱自 pendingResolution 移除，避免輪詢重試造成延遲
+        if (event.getInfo() != null && event.getInfo().getName() != null) {
+            synchronized (pendingResolution) {
+                pendingResolution.remove(event.getInfo().getName());
+            }
+        }
     }
 
     @Override

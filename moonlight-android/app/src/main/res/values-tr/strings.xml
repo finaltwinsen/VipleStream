@@ -337,4 +337,6 @@
     <string name="steam_switch_error_taskgone">Değiştirme görevi ana bilgisayarda kayboldu</string>
     <string name="steam_switch_error_timeout">Değiştirme zaman aşımına uğradı (&gt;150 sn boyunca sunucu son duruma ulaşmadı)</string>
     <string name="steam_switch_account_unavailable">Bu hesabın ana bilgisayarda kayıtlı kimlik bilgisi yok. Önce ana bilgisayarda bir kez oturum açın, ardından tekrar deneyin.</string>
+    <string name="title_show_advanced">Gelişmiş ve deneysel seçenekleri göster</string>
+    <string name="summary_show_advanced">Sorun giderme ve test seçenekleri. Gizli seçenekler mevcut değerlerini korur.</string>
 </resources>

@@ -176,32 +176,36 @@ namespace platf::keyboard {
       auto utf8_str = boost::locale::conv::to_utf<wchar_t>(utf8, utf8 + size, "UTF-8");
       /* Converting to UTF-32 */
       auto utf32_str = boost::locale::conv::utf_to_utf<char32_t>(utf8_str);
-      /* To HEX string */
-      auto hex_unicode = to_hex(utf32_str);
-      BOOST_LOG(debug) << "Unicode, typing U+"sv << hex_unicode;
+      // §REVIEW-1103：一次多個字元時，原本把所有碼點的十六進位串成一個 U+ 序列，打出錯的字；
+      // 改成每個字元各做一次 Ctrl+Shift+U＋hex。
+      for (const auto codepoint : utf32_str) {
+        /* To HEX string */
+        auto hex_unicode = to_hex(std::basic_string<char32_t>(1, codepoint));
+        BOOST_LOG(debug) << "Unicode, typing U+"sv << hex_unicode;
 
-      /* pressing <CTRL> + <SHIFT> + U */
-      (*raw->keyboard).press(0xA2);  // LEFTCTRL
-      (*raw->keyboard).press(0xA0);  // LEFTSHIFT
-      (*raw->keyboard).press(0x55);  // U
-      (*raw->keyboard).release(0x55);  // U
+        /* pressing <CTRL> + <SHIFT> + U */
+        (*raw->keyboard).press(0xA2);  // LEFTCTRL
+        (*raw->keyboard).press(0xA0);  // LEFTSHIFT
+        (*raw->keyboard).press(0x55);  // U
+        (*raw->keyboard).release(0x55);  // U
 
-      /* input each HEX character */
-      for (auto &ch : hex_unicode) {
-        auto key_str = "KEY_"s + ch;
-        auto keycode = libevdev_event_code_from_name(EV_KEY, key_str.c_str());
-        auto wincode = key_mappings.find(keycode);
-        if (keycode == -1 || wincode == key_mappings.end()) {
-          BOOST_LOG(warning) << "Unicode, unable to find keycode for: "sv << ch;
-        } else {
-          (*raw->keyboard).press(wincode->second);
-          (*raw->keyboard).release(wincode->second);
+        /* input each HEX character */
+        for (auto &ch : hex_unicode) {
+          auto key_str = "KEY_"s + ch;
+          auto keycode = libevdev_event_code_from_name(EV_KEY, key_str.c_str());
+          auto wincode = key_mappings.find(keycode);
+          if (keycode == -1 || wincode == key_mappings.end()) {
+            BOOST_LOG(warning) << "Unicode, unable to find keycode for: "sv << ch;
+          } else {
+            (*raw->keyboard).press(wincode->second);
+            (*raw->keyboard).release(wincode->second);
+          }
         }
-      }
 
-      /* releasing <SHIFT> and <CTRL> */
-      (*raw->keyboard).release(0xA0);  // LEFTSHIFT
-      (*raw->keyboard).release(0xA2);  // LEFTCTRL
+        /* releasing <SHIFT> and <CTRL> */
+        (*raw->keyboard).release(0xA0);  // LEFTSHIFT
+        (*raw->keyboard).release(0xA2);  // LEFTCTRL
+      }
     }
   }
 }  // namespace platf::keyboard

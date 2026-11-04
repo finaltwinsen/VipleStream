@@ -61,7 +61,11 @@ public final class VkBackend implements IFrucBackend {
      * "no backend allocated"; non-zero MUST be paired with exactly one
      * {@link #nativeDestroy(long)} call before this object is GC'd.
      */
-    private long nativeHandle = 0;
+    // §REVIEW-1104：volatile 確保多執行緒可見性，搭配 renderLock 保護生命週期
+    private volatile long nativeHandle = 0;
+    private final Object renderLock = new Object();
+    private static final int VK_FRAMES_IN_FLIGHT = 2;
+    private final java.util.ArrayDeque<Image> pendingImages = new java.util.ArrayDeque<>();
 
     // §I.B.2c.2: ImageReader receives MediaCodec output as AHardwareBuffer-backed
     // {@link Image} objects. Phase B.2c.3 imports each one as a VkImage via
@@ -224,6 +228,9 @@ public final class VkBackend implements IFrucBackend {
             return null;
         }
 
+        // §REVIEW-1104：nativeInit 成功後補送 qualityLevel，避免呼叫端在 init 前設定的值未下傳
+        nativeSetQualityLevel(nativeHandle, this.qualityLevel);
+
         if (!setupImageReader(w, h)) {
             Log.w(TAG, "ImageReader setup failed; declining backend → fallback to GLES");
             destroyImageReader();
@@ -272,7 +279,8 @@ public final class VkBackend implements IFrucBackend {
             // 3 buffers: matches MediaCodec's typical output queue depth.
             // Larger eats memory; smaller can stall the encoder.
             imageReader = ImageReader.newInstance(
-                w, h, ImageFormat.PRIVATE, /*maxImages=*/3,
+                // §REVIEW-1104：maxImages 提高至 5（VK_FRAMES_IN_FLIGHT=2 加解碼器輸出緩衝 3），避免保留 in-flight 影格時 BufferQueue 耗盡卡死
+                w, h, ImageFormat.PRIVATE, /*maxImages=*/5,
                 HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE);
 
             imageReaderThread = new HandlerThread("VipleStream-VkImageReader");
@@ -283,6 +291,7 @@ public final class VkBackend implements IFrucBackend {
                 @Override
                 public void onImageAvailable(ImageReader reader) {
                     Image img = null;
+                    boolean keepImg = false;  // §REVIEW-1104：交給 pendingImages 保管的那張不在 finally 關掉
                     try {
                         img = reader.acquireLatestImage();
                         if (img == null) return;
@@ -292,32 +301,49 @@ public final class VkBackend implements IFrucBackend {
                         // sampler view and renders the fullscreen video
                         // sample shader. Falls back to clear-render if the
                         // import or pipeline isn't ready.
-                        if (nativeHandle != 0) {
-                            HardwareBuffer hb = img.getHardwareBuffer();
-                            int rc = nativeRenderFrame(nativeHandle, hb);
-                            if (rc != 0 && imageReaderFramesSeen <= 5) {
-                                Log.w(TAG, "nativeRenderFrame returned " + rc
-                                           + " on frame " + imageReaderFramesSeen);
+                        boolean hasHb = false;
+                        // §REVIEW-1104：使用共同鎖 renderLock 保護 nativeHandle 與渲染生命週期，避免在 destroy 釋放時並行呼叫
+                        synchronized (renderLock) {
+                            if (nativeHandle != 0) {
+                                HardwareBuffer hb = img.getHardwareBuffer();
+                                hasHb = (hb != null);
+                                int rc = nativeRenderFrame(nativeHandle, hb);
+                                if (rc != 0 && imageReaderFramesSeen <= 5) {
+                                    Log.w(TAG, "nativeRenderFrame returned " + rc
+                                               + " on frame " + imageReaderFramesSeen);
+                                }
+                                if (rc == 0) {
+                                    updateOutputFps();
+                                    // §REVIEW-1104：ring 模式下 GPU 尚未取樣完畢，保留最近 VK_FRAMES_IN_FLIGHT 張 Image，待 slot fence 完成再 close()，避免 MediaCodec 覆寫 buffer
+                                    pendingImages.add(img);
+                                    keepImg = true;
+                                    while (pendingImages.size() > VK_FRAMES_IN_FLIGHT) {
+                                        Image oldImg = pendingImages.poll();
+                                        if (oldImg != null) {
+                                            try { oldImg.close(); } catch (Throwable ignored) {}
+                                        }
+                                    }
+                                }
+                                if (hb != null) hb.close();
                             }
-                            if (rc == 0) updateOutputFps();
-                            if (hb != null) hb.close();
                         }
                         if (imageReaderFramesSeen <= 3 || imageReaderFramesSeen % 60 == 0) {
                             Log.i(TAG, "ImageReader frame #" + imageReaderFramesSeen
                                        + " size=" + img.getWidth() + "x" + img.getHeight()
-                                       + " hwBuffer=" + (img.getHardwareBuffer() != null)
+                                       // §REVIEW-1104：改印前面已取得的 hasHb，避免重複呼叫 getHardwareBuffer() 造成短暫 AHardwareBuffer 引用洩漏
+                                        + " hwBuffer=" + hasHb
                                        + " outputFps=" + currentOutputFps);
                         }
                     } catch (Throwable t) {
                         Log.e(TAG, "onImageAvailable threw: " + t, t);
                     } finally {
-                        if (img != null) img.close();
+                        if (img != null && !keepImg) img.close();
                     }
                 }
             }, imageReaderHandler);
 
             Log.i(TAG, "ImageReader created: " + w + "x" + h
-                       + " ImageFormat.PRIVATE maxImages=3 usage=GPU_SAMPLED_IMAGE");
+                       + " ImageFormat.PRIVATE maxImages=5 usage=GPU_SAMPLED_IMAGE");
             return true;
         } catch (Throwable t) {
             Log.e(TAG, "ImageReader init threw: " + t, t);
@@ -365,9 +391,22 @@ public final class VkBackend implements IFrucBackend {
             imageReader = null;
         }
         if (imageReaderThread != null) {
-            try { imageReaderThread.quitSafely(); } catch (Throwable ignored) {}
+            try {
+                imageReaderThread.quitSafely();
+                // §REVIEW-1104：等待 ImageReader 執行緒完全退出，確保正在執行的 onImageAvailable 退出，避免 destroy 後並行 UAF
+                imageReaderThread.join();
+            } catch (Throwable ignored) {}
             imageReaderThread = null;
             imageReaderHandler = null;
+        }
+        // §REVIEW-1104：清理保留中的 in-flight Image 資源
+        synchronized (renderLock) {
+            while (!pendingImages.isEmpty()) {
+                Image pendingImg = pendingImages.poll();
+                if (pendingImg != null) {
+                    try { pendingImg.close(); } catch (Throwable ignored) {}
+                }
+            }
         }
         Log.i(TAG, "ImageReader destroyed (frames seen during this session: "
                    + imageReaderFramesSeen + ")");
@@ -386,13 +425,16 @@ public final class VkBackend implements IFrucBackend {
     @Override
     public void destroy() {
         destroyImageReader();
-        if (nativeHandle != 0) {
-            try {
-                nativeDestroy(nativeHandle);
-            } catch (Throwable t) {
-                Log.e(TAG, "nativeDestroy threw: " + t, t);
+        // §REVIEW-1104：與 nativeRenderFrame 使用同一把鎖，避免釋放 handle 時並行呼叫 nativeDestroy
+        synchronized (renderLock) {
+            if (nativeHandle != 0) {
+                try {
+                    nativeDestroy(nativeHandle);
+                } catch (Throwable t) {
+                    Log.e(TAG, "nativeDestroy threw: " + t, t);
+                }
+                nativeHandle = 0;
             }
-            nativeHandle = 0;
         }
         initialized = false;
     }
@@ -512,10 +554,11 @@ public final class VkBackend implements IFrucBackend {
 
     /** Native init returned (success or graceful null) — clear canary. */
     public static void disarmCanary(Context context) {
+        // §REVIEW-1104：改用 commit() 同步落碟，避免非同步寫入未落碟前行程終止導致下次啟動誤判永久鎖死 GLES
         context.getSharedPreferences(CANARY_PREFS_NAME, Context.MODE_PRIVATE)
                .edit()
                .putBoolean(CANARY_KEY_ARMED, false)
-               .apply();
+               .commit();
     }
 
     private static int readVersionCode(Context context) {

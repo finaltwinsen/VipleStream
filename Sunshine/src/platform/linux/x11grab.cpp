@@ -405,6 +405,11 @@ namespace platf {
       if (streamedMonitor != -1) {
         BOOST_LOG(info) << "Configuring selected display ("sv << streamedMonitor << ") to stream"sv;
         screen_res_t screenr {x11::rr::GetScreenResources(xdisplay.get(), xwindow)};
+        // §REVIEW-1103：沒有 RandR 擴充時回 NULL
+        if (!screenr) {
+          BOOST_LOG(error) << "XRRGetScreenResources failed; cannot select display ["sv << streamedMonitor << ']';
+          return -1;
+        }
         int output = screenr->noutput;
 
         output_info_t result;
@@ -516,6 +521,11 @@ namespace platf {
       auto img = (x11_img_t *) img_out.get();
 
       XImage *x_img {x11::GetImage(xdisplay.get(), xwindow, offset_x, offset_y, width, height, AllPlanes, ZPixmap)};
+      // §REVIEW-1103：擷取範圍超出視窗（解析度剛變小）時 XGetImage 回 NULL
+      if (!x_img) {
+        BOOST_LOG(warning) << "XGetImage failed; reinitializing capture"sv;
+        return capture_e::reinit;
+      }
       img->frame_timestamp = std::chrono::steady_clock::now();
 
       img->width = x_img->width;
@@ -779,6 +789,10 @@ namespace platf {
 
     auto xwindow = DefaultRootWindow(xdisplay.get());
     screen_res_t screenr {x11::rr::GetScreenResources(xdisplay.get(), xwindow)};
+    // §REVIEW-1103：沒有 RandR 擴充時回 NULL
+    if (!screenr) {
+      return {};
+    }
     int output = screenr->noutput;
 
     int monitor = 0;
@@ -841,6 +855,10 @@ namespace platf {
       auto display = (xdisplay_t::pointer) ctx.get();
 
       xcursor_t xcursor = fix::GetCursorImage(display);
+      // §REVIEW-1103：X server 回錯誤時是 NULL
+      if (!xcursor) {
+        return;
+      }
 
       if (img.serial != xcursor->cursor_serial) {
         auto buf_size = xcursor->width * xcursor->height * sizeof(int);

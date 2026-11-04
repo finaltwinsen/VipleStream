@@ -2,6 +2,7 @@ package com.limelight;
 
 import java.io.IOException;
 import java.io.StringReader;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
@@ -10,6 +11,7 @@ import com.limelight.binding.PlatformBinding;
 import com.limelight.computers.ComputerManagerListener;
 import com.limelight.computers.ComputerManagerService;
 import com.limelight.grid.AppGridAdapter;
+import com.limelight.grid.assets.CachedAppAssetLoader;
 import com.limelight.nvstream.http.ComputerDetails;
 import com.limelight.nvstream.http.HostHttpResponseException;
 import com.limelight.nvstream.http.NvApp;
@@ -49,6 +51,7 @@ import android.widget.AdapterView;
 import android.widget.AdapterView.OnItemClickListener;
 import android.widget.ArrayAdapter;
 import android.widget.ImageView;
+import android.widget.ProgressBar;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -64,11 +67,16 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
 
     private ComputerDetails computer;
     private ComputerManagerService.ApplistPoller poller;
+    private final Object appListPollerLock = new Object();
+    private boolean appListPollerStarted;
     private SpinnerDialog blockingLoadSpinner;
     private String lastRawApplist;
     private int lastRunningAppId;
     private boolean suspendGridUpdates;
-    private boolean inForeground;
+    // §REVIEW-1104：將 inForeground 設為 volatile，並新增 contextMenuAppId 與完整應用清單 allApps
+    private volatile boolean inForeground;
+    private int contextMenuAppId;
+    private final ArrayList<AppObject> allApps = new ArrayList<>();
     private boolean showHiddenApps;
     private HashSet<Integer> hiddenAppIds = new HashSet<>();
 
@@ -101,6 +109,7 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
     public final static String SHOW_HIDDEN_APPS_EXTRA = "ShowHiddenApps";
 
     private ComputerManagerService.ComputerManagerBinder managerBinder;
+    private boolean serviceBound;
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         public void onServiceConnected(ComponentName className, IBinder binder) {
             final ComputerManagerService.ComputerManagerBinder localBinder =
@@ -112,6 +121,10 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                 public void run() {
                     // Wait for the binder to be ready
                     localBinder.waitForReady();
+                    // §REVIEW-1104：等待服務就緒後確認 Activity 未結束，避免離開畫面後才啟動輪詢導致洩漏
+                    if (isFinishing()) {
+                        return;
+                    }
 
                     // Get the computer object
                     computer = localBinder.getComputer(uuidString);
@@ -211,7 +224,8 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
 
     private void startComputerUpdates() {
         // Don't start polling if we're not bound or in the foreground
-        if (managerBinder == null || !inForeground) {
+        // §REVIEW-1104：呼叫 startPolling 前確認畫面仍在前景且 Activity 未結束，避免 stop 後才啟動輪詢導致洩漏
+        if (managerBinder == null || !inForeground || isFinishing()) {
             return;
         }
 
@@ -290,15 +304,32 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
             }
         });
 
-        if (poller == null) {
-            poller = managerBinder.createAppListPoller(computer);
+        synchronized (appListPollerLock) {
+            // §REVIEW-1104：若 startPolling 期間畫面已離開前景，立即補停輪詢並放棄啟動 poller
+            if (!inForeground || isFinishing()) {
+                if (managerBinder != null) {
+                    managerBinder.stopPolling();
+                }
+                return;
+            }
+            if (poller == null) {
+                poller = managerBinder.createAppListPoller(computer);
+            }
+            // §REVIEW-1104：onResume 與服務執行緒都會進來，已啟動就不要再 start()，否則舊執行緒參考被蓋掉、停不掉
+            if (!appListPollerStarted) {
+                poller.start();
+                appListPollerStarted = true;
+            }
         }
-        poller.start();
     }
 
     private void stopComputerUpdates() {
-        if (poller != null) {
-            poller.stop();
+        synchronized (appListPollerLock) {
+            if (poller != null) {
+                poller.stop();
+                // §REVIEW-1104：停掉之後才允許下一輪 start()，與 appListPollerStarted 成對
+                appListPollerStarted = false;
+            }
         }
 
         if (managerBinder != null) {
@@ -360,7 +391,8 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
         steamProfileSpinner = findViewById(R.id.steamProfileSpinner);
 
         // Bind to the computer manager service
-        bindService(new Intent(this, ComputerManagerService.class), serviceConnection,
+        // §REVIEW-1104：bind 成功就記住，onDestroy 一律 unbind；不要等 managerBinder，連上前 finish 會漏 ServiceConnection
+        serviceBound = bindService(new Intent(this, ComputerManagerService.class), serviceConnection,
                 Service.BIND_AUTO_CREATE);
     }
 
@@ -462,6 +494,13 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
             }
             @Override
             public void onNothingSelected(AdapterView<?> parent) { /* no-op */ }
+        });
+        // §REVIEW-1104：setSelection 時 listener 還沒掛上就不會回呼，旗標會留到第一次手動選帳號被吃掉
+        steamProfileSpinner.post(new Runnable() {
+            @Override
+            public void run() {
+                suppressSpinnerSelection = false;
+            }
         });
     }
 
@@ -601,6 +640,13 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
         if (currentIdx < 0) return;
         suppressSpinnerSelection = true;
         steamProfileSpinner.setSelection(currentIdx);
+        // §REVIEW-1104：相同 index 不會再送 onItemSelected，沒跑到就把旗標清掉，避免下一次手動選擇被吃掉
+        steamProfileSpinner.post(new Runnable() {
+            @Override
+            public void run() {
+                suppressSpinnerSelection = false;
+            }
+        });
     }
 
     private void populateAppGridWithCache() {
@@ -631,10 +677,17 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
         super.onDestroy();
 
         SpinnerDialog.closeDialogs(this);
+        // §REVIEW-1104：銷毀 Activity 時取消載入並關閉 CachedAppAssetLoader 的三個 ThreadPoolExecutor，避免執行緒洩漏
+        if (appGridAdapter != null) {
+            appGridAdapter.cancelQueuedOperations();
+            appGridAdapter.shutdownLoader();
+        }
         Dialog.closeDialogs();
 
-        if (managerBinder != null) {
+        // §REVIEW-1104：與 managerBinder 是否已賦值分開，避免連上前 finish 漏 unbind
+        if (serviceBound) {
             unbindService(serviceConnection);
+            serviceBound = false;
         }
     }
 
@@ -653,6 +706,30 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
         if (appGridAdapter != null) {
             PreferenceConfiguration prefs = PreferenceConfiguration.readPreferences(this);
             appGridAdapter.setSortMode(prefs.appSortMode);
+            // §REVIEW-1104：返回前景時對仍處於 INVISIBLE 或占位圖的可見項目重新排程載入
+            AbsListView gridView = findViewById(R.id.fragmentView);
+            if (gridView != null) {
+                int firstPosition = gridView.getFirstVisiblePosition();
+                for (int i = 0; i < gridView.getChildCount(); i++) {
+                    int pos = firstPosition + i;
+                    if (pos < 0 || pos >= appGridAdapter.getCount()) {
+                        continue;
+                    }
+                    View child = gridView.getChildAt(i);
+                    ImageView imgView = child.findViewById(R.id.grid_image);
+                    TextView txtView = child.findViewById(R.id.grid_text);
+                    if (imgView != null && txtView != null &&
+                            (imgView.getVisibility() != View.VISIBLE ||
+                             imgView.getDrawable() instanceof CachedAppAssetLoader.AsyncDrawable)) {
+                        AppObject obj = (AppObject) appGridAdapter.getItem(pos);
+                        appGridAdapter.populateView(child, imgView,
+                                (ProgressBar) child.findViewById(R.id.grid_spinner),
+                                txtView,
+                                (ImageView) child.findViewById(R.id.grid_overlay),
+                                obj);
+                    }
+                }
+            }
         }
 
         inForeground = true;
@@ -674,6 +751,8 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
         AdapterContextMenuInfo info = (AdapterContextMenuInfo) menuInfo;
         AppObject selectedApp = (AppObject) appGridAdapter.getItem(info.position);
 
+        // §REVIEW-1104：開啟選單時記下 appId，避免背景輪詢重排後索引錯位或越界崩潰
+        contextMenuAppId = selectedApp.app.getAppId();
         menu.setHeaderTitle(selectedApp.app.getAppName());
 
         if (lastRunningAppId != 0) {
@@ -717,7 +796,19 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
     @Override
     public boolean onContextItemSelected(MenuItem item) {
         AdapterContextMenuInfo info = (AdapterContextMenuInfo) item.getMenuInfo();
-        final AppObject app = (AppObject) appGridAdapter.getItem(info.position);
+        // §REVIEW-1104：改以開啟選單時記下的 appId 查詢目標 AppObject，找不到則忽略
+        AppObject selectedApp = null;
+        for (int i = 0; i < appGridAdapter.getCount(); i++) {
+            AppObject candidate = (AppObject) appGridAdapter.getItem(i);
+            if (candidate.app.getAppId() == contextMenuAppId) {
+                selectedApp = candidate;
+                break;
+            }
+        }
+        if (selectedApp == null) {
+            return true;
+        }
+        final AppObject app = selectedApp;
         switch (item.getItemId()) {
             case START_WITH_QUIT:
                 // Display a confirmation dialog first
@@ -791,8 +882,8 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                 boolean updated = false;
 
                     // Look through our current app list to tag the running app
-                for (int i = 0; i < appGridAdapter.getCount(); i++) {
-                    AppObject existingApp = (AppObject) appGridAdapter.getItem(i);
+                for (int i = 0; i < allApps.size(); i++) {
+                    AppObject existingApp = allApps.get(i);
 
                     // There can only be one or zero apps running.
                     if (existingApp.isRunning &&
@@ -833,8 +924,9 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                     boolean foundExistingApp = false;
 
                     // Try to update an existing app in the list first
-                    for (int i = 0; i < appGridAdapter.getCount(); i++) {
-                        AppObject existingApp = (AppObject) appGridAdapter.getItem(i);
+                    // §REVIEW-1104：增刪比對改走完整清單 allApps 並以 appId 更新同一筆，避免已隱藏應用被重複加入與誤啟用捷徑
+                    for (int i = 0; i < allApps.size(); i++) {
+                        AppObject existingApp = allApps.get(i);
                         if (existingApp.app.getAppId() == app.getAppId()) {
                             // Found the app; update its properties
                             if (!existingApp.app.getAppName().equals(app.getAppName())) {
@@ -872,7 +964,9 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
 
                     if (!foundExistingApp) {
                         // This app must be new
-                        appGridAdapter.addApp(new AppObject(app));
+                        AppObject newApp = new AppObject(app);
+                        allApps.add(newApp);
+                        appGridAdapter.addApp(newApp);
 
                         // We could have a leftover shortcut from last time this PC was paired
                         // or if this app was removed then added again. Enable those shortcuts
@@ -885,9 +979,10 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
 
                 // Next handle app removals
                 int i = 0;
-                while (i < appGridAdapter.getCount()) {
+                // §REVIEW-1104：移除比對改走完整清單 allApps，主機清單真正刪除時才呼叫 disableAppShortcut
+                while (i < allApps.size()) {
                     boolean foundExistingApp = false;
-                    AppObject existingApp = (AppObject) appGridAdapter.getItem(i);
+                    AppObject existingApp = allApps.get(i);
 
                     // Check if this app is in the latest list
                     for (NvApp app : appList) {
@@ -901,6 +996,7 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                     if (!foundExistingApp) {
                         shortcutHelper.disableAppShortcut(computer, existingApp.app, "App removed from PC");
                         appGridAdapter.removeApp(existingApp);
+                        allApps.remove(i);
                         updated = true;
 
                         // Check this same index again because the item at i+1 is now at i after

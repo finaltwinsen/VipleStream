@@ -24,11 +24,11 @@ android {
 
     defaultConfig {
         applicationId "com.piinsta"
-        minSdk 21
+        minSdk 28  // 2026-11-04：最低支援 Android 9（使用者指示）
         targetSdk 34
 
-        versionName "2.0.33"
-        versionCode = 20033
+        versionName "2.0.59"
+        versionCode = 20059
 
         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
         ndk.debugSymbolLevel = 'FULL'

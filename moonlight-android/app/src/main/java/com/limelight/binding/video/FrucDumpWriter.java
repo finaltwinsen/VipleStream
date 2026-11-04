@@ -268,6 +268,8 @@ final class FrucDumpWriter {
 
     /** GL-thread: queue an R32I readback of the MV texture into the mv PBO. */
     void kickReadbackMv(int srcTex) {
+        // §REVIEW-1104：以 FBO glReadPixels 讀取 compute shader 寫入之紋理前需插入 GL_FRAMEBUFFER_BARRIER_BIT
+        GLES31.glMemoryBarrier(GLES31.GL_FRAMEBUFFER_BARRIER_BIT);
         GLES31.glBindFramebuffer(GLES31.GL_READ_FRAMEBUFFER, dumpReadFbo);
         GLES31.glFramebufferTexture2D(GLES31.GL_READ_FRAMEBUFFER,
                 GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, srcTex, 0);
@@ -289,6 +291,8 @@ final class FrucDumpWriter {
     }
 
     private void kickRgba(int srcTex, int pbo) {
+        // §REVIEW-1104：以 FBO glReadPixels 讀取紋理前需插入 GL_FRAMEBUFFER_BARRIER_BIT
+        GLES31.glMemoryBarrier(GLES31.GL_FRAMEBUFFER_BARRIER_BIT);
         GLES31.glBindFramebuffer(GLES31.GL_READ_FRAMEBUFFER, dumpReadFbo);
         GLES31.glFramebufferTexture2D(GLES31.GL_READ_FRAMEBUFFER,
                 GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, srcTex, 0);

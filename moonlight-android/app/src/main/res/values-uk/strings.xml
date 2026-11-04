@@ -349,4 +349,6 @@
     <string name="steam_switch_error_taskgone">Завдання перемикання зникло на хості</string>
     <string name="steam_switch_error_timeout">Час перемикання вичерпано (&gt;150 с, а сервер не дійшов до кінцевого стану)</string>
     <string name="steam_switch_account_unavailable">Для цього облікового запису на хості немає збережених облікових даних. Спершу один раз увійдіть на хості, а потім повторіть спробу.</string>
+    <string name="title_show_advanced">Показувати розширені та експериментальні параметри</string>
+    <string name="summary_show_advanced">Параметри для діагностики й тестування. Приховані параметри зберігають поточні значення.</string>
 </resources>

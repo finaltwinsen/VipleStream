@@ -249,6 +249,13 @@ static bool scanForAv1FrameObu(const uint8_t* data, size_t size,
 struct VkFrucRenderer::NvParserPimpl {
     std::shared_ptr<VkFrucDecodeClient>          client;
     VkSharedBaseObj<VulkanVideoDecodeParser>     parser;
+    // §REVIEW-1104：上一筆 vkQueueSubmit 成功才代表 decode fence 會被 signal。
+    bool decodeFenceInFlight = false;
+    // §REVIEW-1104：AV1 header 的 color／timing 是指標，內容要另存，不能比位址。
+    StdVideoAV1ColorConfig av1ColorCached{};
+    StdVideoAV1TimingInfo  av1TimingCached{};
+    bool av1ColorCachedValid = false;
+    bool av1TimingCachedValid = false;
 };
 
 
@@ -268,6 +275,20 @@ int32_t VkFrucDecodeClient::BeginSequence(const VkParserSequenceInfo* pnvsi)
                 pnvsi->nCodedWidth, pnvsi->nCodedHeight,
                 pnvsi->nDisplayWidth, pnvsi->nDisplayHeight,
                 (unsigned)pnvsi->uBitDepthLumaMinus8 + 8);
+
+    // §REVIEW-1104：session 與 DPB 是 8-bit 4:2:0，bit depth 或 chroma 不合就回 0，讓 parser 停止這次 parse。
+    if (pnvsi->uBitDepthLumaMinus8 != 0
+        || pnvsi->uBitDepthChromaMinus8 != 0
+        || pnvsi->nChromaFormat != 1) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC] §J.3.e.2.i.8 BeginSequence reject — "
+                    "bit_depth_luma=%u bit_depth_chroma=%u chroma_format=%u "
+                    "(native session is 8-bit 4:2:0)",
+                    (unsigned)pnvsi->uBitDepthLumaMinus8 + 8,
+                    (unsigned)pnvsi->uBitDepthChromaMinus8 + 8,
+                    (unsigned)pnvsi->nChromaFormat);
+        return 0;
+    }
 
     // §J.3.e.2.i.8 Phase 1.3b — provision DPB image pool at the actual stream
     // resolution.  Idempotent across IDR resends; teardown clears m_DpbReady.
@@ -337,29 +358,36 @@ bool VkFrucDecodeClient::DecodePicture(VkParserPictureData* pParserPictureData)
     // → garbage pointer → crash inside onH265PictureParametersFromParser.
     if (m_Parent && pParserPictureData) {
         const int codecMask = m_Parent->getVideoCodecMask();
+        bool paramsOk = true;
         if (codecMask & VIDEO_FORMAT_MASK_H265) {
             const auto& hevc = pParserPictureData->CodecSpecific.hevc;
-            m_Parent->onH265PictureParametersFromParser(hevc.pStdVps, hevc.pStdSps, hevc.pStdPps);
+            paramsOk = m_Parent->onH265PictureParametersFromParser(hevc.pStdVps, hevc.pStdSps, hevc.pStdPps);
         } else if (codecMask & VIDEO_FORMAT_MASK_H264) {
             // Phase 2 — H.264 has SPS+PPS only (no VPS).  Same incremental
             // add-info upload pattern as H.265.
             const auto& h264 = pParserPictureData->CodecSpecific.h264;
-            m_Parent->onH264PictureParametersFromParser(h264.pStdSps, h264.pStdPps);
+            paramsOk = m_Parent->onH264PictureParametersFromParser(h264.pStdSps, h264.pStdPps);
         } else if (codecMask & VIDEO_FORMAT_MASK_AV1) {
             // Phase 3b.1 — destroy + recreate session params on first real
             // sequence header (replaces the zero-init placeholder built at
             // createVideoSessionParameters time).  Parser re-delivers the
             // same pStdSps every picture; method no-ops on repeat seq counts.
             const auto& av1 = pParserPictureData->CodecSpecific.av1;
-            m_Parent->onAv1SequenceHeaderFromParser(av1.pStdSps);
+            paramsOk = m_Parent->onAv1SequenceHeaderFromParser(av1.pStdSps);
         }
+
+        // §REVIEW-1104：參數更新失敗不要送 decode，避免 SPS 沒進 session 仍 vkQueueSubmit。
+        if (!paramsOk) return false;
 
         // §J.3.e.2.i.8 Phase 1.3d — record + submit vkCmdDecodeVideoKHR for IDR
         // frames (P/B-frame reference handling lands in 1.3d.2).  Skips silently
         // when prerequisites aren't ready yet (DPB pool, cmd buf, etc).
         // Phase 3b.2 will lift the H.265-only gate inside submitDecodeFrame
         // and add the AV1 picture-info / DPB / decode-info chain.
+        m_SubmitFailed = false;
         m_Parent->submitDecodeFrame(pParserPictureData);
+        // §REVIEW-1104：vkQueueSubmit 失敗時回 false，parser 才不會把這張留成已解碼參考。
+        if (m_SubmitFailed) return false;
     }
 
     return true;
@@ -677,6 +705,37 @@ bool VkFrucRenderer::onH264PictureParametersFromParser(
 // This is called from VkFrucDecodeClient::DecodePicture before submitDecodeFrame,
 // so any in-flight decode is already drained (single-cmd-buffer pattern).
 
+// §REVIEW-1104：對齊 isDifferentFrom，比 scalar 與 pColorConfig／pTimingInfo 所指內容，不比指標位址。
+static bool av1SeqHdrContentSame(const StdVideoAV1SequenceHeader& cached,
+                                 const StdVideoAV1ColorConfig* cachedColor, bool colorValid,
+                                 const StdVideoAV1TimingInfo* cachedTiming, bool timingValid,
+                                 const StdVideoAV1SequenceHeader* incoming)
+{
+    if (!incoming) return false;
+    if (memcmp(&cached.flags, &incoming->flags, sizeof(cached.flags)) != 0) return false;
+    if (cached.seq_profile != incoming->seq_profile) return false;
+    if (cached.frame_width_bits_minus_1 != incoming->frame_width_bits_minus_1) return false;
+    if (cached.frame_height_bits_minus_1 != incoming->frame_height_bits_minus_1) return false;
+    if (cached.max_frame_width_minus_1 != incoming->max_frame_width_minus_1) return false;
+    if (cached.max_frame_height_minus_1 != incoming->max_frame_height_minus_1) return false;
+    if (cached.delta_frame_id_length_minus_2 != incoming->delta_frame_id_length_minus_2) return false;
+    if (cached.additional_frame_id_length_minus_1 != incoming->additional_frame_id_length_minus_1) return false;
+    if (cached.order_hint_bits_minus_1 != incoming->order_hint_bits_minus_1) return false;
+    if (cached.seq_force_integer_mv != incoming->seq_force_integer_mv) return false;
+    if (cached.seq_force_screen_content_tools != incoming->seq_force_screen_content_tools) return false;
+
+    const bool inColor = incoming->pColorConfig != nullptr;
+    if (colorValid != inColor) return false;
+    if (colorValid && memcmp(cachedColor, incoming->pColorConfig, sizeof(StdVideoAV1ColorConfig)) != 0)
+        return false;
+
+    const bool inTiming = incoming->pTimingInfo != nullptr;
+    if (timingValid != inTiming) return false;
+    if (timingValid && memcmp(cachedTiming, incoming->pTimingInfo, sizeof(StdVideoAV1TimingInfo)) != 0)
+        return false;
+    return true;
+}
+
 bool VkFrucRenderer::onAv1SequenceHeaderFromParser(const StdVideoPictureParametersSet* sps)
 {
     if (m_VideoSession == VK_NULL_HANDLE) return false;
@@ -711,25 +770,24 @@ bool VkFrucRenderer::onAv1SequenceHeaderFromParser(const StdVideoPictureParamete
     // contents are identical.  Acting on the bumped count would re-destroy +
     // recreate VkVideoSessionParametersKHR + force vkCmdControlVideoCodingKHR
     // RESET every second → DPB tracking thrash → alternating valid/garbage
-    // frames → grey-green flicker.  Compare the actual StdVideoAV1SequenceHeader
-    // bytes against the last-applied snapshot and short-circuit when truly
-    // unchanged.  Note: this struct contains pColorConfig / pTimingInfo
-    // pointers, which we DO want to follow when comparing — but for repeated
-    // re-sends of the same SPS, parser typically points at the same shared
-    // data, so memcmp on the parent struct catches pointer equality even
-    // when content is also equal (sufficient signal for no-op).
+    // frames → grey-green flicker.  Compare scalar fields plus the bytes
+    // pColorConfig / pTimingInfo point at.  Parser allocates a new SPS object
+    // on every OBU_SEQUENCE_HEADER, so the pointers themselves always differ.
+    // §REVIEW-1104：不能 memcmp 整顆 header，pColorConfig／pTimingInfo 每次都是新位址；內容相同就直接 return。
     uint32_t seq = sps->GetUpdateSequenceCount();
-    if (m_AV1SeqHdrApplied
-        && memcmp(&m_AV1SeqHdrCached, pStdHeader, sizeof(StdVideoAV1SequenceHeader)) == 0) {
+    if (m_AV1SeqHdrApplied && m_NvParser
+        && av1SeqHdrContentSame(m_AV1SeqHdrCached,
+                                &m_NvParser->av1ColorCached, m_NvParser->av1ColorCachedValid,
+                                &m_NvParser->av1TimingCached, m_NvParser->av1TimingCachedValid,
+                                pStdHeader)) {
         // Same content, regardless of parser-bumped seq count — no-op.
         return true;
     }
 
     // Copy the header locally so the create-info pointer stays valid through
-    // the entire vkCreate call (parser owns the source struct).  Also stash
-    // the snapshot for the next-call dedup check.
+    // the entire vkCreate call (parser owns the source struct).  The dedup
+    // snapshot is stashed only after this create succeeds.
     StdVideoAV1SequenceHeader hdrCopy = *pStdHeader;
-    m_AV1SeqHdrCached = *pStdHeader;
 
     VkVideoDecodeAV1SessionParametersCreateInfoKHR av1ParamsCi = {
         VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_SESSION_PARAMETERS_CREATE_INFO_KHR
@@ -763,8 +821,23 @@ bool VkFrucRenderer::onAv1SequenceHeaderFromParser(const StdVideoPictureParamete
         m_pfnDestroyVideoSessionParams(m_Device, oldParams, nullptr);
     }
 
+    const bool headerReplaced = m_AV1SeqHdrApplied;
+    m_AV1SeqHdrCached = hdrCopy;
+    // §REVIEW-1104：不要留 parser 的指標，舊物件銷毀後會懸空；color／timing 內容存在 pimpl。
+    m_AV1SeqHdrCached.pColorConfig = nullptr;
+    m_AV1SeqHdrCached.pTimingInfo = nullptr;
+    if (m_NvParser) {
+        m_NvParser->av1ColorCachedValid = hdrCopy.pColorConfig != nullptr;
+        if (hdrCopy.pColorConfig) m_NvParser->av1ColorCached = *hdrCopy.pColorConfig;
+        m_NvParser->av1TimingCachedValid = hdrCopy.pTimingInfo != nullptr;
+        if (hdrCopy.pTimingInfo) m_NvParser->av1TimingCached = *hdrCopy.pTimingInfo;
+    }
     m_AV1SeqHdrSeqSeen = seq;
     m_AV1SeqHdrApplied = true;
+    if (headerReplaced) {
+        // §REVIEW-1104：sequence header 內容真的變了才重建 params，必須 RESET，否則新 params 配上舊 DPB。
+        m_DecodeNeedsReset = true;
+    }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.1 — AV1 session params "
@@ -1019,7 +1092,11 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
         rt.WaitSemaphores(m_Device, &wi, UINT64_MAX);
     }
 
-    rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
+    // §REVIEW-1104：只有上一筆 vkQueueSubmit 成功才等 fence，失敗時不會 signal，無條件等會永久卡住。
+    if (!m_NvParser || m_NvParser->decodeFenceInFlight) {
+        rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
+        if (m_NvParser) m_NvParser->decodeFenceInFlight = false;
+    }
     rt.ResetFences(m_Device, 1, &m_DecodeFence);
     rt.ResetCommandBuffer(m_DecodeCmdBuf, 0);
 
@@ -1113,12 +1190,13 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
     bci.pReferenceSlots        = allCodingSlots;
     rt.CmdBeginVideoCodingKHR(m_DecodeCmdBuf, &bci);
 
+    bool recordedReset = false;
     if (m_DecodeNeedsReset) {
         VkVideoCodingControlInfoKHR cci = { VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR };
         cci.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR;
         rt.CmdControlVideoCodingKHR(m_DecodeCmdBuf, &cci);
-        m_DecodeNeedsReset = false;
-        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
+        // §REVIEW-1104：RESET 命令還沒送出，成功後才清 m_DecodeNeedsReset 與 DPB active。
+        recordedReset = true;
     }
 
     // ── Decode ──
@@ -1212,6 +1290,7 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
     rt.CmdEndVideoCodingKHR(m_DecodeCmdBuf, &eci);
 
     // ── Decode → SwUpload copy (codec-agnostic, identical to H.265 path) ──
+    bool swLayoutRecorded = false;
     if (m_SwUploadImage != VK_NULL_HANDLE && m_SwImageWidth > 0 && m_SwImageHeight > 0) {
         auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
             m_Instance, "vkGetDeviceProcAddr");
@@ -1293,7 +1372,8 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
         postDep.imageMemoryBarrierCount = 2;
         postDep.pImageMemoryBarriers    = postBars;
         rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &postDep);
-        m_SwImageLayoutInited = true;
+        // §REVIEW-1104：upload layout 還沒 submit，成功後才把 m_SwImageLayoutInited 設成 true。
+        swLayoutRecorded = true;
     }
 
     rt.EndCommandBuffer(m_DecodeCmdBuf);
@@ -1314,14 +1394,25 @@ bool VkFrucRenderer::submitDecodeFrameAv1(VkParserPictureData* ppd)
     VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
     if (vr == VK_SUCCESS) {
         m_LastDecodeValue.store(signalVal, std::memory_order_release);
+        if (m_NvParser) m_NvParser->decodeFenceInFlight = true;
     }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 3b.2b vkQueueSubmit(AV1) rc=%d — disabling native path", (int)vr);
+        // §REVIEW-1104：非 device-lost 的 submit 失敗也不會 signal fence；停用 native decode，下一幀在 WaitForFences 之前返回。
         if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
+        else m_DecodeCmdReady = false;
+        if (m_NvParser && m_NvParser->client) m_NvParser->client->m_SubmitFailed = true;
         m_DecodeSkipCount++;
         return false;
     }
+
+    // §REVIEW-1104：vkQueueSubmit 成功才寫 RESET、DPB active 與 upload layout，失敗時 GPU 沒執行這些命令。
+    if (recordedReset) {
+        m_DecodeNeedsReset = false;
+        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
+    }
+    if (swLayoutRecorded) m_SwImageLayoutInited = true;
 
     curPic->layoutInited = true;
     m_DpbSlotActive[slotIdx] = true;
@@ -1537,7 +1628,11 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
         rt.WaitSemaphores(m_Device, &wi, UINT64_MAX);
     }
 
-    rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
+    // §REVIEW-1104：只有上一筆 vkQueueSubmit 成功才等 fence，失敗時不會 signal，無條件等會永久卡住。
+    if (!m_NvParser || m_NvParser->decodeFenceInFlight) {
+        rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
+        if (m_NvParser) m_NvParser->decodeFenceInFlight = false;
+    }
     rt.ResetFences(m_Device, 1, &m_DecodeFence);
     rt.ResetCommandBuffer(m_DecodeCmdBuf, 0);
 
@@ -1636,12 +1731,13 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
     bci.pReferenceSlots        = allCodingSlots;
     rt.CmdBeginVideoCodingKHR(m_DecodeCmdBuf, &bci);
 
+    bool recordedReset = false;
     if (m_DecodeNeedsReset) {
         VkVideoCodingControlInfoKHR cci = { VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR };
         cci.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR;
         rt.CmdControlVideoCodingKHR(m_DecodeCmdBuf, &cci);
-        m_DecodeNeedsReset = false;
-        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
+        // §REVIEW-1104：RESET 命令還沒送出，成功後才清 m_DecodeNeedsReset 與 DPB active。
+        recordedReset = true;
     }
 
     // ── Decode ──
@@ -1683,6 +1779,7 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
     rt.CmdEndVideoCodingKHR(m_DecodeCmdBuf, &eci);
 
     // ── Decode → SwUpload copy (codec-agnostic, identical to H.265 path) ──
+    bool swLayoutRecorded = false;
     if (m_SwUploadImage != VK_NULL_HANDLE && m_SwImageWidth > 0 && m_SwImageHeight > 0) {
         auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
             m_Instance, "vkGetDeviceProcAddr");
@@ -1764,7 +1861,8 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
         postDep.imageMemoryBarrierCount = 2;
         postDep.pImageMemoryBarriers    = postBars;
         rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &postDep);
-        m_SwImageLayoutInited = true;
+        // §REVIEW-1104：upload layout 還沒 submit，成功後才把 m_SwImageLayoutInited 設成 true。
+        swLayoutRecorded = true;
     }
 
     rt.EndCommandBuffer(m_DecodeCmdBuf);
@@ -1784,14 +1882,25 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
     VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
     if (vr == VK_SUCCESS) {
         m_LastDecodeValue.store(signalVal, std::memory_order_release);
+        if (m_NvParser) m_NvParser->decodeFenceInFlight = true;
     }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 2 vkQueueSubmit(H.264) rc=%d — disabling native path", (int)vr);
+        // §REVIEW-1104：非 device-lost 的 submit 失敗也不會 signal fence；停用 native decode，下一幀在 WaitForFences 之前返回。
         if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
+        else m_DecodeCmdReady = false;
+        if (m_NvParser && m_NvParser->client) m_NvParser->client->m_SubmitFailed = true;
         m_DecodeSkipCount++;
         return false;
     }
+
+    // §REVIEW-1104：vkQueueSubmit 成功才寫 RESET、DPB active 與 upload layout，失敗時 GPU 沒執行這些命令。
+    if (recordedReset) {
+        m_DecodeNeedsReset = false;
+        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
+    }
+    if (swLayoutRecorded) m_SwImageLayoutInited = true;
 
     curPic->layoutInited = true;
     m_DpbSlotActive[slotIdx] = true;
@@ -1947,7 +2056,11 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     }
 
     // Wait for previous decode submission to complete (single cmd buffer pattern).
-    rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
+    // §REVIEW-1104：只有上一筆 vkQueueSubmit 成功才等 fence，失敗時不會 signal，無條件等會永久卡住。
+    if (!m_NvParser || m_NvParser->decodeFenceInFlight) {
+        rt.WaitForFences(m_Device, 1, &m_DecodeFence, VK_TRUE, UINT64_MAX);
+        if (m_NvParser) m_NvParser->decodeFenceInFlight = false;
+    }
     rt.ResetFences(m_Device, 1, &m_DecodeFence);
     rt.ResetCommandBuffer(m_DecodeCmdBuf, 0);
 
@@ -2074,13 +2187,13 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     rt.CmdBeginVideoCodingKHR(m_DecodeCmdBuf, &bci);
 
     // ── Reset session state on first submit ──
+    bool recordedReset = false;
     if (m_DecodeNeedsReset) {
         VkVideoCodingControlInfoKHR cci = { VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR };
         cci.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR;
         rt.CmdControlVideoCodingKHR(m_DecodeCmdBuf, &cci);
-        m_DecodeNeedsReset = false;
-        // Session RESET deactivates all DPB slots — sync our tracking.
-        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
+        // §REVIEW-1104：RESET 命令還沒送出，成功後才清 m_DecodeNeedsReset 與 DPB active。
+        recordedReset = true;
     }
 
     // ── Decode ──
@@ -2107,11 +2220,15 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     auto fillStdRefSlot = [&](uint8_t* dst, const int8_t* src, int count) {
         for (int i = 0; i < count && i < 8; i++) {
             int j = src[i];
+            // §REVIEW-1104：跟 collectRef 同一套條件，對不上留 0xFF，避免指到沒放進 pReferenceSlots 的 slot。
             if (j < 0 || j >= 16) continue;
             auto* p = static_cast<VkFrucDecodeClient::VkFrucDpbPicture*>(hevc.RefPics[j]);
-            if (p && p->m_picIdx >= 0 && p->m_picIdx < VkFrucDecodeClient::kPicPoolSize) {
-                dst[i] = (uint8_t)p->m_picIdx;
-            }
+            if (!p || p->image == VK_NULL_HANDLE || p->view == VK_NULL_HANDLE) continue;
+            int slot = p->m_picIdx;
+            if (slot < 0 || slot >= VkFrucDecodeClient::kPicPoolSize) continue;
+            if (slot == slotIdx) continue;
+            if (!m_DpbSlotActive[slot]) continue;
+            dst[i] = (uint8_t)slot;
         }
     };
     fillStdRefSlot(stdPicInfo.RefPicSetStCurrBefore, hevc.RefPicSetStCurrBefore, hevc.NumPocStCurrBefore);
@@ -2145,6 +2262,7 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     // §J.3.e.2.i.8 Phase 1.4 — copy decoded layer to m_SwUploadImage in the
     // SAME decode-queue cmd buffer.  Sync2 barriers because video-decode
     // pipeline stage only exists in the _2 form.
+    bool swLayoutRecorded = false;
     if (m_SwUploadImage != VK_NULL_HANDLE && m_SwImageWidth > 0 && m_SwImageHeight > 0) {
         auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
             m_Instance, "vkGetDeviceProcAddr");
@@ -2234,7 +2352,8 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
         postDep.imageMemoryBarrierCount = 2;
         postDep.pImageMemoryBarriers    = postBars;
         rt.CmdPipelineBarrier2(m_DecodeCmdBuf, &postDep);
-        m_SwImageLayoutInited = true;
+        // §REVIEW-1104：upload layout 還沒 submit，成功後才把 m_SwImageLayoutInited 設成 true。
+        swLayoutRecorded = true;
     }
 
     rt.EndCommandBuffer(m_DecodeCmdBuf);
@@ -2260,11 +2379,15 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     VkResult vr = rt.QueueSubmit(m_DecodeQueue, 1, &si, m_DecodeFence);
     if (vr == VK_SUCCESS) {
         m_LastDecodeValue.store(signalVal, std::memory_order_release);
+        if (m_NvParser) m_NvParser->decodeFenceInFlight = true;
     }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-VKFRUC] §J.3.e.2.i.8 Phase 1.3d vkQueueSubmit rc=%d — disabling native path", (int)vr);
+        // §REVIEW-1104：非 device-lost 的 submit 失敗也不會 signal fence；停用 native decode，下一幀在 WaitForFences 之前返回。
         if (vr == VK_ERROR_DEVICE_LOST) m_DeviceLost.store(true, std::memory_order_release);
+        else m_DecodeCmdReady = false;
+        if (m_NvParser && m_NvParser->client) m_NvParser->client->m_SubmitFailed = true;
         m_DecodeSkipCount++;
         return false;
     }
@@ -2278,6 +2401,13 @@ bool VkFrucRenderer::submitDecodeFrameH265(VkParserPictureData* ppd)
     //    finished writing.  Graphics' own per-slot fences guard their reads.
     // The decode-queue cmd buffer's sync2 image barriers (around vkCmdCopyImage)
     // handle the WITHIN-queue write→write ordering on m_SwUploadImage.
+
+    // §REVIEW-1104：vkQueueSubmit 成功才寫 RESET、DPB active 與 upload layout，失敗時 GPU 沒執行這些命令。
+    if (recordedReset) {
+        m_DecodeNeedsReset = false;
+        for (int i = 0; i < VkFrucDecodeClient::kPicPoolSize; i++) m_DpbSlotActive[i] = false;
+    }
+    if (swLayoutRecorded) m_SwImageLayoutInited = true;
 
     curPic->layoutInited = true;
     m_DpbSlotActive[slotIdx] = true;   // slot is now usable as a reference

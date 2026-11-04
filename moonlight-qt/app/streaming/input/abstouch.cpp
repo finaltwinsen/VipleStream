@@ -33,7 +33,10 @@ void SdlInputHandler::disableTouchFeedback()
     SDL_SysWMinfo info;
 
     SDL_VERSION(&info.version);
-    SDL_GetWindowWMInfo(m_Window, &info);
+    // §REVIEW-1103：失敗時 info 是未初始化的，不可再讀 subsystem
+    if (!SDL_GetWindowWMInfo(m_Window, &info)) {
+        return;
+    }
 
 #ifdef Q_OS_WIN32
     if (info.subsystem == SDL_SYSWM_WINDOWS) {

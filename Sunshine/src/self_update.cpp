@@ -1104,7 +1104,15 @@ exit 0
   void shutdown() {
     g_cancel.store(true);
     std::lock_guard<std::mutex> lg(g_worker_mtx);
-    if (g_worker.joinable()) g_worker.join();
+    if (!g_worker.joinable()) return;
+    // §REVIEW-1103：更新完成後是在 g_worker 自己身上 exit_sunshine → raise(SIGINT)，處理常式
+    // 同步跑到這裡；join 自己會丟 EDEADLK，還會跳過後面的 tray 收尾與顯示器設定還原。
+    // 是自己就 detach（行程馬上要結束），讓 SIGINT 處理常式照常做完收尾。
+    if (g_worker.get_id() == std::this_thread::get_id()) {
+      g_worker.detach();
+      return;
+    }
+    g_worker.join();
   }
 
   int cli_check_update(int, char **) {

@@ -53,6 +53,8 @@ public abstract class VirtualControllerElement extends View {
 
     float position_pressed_x = 0;
     float position_pressed_y = 0;
+    // §REVIEW-1104：記錄按在此控制項上的 pointerId，以支援多指觸控下的放開事件
+    private int activePointerId = MotionEvent.INVALID_POINTER_ID;
 
     private enum Mode {
         Normal,
@@ -229,7 +231,25 @@ public abstract class VirtualControllerElement extends View {
         // NB: We can get an additional pointer down if the user touches a non-StreamView area
         // while also touching an OSC control, even if that pointer down doesn't correspond to
         // an area of the OSC control.
-        if (event.getActionIndex() != 0) {
+        int actionMasked = event.getActionMasked();
+        int actionIndex = event.getActionIndex();
+
+        // §REVIEW-1104：使用 getPointerId 追蹤真正按下控制項的那一指，處理其 ACTION_POINTER_UP 放開事件
+        if (actionMasked == MotionEvent.ACTION_DOWN) {
+            activePointerId = event.getPointerId(0);
+        } else if (actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
+            return true;
+        } else if (actionMasked == MotionEvent.ACTION_POINTER_UP) {
+            if (event.getPointerId(actionIndex) != activePointerId) {
+                return true;
+            }
+            activePointerId = MotionEvent.INVALID_POINTER_ID;
+        } else if (actionMasked == MotionEvent.ACTION_UP || actionMasked == MotionEvent.ACTION_CANCEL) {
+            activePointerId = MotionEvent.INVALID_POINTER_ID;
+        } else if (actionMasked == MotionEvent.ACTION_MOVE && activePointerId == MotionEvent.INVALID_POINTER_ID) {
+            return true;
+        }
+        if (false /* §REVIEW-1104：舊有 actionIndex != 0 過濾已被上方 activePointerId 處理取代 */) {
             return true;
         }
 
@@ -276,7 +296,9 @@ public abstract class VirtualControllerElement extends View {
                 return true;
             }
             case MotionEvent.ACTION_CANCEL:
-            case MotionEvent.ACTION_UP: {
+            case MotionEvent.ACTION_UP:
+            // §REVIEW-1104：多指觸控下追蹤的手指放開時，走與 ACTION_UP 相同的取消路徑
+            case MotionEvent.ACTION_POINTER_UP: {
                 actionCancel();
                 return true;
             }

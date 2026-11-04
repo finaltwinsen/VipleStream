@@ -7,7 +7,11 @@
 #include <QCoreApplication>
 #include <QTimer>
 
+#include <cstdio>
+
 #define COMPUTER_SEEK_TIMEOUT 10000
+// §REVIEW-1104：cancel 最長約 30 秒，還要再等一輪 poll 才看得到 currentGameId 為 0；逾時就以非 0 結束
+#define QUIT_APP_TIMEOUT 60000
 
 namespace CliQuitStream
 {
@@ -75,6 +79,12 @@ public:
                 m_State = StateFailure;
                 emit q->failed(QObject::tr("Failed to connect to %1").arg(m_ComputerName));
             }
+            // §REVIEW-1104：Quit 階段若一直等不到 quitAppCompleted，以非 0 結束，避免停在 Quitting app
+            else if (m_State == StateQuitApp) {
+                m_State = StateFailure;
+                fprintf(stderr, "%s\n", qPrintable(QObject::tr("Quitting app timed out")));
+                QCoreApplication::exit(1);
+            }
             break;
         // Occurs when searched computer is found
         case Event::ComputerFound:
@@ -83,6 +93,10 @@ public:
                     m_State = StateQuitApp;
                     emit q->quittingApp();
                     m_ComputerManager->quitRunningApp(event.computer);
+                    // §REVIEW-1104：ComputerSeeker 找到主機就 stopPolling，沒焦點時下一輪 poll 不會跑，quit 成功訊號永遠不來
+                    m_ComputerManager->startPolling();
+                    // §REVIEW-1104：Quit 階段原本只有建立 timer、從未 start，輪詢沒送結果時行程會一直等
+                    m_TimeoutTimer->start(QUIT_APP_TIMEOUT);
                 } else {
                     m_State = StateFailure;
                     QString msg = QObject::tr("Computer %1 has not been paired. "
@@ -95,6 +109,8 @@ public:
         // Occurs when app quit completed (error message is set if failed)
         case Event::AppQuitCompleted:
             if (m_State == StateQuitApp) {
+                // §REVIEW-1104：已收到 quit 結果就停掉逾時，避免成功之後又被逾時以非 0 結束
+                m_TimeoutTimer->stop();
                 if (event.errorMessage.isEmpty()) {
                     QCoreApplication::exit(0);
                 } else {

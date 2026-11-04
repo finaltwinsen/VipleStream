@@ -62,6 +62,7 @@ namespace nvprefs {
     if (status != NVAPI_OK) {
       nvapi_error_message(status);
       error_message("NvAPI_DRS_CreateSession() failed");
+      NvAPI_Unload();  // §REVIEW-1103（B033-2）：Initialize 成功過，失敗路徑也要對稱 Unload
       return false;
     }
 

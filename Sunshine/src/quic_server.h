@@ -508,6 +508,9 @@ namespace quic_server {
     picoquic_quic_t *_quic = nullptr;
     std::thread _ioThread;
     std::atomic<bool> _running{false};
+    // §REVIEW-1103：IO 執行緒建 socket／bind 的結果（0＝還沒做完、1＝成功、-1＝失敗），
+    // start() 等它，bind 失敗就回 false，不再把一個 IO 執行緒已經退出的 listener 當成執行中。
+    std::atomic<int> _bindState{0};
 
     std::mutex _sessionMutex;
     std::unordered_map<std::string, std::shared_ptr<QuicSession>> _sessions;

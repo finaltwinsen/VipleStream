@@ -335,6 +335,179 @@ Flickable {
         width: settingsPage.width / 2
         spacing: 15
 
+        // §SETTINGS-ADV：測試、除錯與實驗性的選項預設收起來；收起來的選項照樣套用原本存的值
+        CheckBox {
+            id: showAdvancedCheck
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            text: qsTr("Show advanced and experimental options")
+            font.pointSize: 12
+            checked: StreamingPreferences.showAdvancedSettings
+            onCheckedChanged: {
+                StreamingPreferences.showAdvancedSettings = checked
+            }
+
+            ToolTip.delay: 1000
+            ToolTip.timeout: 6000
+            ToolTip.visible: hovered
+            ToolTip.text: qsTr("Shows options meant for troubleshooting and testing: renderer and video decoder, frame interpolation engines, experimental video formats and network test switches. Hidden options keep their current values.")
+        }
+
+        // VR（Steam Frame PCVR）：從 GUI 啟動的 VR 串流是另一個行程，讀的是這裡存下來的值
+        GroupBox {
+            id: vrSettingsGroupBox
+            // §SETTINGS-ADV：只在頭盔（Steam Frame）上顯示，排在最前面
+            visible: VrLauncher.available
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            padding: 12
+            title: "<font color=\"#D4FF3A\">§ VR · </font><font color=\"#F2F5E1\">" + qsTr("VR Streaming (Steam Frame)") + "</font>"
+            font.pointSize: 12
+
+            Column {
+                anchors.fill: parent
+                spacing: 5
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Resolution per eye")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                // §UI-SCROLL：這一區的四個下拉選單同樣用 AutoResizingComboBox（手把才能在選單裡上下選），
+                // 寬度跟著最長的選項，初始化時要自己算一次
+                AutoResizingComboBox {
+                    id: vrEyeComboBox
+                    property var values: [1152, 1440, 1728, 2160]
+                    model: ["1152 x 1152", "1440 x 1440", "1728 x 1728", "2160 x 2160"]
+                    Component.onCompleted: {
+                        var i = values.indexOf(StreamingPreferences.vrEyeWidth)
+                        currentIndex = i >= 0 ? i : values.length - 1
+                        recalculateWidth()
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrEyeWidth = values[currentIndex]
+                        StreamingPreferences.vrEyeHeight = values[currentIndex]
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Extra field of view (overscan)")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                AutoResizingComboBox {
+                    id: vrOverscanComboBox
+                    property var values: [0, 2, 3, 4, 5]
+                    model: [qsTr("Off"), "2\u00b0", "3\u00b0", "4\u00b0", "5\u00b0"]
+                    Component.onCompleted: {
+                        var i = values.indexOf(Math.round(StreamingPreferences.vrOverscanDeg))
+                        currentIndex = i >= 0 ? i : 0
+                        recalculateWidth()
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrOverscanDeg = values[currentIndex]
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Pick the newest frame this late")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                AutoResizingComboBox {
+                    id: vrLatchDelayComboBox
+                    property var values: [0, 3, 5, 6]
+                    model: [qsTr("Off"), "3 ms", "5 ms", "6 ms"]
+                    Component.onCompleted: {
+                        var i = values.indexOf(Math.round(StreamingPreferences.vrLatchDelayMs))
+                        currentIndex = i >= 0 ? i : 0
+                        recalculateWidth()
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrLatchDelayMs = values[currentIndex]
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Sharper centre (foveated encoding)")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                AutoResizingComboBox {
+                    id: vrFoveationComboBox
+                    property var values: [100, 125, 150, 200]
+                    model: [qsTr("Off"), "1.25x", "1.5x", "2x"]
+                    Component.onCompleted: {
+                        var i = values.indexOf(StreamingPreferences.vrFoveation)
+                        currentIndex = i >= 0 ? i : 0
+                        recalculateWidth()
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrFoveation = values[currentIndex]
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Spends more of the stream's pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.")
+                }
+
+                CheckBox {
+                    id: vrHalfRateCheck
+                    width: parent.width
+                    text: qsTr("Stream at half the headset refresh rate")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.vrHalfRate
+                    onCheckedChanged: {
+                        StreamingPreferences.vrHalfRate = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("The game renders and streams at half rate while the headset still displays at full rate. Halves the load on the host and the network.")
+                }
+
+                CheckBox {
+                    id: vrSynthCheck
+                    width: parent.width
+                    text: qsTr("Synthesize the in-between frames")
+                    font.pointSize: 12
+                    enabled: vrHalfRateCheck.checked
+                    checked: StreamingPreferences.vrSynth
+                    onCheckedChanged: {
+                        StreamingPreferences.vrSynth = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.")
+                }
+            }
+        }
+
         GroupBox {
             id: basicSettingsGroupBox
             width: (parent.width - (parent.leftPadding + parent.rightPadding))
@@ -1125,6 +1298,7 @@ Flickable {
                 // v1.4.137 加 RS_AUTO 並改成預設，行為 = 走標準 hwaccel cascade.
                 Label {
                     width: parent.width
+                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                     text: qsTr("Renderer")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
@@ -1135,6 +1309,7 @@ Flickable {
                 // 選不了項目。
                 AutoResizingComboBox {
                     id: rendererSelectionCombo
+                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                     width: parent.width
                     font.pointSize: 12
                     textRole: "text"
@@ -1156,6 +1331,16 @@ Flickable {
                     }
                     onActivated: {
                         StreamingPreferences.rendererSelection = rendererSelectionModel.get(currentIndex).val
+                        // §REVIEW-1104：切換渲染器會影響 FRUC 的 host fps，autoAdjustBitrate 開啟時同步重算預設位元率
+                        if (StreamingPreferences.autoAdjustBitrate) {
+                            StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(
+                                StreamingPreferences.width,
+                                StreamingPreferences.height,
+                                StreamingPreferences.fps,
+                                StreamingPreferences.enableYUV444,
+                                StreamingPreferences.enableFrameInterpolation)
+                            slider.value = StreamingPreferences.bitrateKbps
+                        }
                     }
 
                     ToolTip.delay: 1000
@@ -1171,7 +1356,7 @@ Flickable {
                 // currentIndex 用 val lookup 對應（同 rendererSelectionCombo）。
                 Label {
                     width: parent.width
-                    visible: Qt.platform.os === "linux"
+                    visible: Qt.platform.os === "linux" && StreamingPreferences.showAdvancedSettings
                     text: qsTr("Linux video output (frontend)")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
@@ -1179,7 +1364,7 @@ Flickable {
 
                 AutoResizingComboBox {
                     id: linuxVideoFrontendCombo
-                    visible: Qt.platform.os === "linux"
+                    visible: Qt.platform.os === "linux" && StreamingPreferences.showAdvancedSettings
                     width: parent.width
                     font.pointSize: 12
                     textRole: "text"
@@ -1259,7 +1444,7 @@ Flickable {
                 // 選 backend.  顯示提示讓使用者知道 Vulkan 等同 Generic.
                 Label {
                     width: parent.width
-                    visible: frameInterpolationCheck.checked
+                    visible: frameInterpolationCheck.checked && StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
                     text: qsTr("The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.")
                     font.pointSize: 10
@@ -1276,7 +1461,7 @@ Flickable {
                 Row {
                     width: parent.width
                     spacing: 8
-                    visible: frameInterpolationCheck.checked
+                    visible: frameInterpolationCheck.checked && StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
                     Label {
                         text: qsTr("Interpolation mode:")
@@ -1291,6 +1476,16 @@ Flickable {
                         onCheckedChanged: {
                             if (checked && StreamingPreferences.vkfrucPassiveMode) {
                                 StreamingPreferences.vkfrucPassiveMode = false
+                                // §REVIEW-1104：切回主動補幀會改變 host fps，autoAdjustBitrate 開啟時同步重算預設位元率
+                                if (StreamingPreferences.autoAdjustBitrate) {
+                                    StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(
+                                        StreamingPreferences.width,
+                                        StreamingPreferences.height,
+                                        StreamingPreferences.fps,
+                                        StreamingPreferences.enableYUV444,
+                                        StreamingPreferences.enableFrameInterpolation)
+                                    slider.value = StreamingPreferences.bitrateKbps
+                                }
                             }
                         }
                         ToolTip.delay: 1000
@@ -1306,6 +1501,16 @@ Flickable {
                         onCheckedChanged: {
                             if (checked && !StreamingPreferences.vkfrucPassiveMode) {
                                 StreamingPreferences.vkfrucPassiveMode = true
+                                // §REVIEW-1104：切到被動補幀會改變 host fps，autoAdjustBitrate 開啟時同步重算預設位元率
+                                if (StreamingPreferences.autoAdjustBitrate) {
+                                    StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(
+                                        StreamingPreferences.width,
+                                        StreamingPreferences.height,
+                                        StreamingPreferences.fps,
+                                        StreamingPreferences.enableYUV444,
+                                        StreamingPreferences.enableFrameInterpolation)
+                                    slider.value = StreamingPreferences.bitrateKbps
+                                }
                             }
                         }
                         ToolTip.delay: 1000
@@ -1321,7 +1526,7 @@ Flickable {
                     // Vulkan renderer 的 compute 補幀內建,不需 frucBackend.
                     // RS_AUTO 走標準 cascade（實際也是 D3D11VA on Windows），
                     // 所以跟 RS_D3D11 一樣需要選 backend.
-                    visible: frameInterpolationCheck.checked
+                    visible: frameInterpolationCheck.checked && StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                              && StreamingPreferences.rendererSelection !== StreamingPreferences.RS_VULKAN
                     font.pointSize: 12
                     textRole: "text"
@@ -1366,7 +1571,7 @@ Flickable {
                     // pipelines that don't take a quality hint.
                     // Vulkan renderer 走自己內建 compute，不吃 quality hint.
                     // RS_AUTO 跟 RS_D3D11 一樣會吃 Generic backend，顯示 quality.
-                    visible: frameInterpolationCheck.checked
+                    visible: frameInterpolationCheck.checked && StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                              && StreamingPreferences.rendererSelection !== StreamingPreferences.RS_VULKAN
                              && frucBackendCombo.currentIndex === 0
                     font.pointSize: 12
@@ -1401,7 +1606,7 @@ Flickable {
                 // 給 UI 看; m_CurrentTier 是 runtime, 跑時才有意義).
                 Label {
                     width: parent.width
-                    visible: frameInterpolationCheck.checked
+                    visible: frameInterpolationCheck.checked && StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
                     font.pointSize: 11
                     wrapMode: Text.Wrap
@@ -1438,7 +1643,7 @@ Flickable {
                 Row {
                     width: parent.width
                     spacing: 8
-                    visible: frameInterpolationCheck.checked
+                    visible: frameInterpolationCheck.checked && StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                              && StreamingPreferences.rendererSelection === StreamingPreferences.RS_VULKAN
                     Label {
                         text: qsTr("Edge MV threshold:")
@@ -1528,6 +1733,23 @@ Flickable {
                             slider.value = defaultBitrate
                         }
                     }
+                }
+
+                // §ABR-AUTO（2026-11-03）：串流中依網路狀況自動升降位元率，滑桿值是上限
+                CheckBox {
+                    id: adaptiveBitrateCheck
+                    width: parent.width
+                    text: qsTr("Adjust bitrate automatically while streaming")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.adaptiveBitrate
+                    onCheckedChanged: {
+                        StreamingPreferences.adaptiveBitrate = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Lowers the bitrate when the network drops packets and raises it back when the network recovers. The bitrate above is the maximum.")
                 }
 
                 Label {
@@ -1828,6 +2050,7 @@ Flickable {
 
                 CheckBox {
                     id: forceRelayStreamCheck
+                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV：測試用
                     width: parent.width
                     text: qsTr("Force streaming via relay (for testing UDP tunnel)")
                     font.pointSize: 11
@@ -2178,160 +2401,6 @@ Flickable {
                 }
             }
         }
-
-        // VR（Steam Frame PCVR）：從 GUI 啟動的 VR 串流是另一個行程，讀的是這裡存下來的值
-        GroupBox {
-            id: vrSettingsGroupBox
-            width: (parent.width - (parent.leftPadding + parent.rightPadding))
-            padding: 12
-            title: "<font color=\"#D4FF3A\">§ VR · </font><font color=\"#F2F5E1\">" + qsTr("VR Streaming (Steam Frame)") + "</font>"
-            font.pointSize: 12
-
-            Column {
-                anchors.fill: parent
-                spacing: 5
-
-                Label {
-                    width: parent.width
-                    text: qsTr("Resolution per eye")
-                    font.pointSize: 12
-                    wrapMode: Text.Wrap
-                }
-
-                // §UI-SCROLL：這一區的四個下拉選單同樣用 AutoResizingComboBox（手把才能在選單裡上下選），
-                // 寬度跟著最長的選項，初始化時要自己算一次
-                AutoResizingComboBox {
-                    id: vrEyeComboBox
-                    property var values: [1152, 1440, 1728, 2160]
-                    model: ["1152 x 1152", "1440 x 1440", "1728 x 1728", "2160 x 2160"]
-                    Component.onCompleted: {
-                        var i = values.indexOf(StreamingPreferences.vrEyeWidth)
-                        currentIndex = i >= 0 ? i : values.length - 1
-                        recalculateWidth()
-                    }
-                    onActivated: {
-                        StreamingPreferences.vrEyeWidth = values[currentIndex]
-                        StreamingPreferences.vrEyeHeight = values[currentIndex]
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 8000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.")
-                }
-
-                Label {
-                    width: parent.width
-                    text: qsTr("Extra field of view (overscan)")
-                    font.pointSize: 12
-                    wrapMode: Text.Wrap
-                }
-
-                AutoResizingComboBox {
-                    id: vrOverscanComboBox
-                    property var values: [0, 2, 3, 4, 5]
-                    model: [qsTr("Off"), "2\u00b0", "3\u00b0", "4\u00b0", "5\u00b0"]
-                    Component.onCompleted: {
-                        var i = values.indexOf(Math.round(StreamingPreferences.vrOverscanDeg))
-                        currentIndex = i >= 0 ? i : 0
-                        recalculateWidth()
-                    }
-                    onActivated: {
-                        StreamingPreferences.vrOverscanDeg = values[currentIndex]
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 8000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.")
-                }
-
-                Label {
-                    width: parent.width
-                    text: qsTr("Pick the newest frame this late")
-                    font.pointSize: 12
-                    wrapMode: Text.Wrap
-                }
-
-                AutoResizingComboBox {
-                    id: vrLatchDelayComboBox
-                    property var values: [0, 3, 5, 6]
-                    model: [qsTr("Off"), "3 ms", "5 ms", "6 ms"]
-                    Component.onCompleted: {
-                        var i = values.indexOf(Math.round(StreamingPreferences.vrLatchDelayMs))
-                        currentIndex = i >= 0 ? i : 0
-                        recalculateWidth()
-                    }
-                    onActivated: {
-                        StreamingPreferences.vrLatchDelayMs = values[currentIndex]
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 8000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.")
-                }
-
-                Label {
-                    width: parent.width
-                    text: qsTr("Sharper centre (foveated encoding)")
-                    font.pointSize: 12
-                    wrapMode: Text.Wrap
-                }
-
-                AutoResizingComboBox {
-                    id: vrFoveationComboBox
-                    property var values: [100, 125, 150, 200]
-                    model: [qsTr("Off"), "1.25x", "1.5x", "2x"]
-                    Component.onCompleted: {
-                        var i = values.indexOf(StreamingPreferences.vrFoveation)
-                        currentIndex = i >= 0 ? i : 0
-                        recalculateWidth()
-                    }
-                    onActivated: {
-                        StreamingPreferences.vrFoveation = values[currentIndex]
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 8000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Spends more of the stream's pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.")
-                }
-
-                CheckBox {
-                    id: vrHalfRateCheck
-                    width: parent.width
-                    text: qsTr("Stream at half the headset refresh rate")
-                    font.pointSize: 12
-                    checked: StreamingPreferences.vrHalfRate
-                    onCheckedChanged: {
-                        StreamingPreferences.vrHalfRate = checked
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 8000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("The game renders and streams at half rate while the headset still displays at full rate. Halves the load on the host and the network.")
-                }
-
-                CheckBox {
-                    id: vrSynthCheck
-                    width: parent.width
-                    text: qsTr("Synthesize the in-between frames")
-                    font.pointSize: 12
-                    enabled: vrHalfRateCheck.checked
-                    checked: StreamingPreferences.vrSynth
-                    onCheckedChanged: {
-                        StreamingPreferences.vrSynth = checked
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 8000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.")
-                }
-            }
-        }
     }
 
     Column {
@@ -2449,6 +2518,7 @@ Flickable {
 
                 CheckBox {
                     id: absoluteTouchCheck
+                    visible: SystemProperties.hasTouchscreen  // §SETTINGS-ADV：沒有觸控螢幕就不顯示
                     hoverEnabled: true
                     width: parent.width
                     text: qsTr("Use touchscreen as a virtual trackpad")
@@ -2597,11 +2667,11 @@ Flickable {
                     text: qsTr("Path scheduler")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
-                    visible: enableMpQuicCheck.checked
+                    visible: enableMpQuicCheck.checked && StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                 }
 
                 AutoResizingComboBox {
-                    visible: enableMpQuicCheck.checked
+                    visible: enableMpQuicCheck.checked && StreamingPreferences.showAdvancedSettings
                     Component.onCompleted: {
                         currentIndex = StreamingPreferences.mpQuicScheduler
                         // 跟 resolution / fps dropdown 一樣顯式量寬, 不然
@@ -2642,12 +2712,14 @@ Flickable {
                 Label {
                     width: parent.width
                     id: resVDSTitle
+                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                     text: qsTr("Video decoder")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
                 }
 
                 AutoResizingComboBox {
+                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                     // ignore setting the index at first, and actually set it when the component is loaded
                     Component.onCompleted: {
                         var saved_vds = StreamingPreferences.videoDecoderSelection
@@ -2757,7 +2829,10 @@ Flickable {
                     enabled: SystemProperties.supportsHdr
                     checked: enabled && StreamingPreferences.enableHdr
                     onCheckedChanged: {
-                        StreamingPreferences.enableHdr = checked
+                        // §REVIEW-1104：supportsHdr 變 false 會讓 checked 跟著變 false，這時不能把已存的 enableHdr 寫成 false
+                        if (enabled) {
+                            StreamingPreferences.enableHdr = checked
+                        }
                     }
 
                     // Updating StreamingPreferences.videoCodecConfig is handled above
@@ -2773,6 +2848,7 @@ Flickable {
 
                 CheckBox {
                     id: enableYUV444
+                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                     width: parent.width
                     text: qsTr("Enable YUV 4:4:4 (Experimental)")
                     font.pointSize: 12
@@ -2804,6 +2880,7 @@ Flickable {
 
                 CheckBox {
                     id: unlockBitrate
+                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
                     width: parent.width
                     text: qsTr("Unlock bitrate limit (Experimental)")
                     font.pointSize: 12

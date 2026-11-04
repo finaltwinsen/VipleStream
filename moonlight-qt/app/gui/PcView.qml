@@ -51,8 +51,17 @@ CenteredGridView {
 
     function pairingComplete(error)
     {
+        // §REVIEW-1104：使用者已取消配對時，晚到的結果不要再改畫面或跳出錯誤
+        if (pairDialog.pairingCancelled) {
+            pairDialog.pairingCancelled = false
+            return
+        }
+
         // Close the PIN dialog
+        // §REVIEW-1104：程式關掉對話框也會送 rejected，不要把這次完成誤判成使用者取消
+        pairDialog.closingAfterComplete = true
         pairDialog.close()
+        pairDialog.closingAfterComplete = false
 
         // Display a failed dialog if we got an error
         if (error !== undefined) {
@@ -630,7 +639,8 @@ CenteredGridView {
                 NavigableMenuItem {
                     text: qsTr("Rename PC")
                     onTriggered: {
-                        renamePcDialog.pcIndex = index
+                        // §REVIEW-1104：改記主機 UUID，確認時再依 UUID 反查列號，避免對話框開啟期間清單重排改到別台
+                        renamePcDialog.pcUuid = model.uuid
                         renamePcDialog.originalName = model.name
                         renamePcDialog.open()
                     }
@@ -638,7 +648,8 @@ CenteredGridView {
                 NavigableMenuItem {
                     text: qsTr("Delete PC")
                     onTriggered: {
-                        deletePcDialog.pcIndex = index
+                        // §REVIEW-1104：改記主機 UUID，確認時再依 UUID 反查列號，避免對話框開啟期間清單重排刪到別台
+                        deletePcDialog.pcUuid = model.uuid
                         deletePcDialog.pcName = model.name
                         deletePcDialog.open()
                     }
@@ -674,6 +685,8 @@ CenteredGridView {
                     computerModel.pairComputer(index, pin)
 
                     // Display the pairing dialog
+                    // §REVIEW-1104：新的一次配對清掉上次的取消旗標，避免晚到的結果被吃掉
+                    pairDialog.pairingCancelled = false
                     pairDialog.pin = pin
                     pairDialog.open()
                 }
@@ -709,7 +722,8 @@ CenteredGridView {
         }
 
         Keys.onDeletePressed: {
-            deletePcDialog.pcIndex = index
+            // §REVIEW-1104：改記主機 UUID，確認時再依 UUID 反查列號，避免對話框開啟期間清單重排刪到別台
+            deletePcDialog.pcUuid = model.uuid
             deletePcDialog.pcName = model.name
             deletePcDialog.open()
         }
@@ -733,10 +747,15 @@ CenteredGridView {
         closePolicy: Popup.CloseOnEscape
 
         property string pin : "0000"
+        property bool pairingCancelled : false
+        property bool closingAfterComplete : false
         standardButtons: Dialog.Cancel
 
         onRejected: {
-            // FIXME: We should interrupt pairing here
+            // §REVIEW-1104：Cancel／Esc 只標記取消，晚到的結果不要開錯誤對話框；已送出的 pair 請求不在這裡中止
+            if (!closingAfterComplete) {
+                pairingCancelled = true
+            }
         }
 
         // Transparent surround; the content Column provides its own ink2 panel.
@@ -836,13 +855,17 @@ CenteredGridView {
     NavigableMessageDialog {
         id: deletePcDialog
         // don't allow edits to the rest of the window while open
-        property int pcIndex : -1
+        // §REVIEW-1104：以 UUID 記錄目標主機，確認時依 UUID 找列，找不到即取消
+        property string pcUuid : ""
         property string pcName : ""
         text: qsTr("Are you sure you want to remove '%1'?").arg(pcName)
         standardButtons: Dialog.Yes | Dialog.No
 
         onAccepted: {
-            computerModel.deleteComputer(pcIndex)
+            var idx = computerModel.indexForUuid(pcUuid)
+            if (idx >= 0) {
+                computerModel.deleteComputer(idx)
+            }
         }
     }
 
@@ -881,7 +904,8 @@ CenteredGridView {
         id: renamePcDialog
         property string label: qsTr("Enter the new name for this PC:")
         property string originalName
-        property int pcIndex : -1;
+        // §REVIEW-1104：以 UUID 記錄目標主機，確認時依 UUID 找列，找不到即取消
+        property string pcUuid : "";
 
         standardButtons: Dialog.Ok | Dialog.Cancel
 
@@ -896,7 +920,10 @@ CenteredGridView {
 
         onAccepted: {
             if (editText.text) {
-                computerModel.renameComputer(pcIndex, editText.text)
+                var idx = computerModel.indexForUuid(pcUuid)
+                if (idx >= 0) {
+                    computerModel.renameComputer(idx, editText.text)
+                }
             }
         }
 

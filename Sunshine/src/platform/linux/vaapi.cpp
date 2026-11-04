@@ -334,6 +334,10 @@ namespace va {
       // Keep track of file descriptors
       if (prime.num_objects > egl::nv12_img_t::num_fds) {
         BOOST_LOG(error) << "Invalid object count for VA surface: "sv << prime.num_objects;
+        // §REVIEW-1103：還沒交給 file_t 接手，這裡直接 return 會漏掉匯出的 PRIME fd
+        for (std::uint32_t x = 0; x < prime.num_objects && x < std::size(prime.objects); ++x) {
+          close(prime.objects[x].fd);
+        }
         return -1;
       }
       std::array<file_t, egl::nv12_img_t::num_fds> fds;

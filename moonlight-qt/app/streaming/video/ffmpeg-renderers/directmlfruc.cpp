@@ -2369,7 +2369,10 @@ void DirectMLFRUC::skipFrame(ID3D11DeviceContext* ctx)
     if (!m_Initialized) return;
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
-    m_FrameCount++;
+    // §REVIEW-1103：跳過的幀沒有 pack 進 FrameTensor、也沒翻 m_WriteSlot，原本只 m_FrameCount++，
+    // 下一幀會拿「兩幀前」的 slot 內插（鬼影）；第一幀就被跳過時 slot 0 從未寫入就被讀。
+    // 歸零讓下一幀重新當基底（走 m_FrameCount == 0 的 pack-only 路徑），少補一張但不會錯。
+    m_FrameCount = 0;
 }
 
 // ── probeInferenceCost ────────────────────────────────────────────────────

@@ -66,6 +66,7 @@ public class CliStreamActivity extends Activity {
 
     private void resolve(String host, String appName) {
         ComputerDatabaseManager dbManager = new ComputerDatabaseManager(this);
+        try {
         ComputerDetails computer = findComputerByHost(dbManager, host);
 
         if (computer == null) {
@@ -156,6 +157,10 @@ public class CliStreamActivity extends Activity {
 
         startActivity(gameIntent);
         finish();
+        } finally {
+            // §REVIEW-1104：CLI 路徑打開 computers4.db 後沒關，連線留到 finalizer 才關並出現 SQLite leaked
+            dbManager.close();
+        }
     }
 
     private ComputerDetails findComputerByHost(ComputerDatabaseManager dbManager, String host) {

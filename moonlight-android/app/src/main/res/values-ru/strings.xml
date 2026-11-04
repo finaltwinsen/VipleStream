@@ -346,4 +346,6 @@
     <string name="steam_switch_error_taskgone">Задача смены исчезла на хосте</string>
     <string name="steam_switch_error_timeout">Время смены истекло (&gt;150 с, а сервер так и не перешёл в конечное состояние)</string>
     <string name="steam_switch_account_unavailable">Для этого аккаунта на хосте нет сохранённых учётных данных. Сначала один раз войдите на хосте, затем повторите попытку.</string>
+    <string name="title_show_advanced">Показывать расширенные и экспериментальные параметры</string>
+    <string name="summary_show_advanced">Параметры для диагностики и тестирования. Скрытые параметры сохраняют текущие значения.</string>
 </resources>

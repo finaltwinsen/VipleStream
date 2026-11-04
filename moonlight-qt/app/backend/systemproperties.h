@@ -23,6 +23,8 @@ public:
     Q_PROPERTY(bool hasDesktopEnvironment MEMBER hasDesktopEnvironment CONSTANT)
     Q_PROPERTY(bool hasBrowser MEMBER hasBrowser CONSTANT)
     Q_PROPERTY(bool hasDiscordIntegration MEMBER hasDiscordIntegration CONSTANT)
+    // §SETTINGS-ADV：有觸控螢幕才顯示「觸控螢幕當觸控板」（啟動時的快照）
+    Q_PROPERTY(bool hasTouchscreen MEMBER hasTouchscreen CONSTANT)
     Q_PROPERTY(bool usesMaterial3Theme MEMBER usesMaterial3Theme CONSTANT)
     Q_PROPERTY(QString versionString MEMBER versionString CONSTANT)
     // §HID-PROBE：啟動探測發現的無回應 HID 裝置（人類可讀、同 VID:PID 去重，
@@ -36,6 +38,8 @@ public:
     Q_PROPERTY(QString unmappedGamepads MEMBER unmappedGamepads NOTIFY unmappedGamepadsChanged)
     Q_PROPERTY(QSize maximumResolution MEMBER maximumResolution NOTIFY maximumResolutionChanged)
     Q_PROPERTY(bool supportsHdr MEMBER supportsHdr NOTIFY supportsHdrChanged)
+    // §REVIEW-1104：暴露探測執行緒是否仍在執行，供 QML 判斷何時可安全呼叫 refreshDisplays()
+    Q_PROPERTY(bool asyncLoadInProgress MEMBER asyncLoadInProgress NOTIFY asyncLoadInProgressChanged)
 
     // Either startAsyncLoad()+waitForAsyncLoad() or refreshDisplays() must be invoked first
     Q_INVOKABLE QRect getNativeResolution(int displayIndex);
@@ -57,6 +61,8 @@ signals:
     void rendererAlwaysFullScreenChanged();
     void maximumResolutionChanged();
     void supportsHdrChanged();
+    // §REVIEW-1104：探測執行緒開始與結束（含拆窗與 SDL_QuitSubSystem 完成）時發信號
+    void asyncLoadInProgressChanged();
 
 private slots:
     void updateDecoderProperties(bool hasHardwareAcceleration, bool rendererAlwaysFullScreen, QSize maximumResolution, bool supportsHdr);
@@ -73,6 +79,7 @@ private:
     bool hasDesktopEnvironment;
     bool hasBrowser;
     bool hasDiscordIntegration;
+    bool hasTouchscreen;
     QString versionString;
     bool usesMaterial3Theme;
     QString unresponsiveHidDevices;   // §HID-PROBE
@@ -83,6 +90,8 @@ private:
     QSize maximumResolution;
     bool supportsHdr;
     QString unmappedGamepads;
+    // §REVIEW-1104：只在探測執行緒執行期間為 true
+    bool asyncLoadInProgress = false;
 
     // Properties set by refreshDisplays()
     QList<QRect> monitorNativeResolutions;

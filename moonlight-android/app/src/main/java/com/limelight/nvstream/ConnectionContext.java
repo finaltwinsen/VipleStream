@@ -37,4 +37,5 @@ public class ConnectionContext {
     public String relayPsk;
     public String serverUuid;
     public String stunAddress;  // STUN public IP from serverinfo
+    public int stunPunchPort;   // §REVIEW-1104：STUN 回報的實際控制埠（0＝不知道，退回 HTTP 埠＋10）
 }

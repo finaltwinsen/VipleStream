@@ -21,6 +21,7 @@
 #define SER_AUTOFPS "autofps"
 #define SER_UNLOCK_BITRATE "unlockbitrate"
 #define SER_AUTOADJUSTBITRATE "autoadjustbitrate"
+#define SER_ADAPTIVEBITRATE "adaptivebitrate"
 #define SER_FULLSCREEN "fullscreen"
 #define SER_VSYNC "vsync"
 #define SER_GAMEOPTS "gameopts"
@@ -80,8 +81,10 @@
 #define SER_SWAPFACEBUTTONS "swapfacebuttons"
 #define SER_CAPTURESYSKEYS "capturesyskeys"
 #define SER_KEEPAWAKE "keepawake"
+#define SER_SHOWADVANCEDSETTINGS "showadvancedsettings"
 #define SER_VROVERSCANDEG "vroverscandeg"
 #define SER_VRBUFFERFRAMES "vrbufferframes"
+#define SER_VRBUFFERAUTO "vrbufferauto"
 #define SER_VRLATCHDELAYMS "vrlatchdelayms"
 #define SER_VRLATCHDELAYMIG "vrlatchdelaymig1029"
 #define SER_VRHALFRATE "vrhalfrate"
@@ -181,6 +184,10 @@ void StreamingPreferences::reload()
     width = settings.value(SER_WIDTH, 1280).toInt();
     height = settings.value(SER_HEIGHT, 720).toInt();
     fps = settings.value(SER_FPS, 60).toInt();
+    // §REVIEW-1104：QSettings 若存有 <= 0 的 fps（如舊版 CLI 寫入或損毀設定），載入時退回預設值 60，避免後續串流與取餘數除以零
+    if (fps <= 0) {
+        fps = 60;
+    }
     // §H.4-AUTO：新安裝（從沒存過解析度／FPS）預設「自動（本機螢幕最佳）」；已存在的使用者設定
     // 一律保留原本的明確值，不會被改成自動。
     autoResolution = settings.value(SER_AUTORES, !settings.contains(SER_WIDTH)).toBool();
@@ -201,6 +208,7 @@ void StreamingPreferences::reload()
                           enableFrameInterpolation)).toInt();
     unlockBitrate = settings.value(SER_UNLOCK_BITRATE, false).toBool();
     autoAdjustBitrate = settings.value(SER_AUTOADJUSTBITRATE, true).toBool();
+    adaptiveBitrate = settings.value(SER_ADAPTIVEBITRATE, true).toBool();
     enableVsync = settings.value(SER_VSYNC, true).toBool();
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();
@@ -305,8 +313,10 @@ void StreamingPreferences::reload()
     reverseScrollDirection = settings.value(SER_REVERSESCROLL, false).toBool();
     swapFaceButtons = settings.value(SER_SWAPFACEBUTTONS, false).toBool();
     keepAwake = settings.value(SER_KEEPAWAKE, true).toBool();
+    showAdvancedSettings = settings.value(SER_SHOWADVANCEDSETTINGS, false).toBool();
     vrOverscanDeg = qBound(0.0, settings.value(SER_VROVERSCANDEG, 3.0).toDouble(), 10.0);
-    vrBufferFrames = qBound(0, settings.value(SER_VRBUFFERFRAMES, 1).toInt(), 1);
+    vrBufferFrames = qBound(0, settings.value(SER_VRBUFFERFRAMES, 1).toInt(), 2);
+    vrBufferAuto = settings.value(SER_VRBUFFERAUTO, true).toBool();
     vrLatchDelayMs = qBound(0.0, settings.value(SER_VRLATCHDELAYMS, 3.0).toDouble(), 20.0);
     // 2026-10-29：預設從 0 改成 3 ms（頭盔實測：解碼→顯示 −3.1 ms，繪製時間與漏幀不變；6 ms 會撞上 GPU 忙碌的那段）。
     // save() 每次都寫入全部設定，舊版存著的 0 多半只是當時的預設值：只遷移一次，把存著的 0 改成 3；
@@ -600,6 +610,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_BITRATE, bitrateKbps);
     settings.setValue(SER_UNLOCK_BITRATE, unlockBitrate);
     settings.setValue(SER_AUTOADJUSTBITRATE, autoAdjustBitrate);
+    settings.setValue(SER_ADAPTIVEBITRATE, adaptiveBitrate);
     settings.setValue(SER_VSYNC, enableVsync);
     settings.setValue(SER_GAMEOPTS, gameOptimizations);
     settings.setValue(SER_HOSTAUDIO, playAudioOnHost);
@@ -658,8 +669,10 @@ void StreamingPreferences::save()
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
+    settings.setValue(SER_SHOWADVANCEDSETTINGS, showAdvancedSettings);
     settings.setValue(SER_VROVERSCANDEG, vrOverscanDeg);
     settings.setValue(SER_VRBUFFERFRAMES, vrBufferFrames);
+    settings.setValue(SER_VRBUFFERAUTO, vrBufferAuto);
     settings.setValue(SER_VRLATCHDELAYMS, vrLatchDelayMs);
     settings.setValue(SER_VRHALFRATE, vrHalfRate);
     settings.setValue(SER_VR10BIT, vr10Bit);
@@ -691,8 +704,35 @@ int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool
     // FRUC dual present 時 server 只推一半 fps real, bitrate 也對應半切.
     // R1-2 不砍半的版本造成 default bitrate 高估, 浪費頻寬 + 加重 client decode 壓力.
     int effectiveFps = fps;
-    if (fruc && fps <= 180) {
-        effectiveFps = fps / 2;
+    bool passiveFullFps = false;  // §REVIEW-1104（使用者決策 B）：被動補幀 host 送全幀，不加 FRUC headroom
+    if (fruc) {
+        // §REVIEW-1104：預設位元率跟 host fps 對齊（Vulkan 被動＝全 fps、Vulkan triple 才 /3、其餘 FRUC 含 fps>180 都 /2）；建構中 s_GlobalPrefs 還沒設，改讀 QSettings
+        bool vulkan = false;
+        bool passivePref = false;
+        bool triplePref = false;
+        StreamingPreferences* prefs = s_GlobalPrefs;
+        if (prefs != nullptr) {
+            vulkan = prefs->rendererSelection == RS_VULKAN;
+            passivePref = prefs->vkfrucPassiveMode;
+            triplePref = prefs->vkfrucEnableTriple;
+        }
+        else {
+            QSettings settings;
+            vulkan = static_cast<RendererSelection>(settings.value(SER_RENDERERSEL, static_cast<int>(RS_AUTO)).toInt()) == RS_VULKAN;
+            passivePref = settings.value(SER_VKFRUCPASSIVE, false).toBool();
+            triplePref = settings.value(SER_VKFRUCTRIPLE, false).toBool();
+        }
+        const bool triplePresent = vulkan && (triplePref || qEnvironmentVariableIntValue("VIPLE_VKFRUC_TRIPLE") != 0);
+        if (vulkan && passivePref) {
+            effectiveFps = fps;
+            passiveFullFps = true;
+        }
+        else if (triplePresent && fps / 3 >= 30) {
+            effectiveFps = fps / 3;
+        }
+        else {
+            effectiveFps = fps / 2;
+        }
     }
 
     // Don't scale bitrate linearly beyond 60 FPS. It's definitely not a linear
@@ -761,7 +801,8 @@ int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool
     // (vs ~113 Mbps at 4K120 FRUC-off — lower, not higher).
     // Net effect at 4K60 FRUC-on:  ~46 Mbps default
     // (vs ~80 Mbps at 4K60 FRUC-off — same direction, halved.)
-    float frucHeadroom = fruc ? 1.15f : 1.0f;
+    // §REVIEW-1104（使用者決策 B）：headroom 的理由是「一張來源要撐兩張顯示」，只適用主動補幀（host 半幀）
+    float frucHeadroom = (fruc && !passiveFullFps) ? 1.15f : 1.0f;
 
     return qRound(resolutionFactor * frameRateFactor * frucHeadroom) * 1000;
 }

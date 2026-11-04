@@ -27,6 +27,7 @@ namespace nvprefs {
     std::filesystem::path undo_file_path;
     std::optional<undo_data_t> undo_data;
     std::optional<undo_file_t> undo_file;
+    bool undo_file_lost = false;  ///< §REVIEW-1103（B033-1）：寫入失敗後檔案已刪，下次 modify 要重建
   };
 
   nvprefs_interface::nvprefs_interface():
@@ -162,6 +163,15 @@ namespace nvprefs {
           error_message("Couldn't create undo file");
           return false;
         }
+      } else if (pimpl->undo_file_lost) {
+        // §REVIEW-1103（B033-1）：上次寫 undo 檔失敗、檔案已刪，重建一份（失敗就保留舊物件，結束時的還原仍可用）
+        auto recreated = undo_file_t::create_new_file(pimpl->undo_file_path);
+        if (!recreated) {
+          error_message("Couldn't recreate undo file");
+          return false;
+        }
+        pimpl->undo_file = std::move(recreated);
+        pimpl->undo_file_lost = false;
       }
 
       assert(undo_data);
@@ -178,6 +188,10 @@ namespace nvprefs {
         if (!pimpl->undo_file->delete_file()) {
           error_message("Couldn't delete undo file");
         }
+        // §REVIEW-1103（B033-1）：delete_file 之後 handle 已空，undo_file 卻還 has_value → 之後每次 modify 都跳過
+        // create_new_file、write_undo_data 立刻失敗，永遠改不了全域設定。標記下次重建檔案；undo_file／undo_data 保留，
+        // 先前成功套用的修改在結束時仍要靠它們還原（本次失敗的修改已由 load_settings 撤回，留在 undo_data 裡還原時無害）。
+        pimpl->undo_file_lost = true;
         return false;
       }
 

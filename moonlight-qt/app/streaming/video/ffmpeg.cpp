@@ -1856,6 +1856,8 @@ void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)
     }
 }
 
+// §REVIEW-1103：呼叫端一律傳 params->videoFormat。m_VideoFormat 要到 completeInitialization 才設定，
+// 建 renderer 當下常常還是 0，原本會讓 D3D11VA HEVC 合成補幀走不到、Linux VAAPI 10-bit 擋不住（P010 崩潰組合）。
 IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig* hwDecodeCfg, int pass, int videoFormat)
 {
     if (!(hwDecodeCfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
@@ -1877,7 +1879,10 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
             // RS_D3D11 時 shouldUseVkFrucRendererForVulkanHwaccel() = false
             // → 走原本的 D3D11VARenderer，行為不變。
             // pass=1 retry 永遠走 D3D11VARenderer（下面 pass==1 block 處理）。
-            if ((videoFormat & VIDEO_FORMAT_MASK_H265) &&
+            // §REVIEW-1103：videoFormat 改傳 params->videoFormat 之前這裡一直拿到 0，這條 composite 路徑
+            // 從來沒被走到過（v1.4.167 只是骨架，D3D11-import VkImage 在 NV driver 有 device lost 前科，
+            // 見 Phase B 死路紀錄）。在實機驗過之前維持原本出貨行為＝一律 D3D11VARenderer。
+            if (/* §REVIEW-1103 composite 未驗證，維持關閉 */ false && (videoFormat & VIDEO_FORMAT_MASK_H265) &&
                 shouldUseVkFrucRendererForVulkanHwaccel() && pass == 0) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VKFRUC-COMPOSITE] §B cascade: D3D11VA HEVC HW "
@@ -2402,7 +2407,7 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
                             decoder->name, i);
                 IFFmpegRenderer::InitFailureReason failureReason;
                 if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, cfg, &failureReason,
-                                          [cfg, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0, m_VideoFormat); })) {
+                                          [cfg, params, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0, params->videoFormat); })) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VK-VIDEO] §J.3.c.1 Vulkan-first override SUCCESS");
                     return true;
@@ -2434,7 +2439,7 @@ bool FFmpegVideoDecoder::tryInitializeRendererForUnknownDecoder(const AVCodec* d
                 // Initialize the hardware codec and submit a test frame if the renderer needs it
                 IFFmpegRenderer::InitFailureReason failureReason;
                 if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, config, &failureReason,
-                                          [config, pass, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(config, pass, m_VideoFormat); })) {
+                                          [config, pass, params, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(config, pass, params->videoFormat); })) {
                     return true;
                 }
                 else if (failureReason == IFFmpegRenderer::InitFailureReason::NoHardwareSupport) {
@@ -2711,7 +2716,7 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
                                 decoder->name, j);
                     IFFmpegRenderer::InitFailureReason failureReason;
                     if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, cfg, &failureReason,
-                                              [cfg, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0, m_VideoFormat); })) {
+                                              [cfg, params, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(cfg, 0, params->videoFormat); })) {
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                     "[VIPLE-VK-VIDEO] §J.3.c.1 Vulkan-first override SUCCESS");
                         return true;
@@ -2736,7 +2741,7 @@ bool FFmpegVideoDecoder::tryInitializeHwAccelDecoder(PDECODER_PARAMETERS params,
             // Initialize the hardware codec and submit a test frame if the renderer needs it
             IFFmpegRenderer::InitFailureReason failureReason;
             if (tryInitializeRenderer(decoder, AV_PIX_FMT_NONE, params, config, &failureReason,
-                                      [config, pass, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(config, pass, m_VideoFormat); })) {
+                                      [config, pass, params, this]() -> IFFmpegRenderer* { return createHwAccelRenderer(config, pass, params->videoFormat); })) {
                 return true;
             }
             else if (failureReason == IFFmpegRenderer::InitFailureReason::NoHardwareSupport) {
@@ -3455,6 +3460,16 @@ bool FFmpegVideoDecoder::pyroWaveSkipStale(VIDEO_FRAME_HANDLE handle, PDECODE_UN
         m_ActiveWndVideoStats.receivedFrames++;
         m_ActiveWndVideoStats.totalFrames++;
         m_ActiveWndVideoStats.pacerDroppedFrames++;
+        // §REVIEW-1103：跳過的幀也要推進 m_LastFrameNumber（照 submitDecodeUnit 的算法先補算中間的網路丟幀），
+        // 否則下一幀會把這一幀再算成 networkDroppedFrames、totalFrames 重複計入，誤觸網路警告。
+        if (!m_LastFrameNumber) {
+            m_ActiveWndVideoStats.measurementStartUs = LiGetMicroseconds();
+        }
+        else if (frameNumber > m_LastFrameNumber + 1) {
+            m_ActiveWndVideoStats.networkDroppedFrames += frameNumber - (m_LastFrameNumber + 1);
+            m_ActiveWndVideoStats.totalFrames += frameNumber - (m_LastFrameNumber + 1);
+        }
+        m_LastFrameNumber = frameNumber;
         m_PwStaleSkipped++;
         m_PwStaleMaxDepth = (std::max)(m_PwStaleMaxDepth, pending);
         LiCompleteVideoFrame(handle, DR_OK);

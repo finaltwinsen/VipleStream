@@ -630,7 +630,9 @@ bool DrmRenderer::initialize(PDECODER_PARAMETERS params)
 
             if (plane->crtc_id == m_Crtc.objectId()) {
                 // Don't consider cursor planes when searching for the highest active zpos
-                uint64_t type = props.property("type")->initialValue();
+                // §REVIEW-1103：DRM 規定 universal plane 一定有 type，但驅動不合規時不要解參考空指標
+                auto typeProp = props.property("type");
+                uint64_t type = typeProp ? typeProp->initialValue() : DRM_PLANE_TYPE_OVERLAY;
                 if (type == DRM_PLANE_TYPE_PRIMARY || type == DRM_PLANE_TYPE_OVERLAY) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "Plane %u is active on CRTC %u",
@@ -719,10 +721,12 @@ bool DrmRenderer::initialize(PDECODER_PARAMETERS params)
 
             // Check if the plane is one that we're allowed to use
             DrmPropertyMap props { m_DrmFd, planeRes->planes[i], DRM_MODE_OBJECT_PLANE };
+            // §REVIEW-1103：沒有 type 屬性的 plane 直接略過（不解參考空指標）
             if (auto type = props.property("type");
-                type->initialValue() != DRM_PLANE_TYPE_OVERLAY &&
+                !type ||
+                (type->initialValue() != DRM_PLANE_TYPE_OVERLAY &&
                 (type->initialValue() != DRM_PLANE_TYPE_PRIMARY || !allowPrimaryPlane) &&
-                (type->initialValue() != DRM_PLANE_TYPE_CURSOR || !allowCursorPlane)) {
+                (type->initialValue() != DRM_PLANE_TYPE_CURSOR || !allowCursorPlane))) {
                 drmModeFreePlane(plane);
                 continue;
             }
@@ -744,6 +748,11 @@ bool DrmRenderer::initialize(PDECODER_PARAMETERS params)
                     else {
                         m_VideoPlaneZpos = zpos->initialValue();
                     }
+                }
+                else if (!zpos->range()) {
+                    // §REVIEW-1103：zpos 應該是 range 屬性；不是的話無法調整，略過這個 plane
+                    drmModeFreePlane(plane);
+                    continue;
                 }
                 else {
                     auto zposRange = *zpos->range();
@@ -854,7 +863,7 @@ bool DrmRenderer::initialize(PDECODER_PARAMETERS params)
                         continue;
                     }
                 }
-                else if ((*zpos->range()).second <= m_VideoPlaneZpos) {
+                else if (!zpos->range() || (*zpos->range()).second <= m_VideoPlaneZpos) {  // §REVIEW-1103：range 判空
                     // This plane cannot be raised high enough to be visible
                     drmModeFreePlane(plane);
                     continue;
@@ -1271,7 +1280,7 @@ bool DrmRenderer::mapDumbBuffer(uint32_t handle, size_t size, void** mapping)
 #else
     *mapping = mmap(nullptr, size, PROT_WRITE, MAP_SHARED, m_DrmFd, mapBuf.offset);
 #endif
-    if (mapping == MAP_FAILED) {
+    if (*mapping == MAP_FAILED) {  // §REVIEW-1103：原本比的是 void** 本身，mmap 失敗永遠當成功
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "mmap() failed for dumb buffer: %d",
                      errno);
@@ -1450,7 +1459,8 @@ void DrmRenderer::blitOverlayToCompositionSurface(Overlay::OverlayType type, SDL
                     (y * m_OverlayCompositionSurface->pitch);
                 auto bpp = m_OverlayCompositionSurface->format->BytesPerPixel;
 
-                if (y < overlayRect->y || y > overlayRect->y + overlayRect->h) {
+                // §REVIEW-1103：overlay 涵蓋 [y, y+h)，原本用 > 會在 y == oy+h 時讀 newSurface 第 h 列（緩衝區外一列）
+                if (y < overlayRect->y || y >= overlayRect->y + overlayRect->h) {
                     // Clear the whole row if the overlay doesn't intersect this row
                     memset(dstPixelRow + (overlayUnionRect.x * bpp),
                            0,

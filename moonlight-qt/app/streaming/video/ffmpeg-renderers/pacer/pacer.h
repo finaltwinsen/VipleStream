@@ -11,7 +11,9 @@
 // - 2 frames in the pacing queue  [reduced from 3: saves ~1 frame display latency]
 // - 1 frame removed from the render queue in the process of rendering
 // - 1 frame for deferred free
-#define PACER_MAX_OUTSTANDING_FRAMES (2 + 1 + 1)
+// §REVIEW-1104（使用者決策 B）：慢渲染時實際最多 6 張在外面＝pacing queue 2＋render queue 2＋正在畫 1＋deferred 1。
+// 原本寫 4，V4L2 m2m 的 capture buffer 依它配置，會少給兩張讓解碼器等不到空 buffer
+#define PACER_MAX_OUTSTANDING_FRAMES (2 * 2 + 2)
 
 // §SF-FREEZE：render 執行緒目前在做什麼、從何時開始（ffmpeg.cpp 的凍結 watchdog 讀取）。
 // 只是診斷用的 relaxed atomic，不參與任何同步。

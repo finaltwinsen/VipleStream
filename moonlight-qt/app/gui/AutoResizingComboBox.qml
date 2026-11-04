@@ -35,6 +35,16 @@ ComboBox {
     // We call this every time the options change (and init)
     // so we can adjust the combo box width here too
     onActivated: recalculateWidth()
+    // §REVIEW-1104：只有 onActivated 會重算，初始化與選項數量改變時寬度停在 0，文字被裁掉
+    property bool widthReady : false
+    Component.onCompleted: {
+        widthReady = true
+        recalculateWidth()
+    }
+    onCountChanged: {
+        if (widthReady)
+            recalculateWidth()
+    }
 
     popup.onAboutToShow: {
         // Switch to normal navigation for combo boxes

@@ -5,6 +5,8 @@
 
 #include "SDL_compat.h"
 
+#include <QHash>
+
 struct GamepadState {
     SDL_GameController* controller;
     SDL_JoystickID jsId;
@@ -222,7 +224,7 @@ private:
     static
     Uint32 dragTimerCallback(Uint32 interval, void* param);
 
-    SDL_Window* m_Window;
+    SDL_Window* m_Window = nullptr;  // §REVIEW-1103：建構子沒初始化，setWindow 之前讀到的是垃圾值
     bool m_MultiController;
     // §HID-PROBE：探測發現無回應 HID 裝置 → 這場不初始化 JOYSTICK/GAMECONTROLLER
     // （與舊版 HAPTIC）子系統；鍵盤／滑鼠／觸控與所有 Ctrl+Alt+Shift 組合鍵照常。
@@ -240,7 +242,9 @@ private:
 
     int m_GamepadMask;
     GamepadState m_GamepadState[MAX_GAMEPADS];
-    QSet<short> m_KeysDown;
+    // §REVIEW-1103：連同按下時的 flags 一起記（keyCode → flags）。帶 SS_KBE_FLAG_NON_NORMALIZED 按下的 JIS 鍵
+    // （¥、＼）原本由 raiseAllKeys 用 flags=0 放開，Sunshine 以 (keyCode, flags) 記狀態對不上 → host 卡鍵。
+    QHash<short, char> m_KeysDown;
     bool m_FakeCaptureActive;
     QString m_OldIgnoreDevices;
     QString m_StreamIgnoreDevicesBase;   // 串流期間的忽略清單（不含 SC 家族）

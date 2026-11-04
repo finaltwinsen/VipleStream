@@ -64,7 +64,14 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     private PcGridAdapter pcGridAdapter;
     private ShortcutHelper shortcutHelper;
     private ComputerManagerService.ComputerManagerBinder managerBinder;
-    private boolean freezeUpdates, runningPolling, inForeground, completeOnCreateCalled;
+    private boolean runningPolling, completeOnCreateCalled;
+    // §REVIEW-1104：freezeUpdates 跨執行緒讀取需設為 volatile，並記錄選單目標主機之 uuid
+    private volatile boolean freezeUpdates;
+    private String contextMenuComputerUuid;
+    // §REVIEW-1104：inForeground 跨執行緒需 volatile；增加 isDestroyed 停止旗標與 serviceBound 紀錄綁定狀態
+    private volatile boolean inForeground;
+    private volatile boolean isDestroyed;
+    private boolean serviceBound;
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         public void onServiceConnected(ComponentName className, IBinder binder) {
             final ComputerManagerService.ComputerManagerBinder localBinder =
@@ -76,6 +83,11 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                 public void run() {
                     // Wait for the binder to be ready
                     localBinder.waitForReady();
+
+                    // §REVIEW-1104：若 Activity 已銷毀，停止設定 binder 與啟動更新
+                    if (isDestroyed) {
+                        return;
+                    }
 
                     // Now make the binder visible
                     managerBinder = localBinder;
@@ -90,6 +102,7 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
         }
 
         public void onServiceDisconnected(ComponentName className) {
+            serviceBound = false;
             managerBinder = null;
         }
     };
@@ -255,7 +268,8 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
         UiHelper.setLocale(this);
 
         // Bind to the computer manager service
-        bindService(new Intent(PcView.this, ComputerManagerService.class), serviceConnection,
+        // §REVIEW-1104：記錄 serviceBound，確保 onDestroy 能確實解綁
+        serviceBound = bindService(new Intent(PcView.this, ComputerManagerService.class), serviceConnection,
                 Service.BIND_AUTO_CREATE);
 
         pcGridAdapter = new PcGridAdapter(this, PreferenceConfiguration.readPreferences(this));
@@ -266,7 +280,7 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     private void startComputerUpdates() {
         // Only allow polling to start if we're bound to CMS, polling is not already running,
         // and our activity is in the foreground.
-        if (managerBinder != null && !runningPolling && inForeground) {
+        if (managerBinder != null && !runningPolling && inForeground && !isDestroyed) {
             freezeUpdates = false;
             managerBinder.startPolling(new ComputerManagerListener() {
                 @Override
@@ -275,7 +289,10 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                         PcView.this.runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
-                                updateComputer(details);
+                                // §REVIEW-1104：freezeUpdates 設為 true 後丟棄已排隊但尚未執行的 updateComputer Runnable
+                                if (!freezeUpdates) {
+                                    updateComputer(details);
+                                }
                             }
                         });
 
@@ -312,8 +329,16 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     public void onDestroy() {
         super.onDestroy();
 
-        if (managerBinder != null) {
+        // §REVIEW-1104：設 volatile 停止旗標並依 serviceBound 必定解綁一次，避免洩漏 PcView 與 Service
+        isDestroyed = true;
+
+        if (serviceBound) {
             unbindService(serviceConnection);
+            serviceBound = false;
+        }
+
+        if (managerBinder != null) {
+            // §REVIEW-1104：此處由下方 serviceBound 統一解綁，避免 waitForReady 期間銷毀時漏解綁
         }
     }
 
@@ -352,6 +377,8 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                 
         AdapterContextMenuInfo info = (AdapterContextMenuInfo) menuInfo;
         ComputerObject computer = (ComputerObject) pcGridAdapter.getItem(info.position);
+        // §REVIEW-1104：開啟選單時記錄目標電腦 uuid，供後續選單操作依 uuid 檢索
+        contextMenuComputerUuid = computer.details.uuid;
 
         // Add a header with PC status details
         menu.clearHeader();
@@ -620,8 +647,21 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
 
     @Override
     public boolean onContextItemSelected(MenuItem item) {
-        AdapterContextMenuInfo info = (AdapterContextMenuInfo) item.getMenuInfo();
-        final ComputerObject computer = (ComputerObject) pcGridAdapter.getItem(info.position);
+        // §REVIEW-1104：改以電腦 uuid 查詢目標 ComputerObject，避免索引位移操作到錯誤主機
+        ComputerObject selectedComputer = null;
+        if (contextMenuComputerUuid != null) {
+            for (int i = 0; i < pcGridAdapter.getCount(); i++) {
+                ComputerObject candidate = (ComputerObject) pcGridAdapter.getItem(i);
+                if (contextMenuComputerUuid.equals(candidate.details.uuid)) {
+                    selectedComputer = candidate;
+                    break;
+                }
+            }
+        }
+        if (selectedComputer == null) {
+            return super.onContextItemSelected(item);
+        }
+        final ComputerObject computer = selectedComputer;
         switch (item.getItemId()) {
             case PAIR_ID:
                 doPair(computer.details);

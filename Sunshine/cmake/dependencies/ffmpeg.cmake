@@ -24,6 +24,15 @@ if(NOT DEFINED FFMPEG_PREPARED_BINARIES)
     # Determine download location
     set(FFMPEG_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/_deps")
 
+    # VipleStream：third-party/build-deps 是直接 vendor 的檔案（不是 git submodule），下面的 tag 查詢一定落空、
+    # 退回「latest」release；latest 會隨上游換版（2026-07-24 起 nv-codec-headers 升到 13.1，nvenc_base.cpp 的
+    # 版本檢查只收 12.0／13.0，且 13.1 會抬高 NVIDIA 驅動下限）。Linux 固定在最後一版 13.0 的 release，
+    # 建置才可重現（2026-11-03 CachyOS 容器乾淨建置時踩到；linux-builder 是靠舊的快取）。
+    # 換版時先確認 ffnvcodec/nvEncodeAPI.h 的版本並同步 nvenc_base.cpp 的檢查。
+    if(UNIX AND NOT APPLE AND NOT DEFINED VIPLE_FFMPEG_BUILD_DEPS_TAG)
+        set(VIPLE_FFMPEG_BUILD_DEPS_TAG "v2026.713.132551")
+    endif()
+
     # Fetch tags for the build-deps submodule so tag lookups work in CI shallow clones
     execute_process(
         COMMAND git -C "${CMAKE_SOURCE_DIR}/third-party/build-deps" fetch --tags --depth=1
@@ -55,6 +64,10 @@ if(NOT DEFINED FFMPEG_PREPARED_BINARIES)
             OUTPUT_STRIP_TRAILING_WHITESPACE
             ERROR_QUIET
         )
+    endif()
+
+    if(VIPLE_FFMPEG_BUILD_DEPS_TAG)
+        set(FFMPEG_RELEASE_TAG "${VIPLE_FFMPEG_BUILD_DEPS_TAG}")
     endif()
 
     # Set GitHub release URL

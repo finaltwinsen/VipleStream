@@ -338,4 +338,6 @@
     <string name="steam_switch_error_taskgone">Bytesuppgiften försvann på värden</string>
     <string name="steam_switch_error_timeout">Tidsgränsen för bytet överskreds (&gt;150 s utan att servern nådde ett slutligt tillstånd)</string>
     <string name="steam_switch_account_unavailable">Det här kontot har inga sparade inloggningsuppgifter på värden. Logga in en gång på värden först och försök sedan igen.</string>
+    <string name="title_show_advanced">Visa avancerade och experimentella alternativ</string>
+    <string name="summary_show_advanced">Alternativ för felsökning och testning. Dolda alternativ behåller sina nuvarande värden.</string>
 </resources>

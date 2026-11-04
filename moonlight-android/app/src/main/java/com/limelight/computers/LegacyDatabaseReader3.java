@@ -35,12 +35,21 @@ public class LegacyDatabaseReader3 {
             return null;
         }
 
-        String[] parts = input.split(""+PORT_DELIMITER, -1);
-        if (parts.length == 1) {
-            return new ComputerDetails.AddressTuple(parts[0], NvHTTP.DEFAULT_HTTP_PORT);
+        // §REVIEW-1104：由最後一個底線切分埠號以支援含底線主機名，解析失敗則回傳 null
+        int lastIndex = input.lastIndexOf(PORT_DELIMITER);
+        if (lastIndex == -1) {
+            return new ComputerDetails.AddressTuple(input, NvHTTP.DEFAULT_HTTP_PORT);
         }
         else {
-            return new ComputerDetails.AddressTuple(parts[0], Integer.parseInt(parts[1]));
+            String addr = input.substring(0, lastIndex);
+            if (addr.isEmpty()) {
+                return null;
+            }
+            try {
+                return new ComputerDetails.AddressTuple(addr, Integer.parseInt(input.substring(lastIndex + 1)));
+            } catch (NumberFormatException e) {
+                return null;
+            }
         }
     }
 
@@ -54,12 +63,14 @@ public class LegacyDatabaseReader3 {
         details.uuid = c.getString(0);
         details.name = c.getString(1);
 
-        String[] addresses = c.getString(2).split(""+ADDRESS_DELIMITER, -1);
+        // §REVIEW-1104：檢查欄位是否為 null 與段數是否足夠，避免 NPE 與 ArrayIndexOutOfBoundsException
+        String rawAddresses = c.getString(2);
+        String[] addresses = rawAddresses != null ? rawAddresses.split(""+ADDRESS_DELIMITER, -1) : new String[0];
 
-        details.localAddress = splitAddressToTuple(readNonEmptyString(addresses[0]));
-        details.remoteAddress = splitAddressToTuple(readNonEmptyString(addresses[1]));
-        details.manualAddress = splitAddressToTuple(readNonEmptyString(addresses[2]));
-        details.ipv6Address = splitAddressToTuple(readNonEmptyString(addresses[3]));
+        details.localAddress = addresses.length > 0 ? splitAddressToTuple(readNonEmptyString(addresses[0])) : null;
+        details.remoteAddress = addresses.length > 1 ? splitAddressToTuple(readNonEmptyString(addresses[1])) : null;
+        details.manualAddress = addresses.length > 2 ? splitAddressToTuple(readNonEmptyString(addresses[2])) : null;
+        details.ipv6Address = addresses.length > 3 ? splitAddressToTuple(readNonEmptyString(addresses[3])) : null;
 
         // External port is persisted in the remote address field
         if (details.remoteAddress != null) {
@@ -92,18 +103,28 @@ public class LegacyDatabaseReader3 {
         try (final Cursor c = computerDb.rawQuery("SELECT * FROM "+COMPUTER_TABLE_NAME, null)) {
             LinkedList<ComputerDetails> computerList = new LinkedList<>();
             while (c.moveToNext()) {
-                ComputerDetails details = getComputerFromCursor(c);
+                // §REVIEW-1104：單列解析失敗只跳過該列，不中斷整表遷移
+                try {
+                    ComputerDetails details = getComputerFromCursor(c);
 
                 // If a critical field is corrupt or missing, skip the database entry
                 if (details.uuid == null) {
                     continue;
                 }
 
-                computerList.add(details);
+                    computerList.add(details);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
             }
 
             return computerList;
         }
+    }
+
+    // §REVIEW-1104：提供獨立刪除舊庫方法，延後至寫入新庫成功後才刪除舊庫
+    public static void deleteDatabase(Context c) {
+        c.deleteDatabase(COMPUTER_DB_NAME);
     }
 
     public static List<ComputerDetails> migrateAllComputers(Context c) {
@@ -113,11 +134,11 @@ public class LegacyDatabaseReader3 {
         ) {
             // Open the existing database
             return getAllComputers(computerDb);
-        } catch (SQLiteException e) {
+        } catch (Exception e) {
             return new LinkedList<ComputerDetails>();
         } finally {
             // Close and delete the old DB
-            c.deleteDatabase(COMPUTER_DB_NAME);
+            // §REVIEW-1104：舊庫刪除改到新庫寫入成功之後
         }
     }
 }

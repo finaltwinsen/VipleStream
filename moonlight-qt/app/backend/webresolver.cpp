@@ -11,6 +11,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMap>
+#include <QRegularExpression>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -18,10 +20,16 @@
 #include <QStandardPaths>
 #include <QUrl>
 
+#include <algorithm>
+#include <atomic>
+
 namespace {
 
 const char* const kBundled = "/app/share/viplestream/yt-dlp";
 const char* const kReleaseBase = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/";
+
+// §REVIEW-1104：載入中按 B 由別的執行緒設這個旗標，resolve() 的等待迴圈看到就 kill yt-dlp
+std::atomic<bool> g_ResolveCancel{false};
 
 QString updatedPath()
 {
@@ -30,6 +38,130 @@ QString updatedPath()
 
 // 頭盔能硬體解的：不要 AV1、不要 HDR、最高 2160p；影像＋音訊分開優先，沒有就整條的
 const char* const kFormat = "bv*[vcodec!*=av01][dynamic_range=SDR][height<=2160]+ba/b[vcodec!*=av01][dynamic_range=SDR]/b";
+
+// 格式的投影：yt-dlp 把 YouTube 的 projectionType 去掉 "RECTANGULAR" 轉小寫，接在 format_note 最後
+// （"2160s60, equi"、"1440s60, mesh"）；平面影片的 RECTANGULAR 變成空的、不會出現
+QString projectionOf(const QJsonObject& f)
+{
+    const QStringList parts = f.value(QStringLiteral("format_note")).toString().split(QLatin1Char(','));
+    for (const QString& raw : parts) {
+        const QString p = raw.trimmed().toLower();
+        if (p.startsWith(QLatin1String("equi")) || p == QLatin1String("mesh")) {
+            return p;
+        }
+    }
+    return QString();
+}
+
+// 畫質清單：只有影像的格式，https 直連（不要 HLS／DASH 清單）、不要 AV1、SDR、最高 2160p。
+// yt-dlp 的 formats 由差到好排，所以同一個高度後面的蓋前面的
+QList<WebResolver::VideoChoice> videoChoicesOf(const QJsonObject& j)
+{
+    QMap<int, WebResolver::VideoChoice> byHeight;
+    const QJsonArray formats = j.value(QStringLiteral("formats")).toArray();
+    for (const QJsonValue& v : formats) {
+        const QJsonObject f = v.toObject();
+        const QString vcodec = f.value(QStringLiteral("vcodec")).toString();
+        const int h = f.value(QStringLiteral("height")).toInt();
+        if (vcodec.isEmpty() || vcodec == QLatin1String("none") || vcodec.startsWith(QLatin1String("av01")) ||
+            f.value(QStringLiteral("acodec")).toString() != QLatin1String("none") ||
+            f.value(QStringLiteral("protocol")).toString() != QLatin1String("https") ||
+            f.value(QStringLiteral("dynamic_range")).toString(QStringLiteral("SDR")) != QLatin1String("SDR") || h <= 0 || h > 2160) {
+            continue;
+        }
+        WebResolver::VideoChoice c;
+        c.height = h;
+        c.url = f.value(QStringLiteral("url")).toString();
+        c.projection = projectionOf(f);
+        // 標籤照 YouTube 的寫法（format_note 開頭的 "1080p60"、360° 片是 "2160s60"），沒有就用高度
+        const QString note = f.value(QStringLiteral("format_note")).toString().split(QLatin1Char(',')).value(0).trimmed();
+        static const QRegularExpression kNote(QStringLiteral("^(\\d+)[ps](\\d*)$"));
+        const QRegularExpressionMatch m = kNote.match(note);
+        c.label = m.hasMatch() ? m.captured(1) + QStringLiteral("p") + m.captured(2) : QStringLiteral("%1p").arg(h);
+        if (!c.url.isEmpty()) {
+            byHeight[h] = c;
+        }
+    }
+    QList<WebResolver::VideoChoice> out;
+    for (auto it = byHeight.cbegin(); it != byHeight.cend(); ++it) {
+        out.prepend(it.value());  // 由高到低
+    }
+    return out;
+}
+
+// 字幕軌：作者上傳的全部＋自動產生的原文（"-orig"）。自動翻譯（網址帶 tlang=，YouTube 給 150 多種）不列：2026-11-02 實測
+// 不經瀏覽器下載一律 HTTP 429（開發機與頭盔都是），列出來只會選了沒字
+QList<WebResolver::SubtitleTrack> subtitlesOf(const QJsonObject& j)
+{
+    QList<WebResolver::SubtitleTrack> out;
+    auto json3 = [](const QJsonArray& a) {
+        for (const QJsonValue& v : a) {
+            const QJsonObject o = v.toObject();
+            if (o.value(QStringLiteral("ext")).toString() == QLatin1String("json3")) {
+                return o;
+            }
+        }
+        return QJsonObject();
+    };
+    const QJsonObject subs = j.value(QStringLiteral("subtitles")).toObject();
+    for (auto it = subs.begin(); it != subs.end(); ++it) {
+        if (it.key() == QLatin1String("live_chat")) {
+            continue;
+        }
+        const QJsonObject o = json3(it.value().toArray());
+        if (!o.isEmpty()) {
+            out.append({it.key(), o.value(QStringLiteral("name")).toString(), o.value(QStringLiteral("url")).toString(), false});
+        }
+    }
+    // 作者上傳的排序：台灣繁中、香港繁中、片子本身的語言、英文、簡中在前，其他照語言代碼
+    const QString videoLang = j.value(QStringLiteral("language")).toString();
+    auto rank = [&videoLang](const QString& lang) {
+        if (lang == QLatin1String("zh-TW") || lang == QLatin1String("zh-Hant")) {
+            return 0;
+        }
+        if (lang == QLatin1String("zh-HK")) {
+            return 1;
+        }
+        if (!videoLang.isEmpty() && (lang == videoLang || lang.startsWith(videoLang + QLatin1Char('-')))) {
+            return 2;
+        }
+        if (lang == QLatin1String("en") || lang.startsWith(QLatin1String("en-"))) {
+            return 3;
+        }
+        if (lang.startsWith(QLatin1String("zh"))) {
+            return 4;
+        }
+        return 5;
+    };
+    std::stable_sort(out.begin(), out.end(), [&rank](const WebResolver::SubtitleTrack& a, const WebResolver::SubtitleTrack& b) {
+        return rank(a.lang) < rank(b.lang);
+    });
+    // 控制列是「點一下換下一個」：TED 這類片有 50 多種語言，全部輪一遍太久。留排在前面的 8 種
+    while (out.size() > 8) {
+        out.removeLast();
+    }
+    const QJsonObject autos = j.value(QStringLiteral("automatic_captions")).toObject();
+    QStringList wanted;
+    for (auto it = autos.begin(); it != autos.end(); ++it) {
+        if (it.key().endsWith(QLatin1String("-orig"))) {
+            wanted << it.key();
+        }
+    }
+    for (const QString& k : wanted) {
+        bool have = false;
+        for (const WebResolver::SubtitleTrack& t : out) {
+            have = have || (!t.automatic && (t.lang == k || t.lang.startsWith(k + QLatin1Char('-'))));
+        }
+        const QJsonObject o = json3(autos.value(k).toArray());
+        if (!have && !o.isEmpty()) {
+            out.append({k, o.value(QStringLiteral("name")).toString(), o.value(QStringLiteral("url")).toString(), true});
+        }
+        if (out.size() >= 16) {
+            break;
+        }
+    }
+    return out;
+}
 
 QStringList baseArgs(const QString& script)
 {
@@ -81,6 +213,11 @@ bool WebResolver::needsResolve(const QString& url)
     return true;
 }
 
+void WebResolver::setResolveCancel(bool cancel)
+{
+    g_ResolveCancel.store(cancel, std::memory_order_release);
+}
+
 WebResolver::Result WebResolver::resolve(const QString& pageUrl, int timeoutMs)
 {
     Result r;
@@ -89,18 +226,70 @@ WebResolver::Result WebResolver::resolve(const QString& pageUrl, int timeoutMs)
         r.error = QStringLiteral("the web video helper (yt-dlp) is not installed");
         return r;
     }
+    // §REVIEW-1104：原本一次等滿逾時才 kill，載入中按 B 取消不了；改成週期檢查旗標並殺掉 yt-dlp
+    auto cancelled = []() {
+        return g_ResolveCancel.load(std::memory_order_acquire);
+    };
+    if (cancelled()) {
+        r.error = QStringLiteral("cancelled");
+        return r;
+    }
     QProcess p;
     QStringList args = baseArgs(script);
     args << QStringLiteral("-J") << QStringLiteral("-f") << QString::fromLatin1(kFormat) << QStringLiteral("--") << pageUrl;
     p.start(QStringLiteral("python3"), args);
-    if (!p.waitForStarted(5000)) {
-        r.error = QStringLiteral("could not start python3 for yt-dlp");
+    bool started = false;
+    int startWaited = 0;
+    while (startWaited < 5000 && !cancelled()) {
+        const int step = std::min(200, 5000 - startWaited);
+        if (p.waitForStarted(step)) {
+            started = true;
+            break;
+        }
+        if (p.state() == QProcess::NotRunning) {
+            break;
+        }
+        startWaited += step;
+    }
+    if (!started) {
+        if (p.state() != QProcess::NotRunning) {
+            p.kill();
+            p.waitForFinished(2000);
+        }
+        r.error = cancelled() ? QStringLiteral("cancelled")
+                              : QStringLiteral("could not start python3 for yt-dlp");
         return r;
     }
-    if (!p.waitForFinished(timeoutMs)) {
-        p.kill();
-        p.waitForFinished(2000);
-        r.error = QStringLiteral("the site did not answer in time");
+    auto waitUntilDone = [&p, &cancelled](int budget) -> bool {
+        int waited = 0;
+        for (;;) {
+            if (cancelled()) {
+                return false;
+            }
+            const int step = budget < 0 ? 200 : std::min(200, budget - waited);
+            if (step <= 0) {
+                break;
+            }
+            if (p.waitForFinished(step) || p.state() == QProcess::NotRunning) {
+                return !cancelled();
+            }
+            if (budget < 0) {
+                continue;
+            }
+            waited += step;
+            if (waited >= budget) {
+                break;
+            }
+        }
+        return p.state() == QProcess::NotRunning && !cancelled();
+    };
+    if (cancelled() || !waitUntilDone(timeoutMs)) {
+        if (p.state() != QProcess::NotRunning) {
+            p.kill();
+            p.waitForFinished(2000);
+        }
+        r.error = cancelled() ? QStringLiteral("cancelled")
+                              : QStringLiteral("the site did not answer in time");
         return r;
     }
     const QByteArray out = p.readAllStandardOutput();
@@ -125,6 +314,9 @@ WebResolver::Result WebResolver::resolve(const QString& pageUrl, int timeoutMs)
             const QJsonObject f = v.toObject();
             const bool video = f.value(QStringLiteral("vcodec")).toString() != QLatin1String("none");
             (video ? r.videoUrl : r.audioUrl) = f.value(QStringLiteral("url")).toString();
+            if (video) {
+                r.projection = projectionOf(f);
+            }
             if (headers.isEmpty()) {
                 headers = f.value(QStringLiteral("http_headers")).toObject();
             }
@@ -133,6 +325,7 @@ WebResolver::Result WebResolver::resolve(const QString& pageUrl, int timeoutMs)
     else {
         r.videoUrl = j.value(QStringLiteral("url")).toString();
         headers = j.value(QStringLiteral("http_headers")).toObject();
+        r.projection = projectionOf(j);
     }
     for (auto it = headers.begin(); it != headers.end(); ++it) {
         if (it.key().compare(QLatin1String("User-Agent"), Qt::CaseInsensitive) == 0) {
@@ -142,6 +335,19 @@ WebResolver::Result WebResolver::resolve(const QString& pageUrl, int timeoutMs)
             r.headers += it.key() + QStringLiteral(": ") + it.value().toString() + QStringLiteral("\r\n");
         }
     }
+    if (!r.audioUrl.isEmpty()) {
+        // 影像、聲音分開的才能只換影像
+        r.videoChoices = videoChoicesOf(j);
+        for (int i = 0; i < r.videoChoices.size(); i++) {
+            if (r.videoChoices[i].url == r.videoUrl) {
+                r.videoChoice = i;
+            }
+        }
+        if (r.videoChoice < 0) {
+            r.videoChoices.clear();  // 選到的不在清單裡（例如 HLS）：不提供換畫質，免得換過去又換不回來
+        }
+    }
+    r.subtitles = subtitlesOf(j);
     r.ok = !r.videoUrl.isEmpty();
     if (!r.ok) {
         r.error = QStringLiteral("no playable format");
@@ -253,8 +459,28 @@ void WebResolver::update()
                 return;
             }
             f.close();
-            QFile::remove(path);
-            QFile::rename(path + QStringLiteral(".new"), path);
+            // §REVIEW-1104：先把舊檔挪開，確認 .new 換上成功再刪；失敗就搬回並留下 .new，不要回報成功
+            const QString neu = path + QStringLiteral(".new");
+            const QString bak = path + QStringLiteral(".bak");
+            if (QFile::exists(bak) && !QFile::remove(bak)) {
+                emit updateFinished(false, tr("Could not save the update."));
+                return;
+            }
+            const bool hadOld = QFile::exists(path);
+            if (hadOld && !QFile::rename(path, bak)) {
+                emit updateFinished(false, tr("Could not save the update."));
+                return;
+            }
+            if (!QFile::rename(neu, path)) {
+                if (hadOld) {
+                    QFile::rename(bak, path);
+                }
+                emit updateFinished(false, tr("Could not save the update."));
+                return;
+            }
+            if (hadOld) {
+                QFile::remove(bak);
+            }
             m_Version.clear();
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] yt-dlp updated (%lld bytes)", static_cast<long long>(data.size()));
             emit updateFinished(true, tr("Updated to %1.").arg(version()));

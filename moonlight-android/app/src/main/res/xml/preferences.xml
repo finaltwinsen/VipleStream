@@ -263,6 +263,13 @@
     </PreferenceCategory>
     <PreferenceCategory android:title="@string/category_advanced_settings"
         android:key="category_advanced_settings">
+        <!-- §SETTINGS-ADV：測試、除錯與實驗性的選項預設收起來（StreamSettings 依這個開關移除／加回），
+             收起來的選項照樣套用原本存的值 -->
+        <CheckBoxPreference
+            android:key="checkbox_show_advanced"
+            android:title="@string/title_show_advanced"
+            android:summary="@string/summary_show_advanced"
+            android:defaultValue="false" />
         <CheckBoxPreference
             android:key="checkbox_unlock_fps"
             android:title="@string/title_unlock_fps"

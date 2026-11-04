@@ -96,6 +96,11 @@ private:
     std::atomic<bool> m_Ready{false};
     std::atomic<bool> m_AllocFailed{false};
 
+    // §REVIEW-1104：run() 公布 fd，stop() 關掉以打斷不看 m_Stop 的阻塞等待
+    QMutex m_SockMutex;
+    qintptr m_WsFd = -1;
+    qintptr m_TunnelFd = -1;
+
     // Populated before m_Ready is set. Held by value once run() starts
     // the proxy loop, so external readers need a mutex only against the
     // race with the very-early readers during startup.

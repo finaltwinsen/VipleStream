@@ -40,6 +40,10 @@ public class ShortcutTrampoline extends Activity {
     private SpinnerDialog blockingLoadSpinner;
 
     private ComputerManagerService.ComputerManagerBinder managerBinder;
+    // §REVIEW-1104：記錄服務綁定狀態，避免取消或銷毀時漏解綁
+    private boolean serviceBound;
+    // §REVIEW-1104：追蹤 Activity 是否在前景，供背景執行緒呼叫 startPolling 前確認
+    private volatile boolean inForeground;
 
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         public void onServiceConnected(ComponentName className, IBinder binder) {
@@ -52,6 +56,11 @@ public class ShortcutTrampoline extends Activity {
                 public void run() {
                     // Wait for the binder to be ready
                     localBinder.waitForReady();
+
+                    // §REVIEW-1104：若 Activity 正在關閉或已離開前景，停止後續流程
+                    if (!inForeground || isFinishing()) {
+                        return;
+                    }
 
                     // Now make the binder visible
                     managerBinder = localBinder;
@@ -70,8 +79,12 @@ public class ShortcutTrampoline extends Activity {
                             blockingLoadSpinner = null;
                         }
 
-                        if (managerBinder != null) {
+                        // §REVIEW-1104：依 serviceBound 解綁並重設旗標
+                        if (serviceBound) {
                             unbindService(serviceConnection);
+
+
+                            serviceBound = false;
                             managerBinder = null;
                         }
 
@@ -79,12 +92,21 @@ public class ShortcutTrampoline extends Activity {
                     }
 
                     // Force CMS to repoll this machine
+                    // §REVIEW-1104：背景執行緒呼叫 startPolling 前確認畫面仍在前景且服務未解綁，避免 onStop 完成後才啟動輪詢導致洩漏
+                    if (!inForeground || isFinishing() || !serviceBound || managerBinder == null) {
+                        return;
+                    }
                     managerBinder.invalidateStateForComputer(computer.uuid);
 
                     // Start polling
                     managerBinder.startPolling(new ComputerManagerListener() {
                         @Override
                         public void notifyComputerUpdated(final ComputerDetails details) {
+                            // §REVIEW-1104：進回呼先把 managerBinder 抄到區域變數判空，防止 onStop 置 null 後 WoL 路徑 NPE
+                            final ComputerManagerService.ComputerManagerBinder binder = managerBinder;
+                            if (binder == null) {
+                                return;
+                            }
                             // Don't care about other computers
                             if (!details.uuid.equalsIgnoreCase(uuidString)) {
                                 return;
@@ -98,7 +120,8 @@ public class ShortcutTrampoline extends Activity {
 
                                     // If we sent at least one WoL packet, reset the computer state
                                     // to force ComputerManager to poll it again.
-                                    managerBinder.invalidateStateForComputer(computer.uuid);
+                                    // §REVIEW-1104：使用區域變數 binder 避免 managerBinder 被清空引發 NPE
+                                    binder.invalidateStateForComputer(computer.uuid);
                                     return;
                                 } catch (IOException e) {
                                     // If we got an exception, we couldn't send a single WoL packet,
@@ -119,8 +142,9 @@ public class ShortcutTrampoline extends Activity {
 
                                         // If the managerBinder was destroyed before this callback,
                                         // just finish the activity.
-                                        if (managerBinder == null) {
-                                            finish();
+                                        // §REVIEW-1104：若 Activity 正在關閉或 binder 已被銷毀，不再啟動後續 Activity
+                                        if (managerBinder == null || isFinishing()) {
+                                                                                finish();
                                             return;
                                         }
 
@@ -132,7 +156,7 @@ public class ShortcutTrampoline extends Activity {
                                                     intentStack.add(ServerHelper.createStartIntent(ShortcutTrampoline.this, app, details, managerBinder));
 
                                                     // Close this activity
-                                                    finish();
+                                                                                        finish();
 
                                                     // Now start the activities
                                                     startActivities(intentStack.toArray(new Intent[]{}));
@@ -147,7 +171,7 @@ public class ShortcutTrampoline extends Activity {
                                                             intentStack.add(startIntent);
 
                                                             // Close this activity
-                                                            finish();
+                                                                                                finish();
 
                                                             // Now start the activities
                                                             startActivities(intentStack.toArray(new Intent[]{}));
@@ -156,13 +180,13 @@ public class ShortcutTrampoline extends Activity {
                                                         @Override
                                                         public void run() {
                                                             // Close this activity
-                                                            finish();
+                                                                                                finish();
                                                         }
                                                     });
                                                 }
                                             } else {
                                                 // Close this activity
-                                                finish();
+                                                                                    finish();
 
                                                 // Add the PC view at the back (and clear the task)
                                                 Intent i;
@@ -203,16 +227,27 @@ public class ShortcutTrampoline extends Activity {
 
                                         // We don't want any more callbacks from now on, so go ahead
                                         // and unbind from the service
-                                        if (managerBinder != null) {
-                                            managerBinder.stopPolling();
+
+                        if (serviceBound) {
+
+        if (managerBinder != null) {
+                                                managerBinder.stopPolling();
+                                            }
                                             unbindService(serviceConnection);
-                                            managerBinder = null;
+
+
+                                            serviceBound = false;
+                            managerBinder = null;
                                         }
                                     }
                                 });
                             }
                         }
                     });
+                    // §REVIEW-1104：若 startPolling 期間畫面已離開前景，立即補停輪詢避免洩漏
+                    if (!inForeground || isFinishing()) {
+                        localBinder.stopPolling();
+                    }
                 }
             }.start();
         }
@@ -272,6 +307,7 @@ public class ShortcutTrampoline extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        inForeground = true;
 
         UiHelper.notifyNewRootView(this);
         ComputerDatabaseManager dbManager = new ComputerDatabaseManager(this);
@@ -356,7 +392,8 @@ public class ShortcutTrampoline extends Activity {
         }
 
         // Bind to the computer manager service
-        bindService(new Intent(this, ComputerManagerService.class), serviceConnection,
+        // §REVIEW-1104：記錄 serviceBound 狀態，避免取消時 managerBinder 尚未賦值導致漏解綁
+        serviceBound = bindService(new Intent(this, ComputerManagerService.class), serviceConnection,
                 Service.BIND_AUTO_CREATE);
 
         blockingLoadSpinner = SpinnerDialog.displayDialog(this, getResources().getString(R.string.conn_establishing_title),
@@ -366,6 +403,8 @@ public class ShortcutTrampoline extends Activity {
     @Override
     protected void onStop() {
         super.onStop();
+        // §REVIEW-1104：離開前景時標記 inForeground 為 false，阻止背景執行緒在 stop 後啟動輪詢
+        inForeground = false;
 
         if (blockingLoadSpinner != null) {
             blockingLoadSpinner.dismiss();
@@ -374,12 +413,26 @@ public class ShortcutTrampoline extends Activity {
 
         Dialog.closeDialogs();
 
+        // §REVIEW-1104：依 serviceBound 解綁，避免 waitForReady 期間取消時漏解綁
         if (managerBinder != null) {
             managerBinder.stopPolling();
-            unbindService(serviceConnection);
             managerBinder = null;
         }
 
-        finish();
+        if (serviceBound) {
+            unbindService(serviceConnection);
+            serviceBound = false;
+        }
+
+
+        if (managerBinder != null) {
+            managerBinder.stopPolling();
+
+
+
+            managerBinder = null;
+        }
+
+                                            finish();
     }
 }

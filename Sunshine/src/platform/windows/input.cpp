@@ -29,7 +29,8 @@
 namespace platf {
   using namespace std::literals;
 
-  thread_local HDESK _lastKnownInputDesktop = nullptr;
+  // §REVIEW-1103：原本存 HDESK，但 syncThreadDesktop 回傳前已 CloseDesktop，數值會被重用；改存桌面名稱。
+  thread_local std::wstring _lastKnownInputDesktop;
 
   constexpr touch_port_t target_touch_port {
     0,
@@ -503,9 +504,10 @@ namespace platf {
       }
     }
     if (send != 1) {
-      auto hDesk = syncThreadDesktop();
-      if (_lastKnownInputDesktop != hDesk && ++retries <= 2) {
-        _lastKnownInputDesktop = hDesk;
+      std::wstring desk_name;
+      syncThreadDesktop(&desk_name);
+      if (_lastKnownInputDesktop != desk_name && ++retries <= 2) {
+        _lastKnownInputDesktop = desk_name;
         goto retry;
       }
       BOOST_LOG(error) << "Couldn't send input"sv;
@@ -528,9 +530,10 @@ namespace platf {
     int retries = 0;
   retry:
     if (!input->fnInjectSyntheticPointerInput(device, pointerInfo, count)) {
-      auto hDesk = syncThreadDesktop();
-      if (_lastKnownInputDesktop != hDesk && ++retries <= 2) {
-        _lastKnownInputDesktop = hDesk;
+      std::wstring desk_name;
+      syncThreadDesktop(&desk_name);
+      if (_lastKnownInputDesktop != desk_name && ++retries <= 2) {
+        _lastKnownInputDesktop = desk_name;
         goto retry;
       }
       return false;

@@ -348,6 +348,7 @@ namespace video {
       device = std::move(other.device);
       avcodec_ctx = std::move(other.avcodec_ctx);
       replacements = std::move(other.replacements);
+      replacements_shared = std::move(other.replacements_shared);
       sps = std::move(other.sps);
       vps = std::move(other.vps);
       spare_packet = std::move(other.spare_packet);
@@ -389,6 +390,8 @@ namespace video {
     std::unique_ptr<platf::avcodec_encode_device_t> device;
 
     std::vector<packet_raw_t::replace_t> replacements;
+    // §REVIEW-1103：給 packet 共同持有的複本（見 packet_raw_t::replacements）；replacements 變動時重建
+    std::shared_ptr<const std::vector<packet_raw_t::replace_t>> replacements_shared;
 
     cbs::nal_t sps;
     cbs::nal_t vps;
@@ -1695,6 +1698,20 @@ namespace video {
               // only support a single display session per device/application.
               disp.reset();
 
+              // §REVIEW-1103：上面等 display 參照釋放時會 erase 掉已停止的 ctx；reinit 剛好碰上最後一個
+              // client 離開時 capture_ctxs 會是空的，display_config_for 對空 vector 取 front() 是 UB。
+              // 先收佇列裡新來的 ctx；還是空的就等下一個 client（佇列停止＝整條擷取結束）。
+              while (capture_ctx_queue->peek()) {
+                capture_ctxs.emplace_back(std::move(*capture_ctx_queue->pop()));
+              }
+              if (capture_ctxs.empty()) {
+                auto next_ctx = capture_ctx_queue->pop();
+                if (!next_ctx) {
+                  return;
+                }
+                capture_ctxs.emplace_back(std::move(*next_ctx));
+              }
+
               // M1b S1-08（§C.5）：與舊版同樣以 capture_ctxs 的設定建 display（舊版固定用 front()）
               const auto &cfg = display_config_for(capture_ctxs);
               disp_source = cfg.captureSource;
@@ -1806,6 +1823,22 @@ namespace video {
           std::string_view((char *) std::begin(sps.old), sps.old.size()),
           std::string_view((char *) std::begin(sps._new), sps._new.size())
         );
+
+        // §REVIEW-1103：把替換內容複製成一份獨立、可共同持有的集合交給 packet
+        struct replacement_store_t {
+          std::vector<std::string> bytes;
+          std::vector<packet_raw_t::replace_t> list;
+        };
+        auto store = std::make_shared<replacement_store_t>();
+        store->bytes.reserve(session.replacements.size() * 2);  // 先保留：之後不再搬移，string_view 才不會失效
+        for (const auto &r : session.replacements) {
+          store->bytes.emplace_back(r.old);
+          store->bytes.emplace_back(r._new);
+        }
+        for (std::size_t i = 0; i + 1 < store->bytes.size(); i += 2) {
+          store->list.emplace_back(std::string_view(store->bytes[i]), std::string_view(store->bytes[i + 1]));
+        }
+        session.replacements_shared = std::shared_ptr<const std::vector<packet_raw_t::replace_t>>(store, &store->list);
       }
 
       if (av_packet && av_packet->pts == frame_nr) {
@@ -1816,7 +1849,7 @@ namespace video {
         }
       }
 
-      packet->replacements = &session.replacements;
+      packet->replacements = session.replacements_shared;
       packet->channel_data = channel_data;
       packets->raise(std::move(packet));
     }
@@ -2578,6 +2611,13 @@ namespace video {
             int64_t newBitrate = *newBitrateKbps * 1000LL;
             ctx->bit_rate = newBitrate;
             ctx->rc_max_rate = newBitrate;
+            // §REVIEW-1103：比照初始化——CBR_WITH_VBR 要讓 bit_rate≠rc_max_rate 維持 VBR 模擬 CBR，
+            // 其他編碼器 rc_min_rate 要跟著改，否則留在舊值（降速後 min > max）
+            if (encoder.flags & CBR_WITH_VBR) {
+              ctx->bit_rate--;
+            } else {
+              ctx->rc_min_rate = newBitrate;
+            }
             if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
               ctx->rc_buffer_size = newBitrate / std::max(1, config.framerate);
             }

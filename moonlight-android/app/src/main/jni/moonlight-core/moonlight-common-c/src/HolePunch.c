@@ -10,6 +10,7 @@
 #include "HolePunch.h"
 
 #include <string.h>
+#include <stddef.h>
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -133,7 +134,10 @@ int LiHolePunch(const char *serverAddr, unsigned short serverPort,
 
         /* Wait for ACK */
         int n = recvfrom(sock, recvBuf, sizeof(recvBuf), 0, NULL, NULL);
-        if (n >= (int)sizeof(HOLEPUNCH_PACKET)) {
+        /* §REVIEW-1103：現有 server 的 ACK 只回前 38 bytes（不含 timestamp），
+         * 要求完整 42 bytes 會讓打洞永遠失敗。這裡只讀到 UUID，到 timestamp 之前就夠，
+         * 新舊 server（38 或 42 bytes）都吃。 */
+        if (n >= (int)offsetof(HOLEPUNCH_PACKET, timestamp)) {
             HOLEPUNCH_PACKET *resp = (HOLEPUNCH_PACKET *)recvBuf;
             if (resp->magic == HOLEPUNCH_MAGIC &&
                 resp->version == HOLEPUNCH_VERSION &&

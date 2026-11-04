@@ -19,7 +19,8 @@ public abstract class AbstractXboxController extends AbstractController {
     protected final UsbDeviceConnection connection;
 
     private Thread inputThread;
-    private boolean stopped;
+    // §REVIEW-1104：將 stopped 設為 volatile，確保跨執行緒能即時看見停止狀態
+    private volatile boolean stopped;
 
     protected UsbEndpoint inEndpt, outEndpt;
 
@@ -29,7 +30,8 @@ public abstract class AbstractXboxController extends AbstractController {
         this.connection = connection;
         this.type = MoonBridge.LI_CTYPE_XBOX;
         this.capabilities = MoonBridge.LI_CCAP_ANALOG_TRIGGERS | MoonBridge.LI_CCAP_RUMBLE;
-        this.buttonFlags =
+        // §REVIEW-1104：支援按鍵遮罩應賦值給 supportedButtonFlags，buttonFlags 初始維持 0
+        this.supportedButtonFlags =
                 ControllerPacket.A_FLAG | ControllerPacket.B_FLAG | ControllerPacket.X_FLAG | ControllerPacket.Y_FLAG |
                         ControllerPacket.UP_FLAG | ControllerPacket.DOWN_FLAG | ControllerPacket.LEFT_FLAG | ControllerPacket.RIGHT_FLAG |
                         ControllerPacket.LB_FLAG | ControllerPacket.RB_FLAG |

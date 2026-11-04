@@ -148,7 +148,10 @@ bool GenericFRUC::createTextures() {
     {
         D3D11_TEXTURE2D_DESC prevMvDesc = mvDesc;
         prevMvDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        hr = m_Device->CreateTexture2D(&prevMvDesc, nullptr, &m_PrevMotionField);
+        // §REVIEW-1104：以全 0 初始化 m_PrevMotionField，避免第一次 ME 讀到未定義的 prev MV 並混入本幀
+        QByteArray zeroMv(mvWidth * mvHeight * 4, '\0');
+        D3D11_SUBRESOURCE_DATA initData = { zeroMv.constData(), mvWidth * 4, 0 };
+        hr = m_Device->CreateTexture2D(&prevMvDesc, &initData, &m_PrevMotionField);
         if (FAILED(hr)) return false;
         hr = m_Device->CreateShaderResourceView(m_PrevMotionField.Get(), nullptr, &m_PrevMotionFieldSRV);
         if (FAILED(hr)) return false;
@@ -283,7 +286,10 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
     // --- Stage 2: Motion Estimation (full-res, strided block matching) ---
     {
         D3D11_MAPPED_SUBRESOURCE mapped;
-        ctx->Map(m_ConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        // §REVIEW-1103：裝置移除（TDR）時 Map 會失敗、pData 未初始化；直接放棄這次補幀，讓裝置重設流程接手
+        if (FAILED(ctx->Map(m_ConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            return false;
+        }
         CBData* cb = (CBData*)mapped.pData;
         cb->frameWidth = m_Width;
         cb->frameHeight = m_Height;
@@ -382,7 +388,10 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
     // MV sampling. Trivially cheap — 30x17 grid at 1080p.
     {
         D3D11_MAPPED_SUBRESOURCE mapped;
-        ctx->Map(m_ConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        // §REVIEW-1103：裝置移除（TDR）時 Map 會失敗、pData 未初始化；直接放棄這次補幀，讓裝置重設流程接手
+        if (FAILED(ctx->Map(m_ConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            return false;
+        }
         CBData* cb = (CBData*)mapped.pData;
         uint32_t mvW = m_Width / (BLOCK_SIZE * DOWNSCALE);
         uint32_t mvH = m_Height / (BLOCK_SIZE * DOWNSCALE);
@@ -414,7 +423,10 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
     // --- Stage 3: Warp + Blend ---
     {
         D3D11_MAPPED_SUBRESOURCE mapped;
-        ctx->Map(m_ConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        // §REVIEW-1103：裝置移除（TDR）時 Map 會失敗、pData 未初始化；直接放棄這次補幀，讓裝置重設流程接手
+        if (FAILED(ctx->Map(m_ConstantBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            return false;
+        }
         CBData* cb = (CBData*)mapped.pData;
         cb->frameWidth = m_Width;
         cb->frameHeight = m_Height;
@@ -469,15 +481,17 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
     ctx->CopyResource(m_PrevMotionField.Get(), m_MotionField.Get());
 
     // --- Diagnostic: read back MV field and log statistics ---
-    if (m_FrameCount <= 5 || (m_FrameCount % 300 == 0)) {
-        uint32_t mvW = m_Width / (BLOCK_SIZE * DOWNSCALE);
-        uint32_t mvH = m_Height / (BLOCK_SIZE * DOWNSCALE);
-
-        if (m_MotionFieldStaging) {
-            ctx->CopyResource(m_MotionFieldStaging.Get(), m_MotionField.Get());
-
-            D3D11_MAPPED_SUBRESOURCE mapped;
-            if (SUCCEEDED(ctx->Map(m_MotionFieldStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+    // §REVIEW-1103：原本在觸發的那一幀 CopyResource 後立刻阻塞 Map(READ)，等 GPU 把整條管線跑完，
+    // release 版也會跑 → 每 300 幀一次 GPU 同步停頓（週期性微卡頓）。改成觸發時只排 copy，
+    // 之後每幀用 DO_NOT_WAIT 試著讀，GPU 還沒做完就下一幀再試，不擋 render 執行緒。
+    if (m_MvDiagPending && m_MotionFieldStaging) {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        HRESULT hr = ctx->Map(m_MotionFieldStaging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
+            m_MvDiagPending = false;
+            if (SUCCEEDED(hr)) {
+                uint32_t mvW = m_Width / (BLOCK_SIZE * DOWNSCALE);
+                uint32_t mvH = m_Height / (BLOCK_SIZE * DOWNSCALE);
                 // MV values are Q1 fixed-point (actual_pixels × 2)
                 float minMvX = 9999, maxMvX = -9999, minMvY = 9999, maxMvY = -9999;
                 double sumAbsMv = 0;
@@ -498,13 +512,20 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
                 }
                 ctx->Unmap(m_MotionFieldStaging.Get(), 0);
 
-                int total = mvW * mvH;
+                int total = (int)(mvW * mvH);
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-FRUC-Generic] frame=%d MV[%dx%d]: X[%.1f..%.1f] Y[%.1f..%.1f] avgAbs=%.1f nonZero=%d/%d",
-                            m_FrameCount, mvW, mvH,
+                            m_MvDiagFrame, mvW, mvH,
                             minMvX, maxMvX, minMvY, maxMvY,
-                            sumAbsMv / total, nonZero, total);
+                            total > 0 ? sumAbsMv / total : 0.0, nonZero, total);
             }
+        }
+    }
+    if (!m_MvDiagPending && (m_FrameCount <= 5 || (m_FrameCount % 300 == 0))) {
+        if (m_MotionFieldStaging) {
+            ctx->CopyResource(m_MotionFieldStaging.Get(), m_MotionField.Get());
+            m_MvDiagPending = true;
+            m_MvDiagFrame = m_FrameCount;
         } else {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-FRUC-Generic] frame=%d interpolated (no staging for MV diag)", m_FrameCount);

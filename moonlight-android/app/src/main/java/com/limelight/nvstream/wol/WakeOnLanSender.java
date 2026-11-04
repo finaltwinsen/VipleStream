@@ -110,27 +110,47 @@ public class WakeOnLanSender {
         }
     }
     
+    /**
+     * §REVIEW-1103：解析失敗回 null。原本解析到一半就停、剩下補 0，照樣送出錯的封包並顯示「喚醒中」。
+     * 也接受 '-' 分隔（Windows 顯示格式）。
+     */
     private static byte[] macStringToBytes(String macAddress) {
+        if (macAddress == null) {
+            return null;
+        }
         byte[] macBytes = new byte[6];
 
         try (@SuppressWarnings("resource")
-             final Scanner scan = new Scanner(macAddress).useDelimiter(":")
+             final Scanner scan = new Scanner(macAddress.trim()).useDelimiter("[:-]")
         ) {
-            for (int i = 0; i < macBytes.length && scan.hasNext(); i++) {
+            int i = 0;
+            for (; i < macBytes.length && scan.hasNext(); i++) {
+                String part = scan.next();
                 try {
-                    macBytes[i] = (byte) Integer.parseInt(scan.next(), 16);
+                    int v = Integer.parseInt(part, 16);
+                    if (part.isEmpty() || part.length() > 2 || v < 0 || v > 0xFF) {
+                        throw new NumberFormatException();
+                    }
+                    macBytes[i] = (byte) v;
                 } catch (NumberFormatException e) {
                     LimeLog.warning("Malformed MAC address: " + macAddress + " (index: " + i + ")");
-                    break;
+                    return null;
                 }
+            }
+            if (i != macBytes.length || scan.hasNext()) {
+                LimeLog.warning("Malformed MAC address: " + macAddress);
+                return null;
             }
             return macBytes;
         }
     }
     
-    private static byte[] createWolPayload(ComputerDetails computer) {
+    private static byte[] createWolPayload(ComputerDetails computer) throws IOException {
         byte[] payload = new byte[102];
         byte[] macAddress = macStringToBytes(computer.macAddress);
+        if (macAddress == null) {
+            throw new IOException("Malformed MAC address");
+        }
         int i;
         
         // 6 bytes of FF

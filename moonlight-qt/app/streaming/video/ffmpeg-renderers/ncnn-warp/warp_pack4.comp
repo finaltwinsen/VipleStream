@@ -33,8 +33,9 @@ void main()
     afp flow_x = buffer_ld1(flow_blob_data, gy * p.w + gx);
     afp flow_y = buffer_ld1(flow_blob_data, p.cstep + gy * p.w + gx);
 
-    afp sample_x = afp(gx) + flow_x;
-    afp sample_y = afp(gy) + flow_y;
+    // §REVIEW-1104：fp16 算術時取樣座標用 float 相加，避免大座標小數被吃掉；權重也在 float 算完再轉回 afp
+    float sample_x = float(gx) + float(flow_x);
+    float sample_y = float(gy) + float(flow_y);
 
     // bilinear interpolate
     afpvec4 v;
@@ -49,8 +50,8 @@ void main()
         x1 = clamp(x1, 0, p.w - 1);
         y1 = clamp(y1, 0, p.h - 1);
 
-        afp alpha = sample_x - afp(x0);
-        afp beta = sample_y - afp(y0);
+        afp alpha = afp(sample_x - float(x0));
+        afp beta = afp(sample_y - float(y0));
 
         afpvec4 v0 = buffer_ld4(image_blob_data, gz * p.cstep + y0 * p.w + x0);
         afpvec4 v1 = buffer_ld4(image_blob_data, gz * p.cstep + y0 * p.w + x1);

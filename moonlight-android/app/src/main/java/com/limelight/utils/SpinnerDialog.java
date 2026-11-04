@@ -60,7 +60,10 @@ public class SpinnerDialog implements Runnable,OnCancelListener {
         activity.runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                progress.setMessage(message);
+                // §REVIEW-1103：run() 在 activity 已 finishing 時提早 return，progress 會維持 null
+                if (progress != null) {
+                    progress.setMessage(message);
+                }
             }
         });
     }

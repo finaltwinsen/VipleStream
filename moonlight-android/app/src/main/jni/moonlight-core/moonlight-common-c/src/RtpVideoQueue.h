@@ -24,11 +24,32 @@ typedef struct _RTPV_QUEUE_LIST {
 #define RTPV_MAX_GRACE_PACKETS 4
 #define RTPV_GRACE_MAX_US 10000  // §K.17-GRACE-TIMEOUT：延後封包最多等 10 ms
 
+// graceFlush 會把這個陣列整段 memcpy 出去，所以型別只有這一處。
+typedef struct _RTPV_DEFERRED_PACKET {
+    PRTP_PACKET packet;
+    PRTPV_QUEUE_ENTRY entry;
+    int length;
+    uint64_t arrivalUs; // §ABR-ADAPT：延後當下的時刻，放行時不能改記成處理當下
+} RTPV_DEFERRED_PACKET;
+
 // §VR-LINK-REPAIR：逐條連線記進度的格數（＝VIPLE_VR_LINK_MAX；RtpVideoQueue.c 有編譯期檢查）
 #define RTPV_ML_LINKS 4
 
 // §VR-REPAIR-RTT（量測）：「放棄之後多久才到齊」同時追蹤幾個 block（說明見 RtpVideoQueue.c 的 msLate*）
 #define RTPV_LATE_SLOTS 4
+
+// §ABR-ADAPT：已收齊、還沒被 VrSend 取走的幀。容量 64；序號去重表蓋得住一幀（最多約 4 個 FEC block × 1024 shard）。
+#define RTPV_FB_CAP 64
+#define RTPV_FB_SEEN_BYTES 512
+#define RTPV_FB_SEEN_BITS (RTPV_FB_SEEN_BYTES * 8)
+
+typedef struct _RTPV_FB_SLOT {
+    uint32_t frame;
+    uint32_t gen;       // 這一筆推進環時的代數，尾端封包補記時用來確認格子還沒被覆寫
+    uint64_t firstUs;
+    uint64_t lastUs;
+    uint32_t bytes;
+} RTPV_FB_SLOT;
 
 typedef struct _RTPV_LATE_SLOT {
     bool open;
@@ -215,11 +236,7 @@ typedef struct _RTP_VIDEO_QUEUE {
     // the next frame's first shard. Instead of immediately discarding
     // the old frame, we defer up to RTPV_MAX_GRACE_PACKETS new-frame
     // packets to give the missing shard a chance to arrive.
-    struct {
-        PRTP_PACKET packet;
-        PRTPV_QUEUE_ENTRY entry;
-        int length;
-    } deferredPackets[RTPV_MAX_GRACE_PACKETS];
+    RTPV_DEFERRED_PACKET deferredPackets[RTPV_MAX_GRACE_PACKETS];
     int deferredCount;
     uint64_t deferredSinceUs;  // §K.17-GRACE-TIMEOUT：開始延後的時間
     uint32_t deferredFrameNumber; // The new frame whose packets are deferred
@@ -251,6 +268,27 @@ typedef struct _RTP_VIDEO_QUEUE {
     uint32_t diagFarStaleMinFrame;    // far 拒收的最小幀號
     uint32_t diagFarStaleMaxFrame;    // far 拒收的最大幀號
     uint32_t diagFarStaleMaxLag;      // far 拒收的最大落後量（currentFrameNumber - frameIndex）
+
+    // §ABR-ADAPT：只在 VR session 寫（VrFlags & VIPLE_VR_SF_ENABLED）。進行中的累計只有 RTP 接收執行緒碰；
+    // ring／dropped 與 VrSend 的交接用 RtpVideoQueue.c 的 fbLock（不能放進這個 struct：RtpvInitializeQueue 會整塊 memset）。
+    // 桌面 session 不進這些欄位。seen 以 RTP 序號 % 4096 去重：多連線的第二份、以及幀交出後才到的 FEC 都不重複計。
+    struct {
+        bool active;            // 正在記某一幀（含已推進環、還等尾端 FEC 的那一幀）
+        bool pushed;            // 這一幀已經在 ring 裡
+        bool useForceRx;        // grace 放行：到達時間用 forceRxUs，不讀當下時鐘
+        uint8_t head;           // ring 裡最舊的一筆
+        uint8_t count;
+        uint16_t dropped;       // 上次取走之後放棄的幀數（無法重組；飽和 65535）
+        uint32_t frame;
+        uint32_t gen;
+        uint32_t bytes;         // RTP payload（去掉 RTP 標頭；含 NV 標頭與 FEC parity；不含還原合成的封包）
+        int slot;               // pushed 時這筆在 ring 的下標；−1＝還沒推進去
+        uint64_t firstUs;
+        uint64_t lastUs;
+        uint64_t forceRxUs;
+        uint8_t seen[RTPV_FB_SEEN_BYTES];
+        RTPV_FB_SLOT ring[RTPV_FB_CAP];
+    } fb;
 } RTP_VIDEO_QUEUE, *PRTP_VIDEO_QUEUE;
 
 // §M01-D：落後量（currentFrameNumber - frameIndex）超過這個值的拒收封包才算
@@ -311,7 +349,14 @@ VIPLE_VR_INLINE void RtpvSetRepairDecision(PRTP_VIDEO_QUEUE queue, const VRRR_OU
 }
 
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue);
+void RtpvShutdownFeedback(void);  // §ABR-ADAPT：連線拆除時刪掉收包報告的鎖
 void RtpvCleanupQueue(PRTP_VIDEO_QUEUE queue);
+
+// §ABR-ADAPT：VrSend 取走已收齊的幀。回傳筆數（0＝沒有收齊的幀；dropped 留著等下一則有幀的報告）。
+// out 已換成相對這一則第一筆的差值。baseTimeUs＝第一筆「最後一個封包到達」的低 32 位元。
+// dropped＝上次取走之後放棄的幀數，這次清成 0。佇列指標由 RtpvInitializeQueue 登記（VideoStream 的 rtpQueue 是 static）。
+int rtpvTakeFrameFeedback(VIPLE_VR_FRAME_FEEDBACK_REC* out, int maxRecs,
+                          uint32_t* baseFrame, uint32_t* baseTimeUs, uint16_t* dropped);
 int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry);
 uint32_t RtpvGetCurrentFrameNumber(PRTP_VIDEO_QUEUE queue);
 void RtpvSubmitQueuedPackets(PRTP_VIDEO_QUEUE queue);

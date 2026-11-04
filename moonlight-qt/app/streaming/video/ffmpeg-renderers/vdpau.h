@@ -41,6 +41,9 @@ private:
     SDL_mutex* m_OverlayMutex;
     VdpBitmapSurface m_OverlaySurface[Overlay::OverlayMax];
     VdpRect m_OverlayRect[Overlay::OverlayMax];
+    // §REVIEW-1104：狀態文字比視窗高時，目的矩形夾進視窗，來源矩形只取文字底部
+    VdpRect m_OverlaySourceRect[Overlay::OverlayMax];
+    bool m_HasOverlaySourceRect[Overlay::OverlayMax];
     VdpOutputSurfaceRenderBlendState m_OverlayBlendState;
 
 #define OUTPUT_SURFACE_COUNT 3

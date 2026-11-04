@@ -152,6 +152,14 @@ int runFrucOffline(const FrucOfflineCommandLineParser& args)
         }
 
         AVFrame* frame = av_frame_alloc();
+        // §REVIEW-1104：av_frame_alloc 失敗會回 NULL，直接寫 frame->format 會空指標當掉
+        if (!frame) {
+            fprintf(stderr, "[fruc-offline] av_frame_alloc failed\n");
+            sws_freeContext(sws);
+            delete renderer;
+            SDL_DestroyWindow(window);
+            return 16;
+        }
         frame->format      = AV_PIX_FMT_NV12;
         frame->width       = width;
         frame->height      = height;

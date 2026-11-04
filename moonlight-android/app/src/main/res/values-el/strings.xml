@@ -340,4 +340,6 @@
     <string name="steam_switch_error_taskgone">Η εργασία εναλλαγής εξαφανίστηκε από τον κεντρικό υπολογιστή</string>
     <string name="steam_switch_error_timeout">Λήξη χρονικού ορίου εναλλαγής (&gt;150 s χωρίς ο διακομιστής να φτάσει σε τελική κατάσταση)</string>
     <string name="steam_switch_account_unavailable">Αυτός ο λογαριασμός δεν έχει αποθηκευμένα διαπιστευτήρια στον κεντρικό υπολογιστή. Συνδεθείτε πρώτα μία φορά στον κεντρικό υπολογιστή και δοκιμάστε ξανά.</string>
+    <string name="title_show_advanced">Εμφάνιση προηγμένων και πειραματικών επιλογών</string>
+    <string name="summary_show_advanced">Επιλογές για αντιμετώπιση προβλημάτων και δοκιμές. Οι κρυφές επιλογές διατηρούν τις τρέχουσες τιμές τους.</string>
 </resources>

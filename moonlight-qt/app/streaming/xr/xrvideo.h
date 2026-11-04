@@ -40,6 +40,8 @@
 #include <QString>
 
 #include <algorithm>
+
+#include "xrbufferauto.h"  // §VR-BUFFER-AUTO
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -100,6 +102,8 @@ public:
         // 直接顯示最新的（不重複），晚到的那張和下一張一起到時馬上回到晚一格（不跳）。OpenXR 的 layer 用的是 swapchain
         // 「最後 release 的那張」，所以要顯示較舊的影像只能讓它待在另一條 swapchain。不可以和 synth 一起開
         int buffer = 0;
+        // §VR-BUFFER-AUTO（2026-11-04）：buffer 是上限；實際深度從 1 起跳，重複幀多就加到上限，長時間用不到再退回 1
+        bool bufferAuto = false;
     };
 
     // §VR-LDIAG：每發布一張新影像記一筆（§VR-SYNTH 的第二次發布沿用同一個 seq，不另記）。時刻都是 steady 時鐘的微秒
@@ -319,6 +323,7 @@ private:
     bool m_HavePrevMeta = false;
     VIPLE_VR_FRAME_META m_PrevMeta = {};
     int64_t m_PrevPts = 0;
+    int64_t m_NominalDelta = 0;  // §REVIEW-1104：補幀的幀間隔基準；原本是函式 static，換一場不會歸零
     int m_FrameH = 0;                // 一張影像的高度（synth 時 swapchain 是它的兩倍）
     bool m_SynthFailed = false;      // shader 或材質建立失敗過：這個 session 不再試
     uint64_t m_FirstShownSeq = 0;    // XR thread（m_SwMutex 內）：已經顯示過一次的 seq
@@ -374,15 +379,22 @@ private:
     std::atomic<uint32_t> m_GpuTypUs{xrflight::kGpuTypInitUs};
     std::vector<SwapchainSet> m_Retired;   // 等 XR thread 送出新一代後銷毀
     // §VR-BUFFER：輪流使用的 swapchain。影像 render thread 畫第 i 張之前把 m_RingSets[i % kRing] 換進 m_Sw（持
-    // m_StatsMutex，takeStatsDeferred 會讀 m_Sw 的尺寸），畫完換回去。寫入的永遠是第三新的那一條，frame thread 只會
-    // 選最新的兩張之一，所以不會撞到正要顯示的那一條
-    static constexpr int kRing = 3;
+    // m_StatsMutex，takeStatsDeferred 會讀 m_Sw 的尺寸），畫完換回去。實際輪用 buffer+2 條（ringSize()）：寫入的永遠是
+    // 第 buffer+2 新的那一條，frame thread 只會選最新的 buffer+1 張之一，所以不會撞到正要顯示的那一條。
+    // 11-04：緩衝最多 2 格（遠端抖動大時的手動試驗），所以配 4 條
+    static constexpr int kRing = 4;
+    int ringSize() const { return std::min(kRing, m_Config.buffer + 2); }
     SwapchainSet m_RingSets[kRing];
     int m_RingNext = 0;                    // 影像 render thread：下一張寫進哪一條
     int m_CurSlot = -1;                    // 影像 render thread：正在畫的那一條（-1＝沒開緩衝）
     Current m_RingPub[kRing];              // 每一條最後發布的那張（m_SwMutex）
     std::atomic<uint64_t> m_RingRel[kRing] = {};  // 每一條最後 release 的序號（queueMutex 內寫）
     uint64_t m_BufLastShown = 0;           // frame thread（m_SwMutex）：current() 上次回傳的 seq
+    // §VR-BUFFER-AUTO（frame thread，m_SwMutex）：目前深度與切換判斷（邏輯在 xrbufferauto.h，離線模擬共用）
+    int m_BufDepth = 0;                    // 0＝還沒初始化
+    xrbuf::AutoDepth m_BufAuto;
+    std::atomic<int> m_BufDepthLog{0};     // 給 10 s log 讀
+    std::atomic<uint32_t> m_BufUp{0}, m_BufDown{0};
     // §VR-BUFFER 量測（frame thread 寫、影像 render thread 每 10 s 印）：顯示「最新的前一張」／最新的一張（新的）／
     // 重複上一張／跳過的張數
     std::atomic<uint32_t> m_BufLag1{0}, m_BufLag0{0}, m_BufRepeat{0}, m_BufSkipped{0};
@@ -440,6 +452,10 @@ private:
     int m_EquiReady = -1;              // m_EquiMutex：最新畫好的那一張；-1＝還沒有
     int m_EquiInUse = -1;              // m_EquiMutex：frame thread 正在取樣的那一張（render thread 不寫它）
     pl_dispatch m_DpFrame = nullptr;   // frame thread 專用（pl_dispatch 不能兩條執行緒共用）
+    // 沉浸模式：render thread（畫全景材質）與 frame thread（畫投影）錄製／送出 libplacebo 工作時互斥。
+    // 兩邊同時送，頭盔驅動的送出執行緒會在 tu_autotune::on_submit 讀到壞掉的 command buffer 而崩潰
+    // （2026-11-02 無人重現：180-sbs＋每秒 seek 必當，平面模式、只調音量都不當）。等 GPU 的時候不持有
+    std::mutex m_PlSubmitMutex;
     SwapchainSet m_Proj;               // frame thread：投影 swapchain
     bool m_ProjLinear = false;         // 投影 swapchain 是線性格式（要把 sRGB 值換回線性）
     bool m_ProjFailed = false;         // 建不起來或 shader 失敗過：這個 session 不再試

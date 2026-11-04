@@ -284,6 +284,8 @@ const KeyCodeMap kKeyCodesMap[] = {
       }
 
       macos_input->kb_flags = release ? macos_input->kb_flags & ~mask : macos_input->kb_flags | mask;
+      // §REVIEW-1103：事件物件會重用，不設 keycode 就會帶著前一個按鍵的 keycode
+      CGEventSetIntegerValueField(event, kCGKeyboardEventKeycode, key);
       CGEventSetType(event, kCGEventFlagsChanged);
       CGEventSetFlags(event, macos_input->kb_flags);
     } else {
@@ -370,11 +372,12 @@ const KeyCodeMap kKeyCodesMap[] = {
     if (macos_input->mouse_down[0]) {
       return kCGEventLeftMouseDragged;
     }
+    // §REVIEW-1103：button_mouse 把右鍵存在 [1]（kCGMouseButtonRight）、中鍵存在 [2]（kCGMouseButtonCenter），原本兩個顛倒
     if (macos_input->mouse_down[1]) {
-      return kCGEventOtherMouseDragged;
+      return kCGEventRightMouseDragged;
     }
     if (macos_input->mouse_down[2]) {
-      return kCGEventRightMouseDragged;
+      return kCGEventOtherMouseDragged;
     }
     return kCGEventMouseMoved;
   }

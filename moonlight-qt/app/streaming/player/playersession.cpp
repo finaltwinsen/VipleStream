@@ -15,6 +15,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStringList>
@@ -26,6 +29,8 @@
 #include <cmath>
 
 extern "C" {
+#include <libavformat/avio.h>
+#include <libavutil/dict.h>
 #include <libavutil/frame.h>
 }
 
@@ -100,6 +105,9 @@ PlayerSession::~PlayerSession()
     requestStop();
     if (m_Thread.joinable()) {
         m_Thread.join();
+    }
+    if (m_SubThread.joinable()) {
+        m_SubThread.join();
     }
 }
 
@@ -189,6 +197,7 @@ int PlayerSession::run(QString* error)
     }
     // §VR-PLAYER（V4）：YouTube 等網站的頁面網址先經 yt-dlp 換成影像／音訊網址（頭盔裡這段時間還沒有畫面）
     QString webTitle;
+    QString webProjection;
     const bool web = WebResolver::needsResolve(m_Config.source);
     // YouTube 偶爾給出一開就 403 的影像網址（同一支片重新解析一次就好）：網站來源開失敗時重新解析、再開一次
     for (int attempt = 0;; attempt++) {
@@ -209,9 +218,24 @@ int PlayerSession::run(QString* error)
                 mo.httpHeaders = wr.headers.toStdString();
             }
             webTitle = wr.title;
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] web resolved in %llu ms: %s%s%s",
+            webProjection = wr.projection;
+            m_WebVideo.clear();
+            for (const WebResolver::VideoChoice& c : wr.videoChoices) {
+                m_WebVideo.append({c.label, c.url});
+            }
+            m_WebVideoIdx = wr.videoChoice;
+            m_WebSubs.clear();
+            for (const WebResolver::SubtitleTrack& t : wr.subtitles) {
+                m_WebSubs.append({t.lang, t.name, t.url, t.automatic});
+            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] web choices: %d qualities (now %s), %d subtitle tracks",
+                        static_cast<int>(m_WebVideo.size()),
+                        m_WebVideoIdx >= 0 ? qPrintable(m_WebVideo[m_WebVideoIdx].label) : "fixed",
+                        static_cast<int>(m_WebSubs.size()));
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] web resolved in %llu ms: %s%s%s projection=%s",
                         static_cast<unsigned long long>((steadyNowNs() - r0) / 1000000ull), wr.audioUrl.isEmpty() ? "single stream" : "video+audio",
-                        wr.isLive ? " (live)" : "", wr.title.isEmpty() ? "" : " - title known");
+                        wr.isLive ? " (live)" : "", wr.title.isEmpty() ? "" : " - title known",
+                        wr.projection.isEmpty() ? "none" : qPrintable(wr.projection));
         }
         std::string err;
         if (m_Media.open(mo, &err)) {
@@ -255,11 +279,32 @@ int PlayerSession::run(QString* error)
                                  ? QFileInfo(m_Config.source).fileName()
                                  : QUrl(m_Config.source).path();
     m_Format = playerfmt::decide(fmtText.toStdString(), info.hints, fileName.toStdString(), &m_FormatSource);
-    // YouTube 的 360° 影片都是等角立方體（EAC），容器裡的投影標記 FFmpeg 不認得（mp4 是 ytmp、webm 是 mesh），只能從來源判斷
+    // 網站說了投影（YouTube 的 projectionType，經 yt-dlp）：以它為準。2026-11-02 使用者回報三支 YouTube 360° 片都判錯：
+    // 那幾支其實是等距柱狀（equi），舊規則「YouTube 的 360° 一律當 EAC」把它們都轉成了 EAC
+    //   - equi*：等距柱狀，不轉 EAC；容器沒說投影（判成平面）時補成 360°；equi_threed_top_bottom＝上下立體
+    //   - mesh：網格投影，YouTube 的 360° 是等角立方體（EAC），容器裡的標記 FFmpeg 不認得（mp4 是 ytmp、webm 是 mesh）
+    //   - 沒說：照舊（YouTube 的 360° 當 EAC）
     const QString host = QUrl(m_Config.source).host().toLower();
-    if (m_Format.projection == playerfmt::Projection::Equirect360 && m_FormatSource != playerfmt::Source::User &&
-        (host.endsWith(QLatin1String("youtube.com")) || host == QLatin1String("youtu.be"))) {
-        m_Format.projection = playerfmt::Projection::Eac360;
+    const bool youtube = host.endsWith(QLatin1String("youtube.com")) || host == QLatin1String("youtu.be");
+    if (m_FormatSource != playerfmt::Source::User) {
+        if (webProjection.startsWith(QLatin1String("equi"))) {
+            if (m_Format.projection == playerfmt::Projection::Flat || m_Format.projection == playerfmt::Projection::Eac360) {
+                m_Format.projection = playerfmt::Projection::Equirect360;
+                m_FormatSource = playerfmt::Source::Metadata;
+            }
+            if (webProjection.contains(QLatin1String("top_bottom"))) {
+                m_Format.stereo = playerfmt::Stereo::TopBottom;
+                m_FormatSource = playerfmt::Source::Metadata;
+            }
+        }
+        else if (m_Format.projection == playerfmt::Projection::Equirect360 &&
+                 (webProjection == QLatin1String("mesh") || (webProjection.isEmpty() && youtube))) {
+            m_Format.projection = playerfmt::Projection::Eac360;
+        }
+        else if (m_Format.projection == playerfmt::Projection::Flat && webProjection == QLatin1String("mesh")) {
+            m_Format.projection = playerfmt::Projection::Eac360;
+            m_FormatSource = playerfmt::Source::Metadata;
+        }
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] format %s (from %s)", playerfmt::name(m_Format).c_str(),
                 playerfmt::sourceName(m_FormatSource));
@@ -327,6 +372,17 @@ int PlayerSession::run(QString* error)
     m_Media.setPaused(false);
     m_PanelShownNs = steadyNowNs();
     m_LastInteractNs.store(m_PanelShownNs);
+    // 字幕：上次在 VR 裡選過某個語言，這支片有就直接開（同 YouTube 記住字幕語言）
+    {
+        const QString subLang = settings.value(QStringLiteral("player/subtitleLang")).toString();
+        for (int i = 0; !subLang.isEmpty() && i < m_WebSubs.size(); i++) {
+            if (m_WebSubs[i].lang == subLang) {
+                selectSubtitle(i);
+                break;
+            }
+        }
+    }
+    updateLabels();
     updatePanel(true);
 
     // ── 3. 呈現迴圈 ──
@@ -354,6 +410,55 @@ int PlayerSession::run(QString* error)
         if (m_Stop.load()) {
             break;
         }
+        if (m_ReopenTo >= 0) {
+            // 換畫質：只換影像那一條（聲音同一條網址），從目前位置接著播。重開這段（約 1 秒）頭盔裡停在最後一張
+            const int to = m_ReopenTo;
+            m_ReopenTo = -1;
+            const double pos = m_Media.position();
+            const bool wasPaused = m_Media.paused();
+            const std::string oldUrl = mo.url;
+            mo.volume = m_Media.volume();
+            if (mo.hwDecode && m_Media.info().decoder.find("v4l2m2m") == std::string::npos) {
+                // 這一場已經從硬體解碼退回軟體了（同一條串流硬體解不了）：重開時直接用軟體，不要再錯 30 張
+                mo.hwDecode = false;
+            }
+            mo.startSec = pos;
+            m_PanelState.buffering = true;
+            updatePanel(true);
+            const uint64_t r0 = steadyNowNs();
+            m_Media.close();
+            mo.url = m_WebVideo[to].url.toStdString();
+            std::string err;
+            bool ok = m_Media.open(mo, &err);
+            if (ok) {
+                m_WebVideoIdx = to;
+            }
+            else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] quality %s failed (%s): back to %s",
+                            qPrintable(m_WebVideo[to].label), err.c_str(), qPrintable(m_WebVideo[m_WebVideoIdx].label));
+                m_Media.close();
+                mo.url = oldUrl;
+                ok = m_Media.open(mo, &err);
+            }
+            if (!ok) {
+                *error = QString::fromStdString(err);
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] reopen failed: %s", err.c_str());
+                rc = 3;
+                break;
+            }
+            m_Media.setPaused(wasPaused);
+            lock.reset();
+            lastSerial = -1;
+            m_LastSlotAbs = INT64_MIN;
+            applyFormat();  // 長寬比可能不一樣（也只有螢幕已經是影像時才動 XR）
+            updateLabels();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] quality -> %s at %.1f s in %llu ms: %s",
+                        qPrintable(m_WebVideo[m_WebVideoIdx].label), pos,
+                        static_cast<unsigned long long>((steadyNowNs() - r0) / 1000000ull), m_Media.describe().c_str());
+            updatePanel(true);
+            continue;
+        }
+        updateSubtitle();
         if (m_Xr != nullptr && (!m_Xr->isRunning() || m_Xr->isLost())) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] XR session ended (%s)", m_Xr->isLost() ? "lost" : "exit");
             rc = m_Xr->isLost() ? 4 : 0;
@@ -405,7 +510,8 @@ int PlayerSession::run(QString* error)
         int serial = 0;
         bool haveNext = false;
         if (!m_Media.peekVideo(&pts, &serial, &haveNext, &npts)) {
-            m_Media.waitVideo(4);
+            // §REVIEW-1103：播完（沒有新影格會來）時睡久一點；seek 會 notify 立刻醒來。
+            m_Media.waitVideo(m_Media.finished() ? 20 : 4);
             continue;
         }
         if (serial != lastSerial) {
@@ -518,6 +624,9 @@ int PlayerSession::run(QString* error)
     settings.sync();
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] stopped at %.1f s (rc=%d)", pos, rc);
     m_Media.close();
+    if (m_SubThread.joinable()) {
+        m_SubThread.join();
+    }
     if (m_Xr != nullptr && m_OwnXr) {
         m_Xr->shutdown();
         delete m_Xr;
@@ -525,6 +634,7 @@ int PlayerSession::run(QString* error)
     else if (m_Xr != nullptr) {
         // §VR-SHELL：session 還給 VR 介面：收控制列、格式回平面、不再要求片子的更新率，螢幕換回介面
         m_Xr->setPlayerPanel(QImage(), false);
+        m_Xr->setPlayerSubtitle(QImage());
         m_Xr->setPlayerLayout(0, 0, 0.0f);
         m_Xr->setPlayerEyeOffset(0.0f);
         m_Xr->setPreferredRefreshHz(0.0f);
@@ -541,8 +651,18 @@ void PlayerSession::showVideo()
     }
     m_VideoShown = true;
     if (!m_OwnXr) {
+        // 螢幕的擺法（遠近、大小、180°／360°）到這時才換：之前換的話，介面還在顯示、螢幕先被放大
+        // （2026-11-02 使用者回報：點了 VR 影片，畫面先放大一下、再過一秒才進播放器，中間容易誤觸）
+        applyFormat();
+        applyScreen();
         m_Xr->setShellActive(false);
     }
+}
+
+bool PlayerSession::xrLayoutLive() const
+{
+    // 自己的 session：一開始就是影片；VR 介面的 session：第一張影像交出去（showVideo）之後才是
+    return m_Xr != nullptr && (m_OwnXr || m_VideoShown);
 }
 
 void PlayerSession::inputButton(int button)
@@ -594,7 +714,7 @@ void PlayerSession::inputPanelClick(float u, float v)
 
 void PlayerSession::applyFormat()
 {
-    if (m_Xr != nullptr) {
+    if (xrLayoutLive()) {
         m_Xr->setPlayerLayout(static_cast<int>(m_Format.projection), static_cast<int>(m_Format.stereo), m_Media.info().frameAspect);
     }
     m_PanelState.formatLabel = formatLabel(m_Format);
@@ -605,7 +725,7 @@ void PlayerSession::applyScreen()
     const int i = std::clamp(m_Config.screenPreset, 0, 2);
     const float dist = kScreens[i].distanceM * std::pow(kDepthDistStep, static_cast<float>(m_Depth));
     const float eyeOffDeg = kDepthEyeStepDeg * static_cast<float>(m_Depth);
-    if (m_Xr != nullptr) {
+    if (xrLayoutLive()) {
         m_Xr->setPlayerScreen(dist, kScreens[i].fovDeg);
         m_Xr->setPlayerEyeOffset(eyeOffDeg * 3.14159265f / 180.0f);
     }
@@ -668,6 +788,29 @@ void PlayerSession::handleCommands()
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] format -> %s (user)", playerfmt::name(m_Format).c_str());
             break;
         }
+        case Cmd::Quality: {
+            // value < 0：換下一個（由高到低、到底回最高）；否則是清單的索引
+            const int n = static_cast<int>(m_WebVideo.size());
+            if (n > 1 && m_WebVideoIdx >= 0) {
+                const int to = c.value < 0.0 ? (m_WebVideoIdx + 1) % n : std::clamp(static_cast<int>(c.value), 0, n - 1);
+                if (to != m_WebVideoIdx) {
+                    m_ReopenTo = to;
+                }
+            }
+            break;
+        }
+        case Cmd::Subtitle: {
+            // value < 0：換下一個（關 → 第一軌 → … → 最後一軌 → 關）；否則是清單的索引（超出＝關）
+            const int n = static_cast<int>(m_WebSubs.size());
+            if (n > 0) {
+                const int to = c.value < 0.0 ? (m_SubIdx + 1 >= n ? -1 : m_SubIdx + 1)
+                                             : (static_cast<int>(c.value) < n ? static_cast<int>(c.value) : -1);
+                selectSubtitle(to);
+                QSettings().setValue(QStringLiteral("player/subtitleLang"), to >= 0 ? m_WebSubs[to].lang : QString());
+                updateLabels();
+            }
+            break;
+        }
         case Cmd::DepthRel: {
             const int d = std::clamp(m_Depth + static_cast<int>(c.value), -kDepthMax, kDepthMax);
             if (d != m_Depth) {
@@ -724,9 +867,153 @@ void PlayerSession::onPanelClick(float u, float v)
     case PlayerPanel::VolUp: post(Cmd::VolumeRel, 0.1); break;
     case PlayerPanel::Format: post(Cmd::Format, -1.0); break;
     case PlayerPanel::Screen: post(Cmd::Screen, -1.0); break;
+    case PlayerPanel::Quality: post(Cmd::Quality, -1.0); break;
+    case PlayerPanel::Subtitles: post(Cmd::Subtitle, -1.0); break;
     case PlayerPanel::Recenter: post(Cmd::Recenter); break;
     case PlayerPanel::Exit: post(Cmd::Exit); break;
     default: post(Cmd::ShowPanel); break;
+    }
+}
+
+void PlayerSession::updateLabels()
+{
+    m_PanelState.qualityLabel = m_WebVideo.size() > 1 && m_WebVideoIdx >= 0 ? m_WebVideo[m_WebVideoIdx].label : QString();
+    m_PanelState.subtitleLabel = m_WebSubs.isEmpty() ? QString() : (m_SubIdx < 0 ? QStringLiteral("Off") : m_WebSubs[m_SubIdx].lang);
+}
+
+void PlayerSession::selectSubtitle(int idx)
+{
+    // 播放器執行緒。前一次下載（有逾時）還沒完就等它，結果用代號丟掉
+    if (m_SubThread.joinable()) {
+        m_SubThread.join();
+    }
+    m_SubIdx = idx;
+    int gen = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_SubMutex);
+        m_Cues.clear();
+        gen = ++m_SubGen;
+    }
+    if (idx < 0 || idx >= m_WebSubs.size()) {
+        m_SubIdx = -1;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] subtitles off");
+        return;
+    }
+    const SubTrack t = m_WebSubs[idx];
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] subtitles -> %s (%s%s)", qPrintable(t.lang), qPrintable(t.name),
+                t.automatic ? ", auto" : "");
+    m_SubThread = std::thread([this, url = t.url, lang = t.lang, gen]() {
+        const uint64_t t0 = steadyNowNs();
+        std::vector<Cue> cues = fetchCues(url);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] subtitles %s: %d cues in %llu ms", qPrintable(lang),
+                    static_cast<int>(cues.size()), static_cast<unsigned long long>((steadyNowNs() - t0) / 1000000ull));
+        std::lock_guard<std::mutex> lk(m_SubMutex);
+        if (gen == m_SubGen) {
+            m_Cues = std::move(cues);
+            m_CuesGen = gen;
+        }
+    });
+}
+
+std::vector<PlayerSession::Cue> PlayerSession::fetchCues(const QString& url)
+{
+    // YouTube 的 json3：{"events":[{"tStartMs":…,"dDurationMs":…,"segs":[{"utf8":"…"},…]},…]}。自動字幕的事件會重疊
+    // （兩行滾動），顯示時把同時有效的接起來，效果同 YouTube。用 FFmpeg 的 avio 下載（播放器本來就靠它連 https，不必另起事件迴圈）
+    std::vector<Cue> cues;
+    AVDictionary* opts = nullptr;
+    av_dict_set(&opts, "rw_timeout", "10000000", 0);
+    AVIOContext* io = nullptr;
+    const int r = avio_open2(&io, url.toUtf8().constData(), AVIO_FLAG_READ, nullptr, &opts);
+    av_dict_free(&opts);
+    if (r < 0 || io == nullptr) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] subtitle download failed (%d)", r);
+        return cues;
+    }
+    QByteArray data;
+    char buf[16384];
+    for (;;) {
+        const int n = avio_read(io, reinterpret_cast<unsigned char*>(buf), sizeof(buf));
+        if (n <= 0 || data.size() > 32 * 1024 * 1024) {
+            break;
+        }
+        data.append(buf, n);
+    }
+    avio_closep(&io);
+    const QJsonArray events = QJsonDocument::fromJson(data).object().value(QStringLiteral("events")).toArray();
+    for (const QJsonValue& ev : events) {
+        const QJsonObject e = ev.toObject();
+        const QJsonArray segs = e.value(QStringLiteral("segs")).toArray();
+        QString text;
+        for (const QJsonValue& s : segs) {
+            text += s.toObject().value(QStringLiteral("utf8")).toString();
+        }
+        text = text.trimmed();
+        if (text.isEmpty()) {
+            continue;
+        }
+        Cue c;
+        c.startSec = e.value(QStringLiteral("tStartMs")).toDouble() / 1000.0;
+        // §REVIEW-1103：缺 dDurationMs 的事件原本長度 0、永遠不顯示；先標成 -1，排序後補到下一段起點（最多 3 s）
+        c.endSec = e.contains(QStringLiteral("dDurationMs"))
+                       ? c.startSec + e.value(QStringLiteral("dDurationMs")).toDouble() / 1000.0
+                       : -1.0;
+        c.text = text;
+        cues.push_back(c);
+    }
+    std::sort(cues.begin(), cues.end(), [](const Cue& a, const Cue& b) { return a.startSec < b.startSec; });
+    for (size_t i = 0; i < cues.size(); ++i) {
+        if (cues[i].endSec < 0.0) {
+            double end = cues[i].startSec + 3.0;
+            if (i + 1 < cues.size() && cues[i + 1].startSec > cues[i].startSec) {
+                end = std::min(end, cues[i + 1].startSec);
+            }
+            cues[i].endSec = end;
+        }
+    }
+    return cues;
+}
+
+void PlayerSession::updateSubtitle()
+{
+    // 播放器執行緒，每 100 ms 看一次：文字變了才重畫、交給 XR
+    const uint64_t now = steadyNowNs();
+    if (now - m_SubCheckedNs < 100000000ull) {
+        return;
+    }
+    m_SubCheckedNs = now;
+    QString text;
+    if (m_SubIdx >= 0 && m_Xr != nullptr) {
+        const double t = m_Media.position();
+        std::lock_guard<std::mutex> lk(m_SubMutex);
+        if (m_CuesGen == m_SubGen) {
+            // 同時有效的最多取最後兩段（自動字幕是兩行滾動）
+            QStringList active;
+            for (const Cue& c : m_Cues) {
+                if (c.startSec > t) {
+                    break;
+                }
+                if (t < c.endSec) {
+                    active << c.text;
+                }
+            }
+            while (active.size() > 2) {
+                active.removeFirst();
+            }
+            text = active.join(QLatin1Char('\n'));
+        }
+    }
+    if (text == m_SubShown) {
+        return;
+    }
+    m_SubShown = text;
+    const QImage img = text.isEmpty() ? QImage() : PlayerPanel::renderSubtitle(text, XrContext::kSubW, XrContext::kSubH);
+    if (!img.isNull() && !m_SubDumped && !m_Config.dumpPanelPath.isEmpty()) {
+        // dev（--dump-panel）：第一張字幕也存一張，看字型與版面
+        m_SubDumped = true;
+        img.save(m_Config.dumpPanelPath + QStringLiteral(".sub.png"));
+    }
+    if (m_Xr != nullptr) {
+        m_Xr->setPlayerSubtitle(img);
     }
 }
 
@@ -818,7 +1105,8 @@ void PlayerSession::logWindow(uint64_t nowNs, bool final)
 void PlayerSession::runTestScript(double elapsedSec)
 {
     // "秒:指令[=值],…"：pause、play、seek=<秒>、seekrel=<秒>、vol=<0..2>、fmt=<名稱>、screen=<0..2>、panel、
-    // depthrel=<格數>（遠近）、click=<u>:<v>（點控制列）、recenter、exit。照時間順序執行，每個只執行一次
+    // depthrel=<格數>（遠近）、click=<u>:<v>（點控制列）、recenter、exit、quality[=<索引>]（換畫質）、sub[=<索引>]（換字幕，
+    // 超出＝關）。照時間順序執行，每個只執行一次
     const QStringList steps = m_Config.testScript.split(QLatin1Char(','), Qt::SkipEmptyParts);
     while (m_TestStep < steps.size()) {
         const QString step = steps.at(m_TestStep).trimmed();
@@ -858,6 +1146,12 @@ void PlayerSession::runTestScript(double elapsedSec)
         }
         else if (name == QLatin1String("screen")) {
             post(Cmd::Screen, val.toDouble());
+        }
+        else if (name == QLatin1String("quality")) {
+            post(Cmd::Quality, val.isEmpty() ? -1.0 : val.toDouble());
+        }
+        else if (name == QLatin1String("sub")) {
+            post(Cmd::Subtitle, val.isEmpty() ? -1.0 : val.toDouble());
         }
         else if (name == QLatin1String("panel")) {
             post(Cmd::TogglePanel);

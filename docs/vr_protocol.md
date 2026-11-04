@@ -129,7 +129,7 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 sampleAgeMs                   
 | | 03 PRESENCE、04 CONTROLLER_STATE | — | reliable |
 | | 05 REFRESH_CHANGED | u16 Hz，觸發重開 session | reliable |
 | | 06 CLIENT_TIMING | 1 Hz 統計（M4a R3 定義 32 B；§VR-PREDICT 2026-10-03 尾端加 4 B＝36 B，舊 server 只讀前 32 B；§VR-BUFFER-REFILL 2026-10-29 再加 8 B＝44 B，舊 server 只讀前 36 B）：`{framesPresented u32, xrMissed u32, metaMiss u32（三者累計）, displayPeriodNs u32, decodeP50Us u16, decodeP95Us u16, renderP50Us u16, renderP95Us u16, slackP50Us i16, slackP05Us i16, mtpP50_100us u16, mtpP95_100us u16, poseLagP50_100us i16（遊戲算繪姿態相對實際顯示的時間差，正＝落後、負＝超前；樣本不足＝0x7FFF）, poseLagCount u16, bufLag1Total u32, bufLag0Total u32（§VR-BUFFER 開著時累計顯示「最新的前一張」／「最新那張」的次數，沒開＝0；server 看相鄰兩則的差，緩衝連續 2 秒九成以上空著就用 burst 把相位提前一整格，見 `vr_buffer_refill`）}` | ch 0x07 unseq |
-| | 07 FRAME_FEEDBACK（GA） | 每 8 幀一批 | ch 0x07 unseq |
+| | 07 FRAME_FEEDBACK | §ABR-ADAPT（2026-11-03）：收包報告，有新收齊的幀才送、最快 100 ms 一則（超過 18 筆拆多則）。`{hdr: baseFrame u32, baseTimeUs u32（第一筆「最後一個封包到達」的 client 單調時鐘 µs 低 32 位元）, count u8, flags u8（bit0＝這段期間有放棄的幀）, droppedFrames u16} + count × {frameDelta u16, spreadUs u16（第一到最後一個封包的時間差，夾 65535）, lastArrOffUs u32（相對 baseTimeUs）, bytes u32（收到的 RTP payload，含 FEC、不含重複）}`，12＋12×n B（n ≤ 18）。server 對照自己記的每幀送完時間算單向延遲趨勢（相對值）與收／送速率（都只算 payload），餵 VR 碼率控制器。server 同意 §VR-LINK-CTRL 時和 LATCH 一樣走連線；舊 server 依 len 略過 | ch 0x07 unseq |
 | | **08 LATCH** | 10 Hz：`{frameId u32, slackUs i32, displayPeriodNs u32}` | ch 0x07 unseq |
 | | **09 LOSS** | `{firstLost u32, lastLost u32, reason u8}`，送 2 次 | ch 0x07 unseq |
 | | **0A LINK_HELLO** | 連線宣告（§VR-MULTILINK，見 §7） | reliable |
@@ -552,8 +552,8 @@ session 開始時才建立連線，之後插上的網卡（或主機後來才連
   （約 4 s）都成立才動手（USB 列舉的瞬間會冒出假介面）；一次最多新增或重綁一條。
 - 介面消失或 IP 變了：該條標記 `ifGone`、停止送 PING（server 的 2 s 存活判定自然讓它變不可用）。同一個 IP 回來時
   只要重送 HELLO；換了 IP 就帶著新描述與 `epoch+1` 重綁。
-- host：control 迴圈的 1 Hz tick 比對 `platf::enum_net_interfaces()`；hub 建立後的第一個 tick 無條件送一次，
-  之後位址集合變動才送。`LINK_ADDRS` 是**完整快照**，client 直接覆蓋候選清單，掉一份或亂序都不會累積錯誤。
+- host：control 迴圈的 1 Hz tick 比對 `platf::enum_net_interfaces()`；client 協商出 `F_HOTADD` 後的第一個 tick
+  無條件送一次，之後位址集合變動才送。`LINK_ADDRS` 是**完整快照**，client 直接覆蓋候選清單，掉一份或亂序都不會累積錯誤。
   不在 `vr_hotspot_connect` 裡直接送：那是 worker 執行緒，`send_vr_s2c()` 限定 control 執行緒。
 
 **同 id 重綁與 slot 回收**（server 的 `on_hello()`；沿用同一個 `link_t` 物件與索引，client 的索引＝`linkIdx`）
@@ -584,6 +584,7 @@ server 的重綁順序（不能讓兩條接收鏈並存）：`retire` 單條 tx 
 4. 影像／音訊接收執行緒在迴圈頂端、且沒有暫存封包時，把 pending fd 換進自己的 poll set，再寫 `ackVideo`／`ackAudio`。
 5. ping 執行緒等到兩邊都 ack 才關舊 fd、換上新的位址與埠、`ready = true`，並把確認、RTT 窗、到達速率與 lag 樣本重來。
    等超過 1 s 只記一則 log、繼續等（寧可留著兩組 fd，也不要讓 `poll` 拿到已關閉的 handle）。
+   PING、追蹤與控制訊息的 `sendto` 和這個 fd 交換共用 `sockMutex`，避免關閉時還有別條執行緒在送舊 socket。
 
 新增連線（append）不需要 ack：ping 執行緒先把 `links[linkCount]` 寫好，再以 release 屏障公開 `linkCount`；兩條接收
 執行緒在迴圈頂端看到 `set->count < 1 + linkCount` 時自行 append。`refused` 不再是永久：hot-add 開啟時記

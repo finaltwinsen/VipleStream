@@ -148,6 +148,7 @@ void NvComputer::serialize(QSettings& settings, bool serializeApps) const
 
 bool NvComputer::isEqualSerialized(const NvComputer &that) const
 {
+    // §REVIEW-1104：stunAddress／stunNatType 有進 serialize，漏比的話只改這兩欄不會存檔
     return this->name == that.name &&
            this->hasCustomName == that.hasCustomName &&
            this->uuid == that.uuid &&
@@ -157,6 +158,8 @@ bool NvComputer::isEqualSerialized(const NvComputer &that) const
            this->ipv6Address == that.ipv6Address &&
            this->manualAddress == that.manualAddress &&
            this->vpnAddress == that.vpnAddress &&
+           this->stunAddress == that.stunAddress &&
+           this->stunNatType == that.stunNatType &&
            this->serverCert == that.serverCert &&
            this->isNvidiaServerSoftware == that.isNvidiaServerSoftware &&
            this->directLaunchDesktop == that.directLaunchDesktop &&
@@ -345,6 +348,12 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
             // Use HTTP port (same as how the server is reached) not the STUN control port
             // This allows Moonlight to reach the GameStream API via the public IP
             this->stunAddress = NvAddress(stunIp, http.httpPort());
+            // §REVIEW-1104（使用者決策 B）：冒號後面就是 host 控制埠在公網上的實際埠，打洞要打這個
+            bool portOk = false;
+            const uint punchPort = stunEndpoint.mid(colonIdx + 1).toUInt(&portOk);
+            if (portOk && punchPort > 0 && punchPort < 65536) {
+                this->stunPunchPort = static_cast<uint16_t>(punchPort);
+            }
         }
         this->stunNatType = NvHTTP::getXmlString(serverInfo, "StunNatType");
         // 值變化才印（見 logOnceOnChange）
@@ -714,11 +723,16 @@ QVector<NvAddress> NvComputer::uniqueAddresses() const
 
 bool NvComputer::update(const NvComputer& that)
 {
-    bool changed = false;
-
     // Lock us for write and them for read
     QWriteLocker thisLock(&this->lock);
     QReadLocker thatLock(&that.lock);
+    // §REVIEW-1104：update 自己會拿寫鎖，relay 要在同一把鎖裡還原時改走 updateUnlocked
+    return updateUnlocked(that);
+}
+
+bool NvComputer::updateUnlocked(const NvComputer& that)
+{
+    bool changed = false;
 
     // UUID may not change or we're talking to a new PC
     Q_ASSERT(this->uuid == that.uuid);
@@ -753,6 +767,12 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED_AND_NONNULL(ipv6Address);
     ASSIGN_IF_CHANGED_AND_NONNULL(manualAddress);
     ASSIGN_IF_CHANGED_AND_NONNULL(vpnAddress);
+    // §REVIEW-1104：poll 的 STUN 位址與 NAT 類型沒寫回，會一直對舊端點打洞；空值不覆蓋，避免沒送 StunEndpoint 的 poll 把已存值清掉
+    ASSIGN_IF_CHANGED_AND_NONNULL(stunAddress);
+    ASSIGN_IF_CHANGED_AND_NONEMPTY(stunNatType);
+    if (that.stunPunchPort != 0) {  // §REVIEW-1104：只在執行期、不影響存檔與畫面，不算「有變更」
+        stunPunchPort = that.stunPunchPort;
+    }
     ASSIGN_IF_CHANGED(activeHttpsPort);
     ASSIGN_IF_CHANGED(externalPort);
     ASSIGN_IF_CHANGED(pairState);

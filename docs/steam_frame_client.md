@@ -2973,7 +2973,8 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
 
 - **來源**：頭盔本機的檔案（`~/Videos`、`~/Downloads`、`/run/media` 底下的外接儲存裝置、家目錄）；網址（mp4／mkv／
   webm 檔或 HLS）；`<host>` 上的影片（整台 PC 或 `media_dirs` 指定的資料夾，見下）；YouTube 等網站（yt-dlp 解析，見下）。
-  選片頁另有「最近播過」，從上次停下的地方接著播（播完的從頭）。
+  同一支片再播會從上次停下的地方接著播（播完的從頭）；選片頁原本的「最近播過」分頁 2026-11-02 依使用者要求拿掉。
+  分頁順序（`--dev-video` 的分頁號碼）：0 這台頭盔、1 PC、2 YouTube、3 網址。
 - **畫面格式**：一般 2D 大螢幕、3D 左右／上下並排（左右眼各取影像的一半，兩個 quad 圖層分眼顯示；半寬／全寬照長寬比判斷）、
   180°、360°（單眼或立體）。判斷順序：使用者指定 > 這支片上次選的 > 容器的中繼資料（spherical／stereo3d）> 檔名標記
   （`_360`、`_180`、`_SBS`、`_LR`、`_TB`、`_OU`、`_3DH`…）> 平面。規則在 `streaming/player/playerformat.h`（有自測）。
@@ -3006,13 +3007,15 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
   （`MediaLibrary::hostBrowse`），不卡介面。
 - **YouTube 等網站（V4）**：Flatpak 帶固定版本的 yt-dlp（`/app/share/viplestream/yt-dlp`），選片頁可以按「Update」從
   yt-dlp 的 GitHub release 下載最新版（核對 SHA2-256SUMS）到 app 資料夾，之後優先用它。選格式：不要 AV1、不要 HDR、
-  最高 2160p，影像與音訊分開兩條（播放器開兩個輸入）。選片頁可以搜尋 YouTube。YouTube 偶爾給出一開就 403 的網址：
+  最高 2160p，影像與音訊分開兩條（播放器開兩個輸入）。沒有 WebEngine 的建置，YouTube 分頁是 yt-dlp 的搜尋清單。YouTube 偶爾給出一開就 403 的網址：
   網站來源開失敗時重新解析一次再開。
-- **內建瀏覽器**：Flatpak 建置的最後一個分頁是瀏覽器（`gui/VideoBrowser.qml`，Qt WebEngine＝Chromium；manifest 用
+- **內建瀏覽器＝YouTube 分頁**（2026-11-02 起；之前是另一個「Browser」分頁，YouTube 分頁是搜尋清單）：Flatpak 建置的 YouTube
+  分頁就是開著 youtube.com 的瀏覽器（`gui/VideoBrowser.qml`，Qt WebEngine＝Chromium；manifest 用
   `io.qt.qtwebengine.BaseApp` 6.11 當 base）。上一頁／下一頁／重新整理／首頁、網址列（不像網址的字當 YouTube 搜尋）、cookie
-  與登入會留著。「Play in VR」：先暫停網頁裡的影片；影片是直接的 http(s) 網址就直接播，不是（YouTube 等用 MediaSource 的
-  `blob:`）就把這一頁的網址交給播放器經 yt-dlp 解析，所以 180°／360°／EAC 的判斷與 VR 播放和其他來源一樣。沒有 WebEngine
-  的建置這一頁是「Link」（貼網址）。Chromium 自己的沙箱在頭盔上起不來（`bwrap: Setting pidns failed`，建立網頁時 UI 執行緒
+  與登入會留著。Google 登入會擋內嵌瀏覽器（看 User-Agent 的 `QtWebEngine/x.y`），所以設定檔的 User-Agent
+  拿掉那一段（＝一般 Chrome），YouTube 也因此給完整的桌面版網頁。頭盔（Adreno）上 Chromium 用 GPU 畫網頁會缺塊（YouTube 頁首、登入鈕整條不見）並冒出彩色三角形，`main.cpp` 在 WebEngine 初始化前固定加 `--disable-gpu`（2026-11-02 頭盔對照：只關光柵化不夠）。「Play in VR」：先暫停網頁裡的影片；影片是直接的 http(s) 網址就直接播，不是（YouTube 等用 MediaSource 的
+  `blob:`）就把這一頁的網址交給播放器經 yt-dlp 解析，所以 180°／360°／EAC 的判斷與 VR 播放和其他來源一樣。最後一個分頁一律是「Link」
+  （貼網址）。Chromium 自己的沙箱在頭盔上起不來（`bwrap: Setting pidns failed`，建立網頁時 UI 執行緒
   永遠卡住），manifest 用 `--env=QTWEBENGINE_DISABLE_SANDBOX=1` 關掉（Flatpak 的沙箱仍在；理由見 `finish-args.md` #19）。
   WebEngine 只在一般啟動（圖形介面）初始化，`stream`／`play` 子行程不載入。
 - **dev 參數**：`--no-xr`（不開 XR，用假的 120 Hz 格點跑整條管線）、`--duration`、`--test-script "<秒>:<指令>,…"`
@@ -3057,6 +3060,32 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
 - **操作**：XrInput 的一般射線滑鼠轉成 Qt 事件——指到＝移動（hover）、扳機＝左鍵、握把＝右鍵、搖桿上下＝捲動、
   B＝Esc（關對話框／上一頁；`XrInputSink::back`）、選單鍵＝開關虛擬鍵盤；文字欄位拿到焦點時自動開鍵盤
   （`requestKeyboard()`），虛擬鍵盤的 Win32 VK 轉成 Qt 按鍵與文字（US 版面）。
+  要不要鍵盤看焦點元件的輸入法查詢（`ItemAcceptsInputMethod`＋`ImEnabled`、非 `ImReadOnly`），不看類別名稱，而且每畫一張重查：內建瀏覽器的網頁欄位（YouTube 搜尋、Google 帳號）焦點一直在 WebEngine 元件上，換欄位不會發 `activeFocusItemChanged`（2026-11-02 修）。沒人戴時 session 只到 VISIBLE、不讀輸入，開鍵盤的要求會排著；手動開關是左手把的 View 鍵。
+  雷射指標是 16 px 的黑白棋盤格（4×4 格）：原本的純白方塊在白底網頁上看不到（2026-11-02 改）。
+  影片播到一半程式重啟（2026-11-02 修）：10-30～11-02 的 viplestream coredump 全當在頭盔驅動送出執行緒的 `tu_autotune::on_submit`（讀到壞掉的 command buffer）。無人重現：180-sbs 沉浸模式＋每秒 seek 第 7／37 次必當；平面模式 51 次 seek、沉浸模式只調音量 51 次都不當。沉浸模式是唯一有兩條執行緒同時對同一個 VkDevice 錄製／送出 libplacebo 工作的地方（render thread 畫全景材質、frame thread 畫投影），改成用 `XrVideo::m_PlSubmitMutex` 互斥（含 `pl_tex_poll`，等 GPU 時不持有）後三場各 51 次 seek 都不當、漏幀 0。
+  另外上傳貼圖共用的 `m_Cmd`／`m_Fence`：上一次送出的沒確認完成前不重錄、不重設、不動 staging（`cmdIdle()`），逾時記 `[VIPLE-XR] upload command buffer still pending`（防範，不是這次當機的原因）。
+  YouTube 分頁的 VR 影片自動轉 VR 播放（2026-11-02）：每秒看 YouTube 播放器的 player response（`movie_player.getPlayerResponse()`），
+  任一格式的 `projectionType` 不是 `RECTANGULAR`（拿不到時看有沒有 `.ytp-webgl-spherical-control`）就自動按「Play in VR」；
+  同一支片只自動一次（按 B 退回網頁不會又被帶回去），log `[VIPLE-PLAYER] browser: VR video detected`。
+  網站影片的投影（2026-11-02）：yt-dlp 的 `format_note` 最後一段是 YouTube 的 projectionType（`equi`、`equi_threed_top_bottom`、`mesh`），
+  `WebResolver::Result::projection` 帶給播放器、以它為準。舊規則「YouTube 的 360° 一律當 EAC」把等距柱狀（equi）的片全判成 360eac；
+  現在只有 `mesh`（或網站沒說）才轉 EAC。log `[VIPLE-PLAYER] web resolved … projection=<值>`。
+  影片中按 B 只退出播放器（2026-11-02）：播放器收尾比手指放開 B 快，回到介面時同一下 B 又被當成「返回」（Esc），影片頁被退掉、跳回主機清單；
+  `XrInput` 在影片模式時把 B 視為按著，要先放開才算介面的返回。
+  YouTube 分頁的 B＝網頁上一頁（2026-11-02）：`VideoView` 攔 Esc／返回鍵交給 `VideoBrowser.goBackIfPossible()`；第一頁時什麼都不做，不離開影片模式。
+  開片到第一張影像之間（2026-11-02）：螢幕的遠近／大小／投影到 `PlayerSession::showVideo()` 才套用（之前會先把介面放大一下）；
+  `AppContent` 蓋上「Opening the video...」吃掉點擊，這段時間按 B＝取消播放（`XrShell::back()` 轉給播放器）。
+  VR 播放時換畫質、字幕（2026-11-02）：同一次 yt-dlp `-J` 的 `formats` 整理出可換的畫質（只有影像、https 直連、非 AV1、SDR、≤2160p，同高度一個），
+  `subtitles`／`automatic_captions` 整理出字幕軌（作者上傳的全部，繁中、片子語言、英文在前；自動的只取原文 `-orig`；json3 格式。自動翻譯（`tlang=`）不經瀏覽器下載一律 HTTP 429，不列）。
+  控制列多「畫質」「CC」兩鈕（點一下換下一個；本機與主機分享的片灰色）。換畫質＝原位置重開影像那一條（聲音同網址），約 0.7 秒；
+  已退回軟體解碼的場次重開時直接用軟體。字幕用 FFmpeg avio 下載、背景執行緒解析，`XrContext::setPlayerSubtitle()` 另一個 quad 圖層
+  （平面螢幕貼下緣內側、180°／360° 在置中方向前方 1.5 m 偏下）；選過的語言記在 `player/subtitleLang`，下一支片有就自動開。
+  無人驗測：`--test-script "6:sub=0,12:quality,20:quality=0,26:sub=99"`，log `[VIPLE-PLAYER] web choices`／`quality ->`／`subtitles`。
+  結束時 Steam 介面重啟（2026-11-02 定案）：Steam 的 bug，不是我們。任何遊戲結束時 Steam 拆掉該遊戲的「VR Game Overlay」，steamwebhelper
+  約 2/3 機率 heap 損壞 SIGABRT（捷徑只跑 `sleep`、Steam 商店的 VR 遊戲都一樣；閒置 0 次）。已有回報：SteamVR-for-Linux #964（追蹤中）、
+  steam-for-linux #13690、#13822。捷徑的 AllowOverlay=0 擋不住（覆蓋層照建、4 場當 3 場）。
+  VR 介面結束改走正常收尾（§VR-SHELL-EXIT）：以前 `shutdownXrForExit()` 之後 `_Exit`（為了這個 webhelper 當機的錯誤推論），跳過了內建瀏覽器
+  與 VR 串流子行程的收尾；現在 `vrShell.reset()` 後 return（解構順序 vrShell → engine → app），另有 20 秒看門狗。頭盔實測拆除 39 ms、無殘留行程。
 - **影片模式（A2）**：`VrLauncher::launchPlayer()` 在 VR 介面裡不開子行程，交給 `XrShell::startPlayer()` 用同一個 XrContext
   跑 `PlayerSession`（`Config.sharedXr`）。載入時面板還是介面；第一張影像要顯示時才換成影片（`setShellActive(false)`），
   這時按鍵與搖桿依 `XrInputSink::playerActive()` 改成影片模式的配置（同 `viplestream play`）；播完或按 B 換回介面，螢幕

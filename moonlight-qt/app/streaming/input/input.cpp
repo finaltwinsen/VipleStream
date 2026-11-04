@@ -328,8 +328,9 @@ void SdlInputHandler::raiseAllKeys()
                 "Raising %d keys",
                 (int)m_KeysDown.count());
 
-    for (auto keyDown : std::as_const(m_KeysDown)) {
-        LiSendKeyboardEvent(keyDown, KEY_ACTION_UP, 0);
+    // §REVIEW-1103：用按下時的 flags 放開（見 input.h m_KeysDown）
+    for (auto it = m_KeysDown.cbegin(); it != m_KeysDown.cend(); ++it) {
+        LiSendKeyboardEvent2(0x8000 | it.key(), KEY_ACTION_UP, 0, it.value());
     }
 
     m_KeysDown.clear();

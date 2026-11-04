@@ -1312,133 +1312,143 @@ Jei užtrunka ilgiau, patikrinkite pagrindinį kompiuterį — galbūt Steam Gua
         <translation>Nustatymai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="352"/>
+        <location filename="../gui/SettingsView.qml" line="525"/>
         <source>Resolution and FPS</source>
         <translation>Raiška ir FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="360"/>
+        <location filename="../gui/SettingsView.qml" line="533"/>
         <source>Setting values too high for your PC or network connection may cause lag, stuttering, or errors.</source>
         <translation>Per didelės jūsų kompiuteriui ar tinklo ryšiui reikšmės gali sukelti vėlavimą, strigimą arba klaidas.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="342"/>
+        <location filename="../gui/SettingsView.qml" line="515"/>
         <source>Basic Settings</source>
         <translation>Pagrindiniai nustatymai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="558"/>
+        <location filename="../gui/SettingsView.qml" line="731"/>
         <source>720p</source>
         <translation>720p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="564"/>
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>1080p</source>
         <translation>1080p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="570"/>
+        <location filename="../gui/SettingsView.qml" line="743"/>
         <source>1440p</source>
         <translation>1440p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="576"/>
+        <location filename="../gui/SettingsView.qml" line="749"/>
         <source>4K</source>
         <translation>4K</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="693"/>
+        <location filename="../gui/SettingsView.qml" line="866"/>
         <source>Custom resolutions are not officially supported by GeForce Experience, so it will not set your host display resolution. You will need to set it manually while in game.</source>
         <translation>GeForce Experience oficialiai nepalaiko pasirinktinių raiškų, todėl ji nenustatys pagrindinio kompiuterio ekrano raiškos. Ją reikės nustatyti rankiniu būdu žaidimo metu.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="694"/>
+        <location filename="../gui/SettingsView.qml" line="867"/>
         <source>Resolutions that are not supported by your client or host PC may cause streaming errors.</source>
         <translation>Raiškos, kurių nepalaiko jūsų kliento ar pagrindinis kompiuteris, gali sukelti transliacijos klaidų.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="700"/>
+        <location filename="../gui/SettingsView.qml" line="873"/>
         <source>Enter a custom resolution:</source>
         <translation>Įveskite pasirinktinę raišką:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="961"/>
+        <location filename="../gui/SettingsView.qml" line="1134"/>
         <source>%1 FPS</source>
         <translation>%1 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1476"/>
+        <location filename="../gui/SettingsView.qml" line="1651"/>
         <source>Video bitrate:</source>
         <translation>Vaizdo pralaidumas (bitrate):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1484"/>
+        <location filename="../gui/SettingsView.qml" line="1659"/>
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>Lėtesniame ryšyje sumažinkite pralaidumą. Padidinkite pralaidumą, kad pagerintumėte vaizdo kokybę.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1506"/>
+        <location filename="../gui/SettingsView.qml" line="1681"/>
         <source>Video bitrate: %1 Mbps</source>
         <translation>Vaizdo pralaidumas: %1 Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1536"/>
+        <location filename="../gui/SettingsView.qml" line="1711"/>
         <source>Display mode</source>
         <translation>Rodymo režimas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1566"/>
+        <location filename="../gui/SettingsView.qml" line="1741"/>
         <source>(Recommended)</source>
         <translation>(Rekomenduojama)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1547"/>
-        <location filename="../gui/SettingsView.qml" line="2115"/>
+        <location filename="../gui/SettingsView.qml" line="1722"/>
+        <location filename="../gui/SettingsView.qml" line="2291"/>
         <source>Fullscreen</source>
         <translation>Visas ekranas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1616"/>
+        <location filename="../gui/SettingsView.qml" line="1791"/>
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>Visas ekranas paprastai užtikrina geriausią našumą, tačiau langas be rėmelių gali geriau veikti su tokiomis funkcijomis kaip macOS Spaces, Alt+Tab, ekrano kopijų įrankiai, ekrano perdangos ir pan.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1552"/>
+        <location filename="../gui/SettingsView.qml" line="1727"/>
         <source>Borderless windowed</source>
         <translation>Langas be rėmelių</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="431"/>
+        <location filename="../gui/SettingsView.qml" line="342"/>
+        <source>Show advanced and experimental options</source>
+        <translation>Rodyti išplėstines ir eksperimentines parinktis</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="352"/>
+        <source>Shows options meant for troubleshooting and testing: renderer and video decoder, frame interpolation engines, experimental video formats and network test switches. Hidden options keep their current values.</source>
+        <translation>Rodo trikčių šalinimo ir testavimo parinktis: atvaizduoklį ir vaizdo dekoderį, kadrų interpoliavimo variklius, eksperimentinius vaizdo formatus ir tinklo testų jungiklius. Paslėptos parinktys išlaiko dabartines reikšmes.</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="604"/>
         <source>Native</source>
         <translation>Savoji</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="432"/>
+        <location filename="../gui/SettingsView.qml" line="605"/>
         <source>Native (Excluding Notch)</source>
         <translation>Savoji (be iškirpimo)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1128"/>
+        <location filename="../gui/SettingsView.qml" line="1302"/>
         <source>Renderer</source>
         <translation>Atvaizdavimo variklis (renderer)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1145"/>
+        <location filename="../gui/SettingsView.qml" line="1320"/>
         <source>Auto (recommended) — let the system pick the most stable hardware decoding path</source>
         <translation>Automatiškai (Auto) — rekomenduojama: sistema parenka stabiliausią aparatinio dekodavimo kelią</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1146"/>
+        <location filename="../gui/SettingsView.qml" line="1321"/>
         <source>Direct3D 11 — always use D3D11VA; works with the NV-OF / DirectML / NCNN interpolation engines</source>
         <translation>Direct3D 11 — visada D3D11VA, galima naudoti su NV-OF / DirectML / NCNN kadrų interpoliavimo varikliais</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1147"/>
+        <location filename="../gui/SettingsView.qml" line="1322"/>
         <source>Vulkan [experimental] — built-in frame interpolation; compatibility issues on some systems (AMD APU / older NVIDIA drivers)</source>
         <translation>Vulkan [eksperimentinis] — integruotas kadrų interpoliavimas, kai kuriuose įrenginiuose (AMD APU / senos NV tvarkyklės) galimos suderinamumo problemos</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1164"/>
+        <location filename="../gui/SettingsView.qml" line="1339"/>
         <source>Auto (recommended): same as upstream Moonlight&apos;s hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
@@ -1451,27 +1461,27 @@ Direct3D 11: aiškiai fiksuoja D3D11VA, kadrų interpoliavimo variklį galima ri
 Vulkan [eksperimentinis]: priverstinis Vulkan-first cascade + savas Vulkan atvaizdavimo konvejeris + dual-present, integruotas kadrų interpoliavimo variklis (tas pats kaip Generic). Žinomos problemos: su NV tvarkykle 596.36 savasis vkCmdDecodeVideoKHR ONLY režimu sukelia NVDEC device-lost; AMD APU tvarkyklė lūžta video session memory bind 226 MB etape; PARALLEL+SW upload kelias lėtas (80+ ms/kadrui). Kai taps stabilus, vėl bus rekomenduojamas.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1175"/>
+        <location filename="../gui/SettingsView.qml" line="1350"/>
         <source>Linux video output (frontend)</source>
         <translation>Linux vaizdo pateikimas (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1190"/>
+        <location filename="../gui/SettingsView.qml" line="1365"/>
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>Automatiškai (Auto) — rekomenduojama: aarch64 arba Zink naudoja Vulkan, kitiems paliekama įprasta tvarka</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1191"/>
+        <location filename="../gui/SettingsView.qml" line="1366"/>
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — pirmenybė Vulkan pateikimui</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1192"/>
+        <location filename="../gui/SettingsView.qml" line="1367"/>
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — paliekama įprasta tvarka (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1208"/>
+        <location filename="../gui/SettingsView.qml" line="1383"/>
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -1488,107 +1498,107 @@ Vulkan: visada pirmenybė Vulkan (libplacebo) pateikimui, nepavykus automatiška
 EGL: paliekama įprasta tvarka, Vulkan aktyviai neteikiama pirmenybė.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1264"/>
+        <location filename="../gui/SettingsView.qml" line="1439"/>
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>Vulkan atvaizdavimo variklis naudoja integruotą kadrų interpoliavimo variklį (tas pats kaip Generic). Norėdami pasirinkti kitą variklį, persijunkite į Direct3D 11.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1282"/>
+        <location filename="../gui/SettingsView.qml" line="1457"/>
         <source>Interpolation mode:</source>
         <translation>Interpoliavimo režimas:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1288"/>
+        <location filename="../gui/SettingsView.qml" line="1463"/>
         <source>Active (recommended)</source>
         <translation>Aktyvus (rekomenduojama)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1299"/>
+        <location filename="../gui/SettingsView.qml" line="1474"/>
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>Serveris siunčia UI fps / 2 (arba / 3 didelio dažnio ekranams), klientas visada atlieka dual/triple interpoliavimą. Maža serverio apkrova, reikia pakankamai galingo kliento GPU.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1303"/>
+        <location filename="../gui/SettingsView.qml" line="1478"/>
         <source>Passive</source>
         <translation>Pasyvus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1314"/>
+        <location filename="../gui/SettingsView.qml" line="1489"/>
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>Serveris siunčia visą UI fps. Klientas pagal recv% dinamiškai didina santykį: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Tinka, kai serveris ne visada pasiekia pilną dažnį.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1410"/>
+        <location filename="../gui/SettingsView.qml" line="1585"/>
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY (integruoti / senesni GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1414"/>
+        <location filename="../gui/SettingsView.qml" line="1589"/>
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN (neaptikta; norėdami aptikti, paleiskite klientą iš naujo)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1416"/>
+        <location filename="../gui/SettingsView.qml" line="1591"/>
         <source>(not detected yet)</source>
         <translation>(dar neaptikta)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1420"/>
+        <location filename="../gui/SettingsView.qml" line="1595"/>
         <source>(not measured)</source>
         <translation>(neišmatuota)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1421"/>
+        <location filename="../gui/SettingsView.qml" line="1596"/>
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>FRUC automatinis lygių parinkimas (Vulkan unified autotier v1.4.127):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1422"/>
+        <location filename="../gui/SettingsView.qml" line="1597"/>
         <source>   GPU: </source>
         <translation>   GPU: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1423"/>
+        <location filename="../gui/SettingsView.qml" line="1598"/>
         <source>   Detected tier: </source>
         <translation>   Aptiktas tier: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1424"/>
+        <location filename="../gui/SettingsView.qml" line="1599"/>
         <source>   Benchmark: </source>
         <translation>   Našumo testas: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1425"/>
+        <location filename="../gui/SettingsView.qml" line="1600"/>
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>Veikimo metu automatiškai keičiama per 7 lygius (T-1..T5):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1428"/>
+        <location filename="../gui/SettingsView.qml" line="1603"/>
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (NVOF GPU, chain apkrova didesnė)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1429"/>
+        <location filename="../gui/SettingsView.qml" line="1604"/>
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (AMD/Intel be NVOF)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1431"/>
+        <location filename="../gui/SettingsView.qml" line="1606"/>
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (mažiausias FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1432"/>
+        <location filename="../gui/SettingsView.qml" line="1607"/>
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = FRUC pristabdytas (GPU nespėja, po 5 min bandoma vėl)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1444"/>
+        <location filename="../gui/SettingsView.qml" line="1619"/>
         <source>Edge MV threshold:</source>
         <translation>Kraštų MV slenkstis (Edge MV threshold):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1460"/>
+        <location filename="../gui/SettingsView.qml" line="1635"/>
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -1601,342 +1611,342 @@ Didelė reikšmė (12-16): ryškesni kraštai, bet ties kontrastingomis judesio 
 Pradžiai naudokite numatytąją reikšmę; jei interpoliuotų kadrų kraštuose matosi kvadratėliai, sumažinkite iki 4-6.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1522"/>
+        <location filename="../gui/SettingsView.qml" line="1697"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>Naudoti numatytąjį (%1 Mbps)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1557"/>
-        <location filename="../gui/SettingsView.qml" line="2107"/>
+        <location filename="../gui/SettingsView.qml" line="1732"/>
+        <location filename="../gui/SettingsView.qml" line="2283"/>
         <source>Windowed</source>
         <translation>Lange</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1623"/>
+        <location filename="../gui/SettingsView.qml" line="1798"/>
         <source>V-Sync</source>
         <translation>V-Sync</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1633"/>
+        <location filename="../gui/SettingsView.qml" line="1808"/>
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>Išjungus V-Sync atvaizdavimo delsa gali būti trumpesnė nei kadras, tačiau gali matytis vaizdo plyšimas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1640"/>
+        <location filename="../gui/SettingsView.qml" line="1815"/>
         <source>Frame pacing</source>
         <translation>Kadrų tempas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1663"/>
+        <location filename="../gui/SettingsView.qml" line="1838"/>
         <source>Audio Settings</source>
         <translation>Garso nustatymai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1698"/>
+        <location filename="../gui/SettingsView.qml" line="1873"/>
         <source>Stereo</source>
         <translation>Stereo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1702"/>
+        <location filename="../gui/SettingsView.qml" line="1877"/>
         <source>5.1 surround sound</source>
         <translation>5.1 erdvinis garsas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1706"/>
+        <location filename="../gui/SettingsView.qml" line="1881"/>
         <source>7.1 surround sound</source>
         <translation>7.1 erdvinis garsas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1720"/>
+        <location filename="../gui/SettingsView.qml" line="1895"/>
         <source>Mute host PC speakers while streaming</source>
         <translation>Transliuojant nutildyti pagrindinio kompiuterio garsiakalbius</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1730"/>
+        <location filename="../gui/SettingsView.qml" line="1905"/>
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>Kad šis nustatymas įsigaliotų, turite iš naujo paleisti šiuo metu vykstantį žaidimą</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1851"/>
+        <location filename="../gui/SettingsView.qml" line="2027"/>
         <source>UI Settings</source>
         <translation>Sąsajos nustatymai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1896"/>
+        <location filename="../gui/SettingsView.qml" line="2072"/>
         <source>Language</source>
         <translation>Kalba</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1922"/>
+        <location filename="../gui/SettingsView.qml" line="2098"/>
         <source>Automatic</source>
         <translation>Automatiškai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2074"/>
+        <location filename="../gui/SettingsView.qml" line="2250"/>
         <source>GUI display mode</source>
         <translation>Sąsajos rodymo režimas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2111"/>
+        <location filename="../gui/SettingsView.qml" line="2287"/>
         <source>Maximized</source>
         <translation>Išdidintas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2139"/>
+        <location filename="../gui/SettingsView.qml" line="2315"/>
         <source>Show configuration warnings</source>
         <translation>Rodyti konfigūracijos įspėjimus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2349"/>
+        <location filename="../gui/SettingsView.qml" line="2371"/>
         <source>Input Settings</source>
         <translation>Įvesties nustatymai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2370"/>
+        <location filename="../gui/SettingsView.qml" line="2392"/>
         <source>This enables seamless mouse control without capturing the client&apos;s mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>Tai leidžia sklandžiai valdyti pelę neužfiksuojant kliento pelės žymeklio. Puikiai tinka nuotoliniam darbalaukiui, bet daugumoje žaidimų neveiks.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2372"/>
+        <location filename="../gui/SettingsView.qml" line="2394"/>
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>PASTABA: dėl GeForce Experience klaidos ši parinktis gali veikti netinkamai, jei pagrindinis kompiuteris turi kelis monitorius.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2754"/>
+        <location filename="../gui/SettingsView.qml" line="2779"/>
         <source>Enable HDR (Experimental)</source>
         <translation>Įjungti HDR (eksperimentinis)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2769"/>
+        <location filename="../gui/SettingsView.qml" line="2794"/>
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>Transliacija palaikys HDR, tačiau kai kuriems žaidimams HDR režimui įjungti gali reikėti HDR monitoriaus pagrindiniame kompiuteryje.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2771"/>
+        <location filename="../gui/SettingsView.qml" line="2796"/>
         <source>HDR streaming is not supported on this PC.</source>
         <translation>Šis kompiuteris nepalaiko HDR transliacijos.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2821"/>
+        <location filename="../gui/SettingsView.qml" line="2848"/>
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>Tai atrakina itin didelį vaizdo pralaidumą, skirtą VipleStream-Server pagrindiniams kompiuteriams. Naudokite tik transliuodami per laidinį Ethernet LAN ryšį.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2859"/>
+        <location filename="../gui/SettingsView.qml" line="2886"/>
         <source>Show performance stats while streaming</source>
         <translation>Transliuojant rodyti našumo statistiką</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2869"/>
+        <location filename="../gui/SettingsView.qml" line="2896"/>
         <source>Display real-time stream performance information while streaming.</source>
         <translation>Transliuojant rodyti transliacijos našumo informaciją realiuoju laiku.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2870"/>
+        <location filename="../gui/SettingsView.qml" line="2897"/>
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>Transliuojant bet kada galite ją įjungti ar išjungti naudodami Ctrl+Alt+Shift+S arba Select+L1+R1+X.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2871"/>
+        <location filename="../gui/SettingsView.qml" line="2898"/>
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>Našumo perdanga nepalaikoma Steam Link ir Raspberry Pi.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2454"/>
+        <location filename="../gui/SettingsView.qml" line="2477"/>
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>Naudoti jutiklinį ekraną kaip virtualų jutiklinį kilimėlį</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2471"/>
+        <location filename="../gui/SettingsView.qml" line="2494"/>
         <source>Swap left and right mouse buttons</source>
         <translation>Sukeisti kairįjį ir dešinįjį pelės mygtukus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2483"/>
+        <location filename="../gui/SettingsView.qml" line="2506"/>
         <source>Reverse mouse scrolling direction</source>
         <translation>Apversti pelės slinkimo kryptį</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2497"/>
+        <location filename="../gui/SettingsView.qml" line="2520"/>
         <source>Gamepad Settings</source>
         <translation>Valdiklio nustatymai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2507"/>
+        <location filename="../gui/SettingsView.qml" line="2530"/>
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>Sukeisti valdiklio A/B ir X/Y mygtukus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2517"/>
+        <location filename="../gui/SettingsView.qml" line="2540"/>
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>Tai perjungia valdiklius į Nintendo stiliaus mygtukų išdėstymą</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2523"/>
+        <location filename="../gui/SettingsView.qml" line="2546"/>
         <source>Force gamepad #1 always connected</source>
         <translation>Valdiklis Nr. 1 visada prijungtas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2533"/>
+        <location filename="../gui/SettingsView.qml" line="2556"/>
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>Priverčia vieną valdiklį visada likti prijungtą prie pagrindinio kompiuterio, net jei prie šio kompiuterio iš tikrųjų neprijungtas joks valdiklis.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2371"/>
+        <location filename="../gui/SettingsView.qml" line="2393"/>
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>Transliuojant tai galite įjungti ar išjungti naudodami Ctrl+Alt+Shift+M.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2541"/>
+        <location filename="../gui/SettingsView.qml" line="2564"/>
         <source>Enable mouse control with gamepads by holding the &apos;Start&apos; button</source>
         <translation>Įjungti pelės valdymą valdikliu laikant „Start“ mygtuką</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1756"/>
+        <location filename="../gui/SettingsView.qml" line="1931"/>
         <source>Host Settings</source>
         <translation>Pagrindinio kompiuterio nustatymai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2635"/>
+        <location filename="../gui/SettingsView.qml" line="2658"/>
         <source>Advanced Settings</source>
         <translation>Išplėstiniai nustatymai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1673"/>
+        <location filename="../gui/SettingsView.qml" line="1848"/>
         <source>Audio configuration</source>
         <translation>Garso konfigūracija</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2128"/>
+        <location filename="../gui/SettingsView.qml" line="2304"/>
         <source>Show connection quality warnings</source>
         <translation>Rodyti ryšio kokybės įspėjimus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2151"/>
+        <location filename="../gui/SettingsView.qml" line="2327"/>
         <source>Discord Rich Presence integration</source>
         <translation>Discord Rich Presence integracija</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2534"/>
+        <location filename="../gui/SettingsView.qml" line="2557"/>
         <source>Only enable this option when streaming a game that doesn&apos;t support gamepads being connected after startup.</source>
         <translation>Įjunkite šią parinktį tik transliuodami žaidimą, kuris nepalaiko valdiklių prijungimo po paleidimo.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2360"/>
+        <location filename="../gui/SettingsView.qml" line="2382"/>
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>Optimizuoti pelę nuotoliniam darbalaukiui, o ne žaidimams</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="857"/>
-        <location filename="../gui/SettingsView.qml" line="1050"/>
+        <location filename="../gui/SettingsView.qml" line="1030"/>
+        <location filename="../gui/SettingsView.qml" line="1223"/>
         <source>Custom (%1 FPS)</source>
         <translation>Pasirinktinis (%1 FPS)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="872"/>
+        <location filename="../gui/SettingsView.qml" line="1045"/>
         <source>Enter a custom frame rate:</source>
         <translation>Įveskite pasirinktinį kadrų dažnį:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="473"/>
-        <location filename="../gui/SettingsView.qml" line="521"/>
-        <location filename="../gui/SettingsView.qml" line="530"/>
-        <location filename="../gui/SettingsView.qml" line="984"/>
+        <location filename="../gui/SettingsView.qml" line="646"/>
+        <location filename="../gui/SettingsView.qml" line="694"/>
+        <location filename="../gui/SettingsView.qml" line="703"/>
+        <location filename="../gui/SettingsView.qml" line="1157"/>
         <source>Custom</source>
         <translation>Pasirinktinis</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1095"/>
+        <location filename="../gui/SettingsView.qml" line="1268"/>
         <source>30 FPS</source>
         <translation>30 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1100"/>
+        <location filename="../gui/SettingsView.qml" line="1273"/>
         <source>60 FPS</source>
         <translation>60 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2167"/>
+        <location filename="../gui/SettingsView.qml" line="2343"/>
         <source>Keep the display awake while streaming</source>
         <translation>Transliuojant neleisti ekranui užmigti</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2177"/>
+        <location filename="../gui/SettingsView.qml" line="2353"/>
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>Transliuojant neleidžia įsijungti ekrano užsklandai ar ekranui užmigti.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2382"/>
+        <location filename="../gui/SettingsView.qml" line="2404"/>
         <source>Capture system keyboard shortcuts</source>
         <translation>Fiksuoti sistemos klaviatūros sparčiuosius klavišus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2390"/>
+        <location filename="../gui/SettingsView.qml" line="2412"/>
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>Tai leidžia transliuojant fiksuoti visos sistemos sparčiuosius klavišus, pvz., Alt+Tab, kuriuos paprastai apdorotų kliento operacinė sistema.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2420"/>
+        <location filename="../gui/SettingsView.qml" line="2442"/>
         <source>in fullscreen</source>
         <translation>viso ekrano režimu</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2424"/>
+        <location filename="../gui/SettingsView.qml" line="2446"/>
         <source>always</source>
         <translation>visada</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2464"/>
+        <location filename="../gui/SettingsView.qml" line="2487"/>
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>Pažymėjus jutiklinis ekranas veikia kaip jutiklinis kilimėlis. Nepažymėjus jutiklinis ekranas tiesiogiai valdo pelės žymeklį.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1766"/>
+        <location filename="../gui/SettingsView.qml" line="1941"/>
         <source>Optimize game settings for streaming</source>
         <translation>Optimizuoti žaidimo nustatymus transliacijai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="552"/>
+        <location filename="../gui/SettingsView.qml" line="725"/>
         <source>Auto (best for this display)</source>
         <translation>Automatiškai (geriausia šiam ekranui)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1090"/>
+        <location filename="../gui/SettingsView.qml" line="1263"/>
         <source>Auto (this display)</source>
         <translation>Automatiškai (šis ekranas)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1214"/>
+        <location filename="../gui/SettingsView.qml" line="1389"/>
         <source>Frame interpolation (FRUC)</source>
         <translation>Kadrų interpoliavimas (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1254"/>
+        <location filename="../gui/SettingsView.qml" line="1429"/>
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>Tarp kiekvieno tikro kadro įterpia interpoliuotą kadrą, taip padvigubindamas faktinį išvesties kadrų dažnį. Tikrasis serverio kadrų dažnis sumažinamas perpus (pvz., nustatymas 120 FPS → užklausa 60 FPS → išvestis 120 FPS).</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1344"/>
+        <location filename="../gui/SettingsView.qml" line="1519"/>
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute (rekomenduojama — mažiausia delsa, bet koks GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1345"/>
+        <location filename="../gui/SettingsView.qml" line="1520"/>
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow (aparatinis srautas + warp; NVIDIA RTX 20+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1346"/>
+        <location filename="../gui/SettingsView.qml" line="1521"/>
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — RIFE ML modelis (reikia galingo GPU; Tensor Core RTX 30/40+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1347"/>
+        <location filename="../gui/SettingsView.qml" line="1522"/>
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE (eksperimentinis; įvairių gamintojų: NV/AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1357"/>
+        <location filename="../gui/SettingsView.qml" line="1532"/>
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
@@ -1949,332 +1959,332 @@ NVIDIA Optical Flow: specialus NVOFA aparatinis blokas Turing+ (RTX 20/30/40 ser
 DirectML: paleidžia pridėtą RIFE 4.25 lite ONNX modelį per D3D12 DirectML EP — *tikras* judesiu kompensuotas ML interpoliavimas, geriausia vaizdo kokybė dinamiškame turinyje. Dėl kiekvienos operacijos kernel-launch sąnaudų (~25 ms bazinė delsa nepriklausomai nuo raiškos) reikia Tensor-Core klasės GPU (RTX 30/40 vidutinės klasės ar geresnio), kad realiu laiku spėtų esant 720p+. Silpnesniuose GPU klientas automatiškai mažina išvedimo raišką (1080p → 720p → 540p → 480p → 360p) ir grįžta prie Generic, jei net 360p netelpa į kadro laiko biudžetą.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1426"/>
+        <location filename="../gui/SettingsView.qml" line="1601"/>
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1427"/>
+        <location filename="../gui/SettingsView.qml" line="1602"/>
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1430"/>
+        <location filename="../gui/SettingsView.qml" line="1605"/>
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (PERFORMANCE GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1653"/>
+        <location filename="../gui/SettingsView.qml" line="1828"/>
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>Kadrų tempas mažina mikrostrigimą atidėdamas per anksti atėjusius kadrus. Jis veikia ir išjungus V-Sync, todėl išlaikoma maža delsa, o netolygus kadrų gavimas išlyginamas.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1736"/>
+        <location filename="../gui/SettingsView.qml" line="1911"/>
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>Nutildyti garsą, kai VipleStream nėra aktyvus langas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1747"/>
+        <location filename="../gui/SettingsView.qml" line="1922"/>
         <source>Mutes VipleStream&apos;s audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>Nutildo VipleStream garsą, kai išeinate iš transliacijos su Alt+Tab arba spustelėjate kitą langą.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1777"/>
+        <location filename="../gui/SettingsView.qml" line="1952"/>
         <source>Quit app on host PC after ending stream</source>
         <translation>Baigus transliaciją uždaryti programėlę pagrindiniame kompiuteryje</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1787"/>
+        <location filename="../gui/SettingsView.qml" line="1962"/>
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>Baigus transliaciją bus uždaryta transliuojama programėlė ar žaidimas. Neišsaugotas progresas bus prarastas!</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1865"/>
+        <location filename="../gui/SettingsView.qml" line="2041"/>
         <source>Design</source>
         <translation>Dizainas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1872"/>
+        <location filename="../gui/SettingsView.qml" line="2048"/>
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>Ramus: redakcinis tinklelis, santūresnė antraštė.
 Ryškus: žurnalo viršelio energija, itin dideli antraščių šriftai.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1888"/>
+        <location filename="../gui/SettingsView.qml" line="2064"/>
         <source>Safe</source>
         <translation>Ramus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1889"/>
+        <location filename="../gui/SettingsView.qml" line="2065"/>
         <source>Bold</source>
         <translation>Ryškus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2057"/>
+        <location filename="../gui/SettingsView.qml" line="2233"/>
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>Kad šis pakeitimas įsigaliotų, turite iš naujo paleisti VipleStream</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2161"/>
+        <location filename="../gui/SettingsView.qml" line="2337"/>
         <source>Updates your Discord status to display the name of the game you&apos;re streaming. The status reads &quot;Playing &lt;game&gt; · via VipleStream&quot; with the VipleStream icon.</source>
         <translation>Atnaujina jūsų Discord būseną, kad būtų rodomas transliuojamo žaidimo pavadinimas. Būsena rodoma kaip „Playing &lt;game&gt; · via VipleStream“ su VipleStream piktograma.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2187"/>
+        <location filename="../gui/SettingsView.qml" line="362"/>
         <source>VR Streaming (Steam Frame)</source>
         <translation>VR transliacija (Steam Frame)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2196"/>
+        <location filename="../gui/SettingsView.qml" line="371"/>
         <source>Resolution per eye</source>
         <translation>Raiška kiekvienai akiai</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2220"/>
+        <location filename="../gui/SettingsView.qml" line="395"/>
         <source>Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.</source>
         <translation>Mažiau pikselių koduoti, siųsti ir dekoduoti reiškia mažesnę delsą. Pagrindinis kompiuteris vis tiek gali atvaizduoti didesne raiška ir ją sumažinti.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2225"/>
+        <location filename="../gui/SettingsView.qml" line="400"/>
         <source>Extra field of view (overscan)</source>
         <translation>Papildomas matymo laukas (overscan)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2233"/>
-        <location filename="../gui/SettingsView.qml" line="2259"/>
-        <location filename="../gui/SettingsView.qml" line="2285"/>
+        <location filename="../gui/SettingsView.qml" line="408"/>
+        <location filename="../gui/SettingsView.qml" line="434"/>
+        <location filename="../gui/SettingsView.qml" line="460"/>
         <source>Off</source>
         <translation>Išjungta</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2246"/>
+        <location filename="../gui/SettingsView.qml" line="421"/>
         <source>Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.</source>
         <translation>Atvaizduoja šiek tiek už kiekvienos akies vaizdo krašto, kad pasukus galvą nesimatytų tuščių kraštų.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2251"/>
+        <location filename="../gui/SettingsView.qml" line="426"/>
         <source>Pick the newest frame this late</source>
         <translation>Naujausią kadrą rinktis tiek vėliau</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2272"/>
+        <location filename="../gui/SettingsView.qml" line="447"/>
         <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
         <translation>Prieš pasirenkant, kurį kadrą rodyti, palaukia kelias milisekundes, kad kadras būtų šviežesnis. Per ilgas laukimas priverčia šalmą praleisti kadrus.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2277"/>
+        <location filename="../gui/SettingsView.qml" line="452"/>
         <source>Sharper centre (foveated encoding)</source>
         <translation>Ryškesnis centras (foveated kodavimas)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2298"/>
+        <location filename="../gui/SettingsView.qml" line="473"/>
         <source>Spends more of the stream&apos;s pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.</source>
         <translation>Daugiau transliacijos pikselių skiria vaizdui tiesiai priešais ir mažiau kiekvienos akies kraštams. Transliacijos dydis nesikeičia.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2304"/>
+        <location filename="../gui/SettingsView.qml" line="479"/>
         <source>Stream at half the headset refresh rate</source>
         <translation>Transliuoti perpus mažesniu nei šalmo atnaujinimo dažniu</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2314"/>
+        <location filename="../gui/SettingsView.qml" line="489"/>
         <source>The game renders and streams at half rate while the headset still displays at full rate. Halves the load on the host and the network.</source>
         <translation>Žaidimas atvaizduojamas ir transliuojamas perpus mažesniu dažniu, o šalmas vis tiek rodo pilnu dažniu. Perpus sumažina pagrindinio kompiuterio ir tinklo apkrovą.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2320"/>
+        <location filename="../gui/SettingsView.qml" line="495"/>
         <source>Synthesize the in-between frames</source>
         <translation>Sintezuoti tarpinius kadrus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2331"/>
+        <location filename="../gui/SettingsView.qml" line="506"/>
         <source>With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.</source>
         <translation>Transliuojant perpus mažesniu dažniu, atnaujinimuose be naujo kadro judantys objektai pastumiami į priekį, užuot dar kartą rodžius ankstesnį kadrą.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2391"/>
+        <location filename="../gui/SettingsView.qml" line="2413"/>
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>PASTABA: kai kurių sparčiųjų klavišų, pvz., Ctrl+Alt+Del sistemoje Windows, negali perimti jokia programa, įskaitant VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2552"/>
+        <location filename="../gui/SettingsView.qml" line="2575"/>
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>Apdoroti valdiklio įvestį, kai VipleStream veikia fone</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2563"/>
+        <location filename="../gui/SettingsView.qml" line="2586"/>
         <source>Allows VipleStream to capture gamepad inputs even if it&apos;s not the current window in focus</source>
         <translation>Leidžia VipleStream fiksuoti valdiklio įvestį, net jei jis nėra aktyvus langas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2572"/>
+        <location filename="../gui/SettingsView.qml" line="2595"/>
         <source>Network (MP-QUIC)</source>
         <translation>Tinklas (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2582"/>
+        <location filename="../gui/SettingsView.qml" line="2605"/>
         <source>Enable MP-QUIC multipath transport</source>
         <translation>Įjungti MP-QUIC daugiakelį perdavimą</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2592"/>
+        <location filename="../gui/SettingsView.qml" line="2615"/>
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>Transliacijai naudoja QUIC multipath (RFC 9443). Įgalina WiFi + mobiliojo ryšio atsarginį perjungimą ir dviejų tinklo plokščių pralaidumo sujungimą. Reikia serverio palaikymo.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2597"/>
+        <location filename="../gui/SettingsView.qml" line="2620"/>
         <source>Path scheduler</source>
         <translation>Kelių planuoklis</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2613"/>
+        <location filename="../gui/SettingsView.qml" line="2636"/>
         <source>Auto (per stream type)</source>
         <translation>Automatiškai (pagal srauto tipą)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2614"/>
+        <location filename="../gui/SettingsView.qml" line="2637"/>
         <source>Lowest latency</source>
         <translation>Mažiausia delsa</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2615"/>
+        <location filename="../gui/SettingsView.qml" line="2638"/>
         <source>Bandwidth aggregation</source>
         <translation>Pralaidumo sujungimas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2616"/>
+        <location filename="../gui/SettingsView.qml" line="2639"/>
         <source>Redundant (all paths)</source>
         <translation>Perteklinis (visi keliai)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2617"/>
+        <location filename="../gui/SettingsView.qml" line="2640"/>
         <source>Earliest completion</source>
         <translation>Anksčiausias užbaigimas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2626"/>
+        <location filename="../gui/SettingsView.qml" line="2649"/>
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>Automatiškai: vaizdas=ECF, garsas=perteklinis, valdymas=min-RTT. Sujungimas: round-robin per visas tinklo plokštes didžiausiam pralaidumui.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2645"/>
+        <location filename="../gui/SettingsView.qml" line="2669"/>
         <source>Video decoder</source>
         <translation>Vaizdo dekoderis</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2670"/>
-        <location filename="../gui/SettingsView.qml" line="2723"/>
+        <location filename="../gui/SettingsView.qml" line="2695"/>
+        <location filename="../gui/SettingsView.qml" line="2748"/>
         <source>Automatic (Recommended)</source>
         <translation>Automatiškai (rekomenduojama)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2674"/>
+        <location filename="../gui/SettingsView.qml" line="2699"/>
         <source>Force software decoding</source>
         <translation>Priverstinis programinis dekodavimas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2678"/>
+        <location filename="../gui/SettingsView.qml" line="2703"/>
         <source>Force hardware decoding</source>
         <translation>Priverstinis aparatinis dekodavimas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2693"/>
+        <location filename="../gui/SettingsView.qml" line="2718"/>
         <source>Video codec</source>
         <translation>Vaizdo kodekas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2727"/>
+        <location filename="../gui/SettingsView.qml" line="2752"/>
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2731"/>
+        <location filename="../gui/SettingsView.qml" line="2756"/>
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2735"/>
+        <location filename="../gui/SettingsView.qml" line="2760"/>
         <source>AV1 (Experimental)</source>
         <translation>AV1 (eksperimentinis)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2739"/>
+        <location filename="../gui/SettingsView.qml" line="2764"/>
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave (itin maža delsa, LAN)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2777"/>
+        <location filename="../gui/SettingsView.qml" line="2803"/>
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>Įjungti YUV 4:4:4 (eksperimentinis)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2800"/>
+        <location filename="../gui/SettingsView.qml" line="2826"/>
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>Tinka darbalaukio ir daug teksto turinčių žaidimų transliacijai, bet nerekomenduojama dinamiškiems žaidimams.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2802"/>
+        <location filename="../gui/SettingsView.qml" line="2828"/>
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>Šis kompiuteris nepalaiko YUV 4:4:4.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2808"/>
+        <location filename="../gui/SettingsView.qml" line="2835"/>
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>Atrakinti pralaidumo ribą (eksperimentinis)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2827"/>
+        <location filename="../gui/SettingsView.qml" line="2854"/>
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>Automatiškai rasti kompiuterius vietiniame tinkle (rekomenduojama)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2848"/>
+        <location filename="../gui/SettingsView.qml" line="2875"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Automatiškai aptikti užblokuotus ryšius (rekomenduojama)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1378"/>
+        <location filename="../gui/SettingsView.qml" line="1553"/>
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>Kokybė — Geriausia vaizdo kokybė, didesnė GPU apkrova</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1379"/>
+        <location filename="../gui/SettingsView.qml" line="1554"/>
         <source>Balanced — Recommended (default)</source>
         <translation>Subalansuotas — Rekomenduojama (numatytoji)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1380"/>
+        <location filename="../gui/SettingsView.qml" line="1555"/>
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>Našumas — Mažiausia delsa, tinka iGPU</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1792"/>
+        <location filename="../gui/SettingsView.qml" line="1967"/>
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>NAT perėjimas (signalizacijos relė)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1802"/>
+        <location filename="../gui/SettingsView.qml" line="1977"/>
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>Relės URL (pvz. ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1813"/>
+        <location filename="../gui/SettingsView.qml" line="1988"/>
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>Relės PSK (iš anksto dalintas raktas, palikite tuščią jei nėra)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1823"/>
+        <location filename="../gui/SettingsView.qml" line="1998"/>
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>Papildoma: padeda prisijungti, kai abi pusės yra už NAT. Paleiskite viplestream-relay serveryje su viešu IP.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1832"/>
+        <location filename="../gui/SettingsView.qml" line="2008"/>
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>Priverstinai transliuoti per relę (UDP tunelio testavimui)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1389"/>
+        <location filename="../gui/SettingsView.qml" line="1564"/>
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2283,7 +2293,7 @@ Subalansuotas: 8 kaimynų paieška + laikinis išlyginimas (~8 ms iGPU)
 Našumas: 4 kaimynų paieška + minimalus apdorojimas (~6 ms iGPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1842"/>
+        <location filename="../gui/SettingsView.qml" line="2018"/>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>Visada transliuoti per relę net kai pagrindinis kompiuteris pasiekiamas tiesiogiai. Naudinga relės UDP tunelio tikrinimui, kai VPN (pvz. Cloudflare WARP) kitu atveju paliktų tiesioginį /launch veikti.</translation>
     </message>

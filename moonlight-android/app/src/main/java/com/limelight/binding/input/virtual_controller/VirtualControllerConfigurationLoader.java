@@ -186,7 +186,8 @@ public class VirtualControllerConfigurationLoader {
     private static final int START_BACK_HEIGHT = 7;
 
     // Make the Guide Menu be in the center of START and BACK menu
-    private static final int GUIDE_X = START_X-BACK_X;
+    // §REVIEW-1104：GUIDE 預設座標改於 createDefaultLayout 中以 (backLeft + startLeft) / 2 計算，此處修正網格中點
+    private static final int GUIDE_X = (START_X + BACK_X) / 2;
     private static final int GUIDE_Y = START_BACK_Y;
 
     public static void createDefaultLayout(final VirtualController controller, final Context context) {
@@ -340,7 +341,8 @@ public class VirtualControllerConfigurationLoader {
         if(config.showGuideButton){
             controller.addElement(createDigitalButton(VirtualControllerElement.EID_GDB,
                             ControllerPacket.SPECIAL_BUTTON_FLAG, 0, 1, "GUIDE", -1, controller, context),
-                    screenScale(GUIDE_X, height)+ rightDisplacement,
+                    // §REVIEW-1104：GUIDE 像素座標置中於 BACK 與 START 之間，避免原先減法常數偏左且位移重複疊加
+                    (screenScale(BACK_X, height) + screenScale(START_X, height) + rightDisplacement) / 2,
                     screenScale(GUIDE_Y, height),
                     screenScale(START_BACK_WIDTH, height),
                     screenScale(START_BACK_HEIGHT, height)

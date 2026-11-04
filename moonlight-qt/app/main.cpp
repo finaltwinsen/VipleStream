@@ -18,7 +18,9 @@
 #include <QRegularExpression>
 #include <QTimer>
 
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef Q_OS_UNIX
@@ -957,9 +959,13 @@ int main(int argc, char *argv[])
     // session started after the probe may not have a working NCNN backend —
     // env var is dev-only.
 #ifdef Q_OS_WIN32
-    if (const char* probeEnv = qgetenv("VIPLE_NCNN_EXTERNAL_PROBE").constData()) {
-        if (probeEnv[0] && probeEnv[0] != '0') {
-            (void)ncnnfruc::runExternalApiProbe();
+    // §REVIEW-1104：qgetenv 的暫存 QByteArray 在 if 條件結束就解構，constData() 會懸空
+    {
+        QByteArray probeEnvBytes = qgetenv("VIPLE_NCNN_EXTERNAL_PROBE");
+        if (const char* probeEnv = probeEnvBytes.constData()) {
+            if (probeEnv[0] && probeEnv[0] != '0') {
+                (void)ncnnfruc::runExternalApiProbe();
+            }
         }
     }
 #endif
@@ -1326,6 +1332,14 @@ int main(int argc, char *argv[])
     // §VR-PLAYER（內建瀏覽器）：Qt WebEngine 必須在 QGuiApplication 之前初始化（它要設 AA_ShareOpenGLContexts）。只有一般
     // 啟動需要：CLI 動作與 VR／影片的子行程（stream、play）不載入它
     if (s_GuiStart) {
+        // 頭盔（Adreno）上 Chromium 用 GPU 畫網頁會缺塊（YouTube 頁首、登入鈕整條不見）、合成層冒出大片彩色三角形；
+        // 2026-11-02 頭盔對照：只關光柵化頁首回來但三角形還在，--disable-gpu 才完全正確。網頁只用來選片（影片交給 VR
+        // 播放器），軟體繪製夠用。保留外面已經給的參數
+        QByteArray chromiumFlags = qgetenv("QTWEBENGINE_CHROMIUM_FLAGS");
+        if (!chromiumFlags.contains("--disable-gpu")) {
+            chromiumFlags = (chromiumFlags + " --disable-gpu").trimmed();
+            qputenv("QTWEBENGINE_CHROMIUM_FLAGS", chromiumFlags);
+        }
         QtWebEngineQuick::initialize();
     }
 #endif
@@ -1765,6 +1779,16 @@ int main(int argc, char *argv[])
             quitParser.parse(app.arguments());
             auto launcher = new CliQuitStream::Launcher(quitParser.getHost(), &app);
             engine.rootContext()->setContextProperty("launcher", launcher);
+            // §REVIEW-1104：事件迴圈啟動後以 QML 的 ComputerManager 單例呼叫 execute()，避免只依賴 StackView.onActivated
+            QTimer::singleShot(0, &app, [&engine, launcher]() {
+                if (!launcher->isExecuted()) {
+                    auto computerManager = engine.singletonInstance<ComputerManager*>(
+                        qmlTypeId("ComputerManager", 1, 0, "ComputerManager"));
+                    if (computerManager != nullptr) {
+                        launcher->execute(computerManager);
+                    }
+                }
+            });
             break;
         }
     case GlobalCommandLineParser::PairRequested:
@@ -1969,13 +1993,25 @@ int main(int argc, char *argv[])
 #endif
 
     if (vrShell) {
-        // §VR-SHELL：XR session 一結束就馬上結束行程，不跑後面的解構（QML engine、內建瀏覽器等要將近 1 秒）——
-        // XR 結束後程式還在超過約 1 秒，Steam 的 steamwebhelper 會當掉重啟（xrshell.h 的 shutdownXrForExit）。
-        // 設定都已經在各自的 QSettings 解構時寫回；log 執行緒上面已經等完
+        // §VR-SHELL-EXIT（2026-11-02）：關掉 XR 之後走正常收尾，跟平面模式一樣 return。以前這裡直接 _Exit，
+        // 理由是「XR 結束後程式還在，Steam 的 steamwebhelper 會當掉」——11-02 對照實驗推翻了：捷徑只跑 sleep、
+        // Steam 商店的 VR 遊戲結束時一樣會當（Steam 的 bug，steam-for-linux #13690）。_Exit 反而跳過了收尾：
+        // 內建瀏覽器（Qt WebEngine）的子行程沒收、VR 串流子行程沒等（~VrLauncher），Steam 記十幾個 PID 被強制結束。
+        // 解構順序：vrShell（拆介面的 QML 樹，含瀏覽器）→ engine（含 VrLauncher 等子行程）→ app（Qt WebEngine 收子行程）
         vrShell->shutdownXrForExit();
-        fflush(stderr);
-        fflush(stdout);
-        std::_Exit(err);
+        // 保險：收尾卡住（驅動、子行程不結束）時 20 秒後強制結束，不要讓行程掛在那裡（~VrLauncher 最多等 12 秒）
+        std::thread([err]() {
+            std::this_thread::sleep_for(std::chrono::seconds(20));
+            fprintf(stderr, "[VIPLE-SHELL] exit: teardown did not finish in 20 s - forcing exit\n");
+            fflush(stderr);
+            fflush(stdout);
+            std::_Exit(err);
+        }).detach();
+        const auto teardownStart = std::chrono::steady_clock::now();
+        vrShell.reset();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] exit: interface torn down in %lld ms",
+                    static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now() - teardownStart).count()));
     }
 
     return err;

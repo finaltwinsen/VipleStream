@@ -223,8 +223,12 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
     QByteArray salt = generateRandomBytes(16);
     QByteArray saltedPin = saltPin(salt, pin);
 
-    QByteArray aesKey = QCryptographicHash::hash(saltedPin, hashAlgo).constData();
-    aesKey.truncate(16);
+    // §REVIEW-1104：QByteArray(const char*) 遇到 hash 裡的 0x00 就截斷，AES-128 key 必須是完整 16 bytes
+    QByteArray aesKey = QCryptographicHash::hash(saltedPin, hashAlgo).left(16);
+    if (aesKey.size() != 16) {
+        qCritical() << "Failed to derive AES key";
+        return PairState::FAILED;
+    }
 
     QString getCert = m_Http.openConnectionToString(m_Http.m_BaseUrlHttp,
                                                     "pair",

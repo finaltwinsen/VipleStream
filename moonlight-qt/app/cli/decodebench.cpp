@@ -1948,7 +1948,8 @@ public:
             if (!havePsnr) {
                 return healG;
             }
-            for (int g = qMin(gEnd, m_Total) - 1; g >= gStart; g--) {
+            // §REVIEW-1104：事件幀號可能是 -1，g < 0 不能當 m_Psnr 的索引
+            for (int g = qMin(gEnd, m_Total) - 1; g >= gStart && g >= 0; g--) {
                 const float p = m_Psnr[(size_t)g];
                 if (p < 0) {
                     continue;
@@ -1998,7 +1999,8 @@ public:
 
             int errFrames = 0, missing = 0, outputs = 0, lastErrG = -1;
             double maxGap = 0, prevOut = -1, psnrMin = -1;
-            for (int g = gStart; g < gEnd && g < m_Total; g++) {
+            // §REVIEW-1104：事件幀號可能是 -1，先從 0 起算才不會拿負索引讀 m_Status
+            for (int g = qMax(gStart, 0); g < gEnd && g < m_Total; g++) {
                 const uint8_t st = m_Status[(size_t)g];
                 if (st == kReceived) {
                     outputs++;
@@ -2025,7 +2027,8 @@ public:
             // 癒合之前（事件幀之後）有送出 keyframe：是靠 IDR（例如 --loop 下一輪開頭）才恢復，
             // 不是 decoder／intra refresh 自己好的 → 串流時一樣要 IDR
             bool healedByKeyframe = false;
-            for (int g = ev.g + 1; healG >= 0 && g <= healG; g++) {
+            // §REVIEW-1104：g < 0 時不能拿去索引 m_Status／m_Pkts
+            for (int g = qMax(ev.g + 1, 0); healG >= 0 && g <= healG; g++) {
                 if (m_Status[(size_t)g] != kDropped && m_Pkts[g % m_Cfg.nf].key) {
                     healedByKeyframe = true;
                     break;
@@ -2212,6 +2215,10 @@ private:
 
     void onError(int g, const char* reason)
     {
+        // §REVIEW-1104：還沒送出任何封包時 g 是 -1，放進事件後統計會用 size_t 索引越界
+        if (g < 0) {
+            return;
+        }
         if (!m_EpisodeOpen) {
             m_EpisodeOpen = true;
             m_EpisodeFlushed = false;

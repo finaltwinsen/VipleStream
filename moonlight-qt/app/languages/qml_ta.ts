@@ -1312,133 +1312,143 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="352"/>
+        <location filename="../gui/SettingsView.qml" line="525"/>
         <source>Resolution and FPS</source>
         <translation>தீர்மானம் மற்றும் எஃப்.பி.எச்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="360"/>
+        <location filename="../gui/SettingsView.qml" line="533"/>
         <source>Setting values too high for your PC or network connection may cause lag, stuttering, or errors.</source>
         <translation>உங்கள் பிசி அல்லது பிணைய இணைப்பிற்கு மதிப்புகளை மிக அதிகமாக அமைப்பது பின்னடைவு, திணறல் அல்லது பிழைகளை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="342"/>
+        <location filename="../gui/SettingsView.qml" line="515"/>
         <source>Basic Settings</source>
         <translation>அடிப்படை அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="558"/>
+        <location filename="../gui/SettingsView.qml" line="731"/>
         <source>720p</source>
         <translation>720 ஆ</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="564"/>
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>1080p</source>
         <translation>1080 ப</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="570"/>
+        <location filename="../gui/SettingsView.qml" line="743"/>
         <source>1440p</source>
         <translation>1440 ப</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="576"/>
+        <location filename="../gui/SettingsView.qml" line="749"/>
         <source>4K</source>
         <translation>எச்.சி.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="693"/>
+        <location filename="../gui/SettingsView.qml" line="866"/>
         <source>Custom resolutions are not officially supported by GeForce Experience, so it will not set your host display resolution. You will need to set it manually while in game.</source>
         <translation>தனிப்பயன் தீர்மானங்கள் சியிபோர்ச் அனுபவத்தால் அதிகாரப்பூர்வமாக ஆதரிக்கப்படவில்லை, எனவே இது உங்கள் புரவலன் காட்சி தீர்மானத்தை அமைக்காது. விளையாட்டில் இருக்கும்போது நீங்கள் அதை கைமுறையாக அமைக்க வேண்டும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="694"/>
+        <location filename="../gui/SettingsView.qml" line="867"/>
         <source>Resolutions that are not supported by your client or host PC may cause streaming errors.</source>
         <translation>உங்கள் வாடிக்கையாளர் அல்லது புரவலன் பிசியால் ஆதரிக்கப்படாத தீர்மானங்கள் ச்ட்ரீமிங் பிழைகளை ஏற்படுத்தக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="700"/>
+        <location filename="../gui/SettingsView.qml" line="873"/>
         <source>Enter a custom resolution:</source>
         <translation>தனிப்பயன் தீர்மானத்தை உள்ளிடவும்:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="961"/>
+        <location filename="../gui/SettingsView.qml" line="1134"/>
         <source>%1 FPS</source>
         <translation>%1 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1476"/>
+        <location filename="../gui/SettingsView.qml" line="1651"/>
         <source>Video bitrate:</source>
         <translation>வீடியோ பிட்ரேட்:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1484"/>
+        <location filename="../gui/SettingsView.qml" line="1659"/>
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>மெதுவான இணைப்புகளில் பிட்ரேட்டை குறைக்கவும். படத்தின் தரத்தை அதிகரிக்க பிட்ரேட்டை உயர்த்தவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1506"/>
+        <location filename="../gui/SettingsView.qml" line="1681"/>
         <source>Video bitrate: %1 Mbps</source>
         <translation>வீடியோ பிட்ரேட்: %1 எம்.பி.பி.எச்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1536"/>
+        <location filename="../gui/SettingsView.qml" line="1711"/>
         <source>Display mode</source>
         <translation>காட்சி முறை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1566"/>
+        <location filename="../gui/SettingsView.qml" line="1741"/>
         <source>(Recommended)</source>
         <translation>(பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1547"/>
-        <location filename="../gui/SettingsView.qml" line="2115"/>
+        <location filename="../gui/SettingsView.qml" line="1722"/>
+        <location filename="../gui/SettingsView.qml" line="2291"/>
         <source>Fullscreen</source>
         <translation>முழு திரை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1616"/>
+        <location filename="../gui/SettingsView.qml" line="1791"/>
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>ஃபுல்ச்கிரீன் பொதுவாக சிறந்த செயல்திறனை வழங்குகிறது, ஆனால் எல்லையற்ற சாளரங்கள் மேகோச் இடைவெளிகள், ஆல்ட்+தாவல், திரைக்காட்சி கருவிகள், திரையில் மேலடுக்குகள் போன்ற அம்சங்களுடன் சிறப்பாக செயல்படக்கூடும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1552"/>
+        <location filename="../gui/SettingsView.qml" line="1727"/>
         <source>Borderless windowed</source>
         <translation>எல்லையற்ற சாளர</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="431"/>
+        <location filename="../gui/SettingsView.qml" line="342"/>
+        <source>Show advanced and experimental options</source>
+        <translation>மேம்பட்ட மற்றும் சோதனை விருப்பங்களைக் காட்டு</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="352"/>
+        <source>Shows options meant for troubleshooting and testing: renderer and video decoder, frame interpolation engines, experimental video formats and network test switches. Hidden options keep their current values.</source>
+        <translation>சிக்கல் தீர்வு மற்றும் சோதனைக்கான விருப்பங்களைக் காட்டுகிறது: ரெண்டரர் மற்றும் வீடியோ டிகோடர், ஃப்ரேம் இடைக்கணிப்பு இயந்திரங்கள், சோதனை வீடியோ வடிவங்கள் மற்றும் நெட்வொர்க் சோதனை சுவிட்சுகள். மறைக்கப்பட்ட விருப்பங்கள் தற்போதைய மதிப்புகளைத் தக்கவைக்கின்றன.</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="604"/>
         <source>Native</source>
         <translation>பழமை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="432"/>
+        <location filename="../gui/SettingsView.qml" line="605"/>
         <source>Native (Excluding Notch)</source>
         <translation>பழமை (உச்சநிலை தவிர)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1128"/>
+        <location filename="../gui/SettingsView.qml" line="1302"/>
         <source>Renderer</source>
         <translation>ரெண்டரர்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1145"/>
+        <location filename="../gui/SettingsView.qml" line="1320"/>
         <source>Auto (recommended) — let the system pick the most stable hardware decoding path</source>
         <translation>தானியங்கி — பரிந்துரைக்கப்படுகிறது: மிக நிலையான வன்பொருள் டிகோடிங் பாதையை கணினியே தேர்ந்தெடுக்கும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1146"/>
+        <location filename="../gui/SettingsView.qml" line="1321"/>
         <source>Direct3D 11 — always use D3D11VA; works with the NV-OF / DirectML / NCNN interpolation engines</source>
         <translation>Direct3D 11 — D3D11VA-வில் நிலைநிறுத்துகிறது, NV-OF / DirectML / NCNN பிரேம் இடைச்செருகல் எஞ்சின்களுடன் பயன்படுத்தலாம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1147"/>
+        <location filename="../gui/SettingsView.qml" line="1322"/>
         <source>Vulkan [experimental] — built-in frame interpolation; compatibility issues on some systems (AMD APU / older NVIDIA drivers)</source>
         <translation>Vulkan [சோதனை] — உள்ளமைந்த பிரேம் இடைச்செருகல்; சில கணினிகளில் (AMD APU / பழைய NV இயக்கி) இணக்கச் சிக்கல்கள் உள்ளன</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1164"/>
+        <location filename="../gui/SettingsView.qml" line="1339"/>
         <source>Auto (recommended): same as upstream Moonlight&apos;s hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
@@ -1451,27 +1461,27 @@ Direct3D 11: D3D11VA-வில் வெளிப்படையாக நில
 Vulkan [சோதனை]: கட்டாய Vulkan-first cascade + நேட்டிவ் Vulkan ரெண்டரிங் பைப்லைன் + dual-present; உள்ளமைந்த பிரேம் இடைச்செருகல் எஞ்சின் (Generic-க்குச் சமம்). அறியப்பட்ட சிக்கல்கள்: NV இயக்கி 596.36-இல் நேட்டிவ் vkCmdDecodeVideoKHR ONLY பயன்முறையில் NVDEC device-lost ஏற்படுத்துகிறது; AMD APU-வில் video session memory bind 226 MB கட்டத்தில் இயக்கி செயலிழக்கிறது; PARALLEL+SW upload பாதையின் செயல்திறன் குறைவு (80+ ms/பிரேம்). நிலையானதும் பரிந்துரைக்கப்பட்ட விருப்பத்திற்குத் திரும்பும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1175"/>
+        <location filename="../gui/SettingsView.qml" line="1350"/>
         <source>Linux video output (frontend)</source>
         <translation>Linux வீடியோ காட்சிப்படுத்தல் (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1190"/>
+        <location filename="../gui/SettingsView.qml" line="1365"/>
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>தானியங்கி — பரிந்துரைக்கப்படுகிறது: aarch64 அல்லது Zink எனில் Vulkan, மற்றவை பழைய வரிசையைத் தக்கவைக்கும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1191"/>
+        <location filename="../gui/SettingsView.qml" line="1366"/>
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — காட்சிப்படுத்தலுக்கு Vulkan-க்கு முன்னுரிமை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1192"/>
+        <location filename="../gui/SettingsView.qml" line="1367"/>
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — பழைய வரிசையைத் தக்கவை (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1208"/>
+        <location filename="../gui/SettingsView.qml" line="1383"/>
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -1488,107 +1498,107 @@ Vulkan: எப்போதும் Vulkan (libplacebo) காட்சிப்
 EGL: பழைய வரிசையைத் தக்கவைக்கும், Vulkan-க்குத் தனி முன்னுரிமை இல்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1264"/>
+        <location filename="../gui/SettingsView.qml" line="1439"/>
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>Vulkan ரெண்டரர் உள்ளமைந்த பிரேம் இடைச்செருகல் எஞ்சினைப் பயன்படுத்துகிறது (Generic-க்குச் சமம்). வேறு எஞ்சினைத் தேர்ந்தெடுக்க Direct3D 11-க்கு மாறவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1282"/>
+        <location filename="../gui/SettingsView.qml" line="1457"/>
         <source>Interpolation mode:</source>
         <translation>இடைச்செருகல் பயன்முறை:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1288"/>
+        <location filename="../gui/SettingsView.qml" line="1463"/>
         <source>Active (recommended)</source>
         <translation>செயலில் (பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1299"/>
+        <location filename="../gui/SettingsView.qml" line="1474"/>
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>சேவையகம் UI fps / 2 (உயர் புதுப்பிப்பு வீதத் திரைகளுக்கு / 3) அனுப்பும், கிளையன்ட் எப்போதும் dual/triple இடைச்செருகல் செய்யும். சேவையகச் சுமை குறைவு, கிளையன்ட் GPU வலுவாக இருக்க வேண்டும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1303"/>
+        <location filename="../gui/SettingsView.qml" line="1478"/>
         <source>Passive</source>
         <translation>செயலற்ற</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1314"/>
+        <location filename="../gui/SettingsView.qml" line="1489"/>
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>சேவையகம் முழு UI fps-ஐ அனுப்பும். கிளையன்ட் recv%-க்கு ஏற்ப ratio-வை மாறும் வகையில் உயர்த்தும்: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. சேவையகம் எப்போதும் முழு வீதத்தில் அனுப்ப முடியாதபோது பொருத்தமானது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1410"/>
+        <location filename="../gui/SettingsView.qml" line="1585"/>
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY (ஒருங்கிணைந்த / பழைய GPU-கள்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1414"/>
+        <location filename="../gui/SettingsView.qml" line="1589"/>
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN (கண்டறியப்படவில்லை; கண்டறிய கிளையன்டை மீண்டும் தொடங்கவும்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1416"/>
+        <location filename="../gui/SettingsView.qml" line="1591"/>
         <source>(not detected yet)</source>
         <translation>(இன்னும் கண்டறியப்படவில்லை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1420"/>
+        <location filename="../gui/SettingsView.qml" line="1595"/>
         <source>(not measured)</source>
         <translation>(அளவிடப்படவில்லை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1421"/>
+        <location filename="../gui/SettingsView.qml" line="1596"/>
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>FRUC தானியங்கி நிலைப்படுத்தல் (Vulkan unified autotier v1.4.127):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1422"/>
+        <location filename="../gui/SettingsView.qml" line="1597"/>
         <source>   GPU: </source>
         <translation>   GPU: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1423"/>
+        <location filename="../gui/SettingsView.qml" line="1598"/>
         <source>   Detected tier: </source>
         <translation>   கண்டறியப்பட்ட tier: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1424"/>
+        <location filename="../gui/SettingsView.qml" line="1599"/>
         <source>   Benchmark: </source>
         <translation>   benchmark: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1425"/>
+        <location filename="../gui/SettingsView.qml" line="1600"/>
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>இயக்க நேரத்தில் 7 நிலைகளில் (T-1..T5) தானாக ஏறும்/இறங்கும்:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1428"/>
+        <location filename="../gui/SettingsView.qml" line="1603"/>
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (NVOF GPU, chain சற்றுக் கனமானது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1429"/>
+        <location filename="../gui/SettingsView.qml" line="1604"/>
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (NVOF இல்லாத AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1431"/>
+        <location filename="../gui/SettingsView.qml" line="1606"/>
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (மிகக் குறைந்த FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1432"/>
+        <location filename="../gui/SettingsView.qml" line="1607"/>
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = FRUC இடைநிறுத்தம் (GPU ஈடுகொடுக்கவில்லை, 5 நிமிடத்தில் மீண்டும் முயற்சி)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1444"/>
+        <location filename="../gui/SettingsView.qml" line="1619"/>
         <source>Edge MV threshold:</source>
         <translation>விளிம்பு MV வரம்பு (Edge MV threshold):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1460"/>
+        <location filename="../gui/SettingsView.qml" line="1635"/>
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -1601,342 +1611,342 @@ Start with the default; if interpolated edges look blocky, lower it to 4-6.</sou
 முதலில் இயல்புநிலையைப் பயன்படுத்தவும்; இடைச்செருகப்பட்ட விளிம்புகளில் கட்டங்கள் தெரிந்தால் 4-6 ஆகக் குறைக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1522"/>
+        <location filename="../gui/SettingsView.qml" line="1697"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>இயல்புநிலையைப் பயன்படுத்து (%1 Mbps)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1557"/>
-        <location filename="../gui/SettingsView.qml" line="2107"/>
+        <location filename="../gui/SettingsView.qml" line="1732"/>
+        <location filename="../gui/SettingsView.qml" line="2283"/>
         <source>Windowed</source>
         <translation>சாளரம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1623"/>
+        <location filename="../gui/SettingsView.qml" line="1798"/>
         <source>V-Sync</source>
         <translation>வி-ஒத்திசைவு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1633"/>
+        <location filename="../gui/SettingsView.qml" line="1808"/>
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>V-Sync ஐ முடக்குவது துணை-சட்டரீதியான வழங்குதல் தாமதத்தை அனுமதிக்கிறது, ஆனால் இது புலப்படும் கிழிப்பைக் காட்டலாம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1640"/>
+        <location filename="../gui/SettingsView.qml" line="1815"/>
         <source>Frame pacing</source>
         <translation>பிரேம் வேகக்கட்டுப்பாடு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1663"/>
+        <location filename="../gui/SettingsView.qml" line="1838"/>
         <source>Audio Settings</source>
         <translation>ஆடியோ அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1698"/>
+        <location filename="../gui/SettingsView.qml" line="1873"/>
         <source>Stereo</source>
         <translation>ச்டீரியோ</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1702"/>
+        <location filename="../gui/SettingsView.qml" line="1877"/>
         <source>5.1 surround sound</source>
         <translation>5.1 சுற்று ஒலி</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1706"/>
+        <location filename="../gui/SettingsView.qml" line="1881"/>
         <source>7.1 surround sound</source>
         <translation>7.1 சரவுண்ட் ஒலி</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1720"/>
+        <location filename="../gui/SettingsView.qml" line="1895"/>
         <source>Mute host PC speakers while streaming</source>
         <translation>ச்ட்ரீமிங் செய்யும் போது முடக்கு புரவலன் பிசி ச்பீக்கர்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1730"/>
+        <location filename="../gui/SettingsView.qml" line="1905"/>
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>இந்த அமைப்பு நடைமுறைக்கு வர தற்போது முன்னேற்றத்தில் உள்ள எந்த விளையாட்டையும் நீங்கள் மறுதொடக்கம் செய்ய வேண்டும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1851"/>
+        <location filename="../gui/SettingsView.qml" line="2027"/>
         <source>UI Settings</source>
         <translation>இடைமுகம் அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1896"/>
+        <location filename="../gui/SettingsView.qml" line="2072"/>
         <source>Language</source>
         <translation>மொழி</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1922"/>
+        <location filename="../gui/SettingsView.qml" line="2098"/>
         <source>Automatic</source>
         <translation>தானியங்கி</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2074"/>
+        <location filename="../gui/SettingsView.qml" line="2250"/>
         <source>GUI display mode</source>
         <translation>GUI காட்சி முறை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2111"/>
+        <location filename="../gui/SettingsView.qml" line="2287"/>
         <source>Maximized</source>
         <translation>அதிகபட்சம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2139"/>
+        <location filename="../gui/SettingsView.qml" line="2315"/>
         <source>Show configuration warnings</source>
         <translation>உள்ளமைவு எச்சரிக்கைகளைக் காட்டு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2349"/>
+        <location filename="../gui/SettingsView.qml" line="2371"/>
         <source>Input Settings</source>
         <translation>உள்ளீட்டு அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2370"/>
+        <location filename="../gui/SettingsView.qml" line="2392"/>
         <source>This enables seamless mouse control without capturing the client&apos;s mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>இது வாடிக்கையாளரின் மவுச் கர்சரைக் கைப்பற்றாமல் தடையற்ற சுட்டி கட்டுப்பாட்டை செயல்படுத்துகிறது. தொலைநிலை டெச்க்டாப் பயன்பாட்டிற்கு இது ஏற்றது, ஆனால் பெரும்பாலான விளையாட்டுகளில் வேலை செய்யாது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2372"/>
+        <location filename="../gui/SettingsView.qml" line="2394"/>
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>குறிப்பு: சியிபோர்ச் அனுபவத்தில் ஒரு பிழை காரணமாக, உங்கள் புரவலன் கணினியில் பல மானிட்டர்கள் இருந்தால் இந்த விருப்பம் சரியாக வேலை செய்யாது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2754"/>
+        <location filename="../gui/SettingsView.qml" line="2779"/>
         <source>Enable HDR (Experimental)</source>
         <translation>HDR ஐ இயக்கவும் (சோதனை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2769"/>
+        <location filename="../gui/SettingsView.qml" line="2794"/>
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>ச்ட்ரீம் எச்டிஆர்-திறன் கொண்டதாக இருக்கும், ஆனால் சில விளையாட்டுகளுக்கு எச்டிஆர் பயன்முறையை இயக்க உங்கள் புரவலன் கணினியில் எச்டிஆர் மானிட்டர் தேவைப்படலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2771"/>
+        <location filename="../gui/SettingsView.qml" line="2796"/>
         <source>HDR streaming is not supported on this PC.</source>
         <translation>இந்த கணினியில் எச்டிஆர் ச்ட்ரீமிங் ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2821"/>
+        <location filename="../gui/SettingsView.qml" line="2848"/>
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>VipleStream-Server புரவலன்களுடன் பயன்படுத்த மிக உயர்ந்த வீடியோ பிட்ரேட்களைத் திறக்கிறது. ஈதர்நெட் LAN இணைப்பில் ஸ்ட்ரீம் செய்யும்போது மட்டுமே பயன்படுத்த வேண்டும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2859"/>
+        <location filename="../gui/SettingsView.qml" line="2886"/>
         <source>Show performance stats while streaming</source>
         <translation>ச்ட்ரீமிங் செய்யும் போது செயல்திறன் புள்ளிவிவரங்களைக் காட்டு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2869"/>
+        <location filename="../gui/SettingsView.qml" line="2896"/>
         <source>Display real-time stream performance information while streaming.</source>
         <translation>ச்ட்ரீமிங் செய்யும் போது நிகழ்நேர ச்ட்ரீம் செயல்திறன் தகவலைக் காண்பி.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2870"/>
+        <location filename="../gui/SettingsView.qml" line="2897"/>
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>Ctrl+Alt+Shift+S ஐப் பயன்படுத்தி ச்ட்ரீமிங் செய்யும் போது எந்த நேரத்திலும் அதை மாற்றலாம் அல்லது+L1+R1+X ஐத் தேர்ந்தெடுக்கலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2871"/>
+        <location filename="../gui/SettingsView.qml" line="2898"/>
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>செயல்திறன் மேலடுக்கு நீராவி இணைப்பு அல்லது ராச்பெர்ரி பையில் ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2454"/>
+        <location filename="../gui/SettingsView.qml" line="2477"/>
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>தொடுதிரையை மெய்நிகர் டிராக்பேடாகப் பயன்படுத்தவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2471"/>
+        <location filename="../gui/SettingsView.qml" line="2494"/>
         <source>Swap left and right mouse buttons</source>
         <translation>இடது மற்றும் வலது சுட்டி பொத்தான்களை மாற்றவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2483"/>
+        <location filename="../gui/SettingsView.qml" line="2506"/>
         <source>Reverse mouse scrolling direction</source>
         <translation>தலைகீழ் சுட்டி ச்க்ரோலிங் திசை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2497"/>
+        <location filename="../gui/SettingsView.qml" line="2520"/>
         <source>Gamepad Settings</source>
         <translation>கேம்பேட் அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2507"/>
+        <location filename="../gui/SettingsView.qml" line="2530"/>
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>A/B மற்றும் X/y கேம்பேட் பொத்தான்களை மாற்றவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2517"/>
+        <location filename="../gui/SettingsView.qml" line="2540"/>
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>இது கேம்பேட்களை நிண்டெண்டோ-பாணி பொத்தானை அமைப்பாக மாற்றுகிறது</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2523"/>
+        <location filename="../gui/SettingsView.qml" line="2546"/>
         <source>Force gamepad #1 always connected</source>
         <translation>கேம்பேட் #1 எப்போதும் இணைக்கப்பட்டுள்ளது</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2533"/>
+        <location filename="../gui/SettingsView.qml" line="2556"/>
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>இந்த கணினியுடன் உண்மையில் கேம்பேடுகள் எதுவும் இணைக்கப்படாவிட்டாலும், ஓச்டுடன் எப்போதும் இணைந்திருக்க ஒரு கேம்பேடை கட்டாயப்படுத்துகிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2371"/>
+        <location filename="../gui/SettingsView.qml" line="2393"/>
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>Ctrl+Alt+Shift+M ஐப் பயன்படுத்தி ச்ட்ரீமிங் செய்யும் போது இதை மாற்றலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2541"/>
+        <location filename="../gui/SettingsView.qml" line="2564"/>
         <source>Enable mouse control with gamepads by holding the &apos;Start&apos; button</source>
         <translation>&apos;தொடக்க&apos; பொத்தானை வைத்திருப்பதன் மூலம் கேம்பேடுகளுடன் சுட்டி கட்டுப்பாட்டை இயக்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1756"/>
+        <location filename="../gui/SettingsView.qml" line="1931"/>
         <source>Host Settings</source>
         <translation>புரவலன் அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2635"/>
+        <location filename="../gui/SettingsView.qml" line="2658"/>
         <source>Advanced Settings</source>
         <translation>மேம்பட்ட அமைப்புகள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1673"/>
+        <location filename="../gui/SettingsView.qml" line="1848"/>
         <source>Audio configuration</source>
         <translation>ஆடியோ உள்ளமைவு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2128"/>
+        <location filename="../gui/SettingsView.qml" line="2304"/>
         <source>Show connection quality warnings</source>
         <translation>இணைப்பு தர எச்சரிக்கைகளைக் காட்டு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2151"/>
+        <location filename="../gui/SettingsView.qml" line="2327"/>
         <source>Discord Rich Presence integration</source>
         <translation>முரண்பாடு பணக்கார இருப்பு ஒருங்கிணைப்பு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2534"/>
+        <location filename="../gui/SettingsView.qml" line="2557"/>
         <source>Only enable this option when streaming a game that doesn&apos;t support gamepads being connected after startup.</source>
         <translation>தொடக்கத்திற்குப் பிறகு கேம்பேடுகள் இணைக்கப்படுவதை ஆதரிக்காத ஒரு விளையாட்டை ச்ட்ரீமிங் செய்யும் போது மட்டுமே இந்த விருப்பத்தை இயக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2360"/>
+        <location filename="../gui/SettingsView.qml" line="2382"/>
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>விளையாட்டுகளுக்கு பதிலாக ரிமோட் டெச்க்டாப்பிற்கு சுட்டியை மேம்படுத்தவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="857"/>
-        <location filename="../gui/SettingsView.qml" line="1050"/>
+        <location filename="../gui/SettingsView.qml" line="1030"/>
+        <location filename="../gui/SettingsView.qml" line="1223"/>
         <source>Custom (%1 FPS)</source>
         <translation>தனிப்பயன் (%1 FPS)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="872"/>
+        <location filename="../gui/SettingsView.qml" line="1045"/>
         <source>Enter a custom frame rate:</source>
         <translation>தனிப்பயன் பிரேம் வீதத்தை உள்ளிடவும்:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="473"/>
-        <location filename="../gui/SettingsView.qml" line="521"/>
-        <location filename="../gui/SettingsView.qml" line="530"/>
-        <location filename="../gui/SettingsView.qml" line="984"/>
+        <location filename="../gui/SettingsView.qml" line="646"/>
+        <location filename="../gui/SettingsView.qml" line="694"/>
+        <location filename="../gui/SettingsView.qml" line="703"/>
+        <location filename="../gui/SettingsView.qml" line="1157"/>
         <source>Custom</source>
         <translation>தனிப்பயன்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1095"/>
+        <location filename="../gui/SettingsView.qml" line="1268"/>
         <source>30 FPS</source>
         <translation>30 எஃப்.பி.எச்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1100"/>
+        <location filename="../gui/SettingsView.qml" line="1273"/>
         <source>60 FPS</source>
         <translation>60 எஃப்.பி.எச்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2167"/>
+        <location filename="../gui/SettingsView.qml" line="2343"/>
         <source>Keep the display awake while streaming</source>
         <translation>ச்ட்ரீமிங் செய்யும் போது காட்சியை விழித்திருங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2177"/>
+        <location filename="../gui/SettingsView.qml" line="2353"/>
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>ச்கிரீன்சேவர் தொடங்குவதைத் தடுக்கிறது அல்லது ச்ட்ரீமிங் செய்யும் போது காட்சி தூங்குவதைத் தடுக்கிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2382"/>
+        <location filename="../gui/SettingsView.qml" line="2404"/>
         <source>Capture system keyboard shortcuts</source>
         <translation>கணினி விசைப்பலகை குறுக்குவழிகளைப் பிடிக்கவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2390"/>
+        <location filename="../gui/SettingsView.qml" line="2412"/>
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>இது ச்ட்ரீமிங் செய்யும் போது கிளையன்ட் OS ஆல் கையாளப்படும் Alt+TAB போன்ற கணினி அளவிலான விசைப்பலகை குறுக்குவழிகளைக் கைப்பற்ற உதவுகிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2420"/>
+        <location filename="../gui/SettingsView.qml" line="2442"/>
         <source>in fullscreen</source>
         <translation>முழுத் திரையில்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2424"/>
+        <location filename="../gui/SettingsView.qml" line="2446"/>
         <source>always</source>
         <translation>எப்போதும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2464"/>
+        <location filename="../gui/SettingsView.qml" line="2487"/>
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>சரிபார்க்கும்போது, தொடுதிரை டிராக்பேட் போல செயல்படுகிறது. தேர்வு செய்யப்படும்போது, தொடுதிரை சுட்டி சுட்டிக்காட்டி நேரடியாகக் கட்டுப்படுத்தும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1766"/>
+        <location filename="../gui/SettingsView.qml" line="1941"/>
         <source>Optimize game settings for streaming</source>
         <translation>ச்ட்ரீமிங்கிற்கான விளையாட்டு அமைப்புகளை மேம்படுத்தவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="552"/>
+        <location filename="../gui/SettingsView.qml" line="725"/>
         <source>Auto (best for this display)</source>
         <translation>தானியங்கி (இந்தத் திரைக்குச் சிறந்தது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1090"/>
+        <location filename="../gui/SettingsView.qml" line="1263"/>
         <source>Auto (this display)</source>
         <translation>தானியங்கி (இந்தத் திரை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1214"/>
+        <location filename="../gui/SettingsView.qml" line="1389"/>
         <source>Frame interpolation (FRUC)</source>
         <translation>பிரேம் இடைச்செருகல் (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1254"/>
+        <location filename="../gui/SettingsView.qml" line="1429"/>
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>ஒவ்வொரு உண்மையான பிரேமுக்கும் இடையே ஒரு இடைச்செருகப்பட்ட பிரேமைச் சேர்த்து, வெளியீட்டு பிரேம் வீதத்தை இரட்டிப்பாக்குகிறது. சேவையகத்தின் உண்மையான பிரேம் வீதம் பாதியாகிறது (எ.கா. 120 FPS அமைப்பு → 60 FPS கோரப்படும் → 120 FPS வெளியீடு).</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1344"/>
+        <location filename="../gui/SettingsView.qml" line="1519"/>
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute (பரிந்துரைக்கப்படுகிறது — மிகக் குறைந்த தாமதம், எந்த GPU-வும்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1345"/>
+        <location filename="../gui/SettingsView.qml" line="1520"/>
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow (வன்பொருள் flow + warp; NVIDIA RTX 20+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1346"/>
+        <location filename="../gui/SettingsView.qml" line="1521"/>
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — RIFE ML மாதிரி (வலுவான GPU தேவை; Tensor Core RTX 30/40+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1347"/>
+        <location filename="../gui/SettingsView.qml" line="1522"/>
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE (சோதனை; எல்லா உற்பத்தியாளர்களும்: NV/AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1357"/>
+        <location filename="../gui/SettingsView.qml" line="1532"/>
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
@@ -1949,332 +1959,332 @@ NVIDIA Optical Flow: Turing+ (RTX 20/30/40 தொடர்) இல் உள்�
 DirectML: உடன் வரும் RIFE 4.25 lite ONNX மாதிரியை D3D12 DirectML EP-இல் இயக்குகிறது — *உண்மையான* இயக்க ஈடுசெய்த ML இடைச்செருகல், இயக்கமிக்க உள்ளடக்கத்தில் சிறந்த காட்சித் தரம். ஒவ்வொரு செயல்பாட்டுக்குமான kernel-launch மேல்செலவு (~25 ms அடிப்படை, தெளிவுத்திறனைப் பொருட்படுத்தாமல்) காரணமாக, 720p+ இல் நிகழ்நேரத்தில் ஈடுகொடுக்க Tensor Core வகை GPU (RTX 30/40 நடுத்தர வகை அல்லது அதற்கு மேல்) தேவை. வலுக்குறைந்த GPU-களில் கிளையன்ட் inference தெளிவுத்திறனைத் தானாகப் படிப்படியாகக் குறைக்கும் (1080p → 720p → 540p → 480p → 360p), 360p கூட பிரேம் வரவுக்குள் பொருந்தவில்லை என்றால் Generic-க்குத் திரும்பும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1426"/>
+        <location filename="../gui/SettingsView.qml" line="1601"/>
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1427"/>
+        <location filename="../gui/SettingsView.qml" line="1602"/>
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1430"/>
+        <location filename="../gui/SettingsView.qml" line="1605"/>
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (PERFORMANCE GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1653"/>
+        <location filename="../gui/SettingsView.qml" line="1828"/>
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>மிக முன்னதாக வரும் பிரேம்களைத் தாமதப்படுத்துவதன் மூலம் பிரேம் வேகக்கட்டுப்பாடு சிறு தடுமாற்றங்களைக் குறைக்கிறது. V-Sync முடக்கத்திலும் இது வேலை செய்யும், எனவே குறைந்த தாமதத்தைத் தக்கவைத்தபடியே சீரற்ற பிரேம் வருகையை மென்மையாக்கலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1736"/>
+        <location filename="../gui/SettingsView.qml" line="1911"/>
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>VipleStream செயலில் உள்ள சாளரமாக இல்லாதபோது ஸ்ட்ரீம் ஆடியோவை முடக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1747"/>
+        <location filename="../gui/SettingsView.qml" line="1922"/>
         <source>Mutes VipleStream&apos;s audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>Alt+Tab மூலம் ஸ்ட்ரீமிலிருந்து வெளியேறும்போது அல்லது வேறு சாளரத்தைக் கிளிக் செய்யும்போது VipleStream-இன் ஆடியோவை முடக்குகிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1777"/>
+        <location filename="../gui/SettingsView.qml" line="1952"/>
         <source>Quit app on host PC after ending stream</source>
         <translation>ச்ட்ரீம் முடித்த பிறகு புரவலன் கணினியில் பயன்பாட்டை விட்டு வெளியேறவும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1787"/>
+        <location filename="../gui/SettingsView.qml" line="1962"/>
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>இது உங்கள் ச்ட்ரீமை முடிக்கும்போது நீங்கள் ச்ட்ரீமிங் செய்யும் பயன்பாடு அல்லது விளையாட்டை மூடும். நீங்கள் சேமிக்கப்படாத முன்னேற்றத்தை இழப்பீர்கள்!</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1865"/>
+        <location filename="../gui/SettingsView.qml" line="2041"/>
         <source>Design</source>
         <translation>வடிவமைப்பு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1872"/>
+        <location filename="../gui/SettingsView.qml" line="2048"/>
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>எளிமை: பத்திரிகை கட்டமைப்பு, அமைதியான தலைப்புப் பகுதி.
 துணிவு: இதழ் அட்டை பாணி, பெரிய தலைப்புகள்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1888"/>
+        <location filename="../gui/SettingsView.qml" line="2064"/>
         <source>Safe</source>
         <translation>எளிமை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1889"/>
+        <location filename="../gui/SettingsView.qml" line="2065"/>
         <source>Bold</source>
         <translation>துணிவு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2057"/>
+        <location filename="../gui/SettingsView.qml" line="2233"/>
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>இந்த மாற்றம் நடைமுறைக்கு வர VipleStream-ஐ மறுதொடக்கம் செய்ய வேண்டும்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2161"/>
+        <location filename="../gui/SettingsView.qml" line="2337"/>
         <source>Updates your Discord status to display the name of the game you&apos;re streaming. The status reads &quot;Playing &lt;game&gt; · via VipleStream&quot; with the VipleStream icon.</source>
         <translation>நீங்கள் ஸ்ட்ரீம் செய்யும் விளையாட்டின் பெயரைக் காட்ட உங்கள் Discord நிலையைப் புதுப்பிக்கிறது. நிலை VipleStream ஐகானுடன் &quot;Playing &lt;game&gt; · via VipleStream&quot; என்று காட்டப்படும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2187"/>
+        <location filename="../gui/SettingsView.qml" line="362"/>
         <source>VR Streaming (Steam Frame)</source>
         <translation>VR ஸ்ட்ரீமிங் (Steam Frame)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2196"/>
+        <location filename="../gui/SettingsView.qml" line="371"/>
         <source>Resolution per eye</source>
         <translation>ஒரு கண்ணுக்கான தெளிவுத்திறன்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2220"/>
+        <location filename="../gui/SettingsView.qml" line="395"/>
         <source>Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.</source>
         <translation>என்கோட் செய்ய, அனுப்ப, டிகோட் செய்யக் குறைவான பிக்சல்கள் என்றால் தாமதம் குறைவு. புரவலன் இன்னும் உயர்ந்த தெளிவுத்திறனில் ரெண்டர் செய்து அளவைக் குறைக்கலாம்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2225"/>
+        <location filename="../gui/SettingsView.qml" line="400"/>
         <source>Extra field of view (overscan)</source>
         <translation>கூடுதல் பார்வைப் புலம் (overscan)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2233"/>
-        <location filename="../gui/SettingsView.qml" line="2259"/>
-        <location filename="../gui/SettingsView.qml" line="2285"/>
+        <location filename="../gui/SettingsView.qml" line="408"/>
+        <location filename="../gui/SettingsView.qml" line="434"/>
+        <location filename="../gui/SettingsView.qml" line="460"/>
         <source>Off</source>
         <translation>முடக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2246"/>
+        <location filename="../gui/SettingsView.qml" line="421"/>
         <source>Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.</source>
         <translation>தலையைத் திருப்பும்போது வெற்று ஓரங்கள் தெரியாமல் இருக்க, ஒவ்வொரு கண்ணின் விளிம்பைத் தாண்டியும் சற்று ரெண்டர் செய்கிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2251"/>
+        <location filename="../gui/SettingsView.qml" line="426"/>
         <source>Pick the newest frame this late</source>
         <translation>இவ்வளவு தாமதித்துப் புதிய பிரேமைத் தேர்ந்தெடு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2272"/>
+        <location filename="../gui/SettingsView.qml" line="447"/>
         <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
         <translation>எந்த பிரேமைக் காட்டுவது என்று தேர்ந்தெடுப்பதற்கு முன் சில மில்லிவினாடிகள் காத்திருக்கும், அதனால் பிரேம் புதியதாக இருக்கும். அதிக நேரம் என்றால் ஹெட்செட் பிரேம்களைத் தவிர்க்கும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2277"/>
+        <location filename="../gui/SettingsView.qml" line="452"/>
         <source>Sharper centre (foveated encoding)</source>
         <translation>கூர்மையான மையம் (foveated என்கோடிங்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2298"/>
+        <location filename="../gui/SettingsView.qml" line="473"/>
         <source>Spends more of the stream&apos;s pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.</source>
         <translation>ஸ்ட்ரீமின் பிக்சல்களில் அதிகமானவற்றை நேர் முன்னாலும் குறைவானவற்றை ஒவ்வொரு கண்ணின் ஓரங்களிலும் செலவிடுகிறது. ஸ்ட்ரீமின் அளவு மாறாது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2304"/>
+        <location filename="../gui/SettingsView.qml" line="479"/>
         <source>Stream at half the headset refresh rate</source>
         <translation>ஹெட்செட் புதுப்பிப்பு வீதத்தின் பாதியில் ஸ்ட்ரீம் செய்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2314"/>
+        <location filename="../gui/SettingsView.qml" line="489"/>
         <source>The game renders and streams at half rate while the headset still displays at full rate. Halves the load on the host and the network.</source>
         <translation>ஹெட்செட் முழு வீதத்தில் காட்டிக்கொண்டிருக்கும்போதே விளையாட்டு பாதி வீதத்தில் ரெண்டர் செய்து ஸ்ட்ரீம் செய்யப்படுகிறது. புரவலன் மற்றும் நெட்வொர்க் மீதான சுமையைப் பாதியாக்குகிறது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2320"/>
+        <location filename="../gui/SettingsView.qml" line="495"/>
         <source>Synthesize the in-between frames</source>
         <translation>இடைப்பட்ட பிரேம்களை உருவாக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2331"/>
+        <location filename="../gui/SettingsView.qml" line="506"/>
         <source>With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.</source>
         <translation>பாதி வீத ஸ்ட்ரீமிங்கில், புதிய பிரேம் இல்லாத புதுப்பிப்புகளில் முந்தைய பிரேமை மீண்டும் காட்டுவதற்குப் பதிலாக, நகரும் பொருள்கள் முன்னோக்கி நகர்த்தப்படுகின்றன.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2391"/>
+        <location filename="../gui/SettingsView.qml" line="2413"/>
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>குறிப்பு: Windows-இல் Ctrl+Alt+Del போன்ற சில விசைப்பலகைக் குறுக்குவழிகளை VipleStream உட்பட எந்தப் பயன்பாடும் இடைமறிக்க முடியாது.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2552"/>
+        <location filename="../gui/SettingsView.qml" line="2575"/>
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>VipleStream பின்னணியில் இருக்கும்போது கேம்பேட் உள்ளீட்டைச் செயலாக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2563"/>
+        <location filename="../gui/SettingsView.qml" line="2586"/>
         <source>Allows VipleStream to capture gamepad inputs even if it&apos;s not the current window in focus</source>
         <translation>கவனத்தில் உள்ள சாளரமாக இல்லாவிட்டாலும் கேம்பேட் உள்ளீடுகளைப் பெற VipleStream-ஐ அனுமதிக்கிறது</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2572"/>
+        <location filename="../gui/SettingsView.qml" line="2595"/>
         <source>Network (MP-QUIC)</source>
         <translation>நெட்வொர்க் (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2582"/>
+        <location filename="../gui/SettingsView.qml" line="2605"/>
         <source>Enable MP-QUIC multipath transport</source>
         <translation>MP-QUIC பல்வழிப் பரிமாற்றத்தை இயக்கு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2592"/>
+        <location filename="../gui/SettingsView.qml" line="2615"/>
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>ஸ்ட்ரீமிங்கிற்கு QUIC பல்வழியை (RFC 9443) பயன்படுத்துகிறது. Wi-Fi + செல்லுலார் மாற்றுவழி மற்றும் இரண்டு நெட்வொர்க் அட்டைகளின் அலைவரிசை ஒருங்கிணைப்பை இயக்குகிறது. சேவையக ஆதரவு தேவை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2597"/>
+        <location filename="../gui/SettingsView.qml" line="2620"/>
         <source>Path scheduler</source>
         <translation>பாதை திட்டமிடுபவர்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2613"/>
+        <location filename="../gui/SettingsView.qml" line="2636"/>
         <source>Auto (per stream type)</source>
         <translation>தானியங்கி (ஸ்ட்ரீம் வகைக்கு ஏற்ப)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2614"/>
+        <location filename="../gui/SettingsView.qml" line="2637"/>
         <source>Lowest latency</source>
         <translation>மிகக் குறைந்த தாமதம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2615"/>
+        <location filename="../gui/SettingsView.qml" line="2638"/>
         <source>Bandwidth aggregation</source>
         <translation>அலைவரிசை ஒருங்கிணைப்பு</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2616"/>
+        <location filename="../gui/SettingsView.qml" line="2639"/>
         <source>Redundant (all paths)</source>
         <translation>மிகைநிலை (எல்லாப் பாதைகளும்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2617"/>
+        <location filename="../gui/SettingsView.qml" line="2640"/>
         <source>Earliest completion</source>
         <translation>முதலில் நிறைவடைவது</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2626"/>
+        <location filename="../gui/SettingsView.qml" line="2649"/>
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>தானியங்கி: வீடியோ=ECF, ஆடியோ=மிகைநிலை, கட்டுப்பாடு=min-RTT. ஒருங்கிணைப்பு: அதிகபட்ச அலைவரிசைக்கு எல்லா நெட்வொர்க் அட்டைகளிலும் round-robin.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2645"/>
+        <location filename="../gui/SettingsView.qml" line="2669"/>
         <source>Video decoder</source>
         <translation>வீடியோ டிகோடர்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2670"/>
-        <location filename="../gui/SettingsView.qml" line="2723"/>
+        <location filename="../gui/SettingsView.qml" line="2695"/>
+        <location filename="../gui/SettingsView.qml" line="2748"/>
         <source>Automatic (Recommended)</source>
         <translation>தானியங்கி (பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2674"/>
+        <location filename="../gui/SettingsView.qml" line="2699"/>
         <source>Force software decoding</source>
         <translation>மென்பொருள் டிகோடிங்கை கட்டாயப்படுத்துங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2678"/>
+        <location filename="../gui/SettingsView.qml" line="2703"/>
         <source>Force hardware decoding</source>
         <translation>வன்பொருள் டிகோடிங்கை கட்டாயப்படுத்துங்கள்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2693"/>
+        <location filename="../gui/SettingsView.qml" line="2718"/>
         <source>Video codec</source>
         <translation>வீடியோ கோடெக்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2727"/>
+        <location filename="../gui/SettingsView.qml" line="2752"/>
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2731"/>
+        <location filename="../gui/SettingsView.qml" line="2756"/>
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2735"/>
+        <location filename="../gui/SettingsView.qml" line="2760"/>
         <source>AV1 (Experimental)</source>
         <translation>ஏ.வி 1 (சோதனை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2739"/>
+        <location filename="../gui/SettingsView.qml" line="2764"/>
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave (மிகக் குறைந்த தாமதம், LAN)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2777"/>
+        <location filename="../gui/SettingsView.qml" line="2803"/>
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>YUV 4:4:4 ஐ இயக்கவும் (சோதனை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2800"/>
+        <location filename="../gui/SettingsView.qml" line="2826"/>
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>டெச்க்டாப் மற்றும் உரை-கனமான விளையாட்டுகளை ச்ட்ரீமிங் செய்வது நல்லது, ஆனால் வேகமான விளையாட்டுகளுக்கு பரிந்துரைக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2802"/>
+        <location filename="../gui/SettingsView.qml" line="2828"/>
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>YUV 4:4:4 இந்தக் கணினியில் ஆதரிக்கப்படவில்லை.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2808"/>
+        <location filename="../gui/SettingsView.qml" line="2835"/>
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>பிட்ரேட் வரம்பைத் திறக்கவும் (சோதனை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2827"/>
+        <location filename="../gui/SettingsView.qml" line="2854"/>
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>உள்ளக நெட்வொர்க்கில் பிசிக்களை தானாகவே கண்டறியவும் (பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2848"/>
+        <location filename="../gui/SettingsView.qml" line="2875"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>தடுக்கப்பட்ட இணைப்புகளை தானாக கண்டறியவும் (பரிந்துரைக்கப்படுகிறது)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1378"/>
+        <location filename="../gui/SettingsView.qml" line="1553"/>
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>தரம் — சிறந்த காட்சி தரம், அதிக GPU சுமை</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1379"/>
+        <location filename="../gui/SettingsView.qml" line="1554"/>
         <source>Balanced — Recommended (default)</source>
         <translation>சமநிலை — பரிந்துரைக்கப்படுகிறது (இயல்புநிலை)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1380"/>
+        <location filename="../gui/SettingsView.qml" line="1555"/>
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>செயல்திறன் — மிகக் குறைந்த தாமதம், iGPU-க்கு பொருத்தம்</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1792"/>
+        <location filename="../gui/SettingsView.qml" line="1967"/>
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>NAT கடப்பு (சிக்னல் ரிலே)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1802"/>
+        <location filename="../gui/SettingsView.qml" line="1977"/>
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>ரிலே URL (எ.கா. ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1813"/>
+        <location filename="../gui/SettingsView.qml" line="1988"/>
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>ரிலே PSK (முன்பகிரப்பட்ட விசை, இல்லையென்றால் காலியாக விடவும்)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1823"/>
+        <location filename="../gui/SettingsView.qml" line="1998"/>
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>விருப்பம்: இரு பக்கங்களும் NAT பின்னணியில் இருக்கும்போது இணைக்க உதவும். பொது IP உள்ள சேவையகத்தில் viplestream-relay ஐ இயக்கவும்.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1832"/>
+        <location filename="../gui/SettingsView.qml" line="2008"/>
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>ரிலே வழியாக ஸ்ட்ரீம் கட்டாயப்படுத்து (UDP சுரங்கம் சோதனைக்கு)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1389"/>
+        <location filename="../gui/SettingsView.qml" line="1564"/>
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2283,7 +2293,7 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 செயல்திறன்: 4-அண்டை தேடல் + குறைந்தபட்ச செயலாக்கம் (iGPU-வில் ~6 ms)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1842"/>
+        <location filename="../gui/SettingsView.qml" line="2018"/>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>ஹோஸ்டை நேரடியாக அடையக்கூடியதாக இருந்தாலும் எப்போதும் ரிலே வழியாக ஸ்ட்ரீம் செய்க. VPN (உ.ம். Cloudflare WARP) /launch-ஐ நேரடியாக இயக்கிவிடும் சூழலில் ரிலே UDP சுரங்கத்தைச் சரிபார்க்கப் பயனுள்ளது.</translation>
     </message>

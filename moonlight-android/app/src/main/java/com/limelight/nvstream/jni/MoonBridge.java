@@ -1,5 +1,7 @@
 package com.limelight.nvstream.jni;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import com.limelight.nvstream.NvConnectionListener;
 import com.limelight.nvstream.av.audio.AudioRenderer;
 import com.limelight.nvstream.av.video.VideoDecoderRenderer;
@@ -144,10 +146,11 @@ public class MoonBridge {
         void onScHidFeatureRequest(byte reportId, byte op, byte seq, byte[] query, byte queryLen);
     }
 
-    private static AudioRenderer audioRenderer;
-    private static VideoDecoderRenderer videoRenderer;
-    private static NvConnectionListener connectionListener;
-    private static volatile ScHidFeatureRequestHandler scHidFeatureRequestHandler;
+    // §REVIEW-1104：欄位宣告為 volatile 確保 cleanupBridge 寫入的 null 對 callback 執行緒可見；scHidFeatureRequestHandler 改為 AtomicReference 以支援原子 CAS
+    private static volatile AudioRenderer audioRenderer;
+    private static volatile VideoDecoderRenderer videoRenderer;
+    private static volatile NvConnectionListener connectionListener;
+    private static final AtomicReference<ScHidFeatureRequestHandler> scHidFeatureRequestHandler = new AtomicReference<>(null);
 
     static {
         System.loadLibrary("moonlight-core");
@@ -210,8 +213,10 @@ public class MoonBridge {
     }
 
     public static int bridgeDrSetup(int videoFormat, int width, int height, int redrawRate) {
-        if (videoRenderer != null) {
-            return videoRenderer.setup(videoFormat, width, height, redrawRate);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        VideoDecoderRenderer renderer = videoRenderer;
+        if (renderer != null) {
+            return renderer.setup(videoFormat, width, height, redrawRate);
         }
         else {
             return -1;
@@ -219,28 +224,36 @@ public class MoonBridge {
     }
 
     public static void bridgeDrStart() {
-        if (videoRenderer != null) {
-            videoRenderer.start();
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        VideoDecoderRenderer renderer = videoRenderer;
+        if (renderer != null) {
+            renderer.start();
         }
     }
 
     public static void bridgeDrStop() {
-        if (videoRenderer != null) {
-            videoRenderer.stop();
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        VideoDecoderRenderer renderer = videoRenderer;
+        if (renderer != null) {
+            renderer.stop();
         }
     }
 
     public static void bridgeDrCleanup() {
-        if (videoRenderer != null) {
-            videoRenderer.cleanup();
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        VideoDecoderRenderer renderer = videoRenderer;
+        if (renderer != null) {
+            renderer.cleanup();
         }
     }
 
     public static int bridgeDrSubmitDecodeUnit(byte[] decodeUnitData, int decodeUnitLength, int decodeUnitType,
                                                int frameNumber, int frameType, char frameHostProcessingLatency,
                                                long receiveTimeMs, long enqueueTimeMs) {
-        if (videoRenderer != null) {
-            return videoRenderer.submitDecodeUnit(decodeUnitData, decodeUnitLength,
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        VideoDecoderRenderer renderer = videoRenderer;
+        if (renderer != null) {
+            return renderer.submitDecodeUnit(decodeUnitData, decodeUnitLength,
                     decodeUnitType, frameNumber, frameType, frameHostProcessingLatency, receiveTimeMs, enqueueTimeMs);
         }
         else {
@@ -249,8 +262,10 @@ public class MoonBridge {
     }
 
     public static int bridgeArInit(int audioConfiguration, int sampleRate, int samplesPerFrame) {
-        if (audioRenderer != null) {
-            return audioRenderer.setup(new AudioConfiguration(audioConfiguration), sampleRate, samplesPerFrame);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        AudioRenderer renderer = audioRenderer;
+        if (renderer != null) {
+            return renderer.setup(new AudioConfiguration(audioConfiguration), sampleRate, samplesPerFrame);
         }
         else {
             return -1;
@@ -258,92 +273,122 @@ public class MoonBridge {
     }
 
     public static void bridgeArStart() {
-        if (audioRenderer != null) {
-            audioRenderer.start();
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        AudioRenderer renderer = audioRenderer;
+        if (renderer != null) {
+            renderer.start();
         }
     }
 
     public static void bridgeArStop() {
-        if (audioRenderer != null) {
-            audioRenderer.stop();
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        AudioRenderer renderer = audioRenderer;
+        if (renderer != null) {
+            renderer.stop();
         }
     }
 
     public static void bridgeArCleanup() {
-        if (audioRenderer != null) {
-            audioRenderer.cleanup();
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        AudioRenderer renderer = audioRenderer;
+        if (renderer != null) {
+            renderer.cleanup();
         }
     }
 
     public static void bridgeArPlaySample(short[] pcmData) {
-        if (audioRenderer != null) {
-            audioRenderer.playDecodedAudio(pcmData);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        AudioRenderer renderer = audioRenderer;
+        if (renderer != null) {
+            renderer.playDecodedAudio(pcmData);
         }
     }
 
     public static void bridgeClStageStarting(int stage) {
-        if (connectionListener != null) {
-            connectionListener.stageStarting(getStageName(stage));
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.stageStarting(getStageName(stage));
         }
     }
 
     public static void bridgeClStageComplete(int stage) {
-        if (connectionListener != null) {
-            connectionListener.stageComplete(getStageName(stage));
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.stageComplete(getStageName(stage));
         }
     }
 
     public static void bridgeClStageFailed(int stage, int errorCode) {
-        if (connectionListener != null) {
-            connectionListener.stageFailed(getStageName(stage), getPortFlagsFromStage(stage), errorCode);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.stageFailed(getStageName(stage), getPortFlagsFromStage(stage), errorCode);
         }
     }
 
     public static void bridgeClConnectionStarted() {
-        if (connectionListener != null) {
-            connectionListener.connectionStarted();
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.connectionStarted();
         }
     }
 
     public static void bridgeClConnectionTerminated(int errorCode) {
-        if (connectionListener != null) {
-            connectionListener.connectionTerminated(errorCode);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.connectionTerminated(errorCode);
         }
     }
 
     public static void bridgeClRumble(short controllerNumber, short lowFreqMotor, short highFreqMotor) {
-        if (connectionListener != null) {
-            connectionListener.rumble(controllerNumber, lowFreqMotor, highFreqMotor);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.rumble(controllerNumber, lowFreqMotor, highFreqMotor);
         }
     }
 
     public static void bridgeClConnectionStatusUpdate(int connectionStatus) {
-        if (connectionListener != null) {
-            connectionListener.connectionStatusUpdate(connectionStatus);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.connectionStatusUpdate(connectionStatus);
         }
     }
 
     public static void bridgeClSetHdrMode(boolean enabled, byte[] hdrMetadata) {
-        if (connectionListener != null) {
-            connectionListener.setHdrMode(enabled, hdrMetadata);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.setHdrMode(enabled, hdrMetadata);
         }
     }
 
     public static void bridgeClRumbleTriggers(short controllerNumber, short leftTrigger, short rightTrigger) {
-        if (connectionListener != null) {
-            connectionListener.rumbleTriggers(controllerNumber, leftTrigger, rightTrigger);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.rumbleTriggers(controllerNumber, leftTrigger, rightTrigger);
         }
     }
 
     public static void bridgeClSetMotionEventState(short controllerNumber, byte eventType, short sampleRateHz) {
-        if (connectionListener != null) {
-            connectionListener.setMotionEventState(controllerNumber, eventType, sampleRateHz);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.setMotionEventState(controllerNumber, eventType, sampleRateHz);
         }
     }
 
     public static void bridgeClSetControllerLED(short controllerNumber, byte r, byte g, byte b) {
-        if (connectionListener != null) {
-            connectionListener.setControllerLED(controllerNumber, r, g, b);
+        // §REVIEW-1104：先將靜態參考抄至區域變數再檢查與呼叫，防止與 cleanupBridge 產生資料競爭導致 NPE
+        NvConnectionListener listener = connectionListener;
+        if (listener != null) {
+            listener.setControllerLED(controllerNumber, r, g, b);
         }
     }
 
@@ -351,21 +396,23 @@ public class MoonBridge {
     // host relays a Steam feature op to the real Steam Controller. May be called
     // on an arbitrary native callback thread.
     public static void scHidFeatureRequest(byte reportId, byte op, byte seq, byte[] query, byte queryLen) {
-        ScHidFeatureRequestHandler handler = scHidFeatureRequestHandler;
+        ScHidFeatureRequestHandler handler = scHidFeatureRequestHandler.get();
         if (handler != null) {
             handler.onScHidFeatureRequest(reportId, op, seq, query, queryLen);
         }
     }
 
     public static void setScHidFeatureRequestHandler(ScHidFeatureRequestHandler handler) {
-        scHidFeatureRequestHandler = handler;
+        scHidFeatureRequestHandler.set(handler);
     }
 
     // Clears the handler only if it is still the given one, so a stale driver
     // shutting down late can't unregister its replacement.
     public static void clearScHidFeatureRequestHandler(ScHidFeatureRequestHandler handler) {
-        if (scHidFeatureRequestHandler == handler) {
-            scHidFeatureRequestHandler = null;
+        // §REVIEW-1104：以 compareAndSet 確保原子性，只有目前 slot 仍為該 handler 時才清為 null，避免清掉後進 handler
+        if (handler != null) {
+            scHidFeatureRequestHandler.compareAndSet(handler, null);
+
         }
     }
 
@@ -373,6 +420,8 @@ public class MoonBridge {
         MoonBridge.videoRenderer = videoRenderer;
         MoonBridge.audioRenderer = audioRenderer;
         MoonBridge.connectionListener = connectionListener;
+        // §REVIEW-1104：每次新連線初始化時先將 native 殘留的 LocalControlPort 歸零，避免跳過 NAT 打洞時沿用上一場舊 port
+        resetLocalControlPort();
     }
 
     public static void cleanupBridge() {
@@ -419,6 +468,9 @@ public class MoonBridge {
     // VipleStream: diagnostic — returns the local UDP port bound by holePunch()
     // (same port ENet will bind to). 0 = punch not yet performed.
     public static native int getLocalControlPort();
+
+    // §REVIEW-1104：跳過 NAT 打洞時供 Java 端將 native 殘留的 LocalControlPort 歸零，避免 ENet socket 綁死舊 port
+    public static native void resetLocalControlPort();
 
     public static native void stopConnection();
 

@@ -12,6 +12,7 @@ import com.limelight.grid.assets.DiskAssetLoader;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.util.List;
 
 public class PosterContentProvider extends ContentProvider {
@@ -53,7 +54,33 @@ public class PosterContentProvider extends ContentProvider {
         }
         String appId = segments.get(APP_ID_PATH_INDEX);
         String uuid = segments.get(COMPUTER_UUID_PATH_INDEX);
-        File file = mDiskAssetLoader.getFile(uuid, Integer.parseInt(appId));
+        // §REVIEW-1104：防範路徑遍歷攻擊，拒絕非 boxart 路徑或含斜線、.. 的區段，並用 canonical path 限制在 boxart 目錄內
+        if (!BOXART_PATH.equals(segments.get(0))) {
+            throw new FileNotFoundException();
+        }
+        for (String segment : segments) {
+            if (segment.contains("..") || segment.contains("/") || segment.contains("\\")) {
+                throw new FileNotFoundException();
+            }
+        }
+
+        int parsedAppId;
+        try {
+            parsedAppId = Integer.parseInt(appId);
+        } catch (NumberFormatException e) {
+            throw new FileNotFoundException();
+        }
+
+        File file = mDiskAssetLoader.getFile(uuid, parsedAppId);
+        try {
+            File baseDir = new File(getContext().getCacheDir(), BOXART_PATH).getCanonicalFile();
+            File canonicalFile = file.getCanonicalFile();
+            if (!canonicalFile.getPath().startsWith(baseDir.getPath() + File.separator)) {
+                throw new FileNotFoundException();
+            }
+        } catch (IOException e) {
+            throw new FileNotFoundException();
+        }
         if (file.exists()) {
             return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY);
         }

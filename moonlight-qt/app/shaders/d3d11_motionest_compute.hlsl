@@ -49,13 +49,15 @@ cbuffer Constants : register(b0)
 
 uint censusDescriptor(Texture2D<float4> tex, int2 pos)
 {
-    float center = tex.Load(int3(clamp(pos, int2(0,0), int2(frameWidth-1, frameHeight-1)), 0)).r;
+    // §REVIEW-1104：貼圖是 CSC 後的 RGB，.r 是紅色不是 luma，純綠／純藍邊緣 census 會全相同
+    const float3 lumaW = float3(0.299, 0.587, 0.114);
+    float center = dot(tex.Load(int3(clamp(pos, int2(0,0), int2(frameWidth-1, frameHeight-1)), 0)).rgb, lumaW);
     uint bits = 0;
     int bit = 0;
     [loop] for (int dy = -CENSUS_RADIUS; dy <= CENSUS_RADIUS; dy++) {
         [loop] for (int dx = -CENSUS_RADIUS; dx <= CENSUS_RADIUS; dx++) {
             if (dx == 0 && dy == 0) continue;
-            float nb = tex.Load(int3(clamp(pos + int2(dx, dy), int2(0,0), int2(frameWidth-1, frameHeight-1)), 0)).r;
+            float nb = dot(tex.Load(int3(clamp(pos + int2(dx, dy), int2(0,0), int2(frameWidth-1, frameHeight-1)), 0)).rgb, lumaW);
             bits |= ((nb < center) ? 1u : 0u) << bit;
             bit++;
         }
@@ -291,7 +293,8 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
                 any(refCenter >= int2(frameWidth - halfSample, frameHeight - halfSample)))
                 continue;
             float cost = computeCensusCost(refCenter, blockCenter, bestSubCost);
-            if (cost < bestSubCost) { bestSubCost = cost; bestMV_Q1 = candidate_Q1; }
+            // §REVIEW-1104：cost 在整數像素上算出來，改善時存評估過的整數 Q1，不要存沒採樣的半像素
+            if (cost < bestSubCost) { bestSubCost = cost; bestMV_Q1 = candidatePixel * 2; }
         }
     }
 #else
@@ -332,10 +335,13 @@ void main(uint3 dispatchID : SV_DispatchThreadID)
         // means slight lag on sudden direction changes, but the lower
         // temporal noise is more important for reducing shimmer than
         // instantaneous accuracy.
-        smoothedMV_Q1 = int2(
-            (bestMV_Q1.x * 6 + prevMV_Q1.x * 4 + 5) / 10,
-            (bestMV_Q1.y * 6 + prevMV_Q1.y * 4 + 5) / 10
-        );
+        // §REVIEW-1104：有號整數除法向零截斷，+5 只對正數是四捨五入，負向約 1px 會被寫成 0 並停住
+        int weightedX = bestMV_Q1.x * 6 + prevMV_Q1.x * 4;
+        int weightedY = bestMV_Q1.y * 6 + prevMV_Q1.y * 4;
+        int magX = (abs(weightedX) + 5) / 10;
+        int magY = (abs(weightedY) + 5) / 10;
+        smoothedMV_Q1 = int2(weightedX < 0 ? -magX : magX,
+                             weightedY < 0 ? -magY : magY);
         // Q1 clamp ±96 == ±48 px (Q1 is 2x pixel). Matches warp's
         // clamp and ME diamond's actual reach.
         smoothedMV_Q1 = clamp(smoothedMV_Q1, int2(-96, -96), int2(96, 96));

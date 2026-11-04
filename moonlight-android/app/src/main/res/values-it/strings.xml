@@ -354,4 +354,6 @@
     <string name="steam_switch_error_taskgone">L\'attività di cambio è scomparsa sull\'host</string>
     <string name="steam_switch_error_timeout">Timeout del cambio (&gt;150 s senza che il server raggiungesse uno stato finale)</string>
     <string name="steam_switch_account_unavailable">Questo account non ha credenziali salvate sull\'host. Accedi prima una volta sull\'host, quindi riprova.</string>
+    <string name="title_show_advanced">Mostra opzioni avanzate e sperimentali</string>
+    <string name="summary_show_advanced">Opzioni per la risoluzione dei problemi e i test. Le opzioni nascoste mantengono i valori attuali.</string>
 </resources>

@@ -197,6 +197,10 @@ Item {
 
             // Initialize the session and probe for host/client capabilities
             if (!session.initialize(window)) {
+                // §REVIEW-1104：initialize() 失敗卻沒寫錯誤文字時，quitAfter 會當成正常結束（結束碼 0），CLI／VR 子行程也不報錯
+                if (!streamSegueErrorDialog.text) {
+                    displayLaunchError(qsTr("Failed to start the stream."));
+                }
                 sessionFinished(0);
                 sessionReadyForDeletion();
                 return;

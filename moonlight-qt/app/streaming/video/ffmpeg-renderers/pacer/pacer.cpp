@@ -22,7 +22,7 @@
 // out of available decoding surfaces.
 // [Reduced from 3→2: saves ~1 frame of display-side latency (~8-16ms at 60-120fps)]
 #define MAX_QUEUED_FRAMES 2
-static_assert(PACER_MAX_OUTSTANDING_FRAMES == MAX_QUEUED_FRAMES + 2,
+static_assert(PACER_MAX_OUTSTANDING_FRAMES == 2 * MAX_QUEUED_FRAMES + 2,  // §REVIEW-1104：兩條佇列＋正在畫＋deferred
               "PACER_MAX_OUTSTANDING_FRAMES and MAX_QUEUED_FRAMES must agree");
 
 // We may be woken up slightly late so don't go all the way
@@ -453,9 +453,12 @@ void Pacer::renderFrame(AVFrame* frame)
 void Pacer::dropFrameForEnqueue(QQueue<AVFrame*>& queue)
 {
     SDL_assert(queue.size() <= MAX_QUEUED_FRAMES);
-    if (queue.size() == MAX_QUEUED_FRAMES) {
+    // §REVIEW-1104：持鎖呼叫 av_frame_free 會占住 pool mutex；比照同檔另外兩處先解鎖，回來後重查佇列是否仍滿
+    while (queue.size() >= MAX_QUEUED_FRAMES) {
         AVFrame* frame = queue.dequeue();
+        m_FrameQueueLock.unlock();
         av_frame_free(&frame);
+        m_FrameQueueLock.lock();
     }
 }
 

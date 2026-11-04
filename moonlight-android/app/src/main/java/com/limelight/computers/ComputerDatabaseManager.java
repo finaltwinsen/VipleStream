@@ -67,17 +67,30 @@ public class ComputerDatabaseManager {
                 ADDRESSES_COLUMN_NAME, MAC_ADDRESS_COLUMN_NAME, SERVER_CERT_COLUMN_NAME));
 
         // Move all computers from the old DB (if any) to the new one
-        List<ComputerDetails> oldComputers = LegacyDatabaseReader.migrateAllComputers(c);
-        for (ComputerDetails computer : oldComputers) {
-            updateComputer(computer);
+        // §REVIEW-1104：每一代舊資料庫各自 try/catch，讀到壞資料不會讓初始化整個失敗；成功寫進新庫後才刪舊庫
+        try {
+            for (ComputerDetails computer : LegacyDatabaseReader.migrateAllComputers(c)) {
+                updateComputer(computer);
+            }
+            LegacyDatabaseReader.deleteDatabase(c);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
-        oldComputers = LegacyDatabaseReader2.migrateAllComputers(c);
-        for (ComputerDetails computer : oldComputers) {
-            updateComputer(computer);
+        try {
+            for (ComputerDetails computer : LegacyDatabaseReader2.migrateAllComputers(c)) {
+                updateComputer(computer);
+            }
+            LegacyDatabaseReader2.deleteDatabase(c);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
-        oldComputers = LegacyDatabaseReader3.migrateAllComputers(c);
-        for (ComputerDetails computer : oldComputers) {
-            updateComputer(computer);
+        try {
+            for (ComputerDetails computer : LegacyDatabaseReader3.migrateAllComputers(c)) {
+                updateComputer(computer);
+            }
+            LegacyDatabaseReader3.deleteDatabase(c);
+        } catch (Exception e) {
+            e.printStackTrace();
         }
     }
 

@@ -22,7 +22,8 @@ import java.util.List;
 
 public class VirtualController {
     public static class ControllerInputContext {
-        public short inputMap = 0x0000;
+        // §REVIEW-1104：改用 int 保存按鍵旗標，避免 0x8000 (Y 鍵) 在傳參至 reportOscState 時發生符號擴展
+        public int inputMap = 0x0000;
         public byte leftTrigger = 0x00;
         public byte rightTrigger = 0x00;
         public short rightStickX = 0x0000;

@@ -122,8 +122,24 @@ linuxdeploy --appdir $DEPLOY_FOLDER \
     --icon-filename viplestream \
     --library "$SDL2_LIB" \
     --plugin qt \
-    --output appimage \
     || fail "linuxdeploy failed!"
+# Patch 6（2026-11-03，CachyOS Qt 6.12 實測）：AppImage 從 AppRun（→ usr/bin/viplestream 的
+# symlink）啟動時，Qt 6.12 以 argv[0] 的目錄（AppImage 根目錄）當 applicationDirPath，
+# 讀不到 linuxdeploy-plugin-qt 放在 usr/bin/qt.conf 的路徑，改到根目錄的 platforms/ 找外掛
+# → 「no Qt platform plugin could be initialized」abort。根目錄也放一份指向 usr/ 的 qt.conf。
+cat > $DEPLOY_FOLDER/qt.conf <<'QTCONF'
+[Paths]
+Prefix = usr
+Plugins = plugins
+Imports = qml
+Qml2Imports = qml
+QTCONF
+linuxdeploy --appdir $DEPLOY_FOLDER \
+    --desktop-file $DEPLOY_FOLDER/usr/share/applications/viplestream.desktop \
+    --icon-file $SOURCE_ROOT/app/res/moonlight.svg \
+    --icon-filename viplestream \
+    --output appimage \
+    || fail "linuxdeploy (appimage) failed!"
 APPIMAGE_RAW=$(ls VipleStream-*.AppImage 2>/dev/null | head -1)
 if [ -n "$APPIMAGE_RAW" ]; then
     mv "$APPIMAGE_RAW" "VipleStream-Client-${VERSION}-linux-x64.AppImage"

@@ -3127,9 +3127,20 @@ static void destroy_in_flight_ring(vk_backend_t* be)
 {
     if (!be->fRingInitialized) return;
 
+    // §REVIEW-1104：釋放 in-flight ring 資源前先等待佇列與各 slot 之 fence 完成，確保 GPU 取樣與 compute 工作皆已結束
+    if (be->vkQueueWaitIdle) {
+        if (be->computeQueue) be->vkQueueWaitIdle(be->computeQueue);
+        if (be->graphicsQueue && be->graphicsQueue != be->computeQueue) {
+            be->vkQueueWaitIdle(be->graphicsQueue);
+        }
+    }
+
     for (uint32_t i = 0; i < VK_FRAMES_IN_FLIGHT; i++) {
         // Free pending AHB resources still tracked in this slot.
         if (be->fSlotHasPending[i]) {
+            if (be->fSlotInFlightFence[i] && be->vkWaitForFences) {
+                be->vkWaitForFences(be->device, 1, &be->fSlotInFlightFence[i], VK_TRUE, UINT64_MAX);
+            }
             if (be->fSlotPendingView[i]) be->vkDestroyImageView(be->device, be->fSlotPendingView[i], NULL);
             if (be->fSlotPendingImg[i])  be->vkDestroyImage(be->device, be->fSlotPendingImg[i], NULL);
             if (be->fSlotPendingMem[i])  be->vkFreeMemory(be->device, be->fSlotPendingMem[i], NULL);
@@ -3846,7 +3857,9 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         be->fSlotPendingMem[slot]  = VK_NULL_HANDLE;
         be->fSlotHasPending[slot]  = 0;
     }
-    be->vkResetFences(be->device, 1, &be->fSlotInFlightFence[slot]);
+    // §REVIEW-1104：fence 改在 gfx submit 前一刻才 reset。原本在這裡 reset，後面 7 條 goto ring_fail_drop_imported
+    // 沒有送出就離開，fence 永遠不會 signal：下一次輪到這個 slot 的 WaitForFences(UINT64_MAX) 卡死，
+    // destroy_in_flight_ring 的等待也會卡死（同 Qt vkfruc 的 §REVIEW-1104）
 
     // Acquire 1 (single mode) or 2 (dual mode) swapchain images.
     // singleMode uses slot.acquireSem[0] / renderDoneSem[0] for the only
@@ -4068,6 +4081,7 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
         .signalSemaphoreCount = semCount,
         .pSignalSemaphores    = signalSems,
     };
+    be->vkResetFences(be->device, 1, &be->fSlotInFlightFence[slot]);  // §REVIEW-1104：見上
     if (be->vkQueueSubmit(be->graphicsQueue, 1, &si,
                            be->fSlotInFlightFence[slot]) != VK_SUCCESS) {
         LOGW("[VKBE-RING] gfx vkQueueSubmit failed");
@@ -4084,8 +4098,9 @@ static int render_ahb_frame(vk_backend_t* be, AHardwareBuffer* ahb)
             .pWaitSemaphores    = &be->fSlotComputeDoneSem[slot],
             .pWaitDstStageMask  = &drainStage,
         };
+        // §REVIEW-1104：fence 已 reset 但 gfx submit 失敗，借這次 drain submit 把它 signal 回來
         if (be->vkQueueSubmit(be->graphicsQueue, 1, &si_drain,
-                               VK_NULL_HANDLE) == VK_SUCCESS) {
+                               be->fSlotInFlightFence[slot]) == VK_SUCCESS) {
             be->vkQueueWaitIdle(be->graphicsQueue);
         }
         goto ring_fail_drop_imported;

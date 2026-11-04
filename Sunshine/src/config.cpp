@@ -690,13 +690,19 @@ namespace config {
       std::stringstream json_stream;
       json_stream << "{\"dd_mode_remapping\":" << value << "}";
 
-      boost::property_tree::ptree json_tree;
-      boost::property_tree::read_json(json_stream, json_tree);
-
       video_t::dd_t::mode_remapping_t output;
-      parse_entry_list(json_tree.get_child("dd_mode_remapping.mixed"), output.mixed);
-      parse_entry_list(json_tree.get_child("dd_mode_remapping.resolution_only"), output.resolution_only);
-      parse_entry_list(json_tree.get_child("dd_mode_remapping.refresh_rate_only"), output.refresh_rate_only);
+      // §REVIEW-1103：手改設定寫錯 JSON 或缺子節點時 ptree 會拋例外，parse() 沒接 → 啟動直接 terminate
+      try {
+        boost::property_tree::ptree json_tree;
+        boost::property_tree::read_json(json_stream, json_tree);
+
+        parse_entry_list(json_tree.get_child("dd_mode_remapping.mixed"), output.mixed);
+        parse_entry_list(json_tree.get_child("dd_mode_remapping.resolution_only"), output.resolution_only);
+        parse_entry_list(json_tree.get_child("dd_mode_remapping.refresh_rate_only"), output.refresh_rate_only);
+      } catch (const boost::property_tree::ptree_error &e) {
+        warn_config(std::format("config: invalid value for 'dd_mode_remapping': {} -- ignoring the remapping list", e.what()));
+        return video_t::dd_t::mode_remapping_t {};
+      }
 
       return output;
     }
@@ -1214,7 +1220,8 @@ namespace config {
     auto pos = begin;
     while (pos < std::cend(string)) {
       if (*pos == '[') {
-        pos = skip_list(pos + 1, std::cend(string)) + 1;
+        // §REVIEW-1103：skip_list 已回傳 ']' 的下一個位置，再 +1 會多跳一字元（結尾時越界）
+        pos = skip_list(pos + 1, std::cend(string));
       } else if (*pos == ']') {
         break;
       } else if (*pos == ',') {
@@ -1244,15 +1251,24 @@ namespace config {
     // We need to add a wrapping object to make it valid JSON, otherwise ptree cannot parse it.
     jsonStream << "{\"prep_cmd\":" << string << "}";
 
-    boost::property_tree::ptree jsonTree;
-    boost::property_tree::read_json(jsonStream, jsonTree);
+    // §REVIEW-1103：JSON 寫錯時 ptree 會拋例外，parse() 沒接 → 啟動直接 terminate；改成警告後略過
+    try {
+      boost::property_tree::ptree jsonTree;
+      boost::property_tree::read_json(jsonStream, jsonTree);
 
-    for (auto &[_, prep_cmd] : jsonTree.get_child("prep_cmd"s)) {
-      auto do_cmd = prep_cmd.get_optional<std::string>("do"s);
-      auto undo_cmd = prep_cmd.get_optional<std::string>("undo"s);
-      auto elevated = prep_cmd.get_optional<bool>("elevated"s);
+      std::vector<prep_cmd_t> parsed;
+      for (auto &[_, prep_cmd] : jsonTree.get_child("prep_cmd"s)) {
+        auto do_cmd = prep_cmd.get_optional<std::string>("do"s);
+        auto undo_cmd = prep_cmd.get_optional<std::string>("undo"s);
+        auto elevated = prep_cmd.get_optional<bool>("elevated"s);
 
-      input.emplace_back(do_cmd.value_or(""), undo_cmd.value_or(""), elevated.value_or(false));
+        parsed.emplace_back(do_cmd.value_or(""), undo_cmd.value_or(""), elevated.value_or(false));
+      }
+      for (auto &cmd : parsed) {
+        input.emplace_back(std::move(cmd));
+      }
+    } catch (const boost::property_tree::ptree_error &e) {
+      warn_config(std::format("config: invalid value for '{}': {} -- ignoring it", name, e.what()));
     }
   }
 
@@ -1591,6 +1607,7 @@ namespace config {
     vr_opt::bool_strict_f(vars, "vr_ctrl_pose_offset", vr.ctrl_pose_offset);
     vr_opt::bool_strict_f(vars, "vr_angvel_local", vr.angvel_local);
     vr_opt::bool_strict_f(vars, "vr_abr_fast", vr.abr_fast);
+    vr_opt::int_strict_f(vars, "vr_abr_ceiling_kbps", vr.abr_ceiling_kbps, 10000, 400000, true);
     vr_opt::bool_strict_f(vars, "vr_hotspot_autoconnect", vr.hotspot_autoconnect);
     vr_opt::int_strict_f(vars, "vr_hotspot_restart_max", vr.hotspot_restart_max, 1, 5, true);
     generic_f(vars, "vr_stale_policy", vr.stale_policy, vr_opt::stale_from_view);

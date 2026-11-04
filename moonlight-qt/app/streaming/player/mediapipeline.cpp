@@ -1064,7 +1064,10 @@ void MediaPipeline::audioThread()
             r = avcodec_receive_frame(m_AudioCtx, f);
             if (r == AVERROR_EOF) {
                 std::lock_guard<std::mutex> lk(m_AudioMutex);
-                m_AudioEof = true;
+                // §REVIEW-1103：比照 video：舊序號排空時的 EOF 不可設到 seek 之後的新序號上
+                if (m_Serial.load() == cur) {
+                    m_AudioEof = true;
+                }
                 avcodec_flush_buffers(m_AudioCtx);
                 break;
             }
@@ -1278,7 +1281,10 @@ void MediaPipeline::dropVideo()
 void MediaPipeline::waitVideo(int timeoutMs)
 {
     std::unique_lock<std::mutex> lk(m_FrameMutex);
-    m_FrameCv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&] { return m_Abort.load() || !m_Frames.empty() || m_VideoEof; });
+    // §REVIEW-1103：原本 EOF 也算「醒來的理由」，播完後佇列永遠空、EOF 永遠 true → 每次 0 ms 返回，
+    // 呈現迴圈空轉吃滿一核（頭盔播完停在控制列時發熱耗電）。EOF 不再算，播完就照 timeout 睡；
+    // seek／新影格進來都會 notify，回應速度不變。
+    m_FrameCv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&] { return m_Abort.load() || !m_Frames.empty(); });
 }
 
 bool MediaPipeline::mediaToSteady(double pts, uint64_t* steadyNs) const

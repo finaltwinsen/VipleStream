@@ -92,6 +92,9 @@
 // 認出；累積到 50 個送出封包（~0.8 s）再判一次，§Q-LOSS-SPURIOUS 的扣除
 // 才收斂。高流量路徑一個 tick 就滿，行為和以前一樣。
 #define LOSS_WINDOW_SENT       50
+// §Q-LOSS-RXCHECK（2026-11-03）：下行還正常就不因上行（ACK）loss 降級，見統計迴圈
+#define LOSS_RX_MIN_PPS        50.0f   // 基準低於這個＝不是影像路徑，照舊規則
+#define LOSS_RX_HEALTHY_FRAC   0.5f
 #define LOSS_PROBATION_US      10000000ull  // 促升後 10s probation
 
 // ── Internal state ──────────────────────────────────────────
@@ -137,6 +140,11 @@ typedef struct _QUIC_SUBFLOW {
     // §Q-LOSS-WINDOW：降級判斷用的累積視窗（滿 LOSS_WINDOW_SENT 個送出封包才評估一次）
     uint64_t lossWinSent;
     uint64_t lossWinLost;
+    // §Q-LOSS-RXCHECK：視窗起點（時刻、pktsRecv）與這條路徑收影像的基準速率（封包／秒）
+    uint64_t lossWinStartUs;
+    uint64_t lossWinRxStart;
+    float rxRateBase;
+    uint64_t lossRxSkipLogUs;  // 「下行正常、不降級」的 log 節流
     // §Q-LOSS-DIAG：picoquic 累積值（§K.10 診斷用）
     uint64_t pqSentTotal;
     uint64_t pqLostTotal;
@@ -499,6 +507,8 @@ static void quicResetSubflowHealthOnPromote(QUIC_SUBFLOW* sf, uint64_t now) {
     sf->lossBadSinceUs = 0;        // 舊任期的 loss 帳不帶入新任期
     sf->lossWinSent = 0;           // §Q-LOSS-WINDOW
     sf->lossWinLost = 0;
+    sf->lossWinStartUs = 0;        // §Q-LOSS-RXCHECK：新任期重建基準
+    sf->rxRateBase = 0.0f;
     sf->lastPromotedAtUs = now;    // §Q-LOSS-DEMOTE probation 起算
 }
 
@@ -861,6 +871,11 @@ int quicWaitReady(unsigned int timeoutMs) {
             return 0;
         }
         if (st == picoquic_state_disconnected) {
+            return -1;
+        }
+        // §REVIEW-1103：使用者取消連線（LiInterruptConnection）時不要再等滿 5 秒。
+        if (ConnectionInterrupted) {
+            Limelog("[VIPLE-MPQUIC] handshake wait aborted: connection interrupted\n");
             return -1;
         }
         PltSleepMs(10);
@@ -1864,19 +1879,52 @@ static void quicUpdatePathStats(void) {
             // §Q-LOSS-DEMOTE: 合格樣本（§Q-LOSS-WINDOW：累積 ≥LOSS_WINDOW_SENT 封包）的越檻
             // 計時。任一合格樣本低於門檻即歸零 → 等效「連續超標」，天然
             // 濾掉 ABR/BBR 探測造成的秒級 loss 尖峰；樣本不足不改判。
-            g_ctx.subflows[i].lossWinSent += deltaSent;
-            g_ctx.subflows[i].lossWinLost += deltaLost;
-            if (g_ctx.subflows[i].lossWinSent >= LOSS_WINDOW_SENT) {
-                float winPct = (float)((double)g_ctx.subflows[i].lossWinLost /
-                                       (double)g_ctx.subflows[i].lossWinSent * 100.0);
-                if (winPct >= LOSS_DEMOTE_PCT) {
-                    if (g_ctx.subflows[i].lossBadSinceUs == 0)
-                        g_ctx.subflows[i].lossBadSinceUs = now;
+            QUIC_SUBFLOW* lw = &g_ctx.subflows[i];
+            if (lw->lossWinStartUs == 0) {
+                lw->lossWinStartUs = now;
+                lw->lossWinRxStart = lw->pktsRecv;
+            }
+            lw->lossWinSent += deltaSent;
+            lw->lossWinLost += deltaLost;
+            if (lw->lossWinSent >= LOSS_WINDOW_SENT) {
+                float winPct = (float)((double)lw->lossWinLost /
+                                       (double)lw->lossWinSent * 100.0);
+                // §Q-LOSS-RXCHECK（2026-11-03）：這裡的 loss 是 client「送出」的封包（幾乎都是 ACK）。
+                // CachyOS → 筆電（server 只有 Wi-Fi）實測：乙太網路路徑 sent=29004 lost=12705，但 server
+                // 的 pqRecv 跟 client 的 pqSent 幾乎一樣——封包都到了，是 server 回 ACK 慢、picoquic 判遺失後
+                // 來不及認成 spurious。結果每 10～40 秒把好好的乙太網路降級、影像換到 Wi-Fi，server 每次換路
+                // 都連發 10 秒 IDR（§Q-FAILOVER-IDR-LOOP），畫面「糊→清晰→糊」不停。
+                // 真正的 zombie（2026-07-06：大流量 UDP 77～100% 丟）下行一定跟著垮；所以這條路徑收影像的
+                // 速率還在基準的一半以上，就把上行的 loss 當成 ACK 計時假象、不武裝降級。基準太小（不是影像
+                // 路徑、或剛促升還沒建立）時照舊規則。
+                uint64_t winUs = now - lw->lossWinStartUs;
+                float rxRate = winUs > 0
+                    ? (float)((double)(lw->pktsRecv - lw->lossWinRxStart) * 1e6 / (double)winUs)
+                    : 0.0f;
+                bool rxHealthy = lw->rxRateBase >= LOSS_RX_MIN_PPS &&
+                                 rxRate >= lw->rxRateBase * LOSS_RX_HEALTHY_FRAC;
+                bool lossHigh = winPct >= LOSS_DEMOTE_PCT;
+                if (lossHigh && !rxHealthy) {
+                    if (lw->lossBadSinceUs == 0)
+                        lw->lossBadSinceUs = now;
                 } else {
-                    g_ctx.subflows[i].lossBadSinceUs = 0;
+                    if (lossHigh && (lw->lossRxSkipLogUs == 0 || now - lw->lossRxSkipLogUs >= 10000000ull)) {
+                        lw->lossRxSkipLogUs = now;
+                        Limelog("[VIPLE-MPQUIC] §Q-LOSS-RXCHECK: subflow %d (if %d) send loss=%.1f%% but "
+                                "downstream healthy (rx %.0f pkt/s, base %.0f) — not demoting\n",
+                                lw->id, lw->interfaceIndex, winPct, rxRate, lw->rxRateBase);
+                    }
+                    lw->lossBadSinceUs = 0;
                 }
-                g_ctx.subflows[i].lossWinSent = 0;
-                g_ctx.subflows[i].lossWinLost = 0;
+                // 基準只用「沒有疑似壞掉」的視窗更新，避免被垮掉的下行拉低
+                if (!lossHigh || rxHealthy) {
+                    lw->rxRateBase = lw->rxRateBase <= 0.0f
+                        ? rxRate
+                        : lw->rxRateBase * 0.7f + rxRate * 0.3f;
+                }
+                lw->lossWinSent = 0;
+                lw->lossWinLost = 0;
+                lw->lossWinStartUs = 0;
             }
 
             g_ctx.subflows[i].prevSent = pq.sent;
@@ -2624,6 +2672,20 @@ static void quicCheckPathHealth(void) {
                          (g_ctx.subflows[0].lastRecvTime > 0 &&
                           (now - g_ctx.subflows[0].lastRecvTime) > 2000000))) {
                         ethernetDead = 1;
+                        // §REVIEW-1103：slot 0 掉過之後永遠不會復活（failback 會在別的 slot 重建同一張網卡），
+                        // 只看 slot 0 會讓 ethernetDead 整場成立、動態 standby 降級整場停用。
+                        // 同一張乙太網卡在別的 slot 有活的路徑，就當乙太網路還活著。
+                        for (int ei = 1; ei < g_ctx.subflowCount; ei++) {
+                            const QUIC_SUBFLOW* es = &g_ctx.subflows[ei];
+                            if (es->interfaceIndex == g_ctx.subflows[0].interfaceIndex &&
+                                es->active && !es->picoquicDeleted &&
+                                es->consecutiveTimeouts == 0 &&
+                                es->lastRecvTime > 0 &&
+                                (now - es->lastRecvTime) <= 2000000) {
+                                ethernetDead = 0;
+                                break;
+                            }
+                        }
                     }
                     // Fix N v1.5.195: state-transition log。failover 期間
                     // 每 500ms 重複印同一訊息無意義，改為只在狀態變化時印。
@@ -3740,6 +3802,9 @@ static void quicFecOnShard(QUIC_TRANSPORT_CTX* ctx, unsigned char ft,
         baseSeq = seq;
     } else {
         shardIndex = (fecInfo & 0x7F) - 1;
+        // §REVIEW-1103：資料分片編號超過資料槽數時不可落進 parity 槽（只會讓 RS 用錯資料）
+        if (shardIndex >= QUIC_FEC_DATA_SHARDS)
+            return;
         baseSeq = (uint16_t)(seq - shardIndex);
     }
 

@@ -339,4 +339,6 @@
     <string name="steam_switch_error_taskgone">Tugas penggantian hilang di host</string>
     <string name="steam_switch_error_timeout">Waktu penggantian habis (&gt;150 dtk tanpa server mencapai status akhir)</string>
     <string name="steam_switch_account_unavailable">Akun ini tidak memiliki kredensial tersimpan di host. Masuk sekali di host terlebih dahulu, lalu coba lagi.</string>
+    <string name="title_show_advanced">Tampilkan opsi lanjutan dan eksperimental</string>
+    <string name="summary_show_advanced">Opsi untuk pemecahan masalah dan pengujian. Opsi yang disembunyikan tetap memakai nilai saat ini.</string>
 </resources>

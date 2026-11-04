@@ -333,4 +333,6 @@
     <string name="steam_switch_error_taskgone">Sarcina de schimbare a dispărut de pe gazdă</string>
     <string name="steam_switch_error_timeout">Schimbarea a expirat (&gt;150 s fără ca serverul să ajungă într-o stare finală)</string>
     <string name="steam_switch_account_unavailable">Acest cont nu are date de autentificare salvate pe gazdă. Conectează-te mai întâi o dată pe gazdă, apoi încearcă din nou.</string>
+    <string name="title_show_advanced">Afișează opțiunile avansate și experimentale</string>
+    <string name="summary_show_advanced">Opțiuni pentru depanare și testare. Opțiunile ascunse își păstrează valorile curente.</string>
 </resources>

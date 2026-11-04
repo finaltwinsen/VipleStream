@@ -492,9 +492,19 @@ int VipleSCHidForceReconnect(void) {
 
     // Cycle the device: Steam receives DeviceRemoved + DeviceAdded notifications
     // and re-runs GetControllerInfo with our proxy now active.
-    CM_Disable_DevNode(parentInst, 0);
+    // §REVIEW-1103（B034-3）：原本不看 CM_* 回傳，CR_REMOVE_VETOED 之類失敗時照樣回 1，log 誤以為重連成功。
+    // disable 失敗＝什麼都沒動，直接回 0；enable 失敗會讓裝置停在停用狀態，多試一次。
+    CONFIGRET cr = CM_Disable_DevNode(parentInst, 0);
+    if (cr != CR_SUCCESS) {
+        SetLastError(static_cast<DWORD>(cr));
+        return 0;
+    }
     Sleep(150);
-    CM_Enable_DevNode(parentInst, 0);
+    cr = CM_Enable_DevNode(parentInst, 0);
+    if (cr != CR_SUCCESS) {
+        Sleep(300);
+        cr = CM_Enable_DevNode(parentInst, 0);
+    }
     // §SC-HID Round 1：enable 之後 driver 的裝置 context 是新的（0x05 統計計數
     // 器歸零）。統計改為每次 GetFeature(0x05) 直接讀絕對值，這裡不需要重設任何
     // user-mode 基準。
@@ -502,6 +512,10 @@ int VipleSCHidForceReconnect(void) {
 
     // Allow VipleSCHidOpen to proceed immediately after re-enumeration.
     VipleSCHidResetOpenThrottle();
+    if (cr != CR_SUCCESS) {
+        SetLastError(static_cast<DWORD>(cr));
+        return 0;
+    }
     return 1;
 }
 

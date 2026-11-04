@@ -37,7 +37,8 @@ void launch_ui(const std::optional<std::string> &path) {
 namespace args {
   int creds(const char *name, int argc, char *argv[]) {
     if (argc < 2 || argv[0] == "help"sv || argv[1] == "help"sv) {
-      help(name);
+      // §REVIEW-1103：help() 會返回，沒 return 會接著越界讀 argv
+      return help(name);
     }
 
     http::save_user_creds(config::sunshine.credentials_file, argv[0], argv[1]);

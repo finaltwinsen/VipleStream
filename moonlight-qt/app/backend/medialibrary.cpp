@@ -193,13 +193,20 @@ QString MediaLibrary::guessFormat(const QString& source) const
 
 namespace {
 
-NvComputer* hostAt(ComputerManager* cm, int host)
+// §REVIEW-1104：主機排序索引會在新增或改名時變動，改以 uuid 查找主機
+NvComputer* hostAt(ComputerManager* cm, const QString& host)
 {
     if (cm == nullptr) {
         return nullptr;
     }
     const QVector<NvComputer*> list = cm->getComputers();
-    return host >= 0 && host < list.size() ? list.at(host) : nullptr;
+    for (NvComputer* c : list) {
+        QReadLocker lock(&c->lock);
+        if (c->uuid == host) {
+            return c;
+        }
+    }
+    return nullptr;
 }
 
 // 不在線上回 false（不連）
@@ -225,7 +232,8 @@ QVariantList MediaLibrary::hosts(ComputerManager* cm) const
             continue;
         }
         QVariantMap m;
-        m[QStringLiteral("index")] = i;
+        // §REVIEW-1104：回傳 uuid 供 QML 保存與查詢，避免排序索引失效
+        m[QStringLiteral("uuid")] = c->uuid;
         m[QStringLiteral("name")] = c->name;
         m[QStringLiteral("online")] = c->state == NvComputer::CS_ONLINE;
         out.append(m);
@@ -233,7 +241,8 @@ QVariantList MediaLibrary::hosts(ComputerManager* cm) const
     return out;
 }
 
-void MediaLibrary::hostBrowse(ComputerManager* cm, int host, int root, const QString& path, int requestId)
+// §REVIEW-1104：host 參數改收 uuid
+void MediaLibrary::hostBrowse(ComputerManager* cm, const QString& host, int root, const QString& path, int requestId)
 {
     NvComputer* c = hostAt(cm, host);
     if (c == nullptr || !hostOnline(c)) {
@@ -324,7 +333,8 @@ void MediaLibrary::hostBrowse(ComputerManager* cm, int host, int root, const QSt
     }).detach();
 }
 
-QString MediaLibrary::hostFileUrl(ComputerManager* cm, int host, int root, const QString& path) const
+// §REVIEW-1104：host 參數改收 uuid
+QString MediaLibrary::hostFileUrl(ComputerManager* cm, const QString& host, int root, const QString& path) const
 {
     NvComputer* c = hostAt(cm, host);
     if (c == nullptr) {
@@ -338,7 +348,8 @@ QString MediaLibrary::hostFileUrl(ComputerManager* cm, int host, int root, const
     return url.toString(QUrl::FullyEncoded);
 }
 
-QString MediaLibrary::hostThumbId(ComputerManager* cm, int host, int root, const QString& path, const QString& stamp) const
+// §REVIEW-1104：host 參數改收 uuid
+QString MediaLibrary::hostThumbId(ComputerManager* cm, const QString& host, int root, const QString& path, const QString& stamp) const
 {
     NvComputer* c = hostAt(cm, host);
     if (c == nullptr) {

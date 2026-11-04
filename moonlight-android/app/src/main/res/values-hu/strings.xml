@@ -337,4 +337,6 @@
     <string name="steam_switch_error_taskgone">A váltási feladat eltűnt a gazdagépen</string>
     <string name="steam_switch_error_timeout">A váltás időtúllépés miatt megszakadt (&gt;150 s alatt a szerver nem jutott végállapotba)</string>
     <string name="steam_switch_account_unavailable">Ehhez a fiókhoz nincsenek mentett hitelesítő adatok a gazdagépen. Előbb jelentkezz be egyszer a gazdagépen, majd próbáld újra.</string>
+    <string name="title_show_advanced">Speciális és kísérleti beállítások megjelenítése</string>
+    <string name="summary_show_advanced">Hibaelhárítási és tesztelési beállítások. A rejtett beállítások megtartják jelenlegi értéküket.</string>
 </resources>

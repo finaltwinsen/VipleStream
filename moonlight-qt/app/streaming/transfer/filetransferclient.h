@@ -18,6 +18,7 @@
 #include <QNetworkReply>
 #include <QObject>
 #include <QPointer>
+#include <QProcess>
 #include <QSslCertificate>
 #include <QSslError>
 #include <QString>
@@ -91,6 +92,13 @@ private:
     void handleListDir(const PendingCommand &cmd);
     void handleDownloadToClient(const PendingCommand &cmd);
     void handleUploadFromClient(const PendingCommand &cmd);
+    /// §REVIEW-1103：實際開始上傳（資料夾在壓縮完成後才呼叫）
+    void startUpload(const QString &token, const QString &uploadPath, const QString &displayName,
+                     const QString &tempZip, bool isDirectory);
+    /// §REVIEW-1103：砍掉進行中的壓縮行程（取消／停止時）
+    void killZipProcess();
+    /// 回報 kind=failed
+    void postFailed(const QString &token, const QString &error);
 
     /**
      * Filename sanitize（單一檔名、無 path traversal 字元）。失敗回傳空。
@@ -141,5 +149,8 @@ private:
     quint64 m_ActiveBytesDone = 0;
     int m_LastProgressBucket = -1;   ///< 0-20 (每 5%)，用來抑制 toast 重複更新
     QFile *m_ActiveFile = nullptr;   ///< Download writer / upload reader 共用
+    QProcess *m_ZipProc = nullptr;   ///< §REVIEW-1103：資料夾上傳的非同步壓縮行程（壓縮中才有）
+    QString m_ActiveTempZip;         ///< §REVIEW-1103：目前上傳用的暫存 zip（取消／停止／完成都要刪）
+    bool m_DownloadWriteFailed = false; ///< §REVIEW-1103：下載寫檔失敗（磁碟滿等）
     bool m_Started = false;
 };

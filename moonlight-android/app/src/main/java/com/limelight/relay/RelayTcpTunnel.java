@@ -17,6 +17,7 @@ package com.limelight.relay;
 import android.util.Base64;
 import android.util.Log;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -25,16 +26,11 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocket;
-import javax.net.ssl.SSLSocketFactory;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 public class RelayTcpTunnel extends Thread {
@@ -48,6 +44,8 @@ public class RelayTcpTunnel extends Thread {
 
     private volatile int mLocalPort = 0;
     private volatile boolean mStop = false;
+    /** §REVIEW-1103：run() 已結束（失敗或關閉）。 */
+    private volatile boolean mDead = false;
     private volatile ServerSocket mServerSocket;
     private volatile Socket mRelaySocket;
 
@@ -68,14 +66,15 @@ public class RelayTcpTunnel extends Thread {
     public int startAndGetPort() {
         start();
         // Wait up to 3 seconds for mLocalPort to be assigned
-        for (int i = 0; i < 300 && mLocalPort == 0 && !mStop; i++) {
+        for (int i = 0; i < 300 && mLocalPort == 0 && !mStop && !mDead; i++) {
             try {
                 Thread.sleep(10);
             } catch (InterruptedException e) {
                 break;
             }
         }
-        return mLocalPort;
+        // §REVIEW-1103：tunnel 在回報埠號前就失敗（例如本機 listen 失敗）時回 0，呼叫端據此放棄 relay。
+        return (mStop || mDead) ? 0 : mLocalPort;
     }
 
     /**
@@ -130,11 +129,8 @@ public class RelayTcpTunnel extends Thread {
             }
 
             if (useTls) {
-                SSLSocketFactory factory = createTrustAllFactory();
-                relaySock = factory.createSocket();
-                relaySock.setSoTimeout(10000);
-                relaySock.connect(new java.net.InetSocketAddress(host, port), 10000);
-                ((SSLSocket) relaySock).startHandshake();
+                // §REVIEW-1103：系統信任庫＋主機名稱驗證，自簽 relay 改用釘選（RelayTls），不再全部信任。
+                relaySock = RelayTls.connect(host, port, 10000);
             } else {
                 relaySock = new Socket();
                 relaySock.setSoTimeout(10000);
@@ -182,8 +178,11 @@ public class RelayTcpTunnel extends Thread {
             relayOut.flush();
 
             // Consume register response
-            relaySock.setSoTimeout(5000);
-            wsRead(relayIn);
+            try {
+                wsReadFrame(relaySock, relayIn, 5000);
+            } catch (SocketTimeoutException e) {
+                // 沿用原行為：沒收到註冊回應也繼續（relay 會在 tcp_tunnel_open 時回錯誤）
+            }
 
             // Request TCP tunnel to server (once, for the whole session)
             JSONObject tunnelReq = new JSONObject();
@@ -236,67 +235,104 @@ public class RelayTcpTunnel extends Thread {
 
                 while (!mStop && !tunnelClosed && !localClient.isClosed()) {
                     boolean activity = false;
+                    boolean localGone = false;
 
                     // Local -> Relay: read from local client (short timeout)
+                    // §REVIEW-1103：本機端的 reset／broken pipe 只結束這一條本機連線、回去 accept 下一條，
+                    // 不再讓 IOException 跳到最外層把整個 tunnel 收掉（之後 SETUP／PLAY 會連不上）。
+                    // relay 端寫入失敗才是真的 tunnel 斷了，仍然往外丟。
+                    int n = 0;
                     try {
                         localClient.setSoTimeout(50);
-                        int n = localIn.read(localBuf);
-                        if (n > 0) {
-                            String encoded = Base64.encodeToString(localBuf, 0, n, Base64.NO_WRAP);
-                            JSONObject dataMsg = new JSONObject();
-                            dataMsg.put("type", "tcp_tunnel_data");
-                            dataMsg.put("tunnel_id", tunnelUuid);
-                            dataMsg.put("target_uuid", mServerUuid);
-                            dataMsg.put("data", encoded);
-                            relayOut.write(wsFrameMasked(dataMsg.toString().getBytes("UTF-8")));
-                            relayOut.flush();
-                            activity = true;
-                            Log.i(TAG, "#" + connectionCount + " Local->Relay: " + n + " bytes");
-                        } else if (n < 0) {
-                            // Local client disconnected
-                            Log.i(TAG, "#" + connectionCount + " Local client disconnected");
-                            break;
+                        n = localIn.read(localBuf);
+                        if (n < 0) {
+                            localGone = true;
                         }
                     } catch (SocketTimeoutException e) {
                         // No data from local client yet, that's fine
+                        n = 0;
+                    } catch (IOException e) {
+                        Log.i(TAG, "#" + connectionCount + " Local read error: " + e.getMessage());
+                        localGone = true;
+                        n = 0;
+                    }
+                    if (n > 0) {
+                        String encoded = Base64.encodeToString(localBuf, 0, n, Base64.NO_WRAP);
+                        JSONObject dataMsg = new JSONObject();
+                        dataMsg.put("type", "tcp_tunnel_data");
+                        dataMsg.put("tunnel_id", tunnelUuid);
+                        dataMsg.put("target_uuid", mServerUuid);
+                        dataMsg.put("data", encoded);
+                        relayOut.write(wsFrameMasked(dataMsg.toString().getBytes("UTF-8")));
+                        relayOut.flush();
+                        activity = true;
+                        Log.i(TAG, "#" + connectionCount + " Local->Relay: " + n + " bytes");
+                    }
+                    if (localGone) {
+                        // Local client disconnected
+                        Log.i(TAG, "#" + connectionCount + " Local client disconnected");
+                        break;
                     }
 
                     // Relay -> Local: read WS frames from relay
+                    // §REVIEW-1103：wsReadFrame 只在「一個位元組都還沒讀」時才算逾時；讀到 frame 開頭後會用長逾時
+                    // 讀完整個 frame，不會再丟掉半個 frame 造成錯位。relay 關閉（EOF／close frame）丟 EOFException
+                    // 結束 tunnel，不再空轉到 RTSP 逾時。
+                    String wsData = null;
                     try {
-                        relaySock.setSoTimeout(100);
-                        String wsData = wsRead(relayIn);
-                        if (wsData != null && !wsData.isEmpty()) {
-                            JSONObject obj = new JSONObject(wsData);
-                            String msgType = obj.optString("type", "");
+                        wsData = wsReadFrame(relaySock, relayIn, 100);
+                    } catch (SocketTimeoutException e) {
+                        // No data from relay yet
+                    }
+                    JSONObject obj = null;
+                    if (wsData != null && !wsData.isEmpty()) {
+                        try {
+                            obj = new JSONObject(wsData);
+                        } catch (JSONException e) {
+                            // §REVIEW-1103：壞掉的訊息只丟棄這一則，不結束 tunnel
+                            Log.w(TAG, "#" + connectionCount + " Ignoring malformed relay message");
+                        }
+                    }
+                    if (obj != null) {
+                        String msgType = obj.optString("type", "");
 
-                            if ("tcp_tunnel_data".equals(msgType)) {
-                                byte[] decoded = Base64.decode(
-                                        obj.optString("data", ""), Base64.NO_WRAP);
-                                localOut.write(decoded);
-                                localOut.flush();
+                        if ("tcp_tunnel_data".equals(msgType)) {
+                            byte[] decoded;
+                            try {
+                                decoded = Base64.decode(obj.optString("data", ""), Base64.NO_WRAP);
+                            } catch (IllegalArgumentException e) {
+                                Log.w(TAG, "#" + connectionCount + " Ignoring bad tunnel data");
+                                decoded = null;
+                            }
+                            if (decoded != null) {
+                                try {
+                                    localOut.write(decoded);
+                                    localOut.flush();
+                                } catch (IOException e) {
+                                    Log.i(TAG, "#" + connectionCount + " Local write error: " + e.getMessage());
+                                    break;
+                                }
                                 activity = true;
                                 Log.i(TAG, "#" + connectionCount + " Relay->Local: "
                                         + decoded.length + " bytes");
-
-                            } else if ("tcp_tunnel_closed".equals(msgType)) {
-                                // Server closed TCP -- normal for per-request RTSP
-                                Log.i(TAG, "#" + connectionCount
-                                        + " Server closed TCP (normal per-request close)");
-                                tunnelClosed = true;
-
-                            } else if ("ping".equals(msgType)) {
-                                JSONObject pong = new JSONObject();
-                                pong.put("type", "pong");
-                                relayOut.write(wsFrameMasked(
-                                        pong.toString().getBytes("UTF-8")));
-                                relayOut.flush();
-                            } else {
-                                Log.i(TAG, "#" + connectionCount + " Got msg: "
-                                        + msgType + " (ignored)");
                             }
+
+                        } else if ("tcp_tunnel_closed".equals(msgType)) {
+                            // Server closed TCP -- normal for per-request RTSP
+                            Log.i(TAG, "#" + connectionCount
+                                    + " Server closed TCP (normal per-request close)");
+                            tunnelClosed = true;
+
+                        } else if ("ping".equals(msgType)) {
+                            JSONObject pong = new JSONObject();
+                            pong.put("type", "pong");
+                            relayOut.write(wsFrameMasked(
+                                    pong.toString().getBytes("UTF-8")));
+                            relayOut.flush();
+                        } else {
+                            Log.i(TAG, "#" + connectionCount + " Got msg: "
+                                    + msgType + " (ignored)");
                         }
-                    } catch (SocketTimeoutException e) {
-                        // No data from relay yet
                     }
 
                     if (!activity && !tunnelClosed) {
@@ -320,6 +356,7 @@ public class RelayTcpTunnel extends Thread {
                 Log.w(TAG, "Tunnel error: " + e.getMessage());
             }
         } finally {
+            mDead = true;
             closeQuietly(relaySock);
             closeQuietly(serverSock);
         }
@@ -368,33 +405,70 @@ public class RelayTcpTunnel extends Thread {
         return frame;
     }
 
-    private static String wsRead(InputStream in) {
-        try {
-            byte[] hdr = readExact(in, 2);
-            if (hdr == null) return null;
+    /** 讀到 frame 開頭之後，讀完剩下部分的逾時。 */
+    private static final int FRAME_TIMEOUT_MS = 10000;
+    private static final int MAX_FRAME_LEN = 1048576;
 
-            int len = hdr[1] & 0x7F;
+    /**
+     * §REVIEW-1103：讀一個 WebSocket frame。
+     * - pollMs 內一個位元組都沒有 → 丟 SocketTimeoutException（沒有讀走任何資料，下次可以安全重試）。
+     * - 讀到第一個位元組後改用 FRAME_TIMEOUT_MS 讀完整個 frame；原本 100 ms 逾時會丟掉讀到一半的 frame，
+     *   下一次把 payload 中段當成 header 而錯位。讀到一半才逾時代表 relay 卡住，丟 IOException 結束 tunnel。
+     * - relay 關閉（EOF 或 close frame）丟 EOFException；原本 EOF 與逾時都回 null，tunnel 會空轉到 RTSP 逾時。
+     * - 長度用 long 解析（原本 int 會截斷）。
+     * @return text frame 的內容；其他控制／二進位 frame 回 ""。
+     */
+    private static String wsReadFrame(Socket sock, InputStream in, int pollMs) throws IOException {
+        sock.setSoTimeout(pollMs);
+        int b0 = in.read();
+        if (b0 < 0) {
+            throw new EOFException("relay connection closed");
+        }
+        sock.setSoTimeout(FRAME_TIMEOUT_MS);
+        try {
+            int b1 = in.read();
+            if (b1 < 0) {
+                throw new EOFException("relay connection closed mid-frame");
+            }
+            long len = b1 & 0x7F;
             if (len == 126) {
                 byte[] ext = readExact(in, 2);
-                if (ext == null) return null;
+                if (ext == null) throw new EOFException("relay connection closed mid-frame");
                 len = ((ext[0] & 0xFF) << 8) | (ext[1] & 0xFF);
             } else if (len == 127) {
                 byte[] ext = readExact(in, 8);
-                if (ext == null) return null;
+                if (ext == null) throw new EOFException("relay connection closed mid-frame");
                 len = 0;
                 for (int i = 0; i < 8; i++) {
                     len = (len << 8) | (ext[i] & 0xFF);
                 }
             }
+            if (len < 0 || len > MAX_FRAME_LEN) {
+                throw new IOException("relay frame too large: " + len);
+            }
+            byte[] maskKey = null;
+            if ((b1 & 0x80) != 0) {
+                maskKey = readExact(in, 4);
+                if (maskKey == null) throw new EOFException("relay connection closed mid-frame");
+            }
+            byte[] data = len == 0 ? new byte[0] : readExact(in, (int) len);
+            if (data == null) throw new EOFException("relay connection closed mid-frame");
+            if (maskKey != null) {
+                for (int i = 0; i < data.length; i++) {
+                    data[i] ^= maskKey[i % 4];
+                }
+            }
 
-            if (len <= 0 || len > 1048576) return null;
-
-            byte[] data = readExact(in, len);
-            if (data == null) return null;
-
+            int opcode = b0 & 0x0F;
+            if (opcode == 0x8) {
+                throw new EOFException("relay sent close frame");
+            }
+            if (opcode != 0x1 && opcode != 0x0) {
+                return "";
+            }
             return new String(data, "UTF-8");
-        } catch (Exception e) {
-            return null;
+        } catch (SocketTimeoutException e) {
+            throw new IOException("relay frame timed out mid-frame", e);
         }
     }
 
@@ -467,50 +541,30 @@ public class RelayTcpTunnel extends Thread {
     /**
      * Drain any pending WS messages from the relay while waiting for accept().
      * Responds to pings to keep the connection alive.
+     * §REVIEW-1103：relay 斷線（EOF／錯位／寫入失敗）往外丟 IOException 結束 tunnel；只有逾時與壞 JSON 忽略。
      */
     private void drainRelayMessages(Socket relaySock, InputStream relayIn,
-                                    OutputStream relayOut) {
+                                    OutputStream relayOut) throws IOException {
+        String wsData;
         try {
-            relaySock.setSoTimeout(50);
-            String wsData = wsRead(relayIn);
-            if (wsData != null && !wsData.isEmpty()) {
-                JSONObject obj = new JSONObject(wsData);
-                String msgType = obj.optString("type", "");
-                if ("ping".equals(msgType)) {
-                    JSONObject pong = new JSONObject();
-                    pong.put("type", "pong");
-                    relayOut.write(wsFrameMasked(pong.toString().getBytes("UTF-8")));
-                    relayOut.flush();
-                }
-            }
+            wsData = wsReadFrame(relaySock, relayIn, 50);
         } catch (SocketTimeoutException e) {
-            // Expected when no data available
-        } catch (Exception e) {
-            // Ignore drain errors
+            return;  // Expected when no data available
         }
-    }
-
-    private static SSLSocketFactory createTrustAllFactory() {
+        if (wsData == null || wsData.isEmpty()) {
+            return;
+        }
         try {
-            TrustManager[] trustAll = new TrustManager[]{
-                    new X509TrustManager() {
-                        @Override
-                        public void checkClientTrusted(X509Certificate[] chain, String authType) {}
-
-                        @Override
-                        public void checkServerTrusted(X509Certificate[] chain, String authType) {}
-
-                        @Override
-                        public X509Certificate[] getAcceptedIssuers() {
-                            return new X509Certificate[0];
-                        }
-                    }
-            };
-            SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, trustAll, new SecureRandom());
-            return ctx.getSocketFactory();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create TrustAll SSLContext", e);
+            JSONObject obj = new JSONObject(wsData);
+            String msgType = obj.optString("type", "");
+            if ("ping".equals(msgType)) {
+                JSONObject pong = new JSONObject();
+                pong.put("type", "pong");
+                relayOut.write(wsFrameMasked(pong.toString().getBytes("UTF-8")));
+                relayOut.flush();
+            }
+        } catch (JSONException e) {
+            // Ignore malformed message
         }
     }
 

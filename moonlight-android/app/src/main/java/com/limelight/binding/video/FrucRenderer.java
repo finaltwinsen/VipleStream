@@ -661,7 +661,8 @@ public class FrucRenderer implements IFrucBackend {
         int mvW = width / BLOCK_SIZE;
         int mvH = height / BLOCK_SIZE;
         GLES31.glDispatchCompute((mvW + 7) / 8, (mvH + 7) / 8, 1);
-        GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        // §REVIEW-1104：後續階段使用 sampler 讀取紋理，需加入 GL_TEXTURE_FETCH_BARRIER_BIT 同步
+        GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GLES31.GL_TEXTURE_FETCH_BARRIER_BIT);
     }
 
     // VipleStream v1.1.136: 3x3 median filter on the MV field.
@@ -684,7 +685,8 @@ public class FrucRenderer implements IFrucBackend {
         GLES31.glUniform1ui(mvmU_FrameH, mvH);
 
         GLES31.glDispatchCompute((mvW + 7) / 8, (mvH + 7) / 8, 1);
-        GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        // §REVIEW-1104：後續階段使用 sampler 讀取紋理，需加入 GL_TEXTURE_FETCH_BARRIER_BIT 同步
+        GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GLES31.GL_TEXTURE_FETCH_BARRIER_BIT);
     }
 
     private void runWarp() {
@@ -706,7 +708,8 @@ public class FrucRenderer implements IFrucBackend {
         GLES31.glUniform1f(warpU_BlendFactor[qualityLevel], 0.5f);
 
         GLES31.glDispatchCompute((width + 7) / 8, (height + 7) / 8, 1);
-        GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        // §REVIEW-1104：後續階段使用 sampler 讀取紋理，需加入 GL_TEXTURE_FETCH_BARRIER_BIT 同步
+        GLES31.glMemoryBarrier(GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GLES31.GL_TEXTURE_FETCH_BARRIER_BIT);
     }
 
     private void blitToScreen(int texId) {
@@ -753,6 +756,8 @@ public class FrucRenderer implements IFrucBackend {
 
     // VipleStream v17: copy current MV field to previous for temporal smoothing
     private void copyMVTexture() {
+        // §REVIEW-1104：以 FBO blit 讀取 compute shader 寫入之紋理前需插入 GL_FRAMEBUFFER_BARRIER_BIT
+        GLES31.glMemoryBarrier(GLES31.GL_FRAMEBUFFER_BARRIER_BIT);
         int mvW = width / BLOCK_SIZE;
         int mvH = height / BLOCK_SIZE;
 
@@ -770,6 +775,11 @@ public class FrucRenderer implements IFrucBackend {
     @Override
     public void destroy() {
         logToFile("destroy: frames=" + frameCount + " interpolated=" + interpolatedCount);
+        if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY &&
+            eglContext != null && eglContext != EGL14.EGL_NO_CONTEXT &&
+            eglSurface != null && eglSurface != EGL14.EGL_NO_SURFACE) {
+            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext);
+        }
         // §B-DUMP-ANDROID: flush + tear down dump GL resources before we
         // tear down the EGL context they were allocated against.
         if (frucDump != null) {
@@ -781,6 +791,10 @@ public class FrucRenderer implements IFrucBackend {
         if (logWriter != null) { logWriter.close(); logWriter = null; }
         if (inputSurface != null) { inputSurface.release(); inputSurface = null; }
         if (surfaceTexture != null) { surfaceTexture.release(); surfaceTexture = null; }
+        // §REVIEW-1104：銷毀 EGL 資源前確保解除 EGL Context 與 Surface 綁定
+        if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
+        }
         if (eglSurface != null && eglSurface != EGL14.EGL_NO_SURFACE) {
             EGL14.eglDestroySurface(eglDisplay, eglSurface);
         }

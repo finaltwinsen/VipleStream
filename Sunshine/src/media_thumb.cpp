@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -374,27 +375,55 @@ namespace media_share {
 #if defined(_WIN32) || defined(__linux__)
     // 一次只做一張：頭盔一頁可能一口氣要幾十張，不要同時開幾十個解碼。鎖由工作執行緒自己拿，呼叫端逾時離開之後，
     // 那條執行緒還在做的期間下一張照樣排隊（不會疊起好幾個 ffmpeg）；排隊的數量有上限（處理程式卡死時不會一直累積執行緒）
-    static std::mutex serial;
-    static std::atomic<int> pending {0};
-    if (pending.fetch_add(1) >= k_max_pending) {
-      pending.fetch_sub(1);
+    // §REVIEW-1103：Windows 的 Shell 縮圖 API 可能永遠不返回，卡住的執行緒會一直拿著鎖、
+    // pending 累積到上限後所有縮圖都失敗到重啟服務。改成「一代」一把鎖＋一個計數：某一張做超過
+    // k_stuck_after 就放棄這一代（卡住的與排在它後面的執行緒自生自滅），換新一代繼續服務；
+    // 放棄的代數有上限，避免一直卡的檔案讓執行緒無限累積。
+    struct gen_t {
+      std::mutex serial;
+      std::atomic<int> pending {0};
+      std::atomic<std::int64_t> busy_since_ms {0};  // 0＝沒有正在做的
+    };
+    constexpr auto k_stuck_after = 3 * k_wait_timeout;
+    constexpr int k_max_abandoned = 3;
+    static std::mutex gen_mtx;
+    static std::shared_ptr<gen_t> current = std::make_shared<gen_t>();
+    static int abandoned = 0;
+    const auto now_ms = []() {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    std::shared_ptr<gen_t> gen;
+    {
+      std::lock_guard<std::mutex> lk(gen_mtx);
+      const auto since = current->busy_since_ms.load();
+      if (since != 0 && now_ms() - since > std::chrono::duration_cast<std::chrono::milliseconds>(k_stuck_after).count() && abandoned < k_max_abandoned) {
+        ++abandoned;
+        BOOST_LOG(warning) << "[VIPLE-THUMB] thumbnail worker stuck, abandoning it (" << abandoned << '/' << k_max_abandoned << ')';
+        current = std::make_shared<gen_t>();
+      }
+      gen = current;
+    }
+    if (gen->pending.fetch_add(1) >= k_max_pending) {
+      gen->pending.fetch_sub(1);
       *error = "too many thumbnail requests in progress";
       return false;
     }
     auto prom = std::make_shared<std::promise<thumb_result_t>>();
     auto fut = prom->get_future();
     // 在自己的執行緒做（Windows 要 STA；卡住時這條請求照樣在期限內回應，那條執行緒自己收尾）
-    std::thread([prom, path]() {
+    std::thread([prom, path, gen, now_ms]() {
       thumb_result_t r;
       {
-        std::lock_guard<std::mutex> lk(serial);
+        std::lock_guard<std::mutex> lk(gen->serial);
+        gen->busy_since_ms.store(now_ms());
   #ifdef _WIN32
         r = shell_thumbnail(path);
   #else
         r = linux_thumbnail(path);
   #endif
+        gen->busy_since_ms.store(0);
       }
-      pending.fetch_sub(1);
+      gen->pending.fetch_sub(1);
       prom->set_value(std::move(r));
     }).detach();
     if (fut.wait_for(k_wait_timeout) != std::future_status::ready) {

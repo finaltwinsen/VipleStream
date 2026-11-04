@@ -26,7 +26,9 @@ class ComputerModel : public QAbstractListModel
         ServerVersionRole,
         // §UI-MULTILINK-BADGE（2026-10-29）：host 的 /serverinfo 宣告了 VR 多連線（<VipleStreamVR> 帶
         // VIPLE_VR_SERVER_CAP_MULTILINK，server 的 vr_multilink 沒關才會帶）。PcView 在主機卡片上多一個「多連線」標籤
-        MultiLinkRole
+        MultiLinkRole,
+        // §REVIEW-1104：提供主機 UUID role，讓刪除與重新命名對話框確認時能依 UUID 重找列號
+        UuidRole
     };
 
 public:
@@ -43,6 +45,9 @@ public:
 
     // §UI-HIDE-SELF：主機頁的序號（濾掉這台電腦自己）換成 ComputerManager::getComputers() 的序號（AppModel 用那一份）
     Q_INVOKABLE int managerIndex(int computerIndex) const;
+
+    // §REVIEW-1104：依 UUID 查詢目前在主機頁列表中的列號，找不到回傳 -1
+    Q_INVOKABLE int indexForUuid(QString uuid) const;
 
     Q_INVOKABLE void deleteComputer(int computerIndex);
 

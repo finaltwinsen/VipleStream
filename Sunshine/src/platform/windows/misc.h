@@ -18,7 +18,12 @@
 
 namespace platf {
   void print_status(const std::string_view &prefix, HRESULT status);
-  HDESK syncThreadDesktop();
+  /**
+   * @brief 把目前執行緒切到 input desktop。
+   * @param name_out 非 nullptr 時填入 input desktop 名稱（例如 "Default"、"Winlogon"）。
+   * @note 回傳的 HDESK 已經關閉，只能拿來判斷成功與否（非 nullptr），不可再使用或拿來比對。
+   */
+  HDESK syncThreadDesktop(std::wstring *name_out = nullptr);
 
   // ── 使用者身分工具（M1b S1-13 的 V2 部分：只補宣告，實作一直在 misc.cpp）──────────
 

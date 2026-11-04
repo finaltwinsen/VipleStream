@@ -295,7 +295,7 @@ namespace crypto {
       // Calling with cipher == nullptr results in a parameter change
       // without requiring a reallocation of the internal cipher ctx.
       if (EVP_EncryptInit_ex(encrypt_ctx.get(), nullptr, nullptr, nullptr, iv->data()) != 1) {
-        return false;
+        return -1;  // §REVIEW-1103：原本 return false＝0，會被當成「成功、長度 0」
       }
 
       int final_outlen;

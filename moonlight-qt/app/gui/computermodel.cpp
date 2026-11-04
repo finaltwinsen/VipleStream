@@ -2,10 +2,14 @@
 
 #include <algorithm>
 
+#include <QHash>
 #include <QHostAddress>
 #include <QHostInfo>
+#include <QMutex>
 #include <QNetworkInterface>
+#include <QSharedPointer>
 #include <QThreadPool>
+#include <QWaitCondition>
 
 #include <Limelight.h>  // VipleVr.h：VIPLE_VR_SERVER_CAP_MULTILINK
 
@@ -23,34 +27,37 @@ void ComputerModel::initialize(ComputerManager* computerManager)
     m_Computers = visibleComputers();
 }
 
-// §UI-HIDE-SELF（2026-10-29）：這台電腦自己也跑著 server 時，區網探索會把它加進主機列表（使用者：「在筆電上
-// 開客戶端會看到筆電自己，這樣是不必要的」）。名稱等於本機名稱、或任一位址是本機網卡的位址，就當成自己不列出來。
-// 只影響主機頁：儲存的主機不刪，命令列直接指定位址串流照常可用
+// §UI-HIDE-SELF（2026-10-29）：這台電腦自己也跑著 server 時，區網探索會把它加進主機列表。
+// 只影響主機頁：儲存的主機不刪，命令列直接指定位址串流照常可用。
+// §REVIEW-1104：名稱相同、舊的區網位址或單一 loopback 不能單獨藏起整台；要名稱相同且目前連線的 activeAddress 是本機
 bool ComputerModel::isThisMachine(const NvComputer* computer)
 {
     static const QString s_LocalName = QHostInfo::localHostName();
-    if (!computer->name.isEmpty() && !s_LocalName.isEmpty() &&
-        computer->name.compare(s_LocalName, Qt::CaseInsensitive) == 0) {
+    QString name;
+    NvAddress active;
+    {
+        QReadLocker lock(&computer->lock);
+        name = computer->name;
+        active = computer->activeAddress;
+    }
+    if (name.isEmpty() || s_LocalName.isEmpty() ||
+            name.compare(s_LocalName, Qt::CaseInsensitive) != 0) {
+        return false;
+    }
+    if (active.isNull()) {
+        return false;
+    }
+    const QHostAddress host(active.address());
+    if (host.isNull()) {
+        return false;
+    }
+    if (host.isLoopback()) {
         return true;
     }
     const QList<QHostAddress> mine = QNetworkInterface::allAddresses();
-    // 公網位址（remote／stun）不比：同一個區網的每一台都共用它
-    for (const NvAddress* a : {&computer->localAddress, &computer->activeAddress, &computer->manualAddress,
-                               &computer->ipv6Address, &computer->vpnAddress}) {
-        if (a->isNull()) {
-            continue;
-        }
-        const QHostAddress host(a->address());
-        if (host.isNull()) {
-            continue;
-        }
-        if (host.isLoopback()) {
+    for (const QHostAddress& m : mine) {
+        if (m.isEqual(host, QHostAddress::TolerantConversion)) {
             return true;
-        }
-        for (const QHostAddress& m : mine) {
-            if (m.isEqual(host, QHostAddress::TolerantConversion)) {
-                return true;
-            }
         }
     }
     return false;
@@ -62,6 +69,25 @@ int ComputerModel::managerIndex(int computerIndex) const
         return -1;
     }
     return m_ComputerManager->getComputers().indexOf(m_Computers[computerIndex]);
+}
+
+// §REVIEW-1104：依 UUID 反查目前列表中的列號，避免對話框開啟期間清單重排導致刪錯或改錯主機
+int ComputerModel::indexForUuid(QString uuid) const
+{
+    if (uuid.isEmpty()) {
+        return -1;
+    }
+    for (int i = 0; i < m_Computers.count(); ++i) {
+        NvComputer* c = m_Computers[i];
+        if (c == nullptr) {
+            continue;
+        }
+        QReadLocker lock(&c->lock);
+        if (c->uuid == uuid) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 QVector<NvComputer*> ComputerModel::visibleComputers() const
@@ -106,6 +132,9 @@ QVariant ComputerModel::data(const QModelIndex& index, int role) const
         return computer->vipleStreamVersion;
     case MultiLinkRole:
         return (computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_MULTILINK) != 0;
+    // §REVIEW-1104：回傳主機 UUID 供 QML 對話框記錄目標主機
+    case UuidRole:
+        return computer->uuid;
     case DetailsRole: {
         QString state, pairState;
 
@@ -206,6 +235,8 @@ QHash<int, QByteArray> ComputerModel::roleNames() const
     names[DetailsRole] = "details";
     names[ServerVersionRole] = "serverVersion";
     names[MultiLinkRole] = "multiLink";  // §UI-MULTILINK-BADGE
+    // §REVIEW-1104：註冊 uuid role 名稱供 PcView.qml 讀取 model.uuid
+    names[UuidRole] = "uuid";
 
     return names;
 }
@@ -230,14 +261,24 @@ Session* ComputerModel::createSessionForCurrentGame(int computerIndex)
     return nullptr;
 }
 
+static void waitForComputerWakes(const NvComputer* computer);
+
 void ComputerModel::deleteComputer(int computerIndex)
 {
-    Q_ASSERT(computerIndex < m_Computers.count());
+    // §REVIEW-1104：release 會拿掉 Q_ASSERT，列號越界不能拿去刪
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) {
+        return;
+    }
+
+    NvComputer* computer = m_Computers[computerIndex];
+
+    // §REVIEW-1104：這台的 wake 還握著裸指標，刪除前先等它跑完，避免和 delete 並行
+    waitForComputerWakes(computer);
 
     beginRemoveRows(QModelIndex(), computerIndex, computerIndex);
 
     // m_Computer[computerIndex] will be deleted by this call
-    m_ComputerManager->deleteHost(m_Computers[computerIndex]);
+    m_ComputerManager->deleteHost(computer);
 
     // Remove the now invalid item
     m_Computers.removeAt(computerIndex);
@@ -245,19 +286,70 @@ void ComputerModel::deleteComputer(int computerIndex)
     endRemoveRows();
 }
 
+struct WakeInflight {
+    int count = 0;
+    QMutex mutex;
+    QWaitCondition done;
+};
+
+static QMutex s_WakeInflightLock;
+static QHash<const NvComputer*, QSharedPointer<WakeInflight>> s_WakeInflight;
+
+static QSharedPointer<WakeInflight> beginComputerWake(NvComputer* computer)
+{
+    QMutexLocker mapLock(&s_WakeInflightLock);
+    QSharedPointer<WakeInflight>& slot = s_WakeInflight[computer];
+    if (slot.isNull()) {
+        slot = QSharedPointer<WakeInflight>::create();
+    }
+    QSharedPointer<WakeInflight> ticket = slot;
+    QMutexLocker ticketLock(&ticket->mutex);
+    ticket->count++;
+    return ticket;
+}
+
+static void endComputerWake(const QSharedPointer<WakeInflight>& ticket)
+{
+    QMutexLocker ticketLock(&ticket->mutex);
+    ticket->count--;
+    if (ticket->count == 0) {
+        ticket->done.wakeAll();
+    }
+}
+
+static void waitForComputerWakes(const NvComputer* computer)
+{
+    QSharedPointer<WakeInflight> ticket;
+    {
+        QMutexLocker mapLock(&s_WakeInflightLock);
+        ticket = s_WakeInflight.take(computer);
+    }
+    if (ticket.isNull()) {
+        return;
+    }
+    QMutexLocker ticketLock(&ticket->mutex);
+    while (ticket->count > 0) {
+        ticket->done.wait(&ticket->mutex);
+    }
+}
+
 class DeferredWakeHostTask : public QRunnable
 {
 public:
-    DeferredWakeHostTask(NvComputer* computer)
-        : m_Computer(computer) {}
+    DeferredWakeHostTask(NvComputer* computer, QSharedPointer<WakeInflight> ticket)
+        : m_Computer(computer),
+          m_Ticket(ticket) {}
 
     void run()
     {
+        // §REVIEW-1104：wake 跟刪除會在同一個 thread pool 並行；跑完才放掉計數，刪除那邊才繼續
         m_Computer->wake();
+        endComputerWake(m_Ticket);
     }
 
 private:
     NvComputer* m_Computer;
+    QSharedPointer<WakeInflight> m_Ticket;
 };
 
 void ComputerModel::wakeComputer(int computerIndex)
@@ -266,7 +358,8 @@ void ComputerModel::wakeComputer(int computerIndex)
 
     NvComputer* computer = m_Computers[computerIndex];
 
-    DeferredWakeHostTask* wakeTask = new DeferredWakeHostTask(computer);
+    // §REVIEW-1104：wake 任務帶計數，刪除這台前才等得到它結束
+    DeferredWakeHostTask* wakeTask = new DeferredWakeHostTask(computer, beginComputerWake(computer));
     QThreadPool::globalInstance()->start(wakeTask);
 
     // VipleStream §K.X — also poke the polling thread for this host so it
@@ -288,7 +381,8 @@ void ComputerModel::wakeAllOfflineHosts()
         QReadLocker lock(&computer->lock);
         if (computer->state != NvComputer::CS_ONLINE
                 && !computer->macAddress.isEmpty()) {
-            DeferredWakeHostTask* wakeTask = new DeferredWakeHostTask(computer);
+            // §REVIEW-1104：同上，批次喚醒也要算進同一份計數
+            DeferredWakeHostTask* wakeTask = new DeferredWakeHostTask(computer, beginComputerWake(computer));
             QThreadPool::globalInstance()->start(wakeTask);
             if (m_ComputerManager) {
                 m_ComputerManager->notifyExplicitWake(computer->uuid);
@@ -299,7 +393,10 @@ void ComputerModel::wakeAllOfflineHosts()
 
 void ComputerModel::renameComputer(int computerIndex, QString name)
 {
-    Q_ASSERT(computerIndex < m_Computers.count());
+    // §REVIEW-1104：release 會拿掉 Q_ASSERT，列號越界不能拿去改名
+    if (computerIndex < 0 || computerIndex >= m_Computers.count()) {
+        return;
+    }
 
     m_ComputerManager->renameHost(m_Computers[computerIndex], name);
 }

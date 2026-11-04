@@ -20,6 +20,11 @@
  * --timeout N     最多顯示 N 秒後強制退出（default 10）
  * --target-pid P  如果指定且該 PID 出現 visible 主視窗，立刻退出
  *                 （未指定時純 timeout）
+ * --watch-new-window
+ *                 §REVIEW-1103：steam://rungameid 啟動拿不到遊戲 PID，server 改傳這個旗標——
+ *                 出現一個「splash 開始時不存在」的大型頂層視窗（不屬於桌面殼層、Steam 本身、自己），
+ *                 連續存在約 0.5 秒就退出。用意是遊戲（或要使用者操作的啟動器）一出來就讓開；
+ *                 誤判的最壞情況只是提早露出桌面，跟沒有黑幕時一樣。
  *
  * 僅 Windows。C++17 + 純 Win32 GUI API。Timer/sleep/string 都走 C++
  * stdlib（chrono/thread/wstring_view）以避開 MinGW + `-static` 下的
@@ -39,6 +44,7 @@
   #include <string>
   #include <string_view>
   #include <thread>
+  #include <vector>
 
 namespace {
 
@@ -97,7 +103,94 @@ namespace {
     DWORD              target_pid  = 0;        // 0 = no process filter (pure timeout)
     clock_t_::time_point start;
     std::chrono::milliseconds timeout {10000};
+    // §REVIEW-1103：--watch-new-window 模式
+    bool watch_new = false;
+    std::vector<HWND> initial;  ///< splash 開始時就已經存在的大型視窗
+    HWND candidate = nullptr;  ///< 這一輪找到的新視窗
+    HWND pending = nullptr;  ///< 上一輪看到的新視窗（要連續兩輪同一個才算數）
+    clock_t_::time_point pending_since;
   };
+
+  bool is_large_top_level(HWND hwnd) {
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr) {
+      return false;
+    }
+    if ((GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) {
+      return false;
+    }
+    RECT r;
+    if (!GetWindowRect(hwnd, &r)) {
+      return false;
+    }
+    // 至少蓋住主螢幕一半的寬與高（濾掉 Steam「準備啟動」之類的小對話框）
+    return (r.right - r.left) >= GetSystemMetrics(SM_CXSCREEN) / 2 && (r.bottom - r.top) >= GetSystemMetrics(SM_CYSCREEN) / 2;
+  }
+
+  /// 視窗擁有者是不是桌面殼層／Steam 自己（這些視窗出現不代表遊戲好了）
+  bool is_shell_or_steam(HWND hwnd) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0 || pid == GetCurrentProcessId()) {
+      return true;
+    }
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) {
+      return true;  // 查不到就不當成遊戲
+    }
+    wchar_t buf[MAX_PATH] {};
+    DWORD len = MAX_PATH;
+    const BOOL ok = QueryFullProcessImageNameW(h, 0, buf, &len);
+    CloseHandle(h);
+    if (!ok) {
+      return true;
+    }
+    std::wstring name {buf, len};
+    const auto slash = name.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+      name = name.substr(slash + 1);
+    }
+    for (auto &c : name) {
+      if (c >= L'A' && c <= L'Z') {
+        c = static_cast<wchar_t>(c - L'A' + L'a');
+      }
+    }
+    static constexpr std::wstring_view k_ignore[] = {
+      L"explorer.exe", L"steam.exe", L"steamwebhelper.exe", L"viple-splash.exe", L"applicationframehost.exe",
+      L"shellexperiencehost.exe", L"startmenuexperiencehost.exe", L"searchhost.exe", L"textinputhost.exe",
+      L"lockapp.exe", L"viplestream-server.exe", L"sunshine.exe",
+    };
+    for (const auto ign : k_ignore) {
+      if (name == ign) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  BOOL CALLBACK snapshot_wnd_proc(HWND hwnd, LPARAM lparam) {
+    auto *st = reinterpret_cast<SplashState *>(lparam);
+    if (is_large_top_level(hwnd)) {
+      st->initial.push_back(hwnd);
+    }
+    return TRUE;
+  }
+
+  BOOL CALLBACK new_wnd_proc(HWND hwnd, LPARAM lparam) {
+    auto *st = reinterpret_cast<SplashState *>(lparam);
+    if (!is_large_top_level(hwnd)) {
+      return TRUE;
+    }
+    for (const auto h : st->initial) {
+      if (h == hwnd) {
+        return TRUE;
+      }
+    }
+    if (is_shell_or_steam(hwnd)) {
+      return TRUE;
+    }
+    st->candidate = hwnd;
+    return FALSE;
+  }
 
   LRESULT CALLBACK splash_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -169,10 +262,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int) {
 
   if (auto v = find_arg(cmdline, L"--timeout"); !v.empty()) {
     long n = parse_leading_int(v);
-    if (n > 0 && n < 120) {
+    if (n > 0 && n <= 120) {  // §REVIEW-1103（B038-3）：上限 120 秒含 120
       st.timeout = std::chrono::milliseconds {n * 1000};
     }
   }
+  st.watch_new = cmdline.find(L"--watch-new-window") != std::wstring_view::npos;
   if (auto v = find_arg(cmdline, L"--target-pid"); !v.empty()) {
     long long n = parse_leading_int64(v);
     if (n > 0) {
@@ -217,6 +311,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int) {
   }
   ShowWindow(hwnd, SW_SHOWNOACTIVATE);
   UpdateWindow(hwnd);
+  if (st.watch_new) {
+    EnumWindows(snapshot_wnd_proc, reinterpret_cast<LPARAM>(&st));
+  }
 
   // Main loop: pump messages, periodically check target window status
   // and timeout. 50ms polling is plenty — no user input goes through
@@ -246,11 +343,25 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmdLine, int) {
         std::this_thread::sleep_for(std::chrono::milliseconds {250});
         break;
       }
+    } else if (st.watch_new) {
+      st.candidate = nullptr;
+      EnumWindows(new_wnd_proc, reinterpret_cast<LPARAM>(&st));
+      if (!st.candidate) {
+        st.pending = nullptr;
+      } else if (st.candidate != st.pending) {
+        st.pending = st.candidate;
+        st.pending_since = clock_t_::now();
+      } else if (clock_t_::now() - st.pending_since >= std::chrono::milliseconds {500}) {
+        // 新視窗連續存在 0.5 秒：再等一下讓它畫出第一張，避免掀開時看到初始化中的空白
+        std::this_thread::sleep_for(std::chrono::milliseconds {250});
+        break;
+      }
     }
 
     // 有訊息就醒、沒有就等到下一次要檢查的時間：沒有 target_pid 時一路睡到逾時，不再每 50 ms 空轉（opt B037）
     const auto remain_ms = std::chrono::duration_cast<std::chrono::milliseconds>(st.timeout - elapsed).count();
-    const long long wait_ms = st.target_pid != 0 ? (remain_ms < 50 ? remain_ms : 50) : remain_ms;
+    const bool polling = st.target_pid != 0 || st.watch_new;
+    const long long wait_ms = polling ? (remain_ms < 50 ? remain_ms : 50) : remain_ms;
     MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(wait_ms > 0 ? wait_ms : 0), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
   }
 

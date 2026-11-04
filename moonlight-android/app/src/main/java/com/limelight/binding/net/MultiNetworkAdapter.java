@@ -68,8 +68,11 @@ public class MultiNetworkAdapter {
     }
 
     private final ConnectivityManager connectivityManager;
+    // §REVIEW-1104：記錄 Network 與介面名稱對應，避免 onLost 時取不到 LinkProperties 變成 unknown
+    private final java.util.Map<Network, String> networkNames = new java.util.concurrent.ConcurrentHashMap<>();
     private ConnectivityManager.NetworkCallback networkCallback;
-    private NetworkChangeListener listener;
+    // §REVIEW-1104：宣告為 volatile 確保跨執行緒能即時看見更新
+    private volatile NetworkChangeListener listener;
 
     public MultiNetworkAdapter(Context context) {
         connectivityManager = (ConnectivityManager)
@@ -126,7 +129,8 @@ public class MultiNetworkAdapter {
             InetAddress addr = null;
             for (LinkAddress la : addresses) {
                 InetAddress a = la.getAddress();
-                if (!a.isLoopbackAddress()) {
+                // §REVIEW-1104：過濾 link-local 位址，避免 IPv6 fe80:: 等無法路由的位址被選為本機連線位址
+                if (!a.isLoopbackAddress() && !a.isLinkLocalAddress()) {
                     addr = a;
                     break;
                 }
@@ -176,6 +180,11 @@ public class MultiNetworkAdapter {
 
                 String name = props.getInterfaceName();
                 if (name == null) name = "unknown";
+                // §REVIEW-1104：記錄 Network 對應的介面名稱，供 onLost 查表避免回傳 unknown
+                networkNames.put(network, name);
+
+
+
                 boolean metered = !caps.hasCapability(
                         NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
                 int bandwidth = caps.getLinkDownstreamBandwidthKbps();
@@ -184,28 +193,45 @@ public class MultiNetworkAdapter {
                 InetAddress addr = null;
                 for (LinkAddress la : addresses) {
                     InetAddress a = la.getAddress();
-                    if (!a.isLoopbackAddress()) {
+                    // §REVIEW-1104：過濾 link-local 位址，避免 IPv6 fe80:: 等無法路由的位址被選為本機連線位址
+                    if (!a.isLoopbackAddress() && !a.isLinkLocalAddress()) {
                         addr = a;
                         break;
                     }
                 }
 
-                if (addr != null && MultiNetworkAdapter.this.listener != null) {
+                // §REVIEW-1104：複製 listener 至區域變數，避免 check-then-act 期間被 stopMonitoring 清為 null 導致 NPE
+                final NetworkChangeListener currentListener = MultiNetworkAdapter.this.listener;
+                if (addr != null && currentListener != null) {
                     NetworkInfo info = new NetworkInfo(name, transport, addr,
                             metered, bandwidth, network);
                     Log.i(TAG, "Network available: " + name + " (" +
                             info.transportName() + ")");
-                    MultiNetworkAdapter.this.listener.onNetworkAvailable(info);
+                    currentListener.onNetworkAvailable(info);
+                }
+            }
+
+            @Override
+            // §REVIEW-1104：監聽 LinkProperties 變更並更新介面名稱對照表
+            public void onLinkPropertiesChanged(Network network, LinkProperties props) {
+                if (props != null && props.getInterfaceName() != null) {
+                    networkNames.put(network, props.getInterfaceName());
                 }
             }
 
             @Override
             public void onLost(Network network) {
                 LinkProperties props = connectivityManager.getLinkProperties(network);
-                String name = (props != null) ? props.getInterfaceName() : "unknown";
+                // §REVIEW-1104：優先從 networkNames 查表取得介面名稱，避免 onLost 時 getLinkProperties 為 null 造成名稱遺失為 unknown
+                String name = networkNames.remove(network);
+                if (name == null) {
+                    name = (props != null) ? props.getInterfaceName() : "unknown";
+                }
                 Log.i(TAG, "Network lost: " + name);
-                if (MultiNetworkAdapter.this.listener != null) {
-                    MultiNetworkAdapter.this.listener.onNetworkLost(
+                // §REVIEW-1104：複製 listener 至區域變數，避免 check-then-act 期間被 stopMonitoring 清為 null 導致 NPE
+                final NetworkChangeListener currentListener = MultiNetworkAdapter.this.listener;
+                if (currentListener != null) {
+                    currentListener.onNetworkLost(
                             name != null ? name : "unknown");
                 }
             }
@@ -226,6 +252,8 @@ public class MultiNetworkAdapter {
                 // Already unregistered
             }
             networkCallback = null;
+            // §REVIEW-1104：清理網路名稱對照快取
+            networkNames.clear();
             Log.i(TAG, "Network monitoring stopped");
         }
         listener = null;

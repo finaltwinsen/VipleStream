@@ -98,6 +98,10 @@ Page {
     }
 
     function goBack() {
+        // §REVIEW-1104：Steam 帳號切換的輪詢還在 GUI 執行緒時，返回會把 AppView 拆掉
+        if (stackView.steamSwitchInProgress) {
+            return
+        }
         if (window.clearOnBack) {
             // Pop all items except the first one
             stackView.pop(null)
@@ -110,6 +114,8 @@ Page {
 
     StackView {
         id: stackView
+        // §REVIEW-1104：AppView 切換 Steam 帳號時設這旗標，goBack 才擋得住返回（屬性放這一層，其他頁沒有這個欄位）
+        property bool steamSwitchInProgress : false
         anchors.fill: parent
         focus: true
 
@@ -391,7 +397,8 @@ Page {
 
                 ToolTip.delay: 1000
                 ToolTip.timeout: 3000
-                ToolTip.visible: hovered || visible
+                // §REVIEW-1104：visible 是按鈕自己的可見性，更新鈕一出現提示就會自己打開
+                ToolTip.visible: hovered || visualFocus
 
                 // Invisible until we get a callback notifying us that
                 // an update is available
@@ -521,7 +528,8 @@ Page {
         standardButtons: Dialog.Ok | Dialog.Cancel
         text: qsTr("This version of VipleStream isn't optimized for your PC. Please download the '%1' version of VipleStream for the best streaming performance.").arg(SystemProperties.friendlyNativeArchName)
         onAccepted: {
-            Qt.openUrlExternally("https://github.com/moonlight-stream/moonlight-qt/releases");
+            // §REVIEW-1104：對話框要使用者下載對應架構的 VipleStream，卻開了上游 Moonlight 的發布頁
+            Qt.openUrlExternally("https://github.com/finaltwinsen/VipleStream/releases");
         }
         onClosed: modeDialog.refocusIfOpen()
     }
@@ -770,6 +778,55 @@ Page {
                 color: "#C8CBB8"
                 text: qsTr("The headset switches to the stream when it is ready. This can take a few seconds.") + "\n\n" +
                       qsTr("Tip:") + " " + qsTr("To end the stream, hold A+X+trigger+grip on the VR controller")
+            }
+        }
+    }
+
+    // §VR-PLAYER：影片模式開片到第一張影像出來之前（網站影片要先經 yt-dlp 解析，約 2～3 秒）蓋住整頁，吃掉點擊與滾輪。
+    // 2026-11-02 使用者回報：點了 VR 影片之後到播放器接手之間，介面還能點、容易誤觸。這段時間按 B＝取消（XrShell::back）
+    Rectangle {
+        id: playerLoadingOverlay
+        parent: appContent
+        z: 1000
+        anchors.fill: parent
+        visible: VrLauncher.shellActive && VrLauncher.running && !VrLauncher.streamRunning
+        color: "#E60D0F0B"
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.AllButtons
+            onClicked: {/* swallow */}
+            onWheel: function(wheel) { wheel.accepted = true }
+        }
+
+        Column {
+            anchors.centerIn: parent
+            width: parent.width - 120
+            spacing: 24
+
+            BusyIndicator {
+                running: playerLoadingOverlay.visible
+                anchors.horizontalCenter: parent.horizontalCenter
+                width: 96
+                height: 96
+            }
+            Label {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                font.pointSize: 26
+                font.bold: true
+                color: "#D4FF3A"
+                text: qsTr("Opening the video...")
+            }
+            Label {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                font.pointSize: 16
+                color: "#C8CBB8"
+                text: qsTr("Press B to cancel.")
             }
         }
     }

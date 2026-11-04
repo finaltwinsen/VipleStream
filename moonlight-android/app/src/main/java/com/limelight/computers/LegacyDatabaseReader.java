@@ -31,27 +31,35 @@ public class LegacyDatabaseReader {
         // too. To disambiguate, we'll need to prefix them with a string
         // greater than the allowable IP address length.
         try {
-            details.localAddress = new ComputerDetails.AddressTuple(InetAddress.getByAddress(c.getBlob(2)).getHostAddress(), NvHTTP.DEFAULT_HTTP_PORT);
+            byte[] blob = c.getBlob(2);
+            if (blob != null) {
+                details.localAddress = new ComputerDetails.AddressTuple(InetAddress.getByAddress(blob).getHostAddress(), NvHTTP.DEFAULT_HTTP_PORT);
+            }
             LimeLog.warning("DB: Legacy local address for " + details.name);
         } catch (UnknownHostException e) {
             // This is probably a hostname/address with the prefix string
+            // §REVIEW-1104：欄位為 NULL 時 stringData 為 null，避免 startsWith 發生 NPE
             String stringData = c.getString(2);
-            if (stringData.startsWith(ADDRESS_PREFIX)) {
+            if (stringData != null && stringData.startsWith(ADDRESS_PREFIX)) {
                 details.localAddress = new ComputerDetails.AddressTuple(c.getString(2).substring(ADDRESS_PREFIX.length()), NvHTTP.DEFAULT_HTTP_PORT);
-            } else {
+            } else if (stringData != null) {
                 LimeLog.severe("DB: Corrupted local address for " + details.name);
             }
         }
 
         try {
-            details.remoteAddress = new ComputerDetails.AddressTuple(InetAddress.getByAddress(c.getBlob(3)).getHostAddress(), NvHTTP.DEFAULT_HTTP_PORT);
+            byte[] blob = c.getBlob(3);
+            if (blob != null) {
+                details.remoteAddress = new ComputerDetails.AddressTuple(InetAddress.getByAddress(blob).getHostAddress(), NvHTTP.DEFAULT_HTTP_PORT);
+            }
             LimeLog.warning("DB: Legacy remote address for " + details.name);
         } catch (UnknownHostException e) {
             // This is probably a hostname/address with the prefix string
+            // §REVIEW-1104：欄位為 NULL 時 stringData 為 null，避免 startsWith 發生 NPE
             String stringData = c.getString(3);
-            if (stringData.startsWith(ADDRESS_PREFIX)) {
+            if (stringData != null && stringData.startsWith(ADDRESS_PREFIX)) {
                 details.remoteAddress = new ComputerDetails.AddressTuple(c.getString(3).substring(ADDRESS_PREFIX.length()), NvHTTP.DEFAULT_HTTP_PORT);
-            } else {
+            } else if (stringData != null) {
                 LimeLog.severe("DB: Corrupted remote address for " + details.name);
             }
         }
@@ -72,19 +80,27 @@ public class LegacyDatabaseReader {
         try (final Cursor c = db.rawQuery("SELECT * FROM " + COMPUTER_TABLE_NAME, null)) {
             LinkedList<ComputerDetails> computerList = new LinkedList<>();
             while (c.moveToNext()) {
-                ComputerDetails details = getComputerFromCursor(c);
+                // §REVIEW-1104：單筆解析失敗只跳過該列，不中斷整表遷移
+                try {
+                    ComputerDetails details = getComputerFromCursor(c);
 
                 // If a critical field is corrupt or missing, skip the database entry
                 if (details.uuid == null) {
                     continue;
                 }
 
-                computerList.add(details);
+                    computerList.add(details);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
             }
 
             return computerList;
         }
     }
+
+    // §REVIEW-1104：提供獨立刪除舊庫方法，延後至寫入新庫成功後才刪除舊庫
+    public static void deleteDatabase(Context c) { c.deleteDatabase(COMPUTER_DB_NAME); }
 
     public static List<ComputerDetails> migrateAllComputers(Context c) {
         try (final SQLiteDatabase computerDb = SQLiteDatabase.openDatabase(
@@ -93,11 +109,9 @@ public class LegacyDatabaseReader {
         ) {
             // Open the existing database
             return getAllComputers(computerDb);
-        } catch (SQLiteException e) {
+        } catch (Exception e) {
+            // §REVIEW-1104：刪舊庫改到新庫寫入成功之後
             return new LinkedList<ComputerDetails>();
-        } finally {
-            // Close and delete the old DB
-            c.deleteDatabase(COMPUTER_DB_NAME);
         }
     }
 }

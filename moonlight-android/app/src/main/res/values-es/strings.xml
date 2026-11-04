@@ -353,4 +353,6 @@
     <string name="steam_switch_error_taskgone">La tarea de cambio desapareció en el host</string>
     <string name="steam_switch_error_timeout">Se agotó el tiempo del cambio (&gt;150 s sin que el servidor llegara a un estado final)</string>
     <string name="steam_switch_account_unavailable">Esta cuenta no tiene credenciales guardadas en el host. Inicia sesión una vez en el host y vuelve a intentarlo.</string>
+    <string name="title_show_advanced">Mostrar opciones avanzadas y experimentales</string>
+    <string name="summary_show_advanced">Opciones para solucionar problemas y hacer pruebas. Las opciones ocultas conservan sus valores actuales.</string>
 </resources>

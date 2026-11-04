@@ -17,7 +17,8 @@ import android.os.IBinder;
 public class DiscoveryService extends Service {
 
     private MdnsDiscoveryAgent discoveryAgent;
-    private MdnsDiscoveryListener boundListener;
+    // §REVIEW-1104：標記為 volatile 確保跨執行緒可見性，避免多執行緒讀寫可見性問題
+    private volatile MdnsDiscoveryListener boundListener;
 
     public class DiscoveryBinder extends Binder {
         public void setListener(MdnsDiscoveryListener listener) {
@@ -42,15 +43,19 @@ public class DiscoveryService extends Service {
         MdnsDiscoveryListener listener = new MdnsDiscoveryListener() {
             @Override
             public void notifyComputerAdded(MdnsComputer computer) {
-                if (boundListener != null) {
-                    boundListener.notifyComputerAdded(computer);
+                // §REVIEW-1104：將 boundListener 讀入區域變數避免判斷非 null 後被清空引發 NPE
+                MdnsDiscoveryListener currentListener = boundListener;
+                if (currentListener != null) {
+                    currentListener.notifyComputerAdded(computer);
                 }
             }
 
             @Override
             public void notifyDiscoveryFailure(Exception e) {
-                if (boundListener != null) {
-                    boundListener.notifyDiscoveryFailure(e);
+                // §REVIEW-1104：將 boundListener 讀入區域變數避免判斷非 null 後被清空引發 NPE
+                MdnsDiscoveryListener currentListener = boundListener;
+                if (currentListener != null) {
+                    currentListener.notifyDiscoveryFailure(e);
                 }
             }
         };

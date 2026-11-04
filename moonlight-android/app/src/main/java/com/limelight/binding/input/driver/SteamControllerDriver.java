@@ -324,6 +324,10 @@ public class SteamControllerDriver implements MoonBridge.ScHidFeatureRequestHand
                 if (n >= 2) {
                     LimeLog.info("[SC-HID] Wireless status id=0x"+Integer.toHexString(reportId)+
                             " state="+(buffer[1] & 0xFF)+" (iface="+ifaceIndex+")");
+                    // §REVIEW-1104：無線斷線時重設 activeIface，避免 feature 請求繼續送往已斷線的 slot 介面
+                    if ((buffer[1] & 0xFF) == 1) {
+                        activeIface.compareAndSet(ifaceIndex, -1);
+                    }
                 }
                 forward = false;
                 break;

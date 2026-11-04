@@ -91,6 +91,8 @@ private:
     qint64                 m_BytesTotal;
     QString                m_Status;
     bool                   m_Cancelled;
+    // §REVIEW-1104：下載寫入失敗（磁碟滿、位元組數不符）時不要發 readyToRestart
+    bool                   m_DownloadWriteFailed;
     UpdateAssetRules::Platform m_Platform;  // §F9：建構時偵測一次
     QNetworkReply*         m_NotesReply;     // §UPDATE-NOTES：跟下載流程分開
     QString                m_NotesVersion;

@@ -29,9 +29,16 @@ public abstract class MdnsDiscoveryAgent {
 
         // Add a computer object for each IPv4 address reported by the PC
         for (Inet4Address v4Addr : v4Addrs) {
-            synchronized (computers) {
+            {
+
                 MdnsComputer computer = new MdnsComputer(name, v4Addr, v6GlobalAddr, port);
-                if (computers.add(computer)) {
+                boolean added;
+                // §REVIEW-1104：將 notifyComputerAdded 移出 synchronized 區塊，避免回呼阻塞 I/O 長時間持鎖
+                synchronized (computers) {
+                    added = computers.add(computer);
+                }
+
+                if (added) {
                     // This was a new entry
                     listener.notifyComputerAdded(computer);
                 }
@@ -44,7 +51,12 @@ public abstract class MdnsDiscoveryAgent {
 
             if (v6LocalAddr != null || v6GlobalAddr != null) {
                 MdnsComputer computer = new MdnsComputer(name, v6LocalAddr, v6GlobalAddr, port);
-                if (computers.add(computer)) {
+                boolean added;
+                // §REVIEW-1104：IPv6 路徑也須在 synchronized (computers) 內執行 add 防止資料競爭，並在釋放鎖後通知
+                synchronized (computers) {
+                    added = computers.add(computer);
+                }
+                if (added) {
                     // This was a new entry
                     listener.notifyComputerAdded(computer);
                 }
@@ -58,13 +70,17 @@ public abstract class MdnsDiscoveryAgent {
         }
     }
 
+    // §REVIEW-1104：優先挑選無需 scope id 即可連線的 ULA，並跳過無 scope id 的 link-local 避免連線失敗
     protected static Inet6Address getLocalAddress(Inet6Address[] addresses) {
         for (Inet6Address addr : addresses) {
-            if (addr.isLinkLocalAddress() || addr.isSiteLocalAddress()) {
+            // 優先尋找 ULA (fc00::/7)
+            if ((addr.getAddress()[0] & 0xfe) == 0xfc) {
                 return addr;
             }
-            // fc00::/7 - ULAs
-            else if ((addr.getAddress()[0] & 0xfe) == 0xfc) {
+        }
+        // 次選 site-local 或具備有效 scope id 的 link-local
+        for (Inet6Address addr : addresses) {
+            if (addr.isSiteLocalAddress() || (addr.isLinkLocalAddress() && addr.getScopeId() != 0)) {
                 return addr;
             }
         }

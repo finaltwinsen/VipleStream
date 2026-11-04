@@ -60,6 +60,9 @@ finish-args:
   - --filesystem=xdg-videos:ro
   - --filesystem=xdg-download:ro
   - --filesystem=/run/media:ro
+  # §TS-PATH：host 走 Tailscale 時連本機 tailscaled socket（/run/tailscale/tailscaled.sock），
+  # 看路徑是直連還是中繼，必要時 restun／rebind。要能寫（對 socket 送 HTTP），所以不加 :ro。
+  - --filesystem=/run/tailscale
   # §VR-PLAYER（內建瀏覽器）：Chromium 自己的沙箱在 Flatpak 裡要再開一層 bwrap，頭盔上建不了 PID namespace
   # （bwrap: Setting pidns failed）→ 建立網頁時 UI 執行緒永遠卡住。關掉它（Flathub 用 QtWebEngine 的 app 也這樣做）；
   # Flatpak 本身的沙箱仍在

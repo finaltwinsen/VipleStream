@@ -308,6 +308,9 @@ private:
     void*    m_FrucRgbImgDescSet  [FRUC_RGB_IMG_RING] = {};  // VkDescriptorSet[2]
     void*    m_FrucRgbImgPlTex    [FRUC_RGB_IMG_RING] = {};  // pl_tex[2] (long-lived wrap)
     uint32_t m_FrucRgbImgRingIdx  = 0;  // monotonic frame counter, slot = idx % RING
+    // §REVIEW-1103：每個 ring slot 是否已轉過 layout（原本是函式內 static，跨 renderer 實例保留，
+    // 同一個行程第二場串流新建的 image 第一次轉換會誤用 oldLayout=GENERAL）。建立 ring 時歸零。
+    bool     m_FrucRgbImgFirstUseTracked[FRUC_RGB_IMG_RING] = {};
     void*    m_FrucRgbImgDescPool  = nullptr;  // VkDescriptorPool (sized for RING sets)
     void*    m_FrucRgbImgHostBuf   = nullptr;  // VkBuffer (4 bytes RGBA8 readback, single)
     void*    m_FrucRgbImgHostBufMem= nullptr;  // VkDeviceMemory

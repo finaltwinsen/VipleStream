@@ -1029,7 +1029,13 @@ namespace vr::selftest::platform {
       void reader_main() {
         std::string acc;
         std::array<char, 4096> buf {};
+        int reads_after_stop = 0;
         for (;;) {
+          // §REVIEW-1103（B032 可能-1）：原本只在管線空的時候看 stop；殘留的孫行程一直寫 stdout 時 join 會永遠等。
+          // 收到 stop 後最多再讀 64 次（把已經在管線裡的輸出收完）就離開。
+          if (reader_stop_.load() && ++reads_after_stop > 64) {
+            break;
+          }
           DWORD avail = 0;
           if (!PeekNamedPipe(read_, nullptr, 0, nullptr, &avail, nullptr)) {
             break;  // 寫端全部關閉（ERROR_BROKEN_PIPE）
@@ -2309,7 +2315,8 @@ namespace vr::selftest::platform {
         {"fence-jump", [](auto &d, auto &) { d.fence_value = 200 + 1025; }, frame_invalid_e::fence},
         {"fence-max", [](auto &d, auto &) { d.fence_value = UINT64_MAX; }, frame_invalid_e::fence},
         {"tex-idx", [](auto &d, auto &) { d.tex_idx = VRIPC_TEX_COUNT; }, frame_invalid_e::tex_idx},
-        {"flags", [](auto &d, auto &) { d.flags |= 0x40u; }, frame_invalid_e::flags},
+        // §REVIEW-1103（B032-1）：0x40 是合法的 VRIPC_FRM_FOVEATED（2.0.31 起），用保留位元 0x80 才會被判 flags
+        {"flags", [](auto &d, auto &) { d.flags |= 0x80u; }, frame_invalid_e::flags},
         {"layers", [](auto &d, auto &) { d.layer_count = 17; }, frame_invalid_e::layers},
         {"pos-nan", [&](auto &d, auto &) { d.render_pos[0] = nan; }, frame_invalid_e::pose},
         {"rot-nan", [&](auto &d, auto &) { d.render_rot[2] = nan; }, frame_invalid_e::pose},
@@ -2349,7 +2356,7 @@ namespace vr::selftest::platform {
      * @brief T6.probe-unit（K16）與 T6.abi-table。
      * - unit：`vr_probe --mode unit`，期望 `unit pass=<n> fail=<n>`、exit 0（driver 端純模組：fov_to_rect、virtual_vsync、
      *   pose_history 與 ipc_client 的迴路測試）。
-     * - ABI 表：server（GCC）與 vr_probe（MSVC）各自印 vr_ipc_abi_table.h 的 307 列，逐字比對。vr_probe 在 ipcpeer 與 unit
+     * - ABI 表：server（GCC）與 vr_probe（MSVC）各自印 vr_ipc_abi_table.h 的每一列，逐字比對。vr_probe 在 ipcpeer 與 unit
      *   開頭印 `abi-row <key>=<value>` 各一行、最後 `abi-rows count=<n> digest=<16 hex>`；unit 的輸出沒有表時，另跑一次
      *   連不存在的 pipe 的 ipcpeer（`--peer-no-render --pipe \\.\pipe\VipleStreamVR-selftest-abi`，不碰 bridge）取表。
      */

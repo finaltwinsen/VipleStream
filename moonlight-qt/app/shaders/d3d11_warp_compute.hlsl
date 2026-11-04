@@ -123,12 +123,13 @@ float2 sampleMV(float2 pixelPos)
 float computeAdaptiveWeight(float2 pixelPos, float2 mv)
 {
     float2 prevPos = pixelPos - mv * 0.5;
-    float2 mvAtPrev = sampleMV(prevPos);
+    // §REVIEW-1104：main 已把 backward MV 取成 forward，這裡仍拿未取負的 sampleMV，一致性檢查會反號
+    float2 mvAtPrev = -sampleMV(prevPos);
     float2 backFromPrev = prevPos + mvAtPrev * 0.5;
     float fwdError = length(backFromPrev - pixelPos);
 
     float2 currPos = pixelPos + mv * 0.5;
-    float2 mvAtCurr = sampleMV(currPos);
+    float2 mvAtCurr = -sampleMV(currPos);
     float2 backFromCurr = currPos - mvAtCurr * 0.5;
     float bwdError = length(backFromCurr - pixelPos);
 

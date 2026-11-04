@@ -314,6 +314,11 @@ namespace config {
     /// disabled＝完全舊行為。
     bool abr_fast = true;
 
+    /// §ABR-ADAPT（2026-11-03）：vr_abr_ceiling_kbps（150000 預設；0＝關，10000–400000）。VR 開了快速碼率控制時，編碼器以
+    /// max(client 設定碼率, 這個值) 初始化（決定 level／tier 與碼率上限），client 設定的碼率只當起始值；實際碼率由控制器依鏈路容量、
+    /// 畫質飽和（QP）與 client 解碼負載決定。level 在 session 開始時就鎖住（§SF-PARAMSETS），所以上限只能在這裡先給夠。
+    int abr_ceiling_kbps = 150000;
+
     /// §VR-HOTSPOT-AUTO（2026-10-30）：vr_hotspot_autoconnect。enabled（預設）＝收到頭盔熱點 TLV 時
     /// 自動以 Windows Native Wifi API 挑選可見該 SSID 且未連線的無線網卡設定 all-user profile 並連線。
     bool hotspot_autoconnect = true;

@@ -10,6 +10,19 @@
 // platform includes
 #include <Audioclient.h>
 #include <avrt.h>
+#include <endpointvolume.h>
+
+// §AUD-MON：mingw-w64 的 endpointvolume.h 只有 IAudioMeterInformation 的前置宣告、沒有定義。
+// 照 Windows SDK 的 vtable 順序自己補上（完整的 SDK 標頭會定義下面這個 guard，就不重複定義）。
+#ifndef __IAudioMeterInformation_INTERFACE_DEFINED__
+  #define __IAudioMeterInformation_INTERFACE_DEFINED__
+interface IAudioMeterInformation: public IUnknown {
+  virtual HRESULT STDMETHODCALLTYPE GetPeakValue(float *pfPeak) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetMeteringChannelCount(UINT *pnChannelCount) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetChannelsPeakValues(UINT32 u32ChannelCount, float *afPeakValues) = 0;
+  virtual HRESULT STDMETHODCALLTYPE QueryHardwareSupport(DWORD *pdwHardwareSupportMask) = 0;
+};
+#endif
 #include <mmdeviceapi.h>
 #include <newdev.h>
 #include <roapi.h>
@@ -218,6 +231,11 @@ namespace platf::audio {
   using collection_t = util::safe_ptr<IMMDeviceCollection, Release<IMMDeviceCollection>>;
   using audio_client_t = util::safe_ptr<IAudioClient, Release<IAudioClient>>;
   using audio_capture_t = util::safe_ptr<IAudioCaptureClient, Release<IAudioCaptureClient>>;
+  using audio_meter_t = util::safe_ptr<IAudioMeterInformation, Release<IAudioMeterInformation>>;
+
+  // §AUD-MON：IAudioMeterInformation 的 IID（{C02216F6-8C67-4B5B-9D00-D008E73E0064}）。
+  // 自己定義，不依賴各工具鏈的 uuid 程式庫有沒有這個符號。
+  const IID kIidAudioMeterInformation = {0xC02216F6, 0x8C67, 0x4B5B, {0x9D, 0x00, 0xD0, 0x08, 0xE7, 0x3E, 0x00, 0x64}};
   using wave_format_t = util::safe_ptr<WAVEFORMATEX, co_task_free<WAVEFORMATEX>>;
   using wstring_t = util::safe_ptr<WCHAR, co_task_free<WCHAR>>;
   using handle_t = util::safe_ptr_v2<void, BOOL, CloseHandle>;
@@ -451,6 +469,19 @@ namespace platf::audio {
       return capture_e::ok;
     }
 
+    std::optional<float> render_peak() override {
+      if (!audio_meter) {
+        return std::nullopt;
+      }
+
+      float peak = 0.0f;
+      if (FAILED(audio_meter->GetPeakValue(&peak))) {
+        return std::nullopt;
+      }
+
+      return peak;
+    }
+
     int init(std::uint32_t sample_rate, std::uint32_t frame_size, std::uint32_t channels_out, bool continuous) {
       audio_event.reset(CreateEventA(nullptr, FALSE, FALSE, nullptr));
       if (!audio_event) {
@@ -487,6 +518,13 @@ namespace platf::audio {
         return -1;
       }
 
+      // §AUD-MON：同一個播放裝置的音量計。拿不到只是少了擷取健康檢查，不影響擷取本身。
+      status = device->Activate(kIidAudioMeterInformation, CLSCTX_ALL, nullptr, (void **) &audio_meter);
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "[VIPLE-AUD-MON] Couldn't activate the render peak meter [0x"sv << util::hex(status).to_string_view() << "], capture health check disabled"sv;
+        audio_meter.reset();
+      }
+
       for (const auto &format : formats) {
         if (format.channel_count != channels_out) {
           BOOST_LOG(debug) << "Skipping audio format ["sv << format.name << "] with channel count ["sv
@@ -511,7 +549,9 @@ namespace platf::audio {
 
       REFERENCE_TIME default_latency;
       audio_client->GetDevicePeriod(&default_latency, nullptr);
-      default_latency_ms = default_latency / 1000;
+      // §REVIEW-1103：REFERENCE_TIME 單位是 100 ns，換成 ms 要除以 10000（原本 /1000 把 10 ms 週期算成 100 ms，
+      // 主機沒出聲時每次要等 100 ms 才逾時）。至少 1 ms，避免週期很短時變成 0 而空轉。
+      default_latency_ms = std::max<REFERENCE_TIME>(1, default_latency / 10000);
       continuous_audio = continuous;
 
       std::uint32_t frames;
@@ -676,6 +716,7 @@ namespace platf::audio {
     device_t device;
     audio_client_t audio_client;
     audio_capture_t audio_capture;
+    audio_meter_t audio_meter;
 
     audio_notification_t endpt_notification;
     std::optional<std::function<void()>> default_endpt_changed_cb;

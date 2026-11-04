@@ -5,6 +5,9 @@ import ComputerManager 1.0
 import Session 1.0
 
 Item {
+    // §REVIEW-1104：這頁沒有 stageText，text 綁定會 ReferenceError，階段文字一直是空的
+    property string stageText : qsTr("Establishing connection to PC...")
+
     function onSearchingComputer() {
         stageLabel.text = qsTr("Establishing connection to PC...")
     }

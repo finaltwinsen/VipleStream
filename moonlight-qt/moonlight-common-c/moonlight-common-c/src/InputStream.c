@@ -503,7 +503,14 @@ static void inputSendThreadProc(void* context) {
                 if (!sendInputPacket(holder, more)) {
                     freePacketHolder(holder);
 #ifdef VIPLE_MPQUIC
-                    if (isQuicControlFallbackAvailable()) goto enet_input_reconnect_wait; // §M01-C
+                    if (isQuicControlFallbackAvailable()) {
+                        // §REVIEW-1103：跳去重連等待前要清 dirty，否則 LiSendMouseMoveEvent
+                        // 看到 dirty 只累加 delta、不再排封包，重連後相對滑鼠整場不動。
+                        PltLockMutex(&batchedInputMutex);
+                        currentRelativeMouseState.dirty = false;
+                        PltUnlockMutex(&batchedInputMutex);
+                        goto enet_input_reconnect_wait; // §M01-C
+                    }
 #endif
                     return;
                 }
@@ -733,6 +740,17 @@ static void inputSendThreadProc(void* context) {
             }
             while (!PltIsThreadInterrupted(&inputSendThread)) {
                 PltSleepMs(100);
+                // §REVIEW-1103：stopInputStream 不會 interrupt 本執行緒（只 drain 佇列），
+                // QUIC 已死且 ENet 連不回時這裡永遠不會 break → join 卡死整個 client。
+                // initialized 在 stopInputStream 一開始就清掉；看到就直接結束，
+                // 佇列剩下的封包由 destroyInputStream 釋放。
+                if (!initialized) {
+                    if (waitLogged) {
+                        Limelog("[VIPLE-MPQUIC] §Q-ENET-RECONNECT: inputSendThread "
+                                "stopping during reconnect wait\n");
+                    }
+                    return;
+                }
                 // §Q-INPUT-QUIC-ESCAPE-FIX (review batch 2)：加 QUIC 逃生
                 // 條件。§Q-ENET-LOCAL-PUBLISH-FIX 之後，重連嘗試期間全域
                 // peer/client 維持 NULL（舊版 racy 提前發布意外提供了
@@ -1299,6 +1317,14 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         if (err != LBQ_SUCCESS) {
             LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
             Limelog("Input queue reached maximum size limit\n");
+            // §REVIEW-1103：入佇列失敗要先把 currentQueuedControllerPacket 指回 NULL
+            // 再釋放，否則下一次同手把的事件會改寫已釋放的 holder（UAF）。
+            // 重連等待期間佇列不被消化，轉搖桿幾秒就會滿到這裡。
+            PltLockMutex(&batchedInputMutex);
+            if (currentQueuedControllerPacket[controllerNumber] == holder) {
+                currentQueuedControllerPacket[controllerNumber] = NULL;
+            }
+            PltUnlockMutex(&batchedInputMutex);
             freePacketHolder(holder);
         }
     }

@@ -1264,6 +1264,11 @@ pollListing();
     if (!authenticate(response, request)) {
       return;
     }
+    // §REVIEW-1103：參數全走 query string，跨站送無 body 的 form POST 不會觸發 preflight，
+    // 瀏覽器快取的 Basic 認證會自動帶上 → 比照其他會改狀態的 API 驗 CSRF。
+    if (!validate_csrf_token(response, request, get_client_id(request))) {
+      return;
+    }
     auto owner = proc::proc.running_owner_uuid();
     if (proc::proc.running() <= 0 || owner.empty()) {
       response->write(SimpleWeb::StatusCode::client_error_conflict, R"({"error":"no_active_stream"})");
@@ -1686,7 +1691,7 @@ pollListing();
       } else {
         auto data = SimpleWeb::Crypto::Base64::decode(input_tree.value("data", ""));
 
-        std::ofstream imgfile(path);
+        std::ofstream imgfile(path, std::ios::binary);  // §REVIEW-1103：文字模式會把 PNG 的 LF 轉成 CRLF
         imgfile.write(data.data(), static_cast<int>(data.size()));
       }
       output_tree["status"] = true;
@@ -2019,7 +2024,8 @@ pollListing();
     boost::process::v1::environment env = boost::this_process::environment();
 
     // Run with elevated permissions, non-interactive
-    const std::string install_cmd = std::format("{} /quiet", installer_path.string());
+    // §REVIEW-1103：路徑加引號，避免未加引號路徑被 CreateProcess 依序嘗試（C:\Program.exe）
+    const std::string install_cmd = std::format("\"{}\" /quiet", installer_path.string());
     auto child = platf::run_command(true, false, install_cmd, working_dir, env, nullptr, ec, nullptr);
 
     if (ec) {

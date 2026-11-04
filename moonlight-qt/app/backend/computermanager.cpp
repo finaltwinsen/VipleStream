@@ -182,6 +182,7 @@ private:
                             relayAddr = NvAddress(result.stunIp, 47989);
                             m_Computer->stunAddress = relayAddr;
                             m_Computer->stunNatType = result.natType;
+                            m_Computer->stunPunchPort = result.stunPort;  // §REVIEW-1104：打洞用 relay 回報的實際埠
                         } else {
                             // No STUN endpoint — use a placeholder address.
                             // All communication will go through relay proxy/tunnel.
@@ -209,15 +210,30 @@ private:
                                 // Parse the proxied serverInfo XML, but preserve cached pair state
                                 // (relay proxy can't present the Moonlight client's TLS certificate,
                                 //  so PairStatus from proxy is always 0 — use the cached value instead)
-                                auto cachedPairState = m_Computer->pairState;
-                                auto cachedAppList = m_Computer->appList;
-                                auto cachedServerCert = m_Computer->serverCert;
+                                // §REVIEW-1104：複製、update、還原必須在電腦寫鎖內完成，否則 appList／憑證會和讀端交錯
+                                NvComputer::PairState cachedPairState = NvComputer::PS_UNKNOWN;
+                                QVector<NvApp> cachedAppList;
+                                QSslCertificate cachedServerCert;
+                                {
+                                    QReadLocker computerLock(&m_Computer->lock);
+                                    cachedPairState = m_Computer->pairState;
+                                    cachedAppList = m_Computer->appList;
+                                    cachedServerCert = m_Computer->serverCert;
+                                }
 
                                 try {
-                                    NvHTTP http(relayAddr, 0, m_Computer->serverCert, &nam);
+                                    NvHTTP http(relayAddr, 0, cachedServerCert, &nam);
                                     NvComputer newState(http, proxyResp);
+
+                                    QWriteLocker computerLock(&m_Computer->lock);
+                                    cachedPairState = m_Computer->pairState;
+                                    cachedAppList = m_Computer->appList;
+                                    cachedServerCert = m_Computer->serverCert;
                                     if (m_Computer->uuid == newState.uuid) {
-                                        stateChanged = m_Computer->update(newState);
+                                        {
+                                            QReadLocker newStateLock(&newState.lock);
+                                            stateChanged = m_Computer->updateUnlocked(newState);
+                                        }
 
                                         // Restore cached pair state, cert, and app list
                                         // Relay proxy can't verify pairing (no client TLS cert),
@@ -240,6 +256,7 @@ private:
                                         relayOnly = true;
                                     }
                                 } catch (...) {
+                                    QWriteLocker computerLock(&m_Computer->lock);
                                     m_Computer->state = NvComputer::CS_ONLINE;
                                     m_Computer->pairState = !cachedAppList.isEmpty() ?
                                         NvComputer::PS_PAIRED : cachedPairState;
@@ -472,12 +489,16 @@ void DelayedFlushThread::run() {
             m_ComputerManager->m_NeedsDelayedFlush = false;
 
             // Update the last serialized hosts map under the delayed flush mutex
+            // §REVIEW-1104：m_KnownHosts 由 m_Lock 保護，只拿 flush mutex 走訪會和新增／刪除交錯
             m_ComputerManager->m_LastSerializedHosts.clear();
-            for (const NvComputer* computer : std::as_const(m_ComputerManager->m_KnownHosts)) {
-                // Copy the current state of the NvComputer to allow us to check later if we need
-                // to serialize it again when attribute updates occur.
-                QReadLocker computerLock(&computer->lock);
-                m_ComputerManager->m_LastSerializedHosts[computer->uuid] = *computer;
+            {
+                QReadLocker hostsLock(&m_ComputerManager->m_Lock);
+                for (const NvComputer* computer : std::as_const(m_ComputerManager->m_KnownHosts)) {
+                    // Copy the current state of the NvComputer to allow us to check later if we need
+                    // to serialize it again when attribute updates occur.
+                    QReadLocker computerLock(&computer->lock);
+                    m_ComputerManager->m_LastSerializedHosts[computer->uuid] = *computer;
+                }
             }
         }
 
@@ -747,10 +768,28 @@ QVector<NvComputer*> ComputerManager::getComputers()
     QReadLocker lock(&m_Lock);
 
     // Return a sorted host list
-    auto hosts = QVector<NvComputer*>::fromList(m_KnownHosts.values());
-    std::stable_sort(hosts.begin(), hosts.end(), [](const NvComputer* host1, const NvComputer* host2) {
-        return host1->name.toLower() < host2->name.toLower();
+    // §REVIEW-1104：name 會在電腦鎖下被換掉，先複製再排序，避免比較函式看到一半的 QString
+    struct NamedHost {
+        QString name;
+        NvComputer* host;
+    };
+    QVector<NamedHost> entries;
+    entries.reserve(m_KnownHosts.size());
+    for (NvComputer* host : std::as_const(m_KnownHosts)) {
+        QReadLocker computerLock(&host->lock);
+        NamedHost entry;
+        entry.name = host->name;
+        entry.host = host;
+        entries.append(entry);
+    }
+    std::stable_sort(entries.begin(), entries.end(), [](const NamedHost& a, const NamedHost& b) {
+        return a.name.toLower() < b.name.toLower();
     });
+    QVector<NvComputer*> hosts;
+    hosts.reserve(entries.size());
+    for (const NamedHost& entry : entries) {
+        hosts.append(entry.host);
+    }
     return hosts;
 }
 
@@ -760,10 +799,16 @@ QSize ComputerManager::getMaxHostDisplayMode()
     int maxW = 0;
     int maxH = 0;
     for (NvComputer* host : std::as_const(m_KnownHosts)) {
-        if (host->isNvidiaServerSoftware) {
-            continue;  // GFE/NV advertises encoder modes, not display modes
+        QVector<NvDisplayMode> modes;
+        {
+            // §REVIEW-1104：displayModes 會被 update() 整份換掉，不能在沒拿電腦鎖時走訪 QVector
+            QReadLocker computerLock(&host->lock);
+            if (host->isNvidiaServerSoftware) {
+                continue;  // GFE/NV advertises encoder modes, not display modes
+            }
+            modes = host->displayModes;
         }
-        for (const NvDisplayMode& mode : std::as_const(host->displayModes)) {
+        for (const NvDisplayMode& mode : std::as_const(modes)) {
             if (mode.width * mode.height > maxW * maxH) {
                 maxW = mode.width;
                 maxH = mode.height;
@@ -1146,6 +1191,8 @@ private:
             Q_ASSERT(http.httpsPort() != 0);
             serverInfo = fetchServerInfo(http);
             if (serverInfo.isEmpty()) {
+                // §REVIEW-1104：已存在主機的 HTTPS serverinfo 失敗直接 return 會漏掉 newComputer
+                delete newComputer;
                 return;
             }
 

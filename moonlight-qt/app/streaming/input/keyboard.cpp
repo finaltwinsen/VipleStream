@@ -476,7 +476,7 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
 
     // Track the key state so we always know which keys are down
     if (event->state == SDL_PRESSED) {
-        m_KeysDown.insert(keyCode);
+        m_KeysDown.insert(keyCode, shouldNotConvertToScanCodeOnServer ? SS_KBE_FLAG_NON_NORMALIZED : 0);
     }
     else {
         m_KeysDown.remove(keyCode);

@@ -529,9 +529,15 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
             memcpy(hd.rot, located.rot, sizeof(hd.rot));
             memcpy(hd.linVel, located.linVel, sizeof(hd.linVel));
             memcpy(hd.angVel, located.angVel, sizeof(hd.angVel));
+            // §REVIEW-1104：frameloop 不重 locate，速度有效旗標沒抄的話統計永遠是 0%
+            hd.linValid = located.linValid;
+            hd.angValid = located.angValid;
         }
         else {
             hd.poseValid = false;
+            // §REVIEW-1104：locate 失敗時清掉上一格留下的速度有效旗標
+            hd.linValid = false;
+            hd.angValid = false;
         }
 
         uint32_t buttons = 0, touches = 0;

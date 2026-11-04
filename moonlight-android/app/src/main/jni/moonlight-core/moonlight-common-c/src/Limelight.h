@@ -1069,6 +1069,16 @@ void LiCompleteVideoFrame(VIDEO_FRAME_HANDLE handle, int drStatus);
 // See ConnListenerSetHdrMode() for more details.
 bool LiGetCurrentHostDisplayHdrMode(void);
 
+// VipleStream §AUD-MON：server 回報的音訊擷取狀態（0x5510）。server 比對「播放裝置的音量計有沒有在出聲」
+// 和「擷取有沒有拿到聲音」，只在真的擷取不到時才回報 STALLED，所以主機只是沒出聲不會誤報。
+// 回傳最後一筆狀態；這場還沒收到過（舊 server、或平台不支援健康檢查）回傳 -1。
+// seq（可為 NULL）每收到一筆 +1，用來分辨同一個狀態又送來一次。
+#define LI_AUDIO_STATUS_MONITORING  0 // 擷取已啟動、健康檢查有效
+#define LI_AUDIO_STATUS_STALLED     1 // 主機在出聲但擷取不到，server 自動重建後仍然如此
+#define LI_AUDIO_STATUS_RECOVERED   2 // STALLED 之後擷取又拿到聲音
+#define LI_AUDIO_STATUS_INIT_FAILED 3 // 擷取初始化失敗，這場串流沒有聲音
+int LiGetServerAudioStatus(uint32_t* seq);
+
 typedef struct _SS_HDR_METADATA {
     // RGB order
     struct {

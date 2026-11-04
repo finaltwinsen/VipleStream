@@ -1312,102 +1312,102 @@ Si tarda más, revise el host: puede que Steam Guard esté pidiendo la verificac
         <translation>Ajustes</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="352"/>
+        <location filename="../gui/SettingsView.qml" line="525"/>
         <source>Resolution and FPS</source>
         <translation>Resolución y FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="360"/>
+        <location filename="../gui/SettingsView.qml" line="533"/>
         <source>Setting values too high for your PC or network connection may cause lag, stuttering, or errors.</source>
         <translation>Ajustar valores demasiado elevados para su PC o su conexión de red puede provocar retrasos, tartamudeos o errores.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="342"/>
+        <location filename="../gui/SettingsView.qml" line="515"/>
         <source>Basic Settings</source>
         <translation>Configuración básica</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="552"/>
+        <location filename="../gui/SettingsView.qml" line="725"/>
         <source>Auto (best for this display)</source>
         <translation>Automático (lo mejor para esta pantalla)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="558"/>
+        <location filename="../gui/SettingsView.qml" line="731"/>
         <source>720p</source>
         <translation>720p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="564"/>
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>1080p</source>
         <translation>1080p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="570"/>
+        <location filename="../gui/SettingsView.qml" line="743"/>
         <source>1440p</source>
         <translation>1440p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="576"/>
+        <location filename="../gui/SettingsView.qml" line="749"/>
         <source>4K</source>
         <translation>4K</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="693"/>
+        <location filename="../gui/SettingsView.qml" line="866"/>
         <source>Custom resolutions are not officially supported by GeForce Experience, so it will not set your host display resolution. You will need to set it manually while in game.</source>
         <translation>GeForce Experience no admite oficialmente las resoluciones personalizadas, por lo que no establecerá la resolución de la pantalla anfitriona. Tendrás que configurarla manualmente en el juego.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="694"/>
+        <location filename="../gui/SettingsView.qml" line="867"/>
         <source>Resolutions that are not supported by your client or host PC may cause streaming errors.</source>
         <translation>Las resoluciones que no sean compatibles con el cliente o el PC anfitrión pueden provocar errores de transmisión.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="700"/>
+        <location filename="../gui/SettingsView.qml" line="873"/>
         <source>Enter a custom resolution:</source>
         <translation>Introduzca una resolución personalizada:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="961"/>
+        <location filename="../gui/SettingsView.qml" line="1134"/>
         <source>%1 FPS</source>
         <translation>%1 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1090"/>
+        <location filename="../gui/SettingsView.qml" line="1263"/>
         <source>Auto (this display)</source>
         <translation>Automático (esta pantalla)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1214"/>
+        <location filename="../gui/SettingsView.qml" line="1389"/>
         <source>Frame interpolation (FRUC)</source>
         <translation>Interpolación de fotogramas (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1254"/>
+        <location filename="../gui/SettingsView.qml" line="1429"/>
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>Inserta un fotograma interpolado entre cada fotograma real, duplicando la tasa de fotogramas efectiva. La tasa de fotogramas real del servidor se reduce a la mitad (p. ej., ajuste de 120 FPS → se solicitan 60 FPS → salida de 120 FPS).</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1344"/>
+        <location filename="../gui/SettingsView.qml" line="1519"/>
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute (recomendado — latencia mínima, cualquier GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1345"/>
+        <location filename="../gui/SettingsView.qml" line="1520"/>
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow (flujo por HW + warp; NVIDIA RTX 20+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1346"/>
+        <location filename="../gui/SettingsView.qml" line="1521"/>
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — modelo ML RIFE (requiere GPU potente; Tensor Core RTX 30/40+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1347"/>
+        <location filename="../gui/SettingsView.qml" line="1522"/>
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE (experimental; multifabricante: NV/AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1357"/>
+        <location filename="../gui/SettingsView.qml" line="1532"/>
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
@@ -1420,393 +1420,403 @@ NVIDIA Optical Flow: hardware NVOFA dedicado en Turing+ (series RTX 20/30/40). ~
 DirectML: ejecuta el modelo ONNX RIFE 4.25 lite incluido en el EP DirectML de D3D12: interpolación ML con compensación de movimiento *real*, la mejor calidad visual en contenido dinámico. La sobrecarga de lanzamiento de kernel por operación (~25 ms de base, independientemente de la resolución) hace que necesite una GPU con Tensor Cores (RTX 30/40 de gama media o superior) para funcionar en tiempo real a 720p o más. En GPU más débiles, el cliente reduce automáticamente la resolución de inferencia (1080p → 720p → 540p → 480p → 360p) y vuelve a Generic si ni siquiera 360p cabe en el presupuesto del fotograma.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1426"/>
+        <location filename="../gui/SettingsView.qml" line="1601"/>
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (GPU QUALITY)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1427"/>
+        <location filename="../gui/SettingsView.qml" line="1602"/>
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (GPU BALANCED)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1430"/>
+        <location filename="../gui/SettingsView.qml" line="1605"/>
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (GPU PERFORMANCE)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1476"/>
+        <location filename="../gui/SettingsView.qml" line="1651"/>
         <source>Video bitrate:</source>
         <translation>Tasa de bits de vídeo:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1484"/>
+        <location filename="../gui/SettingsView.qml" line="1659"/>
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>Reduzca la tasa de bits en las conexiones más lentas. Aumenta la tasa de bits para aumentar la calidad de la imagen.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1506"/>
+        <location filename="../gui/SettingsView.qml" line="1681"/>
         <source>Video bitrate: %1 Mbps</source>
         <translation>Tasa de bits de vídeo: %1 Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1536"/>
+        <location filename="../gui/SettingsView.qml" line="1711"/>
         <source>Display mode</source>
         <translation>Modo de visualización</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1566"/>
+        <location filename="../gui/SettingsView.qml" line="1741"/>
         <source>(Recommended)</source>
         <translation>(Recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1547"/>
-        <location filename="../gui/SettingsView.qml" line="2115"/>
+        <location filename="../gui/SettingsView.qml" line="1722"/>
+        <location filename="../gui/SettingsView.qml" line="2291"/>
         <source>Fullscreen</source>
         <translation>Pantalla completa</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1616"/>
+        <location filename="../gui/SettingsView.qml" line="1791"/>
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>La pantalla completa suele ofrecer el mejor rendimiento, pero la ventana sin bordes puede funcionar mejor con funciones como macOS Spaces, Alt+Tab, herramientas de captura de pantalla, superposiciones en pantalla, etc.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1552"/>
+        <location filename="../gui/SettingsView.qml" line="1727"/>
         <source>Borderless windowed</source>
         <translation>Ventana sin bordes</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="431"/>
+        <location filename="../gui/SettingsView.qml" line="604"/>
         <source>Native</source>
         <translation>Nativo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="432"/>
+        <location filename="../gui/SettingsView.qml" line="605"/>
         <source>Native (Excluding Notch)</source>
         <translation>Nativo (excluido Notch)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1522"/>
+        <location filename="../gui/SettingsView.qml" line="1697"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>Uso predeterminado(%1 Mbps)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1557"/>
-        <location filename="../gui/SettingsView.qml" line="2107"/>
+        <location filename="../gui/SettingsView.qml" line="1732"/>
+        <location filename="../gui/SettingsView.qml" line="2283"/>
         <source>Windowed</source>
         <translation>Ventana</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1623"/>
+        <location filename="../gui/SettingsView.qml" line="1798"/>
         <source>V-Sync</source>
         <translation>V-Sync (Sincronización Vertical)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1633"/>
+        <location filename="../gui/SettingsView.qml" line="1808"/>
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>Desactivar V-Sync permite una latencia de renderizado por debajo de los fotogramas, pero puede mostrar un tearing visible</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1640"/>
+        <location filename="../gui/SettingsView.qml" line="1815"/>
         <source>Frame pacing</source>
         <translation>Ritmo de fotogramas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1663"/>
+        <location filename="../gui/SettingsView.qml" line="1838"/>
         <source>Audio Settings</source>
         <translation>Ajustes de audio</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1698"/>
+        <location filename="../gui/SettingsView.qml" line="1873"/>
         <source>Stereo</source>
         <translation>Estéreo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1702"/>
+        <location filename="../gui/SettingsView.qml" line="1877"/>
         <source>5.1 surround sound</source>
         <translation>Sonido envolvente 5.1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1706"/>
+        <location filename="../gui/SettingsView.qml" line="1881"/>
         <source>7.1 surround sound</source>
         <translation>Sonido envolvente 7.1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1720"/>
+        <location filename="../gui/SettingsView.qml" line="1895"/>
         <source>Mute host PC speakers while streaming</source>
         <translation>Silenciar los altavoces del PC anfitrión durante la transmisión</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1730"/>
+        <location filename="../gui/SettingsView.qml" line="1905"/>
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>Para que este ajuste surta efecto, debes reiniciar cualquier partida que esté en curso</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1851"/>
+        <location filename="../gui/SettingsView.qml" line="2027"/>
         <source>UI Settings</source>
         <translation>Configuración de la interfaz</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1896"/>
+        <location filename="../gui/SettingsView.qml" line="2072"/>
         <source>Language</source>
         <translation>Idioma</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1922"/>
+        <location filename="../gui/SettingsView.qml" line="2098"/>
         <source>Automatic</source>
         <translation>Automático</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2074"/>
+        <location filename="../gui/SettingsView.qml" line="2250"/>
         <source>GUI display mode</source>
         <translation>Modo de visualización GUI</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2111"/>
+        <location filename="../gui/SettingsView.qml" line="2287"/>
         <source>Maximized</source>
         <translation>Maximizado</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2139"/>
+        <location filename="../gui/SettingsView.qml" line="2315"/>
         <source>Show configuration warnings</source>
         <translation>Mostrar advertencias de configuración</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2349"/>
+        <location filename="../gui/SettingsView.qml" line="2371"/>
         <source>Input Settings</source>
         <translation>Ajustes de entrada</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2370"/>
+        <location filename="../gui/SettingsView.qml" line="2392"/>
         <source>This enables seamless mouse control without capturing the client&apos;s mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>Esto permite un control perfecto del ratón sin capturar el cursor del ratón del cliente. Es ideal para el uso del escritorio remoto, pero no funcionará en la mayoría de los juegos.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2372"/>
+        <location filename="../gui/SettingsView.qml" line="2394"/>
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>NOTA: Debido a un error en GeForce Experience, es posible que esta opción no funcione correctamente si su PC host tiene varios monitores.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2735"/>
+        <location filename="../gui/SettingsView.qml" line="2760"/>
         <source>AV1 (Experimental)</source>
         <translation>AV1 (Experimental)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2754"/>
+        <location filename="../gui/SettingsView.qml" line="2779"/>
         <source>Enable HDR (Experimental)</source>
         <translation>Activar HDR (Experimental)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2769"/>
+        <location filename="../gui/SettingsView.qml" line="2794"/>
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>La transmisión podrá utilizar HDR, pero algunos juegos pueden requerir un monitor HDR en el PC anfitrión para permitir el modo HDR.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2771"/>
+        <location filename="../gui/SettingsView.qml" line="2796"/>
         <source>HDR streaming is not supported on this PC.</source>
         <translation>La transmisión HDR no esta soportada en este PC.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2821"/>
+        <location filename="../gui/SettingsView.qml" line="2848"/>
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>Esto desbloquea tasas de bits de vídeo extremadamente altas para usar con hosts VipleStream-Server. Solo debe usarse al transmitir por una conexión LAN Ethernet.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2859"/>
+        <location filename="../gui/SettingsView.qml" line="2886"/>
         <source>Show performance stats while streaming</source>
         <translation>Mostrar estadísticas de rendimiento en streaming</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2869"/>
+        <location filename="../gui/SettingsView.qml" line="2896"/>
         <source>Display real-time stream performance information while streaming.</source>
         <translation>Muestra información sobre el rendimiento del flujo en tiempo real mientras se transmite.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2870"/>
+        <location filename="../gui/SettingsView.qml" line="2897"/>
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>Puedes cambiarla en cualquier momento mientras transmites con Ctrl+Alt+Mayús+S o Select+L1+R1+X.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2871"/>
+        <location filename="../gui/SettingsView.qml" line="2898"/>
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>La superposición de rendimiento no es compatible con Steam Link o Raspberry Pi.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2454"/>
+        <location filename="../gui/SettingsView.qml" line="2477"/>
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>Utilice la pantalla táctil como un trackpad virtual</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2471"/>
+        <location filename="../gui/SettingsView.qml" line="2494"/>
         <source>Swap left and right mouse buttons</source>
         <translation>Intercambiar los botones izquierdo y derecho del ratón</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2483"/>
+        <location filename="../gui/SettingsView.qml" line="2506"/>
         <source>Reverse mouse scrolling direction</source>
         <translation>Invertir la dirección de desplazamiento del ratón</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2497"/>
+        <location filename="../gui/SettingsView.qml" line="2520"/>
         <source>Gamepad Settings</source>
         <translation>Configuración del mando</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2507"/>
+        <location filename="../gui/SettingsView.qml" line="2530"/>
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>Cambiar los botones del mando A / B y X / Y</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2517"/>
+        <location filename="../gui/SettingsView.qml" line="2540"/>
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>Esto cambia los mandos a un diseño de botones al estilo de Nintendo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2523"/>
+        <location filename="../gui/SettingsView.qml" line="2546"/>
         <source>Force gamepad #1 always connected</source>
         <translation>Forzar que el mando #1 esté siempre conectado</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2533"/>
+        <location filename="../gui/SettingsView.qml" line="2556"/>
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>Obliga a un solo mando a permanecer siempre conectado al host, aunque no haya ningún mando conectado a este PC.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2371"/>
+        <location filename="../gui/SettingsView.qml" line="2393"/>
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>Puedes alternar esto mientras transmites usando Ctrl+Alt+Mayús+M.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2541"/>
+        <location filename="../gui/SettingsView.qml" line="2564"/>
         <source>Enable mouse control with gamepads by holding the &apos;Start&apos; button</source>
         <translation>Activa el control del ratón con los mandos manteniendo pulsado el botón &apos;Start&apos;</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1756"/>
+        <location filename="../gui/SettingsView.qml" line="1931"/>
         <source>Host Settings</source>
         <translation>Configuración de host</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2635"/>
+        <location filename="../gui/SettingsView.qml" line="2658"/>
         <source>Advanced Settings</source>
         <translation>Configuración avanzada</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1673"/>
+        <location filename="../gui/SettingsView.qml" line="1848"/>
         <source>Audio configuration</source>
         <translation>Configuración del sonido</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2128"/>
+        <location filename="../gui/SettingsView.qml" line="2304"/>
         <source>Show connection quality warnings</source>
         <translation>Mostrar avisos de calidad de la conexión</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2151"/>
+        <location filename="../gui/SettingsView.qml" line="2327"/>
         <source>Discord Rich Presence integration</source>
         <translation>Integración de Discord Rich Presence</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2534"/>
+        <location filename="../gui/SettingsView.qml" line="2557"/>
         <source>Only enable this option when streaming a game that doesn&apos;t support gamepads being connected after startup.</source>
         <translation>Sólo active esta opción cuando transmita un juego que no admita la conexión de mandos después del inicio.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2360"/>
+        <location filename="../gui/SettingsView.qml" line="2382"/>
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>Optimizar el ratón para el escritorio remoto en lugar de los juegos</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="857"/>
-        <location filename="../gui/SettingsView.qml" line="1050"/>
+        <location filename="../gui/SettingsView.qml" line="1030"/>
+        <location filename="../gui/SettingsView.qml" line="1223"/>
         <source>Custom (%1 FPS)</source>
         <translation>Personalizado (%1 FPS)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="872"/>
+        <location filename="../gui/SettingsView.qml" line="1045"/>
         <source>Enter a custom frame rate:</source>
         <translation>Introduce una velocidad para los fotogramas personalizada:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="473"/>
-        <location filename="../gui/SettingsView.qml" line="521"/>
-        <location filename="../gui/SettingsView.qml" line="530"/>
-        <location filename="../gui/SettingsView.qml" line="984"/>
+        <location filename="../gui/SettingsView.qml" line="646"/>
+        <location filename="../gui/SettingsView.qml" line="694"/>
+        <location filename="../gui/SettingsView.qml" line="703"/>
+        <location filename="../gui/SettingsView.qml" line="1157"/>
         <source>Custom</source>
         <translation>Personalizado</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1095"/>
+        <location filename="../gui/SettingsView.qml" line="1268"/>
         <source>30 FPS</source>
         <translation>30 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1100"/>
+        <location filename="../gui/SettingsView.qml" line="1273"/>
         <source>60 FPS</source>
         <translation>60 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2167"/>
+        <location filename="../gui/SettingsView.qml" line="2343"/>
         <source>Keep the display awake while streaming</source>
         <translation>Mantener la pantalla encendida mientras dura la transmisión</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2177"/>
+        <location filename="../gui/SettingsView.qml" line="2353"/>
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>Prevenir que el protector de pantallas inicie o la pantalla entre en modo dormir durante la transmisión.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2382"/>
+        <location filename="../gui/SettingsView.qml" line="2404"/>
         <source>Capture system keyboard shortcuts</source>
         <translation>Capturar los atajos de teclado del sistema</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2390"/>
+        <location filename="../gui/SettingsView.qml" line="2412"/>
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>Esto permite capturar los atajos de teclado de todo el sistema, como Alt+Tab, que normalmente serían manejados por el sistema operativo del cliente durante la transmisión.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2420"/>
+        <location filename="../gui/SettingsView.qml" line="2442"/>
         <source>in fullscreen</source>
         <translation>en pantalla completa</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2424"/>
+        <location filename="../gui/SettingsView.qml" line="2446"/>
         <source>always</source>
         <translation>siempre</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2464"/>
+        <location filename="../gui/SettingsView.qml" line="2487"/>
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>Cuando está marcada, la pantalla táctil actúa como un trackpad. Si no está marcada, la pantalla táctil controlará directamente el puntero del ratón.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1766"/>
+        <location filename="../gui/SettingsView.qml" line="1941"/>
         <source>Optimize game settings for streaming</source>
         <translation>Optimizar la configuración del juego para la transmisión</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1128"/>
+        <location filename="../gui/SettingsView.qml" line="342"/>
+        <source>Show advanced and experimental options</source>
+        <translation>Mostrar opciones avanzadas y experimentales</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="352"/>
+        <source>Shows options meant for troubleshooting and testing: renderer and video decoder, frame interpolation engines, experimental video formats and network test switches. Hidden options keep their current values.</source>
+        <translation>Muestra opciones para solucionar problemas y hacer pruebas: renderizador y decodificador de vídeo, motores de interpolación de fotogramas, formatos de vídeo experimentales e interruptores de pruebas de red. Las opciones ocultas conservan sus valores actuales.</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="1302"/>
         <source>Renderer</source>
         <translation>Renderizador</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1145"/>
+        <location filename="../gui/SettingsView.qml" line="1320"/>
         <source>Auto (recommended) — let the system pick the most stable hardware decoding path</source>
         <translation>Automático — Recomendado: deja que el sistema elija la ruta de decodificación por hardware más estable</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1146"/>
+        <location filename="../gui/SettingsView.qml" line="1321"/>
         <source>Direct3D 11 — always use D3D11VA; works with the NV-OF / DirectML / NCNN interpolation engines</source>
         <translation>Direct3D 11 — fija D3D11VA; compatible con los motores de interpolación NV-OF / DirectML / NCNN</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1147"/>
+        <location filename="../gui/SettingsView.qml" line="1322"/>
         <source>Vulkan [experimental] — built-in frame interpolation; compatibility issues on some systems (AMD APU / older NVIDIA drivers)</source>
         <translation>Vulkan [experimental] — interpolación integrada; algunos equipos (AMD APU / drivers NV antiguos) tienen problemas de compatibilidad</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1164"/>
+        <location filename="../gui/SettingsView.qml" line="1339"/>
         <source>Auto (recommended): same as upstream Moonlight&apos;s hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
@@ -1819,27 +1829,27 @@ Direct3D 11: fija explícitamente D3D11VA; el motor de interpolación puede ser 
 Vulkan [experimental]: fuerza la cascada Vulkan-first + canal de renderizado Vulkan nativo + dual-present, con motor de interpolación integrado (equivale a Generic). Problemas conocidos: con el driver NV 596.36, vkCmdDecodeVideoKHR nativo en modo ONLY provoca device-lost de NVDEC; en AMD APU el driver se bloquea en la fase de video session memory bind de 226MB; la ruta PARALLEL+SW upload tiene bajo rendimiento (80+ ms/frame). Volverá a ser la opción recomendada cuando sea estable.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1175"/>
+        <location filename="../gui/SettingsView.qml" line="1350"/>
         <source>Linux video output (frontend)</source>
         <translation>Presentación de vídeo en Linux (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1190"/>
+        <location filename="../gui/SettingsView.qml" line="1365"/>
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>Automático — Recomendado: Vulkan en aarch64 o con Zink; en los demás casos se mantiene el orden original</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1191"/>
+        <location filename="../gui/SettingsView.qml" line="1366"/>
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — prioriza la presentación con Vulkan</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1192"/>
+        <location filename="../gui/SettingsView.qml" line="1367"/>
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — mantiene el orden original (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1208"/>
+        <location filename="../gui/SettingsView.qml" line="1383"/>
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -1856,107 +1866,107 @@ Vulkan: siempre prioriza la presentación con Vulkan (libplacebo) y, si falla, v
 EGL: mantiene el orden original sin preferir Vulkan.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1264"/>
+        <location filename="../gui/SettingsView.qml" line="1439"/>
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>El renderizador Vulkan usa el motor de interpolación integrado (equivale a Generic). Para elegir otro motor de interpolación, cambie a Direct3D 11.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1282"/>
+        <location filename="../gui/SettingsView.qml" line="1457"/>
         <source>Interpolation mode:</source>
         <translation>Modo de interpolación:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1288"/>
+        <location filename="../gui/SettingsView.qml" line="1463"/>
         <source>Active (recommended)</source>
         <translation>Activo (recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1299"/>
+        <location filename="../gui/SettingsView.qml" line="1474"/>
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>El servidor envía los FPS configurados / 2 (o / 3 en pantallas de alta frecuencia) y el cliente interpola siempre al doble/triple. Poca carga en el servidor; requiere una GPU potente en el cliente.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1303"/>
+        <location filename="../gui/SettingsView.qml" line="1478"/>
         <source>Passive</source>
         <translation>Pasivo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1314"/>
+        <location filename="../gui/SettingsView.qml" line="1489"/>
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>El servidor envía los FPS configurados a plena capacidad. El cliente aumenta la proporción dinámicamente según recv%: ≥ 70% sin interpolación, 40-70% 2x, &lt; 40% 3x. Adecuado cuando el servidor no siempre puede mantener la tasa completa.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1410"/>
+        <location filename="../gui/SettingsView.qml" line="1585"/>
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY (GPU integradas / antiguas)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1414"/>
+        <location filename="../gui/SettingsView.qml" line="1589"/>
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN (no detectada; reinicie el cliente para detectarla)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1416"/>
+        <location filename="../gui/SettingsView.qml" line="1591"/>
         <source>(not detected yet)</source>
         <translation>(aún no detectada)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1420"/>
+        <location filename="../gui/SettingsView.qml" line="1595"/>
         <source>(not measured)</source>
         <translation>(sin medir)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1421"/>
+        <location filename="../gui/SettingsView.qml" line="1596"/>
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>Escalado automático de FRUC (Vulkan unified autotier v1.4.127):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1422"/>
+        <location filename="../gui/SettingsView.qml" line="1597"/>
         <source>   GPU: </source>
         <translation>   GPU: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1423"/>
+        <location filename="../gui/SettingsView.qml" line="1598"/>
         <source>   Detected tier: </source>
         <translation>   Nivel detectado: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1424"/>
+        <location filename="../gui/SettingsView.qml" line="1599"/>
         <source>   Benchmark: </source>
         <translation>   Benchmark: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1425"/>
+        <location filename="../gui/SettingsView.qml" line="1600"/>
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>En tiempo de ejecución sube y baja automáticamente entre 7 niveles (T-1..T5):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1428"/>
+        <location filename="../gui/SettingsView.qml" line="1603"/>
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (GPU con NVOF de gama media, chain exigente)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1429"/>
+        <location filename="../gui/SettingsView.qml" line="1604"/>
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (AMD/Intel sin NVOF)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1431"/>
+        <location filename="../gui/SettingsView.qml" line="1606"/>
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (FRUC mínimo)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1432"/>
+        <location filename="../gui/SettingsView.qml" line="1607"/>
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = FRUC en pausa (la GPU no da abasto; reintento tras 5 min)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1444"/>
+        <location filename="../gui/SettingsView.qml" line="1619"/>
         <source>Edge MV threshold:</source>
         <translation>Umbral de MV de bordes (Edge MV threshold):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1460"/>
+        <location filename="../gui/SettingsView.qml" line="1635"/>
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -1969,312 +1979,312 @@ Valores altos (12-16): bordes más nítidos, pero puede quedar mosaico en los l�
 Se recomienda empezar con el valor predeterminado; si los bordes interpolados se ven en bloques, bájelo a 4-6.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1653"/>
+        <location filename="../gui/SettingsView.qml" line="1828"/>
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>El ritmo de fotogramas reduce los microtirones retrasando los fotogramas que llegan demasiado pronto. También funciona con V-Sync desactivado, de modo que mantiene una latencia baja mientras suaviza la llegada irregular de fotogramas.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1736"/>
+        <location filename="../gui/SettingsView.qml" line="1911"/>
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>Silenciar el audio de la transmisión cuando VipleStream no sea la ventana activa</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1747"/>
+        <location filename="../gui/SettingsView.qml" line="1922"/>
         <source>Mutes VipleStream&apos;s audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>Silencia el audio de VipleStream cuando sale de la transmisión con Alt+Tab o hace clic en otra ventana.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1777"/>
+        <location filename="../gui/SettingsView.qml" line="1952"/>
         <source>Quit app on host PC after ending stream</source>
         <translation>Salir de la aplicación en el PC anfitrión después de terminar la transmisión</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1787"/>
+        <location filename="../gui/SettingsView.qml" line="1962"/>
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>Esto cerrará la aplicación o el juego que estás transmitiendo cuando termines tu transmisión. ¡Perderás todo el progreso que no hayas guardado!</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1865"/>
+        <location filename="../gui/SettingsView.qml" line="2041"/>
         <source>Design</source>
         <translation>Diseño</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1872"/>
+        <location filename="../gui/SettingsView.qml" line="2048"/>
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>Seguro: cuadrícula editorial, cabecera más sobria.
 Audaz: estilo de portada de revista, títulos de gran tamaño.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1888"/>
+        <location filename="../gui/SettingsView.qml" line="2064"/>
         <source>Safe</source>
         <translation>Seguro</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1889"/>
+        <location filename="../gui/SettingsView.qml" line="2065"/>
         <source>Bold</source>
         <translation>Audaz</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2057"/>
+        <location filename="../gui/SettingsView.qml" line="2233"/>
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>Debe reiniciar VipleStream para que este cambio surta efecto</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2161"/>
+        <location filename="../gui/SettingsView.qml" line="2337"/>
         <source>Updates your Discord status to display the name of the game you&apos;re streaming. The status reads &quot;Playing &lt;game&gt; · via VipleStream&quot; with the VipleStream icon.</source>
         <translation>Actualiza su estado de Discord para mostrar el nombre del juego que está transmitiendo. El estado muestra &quot;Playing &lt;game&gt; · via VipleStream&quot; con el icono de VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2187"/>
+        <location filename="../gui/SettingsView.qml" line="362"/>
         <source>VR Streaming (Steam Frame)</source>
         <translation>Transmisión VR (Steam Frame)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2196"/>
+        <location filename="../gui/SettingsView.qml" line="371"/>
         <source>Resolution per eye</source>
         <translation>Resolución por ojo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2220"/>
+        <location filename="../gui/SettingsView.qml" line="395"/>
         <source>Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.</source>
         <translation>Menos píxeles que codificar, enviar y decodificar significa menor latencia. El host puede seguir renderizando a una resolución mayor y reducirla.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2225"/>
+        <location filename="../gui/SettingsView.qml" line="400"/>
         <source>Extra field of view (overscan)</source>
         <translation>Campo de visión adicional (overscan)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2233"/>
-        <location filename="../gui/SettingsView.qml" line="2259"/>
-        <location filename="../gui/SettingsView.qml" line="2285"/>
+        <location filename="../gui/SettingsView.qml" line="408"/>
+        <location filename="../gui/SettingsView.qml" line="434"/>
+        <location filename="../gui/SettingsView.qml" line="460"/>
         <source>Off</source>
         <translation>Desactivado</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2246"/>
+        <location filename="../gui/SettingsView.qml" line="421"/>
         <source>Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.</source>
         <translation>Renderiza un poco más allá del borde de cada ojo para que al girar la cabeza no aparezcan bordes vacíos.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2251"/>
+        <location filename="../gui/SettingsView.qml" line="426"/>
         <source>Pick the newest frame this late</source>
         <translation>Esperar para elegir el fotograma más reciente</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2272"/>
+        <location filename="../gui/SettingsView.qml" line="447"/>
         <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
         <translation>Espera unos milisegundos antes de elegir qué fotograma mostrar, para que sea más reciente. Un valor demasiado alto hace que el visor se salte fotogramas.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2277"/>
+        <location filename="../gui/SettingsView.qml" line="452"/>
         <source>Sharper centre (foveated encoding)</source>
         <translation>Centro más nítido (codificación foveada)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2298"/>
+        <location filename="../gui/SettingsView.qml" line="473"/>
         <source>Spends more of the stream&apos;s pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.</source>
         <translation>Dedica más píxeles de la transmisión a la zona central y menos a los bordes de cada ojo. El tamaño de la transmisión no cambia.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2304"/>
+        <location filename="../gui/SettingsView.qml" line="479"/>
         <source>Stream at half the headset refresh rate</source>
         <translation>Transmitir a la mitad de la frecuencia de actualización del visor</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2314"/>
+        <location filename="../gui/SettingsView.qml" line="489"/>
         <source>The game renders and streams at half rate while the headset still displays at full rate. Halves the load on the host and the network.</source>
         <translation>El juego se renderiza y se transmite a la mitad de frecuencia, mientras el visor sigue mostrando a frecuencia completa. Reduce a la mitad la carga del host y de la red.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2320"/>
+        <location filename="../gui/SettingsView.qml" line="495"/>
         <source>Synthesize the in-between frames</source>
         <translation>Sintetizar los fotogramas intermedios</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2331"/>
+        <location filename="../gui/SettingsView.qml" line="506"/>
         <source>With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.</source>
         <translation>Con la transmisión a media frecuencia, los objetos en movimiento se desplazan hacia delante en los refrescos sin fotograma nuevo, en lugar de volver a mostrar el fotograma anterior.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2391"/>
+        <location filename="../gui/SettingsView.qml" line="2413"/>
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>NOTA: Algunos atajos de teclado como Ctrl+Alt+Supr en Windows no pueden ser interceptados por ninguna aplicación, incluida VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2552"/>
+        <location filename="../gui/SettingsView.qml" line="2575"/>
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>Procesar la entrada del mando cuando VipleStream está en segundo plano</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2563"/>
+        <location filename="../gui/SettingsView.qml" line="2586"/>
         <source>Allows VipleStream to capture gamepad inputs even if it&apos;s not the current window in focus</source>
         <translation>Permite que VipleStream capture la entrada de los mandos aunque no sea la ventana activa</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2572"/>
+        <location filename="../gui/SettingsView.qml" line="2595"/>
         <source>Network (MP-QUIC)</source>
         <translation>Red (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2582"/>
+        <location filename="../gui/SettingsView.qml" line="2605"/>
         <source>Enable MP-QUIC multipath transport</source>
         <translation>Activar el transporte multiruta MP-QUIC</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2592"/>
+        <location filename="../gui/SettingsView.qml" line="2615"/>
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>Usa QUIC multiruta (RFC 9443) para transmitir. Permite la conmutación por error entre WiFi y datos móviles, y la agregación de ancho de banda con dos tarjetas de red. Requiere soporte del servidor.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2597"/>
+        <location filename="../gui/SettingsView.qml" line="2620"/>
         <source>Path scheduler</source>
         <translation>Planificador de rutas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2613"/>
+        <location filename="../gui/SettingsView.qml" line="2636"/>
         <source>Auto (per stream type)</source>
         <translation>Automático (por tipo de flujo)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2614"/>
+        <location filename="../gui/SettingsView.qml" line="2637"/>
         <source>Lowest latency</source>
         <translation>Latencia mínima</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2615"/>
+        <location filename="../gui/SettingsView.qml" line="2638"/>
         <source>Bandwidth aggregation</source>
         <translation>Agregación de ancho de banda</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2616"/>
+        <location filename="../gui/SettingsView.qml" line="2639"/>
         <source>Redundant (all paths)</source>
         <translation>Redundante (todas las rutas)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2617"/>
+        <location filename="../gui/SettingsView.qml" line="2640"/>
         <source>Earliest completion</source>
         <translation>Finalización más temprana</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2626"/>
+        <location filename="../gui/SettingsView.qml" line="2649"/>
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>Automático: vídeo=ECF, audio=redundante, control=min-RTT. Agregación: round-robin entre todas las tarjetas de red para obtener el máximo ancho de banda.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2645"/>
+        <location filename="../gui/SettingsView.qml" line="2669"/>
         <source>Video decoder</source>
         <translation>Descodificador de vídeo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2670"/>
-        <location filename="../gui/SettingsView.qml" line="2723"/>
+        <location filename="../gui/SettingsView.qml" line="2695"/>
+        <location filename="../gui/SettingsView.qml" line="2748"/>
         <source>Automatic (Recommended)</source>
         <translation>Automático (recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2674"/>
+        <location filename="../gui/SettingsView.qml" line="2699"/>
         <source>Force software decoding</source>
         <translation>Forzar la decodificación por software</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2678"/>
+        <location filename="../gui/SettingsView.qml" line="2703"/>
         <source>Force hardware decoding</source>
         <translation>Forzar la decodificación por hardware</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2693"/>
+        <location filename="../gui/SettingsView.qml" line="2718"/>
         <source>Video codec</source>
         <translation>Códec de vídeo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2727"/>
+        <location filename="../gui/SettingsView.qml" line="2752"/>
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2731"/>
+        <location filename="../gui/SettingsView.qml" line="2756"/>
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2739"/>
+        <location filename="../gui/SettingsView.qml" line="2764"/>
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave (latencia ultrabaja en LAN)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2777"/>
+        <location filename="../gui/SettingsView.qml" line="2803"/>
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>Activar YUV 4:4:4 (Experimental)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2800"/>
+        <location filename="../gui/SettingsView.qml" line="2826"/>
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>Bueno para la transmisión de juegos de escritorio y de texto pesado, pero no se recomienda para juegos de ritmo rápido.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2802"/>
+        <location filename="../gui/SettingsView.qml" line="2828"/>
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>YUV 4:4:4 no es compatible con este PC.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2808"/>
+        <location filename="../gui/SettingsView.qml" line="2835"/>
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>Desbloqueo del límite de bits (Experimental)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2827"/>
+        <location filename="../gui/SettingsView.qml" line="2854"/>
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>Encuentre automáticamente los ordenadores de la red local (recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2848"/>
+        <location filename="../gui/SettingsView.qml" line="2875"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Detectar automáticamente las conexiones bloqueadas (recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1378"/>
+        <location filename="../gui/SettingsView.qml" line="1553"/>
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>Calidad — Mejor calidad visual, mayor carga de GPU</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1379"/>
+        <location filename="../gui/SettingsView.qml" line="1554"/>
         <source>Balanced — Recommended (default)</source>
         <translation>Equilibrado — Recomendado (predeterminado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1380"/>
+        <location filename="../gui/SettingsView.qml" line="1555"/>
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>Rendimiento — Menor latencia, adecuado para iGPU</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1792"/>
+        <location filename="../gui/SettingsView.qml" line="1967"/>
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>NAT Traversal (relé de señalización)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1802"/>
+        <location filename="../gui/SettingsView.qml" line="1977"/>
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>URL del relé (p. ej. ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1813"/>
+        <location filename="../gui/SettingsView.qml" line="1988"/>
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>PSK del relé (clave precompartida, deje vacío si no hay)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1823"/>
+        <location filename="../gui/SettingsView.qml" line="1998"/>
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>Opcional: ayuda a conectar cuando ambos extremos están detrás de NAT. Ejecute viplestream-relay en un servidor con IP pública.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1832"/>
+        <location filename="../gui/SettingsView.qml" line="2008"/>
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>Forzar transmisión por el relé (para probar el túnel UDP)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1389"/>
+        <location filename="../gui/SettingsView.qml" line="1564"/>
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2283,7 +2293,7 @@ Equilibrado: búsqueda de 8 vecinos + suavizado temporal (~8 ms en iGPU)
 Rendimiento: búsqueda de 4 vecinos + procesamiento mínimo (~6 ms en iGPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1842"/>
+        <location filename="../gui/SettingsView.qml" line="2018"/>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>Siempre transmitir vía el relé incluso si el host es directamente accesible. Útil para verificar el túnel UDP cuando una VPN (p. ej. Cloudflare WARP) permitiría de otro modo el /launch directo.</translation>
     </message>

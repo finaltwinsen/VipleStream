@@ -11,9 +11,12 @@
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
+#include "network.h"
+#include "rtsp.h"
 #include "stun.h"
 #include "udp_tunnel.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <chrono>
@@ -22,6 +25,7 @@
 #include <sstream>
 #include <mutex>
 #include <map>
+#include <shared_mutex>
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -90,6 +94,11 @@ namespace relay {
     std::mutex g_state_mtx;
     std::map<std::string, std::function<void(udp_tunnel::Flow)>> g_pending_allocates;
     std::function<void(const uint8_t *, size_t)> g_tunnel_binary_handler;
+    // §REVIEW-1103：g_tunnel_binary_handler 專用的讀寫鎖。原本在 g_state_mtx 內複製一份、出鎖才呼叫，
+    // TunnelSession 解構時 set_tunnel_binary_handler({}) 不會等正在跑的呼叫 → 對已釋放的 TunnelSession
+    // dispatch（UAF）。改成呼叫期間持共用鎖、換 handler 時持獨占鎖，換完就保證沒有舊的呼叫還在跑。
+    // handler 內不可再呼叫 set_tunnel_binary_handler（會死結）；目前的 TunnelSession::dispatch 不會。
+    std::shared_mutex g_tunnel_handler_mtx;
     std::function<void(udp_tunnel::Flow)> g_allocated_notify_handler;
 
     // Buffer of role="b" allocated notifications that arrived before a
@@ -102,11 +111,24 @@ namespace relay {
     std::vector<udp_tunnel::Flow> g_pending_notifications;
   }  // namespace
 
+  // §REVIEW-1103：剛失敗的 socket 呼叫是不是只是逾時（SO_RCVTIMEO）／被中斷
+  static bool socket_error_is_timeout() {
+#ifdef _WIN32
+    const int e = WSAGetLastError();
+    return e == WSAETIMEDOUT || e == WSAEWOULDBLOCK || e == WSAEINTR;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+#endif
+  }
+
   class Transport {
   public:
     virtual ~Transport() = default;
     virtual int send(const void *data, int len) = 0;
     virtual int recv(void *buf, int len) = 0;
+    // §REVIEW-1103：recv() 回負值時分辨「只是逾時」與「連線已斷」。原本一律當逾時，
+    // TCP RST／網路斷掉時主迴圈永遠偵測不到、不會重連。必須緊接在 recv() 之後呼叫。
+    virtual bool recvTimedOut(int n) = 0;
     virtual void close() = 0;
     virtual void setRecvTimeout(int ms) = 0;
   };
@@ -134,6 +156,9 @@ namespace relay {
     }
     int recv(void *buf, int len) override {
       return ::recv(_sock, (char *)buf, len, 0);
+    }
+    bool recvTimedOut(int) override {
+      return socket_error_is_timeout();
     }
     void close() override {
       closesocket(_sock);
@@ -171,9 +196,15 @@ namespace relay {
       SSL_set_fd(_ssl, (int)_sock);
       SSL_set_tlsext_host_name(_ssl, host.c_str());  // SNI for Cloudflare
 
-      if (SSL_connect(_ssl) <= 0) {
+      const int connect_rc = SSL_connect(_ssl);
+      if (connect_rc <= 0) {
+        // §REVIEW-1103：對方直接斷線（SSL_ERROR_SYSCALL）時錯誤佇列是空的，ERR_reason_error_string 回 NULL，
+        // 直接 << 會 strlen(NULL) 讓整個 server 崩潰（11-03 relay 不穩時每 1～2 分鐘崩一次）。
+        const unsigned long ssl_err = ERR_get_error();
+        const char *reason = ssl_err ? ERR_reason_error_string(ssl_err) : nullptr;
         BOOST_LOG(warning) << "[RELAY] TLS handshake failed: "
-          << ERR_reason_error_string(ERR_get_error());
+          << (reason ? reason : "no OpenSSL error (peer closed or socket error)")
+          << " (ssl_error=" << SSL_get_error(_ssl, connect_rc) << ", err=0x" << std::hex << ssl_err << std::dec << ')';
         SSL_free(_ssl); _ssl = nullptr;
         SSL_CTX_free(_ctx); _ctx = nullptr;
         return false;
@@ -194,6 +225,14 @@ namespace relay {
     }
     int recv(void *buf, int len) override {
       return SSL_read(_ssl, buf, len);
+    }
+    bool recvTimedOut(int n) override {
+      const int err = SSL_get_error(_ssl, n);
+      if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return true;
+      // SO_RCVTIMEO 到期時 OpenSSL 可能回 SYSCALL（Windows 的 WSAETIMEDOUT 不在它的可重試清單），
+      // 這時看 socket 錯誤碼；其他（ZERO_RETURN、SSL、真的 socket 錯誤）都是連線斷了。
+      if (err == SSL_ERROR_SYSCALL) return socket_error_is_timeout();
+      return false;
     }
     void setRecvTimeout(int ms) override {
 #ifdef _WIN32
@@ -344,7 +383,7 @@ namespace relay {
     uint8_t hdr[2];
     int n = tr.recv(hdr, 1);
     if (n == 0) { f.opcode = 0xFF; return f; }
-    if (n < 0)  { f.opcode = 0xFE; return f; }
+    if (n < 0)  { f.opcode = tr.recvTimedOut(n) ? 0xFE : 0xFF; return f; }  // §REVIEW-1103
     if (!recv_exact(tr, hdr + 1, 1)) { f.opcode = 0xFF; return f; }
 
 
@@ -382,15 +421,16 @@ namespace relay {
   // Binary frames are routed to the tunnel handler here so that binary
   // tunnel data is never dropped even when the relay thread is parked
   // inside a nested loop (e.g. the tcp_tunnel_open handler).
+  // §REVIEW-1103：把 relay 送來的 binary frame 交給目前的 tunnel handler（呼叫期間持共用鎖）
+  static void deliver_tunnel_binary(const uint8_t *data, size_t len) {
+    std::shared_lock<std::shared_mutex> l(g_tunnel_handler_mtx);
+    if (g_tunnel_binary_handler) g_tunnel_binary_handler(data, len);
+  }
+
   static std::string ws_recv(Transport &tr) {
     auto f = ws_recv_frame(tr);
     if (f.opcode == 0x2) {
-      std::function<void(const uint8_t *, size_t)> h;
-      {
-        std::lock_guard<std::mutex> l(g_state_mtx);
-        h = g_tunnel_binary_handler;
-      }
-      if (h) h(f.payload.data(), f.payload.size());
+      deliver_tunnel_binary(f.payload.data(), f.payload.size());
       return "";
     }
     if (f.opcode != 0x1) return "";
@@ -529,7 +569,7 @@ namespace relay {
   }
 
   void set_tunnel_binary_handler(std::function<void(const uint8_t *, size_t)> cb) {
-    std::lock_guard<std::mutex> l(g_state_mtx);
+    std::unique_lock<std::shared_mutex> l(g_tunnel_handler_mtx);  // §REVIEW-1103：等執行中的呼叫結束
     g_tunnel_binary_handler = std::move(cb);
   }
 
@@ -827,6 +867,12 @@ namespace relay {
 
       // Main loop: publish STUN endpoint + handle incoming proxy requests
       auto lastEndpointPublish = std::chrono::steady_clock::now();
+      // §REVIEW-1103：最後一次收到 relay 任何 frame 的時間。每 ENDPOINT_PUBLISH_SEC 會送 ping、
+      // relay 會回 pong，超過三個週期都沒有任何 frame＝連線已死（半開的 TCP 不會回錯誤）→ 重連。
+      // rxSeen 讓「處理訊息本身花很久」（例如 tcp_tunnel 的巢狀迴圈）不被誤判成沒收到。
+      auto lastRx = lastEndpointPublish;
+      bool rxSeen = false;
+      constexpr auto kRxDeadAfter = std::chrono::seconds(ENDPOINT_PUBLISH_SEC * 3 + 5);
       // A single failed text-frame send no longer tears down the WS
       // connection. With SO_SNDTIMEO=10ms the send API can briefly
       // return a timeout when the Cloudflare edge is momentarily slow
@@ -836,6 +882,10 @@ namespace relay {
       while (!shutdown_event->peek()) {
         // Publish STUN endpoint periodically
         auto now = std::chrono::steady_clock::now();
+        if (rxSeen) {
+          lastRx = now;
+          rxSeen = false;
+        }
         if (now - lastEndpointPublish >= std::chrono::seconds(ENDPOINT_PUBLISH_SEC)) {
           auto ep = stun::get_endpoint();
           if (ep.valid()) {
@@ -867,12 +917,34 @@ namespace relay {
         }
 
         // Read incoming messages (short timeout — non-blocking poll)
-        std::string msg = ws_recv(*transport);
-        if (msg.empty()) {
-          // Timeout, non-text frame, or close — loop again (outer while
-          // drops out naturally if the transport is dead, because
-          // subsequent sends will fail and we'll break below).
+        // §REVIEW-1103：原本用 ws_recv()，close／錯誤／逾時都變成空字串 → 等 1 秒再試，迴圈沒有
+        // 任何跳出點，relay 一斷就永遠不重連。改看 frame 的 opcode：0xFF（關閉／錯誤）跳出重連、
+        // 長時間沒收到任何 frame 也跳出；binary frame 照舊交給 tunnel handler，但不再白等 1 秒。
+        auto frame = ws_recv_frame(*transport);
+        if (frame.opcode == 0xFF) {
+          BOOST_LOG(warning) << "[RELAY] Connection closed or read error";
+          break;
+        }
+        if (frame.opcode == 0xFE) {
+          if (std::chrono::steady_clock::now() - lastRx > kRxDeadAfter) {
+            BOOST_LOG(warning) << "[RELAY] No frame from relay for "
+                               << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - lastRx).count()
+                               << "s, treating connection as dead";
+            break;
+          }
           if (shutdown_event->view(std::chrono::seconds(1))) break;
+          continue;
+        }
+        rxSeen = true;
+        if (frame.opcode == 0x2) {
+          deliver_tunnel_binary(frame.payload.data(), frame.payload.size());
+          continue;
+        }
+        if (frame.opcode != 0x1) {
+          continue;  // ping／pong／continuation 等：只當存活訊號
+        }
+        std::string msg(frame.payload.begin(), frame.payload.end());
+        if (msg.empty()) {
           continue;
         }
 
@@ -907,6 +979,23 @@ namespace relay {
           if (path.empty() || path[0] != '/' || path.find_first_of("\r\n") != std::string::npos) {
             BOOST_LOG(warning) << "[RELAY-PROXY] Malformed or unsafe path rejected: " << path;
             continue;
+          }
+          // §REVIEW-1103：proxy 是從 127.0.0.1 打本機 HTTP，等於幫 relay 對端繞過 nvhttp 的
+          // localhost 檢查 → 只放行 client 經 relay 會用到的端點（Qt／Android 的 relay 路徑只用這幾個）。
+          {
+            const auto endpoint = path.substr(0, path.find('?'));
+            static const char *const kAllowed[] = {"/serverinfo", "/applist", "/launch", "/resume", "/cancel"};
+            bool allowed = false;
+            for (const char *a : kAllowed) {
+              if (endpoint == a) {
+                allowed = true;
+                break;
+              }
+            }
+            if (!allowed) {
+              BOOST_LOG(warning) << "[RELAY-PROXY] Path not allowed via relay: " << endpoint;
+              continue;
+            }
           }
 
           BOOST_LOG(info) << "[RELAY-PROXY] Request: " << path << " (from=" << fromUuid.substr(0, 12) << ")";
@@ -1000,6 +1089,17 @@ namespace relay {
 
           BOOST_LOG(info) << "[RELAY-TUNNEL] Opening TCP tunnel to localhost:" << targetPort
                           << " (from=" << fromUuid.substr(0, 12) << ")";
+
+          // §REVIEW-1103：target_port 來自 relay 訊息，原本不設限 → relay 對端可轉到本機任何埠
+          // （Web UI、資料庫…）。client 只會開 RTSP（Qt／Android 都是 RTSP_SETUP_PORT 對應的埠），
+          // 依目前設定的基準埠推導，其他一律拒絕。
+          if (targetPort != static_cast<int>(net::map_port(rtsp_stream::RTSP_SETUP_PORT))) {
+            BOOST_LOG(warning) << "[RELAY-TUNNEL] Rejected tunnel to non-RTSP port " << targetPort;
+            std::lock_guard<std::mutex> l(g_send_mtx);
+            ws_send(*transport, "{\"type\":\"tcp_tunnel_closed\",\"tunnel_id\":\"" + tunnelId +
+                                "\",\"from_uuid\":\"" + fromUuid + "\"}");
+            continue;
+          }
 
           // Switch WS transport to short timeout for tunnel polling
           transport->setRecvTimeout(100); // 100ms poll

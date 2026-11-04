@@ -110,6 +110,7 @@ public:
         bool pyroWaveInterop = false;
         // §VR-BUFFER（2026-10-29）：PCVR 頭盔端多緩衝幾格（0／1），見 XrVideo::Config::buffer
         int pcvrBufferFrames = 0;
+        bool pcvrBufferAuto = false;  // §VR-BUFFER-AUTO：pcvrBufferFrames 是上限，深度在 1～上限之間自動切換
         // §VR-GPU-PRIO（2026-10-29，dev）：XR VkDevice 那條 queue 的全域優先權（0＝驅動預設、1＝high、2＝realtime）
         int gpuQueuePriority = 0;
         // 2026-10-08（§VR-LATE-LATCH）：PCVR 的 frame thread 在 xrWaitFrame 返回後先等這麼久，才挑最新的串流影像交給
@@ -306,6 +307,11 @@ public:
     static constexpr int kPanelW = 1024;
     static constexpr int kPanelH = 192;
     void setPlayerPanel(const QImage& img, bool visible);
+    // 任何執行緒：字幕貼圖（kSubW×kSubH，透明底）；空的 QImage＝不顯示。平面螢幕貼在螢幕下緣內側，180°／360° 擺在置中時的
+    // 正前方偏下。不能點（射線不會跟它求交）
+    static constexpr int kSubW = 1280;
+    static constexpr int kSubH = 192;
+    void setPlayerSubtitle(const QImage& img);
 
     // ── §VR-SHELL（頭盔 VR 介面）──
     // 任何執行緒：介面畫面（Options.shellWidth×shellHeight；格式用 shellImageFormat() 才不會在 frame thread 轉換）。
@@ -361,6 +367,9 @@ private:
     void handleStateChange(XrSessionState state);
     void frameThreadMain();
     bool clearImage(VkImage img, float r, float g, float b, float a = 1.0f);
+    // m_Cmd／m_Fence／staging 可以重用了嗎（上一次送出的已完成）；還沒完成就回 false、什麼都不碰
+    bool cmdIdle(uint64_t timeoutNs);
+    void cmdSubmitted();
     // X3：loading／狀態 quad 只清一次色，之後的幀重用最後 release 的影像（a<1 時 rgb 應為預乘值）
     bool ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count, bool* ready, float r, float g, float b,
                          float a = 1.0f);
@@ -451,6 +460,14 @@ private:
     uint32_t m_PanelImageCount = 0;
     VkImage* m_PanelImages = nullptr;
     bool m_PanelUploaded = false;               // frame thread
+    std::mutex m_SubMutex;
+    QImage m_SubImg;                            // m_SubMutex
+    bool m_SubDirty = false;                    // m_SubMutex
+    std::atomic<bool> m_SubVisible{false};
+    XrSwapchain m_SubSwapchain = XR_NULL_HANDLE;
+    uint32_t m_SubImageCount = 0;
+    VkImage* m_SubImages = nullptr;
+    bool m_SubUploaded = false;                 // frame thread
     // §VR-SHELL
     std::mutex m_ShellMutex;
     QImage m_ShellImg;                          // m_ShellMutex
@@ -507,6 +524,8 @@ private:
     VkCommandPool m_CmdPool = VK_NULL_HANDLE;
     VkCommandBuffer m_Cmd = VK_NULL_HANDLE;
     VkFence m_Fence = VK_NULL_HANDLE;
+    bool m_CmdPending = false;      // m_Cmd 已送出、m_Fence 還沒確認完成（只在 frame thread 用）
+    bool m_CmdTimeoutLogged = false;
     std::mutex m_QueueMutex;
     std::vector<const char*> m_DevExts;
     VkPhysicalDeviceFeatures2 m_EnFeat2 = {};

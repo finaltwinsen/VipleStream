@@ -3583,6 +3583,7 @@ bool buildBufferPool(const VulkanCtx& ctx,
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "[VIPLE-RIFE-VK] BufferPool: blob '%s' alloc failed (%zu B)",
                          qUtf8Printable(name), bytes);
+            destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, buf);  // §REVIEW-1103：半建好的也要釋放
             destroyBufferPool(out);
             return false;
         }
@@ -3598,6 +3599,10 @@ bool buildBufferPool(const VulkanCtx& ctx,
                                         pfnCreateBuffer, pfnGetBufferMemoryRequirements,
                                         pfnAllocateMemory, pfnBindBufferMemory, pfnMapMemory,
                                         outIt->second.size, out.outReadback)) {
+                // §REVIEW-1103：createCachedHostBuffer 失敗時 out.buf 可能已建立但沒綁記憶體（APU／iGPU 上
+                // 所有 host-visible 型別都帶 DEVICE_LOCAL，findHostCachedMemoryType 必然失敗）。不清掉的話
+                // runInference 看到 buf 非空就對未綁定的 buffer 下 vkCmdCopyBuffer → device lost。
+                destroyHostBuffer(device, pfnUnmapMemory, pfnDestroyBuffer, pfnFreeMemory, out.outReadback);
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-RIFE-VK] BufferPool: out0 staging alloc failed (continuing — readback will use BAR memory)");
             }
@@ -7934,6 +7939,17 @@ bool RifeNativeExecutor::runInference(const float* in0Data,
 {
     if (!m_impl || !m_impl->initialized) return false;
     if (!in0Data || !in1Data || !out0Data) return false;
+    // §REVIEW-1103：fp16 blob（VIPLE_RIFE_VK_FP16）只有 runInferenceGpuFlow 做了 fp32↔fp16 邊界轉換，
+    // 這條路徑直接按位元組複製會把張量弄壞；明確拒絕，讓呼叫端走原本的失敗處理。
+    if (isFp16BlobEnabled()) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RIFE-VK] %s does not support fp16 blobs (VIPLE_RIFE_VK_FP16); refusing", "runInference");
+        }
+        return false;
+    }
 
     using clk = std::chrono::high_resolution_clock;
     auto ms = [](clk::duration d) {
@@ -8044,6 +8060,17 @@ bool RifeNativeExecutor::runInferenceGpu(void* cmdRaw,
                                          void* out0BufRaw)
 {
     if (!m_impl || !m_impl->initialized) return false;
+    // §REVIEW-1103：fp16 blob（VIPLE_RIFE_VK_FP16）只有 runInferenceGpuFlow 做了 fp32↔fp16 邊界轉換，
+    // 這條路徑直接按位元組複製會把張量弄壞；明確拒絕，讓呼叫端走原本的失敗處理。
+    if (isFp16BlobEnabled()) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-RIFE-VK] %s does not support fp16 blobs (VIPLE_RIFE_VK_FP16); refusing", "runInferenceGpu");
+        }
+        return false;
+    }
     auto cmd     = (VkCommandBuffer)cmdRaw;
     auto in0Buf  = (VkBuffer)in0BufRaw;
     auto in1Buf  = (VkBuffer)in1BufRaw;

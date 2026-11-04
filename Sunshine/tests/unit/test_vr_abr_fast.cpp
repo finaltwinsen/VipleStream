@@ -1,8 +1,13 @@
 /**
  * @file tests/unit/test_vr_abr_fast.cpp
- * @brief VipleStream 2.0 §VR-ABR-FAST：VR 反應式快速降碼率單元測試。
+ * @brief VipleStream 2.0 §ABR-ADAPT：VR 自適應快速碼率控制器單元測試（第 1、2、3 期）。
  */
 #include "../tests_common.h"
+
+#include <cmath>
+#include <random>
+#include <string>
+#include <vector>
 
 #include <src/vr/vr_abr_fast.h>
 
@@ -11,243 +16,918 @@ using namespace std::chrono_literals;
 
 namespace {
   constexpr int kConfigured100Mbps = 100000;
+  constexpr int kConfigured50Mbps = 50000;
   constexpr int kConfigured20Mbps = 20000;
 
   struct VrAbrFastTest : testing::Test {
     fast::steady::time_point t0 = fast::steady::now();
+
+    /// 輔助函式：讓控制器內部 delay_trend_t 進入過載狀態（模擬網路壅塞）
+    void make_trend_overuse(fast::fast_controller_t &c, fast::steady::time_point at) {
+      // 5 秒 20 ms 基準，接著急劇上升觸發 delay-trend overuse
+      for (int i = 0; i < 50; ++i) {
+        c.on_rtt(20, at + i * 100ms);
+      }
+      double rtt = 20.0;
+      for (int i = 1; i <= 20; ++i) {
+        rtt += 10.0;
+        c.on_rtt(static_cast<int>(rtt), at + 5000ms + i * 100ms);
+      }
+    }
   };
 }  // namespace
 
-// 1. 單張救不回只打 9 折（中度降碼 ×0.90）
+// ==============================================================================
+// 既有測試更新（因應 §ABR-ADAPT 規則改動更新並在註解說明）
+// ==============================================================================
+
+// 1. 單張救不回：§ABR-ADAPT 新規則下，零星丟包需伴隨延遲過載（或剛脫離過載 1.5s 內）才視為壅塞降碼打 9 折（×0.90），原因加註 +delay
 TEST_F(VrAbrFastTest, SingleFecFailedCutsByTenPercent) {
   fast::fast_controller_t c(kConfigured100Mbps);
   EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
 
+  // 延遲平穩時視為隨機丟包，不降碼
   c.on_fec_failed(1, t0);
-  EXPECT_EQ(c.state(), fast::fast_state_e::cut);
-  EXPECT_STREQ(c.last_reason(), "fec-failed-1");
+  EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
+  EXPECT_EQ(c.random_losses(), 1);
 
-  auto next = c.tick(t0);
+  // 注入延遲過載後，救不回事件即判定為壅塞觸發中度降碼（×0.90）
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);  // 先消化 delay-trend 降碼進入 hold/ramp
+  c.set_applied_kbps(100000);  // 重設為基準測試
+
+  const auto t_loss = t0 + 10000ms;
+  c.on_fec_failed(1, t_loss);
+  EXPECT_EQ(c.state(), fast::fast_state_e::cut);
+  EXPECT_STREQ(c.last_reason(), "fec-failed-1+delay");
+
+  auto next = c.tick(t_loss);
   ASSERT_TRUE(next.has_value());
   EXPECT_EQ(*next, 90000);  // 100000 * 0.90 = 90000
   EXPECT_EQ(c.applied_kbps(), 90000);
 }
 
-// 2. 1 秒內救不回 ≥ 2 張打 75 折（嚴重降碼 ×0.75）
+// 2. 1 秒內救不回 ≥ 2 張：伴隨延遲過載時觸發嚴重降碼打 75 折（×0.75），原因加註 +delay
 TEST_F(VrAbrFastTest, TwoFecFailedWithinOneSecondCutsByTwentyFivePercent) {
   fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
 
-  // 一次來 2 張救不回
-  c.on_fec_failed(2, t0);
+  const auto t_loss = t0 + 10000ms;
+  c.on_fec_failed(2, t_loss);
   EXPECT_EQ(c.state(), fast::fast_state_e::cut);
-  EXPECT_STREQ(c.last_reason(), "fec-failed-ge-2");
+  EXPECT_STREQ(c.last_reason(), "fec-failed-ge-2+delay");
 
-  auto next = c.tick(t0);
+  auto next = c.tick(t_loss);
   ASSERT_TRUE(next.has_value());
   EXPECT_EQ(*next, 75000);  // 100000 * 0.75 = 75000
 }
 
-// 2b. 1 秒內分批達到 2 張救不回亦觸發嚴重降碼
+// 2b. 1 秒內分批達到 2 張救不回亦觸發嚴重降碼（伴隨延遲過載）
 TEST_F(VrAbrFastTest, TwoFecFailedBatchedWithinOneSecond) {
   fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
 
-  c.on_fec_failed(1, t0);
-  auto t1 = c.tick(t0);
-  ASSERT_TRUE(t1.has_value());
-  EXPECT_EQ(*t1, 90000);  // 第 1 張先打 9 折
+  const auto t1 = t0 + 10000ms;
+  c.on_fec_failed(1, t1);
+  auto res1 = c.tick(t1);
+  ASSERT_TRUE(res1.has_value());
+  EXPECT_EQ(*res1, 90000);  // 第 1 張先打 9 折
 
   // 200 ms 後來第 2 張（1 秒內累積 2 張）
-  c.on_fec_failed(1, t0 + 200ms);
-  auto t2 = c.tick(t0 + 200ms);
-  ASSERT_TRUE(t2.has_value());
-  EXPECT_EQ(*t2, 67500);  // 90000 * 0.75 = 67500
+  const auto t2 = t1 + 200ms;
+  c.on_fec_failed(1, t2);
+  auto res2 = c.tick(t2);
+  ASSERT_TRUE(res2.has_value());
+  EXPECT_EQ(*res2, 67500);  // 90000 * 0.75 = 67500
 }
 
-// 3. 同一秒內第二次嚴重降碼打 60 折（×0.60）
+// 3. 同一秒內第二次嚴重降碼打 60 折（×0.60），原因加註 +delay
 TEST_F(VrAbrFastTest, SecondCriticalCutWithinSameSecondCutsToSixtyPercent) {
   fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
 
-  // 第一次嚴重降碼（例如一次 LOSS 回報 lostFrames >= 2）
-  c.on_loss(2, t0);
-  auto t1 = c.tick(t0);
-  ASSERT_TRUE(t1.has_value());
-  EXPECT_EQ(*t1, 75000);  // 100000 * 0.75 = 75000
+  const auto t1 = t0 + 10000ms;
+  c.on_loss(2, t1);
+  auto res1 = c.tick(t1);
+  ASSERT_TRUE(res1.has_value());
+  EXPECT_EQ(*res1, 75000);  // 100000 * 0.75 = 75000
+  EXPECT_STREQ(c.last_reason(), "loss-ge-2+delay");
 
-  // 500 ms 後（在 1 秒視窗內）第二次嚴重降碼（例如連線 dropBlock）
-  c.on_drop_block(t0 + 500ms);
-  auto t2 = c.tick(t0 + 500ms);
-  ASSERT_TRUE(t2.has_value());
-  EXPECT_EQ(*t2, 60000);  // 同秒內第二次嚴重：基準 100000 * 0.60 = 60000！
+  // 500 ms 後（同一秒視窗內）第二次嚴重降碼（連線 dropBlock）
+  const auto t2 = t1 + 500ms;
+  c.on_drop_block(t2);
+  auto res2 = c.tick(t2);
+  ASSERT_TRUE(res2.has_value());
+  EXPECT_EQ(*res2, 60000);  // 基準 100000 * 0.60 = 60000
+  EXPECT_STREQ(c.last_reason(), "drop-block+delay");
 }
 
-// 4. HOLD 期間（2.0 秒冷卻）禁止任何碼率回升
+// 4. HOLD 期間禁止任何碼率回升
 TEST_F(VrAbrFastTest, HoldPeriodProhibitsBitrateRamping) {
   fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
 
-  c.on_loss(2, t0);
-  auto t1 = c.tick(t0);
-  ASSERT_TRUE(t1.has_value());
-  EXPECT_EQ(*t1, 75000);
+  const auto t_cut = t0 + 10000ms;
+  c.on_loss(2, t_cut);
+  auto res = c.tick(t_cut);
+  ASSERT_TRUE(res.has_value());
+  EXPECT_EQ(*res, 75000);
   EXPECT_EQ(c.state(), fast::fast_state_e::hold);
 
-  // 在 2.0 秒內，tick 不得回升任何碼率
-  EXPECT_FALSE(c.tick(t0 + 500ms).has_value());
-  EXPECT_FALSE(c.tick(t0 + 1000ms).has_value());
-  EXPECT_FALSE(c.tick(t0 + 1500ms).has_value());
-  EXPECT_FALSE(c.tick(t0 + 1999ms).has_value());
+  // 在 HOLD 冷卻期間內（未滿 600 ms），tick 不得回升任何碼率
+  EXPECT_FALSE(c.tick(t_cut + 200ms).has_value());
+  EXPECT_FALSE(c.tick(t_cut + 400ms).has_value());
+  EXPECT_FALSE(c.tick(t_cut + 590ms).has_value());
   EXPECT_EQ(c.state(), fast::fast_state_e::hold);
   EXPECT_EQ(c.current_target_kbps(), 75000);
 }
 
-// 5. RAMP 平滑回升：滿 2.0 秒後，每 1.5 秒乾淨就 +4%×上限
-TEST_F(VrAbrFastTest, RampEveryOnePointFiveSecondsFourPercent) {
+// 5. 自適應 RAMP 平滑回升：隨 base RTT 動態調整間隔與步長
+//    §ABR-ADAPT 新規則：HOLD 與 RAMP 間隔隨 base RTT 縮放，回升初期採乘法增加
+TEST_F(VrAbrFastTest, AdaptiveRampTimingAndStep) {
   fast::fast_controller_t c(kConfigured100Mbps);
+  // 給定穩定 base 200 ms
+  for (int i = 0; i < 50; ++i) {
+    c.on_rtt(200, t0 + i * 100ms);
+  }
+  const auto t_cut = t0 + 5000ms;
+  // 透過 12 筆 persistent 丟包觸發降碼
+  c.on_loss(12, t_cut);
+  c.tick(t_cut);
+  EXPECT_EQ(c.applied_kbps(), 75000);
+  EXPECT_EQ(c.state(), fast::fast_state_e::hold);
 
-  c.on_loss(2, t0);
-  c.tick(t0);  // target = 75000，進入 hold
-
-  // 滿 2.0 秒（t0 + 2000ms）解除 HOLD，轉入 RAMP
-  c.tick(t0 + 2000ms);
+  // base 200 ms 時 HOLD 長度 = 8 * 200 = 1600 ms
+  EXPECT_FALSE(c.tick(t_cut + 1590ms).has_value());
+  c.tick(t_cut + 1600ms);
   EXPECT_EQ(c.state(), fast::fast_state_e::ramp);
 
-  // 再過 1.5 秒（t0 + 3500ms）：第一次回升 +4%×100000 = +4000
-  auto r1 = c.tick(t0 + 3500ms);
+  // base 200 ms 時 RAMP 間隔 = clamp(4 * 200, 250, 1000) = 800 ms
+  // 滿 800 ms（t_cut + 2400ms）第一次回升：乘法步長 = 75000 * 0.08 * 0.8s = 4800 kbps
+  EXPECT_FALSE(c.tick(t_cut + 2390ms).has_value());
+  auto r1 = c.tick(t_cut + 2400ms);
   ASSERT_TRUE(r1.has_value());
-  EXPECT_EQ(*r1, 79000);  // 75000 + 4000 = 79000
-  EXPECT_EQ(c.state(), fast::fast_state_e::ramp);
-
-  // 再過 1.5 秒（t0 + 5000ms）：第二次回升 +4000
-  auto r2 = c.tick(t0 + 5000ms);
-  ASSERT_TRUE(r2.has_value());
-  EXPECT_EQ(*r2, 83000);
-  EXPECT_EQ(c.state(), fast::fast_state_e::ramp);
-
-  // 尚未滿 1.5 秒不回升
-  EXPECT_FALSE(c.tick(t0 + 5500ms).has_value());
+  EXPECT_EQ(*r1, 79800);  // 75000 + 4800 = 79800
 }
 
-// 6. 下限：max(10 Mbps, 設定碼率 × 30%)
+// 6. 下限：§ABR-ADAPT 改為技術最低值 k_floor_tech_kbps = 2000 kbps，不再採用 10 Mbps / 30%
 TEST_F(VrAbrFastTest, LowerBoundFloorProtection) {
-  // 案例 A：設定 20 Mbps，30% 是 6 Mbps < 10 Mbps，下限鎖定 10 Mbps (10000 Kbps)
+  // 案例 A：設定 20 Mbps，舊規則下限為 10 Mbps；新規則技術下限為 2 Mbps (2000 Kbps)
   {
     fast::fast_controller_t c(kConfigured20Mbps);
-    EXPECT_EQ(c.floor_kbps(), 10000);
+    EXPECT_EQ(c.floor_kbps(), 2000);
 
-    // 連續多次嚴重降碼
-    c.on_loss(2, t0);
-    c.tick(t0);  // 20000 * 0.75 = 15000
-    c.on_loss(2, t0 + 2s);
-    c.tick(t0 + 2s);  // 15000 * 0.75 = 11250
-    c.on_loss(2, t0 + 4s);
-    auto next = c.tick(t0 + 4s);  // 11250 * 0.75 = 8437 < 10000 -> 限制在 10000
-    ASSERT_TRUE(next.has_value());
-    EXPECT_EQ(*next, 10000);
+    make_trend_overuse(c, t0);
+    c.tick(t0 + 7000ms);
+
+    auto t = t0 + 10000ms;
+    for (int i = 0; i < 15; ++i) {
+      t += 2000ms;
+      c.on_loss(2, t);
+      c.tick(t);
+    }
+    // 應降至 2000 kbps 且不得低於 2000
+    EXPECT_EQ(c.applied_kbps(), 2000);
   }
 
-  // 案例 B：設定 100 Mbps，30% 是 30 Mbps > 10 Mbps，下限為 30 Mbps (30000 Kbps)
+  // 案例 B：設定 100 Mbps，舊規則下限為 30 Mbps；新規則技術下限仍為 2 Mbps (2000 Kbps)
   {
     fast::fast_controller_t c(kConfigured100Mbps);
-    EXPECT_EQ(c.floor_kbps(), 30000);
+    EXPECT_EQ(c.floor_kbps(), 2000);
+  }
 
-    c.on_loss(2, t0);
-    c.tick(t0);  // 75000
-    c.on_loss(2, t0 + 2s);
-    c.tick(t0 + 2s);  // 56250
-    c.on_loss(2, t0 + 4s);
-    c.tick(t0 + 4s);  // 42187
-    c.on_loss(2, t0 + 6s);
-    c.tick(t0 + 6s);  // 31640
-    c.on_loss(2, t0 + 8s);
-    auto next = c.tick(t0 + 8s);  // 31640 * 0.75 = 23730 < 30000 -> 限制在 30000
-    ASSERT_TRUE(next.has_value());
-    EXPECT_EQ(*next, 30000);
+  // 案例 C：設定碼率低於 2000 kbps（如 1500 kbps）時，下限不可高於設定值（保留 B039-2）
+  {
+    fast::fast_controller_t c(1500);
+    EXPECT_EQ(c.floor_kbps(), 1500);
   }
 }
 
-// 7. 防振盪：RAMP 中 5 秒內又降碼 → 上限暫時壓到 applied × 0.85 維持 30 秒
+// 7. 防振盪：RAMP 中 5 秒內再次降碼 -> 上限暫壓至 applied × 0.85 維持 30 秒（整段保留）
 TEST_F(VrAbrFastTest, AntiOscillationPenaltyThirtySeconds) {
   fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
 
-  c.on_loss(2, t0);
-  c.tick(t0);  // target = 75000，進入 hold
+  const auto t_cut1 = t0 + 10000ms;
+  c.on_loss(2, t_cut1);
+  c.tick(t_cut1);  // target = 75000, 進入 hold
 
-  // t0 + 2000ms 進入 RAMP
-  c.tick(t0 + 2000ms);
+  // 解除 HOLD 進入 RAMP
+  c.tick(t_cut1 + 2000ms);
   EXPECT_EQ(c.state(), fast::fast_state_e::ramp);
 
-  // t0 + 3500ms（滿 1.5s）回升到 79000
-  auto r1 = c.tick(t0 + 3500ms);
-  ASSERT_TRUE(r1.has_value());
-  EXPECT_EQ(*r1, 79000);
+  // 回升到 79000
+  c.set_applied_kbps(79000);
 
-  // 於 t0 + 4000ms（進入 RAMP 後 2 秒，小於 5 秒）遭遇網路阻力再次觸發降碼
-  // 此時 applied 為 79000，防振盪上限 penalty_cap = 79000 * 0.85 = 67150
-  c.on_loss(2, t0 + 4000ms);
-  auto cut1 = c.tick(t0 + 4000ms);
-  ASSERT_TRUE(cut1.has_value());
-  // 79000 * 0.75 = 59250 (小於 penalty_cap 67150)
-  EXPECT_EQ(*cut1, 59250);
+  // 於進入 RAMP 後 2 秒遭遇阻力再次降碼，applied 為 79000，防振盪上限 penalty_cap = 79000 * 0.85 = 67150
+  const auto t_cut2 = t_cut1 + 3000ms;
+  c.on_loss(2, t_cut2);
+  auto cut2 = c.tick(t_cut2);
+  ASSERT_TRUE(cut2.has_value());
+  EXPECT_EQ(*cut2, 59250);  // 79000 * 0.75 = 59250
 
-  // t0 + 6000ms 解除 HOLD 再次進入 RAMP
-  c.tick(t0 + 6000ms);
+  // 解除 HOLD 再次進入 RAMP
+  c.tick(t_cut2 + 2000ms);
   EXPECT_EQ(c.state(), fast::fast_state_e::ramp);
 
-  // 期間持續回升，但必須受限於 67150，持續 30 秒（至 t0 + 34000ms）
-  fast::steady::time_point t = t0 + 6000ms;
-  while (t < t0 + 33000ms) {
-    t += 1500ms;
+  // 期間持續回升，但必須受限於 penalty_cap (67150)，維持 30 秒
+  auto t = t_cut2 + 2000ms;
+  while (t < t_cut2 + 29000ms) {
+    t += 1000ms;
     c.tick(t);
     EXPECT_LE(c.current_target_kbps(), 67150);
   }
 
-  // 超過 30 秒（t0 + 35000ms）後，防振盪懲罰解除，上限恢復為 100000
-  EXPECT_EQ(c.effective_cap_kbps(t0 + 35000ms), 100000);
-  t = t0 + 35000ms;
-  c.tick(t);
-  t += 1500ms;
-  c.tick(t);
-  EXPECT_GT(c.current_target_kbps(), 67150);
+  // 超過 30 秒後防振盪懲罰解除，上限恢復為 100000
+  EXPECT_EQ(c.effective_cap_kbps(t_cut2 + 35000ms), 100000);
 }
 
-// 8. 補充測試：中度訊號（LATCH 連續 2 筆負 slack、主連線送達率 < 90%）與嚴重訊號（RTT 膨脹、dropBlock）
+// 8. 訊號來源判定：LATCH 延遲中度降碼、送達率低中度降碼、delay-trend 快速降碼
 TEST_F(VrAbrFastTest, ModerateAndCriticalSignalSources) {
-  // LATCH 連續 2 筆 slack < -1000 us 觸發中度降碼
+  // LATCH 連續 2 筆 slack < -1000 us 觸發中度降碼（不改行為）
   {
     fast::fast_controller_t c(kConfigured100Mbps);
     c.on_latch_slack(-1200, t0);
-    EXPECT_EQ(c.state(), fast::fast_state_e::healthy);  // 第 1 筆不觸發
+    EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
     c.on_latch_slack(-1500, t0 + 100ms);
-    EXPECT_EQ(c.state(), fast::fast_state_e::cut);      // 連續 2 筆觸發中度
+    EXPECT_EQ(c.state(), fast::fast_state_e::cut);
     EXPECT_STREQ(c.last_reason(), "latch-slack-late");
     auto next = c.tick(t0 + 100ms);
     ASSERT_TRUE(next.has_value());
     EXPECT_EQ(*next, 90000);
   }
 
-  // 主連線送達率 < 90% 觸發中度降碼
+  // 主連線送達率 < 90% 伴隨延遲過載時觸發中度降碼
   {
     fast::fast_controller_t c(kConfigured100Mbps);
-    c.on_delivery(88.5, t0);
+    make_trend_overuse(c, t0);
+    c.tick(t0 + 7000ms);
+    c.set_applied_kbps(100000);
+
+    const auto t = t0 + 10000ms;
+    c.on_delivery(88.5, t);
     EXPECT_EQ(c.state(), fast::fast_state_e::cut);
-    EXPECT_STREQ(c.last_reason(), "delivery-low");
-    auto next = c.tick(t0);
+    EXPECT_STREQ(c.last_reason(), "delivery-low+delay");
+    auto next = c.tick(t);
     ASSERT_TRUE(next.has_value());
     EXPECT_EQ(*next, 90000);
   }
 
-  // RTT 超過基準 15 ms 持續 500 ms 觸發嚴重降碼
+  // RTT 膨脹由 delay_trend_t 判定：進入 overuse 時觸發 delay-trend 降碼（單次 ×0.85）
   {
     fast::fast_controller_t c(kConfigured100Mbps);
-    c.on_rtt(10, t0);  // baseline = 10 ms
-    c.on_rtt(26, t0 + 100ms);  // 26 >= 10 + 15，開始超標
-    EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
-    c.on_rtt(28, t0 + 599ms);  // 持續未滿 500 ms（499 ms）
-    EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
-    c.on_rtt(30, t0 + 601ms);  // 持續滿 501 ms -> 觸發嚴重降碼
-    EXPECT_EQ(c.state(), fast::fast_state_e::cut);
-    EXPECT_STREQ(c.last_reason(), "rtt-inflation");
-    auto next = c.tick(t0 + 601ms);
-    ASSERT_TRUE(next.has_value());
-    EXPECT_EQ(*next, 75000);
+    // 5 秒 base 20 ms
+    for (int i = 0; i < 50; ++i) {
+      c.on_rtt(20, t0 + i * 100ms);
+      EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
+    }
+    // 急劇上升觸發 delay-trend
+    double rtt = 20.0;
+    bool cut_triggered = false;
+    for (int i = 1; i <= 20; ++i) {
+      rtt += 10.0;
+      const auto t = t0 + 5000ms + i * 100ms;
+      c.on_rtt(static_cast<int>(rtt), t);
+      auto res = c.tick(t);
+      if (res.has_value() && !cut_triggered) {
+        cut_triggered = true;
+        EXPECT_STREQ(c.last_reason(), "delay-trend");
+        EXPECT_EQ(*res, 85000);  // 100000 * 0.85 = 85000
+      }
+    }
+    EXPECT_TRUE(cut_triggered);
   }
+}
+
+// ==============================================================================
+// 任務 §ABR-ADAPT 第 1 期第 1 段新增測試（情境 6 ~ 10）
+// ==============================================================================
+
+// 6. 控制器：行動網路抖動＋零星丟包不降碼
+//    fast_controller_t(20000)，餵情境 1 的 RTT，並每 3 s on_fec_failed(1) 一次，跑 60 s，每 100 ms tick
+//    -> 碼率不得低於 20000 × 0.9，random_losses() > 0。
+TEST_F(VrAbrFastTest, ControllerMobileJitterAndSporadicLossDoesNotCut) {
+  fast::fast_controller_t c(kConfigured20Mbps);
+  std::mt19937 rng(1);
+  std::uniform_real_distribution<double> dist(0.0, 25.0);
+
+  for (int i = 0; i < 600; ++i) {
+    const auto t = t0 + i * 100ms;
+    const double rtt = 38.0 + dist(rng);
+    c.on_rtt(static_cast<int>(rtt), t);
+
+    if (i > 0 && i % 80 == 0) {  // 每 8 秒一次 FEC 救不回 (n=1)：20 秒視窗內最多 3 次，低於 §ABR-LOSSRATE 門檻
+      c.on_fec_failed(1, t);
+    }
+
+    c.tick(t);
+  }
+
+  EXPECT_GE(c.applied_kbps(), static_cast<int>(kConfigured20Mbps * 0.9));
+  EXPECT_GT(c.random_losses(), 0);
+  EXPECT_EQ(c.cuts(), 0);
+}
+
+// 7. 控制器：持續大量丟包仍會降
+//    同上但每 200 ms on_fec_failed(2) -> 3 s 內要降碼，原因含 +persistent。
+TEST_F(VrAbrFastTest, ControllerPersistentHeavyLossTriggersCut) {
+  fast::fast_controller_t c(kConfigured20Mbps);
+  std::mt19937 rng(1);
+  std::uniform_real_distribution<double> dist(0.0, 25.0);
+
+  bool cut_triggered = false;
+  std::string cut_reason = "";
+  double cut_latency_sec = -1.0;
+
+  for (int i = 0; i < 30; ++i) {  // 最長跑 3 秒
+    const auto t = t0 + i * 100ms;
+    const double rtt = 38.0 + dist(rng);
+    c.on_rtt(static_cast<int>(rtt), t);
+
+    if (i % 2 == 0) {  // 每 200 ms 丟包 2 張 (每秒累計 10 權重)
+      c.on_fec_failed(2, t);
+    }
+
+    auto res = c.tick(t);
+    if (res.has_value() && !cut_triggered) {
+      cut_triggered = true;
+      cut_reason = c.last_reason();
+      cut_latency_sec = i * 0.1;
+    }
+  }
+
+  EXPECT_TRUE(cut_triggered);
+  EXPECT_LE(cut_latency_sec, 3.0);
+  EXPECT_NE(cut_reason.find("+persistent"), std::string::npos);
+}
+
+// 8. 控制器：bufferbloat 降碼並回升
+//    configured 50000，情境 3 的延遲上升 -> 降碼（原因 delay-trend）；
+//    之後 RTT 回到 base -> 最終爬回 ≥ 45000，並驗證回升前段是乘法（單步增量隨 applied 變大）。
+TEST_F(VrAbrFastTest, ControllerBufferbloatCutAndRampRecovery) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+
+  // 10 秒 base 20 ms 平穩
+  for (int i = 0; i < 100; ++i) {
+    const auto t = t0 + i * 100ms;
+    c.on_rtt(20, t);
+    c.tick(t);
+  }
+
+  // 開始 bufferbloat 每 100 ms +5 ms
+  const auto t_bloat = t0 + 10000ms;
+  double rtt = 20.0;
+  bool cut_triggered = false;
+  for (int i = 1; i <= 20; ++i) {
+    rtt += 5.0;
+    const auto t = t_bloat + i * 100ms;
+    c.on_rtt(static_cast<int>(rtt), t);
+    auto res = c.tick(t);
+    if (res.has_value() && !cut_triggered) {
+      cut_triggered = true;
+      EXPECT_STREQ(c.last_reason(), "delay-trend");
+    }
+  }
+  EXPECT_TRUE(cut_triggered);
+
+  // RTT 回復為 base (20 ms)，持續推進觀測回升步長
+  const auto t_recover = t_bloat + 2000ms;
+  std::vector<int> ramp_steps;
+  int prev_applied = c.applied_kbps();
+
+  for (int i = 1; i <= 600; ++i) {
+    const auto t = t_recover + i * 100ms;
+    c.on_rtt(20, t);
+    auto res = c.tick(t);
+    if (res.has_value() && std::string(c.last_reason()) == "ramp-clean") {
+      ramp_steps.push_back(*res - prev_applied);
+      prev_applied = *res;
+    }
+  }
+
+  // 最終應成功爬回 >= 45000
+  EXPECT_GE(c.applied_kbps(), 45000);
+
+  // 驗證回升乘法階段：在 applied < 0.8 * last_congested 時，步長隨 applied 變大
+  // 尋找連續兩步乘法階段步長
+  bool mult_step_growth_found = false;
+  for (size_t i = 1; i < ramp_steps.size(); ++i) {
+    if (ramp_steps[i] > ramp_steps[i - 1]) {
+      mult_step_growth_found = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(mult_step_growth_found);
+}
+
+// 9. 下限：連續嚴重丟包可降到 2000 但不低於 2000
+TEST_F(VrAbrFastTest, LowerBoundTechFloorProtectionAt2000) {
+  fast::fast_controller_t c(kConfigured20Mbps);
+  EXPECT_EQ(c.floor_kbps(), 2000);
+
+  // 營造持續延遲過載環境使丟包皆觸發嚴重降碼
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+
+  auto t = t0 + 10000ms;
+  for (int i = 0; i < 20; ++i) {
+    t += 2000ms;
+    c.on_loss(5, t);
+    c.tick(t);
+  }
+
+  EXPECT_EQ(c.applied_kbps(), 2000);
+  EXPECT_EQ(c.floor_kbps(), 2000);
+}
+
+// 10. HOLD 長度隨 RTT：base 5 ms 時 HOLD ≈ 600 ms；base 200 ms 時 HOLD = 1600 ms
+TEST_F(VrAbrFastTest, HoldDurationAdaptsToBaseRtt) {
+  // 案例 A：base 5 ms -> 8 * 5 = 40 ms，clamp 至下限 600 ms
+  {
+    fast::fast_controller_t c(kConfigured20Mbps);
+    for (int i = 0; i < 50; ++i) {
+      c.on_rtt(5, t0 + i * 100ms);
+    }
+    const auto t_cut = t0 + 5000ms;
+    c.on_loss(12, t_cut);  // 12 筆 persistent 觸發降碼
+    c.tick(t_cut);
+    EXPECT_EQ(c.state(), fast::fast_state_e::hold);
+
+    // 590 ms 仍處於 HOLD
+    EXPECT_FALSE(c.tick(t_cut + 590ms).has_value());
+    EXPECT_EQ(c.state(), fast::fast_state_e::hold);
+
+    // 610 ms 已解除 HOLD 轉入 RAMP
+    c.tick(t_cut + 610ms);
+    EXPECT_EQ(c.state(), fast::fast_state_e::ramp);
+  }
+
+  // 案例 B：base 200 ms -> 8 * 200 = 1600 ms
+  {
+    fast::fast_controller_t c(kConfigured20Mbps);
+    for (int i = 0; i < 50; ++i) {
+      c.on_rtt(200, t0 + i * 100ms);
+    }
+    const auto t_cut = t0 + 5000ms;
+    c.on_loss(12, t_cut);
+    c.tick(t_cut);
+    EXPECT_EQ(c.state(), fast::fast_state_e::hold);
+
+    // 1590 ms 仍處於 HOLD
+    EXPECT_FALSE(c.tick(t_cut + 1590ms).has_value());
+    EXPECT_EQ(c.state(), fast::fast_state_e::hold);
+
+    // 1610 ms 已解除 HOLD 轉入 RAMP
+    c.tick(t_cut + 1610ms);
+    EXPECT_EQ(c.state(), fast::fast_state_e::ramp);
+  }
+}
+
+// ==============================================================================
+// 任務 §ABR-ADAPT 第 2、3 期新增測試（情境 1 ~ 7）
+// ==============================================================================
+
+// 1. OWD 可用時，RTT 劇烈膨脹但 OWD 平穩 -> 不降碼；OWD 膨脹（每 100 ms +5 ms）-> 1 s 內降碼，原因 owd-trend
+TEST_F(VrAbrFastTest, OwdActiveSuppressesRttAndTriggersOwdTrendCut) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+
+  // 先建立 5 秒平穩基準（RTT = 20 ms，OWD = -300.0 ms 含固定時鐘偏移）
+  for (int i = 0; i < 50; ++i) {
+    const auto t = t0 + i * 100ms;
+    c.on_rtt(20, t);
+    c.on_owd(-300.0, t);
+    c.tick(t);
+  }
+  EXPECT_TRUE(c.owd_active(t0 + 4900ms));
+
+  // RTT 劇烈膨脹（每 100 ms +10 ms），但 OWD 維持平穩 -> RTT 雖進 overuse，但因 OWD 可用而不觸發降碼
+  const auto t_rtt_spike = t0 + 5000ms;
+  int rtt = 20;
+  for (int i = 1; i <= 20; ++i) {
+    rtt += 10;
+    const auto t = t_rtt_spike + i * 100ms;
+    c.on_owd(-300.0, t);
+    c.on_rtt(rtt, t);
+    EXPECT_FALSE(c.tick(t).has_value());
+  }
+  EXPECT_EQ(c.trend().state(), fast::trend_state_e::overuse);
+  EXPECT_EQ(c.owd_trend().state(), fast::trend_state_e::normal);
+  EXPECT_FALSE(c.congested(t_rtt_spike + 2000ms));
+  EXPECT_EQ(c.cuts(), 0);
+  EXPECT_EQ(c.applied_kbps(), kConfigured50Mbps);
+
+  // OWD 開始膨脹（每 100 ms +5 ms）-> 1 秒內觸發降碼，原因 owd-trend
+  const auto t_owd_rise = t_rtt_spike + 2000ms;
+  double owd = -300.0;
+  bool cut_triggered = false;
+  double cut_latency_sec = -1.0;
+  for (int i = 1; i <= 20; ++i) {
+    owd += 5.0;
+    const auto t = t_owd_rise + i * 100ms;
+    c.on_owd(owd, t);
+    auto res = c.tick(t);
+    if (res.has_value() && !cut_triggered) {
+      cut_triggered = true;
+      cut_latency_sec = i * 0.1;
+      EXPECT_STREQ(c.last_reason(), "owd-trend");
+      EXPECT_EQ(*res, 42500);  // 50000 * 0.85 = 42500
+      EXPECT_TRUE(c.congested(t));
+    }
+  }
+  EXPECT_TRUE(cut_triggered);
+  EXPECT_LE(cut_latency_sec, 1.0);
+}
+
+// 2. OWD 停 3 s 後 -> 回到看 RTT（RTT 膨脹會觸發 delay-trend）
+TEST_F(VrAbrFastTest, OwdInactiveAfterThreeSecondsFallsBackToRtt) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+
+  // 前 5 秒同時餵 OWD 與 RTT
+  for (int i = 0; i < 50; ++i) {
+    const auto t = t0 + i * 100ms;
+    c.on_rtt(20, t);
+    c.on_owd(15.0, t);
+  }
+  const auto t_last_owd = t0 + 4900ms;
+  EXPECT_TRUE(c.owd_active(t_last_owd));
+
+  // OWD 停餵 3 秒，期間 RTT 維持平穩 20 ms
+  for (int i = 1; i <= 30; ++i) {
+    const auto t = t_last_owd + i * 100ms;
+    c.on_rtt(20, t);
+    c.tick(t);
+  }
+  const auto t_after_3s = t_last_owd + 3000ms;
+  EXPECT_FALSE(c.owd_active(t_after_3s));
+
+  // 此時 RTT 膨脹（每 100 ms +5 ms）應能正常觸發 delay-trend 降碼
+  double rtt = 20.0;
+  bool cut_triggered = false;
+  for (int i = 1; i <= 20; ++i) {
+    rtt += 5.0;
+    const auto t = t_after_3s + i * 100ms;
+    c.on_rtt(static_cast<int>(rtt), t);
+    auto res = c.tick(t);
+    if (res.has_value() && !cut_triggered) {
+      cut_triggered = true;
+      EXPECT_STREQ(c.last_reason(), "delay-trend");
+      EXPECT_EQ(*res, 42500);
+    }
+  }
+  EXPECT_TRUE(cut_triggered);
+}
+
+// 3. 鏈路飽和：applied 50000、rates recv=20000 send=40000 -> delay 類降碼一步落到 ≈ 50000×0.5=25000（factor 夾在 0.5）；
+//    recv=36000 send=40000 -> factor=0.855 -> 夾 0.85
+TEST_F(VrAbrFastTest, SaturatedRatesCutDirectlyToLinkCapacity) {
+  // 案例 A：recv=20000, send=40000 -> 0.95 * 20000 / 40000 = 0.475 -> clamp 至 0.5 -> 50000 * 0.5 = 25000
+  {
+    fast::fast_controller_t c(kConfigured50Mbps);
+    make_trend_overuse(c, t0);
+    c.tick(t0 + 7000ms);
+    c.set_applied_kbps(50000);
+
+    const auto t_cut = t0 + 8000ms;
+    c.on_rates(20000, 40000, t_cut);
+    EXPECT_EQ(c.recv_kbps(), 20000);
+    EXPECT_EQ(c.send_kbps(), 40000);
+
+    c.on_loss(2, t_cut);
+    auto res = c.tick(t_cut);
+    ASSERT_TRUE(res.has_value());
+    EXPECT_STREQ(c.last_reason(), "loss-ge-2+delay");
+    EXPECT_EQ(*res, 25000);
+  }
+
+  // 案例 B：recv=36000, send=40000 (send >= recv * 1.05 = 37800) -> 0.95 * 36000 / 40000 = 0.855 -> clamp 至 0.85
+  // 若無 saturated rates，loss-ge-2+delay 原本為 0.75 (37500)；有飽和 rates 則夾在 0.85 (50000 * 0.85 = 42500)
+  {
+    fast::fast_controller_t c(kConfigured50Mbps);
+    make_trend_overuse(c, t0);
+    c.tick(t0 + 7000ms);
+    c.set_applied_kbps(50000);
+
+    const auto t_cut = t0 + 8000ms;
+    c.on_rates(36000, 40000, t_cut);
+    c.on_loss(2, t_cut);
+    auto res = c.tick(t_cut);
+    ASSERT_TRUE(res.has_value());
+    EXPECT_STREQ(c.last_reason(), "loss-ge-2+delay");
+    EXPECT_EQ(*res, 42500);
+  }
+}
+
+// 4. 畫質飽和：QP 一直 20 -> RAMP 不回升；QP 改 30 -> 恢復回升
+TEST_F(VrAbrFastTest, QualitySaturationBlocksRampUntilQpRises) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  for (int i = 0; i < 50; ++i) {
+    c.on_rtt(20, t0 + i * 100ms);
+  }
+
+  // 先降碼並解除 HOLD 進入 RAMP（applied = 37500）
+  const auto t_cut = t0 + 5000ms;
+  c.on_loss(12, t_cut);
+  c.tick(t_cut);
+  EXPECT_EQ(c.applied_kbps(), 37500);
+
+  const auto t_ramp = t_cut + 1000ms;
+  c.on_quality(2000, 1, t_ramp);  // HEVC, QP = 20.00 <= 22.00
+  c.tick(t_ramp);
+  EXPECT_EQ(c.state(), fast::fast_state_e::ramp);
+  EXPECT_TRUE(c.quality_saturated(t_ramp));
+  EXPECT_STREQ(c.ramp_block_reason(t_ramp), "quality");
+
+  // 持續 5 秒每 500 ms 餵 QP = 20 -> RAMP 停住不回升
+  for (int i = 1; i <= 50; ++i) {
+    const auto t = t_ramp + i * 100ms;
+    if (i % 5 == 0) {
+      c.on_quality(2000, 1, t);
+    }
+    EXPECT_FALSE(c.tick(t).has_value());
+  }
+  EXPECT_EQ(c.applied_kbps(), 37500);
+  EXPECT_EQ(c.ramps(), 0);
+
+  // QP 改為 30（3000）-> 解除畫質飽和並恢復回升
+  const auto t_unblock = t_ramp + 5000ms;
+  c.on_quality(3000, 1, t_unblock);
+  EXPECT_FALSE(c.quality_saturated(t_unblock));
+  EXPECT_STREQ(c.ramp_block_reason(t_unblock), "none");
+
+  for (int i = 1; i <= 20; ++i) {
+    const auto t = t_unblock + i * 100ms;
+    if (i % 5 == 0) {
+      c.on_quality(3000, 1, t);
+    }
+    c.tick(t);
+  }
+  EXPECT_GT(c.applied_kbps(), 37500);
+  EXPECT_GT(c.ramps(), 0);
+}
+
+// 5. quality-trim：QP 一直 15、HEALTHY -> 10 s 後開始每 3 s −5%，cuts() 不變、trims() 增加、狀態不進 HOLD；
+//    QP 回到 25 -> 停止 trim 並開始回升
+TEST_F(VrAbrFastTest, QualityTrimReducesBitrateWithoutHoldAndRecoversWhenQpRises) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
+
+  // t = 0 起餵 QP = 15 (1500)，前 9.9 秒尚未滿 10 秒門檻，不觸發 trim
+  c.on_quality(1500, 1, t0);
+  for (int i = 1; i < 100; ++i) {
+    const auto t = t0 + i * 100ms;
+    if (i % 5 == 0) {
+      c.on_quality(1500, 1, t);
+    }
+    EXPECT_FALSE(c.tick(t).has_value());
+  }
+  EXPECT_EQ(c.trims(), 0);
+  EXPECT_EQ(c.cuts(), 0);
+  EXPECT_EQ(c.applied_kbps(), 50000);
+
+  // 滿 10 秒（t0 + 10000ms）：第一次 quality-trim（-5% -> 47500），狀態維持 HEALTHY（不進 HOLD）
+  const auto t_10s = t0 + 10000ms;
+  c.on_quality(1500, 1, t_10s);
+  auto trim1 = c.tick(t_10s);
+  ASSERT_TRUE(trim1.has_value());
+  EXPECT_EQ(*trim1, 47500);
+  EXPECT_STREQ(c.last_reason(), "quality-trim");
+  EXPECT_EQ(c.trims(), 1);
+  EXPECT_EQ(c.cuts(), 0);
+  EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
+
+  // 10.1s ~ 12.9s 之間未滿 3 秒間隔，不再次 trim，且因畫質飽和不進入 RAMP
+  for (int i = 101; i < 130; ++i) {
+    const auto t = t0 + i * 100ms;
+    if (i % 5 == 0) {
+      c.on_quality(1500, 1, t);
+    }
+    EXPECT_FALSE(c.tick(t).has_value());
+    EXPECT_NE(c.state(), fast::fast_state_e::hold);
+  }
+  EXPECT_EQ(c.trims(), 1);
+
+  // 滿 13 秒（距上次 trim 滿 3 秒）：第二次 quality-trim（round(47500 * 0.95) = 45125）
+  const auto t_13s = t0 + 13000ms;
+  c.on_quality(1500, 1, t_13s);
+  auto trim2 = c.tick(t_13s);
+  ASSERT_TRUE(trim2.has_value());
+  EXPECT_EQ(*trim2, 45125);
+  EXPECT_EQ(c.trims(), 2);
+  EXPECT_EQ(c.cuts(), 0);
+  EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
+
+  // QP 回到 25 (2500) -> 停止 trim 並轉入 RAMP 開始回升
+  const auto t_recover = t0 + 14000ms;
+  c.on_quality(2500, 1, t_recover);
+  for (int i = 0; i <= 30; ++i) {
+    const auto t = t_recover + i * 100ms;
+    if (i > 0 && i % 5 == 0) {
+      c.on_quality(2500, 1, t);
+    }
+    c.tick(t);
+  }
+  EXPECT_EQ(c.trims(), 2);
+  EXPECT_EQ(c.cuts(), 0);
+  EXPECT_GT(c.applied_kbps(), 45125);
+  EXPECT_GT(c.ramps(), 0);
+}
+
+// 6. 解碼：p95 = 0.9×period -> 不回升；連 2 筆 1.1×period -> decode-overload 降 10%；之後 4 s 沒樣本 -> 解除
+TEST_F(VrAbrFastTest, DecodeTightBlocksRampAndOverloadCutsByTenPercent) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  for (int i = 0; i < 50; ++i) {
+    c.on_rtt(20, t0 + i * 100ms);
+  }
+
+  // 設定 applied = 40000 並推進 tick 使其進入 RAMP
+  const auto t_start = t0 + 5000ms;
+  c.set_applied_kbps(40000);
+  c.tick(t_start);
+  EXPECT_EQ(c.state(), fast::fast_state_e::ramp);
+
+  // p95 = 0.9 * period (9000 us / 10000 us) -> 解碼吃緊，RAMP 不回升
+  c.on_decode(9000, 10000, t_start);
+  EXPECT_STREQ(c.ramp_block_reason(t_start), "decode");
+  for (int i = 1; i <= 15; ++i) {
+    const auto t = t_start + i * 100ms;
+    if (i == 10) {
+      c.on_decode(9000, 10000, t);
+    }
+    EXPECT_FALSE(c.tick(t).has_value());
+  }
+  EXPECT_EQ(c.applied_kbps(), 40000);
+  EXPECT_EQ(c.ramps(), 0);
+
+  // 連續 2 筆 p95 = 1.1 * period (11000 us / 10000 us) -> 觸發 decode-overload 降碼 10%
+  const auto t_ov1 = t_start + 2000ms;
+  c.on_decode(11000, 10000, t_ov1);
+  EXPECT_EQ(c.state(), fast::fast_state_e::ramp);  // 第 1 筆尚未降碼
+
+  const auto t_ov2 = t_start + 3000ms;
+  c.on_decode(11000, 10000, t_ov2);
+  EXPECT_EQ(c.state(), fast::fast_state_e::cut);
+  EXPECT_STREQ(c.last_reason(), "decode-overload");
+
+  auto cut_res = c.tick(t_ov2);
+  ASSERT_TRUE(cut_res.has_value());
+  EXPECT_EQ(*cut_res, 36000);  // 40000 * 0.90 = 36000
+
+  // 之後 4 秒沒有新 decode 樣本 -> 3 秒有效期限屆滿後解除阻擋並恢復回升
+  for (int i = 1; i <= 40; ++i) {
+    const auto t = t_ov2 + i * 100ms;
+    c.on_rtt(20, t);
+    c.tick(t);
+  }
+  const auto t_after_4s = t_ov2 + 4000ms;
+  EXPECT_STREQ(c.ramp_block_reason(t_after_4s), "none");
+  EXPECT_GT(c.applied_kbps(), 36000);
+  EXPECT_GT(c.ramps(), 0);
+}
+
+// 7. ramp_block_reason 依優先序回傳正確（"delay" > "decode" > "quality" > "none"）
+TEST_F(VrAbrFastTest, RampBlockReasonFollowsPriorityOrder) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+
+  // 初始無任何阻擋 -> "none"
+  EXPECT_STREQ(c.ramp_block_reason(t0), "none");
+
+  // 1. 僅畫質飽和 (QP = 20 <= 22) -> "quality"
+  c.on_quality(2000, 1, t0);
+  EXPECT_STREQ(c.ramp_block_reason(t0), "quality");
+
+  // 2. 同時解碼吃緊 (p95 = 9000 > 8500) 與畫質飽和 -> 優先回傳 "decode"
+  c.on_decode(9000, 10000, t0);
+  EXPECT_STREQ(c.ramp_block_reason(t0), "decode");
+
+  // 3. 同時延遲過載、解碼吃緊、畫質飽和 -> 優先回傳 "delay"
+  make_trend_overuse(c, t0);
+  const auto t_over = t0 + 7000ms;
+  c.on_quality(2000, 1, t_over);
+  c.on_decode(9000, 10000, t_over);
+  EXPECT_STREQ(c.ramp_block_reason(t_over), "delay");
+
+  // 4. 當 OWD 可用且平穩時，delay 改看 OWD（normal），應退回次高優先序 "decode"
+  for (int i = 0; i < 10; ++i) {
+    c.on_owd(10.0, t_over + i * 50ms);
+  }
+  const auto t_owd_clean = t_over + 450ms;
+  c.on_quality(2000, 1, t_owd_clean);
+  c.on_decode(9000, 10000, t_owd_clean);
+  EXPECT_STREQ(c.ramp_block_reason(t_owd_clean), "decode");
+
+  // 5. 解碼恢復正常 (p95 = 5000 <= 8500)，應退回 "quality"
+  c.on_decode(5000, 10000, t_owd_clean);
+  EXPECT_STREQ(c.ramp_block_reason(t_owd_clean), "quality");
+
+  // 6. 畫質不再飽和 (QP = 28 > 22)，應退回 "none"
+  c.on_quality(2800, 1, t_owd_clean);
+  EXPECT_STREQ(c.ramp_block_reason(t_owd_clean), "none");
+}
+
+
+// §ABR-LOSSRATE（11-04 桌球實測）：延遲平穩但每 3 秒一張救不回 -> 視為跟碼率有關，降 10% 並暫壓上限；不低於 10 Mbps
+TEST_F(VrAbrFastTest, SustainedRandomLossCutsByLossRateButNotBelowTenMbps) {
+  fast::fast_controller_t c(kConfigured20Mbps);
+  std::vector<int> cuts;
+  for (int i = 0; i < 3000; ++i) {  // 300 秒
+    const auto t = t0 + i * 100ms;
+    c.on_rtt(30, t);
+    if (i > 0 && i % 30 == 0) {
+      c.on_fec_failed(1, t);
+    }
+    auto r = c.tick(t);
+    if (r.has_value() && std::string(c.last_reason()) == "loss-rate") {
+      cuts.push_back(*r);
+    }
+  }
+  ASSERT_FALSE(cuts.empty());
+  EXPECT_EQ(cuts.front(), 18000);  // 20000 × 0.90
+  EXPECT_GE(c.applied_kbps(), 10000);
+  EXPECT_GE(c.loss_rate_cuts(), 1);
+}
+
+// §ABR-LOSSRATE：零星（每 15 秒一張）不觸發
+TEST_F(VrAbrFastTest, SparseRandomLossDoesNotTriggerLossRate) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  for (int i = 0; i < 1200; ++i) {
+    const auto t = t0 + i * 100ms;
+    c.on_rtt(30, t);
+    if (i > 0 && i % 150 == 0) {
+      c.on_fec_failed(1, t);
+    }
+    c.tick(t);
+  }
+  EXPECT_EQ(c.loss_rate_cuts(), 0);
+  EXPECT_EQ(c.cuts(), 0);
+}
+
+// 11-04：同一次塞車連降兩刀，塞車點要記第一刀前的值；之後回升接近塞車點要慢（每秒 ≤ 0.5%）
+TEST_F(VrAbrFastTest, CongestionEpisodeKeepsFirstCutPointAndRampsSlowlyNearIt) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(75000);
+  c.tick(t0);
+  ASSERT_EQ(c.applied_kbps(), 75000);
+  make_trend_overuse(c, t0);  // 第一刀 delay-trend
+  c.tick(t0 + 7000ms);
+  const int after_first = c.applied_kbps();
+  ASSERT_LT(after_first, 75000);
+  EXPECT_EQ(c.last_congested_kbps(), 75000);
+  // 1.6 秒後同一次塞車的第二刀（丟包＋延遲）
+  c.on_fec_failed(1, t0 + 7600ms);
+  c.tick(t0 + 7600ms);
+  EXPECT_EQ(c.last_congested_kbps(), 75000);
+
+  // 延遲回到平穩後回升：從 0.8×75000＝60000 以上起算，每秒最多 +0.5%
+  int prev = c.applied_kbps();
+  auto prev_t = t0 + 7600ms;
+  for (int i = 1; i <= 1200; ++i) {
+    const auto t = t0 + 7600ms + i * 100ms;
+    c.on_rtt(25, t);
+    auto r = c.tick(t);
+    if (r.has_value() && std::string(c.last_reason()) == "ramp-clean" && prev >= 60000) {
+      const double dt = std::chrono::duration<double>(t - prev_t).count();
+      EXPECT_LE(*r - prev, static_cast<int>(prev * 0.005) + 1);
+      EXPECT_GE(dt, 0.99);
+    }
+    if (r.has_value()) {
+      prev = *r;
+      prev_t = t;
+    }
+  }
+}
+
+// §ABR-RATCHET：30 秒沒再塞車後，塞車點每秒往上放寬 0.1%，最多 +50%
+TEST_F(VrAbrFastTest, CongestionPointRelaxesWhenQuiet) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(75000);
+  c.tick(t0);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  ASSERT_EQ(c.last_congested_kbps(), 75000);
+  const int lc0 = c.effective_congested_kbps();
+  for (int i = 1; i <= 600; ++i) {  // 60 秒平穩
+    const auto t = t0 + 7000ms + i * 100ms;
+    c.on_rtt(25, t);
+    c.tick(t);
+  }
+  const int lc60 = c.effective_congested_kbps();
+  EXPECT_GE(lc60, static_cast<int>(lc0 * 1.02));
+  EXPECT_LE(lc60, static_cast<int>(lc0 * 1.04));
+  for (int i = 601; i <= 6500; ++i) {
+    const auto t = t0 + 7000ms + i * 100ms;
+    c.on_rtt(25, t);
+    c.tick(t);
+  }
+  EXPECT_EQ(c.effective_congested_kbps(), static_cast<int>(75000 * 1.5));
+  EXPECT_EQ(c.applied_kbps(), 75000);  // 平穩夠久要回到上限
 }

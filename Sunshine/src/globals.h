@@ -58,6 +58,7 @@ namespace mail {
   MAIL(bitrate_change);  // VipleStream: adaptive bitrate (kbps)
   MAIL(fps_change);      // VipleStream: dynamic FPS change from client
   MAIL(vr_refresh);      // VipleStream 2.0 §VR: LOSS → 開一波 intra refresh（值 = wave 長度，幀）
+  MAIL(audio_status);    // VipleStream §AUD-MON: 擷取健康狀態（audio::status_e），control 執行緒轉給 client
 #undef MAIL
 
 }  // namespace mail

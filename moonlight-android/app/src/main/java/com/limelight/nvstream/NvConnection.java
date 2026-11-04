@@ -22,6 +22,7 @@ import java.security.cert.X509Certificate;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -48,9 +49,16 @@ public class NvConnection {
     private String uniqueId;
     private ConnectionContext context;
     private static Semaphore connectionAllowed = new Semaphore(1);
+    // §REVIEW-1104：這個連線是否真的拿到了 connectionAllowed，以及是否已被要求停止。
+    // 原本 stop() 一律 release()：連線還在 HTTP 階段（還沒 acquire）就被停時會多還一次，計數變 2，
+    // start 執行緒之後照樣把連線建起來（沒人會再停它）。
+    private final AtomicBoolean holdsConnectionPermit = new AtomicBoolean(false);
+    private volatile boolean stopRequested = false;
     private final boolean isMonkey;
     private final Context appContext;
     private RelayTcpTunnel relayTunnel;  // VipleStream: RTSP tunnel for relay
+    // §REVIEW-1104：記錄本次 serverinfo 或 launch/resume 是否走過 relay，stop() 清掉 relayTunnel 後旗標仍保留
+    private volatile boolean usedRelay = false;
 
     public NvConnection(Context appContext, ComputerDetails.AddressTuple host, int httpsPort, String uniqueId, StreamConfiguration config, LimelightCryptoProvider cryptoProvider, X509Certificate serverCert)
     {
@@ -72,11 +80,17 @@ public class NvConnection {
     }
 
     // VipleStream: Set relay configuration for NAT traversal
-    public void setRelayConfig(String relayUrl, String relayPsk, String serverUuid, String stunAddress) {
+    public void setRelayConfig(String relayUrl, String relayPsk, String serverUuid, String stunAddress, int stunPunchPort) {
         context.relayUrl = relayUrl;
         context.relayPsk = relayPsk;
         context.serverUuid = serverUuid;
         context.stunAddress = stunAddress;
+        context.stunPunchPort = stunPunchPort;  // §REVIEW-1104
+    }
+
+    // §REVIEW-1104：公開本次 serverinfo 或 launch/resume 是否走過 relay（stop() 清掉 relayTunnel 後旗標仍保留）
+    public boolean isUsingRelay() {
+        return usedRelay;
     }
 
     private static SecretKey generateRiAesKey() {
@@ -97,7 +111,141 @@ public class NvConnection {
         return new SecureRandom().nextInt();
     }
 
+    // §REVIEW-1104（使用者決策：開多路徑＝要更流暢）：把目前有網際網路的 Wi-Fi／行動網路／乙太網路介面交給原生層。
+    // 原本只在連線開始時列一次；現在網路有變動（Wi-Fi 斷、行動網路連上）時也會重交，QUIC 的路徑復原執行緒才看得到新介面
+    private void injectNetInterfaces(ConnectivityManager cm) {
+        try {
+            injectNetInterfacesUnchecked(cm);
+        } catch (Exception e) {
+            // 網路回呼執行緒上不可以丟例外出去（網路正在變動時查屬性可能失敗）
+            LimeLog.warning("[VIPLE-MPQUIC] Failed to enumerate interfaces: " + e.getMessage());
+        }
+    }
+
+    private void injectNetInterfacesUnchecked(ConnectivityManager cm) {
+        Network[] networks = cm.getAllNetworks();
+        if (networks != null) {
+            java.util.ArrayList<String> nameList = new java.util.ArrayList<>();
+            java.util.ArrayList<Integer> typeList = new java.util.ArrayList<>();
+            java.util.ArrayList<Integer> familyList = new java.util.ArrayList<>();
+            java.util.ArrayList<byte[]> addrList = new java.util.ArrayList<>();
+
+            for (Network net : networks) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+                LinkProperties props = cm.getLinkProperties(net);
+                if (caps == null || props == null) continue;
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET))
+                    continue;
+
+                int transport = -1;
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))
+                    transport = NetworkCapabilities.TRANSPORT_WIFI;
+                else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))
+                    transport = NetworkCapabilities.TRANSPORT_CELLULAR;
+                else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+                    transport = NetworkCapabilities.TRANSPORT_ETHERNET;
+                if (transport < 0) continue;
+
+                String ifName = props.getInterfaceName();
+                if (ifName == null) ifName = "unknown";
+
+                for (android.net.LinkAddress la : props.getLinkAddresses()) {
+                    InetAddress a = la.getAddress();
+                    if (a.isLoopbackAddress()) continue;
+                    byte[] raw = a.getAddress();
+                    int family = (raw.length == 4) ? 2 : 10; // AF_INET=2, AF_INET6=10
+                    nameList.add(ifName);
+                    typeList.add(transport);
+                    familyList.add(family);
+                    addrList.add(raw);
+                    LimeLog.info("[VIPLE-MPQUIC] Interface: " + ifName
+                            + " type=" + transport + " addr=" + a.getHostAddress());
+                }
+            }
+
+            if (!nameList.isEmpty()) {
+                String[] names = nameList.toArray(new String[0]);
+                int[] types = new int[typeList.size()];
+                int[] families = new int[familyList.size()];
+                for (int i = 0; i < typeList.size(); i++) {
+                    types[i] = typeList.get(i);
+                    families[i] = familyList.get(i);
+                }
+                byte[][] addrs = addrList.toArray(new byte[0][]);
+                MoonBridge.setNetInterfaces(names, types, families, addrs);
+            }
+        }
+    }
+
+    // §REVIEW-1104：串流期間讓行動網路保持連線待命，並監看網路變動。只在開多路徑時啟用，stop() 時釋放
+    private ConnectivityManager.NetworkCallback cellKeepaliveCallback;
+    private ConnectivityManager.NetworkCallback netChangeCallback;
+
+    private void startMultipathNetworkWatch(final ConnectivityManager cm) {
+        try {
+            android.net.NetworkRequest cellRequest = new android.net.NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build();
+            cellKeepaliveCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    LimeLog.info("[VIPLE-MPQUIC] cellular keepalive: network available");
+                    injectNetInterfaces(cm);
+                }
+            };
+            cm.requestNetwork(cellRequest, cellKeepaliveCallback);
+            LimeLog.info("[VIPLE-MPQUIC] cellular keepalive requested for this session");
+        } catch (Exception e) {
+            cellKeepaliveCallback = null;
+            LimeLog.warning("[VIPLE-MPQUIC] cellular keepalive request failed: " + e.getMessage());
+        }
+        try {
+            android.net.NetworkRequest anyRequest = new android.net.NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build();
+            netChangeCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    injectNetInterfaces(cm);
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    LimeLog.info("[VIPLE-MPQUIC] network lost - refreshing interface list");
+                    injectNetInterfaces(cm);
+                }
+
+                @Override
+                public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
+                    injectNetInterfaces(cm);
+                }
+            };
+            cm.registerNetworkCallback(anyRequest, netChangeCallback);
+        } catch (Exception e) {
+            netChangeCallback = null;
+            LimeLog.warning("[VIPLE-MPQUIC] network change watch failed: " + e.getMessage());
+        }
+    }
+
+    private void stopMultipathNetworkWatch() {
+        ConnectivityManager cm = (ConnectivityManager) appContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) {
+            return;
+        }
+        if (cellKeepaliveCallback != null) {
+            try { cm.unregisterNetworkCallback(cellKeepaliveCallback); } catch (Exception ignored) {}
+            cellKeepaliveCallback = null;
+        }
+        if (netChangeCallback != null) {
+            try { cm.unregisterNetworkCallback(netChangeCallback); } catch (Exception ignored) {}
+            netChangeCallback = null;
+        }
+    }
+
     public void stop() {
+        stopRequested = true;  // §REVIEW-1104：start 執行緒拿到 permit 後會看這個旗標
+        stopMultipathNetworkWatch();  // §REVIEW-1104：釋放行動網路保活與網路監看
         // Interrupt any pending connection. This is thread-safe.
         MoonBridge.interruptConnection();
 
@@ -115,7 +263,10 @@ public class NvConnection {
         }
 
         // Now a pending connection can be processed
-        connectionAllowed.release();
+        // §REVIEW-1104：只還這個連線真的拿到的那一個
+        if (holdsConnectionPermit.compareAndSet(true, false)) {
+            connectionAllowed.release();
+        }
     }
 
     private InetAddress resolveServerAddress() throws IOException {
@@ -261,6 +412,8 @@ public class NvConnection {
                 }
                 serverInfo = resp;
                 usedRelayForServerInfo = true;
+                // §REVIEW-1104：記錄 serverinfo 走過 relay，stop() 清掉 relayTunnel 後仍保留此旗標
+                usedRelay = true;
             } else {
                 throw directFail;
             }
@@ -290,7 +443,8 @@ public class NvConnection {
         context.serverCodecModeSupport = (int)h.getServerCodecModeSupport(serverInfo);
 
         context.negotiatedHdr = (context.streamConfig.getSupportedVideoFormats() & MoonBridge.VIDEO_FORMAT_MASK_10BIT) != 0;
-        if ((context.serverCodecModeSupport & 0x20200) == 0 && context.negotiatedHdr) {
+        // §REVIEW-1104：改用與 Limelight.h SCM_MASK_10BIT 一致的完整 10-bit 遮罩，避免 PyroWave 10-bit 或 4:4:4 10-bit 被誤判不支援 HDR
+        if ((context.serverCodecModeSupport & 0x0A520200) == 0 && context.negotiatedHdr) {
             context.connListener.displayTransientMessage("Your PC GPU does not support streaming HDR. The stream will be SDR.");
             context.negotiatedHdr = false;
         }
@@ -367,6 +521,7 @@ public class NvConnection {
                             throw resumeEx;
                         }
                     }
+
                 } else {
                     return quitAndLaunch(h, context);
                 }
@@ -383,6 +538,7 @@ public class NvConnection {
                     context.connListener.displayMessage("The application is minimized. Resume it on the PC manually or " +
                             "quit the session and start streaming again.");
                     return false;
+
                 } else {
                     throw e;
                 }
@@ -454,6 +610,8 @@ public class NvConnection {
         // <resume>1</resume> — both have <sessionUrl0>. Check that instead of
         // gamesession-only (resume path was incorrectly reported as failed).
         if (launchResp != null && launchResp.contains("sessionUrl0")) {
+            // §REVIEW-1104：記錄 launch/resume 走過 relay，stop() 清掉 relayTunnel 後仍保留此旗標
+            usedRelay = true;
             try {
                 // Extract RTSP session URL from XML response
                 ctx.rtspSessionUrl = extractXmlTag(launchResp, "sessionUrl0");
@@ -462,20 +620,31 @@ public class NvConnection {
                 relayTunnel = new RelayTcpTunnel(ctx.relayUrl, ctx.relayPsk,
                         ctx.serverUuid, 48010);
                 int localPort = relayTunnel.startAndGetPort();
+                if (localPort == 0) {
+                    // §REVIEW-1103：tunnel 沒起來就別拿 port 0 去連 RTSP
+                    relayTunnel.stopTunnel();
+                    relayTunnel = null;
+                    throw new IOException("Relay TCP tunnel failed to start");
+                }
                 ctx.rtspSessionUrl = "rtspenc://127.0.0.1:" + localPort;
 
-                // Override server address for UDP streams
+                // §REVIEW-1104：UDP 目標維持原本的主機位址（不可連 loopback，Android 無 UDP relay）；若已有 STUN 位址則指向該位址
                 if (ctx.stunAddress != null && !ctx.stunAddress.isEmpty()) {
-                    ctx.serverAddress = new ComputerDetails.AddressTuple(ctx.stunAddress,
-                            ctx.serverAddress.port);
-                } else {
-                    ctx.serverAddress = new ComputerDetails.AddressTuple("127.0.0.1",
-                            ctx.serverAddress.port);
+                    ctx.serverAddress = new ComputerDetails.AddressTuple(ctx.stunAddress, ctx.serverAddress.port);
+
+
+
+
                 }
 
                 LimeLog.info("[VIPLE-NAT] Relay " + verb + " OK, RTSP tunnel on port " + localPort);
                 return true;
             } catch (Exception e) {
+                // §REVIEW-1104：tunnel 已 start() 之後若後續設定失敗，需及時關閉 tunnel 並清空欄位以防 leak
+                if (relayTunnel != null) {
+                    relayTunnel.stopTunnel();
+                    relayTunnel = null;
+                }
                 LimeLog.info("[VIPLE-NAT] Relay post-launch setup failed: " + e.getMessage());
                 throw new IOException("Relay launch setup failed", e);
             }
@@ -486,14 +655,42 @@ public class NvConnection {
     }
 
     private String buildRelayLaunchPath(String verb, int appId, ConnectionContext ctx) {
-        return String.format("/%s?appid=%d&mode=%dx%dx%d&additionalStates=1&sops=%d" +
-                        "&rikey=%s&rikeyid=%d&localAudioPlayMode=0&surroundAudioInfo=%d" +
-                        "&remoteControllersBitmap=0&gcmap=0&gcpersist=0&uniqueid=0123456789ABCDEF&corever=1",
-                verb, appId,
-                ctx.negotiatedWidth, ctx.negotiatedHeight, ctx.streamConfig.getRefreshRate(),
-                1, // sops
-                bytesToHex(ctx.riKey.getEncoded()), ctx.riKeyId,
-                ctx.streamConfig.getAudioConfiguration().toInt());
+        // §REVIEW-1104：relay launch 參數組改與 NvHTTP.launchApp 一致（FPS、SOPS、HDR、音訊模式與聲道等）
+        int fps = ctx.isNvidiaServerSoftware && ctx.streamConfig.getLaunchRefreshRate() > 60 ?
+                0 : ctx.streamConfig.getLaunchRefreshRate();
+
+        boolean enableSops = ctx.streamConfig.getSops();
+        if (ctx.isNvidiaServerSoftware) {
+            if (ctx.negotiatedWidth * ctx.negotiatedHeight > 1280 * 720 &&
+                    ctx.negotiatedWidth * ctx.negotiatedHeight != 1920 * 1080 &&
+                    ctx.negotiatedWidth * ctx.negotiatedHeight != 3840 * 2160) {
+                enableSops = false;
+            }
+        }
+
+        String hdrParam = !ctx.negotiatedHdr ? "" :
+                "&hdrMode=1&clientHdrCapVersion=0&clientHdrCapSupportedFlagsInUint32=0&clientHdrCapMetaDataId=NV_STATIC_METADATA_TYPE_1&clientHdrCapDisplayData=0x0x0x0x0x0x0x0x0x0x0";
+
+        return "/" + verb + "?appid=" + appId +
+                "&mode=" + ctx.negotiatedWidth + "x" + ctx.negotiatedHeight + "x" + fps +
+                "&additionalStates=1&sops=" + (enableSops ? 1 : 0) +
+                "&rikey=" + bytesToHex(ctx.riKey.getEncoded()) +
+                "&rikeyid=" + ctx.riKeyId +
+                hdrParam +
+                "&localAudioPlayMode=" + (ctx.streamConfig.getPlayLocalAudio() ? 1 : 0) +
+                "&surroundAudioInfo=" + ctx.streamConfig.getAudioConfiguration().getSurroundAudioInfo() +
+                "&remoteControllersBitmap=" + ctx.streamConfig.getAttachedGamepadMask() +
+                "&gcmap=" + ctx.streamConfig.getAttachedGamepadMask() +
+                "&gcpersist=" + (ctx.streamConfig.getPersistGamepadsAfterDisconnect() ? 1 : 0) +
+                MoonBridge.getLaunchUrlQueryParameters() +
+                "&uniqueid=0123456789ABCDEF";
+
+
+
+
+
+
+
     }
 
     private static String bytesToHex(byte[] bytes) {
@@ -518,6 +715,35 @@ public class NvConnection {
         int end = xml.indexOf(closeTag, start);
         if (end < 0) return null;
         return xml.substring(start, end);
+    }
+
+    // §REVIEW-1104：判斷連線目標是否為 loopback、RFC1918 私網、link-local 或 100.64.0.0/10 (CGNAT)
+    private static boolean isPrivateOrLoopbackAddress(String addressStr) {
+        if (addressStr == null || addressStr.isEmpty()) {
+            return false;
+        }
+        try {
+            InetAddress addr = InetAddress.getByName(addressStr);
+            if (addr.isLoopbackAddress() || addr.isSiteLocalAddress() || addr.isLinkLocalAddress()) {
+                return true;
+            }
+            byte[] bytes = addr.getAddress();
+            if (bytes.length == 4) {
+                // 100.64.0.0/10 (CGNAT RFC 6598: 100.64.0.0 ~ 100.127.255.255)
+                int b0 = bytes[0] & 0xFF;
+                int b1 = bytes[1] & 0xFF;
+                if (b0 == 100 && ((b1 & 0xC0) == 64)) {
+                    return true;
+                }
+            } else if (bytes.length == 16) {
+                // IPv6 Unique Local Address (fc00::/7, RFC 4193)
+                if (((bytes[0] & 0xFF) & 0xFE) == 0xFC) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
     }
 
     public void start(final AudioRenderer audioRenderer, final VideoDecoderRenderer videoDecoderRenderer, final NvConnectionListener connectionListener)
@@ -561,6 +787,14 @@ public class NvConnection {
                     context.connListener.stageFailed(appName, 0, 0);
                     return;
                 }
+                holdsConnectionPermit.set(true);
+                // §REVIEW-1104：連線還在準備時使用者就離開了（stop() 已跑過）：不要再建立連線，自己把 permit 還回去
+                if (stopRequested) {
+                    if (holdsConnectionPermit.compareAndSet(true, false)) {
+                        connectionAllowed.release();
+                    }
+                    return;
+                }
 
                 // Moonlight-core is not thread-safe with respect to connection start and stop, so
                 // we must not invoke that functionality in parallel.
@@ -580,8 +814,14 @@ public class NvConnection {
                                             context.relayPsk, context.serverUuid, 5000);
                             if (r != null && r.success && r.stunIp != null) {
                                 context.stunAddress = r.stunIp;
+                                context.stunPunchPort = r.stunPort;  // §REVIEW-1104
+                                // §REVIEW-1104：走 relay 時 lookup 得到 stunIp 後，將 UDP serverAddress 更新為該位址
+                                if (relayTunnel != null) {
+                                    context.serverAddress = new ComputerDetails.AddressTuple(r.stunIp, context.serverAddress.port);
+                                }
                                 LimeLog.info("[VIPLE-NAT] Relay lookup OK: stunAddress="
                                         + r.stunIp);
+            
                             } else {
                                 LimeLog.warning("[VIPLE-NAT] Relay lookup returned no stunIp");
                             }
@@ -591,11 +831,30 @@ public class NvConnection {
                         }
                     }
 
+                    // §REVIEW-1104：relay 連線且無 STUN 位址又無 UDP relay 時直接中止，避免 UDP 打向 loopback
+                    if (relayTunnel != null && (context.stunAddress == null || context.stunAddress.isEmpty())) {
+                        LimeLog.severe("[VIPLE-NAT] Relay connection has no STUN address and no UDP relay; aborting");
+                        context.connListener.displayMessage("Relay connection requires STUN address");
+                        context.connListener.stageFailed(appName, MoonBridge.ML_PORT_FLAG_UDP_47998 | MoonBridge.ML_PORT_FLAG_UDP_47999, 0);
+                        relayTunnel.stopTunnel();
+                        relayTunnel = null;
+                        if (holdsConnectionPermit.compareAndSet(true, false)) {
+                            connectionAllowed.release();
+                        }
+                        return;
+                    }
+
                     // VipleStream: NAT hole punch before LiStartConnection so ENet control
                     // socket reuses the bound local port. Best-effort — failure is non-fatal.
+                    // §REVIEW-1104：連線目標為私網、loopback 或 CGNAT (100.64.0.0/10) 時跳過打洞，避免無謂等待 3 秒超時
+                    if (isPrivateOrLoopbackAddress(context.serverAddress.address)) {
+                        LimeLog.info("[VIPLE-NAT] Skipping hole punch: direct private address "
+                                + context.serverAddress.address);
+                    } else
                     if (context.stunAddress != null && !context.stunAddress.isEmpty()
                             && context.serverUuid != null) {
-                        int controlPort = context.serverAddress.port + 10;
+                        // §REVIEW-1104（使用者決策 B）：有 STUN 回報的實際埠就打它（NAT 換埠時 +10 會打錯）；舊版 server 沒給才 +10
+                        int controlPort = context.stunPunchPort != 0 ? context.stunPunchPort : context.serverAddress.port + 10;
                         byte[] srvU = new byte[16];
                         byte[] srvSrc = context.serverUuid.getBytes(java.nio.charset.StandardCharsets.UTF_8);
                         System.arraycopy(srvSrc, 0, srvU, 0, Math.min(16, srvSrc.length));
@@ -606,6 +865,7 @@ public class NvConnection {
                                 srvU, cliU, 3000);
                         if (punchResult == 0) {
                             LimeLog.info("[VIPLE-NAT] Hole punch succeeded!");
+        
                         } else {
                             LimeLog.warning("[VIPLE-NAT] Hole punch failed (" + punchResult
                                     + "), proceeding with direct connection");
@@ -621,57 +881,10 @@ public class NvConnection {
                             ConnectivityManager cm = (ConnectivityManager)
                                     appContext.getSystemService(Context.CONNECTIVITY_SERVICE);
                             if (cm != null) {
-                                Network[] networks = cm.getAllNetworks();
-                                if (networks != null) {
-                                    java.util.ArrayList<String> nameList = new java.util.ArrayList<>();
-                                    java.util.ArrayList<Integer> typeList = new java.util.ArrayList<>();
-                                    java.util.ArrayList<Integer> familyList = new java.util.ArrayList<>();
-                                    java.util.ArrayList<byte[]> addrList = new java.util.ArrayList<>();
-
-                                    for (Network net : networks) {
-                                        NetworkCapabilities caps = cm.getNetworkCapabilities(net);
-                                        LinkProperties props = cm.getLinkProperties(net);
-                                        if (caps == null || props == null) continue;
-                                        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET))
-                                            continue;
-
-                                        int transport = -1;
-                                        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))
-                                            transport = NetworkCapabilities.TRANSPORT_WIFI;
-                                        else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))
-                                            transport = NetworkCapabilities.TRANSPORT_CELLULAR;
-                                        else if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
-                                            transport = NetworkCapabilities.TRANSPORT_ETHERNET;
-                                        if (transport < 0) continue;
-
-                                        String ifName = props.getInterfaceName();
-                                        if (ifName == null) ifName = "unknown";
-
-                                        for (android.net.LinkAddress la : props.getLinkAddresses()) {
-                                            InetAddress a = la.getAddress();
-                                            if (a.isLoopbackAddress()) continue;
-                                            byte[] raw = a.getAddress();
-                                            int family = (raw.length == 4) ? 2 : 10; // AF_INET=2, AF_INET6=10
-                                            nameList.add(ifName);
-                                            typeList.add(transport);
-                                            familyList.add(family);
-                                            addrList.add(raw);
-                                            LimeLog.info("[VIPLE-MPQUIC] Interface: " + ifName
-                                                    + " type=" + transport + " addr=" + a.getHostAddress());
-                                        }
-                                    }
-
-                                    if (!nameList.isEmpty()) {
-                                        String[] names = nameList.toArray(new String[0]);
-                                        int[] types = new int[typeList.size()];
-                                        int[] families = new int[familyList.size()];
-                                        for (int i = 0; i < typeList.size(); i++) {
-                                            types[i] = typeList.get(i);
-                                            families[i] = familyList.get(i);
-                                        }
-                                        byte[][] addrs = addrList.toArray(new byte[0][]);
-                                        MoonBridge.setNetInterfaces(names, types, families, addrs);
-                                    }
+                                injectNetInterfaces(cm);
+                                // §REVIEW-1104：開了多路徑＝要更流暢：讓行動網路保持待命並監看網路變動
+                                if (!stopRequested) {
+                                    startMultipathNetworkWatch(cm);
                                 }
                             }
                         } catch (Exception e) {
@@ -687,6 +900,7 @@ public class NvConnection {
                                 MoonBridge.setQuicTicketStorePath(ticketPath);
                                 LimeLog.info("[VIPLE-MPQUIC] Ticket store: " + ticketPath);
                             } else {
+            
                                 MoonBridge.setQuicTicketStorePath(null);
                             }
                         } catch (Exception e) {
@@ -713,10 +927,17 @@ public class NvConnection {
                             context.streamConfig.getMpQuicPort(),
                             context.streamConfig.getAutoAdjustBitrate());
                     if (ret != 0) {
+                        // §REVIEW-1104：startConnection 失敗時及時關閉 relay tunnel，避免洩漏 WebSocket 連線
+                        if (relayTunnel != null) {
+                            relayTunnel.stopTunnel();
+                            relayTunnel = null;
+                        }
                         // LiStartConnection() failed, so the caller is not expected
                         // to stop the connection themselves. We need to release their
                         // semaphore count for them.
-                        connectionAllowed.release();
+                        if (holdsConnectionPermit.compareAndSet(true, false)) {  // §REVIEW-1104
+                            connectionAllowed.release();
+                        }
                         return;
                     }
                 }

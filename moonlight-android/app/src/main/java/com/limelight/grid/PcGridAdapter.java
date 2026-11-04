@@ -35,7 +35,14 @@ public class PcGridAdapter extends GenericGridAdapter<PcView.ComputerObject> {
         sortList();
     }
 
-    private void sortList() {
+    // §REVIEW-1104：資料變更（如主機改名）時重新排序，避免畫面顯示新名稱但位置仍停在舊字母順序
+    @Override
+    public void notifyDataSetChanged() {
+        sortList();
+        super.notifyDataSetChanged();
+    }
+
+    public void sortList() {
         Collections.sort(itemList, new Comparator<PcView.ComputerObject>() {
             @Override
             public int compare(PcView.ComputerObject lhs, PcView.ComputerObject rhs) {

@@ -261,6 +261,13 @@ void SdlRenderer::renderOverlay(Overlay::OverlayType type)
 
         // If we have an overlay texture, render it too
         if (m_OverlayTextures[type] != nullptr) {
+            // §REVIEW-1104：狀態文字的 Y 只在換 surface 時算一次，視窗縮放後要按目前 viewport 重算
+            if (type == Overlay::OverlayStatusUpdate) {
+                SDL_Rect viewportRect;
+                SDL_RenderGetViewport(m_Renderer, &viewportRect);
+                m_OverlayRects[type].y = viewportRect.h - m_OverlayRects[type].h;
+            }
+
             SDL_RenderCopy(m_Renderer, m_OverlayTextures[type], nullptr, &m_OverlayRects[type]);
         }
     }
@@ -445,6 +452,15 @@ ReadbackRetry:
     if (frame->format == AV_PIX_FMT_CUDA) {
 #ifdef HAVE_CUDA
         if (m_CudaGLHelper == nullptr || !m_CudaGLHelper->copyCudaFrameToTextures(frame)) {
+            // §REVIEW-1104：拷貝失敗要先 unregister 並丟掉已向 CUDA 註冊的 texture，SDL 才能安全重建再上傳
+            if (m_CudaGLHelper != nullptr) {
+                delete m_CudaGLHelper;
+                m_CudaGLHelper = nullptr;
+                if (m_Texture != nullptr) {
+                    SDL_DestroyTexture(m_Texture);
+                    m_Texture = nullptr;
+                }
+            }
             goto ReadbackRetry;
         }
 #else

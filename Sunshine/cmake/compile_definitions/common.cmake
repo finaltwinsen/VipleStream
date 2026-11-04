@@ -246,6 +246,9 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/self_update.h"
         "${CMAKE_SOURCE_DIR}/src/system_tray.cpp"
         "${CMAKE_SOURCE_DIR}/src/system_tray.h"
+        # §TS-PATH：Tailscale 中繼時嘗試恢復直連（不接 stream.cpp，接線另外做）
+        "${CMAKE_SOURCE_DIR}/src/tailscale_path.cpp"
+        "${CMAKE_SOURCE_DIR}/src/tailscale_path.h"
         "${CMAKE_SOURCE_DIR}/src/task_pool.h"
         "${CMAKE_SOURCE_DIR}/src/thread_pool.h"
         "${CMAKE_SOURCE_DIR}/src/thread_safe.h"

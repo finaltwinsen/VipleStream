@@ -236,12 +236,18 @@ namespace tunnel_session {
     udp_tunnel::encode_packet(_flow, src_port, dst_port,
                               payload, len, buf);
 
-    if (c == udp_tunnel::Carrier::UDP_RELAY && _udp_sock) {
+    if (c == udp_tunnel::Carrier::UDP_RELAY) {
       boost::system::error_code ec;
+      bool have_sock = false;
       {
+        // §REVIEW-1103：_udp_sock 的 null 檢查移進鎖內（stop() 在同一把鎖下 reset），避免檢查完才被清掉
         std::lock_guard<std::mutex> l(_udp_send_mtx);
-        _udp_sock->send_to(asio::buffer(buf), _udp_endpoint, 0, ec);
+        if (_udp_sock) {
+          have_sock = true;
+          _udp_sock->send_to(asio::buffer(buf), _udp_endpoint, 0, ec);
+        }
       }
+      if (!have_sock) return relay::send_tunnel_binary(buf.data(), buf.size());  // 同舊行為：沒有 socket 就走 WS
       if (!ec) return true;
       BOOST_LOG(debug) << "[TUNNEL] UDP send failed (" << ec.message()
                        << "), failing over to WS";

@@ -1524,6 +1524,7 @@ private:
     viple::rife_native_vk::RifeNativeExecutor* m_RifeNative = nullptr;
     bool m_RifeNativeMode  = false;   // env var read at ctor
     bool m_RifeNativeReady = false;   // initialize() returned true
+    bool m_RifeNativeFailed = false;  // §REVIEW-1104：runRifeNativeStage 失敗過，這場不再由 tier 打開 RIFE
     int  m_RifeNativeInferW = 0;      // β.1 = src W, β.4 = 384
     int  m_RifeNativeInferH = 0;
     bool createRifeNativeResources(int width, int height);

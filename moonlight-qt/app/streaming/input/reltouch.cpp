@@ -39,7 +39,10 @@ Uint32 SdlInputHandler::dragTimerCallback(Uint32, void *param)
         me->m_DragButton = BUTTON_LEFT;
     }
 
-    LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, me->m_DragButton);
+    // §REVIEW-1103：0 指或 3 指以上時 m_DragButton 維持 0，原本會送出 button 0 的按下事件
+    if (me->m_DragButton != 0) {
+        LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, me->m_DragButton);
+    }
 
     return 0;
 }
@@ -59,26 +62,22 @@ void SdlInputHandler::handleRelativeFingerEvent(SDL_TouchFingerEvent* event)
     // This is also required to handle finger up which
     // where the finger will not be in SDL_GetTouchFinger()
     // anymore.
+    // §REVIEW-1103：槽位以 m_TouchDownEvent 自己管（type==0 表示空槽）。原本 FINGERDOWN 用 SDL 的暫態索引，
+    // SDL_DelFinger 是「最後一個搬到被刪的位置」，「放 A、放 B、抬 A、放 C」時 C 拿到索引 1、覆寫 B 的紀錄，
+    // 之後 B 的 motion／up 找不到。另外 fingerId 可能是 0，空槽（全零）也要排除在比對之外。
     if (event->type != SDL_FINGERDOWN) {
         for (int i = 0; i < MAX_FINGERS; i++) {
-            if (event->fingerId == m_TouchDownEvent[i].fingerId) {
+            if (m_TouchDownEvent[i].type != 0 && event->fingerId == m_TouchDownEvent[i].fingerId) {
                 fingerIndex = i;
                 break;
             }
         }
     }
     else {
-        // Resolve the new finger by determining the ID of each
-        // finger on the display.
-        int numTouchFingers = SDL_GetNumTouchFingers(event->touchId);
-        for (int i = 0; i < numTouchFingers; i++) {
-            SDL_Finger* finger = SDL_GetTouchFinger(event->touchId, i);
-            SDL_assert(finger != nullptr);
-            if (finger != nullptr) {
-                if (finger->id == event->fingerId) {
-                    fingerIndex = i;
-                    break;
-                }
+        for (int i = 0; i < MAX_FINGERS; i++) {
+            if (m_TouchDownEvent[i].type == 0) {
+                fingerIndex = i;
+                break;
             }
         }
     }

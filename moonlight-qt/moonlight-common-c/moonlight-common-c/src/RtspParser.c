@@ -294,7 +294,21 @@ void insertOption(POPTION_ITEM* optionsHead, POPTION_ITEM opt) {
     while (current != NULL) {
         // Check for duplicate option; if so, replace the option currently there
         if (!strcmp(current->option, opt->option)) {
-            current->content = opt->content;
+            // §REVIEW-1103：重複標頭時新節點沒鏈進串列，原本會整個洩漏。內容換給舊節點後把新節點
+            // （連同換下來的舊內容）照 freeOptionList 的規則釋放。同一份串列的節點旗標一致
+            //（解析出來的都是 0、addOption 的都是 ALLOCATED）；萬一不一致就維持原行為，不冒險釋放。
+            if (((current->flags ^ opt->flags) & FLAG_ALLOCATED_OPTION_FIELDS) == 0) {
+                char* oldContent = current->content;
+                current->content = opt->content;
+                if (opt->flags & FLAG_ALLOCATED_OPTION_FIELDS) {
+                    free(opt->option);
+                    free(oldContent);
+                }
+                free(opt);
+            }
+            else {
+                current->content = opt->content;
+            }
             return;
         }
         if (current->next == NULL) {

@@ -81,5 +81,7 @@ public:
     // 藍牙／BLE HID 字串查詢足夠的裕度，只有真卡死才多等這 1 秒。
     // 總預算必須 > per-device wait，否則 worker 會在完成前被主執行緒放棄。
     static constexpr int kPerDeviceWaitMs = 1000;
-    static constexpr int kOverallBudgetMs = 2500;
+    // §REVIEW-1104（使用者決策 B）：2500→4000。列舉本身慢（裝置多、USB 從省電醒來，>1.5 s）時，舊的 2.5 s
+    // 會在逐台探測完成前就逾時，沒有壞裝置也被當成「不明裝置卡住」而停用手把；正常機器仍是 ms 級
+    static constexpr int kOverallBudgetMs = 4000;
 };

@@ -1884,6 +1884,15 @@ QJsonObject runHeaderTest(const QString& path, bool mplane, const CodecInfo& cod
                         gotLast = true;
                         ff[QStringLiteral("emptyLastBuffer")] = true;
                     }
+                    else {
+                        // §REVIEW-1104：非 LAST 的 0-byte CAPTURE 取出後沒 QBUF 回去，queue 會少一張
+                        if (xioctl(res.fd, VIDIOC_QBUF, &b) != 0) {
+                            const int err = errno;
+                            ff[QStringLiteral("qbuf")] = errText(err);
+                            abort = true;
+                            break;
+                        }
+                    }
                     continue;
                 }
                 gotFrame = true;

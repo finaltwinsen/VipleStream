@@ -70,10 +70,9 @@ public:
 
     // 程式要結束了（app.exec() 返回之後）：停掉播放器與鉤子，但 XR session 留著
     void prepareExit();
-    // 最後一步：關掉 XR session。呼叫端緊接著結束行程——頭盔實測（2026-10-20）：我們的程式結束時 Steam 的 steamwebhelper
-    // 常常當掉重啟（SIGABRT、heap 損壞，在 Mesa／CEF 的繪圖路徑）。SteamVR 會替 OpenXR 的 quad 圖層建覆蓋層
-    // （openxr_quadlayer_*），webhelper 拿它的貼圖畫；推測是程式一結束貼圖就消失。所以先送幾百毫秒的空畫面
-    // （XrContext::setBlank）讓那些覆蓋層在我們還活著時拆掉，再關 session、馬上結束行程
+    // 最後一步：先送幾百毫秒的空畫面（XrContext::setBlank）再關 XR session，之後呼叫端走正常收尾（main.cpp）。
+    // 當初（2026-10-20）是為了 Steam 的 steamwebhelper 在我們結束時當掉重啟而加的；2026-11-02 對照實驗確定那是
+    // Steam 的 bug（任何遊戲結束都會，steam-for-linux #13690），跟我們怎麼結束無關。空畫面留著：關 session 前不會停在最後一張
     void shutdownXrForExit();
 
     // 面板的像素尺寸
@@ -136,6 +135,8 @@ private:
 
     // §VR-SHELL（A2）：在這個 session 裡播的那一場。m_Route 是 XR frame thread 轉輸入用的（m_RouteMutex）
     player::PlayerSession* m_Player = nullptr;
+    // §REVIEW-1104：載入中按 B 取消時，結束碼不要顯示成播放失敗
+    bool m_PlayerCancel = false;
     std::mutex m_RouteMutex;
     player::PlayerSession* m_Route = nullptr;
 

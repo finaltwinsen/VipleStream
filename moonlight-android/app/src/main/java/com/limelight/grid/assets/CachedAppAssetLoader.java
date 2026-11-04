@@ -18,6 +18,7 @@ import com.limelight.nvstream.http.NvApp;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.ref.WeakReference;
+import java.util.HashSet;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -56,6 +57,8 @@ public class CachedAppAssetLoader {
     private final DiskAssetLoader diskLoader;
     private final Bitmap placeholderBitmap;
     private final Bitmap noAppImageBitmap;
+    // §REVIEW-1104：追蹤已派發的 LoaderTask 與最近一次取消的 loader，供前景取消與釋放執行緒池使用
+    private final HashSet<LoaderTask> activeTasks = new HashSet<>();
 
     public CachedAppAssetLoader(ComputerDetails computer, double scalingDivider,
                                 NetworkAssetLoader networkLoader, MemoryAssetLoader memoryLoader,
@@ -77,6 +80,16 @@ public class CachedAppAssetLoader {
     }
 
     public void cancelForegroundLoads() {
+        // §REVIEW-1104：取消時對已綁定至 ImageView 的 LoaderTask 呼叫 cancel(true)，中斷進行中任務並讓後續可重新排程
+        synchronized (activeTasks) {
+            for (LoaderTask task : activeTasks) {
+                ImageView imageView = task.imageViewRef.get();
+                if (getLoaderTask(imageView) == task) {
+                    task.cancel(true);
+                }
+            }
+            activeTasks.clear();
+        }
         Runnable r;
 
         while ((r = foregroundExecutor.getQueue().poll()) != null) {
@@ -90,6 +103,13 @@ public class CachedAppAssetLoader {
 
     public void freeCacheMemory() {
         memoryLoader.clearCache();
+    }
+
+    // §REVIEW-1104：新增 shutdownNow() 關閉三個 ThreadPoolExecutor，避免替換 loader 或銷毀 Activity 時洩漏閒置執行緒
+    public void shutdownNow() {
+        cacheExecutor.shutdownNow();
+        foregroundExecutor.shutdownNow();
+        networkExecutor.shutdownNow();
     }
 
     private ScaledBitmap doNetworkAssetLoad(LoaderTuple tuple, LoaderTask task) {
@@ -153,6 +173,10 @@ public class CachedAppAssetLoader {
             this.imageViewRef = new WeakReference<>(imageView);
             this.textViewRef = new WeakReference<>(textView);
             this.diskOnly = diskOnly;
+            // §REVIEW-1104：登記新建的 LoaderTask，以便在 cancelForegroundLoads 時呼叫 cancel(true)
+            synchronized (activeTasks) {
+                activeTasks.add(this);
+            }
         }
 
         @Override
@@ -208,7 +232,17 @@ public class CachedAppAssetLoader {
         }
 
         @Override
+        protected void onCancelled(ScaledBitmap bitmap) {
+            synchronized (activeTasks) {
+                activeTasks.remove(this);
+            }
+        }
+
+        @Override
         protected void onPostExecute(final ScaledBitmap bitmap) {
+            synchronized (activeTasks) {
+                activeTasks.remove(this);
+            }
             // Do nothing if cancelled
             if (isCancelled()) {
                 return;
@@ -231,6 +265,10 @@ public class CachedAppAssetLoader {
 
                             @Override
                             public void onAnimationEnd(Animation animation) {
+                                // §REVIEW-1104：淡出結束時檢查任務未取消且 ImageView 未被重用，避免舊封面覆蓋新 app
+                                if (LoaderTask.this.isCancelled() || getLoaderTask(imageView) != LoaderTask.this) {
+                                    return;
+                                }
                                 // Fade in the new box art
                                 imageView.setImageBitmap(bitmap.bitmap);
                                 imageView.startAnimation(AnimationUtils.loadAnimation(imageView.getContext(), R.anim.boxart_fadein));
@@ -252,7 +290,8 @@ public class CachedAppAssetLoader {
         }
     }
 
-    static class AsyncDrawable extends BitmapDrawable {
+    // §REVIEW-1104：公開 AsyncDrawable 供 AppView.onResume 判斷可見項目是否仍處於占位圖狀態
+    public static class AsyncDrawable extends BitmapDrawable {
         private final WeakReference<LoaderTask> loaderTaskReference;
 
         public AsyncDrawable(Resources res, Bitmap bitmap,
@@ -282,7 +321,8 @@ public class CachedAppAssetLoader {
         return null;
     }
 
-    private static boolean cancelPendingLoad(LoaderTuple tuple, ImageView imageView) {
+    // §REVIEW-1104：取消 static 修飾，以便在取消任務時從 executor 佇列清除已取消的任務
+    private boolean cancelPendingLoad(LoaderTuple tuple, ImageView imageView) {
         final LoaderTask loaderTask = getLoaderTask(imageView);
 
         // Check if any task was pending for this image view
@@ -292,6 +332,9 @@ public class CachedAppAssetLoader {
             // Cancel the task if it's not already loading the same data
             if (taskTuple == null || !taskTuple.equals(tuple)) {
                 loaderTask.cancel(true);
+                // §REVIEW-1104：取消後立即 purge 清除佇列中已取消任務，避免佇列被佔滿導致新任務遭 DiscardOldestPolicy 丟棄
+                foregroundExecutor.purge();
+                networkExecutor.purge();
             } else {
                 // It's already loading what we want
                 return false;
@@ -332,6 +375,8 @@ public class CachedAppAssetLoader {
     }
 
     public boolean populateImageView(NvApp app, ImageView imgView, TextView textView) {
+        // §REVIEW-1104：進入時清除殘留動畫，避免淡出回呼將舊圖蓋在新 app 的 ImageView 上
+        imgView.clearAnimation();
         LoaderTuple tuple = new LoaderTuple(computer, app);
 
         // If there's already a task in progress for this view,
@@ -359,9 +404,10 @@ public class CachedAppAssetLoader {
         // If it's not in memory, create an async task to load it. This task will be attached
         // via AsyncDrawable to this view.
         final LoaderTask task = new LoaderTask(imgView, textView, true);
-        final AsyncDrawable asyncDrawable = new AsyncDrawable(imgView.getResources(), placeholderBitmap, task);
-        textView.setVisibility(View.INVISIBLE);
-        imgView.setVisibility(View.INVISIBLE);
+        // §REVIEW-1104：未載入前先顯示占位圖與文字並保持 VISIBLE，避免任務遭 DiscardOldestPolicy 丟棄時格子維持 INVISIBLE 留白
+        final AsyncDrawable asyncDrawable = new AsyncDrawable(imgView.getResources(), noAppImageBitmap, task);
+        textView.setVisibility(View.VISIBLE);
+        imgView.setVisibility(View.VISIBLE);
         imgView.setImageDrawable(asyncDrawable);
 
         // Run the task on our foreground executor

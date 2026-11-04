@@ -330,12 +330,27 @@ build_moonlight.cmd                         :: 重 build
 
 ## 7. Linux 建置（x64 AppImage／.deb）
 
-Linux 兩件要在 Linux x64 機器上建（Ubuntu 26.04 驗證過）。入口是兩支**已入 git** 的腳本：
+Linux 兩件要在 Ubuntu 26.04 x64 環境建。入口是兩支**已入 git** 的腳本：
 
 | 產物 | 腳本（在 git 裡） | 輸出 | 上 release 的檔名 |
 |---|---|---|---|
 | Client AppImage | `moonlight-qt/scripts/build-appimage-native.sh`（在 `moonlight-qt/` 目錄執行） | `moonlight-qt/build/installer-release/VipleStream-Client-X.Y.Z-linux-x64.AppImage` | 同左 |
 | Server `.deb` | `Sunshine/scripts/linux_build.sh`（在 `Sunshine/` 目錄執行，例如 `bash scripts/linux_build.sh --skip-cuda --skip-cleanup`；`--help` 列出全部選項） | `Sunshine/build/cpack_artifacts/VipleStream-Server.deb`（檔名沒有版號，套件內的 Version 正確） | 改名成 `VipleStream-Server-X.Y.Z-linux-x64.deb` |
+
+**建置環境（2026-11-03 起）**：在開發者的 Arch 系桌機（CachyOS）上用 podman 跑 `ubuntu:26.04` 容器，
+工具鏈與函式庫全部來自 Ubuntu 官方套件，容器內照常跑上面兩支腳本。**不要在滾動更新的發行版上原生建 release**：
+glibc／函式庫 soname 會比目標發行版新、CachyOS 的套件庫是 x86-64-v3（AppImage 會把它們打包進去，舊 CPU 上
+illegal instruction），`.deb` 的 Depends 也必須是 Ubuntu 的套件名。容器建置的包裝腳本是本機工具（不入 git）。
+容器裡要額外注意：
+- 要有 `sudo`（`linux_build.sh` 以 sudo 裝相依）與 `~/.bashrc`（腳本會 source）。
+- client 需要 `qt6-svg-plugins`（linuxdeploy-plugin-qt 會部署 `libqsvgicon.so`）。
+- **不要裝 `libffmpeg-nvenc-dev`**：server 會抓到系統的 NVENC 標頭而不是預編 FFmpeg 內附的那份，版本檢查會失敗。
+- 產物的 glibc 需求應為 2.43（Ubuntu 26.04），可用 `objdump -T` 核對。
+
+**FFmpeg 預編譯包版本**：`Sunshine/cmake/dependencies/ffmpeg.cmake` 在 Linux 固定使用 LizardByte/build-deps
+的 `v2026.713.132551`（最後一版 NVENC 13.0；之後的 release 是 13.1，`nvenc_base.cpp` 的版本檢查會擋，也會抬高
+NVIDIA 驅動下限）。cmake 看到 `Sunshine/build/_deps/ffmpeg` 已解壓就不會重抓，換版或第一次用釘選版時先清
+`Sunshine/build`。可用 `-DVIPLE_FFMPEG_BUILD_DEPS_TAG=<tag>` 覆寫。
 
 **版號**：兩支腳本讀的是已經 propagate 進 repo 的版號檔（`moonlight-qt/app/version.txt`、
 `Sunshine/CMakeLists.txt`），**不要在 Linux 機上 bump**。版號由 Windows 開發機的
@@ -399,7 +414,7 @@ arm64 Flatpak 的 release 一定要，見 §8）。建完核對產物版號和 `
 ## 8. Steam Frame client（Linux arm64 Flatpak）
 
 2.0 的 Steam Frame client 是 moonlight-qt 的原生 Linux arm64 版，以 Flatpak 打包，app-id
-`io.github.finaltwinsen.VipleStream`。在 Linux x64 建置機（`<builder>`）上用已入 git 的腳本建置，aarch64 靠 qemu-user：
+`io.github.finaltwinsen.VipleStream`。用已入 git 的腳本建置：2026-11-03 起 release 在 **aarch64 原生機（樹莓派 5，Ubuntu 26.04）**上建（約 10 分鐘），x64 建置機也可以，aarch64 靠 qemu-user（慢很多）：
 
 ```bash
 bash moonlight-qt/scripts/build-steamframe.sh --arch aarch64 --check              # 缺什麼、怎麼裝（不會自動裝）

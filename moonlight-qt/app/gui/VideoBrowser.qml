@@ -10,6 +10,7 @@ import VrLauncher 1.0
 //   - 網頁裡的 <video> 直接用 http(s) 網址播的（不是 blob:／MediaSource）：用那個網址直接播；
 //   - 其他（YouTube 等用 MediaSource 的網站）：用這一頁的網址，播放器經 yt-dlp 解析（180°／360°／EAC 的判斷照舊）。
 // 只在有 Qt WebEngine 的建置（Flatpak 用 io.qt.qtwebengine.BaseApp）由 VideoView 的 Loader 載入；沒有的建置不會碰到這個檔。
+// 2026-11-02 起它就是影片模式的 YouTube 分頁（使用者要「跟網頁版一模一樣、可以登入」）：首頁 youtube.com、網址列仍可去別的網站。
 Item {
     id: browser
 
@@ -43,11 +44,36 @@ Item {
         view.runJavaScript("window.scrollBy(0," + Math.round(pages * view.height) + ")")
     }
 
+    // B／返回鍵（VideoView 轉過來）：網頁的上一頁；沒有上一頁回 false
+    function goBackIfPossible() {
+        if (!view.canGoBack) {
+            console.warn("[VIPLE-PLAYER] browser back: no history")
+            return false
+        }
+        view.goBack()
+        return true
+    }
+
+    // 手把從分頁列按「下」：焦點進網頁
+    function focusPage() {
+        view.forceActiveFocus()
+    }
+
+    // Google 登入會擋「內嵌瀏覽器」（「這個瀏覽器或應用程式可能不安全」），它看 User-Agent 裡的 QtWebEngine/x.y 字樣；
+    // 拿掉那一段就是一般的 Chrome User-Agent（核心本來就是 Chromium），YouTube 也會給完整的桌面版網頁
+    Component.onCompleted: {
+        var ua = webProfile.httpUserAgent
+        webProfile.httpUserAgent = ua.replace(/ ?QtWebEngine\/[^ ]+/, "")
+        console.warn("[VIPLE-PLAYER] browser user agent: " + webProfile.httpUserAgent)
+        view.url = browser.homeUrl
+    }
+
     function playInVr() {
         view.runJavaScript(probeScript, function(r) {
             var src = r && r.src ? r.src : ""
             console.warn("[VIPLE-PLAYER] browser play in VR: page=" + view.url + " videoSrc=" + src.substring(0, 80))
-            var direct = /^https?:\/\//.test(src)
+            // §REVIEW-1104（使用者決策 C）：Google 影片伺服器的直連多半是低畫質、很快過期的檔案，改交網頁網址給 yt-dlp
+            var direct = /^https?:\/\//.test(src) && !/^https?:\/\/[^\/]*googlevideo\.com\//.test(src)
             var source = direct ? src : view.url.toString()
             if (!VrLauncher.launchPlayer(source, browser.formatName, r && r.title ? r.title : view.title, "")) {
                 browser.launchFailed(qsTr("Could not start the video player."))
@@ -62,12 +88,32 @@ Item {
         onTriggered: browser.playInVr()
     }
 
+    // YouTube 的 VR 影片（180°／360°）自動轉到 VR 播放（2026-11-02 使用者要求：不必再按「Play in VR」）。
+    // 看 YouTube 播放器自己的 player response：任一格式的 projectionType 不是 RECTANGULAR＝VR 影片；
+    // 拿不到時退而看播放器有沒有 360° 的視角控制。videoId 要對得上（站內換頁時 player response 可能還是上一支）。
+    // 同一支只自動轉一次：從 VR 播放器退回來（B）還停在這一頁時不會又被帶回去；要再看就按「Play in VR」
+    property string autoLaunchedId: ""
+    readonly property string vrProbeScript: "(function(){var r={n:document.querySelectorAll('video').length,id:'',vr:''};" +
+        "try{var u=new URL(location.href);if(/(^|\\.)youtube\\.com$/.test(u.hostname)&&u.pathname==='/watch'){r.id=u.searchParams.get('v')||'';" +
+        "var p=document.getElementById('movie_player');var pr=p&&p.getPlayerResponse?p.getPlayerResponse():null;" +
+        "if(pr&&pr.videoDetails&&pr.videoDetails.videoId===r.id){var fs=(pr.streamingData&&pr.streamingData.adaptiveFormats)||[];" +
+        "for(var i=0;i<fs.length;i++){var t=fs[i].projectionType;if(t&&t!=='RECTANGULAR'){r.vr=String(t);break;}}}" +
+        "if(!r.vr&&p&&p.querySelector&&p.querySelector('.ytp-webgl-spherical-control')){r.vr='SPHERICAL';}}}catch(e){}" +
+        "return r;})()"
+
     Timer {
-        // 有沒有影片：讓按鈕顯眼一點（每兩秒看一次）
-        interval: 2000
+        // 有沒有影片（讓按鈕顯眼一點）、是不是 YouTube 的 VR 影片（自動轉 VR 播放）：每秒看一次
+        interval: 1000
         repeat: true
-        running: browser.visible
-        onTriggered: view.runJavaScript("document.querySelectorAll('video').length > 0", function(r) { browser.pageHasVideo = r === true })
+        running: browser.visible && !VrLauncher.running
+        onTriggered: view.runJavaScript(browser.vrProbeScript, function(r) {
+            browser.pageHasVideo = r && r.n > 0
+            if (r && r.vr !== "" && r.id !== "" && r.id !== browser.autoLaunchedId && !view.loading && !VrLauncher.running) {
+                browser.autoLaunchedId = r.id
+                console.warn("[VIPLE-PLAYER] browser: VR video detected (" + r.vr + ", " + r.id + "), playing in VR")
+                browser.playInVr()
+            }
+        })
     }
 
     ColumnLayout {
@@ -109,15 +155,20 @@ Item {
             id: view
             Layout.fillWidth: true
             Layout.fillHeight: true
-            url: browser.homeUrl
+            // url 在 Component.onCompleted 才設（先改好 User-Agent，第一個請求就用改過的）
             // 帳號登入（YouTube 等）與 cookie 留著：用有名字的設定檔（存在 app 的資料夾），不用無痕
             profile: WebEngineProfile {
+                id: webProfile
                 storageName: "VipleStream"
                 offTheRecord: false
                 httpCacheType: WebEngineProfile.DiskHttpCache
                 persistentCookiesPolicy: WebEngineProfile.AllowPersistentCookies
             }
             onUrlChanged: {
+                // 離開自動轉過的那支片（上一頁、點別支）：之後再點回來還是要自動轉
+                if (browser.autoLaunchedId !== "" && url.toString().indexOf("v=" + browser.autoLaunchedId) < 0) {
+                    browser.autoLaunchedId = ""
+                }
                 if (!address.activeFocus) {
                     address.text = url.toString()
                 }

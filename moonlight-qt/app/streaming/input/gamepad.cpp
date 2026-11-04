@@ -6,6 +6,7 @@
 #include "backend/hidprobe.h"   // §HID-PROBE
 
 #include <QtMath>
+#include <cmath>
 
 // How long the Start button must be pressed to toggle mouse emulation
 #define MOUSE_EMULATION_LONG_PRESS_TIME 750
@@ -179,8 +180,10 @@ Uint32 SdlInputHandler::mouseEmulationTimerCallback(Uint32 interval, void *param
     deltaY = qPow(rawY / 32766.0f * MOUSE_EMULATION_MOTION_MULTIPLIER, 3);
 
     // Enforce deadzones
-    deltaX = qAbs(deltaX) > MOUSE_EMULATION_DEADZONE ? deltaX - MOUSE_EMULATION_DEADZONE : 0;
-    deltaY = qAbs(deltaY) > MOUSE_EMULATION_DEADZONE ? deltaY - MOUSE_EMULATION_DEADZONE : 0;
+    // §REVIEW-1103：原本 delta - DEADZONE 對負值是往外推（−2.1 → −4.1），左／上比右／下靈敏、跨過死區會跳；
+    // 改成往零收縮
+    deltaX = qAbs(deltaX) > MOUSE_EMULATION_DEADZONE ? std::copysign(qAbs(deltaX) - MOUSE_EMULATION_DEADZONE, deltaX) : 0;
+    deltaY = qAbs(deltaY) > MOUSE_EMULATION_DEADZONE ? std::copysign(qAbs(deltaY) - MOUSE_EMULATION_DEADZONE, deltaY) : 0;
 
     if (deltaX != 0 || deltaY != 0) {
         LiSendMouseMoveEvent((short)deltaX, (short)deltaY);
@@ -1093,7 +1096,8 @@ int SdlInputHandler::getAttachedGamepadMask()
             SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i),
                                       guidStr, sizeof(guidStr));
 
-            if (!m_IgnoreDeviceGuids.contains(guidStr, Qt::CaseInsensitive))
+            // §REVIEW-1103：協定遮罩只有 MAX_GAMEPADS 位，超過的不算（原本 31 支以上會位移溢位）
+            if (!m_IgnoreDeviceGuids.contains(guidStr, Qt::CaseInsensitive) && count < MAX_GAMEPADS)
             {
                 mask |= (1 << count++);
             }

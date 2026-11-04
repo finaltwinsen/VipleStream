@@ -14,11 +14,13 @@ import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.view.InputDevice;
 import android.widget.Toast;
 
 import com.limelight.LimeLog;
 import com.limelight.R;
+import com.limelight.nvstream.jni.MoonBridge;
 import com.limelight.preferences.PreferenceConfiguration;
 
 import java.io.File;
@@ -32,6 +34,11 @@ public class UsbDriverService extends Service implements UsbDriverListener {
     private UsbManager usbManager;
     private PreferenceConfiguration prefConfig;
     private boolean started;
+
+    // §REVIEW-1104：保留主執行緒 Handler 用於管理延遲工作與非同步回呼
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    // §REVIEW-1104：保護 controllers 與 steamControllers 清單結構修改的同步鎖
+    private final Object controllerLock = new Object();
 
     private final UsbEventReceiver receiver = new UsbEventReceiver();
     private final UsbDriverBinder binder = new UsbDriverBinder();
@@ -53,25 +60,44 @@ public class UsbDriverService extends Service implements UsbDriverListener {
     public void reportControllerState(int controllerId, int buttonFlags, float leftStickX, float leftStickY,
                                       float rightStickX, float rightStickY, float leftTrigger, float rightTrigger) {
         // Call through to the client's listener
+        
+
         if (listener != null) {
             listener.reportControllerState(controllerId, buttonFlags, leftStickX, leftStickY, rightStickX, rightStickY, leftTrigger, rightTrigger);
         }
     }
 
     @Override
-    public void deviceRemoved(AbstractController controller) {
+    public void deviceRemoved(final AbstractController controller) {
+        // §REVIEW-1104：驅動執行緒只標記已停，實際移除與通知丟回主執行緒並同步清單鎖
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
         // Remove the the controller from our list (if not removed already)
-        controllers.remove(controller);
+                synchronized (controllerLock) {
+                    controllers.remove(controller);
+                }
 
         // Call through to the client's listener
-        if (listener != null) {
-            listener.deviceRemoved(controller);
+        
+                if (listener != null) {
+                    listener.deviceRemoved(controller);
+                }
+            }
+        });
+    }
+
+    /*
+
         }
     }
 
     @Override
+    */
+    @Override
     public void deviceAdded(AbstractController controller) {
         // Call through to the client's listener
+        
         if (listener != null) {
             listener.deviceAdded(controller);
         }
@@ -93,9 +119,13 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                 // kernel is capable of running the device. Let's post a delayed
                 // message to process this state change to allow the kernel
                 // some time to bring up the stack.
-                new Handler().postDelayed(new Runnable() {
+                // §REVIEW-1104：使用保留的 handler 排程延遲工作，並於工作執行前檢查 started
+                handler.postDelayed(new Runnable() {
                     @Override
                     public void run() {
+                        if (!started) {
+                            return;
+                        }
                         // Continue the state machine
                         handleUsbDeviceState(device);
                     }
@@ -123,12 +153,24 @@ public class UsbDriverService extends Service implements UsbDriverListener {
             UsbDriverService.this.listener = listener;
 
             // Report all controllerMap that already exist
+            
             if (listener != null) {
-                for (AbstractController controller : controllers) {
-                    listener.deviceAdded(controller);
+                // §REVIEW-1104：遍歷 controllers 清單時取得 controllerLock 同步鎖
+                synchronized (controllerLock) {
+                    for (AbstractController controller : controllers) {
+                        listener.deviceAdded(controller);
+                    }
                 }
             }
         }
+        /*
+                if (listener != null) {
+            listener.deviceAdded(controller);
+                }
+            }
+        }
+
+        */
 
         public void setStateListener(UsbDriverStateListener stateListener) {
             UsbDriverService.this.stateListener = stateListener;
@@ -144,6 +186,10 @@ public class UsbDriverService extends Service implements UsbDriverListener {
     }
 
     private void handleUsbDeviceState(UsbDevice device) {
+        // §REVIEW-1104：檢查 service 是否已停止，避免在 onDestroy 後繼續認領裝置
+        if (!started) {
+            return;
+        }
         // Are we able to operate it?
         if (shouldClaimDevice(device, prefConfig.bindAllUsb)) {
             // Do we have permission yet?
@@ -189,6 +235,12 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                 return;
             }
 
+            // §REVIEW-1104：已打開連線但發現服務已停止，立刻關閉連線避免佔用介面
+            if (!started) {
+                connection.close();
+                return;
+            }
+
 
             // §SC-HID: Steam Controller gen-2 raw passthrough (outside the
             // AbstractController lifecycle, see steamControllers above)
@@ -196,15 +248,52 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                 SteamControllerDriver scDriver = new SteamControllerDriver(device, connection,
                         new SteamControllerDriver.Listener() {
                             @Override
-                            public void onStopped(SteamControllerDriver driver) {
-                                steamControllers.remove(driver);
+                            public void onStopped(final SteamControllerDriver driver) {
+                                // §REVIEW-1104：驅動執行緒只標記已停，實際移除排回 service 主執行緒並同步清單鎖
+                                handler.post(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        synchronized (controllerLock) {
+                                            steamControllers.remove(driver);
+                                            // §REVIEW-1104：若仍有其他存活的 Steam Controller 驅動，將 feature request slot 重新掛載給剩餘驅動，否則確保已停驅動從 slot 清除
+                                            if (!steamControllers.isEmpty()) {
+                                                MoonBridge.setScHidFeatureRequestHandler(
+                                                        steamControllers.get(steamControllers.size() - 1));
+                                            } else {
+                                                MoonBridge.clearScHidFeatureRequestHandler(driver);
+                                            }
+                                        }
+                                    }
+                                });
                             }
                         });
+                /*
+                // §REVIEW-1104
+                                            steamControllers.remove(driver);
+            
+        
+                                           });
+                            }
+                        });
+                                       });
+                            }
+                        });
+        
+                            }
+
+
+
+
+                
+                */
                 if (!scDriver.start()) {
                     connection.close();
                     return;
                 }
-                steamControllers.add(scDriver);
+                // §REVIEW-1104：加入 steamControllers 清單時同步清單鎖
+                synchronized (controllerLock) {
+                    steamControllers.add(scDriver);
+                }
                 return;
             }
 
@@ -231,7 +320,10 @@ public class UsbDriverService extends Service implements UsbDriverListener {
             }
 
             // Add this controller to the list
-            controllers.add(controller);
+            // §REVIEW-1104：加入 controllers 清單時同步清單鎖
+            synchronized (controllerLock) {
+                controllers.add(controller);
+            }
         }
     }
 
@@ -347,10 +439,15 @@ public class UsbDriverService extends Service implements UsbDriverListener {
 
         started = false;
 
+        // §REVIEW-1104：停止服務時移除尚未執行的延遲工作與回呼
+        handler.removeCallbacksAndMessages(null);
+
         // Stop the attachment receiver
         unregisterReceiver(receiver);
 
-        // Stop all controllers
+        // §REVIEW-1104：使用同一把鎖同步清空 controllers 與 steamControllers 清單並停止裝置
+        synchronized (controllerLock) {
+            // Stop all controllers
         while (controllers.size() > 0) {
             // Stop and remove the controller
             controllers.remove(0).stop();
@@ -361,6 +458,7 @@ public class UsbDriverService extends Service implements UsbDriverListener {
         // would be a no-op here.
         while (steamControllers.size() > 0) {
             steamControllers.remove(0).stop();
+        }
         }
     }
 

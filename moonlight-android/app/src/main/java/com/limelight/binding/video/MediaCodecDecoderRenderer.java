@@ -76,6 +76,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     // in a Vulkan implementation without touching the Game/MediaCodec
     // wiring. Concrete type chosen at init based on prefs / fallback.
     private IFrucBackend frucRenderer;
+    // §REVIEW-1104：保存 FRUC backend 回傳的 input Surface 供解碼器重啟時沿用
+    private Surface frucInputSurface;
     private boolean frucEnabled = false;
     private boolean pyroWaveActive = false;
 
@@ -600,8 +602,19 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         //      drops to direct rendering (FRUC OFF) the same way as before.
         Surface decoderOutputSurface = renderTarget.getSurface();
         if (context != null && prefs.enableFruc) {
-            int w = format.getInteger("width", 1920);
-            int h = format.getInteger("height", 1080);
+            // §REVIEW-1104：MediaFormat.getInteger(String, int) 為 API 29+，改用相容 API 16 的 getInteger(String) 避免 NoSuchMethodError
+            int w = format.containsKey(MediaFormat.KEY_WIDTH) ? format.getInteger(MediaFormat.KEY_WIDTH) : 1920;
+            int h = format.containsKey(MediaFormat.KEY_HEIGHT) ? format.getInteger(MediaFormat.KEY_HEIGHT) : 1080;
+
+            if (frucRenderer != null && frucInputSurface != null && frucRenderer.isInitialized()) {
+                // §REVIEW-1104：解碼器重啟時沿用既有 FRUC backend 與 input Surface，避免打到已被佔用的顯示 Surface
+                decoderOutputSurface = frucInputSurface;
+            }
+            else if (frucRenderer != null) {
+                    this.frucRenderer.destroy();
+                    this.frucRenderer = null;
+                    frucInputSurface = null;
+                }
 
             boolean vkSetting = prefs.frucBackendVulkan;
             boolean vkOverride = VkBackend.isOptedIn();
@@ -622,7 +635,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 vkOptIn = false;
             }
 
-            if (vkOptIn) {
+            if (vkOptIn && frucRenderer == null) {
                 // Arm canary BEFORE any JNI call into Vulkan. If native
                 // crashes, the flag persists across process death and the
                 // next launch sees it. commit() not apply() — has to be
@@ -647,10 +660,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     VkBackend.disarmCanary(context);
                     if (vkInput != null) {
                         frucRenderer = vk;
+                        frucInputSurface = vkInput;
                         decoderOutputSurface = vkInput;
                         frucEnabled = true;
                         LimeLog.info("FRUC enabled (Vulkan, opt-in)");
-                    } else {
+                    }
+                    else {
                         LimeLog.info("Vulkan FRUC backend declined; falling back to GLES");
                     }
                 } catch (Throwable t) {
@@ -668,15 +683,18 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     Surface frucInput = gles.initialize(renderTarget.getSurface(), w, h);
                     if (frucInput != null) {
                         frucRenderer = gles;
+                        frucInputSurface = frucInput;
                         decoderOutputSurface = frucInput;
                         frucEnabled = true;
                         LimeLog.info("FRUC enabled (Generic Compute, GLES)");
-                    } else {
+                    }
+                    else {
                         LimeLog.info("FRUC init failed, using direct rendering");
                     }
                 } catch (Exception e) {
                     LimeLog.warning("FRUC not available: " + e.getMessage());
-                    frucRenderer = null;
+                    frucInputSurface = null;
+                    this.frucRenderer = null;
                 }
             }
         }
@@ -1302,7 +1320,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                     activeWindowVideoStats.totalTimeMs += deltaUs / 1000;
                                 }
                             }
-                        } else {
+                        }
+                        else {
                             switch (outIndex) {
                                 case MediaCodec.INFO_TRY_AGAIN_LATER:
                                     break;
@@ -1319,6 +1338,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                         handleDecoderException(e);
                     } finally {
                         doCodecRecoveryIfRequired(CR_FLAG_RENDER_THREAD);
+                        // §REVIEW-1104：渲染執行緒退出前解除當前執行緒的 EGL Context 綁定
+                        if (stopping && android.opengl.EGL14.eglGetCurrentContext() != android.opengl.EGL14.EGL_NO_CONTEXT) {
+                            android.opengl.EGL14.eglMakeCurrent(android.opengl.EGL14.eglGetDisplay(android.opengl.EGL14.EGL_DEFAULT_DISPLAY),
+                                    android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_CONTEXT);
+                        }
                     }
                 }
             }
@@ -1433,6 +1457,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 @Override
                 public void run() {
                     // Don't allow any further messages to be queued
+                    // §REVIEW-1104：Choreographer 執行緒退出前解除 EGL Context 綁定
+                    if (android.opengl.EGL14.eglGetCurrentContext() != android.opengl.EGL14.EGL_NO_CONTEXT) {
+                        android.opengl.EGL14.eglMakeCurrent(android.opengl.EGL14.eglGetDisplay(android.opengl.EGL14.EGL_DEFAULT_DISPLAY),
+                                android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_CONTEXT);
+                    }
                     choreographerHandlerThread.quit();
 
                     // Deregister the frame callback (if registered)
@@ -1450,8 +1479,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             return;
         }
         if (frucRenderer != null) {
-            frucRenderer.destroy();
-            frucRenderer = null;
+            // §REVIEW-1104：destroy 延後至 join 完成後執行
+            // §REVIEW-1104：先關閉 FRUC 旗標並通知各執行緒停止，待 Choreographer 與渲染執行緒 join 結束後再釋放 FRUC 資源
             frucEnabled = false;
         }
 
@@ -1474,7 +1503,22 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         // Wait for the renderer thread to shut down
         try {
-            rendererThread.join();
+            try {
+                if (rendererThread != null) {
+                    rendererThread.join();
+                }
+            } finally {
+                // §REVIEW-1104：待執行緒結束後在當前執行緒解除 Context 綁定並釋放 FRUC 資源
+                if (android.opengl.EGL14.eglGetCurrentContext() != android.opengl.EGL14.EGL_NO_CONTEXT) {
+                    android.opengl.EGL14.eglMakeCurrent(android.opengl.EGL14.eglGetDisplay(android.opengl.EGL14.EGL_DEFAULT_DISPLAY),
+                            android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_CONTEXT);
+                }
+                if (frucRenderer != null) {
+                    frucRenderer.destroy();
+                    frucRenderer = null;
+                    frucInputSurface = null;
+                }
+            }
         } catch (InterruptedException e) {
             e.printStackTrace();
 
@@ -1635,7 +1679,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     decoder = av1Decoder.getName();
                 } else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE) != 0) {
                     decoder = "PyroWave (Vulkan GPU)";
-                } else {
+                }
+                else {
                     decoder = "(unknown)";
                 }
 
@@ -1681,7 +1726,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                               frucRenderer.getOutputFps())).append('\n');
                 } else if (prefs.enableFruc) {
                     sb.append(context.getString(R.string.perf_overlay_fruc_pending)).append('\n');
-                } else {
+                }
+                else {
                     sb.append(context.getString(R.string.perf_overlay_fruc_off)).append('\n');
                 }
 
@@ -1907,7 +1953,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         if (frameHostProcessingLatency != 0) {
             if (activeWindowVideoStats.minHostProcessingLatency != 0) {
                 activeWindowVideoStats.minHostProcessingLatency = (char) Math.min(activeWindowVideoStats.minHostProcessingLatency, frameHostProcessingLatency);
-            } else {
+            }
+            else {
                 activeWindowVideoStats.minHostProcessingLatency = frameHostProcessingLatency;
             }
             activeWindowVideoStats.framesWithHostProcessingLatency += 1;

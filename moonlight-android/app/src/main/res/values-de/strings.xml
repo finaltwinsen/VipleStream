@@ -353,4 +353,6 @@
     <string name="steam_switch_error_taskgone">Der Wechselvorgang ist auf dem Host verschwunden</string>
     <string name="steam_switch_error_timeout">Zeitüberschreitung beim Wechsel (&gt;150 s, ohne dass der Server einen Endzustand erreicht hat)</string>
     <string name="steam_switch_account_unavailable">Für dieses Konto sind auf dem Host keine Anmeldedaten gespeichert. Melde dich zuerst einmal auf dem Host an und versuche es dann erneut.</string>
+    <string name="title_show_advanced">Erweiterte und experimentelle Optionen anzeigen</string>
+    <string name="summary_show_advanced">Optionen zur Fehlersuche und zum Testen. Ausgeblendete Optionen behalten ihre aktuellen Werte.</string>
 </resources>

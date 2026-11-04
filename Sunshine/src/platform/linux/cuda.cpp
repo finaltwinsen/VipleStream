@@ -686,7 +686,13 @@ namespace cuda {
 
         NVFBC_DESTROY_HANDLE_PARAMS params {NVFBC_DESTROY_HANDLE_PARAMS_VER};
 
-        ctx_t ctx {handle};
+        // §REVIEW-1103：DestroyHandle 要在 context 綁定時呼叫，但之後 handle 已失效；原本用 ctx_t 綁定，
+        // 離開 scope 時解構子又對已銷毀的 handle 呼叫 nvFBCReleaseContext。改成只綁定、不再 release
+        // （與 NvFBC 範例一致：DestroyHandle 之後不再碰這個 handle）。
+        NVFBC_BIND_CONTEXT_PARAMS bind_params {NVFBC_BIND_CONTEXT_PARAMS_VER};
+        if (func.nvFBCBindContext(handle, &bind_params)) {
+          BOOST_LOG(error) << "Couldn't bind NvFBC context to current thread: " << func.nvFBCGetLastErrorStr(handle);
+        }
         if (func.nvFBCDestroyHandle(handle, &params)) {
           BOOST_LOG(error) << "Couldn't destroy session handle: "sv << func.nvFBCGetLastErrorStr(handle);
         }

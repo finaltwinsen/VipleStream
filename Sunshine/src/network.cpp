@@ -176,6 +176,11 @@ namespace net {
     // Maximum of 128 clients, which should be enough for anyone
     auto host = host_t {enet_host_create(af == IPV4 ? AF_INET : AF_INET6, &addr, 128, 0, 0, 0)};
 
+    // §REVIEW-1103：控制埠被占用時 enet_host_create 回 NULL；交給呼叫端的 if (_host) 處理，不可解參考
+    if (!host) {
+      return host;
+    }
+
     // Enable opportunistic QoS tagging (automatically disables if the network appears to drop tagged packets)
     enet_socket_set_option(host->socket, ENET_SOCKOPT_QOS, 1);
 

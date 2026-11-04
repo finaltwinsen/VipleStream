@@ -62,12 +62,9 @@ namespace platf::dxgi {
       return;
     }
 
-    auto pixels_per_byte = width / pitch;
-    if (pixels_per_byte <= 0) {
-      pixels_per_byte = 8;
-    }
-    auto bytes_per_row = delta_width / pixels_per_byte;
-
+    // §REVIEW-1103：單色遮罩固定每 byte 8 個像素。原本用 width / pitch 算，pitch 有對齊填充時會小於 8，
+    // 每 byte 仍寫 8 px → 超出 delta_width、寫出畫面那一列；游標靠左時又重複扣掉 skip，畫少一截。
+    // 改成逐像素：游標第 cx 欄在第 cx / 8 個 byte、第 cx % 8 個 bit。
     auto img_data = (int *) img.data;
     for (int i = 0; i < delta_height; ++i) {
       auto and_mask = &cursor_img_data[i * pitch];
@@ -75,26 +72,21 @@ namespace platf::dxgi {
 
       auto img_pixel_p = &img_data[(i + img_skip_y) * (img.row_pitch / img.pixel_pitch) + img_skip_x];
 
-      auto skip_x = cursor_skip_x;
-      for (int x = 0; x < bytes_per_row; ++x) {
-        for (auto bit = 0u; bit < 8; ++bit) {
-          if (skip_x > 0) {
-            --skip_x;
-
-            continue;
-          }
-
-          int and_ = *and_mask & (1 << (7 - bit)) ? -1 : 0;
-          int xor_ = *xor_mask & (1 << (7 - bit)) ? -1 : 0;
-
-          *img_pixel_p &= and_;
-          *img_pixel_p ^= xor_;
-
-          ++img_pixel_p;
+      for (int x = 0; x < delta_width; ++x) {
+        const int cx = cursor_skip_x + x;
+        const int byte_idx = cx / 8;
+        if (byte_idx >= pitch) {
+          break;
         }
+        const int mask_bit = 1 << (7 - (cx % 8));
 
-        ++and_mask;
-        ++xor_mask;
+        int and_ = and_mask[byte_idx] & mask_bit ? -1 : 0;
+        int xor_ = xor_mask[byte_idx] & mask_bit ? -1 : 0;
+
+        *img_pixel_p &= and_;
+        *img_pixel_p ^= xor_;
+
+        ++img_pixel_p;
       }
     }
   }

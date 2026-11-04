@@ -253,7 +253,9 @@ bool NvOFRUCWrapper::submitFrame(ID3D11DeviceContext* deviceContext, double time
     int renderIdx = m_CurrentRenderIndex;
     m_LastRenderIndex = renderIdx;  // Save for getLastRenderSRV()
     m_CurrentRenderIndex = (m_CurrentRenderIndex + 1) % NUM_RENDER_TEXTURES;
-    int outputIdx = m_CurrentOutputIndex;
+    // §REVIEW-1103：輸出寫進「下一張」輸出貼圖，成功後才把 m_CurrentOutputIndex 指過去（:342），
+    // getOutputSRV() 拿到的永遠是剛寫好的那張；原本一直寫同一張，第二張閒置、雙緩衝形同虛設。
+    int outputIdx = (m_CurrentOutputIndex + 1) % NUM_INTERP_TEXTURES;
 
     // Signal fence using the SAME context that did the rendering
     ComPtr<ID3D11DeviceContext4> ctx4;

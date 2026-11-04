@@ -3,6 +3,7 @@
 
 #include "streaming/session.h"
 #include "streaming/streamutils.h"
+#include "settings/streamingpreferences.h"  // §REVIEW-1103：warp 的 edgeMvThreshold
 
 // §J.3.e.1.d — handoff to ncnn via the new external VkDevice API.
 #include <ncnn/gpu.h>
@@ -2714,12 +2715,13 @@ void storeInterp(int x, int y, vec3 c) {
 // to the side that fails self-consistency check.
 float computeAdaptiveWeight(vec2 pixelPos, vec2 mv) {
     vec2 prevPos = pixelPos - mv * 0.5;
-    vec2 mvAtPrev = sampleMV(prevPos);
+    // §REVIEW-1104：main 已把 backward MV 取成 forward，這裡仍拿未取負的 sampleMV，一致性檢查會反號
+    vec2 mvAtPrev = -sampleMV(prevPos);
     vec2 backFromPrev = prevPos + mvAtPrev * 0.5;
     float fwdError = length(backFromPrev - pixelPos);
 
     vec2 currPos = pixelPos + mv * 0.5;
-    vec2 mvAtCurr = sampleMV(currPos);
+    vec2 mvAtCurr = -sampleMV(currPos);
     vec2 backFromCurr = currPos - mvAtCurr * 0.5;
     float bwdError = length(backFromCurr - pixelPos);
 
@@ -3520,6 +3522,7 @@ bool PlVkRenderer::initFrucRgbImgResources()
     VkPhysicalDeviceMemoryProperties mp = {};
     pfnGetPhysProps(m_Vulkan->phys_device, &mp);
     for (uint32_t ri = 0; ri < FRUC_RGB_IMG_RING; ri++) {
+        m_FrucRgbImgFirstUseTracked[ri] = false;  // §REVIEW-1103：新 image 從 UNDEFINED 開始
         VkImageCreateInfo iCi = {};
         iCi.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         iCi.imageType = VK_IMAGE_TYPE_2D;
@@ -3887,12 +3890,11 @@ bool PlVkRenderer::runRgbImgReversePass(VkCommandBuffer cb, uint32_t width, uint
     // Subsequent calls: GENERAL → GENERAL (after libplacebo sampled, ring
     // rotation brings the slot back; the swapchain ack means the prior
     // sample is done).
-    static bool s_FirstUseTracked[FRUC_RGB_IMG_RING] = {};
     VkImageMemoryBarrier toGen = {};
     toGen.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toGen.srcAccessMask = s_FirstUseTracked[slot] ? VK_ACCESS_SHADER_READ_BIT : 0;
+    toGen.srcAccessMask = m_FrucRgbImgFirstUseTracked[slot] ? VK_ACCESS_SHADER_READ_BIT : 0;
     toGen.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    toGen.oldLayout = s_FirstUseTracked[slot] ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    toGen.oldLayout = m_FrucRgbImgFirstUseTracked[slot] ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
     toGen.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     toGen.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toGen.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -3902,7 +3904,7 @@ bool PlVkRenderer::runRgbImgReversePass(VkCommandBuffer cb, uint32_t width, uint
     toGen.subresourceRange.layerCount = 1;
     pfnBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                0, 0, nullptr, 0, nullptr, 1, &toGen);
-    s_FirstUseTracked[slot] = true;
+    m_FrucRgbImgFirstUseTracked[slot] = true;
 
     pfnBindPipe(cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)m_FrucRgbImgVkPipeline);
     VkDescriptorSet dSet = (VkDescriptorSet)m_FrucRgbImgDescSet[slot];
@@ -4740,7 +4742,7 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
         bci.size = size;
         bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (pfnCreateBuffer(m_Vulkan->device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
+        if (pfnCreateBuffer(m_Vulkan->device, &bci, nullptr, &outBuf) != VK_SUCCESS) { outBuf = VK_NULL_HANDLE; return false; }  // §REVIEW-1103：失敗時 handle 內容未定義
         VkMemoryRequirements memReq = {};
         pfnGetBufMemReq(m_Vulkan->device, outBuf, &memReq);
         int mti = pickMemType(memReq.memoryTypeBits,
@@ -4751,7 +4753,7 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
         mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         mai.allocationSize = memReq.size;
         mai.memoryTypeIndex = (uint32_t)mti;
-        if (pfnAllocateMemory(m_Vulkan->device, &mai, nullptr, &outMem) != VK_SUCCESS) return false;
+        if (pfnAllocateMemory(m_Vulkan->device, &mai, nullptr, &outMem) != VK_SUCCESS) { outMem = VK_NULL_HANDLE; return false; }
         if (pfnBindBufMem(m_Vulkan->device, outBuf, outMem, 0) != VK_SUCCESS) return false;
         if (pfnMapMemory(m_Vulkan->device, outMem, 0, size, 0, &outMapped) != VK_SUCCESS) return false;
         return true;
@@ -4767,6 +4769,18 @@ bool PlVkRenderer::initRifeModel(uint32_t width, uint32_t height)
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VK-FRUC] §J.3.e.2.e2 staging-buffer alloc failed (sizeRGB=%llu)",
                     (unsigned long long)sizeRGB);
+        // §REVIEW-1103：部分成功時把已配置的 buffer／memory 釋放（第二個失敗時第一個 10～25 MB 原本會漏掉；
+        // allocHostVisibleBuf 自己中途失敗也會留下 buffer）。vkFreeMemory 會隱含 unmap。
+        auto pfnDestroyBuffer = (PFN_vkDestroyBuffer)getDevProc("vkDestroyBuffer");
+        auto pfnFreeMemory    = (PFN_vkFreeMemory)getDevProc("vkFreeMemory");
+        if (pfnDestroyBuffer) {
+            if (inBuf != VK_NULL_HANDLE)  pfnDestroyBuffer(m_Vulkan->device, inBuf, nullptr);
+            if (outBuf != VK_NULL_HANDLE) pfnDestroyBuffer(m_Vulkan->device, outBuf, nullptr);
+        }
+        if (pfnFreeMemory) {
+            if (inMem != VK_NULL_HANDLE)  pfnFreeMemory(m_Vulkan->device, inMem, nullptr);
+            if (outMem != VK_NULL_HANDLE) pfnFreeMemory(m_Vulkan->device, outMem, nullptr);
+        }
         m_RifeNet.reset();
         m_RifeTimestepMat.release();
         m_RifeDisabled = true;
@@ -5012,7 +5026,9 @@ bool PlVkRenderer::initFrucGenericResources(uint32_t width, uint32_t height)
     // fineMV, 7 = flag buf). Push const 36→40 byte (added uint hasFineMv).
     // plvk path doesn't run fine ME so binding 6/7 stub-綁 mvF/prevMv +
     // hasFineMv=0 — shader skips fine path.
-    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 8, 40, warpMod, warpDsl, warpPL, warpPipe)) {
+    // §REVIEW-1103：warp shader 的 push constant 是 44 byte（§β.11.b 加了 edgeMvThreshold），原本這裡只給 40，
+    // shader 讀到範圍外的值（未定義，多半是 0）→ smoothstep(0, 0, …) 未定義、補幀幀可能錯色；與 vkfruc.cpp 一致改 44。
+    if (!buildPipeline("Warp", kFrucWarpShaderGlsl, 8, 44, warpMod, warpDsl, warpPL, warpPipe)) {
         m_FrucGenericDisabled = true; return false;
     }
     m_FrucWarpShaderMod = warpMod; m_FrucWarpDsl = warpDsl; m_FrucWarpPipeLay = warpPL; m_FrucWarpPipeline = warpPipe;
@@ -5343,8 +5359,13 @@ bool PlVkRenderer::runFrucGenericComputePass(uint32_t width, uint32_t height)
         uint32_t hasTemporalMv;
         uint32_t hasBackwardMv;
         uint32_t hasFineMv;
+        float    edgeMvThreshold;  // §REVIEW-1103：補上第 11 個欄位（44 byte），取值規則同 vkfruc.cpp
     } warpPc = { width, height, 8, m_FrucGenericMvWidth, m_FrucGenericMvHeight,
-                 0.5f, 0.5f, 1u, 0u, 0u };
+                 0.5f, 0.5f, 1u, 0u, 0u,
+                 [&]() -> float {
+                     auto* prefs = StreamingPreferences::get();
+                     return (prefs && prefs->vkfrucEdgeMvThreshold > 0.0f) ? prefs->vkfrucEdgeMvThreshold : 8.0f;
+                 }() };
     pfnPushC(cb, (VkPipelineLayout)m_FrucWarpPipeLay,
              VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(warpPc), &warpPc);
     pfnDispatch(cb, (width + 7) / 8, (height + 7) / 8, 1);

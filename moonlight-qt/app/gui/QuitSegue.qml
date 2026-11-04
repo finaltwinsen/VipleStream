@@ -13,6 +13,8 @@ Item {
     property var nextLaunchFn : null
 
     property string stageText : qsTr("Quitting %1...").arg(appName)
+    // §REVIEW-1104：失敗時先留在這一頁，等錯誤對話框關掉才 pop
+    property bool popAfterErrorDialog : false
 
     function quitAppCompleted(error)
     {
@@ -21,6 +23,9 @@ Item {
             errorDialog.text = error
             errorDialog.open()
             console.error(error)
+            // §REVIEW-1104：錯誤對話框是這一頁的子物件，立刻 pop 會把失敗原因一起拆掉
+            popAfterErrorDialog = true
+            return
         }
 
         // If we're supposed to launch another game after this, do so now
@@ -81,5 +86,13 @@ Item {
 
     ErrorMessageDialog {
         id: errorDialog
+
+        onClosed: {
+            // §REVIEW-1104：看完失敗原因才離開；延後 pop，避免在對話框的 closed 裡面拆掉自己
+            if (popAfterErrorDialog) {
+                popAfterErrorDialog = false
+                Qt.callLater(function() { stackView.pop() })
+            }
+        }
     }
 }

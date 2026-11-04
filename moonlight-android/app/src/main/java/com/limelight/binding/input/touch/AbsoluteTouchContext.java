@@ -19,14 +19,27 @@ public class AbsoluteTouchContext implements TouchContext {
     private boolean cancelled;
     private boolean confirmedLongPress;
     private boolean confirmedTap;
+    private boolean hasPendingLeftUp;
+
+    private void flushPendingLeftUp() {
+        if (hasPendingLeftUp) {
+            hasPendingLeftUp = false;
+            handler.removeCallbacks(leftButtonUpRunnable);
+            conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+            confirmedTap = false;
+        }
+    }
 
     private final Runnable longPressRunnable = new Runnable() {
         @Override
         public void run() {
+            hasPendingLeftUp = false;
             // This timer should have already expired, but cancel it just in case
             cancelTapDownTimer();
 
             // Switch from a left click to a right click after a long press
+            // §REVIEW-1104：切換右鍵前若 left-up 還在佇列，先同步放開並移除 callback
+            flushPendingLeftUp();
             confirmedLongPress = true;
             if (confirmedTap) {
                 conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
@@ -38,6 +51,7 @@ public class AbsoluteTouchContext implements TouchContext {
     private final Runnable tapDownRunnable = new Runnable() {
         @Override
         public void run() {
+            hasPendingLeftUp = false;
             // Start our tap
             tapConfirmed();
         }
@@ -48,9 +62,11 @@ public class AbsoluteTouchContext implements TouchContext {
     private final View targetView;
     private final Handler handler;
 
+    // §REVIEW-1104：左鍵放開時清除待釋放標記
     private final Runnable leftButtonUpRunnable = new Runnable() {
         @Override
         public void run() {
+            hasPendingLeftUp = false;
             conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
         }
     };
@@ -83,6 +99,11 @@ public class AbsoluteTouchContext implements TouchContext {
     @Override
     public boolean touchDownEvent(int eventX, int eventY, long eventTime, boolean isNewFinger)
     {
+        // §REVIEW-1104：新手勢按下時若 left-up 還在佇列，先同步放開並取消 callback，避免後續拖曳被提早放開
+        if (actionIndex == 0) {
+            flushPendingLeftUp();
+        }
+
         if (!isNewFinger) {
             // We don't handle finger transitions for absolute mode
             return true;
@@ -144,6 +165,8 @@ public class AbsoluteTouchContext implements TouchContext {
 
                 // Release the left mouse button in 100ms to allow for apps that use polling
                 // to detect mouse button presses.
+                // §REVIEW-1104：排程延遲放開時記錄 hasPendingLeftUp
+                hasPendingLeftUp = true;
                 handler.removeCallbacks(leftButtonUpRunnable);
                 handler.postDelayed(leftButtonUpRunnable, 100);
             }
@@ -220,6 +243,8 @@ public class AbsoluteTouchContext implements TouchContext {
 
     @Override
     public void cancelTouch() {
+        // §REVIEW-1104：取消觸控時若 left-up 還在佇列，先同步放開並移除 callback
+        flushPendingLeftUp();
         cancelled = true;
 
         // Cancel the timers

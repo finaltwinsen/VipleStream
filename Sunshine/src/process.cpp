@@ -67,6 +67,8 @@ namespace proc {
   // the same reason _steam_watchdog_gen is: std::mutex / std::atomic
   // aren't move-constructible and proc_t needs default move ops.
   std::mutex proc_t::_owner_mutex;
+  std::recursive_mutex proc_t::_state_mutex;  // §REVIEW-1103
+  std::atomic<int> proc_t::_running_cache {0};  // §REVIEW-1103
   std::atomic<uint64_t> proc_t::_idle_watchdog_gen {0};
 
   class deinit_t: public platf::deinit_t {
@@ -292,8 +294,13 @@ namespace proc {
       // §STEAM-WATCHDOG-RUNNING：遊戲結束要「這個 app 的 Running 旗標是 0、而且 RunningAppID 也不是它」連續這麼久
       // （VR 遊戲啟動時 Steam 會在 SteamVR 與遊戲之間切換；找不到旗標的鍵時退回只看 RunningAppID）
       constexpr int k_exit_polls = 12;  // 12 × 250 ms ＝ 3 秒
+      // §REVIEW-1103：沒有遊戲時 RunningAppID 會停在舊值（上面註解），只靠 AND 會永遠等不到結束。
+      // Running 旗標讀得到而且是 0、RunningAppID 卻還停在這個 app，持續 15 秒也視為結束
+      // （比 3 秒長，避開 VR 遊戲啟動時 SteamVR／遊戲之間切換的空檔）。
+      constexpr int k_stale_exit_polls = 60;  // 60 × 250 ms ＝ 15 秒
       bool game_started = false;
       int gone_polls = 0;
+      int stale_polls = 0;
       uint32_t ignored_running_id = 0;
       while (_steam_watchdog_gen.load() == my_gen) {
         const uint32_t cur = read_steam_running_app_id();
@@ -311,6 +318,13 @@ namespace proc {
           }
         } else {
           const bool gone = cur != app_id && app_running != 1;
+          const bool stale_id = cur == app_id && app_running == 0;
+          stale_polls = stale_id ? stale_polls + 1 : 0;
+          if (stale_polls >= k_stale_exit_polls) {
+            BOOST_LOG(info) << "[steam-watchdog "sv << app_id
+                            << "] game exited (Running=0 for 15 s; RunningAppID still "sv << cur << "); ending stream"sv;
+            break;
+          }
           if (!gone) {
             if (cur != app_id && cur != ignored_running_id) {
               // RunningAppID 跳走了、但遊戲本身還在跑：不收串流（每個新值記一次）
@@ -374,6 +388,7 @@ namespace proc {
 
   int proc_t::execute(int app_id, std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
                        std::string owner_uuid, std::string owner_name) {
+    std::lock_guard<std::recursive_mutex> state_lk(_state_mutex);  // §REVIEW-1103
     // Ensure starting from a clean slate
     terminate();
 
@@ -563,6 +578,17 @@ namespace proc {
   }
 
   int proc_t::running() {
+    // §REVIEW-1103：別的執行緒正在 terminate()／execute() 時不等鎖，回傳上一次的結果（見 process.h）。
+    std::unique_lock<std::recursive_mutex> state_lk(_state_mutex, std::try_to_lock);
+    if (!state_lk.owns_lock()) {
+      return _running_cache.load();
+    }
+    const int r = running_locked_();
+    _running_cache.store(r);
+    return r;
+  }
+
+  int proc_t::running_locked_() {
 #ifndef _WIN32
     // On POSIX OSes, we must periodically wait for our children to avoid
     // them becoming zombies. This must be synchronized carefully with
@@ -603,6 +629,7 @@ namespace proc {
   }
 
   void proc_t::terminate() {
+    std::lock_guard<std::recursive_mutex> state_lk(_state_mutex);  // §REVIEW-1103
     std::error_code ec;
     placebo = false;
     if (_vr_pcvr) {
@@ -632,9 +659,16 @@ namespace proc {
 
       if (ec) {
         BOOST_LOG(warning) << "System: "sv << ec.message();
+        // §REVIEW-1103：啟動失敗時 child 無效，wait() 會拋 process_error（POSIX 上還可能變成 waitpid(-1)）
+        continue;
       }
 
-      child.wait();
+      std::error_code wait_ec;
+      child.wait(wait_ec);
+      if (wait_ec) {
+        BOOST_LOG(warning) << "Undo Cmd wait failed: "sv << wait_ec.message();
+        continue;
+      }
       auto ret = child.exit_code();
 
       if (ret != 0) {
@@ -650,7 +684,11 @@ namespace proc {
     // Since terminate() is always run when a new app has started
     if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
-      system_tray::update_tray_stopped(proc::proc.get_last_run_app_name());
+      // §REVIEW-1103：這裡持有 _state_mutex。Windows 的 tray_update 會 SendMessage 給 tray 執行緒等它處理，
+      // 而 tray 的檔案傳輸選單回呼會呼叫 running()（要同一把鎖）→ 兩邊互等。改由背景執行緒通知。
+      std::thread([app_name = proc::proc.get_last_run_app_name()]() {
+        system_tray::update_tray_stopped(app_name);
+      }).detach();
 #endif
 
       display_device::revert_configuration();
@@ -800,6 +838,7 @@ namespace proc {
   }
 
   void proc_t::detach() {
+    std::lock_guard<std::recursive_mutex> state_lk(_state_mutex);  // §REVIEW-1103
     if (_vr_pcvr) {
       _vr_pcvr = false;
       ::vr::orchestrator::stop(::vr::orchestrator::stop_reason_e::user_ended);
@@ -1171,8 +1210,11 @@ namespace proc {
       return DEFAULT_APP_IMAGE_PATH;
     }
 
+    // §STEAM-ART：Steam 的 librarycache 會把 PNG 存成 .jpg（11-03 host 實測 DeoVR 的 library_600x900.jpg
+    // 檔頭是 PNG），只照副檔名檢查會把它當壞檔換成預設圖。副檔名只用來篩「是圖片」，內容兩種格式都接受；
+    // appasset 依檔頭決定 Content-Type。
     auto validate_magic = [&](const std::filesystem::path &p) -> bool {
-      return is_png ? check_valid_png(p) : check_valid_jpeg(p);
+      return check_valid_png(p) || check_valid_jpeg(p);
     };
 
     // check if image is in assets directory
@@ -1503,7 +1545,7 @@ namespace proc {
             if (splash.empty()) {
               splash = "viple-splash.exe";
             }
-            ctx.detached.emplace_back(splash + " --timeout 12");
+            ctx.detached.emplace_back(splash + " --timeout 12 --watch-new-window");  // §REVIEW-1103：拿不到遊戲 PID，改偵測新出現的大型視窗提早掀開
           }
   #endif
           // Steam's URL handler returns quickly, so auto-detach ON keeps

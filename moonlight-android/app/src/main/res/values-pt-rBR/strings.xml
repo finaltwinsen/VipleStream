@@ -339,4 +339,6 @@
     <string name="steam_switch_error_taskgone">A tarefa de troca desapareceu no host</string>
     <string name="steam_switch_error_timeout">Tempo esgotado na troca (&gt;150 s sem o servidor atingir um estado final)</string>
     <string name="steam_switch_account_unavailable">Esta conta não tem credenciais salvas no host. Faça login uma vez no host primeiro e tente novamente.</string>
+    <string name="title_show_advanced">Mostrar opções avançadas e experimentais</string>
+    <string name="summary_show_advanced">Opções para solução de problemas e testes. As opções ocultas mantêm os valores atuais.</string>
 </resources>

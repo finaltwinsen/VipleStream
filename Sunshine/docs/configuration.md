@@ -2388,13 +2388,17 @@ not matter). Any other value is reported in the log as an invalid value and the 
     <tr>
         <td>Description</td>
         <td colspan="2">
-            VipleStream 2.0 (§VR-ABR-FAST): Reactive fast bitrate reduction for VR streaming.
-            When unrecoverable packet loss, missing FEC blocks, network queue blocking (dropBlock),
-            or bufferbloat delay spikes are detected, the target bitrate is immediately reduced
-            (cutting by 10% to 40%) without waiting for coarse loss ratios. After a 2.0-second cooldown
-            hold period, the bitrate smoothly ramps up by 4% of the cap every 1.5 seconds. Anti-oscillation
-            penalizes frequent cuts during ramp-up by clamping the bitrate cap to 85% of applied bitrate
-            for 30 seconds.
+            VipleStream 2.0 (§VR-ABR-FAST, §ABR-ADAPT since 2.0.44): adaptive bitrate control for VR streaming.
+            Congestion is detected from the queuing-delay trend (one-way delay from the headset's receive reports,
+            or the round-trip time for older clients) with a threshold that adapts to the measured jitter, so
+            cellular or hotspot jitter is not mistaken for congestion. Packet loss without a rising delay is treated
+            as wireless loss and left to FEC/repair instead of cutting the bitrate; persistent loss on a saturated
+            link still cuts. Cuts drop to the measured delivery rate when the link is saturated. Ramps up quickly
+            (about +8%/s) far below the last congestion point and slowly near it; cooldowns scale with the
+            base round-trip time. The upper limit is diminishing returns: the ramp stops when the encoder's average
+            QP shows the picture is already saturated or when the headset's decoder is near its frame budget, and
+            the bitrate is trimmed slowly when quality is far beyond saturation. The lower limit is a 2 Mbps
+            technical floor. See also [vr_abr_ceiling_kbps](#vr_abr_ceiling_kbps).
             Accepts `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
             When disabled, the legacy AIMD ABR behavior is retained.
             @note{Applies to VR sessions only.}
@@ -2410,6 +2414,33 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td>Example</td>
         <td colspan="2">@code{}
             vr_abr_fast = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_abr_ceiling_kbps
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (§ABR-ADAPT): with [vr_abr_fast](#vr_abr_fast) enabled, the VR encoder is initialized at
+            max(client bitrate, this value) so that the codec level/tier leaves room to go up (the level is locked
+            for the whole session). The client's bitrate setting becomes the starting bitrate; the controller then
+            moves between the 2 Mbps floor and this ceiling. `0` keeps the client's setting as the ceiling.
+            @note{Applies to VR sessions only. Range 10000–400000, or 0.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            150000
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_abr_ceiling_kbps = 100000
             @endcode</td>
     </tr>
 </table>

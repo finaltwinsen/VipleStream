@@ -350,4 +350,6 @@
     <string name="steam_switch_error_taskgone">主机上的切换任务已消失</string>
     <string name="steam_switch_error_timeout">切换超时（&gt;150 秒服务器仍未进入最终状态）</string>
     <string name="steam_switch_account_unavailable">此账户在主机上没有已保存的凭据。请先在主机上登录一次，然后重试。</string>
+    <string name="title_show_advanced">显示高级与实验性选项</string>
+    <string name="summary_show_advanced">用于排查问题与测试的选项。隐藏的选项仍沿用目前的值。</string>
 </resources>

@@ -1009,7 +1009,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         // Create a client that can use 1 outgoing connection and 1 channel
         client = enet_host_create(RemoteAddr.ss_family, NULL, 1, 1, 0, 0);
         if (client == NULL) {
-            return -1;
+            ret = -1; goto Exit; // §REVIEW-1103：走 Exit 才會釋放 crypto context
         }
 
         // Connect to the host
@@ -1017,7 +1017,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         if (peer == NULL) {
             enet_host_destroy(client);
             client = NULL;
-            return -1;
+            ret = -1; goto Exit; // §REVIEW-1103：走 Exit 才會釋放 crypto context
         }
 
         // Wait for the connect to complete
@@ -1028,7 +1028,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             peer = NULL;
             enet_host_destroy(client);
             client = NULL;
-            return -1;
+            ret = -1; goto Exit; // §REVIEW-1103：走 Exit 才會釋放 crypto context
         }
 
         // Ensure the connect verify ACK is sent immediately
@@ -1049,6 +1049,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP OPTIONS request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1069,12 +1070,14 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP DESCRIBE request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
         if (!response.payload) {
             Limelog("RTSP DESCRIBE no content in response\n");
             ret = -1;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1163,6 +1166,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         // Parse the Opus surround parameters out of the RTSP DESCRIBE response.
         ret = parseOpusConfigurations(&response);
         if (ret != 0) {
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1188,6 +1192,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP SETUP streamid=audio request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1225,6 +1230,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         if (sessionId == NULL) {
             Limelog("RTSP SETUP streamid=audio is missing session attribute\n");
             ret = -1;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1237,12 +1243,14 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         if (sessionToken == NULL) {
             Limelog("RTSP SETUP streamid=audio session attribute is empty\n");
             ret = -1;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
         sessionIdString = strdup(sessionToken);
         if (sessionIdString == NULL) {
             Limelog("Failed to duplicate session ID string\n");
             ret = -1;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1268,6 +1276,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP SETUP streamid=video request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1315,6 +1324,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP SETUP streamid=control request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1361,6 +1371,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP ANNOUNCE request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1382,6 +1393,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP PLAY failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
             goto Exit;
         }
 
@@ -1402,6 +1414,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
                 Limelog("RTSP PLAY streamid=video failed: %d\n",
                     response.message.response.statusCode);
                 ret = response.message.response.statusCode;
+                freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
                 goto Exit;
             }
 
@@ -1422,6 +1435,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
                 Limelog("RTSP PLAY streamid=audio failed: %d\n",
                     response.message.response.statusCode);
                 ret = response.message.response.statusCode;
+                freeMessage(&response); // §REVIEW-1103：已解析的回應在錯誤路徑也要釋放
                 goto Exit;
             }
 

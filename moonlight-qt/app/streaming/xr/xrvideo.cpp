@@ -270,6 +270,7 @@ void XrVideo::destroyAllSwapchains()
             c = Current();
         }
         m_BufLastShown = 0;
+        m_BufDepth = 0;  // §VR-BUFFER-AUTO：下一場從 1 格重新開始
     }
     m_RingNext = 0;
     m_SwFormat = 0;
@@ -311,15 +312,24 @@ void XrVideo::destroy(bool gpuWedged)
     if (m_Thread.joinable()) {
         m_Thread.join();
     }
+    // §REVIEW-1104：補幀幀間隔基準改成成員，拆掉時歸零，下一場才不會沿用上一場的幀率
+    m_NominalDelta = 0;
     if (gpuWedged) {
         // 所有 libplacebo 釋放都會等 GPU：只收掉 XR swapchain handle 與沒被 GPU 參照的 mailbox 幀，其餘洩漏
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-XR] video: GPU wedged - leaking libplacebo objects and %d in-flight frame(s)",
                     static_cast<int>(m_WedgedFrames.size()));
-        for (SwapchainSet* s : {&m_Sw}) {
+        // §REVIEW-1104：wedge 也要銷毀 ring 與投影 swapchain（session 的 child），只清 handle，不 pl_tex_destroy
+        for (SwapchainSet* s : {&m_Sw, &m_Proj}) {
             if (s->swapchain != XR_NULL_HANDLE) {
                 xrDestroySwapchain(s->swapchain);
                 s->swapchain = XR_NULL_HANDLE;
+            }
+        }
+        for (int i = 0; i < kRing; i++) {
+            if (m_RingSets[i].swapchain != XR_NULL_HANDLE) {
+                xrDestroySwapchain(m_RingSets[i].swapchain);
+                m_RingSets[i].swapchain = XR_NULL_HANDLE;
             }
         }
         for (SwapchainSet& s : m_Retired) {
@@ -822,6 +832,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         return renderEquiFrame(frame, t0);  // §VR-PLAYER（V2）
     }
 
+    // §REVIEW-1104：平面路徑錄製與送出 libplacebo 時拿送出鎖，和全景投影互斥，否則驅動會在 tu_autotune::on_submit 崩潰
+    std::unique_lock<std::mutex> submitLock(m_PlSubmitMutex);
+
     pl_gpu g = m_Vulkan->gpu;
     // §VR-XRLOOP（量測）：這一張影像的 swapchain 呼叫花多久。先記在這裡，等下面本來就要拿 m_StatsMutex 的地方
     // 一起寫回（flushSwLocked）——不為了量測多拿一次鎖
@@ -890,7 +903,10 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         hp.semaphore.sem = m_Sem;
         hp.semaphore.value = ++m_SemValue;
         if (!pl_vulkan_hold_ex(g, &hp)) {
+            // §REVIEW-1104：hold 失敗時 pl_gpu_finish 會等 GPU，這段不持送出鎖
+            submitLock.unlock();
             pl_gpu_finish(g);
+            submitLock.lock();
             return 0;
         }
         submitUs = nowUs();
@@ -898,7 +914,11 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
             m_FlightSubmitUs.store(submitUs);
             m_FlightSeq.store(m_Published.seq + 1);
         }
-        if (!m_Ctx->waitSemaphoreBounded(m_Sem, hp.semaphore.value, 1000000000ull)) {
+        // §REVIEW-1104：等 GPU 最長 1 秒，這段不持送出鎖，返回後的 unmap 與補幀才再互斥
+        submitLock.unlock();
+        const bool gpuDone = m_Ctx->waitSemaphoreBounded(m_Sem, hp.semaphore.value, 1000000000ull);
+        submitLock.lock();
+        if (!gpuDone) {
             return -1;
         }
         pl_gpu_finish(g);
@@ -1252,8 +1272,9 @@ void XrVideo::bufferMaybeLog()
     const uint32_t lag1 = m_BufLag1.exchange(0), lag0 = m_BufLag0.exchange(0);
     const uint32_t rep = m_BufRepeat.exchange(0), skip = m_BufSkipped.exchange(0);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VR-BUFFER] 10s buffer=%d shown lag1=%u lag0=%u repeat=%u skipped=%u",
-                m_Config.buffer, lag1, lag0, rep, skip);
+                "[VIPLE-VR-BUFFER] 10s buffer=%d%s depth=%d up=%u down=%u shown lag1=%u lag0=%u repeat=%u skipped=%u",
+                m_Config.buffer, m_Config.bufferAuto ? " auto" : "", m_BufDepthLog.load(std::memory_order_relaxed),
+                m_BufUp.exchange(0), m_BufDown.exchange(0), lag1, lag0, rep, skip);
 }
 
 void XrVideo::renderThreadMain()
@@ -1316,7 +1337,7 @@ void XrVideo::renderThreadMain()
                     std::swap(v->m_Sw, v->m_RingSets[slot]);
                     v->m_CurSlot = -1;
                     if (v->m_Published.seq != seqBefore) {
-                        v->m_RingNext = (slot + 1) % kRing;
+                        v->m_RingNext = (slot + 1) % v->ringSize();
                     }
                 }
             }
@@ -1366,10 +1387,15 @@ bool XrVideo::current(Current* out)
     out->fbSeq = m_Published.seq;  // §VR-BUFFER：host 節拍一律照最新的一張
     out->fbDrawnUs = m_Published.lastDrawnUs;
     if (m_Config.buffer > 0) {
-        // §VR-BUFFER：要顯示的序號＝max(上次顯示的下一張, 最新的前一張)，不超過最新。最新的前一張必定還在它那條
-        // swapchain 上（寫入的是第三新的那一條）；找不到（那一張沒畫成功）就退回最新的一張
+        // §VR-BUFFER：要顯示的序號＝max(上次顯示的下一張, 最新往前數 buffer 張)，不超過最新。那幾張必定還在各自的
+        // swapchain 上（寫入的是第 buffer+2 新的那一條）；找不到（那一張沒畫成功）就退回最新的一張
         const uint64_t newest = m_Published.seq;
-        uint64_t want = std::max(m_BufLastShown + 1, newest > 0 ? newest - 1 : 0);
+        if (m_BufDepth == 0) {
+            m_BufAuto.reset(m_Config.buffer);
+            m_BufDepth = m_Config.bufferAuto ? m_BufAuto.depth : m_Config.buffer;
+            m_BufDepthLog.store(m_BufDepth, std::memory_order_relaxed);
+        }
+        uint64_t want = xrbuf::pick(m_BufLastShown, newest, m_BufDepth);
         if (want > newest) {
             want = newest;
         }
@@ -1394,6 +1420,14 @@ bool XrVideo::current(Current* out)
             (shown == newest ? m_BufLag0Total : m_BufLag1Total).fetch_add(1, std::memory_order_relaxed);
             if (m_BufLastShown != 0 && shown > m_BufLastShown + 1) {
                 m_BufSkipped.fetch_add(static_cast<uint32_t>(shown - m_BufLastShown - 1), std::memory_order_relaxed);
+            }
+        }
+        if (m_Config.bufferAuto) {
+            const int before = m_BufAuto.depth;
+            if (m_BufAuto.step(shown, m_BufLastShown, newest, nowUs())) {
+                m_BufDepth = m_BufAuto.depth;
+                m_BufDepthLog.store(m_BufDepth, std::memory_order_relaxed);
+                (m_BufDepth > before ? m_BufUp : m_BufDown).fetch_add(1, std::memory_order_relaxed);
             }
         }
         m_BufLastShown = shown;
@@ -1759,6 +1793,8 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     pl_fmt fmtSmall = pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
     pl_fmt fmtFlow = pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps);
     const int sw = std::max(16, fw / 8), sh = std::max(16, fh / 8);
+    const int prevSmallW = m_Small[0] != nullptr ? m_Small[0]->params.w : 0;
+    const int prevSmallH = m_Small[0] != nullptr ? m_Small[0]->params.h : 0;
     // dev：帶了 --xr-dump-frame 時這幾張要能讀回（dumpSynthInputs）。格式不支援讀回就照舊建立，只是那幾個檔不會存
     const bool devRead = !m_Config.dumpPath.isEmpty();
     auto mk = [g, devRead](pl_tex* t, int w, int h, pl_fmt f) {
@@ -1790,6 +1826,10 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         m_HavePrevSmall = false;
         m_HavePrevMeta = false;
     }
+    if ((prevSmallW != 0 && prevSmallW != sw) || (prevSmallH != 0 && prevSmallH != sh)) {
+        // §REVIEW-1104：縮圖寬或高變了，pl_tex_recreate 後內容未定義，不能拿來估位移
+        m_HavePrevSmall = false;
+    }
 
     pl_frame tFull = *targetProto;
     tFull.planes[0].texture = m_Full;
@@ -1799,7 +1839,15 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     tFull.crop.x1 = 0.0f;
     tFull.crop.y1 = 0.0f;
     if (!pl_render_image(m_Renderer, mapped, &tFull, &m_RenderParams)) {
-        return false;
+        // §REVIEW-1104：畫進 m_Full 失敗也要關掉合成，並把真幀畫進已 acquire 的 swapchain，否則 release 的是沒畫過的影像
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] render to full failed - frame synthesis off for this session");
+        m_SynthFailed = true;
+        pl_frame t = *targetProto;
+        t.crop.x0 = 0.0f;
+        t.crop.y0 = 0.0f;
+        t.crop.x1 = ow;
+        t.crop.y1 = oh;
+        return pl_render_image(m_Renderer, mapped, &t, &m_RenderParams);
     }
     const int cur = m_SmallCur, prev = cur ^ 1;
     bool smallOk = false;
@@ -1851,17 +1899,17 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     bool flowOk = false;
     float half[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     // 這裡的 pts 已經不是幀號（decoder 把它換成呈現時間）：用間隔的移動平均當一幀的長度，超過 1.6 倍就是中間掉過幀
-    static int64_t s_nominalDelta = 0;
+    // §REVIEW-1104：幀間隔基準改成成員，destroy 會歸零；單次大間隔仍不上修
     const int64_t ptsDelta = pts - m_PrevPts;
     if (m_HavePrevMeta && ptsDelta > 0) {
-        if (s_nominalDelta == 0) {
-            s_nominalDelta = ptsDelta;
+        if (m_NominalDelta == 0) {
+            m_NominalDelta = ptsDelta;
         }
-        else if (ptsDelta < s_nominalDelta * 3) {
-            s_nominalDelta = (s_nominalDelta * 7 + ptsDelta) / 8;
+        else if (ptsDelta < m_NominalDelta * 3) {
+            m_NominalDelta = (m_NominalDelta * 7 + ptsDelta) / 8;
         }
     }
-    const bool consecutive = ptsDelta > 0 && s_nominalDelta > 0 && ptsDelta * 10 <= s_nominalDelta * 16;
+    const bool consecutive = ptsDelta > 0 && m_NominalDelta > 0 && ptsDelta * 10 <= m_NominalDelta * 16;
     if (smallOk && m_HavePrevSmall && hasMeta && m_HavePrevMeta && consecutive) {
         // d＝q_prev⁻¹·q_cur（上一張到這一張的轉動，機體座標）；half＝它的一半＝normalize(d ＋ 1)
         const float* a = m_PrevMeta.renderRot;
@@ -2219,6 +2267,7 @@ bool XrVideo::renderEquiFrame(AVFrame* frame, uint64_t t0)
     tp.format = fmt;
     tp.sampleable = true;
     tp.renderable = true;
+    std::unique_lock<std::mutex> submitLock(m_PlSubmitMutex);
     if (fmt == nullptr || !pl_tex_recreate(g, &m_Equi[slot], &tp)) {
         av_frame_free(&frame);
         std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -2250,9 +2299,19 @@ bool XrVideo::renderEquiFrame(AVFrame* frame, uint64_t t0)
     const uint64_t tCpu = nowUs();
     // GPU 做完才發布、才放掉解碼幀（有上限：GPU 卡住時不要永遠等）
     pl_gpu_flush(g);
+    submitLock.unlock();
+    // 輪詢也會回收 libplacebo 的 command buffer：在鎖內只查不等（0 逾時），等待放在鎖外，frame thread 不會被擋
     bool busy = true;
-    for (int i = 0; i < 100 && busy; i++) {
-        busy = pl_tex_poll(g, m_Equi[slot], 10000000ull);
+    const uint64_t pollEnd = nowUs() + 1000000ull;
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> pl(m_PlSubmitMutex);
+            busy = pl_tex_poll(g, m_Equi[slot], 0);
+        }
+        if (!busy || nowUs() >= pollEnd) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
     }
     if (busy) {
         m_WedgedFrames.push_back(frame);
@@ -2261,6 +2320,7 @@ bool XrVideo::renderEquiFrame(AVFrame* frame, uint64_t t0)
         return false;
     }
     if (mappedOk) {
+        std::lock_guard<std::mutex> ul(m_PlSubmitMutex);
         pl_unmap_avframe(g, &mapped);
     }
     av_frame_free(&frame);
@@ -2436,6 +2496,7 @@ bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj
     XrSwapchainImageWaitInfo wi = xrS<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
     wi.timeout = 50000000;  // 50 ms
     xrWaitSwapchainImage(m_Proj.swapchain, &wi);
+    std::unique_lock<std::mutex> submitLock(m_PlSubmitMutex);
     pl_tex dst = m_Proj.wrapped[idx];
     pl_vulkan_release_params rp = {};
     rp.tex = dst;
@@ -2560,6 +2621,7 @@ bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj
     if (!pl_vulkan_hold_ex(g, &hp)) {
         pl_gpu_finish(g);
     }
+    submitLock.unlock();
     {
         XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
         std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());

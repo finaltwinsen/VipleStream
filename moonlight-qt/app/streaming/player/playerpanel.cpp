@@ -135,14 +135,17 @@ QImage PlayerPanel::render(const State& s)
     // 按鈕
     const QString labels[ButtonCount] = {
         QStringLiteral("−30s"), QStringLiteral("−10s"), QString(), QStringLiteral("+10s"), QStringLiteral("+30s"),
-        QStringLiteral("Vol −"), QStringLiteral("Vol +"), s.formatLabel, s.screenLabel, QStringLiteral("Center"),
+        QStringLiteral("Vol −"), QStringLiteral("Vol +"), s.formatLabel, s.screenLabel,
+        s.qualityLabel.isEmpty() ? QStringLiteral("Quality") : s.qualityLabel,
+        QStringLiteral("CC ") + (s.subtitleLabel.isEmpty() ? QStringLiteral("–") : s.subtitleLabel), QStringLiteral("Center"),
         QStringLiteral("Exit")};
-    f.setPixelSize(22);
+    f.setPixelSize(20);
     p.setFont(f);
     for (int i = 0; i < ButtonCount; i++) {
         const QRect r = buttonRect(i);
         const bool hover = s.hover == i;
-        const bool disabled = !s.seekable && i <= Fwd30 && i != PlayPause;
+        const bool disabled = (!s.seekable && i <= Fwd30 && i != PlayPause) || (i == Quality && s.qualityLabel.isEmpty()) ||
+                              (i == Subtitles && s.subtitleLabel.isEmpty());
         p.setPen(Qt::NoPen);
         p.setBrush(hover ? QColor(70, 110, 190) : (i == Exit ? rgba(120, 40, 40, 230) : rgba(48, 48, 56, 230)));
         p.drawRoundedRect(QRectF(r), 12, 12);
@@ -159,12 +162,45 @@ QImage PlayerPanel::render(const State& s)
             p.setPen(QColor(180, 180, 180));
             p.drawText(r.adjusted(0, 30, 0, 0), Qt::AlignHCenter | Qt::AlignVCenter,
                        QString::number(static_cast<int>(std::lround(s.volume * 100.0f))) + QStringLiteral("%"));
-            f.setPixelSize(22);
+            f.setPixelSize(20);
             p.setFont(f);
             continue;
         }
         p.drawText(r, Qt::AlignCenter | Qt::TextWordWrap, labels[i]);
     }
+    p.end();
+    return img;
+}
+
+QImage PlayerPanel::renderSubtitle(const QString& text, int w, int h)
+{
+    QImage img(w, h, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    if (text.trimmed().isEmpty()) {
+        return img;
+    }
+    QPainter p(&img);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+    QFont f = p.font();
+    f.setPixelSize(46);
+    f.setBold(true);
+    p.setFont(f);
+    const int pad = 16;
+    const QRect area(40, 0, w - 80, h - 8);
+    QRect br = p.boundingRect(area, Qt::AlignHCenter | Qt::AlignBottom | Qt::TextWordWrap, text);
+    QString shown = text;
+    // 超過高度：從前面開始丟行（留最後幾行，跟 YouTube 一樣新的在下面）
+    while (br.height() > area.height() - 2 * pad && shown.contains(QLatin1Char('\n'))) {
+        shown = shown.mid(shown.indexOf(QLatin1Char('\n')) + 1);
+        br = p.boundingRect(area, Qt::AlignHCenter | Qt::AlignBottom | Qt::TextWordWrap, shown);
+    }
+    const QRect box = br.adjusted(-pad, -pad / 2, pad, pad / 2).intersected(QRect(0, 0, w, h));
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0, 0, 0, 170));
+    p.drawRoundedRect(QRectF(box), 10, 10);
+    p.setPen(QColor(255, 255, 255));
+    p.drawText(area, Qt::AlignHCenter | Qt::AlignBottom | Qt::TextWordWrap, shown);
     p.end();
     return img;
 }

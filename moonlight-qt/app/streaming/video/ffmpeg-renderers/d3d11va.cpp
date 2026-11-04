@@ -1238,6 +1238,14 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         // bRepeat=1 on every non-initial frame at 4K on RTX A1000.
         double frameTimestampSec = static_cast<double>(SDL_GetTicks()) / 1000.0;
         bool hasInterp = m_FRUC->submitFrame(m_RenderDeviceContext.Get(), frameTimestampSec);
+        // §REVIEW-1103：晚到／連線差時原本只有 GenericFRUC 會跳過補幀，NvOFFRUC 照樣多 Present 一張補幀
+        //（而且是 V-sync），反而加延遲。NvOF 仍照常 submit（保持它的參考幀連續），只是不顯示補幀、
+        // 真實幀改成立即 Present，與 GenericFRUC 的跳過路徑一致。
+        const bool nvofSkipInterp = frameLate || connectionPoor;
+        if (nvofSkipInterp) {
+            m_FrucSkipCount++;
+        }
+        hasInterp = hasInterp && !nvofSkipInterp;
         m_FRUCLastFrameInterpolated = hasInterp;
 
         // Present interpolated frame first (if available)
@@ -1284,11 +1292,13 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
             renderOverlay((Overlay::OverlayType)i);
         }
         // FRUC requires V-sync to pace 2x presents across separate refresh intervals
+        // §REVIEW-1103：跳過補幀時只有一張，照 GenericFRUC 跳過路徑立即 Present（不等 V-sync）
         {
             dumpBackbufferIfActive("real");  // §B-DUMP-D3D11
             LARGE_INTEGER pBegin, pEnd;
             QueryPerformanceCounter(&pBegin);
-            hr = m_SwapChain->Present(1, 0);
+            hr = nvofSkipInterp ? m_SwapChain->Present(0, m_AllowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0)
+                                : m_SwapChain->Present(1, 0);
             QueryPerformanceCounter(&pEnd);
             recordPresent(m_PresentReal, pBegin, pEnd);
             m_PresentRealTotal++;
@@ -2611,8 +2621,10 @@ ncnn_cascade_done:;
 // VipleStream: FRUC stats for overlay
 bool D3D11VARenderer::isFRUCActive() const
 {
-    return (m_FRUC && m_FRUC->isInitialized()) ||
-           (m_GenericFRUC && m_GenericFRUC->isInitialized());
+    // §REVIEW-1103：使用者暫停補幀時不算啟用（原本狀態顯示仍說補幀中）
+    return !m_FRUCPaused.load() &&
+           ((m_FRUC && m_FRUC->isInitialized()) ||
+            (m_GenericFRUC && m_GenericFRUC->isInitialized()));
 }
 
 bool D3D11VARenderer::lastFrameHadFRUCInterp() const

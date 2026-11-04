@@ -339,4 +339,6 @@
     <string name="steam_switch_error_taskgone">Tác vụ chuyển tài khoản đã biến mất trên máy chủ</string>
     <string name="steam_switch_error_timeout">Hết thời gian chuyển (&gt;150 giây mà máy chủ chưa đạt trạng thái kết thúc)</string>
     <string name="steam_switch_account_unavailable">Tài khoản này chưa có thông tin đăng nhập được lưu trên máy chủ. Hãy đăng nhập một lần trên máy chủ trước rồi thử lại.</string>
+    <string name="title_show_advanced">Hiện tùy chọn nâng cao và thử nghiệm</string>
+    <string name="summary_show_advanced">Các tùy chọn để khắc phục sự cố và thử nghiệm. Tùy chọn bị ẩn vẫn giữ giá trị hiện tại.</string>
 </resources>

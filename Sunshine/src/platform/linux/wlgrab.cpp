@@ -77,7 +77,10 @@ namespace wl {
         }
       }
 
-      monitor->listen(interface.output_manager);
+      // §REVIEW-1103：下面要用所有螢幕的 viewport 算桌面邏輯尺寸，只 listen 被選的那台時其他螢幕都是 0
+      for (auto &monitor_entry : interface.monitors) {
+        monitor_entry->listen(interface.output_manager);
+      }
 
       display.roundtrip();
 

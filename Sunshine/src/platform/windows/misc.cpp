@@ -218,7 +218,7 @@ namespace platf {
         continue;
 
       // 分類介面 — 參考 PlatformNetIf.c classifyWindowsAdapter()
-      std::wstring desc(adapter->Description);
+      std::wstring desc(adapter->Description ? adapter->Description : L"");  // §REVIEW-1103
       std::string name;
       std::string type;
 
@@ -285,7 +285,10 @@ namespace platf {
     return result;
   }
 
-  HDESK syncThreadDesktop() {
+  HDESK syncThreadDesktop(std::wstring *name_out) {
+    if (name_out) {
+      name_out->clear();
+    }
     auto hDesk = OpenInputDesktop(DF_ALLOWOTHERACCOUNTHOOK, FALSE, GENERIC_ALL);
     if (!hDesk) {
       auto err = GetLastError();
@@ -297,6 +300,16 @@ namespace platf {
     if (!SetThreadDesktop(hDesk)) {
       auto err = GetLastError();
       BOOST_LOG(error) << "Failed to sync desktop to thread [0x"sv << util::hex(err).to_string_view() << ']';
+    }
+
+    // §REVIEW-1103：handle 關掉之後數值會被重用，呼叫端拿它比對「桌面有沒有換」不可靠；
+    // 關閉前先取名稱給呼叫端比。
+    if (name_out) {
+      wchar_t name[256] {};
+      DWORD needed = 0;
+      if (GetUserObjectInformationW(hDesk, UOI_NAME, name, sizeof(name) - sizeof(wchar_t), &needed)) {
+        *name_out = name;
+      }
     }
 
     CloseDesktop(hDesk);
@@ -330,9 +343,18 @@ namespace platf {
       &AdministratorsGroup
     );
     if (ret) {
-      if (!CheckTokenMembership(user_token, AdministratorsGroup, &ret)) {
+      // §REVIEW-1103：CheckTokenMembership 只收 impersonation token，WTSQueryUserToken 給的是 primary token，
+      // 直接傳一定失敗（ERROR_NO_IMPERSONATION_TOKEN）；先複製成 impersonation token。
+      HANDLE imp_token = nullptr;
+      if (!DuplicateToken(user_token, SecurityIdentification, &imp_token)) {
         ret = false;
-        BOOST_LOG(error) << "Failed to verify token membership for administrative access: " << GetLastError();
+        BOOST_LOG(error) << "Failed to duplicate token for administrative access check: " << GetLastError();
+      } else {
+        if (!CheckTokenMembership(imp_token, AdministratorsGroup, &ret)) {
+          ret = false;
+          BOOST_LOG(error) << "Failed to verify token membership for administrative access: " << GetLastError();
+        }
+        CloseHandle(imp_token);
       }
       FreeSid(AdministratorsGroup);
     } else {
@@ -1061,6 +1083,12 @@ namespace platf {
 
     // Create a new console for interactive processes and use no console for non-interactive processes
     creation_flags |= interactive ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW;
+
+    // §REVIEW-1103：下面會暫改「整個行程」的 PATH 再還原；VR 平台執行緒、檔案選取、app 啟動、
+    // steam-switch 都可能同時呼叫，交錯時 B 會把 A 暫加的目錄當成原值存起來、還原後永久留在 PATH。
+    // 從讀 PATH 到函式結束（還原）整段序列化；這段只有 CreateProcess，很快。
+    static std::mutex path_env_mutex;
+    std::lock_guard<std::mutex> path_env_lock(path_env_mutex);
 
     // Find the PATH variable in our environment block using a case-insensitive search
     auto sunshine_wenv = boost::this_process::wenvironment();

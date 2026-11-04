@@ -351,4 +351,6 @@
     <string name="steam_switch_error_taskgone">La tâche de changement a disparu sur l\'hôte</string>
     <string name="steam_switch_error_timeout">Délai dépassé pour le changement (&gt;150 s sans que le serveur atteigne un état final)</string>
     <string name="steam_switch_account_unavailable">Ce compte n\'a aucun identifiant enregistré sur l\'hôte. Connectez-vous d\'abord une fois sur l\'hôte, puis réessayez.</string>
+    <string name="title_show_advanced">Afficher les options avancées et expérimentales</string>
+    <string name="summary_show_advanced">Options de dépannage et de test. Les options masquées conservent leurs valeurs actuelles.</string>
 </resources>

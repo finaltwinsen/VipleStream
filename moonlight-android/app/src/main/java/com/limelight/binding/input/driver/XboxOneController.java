@@ -186,10 +186,11 @@ public class XboxOneController extends AbstractXboxController {
         byte[] data = {
                 0x09, 0x00, seqNum++, 0x09, 0x00,
                 0x0F,
-                (byte)(leftTriggerMotor >> 9),
-                (byte)(rightTriggerMotor >> 9),
-                (byte)(lowFreqMotor >> 9),
-                (byte)(highFreqMotor >> 9),
+                // §REVIEW-1104：先轉為無號整數再右移，避免 short 符號擴展導致震動強度計算錯誤
+                (byte)((leftTriggerMotor & 0xFFFF) >> 9),
+                (byte)((rightTriggerMotor & 0xFFFF) >> 9),
+                (byte)((lowFreqMotor & 0xFFFF) >> 9),
+                (byte)((highFreqMotor & 0xFFFF) >> 9),
                 (byte)0xFF, 0x00, (byte)0xFF
         };
         int res = connection.bulkTransfer(outEndpt, data, data.length, 100);

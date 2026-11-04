@@ -688,6 +688,23 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
     // §VR-PLAYER／§VR-SHELL：影片模式（按鍵與搖桿交給呼叫端）。playerActive 有設時在執行期切換（介面與影片模式共用 session）
     const bool playerMode = m_Sink.playerButton && (m_Sink.playerActive ? m_Sink.playerActive() : true);
+    if (playerMode && !m_PlayerModeWas) {
+        // §REVIEW-1104：進片當下左鍵可能還按著，先放開，避免在殼層頁面上繼續拖曳
+        if (m_Pressed[0] || m_Pressed[1]) {
+            releaseAll("player mode");
+        }
+        // §REVIEW-1104：進片時鍵盤若還開著，180°／360° 射線打不中也關不掉；關鍵盤會清掉扳機邊緣，留著給控制列
+        const bool trigPrev = m_KbTrigPrev;
+        setKeyboardOpen(false, "player");
+        m_KbTrigPrev = trigPrev;
+    }
+    m_PlayerModeWas = playerMode;
+    if (playerMode) {
+        // 影片模式按 B＝離開影片（交給播放器）。播放器收尾很快，手指還沒放開 B 就回到介面了；這裡當成「B 還按著」，
+        // 要先放開才算介面的「返回」——不然同一下 B 又送一次 Esc，影片頁被退掉、直接跳回主機清單
+        // （2026-11-02 使用者回報；180°／360° 時下面會提早 return，m_BackWas 也一直沒更新到）
+        m_BackWas = true;
+    }
     if (!m_TestPointer && m_TestKbText.isEmpty() && m_KbToggleAction != XR_NULL_HANDLE) {
         for (int h = 0; h < 2; h++) {
             XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
@@ -752,6 +769,10 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             m_Sink.panel(-1.0f, -1.0f);
         }
         m_PanelHit = false;
+        // §REVIEW-1104：沒有平面螢幕就返回；影片模式按住的扳機，放開前不要補送成左鍵
+        if (playerMode && !m_TestPointer && m_TestKbText.isEmpty()) {
+            m_TrigOnKb = m_PlayerWas[0][0] || m_PlayerWas[0][1];
+        }
         return;
     }
 
@@ -829,6 +850,10 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         }
         haveRay = locateAim(d, displayTime, local, &origin, &dir);
     }
+    // §REVIEW-1104：影片模式按住的扳機，放開前都不要補送成左鍵（控制列提早 return 也算）
+    if (playerMode) {
+        m_TrigOnKb = leftDesired;
+    }
 
     // ── §VR-PLAYER：控制列（優先於鍵盤與影像螢幕）──
     if (screen.panelValid && haveRay) {
@@ -894,15 +919,20 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     if (!kbHit) {
         m_KbHover = -1;
     }
+    // §REVIEW-1104：控制列 panelClick 已處理；影片模式的扳機不再當左鍵或鍵盤鍵
+    const bool triggerHeld = leftDesired;
+    if (playerMode) {
+        leftDesired = false;
+    }
     // trigger 上升緣落在鍵上＝按鍵按下；下降緣放開（按住時 host 端自己連發）
     if (leftDesired && !m_KbTrigPrev && kbHit && m_KbHover >= 0 && !m_Pressed[0]) {
         kbPress(m_KbHover);
     }
-    else if (!leftDesired && m_KbTrigPrev) {
+    else if (!triggerHeld && m_KbTrigPrev) {  // §REVIEW-1104：用真實扳機，避免影片模式把按住誤判成放開
         kbRelease();
         m_TrigOnKb = false;
     }
-    m_KbTrigPrev = leftDesired;
+    m_KbTrigPrev = triggerHeld;  // §REVIEW-1104：leftDesired 在影片模式已被清掉，邊緣仍要看真實扳機
     m_KbHit = kbHit;
     if (kbHit) {
         // 指標畫在鍵盤上；不送滑鼠移動、不按下滑鼠鍵（已按住的照常放開）
@@ -954,7 +984,8 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             m_HitPose.position = {p.x, p.y, p.z};
             m_HitPose.orientation = screen.pose.orientation;
         }
-        if (std::fabs(m_U - m_SentU) > 1e-4f || std::fabs(m_V - m_SentV) > 1e-4f) {
+        // §REVIEW-1104：影片模式不要把射線 UV 送進殼層，避免遮罩底下的頁面跟著拖曳
+        if (!playerMode && (std::fabs(m_U - m_SentU) > 1e-4f || std::fabs(m_V - m_SentV) > 1e-4f)) {
             m_SentU = m_U;
             m_SentV = m_V;
             m_StatMoves++;
@@ -965,6 +996,10 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
     m_Hit = hit;
 
+    // §REVIEW-1104：扳機已放開就清掉「不要補送左鍵」，避免影片模式提早 return 後旗標卡住
+    if (!triggerHeld) {
+        m_TrigOnKb = false;
+    }
     // ── 按鍵：按下只在命中時；放開隨時。按下始於鍵盤的這次 trigger 不轉成滑鼠左鍵 ──
     if (leftDesired && !m_Pressed[0] && hit && !m_TrigOnKb && !m_TrigOnPanel) {
         setButton(0, true);

@@ -125,6 +125,8 @@ private:
     uint32_t m_QuarterWidth = 0;
     uint32_t m_QuarterHeight = 0;
     int m_FrameCount = 0;
+    bool m_MvDiagPending = false;  // §REVIEW-1103：MV 診斷讀回已排 copy、等 GPU 做完再讀（不阻塞）
+    int m_MvDiagFrame = 0;         // §REVIEW-1103：排 copy 的那一幀編號（log 用）
 
     // VipleStream: GPU-side timestamp queries for the ME + warp
     // dispatches. Double-buffered so the CPU reads frame N-2's

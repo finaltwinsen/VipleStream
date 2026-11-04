@@ -146,10 +146,16 @@ public class ComputerManagerService extends Service {
                                         if (cachedAppList != null && !cachedAppList.isEmpty()) {
                                             details.pairState = PairingManager.PairState.PAIRED;
                                         }
+                                        // §REVIEW-1104（使用者決策 B）：上面兩個快取只在記憶體，冷啟動後就沒了。
+                                        // 釘選的 serverCert 只在配對成功時寫入、而且存在資料庫，有它就視為已配對
+                                        if (details.serverCert != null) {
+                                            details.pairState = PairingManager.PairState.PAIRED;
+                                        }
 
                                         // Store STUN info from relay lookup
                                         if (result.stunIp != null && !result.stunIp.isEmpty()) {
                                             details.stunAddress = result.stunIp;
+                                            details.stunPunchPort = result.stunPort;  // §REVIEW-1104：打洞用 relay 回報的實際埠
                                         }
                                         if (relayDetails.stunAddress != null) {
                                             details.stunAddress = relayDetails.stunAddress;
@@ -161,7 +167,8 @@ public class ComputerManagerService extends Service {
                                 } catch (Exception e) {
                                     // Parsing failed but server is reachable via relay
                                     details.state = ComputerDetails.State.ONLINE;
-                                    if (cachedPairState == PairingManager.PairState.PAIRED) {
+                                    // §REVIEW-1104（使用者決策 B）：有釘選憑證＝配對過，冷啟動也成立
+                                    if (cachedPairState == PairingManager.PairState.PAIRED || details.serverCert != null) {
                                         details.pairState = PairingManager.PairState.PAIRED;
                                     }
                                     LimeLog.info("[VIPLE-NAT] " + details.name + " online via relay (parse failed: " + e.getMessage() + ")");
@@ -216,8 +223,10 @@ public class ComputerManagerService extends Service {
         }
 
         // Don't call the listener if this is a failed lookup of a new PC
-        if ((!newPc || details.state == ComputerDetails.State.ONLINE) && listener != null) {
-            listener.notifyComputerUpdated(details);
+        // §REVIEW-1104：將 listener 複製到區域變數避免兩次欄位讀取之間被清為 null 導致 NPE
+        ComputerManagerListener l = listener;
+        if ((!newPc || details.state == ComputerDetails.State.ONLINE) && l != null) {
+            l.notifyComputerUpdated(details);
         }
 
         releaseLocalDatabaseReference();
@@ -398,13 +407,31 @@ public class ComputerManagerService extends Service {
         boolean activeNetworkIsVpn = NetHelper.isActiveNetworkVpn(this);
         ConnectivityManager connMgr = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
 
-        // Check if we're currently connected to a VPN which may send our
+        /* VPN_CLEANUP_START
         // STUN request from an unexpected interface
+，並以 try/finally 確保 unbind 與釋放鎖
+        if (activeNetworkIsVpn) { defaultNetworkLock.lock(); }
+        try {
+            if (activeNetworkIsVpn) {
+
         if (activeNetworkIsVpn) {
-            // Acquire the default network lock since we could be changing global process state
+            defaultNetworkLock.lock();
+        }
+
+        try {
+            if (activeNetworkIsVpn) {
+
             defaultNetworkLock.lock();
 
-            // On Lollipop or later, we can bind our process to the underlying interface
+        VPN_CLEANUP_END */
+        // §REVIEW-1104：將 STUN 移至 if (activeNetworkIsVpn) 外，非 VPN 亦能進行 STUN，並以 try/finally 確保 unbind 與釋放鎖
+        if (activeNetworkIsVpn) {
+            defaultNetworkLock.lock();
+        }
+
+        try {
+            if (activeNetworkIsVpn) {
+                // On Lollipop or later, we can bind our process to the underlying interface
             // to ensure our STUN request goes out on that interface or not at all (which is
             // preferable to getting a VPN endpoint address back).
             Network[] networks = connMgr.getAllNetworks();
@@ -428,6 +455,8 @@ public class ComputerManagerService extends Service {
                 }
             }
 
+            }
+
             // Perform the STUN request if we're not on a VPN or if we bound to a network
             if (!activeNetworkIsVpn || boundToNetwork) {
                 String stunResolvedAddress = NvConnection.findExternalAddressForMdns("stun.moonlight-stream.org", 3478);
@@ -438,6 +467,7 @@ public class ComputerManagerService extends Service {
                 }
             }
 
+        } finally {
             // Unbind from the network
             if (boundToNetwork) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -448,11 +478,26 @@ public class ComputerManagerService extends Service {
             }
 
             // Unlock the network state
+            /* VPN_CLEANUP_TAIL_START
+    
+        if (activeNetworkIsVpn) {
+            defaultNetworkLock.lock();
+        }
+
+        try {
+            if (activeNetworkIsVpn) {
+            VPN_CLEANUP_TAIL_END */
             if (activeNetworkIsVpn) {
                 defaultNetworkLock.unlock();
             }
         }
     }
+    /* DUMMY_TAIL_START
+            }
+        }
+    }
+
+    DUMMY_TAIL_END */
 
     private MdnsDiscoveryListener createDiscoveryListener() {
         return new MdnsDiscoveryListener() {
@@ -590,12 +635,26 @@ public class ComputerManagerService extends Service {
     }
 
     private boolean getLocalDatabaseReference() {
+        // §REVIEW-1104：使用 CAS 迴圈確保「非 0 則遞增」為原子操作，避免與 onDestroy 競爭打到已關閉的資料庫
+        while (true) {
+            int current = dbRefCount.get();
+            if (current <= 0) {
+                return false;
+            }
+            if (dbRefCount.compareAndSet(current, current + 1)) {
+                return true;
+            }
+        }
+        /* OLD_REF_START
         if (dbRefCount.get() == 0) {
             return false;
         }
 
-        dbRefCount.incrementAndGet();
+        // OLD_REF
         return true;
+    }
+
+        OLD_REF_END */
     }
 
     private void releaseLocalDatabaseReference() {
@@ -778,6 +837,9 @@ public class ComputerManagerService extends Service {
 
     @Override
     public void onCreate() {
+        // §REVIEW-1103：relay wss 的自簽憑證釘選需要儲存位置
+        com.limelight.relay.RelayTls.init(this);
+
         // Bind to the discovery service
         bindService(new Intent(this, DiscoveryService.class),
                 discoveryServiceConnection, Service.BIND_AUTO_CREATE);
@@ -809,6 +871,19 @@ public class ComputerManagerService extends Service {
                     LimeLog.info("Resetting PC state for new available network");
                     synchronized (pollingTuples) {
                         for (PollingTuple tuple : pollingTuples) {
+                            // §REVIEW-1104：先取得 networkLock 避免與並行輪詢競爭將狀態蓋回，鎖順序與 invalidateStateForComputer 一致
+                            synchronized (tuple.networkLock) {
+                                tuple.computer.state = ComputerDetails.State.UNKNOWN;
+                                ComputerManagerListener l = listener;
+                                if (l != null) {
+                                    l.notifyComputerUpdated(tuple.computer);
+                                }
+                            }
+                        }
+                    }
+                    if (false)
+                    synchronized (pollingTuples) {
+                        for (PollingTuple tuple : pollingTuples) {
                             tuple.computer.state = ComputerDetails.State.UNKNOWN;
                             if (listener != null) {
                                 listener.notifyComputerUpdated(tuple.computer);
@@ -820,6 +895,19 @@ public class ComputerManagerService extends Service {
                 @Override
                 public void onLost(Network network) {
                     LimeLog.info("Offlining PCs due to network loss");
+                    synchronized (pollingTuples) {
+                        for (PollingTuple tuple : pollingTuples) {
+                            // §REVIEW-1104：先取得 networkLock 避免與並行輪詢競爭將狀態蓋回，鎖順序與 invalidateStateForComputer 一致
+                            synchronized (tuple.networkLock) {
+                                tuple.computer.state = ComputerDetails.State.OFFLINE;
+                                ComputerManagerListener l = listener;
+                                if (l != null) {
+                                    l.notifyComputerUpdated(tuple.computer);
+                                }
+                            }
+                        }
+                    }
+                    if (false)
                     synchronized (pollingTuples) {
                         for (PollingTuple tuple : pollingTuples) {
                             tuple.computer.state = ComputerDetails.State.OFFLINE;

@@ -2004,12 +2004,26 @@ namespace quic_server {
     }
 
     _port = port;
+    _bindState.store(0);
     _running.store(true);
     _ioThread = std::thread(&QuicListener::ioLoop, this);
 
     // Start periodic stats logging (every 30s)
     _statsRunning.store(true);
     _statsThread = std::thread(&QuicListener::statsLoop, this);
+
+    // §REVIEW-1103：等 IO 執行緒回報 socket／bind 結果（正常是毫秒等級；上限 5 秒）
+    {
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      while (_bindState.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      if (_bindState.load() < 0) {
+        BOOST_LOG(error) << "[VIPLE-MPQUIC] Listener socket setup failed on port " << port;
+        stop();
+        return false;
+      }
+    }
 
     BOOST_LOG(info) << "[VIPLE-MPQUIC] Server listening on port " << port;
     return true;
@@ -2117,6 +2131,7 @@ namespace quic_server {
     SOCKET sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == INVALID_SOCKET) {
       BOOST_LOG(error) << "[VIPLE-MPQUIC] Failed to create server socket";
+      _bindState.store(-1);  // §REVIEW-1103
       return;
     }
 
@@ -2141,8 +2156,10 @@ namespace quic_server {
       BOOST_LOG(error) << "[VIPLE-MPQUIC] Failed to bind server socket on port "
                        << _port;
       closesocket(sock);
+      _bindState.store(-1);  // §REVIEW-1103
       return;
     }
+    _bindState.store(1);  // §REVIEW-1103
 
     // §Q-SOCK-NONBLOCK (ultrareview #6)：所有路徑共用這一個 socket 與一條 IO
     // 執行緒。阻塞的 sendto 碰上卡住的 Wi-Fi 介面（實測一次可卡 10 s，見

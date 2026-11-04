@@ -104,6 +104,16 @@ namespace audio {
       nullptr
     )};
 
+    // §REVIEW-1103：client 給的 surroundParams（例如 coupled > streams）會讓 opus 回 NULL，
+    // 接著 ctl(NULL) 就讓 server 崩潰；建立失敗就結束這條音訊串流。
+    if (!opus) {
+      BOOST_LOG(error) << "Couldn't create Opus encoder: "sv << stream.channelCount << " channels, "sv
+                       << stream.streams << " streams, "sv << stream.coupledStreams << " coupled"sv;
+      packets->stop();
+
+      return;
+    }
+
     opus_multistream_encoder_ctl(opus.get(), OPUS_SET_BITRATE(stream.bitrate));
     opus_multistream_encoder_ctl(opus.get(), OPUS_SET_VBR(0));
 
@@ -138,8 +148,30 @@ namespace audio {
     }
   }
 
+  // §AUD-MON：擷取健康檢查的參數。
+  //   上游的擷取在主機沒出聲時本來就不送封包（沒有 CONTINUOUS_AUDIO 時 WASAPI 直接逾時），client 光看
+  //   「多久沒收到音訊」分不出「沒聲音」和「擷取壞了」。這裡改在 server 端比對：播放裝置的音量計顯示
+  //   有在出聲、擷取卻連續幾秒都拿不到有聲音的樣本，才算異常。
+  constexpr auto kMonMeterInterval = 250ms;  ///< 讀音量計的間隔
+  constexpr auto kMonWindow = 1s;  ///< 一個判定窗
+  constexpr float kMonPlayingPeak = 0.01f;  ///< 音量計峰值 ≥ −40 dBFS 算「有在出聲」
+  constexpr float kMonAudibleSample = 1e-4f;  ///< 擷取樣本絕對值超過這個算「拿到聲音」（比上面低 40 dB）
+  constexpr int kMonStallWindows = 5;  ///< 連續幾個判定窗異常才重建擷取
+  constexpr int kMonReportAfterTries = 3;  ///< 連續重建幾次都沒好才通知 client
+  constexpr int kMonRetryEvery = 6;  ///< 通知之後，每隔幾次異常（約 30 秒）再重建一次
+
+  static bool has_audible_sample(const std::vector<float> &buf) {
+    for (auto v : buf) {
+      if (v > kMonAudibleSample || v < -kMonAudibleSample) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void capture(safe::mail_t mail, config_t config, void *channel_data) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
+    auto status_queue = mail->queue<int>(mail::audio_status);
     if (!config::audio.stream) {
       shutdown_event->view();
       return;
@@ -154,8 +186,9 @@ namespace audio {
       return;
     }
 
-    auto init_failure_fg = util::fail_guard([&shutdown_event]() {
+    auto init_failure_fg = util::fail_guard([&shutdown_event, &status_queue]() {
       BOOST_LOG(error) << "Unable to initialize audio capture. The stream will not have audio."sv;
+      status_queue->raise((int) status_e::init_failed);
 
       // Wait for shutdown to be signalled if we fail init.
       // This allows streaming to continue without audio.
@@ -229,11 +262,99 @@ namespace audio {
 
     int samples_per_frame = frame_size * stream.channelCount;
 
+    auto reinit_mic = [&]() {
+      mic.reset();
+      do {
+        mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size, continuous_audio, host_audio);
+        if (!mic) {
+          BOOST_LOG(warning) << "Couldn't re-initialize audio input"sv;
+        }
+      } while (!mic && !shutdown_event->view(5s));
+    };
+
+    // §AUD-MON 狀態
+    const bool mon_supported = mic->render_peak().has_value();
+    if (mon_supported) {
+      BOOST_LOG(info) << "[VIPLE-AUD-MON] capture health check active"sv;
+      status_queue->raise((int) status_e::monitoring);
+    } else {
+      BOOST_LOG(info) << "[VIPLE-AUD-MON] no render peak meter on this platform, capture health check disabled"sv;
+    }
+    auto mon_next_meter = std::chrono::steady_clock::now();
+    auto mon_window_start = mon_next_meter;
+    bool mon_win_playing = false;  // 這個判定窗內音量計有沒有看到聲音
+    bool mon_win_captured = false;  // 這個判定窗內擷取有沒有拿到聲音
+    float mon_win_peak = 0.0f;
+    int mon_stalled_windows = 0;
+    int mon_tries = 0;  // 連續因異常重建擷取的次數（擷取拿到聲音就歸零）
+    bool mon_reported = false;  // 已經通知 client stalled
+
     while (!shutdown_event->peek()) {
       std::vector<float> sample_buffer;
       sample_buffer.resize(samples_per_frame);
 
       auto status = mic->sample(sample_buffer);
+
+      // §AUD-MON：每次迭代都要跑（逾時也是），所以放在 switch 之前。
+      // 主機沒出聲時 sample() 每個裝置週期（Windows 共用模式約 10 ms）逾時一次，迴圈不會卡住；
+      // 判定只看時間（250 ms 讀音量計、1 s 判定窗），不數逾時次數，所以逾時週期長短不影響結果。
+      // （§REVIEW-1103 之前 Windows 的逾時誤算成約 100 ms，判定一樣正確。）
+      if (mon_supported && mic) {
+        auto now = std::chrono::steady_clock::now();
+        if (status == platf::capture_e::ok && !mon_win_captured && has_audible_sample(sample_buffer)) {
+          mon_win_captured = true;
+        }
+        if (now >= mon_next_meter) {
+          mon_next_meter = now + kMonMeterInterval;
+          if (auto peak = mic->render_peak(); peak && *peak >= kMonPlayingPeak) {
+            mon_win_playing = true;
+            mon_win_peak = std::max(mon_win_peak, *peak);
+          }
+        }
+        if (now - mon_window_start >= kMonWindow) {
+          bool do_reinit = false;
+          if (mon_win_captured) {
+            if (mon_reported) {
+              BOOST_LOG(info) << "[VIPLE-AUD-MON] capture recovered"sv;
+              status_queue->raise((int) status_e::recovered);
+              mon_reported = false;
+            }
+            mon_stalled_windows = 0;
+            mon_tries = 0;
+          } else if (mon_win_playing) {
+            if (++mon_stalled_windows >= kMonStallWindows) {
+              mon_stalled_windows = 0;
+              ++mon_tries;
+              BOOST_LOG(warning) << "[VIPLE-AUD-MON] host is playing audio (peak "sv << mon_win_peak
+                                 << ") but capture got nothing for "sv << kMonStallWindows << " s (try "sv << mon_tries << ')';
+              if (mon_tries >= kMonReportAfterTries && !mon_reported) {
+                BOOST_LOG(error) << "[VIPLE-AUD-MON] capture still silent after "sv << mon_tries << " re-initializations, notifying client"sv;
+                status_queue->raise((int) status_e::stalled);
+                mon_reported = true;
+              }
+              do_reinit = mon_tries <= kMonReportAfterTries || (mon_tries % kMonRetryEvery) == 0;
+            }
+          } else {
+            // 主機沒出聲：什麼都不判斷（重建次數保留，靜音不算恢復）
+            mon_stalled_windows = 0;
+          }
+          mon_window_start = now;
+          mon_win_playing = false;
+          mon_win_captured = false;
+          mon_win_peak = 0.0f;
+
+          if (do_reinit) {
+            BOOST_LOG(info) << "[VIPLE-AUD-MON] re-initializing audio capture"sv;
+            reinit_mic();
+            if (!mic) {
+              return;  // shutdown 期間沒重建成功
+            }
+            mon_window_start = std::chrono::steady_clock::now();
+            continue;
+          }
+        }
+      }
+
       switch (status) {
         case platf::capture_e::ok:
           break;
@@ -241,13 +362,10 @@ namespace audio {
           continue;
         case platf::capture_e::reinit:
           BOOST_LOG(info) << "Reinitializing audio capture"sv;
-          mic.reset();
-          do {
-            mic = control->microphone(stream.mapping, stream.channelCount, stream.sampleRate, frame_size, continuous_audio, host_audio);
-            if (!mic) {
-              BOOST_LOG(warning) << "Couldn't re-initialize audio input"sv;
-            }
-          } while (!mic && !shutdown_event->view(5s));
+          reinit_mic();
+          if (!mic) {
+            return;
+          }
           continue;
         default:
           return;

@@ -353,7 +353,10 @@ void PltClearEvent(PLT_EVENT* event) {
 #if defined(LC_WINDOWS)
     ResetEvent(*event);
 #else
+    // §REVIEW-1103：signalled 由 PltSetEvent／PltWaitForEvent 在 mutex 內讀寫，這裡也要拿鎖（避免 data race UB）
+    PltLockMutex(&event->mutex);
     event->signalled = false;
+    PltUnlockMutex(&event->mutex);
 #endif
 }
 

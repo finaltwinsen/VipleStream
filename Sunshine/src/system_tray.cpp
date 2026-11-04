@@ -106,17 +106,20 @@ namespace system_tray {
    * `tray` 變數宣告之後（line ~212）才合法 reference `tray`。
    */
   static void show_tray_balloon(const char *title, const char *text);
+  // §REVIEW-1103：檔案傳輸選單的通知改走持 s_tray_mtx 的版本，避免跟串流開始／停止時
+  // 背景執行緒的 update_tray_* 同時改 tray 結構並呼叫 tray_update。
+  static void show_tray_balloon_owned(const std::string &title, const std::string &text);
 
   void tray_xfer_send_cb([[maybe_unused]] struct tray_menu *item) {
     auto owner = proc::proc.running_owner_uuid();
     if (proc::proc.running() <= 0 || owner.empty()) {
       BOOST_LOG(info) << "[VIPLE-XFER] tray Send: no active stream / no owner uuid";
-      show_tray_balloon("File transfer", "No active stream. Start streaming first.");
+      show_tray_balloon_owned("File transfer", "No active stream. Start streaming first.");
       return;
     }
     if (file_transfer::manager::instance().busy()) {
       BOOST_LOG(info) << "[VIPLE-XFER] tray Send: another transfer in progress";
-      show_tray_balloon("File transfer", "Another transfer in progress. Wait for it to finish.");
+      show_tray_balloon_owned("File transfer", "Another transfer in progress. Wait for it to finish.");
       return;
     }
     fs_picker::open_options opts;
@@ -139,12 +142,12 @@ namespace system_tray {
     auto owner = proc::proc.running_owner_uuid();
     if (proc::proc.running() <= 0 || owner.empty()) {
       BOOST_LOG(info) << "[VIPLE-XFER] tray Receive: no active stream / no owner uuid";
-      show_tray_balloon("File transfer", "No active stream. Start streaming first.");
+      show_tray_balloon_owned("File transfer", "No active stream. Start streaming first.");
       return;
     }
     if (file_transfer::manager::instance().busy()) {
       BOOST_LOG(info) << "[VIPLE-XFER] tray Receive: another transfer in progress";
-      show_tray_balloon("File transfer", "Another transfer in progress. Wait for it to finish.");
+      show_tray_balloon_owned("File transfer", "Another transfer in progress. Wait for it to finish.");
       return;
     }
     // 1. 先排 list_dir：client 下次 poll 會把 Downloads listing 回到 /transfer/result

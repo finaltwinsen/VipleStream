@@ -2557,7 +2557,8 @@ void VkFrucRenderer::runAutotierTransition()
         m_FrucChainAsyncTempDisabled.store(!cfgSync.useAsync, std::memory_order_relaxed);
         // RIFE auto-toggle: tier 想要 RIFE + pipeline 已載入過 → ready.
         if (m_RifeNative != nullptr) {
-            const bool newRifeReady = cfgSync.useRife;
+            // §REVIEW-1104：RIFE 這場失敗過就不再打開（原本 tier 每格又設回 true，每格重試一次失敗的 RIFE）
+            const bool newRifeReady = cfgSync.useRife && !m_RifeNativeFailed;
             if (m_RifeNativeReady != newRifeReady) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-TIER] tier=T%d → RIFE %s (auto by tier)",
@@ -5872,6 +5873,8 @@ bool VkFrucRenderer::acceptsNativeDecode() const
     // 設 VIPLE_VKFRUC_NATIVE_DECODE=1 才 opt-in.  之後 Phase 1.4 完成且
     // 走通 stream 後拆 gate.
     static const bool wantNative = qEnvironmentVariableIntValue("VIPLE_VKFRUC_NATIVE_DECODE") != 0;
+    // §REVIEW-1104：原生 Vulkan 解碼僅支援 8-bit 4:2:0，對非 8-bit 或非 4:2:0 串流回傳 false 以擋住 NAL 進入 native 路徑。
+    if (m_VideoFormat & (VIDEO_FORMAT_MASK_10BIT | VIDEO_FORMAT_MASK_YUV444)) return false;
     return wantNative && (m_VideoSession != VK_NULL_HANDLE);
 }
 
@@ -6997,7 +7000,7 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
             m_DeviceLost.store(true, std::memory_order_release);
             return;
         }
-        m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
+        // §REVIEW-1104：fence 改在真正送出前才 reset——之前在函式開頭 reset，中途 acquire／建 view 失敗就 return，fence 永遠不會 signal，下一次輪到這個 slot 的 WaitForFences(UINT64_MAX) 會卡死（視窗縮放時 acquire 常回 OUT_OF_DATE）
     }
 
     // §K.3 — 釋放上一輪同 slot 的 VAAPI import（GPU 已完成 CopyImageToBuffer）。
@@ -7137,7 +7140,8 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
     // v1.5.6 crash diag: print state before each Vk call so AMD RADV crash
     // site is pinned (log truncates at crash, last line = crash location).
     VkCommandBuffer cmd = m_SlotCmdBuf[slot];
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+    // §REVIEW-1104：下面 7 行 §K.3 診斷原本每幀都印（render thread 熱路徑），改成跟 log 一樣只印前 5 幀與每 60 幀
+    if (log) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VAAPI-VK] §K.3 diag slot=%u cmd=%p NV12buf=%p RtPfnReset=%p",
                 slot, (void*)cmd, (void*)m_SwFrucNv12Buf,
                 (void*)(uintptr_t)m_RtPfn.ResetCommandBuffer);
@@ -7155,12 +7159,12 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
         return;
     }
     m_RtPfn.ResetCommandBuffer(cmd, 0);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after ResetCommandBuffer");
+    if (log) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after ResetCommandBuffer");
     VkCommandBufferBeginInfo cbbi = {};
     cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     m_RtPfn.BeginCommandBuffer(cmd, &cbbi);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after BeginCommandBuffer");
+    if (log) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after BeginCommandBuffer");
 
     // a. 轉換 imported LINEAR NV12: UNDEFINED → GENERAL，同時 drain 上一幀
     //    m_SwFrucNv12Buf 的 COMPUTE_SHADER_READ（WAW barrier）。
@@ -7173,6 +7177,8 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
     importBar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     importBar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     importBar.image               = imp.image;
+    // §REVIEW-1104（覆核）：這張多平面影像建立時沒帶 DISJOINT，依 VUID-VkImageMemoryBarrier-image-01671 只能用 COLOR_BIT；
+    // 審查建議的 PLANE_0|PLANE_1 只適用 disjoint 影像，維持原樣
     importBar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     importBar.subresourceRange.levelCount = 1;
     importBar.subresourceRange.layerCount = 1;
@@ -7187,14 +7193,14 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
     preCopyBar.offset = 0;
     preCopyBar.size   = VK_WHOLE_SIZE;
 
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+    if (log) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-VAAPI-VK] §K.3 diag before CmdPipelineBarrier preCopyBar.buf=%p importBar.img=%p",
                 (void*)preCopyBar.buffer, (void*)importBar.image);
     m_RtPfn.CmdPipelineBarrier(cmd,
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, nullptr, 1, &preCopyBar, 1, &importBar);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after CmdPipelineBarrier");
+    if (log) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after CmdPipelineBarrier");
 
     // b. CopyImageToBuffer: LINEAR NV12 → m_SwFrucNv12Buf（Y @ offset 0，UV @ W×H）。
     VkBufferImageCopy copyRegs[2] = {};
@@ -7208,10 +7214,10 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
     copyRegs[1].imageSubresource.aspectMask     = VK_IMAGE_ASPECT_PLANE_1_BIT;
     copyRegs[1].imageSubresource.layerCount     = 1;
     copyRegs[1].imageExtent                     = { W / 2, H / 2, 1 };
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag before CmdCopyImageToBuffer");
+    if (log) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag before CmdCopyImageToBuffer");
     m_RtPfn.CmdCopyImageToBuffer(cmd, imp.image, VK_IMAGE_LAYOUT_GENERAL,
                                  m_SwFrucNv12Buf, 2, copyRegs);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after CmdCopyImageToBuffer");
+    if (log) SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VAAPI-VK] §K.3 diag after CmdCopyImageToBuffer");
 
     // c. Buffer barrier: TRANSFER_WRITE → COMPUTE_SHADER_READ。
     VkBufferMemoryBarrier bufBar = {};
@@ -7361,6 +7367,7 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
         VkResult vr;
         {
             std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         if (vr != VK_SUCCESS) {
@@ -7411,6 +7418,7 @@ void VkFrucRenderer::renderFrameVAAPIImport(AVFrame* frame)
         VkResult vr;
         {
             std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         if (vr != VK_SUCCESS) {
@@ -11080,6 +11088,7 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
                 "VIPLE_VKFRUC_RIFE_INFER_DIM)",
                 (unsigned long long)m_FrucFrameCount);
             m_RifeNativeReady = false;
+            m_RifeNativeFailed = true;  // §REVIEW-1104：讓 tier 同步不要再打開
         }
     }
 
@@ -11759,7 +11768,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         uint32_t slot = m_CurrentSlot;
         m_CurrentSlot = (m_CurrentSlot + 1) % kFrucFramesInFlight;
         m_RtPfn.WaitForFences(m_Device, 1, &m_SlotInFlightFence[slot], VK_TRUE, UINT64_MAX);
-        m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
+        // §REVIEW-1104：fence 改在真正送出前才 reset——之前在函式開頭 reset，中途 acquire／建 view 失敗就 return，fence 永遠不會 signal，下一次輪到這個 slot 的 WaitForFences(UINT64_MAX) 會卡死（視窗縮放時 acquire 常回 OUT_OF_DATE）
 
         uint32_t imgIdx = 0;
         VkResult vrA = m_RtPfn.AcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
@@ -11804,6 +11813,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         si.pSignalSemaphores    = &m_SlotRenderDoneSem[slot][0];
         {
             std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
             m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
 
@@ -11859,7 +11869,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
 
     m_RtPfn.WaitForFences(m_Device, 1, &m_SlotInFlightFence[slot],
                           VK_TRUE, UINT64_MAX);
-    m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
+    // §REVIEW-1104：fence 改在真正送出前才 reset——之前在函式開頭 reset，中途 acquire／建 view 失敗就 return，fence 永遠不會 signal，下一次輪到這個 slot 的 WaitForFences(UINT64_MAX) 會卡死（視窗縮放時 acquire 常回 OUT_OF_DATE）
 
     // §B-DUMP — fence signaled = GPU finished writing m_DumpStaging*[slot]
     // for the prior use of this slot.  Convert + push to writer thread now,
@@ -12817,6 +12827,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             VkResult vrPost;
             {
                 std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
                 vrPost = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
             }
             if (vrPost != VK_SUCCESS) {
@@ -13566,6 +13577,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
             VkResult vrPH;
             {
                 std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
                 vrPH = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siPH, m_SlotInFlightFence[slot]);
             }
             if (vrPH != VK_SUCCESS) {
@@ -14316,6 +14328,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
         si.pSignalSemaphores    = signalSems;
         {
             std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         if (vr != VK_SUCCESS) {
@@ -14359,6 +14372,7 @@ void VkFrucRenderer::renderFrame(AVFrame* frame)
                                     (void*)vkf->sem[0], (unsigned long long)signalVals[1]);
         {
             std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         if (vr != VK_SUCCESS) {
@@ -14786,14 +14800,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
             m_DeviceLost.store(true, std::memory_order_release);
             return;
         }
-        VkResult rfRes = m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);
-        if (rfRes != VK_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "[VIPLE-VKFRUC-SW] §J.3.e.2.i.8 1.5c — ResetFences slot=%u rc=%d (device lost) — disabling native path",
-                         slot, (int)rfRes);
-            m_DeviceLost.store(true, std::memory_order_release);
-            return;
-        }
+        // §REVIEW-1104：fence 改在真正送出前才 reset——之前在函式開頭 reset，中途 acquire／建 view 失敗就 return，fence 永遠不會 signal，下一次輪到這個 slot 的 WaitForFences(UINT64_MAX) 會卡死（視窗縮放時 acquire 常回 OUT_OF_DATE）
     }
     // §B-DUMP — same fence-wait flush point as renderFrame (HW path).
     flushDumpSlotIfPending(slot);
@@ -15358,6 +15365,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
             VkResult vrP;
             {
                 std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+                m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
                 vrP = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &siP, m_SlotInFlightFence[slot]);
             }
             if (vrP != VK_SUCCESS) {
@@ -15785,6 +15793,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         si.pSignalSemaphores    = signalSems;
         {
             std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         if (vr != VK_SUCCESS) {
@@ -15860,6 +15869,7 @@ void VkFrucRenderer::renderFrameSw(AVFrame* frame)
         si.pSignalSemaphores    = singleSignalSems;
         {
             std::lock_guard<std::recursive_mutex> lk(s_VkFrucQueueLock);
+            m_RtPfn.ResetFences(m_Device, 1, &m_SlotInFlightFence[slot]);  // §REVIEW-1104：見函式開頭的說明
             vr = m_RtPfn.QueueSubmit(m_GraphicsQueue, 1, &si, m_SlotInFlightFence[slot]);
         }
         _profT3 = std::chrono::steady_clock::now();

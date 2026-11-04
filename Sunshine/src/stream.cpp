@@ -8,6 +8,7 @@
 #include <bit>  // §VR：std::endian（0x81 header 直接以 little-endian 版面上線）
 #include <cmath>
 #include <cstddef>  // §VR-BUFFER-REFILL：offsetof（CLIENT_TIMING 的姿態欄位結尾）
+#include <cstring>  // §ABR-ADAPT：strcmp（fast-loss 判斷）
 #include <format>
 #include <fstream>
 #include <future>
@@ -35,11 +36,13 @@ extern "C" {
 #include "network.h"
 #include "platform/common.h"
 #include "process.h"
+#include "abr_signals.h"
 #include "relay.h"
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
 #include "system_tray.h"
+#include "tailscale_path.h"
 #include "thread_safe.h"
 #include "tunnel_session.h"
 #include "udp_tunnel.h"
@@ -234,6 +237,17 @@ namespace stream {
     std::uint8_t type_right;
     std::uint8_t left[DS_EFFECT_PAYLOAD_SIZE];
     std::uint8_t right[DS_EFFECT_PAYLOAD_SIZE];
+  };
+
+  // §AUD-MON：音訊擷取健康狀態（server→client，0x5510）。舊 client 不認得這個 type，直接略過。
+  // 0x5506–0x550F 留給 VR，所以從 0x5510 開始。
+  constexpr std::uint16_t VIPLE_AUDIO_STATUS_PTYPE = 0x5510;
+
+  struct control_audio_status_t {
+    control_header_v2 header;
+    std::uint8_t version;  // 1
+    std::uint8_t state;  // audio::status_e
+    std::uint16_t reserved;
   };
 
   // §SC-HID Phase 2C：透明 feature proxy 請求（server→client，0x5505）。
@@ -606,6 +620,28 @@ namespace stream {
       std::chrono::steady_clock::time_point fecAccumStart{std::chrono::steady_clock::now()};
       // §VR-LINK-REPAIR：補包救回來的缺包數（下一次 run_abr_aimd 取走）。不進 fecLossAccum，見 kVrAbrRepairHoldPct
       std::atomic<int> vrRepairAccum{0};
+      // §ABR-ADAPT（第 2 期）：每幀送完的時間（server 單調時鐘 µs）與送出的位元組（影像＋FEC）。videoBroadcastThread 寫、
+      // control 執行緒讀 client 的 FRAME_FEEDBACK 時對照，算單向延遲（相對值）與實際送達速率。只有 VR session 會寫。
+      struct abr_tx_slot_t {
+        std::atomic<uint32_t> frame {0xFFFFFFFFu};
+        std::atomic<int64_t> us {0};
+      };
+      std::array<abr_tx_slot_t, 2048> abrTx {};  // 120 fps 約 17 s：數秒級的排隊延遲也對得上
+      std::atomic<uint64_t> abrTxBytes {0};
+      // §ABR-ADAPT：session 開始時發的「起始碼率」事件。mail 的事件只用 weak_ptr 掛著，沒人持有就連同值一起消失
+      // （2026-11-04 實測：編碼器前 12 s 以上限 150 Mbps 在送）——在這裡持有到編碼執行緒自己訂閱為止
+      std::shared_ptr<void> vrStartBitrateEvent;
+      // 以下握 abrMutex（control 執行緒）
+      bool abrRxHave = false;
+      uint32_t abrRxPrevLo = 0;      ///< client 時間（µs）低 32 位元的上一筆，用來展開繞回
+      int64_t abrRxHi = 0;           ///< 展開後的高位（每繞回一次 +2^32）
+      bool abrOwdHave = false;
+      int64_t abrOwdOffsetUs = 0;    ///< 第一筆的 client−server 時間差（之後只看相對變化）
+      uint64_t abrRxBytesWin = 0;    ///< 這個速率視窗 client 回報收到的位元組
+      uint64_t abrTxBytesWinStart = 0;
+      std::chrono::steady_clock::time_point abrRateWinStart {};
+      int abrFeedbackRecs = 0;       ///< 10 s 統計：收到幾筆幀紀錄
+      int abrFeedbackMiss = 0;       ///< 10 s 統計：對不到送出紀錄的幀
       std::chrono::steady_clock::time_point vrRepairHoldLog{};  // 「補包量大、暫停回升」的 log 節流（握 abrMutex）
       // §VR-REPAIR-RTT（量測）：client 回報的 FEC status 這 10 秒的分類（握 abrMutex；vr_control_tick 印出並歸零）。
       // 只記帳，位元率與 FEC 的調整不看它
@@ -663,6 +699,9 @@ namespace stream {
       uint32_t abrRttMinPrevMs{0};     // 上一視窗最小
       std::chrono::steady_clock::time_point abrRttWindowStart{};
       int abrRttCongestedRounds{0};    // 連續判定壅塞的輪數
+      // §ABR-ADAPT（2D）：自適應延遲趨勢（同 VR 控制器用的估計器）；abr_sample_rtt 餵、run_abr_aimd 讀（都握 abrMutex）。
+      // 桌面 session 用它取代固定門檻（2 倍且 +50 ms）的壅塞判斷；VR 有自己的（在 vrAbrFast 裡）
+      ::vr::abr::delay_trend_t abrTrend;
       std::chrono::steady_clock::time_point abrRttLastCutTime{};
       // §ABR-DELAY heartbeat：健康路徑下 rttCongested 永遠是 false、
       // 一行都不會印，導致「正確地沒觸發」與「程式根本沒跑到這裡」
@@ -721,6 +760,7 @@ namespace stream {
 
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+      safe::mail_raw_t::queue_t<int> audio_status_queue;  // §AUD-MON（audio::status_e）
 
       // §S11-DECRYPT-LOCK-FIX (review batch 2)：control 解密狀態鎖。
       // cipher（EVP ctx）與 incoming_iv 由 controlBroadcastThread（ENet）
@@ -739,6 +779,10 @@ namespace stream {
       std::atomic<std::chrono::milliseconds> loopTimeout {kControlLoopTimeoutDefault};
     } control;
 
+    // §TS-PATH：這次監看的代號（on_session_start 的回傳）。0＝沒有監看。
+    // stop 只拿這個代號去停，已經不是目前那一次就不動。
+    std::uint64_t tsPathGen = 0;
+
     std::uint32_t launch_session_id;
 
     // VipleStream: NAT-traversal relay tunnel. When the client cannot
@@ -746,7 +790,21 @@ namespace stream {
     // datagram plane is carried over the relay via this object.
     // Remains null when `udp_tunnel_mode == "direct"` or allocation
     // fails — the direct UDP sockets are used as before in that case.
+    // §REVIEW-1103：relay 執行緒（flow 通知回呼）寫、broadcast 執行緒每幀讀，原本無鎖指派同一個
+    // shared_ptr＝資料競態。一律經 get_tunnel()／tunnel_mtx 存取，用的人先複製一份再用。
     std::shared_ptr<tunnel_session::TunnelSession> tunnel;
+    std::mutex tunnel_mtx;
+    std::shared_ptr<tunnel_session::TunnelSession> get_tunnel() {
+      std::lock_guard<std::mutex> lk(tunnel_mtx);
+      return tunnel;
+    }
+    // §REVIEW-1103：relay flow 通知回呼的存活閘門。回呼持鎖執行、session 結束時持鎖把 alive 設 false，
+    // 這樣拆除會等執行中的回呼做完，之後殘留的回呼也不會再碰已解構的 session。
+    struct tunnel_notify_gate_t {
+      std::mutex m;
+      bool alive = true;
+    };
+    std::shared_ptr<tunnel_notify_gate_t> tunnel_notify_gate;
     std::string remote_uuid;  ///< Peer UUID, used to allocate a tunnel flow.
 
     // §M01-D 2026-09-23：建立這條 session 的 client 身分（TLS 憑證 UUID，
@@ -1501,6 +1559,33 @@ namespace stream {
     return 0;
   }
 
+  /**
+   * @brief §AUD-MON：把一筆音訊擷取狀態送給 client（control 執行緒，RELIABLE）。
+   */
+  static int send_audio_status(session_t *session, int state) {
+    if (!session || !session->broadcast_ref || !session->control.peer) {
+      return -1;
+    }
+
+    control_audio_status_t plaintext {};
+    plaintext.header.type = VIPLE_AUDIO_STATUS_PTYPE;
+    plaintext.header.payloadLength = sizeof(control_audio_status_t) - sizeof(control_header_v2);
+    plaintext.version = 1;
+    plaintext.state = (std::uint8_t) state;
+
+    std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
+      encrypted_payload;
+
+    auto payload = encode_control(session, util::view(plaintext), encrypted_payload);
+    if (session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+      BOOST_LOG(warning) << "[VIPLE-AUD-MON] couldn't send audio status "sv << state << " to client"sv;
+      return -1;
+    }
+
+    BOOST_LOG(info) << "[VIPLE-AUD-MON] sent audio status "sv << state << " to client"sv;
+    return 0;
+  }
+
   // ── VipleStream 2.0 §VR（M1a）：控制通道（docs/vr_protocol.md §4.3、§4.5）──────
 
   /**
@@ -1972,6 +2057,75 @@ namespace stream {
   }
 
   /**
+   * @brief §ABR-ADAPT（第 2 期）：client 的收包報告（0x5507/07 FRAME_FEEDBACK）。每筆紀錄是一幀「最後一個封包到達的 client 時間」
+   *        與收到的位元組；對上 videoBroadcastThread 記下的送完時間，得到單向延遲（含固定時鐘偏移，只看相對變化）餵給控制器的
+   *        owd 趨勢，並每 500 ms 算一次收／送速率（都含 FEC）。ENet 與連線層兩條路都會進來（control 執行緒或連線接收執行緒）。
+   */
+  static void vr_handle_frame_feedback(session_t *session, const std::uint8_t *body, std::size_t len) {
+    if (len < sizeof(VIPLE_VR_TLV_FRAME_FEEDBACK_HDR)) {
+      return;
+    }
+    VIPLE_VR_TLV_FRAME_FEEDBACK_HDR hdr;
+    std::memcpy(&hdr, body, sizeof(hdr));
+    const std::size_t n = std::min<std::size_t>({(std::size_t) hdr.count, (std::size_t) VIPLE_VR_FRAME_FEEDBACK_MAX,
+                                                 (len - sizeof(hdr)) / sizeof(VIPLE_VR_FRAME_FEEDBACK_REC)});
+    std::lock_guard<std::mutex> lk(session->video.abrMutex);
+    auto &v = session->video;
+    if (!v.vrAbrFast) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    for (std::size_t i = 0; i < n; ++i) {
+      VIPLE_VR_FRAME_FEEDBACK_REC rec;
+      std::memcpy(&rec, body + sizeof(hdr) + i * sizeof(rec), sizeof(rec));
+      v.abrRxBytesWin += rec.bytes;
+      ++v.abrFeedbackRecs;
+      const uint32_t frame = hdr.baseFrame + rec.frameDelta;
+      const auto &slot = v.abrTx[frame & 2047];
+      if (slot.frame.load(std::memory_order_acquire) != frame) {
+        ++v.abrFeedbackMiss;
+        continue;
+      }
+      const int64_t txUs = slot.us.load(std::memory_order_relaxed);
+      // client 時間只有低 32 位元（µs，約 71 分鐘繞回一次）：照順序展開
+      const uint32_t lo = hdr.baseTimeUs + rec.lastArrOffUs;
+      if (v.abrRxHave && lo < v.abrRxPrevLo && v.abrRxPrevLo - lo > 0x80000000u) {
+        v.abrRxHi += (int64_t) 1 << 32;
+      } else if (v.abrRxHave && lo > v.abrRxPrevLo && lo - v.abrRxPrevLo > 0x80000000u) {
+        continue;  // 繞回前的舊紀錄晚到：丟掉，不要讓展開倒退
+      }
+      v.abrRxHave = true;
+      v.abrRxPrevLo = lo;
+      const int64_t rxUs = v.abrRxHi + lo;
+      const int64_t diff = rxUs - txUs;
+      if (!v.abrOwdHave) {
+        v.abrOwdHave = true;
+        v.abrOwdOffsetUs = diff;
+      }
+      // 相對值＋10 s：delay_trend 只收正值；第一筆之後若更快（偏移變小）仍為正
+      const double owdMs = (double) (diff - v.abrOwdOffsetUs) / 1000.0 + 10000.0;  // 餘裕 10 s（第一筆可能是慢的）
+      if (owdMs > 0.0) {
+        v.vrAbrFast->on_owd(owdMs, now);
+      }
+    }
+    // 收／送速率：每 500 ms 一次
+    if (v.abrRateWinStart == std::chrono::steady_clock::time_point {}) {
+      v.abrRateWinStart = now;
+      v.abrTxBytesWinStart = v.abrTxBytes.load(std::memory_order_relaxed);
+      v.abrRxBytesWin = 0;
+    } else if (now - v.abrRateWinStart >= std::chrono::milliseconds(500)) {
+      const double sec = std::chrono::duration<double>(now - v.abrRateWinStart).count();
+      const uint64_t tx = v.abrTxBytes.load(std::memory_order_relaxed);
+      const int recvKbps = (int) (v.abrRxBytesWin * 8.0 / 1000.0 / sec);
+      const int sendKbps = (int) ((tx - v.abrTxBytesWinStart) * 8.0 / 1000.0 / sec);
+      v.vrAbrFast->on_rates(recvKbps, sendKbps, now);
+      v.abrRateWinStart = now;
+      v.abrTxBytesWinStart = tx;
+      v.abrRxBytesWin = 0;
+    }
+  }
+
+  /**
    * @brief §VR-LINK-CTRL：連線層送來的 0x5507（hub 的接收執行緒；已解密、已去重）。只收時間敏感、處理函式可以在
    *        別條執行緒跑的那幾種；其餘（CONFIG、CLIENT_TIMING、LINK_HELLO…）只走 ENet，從這裡來的一律忽略。
    */
@@ -1996,6 +2150,9 @@ namespace stream {
         VIPLE_VR_TLV_LATCH latch;
         std::memcpy(&latch, body, sizeof(latch));
         vr_handle_latch(session, vr_state, latch);
+      } else if (type == VIPLE_VR_C2S_FRAME_FEEDBACK) {
+        vr_state.count_c2s(type);
+        vr_handle_frame_feedback(session, body, len);
       } else if (type == VIPLE_VR_C2S_NACK && session->vrLinks) {
         // §VR-LINK-REPAIR：client 回報某個 FEC block 缺哪些 shard；補哪些、走哪條由 hub 決定
         vr_state.count_c2s(type);
@@ -2289,11 +2446,31 @@ namespace stream {
       if (session->video.vrAbrFast) {
         std::lock_guard<std::mutex> lk(session->video.abrMutex);
         const auto &f = *session->video.vrAbrFast;
+        const auto rt = f.trend().snapshot();
+        const bool owd = f.owd_active(now);
+        const auto ot = f.owd_trend().snapshot();
+        const int qp = abr_signals::avg_qp_x100.load(std::memory_order_relaxed);
         BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] 10s: cuts=" << f.cuts()
                         << " ramps=" << f.ramps()
+                        << " trims=" << f.trims()
                         << " target=" << session->video.targetBitrateKbps.load()
                         << " cap=" << f.effective_cap_kbps(now)
-                        << " floor=" << f.floor_kbps();
+                        << " floor=" << f.floor_kbps()
+                        << " state=" << f.state_str()
+                        << " block=" << f.ramp_block_reason(now)
+                        << " randomLoss=" << f.random_losses()
+                        << " lossRateCuts=" << f.loss_rate_cuts()
+                        << " lastCong=" << f.last_congested_kbps() << '/' << f.effective_congested_kbps()
+                        << std::format(" rtt base/jit/p50={:.0f}/{:.0f}/{:.0f}ms trend={:.1f} gamma={:.1f} {}", rt.base_ms, rt.jitter_ms, rt.p50_ms,
+                                       rt.trend_ms, rt.gamma_ms, ::vr::abr::trend_state_name(rt.state))
+                        << (owd ? std::format(" owd jit={:.1f}ms trend={:.1f} gamma={:.1f} {}", ot.jitter_ms, ot.trend_ms, ot.gamma_ms,
+                                              ::vr::abr::trend_state_name(ot.state)) :
+                                  std::string(" owd=off"))
+                        << " recv/send=" << f.recv_kbps() << '/' << f.send_kbps() << "kbps"
+                        << " qp=" << (qp >= 0 ? std::format("{:.1f}", qp / 100.0) : std::string("-"))
+                        << " fb=" << session->video.abrFeedbackRecs << '/' << session->video.abrFeedbackMiss;
+        session->video.abrFeedbackRecs = 0;
+        session->video.abrFeedbackMiss = 0;
       }
       ctl.lastLog = now;
       ctl.lastLogStats = cur;
@@ -2347,6 +2524,9 @@ namespace stream {
     uint32_t rtt = peer->roundTripTime;
     session->video.abrRttLastMs = rtt;
     session->video.abrRttSampled = true;
+    if (!session->vr) {
+      session->video.abrTrend.on_rtt(rtt == 0 ? 0.5 : (double) rtt, std::chrono::steady_clock::now());  // §ABR-ADAPT（2D）
+    }
 
     auto now = std::chrono::steady_clock::now();
     if (session->video.abrRttWindowStart.time_since_epoch().count() == 0) {
@@ -2463,12 +2643,15 @@ namespace stream {
       constexpr int kVrSingleLinkCapKbps = 75000;
       const bool singleLink = !session->vrLinks || session->vrLinks->alive_count() <= 1;
       session->video.vrAbrFast->set_cap_kbps(singleLink ? std::min(maxBr, kVrSingleLinkCapKbps) : maxBr);
+      // §ABR-ADAPT（第 3 期）：畫質飽和（編碼器平均 QP）——飽和時不再加碼，畫質多到用不完時小幅回收
+      session->video.vrAbrFast->on_quality(abr_signals::avg_qp_x100.load(std::memory_order_relaxed),
+                                           abr_signals::codec.load(std::memory_order_relaxed), abrNow);
       auto fastTarget = session->video.vrAbrFast->tick(abrNow);
       if (fastTarget.has_value()) {
         target = *fastTarget;
         fastBitrateChanged = true;
       }
-      minBr = session->video.vrAbrFast->floor_kbps();
+      minBr = std::min(session->video.vrAbrFast->floor_kbps(), maxBr);  // §REVIEW-1103（B039-2）：下限不可高過上限
     }
 
     // §ABR-QSTALE-FEEDBACK 2026-07-16：把 server 自己在 §Q-STALE 丟掉的
@@ -2567,22 +2750,57 @@ namespace stream {
           // 安靜期存活確認：證明取樣與基線維護真的在跑，而不是這段
           // 程式碼從未被執行到。60 秒一次，對 log 量無影響。
           session->video.abrRttLastHeartbeat = nowTp;
+          const auto ts = session->video.abrTrend.snapshot();
           BOOST_LOG(info) << "[VIPLE-ABR-RTT] rtt=" << rtt << "ms baseline=" << baseline
             << "ms inflation=" << ((float) rtt / (float) denom)
-            << "x action=OK heartbeat";
+            << "x action=OK heartbeat"
+            << (session->vr ? std::string {} :
+                              std::format(" trend base/jit={:.0f}/{:.0f}ms trend={:.1f} gamma={:.1f} {}", ts.base_ms, ts.jitter_ms, ts.trend_ms,
+                                          ts.gamma_ms, ::vr::abr::trend_state_name(ts.state)));
         }
       }
     }
     // 註：inflation 用 denom 當分母（baseline 可能為 0），見上方註解。
 
+    // §ABR-ADAPT（2D）：桌面 session 改用自適應延遲趨勢判斷壅塞。固定門檻（2 倍且 +50 ms）在行動網路這類 RTT 本來就跳
+    // 20～30 ms 的路徑上會誤判、在 LAN 又太鈍；趨勢看的是「排隊延遲是否持續上升」，門檻依實測抖動自己調。
+    // 舊的計算保留給 log 與心跳；VR 不受影響（VR 的控制器有自己的一份）。
+    bool deskTrendOver = false;
+    if (!session->vr && session->video.abrRttSampled) {
+      using namespace std::chrono_literals;
+      const auto &tr = session->video.abrTrend;
+      deskTrendOver = tr.state() == ::vr::abr::trend_state_e::overuse || tr.overuse_recently(abrNow, 1500ms);
+      const bool cooled2 = session->video.abrRttLastCutTime.time_since_epoch().count() == 0 ||
+                           abrNow - session->video.abrRttLastCutTime >= 2s;
+      rttSevere = tr.state() == ::vr::abr::trend_state_e::overuse && cooled2;
+      // 排空中（underuse）也不回升：等佇列清掉
+      rttCongested = deskTrendOver || tr.state() == ::vr::abr::trend_state_e::underuse;
+    }
+
+    // §ABR-ADAPT：VR 的丟包分類——延遲沒有上升（不是塞車）的丟包是無線環境的隨機掉包，交給 FEC／補包，不降碼。
+    // 丟到 8% 以上（斷訊級）照舊降；真的送不動但延遲沒漲（限速器直接丟）由控制器的 persistent 規則處理。
+    // §ABR-ADAPT（審查）：VR 有控制器時舊 AIMD 的丟包降碼整個不走（> 8% 砍半會在無線空檔把碼率幾秒內打到底、和控制器的
+    // RAMP 對砍）。塞車（延遲上升）或真的送不動由控制器自己降並進 HOLD；斷訊級（≥ 30%）仍照舊降，斷訊恢復邏輯靠它記下降碼前的值
+    const bool vrRandomLoss = session->vr && session->video.vrAbrFast && effectiveLoss > 0 &&
+                              !(lossPct >= vr::abr::k_outage_loss_pct);
+
     if (fastBitrateChanged) {
       // §VR-ABR-FAST：本輪由反應式快速降碼率控制器主導 target
+      session->video.bitrateZeroLossStreak = 0;
+    } else if (vrRandomLoss || (session->vr && std::strcmp(src, "fast-loss") == 0)) {
+      // 不降、也不累積零丟包回升（VR 的回升由控制器的 RAMP 決定）。fast-loss（LOSS 回報觸發、lossCount 傳 0）也不能當成
+      // 乾淨視窗：否則斷訊尾聲連著幾則「剛好 2 幀」的 LOSS 會被 on_clean 數成乾淨，提前拉回斷訊前的碼率（審查）
       session->video.bitrateZeroLossStreak = 0;
     } else if (effectiveLoss > 0) {
       // 丟包：放棄回升累積（target 收斂回 applied），按嚴重度乘法削減
       float lossPerSec = effectiveLoss * 1000.0f / std::max<long long>(elapsedMs, 1);
       int base = std::min(target, applied);
-      if (lossPct >= 0.0f) {
+      // §ABR-ADAPT（2D）：丟包分類。延遲沒有上升、server 也沒有自己丟（staleDrops／QUIC 壅塞）＝無線環境的隨機掉包，
+      // 降碼沒用（FEC 與 RFI 處理）：只有很重（> 30 個／秒）才小降一階，其餘維持。沒有 RTT 樣本（QUIC-only）時照舊
+      const bool deskRandomLoss = !session->vr && session->video.abrRttSampled && staleDrops == 0 && !quicCongested && !deskTrendOver;
+      if (deskRandomLoss) {
+        target = lossPerSec > 30 ? base * 85 / 100 : base;
+      } else if (lossPct >= 0.0f) {
         // §VR-ABR-RATIO：VR 依丟包比例（到這裡一定 ≥ 1%）
         if (lossPct > 8.0f) {
           target = base * 50 / 100;
@@ -2610,7 +2828,8 @@ namespace stream {
       // base 取 min(target, applied)，與 loss 路徑同語義：避免從一個
       // 還沒真正套用的樂觀 target 往下打折（否則實際降幅會不如預期）。
       int base = std::min(target, applied);
-      target = base * 75 / 100;
+      // §ABR-ADAPT（2D）：趨勢判定比舊的倍數門檻早、且每 2 s 可以再降，單次降幅改 ×85%（同 VR 的 delay-trend）
+      target = base * (session->vr ? 75 : 85) / 100;
       session->video.bitrateZeroLossStreak = 0;
       session->video.abrRttLastCutTime = std::chrono::steady_clock::now();
     } else if (quicCongested || rttCongested || repairHold) {
@@ -3110,6 +3329,9 @@ namespace stream {
           VIPLE_VR_TLV_LATCH latch;
           std::memcpy(&latch, body, sizeof(latch));
           vr_handle_latch(session, *vr_state, latch);
+        } else if (type == VIPLE_VR_C2S_FRAME_FEEDBACK) {
+          vr_state->count_c2s(type);
+          vr_handle_frame_feedback(session, body, len);
         } else if (type == VIPLE_VR_C2S_CLIENT_TIMING) {
           // M4a R3：1 Hz client 時序（依 len 能讀多少算多少）
           vr_state->count_c2s(type);
@@ -3125,6 +3347,11 @@ namespace stream {
             VIPLE_VR_TLV_CLIENT_TIMING ct {};
             std::memcpy(&ct, body, std::min<std::size_t>(len, sizeof(ct)));
             const auto now = std::chrono::steady_clock::now();
+            // §ABR-ADAPT（第 3 期）：client 解碼吃緊時不再加碼，跟不上時降一點（不是網路問題）
+            if (session->video.vrAbrFast && session->config.monitor.framerate > 0) {
+              std::lock_guard<std::mutex> lk(session->video.abrMutex);
+              session->video.vrAbrFast->on_decode((int) ct.decodeP95Us, 1000000 / session->config.monitor.framerate, now);
+            }
             const auto ms = [](int32_t us) {
               return std::format("{:.1f}", us / 1000.0);
             };
@@ -3193,7 +3420,11 @@ namespace stream {
                                     (hotspot.band == VIPLE_VR_HOTSPOT_BAND_5GHZ) ? "5GHz" : "2.4GHz";
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] received ssid=" << ssid_prefix << "*** keylen=" << (int) hotspot.keyLen << " band=" << band_name;
 
-            if (config::vr.hotspot_autoconnect) {
+            if (config::vr.hotspot_autoconnect && session->tsPathGen != 0) {
+              // 11-04：client 經 Tailscale 連進來（人在外面）時頭盔熱點不在附近，連了也連不上，
+              // 看門狗還會在 30 s 後重啟 host 的熱點網卡——這場不連、不監看
+              BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] client is on Tailscale (remote) - not joining the headset hotspot this session"sv;
+            } else if (config::vr.hotspot_autoconnect) {
               // 丟到背景執行緒處理（不可卡住 control 執行緒）
               std::thread([hotspot, ssid = std::move(ssid), key = std::move(key)]() mutable {
                 platf::vr_hotspot_connect(hotspot.version, hotspot.authType, hotspot.band, hotspot.channel, std::move(ssid), std::move(key));
@@ -3511,6 +3742,13 @@ namespace stream {
               auto hdr_info = hdr_queue->pop();
 
               send_hdr_mode(session, std::move(hdr_info));
+            }
+
+            auto &audio_status_queue = session->control.audio_status_queue;
+            while (session->control.peer && audio_status_queue->peek()) {
+              auto audio_status = audio_status_queue->pop();
+
+              send_audio_status(session, *audio_status);
             }
 
             // VipleStream 2.0 §VR：S→C 只能在這條執行緒送（STATE／STATS／REFRESH_START 等）
@@ -4098,6 +4336,9 @@ namespace stream {
     }
 
     auto to_u16 = [](float v) -> uint16_t {
+      if (!std::isfinite(v)) {
+        v = 0.5f;  // §REVIEW-1103（B039 可能-2）：NaN 的 lround 是未指定值；壞值退回畫面中心
+      }
       float c = std::clamp(v, 0.0f, 1.0f);
       return (uint16_t) std::lround(c * 65535.0f);
     };
@@ -4541,11 +4782,12 @@ namespace stream {
 #else
         const bool use_quic = false;
 #endif
+        const auto tunnel_keep = session->get_tunnel();  // §REVIEW-1103：這一幀用同一份
         const bool use_tunnel =
           !use_quic &&
-          session->tunnel &&
-          session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
-          session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
+          tunnel_keep &&
+          tunnel_keep->carrier() != udp_tunnel::Carrier::NONE &&
+          tunnel_keep->carrier() != udp_tunnel::Carrier::DIRECT;
 
         // §VR-MULTILINK：有連線可用時，這一幀改由每條連線各送一份（複製進各自的佇列就返回，不會被任何一條
         // 鏈路卡住）；原本的單一路徑暫停。全部連線都不可用時自動退回下面的單一路徑。
@@ -4736,8 +4978,8 @@ namespace stream {
                   scratch.resize(pre + dat);
                   std::memcpy(scratch.data(), shards.prefix(idx), pre);
                   std::memcpy(scratch.data() + pre, shards.data(idx), dat);
-                  session->tunnel->send(tunnel_video_server_port, tunnel_video_peer_port,
-                                        scratch.data(), scratch.size());
+                  tunnel_keep->send(tunnel_video_server_port, tunnel_video_peer_port,
+                                    scratch.data(), scratch.size());
                 }
               } else if (use_links) {
                 const size_t pre = shards.prefixsize;
@@ -4799,6 +5041,17 @@ namespace stream {
                              << (frame_is_dupe ? " Dupe" : "")
                              << (packet->is_idr() ? " Key" : "")
                              << (packet->after_ref_frame_invalidation ? " RFI" : "");
+
+          // §ABR-ADAPT（第 2 期）：記下這一幀（目前送完的那個 block）的送出時間與位元組，最後一個 block 覆蓋成整幀送完的時間
+          if (session->vr) {
+            auto &slot = session->video.abrTx[packet->frame_index() & 2047];
+            // 先作廢幀號再寫時間、最後發布新幀號：讀的一方不會拿到「舊幀號配新時間」
+            slot.frame.store(0xFFFFFFFFu, std::memory_order_release);
+            slot.us.store(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                          std::memory_order_relaxed);
+            slot.frame.store((uint32_t) packet->frame_index(), std::memory_order_release);
+            session->video.abrTxBytes.fetch_add((uint64_t) shards.size() * shards.blocksize, std::memory_order_relaxed);  // 只算 payload（不含 RTP 標頭與加密前綴），和 client 的計法一致
+          }
 
           ++blockIndex;
           lowseq += shards.size();
@@ -4939,11 +5192,12 @@ namespace stream {
 #else
         const bool use_quic_audio = false;
 #endif
+        const auto tunnel_keep = session->get_tunnel();  // §REVIEW-1103
         const bool use_tunnel =
           !use_quic_audio &&
-          session->tunnel &&
-          session->tunnel->carrier() != udp_tunnel::Carrier::NONE &&
-          session->tunnel->carrier() != udp_tunnel::Carrier::DIRECT;
+          tunnel_keep &&
+          tunnel_keep->carrier() != udp_tunnel::Carrier::NONE &&
+          tunnel_keep->carrier() != udp_tunnel::Carrier::DIRECT;
         const uint16_t server_audio_port = net::map_port(AUDIO_STREAM_PORT);
         // §AUDIO-PORT-LEARN：R.1 略過 ping 時 peer.port()==0，改用背景學到的 port；
         // 兩者都沒有就先不走 UDP／通道（送往 port 0 只是白丟）
@@ -4974,8 +5228,8 @@ namespace stream {
           std::memcpy(audioScratch.data() + sizeof(audio_packet),
                       shards_p[sequenceNumber % RTPA_DATA_SHARDS], bytes);
           if (audio_port != 0) {
-            session->tunnel->send(server_audio_port, audio_port,
-                                  audioScratch.data(), audioScratch.size());
+            tunnel_keep->send(server_audio_port, audio_port,
+                              audioScratch.data(), audioScratch.size());
           }
         } else if (use_links) {
           vr_links->send_audio((const uint8_t *) &audio_packet, sizeof(audio_packet),
@@ -5030,8 +5284,8 @@ namespace stream {
               std::memcpy(audioScratch.data() + sizeof(fec_packet),
                           shards_p[RTPA_DATA_SHARDS + x], bytes);
               if (audio_port != 0) {
-                session->tunnel->send(server_audio_port, audio_port,
-                                      audioScratch.data(), audioScratch.size());
+                tunnel_keep->send(server_audio_port, audio_port,
+                                  audioScratch.data(), audioScratch.size());
               }
             } else if (use_links) {
               vr_links->send_audio((const uint8_t *) &fec_packet, sizeof(fec_packet),
@@ -5224,17 +5478,18 @@ namespace stream {
     std::shared_ptr<tunnel_session::TunnelSession> handler_owner;
     auto try_register_tunnel_handler = [&]() {
       if (tunnel_handler_registered) return;
-      if (!session->tunnel) return;
-      auto c = session->tunnel->carrier();
+      auto tun = session->get_tunnel();  // §REVIEW-1103
+      if (!tun) return;
+      auto c = tun->carrier();
       if (c == udp_tunnel::Carrier::NONE ||
           c == udp_tunnel::Carrier::DIRECT) return;
-      session->tunnel->set_handler(local_port,
+      tun->set_handler(local_port,
         [messages](const uint8_t *data, size_t len, uint16_t src_port) {
           udp::endpoint fake_peer(asio::ip::make_address("127.0.0.1"), src_port);
           messages->raise(fake_peer,
                           std::string{reinterpret_cast<const char *>(data), len});
         });
-      handler_owner = session->tunnel;
+      handler_owner = tun;
       tunnel_handler_registered = true;
       BOOST_LOG(info) << "[TUNNEL] recv_ping tunnel handler attached for port "
                       << local_port;
@@ -5250,8 +5505,9 @@ namespace stream {
       }
       ref->message_queue_queue->raise(type, session_id, nullptr);
 
-      if (tunnel_handler_registered && session->tunnel) {
-        session->tunnel->set_handler(local_port, {});
+      if (tunnel_handler_registered && handler_owner) {
+        // §REVIEW-1103：拆掉自己裝上的那一份（session->tunnel 可能已被 reset）
+        handler_owner->set_handler(local_port, {});
       }
     });
 
@@ -5334,19 +5590,8 @@ namespace stream {
     auto address = session->video.peer.address();
     session->video.qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video.peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
-    // VipleStream: store configured bitrate for adaptive bitrate algorithm
-    session->video.configuredBitrateKbps = session->config.monitor.bitrate;
-    session->video.autoAdjustBitrate = session->config.autoAdjustBitrate;
-    // §VR-ABR-FAST 2026-10-30：VR 反應式快速降碼率控制器
-    if (session->vr && config::vr.abr_fast) {
-      session->video.vrAbrFast = std::make_unique<vr::abr::fast_controller_t>(session->video.configuredBitrateKbps);
-      // 2026-10-30 實測：頭盔這場沒開「自動調整位元率」，run_abr_aimd 一進去就 return，控制器降了 4 次都沒套用、
-      // 149 Mbps 硬塞家用 Wi-Fi（每 10 s 救不回 68 張）。使用者要「體驗第一、寧可糊不要卡」→ VR 開了快速降碼就一律啟用
-      if (!session->video.autoAdjustBitrate) {
-        BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] client asked for a fixed bitrate; enabling adaptive bitrate for VR (vr_abr_fast)";
-        session->video.autoAdjustBitrate = true;
-      }
-    }
+    // §REVIEW-1103：configuredBitrateKbps／autoAdjustBitrate／vrAbrFast 的初始化移到 session::start
+    // （啟動執行緒、加入 control 迴圈的 session 清單之前），不再在這裡無鎖發布給 control 執行緒。
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
     video::capture(session->mail, session->config.monitor, session);
@@ -5445,6 +5690,7 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      tailscale_path::on_session_end(session.tsPathGen);  // §TS-PATH
     }
 
     void join(session_t &session) {
@@ -5520,6 +5766,12 @@ namespace stream {
       // handler, "set up" a tunnel on the dead session, and leave the
       // new session without one.
       relay::set_allocated_notify_handler({});
+      // §REVIEW-1103：set_allocated_notify_handler({}) 不會等已經複製出去、正在跑的回呼；
+      // 經閘門等它做完並讓殘留的回呼失效，之後才能安全解構 session。
+      if (session.tunnel_notify_gate) {
+        std::lock_guard<std::mutex> lk(session.tunnel_notify_gate->m);
+        session.tunnel_notify_gate->alive = false;
+      }
 
 #ifdef VIPLE_MPQUIC
       // §Q-RECVHANDLER-CLEAR-FIX (review batch 2)：拆掉 QUIC recv
@@ -5535,8 +5787,13 @@ namespace stream {
       // Tear the tunnel down explicitly too so its WS binary handler
       // is unregistered before the relay thread tries to deliver to a
       // dead TunnelSession.
-      if (session.tunnel) {
-        session.tunnel.reset();
+      {
+        std::shared_ptr<tunnel_session::TunnelSession> dead;
+        {
+          std::lock_guard<std::mutex> lk(session.tunnel_mtx);  // §REVIEW-1103
+          dead = std::move(session.tunnel);
+        }
+        dead.reset();  // 在鎖外解構（stop() 會碰 relay 的鎖）
       }
 
       // If this is the last session, invoke the platform callbacks
@@ -5597,9 +5854,14 @@ namespace stream {
       // accept the first unclaimed notification and attach it to the
       // session that's currently listening.
       session_t *sess_ptr = &session;
+      auto gate = std::make_shared<session_t::tunnel_notify_gate_t>();
+      session.tunnel_notify_gate = gate;
       relay::set_allocated_notify_handler(
-        [sess_ptr, mode](udp_tunnel::Flow flow) {
-          if (sess_ptr->tunnel) return;  // already set up
+        [sess_ptr, mode, gate](udp_tunnel::Flow flow) {
+          // §REVIEW-1103：整段持閘門鎖；session 拆除時會等這裡做完，之後 alive=false 就直接返回
+          std::lock_guard<std::mutex> gate_lk(gate->m);
+          if (!gate->alive) return;
+          if (sess_ptr->get_tunnel()) return;  // already set up
           if (!flow.valid()) return;
 
           auto ts = std::make_shared<tunnel_session::TunnelSession>();
@@ -5608,9 +5870,13 @@ namespace stream {
             return;
           }
           ts->enable_local_bridge(net::map_port(CONTROL_PORT));
-          sess_ptr->tunnel = std::move(ts);
+          const auto carrier = ts->carrier();
+          {
+            std::lock_guard<std::mutex> lk(sess_ptr->tunnel_mtx);
+            sess_ptr->tunnel = std::move(ts);
+          }
           BOOST_LOG(info) << "[TUNNEL] session tunnel active (carrier="
-                          << udp_tunnel::carrier_name(sess_ptr->tunnel->carrier())
+                          << udp_tunnel::carrier_name(carrier)
                           << ", flow_id=" << flow.flow_id
                           << ", peer=" << flow.remote_uuid.substr(0, 16) << ")";
         });
@@ -5687,6 +5953,37 @@ namespace stream {
                         << " loopTimeout=" << session.control.loopTimeout.load().count() << "ms";
       }
 
+      // VipleStream: store configured bitrate for adaptive bitrate algorithm
+      // §REVIEW-1103：原本在 videoThread 的 recv_ping 之後才寫，control 執行緒那時可能已在讀
+      // （unique_ptr 從 null 變非 null 的無鎖發布）→ 移到這裡，session 加入清單、執行緒啟動之前。
+      session.video.configuredBitrateKbps = session.config.monitor.bitrate;
+      session.video.autoAdjustBitrate = session.config.autoAdjustBitrate;
+      // §VR-ABR-FAST 2026-10-30：VR 反應式快速降碼率控制器
+      if (session.vr && config::vr.abr_fast) {
+        // §ABR-ADAPT：上限＝邊際效應，不是 client 設定。編碼器用 vr_abr_ceiling_kbps 初始化（level／tier 夠用到這裡），
+        // client 設定的碼率當起始值：先發一次 bitrate_change，編碼執行緒第一幀就降到起始值（VR 降碼不送 IDR）。
+        const int startKbps = session.config.monitor.bitrate;
+        if (config::vr.abr_ceiling_kbps > startKbps) {
+          session.config.monitor.bitrate = config::vr.abr_ceiling_kbps;
+          session.video.configuredBitrateKbps = config::vr.abr_ceiling_kbps;
+          session.video.adaptiveBitrateKbps.store(startKbps);
+          session.video.targetBitrateKbps.store(startKbps);
+          auto ev = session.mail->event<int>(mail::bitrate_change);
+          ev->raise(startKbps);
+          session.video.vrStartBitrateEvent = ev;
+          BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] ceiling " << config::vr.abr_ceiling_kbps << " kbps (encoder init), start " << startKbps
+                          << " kbps (client setting)";
+        }
+        session.video.vrAbrFast = std::make_unique<::vr::abr::fast_controller_t>(session.video.configuredBitrateKbps);
+        session.video.vrAbrFast->set_applied_kbps(session.video.adaptiveBitrateKbps.load() > 0 ? session.video.adaptiveBitrateKbps.load() : session.video.configuredBitrateKbps);
+        // 2026-10-30 實測：頭盔這場沒開「自動調整位元率」，run_abr_aimd 一進去就 return，控制器降了 4 次都沒套用、
+        // 149 Mbps 硬塞家用 Wi-Fi（每 10 s 救不回 68 張）。使用者要「體驗第一、寧可糊不要卡」→ VR 開了快速降碼就一律啟用
+        if (!session.video.autoAdjustBitrate) {
+          BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] client asked for a fixed bitrate; enabling adaptive bitrate for VR (vr_abr_fast)";
+          session.video.autoAdjustBitrate = true;
+        }
+      }
+
       // Insert this session into the session list
       {
         auto lg = session.broadcast_ref->control_server._sessions.lock();
@@ -5696,7 +5993,10 @@ namespace stream {
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
 
-      session.state.store(state_e::RUNNING, std::memory_order_relaxed);
+      // §TS-PATH：先記下監看代號，再以 release 標成 RUNNING。
+      // stop() 的 CAS 看得到 RUNNING 時，也看得到這個代號（不是 Tailscale 就是 0）。
+      session.tsPathGen = tailscale_path::on_session_start(session.control.expected_peer_address);
+      session.state.store(state_e::RUNNING, std::memory_order_release);
 
 #ifdef VIPLE_MPQUIC
       // §F3 註冊點 A：session 已 RUNNING，QUIC 連線若已存在就立刻註冊
@@ -5730,6 +6030,7 @@ namespace stream {
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
+      session->control.audio_status_queue = mail->queue<int>(mail::audio_status);
       session->control.legacy_input_enc_iv = launch_session.iv;
       session->control.cipher = crypto::cipher::gcm_t {
         launch_session.gcm_key,

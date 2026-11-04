@@ -332,4 +332,6 @@
     <string name="steam_switch_error_taskgone">ホスト上の切り替えタスクが消失しました</string>
     <string name="steam_switch_error_timeout">切り替えがタイムアウトしました（&gt;150 秒経過してもサーバーが終了状態に達しませんでした）</string>
     <string name="steam_switch_account_unavailable">このアカウントにはホストに保存された認証情報がありません。先にホストで一度サインインしてから、もう一度お試しください。</string>
+    <string name="title_show_advanced">詳細設定と実験的なオプションを表示</string>
+    <string name="summary_show_advanced">トラブルシューティングやテスト用のオプションです。非表示のオプションも現在の値のまま使われます。</string>
 </resources>

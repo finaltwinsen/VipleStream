@@ -352,4 +352,6 @@
     <string name="steam_switch_error_taskgone">Wisseltaak is verdwenen op de host</string>
     <string name="steam_switch_error_timeout">Wisselen verlopen (&gt;150 s zonder dat de server een eindtoestand bereikte)</string>
     <string name="steam_switch_account_unavailable">Voor dit account zijn geen inloggegevens opgeslagen op de host. Meld je eerst één keer aan op de host en probeer het daarna opnieuw.</string>
+    <string name="title_show_advanced">Geavanceerde en experimentele opties tonen</string>
+    <string name="summary_show_advanced">Opties voor probleemoplossing en testen. Verborgen opties behouden hun huidige waarden.</string>
 </resources>

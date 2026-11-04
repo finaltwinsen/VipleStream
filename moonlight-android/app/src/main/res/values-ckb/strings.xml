@@ -316,4 +316,6 @@
     <string name="steam_switch_error_taskgone">ئەرکی گۆڕین لەسەر هۆست نەما</string>
     <string name="steam_switch_error_timeout">کاتی گۆڕین تەواو بوو (&gt;150 چرکە بەبێ ئەوەی سێرڤەر بگاتە دۆخێکی کۆتایی)</string>
     <string name="steam_switch_account_unavailable">ئەم هەژمارە هیچ زانیاری چوونەژوورەوەی پاشەکەوتکراوی لەسەر هۆست نییە. سەرەتا جارێک لەسەر هۆست بچۆ ژوورەوە، پاشان دووبارە هەوڵ بدەرەوە.</string>
+    <string name="title_show_advanced">پیشاندانی هەڵبژاردە پێشکەوتوو و تاقیکارییەکان</string>
+    <string name="summary_show_advanced">هەڵبژاردەکانی چارەسەری کێشە و تاقیکردنەوە. هەڵبژاردە شاردراوەکان بەهای ئێستایان دەپارێزن.</string>
 </resources>

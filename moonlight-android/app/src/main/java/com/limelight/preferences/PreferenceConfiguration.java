@@ -122,7 +122,7 @@ public class PreferenceConfiguration {
     // a free-form WxH escape hatch for the resolution dropdown.
     private static final String PACKET_SIZE_PREF_STRING = "seekbar_packet_size";
     private static final String ENABLE_YUV444_PREF_STRING = "checkbox_enable_yuv444";
-    private static final String CUSTOM_RESOLUTION_PREF_STRING = "text_custom_resolution";
+    static final String CUSTOM_RESOLUTION_PREF_STRING = "text_custom_resolution";
 
     // VipleStream H Phase 2: app-list sort mode. Stored as the enum's
     // name() string ("DEFAULT" / "RECENT" / "PLAYTIME" / "NAME"). The
@@ -341,9 +341,27 @@ public class PreferenceConfiguration {
     }
 
     public static int getDefaultBitrate(String resString, String fpsString) {
-        int width = getWidthFromResolutionString(resString);
-        int height = getHeightFromResolutionString(resString);
-        int fps = Integer.parseInt(fpsString);
+        int width, height;
+        try {
+            width = getWidthFromResolutionString(resString);
+            height = getHeightFromResolutionString(resString);
+            if (width <= 0 || height <= 0) {
+                throw new IllegalArgumentException();
+            }
+        } catch (Exception e) {
+            // §REVIEW-1104：傳入 custom sentinel 或畸形解析度時退回預設解析度計算位元率，避免 NumberFormatException
+            width = getWidthFromResolutionString(DEFAULT_RESOLUTION);
+            height = getHeightFromResolutionString(DEFAULT_RESOLUTION);
+        }
+        int fps;
+        try {
+            fps = Integer.parseInt(fpsString);
+            if (fps <= 0) {
+                throw new IllegalArgumentException();
+            }
+        } catch (Exception e) {
+            fps = Integer.parseInt(DEFAULT_FPS);
+        }
 
         // This logic is shamelessly stolen from Moonlight Qt:
         // https://github.com/moonlight-stream/moonlight-qt/blob/master/app/settings/streamingpreferences.cpp
@@ -425,8 +443,13 @@ public class PreferenceConfiguration {
 
     public static int getDefaultBitrate(Context context) {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+        String res = prefs.getString(RESOLUTION_PREF_STRING, DEFAULT_RESOLUTION);
+        if (RES_CUSTOM.equalsIgnoreCase(res)) {
+            // §REVIEW-1104：偏好設定為 custom 時改讀自訂解析度字串，避免傳入 sentinel 導致解析崩潰
+            res = prefs.getString(CUSTOM_RESOLUTION_PREF_STRING, DEFAULT_RESOLUTION);
+        }
         return getDefaultBitrate(
-                prefs.getString(RESOLUTION_PREF_STRING, DEFAULT_RESOLUTION),
+                res,
                 prefs.getString(FPS_PREF_STRING, DEFAULT_FPS));
     }
 
@@ -611,9 +634,20 @@ public class PreferenceConfiguration {
             // launch that the server cannot honour.
             if (RES_CUSTOM.equalsIgnoreCase(resStr)) {
                 String customStr = prefs.getString(CUSTOM_RESOLUTION_PREF_STRING, "").trim();
+                boolean valid = false;
                 if (customStr.matches("(?i)\\d+x\\d+")) {
-                    resStr = customStr.toLowerCase();
-                } else {
+                    try {
+                        int w = PreferenceConfiguration.getWidthFromResolutionString(customStr);
+                        int h = PreferenceConfiguration.getHeightFromResolutionString(customStr);
+                        // §REVIEW-1104（使用者決策 B）：單邊超過 8192 沒有任何編碼器支援，跟其他無效值一樣退回預設
+                        if (w > 0 && h > 0 && w <= 8192 && h <= 8192) {
+                            resStr = customStr.toLowerCase();
+                            valid = true;
+                        }
+                    } catch (NumberFormatException ignored) {}
+                }
+                if (!valid) {
+                    // §REVIEW-1104：自訂解析度為非正數或數值溢位時退回 DEFAULT_RESOLUTION，避免崩潰或啟動非法尺寸
                     resStr = PreferenceConfiguration.DEFAULT_RESOLUTION;
                 }
             }
@@ -624,9 +658,25 @@ public class PreferenceConfiguration {
                 prefs.edit().putString(RESOLUTION_PREF_STRING, resStr).apply();
             }
 
-            config.width = PreferenceConfiguration.getWidthFromResolutionString(resStr);
-            config.height = PreferenceConfiguration.getHeightFromResolutionString(resStr);
-            config.fps = Integer.parseInt(prefs.getString(FPS_PREF_STRING, PreferenceConfiguration.DEFAULT_FPS));
+            try {
+                config.width = PreferenceConfiguration.getWidthFromResolutionString(resStr);
+                config.height = PreferenceConfiguration.getHeightFromResolutionString(resStr);
+                if (config.width <= 0 || config.height <= 0) {
+                    throw new IllegalArgumentException();
+                }
+            } catch (Exception e) {
+                // §REVIEW-1104：解析度異常時防禦退回 DEFAULT_RESOLUTION
+                config.width = PreferenceConfiguration.getWidthFromResolutionString(PreferenceConfiguration.DEFAULT_RESOLUTION);
+                config.height = PreferenceConfiguration.getHeightFromResolutionString(PreferenceConfiguration.DEFAULT_RESOLUTION);
+            }
+            try {
+                config.fps = Integer.parseInt(prefs.getString(FPS_PREF_STRING, PreferenceConfiguration.DEFAULT_FPS));
+                if (config.fps <= 0) {
+                    throw new IllegalArgumentException();
+                }
+            } catch (Exception e) {
+                config.fps = Integer.parseInt(PreferenceConfiguration.DEFAULT_FPS);
+            }
         }
 
         if (!prefs.contains(SMALL_ICONS_PREF_STRING)) {

@@ -598,6 +598,14 @@ namespace platf {
   public:
     virtual capture_e sample(std::vector<float> &frame_buffer) = 0;
 
+    /**
+     * @brief §AUD-MON：被擷取的播放裝置目前的音量峰值（0–1，系統音量計）。
+     *        平台不支援時回 std::nullopt（不做擷取健康檢查）。只能在擷取執行緒呼叫。
+     */
+    virtual std::optional<float> render_peak() {
+      return std::nullopt;
+    }
+
     virtual ~mic_t() = default;
   };
 

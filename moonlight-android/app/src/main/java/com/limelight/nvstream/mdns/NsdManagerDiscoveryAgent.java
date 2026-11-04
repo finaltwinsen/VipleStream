@@ -25,7 +25,20 @@ public class NsdManagerDiscoveryAgent extends MdnsDiscoveryAgent {
     private NsdManager.DiscoveryListener pendingListener;
     private NsdManager.DiscoveryListener activeListener;
     private final HashMap<String, NsdManager.ServiceInfoCallback> serviceCallbacks = new HashMap<>();
-    private final ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
+    // §REVIEW-1104：改用 daemon 執行緒並啟用 allowCoreThreadTimeOut，避免 agent 被棄置後殘留 idle 執行緒
+    private final ThreadPoolExecutor executor = createExecutor();
+
+    private static ThreadPoolExecutor createExecutor() {
+        ThreadPoolExecutor exec = new ThreadPoolExecutor(1, 1, 10, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(),
+                r -> {
+                    Thread t = new Thread(r, "NsdManagerDiscoveryCallback");
+                    t.setDaemon(true);
+                    return t;
+                });
+        exec.allowCoreThreadTimeOut(true);
+        return exec;
+    }
 
     private NsdManager.DiscoveryListener createDiscoveryListener() {
         return new NsdManager.DiscoveryListener() {
@@ -122,6 +135,16 @@ public class NsdManagerDiscoveryAgent extends MdnsDiscoveryAgent {
                         public void onServiceInfoCallbackUnregistered() {
                         }
                     };
+
+                    // §REVIEW-1104：若已有同名服務的舊 callback，先反註冊再註冊新 callback，防止重複註冊造成洩漏
+                    NsdManager.ServiceInfoCallback oldCallback = serviceCallbacks.remove(nsdServiceInfo.getServiceName());
+                    if (oldCallback != null) {
+                        try {
+                            nsdManager.unregisterServiceInfoCallback(oldCallback);
+                        } catch (IllegalArgumentException e) {
+                            LimeLog.warning("NSD: Previous callback already unregistered: " + e.getMessage());
+                        }
+                    }
 
                     nsdManager.registerServiceInfoCallback(nsdServiceInfo, executor, serviceInfoCallback);
                     serviceCallbacks.put(nsdServiceInfo.getServiceName(), serviceInfoCallback);

@@ -789,7 +789,7 @@ namespace platf {
                 continue;
               }
               BOOST_LOG(warning) << "poll() failed: "sv << errno;
-              break;
+              return false;  // §REVIEW-1103：原本 break 後仍回 true，把沒送出的批次當成功
             }
 
             // Try to send again

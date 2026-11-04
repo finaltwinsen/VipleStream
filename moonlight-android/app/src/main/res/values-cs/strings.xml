@@ -339,4 +339,6 @@
     <string name="steam_switch_error_taskgone">Úloha přepnutí na hostiteli zmizela</string>
     <string name="steam_switch_error_timeout">Časový limit přepnutí vypršel (&gt;150 s, aniž server dosáhl konečného stavu)</string>
     <string name="steam_switch_account_unavailable">Tento účet nemá na hostiteli uložené přihlašovací údaje. Nejprve se jednou přihlaste na hostiteli a pak to zkuste znovu.</string>
+    <string name="title_show_advanced">Zobrazit pokročilé a experimentální možnosti</string>
+    <string name="summary_show_advanced">Možnosti pro řešení potíží a testování. Skryté možnosti si ponechají aktuální hodnoty.</string>
 </resources>

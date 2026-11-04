@@ -193,6 +193,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     public static final String EXTRA_APP_HDR = "HDR";
     public static final String EXTRA_SERVER_CERT = "ServerCert";
     public static final String EXTRA_STUN_ADDRESS = "StunAddress"; // VipleStream: STUN endpoint for relay
+    public static final String EXTRA_STUN_PUNCH_PORT = "StunPunchPort"; // §REVIEW-1104：STUN 回報的實際控制埠
     // VipleStream §M.parity W1 (2026-05-20). Host codec capability bit
     // field (SCM_* flags from Sunshine /serverinfo). 0 means the host
     // did not advertise the field (vanilla GFE / older Sunshine) — in
@@ -203,6 +204,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // §REVIEW-1103：relay wss 的自簽憑證釘選需要儲存位置
+        com.limelight.relay.RelayTls.init(this);
 
         UiHelper.setLocale(this);
 
@@ -512,7 +516,23 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         int serverCodecModeSupport = Game.this.getIntent().getIntExtra(EXTRA_SERVER_CODEC_MODE_SUPPORT, 0);
         if (serverCodecModeSupport != 0) {
             int beforeMask = supportedVideoFormats;
-            supportedVideoFormats &= serverCodecModeSupport;
+            // §REVIEW-1104：將主機回報的 SCM_* 位元映射為 VIDEO_FORMAT_* 遮罩後再取交集，避免 AV1、4:4:4 與 PyroWave 格式位元因編號不同遭誤刪
+            int serverFormatMask = 0;
+            if ((serverCodecModeSupport & 0x00000001) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_H264;
+            if ((serverCodecModeSupport & 0x00040000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_H264_HIGH8_444;
+            if ((serverCodecModeSupport & 0x00000100) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_H265;
+            if ((serverCodecModeSupport & 0x00000200) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_H265_MAIN10;
+            if ((serverCodecModeSupport & 0x00080000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_H265_REXT8_444;
+            if ((serverCodecModeSupport & 0x00100000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_H265_REXT10_444;
+            if ((serverCodecModeSupport & 0x00010000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_AV1_MAIN8;
+            if ((serverCodecModeSupport & 0x00020000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_AV1_MAIN10;
+            if ((serverCodecModeSupport & 0x00200000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_AV1_HIGH8_444;
+            if ((serverCodecModeSupport & 0x00400000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_AV1_HIGH10_444;
+            if ((serverCodecModeSupport & 0x01000000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_PYROWAVE_MAIN8;
+            if ((serverCodecModeSupport & 0x02000000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_PYROWAVE_MAIN10;
+            if ((serverCodecModeSupport & 0x04000000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_PYROWAVE_444_8;
+            if ((serverCodecModeSupport & 0x08000000) != 0) serverFormatMask |= MoonBridge.VIDEO_FORMAT_PYROWAVE_444_10;
+            supportedVideoFormats &= serverFormatMask;
             if (beforeMask != supportedVideoFormats) {
                 LimeLog.info("[VIPLE-PARITY] supportedVideoFormats masked by server caps 0x"
                              + Integer.toHexString(beforeMask) + " -> 0x"
@@ -574,15 +594,20 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     LimeLog.info("Bogus refresh rate: " + roundedRefreshRate);
                 }
                 else {
-                    chosenFrameRate = roundedRefreshRate - 1;
-                    LimeLog.info("Adjusting FPS target for screen to " + chosenFrameRate);
+                    // §REVIEW-1104：FRUC 已把 chosenFrameRate 砍半，cap-fps 的 −1 不可再覆寫，否則 server 不會以半幀率送流
+                    if (!prefConfig.enableFruc) {
+                        chosenFrameRate = roundedRefreshRate - 1;
+                        LimeLog.info("Adjusting FPS target for screen to " + chosenFrameRate);
+                    }
                 }
             }
         }
 
         StreamConfiguration config = new StreamConfiguration.Builder()
                 .setResolution(prefConfig.width, prefConfig.height)
-                .setLaunchRefreshRate(prefConfig.fps)
+                // §REVIEW-1104（使用者決策 B）：開補幀時 host 顯示器／遊戲跟實際串流幀率（半幀）對齊，與 Qt 一致——
+                // 全幀時 host 從 120 張挑 60 張，間隔不均會讓補出來的動作抖，GPU 也白畫一半
+                .setLaunchRefreshRate(prefConfig.enableFruc ? chosenFrameRate : prefConfig.fps)
                 .setRefreshRate(chosenFrameRate)
                 .setApp(app)
                 .setBitrate(prefConfig.bitrate)
@@ -610,7 +635,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         // VipleStream: Pass relay settings to connection context
         String pcUuid = Game.this.getIntent().getStringExtra(EXTRA_PC_UUID);
         String stunAddr = Game.this.getIntent().getStringExtra(EXTRA_STUN_ADDRESS);
-        conn.setRelayConfig(prefConfig.relayUrl, prefConfig.relayPsk, pcUuid, stunAddr);
+        conn.setRelayConfig(prefConfig.relayUrl, prefConfig.relayPsk, pcUuid, stunAddr,
+                Game.this.getIntent().getIntExtra(EXTRA_STUN_PUNCH_PORT, 0));
 
         controllerHandler = new ControllerHandler(this, conn, this, prefConfig);
         keyboardTranslator = new KeyboardTranslator();
@@ -748,6 +774,16 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 }
 
                 notificationOverlayView.setVisibility(requestedNotificationOverlayVisibility);
+
+                // §REVIEW-1104：進入 PiP 會把檔案傳輸 overlay 藏起來，離開時若還有進度文字且尚未終態就設回可見
+                if (fileTransferOverlayView != null) {
+                    CharSequence transferText = fileTransferOverlayView.getText();
+                    String transferMessage = transferText == null ? null : transferText.toString();
+                    if (transferMessage != null && transferMessage.length() > 0
+                            && !isFileTransferTerminalMessage(transferMessage)) {
+                        fileTransferOverlayView.setVisibility(View.VISIBLE);
+                    }
+                }
 
                 // Enable sensors again after exiting PiP
                 controllerHandler.enableSensors();
@@ -2404,14 +2440,15 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             // during the process of stopping this one.
             new Thread() {
                 public void run() {
-                    // §M.1.f fix (2026-05-14) — Android equivalent of moonlight-qt
-                    // session.cpp shouldNotifyServerCancel.  Send HTTP /cancel
-                    // before conn.stop() so server-side proc::proc.terminate()
-                    // releases _owner_uuid; without this the next paired
-                    // device's /launch gets 503 "Server in use by another paired
-                    // device".  conn.stop() alone only tears down the RTSP /
-                    // moonlight-common-c streaming session, not the host
-                    // ownership lock.
+                    // §REVIEW-1104：先 conn.stop() 釋放 semaphore；quitApp() 沒有讀取逾時，卡住不能擋住 teardown
+                    try {
+                        conn.stop();
+                    } catch (Exception e) {
+                        android.util.Log.w("VipleStream", "[§M.1.f] conn.stop failed: " + e.getMessage());
+                    }
+
+                    // §M.1.f：/cancel 釋放 server 端 _owner_uuid。conn.stop() 只拆串流，
+                    // 不放 host 擁有權。這步失敗不可擋住已經做完的 teardown。
                     try {
                         if (xferHost != null && xferHttpsPort != 0 && xferServerCert != null) {
                             String uniqueId = "0123456789ABCDEF";  // same value FileTransferClient uses
@@ -2431,7 +2468,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         // Defensive layer covers via RTSP teardown when implemented.
                         android.util.Log.w("VipleStream", "[§M.1.f] /cancel failed: " + e.getMessage());
                     }
-                    conn.stop();
                 }
             }.start();
         }
@@ -2704,6 +2740,16 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         }
     }
 
+    // §REVIEW-1104：下載成功是 Received:，要算終態，否則左下角進度條留到串流結束
+    private static boolean isFileTransferTerminalMessage(String message) {
+        return message != null && (
+                message.startsWith("Saved")
+             || message.startsWith("Sent")
+             || message.startsWith("Received:")
+             || message.startsWith("File transfer cancelled")
+             || message.contains("failed"));
+    }
+
     /**
      * VipleStream §N.5 (2026-05-14) — File transfer 進度 overlay 顯示.
      *
@@ -2730,11 +2776,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 Runnable prev = fileTransferHideTask.getAndSet(null);
                 if (prev != null) fileTransferOverlayView.removeCallbacks(prev);
                 // 終態 (完成 / 取消 / 失敗) 3 秒後 hide；進行中保持顯示
-                boolean isTerminal = message != null && (
-                        message.startsWith("Saved")
-                     || message.startsWith("Sent")
-                     || message.startsWith("File transfer cancelled")
-                     || message.contains("failed"));
+                // §REVIEW-1104：下載成功的文案是 Received:，原本對不上，進度條會留到串流結束
+                boolean isTerminal = isFileTransferTerminalMessage(message);
                 if (isTerminal) {
                     Runnable hideTask = () -> fileTransferOverlayView.setVisibility(View.GONE);
                     fileTransferHideTask.set(hideTask);
@@ -2805,6 +2848,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             UiHelper.notifyStreamConnecting(Game.this);
 
             decoderRenderer.setRenderTarget(holder);
+            // §REVIEW-1104：connecting 原本從來沒被設成 true，連線建立前離開時 stopConnection() 什麼都不做，
+            // 連線照樣在背景建起來。NvConnection.stop() 已處理「還沒拿到 permit 就被停」的情況
+            connecting = true;
             conn.start(new AndroidAudioRenderer(Game.this, prefConfig.enableAudioFx),
                     decoderRenderer, Game.this);
         }

@@ -36,6 +36,7 @@ VDPAURenderer::VDPAURenderer(int decoderSelectionPass)
 {
     SDL_zero(m_OutputSurface);
     SDL_zero(m_OverlaySurface);
+    SDL_zero(m_HasOverlaySourceRect); // §REVIEW-1104：來源矩形旗標預設關閉，一般 overlay 行為不變
 }
 
 VDPAURenderer::~VDPAURenderer()
@@ -448,11 +449,26 @@ void VDPAURenderer::notifyOverlayUpdated(Overlay::OverlayType type)
         }
 
         VdpRect overlayRect;
+        VdpRect sourceRect;
+        bool useSourceRect = false;
 
         if (type == Overlay::OverlayStatusUpdate) {
             // Bottom Left
             overlayRect.x0 = 0;
-            overlayRect.y0 = m_DisplayHeight - newSurface->h;
+            // §REVIEW-1104：表面比視窗高時無號相減會下溢；用有號計算，夾進視窗並保留文字底部
+            int signedY0 = (int)m_DisplayHeight - newSurface->h;
+            if (signedY0 < 0) {
+                // 只把 y0 夾成 0 會改成顯示文字頂端；來源改取底部，目的矩形才整段落在視窗內
+                SDL_zero(sourceRect);
+                sourceRect.x1 = (uint32_t)newSurface->w;
+                sourceRect.y0 = (uint32_t)(-signedY0);
+                sourceRect.y1 = (uint32_t)newSurface->h;
+                useSourceRect = true;
+                overlayRect.y0 = 0;
+            }
+            else {
+                overlayRect.y0 = (uint32_t)signedY0;
+            }
         }
         else if (type == Overlay::OverlayDebug) {
             // Top left
@@ -461,7 +477,12 @@ void VDPAURenderer::notifyOverlayUpdated(Overlay::OverlayType type)
         }
 
         overlayRect.x1 = overlayRect.x0 + newSurface->w;
-        overlayRect.y1 = overlayRect.y0 + newSurface->h;
+        if (useSourceRect) {
+            overlayRect.y1 = m_DisplayHeight;
+        }
+        else {
+            overlayRect.y1 = overlayRect.y0 + newSurface->h;
+        }
 
         // Surface data is no longer needed
         SDL_FreeSurface(newSurface);
@@ -469,6 +490,10 @@ void VDPAURenderer::notifyOverlayUpdated(Overlay::OverlayType type)
         SDL_LockMutex(m_OverlayMutex);
         m_OverlaySurface[type] = newBitmapSurface;
         m_OverlayRect[type] = overlayRect;
+        m_HasOverlaySourceRect[type] = useSourceRect;
+        if (useSourceRect) {
+            m_OverlaySourceRect[type] = sourceRect;
+        }
         SDL_UnlockMutex(m_OverlayMutex);
     }
 }
@@ -508,10 +533,13 @@ void VDPAURenderer::renderOverlay(VdpOutputSurface destination, Overlay::Overlay
         return;
     }
 
+    // §REVIEW-1104：比視窗高的狀態文字改畫來源底部，目的矩形已夾進視窗
+    const VdpRect* sourceRect = m_HasOverlaySourceRect[type] ? &m_OverlaySourceRect[type] : nullptr;
+
     status = m_VdpOutputSurfaceRenderBitmapSurface(destination,
                                                    &m_OverlayRect[type],
                                                    m_OverlaySurface[type],
-                                                   nullptr,
+                                                   sourceRect,
                                                    nullptr,
                                                    &m_OverlayBlendState,
                                                    0);
@@ -547,9 +575,12 @@ void VDPAURenderer::renderFrame(AVFrame* frame)
     // We need to create the mixer on the fly, because we don't know the dimensions
     // of our video surfaces in advance of decoding. We also need to recreate it when
     // the frame format or size changes.
-    if (hasFrameFormatChanged(frame)) {
+    // §REVIEW-1104：建立失敗後 hasFrameFormatChanged 不會再變 true，handle 為 0 時下一幀要重試
+    if (hasFrameFormatChanged(frame) || m_VideoMixer == 0) {
         if (m_VideoMixer != 0) {
             m_VdpVideoMixerDestroy(m_VideoMixer);
+            // §REVIEW-1104：銷毀後立刻清成 0，失敗路徑與解構才不會對同一 handle 再 destroy
+            m_VideoMixer = 0;
         }
 
         VdpChromaType videoSurfaceChroma;
@@ -586,6 +617,8 @@ void VDPAURenderer::renderFrame(AVFrame* frame)
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "VdpVideoMixerCreate() failed: %s",
                          m_VdpGetErrorString(status));
+            // §REVIEW-1104：Create 失敗時清掉可能寫入的 handle，下一幀才會重試建立
+            m_VideoMixer = 0;
             return;
         }
     }

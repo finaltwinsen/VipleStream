@@ -35,6 +35,7 @@ import com.limelight.utils.Dialog;
 import com.limelight.utils.UiHelper;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 
 public class StreamSettings extends Activity {
@@ -253,6 +254,10 @@ public class StreamSettings extends Activity {
             if (res == null) {
                 res = prefs.getString(PreferenceConfiguration.RESOLUTION_PREF_STRING, PreferenceConfiguration.DEFAULT_RESOLUTION);
             }
+            if (PreferenceConfiguration.RES_CUSTOM.equalsIgnoreCase(res)) {
+                // §REVIEW-1104：選取 custom 自訂解析度時改讀 text_custom_resolution，解析失敗由 getDefaultBitrate 退回預設值
+                res = prefs.getString(PreferenceConfiguration.CUSTOM_RESOLUTION_PREF_STRING, PreferenceConfiguration.DEFAULT_RESOLUTION);
+            }
             if (fps == null) {
                 fps = prefs.getString(PreferenceConfiguration.FPS_PREF_STRING, PreferenceConfiguration.DEFAULT_FPS);
             }
@@ -435,6 +440,7 @@ public class StreamSettings extends Activity {
                 MediaCodecInfo hevcDecoder = MediaCodecHelper.findProbableSafeDecoder("video/hevc", -1);
 
                 if (avcDecoder != null) {
+                    try {
                     Range<Integer> avcWidthRange = avcDecoder.getCapabilitiesForType("video/avc").getVideoCapabilities().getSupportedWidths();
 
                     LimeLog.info("AVC supported width range: "+avcWidthRange.getLower()+" - "+avcWidthRange.getUpper());
@@ -450,10 +456,22 @@ public class StreamSettings extends Activity {
                         else if (maxSupportedResW < 1280) {
                             maxSupportedResW = 1280;
                         }
+                    } /*
+                            maxSupportedResW = 1920;
+                        }
+                        else if (maxSupportedResW < 1280) {
+                            maxSupportedResW = 1280;
+                        }
                     }
                 }
 
+                */ } catch (Exception e) {
+                    // §REVIEW-1104：部分解碼器呼叫 getCapabilitiesForType 會拋出 IllegalArgumentException，捕捉並跳過該解碼器
+                    LimeLog.warning("Failed to get AVC decoder capabilities: " + e.getMessage());
+                } }
+
                 if (hevcDecoder != null) {
+                    try {
                     Range<Integer> hevcWidthRange = hevcDecoder.getCapabilitiesForType("video/hevc").getVideoCapabilities().getSupportedWidths();
 
                     LimeLog.info("HEVC supported width range: "+hevcWidthRange.getLower()+" - "+hevcWidthRange.getUpper());
@@ -469,8 +487,19 @@ public class StreamSettings extends Activity {
                         else if (maxSupportedResW < 1280) {
                             maxSupportedResW = 1280;
                         }
+                    } /*
+                            maxSupportedResW = 1920;
+                        }
+                        else if (maxSupportedResW < 1280) {
+                            maxSupportedResW = 1280;
+                        }
                     }
                 }
+
+                */ } catch (Exception e) {
+                    // §REVIEW-1104：部分解碼器呼叫 getCapabilitiesForType 會拋出 IllegalArgumentException，捕捉並跳過該解碼器
+                    LimeLog.warning("Failed to get HEVC decoder capabilities: " + e.getMessage());
+                } }
 
                 LimeLog.info("Maximum resolution slot: "+maxSupportedResW);
 
@@ -667,6 +696,61 @@ public class StreamSettings extends Activity {
                     return true;
                 }
             });
+
+            // 放在最後：上面的程式還會用 findPreference 找進階區的選項（例如 unlock FPS），先移除就找不到了
+            setupAdvancedToggle();
+        }
+
+        // §SETTINGS-ADV：「顯示進階與實驗性選項」關著時，進階區收起這些測試、除錯與實驗性的選項。
+        // 只是不顯示：值照樣存在 SharedPreferences、照樣套用。
+        private static final String[] ADVANCED_ONLY_KEYS = {
+                "checkbox_unlock_fps",
+                "list_fruc_quality",
+                "checkbox_fruc_backend_vulkan",
+                "checkbox_full_range",
+                "checkbox_enable_yuv444",
+                "seekbar_packet_size",
+                "list_mpquic_scheduler",
+        };
+        private final ArrayList<Preference> advancedOnlyPrefs = new ArrayList<>();
+
+        private void setupAdvancedToggle() {
+            final PreferenceCategory category =
+                    (PreferenceCategory) findPreference("category_advanced_settings");
+            CheckBoxPreference toggle = (CheckBoxPreference) findPreference("checkbox_show_advanced");
+            if (category == null || toggle == null) {
+                return;
+            }
+
+            // 收起再加回時照 XML 的順序排，不要排到最後面（XML 載入時每個選項都已經編好 order）
+            category.setOrderingAsAdded(false);
+            for (String key : ADVANCED_ONLY_KEYS) {
+                Preference pref = category.findPreference(key);
+                if (pref != null) {
+                    advancedOnlyPrefs.add(pref);
+                }
+            }
+
+            applyAdvancedVisibility(category, toggle.isChecked());
+            toggle.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    applyAdvancedVisibility(category, (Boolean) newValue);
+                    return true;
+                }
+            });
+        }
+
+        private void applyAdvancedVisibility(PreferenceCategory category, boolean show) {
+            for (Preference pref : advancedOnlyPrefs) {
+                boolean shown = category.findPreference(pref.getKey()) != null;
+                if (show && !shown) {
+                    category.addPreference(pref);
+                }
+                else if (!show && shown) {
+                    category.removePreference(pref);
+                }
+            }
         }
     }
 }

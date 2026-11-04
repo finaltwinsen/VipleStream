@@ -183,7 +183,9 @@ public class DigitalPad extends VirtualControllerElement {
                 return true;
             }
             case MotionEvent.ACTION_CANCEL:
-            case MotionEvent.ACTION_UP: {
+            case MotionEvent.ACTION_UP:
+            // §REVIEW-1104：多指觸控下主要手指放開時，走與 ACTION_UP 相同的放開路徑
+            case MotionEvent.ACTION_POINTER_UP: {
                 direction = 0;
                 newDirectionCallback(direction);
                 invalidate();

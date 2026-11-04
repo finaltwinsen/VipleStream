@@ -398,7 +398,8 @@ CenteredGridView {
                 // images, however the one known exception is Overcooked. Therefore, we only execute
                 // the image size checks if this is not an app collector game. We know the officially
                 // supported games all have box art, so this check is not required.
-                if (!model.isAppCollectorGame &&
+                // §REVIEW-1104：role 名稱是 appCollectorGame，isAppCollectorGame 永遠是 undefined，佔位圖判斷對每款遊戲都跑
+                if (!model.appCollectorGame &&
                     ((sourceSize.width === 130 && sourceSize.height === 180) || // GFE 2.0 placeholder image
                      (sourceSize.width === 628 && sourceSize.height === 888) || // GFE 3.0 placeholder image
                      (sourceSize.width === 200 && sourceSize.height === 266)))  // Our no_app_image.png
@@ -822,6 +823,12 @@ CenteredGridView {
         }
     }
 
+    // §REVIEW-1104：Steam 帳號切換失敗或帳號不能切時要有畫面，不能只寫 console
+    NavigableMessageDialog {
+        id: steamSwitchErrorDialog
+        standardButtons: Dialog.Ok
+    }
+
     ScrollBar.vertical: ScrollBar {}
 
     // ─────────────────────────────────────────────────────────────────────
@@ -883,15 +890,34 @@ CenteredGridView {
                     if (suppressActivated) return
                     var account = currentValue
                     if (!account) return
+                    // §REVIEW-1104：沒存密碼的帳號伺服器會回 409，不要送出切換
+                    var profileRow = steamProfileModel.get(currentIndex)
+                    if (profileRow && profileRow.switchable === false) {
+                        steamSwitchErrorDialog.text = qsTr("This Steam account has no saved password on the host. Sign in on the host once before switching to it.")
+                        steamSwitchErrorDialog.open()
+                        pinnedSteamBar.populate()
+                        return
+                    }
                     console.log("[H.4] switch start: account=" + account)
                     appGrid.steamSwitchInProgress = true
-                    var ok = appModel.requestSteamSwitch(account)
-                    appGrid.steamSwitchInProgress = false
+                    // §REVIEW-1104：輪詢還在 GUI 執行緒時，返回會把這一頁拆掉；旗標讓 goBack 直接回來
+                    stackView.steamSwitchInProgress = true
+                    switchBusyBlocker.forceActiveFocus()
+                    var ok = false
+                    try {
+                        ok = appModel.requestSteamSwitch(account)
+                    } finally {
+                        appGrid.steamSwitchInProgress = false
+                        stackView.steamSwitchInProgress = false
+                    }
                     console.log("[H.4] switch result: ok=" + ok
                                 + " error=" + appModel.lastSteamSwitchError())
                     if (!ok) {
                         console.warn("[H.4] switch failed:",
                                      appModel.lastSteamSwitchError())
+                        // §REVIEW-1104：切換失敗只寫 console，畫面看不出原因
+                        steamSwitchErrorDialog.text = appModel.lastSteamSwitchError()
+                        steamSwitchErrorDialog.open()
                     }
                     // Re-populate either way: success → reflects new
                     // current; failure → roll back highlight to current.
@@ -960,21 +986,40 @@ CenteredGridView {
         // first /steamswitch/status reply.
         property string progressState:   ""
         property string progressMessage: ""
+        // §REVIEW-1104：建立時 visible 會從預設 true 綁成 false，那次不要把焦點搶走
+        property bool switchOverlayTookFocus: false
 
         // Reset when the overlay closes so a stale state from the last
         // switch doesn't flash on the next open.
         onVisibleChanged: {
-            if (!visible) {
+            if (visible) {
+                // §REVIEW-1104：切換期間遮罩拿走焦點，Escape／返回才不會把這一頁 pop 掉
+                switchOverlayTookFocus = true
+                switchBusyBlocker.forceActiveFocus()
+            } else {
                 progressState   = ""
                 progressMessage = ""
+                // §REVIEW-1104：遮罩收起後把焦點還給遊戲庫，避免看不見的區域繼續吃按鍵
+                if (switchOverlayTookFocus) {
+                    switchOverlayTookFocus = false
+                    appGrid.forceActiveFocus()
+                }
             }
         }
 
-        // Eat clicks
+        // Eat clicks and Escape / Back. The poll still runs on the GUI thread.
         MouseArea {
+            id: switchBusyBlocker
             anchors.fill: parent
             hoverEnabled: true
             onClicked: {/* swallow */}
+            // §REVIEW-1104：遮罩原本只吃滑鼠，Escape／手把返回仍會把 AppView pop 掉
+            Keys.onEscapePressed: {
+                event.accepted = true
+            }
+            Keys.onBackPressed: {
+                event.accepted = true
+            }
         }
 
         Column {

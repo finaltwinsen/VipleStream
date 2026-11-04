@@ -293,15 +293,16 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
     for (;;) {
         // vaInitialize() will return the libva library version even if the function
         // fails. This has been the case since libva v2.6 from 5 years ago. This
-        // doesn't seem to be documented anywhere, so we will be conservative to
-        // protect against changes in libva behavior by reinitializing major/minor
-        // each time and clamping it to the valid range of versions based upon
-        // the version of libva that we compiled with.
+        // doesn't seem to be documented anywhere, so we reinitialize major/minor
+        // each time before calling it.
         major = minor = 0;
         status = tryVaInitialize(vaDeviceContext, params, &major, &minor);
         if (status != VA_STATUS_SUCCESS) {
-            major = std::max(major, VA_MAJOR_VERSION);
-            minor = std::max(minor, VA_MINOR_VERSION);
+            // §REVIEW-1104：runtime 回了非零版本就照用；只有 0,0（沒叫到 vaInitialize）才改用編譯期版本，避免較舊 runtime 被抬高後跳過 driver fallback
+            if (major == 0 && minor == 0) {
+                major = VA_MAJOR_VERSION;
+                minor = VA_MINOR_VERSION;
+            }
 
             // If LIBVA_DRIVER_NAME has not been set manually and we're running a
             // version of libva less than 2.20, we'll try our own fallback names.
@@ -945,8 +946,11 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
                              status);
             }
 
+            // §REVIEW-1104：還原前若 overlay 已關閉，銷毀借走的 image／subpicture，不要寫回 slot
+            bool overlayEnabled = Session::get()->getOverlayManager().isOverlayEnabled((Overlay::OverlayType)type);
+
             // If a new subpicture was populated while we were unlocked, free the old one we took ownership of
-            if (m_OverlaySubpicture[type] != 0) {
+            if (m_OverlaySubpicture[type] != 0 || !overlayEnabled) {
                 status = vaDestroySubpicture(vaDeviceContext->display, associatedOverlaySubpictures[type]);
                 if (status != VA_STATUS_SUCCESS) {
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -960,12 +964,14 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
             }
 
             // If a new image was populated while we were unlocked, free the one old we took ownership of
-            if (m_OverlayImage[type].image_id != 0) {
-                status = vaDestroyImage(vaDeviceContext->display, associatedOverlayImages[type].image_id);
-                if (status != VA_STATUS_SUCCESS) {
-                    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                                 "vaDestroyImage() failed: %d",
-                                 status);
+            if (m_OverlayImage[type].image_id != 0 || !overlayEnabled) {
+                if (associatedOverlayImages[type].image_id != 0) {
+                    status = vaDestroyImage(vaDeviceContext->display, associatedOverlayImages[type].image_id);
+                    if (status != VA_STATUS_SUCCESS) {
+                        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                     "vaDestroyImage() failed: %d",
+                                     status);
+                    }
                 }
             }
             else {
@@ -1248,12 +1254,23 @@ bool VAAPIRenderer::mapDrmPrimeFrame(AVFrame* frame, AVDRMFrameDescriptor* drmDe
 
     // Add a buffer reference to the frame to automatically close the
     // mapped FDs when the frame is no longer referenced.
-    frame->opaque_ref = av_buffer_create((uint8_t*)(new AVDRMFrameDescriptor(*drmDescriptor)),
-                                         sizeof(*drmDescriptor),
-                                         freeDrmDescriptorBuffer,
-                                         frame->opaque_ref, // Chain any existing buffer
-                                         AV_BUFFER_FLAG_READONLY);
+    AVDRMFrameDescriptor* ownedDescriptor = new AVDRMFrameDescriptor(*drmDescriptor);
+    AVBufferRef* buffer = av_buffer_create((uint8_t*)ownedDescriptor,
+                                           sizeof(*drmDescriptor),
+                                           freeDrmDescriptorBuffer,
+                                           frame->opaque_ref, // Chain any existing buffer
+                                           AV_BUFFER_FLAG_READONLY);
+    if (buffer == nullptr) {
+        // §REVIEW-1104：av_buffer_create 失敗不會呼叫 free callback，也不接管 descriptor；要自己關 fd 並刪掉它，原 opaque_ref 維持不動
+        for (int i = 0; i < ownedDescriptor->nb_objects; i++) {
+            close(ownedDescriptor->objects[i].fd);
+            drmDescriptor->objects[i].fd = -1;
+        }
+        delete ownedDescriptor;
+        return false;
+    }
 
+    frame->opaque_ref = buffer;
     return true;
 }
 

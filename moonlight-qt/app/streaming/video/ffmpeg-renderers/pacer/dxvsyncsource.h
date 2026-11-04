@@ -42,10 +42,13 @@ public:
     virtual void waitForVsync() override;
 
 private:
+    bool waitForVsyncOnce();  // §REVIEW-1104：真的等到 vblank 才回 true
     Pacer* m_Pacer;
     HMODULE m_Gdi32Handle;
     HWND m_Window;
     HMONITOR m_LastMonitor;
+    int m_LastHz = 60;       // §REVIEW-1104：等 vblank 失敗時用來估一格的長度
+    int m_FailStreak = 0;    // §REVIEW-1104：連續失敗次數（只在第一次印 log）
     D3DKMT_WAITFORVERTICALBLANKEVENT m_WaitForVblankEventParams;
 
     PFND3DKMTOPENADAPTERFROMHDC m_D3DKMTOpenAdapterFromHdc;

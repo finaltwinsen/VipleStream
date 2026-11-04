@@ -31,6 +31,7 @@
 | 17 | `--filesystem=xdg-download:ro` | 同上，下載資料夾 | 唯讀 | 新增（2026-10-19） |
 | 18 | `--filesystem=/run/media:ro` | 同上，外接儲存裝置 | 唯讀 | 新增（2026-10-19）；**UNVERIFIED**（頭盔沒有插外接裝置測過） |
 | 19 | `--env=QTWEBENGINE_DISABLE_SANDBOX=1` | §VR-PLAYER 內建瀏覽器（Qt WebEngine）：Chromium 自己的沙箱在 Flatpak 內要再開一層 bwrap，頭盔上建不了 PID namespace（`bwrap: Setting pidns failed`），建立網頁時 UI 執行緒卡在 `WebContentsAdapter` 建構式永遠不回來 | 網頁的 renderer 少一層 Chromium 沙箱；Flatpak 的沙箱仍在。Flathub 上用 QtWebEngine 的 app 普遍這樣做 | 新增（2026-10-19，頭盔驗過：關掉後 YouTube 3 秒內載入） |
+| 20 | `--filesystem=/run/tailscale` | §TS-PATH：串流的 host 在 Tailscale（100.64.0.0/10）時，client 連本機 tailscaled 的 unix socket（`/run/tailscale/tailscaled.sock`，其次 `/var/run/tailscale/tailscaled.sock`）讀路徑、送 disco ping，必要時 restun／rebind，把 DERP 中繼拉回直連 | 沒加 `:ro`：對 socket 送 HTTP 要能寫。目錄裡是 rw-rw-rw- 的 socket，沒有家目錄。restun／rebind 沒有 operator 會 403，不中斷串流。沒裝 Tailscale 或沒這條權限時連不上，程式記一次 log 就停 | 新增（2026-11-04）；**UNVERIFIED**（還沒在 Frame 上確認掛載） |
 
 `--env=` 原則上只用來**清掉** host 的變數（不變式 7：不以環境變數當使用者設定）。任何功能開關都走 Settings UI 或 CLI 旗標。
 唯一例外是 #19：它不是使用者設定，是 Qt WebEngine 在 Flatpak 內能跑起來的前提（固定值，沒有開關的意義）。

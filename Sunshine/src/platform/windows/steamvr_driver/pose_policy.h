@@ -52,6 +52,9 @@ namespace vrdrv {
     bool stale = false;  ///< age > zero_vel_us
     bool hold = false;  ///< §VR-STALE-HOLD 生效中
     bool blend = false;  ///< §VR-STALE-BLEND 生效中
+    /// §REVIEW-1103：設定上有沒有開 §VR-STALE-BLEND（不論目前是否 stale）。恢復混合要看這個——
+    /// 新樣本到達那一刻 age＝0、stale＝false，blend 必為 false，拿 blend 判斷會讓恢復混合永遠不觸發。
+    bool blend_enabled = false;
     bool zero_vel = false;  ///< 速度與 offset 歸零（legacy 或 blend 衰減完畢）
     bool keep_offset = false;  ///< 進 stale 後保持最後一筆有效 offset（blend 模式為 true）
     double lin_scale = 1.0;  ///< 線速度衰減倍率
@@ -65,6 +68,7 @@ namespace vrdrv {
     pose_policy_t r;
     r.stale = in.age_us > (int64_t) in.zero_vel_us;
     r.blend = r.stale && in.stale_blend;
+    r.blend_enabled = in.stale_blend;
     r.hold = r.stale && !r.blend && in.stale_hold && in.age_us <= (int64_t) in.hold_max_us;
 
     if (r.blend) {
@@ -187,7 +191,7 @@ namespace vrdrv {
           res.recover_gap_ms = gap_ms;
           res.recover_jump_mm = jump_mm;
 
-          if (pol.blend) {
+          if (pol.blend_enabled) {  // §REVIEW-1103：原本看 pol.blend，在新樣本那一刻必為 false
             recovering_ = true;
             recover_start_qpc_ = now_qpc;
             blend_from_pos_ = last_output_pos_;

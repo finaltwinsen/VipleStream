@@ -104,8 +104,6 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             // FIXME: Paddles?
     );
 
-    private final Vector2d inputVector = new Vector2d();
-
     private final SparseArray<InputDeviceContext> inputDeviceContexts = new SparseArray<>();
     private final SparseArray<UsbDeviceContext> usbDeviceContexts = new SparseArray<>();
 
@@ -123,7 +121,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     private final HandlerThread backgroundHandlerThread;
     private final Handler backgroundThreadHandler;
     private boolean hasGameController;
-    private boolean stopped = false;
+    // §REVIEW-1104：stop() 在主執行緒寫入，rumble／USB 執行緒也要看得到
+    private volatile boolean stopped = false;
 
     private final PreferenceConfiguration prefConfig;
     private short currentControllers, initialControllers;
@@ -448,6 +447,17 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         return true;
     }
 
+    // §REVIEW-1104：有搖桿的內建手把固定佔編號 0，外接找空位時要先讓出來
+    private boolean hasInternalJoystickDevice() {
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice dev = InputDevice.getDevice(id);
+            if (dev != null && !isExternal(dev) && hasJoystickAxes(dev)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Called before sending input but after we've determined that this
     // is definitely a controller (not a keyboard, mouse, or something else)
     private void assignControllerNumberIfNeeded(GenericControllerContext context) {
@@ -460,8 +470,17 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
             LimeLog.info(devContext.name+" ("+context.id+") needs a controller number assigned");
             if (!devContext.external) {
-                LimeLog.info("Built-in buttons hardcoded as controller 0");
                 context.controllerNumber = 0;
+                if (devContext.hasJoystickAxes) {
+                    // §REVIEW-1104：有搖桿的內建手把佔 bit 0，外接手把才不會也分到編號 0
+                    LimeLog.info("Built-in controller hardcoded as controller 0");
+                    currentControllers |= 1;
+                    initialControllers &= ~1;
+                    context.reservedControllerNumber = true;
+                }
+                else {
+                    LimeLog.info("Built-in buttons hardcoded as controller 0");
+                }
             }
             else if (prefConfig.multiController && devContext.hasJoystickAxes) {
                 context.controllerNumber = 0;
@@ -469,6 +488,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 LimeLog.info("Reserving the next available controller number");
                 for (short i = 0; i < MAX_GAMEPADS; i++) {
                     if ((currentControllers & (1 << i)) == 0) {
+                        // §REVIEW-1104：bit 0 留給有搖桿的內建手把，外接先送輸入也不能搶走
+                        if (i == 0 && hasInternalJoystickDevice()) {
+                            continue;
+                        }
+
                         // Found an unused controller value
                         currentControllers |= (1 << i);
 
@@ -536,6 +560,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 LimeLog.info("Reserving the next available controller number");
                 for (short i = 0; i < MAX_GAMEPADS; i++) {
                     if ((currentControllers & (1 << i)) == 0) {
+                        // §REVIEW-1104：bit 0 留給有搖桿的內建手把，外接先送輸入也不能搶走
+                        if (i == 0 && hasInternalJoystickDevice()) {
+                            continue;
+                        }
+
                         // Found an unused controller value
                         currentControllers |= (1 << i);
 
@@ -1042,8 +1071,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private byte maxByMagnitude(byte a, byte b) {
-        int absA = Math.abs(a);
-        int absB = Math.abs(b);
+        // §REVIEW-1104：扳機滿按是 (byte)0xFF，Math.abs 會變成 1，要先看成無號值
+        int absA = a & 0xFF;
+        int absB = b & 0xFF;
         if (absA > absB) {
             return a;
         }
@@ -1215,12 +1245,13 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     context.controllerNumber == controllerNumber &&
                     context.mouseEmulationActive == originalContext.mouseEmulationActive) {
                 inputMap |= context.inputMap;
-                leftTrigger |= maxByMagnitude(leftTrigger, context.leftTrigger);
-                rightTrigger |= maxByMagnitude(rightTrigger, context.rightTrigger);
-                leftStickX |= maxByMagnitude(leftStickX, context.leftStickX);
-                leftStickY |= maxByMagnitude(leftStickY, context.leftStickY);
-                rightStickX |= maxByMagnitude(rightStickX, context.rightStickX);
-                rightStickY |= maxByMagnitude(rightStickY, context.rightStickY);
+                // §REVIEW-1104：類比軸用 OR 會合成出兩邊都不是的值，改挑絕對值較大者
+                leftTrigger = maxByMagnitude(leftTrigger, context.leftTrigger);
+                rightTrigger = maxByMagnitude(rightTrigger, context.rightTrigger);
+                leftStickX = maxByMagnitude(leftStickX, context.leftStickX);
+                leftStickY = maxByMagnitude(leftStickY, context.leftStickY);
+                rightStickX = maxByMagnitude(rightStickX, context.rightStickX);
+                rightStickY = maxByMagnitude(rightStickY, context.rightStickY);
             }
         }
         for (int i = 0; i < usbDeviceContexts.size(); i++) {
@@ -1229,22 +1260,24 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                     context.controllerNumber == controllerNumber &&
                     context.mouseEmulationActive == originalContext.mouseEmulationActive) {
                 inputMap |= context.inputMap;
-                leftTrigger |= maxByMagnitude(leftTrigger, context.leftTrigger);
-                rightTrigger |= maxByMagnitude(rightTrigger, context.rightTrigger);
-                leftStickX |= maxByMagnitude(leftStickX, context.leftStickX);
-                leftStickY |= maxByMagnitude(leftStickY, context.leftStickY);
-                rightStickX |= maxByMagnitude(rightStickX, context.rightStickX);
-                rightStickY |= maxByMagnitude(rightStickY, context.rightStickY);
+                // §REVIEW-1104：類比軸用 OR 會合成出兩邊都不是的值，改挑絕對值較大者
+                leftTrigger = maxByMagnitude(leftTrigger, context.leftTrigger);
+                rightTrigger = maxByMagnitude(rightTrigger, context.rightTrigger);
+                leftStickX = maxByMagnitude(leftStickX, context.leftStickX);
+                leftStickY = maxByMagnitude(leftStickY, context.leftStickY);
+                rightStickX = maxByMagnitude(rightStickX, context.rightStickX);
+                rightStickY = maxByMagnitude(rightStickY, context.rightStickY);
             }
         }
         if (defaultContext.controllerNumber == controllerNumber) {
             inputMap |= defaultContext.inputMap;
-            leftTrigger |= maxByMagnitude(leftTrigger, defaultContext.leftTrigger);
-            rightTrigger |= maxByMagnitude(rightTrigger, defaultContext.rightTrigger);
-            leftStickX |= maxByMagnitude(leftStickX, defaultContext.leftStickX);
-            leftStickY |= maxByMagnitude(leftStickY, defaultContext.leftStickY);
-            rightStickX |= maxByMagnitude(rightStickX, defaultContext.rightStickX);
-            rightStickY |= maxByMagnitude(rightStickY, defaultContext.rightStickY);
+            // §REVIEW-1104：類比軸用 OR 會合成出兩邊都不是的值，改挑絕對值較大者
+            leftTrigger = maxByMagnitude(leftTrigger, defaultContext.leftTrigger);
+            rightTrigger = maxByMagnitude(rightTrigger, defaultContext.rightTrigger);
+            leftStickX = maxByMagnitude(leftStickX, defaultContext.leftStickX);
+            leftStickY = maxByMagnitude(leftStickY, defaultContext.leftStickY);
+            rightStickX = maxByMagnitude(rightStickX, defaultContext.rightStickX);
+            rightStickY = maxByMagnitude(rightStickY, defaultContext.rightStickY);
         }
 
         if (originalContext.mouseEmulationActive) {
@@ -1562,9 +1595,10 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     private Vector2d populateCachedVector(float x, float y) {
-        // Reinitialize our cached Vector2d object
-        inputVector.initialize(x, y);
-        return inputVector;
+        // §REVIEW-1104：主執行緒與 USB 執行緒不能共用同一顆 Vector2d，否則搖桿分量會被蓋掉
+        Vector2d vector = new Vector2d();
+        vector.initialize(x, y);
+        return vector;
     }
 
     private void handleDeadZone(Vector2d stickVector, float deadzoneRadius) {
@@ -2034,6 +2068,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     public void handleRumble(short controllerNumber, short lowFreqMotor, short highFreqMotor) {
+        // §REVIEW-1104：rumble 在原生 callback 執行緒，SparseArray 只能回主執行緒碰
+        if (Looper.myLooper() != mainThreadHandler.getLooper()) {
+            mainThreadHandler.post(() -> handleRumble(controllerNumber, lowFreqMotor, highFreqMotor));
+            return;
+        }
+
         boolean foundMatchingDevice = false;
         boolean vibrated = false;
 
@@ -2110,6 +2150,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     public void handleRumbleTriggers(short controllerNumber, short leftTrigger, short rightTrigger) {
+        // §REVIEW-1104：扳機震動在原生 callback 執行緒，SparseArray 只能回主執行緒碰
+        if (Looper.myLooper() != mainThreadHandler.getLooper()) {
+            mainThreadHandler.post(() -> handleRumbleTriggers(controllerNumber, leftTrigger, rightTrigger));
+            return;
+        }
+
         if (stopped) {
             return;
         }
@@ -2225,6 +2271,13 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     public void handleSetMotionEventState(final short controllerNumber, final byte motionType, short reportRateHz) {
+        // §REVIEW-1104：動態感應器開關在原生 callback 執行緒，SparseArray 只能回主執行緒碰
+        if (Looper.myLooper() != mainThreadHandler.getLooper()) {
+            final short rateHz = reportRateHz;
+            mainThreadHandler.post(() -> handleSetMotionEventState(controllerNumber, motionType, rateHz));
+            return;
+        }
+
         if (stopped) {
             return;
         }
@@ -2290,6 +2343,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     }
 
     public void handleSetControllerLED(short controllerNumber, byte r, byte g, byte b) {
+        // §REVIEW-1104：LED 設定在原生 callback 執行緒，SparseArray 只能回主執行緒碰
+        if (Looper.myLooper() != mainThreadHandler.getLooper()) {
+            mainThreadHandler.post(() -> handleSetControllerLED(controllerNumber, r, g, b));
+            return;
+        }
+
         if (stopped) {
             return;
         }
@@ -2809,6 +2868,15 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                                       float leftStickX, float leftStickY,
                                       float rightStickX, float rightStickY,
                                       float leftTrigger, float rightTrigger) {
+        // §REVIEW-1104：USB 輸入執行緒不能碰 SparseArray，丟回主執行緒
+        if (Looper.myLooper() != mainThreadHandler.getLooper()) {
+            final float lt = leftTrigger;
+            final float rt = rightTrigger;
+            mainThreadHandler.post(() -> reportControllerState(controllerId, buttonFlags,
+                    leftStickX, leftStickY, rightStickX, rightStickY, lt, rt));
+            return;
+        }
+
         GenericControllerContext context = usbDeviceContexts.get(controllerId);
         if (context == null) {
             return;
@@ -2845,6 +2913,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     @Override
     public void deviceRemoved(AbstractController controller) {
+        // §REVIEW-1104：USB 拔除在輸入執行緒，SparseArray 只能回主執行緒改
+        if (Looper.myLooper() != mainThreadHandler.getLooper()) {
+            mainThreadHandler.post(() -> deviceRemoved(controller));
+            return;
+        }
+
         UsbDeviceContext context = usbDeviceContexts.get(controller.getControllerId());
         if (context != null) {
             LimeLog.info("Removed controller: "+controller.getControllerId());
@@ -2856,6 +2930,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
     @Override
     public void deviceAdded(AbstractController controller) {
+        // §REVIEW-1104：USB 插入在輸入執行緒，SparseArray 只能回主執行緒改
+        if (Looper.myLooper() != mainThreadHandler.getLooper()) {
+            mainThreadHandler.post(() -> deviceAdded(controller));
+            return;
+        }
+
         if (stopped) {
             return;
         }
@@ -3006,13 +3086,22 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         public long startDownTime = 0;
 
+        // §REVIEW-1104：destroy() 清不掉正在執行的電量輪詢，用這個旗標擋掉事後再排程
+        public volatile boolean destroyed;
+
         public final Runnable batteryStateUpdateRunnable = new Runnable() {
             @Override
             public void run() {
+                if (destroyed) {
+                    return;
+                }
+
                 sendControllerBatteryPacket(InputDeviceContext.this);
 
-                // Requeue the callback
-                backgroundThreadHandler.postDelayed(this, BATTERY_RECHECK_INTERVAL_MS);
+                // §REVIEW-1104：正在跑的這次結束後先看旗標，拔掉或 migrate 之後不要再排下一次
+                if (!destroyed) {
+                    backgroundThreadHandler.postDelayed(this, BATTERY_RECHECK_INTERVAL_MS);
+                }
             }
         };
 
@@ -3031,6 +3120,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         @Override
         public void destroy() {
+            // §REVIEW-1104：先設 destroyed，正在跑的電量輪詢才不會結束後又把自己排回去
+            destroyed = true;
+
             super.destroy();
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && vibratorManager != null) {
@@ -3056,6 +3148,8 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             }
 
             backgroundThreadHandler.removeCallbacks(batteryStateUpdateRunnable);
+            // §REVIEW-1104：run() 若已看過旗標、正要把自己排回去，等它回到這個執行緒再清一次
+            backgroundThreadHandler.post(() -> backgroundThreadHandler.removeCallbacks(batteryStateUpdateRunnable));
         }
 
         @Override
@@ -3203,7 +3297,26 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             // Don't release the controller number, because we will carry it over if it is present.
             // We also want to make sure the change is invisible to the host PC to avoid an add/remove
             // cycle for the gamepad which may break some games.
+            // §REVIEW-1104：destroy() 會關掉搖桿模擬滑鼠，先記下來，搬完狀態再在新 context 接回去
+            final boolean wasMouseEmulation = oldContext.mouseEmulationActive;
             oldContext.destroy();
+
+            // §REVIEW-1104：按住的鍵、搖桿、扳機一起搬過來。原本新 context 從全零開始，下一包輸入就會讓
+            // host 以為放開了（人還按著），裝置資訊變動（取得／失去焦點、觸控板軸出現）時常見
+            this.inputMap = oldContext.inputMap;
+            this.leftTrigger = oldContext.leftTrigger;
+            this.rightTrigger = oldContext.rightTrigger;
+            this.leftStickX = oldContext.leftStickX;
+            this.leftStickY = oldContext.leftStickY;
+            this.rightStickX = oldContext.rightStickX;
+            this.rightStickY = oldContext.rightStickY;
+            this.emulatingButtonFlags = oldContext.emulatingButtonFlags;
+            this.pendingExit = oldContext.pendingExit;
+            if (wasMouseEmulation) {
+                this.mouseEmulationActive = true;
+                this.mouseEmulationLastInputMap = oldContext.mouseEmulationLastInputMap;
+                mainThreadHandler.postDelayed(this.mouseEmulationRunnable, this.mouseEmulationReportPeriod);
+            }
 
             // Copy over existing controller number state
             this.assignedControllerNumber = oldContext.assignedControllerNumber;

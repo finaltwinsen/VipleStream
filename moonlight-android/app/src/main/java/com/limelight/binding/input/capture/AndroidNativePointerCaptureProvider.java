@@ -17,6 +17,23 @@ import android.view.View;
 public class AndroidNativePointerCaptureProvider extends AndroidPointerIconCaptureProvider implements InputManager.InputDeviceListener {
     private final InputManager inputManager;
     private final View targetView;
+    // §REVIEW-1104：延遲 recapture 存成欄位，showCursor／destroy 才取消得掉
+    private final Handler captureHandler = new Handler();
+    private final Runnable recaptureRunnable = new Runnable() {
+        @Override
+        public void run() {
+            // §REVIEW-1104：500ms 後熱鍵可能已放開游標或 ungrab，重查再抓，避免游標被鎖住
+            if (!isCapturing || isCursorVisible) {
+                return;
+            }
+            if (!targetView.isAttachedToWindow() || !targetView.hasWindowFocus()) {
+                return;
+            }
+            if (hasCaptureCompatibleInputDevice()) {
+                targetView.requestPointerCapture();
+            }
+        }
+    };
 
     public AndroidNativePointerCaptureProvider(Activity activity, View targetView) {
         super(activity, targetView);
@@ -65,6 +82,9 @@ public class AndroidNativePointerCaptureProvider extends AndroidPointerIconCaptu
     public void showCursor() {
         super.showCursor();
 
+        // §REVIEW-1104：放開游標後取消延遲 recapture，否則 500ms 後會把游標再抓回去
+        captureHandler.removeCallbacks(recaptureRunnable);
+
         // It is important to unregister the listener *before* releasing pointer capture,
         // because releasing pointer capture can cause an onInputDeviceChanged() callback
         // for devices with a touchpad (like a DS4 controller).
@@ -86,6 +106,14 @@ public class AndroidNativePointerCaptureProvider extends AndroidPointerIconCaptu
     }
 
     @Override
+    public void destroy() {
+        // §REVIEW-1104：Home 離開沒反註冊 listener 會漏 Activity；先反註冊再 release，並取消延遲 recapture
+        captureHandler.removeCallbacks(recaptureRunnable);
+        inputManager.unregisterInputDeviceListener(this);
+        targetView.releasePointerCapture();
+    }
+
+    @Override
     public void onWindowFocusChanged(boolean focusActive) {
         // NB: We have to check cursor visibility here because Android pointer capture
         // doesn't support capturing the cursor while it's visible. Enabling pointer
@@ -98,15 +126,9 @@ public class AndroidNativePointerCaptureProvider extends AndroidPointerIconCaptu
         // we have to delay a bit before requesting capture because otherwise
         // we'll hit the "requestPointerCapture called for a window that has no focus"
         // error and it will not actually capture the cursor.
-        Handler h = new Handler();
-        h.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (hasCaptureCompatibleInputDevice()) {
-                    targetView.requestPointerCapture();
-                }
-            }
-        }, 500);
+        // §REVIEW-1104：沿用同一個 Runnable，焦點連跳不會排入多份 recapture
+        captureHandler.removeCallbacks(recaptureRunnable);
+        captureHandler.postDelayed(recaptureRunnable, 500);
     }
 
     @Override

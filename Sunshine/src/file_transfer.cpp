@@ -279,7 +279,8 @@ namespace file_transfer {
     {
       std::lock_guard lk {m_mutex};
       auto it = m_active.find(token);
-      if (it != m_active.end()) {
+      // §REVIEW-1103：已結束（done／failed）的不再改成 canceled
+      if (it != m_active.end() && (it->second->st == state::pending || it->second->st == state::running)) {
         it->second->cancel_flag.store(true);
         it->second->st = state::canceled;
         BOOST_LOG(info) << "[VIPLE-XFER] cancel flagged token=" << token;
@@ -365,6 +366,10 @@ namespace file_transfer {
     if (t->dir != direction::to_client) {
       return false;
     }
+    // §REVIEW-1103：已取消（client 晚到）就不開始，也不可把狀態從 canceled 改回 running
+    if (t->cancel_flag.load()) {
+      return false;
+    }
     out_stream.open(t->local_path, std::ios::binary);
     if (!out_stream.is_open()) {
       BOOST_LOG(warning) << "[VIPLE-XFER] open_for_send failed: " << t->local_path.string();
@@ -373,6 +378,9 @@ namespace file_transfer {
     }
     {
       std::lock_guard lk {m_mutex};
+      if (t->cancel_flag.load()) {  // §REVIEW-1103：開檔期間被取消
+        return false;
+      }
       t->st = state::running;
     }
     return true;
@@ -391,6 +399,9 @@ namespace file_transfer {
     if (t->dir != direction::from_client) {
       return false;
     }
+    if (t->cancel_flag.load()) {  // §REVIEW-1103：同 open_for_send
+      return false;
+    }
     out_stream.open(t->local_path, std::ios::binary | std::ios::trunc);
     if (!out_stream.is_open()) {
       BOOST_LOG(warning) << "[VIPLE-XFER] open_for_receive failed: " << t->local_path.string();
@@ -399,9 +410,34 @@ namespace file_transfer {
     }
     {
       std::lock_guard lk {m_mutex};
+      if (t->cancel_flag.load()) {  // §REVIEW-1103：開檔期間被取消
+        return false;
+      }
       t->st = state::running;
     }
     return true;
+  }
+
+  void manager::set_client_progress(const std::string &token, std::uint64_t bytes_done) {
+    std::lock_guard lk {m_mutex};
+    auto it = m_active.find(token);
+    if (it == m_active.end() || it->second->dir != direction::to_client) {
+      return;
+    }
+    auto &t = *it->second;
+    if (t.st != state::pending && t.st != state::running) {
+      return;
+    }
+    if (t.total_bytes > 0 && bytes_done > t.total_bytes) {
+      bytes_done = t.total_bytes;
+    }
+    t.bytes_done = bytes_done;
+  }
+
+  bool manager::is_canceled(const std::string &token) const {
+    std::lock_guard lk {m_mutex};
+    auto it = m_active.find(token);
+    return it == m_active.end() || it->second->cancel_flag.load();
   }
 
   void manager::report_progress(const std::string &token, std::uint64_t delta_bytes) {
@@ -422,8 +458,17 @@ namespace file_transfer {
         return;
       }
       t = it->second;
-      t->st = success ? state::done : state::failed;
-      t->error_msg = std::move(error_msg);
+      // §REVIEW-1103：Web UI 取消後，上傳完成（blob_post）或 client 晚到的 done 原本會把 canceled 蓋回 done。
+      // 已取消的維持 canceled；client 自己回報的 canceled（kind=canceled）也記成 canceled 而不是 failed。
+      if (t->cancel_flag.load() || t->st == state::canceled || (!success && error_msg == "canceled")) {
+        t->st = state::canceled;
+        if (t->error_msg.empty()) {
+          t->error_msg = error_msg.empty() ? std::string("canceled") : std::move(error_msg);
+        }
+      } else {
+        t->st = success ? state::done : state::failed;
+        t->error_msg = std::move(error_msg);
+      }
     }
     BOOST_LOG(info) << "[VIPLE-XFER] finalize token=" << token
                     << " success=" << success

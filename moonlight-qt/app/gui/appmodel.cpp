@@ -7,7 +7,13 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QEventLoop>
+#include <QGuiApplication>
+#include <QKeyEvent>
+#include <QPointer>
 #include <QThread>
+#include <QTimer>
+
+#include <atomic>
 
 AppModel::AppModel(QObject *parent)
     : QAbstractListModel(parent)
@@ -24,15 +30,18 @@ void AppModel::initialize(ComputerManager* computerManager, int computerIndex, b
 
     Q_ASSERT(computerIndex < m_ComputerManager->getComputers().count());
     m_Computer = m_ComputerManager->getComputers().at(computerIndex);
-    m_CurrentGameId = m_Computer->currentGameId;
     m_ShowHiddenGames = showHiddenGames;
     m_VrOnly = vrOnly;
+    QVector<NvApp> appList;
     {
+        // §REVIEW-1104：polling 會整份換掉 appList 與 currentGameId，複製時要拿 NvComputer::lock
         QReadLocker lock(&m_Computer->lock);
+        m_CurrentGameId = m_Computer->currentGameId;
         m_LastKnownPeerIsViple = m_Computer->isVipleStreamPeer;
+        appList = m_Computer->appList;
     }
 
-    updateAppList(m_Computer->appList);
+    updateAppList(appList);
 }
 
 QVariantMap AppModel::vrLaunchTarget()
@@ -99,11 +108,15 @@ Session* AppModel::createSessionForApp(int appIndex, bool takeover)
 
 QString AppModel::getSessionOwnerUuid()
 {
+    // §REVIEW-1104：sessionOwnerUuid 在 polling 寫鎖裡被換掉，不能在沒拿鎖時複製 QString
+    QReadLocker lock(&m_Computer->lock);
     return m_Computer->sessionOwnerUuid;
 }
 
 QString AppModel::getSessionOwnerName()
 {
+    // §REVIEW-1104：sessionOwnerName 在 polling 寫鎖裡被換掉，不能在沒拿鎖時複製 QString
+    QReadLocker lock(&m_Computer->lock);
     return m_Computer->sessionOwnerName;
 }
 
@@ -262,10 +275,17 @@ void AppModel::updateAppList(QVector<NvApp> newList)
         perHostDirectLaunchDesktop = m_Computer->directLaunchDesktop;
     }
     if (perHostDirectLaunchDesktop) {
+        int desktopIndex = -1;
         for (int i = 0; i < newVisibleList.count(); i++) {
             if (newVisibleList[i].name == QStringLiteral("Desktop")) {
-                newVisibleList[i].directLaunch = true;
+                desktopIndex = i;
                 break;
+            }
+        }
+        // §REVIEW-1104：找得到 Desktop 才只留它的 directLaunch，否則排在前面的其他 directLaunch 會先被啟動
+        if (desktopIndex >= 0) {
+            for (int i = 0; i < newVisibleList.count(); i++) {
+                newVisibleList[i].directLaunch = (i == desktopIndex);
             }
         }
     }
@@ -401,10 +421,23 @@ void AppModel::handleComputerStateChanged(NvComputer* computer)
         }
     }
 
+    // §REVIEW-1104：appList、currentGameId、state、pairState 會被輪詢改掉，先在鎖內複製再比，避免隱式共享交錯
+    NvComputer::ComputerState state;
+    NvComputer::PairState pairState;
+    QVector<NvApp> appList;
+    int currentGameId;
+    {
+        QReadLocker lock(&m_Computer->lock);
+        state = m_Computer->state;
+        pairState = m_Computer->pairState;
+        appList = m_Computer->appList;
+        currentGameId = m_Computer->currentGameId;
+    }
+
     // If the computer has gone offline or we've been unpaired,
     // signal the UI so we can go back to the PC view.
-    if (m_Computer->state == NvComputer::CS_OFFLINE ||
-            m_Computer->pairState == NvComputer::PS_NOT_PAIRED) {
+    if (state == NvComputer::CS_OFFLINE ||
+            pairState == NvComputer::PS_NOT_PAIRED) {
         emit computerLost();
         return;
     }
@@ -412,15 +445,15 @@ void AppModel::handleComputerStateChanged(NvComputer* computer)
     // First, process additions/removals from the app list. This
     // is required because the new game may now be running, so
     // we can't check that first.
-    if (computer->appList != m_AllApps) {
-        updateAppList(computer->appList);
+    if (appList != m_AllApps) {
+        updateAppList(appList);
     }
 
     // Finally, process changes to the active app
-    if (computer->currentGameId != m_CurrentGameId) {
+    if (currentGameId != m_CurrentGameId) {
         // First, invalidate the running state of newly running game
         for (int i = 0; i < m_VisibleApps.count(); i++) {
-            if (m_VisibleApps[i].id == computer->currentGameId) {
+            if (m_VisibleApps[i].id == currentGameId) {
                 emit dataChanged(createIndex(i, 0),
                                  createIndex(i, 0),
                                  QVector<int>() << RunningRole);
@@ -441,7 +474,7 @@ void AppModel::handleComputerStateChanged(NvComputer* computer)
         }
 
         // Now update our internal state
-        m_CurrentGameId = m_Computer->currentGameId;
+        m_CurrentGameId = currentGameId;
     }
 }
 
@@ -536,6 +569,144 @@ int AppModel::currentSteamProfileIndex() const
     return -1;
 }
 
+class SteamSwitchInputFilter : public QObject
+{
+public:
+    QEventLoop* loop = nullptr;
+    bool cancelRequested = false;
+
+    bool eventFilter(QObject*, QEvent* event) override
+    {
+        const QEvent::Type type = event->type();
+        if (type == QEvent::KeyPress) {
+            const int key = static_cast<QKeyEvent*>(event)->key();
+            if (key == Qt::Key_Escape || key == Qt::Key_Back) {
+                cancelRequested = true;
+                if (loop != nullptr) {
+                    loop->quit();
+                }
+            }
+            return true;
+        }
+        switch (type) {
+        case QEvent::KeyRelease:
+        case QEvent::ShortcutOverride:
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick:
+        case QEvent::Wheel:
+        case QEvent::TouchBegin:
+        case QEvent::TouchUpdate:
+        case QEvent::TouchEnd:
+            return true;
+        default:
+            return false;
+        }
+    }
+};
+
+// §REVIEW-1104：輪詢改在工作執行緒執行，透過 steamSwitchProgress 與 QThread::finished signal 把進度與最後成敗送回 GUI 執行緒
+class SteamSwitchPollThread : public QThread
+{
+public:
+    AppModel* model = nullptr;
+    NvAddress address;
+    uint16_t httpsPort = 0;
+    QSslCertificate serverCert;
+    QString taskId;
+    std::atomic<bool> cancelRequested{false};
+    bool succeeded = false;
+    QString errorMessage;
+
+    void cancel()
+    {
+        cancelRequested.store(true);
+        quit();
+    }
+
+    bool waitPollInterval()
+    {
+        for (int i = 0; i < 20; ++i) {
+            if (cancelRequested.load() || QCoreApplication::closingDown()) {
+                return false;
+            }
+            QEventLoop loop;
+            QTimer timer;
+            timer.setSingleShot(true);
+            QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+            timer.start(50);
+            loop.exec();
+        }
+        return !cancelRequested.load() && !QCoreApplication::closingDown();
+    }
+
+    void run() override
+    {
+        NvHTTP http(address, httpsPort, serverCert);
+        const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + 150000;
+        int consecutiveErrors = 0;
+        while (QDateTime::currentMSecsSinceEpoch() < deadline) {
+            if (!waitPollInterval()) {
+                errorMessage = AppModel::tr("Switch cancelled");
+                return;
+            }
+
+            NvHTTP::SteamSwitchStatus status;
+            try {
+                status = http.pollSteamSwitchStatus(taskId);
+                if (cancelRequested.load() || QCoreApplication::closingDown()) {
+                    errorMessage = AppModel::tr("Switch cancelled");
+                    return;
+                }
+                consecutiveErrors = 0;
+            } catch (const GfeHttpResponseException& e) {
+                // 404 means the task was GC'd (server restart, or finished
+                // >60 s ago).  Anything else is transient — retry a few times
+                // before giving up.
+                if (cancelRequested.load() || QCoreApplication::closingDown()) {
+                    errorMessage = AppModel::tr("Switch cancelled");
+                    return;
+                }
+                if (e.getStatusCode() == 404) {
+                    errorMessage = AppModel::tr("Switch task disappeared on host");
+                    return;
+                }
+                if (++consecutiveErrors >= 5) {
+                    errorMessage = QString::fromUtf8(e.getStatusMessage());
+                    return;
+                }
+                continue;
+            } catch (const QtNetworkReplyException& e) {
+                if (cancelRequested.load() || QCoreApplication::closingDown()) {
+                    errorMessage = AppModel::tr("Switch cancelled");
+                    return;
+                }
+                if (++consecutiveErrors >= 5) {
+                    errorMessage = e.toQString();
+                    return;
+                }
+                continue;
+            }
+
+            if (model != nullptr && !cancelRequested.load()) {
+                emit model->steamSwitchProgress(status.state, status.message);
+            }
+
+            if (status.isTerminal()) {
+                if (status.state == QLatin1String("done")
+                 || status.state == QLatin1String("already_active")) {
+                    succeeded = true;
+                    return;
+                }
+                errorMessage = !status.error.isEmpty() ? status.error : status.message;
+                return;
+            }
+        }
+
+        errorMessage = AppModel::tr("Switch timed out (>150s without server reaching a terminal state)");
+    }
+};
+
 bool AppModel::requestSteamSwitch(QString accountName)
 {
     m_LastSteamSwitchError.clear();
@@ -543,7 +714,16 @@ bool AppModel::requestSteamSwitch(QString accountName)
         m_LastSteamSwitchError = tr("No host selected");
         return false;
     }
-    NvHTTP http(m_Computer);
+    NvAddress activeAddress;
+    uint16_t activeHttpsPort;
+    QSslCertificate serverCert;
+    {
+        QReadLocker lock(&m_Computer->lock);
+        activeAddress = m_Computer->activeAddress;
+        activeHttpsPort = m_Computer->activeHttpsPort;
+        serverCert = m_Computer->serverCert;
+    }
+    NvHTTP http(activeAddress, activeHttpsPort, serverCert);
 
     // 1. Kick off the async task on the host. Returns within ms.
     NvHTTP::SteamSwitchStatus status;
@@ -572,53 +752,70 @@ bool AppModel::requestSteamSwitch(QString accountName)
     }
 
     // 4. Poll loop.  150 s safety deadline matches the server's own
-    //    15 s shutdown + 90 s login + slack budget.  Drives
-    //    QCoreApplication::processEvents() between polls so QML stays
-    //    responsive (busy overlay animation, signal delivery).
-    const qint64 deadline = QDateTime::currentMSecsSinceEpoch() + 150000;
-    int consecutiveErrors = 0;
-    while (QDateTime::currentMSecsSinceEpoch() < deadline) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-        QThread::msleep(900);
+    //    15 s shutdown + 90 s login + slack budget.
+    // §REVIEW-1104：輪詢移至工作執行緒，GUI 執行緒不 msleep 並吃掉按鍵，Escape／返回取消輪詢
+    SteamSwitchPollThread pollThread;
+    pollThread.model = this;
+    pollThread.address = activeAddress;
+    pollThread.httpsPort = activeHttpsPort;
+    pollThread.serverCert = serverCert;
+    pollThread.taskId = status.taskId;
 
-        try {
-            status = http.pollSteamSwitchStatus(status.taskId);
-            consecutiveErrors = 0;
-        } catch (const GfeHttpResponseException& e) {
-            // 404 means the task was GC'd (server restart, or finished
-            // >60 s ago).  Anything else is transient — retry a few times
-            // before giving up.
-            if (e.getStatusCode() == 404) {
-                m_LastSteamSwitchError = tr("Switch task disappeared on host");
-                return false;
+    QEventLoop loop;
+    SteamSwitchInputFilter inputFilter;
+    inputFilter.loop = &loop;
+    struct FilterGuard {
+        SteamSwitchInputFilter* filter;
+        explicit FilterGuard(SteamSwitchInputFilter* f) : filter(f)
+        {
+            if (qGuiApp != nullptr) {
+                qGuiApp->installEventFilter(filter);
             }
-            if (++consecutiveErrors >= 5) {
-                m_LastSteamSwitchError = QString::fromUtf8(e.getStatusMessage());
-                return false;
-            }
-            continue;
-        } catch (const QtNetworkReplyException& e) {
-            if (++consecutiveErrors >= 5) {
-                m_LastSteamSwitchError = e.toQString();
-                return false;
-            }
-            continue;
         }
-
-        emit steamSwitchProgress(status.state, status.message);
-
-        if (status.isTerminal()) {
-            if (status.state == QLatin1String("done")
-             || status.state == QLatin1String("already_active")) {
-                refreshSteamProfiles();
-                return true;
+        ~FilterGuard()
+        {
+            if (qGuiApp != nullptr) {
+                qGuiApp->removeEventFilter(filter);
             }
-            m_LastSteamSwitchError = !status.error.isEmpty() ? status.error : status.message;
-            return false;
         }
+    } filterGuard(&inputFilter);
+    Q_UNUSED(filterGuard);
+
+    QPointer<AppModel> self(this);
+    QObject::connect(&pollThread, &QThread::finished, &loop, &QEventLoop::quit);
+    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &loop, &QEventLoop::quit);
+    auto destroyedConn = QObject::connect(this, &QObject::destroyed, &loop, [&]() {
+        pollThread.cancel();
+        pollThread.wait();
+        loop.quit();
+    });
+
+    pollThread.start();
+    if (!inputFilter.cancelRequested && !QCoreApplication::closingDown()) {
+        loop.exec(QEventLoop::AllEvents);
+    }
+    inputFilter.loop = nullptr;
+    if (!self.isNull()) {
+        QObject::disconnect(destroyedConn);
     }
 
-    m_LastSteamSwitchError = tr("Switch timed out (>150s without server reaching a terminal state)");
+    if (inputFilter.cancelRequested || QCoreApplication::closingDown() || self.isNull()) {
+        pollThread.cancel();
+    }
+    pollThread.wait();
+
+    if (self.isNull()) {
+        return false;
+    }
+    if (inputFilter.cancelRequested || QCoreApplication::closingDown()) {
+        m_LastSteamSwitchError = tr("Switch cancelled");
+        return false;
+    }
+    if (pollThread.succeeded) {
+        refreshSteamProfiles();
+        return true;
+    }
+    m_LastSteamSwitchError = pollThread.errorMessage;
     return false;
 }
 

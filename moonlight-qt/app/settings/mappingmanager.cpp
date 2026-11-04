@@ -78,19 +78,17 @@ void MappingManager::applyMappings()
                         "Loaded %d new gamepad mappings",
                         newMappings);
         }
-        else {
-            if (newMappings < 0) {
-                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                             "Error loading gamepad mappings: %s",
-                             SDL_GetError());
-            }
-            else if (newMappings == 0) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "0 new mappings found in gamecontrollerdb.txt. Is it corrupt?");
-            }
-
-            // Try deleting the cached mapping list just in case it's corrupt
+        else if (newMappings < 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Error loading gamepad mappings: %s",
+                         SDL_GetError());
+            // §REVIEW-1104：只有載入失敗才刪 cache；回 0 是沒有新 GUID，不是檔案壞掉
             Path::deleteCacheFile("gamecontrollerdb.txt");
+        }
+        else if (newMappings == 0) {
+            // §REVIEW-1104：回 0 是沒有新 GUID（已載入過），不是檔案壞掉
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "No new gamepad mappings in gamecontrollerdb.txt");
         }
     }
     else {

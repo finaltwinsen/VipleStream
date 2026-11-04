@@ -80,6 +80,8 @@ public class NvHTTP {
     
     private OkHttpClient httpClientLongConnectTimeout;
     private OkHttpClient httpClientLongConnectNoReadTimeout;
+    // §REVIEW-1104：/cancel 專用，讀取最多 60 秒（host 收 VR 約 20 秒；卡住的 host 不可讓「結束遊戲」永遠轉圈）
+    private OkHttpClient httpClientQuitTimeout;
     private OkHttpClient httpClientShortConnectTimeout;
 
     private X509TrustManager defaultTrustManager;
@@ -187,6 +189,10 @@ public class NvHTTP {
 
         httpClientLongConnectNoReadTimeout = httpClientLongConnectTimeout.newBuilder()
                 .readTimeout(0, TimeUnit.MILLISECONDS)
+                .build();
+
+        httpClientQuitTimeout = httpClientLongConnectTimeout.newBuilder()
+                .readTimeout(60000, TimeUnit.MILLISECONDS)
                 .build();
     }
 
@@ -484,6 +490,14 @@ public class NvHTTP {
         String stunEp = getXmlString(serverInfo, "StunEndpoint", false);
         if (stunEp != null && stunEp.contains(":")) {
             details.stunAddress = stunEp.substring(0, stunEp.lastIndexOf(':'));
+            // §REVIEW-1104（使用者決策 B）：冒號後面是 host 控制埠在公網上的實際埠，打洞要打這個
+            try {
+                int p = Integer.parseInt(stunEp.substring(stunEp.lastIndexOf(':') + 1));
+                if (p > 0 && p < 65536) {
+                    details.stunPunchPort = p;
+                }
+            } catch (NumberFormatException ignored) {
+            }
         }
 
         // VipleStream capability marker (v1.2.93). Non-blocking — vanilla
@@ -950,7 +964,7 @@ public class NvHTTP {
     }
     
     public boolean quitApp() throws IOException, XmlPullParserException {
-        String xmlStr = openHttpConnectionToString(httpClientLongConnectNoReadTimeout, getHttpsUrl(true), "cancel");
+        String xmlStr = openHttpConnectionToString(httpClientQuitTimeout, getHttpsUrl(true), "cancel");
         if (getXmlString(xmlStr, "cancel", true).equals("0")) {
             return false;
         }

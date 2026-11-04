@@ -37,6 +37,7 @@
 #endif
 #ifdef HAVE_VR_PLAYER
 #include "streaming/player/playersession.h"
+#include "webresolver.h"
 #endif
 
 namespace {
@@ -546,6 +547,9 @@ bool XrShell::startPlayer(const QString& source, const QString& format, const QS
     if (m_Xr == nullptr || m_Player != nullptr) {
         return false;
     }
+    // §REVIEW-1104：新的一場不要沿用上一場載入中按 B 留下的取消
+    m_PlayerCancel = false;
+    WebResolver::setResolveCancel(false);
     player::PlayerSession::Config pc;
     pc.source = source;
     pc.audioSource = audioSource;
@@ -565,7 +569,11 @@ bool XrShell::startPlayer(const QString& source, const QString& format, const QS
             m_Xr->setPlayerScreen(kShellDistanceM, kShellFovDeg);
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] video player finished (rc=%d)", rc);
-        VrLauncher::playerFinished(rc, error);
+        // §REVIEW-1104：載入中按 B 時播放緒只能回解析失敗（3）；這是使用者取消，改記成正常離開，避免跳出「播不了」
+        const int shownRc = m_PlayerCancel ? 0 : rc;
+        const QString shownError = m_PlayerCancel ? QString() : error;
+        m_PlayerCancel = false;
+        VrLauncher::playerFinished(shownRc, shownError);
         scheduleRender(true);
     });
     {
@@ -629,6 +637,8 @@ void XrShell::renderNow()
         m_Xr->setShellImage(img.convertToFormat(m_Xr->shellImageFormat()));
     }
 #endif
+    // 網頁裡換欄位不會發 activeFocusItemChanged（見 focusChanged()），每畫一張重查一次要不要鍵盤
+    focusChanged();
     const uint64_t t1 = steadyNowNs();
     m_Frames++;
     m_RenderNs += t1 - t0;
@@ -738,6 +748,18 @@ void XrShell::key(int vk, bool down, uint8_t mods)
 
 void XrShell::back()
 {
+#ifdef HAVE_VR_PLAYER
+    if (m_Player != nullptr) {
+        // 影片載入中（介面被「開啟影片」蓋住）：B＝取消這次播放，不是介面的返回
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] B while the video is loading: cancelling the player");
+        // §REVIEW-1104：只 post(Cmd::Exit) 不會叫醒堵在 yt-dlp 的播放緒；這裡要求停掉解析並 requestStop，等待迴圈才會 kill
+        m_PlayerCancel = true;
+        WebResolver::setResolveCancel(true);
+        m_Player->requestStop();
+        m_Player->inputButton(static_cast<int>(XrInputSink::PlayerButton::B));
+        return;
+    }
+#endif
     // 同平面介面的 Esc：關對話框、回上一頁（StackView 的 Keys.onEscapePressed）
     sendKeyPress(Qt::Key_Escape, QString(), Qt::NoModifier, true);
     sendKeyPress(Qt::Key_Escape, QString(), Qt::NoModifier, false);
@@ -745,8 +767,13 @@ void XrShell::back()
 
 void XrShell::focusChanged()
 {
+    // 要不要文字輸入：用 Qt 的輸入法查詢，不看類別名稱。2026-11-02 使用者回報影片模式的瀏覽器點網頁裡的欄位（YouTube 搜尋、
+    // Google 帳號）叫不出鍵盤——焦點一直在 WebEngine 的元件上，網頁裡換欄位只會切它的 ItemAcceptsInputMethod／ImEnabled，
+    // activeFocusItemChanged 不會再來，所以 renderNow() 每畫一張也呼叫這裡（狀態沒變就直接返回）
     QQuickItem* item = m_Win->activeFocusItem();
-    const bool text = item != nullptr && (item->inherits("QQuickTextInput") || item->inherits("QQuickTextEdit"));
+    const bool text = item != nullptr && (item->flags() & QQuickItem::ItemAcceptsInputMethod)
+                      && item->inputMethodQuery(Qt::ImEnabled).toBool()
+                      && !item->inputMethodQuery(Qt::ImReadOnly).toBool();
     if (text == m_TextFocus) {
         return;
     }

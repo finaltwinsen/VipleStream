@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <QList>
 #include <QObject>
 #include <QString>
 
@@ -21,6 +22,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "mediapipeline.h"
 #include "playerformat.h"
@@ -83,7 +85,8 @@ signals:
     void finished(int exitCode, const QString& error);
 
 private:
-    enum class Cmd { TogglePause, Seek, SeekRel, Volume, VolumeRel, Format, Screen, Recenter, Exit, TogglePanel, ShowPanel, DepthRel };
+    enum class Cmd { TogglePause, Seek, SeekRel, Volume, VolumeRel, Format, Screen, Recenter, Exit, TogglePanel, ShowPanel, DepthRel,
+                     Quality, Subtitle };
     struct Command {
         Cmd cmd;
         double value = 0.0;
@@ -108,6 +111,7 @@ private:
     bool m_OwnXr = true;        // §VR-SHELL：m_Xr 是自己帶起的（false＝VR 介面的，結束時不關）
     std::atomic<bool> m_VideoShown{false};  // §VR-SHELL：已經把螢幕從介面換成影像（第一張要交出去的時候才換，載入時介面還在）
     void showVideo();
+    bool xrLayoutLive() const;
     MediaPipeline m_Media;
 
     std::mutex m_CmdMutex;
@@ -141,6 +145,40 @@ private:
     int64_t m_LastSlotAbs = INT64_MIN;  // 上一張交出的那一張排到的格點時刻（steady ns）
     float m_LeadMinMs = 1e9f;        // 交出時距離挑影像還有多久（最小）
     int m_Traced = 0;
+
+    // ── 網站影片的畫質與字幕（2026-11-02 使用者要求 VR 播放時也能用 YouTube 的設定）──
+    struct VideoChoice {
+        QString label;
+        QString url;
+    };
+    struct SubTrack {
+        QString lang;
+        QString name;
+        QString url;
+        bool automatic = false;
+    };
+    struct Cue {
+        double startSec = 0.0;
+        double endSec = 0.0;
+        QString text;
+    };
+    QList<VideoChoice> m_WebVideo;   // 由高到低；空＝不能換
+    int m_WebVideoIdx = -1;
+    int m_ReopenTo = -1;             // >=0：呈現迴圈要換成這個畫質（重開影像，從目前位置接著播）
+    QList<SubTrack> m_WebSubs;
+    int m_SubIdx = -1;               // -1＝關
+    void selectSubtitle(int idx);
+    void updateSubtitle();
+    void updateLabels();
+    static std::vector<Cue> fetchCues(const QString& url);
+    std::thread m_SubThread;         // 下載字幕（json3）
+    std::mutex m_SubMutex;
+    std::vector<Cue> m_Cues;         // m_SubMutex
+    int m_CuesGen = 0;               // m_SubMutex：下載完成時對得上才收
+    int m_SubGen = 0;                // 播放器執行緒
+    QString m_SubShown;              // 目前顯示的字幕文字（播放器執行緒）
+    uint64_t m_SubCheckedNs = 0;
+    bool m_SubDumped = false;
 };
 
 }  // namespace player

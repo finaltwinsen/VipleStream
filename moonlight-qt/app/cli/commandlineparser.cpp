@@ -359,10 +359,36 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
     }
 }
 
+// §REVIEW-1104：這三個選項會吃下一個參數。--opt=value 的值已在同一個參數裡，不能再跳下一個。
+// 對齊 ParseAsLongOptions，-name 與 --name 都算。
+static bool optionValueIsNextArg(const char* arg)
+{
+    static const char* k_Names[] = {
+        "dev-video",
+        "vr-shell",
+        "vr-test-preflight",
+    };
+    const char* name = arg;
+    if (name[0] == '-') {
+        name++;
+    }
+    if (name[0] == '-') {
+        name++;
+    }
+    for (const char* opt : k_Names) {
+        const size_t n = strlen(opt);
+        if (strncmp(name, opt, n) != 0) {
+            continue;
+        }
+        return name[n] == '\0';
+    }
+    return false;
+}
+
 const char* GlobalCommandLineParser::earlyProbeAction(int argc, char* argv[])
 {
     // 對齊 parse()：QCommandLineParser 把「-」開頭的字當選項（這個階段不認得的選項後面
-    // 接的值會被當成位置參數，這裡同樣當成候選）、「--」之後全部是位置參數；位置參數
+    // 接的值會被當成位置參數，這裡同樣當成候選；上面三個會吃值的選項除外）、「--」之後全部是位置參數；位置參數
     // 依序比對已知動作（不分大小寫），第一個命中的決定動作。
     bool afterDoubleDash = false;
     for (int i = 1; i < argc; i++) {
@@ -373,6 +399,13 @@ const char* GlobalCommandLineParser::earlyProbeAction(int argc, char* argv[])
         if (!afterDoubleDash && arg[0] == '-' && arg[1] != '\0') {
             if (strcmp(arg, "--") == 0) {
                 afterDoubleDash = true;
+            }
+            // §REVIEW-1104：值若正好是 decode-bench 等探測動作，不能當成動作，否則 GUI 啟動會直接結束
+            else if (optionValueIsNextArg(arg) && i + 1 < argc) {
+                const char* next = argv[i + 1];
+                if (next != nullptr && next[0] != '-') {
+                    i++;
+                }
             }
             continue;
         }
@@ -684,8 +717,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
     parser.addValueOption("vr-inject-loss", "(dev) N: inject a VR LOSS report every N seconds");
     parser.addFlagOption("vr-link-selftest", "(dev) PCVR multi-link: open a second link on the same network interface to exercise duplication and de-duplication. Not saved.");
-    parser.addValueOption("vr-buffer-frames", "PCVR: hold this many extra frames on the headset (0 or 1) to absorb network jitter; "
-                                              "adds one display period of latency (default 1). Saved.");
+    parser.addValueOption("vr-buffer-frames", "PCVR: hold this many extra frames on the headset (0, 1 or 2) to absorb network jitter, "
+                                              "or auto = switch between 1 and 2 by observed repeats (default auto); "
+                                              "each frame adds one display period of latency. Saved.");
     parser.addValueOption("vr-overscan", "(dev) PCVR: widen each eye's field of view by this many degrees on every side (0-10); "
                                          "the host renders the extra margin so head turns do not expose blank edges");
     // §VR-LAUNCHER：GUI 的 VR 模式以子行程串流，接管確認在 GUI 做完後帶這個旗標（不寫入設定）
@@ -744,12 +778,34 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         if (parser.value("fps").compare("auto", Qt::CaseInsensitive) == 0) {
             preferences->cliAutoFps = 1;
         } else {
-            preferences->fps = parser.getIntOption("fps");
+            const int fpsValue = parser.getIntOption("fps");
+            // §REVIEW-1104：fps ≤ 0 會先被存進設定，選顯示模式時 refresh_rate % fps 整數除以零
+            if (fpsValue <= 0) {
+                parser.showError(QString("FPS must be greater than 0 (got %1)").arg(fpsValue));
+            }
+            preferences->fps = fpsValue;
             preferences->cliAutoFps = 0;
             if (!inRange(preferences->fps, 10, 480)) {
                 fprintf(stderr, "Warning: FPS is out of the supported range (10 - 480 FPS). Performance may suffer!\n");
             }
         }
+    }
+
+    // §REVIEW-1104：預設位元率會看 4:4:4 與補幀，這兩個旗標要在重算之前套用
+    // Resolve --yuv444 and --no-yuv444 options
+    preferences->enableYUV444 = parser.getToggleOptionValue("yuv444", preferences->enableYUV444);
+
+    // Resolve --frame-interpolation and --no-frame-interpolation options
+    preferences->enableFrameInterpolation = parser.getToggleOptionValue("frame-interpolation", preferences->enableFrameInterpolation);
+
+    // §REVIEW-1104：預設位元率會看 renderer 與 vk-triple，這兩個覆寫要在重算之前套用
+    preferences->vkfrucEnableTriple =
+        parser.getToggleOptionValue("vk-triple", preferences->vkfrucEnableTriple);
+
+    // Resolve --renderer option (override saved RS_D3D11 / RS_VULKAN).
+    if (parser.isSet("renderer")) {
+        preferences->rendererSelection = mapValue(m_RendererSelectionMap,
+                                                   parser.getChoiceOptionValue("renderer"));
     }
 
     // Resolve --bitrate option
@@ -831,12 +887,6 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     // Resolve --hdr and --no-hdr options
     preferences->enableHdr = parser.getToggleOptionValue("hdr", preferences->enableHdr);
 
-    // Resolve --yuv444 and --no-yuv444 options
-    preferences->enableYUV444 = parser.getToggleOptionValue("yuv444", preferences->enableYUV444);
-
-    // Resolve --frame-interpolation and --no-frame-interpolation options
-    preferences->enableFrameInterpolation = parser.getToggleOptionValue("frame-interpolation", preferences->enableFrameInterpolation);
-
     // Resolve --fruc-backend option
     if (parser.isSet("fruc-backend")) {
         preferences->frucBackend = mapValue(m_FrucBackendMap, parser.getChoiceOptionValue("fruc-backend"));
@@ -850,17 +900,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     // §B-NVOF / §B2 — Vulkan-only 補幀進階開關 CLI override (default=既有 prefs).
     preferences->vkfrucEnableNvOf =
         parser.getToggleOptionValue("vk-nvof",   preferences->vkfrucEnableNvOf);
-    preferences->vkfrucEnableTriple =
-        parser.getToggleOptionValue("vk-triple", preferences->vkfrucEnableTriple);
-
-    // Resolve --renderer option (override saved RS_D3D11 / RS_VULKAN).
-    if (parser.isSet("renderer")) {
-        preferences->rendererSelection = mapValue(m_RendererSelectionMap,
-                                                   parser.getChoiceOptionValue("renderer"));
-    }
 
     // Resolve --auto-bitrate and --no-auto-bitrate options
-    preferences->autoAdjustBitrate = parser.getToggleOptionValue("auto-bitrate", preferences->autoAdjustBitrate);
+    // §ABR-AUTO：這個旗標的說明一直是「依網路調整」，對應 adaptiveBitrate
+    preferences->adaptiveBitrate = parser.getToggleOptionValue("auto-bitrate", preferences->adaptiveBitrate);
 
     // Resolve --capture-system-keys option
     if (parser.isSet("capture-system-keys")) {
@@ -1107,12 +1150,22 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         preferences->vrLinkSelftest = true;
     }
     if (parser.isSet("vr-buffer-frames")) {
-        bool ok = false;
-        const int n = parser.value("vr-buffer-frames").toInt(&ok);
-        if (!ok || n < 0 || n > 1) {
-            parser.showError(QString("vr-buffer-frames must be 0 or 1: %1").arg(parser.value("vr-buffer-frames")));
+        const QString v = parser.value("vr-buffer-frames");
+        if (v.compare("auto", Qt::CaseInsensitive) == 0) {
+            preferences->vrBufferAuto = true;
+            if (preferences->vrBufferFrames <= 0) {
+                preferences->vrBufferFrames = 1;
+            }
         }
-        preferences->vrBufferFrames = n;
+        else {
+            bool ok = false;
+            const int n = v.toInt(&ok);
+            if (!ok || n < 0 || n > 2) {
+                parser.showError(QString("vr-buffer-frames must be auto, 0, 1 or 2: %1").arg(v));
+            }
+            preferences->vrBufferFrames = n;
+            preferences->vrBufferAuto = false;
+        }
     }
     if (parser.isSet("vr-overscan")) {
         bool ok = false;

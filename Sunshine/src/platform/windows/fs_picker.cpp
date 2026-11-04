@@ -86,7 +86,11 @@ namespace fs_picker {
     std::string make_temp_result_path() {
       thread_local std::mt19937_64 rng {std::random_device {}()};
       std::ostringstream oss;
-      oss << "C:\\Windows\\Temp\\viple-picker-"
+      // §REVIEW-1103：Windows 不一定裝在 C 槽，改查系統目錄（取不到才退回 C:\Windows）。
+      char win_dir[MAX_PATH] {};
+      UINT win_len = ::GetSystemWindowsDirectoryA(win_dir, MAX_PATH);
+      oss << ((win_len > 0 && win_len < MAX_PATH) ? std::string(win_dir, win_len) : std::string("C:\\Windows"))
+          << "\\Temp\\viple-picker-"
           << ::GetCurrentProcessId() << "-"
           << std::hex << rng() << ".txt";
       return oss.str();
@@ -161,7 +165,8 @@ namespace fs_picker {
       BOOST_LOG(info) << "[VIPLE-XFER] fs_picker: spawning helper "
                       << helper_exe_utf8 << " result=" << result_path;
 
-      boost::filesystem::path work_dir = std::filesystem::path(helper_exe_w).parent_path().string();
+      // §REVIEW-1103：boost::filesystem 把窄字串當 ANSI，交 UTF-8 遇到非 ASCII 安裝路徑會亂掉；直接給寬字串。
+      boost::filesystem::path work_dir {std::filesystem::path(helper_exe_w).parent_path().wstring()};
       bp::environment env;  // empty — run_command merges user env for SYSTEM->user spawn
       std::error_code ec;
 

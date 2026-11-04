@@ -90,7 +90,8 @@ namespace platf {
     int status;
 
     mic->mic.reset(
-      pa_simple_new(nullptr, "sunshine", pa_stream_direction_t::PA_STREAM_RECORD, source_name.c_str(), "sunshine-record", &ss, &pa_map, &pa_attr, &status)
+      // §REVIEW-1103：找不到 monitor 時 source_name 是空字串，PulseAudio 會拒絕；空的就傳 NULL 用預設來源
+      pa_simple_new(nullptr, "sunshine", pa_stream_direction_t::PA_STREAM_RECORD, source_name.empty() ? nullptr : source_name.c_str(), "sunshine-record", &ss, &pa_map, &pa_attr, &status)
     );
 
     if (!mic->mic) {
@@ -323,7 +324,8 @@ namespace platf {
 
         cb_t<pa_sink_info *> f = [&](ctx_t::pointer ctx, const pa_sink_info *sink_info, int eol) {
           if (!sink_info) {
-            if (!eol) {
+            // §REVIEW-1103：sink_info 為 NULL 時 eol 只會 >0（結束）或 <0（錯誤），原本 !eol 讓錯誤分支成了死碼
+            if (eol < 0) {
               BOOST_LOG(error) << "Couldn't get pulseaudio sink info: "sv << pa_strerror(pa_context_errno(ctx));
 
               alarm->ring(-1);
@@ -442,7 +444,8 @@ namespace platf {
 
         cb_t<pa_sink_info *> sink_f = [&](ctx_t::pointer ctx, const pa_sink_info *sink_info, int eol) {
           if (!sink_info) {
-            if (!eol) {
+            // §REVIEW-1103：同上，錯誤是 eol < 0
+            if (eol < 0) {
               BOOST_LOG(error) << "Couldn't get pulseaudio sink info for ["sv << sink_name
                                << "]: "sv << pa_strerror(pa_context_errno(ctx));
               alarm->ring(-1);

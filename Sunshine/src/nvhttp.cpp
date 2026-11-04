@@ -169,6 +169,10 @@ namespace nvhttp {
   // uniqueID, session
   std::unordered_map<std::string, pair_session_t> map_id_sess;
   client_t client_root;
+  // §REVIEW-1103：client_root 與 cert_chain 會被 confighttp 執行緒（unpair／enable／admin）
+  // 改動，同時 nvhttp HTTPS 執行緒在握手驗證時遍歷 → 一把鎖保護兩者。用 recursive_mutex，
+  // 因為 unpair_client → save_state／load_state、add_authorized_client → save_state 會重入。
+  std::recursive_mutex client_root_mtx;
   std::atomic<uint32_t> session_id_counter;
 
   using args_t = SimpleWeb::CaseInsensitiveMultimap;
@@ -236,6 +240,7 @@ namespace nvhttp {
 
   std::string caller_name_for(const std::string &uuid) {
     if (uuid.empty()) return {};
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     for (const auto &nc : client_root.named_devices) {
       if (nc.uuid == uuid) return nc.name;
     }
@@ -244,6 +249,7 @@ namespace nvhttp {
 
   bool is_admin_device(const std::string &uuid) {
     if (uuid.empty()) return false;
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     for (const auto &nc : client_root.named_devices) {
       if (nc.uuid == uuid) {
         // Task 5 promotes named_cert_t::is_admin; until then nobody is admin.
@@ -254,6 +260,7 @@ namespace nvhttp {
   }
 
   static std::string named_cert_uuid_for_pem(const std::string_view cert_pem) {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     for (const auto &nc : client_root.named_devices) {
       if (nc.cert == cert_pem) return nc.uuid;
     }
@@ -261,6 +268,7 @@ namespace nvhttp {
   }
 
   void save_state() {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     pt::ptree root;
 
     if (fs::exists(config::nvhttp.file_state)) {
@@ -300,6 +308,7 @@ namespace nvhttp {
   }
 
   void load_state() {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     if (!fs::exists(config::nvhttp.file_state)) {
       BOOST_LOG(info) << "File "sv << config::nvhttp.file_state << " doesn't exist"sv;
       http::unique_id = uuid_util::uuid_t::generate().string();
@@ -368,6 +377,7 @@ namespace nvhttp {
   }
 
   void add_authorized_client(const std::string &name, std::string &&cert) {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     client_t &client = client_root;
     named_cert_t named_cert;
     named_cert.name = name;
@@ -1172,6 +1182,7 @@ namespace nvhttp {
   }
 
   nlohmann::json get_all_clients() {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     nlohmann::json named_cert_nodes = nlohmann::json::array();
     client_t &client = client_root;
     for (auto &named_cert : client.named_devices) {
@@ -2223,16 +2234,10 @@ namespace nvhttp {
     // image decoder doesn't reject the JPEG payload as a malformed PNG.
     // Manual apps still typically point at .png files and keep the
     // upstream behaviour.
+    // §STEAM-ART：依檔頭判斷，不看副檔名（Steam 會把 PNG 存成 .jpg）。
     std::string ct = "image/png";
-    if (!app_image.empty()) {
-      auto dot = app_image.find_last_of('.');
-      if (dot != std::string::npos) {
-        std::string ext = app_image.substr(dot + 1);
-        for (auto &c : ext) c = (char) std::tolower((unsigned char) c);
-        if (ext == "jpg" || ext == "jpeg") {
-          ct = "image/jpeg";
-        }
-      }
+    if (!app_image.empty() && proc::check_valid_jpeg(app_image)) {
+      ct = "image/jpeg";
     }
     headers.emplace("Content-Type", ct);
     response->write(SimpleWeb::StatusCode::success_ok, in, headers);
@@ -2924,9 +2929,25 @@ namespace nvhttp {
         BOOST_LOG(info) << "[VIPLE-XFER] result EXIT 200_listing entries="sv
                         << entries.size() << " ssl="sv << ssl_ptr;
         return;
+      } else if (kind == "progress") {
+        // §REVIEW-1103：client 每 5% 回報一次，原本一律 400 unknown_kind；而且 server→client 方向（blob GET）
+        // server 自己看不到進度，Web UI 永遠 0%。to_client 方向採用 client 的數字，另一方向忽略。
+        auto token = j.value("token", "");
+        std::uint64_t bytes_done = 0;
+        if (j.contains("bytes_done") && j["bytes_done"].is_number()) {
+          const double v = j["bytes_done"].get<double>();
+          bytes_done = v > 0 ? static_cast<std::uint64_t>(v) : 0;
+        }
+        file_transfer::manager::instance().set_client_progress(token, bytes_done);
+        response->write(SimpleWeb::StatusCode::success_ok, R"({"ok":true})");
+        BOOST_LOG(debug) << "[VIPLE-XFER] result EXIT 200_progress token=" << token << " bytes=" << bytes_done;
+        return;
       } else if (kind == "done" || kind == "failed" || kind == "canceled") {
         auto token = j.value("token", "");
         auto err = j.value("error", "");
+        if (kind == "canceled" && err.empty()) {
+          err = "canceled";
+        }
         file_transfer::manager::instance().finalize(token, kind == "done", err);
         response->write(SimpleWeb::StatusCode::success_ok, R"({"ok":true})");
         BOOST_LOG(info) << "[VIPLE-XFER] result EXIT 200_finalize kind="sv << kind
@@ -3042,6 +3063,16 @@ namespace nvhttp {
       std::uint64_t total = 0;
       std::uint64_t last_logged_mb = 0;
       while (body.good()) {
+        // §REVIEW-1103：Web UI／tray 取消後不再寫，刪掉寫一半的檔案
+        if (file_transfer::manager::instance().is_canceled(token)) {
+          out.close();
+          std::error_code rm_ec;
+          std::filesystem::remove(t->local_path, rm_ec);
+          file_transfer::manager::instance().finalize(token, false, "canceled");
+          response->write(SimpleWeb::StatusCode::client_error_gone, R"({"error":"canceled"})");
+          BOOST_LOG(info) << "[VIPLE-XFER] blob_post EXIT 410_canceled bytes=" << total << " ssl="sv << ssl_ptr;
+          return;
+        }
         body.read(buf.data(), buf.size());
         auto n = body.gcount();
         if (n <= 0) break;
@@ -3066,6 +3097,16 @@ namespace nvhttp {
         }
       }
       out.flush();
+      out.close();
+      // §REVIEW-1103：寫完才發現已取消（例如最後一個 chunk 期間）→ 不算完成，刪檔
+      if (file_transfer::manager::instance().is_canceled(token)) {
+        std::error_code rm_ec;
+        std::filesystem::remove(t->local_path, rm_ec);
+        file_transfer::manager::instance().finalize(token, false, "canceled");
+        response->write(SimpleWeb::StatusCode::client_error_gone, R"({"error":"canceled"})");
+        BOOST_LOG(info) << "[VIPLE-XFER] blob_post EXIT 410_canceled_at_end bytes=" << total << " ssl="sv << ssl_ptr;
+        return;
+      }
       file_transfer::manager::instance().finalize(token, true);
       BOOST_LOG(info) << "[VIPLE-XFER] /transfer/blob POST token=" << token
                       << " received=" << total;
@@ -3206,10 +3247,15 @@ namespace nvhttp {
         X509_NAME_oneline(X509_get_subject_name(cert.get()), subject_name, sizeof(subject_name));
 
         BOOST_LOG(debug) << "Added cert ["sv << subject_name << ']';
+        std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
         cert_chain.add(std::move(cert));
       }
 
-      auto err_str = cert_chain.verify(x509.get());
+      const char *err_str;
+      {
+        std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
+        err_str = cert_chain.verify(x509.get());
+      }
       if (err_str) {
         BOOST_LOG(warning) << "[VIPLE-VERIFY] DENY chain_verify_fail ssl="sv << (void *)ssl
                            << " err="sv << err_str;
@@ -3298,22 +3344,39 @@ namespace nvhttp {
 
     // VipleStream: Expose authenticated endpoints on HTTP for relay proxy (localhost only).
     // Security: relay.cpp (same process) connects to localhost. External access is blocked.
-    http_server.resource["^/applist$"]["GET"] = applist<SimpleWeb::HTTP>;
-    http_server.resource["^/cancel$"]["GET"] = cancel<SimpleWeb::HTTP>;
-    http_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) {
-      // Localhost guard: only relay.cpp (same machine) can call this
-      auto remote = req->remote_endpoint().address().to_string();
+    // §REVIEW-1103：/applist、/cancel 原本沒擋（未配對就能拿 app 清單、作廢 VR 預約），
+    // 改成四個端點共用同一個 localhost 檢查；位址先 normalize——雙堆疊綁定時本機會是
+    // ::ffff:127.0.0.1，舊的 to_string() 比對會誤擋。正式 client 一律走 HTTPS，不受影響。
+    auto http_localhost_only = [](const char *what, auto &resp, auto &req) {
+      auto remote = net::addr_to_normalized_string(req->remote_endpoint().address());
       if (remote != "127.0.0.1" && remote != "::1") {
-        BOOST_LOG(warning) << "Rejected /launch from non-localhost: " << remote;
+        BOOST_LOG(warning) << "Rejected HTTP /" << what << " from non-localhost: " << remote;
         *resp << "HTTP/1.0 403 Forbidden\r\n\r\n";
+        return false;
+      }
+      return true;
+    };
+    http_server.resource["^/applist$"]["GET"] = [http_localhost_only](auto resp, auto req) {
+      if (!http_localhost_only("applist", resp, req)) {
+        return;
+      }
+      applist<SimpleWeb::HTTP>(resp, req);
+    };
+    http_server.resource["^/cancel$"]["GET"] = [http_localhost_only](auto resp, auto req) {
+      if (!http_localhost_only("cancel", resp, req)) {
+        return;
+      }
+      cancel<SimpleWeb::HTTP>(resp, req);
+    };
+    http_server.resource["^/launch$"]["GET"] = [&host_audio, http_localhost_only](auto resp, auto req) {
+      // Localhost guard: only relay.cpp (same machine) can call this
+      if (!http_localhost_only("launch", resp, req)) {
         return;
       }
       launch<SimpleWeb::HTTP>(host_audio, resp, req);
     };
-    http_server.resource["^/resume$"]["GET"] = [&host_audio](auto resp, auto req) {
-      auto remote = req->remote_endpoint().address().to_string();
-      if (remote != "127.0.0.1" && remote != "::1") {
-        *resp << "HTTP/1.0 403 Forbidden\r\n\r\n";
+    http_server.resource["^/resume$"]["GET"] = [&host_audio, http_localhost_only](auto resp, auto req) {
+      if (!http_localhost_only("resume", resp, req)) {
         return;
       }
       resume<SimpleWeb::HTTP>(host_audio, resp, req);
@@ -3353,6 +3416,7 @@ namespace nvhttp {
   }
 
   void erase_all_clients() {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     client_t client;
     client_root = client;
     cert_chain.clear();
@@ -3360,6 +3424,7 @@ namespace nvhttp {
   }
 
   bool unpair_client(const std::string_view uuid) {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     bool removed = false;
     client_t &client = client_root;
     for (auto it = client.named_devices.begin(); it != client.named_devices.end();) {
@@ -3377,6 +3442,7 @@ namespace nvhttp {
   }
 
   bool set_client_enabled(const std::string_view uuid, bool enabled) {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     client_t &client = client_root;
     for (auto &named_cert : client.named_devices) {
       if (named_cert.uuid == uuid) {
@@ -3389,6 +3455,7 @@ namespace nvhttp {
   }
 
   bool set_client_admin(const std::string_view uuid, bool is_admin) {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     client_t &client = client_root;
     for (auto &named_cert : client.named_devices) {
       if (named_cert.uuid == uuid) {
@@ -3432,6 +3499,7 @@ namespace nvhttp {
   }
 
   bool is_client_enabled(const std::string_view cert_pem) {
+    std::lock_guard<std::recursive_mutex> lg(client_root_mtx);  // §REVIEW-1103
     const client_t &client = client_root;
     for (const auto &named_cert : client.named_devices) {
       if (named_cert.cert == cert_pem) {

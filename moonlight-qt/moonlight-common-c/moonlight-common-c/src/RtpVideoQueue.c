@@ -18,8 +18,298 @@
 // RTP packets use a 90 KHz presentation timestamp clock
 #define PTS_DIVISOR 90
 
+// §ABR-ADAPT ────────────────────────────────────────────────────────────────
+// 收齊的幀記在 queue->fb，VrSend 用 rtpvTakeFrameFeedback 取走。RTP 接收執行緒寫、VrSend 讀。
+// 進行中的累計（first／last／bytes／seen）只有接收執行緒碰，不加鎖；ring 與 dropped 才用 fbLock。
+// 鎖是檔案範圍的：RtpvInitializeQueue 會把整個 queue memset 掉（watchdog），鎖不能放在 struct 裡。
+// 桌面 session（沒設 VIPLE_VR_SF_ENABLED）在函式入口就返回，不讀時鐘、不加鎖。
+
+VIPLE_VR_STATIC_ASSERT(RTPV_FB_CAP == 64, fb_cap_64);
+VIPLE_VR_STATIC_ASSERT(RTPV_FB_SEEN_BITS == 4096, fb_seen_4096);
+VIPLE_VR_STATIC_ASSERT((RTPV_FB_SEEN_BITS & (RTPV_FB_SEEN_BITS - 1)) == 0, fb_seen_pow2);
+
+static PLT_MUTEX fbLock;
+static bool fbLockReady;
+static PRTP_VIDEO_QUEUE fbQueue;
+
+static void fbEnsureLock(void) {
+    if (!fbLockReady) {
+        if (PltCreateMutex(&fbLock) == 0) {
+            fbLockReady = true;
+        }
+    }
+}
+
+// 這一幀已經見過這個 RTP 序號（多連線的第二份，或佇列拒收之後又碰到的同一份）。true＝這次才第一次看到。
+static bool fbMarkNew(PRTP_VIDEO_QUEUE q, uint16_t seq) {
+    unsigned bit = (unsigned)seq & (RTPV_FB_SEEN_BITS - 1);
+    unsigned mask = 1u << (bit & 7);
+    uint8_t* cell = &q->fb.seen[bit >> 3];
+
+    if (*cell & mask) {
+        return false;
+    }
+    *cell = (uint8_t)(*cell | mask);
+    return true;
+}
+
+// grace 放行用開始延後的時刻。多連線從等待環交出來的封包用當初到達的時刻（mlMeasRxUs）。其餘才讀時鐘。
+static uint64_t fbRxUs(PRTP_VIDEO_QUEUE q) {
+    if (q->fb.useForceRx) {
+        return q->fb.forceRxUs;
+    }
+    if (q->mlMeasRxUs != 0) {
+        return q->mlMeasRxUs;
+    }
+    return PltGetMicroseconds();
+}
+
+static void fbTouch(PRTP_VIDEO_QUEUE q, uint64_t rxUs, uint32_t payload) {
+    if (rxUs < q->fb.firstUs) {
+        q->fb.firstUs = rxUs;
+    }
+    if (rxUs > q->fb.lastUs) {
+        q->fb.lastUs = rxUs;
+    }
+    if (payload > UINT32_MAX - q->fb.bytes) {
+        q->fb.bytes = UINT32_MAX;
+    }
+    else {
+        q->fb.bytes += payload;
+    }
+}
+
+static void fbBegin(PRTP_VIDEO_QUEUE q, uint32_t frame, uint16_t seq, uint32_t payload, uint64_t rxUs) {
+    memset(q->fb.seen, 0, sizeof(q->fb.seen));
+    q->fb.active = true;
+    q->fb.pushed = false;
+    q->fb.frame = frame;
+    q->fb.gen++;
+    if (q->fb.gen == 0) {
+        q->fb.gen = 1;
+    }
+    q->fb.firstUs = rxUs;
+    q->fb.lastUs = rxUs;
+    q->fb.bytes = payload;
+    q->fb.slot = -1;
+    fbMarkNew(q, seq);
+}
+
+// 幀已經推進環之後才到的封包（多半是尾端 FEC）：格子還在、而且沒被覆寫，才補時間與位元組。
+static void fbPatchSlot(PRTP_VIDEO_QUEUE q) {
+    int idx;
+    uint32_t gen, frame, bytes;
+    uint64_t firstUs, lastUs;
+
+    if (!q->fb.pushed || !fbLockReady) {
+        return;
+    }
+    idx = q->fb.slot;
+    gen = q->fb.gen;
+    frame = q->fb.frame;
+    bytes = q->fb.bytes;
+    firstUs = q->fb.firstUs;
+    lastUs = q->fb.lastUs;
+    PltLockMutex(&fbLock);
+    if (fbQueue == q && idx >= 0 && idx < RTPV_FB_CAP) {
+        RTPV_FB_SLOT* s = &q->fb.ring[idx];
+        if (s->gen == gen && s->frame == frame) {
+            s->firstUs = firstUs;
+            s->lastUs = lastUs;
+            s->bytes = bytes;
+        }
+    }
+    PltUnlockMutex(&fbLock);
+}
+
+static void fbDropFrames(PRTP_VIDEO_QUEUE q, uint32_t n) {
+    uint32_t sum;
+
+    if (n == 0 || (VrFlags & VIPLE_VR_SF_ENABLED) == 0 || !fbLockReady) {
+        return;
+    }
+    PltLockMutex(&fbLock);
+    if (fbQueue == q) {
+        sum = (uint32_t)q->fb.dropped + n;
+        q->fb.dropped = sum > 0xFFFFu ? (uint16_t)0xFFFF : (uint16_t)sum;
+    }
+    PltUnlockMutex(&fbLock);
+}
+
+// 還沒交出的這一幀不要進環。已經推進環的（等尾端 FEC）留著。
+static void fbAbandon(PRTP_VIDEO_QUEUE q) {
+    if (!q->fb.active || q->fb.pushed) {
+        return;
+    }
+    q->fb.active = false;
+}
+
+// [from, until) 有幾幀要算進 dropped。handedOver＝from 那一幀已經交出，不要再算一次。超過 4096 夾住（幀號毒化）。
+static uint32_t fbSpan(uint32_t fromInclusive, uint32_t untilExclusive, bool handedOver) {
+    uint32_t n;
+
+    if (untilExclusive <= fromInclusive) {
+        return 0;
+    }
+    n = untilExclusive - fromInclusive;
+    if (handedOver && n > 0) {
+        n--;
+    }
+    if (n > 4096u) {
+        n = 4096u;
+    }
+    return n;
+}
+
+static void fbOnAccepted(PRTP_VIDEO_QUEUE q, uint32_t frame, uint16_t seq, uint32_t payload) {
+    uint64_t rxUs;
+
+    if ((VrFlags & VIPLE_VR_SF_ENABLED) == 0) {
+        return;
+    }
+    if (q->fb.active && q->fb.frame == frame) {
+        if (!fbMarkNew(q, seq)) {
+            return;
+        }
+        fbTouch(q, fbRxUs(q), payload);
+        if (q->fb.pushed) {
+            fbPatchSlot(q);
+        }
+        return;
+    }
+    // 上一幀還在記、卻沒交出就換幀：安全網，正常路徑會先 fbAbandon，這裡不會再算到。
+    if (q->fb.active && !q->fb.pushed) {
+        fbDropFrames(q, 1);
+        q->fb.active = false;
+    }
+    rxUs = fbRxUs(q);
+    fbBegin(q, frame, seq, payload, rxUs);
+}
+
+// 佇列拒收、但屬於正在記的那一幀（幀已交出後的尾端 FEC、或同一個 block 裡序號落後的那一份）。
+static void fbOnLate(PRTP_VIDEO_QUEUE q, uint32_t frame, uint16_t seq, uint32_t payload) {
+    if ((VrFlags & VIPLE_VR_SF_ENABLED) == 0) {
+        return;
+    }
+    if (!q->fb.active || q->fb.frame != frame) {
+        return;
+    }
+    if (!fbMarkNew(q, seq)) {
+        return;
+    }
+    fbTouch(q, fbRxUs(q), payload);
+    if (q->fb.pushed) {
+        fbPatchSlot(q);
+    }
+}
+
+static uint32_t fbPayloadLen(int length, int dataOffset) {
+    if (length <= dataOffset) {
+        return 0;
+    }
+    return (uint32_t)(length - dataOffset);
+}
+
+// 交給解碼器的那一刻推進環。同一幀只推一次；之後的尾端封包走 fbPatchSlot。
+static void fbPush(PRTP_VIDEO_QUEUE q) {
+    RTPV_FB_SLOT slot;
+    int idx;
+
+    if ((VrFlags & VIPLE_VR_SF_ENABLED) == 0 || !q->fb.active || q->fb.pushed || !fbLockReady) {
+        return;
+    }
+    slot.frame = q->fb.frame;
+    slot.gen = q->fb.gen;
+    slot.firstUs = q->fb.firstUs;
+    slot.lastUs = q->fb.lastUs;
+    slot.bytes = q->fb.bytes;
+    PltLockMutex(&fbLock);
+    if (fbQueue == q) {
+        if (q->fb.count == RTPV_FB_CAP) {
+            q->fb.head = (uint8_t)((q->fb.head + 1) % RTPV_FB_CAP);
+            q->fb.count--;
+        }
+        idx = (q->fb.head + q->fb.count) % RTPV_FB_CAP;
+        q->fb.ring[idx] = slot;
+        q->fb.count++;
+        q->fb.slot = idx;
+        q->fb.pushed = true;
+    }
+    PltUnlockMutex(&fbLock);
+}
+
+// 桌面 session 連函式都不呼叫。尾端 FEC 被拒收是常態，不能每包多付一次 call。
+#define FB_ON_ACCEPTED(q, frame, seq, payload) \
+    do { if ((VrFlags & VIPLE_VR_SF_ENABLED) != 0) fbOnAccepted((q), (frame), (seq), (payload)); } while (0)
+#define FB_ON_LATE(q, frame, seq, payload) \
+    do { if ((VrFlags & VIPLE_VR_SF_ENABLED) != 0) fbOnLate((q), (frame), (seq), (payload)); } while (0)
+#define FB_PUSH(q) \
+    do { if ((VrFlags & VIPLE_VR_SF_ENABLED) != 0) fbPush((q)); } while (0)
+
+int rtpvTakeFrameFeedback(VIPLE_VR_FRAME_FEEDBACK_REC* out, int maxRecs,
+                          uint32_t* baseFrame, uint32_t* baseTimeUs, uint16_t* dropped) {
+    PRTP_VIDEO_QUEUE q;
+    int i, n;
+    uint32_t bFrame;
+    uint64_t bLast;
+
+    if (out == NULL || maxRecs <= 0 || baseFrame == NULL || baseTimeUs == NULL || dropped == NULL) {
+        return 0;
+    }
+    *dropped = 0;
+    if (!fbLockReady) {
+        return 0;
+    }
+    PltLockMutex(&fbLock);
+    q = fbQueue;
+    if (q == NULL || q->fb.count == 0) {
+        PltUnlockMutex(&fbLock);
+        return 0;
+    }
+    n = maxRecs;
+    if (n > (int)q->fb.count) {
+        n = (int)q->fb.count;
+    }
+    bFrame = q->fb.ring[q->fb.head].frame;
+    bLast = q->fb.ring[q->fb.head].lastUs;
+    *baseFrame = bFrame;
+    *baseTimeUs = (uint32_t)bLast;
+    for (i = 0; i < n; i++) {
+        RTPV_FB_SLOT* s = &q->fb.ring[(q->fb.head + i) % RTPV_FB_CAP];
+        uint32_t dFrame = s->frame - bFrame;
+        uint64_t spread = s->lastUs >= s->firstUs ? s->lastUs - s->firstUs : 0;
+        uint64_t off = s->lastUs - bLast;
+
+        out[i].frameDelta = dFrame > 0xFFFFu ? (uint16_t)0xFFFF : (uint16_t)dFrame;
+        out[i].spreadUs = spread > 0xFFFFu ? (uint16_t)0xFFFF : (uint16_t)spread;
+        out[i].lastArrOffUs = (uint32_t)off;
+        out[i].bytes = s->bytes;
+    }
+    q->fb.head = (uint8_t)((q->fb.head + n) % RTPV_FB_CAP);
+    q->fb.count = (uint8_t)(q->fb.count - n);
+    *dropped = q->fb.dropped;
+    q->fb.dropped = 0;
+    PltUnlockMutex(&fbLock);
+    return n;
+}
+
+// §ABR-ADAPT（11-04 修）：fbLock 每場只建一次（RtpvInitializeQueue 會被 watchdog 重複呼叫），連線拆除時刪掉。
+// 原本從沒刪，每場漏一個 mutex，debug 版在 cleanupPlatform 的 activeMutexes==0 斷言中止
+void RtpvShutdownFeedback(void) {
+    if (fbLockReady) {
+        PltDeleteMutex(&fbLock);
+        fbLockReady = false;
+    }
+    fbQueue = NULL;
+}
+
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
     reed_solomon_init();
+    // watchdog 會在 VrSend 還活著的時候重設佇列。先拿 fbLock，避免取走讀到 memset 到一半的 ring。
+    fbEnsureLock();
+    if (fbLockReady) {
+        PltLockMutex(&fbLock);
+    }
     memset(queue, 0, sizeof(*queue));
 
     queue->currentFrameNumber = 1;
@@ -29,6 +319,10 @@ void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
     // 舊版會把 isBefore16(seq,0) 為真（seq ≥ 32768）的封包全部判成過期，
     // 一直卡到 16-bit 序號繞回。基準改由第一個開新 FEC block 的封包重建。
     queue->seqBaselinePending = true;
+    fbQueue = queue;
+    if (fbLockReady) {
+        PltUnlockMutex(&fbLock);
+    }
 }
 
 static void purgeListEntries(PRTPV_QUEUE_LIST list) {
@@ -71,6 +365,14 @@ static void mlFreeHold(PRTP_VIDEO_QUEUE queue) {
 }
 
 void RtpvCleanupQueue(PRTP_VIDEO_QUEUE queue) {
+    // 先把登記拿掉，VrSend 才不會在封包被釋放之後還來讀 ring。鎖本身留著（下一場 Initialize 還用）。
+    if (fbLockReady) {
+        PltLockMutex(&fbLock);
+        if (fbQueue == queue) {
+            fbQueue = NULL;
+        }
+        PltUnlockMutex(&fbLock);
+    }
     purgeListEntries(&queue->pendingFecBlockList);
     purgeListEntries(&queue->completedFecBlockList);
 
@@ -593,6 +895,8 @@ static void stageCompleteFecBlock(PRTP_VIDEO_QUEUE queue) {
 }
 
 static void submitCompletedFrame(PRTP_VIDEO_QUEUE queue) {
+    // §ABR-ADAPT：這一幀交給解碼器。PyroWave 的部分搶救也走這裡，算交出、不算放棄。
+    FB_PUSH(queue);
     while (queue->completedFecBlockList.count > 0) {
         PRTPV_QUEUE_ENTRY entry = queue->completedFecBlockList.head;
 
@@ -2196,11 +2500,7 @@ void RtpvRepairGone(PRTP_VIDEO_QUEUE queue, uint32_t frame, uint8_t block) {
 //（呼叫端先處理它、再呼叫這裡）；否則是放棄上一幀。
 static void graceFlush(PRTP_VIDEO_QUEUE queue, bool recovered, const char* why) {
     int savedCount = queue->deferredCount;
-    struct {
-        PRTP_PACKET packet;
-        PRTPV_QUEUE_ENTRY entry;
-        int length;
-    } saved[RTPV_MAX_GRACE_PACKETS];
+    RTPV_DEFERRED_PACKET saved[RTPV_MAX_GRACE_PACKETS];
     memcpy(saved, queue->deferredPackets, sizeof(saved[0]) * savedCount);
     queue->deferredCount = 0;
 
@@ -2215,7 +2515,12 @@ static void graceFlush(PRTP_VIDEO_QUEUE queue, bool recovered, const char* why) 
 
     // 放棄時：第一個延後封包觸發舊幀丟棄＋新幀初始化
     for (int i = 0; i < savedCount; i++) {
-        int dret = RtpvAddPacketInternal(queue, saved[i].packet, saved[i].length, saved[i].entry);
+        int dret;
+        // §ABR-ADAPT：這包是更早到的，收齊時間要用延後當下，不能用現在。
+        queue->fb.useForceRx = true;
+        queue->fb.forceRxUs = saved[i].arrivalUs;
+        dret = RtpvAddPacketInternal(queue, saved[i].packet, saved[i].length, saved[i].entry);
+        queue->fb.useForceRx = false;
         if (dret != RTPF_RET_QUEUED) {
             free(saved[i].packet);
         }
@@ -2274,14 +2579,17 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
             // Not the missing shard. Could be more new-frame packets or even
             // a frame beyond the deferred one.
             if (peekFrame == queue->deferredFrameNumber &&
-                queue->deferredCount < RTPV_MAX_GRACE_PACKETS &&
-                PltGetMicroseconds() - queue->deferredSinceUs < RTPV_GRACE_MAX_US) {
-                // Same new frame, still within grace budget — defer this one too
-                queue->deferredPackets[queue->deferredCount].packet = packet;
-                queue->deferredPackets[queue->deferredCount].entry = packetEntry;
-                queue->deferredPackets[queue->deferredCount].length = length;
-                queue->deferredCount++;
-                return RTPF_RET_QUEUED;
+                queue->deferredCount < RTPV_MAX_GRACE_PACKETS) {
+                uint64_t graceNowUs = PltGetMicroseconds();
+                if (graceNowUs - queue->deferredSinceUs < RTPV_GRACE_MAX_US) {
+                    // Same new frame, still within grace budget — defer this one too
+                    queue->deferredPackets[queue->deferredCount].packet = packet;
+                    queue->deferredPackets[queue->deferredCount].entry = packetEntry;
+                    queue->deferredPackets[queue->deferredCount].length = length;
+                    queue->deferredPackets[queue->deferredCount].arrivalUs = graceNowUs;
+                    queue->deferredCount++;
+                    return RTPF_RET_QUEUED;
+                }
             }
 
             // Grace period exhausted (budget full, time limit, or different frame entirely).
@@ -2323,6 +2631,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
                     queue->deferredCount = 1;
                     queue->deferredFrameNumber = peekFrame;
                     queue->deferredSinceUs = PltGetMicroseconds();
+                    queue->deferredPackets[0].arrivalUs = queue->deferredSinceUs;
                     return RTPF_RET_QUEUED;
                 }
             }
@@ -2415,6 +2724,9 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
                        (nvPacket->fecInfo & 0x3FF000) >> 12, (nvPacket->fecInfo & 0xFFC00000) >> 22);
         }
 
+        // §ABR-ADAPT：正常 FEC 的尾端 parity 會在幀交出之後才到（lag＝1），這裡被拒收，但仍是這一幀收到的位元組。
+        FB_ON_LATE(queue, nvPacket->frameIndex, packet->sequenceNumber, fbPayloadLen(length, dataOffset));
+
         // Reject frames behind our current frame number
         return RTPF_RET_REJECTED;
     }
@@ -2425,6 +2737,8 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
 
     if (nvPacket->frameIndex == queue->currentFrameNumber && fecCurrentBlockNumber < queue->multiFecCurrentBlockNumber) {
         // Reject FEC blocks behind our current block number
+        // §ABR-ADAPT：同一個幀、前一個 block 收齊之後才到的封包（parity 或另一條連線的複本）。
+        FB_ON_LATE(queue, nvPacket->frameIndex, packet->sequenceNumber, fbPayloadLen(length, dataOffset));
         return RTPF_RET_REJECTED;
     }
 
@@ -2445,6 +2759,8 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
                     queue->seqRejectStreak, queue->nextContiguousSequenceNumber,
                     (unsigned)packet->sequenceNumber, nvPacket->frameIndex);
         }
+        // §ABR-ADAPT：序號落後、佇列不併入。第一次看到的仍算收到的位元組；複本由 seen 去掉。
+        FB_ON_LATE(queue, nvPacket->frameIndex, packet->sequenceNumber, fbPayloadLen(length, dataOffset));
         return RTPF_RET_REJECTED;
     }
     queue->seqRejectStreak = 0;
@@ -2453,6 +2769,7 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
     // if we can't finish a frame before receiving the next one.
     if (queue->pendingFecBlockList.count == 0 || queue->currentFrameNumber != nvPacket->frameIndex ||
             queue->multiFecCurrentBlockNumber != fecCurrentBlockNumber) {
+        bool fbHanded = false;
         // §VR-REPAIR-RTT（量測）：正在等的那個 block 收到過封包沒有、手上有哪些 shard（下面會清掉，msNoteLost 要用）
         const bool hadPending = queue->pendingFecBlockList.count != 0;
         uint8_t lateHave[32];
@@ -2480,8 +2797,17 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
                 // we must manually advance the queue to the next frame. Parsing this
                 // frame further is not possible.
                 if (queue->currentFrameNumber == nvPacket->frameIndex) {
+                    bool salvaged;
                     msNoteLost(queue, queue->currentFrameNumber + 1, hadPending, have);  // §VR-REPAIR-RTT（量測）
-                    salvagePartialPyroWaveFrame(queue);
+                    salvaged = salvagePartialPyroWaveFrame(queue);
+                    // §ABR-ADAPT：搶救成功的部分幀已交出；否則整幀只計進 dropped，不進環。
+                    if (salvaged) {
+                        FB_ON_LATE(queue, nvPacket->frameIndex, packet->sequenceNumber, fbPayloadLen(length, dataOffset));
+                    }
+                    else {
+                        fbAbandon(queue);
+                    }
+                    fbDropFrames(queue, fbSpan(queue->currentFrameNumber, queue->currentFrameNumber + 1, salvaged));
 
                     // Discard any unsubmitted buffers from the previous frame
                     purgeListEntries(&queue->pendingFecBlockList);
@@ -2521,7 +2847,23 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
 
             // §VR-REPAIR-RTT（量測）：這個封包所屬的那一幀也救不回來了（前面的 block 沒到），之後改等它的下一幀
             msNoteLost(queue, nvPacket->frameIndex + 1, hadPending, have);
-            salvagePartialPyroWaveFrame(queue);
+            {
+                // §ABR-ADAPT：current==0 是 watchdog 哨兵，不要把 0..幀號 整段算成放棄。
+                bool salvaged = salvagePartialPyroWaveFrame(queue);
+                uint32_t from = queue->currentFrameNumber;
+                if (salvaged) {
+                    FB_ON_LATE(queue, nvPacket->frameIndex, packet->sequenceNumber, fbPayloadLen(length, dataOffset));
+                }
+                else {
+                    fbAbandon(queue);
+                }
+                if (from == 0) {
+                    fbDropFrames(queue, salvaged ? 0u : 1u);
+                }
+                else {
+                    fbDropFrames(queue, fbSpan(from, nvPacket->frameIndex + 1, salvaged));
+                }
+            }
 
             // Discard any unsubmitted buffers from the previous frame
             purgeListEntries(&queue->pendingFecBlockList);
@@ -2540,7 +2882,7 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         }
 
         if (queue->currentFrameNumber != nvPacket->frameIndex) {
-            salvagePartialPyroWaveFrame(queue);
+            fbHanded = salvagePartialPyroWaveFrame(queue);
         }
 
         // Discard any pending buffers from the previous FEC block
@@ -2556,6 +2898,15 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         // after successfully processing a frame.
         if (queue->currentFrameNumber != nvPacket->frameIndex) {
             LC_ASSERT_VT(queue->currentFrameNumber < nvPacket->frameIndex);
+
+            // §ABR-ADAPT：跳過的幀只計進 dropped。current==0 與 §FRZ-RESYNC-SENTINEL 一樣不當成幾千幀。
+            // 推測性 RFI（reportedLostFrame）當時幀還沒放棄，這裡才算一次；搶救成功的那一幀不計。
+            if (!fbHanded) {
+                fbAbandon(queue);
+            }
+            if (queue->currentFrameNumber != 0) {
+                fbDropFrames(queue, fbSpan(queue->currentFrameNumber, nvPacket->frameIndex, fbHanded));
+            }
 
             msNoteLost(queue, nvPacket->frameIndex, hadPending, have);  // §VR-REPAIR-RTT（量測）
 
@@ -2686,6 +3037,8 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         return RTPF_RET_REJECTED;
     }
     else {
+        // §ABR-ADAPT：queuePacket 回 false 的是複本，不會進到這裡。FEC 還原合成的封包不走這條。
+        FB_ON_ACCEPTED(queue, queue->currentFrameNumber, packet->sequenceNumber, fbPayloadLen(length, dataOffset));
         if (queue->mlMeas) {
             // §VR-REPAIR-RTT（量測）：block 內的停頓。receivedHighestSequenceNumber 還是這個封包之前的值（下面才更新）
             msNoteAccepted(queue, queue->pendingFecBlockList.count > 1 &&

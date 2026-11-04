@@ -31,6 +31,7 @@ Updater::Updater(QObject *parent)
       m_BytesReceived(0),
       m_BytesTotal(0),
       m_Cancelled(false),
+      m_DownloadWriteFailed(false),
       m_Platform(UpdateAssetRules::detectPlatform()),
       m_NotesReply(nullptr)
 {
@@ -137,6 +138,7 @@ void Updater::startUpdate(const QString& version)
 
     m_Version       = version;
     m_Cancelled     = false;
+    m_DownloadWriteFailed = false;
     m_BytesReceived = 0;
     m_BytesTotal    = 0;
     emit progressChanged();
@@ -366,7 +368,11 @@ void Updater::handleAssetListFinished()
             this, &Updater::handleDownloadProgress);
     connect(m_CurrentReply, &QNetworkReply::readyRead, this, [this]() {
         if (m_DownloadFile && m_CurrentReply) {
-            m_DownloadFile->write(m_CurrentReply->readAll());
+            const QByteArray data = m_CurrentReply->readAll();
+            // §REVIEW-1104：磁碟滿時 write 會少寫；先記下，收尾改走 fail()，不要把截斷的 zip 交給 helper
+            if (m_DownloadFile->write(data) != data.size()) {
+                m_DownloadWriteFailed = true;
+            }
         }
     });
     connect(m_CurrentReply, &QNetworkReply::finished,
@@ -387,9 +393,16 @@ void Updater::handleDownloadFinished()
 
     // Flush 殘留 buffer（readyRead 之後 finished 之前可能還有 bytes）
     if (m_DownloadFile && reply) {
-        m_DownloadFile->write(reply->readAll());
-        m_DownloadFile->flush();
+        const QByteArray tail = reply->readAll();
+        // §REVIEW-1104：write／flush 失敗或位元組數對不上總長度，不能當成下載成功，否則會關程式去解截斷的 zip
+        if (m_DownloadFile->write(tail) != tail.size() || !m_DownloadFile->flush()) {
+            m_DownloadWriteFailed = true;
+        }
+        const qint64 written = m_DownloadFile->size();
         m_DownloadFile->close();
+        if (m_BytesTotal > 0 && written != m_BytesTotal) {
+            m_DownloadWriteFailed = true;
+        }
     }
 
     if (m_Cancelled) {
@@ -414,6 +427,11 @@ void Updater::handleDownloadFinished()
         return;
     }
     if (reply) reply->deleteLater();
+
+    if (m_DownloadWriteFailed) {
+        fail(tr("Could not save the downloaded update. The disk may be full."));
+        return;
+    }
 
     if (m_DownloadFile) {
         delete m_DownloadFile;
@@ -491,10 +509,17 @@ bool Updater::spawnHelperAndQuit()
 
     // PowerShell 跳過 ExecutionPolicy + 隱藏視窗的標準呼叫慣例
     // ($PSScriptRoot 在 -File 模式下可用，這裡用絕對路徑所以不需要)
+    // §REVIEW-1104：目錄要提權時，覆寫仍由已提高權限的 PowerShell 做；重開 exe 改經未提權的 explorer（Shell.Application），避免新行程維持系統管理員。COM 失敗才退回 Start-Process，避免更新好了卻沒有行程再開
     QString script = QStringLiteral(
-        "param([int]$AppPid,[string]$ZipPath,[string]$InstallDir,[string]$ExePath)\n"
+        "param([int]$AppPid,[string]$ZipPath,[string]$InstallDir,[string]$ExePath,[int]$DropAdmin)\n"
         "$ErrorActionPreference='Stop'\n"
-        "try { Wait-Process -Id $AppPid -Timeout 30 -ErrorAction Stop } catch {}\n"
+        // §REVIEW-1104：舊程式最多等 90 秒（自己收尾最多 30 秒，VR 收尾更久）；還沒結束就不要覆蓋——
+        // 檔案被鎖時 Expand-Archive 會解到一半中斷，留下新舊混雜、可能再也開不起來的安裝。改成放棄這次更新並提示
+        "try { Wait-Process -Id $AppPid -Timeout 90 -ErrorAction Stop } catch {}\n"
+        "if (Get-Process -Id $AppPid -ErrorAction SilentlyContinue) {\n"
+        "  try { Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('__FAIL_MSG__', 'VipleStream') | Out-Null } catch {}\n"
+        "  exit 2\n"
+        "}\n"
         "Start-Sleep -Milliseconds 800\n"
         "try {\n"
         "  Expand-Archive -LiteralPath $ZipPath -DestinationPath $InstallDir -Force\n"
@@ -503,14 +528,31 @@ bool Updater::spawnHelperAndQuit()
         "  exit 1\n"
         "}\n"
         "Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue\n"
-        "Start-Process -FilePath $ExePath\n"
+        "if ($DropAdmin -ne 0) {\n"
+        "  try {\n"
+        "    $shell = New-Object -ComObject Shell.Application\n"
+        "    $shell.ShellExecute($ExePath, '', $InstallDir, 'open', 1)\n"
+        "  } catch {\n"
+        "    Start-Process -FilePath $ExePath\n"
+        "  }\n"
+        "} else {\n"
+        "  Start-Process -FilePath $ExePath\n"
+        "}\n"
     );
+
+    // §REVIEW-1104：放棄更新時的提示（PowerShell 單引號字串：' 要寫成 ''）
+    QString failMsg = tr("The update was not installed because VipleStream did not exit in time. "
+                         "Please close VipleStream and try updating again.");
+    failMsg.replace(QStringLiteral("'"), QStringLiteral("''"));
+    script.replace(QStringLiteral("__FAIL_MSG__"), failMsg);
 
     QFile sf(helperPath);
     if (!sf.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         fail(tr("Cannot write helper script: %1").arg(sf.errorString()));
         return false;
     }
+    // §REVIEW-1104：加 UTF-8 BOM，Windows PowerShell 5.1 才不會把翻譯後的提示文字當 ANSI 讀成亂碼
+    sf.write("\xEF\xBB\xBF");
     sf.write(script.toUtf8());
     sf.close();
 
@@ -521,12 +563,13 @@ bool Updater::spawnHelperAndQuit()
     // 構造 PowerShell argv：-NoProfile -ExecutionPolicy Bypass -File <script> -AppPid ... -ZipPath ...
     QString args = QStringLiteral(
         "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden "
-        "-File \"%1\" -AppPid %2 -ZipPath \"%3\" -InstallDir \"%4\" -ExePath \"%5\""
+        "-File \"%1\" -AppPid %2 -ZipPath \"%3\" -InstallDir \"%4\" -ExePath \"%5\" -DropAdmin %6"
     ).arg(QDir::toNativeSeparators(helperPath))
      .arg(pid)
      .arg(QDir::toNativeSeparators(m_DownloadPath))
      .arg(QDir::toNativeSeparators(installDir))
-     .arg(QDir::toNativeSeparators(exePath));
+     .arg(QDir::toNativeSeparators(exePath))
+     .arg(needElevate ? 1 : 0);
 
     if (!shellExecuteRunas(QStringLiteral("powershell.exe"), args, needElevate)) {
         // 使用者取消 UAC prompt 也會走這條

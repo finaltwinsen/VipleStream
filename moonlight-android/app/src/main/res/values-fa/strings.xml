@@ -321,4 +321,6 @@
     <string name="steam_switch_error_taskgone">وظیفه تعویض روی میزبان ناپدید شد</string>
     <string name="steam_switch_error_timeout">مهلت تعویض به پایان رسید (&gt;150 ثانیه بدون رسیدن سرور به وضعیت نهایی)</string>
     <string name="steam_switch_account_unavailable">این حساب هیچ اطلاعات ورود ذخیره‌شده‌ای روی میزبان ندارد. ابتدا یک بار روی میزبان وارد شوید، سپس دوباره امتحان کنید.</string>
+    <string name="title_show_advanced">نمایش گزینه‌های پیشرفته و آزمایشی</string>
+    <string name="summary_show_advanced">گزینه‌های عیب‌یابی و آزمایش. گزینه‌های پنهان مقدار فعلی خود را حفظ می‌کنند.</string>
 </resources>

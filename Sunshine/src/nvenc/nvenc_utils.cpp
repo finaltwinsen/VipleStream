@@ -72,8 +72,12 @@ namespace nvenc {
       case video::colorspace_e::bt2020sdr:
         // Rec. 2020
         colorspace.primaries = NV_ENC_VUI_COLOR_PRIMARIES_BT2020;
-        assert(sunshine_colorspace.bit_depth == 10);
-        colorspace.tranfer_function = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT2020_10;
+        // §REVIEW-1103：client 可以要求 8-bit Rec.2020（encoderCscMode 選 2020、dynamicRange=0），
+        // 原本 assert 10-bit（debug 版會中止）並一律標 BT2020_10。8-bit 改標 BT709 transfer
+        // （H.273：兩者曲線相同，BT2020_10 只用於 10-bit）。
+        colorspace.tranfer_function = sunshine_colorspace.bit_depth == 10 ?
+                                        NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT2020_10 :
+                                        NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
         colorspace.matrix = NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL;
         break;
 

@@ -13,6 +13,7 @@
 #include <vector>
 
 // local includes
+#include "src/abr_signals.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/utility.h"
@@ -487,6 +488,7 @@ namespace nvenc {
     stored_init_params = init_params;
     stored_init_params.encodeConfig = &stored_enc_config;
     pin_level_for_reconfigure(client_config.videoFormat);
+    abr_signals::reset(client_config.videoFormat);  // §ABR-ADAPT：0=H.264、1=HEVC、2=AV1
 
     if (async_event_handle) {
       NV_ENC_EVENT_PARAMS event_params = {min_struct_version(NV_ENC_EVENT_PARAMS_VER)};
@@ -690,6 +692,9 @@ namespace nvenc {
       BOOST_LOG(error) << "NvEnc: locked bitstream buffer is null or empty";
       return {};
     }
+
+    // §ABR-ADAPT：畫質飽和判斷用的平均 QP（NVENC 每幀都有，不另外花成本）
+    abr_signals::note_frame_qp(static_cast<int>(lock_bitstream.frameAvgQP), lock_bitstream.pictureType == NV_ENC_PIC_TYPE_IDR);
 
     nvenc_encoded_frame encoded_frame {
       {data_pointer, data_pointer + lock_bitstream.bitstreamSizeInBytes},

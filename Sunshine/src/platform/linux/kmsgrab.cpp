@@ -904,6 +904,11 @@ namespace platf {
         }
 
         plane_t plane = drmModeGetPlane(card.fd.el, cursor_plane_id);
+        // §REVIEW-1103：ioctl 失敗（裝置移除、驅動重載）時回 NULL，下面會解參考
+        if (!plane) {
+          captured_cursor.visible = false;
+          return;
+        }
 
         std::optional<std::int32_t> prop_crtc_x;
         std::optional<std::int32_t> prop_crtc_y;
@@ -1087,6 +1092,11 @@ namespace platf {
         }
 
         plane_t plane = drmModeGetPlane(card.fd.el, plane_id);
+        // §REVIEW-1103：ioctl 失敗時回 NULL，card.fb() 與下面的 log 都會解參考
+        if (!plane) {
+          BOOST_LOG(warning) << "Couldn't get drm plane ["sv << plane_id << "]: "sv << strerror(errno);
+          return capture_e::reinit;
+        }
         frame_timestamp = std::chrono::steady_clock::now();
 
         auto fb = card.fb(plane.get());

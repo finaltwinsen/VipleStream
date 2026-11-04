@@ -293,7 +293,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
 #define VIPLE_VR_C2S_CONTROLLER_STATE  0x04  // reliable
 #define VIPLE_VR_C2S_REFRESH_CHANGED   0x05  // reliable，觸發重開 session
 #define VIPLE_VR_C2S_CLIENT_TIMING     0x06  // VR channel unsequenced，1 Hz
-#define VIPLE_VR_C2S_FRAME_FEEDBACK    0x07  // VR channel unsequenced（GA）
+#define VIPLE_VR_C2S_FRAME_FEEDBACK    0x07  // VR channel unsequenced，有新收齊的幀才送，最快 100 ms（§ABR-ADAPT）
 #define VIPLE_VR_C2S_LATCH             0x08  // VR channel unsequenced，10 Hz
 #define VIPLE_VR_C2S_LOSS              0x09  // VR channel unsequenced，送 2 次
 #define VIPLE_VR_C2S_LINK_HELLO        0x0A  // reliable，§VR-MULTILINK
@@ -570,6 +570,23 @@ typedef struct _VIPLE_VR_LINK_ADDRS {
     uint8_t addr[VIPLE_VR_LINK_ADDR_MAX][4];
 } VIPLE_VR_LINK_ADDRS;
 
+// §ABR-ADAPT：每 100 ms 一則（有新收齊的幀才送），列出這段時間收齊的幀。時間都是 client 單調時鐘（µs）。
+// 線上是 little-endian。與 LOSS／LATCH 一樣直接 memcpy 主機序（VR 只在 little-endian 平台協商，見檔頭）。
+#define VIPLE_VR_FRAME_FEEDBACK_F_DROPPED 0x01  // bit0：這段期間 queue 有丟棄未完成的幀（有缺幀，不代表塞車）
+typedef struct _VIPLE_VR_TLV_FRAME_FEEDBACK_HDR {
+    uint32_t baseFrame;     // 第一筆紀錄的幀號（線上的 frameIndex）
+    uint32_t baseTimeUs;    // 第一筆紀錄「最後一個封包到達時間」的低 32 位元（µs，會繞回，server 用差值）
+    uint8_t  count;         // 後面幾筆紀錄（1..VIPLE_VR_FRAME_FEEDBACK_MAX）
+    uint8_t  flags;         // bit0：VIPLE_VR_FRAME_FEEDBACK_F_DROPPED
+    uint16_t droppedFrames; // 這段期間放棄的幀數（無法重組）
+} VIPLE_VR_TLV_FRAME_FEEDBACK_HDR;   // 12 B
+typedef struct _VIPLE_VR_FRAME_FEEDBACK_REC {
+    uint16_t frameDelta;    // 幀號 − baseFrame
+    uint16_t spreadUs;      // 這一幀第一個到最後一個封包的時間差（µs，超過 65535 夾住）
+    uint32_t lastArrOffUs;  // 最後一個封包到達時間 − baseTimeUs（µs）
+    uint32_t bytes;         // 這一幀實際收到的封包 payload 位元組數（含 FEC 封包、不含重複收到的）
+} VIPLE_VR_FRAME_FEEDBACK_REC;       // 12 B
+#define VIPLE_VR_FRAME_FEEDBACK_MAX 18   // 12 + 18×12 = 228 B，在 TLV 251 B 內
 
 #pragma pack(pop)
 
@@ -596,6 +613,9 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_ADDRS) == 33, link_addrs_33);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TRACKING) <= VIPLE_VR_MAX_CTRL_PAYLOAD, tracking_fits);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_INFO) == 102, tlv_hotspot_102);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_INFO) <= VIPLE_VR_MAX_CTRL_PAYLOAD, hotspot_fits);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_FRAME_FEEDBACK_HDR) == 12, tlv_frame_feedback_hdr_12);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_FRAME_FEEDBACK_REC) == 12, tlv_frame_feedback_rec_12);
+VIPLE_VR_STATIC_ASSERT(2 + sizeof(VIPLE_VR_TLV_FRAME_FEEDBACK_HDR) + VIPLE_VR_FRAME_FEEDBACK_MAX * sizeof(VIPLE_VR_FRAME_FEEDBACK_REC) <= VIPLE_VR_MAX_CTRL_PAYLOAD, frame_feedback_fits);
 
 // ── 解碼後的每幀 VR metadata（client 內部，不上線）─────────────────
 

@@ -337,4 +337,6 @@
     <string name="steam_switch_error_taskgone">Bytteoppgaven forsvant på verten</string>
     <string name="steam_switch_error_timeout">Tidsavbrudd for byttet (&gt;150 s uten at serveren nådde en slutttilstand)</string>
     <string name="steam_switch_account_unavailable">Denne kontoen har ingen lagrede påloggingsopplysninger på verten. Logg inn én gang på verten først, og prøv deretter igjen.</string>
+    <string name="title_show_advanced">Vis avanserte og eksperimentelle innstillinger</string>
+    <string name="summary_show_advanced">Innstillinger for feilsøking og testing. Skjulte innstillinger beholder gjeldende verdier.</string>
 </resources>

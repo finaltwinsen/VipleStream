@@ -108,11 +108,25 @@ RelayUdpTunnel::RelayUdpTunnel(const QString &relayUrl,
 
 RelayUdpTunnel::~RelayUdpTunnel() {
     stop();
-    wait(10000);
+    // §REVIEW-1104：限時 wait 結束時執行緒可能還在寫成員；要等 isFinished 再讓 QThread 解構
+    wait();
 }
 
 void RelayUdpTunnel::stop() {
     m_Stop = true;
+    // §REVIEW-1104：只設旗標不會打斷 waitForEncrypted／wsReadFrame，關掉 socket 阻塞呼叫才會返回
+    QMutexLocker lk(&m_SockMutex);
+    if (m_WsFd != -1) {
+#ifdef _WIN32
+        ::shutdown((SOCKET)m_WsFd, SD_BOTH);
+#else
+        ::shutdown((int)m_WsFd, SHUT_RDWR);
+#endif
+    }
+    if (m_TunnelFd != -1) {
+        ::closesocket((SOCKET)m_TunnelFd);
+        m_TunnelFd = -1;
+    }
 }
 
 bool RelayUdpTunnel::startAndWaitReady(int timeoutMs) {
@@ -164,6 +178,55 @@ bool resolveIpv4(const QString &host, uint16_t port, sockaddr_in &out) {
 }  // namespace
 
 void RelayUdpTunnel::run() {
+    // §REVIEW-1104：stop() 與這裡的 close 共用 m_SockMutex，避免關到已經重用的 fd
+    auto publishWs = [this](QAbstractSocket *sock) {
+        qintptr fd = sock ? sock->socketDescriptor() : -1;
+        QMutexLocker lk(&m_SockMutex);
+        m_WsFd = fd;
+        if (m_Stop.load() && fd != -1) {
+#ifdef _WIN32
+            ::shutdown((SOCKET)fd, SD_BOTH);
+#else
+            ::shutdown((int)fd, SHUT_RDWR);
+#endif
+        }
+    };
+    auto releaseWs = [this](QAbstractSocket *sock) {
+        if (!sock) {
+            return;
+        }
+        {
+            QMutexLocker lk(&m_SockMutex);
+            m_WsFd = -1;
+        }
+        delete sock;
+    };
+    auto publishTunnel = [this](SOCKET s) -> SOCKET {
+        QMutexLocker lk(&m_SockMutex);
+        if (s == INVALID_SOCKET) {
+            m_TunnelFd = -1;
+            return INVALID_SOCKET;
+        }
+        if (m_Stop.load()) {
+            ::closesocket(s);
+            m_TunnelFd = -1;
+            return INVALID_SOCKET;
+        }
+        m_TunnelFd = (qintptr)s;
+        return s;
+    };
+    auto releaseTunnel = [this](SOCKET s) -> SOCKET {
+        if (s == INVALID_SOCKET) {
+            return INVALID_SOCKET;
+        }
+        QMutexLocker lk(&m_SockMutex);
+        if (m_TunnelFd != -1 && m_TunnelFd == (qintptr)s) {
+            ::closesocket(s);
+            m_TunnelFd = -1;
+        }
+        return INVALID_SOCKET;
+    };
+
     /* ---------- 1. Connect to relay over WS ---------- */
     QUrl url(m_RelayUrl);
     bool useTls = (url.scheme() == "wss");
@@ -183,10 +246,11 @@ void RelayUdpTunnel::run() {
         auto ssl = new QSslSocket();
         ssl->setPeerVerifyMode(QSslSocket::VerifyNone);
         ssl->connectToHostEncrypted(host, wsPort);
+        publishWs(ssl);
         if (!ssl->waitForEncrypted(10000)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-UDPTUN] TLS connect failed");
-            delete ssl;
+            releaseWs(ssl);
             m_AllocFailed = true;
             return;
         }
@@ -194,15 +258,18 @@ void RelayUdpTunnel::run() {
     } else {
         auto tcp = new QTcpSocket();
         tcp->connectToHost(host, wsPort);
+        publishWs(tcp);
         if (!tcp->waitForConnected(10000)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-UDPTUN] TCP connect failed");
-            delete tcp;
+            releaseWs(tcp);
             m_AllocFailed = true;
             return;
         }
         ws = tcp;
     }
+    // §REVIEW-1104：連上之後 fd 才穩定；若 stop() 在這之前跑過，這裡會補 shutdown
+    publishWs(ws);
     // Disable Nagle — we're shipping per-packet RTP through this
     // socket and batching inflates latency by hundreds of ms.
     ws->setSocketOption(QAbstractSocket::LowDelayOption, 1);
@@ -229,7 +296,8 @@ void RelayUdpTunnel::run() {
     ws->waitForBytesWritten(5000);
 
     QByteArray hsResp;
-    while (hsResp.size() < 8192) {
+    // §REVIEW-1104：對端慢慢送、始終沒有結尾時這個迴圈不看 m_Stop，stop 之後要能離開
+    while (hsResp.size() < 8192 && !m_Stop.load()) {
         if (ws->bytesAvailable() == 0 && !ws->waitForReadyRead(5000)) break;
         QByteArray chunk = ws->peek(ws->bytesAvailable());
         int endIdx = chunk.indexOf("\r\n\r\n");
@@ -239,7 +307,7 @@ void RelayUdpTunnel::run() {
     if (!hsResp.contains("101")) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-UDPTUN] WS handshake failed");
-        delete ws; m_AllocFailed = true; return;
+        releaseWs(ws); m_AllocFailed = true; return;
     }
 
     // Register as client
@@ -283,7 +351,7 @@ void RelayUdpTunnel::run() {
         if (reply.isEmpty()) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-UDPTUN] allocate timeout");
-            delete ws; m_AllocFailed = true; return;
+            releaseWs(ws); m_AllocFailed = true; return;
         }
         QJsonObject o = QJsonDocument::fromJson(reply).object();
         if (o["type"].toString() != "udp_tunnel_allocated" ||
@@ -291,7 +359,7 @@ void RelayUdpTunnel::run() {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-UDPTUN] unexpected reply: %s",
                         qPrintable(o["type"].toString()));
-            delete ws; m_AllocFailed = true; return;
+            releaseWs(ws); m_AllocFailed = true; return;
         }
         int fid = o["flow_id"].toInt(0);
         QByteArray tokenHex = o["token"].toString().toLatin1();
@@ -299,7 +367,7 @@ void RelayUdpTunnel::run() {
             !VpTunnel_hex_to_token(tokenHex.constData(), flow.token)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-UDPTUN] malformed allocated payload");
-            delete ws; m_AllocFailed = true; return;
+            releaseWs(ws); m_AllocFailed = true; return;
         }
         flow.flow_id = (uint16_t)fid;
         relayUdpHost = o["relay_udp_host"].toString();
@@ -328,10 +396,14 @@ void RelayUdpTunnel::run() {
             anyAddr.sin_family = AF_INET;
             anyAddr.sin_addr.s_addr = htonl(INADDR_ANY);
             bind(tunnelSock, (sockaddr *)&anyAddr, sizeof(anyAddr));
-            useUdpCarrier = true;
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-UDPTUN] carrier=UDP_RELAY %s:%u",
-                        qPrintable(relayUdpHost), relayUdpPort);
+            // §REVIEW-1104：公布 fd，stop() 才能關掉這顆 UDP socket 讓 select 返回
+            tunnelSock = publishTunnel(tunnelSock);
+            if (tunnelSock != INVALID_SOCKET) {
+                useUdpCarrier = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-UDPTUN] carrier=UDP_RELAY %s:%u",
+                            qPrintable(relayUdpHost), relayUdpPort);
+            }
         }
     }
     if (!useUdpCarrier) {
@@ -393,8 +465,8 @@ void RelayUdpTunnel::run() {
                     localPort, p);
     }
     if (proxies.isEmpty()) {
-        if (tunnelSock != INVALID_SOCKET) closesocket(tunnelSock);
-        delete ws; m_AllocFailed = true; return;
+        tunnelSock = releaseTunnel(tunnelSock);
+        releaseWs(ws); m_AllocFailed = true; return;
     }
     // Publish the port map so RelayTcpTunnel can rewrite RTSP replies.
     {
@@ -424,6 +496,9 @@ void RelayUdpTunnel::run() {
      * -------------------------------------------------------------- */
     uint8_t rxbuf[2048];
     uint8_t txbuf[2048];
+    // §REVIEW-1104：UDP carrier 視訊封包可到 packetSize+40，2048 會截斷；改 64KB，塞不下就丟並只記一次
+    uint8_t tunnelRx[65536];
+    bool tunnelRxTruncLogged = false;
 
     auto deliver_to_proxy = [&](uint16_t srcPort,
                                 const uint8_t *payload, size_t payloadLen) {
@@ -551,15 +626,34 @@ void RelayUdpTunnel::run() {
             if (useUdpCarrier && FD_ISSET(tunnelSock, &rset)) {
                 sockaddr_in from = {};
                 socklen_t fromLen = sizeof(from);
-                int n = recvfrom(tunnelSock, (char *)rxbuf, sizeof(rxbuf), 0,
+                int n = recvfrom(tunnelSock, (char *)tunnelRx, sizeof(tunnelRx), 0,
                                  (sockaddr *)&from, &fromLen);
+                bool truncated = false;
+#ifdef _WIN32
+                if (n < 0 && WSAGetLastError() == WSAEMSGSIZE) {
+                    truncated = true;
+                }
+#else
+                if (n == (int)sizeof(tunnelRx)) {
+                    truncated = true;
+                }
+#endif
+                if (truncated) {
+                    if (!tunnelRxTruncLogged) {
+                        tunnelRxTruncLogged = true;
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-UDPTUN] UDP carrier datagram exceeds %d bytes, dropped",
+                                    (int)sizeof(tunnelRx));
+                    }
+                    n = -1;
+                }
                 if (n > 0 &&
                     from.sin_addr.s_addr == relayAddr.sin_addr.s_addr &&
                     from.sin_port == relayAddr.sin_port) {
                     uint16_t srcPort = 0, dstPort = 0;
                     const uint8_t *payload = nullptr;
                     size_t payloadLen = 0;
-                    if (VpTunnel_parse(&flow, rxbuf, (size_t)n,
+                    if (VpTunnel_parse(&flow, tunnelRx, (size_t)n,
                                        &srcPort, &dstPort,
                                        &payload, &payloadLen)) {
                         deliver_to_proxy(srcPort, payload, payloadLen);
@@ -616,7 +710,7 @@ void RelayUdpTunnel::run() {
     for (auto &ps : proxies) {
         if (ps.fd != INVALID_SOCKET) closesocket(ps.fd);
     }
-    if (tunnelSock != INVALID_SOCKET) closesocket(tunnelSock);
-    delete ws;
+    tunnelSock = releaseTunnel(tunnelSock);
+    releaseWs(ws);
     m_Ready.store(false);
 }

@@ -72,6 +72,17 @@ namespace audio {
   using packet_t = std::pair<void *, buffer_t>;
   using audio_ctx_ref_t = safe::shared_t<audio_ctx_t>::ptr_t;
 
+  /**
+   * @brief §AUD-MON：擷取健康狀態，經 mail::audio_status 交給 control 執行緒、以 0x5510 送給 client。
+   *        數值就是線上格式（u8），只能往後加。
+   */
+  enum class status_e : int {
+    monitoring = 0,  ///< 擷取已啟動、健康檢查有效（平台拿得到播放裝置的音量計）
+    stalled = 1,  ///< 主機在出聲，但擷取連續幾秒拿不到聲音，自動重建擷取後仍然如此
+    recovered = 2,  ///< 回報 stalled 之後，擷取又拿到聲音了
+    init_failed = 3,  ///< 擷取初始化失敗，這場串流沒有聲音
+  };
+
   void capture(safe::mail_t mail, config_t config, void *channel_data);
 
   /**

@@ -51,16 +51,25 @@ public class PairingManager {
         return new String(hexChars);
     }
     
+    // §REVIEW-1104：檢查十六進位字串是否為偶數長度且僅含合法十六進位字元，不合法時回傳 null 避免拋出 IllegalArgumentException
     private static byte[] hexToBytes(String s) {
+        if (s == null) {
+            return null;
+        }
         int len = s.length();
         if (len % 2 != 0) {
-            throw new IllegalArgumentException("Illegal string length: "+len);
+            return null;
         }
 
         byte[] data = new byte[len / 2];
         for (int i = 0; i < len; i += 2) {
-            data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
-                                 + Character.digit(s.charAt(i+1), 16));
+            int d1 = Character.digit(s.charAt(i), 16);
+            int d2 = Character.digit(s.charAt(i+1), 16);
+            if (d1 == -1 || d2 == -1) {
+                return null;
+            }
+            data[i / 2] = (byte) ((d1 << 4) + d2);
+
         }
         return data;
     }
@@ -71,11 +80,19 @@ public class PairingManager {
         String certText = NvHTTP.getXmlString(text, "plaincert", false);
         if (certText != null) {
             byte[] certBytes = hexToBytes(certText);
+            // §REVIEW-1104：plaincert 不是合法 hex 時拋出 IOException，避免未檢查例外導致背景執行緒崩潰
+            if (certBytes == null) {
+                throw new IOException("Invalid hex in plaincert");
+            }
 
             try {
                 CertificateFactory cf = CertificateFactory.getInstance("X.509");
                 return (X509Certificate)cf.generateCertificate(new ByteArrayInputStream(certBytes));
             } catch (CertificateException e) {
+                e.printStackTrace();
+                // §REVIEW-1104：憑證解析失敗改拋 IOException，讓呼叫端正常捕捉而非因 RuntimeException 崩潰
+                throw new IOException(e);
+            } catch (Exception e) {
                 e.printStackTrace();
                 throw new RuntimeException(e);
             }
@@ -183,6 +200,10 @@ public class PairingManager {
     }
     
     public PairState pair(String serverInfo, String pin) throws IOException, XmlPullParserException {
+        // §REVIEW-1104：若用戶端憑證或私鑰未成功載入（pemCertBytes 為 null），提前回傳 FAILED 避免 bytesToHex 拋出 NullPointerException
+        if (pemCertBytes == null || cert == null || pk == null) {
+            return PairState.FAILED;
+        }
         PairingHashAlgorithm hashAlgo;
 
         int serverMajorVersion = http.getServerMajorVersion(serverInfo);
@@ -236,7 +257,17 @@ public class PairingManager {
         
         // Decode the server's response and subsequent challenge
         byte[] encServerChallengeResponse = hexToBytes(NvHTTP.getXmlString(challengeResp, "challengeresponse", true));
+        // §REVIEW-1104：challengeresponse 非合法十六進位時取消配對並回傳 FAILED
+        if (encServerChallengeResponse == null) {
+            http.unpair();
+            return PairState.FAILED;
+        }
         byte[] decServerChallengeResponse = decryptAes(encServerChallengeResponse, aesKey);
+        // §REVIEW-1104：確認解密後回應長度足夠（≥ hashLength + 16），避免 copyOfRange 拋出 ArrayIndexOutOfBoundsException
+        if (decServerChallengeResponse.length < hashAlgo.getHashLength() + 16) {
+            http.unpair();
+            return PairState.FAILED;
+        }
         
         byte[] serverResponse = Arrays.copyOfRange(decServerChallengeResponse, 0, hashAlgo.getHashLength());
         byte[] serverChallenge = Arrays.copyOfRange(decServerChallengeResponse, hashAlgo.getHashLength(), hashAlgo.getHashLength() + 16);
@@ -253,6 +284,11 @@ public class PairingManager {
         
         // Get the server's signed secret
         byte[] serverSecretResp = hexToBytes(NvHTTP.getXmlString(secretResp, "pairingsecret", true));
+        // §REVIEW-1104：確認 pairingsecret 為合法十六進位且長度 ≥ 16，避免 copyOfRange 拋出 IllegalArgumentException
+        if (serverSecretResp == null || serverSecretResp.length < 16) {
+            http.unpair();
+            return PairState.FAILED;
+        }
         byte[] serverSecret = Arrays.copyOfRange(serverSecretResp, 0, 16);
         byte[] serverSignature = Arrays.copyOfRange(serverSecretResp, 16, serverSecretResp.length);
 

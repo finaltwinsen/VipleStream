@@ -360,6 +360,8 @@ namespace vrdrv {
         uint32_t idx = 0;
         if (find_locked(handles[e], idx)) {
           (*pIndices)[e] = (idx + 1) % 3;
+        } else {
+          (*pIndices)[e] = 0;  // §REVIEW-1103（B035 可能-1）：不是我們的 handle 也要給確定值，不留呼叫端的未初始化內容
         }
       }
     });
@@ -512,10 +514,10 @@ namespace vrdrv {
       bool torn = false;
       const bool read_ok = gen_->read_tracking_closest_target(t_target_qpc, trk_slot, trk_idx, &torn);
 
-      const bool gaze_valid = read_ok &&
-                              ((trk_slot.flags & VRIPC_TRK_F_GAZE) != 0) &&
-                              trk_slot.gaze_conf > 0 &&
-                              trk_slot.gaze_sample_age_ms < 250;
+      bool gaze_valid = read_ok &&
+                        ((trk_slot.flags & VRIPC_TRK_F_GAZE) != 0) &&
+                        trk_slot.gaze_conf > 0 &&
+                        trk_slot.gaze_sample_age_ms < 250;
 
       float target_px[2] = {optical_axis[0][0], optical_axis[1][0]};
       float target_py[2] = {optical_axis[0][1], optical_axis[1][1]};
@@ -523,9 +525,18 @@ namespace vrdrv {
       float yaw = 0.0f;
       float pitch = 0.0f;
       if (gaze_valid) {
-        ++stat_gaze_valid_;
         yaw = half_to_float(trk_slot.gaze_yaw_f16);
         pitch = half_to_float(trk_slot.gaze_pitch_f16);
+        // §REVIEW-1103（B035-1）：f16 的 NaN／Inf 會一路變成 NaN 的注視點；第一幀初始化時寫進中心就永遠是 NaN。
+        // 不是有限值、或超過 ±85°（tan 爆掉）就當這次沒有 gaze。
+        if (!std::isfinite(yaw) || !std::isfinite(pitch) || std::fabs(yaw) > 1.48f || std::fabs(pitch) > 1.48f) {
+          gaze_valid = false;
+          yaw = 0.0f;
+          pitch = 0.0f;
+        }
+      }
+      if (gaze_valid) {
+        ++stat_gaze_valid_;
 
         const float tx = std::tan(yaw);
         const float ty = std::tan(pitch);
@@ -576,6 +587,9 @@ namespace vrdrv {
       } else if (!gaze_valid) {
         saccade_frozen_ = false;
         low_vel_samples_ = 0;
+        // §REVIEW-1103（B035-2）：中斷（眨眼）期間不清的話，恢復第一幀會拿「中斷前角度→現在角度」除以單幀 dt，
+        // 眼睛在中斷期間轉 > ~3° 就被算成 > 250°/s → 誤判 saccade、注視點多卡在光軸約 2 幀。恢復後第一個樣本只當基準。
+        last_gaze_sample_qpc_ = 0;
       }
 
       if (gaze_valid) {

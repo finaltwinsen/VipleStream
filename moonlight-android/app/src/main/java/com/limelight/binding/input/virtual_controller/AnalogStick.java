@@ -136,7 +136,8 @@ public class AnalogStick extends VirtualControllerElement {
     private static double getAngle(float way_x, float way_y) {
         // prevent divisions by zero for corner cases
         if (way_x == 0) {
-            return way_y < 0 ? Math.PI : 0;
+            // §REVIEW-1104：修正垂直軸特判角度，上方(way_y < 0)應為 0，下方(way_y > 0)應為 Math.PI
+            return way_y < 0 ? 0 : Math.PI;
         } else if (way_y == 0) {
             if (way_x > 0) {
                 return Math.PI * 3 / 2;
@@ -325,7 +326,9 @@ public class AnalogStick extends VirtualControllerElement {
             }
             // up event (revoke touch)
             case MotionEvent.ACTION_CANCEL:
-            case MotionEvent.ACTION_UP: {
+            case MotionEvent.ACTION_UP:
+            // §REVIEW-1104：多指觸控下主要手指放開時，走與 ACTION_UP 相同的放開路徑
+            case MotionEvent.ACTION_POINTER_UP: {
                 setPressed(false);
                 break;
             }

@@ -365,4 +365,6 @@
     <string name="steam_switch_error_taskgone">Switch task disappeared on host</string>
     <string name="steam_switch_error_timeout">Switch timed out (>150 s without server reaching a terminal state)</string>
     <string name="steam_switch_account_unavailable">This account has no saved credentials on the host. Sign in once on the host first, then try again.</string>
+    <string name="title_show_advanced">Show advanced and experimental options</string>
+    <string name="summary_show_advanced">Troubleshooting and testing options. Hidden options keep their current values.</string>
 </resources>

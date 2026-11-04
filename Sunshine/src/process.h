@@ -282,6 +282,15 @@ namespace proc {
     // exits without joining (joining from clear_owner_uuid() would
     // deadlock when the watchdog itself initiated the clear).
     static std::mutex _owner_mutex;
+    // §REVIEW-1103：running()／terminate()／execute()／detach() 會從 stream、HTTP／HTTPS、tray、
+    // Steam／idle 看門狗等多條執行緒呼叫；app 結束時兩條執行緒可能同時進 terminate()，undo 指令重複執行、
+    // _app_prep_it 被遞減兩次而越界。用一把 recursive mutex 序列化（execute→terminate、running→terminate
+    // 會在同一條執行緒重入）。static 是因為 proc_t 會被 move 指派（refresh），和 _owner_mutex 同理。
+    static std::recursive_mutex _state_mutex;
+    // §REVIEW-1103：running() 每輪都會被串流控制執行緒呼叫，不能被 terminate()（undo 指令、等程式結束）
+    // 或 execute()（prep 指令）持鎖擋住好幾秒；拿不到鎖時回傳上一次的結果。
+    static std::atomic<int> _running_cache;
+    int running_locked_();
     std::chrono::steady_clock::time_point _last_activity {};
     static std::atomic<uint64_t> _idle_watchdog_gen;
     void start_idle_watchdog_();
@@ -295,6 +304,7 @@ namespace proc {
   std::tuple<std::string, std::string> calculate_app_id(const std::string &app_name, std::string app_image_path, int index);
 
   bool check_valid_png(const std::filesystem::path &path);
+  bool check_valid_jpeg(const std::filesystem::path &path);  // §STEAM-ART：appasset 依檔頭決定 Content-Type
   std::string validate_app_image_path(std::string app_image_path);
   void refresh(const std::string &file_name);
   std::optional<proc::proc_t> parse(const std::string &file_name);

@@ -5,6 +5,7 @@
 
 #include "filetransferclient.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -63,6 +64,7 @@ void FileTransferClient::onWorkerStarted()
 void FileTransferClient::onWorkerStopping()
 {
     qCInfo(lcXfer) << "[VIPLE-XFER] worker thread stopping, cleaning up";
+    killZipProcess();  // §REVIEW-1103：壓縮中結束串流不必等壓完
     if (m_PollTimer) {
         m_PollTimer->stop();
         m_PollTimer->deleteLater();
@@ -98,9 +100,20 @@ void FileTransferClient::onWorkerStopping()
             QFile::remove(path);
         }
     }
+    // §REVIEW-1103：取消／串流中斷的資料夾上傳原本會把暫存 zip 留在 %TEMP%（大小＝整個資料夾）
+    if (!m_ActiveTempZip.isEmpty()) {
+        QFile::remove(m_ActiveTempZip);
+        m_ActiveTempZip.clear();
+    }
+    m_ActiveToken.clear();
     if (m_Nam) {
         m_Nam->deleteLater();
         m_Nam = nullptr;
+    }
+    // §REVIEW-1103：呼叫端在 stop() 之後 deleteLater()，但物件還屬於 worker 執行緒、而它的事件迴圈馬上就結束，
+    // DeferredDelete 永遠不會被處理 → 每場串流洩漏一個物件。搬回主執行緒（只能在目前所屬的執行緒上推出去，這裡就是）。
+    if (QCoreApplication::instance() != nullptr) {
+        moveToThread(QCoreApplication::instance()->thread());
     }
 }
 
@@ -189,6 +202,7 @@ void FileTransferClient::cancelCurrent()
     const QString token = m_ActiveToken;
     const bool isDownload = (m_ActiveDirection == QStringLiteral("in"));
     qCInfo(lcXfer) << "[VIPLE-XFER] cancel requested token=" << token;
+    killZipProcess();  // §REVIEW-1103：資料夾還在壓縮時取消
     if (m_ActiveTransferReply) {
         auto *p = m_ActiveTransferReply.data();
         m_ActiveTransferReply.clear();
@@ -210,6 +224,11 @@ void FileTransferClient::cancelCurrent()
         if (isDownload) {
             QFile::remove(tmpPath);
         }
+    }
+    // §REVIEW-1103：原本取消資料夾上傳時暫存 zip 沒人刪（finished lambda 看到 reply 已清掉就 return）
+    if (!m_ActiveTempZip.isEmpty()) {
+        QFile::remove(m_ActiveTempZip);
+        m_ActiveTempZip.clear();
     }
     m_ActiveTotalBytes = 0;
     m_ActiveBytesDone = 0;
@@ -247,7 +266,8 @@ void FileTransferClient::onPollTimer()
 {
     if (!m_Started || !m_Nam) return;
     if (m_PollReply) return;            // 上一次 poll 還在跑，跳過
-    if (m_ActiveTransferReply) return;  // 有 transfer 進行中，先別 poll 新命令
+    // §REVIEW-1103：原本傳輸中不 poll，Web UI 按取消排進來的 cancel 命令要等傳完才收得到 = 取消無效。
+    // 現在傳輸中照常 poll；dispatch 對「傳輸中又來一筆傳輸」回報 busy（server 的 busy() 本來就擋，實務上不會發生）。
 
     QUrl url = buildUrl(QStringLiteral("/transfer/poll"));
     // 每 2 秒一發，常態靜音；錯誤路徑在 onPollFinished 已有 qCWarning
@@ -368,6 +388,7 @@ void FileTransferClient::handleDownloadToClient(const PendingCommand &cmd)
 {
     if (!m_ActiveToken.isEmpty()) {
         qCWarning(lcXfer) << "[VIPLE-XFER] download requested but transfer in progress";
+        postFailed(cmd.token, QStringLiteral("busy"));  // §REVIEW-1103
         return;
     }
     QString safeName = sanitizeFilename(cmd.filename);
@@ -398,6 +419,7 @@ void FileTransferClient::handleDownloadToClient(const PendingCommand &cmd)
     }
     m_ActiveToken = cmd.token;
     m_ActiveDirection = QStringLiteral("in");
+    m_DownloadWriteFailed = false;
     m_ActiveTotalBytes = cmd.size;
     m_ActiveBytesDone = 0;
     m_LastProgressBucket = -1;
@@ -417,7 +439,13 @@ void FileTransferClient::handleDownloadToClient(const PendingCommand &cmd)
         if (!self || !self->m_ActiveFile || !self->m_ActiveTransferReply) return;
         QByteArray chunk = self->m_ActiveTransferReply->readAll();
         if (chunk.isEmpty()) return;
-        self->m_ActiveFile->write(chunk);
+        // §REVIEW-1103：寫檔失敗（磁碟滿等）原本不檢查，網路端照樣 NoError → 回報 done、留下截斷的檔案
+        if (self->m_ActiveFile->write(chunk) != chunk.size()) {
+            qCWarning(lcXfer) << "[VIPLE-XFER] download write failed:" << self->m_ActiveFile->errorString();
+            self->m_DownloadWriteFailed = true;
+            self->m_ActiveTransferReply->abort();  // 同步觸發 finished，在那裡清理並回報失敗
+            return;
+        }
         self->m_ActiveBytesDone += static_cast<quint64>(chunk.size());
         int bucket = (self->m_ActiveTotalBytes > 0)
                          ? static_cast<int>(self->m_ActiveBytesDone * 20 / self->m_ActiveTotalBytes)
@@ -438,12 +466,31 @@ void FileTransferClient::handleDownloadToClient(const PendingCommand &cmd)
         QNetworkReply *r = self->m_ActiveTransferReply.data();
         self->m_ActiveTransferReply.clear();
         if (!r) return;
-        bool ok = (r->error() == QNetworkReply::NoError);
+        bool ok = (r->error() == QNetworkReply::NoError) && !self->m_DownloadWriteFailed;
+        QString errText = self->m_DownloadWriteFailed ? QStringLiteral("write_failed") : r->errorString();
         if (self->m_ActiveFile) {
             // flush 剩餘 readyRead 沒被觸發到的尾段
             QByteArray tail = r->readAll();
-            if (!tail.isEmpty()) self->m_ActiveFile->write(tail);
-            self->m_ActiveFile->flush();
+            if (ok && !tail.isEmpty()) {
+                if (self->m_ActiveFile->write(tail) != tail.size()) {
+                    ok = false;
+                    errText = QStringLiteral("write_failed");
+                }
+                else {
+                    self->m_ActiveBytesDone += static_cast<quint64>(tail.size());
+                }
+            }
+            if (ok && !self->m_ActiveFile->flush()) {
+                ok = false;
+                errText = QStringLiteral("write_failed");
+            }
+            // §REVIEW-1103：大小對不上（連線中途被切但沒報錯）也算失敗
+            if (ok && self->m_ActiveTotalBytes > 0 && self->m_ActiveBytesDone != self->m_ActiveTotalBytes) {
+                qCWarning(lcXfer) << "[VIPLE-XFER] download size mismatch got=" << self->m_ActiveBytesDone
+                                  << "expected=" << self->m_ActiveTotalBytes;
+                ok = false;
+                errText = QStringLiteral("size_mismatch");
+            }
             self->m_ActiveFile->close();
             QString finalPath = self->m_ActiveFile->fileName();
             delete self->m_ActiveFile;
@@ -457,7 +504,7 @@ void FileTransferClient::handleDownloadToClient(const PendingCommand &cmd)
         QJsonObject obj;
         obj["kind"] = ok ? QStringLiteral("done") : QStringLiteral("failed");
         obj["token"] = self->m_ActiveToken;
-        if (!ok) obj["error"] = r->errorString();
+        if (!ok) obj["error"] = errText;
         self->postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
         qCInfo(lcXfer) << "[VIPLE-XFER] download finished token=" << self->m_ActiveToken
                        << "ok=" << ok;
@@ -473,21 +520,41 @@ void FileTransferClient::handleDownloadToClient(const PendingCommand &cmd)
     });
 }
 
+void FileTransferClient::postFailed(const QString &token, const QString &error)
+{
+    QJsonObject obj;
+    obj["kind"] = QStringLiteral("failed");
+    obj["token"] = token;
+    obj["error"] = error;
+    postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+}
+
+void FileTransferClient::killZipProcess()
+{
+    if (!m_ZipProc) {
+        return;
+    }
+    QProcess *z = m_ZipProc;
+    m_ZipProc = nullptr;
+    z->disconnect(this);
+    z->kill();
+    z->waitForFinished(2000);
+    delete z;
+}
+
 void FileTransferClient::handleUploadFromClient(const PendingCommand &cmd)
 {
     if (!m_ActiveToken.isEmpty()) {
         qCWarning(lcXfer) << "[VIPLE-XFER] upload requested but transfer in progress";
+        // §REVIEW-1103：傳輸中也會 poll（為了收 cancel），撞到的命令回報失敗，server 不必等到逾時
+        postFailed(cmd.token, QStringLiteral("busy"));
         return;
     }
     QString safeName = sanitizeFilename(cmd.filename);
     if (safeName.isEmpty()) {
         qCWarning(lcXfer) << "[VIPLE-XFER] upload: rejected filename" << cmd.filename;
         // 回報失敗，server 不必等到逾時（opt B049）
-        QJsonObject obj;
-        obj["kind"] = QStringLiteral("failed");
-        obj["token"] = cmd.token;
-        obj["error"] = QStringLiteral("invalid_filename");
-        postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+        postFailed(cmd.token, QStringLiteral("invalid_filename"));
         return;
     }
     QString baseDir = cmd.path.isEmpty() ? downloadsDir() : cmd.path;
@@ -495,87 +562,117 @@ void FileTransferClient::handleUploadFromClient(const PendingCommand &cmd)
     QFileInfo srcInfo(src);
     if (!srcInfo.exists()) {
         qCWarning(lcXfer) << "[VIPLE-XFER] upload: missing src" << src;
-        QJsonObject obj;
-        obj["kind"] = QStringLiteral("failed");
-        obj["token"] = cmd.token;
-        obj["error"] = QStringLiteral("src_missing");
-        postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+        postFailed(cmd.token, QStringLiteral("src_missing"));
+        return;
+    }
+
+    if (!(cmd.isDirectory || srcInfo.isDir())) {
+        startUpload(cmd.token, src, safeName, QString(), false);
         return;
     }
 
     // 資料夾 → 先 zip 到 temp，然後上傳 zip。完成後刪除 temp。
-    QString uploadPath = src;
-    bool zipTempCreated = false;
-    if (cmd.isDirectory || srcInfo.isDir()) {
-        QString tempZip = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                              .filePath("VipleXfer-" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".zip");
-        emit statusChanged(tr("Zipping folder: %1…").arg(safeName));
-        qCInfo(lcXfer) << "[VIPLE-XFER] zipping folder src=" << src << "to" << tempZip;
-        QProcess zipProc;
-#ifdef Q_OS_WIN
-        // PowerShell Compress-Archive — 通用、不依賴外部安裝
-        QStringList args;
-        args << "-NoLogo" << "-NonInteractive" << "-Command"
-             << QString("Compress-Archive -LiteralPath '%1' -DestinationPath '%2' -Force")
-                    .arg(QString(src).replace("'", "''"), QString(tempZip).replace("'", "''"));
-        zipProc.start("powershell.exe", args);
-#else
-        // Linux：用 zip 命令（zip -r OUT IN）
-        QStringList args;
-        args << "-r" << tempZip << safeName;
-        zipProc.setWorkingDirectory(baseDir);
-        zipProc.start("zip", args);
-#endif
-        if (!zipProc.waitForStarted(5000)) {
-            qCWarning(lcXfer) << "[VIPLE-XFER] zip process failed to start";
-            QJsonObject obj;
-            obj["kind"] = QStringLiteral("failed");
-            obj["token"] = cmd.token;
-            obj["error"] = QStringLiteral("zip_start_failed");
-            postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
-            return;
-        }
-        zipProc.waitForFinished(-1);
-        if (zipProc.exitStatus() != QProcess::NormalExit || zipProc.exitCode() != 0) {
-            qCWarning(lcXfer) << "[VIPLE-XFER] zip failed exitCode=" << zipProc.exitCode()
-                              << "stderr=" << zipProc.readAllStandardError();
-            QFile::remove(tempZip);
-            QJsonObject obj;
-            obj["kind"] = QStringLiteral("failed");
-            obj["token"] = cmd.token;
-            obj["error"] = QStringLiteral("zip_failed");
-            postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
-            return;
-        }
-        uploadPath = tempZip;
-        zipTempCreated = true;
-        QFileInfo zipInfo(tempZip);
-        qCInfo(lcXfer) << "[VIPLE-XFER] zip done, size=" << zipInfo.size();
-    }
+    // §REVIEW-1103：原本 waitForFinished(-1) 把 worker 整段卡住：壓縮期間取消熱鍵、Web UI 取消都排在佇列裡
+    // 不會執行，這時結束串流 stop() 還要等壓完。改成非同步：壓縮期間就把 token 記成進行中，
+    // cancelCurrent／onWorkerStopping 會砍掉壓縮行程並刪暫存檔。
+    QString tempZip = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                          .filePath("VipleXfer-" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".zip");
+    emit statusChanged(tr("Zipping folder: %1…").arg(safeName));
+    qCInfo(lcXfer) << "[VIPLE-XFER] zipping folder src=" << src << "to" << tempZip;
 
+    m_ActiveToken = cmd.token;
+    m_ActiveDirection = QStringLiteral("out");
+    m_ActiveTempZip = tempZip;
+    m_ActiveTotalBytes = 0;
+    m_ActiveBytesDone = 0;
+    m_LastProgressBucket = -1;
+
+    m_ZipProc = new QProcess();
+#ifdef Q_OS_WIN
+    // PowerShell Compress-Archive — 通用、不依賴外部安裝
+    QStringList args;
+    args << "-NoLogo" << "-NonInteractive" << "-Command"
+         << QString("Compress-Archive -LiteralPath '%1' -DestinationPath '%2' -Force")
+                .arg(QString(src).replace("'", "''"), QString(tempZip).replace("'", "''"));
+    const QString program = QStringLiteral("powershell.exe");
+#else
+    // Linux：用 zip 命令（zip -r OUT IN）
+    // §REVIEW-1103：資料夾名以 '-' 開頭會被 zip 當成選項，加 "./" 前綴
+    QStringList args;
+    args << "-r" << tempZip << (QStringLiteral("./") + safeName);
+    m_ZipProc->setWorkingDirectory(baseDir);
+    const QString program = QStringLiteral("zip");
+#endif
+
+    const QString token = cmd.token;
+    const bool isDirectory = cmd.isDirectory;
+    connect(m_ZipProc, &QProcess::errorOccurred, this, [this, token](QProcess::ProcessError err) {
+        if (err != QProcess::FailedToStart || !m_ZipProc || m_ActiveToken != token) {
+            return;  // 其他錯誤會接著發 finished，在那裡處理
+        }
+        qCWarning(lcXfer) << "[VIPLE-XFER] zip process failed to start";
+        // 在它自己的訊號裡，不可直接 delete
+        QProcess *z = m_ZipProc;
+        m_ZipProc = nullptr;
+        z->disconnect(this);
+        z->deleteLater();
+        QFile::remove(m_ActiveTempZip);
+        m_ActiveTempZip.clear();
+        m_ActiveToken.clear();
+        postFailed(token, QStringLiteral("zip_start_failed"));
+    });
+    connect(m_ZipProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, token, safeName, isDirectory](int exitCode, QProcess::ExitStatus status) {
+                if (!m_ZipProc || m_ActiveToken != token) {
+                    return;  // 已取消（cancelCurrent 先把 m_ZipProc 清掉、斷開連線）
+                }
+                QProcess *z = m_ZipProc;
+                m_ZipProc = nullptr;
+                const QByteArray stderrText = z->readAllStandardError();
+                z->deleteLater();
+                const QString zipPath = m_ActiveTempZip;
+                if (status != QProcess::NormalExit || exitCode != 0) {
+                    qCWarning(lcXfer) << "[VIPLE-XFER] zip failed exitCode=" << exitCode
+                                      << "stderr=" << stderrText;
+                    QFile::remove(zipPath);
+                    m_ActiveTempZip.clear();
+                    m_ActiveToken.clear();
+                    postFailed(token, QStringLiteral("zip_failed"));
+                    return;
+                }
+                qCInfo(lcXfer) << "[VIPLE-XFER] zip done, size=" << QFileInfo(zipPath).size();
+                // startUpload 會重新檢查 m_ActiveToken，先清掉
+                m_ActiveToken.clear();
+                startUpload(token, zipPath, safeName, zipPath, isDirectory);
+            });
+    m_ZipProc->start(program, args);
+}
+
+void FileTransferClient::startUpload(const QString &token, const QString &uploadPath,
+                                     const QString &displayName, const QString &tempZip,
+                                     bool isDirectory)
+{
     QFileInfo uploadInfo(uploadPath);
     m_ActiveFile = new QFile(uploadPath);
     if (!m_ActiveFile->open(QIODevice::ReadOnly)) {
         qCWarning(lcXfer) << "[VIPLE-XFER] upload: open read failed" << uploadPath;
         delete m_ActiveFile;
         m_ActiveFile = nullptr;
-        if (zipTempCreated) QFile::remove(uploadPath);
+        if (!tempZip.isEmpty()) QFile::remove(tempZip);
+        m_ActiveTempZip.clear();
         // 回報失敗，server 不必等到逾時（opt B049）
-        QJsonObject obj;
-        obj["kind"] = QStringLiteral("failed");
-        obj["token"] = cmd.token;
-        obj["error"] = QStringLiteral("open_read_failed");
-        postResult(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+        postFailed(token, QStringLiteral("open_read_failed"));
         return;
     }
-    m_ActiveToken = cmd.token;
+    m_ActiveToken = token;
     m_ActiveDirection = QStringLiteral("out");
+    m_ActiveTempZip = tempZip;
     m_ActiveTotalBytes = static_cast<quint64>(uploadInfo.size());
     m_ActiveBytesDone = 0;
     m_LastProgressBucket = -1;
 
     QUrl url = buildUrl(QStringLiteral("/transfer/blob"),
-                        QStringLiteral("token=") + cmd.token);
+                        QStringLiteral("token=") + token);
     QNetworkRequest req = buildRequest(url);
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
     req.setHeader(QNetworkRequest::ContentLengthHeader, uploadInfo.size());
@@ -583,14 +680,13 @@ void FileTransferClient::handleUploadFromClient(const PendingCommand &cmd)
     // QNetworkAccessManager::post(QIODevice*) 會自動以 streaming 方式發送
     m_ActiveTransferReply = m_Nam->post(req, m_ActiveFile);
 
-    emit statusChanged(tr("Sending: %1 (0%)").arg(safeName));
-    qCInfo(lcXfer) << "[VIPLE-XFER] upload started token=" << cmd.token
+    emit statusChanged(tr("Sending: %1 (0%)").arg(displayName));
+    qCInfo(lcXfer) << "[VIPLE-XFER] upload started token=" << token
                    << "uploadPath=" << uploadPath << "size=" << uploadInfo.size()
-                   << "isDir=" << cmd.isDirectory;
+                   << "isDir=" << isDirectory;
 
     QPointer<FileTransferClient> self(this);
-    QString filenameCopy = safeName;
-    QString tempZipForCleanup = zipTempCreated ? uploadPath : QString();
+    QString filenameCopy = displayName;
     connect(m_ActiveTransferReply.data(), &QNetworkReply::uploadProgress,
             this, [self, filenameCopy](qint64 sent, qint64 total) {
                 if (!self || total <= 0) return;
@@ -606,7 +702,7 @@ void FileTransferClient::handleUploadFromClient(const PendingCommand &cmd)
                 }
             });
 
-    connect(m_ActiveTransferReply.data(), &QNetworkReply::finished, this, [self, filenameCopy, tempZipForCleanup]() {
+    connect(m_ActiveTransferReply.data(), &QNetworkReply::finished, this, [self, filenameCopy]() {
         if (!self) return;
         QNetworkReply *r = self->m_ActiveTransferReply.data();
         self->m_ActiveTransferReply.clear();
@@ -618,8 +714,9 @@ void FileTransferClient::handleUploadFromClient(const PendingCommand &cmd)
             self->m_ActiveFile = nullptr;
         }
         // 清掉 zip temp（如果有的話）
-        if (!tempZipForCleanup.isEmpty()) {
-            QFile::remove(tempZipForCleanup);
+        if (!self->m_ActiveTempZip.isEmpty()) {
+            QFile::remove(self->m_ActiveTempZip);
+            self->m_ActiveTempZip.clear();
         }
         if (ok) {
             emit self->statusChanged(tr("Sent: %1").arg(filenameCopy));
@@ -672,6 +769,22 @@ QString FileTransferClient::sanitizeFilename(const QString &raw)
         if (ch.unicode() < 0x20) return {};
         if (forbidden.contains(ch)) return {};
     }
+#ifdef Q_OS_WIN
+    // §REVIEW-1103：CON／NUL／COM1 等保留裝置名（含帶副檔名的形式）在 Windows 開不了檔，先擋掉
+    {
+        const QString stem = raw.section(QLatin1Char('.'), 0, 0).trimmed().toUpper();
+        static const QStringList reserved = {
+            QStringLiteral("CON"), QStringLiteral("PRN"), QStringLiteral("AUX"), QStringLiteral("NUL"),
+            QStringLiteral("COM1"), QStringLiteral("COM2"), QStringLiteral("COM3"), QStringLiteral("COM4"),
+            QStringLiteral("COM5"), QStringLiteral("COM6"), QStringLiteral("COM7"), QStringLiteral("COM8"),
+            QStringLiteral("COM9"), QStringLiteral("LPT1"), QStringLiteral("LPT2"), QStringLiteral("LPT3"),
+            QStringLiteral("LPT4"), QStringLiteral("LPT5"), QStringLiteral("LPT6"), QStringLiteral("LPT7"),
+            QStringLiteral("LPT8"), QStringLiteral("LPT9"),
+        };
+        if (reserved.contains(stem)) return {};
+        if (raw.endsWith(QLatin1Char('.')) || raw.endsWith(QLatin1Char(' '))) return {};
+    }
+#endif
     return raw;
 }
 

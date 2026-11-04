@@ -206,6 +206,7 @@ private:
     int m_Dominant = 1;  // 0 左、1 右
     bool m_TriggerDown[2] = {false, false};
     bool m_Pressed[2] = {false, false};  // [0] 左鍵、[1] 右鍵（已送出 press、尚未 release）
+    bool m_PlayerModeWas = false;        // §REVIEW-1104：上一格是否影片模式（上升緣放開滑鼠鍵並關鍵盤）
     bool m_WasFocused = false;
 
     XrRay::OneEuro m_FiltU, m_FiltV;

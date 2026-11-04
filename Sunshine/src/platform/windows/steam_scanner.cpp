@@ -11,6 +11,9 @@
   #include <algorithm>
   #include <atomic>
   #include <chrono>
+  #include <cstring>
+  #include <cwctype>
+  #include <initializer_list>
   #include <filesystem>
   #include <fstream>
   #include <mutex>
@@ -109,6 +112,80 @@ namespace viple::steam {
      */
     std::string path_to_utf8(const fs::path &p) {
       return wstr_to_utf8(p.wstring());
+    }
+
+    /**
+     * §STEAM-ART：在 Steam 的 librarycache 找某個 app 的圖。
+     *
+     * Steam 的快取格式一直在變，同一台機器上三種並存（11-03 host 實測 55 款裡約 20 款只在新格式）：
+     *   1. 舊版：librarycache/<appid>_library_600x900.jpg
+     *   2. 2024：librarycache/<appid>/library_600x900.jpg
+     *   3. 2025 起：librarycache/<appid>/<sha1>/library_600x900.jpg（每張圖各自一個雜湊子資料夾，圖更新就換資料夾）
+     * 檔名也有變體：直式封面另有 library_capsule.jpg（同為 300x450），橫幅有 header.jpg／library_header.jpg，
+     * 有語系版本時是 <base>_<語系>.jpg（例如 library_600x900_tchinese.jpg），而且可能只有語系版。
+     *
+     * 依 bases 的順序找，每個 base 先找完全同名、再找語系版；同一個名字出現在多處時取最新的檔案。
+     * 子資料夾只往下看一層。找不到回傳空字串。
+     */
+    std::string find_librarycache_image(const fs::path &lc, const std::string &app_id, std::initializer_list<const char *> bases) {
+      std::error_code ec;
+      std::vector<fs::path> files;
+      auto collect = [&](const fs::path &dir) {
+        for (fs::directory_iterator it {dir, ec}, end; !ec && it != end; it.increment(ec)) {
+          std::error_code ec2;
+          if (it->is_regular_file(ec2)) {
+            files.push_back(it->path());
+          } else if (dir == lc / app_id && it->is_directory(ec2)) {
+            for (fs::directory_iterator sub {it->path(), ec2}, send; !ec2 && sub != send; sub.increment(ec2)) {
+              std::error_code ec3;
+              if (sub->is_regular_file(ec3)) {
+                files.push_back(sub->path());
+              }
+            }
+          }
+        }
+        ec.clear();
+      };
+      collect(lc / app_id);
+
+      auto lower = [](std::wstring w) {
+        for (auto &c : w) {
+          c = (wchar_t) std::towlower(c);
+        }
+        return w;
+      };
+
+      for (const char *base_c : bases) {
+        const std::wstring base(base_c, base_c + std::strlen(base_c));
+        // 舊版平面格式
+        const fs::path flat = lc / (app_id + "_" + base_c + ".jpg");
+        for (int pass = 0; pass < 2; ++pass) {
+          fs::path best;
+          fs::file_time_type best_time {};
+          for (const auto &f : files) {
+            const auto name = lower(f.filename().wstring());
+            const bool exact = name == base + L".jpg";
+            const bool variant = name.size() > base.size() + 5 && name.compare(0, base.size() + 1, base + L"_") == 0 &&
+                                 name.compare(name.size() - 4, 4, L".jpg") == 0;
+            if (pass == 0 ? !exact : !variant) {
+              continue;
+            }
+            std::error_code ec2;
+            const auto t = fs::last_write_time(f, ec2);
+            if (best.empty() || (!ec2 && t > best_time)) {
+              best = f;
+              best_time = ec2 ? fs::file_time_type {} : t;
+            }
+          }
+          if (!best.empty()) {
+            return path_to_utf8(best);
+          }
+          if (pass == 0 && fs::exists(flat, ec)) {
+            return path_to_utf8(flat);
+          }
+        }
+      }
+      return {};
     }
 
     std::optional<std::string> slurp_file(const fs::path &p) {
@@ -519,21 +596,11 @@ namespace viple::steam {
           } catch (...) {}
           a.launch_url = "steam://rungameid/" + app_id;
 
-          // Image lookup — Steam 2024+ uses per-AppID subfolders
-          fs::path newHeader  = steam / "appcache" / "librarycache" / app_id / "header.jpg";
-          fs::path newLibrary = steam / "appcache" / "librarycache" / app_id / "library_600x900.jpg";
-          fs::path oldHeader  = steam / "appcache" / "librarycache" / (app_id + "_header.jpg");
-          fs::path oldLibrary = steam / "appcache" / "librarycache" / (app_id + "_library_600x900.jpg");
-          if (fs::exists(newHeader, ec)) {
-            a.image_header = path_to_utf8(newHeader);
-          } else if (fs::exists(oldHeader, ec)) {
-            a.image_header = path_to_utf8(oldHeader);
-          }
-          if (fs::exists(newLibrary, ec)) {
-            a.image_library = path_to_utf8(newLibrary);
-          } else if (fs::exists(oldLibrary, ec)) {
-            a.image_library = path_to_utf8(oldLibrary);
-          }
+          // §STEAM-ART：三種快取格式＋檔名變體都要找（原本只找 <appid>/ 與 <appid>_ 兩種固定檔名，
+          // 新版 Steam 放在雜湊子資料夾或只有 library_capsule／語系版的遊戲就沒有封面）。
+          const fs::path lc = steam / "appcache" / "librarycache";
+          a.image_library = find_librarycache_image(lc, app_id, {"library_600x900", "library_capsule"});
+          a.image_header  = find_librarycache_image(lc, app_id, {"header", "library_header"});
 
           if (auto it = ownership.find(app_id); it != ownership.end()) {
             a.owners = it->second;

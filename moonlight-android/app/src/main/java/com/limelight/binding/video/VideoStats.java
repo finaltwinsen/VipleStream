@@ -33,7 +33,8 @@ class VideoStats {
 
         if (this.minHostProcessingLatency == 0) {
             this.minHostProcessingLatency = other.minHostProcessingLatency;
-        } else {
+        // §REVIEW-1104：0 為無樣本哨兵值，other 為 0 時不參與 Math.min 避免將下限誤刷為 0
+        } else if (other.minHostProcessingLatency != 0) {
             this.minHostProcessingLatency = (char) Math.min(this.minHostProcessingLatency, other.minHostProcessingLatency);
         }
         this.maxHostProcessingLatency = (char) Math.max(this.maxHostProcessingLatency, other.maxHostProcessingLatency);

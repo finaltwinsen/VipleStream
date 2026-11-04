@@ -83,6 +83,9 @@ public:
     // ensureDpbImagePool / tear them down on destroyVideoSession.
     VkFrucDpbPicture       m_PicPool[kPicPoolSize];
 
+    // §REVIEW-1104：vkQueueSubmit 失敗時由 renderer 設 true，DecodePicture 據此回 false。
+    bool                   m_SubmitFailed = false;
+
 private:
     VkFrucRenderer*        m_Parent;
     std::atomic<uint64_t>  m_BeginSeqCount{0};

@@ -338,4 +338,6 @@
     <string name="steam_switch_error_taskgone">Zadanie przełączania zniknęło z hosta</string>
     <string name="steam_switch_error_timeout">Przekroczono czas przełączania (&gt;150 s, a serwer nie osiągnął stanu końcowego)</string>
     <string name="steam_switch_account_unavailable">To konto nie ma zapisanych danych logowania na hoście. Najpierw zaloguj się raz na hoście, a potem spróbuj ponownie.</string>
+    <string name="title_show_advanced">Pokaż opcje zaawansowane i eksperymentalne</string>
+    <string name="summary_show_advanced">Opcje do rozwiązywania problemów i testów. Ukryte opcje zachowują bieżące wartości.</string>
 </resources>

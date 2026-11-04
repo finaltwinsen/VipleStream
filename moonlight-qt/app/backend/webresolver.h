@@ -22,6 +22,21 @@ class WebResolver : public QObject
     Q_OBJECT
 
 public:
+    // 可以換的畫質（只有影像的那一條；聲音不變）。同一個高度只留一個：https 直連、不要 AV1、SDR，同高度取 yt-dlp 排最好的
+    struct VideoChoice {
+        int height = 0;
+        QString label;      // "1080p"、"2160p60"
+        QString url;
+        QString projection; // 同 Result::projection
+    };
+    // 字幕軌（json3 格式的網址；YouTube 的時間文字）
+    struct SubtitleTrack {
+        QString lang;       // "en"、"zh-Hant"、"en-orig"
+        QString name;       // "English"、"Chinese (Traditional)"
+        QString url;
+        bool automatic = false;  // 自動產生（含自動翻譯）
+    };
+
     struct Result {
         bool ok = false;
         QString error;
@@ -32,6 +47,13 @@ public:
         QString headers;    // "Key: value\r\n…"（不含 User-Agent）
         double durationSec = 0.0;
         bool isLive = false;
+        // 影像那一條的投影（YouTube 的 projectionType，yt-dlp 寫在 format_note 最後）：equi＝等距柱狀、
+        // equi_threed_top_bottom＝等距柱狀上下立體、mesh＝網格（等角立方體等）；平面影片或網站沒說＝空字串
+        QString projection;
+        // 換畫質、字幕（2026-11-02 使用者要求 VR 播放時也能用 YouTube 的畫質與字幕）
+        QList<VideoChoice> videoChoices;   // 由高到低；空＝不能換（網站只給整條、或不是 YouTube 的格式）
+        int videoChoice = -1;              // 目前用的是 videoChoices 的哪一個
+        QList<SubtitleTrack> subtitles;    // 作者上傳的在前，自動產生的原文在後（不含自動翻譯）
     };
 
     explicit WebResolver(QObject* parent = nullptr);
@@ -43,6 +65,8 @@ public:
     static bool needsResolve(const QString& url);
     // 阻塞：解析一個網址（timeoutMs 內沒結果就失敗）
     static Result resolve(const QString& pageUrl, int timeoutMs);
+    // §REVIEW-1104：載入中按 B 要能打斷正在等的 yt-dlp（resolve 週期檢查這個旗標）
+    static void setResolveCancel(bool cancel);
 
     // ── 非同步（GUI 執行緒）──
     // 搜尋 YouTube（前 n 筆）；結果經 searchFinished([{title, url, duration, channel}], error)

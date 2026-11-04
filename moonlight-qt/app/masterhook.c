@@ -232,7 +232,8 @@ int close(int fd)
     int ret = fn_close(fd);
 
     // If we closed the last SDL FD, restore master to the Qt FD
-    if (ret == 0 && lastSdlFd) {
+    // §REVIEW-1104：Linux 上 DRM fd 的 close 就算回非 0，fd 也已經關掉，仍要還原 master 與 CRTC
+    if (lastSdlFd) {
         if (drmSetMaster(g_QtDrmMasterFd) < 0) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Failed to restore master to Qt DRM FD: %d",

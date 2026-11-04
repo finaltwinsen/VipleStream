@@ -578,6 +578,18 @@ void stopAudioStream(void) {
     AudioCallbacks.cleanup();
 }
 
+// §REVIEW-1103：startAudioStream 建執行緒失敗時的 QUIC 收尾（與 stopAudioStream 相同）
+static void unregisterQuicAudioOnStartFailure(void) {
+#ifdef VIPLE_MPQUIC
+    if (useQuicAudio) {
+        quicSetRecvCallbackForFlow(QUIC_FLOW_AUDIO, NULL, NULL);
+    }
+    quicAudioRing.head = 0;
+    quicAudioRing.tail = 0;
+    useQuicAudio = false;
+#endif
+}
+
 int startAudioStream(void* audioContext, int arFlags) {
     int err;
     OPUS_MULTISTREAM_CONFIGURATION chosenConfig;
@@ -617,10 +629,9 @@ int startAudioStream(void* audioContext, int arFlags) {
     err = PltCreateThread("AudioRecv", AudioReceiveThreadProc, NULL, &receiveThread);
     if (err != 0) {
         AudioCallbacks.stop();
-        if (rtpSocket != INVALID_SOCKET) {
-            closeSocket(rtpSocket);
-            rtpSocket = INVALID_SOCKET;
-        }
+        // §REVIEW-1103：失敗路徑要登出 QUIC 音訊回呼；rtpSocket 不在這裡關——UDP ping 執行緒
+        // 可能還在用它送，留給 destroyAudioStream 在 join ping 執行緒之後再關。
+        unregisterQuicAudioOnStartFailure();
         AudioCallbacks.cleanup();
         return err;
     }
@@ -631,10 +642,8 @@ int startAudioStream(void* audioContext, int arFlags) {
             AudioCallbacks.stop();
             PltInterruptThread(&receiveThread);
             PltJoinThread(&receiveThread);
-            if (rtpSocket != INVALID_SOCKET) {
-                closeSocket(rtpSocket);
-                rtpSocket = INVALID_SOCKET;
-            }
+            // §REVIEW-1103：同上，rtpSocket 留給 destroyAudioStream 關
+            unregisterQuicAudioOnStartFailure();
             AudioCallbacks.cleanup();
             return err;
         }

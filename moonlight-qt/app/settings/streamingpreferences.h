@@ -250,6 +250,7 @@ public:
     Q_PROPERTY(int bitrateKbps MEMBER bitrateKbps NOTIFY bitrateChanged)
     Q_PROPERTY(bool unlockBitrate MEMBER unlockBitrate NOTIFY unlockBitrateChanged)
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
+    Q_PROPERTY(bool adaptiveBitrate MEMBER adaptiveBitrate NOTIFY adaptiveBitrateChanged)
     Q_PROPERTY(bool enableVsync MEMBER enableVsync NOTIFY enableVsyncChanged)
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
@@ -335,6 +336,8 @@ public:
     Q_PROPERTY(bool reverseScrollDirection MEMBER reverseScrollDirection NOTIFY reverseScrollDirectionChanged)
     Q_PROPERTY(bool swapFaceButtons MEMBER swapFaceButtons NOTIFY swapFaceButtonsChanged)
     Q_PROPERTY(bool keepAwake MEMBER keepAwake NOTIFY keepAwakeChanged)
+    // §SETTINGS-ADV：設定頁「顯示進階與實驗性選項」；只影響設定頁顯示哪些選項，不影響任何串流行為
+    Q_PROPERTY(bool showAdvancedSettings MEMBER showAdvancedSettings NOTIFY showAdvancedSettingsChanged)
     // VR（Steam Frame PCVR）：設定頁用。vrEyeWidth 在設定頁一律和 vrEyeHeight 一起改（正方形）
     Q_PROPERTY(int vrEyeWidth MEMBER vrEyeWidth NOTIFY vrSettingsChanged)
     Q_PROPERTY(int vrEyeHeight MEMBER vrEyeHeight NOTIFY vrSettingsChanged)
@@ -365,7 +368,11 @@ public:
     bool autoFps;
     int bitrateKbps;
     bool unlockBitrate;
+    // 滑桿是否跟著解析度／fps 自動換成預設值（上游 Moonlight 的語意；動滑桿就關掉）
     bool autoAdjustBitrate;
+    // §ABR-AUTO（2026-11-03）：串流中依網路狀況自動調整位元率（server 的 AIMD），滑桿值是上限。
+    // 原本這件事也綁在 autoAdjustBitrate 上，使用者一動滑桿就連帶關掉；拆開後預設一律開。
+    bool adaptiveBitrate;
     bool enableVsync;
     bool gameOptimizations;
     bool playAudioOnHost;
@@ -412,6 +419,7 @@ public:
     bool reverseScrollDirection;
     bool swapFaceButtons;
     bool keepAwake;
+    bool showAdvancedSettings;  // §SETTINGS-ADV
     int packetSize;
     AudioConfig audioConfig;
     VideoCodecConfig videoCodecConfig;
@@ -522,7 +530,9 @@ public:
     bool vrHalfRate = false;          // §VR-HALF-RATE：--vr-half-rate，串流跑顯示更新率的一半；寫入設定（vrhalfrate）
     double vrLatchDelayMs = 3.0;      // §VR-LATE-LATCH：--vr-latch-delay，frame thread 晚幾毫秒才挑影像（0～20）；寫入設定（vrlatchdelayms）。
                                       // 2026-10-29 預設 0→3（使用者指示；頭盔實測解碼→顯示 −3.1 ms），舊版存著的 0 遷移一次
-    int vrBufferFrames = 1;           // §VR-BUFFER（2026-10-29）：--vr-buffer-frames，頭盔端多緩衝幾格（0＝關、1）；寫入設定（vrbufferframes）。
+    int vrBufferFrames = 1;           // §VR-BUFFER（2026-10-29）：--vr-buffer-frames，頭盔端多緩衝幾格（0＝關、1、2）；寫入設定（vrbufferframes）。
+    bool vrBufferAuto = true;         // §VR-BUFFER-AUTO（2026-11-04）：緩衝開著時依重複幀自動在 1、2 格之間切換（vrbufferauto）；
+                                      // --vr-buffer-frames auto 開、給數字＝固定格數。遠端桌球實測 2 格重複 76→26／10 s，MTP +4 ms
                                       // 預設開（使用者 10-29 指示；頭盔實測每張 0～7 ms 抖動時重複幀 13%→0.8%，MTP +3～7 ms）
     double vrOverscanDeg = 3.0;       // --vr-overscan（2.0.30 起預設 3）：每眼 FOV 四邊各放大幾度（0～10）。2026-10-07 起寫入設定（vroverscandeg），GUI 啟動的 VR 也吃得到
     bool vrTestHaptic = false;        // §VR M4a R2（dev）：--vr-test-haptic 本地注入 HAPTIC，不寫入設定
@@ -535,6 +545,7 @@ signals:
     void bitrateChanged();
     void unlockBitrateChanged();
     void autoAdjustBitrateChanged();
+    void adaptiveBitrateChanged();
     void enableVsyncChanged();
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();
@@ -589,6 +600,7 @@ signals:
     void swapFaceButtonsChanged();
     void captureSysKeysModeChanged();
     void keepAwakeChanged();
+    void showAdvancedSettingsChanged();
     void vrSettingsChanged();
     void languageChanged();
 

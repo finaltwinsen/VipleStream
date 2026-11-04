@@ -153,7 +153,13 @@ int openHook(typeof(open) *real_open, typeof(close) *real_close, const char *pat
                     real_close(fd);
 
                     // dup() an existing FD into the unused slot
-                    fd = dup(g_SdlDrmMasterFds[allocatedFdIndex]);
+                    // §REVIEW-1104：dup 不會沿用 O_CLOEXEC，子行程會繼承這份 DRM master fd
+                    if (flags & O_CLOEXEC) {
+                        fd = fcntl(g_SdlDrmMasterFds[allocatedFdIndex], F_DUPFD_CLOEXEC, 0);
+                    }
+                    else {
+                        fd = dup(g_SdlDrmMasterFds[allocatedFdIndex]);
+                    }
                 }
                 else {
                     // Drop master on Qt's FD so we can pick it up for SDL.
@@ -178,15 +184,37 @@ int openHook(typeof(open) *real_open, typeof(close) *real_close, const char *pat
                     else {
                         fd = real_open(pathname, flags);
                     }
+                    // §REVIEW-1104：第二次 open 失敗時 master 已從 Qt 拿掉，要還回去，否則兩邊都不是 master
+                    if (fd < 0) {
+                        int savedErrno = errno;
+                        if (drmSetMaster(g_QtDrmMasterFd) < 0) {
+                            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                         "Failed to restore master to Qt DRM FD: %d",
+                                         errno);
+                        }
+                        errno = savedErrno;
+                    }
                 }
 
                 if (fd >= 0) {
                     // Start with DRM master on the new FD
-                    drmSetMaster(fd);
-
-                    // Insert the FD into the table
-                    g_SdlDrmMasterFds[freeFdIndex] = fd;
-                    g_SdlDrmMasterFdCount++;
+                    // §REVIEW-1104：重新 open 後設不成 master 就不記進表，關掉該 fd 並把 master 還給 Qt
+                    if (drmSetMaster(fd) < 0 && allocatedFdIndex < 0) {
+                        int savedErrno = errno;
+                        real_close(fd);
+                        fd = -1;
+                        if (drmSetMaster(g_QtDrmMasterFd) < 0) {
+                            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                         "Failed to restore master to Qt DRM FD: %d",
+                                         errno);
+                        }
+                        errno = savedErrno;
+                    }
+                    else {
+                        // Insert the FD into the table
+                        g_SdlDrmMasterFds[freeFdIndex] = fd;
+                        g_SdlDrmMasterFdCount++;
+                    }
                 }
 
                 pthread_mutex_unlock(&g_FdTableLock);

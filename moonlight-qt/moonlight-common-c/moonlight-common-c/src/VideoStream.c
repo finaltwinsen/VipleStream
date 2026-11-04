@@ -351,6 +351,7 @@ void destroyVideoStream(void) {
     PltDestroyCryptoContext(decryptionCtx);
     destroyVideoDepacketizer();
     RtpvCleanupQueue(&rtpQueue);
+    RtpvShutdownFeedback();  // §ABR-ADAPT：所有執行緒都已結束，收包報告的鎖可以刪了
 }
 
 // UDP Ping proc

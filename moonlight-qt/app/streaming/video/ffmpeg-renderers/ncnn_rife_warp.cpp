@@ -54,6 +54,7 @@ layout (push_constant) uniform parameter
     int h;
     int c;
     int cstep;
+    int flow_cstep;
 } p;
 
 void main()
@@ -66,10 +67,11 @@ void main()
         return;
 
     afp flow_x = buffer_ld1(flow_blob_data, gy * p.w + gx);
-    afp flow_y = buffer_ld1(flow_blob_data, p.cstep + gy * p.w + gx);
+    afp flow_y = buffer_ld1(flow_blob_data, p.flow_cstep + gy * p.w + gx);
 
-    afp sample_x = afp(gx) + flow_x;
-    afp sample_y = afp(gy) + flow_y;
+    // §REVIEW-1104: 取樣座標改用 float 計算，避免 fp16 在大座標下損失小數精度
+    float sample_x = float(gx) + float(flow_x);
+    float sample_y = float(gy) + float(flow_y);
 
     afp v;
     {
@@ -83,8 +85,9 @@ void main()
         x1 = clamp(x1, 0, p.w - 1);
         y1 = clamp(y1, 0, p.h - 1);
 
-        afp alpha = sample_x - afp(x0);
-        afp beta = sample_y - afp(y0);
+        // §REVIEW-1104: 先以 float 計算小數權重再轉回 afp，保留雙線性插值精度
+        afp alpha = afp(sample_x - float(x0));
+        afp beta = afp(sample_y - float(y0));
 
         afp v0 = buffer_ld1(image_blob_data, gz * p.cstep + y0 * p.w + x0);
         afp v1 = buffer_ld1(image_blob_data, gz * p.cstep + y0 * p.w + x1);
@@ -123,6 +126,7 @@ layout (push_constant) uniform parameter
     int h;
     int c;
     int cstep;
+    int flow_cstep;
 } p;
 
 void main()
@@ -135,10 +139,11 @@ void main()
         return;
 
     afp flow_x = buffer_ld1(flow_blob_data, gy * p.w + gx);
-    afp flow_y = buffer_ld1(flow_blob_data, p.cstep + gy * p.w + gx);
+    afp flow_y = buffer_ld1(flow_blob_data, p.flow_cstep + gy * p.w + gx);
 
-    afp sample_x = afp(gx) + flow_x;
-    afp sample_y = afp(gy) + flow_y;
+    // §REVIEW-1104: 取樣座標改用 float 計算，避免 fp16 在大座標下損失小數精度
+    float sample_x = float(gx) + float(flow_x);
+    float sample_y = float(gy) + float(flow_y);
 
     afpvec4 v;
     {
@@ -152,8 +157,9 @@ void main()
         x1 = clamp(x1, 0, p.w - 1);
         y1 = clamp(y1, 0, p.h - 1);
 
-        afp alpha = sample_x - afp(x0);
-        afp beta = sample_y - afp(y0);
+        // §REVIEW-1104: 先以 float 計算小數權重再轉回 afp，保留雙線性插值精度
+        afp alpha = afp(sample_x - float(x0));
+        afp beta = afp(sample_y - float(y0));
 
         afpvec4 v0 = buffer_ld4(image_blob_data, gz * p.cstep + y0 * p.w + x0);
         afpvec4 v1 = buffer_ld4(image_blob_data, gz * p.cstep + y0 * p.w + x1);
@@ -193,6 +199,7 @@ layout (push_constant) uniform parameter
     int h;
     int c;
     int cstep;
+    int flow_cstep;
 } p;
 
 void main()
@@ -205,10 +212,11 @@ void main()
         return;
 
     afp flow_x = buffer_ld1(flow_blob_data, gy * p.w + gx);
-    afp flow_y = buffer_ld1(flow_blob_data, p.cstep + gy * p.w + gx);
+    afp flow_y = buffer_ld1(flow_blob_data, p.flow_cstep + gy * p.w + gx);
 
-    afp sample_x = afp(gx) + flow_x;
-    afp sample_y = afp(gy) + flow_y;
+    // §REVIEW-1104: 取樣座標改用 float 計算，避免 fp16 在大座標下損失小數精度
+    float sample_x = float(gx) + float(flow_x);
+    float sample_y = float(gy) + float(flow_y);
 
     afpvec8 v;
     {
@@ -222,8 +230,9 @@ void main()
         x1 = clamp(x1, 0, p.w - 1);
         y1 = clamp(y1, 0, p.h - 1);
 
-        afp alpha = sample_x - afp(x0);
-        afp beta = sample_y - afp(y0);
+        // §REVIEW-1104: 先以 float 計算小數權重再轉回 afp，保留雙線性插值精度
+        afp alpha = afp(sample_x - float(x0));
+        afp beta = afp(sample_y - float(y0));
 
         afpvec8 v0 = buffer_ld8(image_blob_data, gz * p.cstep + y0 * p.w + x0);
         afpvec8 v1 = buffer_ld8(image_blob_data, gz * p.cstep + y0 * p.w + x1);
@@ -393,11 +402,14 @@ int RifeWarp::forward(const std::vector<VkMat>& bottom_blobs,
     bindings[1] = flow_blob;
     bindings[2] = top_blob;
 
-    std::vector<vk_constant_type> constants(4);
+    // §REVIEW-1104（使用者決策 B）：flownet 會把高度補到 128 的倍數（1080→1152），flow 的 channel stride 比影像大；
+    // 原本 flow_y 用影像的 cstep 去讀，1080p 前 72 列讀到 flow_x、其後每列錯位 72 列，垂直動向全錯。另外傳 flow 自己的 cstep
+    std::vector<vk_constant_type> constants(5);
     constants[0].i = top_blob.w;
     constants[1].i = top_blob.h;
     constants[2].i = top_blob.c;
     constants[3].i = top_blob.cstep;
+    constants[4].i = static_cast<int>(flow_blob.cstep);
 
     if (elempack == 8 && pipeline_warp_pack8) {
         cmd.record_pipeline(pipeline_warp_pack8, bindings, constants, top_blob);

@@ -5,6 +5,7 @@
 // standard includes
 #include <algorithm>
 #include <format>
+#include <future>
 #include <utility>
 
 // lib includes
@@ -65,7 +66,7 @@ namespace vr::multilink {
 
     uint8_t id = 0;
     hello_link_t desc;
-    bool primary = false;
+    std::atomic<bool> primary {false};  // §REVIEW-1103（B040-3）：控制執行緒寫、影像執行緒讀
     udp::endpoint client_video;
     udp::endpoint client_audio;
     udp::socket video_sock;
@@ -951,7 +952,9 @@ namespace vr::multilink {
           if (h.epoch > existing->epoch) {
             existing->epoch = h.epoch;
           }
-          if (existing->server_video_port != 0) {
+          // §REVIEW-1103（B040-2）：rebuild_link 等 io 執行緒逾時後，已 post 的重建工作稍後仍可能完成、把埠設回非 0，
+          // 但 tx 執行緒沒建 → 回 OK 的話這條連線有佇列沒人送。tx 沒在跑就走下面的就地重建。
+          if (existing->server_video_port != 0 && existing->tx.joinable()) {
             r.status = VIPLE_VR_LINK_READY_OK;
             r.server_video_port = existing->server_video_port;
             r.server_audio_port = existing->server_audio_port;

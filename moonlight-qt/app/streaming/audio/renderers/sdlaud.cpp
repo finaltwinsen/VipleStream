@@ -14,7 +14,8 @@ SdlAudioRenderer::SdlAudioRenderer()
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s",
                      SDL_GetError());
-        SDL_assert(SDL_WasInit(SDL_INIT_AUDIO));
+        // §REVIEW-1103：這裡原本 SDL_assert(SDL_WasInit(AUDIO))——在失敗分支裡恆假，debug 建置必中斷；
+        // 失敗後 prepareForPlayback 的 SDL_OpenAudioDevice 也會失敗並走無音訊路徑，不需要斷言。
     }
 }
 

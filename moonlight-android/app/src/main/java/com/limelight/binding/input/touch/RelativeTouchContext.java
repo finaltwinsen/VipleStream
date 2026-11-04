@@ -22,6 +22,16 @@ public class RelativeTouchContext implements TouchContext {
     private double xFactor, yFactor;
     private int pointerCount;
     private int maxPointerCountInGesture;
+    private byte pendingButtonIndex = 0;
+
+    private void flushPendingButtonUp() {
+        if (pendingButtonIndex != 0) {
+            byte btn = pendingButtonIndex;
+            pendingButtonIndex = 0;
+            handler.removeCallbacks(buttonUpRunnables[btn - 1]);
+            conn.sendMouseButtonUp(btn);
+        }
+    }
 
     private final NvConnection conn;
     private final int actionIndex;
@@ -55,30 +65,35 @@ public class RelativeTouchContext implements TouchContext {
             new Runnable() {
                 @Override
                 public void run() {
+                    pendingButtonIndex = 0;
                     conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
                 }
             },
             new Runnable() {
                 @Override
                 public void run() {
+                    pendingButtonIndex = 0;
                     conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_MIDDLE);
                 }
             },
             new Runnable() {
                 @Override
                 public void run() {
+                    pendingButtonIndex = 0;
                     conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
                 }
             },
             new Runnable() {
                 @Override
                 public void run() {
+                    pendingButtonIndex = 0;
                     conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_X1);
                 }
             },
             new Runnable() {
                 @Override
                 public void run() {
+                    pendingButtonIndex = 0;
                     conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_X2);
                 }
             }
@@ -148,6 +163,9 @@ public class RelativeTouchContext implements TouchContext {
     @Override
     public boolean touchDownEvent(int eventX, int eventY, long eventTime, boolean isNewFinger)
     {
+        // §REVIEW-1104：新手勢按下時若有待送的 button-up，先同步送出放開並取消 callback，避免後續移動變成拖曳
+        flushPendingButtonUp();
+
         // Get the view dimensions to scale inputs on this touch
         xFactor = referenceWidth / (double)targetView.getWidth();
         yFactor = referenceHeight / (double)targetView.getHeight();
@@ -177,8 +195,14 @@ public class RelativeTouchContext implements TouchContext {
             return;
         }
 
+
+
+
         // Cancel the drag timer
         cancelDragTimer();
+
+        // §REVIEW-1104：先以抬起座標更新位移與 checkForConfirmedMove，避免漏送最後一段位移或誤判 tap
+        touchMoveEvent(eventX, eventY, eventTime);
 
         byte buttonIndex = getMouseButtonIndex();
 
@@ -188,11 +212,15 @@ public class RelativeTouchContext implements TouchContext {
         }
         else if (isTap(eventTime))
         {
+            // §REVIEW-1104：若前一次 tap 尚未完成放開，先同步送出 up 避免兩次 down 重疊
+            flushPendingButtonUp();
+
             // Lower the mouse button
             conn.sendMouseButtonDown(buttonIndex);
 
             // Release the mouse button in 100ms to allow for apps that use polling
             // to detect mouse button presses.
+            pendingButtonIndex = buttonIndex;
             Runnable buttonUpRunnable = buttonUpRunnables[buttonIndex - 1];
             handler.removeCallbacks(buttonUpRunnable);
             handler.postDelayed(buttonUpRunnable, 100);
@@ -272,11 +300,12 @@ public class RelativeTouchContext implements TouchContext {
                     }
                 } else {
                     if (prefConfig.absoluteMouseMode) {
+                        // §REVIEW-1104：deltaX/deltaY 已乘上 xFactor/yFactor 縮放至 reference 座標系，reference 尺寸應傳 referenceWidth/referenceHeight
                         conn.sendMouseMoveAsMousePosition(
                                 (short) deltaX,
                                 (short) deltaY,
-                                (short) targetView.getWidth(),
-                                (short) targetView.getHeight());
+                                (short) referenceWidth,
+                                (short) referenceHeight);
                     }
                     else {
                         conn.sendMouseMove((short) deltaX, (short) deltaY);
@@ -305,6 +334,11 @@ public class RelativeTouchContext implements TouchContext {
     @Override
     public void cancelTouch() {
         cancelled = true;
+        // §REVIEW-1104：取消觸控時若有待送的 button-up，先同步送出放開並取消 callback
+        flushPendingButtonUp();
+
+
+
 
         // Cancel the drag timer
         cancelDragTimer();

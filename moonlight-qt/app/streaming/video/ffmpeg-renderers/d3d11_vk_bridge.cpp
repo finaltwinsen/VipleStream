@@ -249,16 +249,21 @@ bool D3D11VkBridge::loadVulkanWin32Pfns_()
     m_pfnImportSemWin32Handle = (PFN_vkImportSemaphoreWin32HandleKHR)
         m_pfnGDPA(m_VkDevice, "vkImportSemaphoreWin32HandleKHR");
 
-    if (!m_pfnGetMemWin32HandleProps || !m_pfnImportSemWin32Handle) {
+    // §REVIEW-1103：semaphore 匯入只給 createFenceSync 用，而 fence 是可選的（失敗有 fenceless 後備），
+    // 這裡只把記憶體匯入列為必要；semaphore PFN 改在 createFenceSync 檢查。
+    if (!m_pfnGetMemWin32HandleProps) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-VKFRUC-COMPOSITE] missing Win32-external PFN: "
-                     "vkGetMemoryWin32HandlePropertiesKHR=%p "
-                     "vkImportSemaphoreWin32HandleKHR=%p — VkDevice was not "
-                     "created with VK_KHR_external_memory_win32 + "
-                     "VK_KHR_external_semaphore_win32 enabled.",
-                     (void*)m_pfnGetMemWin32HandleProps,
-                     (void*)m_pfnImportSemWin32Handle);
+                     "vkGetMemoryWin32HandlePropertiesKHR=%p — VkDevice was not "
+                     "created with VK_KHR_external_memory_win32 enabled.",
+                     (void*)m_pfnGetMemWin32HandleProps);
         return false;
+    }
+    if (!m_pfnImportSemWin32Handle) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VKFRUC-COMPOSITE] vkImportSemaphoreWin32HandleKHR missing "
+                    "(VK_KHR_external_semaphore_win32 not enabled) — fence sync unavailable, "
+                    "fenceless fallback only");
     }
 
     m_pfnCreateImage      = (PFN_vkCreateImage)               m_pfnGDPA(m_VkDevice, "vkCreateImage");
@@ -292,6 +297,9 @@ bool D3D11VkBridge::createFenceSync()
     if (!m_Initialized) {
         return false;
     }
+    if (!m_pfnImportSemWin32Handle) {  // §REVIEW-1103：見 loadVulkanWin32Pfns_
+        return false;
+    }
     if (m_D3D11Fence || m_VkSemaphore != VK_NULL_HANDLE) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-COMPOSITE] B4 createFenceSync called twice");
@@ -323,17 +331,24 @@ bool D3D11VkBridge::createFenceSync()
     semType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
     semType.initialValue  = 0;
 
-    VkExportSemaphoreCreateInfo expInfo = {};
-    expInfo.sType       = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
-    expInfo.pNext       = &semType;
-    expInfo.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
-
+    // §REVIEW-1103：這顆 semaphore 只「匯入」D3D11 fence，不匯出；照規格不需要 VkExportSemaphoreCreateInfo，
+    // 帶了反而會讓「只支援匯入、不支援匯出 D3D12_FENCE」的驅動建立失敗。
     VkSemaphoreCreateInfo sci = {};
     sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    sci.pNext = &expInfo;
+    sci.pNext = &semType;
 
     VkSemaphore sem = VK_NULL_HANDLE;
     VkResult vr = m_pfnCreateSemaphore(m_VkDevice, &sci, nullptr, &sem);
+    if (vr != VK_SUCCESS) {
+        // 保險：萬一某個驅動反而要求帶 export info，退回原本的建立方式再試一次
+        VkExportSemaphoreCreateInfo expInfo = {};
+        expInfo.sType       = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
+        expInfo.pNext       = &semType;
+        expInfo.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
+        sci.pNext = &expInfo;
+        sem = VK_NULL_HANDLE;
+        vr = m_pfnCreateSemaphore(m_VkDevice, &sci, nullptr, &sem);
+    }
     if (vr != VK_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-VKFRUC-COMPOSITE] B4 vkCreateSemaphore (timeline + "

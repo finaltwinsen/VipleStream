@@ -10,6 +10,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cwctype>
 #include <filesystem>
@@ -474,6 +475,17 @@ namespace vr {
         return p;
       }
 
+      /// §REVIEW-1103（B031-1）：openvrpaths.vrpath 在使用者可寫的 %LocalAppData%，裡面的路徑不可信。
+      /// 只收「磁碟代號:\」開頭、而且不是網路磁碟的本機路徑：`\\host`、`//host`、`\/host`、`\\?\UNC\`、`\\.\` 一律拒絕，
+      /// 避免 SYSTEM 身分去碰 SMB（強迫驗證、NTLM relay）。
+      bool is_local_drive_path(const std::wstring &p) {
+        if (p.size() < 3 || !std::iswalpha(p[0]) || p[1] != L':' || (p[2] != L'\\' && p[2] != L'/')) {
+          return false;
+        }
+        const wchar_t root[] = {p[0], L':', L'\\', L'\0'};
+        return GetDriveTypeW(root) != DRIVE_REMOTE;
+      }
+
       std::optional<openvrpaths_t> read_openvrpaths() {
         const auto base = user_local_appdata();
         if (!base) {
@@ -722,7 +734,10 @@ namespace vr {
           const fs::path rt {o->runtime.front()};
           const auto rts = rt.wstring();
           // 拒絕 UNC 網路路徑、非絕對路徑或包含 .. 的路徑，防止強迫驗證洩漏 (NTLM Relay) 與目錄走訪
-          if (rt.is_absolute() && !rts.starts_with(L"\\\\") && rts.find(L"..") == std::wstring::npos) {
+          // §REVIEW-1103（B031-1）：原本只擋 `\\` 開頭，`//host/share`、`\/host`、`/\host` 這些 Win32 一樣當 UNC，
+          // openvrpaths 又在使用者可寫的 %LocalAppData% → SYSTEM 身分會對外發 SMB 驗證。改成白名單：只收「磁碟代號:\」
+          // 開頭的本機路徑（`\\?\`、`\\.\` 裝置路徑也一併排除），而且該磁碟不能是網路磁碟。
+          if (is_local_drive_path(rts) && rt.is_absolute() && rts.find(L"..") == std::wstring::npos) {
             std::error_code ec;
             if (fs::is_regular_file(rt / L"bin" / L"win64" / L"vrserver.exe", ec) && !same_path(rt, f.runtime)) {
               BOOST_LOG(info) << "[VIPLE-VR-ORCH] steamvr runtime differs: appmanifest=" << tail(f.runtime) << " openvrpaths=" << tail(rt) << " (using openvrpaths)";
@@ -769,7 +784,16 @@ namespace vr {
 
       std::optional<fs::path> vrsettings_path() {
         if (auto o = read_openvrpaths(); o && !o->config.empty()) {
-          return fs::path {o->config.front()} / L"steamvr.vrsettings";
+          // §REVIEW-1103（B031-1 延伸）：config 路徑同樣來自使用者可寫的 openvrpaths，guard 會以 SYSTEM 讀寫它
+          const fs::path cfg {o->config.front()};
+          const auto cfgs = cfg.wstring();
+          if (is_local_drive_path(cfgs) && cfgs.find(L"..") == std::wstring::npos) {
+            return cfg / L"steamvr.vrsettings";
+          }
+          static std::atomic<bool> warned {false};
+          if (!warned.exchange(true)) {
+            BOOST_LOG(warning) << "[VIPLE-VR-ORCH] openvrpaths config path rejected (not a local drive path)";
+          }
         }
         const auto env = cached_environment();
         if (!env.steam_root.empty()) {

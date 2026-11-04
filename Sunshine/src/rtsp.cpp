@@ -949,7 +949,10 @@ namespace rtsp_stream {
        */
       if (x == audio::SURROUND51 || x == audio::SURROUND71) {
         std::copy_n(mapping_p, stream_config.channelCount, mapping);
-        std::rotate(mapping + 3, mapping + 4, mapping + audio::MAX_STREAM_CONFIG);
+        // §REVIEW-1103：終點原本是 audio::MAX_STREAM_CONFIG（設定組數＝6，不是聲道數），5.1 剛好
+        // 對上，7.1 只轉了 [3,6)；client（RtspConnection.c）對整段 [3, channelCount) 右轉回來，
+        // 7.1 一般音質有三個聲道會送到錯的喇叭。改用實際聲道數。
+        std::rotate(mapping + 3, mapping + 4, mapping + stream_config.channelCount);
 
         mapping_p = mapping;
       }
@@ -1190,7 +1193,9 @@ namespace rtsp_stream {
       // Coupled streams
       std::uint8_t m = session.surround_params[2] - '0';
       auto valid = false;
-      if ((c == 6 || c == 8) && c == config.audio.channels && n + m == c && session.surround_params.length() == c + 3) {
+      // §REVIEW-1103：opus multistream 還要求 coupled ≤ streams 且 streams ≥ 1；例如 n=1 m=5 會讓 encoder 建立失敗
+      if ((c == 6 || c == 8) && c == config.audio.channels && n + m == c && n >= 1 && m <= n &&
+          session.surround_params.length() == c + 3) {
         config.audio.customStreamParams.channelCount = c;
         config.audio.customStreamParams.streams = n;
         config.audio.customStreamParams.coupledStreams = m;

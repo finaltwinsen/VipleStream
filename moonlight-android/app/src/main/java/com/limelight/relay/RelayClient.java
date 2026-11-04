@@ -14,15 +14,9 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocket;
-import javax.net.ssl.SSLSocketFactory;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 
 import org.json.JSONObject;
 
@@ -82,11 +76,8 @@ public class RelayClient {
 
             // Connect
             if (useTls) {
-                SSLSocketFactory factory = createTrustAllFactory();
-                sock = factory.createSocket();
-                sock.setSoTimeout(timeoutMs);
-                sock.connect(new InetSocketAddress(host, port), timeoutMs);
-                ((SSLSocket) sock).startHandshake();
+                // §REVIEW-1103：改走系統信任庫＋主機名稱驗證，自簽 relay 改用釘選（RelayTls），不再全部信任。
+                sock = RelayTls.connect(host, port, timeoutMs);
             } else {
                 sock = new Socket();
                 sock.setSoTimeout(timeoutMs);
@@ -232,11 +223,8 @@ public class RelayClient {
 
             // Connect
             if (useTls) {
-                SSLSocketFactory factory = createTrustAllFactory();
-                sock = factory.createSocket();
-                sock.setSoTimeout(timeoutMs);
-                sock.connect(new InetSocketAddress(host, port), timeoutMs);
-                ((SSLSocket) sock).startHandshake();
+                // §REVIEW-1103：改走系統信任庫＋主機名稱驗證，自簽 relay 改用釘選（RelayTls），不再全部信任。
+                sock = RelayTls.connect(host, port, timeoutMs);
             } else {
                 sock = new Socket();
                 sock.setSoTimeout(timeoutMs);
@@ -296,8 +284,10 @@ public class RelayClient {
             out.write(wsFrameMasked(proxyMsg.toString().getBytes("UTF-8")));
             out.flush();
 
+            // §REVIEW-1103：/launch、/resume 的查詢字串帶 rikey（串流金鑰），只記 '?' 之前的路徑。
+            int q = path.indexOf('?');
             Log.i(TAG, "Proxy sent: " + serverUuid.substring(0, Math.min(8, serverUuid.length()))
-                    + " -> " + path);
+                    + " -> " + (q >= 0 ? path.substring(0, q) + "?..." : path));
 
             // Wait for http_proxy_response with matching request_id
             for (int attempt = 0; attempt < 10; attempt++) {
@@ -391,10 +381,13 @@ public class RelayClient {
             } else if (len == 127) {
                 byte[] ext = readExact(in, 8);
                 if (ext == null) return null;
-                len = 0;
+                // §REVIEW-1103：64 位元長度用 long 累加，原本 int 會截斷成看似合法的小長度而錯位。
+                long longLen = 0;
                 for (int i = 0; i < 8; i++) {
-                    len = (len << 8) | (ext[i] & 0xFF);
+                    longLen = (longLen << 8) | (ext[i] & 0xFF);
                 }
+                if (longLen <= 0 || longLen > 1048576) return null;
+                len = (int) longLen;
             }
 
             if (len <= 0 || len > 1048576) return null;
@@ -479,34 +472,6 @@ public class RelayClient {
         byte[] bytes = new byte[(chars + 1) / 2];
         rng.nextBytes(bytes);
         return bytesToHex(bytes).substring(0, chars);
-    }
-
-    /**
-     * Create an SSLSocketFactory that trusts all certificates (for self-signed relay servers).
-     * Each call creates a new context -- not shared with the default.
-     */
-    private static SSLSocketFactory createTrustAllFactory() {
-        try {
-            TrustManager[] trustAll = new TrustManager[]{
-                    new X509TrustManager() {
-                        @Override
-                        public void checkClientTrusted(X509Certificate[] chain, String authType) {}
-
-                        @Override
-                        public void checkServerTrusted(X509Certificate[] chain, String authType) {}
-
-                        @Override
-                        public X509Certificate[] getAcceptedIssuers() {
-                            return new X509Certificate[0];
-                        }
-                    }
-            };
-            SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, trustAll, new SecureRandom());
-            return ctx.getSocketFactory();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to create TrustAll SSLContext", e);
-        }
     }
 
     private static void closeQuietly(Socket sock) {

@@ -83,6 +83,7 @@ typedef struct _VRML_LINK {
     struct sockaddr_in pendingServerA;
     uint16_t pendingLocalVideoPort;
     uint16_t pendingLocalAudioPort;
+    char pendingIfName[LC_NETIF_MAX_NAME]; // §REVIEW-1103：重綁目標網卡名稱，commit 時寫回 ifName
     volatile uint32_t pendingGen; // 這次重綁的世代（ping 執行緒寫，control 執行緒讀）
     uint64_t activateAtMs;        // READY OK、activateGen 已設定的時間（ack 的等待從這裡算）
     bool ackWarned;
@@ -164,9 +165,12 @@ static bool started;
 static PLT_THREAD pingThread;
 static PLT_MUTEX trkMutex;
 static bool trkMutexCreated;  // 只建立一次、不刪除：追蹤執行緒可能在 session 收尾時還握著它
+// §VR-MULTILINK-HOTADD：rebind 收尾會在 ping 執行緒關掉舊 socket；PING／追蹤／控制訊息可能正從別條執行緒送出。
+// 這把鎖只包住單一次非阻塞 sendto 與 fd 的交換，不包加解密。
+static PLT_MUTEX sockMutex;
+static bool sockMutexCreated;
 static PPLT_CRYPTO_CONTEXT trkCrypto;
 static uint32_t dataSeq;
-static volatile bool helloAcked;
 static VRML_RXSET videoSet;
 static VRML_RXSET audioSet;
 
@@ -211,9 +215,13 @@ static bool s2cAny;                        // 以下三個＝T_S2C 的去重視�
 static uint32_t s2cTop;
 static uint64_t s2cMask;
 static volatile uint32_t ctlSent, ctlDrop; // 送出的 0x5507（則數）／沒有任何一條連線送得出去的
-static bool gonePending;                   // §VR-LINK-REPAIR：最近一則 REPAIR_GONE（只在影像接收執行緒存取）
-static uint32_t goneFrame;
-static uint8_t goneBlock;
+static bool gonePending;                   // §VR-LINK-REPAIR：有沒有待交出的 REPAIR_GONE（只在影像接收執行緒存取）
+// §REVIEW-1103：原本只存最近一則，同一批收進兩則 GONE 時前一則被蓋掉、只能等佇列期限才放棄。
+// 改成小環狀佇列；滿了就丟最舊的（那個 block 最晚也會在佇列期限放棄）。
+#define VRML_GONE_RING 8
+static uint32_t goneFrameRing[VRML_GONE_RING];
+static uint8_t goneBlockRing[VRML_GONE_RING];
+static int goneHead, goneCount;
 static volatile uint32_t s2cRx, s2cDup, s2cBad;
 static uint32_t ctlSentPrev, ctlDropPrev, s2cRxPrev, s2cDupPrev, s2cBadPrev;
 
@@ -359,12 +367,13 @@ int vrmlPrepare(void) {
 
     linkCount = 0;
     started = false;
-    helloAcked = false;
     dataSeq = 0;
     legacyRxPkts = 0;
     legacyRxPktsPrev = 0;
     hubCaps = 0;
     gonePending = false;
+    goneHead = 0;
+    goneCount = 0;
     s2cAny = false;
     s2cTop = 0;
     s2cMask = 0;
@@ -399,6 +408,13 @@ int vrmlPrepare(void) {
     if (!(EncryptionFeaturesEnabled & SS_ENC_CONTROL_V2)) {
         Limelog("[VIPLE-VR-LINK] multi-link needs the encrypted control stream; staying on the single path\n");
         return 0;
+    }
+    if (!sockMutexCreated) {
+        if (PltCreateMutex(&sockMutex) != 0) {
+            Limelog("[VIPLE-VR-LINK] could not create the socket mutex; staying on the single path\n");
+            return 0;
+        }
+        sockMutexCreated = true;
     }
 
     localBe = ((struct sockaddr_in*)&LocalAddr)->sin_addr.s_addr;
@@ -633,6 +649,7 @@ static void hotaddCommitPending(VRML_LINK* L, uint64_t nowMs) {
     const uint16_t vp = L->pendingLocalVideoPort;
     const uint16_t ap = L->pendingLocalAudioPort;
 
+    PltLockMutex(&sockMutex);
     if (L->videoSock != INVALID_SOCKET) {
         closeSocket(L->videoSock);
     }
@@ -646,6 +663,13 @@ static void hotaddCommitPending(VRML_LINK* L, uint64_t nowMs) {
     L->serverA = serverA;
     L->localVideoPort = vp;
     L->localAudioPort = ap;
+    PltUnlockMutex(&sockMutex);
+    // §REVIEW-1103：重綁到名稱不同的網卡時一定要更新 ifName，否則下一輪 hotaddScan
+    // 用舊名稱比對，判定介面消失（ifGone）而整場停用這條連線。
+    if (L->pendingIfName[0] != '\0') {
+        snprintf(L->ifName, sizeof(L->ifName), "%s", L->pendingIfName);
+        L->pendingIfName[0] = '\0';
+    }
     L->pendingVideoSock = INVALID_SOCKET;
     L->pendingAudioSock = INVALID_SOCKET;
     L->pending = false;
@@ -718,6 +742,7 @@ static bool hotaddStartRebind(VRML_LINK* L, const VRML_CAND* cand, uint64_t nowM
     L->pendingAudioSock = as;
     L->pendingLocalVideoPort = vp;
     L->pendingLocalAudioPort = ap;
+    snprintf(L->pendingIfName, sizeof(L->pendingIfName), "%s", cand->ifName);
     L->pendingGen = ++hotaddGen;
     if (L->pendingGen == 0) {
         L->pendingGen = ++hotaddGen;
@@ -727,6 +752,7 @@ static bool hotaddStartRebind(VRML_LINK* L, const VRML_CAND* cand, uint64_t nowM
     L->activateGen = 0;
     L->activateAtMs = 0;
     L->ackWarned = false;
+    VRML_RELEASE_FENCE();  // 先讓 pending 的 fd／位址／埠都可見，再公開 pending
     L->pending = true;
     L->ready = false;
     L->refused = false;
@@ -1035,8 +1061,10 @@ static void PingThreadProc(void* context) {
             pkt.ping.burstSeq = L->burstSeq;
             pkt.ping.burstMbps = LE16(L->burstMbps);
             // 送不出去（網卡忙或斷線）就算了，下一輪再送
+            PltLockMutex(&sockMutex);  // rebind 收尾會在另一個執行緒關舊 fd
             sendto(L->videoSock, (char*)&pkt, sizeof(pkt), 0, (struct sockaddr*)&L->serverV, sizeof(L->serverV));
             sendto(L->audioSock, (char*)&pkt.hdr, sizeof(pkt.hdr), 0, (struct sockaddr*)&L->serverA, sizeof(L->serverA));
+            PltUnlockMutex(&sockMutex);
         }
 
         if (nowMs - lastStatsMs >= VRML_STATS_INTERVAL_MS) {
@@ -1100,10 +1128,21 @@ void vrmlStop(void) {
     for (i = 0; i < linkCount; i++) {
         // 接收執行緒已經結束：還沒換進 poll set 的 pending fd 也可以安全關掉
         hotaddClosePending(&links[i]);
+        if (sockMutexCreated) {
+            PltLockMutex(&sockMutex);
+        }
         closeLinkSockets(&links[i]);
+        if (sockMutexCreated) {
+            PltUnlockMutex(&sockMutex);
+        }
     }
     linkCount = 0;
     hubCaps = 0;
+    // §REVIEW-1103（11-04 補）：sockMutex 在 vrmlPrepare 建立，原本從沒刪，debug 版結束時 activeMutexes 斷言中止
+    if (sockMutexCreated) {
+        PltDeleteMutex(&sockMutex);
+        sockMutexCreated = false;
+    }
     if (s2cCrypto != NULL) {
         // 影像接收執行緒已經結束（呼叫端保證），沒有人在用了
         PltDestroyCryptoContext(s2cCrypto);
@@ -1198,7 +1237,6 @@ void vrmlOnS2C(const unsigned char* tlv, int len) {
                 }
                 hubCaps = caps;
             }
-            helloAcked = true;
         }
         else if (type == VIPLE_VR_S2C_LINK_ADDRS && blen >= 1) {
             // §VR-MULTILINK-HOTADD：server 目前可廣告位址的完整快照；直接覆蓋候選清單。是否真的拿來掃描由
@@ -1261,6 +1299,7 @@ static void replaceRxSet(VRML_RXSET* set, bool video) {
         set->readable[i + 1] = false;
         set->dead[i + 1] = false;
         set->deadAtMs[i + 1] = 0;
+        VRML_RELEASE_FENCE();  // fd 換好之後才公開 ack；ping 執行緒看到兩個 ack 才會關舊 fd
         if (video) {
             L->ackVideo = gen;
         }
@@ -1530,8 +1569,16 @@ static void onLinkS2C(const VIPLE_VR_LINK_HDR* hdr, const char* buffer, int len)
             if (type == VIPLE_VR_S2C_REPAIR_GONE && blen >= sizeof(VIPLE_VR_TLV_REPAIR_GONE)) {
                 VIPLE_VR_TLV_REPAIR_GONE g;
                 memcpy(&g, &plain[off + 2], sizeof(g));
-                goneFrame = g.frame;
-                goneBlock = g.block;
+                if (goneCount == VRML_GONE_RING) {
+                    goneHead = (goneHead + 1) % VRML_GONE_RING;
+                    goneCount--;
+                }
+                {
+                    const int idx = (goneHead + goneCount) % VRML_GONE_RING;
+                    goneFrameRing[idx] = g.frame;
+                    goneBlockRing[idx] = g.block;
+                    goneCount++;
+                }
                 gonePending = true;
             }
             off += 2 + blen;
@@ -2025,6 +2072,7 @@ static int sendC2S(uint16_t ptype, const void* sample, int length, bool tracking
     uint32_t seq;
     int cipherLen = 0;
     int sent = 0;
+    int rc;
     int i;
     bool anyConfirmed = false;
 
@@ -2082,7 +2130,10 @@ static int sendC2S(uint16_t ptype, const void* sample, int length, bool tracking
         hdr.linkId = L->id;
         memcpy(pkt, &hdr, sizeof(hdr));
         // 非阻塞：這條連線的送出佇列滿了就丟這一份（另一條還有一份）
-        if (sendto(L->videoSock, (char*)pkt, (int)sizeof(hdr) + 16 + cipherLen, 0, (struct sockaddr*)&L->serverV, sizeof(L->serverV)) > 0) {
+        PltLockMutex(&sockMutex);  // rebind 收尾會在 ping 執行緒關舊 fd
+        rc = sendto(L->videoSock, (char*)pkt, (int)sizeof(hdr) + 16 + cipherLen, 0, (struct sockaddr*)&L->serverV, sizeof(L->serverV));
+        PltUnlockMutex(&sockMutex);
+        if (rc > 0) {
             if (tracking) {
                 L->trkSent++;
             }
@@ -2163,9 +2214,11 @@ bool vrmlTakeGone(uint32_t* frame, uint8_t* block) {
     if (!gonePending || stageNext < stageCount) {
         return false;
     }
-    gonePending = false;
-    *frame = goneFrame;
-    *block = goneBlock;
+    *frame = goneFrameRing[goneHead];
+    *block = goneBlockRing[goneHead];
+    goneHead = (goneHead + 1) % VRML_GONE_RING;
+    goneCount--;
+    gonePending = goneCount > 0;
     return true;
 }
 

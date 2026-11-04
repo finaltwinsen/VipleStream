@@ -14,6 +14,7 @@
 #include <string.h>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 
 // lib includes
 #include <gio/gio.h>
@@ -208,6 +209,14 @@ namespace portal {
     std::vector<uint8_t> *front_buffer;
     // Points to the buffer currently being written by on_process
     std::vector<uint8_t> *back_buffer;
+    // §REVIEW-1103：MemPtr 幀在 on_process 複製完就還給 PipeWire，fill_img 不可再讀那個 spa_buffer
+    // （chunk／metadata 可能已被下一幀覆寫）；需要的欄位先存在這裡，current_buffer 只給 DMA-BUF 用。
+    bool mem_frame = false;
+    size_t mem_size = 0;
+    std::optional<uint64_t> mem_seq;
+    std::optional<uint64_t> mem_pts;
+    std::optional<uint32_t> mem_flags;
+    std::optional<bool> mem_damage;
 
     stream_data_t():
         front_buffer(&buffer_a),
@@ -892,7 +901,8 @@ namespace portal {
       stream_data.frame_ready = ready;
     }
 
-    void init(int stream_fd, int stream_node, std::shared_ptr<shared_state_t> shared_state) {
+    // §REVIEW-1103：回傳是否連上 PipeWire（core 不是 NULL），連不上時呼叫端要讓 display 初始化失敗
+    bool init(int stream_fd, int stream_node, std::shared_ptr<shared_state_t> shared_state) {
       fd = stream_fd;
       node = stream_node;
       stream_data.shared = std::move(shared_state);
@@ -910,7 +920,9 @@ namespace portal {
         }
       }
 
+      const bool connected = core != nullptr;
       pw_thread_loop_unlock(loop);
+      return connected;
     }
 
     void cleanup_stream() {
@@ -922,6 +934,7 @@ namespace portal {
           std::scoped_lock lock(stream_data.frame_mutex);
           stream_data.frame_ready = false;
           stream_data.current_buffer = nullptr;
+          stream_data.mem_frame = false;  // §REVIEW-1103
         }
 
         if (stream_data.stream) {
@@ -936,7 +949,10 @@ namespace portal {
 
     void ensure_stream(const platf::mem_type_e mem_type, const uint32_t width, const uint32_t height, const uint32_t refresh_rate, const struct dmabuf_format_info_t *dmabuf_infos, const int n_dmabuf_infos, const bool display_is_nvidia) {
       pw_thread_loop_lock(loop);
-      if (!stream_data.stream) {
+      // §REVIEW-1103：PipeWire 連不上時 core 是 NULL，pw_stream_new(NULL) 會崩潰；不建串流，capture 會等到逾時
+      if (!stream_data.stream && !core) {
+        BOOST_LOG(error) << "PipeWire core is not connected; cannot create capture stream"sv;
+      } else if (!stream_data.stream) {
         struct pw_properties *props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE, "Screen", nullptr);
 
         stream_data.stream = pw_stream_new(core, "Sunshine Video Capture", props);
@@ -1031,6 +1047,35 @@ namespace portal {
         return;
       }
 
+      // §REVIEW-1103：MemPtr 幀。原本 img->data 直接指向 front_buffer，PipeWire 執行緒兩幀後就會覆寫它
+      // （resize 時還會重新配置而懸空），編碼端慢一點就讀到撕裂或已釋放的畫面；改成複製到這張 img 自己的緩衝。
+      // 複製在 frame_mutex 內做，on_process 只在拿鎖時交換前後緩衝，所以 front_buffer 此時不會被寫。
+      if (stream_data.mem_frame) {
+        if (stream_data.mem_size != 0) {
+          auto *img_descriptor = static_cast<egl::img_descriptor_t *>(img);
+          img_descriptor->frame_timestamp = std::chrono::steady_clock::now();
+          if (stream_data.mem_seq) {
+            img_descriptor->seq = stream_data.mem_seq;
+          }
+          if (stream_data.mem_pts) {
+            img_descriptor->pts = stream_data.mem_pts;
+          }
+          img_descriptor->pw_flags = stream_data.mem_flags;
+          img_descriptor->pw_damage = stream_data.mem_damage;
+
+          auto &storage = img_storage[img];
+          const size_t n = std::min(stream_data.mem_size, stream_data.front_buffer->size());
+          if (storage.size() < n) {
+            storage.resize(n);
+          }
+          std::memcpy(storage.data(), stream_data.front_buffer->data(), n);
+          img->data = storage.data();
+          img->row_pitch = stream_data.local_stride;
+        }
+        pw_thread_loop_unlock(loop);
+        return;
+      }
+
       if (!stream_data.current_buffer) {
         img->data = nullptr;
         pw_thread_loop_unlock(loop);
@@ -1054,10 +1099,12 @@ namespace portal {
 
   private:
     struct pw_thread_loop *loop;
-    struct pw_context *context;
-    struct pw_core *core;
+    struct pw_context *context = nullptr;  // §REVIEW-1103：原本未初始化，連線失敗時 core 是垃圾值而不是 NULL
+    struct pw_core *core = nullptr;
     struct spa_hook core_listener;
     struct stream_data_t stream_data;
+    // §REVIEW-1103：每張 img 自己的 MemPtr 畫面緩衝（img 來自固定的池，數量有限）
+    std::unordered_map<const platf::img_t *, std::vector<uint8_t>> img_storage;
     int fd;
     int node;
 
@@ -1173,6 +1220,7 @@ namespace portal {
           pw_stream_queue_buffer(d->stream, d->current_buffer);
         }
         d->current_buffer = b;
+        d->mem_frame = false;  // §REVIEW-1103
         d->frame_ready = true;
       }
       // 3. Optimized Path: Software/MemPtr
@@ -1192,7 +1240,24 @@ namespace portal {
 
           d->local_stride = b->buffer->datas[0].chunk->stride;
           d->frame_ready = true;
-          d->current_buffer = b;
+          // §REVIEW-1103：這個 buffer 下面就還給 PipeWire 了，不可再留指標；需要的欄位先存起來
+          d->current_buffer = nullptr;
+          d->mem_frame = true;
+          d->mem_size = size;
+          d->mem_seq.reset();
+          d->mem_pts.reset();
+          auto *h = static_cast<struct spa_meta_header *>(
+            spa_buffer_find_meta_data(b->buffer, SPA_META_Header, sizeof(struct spa_meta_header))
+          );
+          if (h) {
+            d->mem_seq = h->seq;
+            d->mem_pts = h->pts;
+          }
+          d->mem_flags = b->buffer->datas[0].chunk->flags;
+          auto *damage = static_cast<struct spa_meta_region *>(
+            spa_buffer_find_meta_data(b->buffer, SPA_META_VideoDamage, sizeof(struct spa_meta_region))
+          );
+          d->mem_damage = (damage && damage->region.size.width > 0 && damage->region.size.height > 0) ? std::optional<bool>(true) : std::nullopt;
         }
 
         // Release the PW buffer immediately after copy
@@ -1206,6 +1271,7 @@ namespace portal {
       const auto d = static_cast<struct stream_data_t *>(user_data);
 
       d->current_buffer = nullptr;
+      d->mem_frame = false;  // §REVIEW-1103
 
       if (param == nullptr || id != SPA_PARAM_Format) {
         return;
@@ -1326,7 +1392,10 @@ namespace portal {
         shared_state->negotiated_width.store(0);
         shared_state->negotiated_height.store(0);
       }
-      pipewire.init(pipewire_fd, pipewire_node, shared_state);
+      if (!pipewire.init(pipewire_fd, pipewire_node, shared_state)) {
+        BOOST_LOG(error) << "Couldn't connect to PipeWire for portal capture"sv;
+        return -1;
+      }
 
       // Start PipeWire now so format negotiation can proceed before capture start
       pipewire.ensure_stream(mem_type, width, height, framerate, dmabuf_infos.data(), n_dmabuf_infos, display_is_nvidia);
@@ -1534,8 +1603,11 @@ namespace portal {
         return -1;
       }
 
-      img->data = new std::uint8_t[img->height * img->row_pitch];
-      std::fill_n(img->data, img->height * img->row_pitch, 0);
+      // §REVIEW-1103：原本 new[] 之後沒人釋放（img_t 只關 fd，fill_img 又會把 data 換掉），每次開始串流或重建
+      // 編碼 session 就漏一整張畫面（4K 約 33 MB）。改成由 display 持有，同一張 img 重複使用同一塊。
+      auto &storage = dummy_storage[img];
+      storage.assign(static_cast<size_t>(img->height) * img->row_pitch, 0);
+      img->data = storage.data();
       return 0;
     }
 
@@ -1680,9 +1752,19 @@ namespace portal {
       return 0;
     }
 
+  public:
+    // §REVIEW-1103：get_dmabuf_modifiers 用 g_memdup2 配置的 modifier 陣列，物件銷毀時要釋放。
+    // 解構子必須是 public（display 由 shared_ptr／make_shared 持有）。
+    ~portal_t() override {
+      clear_dmabuf_modifiers();
+    }
+
+  private:
+
     platf::mem_type_e mem_type;
     wl::display_t wl_display;
     pipewire_t pipewire;
+    std::unordered_map<const platf::img_t *, std::vector<std::uint8_t>> dummy_storage;  // §REVIEW-1103
     std::array<struct dmabuf_format_info_t, MAX_DMABUF_FORMATS> dmabuf_infos;
     void clear_dmabuf_modifiers() {
       for (int i = 0; i < n_dmabuf_infos; ++i) {

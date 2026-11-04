@@ -70,6 +70,7 @@ public class ServerHelper {
         // VipleStream: Pass STUN address for relay NAT traversal
         if (computer.stunAddress != null) {
             intent.putExtra(Game.EXTRA_STUN_ADDRESS, computer.stunAddress);
+            intent.putExtra(Game.EXTRA_STUN_PUNCH_PORT, computer.stunPunchPort);  // §REVIEW-1104
         }
         try {
             if (computer.serverCert != null) {

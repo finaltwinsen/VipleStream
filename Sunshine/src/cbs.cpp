@@ -119,6 +119,11 @@ namespace cbs {
     }
 
     auto sps_p = ((CodedBitstreamH264Context *) ctx->priv_data)->active_sps;
+    // §REVIEW-1103：編碼器輸出異常（IDR 不帶 SPS）時 active_sps 為 NULL，不可解參考
+    if (!sps_p) {
+      BOOST_LOG(error) << "No active SPS in packet"sv;
+      return {};
+    }
 
     // This is a very large struct that cannot safely be stored on the stack
     auto sps = std::make_unique<H264RawSPS>(*sps_p);
@@ -176,6 +181,11 @@ namespace cbs {
 
     auto vps_p = ((CodedBitstreamH265Context *) ctx->priv_data)->active_vps;
     auto sps_p = ((CodedBitstreamH265Context *) ctx->priv_data)->active_sps;
+    // §REVIEW-1103：缺 VPS／SPS 時不可解參考
+    if (!vps_p || !sps_p) {
+      BOOST_LOG(error) << "No active VPS/SPS in packet"sv;
+      return {};
+    }
 
     // These are very large structs that cannot safely be stored on the stack
     auto sps = std::make_unique<H265RawSPS>(*sps_p);
@@ -254,13 +264,15 @@ namespace cbs {
     if (codec_id == AV_CODEC_ID_H264) {
       auto h264 = (CodedBitstreamH264Context *) ctx->priv_data;
 
-      if (!h264->active_sps->vui_parameters_present_flag) {
+      // §REVIEW-1103：active_sps 可能為 NULL
+      if (!h264->active_sps || !h264->active_sps->vui_parameters_present_flag) {
         return false;
       }
 
       return true;
     }
 
-    return ((CodedBitstreamH265Context *) ctx->priv_data)->active_sps->vui_parameters_present_flag;
+    auto hevc_sps = ((CodedBitstreamH265Context *) ctx->priv_data)->active_sps;
+    return hevc_sps && hevc_sps->vui_parameters_present_flag;
   }
 }  // namespace cbs

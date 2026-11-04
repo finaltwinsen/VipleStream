@@ -140,6 +140,8 @@ public class AppGridAdapter extends GenericGridAdapter<AppView.AppObject> {
         if (loader != null) {
             // Cancel operations on the old loader
             cancelQueuedOperations();
+            // §REVIEW-1104：被換下來的 loader 不會再用，關掉它的三個執行緒池（原本只取消、執行緒一直留著）
+            loader.shutdownNow();
         }
 
         this.loader = new CachedAppAssetLoader(computer, scalingDivisor,
@@ -150,6 +152,13 @@ public class AppGridAdapter extends GenericGridAdapter<AppView.AppObject> {
 
         // This will trigger the view to reload with the new layout
         setLayoutId(getLayoutIdForPreferences(prefs));
+    }
+
+    // §REVIEW-1104：Activity 結束時關掉這個 adapter 自己的 loader 執行緒池（不用 static 共用，免得關到別的頁面的）
+    public void shutdownLoader() {
+        if (loader != null) {
+            loader.shutdownNow();
+        }
     }
 
     public void cancelQueuedOperations() {

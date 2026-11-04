@@ -150,12 +150,15 @@ int lcEnumNetInterfaces(PLC_NET_INTERFACE out, int maxCount) {
             memset(&out[count], 0, sizeof(out[count]));
             WideCharToMultiByte(CP_UTF8, 0, adapter->FriendlyName, -1,
                                 out[count].name, LC_NETIF_MAX_NAME, NULL, NULL);
+            // §REVIEW-1103：IPv6 位址要用 IPv6 的介面索引與 metric（停用 IPv4 的介面 IfIndex 是 0）
             out[count].index = (int)adapter->IfIndex;
+            if (sa->sa_family == AF_INET6 && adapter->Ipv6IfIndex != 0)
+                out[count].index = (int)adapter->Ipv6IfIndex;
             out[count].type = ifType;
             out[count].family = sa->sa_family;
             memcpy(&out[count].addr, sa, unicast->Address.iSockaddrLength);
             out[count].addrLen = (SOCKADDR_LEN)unicast->Address.iSockaddrLength;
-            out[count].metric = (int)(adapter->Ipv4Metric);
+            out[count].metric = (int)(sa->sa_family == AF_INET6 ? adapter->Ipv6Metric : adapter->Ipv4Metric);
             out[count].up = true;
             out[count].preferred = (unicast->DadState == IpDadStatePreferred);
             out[count].prefixLen = (int)unicast->OnLinkPrefixLength;
@@ -175,19 +178,27 @@ int lcEnumNetInterfaces(PLC_NET_INTERFACE out, int maxCount) {
 
 static LC_NET_INTERFACE s_jniInterfaces[LC_NETIF_MAX_COUNT];
 static int s_jniInterfaceCount = 0;
+// §REVIEW-1103：JNI 執行緒寫、串流執行緒讀，網路切換瞬間會讀到半新半舊的清單；加鎖。
+static pthread_mutex_t s_jniInterfacesLock = PTHREAD_MUTEX_INITIALIZER;
 
 void lcSetNetInterfacesFromJni(PLC_NET_INTERFACE interfaces, int count) {
     if (count > LC_NETIF_MAX_COUNT)
         count = LC_NETIF_MAX_COUNT;
+    if (count < 0)
+        count = 0;
+    pthread_mutex_lock(&s_jniInterfacesLock);
     memcpy(s_jniInterfaces, interfaces, count * sizeof(LC_NET_INTERFACE));
     s_jniInterfaceCount = count;
+    pthread_mutex_unlock(&s_jniInterfacesLock);
 }
 
 int lcEnumNetInterfaces(PLC_NET_INTERFACE out, int maxCount) {
+    pthread_mutex_lock(&s_jniInterfacesLock);
     int count = s_jniInterfaceCount;
     if (count > maxCount)
         count = maxCount;
     memcpy(out, s_jniInterfaces, count * sizeof(LC_NET_INTERFACE));
+    pthread_mutex_unlock(&s_jniInterfacesLock);
     return count;
 }
 

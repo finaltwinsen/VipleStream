@@ -35,6 +35,7 @@
 #include <shellapi.h>  // CommandLineToArgvW
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -97,15 +98,16 @@ extern "C" int APIENTRY wWinMain(
 
   // 一律先建一個空的 result 檔，確保 caller 沒拿到舊資料；後續視 dialog
   // 結果 truncate-write 內容（成功）或 leave-empty（取消）。
-  // ofstream 在 MSVC 上接受 wchar_t* 但 g++ 上需要 std::filesystem::path 或
-  // 走 utf8 narrow。result_path 由 caller 產生（C:\Windows\Temp\...）是 ASCII，
-  // narrow 轉換安全；統一走 utf8 比較跨編譯器。
-  std::string result_path_utf8 = wide_to_utf8(result_path_w);
-  auto write_result = [&](const std::string &content) {
-    std::ofstream f(result_path_utf8, std::ios::binary | std::ios::trunc);
-    if (f) {
-      f.write(content.data(), static_cast<std::streamsize>(content.size()));
+  // §REVIEW-1103（B038-1）：用寬字元路徑開檔（不經 ANSI 字碼頁），並回報寫入是否成功——
+  // 寫失敗時 server 讀到空檔會當成「使用者取消」，exit code 要能分辨。
+  auto write_result = [&](const std::string &content) -> bool {
+    std::ofstream f(std::filesystem::path(result_path_w), std::ios::binary | std::ios::trunc);
+    if (!f) {
+      return false;
     }
+    f.write(content.data(), static_cast<std::streamsize>(content.size()));
+    f.flush();
+    return static_cast<bool>(f);
   };
   write_result("");
 
@@ -153,9 +155,9 @@ extern "C" int APIENTRY wWinMain(
     if (SUCCEEDED(dlg->GetResult(&result)) && result) {
       PWSTR path_w = nullptr;
       if (SUCCEEDED(result->GetDisplayName(SIGDN_FILESYSPATH, &path_w)) && path_w) {
-        write_result(wide_to_utf8(path_w));
+        const bool written = write_result(wide_to_utf8(path_w));
         ::CoTaskMemFree(path_w);
-        exit_code = 0;
+        exit_code = written ? 0 : 2;
       }
       result->Release();
     }

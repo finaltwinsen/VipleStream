@@ -18,7 +18,13 @@ public class AndroidAudioRenderer implements AudioRenderer {
     private final Context context;
     private final boolean enableAudioFx;
 
-    private AudioTrack track;
+    // §REVIEW-1104：保存音訊配置供 AudioTrack 重建，並透過 volatile 變數追蹤停止狀態與 track 參照
+    private volatile AudioTrack track;
+    private int channelConfig;
+    private int sampleRate;
+    private int bufferSize;
+    private boolean lowLatency;
+    private volatile boolean stopping = false;
 
     public AndroidAudioRenderer(Context context, boolean enableAudioFx) {
         this.context = context;
@@ -162,6 +168,13 @@ public class AndroidAudioRenderer implements AudioRenderer {
                 track = createAudioTrack(channelConfig, sampleRate, bufferSize, lowLatency);
                 track.play();
 
+                // §REVIEW-1104：記錄建立成功之音訊參數以備後續 dead object 時重建使用
+                this.channelConfig = channelConfig;
+                this.sampleRate = sampleRate;
+                this.bufferSize = bufferSize;
+                this.lowLatency = lowLatency;
+                this.stopping = false;
+
                 // Successfully created working AudioTrack. We're done here.
                 LimeLog.info("Audio track configuration: "+bufferSize+" "+lowLatency);
                 break;
@@ -187,12 +200,43 @@ public class AndroidAudioRenderer implements AudioRenderer {
 
     @Override
     public void playDecodedAudio(short[] audioData) {
+        // §REVIEW-1104：若已進入停止流程則直接丟棄音訊資料，避免阻塞解碼執行緒
+        if (stopping) {
+            return;
+        }
         // Only queue up to 40 ms of pending audio data in addition to what AudioTrack is buffering for us.
         if (MoonBridge.getPendingAudioDuration() < 40) {
             // This will block until the write is completed. That can cause a backlog
             // of pending audio data, so we do the above check to be able to bound
             // latency at 40 ms in that situation.
-            track.write(audioData, 0, audioData.length);
+            // §REVIEW-1104：檢查 write() 回傳值處理短寫，遇 dead object 等錯誤則重建 track 再寫
+            int offset = 0;
+            int retryCount = 0;
+            while (offset < audioData.length && !stopping) {
+                AudioTrack currentTrack = track;
+                if (currentTrack == null) {
+                    break;
+                }
+                int ret;
+                try {
+                    ret = currentTrack.write(audioData, offset, audioData.length - offset);
+                } catch (Exception e) {
+                    LimeLog.warning("AudioTrack write exception: " + e.getMessage());
+                    break;
+                }
+                if (ret > 0) {
+                    offset += ret;
+                } else if (!stopping && (ret == AudioTrack.ERROR_DEAD_OBJECT || ret == AudioTrack.ERROR_INVALID_OPERATION) && retryCount == 0) {
+                    retryCount++;
+                    LimeLog.warning("AudioTrack write error " + ret + ", recreating track");
+                    if (!recreateTrack()) {
+                        break;
+                    }
+                } else {
+                    LimeLog.warning("AudioTrack write failed with code: " + ret);
+                    break;
+                }
+            }
         }
         else {
             LimeLog.info("Too much pending audio data: " + MoonBridge.getPendingAudioDuration() +" ms");
@@ -213,6 +257,14 @@ public class AndroidAudioRenderer implements AudioRenderer {
 
     @Override
     public void stop() {
+        // §REVIEW-1104：停流時先設旗標並 pause 打斷阻塞中的 write，避免 join 時卡住
+        stopping = true;
+        AudioTrack t = track;
+        if (t != null) {
+            try {
+                t.pause();
+            } catch (Exception ignored) {}
+        }
         if (enableAudioFx) {
             // Close our audio effect control session when we're stopping
             Intent i = new Intent(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION);
@@ -223,11 +275,49 @@ public class AndroidAudioRenderer implements AudioRenderer {
     }
 
     @Override
-    public void cleanup() {
+    public synchronized void cleanup() {
         // Immediately drop all pending data
-        track.pause();
-        track.flush();
+        // §REVIEW-1104：停流時已呼叫 pause，此處確保 flush 與 release 安全執行並防範空指標
+        stopping = true;
+        if (track != null) {
+            try {
+                track.pause();
+            } catch (Exception ignored) {}
+            try {
+                track.flush();
+            } catch (Exception ignored) {}
+            try {
+                track.release();
+            } catch (Exception ignored) {}
+            track = null;
+        }
 
-        track.release();
+
+    }
+
+    // §REVIEW-1104：當 AudioTrack 遭遇 dead object 或 invalid operation 時重新建立實例
+    private synchronized boolean recreateTrack() {
+        if (stopping) {
+            return false;
+        }
+        try {
+            if (track != null) {
+                try {
+                    track.release();
+                } catch (Exception ignored) {}
+                track = null;
+            }
+            AudioTrack newTrack = createAudioTrack(channelConfig, sampleRate, bufferSize, lowLatency);
+            newTrack.play();
+            track = newTrack;
+            if (enableAudioFx) {
+                start();
+            }
+            return true;
+        } catch (Exception e) {
+            LimeLog.warning("Failed to recreate AudioTrack: " + e.getMessage());
+            track = null;
+            return false;
+        }
     }
 }

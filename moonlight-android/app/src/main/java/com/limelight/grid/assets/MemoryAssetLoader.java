@@ -22,7 +22,10 @@ public class MemoryAssetLoader {
 
             if (evicted) {
                 // Keep a soft reference around to the bitmap as long as we can
-                evictionCache.put(key, new SoftReference<>(oldValue));
+                // §REVIEW-1104：evictionCache 與 memoryCache 的 put/evictAll 共用 evictionCache 鎖，避免並發存取 HashMap 造成死迴圈或崩潰
+                synchronized (evictionCache) {
+                    evictionCache.put(key, new SoftReference<>(oldValue));
+                }
             }
         }
     };
@@ -41,7 +44,8 @@ public class MemoryAssetLoader {
             return bmp;
         }
 
-        SoftReference<ScaledBitmap> bmpRef = evictionCache.get(key);
+        synchronized (evictionCache) {
+            SoftReference<ScaledBitmap> bmpRef = evictionCache.get(key);
         if (bmpRef != null) {
             bmp = bmpRef.get();
             if (bmp != null) {
@@ -59,16 +63,26 @@ public class MemoryAssetLoader {
             }
         }
 
+        }
+
         return null;
     }
 
     public void populateCache(CachedAppAssetLoader.LoaderTuple tuple, ScaledBitmap bitmap) {
-        memoryCache.put(constructKey(tuple), bitmap);
+        // §REVIEW-1104：以 evictionCache 鎖保護 memoryCache.put，確保鎖順序一致避免死鎖
+        synchronized (evictionCache) {
+            memoryCache.put(constructKey(tuple), bitmap);
+        }
     }
 
     public void clearCache() {
+        // §REVIEW-1104：同步保護 clear 與 evictAll，避免背景載入與清理快取交錯
+        synchronized (evictionCache) {
         // We must evict first because that will push all items into the eviction cache
-        memoryCache.evictAll();
-        evictionCache.clear();
+
+    
+            memoryCache.evictAll();
+            evictionCache.clear();
+        }
     }
 }

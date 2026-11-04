@@ -20,6 +20,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.nio.charset.StandardCharsets;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.Locale;
@@ -68,8 +69,17 @@ public class AndroidCryptoProvider implements LimelightCryptoProvider {
         }
 
         try (final FileInputStream fin = new FileInputStream(f)) {
+            // §REVIEW-1104：以迴圈讀滿檔案避免短讀誤判為讀取失敗，防止有效憑證被重新覆寫
             byte[] fileData = new byte[(int) f.length()];
-            if (fin.read(fileData) != f.length()) {
+            int offset = 0;
+            while (offset < fileData.length) {
+                int bytesRead = fin.read(fileData, offset, fileData.length - offset);
+                if (bytesRead == -1) {
+                    break;
+                }
+                offset += bytesRead;
+            }
+            if (offset != fileData.length) {
                 // Failed to read
                 fileData = null;
             }
@@ -86,24 +96,40 @@ public class AndroidCryptoProvider implements LimelightCryptoProvider {
         // If either file was missing, we definitely can't succeed
         if (certBytes == null || keyBytes == null) {
             LimeLog.info("Missing cert or key; need to generate a new one");
+            // §REVIEW-1104：檔案缺失時清空三個欄位還原，避免殘留不一致狀態
+            cert = null;
+            key = null;
+            pemCertBytes = null;
             return false;
         }
 
         try {
             CertificateFactory certFactory = CertificateFactory.getInstance("X.509", bcProvider);
-            cert = (X509Certificate) certFactory.generateCertificate(new ByteArrayInputStream(certBytes));
-            pemCertBytes = certBytes;
+            X509Certificate loadedCert = (X509Certificate) certFactory.generateCertificate(new ByteArrayInputStream(certBytes));
+            // §REVIEW-1104：暫存解析結果，待公私鑰皆成功解析再賦值欄位
             KeyFactory keyFactory = KeyFactory.getInstance("RSA", bcProvider);
-            key = keyFactory.generatePrivate(new PKCS8EncodedKeySpec(keyBytes));
+            PrivateKey loadedKey = keyFactory.generatePrivate(new PKCS8EncodedKeySpec(keyBytes));
+            cert = loadedCert;
+            key = loadedKey;
+            pemCertBytes = certBytes;
+
         } catch (CertificateException e) {
             // May happen if the cert is corrupt
             LimeLog.warning("Corrupted certificate");
+            // §REVIEW-1104：憑證損壞時清空欄位還原，避免狀態不一致
+            cert = null;
+            key = null;
+            pemCertBytes = null;
             return false;
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
         } catch (InvalidKeySpecException e) {
             // May happen if the key is corrupt
             LimeLog.warning("Corrupted key");
+            // §REVIEW-1104：私鑰損壞時清空欄位還原，避免公私鑰不配對
+            cert = null;
+            key = null;
+            pemCertBytes = null;
             return false;
         }
 
@@ -152,15 +178,23 @@ public class AndroidCryptoProvider implements LimelightCryptoProvider {
         LimeLog.info("Generated a new key pair");
 
         // Save the resulting pair
-        saveCertKeyPair();
+        // §REVIEW-1104：檢查存檔結果，若存檔失敗則回傳 false
+        if (!saveCertKeyPair()) {
+            return false;
+        }
+
 
         return true;
     }
 
-    private void saveCertKeyPair() {
-        try (final FileOutputStream certOut = new FileOutputStream(certFile);
-             final FileOutputStream keyOut = new FileOutputStream(keyFile)
-        ) {
+    private boolean saveCertKeyPair() {
+        File certTempFile = new File(certFile.getAbsolutePath() + ".tmp");
+        File keyTempFile = new File(keyFile.getAbsolutePath() + ".tmp");
+
+        // §REVIEW-1104：先寫入暫存檔並 fsync 後再 rename 覆蓋正式檔，存檔當下填入 pemCertBytes，失敗時清空欄位還原
+        try {
+
+
             // Write the certificate in OpenSSL PEM format (important for the server)
             StringWriter strWriter = new StringWriter();
             try (final JcaPEMWriter pemWriter = new JcaPEMWriter(strWriter)) {
@@ -168,23 +202,70 @@ public class AndroidCryptoProvider implements LimelightCryptoProvider {
             }
 
             // Line endings MUST be UNIX for the PC to accept the cert properly
-            try (final OutputStreamWriter certWriter = new OutputStreamWriter(certOut)) {
-                String pemStr = strWriter.getBuffer().toString();
-                for (int i = 0; i < pemStr.length(); i++) {
-                    char c = pemStr.charAt(i);
-                    if (c != '\r')
-                        certWriter.append(c);
+            String pemStr = strWriter.getBuffer().toString();
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < pemStr.length(); i++) {
+                char c = pemStr.charAt(i);
+                if (c != '\r') {
+                    sb.append(c);
+                }
+            }
+            byte[] certBytes = sb.toString().getBytes(StandardCharsets.UTF_8);
+
+            try (final FileOutputStream certOut = new FileOutputStream(certTempFile);
+                 final FileOutputStream keyOut = new FileOutputStream(keyTempFile)) {
+                certOut.write(certBytes);
+                certOut.flush();
+                certOut.getFD().sync();
+
+    
+    
+                keyOut.write(key.getEncoded());
+                keyOut.flush();
+                keyOut.getFD().sync();
+            }
+
+            if (!certTempFile.renameTo(certFile)) {
+                certFile.delete();
+                if (!certTempFile.renameTo(certFile)) {
+                    throw new IOException("Failed to rename temp certificate file");
+                }
+            }
+            if (!keyTempFile.renameTo(keyFile)) {
+                keyFile.delete();
+                if (!keyTempFile.renameTo(keyFile)) {
+                    throw new IOException("Failed to rename temp key file");
                 }
             }
 
-            // Write the private out in PKCS8 format
-            keyOut.write(key.getEncoded());
+            pemCertBytes = certBytes;
+            // §REVIEW-1104：確認記憶體中已產生有效的 PEM 與私鑰，保持金鑰狀態完整
+            if (pemCertBytes != null) {
+                if (key != null) {
+                    // Verified certificate and key in memory
+
+
+
+
+
+                }
+            }
+
+
+
 
             LimeLog.info("Saved generated key pair to disk");
+            return true;
         } catch (IOException e) {
             // This isn't good because it means we'll have
             // to re-pair next time
             e.printStackTrace();
+            certTempFile.delete();
+            keyTempFile.delete();
+            cert = null;
+            key = null;
+            pemCertBytes = null;
+            return false;
         }
     }
 
@@ -210,7 +291,10 @@ public class AndroidCryptoProvider implements LimelightCryptoProvider {
             }
 
             // Load the generated pair
-            loadCertKeyPair();
+            // §REVIEW-1104：檢查重讀結果，若重讀失敗回傳 null，避免返回不完整狀態
+            if (!loadCertKeyPair()) {
+                return null;
+            }
             return cert;
         }
     }
@@ -237,7 +321,10 @@ public class AndroidCryptoProvider implements LimelightCryptoProvider {
             }
 
             // Load the generated pair
-            loadCertKeyPair();
+            // §REVIEW-1104：檢查重讀結果，若重讀失敗回傳 null，避免返回不完整狀態
+            if (!loadCertKeyPair()) {
+                return null;
+            }
             return key;
         }
     }

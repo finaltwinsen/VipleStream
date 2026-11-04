@@ -189,6 +189,12 @@ void LiStopConnection(void) {
 
     // §VR：連線已拆完，之後誤呼叫的 VR API 一律變成 no-op（不碰已銷毀的 mutex）
     VrFlags = 0;
+
+    // §REVIEW-1103：tunnel 用的埠覆寫只屬於這一場。不清的話，同一個行程下一場
+    // 直連（沒呼叫 LiOverrideUdpPorts）會沿用上一場 tunnel 的本機代理埠而連不上。
+    OverrideVideoPort = 0;
+    OverrideAudioPort = 0;
+    OverrideControlPort = 0;
 }
 
 static void terminationCallbackThreadFunc(void* context)
@@ -382,7 +388,8 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
                                     strcmp(hostBuf, "[::1]") == 0 ||
                                     strcmp(hostBuf, "::1") == 0;
                     if (loopback && strcmp(hostBuf, serverInfo->address) != 0) {
-                        RtspAddrString = strdup(hostBuf);
+                        // §REVIEW-1103：getaddrinfo 不吃帶中括號的 "[::1]"，去掉括號再存。
+                        RtspAddrString = strdup(strcmp(hostBuf, "[::1]") == 0 ? "::1" : hostBuf);
                         Limelog("RTSP host override: %s (tunnel)\n", RtspAddrString);
                     }
                 }

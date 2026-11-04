@@ -35,17 +35,18 @@ public:
     Q_INVOKABLE bool isUrl(const QString& text) const;
 
     // ── §VR-PLAYER（V3）：host 上的影片（VipleStream Server 的 /viple/media/*，經 HTTPS、用配對憑證）──
-    // [{index, name, online}]：配對過的主機（index 是 ComputerManager 裡的位置）
+    // §REVIEW-1104：主機改用 uuid 識別，避免主機排序變動後指到錯的電腦
+    // [{uuid, name, online}]：配對過的主機
     Q_INVOKABLE QVariantList hosts(ComputerManager* cm) const;
     // 在背景執行緒讀（主機慢或不通時介面不會卡住）：root＝-1 列這台主機的根（磁碟機或分享資料夾），否則列那個根裡
     // path（相對路徑，用 / 分隔）的內容。結果經 hostBrowseFinished(requestId, entries, error)：
     //   root＝-1：[{index, name, drive}]；否則 [{name, path, isDir, detail, format}]（子資料夾在前）
-    Q_INVOKABLE void hostBrowse(ComputerManager* cm, int host, int root, const QString& path, int requestId);
+    Q_INVOKABLE void hostBrowse(ComputerManager* cm, const QString& host, int root, const QString& path, int requestId);
     // 播放用的網址（https://<主機>:<埠>/viple/media/file?root=…&path=…）
-    Q_INVOKABLE QString hostFileUrl(ComputerManager* cm, int host, int root, const QString& path) const;
+    Q_INVOKABLE QString hostFileUrl(ComputerManager* cm, const QString& host, int root, const QString& path) const;
     // §VR-PLAYER-THUMB：主機分享檔案的縮圖 id（image://vthumb/<這個>，見 videothumbs.h）；主機找不到回空字串
     // stamp＝清單給的「大小_修改時間」（主機上同名檔案換掉之後換新縮圖）
-    Q_INVOKABLE QString hostThumbId(ComputerManager* cm, int host, int root, const QString& path, const QString& stamp) const;
+    Q_INVOKABLE QString hostThumbId(ComputerManager* cm, const QString& host, int root, const QString& path, const QString& stamp) const;
 
     // ── §VR-PLAYER（V4）：YouTube 等網站（WebResolver）──
     // 非同步：結果經 webSearchFinished(results, error)；results＝[{title, url, channel, duration}]

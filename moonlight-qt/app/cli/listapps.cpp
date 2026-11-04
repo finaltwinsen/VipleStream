@@ -1,15 +1,31 @@
 #include "listapps.h"
 
-#include "backend/boxartmanager.h"
 #include "backend/computermanager.h"
 #include "backend/computerseeker.h"
+#include "path.h"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QTimer>
+#include <QUrl>
 
 #define COMPUTER_SEEK_TIMEOUT 30000
 
 namespace CliListApps
 {
+
+// §REVIEW-1104：名稱含引號或換行會拆開 CSV 欄位，逐行模式也會被換行拆成多列
+static QString sanitizeAppName(const QString& name, bool escapeQuotes)
+{
+    QString out = name;
+    out.replace(QLatin1Char('\r'), QLatin1Char(' '));
+    out.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    if (escapeQuotes) {
+        out.replace(QStringLiteral("\""), QStringLiteral("\"\""));
+    }
+    return out;
+}
 
 enum State {
     StateInit,
@@ -62,8 +78,6 @@ public:
                            q, &Launcher::onComputerSeekTimeout);
                 m_ComputerSeeker->start(COMPUTER_SEEK_TIMEOUT);
 
-                m_BoxArtManager = new BoxArtManager(q);
-
                 if (m_Arguments.isVerbose()) {
                     fprintf(stdout, "Establishing connection to PC...\n");
                 }
@@ -74,7 +88,7 @@ public:
             if (m_State == StateSeekComputer) {
                 fprintf(stderr, "%s\n", qPrintable(QString("Failed to connect to %1").arg(m_ComputerName)));
 
-                QCoreApplication::exit(-1);
+                exitAfterFlush(-1);
             }
             break;
         // Occurs when searched computer is found
@@ -98,10 +112,10 @@ public:
                         const auto appList = http.getAppList();
                         m_Arguments.isPrintCSV() ? printAppsCSV(appList) : printApps(appList);
 
-                        QCoreApplication::exit(0);
+                        exitAfterFlush(0);
                     } catch (std::exception& exception) {
                         fprintf(stderr, "%s\n", exception.what());
-                        QCoreApplication::exit(1);
+                        exitAfterFlush(1);
                     }
                 } else {
                     m_State = StateFailure;
@@ -109,7 +123,7 @@ public:
                                             "Please open Moonlight to pair before retrieving games list.")
                                             .arg(event.computer->name)));
 
-                    QCoreApplication::exit(-1);
+                    exitAfterFlush(-1);
                 }
             }
             break;
@@ -118,7 +132,7 @@ public:
 
     void printApps(QVector<NvApp> apps) {
         for (int i = 0; i < apps.length(); i++) {
-            fprintf(stdout, "%s\n", qPrintable(apps[i].name));
+            fprintf(stdout, "%s\n", qPrintable(sanitizeAppName(apps[i].name, false)));
         }
     }
 
@@ -131,20 +145,40 @@ public:
 
     void printAppCSV(NvApp app) const
     {
-        fprintf(stdout, "\"%s\",%d,%s,%s,%s,%s,\"%s\"\n", qPrintable(app.name),
+        // §REVIEW-1104：不要呼叫 loadBoxArt；沒快取時它會丟背景下載並立刻回 placeholder，行程還會等 thread pool
+        QString boxArtUrl;
+        QDir boxArtDir(Path::getBoxArtCacheDir());
+        if (boxArtDir.cd(m_Computer->uuid)) {
+            QFile cacheFile(boxArtDir.filePath(QString::number(app.id) + ".png"));
+            if (cacheFile.exists() && cacheFile.size() > 0) {
+                boxArtUrl = QUrl::fromLocalFile(cacheFile.fileName()).toDisplayString();
+            }
+        }
+
+        fprintf(stdout, "\"%s\",%d,%s,%s,%s,%s,\"%s\"\n", qPrintable(sanitizeAppName(app.name, true)),
                                                           app.id,
                                                           app.hdrSupported ? "true" : "false",
                                                           app.isAppCollectorGame ? "true" : "false",
                                                           app.hidden ? "true" : "false",
                                                           app.directLaunch ? "true" : "false",
-                                                          qPrintable(m_BoxArtManager->loadBoxArt(m_Computer, app).toDisplayString()));
+                                                          qPrintable(boxArtUrl));
+    }
+
+    // §REVIEW-1104：ComputerManager 沒有 parent，直接 exit 會在 DelayedFlushThread 寫入 QSettings 前結束
+    void exitAfterFlush(int code)
+    {
+        ComputerManager* manager = m_ComputerManager;
+        m_ComputerManager = nullptr;
+        QTimer::singleShot(0, q_ptr, [manager, code]() {
+            delete manager;
+            QCoreApplication::exit(code);
+        });
     }
 
     Launcher *q_ptr;
     ComputerManager *m_ComputerManager;
     QString m_ComputerName;
     ComputerSeeker *m_ComputerSeeker;
-    BoxArtManager *m_BoxArtManager;
     NvComputer *m_Computer;
     State m_State;
     ListCommandLineParser m_Arguments;

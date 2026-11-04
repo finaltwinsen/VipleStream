@@ -24,9 +24,19 @@ public class LegacyDatabaseReader2 {
 
         details.uuid = c.getString(0);
         details.name = c.getString(1);
-        details.localAddress = new ComputerDetails.AddressTuple(c.getString(2), NvHTTP.DEFAULT_HTTP_PORT);
-        details.remoteAddress = new ComputerDetails.AddressTuple(c.getString(3), NvHTTP.DEFAULT_HTTP_PORT);
-        details.manualAddress = new ComputerDetails.AddressTuple(c.getString(4), NvHTTP.DEFAULT_HTTP_PORT);
+        // §REVIEW-1104：檢查 getString 是否為 null，避免 AddressTuple 拋出 IllegalArgumentException
+        String localAddr = c.getString(2);
+        if (localAddr != null) {
+            details.localAddress = new ComputerDetails.AddressTuple(localAddr, NvHTTP.DEFAULT_HTTP_PORT);
+        }
+        String remoteAddr = c.getString(3);
+        if (remoteAddr != null) {
+            details.remoteAddress = new ComputerDetails.AddressTuple(remoteAddr, NvHTTP.DEFAULT_HTTP_PORT);
+        }
+        String manualAddr = c.getString(4);
+        if (manualAddr != null) {
+            details.manualAddress = new ComputerDetails.AddressTuple(manualAddr, NvHTTP.DEFAULT_HTTP_PORT);
+        }
         details.macAddress = c.getString(5);
 
         // This column wasn't always present in the old schema
@@ -53,18 +63,28 @@ public class LegacyDatabaseReader2 {
         try (final Cursor c = computerDb.rawQuery("SELECT * FROM "+COMPUTER_TABLE_NAME, null)) {
             LinkedList<ComputerDetails> computerList = new LinkedList<>();
             while (c.moveToNext()) {
-                ComputerDetails details = getComputerFromCursor(c);
+                // §REVIEW-1104：單列解析失敗只跳過該列，不中斷整表遷移
+                try {
+                    ComputerDetails details = getComputerFromCursor(c);
 
                 // If a critical field is corrupt or missing, skip the database entry
                 if (details.uuid == null) {
                     continue;
                 }
 
-                computerList.add(details);
+                    computerList.add(details);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
             }
 
             return computerList;
         }
+    }
+
+    // §REVIEW-1104：提供獨立刪除舊庫方法，延後至寫入新庫成功後才刪除舊庫
+    public static void deleteDatabase(Context c) {
+        c.deleteDatabase(COMPUTER_DB_NAME);
     }
 
     public static List<ComputerDetails> migrateAllComputers(Context c) {
@@ -74,11 +94,11 @@ public class LegacyDatabaseReader2 {
         ) {
             // Open the existing database
             return getAllComputers(computerDb);
-        } catch (SQLiteException e) {
+        } catch (Exception e) {
             return new LinkedList<ComputerDetails>();
         } finally {
             // Close and delete the old DB
-            c.deleteDatabase(COMPUTER_DB_NAME);
+            // §REVIEW-1104：舊庫刪除改到新庫寫入成功之後
         }
     }
 }

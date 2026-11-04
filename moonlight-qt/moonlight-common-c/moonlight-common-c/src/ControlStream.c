@@ -128,6 +128,11 @@ static bool stopping;
 static bool disconnectPending;
 static bool encryptedControlStream;
 static bool hdrEnabled;
+// §AUD-MON：server 回報的音訊擷取狀態（0x5510）。-1＝這場還沒收到（舊 server 或不支援的平台）。
+// 控制接收執行緒寫、app 的主迴圈讀；seq 每收到一筆 +1，讓 app 分得出同一個狀態又來了一次。
+#define VIPLE_AUDIO_STATUS_PTYPE 0x5510
+static volatile int serverAudioStatus = -1;
+static volatile uint32_t serverAudioStatusSeq;
 static SS_HDR_METADATA hdrMetadata;
 
 static int intervalGoodFrameCount;
@@ -500,6 +505,8 @@ int initializeControlStream(void) {
     decryptionCtx = PltCreateCryptoContext();
     hdrEnabled = false;
     memset(&hdrMetadata, 0, sizeof(hdrMetadata));
+    serverAudioStatus = -1;
+    serverAudioStatusSeq = 0;
 
     vrApiReady = true;  // §VR-API-GATE
     return 0;
@@ -684,6 +691,11 @@ static struct {
 // 分支可能持鎖 service 將近 1 秒），而送 LOSS 要加密＋enet_host_service。
 static PLT_THREAD vrSendThread;
 static bool vrSendThreadStarted;
+// §ABR-ADAPT：下一則 FRAME_FEEDBACK 最早什麼時候送（VrSend 每 2 ms 醒一次，這裡隔 100 ms）
+static uint64_t vrFbDueMs;
+// 送失敗的那一則留著下一輪先重送（失敗通常就是傳送緩衝滿了；丟掉的話 server 少算這段收到的位元組，會把它看成鏈路飽和）
+static uint8_t vrFbPendingTlv[2 + sizeof(VIPLE_VR_TLV_FRAME_FEEDBACK_HDR) + VIPLE_VR_FRAME_FEEDBACK_MAX * sizeof(VIPLE_VR_FRAME_FEEDBACK_REC)];
+static int vrFbPendingLen;
 static volatile int vrTrackingConsecutiveFails;
 static volatile uint64_t vrTrackingBackoffUntilMs;
 static volatile uint32_t vrTrackingSent, vrTrackingDropped;
@@ -698,6 +710,8 @@ static void vrRecoveryInit(void) {
     memset(&vrRec, 0, sizeof(vrRec));
     vrSessionAtInit = (VrFlags & VIPLE_VR_SF_ENABLED) != 0;
     vrSendThreadStarted = false;
+    vrFbDueMs = 0;
+    vrFbPendingLen = 0;
     vrTrackingConsecutiveFails = 0;
     vrTrackingBackoffUntilMs = 0;
     vrTrackingSent = 0;
@@ -1005,6 +1019,59 @@ void vrRecoveryOnFrame(uint32_t frameIndex, uint8_t vrFrameFlags, bool isIdr) {
     PltUnlockMutex(&vrRecMutex);
 }
 
+// §ABR-ADAPT：每 100 ms 把這段收齊的幀組成 0x07（超過 18 筆就連送多則）。沒有收齊的幀就不送。
+// 只在 vrApiReady 時取走，避免 API 還沒開就把紀錄清掉。
+
+static void vrSendFrameFeedback(uint64_t nowMs) {
+    int batches;
+
+    if ((VrFlags & VIPLE_VR_SF_ENABLED) == 0 || !vrApiReady) {
+        return;
+    }
+    if (vrFbDueMs != 0 && nowMs < vrFbDueMs) {
+        return;
+    }
+    vrFbDueMs = nowMs + 100;
+
+    if (vrFbPendingLen > 0) {
+        if (LiSendVrMessage(vrFbPendingTlv, vrFbPendingLen, false) != 0) {
+            return;  // 還是送不出去：留著，下一輪再試（新的紀錄留在環裡）
+        }
+        vrFbPendingLen = 0;
+    }
+
+    for (batches = 0; batches < 8; batches++) {
+        VIPLE_VR_FRAME_FEEDBACK_REC recs[VIPLE_VR_FRAME_FEEDBACK_MAX];
+        VIPLE_VR_TLV_FRAME_FEEDBACK_HDR hdr;
+        uint8_t tlv[2 + sizeof(hdr) + VIPLE_VR_FRAME_FEEDBACK_MAX * sizeof(recs[0])];
+        uint32_t baseFrame = 0;
+        uint32_t baseTimeUs = 0;
+        uint16_t dropped = 0;
+        int n;
+        int payload;
+
+        n = rtpvTakeFrameFeedback(recs, VIPLE_VR_FRAME_FEEDBACK_MAX, &baseFrame, &baseTimeUs, &dropped);
+        if (n <= 0) {
+            break;
+        }
+        hdr.baseFrame = baseFrame;
+        hdr.baseTimeUs = baseTimeUs;
+        hdr.count = (uint8_t)n;
+        hdr.flags = dropped != 0 ? (uint8_t)VIPLE_VR_FRAME_FEEDBACK_F_DROPPED : 0;
+        hdr.droppedFrames = dropped;
+        payload = (int)sizeof(hdr) + n * (int)sizeof(recs[0]);
+        tlv[0] = VIPLE_VR_C2S_FRAME_FEEDBACK;
+        tlv[1] = (uint8_t)payload;
+        memcpy(&tlv[2], &hdr, sizeof(hdr));
+        memcpy(&tlv[2 + sizeof(hdr)], recs, (size_t)n * sizeof(recs[0]));
+        if (LiSendVrMessage(tlv, 2 + payload, false) != 0) {
+            memcpy(vrFbPendingTlv, tlv, (size_t)(2 + payload));
+            vrFbPendingLen = 2 + payload;
+            break;
+        }
+    }
+}
+
 // VrSend 執行緒的一輪：送出登記的 LOSS（第二份延後 VR_LOSS_TWIN_DELAY_MS），並推進
 // 重送／退回 IDR 的逾時。這條執行緒可以持 enetMutex（讀 RTT、送封包）。
 static void vrSendTick(void) {
@@ -1059,6 +1126,7 @@ static void vrSendTick(void) {
         vrSendLossOnce(f2, l2, r2);
     }
     vrPerformAction(action, firstLost, lastLost);
+    vrSendFrameFeedback(now);
 }
 
 static void vrSendThreadFunc(void* context) {
@@ -1166,8 +1234,11 @@ int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable) {
         return -1;
     }
 
-    // §VR-LINK-CTRL：LATCH（10 Hz 的節拍回授）在 server 同意時走連線，理由同 LOSS。其餘訊息照舊走 ENet。
-    if (!reliable && length >= 2 && tlv[0] == VIPLE_VR_C2S_LATCH && 2 + (int)tlv[1] == length &&
+    // §VR-LINK-CTRL：LATCH（10 Hz 的節拍回授）與 FRAME_FEEDBACK（§ABR-ADAPT，收包報告）在 server 同意時走連線，
+    // 理由同 LOSS。每條已確認的連線各一份、序號相同，server 用序號去重。其餘訊息照舊走 ENet。
+    if (!reliable && length >= 2 &&
+            (tlv[0] == VIPLE_VR_C2S_LATCH || tlv[0] == VIPLE_VR_C2S_FRAME_FEEDBACK) &&
+            2 + (int)tlv[1] == length &&
             vrmlSendCtrl(tlv, length) > 0) {
         return 0;
     }
@@ -2477,6 +2548,15 @@ enet_main_loop:
                 hdrEnabled = (enableByte != 0);
             }
 
+            // §AUD-MON：只記下狀態，app 自己輪詢（LiGetServerAudioStatus），不必經 async callback。
+            if (IS_SUNSHINE() && ctlHdr->type == VIPLE_AUDIO_STATUS_PTYPE && packetLength >= (int)sizeof(*ctlHdr) + 2) {
+                const uint8_t* p = (const uint8_t*)(ctlHdr + 1);
+                // p[0]＝版本（目前 1），p[1]＝狀態
+                serverAudioStatus = p[1];
+                serverAudioStatusSeq++;
+                Limelog("[VIPLE-AUD-MON] server audio status %u (v%u)\n", (unsigned)p[1], (unsigned)p[0]);
+            }
+
             // §VR：REFRESH_START 由控制接收執行緒直接交給恢復狀態機
             if ((VrFlags & VIPLE_VR_SF_ENABLED) && ctlHdr->type == (unsigned short)VIPLE_VR_PTYPE_S2C) {
                 vrHandleS2CInline((const uint8_t*)(ctlHdr + 1), packetLength - (int)sizeof(*ctlHdr));
@@ -3550,11 +3630,16 @@ int stopControlStream(void) {
         PltInterruptThread(&vrSendThread);
     }
 
-    if (!lossStatsJoined) {
-        PltJoinThread(&lossStatsThread);
-    }
     PltJoinThread(&requestIdrFrameThread);
     PltJoinThread(&controlReceiveThread);
+    // §REVIEW-1103：lossStatsThread 要在 controlReceiveThread 之後才 join。ENet 重連成功的當下
+    // controlReceiveThread 會 join 舊的 lossStats 並建新的（§LOSSSTATS-RESTART）；先 join 這裡會跟它
+    // 雙重 join 同一條執行緒，新建的那條也沒人 join。controlReceiveThread 結束後 lossStatsThread
+    // 只剩一個擁有者；它可能是剛重建、沒收到上面那次 interrupt 的，所以再 interrupt 一次。
+    if (!lossStatsJoined) {
+        PltInterruptThread(&lossStatsThread);
+        PltJoinThread(&lossStatsThread);
+    }
     PltJoinThread(&asyncCallbackThread);
     // §VR：一定要在下面銷毀 peer/client 之前 join（它會送 LOSS）；是否 join 看
     // vrSendThreadStarted（§M01-E 的教訓：不能漏 join）
@@ -3711,6 +3796,17 @@ int startControlStream(void) {
         client = enet_host_create(RemoteAddr.ss_family,
                                   LocalAddr.ss_family != 0 ? &localAddress : NULL,
                                   1, CTRL_CHANNEL_COUNT, 0, 0);
+#ifndef __3DS__
+        // §REVIEW-1103：打洞留下的埠被別人佔走時不要整場失敗——退回 OS 指派的埠再試一次
+        //（只是少了 NAT 洞的好處；重連路徑本來就這樣退）。
+        if (client == NULL && LocalControlPort != 0 && LocalAddr.ss_family != 0) {
+            Limelog("[VIPLE-NAT] could not bind ENet to hole-punched port %u; retrying with an ephemeral port\n",
+                    (unsigned int)LocalControlPort);
+            enet_address_set_port(&localAddress, 0);
+            client = enet_host_create(RemoteAddr.ss_family, &localAddress,
+                                      1, CTRL_CHANNEL_COUNT, 0, 0);
+        }
+#endif
         if (client == NULL) {
             stopping = true;
             return -1;
@@ -4040,6 +4136,13 @@ int startControlStream(void) {
 
 bool LiGetCurrentHostDisplayHdrMode(void) {
     return hdrEnabled;
+}
+
+int LiGetServerAudioStatus(uint32_t* seq) {
+    if (seq != NULL) {
+        *seq = serverAudioStatusSeq;
+    }
+    return serverAudioStatus;
 }
 
 bool LiGetHdrMetadata(PSS_HDR_METADATA metadata) {

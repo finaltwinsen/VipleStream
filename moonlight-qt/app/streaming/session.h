@@ -3,6 +3,7 @@
 #include <QSemaphore>
 #include <QQuickWindow>
 
+#include <atomic>
 #include <functional>
 
 #include <Limelight.h>
@@ -91,7 +92,17 @@ public:
         }
 
         // Make sure nobody forgets to update this for new SCM values
-        SDL_assert(serverCodecModes == 0);
+        // §REVIEW-1103：原本是 SDL_assert——host 宣告了 client 不認識的位元時 debug 建置會中斷（release 是空的）。
+        // 未知位元本來就被 mask 掉、行為正確，改成記一次 log。
+        if (serverCodecModes != 0) {
+            static bool s_Logged = false;
+            if (!s_Logged) {
+                s_Logged = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Host advertised unknown server codec mode bits: 0x%x (ignored)",
+                            serverCodecModes);
+            }
+        }
 
         int val = *this;
         return val & mask;
@@ -364,7 +375,7 @@ private:
     SDL_TimerID m_XrRebuildTimer = 0;
     ScHidPassthrough m_ScHid;
     Uint32 m_ScHidHotplugTick = 0;   // §SC-HOTPLUG：pollScHidHotplug() 的節流
-    int m_MouseEmulationRefCount;
+    std::atomic<int> m_MouseEmulationRefCount;  // §REVIEW-1103：主執行緒寫、解碼執行緒讀
     int m_FlushingWindowEventsRef;
     QStringList m_LaunchWarnings;
     bool m_ShouldExit;

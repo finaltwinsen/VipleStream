@@ -55,73 +55,11 @@ void CompatFetcher::start()
 
 bool CompatFetcher::isGfeVersionSupported(QString gfeVersion)
 {
+    // §REVIEW-1104：遠端相容性檢查已停用，殘留的 latestsupportedversion-v1 仍會把較新的 GfeVersion 拒開串流
+    Q_UNUSED(gfeVersion);
     QSettings settings;
-
-    if (gfeVersion.trimmed().isEmpty()) {
-        // If we don't have a GFE version, just allow it
-        return true;
-    }
-
-    QString latestSupportedVersion = settings.value(COMPAT_KEY COMPAT_VERSION).toString();
-    if (latestSupportedVersion.isEmpty()) {
-        // We don't have compat data yet, so just assume it's supported
-        return true;
-    }
-
-    QStringList latestSupportedVersionQuad = latestSupportedVersion.split('.');
-    QStringList gfeVersionQuad = gfeVersion.split('.');
-
-    if (gfeVersionQuad.count() <= 1) {
-        qWarning() << "Failed to parse GFE version:" << gfeVersion;
-        return true;
-    }
-
-    if (latestSupportedVersionQuad.count() <= 1) {
-        qWarning() << "Failed to parse latest supported version:" << latestSupportedVersion;
-        return true;
-    }
-
-    for (int i = 0;; i++) {
-        int actualVerVal = 0;
-        int latestSupportedVal = 0;
-
-        // Treat missing decimal places as 0
-        if (i < gfeVersionQuad.count()) {
-            bool ok;
-
-            actualVerVal = gfeVersionQuad[i].toInt(&ok);
-            if (!ok || actualVerVal < 0) {
-                // Return true to be safe
-                qWarning() << "Failed to parse GFE version:" << gfeVersion;
-                return true;
-            }
-        }
-        if (i < latestSupportedVersionQuad.count()) {
-            bool ok;
-
-            latestSupportedVal = latestSupportedVersionQuad[i].toInt(&ok);
-            if (!ok || latestSupportedVal < 0) {
-                // Return true to be safe
-                qWarning() << "Failed to parse latest supported version:" << latestSupportedVersion;
-                return true;
-            }
-        }
-
-        if (i >= gfeVersionQuad.count() && i >= latestSupportedVersionQuad.count()) {
-            // Equal versions - this is fine
-            return true;
-        }
-
-        if (actualVerVal < latestSupportedVal) {
-            // Actual version is lower than latest supported - this is fine
-            return true;
-        }
-        else if (actualVerVal > latestSupportedVal) {
-            // Actual version is greater than latest supported - this is bad
-            qWarning() << "GFE version" << gfeVersion << "is not supported by this version of Moonlight";
-            return false;
-        }
-    }
+    settings.remove(COMPAT_KEY COMPAT_VERSION);
+    return true;
 }
 
 void CompatFetcher::handleCompatInfoFetched(QNetworkReply* reply)

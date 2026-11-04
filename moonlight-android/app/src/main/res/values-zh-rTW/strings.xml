@@ -351,4 +351,6 @@
     <string name="steam_switch_error_taskgone">主機上的切換工作已消失</string>
     <string name="steam_switch_error_timeout">切換逾時（&gt;150 秒伺服器仍未進入最終狀態）</string>
     <string name="steam_switch_account_unavailable">這個帳號在主機上沒有已儲存的登入資訊。請先在主機上登入一次，然後再試一次。</string>
+    <string name="title_show_advanced">顯示進階與實驗性選項</string>
+    <string name="summary_show_advanced">用於排除問題與測試的選項。收起來的選項仍沿用目前的值。</string>
 </resources>

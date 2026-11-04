@@ -97,6 +97,8 @@ public class ComputerDetails {
     public boolean nvidiaServer;
     public String stunAddress;  // VipleStream: STUN public endpoint IP
     public String stunNatType;  // VipleStream: NAT type (punchable/symmetric)
+    // §REVIEW-1104（使用者決策 B）：STUN 回報的公網控制埠（打洞目標；NAT 換埠時不等於 HTTP 埠＋10）。0＝不知道
+    public int stunPunchPort;
 
     // VipleStream capability marker (v1.2.93). Non-blocking — `false`
     // simply means the host is vanilla Sunshine / GFE and we get
@@ -184,6 +186,13 @@ public class ComputerDetails {
         this.runningGameId = details.runningGameId;
         this.nvidiaServer = details.nvidiaServer;
         this.rawAppList = details.rawAppList;
+        // §REVIEW-1104：當傳入的 stunAddress 非空時更新，避免直連成功後仍保留舊的 STUN 位址
+        if (details.stunAddress != null) {
+            this.stunAddress = details.stunAddress;
+            if (details.stunPunchPort != 0) {
+                this.stunPunchPort = details.stunPunchPort;  // §REVIEW-1104：跟著 STUN 位址一起更新
+            }
+        }
         this.isVipleStreamPeer = details.isVipleStreamPeer;
         this.vipleStreamProtocol = details.vipleStreamProtocol;
         this.serverCodecModeSupport = details.serverCodecModeSupport;

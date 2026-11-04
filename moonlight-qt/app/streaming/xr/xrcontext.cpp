@@ -241,6 +241,18 @@ void XrContext::setPlayerPanel(const QImage& img, bool visible)
     m_PanelVisible.store(visible, std::memory_order_release);
 }
 
+void XrContext::setPlayerSubtitle(const QImage& img)
+{
+    {
+        std::lock_guard<std::mutex> lk(m_SubMutex);
+        if (!img.isNull()) {
+            m_SubImg = img;
+            m_SubDirty = true;
+        }
+    }
+    m_SubVisible.store(!img.isNull(), std::memory_order_release);
+}
+
 XrContext::DisplayTiming XrContext::displayTiming() const
 {
     std::lock_guard<std::mutex> lk(m_TimingMutex);
@@ -357,6 +369,7 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         vc.requireMeta = m_Options.pcvr;  // M4a R4：PCVR 不發布無 render pose 的影像
         vc.synth = m_Options.pcvr && m_Options.pcvrSynth;  // §VR-SYNTH
         vc.buffer = m_Options.pcvr && !vc.synth ? m_Options.pcvrBufferFrames : 0;  // §VR-BUFFER：和補幀互斥（都用 swapchain 的配置）
+        vc.bufferAuto = vc.buffer > 1 && m_Options.pcvrBufferAuto;                    // §VR-BUFFER-AUTO
         vc.testJitter = m_Options.testJitter;  // §VR-LDIAG（dev）：--vr-test-jitter
         vc.passTimers = m_Options.pcvr;        // §VR-PASS：每個 pass 的 GPU 時間（[VIPLE-VR-PASS]；VR 的 tag，XR 桌面不開）
         // §VR-LATCH-RELATCH／§VR-LATCH-WAIT：整場維持（A/B 切換只切 frame thread 那一側，發布的方式不跟著變）
@@ -1242,7 +1255,7 @@ bool XrContext::createQuadSwapchain(QString* error)
                     xrResultStr(m_Instance, r).toUtf8().constData());
     }
 
-    // X4：指標 quad（白色小方塊）。建不起來只是沒有指標，輸入照常
+    // X4：指標 quad（黑白棋盤格小方塊）。建不起來只是沒有指標，輸入照常
     ci.width = kPointerPx;
     ci.height = kPointerPx;
     r = xrCreateSwapchain(m_Session, &ci, &m_PointerSwapchain);
@@ -1282,6 +1295,8 @@ bool XrContext::createQuadSwapchain(QString* error)
     if (m_Options.player) {
         createSolidSwapchain(static_cast<uint32_t>(kPanelW), static_cast<uint32_t>(kPanelH), &m_PanelSwapchain, &m_PanelImages,
                              &m_PanelImageCount, "player panel");
+        createSolidSwapchain(static_cast<uint32_t>(kSubW), static_cast<uint32_t>(kSubH), &m_SubSwapchain, &m_SubImages,
+                             &m_SubImageCount, "player subtitle");
     }
     // §VR-SHELL：介面面板
     if (m_Options.shellWidth > 0 && m_Options.shellHeight > 0) {
@@ -1466,8 +1481,49 @@ void XrContext::handleStateChange(XrSessionState state)
 
 // ── frame thread ──
 
+// m_Cmd 只有一個：上一次送出的沒確認完成就重錄／重設 fence，頭盔驅動（turnip）的送出執行緒之後讀到被重設的
+// command buffer 會在 tu_autotune::on_submit 崩潰（2026-11-02 查：使用者「影片播到一半程式直接重啟」，
+// 9 個 coredump 全是這個位置）。以前等 1 s 逾時就照樣重設；現在逾時就保持 pending，這段期間的上傳先跳過
+bool XrContext::cmdIdle(uint64_t timeoutNs)
+{
+    if (!m_CmdPending) {
+        return true;
+    }
+    const uint64_t t0 = steadyNowNs();
+    const VkResult r = s_Vk.WaitForFences(m_VkDevice, 1, &m_Fence, VK_TRUE, timeoutNs);
+    if (r != VK_SUCCESS) {
+        // §REVIEW-1104：VK_ERROR_DEVICE_LOST 只留 pending 不會走 session loss，這裡要標 GPU wedged
+        if (r == VK_ERROR_DEVICE_LOST) {
+            markGpuWedged("upload fence wait returned VK_ERROR_DEVICE_LOST");
+        }
+        if (!m_CmdTimeoutLogged) {
+            m_CmdTimeoutLogged = true;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-XR] upload command buffer still pending after %.0f ms (vk=%d) - not reusing it, uploads skipped until it completes",
+                        static_cast<double>(steadyNowNs() - t0) / 1e6, static_cast<int>(r));
+        }
+        return false;
+    }
+    s_Vk.ResetFences(m_VkDevice, 1, &m_Fence);
+    m_CmdPending = false;
+    if (m_CmdTimeoutLogged) {
+        m_CmdTimeoutLogged = false;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] upload command buffer completed, uploads resume");
+    }
+    return true;
+}
+
+void XrContext::cmdSubmitted()
+{
+    m_CmdPending = true;
+    cmdIdle(1000000000ull);  // 照舊同步等（最多 1 s）；逾時就留著 pending，下次用之前再確認
+}
+
 bool XrContext::clearImage(VkImage img, float r, float g, float b, float a)
 {
+    if (!cmdIdle(0)) {
+        return false;
+    }
     s_Vk.ResetCommandBuffer(m_Cmd, 0);
     VkCommandBufferBeginInfo bi = vkStruct<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1514,8 +1570,7 @@ bool XrContext::clearImage(VkImage img, float r, float g, float b, float a)
     if (vr != VK_SUCCESS) {
         return false;
     }
-    s_Vk.WaitForFences(m_VkDevice, 1, &m_Fence, VK_TRUE, 1000000000ull);
-    s_Vk.ResetFences(m_VkDevice, 1, &m_Fence);
+    cmdSubmitted();
     return true;
 }
 
@@ -1525,7 +1580,7 @@ bool XrContext::ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count,
     if (*ready) {
         return true;  // runtime 沿用最後 release 的影像
     }
-    if (sc == XR_NULL_HANDLE || images == nullptr) {
+    if (sc == XR_NULL_HANDLE || images == nullptr || !cmdIdle(0)) {
         return false;
     }
     uint32_t idx = 0;
@@ -1545,6 +1600,10 @@ bool XrContext::ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count,
     {
         std::lock_guard<std::mutex> lk(m_QueueMutex);
         xrReleaseSwapchainImage(sc, &ri);
+    }
+    // §REVIEW-1104：fence 回 device lost 時純色沒畫完，不要設 *ready；submit 已成功仍回傳 true，避免圖層被藏
+    if (drawn && m_CmdPending && gpuWedged()) {
+        return true;
     }
     *ready = drawn;
     return drawn;
@@ -1586,8 +1645,14 @@ bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, con
     if (sc == XR_NULL_HANDLE || images == nullptr || (!bgra && !rgba) || s_Vk.CreateBuffer == nullptr) {
         return false;
     }
+    if (!cmdIdle(0)) {
+        return false;  // 上一次的複製還在 GPU 上：staging 與 m_Cmd 都不能動
+    }
     // Format_ARGB32 在記憶體裡是 B,G,R,A（little-endian）；UNORM 格式會被 runtime 當線性值（稍亮），SRGB 正確
-    const QImage img = src.convertToFormat(bgra ? QImage::Format_ARGB32 : QImage::Format_RGBA8888);
+    // §REVIEW-1104：來源已是預乘 ARGB32 時維持預乘，避免 SOURCE_ALPHA 把半透明邊緣除回成發白
+    const bool srcPremul = src.format() == QImage::Format_ARGB32_Premultiplied;
+    const QImage img = src.convertToFormat(bgra ? (srcPremul ? QImage::Format_ARGB32_Premultiplied : QImage::Format_ARGB32)
+                                                 : (srcPremul ? QImage::Format_RGBA8888_Premultiplied : QImage::Format_RGBA8888));
     const uint32_t w = static_cast<uint32_t>(img.width());
     const uint32_t h = static_cast<uint32_t>(img.height());
     const VkDeviceSize size = static_cast<VkDeviceSize>(w) * h * 4;
@@ -1696,8 +1761,7 @@ bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, con
         }
         ok = vr == VK_SUCCESS;
         if (ok) {
-            s_Vk.WaitForFences(m_VkDevice, 1, &m_Fence, VK_TRUE, 1000000000ull);
-            s_Vk.ResetFences(m_VkDevice, 1, &m_Fence);
+            cmdSubmitted();
         }
     }
     {
@@ -2100,7 +2164,7 @@ void XrContext::frameThreadMain()
             }
         }
 
-        const XrCompositionLayerBaseHeader* layers[8];
+        const XrCompositionLayerBaseHeader* layers[10];
         uint32_t layerCount = 0;
         // M4a R1（PCVR）：projection＋淡出 quad（結構體要活到 xrEndFrame）
         XrCompositionLayerProjection proj = xrStruct<XrCompositionLayerProjection>(XR_TYPE_COMPOSITION_LAYER_PROJECTION);
@@ -2113,6 +2177,7 @@ void XrContext::frameThreadMain()
         XrCompositionLayerQuad status = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerQuad quadEye2 = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-PLAYER 右眼
         XrCompositionLayerQuad panelLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        XrCompositionLayerQuad subLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         float playerEyeAspect = 0.0f;  // §VR-PLAYER：這一格每眼的畫面比例（螢幕高度＝寬÷它）
         if (m_Options.player && m_PlayerScreenDirty.exchange(false, std::memory_order_acq_rel)) {
             m_Screen->setGeometry(m_PlayerDistM.load(std::memory_order_relaxed), m_PlayerFovDeg.load(std::memory_order_relaxed));
@@ -2250,6 +2315,10 @@ void XrContext::frameThreadMain()
                                                  sub)) {
                         for (int e = 0; e < 2; e++) {
                             projViews[e].pose = views[e].pose;
+                            // §REVIEW-1104：POSITION_VALID 沒設時 position 不可用，歸零；方向有效仍照送全景層
+                            if ((vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) == 0) {
+                                projViews[e].pose.position = {0.0f, 0.0f, 0.0f};
+                            }
                             projViews[e].fov = views[e].fov;
                             projViews[e].subImage = sub[e];
                         }
@@ -2480,6 +2549,63 @@ void XrContext::frameThreadMain()
             }
         }
 
+        // §VR-PLAYER：字幕（2026-11-02 使用者要求 YouTube 的字幕）。平面螢幕：寬為螢幕的 80%、貼在螢幕下緣內側、往使用者拉近 2 cm；
+        // 180°／360°：置中時的頭部前方 1.5 m、比眼睛低 0.28 m、寬 1.1 m、後仰 10 度。畫在控制列與指標底下
+        if (m_Options.player && !shellOn && fs.shouldRender && m_SubSwapchain != XR_NULL_HANDLE && m_Screen->placed() &&
+            m_SubVisible.load(std::memory_order_acquire)) {
+            QImage img;
+            {
+                std::lock_guard<std::mutex> lk(m_SubMutex);
+                if (m_SubDirty) {
+                    img = m_SubImg;
+                    m_SubDirty = false;
+                }
+            }
+            if (!img.isNull() && img.width() == kSubW && img.height() == kSubH) {
+                m_SubUploaded = uploadImage(m_SubSwapchain, m_SubImages, m_SubImageCount, img) || m_SubUploaded;
+            }
+            if (m_SubUploaded && layerCount < 6) {
+                XrPosef sp = m_Screen->quadPose();
+                float subW = screenW * 0.8f;
+                float lift = 0.0f;     // 字幕中心相對螢幕下緣往上
+                float tiltDeg = 0.0f;
+                float towardUser = 0.02f;
+                float scrH = screenW / screenAspect;
+                if (immersiveShown || playerProj != 0) {
+                    const XrVector3f head = m_Screen->headPosition();
+                    const float yaw = m_Screen->yawRad();
+                    sp.position = {head.x - std::sin(yaw) * 1.5f, head.y - 0.28f, head.z - std::cos(yaw) * 1.5f};
+                    scrH = 0.0f;
+                    subW = 1.1f;
+                    tiltDeg = -10.0f;
+                    towardUser = 0.0f;
+                }
+                const float subH = subW * static_cast<float>(kSubH) / static_cast<float>(kSubW);
+                if (scrH > 0.0f) {
+                    lift = subH * 0.5f + scrH * 0.03f;
+                }
+                const float tilt = tiltDeg * 3.14159265f / 180.0f;
+                const XrQuaternionf qx = {std::sin(tilt * 0.5f), 0.0f, 0.0f, std::cos(tilt * 0.5f)};
+                const XrQuaternionf& q = sp.orientation;
+                const XrQuaternionf qt = {q.w * qx.x + q.x * qx.w + q.y * qx.z - q.z * qx.y,
+                                          q.w * qx.y - q.x * qx.z + q.y * qx.w + q.z * qx.x,
+                                          q.w * qx.z + q.x * qx.y - q.y * qx.x + q.z * qx.w,
+                                          q.w * qx.w - q.x * qx.x - q.y * qx.y - q.z * qx.z};
+                const XrRay::Vec3 off = XrRay::rotate(q, {0.0f, -scrH * 0.5f + lift, towardUser});
+                subLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                subLayer.space = m_LocalSpace;
+                subLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                subLayer.subImage.swapchain = m_SubSwapchain;
+                subLayer.subImage.imageRect.offset = {0, 0};
+                subLayer.subImage.imageRect.extent = {kSubW, kSubH};
+                subLayer.subImage.imageArrayIndex = 0;
+                subLayer.pose.orientation = qt;
+                subLayer.pose.position = {sp.position.x + off.x, sp.position.y + off.y, sp.position.z + off.z};
+                subLayer.size = {subW, subH};
+                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&subLayer);
+            }
+        }
+
         // §VR-PLAYER：控制列——螢幕下緣再往下 4 cm、往使用者拉近 15 cm、後仰 20 度；寬為螢幕的 55%（最寬 1.1 m）
         bool panelShown = false;
         XrPosef panelPose = {};
@@ -2586,8 +2712,27 @@ void XrContext::frameThreadMain()
                 }
             }
             XrPosef pp;
-            if (m_Input->pointerPose(&pp) && layerCount < 8 &&
-                ensureSolidQuad(m_PointerSwapchain, m_PointerImages, m_PointerImageCount, &m_PointerReady, 1.0f, 1.0f, 1.0f)) {
+            if (!m_PointerReady && m_PointerSwapchain != XR_NULL_HANDLE && m_PointerImages != nullptr) {
+                // 黑白棋盤格（4×4 格）：純白方塊在白底網頁上完全看不到（2026-11-02 使用者回報），
+                // 棋盤格在白底、黑底、彩色畫面上都至少有一半格子跟背景反差
+                QImage chk(static_cast<int>(kPointerPx), static_cast<int>(kPointerPx), QImage::Format_ARGB32);
+                const int cell = static_cast<int>(kPointerPx) / 4;
+                for (int y = 0; y < chk.height(); y++) {
+                    for (int x = 0; x < chk.width(); x++) {
+                        chk.setPixel(x, y, ((x / cell + y / cell) & 1) ? 0xFF000000u : 0xFFFFFFFFu);
+                    }
+                }
+                // 格式不支援上傳時退回原本的純白方塊
+                // §REVIEW-1104：device lost 時 ensureSolidQuad 回 true 但不設 *ready，不能用回傳值把指標記成完成
+                if (uploadImage(m_PointerSwapchain, m_PointerImages, m_PointerImageCount, chk)) {
+                    m_PointerReady = true;
+                }
+                else {
+                    ensureSolidQuad(m_PointerSwapchain, m_PointerImages, m_PointerImageCount, &m_PointerReady,
+                                    1.0f, 1.0f, 1.0f);
+                }
+            }
+            if (m_PointerReady && m_Input->pointerPose(&pp) && layerCount < 8) {
                 const float size = screenW * 0.008f;  // 1080p 螢幕上約 16 px
                 pointer.layerFlags = 0;
                 pointer.space = m_LocalSpace;
@@ -4703,6 +4848,14 @@ void XrContext::destroyAll()
     m_PanelImages = nullptr;
     m_PanelImageCount = 0;
     m_PanelUploaded = false;
+    if (m_SubSwapchain != XR_NULL_HANDLE) {
+        xrDestroySwapchain(m_SubSwapchain);
+        m_SubSwapchain = XR_NULL_HANDLE;
+    }
+    delete[] m_SubImages;
+    m_SubImages = nullptr;
+    m_SubImageCount = 0;
+    m_SubUploaded = false;
     if (m_ShellSwapchain != XR_NULL_HANDLE) {
         xrDestroySwapchain(m_ShellSwapchain);
         m_ShellSwapchain = XR_NULL_HANDLE;
@@ -4724,7 +4877,8 @@ void XrContext::destroyAll()
     }
     m_KbImageCount = m_KbHoverImageCount = m_KbPressImageCount = 0;
     m_KbUploaded = m_KbHoverReady = m_KbPressReady = false;
-    if (m_Staging != VK_NULL_HANDLE && m_VkDevice != VK_NULL_HANDLE) {
+    // §REVIEW-1104：GPU 已卡住或上傳命令還沒完成時，staging 可能仍被 command buffer 讀，比照 device 留下不釋放
+    if (m_Staging != VK_NULL_HANDLE && m_VkDevice != VK_NULL_HANDLE && !gpuWedged() && !m_CmdPending) {
         s_Vk.UnmapMemory(m_VkDevice, m_StagingMem);
         s_Vk.DestroyBuffer(m_VkDevice, m_Staging, nullptr);
         s_Vk.FreeMemory(m_VkDevice, m_StagingMem, nullptr);

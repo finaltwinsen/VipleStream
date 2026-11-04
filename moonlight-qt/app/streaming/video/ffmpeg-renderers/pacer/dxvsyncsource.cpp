@@ -72,7 +72,7 @@ bool DxVsyncSource::isAsync()
     return false;
 }
 
-void DxVsyncSource::waitForVsync()
+bool DxVsyncSource::waitForVsyncOnce()
 {
     NTSTATUS status;
 
@@ -82,21 +82,25 @@ void DxVsyncSource::waitForVsync()
         MONITORINFOEXA monitorInfo = {};
         monitorInfo.cbSize = sizeof(monitorInfo);
         if (!GetMonitorInfoA(currentMonitor, &monitorInfo)) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            if (m_FailStreak == 0) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "GetMonitorInfo() failed: %d",
                          GetLastError());
-            return;
+            return false;
         }
 
-        DEVMODEA monitorMode;
+        // §REVIEW-1104：dmDriverExtra 沒初始化，EnumDisplaySettingsA 可能失敗或寫過結構結尾
+        DEVMODEA monitorMode = {};
         monitorMode.dmSize = sizeof(monitorMode);
         if (!EnumDisplaySettingsA(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &monitorMode)) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            if (m_FailStreak == 0) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "EnumDisplaySettings() failed: %d",
                          GetLastError());
-            return;
+            return false;
         }
 
+        if (monitorMode.dmDisplayFrequency > 1) {
+            m_LastHz = static_cast<int>(monitorMode.dmDisplayFrequency);
+        }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Monitor changed: %s %d Hz",
                     monitorInfo.szDevice,
@@ -107,15 +111,18 @@ void DxVsyncSource::waitForVsync()
             D3DKMT_CLOSEADAPTER closeAdapterParams = {};
             closeAdapterParams.hAdapter = m_WaitForVblankEventParams.hAdapter;
             m_D3DKMTCloseAdapter(&closeAdapterParams);
+            // §REVIEW-1104：Close 後清掉 hAdapter 與 m_LastMonitor，開新 adapter 失敗時下一圈才會整段重開，也不會再關一次
+            m_WaitForVblankEventParams.hAdapter = 0;
+            m_LastMonitor = nullptr;
         }
 
         D3DKMT_OPENADAPTERFROMHDC openAdapterParams = {};
         openAdapterParams.hDc = CreateDCA(nullptr, monitorInfo.szDevice, nullptr, nullptr);
         if (!openAdapterParams.hDc) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            if (m_FailStreak == 0) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "CreateDC() failed: %d",
                          GetLastError());
-            return;
+            return false;
         }
 
         // Open the new adapter
@@ -123,10 +130,10 @@ void DxVsyncSource::waitForVsync()
         DeleteDC(openAdapterParams.hDc);
 
         if (status != STATUS_SUCCESS) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+            if (m_FailStreak == 0) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "D3DKMTOpenAdapterFromHdc() failed: %x",
                          status);
-            return;
+            return false;
         }
 
         m_WaitForVblankEventParams.hAdapter = openAdapterParams.hAdapter;
@@ -138,9 +145,28 @@ void DxVsyncSource::waitForVsync()
 
     status = m_D3DKMTWaitForVerticalBlankEvent(&m_WaitForVblankEventParams);
     if (status != STATUS_SUCCESS) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+        if (m_FailStreak == 0) SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "D3DKMTWaitForVerticalBlankEvent() failed: %x",
                      status);
+        return false;
+    }
+    return true;
+}
+
+// §REVIEW-1104（使用者決策 B）：等 vblank 的呼叫立刻失敗時（螢幕關閉／省電、遠端桌面、驅動重置、切換螢幕），
+// 原本直接 return，vsync 執行緒就變成無等待空轉：一顆核心吃滿、畫面盡快亂交、log 每圈一行。
+// 改成失敗時睡一個畫面間隔（照最後已知的螢幕 Hz）再照常交幀；log 只在連續失敗的第一次印，恢復時印一行
+void DxVsyncSource::waitForVsync()
+{
+    if (waitForVsyncOnce()) {
+        if (m_FailStreak > 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Vertical blank wait recovered after %d failure(s)",
+                        m_FailStreak);
+            m_FailStreak = 0;
+        }
         return;
     }
+    m_FailStreak++;
+    SDL_Delay(static_cast<Uint32>(1000 / (m_LastHz > 0 ? m_LastHz : 60)));
 }

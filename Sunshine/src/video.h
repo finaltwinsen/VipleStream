@@ -295,7 +295,9 @@ namespace video {
       }
     };
 
-    std::vector<replace_t> *replacements = nullptr;
+    // §REVIEW-1103：原本是指向 encode session 成員的裸指標，packet 進全域佇列後 session 可能先被重建／
+    // 解構 → 懸空。改成共同持有一份獨立的複本（內容與 string_view 指向的位元組一起活到 packet 消滅）。
+    std::shared_ptr<const std::vector<replace_t>> replacements;
     void *channel_data = nullptr;
     bool after_ref_frame_invalidation = false;
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;

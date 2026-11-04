@@ -57,6 +57,9 @@ namespace vr::orchestrator {
     std::atomic<uint64_t> g_seq {0};
     std::atomic<int64_t> g_error_until_ms {0};
     steady::time_point g_state_since = steady::now();
+    /// §REVIEW-1103（B041-1）：編排執行緒取到新 job 時設 true，idle_quit_steamvr 看到就把等待計時歸零。
+    /// 只在編排執行緒讀寫（thread_main 與它呼叫的 maintenance），不需要鎖。
+    bool g_idle_quit_reset = false;
 
     /// 路徑比對鍵：斜線統一、ASCII 小寫、去尾端斜線
     std::string path_key(std::string s) {
@@ -745,6 +748,14 @@ namespace vr::orchestrator {
       constexpr auto k_cap_game = 2min;  // 10-30：頭盔沒電斷線、遊戲還開著，5 分鐘內使用者改開 Steam 內建串流都會失敗 → 縮成 2 分鐘
       static std::string steamlink_baseline;
       static steady::time_point last_steamlink_check {};
+      // §REVIEW-1103（B041-1）：RESTORE_PENDING 期間頭盔重連（§VR-REARM）時 run_session 會直接接手、不跑 maintenance，
+      // pending_since 留著第一段的時間；第二段結束一回到 RESTORE_PENDING，cap 立刻成立、馬上關 SteamVR（含還在跑的遊戲），
+      // 重連窗口等於沒有。新 session 開始就把計時歸零，從這一段結束才重新起算。
+      if (g_idle_quit_reset) {
+        g_idle_quit_reset = false;
+        pending_since = {};
+        idle_since = {};
+      }
       if (!pending || bs.peer_is_selftest) {
         pending_since = {};
         idle_since = {};
@@ -857,9 +868,17 @@ namespace vr::orchestrator {
             job = std::move(g_pending);
             g_pending.reset();
             g_stop_req = false;
+          } else if (cur() == state_e::precheck) {
+            // §REVIEW-1103（B041-2）：start() 設了 PRECHECK、執行緒還沒取走 job 就被 stop() 清掉（/launch 後立刻斷線或取消）。
+            // 沒有人會再離開 PRECHECK，之後每次 start() 都因狀態不符被拒、VR 要重啟 server 才恢復 → 這裡復原。
+            // start() 現在在鎖內同時設 g_pending 與 PRECHECK，鎖內看到「PRECHECK 但沒有 job」就一定是被取消的。
+            // 在鎖內復原：放鎖後才改的話，中間插進來的新 start() 設的 PRECHECK 會被蓋掉
+            BOOST_LOG(info) << "[VIPLE-VR-ORCH] start cancelled before run - leaving PRECHECK";
+            set_state(platform::guard_pending() ? state_e::restore_pending : state_e::idle);
           }
         }
         if (job) {
+          g_idle_quit_reset = true;  // §REVIEW-1103（B041-1）
           BOOST_LOG(info) << "[VIPLE-VR-ORCH] start app=\"" << job->app.name << "\" vrClass=" << job->app.vr_class << " eye=" << job->neg.params.eye_width << 'x' << job->neg.params.eye_height
                           << " hz=" << job->neg.params.hz << " force=" << job->force << " session=" << log_guid(job->neg.guid);
           run_session(*job);
@@ -972,12 +991,13 @@ namespace vr::orchestrator {
       g_pending = job_t {neg, app, force};
       g_cur_params = neg.params;
       g_stop_req = false;
+      // 從這裡起 active() 為 true（PRECHECK 由執行緒記轉換 log）
+      // §REVIEW-1103（B041-2）：狀態跟 g_pending 一起在鎖內設定，編排執行緒才能在鎖內分辨「PRECHECK 但 job 已被取消」。
+      g_error_until_ms.store(0);
+      g_start_from.store(g_state.load());
+      g_state.store(static_cast<uint8_t>(state_e::precheck));
+      publish(VIPLE_VR_STATE_ORCHESTRATING, 0, 0);
     }
-    // 從這裡起 active() 為 true（PRECHECK 由執行緒記轉換 log）
-    g_error_until_ms.store(0);
-    g_start_from.store(g_state.load());
-    g_state.store(static_cast<uint8_t>(state_e::precheck));
-    publish(VIPLE_VR_STATE_ORCHESTRATING, 0, 0);
     g_cv.notify_all();
     return true;
   }

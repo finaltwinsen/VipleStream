@@ -324,6 +324,7 @@ SOURCES += \
     backend/systemproperties.cpp \
     backend/hidprobe.cpp \
     backend/vrlauncher.cpp \
+    backend/tailscalepath.cpp \
     backend/xrshell.cpp \
     backend/medialibrary.cpp \
     backend/videothumbs.cpp \
@@ -354,6 +355,7 @@ HEADERS += \
     streaming/video/bitstreamdump.h \
     streaming/video/v4l2/v4l2caps.h \
     streaming/xr/xrlatchstats.h \
+    streaming/xr/xrbufferauto.h \
     streaming/xr/xrphase.h \
     streaming/xr/xrvideostats.h \
     streaming/xr/xrflight.h \
@@ -415,6 +417,7 @@ HEADERS += \
     backend/systemproperties.h \
     backend/hidprobe.h \
     backend/vrlauncher.h \
+    backend/tailscalepath.h \
     backend/xrshell.h \
     backend/medialibrary.h \
     backend/videothumbs.h \

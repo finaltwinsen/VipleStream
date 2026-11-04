@@ -29,6 +29,9 @@ private:
 
     bool updateAppList(QVector<NvApp> newAppList);
 
+    // §REVIEW-1104：呼叫端已持有 this->lock 寫鎖時使用，relay 還原才不會跟 update() 重入死鎖
+    bool updateUnlocked(const NvComputer& that);
+
 public:
     // VipleStream H Phase 2.2: shared app comparator — `true` iff `a`
     // should sort before `b` given the current StreamingPreferences
@@ -121,6 +124,9 @@ public:
     NvAddress vpnAddress;       // §VPN-ADDR：host 廣告的 Tailscale 等 VPN 位址（100.64.0.0/10），最後才試
     NvAddress stunAddress;      // VipleStream: STUN-discovered public endpoint
     QString stunNatType;        // "punchable" or "symmetric"
+    // §REVIEW-1104（使用者決策 B）：STUN 回報的公網「控制埠」（打洞目標）。NAT 會換埠時不等於 HTTP 埠＋10。
+    // 0＝不知道（舊版 server／relay 沒給），打洞端退回 stunAddress.port()+10。只在執行期，不存檔
+    uint16_t stunPunchPort = 0;
     QByteArray macAddress;
     QString name;
     bool hasCustomName;

@@ -184,6 +184,18 @@ namespace file_transfer {
     void report_progress(const std::string &token, std::uint64_t delta_bytes);
 
     /**
+     * §REVIEW-1103：client 回報的絕對進度（POST /transfer/result kind=progress）。
+     * 只套用在 to_client（server 送、client 收）方向——那個方向 server 把整檔交給 HTTP 層後就看不到進度；
+     * from_client 方向 server 自己在 blob_post 算，忽略 client 的數字。
+     */
+    void set_client_progress(const std::string &token, std::uint64_t bytes_done);
+
+    /**
+     * §REVIEW-1103：這筆傳輸是否已被取消（Web UI／tray 取消、或串流結束 abort_all）。不存在也回 true。
+     */
+    bool is_canceled(const std::string &token) const;
+
+    /**
      * Transfer 結束（client 寫完或拉完）— 標記 done/failed。
      */
     void finalize(const std::string &token, bool success, std::string error_msg = {});

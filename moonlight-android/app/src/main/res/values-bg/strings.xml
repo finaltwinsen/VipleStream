@@ -324,4 +324,6 @@
     <string name="steam_switch_error_taskgone">Задачата за превключване изчезна на хоста</string>
     <string name="steam_switch_error_timeout">Времето за превключване изтече (&gt;150 s, без сървърът да достигне крайно състояние)</string>
     <string name="steam_switch_account_unavailable">Този акаунт няма запазени данни за вход на хоста. Първо влезте веднъж на хоста, след това опитайте отново.</string>
+    <string name="title_show_advanced">Показване на разширени и експериментални опции</string>
+    <string name="summary_show_advanced">Опции за отстраняване на проблеми и тестване. Скритите опции запазват текущите си стойности.</string>
 </resources>

@@ -210,7 +210,23 @@ namespace platf::gamepad {
     }
     // Only the PS5 controller supports touch input
     if (std::holds_alternative<inputtino::PS5Joypad>(*gamepad->joypad)) {
-      if (touch.pressure > 0.5) {
+      // §REVIEW-1103：依事件型別判斷按下／放開（同 Windows 版）；送小於 0.5 壓力值的 client 原本永遠按不下去。
+      // 其他事件型別才退回看壓力。
+      bool down;
+      switch (touch.eventType) {
+        case LI_TOUCH_EVENT_DOWN:
+        case LI_TOUCH_EVENT_MOVE:
+          down = true;
+          break;
+        case LI_TOUCH_EVENT_UP:
+        case LI_TOUCH_EVENT_CANCEL:
+          down = false;
+          break;
+        default:
+          down = touch.pressure > 0.5;
+          break;
+      }
+      if (down) {
         std::get<inputtino::PS5Joypad>(*gamepad->joypad).place_finger(touch.pointerId, touch.x * inputtino::PS5Joypad::touchpad_width, touch.y * inputtino::PS5Joypad::touchpad_height);
       } else {
         std::get<inputtino::PS5Joypad>(*gamepad->joypad).release_finger(touch.pointerId);
