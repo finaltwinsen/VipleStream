@@ -2913,9 +2913,15 @@ namespace stream {
       deskTrendOver = tr.state() == ::vr::abr::trend_state_e::overuse || tr.overuse_recently(abrNow, 1500ms);
       const bool cooled2 = session->video.abrRttLastCutTime.time_since_epoch().count() == 0 ||
                            abrNow - session->video.abrRttLastCutTime >= 2s;
-      rttSevere = tr.state() == ::vr::abr::trend_state_e::overuse && cooled2;
+      // §LAT-2D（2026-11-05 限速 A/B）：趨勢只看「排隊延遲還在不在漲」。瓶頸佇列塞滿後延遲停在 300～400 ms 不再上升，
+      // 趨勢回到 normal，結果在 RTT 是基線幾百倍時照樣回升、佇列永遠排不掉（實測限速 15 Mbps 時碼率在 10～14 Mbps 鋸齒、
+      // RTT 整段 250～500 ms）。所以舊的絕對門檻（≥ 2 倍且多 50 ms 暫停回升；≥ 4 倍且多 200 ms 連 2 輪就降）也要算：
+      // 趨勢抓變化、絕對門檻抓「一直很高」，任一成立就成立
+      const bool legacySevere = rttSevere;
+      const bool legacyCongested = rttCongested;
+      rttSevere = (tr.state() == ::vr::abr::trend_state_e::overuse && cooled2) || legacySevere;
       // 排空中（underuse）也不回升：等佇列清掉
-      rttCongested = deskTrendOver || tr.state() == ::vr::abr::trend_state_e::underuse;
+      rttCongested = deskTrendOver || tr.state() == ::vr::abr::trend_state_e::underuse || legacyCongested;
     }
 
     // §ABR-ADAPT：VR 的丟包分類——延遲沒有上升（不是塞車）的丟包是無線環境的隨機掉包，交給 FEC／補包，不降碼。
@@ -3011,10 +3017,22 @@ namespace stream {
           session->video.bitrateZeroLossStreak = 0;
         }
       }
-      if (session->video.bitrateZeroLossStreak >= 5) {
+      // §LAT-2D（2026-11-05）：2D 延遲已經回到基線（多不到 20 ms）時加快回升：連 3 輪（1.5 s）就升，
+      // 加幅取「上限 5%」與「目前 15%」較大者（乘法探頂）。限速 A/B 裡解除後要 33 s 才從 8 回到 37 Mbps；
+      // 延遲門檻修好後升過頭會馬上被 RTT 或丟包抓到，敢升快一點。延遲沒回到基線時照舊 5 輪＋5%
+      bool deskClean = false;
+      if (!session->vr && session->video.abrRttSampled) {
+        const uint32_t r = session->video.abrRttLastMs;
+        const uint32_t b = abr_rtt_baseline(session);
+        // 多不到 20 ms 才算回到基線（LAN 基線 1 ms 時 1.5 倍沒有意義，看絕對差就好）
+        deskClean = r <= b + 20;
+      }
+      const int rampRounds = deskClean ? 3 : 5;
+      if (session->video.bitrateZeroLossStreak >= rampRounds) {
         // §VR-ABR-FAST 啟用時由 fast controller 控制回升（RAMP），不執行舊 AIMD +5%
         if (!session->vr || !session->video.vrAbrFast) {
-          target += maxBr * 5 / 100;  // additive increase: +5% of max
+          const int step = deskClean ? std::max(maxBr * 5 / 100, target * 15 / 100) : maxBr * 5 / 100;
+          target += step;  // additive increase: +5% of max（2D 延遲乾淨時改乘法 15%）
         }
         session->video.bitrateZeroLossStreak = 0;
       }

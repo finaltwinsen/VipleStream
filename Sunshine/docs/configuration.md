@@ -3693,6 +3693,31 @@ not matter). Any other value is reported in the log as an invalid value and the 
     </tr>
 </table>
 
+### abr_cut_idr
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream §LAT-2D: when the adaptive bitrate lowers the bitrate of a normal (non-VR) stream, reset the
+            encoder and send an IDR frame. Disabled (default) lowers the bitrate smoothly like VR sessions do: sending a
+            large IDR frame while the link is congested makes the congestion worse.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            abr_cut_idr = enabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### nvenc_vbv_increase
 
 <table>

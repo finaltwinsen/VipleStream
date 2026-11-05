@@ -2641,7 +2641,9 @@ namespace video {
               if (nvenc_dev && nvenc_dev->nvenc) {
                 // §VR F13：VR session 降碼也走平滑過渡（不 reset、不 IDR）；一幀大 IDR 在 VR
                 // 就是一次明顯卡頓，恢復交給 intra refresh。一般 session 行為不變。
-                nvenc_dev->nvenc->reconfigure_bitrate(*newBitrateKbps, config.framerate, isDecrease && !config.vrProfile);
+                // §LAT-2D：abr_cut_idr = disabled 時 2D 也平滑降碼（A/B 用）
+                nvenc_dev->nvenc->reconfigure_bitrate(*newBitrateKbps, config.framerate,
+                                                      isDecrease && !config.vrProfile && config::video.abr_cut_idr);
               }
             } else if (auto pyro_session = dynamic_cast<pyrowave::pyrowave_encode_session_t *>(session.get())) {
               pyro_session->reconfigure_bitrate(*newBitrateKbps, config.framerate);

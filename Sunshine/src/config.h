@@ -178,6 +178,10 @@ namespace config {
 
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
     double minimum_fps_target;  ///< Lowest framerate that will be used when streaming. Range 0-1000, 0 = client's requested framerate.
+    /// §LAT-2D（2026-11-05）：abr_cut_idr。2D（非 VR）ABR 降碼時要不要 reset 編碼器＋IDR（舊的快速收斂做法）。
+    /// 預設 disabled＝比照 VR 平滑降碼：限速 15 Mbps A/B 裡平滑降碼不比 IDR 差，解除後恢復更乾淨（解碼 p95 18～70 → 約 1 ms），
+    /// 塞車當下再送一張大 IDR 只會更塞。enabled＝舊行為
+    bool abr_cut_idr = false;
   };
 
   struct audio_t {
