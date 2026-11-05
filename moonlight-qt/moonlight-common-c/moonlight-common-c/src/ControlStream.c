@@ -1,4 +1,10 @@
 #include "Limelight-internal.h"
+
+// §VIPLE-VR-LAT10：見 Limelight.h 的 LiSetVrFeedbackClockOffsetUs
+static volatile int64_t VrFeedbackClockOffsetUs = 0;
+void LiSetVrFeedbackClockOffsetUs(int64_t offsetUs) {
+    VrFeedbackClockOffsetUs = offsetUs;
+}
 #include "VrMultiLink.h"
 #include "HolePunch.h"  // VipleStream: for LocalControlPort (NAT-pinhole preservation)
 
@@ -1055,7 +1061,7 @@ static void vrSendFrameFeedback(uint64_t nowMs) {
             break;
         }
         hdr.baseFrame = baseFrame;
-        hdr.baseTimeUs = baseTimeUs;
+        hdr.baseTimeUs = baseTimeUs + (uint32_t)VrFeedbackClockOffsetUs;  // §VIPLE-VR-LAT10：換成 tracking 的時鐘
         hdr.count = (uint8_t)n;
         hdr.flags = dropped != 0 ? (uint8_t)VIPLE_VR_FRAME_FEEDBACK_F_DROPPED : 0;
         hdr.droppedFrames = dropped;

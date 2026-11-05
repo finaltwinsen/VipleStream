@@ -931,3 +931,36 @@ TEST_F(VrAbrFastTest, CongestionPointRelaxesWhenQuiet) {
   EXPECT_EQ(c.effective_congested_kbps(), static_cast<int>(75000 * 1.5));
   EXPECT_EQ(c.applied_kbps(), 75000);  // 平穩夠久要回到上限
 }
+
+// §ABR-SHORTFALL：沒有延遲趨勢、沒有丟包，但收到的比送出少三成，連續兩次回報就直接降到約收得到的量
+TEST_F(VrAbrFastTest, RateShortfallCutsWithoutWaitingForTrend) {
+  fast::fast_controller_t c(75000);
+  for (int i = 0; i < 50; ++i) {
+    c.on_rtt(5, t0 + i * 100ms);
+  }
+  c.set_applied_kbps(75000);
+  const auto t1 = t0 + 6000ms;
+  c.on_rates(58600, 84800, t1);
+  EXPECT_FALSE(c.tick(t1).has_value());  // 只有一次：還不降
+  const auto t2 = t1 + 500ms;
+  c.on_rates(58600, 84800, t2);
+  auto res = c.tick(t2);
+  ASSERT_TRUE(res.has_value());
+  EXPECT_STREQ(c.last_reason(), "rate-shortfall+delay");
+  // 0.95 × 58600 / 84800 = 0.656 → 75000 × 0.656 ≈ 49200
+  EXPECT_NEAR(*res, 49200, 600);
+}
+
+// §ABR-SHORTFALL：無線零星掉包造成的小落差（送 80、收 74，約 8%）不降
+TEST_F(VrAbrFastTest, SmallRateGapDoesNotCut) {
+  fast::fast_controller_t c(75000);
+  for (int i = 0; i < 50; ++i) {
+    c.on_rtt(5, t0 + i * 100ms);
+  }
+  c.set_applied_kbps(75000);
+  for (int i = 0; i < 6; ++i) {
+    const auto t = t0 + 6000ms + i * 500ms;
+    c.on_rates(74000, 80000, t);
+    EXPECT_FALSE(c.tick(t).has_value());
+  }
+}

@@ -301,6 +301,9 @@ namespace video {
     void *channel_data = nullptr;
     bool after_ref_frame_invalidation = false;
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+    // §VIPLE-VR-LAT10：編碼開始與完成時間戳（PCVR 延遲分析用）
+    std::optional<std::chrono::steady_clock::time_point> encode_start;
+    std::optional<std::chrono::steady_clock::time_point> encode_end;
     vr_frame_meta_t vr_meta {};  // VipleStream 2.0 §VR：只有 VR session 會填
   };
 

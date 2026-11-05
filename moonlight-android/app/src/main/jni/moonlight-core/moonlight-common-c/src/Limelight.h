@@ -939,6 +939,11 @@ int LiSendHighResHScrollEvent(short scrollAmount);
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMicroseconds(void);
 
+// §VIPLE-VR-LAT10：FRAME_FEEDBACK 的到達時間要和 tracking 的 sampleTimeNs 同一個時鐘（host 才能用同一組時鐘偏移
+// 換算單向延遲）。app 在 VR session 開始時設「app 的單調時鐘 µs − LiGetMicroseconds()」，送出時加上這個差值。
+// 沒設＝0（舊行為；host 的 ABR 只看相對變化，不受影響）。
+void LiSetVrFeedbackClockOffsetUs(int64_t offsetUs);
+
 // This function returns a time in milliseconds with an implementation-defined epoch.
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMillis(void);

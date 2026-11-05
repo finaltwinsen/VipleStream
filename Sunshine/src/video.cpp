@@ -1765,6 +1765,7 @@ namespace video {
     auto &sps = session.sps;
     auto &vps = session.vps;
 
+    const auto enc_start = std::chrono::steady_clock::now();
     // send the frame to the encoder
     auto ret = avcodec_send_frame(ctx.get(), frame);
     if (ret < 0) {
@@ -1791,6 +1792,7 @@ namespace video {
       } else if (ret < 0) {
         return ret;
       }
+      const auto enc_end = std::chrono::steady_clock::now();
 
       if (av_packet->flags & AV_PKT_FLAG_KEY) {
         BOOST_LOG(debug) << "Frame "sv << frame_nr << ": IDR Keyframe (AV_FRAME_FLAG_KEY)"sv;
@@ -1843,6 +1845,9 @@ namespace video {
 
       if (av_packet && av_packet->pts == frame_nr) {
         packet->frame_timestamp = frame_timestamp;
+        // §VIPLE-VR-LAT10：記錄編碼起訖時間
+        packet->encode_start = enc_start;
+        packet->encode_end = enc_end;
         // §VR：metadata 跟著 frame_timestamp 一樣只掛在這一幀自己的 packet 上
         if (vr_meta) {
           packet->vr_meta = *vr_meta;
@@ -1858,7 +1863,9 @@ namespace video {
   }
 
   int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp, const vr_frame_meta_t *vr_meta) {
+    const auto enc_start = std::chrono::steady_clock::now();
     auto encoded_frame = session.encode_frame(frame_nr);
+    const auto enc_end = std::chrono::steady_clock::now();
     if (encoded_frame.data.empty()) {
       BOOST_LOG(error) << "NvENC returned empty packet";
       return -1;
@@ -1881,6 +1888,9 @@ namespace video {
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame_timestamp;
+    // §VIPLE-VR-LAT10：記錄編碼起訖時間
+    packet->encode_start = enc_start;
+    packet->encode_end = enc_end;
     if (vr_meta) {
       packet->vr_meta = *vr_meta;
     }

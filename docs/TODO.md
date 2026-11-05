@@ -71,6 +71,20 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   頭盔的 `auto-update.sh` 還沒在頭盔上跑過——**測試頭盔跑的是 dev 版，執行新安裝腳本前先把它的「軟體更新」設成不要自動檢查**，
   避免版號判斷出錯時被 GitHub 正式版蓋掉。
 
+### §LAT 延遲與體驗改善路線（2026-11-05 定案，依序做、做完一項更新一項）
+現況（10-07 頭盔，未逐段量）：延遲 41～45 ms ≈ 主機 SteamVR 管線約 2 格 14～16＋擷取編碼 3＋網路 2＋解碼 3＋延後挑影像 3～4＋頭盔合成到顯示約 1.3 格 9～11。
+最大兩塊是兩端 SteamVR 的管線；換語言（C、組合語言）不會改善（等待時間不是 CPU 指令，編解碼在硬體）。
+1. **G 每段延遲儀表**：每張影像記錄擷取→編碼→送出→收齊→解碼→挑選→顯示各段時間（host 與頭盔時鐘對齊已有），10 秒彙整 p50／p95，
+   另做自動 A/B 腳本。**狀態：host 端完成（2.0.78／client 2.0.79）**：`[VIPLE-VR-LAT10]` 每 10 秒列 present→enc、enc、enc→send、send、oneway、host、to-client 的 p50/p95/max（時鐘：client 收包報告改用 tracking 同一個 steady_clock，見 `LiSetVrFeedbackClockOffsetUs`；host 的 QPC 與 steady_clock 用同一刻讀數換算）。模擬頭盔（開發機→host）實測：host 4.1 ms、oneway p50 3.6～4.8／p95 4.7～8.6／max 13～19、present→頭盔收齊 p50 7.7～8.9 ms。頭盔端各段沿用 `chain dec … sum=`。自動 A/B 腳本：沿用 `scripts/vr/s0_game.sh`，之後依需要再包。
+2. **C 頭盔無線電三項**：§VR-NETSEL（已寫）、關 wlan0 背景掃描、送 softapmanager `streamon`——頭盔回家驗。**狀態：等頭盔**
+3. **B1 每格大小固定（VBV 一格）＋B2 全面 intra refresh 取代 IDR**：**狀態：查明不必做（11-05）**——VBV 本來就是一格＋20%，每幀大小 max 只比 p50 多約一成（49／52／55 KB）；VBV 改 1 格沒有可量的差別（A/B 各 60 s，碼率不同無法直接比）；VR 只有開場 3 次 IDR（f=1 request、f=11 request、f=16 startup-retry），之後全是 intra refresh。單向延遲尖峰與每幀大小無關。
+3b. **ABR 塞車反應太慢（11-05 從 LAT10 發現）**：模擬頭盔 75 Mbps 時送 84.8／收 58.6 Mbps（收到的少三成＝在排隊），單向延遲 p95 83 ms、max 172 ms，ABR 要等 owd 趨勢累積到 overuse（約 10 s）才降。改法：收／送速率比連續低於門檻就直接降（不等趨勢），並檢查開場直接用上限 75 Mbps 起跳是否合理。**狀態：已加規則、待頭盔驗（host 2.0.81）**——`vr_abr_fast.h` 的 on_rates：送 ≥ 收 × 1.15 連續 2 次（約 1 s）就降（rate-shortfall+delay，降幅照收／送比），單元測試 27 項過（新增兩項）。模擬頭盔 90 s 這條規則沒觸發：塞車時是 owd-trend 先降；而且收送速率只在處理收包報告時更新，**整段卡住時報告也送不過來，速率停在舊值**——下一步補「超過 N ms 收不到收包報告＝塞住」直接降。開發機這條 Wi-Fi 本身會整段卡 1.7 s，不能拿來判斷效果。
+4. **A2 主機畫面節拍對齊頭盔顯示＋A4 依實測動態調整延後挑影像**。**狀態：調查完（11-05），全部要頭盔驗**——`--vr-emulate` 不跑 OpenXR 迴圈、不送 LATCH，模擬頭盔量不到。候選（依序）：① host 改 `vr_latch_mode = v3`＋`vr_latch_acquire = enabled`（開場對齊約 40 s→約 3 s 的說法待驗）；② 延後挑影像依顯示週期比例縮放（144 Hz 一格 6.94 ms，固定延後佔比太大）；③ 依實測 GPU 完成時間（tail max、heldMiss）在 3～6 ms 間動態調。死路（不要重做）：host 目標餘裕 40%（撞頭盔合成器 GPU 忙碌段，重複幀 3.39%）、依晚到比例自動調餘裕（底噪讓積分器一路推到上限）、延後挑影像 > 6.5 ms（`kLatchSpanMaxUs`，7 ms 時 runtime 重投影 71 格）。調查報告：`temp/lat_a2/survey_out.md`。
+5. **A5 送深度圖層讓頭盔做位置修正＋D1 依實測延遲與頭部動作調整預測量（D3 手把另外預測）**。**狀態：未開始**
+6. **A1 分片編碼與傳輸、A3 研究讓 SteamVR 少排一格**。**狀態：未開始**
+其他候選（排在後面、依量測決定）：B3 AV1（先確認 Frame 的 AV1 解碼延遲）、B4 影像封包 Wi-Fi 優先權、B5 批次收送（USO／RIO、sendmmsg）、
+E1 頭盔效能等級（注意電池保護斷電）、E2 熱路徑即時優先權、E3 熱路徑去鎖去配置。
+
 ### §VR-NETSEL 網路狀態自動選擇＋§VR-MIC 頭盔麥克風（2.0.75，未提交、頭盔不在家）
 - **§VR-NETSEL**：安裝腳本裝 `viplestream-netmode.service`（app 寫 netmode-request.json 心跳；5 秒沒更新、轉接器沒連線、6 小時上限都會交還
   wlan0）；app `vrnetmode.h` 在 VR 串流中量 B（家用＋轉接器）與 C（只用轉接器）各 20 秒，比每秒新影像數，選順的並記住地點（家用 SSID 雜湊，14 天重測）。
@@ -80,7 +94,7 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 - **WiVRn 學到的兩件事（待頭盔驗）**：① 串流時把 wlan0 的 wpa_supplicant `bgscan` 設成空字串（WiVRn PR #1194；要一次性 root 放 D-Bus policy
   到 /etc/dbus-1/system.d/＋/etc/atomic-update.conf.d/ 才能保留過更新），可改善 B 狀態的週期性空白；② Steam 的 vrlink 會對
   `/var/run/softapmanager.streaming.socket` 送 `streamon`／`streamoff`（反組譯得知、未公開）——先看 socket 權限，再比送前送後的掉包。
-- **§VR-MIC**：頭盔 SDL 錄音＋Opus（48 kHz 單聲道、20 ms、24 kbps、in-band FEC）→ C2S MIC 0x0D（VR 控制通道 unsequenced）→ host 解碼寫進
+- **§VR-MIC（11-05 模擬頭盔端到端通過：client 每 10 s 送 500 則、host 收 501 則、0 掉包、緩衝 50～70 ms、開場 1 次 underrun；host 裝置 float32／48 kHz／2 ch）**：頭盔 SDL 錄音＋Opus（48 kHz 單聲道、20 ms、24 kbps、in-band FEC）→ C2S MIC 0x0D（VR 控制通道 unsequenced）→ host 解碼寫進
   「Steam Streaming Microphone」播放端（做法同 Apollo PR #1428）；`vr_mic`（預設開）、能力位元 `VIPLE_VR_SERVER_CAP_MIC 0x100`、找不到裝置回 NOTICE 5；
   設定頁「把頭盔麥克風送到電腦」（預設開）。兩個模組 gemini 寫、我核對並修過（COM 物件全在播放執行緒、SDL 子系統釋放）。
   **待驗**：host 上的裝置名稱與格式、實際收音品質與延遲、掉包時有沒有嗡嗡聲（WiVRn #1012 的教訓）。

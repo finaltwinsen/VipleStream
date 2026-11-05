@@ -4012,6 +4012,11 @@ bool Session::startConnectionAsync()
     }
 #endif
 
+    // §VIPLE-VR-LAT10：收包報告的時間換成 tracking 用的 steady_clock（host 拿同一組時鐘偏移算單向延遲）。
+    // 一定要在連線開始前設：中途改值會讓 host 的 ABR 看到單向延遲跳一大段
+    LiSetVrFeedbackClockOffsetUs((int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch()).count() -
+                                 (int64_t)LiGetMicroseconds());
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);

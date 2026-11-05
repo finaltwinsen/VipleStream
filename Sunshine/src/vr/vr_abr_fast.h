@@ -6,6 +6,8 @@
  *   - 延遲趨勢（delay_trend_t）：自適應門檻 γ 追蹤排隊延遲膨脹，進入 overuse 即快速降碼。
  *   - 單向延遲（on_owd）：2 秒內有樣本時優先以 owd_trend_ 判定壅塞、降碼與暫停回升。
  *   - 實際送達速率（on_rates）：鏈路飽和（send >= recv * 1.05）時，壅塞降碼一步落至 clamp(0.95 * recv / send, 0.5, 0.85)。
+ *     §ABR-SHORTFALL（11-05）：送出比收到多 15% 以上連續 2 次回報（約 1 秒）＝已經在排隊，直接降（原因 rate-shortfall+delay），
+ *     不等延遲趨勢累積（模擬頭盔實測：送 84.8／收 58.6 Mbps 時單向延遲 p95 83 ms，趨勢要約 10 秒才判 overuse）。
  *   - 畫質飽和（on_quality）：H.264/HEVC QP <= 22 時暫停回升；連續 10 秒 QP <= 17 時每 3 秒小幅回收 5%（quality-trim）。
  *   - 解碼負載（on_decode）：p95 > 0.85 * period 時暫停回升（有效 3 秒）；連 2 筆 > 1.0 * period 觸發 decode-overload 中度降碼。
  *   - 丟包分類：
@@ -75,6 +77,9 @@ namespace vr::abr {
   constexpr auto k_fast_owd_active_window = std::chrono::milliseconds(2000);   ///< OWD 樣本有效視窗 2 秒
   constexpr auto k_fast_rates_fresh_window = std::chrono::milliseconds(1000);  ///< 送達速率有效視窗 1 秒
   constexpr double k_fast_rates_saturated_ratio = 1.05;                        ///< 鏈路飽和判定倍數 1.05
+  constexpr double k_fast_shortfall_ratio = 1.15;    ///< §ABR-SHORTFALL：送出 ≥ 收到 × 1.15 才算排隊（避開無線零星掉包的小落差）
+  constexpr int k_fast_shortfall_reports = 2;        ///< 連續幾次回報（每 500 ms 一次）
+  constexpr int k_fast_shortfall_min_kbps = 5000;    ///< 送出太少時不判（量測誤差大）
   constexpr auto k_fast_quality_recent_window = std::chrono::milliseconds(1500); ///< QP 飽和判定視窗 1.5 秒
   constexpr auto k_fast_quality_trim_duration = std::chrono::seconds(10);      ///< quality-trim 連續門檻 10 秒
   constexpr auto k_fast_quality_trim_interval = std::chrono::seconds(3);       ///< quality-trim 間隔 3 秒
@@ -261,6 +266,16 @@ namespace vr::abr {
       recv_kbps_ = std::max(0, recv_kbps);
       send_kbps_ = std::max(0, send_kbps);
       last_rates_time_ = now;
+      // §ABR-SHORTFALL：收到的明顯少於送出＝鏈路已經塞住在排隊，直接降（降幅由 trigger_cut 依收／送比算）
+      if (send_kbps_ >= k_fast_shortfall_min_kbps &&
+          static_cast<double>(send_kbps_) >= static_cast<double>(recv_kbps_) * k_fast_shortfall_ratio) {
+        if (++shortfall_reports_ >= k_fast_shortfall_reports) {
+          shortfall_reports_ = 0;
+          trigger_cut(severity_e::moderate, "rate-shortfall+delay", now);
+        }
+      } else {
+        shortfall_reports_ = 0;
+      }
     }
 
     /// 接收畫質回報（每 500 ms 一次，codec：0=H.264、1=HEVC、2=AV1）
@@ -784,6 +799,7 @@ namespace vr::abr {
     steady::time_point last_rates_time_{};
     int recv_kbps_ = 0;
     int send_kbps_ = 0;
+    int shortfall_reports_ = 0;  ///< §ABR-SHORTFALL：連續幾次收／送落差超過門檻
 
     steady::time_point last_quality_time_{};
     int last_qp_x100_ = -1;

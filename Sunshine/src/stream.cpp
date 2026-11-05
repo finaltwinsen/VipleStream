@@ -623,9 +623,15 @@ namespace stream {
       std::atomic<int> vrRepairAccum{0};
       // §ABR-ADAPT（第 2 期）：每幀送完的時間（server 單調時鐘 µs）與送出的位元組（影像＋FEC）。videoBroadcastThread 寫、
       // control 執行緒讀 client 的 FRAME_FEEDBACK 時對照，算單向延遲（相對值）與實際送達速率。只有 VR session 會寫。
+      // §VIPLE-VR-LAT10：擴充記錄各階段時間戳（server steady µs），供幀延遲分解統計使用。
       struct abr_tx_slot_t {
         std::atomic<uint32_t> frame {0xFFFFFFFFu};
         std::atomic<int64_t> us {0};
+        std::atomic<int64_t> present_us {0};
+        std::atomic<int64_t> enc_start_us {0};
+        std::atomic<int64_t> enc_end_us {0};
+        std::atomic<int64_t> first_send_us {0};
+        std::atomic<int64_t> last_send_us {0};
       };
       std::array<abr_tx_slot_t, 2048> abrTx {};  // 120 fps 約 17 s：數秒級的排隊延遲也對得上
       std::atomic<uint64_t> abrTxBytes {0};
@@ -717,6 +723,17 @@ namespace stream {
       vr::abr::outage_state_t vrOutage;
       // §VR-ABR-FAST（2026-10-30）：VR 反應式快速降碼率控制器。abrMutex 保護。
       std::unique_ptr<vr::abr::fast_controller_t> vrAbrFast;
+      // §VIPLE-VR-LAT10：PCVR 每幀延遲分解統計向量（握 abrMutex 保護）
+      std::vector<double> latPresentToEnc;
+      std::vector<double> latEnc;
+      std::vector<double> latEncToSend;
+      std::vector<double> latSend;
+      std::vector<double> latOneway;
+      std::vector<double> latHost;
+      std::vector<double> latToClient;
+      std::vector<double> latKB;  ///< 每幀實際收到的大小（KB，含 FEC）：看單向延遲的尖峰是不是大畫面造成的
+      int latMatchedFrames {0};
+      std::chrono::steady_clock::time_point latLastLog {};
     } video;
 
     struct {
@@ -2072,6 +2089,54 @@ namespace stream {
   }
 
   /**
+   * @brief §VIPLE-VR-LAT10：計算並格式化延遲統計（p50/p95/max，單位 ms 保留兩位小數）。
+   */
+  static std::string vr_format_lat_stats(std::vector<double> &v, bool is_clk_dependent, bool clk_unlocked) {
+    if (v.empty()) {
+      if (is_clk_dependent && clk_unlocked) {
+        return "clk=unlocked";
+      }
+      return "n/a";
+    }
+    std::sort(v.begin(), v.end());
+    const auto at = [&](double q) {
+      return v[std::min(v.size() - 1, static_cast<std::size_t>(q * (double) (v.size() - 1) + 0.5))];
+    };
+    return std::format("{:.2f}/{:.2f}/{:.2f}", at(0.50), at(0.95), v.back());
+  }
+
+  /**
+   * @brief §VIPLE-VR-LAT10：輸出延遲分解統計（呼叫端需持 abrMutex）。
+   */
+  static void vr_log_lat_summary(session_t *session, bool is_final) {
+    auto &v = session->video;
+    if (v.latMatchedFrames == 0) {
+      return;
+    }
+    const auto cs = session->vr ? session->vr->clock_stats(false) : std::nullopt;
+    const bool clk_unlocked = !cs.has_value() || !cs->ready;
+
+    BOOST_LOG(info) << "[VIPLE-VR-LAT10] " << (is_final ? "(final) " : "") << "frames=" << v.latMatchedFrames
+                    << " | present->enc " << vr_format_lat_stats(v.latPresentToEnc, false, clk_unlocked)
+                    << " | enc " << vr_format_lat_stats(v.latEnc, false, clk_unlocked)
+                    << " | enc->send " << vr_format_lat_stats(v.latEncToSend, false, clk_unlocked)
+                    << " | send " << vr_format_lat_stats(v.latSend, false, clk_unlocked)
+                    << " | oneway " << vr_format_lat_stats(v.latOneway, true, clk_unlocked)
+                    << " | host " << vr_format_lat_stats(v.latHost, false, clk_unlocked)
+                    << " | to-client " << vr_format_lat_stats(v.latToClient, true, clk_unlocked)
+                    << " | KB " << vr_format_lat_stats(v.latKB, false, clk_unlocked);
+    v.latPresentToEnc.clear();
+    v.latEnc.clear();
+    v.latEncToSend.clear();
+    v.latSend.clear();
+    v.latOneway.clear();
+    v.latHost.clear();
+    v.latToClient.clear();
+    v.latKB.clear();
+    v.latMatchedFrames = 0;
+  }
+
+  /**
    * @brief §ABR-ADAPT（第 2 期）：client 的收包報告（0x5507/07 FRAME_FEEDBACK）。每筆紀錄是一幀「最後一個封包到達的 client 時間」
    *        與收到的位元組；對上 videoBroadcastThread 記下的送完時間，得到單向延遲（含固定時鐘偏移，只看相對變化）餵給控制器的
    *        owd 趨勢，並每 500 ms 算一次收／送速率（都含 FEC）。ENet 與連線層兩條路都會進來（control 執行緒或連線接收執行緒）。
@@ -2086,10 +2151,12 @@ namespace stream {
                                                  (len - sizeof(hdr)) / sizeof(VIPLE_VR_FRAME_FEEDBACK_REC)});
     std::lock_guard<std::mutex> lk(session->video.abrMutex);
     auto &v = session->video;
-    if (!v.vrAbrFast) {
-      return;
-    }
+
     const auto now = std::chrono::steady_clock::now();
+    const auto cs = session->vr ? session->vr->clock_stats(false) : std::nullopt;
+    const bool clk_ready = cs.has_value() && cs->ready;
+    const int64_t clk_offset_us = clk_ready ? (cs->offset_ns / 1000) : 0;
+
     for (std::size_t i = 0; i < n; ++i) {
       VIPLE_VR_FRAME_FEEDBACK_REC rec;
       std::memcpy(&rec, body + sizeof(hdr) + i * sizeof(rec), sizeof(rec));
@@ -2119,24 +2186,83 @@ namespace stream {
       }
       // 相對值＋10 s：delay_trend 只收正值；第一筆之後若更快（偏移變小）仍為正
       const double owdMs = (double) (diff - v.abrOwdOffsetUs) / 1000.0 + 10000.0;  // 餘裕 10 s（第一筆可能是慢的）
-      if (owdMs > 0.0) {
+      if (v.vrAbrFast && owdMs > 0.0) {
         v.vrAbrFast->on_owd(owdMs, now);
       }
+
+      // §VIPLE-VR-LAT10：收集每幀延遲分解統計（各階段若缺少時間戳則略過該階段）
+      ++v.latMatchedFrames;
+      if (v.latKB.size() < 4096) {
+        v.latKB.push_back((double) rec.bytes / 1024.0);
+      }
+      const int64_t presentUs = slot.present_us.load(std::memory_order_relaxed);
+      const int64_t encStartUs = slot.enc_start_us.load(std::memory_order_relaxed);
+      const int64_t encEndUs = slot.enc_end_us.load(std::memory_order_relaxed);
+      const int64_t firstSendUs = slot.first_send_us.load(std::memory_order_relaxed);
+      const int64_t lastSendUs = slot.last_send_us.load(std::memory_order_relaxed);
+      // client 時間只有低 32 位元（rxUs 的高位是從 0 展開的，只能看相對變化）：用時鐘偏移推出 client 現在大約的時間，
+      // 再把低 32 位元補到離它最近的那一圈，得到完整的 client 時間，才能換成 server 時鐘
+      // 時鐘偏移是「server 的 vr_clock（QPC）− client」，這裡的各段時間戳是 steady_clock，兩者起點不同：用同一刻的兩個讀數換算
+      int64_t arrivalServerUs = 0;
+      if (clk_ready) {
+        const int64_t nowSteadyUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const int64_t nowQpcUs = (int64_t) ((double) platf::vr_clock_ticks() * 1e6 / (double) platf::vr_clock_frequency());
+        const int64_t clientNowUs = nowQpcUs - clk_offset_us;
+        int64_t full = (clientNowUs & ~(int64_t) 0xFFFFFFFF) + (int64_t) lo;
+        if (full - clientNowUs > ((int64_t) 1 << 31)) {
+          full -= (int64_t) 1 << 32;
+        } else if (clientNowUs - full > ((int64_t) 1 << 31)) {
+          full += (int64_t) 1 << 32;
+        }
+        arrivalServerUs = full + clk_offset_us - (nowQpcUs - nowSteadyUs);
+      }
+
+      if (presentUs > 0 && encStartUs > 0 && v.latPresentToEnc.size() < 4096) {
+        v.latPresentToEnc.push_back((double) (encStartUs - presentUs) / 1000.0);
+      }
+      if (encStartUs > 0 && encEndUs > 0 && v.latEnc.size() < 4096) {
+        v.latEnc.push_back((double) (encEndUs - encStartUs) / 1000.0);
+      }
+      if (encEndUs > 0 && firstSendUs > 0 && v.latEncToSend.size() < 4096) {
+        v.latEncToSend.push_back((double) (firstSendUs - encEndUs) / 1000.0);
+      }
+      if (firstSendUs > 0 && lastSendUs > 0 && v.latSend.size() < 4096) {
+        v.latSend.push_back((double) (lastSendUs - firstSendUs) / 1000.0);
+      }
+      if (clk_ready && lastSendUs > 0 && v.latOneway.size() < 4096) {
+        v.latOneway.push_back((double) (arrivalServerUs - lastSendUs) / 1000.0);
+      }
+      if (presentUs > 0 && lastSendUs > 0 && v.latHost.size() < 4096) {
+        v.latHost.push_back((double) (lastSendUs - presentUs) / 1000.0);
+      }
+      if (clk_ready && presentUs > 0 && v.latToClient.size() < 4096) {
+        v.latToClient.push_back((double) (arrivalServerUs - presentUs) / 1000.0);
+      }
     }
-    // 收／送速率：每 500 ms 一次
-    if (v.abrRateWinStart == std::chrono::steady_clock::time_point {}) {
-      v.abrRateWinStart = now;
-      v.abrTxBytesWinStart = v.abrTxBytes.load(std::memory_order_relaxed);
-      v.abrRxBytesWin = 0;
-    } else if (now - v.abrRateWinStart >= std::chrono::milliseconds(500)) {
-      const double sec = std::chrono::duration<double>(now - v.abrRateWinStart).count();
-      const uint64_t tx = v.abrTxBytes.load(std::memory_order_relaxed);
-      const int recvKbps = (int) (v.abrRxBytesWin * 8.0 / 1000.0 / sec);
-      const int sendKbps = (int) ((tx - v.abrTxBytesWinStart) * 8.0 / 1000.0 / sec);
-      v.vrAbrFast->on_rates(recvKbps, sendKbps, now);
-      v.abrRateWinStart = now;
-      v.abrTxBytesWinStart = tx;
-      v.abrRxBytesWin = 0;
+    // 收／送速率：每 500 ms 一次（僅在 vrAbrFast 啟用時通知控制器）
+    if (v.vrAbrFast) {
+      if (v.abrRateWinStart == std::chrono::steady_clock::time_point {}) {
+        v.abrRateWinStart = now;
+        v.abrTxBytesWinStart = v.abrTxBytes.load(std::memory_order_relaxed);
+        v.abrRxBytesWin = 0;
+      } else if (now - v.abrRateWinStart >= std::chrono::milliseconds(500)) {
+        const double sec = std::chrono::duration<double>(now - v.abrRateWinStart).count();
+        const uint64_t tx = v.abrTxBytes.load(std::memory_order_relaxed);
+        const int recvKbps = (int) (v.abrRxBytesWin * 8.0 / 1000.0 / sec);
+        const int sendKbps = (int) ((tx - v.abrTxBytesWinStart) * 8.0 / 1000.0 / sec);
+        v.vrAbrFast->on_rates(recvKbps, sendKbps, now);
+        v.abrRateWinStart = now;
+        v.abrTxBytesWinStart = tx;
+        v.abrRxBytesWin = 0;
+      }
+    }
+
+    // §VIPLE-VR-LAT10：每 10 秒輸出一次延遲分解統計
+    if (v.latLastLog == std::chrono::steady_clock::time_point {}) {
+      v.latLastLog = now;
+    } else if (now - v.latLastLog >= 10s) {
+      vr_log_lat_summary(session, false);
+      v.latLastLog = now;
     }
   }
 
@@ -4824,6 +4950,21 @@ namespace stream {
         // per-frame loop to reuse capacity across frames).
         auto &scratch = videoScratch;
 
+        // §VIPLE-VR-LAT10：取得各階段時間戳（server steady µs）
+        int64_t present_us = 0;
+        if (packet->frame_timestamp) {
+          present_us = std::chrono::duration_cast<std::chrono::microseconds>(packet->frame_timestamp->time_since_epoch()).count();
+        }
+        int64_t enc_start_us = 0;
+        if (packet->encode_start) {
+          enc_start_us = std::chrono::duration_cast<std::chrono::microseconds>(packet->encode_start->time_since_epoch()).count();
+        }
+        int64_t enc_end_us = 0;
+        if (packet->encode_end) {
+          enc_end_us = std::chrono::duration_cast<std::chrono::microseconds>(packet->encode_end->time_since_epoch()).count();
+        }
+        int64_t first_send_us = 0;
+
         auto blockIndex = 0;
         std::for_each(fec_blocks_begin, fec_blocks_end, [&](std::string_view &current_payload) {
           auto packets = (current_payload.size() + (blocksize - 1)) / blocksize;
@@ -4942,6 +5083,10 @@ namespace stream {
               batch_info.block_count = current_batch_size;
 
               frame_send_batch_latency_logger.first_point_now();
+              // §VIPLE-VR-LAT10：在發送該幀第一個 shard 前記錄首包發送時間
+              if (first_send_us == 0) {
+                first_send_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+              }
               // VipleStream: when the session is carried by the relay
               // tunnel, every shard goes out per-packet with the tunnel
               // header + HMAC prepended. Batched sendmsg/WSASendTo can't
@@ -5066,10 +5211,16 @@ namespace stream {
           // §ABR-ADAPT（第 2 期）：記下這一幀（目前送完的那個 block）的送出時間與位元組，最後一個 block 覆蓋成整幀送完的時間
           if (session->vr) {
             auto &slot = session->video.abrTx[packet->frame_index() & 2047];
+            const auto send_complete_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
             // 先作廢幀號再寫時間、最後發布新幀號：讀的一方不會拿到「舊幀號配新時間」
             slot.frame.store(0xFFFFFFFFu, std::memory_order_release);
-            slot.us.store(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
-                          std::memory_order_relaxed);
+            slot.us.store(send_complete_us, std::memory_order_relaxed);
+            // §VIPLE-VR-LAT10：寫入各階段延遲時間戳
+            slot.present_us.store(present_us, std::memory_order_relaxed);
+            slot.enc_start_us.store(enc_start_us, std::memory_order_relaxed);
+            slot.enc_end_us.store(enc_end_us, std::memory_order_relaxed);
+            slot.first_send_us.store(first_send_us, std::memory_order_relaxed);
+            slot.last_send_us.store(send_complete_us, std::memory_order_relaxed);
             slot.frame.store((uint32_t) packet->frame_index(), std::memory_order_release);
             session->video.abrTxBytes.fetch_add((uint64_t) shards.size() * shards.blocksize, std::memory_order_relaxed);  // 只算 payload（不含 RTP 標頭與加密前綴），和 client 的計法一致
           }
@@ -5768,6 +5919,11 @@ namespace stream {
                         << " s2cDropped=" << s.s2c_dropped;
         if (const auto cs = session.vr->clock_stats(true)) {
           BOOST_LOG(info) << "[VIPLE-VR-CLK] (final) " << ::vr::clk::format_stats(*cs);
+        }
+        // §VIPLE-VR-LAT10：session 結束時若有延遲統計資料則輸出最終統計
+        {
+          std::lock_guard<std::mutex> lk(session.video.abrMutex);
+          vr_log_lat_summary(&session, true);
         }
         session.vr->set_padmode(nullptr);  // §VR-PADMODE：移除虛擬 Xbox 手把（解構時）
 #if VIPLE_VR_BRIDGE_HAS_ABI
