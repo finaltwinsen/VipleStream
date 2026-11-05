@@ -505,6 +505,103 @@ Flickable {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.")
                 }
+
+                CheckBox {
+                    id: vrWheelCheck
+                    width: parent.width
+                    text: qsTr("Steering wheel with the controllers (Xbox controller mode)")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.vrWheel
+                    onCheckedChanged: {
+                        StreamingPreferences.vrWheel = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("In games that use the virtual Xbox controller, hold both controllers like a steering wheel and turn them to steer (replaces the left stick's left/right). While streaming, hold both thumbsticks pressed for 1.5 seconds to switch it on or off.")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("Steering wheel rotation (full left to full right)")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                    enabled: vrWheelCheck.checked
+                }
+
+                AutoResizingComboBox {
+                    id: vrWheelRangeComboBox
+                    enabled: vrWheelCheck.checked
+                    property var values: [180, 270, 360, 540, 900]
+                    model: ["180°", "270°", "360°", "540°", "900°"]
+                    Component.onCompleted: {
+                        var i = values.indexOf(StreamingPreferences.vrWheelRange)
+                        currentIndex = i >= 0 ? i : 0
+                        recalculateWidth()
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrWheelRange = values[currentIndex]
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("How far you turn the controllers for full lock. 180° means a quarter turn either way reaches the stick's end.")
+                }
+
+                // §VR-NETSEL：Steam Frame 的網路狀態（家用 Wi-Fi＋轉接器 vs 串流時只用轉接器）
+                Label {
+                    width: parent.width
+                    text: qsTr("Headset network during VR (Steam Frame with the streaming adapter)")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                AutoResizingComboBox {
+                    id: vrNetModeComboBox
+                    model: [qsTr("Test and choose automatically"), qsTr("Always keep home Wi-Fi"), qsTr("Pause home Wi-Fi while streaming")]
+                    Component.onCompleted: {
+                        currentIndex = Math.max(0, Math.min(2, StreamingPreferences.vrNetMode))
+                        recalculateWidth()
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrNetMode = currentIndex
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 10000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("The headset has one Wi-Fi radio, so staying on home Wi-Fi while streaming over the adapter makes it switch back and forth and drop video. The automatic test compares both during a VR stream (about 1 minute) and remembers the result for this place. While home Wi-Fi is paused the headset itself is offline; it reconnects when you stop streaming.")
+                }
+
+                CheckBox {
+                    id: vrMicCheck
+                    width: parent.width
+                    text: qsTr("Send the headset microphone to the PC")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.vrMic
+                    onCheckedChanged: {
+                        StreamingPreferences.vrMic = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("During a VR stream your voice goes to the PC's \"Microphone (Steam Streaming Microphone)\" device (installed with Steam). Select it in the game or voice chat app.")
+                }
+
+                CheckBox {
+                    id: vrNetRetestCheck
+                    width: parent.width
+                    enabled: vrNetModeComboBox.currentIndex === 0
+                    text: qsTr("Run the network test again next time")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.vrNetRetest
+                    onCheckedChanged: {
+                        StreamingPreferences.vrNetRetest = checked
+                    }
+                }
             }
         }
 
@@ -2382,6 +2479,31 @@ Flickable {
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("Updates your Discord status to display the name of the game you're streaming. The status reads \"Playing <game> · via VipleStream\" with the VipleStream icon.")
+                }
+
+                // §AUTO-UPDATE：自動更新（預設自動安裝）
+                Label {
+                    width: parent.width
+                    text: qsTr("App updates")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                AutoResizingComboBox {
+                    id: updateModeComboBox
+                    model: [qsTr("Don't check automatically"), qsTr("Notify me"), qsTr("Install automatically")]
+                    Component.onCompleted: {
+                        currentIndex = Math.max(0, Math.min(2, StreamingPreferences.updateMode))
+                        recalculateWidth()
+                    }
+                    onActivated: {
+                        StreamingPreferences.updateMode = currentIndex
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 8000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Checks for a new version when VipleStream starts. Install automatically downloads and verifies the update and restarts VipleStream, but never while you are streaming.")
                 }
 
                 CheckBox {

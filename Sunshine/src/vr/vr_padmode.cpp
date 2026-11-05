@@ -76,6 +76,10 @@ namespace vr::padmode {
   }
 
   void controller_t::on_sample(const VIPLE_VR_CONTROLLER_INPUT in[2], int64_t now_ms) {
+    on_sample(in, nullptr, nullptr, now_ms);
+  }
+
+  void controller_t::on_sample(const VIPLE_VR_CONTROLLER_INPUT in[2], const float *l, const float *r, int64_t now_ms) {
     bool wake = false;
     {
       std::lock_guard lk(mtx_);
@@ -84,8 +88,20 @@ namespace vr::padmode {
         toggle_req_ = true;
         wake = true;
       }
+      const int range = wheel_range_deg(in);
+      if (range != wheel_range_) {
+        BOOST_LOG(info) << "[VIPLE-VR-WHEEL] steering wheel " << (range ? "on, range=" + std::to_string(range) + " deg" : std::string("off"));
+        wheel_range_ = range;
+        wheel_.reset();
+      }
       if (pad_id_ >= 0 && h_.pad_update) {
-        const xpad_t x = map_frame(in, held);
+        xpad_t x = map_frame(in, held);
+        if (range > 0) {
+          const bool both = l && r && (in[0].flags & VIPLE_VR_CTRL_ACTIVE) && (in[1].flags & VIPLE_VR_CTRL_ACTIVE);
+          if (const auto a = wheel_.step(l, r, both)) {
+            x.lx = wheel_to_stick(*a, range);  // 算不出角度時（某一手沒在追蹤）維持搖桿
+          }
+        }
         if (!sent_ || !(x == last_)) {
           h_.pad_update(pad_id_, x);
           last_ = x;

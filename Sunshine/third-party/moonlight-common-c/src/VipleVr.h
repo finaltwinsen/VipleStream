@@ -49,6 +49,7 @@ extern "C" {
 #define VIPLE_VR_SERVER_CAP_RECOVERY_INTRA  0x20  // encoder 支援 intra refresh
 #define VIPLE_VR_SERVER_CAP_MULTILINK       0x40  // §VR-MULTILINK：支援多連線
 #define VIPLE_VR_SERVER_CAP_GAZE_FOVEA      0x80  // §VR-GAZE-FOVEA：支援 0x82 幀標頭（逐幀動態注視點中心）
+#define VIPLE_VR_SERVER_CAP_MIC             0x100 // §VR-MIC：收頭盔麥克風（C2S MIC），寫進 host 的虛擬麥克風（<VipleStreamVR> 是十進位整數，放得下）
 
 // /launch 的 vrCaps（十六進位）
 #define VIPLE_VR_CLIENT_CAP_RECOVERY_INTRA  0x01
@@ -180,6 +181,12 @@ extern "C" {
 #define VIPLE_VR_CTRL_PROFILE_FRAME    3  // /interaction_profiles/valve/frame_controller_valve（Steam Frame）
 #define VIPLE_VR_CTRL_PROFILE_OTHER    4  // 其他（khr/simple 等）
 
+// §VR-WHEEL（2026-11-05）：input[0].reserved＝方向盤模擬。client 的設定與快捷鍵（兩支搖桿同時按住 1.5 秒）決定，
+// server 在 Xbox 手把模式時依兩手的相對位置算方向盤角度、取代左搖桿 X。舊 client 送 0＝關；舊 server 不看這個位元組。
+#define VIPLE_VR_WHEEL_ON          0x80  // 方向盤模式開
+#define VIPLE_VR_WHEEL_RANGE_MASK  0x7F  // 轉向範圍（左打到底到右打到底，單位 10 度；0＝預設 180 度）
+#define VIPLE_VR_WHEEL_RANGE_DEFAULT_DEG 180
+
 #pragma pack(push, 1)
 
 typedef struct _VIPLE_VR_POSE {
@@ -200,7 +207,7 @@ typedef struct _VIPLE_VR_CONTROLLER_INPUT {
     uint8_t  battery;   // 0–100，255 = 未知
     uint8_t  flags;     // VIPLE_VR_CTRL_*
     uint8_t  profile;   // VIPLE_VR_CTRL_PROFILE_*（M4a 收尾；原 reserved 的低位元組）
-    uint8_t  reserved;
+    uint8_t  reserved;  // input[0]（左手）：§VR-WHEEL 方向盤設定（VIPLE_VR_WHEEL_*）；input[1]：保留 0
 } VIPLE_VR_CONTROLLER_INPUT;
 
 // VIPLE_VR_GAZE.flags
@@ -299,7 +306,8 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
 #define VIPLE_VR_C2S_LINK_HELLO        0x0A  // reliable，§VR-MULTILINK
 #define VIPLE_VR_C2S_NACK              0x0B  // §VR-LINK-REPAIR：只走連線的 DATA（不走 ENet）
 #define VIPLE_VR_C2S_HOTSPOT_INFO      0x0C  // reliable，§VR-HOTSPOT-AUTO
-#define VIPLE_VR_C2S_RESERVED_MIC      0x7F
+#define VIPLE_VR_C2S_MIC               0x0D  // §VR-MIC：VR channel unsequenced，每 20 ms 一則：{u16 seq（LE）, Opus 封包}（48 kHz 單聲道）
+#define VIPLE_VR_C2S_RESERVED_MIC      0x7F  // 舊保留值（未使用；新版改用 0x0D）
 
 // S→C subtype
 #define VIPLE_VR_S2C_HAPTIC            0x01  // VR channel unsequenced
@@ -318,6 +326,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
 #define VIPLE_VR_NOTICE_PAD_ON_MANUAL    2  // 手動切成 Xbox 手把模式（兩支選單鍵長按 2 秒）
 #define VIPLE_VR_NOTICE_PAD_OFF_MANUAL   3  // 手動切回 VR 手把
 #define VIPLE_VR_NOTICE_PAD_UNAVAILABLE  4  // 要切成手把模式，但 host 建不了虛擬手把（沒有 ViGEmBus）
+#define VIPLE_VR_NOTICE_MIC_UNAVAILABLE  5  // §VR-MIC：host 找不到 Steam Streaming Microphone（主機沒裝 Steam），頭盔麥克風送不過去
 
 // LOSS.reason
 #define VIPLE_VR_LOSS_NETWORK       1  // depacketizer 偵測到掉幀

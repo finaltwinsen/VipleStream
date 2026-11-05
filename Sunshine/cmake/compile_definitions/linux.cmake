@@ -109,7 +109,8 @@ list(APPEND PLATFORM_TARGET_FILES
 
 # VipleStream 2.0 §VR：Linux PCVR 在 2.0 範圍外，stub 恆回報不支援（/serverinfo PCVR bit = 0）
 list(APPEND PLATFORM_TARGET_FILES
-        "${CMAKE_SOURCE_DIR}/src/platform/linux/vr_stub.cpp")
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/vr_stub.cpp"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_mic_stub.cpp")  # §VR-MIC：只有 Windows 有虛擬麥克風
 
 # evdev
 include(dependencies/libevdev_Sunshine)

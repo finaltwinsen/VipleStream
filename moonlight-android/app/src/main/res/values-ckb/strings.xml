@@ -318,4 +318,23 @@
     <string name="steam_switch_account_unavailable">ئەم هەژمارە هیچ زانیاری چوونەژوورەوەی پاشەکەوتکراوی لەسەر هۆست نییە. سەرەتا جارێک لەسەر هۆست بچۆ ژوورەوە، پاشان دووبارە هەوڵ بدەرەوە.</string>
     <string name="title_show_advanced">پیشاندانی هەڵبژاردە پێشکەوتوو و تاقیکارییەکان</string>
     <string name="summary_show_advanced">هەڵبژاردەکانی چارەسەری کێشە و تاقیکردنەوە. هەڵبژاردە شاردراوەکان بەهای ئێستایان دەپارێزن.</string>
+    <!-- ڕیزەکانی نوێکردنەوەی بەرنامە -->
+    <string name="title_update_mode">نوێکردنەوەکانی بەرنامە</string>
+    <string name="update_mode_off">کوژاوەتەوە</string>
+    <string name="update_mode_notify">ئاگادارم بکەرەوە</string>
+    <string name="update_mode_auto">داگرتن بەشێوەی خۆکار</string>
+    <string name="update_available_title">نوێکردنەوە بەردەستە</string>
+    <string name="update_available_message">VipleStream %s بەردەستە</string>
+    <string name="update_button_update">نوێکردنەوە</string>
+    <string name="update_button_later">دواتر</string>
+    <string name="update_button_release_notes">تێبینییەکانی وەشان</string>
+    <string name="update_downloaded_title">نوێکردنەوە داگیرا</string>
+    <string name="update_downloaded_message">VipleStream %s داگیراوە</string>
+    <string name="update_button_install">دابەزراندن</string>
+    <string name="update_downloading_title">نوێکردنەوە دادەگیرێت…</string>
+    <string name="update_permission_title">دابەزراندنی بەرنامەی نەناسراو</string>
+    <string name="update_permission_message">بۆ دابەزراندنی نوێکردنەوەکان، ڕێگە بە VipleStream بدە بەرنامەی نەناسراو دابەزێنێت</string>
+    <string name="update_button_settings">ڕێکخستنەکان</string>
+    <string name="update_error_title">نوێکردنەوە سەرکەوتوو نەبوو</string>
+    <string name="update_error_message">داگرتن یان پشتڕاستکردنەوەی نوێکردنەوە سەرکەوتوو نەبوو</string>
 </resources>

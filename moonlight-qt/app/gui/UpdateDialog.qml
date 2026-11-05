@@ -36,6 +36,16 @@ NavigableDialog {
         dialog.open()
     }
 
+    // §AUTO-UPDATE：自動安裝——直接進 downloading，下載驗證完成後照常 Qt.quit() 交給 helper 換檔重啟
+    function startAutomatic(version, pageUrl) {
+        dialog.newVersion     = version
+        dialog.releasePageUrl = pageUrl
+        dialog.mode           = "downloading"
+        dialog.errorMessage   = ""
+        dialog.open()
+        Updater.startUpdate(version)
+    }
+
     // 手把／鍵盤：焦點在按鈕上時，上下鍵捲動更新摘要
     function scrollNotes(step) {
         if (!notesView.visible) return

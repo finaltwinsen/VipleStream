@@ -61,9 +61,13 @@ QString Updater::manualUpdateHint() const
         return QString();
     case InstallMode::NotifyOnly:
         if (m_Platform.packaging == Packaging::Flatpak) {
-            // α 的 arm64 Flatpak 是 release 上的單檔 bundle、x64 Flatpak 是本機建的，
-            // 兩者預設都沒有 remote，flatpak update 更新不到——先講 bundle 的裝法；
-            // P1 發佈方式確定有 remote 之後再調整（見 §F9／F17 文件同步待辦）。
+            // §AUTO-UPDATE：Steam Frame（arm64）用安裝腳本裝的，頭盔上的 viplestream-update.timer 會在 app 關著時自動更新
+            // （沙盒裡的 app 沒辦法替自己裝 bundle）；x64 Flatpak 是本機建的，照舊手動
+            if (m_Platform.arch == Arch::Arm64) {
+                return tr("On the Steam Frame, VipleStream updates itself in the background while it is closed "
+                          "(when installed with the installer script). "
+                          "To update right away, close VipleStream and run the new installer script from the release page.");
+            }
             return tr("This copy of VipleStream is installed as a Flatpak. "
                       "Download the new .flatpak from the release page and install it with "
                       "\"flatpak install --bundle <file>\". "

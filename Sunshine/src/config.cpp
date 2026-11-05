@@ -861,6 +861,7 @@ namespace config {
     platf::appdata().string() + "/sunshine.log",  // log file
     false,  // notify_pre_releases
     true,  // system_tray
+    "install",  // update_mode（§AUTO-UPDATE：2026-11-05 使用者指示預設自動安裝）
     {},  // prep commands
   };
 
@@ -1598,6 +1599,7 @@ namespace config {
     vr_opt::int_strict_f(vars, "vr_latch_acquire_ppm", vr.latch_acquire_ppm, 1000, 5000, false);
     vr_opt::bool_strict_f(vars, "vr_buffer_refill", vr.buffer_refill);  // §VR-BUFFER-REFILL
     vr_opt::bool_strict_f(vars, "vr_padmode", vr.padmode);  // §VR-PADMODE
+    vr_opt::bool_strict_f(vars, "vr_mic", vr.mic);  // §VR-MIC
     vr_opt::int_strict_f(vars, "vr_render_scale_pct", vr.render_scale_pct, 100, 250, false);
     vr_opt::int_strict_f(vars, "vr_render_target_max", vr.render_target_max, 1000, 8192, false);
     // §VR-DIRECT-KICK：兩個平台都認得這個 key（Linux 沒有 PCVR，設了沒有作用，但不會被當成不認得的選項）
@@ -1686,6 +1688,7 @@ namespace config {
 
     bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);
     bool_f(vars, "system_tray", sunshine.system_tray);
+    string_restricted_f(vars, "update_mode", sunshine.update_mode, {"off"sv, "notify"sv, "install"sv});  // §AUTO-UPDATE
 
     int port = sunshine.port;
     int_between_f(vars, "port"s, port, {1024 + nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});

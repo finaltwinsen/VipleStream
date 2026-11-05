@@ -13,6 +13,7 @@
 #include "input/sc_hid.h"
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
+#include "audio/miccapture.h"  // §VR-MIC
 #include "video/overlaymanager.h"
 #include "vr/vrlaunchparams.h"
 #include "vr/vrtracking.h"
@@ -361,6 +362,8 @@ private:
     // §VR M3a X1：--display-target xr-desktop 時在 startConnectionAsync 開頭建立；bring-up 失敗
     // 就是 nullptr（退回平面，不變式 5）。拆除在 decoder 刪除之後、SDL_DestroyWindow 之前。
     XrContext* m_XrContext = nullptr;
+    // §VR-PADMODE／§VR-WHEEL：server 通知的 Xbox 手把模式狀態（只用來決定方向盤提示要不要補一句「手把模式時才有作用」）
+    bool m_VrPadModeOn = false;
     bool m_XrPcvr = false;  // M4a R1：XrContext 是 PCVR 模式（projection＋XR tracking）
     void setupXrDesktop();
     void destroyXrContext();
@@ -441,6 +444,8 @@ private:
     VrLaunchConfig m_VrLaunch;
     VrSessionInfo m_VrSession;
     VrTrackingSender m_VrTracking;
+    // §VR-MIC：頭盔麥克風（server 宣告 CAP_MIC、設定開著才建立；LiStopConnection 之前停）
+    std::unique_ptr<MicCapture> m_Mic;
     // server 每秒一筆 STATS（計數欄位是累計值）。主執行緒每 10 秒印一次
     // 「最新一筆 − 上次印 log 時的快照」
     VIPLE_VR_TLV_STATS m_VrServerStatsLatest {};

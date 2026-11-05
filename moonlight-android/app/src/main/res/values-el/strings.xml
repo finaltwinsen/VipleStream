@@ -342,4 +342,23 @@
     <string name="steam_switch_account_unavailable">Αυτός ο λογαριασμός δεν έχει αποθηκευμένα διαπιστευτήρια στον κεντρικό υπολογιστή. Συνδεθείτε πρώτα μία φορά στον κεντρικό υπολογιστή και δοκιμάστε ξανά.</string>
     <string name="title_show_advanced">Εμφάνιση προηγμένων και πειραματικών επιλογών</string>
     <string name="summary_show_advanced">Επιλογές για αντιμετώπιση προβλημάτων και δοκιμές. Οι κρυφές επιλογές διατηρούν τις τρέχουσες τιμές τους.</string>
+    <!-- Συμβολοσειρές ενημέρωσης εφαρμογής -->
+    <string name="title_update_mode">Ενημερώσεις εφαρμογής</string>
+    <string name="update_mode_off">Ανενεργό</string>
+    <string name="update_mode_notify">Ειδοποίησέ με</string>
+    <string name="update_mode_auto">Αυτόματη λήψη</string>
+    <string name="update_available_title">Διαθέσιμη ενημέρωση</string>
+    <string name="update_available_message">Το VipleStream %s είναι διαθέσιμο</string>
+    <string name="update_button_update">Ενημέρωση</string>
+    <string name="update_button_later">Αργότερα</string>
+    <string name="update_button_release_notes">Σημειώσεις έκδοσης</string>
+    <string name="update_downloaded_title">Η ενημέρωση λήφθηκε</string>
+    <string name="update_downloaded_message">Το VipleStream %s έχει ληφθεί</string>
+    <string name="update_button_install">Εγκατάσταση</string>
+    <string name="update_downloading_title">Λήψη ενημέρωσης…</string>
+    <string name="update_permission_title">Εγκατάσταση άγνωστων εφαρμογών</string>
+    <string name="update_permission_message">Για να εγκαταστήσετε ενημερώσεις, επιτρέψτε στο VipleStream να εγκαθιστά άγνωστες εφαρμογές</string>
+    <string name="update_button_settings">Ρυθμίσεις</string>
+    <string name="update_error_title">Η ενημέρωση απέτυχε</string>
+    <string name="update_error_message">Αποτυχία λήψης ή επαλήθευσης της ενημέρωσης</string>
 </resources>

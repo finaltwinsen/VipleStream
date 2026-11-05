@@ -41,6 +41,7 @@ uint64_t steadyNowNs()
 constexpr float kClickOn = 0.70f;     // 類比值視為「按下」的門檻（沒有 click 元件的 profile）
 constexpr float kTouchOn = 0.05f;
 constexpr uint64_t kComboNs = 1000000000ull;  // menu＋trigger 1 s → SYSTEM
+constexpr uint64_t kWheelComboNs = 1500000000ull;  // §VR-WHEEL：兩支搖桿同時按住 1.5 s → 切換方向盤模式
 
 uint16_t unorm16(float v)
 {
@@ -69,6 +70,12 @@ XrVrControllers::XrVrControllers(bool testInput, std::function<void()> exitCombo
 XrVrControllers::~XrVrControllers()
 {
     destroy();
+}
+
+void XrVrControllers::setWheel(uint8_t wire, std::function<void(bool on)> toggled)
+{
+    m_Wheel.store(wire, std::memory_order_relaxed);
+    m_WheelToggled = std::move(toggled);
 }
 
 bool XrVrControllers::create(XrInstance instance, XrSession session, const QStringList& enabledExts, QString* error)
@@ -623,6 +630,29 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
         hd.stickY = snorm16(sy);
     }
 
+    // §VR-WHEEL 快捷鍵：兩支搖桿同時按下 1.5 秒切換一次，放開才能再觸發（host 在兩支同時按下時不送 LS／RS）
+    const bool wheelCombo = m_WheelToggled && focused && !m_TestInput && (next[0].buttons & VIPLE_VR_BTN_THUMBSTICK) &&
+                            (next[1].buttons & VIPLE_VR_BTN_THUMBSTICK);
+    if (!wheelCombo) {
+        m_WheelComboStartNs = 0;
+        m_WheelComboFired = false;
+    }
+    else {
+        if (m_WheelComboStartNs == 0) {
+            m_WheelComboStartNs = nowNs;
+        }
+        if (!m_WheelComboFired && nowNs - m_WheelComboStartNs >= kWheelComboNs) {
+            m_WheelComboFired = true;
+            uint8_t w = m_Wheel.load(std::memory_order_relaxed);
+            w ^= VIPLE_VR_WHEEL_ON;
+            m_Wheel.store(w, std::memory_order_relaxed);
+            const bool on = (w & VIPLE_VR_WHEEL_ON) != 0;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-WHEEL] hotkey (both stick clicks): steering wheel %s",
+                        on ? "on" : "off");
+            m_WheelToggled(on);
+        }
+    }
+
     // edges 只在 frame thread 累加（takeStatsLine 也在 frame thread 歸零），直接以 next 覆蓋
     std::lock_guard<std::mutex> lk(m_Mutex);
     m_Hand[0] = next[0];
@@ -669,7 +699,7 @@ void XrVrControllers::fill(_VIPLE_VR_TRACKING* sample, XrSpace trackSpace, XrTim
         in.flags = static_cast<uint8_t>((active ? VIPLE_VR_CTRL_ACTIVE : 0) |
                                         ((focused || m_TestInput) ? VIPLE_VR_CTRL_FOCUSED : 0));
         in.profile = m_Profile[h].load(std::memory_order_relaxed);  // M4a 收尾：server 選控制器外觀
-        in.reserved = 0;
+        in.reserved = h == 0 ? m_Wheel.load(std::memory_order_relaxed) : 0;  // §VR-WHEEL：只放在左手
         if (active) {
             // 2026-10-05：速度有效率與最大值（拍子外插只靠這兩個速度；無效時送 0＝SteamVR 不外插）
             const float lin = std::sqrt(hd.linVel[0] * hd.linVel[0] + hd.linVel[1] * hd.linVel[1] + hd.linVel[2] * hd.linVel[2]);

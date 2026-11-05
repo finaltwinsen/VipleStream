@@ -7,6 +7,12 @@
 #   - 以 FLATPAK_BWRAP 換上只拿掉 --unshare-pid 的 bwrap 包裝（Flatpak 的其他隔離都還在）；
 #   - 執行期加上 OpenXR 連 SteamVR 需要的 /opt/steamvr（唯讀）、/tmp、/dev/shm（這三條不進 manifest，理由同上）；
 #   - 把啟動器加進 Steam 收藏庫，並蓋掉選單裡 Flatpak 匯出的捷徑，兩個入口開的都是同一個啟動器；
+#   - §AUTO-UPDATE：裝一個 systemd user timer（viplestream-update.timer），開機 10 分鐘後、之後每 6 小時檢查 GitHub
+#     最新版；有新版就下載 .flatpak 與新的安裝腳本、用 GitHub 的 sha256 驗證，在 VipleStream 沒開著時執行新的安裝腳本。
+#     依 app 設定頁的「App updates」（updatemode：0 不檢查、1 只通知、2 自動安裝，預設 2）決定要不要裝；
+#   - §VR-NETSEL：裝 viplestream-netmode.service。VipleStream 串流 VR 時可以要求「只用轉接器」：服務把 wlan0 暫時交出
+#     NetworkManager 的管理（頭盔只有一個無線電，家用 Wi-Fi 連著會輪流用、熱點那條整段收不到）；app 5 秒沒更新請求、
+#     轉接器沒有連線、或 app 要求恢復時立刻交還（自動接回家用 Wi-Fi）。重開機本來就會還原；
 #   - 收藏庫（與 SteamVR）的封面圖與圖示：從安裝好的 app 複製（/app/share/viplestream/steam/）。Flatpak 匯出的圖示只有
 #     SVG 主題名稱，Steam 捷徑認不得，沒有這一步捷徑就沒有圖。
 #
@@ -45,10 +51,11 @@ command -v flatpak >/dev/null || die "flatpak not found"
 [ -x /usr/bin/bwrap ] || die "/usr/bin/bwrap not found"
 
 if [ "$UNINSTALL" = 1 ]; then
-    systemctl --user disable --now viplestream-hotspot.service 2>/dev/null || true
-    rm -f "$HOME/.config/systemd/user/viplestream-hotspot.service"
+    systemctl --user disable --now viplestream-hotspot.service viplestream-update.timer viplestream-netmode.service 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/viplestream-hotspot.service" "$HOME/.config/systemd/user/viplestream-netmode.service" "$HOME/.config/systemd/user/viplestream-update.service" "$HOME/.config/systemd/user/viplestream-update.timer"
     systemctl --user daemon-reload 2>/dev/null || true
-    rm -f "$LAUNCHER" "$SHIM" "$DEST/update-hotspot.sh" "$DESKTOP"
+    rm -rf "$DEST/update"
+    rm -f "$LAUNCHER" "$SHIM" "$DEST/update-hotspot.sh" "$DEST/netmode.sh" "$DEST/auto-update.sh" "$DEST/auto-update.log" "$DEST/installed-version" "$DESKTOP"
     rmdir "$DEST" 2>/dev/null || true
     flatpak --user uninstall -y "$APP_ID//$BRANCH" 2>/dev/null || true
     say "removed. Delete the VipleStream shortcut from your Steam library by hand."
@@ -189,6 +196,197 @@ HOTSPOT_EOF
 systemctl --user daemon-reload 2>/dev/null || true
 systemctl --user enable --now viplestream-hotspot.service 2>/dev/null || true
 say "installed and enabled viplestream-hotspot.service"
+
+# §AUTO-UPDATE：記下裝的版號（從 bundle 檔名），給自動更新比對
+ver="$(basename "$BUNDLE" | sed -n 's/^VipleStream-Client-\([0-9][0-9.]*\)-linux-arm64.*\.flatpak$/\1/p')"
+[ -n "$ver" ] && echo "$ver" > "$DEST/installed-version"
+
+# 自動更新小工具。先寫暫存檔再 rename：自動更新本身就是在跑這支安裝腳本，換成新 inode 才不會改到正在執行的那份
+cat > "$DEST/auto-update.sh.tmp" <<'AUTO_EOF'
+#!/bin/bash
+# auto-update.sh — VipleStream for Steam Frame 自動更新（§AUTO-UPDATE；install-steamframe.sh 安裝，viplestream-update.timer 執行）
+# 1. HEAD github.com/.../releases/latest（不吃 API 配額）讀最新版號，跟 installed-version 比
+# 2. 有新版：API 取 .flatpak 與安裝腳本的 sha256（digest），下載後驗證；缺 digest 或不符就放棄（fail closed）
+# 3. VipleStream 沒開著才執行新的安裝腳本（開著就等下一輪）；設定頁選「只通知」或「不檢查」時不安裝
+set -uo pipefail
+REPO=finaltwinsen/VipleStream
+APP_ID=io.github.finaltwinsen.VipleStream
+DEST="$HOME/.local/share/viplestream-frame"
+WORK="$DEST/update"
+LOG="$DEST/auto-update.log"
+CONF="$HOME/.var/app/$APP_ID/config/VipleStream/VipleStream.conf"
+
+log() { echo "$(date '+%F %T') [VIPLE-UPDATE] $*" >> "$LOG"; }
+trim_log() { [ -f "$LOG" ] && tail -n 300 "$LOG" > "$LOG.tmp" && mv -f "$LOG.tmp" "$LOG"; }
+trap trim_log EXIT
+
+mode="$(sed -n 's/^updatemode=\([0-9]\)$/\1/p' "$CONF" 2>/dev/null | tail -n 1)"
+mode="${mode:-2}"
+if [ "$mode" = 0 ]; then exit 0; fi
+
+cur="$(cat "$DEST/installed-version" 2>/dev/null || true)"
+loc="$(curl -fsSI --max-time 30 -A "VipleStream-SteamFrame-Updater/${cur:-0}" "https://github.com/$REPO/releases/latest" \
+       | tr -d '\r' | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/v\{0,1\}\([0-9][0-9.]*\)$/\1/p')"
+if [ -z "$loc" ]; then log "check failed (no network or GitHub unreachable)"; exit 0; fi
+newer="$(printf '%s\n%s\n' "${cur:-0}" "$loc" | sort -V | tail -n 1)"
+if [ "$loc" = "$cur" ] || [ "$newer" != "$loc" ]; then exit 0; fi
+log "update available: ${cur:-unknown} -> $loc (updatemode=$mode)"
+if [ "$mode" != 2 ]; then exit 0; fi
+if flatpak ps --columns=application 2>/dev/null | grep -qx "$APP_ID"; then
+    log "VipleStream is running; will install after it closes"
+    exit 0
+fi
+
+rm -rf "$WORK" && mkdir -p -m 0700 "$WORK"
+api="$(curl -fsS --max-time 30 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/releases/tags/v$loc")" \
+    || { log "release API failed"; exit 0; }
+plan="$(printf '%s' "$api" | python3 -c '
+import json, sys
+v = sys.argv[1]
+want = {"VipleStream-Client-%s-linux-arm64.flatpak" % v: "bundle", "VipleStream-SteamFrame-Install-%s.sh" % v: "installer"}
+for a in json.load(sys.stdin).get("assets", []):
+    if a.get("name") in want:
+        d = a.get("digest") or ""
+        print(want[a["name"]], a["name"], d.split(":", 1)[1] if d.startswith("sha256:") else "", a.get("browser_download_url", ""))
+' "$loc")" || { log "cannot parse release"; exit 0; }
+n=0
+while read -r kind name sha url; do
+    if [ -z "$sha" ] || [ -z "$url" ]; then log "$name has no sha256 digest; refusing"; exit 0; fi
+    curl -fsSL --max-time 1800 -o "$WORK/$name" "$url" || { log "download failed: $name"; exit 0; }
+    got="$(sha256sum "$WORK/$name" | awk '{print $1}')"
+    if [ "$got" != "$sha" ]; then log "sha256 mismatch: $name"; rm -f "$WORK/$name"; exit 0; fi
+    n=$((n + 1))
+done <<< "$plan"
+if [ "$n" != 2 ]; then log "release v$loc is missing the Steam Frame files"; exit 0; fi
+if flatpak ps --columns=application 2>/dev/null | grep -qx "$APP_ID"; then
+    log "VipleStream started while downloading; will install next time"
+    exit 0
+fi
+log "installing v$loc"
+if bash "$WORK/VipleStream-SteamFrame-Install-$loc.sh" "$WORK/VipleStream-Client-$loc-linux-arm64.flatpak" >> "$LOG" 2>&1; then
+    log "updated to v$loc"
+    rm -rf "$WORK"
+else
+    log "install of v$loc failed (see above)"
+fi
+AUTO_EOF
+chmod 755 "$DEST/auto-update.sh.tmp"
+mv -f "$DEST/auto-update.sh.tmp" "$DEST/auto-update.sh"
+cat > "$HOME/.config/systemd/user/viplestream-update.service" <<'UPD_EOF'
+[Unit]
+Description=VipleStream automatic update check
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/viplestream-frame/auto-update.sh
+Nice=10
+UPD_EOF
+cat > "$HOME/.config/systemd/user/viplestream-update.timer" <<'UPD_EOF'
+[Unit]
+Description=VipleStream automatic update check (every 6 hours)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+RandomizedDelaySec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UPD_EOF
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user enable --now viplestream-update.timer 2>/dev/null || true
+say "automatic updates enabled (viplestream-update.timer; choose 'App updates' in VipleStream's settings to change)"
+
+# §VR-NETSEL：網路狀態小服務（同樣先寫暫存檔再 rename）
+cat > "$DEST/netmode.sh.tmp" <<'NETMODE_EOF'
+#!/bin/bash
+# netmode.sh — VipleStream for Steam Frame 的網路狀態服務（§VR-NETSEL；install-steamframe.sh 安裝成 viplestream-netmode.service）
+# 讀 app 的請求 netmode-request.json（{"mode":"adapter-only"|"normal","t":<epoch>}），寫狀態 netmode-status.json。
+# 只做兩件事：wlan0 交出／交還 NetworkManager 的管理。安全規則：請求超過 5 秒沒更新、轉接器的熱點沒有連線、
+# 或連續 6 小時，一律交還；服務停止時也交還。家用 Wi-Fi 的名稱只存雜湊（當「地點」用）。
+set -uo pipefail
+DIR="$HOME/.var/app/io.github.finaltwinsen.VipleStream/data/viplestream"
+REQ="$DIR/netmode-request.json"
+STATUS="$DIR/netmode-status.json"
+applied=normal
+since=0
+loc=""
+err=""
+
+give_back() {
+    nmcli device set wlan0 managed yes >/dev/null 2>&1 || true
+}
+trap 'give_back; exit 0' TERM INT
+give_back  # 開機或服務重啟：一律從「交還」開始
+
+ap_iface() { iw dev 2>/dev/null | awk '/Interface/ {i=$2} /type AP/ {print i; exit}'; }
+
+while :; do
+    now=$(date +%s)
+    want=normal
+    if [ -f "$REQ" ]; then
+        read -r mode t < <(python3 -c 'import json,sys
+try:
+    d=json.load(open(sys.argv[1])); print(d.get("mode","normal"), int(d.get("t",0)))
+except Exception:
+    print("normal 0")' "$REQ" 2>/dev/null) || { mode=normal; t=0; }
+        if [ "$mode" = adapter-only ] && [ $((now - t)) -le 5 ]; then want=adapter-only; fi
+    fi
+    ap="$(ap_iface)"
+    station=false
+    if [ -n "$ap" ] && iw dev "$ap" station dump 2>/dev/null | grep -q '^Station'; then station=true; fi
+    [ "$station" = true ] || want=normal
+    if [ "$applied" = adapter-only ] && [ $((now - since)) -ge 21600 ]; then want=normal; fi
+
+    if [ "$want" != "$applied" ]; then
+        if [ "$want" = adapter-only ]; then
+            if out="$(nmcli device set wlan0 managed no 2>&1)"; then
+                applied=adapter-only; since=$now; err=""
+                echo "[VIPLE-VR-NETSEL] home Wi-Fi paused (adapter only)"
+            else
+                err="${out:0:200}"
+                echo "[VIPLE-VR-NETSEL] could not pause home Wi-Fi: $err"
+            fi
+        else
+            give_back
+            applied=normal; err=""
+            echo "[VIPLE-VR-NETSEL] home Wi-Fi given back"
+        fi
+    fi
+    # 地點：目前連著的家用 Wi-Fi 名稱的雜湊（不存名稱本身）；暫停中沿用上一次的
+    ssid="$(iw dev wlan0 link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p')"
+    [ -n "$ssid" ] && loc="$(printf '%s' "$ssid" | sha256sum | cut -c1-16)"
+    wl="$(nmcli -t -f DEVICE,STATE device 2>/dev/null | sed -n 's/^wlan0://p')"
+    mkdir -p -m 0700 "$DIR"
+    APPLIED="$applied" STATION="$station" LOC="$loc" WL="$wl" ERR="$err" python3 -c 'import json,os,time
+print(json.dumps({"t":int(time.time()),"applied":os.environ["APPLIED"],"ap_station":os.environ["STATION"]=="true",
+                  "loc":os.environ["LOC"],"wlan0":os.environ["WL"],"err":os.environ["ERR"]}))' > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
+    sleep 1
+done
+NETMODE_EOF
+chmod 755 "$DEST/netmode.sh.tmp"
+mv -f "$DEST/netmode.sh.tmp" "$DEST/netmode.sh"
+cat > "$HOME/.config/systemd/user/viplestream-netmode.service" <<'NETMODE_EOF'
+[Unit]
+Description=VipleStream headset network mode helper
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/viplestream-frame/netmode.sh
+ExecStopPost=-/usr/bin/nmcli device set wlan0 managed yes
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+NETMODE_EOF
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user enable viplestream-netmode.service 2>/dev/null || true
+systemctl --user restart viplestream-netmode.service 2>/dev/null || true
+say "installed viplestream-netmode.service (lets VipleStream pause home Wi-Fi during VR; see 'Headset network during VR' in its settings)"
 
 # Steam 用的封面圖與圖示（2.0.3 起的 bundle 才有）
 ART="$(flatpak --user info --show-location "$APP_ID//$BRANCH" 2>/dev/null)/files/share/viplestream/steam"

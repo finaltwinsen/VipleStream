@@ -8,6 +8,7 @@
 #include <charconv>
 #include <deque>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1101,7 +1102,139 @@ exit 0
     });
   }
 
+  // ── §AUTO-UPDATE ──
+  namespace {
+    std::mutex g_auto_mtx;
+    std::condition_variable g_auto_cv;
+    std::thread g_auto;
+    bool g_auto_stop = false;
+    std::string g_auto_mode;
+    std::string g_auto_announced;  ///< 已經跳過「有新版」通知的版號（每版只跳一次）
+    std::string g_auto_tried;  ///< 已經自動安裝過的版號（失敗不重試）
+    std::mutex g_ui_mtx;
+    notify_fn g_ui_notify;
+    state_fn g_ui_state;
+
+    notify_fn ui_notify() {
+      std::lock_guard<std::mutex> lg(g_ui_mtx);
+      if (g_ui_notify) return g_ui_notify;
+      return [](const std::string &title, const std::string &text) {
+        BOOST_LOG(info) << "[VIPLE-UPDATE] (no tray) " << title << ": " << text;
+      };
+    }
+
+    state_fn ui_state() {
+      std::lock_guard<std::mutex> lg(g_ui_mtx);
+      return g_ui_state;
+    }
+
+    /// 自動檢查的通知過濾：只轉送「有新版」，而且每版一次；「已是最新」「查詢失敗」只留 log
+    void auto_notify(const std::string &title, const std::string &text) {
+      if (title != "VipleStream update available") {
+        BOOST_LOG(info) << "[VIPLE-UPDATE] auto check: " << title << " (" << text << ")";
+        return;
+      }
+      const auto pend = pending();
+      std::string mode;
+      {
+        std::lock_guard<std::mutex> lg(g_auto_mtx);
+        if (!pend || g_auto_announced == pend->version) return;
+        g_auto_announced = pend->version;
+        mode = g_auto_mode;
+      }
+      if (mode == "install") {
+        ui_notify()(title, "Version " + pend->version + " will be installed automatically when nobody is streaming. "
+                           "You can also install it now from the tray menu.");
+      } else {
+        ui_notify()(title, text);
+      }
+    }
+
+    /// 等 ms 毫秒或被 shutdown 叫醒；回 true＝要停止
+    bool auto_wait(std::chrono::milliseconds ms) {
+      std::unique_lock<std::mutex> lk(g_auto_mtx);
+      return g_auto_cv.wait_for(lk, ms, [] { return g_auto_stop; });
+    }
+
+    void auto_loop() {
+      using namespace std::chrono;
+      if (auto_wait(minutes(3))) return;
+      std::string mode;
+      {
+        std::lock_guard<std::mutex> lg(g_auto_mtx);
+        mode = g_auto_mode;
+      }
+      auto last_stream = steady_clock::now();
+      while (true) {
+        const auto st = state();
+        if (st == state_e::idle || st == state_e::update_available) {
+          BOOST_LOG(info) << "[VIPLE-UPDATE] auto check (update_mode=" << mode << ")";
+          check_async(auto_notify, ui_state());
+        }
+        // 下一次檢查：24 小時後（加最多 1 小時的隨機偏移，避免很多台同時打 GitHub）
+        const auto next = steady_clock::now() + hours(24) + minutes(std::rand() % 60);
+        while (steady_clock::now() < next) {
+          if (auto_wait(minutes(1))) return;
+          if (mode != "install") continue;
+          if (rtsp_stream::session_count() > 0) {
+            last_stream = steady_clock::now();
+            continue;
+          }
+          const auto pend = pending();
+          if (!pend || state() != state_e::update_available || steady_clock::now() - last_stream < minutes(10)) continue;
+          {
+            std::lock_guard<std::mutex> lg(g_auto_mtx);
+            if (g_auto_tried == pend->version) continue;
+          }
+          BOOST_LOG(info) << "[VIPLE-UPDATE] auto install v" << pend->version << " (no stream for 10 min)";
+          std::string why;
+          if (install_pending_async(ui_notify(), ui_state(), &why)) {
+            // 開始了就記住：這一版裝失敗不再自動重試（失敗通知已由安裝流程跳出），等下一版或手動
+            std::lock_guard<std::mutex> lg(g_auto_mtx);
+            g_auto_tried = pend->version;
+          } else {
+            BOOST_LOG(info) << "[VIPLE-UPDATE] auto install not started: " << why;
+          }
+        }
+      }
+    }
+  }  // namespace
+
+  void set_ui(notify_fn notify, state_fn on_state) {
+    std::lock_guard<std::mutex> lg(g_ui_mtx);
+    g_ui_notify = std::move(notify);
+    g_ui_state = std::move(on_state);
+  }
+
+  void start_auto(const std::string &mode) {
+    if (mode == "off") {
+      BOOST_LOG(info) << "[VIPLE-UPDATE] automatic update checks are off (update_mode=off)";
+      return;
+    }
+    std::lock_guard<std::mutex> lg(g_auto_mtx);
+    if (g_auto.joinable()) return;
+    g_auto_mode = mode == "install" ? "install" : "notify";
+    g_auto_stop = false;
+    try {
+      g_auto = std::thread(auto_loop);
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "[VIPLE-UPDATE] cannot start auto update thread: " << e.what();
+    }
+  }
+
   void shutdown() {
+    {
+      std::lock_guard<std::mutex> lg(g_auto_mtx);
+      g_auto_stop = true;
+    }
+    g_auto_cv.notify_all();
+    if (g_auto.joinable()) {
+      if (g_auto.get_id() == std::this_thread::get_id()) {
+        g_auto.detach();
+      } else {
+        g_auto.join();
+      }
+    }
     g_cancel.store(true);
     std::lock_guard<std::mutex> lg(g_worker_mtx);
     if (!g_worker.joinable()) return;

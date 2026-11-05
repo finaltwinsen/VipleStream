@@ -141,6 +141,17 @@ function removeCmd(index) {
               default="false"
     ></Checkbox>
 
+    <!-- §AUTO-UPDATE：自動更新 -->
+    <div class="mb-3">
+      <label for="update_mode" class="form-label">{{ $t('config.update_mode') }}</label>
+      <select id="update_mode" class="form-select" v-model="config.update_mode">
+        <option value="off">{{ $t('config.update_mode_off') }}</option>
+        <option value="notify">{{ $t('config.update_mode_notify') }}</option>
+        <option value="install">{{ $t('config.update_mode_install') }}</option>
+      </select>
+      <div class="form-text">{{ $t('config.update_mode_desc') }}</div>
+    </div>
+
     <!-- Enable system tray -->
     <Checkbox class="mb-3"
               id="system_tray"

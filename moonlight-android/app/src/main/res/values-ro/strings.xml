@@ -335,4 +335,23 @@
     <string name="steam_switch_account_unavailable">Acest cont nu are date de autentificare salvate pe gazdă. Conectează-te mai întâi o dată pe gazdă, apoi încearcă din nou.</string>
     <string name="title_show_advanced">Afișează opțiunile avansate și experimentale</string>
     <string name="summary_show_advanced">Opțiuni pentru depanare și testare. Opțiunile ascunse își păstrează valorile curente.</string>
+    <!-- Șiruri de actualizare a aplicației -->
+    <string name="title_update_mode">Actualizări aplicație</string>
+    <string name="update_mode_off">Oprit</string>
+    <string name="update_mode_notify">Notifică-mă</string>
+    <string name="update_mode_auto">Descarcă automat</string>
+    <string name="update_available_title">Actualizare disponibilă</string>
+    <string name="update_available_message">VipleStream %s este disponibil</string>
+    <string name="update_button_update">Actualizează</string>
+    <string name="update_button_later">Mai târziu</string>
+    <string name="update_button_release_notes">Note de lansare</string>
+    <string name="update_downloaded_title">Actualizare descărcată</string>
+    <string name="update_downloaded_message">VipleStream %s a fost descărcat</string>
+    <string name="update_button_install">Instalează</string>
+    <string name="update_downloading_title">Se descarcă actualizarea…</string>
+    <string name="update_permission_title">Instalare aplicații necunoscute</string>
+    <string name="update_permission_message">Pentru a instala actualizări, permiteți VipleStream să instaleze aplicații necunoscute</string>
+    <string name="update_button_settings">Setări</string>
+    <string name="update_error_title">Actualizare eșuată</string>
+    <string name="update_error_message">Descărcarea sau verificarea actualizării a eșuat</string>
 </resources>

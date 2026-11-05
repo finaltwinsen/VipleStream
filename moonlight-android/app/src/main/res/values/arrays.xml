@@ -179,4 +179,14 @@
         <item>PLAYTIME</item>
         <item>NAME</item>
     </string-array>
+    <string-array name="update_mode_names">
+        <item>@string/update_mode_off</item>
+        <item>@string/update_mode_notify</item>
+        <item>@string/update_mode_auto</item>
+    </string-array>
+    <string-array name="update_mode_values" translatable="false">
+        <item>off</item>
+        <item>notify</item>
+        <item>auto</item>
+    </string-array>
 </resources>

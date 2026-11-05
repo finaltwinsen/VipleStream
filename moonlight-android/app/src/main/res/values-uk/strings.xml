@@ -351,4 +351,23 @@
     <string name="steam_switch_account_unavailable">Для цього облікового запису на хості немає збережених облікових даних. Спершу один раз увійдіть на хості, а потім повторіть спробу.</string>
     <string name="title_show_advanced">Показувати розширені та експериментальні параметри</string>
     <string name="summary_show_advanced">Параметри для діагностики й тестування. Приховані параметри зберігають поточні значення.</string>
+    <!-- Рядки оновлення додатка -->
+    <string name="title_update_mode">Оновлення додатка</string>
+    <string name="update_mode_off">Вимк.</string>
+    <string name="update_mode_notify">Сповіщати</string>
+    <string name="update_mode_auto">Завантажувати автоматично</string>
+    <string name="update_available_title">Доступне оновлення</string>
+    <string name="update_available_message">Доступна версія VipleStream %s</string>
+    <string name="update_button_update">Оновити</string>
+    <string name="update_button_later">Пізніше</string>
+    <string name="update_button_release_notes">Примітки до випуску</string>
+    <string name="update_downloaded_title">Оновлення завантажено</string>
+    <string name="update_downloaded_message">VipleStream %s завантажено</string>
+    <string name="update_button_install">Встановити</string>
+    <string name="update_downloading_title">Завантаження оновлення…</string>
+    <string name="update_permission_title">Встановлення невідомих додатків</string>
+    <string name="update_permission_message">Щоб встановити оновлення, дозвольте VipleStream встановлювати невідомі додатки</string>
+    <string name="update_button_settings">Налаштування</string>
+    <string name="update_error_title">Помилка оновлення</string>
+    <string name="update_error_message">Не вдалося завантажити або перевірити оновлення</string>
 </resources>

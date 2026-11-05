@@ -1432,6 +1432,7 @@ bool XrContext::createActions(QString* error)
     if (m_Options.pcvr) {
         // M4a R2：PCVR 的控制器（grip pose、按鍵、haptic）→ 0x5506
         m_VrCtl = new XrVrControllers(m_Options.testVrInput, m_Options.inputSink.exitCombo);
+        m_VrCtl->setWheel(m_Options.vrWheel, m_Options.inputSink.wheelToggled);  // §VR-WHEEL
         if (!m_VrCtl->create(m_Instance, m_Session, m_EnabledExtensions, error)) {
             return false;
         }
@@ -3271,6 +3272,7 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
         t.skip10s += static_cast<uint32_t>((std::min<uint64_t>)(seq - t.lastLatchedSeq - 1, 0xffffu));  // XrVideo 每發布一張 seq+1
     }
     t.new10s++;
+    m_PcvrNewFrames.fetch_add(1, std::memory_order_relaxed);  // §VR-NETSEL
     t.lastWasRepeat = false;
     t.lastLatchedSeq = seq;
     t.presentedTotal++;

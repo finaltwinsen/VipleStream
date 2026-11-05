@@ -524,6 +524,9 @@ int main(int argc, char *argv[]) {
 #endif
   }
 
+  // §AUTO-UPDATE：update_mode（off／notify／install）的自動檢查；有常駐圖示時由它登記通知出口
+  self_update::start_auto(config::sunshine.update_mode);
+
   mainThreadLoop(shutdown_event);
 
 #ifdef _WIN32

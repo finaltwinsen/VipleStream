@@ -367,4 +367,23 @@
     <string name="steam_switch_account_unavailable">This account has no saved credentials on the host. Sign in once on the host first, then try again.</string>
     <string name="title_show_advanced">Show advanced and experimental options</string>
     <string name="summary_show_advanced">Troubleshooting and testing options. Hidden options keep their current values.</string>
+    <!-- App update strings -->
+    <string name="title_update_mode">App updates</string>
+    <string name="update_mode_off">Off</string>
+    <string name="update_mode_notify">Notify me</string>
+    <string name="update_mode_auto">Download automatically</string>
+    <string name="update_available_title">Update Available</string>
+    <string name="update_available_message">VipleStream %s is available</string>
+    <string name="update_button_update">Update</string>
+    <string name="update_button_later">Later</string>
+    <string name="update_button_release_notes">Release notes</string>
+    <string name="update_downloaded_title">Update Downloaded</string>
+    <string name="update_downloaded_message">VipleStream %s has been downloaded</string>
+    <string name="update_button_install">Install</string>
+    <string name="update_downloading_title">Downloading update…</string>
+    <string name="update_permission_title">Install Unknown Apps</string>
+    <string name="update_permission_message">To install updates, allow VipleStream to install unknown apps</string>
+    <string name="update_button_settings">Settings</string>
+    <string name="update_error_title">Update Failed</string>
+    <string name="update_error_message">Failed to download or verify update</string>
 </resources>

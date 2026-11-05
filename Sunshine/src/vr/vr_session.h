@@ -26,6 +26,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+
+#include "vr_mic.h"
 #include <string_view>
 #include <vector>
 
@@ -524,6 +526,28 @@ namespace vr {
       return padmode_;
     }
 
+    /**
+     * @brief §VR-MIC：收到一則 C2S MIC。第一次收到時才開 host 的虛擬麥克風（session 結束時隨 session_state_t 釋放）；
+     *        開不起來就通知頭盔一次（VIPLE_VR_NOTICE_MIC_UNAVAILABLE），之後的封包直接丟。
+     */
+    void on_mic(const uint8_t *body, std::size_t len) {
+      if (len < 3) {
+        return;
+      }
+      const uint16_t seq = static_cast<uint16_t>(body[0] | (body[1] << 8));
+      std::lock_guard lk(mic_mtx_);
+      if (!mic_ && !mic_tried_) {
+        mic_tried_ = true;
+        mic_ = mic::sink_t::create();
+        if (!mic_) {
+          queue_notice(VIPLE_VR_NOTICE_MIC_UNAVAILABLE);
+        }
+      }
+      if (mic_) {
+        mic_->push(seq, body + 2, len - 2);
+      }
+    }
+
     /// 1 Hz STATS（unsequenced）；所有計數欄位都是累計值
     void queue_stats();
 
@@ -535,6 +559,9 @@ namespace vr {
   private:
     mutable std::mutex padmode_mtx_;
     std::shared_ptr<padmode::controller_t> padmode_;
+    std::mutex mic_mtx_;  ///< §VR-MIC
+    std::unique_ptr<mic::sink_t> mic_;
+    bool mic_tried_ = false;
 
     enum class wave_phase_e {
       idle,

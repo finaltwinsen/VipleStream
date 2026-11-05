@@ -78,7 +78,7 @@ Windows 10/11 with an NVIDIA, AMD or Intel GPU that has a hardware video encoder
 5. *Optional:* Xbox controller mode for VR games that ignore VR controllers needs [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) on the host.
 6. *For VR on the Steam Frame:* install Steam and SteamVR, and keep a Windows user signed in (a locked or signed-out desktop streams a solid colour). The server installs and registers its own SteamVR driver when a VR session starts.
 
-**Updating:** right-click the tray icon → **Check for updates...**, or stop the service, extract the new zip over the old one, and start it again.
+**Updating:** automatic by default. The server checks GitHub once a day and installs a new version, verified against its sha256, once nobody has streamed for 10 minutes. Change this under **Automatic updates** in the Web UI (General tab): off, notify only, or install automatically. You can also right-click the tray icon → **Check for updates...**.
 
 ### Host on Linux
 
@@ -99,6 +99,8 @@ The package enables a systemd user service for the installing user, so the serve
 | Android 9+ | Sideload `VipleStream-Android-X.Y.Z.apk` (file manager, or `adb install -r`). |
 | Steam Frame | See below. |
 
+Clients update themselves by default: Windows and the Linux AppImage download, verify and install a new version when they start (never during a stream); Android downloads it on an unmetered network and asks you to tap **Install** (the first time, allow VipleStream to install apps). Change this under **App updates** in the settings.
+
 ### Steam Frame headset
 
 Use the installer script, not `flatpak install` alone. A plain Flatpak install only gives you Desktop mode: Flatpak always runs apps in their own process-ID sandbox, and the headset's SteamVR cannot work with an app inside one, so VipleStream turns VR mode and Video mode off. The installer adds a launcher that drops only that one isolation (the rest of the Flatpak sandbox stays) and gives access to SteamVR.
@@ -111,7 +113,7 @@ Use the installer script, not `flatpak install` alone. A plain Flatpak install o
    It installs the Flatpak, sets up and checks the launcher, and adds **VipleStream** to your Steam library (Steam must be running).
 3. Launch **VipleStream** from your Steam library inside the headset.
 
-**Updating:** download both files of the new release and run the new installer the same way. **Removing:** `bash VipleStream-SteamFrame-Install-X.Y.Z.sh --uninstall`, then delete the shortcut from your Steam library.
+**Updating:** automatic. The installer sets up a background check (every 6 hours) that downloads the new release, verifies it, and installs it while VipleStream is closed. To update right away, download both files of the new release and run the new installer the same way. Choose **App updates** in VipleStream's settings to turn this off. **Removing:** `bash VipleStream-SteamFrame-Install-X.Y.Z.sh --uninstall`, then delete the shortcut from your Steam library.
 
 ## Using it
 
@@ -176,7 +178,7 @@ More: [`docs/setup_guide.md`](docs/setup_guide.md) (configuration and troublesho
 
 **Steam & host**
 - Steam library auto-import with playtime and last-played sorting; switch the host's Steam account from the client.
-- Ending an app closes the Steam game gracefully; Steam Controller native HID passthrough; host self-update from the tray icon; file transfer during a stream.
+- Ending an app closes the Steam game gracefully; Steam Controller native HID passthrough; automatic updates on every platform (host, PC, Android, Steam Frame); file transfer during a stream.
 - 30 UI languages, including Traditional Chinese.
 
 ## Architecture
@@ -312,7 +314,7 @@ Windows 10／11，顯示卡（NVIDIA、AMD 或 Intel）要有硬體影像編碼�
 5. *選用：* 「Xbox 手把模式」（給不用 VR 手把的 VR 遊戲）需要在主機裝 [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)。
 6. *要在 Steam Frame 玩 VR：* 裝好 Steam 與 SteamVR，並保持有 Windows 使用者登入（鎖定或登出時畫面會是一整片單色）。VR 串流開始時，server 會自己部署並註冊 SteamVR driver，不必手動安裝。
 
-**更新：** 在系統匣圖示按右鍵 →「**Check for updates...**」；或停止服務、把新的 zip 解壓縮覆蓋，再啟動服務。
+**更新：** 預設自動更新。server 每天向 GitHub 檢查一次，有新版就在連續 10 分鐘沒有人串流時下載、用 sha256 驗證後安裝。可以在 Web UI 的 General 分頁「**自動更新**」改成關閉、只通知或自動安裝；也可以在系統匣圖示按右鍵 →「**Check for updates...**」手動檢查。
 
 ### Linux 主機
 
@@ -333,6 +335,8 @@ sudo apt install ./VipleStream-Server-X.Y.Z-linux-x64.deb
 | Android 9 以上 | 用檔案管理員或 `adb install -r` 側載 `VipleStream-Android-X.Y.Z.apk`。 |
 | Steam Frame | 見下方。 |
 
+用戶端預設會自動更新：Windows 與 Linux AppImage 啟動時下載、驗證並安裝新版（串流中不會）；Android 在不計流量的網路下載好之後，請你按「**安裝**」（第一次要允許 VipleStream 安裝應用程式）。可以在設定的「**軟體更新**」修改。
+
 ### Steam Frame 頭盔
 
 請用安裝腳本，不要只執行 `flatpak install`。單純裝 Flatpak 只能用桌面模式：Flatpak 一定會把程式放進獨立的行程 ID 沙盒，頭盔的 SteamVR 無法跟沙盒裡的程式合作，VipleStream 就會停用 VR 模式與影片模式。安裝腳本會加一個啟動器，只拿掉這一項隔離（Flatpak 其他隔離不變），並開放 SteamVR 的存取。
@@ -345,7 +349,7 @@ sudo apt install ./VipleStream-Server-X.Y.Z-linux-x64.deb
    它會安裝 Flatpak、設定並檢查啟動器，然後把 **VipleStream** 加進 Steam 收藏庫（Steam 要開著）。
 3. 在頭盔裡從 Steam 收藏庫開啟 **VipleStream**。
 
-**更新：** 下載新版的兩個檔案，用同樣方式執行新的安裝腳本。**移除：** 執行 `bash VipleStream-SteamFrame-Install-X.Y.Z.sh --uninstall`，再從 Steam 收藏庫刪掉捷徑。
+**更新：** 自動更新。安裝腳本會設定一個背景檢查（每 6 小時），在 VipleStream 關著時下載新版、驗證後安裝。想馬上更新就下載新版的兩個檔案，用同樣方式執行新的安裝腳本。在 VipleStream 的設定裡「**軟體更新**」可以關掉。**移除：** 執行 `bash VipleStream-SteamFrame-Install-X.Y.Z.sh --uninstall`，再從 Steam 收藏庫刪掉捷徑。
 
 ## 使用
 
@@ -410,7 +414,7 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 
 **Steam 與主機**
 - 自動匯入 Steam 遊戲庫，可依遊玩時間、最近遊玩排序；從用戶端切換主機的 Steam 帳號。
-- 結束程式會正常關閉 Steam 遊戲；Steam Controller 原生 HID 轉發；主機從系統匣自我更新；串流中傳檔。
+- 結束程式會正常關閉 Steam 遊戲；Steam Controller 原生 HID 轉發；各平台自動更新（主機、電腦、Android、Steam Frame）；串流中傳檔。
 - 30 種介面語言，含繁體中文。
 
 ## 架構

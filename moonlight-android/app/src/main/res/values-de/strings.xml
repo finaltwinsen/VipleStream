@@ -355,4 +355,23 @@
     <string name="steam_switch_account_unavailable">Für dieses Konto sind auf dem Host keine Anmeldedaten gespeichert. Melde dich zuerst einmal auf dem Host an und versuche es dann erneut.</string>
     <string name="title_show_advanced">Erweiterte und experimentelle Optionen anzeigen</string>
     <string name="summary_show_advanced">Optionen zur Fehlersuche und zum Testen. Ausgeblendete Optionen behalten ihre aktuellen Werte.</string>
+    <!-- App-Update-Zeichenfolgen -->
+    <string name="title_update_mode">App-Updates</string>
+    <string name="update_mode_off">Aus</string>
+    <string name="update_mode_notify">Benachrichtigen</string>
+    <string name="update_mode_auto">Automatisch herunterladen</string>
+    <string name="update_available_title">Update verfügbar</string>
+    <string name="update_available_message">VipleStream %s ist verfügbar</string>
+    <string name="update_button_update">Aktualisieren</string>
+    <string name="update_button_later">Später</string>
+    <string name="update_button_release_notes">Versionshinweise</string>
+    <string name="update_downloaded_title">Update heruntergeladen</string>
+    <string name="update_downloaded_message">VipleStream %s wurde heruntergeladen</string>
+    <string name="update_button_install">Installieren</string>
+    <string name="update_downloading_title">Update wird heruntergeladen…</string>
+    <string name="update_permission_title">Unbekannte Apps installieren</string>
+    <string name="update_permission_message">Um Updates zu installieren, erlaube VipleStream die Installation unbekannter Apps</string>
+    <string name="update_button_settings">Einstellungen</string>
+    <string name="update_error_title">Update fehlgeschlagen</string>
+    <string name="update_error_message">Update konnte nicht heruntergeladen oder überprüft werden</string>
 </resources>

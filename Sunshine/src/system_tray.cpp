@@ -414,6 +414,16 @@ namespace system_tray {
     BOOST_LOG(info) << "System tray created"sv;
     tray_initialized = true;
 
+    // §AUTO-UPDATE：自動檢查的通知與選單狀態走常駐圖示
+    self_update::set_ui(
+      [](const std::string &title, const std::string &text) {
+        show_tray_balloon_owned(title, text);
+      },
+      [](bool busy, const std::string &label) {
+        set_update_menu_state(busy, label);
+      }
+    );
+
     // VipleStream §SELF-UPDATE — 上次更新腳本留下的結果檔：跳一次「已更新」通知
     if (auto updated = self_update::take_last_result()) {
       if (updated->rfind("FAILED", 0) == 0) {

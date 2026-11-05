@@ -339,4 +339,23 @@
     <string name="steam_switch_account_unavailable">Bu hesabın ana bilgisayarda kayıtlı kimlik bilgisi yok. Önce ana bilgisayarda bir kez oturum açın, ardından tekrar deneyin.</string>
     <string name="title_show_advanced">Gelişmiş ve deneysel seçenekleri göster</string>
     <string name="summary_show_advanced">Sorun giderme ve test seçenekleri. Gizli seçenekler mevcut değerlerini korur.</string>
+    <!-- Uygulama güncelleme dizeleri -->
+    <string name="title_update_mode">Uygulama güncellemeleri</string>
+    <string name="update_mode_off">Kapalı</string>
+    <string name="update_mode_notify">Bana bildir</string>
+    <string name="update_mode_auto">Otomatik indir</string>
+    <string name="update_available_title">Güncelleme Mevcut</string>
+    <string name="update_available_message">VipleStream %s kullanılabilir</string>
+    <string name="update_button_update">Güncelle</string>
+    <string name="update_button_later">Daha sonra</string>
+    <string name="update_button_release_notes">Sürüm notları</string>
+    <string name="update_downloaded_title">Güncelleme İndirildi</string>
+    <string name="update_downloaded_message">VipleStream %s indirildi</string>
+    <string name="update_button_install">Yükle</string>
+    <string name="update_downloading_title">Güncelleme indiriliyor…</string>
+    <string name="update_permission_title">Bilinmeyen Uygulamaları Yükle</string>
+    <string name="update_permission_message">Güncellemeleri yüklemek için VipleStream\'in bilinmeyen uygulamaları yüklemesine izin verin</string>
+    <string name="update_button_settings">Ayarlar</string>
+    <string name="update_error_title">Güncelleme Başarısız</string>
+    <string name="update_error_message">Güncelleme indirilemedi veya doğrulanamadı</string>
 </resources>

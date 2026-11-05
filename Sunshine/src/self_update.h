@@ -70,8 +70,19 @@ namespace self_update {
   bool check_async(notify_fn notify, state_fn on_state);
   /// 第二段：背景下載＋驗證＋安裝 pending。回 false＝沒有 pending／忙碌中／串流中。
   bool install_pending_async(notify_fn notify, state_fn on_state, std::string *why_not);
-  /// 關機：取消 curl、join 背景執行緒。
+  /// 關機：停止自動檢查、取消 curl、join 背景執行緒。
   void shutdown();
+
+  /**
+   * @brief §AUTO-UPDATE（2026-11-05）：設定 update_mode 的自動檢查。
+   *
+   * off：不自動查（常駐圖示仍可手動）。notify：開機 3 分鐘後、之後每 24 小時查一次，有新版就跳一次通知、
+   * 選單換成「Install update」。install（預設，2026-11-05 使用者指示）：同上，另外在連續 10 分鐘沒有人串流時自動下載＋驗證＋安裝（安裝會重啟服務）；
+   * 同一版裝失敗就不再自動重試，等下一版或手動。檢查走免 API 配額的 HEAD 302，「已是最新」與「查詢失敗」不跳通知。
+   */
+  void start_auto(const std::string &mode);
+  /// 常駐圖示建立後登記通知與選單狀態的出口（自動檢查用）；沒有常駐圖示時只寫 log
+  void set_ui(notify_fn notify, state_fn on_state);
 
   std::optional<std::string> take_last_result();
 

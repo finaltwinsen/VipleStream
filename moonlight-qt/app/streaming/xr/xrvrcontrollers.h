@@ -64,6 +64,10 @@ public:
     void onProfileChanged();
     QString takeStatsLine();
 
+    // §VR-WHEEL：方向盤模式。wire＝input[0].reserved 的值（VIPLE_VR_WHEEL_ON | 轉向範圍/10，0＝關）；
+    // toggled：兩支搖桿同時按住 1.5 秒切換時呼叫（frame thread），空＝不偵測快捷鍵
+    void setWheel(uint8_t wire, std::function<void(bool on)> toggled);
+
 private:
     struct Hand {
         // 按鍵快照（updateFrame 寫、fill 讀）
@@ -101,6 +105,10 @@ private:
     bool m_TestInput;
     std::function<void()> m_ExitCombo;  // §VR-EXIT-COMBO
     bool m_ExitComboWas = false;        // 上一格是否整組按住（frame thread）
+    std::atomic<uint8_t> m_Wheel{0};     // §VR-WHEEL：input[0].reserved（frame thread 寫、tracking thread 讀）
+    std::function<void(bool)> m_WheelToggled;
+    uint64_t m_WheelComboStartNs = 0;   // frame thread
+    bool m_WheelComboFired = false;
     XrInstance m_Instance = XR_NULL_HANDLE;
     XrSession m_Session = XR_NULL_HANDLE;
     XrPath m_Hands[2] = {XR_NULL_PATH, XR_NULL_PATH};

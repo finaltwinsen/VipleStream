@@ -352,4 +352,23 @@
     <string name="steam_switch_account_unavailable">此账户在主机上没有已保存的凭据。请先在主机上登录一次，然后重试。</string>
     <string name="title_show_advanced">显示高级与实验性选项</string>
     <string name="summary_show_advanced">用于排查问题与测试的选项。隐藏的选项仍沿用目前的值。</string>
+    <!-- 软件更新字符串 -->
+    <string name="title_update_mode">软件更新</string>
+    <string name="update_mode_off">关闭</string>
+    <string name="update_mode_notify">通知我</string>
+    <string name="update_mode_auto">自动下载</string>
+    <string name="update_available_title">有可用更新</string>
+    <string name="update_available_message">VipleStream %s 现已推出</string>
+    <string name="update_button_update">更新</string>
+    <string name="update_button_later">稍后</string>
+    <string name="update_button_release_notes">发行说明</string>
+    <string name="update_downloaded_title">更新已下载</string>
+    <string name="update_downloaded_message">VipleStream %s 已下载完成</string>
+    <string name="update_button_install">安装</string>
+    <string name="update_downloading_title">正在下载更新…</string>
+    <string name="update_permission_title">安装未知应用</string>
+    <string name="update_permission_message">要安装更新，请允许 VipleStream 安装未知应用</string>
+    <string name="update_button_settings">设置</string>
+    <string name="update_error_title">更新失败</string>
+    <string name="update_error_message">下载或验证更新失败</string>
 </resources>

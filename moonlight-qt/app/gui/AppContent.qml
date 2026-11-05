@@ -6,6 +6,7 @@ import QtQuick.Controls.Material 2.2
 
 import ComputerManager 1.0
 import AutoUpdateChecker 1.0
+import Updater 1.0
 import StreamingPreferences 1.0
 import SystemProperties 1.0
 import SdlGamepadKeyNavigation 1.0
@@ -418,6 +419,12 @@ Page {
                     updateButton.newVersion = version
                     updateButton.browserUrl = url
                     updateButton.visible = true
+                    // §AUTO-UPDATE：設定成自動安裝、本平台能自己裝、一般介面啟動（不是命令列串流／結束），而且還停在電腦清單、
+                    // 程式清單或設定頁（串流畫面在第 3 層以上）時直接下載安裝；其他情況維持右上角的更新按鈕
+                    if (StreamingPreferences.updateMode === 2 && Updater.autoInstallSupported &&
+                            initialView === "qrc:/gui/PcView.qml" && stackView.depth <= 2) {
+                        updateDialog.startAutomatic(version, url)
+                    }
                 }
 
                 Component.onCompleted: {
@@ -426,7 +433,10 @@ Page {
                     // endpoint is not applicable to the fork; see backend/
                     // autoupdatechecker.cpp).
                     AutoUpdateChecker.onUpdateAvailable.connect(updateAvailable)
-                    AutoUpdateChecker.start()
+                    // §AUTO-UPDATE：0＝不自動檢查（設定頁可改）
+                    if (StreamingPreferences.updateMode !== 0) {
+                        AutoUpdateChecker.start()
+                    }
                 }
 
                 Keys.onDownPressed: {

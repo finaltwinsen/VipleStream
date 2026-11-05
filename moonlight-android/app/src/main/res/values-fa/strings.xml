@@ -323,4 +323,23 @@
     <string name="steam_switch_account_unavailable">این حساب هیچ اطلاعات ورود ذخیره‌شده‌ای روی میزبان ندارد. ابتدا یک بار روی میزبان وارد شوید، سپس دوباره امتحان کنید.</string>
     <string name="title_show_advanced">نمایش گزینه‌های پیشرفته و آزمایشی</string>
     <string name="summary_show_advanced">گزینه‌های عیب‌یابی و آزمایش. گزینه‌های پنهان مقدار فعلی خود را حفظ می‌کنند.</string>
+    <!-- رشته‌های به‌روزرسانی برنامه -->
+    <string name="title_update_mode">به‌روزرسانی‌های برنامه</string>
+    <string name="update_mode_off">خاموش</string>
+    <string name="update_mode_notify">به من اطلاع بده</string>
+    <string name="update_mode_auto">دانلود خودکار</string>
+    <string name="update_available_title">به‌روزرسانی موجود است</string>
+    <string name="update_available_message">نسخه %s برنامه VipleStream موجود است</string>
+    <string name="update_button_update">به‌روزرسانی</string>
+    <string name="update_button_later">بعداً</string>
+    <string name="update_button_release_notes">تغییرات این نسخه</string>
+    <string name="update_downloaded_title">به‌روزرسانی دانلود شد</string>
+    <string name="update_downloaded_message">نسخه %s برنامه VipleStream دانلود شد</string>
+    <string name="update_button_install">نصب</string>
+    <string name="update_downloading_title">در حال دانلود به‌روزرسانی…</string>
+    <string name="update_permission_title">نصب برنامه‌های ناشناخته</string>
+    <string name="update_permission_message">برای نصب به‌روزرسانی‌ها، به VipleStream اجازه نصب برنامه‌های ناشناخته را بدهید</string>
+    <string name="update_button_settings">تنظیمات</string>
+    <string name="update_error_title">به‌روزرسانی ناموفق بود</string>
+    <string name="update_error_message">دانلود یا تأیید به‌روزرسانی ناموفق بود</string>
 </resources>

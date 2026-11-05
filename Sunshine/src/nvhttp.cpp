@@ -53,6 +53,7 @@
 #include "uuid.h"
 #include "video.h"
 #include "pyrowave_encode.h"
+#include "vr/vr_mic.h"
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_platform.h"
 #include "vr/vr_selftest.h"
@@ -991,6 +992,21 @@ namespace nvhttp {
       // §VR-GAZE-FOVEA：只在 pcvr 且 vr_gaze_fovea 開啟時宣告
       if ((vr_caps & VIPLE_VR_SERVER_CAP_PCVR) && config::vr.gaze_fovea) {
         vr_caps |= VIPLE_VR_SERVER_CAP_GAZE_UPLINK | VIPLE_VR_SERVER_CAP_GAZE_FOVEA;
+      }
+      // §VR-MIC：pcvr、vr_mic 開著、而且 host 找得到 Steam Streaming Microphone 才宣告（30 秒快取，避免每次 /serverinfo 都列舉音訊裝置）
+      if ((vr_caps & VIPLE_VR_SERVER_CAP_PCVR) && config::vr.mic) {
+        static std::mutex mic_mtx;
+        static std::chrono::steady_clock::time_point mic_at {};
+        static bool mic_ok = false;
+        std::lock_guard lk(mic_mtx);
+        const auto now = std::chrono::steady_clock::now();
+        if (mic_at.time_since_epoch().count() == 0 || now - mic_at > std::chrono::seconds(30)) {
+          mic_ok = ::vr::mic::available();
+          mic_at = now;
+        }
+        if (mic_ok) {
+          vr_caps |= VIPLE_VR_SERVER_CAP_MIC;
+        }
       }
       tree.put("root.VipleStreamVR", vr_caps);
       tree.put("root.VipleStreamVRProto", VIPLE_VR_PROTO_VERSION);

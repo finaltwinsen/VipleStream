@@ -65,6 +65,8 @@ namespace vr::padmode {
 
     /// 每個被採用的 tracking 樣本呼叫一次（任何執行緒）。in[0]＝左手、in[1]＝右手
     void on_sample(const VIPLE_VR_CONTROLLER_INPUT in[2], int64_t now_ms);
+    /// 同上，另外帶兩手的位置（§VR-WHEEL 方向盤模式要用）；l／r 為 nullptr＝沒有姿態
+    void on_sample(const VIPLE_VR_CONTROLLER_INPUT in[2], const float *l, const float *r, int64_t now_ms);
 
     /// 背景執行緒每一輪做的事（測試直接呼叫）
     void poll_once();
@@ -83,6 +85,8 @@ namespace vr::padmode {
     bool toggle_req_ = false;  // (m) on_sample 偵測到長按，背景執行緒處理
     int pad_id_ = -1;  // (m) on_sample 讀來送狀態
     combo_t combo_;  // (m)
+    wheel_t wheel_;  // (m) §VR-WHEEL
+    int wheel_range_ = 0;  // (m) 上一個樣本的方向盤設定（0＝關），用來記 log
     xpad_t last_ {};  // (m)
     bool sent_ = false;  // (m)
 

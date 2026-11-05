@@ -353,4 +353,23 @@
     <string name="steam_switch_account_unavailable">這個帳號在主機上沒有已儲存的登入資訊。請先在主機上登入一次，然後再試一次。</string>
     <string name="title_show_advanced">顯示進階與實驗性選項</string>
     <string name="summary_show_advanced">用於排除問題與測試的選項。收起來的選項仍沿用目前的值。</string>
+    <!-- 軟體更新字串 -->
+    <string name="title_update_mode">軟體更新</string>
+    <string name="update_mode_off">關閉</string>
+    <string name="update_mode_notify">通知我</string>
+    <string name="update_mode_auto">自動下載</string>
+    <string name="update_available_title">有可用更新</string>
+    <string name="update_available_message">VipleStream %s 現已推出</string>
+    <string name="update_button_update">更新</string>
+    <string name="update_button_later">稍後</string>
+    <string name="update_button_release_notes">版本資訊</string>
+    <string name="update_downloaded_title">更新已下載</string>
+    <string name="update_downloaded_message">VipleStream %s 已下載完成</string>
+    <string name="update_button_install">安裝</string>
+    <string name="update_downloading_title">正在下載更新…</string>
+    <string name="update_permission_title">安裝未知的應用程式</string>
+    <string name="update_permission_message">若要安裝更新，請允許 VipleStream 安裝未知的應用程式</string>
+    <string name="update_button_settings">設定</string>
+    <string name="update_error_title">更新失敗</string>
+    <string name="update_error_message">下載或驗證更新失敗</string>
 </resources>

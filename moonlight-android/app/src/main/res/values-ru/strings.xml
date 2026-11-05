@@ -348,4 +348,23 @@
     <string name="steam_switch_account_unavailable">Для этого аккаунта на хосте нет сохранённых учётных данных. Сначала один раз войдите на хосте, затем повторите попытку.</string>
     <string name="title_show_advanced">Показывать расширенные и экспериментальные параметры</string>
     <string name="summary_show_advanced">Параметры для диагностики и тестирования. Скрытые параметры сохраняют текущие значения.</string>
+    <!-- Строки обновления приложения -->
+    <string name="title_update_mode">Обновления приложения</string>
+    <string name="update_mode_off">Выкл.</string>
+    <string name="update_mode_notify">Уведомлять</string>
+    <string name="update_mode_auto">Скачивать автоматически</string>
+    <string name="update_available_title">Доступно обновление</string>
+    <string name="update_available_message">Доступна версия VipleStream %s</string>
+    <string name="update_button_update">Обновить</string>
+    <string name="update_button_later">Позже</string>
+    <string name="update_button_release_notes">Информация о релизе</string>
+    <string name="update_downloaded_title">Обновление скачано</string>
+    <string name="update_downloaded_message">VipleStream %s успешно скачан</string>
+    <string name="update_button_install">Установить</string>
+    <string name="update_downloading_title">Загрузка обновления…</string>
+    <string name="update_permission_title">Установка неизвестных приложений</string>
+    <string name="update_permission_message">Для установки обновлений разрешите VipleStream установку неизвестных приложений</string>
+    <string name="update_button_settings">Настройки</string>
+    <string name="update_error_title">Ошибка обновления</string>
+    <string name="update_error_message">Не удалось скачать или проверить обновление</string>
 </resources>

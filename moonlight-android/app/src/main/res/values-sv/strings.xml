@@ -340,4 +340,23 @@
     <string name="steam_switch_account_unavailable">Det här kontot har inga sparade inloggningsuppgifter på värden. Logga in en gång på värden först och försök sedan igen.</string>
     <string name="title_show_advanced">Visa avancerade och experimentella alternativ</string>
     <string name="summary_show_advanced">Alternativ för felsökning och testning. Dolda alternativ behåller sina nuvarande värden.</string>
+    <!-- Appuppdateringssträngar -->
+    <string name="title_update_mode">Appuppdateringar</string>
+    <string name="update_mode_off">Av</string>
+    <string name="update_mode_notify">Meddela mig</string>
+    <string name="update_mode_auto">Ladda ned automatiskt</string>
+    <string name="update_available_title">Uppdatering tillgänglig</string>
+    <string name="update_available_message">VipleStream %s är tillgänglig</string>
+    <string name="update_button_update">Uppdatera</string>
+    <string name="update_button_later">Senare</string>
+    <string name="update_button_release_notes">Versionsinformation</string>
+    <string name="update_downloaded_title">Uppdatering nedladdad</string>
+    <string name="update_downloaded_message">VipleStream %s har laddats ned</string>
+    <string name="update_button_install">Installera</string>
+    <string name="update_downloading_title">Laddar ned uppdatering…</string>
+    <string name="update_permission_title">Installera okända appar</string>
+    <string name="update_permission_message">Tillåt VipleStream att installera okända appar för att installera uppdateringar</string>
+    <string name="update_button_settings">Inställningar</string>
+    <string name="update_error_title">Uppdatering misslyckades</string>
+    <string name="update_error_message">Det gick inte att ladda ned eller verifiera uppdateringen</string>
 </resources>

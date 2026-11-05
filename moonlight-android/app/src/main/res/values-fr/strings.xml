@@ -353,4 +353,23 @@
     <string name="steam_switch_account_unavailable">Ce compte n\'a aucun identifiant enregistré sur l\'hôte. Connectez-vous d\'abord une fois sur l\'hôte, puis réessayez.</string>
     <string name="title_show_advanced">Afficher les options avancées et expérimentales</string>
     <string name="summary_show_advanced">Options de dépannage et de test. Les options masquées conservent leurs valeurs actuelles.</string>
+    <!-- Chaînes de mise à jour -->
+    <string name="title_update_mode">Mises à jour de l\'application</string>
+    <string name="update_mode_off">Désactivé</string>
+    <string name="update_mode_notify">Me notifier</string>
+    <string name="update_mode_auto">Télécharger automatiquement</string>
+    <string name="update_available_title">Mise à jour disponible</string>
+    <string name="update_available_message">VipleStream %s est disponible</string>
+    <string name="update_button_update">Mettre à jour</string>
+    <string name="update_button_later">Plus tard</string>
+    <string name="update_button_release_notes">Notes de version</string>
+    <string name="update_downloaded_title">Mise à jour téléchargée</string>
+    <string name="update_downloaded_message">VipleStream %s a été téléchargé</string>
+    <string name="update_button_install">Installer</string>
+    <string name="update_downloading_title">Téléchargement de la mise à jour…</string>
+    <string name="update_permission_title">Installer des applications inconnues</string>
+    <string name="update_permission_message">Pour installer des mises à jour, autorisez VipleStream à installer des applications inconnues</string>
+    <string name="update_button_settings">Paramètres</string>
+    <string name="update_error_title">Échec de la mise à jour</string>
+    <string name="update_error_message">Échec du téléchargement ou de la vérification de la mise à jour</string>
 </resources>

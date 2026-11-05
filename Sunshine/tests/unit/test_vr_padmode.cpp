@@ -4,6 +4,7 @@
  */
 #include "../tests_common.h"
 
+#include <cmath>
 #include <map>
 #include <vector>
 
@@ -224,4 +225,85 @@ TEST(VrPadmodeController, DestructorFreesPad) {
     EXPECT_TRUE(c.pad_active());
   }
   EXPECT_EQ(f.frees.size(), 1u);
+}
+
+// §VR-WHEEL
+namespace {
+  /// 兩手在 y＝1、z＝-0.4 的平面握著直徑 0.36 m 的方向盤，轉 deg 度（右轉為正）；yaw＝整個人轉身的角度
+  void wheel_hands(float deg, float l[3], float r[3], float yaw_deg = 0.0f) {
+    const float a = deg * 3.14159265f / 180.0f;
+    const float y = yaw_deg * 3.14159265f / 180.0f;
+    const float rad = 0.18f;
+    // 方向盤平面裡的右手位置（x 往右、y 往上）：右轉時右手往下
+    const float px = rad * std::cos(a);
+    const float py = -rad * std::sin(a);
+    const float ax = std::cos(y);
+    const float az = std::sin(y);
+    r[0] = px * ax;
+    r[1] = 1.0f + py;
+    r[2] = -0.4f + px * az;
+    l[0] = -px * ax;
+    l[1] = 1.0f - py;
+    l[2] = -0.4f - px * az;
+  }
+}  // namespace
+
+TEST(VrPadmodeWheel, AngleFollowsRotationPast90Degrees) {
+  wheel_t w;
+  float l[3], r[3];
+  for (int d = 0; d <= 200; d += 5) {
+    wheel_hands(static_cast<float>(d), l, r);
+    const auto a = w.step(l, r, true);
+    ASSERT_TRUE(a.has_value());
+    EXPECT_NEAR(*a * 180.0f / 3.14159265f, d, 0.5f) << "at " << d;
+  }
+  for (int d = 200; d >= -200; d -= 5) {
+    wheel_hands(static_cast<float>(d), l, r);
+    const auto a = w.step(l, r, true);
+    ASSERT_TRUE(a.has_value());
+    EXPECT_NEAR(*a * 180.0f / 3.14159265f, d, 0.5f) << "at " << d;
+  }
+}
+
+TEST(VrPadmodeWheel, IndependentOfBodyYaw) {
+  wheel_t w;
+  float l[3], r[3];
+  wheel_hands(0.0f, l, r, 40.0f);
+  ASSERT_TRUE(w.step(l, r, true).has_value());
+  wheel_hands(45.0f, l, r, 40.0f);
+  EXPECT_NEAR(*w.step(l, r, true) * 180.0f / 3.14159265f, 45.0f, 0.5f);
+  wheel_hands(-30.0f, l, r, 40.0f);
+  EXPECT_NEAR(*w.step(l, r, true) * 180.0f / 3.14159265f, -30.0f, 0.5f);
+}
+
+TEST(VrPadmodeWheel, LostTrackingResetsAndNeedsLevelHandsFirst) {
+  wheel_t w;
+  float l[3], r[3];
+  wheel_hands(70.0f, l, r);
+  EXPECT_FALSE(w.step(l, r, true).has_value());  // 第一次兩手不水平（> 45 度）：還不建立
+  wheel_hands(10.0f, l, r);
+  EXPECT_TRUE(w.step(l, r, true).has_value());
+  EXPECT_FALSE(w.step(l, r, false).has_value());
+  EXPECT_FALSE(w.valid);
+}
+
+TEST(VrPadmodeWheel, StickMappingAndWireByte) {
+  const float pi = 3.14159265f;
+  EXPECT_EQ(wheel_to_stick(pi / 2, 180), 32767);
+  EXPECT_EQ(wheel_to_stick(-pi, 180), -32767);
+  EXPECT_EQ(wheel_to_stick(pi / 4, 180), 16384);
+  EXPECT_EQ(wheel_to_stick(pi / 2, 360), 16384);
+  VIPLE_VR_CONTROLLER_INPUT in[2] = {hand(), hand()};
+  EXPECT_EQ(wheel_range_deg(in), 0);
+  in[0].reserved = VIPLE_VR_WHEEL_ON;
+  EXPECT_EQ(wheel_range_deg(in), 180);
+  in[0].reserved = VIPLE_VR_WHEEL_ON | 54;
+  EXPECT_EQ(wheel_range_deg(in), 540);
+}
+
+TEST(VrPadmodeMap, BothStickClicksAreSuppressed) {
+  VIPLE_VR_CONTROLLER_INPUT in[2] = {hand(VIPLE_VR_BTN_THUMBSTICK), hand(VIPLE_VR_BTN_THUMBSTICK)};
+  EXPECT_EQ(map_frame(in, false).buttons, 0u);
+  in[1].buttons = 0;
+  EXPECT_EQ(map_frame(in, false).buttons, k_left_stick);
 }

@@ -341,4 +341,23 @@
     <string name="steam_switch_account_unavailable">Tento účet nemá na hostiteli uložené přihlašovací údaje. Nejprve se jednou přihlaste na hostiteli a pak to zkuste znovu.</string>
     <string name="title_show_advanced">Zobrazit pokročilé a experimentální možnosti</string>
     <string name="summary_show_advanced">Možnosti pro řešení potíží a testování. Skryté možnosti si ponechají aktuální hodnoty.</string>
+    <!-- Řetězce aktualizace aplikace -->
+    <string name="title_update_mode">Aktualizace aplikace</string>
+    <string name="update_mode_off">Vypnuto</string>
+    <string name="update_mode_notify">Upozornit mě</string>
+    <string name="update_mode_auto">Stahovat automaticky</string>
+    <string name="update_available_title">K dispozici je aktualizace</string>
+    <string name="update_available_message">Je k dispozici VipleStream %s</string>
+    <string name="update_button_update">Aktualizovat</string>
+    <string name="update_button_later">Později</string>
+    <string name="update_button_release_notes">Poznámky k vydání</string>
+    <string name="update_downloaded_title">Aktualizace stažena</string>
+    <string name="update_downloaded_message">VipleStream %s byl stažen</string>
+    <string name="update_button_install">Instalovat</string>
+    <string name="update_downloading_title">Stahování aktualizace…</string>
+    <string name="update_permission_title">Instalace neznámých aplikací</string>
+    <string name="update_permission_message">Chcete-li instalovat aktualizace, povolte VipleStreamu instalovat neznámé aplikace</string>
+    <string name="update_button_settings">Nastavení</string>
+    <string name="update_error_title">Aktualizace se nezdařila</string>
+    <string name="update_error_message">Aktualizaci se nepodařilo stáhnout nebo ověřit</string>
 </resources>

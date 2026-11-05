@@ -28,12 +28,15 @@
 #include "utils.h"
 
 #include <map>
+#include <memory>
 #include <tuple>
 
 #ifdef HAVE_FFMPEG
 #include "video/ffmpeg.h"
 #include "backend/tailscalepath.h"
 #include "streaming/batterymonitor.h"  // §VR-LOWBATT
+#include "streaming/vr/vrnetmode.h"  // §VR-NETSEL
+#include "streaming/audio/miccapture.h"  // §VR-MIC
 #endif
 
 #ifdef HAVE_SLVIDEO
@@ -249,6 +252,8 @@ static int inputStallWatchdogProc(void*)
 #define SDL_CODE_XR_REBUILD 112
 // §VR M3a 虛擬鍵盤：data1＝VK | (modifiers << 16)、data2＝1 按下／0 放開
 #define SDL_CODE_XR_KEY 113
+// §VR-WHEEL：快捷鍵切換了方向盤模式（XR frame thread 推），data1＝1 開／0 關
+#define SDL_CODE_XR_WHEEL 114
 
 #include <openssl/rand.h>
 #include <algorithm>
@@ -608,15 +613,21 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
                 switch (payload[0]) {
                 case VIPLE_VR_NOTICE_PAD_ON_AUTO:
                     text = tr("This game doesn't use VR controllers - switched to Xbox controller mode");
+                    m_VrPadModeOn = true;
                     break;
                 case VIPLE_VR_NOTICE_PAD_ON_MANUAL:
                     text = tr("Xbox controller mode: on");
+                    m_VrPadModeOn = true;
                     break;
                 case VIPLE_VR_NOTICE_PAD_OFF_MANUAL:
                     text = tr("Xbox controller mode: off (VR controllers)");
+                    m_VrPadModeOn = false;
                     break;
                 case VIPLE_VR_NOTICE_PAD_UNAVAILABLE:
                     text = tr("Xbox controller mode unavailable: install ViGEmBus on the host");
+                    break;
+                case VIPLE_VR_NOTICE_MIC_UNAVAILABLE:
+                    text = tr("Microphone not available on the host: Steam's \"Steam Streaming Microphone\" device was not found");
                     break;
                 default:
                     break;
@@ -2315,6 +2326,7 @@ private:
         m_Session->m_ScHid.stop();
         // §VR：tracking 執行緒會呼叫 LiSendVrTracking，必須在 LiStopConnection 之前停
         m_Session->m_VrTracking.stop();
+        m_Session->m_Mic.reset();  // §VR-MIC：編碼執行緒會呼叫 LiSendVrMessage，同理
         TailscalePath::stop();  // §TS-PATH
 
         // Finish cleanup of the connection state
@@ -3039,6 +3051,18 @@ bool Session::createXrContext(bool isRebuild, QString* error)
         SDL_Event ev = {};
         ev.type = SDL_QUIT;
         ev.quit.timestamp = SDL_GetTicks();
+        SDL_PushEvent(&ev);
+    };
+    // §VR-WHEEL：方向盤模式的初始值（設定頁），串流中兩支搖桿同時按住 1.5 秒切換
+    {
+        const int range = qBound(90, m_Preferences->vrWheelRange, 900);
+        xo.vrWheel = m_Preferences->vrWheel ? static_cast<uint8_t>(VIPLE_VR_WHEEL_ON | (range / 10)) : 0;
+    }
+    xo.inputSink.wheelToggled = [](bool on) {
+        SDL_Event ev = {};
+        ev.type = SDL_USEREVENT;
+        ev.user.code = SDL_CODE_XR_WHEEL;
+        ev.user.data1 = (void*)(uintptr_t)(on ? 1 : 0);
         SDL_PushEvent(&ev);
     };
     // X5：runtime 結束 session（frame thread 呼叫，只推事件）
@@ -4043,6 +4067,24 @@ bool Session::startConnectionAsync()
     // §VR：tracking 上行（M1a 為合成 pose）。LiStartConnection 已依 vrFlags 生效
     if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
         checkAndSendVrHotspotInfo();
+        // §VR-MIC：頭盔麥克風 → host 的 Steam Streaming Microphone
+        if ((m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_MIC) && m_Preferences->vrMic) {
+            m_Mic = MicCapture::start([](const uint8_t* payload, int len) {
+                uint8_t tlv[2 + VIPLE_VR_MAX_CTRL_PAYLOAD];
+                if (len <= 0 || len > VIPLE_VR_MAX_CTRL_PAYLOAD) {
+                    return;
+                }
+                tlv[0] = VIPLE_VR_C2S_MIC;
+                tlv[1] = static_cast<uint8_t>(len);
+                memcpy(tlv + 2, payload, static_cast<size_t>(len));
+                LiSendVrMessage(tlv, len + 2, false);
+            });
+        }
+        else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-MIC] not sending the microphone (%s)",
+                        !(m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_MIC) ? "host has no Steam Streaming Microphone or is too old"
+                                                                              : "turned off in settings");
+        }
         VrSyntheticMotion motion = (VrSyntheticMotion)m_Preferences->vrSyntheticMotion;
 #ifdef HAVE_OPENXR
         if (m_XrPcvr && m_XrContext != nullptr) {
@@ -4565,12 +4607,31 @@ void Session::exec()
     BatteryMonitor battery(m_Preferences->vrFakeBatteryPct, m_Preferences->vrLowBatteryAtPct);
     Uint32 batteryPollTime = 0, batteryLogTime = 0;
     int batteryIconPct = -1;
+    // §VR-NETSEL：Steam Frame 的網路狀態自動選擇（解構時交還家用 Wi-Fi）
+    std::unique_ptr<VrNetMode> netMode;
 
     for (;;) {
         s_LoopBeat.fetch_add(1);
         s_LoopPhase.store(-1);
         pollScHidHotplug();
 #ifdef HAVE_OPENXR
+#ifdef Q_OS_LINUX
+        if (m_XrContext != nullptr && (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED)) {
+            if (!netMode) {
+                netMode = std::make_unique<VrNetMode>(m_Preferences->vrNetMode, m_Preferences->vrNetRetest, m_StreamConfig.fps);
+                netMode->toast = [this](const QString& text) {
+                    if (m_XrContext != nullptr) {
+                        m_XrContext->showToast(text, 6000);
+                    }
+                };
+            }
+            netMode->tick(SDL_GetTicks(), m_XrContext->pcvrNewFrames());
+            if (m_Preferences->vrNetRetest && netMode->retestConsumed()) {
+                m_Preferences->vrNetRetest = false;  // 重測只做一次
+                m_Preferences->save();
+            }
+        }
+#endif
         if (m_XrContext != nullptr && SDL_TICKS_PASSED(SDL_GetTicks(), batteryPollTime)) {
             batteryPollTime = SDL_GetTicks() + 10000;
             if (const auto br = battery.read()) {
@@ -4765,6 +4826,22 @@ void Session::exec()
             case SDL_CODE_XR_ENDED:
                 handleXrEnded((int)(intptr_t)event.user.data1);
                 break;
+            case SDL_CODE_XR_WHEEL: {
+                // §VR-WHEEL：快捷鍵切換 → 記進設定（下一場沿用）並在頭盔裡提示
+                const bool on = event.user.data1 != nullptr;
+                m_Preferences->vrWheel = on;
+                m_Preferences->save();
+#ifdef HAVE_OPENXR
+                if (m_XrContext != nullptr) {
+                    // 提示框一次放得下約兩行：手把模式沒開時改提醒「要在 Xbox 手把模式才有作用」
+                    const QString text = !on ? tr("Steering wheel: off (left stick steers)")
+                                             : (m_VrPadModeOn ? tr("Steering wheel: on - turn both controllers like a wheel")
+                                                              : tr("Steering wheel: on (works in Xbox controller mode)"));
+                    m_XrContext->showToast(text, 3000);
+                }
+#endif
+                break;
+            }
             case SDL_CODE_XR_REBUILD:
                 handleXrRebuild((uint32_t)(uintptr_t)event.user.data1);
                 break;

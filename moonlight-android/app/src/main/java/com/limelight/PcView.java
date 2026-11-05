@@ -22,6 +22,7 @@ import com.limelight.preferences.PreferenceConfiguration;
 import com.limelight.preferences.StreamSettings;
 import com.limelight.ui.AdapterFragment;
 import com.limelight.ui.AdapterFragmentCallbacks;
+import com.limelight.utils.AppUpdater;
 import com.limelight.utils.Dialog;
 import com.limelight.utils.HelpLauncher;
 import com.limelight.utils.ServerHelper;
@@ -351,6 +352,9 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
 
         inForeground = true;
         startComputerUpdates();
+
+        // 檢查應用程式自我更新
+        AppUpdater.onActivityResume(this);
     }
 
     @Override
@@ -366,6 +370,8 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
         super.onStop();
 
         Dialog.closeDialogs();
+        // 關閉更新相關對話方塊，避免視窗洩漏
+        AppUpdater.onActivityStop(this);
     }
 
     @Override

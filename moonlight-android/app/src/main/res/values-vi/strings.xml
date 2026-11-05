@@ -341,4 +341,23 @@
     <string name="steam_switch_account_unavailable">Tài khoản này chưa có thông tin đăng nhập được lưu trên máy chủ. Hãy đăng nhập một lần trên máy chủ trước rồi thử lại.</string>
     <string name="title_show_advanced">Hiện tùy chọn nâng cao và thử nghiệm</string>
     <string name="summary_show_advanced">Các tùy chọn để khắc phục sự cố và thử nghiệm. Tùy chọn bị ẩn vẫn giữ giá trị hiện tại.</string>
+    <!-- Chuỗi cập nhật ứng dụng -->
+    <string name="title_update_mode">Cập nhật ứng dụng</string>
+    <string name="update_mode_off">Tắt</string>
+    <string name="update_mode_notify">Thông báo cho tôi</string>
+    <string name="update_mode_auto">Tự động tải xuống</string>
+    <string name="update_available_title">Có bản cập nhật mới</string>
+    <string name="update_available_message">VipleStream %s đã sẵn sàng</string>
+    <string name="update_button_update">Cập nhật</string>
+    <string name="update_button_later">Để sau</string>
+    <string name="update_button_release_notes">Ghi chú phát hành</string>
+    <string name="update_downloaded_title">Đã tải xuống bản cập nhật</string>
+    <string name="update_downloaded_message">VipleStream %s đã được tải xuống</string>
+    <string name="update_button_install">Cài đặt</string>
+    <string name="update_downloading_title">Đang tải xuống bản cập nhật…</string>
+    <string name="update_permission_title">Cài đặt ứng dụng không xác định</string>
+    <string name="update_permission_message">Để cài đặt bản cập nhật, hãy cho phép VipleStream cài đặt ứng dụng không xác định</string>
+    <string name="update_button_settings">Cài đặt</string>
+    <string name="update_error_title">Cập nhật thất bại</string>
+    <string name="update_error_message">Không thể tải xuống hoặc xác minh bản cập nhật</string>
 </resources>

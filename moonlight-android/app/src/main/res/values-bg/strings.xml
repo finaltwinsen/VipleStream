@@ -326,4 +326,23 @@
     <string name="steam_switch_account_unavailable">Този акаунт няма запазени данни за вход на хоста. Първо влезте веднъж на хоста, след това опитайте отново.</string>
     <string name="title_show_advanced">Показване на разширени и експериментални опции</string>
     <string name="summary_show_advanced">Опции за отстраняване на проблеми и тестване. Скритите опции запазват текущите си стойности.</string>
+    <!-- Низове за актуализация на приложението -->
+    <string name="title_update_mode">Актуализации на приложението</string>
+    <string name="update_mode_off">Изкл.</string>
+    <string name="update_mode_notify">Известяване</string>
+    <string name="update_mode_auto">Автоматично изтегляне</string>
+    <string name="update_available_title">Налична е актуализация</string>
+    <string name="update_available_message">VipleStream %s е наличен</string>
+    <string name="update_button_update">Актуализиране</string>
+    <string name="update_button_later">По-късно</string>
+    <string name="update_button_release_notes">Бележки по изданието</string>
+    <string name="update_downloaded_title">Актуализацията е изтеглена</string>
+    <string name="update_downloaded_message">VipleStream %s беше изтеглен</string>
+    <string name="update_button_install">Инсталиране</string>
+    <string name="update_downloading_title">Изтегляне на актуализацията…</string>
+    <string name="update_permission_title">Инсталиране на неизвестни приложения</string>
+    <string name="update_permission_message">За да инсталирате актуализации, разрешете на VipleStream да инсталира неизвестни приложения</string>
+    <string name="update_button_settings">Настройки</string>
+    <string name="update_error_title">Неуспешна актуализация</string>
+    <string name="update_error_message">Неуспешно изтегляне или проверка на актуализацията</string>
 </resources>

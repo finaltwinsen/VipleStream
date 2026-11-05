@@ -339,4 +339,23 @@
     <string name="steam_switch_account_unavailable">Denne kontoen har ingen lagrede påloggingsopplysninger på verten. Logg inn én gang på verten først, og prøv deretter igjen.</string>
     <string name="title_show_advanced">Vis avanserte og eksperimentelle innstillinger</string>
     <string name="summary_show_advanced">Innstillinger for feilsøking og testing. Skjulte innstillinger beholder gjeldende verdier.</string>
+    <!-- App-oppdateringsstrenger -->
+    <string name="title_update_mode">App-oppdateringer</string>
+    <string name="update_mode_off">Av</string>
+    <string name="update_mode_notify">Varsle meg</string>
+    <string name="update_mode_auto">Last ned automatisk</string>
+    <string name="update_available_title">Oppdatering tilgjengelig</string>
+    <string name="update_available_message">VipleStream %s er tilgjengelig</string>
+    <string name="update_button_update">Oppdater</string>
+    <string name="update_button_later">Senere</string>
+    <string name="update_button_release_notes">Versjonsnotater</string>
+    <string name="update_downloaded_title">Oppdatering lastet ned</string>
+    <string name="update_downloaded_message">VipleStream %s er lastet ned</string>
+    <string name="update_button_install">Installer</string>
+    <string name="update_downloading_title">Laster ned oppdatering…</string>
+    <string name="update_permission_title">Installer ukjente apper</string>
+    <string name="update_permission_message">For å installere oppdateringer, gi VipleStream tillatelse til å installere ukjente apper</string>
+    <string name="update_button_settings">Innstillinger</string>
+    <string name="update_error_title">Oppdatering mislyktes</string>
+    <string name="update_error_message">Kunne ikke laste ned eller verifisere oppdateringen</string>
 </resources>

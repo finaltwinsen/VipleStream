@@ -339,4 +339,23 @@
     <string name="steam_switch_account_unavailable">לחשבון זה אין פרטי התחברות שמורים במארח. התחבר פעם אחת במארח ואז נסה שוב.</string>
     <string name="title_show_advanced">הצג אפשרויות מתקדמות וניסיוניות</string>
     <string name="summary_show_advanced">אפשרויות לפתרון בעיות ולבדיקות. אפשרויות מוסתרות שומרות על הערכים הנוכחיים שלהן.</string>
+    <!-- מחרוזות עדכון אפליקציה -->
+    <string name="title_update_mode">עדכוני אפליקציה</string>
+    <string name="update_mode_off">כבוי</string>
+    <string name="update_mode_notify">הודע לי</string>
+    <string name="update_mode_auto">הורדה אוטומטית</string>
+    <string name="update_available_title">עדכון זמין</string>
+    <string name="update_available_message">VipleStream %s זמין כעת</string>
+    <string name="update_button_update">עדכן</string>
+    <string name="update_button_later">מאוחר יותר</string>
+    <string name="update_button_release_notes">הערות גרסה</string>
+    <string name="update_downloaded_title">העדכון הורד</string>
+    <string name="update_downloaded_message">VipleStream %s הורד בהצלחה</string>
+    <string name="update_button_install">התקן</string>
+    <string name="update_downloading_title">מוריד עדכון…</string>
+    <string name="update_permission_title">התקנת אפליקציות ממקור לא ידוע</string>
+    <string name="update_permission_message">כדי להתקין עדכונים, אפשר ל-VipleStream להתקין אפליקציות ממקורות לא ידועים</string>
+    <string name="update_button_settings">הגדרות</string>
+    <string name="update_error_title">העדכון נכשל</string>
+    <string name="update_error_message">הורדת העדכון או אימותו נכשלו</string>
 </resources>

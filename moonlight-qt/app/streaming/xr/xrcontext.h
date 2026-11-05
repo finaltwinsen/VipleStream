@@ -83,6 +83,8 @@ public:
         QString testJitter;
         // X4：射線滑鼠事件的出口（Session 提供，從 XR frame thread 呼叫；推 SDL_USEREVENT 到 main thread）
         XrInputSink inputSink;
+        // §VR-WHEEL：PCVR 方向盤模式的初始值（input[0].reserved：VIPLE_VR_WHEEL_ON | 轉向範圍/10，0＝關）
+        uint8_t vrWheel = 0;
         // X4（dev）：合成射線（不讀控制器），驗證求交→濾波→事件→Li* 路徑
         bool testPointer = false;
         // 虛擬鍵盤（dev）：--xr-test-keyboard 的文字（合成射線逐鍵點擊）、--xr-dump-keyboard 的 PNG 路徑
@@ -314,9 +316,12 @@ public:
     void setPlayerSubtitle(const QImage& img);
 
     // §VR-PADMODE：PCVR 的短暫提示（任何執行緒）：在視野正前方偏下 1 m 顯示 durationMs，再呼叫就換掉
+    std::atomic<uint64_t> m_PcvrNewFrames{0};  // §VR-NETSEL
     static constexpr int kToastW = 1280;
     static constexpr int kToastH = 160;
     void showToast(const QString& text, int durationMs);
+    // §VR-NETSEL：PCVR 顯示迴圈累計拿到新影像的格數（任何執行緒讀）
+    uint64_t pcvrNewFrames() const { return m_PcvrNewFrames.load(std::memory_order_relaxed); }
 
     // §VR-LOWBATT：視野右上角的低電量圖示（任何執行緒）。pct < 0＝收起來
     static constexpr int kBattW = 256;

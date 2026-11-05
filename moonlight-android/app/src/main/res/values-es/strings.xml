@@ -355,4 +355,23 @@
     <string name="steam_switch_account_unavailable">Esta cuenta no tiene credenciales guardadas en el host. Inicia sesión una vez en el host y vuelve a intentarlo.</string>
     <string name="title_show_advanced">Mostrar opciones avanzadas y experimentales</string>
     <string name="summary_show_advanced">Opciones para solucionar problemas y hacer pruebas. Las opciones ocultas conservan sus valores actuales.</string>
+    <!-- Cadenas de actualización -->
+    <string name="title_update_mode">Actualizaciones de la aplicación</string>
+    <string name="update_mode_off">Desactivado</string>
+    <string name="update_mode_notify">Notificarme</string>
+    <string name="update_mode_auto">Descargar automáticamente</string>
+    <string name="update_available_title">Actualización disponible</string>
+    <string name="update_available_message">VipleStream %s está disponible</string>
+    <string name="update_button_update">Actualizar</string>
+    <string name="update_button_later">Más tarde</string>
+    <string name="update_button_release_notes">Notas de la versión</string>
+    <string name="update_downloaded_title">Actualización descargada</string>
+    <string name="update_downloaded_message">VipleStream %s ha sido descargado</string>
+    <string name="update_button_install">Instalar</string>
+    <string name="update_downloading_title">Descargando actualización…</string>
+    <string name="update_permission_title">Instalar aplicaciones desconocidas</string>
+    <string name="update_permission_message">Para instalar actualizaciones, permita que VipleStream instale aplicaciones desconocidas</string>
+    <string name="update_button_settings">Ajustes</string>
+    <string name="update_error_title">Error de actualización</string>
+    <string name="update_error_message">Error al descargar o verificar la actualización</string>
 </resources>

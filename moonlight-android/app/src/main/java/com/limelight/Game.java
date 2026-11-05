@@ -93,6 +93,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         OnGenericMotionListener, OnTouchListener, NvConnectionListener, EvdevListener,
         OnSystemUiVisibilityChangeListener, GameGestures, StreamView.InputCallbacks,
         PerfOverlayListener, UsbDriverService.UsbDriverStateListener, View.OnKeyListener {
+    // 記錄目前是否有串流正在進行（供自我更新程式 AppUpdater 檢查）
+    private static volatile boolean sIsStreaming = false;
+
+    public static boolean isStreaming() {
+        return sIsStreaming;
+    }
+
     private int lastButtonState = 0;
 
     // Only 2 touches are supported
@@ -204,6 +211,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // 串流活動建立，設定串流進行中旗標
+        sIsStreaming = true;
 
         // §REVIEW-1103：relay wss 的自簽憑證釘選需要儲存位置
         com.limelight.relay.RelayTls.init(this);
@@ -1194,6 +1204,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     @Override
     protected void onDestroy() {
         super.onDestroy();
+
+        // 串流活動銷毀，清除串流進行中旗標
+        sIsStreaming = false;
 
         if (controllerHandler != null) {
             controllerHandler.destroy();

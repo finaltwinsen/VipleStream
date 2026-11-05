@@ -67,6 +67,7 @@
 #define SER_CONFWARNINGS "confwarnings"
 #define SER_UIDISPLAYMODE "uidisplaymode"
 #define SER_RICHPRESENCE "richpresence"
+#define SER_UPDATEMODE "updatemode"
 #define SER_GAMEPADMOUSE "gamepadmouse"
 #define SER_DEFAULTVER "defaultver"
 #define SER_PACKETSIZE "packetsize"
@@ -98,6 +99,11 @@
 #define SER_VRREPAIRRTT "vrrepairrtt"
 #define SER_VRREPAIRHOLDMS "vrrepairholdms"
 #define SER_VRSYNTH "vrsynth"
+#define SER_VRWHEEL "vrwheel"
+#define SER_VRNETMODE "vrnetmode"
+#define SER_VRMIC "vrmic"
+#define SER_VRNETRETEST "vrnetretest"
+#define SER_VRWHEELRANGE "vrwheelrange"
 #define SER_VRFOVEATION "vrfoveation"
 #define SER_VRDEFAULTSMIG2030 "vrdefaultsmig2030"
 #define SER_VREYEWIDTH "vreyewidth"
@@ -301,6 +307,7 @@ void StreamingPreferences::reload()
     connectionWarnings = settings.value(SER_CONNWARNINGS, true).toBool();
     configurationWarnings = settings.value(SER_CONFWARNINGS, true).toBool();
     richPresence = settings.value(SER_RICHPRESENCE, true).toBool();
+    updateMode = qBound(0, settings.value(SER_UPDATEMODE, 2).toInt(), 2);
     gamepadMouse = settings.value(SER_GAMEPADMOUSE, true).toBool();
     detectNetworkBlocking = settings.value(SER_DETECTNETBLOCKING, true).toBool();
     enableMpQuic = settings.value(SER_ENABLEMPQUIC, false).toBool();
@@ -351,6 +358,11 @@ void StreamingPreferences::reload()
         vrRepairHoldMs = (hold >= 8 && hold <= 100) ? hold : 0;
     }
     vrSynth = settings.value(SER_VRSYNTH, false).toBool();
+    vrWheel = settings.value(SER_VRWHEEL, false).toBool();
+    vrNetMode = qBound(0, settings.value(SER_VRNETMODE, 0).toInt(), 2);
+    vrMic = settings.value(SER_VRMIC, true).toBool();
+    vrNetRetest = settings.value(SER_VRNETRETEST, false).toBool();
+    vrWheelRange = qBound(90, settings.value(SER_VRWHEELRANGE, 180).toInt(), 900);
     vrFoveation = qBound(100, settings.value(SER_VRFOVEATION, 200).toInt(), 250);
     // 每眼解析度（2026-10-07 起寫入設定，GUI 啟動的 VR 也吃得到）。範圍同 --vr-eye；超出範圍就用預設
     {
@@ -647,6 +659,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_CONNWARNINGS, connectionWarnings);
     settings.setValue(SER_CONFWARNINGS, configurationWarnings);
     settings.setValue(SER_RICHPRESENCE, richPresence);
+    settings.setValue(SER_UPDATEMODE, updateMode);
     settings.setValue(SER_GAMEPADMOUSE, gamepadMouse);
     settings.setValue(SER_PACKETSIZE, packetSize);
     settings.setValue(SER_DETECTNETBLOCKING, detectNetworkBlocking);
@@ -685,6 +698,11 @@ void StreamingPreferences::save()
     settings.setValue(SER_VRREPAIRRTT, vrRepairRtt);
     settings.setValue(SER_VRREPAIRHOLDMS, vrRepairHoldMs);
     settings.setValue(SER_VRSYNTH, vrSynth);
+    settings.setValue(SER_VRWHEEL, vrWheel);
+    settings.setValue(SER_VRNETMODE, vrNetMode);
+    settings.setValue(SER_VRMIC, vrMic);
+    settings.setValue(SER_VRNETRETEST, vrNetRetest);
+    settings.setValue(SER_VRWHEELRANGE, vrWheelRange);
     settings.setValue(SER_VRFOVEATION, vrFoveation);
     settings.setValue(SER_VREYEWIDTH, vrEyeWidth);
     settings.setValue(SER_VREYEHEIGHT, vrEyeHeight);

@@ -341,4 +341,23 @@
     <string name="steam_switch_account_unavailable">Akun ini tidak memiliki kredensial tersimpan di host. Masuk sekali di host terlebih dahulu, lalu coba lagi.</string>
     <string name="title_show_advanced">Tampilkan opsi lanjutan dan eksperimental</string>
     <string name="summary_show_advanced">Opsi untuk pemecahan masalah dan pengujian. Opsi yang disembunyikan tetap memakai nilai saat ini.</string>
+    <!-- String pembaruan aplikasi -->
+    <string name="title_update_mode">Pembaruan aplikasi</string>
+    <string name="update_mode_off">Mati</string>
+    <string name="update_mode_notify">Beri tahu saya</string>
+    <string name="update_mode_auto">Unduh otomatis</string>
+    <string name="update_available_title">Pembaruan Tersedia</string>
+    <string name="update_available_message">VipleStream %s telah tersedia</string>
+    <string name="update_button_update">Perbarui</string>
+    <string name="update_button_later">Nanti</string>
+    <string name="update_button_release_notes">Catatan rilis</string>
+    <string name="update_downloaded_title">Pembaruan Telah Diunduh</string>
+    <string name="update_downloaded_message">VipleStream %s telah diunduh</string>
+    <string name="update_button_install">Pasang</string>
+    <string name="update_downloading_title">Mengunduh pembaruan…</string>
+    <string name="update_permission_title">Pasang Aplikasi Tidak Dikenal</string>
+    <string name="update_permission_message">Untuk memasang pembaruan, izinkan VipleStream memasang aplikasi tidak dikenal</string>
+    <string name="update_button_settings">Pengaturan</string>
+    <string name="update_error_title">Pembaruan Gagal</string>
+    <string name="update_error_message">Gagal mengunduh atau memverifikasi pembaruan</string>
 </resources>

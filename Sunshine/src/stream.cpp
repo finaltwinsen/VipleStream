@@ -1903,7 +1903,16 @@ namespace stream {
     if (latest) {
       // §VR-PADMODE：手把模式時把兩手的狀態轉給虛擬 Xbox 手把（只做對應與長按偵測，不阻塞）
       if (const auto pad = vr_state.padmode()) {
+        // §VR-WHEEL：兩手的姿態有效才帶位置（方向盤模式要用）；packed 結構先複製出來，不取成員位址
+        const bool lp = (sample.flags & VIPLE_VR_TRK_LEFT) != 0;
+        const bool rp = (sample.flags & VIPLE_VR_TRK_RIGHT) != 0;
+        float lpos[3];
+        float rpos[3];
+        std::memcpy(lpos, sample.pose[VIPLE_VR_POSE_LEFT].pos, sizeof(lpos));
+        std::memcpy(rpos, sample.pose[VIPLE_VR_POSE_RIGHT].pos, sizeof(rpos));
         pad->on_sample(sample.input,
+                       lp ? lpos : nullptr,
+                       rp ? rpos : nullptr,
                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
       }
       // pcvr：接受為最新樣本之後才寫進 bridge（stub／disabled 時 tracking_wanted() 恆為 false，立即返回）
@@ -3411,6 +3420,12 @@ namespace stream {
               BOOST_LOG(info) << "[VIPLE-VR-PREDICT] 10s: vsync_to_photons_us=" << s->now_us << " (min " << s->min_us << " max " << s->max_us
                               << ") pose lag ema=" << ms(s->ema_us) << " ms updates=" << s->updates << " windows=" << s->windows;
             }
+          }
+        } else if (type == VIPLE_VR_C2S_MIC) {
+          // §VR-MIC：頭盔麥克風（每 20 ms 一則），vr_mic 關掉時照樣丟掉
+          vr_state->count_c2s(type);
+          if (config::vr.mic) {
+            vr_state->on_mic(body, len);
           }
         } else if (type == VIPLE_VR_C2S_HOTSPOT_INFO && len >= sizeof(VIPLE_VR_TLV_HOTSPOT_INFO)) {
           vr_state->count_c2s(type);

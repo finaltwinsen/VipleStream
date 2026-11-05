@@ -354,4 +354,23 @@
     <string name="steam_switch_account_unavailable">Voor dit account zijn geen inloggegevens opgeslagen op de host. Meld je eerst één keer aan op de host en probeer het daarna opnieuw.</string>
     <string name="title_show_advanced">Geavanceerde en experimentele opties tonen</string>
     <string name="summary_show_advanced">Opties voor probleemoplossing en testen. Verborgen opties behouden hun huidige waarden.</string>
+    <!-- App-updates -->
+    <string name="title_update_mode">App-updates</string>
+    <string name="update_mode_off">Uit</string>
+    <string name="update_mode_notify">Melden</string>
+    <string name="update_mode_auto">Automatisch downloaden</string>
+    <string name="update_available_title">Update beschikbaar</string>
+    <string name="update_available_message">VipleStream %s is beschikbaar</string>
+    <string name="update_button_update">Bijwerken</string>
+    <string name="update_button_later">Later</string>
+    <string name="update_button_release_notes">Releaseopmerkingen</string>
+    <string name="update_downloaded_title">Update gedownload</string>
+    <string name="update_downloaded_message">VipleStream %s is gedownload</string>
+    <string name="update_button_install">Installeren</string>
+    <string name="update_downloading_title">Update downloaden…</string>
+    <string name="update_permission_title">Onbekende apps installeren</string>
+    <string name="update_permission_message">Sta VipleStream toe onbekende apps te installeren om updates te installeren</string>
+    <string name="update_button_settings">Instellingen</string>
+    <string name="update_error_title">Update mislukt</string>
+    <string name="update_error_message">Kan update niet downloaden of verifiëren</string>
 </resources>

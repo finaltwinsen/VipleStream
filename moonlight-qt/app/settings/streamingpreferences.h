@@ -319,6 +319,8 @@ public:
     Q_PROPERTY(bool connectionWarnings MEMBER connectionWarnings NOTIFY connectionWarningsChanged)
     Q_PROPERTY(bool configurationWarnings MEMBER configurationWarnings NOTIFY configurationWarningsChanged)
     Q_PROPERTY(bool richPresence MEMBER richPresence NOTIFY richPresenceChanged)
+    // §AUTO-UPDATE（2026-11-05）：0＝不自動檢查、1＝有新版時通知、2＝自動安裝（預設）
+    Q_PROPERTY(int updateMode MEMBER updateMode NOTIFY updateModeChanged)
     Q_PROPERTY(bool gamepadMouse MEMBER gamepadMouse NOTIFY gamepadMouseChanged)
     Q_PROPERTY(bool detectNetworkBlocking MEMBER detectNetworkBlocking NOTIFY detectNetworkBlockingChanged)
     Q_PROPERTY(bool showPerformanceOverlay MEMBER showPerformanceOverlay NOTIFY showPerformanceOverlayChanged)
@@ -345,6 +347,11 @@ public:
     Q_PROPERTY(double vrLatchDelayMs MEMBER vrLatchDelayMs NOTIFY vrSettingsChanged)
     Q_PROPERTY(bool vrHalfRate MEMBER vrHalfRate NOTIFY vrSettingsChanged)
     Q_PROPERTY(bool vrSynth MEMBER vrSynth NOTIFY vrSettingsChanged)
+    Q_PROPERTY(bool vrWheel MEMBER vrWheel NOTIFY vrSettingsChanged)
+    Q_PROPERTY(int vrNetMode MEMBER vrNetMode NOTIFY vrSettingsChanged)
+    Q_PROPERTY(bool vrMic MEMBER vrMic NOTIFY vrSettingsChanged)
+    Q_PROPERTY(bool vrNetRetest MEMBER vrNetRetest NOTIFY vrSettingsChanged)
+    Q_PROPERTY(int vrWheelRange MEMBER vrWheelRange NOTIFY vrSettingsChanged)
     Q_PROPERTY(int vrFoveation MEMBER vrFoveation NOTIFY vrSettingsChanged)
     Q_PROPERTY(CaptureSysKeysMode captureSysKeysMode MEMBER captureSysKeysMode NOTIFY captureSysKeysModeChanged)
     Q_PROPERTY(Language language MEMBER language NOTIFY languageChanged);
@@ -408,6 +415,7 @@ public:
     bool connectionWarnings;
     bool configurationWarnings;
     bool richPresence;
+    int updateMode = 2;  // §AUTO-UPDATE：寫入設定（updatemode）
     bool gamepadMouse;
     bool detectNetworkBlocking;
     bool enableMpQuic;
@@ -483,6 +491,15 @@ public:
     bool vrLinkSelftest = false;      // §VR-MULTILINK（dev）：--vr-link-selftest 在同一張網卡再開一條連線，不寫入設定
     int  vrFoveation = 200;           // §VR-FOVEA（2.0.30 起預設 200）：--vr-foveation，正前方的像素密度（%，100＝關）；寫入設定（vrfoveation）
     bool vrSynth = false;             // §VR-SYNTH：--vr-synth，半速串流時合成中間那一格；寫入設定（vrsynth）
+    // §VR-WHEEL（2026-11-05）：Xbox 手把模式時，兩支手把像握方向盤一樣轉動＝左搖桿 X。串流中兩支搖桿同時按住 1.5 秒切換，
+    // 切換結果也寫回這裡（vrwheel）。vrWheelRange＝左打到底到右打到底的總角度（度，90–900，vrwheelrange）
+    bool vrWheel = false;
+    // §VR-NETSEL（2026-11-05）：Steam Frame 的網路狀態。0＝自動測試並選擇（預設）、1＝一律保留家用 Wi-Fi、2＝一律只用轉接器
+    // （vrnetmode）。vrNetRetest＝下一場重新測（測完自動清掉，vrnetretest）
+    int  vrNetMode = 0;
+    bool vrMic = true;  // §VR-MIC（2026-11-05）：串流 VR 時把頭盔麥克風送到主機（vrmic）
+    bool vrNetRetest = false;
+    int  vrWheelRange = 180;
     bool vr10Bit = false;             // §VR-10BIT：--vr-10bit，PCVR 要求 HEVC Main10（SDR）；寫入設定（vr10bit）。PCVR 不看 enableHdr
     bool vrTrackLock = true;          // §VR-TRACK-LOCK（2.0.30 起預設開）：--vr-track-lock，追蹤樣本鎖到顯示的節拍；寫入設定（vrtracklock）
     // §VR-TRACK-RELOCK：鎖相之後有一部分的幀開始用到前一筆樣本就重新搜尋（只在 vrTrackLock 開著時有作用）；寫入設定
@@ -591,6 +608,7 @@ signals:
     void connectionWarningsChanged();
     void configurationWarningsChanged();
     void richPresenceChanged();
+    void updateModeChanged();
     void gamepadMouseChanged();
     void detectNetworkBlockingChanged();
     void enableMpQuicChanged();

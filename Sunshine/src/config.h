@@ -281,6 +281,9 @@ namespace config {
     /// 遊戲（例：Assetto Corsa、ACC、GRIP——只吃手把或方向盤）時，另外插一支虛擬 Xbox 360 手把，把 Frame 兩手的狀態送過去；
     /// 兩支選單鍵長按 2 秒手動切換並記住。disabled＝不做（Frame 手把只交給 SteamVR）
     bool padmode = true;
+    /// §VR-MIC（2026-11-05）：vr_mic（enabled 預設）。頭盔麥克風寫進 host 的「Steam Streaming Microphone」（Steam 裝的虛擬裝置），
+    /// 遊戲或 Discord 選「Microphone (Steam Streaming Microphone)」就收得到。disabled＝不宣告、收到也丟
+    bool mic = true;
     /// §VR-RENDER-SCALE（2026-10-08）：vr_render_scale_pct。告訴 SteamVR 的建議算圖尺寸＝串流的每眼尺寸 × 這個百分比
     /// （100–250）。串流尺寸決定編碼、傳輸、解碼的負擔（也就是延遲），算圖尺寸決定畫面細節；Steam 內建串流是
     /// 算圖 2160、編碼寬度 1152。100＝舊行為（兩者相同）。改了要等 SteamVR 重啟才生效。
@@ -518,6 +521,7 @@ namespace config {
     std::string log_file;
     bool notify_pre_releases;
     bool system_tray;
+    std::string update_mode;  ///< §AUTO-UPDATE：off／notify／install（預設）
     std::vector<prep_cmd_t> prep_cmds;
 
     // List of allowed origins for CSRF protection (e.g., "https://example.com,https://app.example.com")

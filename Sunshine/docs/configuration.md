@@ -285,6 +285,40 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### update_mode
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream §AUTO-UPDATE: automatic update checks. The server checks GitHub 3 minutes after start and then
+            once a day (a HEAD request that does not use API quota). With `install`, the update is downloaded, verified
+            against the release's sha256 digest and installed once nobody has streamed for 10 minutes; the server
+            restarts. A version that fails to install is not retried automatically. On Linux, automatic install needs
+            password-less `sudo`; otherwise it falls back to a notification.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            install
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="3">Choices</td>
+        <td>off</td>
+        <td>No automatic checks (the tray icon's "Check for updates..." still works).</td>
+    </tr>
+    <tr>
+        <td>notify</td>
+        <td>Show a notification once per new version.</td>
+    </tr>
+    <tr>
+        <td>install</td>
+        <td>Notify, then install automatically when nobody is streaming.</td>
+    </tr>
+</table>
+
 ## Input
 
 ### controller
@@ -2272,6 +2306,32 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Example</td>
         <td colspan="2">@code{}
             vr_buffer_refill = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_mic
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream §VR-MIC: send the headset microphone to the host during a PC VR session. The host writes it into
+            the "Steam Streaming Microphone" virtual device that Steam installs; select
+            "Microphone (Steam Streaming Microphone)" in the game or voice chat app. Only advertised when that device
+            exists (Windows host with Steam installed).
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_mic = disabled
             @endcode</td>
     </tr>
 </table>

@@ -341,4 +341,23 @@
     <string name="steam_switch_account_unavailable">Esta conta não tem credenciais guardadas no anfitrião. Inicie sessão uma vez no anfitrião primeiro e tente novamente.</string>
     <string name="title_show_advanced">Mostrar opções avançadas e experimentais</string>
     <string name="summary_show_advanced">Opções para resolução de problemas e testes. As opções ocultas mantêm os valores atuais.</string>
+    <!-- Strings de atualização -->
+    <string name="title_update_mode">Atualizações da aplicação</string>
+    <string name="update_mode_off">Desativado</string>
+    <string name="update_mode_notify">Notificar-me</string>
+    <string name="update_mode_auto">Transferir automaticamente</string>
+    <string name="update_available_title">Atualização disponível</string>
+    <string name="update_available_message">O VipleStream %s está disponível</string>
+    <string name="update_button_update">Atualizar</string>
+    <string name="update_button_later">Mais tarde</string>
+    <string name="update_button_release_notes">Notas de lançamento</string>
+    <string name="update_downloaded_title">Atualização transferida</string>
+    <string name="update_downloaded_message">O VipleStream %s foi transferido</string>
+    <string name="update_button_install">Instalar</string>
+    <string name="update_downloading_title">A transferir atualização…</string>
+    <string name="update_permission_title">Instalar aplicações desconhecidas</string>
+    <string name="update_permission_message">Para instalar atualizações, permita que o VipleStream instale aplicações desconhecidas</string>
+    <string name="update_button_settings">Definições</string>
+    <string name="update_error_title">Falha na atualização</string>
+    <string name="update_error_message">Falha ao transferir ou verificar a atualização</string>
 </resources>

@@ -104,6 +104,8 @@ struct XrInputSink {
     // §VR-EXIT-COMBO：A＋X＋扳機＋握把同時按住（各取任一手）的上升緣＝結束串流。VR 串流與 XR 桌面沒有平面視窗，
     // 實體鍵盤的 Ctrl+Alt+Shift+Q 收不到、頭盔手把也不是 SDL 手把（Start+Select+L1+R1 不會觸發）。沒設＝不偵測
     std::function<void()> exitCombo;
+    // §VR-WHEEL：PCVR 時兩支搖桿同時按住 1.5 秒切換方向盤模式，on＝切換後的狀態（frame thread 呼叫，只推事件）。沒設＝不偵測
+    std::function<void(bool on)> wheelToggled;
 };
 
 class XrInput

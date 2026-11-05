@@ -142,6 +142,8 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 sampleAgeMs                   
 | | 04 CONFIG_ACK、05 LAYOUT | epoch 對應的 FoV、overscan、foveation、**eyeToHead** | reliable |
 | | **06 REFRESH_START** | `{startFrame u32, frameCnt u8, reason u8}`，送 2 次 | ch 0x07 unseq |
 | | 0A NOTICE | §VR-PADMODE（2026-11-04）：`{code u8}`，頭盔短暫顯示提示（1＝這款遊戲不使用 VR 手把、已切 Xbox 手把模式；2／3＝手動開／關；4＝host 沒有 ViGEmBus）。舊 client 依 len 跳過 | reliable |
+| 0x5506 C→S | input[0].reserved | §VR-WHEEL（2026-11-05）：左手輸入的保留位元組改放方向盤設定：`0x80`＝方向盤模式開、低 7 bit＝轉向總角度／10（0＝預設 180°）。client 的設定頁與快捷鍵（兩支搖桿同時按住 1.5 秒）決定；server 在 Xbox 手把模式時用兩手位置算角度取代左搖桿 X，兩支搖桿同時按下時不送 LS／RS。舊 client 送 0，舊 server 不讀 | 隨 tracking |
+| 0x5507 C→S | 0D MIC | §VR-MIC（2026-11-05）：`{seq u16 LE, Opus 封包}`，48 kHz 單聲道、每 20 ms 一則、in-band FEC。server 宣告 `VIPLE_VR_SERVER_CAP_MIC 0x100` 才送；server 寫進 Steam Streaming Microphone，找不到就回 NOTICE 5 | ch 0x07 unseq |
 
 - **client 接收（`Q/ControlStream.c`）**：
   - 新增偽 typeIndex `IDX_VIPLE_VR_S2C = 0x100`（不進 packetTypes 表）；

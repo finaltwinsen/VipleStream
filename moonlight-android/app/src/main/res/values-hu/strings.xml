@@ -339,4 +339,23 @@
     <string name="steam_switch_account_unavailable">Ehhez a fiókhoz nincsenek mentett hitelesítő adatok a gazdagépen. Előbb jelentkezz be egyszer a gazdagépen, majd próbáld újra.</string>
     <string name="title_show_advanced">Speciális és kísérleti beállítások megjelenítése</string>
     <string name="summary_show_advanced">Hibaelhárítási és tesztelési beállítások. A rejtett beállítások megtartják jelenlegi értéküket.</string>
+    <!-- Alkalmazásfrissítési karakterláncok -->
+    <string name="title_update_mode">Alkalmazásfrissítések</string>
+    <string name="update_mode_off">Kikapcsolva</string>
+    <string name="update_mode_notify">Értesítsen</string>
+    <string name="update_mode_auto">Automatikus letöltés</string>
+    <string name="update_available_title">Frissítés érhető el</string>
+    <string name="update_available_message">A VipleStream %s elérhető</string>
+    <string name="update_button_update">Frissítés</string>
+    <string name="update_button_later">Később</string>
+    <string name="update_button_release_notes">Kiadási megjegyzések</string>
+    <string name="update_downloaded_title">Frissítés letöltve</string>
+    <string name="update_downloaded_message">A VipleStream %s letöltődött</string>
+    <string name="update_button_install">Telepítés</string>
+    <string name="update_downloading_title">Frissítés letöltése…</string>
+    <string name="update_permission_title">Ismeretlen alkalmazások telepítése</string>
+    <string name="update_permission_message">A frissítések telepítéséhez engedélyezze a VipleStream számára az ismeretlen alkalmazások telepítését</string>
+    <string name="update_button_settings">Beállítások</string>
+    <string name="update_error_title">A frissítés sikertelen</string>
+    <string name="update_error_message">Nem sikerült letölteni vagy ellenőrizni a frissítést</string>
 </resources>

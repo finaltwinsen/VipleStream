@@ -340,4 +340,23 @@
     <string name="steam_switch_account_unavailable">To konto nie ma zapisanych danych logowania na hoście. Najpierw zaloguj się raz na hoście, a potem spróbuj ponownie.</string>
     <string name="title_show_advanced">Pokaż opcje zaawansowane i eksperymentalne</string>
     <string name="summary_show_advanced">Opcje do rozwiązywania problemów i testów. Ukryte opcje zachowują bieżące wartości.</string>
+    <!-- Ciągi aktualizacji aplikacji -->
+    <string name="title_update_mode">Aktualizacje aplikacji</string>
+    <string name="update_mode_off">Wył.</string>
+    <string name="update_mode_notify">Powiadom mnie</string>
+    <string name="update_mode_auto">Pobieraj automatycznie</string>
+    <string name="update_available_title">Dostępna aktualizacja</string>
+    <string name="update_available_message">VipleStream %s jest dostępny</string>
+    <string name="update_button_update">Aktualizuj</string>
+    <string name="update_button_later">Później</string>
+    <string name="update_button_release_notes">Informacje o wydaniu</string>
+    <string name="update_downloaded_title">Pobrano aktualizację</string>
+    <string name="update_downloaded_message">VipleStream %s został pobrany</string>
+    <string name="update_button_install">Zainstaluj</string>
+    <string name="update_downloading_title">Pobieranie aktualizacji…</string>
+    <string name="update_permission_title">Instalowanie nieznanych aplikacji</string>
+    <string name="update_permission_message">Aby instalować aktualizacje, zezwól VipleStream na instalowanie nieznanych aplikacji</string>
+    <string name="update_button_settings">Ustawienia</string>
+    <string name="update_error_title">Aktualizacja nie powiodła się</string>
+    <string name="update_error_message">Nie udało się pobrać lub zweryfikować aktualizacji</string>
 </resources>
