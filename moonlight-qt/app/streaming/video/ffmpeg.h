@@ -1,8 +1,10 @@
 #pragma once
 
 #include <functional>
+#include <mutex>
 #include <QQueue>
 #include <set>
+#include <vector>
 
 #include "../bandwidth.h"
 #include "decoder.h"
@@ -16,6 +18,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 }
+
 
 class FFmpegVideoDecoder : public IVideoDecoder {
 public:
@@ -242,6 +245,27 @@ private:
     VIPLE_VR_FRAME_META m_VrPendingMeta {};
     bool m_VrPendingMetaValid = false;
     int64_t m_VrPendingMetaFrame = 0;
+
+    // §VIPLE-2D-PERF：平面非 VR 串流每 10 秒印出延遲摘要
+    bool isVrSession() const;
+    void recordHostSample(double hostMs);
+    void recordRttSample(double rttMs);
+    void recordDecodeSample(double decodeMs);
+    void onPacerRendered(uint64_t beforeRender, uint64_t afterRender, const AVFrame* frame);  // §VIPLE-2D-PERF
+    void recordPacerRenderSamples(double queueMs, double renderMs, double totalMs);
+    void log2DPerfSummary(uint64_t nowUs);
+
+    std::mutex m_2DPerfMutex;
+    std::vector<double> m_2DPerfHostSamples;
+    std::vector<double> m_2DPerfRttSamples;
+    std::vector<double> m_2DPerfDecodeSamples;
+    std::vector<double> m_2DPerfQueueSamples;
+    std::vector<double> m_2DPerfRenderSamples;
+    std::vector<double> m_2DPerfTotalSamples;
+    uint32_t m_2DPerfFrames = 0;
+    uint32_t m_2DPerfNetDrop = 0;
+    uint32_t m_2DPerfPacerDrop = 0;
+    uint64_t m_2DPerfWindowStartUs = 0;
 
     static const uint8_t k_H264TestFrame[];
     static const uint8_t k_HEVCMainTestFrame[];

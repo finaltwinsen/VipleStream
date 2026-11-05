@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include "../../decoder.h"
 #include "../renderer.h"
 
@@ -50,6 +51,9 @@ class Pacer
 {
 public:
     Pacer(IFFmpegRenderer* renderer, PVIDEO_STATS videoStats);
+
+    // §VIPLE-2D-PERF：每幀交給 renderer 前後的時間（LiGetMicroseconds）與幀本身；在 render thread 呼叫，不可阻塞
+    std::function<void(uint64_t beforeUs, uint64_t afterUs, const AVFrame* frame)> onRendered;
 
     ~Pacer();
 

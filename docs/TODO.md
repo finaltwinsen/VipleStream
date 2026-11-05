@@ -85,6 +85,14 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 其他候選（排在後面、依量測決定）：B3 AV1（先確認 Frame 的 AV1 解碼延遲）、B4 影像封包 Wi-Fi 優先權、B5 批次收送（USO／RIO、sendmmsg）、
 E1 頭盔效能等級（注意電池保護斷電）、E2 熱路徑即時優先權、E3 熱路徑去鎖去配置。
 
+### §LAT-2D 2D 串流延遲與體驗（Windows／Linux／Android 用戶端，2026-11-05 使用者：不是只有頭盔）
+VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另一套 ABR（AIMD）與另一條呈現路徑。依序：
+1. **G2 2D 每段延遲**：盤點現有量測（client 效能疊層的網路延遲／host 處理／解碼／算圖／佇列、test_fruc_30s），補成每 10 秒一行的 log，三個平台一致。**狀態：完成（client 2.0.82）**——`[VIPLE-2D-PERF]`：Qt 在 ffmpeg.cpp（Pacer 加 onRendered 回呼取樣，「收到→顯示」因 FFmpeg 7 移除 reordered_opaque 暫印 n/a）、Android 在 MediaCodecDecoderRenderer（logcat 標籤 com.limelight.LimeLog）。REMNANT 實測：**Windows** 133 fps、host 4.9／解碼 0.37／排隊 0.2（p95 3.2）／算圖 1.8 ms；**Android Pixel 5** 60 fps、host 2.1／**解碼 9（p95 13～15）／排隊 13（p95 15.6）／收到→交出 22（p95 28～31）ms**——Android 用戶端多出約 20 ms，第 3、4 項先做 Android。**更正（同日）**：那場 Pixel 5 開著補幀（host 45 fps → GLES 補成 2 倍、90 Hz）；**關補幀**對照：90 fps、解碼 7.4（p95 9.5）、解出→交出 1.1（p95 2.0）、**收到→交出 8.7（p95 11）ms**。補幀多出的約 13 ms 大多是補幀本身（先顯示中間幀再顯示真實那張、每次 swap 等 vsync），解碼迴圈被卡住只佔約 1.6 ms——把補幀移到獨立執行緒不划算。Pixel 5 已選 `c2.qti.hevc.decoder.low_latency`（FEATURE_LowLatency 生效），7.4 ms 是硬體解碼本身。
+2. **2D ABR 塞車反應**：把收／送落差直接降的規則用到 2D 的 AIMD（2D 沒有每幀收包報告，看能不能用現有回報代替）。**狀態：查明兩個問題（11-05 REMNANT）**——① 2D 降碼一律 reset＋IDR（video.cpp `isDecrease && !config.vrProfile`，原本為了快速收斂），等於網路正塞時多送一張大 IDR；VR 早已改平滑降碼＋intra refresh。② 降完回升慢：Android 開場掉包 20.6→8.7 Mbps 後每 5 s 才 +2 Mbps，約 27 s 才回到 19 Mbps。**下一步**：先做 2D 的限速／斷線注入（VR 有 `vr_multilink_fault`，2D 沒有），才能 A/B「降碼 IDR vs 平滑」與回升速度；區網自然塞車一場只有一兩次，不夠比。
+3. **呈現路徑排隊**：Windows（D3D11 flip model、waitable swapchain、V-Sync 關時的節拍）、Linux（Vulkan／EGL present mode）、Android（MediaCodec 低延遲旗標 KEY_LOW_LATENCY 與廠商選項、Surface 直出、Choreographer 節拍）。**狀態：部分查明（11-05）**——Windows 已是 flip model＋最大排隊 1 格＋waitable＋允許撕裂，用戶端解碼＋排隊＋算圖合計約 2.4 ms；Android 預設「最低延遲」直接 release、排隊 1.1 ms。剩下：Exynos 的低延遲鍵只套 H.264（要擴到 HEVC／AV1，沒有 Exynos 手機可驗）、Choreographer 執行緒優先權（只影響「平衡」模式）。設定頁應註明補幀會多約 13 ms 延遲。
+4. **解碼端**：各平台硬體解碼的輸出延遲（Android 解碼器常多緩衝 1～2 張）、零複製。**狀態：未開始**
+5. **輸入延遲**：滑鼠鍵盤與手把從 client 到 host 的路徑（批次、Nagle、優先權）。**狀態：未開始**
+
 ### §VR-NETSEL 網路狀態自動選擇＋§VR-MIC 頭盔麥克風（2.0.75，未提交、頭盔不在家）
 - **§VR-NETSEL**：安裝腳本裝 `viplestream-netmode.service`（app 寫 netmode-request.json 心跳；5 秒沒更新、轉接器沒連線、6 小時上限都會交還
   wlan0）；app `vrnetmode.h` 在 VR 串流中量 B（家用＋轉接器）與 C（只用轉接器）各 20 秒，比每秒新影像數，選順的並記住地點（家用 SSID 雜湊，14 天重測）。

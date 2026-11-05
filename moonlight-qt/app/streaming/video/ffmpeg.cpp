@@ -551,6 +551,166 @@ bool FFmpegVideoDecoder::getTestFrameData(int videoFormat, const uint8_t** data,
     }
 }
 
+bool FFmpegVideoDecoder::isVrSession() const
+{
+    return ((LiGetVrFlags() & VIPLE_VR_SF_ENABLED) != 0) || (m_VrTracker != nullptr);
+}
+
+void FFmpegVideoDecoder::recordHostSample(double hostMs)
+{
+    if (isVrSession() || hostMs < 0.0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_2DPerfMutex);
+    if (m_2DPerfHostSamples.size() < 4096) {
+        m_2DPerfHostSamples.push_back(hostMs);
+    }
+}
+
+void FFmpegVideoDecoder::recordRttSample(double rttMs)
+{
+    if (isVrSession() || rttMs < 0.0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_2DPerfMutex);
+    if (m_2DPerfRttSamples.size() < 4096) {
+        m_2DPerfRttSamples.push_back(rttMs);
+    }
+}
+
+void FFmpegVideoDecoder::recordDecodeSample(double decodeMs)
+{
+    if (isVrSession() || decodeMs < 0.0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_2DPerfMutex);
+    if (m_2DPerfDecodeSamples.size() < 4096) {
+        m_2DPerfDecodeSamples.push_back(decodeMs);
+    }
+}
+
+void FFmpegVideoDecoder::recordPacerRenderSamples(double queueMs, double renderMs, double totalMs)
+{
+    if (isVrSession()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_2DPerfMutex);
+    if (queueMs >= 0.0 && m_2DPerfQueueSamples.size() < 4096) {
+        m_2DPerfQueueSamples.push_back(queueMs);
+    }
+    if (renderMs >= 0.0 && m_2DPerfRenderSamples.size() < 4096) {
+        m_2DPerfRenderSamples.push_back(renderMs);
+    }
+    if (totalMs >= 0.0 && m_2DPerfTotalSamples.size() < 4096) {
+        m_2DPerfTotalSamples.push_back(totalMs);
+    }
+}
+
+void FFmpegVideoDecoder::onPacerRendered(uint64_t beforeRender, uint64_t afterRender, const AVFrame* frame)
+{
+    // §VIPLE-2D-PERF：pkt_dts＝進 Pacer 佇列的時間（與 Pacer 既有統計同一個欄位）。
+    // 「收到→顯示」需要每幀的收到時間，AVFrame 的 reordered_opaque 在 FFmpeg 7 已移除，之後另找欄位再補（目前印 n/a）
+    const uint64_t pktDts = (uint64_t)frame->pkt_dts;
+    const uint64_t enqUs = 0;
+    const double queueMs = (pktDts > 0 && beforeRender >= pktDts) ? (double)(beforeRender - pktDts) / 1000.0 : -1.0;
+    const double renderMs = (afterRender >= beforeRender) ? (double)(afterRender - beforeRender) / 1000.0 : -1.0;
+    const double totalMs = (enqUs > 0 && afterRender >= enqUs) ? (double)(afterRender - enqUs) / 1000.0 : -1.0;
+    recordPacerRenderSamples(queueMs, renderMs, totalMs);
+}
+
+void FFmpegVideoDecoder::log2DPerfSummary(uint64_t nowUs)
+{
+    if (isVrSession()) {
+        return;
+    }
+
+    std::vector<double> hostCopy;
+    std::vector<double> rttCopy;
+    std::vector<double> decodeCopy;
+    std::vector<double> queueCopy;
+    std::vector<double> renderCopy;
+    std::vector<double> totalCopy;
+    uint32_t framesCount = 0;
+    uint32_t netDropCount = 0;
+    uint32_t pacerDropCount = 0;
+    uint64_t elapsedUs = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(m_2DPerfMutex);
+        hostCopy = m_2DPerfHostSamples;
+        rttCopy = m_2DPerfRttSamples;
+        decodeCopy = m_2DPerfDecodeSamples;
+        queueCopy = m_2DPerfQueueSamples;
+        renderCopy = m_2DPerfRenderSamples;
+        totalCopy = m_2DPerfTotalSamples;
+
+        m_2DPerfHostSamples.clear();
+        m_2DPerfRttSamples.clear();
+        m_2DPerfDecodeSamples.clear();
+        m_2DPerfQueueSamples.clear();
+        m_2DPerfRenderSamples.clear();
+        m_2DPerfTotalSamples.clear();
+
+        framesCount = m_2DPerfFrames;
+        netDropCount = m_2DPerfNetDrop;
+        pacerDropCount = m_2DPerfPacerDrop;
+        m_2DPerfFrames = 0;
+        m_2DPerfNetDrop = 0;
+        m_2DPerfPacerDrop = 0;
+
+        elapsedUs = (m_2DPerfWindowStartUs != 0 && nowUs > m_2DPerfWindowStartUs)
+            ? (nowUs - m_2DPerfWindowStartUs) : 0;
+        m_2DPerfWindowStartUs = nowUs;
+    }
+
+    const double fps = (elapsedUs > 0)
+        ? ((double)framesCount * 1000000.0 / (double)elapsedUs) : 0.0;
+
+    auto formatP50P95Max = [](std::vector<double>& v, char* buf, size_t bufSize) {
+        if (v.empty()) {
+            snprintf(buf, bufSize, "n/a");
+            return;
+        }
+        std::sort(v.begin(), v.end());
+        size_t idx50 = (size_t)(0.50 * (double)(v.size() - 1) + 0.5);
+        size_t idx95 = (size_t)(0.95 * (double)(v.size() - 1) + 0.5);
+        if (idx50 >= v.size()) idx50 = v.size() - 1;
+        if (idx95 >= v.size()) idx95 = v.size() - 1;
+        snprintf(buf, bufSize, "%.2f/%.2f/%.2f", v[idx50], v[idx95], v.back());
+    };
+
+    auto formatP50P95 = [](std::vector<double>& v, char* buf, size_t bufSize) {
+        if (v.empty()) {
+            snprintf(buf, bufSize, "n/a");
+            return;
+        }
+        std::sort(v.begin(), v.end());
+        size_t idx50 = (size_t)(0.50 * (double)(v.size() - 1) + 0.5);
+        size_t idx95 = (size_t)(0.95 * (double)(v.size() - 1) + 0.5);
+        if (idx50 >= v.size()) idx50 = v.size() - 1;
+        if (idx95 >= v.size()) idx95 = v.size() - 1;
+        snprintf(buf, bufSize, "%.2f/%.2f", v[idx50], v[idx95]);
+    };
+
+    char hostBuf[48];
+    char rttBuf[48];
+    char decodeBuf[48];
+    char queueBuf[48];
+    char renderBuf[48];
+    char totalBuf[48];
+
+    formatP50P95Max(hostCopy, hostBuf, sizeof(hostBuf));
+    formatP50P95(rttCopy, rttBuf, sizeof(rttBuf));
+    formatP50P95Max(decodeCopy, decodeBuf, sizeof(decodeBuf));
+    formatP50P95Max(queueCopy, queueBuf, sizeof(queueBuf));
+    formatP50P95Max(renderCopy, renderBuf, sizeof(renderBuf));
+    formatP50P95Max(totalCopy, totalBuf, sizeof(totalBuf));
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-2D-PERF] 10s: frames=%u fps=%.1f | host %s | rtt %s | decode %s | queue %s | render %s | total(recv->present) %s | netDrop=%u pacerDrop=%u",
+                framesCount, fps, hostBuf, rttBuf, decodeBuf, queueBuf, renderBuf, totalBuf, netDropCount, pacerDropCount);
+}
+
 FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
     : m_Pkt(av_packet_alloc()),
       m_VideoDecoderCtx(nullptr),
@@ -657,6 +817,20 @@ void FFmpegVideoDecoder::reset()
 
     delete m_Pacer;
     m_Pacer = nullptr;
+
+    {
+        std::lock_guard<std::mutex> lock(m_2DPerfMutex);
+        m_2DPerfHostSamples.clear();
+        m_2DPerfRttSamples.clear();
+        m_2DPerfDecodeSamples.clear();
+        m_2DPerfQueueSamples.clear();
+        m_2DPerfRenderSamples.clear();
+        m_2DPerfTotalSamples.clear();
+        m_2DPerfFrames = 0;
+        m_2DPerfNetDrop = 0;
+        m_2DPerfPacerDrop = 0;
+        m_2DPerfWindowStartUs = 0;
+    }
 
     // This must be called after deleting Pacer because it
     // may be holding AVFrames to free in its destructor.
@@ -921,6 +1095,9 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     // Don't bother initializing Pacer if we're not actually going to render
     if (testMode != TestMode::TestFrameOnly) {
         m_Pacer = new Pacer(m_FrontendRenderer, &m_ActiveWndVideoStats);
+        if (!isVrSession()) {
+            m_Pacer->onRendered = [this](uint64_t b, uint64_t a, const AVFrame* f) { onPacerRendered(b, a, f); };
+        }
         // §VR M3a X5（設計 §2.4 ⑥）：XR 模式的顯示節拍由 XR frame thread 決定，Pacer 只轉交幀、
         // 不取視窗的 vsync 來源（無頭 offscreen 時也取不到，舊寫法會讓整組 renderer 初始化失敗）
         const bool xrPacingOff = params->xr != nullptr;
@@ -2876,6 +3053,20 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
         m_VrTracker = std::make_unique<VrFrameMetaTracker>(vrPrefs ? vrPrefs->vrInjectDropEvery : 0,
                                                            vrPrefs ? vrPrefs->vrInjectLossSec : 0);
     }
+    else if (!m_TestOnly && !params->testOnly) {
+        // §VIPLE-2D-PERF：預先配置 4096 筆樣本空間，避免串流期間 vector 重新配置
+        std::lock_guard<std::mutex> lock(m_2DPerfMutex);
+        m_2DPerfHostSamples.reserve(4096);
+        m_2DPerfRttSamples.reserve(4096);
+        m_2DPerfDecodeSamples.reserve(4096);
+        m_2DPerfQueueSamples.reserve(4096);
+        m_2DPerfRenderSamples.reserve(4096);
+        m_2DPerfTotalSamples.reserve(4096);
+        m_2DPerfFrames = 0;
+        m_2DPerfNetDrop = 0;
+        m_2DPerfPacerDrop = 0;
+        m_2DPerfWindowStartUs = 0;
+    }
 
     bool ok = initializeInternal(params);
     if (!m_TestOnly) {
@@ -3001,6 +3192,9 @@ bool FFmpegVideoDecoder::initializePyroWave(PDECODER_PARAMETERS params)
 
         if (!m_TestOnly) {
             m_Pacer = new Pacer(m_FrontendRenderer, &m_ActiveWndVideoStats);
+            if (!isVrSession()) {
+                m_Pacer->onRendered = [this](uint64_t b, uint64_t a, const AVFrame* f) { onPacerRendered(b, a, f); };
+            }
             const bool xrPacingOff = initParams.xr != nullptr;
             if (!m_Pacer->initialize(initParams.window, initParams.frameRate,
                                      !xrPacingOff &&
@@ -3739,6 +3933,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         const uint64_t thisFrameDecodeUs =
                             LiGetMicroseconds() - du.enqueueTimeUs;
                         m_ActiveWndVideoStats.totalDecodeTimeUs += thisFrameDecodeUs;
+                        if (!isVrSession()) {
+                            recordDecodeSample((double)thisFrameDecodeUs / 1000.0);
+                        }
                         if (m_VrDropOnMetaMiss) {
                             VrDecodeTiming::record(thisFrameDecodeUs);  // 2026-10-05：XR 模式的 CLIENT_TIMING decode 欄位
                         }
@@ -4029,6 +4226,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     if (!m_LastFrameNumber) {
         m_ActiveWndVideoStats.measurementStartUs = LiGetMicroseconds();
         m_LastFrameNumber = du->frameNumber;
+        if (m_2DPerfWindowStartUs == 0) {
+            m_2DPerfWindowStartUs = m_ActiveWndVideoStats.measurementStartUs;
+        }
     }
     else {
         // Any frame number greater than m_LastFrameNumber + 1 represents a dropped frame
@@ -4433,6 +4633,26 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         // Accumulate these values into the global stats
         addVideoStats(m_ActiveWndVideoStats, m_GlobalVideoStats);
 
+        // §VIPLE-2D-PERF：在 ActiveWnd 清空前累計幀數與丟幀數，採樣 RTT 並在滿 10 秒時印出摘要
+        if (!isVrSession()) {
+            m_2DPerfFrames += m_ActiveWndVideoStats.receivedFrames;
+            m_2DPerfNetDrop += m_ActiveWndVideoStats.networkDroppedFrames;
+            m_2DPerfPacerDrop += m_ActiveWndVideoStats.pacerDroppedFrames;
+
+            uint32_t rtt = 0, variance = 0;
+            if (LiGetEstimatedRttInfo(&rtt, &variance) && rtt > 0) {
+                recordRttSample((double)rtt);
+            }
+
+            const uint64_t nowUs = LiGetMicroseconds();
+            if (m_2DPerfWindowStartUs == 0) {
+                m_2DPerfWindowStartUs = nowUs;
+            }
+            else if (nowUs - m_2DPerfWindowStartUs >= 10000000ull) {
+                log2DPerfSummary(nowUs);
+            }
+        }
+
         // Move this window into the last window slot and clear it for next window
         SDL_memcpy(&m_LastWndVideoStats, &m_ActiveWndVideoStats, sizeof(m_ActiveWndVideoStats));
         SDL_zero(m_ActiveWndVideoStats);
@@ -4440,6 +4660,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     }
 
     if (du->frameHostProcessingLatency != 0) {
+        if (!isVrSession()) {
+            recordHostSample((double)du->frameHostProcessingLatency / 10.0);
+        }
         if (m_ActiveWndVideoStats.minHostProcessingLatency != 0) {
             m_ActiveWndVideoStats.minHostProcessingLatency = qMin(m_ActiveWndVideoStats.minHostProcessingLatency, du->frameHostProcessingLatency);
         }

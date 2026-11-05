@@ -392,6 +392,9 @@ void Pacer::renderFrame(AVFrame* frame)
     uint64_t afterRender = LiGetMicroseconds();
 
     m_VideoStats->totalRenderTimeUs += (afterRender - beforeRender);
+    if (onRendered) {
+        onRendered(beforeRender, afterRender, frame);  // §VIPLE-2D-PERF
+    }
     m_VideoStats->renderedFrames++;
 
     // VipleStream: Track FRUC interpolated frames.

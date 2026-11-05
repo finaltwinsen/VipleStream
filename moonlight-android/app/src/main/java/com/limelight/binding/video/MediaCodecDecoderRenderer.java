@@ -6,6 +6,7 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -143,6 +144,205 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private int numVpsIn;
     private int numFramesIn;
     private int numFramesOut;
+
+    // =========================================================================
+    // VipleStream [VIPLE-2D-PERF] 週期性 2D 延遲統計
+    // =========================================================================
+    private static final int PERF_RING_CAPACITY = 2048;
+    private static final int IN_FLIGHT_CAPACITY = 256;
+    private static final int MAX_OUT_BUFFERS = 128;
+
+    /**
+     * 預先配置的固定容量環狀緩衝區，避免每個影格產生記憶體配置 (GC 壓力)。
+     * 採雙緩衝機制 (ring 與 snapshot)，在 synchronized 區塊內僅進行指標置換，
+     * 實際的排序與分位數計算於鎖外執行，確保不阻塞解碼與渲染執行緒。
+     */
+    private static class PerfStageTracker {
+        long[] ring = new long[PERF_RING_CAPACITY];
+        long[] snapshot = new long[PERF_RING_CAPACITY];
+        int count = 0;
+        int head = 0;
+
+        void add(long val) {
+            ring[head] = val;
+            head = (head + 1) % ring.length;
+            count++;
+        }
+
+        int snapshotAndReset() {
+            int valid = Math.min(count, ring.length);
+            long[] tmp = ring;
+            ring = snapshot;
+            snapshot = tmp;
+            count = 0;
+            head = 0;
+            return valid;
+        }
+    }
+
+    private final Object perfLock = new Object();
+    private final PerfStageTracker stageHost = new PerfStageTracker();
+    private final PerfStageTracker stageRtt = new PerfStageTracker();
+    private final PerfStageTracker stageDecode = new PerfStageTracker();
+    private final PerfStageTracker stageQueue = new PerfStageTracker();
+    private final PerfStageTracker stageTotal = new PerfStageTracker();
+
+    // 飛行中 (in-flight) 輸入影格記錄，以 PTS 作為關聯鍵
+    private final long[] inFlightPts = new long[IN_FLIGHT_CAPACITY];
+    private final long[] inFlightRecvNs = new long[IN_FLIGHT_CAPACITY];
+    private final long[] inFlightSubmitNs = new long[IN_FLIGHT_CAPACITY];
+    private int inFlightHead = 0;
+
+    // 依 MediaCodec 輸出緩衝區索引 (outIndex) 記錄出列與接收時間
+    private final long[] outBufferDequeueNs = new long[MAX_OUT_BUFFERS];
+    private final long[] outBufferRecvNs = new long[MAX_OUT_BUFFERS];
+
+    private int perfRenderedFramesCount = 0;
+    private int perfNetDrops = 0;
+    private long perfSummaryWindowStartMs = 0;
+
+    // 記錄輸入緩衝區排入 MediaCodec (submit) 事件
+    private void onInputBufferQueued(long timestampUs, long recvNs, long submitNs, char hostLatency) {
+        synchronized (perfLock) {
+            int slot = inFlightHead & (IN_FLIGHT_CAPACITY - 1);
+            inFlightPts[slot] = timestampUs;
+            inFlightRecvNs[slot] = recvNs;
+            inFlightSubmitNs[slot] = submitNs;
+            inFlightHead++;
+
+            if (hostLatency != 0) {
+                // host latency 單位為 0.1 ms，轉為奈秒 (100,000 ns)
+                stageHost.add((long) hostLatency * 100_000L);
+            }
+
+            long rttInfo = MoonBridge.getEstimatedRttInfo();
+            if (rttInfo != -1) {
+                int rttMs = (int) (rttInfo >> 32);
+                if (rttMs >= 0) {
+                    stageRtt.add((long) rttMs * 1_000_000L);
+                }
+            }
+        }
+    }
+
+    // 記錄輸出緩衝區從 MediaCodec 取出 (dequeue) 事件
+    private void onOutputBufferDequeued(int outIndex, long presentationTimeUs, long dequeueTimeNs) {
+        long matchedSubmitNs = 0;
+        long matchedRecvNs = 0;
+        synchronized (perfLock) {
+            for (int i = 0; i < IN_FLIGHT_CAPACITY; i++) {
+                int slot = (inFlightHead - 1 - i) & (IN_FLIGHT_CAPACITY - 1);
+                if (inFlightPts[slot] == presentationTimeUs) {
+                    matchedSubmitNs = inFlightSubmitNs[slot];
+                    matchedRecvNs = inFlightRecvNs[slot];
+                    inFlightPts[slot] = 0; // 配對成功，清空該槽位避免重複使用
+                    break;
+                }
+            }
+            if (matchedSubmitNs > 0) {
+                long decodeNs = dequeueTimeNs - matchedSubmitNs;
+                if (decodeNs >= 0 && decodeNs < 1_000_000_000L) { // 排除異常離群值 (>1s)
+                    stageDecode.add(decodeNs);
+                }
+            }
+            if (outIndex >= 0 && outIndex < outBufferDequeueNs.length) {
+                outBufferDequeueNs[outIndex] = dequeueTimeNs;
+                outBufferRecvNs[outIndex] = matchedRecvNs;
+            }
+        }
+    }
+
+    // 記錄輸出緩衝區釋放 (releaseOutputBuffer) 事件
+    private void onOutputBufferReleased(int outIndex, boolean rendered) {
+        if (outIndex >= 0 && outIndex < outBufferDequeueNs.length) {
+            long releaseTimeNs = System.nanoTime();
+            synchronized (perfLock) {
+                long dequeueNs = outBufferDequeueNs[outIndex];
+                long recvNs = outBufferRecvNs[outIndex];
+                outBufferDequeueNs[outIndex] = 0;
+                outBufferRecvNs[outIndex] = 0;
+
+                if (rendered) {
+                    perfRenderedFramesCount++;
+                    if (dequeueNs > 0 && recvNs > 0) {
+                        long queueNs = releaseTimeNs - dequeueNs;
+                        long totalNs = releaseTimeNs - recvNs;
+                        if (queueNs >= 0 && queueNs < 1_000_000_000L) {
+                            stageQueue.add(queueNs);
+                        }
+                        if (totalNs >= 0 && totalNs < 2_000_000_000L) {
+                            stageTotal.add(totalNs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 每 10 秒輸出 [VIPLE-2D-PERF] 統計摘要至 logcat
+    private void emit2DPerfSummary(long nowMs) {
+        long elapsedMs = nowMs - perfSummaryWindowStartMs;
+        if (elapsedMs <= 0) {
+            elapsedMs = 10000;
+        }
+
+        int frames;
+        int netDrop;
+        int hostN, rttN, decN, qN, totN;
+
+        synchronized (perfLock) {
+            frames = perfRenderedFramesCount;
+            perfRenderedFramesCount = 0;
+
+            netDrop = perfNetDrops;
+            perfNetDrops = 0;
+
+            hostN = stageHost.snapshotAndReset();
+            rttN = stageRtt.snapshotAndReset();
+            decN = stageDecode.snapshotAndReset();
+            qN = stageQueue.snapshotAndReset();
+            totN = stageTotal.snapshotAndReset();
+        }
+
+        double fps = (double) frames / (elapsedMs / 1000.0);
+
+        // 於鎖外排序與計算分位數，避免阻塞渲染或解碼執行緒
+        Arrays.sort(stageHost.snapshot, 0, hostN);
+        double hostP50 = hostN > 0 ? stageHost.snapshot[Math.min((int) (hostN * 0.50), hostN - 1)] / 1_000_000.0 : 0.0;
+        double hostP95 = hostN > 0 ? stageHost.snapshot[Math.min((int) (hostN * 0.95), hostN - 1)] / 1_000_000.0 : 0.0;
+        double hostMax = hostN > 0 ? stageHost.snapshot[hostN - 1] / 1_000_000.0 : 0.0;
+
+        Arrays.sort(stageRtt.snapshot, 0, rttN);
+        double rttP50 = rttN > 0 ? stageRtt.snapshot[Math.min((int) (rttN * 0.50), rttN - 1)] / 1_000_000.0 : 0.0;
+        double rttP95 = rttN > 0 ? stageRtt.snapshot[Math.min((int) (rttN * 0.95), rttN - 1)] / 1_000_000.0 : 0.0;
+
+        Arrays.sort(stageDecode.snapshot, 0, decN);
+        double decP50 = decN > 0 ? stageDecode.snapshot[Math.min((int) (decN * 0.50), decN - 1)] / 1_000_000.0 : 0.0;
+        double decP95 = decN > 0 ? stageDecode.snapshot[Math.min((int) (decN * 0.95), decN - 1)] / 1_000_000.0 : 0.0;
+        double decMax = decN > 0 ? stageDecode.snapshot[decN - 1] / 1_000_000.0 : 0.0;
+
+        Arrays.sort(stageQueue.snapshot, 0, qN);
+        double qP50 = qN > 0 ? stageQueue.snapshot[Math.min((int) (qN * 0.50), qN - 1)] / 1_000_000.0 : 0.0;
+        double qP95 = qN > 0 ? stageQueue.snapshot[Math.min((int) (qN * 0.95), qN - 1)] / 1_000_000.0 : 0.0;
+        double qMax = qN > 0 ? stageQueue.snapshot[qN - 1] / 1_000_000.0 : 0.0;
+
+        Arrays.sort(stageTotal.snapshot, 0, totN);
+        double totP50 = totN > 0 ? stageTotal.snapshot[Math.min((int) (totN * 0.50), totN - 1)] / 1_000_000.0 : 0.0;
+        double totP95 = totN > 0 ? stageTotal.snapshot[Math.min((int) (totN * 0.95), totN - 1)] / 1_000_000.0 : 0.0;
+        double totMax = totN > 0 ? stageTotal.snapshot[totN - 1] / 1_000_000.0 : 0.0;
+
+        String logLine = String.format(Locale.US,
+                "[VIPLE-2D-PERF] 10s: frames=%d fps=%.1f | host=%.2f/%.2f/%.2f | rtt p50/p95=%.2f/%.2f | decode(submit->output)=%.2f/%.2f/%.2f | queue(output->release)=%.2f/%.2f/%.2f | total(recv->release)=%.2f/%.2f/%.2f | netDrop=%d",
+                frames, fps,
+                hostP50, hostP95, hostMax,
+                rttP50, rttP95,
+                decP50, decP95, decMax,
+                qP50, qP95, qMax,
+                totP50, totP95, totMax,
+                netDrop);
+
+        LimeLog.info(logLine);
+    }
 
     private MediaCodecInfo findAvcDecoder() {
         MediaCodecInfo decoder = MediaCodecHelper.findProbableSafeDecoder("video/avc", MediaCodecInfo.CodecProfileLevel.AVCProfileHigh);
@@ -912,6 +1112,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 nextInputBuffer = null;
                 nextInputBufferIndex = -1;
                 outputBufferQueue.clear();
+                synchronized (perfLock) {
+                    inFlightHead = 0;
+                    Arrays.fill(inFlightPts, 0);
+                    Arrays.fill(outBufferDequeueNs, 0);
+                    Arrays.fill(outBufferRecvNs, 0);
+                }
 
                 // If we just need a flush, do so now with all threads quiesced.
                 if (codecRecoveryType.get() == CR_RECOVERY_TYPE_FLUSH) {
@@ -1184,11 +1390,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                         frucRenderer.onFrameAvailable();
                     }
 
+                    onOutputBufferReleased(nextOutputBuffer, true);
                     lastRenderedFrameTimeNanos = frameTimeNanos;
                     activeWindowVideoStats.totalFramesRendered++;
                 } catch (IllegalStateException ignored) {
                     try {
                         // Try to avoid leaking the output buffer by releasing it without rendering
+                        onOutputBufferReleased(nextOutputBuffer, false);
                         videoDecoder.releaseOutputBuffer(nextOutputBuffer, false);
                     } catch (IllegalStateException e) {
                         // This will leak nextOutputBuffer, but there's really nothing else we can do
@@ -1240,6 +1448,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                         if (outIndex >= 0) {
                             long presentationTimeUs = info.presentationTimeUs;
                             int lastIndex = outIndex;
+                            onOutputBufferDequeued(outIndex, presentationTimeUs, System.nanoTime());
 
                             numFramesOut++;
 
@@ -1247,12 +1456,14 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                             if (prefs.framePacing != PreferenceConfiguration.FRAME_PACING_BALANCED) {
                                 // Get the last output buffer in the queue
                                 while ((outIndex = videoDecoder.dequeueOutputBuffer(info, 0)) >= 0) {
+                                    onOutputBufferReleased(lastIndex, false);
                                     videoDecoder.releaseOutputBuffer(lastIndex, false);
 
                                     numFramesOut++;
 
                                     lastIndex = outIndex;
                                     presentationTimeUs = info.presentationTimeUs;
+                                    onOutputBufferDequeued(outIndex, presentationTimeUs, System.nanoTime());
                                 }
 
                                 if (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
@@ -1282,6 +1493,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                     frucRenderer.onFrameAvailable();
                                 }
 
+                                onOutputBufferReleased(lastIndex, true);
                                 activeWindowVideoStats.totalFramesRendered++;
                             }
                             else {
@@ -1295,7 +1507,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 // refresh rate).
                                 if (outputBufferQueue.size() == OUTPUT_BUFFER_QUEUE_LIMIT) {
                                     try {
-                                        videoDecoder.releaseOutputBuffer(outputBufferQueue.take(), false);
+                                        int droppedBuffer = outputBufferQueue.take();
+                                        onOutputBufferReleased(droppedBuffer, false);
+                                        videoDecoder.releaseOutputBuffer(droppedBuffer, false);
                                     } catch (InterruptedException e) {
                                         // We're shutting down, so we can just drop this buffer on the floor
                                         // and it will be reclaimed when the codec is released.
@@ -1643,6 +1857,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             return MoonBridge.DR_OK;
         }
 
+        long recvTimeNs = System.nanoTime();
+
         if (lastFrameNumber == 0) {
             activeWindowVideoStats.measurementStartTimestamp = SystemClock.uptimeMillis();
         } else if (frameNumber != lastFrameNumber && frameNumber != lastFrameNumber + 1) {
@@ -1651,6 +1867,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             activeWindowVideoStats.framesLost += frameNumber - lastFrameNumber - 1;
             activeWindowVideoStats.totalFrames += frameNumber - lastFrameNumber - 1;
             activeWindowVideoStats.frameLossEvents++;
+            int lostFrames = frameNumber - lastFrameNumber - 1;
+            if (lostFrames > 0) {
+                synchronized (perfLock) {
+                    perfNetDrops += lostFrames;
+                }
+            }
         }
 
         // Reset CSD data for each IDR frame
@@ -1738,6 +1960,15 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             lastWindowVideoStats.copy(activeWindowVideoStats);
             activeWindowVideoStats.clear();
             activeWindowVideoStats.measurementStartTimestamp = SystemClock.uptimeMillis();
+        }
+
+        // 每 10 秒輸出一次 [VIPLE-2D-PERF] 效能統計至 logcat
+        long currentUptimeMs = SystemClock.uptimeMillis();
+        if (perfSummaryWindowStartMs == 0) {
+            perfSummaryWindowStartMs = currentUptimeMs;
+        } else if (currentUptimeMs >= perfSummaryWindowStartMs + 10000) {
+            emit2DPerfSummary(currentUptimeMs);
+            perfSummaryWindowStartMs = currentUptimeMs;
         }
 
         boolean csdSubmittedForThisFrame = false;
@@ -2047,9 +2278,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         // Copy data from our buffer list into the input buffer
         nextInputBuffer.put(decodeUnitData, 0, decodeUnitLength);
 
+        long submitTimeNs = System.nanoTime();
         if (!queueNextInputBuffer(timestampUs, codecFlags)) {
             return MoonBridge.DR_NEED_IDR;
         }
+
+        onInputBufferQueued(timestampUs, recvTimeNs, submitTimeNs, frameHostProcessingLatency);
 
         return MoonBridge.DR_OK;
     }
