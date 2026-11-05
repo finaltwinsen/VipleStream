@@ -670,6 +670,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                           "(the usual state with nobody wearing the headset) and opens one that is closed. Closing it this way does not give the timing "
                           "of a worn session - to measure, disable the dashboard on the host instead. Needs an active left controller: always the case "
                           "with --vr-emulate; on a real XR runtime add --vr-synthetic-hands unless the controller is tracked. Not saved.");
+    parser.addFlagOption("input-test-unreliable", "(dev) with --input-test: send relative mouse moves unreliably (no ACK wait) to compare input spacing. "
+                         "Lost packets lose that bit of motion. Not saved.");
+    parser.addFlagOption("input-test", "(dev) send a tiny relative mouse move (+1/-1 px, alternating) every 4 ms while streaming, "
+                         "so the host's [VIPLE-INPUT10] line shows input packet spacing. Not saved.");
     parser.addValueOption("vr-synthetic-pad-test", "(dev) PCVR with --vr-emulate: starting this many seconds after tracking starts, play a fixed "
                           "button sequence for the host's Xbox controller mode (A, trigger + left stick, d-pad up + bumper, then both menu buttons "
                           "held 2.5 s, repeated three times over 20 s), to check the host's virtual pad unattended (0 = off). Not saved.");
@@ -1060,6 +1064,12 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError(QString("vr-low-battery-at must be 0-100: %1").arg(parser.value("vr-low-battery-at")));
         }
         preferences->vrLowBatteryAtPct = pct;
+    }
+    if (parser.isSet("input-test")) {
+        preferences->inputTest = true;
+    }
+    if (parser.isSet("input-test-unreliable")) {
+        preferences->inputTestUnreliable = true;
     }
     if (parser.isSet("vr-synthetic-pad-test")) {
         bool ok = false;

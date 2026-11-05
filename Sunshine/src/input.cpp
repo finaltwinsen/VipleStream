@@ -207,6 +207,12 @@ namespace input {
 #endif
 
   struct input_t {
+    // §LAT-2D：累計位移滑鼠（SS_MOUSE_MOVE_REL_CUM_MAGIC）的上一筆
+    bool rel_cum_init = false;
+    uint32_t rel_cum_seq = 0;
+    int32_t rel_cum_x = 0;
+    int32_t rel_cum_y = 0;
+
     enum shortkey_e {
       CTRL = 0x1,  ///< Control key
       ALT = 0x2,  ///< Alt key
@@ -690,6 +696,40 @@ namespace input {
 
     // The minor axis is perpendicular to major axis so the angle must be rotated by 90 degrees
     return {multiply_polar_by_cartesian_scalar(major, angle, scalar), multiply_polar_by_cartesian_scalar(minor, angle + (M_PI / 2), scalar)};
+  }
+
+  /// §LAT-2D：累計位移滑鼠。只處理比上一筆新的（UNSEQUENCED 會亂序、client 每筆送兩份），位移＝這次累計−上次累計，
+  /// 超過 short 範圍就拆成多次移動
+  void passthrough(std::shared_ptr<input_t> &input, PSS_REL_MOUSE_CUM_PACKET packet) {
+    const uint32_t seq = util::endian::little(packet->seq);
+    const int32_t cx = (int32_t) util::endian::little((uint32_t) packet->cumX);
+    const int32_t cy = (int32_t) util::endian::little((uint32_t) packet->cumY);
+    int64_t dx, dy;
+    if (!input->rel_cum_init) {
+      input->rel_cum_init = true;
+      dx = cx;  // client 每個 session 從 0 開始累計
+      dy = cy;
+    } else {
+      if ((int32_t) (seq - input->rel_cum_seq) <= 0) {
+        return;  // 舊的或重複的
+      }
+      dx = (int32_t) ((uint32_t) cx - (uint32_t) input->rel_cum_x);
+      dy = (int32_t) ((uint32_t) cy - (uint32_t) input->rel_cum_y);
+    }
+    input->rel_cum_seq = seq;
+    input->rel_cum_x = cx;
+    input->rel_cum_y = cy;
+    if (!config::input.mouse) {
+      return;
+    }
+    while (dx != 0 || dy != 0) {
+      const int stepX = (int) std::clamp<int64_t>(dx, INT16_MIN, INT16_MAX);
+      const int stepY = (int) std::clamp<int64_t>(dy, INT16_MIN, INT16_MAX);
+      input->mouse_left_button_timeout = DISABLE_LEFT_BUTTON_DELAY;
+      platf::move_mouse(platf_input, stepX, stepY);
+      dx -= stepX;
+      dy -= stepY;
+    }
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_ABS_MOUSE_MOVE_PACKET packet) {
@@ -1847,6 +1887,14 @@ namespace input {
    * @param src A later packet to attempt to batch.
    * @return The status of the batching operation.
    */
+  /// §LAT-2D：累計位移本來就包含之前所有的移動，合併＝留下比較新的那一筆
+  batch_result_e batch(PSS_REL_MOUSE_CUM_PACKET dest, PSS_REL_MOUSE_CUM_PACKET src) {
+    if ((int32_t) (util::endian::little(src->seq) - util::endian::little(dest->seq)) > 0) {
+      *dest = *src;
+    }
+    return batch_result_e::batched;
+  }
+
   batch_result_e batch(PSS_HSCROLL_PACKET dest, PSS_HSCROLL_PACKET src) {
     short scrollAmt;
 
@@ -2040,6 +2088,8 @@ namespace input {
         return batch((PNV_SCROLL_PACKET) dest, (PNV_SCROLL_PACKET) src);
       case SS_HSCROLL_MAGIC:
         return batch((PSS_HSCROLL_PACKET) dest, (PSS_HSCROLL_PACKET) src);
+      case SS_MOUSE_MOVE_REL_CUM_MAGIC:
+        return batch((PSS_REL_MOUSE_CUM_PACKET) dest, (PSS_REL_MOUSE_CUM_PACKET) src);
       case MULTI_CONTROLLER_MAGIC_GEN5:
         return batch((PNV_MULTI_CONTROLLER_PACKET) dest, (PNV_MULTI_CONTROLLER_PACKET) src);
       case SS_TOUCH_MAGIC:
@@ -2124,6 +2174,9 @@ namespace input {
       switch (util::endian::little(payload->magic)) {
         case MOUSE_MOVE_REL_MAGIC_GEN5:
           passthrough(input, (PNV_REL_MOUSE_MOVE_PACKET) payload);
+          break;
+        case SS_MOUSE_MOVE_REL_CUM_MAGIC:  // §LAT-2D
+          passthrough(input, (PSS_REL_MOUSE_CUM_PACKET) payload);
           break;
         case MOUSE_MOVE_ABS_MAGIC:
           passthrough(input, (PNV_ABS_MOUSE_MOVE_PACKET) payload);

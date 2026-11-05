@@ -2327,6 +2327,10 @@ private:
         // §VR：tracking 執行緒會呼叫 LiSendVrTracking，必須在 LiStopConnection 之前停
         m_Session->m_VrTracking.stop();
         m_Session->m_Mic.reset();  // §VR-MIC：編碼執行緒會呼叫 LiSendVrMessage，同理
+        m_Session->m_InputTestStop = true;  // §LAT-2D（dev）
+        if (m_Session->m_InputTestThread.joinable()) {
+            m_Session->m_InputTestThread.join();
+        }
         TailscalePath::stop();  // §TS-PATH
 
         // Finish cleanup of the connection state
@@ -4017,6 +4021,10 @@ bool Session::startConnectionAsync()
     LiSetVrFeedbackClockOffsetUs((int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch()).count() -
                                  (int64_t)LiGetMicroseconds());
+    // §LAT-2D：host 宣告 <VipleStreamInput> bit 0 才送累計位移滑鼠（舊 host、上游 Sunshine 照舊可靠傳送）；--input-test-unreliable 的 A/B 量測時不用
+    LiSetRelativeMouseCumulative((m_Computer->vipleStreamInput & 1) != 0 && !m_Preferences->inputTestUnreliable);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-INPUT] relative mouse: %s",
+                ((m_Computer->vipleStreamInput & 1) != 0 && !m_Preferences->inputTestUnreliable) ? "cumulative (unreliable, no ACK wait)" : "reliable (legacy)");
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);
@@ -4070,6 +4078,24 @@ bool Session::startConnectionAsync()
     m_ScHid.start();
 
     // §VR：tracking 上行（M1a 為合成 pose）。LiStartConnection 已依 vrFlags 生效
+    // §LAT-2D（dev，--input-test）：每 4 ms 送一次 +1／-1 像素的相對滑鼠移動（左右交替，游標不會跑掉），
+    // host 的 [VIPLE-INPUT10] 依到達間隔看輸入有沒有被卡住（例：可靠傳輸等 ACK、影像方向塞車時 ACK 晚到）
+    LiSetRelativeMouseUnreliable(m_Preferences->inputTestUnreliable);  // §LAT-2D（dev）
+    if (m_Preferences->inputTest) {
+        m_InputTestStop = false;
+        m_InputTestThread = std::thread([this]() {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-INPUT-TEST] sending a +/-1 px mouse move every 4 ms");
+            short dir = 1;
+            auto next = std::chrono::steady_clock::now();
+            while (!m_InputTestStop.load()) {
+                LiSendMouseMoveEvent(dir, 0);
+                dir = -dir;
+                next += std::chrono::milliseconds(4);
+                std::this_thread::sleep_until(next);
+            }
+        });
+    }
+
     if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
         checkAndSendVrHotspotInfo();
         // §VR-MIC：頭盔麥克風 → host 的 Steam Streaming Microphone

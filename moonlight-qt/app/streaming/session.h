@@ -4,6 +4,7 @@
 #include <QQuickWindow>
 
 #include <atomic>
+#include <thread>
 #include <functional>
 
 #include <Limelight.h>
@@ -446,6 +447,9 @@ private:
     VrTrackingSender m_VrTracking;
     // §VR-MIC：頭盔麥克風（server 宣告 CAP_MIC、設定開著才建立；LiStopConnection 之前停）
     std::unique_ptr<MicCapture> m_Mic;
+    // §LAT-2D（dev，--input-test）：固定節奏送滑鼠移動的執行緒（LiStopConnection 之前停）
+    std::thread m_InputTestThread;
+    std::atomic<bool> m_InputTestStop{false};
     // server 每秒一筆 STATS（計數欄位是累計值）。主執行緒每 10 秒印一次
     // 「最新一筆 − 上次印 log 時的快照」
     VIPLE_VR_TLV_STATS m_VrServerStatsLatest {};

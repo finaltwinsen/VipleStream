@@ -209,6 +209,19 @@ typedef struct _SS_SC_HID_FEATURE_PACKET {
 } SS_SC_HID_FEATURE_PACKET, *PSS_SC_HID_FEATURE_PACKET;
 
 #define SS_SC_HID_INPUT_MAGIC 0x55000009
+
+// §LAT-2D（2026-11-05）：相對滑鼠的「累計位移」封包。舊的相對移動走可靠傳送，影像方向塞車時 ACK 晚到，
+// 滑鼠會被卡住幾百毫秒（限速 A/B 實測 279／526 ms）。這個封包改用不保證送達、不保證順序（ENET_PACKET_FLAG_UNSEQUENCED）：
+// cumX／cumY 是這個 session 從頭累計的位移（int32，會繞回），host 用「這次 − 上次」得到要移的量，掉一個由下一個補回；
+// seq 每送一個 +1，host 只處理比上次新的（亂序、重複的丟掉）。欄位是 little-endian。只在 host 的 /serverinfo
+// 宣告 <VipleStreamInput>（bit 0）時才送，舊 host 照舊收 MOUSE_MOVE_REL。
+#define SS_MOUSE_MOVE_REL_CUM_MAGIC 0x5500000A
+typedef struct _SS_REL_MOUSE_CUM_PACKET {
+    NV_INPUT_HEADER header;
+    uint32_t seq;
+    int32_t cumX;
+    int32_t cumY;
+} SS_REL_MOUSE_CUM_PACKET, *PSS_REL_MOUSE_CUM_PACKET;
 typedef struct _SS_SC_HID_INPUT_PACKET {
     NV_INPUT_HEADER header;
     uint8_t data[SS_SC_HID_REPORT_MAX];

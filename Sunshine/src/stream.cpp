@@ -3247,6 +3247,53 @@ namespace stream {
     }
   }
 
+  /// §INPUT-GAP／§LAT-2D：每個 client 輸入封包到達時呼叫（control 執行緒）。加密與未加密兩條路都要呼叫——
+  /// 2026-11-05 發現現在的 client 都走加密路徑、直接 input::passthrough，原本只放在 IDX_INPUT_DATA handler 的診斷從沒跑到
+  static void note_input_arrival() {
+    using clock = std::chrono::steady_clock;
+    static clock::time_point s_lastArrival {};
+    static clock::time_point s_winStart {};
+    static uint32_t s_winCount = 0, s_prevRate = 0;
+    auto now = clock::now();
+    if (s_lastArrival != clock::time_point {}) {
+      auto gapMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastArrival).count();
+      uint32_t before = std::max(s_prevRate, s_winCount);
+      if (gapMs > 150 && before >= 30) {
+        BOOST_LOG(info) << "[VIPLE-INPUT-GAP] " << gapMs << " ms since last input packet (rate before gap "
+                        << before << "/s)";
+      }
+    }
+    if (s_winStart == clock::time_point {} || now - s_winStart >= std::chrono::seconds(1)) {
+      s_prevRate = s_winCount;
+      s_winCount = 0;
+      s_winStart = now;
+    }
+    s_winCount++;
+    // §LAT-2D（2026-11-05）：每 10 秒印一次輸入封包到達間隔的 p50／p95／max（client 帶 --input-test 時是固定 4 ms 節奏，
+    // 間隔拉長＝輸入在路上被卡住；平常的真實輸入不規則，看 max 就好）
+    {
+      static std::vector<float> s_gaps;
+      static clock::time_point s_gapWin {};
+      if (s_lastArrival != clock::time_point {} && s_gaps.size() < 8192 && now - s_lastArrival < std::chrono::seconds(5)) {  // 超過 5 s＝換場或閒置，不算
+        s_gaps.push_back(std::chrono::duration<float, std::milli>(now - s_lastArrival).count());
+      }
+      if (s_gapWin == clock::time_point {}) {
+        s_gapWin = now;
+      } else if (now - s_gapWin >= std::chrono::seconds(10)) {
+        if (!s_gaps.empty()) {
+          std::sort(s_gaps.begin(), s_gaps.end());
+          const auto at = [&](double q) { return s_gaps[std::min(s_gaps.size() - 1, (std::size_t) (q * (double) (s_gaps.size() - 1) + 0.5))]; };
+          const std::size_t over20 = (std::size_t) (s_gaps.end() - std::upper_bound(s_gaps.begin(), s_gaps.end(), 20.0f));
+          BOOST_LOG(info) << "[VIPLE-INPUT10] packets=" << s_gaps.size() << " gap p50/p95/p99/max="
+                          << std::format("{:.1f}/{:.1f}/{:.1f}/{:.1f}", at(0.5), at(0.95), at(0.99), s_gaps.back()) << " ms over20ms=" << over20;
+        }
+        s_gaps.clear();
+        s_gapWin = now;
+      }
+    }
+    s_lastArrival = now;
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -3630,32 +3677,7 @@ namespace stream {
     server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
 
-      // §INPUT-GAP 診斷（2026-09-21 鍵鼠斷續事故）：量 client 輸入封包的到達
-      // 間隔。前 1 秒有活動（≥30 包）後突然 >150 ms 沒封包＝上游（client 主迴圈
-      // 或 ENet）停頓；與 client 端 [VIPLE-INPUT-STALL] 對時即可分辨是哪一側。
-      // 只在 control 執行緒被呼叫，static 不需鎖；一次只有一條 session。
-      {
-        using clock = std::chrono::steady_clock;
-        static clock::time_point s_lastArrival {};
-        static clock::time_point s_winStart {};
-        static uint32_t s_winCount = 0, s_prevRate = 0;
-        auto now = clock::now();
-        if (s_lastArrival != clock::time_point {}) {
-          auto gapMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - s_lastArrival).count();
-          uint32_t before = std::max(s_prevRate, s_winCount);
-          if (gapMs > 150 && before >= 30) {
-            BOOST_LOG(info) << "[VIPLE-INPUT-GAP] " << gapMs << " ms since last input packet (rate before gap "
-                            << before << "/s)";
-          }
-        }
-        if (s_winStart == clock::time_point {} || now - s_winStart >= std::chrono::seconds(1)) {
-          s_prevRate = s_winCount;
-          s_winCount = 0;
-          s_winStart = now;
-        }
-        s_winCount++;
-        s_lastArrival = now;
-      }
+      note_input_arrival();  // §INPUT-GAP／§LAT-2D
 
       if (payload.size() < sizeof(int32_t)) {
         BOOST_LOG(warning) << "Invalid IDX_INPUT_DATA payload size: "sv << payload.size();
@@ -3794,6 +3816,7 @@ namespace stream {
           inputDecryptOkLogged = true;
         }
         plaintext.erase(std::begin(plaintext), std::begin(plaintext) + 4);
+        note_input_arrival();  // §LAT-2D
         input::passthrough(session->input, std::move(plaintext));
       } else {
         server->call(type, session, next_payload, true);

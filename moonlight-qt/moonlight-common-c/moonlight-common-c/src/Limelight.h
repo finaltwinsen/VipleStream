@@ -944,6 +944,14 @@ uint64_t LiGetMicroseconds(void);
 // 沒設＝0（舊行為；host 的 ABR 只看相對變化，不受影響）。
 void LiSetVrFeedbackClockOffsetUs(int64_t offsetUs);
 
+// §LAT-2D（dev，2026-11-05）：相對滑鼠移動改用不保證送達的循序傳送（不等 ACK）。只給 A/B 量測用：掉一個封包就少移一段，
+// 正式做法要改成帶累計位移的新封包格式。預設 false（舊行為：可靠傳送）。
+void LiSetRelativeMouseUnreliable(bool unreliable);
+
+// §LAT-2D（2026-11-05）：host 宣告 <VipleStreamInput> bit 0 時，相對滑鼠改送累計位移封包（SS_MOUSE_MOVE_REL_CUM_MAGIC，
+// 不保證送達、每筆送兩份）：影像方向塞車時不再等 ACK。要在 LiStartConnection 之前設；預設 false（舊行為）。
+void LiSetRelativeMouseCumulative(bool cumulative);
+
 // This function returns a time in milliseconds with an implementation-defined epoch.
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMillis(void);

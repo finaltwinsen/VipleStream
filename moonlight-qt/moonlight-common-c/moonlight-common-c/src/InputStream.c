@@ -1,5 +1,18 @@
 #include "Limelight-internal.h"
 
+// §LAT-2D（dev）：見 Limelight.h 的 LiSetRelativeMouseUnreliable
+static volatile bool RelativeMouseUnreliable = false;
+void LiSetRelativeMouseUnreliable(bool unreliable) {
+    RelativeMouseUnreliable = unreliable;
+}
+
+// §LAT-2D：累計位移滑鼠（見 Limelight.h 的 LiSetRelativeMouseCumulative）。累計值只在輸入執行緒裡更新（握 batchedInputMutex）
+static volatile bool RelativeMouseCumulative = false;
+static uint32_t RelCumX, RelCumY, RelCumSeq;
+void LiSetRelativeMouseCumulative(bool cumulative) {
+    RelativeMouseCumulative = cumulative;
+}
+
 #ifdef VIPLE_MPQUIC
 #include "QuicTransport.h"
 
@@ -106,6 +119,7 @@ typedef struct _PACKET_HOLDER {
         NV_INPUT_HEADER header;
         NV_KEYBOARD_PACKET keyboard;
         NV_REL_MOUSE_MOVE_PACKET mouseMoveRel;
+        SS_REL_MOUSE_CUM_PACKET mouseMoveRelCum;  // §LAT-2D
         NV_ABS_MOUSE_MOVE_PACKET mouseMoveAbs;
         NV_MOUSE_BUTTON_PACKET mouseButton;
         NV_CONTROLLER_PACKET controller;
@@ -169,6 +183,7 @@ int initializeInputStream(void) {
 
     memset(currentGamepadSensorState, 0, sizeof(currentGamepadSensorState));
     memset(&currentRelativeMouseState, 0, sizeof(currentRelativeMouseState));
+    RelCumX = RelCumY = RelCumSeq = 0;  // §LAT-2D：每個 session 從 0 開始累計
     memset(&currentAbsoluteMouseState, 0, sizeof(currentAbsoluteMouseState));
     memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
     PltCreateMutex(&batchedInputMutex);
@@ -461,6 +476,36 @@ static void inputSendThreadProc(void* context) {
             }
 
             PltLockMutex(&batchedInputMutex);
+
+            // §LAT-2D：host 支援時改送累計位移（不保證送達、每筆送兩份）：掉一個由下一個或另一份補回，不必等 ACK
+            if (RelativeMouseCumulative && encryptedControlStream) {
+                RelCumX += (uint32_t)currentRelativeMouseState.deltaX;
+                RelCumY += (uint32_t)currentRelativeMouseState.deltaY;
+                currentRelativeMouseState.deltaX = 0;
+                currentRelativeMouseState.deltaY = 0;
+                RelCumSeq++;
+                holder->packet.mouseMoveRelCum.header.size = BE32(sizeof(SS_REL_MOUSE_CUM_PACKET) - sizeof(uint32_t));
+                holder->packet.mouseMoveRelCum.header.magic = LE32(SS_MOUSE_MOVE_REL_CUM_MAGIC);
+                holder->packet.mouseMoveRelCum.seq = LE32(RelCumSeq);
+                holder->packet.mouseMoveRelCum.cumX = (int32_t)LE32(RelCumX);
+                holder->packet.mouseMoveRelCum.cumY = (int32_t)LE32(RelCumY);
+                holder->enetPacketFlags = ENET_PACKET_FLAG_UNSEQUENCED;
+                currentRelativeMouseState.dirty = false;
+                PltUnlockMutex(&batchedInputMutex);
+
+                if (!sendInputPacket(holder, true) || !sendInputPacket(holder, false)) {
+                    freePacketHolder(holder);
+#ifdef VIPLE_MPQUIC
+                    if (isQuicControlFallbackAvailable()) {
+                        goto enet_input_reconnect_wait;
+                    }
+#endif
+                    return;
+                }
+                lastMousePacketTime = now;
+                freePacketHolder(holder);
+                continue;
+            }
 
             // Send as many packets as it takes to get the entire delta through
             while (currentRelativeMouseState.deltaX != 0 || currentRelativeMouseState.deltaY != 0) {
@@ -902,7 +947,8 @@ int LiSendMouseMoveEvent(short deltaX, short deltaY) {
 
         // TODO: Send this as unreliable sequenced when we have a delayed reliable retransmission thread
         // and protocol updates to allow us to determine which unreliable messages were dropped.
-        holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
+        // §LAT-2D（dev）：LiSetRelativeMouseUnreliable(true) 時改不保證送達（只給 A/B 量測）
+        holder->enetPacketFlags = RelativeMouseUnreliable ? 0 : ENET_PACKET_FLAG_RELIABLE;
 
         holder->packet.mouseMoveRel.header.size = BE32(sizeof(NV_REL_MOUSE_MOVE_PACKET) - sizeof(uint32_t));
         if (AppVersionQuad[0] >= 5) {

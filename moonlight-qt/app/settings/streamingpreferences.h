@@ -464,6 +464,8 @@ public:
     double vrSyntheticMenuAtSec = 0.0;
     double vrSyntheticPadTestSec = 0.0;  // dev（--vr-synthetic-pad-test）：不存檔
     int vrFakeBatteryPct = -1;  // dev（--vr-fake-battery）：>= 0 時低電量提示改看這個電量；不存檔
+    bool inputTest = false;
+    bool inputTestUnreliable = false;  // §LAT-2D（dev，--input-test-unreliable）：相對滑鼠改不保證送達；不存檔  // §LAT-2D（dev，--input-test）：串流時每 4 ms 送一次 ±1 像素的滑鼠移動，量 host 端輸入封包間隔；不存檔
     int vrLowBatteryAtPct = -1;  // dev（--vr-low-battery-at）：>= 0 時低電量門檻改成這個值、不看充電；不存檔
     // 每眼解析度（打包尺寸為 2W×H，SBS）。預設 2160x2160＝Steam Frame 面板每眼的原生解析度。
     // 2026-10-03 Frame 實測：每眼 1728 清晰度不夠；iris 解 4320x2160@120（200 Mbps）每幀 p50 8.1 ms、

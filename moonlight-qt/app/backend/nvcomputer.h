@@ -155,6 +155,7 @@ public:
     // 與 <VipleStreamVRProto>。舊版或 vanilla server 沒有這兩個元素 → 0（只能平面）。
     // 跟其他 VipleStream 能力旗標一樣不序列化，每次 poll 由 update() 帶入。
     int vipleStreamVr = 0;
+    int vipleStreamInput = 0;  // §LAT-2D：<VipleStreamInput>，bit 0＝收累計位移滑鼠
     int vipleStreamVrProto = 0;
 
     // §MP-ADV: 伺服器透過 /serverinfo 廣告的所有網路介面。

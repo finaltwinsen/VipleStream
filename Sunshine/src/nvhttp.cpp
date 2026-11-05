@@ -963,6 +963,7 @@ namespace nvhttp {
     // Displayed in the client's host card so operators can verify which
     // build is running without leaving the UI.
     tree.put("root.VipleStreamVersion", PROJECT_VERSION);
+    tree.put("root.VipleStreamInput", "1");  // §LAT-2D：bit 0＝收累計位移滑鼠（SS_MOUSE_MOVE_REL_CUM_MAGIC）
 
     // VipleStream MP-QUIC capability: advertise if enabled in config.
     // Vanilla Moonlight clients ignore unknown XML elements.
