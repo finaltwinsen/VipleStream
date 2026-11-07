@@ -120,7 +120,10 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 - **頭盔配戴**：11-04 晚網路差的時段（單向延遲常跳 250 ms）緩衝自動停在 2 格、塞車點放寬有作用，使用者認為比舊版穩。
   **還沒驗**：網路好（在家）時會不會回到並停在 1 格。
 - **頭盔 Tailscale operator**：頭盔端 rebind 要 `sudo tailscale set --operator=steamos` 一次（使用者執行），沒做的話頭盔只能 ping、中繼恢復較慢。
-- **§ABR-ADAPT 第 4 期（自動半速／降解析度）**：VR 要重開 session 才能切，需使用者決定要不要做成設定裡的「自動」。
+- **§VR-RATE-AUTO（2.0.96，自動半速，不重開 session）**：11-08 配戴一場（144 Hz）升降時機正確、半速節奏鎖有效（3 格以上重複每 10 s 0～1）。
+  **還沒定**：斷流很多的那段（網路短暫中斷）要不要排除在降速判斷外（11-08 02:33 那次是中斷觸發的）；降解析度那一半（第 4 期另一半）沒做。
+  Windows／Linux x64 client 還沒建這一版（設定頁依模式顯示也在裡面）。
+- **§ABR-LOSSRATE-VERIFY／§ABR-RESTORE-STABLE（2.0.94～95）**：11-08 配戴看到兩者都有動作（撤銷 3 次、不拉回沒撐住的碼率）；再看幾場遠端的碼率曲線。
 - **補幀畫面目視**：vkfruc_interp 4-tap shader 第一次真的生效（5 月 24e98950 的 .frag 從沒重編）。NCNN（RIFE）後端輸出全黑仍在。
 - **沒有環境驗的**：relay 打洞改用 STUN 實際埠（Qt＋Android，要沒有 Tailscale 的外網）；Android 開 MP-QUIC 時行動網路保活與 Wi-Fi→行動網路接手（要有 SIM 的手機、host 可從外網連）；Linux VAAPI 實機。
 - **2.0.63 發佈後可驗**：host 常駐圖示走一次真實的「Check for updates」（§SELF-UPDATE）、電腦版 client 更新對話框的摘要（§UPDATE-NOTES）、Windows 更新等 90 s 不覆蓋的提示視窗。

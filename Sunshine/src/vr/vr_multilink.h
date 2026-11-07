@@ -140,6 +140,8 @@ namespace vr::multilink {
 
     /// §VR-LINK-GRACE：有沒有任何一條連線還活著（最近 2 s 內收過帶 CONFIRMED 的 PING）。任何執行緒
     bool any_alive() const;
+    /// §VR-RATE-AUTO：影像批次的期限（補包期限跟著它走）。串流中途改送出週期時呼叫；任何執行緒
+    void set_video_max_age(std::chrono::microseconds age);
 
     /// §VR-ABR-FAST（2026-10-30）：現在活著的連線數（定義同 any_alive）。任何執行緒
     int alive_count() const;

@@ -270,6 +270,7 @@ void XrVideo::destroyAllSwapchains()
             c = Current();
         }
         m_BufLastShown = 0;
+        m_BufShownCount = 0;
         m_BufDepth = 0;  // §VR-BUFFER-AUTO：下一場從 1 格重新開始
     }
     m_RingNext = 0;
@@ -1395,7 +1396,20 @@ bool XrVideo::current(Current* out)
             m_BufDepth = m_Config.bufferAuto ? m_BufAuto.depth : m_Config.buffer;
             m_BufDepthLog.store(m_BufDepth, std::memory_order_relaxed);
         }
-        uint64_t want = xrbuf::pick(m_BufLastShown, newest, m_BufDepth);
+        // §VR-RATE-AUTO：半速時每張本來就佔兩格。11-08 第一版「緩衝少一格」實際等於沒有緩衝（每 10 秒 720 格裡 713 格
+        // 顯示最新的那張），稍微晚到就變成「一張 3 格、下一張 1 格」的節奏抖動（每 10 秒 5～15 次）。改成：自動緩衝到
+        // 2 格時鎖住節奏——這一張還沒顯示滿 div 格就繼續顯示它（就算新的一張已經到了）。晚到一次節奏就往後挪一格，
+        // 之後的每一張都多一格餘裕；積到落後兩張以上才跳過追上。1 格時照舊一到就顯示（延遲最低）
+        const int streamDiv = m_StreamDiv.load(std::memory_order_relaxed);
+        uint64_t want;
+        if (streamDiv >= 2 && m_BufDepth >= 2 && m_BufLastShown != 0 && m_BufShownCount < static_cast<uint32_t>(streamDiv) &&
+            newest > m_BufLastShown && newest - m_BufLastShown <= 1) {
+            want = m_BufLastShown;
+        }
+        else {
+            const int pickDepth = streamDiv >= 2 ? (m_BufDepth >= 2 ? 1 : 0) : m_BufDepth;
+            want = xrbuf::pick(m_BufLastShown, newest, pickDepth);
+        }
         if (want > newest) {
             want = newest;
         }
@@ -1422,9 +1436,10 @@ bool XrVideo::current(Current* out)
                 m_BufSkipped.fetch_add(static_cast<uint32_t>(shown - m_BufLastShown - 1), std::memory_order_relaxed);
             }
         }
+        m_BufShownCount = shown == m_BufLastShown ? m_BufShownCount + 1 : 1;  // §VR-RATE-AUTO：這一張顯示了幾格
         if (m_Config.bufferAuto) {
             const int before = m_BufAuto.depth;
-            if (m_BufAuto.step(shown, m_BufLastShown, newest, nowUs())) {
+            if (m_BufAuto.step(shown, m_BufLastShown, newest, nowUs(), streamDiv)) {
                 m_BufDepth = m_BufAuto.depth;
                 m_BufDepthLog.store(m_BufDepth, std::memory_order_relaxed);
                 (m_BufDepth > before ? m_BufUp : m_BufDown).fetch_add(1, std::memory_order_relaxed);

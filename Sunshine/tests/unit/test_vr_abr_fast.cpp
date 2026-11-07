@@ -856,6 +856,124 @@ TEST_F(VrAbrFastTest, SustainedRandomLossCutsByLossRateButNotBelowTenMbps) {
   EXPECT_GE(c.loss_rate_cuts(), 1);
 }
 
+// §ABR-LOSSRATE-VERIFY（11-07 遠端桌球）：丟包頻率跟碼率無關（降碼前後都是每 3 秒一張）-> 30 秒後撤銷、回到原碼率、
+// 上限解除，之後 10 分鐘不再因此降
+TEST_F(VrAbrFastTest, LossRateCutRevertedWhenLossDoesNotDrop) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(75000);  // 單一連線上限（同 stream.cpp）
+  c.set_applied_kbps(75000);
+  int firstCutAt = -1, revertAt = -1;
+  for (int i = 0; i < 6000; ++i) {  // 600 秒
+    const auto t = t0 + i * 100ms;
+    c.on_rtt(30, t);
+    if (i > 0 && i % 30 == 0) {
+      c.on_fec_failed(1, t);
+    }
+    auto r = c.tick(t);
+    if (r.has_value()) {
+      c.set_applied_kbps(*r);
+      if (firstCutAt < 0 && std::string(c.last_reason()) == "loss-rate") {
+        firstCutAt = i;
+        EXPECT_EQ(*r, 67500);
+      }
+      if (revertAt < 0 && std::string(c.last_reason()) == "loss-rate-revert") {
+        revertAt = i;
+        EXPECT_EQ(*r, 75000);
+      }
+    }
+  }
+  ASSERT_GE(firstCutAt, 0);
+  ASSERT_GE(revertAt, 0);
+  EXPECT_EQ(revertAt - firstCutAt, 300);  // 30 秒試驗
+  EXPECT_EQ(c.loss_rate_cuts(), 1);       // 停用 10 分鐘：整場只降這一次
+  EXPECT_EQ(c.loss_rate_reverts(), 1);
+  EXPECT_EQ(c.applied_kbps(), 75000);
+  EXPECT_EQ(c.effective_cap_kbps(t0 + 600s), 75000);  // 丟包率上限已解除，只剩連線上限
+}
+
+// §ABR-LOSSRATE-VERIFY：降碼後丟包真的變少（每 3 秒一張 -> 每 15 秒一張）-> 保留這一刀
+TEST_F(VrAbrFastTest, LossRateCutKeptWhenLossDrops) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(75000);  // 單一連線上限（同 stream.cpp）
+  c.set_applied_kbps(75000);
+  int cutAt = -1, maxDuringCap = 0;
+  for (int i = 0; i < 1200; ++i) {  // 120 秒
+    const auto t = t0 + i * 100ms;
+    c.on_rtt(30, t);
+    const int every = (cutAt < 0) ? 30 : 150;
+    if (i > 0 && i % every == 0) {
+      c.on_fec_failed(1, t);
+    }
+    auto r = c.tick(t);
+    if (r.has_value()) {
+      c.set_applied_kbps(*r);
+      if (cutAt < 0 && std::string(c.last_reason()) == "loss-rate") {
+        cutAt = i;
+      }
+    }
+    if (cutAt >= 0 && i > cutAt && i < cutAt + 590) {
+      maxDuringCap = std::max(maxDuringCap, c.applied_kbps());
+    }
+  }
+  ASSERT_GE(cutAt, 0);
+  EXPECT_EQ(c.loss_rate_reverts(), 0);
+  EXPECT_EQ(maxDuringCap, 67500);  // 試驗判定有效：上限照留 60 秒，不會被拉回 75 Mbps
+}
+
+// §VR-ABR-OUTAGE：斷訊連刀觸發防振盪上限；拉回斷訊前碼率時要清掉，下一輪不可被壓回去（11-07：29.6 -> 5.9 Mbps）
+TEST_F(VrAbrFastTest, OutageRestoreClearsAntiOscillationCap) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.set_applied_kbps(40000);
+  for (auto t = t0 + 7000ms; t <= t0 + 20000ms; t += 100ms) {  // 40 Mbps 穩定撐住 13 秒
+    c.set_applied_kbps(40000);
+    c.tick(t);
+  }
+  ASSERT_EQ(c.stable_kbps(), 40000);
+  const auto t1 = t0 + 20000ms;
+  c.on_loss(2, t1);
+  c.tick(t1);                       // 40000 -> 30000，HOLD
+  c.tick(t1 + 2100ms);              // 進 RAMP
+  c.set_applied_kbps(32000);
+  c.on_loss(2, t1 + 3000ms);        // RAMP 5 秒內又降 -> 防振盪上限 32000 × 0.85
+  c.tick(t1 + 3000ms);
+  ASSERT_LT(c.effective_cap_kbps(t1 + 4000ms), 30000);
+
+  EXPECT_EQ(c.on_outage_restored(30000, t1 + 8000ms), 30000);
+  EXPECT_EQ(c.effective_cap_kbps(t1 + 8000ms), 100000);
+  auto r = c.tick(t1 + 8100ms);
+  EXPECT_FALSE(r.has_value());      // 不會被壓回
+  EXPECT_EQ(c.applied_kbps(), 30000);
+}
+
+// §ABR-RESTORE-STABLE（11-08）：斷訊前的值從沒撐住過（開場 75 Mbps 6 秒就塞）-> 不拉回；
+// 撐住 10 秒的值才拉回、而且不超過它；拉回後 5 秒內又塞 -> 穩定值作廢
+TEST_F(VrAbrFastTest, OutageRestoreOnlyUpToStableBitrate) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(75000);
+  make_trend_overuse(c, t0);        // 開場就塞（約第 6 秒降碼）
+  c.tick(t0 + 6500ms);
+  c.set_applied_kbps(20000);
+  EXPECT_EQ(c.on_outage_restored(75000, t0 + 8000ms), 0);
+  EXPECT_EQ(c.stable_kbps(), 0);
+
+  // 20 Mbps 撐住 12 秒 -> 穩定值 20000；拉回 75000 只給 20000
+  for (auto t = t0 + 8000ms; t <= t0 + 20000ms; t += 100ms) {
+    c.set_applied_kbps(20000);
+    c.tick(t);
+  }
+  EXPECT_EQ(c.stable_kbps(), 20000);
+  c.set_applied_kbps(8000);
+  EXPECT_EQ(c.on_outage_restored(75000, t0 + 20500ms), 20000);
+
+  // 拉回後 2 秒又塞 -> 穩定值作廢，下一次斷訊不再拉回
+  c.on_loss(2, t0 + 22500ms);
+  c.tick(t0 + 22500ms);
+  EXPECT_EQ(c.stable_kbps(), 0);
+  c.set_applied_kbps(10000);
+  EXPECT_EQ(c.on_outage_restored(75000, t0 + 25000ms), 0);
+}
+
 // §ABR-LOSSRATE：零星（每 15 秒一張）不觸發
 TEST_F(VrAbrFastTest, SparseRandomLossDoesNotTriggerLossRate) {
   fast::fast_controller_t c(kConfigured100Mbps);

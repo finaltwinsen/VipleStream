@@ -164,6 +164,8 @@ namespace vr::multilink {
 
     options_t opt;
     c2s_cb_t on_c2s;
+    // §VR-RATE-AUTO：影像批次的期限（opt.video_max_age 是起始值）。半速時送出週期變兩倍，期限跟著放寬（set_video_max_age）
+    std::atomic<int64_t> max_age_us {opt.video_max_age.count()};
 
     // 解密與去重（只在 io 執行緒存取）
     crypto::cipher::gcm_t cipher;
@@ -753,7 +755,8 @@ namespace vr::multilink {
         // 早就由另一條湊齊了，白佔空中時間，還讓頭盔以為這條平常就落後幾十毫秒而延後回報缺包（10-07 晚實測：
         // 落後 30～50 ms、被採用的封包接近 0）。期限縮短後，它送出去的一定是當下這一幀的資料。
         const bool fresh_only = opt.video == options_t::video_e::always && good_carrier_besides(L, to_ns(begin));
-        const auto deadline = b.enq + fault_delay + (fresh_only ? opt.video_max_age / 4 : opt.video_max_age);
+        const std::chrono::microseconds max_age {max_age_us.load(std::memory_order_relaxed)};
+        const auto deadline = b.enq + fault_delay + (fresh_only ? max_age / 4 : max_age);
         size_t sent = 0;
         bool faulted = false;
         if (opt.fault.blocked(L.id, to_ns(b.enq) / 1'000'000)) {  // 以入列時刻判斷：每條連線的同一批入列時刻相同，互補的規則不會把同一批在兩條都丟掉
@@ -1351,7 +1354,7 @@ namespace vr::multilink {
     const bool rtt_mode = nack_rtt_mode(m.features.load(std::memory_order_relaxed), nack.flags);
     const unsigned eta_ms = nack_eta_ms(nack.flags);
     gap_ns = repair_in_flight_gap_ns(rtt_mode, eta_ms, gap_ns);
-    const int64_t max_age_ns = repair_max_age_ns(rtt_mode, std::chrono::duration_cast<std::chrono::nanoseconds>(m.opt.video_max_age).count());
+    const int64_t max_age_ns = repair_max_age_ns(rtt_mode, m.max_age_us.load(std::memory_order_relaxed) * 1000);
 
     batch_t rb;
     bool log_it = false;
@@ -1561,6 +1564,12 @@ namespace vr::multilink {
         L.audio_sock.send_to(bufs, L.client_audio, 0, ec);
       }
       (ec ? L.audio_drop : L.audio_pkts).fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  void hub_t::set_video_max_age(std::chrono::microseconds age) {
+    if (impl_ && age.count() > 0) {
+      impl_->max_age_us.store(age.count(), std::memory_order_relaxed);
     }
   }
 

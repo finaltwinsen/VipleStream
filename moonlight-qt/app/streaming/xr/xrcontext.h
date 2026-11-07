@@ -54,6 +54,7 @@
 #include "xrinput.h"
 #include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Classifier（header-only，不依賴 OpenXR）
 #include "xrphase.h"       // §VR-XRLOOP：相位換算、xrphase::RankScan（header-only，不依賴 OpenXR）
+#include "xrrateauto.h"    // §VR-RATE-AUTO：網路不穩時自動半速（header-only，不依賴 OpenXR）
 #include "xrvrcontrollers.h"
 
 class XrVideo;
@@ -113,6 +114,7 @@ public:
         // §VR-BUFFER（2026-10-29）：PCVR 頭盔端多緩衝幾格（0／1），見 XrVideo::Config::buffer
         int pcvrBufferFrames = 0;
         bool pcvrBufferAuto = false;  // §VR-BUFFER-AUTO：pcvrBufferFrames 是上限，深度在 1～上限之間自動切換
+        bool pcvrRateAuto = false;    // §VR-RATE-AUTO：全速串流時網路不穩就要求 host 半速（xrrateauto.h）
         // §VR-GPU-PRIO（2026-10-29，dev）：XR VkDevice 那條 queue 的全域優先權（0＝驅動預設、1＝high、2＝realtime）
         int gpuQueuePriority = 0;
         // 2026-10-08（§VR-LATE-LATCH）：PCVR 的 frame thread 在 xrWaitFrame 返回後先等這麼久，才挑最新的串流影像交給
@@ -277,6 +279,12 @@ public:
     bool pcvrGazeFovea() const { return m_PcvrGazeFovea.load(std::memory_order_relaxed); }
     // §VR-LATCH-WAIT：串流一幀佔幾個顯示格（半速串流 2）。main thread 在決定串流更新率之後設，frame thread 讀
     void setPcvrStreamDiv(int div) { m_PcvrStreamDiv.store(div >= 1 ? div : 1, std::memory_order_relaxed); }
+    // §VR-RATE-AUTO：main thread 收到 host 的 S2C_RATE。accepted 時立刻換分頻（等待閘門、補包上限、緩衝），
+    // 判斷器的狀態交給 frame thread 在下一格更新
+    void onPcvrRateApplied(int div, bool accepted, uint16_t seq);
+    void pcvrRateSlot(bool newFrame, uint64_t nowUs);
+    // §VR-RATE-AUTO：新的一場從全速重新開始（main thread；判斷器由 frame thread 在下一格重設）
+    void resetPcvrRate();
     bool trackingThreadMode() const { return m_TimeConv != nullptr; }
     // §VR-PLAYAREA（2026-10-30）：真實遊玩區範圍（公尺）；STAGE 且成功取得有效矩形（0.5～20 m）時回傳 true
     bool playAreaBounds(float* widthM, float* heightM) const {
@@ -568,6 +576,13 @@ private:
     bool m_PyroWaveVk13 = false;                    // §PYROWAVE-XR-ZC：device 是 1.3 且 PyroWave 要的功能都開了
     bool m_HaveFeatureChain = false;
     XrVideo* m_Video = nullptr;
+    // §VR-RATE-AUTO：判斷器只在 frame thread 用；host 的回覆經 m_RateReply 交過去（bit31＝有值、bit24＝accepted、
+    // bit16..23＝div、bit0..15＝seq）
+    xrrate::AutoRate m_RateAuto;
+    std::atomic<uint32_t> m_RateReply {0};
+    std::atomic<int> m_RateDiv {1};
+    bool m_RateDisabledLogged = false;
+    std::atomic<bool> m_RateResetReq {false};
 
     // §VR-LOGASYNC：10 s 彙總行（[VIPLE-XR] 10s、[VIPLE-VR-LDIAG]、[VIPLE-VR-XRLOOP]、[VIPLE-VR-MTP10] 等）frame thread 只組字串，
     // 由這條佇列的執行緒呼叫 SDL_LogInfo；shutdown() 在 frame thread 結束之後印完剩下的

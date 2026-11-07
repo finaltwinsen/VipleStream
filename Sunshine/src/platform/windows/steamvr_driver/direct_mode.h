@@ -157,6 +157,8 @@ namespace vrdrv {
     uint64_t stat_composed_ = 0;
     uint64_t stat_noslot_ = 0;
     uint64_t stat_acq_timeout_ = 0;
+    uint64_t stat_acq_slow_ = 0;  ///< §VR-ACQ-WAIT：超過 5 ms 才拿到 sync texture 的次數
+    static constexpr DWORD k_acquire_wait_ms = 50;  ///< §VR-ACQ-WAIT：最多等多久（約 120 Hz 的 6 格）
     uint64_t stat_no_target_ = 0;
     uint64_t stat_missed_ = 0;
     int64_t stat_last_present_ = 0;

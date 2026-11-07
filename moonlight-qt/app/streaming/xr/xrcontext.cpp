@@ -3239,6 +3239,76 @@ std::string latchWaitTail(const xrlatch::Counters& c)
 }
 }  // namespace
 
+// §VR-RATE-AUTO（2026-11-08）：main thread 收到 host 的 S2C_RATE。照 host 實際的狀態換分頻（就算不是這一場判斷器
+// 現在等的那一筆也照換：host 已經照它送了），判斷器的狀態交給 frame thread 下一格更新。
+void XrContext::onPcvrRateApplied(int div, bool accepted, uint16_t seq)
+{
+    div = div >= 2 ? 2 : 1;
+    if (accepted) {
+        setPcvrStreamDiv(div);
+        LiVrSetStreamDiv(static_cast<uint32_t>(div));
+        if (m_Video != nullptr) {
+            m_Video->setStreamDiv(div);
+        }
+        m_RateDiv.store(div, std::memory_order_relaxed);
+    }
+    m_RateReply.store(0x80000000u | (accepted ? 0x01000000u : 0u) | (static_cast<uint32_t>(div) << 16) | seq,
+                      std::memory_order_release);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-RATE] host %s div=%d (seq=%u): stream %s",
+                accepted ? "applied" : "refused", div, seq, div == 2 ? "half rate, each frame shown twice" : "full rate");
+}
+
+void XrContext::resetPcvrRate()
+{
+    m_RateDiv.store(1, std::memory_order_relaxed);
+    m_RateReply.store(0, std::memory_order_relaxed);
+    m_RateResetReq.store(true, std::memory_order_release);
+    if (m_Video != nullptr) {
+        m_Video->setStreamDiv(1);
+    }
+}
+
+// §VR-RATE-AUTO：frame thread，每個顯示格一次。newFrame＝這一格顯示的是新影像
+void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs)
+{
+    if (!m_Options.pcvrRateAuto) {
+        return;
+    }
+    if (m_RateResetReq.exchange(false, std::memory_order_acquire)) {
+        m_RateAuto = xrrate::AutoRate();
+        m_RateDisabledLogged = false;
+    }
+    const uint32_t reply = m_RateReply.exchange(0, std::memory_order_acquire);
+    if (reply & 0x80000000u) {
+        m_RateAuto.onApplied(static_cast<int>((reply >> 16) & 0xffu), (reply & 0x01000000u) != 0, nowUs);
+    }
+    m_RateAuto.onSlot(newFrame, nowUs);
+    const xrrate::AutoRate::Request r = m_RateAuto.poll(nowUs);
+    if (r.div != 0) {
+        VIPLE_VR_TLV_RATE req{};
+        req.div = static_cast<uint8_t>(r.div);
+        req.reason = r.reason == xrrate::AutoRate::Reason::Up ? VIPLE_VR_RATE_REASON_AUTO_UP : VIPLE_VR_RATE_REASON_AUTO_DOWN;
+        req.seq = m_RateAuto.seq();
+        uint8_t tlv[2 + sizeof(req)];
+        tlv[0] = VIPLE_VR_C2S_RATE;
+        tlv[1] = sizeof(req);
+        memcpy(tlv + 2, &req, sizeof(req));
+        const int rc = LiSendVrMessage(tlv, sizeof(tlv), true);
+        const char* why = r.reason == xrrate::AutoRate::Reason::Up ? "network stable, trying full rate"
+                        : r.reason == xrrate::AutoRate::Reason::ProbeFail ? "full rate did not hold, back to half"
+                                                                          : "network unstable";
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-RATE] request div=%d seq=%u%s (%s): short repeats last 15 s=%u, last 5 s=%u stalls=%u; next try after %llu s%s",
+                    r.div, req.seq, r.retry ? " (resend)" : "", why, m_RateAuto.recentSum(3), m_RateAuto.lastWindow().shortRep,
+                    m_RateAuto.lastWindow().stalls, static_cast<unsigned long long>(m_RateAuto.upDwellUs() / 1000000ull),
+                    rc == 0 ? "" : " - send failed");
+    }
+    if (m_RateAuto.disabled() && !m_RateDisabledLogged) {
+        m_RateDisabledLogged = true;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-RATE] host did not answer the rate request - automatic frame rate is off for this session (host too old?)");
+    }
+}
+
 // M4a R3：frame thread，新的一張串流影像第一次被 latch 進 projection layer 時呼叫。
 // slack＝latch 時刻 − 影像就緒時刻（正值＝幀比 latch 早到）；MTP_content＝本幀預測顯示時間 −
 // echoSampleId 的 sampleTime（兩者都是 client steady 時鐘）。
@@ -3256,6 +3326,7 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     if (seq == 0) {
         return;
     }
+    pcvrRateSlot(seq != t.lastLatchedSeq, latchNs / 1000ull);  // §VR-RATE-AUTO：每個顯示格餵一次
     if (seq == t.lastLatchedSeq) {
         t.repeat10s++;  // 同一張影像重送（沒有新幀）：只計數
         t.lastWasRepeat = true;
@@ -3595,7 +3666,7 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         m_AsyncLog.postf(
                          "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
                          " | frames new=%u repeat=%u skip=%u mismatch=%u%s%s%s%s"
-                         " | repRun max=%u ge3=%u ge5=%u latchSkip=%u rr=%s",
+                         " | repRun max=%u ge3=%u ge5=%u latchSkip=%u rr=%s%s",
                          n, pctOf(t.mtp10sUs, 0.50) / 1000.0, pctOf(t.mtp10sUs, 0.95) / 1000.0,
                          pctOf(t.mtp10sUs, 0.99) / 1000.0, t.mtpNoSample, t.latchSent,
                          secs > 0 ? t.latchSent / secs : 0.0, t.lastSlackUs, t.timingSent,
@@ -3626,7 +3697,17 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
                          (std::max)(t.repRunMax10s, t.repStreak), t.repRunGe3, t.repRunGe5,
                          // §VR-REPAIR-RTT：latchSkip＝沒有拿來更新 LATCH 樣本的新影像張數；rr＝這 10 s 補包照哪一套規則
                          // （0 原本的、1 跟著往返時間走的、m 兩種都有）
-                         t.latchSkip10s, t.rrSeen10s == 3u ? "m" : (t.rrSeen10s == 2u ? "1" : "0"));
+                         t.latchSkip10s, t.rrSeen10s == 3u ? "m" : (t.rrSeen10s == 2u ? "1" : "0"),
+                         // §VR-RATE-AUTO：目前的分頻與判斷器的統計（自動開著才印）
+                         m_Options.pcvrRateAuto
+                             ? qUtf8Printable(QString(" | rate div=%1 short15s=%2 downs=%3 ups=%4 probeFails=%5%6")
+                                                  .arg(m_RateDiv.load(std::memory_order_relaxed))
+                                                  .arg(m_RateAuto.recentSum(3))
+                                                  .arg(m_RateAuto.downs())
+                                                  .arg(m_RateAuto.ups())
+                                                  .arg(m_RateAuto.probeFails())
+                                                  .arg(m_RateAuto.disabled() ? " off" : ""))
+                             : "");
         t.repRunMax10s = t.repRunGe3 = t.repRunGe5 = 0;
         t.latchSkip10s = 0;
         t.rrSeen10s = 0;

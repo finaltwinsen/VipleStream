@@ -687,6 +687,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                            "start using the previous sample at the locked phase (this run only, the saved setting is not changed)",
                            {"on", "off"});
     parser.addToggleOption("vr-half-rate", "PCVR: run the game and the stream at half the headset refresh rate (the headset still displays at full rate)");
+    parser.addToggleOption("vr-rate-auto", "PCVR at full rate: drop to half rate automatically while the network is unstable and go back when it recovers (default on)");
     parser.addToggleOption("vr-synth", "PCVR with --vr-half-rate: show a motion-extrapolated frame on the display refreshes that have no new stream frame");
     parser.addValueOption("vr-foveation", "PCVR: foveated encoding - pixel density straight ahead as a percentage of uniform sampling "
                           "(100 = off, up to 250; the edges get fewer pixels, the stream size stays the same)");
@@ -1080,6 +1081,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         preferences->vrSyntheticPadTestSec = sec;
     }
     preferences->vrHalfRate = parser.getToggleOptionValue("vr-half-rate", preferences->vrHalfRate);
+    preferences->vrRateAuto = parser.getToggleOptionValue("vr-rate-auto", preferences->vrRateAuto);
     preferences->vr10Bit = parser.getToggleOptionValue("vr-10bit", preferences->vr10Bit);
     preferences->vrTrackLock = parser.getToggleOptionValue("vr-track-lock", preferences->vrTrackLock);
     if (parser.isSet("vr-track-relock")) {

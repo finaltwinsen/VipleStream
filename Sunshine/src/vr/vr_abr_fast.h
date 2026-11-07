@@ -23,7 +23,13 @@
  *   - 丟包率預算（§ABR-LOSSRATE，11-04 桌球實測）：延遲沒升的「隨機」丟包若 20 秒內 >= 4 次且橫跨至少 10 秒（約每 10 秒 2 張救不回），
  *     代表丟包跟碼率有關（20 Mbps 幾乎不丟、75 Mbps 每 10 秒 2 張）→ 降 10% 並把上限暫壓在降後的值 60 秒；
  *     低於 10 Mbps 不再因此降（那種丟包多半是無線環境本身，降碼救不了）。
+ *     * §ABR-LOSSRATE-VERIFY（11-07 遠端桌球）：每次因此降碼都是一次試驗。降後 30 秒內隨機丟包的頻率若沒有降到降碼前的
+ *       六成以下，代表丟包跟碼率無關 → 撤銷這一刀（回到降碼前的碼率、拿掉暫壓的上限、塞車點還原），這條規則停用 10 分鐘。
+ *       實測 75 Mbps 與 10 Mbps 都是每 10 秒約 2.5 次，舊規則把碼率一路壓到 38 Mbps、之後 10 Mbps 變成實際上限（QP 25→36）。
  *     * 延遲趨勢過載或 trend > 0.5γ、解碼吃緊、畫質飽和時暫停回升。
+ *   - 斷訊後拉回（on_outage_restored，§VR-ABR-OUTAGE）：斷訊期間連降多刀會順便觸發防振盪上限（applied × 0.85），
+ *     拉回斷訊前碼率時一起清掉，否則下一輪就被上限壓回斷訊時的低點（11-07：拉回 29.6 Mbps 後 0.6 秒被壓回 5.9 Mbps）。
+ *     但只拉回到斷訊前穩定撐住 10 秒的碼率（§ABR-RESTORE-STABLE，11-08：拉回沒撐住過的 75 Mbps，3 分鐘內塞了 6 次）。
  *   - 防振盪懲罰：RAMP 中 5 秒內再次降碼 -> 上限暫壓至 applied * 0.85 維持 30 秒。
  *
  * 純邏輯、無 I/O、無 log、無全域狀態，可單元測試。呼叫端（stream.cpp）持 abrMutex 加鎖呼叫並負責記錄 log。
@@ -38,6 +44,7 @@
 #include <deque>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "abr_delay_trend.h"
 
@@ -93,6 +100,14 @@ namespace vr::abr {
   constexpr int k_fast_loss_rate_threshold = 4;                            ///< 視窗內隨機丟包次數門檻
   constexpr auto k_fast_loss_rate_cap_duration = std::chrono::seconds(60); ///< 降後上限維持 60 秒
   constexpr int k_fast_loss_rate_min_kbps = 10000;                         ///< 低於此值不再因丟包率降碼
+  // §ABR-LOSSRATE-VERIFY（11-07）
+  constexpr auto k_fast_loss_rate_trial = std::chrono::seconds(30);        ///< 降碼後觀察多久
+  constexpr auto k_fast_loss_rate_settle = std::chrono::seconds(2);        ///< 降碼生效前的丟包不算
+  constexpr double k_fast_loss_rate_effective_ratio = 0.6;                 ///< 降後頻率要低於降前的這個比例才算有效
+  constexpr auto k_fast_loss_rate_off = std::chrono::minutes(10);          ///< 無效時停用這條規則多久
+  // §ABR-RESTORE-STABLE（11-08）
+  constexpr auto k_fast_stable_window = std::chrono::seconds(10);          ///< 撐住多久才算穩定
+  constexpr auto k_fast_restore_fail_window = std::chrono::seconds(5);     ///< 拉回後多久內又降碼算拉回失敗
 
   class fast_controller_t {
   public:
@@ -140,6 +155,38 @@ namespace vr::abr {
     int trims() const { return trims_count_; }
     int random_losses() const { return random_loss_events_; }
     int loss_rate_cuts() const { return loss_rate_cuts_; }
+    int loss_rate_reverts() const { return loss_rate_reverts_; }
+    /// §ABR-LOSSRATE-VERIFY：撤銷時記下降前／降後的丟包頻率（每 10 秒幾次），給呼叫端印 log
+    double loss_rate_pre_per10s() const { return lr_pre_rate_ * 10.0; }
+    double loss_rate_post_per10s() const { return lr_post_rate_ * 10.0; }
+    bool loss_rate_disabled(steady::time_point now) const { return now < lr_disabled_until_; }
+
+    /// §VR-ABR-OUTAGE：斷訊結束、呼叫端想把碼率拉回斷訊前的值（kbps）。回傳實際允許拉回的值，0＝不拉回。
+    /// 只拉回到「斷訊前 10 秒沒有任何降碼、穩定撐住」的碼率（§ABR-RESTORE-STABLE，11-08）：那晚的路只撐得住約 30 Mbps，
+    /// 斷訊前的值是開場的 75 Mbps（開場 6 秒就塞），每次拉回 75 都馬上再塞，3 分鐘重複 6 次。拉回後 5 秒內又降碼＝拉回失敗，
+    /// 穩定值作廢，要重新撐滿 10 秒才算數。允許拉回時，清掉斷訊期間連刀觸發的防振盪上限、丟包率上限與進行中的試驗
+    int on_outage_restored(int kbps, steady::time_point now) {
+      if (kbps <= 0 || stable_kbps_ <= 0) return 0;
+      const int allowed = std::min({kbps, stable_kbps_, std::max(floor_kbps(), cap_kbps_)});
+      if (allowed <= applied_kbps_) return 0;
+      kbps = allowed;
+      restore_time_ = now;
+      penalty_until_ = {};
+      loss_cap_until_ = {};
+      lr_trial_active_ = false;
+      pending_target_.reset();
+      applied_kbps_ = std::min(kbps, std::max(floor_kbps(), cap_kbps_));
+      current_target_kbps_ = applied_kbps_;
+      if (last_congested_kbps_ > 0 && last_congested_kbps_ < applied_kbps_) {
+        last_congested_kbps_ = applied_kbps_;
+      }
+      state_ = fast_state_e::healthy;
+      hold_until_ = now;
+      last_reason_ = "outage-restore";
+      return applied_kbps_;
+    }
+    /// §ABR-RESTORE-STABLE：最近一次「10 秒內沒有降碼」時撐住的碼率（0＝還沒有）
+    int stable_kbps() const { return stable_kbps_; }
     int last_congested_kbps() const { return last_congested_kbps_; }
     /// 塞車點隨「多久沒再塞車」往上放寬後的值（§ABR-RATCHET）；log 與回升分區用
     int effective_congested_kbps() const { return eff_congested_kbps(); }
@@ -429,6 +476,7 @@ namespace vr::abr {
     /// 推進狀態機，返回新目標碼率（若無調整則為 std::nullopt）
     std::optional<int> tick(steady::time_point now) {
       last_tick_ = now;
+      update_stable(now);
       // 1. 若有 pending 的降碼要求，立刻回傳並轉入 HOLD 冷卻
       if (pending_target_.has_value()) {
         const int target = *pending_target_;
@@ -436,6 +484,11 @@ namespace vr::abr {
         applied_kbps_ = target;
         state_ = fast_state_e::hold;
         return target;
+      }
+
+      // 1a. §ABR-LOSSRATE-VERIFY：丟包率降碼的試驗到期 -> 判定有沒有效，沒效就撤銷
+      if (auto revert = evaluate_loss_rate_trial(now)) {
+        return revert;
       }
 
       // 1b. 上限往下調時立刻壓到上限
@@ -640,15 +693,35 @@ namespace vr::abr {
       }
       (void) n;  // 一筆回報算一次：要的是「多常出事」，同一筆裡幾張由 persistent 規則處理
       loss_rate_events_.push_back(now);
+      // §ABR-LOSSRATE-VERIFY：試驗中只計數、不再降；規則停用中也不降
+      if (lr_trial_active_) {
+        if (now >= lr_trial_start_ + k_fast_loss_rate_settle) {
+          ++lr_trial_events_;
+        }
+        return;
+      }
+      if (now < lr_disabled_until_) return;
       if (static_cast<int>(loss_rate_events_.size()) < k_fast_loss_rate_threshold) return;
       // 要「持續」：最早一筆至少 10 秒前，短時間的密集丟包交給 persistent／延遲規則
       if (now - loss_rate_events_.front() < k_fast_loss_rate_window / 2) return;
       if (applied_kbps_ <= k_fast_loss_rate_min_kbps) return;
       if (now < hold_until_ || pending_target_.has_value()) return;  // 剛降過，等它生效再看
+      // 降碼前的頻率：視窗內 n 筆、首尾相隔 span → (n-1)/span（用 n/span 會高估，撤銷門檻就變鬆）
+      const double span_s = std::chrono::duration<double>(now - loss_rate_events_.front()).count();
+      const double pre_rate = span_s > 0.0 ? static_cast<double>(loss_rate_events_.size() - 1) / span_s : 0.0;
       loss_rate_events_.clear();
       const int before = applied_kbps_;
+      const int prev_congested = last_congested_kbps_;
+      const auto prev_congested_time = last_congested_time_;
       trigger_cut(severity_e::moderate, "loss-rate", now);
       if (pending_target_.has_value()) {
+        lr_trial_active_ = true;
+        lr_trial_start_ = now;
+        lr_trial_events_ = 0;
+        lr_pre_rate_ = pre_rate;
+        lr_before_kbps_ = before;
+        lr_prev_congested_kbps_ = prev_congested;
+        lr_prev_congested_time_ = prev_congested_time;
         // trigger_cut 的中度降碼＝×0.90；不要因為這條規則掉到 10 Mbps 以下
         pending_target_ = std::max(*pending_target_, std::min(before, k_fast_loss_rate_min_kbps));
         current_target_kbps_ = *pending_target_;
@@ -659,11 +732,77 @@ namespace vr::abr {
       }
     }
 
+    /// §ABR-LOSSRATE-VERIFY：試驗到期時判定。降後頻率 ≥ 降前 × 0.6 → 撤銷並停用規則，回傳要套用的碼率
+    std::optional<int> evaluate_loss_rate_trial(steady::time_point now) {
+      if (!lr_trial_active_ || now < lr_trial_start_ + k_fast_loss_rate_trial) {
+        return std::nullopt;
+      }
+      lr_trial_active_ = false;
+      const double window_s = std::chrono::duration<double>(k_fast_loss_rate_trial - k_fast_loss_rate_settle).count();
+      lr_post_rate_ = static_cast<double>(lr_trial_events_) / window_s;
+      if (lr_post_rate_ < lr_pre_rate_ * k_fast_loss_rate_effective_ratio) {
+        return std::nullopt;  // 有效：保留上限，規則照常
+      }
+      ++loss_rate_reverts_;
+      lr_disabled_until_ = now + k_fast_loss_rate_off;
+      loss_cap_until_ = {};
+      loss_rate_events_.clear();
+      // 這一刀記下的塞車點不是真的塞車，還原
+      last_congested_kbps_ = lr_prev_congested_kbps_;
+      last_congested_time_ = lr_prev_congested_time_;
+      last_reason_ = "loss-rate-revert";
+      // 正在塞車就不往上拉（之後由 RAMP 依塞車點回升）
+      if (is_congested(now) || state_ == fast_state_e::cut || now < hold_until_) {
+        return std::nullopt;
+      }
+      const int target = std::min(lr_before_kbps_, effective_cap_kbps(now));
+      if (target <= applied_kbps_) {
+        return std::nullopt;
+      }
+      applied_kbps_ = target;
+      current_target_kbps_ = target;
+      state_ = fast_state_e::healthy;
+      return target;
+    }
+
+    /// §ABR-RESTORE-STABLE：10 秒內沒有降碼時，穩定值＝這 10 秒內套用過的最低碼率（回升中途的值也算，取最低最保守）
+    void update_stable(steady::time_point now) {
+      if (first_tick_ == steady::time_point {}) {
+        first_tick_ = now;
+      }
+      if (applied_hist_.empty() || applied_hist_.back().second != applied_kbps_) {
+        applied_hist_.emplace_back(now, applied_kbps_);
+      }
+      // 只留視窗內的紀錄，外加視窗起點當下生效的那一筆
+      while (applied_hist_.size() >= 2 && now - applied_hist_[1].first >= k_fast_stable_window) {
+        applied_hist_.pop_front();
+      }
+      const auto quiet_since = std::max(first_tick_, last_cut_time_);
+      if (now - quiet_since < k_fast_stable_window) {
+        return;
+      }
+      int lowest = applied_kbps_;
+      for (const auto &h : applied_hist_) {
+        lowest = std::min(lowest, h.second);
+      }
+      stable_kbps_ = lowest;
+    }
+
     void trigger_cut(severity_e sev, const char *reason, steady::time_point now) {
       // 降碼後的冷卻期（hold_until_ 之前）只接受嚴重訊號：送達率每 250 ms、LATCH 每 100 ms 就回報一次，
       // 中度訊號不擋的話一兩秒內會連降好幾次直接壓到下限（HOLD 期間只有嚴重訊號能二度打折）
       if (sev == severity_e::moderate && now < hold_until_) {
         return;
+      }
+      // §ABR-RESTORE-STABLE：拉回後 5 秒內又降碼＝拉回的值撐不住，穩定值作廢
+      if (restore_time_ != steady::time_point {} && now - restore_time_ <= k_fast_restore_fail_window) {
+        stable_kbps_ = 0;
+      }
+      restore_time_ = {};
+      last_cut_time_ = now;
+      // §ABR-LOSSRATE-VERIFY：試驗期間有真的塞車降碼 -> 這次試驗作廢（比較基準被干擾），上限照留
+      if (lr_trial_active_ && std::strcmp(reason, "loss-rate") != 0) {
+        lr_trial_active_ = false;
       }
 
       // 防振盪：RAMP 中 5 秒內又降碼 -> 上限暫時壓到 applied × 0.85 維持 30 秒
@@ -780,6 +919,25 @@ namespace vr::abr {
     int loss_cap_ = 0;
     steady::time_point loss_cap_until_ {};
     int loss_rate_cuts_ = 0;
+
+    // §ABR-LOSSRATE-VERIFY
+    bool lr_trial_active_ = false;
+    steady::time_point lr_trial_start_ {};
+    int lr_trial_events_ = 0;
+    double lr_pre_rate_ = 0.0;   ///< 降碼前每秒幾次
+    double lr_post_rate_ = 0.0;  ///< 試驗期間每秒幾次
+    int lr_before_kbps_ = 0;
+    int lr_prev_congested_kbps_ = 0;
+    steady::time_point lr_prev_congested_time_ {};
+    steady::time_point lr_disabled_until_ {};
+    int loss_rate_reverts_ = 0;
+
+    // §ABR-RESTORE-STABLE
+    steady::time_point first_tick_ {};
+    steady::time_point last_cut_time_ {};
+    steady::time_point restore_time_ {};
+    std::deque<std::pair<steady::time_point, int>> applied_hist_;
+    int stable_kbps_ = 0;
 
     // 丟包與延遲追蹤
     std::deque<fec_record_t> fec_fails_;

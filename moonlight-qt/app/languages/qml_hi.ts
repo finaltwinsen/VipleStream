@@ -1047,77 +1047,77 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>त्रुटि कोड: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1934" />
+        <location filename="../streaming/session.cpp" line="1942" />
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>%1 पर GeForce Experience का संस्करण Moonlight के इस बिल्ड द्वारा समर्थित नहीं है। %1 से स्ट्रीम करने के लिए आपको Moonlight अपडेट करना होगा।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1940" />
+        <location filename="../streaming/session.cpp" line="1948" />
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>रिमोट डेस्कटॉप माउस मोड सक्षम करने का आपका चयन गेम में समस्याएँ पैदा कर सकता है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1944" />
+        <location filename="../streaming/session.cpp" line="1952" />
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>सॉफ़्टवेयर डिकोडिंग को बाध्य करने का आपका सेटिंग चयन स्ट्रीमिंग परफ़ॉर्मेंस ख़राब कर सकता है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2003" />
+        <location filename="../streaming/session.cpp" line="2011" />
         <source>Your host PC doesn't support encoding HEVC.</source>
         <translation>आपका होस्ट PC HEVC एन्कोडिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2021" />
+        <location filename="../streaming/session.cpp" line="2029" />
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>GPU समर्थन के बिना HEVC को बाध्य करने के आपके चयन के कारण सॉफ़्टवेयर डिकोडिंग का उपयोग हो रहा है। इससे स्ट्रीमिंग परफ़ॉर्मेंस ख़राब हो सकती है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1973" />
+        <location filename="../streaming/session.cpp" line="1981" />
         <source>Your host software or GPU doesn't support encoding AV1.</source>
         <translation>आपका होस्ट सॉफ़्टवेयर या GPU AV1 एन्कोडिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1991" />
+        <location filename="../streaming/session.cpp" line="1999" />
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>GPU समर्थन के बिना AV1 को बाध्य करने के आपके चयन के कारण सॉफ़्टवेयर डिकोडिंग का उपयोग हो रहा है। इससे स्ट्रीमिंग परफ़ॉर्मेंस ख़राब हो सकती है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2068" />
+        <location filename="../streaming/session.cpp" line="2076" />
         <source>Your host PC doesn't support HDR streaming.</source>
         <translation>आपका होस्ट PC HDR स्ट्रीमिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2060" />
+        <location filename="../streaming/session.cpp" line="2068" />
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>H.264 कोडेक के साथ HDR समर्थित नहीं है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2095" />
+        <location filename="../streaming/session.cpp" line="2103" />
         <source>This PC's GPU doesn't support AV1 Main10 decoding for HDR streaming.</source>
         <translation>इस PC का GPU HDR स्ट्रीमिंग के लिए AV1 Main10 डिकोडिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2064" />
+        <location filename="../streaming/session.cpp" line="2072" />
         <source>This PC's GPU doesn't support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>इस PC का GPU HDR स्ट्रीमिंग के लिए 10-बिट HEVC या AV1 डिकोडिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2128" />
+        <location filename="../streaming/session.cpp" line="2136" />
         <source>Your host PC and client PC don't support the same HDR video codecs.</source>
         <translation>आपका होस्ट PC और क्लाइंट PC एक जैसे HDR वीडियो कोडेक का समर्थन नहीं करते।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2231" />
+        <location filename="../streaming/session.cpp" line="2239" />
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>H.264 कोडेक 4K से अधिक वीडियो रिज़ॉल्यूशन का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3592" />
+        <location filename="../streaming/session.cpp" line="3614" />
         <source>Host returned error: %1</source>
         <translation>होस्ट ने त्रुटि लौटाई: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2040" />
+        <location filename="../streaming/session.cpp" line="2048" />
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>GPU समर्थन के बिना H.264 को बाध्य करने के आपके चयन के कारण सॉफ़्टवेयर डिकोडिंग का उपयोग हो रहा है। इससे स्ट्रीमिंग परफ़ॉर्मेंस ख़राब हो सकती है।</translation>
     </message>
@@ -1147,249 +1147,249 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>होस्ट पर माइक्रोफ़ोन उपलब्ध नहीं है: Steam का "Steam Streaming Microphone" डिवाइस नहीं मिला</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="779" />
+        <location filename="../streaming/session.cpp" line="787" />
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>%1 पर कोई दूसरा हेडसेट SteamVR का उपयोग कर रहा है (उदाहरण के लिए Steam Link)। उसे डिस्कनेक्ट करें, फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="781" />
+        <location filename="../streaming/session.cpp" line="789" />
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>%1 पर VipleStream के बिना पहले से एक VR गेम चल रहा है। उसे बंद करें, फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="783" />
+        <location filename="../streaming/session.cpp" line="791" />
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>%1 पर SteamVR को रीस्टार्ट होना है, लेकिन वहाँ अभी भी एक VR गेम चल रहा है। पहले गेम बंद करें (ऐप सूची में "खेल बंद करें"), फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="786" />
+        <location filename="../streaming/session.cpp" line="794" />
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>%1 पर SteamVR सेफ़ मोड में शुरू हुआ और उसने VipleStream ड्राइवर को ब्लॉक कर दिया। होस्ट पर SteamVR रीस्टार्ट करें, फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="788" />
+        <location filename="../streaming/session.cpp" line="796" />
         <source>SteamVR is not installed on %1.</source>
         <translation>%1 पर SteamVR इंस्टॉल नहीं है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="790" />
+        <location filename="../streaming/session.cpp" line="798" />
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>%1 पर Steam में साइन इन नहीं है। होस्ट पर Steam में साइन इन करें (उदाहरण के लिए डेस्कटॉप मोड में), फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="792" />
+        <location filename="../streaming/session.cpp" line="800" />
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>%1 पर कोई भी Windows में साइन इन नहीं है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="794" />
+        <location filename="../streaming/session.cpp" line="802" />
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 Windows साइन-इन या लॉक स्क्रीन पर है। होस्ट पर साइन इन करें, फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="797" />
+        <location filename="../streaming/session.cpp" line="805" />
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>%1 पर SteamVR समय पर शुरू नहीं हुआ। फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="799" />
+        <location filename="../streaming/session.cpp" line="807" />
         <source>%1 could not start VR (error %2).</source>
         <translation>%1 VR शुरू नहीं कर सका (त्रुटि %2)।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="824" />
+        <location filename="../streaming/session.cpp" line="832" />
         <source>%1 doesn't offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 VR स्ट्रीमिंग प्रदान नहीं करता। इसके लिए PCVR सक्षम के साथ VipleStream Server 2.0 या बाद का संस्करण चाहिए।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="834" />
+        <location filename="../streaming/session.cpp" line="842" />
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1 केवल रिले के माध्यम से पहुँच योग्य है। VR स्ट्रीमिंग के लिए सीधा कनेक्शन चाहिए।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="842" />
+        <location filename="../streaming/session.cpp" line="850" />
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>वीडियो कोडेक सेटिंग AV1 को बाध्य करती है, लेकिन VR स्ट्रीमिंग के लिए HEVC या H.264 चाहिए। सेटिंग्स में वीडियो कोडेक बदलें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1342" />
+        <location filename="../streaming/session.cpp" line="1350" />
         <source>Failed to initialize video subsystem: %1</source>
         <translation>वीडियो सबसिस्टम प्रारंभ करने में विफल: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1427" />
+        <location filename="../streaming/session.cpp" line="1435" />
         <source>Failed to create window for hardware decode test: %1</source>
         <translation>हार्डवेयर डिकोड परीक्षण के लिए विंडो बनाने में विफल: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1533" />
+        <location filename="../streaming/session.cpp" line="1541" />
         <source>Invalid stream frame rate (%1 FPS).</source>
         <translation>अमान्य स्ट्रीम फ़्रेम दर (%1 FPS)।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1879" />
+        <location filename="../streaming/session.cpp" line="1887" />
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>इस डिवाइस में VR स्ट्रीमिंग के लिए कोई 8-बिट HEVC या H.264 वीडियो डिकोडर नहीं है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1908" />
+        <location filename="../streaming/session.cpp" line="1916" />
         <source>Failed to initialize video decoder.</source>
         <translation>वीडियो डिकोडर प्रारंभ करने में विफल।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1950" />
+        <location filename="../streaming/session.cpp" line="1958" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>आपका होस्ट सॉफ़्टवेयर या GPU PyroWave एन्कोडिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1961" />
+        <location filename="../streaming/session.cpp" line="1969" />
         <source>Your client GPU doesn't support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>आपके क्लाइंट का GPU Vulkan 1.3 के साथ PyroWave डिकोडिंग का समर्थन नहीं करता। HEVC/H.264 पर लौटा जा रहा है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2050" />
+        <location filename="../streaming/session.cpp" line="2058" />
         <source>Your host PC and client PC don't support the same video codecs. This may cause poor streaming performance.</source>
         <translation>आपका होस्ट PC और क्लाइंट PC एक जैसे वीडियो कोडेक का समर्थन नहीं करते। इससे स्ट्रीमिंग परफ़ॉर्मेंस ख़राब हो सकती है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2053" />
+        <location filename="../streaming/session.cpp" line="2061" />
         <source>Your client GPU doesn't support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>आपके क्लाइंट का GPU H.264 डिकोडिंग का समर्थन नहीं करता। इससे स्ट्रीमिंग परफ़ॉर्मेंस ख़राब हो सकती है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2083" />
+        <location filename="../streaming/session.cpp" line="2091" />
         <source>This PC's GPU doesn't support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>इस PC का GPU HDR स्ट्रीमिंग के लिए PyroWave Main10 डिकोडिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2101" />
-        <location filename="../streaming/session.cpp" line="2119" />
+        <location filename="../streaming/session.cpp" line="2109" />
+        <location filename="../streaming/session.cpp" line="2127" />
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>GPU समर्थन के बिना HDR को बाध्य करने के आपके चयन के कारण सॉफ़्टवेयर डिकोडिंग का उपयोग हो रहा है। इससे स्ट्रीमिंग परफ़ॉर्मेंस ख़राब हो सकती है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2113" />
+        <location filename="../streaming/session.cpp" line="2121" />
         <source>This PC's GPU doesn't support HEVC Main10 decoding for HDR streaming.</source>
         <translation>इस PC का GPU HDR स्ट्रीमिंग के लिए HEVC Main10 डिकोडिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2135" />
+        <location filename="../streaming/session.cpp" line="2143" />
         <source>Your host PC doesn't support YUV 4:4:4 streaming.</source>
         <translation>आपका होस्ट PC YUV 4:4:4 स्ट्रीमिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2143" />
+        <location filename="../streaming/session.cpp" line="2151" />
         <source>Your host PC doesn't support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>आपका होस्ट PC चयनित वीडियो कोडेक के लिए YUV 4:4:4 स्ट्रीमिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2158" />
+        <location filename="../streaming/session.cpp" line="2166" />
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>GPU समर्थन के बिना YUV 4:4:4 को बाध्य करने के आपके चयन के कारण सॉफ़्टवेयर डिकोडिंग का उपयोग हो रहा है। इससे स्ट्रीमिंग परफ़ॉर्मेंस ख़राब हो सकती है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2164" />
+        <location filename="../streaming/session.cpp" line="2172" />
         <source>This PC's GPU doesn't support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>इस PC का GPU चयनित वीडियो कोडेक के लिए YUV 4:4:4 डिकोडिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2173" />
+        <location filename="../streaming/session.cpp" line="2181" />
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>4K स्ट्रीमिंग के लिए GeForce Experience 3.0 या उच्चतर आवश्यक है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2190" />
+        <location filename="../streaming/session.cpp" line="2198" />
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>आपकी चुनी गई सराउंड साउंड सेटिंग वर्तमान ऑडियो डिवाइस द्वारा समर्थित नहीं है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2196" />
+        <location filename="../streaming/session.cpp" line="2204" />
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>ऑडियो डिवाइस खोलने में विफल। इस सत्र के दौरान ऑडियो उपलब्ध नहीं रहेगा।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2205" />
+        <location filename="../streaming/session.cpp" line="2213" />
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>एक HID डिवाइस प्रतिक्रिया नहीं दे रहा है (%1)। इस सत्र के लिए गेमपैड इनपुट और Steam Controller पासथ्रू बंद हैं। डिवाइस को निकालकर फिर से लगाएँ, फिर स्ट्रीम दोबारा शुरू करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2209" />
+        <location filename="../streaming/session.cpp" line="2217" />
         <source>An attached gamepad has no mapping and won't be usable. Visit the Moonlight help to resolve this.</source>
         <translation>एक जुड़े हुए गेमपैड की कोई मैपिंग नहीं है और वह उपयोग योग्य नहीं होगा। इसे हल करने के लिए Moonlight सहायता देखें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2227" />
+        <location filename="../streaming/session.cpp" line="2235" />
         <source>Your host PC's GPU doesn't support streaming video resolutions over 4K.</source>
         <translation>आपके होस्ट PC का GPU 4K से अधिक वीडियो रिज़ॉल्यूशन की स्ट्रीमिंग का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2245" />
+        <location filename="../streaming/session.cpp" line="2253" />
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC's GPU.</source>
         <translation>हार्डवेयर डिकोडिंग को बाध्य करने का आपका चयन पूरा नहीं किया जा सकता क्योंकि इस PC के GPU में हार्डवेयर डिकोडिंग समर्थन नहीं है।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2248" />
+        <location filename="../streaming/session.cpp" line="2256" />
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC's GPU lacks support for decoding your chosen codec.</source>
         <translation>आपका कोडेक चयन और हार्डवेयर डिकोडिंग बाध्य करने की सेटिंग संगत नहीं हैं। इस PC का GPU आपके चुने गए कोडेक को डिकोड करने का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3107" />
+        <location filename="../streaming/session.cpp" line="3121" />
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>VR सत्र शुरू होने के बाद XR रनटाइम %1, इसलिए स्ट्रीम समाप्त कर दी गई।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3108" />
+        <location filename="../streaming/session.cpp" line="3122" />
         <source>exited</source>
         <translation>बंद हो गया</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3108" />
+        <location filename="../streaming/session.cpp" line="3122" />
         <source>stopped responding or was lost</source>
         <translation>अनुत्तरदायी हो गया या खो गया</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3264" />
+        <location filename="../streaming/session.cpp" line="3278" />
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>इस हेडसेट पर VR शुरू नहीं हो सका (%1)। सुनिश्चित करें कि SteamVR चल रहा है, फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3273" />
+        <location filename="../streaming/session.cpp" line="3287" />
         <source>The headset's VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>हेडसेट के VR रनटाइम ने समय पर प्रतिक्रिया नहीं दी। सुनिश्चित करें कि SteamVR चल रहा है, फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3488" />
+        <location filename="../streaming/session.cpp" line="3510" />
         <source>Failed to launch via relay proxy</source>
         <translation>रिले प्रॉक्सी के माध्यम से लॉन्च करने में विफल</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3564" />
+        <location filename="../streaming/session.cpp" line="3586" />
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 ने VR सत्र शुरू नहीं किया। सुनिश्चित करें कि होस्ट पर PCVR सक्षम है, फिर से प्रयास करें।</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3573" />
-        <location filename="../streaming/session.cpp" line="3580" />
+        <location filename="../streaming/session.cpp" line="3595" />
+        <location filename="../streaming/session.cpp" line="3602" />
         <source>Connection to host failed</source>
         <translation>होस्ट से कनेक्शन विफल</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4837" />
+        <location filename="../streaming/session.cpp" line="4886" />
         <source>Steering wheel: off (left stick steers)</source>
         <translation>स्टीयरिंग व्हील: बंद (बायाँ स्टिक स्टीयर करता है)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4838" />
+        <location filename="../streaming/session.cpp" line="4887" />
         <source>Steering wheel: on - turn both controllers like a wheel</source>
         <translation>स्टीयरिंग व्हील: चालू - दोनों कंट्रोलर को व्हील की तरह घुमाएँ</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4839" />
+        <location filename="../streaming/session.cpp" line="4888" />
         <source>Steering wheel: on (works in Xbox controller mode)</source>
         <translation>स्टीयरिंग व्हील: चालू (Xbox कंट्रोलर मोड में काम करता है)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="5063" />
+        <location filename="../streaming/session.cpp" line="5112" />
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>वीडियो डिकोडर प्रारंभ नहीं किया जा सका। कृपया अपनी स्ट्रीमिंग सेटिंग्स जाँचें और फिर से प्रयास करें।</translation>
     </message>
@@ -1402,102 +1402,102 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>सेटिंग्स</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="622" />
+        <location filename="../gui/SettingsView.qml" line="646" />
         <source>Resolution and FPS</source>
         <translation>रिज़ॉल्यूशन और FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="630" />
+        <location filename="../gui/SettingsView.qml" line="654" />
         <source>Setting values too high for your PC or network connection may cause lag, stuttering, or errors.</source>
         <translation>आपके PC या नेटवर्क कनेक्शन के लिए बहुत अधिक मान सेट करने से लैग, रुक-रुककर चलना या त्रुटियाँ हो सकती हैं।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="612" />
+        <location filename="../gui/SettingsView.qml" line="636" />
         <source>Basic Settings</source>
         <translation>मूल सेटिंग्स</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="822" />
+        <location filename="../gui/SettingsView.qml" line="846" />
         <source>Auto (best for this display)</source>
         <translation>स्वचालित (इस डिस्प्ले के लिए सर्वश्रेष्ठ)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="828" />
+        <location filename="../gui/SettingsView.qml" line="852" />
         <source>720p</source>
         <translation>720p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="834" />
+        <location filename="../gui/SettingsView.qml" line="858" />
         <source>1080p</source>
         <translation>1080p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="840" />
+        <location filename="../gui/SettingsView.qml" line="864" />
         <source>1440p</source>
         <translation>1440p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="846" />
+        <location filename="../gui/SettingsView.qml" line="870" />
         <source>4K</source>
         <translation>4K</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="963" />
+        <location filename="../gui/SettingsView.qml" line="987" />
         <source>Custom resolutions are not officially supported by GeForce Experience, so it will not set your host display resolution. You will need to set it manually while in game.</source>
         <translation>GeForce Experience आधिकारिक रूप से कस्टम रिज़ॉल्यूशन का समर्थन नहीं करता, इसलिए यह आपके होस्ट का डिस्प्ले रिज़ॉल्यूशन सेट नहीं करेगा। आपको गेम में रहते हुए इसे मैन्युअल रूप से सेट करना होगा।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="964" />
+        <location filename="../gui/SettingsView.qml" line="988" />
         <source>Resolutions that are not supported by your client or host PC may cause streaming errors.</source>
         <translation>ऐसे रिज़ॉल्यूशन जिनका आपका क्लाइंट या होस्ट PC समर्थन नहीं करता, स्ट्रीमिंग त्रुटियाँ पैदा कर सकते हैं।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="970" />
+        <location filename="../gui/SettingsView.qml" line="994" />
         <source>Enter a custom resolution:</source>
         <translation>कस्टम रिज़ॉल्यूशन दर्ज करें:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1231" />
+        <location filename="../gui/SettingsView.qml" line="1255" />
         <source>%1 FPS</source>
         <translation>%1 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1360" />
+        <location filename="../gui/SettingsView.qml" line="1384" />
         <source>Auto (this display)</source>
         <translation>स्वचालित (यह डिस्प्ले)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1496" />
+        <location filename="../gui/SettingsView.qml" line="1520" />
         <source>Frame interpolation (FRUC)</source>
         <translation>फ़्रेम इंटरपोलेशन (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1536" />
+        <location filename="../gui/SettingsView.qml" line="1560" />
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>हर वास्तविक फ़्रेम के बीच एक इंटरपोलेटेड फ़्रेम डालता है, जिससे प्रभावी आउटपुट फ़्रेम रेट दोगुना हो जाता है। सर्वर का वास्तविक फ़्रेम रेट आधा कर दिया जाता है (उदा. 120 FPS सेटिंग → 60 FPS का अनुरोध → 120 FPS आउटपुट)।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1646" />
+        <location filename="../gui/SettingsView.qml" line="1670" />
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute (अनुशंसित — न्यूनतम विलंब, कोई भी GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1647" />
+        <location filename="../gui/SettingsView.qml" line="1671" />
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow (हार्डवेयर flow + warp; NVIDIA RTX 20+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1648" />
+        <location filename="../gui/SettingsView.qml" line="1672" />
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — RIFE ML मॉडल (शक्तिशाली GPU चाहिए; Tensor Core RTX 30/40+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1649" />
+        <location filename="../gui/SettingsView.qml" line="1673" />
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE (प्रायोगिक; क्रॉस-वेंडर: NV/AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1659" />
+        <location filename="../gui/SettingsView.qml" line="1683" />
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
@@ -1510,458 +1510,493 @@ NVIDIA Optical Flow: Turing+ (RTX 20/30/40 सीरीज़) पर समर�
 DirectML: साथ आए RIFE 4.25 lite ONNX मॉडल को D3D12 DirectML EP पर चलाता है — *वास्तविक* मोशन-कम्पेन्सेटेड ML इंटरपोलेशन, गतिशील सामग्री पर सर्वश्रेष्ठ दृश्य गुणवत्ता। प्रति-ऑपरेशन kernel-launch ओवरहेड (~25 ms बेसलाइन, रिज़ॉल्यूशन चाहे जो हो) के कारण 720p+ पर रियल टाइम में चलने के लिए Tensor-Core-श्रेणी का GPU (RTX 30/40 मेनस्ट्रीम या बेहतर) चाहिए। कमज़ोर GPU पर क्लाइंट अपने-आप inference रिज़ॉल्यूशन घटाता है (1080p → 720p → 540p → 480p → 360p) और अगर 360p भी फ़्रेम बजट में न आए तो Generic पर लौट आता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1728" />
+        <location filename="../gui/SettingsView.qml" line="1752" />
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1729" />
+        <location filename="../gui/SettingsView.qml" line="1753" />
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1732" />
+        <location filename="../gui/SettingsView.qml" line="1756" />
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (PERFORMANCE GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1778" />
+        <location filename="../gui/SettingsView.qml" line="1802" />
         <source>Video bitrate:</source>
         <translation>वीडियो बिटरेट:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1786" />
+        <location filename="../gui/SettingsView.qml" line="1810" />
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>धीमे कनेक्शन पर बिटरेट कम करें। इमेज क्वालिटी बढ़ाने के लिए बिटरेट बढ़ाएँ।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1808" />
+        <location filename="../gui/SettingsView.qml" line="1832" />
         <source>Video bitrate: %1 Mbps</source>
         <translation>वीडियो बिटरेट: %1 Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1855" />
+        <location filename="../gui/SettingsView.qml" line="1879" />
         <source>Display mode</source>
         <translation>डिस्प्ले मोड</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1866" />
-        <location filename="../gui/SettingsView.qml" line="2435" />
+        <location filename="../gui/SettingsView.qml" line="1890" />
+        <location filename="../gui/SettingsView.qml" line="2459" />
         <source>Fullscreen</source>
         <translation>फ़ुलस्क्रीन</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1935" />
+        <location filename="../gui/SettingsView.qml" line="1959" />
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>फ़ुलस्क्रीन आम तौर पर सबसे अच्छी परफ़ॉर्मेंस देता है, लेकिन बॉर्डरलेस विंडो macOS Spaces, Alt+Tab, स्क्रीनशॉट टूल, ऑन-स्क्रीन ओवरले आदि जैसी सुविधाओं के साथ बेहतर काम कर सकती है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1871" />
+        <location filename="../gui/SettingsView.qml" line="1895" />
         <source>Borderless windowed</source>
         <translation>बॉर्डरलेस विंडो</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="701" />
+        <location filename="../gui/SettingsView.qml" line="725" />
         <source>Native</source>
         <translation>नेटिव</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="702" />
+        <location filename="../gui/SettingsView.qml" line="726" />
         <source>Native (Excluding Notch)</source>
         <translation>नेटिव (नॉच को छोड़कर)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1824" />
+        <location filename="../gui/SettingsView.qml" line="1848" />
         <source>Use Default (%1 Mbps)</source>
         <translation>डिफ़ॉल्ट का उपयोग करें (%1 Mbps)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1876" />
-        <location filename="../gui/SettingsView.qml" line="2427" />
+        <location filename="../gui/SettingsView.qml" line="1900" />
+        <location filename="../gui/SettingsView.qml" line="2451" />
         <source>Windowed</source>
         <translation>विंडो</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1885" />
+        <location filename="../gui/SettingsView.qml" line="1909" />
         <source>(Recommended)</source>
         <translation>(अनुशंसित)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1942" />
+        <location filename="../gui/SettingsView.qml" line="1966" />
         <source>V-Sync</source>
         <translation>V-Sync</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1952" />
+        <location filename="../gui/SettingsView.qml" line="1976" />
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>V-Sync बंद करने से सब-फ़्रेम रेंडरिंग विलंब संभव होता है, लेकिन स्क्रीन टियरिंग दिख सकती है</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1959" />
+        <location filename="../gui/SettingsView.qml" line="1983" />
         <source>Frame pacing</source>
         <translation>फ़्रेम पेसिंग</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1982" />
+        <location filename="../gui/SettingsView.qml" line="2006" />
         <source>Audio Settings</source>
         <translation>ऑडियो सेटिंग्स</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2017" />
+        <location filename="../gui/SettingsView.qml" line="2041" />
         <source>Stereo</source>
         <translation>स्टीरियो</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2021" />
+        <location filename="../gui/SettingsView.qml" line="2045" />
         <source>5.1 surround sound</source>
         <translation>5.1 सराउंड साउंड</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2025" />
+        <location filename="../gui/SettingsView.qml" line="2049" />
         <source>7.1 surround sound</source>
         <translation>7.1 सराउंड साउंड</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2039" />
+        <location filename="../gui/SettingsView.qml" line="2063" />
         <source>Mute host PC speakers while streaming</source>
         <translation>स्ट्रीमिंग के दौरान होस्ट PC के स्पीकर म्यूट करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2049" />
+        <location filename="../gui/SettingsView.qml" line="2073" />
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>इस सेटिंग को लागू करने के लिए आपको चल रहा कोई भी गेम रीस्टार्ट करना होगा</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2171" />
+        <location filename="../gui/SettingsView.qml" line="2195" />
         <source>UI Settings</source>
         <translation>UI सेटिंग्स</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2216" />
+        <location filename="../gui/SettingsView.qml" line="2240" />
         <source>Language</source>
         <translation>भाषा</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2242" />
+        <location filename="../gui/SettingsView.qml" line="2266" />
         <source>Automatic</source>
         <translation>स्वचालित</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2394" />
+        <location filename="../gui/SettingsView.qml" line="2418" />
         <source>GUI display mode</source>
         <translation>GUI डिस्प्ले मोड</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2431" />
+        <location filename="../gui/SettingsView.qml" line="2455" />
         <source>Maximized</source>
         <translation>मैक्सिमाइज़्ड</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2459" />
+        <location filename="../gui/SettingsView.qml" line="2483" />
         <source>Show configuration warnings</source>
         <translation>कॉन्फ़िगरेशन चेतावनियाँ दिखाएँ</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2540" />
+        <location filename="../gui/SettingsView.qml" line="2565" />
         <source>Input Settings</source>
         <translation>इनपुट सेटिंग्स</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2561" />
+        <location filename="../gui/SettingsView.qml" line="2586" />
         <source>This enables seamless mouse control without capturing the client's mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>इससे क्लाइंट के माउस कर्सर को कैप्चर किए बिना सहज माउस नियंत्रण मिलता है। यह रिमोट डेस्कटॉप उपयोग के लिए आदर्श है, लेकिन अधिकांश गेम में काम नहीं करेगा।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2563" />
+        <location filename="../gui/SettingsView.qml" line="2588" />
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>नोट: GeForce Experience में एक बग के कारण, अगर आपके होस्ट PC में कई मॉनिटर हैं तो यह विकल्प ठीक से काम नहीं कर सकता।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2948" />
+        <location filename="../gui/SettingsView.qml" line="2977" />
         <source>Enable HDR (Experimental)</source>
         <translation>HDR सक्षम करें (प्रायोगिक)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2966" />
+        <location filename="../gui/SettingsView.qml" line="2995" />
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>स्ट्रीम HDR-सक्षम होगी, लेकिन कुछ गेम में HDR मोड चालू करने के लिए आपके होस्ट PC पर HDR मॉनिटर आवश्यक हो सकता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2968" />
+        <location filename="../gui/SettingsView.qml" line="2997" />
         <source>HDR streaming is not supported on this PC.</source>
         <translation>इस PC पर HDR स्ट्रीमिंग समर्थित नहीं है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3020" />
+        <location filename="../gui/SettingsView.qml" line="3049" />
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>यह VipleStream-Server होस्ट के साथ उपयोग के लिए बहुत ऊँची वीडियो बिटरेट अनलॉक करता है। इसका उपयोग केवल ईथरनेट LAN कनेक्शन पर स्ट्रीमिंग करते समय करें।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3058" />
+        <location filename="../gui/SettingsView.qml" line="3087" />
         <source>Show performance stats while streaming</source>
         <translation>स्ट्रीमिंग के दौरान परफ़ॉर्मेंस आँकड़े दिखाएँ</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3068" />
+        <location filename="../gui/SettingsView.qml" line="3097" />
         <source>Display real-time stream performance information while streaming.</source>
         <translation>स्ट्रीमिंग के दौरान रियल-टाइम स्ट्रीम परफ़ॉर्मेंस जानकारी दिखाएँ।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3069" />
+        <location filename="../gui/SettingsView.qml" line="3098" />
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>स्ट्रीमिंग के दौरान आप इसे कभी भी Ctrl+Alt+Shift+S या Select+L1+R1+X से चालू/बंद कर सकते हैं।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3070" />
+        <location filename="../gui/SettingsView.qml" line="3099" />
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>परफ़ॉर्मेंस ओवरले Steam Link या Raspberry Pi पर समर्थित नहीं है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2646" />
+        <location filename="../gui/SettingsView.qml" line="2671" />
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>टचस्क्रीन को वर्चुअल ट्रैकपैड के रूप में उपयोग करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2663" />
+        <location filename="../gui/SettingsView.qml" line="2688" />
         <source>Swap left and right mouse buttons</source>
         <translation>बाएँ और दाएँ माउस बटन आपस में बदलें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2675" />
+        <location filename="../gui/SettingsView.qml" line="2700" />
         <source>Reverse mouse scrolling direction</source>
         <translation>माउस स्क्रॉल की दिशा उलटें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2689" />
+        <location filename="../gui/SettingsView.qml" line="2714" />
         <source>Gamepad Settings</source>
         <translation>गेमपैड सेटिंग्स</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2699" />
+        <location filename="../gui/SettingsView.qml" line="2724" />
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>गेमपैड के A/B और X/Y बटन आपस में बदलें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2709" />
+        <location filename="../gui/SettingsView.qml" line="2734" />
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>इससे गेमपैड Nintendo-शैली के बटन लेआउट पर आ जाते हैं</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2715" />
+        <location filename="../gui/SettingsView.qml" line="2740" />
         <source>Force gamepad #1 always connected</source>
         <translation>गेमपैड #1 को हमेशा कनेक्टेड रखें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2725" />
+        <location filename="../gui/SettingsView.qml" line="2750" />
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>होस्ट से एक गेमपैड को हमेशा जुड़ा रखता है, भले ही इस PC से वास्तव में कोई गेमपैड जुड़ा न हो।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2562" />
+        <location filename="../gui/SettingsView.qml" line="2587" />
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>स्ट्रीमिंग के दौरान आप इसे Ctrl+Alt+Shift+M से चालू/बंद कर सकते हैं।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2733" />
+        <location filename="../gui/SettingsView.qml" line="2758" />
         <source>Enable mouse control with gamepads by holding the 'Start' button</source>
         <translation>'Start' बटन दबाए रखकर गेमपैड से माउस नियंत्रण सक्षम करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2075" />
+        <location filename="../gui/SettingsView.qml" line="2099" />
         <source>Host Settings</source>
         <translation>होस्ट सेटिंग्स</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2827" />
+        <location filename="../gui/SettingsView.qml" line="2853" />
         <source>Advanced Settings</source>
         <translation>उन्नत सेटिंग्स</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1992" />
+        <location filename="../gui/SettingsView.qml" line="2016" />
         <source>Audio configuration</source>
         <translation>ऑडियो कॉन्फ़िगरेशन</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2448" />
+        <location filename="../gui/SettingsView.qml" line="2472" />
         <source>Show connection quality warnings</source>
         <translation>कनेक्शन गुणवत्ता चेतावनियाँ दिखाएँ</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2471" />
+        <location filename="../gui/SettingsView.qml" line="2495" />
         <source>Discord Rich Presence integration</source>
         <translation>Discord Rich Presence इंटीग्रेशन</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2726" />
+        <location filename="../gui/SettingsView.qml" line="2751" />
         <source>Only enable this option when streaming a game that doesn't support gamepads being connected after startup.</source>
         <translation>यह विकल्प केवल तभी सक्षम करें जब आप ऐसा गेम स्ट्रीम कर रहे हों जो शुरू होने के बाद जोड़े गए गेमपैड का समर्थन नहीं करता।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2551" />
+        <location filename="../gui/SettingsView.qml" line="2576" />
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>माउस को गेम के बजाय रिमोट डेस्कटॉप के लिए ऑप्टिमाइज़ करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1127" />
-        <location filename="../gui/SettingsView.qml" line="1320" />
+        <location filename="../gui/SettingsView.qml" line="1151" />
+        <location filename="../gui/SettingsView.qml" line="1344" />
         <source>Custom (%1 FPS)</source>
         <translation>कस्टम (%1 FPS)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1142" />
+        <location filename="../gui/SettingsView.qml" line="1166" />
         <source>Enter a custom frame rate:</source>
         <translation>कस्टम फ़्रेम रेट दर्ज करें:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="743" />
-        <location filename="../gui/SettingsView.qml" line="791" />
-        <location filename="../gui/SettingsView.qml" line="800" />
-        <location filename="../gui/SettingsView.qml" line="1254" />
+        <location filename="../gui/SettingsView.qml" line="767" />
+        <location filename="../gui/SettingsView.qml" line="815" />
+        <location filename="../gui/SettingsView.qml" line="824" />
+        <location filename="../gui/SettingsView.qml" line="1278" />
         <source>Custom</source>
         <translation>कस्टम</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1365" />
+        <location filename="../gui/SettingsView.qml" line="1389" />
         <source>30 FPS</source>
         <translation>30 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1370" />
+        <location filename="../gui/SettingsView.qml" line="1394" />
         <source>60 FPS</source>
         <translation>60 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2512" />
+        <location filename="../gui/SettingsView.qml" line="2536" />
         <source>Keep the display awake while streaming</source>
         <translation>स्ट्रीमिंग के दौरान डिस्प्ले को जगाए रखें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2522" />
+        <location filename="../gui/SettingsView.qml" line="2546" />
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>स्ट्रीमिंग के दौरान स्क्रीनसेवर शुरू होने या डिस्प्ले के स्लीप में जाने से रोकता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2573" />
+        <location filename="../gui/SettingsView.qml" line="2598" />
         <source>Capture system keyboard shortcuts</source>
         <translation>सिस्टम कीबोर्ड शॉर्टकट कैप्चर करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2581" />
+        <location filename="../gui/SettingsView.qml" line="2606" />
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>इससे Alt+Tab जैसे सिस्टम-व्यापी कीबोर्ड शॉर्टकट कैप्चर होते हैं, जिन्हें स्ट्रीमिंग के दौरान सामान्यतः क्लाइंट OS संभालता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2611" />
+        <location filename="../gui/SettingsView.qml" line="2636" />
         <source>in fullscreen</source>
         <translation>फ़ुलस्क्रीन में</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2615" />
+        <location filename="../gui/SettingsView.qml" line="2640" />
         <source>always</source>
         <translation>हमेशा</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2656" />
+        <location filename="../gui/SettingsView.qml" line="2681" />
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>चेक करने पर टचस्क्रीन ट्रैकपैड की तरह काम करती है। अनचेक करने पर टचस्क्रीन सीधे माउस पॉइंटर को नियंत्रित करती है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2085" />
+        <location filename="../gui/SettingsView.qml" line="2109" />
         <source>Optimize game settings for streaming</source>
         <translation>स्ट्रीमिंग के लिए गेम सेटिंग्स ऑप्टिमाइज़ करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="342" />
+        <location filename="../gui/SettingsView.qml" line="346" />
         <source>Show advanced and experimental options</source>
         <translation>उन्नत और प्रायोगिक विकल्प दिखाएँ</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="352" />
+        <location filename="../gui/SettingsView.qml" line="356" />
         <source>Shows options meant for troubleshooting and testing: renderer and video decoder, frame interpolation engines, experimental video formats and network test switches. Hidden options keep their current values.</source>
         <translation>समस्या निवारण और परीक्षण के विकल्प दिखाता है: रेंडरर और वीडियो डिकोडर, फ़्रेम इंटरपोलेशन इंजन, प्रायोगिक वीडियो फ़ॉर्मैट और नेटवर्क परीक्षण स्विच। छिपे हुए विकल्प अपने मौजूदा मान बनाए रखते हैं।</translation>
     </message>
     <message>
+        <location filename="../gui/SettingsView.qml" line="484" />
+        <source>Frame rate</source>
+        <translation>फ़्रेम दर</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="494" />
+        <source>Automatic (half rate while the network is unstable)</source>
+        <translation>स्वचालित (नेटवर्क अस्थिर होने पर आधी दर)</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="495" />
+        <source>Full (same as the headset refresh rate)</source>
+        <translation>पूरी (हेडसेट की रिफ़्रेश रेट के समान)</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="496" />
+        <source>Half (each frame shown twice)</source>
+        <translation>आधी (हर फ़्रेम दो बार दिखाया जाता है)</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="497" />
+        <source>Half with synthesized in-between frames</source>
+        <translation>संश्लेषित बीच के फ़्रेमों के साथ आधी</translation>
+    </message>
+    <message>
         <location filename="../gui/SettingsView.qml" line="512" />
+        <source>Automatic streams at full rate and switches to half rate without restarting the game while the network keeps delaying frames, then tries full rate again once it is stable. Half rate streams every other frame while the headset still displays at full rate: half the network traffic and more time to repair lost packets. Synthesized frames make motion look smoother but can wobble or tear on fast objects.</source>
+        <translation>स्वचालित मोड पूरी दर पर स्ट्रीम करता है और जब तक नेटवर्क फ़्रेमों में देरी करता रहता है तब तक गेम को रीस्टार्ट किए बिना आधी दर पर स्विच कर देता है, फिर नेटवर्क स्थिर होने पर दोबारा पूरी दर की कोशिश करता है। आधी दर हर दूसरे फ़्रेम को स्ट्रीम करती है जबकि हेडसेट फिर भी पूरी दर पर दिखाता है: नेटवर्क ट्रैफ़िक आधा होता है और खोए हुए पैकेट सुधारने के लिए अधिक समय मिलता है। संश्लेषित फ़्रेम गति को अधिक सहज दिखाते हैं, लेकिन तेज़ वस्तुओं पर डगमगा या फट (टियर हो) सकते हैं।</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="529" />
+        <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers.</source>
+        <translation>नेटवर्क के पैकेट गिराने पर बिटरेट घटाता है और नेटवर्क ठीक होने पर उसे फिर बढ़ा देता है।</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="535" />
         <source>Steering wheel with the controllers (Xbox controller mode)</source>
         <translation>कंट्रोलर के साथ स्टीयरिंग व्हील (Xbox कंट्रोलर मोड)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="522" />
+        <location filename="../gui/SettingsView.qml" line="545" />
         <source>In games that use the virtual Xbox controller, hold both controllers like a steering wheel and turn them to steer (replaces the left stick's left/right). While streaming, hold both thumbsticks pressed for 1.5 seconds to switch it on or off.</source>
         <translation>वर्चुअल Xbox कंट्रोलर का उपयोग करने वाले गेम में, दोनों कंट्रोलर को स्टीयरिंग व्हील की तरह पकड़ें और स्टीयर करने के लिए उन्हें घुमाएँ (यह बाएँ स्टिक के बाएँ/दाएँ को बदलता है)। स्ट्रीमिंग के दौरान, इसे चालू या बंद करने के लिए दोनों थंबस्टिक को 1.5 सेकंड तक दबाए रखें।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="527" />
+        <location filename="../gui/SettingsView.qml" line="550" />
         <source>Steering wheel rotation (full left to full right)</source>
         <translation>स्टीयरिंग व्हील रोटेशन (पूरा बाएँ से पूरा दाएँ)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="550" />
+        <location filename="../gui/SettingsView.qml" line="573" />
         <source>How far you turn the controllers for full lock. 180° means a quarter turn either way reaches the stick's end.</source>
         <translation>फुल लॉक के लिए आप कंट्रोलर को कितना घुमाते हैं। 180° का मतलब है कि किसी भी तरफ एक चौथाई मोड़ स्टिक के छोर तक पहुँचता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="556" />
+        <location filename="../gui/SettingsView.qml" line="579" />
         <source>Headset network during VR (Steam Frame with the streaming adapter)</source>
         <translation>VR के दौरान हेडसेट नेटवर्क (स्ट्रीमिंग एडेप्टर के साथ Steam Frame)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="563" />
+        <location filename="../gui/SettingsView.qml" line="586" />
         <source>Test and choose automatically</source>
         <translation>स्वचालित रूप से परीक्षण करें और चुनें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="563" />
+        <location filename="../gui/SettingsView.qml" line="586" />
         <source>Always keep home Wi-Fi</source>
         <translation>हमेशा होम Wi-Fi चालू रखें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="563" />
+        <location filename="../gui/SettingsView.qml" line="586" />
         <source>Pause home Wi-Fi while streaming</source>
         <translation>स्ट्रीमिंग के दौरान होम Wi-Fi को रोकें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="575" />
+        <location filename="../gui/SettingsView.qml" line="598" />
         <source>The headset has one Wi-Fi radio, so staying on home Wi-Fi while streaming over the adapter makes it switch back and forth and drop video. The automatic test compares both during a VR stream (about 1 minute) and remembers the result for this place. While home Wi-Fi is paused the headset itself is offline; it reconnects when you stop streaming.</source>
         <translation>हेडसेट में एक ही Wi-Fi रेडियो है, इसलिए एडेप्टर पर स्ट्रीमिंग करते समय होम Wi-Fi से जुड़े रहने पर यह आगे-पीछे स्विच करता है और वीडियो छूट जाता है। स्वचालित परीक्षण VR स्ट्रीम के दौरान दोनों की तुलना करता है (लगभग 1 मिनट) और इस स्थान के लिए परिणाम याद रखता है। जब होम Wi-Fi रुका होता है तो हेडसेट स्वयं ऑफ़लाइन होता है; स्ट्रीमिंग बंद करने पर यह फिर से कनेक्ट हो जाता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="581" />
+        <location filename="../gui/SettingsView.qml" line="604" />
         <source>Send the headset microphone to the PC</source>
         <translation>हेडसेट माइक्रोफ़ोन को PC पर भेजें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="591" />
+        <location filename="../gui/SettingsView.qml" line="614" />
         <source>During a VR stream your voice goes to the PC's "Microphone (Steam Streaming Microphone)" device (installed with Steam). Select it in the game or voice chat app.</source>
         <translation>VR स्ट्रीम के दौरान आपकी आवाज़ PC के "Microphone (Steam Streaming Microphone)" डिवाइस पर जाती है (Steam के साथ इंस्टॉल किया गया)। इसे गेम या वॉइस चैट ऐप में चुनें।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="598" />
+        <location filename="../gui/SettingsView.qml" line="621" />
         <source>Run the network test again next time</source>
         <translation>अगली बार फिर से नेटवर्क परीक्षण चलाएं</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1399" />
+        <location filename="../gui/SettingsView.qml" line="1423" />
         <source>Renderer</source>
         <translation>रेंडरर</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1417" />
+        <location filename="../gui/SettingsView.qml" line="1441" />
         <source>Auto (recommended) — let the system pick the most stable hardware decoding path</source>
         <translation>स्वचालित (Auto) — अनुशंसित: सिस्टम सबसे स्थिर हार्डवेयर डिकोडिंग पथ चुनता है</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1418" />
+        <location filename="../gui/SettingsView.qml" line="1442" />
         <source>Direct3D 11 — always use D3D11VA; works with the NV-OF / DirectML / NCNN interpolation engines</source>
         <translation>Direct3D 11 — D3D11VA पर लॉक करता है, NV-OF / DirectML / NCNN फ़्रेम इंटरपोलेशन इंजन के साथ उपयोग किया जा सकता है</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1419" />
+        <location filename="../gui/SettingsView.qml" line="1443" />
         <source>Vulkan [experimental] — built-in frame interpolation; compatibility issues on some systems (AMD APU / older NVIDIA drivers)</source>
         <translation>Vulkan [प्रायोगिक] — बिल्ट-इन फ़्रेम इंटरपोलेशन, कुछ मशीनों (AMD APU / पुराने NV ड्राइवर) पर संगतता समस्याएँ</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1446" />
+        <location filename="../gui/SettingsView.qml" line="1470" />
         <source>Auto (recommended): same as upstream Moonlight's hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
@@ -1974,27 +2009,27 @@ Direct3D 11: स्पष्ट रूप से D3D11VA पर लॉक कर
 Vulkan [प्रायोगिक]: Vulkan-first cascade + नेटिव Vulkan रेंडरिंग पाइपलाइन + dual-present को बाध्य करता है; फ़्रेम इंटरपोलेशन इंजन बिल्ट-इन है (Generic के समान)। ज्ञात समस्याएँ: NV ड्राइवर 596.36 पर ONLY मोड में नेटिव vkCmdDecodeVideoKHR से NVDEC device-lost होता है; AMD APU पर video session memory bind 226MB चरण में ड्राइवर क्रैश होता है; PARALLEL+SW upload पथ की परफ़ॉर्मेंस कम है (80+ ms/फ़्रेम)। स्थिर होने पर यह फिर से अनुशंसित विकल्प बनेगा।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1457" />
+        <location filename="../gui/SettingsView.qml" line="1481" />
         <source>Linux video output (frontend)</source>
         <translation>Linux वीडियो प्रस्तुति (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1472" />
+        <location filename="../gui/SettingsView.qml" line="1496" />
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>स्वचालित (Auto) — अनुशंसित: aarch64 या Zink पर Vulkan, बाकी में मूल क्रम बना रहता है</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1473" />
+        <location filename="../gui/SettingsView.qml" line="1497" />
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — Vulkan प्रस्तुति को प्राथमिकता</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1474" />
+        <location filename="../gui/SettingsView.qml" line="1498" />
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — मूल क्रम बनाए रखें (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1490" />
+        <location filename="../gui/SettingsView.qml" line="1514" />
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -2011,107 +2046,107 @@ Vulkan: हमेशा Vulkan (libplacebo) प्रस्तुति को �
 EGL: मूल क्रम बनाए रखता है, Vulkan को प्राथमिकता नहीं देता।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1546" />
+        <location filename="../gui/SettingsView.qml" line="1570" />
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>Vulkan रेंडरर बिल्ट-इन फ़्रेम इंटरपोलेशन इंजन का उपयोग करता है (Generic के समान)। कोई अन्य इंजन चुनने के लिए Direct3D 11 पर स्विच करें।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1564" />
+        <location filename="../gui/SettingsView.qml" line="1588" />
         <source>Interpolation mode:</source>
         <translation>इंटरपोलेशन मोड:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1570" />
+        <location filename="../gui/SettingsView.qml" line="1594" />
         <source>Active (recommended)</source>
         <translation>सक्रिय (अनुशंसित)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1591" />
+        <location filename="../gui/SettingsView.qml" line="1615" />
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>सर्वर UI fps / 2 (या हाई-रिफ़्रेश डिस्प्ले पर / 3) भेजता है, क्लाइंट हमेशा dual/triple इंटरपोलेशन करता है। सर्वर पर कम लोड, क्लाइंट GPU पर्याप्त शक्तिशाली होना चाहिए।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1595" />
+        <location filename="../gui/SettingsView.qml" line="1619" />
         <source>Passive</source>
         <translation>पैसिव</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1616" />
+        <location filename="../gui/SettingsView.qml" line="1640" />
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>सर्वर पूरी UI fps पर भेजता है। क्लाइंट recv% के अनुसार ratio को गतिशील रूप से बढ़ाता है: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x। तब उपयुक्त जब सर्वर हमेशा पूरी गति न दे पाए।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1712" />
+        <location filename="../gui/SettingsView.qml" line="1736" />
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY (इंटीग्रेटेड / पुराने GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1716" />
+        <location filename="../gui/SettingsView.qml" line="1740" />
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN (पता नहीं चला; पता लगाने के लिए क्लाइंट को पुनः आरंभ करें)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1718" />
+        <location filename="../gui/SettingsView.qml" line="1742" />
         <source>(not detected yet)</source>
         <translation>(अभी तक पता नहीं चला)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1722" />
+        <location filename="../gui/SettingsView.qml" line="1746" />
         <source>(not measured)</source>
         <translation>(मापा नहीं गया)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1723" />
+        <location filename="../gui/SettingsView.qml" line="1747" />
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>FRUC स्वचालित स्तर निर्धारण (Vulkan unified autotier v1.4.127):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1724" />
+        <location filename="../gui/SettingsView.qml" line="1748" />
         <source>   GPU: </source>
         <translation>   GPU: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1725" />
+        <location filename="../gui/SettingsView.qml" line="1749" />
         <source>   Detected tier: </source>
         <translation>   पहचाना गया tier: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1726" />
+        <location filename="../gui/SettingsView.qml" line="1750" />
         <source>   Benchmark: </source>
         <translation>   बेंचमार्क: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1727" />
+        <location filename="../gui/SettingsView.qml" line="1751" />
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>रनटाइम में 7 स्तरों (T-1..T5) के बीच स्वचालित रूप से ऊपर-नीचे:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1730" />
+        <location filename="../gui/SettingsView.qml" line="1754" />
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (NVOF GPU, chain पर अधिक भार)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1731" />
+        <location filename="../gui/SettingsView.qml" line="1755" />
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (AMD/Intel, NVOF नहीं)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1733" />
+        <location filename="../gui/SettingsView.qml" line="1757" />
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (न्यूनतम FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1734" />
+        <location filename="../gui/SettingsView.qml" line="1758" />
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = FRUC रोका गया (GPU संभाल नहीं पा रहा, 5 मिनट बाद पुनः प्रयास)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1746" />
+        <location filename="../gui/SettingsView.qml" line="1770" />
         <source>Edge MV threshold:</source>
         <translation>किनारे का MV थ्रेशोल्ड (Edge MV threshold):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1762" />
+        <location filename="../gui/SettingsView.qml" line="1786" />
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -2124,352 +2159,333 @@ Start with the default; if interpolated edges look blocky, lower it to 4-6.</sou
 पहले डिफ़ॉल्ट मान आज़माएँ; अगर इंटरपोलेटेड किनारों पर ब्लॉक दिखें तो इसे 4-6 तक घटाएँ।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1839" />
+        <location filename="../gui/SettingsView.qml" line="519" />
+        <location filename="../gui/SettingsView.qml" line="1863" />
         <source>Adjust bitrate automatically while streaming</source>
         <translation>स्ट्रीमिंग के दौरान बिटरेट अपने-आप समायोजित करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1849" />
+        <location filename="../gui/SettingsView.qml" line="1873" />
         <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers. The bitrate above is the maximum.</source>
         <translation>नेटवर्क के पैकेट गिराने पर बिटरेट घटाता है और नेटवर्क ठीक होने पर उसे फिर बढ़ा देता है। ऊपर दिया गया बिटरेट अधिकतम है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1972" />
+        <location filename="../gui/SettingsView.qml" line="1996" />
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>फ़्रेम पेसिंग बहुत जल्दी आने वाले फ़्रेम को रोककर माइक्रो-स्टटर कम करती है। यह V-Sync बंद होने पर भी काम करती है, इसलिए विलंब कम रहता है और फ़्रेम का असमान आगमन सहज हो जाता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2055" />
+        <location filename="../gui/SettingsView.qml" line="2079" />
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>जब VipleStream सक्रिय विंडो न हो तो ऑडियो स्ट्रीम म्यूट करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2066" />
+        <location filename="../gui/SettingsView.qml" line="2090" />
         <source>Mutes VipleStream's audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>जब आप Alt+Tab से स्ट्रीम से बाहर जाते हैं या किसी दूसरी विंडो पर क्लिक करते हैं तो VipleStream का ऑडियो म्यूट कर देता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2096" />
+        <location filename="../gui/SettingsView.qml" line="2120" />
         <source>Quit app on host PC after ending stream</source>
         <translation>स्ट्रीम समाप्त करने के बाद होस्ट PC पर ऐप बंद करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2106" />
+        <location filename="../gui/SettingsView.qml" line="2130" />
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>स्ट्रीम समाप्त करने पर यह उस ऐप या गेम को बंद कर देगा जिसे आप स्ट्रीम कर रहे हैं। कोई भी बिना सहेजी गई प्रगति खो जाएगी!</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2185" />
+        <location filename="../gui/SettingsView.qml" line="2209" />
         <source>Design</source>
         <translation>डिज़ाइन</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2192" />
+        <location filename="../gui/SettingsView.qml" line="2216" />
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>सौम्य: संपादकीय ग्रिड, शांत मास्टहेड।
 बोल्ड: मैगज़ीन कवर जैसी ऊर्जा, बड़े आकार के डिस्प्ले शीर्षक।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2208" />
+        <location filename="../gui/SettingsView.qml" line="2232" />
         <source>Safe</source>
         <translation>सौम्य</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2209" />
+        <location filename="../gui/SettingsView.qml" line="2233" />
         <source>Bold</source>
         <translation>बोल्ड</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2377" />
+        <location filename="../gui/SettingsView.qml" line="2401" />
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>इस बदलाव को लागू करने के लिए आपको VipleStream रीस्टार्ट करना होगा</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2481" />
+        <location filename="../gui/SettingsView.qml" line="2505" />
         <source>Updates your Discord status to display the name of the game you're streaming. The status reads "Playing &lt;game&gt; · via VipleStream" with the VipleStream icon.</source>
         <translation>आपके Discord स्टेटस को अपडेट करता है ताकि आप जिस गेम को स्ट्रीम कर रहे हैं उसका नाम दिखे। स्टेटस में VipleStream आइकन के साथ "Playing &lt;game&gt; · via VipleStream" दिखता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="362" />
+        <location filename="../gui/SettingsView.qml" line="366" />
         <source>VR Streaming (Steam Frame)</source>
         <translation>VR स्ट्रीमिंग (Steam Frame)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="371" />
+        <location filename="../gui/SettingsView.qml" line="375" />
         <source>Resolution per eye</source>
         <translation>प्रति आँख रिज़ॉल्यूशन</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="395" />
+        <location filename="../gui/SettingsView.qml" line="399" />
         <source>Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.</source>
         <translation>एन्कोड करने, भेजने और डिकोड करने के लिए कम पिक्सेल का मतलब कम विलंब है। होस्ट फिर भी अधिक रिज़ॉल्यूशन पर रेंडर करके उसे छोटा कर सकता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="400" />
+        <location filename="../gui/SettingsView.qml" line="404" />
         <source>Extra field of view (overscan)</source>
         <translation>अतिरिक्त दृश्य क्षेत्र (overscan)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="408" />
-        <location filename="../gui/SettingsView.qml" line="434" />
-        <location filename="../gui/SettingsView.qml" line="460" />
+        <location filename="../gui/SettingsView.qml" line="412" />
+        <location filename="../gui/SettingsView.qml" line="438" />
+        <location filename="../gui/SettingsView.qml" line="464" />
         <source>Off</source>
         <translation>बंद</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="421" />
+        <location filename="../gui/SettingsView.qml" line="425" />
         <source>Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.</source>
         <translation>हर आँख के किनारे से थोड़ा आगे तक रेंडर करता है ताकि सिर घुमाने पर खाली किनारे न दिखें।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="426" />
+        <location filename="../gui/SettingsView.qml" line="430" />
         <source>Pick the newest frame this late</source>
         <translation>इतनी देर से सबसे नया फ़्रेम चुनें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="447" />
+        <location filename="../gui/SettingsView.qml" line="451" />
         <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
         <translation>कौन-सा फ़्रेम दिखाना है यह चुनने से पहले कुछ मिलीसेकंड रुकता है, ताकि फ़्रेम ज़्यादा ताज़ा हो। बहुत ज़्यादा देर करने से हेडसेट फ़्रेम छोड़ने लगता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="452" />
+        <location filename="../gui/SettingsView.qml" line="456" />
         <source>Sharper centre (foveated encoding)</source>
         <translation>बीच का हिस्सा अधिक स्पष्ट (foveated एन्कोडिंग)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="473" />
+        <location filename="../gui/SettingsView.qml" line="477" />
         <source>Spends more of the stream's pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.</source>
         <translation>स्ट्रीम के ज़्यादा पिक्सेल ठीक सामने और हर आँख के किनारों पर कम खर्च करता है। स्ट्रीम का आकार वही रहता है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="479" />
-        <source>Stream at half the headset refresh rate</source>
-        <translation>हेडसेट की आधी रिफ़्रेश रेट पर स्ट्रीम करें</translation>
-    </message>
-    <message>
-        <location filename="../gui/SettingsView.qml" line="489" />
-        <source>The game renders and streams at half rate while the headset still displays at full rate. Halves the load on the host and the network.</source>
-        <translation>गेम आधी दर पर रेंडर और स्ट्रीम होता है, जबकि हेडसेट फिर भी पूरी दर पर दिखाता है। होस्ट और नेटवर्क पर लोड आधा हो जाता है।</translation>
-    </message>
-    <message>
-        <location filename="../gui/SettingsView.qml" line="495" />
-        <source>Synthesize the in-between frames</source>
-        <translation>बीच के फ़्रेम संश्लेषित करें</translation>
-    </message>
-    <message>
-        <location filename="../gui/SettingsView.qml" line="506" />
-        <source>With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.</source>
-        <translation>आधी दर की स्ट्रीमिंग में, जिन रिफ़्रेश पर कोई नया फ़्रेम नहीं होता, उन पर पिछला फ़्रेम दोबारा दिखाने के बजाय चलती वस्तुओं को आगे खिसकाया जाता है।</translation>
-    </message>
-    <message>
-        <location filename="../gui/SettingsView.qml" line="2487" />
+        <location filename="../gui/SettingsView.qml" line="2511" />
         <source>App updates</source>
         <translation>ऐप अपडेट</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2494" />
+        <location filename="../gui/SettingsView.qml" line="2518" />
         <source>Don't check automatically</source>
         <translation>अपने-आप जाँच न करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2494" />
+        <location filename="../gui/SettingsView.qml" line="2518" />
         <source>Notify me</source>
         <translation>मुझे सूचित करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2494" />
+        <location filename="../gui/SettingsView.qml" line="2518" />
         <source>Install automatically</source>
         <translation>अपने-आप इंस्टॉल करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2506" />
+        <location filename="../gui/SettingsView.qml" line="2530" />
         <source>Checks for a new version when VipleStream starts. Install automatically downloads and verifies the update and restarts VipleStream, but never while you are streaming.</source>
         <translation>VipleStream शुरू होने पर नए संस्करण की जाँच करता है। "अपने-आप इंस्टॉल करें" अपडेट डाउनलोड और सत्यापित करता है और VipleStream को पुनरारंभ करता है, लेकिन कभी भी स्ट्रीमिंग के दौरान नहीं।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2582" />
+        <location filename="../gui/SettingsView.qml" line="2607" />
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>नोट: Windows पर Ctrl+Alt+Del जैसे कुछ कीबोर्ड शॉर्टकट को VipleStream सहित कोई भी ऐप्लिकेशन इंटरसेप्ट नहीं कर सकता।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2744" />
+        <location filename="../gui/SettingsView.qml" line="2769" />
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>VipleStream बैकग्राउंड में होने पर भी गेमपैड इनपुट प्रोसेस करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2755" />
+        <location filename="../gui/SettingsView.qml" line="2780" />
         <source>Allows VipleStream to capture gamepad inputs even if it's not the current window in focus</source>
         <translation>VipleStream को गेमपैड इनपुट कैप्चर करने देता है, भले ही वह फ़ोकस वाली विंडो न हो</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2764" />
+        <location filename="../gui/SettingsView.qml" line="2790" />
         <source>Network (MP-QUIC)</source>
         <translation>नेटवर्क (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2774" />
+        <location filename="../gui/SettingsView.qml" line="2800" />
         <source>Enable MP-QUIC multipath transport</source>
         <translation>MP-QUIC मल्टीपाथ ट्रांसपोर्ट सक्षम करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2784" />
+        <location filename="../gui/SettingsView.qml" line="2810" />
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>स्ट्रीमिंग के लिए QUIC मल्टीपाथ (RFC 9443) का उपयोग करता है। WiFi + सेल्युलर फ़ेलओवर और दो-NIC बैंडविड्थ एग्रीगेशन संभव बनाता है। सर्वर समर्थन आवश्यक है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2789" />
+        <location filename="../gui/SettingsView.qml" line="2815" />
         <source>Path scheduler</source>
         <translation>पाथ शेड्यूलर</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2805" />
+        <location filename="../gui/SettingsView.qml" line="2831" />
         <source>Auto (per stream type)</source>
         <translation>स्वचालित (स्ट्रीम प्रकार के अनुसार)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2806" />
+        <location filename="../gui/SettingsView.qml" line="2832" />
         <source>Lowest latency</source>
         <translation>न्यूनतम विलंब</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2807" />
+        <location filename="../gui/SettingsView.qml" line="2833" />
         <source>Bandwidth aggregation</source>
         <translation>बैंडविड्थ एग्रीगेशन</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2808" />
+        <location filename="../gui/SettingsView.qml" line="2834" />
         <source>Redundant (all paths)</source>
         <translation>रिडंडेंट (सभी पाथ)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2809" />
+        <location filename="../gui/SettingsView.qml" line="2835" />
         <source>Earliest completion</source>
         <translation>सबसे जल्दी पूर्णता</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2818" />
+        <location filename="../gui/SettingsView.qml" line="2844" />
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>स्वचालित: video=ECF, audio=redundant, control=min-RTT। एग्रीगेशन: अधिकतम बैंडविड्थ के लिए सभी NIC पर round-robin।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2838" />
+        <location filename="../gui/SettingsView.qml" line="2864" />
         <source>Video decoder</source>
         <translation>वीडियो डिकोडर</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2864" />
-        <location filename="../gui/SettingsView.qml" line="2917" />
+        <location filename="../gui/SettingsView.qml" line="2890" />
+        <location filename="../gui/SettingsView.qml" line="2945" />
         <source>Automatic (Recommended)</source>
         <translation>स्वचालित (अनुशंसित)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2868" />
+        <location filename="../gui/SettingsView.qml" line="2894" />
         <source>Force software decoding</source>
         <translation>सॉफ़्टवेयर डिकोडिंग बाध्य करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2872" />
+        <location filename="../gui/SettingsView.qml" line="2898" />
         <source>Force hardware decoding</source>
         <translation>हार्डवेयर डिकोडिंग बाध्य करें</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2887" />
+        <location filename="../gui/SettingsView.qml" line="2914" />
         <source>Video codec</source>
         <translation>वीडियो कोडेक</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2921" />
+        <location filename="../gui/SettingsView.qml" line="2949" />
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2925" />
+        <location filename="../gui/SettingsView.qml" line="2953" />
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2929" />
+        <location filename="../gui/SettingsView.qml" line="2957" />
         <source>AV1 (Experimental)</source>
         <translation>AV1 (प्रायोगिक)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2933" />
+        <location filename="../gui/SettingsView.qml" line="2961" />
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave (अति-कम विलंबता, LAN)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2975" />
+        <location filename="../gui/SettingsView.qml" line="3004" />
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>YUV 4:4:4 सक्षम करें (प्रायोगिक)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2998" />
+        <location filename="../gui/SettingsView.qml" line="3027" />
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>डेस्कटॉप और टेक्स्ट-प्रधान गेम स्ट्रीम करने के लिए अच्छा, लेकिन तेज़ गति वाले गेम के लिए अनुशंसित नहीं।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3000" />
+        <location filename="../gui/SettingsView.qml" line="3029" />
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>इस PC पर YUV 4:4:4 समर्थित नहीं है।</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3007" />
+        <location filename="../gui/SettingsView.qml" line="3036" />
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>बिटरेट सीमा अनलॉक करें (प्रायोगिक)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3026" />
+        <location filename="../gui/SettingsView.qml" line="3055" />
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>लोकल नेटवर्क पर PC अपने-आप खोजें (अनुशंसित)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3047" />
+        <location filename="../gui/SettingsView.qml" line="3076" />
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>ब्लॉक किए गए कनेक्शन अपने-आप पहचानें (अनुशंसित)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1680" />
+        <location filename="../gui/SettingsView.qml" line="1704" />
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>गुणवत्ता — सर्वश्रेष्ठ दृश्य गुणवत्ता, उच्च GPU लोड</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1681" />
+        <location filename="../gui/SettingsView.qml" line="1705" />
         <source>Balanced — Recommended (default)</source>
         <translation>संतुलित — अनुशंसित (डिफ़ॉल्ट)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1682" />
+        <location filename="../gui/SettingsView.qml" line="1706" />
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>परफ़ॉर्मेंस — न्यूनतम विलंब, iGPU के लिए उपयुक्त</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2111" />
+        <location filename="../gui/SettingsView.qml" line="2135" />
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>NAT ट्रावर्सल (सिग्नलिंग रिले)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2121" />
+        <location filename="../gui/SettingsView.qml" line="2145" />
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>रिले URL (उदा. ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2132" />
+        <location filename="../gui/SettingsView.qml" line="2156" />
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>रिले PSK (प्री-शेयर्ड कुंजी, न हो तो खाली छोड़ें)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2142" />
+        <location filename="../gui/SettingsView.qml" line="2166" />
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>वैकल्पिक: जब दोनों पक्ष NAT के पीछे हों तब कनेक्ट होने में मदद करता है। पब्लिक IP वाले सर्वर पर viplestream-relay चलाएँ.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2152" />
+        <location filename="../gui/SettingsView.qml" line="2176" />
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>रिले के माध्यम से स्ट्रीमिंग जबरन करें (UDP टनल परीक्षण हेतु)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1691" />
+        <location filename="../gui/SettingsView.qml" line="1715" />
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2478,7 +2494,7 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 प्रदर्शन: 4-पड़ोसी खोज + न्यूनतम प्रसंस्करण (~6 ms iGPU पर)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2162" />
+        <location filename="../gui/SettingsView.qml" line="2186" />
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>होस्ट सीधे उपलब्ध हो तब भी हमेशा रिले के माध्यम से स्ट्रीम करें। रिले के UDP टनल को सत्यापित करने के लिए उपयोगी, जब VPN (जैसे Cloudflare WARP) वरना सीधा /launch चला देगा।</translation>
     </message>

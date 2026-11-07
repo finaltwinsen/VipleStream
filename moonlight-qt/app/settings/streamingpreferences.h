@@ -346,6 +346,7 @@ public:
     Q_PROPERTY(double vrOverscanDeg MEMBER vrOverscanDeg NOTIFY vrSettingsChanged)
     Q_PROPERTY(double vrLatchDelayMs MEMBER vrLatchDelayMs NOTIFY vrSettingsChanged)
     Q_PROPERTY(bool vrHalfRate MEMBER vrHalfRate NOTIFY vrSettingsChanged)
+    Q_PROPERTY(bool vrRateAuto MEMBER vrRateAuto NOTIFY vrSettingsChanged)
     Q_PROPERTY(bool vrSynth MEMBER vrSynth NOTIFY vrSettingsChanged)
     Q_PROPERTY(bool vrWheel MEMBER vrWheel NOTIFY vrSettingsChanged)
     Q_PROPERTY(int vrNetMode MEMBER vrNetMode NOTIFY vrSettingsChanged)
@@ -550,6 +551,8 @@ public:
     int cliRepairIdle = 0;
     bool cliRepairNoAhead = false;
     bool vrHalfRate = false;          // §VR-HALF-RATE：--vr-half-rate，串流跑顯示更新率的一半；寫入設定（vrhalfrate）
+    bool vrRateAuto = true;           // §VR-RATE-AUTO（2026-11-08）：全速串流時網路不穩就自動降成半速、穩了再升回（vrrateauto）；
+                                      // vrHalfRate 開著時不作用（那是開場就協商好的半速）
     double vrLatchDelayMs = 3.0;      // §VR-LATE-LATCH：--vr-latch-delay，frame thread 晚幾毫秒才挑影像（0～20）；寫入設定（vrlatchdelayms）。
                                       // 2026-10-29 預設 0→3（使用者指示；頭盔實測解碼→顯示 −3.1 ms），舊版存著的 0 遷移一次
     int vrBufferFrames = 1;           // §VR-BUFFER（2026-10-29）：--vr-buffer-frames，頭盔端多緩衝幾格（0＝關、1、2）；寫入設定（vrbufferframes）。

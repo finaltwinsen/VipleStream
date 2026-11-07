@@ -2693,6 +2693,19 @@ namespace video {
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
         if (auto img = images->pop(max_frametime)) {
+          // §VR-RATE-AUTO（2026-11-08）：串流中途降成半速時，driver 照原本的更新率出幀，這裡每 div 張只編一張。
+          // 跳過的那張不編碼、不送、不佔幀號（client 收到的幀號照樣連續），下一輪等下一張
+          if (vr_state && config.captureSource == 1) {
+            int vr_rate_applied = 0;
+            const bool vr_rate_skip = vr_state->rate_skip_image((uint32_t) frame_nr, vr_rate_applied);
+            if (vr_rate_applied != 0) {
+              BOOST_LOG(info) << "[VIPLE-VR-RATE] applied div=" << vr_rate_applied << " from f=" << frame_nr
+                              << " (stream " << config.framerate / vr_rate_applied << " fps, skipped so far " << vr_state->rate_skipped() << ")";
+            }
+            if (vr_rate_skip) {
+              continue;
+            }
+          }
           frame_timestamp = img->frame_timestamp;
           vr_repeated = false;
           if (config.captureSource == 1) {

@@ -404,6 +404,69 @@ namespace vr {
     /// options 是 §VR-LATCH-V3 的選配項（上一個 session 學到的積分、定時 burst），legacy／v2 不用。
     void configure_latch(latch::mode_e mode, int target_pct, uint32_t host_period_ns, const latch::options_t &options = {});
 
+    // ── §VR-RATE-AUTO（2026-11-08）：串流中途「每幾張送一張」────────────────────────────
+    /// control 執行緒：client 要求的分頻（已驗證可接受）。下一張新影像由編碼執行緒套用並回 S2C_RATE
+    void request_rate(int div, uint16_t seq) {
+      std::lock_guard lk {rate_mtx_};
+      rate_pending_ = true;
+      rate_pending_div_ = div;
+      rate_pending_seq_ = seq;
+    }
+    /// control 執行緒：拒絕（直接回覆，分頻不變）
+    void refuse_rate(uint16_t seq) {
+      VIPLE_VR_TLV_RATE_APPLIED a {};
+      a.div = (uint8_t) rate_div_.load(std::memory_order_relaxed);
+      a.accepted = 0;
+      a.seq = seq;
+      a.firstFrame = 0;
+      queue_s2c(make_tlv(VIPLE_VR_S2C_RATE, &a, sizeof(a)), true);
+    }
+    /**
+     * @brief 編碼執行緒：每張從 driver 來的新影像呼叫一次，回傳要不要跳過（不編碼、不送）。
+     * @param next_frame_nr 這張若編碼，會用的幀號（NV_VIDEO_PACKET.frameIndex）
+     * @param applied_div 這次剛套用新的分頻時填入新值（0＝沒變）
+     */
+    bool rate_skip_image(uint32_t next_frame_nr, int &applied_div) {
+      applied_div = 0;
+      {
+        std::lock_guard lk {rate_mtx_};
+        if (rate_pending_) {
+          rate_pending_ = false;
+          const int div = rate_pending_div_;
+          rate_div_.store(div, std::memory_order_relaxed);
+          rate_phase_ = 0;
+          applied_div = div;
+          VIPLE_VR_TLV_RATE_APPLIED a {};
+          a.div = (uint8_t) div;
+          a.accepted = 1;
+          a.seq = rate_pending_seq_;
+          a.firstFrame = next_frame_nr;
+          queue_s2c(make_tlv(VIPLE_VR_S2C_RATE, &a, sizeof(a)), true);
+        }
+      }
+      if (applied_div != 0) {
+        std::lock_guard lk {latch_mtx_};
+        latch_ctl_.set_stream_div(applied_div);
+      }
+      const int div = rate_div_.load(std::memory_order_relaxed);
+      if (div <= 1) {
+        return false;
+      }
+      // 套用後的第一張照送，之後每 div 張送一張
+      const bool skip = (rate_phase_ % (uint32_t) div) != 0;
+      ++rate_phase_;
+      if (skip) {
+        rate_skipped_.fetch_add(1, std::memory_order_relaxed);
+      }
+      return skip;
+    }
+    int rate_div() const {
+      return rate_div_.load(std::memory_order_relaxed);
+    }
+    uint64_t rate_skipped() const {
+      return rate_skipped_.load(std::memory_order_relaxed);
+    }
+
     // §VR-LATCH-V3：以下三個都在 latch_mtx_ 內轉呼叫控制器（LATCH 可能從 control、QUIC IO 或多連線的接收執行緒進來）
 
     /// v3 的相位還沒穩定（§VR-PREDICT 這時不採樣）。legacy／v2 恆為 false。
@@ -631,6 +694,15 @@ namespace vr {
     std::atomic<uint64_t> latch_held_ {0};
 
     // M4a R3
+    // §VR-RATE-AUTO
+    std::mutex rate_mtx_;
+    bool rate_pending_ = false;
+    int rate_pending_div_ = 1;
+    uint16_t rate_pending_seq_ = 0;
+    std::atomic<int> rate_div_ {1};
+    uint32_t rate_phase_ = 0;  ///< 編碼執行緒專用
+    std::atomic<uint64_t> rate_skipped_ {0};
+
     mutable std::mutex latch_mtx_;
     latch::controller_t latch_ctl_;
     latch::result_t latch_last_ {};

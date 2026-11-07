@@ -15,6 +15,10 @@ Flickable {
 
     signal languageChanged()
 
+    // §SETTINGS-MODE（2026-11-08）：設定頁只顯示目前模式下會生效的選項。頭盔（Steam Frame）上選了 VR 模式時只顯示 VR 的，
+    // 2D 模式（含所有非頭盔平台）不顯示 VR 那一區。VR 串流不看 2D 的解析度、幀率、位元率、解碼器、HDR 等
+    readonly property bool vrSettingsMode: VrLauncher.available && VrLauncher.vrMode
+
     boundsBehavior: Flickable.OvershootBounds
 
     contentWidth: settingsColumn1.width > settingsColumn2.width ? settingsColumn1.width : settingsColumn2.width
@@ -355,8 +359,8 @@ Flickable {
         // VR（Steam Frame PCVR）：從 GUI 啟動的 VR 串流是另一個行程，讀的是這裡存下來的值
         GroupBox {
             id: vrSettingsGroupBox
-            // §SETTINGS-ADV：只在頭盔（Steam Frame）上顯示，排在最前面
-            visible: VrLauncher.available
+            // §SETTINGS-ADV：只在頭盔（Steam Frame）上顯示，排在最前面；§SETTINGS-MODE：而且要是 VR 模式
+            visible: settingsPage.vrSettingsMode
             width: (parent.width - (parent.leftPadding + parent.rightPadding))
             padding: 12
             title: "<font color=\"#D4FF3A\">§ VR · </font><font color=\"#F2F5E1\">" + qsTr("VR Streaming (Steam Frame)") + "</font>"
@@ -473,37 +477,56 @@ Flickable {
                     ToolTip.text: qsTr("Spends more of the stream's pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.")
                 }
 
-                CheckBox {
-                    id: vrHalfRateCheck
+                // §VR-RATE（2026-11-08）：VR 的串流幀率。取代原本「半速」與「補出中間畫面」兩個勾選框（同樣存在
+                // vrHalfRate／vrSynth）。2D 的幀率設定對 VR 沒有作用（VR 一律照頭盔的更新率）
+                Label {
                     width: parent.width
-                    text: qsTr("Stream at half the headset refresh rate")
+                    text: qsTr("Frame rate")
                     font.pointSize: 12
-                    checked: StreamingPreferences.vrHalfRate
-                    onCheckedChanged: {
-                        StreamingPreferences.vrHalfRate = checked
-                    }
-
-                    ToolTip.delay: 1000
-                    ToolTip.timeout: 8000
-                    ToolTip.visible: hovered
-                    ToolTip.text: qsTr("The game renders and streams at half rate while the headset still displays at full rate. Halves the load on the host and the network.")
+                    wrapMode: Text.Wrap
                 }
 
-                CheckBox {
-                    id: vrSynthCheck
-                    width: parent.width
-                    text: qsTr("Synthesize the in-between frames")
-                    font.pointSize: 12
-                    enabled: vrHalfRateCheck.checked
-                    checked: StreamingPreferences.vrSynth
-                    onCheckedChanged: {
-                        StreamingPreferences.vrSynth = checked
+                AutoResizingComboBox {
+                    id: vrRateComboBox
+                    textRole: "text"
+                    model: ListModel {
+                        id: vrRateListModel
+                        ListElement { text: qsTr("Automatic (half rate while the network is unstable)"); half: false; synth: false; rateAuto: true }
+                        ListElement { text: qsTr("Full (same as the headset refresh rate)"); half: false; synth: false; rateAuto: false }
+                        ListElement { text: qsTr("Half (each frame shown twice)"); half: true; synth: false; rateAuto: false }
+                        ListElement { text: qsTr("Half with synthesized in-between frames"); half: true; synth: true; rateAuto: false }
+                    }
+                    Component.onCompleted: {
+                        currentIndex = StreamingPreferences.vrHalfRate ? (StreamingPreferences.vrSynth ? 3 : 2)
+                                                                       : (StreamingPreferences.vrRateAuto ? 0 : 1)
+                    }
+                    onActivated: {
+                        StreamingPreferences.vrHalfRate = vrRateListModel.get(currentIndex).half
+                        StreamingPreferences.vrSynth = vrRateListModel.get(currentIndex).synth
+                        StreamingPreferences.vrRateAuto = vrRateListModel.get(currentIndex).rateAuto
                     }
 
                     ToolTip.delay: 1000
                     ToolTip.timeout: 8000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("With half-rate streaming, moving objects are pushed forward on the refreshes that have no new frame instead of showing the previous frame again.")
+                    ToolTip.text: qsTr("Automatic streams at full rate and switches to half rate without restarting the game while the network keeps delaying frames, then tries full rate again once it is stable. Half rate streams every other frame while the headset still displays at full rate: half the network traffic and more time to repair lost packets. Synthesized frames make motion look smoother but can wobble or tear on fast objects.")
+                }
+
+                // §SETTINGS-MODE：VR 串流也照這個開關決定要不要自動調位元率（和 2D 共用同一個設定）
+                CheckBox {
+                    id: vrAdaptiveBitrateCheck
+                    width: parent.width
+                    text: qsTr("Adjust bitrate automatically while streaming")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.adaptiveBitrate
+                    onCheckedChanged: {
+                        StreamingPreferences.adaptiveBitrate = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Lowers the bitrate when the network drops packets and raises it back when the network recovers.")
                 }
 
                 CheckBox {
@@ -607,6 +630,7 @@ Flickable {
 
         GroupBox {
             id: basicSettingsGroupBox
+            visible: !settingsPage.vrSettingsMode  // §SETTINGS-MODE：2D 專用
             width: (parent.width - (parent.leftPadding + parent.rightPadding))
             padding: 12
             title: "<font color=\"#D4FF3A\">§ 01 · </font><font color=\"#F2F5E1\">" + qsTr("Basic Settings") + "</font>"
@@ -2535,6 +2559,7 @@ Flickable {
 
         GroupBox {
             id: inputSettingsGroupBox
+            visible: !settingsPage.vrSettingsMode  // §SETTINGS-MODE：2D 專用
             width: (parent.width - (parent.leftPadding + parent.rightPadding))
             padding: 12
             title: "<font color=\"#D4FF3A\">§ 05 · </font><font color=\"#F2F5E1\">" + qsTr("Input Settings") + "</font>"
@@ -2759,6 +2784,7 @@ Flickable {
 
         GroupBox {
             id: mpquicSettingsGroupBox
+            visible: !settingsPage.vrSettingsMode  // §SETTINGS-MODE：2D 專用
             width: (parent.width - (parent.leftPadding + parent.rightPadding))
             padding: 12
             title: "<font color=\"#D4FF3A\">§ 08 · </font><font color=\"#F2F5E1\">" + qsTr("Network (MP-QUIC)") + "</font>"
@@ -2834,14 +2860,14 @@ Flickable {
                 Label {
                     width: parent.width
                     id: resVDSTitle
-                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
+                    visible: StreamingPreferences.showAdvancedSettings && !settingsPage.vrSettingsMode  // §SETTINGS-ADV
                     text: qsTr("Video decoder")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
                 }
 
                 AutoResizingComboBox {
-                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
+                    visible: StreamingPreferences.showAdvancedSettings && !settingsPage.vrSettingsMode  // §SETTINGS-ADV／§SETTINGS-MODE
                     // ignore setting the index at first, and actually set it when the component is loaded
                     Component.onCompleted: {
                         var saved_vds = StreamingPreferences.videoDecoderSelection
@@ -2884,6 +2910,7 @@ Flickable {
                 Label {
                     width: parent.width
                     id: resVCCTitle
+                    visible: !settingsPage.vrSettingsMode  // §SETTINGS-MODE：VR 固定 HEVC／8-bit，不看這個
                     text: qsTr("Video codec")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
@@ -2910,6 +2937,7 @@ Flickable {
                     }
 
                     id: codecComboBox
+                    visible: !settingsPage.vrSettingsMode  // §SETTINGS-MODE：VR 固定 HEVC／8-bit，不看這個
                     textRole: "text"
                     model: ListModel {
                         id: codecListModel
@@ -2944,6 +2972,7 @@ Flickable {
 
                 CheckBox {
                     id: enableHdr
+                    visible: !settingsPage.vrSettingsMode  // §SETTINGS-MODE：VR 固定 HEVC／8-bit，不看這個
                     width: parent.width
                     text: qsTr("Enable HDR (Experimental)")
                     font.pointSize: 12
@@ -2970,7 +2999,7 @@ Flickable {
 
                 CheckBox {
                     id: enableYUV444
-                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
+                    visible: StreamingPreferences.showAdvancedSettings && !settingsPage.vrSettingsMode  // §SETTINGS-ADV
                     width: parent.width
                     text: qsTr("Enable YUV 4:4:4 (Experimental)")
                     font.pointSize: 12
@@ -3002,7 +3031,7 @@ Flickable {
 
                 CheckBox {
                     id: unlockBitrate
-                    visible: StreamingPreferences.showAdvancedSettings  // §SETTINGS-ADV
+                    visible: StreamingPreferences.showAdvancedSettings && !settingsPage.vrSettingsMode  // §SETTINGS-ADV
                     width: parent.width
                     text: qsTr("Unlock bitrate limit (Experimental)")
                     font.pointSize: 12

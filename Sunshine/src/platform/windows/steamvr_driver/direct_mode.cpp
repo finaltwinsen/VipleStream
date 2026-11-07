@@ -779,10 +779,17 @@ namespace vrdrv {
     });
     bool acquired = false;
     if (km) {
-      const HRESULT hr = km->AcquireSync(0, 5);
+      // §VR-ACQ-WAIT（2026-11-05）：這把鎖要等 vrcompositor 在 GPU 上的合成做完才放；重的遊戲（ACC）GPU 排在前面，
+      // 放鎖常在 Present 之後 15～20 ms。舊的 5 ms 逾時讓每一張都被丟掉（composed=0、acqTimeout=全部＝頭盔定格）。
+      // 改成最多等 k_acquire_wait_ms，等太久才放棄；超過 5 ms 才拿到的另外計數（acqSlow）。
+      const int64_t acq_t0 = now_qpc();
+      const HRESULT hr = km->AcquireSync(0, k_acquire_wait_ms);
       if (hr == S_OK) {
         acquired = true;
         ++sync_ok_;
+        if (now_qpc() - acq_t0 > ctx_.qpf * 5 / 1000) {
+          ++stat_acq_slow_;
+        }
       } else {
         // WAIT_TIMEOUT 是成功碼（0x102），不能用 SUCCEEDED 判斷
         st.drop_acquire_timeout.fetch_add(1, std::memory_order_relaxed);
@@ -817,8 +824,8 @@ namespace vrdrv {
     if (stat_t0_ == 0) {
       stat_t0_ = present_qpc;
     } else if (present_qpc - stat_t0_ >= 10 * ctx_.qpf) {
-      VRDRV_LOG_INFO("timing 10s: presents=%llu composed=%llu noslot=%llu acqTimeout=%llu noTarget=%llu missed=%llu intervalMaxMs=%.2f layersMax=%u swapsets=%u keyedMutex=%s syncOk=%llu releaseFailed=%llu",
-                     (unsigned long long) stat_presents_, (unsigned long long) stat_composed_, (unsigned long long) stat_noslot_, (unsigned long long) stat_acq_timeout_,
+      VRDRV_LOG_INFO("timing 10s: presents=%llu composed=%llu noslot=%llu acqTimeout=%llu acqSlow=%llu noTarget=%llu missed=%llu intervalMaxMs=%.2f layersMax=%u swapsets=%u keyedMutex=%s syncOk=%llu releaseFailed=%llu",
+                     (unsigned long long) stat_presents_, (unsigned long long) stat_composed_, (unsigned long long) stat_noslot_, (unsigned long long) stat_acq_timeout_, (unsigned long long) stat_acq_slow_,
                      (unsigned long long) stat_no_target_, (unsigned long long) stat_missed_, stat_interval_max_ms_, st.max_layer_count.load(),
                      (unsigned) sets_.size(), sync_mutex_ ? "yes" : (sync_handle_ ? "absent" : "none"), (unsigned long long) sync_ok_, (unsigned long long) sync_release_failed_);
       if (stat_have_l0_) {
@@ -837,7 +844,7 @@ namespace vrdrv {
         }
       }
       stat_t0_ = present_qpc;
-      stat_presents_ = stat_composed_ = stat_noslot_ = stat_acq_timeout_ = stat_no_target_ = stat_missed_ = 0;
+      stat_presents_ = stat_composed_ = stat_noslot_ = stat_acq_timeout_ = stat_acq_slow_ = stat_no_target_ = stat_missed_ = 0;
       stat_interval_max_ms_ = 0.0;
     }
     unlock();

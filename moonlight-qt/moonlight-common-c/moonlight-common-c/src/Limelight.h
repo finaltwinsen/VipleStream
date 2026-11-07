@@ -1158,6 +1158,10 @@ void LiReportVrLoss(uint32_t firstLost, uint32_t lastLost, uint8_t reason);
 // 只在照 §VR-REPAIR-RTT 的規則等待時才會有值，其餘情況恆為 UINT32_MAX。可從任何執行緒呼叫。
 uint32_t LiGetVrRepairQuietMs(void);
 
+// §VR-RATE-AUTO：host 已套用的分頻（每幾張送一張；1＝全速）。影像接收那一側用它把補包的等待上限與幀週期
+// 換成實際的送出週期。收到 S2C_RATE 時呼叫；每場串流開頭自動回到 1。可從任何執行緒呼叫。
+void LiVrSetStreamDiv(uint32_t div);
+
 // §VR-REPAIR-RTT：補包目前照哪一套規則（0＝原本的規則、1＝跟著往返時間走的規則）。只給 log 用。可從任何執行緒呼叫。
 int LiGetVrRepairRules(void);
 

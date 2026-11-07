@@ -426,7 +426,18 @@ namespace vr::latch {
   // ── §VR-LATCH-V3 ──────────────────────────────────────────────────────
 
   int64_t controller_t::stream_period_ns() const {
-    return host_period_ns_ != 0 ? (int64_t) host_period_ns_ : (int64_t) period_ns_;
+    return (host_period_ns_ != 0 ? (int64_t) host_period_ns_ : (int64_t) period_ns_) * stream_div_;
+  }
+
+  void controller_t::set_stream_div(int div) {
+    div = div >= 1 && div <= 4 ? div : 1;
+    if (div == stream_div_) {
+      return;
+    }
+    stream_div_ = div;
+    // 舊分頻收的間隔，前進張數的期望值不同：重收（v3 以外沒有閘門，清了也無妨）
+    v3_clear_gate();
+    have_frame_ = false;
   }
 
   result_t controller_t::hold() const {

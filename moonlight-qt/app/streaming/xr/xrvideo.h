@@ -158,6 +158,8 @@ public:
     // §VR-BUFFER-REFILL：開了緩衝時回傳 true 與累計的挑選結果（顯示「最新的前一張」／「最新的一張」的次數，不歸零）；
     // 沒開緩衝回 false。XR frame thread 每秒放進 CLIENT_TIMING 帶給 host
     bool bufferTotals(uint32_t* lag1, uint32_t* lag0) const;
+    // §VR-RATE-AUTO：host 改了「每幾張送一張」（main thread 收到 S2C_RATE 時設）
+    void setStreamDiv(int div) { m_StreamDiv.store(div >= 2 ? 2 : 1, std::memory_order_relaxed); }
 
     XrVideo(XrContext* ctx, const Config& config);
     ~XrVideo();
@@ -393,6 +395,8 @@ private:
     // §VR-BUFFER-AUTO（frame thread，m_SwMutex）：目前深度與切換判斷（邏輯在 xrbufferauto.h，離線模擬共用）
     int m_BufDepth = 0;                    // 0＝還沒初始化
     xrbuf::AutoDepth m_BufAuto;
+    std::atomic<int> m_StreamDiv {1};      // §VR-RATE-AUTO：串流每張佔幾格（main thread 設、frame thread 讀）
+    uint32_t m_BufShownCount = 0;          // §VR-RATE-AUTO：m_BufLastShown 那一張已經顯示了幾格（m_SwMutex）
     std::atomic<int> m_BufDepthLog{0};     // 給 10 s log 讀
     std::atomic<uint32_t> m_BufUp{0}, m_BufDown{0};
     // §VR-BUFFER 量測（frame thread 寫、影像 render thread 每 10 s 印）：顯示「最新的前一張」／最新的一張（新的）／

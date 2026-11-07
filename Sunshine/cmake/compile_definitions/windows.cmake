@@ -96,6 +96,7 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sc_hid_driver/VipleSCHid.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_platform_win.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_mic_win.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_scene_focus_win.cpp"  # §VR-FOCUS
         # §VR M1b V2：vr_bridge（pipe／shm／ring 貼圖／握手）、admin pipe（--vr-selftest 的 server 端）、
         # selftest 的 Windows 平台層（T0／T2／T6）
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_bridge_win.cpp"

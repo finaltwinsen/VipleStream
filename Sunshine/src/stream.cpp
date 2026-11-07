@@ -51,6 +51,7 @@ extern "C" {
 #include "vr/vr_bridge.h"
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_padmode.h"
+#include "vr/vr_scene_focus.h"
 #include "vr/vr_abr_outage.h"
 #include "vr/vr_abr_fast.h"
 #include "vr/vr_fec_spread.h"
@@ -564,6 +565,7 @@ namespace stream {
     safe::mail_t mail;
 
     std::shared_ptr<input::input_t> input;
+    std::shared_ptr<void> vr_focus;  // §VR-FOCUS：PCVR 期間讓遊戲視窗保持前景
 
     std::thread audioThread;
     std::thread videoThread;
@@ -2600,7 +2602,8 @@ namespace stream {
                         << " state=" << f.state_str()
                         << " block=" << f.ramp_block_reason(now)
                         << " randomLoss=" << f.random_losses()
-                        << " lossRateCuts=" << f.loss_rate_cuts()
+                        << " lossRateCuts=" << f.loss_rate_cuts() << '/' << f.loss_rate_reverts()
+                        << (f.loss_rate_disabled(now) ? "(off)" : "")
                         << " lastCong=" << f.last_congested_kbps() << '/' << f.effective_congested_kbps()
                         << std::format(" rtt base/jit/p50={:.0f}/{:.0f}/{:.0f}ms trend={:.1f} gamma={:.1f} {}", rt.base_ms, rt.jitter_ms, rt.p50_ms,
                                        rt.trend_ms, rt.gamma_ms, ::vr::abr::trend_state_name(rt.state))
@@ -2787,7 +2790,16 @@ namespace stream {
       // §ABR-ADAPT（第 3 期）：畫質飽和（編碼器平均 QP）——飽和時不再加碼，畫質多到用不完時小幅回收
       session->video.vrAbrFast->on_quality(abr_signals::avg_qp_x100.load(std::memory_order_relaxed),
                                            abr_signals::codec.load(std::memory_order_relaxed), abrNow);
+      const int revertsBefore = session->video.vrAbrFast->loss_rate_reverts();
       auto fastTarget = session->video.vrAbrFast->tick(abrNow);
+      if (session->video.vrAbrFast->loss_rate_reverts() != revertsBefore) {
+        // §ABR-LOSSRATE-VERIFY：降碼沒讓隨機丟包變少 -> 撤銷那一刀、規則停用 10 分鐘
+        BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] loss-rate cut reverted: random loss per 10s before="
+                        << std::format("{:.1f}", session->video.vrAbrFast->loss_rate_pre_per10s())
+                        << " after=" << std::format("{:.1f}", session->video.vrAbrFast->loss_rate_post_per10s())
+                        << " (not bitrate-related), restore=" << (fastTarget ? *fastTarget : 0)
+                        << " kbps, rule off for 10 min";
+      }
       if (fastTarget.has_value()) {
         target = *fastTarget;
         fastBitrateChanged = true;
@@ -3010,7 +3022,16 @@ namespace stream {
       }
       // §VR-ABR-OUTAGE：斷訊後安靜 1 s、2 個乾淨視窗、影像確實在送達 → 直接拉回斷訊前的位元率（每次斷訊只拉一次）
       if (session->vr) {
-        const int restored = vr::abr::on_clean(session->video.vrOutage, target, maxBr, abrNow);
+        int restored = vr::abr::on_clean(session->video.vrOutage, target, maxBr, abrNow);
+        // §ABR-RESTORE-STABLE（11-08）：只拉回到斷訊前穩定撐住 10 秒的碼率；允許時一併清掉斷訊連刀觸發的防振盪上限
+        if (restored > target && session->video.vrAbrFast) {
+          const int wanted = restored;
+          restored = session->video.vrAbrFast->on_outage_restored(wanted, abrNow);
+          if (restored <= target) {
+            BOOST_LOG(info) << "[VIPLE-ABR] VR link clean again: not restoring " << wanted << " kbps (stable before outage="
+                            << session->video.vrAbrFast->stable_kbps() << " kbps, now " << target << ")";
+          }
+        }
         if (restored > target) {
           BOOST_LOG(info) << "[VIPLE-ABR] VR link clean again: restoring " << target << " -> " << restored << " kbps (pre-outage bitrate)";
           target = restored;
@@ -3556,7 +3577,8 @@ namespace stream {
             // §ABR-ADAPT（第 3 期）：client 解碼吃緊時不再加碼，跟不上時降一點（不是網路問題）
             if (session->video.vrAbrFast && session->config.monitor.framerate > 0) {
               std::lock_guard<std::mutex> lk(session->video.abrMutex);
-              session->video.vrAbrFast->on_decode((int) ct.decodeP95Us, 1000000 / session->config.monitor.framerate, now);
+              // §VR-RATE-AUTO：半速時每張有兩個 host 週期可以解碼
+              session->video.vrAbrFast->on_decode((int) ct.decodeP95Us, 1000000 / session->config.monitor.framerate * vr_state->rate_div(), now);
             }
             const auto ms = [](int32_t us) {
               return std::format("{:.1f}", us / 1000.0);
@@ -3611,6 +3633,29 @@ namespace stream {
               BOOST_LOG(info) << "[VIPLE-VR-PREDICT] 10s: vsync_to_photons_us=" << s->now_us << " (min " << s->min_us << " max " << s->max_us
                               << ") pose lag ema=" << ms(s->ema_us) << " ms updates=" << s->updates << " windows=" << s->windows;
             }
+          }
+        } else if (type == VIPLE_VR_C2S_RATE && len >= sizeof(VIPLE_VR_TLV_RATE)) {
+          // §VR-RATE-AUTO（2026-11-08）：頭盔要求串流中途改「每幾張送一張」。SteamVR／遊戲照協商的更新率跑，
+          // 編碼執行緒在下一張新影像套用並回 S2C_RATE。送出週期變了，影像批次（與補包）的期限跟著放寬
+          vr_state->count_c2s(type);
+          VIPLE_VR_TLV_RATE req {};
+          std::memcpy(&req, body, sizeof(req));
+          const int fps = session->config.monitor.framerate;
+          const int div = req.div == 2 ? 2 : 1;
+          const bool pcvr = vr_state->negotiated().pcvr;
+          if (req.div < 1 || req.div > 2 || !pcvr || fps <= 0 || fps / div < 45) {
+            BOOST_LOG(info) << "[VIPLE-VR-RATE] refused div=" << (int) req.div << " seq=" << req.seq << " (pcvr=" << pcvr << " fps=" << fps << ")";
+            vr_state->refuse_rate(req.seq);
+          } else {
+            const char *why = req.reason == VIPLE_VR_RATE_REASON_AUTO_DOWN ? "auto-down" :
+                              req.reason == VIPLE_VR_RATE_REASON_AUTO_UP   ? "auto-up" :
+                                                                             "manual";
+            BOOST_LOG(info) << "[VIPLE-VR-RATE] request div=" << div << " seq=" << req.seq << " reason=" << why << " (was " << vr_state->rate_div() << ")";
+            if (session->vrLinks) {
+              const int64_t period_us = 1000000 / fps * div;
+              session->vrLinks->set_video_max_age(std::chrono::microseconds {std::clamp<int64_t>(2 * period_us, 8000, 40000)});
+            }
+            vr_state->request_rate(div, req.seq);
           }
         } else if (type == VIPLE_VR_C2S_MIC) {
           // §VR-MIC：頭盔麥克風（每 20 ms 一則），vr_mic 關掉時照樣丟掉
@@ -4711,7 +4756,8 @@ namespace stream {
             return v.empty() ? 0.0 : v[std::min(v.size() - 1, (size_t) (q * (double) (v.size() - 1) + 0.5))];
           };
           BOOST_LOG(info) << "[VIPLE-VR-TX] 10s: frames=" << v.size() << " presentToFirstPkt p50=" << std::format("{:.2f}", at(0.5))
-                          << "ms p95=" << std::format("{:.2f}", at(0.95)) << "ms transport=rtp";
+                          << "ms p95=" << std::format("{:.2f}", at(0.95)) << "ms transport=rtp"
+                          << (session->vr ? std::format(" rateDiv={} skipped={}", session->vr->rate_div(), session->vr->rate_skipped()) : std::string());
           v.clear();
           session->vrTxLastLog = now;
         }
@@ -5967,6 +6013,7 @@ namespace stream {
           vr_log_lat_summary(&session, true);
         }
         session.vr->set_padmode(nullptr);  // §VR-PADMODE：移除虛擬 Xbox 手把（解構時）
+        session.vr_focus.reset();  // §VR-FOCUS
 #if VIPLE_VR_BRIDGE_HAS_ABI
         if (session.vr->negotiated().pcvr) {
           ::vr::bridge::set_haptic_sink(nullptr);  // M4a R3：先摘 sink，再清 active
@@ -6133,6 +6180,12 @@ namespace stream {
         };
         session.vr->set_padmode(std::make_shared<::vr::padmode::controller_t>(std::move(h)));
         BOOST_LOG(info) << "[VIPLE-VR-PADMODE] enabled for this PCVR session";
+      }
+      // §VR-FOCUS：遊戲視窗不在前景時 Unreal 遊戲會靜音（GRIP 實測），有些還會降速
+      if (session.vr && session.vr->negotiated().pcvr) {
+        session.vr_focus = ::vr::scene_focus::start([]() {
+          return ::vr::bridge::status().scene_pid;
+        });
       }
 #endif
 

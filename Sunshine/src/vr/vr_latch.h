@@ -195,6 +195,10 @@ namespace vr::latch {
      */
     void configure(mode_e mode, int target_pct, uint32_t host_period_ns, const options_t &options = {});
 
+    /// §VR-RATE-AUTO：串流中途改了「每幾張送一張」。節拍閘門與補一張（refill）用的串流週期跟著變；
+    /// 相位的模數不變（送出的幀仍落在 host 虛擬 vsync 上）。閘門的紀錄清掉重收
+    void set_stream_div(int div);
+
     /**
      * @brief 處理一則 LATCH。
      * @param slack_us LATCH.slackUs
@@ -375,6 +379,7 @@ namespace vr::latch {
     int target_pct_ = kTargetPctDefault;
     uint32_t host_period_ns_ = 0;
     options_t options_ {};
+    int stream_div_ = 1;  ///< §VR-RATE-AUTO：host 每幾張送一張（串流週期＝host 週期 × 這個值）
 
     bool have_ema_ = false;
     double ema_ = 0;  ///< legacy：slack 的 EMA；v2：誤差的 EMA

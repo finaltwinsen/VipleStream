@@ -62,6 +62,9 @@ static struct {
 static volatile uint32_t rrDelayedReleaseMs;
 static volatile int rrDelayedAny;
 static volatile int rrRulesNow;
+// §VR-RATE-AUTO：host 目前每幾張送一張（1＝全速）。由 client 在收到 S2C_RATE 時設，影像接收執行緒每個封包讀一次，
+// 用來把補包的等待上限與幀週期換成實際的送出週期。每場串流開頭歸 1
+static volatile uint32_t vrStreamDiv = 1;
 
 // 佇列被整個重設了（§FRZ-WATCHDOG）：它的累計值歸零，這裡留的副本跟著重來，不然下一次取差值會是一個很大的數
 // （交給保險的那兩個會變成幾十億次失敗）
@@ -421,16 +424,11 @@ static void VideoReceiveThreadProc(void* context) {
     uint32_t mlHoldUs = 0;
     int mlHoldPollMs = 0;
     // §VR-REPAIR-RTT：串流的幀週期（不夾；上面的 mlHoldUs 是夾在 4～14 ms 的同一個值）
-    const uint32_t mlFramePeriodUs = StreamConfig.fps > 0 ? 1000000u / (uint32_t)StreamConfig.fps : 11111u;
-    if (mlLinks > 0) {
-        mlHoldUs = mlFramePeriodUs;
-        if (mlHoldUs < 4000) {
-            mlHoldUs = 4000;
-        }
-        if (mlHoldUs > 14000) {
-            mlHoldUs = 14000;
-        }
-    }
+    const uint32_t mlBasePeriodUs = StreamConfig.fps > 0 ? 1000000u / (uint32_t)StreamConfig.fps : 11111u;
+    uint32_t mlFramePeriodUs = mlBasePeriodUs;
+    // §VR-RATE-AUTO：分頻改了就重算（半速時等待上限從約 8 ms 放寬到 14 ms，遠端時救回的幀多很多）
+    uint32_t mlDivApplied = 0;
+    vrStreamDiv = 1;
     int rxLink = -1;
     // §VR-REPAIR-RTT：每場串流重來
     memset(&rr, 0, sizeof(rr));
@@ -826,6 +824,15 @@ static void VideoReceiveThreadProc(void* context) {
             VRRR_IN in;
             VRRR_OUT out;
             const int feat = mlLinks > 0 ? vrmlFeatures() : 0;
+            {
+                const uint32_t div = vrStreamDiv >= 1 && vrStreamDiv <= 4 ? vrStreamDiv : 1;
+                if (div != mlDivApplied) {
+                    mlDivApplied = div;
+                    mlFramePeriodUs = mlBasePeriodUs * div;
+                    // 單一路徑（沒有多連線）時照舊不等：mlHoldUs＝0
+                    mlHoldUs = mlLinks <= 0 ? 0 : (mlFramePeriodUs < 4000 ? 4000 : (mlFramePeriodUs > 14000 ? 14000 : mlFramePeriodUs));
+                }
+            }
             // 上一個封包（與它之後的等待逾時、REPAIR_GONE）是照 RTT 規則處理的，那段時間的結果才交給保險
             const bool prevRtt = rtpQueue.mlRttMode;
             bool haveRtt;
@@ -1109,6 +1116,10 @@ uint32_t LiGetVrRepairQuietMs(void) {
         return UINT32_MAX;
     }
     return (uint32_t)PltGetMillis() - rrDelayedReleaseMs;  // 都是毫秒時戳的低 32 bit，繞回也正確
+}
+
+void LiVrSetStreamDiv(uint32_t div) {
+    vrStreamDiv = div >= 1 && div <= 4 ? div : 1;
 }
 
 int LiGetVrRepairRules(void) {

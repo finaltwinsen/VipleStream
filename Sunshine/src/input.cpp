@@ -25,6 +25,7 @@ extern "C" {
 #include <atomic>
 #include <bitset>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>  // snprintf（§SC-HID driver 0x05 統計格式化）
 #include <mutex>
 #include <cmath>
@@ -183,6 +184,14 @@ namespace input {
     // Sunshine forces the button to be in a specific state until the gamepad state matches that of
     // Moonlight once more.
     button_state_e back_button_state;
+
+    // §VR-PADMODE-SLOT（2026-11-05）：padmode 的虛擬 Xbox 手把要佔 XInput 第 0 格。
+    // 頭盔的 client 會把 Steam Virtual Gamepad（28DE:11FF）回報成手把、session 一開始就佔走第 0 格，
+    // 但它在 VR 裡從頭到尾不送輸入；只讀第一個手把的遊戲於是讀到一支靜止的手把，padmode 看起來完全沒反應。
+    // padmode 開啟時把「從沒送過輸入」的 client 手把先拔掉（parked），等它真的送出非靜止的狀態才插回去。
+    platf::gamepad_arrival_t arrival {};
+    bool seen_input = false;
+    bool parked = false;
   };
 
 #ifdef _WIN32
@@ -1106,6 +1115,9 @@ namespace input {
     }
 
     input->gamepads[packet->controllerNumber].id = id;
+    input->gamepads[packet->controllerNumber].arrival = arrival;
+    input->gamepads[packet->controllerNumber].seen_input = false;
+    input->gamepads[packet->controllerNumber].parked = false;
   }
 
   /**
@@ -1709,6 +1721,35 @@ namespace input {
 
     auto &gamepad = input->gamepads[packet->controllerNumber];
 
+    // §VR-PADMODE-SLOT：每個非靜止的狀態都算「有在用」（搖桿留一點漂移空間）
+    const bool active_state = packet->buttonFlags != 0 || packet->buttonFlags2 != 0 ||
+                              packet->leftTrigger > 8 || packet->rightTrigger > 8 ||
+                              std::abs((int) packet->leftStickX) > 6000 || std::abs((int) packet->leftStickY) > 6000 ||
+                              std::abs((int) packet->rightStickX) > 6000 || std::abs((int) packet->rightStickY) > 6000;
+
+    if (gamepad.parked) {
+      if (!(packet->activeGamepadMask & (1 << packet->controllerNumber))) {
+        gamepad.parked = false;  // client 移除了它，不必再插回
+        return;
+      }
+      if (!active_state) {
+        return;
+      }
+      auto id = alloc_id(gamepadMask);
+      if (id < 0) {
+        return;
+      }
+      if (platf::alloc_gamepad(platf_input, {id, (uint8_t) packet->controllerNumber}, gamepad.arrival, input->feedback_queue)) {
+        free_id(gamepadMask, id);
+        return;
+      }
+      gamepad.id = id;
+      gamepad.parked = false;
+      gamepad.gamepad_state = {};
+      BOOST_LOG(info) << "[VIPLE-VR-PADMODE] client gamepad " << (int) packet->controllerNumber
+                      << " sent input, plugged back in as pad=" << id;
+    }
+
     // If this is an event for a new gamepad, create the gamepad now. Ideally, the client would
     // send a controller arrival instead of this but it's still supported for legacy clients.
     if ((packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id < 0) {
@@ -1809,6 +1850,9 @@ namespace input {
     platf::gamepad_update(platf_input, gamepad.id, gamepad_state);
 
     gamepad.gamepad_state = gamepad_state;
+    if (active_state) {
+      gamepad.seen_input = true;
+    }
   }
 
   enum class batch_result_e {
@@ -2299,6 +2343,28 @@ namespace input {
     }
     // 在 task pool 執行緒上建立並等結果（一般手把的 alloc／update／free 都在這條執行緒，避免與它們並行碰 ViGEm 的陣列）
     auto fut = task_pool.push([input]() -> int {
+      // §VR-PADMODE-SLOT：先拔掉從沒送過輸入的 client 手把，讓 padmode 的手把拿到 XInput 第 0 格
+      bool parked_any = false;
+      for (size_t i = 0; i < input->gamepads.size(); ++i) {
+        auto &g = input->gamepads[i];
+        if (g.id < 0 || g.seen_input) {
+          continue;
+        }
+        if (g.back_timeout_id) {
+          task_pool.cancel(g.back_timeout_id);
+          g.back_timeout_id = nullptr;
+        }
+        BOOST_LOG(info) << "[VIPLE-VR-PADMODE] client gamepad " << i << " (pad=" << g.id
+                        << ") never sent input, unplugged so the VR pad gets the first slot";
+        free_gamepad(platf_input, g.id);
+        g.id = -1;
+        g.parked = true;
+        g.gamepad_state = {};
+        parked_any = true;
+      }
+      if (parked_any) {
+        std::this_thread::sleep_for(200ms);  // 等 XInput 收回那一格再插新的
+      }
       const int id = alloc_id(gamepadMask);
       if (id < 0) {
         return -1;

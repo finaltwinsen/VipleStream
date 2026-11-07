@@ -660,6 +660,14 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
                 }
             }
             break;
+        case VIPLE_VR_S2C_RATE:
+            // §VR-RATE-AUTO：host 套用（或拒絕）了「每幾張送一張」
+            if (len >= sizeof(VIPLE_VR_TLV_RATE_APPLIED) && m_XrContext != nullptr) {
+                VIPLE_VR_TLV_RATE_APPLIED a;
+                memcpy(&a, payload, sizeof(a));
+                m_XrContext->onPcvrRateApplied(a.div, a.accepted != 0, a.seq);
+            }
+            break;
         case VIPLE_VR_S2C_STATS: {
             // 欄位只往後加：依 len 能讀多少算多少。計數欄位是 session 累計值
             //（STATS 走 UNSEQUENCED，掉一筆不會漏算），區間值 = 兩個快照相減
@@ -2950,6 +2958,8 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     xo.preferredRefreshHz = m_XrPcvr ? static_cast<float>(m_Preferences->vrRefreshHz) : 0.0f;
     xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
     xo.pcvrSynth = m_XrPcvr && m_Preferences->vrHalfRate && m_Preferences->vrSynth;  // §VR-SYNTH：只在半速串流時有意義
+    // §VR-RATE-AUTO（2026-11-08）：全速串流時網路不穩就要求 host 中途改半速（開場就選半速時不作用）
+    xo.pcvrRateAuto = m_XrPcvr && m_Preferences->vrRateAuto && !m_Preferences->vrHalfRate;
     // §VR-BUFFER：頭盔端多緩衝一格吸收到達抖動（設定 vrbufferframes，預設 1）。2.0.25 加了設定與 XR 端，這裡一直漏接，
     // 緩衝實際上從沒開過——遠端（行動網路，到達抖動約 10 ms＞一格 8.3 ms）每 10 s 約 200 張重複＋200 張跳過（2026-11-04）
     // §VR-BUFFER-AUTO（11-04）：自動時 swapchain 照最多 2 格配置，實際深度由 XrVideo 依重複幀在 1、2 之間切換
@@ -3314,6 +3324,14 @@ bool Session::setupXrPcvr()
         m_VrLaunch.displayHz = hz;
         m_XrContext->setPcvrStreamDiv(2);  // §VR-LATCH-WAIT：串流一幀佔兩個顯示格（沒有新影像的那一格不等）
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SESSION] half-rate: display %d Hz, stream %d Hz", hz, hz / 2);
+    }
+    else {
+        // §VR-RATE-AUTO：每一場從全速開始（上一場可能停在自動半速）
+        m_XrContext->setPcvrStreamDiv(1);
+        m_XrContext->resetPcvrRate();
+        if (m_Preferences->vrRateAuto && !m_Preferences->vrHalfRate) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-RATE] automatic frame rate on: %d Hz, drops to %d Hz while the network is unstable", hz, hz / 2);
+        }
     }
     if (!vi.timeConversion) {
         m_VrLaunch.caps &= ~VIPLE_VR_CLIENT_CAP_TRACK_THREAD;  // frameloop 模式

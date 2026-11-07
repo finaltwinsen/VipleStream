@@ -3381,3 +3381,40 @@ TEST(VrLatchTest, V2AcquireOnlyDuringOpening) {
   }
   EXPECT_EQ(r.step_why, vr::latch::kStepAcq);
 }
+
+// §VR-RATE-AUTO（2026-11-08）：串流中途降成半速時，host 虛擬 vsync 照 120 Hz 跑、frameId 只前進一半。
+// 沒告訴控制器的話節拍閘門一直關著（前進張數只有協商幀率的五成 < 七成）；set_stream_div(2) 之後閘門照常會開
+TEST(VrLatchTest, StreamDivKeepsV3GateOpenAtHalfRate) {
+  constexpr int32_t on_target = 3333;
+  {
+    controller_t c;
+    c.configure(mode_e::v3, 40, kPeriod120);
+    int64_t now = 0;
+    uint32_t id = 0;
+    vr::latch::result_t r;
+    for (int i = 0; i < 20; ++i) {
+      now += kStepNs;
+      id += 6;  // 每 100 ms 只有 6 張（半速）
+      r = c.on_latch(on_target, kPeriod120, now, id);
+    }
+    EXPECT_FALSE(r.gate_open);
+  }
+  {
+    controller_t c;
+    c.configure(mode_e::v3, 40, kPeriod120);
+    c.set_stream_div(2);
+    int64_t now = 0;
+    uint32_t id = 0;
+    vr::latch::result_t r;
+    for (int i = 0; i < 20; ++i) {
+      now += kStepNs;
+      id += 6;
+      r = c.on_latch(on_target, kPeriod120, now, id);
+    }
+    EXPECT_TRUE(r.gate_open);
+    // 升回全速：閘門紀錄重收，之後照 12 張／100 ms 也會開
+    c.set_stream_div(1);
+    r = feed_v3(c, on_target, 20, now, id);
+    EXPECT_TRUE(r.gate_open);
+  }
+}

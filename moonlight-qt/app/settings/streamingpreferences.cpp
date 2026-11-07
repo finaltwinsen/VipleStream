@@ -89,6 +89,7 @@
 #define SER_VRLATCHDELAYMS "vrlatchdelayms"
 #define SER_VRLATCHDELAYMIG "vrlatchdelaymig1029"
 #define SER_VRHALFRATE "vrhalfrate"
+#define SER_VRRATEAUTO "vrrateauto"
 #define SER_VR10BIT "vr10bit"
 #define SER_VRTRACKLOCK "vrtracklock"
 #define SER_VRTRACKRELOCK "vrtrackrelock"
@@ -336,6 +337,7 @@ void StreamingPreferences::reload()
         settings.setValue(SER_VRLATCHDELAYMIG, true);
     }
     vrHalfRate = settings.value(SER_VRHALFRATE, false).toBool();
+    vrRateAuto = settings.value(SER_VRRATEAUTO, true).toBool();
     vr10Bit = settings.value(SER_VR10BIT, false).toBool();
     vrTrackLock = settings.value(SER_VRTRACKLOCK, true).toBool();
     vrTrackRelock = settings.value(SER_VRTRACKRELOCK, false).toBool();
@@ -688,6 +690,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_VRBUFFERAUTO, vrBufferAuto);
     settings.setValue(SER_VRLATCHDELAYMS, vrLatchDelayMs);
     settings.setValue(SER_VRHALFRATE, vrHalfRate);
+    settings.setValue(SER_VRRATEAUTO, vrRateAuto);
     settings.setValue(SER_VR10BIT, vr10Bit);
     settings.setValue(SER_VRTRACKLOCK, vrTrackLock);
     settings.setValue(SER_VRTRACKRELOCK, vrTrackRelock);

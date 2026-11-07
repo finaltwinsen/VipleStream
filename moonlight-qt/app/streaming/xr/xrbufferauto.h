@@ -25,6 +25,7 @@ namespace xrbuf {
         uint64_t sinceUs = 0;    // 上次切換的時刻
         uint32_t starve = 0;     // 視窗內的缺貨格數
         uint32_t ups = 0, downs = 0;
+        uint32_t sameRun = 0;    // §VR-RATE-AUTO：這一張已經連續重複幾格
 
         void reset(int maxD)
         {
@@ -34,14 +35,17 @@ namespace xrbuf {
             starve = 0;
         }
 
-        // 每顯示一格呼叫一次（shown＝這一格顯示的序號、lastShown＝上一格、newest＝目前最新）。回傳深度有沒有變
-        bool step(uint64_t shown, uint64_t lastShown, uint64_t newest, uint64_t now)
+        // 每顯示一格呼叫一次（shown＝這一格顯示的序號、lastShown＝上一格、newest＝目前最新）。回傳深度有沒有變。
+        // §VR-RATE-AUTO：div＝串流每張佔幾格（半速 2）。半速時每張本來就顯示兩格，重複到第 div 格以上才算缺貨；
+        // 「只剩最新一張」那一條只在全速時算（半速時最新那一張還有一格可以顯示）
+        bool step(uint64_t shown, uint64_t lastShown, uint64_t newest, uint64_t now, int div = 1)
         {
             if (winUs == 0) {
                 winUs = now;
                 sinceUs = now;
             }
-            if (shown == lastShown || (depth >= 2 && shown == newest)) {
+            sameRun = shown == lastShown ? sameRun + 1 : 0;
+            if ((shown == lastShown && sameRun >= static_cast<uint32_t>(div < 1 ? 1 : div)) || (div <= 1 && depth >= 2 && shown == newest)) {
                 starve++;
             }
             const int before = depth;

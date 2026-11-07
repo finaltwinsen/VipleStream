@@ -307,6 +307,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
 #define VIPLE_VR_C2S_NACK              0x0B  // §VR-LINK-REPAIR：只走連線的 DATA（不走 ENet）
 #define VIPLE_VR_C2S_HOTSPOT_INFO      0x0C  // reliable，§VR-HOTSPOT-AUTO
 #define VIPLE_VR_C2S_MIC               0x0D  // §VR-MIC：VR channel unsequenced，每 20 ms 一則：{u16 seq（LE）, Opus 封包}（48 kHz 單聲道）
+#define VIPLE_VR_C2S_RATE              0x0E  // reliable，§VR-RATE-AUTO：要求 host 每幾張送一張（VIPLE_VR_TLV_RATE）
 #define VIPLE_VR_C2S_RESERVED_MIC      0x7F  // 舊保留值（未使用；新版改用 0x0D）
 
 // S→C subtype
@@ -319,6 +320,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
 #define VIPLE_VR_S2C_LINK_READY        0x07  // reliable，§VR-MULTILINK
 #define VIPLE_VR_S2C_REPAIR_GONE       0x08  // §VR-LINK-REPAIR：只走連線的 T_S2C
 #define VIPLE_VR_S2C_LINK_ADDRS        0x09  // reliable，§VR-MULTILINK-HOTADD：server 目前可廣告的位址完整快照
+#define VIPLE_VR_S2C_RATE              0x0B  // reliable，§VR-RATE-AUTO：host 已套用的分頻（VIPLE_VR_TLV_RATE_APPLIED）
 #define VIPLE_VR_S2C_NOTICE            0x0A  // reliable，§VR-PADMODE：要在頭盔裡短暫顯示的提示，payload {u8 code}（VIPLE_VR_NOTICE_*）
 
 // NOTICE.code（不認得的代碼略過）
@@ -376,6 +378,25 @@ typedef struct _VIPLE_VR_TLV_LOSS {
     uint32_t lastLost;   // 幀號（含）
     uint8_t  reason;     // VIPLE_VR_LOSS_*
 } VIPLE_VR_TLV_LOSS;
+
+// §VR-RATE-AUTO（2026-11-08）：串流中途切換「每幾張送一張」。SteamVR 與遊戲照協商的更新率跑（driver 的虛擬 vsync
+// 不變），host 只編碼、送出每 div 張中的一張；頭盔每張顯示 div 格（轉頭由頭盔的重投影補）。只在 host 端的串流率
+// ／div ≥ 45 Hz 時接受。舊 host 不認得 C2S_RATE、不會回 S2C_RATE，client 就維持全速。
+#define VIPLE_VR_RATE_REASON_AUTO_DOWN  1  // 自動：網路不穩，降
+#define VIPLE_VR_RATE_REASON_AUTO_UP    2  // 自動：試著升回
+#define VIPLE_VR_RATE_REASON_MANUAL     3
+typedef struct _VIPLE_VR_TLV_RATE {
+    uint8_t  div;       // 1＝全速、2＝半速
+    uint8_t  reason;    // VIPLE_VR_RATE_REASON_*
+    uint16_t seq;       // client 的要求序號（S2C 回帶，對得上才算這次要求的結果）
+} VIPLE_VR_TLV_RATE;
+
+typedef struct _VIPLE_VR_TLV_RATE_APPLIED {
+    uint8_t  div;         // host 現在的分頻（拒絕時是原本的值）
+    uint8_t  accepted;    // 1＝照要求套用、0＝拒絕（串流率太低、不是 PCVR 等）
+    uint16_t seq;         // 對應的要求序號
+    uint32_t firstFrame;  // 從這個幀號（NV_VIDEO_PACKET.frameIndex）起照新的分頻送
+} VIPLE_VR_TLV_RATE_APPLIED;
 
 typedef struct _VIPLE_VR_TLV_LATCH {
     uint32_t frameId;
@@ -614,6 +635,8 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_FRAME_HEADER) == VIPLE_VR_FRAME_HEADER_SI
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_FRAME_HEADER_GAZE) == VIPLE_VR_FRAME_HEADER_GAZE_SIZE, frame_header_gaze_32);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LOSS) == 9, tlv_loss_9);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LATCH) == 12, tlv_latch_12);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_RATE) == 4, tlv_rate_4);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_RATE_APPLIED) == 8, tlv_rate_applied_8);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_REFRESH_START) == 6, tlv_refresh_6);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_CLIENT_TIMING) == 44, tlv_client_timing_44);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATE) == 4, tlv_state_4);
