@@ -283,6 +283,8 @@ bool VulkanH264Decoder::BeginPicture(VkParserPictureData *pnvpd)
         }
         // DPB
         h264->frame_num = dpb[iCur].FrameNum;
+        h264->IdrPicFlag = slh->IdrPicFlag ? 1 : 0;              // VipleStream（B062）
+        h264->idr_pic_id = (uint16_t)slh->idr_pic_id;            // 只在 IdrPicFlag 時有意義（slice header 才會帶）
         h264->CurrFieldOrderCnt[0] = dpb[iCur].TopFieldOrderCnt;
         h264->CurrFieldOrderCnt[1] = dpb[iCur].BottomFieldOrderCnt;
 

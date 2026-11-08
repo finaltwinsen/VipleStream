@@ -1744,7 +1744,9 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
     StdVideoDecodeH264PictureInfo stdPicInfo = {};
     // intra_pic_flag is generic (not in h264 union); is_intra in std flags follows.
     stdPicInfo.flags.is_intra              = ppd->intra_pic_flag ? 1 : 0;
-    stdPicInfo.flags.IdrPicFlag            = ppd->intra_pic_flag ? 1 : 0;  // IDR ≈ intra in our streaming
+    // §REVIEW B062（2026-11-08）：用 parser 解出的 IdrPicFlag／idr_pic_id。之前以 intra_pic_flag 代替，intra refresh
+    // 或非 IDR 的 I 幀會被誤標成 IDR（驅動會清掉參考幀），idr_pic_id 一律 0（連續兩張 IDR 時規格要求不同的值）
+    stdPicInfo.flags.IdrPicFlag            = h264.IdrPicFlag ? 1 : 0;
     stdPicInfo.flags.is_reference          = ppd->ref_pic_flag ? 1 : 0;
     stdPicInfo.flags.field_pic_flag        = ppd->field_pic_flag ? 1 : 0;
     stdPicInfo.flags.bottom_field_flag     = ppd->bottom_field_flag ? 1 : 0;
@@ -1752,8 +1754,7 @@ bool VkFrucRenderer::submitDecodeFrameH264(VkParserPictureData* ppd)
     stdPicInfo.seq_parameter_set_id        = h264.seq_parameter_set_id;
     stdPicInfo.pic_parameter_set_id        = h264.pic_parameter_set_id;
     stdPicInfo.frame_num                   = (uint16_t)h264.frame_num;
-    stdPicInfo.idr_pic_id                  = 0;  // parser doesn't expose; driver
-                                                 // typically tolerates 0 for streaming
+    stdPicInfo.idr_pic_id                  = h264.IdrPicFlag ? h264.idr_pic_id : 0;
     stdPicInfo.PicOrderCnt[0]              = h264.CurrFieldOrderCnt[0];
     stdPicInfo.PicOrderCnt[1]              = h264.CurrFieldOrderCnt[1];
 

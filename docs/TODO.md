@@ -59,11 +59,11 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   **待驗**：配戴時遊戲裡的手指動作（Alyx、Moss 這類會顯示手的遊戲）。
 - **不修（已查明無害）**：遊戲啟動時 `Failed to find device container 100000001` 等滿 2 秒 `Initial config load timed out`。
   時好時壞、跟手把加入時機無關（手把在遊戲連上前 10 s 就啟用了）；逾時後 binding 照常載入，11-04 那場桌球就是逾時的場次、手把正常。
-- **§VR-WHEEL（2.0.72，未提交）**：手把模式時兩支手把像握方向盤一樣轉＝左搖桿 X；設定頁開關＋轉向角度（180／270／360／540／900°），
+- **§VR-WHEEL（2.0.72，v2.0.75 已提交）**：手把模式時兩支手把像握方向盤一樣轉＝左搖桿 X；設定頁開關＋轉向角度（180／270／360／540／900°），
   串流中兩支搖桿同時按住 1.5 秒切換（結果寫回設定）。開關與角度放在 0x5506 左手輸入的保留位元組，舊版兩端忽略。host 單元測試 14 項過；
-  頭盔 dev 2.0.72 已建在樹莓派倉庫、host 已是 2.0.73。**待驗（頭盔不在家）**：配戴 ACC／GRIP 試手感、快捷鍵提示、轉超過 90 度與轉身時的穩定度。
+  頭盔 dev 已是 2.0.96、host 2.0.95。**待驗（頭盔不在家）**：配戴 ACC／GRIP 試手感、快捷鍵提示、轉超過 90 度與轉身時的穩定度。
 
-### §AUTO-UPDATE 各平台自動更新（2.0.73，未提交；預設自動安裝）
+### §AUTO-UPDATE 各平台自動更新（2.0.73，v2.0.75 已提交；預設自動安裝）
 - host：`update_mode`（off／notify／install，預設 install），開機 3 分鐘後、之後每天查；連續 10 分鐘沒人串流才裝。host 2.0.73 已確認
   `auto check` 會跑（最新 2.0.63，判定已是最新）。電腦版：設定頁「軟體更新」，啟動時在電腦／程式清單才自動裝。Android：gemini 寫、我修過，
   release 編譯過。Steam Frame：安裝腳本裝 `viplestream-update.timer`（每 6 小時），讀 app 的 `updatemode`。
@@ -93,7 +93,7 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 4. **解碼端**：各平台硬體解碼的輸出延遲（Android 解碼器常多緩衝 1～2 張）、零複製。**狀態：未開始**
 5. **輸入延遲**：滑鼠鍵盤與手把從 client 到 host 的路徑（批次、Nagle、優先權）。**狀態：相對滑鼠完成（2.0.89）**——量測：client `--input-test`（每 4 ms ±1 px）＋host `[VIPLE-INPUT10]`（到達間隔 p50/p95/p99/max、>20 ms 次數；順帶修好：加密控制通道的輸入從沒經過舊的 [VIPLE-INPUT-GAP] 診斷）。限速 15 Mbps A/B：可靠傳送在解除限速時卡 279／526 ms，不等 ACK（`--input-test-unreliable`）就沒有 → 新增累計位移封包 `SS_MOUSE_MOVE_REL_CUM_MAGIC 0x5500000A`（{seq, cumX, cumY}，UNSEQUENCED、每筆送兩份，host 依 seq 去重、位移＝累計差），host 宣告 `<VipleStreamInput>1` 才用。G 組整場 100 s **超過 20 ms 的間隔 0 次、最大 16 ms**。剩下：按鍵／鍵盤／手把按鈕仍是可靠傳送（漏一個按下或放開會錯，要另外設計）；Android client 用同一份 common-c，重建就會用新封包（還沒在手機上驗）。
 
-### §VR-NETSEL 網路狀態自動選擇＋§VR-MIC 頭盔麥克風（2.0.75，未提交、頭盔不在家）
+### §VR-NETSEL 網路狀態自動選擇＋§VR-MIC 頭盔麥克風（v2.0.75 已提交；頭盔不在家、待驗）
 - **§VR-NETSEL**：安裝腳本裝 `viplestream-netmode.service`（app 寫 netmode-request.json 心跳；5 秒沒更新、轉接器沒連線、6 小時上限都會交還
   wlan0）；app `vrnetmode.h` 在 VR 串流中量 B（家用＋轉接器）與 C（只用轉接器）各 20 秒，比每秒新影像數，選順的並記住地點（家用 SSID 雜湊，14 天重測）。
   設定頁「VR 網路」：自動／一律保留家用 Wi-Fi／串流時暫停家用 Wi-Fi，另有「下次重測」。**待驗**：服務在使用者工作階段能不能 `nmcli device set wlan0 managed no`；
@@ -118,17 +118,20 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 
 ### 2.0.59 待驗（§ABR-ADAPT、§TS-PATH、§VR-BUFFER-AUTO、§REVIEW-1104）
 - **頭盔配戴**：11-04 晚網路差的時段（單向延遲常跳 250 ms）緩衝自動停在 2 格、塞車點放寬有作用，使用者認為比舊版穩。
-  **還沒驗**：網路好（在家）時會不會回到並停在 1 格。
+  11-08 在家（2.0.97）兩場整場停在 2 格：退回門檻 30 秒 < 15 格「少一格就缺貨」在 144 Hz 碰不到（穩定段 14～91 格／10 s），
+  退回的話這些都會變重複，流暢優先先維持。
 - **頭盔 Tailscale operator**：頭盔端 rebind 要 `sudo tailscale set --operator=steamos` 一次（使用者執行），沒做的話頭盔只能 ping、中繼恢復較慢。
 - **§VR-RATE-AUTO（2.0.96，自動半速，不重開 session）**：11-08 配戴一場（144 Hz）升降時機正確、半速節奏鎖有效（3 格以上重複每 10 s 0～1）。
-  **還沒定**：斷流很多的那段（網路短暫中斷）要不要排除在降速判斷外（11-08 02:33 那次是中斷觸發的）；降解析度那一半（第 4 期另一半）沒做。
+  2.0.97 起長凍結（每 5 s 視窗 ≥3 次）＝中斷，不算降速理由；11-08 下午在家兩場開場短重複 63／71 被擋下、整場全速（`temp/launchertest/ml/worn_1108_lan/`）。
+  **還沒做**：降解析度那一半（第 4 期另一半）。
   Windows／Linux x64 client 還沒建這一版（設定頁依模式顯示也在裡面）。
 - **§ABR-LOSSRATE-VERIFY／§ABR-RESTORE-STABLE（2.0.94～95）**：11-08 配戴看到兩者都有動作（撤銷 3 次、不拉回沒撐住的碼率）；再看幾場遠端的碼率曲線。
 - **補幀畫面目視**：vkfruc_interp 4-tap shader 第一次真的生效（5 月 24e98950 的 .frag 從沒重編）。NCNN（RIFE）後端輸出全黑仍在。
 - **沒有環境驗的**：relay 打洞改用 STUN 實際埠（Qt＋Android，要沒有 Tailscale 的外網）；Android 開 MP-QUIC 時行動網路保活與 Wi-Fi→行動網路接手（要有 SIM 的手機、host 可從外網連）；Linux VAAPI 實機。
 - **2.0.63 發佈後可驗**：host 常駐圖示走一次真實的「Check for updates」（§SELF-UPDATE）、電腦版 client 更新對話框的摘要（§UPDATE-NOTES）、Windows 更新等 90 s 不覆蓋的提示視窗。
 - **Android 低於 9 的相容分支**：minSdk 已是 28，舊分支可另外清（不要夾在 bug 修正裡）。
-- **審查剩下沒修的**：B062 nvvideoparser 第三方 parser 補 `IdrPicFlag`／`idr_pic_id`（原生 Vulkan 解碼預設關）；relay 經 proxy 時的身分（/resume、/cancel 會被擋，決策維持）。
+- **審查剩下沒修的**：relay 經 proxy 時的身分（/resume、/cancel 會被擋，決策維持）。B062（nvvideoparser 補 `IdrPicFlag`／`idr_pic_id`）2.0.97 已補，
+  Windows client 還沒編譯過（原生 Vulkan 解碼預設關）。
 
 ### Linux 安裝包與更新摘要（2.0.33）
 

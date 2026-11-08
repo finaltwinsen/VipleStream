@@ -230,6 +230,10 @@ typedef struct VkParserH264PictureData {
             };
         } svcext;
     };
+    // VipleStream（2026-11-08，審查 B062）：slice header 已經解出來、原本沒交出去的兩個欄位。放在結構最後，前面欄位的位置不變。
+    // Vulkan 的 StdVideoDecodeH264PictureInfo 要正確的 IdrPicFlag／idr_pic_id；之前用 intra_pic_flag 代替、idr_pic_id 填 0
+    uint8_t IdrPicFlag;
+    uint16_t idr_pic_id;
 } VkParserH264PictureData;
 
 typedef struct VkParserHevcPictureData {

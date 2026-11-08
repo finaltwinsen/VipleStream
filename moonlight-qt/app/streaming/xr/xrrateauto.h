@@ -10,7 +10,8 @@
 // 半速 200 秒 1 張。
 //
 // 規則（5 秒一個視窗）：
-//   降：全速時，最近 3 個視窗合計 ≥ kDownSum，而且至少 2 個視窗各 ≥ kDownEach。
+//   降：全速時，最近 3 個視窗合計 ≥ kDownSum，而且至少 2 個視窗各 ≥ kDownEach；這 3 個視窗都不能是中斷
+//       （斷流 ≥ kOutageStalls 次，11-08 使用者：中斷不觸發降速）。
 //   升：半速滿 upDwell（起始 60 秒），而且最近 kUpWindows 個視窗每個都 ≤ kUpMax、每 15 秒合計 ≤ kUpSum15、沒有斷流 → 試著升回全速。
 //   試升：升回後 kProbeUs 內最新視窗 ≥ kProbeFail、且和前一個合計 ≥ kProbeFailSum → 退回半速，upDwell 加倍（上限 10 分鐘）；撐過就把 upDwell 還原。
 //   開場 kStartSettleUs、每次切換後 kSwitchSettleUs 內不判斷（切換那一刻的重複是切換本身造成的）。
@@ -49,6 +50,10 @@ namespace xrrate {
         // 偶爾一個 5 秒冒出十幾格就會判失敗（離線模擬重現），白白退回半速再等兩倍時間
         static constexpr uint32_t kProbeFail = 12;
         static constexpr uint32_t kProbeFailSum = 22;
+        // 11-08 使用者：網路中斷不要觸發降速（半速救不了）。一個視窗裡斷流 ≥ kOutageStalls 次＝這段是中斷，
+        // 降速與試升失敗都不拿它判斷；最近 3 個視窗有中斷就先等（中斷過後 15 秒再看）。只有零星 1～2 次斷流的
+        // 視窗照算——一直很差的網路（11-08 00:33）也常有零星長空檔，那正是半速有用的情況
+        static constexpr uint32_t kOutageStalls = 3;
         static constexpr uint64_t kReplyTimeoutUs = 3000000ull;
         static constexpr int kMaxRetries = 3;
         static constexpr int kHist = 8;
@@ -149,6 +154,7 @@ namespace xrrate {
         uint32_t downs() const { return m_Downs; }
         uint32_t ups() const { return m_Ups; }
         uint32_t probeFails() const { return m_ProbeFails; }
+        uint32_t outageSkips() const { return m_OutageSkips; }  // 因為最近有中斷而沒做降速判斷的次數
         // 最近一個完成的視窗（log 用）
         const Window& lastWindow() const { return m_Hist[(m_HistHead + kHist - 1) % kHist]; }
         uint32_t recentSum(int n) const
@@ -162,6 +168,7 @@ namespace xrrate {
 
     private:
         const Window& hist(int back) const { return m_Hist[(m_HistHead + kHist - 1 - back) % kHist]; }
+        static bool outage(const Window& w) { return w.stalls >= kOutageStalls; }
 
         void closeRun()
         {
@@ -228,8 +235,8 @@ namespace xrrate {
                 // 試升期間：一個視窗就判
                 if (m_ProbeUntilUs != 0) {
                     if (nowUs < m_ProbeUntilUs) {
-                        const uint32_t prev = m_HistN >= 2 ? hist(1).shortRep : 0;
-                        if (hist(0).shortRep >= kProbeFail && hist(0).shortRep + prev >= kProbeFailSum) {
+                        const uint32_t prev = m_HistN >= 2 && !outage(hist(1)) ? hist(1).shortRep : 0;
+                        if (!outage(hist(0)) && hist(0).shortRep >= kProbeFail && hist(0).shortRep + prev >= kProbeFailSum) {
                             m_Decision = Request {2, Reason::ProbeFail, false};
                         }
                         return;
@@ -239,6 +246,12 @@ namespace xrrate {
                 }
                 if (m_DownRefused || m_HistN < 3) {
                     return;
+                }
+                for (int i = 0; i < 3; ++i) {
+                    if (outage(hist(i))) {
+                        ++m_OutageSkips;
+                        return;
+                    }
                 }
                 uint32_t sum = 0;
                 int each = 0;
@@ -292,6 +305,7 @@ namespace xrrate {
         uint64_t m_UpDwellUs = kUpDwellStartUs;
         uint64_t m_ProbeUntilUs = 0;
         uint32_t m_Downs = 0, m_Ups = 0, m_ProbeFails = 0;
+        uint32_t m_OutageSkips = 0;
     };
 
 }  // namespace xrrate

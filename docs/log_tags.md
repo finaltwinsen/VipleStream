@@ -362,10 +362,10 @@ VR 相關 tag 只在 VR session 出現：client 帶 `--display-target pcvr`，�
 
 - client：`automatic frame rate on: 120 Hz, drops to 60 Hz ...`（開場）；`request div=<1|2> seq=<n> (<原因>): short repeats last 15 s=<格> , last 5 s=<格> stalls=<次>; next try after <秒> s`；
   `host applied|refused div=<n> (seq=<n>)`；host 不回時 `automatic frame rate is off for this session`。
-  `[VIPLE-VR-MTP10]` 尾端 `| rate div=<1|2> short15s=<格> downs= ups= probeFails=`。
+  `[VIPLE-VR-MTP10]` 尾端 `| rate div=<1|2> short15s=<格> downs= ups= probeFails= outageSkips=`（outageSkips＝最近有中斷而沒判斷降速的次數）。
 - 判斷（`streaming/xr/xrrateauto.h`）：只算預期外、連續不超過 6 格的重複（更長的是斷流，半速救不了）。5 秒一個視窗；
-  降＝最近 3 個視窗合計 ≥ 45 且至少 2 個視窗各 ≥ 10；升＝半速滿 60 秒（試升失敗後加倍，上限 10 分鐘）且最近 30 秒每個視窗 ≤ 4、沒有斷流；
-  升回後 30 秒內任一視窗 ≥ 15 就退回半速。開場 15 秒、每次切換後 4 秒不判斷。
+  降＝最近 3 個視窗合計 ≥ 45 且至少 2 個視窗各 ≥ 10、而且 3 個都不是中斷（斷流 ≥ 3 次的視窗＝網路中斷，不觸發降速；試升失敗也不看它）；升＝半速滿 60 秒（試升失敗後加倍，上限 10 分鐘）且最近 30 秒每個視窗 ≤ 10、每 15 秒合計 ≤ 22、沒有斷流；
+  升回後 30 秒內最新視窗 ≥ 12 且和前一個合計 ≥ 22 就退回半速。半速且自動緩衝 2 格時鎖住每張顯示兩格（節奏鎖）。開場 15 秒、每次切換後 4 秒不判斷。
 - server：`[VIPLE-VR-RATE] request div=<n> seq=<n> reason=auto-down|auto-up|manual (was <n>)`、`refused ...`、
   `applied div=<n> from f=<幀號> (stream <fps> fps, skipped so far <n>)`；`[VIPLE-VR-TX] 10s` 尾端 `rateDiv=<n> skipped=<累計>`。
 

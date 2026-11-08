@@ -3700,13 +3700,14 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
                          t.latchSkip10s, t.rrSeen10s == 3u ? "m" : (t.rrSeen10s == 2u ? "1" : "0"),
                          // §VR-RATE-AUTO：目前的分頻與判斷器的統計（自動開著才印）
                          m_Options.pcvrRateAuto
-                             ? qUtf8Printable(QString(" | rate div=%1 short15s=%2 downs=%3 ups=%4 probeFails=%5%6")
+                             ? qUtf8Printable(QString(" | rate div=%1 short15s=%2 downs=%3 ups=%4 probeFails=%5 outageSkips=%7%6")
                                                   .arg(m_RateDiv.load(std::memory_order_relaxed))
                                                   .arg(m_RateAuto.recentSum(3))
                                                   .arg(m_RateAuto.downs())
                                                   .arg(m_RateAuto.ups())
                                                   .arg(m_RateAuto.probeFails())
-                                                  .arg(m_RateAuto.disabled() ? " off" : ""))
+                                                  .arg(m_RateAuto.disabled() ? " off" : "")
+                                                  .arg(m_RateAuto.outageSkips()))
                              : "");
         t.repRunMax10s = t.repRunGe3 = t.repRunGe5 = 0;
         t.latchSkip10s = 0;
