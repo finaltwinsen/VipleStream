@@ -210,6 +210,11 @@ namespace vripc_abi_table {
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, fovea_slew_dps),
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, fovea_max_mdeg),
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, fovea_deadband_mdeg),
+      VRIPC_ABI_ROW_OFF(vripc_session_config_t, fovea_inset_u0),  // §VR-FOVEA-INSET（2026-11-09）：reserved 前 2 位元組
+      VRIPC_ABI_ROW_OFF(vripc_session_config_t, tile_w),  // §VR-FOVEA-TILES（2026-11-10）：reserved 的第 3～10 位元組
+      VRIPC_ABI_ROW_OFF(vripc_session_config_t, tile_h),
+      VRIPC_ABI_ROW_OFF(vripc_session_config_t, tile_render_w),
+      VRIPC_ABI_ROW_OFF(vripc_session_config_t, tile_render_h),
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, reserved),
       VRIPC_ABI_ROW_SIZE(vripc_pacing_t),
       VRIPC_ABI_ROW_ALIGN(vripc_pacing_t),

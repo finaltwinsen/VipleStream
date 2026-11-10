@@ -185,8 +185,8 @@ namespace vr::orchestrator {
       vripc_session_config_t c {};
       c.eye_width = static_cast<uint32_t>(p.eye_width);
       c.eye_height = static_cast<uint32_t>(p.eye_height);
-      c.packed_width = c.eye_width * 2;
-      c.packed_height = c.eye_height;
+      c.packed_width = static_cast<uint32_t>(neg.packed_width());  // §VR-FOVEA-TILES：分塊時是 2×每塊
+      c.packed_height = static_cast<uint32_t>(neg.packed_height());
       c.dxgi_format = VRIPC_DXGI_FORMAT_B8G8R8A8_UNORM;
       c.refresh_mhz = static_cast<uint32_t>(p.hz) * 1000u;
       c.period_ns = p.period_ns > 0 ? static_cast<uint64_t>(p.period_ns) : 1000000000ull / static_cast<uint64_t>(std::max(1, p.hz));
@@ -284,8 +284,24 @@ namespace vr::orchestrator {
         c.render_scale_pct = (uint16_t) std::max(100, cap * 100 / (int) c.eye_width);
       }
       // §VR-FOVEA：client 要求、而且是真的 driver 才開（協商回應裡的 fovea= 用同一個條件）
-      c.fovea_pct = (uint16_t) (neg.pcvr && p.fovea > 100 && p.fovea <= 250 ? p.fovea : 100);
-      if (c.fovea_pct > 100) {
+      // §VR-FOVEA-TILES：分塊時不做幾何變形（fovea_pct 維持 100），改帶每塊尺寸
+      c.fovea_pct = (uint16_t) (neg.pcvr && p.fovea > 100 && p.fovea <= 250 && !neg.tiles() ? p.fovea : 100);
+      if (neg.pcvr && neg.tiles()) {
+        c.tile_w = (uint16_t) p.tile_w;
+        c.tile_h = (uint16_t) p.tile_h;
+        c.tile_render_w = (uint16_t) p.tile_render_w;
+        c.tile_render_h = (uint16_t) p.tile_render_h;
+        BOOST_LOG(info) << "[VIPLE-VR-ORCH] foveation tiles: " << c.tile_w << 'x' << c.tile_h << " per tile, packed " << c.packed_width << 'x'
+                        << c.packed_height << ", gaze tile = native crop of the " << c.tile_render_w << 'x' << c.tile_render_h << " render";
+      }
+      // §VR-FOVEA-INSET：協商時算好的分段曲線（0＝三次曲線）
+      c.fovea_inset_u0 = (uint16_t) (c.fovea_pct > 100 && p.fovea_inset_u0 >= 1000 && p.fovea_inset_u0 <= 9000 ? p.fovea_inset_u0 : 0);
+      if (c.fovea_pct > 100 && c.fovea_inset_u0 > 0) {
+        const float a = 100.0f / c.fovea_pct, u0 = c.fovea_inset_u0 / 10000.0f;
+        BOOST_LOG(info) << "[VIPLE-VR-ORCH] foveated encoding (inset): centre density " << c.fovea_pct << "% over "
+                        << (int) (u0 * 100.0f + 0.5f) << "% of the encoded image (" << (int) (a * u0 * 100.0f + 0.5f)
+                        << "% of the view), edge " << (int) (100.0f * (1.0f - u0) / (1.0f - a * u0) + 0.5f) << "%";
+      } else if (c.fovea_pct > 100) {
         BOOST_LOG(info) << "[VIPLE-VR-ORCH] foveated encoding: centre density " << c.fovea_pct << "% of uniform (edge "
                         << (int) (100.0f / (3.0f - 200.0f / c.fovea_pct) + 0.5f) << "%)";
       }
@@ -294,7 +310,8 @@ namespace vr::orchestrator {
         c.fovea_flags = VRIPC_FOVEA_F_GAZE;
         c.fovea_slew_dps = (uint32_t) (config::vr.fovea_gaze_slew_dps < 30 ? 30 : config::vr.fovea_gaze_slew_dps > 600 ? 600 : config::vr.fovea_gaze_slew_dps);
         c.fovea_max_mdeg = 20000;
-        c.fovea_deadband_mdeg = 1500;
+        // §VR-FOVEA-TILES：注視點那塊完全清楚的範圍有二十幾度，視線偏 2° 內不必移（少一次移動＝少一次編碼成本）
+        c.fovea_deadband_mdeg = neg.tiles() ? 2000 : 1500;
         BOOST_LOG(info) << "[VIPLE-VR-GAZE] session config: flags=0x" << std::hex << c.fovea_flags << std::dec
                         << " slew=" << c.fovea_slew_dps << "dps deadband=" << c.fovea_deadband_mdeg << "mdeg max=" << c.fovea_max_mdeg << "mdeg";
       }

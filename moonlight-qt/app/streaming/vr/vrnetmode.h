@@ -12,6 +12,15 @@
 //
 // 評分：XR 顯示迴圈「拿到新影像」的格數（每秒）。兩個量測窗都在同一場、同樣設定下量，比的是相對差：
 // 缺額＝1 − 新影像率／串流幀率。C 的缺額至少少 0.5 個百分點、而且至少少兩成才選 C（差不多時保留家用 Wi-Fi，頭盔才有網路）。
+//
+// §VR-NETSEL-HOLD（2026-11-08 傍晚實測後）：
+//   - 每次要暫停／接回家用 Wi-Fi 之前先通知 host（netSwitch），那幾秒的掉包不拿來降碼。接回家用 Wi-Fi 時單一無線電
+//     要重新連線，熱點跟著掉約 20 秒；舊版 host 把它當塞車，一路降到 2 Mbps、90 秒才回到 60 Mbps。
+//   - 開場暖身 20 → 40 秒：遊戲載入的卡頓一直延續到第 33 秒，B 的量測窗被它拖累（0.43% 裡大半是開場）。
+//   - 只有不順時才測（使用者 11-08 決定）：暫停再接回家用 Wi-Fi 會讓頭盔的 Steam 登出、重新登入，登入後 steamwebhelper
+//     幾乎每次崩潰（Steam 的 bug，SteamVR 介面重啟）。所以每場先只量 B（不切換、沒有副作用），缺額 < kTestThreshold
+//     就保留家用 Wi-Fi、不記住（下次照樣先量 B）。選 C 的條件本來就要 B − C ≥ 0.5 個百分點，B 低於這個值不可能選 C。
+//     B 不順時：這個地點 14 天內已經測過、選了 B，就不再切（不重複觸發介面重啟）；沒測過或要求重測才去量 C。
 #pragma once
 
 #include <QCoreApplication>
@@ -35,11 +44,14 @@ public:
     // 設定頁的「VR 網路」（vrnetmode）：0＝自動測試並選擇（預設）、1＝一律保留家用 Wi-Fi、2＝一律只用轉接器
     enum Pref { kAuto = 0, kKeepHome = 1, kAdapterOnly = 2 };
 
-    static constexpr uint32_t kWarmupMs = 20000;    // 開場先等串流穩定
+    static constexpr uint32_t kWarmupMs = 40000;    // 開場先等串流穩定（遊戲載入的卡頓實測延續到 33 秒）
+    static constexpr int kPauseHoldMs = 8000;       // §VR-NETSEL-HOLD：暫停家用 Wi-Fi 時 host 多久內不因掉包降碼
+    static constexpr int kResumeHoldMs = 20000;     // 接回家用 Wi-Fi：重新連線約 12 秒，熱點掉包實測約 20 秒
     static constexpr uint32_t kWindowMs = 20000;    // 每個狀態量 20 秒
     static constexpr uint32_t kApplyTimeoutMs = 20000;
     static constexpr uint32_t kSettleMs = 6000;     // 切換後等連線重新穩定
     static constexpr int kRetestDays = 14;
+    static constexpr double kTestThreshold = 0.005;  // B 的缺額到這麼多才值得暫停家用 Wi-Fi 去比 C
 
     VrNetMode(int pref, bool retest, int streamFps) : m_Pref(pref), m_Retest(retest), m_Fps(streamFps > 0 ? streamFps : 90)
     {
@@ -63,6 +75,8 @@ public:
     VrNetMode& operator=(const VrNetMode&) = delete;
 
     std::function<void(const QString&)> toast;  // 頭盔裡的提示（main thread）
+    /// §VR-NETSEL-HOLD：要切網路了（phase＝VIPLE_VR_NET_SWITCH_*，1＝暫停家用 Wi-Fi、2＝接回），請 host 在 holdMs 內別因掉包降碼
+    std::function<void(int phase, int holdMs)> netSwitch;
 
     /// main loop 每圈呼叫；newFrames＝XR 顯示迴圈累計拿到新影像的格數
     void tick(uint32_t nowMs, uint64_t newFrames)
@@ -108,21 +122,17 @@ public:
                 m_State = State::Done;
                 return;
             }
-            if (!m_Retest && !m_Loc.isEmpty()) {
-                const QString remembered = rememberedChoice();
-                if (remembered == QLatin1String("C")) {
-                    log(QStringLiteral("remembered for this location: adapter only"));
-                    applyAdapterOnly(nowMs, true);
-                    m_State = State::Done;
-                    return;
-                }
-                if (remembered == QLatin1String("B")) {
-                    log(QStringLiteral("remembered for this location: keep home Wi-Fi"));
-                    m_State = State::Done;
-                    return;
-                }
+            // §VR-NETBENCH（11-08 使用者決定）：遊戲中不再比較網路。「自動」只套用這個地點存下的選擇（之後由設定頁的
+            // 「測試網路」量出來）；沒有存過就保留家用 Wi-Fi。舊的量測流程（MeasureB 之後）留著給測試功能沿用，這裡不再進入
+            if (!m_Loc.isEmpty() && rememberedChoice() == QLatin1String("C")) {
+                log(QStringLiteral("saved for this location: adapter only"));
+                applyAdapterOnly(nowMs, true);
             }
-            say(QCoreApplication::translate("VrNetMode", "Network test: comparing the headset's connections (about 1 minute)"));
+            else {
+                log(QStringLiteral("no saved choice for adapter-only here; keeping home Wi-Fi"));
+            }
+            m_State = State::Done;
+            return;
             log("test: measuring B (home Wi-Fi + adapter)");
             beginWindow(nowMs, newFrames);
             m_State = State::MeasureB;
@@ -134,7 +144,19 @@ public:
             }
             m_DeficitB = endWindow(nowMs, newFrames);
             log(QStringLiteral("test: B deficit %1%").arg(m_DeficitB * 100.0, 0, 'f', 2));
+            if (m_DeficitB < kTestThreshold && !m_Retest) {
+                log("test: smooth with home Wi-Fi; not switching (adapter-only could not win by enough)");
+                m_State = State::Done;
+                return;
+            }
+            if (m_RememberedB && !m_Retest) {
+                log("test: not smooth, but this location was already tested and home Wi-Fi won; not switching again");
+                m_State = State::Done;
+                return;
+            }
+            say(QCoreApplication::translate("VrNetMode", "Network test: trying adapter only for about 30 seconds (home Wi-Fi pauses, then comes back)"));
             m_Want = Want::AdapterOnly;
+            notifySwitch(1, kPauseHoldMs);
             writeRequest(nowMs, true);
             m_StateMs = nowMs;
             m_State = State::ApplyC;
@@ -235,6 +257,7 @@ private:
     {
         m_Want = Want::AdapterOnly;
         m_AppliedMs = nowMs;
+        notifySwitch(1, kPauseHoldMs);
         writeRequest(nowMs, true);
         if (announce) {
             say(QCoreApplication::translate("VrNetMode", "Home Wi-Fi paused during VR for a smoother stream - it reconnects when you stop streaming"));
@@ -243,8 +266,20 @@ private:
 
     void backToNormal(uint32_t nowMs)
     {
+        if (m_Want == Want::AdapterOnly) {
+            notifySwitch(2, kResumeHoldMs);
+        }
         m_Want = Want::Normal;
         writeRequest(nowMs, false);
+    }
+
+    void notifySwitch(int phase, int holdMs)
+    {
+        if (netSwitch) {
+            netSwitch(phase, holdMs);
+        }
+        log(QStringLiteral("asked the host not to cut the bitrate for %1 s while %2").arg(holdMs / 1000)
+                .arg(phase == 1 ? QStringLiteral("home Wi-Fi pauses") : QStringLiteral("home Wi-Fi reconnects")));
     }
 
     void beginWindow(uint32_t nowMs, uint64_t newFrames)
@@ -350,4 +385,5 @@ private:
     uint32_t m_WinStartMs = 0;
     uint64_t m_WinStartFrames = 0;
     double m_DeficitB = 0.0;
+    bool m_RememberedB = false;  // 這個地點 14 天內測過、選了 B
 };

@@ -3,6 +3,8 @@ import QtQuick.Controls 2.2
 import QtQuick.Controls.Material 2.2
 
 import ComputerManager 1.0
+import VrLauncher 1.0
+import VrNetBench 1.0
 
 // §VR-SHELL（2026-10-20）：頭盔 VR 介面的外殼。不是視窗：backend/xrshell.cpp 用 QQuickRenderControl 把它畫在離屏的
 // QQuickWindow 裡，讀回成圖片貼到 XR 面板上，控制器射線轉成滑鼠事件送回來。內容與平面視窗共用 AppContent.qml。
@@ -46,6 +48,21 @@ Item {
         id: appContent
         anchors.fill: parent
         focus: true
+    }
+
+    // §VR-NETBENCH（dev，--dev-netbench）：主機一上線就開始網路測試；主機還沒上線時每 5 秒再試，最多 2 分鐘
+    Timer {
+        property int tries: 0
+        interval: 5000
+        repeat: true
+        running: VrNetBench.devAutoStart
+        onTriggered: {
+            tries++
+            if (VrNetBench.running || VrNetBench.start(VrLauncher, ComputerManager) || tries >= 24) {
+                console.log("[VIPLE-VR-NETBENCH] dev auto start: " + (VrNetBench.running ? "started" : "gave up: " + VrNetBench.status))
+                stop()
+            }
+        }
     }
 
     Component.onCompleted: {

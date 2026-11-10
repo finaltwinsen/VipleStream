@@ -131,14 +131,7 @@ namespace vrdrv {
     eye_h_ = eye_h;
     eye_rect_[0] = math::fov_to_rect(cfg.fov_tan[0]);
     eye_rect_[1] = math::fov_to_rect(cfg.fov_tan[1]);
-    fovea_a_ = cfg.fovea_pct > 100 && cfg.fovea_pct <= 250 ? 100.0f / (float) cfg.fovea_pct : 0.0f;
-    fovea_flags_ = cfg.fovea_flags;
-    fovea_slew_dps_ = cfg.fovea_slew_dps ? cfg.fovea_slew_dps : 200;
-    fovea_max_mdeg_ = cfg.fovea_max_mdeg ? cfg.fovea_max_mdeg : 20000;
-    fovea_deadband_mdeg_ = cfg.fovea_deadband_mdeg ? cfg.fovea_deadband_mdeg : 1500;
-    fovea_centre_init_ = false;
-    saccade_frozen_ = false;
-    low_vel_samples_ = 0;
+    load_fovea_config_locked(cfg);
     act_luid_ = luid;
     unlock();
     vsync_.activate(ctx_.qpf, cfg.refresh_mhz, now_qpc());
@@ -426,6 +419,126 @@ namespace vrdrv {
     return sync_mutex_.Get();
   }
 
+  // 注視點編碼（§VR-FOVEA／§VR-FOVEA-INSET／§VR-GAZE-FOVEA）與分塊（§VR-FOVEA-TILES）的設定。Activate 與每個
+  // generation 的 TEXTURES 都呼叫：這些只影響我們自己怎麼合成，SteamVR 不知道，所以不必等 SteamVR 重開。
+  // 2026-11-10 之前只在 Activate 載入一次——SteamVR 沒關、下一場換了注視點設定時 driver 還照舊的畫。
+  void direct_mode_t::load_fovea_config_locked(const vripc_session_config_t &cfg) {
+    fovea_a_ = cfg.fovea_pct > 100 && cfg.fovea_pct <= 250 ? 100.0f / (float) cfg.fovea_pct : 0.0f;
+    fovea_u0_ = fovea_a_ > 0.0f && cfg.fovea_inset_u0 >= 1000 && cfg.fovea_inset_u0 <= 9000 ? (float) cfg.fovea_inset_u0 / 10000.0f : 0.0f;
+    fovea_flags_ = cfg.fovea_flags;
+    fovea_slew_dps_ = cfg.fovea_slew_dps ? cfg.fovea_slew_dps : 200;
+    fovea_max_mdeg_ = cfg.fovea_max_mdeg ? cfg.fovea_max_mdeg : 20000;
+    fovea_deadband_mdeg_ = cfg.fovea_deadband_mdeg ? cfg.fovea_deadband_mdeg : 1500;
+    fovea_centre_init_ = false;
+    saccade_frozen_ = false;
+    low_vel_samples_ = 0;
+    // ipc_proto 的 check_config 已經驗過尺寸關係；這裡再擋一次不合理的值（當成不分塊）
+    const bool tiles_ok = cfg.tile_w >= 64 && cfg.tile_h >= 64 && cfg.tile_render_w > cfg.tile_w && cfg.tile_render_h > cfg.tile_h;
+    const bool changed = (tiles_ok ? cfg.tile_w : 0u) != tile_w_ || (tiles_ok ? cfg.tile_h : 0u) != tile_h_ ||
+                         (tiles_ok ? cfg.tile_render_w : 0u) != tile_render_w_ || (tiles_ok ? cfg.tile_render_h : 0u) != tile_render_h_;
+    tile_w_ = tiles_ok ? cfg.tile_w : 0;
+    tile_h_ = tiles_ok ? cfg.tile_h : 0;
+    tile_render_w_ = tiles_ok ? cfg.tile_render_w : 0;
+    tile_render_h_ = tiles_ok ? cfg.tile_render_h : 0;
+    tile_gaze_tx_ = 0.0f;
+    tile_gaze_ty_ = 0.0f;
+    tile_gaze_init_ = false;
+    tile_last_valid_qpc_ = 0;
+    if (tiles_ok && changed) {
+      VRDRV_LOG_INFO("[VIPLE-VR-FOVEA] tiles: %ux%u per tile (ring %ux%u), gaze tile = native crop of the %ux%u render, gaze=%d deadband=%u mdeg",
+                     (unsigned) cfg.tile_w, (unsigned) cfg.tile_h, (unsigned) cfg.tile_w * 2u, (unsigned) cfg.tile_h * 2u, (unsigned) cfg.tile_render_w,
+                     (unsigned) cfg.tile_render_h, (cfg.fovea_flags & VRIPC_FOVEA_F_GAZE) ? 1 : 0, (unsigned) fovea_deadband_mdeg_);
+    } else if (!tiles_ok && changed) {
+      VRDRV_LOG_INFO("[VIPLE-VR-FOVEA] tiles off (fovea a=%.3f u0=%.3f)", fovea_a_, fovea_u0_);
+    }
+  }
+
+  // §VR-FOVEA-TILES（2026-11-10）：注視點那塊的左上角（算圖像素，兩眼各自）。
+  //  - 視線有效：新的視線方向和「已採用的」差超過死區才採用，一次移到位——不限速、掃視途中也跟。
+  //    11-10 配戴（分段曲線）：掃視凍結（>250°/s）＋每秒最多 200° 讓一次 20° 的掃視要約 100 ms 才移到，
+  //    使用者看得到邊緣先糊再清楚。分塊之後移動注視點那塊對編碼器只是平移、全視野那塊完全不動，不必再限速。
+  //  - 視線中斷不到 0.5 秒（眨眼）：留在原位；更久（沒戴、追蹤掉了）回到正前方。
+  //  - 沒有協商眼動：固定在正前方。
+  // 位置對齊整數像素、夾在影像內。取「最新」的追蹤樣本（視線不需要對到算繪時刻，越新越好）。
+  void direct_mode_t::tile_origin_locked(int64_t present_qpc, uint16_t org[2][2]) {
+    bool valid = false;
+    float tx = 0.0f, ty = 0.0f;
+    if ((fovea_flags_ & VRIPC_FOVEA_F_GAZE) != 0 && gen_) {
+      vripc_tracking_slot_t trk_slot {};
+      uint64_t trk_idx = 0;
+      bool torn = false;
+      // 目標時刻給到一秒後＝取目標時刻最晚的那一筆（最新的樣本）
+      const bool read_ok = gen_->read_tracking_closest_target(present_qpc + ctx_.qpf, trk_slot, trk_idx, &torn);
+      if (read_ok && (trk_slot.flags & VRIPC_TRK_F_GAZE) != 0 && trk_slot.gaze_conf > 0 && trk_slot.gaze_sample_age_ms < 250) {
+        const float yaw = half_to_float(trk_slot.gaze_yaw_f16);
+        const float pitch = half_to_float(trk_slot.gaze_pitch_f16);
+        // 不是有限值、或超過 ±85°（tan 爆掉）就當這次沒有（§REVIEW-1103 B035-1）
+        if (std::isfinite(yaw) && std::isfinite(pitch) && std::fabs(yaw) <= 1.48f && std::fabs(pitch) <= 1.48f) {
+          tx = std::tan(yaw);
+          ty = std::tan(pitch);
+          valid = true;
+        }
+      }
+      if (valid) {
+        ++stat_gaze_valid_;
+        tile_last_valid_qpc_ = present_qpc;
+      } else {
+        ++stat_gaze_stale_;
+      }
+    }
+    if (valid) {
+      // 兩個方向 (tx, ty, 1) 的夾角
+      const float ax = tile_gaze_tx_, ay = tile_gaze_ty_;
+      const float dot = (ax * tx + ay * ty + 1.0f) / std::sqrt((ax * ax + ay * ay + 1.0f) * (tx * tx + ty * ty + 1.0f));
+      const float deg = std::acos(dot > 1.0f ? 1.0f : dot < -1.0f ? -1.0f : dot) * (180.0f / 3.14159265358979323846f);
+      if (!tile_gaze_init_ || deg * 1000.0f >= (float) fovea_deadband_mdeg_) {
+        tile_gaze_tx_ = tx;
+        tile_gaze_ty_ = ty;
+        if (tile_gaze_init_) {
+          ++stat_tile_moves_;
+        }
+        tile_gaze_init_ = true;
+      }
+    } else if (tile_gaze_init_ && (tile_last_valid_qpc_ == 0 || present_qpc - tile_last_valid_qpc_ > ctx_.qpf / 2)) {
+      tile_gaze_tx_ = 0.0f;
+      tile_gaze_ty_ = 0.0f;
+      tile_gaze_init_ = false;
+    }
+    for (int e = 0; e < 2; ++e) {
+      const float ew = eye_rect_[e].right - eye_rect_[e].left;
+      const float eh = eye_rect_[e].bottom - eye_rect_[e].top;
+      // 視線在本眼影像裡的位置（正規化；y 由上緣算，rect 的 bottom 是上緣的 tangent）
+      const float cx = ew > 1e-6f ? (tile_gaze_tx_ - eye_rect_[e].left) / ew : 0.5f;
+      const float cy = eh > 1e-6f ? (eye_rect_[e].bottom - tile_gaze_ty_) / eh : 0.5f;
+      const long max_x = (long) tile_render_w_ - (long) tile_w_;
+      const long max_y = (long) tile_render_h_ - (long) tile_h_;
+      long ox = std::lround(cx * (float) tile_render_w_ - 0.5f * (float) tile_w_);
+      long oy = std::lround(cy * (float) tile_render_h_ - 0.5f * (float) tile_h_);
+      if (ox < 0 || ox > max_x || oy < 0 || oy > max_y) {
+        if (valid) {
+          ++stat_gaze_clamped_;
+        }
+        ox = ox < 0 ? 0 : ox > max_x ? max_x : ox;
+        oy = oy < 0 ? 0 : oy > max_y ? max_y : oy;
+      }
+      org[e][0] = (uint16_t) ox;
+      org[e][1] = (uint16_t) oy;
+      tile_last_org_[e][0] = org[e][0];
+      tile_last_org_[e][1] = org[e][1];
+    }
+    if (stat_gaze_last_log_ == 0 || present_qpc - stat_gaze_last_log_ >= (int64_t) (10 * ctx_.qpf)) {
+      VRDRV_LOG_INFO("[VIPLE-VR-GAZE] host: tiles originL=(%u,%u) originR=(%u,%u) of %ux%u valid=%llu stale=%llu moves=%llu clamped=%llu",
+                     (unsigned) org[0][0], (unsigned) org[0][1], (unsigned) org[1][0], (unsigned) org[1][1], (unsigned) tile_render_w_, (unsigned) tile_render_h_,
+                     (unsigned long long) stat_gaze_valid_, (unsigned long long) stat_gaze_stale_, (unsigned long long) stat_tile_moves_,
+                     (unsigned long long) stat_gaze_clamped_);
+      stat_gaze_last_log_ = present_qpc;
+      stat_gaze_valid_ = 0;
+      stat_gaze_stale_ = 0;
+      stat_tile_moves_ = 0;
+      stat_gaze_clamped_ = 0;
+    }
+  }
+
   void direct_mode_t::compose_and_publish_locked(int64_t present_qpc, uint32_t &exit_code) {
     last_presented_ = false;
     auto &st = ctx_.ipc->status();
@@ -496,6 +609,13 @@ namespace vrdrv {
     if (layer_count_ > 0) {
       const float pred = std::isfinite(layers_[0].pred_s) ? layers_[0].pred_s : 0.0f;
       t_target_qpc = layers_[0].submit_qpc + (int64_t) ((double) pred * (double) ctx_.qpf);
+    }
+
+    // §VR-FOVEA-TILES：分塊時注視點那塊的左上角（算圖像素）；下面的曲線中心那一段不會跑（fovea_a_＝0）
+    const bool tiles_active = tile_w_ > 0;
+    uint16_t tile_org[2][2] = {{0, 0}, {0, 0}};
+    if (tiles_active) {
+      tile_origin_locked(present_qpc, tile_org);
     }
 
     const bool fovea_active = (fovea_a_ >= 0.4f && fovea_a_ < 0.999f) && ((fovea_flags_ & VRIPC_FOVEA_F_GAZE) != 0);
@@ -666,7 +786,20 @@ namespace vrdrv {
     }
 
     auto *ctx = device_.ctx();
-    comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, fovea_a_, fovea_active ? fovea_out_centre : nullptr);
+    if (tiles_active) {
+      tile_layout_t tl;
+      tl.tile_w = tile_w_;
+      tl.tile_h = tile_h_;
+      for (int e = 0; e < 2; ++e) {
+        tl.origin[e][0] = (float) tile_org[e][0] / (float) tile_render_w_;
+        tl.origin[e][1] = (float) tile_org[e][1] / (float) tile_render_h_;
+      }
+      tl.cover[0] = (float) tile_w_ / (float) tile_render_w_;
+      tl.cover[1] = (float) tile_h_ / (float) tile_render_h_;
+      comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, 0.0f, nullptr, 0.0f, &tl);
+    } else {
+      comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, fovea_a_, fovea_active ? fovea_out_centre : nullptr, fovea_u0_);
+    }
     const uint64_t value = ++R.fence_n;
     HRESULT hr = device_.ctx4()->Signal(R.shared_fence.Get(), value);
     ctx->Flush();  // 跨行程 CPU 觀察需要（§B.7）
@@ -695,9 +828,18 @@ namespace vrdrv {
     d.present_qpc = present_qpc;
     d.submit_qpc = submit_qpc;
     d.render_rot[3] = 1.0f;
-    std::memcpy(d.fovea_centre, fovea_out_centre, sizeof(d.fovea_centre));
-    if (fovea_active) {
+    if (tiles_active) {
+      // §VR-FOVEA-TILES：這四欄改放左上角的像素座標。server 乘 65535 四捨五入成 u16 上線，值不變（≤ 65535 的整數）
+      for (int e = 0; e < 2; ++e) {
+        d.fovea_centre[e][0] = (float) tile_org[e][0] / 65535.0f;
+        d.fovea_centre[e][1] = (float) tile_org[e][1] / 65535.0f;
+      }
       d.flags |= VRIPC_FRM_FOVEATED;
+    } else {
+      std::memcpy(d.fovea_centre, fovea_out_centre, sizeof(d.fovea_centre));
+      if (fovea_active) {
+        d.flags |= VRIPC_FRM_FOVEATED;
+      }
     }
     if (layer_count_ > 0) {
       // 第 0 層＝scene：mHmdPose 是 SteamVR 世界空間；renderPose(client 空間) = Δ_cur⁻¹ · mHmdPose（S2-06、§E.2）
@@ -916,9 +1058,13 @@ namespace vrdrv {
         VRDRV_LOG_WARN("textures gen=%llu result=reject reason=adapter-mismatch (K20: direct-mode device lives until Cleanup)", (unsigned long long) gen->id());
         return;
       }
-      if (activated_ && (msg.width != 2 * eye_w_ || msg.height != eye_h_)) {
+      // K20：Activate 之後每眼尺寸不可變（SteamVR 的建議算圖尺寸、眼的 viewport 都照它）。ring 的尺寸則看這個
+      // generation 的設定——§VR-FOVEA-TILES 分塊時是 (2·tile_w)×(2·tile_h)，同一次 SteamVR 執行期間下一場可以換檔位
+      const vripc_session_config_t &gcfg = gen->config();
+      if (activated_ && (gcfg.eye_width != eye_w_ || gcfg.eye_height != eye_h_ || msg.width != gcfg.packed_width || msg.height != gcfg.packed_height)) {
         r.reject_reason = VRIPC_REJ_TEXTURE_INVALID;
-        VRDRV_LOG_WARN("textures gen=%llu result=reject reason=k20-size ring=%ux%u activated=%ux%u", (unsigned long long) gen->id(), msg.width, msg.height, 2 * eye_w_, eye_h_);
+        VRDRV_LOG_WARN("textures gen=%llu result=reject reason=k20-size ring=%ux%u config eye=%ux%u packed=%ux%u activated eye=%ux%u", (unsigned long long) gen->id(),
+                       msg.width, msg.height, gcfg.eye_width, gcfg.eye_height, gcfg.packed_width, gcfg.packed_height, eye_w_, eye_h_);
         return;
       }
       HRESULT hr = ensure_device_locked(&luid);
@@ -939,6 +1085,8 @@ namespace vrdrv {
       ring->generation = gen->id();
       ring->space_epoch = gen->config().space_epoch;
       ring->layout_epoch = gen->config().layout_epoch;
+      // 注視點／分塊照這個 generation 的設定（Activate 時載入的是 HMD 建立當下那個 generation 的）
+      load_fovea_config_locked(gcfg);
       ring_ = ring;
       gen_ = gen;
       frame_id_ = 0;

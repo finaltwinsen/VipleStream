@@ -8,7 +8,8 @@ cbuffer layer_cb : register(b0) {
   float4 uv_rect;  // u0, v0（上）, u1, v1（下）
   uint mode;  // 0 SRGB 視圖（取樣已是 linear）、1 UNORM 視為 sRGB 編碼（原樣）、2 float linear
   uint force_alpha;  // B8G8R8X8：alpha 未定義 → 1
-  uint2 pad;
+  uint fovea_mode;  // §VR-FOVEA-TILES：1＝注視點那塊（fovea＝裁切的左上角 xy、大小 zw）；0＝看 fovea.x
+  uint pad;
   float4 fovea;  // §VR-FOVEA：x＝a（0＝關）。開的時候四邊形蓋滿本眼的 viewport，uv 改成本眼影像的座標（左上 0,0）
 };
 
@@ -22,7 +23,7 @@ vs_out main(uint id : SV_VertexID) {
   const float fx = (id & 1) ? 1.0 : 0.0;
   const float fy = (id & 2) ? 1.0 : 0.0;
   vs_out o;
-  if (fovea.x > 0.0) {
+  if (fovea.x > 0.0 || fovea_mode != 0) {
     o.pos = float4(lerp(-1.0, 1.0, fx), lerp(1.0, -1.0, fy), 0.0, 1.0);
     o.uv = float2(fx, fy);
     return o;

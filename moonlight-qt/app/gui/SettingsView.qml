@@ -8,6 +8,7 @@ import ComputerManager 1.0
 import SdlGamepadKeyNavigation 1.0
 import SystemProperties 1.0
 import VrLauncher 1.0
+import VrNetBench 1.0
 
 Flickable {
     id: settingsPage
@@ -381,11 +382,12 @@ Flickable {
                 // 寬度跟著最長的選項，初始化時要自己算一次
                 AutoResizingComboBox {
                     id: vrEyeComboBox
-                    property var values: [1152, 1440, 1728, 2160]
-                    model: ["1152 x 1152", "1440 x 1440", "1728 x 1728", "2160 x 2160"]
+                    property var values: [1152, 1440, 1728, 2016, 2160, 2304]
+                    model: ["1152 x 1152", "1440 x 1440", "1728 x 1728", "2016 x 2016", "2160 x 2160", "2304 x 2304"]
                     Component.onCompleted: {
                         var i = values.indexOf(StreamingPreferences.vrEyeWidth)
-                        currentIndex = i >= 0 ? i : values.length - 1
+                        // 不在清單裡的值（例如舊設定）退回 1440，不再跳到最大的選項
+                        currentIndex = i >= 0 ? i : values.indexOf(1440)
                         recalculateWidth()
                     }
                     onActivated: {
@@ -451,30 +453,38 @@ Flickable {
                     ToolTip.text: qsTr("Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.")
                 }
 
+                // §VR-FOVEA-TILES（2.0.122）：關／小／中／大。開著時每眼送兩塊影像——整個視野縮小的一塊，加上視線所在位置
+                // 原生細節的一塊；大小決定每塊多大（存 vrFoveaTiles：1 小、2 中、3 大）。關＝vrFoveation 100，其餘＝200。
+                // 2.0.121 以前是 關／1.25x／1.5x／2x（變形式注視點的強度），舊值只要 >100 就當成開著
                 Label {
                     width: parent.width
-                    text: qsTr("Sharper centre (foveated encoding)")
+                    text: qsTr("Sharper where you look (foveated streaming)")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
                 }
 
                 AutoResizingComboBox {
                     id: vrFoveationComboBox
-                    property var values: [100, 125, 150, 200]
-                    model: [qsTr("Off"), "1.25x", "1.5x", "2x"]
+                    model: [qsTr("Off"), qsTr("Small"), qsTr("Medium"), qsTr("Large")]
                     Component.onCompleted: {
-                        var i = values.indexOf(StreamingPreferences.vrFoveation)
-                        currentIndex = i >= 0 ? i : 0
+                        currentIndex = StreamingPreferences.vrFoveation > 100
+                                       ? Math.min(3, Math.max(1, StreamingPreferences.vrFoveaTiles)) : 0
                         recalculateWidth()
                     }
                     onActivated: {
-                        StreamingPreferences.vrFoveation = values[currentIndex]
+                        if (currentIndex === 0) {
+                            StreamingPreferences.vrFoveation = 100
+                        }
+                        else {
+                            StreamingPreferences.vrFoveation = 200
+                            StreamingPreferences.vrFoveaTiles = currentIndex
+                        }
                     }
 
                     ToolTip.delay: 1000
                     ToolTip.timeout: 8000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Spends more of the stream's pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.")
+                    ToolTip.text: qsTr("Each eye is sent as a reduced picture of the whole view plus a full-detail picture that follows your gaze (it stays straight ahead without eye tracking). A larger size keeps more detail away from where you look, but uses more bandwidth and headset power and adds a little delay.")
                 }
 
                 // §VR-RATE（2026-11-08）：VR 的串流幀率。取代原本「半速」與「補出中間畫面」兩個勾選框（同樣存在
@@ -583,7 +593,7 @@ Flickable {
 
                 AutoResizingComboBox {
                     id: vrNetModeComboBox
-                    model: [qsTr("Test and choose automatically"), qsTr("Always keep home Wi-Fi"), qsTr("Pause home Wi-Fi while streaming")]
+                    model: [qsTr("Use the network test result"), qsTr("Always keep home Wi-Fi"), qsTr("Pause home Wi-Fi while streaming")]
                     Component.onCompleted: {
                         currentIndex = Math.max(0, Math.min(2, StreamingPreferences.vrNetMode))
                         recalculateWidth()
@@ -595,7 +605,99 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 10000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("The headset has one Wi-Fi radio, so staying on home Wi-Fi while streaming over the adapter makes it switch back and forth and drop video. The automatic test compares both during a VR stream (about 1 minute) and remembers the result for this place. While home Wi-Fi is paused the headset itself is offline; it reconnects when you stop streaming.")
+                    ToolTip.text: qsTr("The headset has one Wi-Fi radio, so staying on home Wi-Fi while streaming over the adapter makes it switch back and forth and drop video. \"Test network\" below compares both and remembers the result for this place; until then home Wi-Fi is kept. While home Wi-Fi is paused the headset itself is offline; it reconnects when you stop streaming.")
+                }
+
+                // §VR-NETBENCH：測試網路（全自動：切網路狀態、跑解析度階梯、存結果）
+                Row {
+                    spacing: 10
+                    Button {
+                        id: vrNetBenchButton
+                        text: VrNetBench.running ? qsTr("Cancel test") : qsTr("Test network")
+                        enabled: VrLauncher.available && (VrNetBench.running || !VrLauncher.running)
+                        onClicked: {
+                            if (VrNetBench.running) {
+                                VrNetBench.cancel()
+                            }
+                            else {
+                                VrNetBench.start(VrLauncher, ComputerManager)
+                            }
+                        }
+
+                        ToolTip.delay: 1000
+                        ToolTip.timeout: 10000
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Plays a recorded table tennis clip from the host at 144 Hz and raises the resolution step by step, first with home Wi-Fi + adapter, then adapter only, then home Wi-Fi again. Takes about 10-20 minutes; you can keep the headset on or take it off. The headset's home Wi-Fi pauses for part of the test and Steam may sign in again afterwards.")
+                    }
+                    Button {
+                        id: vrNetBenchApply
+                        visible: !VrNetBench.running && VrNetBench.verdict !== "" && vrNetModeComboBox.currentIndex !== 0
+                        text: qsTr("Apply")
+                        onClicked: {
+                            StreamingPreferences.vrNetMode = 0
+                            vrNetModeComboBox.currentIndex = 0
+                        }
+                    }
+                }
+
+                ProgressBar {
+                    width: parent.width
+                    visible: VrNetBench.running
+                    from: 0
+                    to: 100
+                    value: VrNetBench.progress
+                }
+
+                Label {
+                    width: parent.width
+                    visible: text !== ""
+                    text: VrNetBench.status !== "" ? VrNetBench.status
+                                                   : (VrNetBench.lastSaved !== "" ? qsTr("Last test: %1").arg(VrNetBench.lastSaved) : "")
+                    font.pointSize: 10
+                    wrapMode: Text.Wrap
+                }
+
+                Label {
+                    width: parent.width
+                    visible: VrNetBench.verdict !== ""
+                    text: VrNetBench.verdict
+                    font.pointSize: 11
+                    font.bold: true
+                    wrapMode: Text.Wrap
+                }
+
+                Column {
+                    visible: VrNetBench.rows.length > 0
+                    spacing: 2
+                    // 每一階一列；欄寬固定，頭盔裡的雷射指標比較好對
+                    property var widths: [190, 80, 120, 130, 70, 70]
+                    Row {
+                        spacing: 8
+                        Repeater {
+                            model: [qsTr("Network"), qsTr("Per eye"), qsTr("Missed frames"), qsTr("Latency p95 (ms)"), qsTr("Mbps"), qsTr("144 Hz")]
+                            delegate: Label {
+                                width: parent.parent.widths[index]
+                                text: modelData
+                                font.bold: true
+                                font.pointSize: 10
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+                    Repeater {
+                        model: VrNetBench.rows
+                        delegate: Row {
+                            property var r: modelData
+                            property var w: parent.widths
+                            spacing: 8
+                            Label { width: w[0]; text: r.state; font.pointSize: 10; elide: Text.ElideRight }
+                            Label { width: w[1]; text: r.eye; font.pointSize: 10 }
+                            Label { width: w[2]; text: r.deficit; font.pointSize: 10 }
+                            Label { width: w[3]; text: r.mtp95; font.pointSize: 10 }
+                            Label { width: w[4]; text: r.mbps; font.pointSize: 10 }
+                            Label { width: w[5] + 160; text: (r.held ? qsTr("yes") : qsTr("no")) + (r.note !== "" ? " (" + r.note + ")" : ""); font.pointSize: 10 }
+                        }
+                    }
                 }
 
                 CheckBox {
@@ -614,17 +716,6 @@ Flickable {
                     ToolTip.text: qsTr("During a VR stream your voice goes to the PC's \"Microphone (Steam Streaming Microphone)\" device (installed with Steam). Select it in the game or voice chat app.")
                 }
 
-                CheckBox {
-                    id: vrNetRetestCheck
-                    width: parent.width
-                    enabled: vrNetModeComboBox.currentIndex === 0
-                    text: qsTr("Run the network test again next time")
-                    font.pointSize: 12
-                    checked: StreamingPreferences.vrNetRetest
-                    onCheckedChanged: {
-                        StreamingPreferences.vrNetRetest = checked
-                    }
-                }
             }
         }
 

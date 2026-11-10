@@ -528,4 +528,45 @@ namespace platf::dxgi {
     void rawdump_copy(ID3D11Texture2D *src, uint64_t frame_id);  ///< 在 signal_consumed 之前呼叫（同一個 context，讀到的一定是這一張）
     void rawdump_after_frame(ID3D11Texture2D *src);  ///< signal_consumed 之後：第一次配 staging；抓滿了就讀回寫檔（會停住擷取執行緒幾秒）
   };
+
+  class vr_clip_source_t;
+
+  /**
+   * @brief §VR-NETBENCH（2026-11-08）：VR 網路測試的擷取來源。不接 SteamVR driver，改播預錄片段（vr_clip_source_t 解碼＋縮放到
+   *        協商的打包尺寸），自己以協商的 Hz 出幀、照頭盔的節拍回授（bridge::pacing_ppm_now）微調週期；每張帶當下最新的頭部姿態
+   *        （和遊戲畫面一樣的 metadata，頭盔端的延遲統計照常）。下游的編碼、傳送全部和 display_vr_t 相同。
+   */
+  class display_vr_clip_t: public display_vram_t {
+  public:
+    display_vr_clip_t();  // 定義在 display_vr.cpp（vr_clip_source_t 在那裡才是完整型別）
+    ~display_vr_clip_t() override;
+    int init(const ::video::config_t &config);
+    capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override;
+    capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) override {
+      return capture_e::timeout;  // 不使用：capture() 自己驅動
+    }
+    capture_e release_snapshot() override {
+      return capture_e::ok;
+    }
+    bool is_hdr() override {
+      return false;
+    }
+    bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
+      std::memset(&metadata, 0, sizeof(metadata));
+      return false;
+    }
+    bool is_event_driven() override {
+      return true;
+    }
+    std::vector<DXGI_FORMAT> get_supported_capture_formats() override {
+      return {DXGI_FORMAT_B8G8R8A8_UNORM};
+    }
+
+  private:
+    std::unique_ptr<vr_clip_source_t> clip_;
+    std::vector<texture2d_t> shared_;  ///< 片段來源的共享貼圖（輪替；在擷取端的裝置上打開）
+    std::vector<IDXGIKeyedMutex *> kmutex_;
+    uint64_t frame_id_ = 0;
+    int framerate_ = 0;
+  };
 }  // namespace platf::dxgi

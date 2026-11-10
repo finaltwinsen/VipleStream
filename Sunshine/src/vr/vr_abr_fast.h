@@ -5,6 +5,11 @@
  * 專為 VR 高速動態環境設計（流暢度第一、寧可糊不要卡）。依環境自適應：
  *   - 延遲趨勢（delay_trend_t）：自適應門檻 γ 追蹤排隊延遲膨脹，進入 overuse 即快速降碼。
  *   - 單向延遲（on_owd）：2 秒內有樣本時優先以 owd_trend_ 判定壅塞、降碼與暫停回升。
+ *     §ABR-OWD-STALL（11-08 在家）：判過載時最近 8 張的單向延遲中位數已回到基準（高出不到 max(4 ms, 0.5γ)）＝Wi-Fi 停頓，
+ *     不降碼、不記塞車點（實測每次停頓都把塞車點往下記 75→59→50 Mbps，之後被防振盪上限鎖 30 秒，整場卡在 42～51 Mbps）。
+ *   - §VR-NETSEL-HOLD（11-08 傍晚）：頭盔通知要切網路（暫停／接回家用 Wi-Fi）時，那幾秒內網路類訊號（丟包、延遲、送達率）
+ *     不降碼（解碼過載也算：湧進來的畫面會拉高解碼 p95）、隨機丟包不計數；畫質修剪照常。實測接回家用 Wi-Fi 時熱點跟著掉包，
+ *     一路降到 2 Mbps、90 秒才回到 60。
  *   - 實際送達速率（on_rates）：鏈路飽和（send >= recv * 1.05）時，壅塞降碼一步落至 clamp(0.95 * recv / send, 0.5, 0.85)。
  *     §ABR-SHORTFALL（11-05）：送出比收到多 15% 以上連續 2 次回報（約 1 秒）＝已經在排隊，直接降（原因 rate-shortfall+delay），
  *     不等延遲趨勢累積（模擬頭盔實測：送 84.8／收 58.6 Mbps 時單向延遲 p95 83 ms，趨勢要約 10 秒才判 overuse）。
@@ -82,8 +87,13 @@ namespace vr::abr {
 
   // §ABR-ADAPT 第 2、3 期常數
   constexpr auto k_fast_owd_active_window = std::chrono::milliseconds(2000);   ///< OWD 樣本有效視窗 2 秒
+  constexpr std::size_t k_fast_owd_recent_n = 8;        ///< §ABR-OWD-STALL：看最近 8 張（144 Hz 約 55 ms）的單向延遲中位數
+  constexpr double k_fast_owd_stall_drained_ms = 4.0;   ///< §ABR-OWD-STALL：高出基準不到 max(4 ms, 0.5γ)＝已經消了
+  constexpr int k_fast_net_switch_max_ms = 20000;       ///< §VR-NETSEL-HOLD：頭盔要求的暫停降碼最長 20 秒
   constexpr auto k_fast_rates_fresh_window = std::chrono::milliseconds(1000);  ///< 送達速率有效視窗 1 秒
-  constexpr double k_fast_rates_saturated_ratio = 1.05;                        ///< 鏈路飽和判定倍數 1.05
+  constexpr double k_fast_rates_saturated_ratio = 1.05;  ///< 鏈路飽和判定倍數 1.05
+  constexpr auto k_fast_saturated_no_restore = std::chrono::milliseconds(6000);  ///< 飽和降碼後這段時間內不做斷訊拉回
+  constexpr auto k_fast_saturated_startup_grace = std::chrono::seconds(10);     ///< 開場這段時間的飽和降碼不算
   constexpr double k_fast_shortfall_ratio = 1.15;    ///< §ABR-SHORTFALL：送出 ≥ 收到 × 1.15 才算排隊（避開無線零星掉包的小落差）
   constexpr int k_fast_shortfall_reports = 2;        ///< 連續幾次回報（每 500 ms 一次）
   constexpr int k_fast_shortfall_min_kbps = 5000;    ///< 送出太少時不判（量測誤差大）
@@ -165,9 +175,27 @@ namespace vr::abr {
     /// 只拉回到「斷訊前 10 秒沒有任何降碼、穩定撐住」的碼率（§ABR-RESTORE-STABLE，11-08）：那晚的路只撐得住約 30 Mbps，
     /// 斷訊前的值是開場的 75 Mbps（開場 6 秒就塞），每次拉回 75 都馬上再塞，3 分鐘重複 6 次。拉回後 5 秒內又降碼＝拉回失敗，
     /// 穩定值作廢，要重新撐滿 10 秒才算數。允許拉回時，清掉斷訊期間連刀觸發的防振盪上限、丟包率上限與進行中的試驗
+    ///
+    /// §VR-ABR-STARTUP-RESTORE（11-09）：還沒有穩定值、而且這一場從沒因為延遲上升降過碼（不是塞車，例如開場一陣無線丟包）
+    /// -> 拉回斷訊前的一半。11-09 拳擊開場：75 Mbps 時 0.7 秒內丟包連降三刀到 9.4 Mbps、延遲沒漲，因為沒有穩定值不拉回，
+    /// 之後每 0.5 秒 +2% 爬了將近一分鐘、整段畫面偏糊。拉回一半後 5 秒內又降碼＝這一場不再這樣拉
+    ///
+    /// §VR-ABR-SATURATED-NO-RESTORE（11-09 午）：最近 k_fast_saturated_no_restore 內有過「鏈路飽和」的降碼（送出 ≥ 收到 × 1.05）
+    /// -> 這次的「斷訊」是塞車造成的，不拉回。11-09 拳擊：碼率爬到 140 Mbps 塞爆轉接器那條（host「link 2 cannot keep up」），
+    /// 降到 75 後被當成斷訊拉回 126、2 秒後又斷，自動半速啟動，最後 1 分半停在 72 Hz
     int on_outage_restored(int kbps, steady::time_point now) {
-      if (kbps <= 0 || stable_kbps_ <= 0) return 0;
-      const int allowed = std::min({kbps, stable_kbps_, std::max(floor_kbps(), cap_kbps_)});
+      if (kbps <= 0) return 0;
+      if (last_saturated_cut_ != steady::time_point {} && now >= last_saturated_cut_ && now - last_saturated_cut_ <= k_fast_saturated_no_restore) {
+        return 0;
+      }
+      int ref = stable_kbps_;
+      half_restore_ = false;
+      if (ref <= 0) {
+        if (delay_congestion_seen_ || half_restore_blocked_) return 0;
+        ref = kbps / 2;
+        half_restore_ = true;
+      }
+      const int allowed = std::min({kbps, ref, std::max(floor_kbps(), cap_kbps_)});
       if (allowed <= applied_kbps_) return 0;
       kbps = allowed;
       restore_time_ = now;
@@ -182,7 +210,7 @@ namespace vr::abr {
       }
       state_ = fast_state_e::healthy;
       hold_until_ = now;
-      last_reason_ = "outage-restore";
+      last_reason_ = half_restore_ ? "outage-restore-half" : "outage-restore";
       return applied_kbps_;
     }
     /// §ABR-RESTORE-STABLE：最近一次「10 秒內沒有降碼」時撐住的碼率（0＝還沒有）
@@ -292,24 +320,53 @@ namespace vr::abr {
       // §ABR-ADAPT（審查）：餘裕 10 s——第一筆若是慢的（大 IDR、開場擁塞），之後較快的幀不會被夾成同一個值
       const double rel_owd_ms = std::max(1.0, (owd_ms - owd_offset_ms_) + 10000.0);
       last_owd_time_ = now;
+      owd_recent_[owd_recent_pos_++ % k_fast_owd_recent_n] = rel_owd_ms;
       const auto prev_state = owd_trend_.state();
       owd_trend_.on_rtt(rel_owd_ms, now);
       const auto cur_state = owd_trend_.state();
 
       if (cur_state == trend_state_e::overuse) {
-        if (prev_state != trend_state_e::overuse) {
-          trigger_cut(severity_e::fast, "owd-trend", now);
+        const bool first = prev_state != trend_state_e::overuse;
+        if (first || last_owd_trend_cut_time_ == steady::time_point{} ||
+            now - last_owd_trend_cut_time_ >= std::chrono::milliseconds(1000)) {
           last_owd_trend_cut_time_ = now;
-        } else if (last_owd_trend_cut_time_ == steady::time_point{} ||
-                   now - last_owd_trend_cut_time_ >= std::chrono::milliseconds(1000)) {
-          trigger_cut(severity_e::fast, "owd-trend", now);
-          last_owd_trend_cut_time_ = now;
+          if (owd_spike_drained()) {
+            ++owd_stall_skips_;
+          } else {
+            trigger_cut(severity_e::fast, "owd-trend", now);
+          }
         }
       }
     }
 
+    /// §ABR-OWD-STALL：延遲趨勢判過載的這一刻，最近幾張的單向延遲已經回到基準＝無線停頓（一段時間收不到、之後一次全到），
+    /// 不是排隊。排隊時佇列要等碼率降下來才會消，判過載時最新的幀一定還是慢的。
+    bool owd_spike_drained() const {
+      if (owd_recent_pos_ < k_fast_owd_recent_n) return false;
+      double v[k_fast_owd_recent_n];
+      std::copy(std::begin(owd_recent_), std::end(owd_recent_), v);
+      std::nth_element(v, v + k_fast_owd_recent_n / 2, v + k_fast_owd_recent_n);
+      const double excess = v[k_fast_owd_recent_n / 2] - owd_trend_.base_ms();
+      return excess <= std::max(k_fast_owd_stall_drained_ms, 0.5 * owd_trend_.gamma_ms());
+    }
+
+    int owd_stall_skips() const { return owd_stall_skips_; }
+
+    /// §VR-NETSEL-HOLD：頭盔要切網路了。hold_ms 內網路類訊號不降碼（重複通知取最晚的結束時間）
+    void begin_net_switch(int hold_ms, steady::time_point now) {
+      const auto until = now + std::chrono::milliseconds(std::clamp(hold_ms, 0, k_fast_net_switch_max_ms));
+      if (until > net_switch_until_) {
+        net_switch_until_ = until;
+      }
+    }
+    bool net_switch_active(steady::time_point now) const { return now < net_switch_until_; }
+    int net_switch_skips() const { return net_switch_skips_; }
+
     /// 接收實際送達速率回報（每 500 ms 一次，單位 kbps）
     void on_rates(int recv_kbps, int send_kbps, steady::time_point now) {
+      if (first_rates_time_ == steady::time_point {}) {
+        first_rates_time_ = now;  // §VR-ABR-SATURATED-NO-RESTORE：開場起點
+      }
       recv_kbps_ = std::max(0, recv_kbps);
       send_kbps_ = std::max(0, send_kbps);
       last_rates_time_ = now;
@@ -687,6 +744,9 @@ namespace vr::abr {
 
     /// 延遲平穩時救不回的幀：照舊算隨機丟包，但 20 秒內太多次就視為跟碼率有關（§ABR-LOSSRATE）
     void note_random_frame_loss(int n, steady::time_point now) {
+      if (net_switch_active(now)) {
+        return;  // §VR-NETSEL-HOLD：切網路時的掉包不算進丟包率
+      }
       ++random_loss_events_;
       while (!loss_rate_events_.empty() && now - loss_rate_events_.front() > k_fast_loss_rate_window) {
         loss_rate_events_.pop_front();
@@ -794,9 +854,22 @@ namespace vr::abr {
       if (sev == severity_e::moderate && now < hold_until_) {
         return;
       }
+      // §VR-NETSEL-HOLD：頭盔正在切網路——丟包、延遲、送達率都是切換本身造成的，不是塞車。解碼過載也擋：
+      // 11-08 晚實測接回家用 Wi-Fi 時畫面一次湧進來，解碼 p95 跟著拉高，decode-overload 連降五刀 70→11 Mbps
+      if (net_switch_active(now)) {
+        ++net_switch_skips_;
+        return;
+      }
       // §ABR-RESTORE-STABLE：拉回後 5 秒內又降碼＝拉回的值撐不住，穩定值作廢
       if (restore_time_ != steady::time_point {} && now - restore_time_ <= k_fast_restore_fail_window) {
         stable_kbps_ = 0;
+        if (half_restore_) {
+          half_restore_blocked_ = true;  // §VR-ABR-STARTUP-RESTORE：拉回一半也撐不住
+        }
+      }
+      // §VR-ABR-STARTUP-RESTORE：延遲上升造成的降碼＝真的塞車，這一場沒有穩定值時不再拉回
+      if (std::strstr(reason, "delay") != nullptr || std::strstr(reason, "owd") != nullptr) {
+        delay_congestion_seen_ = true;
       }
       restore_time_ = {};
       last_cut_time_ = now;
@@ -838,6 +911,12 @@ namespace vr::abr {
           recv_kbps_ >= 0 &&
           static_cast<double>(send_kbps_) >= static_cast<double>(recv_kbps_) * k_fast_rates_saturated_ratio) {
         has_saturated_rates = true;
+        // §VR-ABR-SATURATED-NO-RESTORE：開場 10 秒內不算（IDR 與起步的突發讓送出暫時大於收到，11-09 拳擊開場那一刀就是）；
+        // 之後的飽和降碼＝真的塞車：6 秒內不拉回，這一場也不再「沒有穩定值時拉回一半」
+        if (first_rates_time_ != steady::time_point {} && now - first_rates_time_ >= k_fast_saturated_startup_grace) {
+          last_saturated_cut_ = now;
+          delay_congestion_seen_ = true;
+        }
         double raw_f = 0.95 * static_cast<double>(recv_kbps_) / static_cast<double>(send_kbps_);
         saturated_factor = std::clamp(raw_f, 0.50, 0.85);
       }
@@ -938,6 +1017,11 @@ namespace vr::abr {
     steady::time_point restore_time_ {};
     std::deque<std::pair<steady::time_point, int>> applied_hist_;
     int stable_kbps_ = 0;
+    bool delay_congestion_seen_ = false;  ///< §VR-ABR-STARTUP-RESTORE：這一場曾因延遲上升降碼
+    steady::time_point last_saturated_cut_ {};
+    steady::time_point first_rates_time_ {};  ///< 第一次收到送達速率（≈ 串流開始）  ///< §VR-ABR-SATURATED-NO-RESTORE：最近一次鏈路飽和時的降碼
+    bool half_restore_ = false;           ///< 最近一次拉回是「沒有穩定值、拉回一半」
+    bool half_restore_blocked_ = false;   ///< 拉回一半後很快又降碼：這一場不再拉回一半
 
     // 丟包與延遲追蹤
     std::deque<fec_record_t> fec_fails_;
@@ -951,6 +1035,11 @@ namespace vr::abr {
     bool owd_have_offset_ = false;
     double owd_offset_ms_ = 0.0;
     steady::time_point last_owd_time_{};
+    double owd_recent_[k_fast_owd_recent_n] = {};
+    std::size_t owd_recent_pos_ = 0;
+    int owd_stall_skips_ = 0;
+    steady::time_point net_switch_until_ {};
+    int net_switch_skips_ = 0;
     steady::time_point last_owd_trend_cut_time_{};
     delay_trend_t owd_trend_;
 

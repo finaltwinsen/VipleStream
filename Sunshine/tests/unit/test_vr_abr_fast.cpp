@@ -974,6 +974,38 @@ TEST_F(VrAbrFastTest, OutageRestoreOnlyUpToStableBitrate) {
   EXPECT_EQ(c.on_outage_restored(75000, t0 + 25000ms), 0);
 }
 
+// §VR-ABR-STARTUP-RESTORE（11-09）：開場一陣丟包（延遲沒漲）連降到底、還沒有穩定值 -> 拉回斷訊前的一半；
+// 拉回後 5 秒內又降碼 -> 這一場不再拉回一半
+TEST_F(VrAbrFastTest, StartupOutageRestoresHalfWithoutDelayCongestion) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(75000);
+  c.set_applied_kbps(9375);
+  ASSERT_EQ(c.stable_kbps(), 0);
+  EXPECT_EQ(c.on_outage_restored(75000, t0 + 5000ms), 37500);
+  EXPECT_EQ(c.applied_kbps(), 37500);
+
+  c.on_loss(12, t0 + 7000ms);  // 拉回後 2 秒又降（一次 12 張＝persistent 門檻）
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(10000);
+  EXPECT_EQ(c.on_outage_restored(75000, t0 + 12000ms), 0);
+}
+
+// §VR-ABR-SATURATED-NO-RESTORE（11-09 午）：鏈路飽和（送出 ≥ 收到 × 1.05）時的降碼＝塞車，6 秒內不做斷訊拉回
+TEST_F(VrAbrFastTest, NoOutageRestoreRightAfterSaturatedCut) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(100000);
+  c.set_applied_kbps(90000);
+  c.on_rates(90000, 90000, t0);  // 開場起點
+  const auto t1 = t0 + 20000ms;  // 開場 10 秒以後
+  c.on_rates(60000, 90000, t1);  // 送 90、收 60：飽和
+  c.on_loss(12, t1);             // persistent（飽和才允許）
+  c.tick(t1);
+  ASSERT_LT(c.applied_kbps(), 90000);
+  c.set_applied_kbps(40000);
+  EXPECT_EQ(c.on_outage_restored(90000, t1 + 3000ms), 0);
+  EXPECT_EQ(c.on_outage_restored(90000, t1 + 8000ms), 0);  // 沒有穩定值、又塞過：也不拉回一半
+}
+
 // §ABR-LOSSRATE：零星（每 15 秒一張）不觸發
 TEST_F(VrAbrFastTest, SparseRandomLossDoesNotTriggerLossRate) {
   fast::fast_controller_t c(kConfigured100Mbps);
@@ -1081,4 +1113,111 @@ TEST_F(VrAbrFastTest, SmallRateGapDoesNotCut) {
     c.on_rates(74000, 80000, t);
     EXPECT_FALSE(c.tick(t).has_value());
   }
+}
+
+// §ABR-OWD-STALL（11-08 在家）：Wi-Fi 停頓（一段時間收不到、之後一次全到）不是排隊——判過載時最新幾張已回到基準 -> 不降碼
+namespace {
+  // 144 Hz 逐張餵單向延遲：base_ms 平穩、stall_ms>0 時在 at 那一刻停頓 stall_ms，停頓期間送出的幀在停頓結束時一起到
+  struct owd_feeder_t {
+    fast::fast_controller_t &c;
+    std::chrono::steady_clock::time_point t;
+    double jitter_phase = 0.0;
+    void steady_for(std::chrono::milliseconds dur, double owd_ms) {
+      const auto end = t + dur;
+      while (t < end) {
+        jitter_phase += 1.0;
+        c.on_owd(owd_ms + (static_cast<int>(jitter_phase) % 3) * 0.5, t);  // 0～1 ms 抖動
+        c.tick(t);
+        t += 6944us;
+      }
+    }
+    void stall(std::chrono::milliseconds stall, double base_owd_ms) {
+      const int n = static_cast<int>(stall / 6944us);
+      const auto arrive = t + stall;
+      for (int i = 0; i < n; ++i) {
+        const double waited = std::chrono::duration<double, std::milli>(stall - i * 6944us).count();
+        c.on_owd(base_owd_ms + waited, arrive);
+      }
+      c.tick(arrive);
+      t = arrive + 6944us;
+    }
+  };
+}  // namespace
+
+TEST_F(VrAbrFastTest, OwdWifiStallIsNotCongestion) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  owd_feeder_t f{c, t0};
+  f.steady_for(5000ms, 2.0);
+  ASSERT_EQ(c.cuts(), 0);
+  // 每隔 3 秒停頓一次 100 ms（11-08 在家 1728 那場：每 30～50 秒一次 20～100 ms）
+  for (int k = 0; k < 4; ++k) {
+    f.stall(100ms, 2.0);
+    f.steady_for(3000ms, 2.0);
+  }
+  EXPECT_EQ(c.cuts(), 0) << "last reason=" << c.last_reason();
+  EXPECT_GT(c.owd_stall_skips(), 0);  // 確實判過載過，是新規則擋下的
+  EXPECT_EQ(c.applied_kbps(), kConfigured50Mbps);
+  EXPECT_EQ(c.last_congested_kbps(), 0);
+}
+
+TEST_F(VrAbrFastTest, OwdQueueBuildupAfterStallStillCuts) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  owd_feeder_t f{c, t0};
+  f.steady_for(5000ms, 2.0);
+  f.stall(100ms, 2.0);
+  f.steady_for(3000ms, 2.0);
+  const int skips = c.owd_stall_skips();
+  // 真的排隊：每張多 0.15 ms（每秒 +21 ms），佇列一直不消
+  double owd = 2.0;
+  bool cut = false;
+  for (int i = 0; i < 144 * 2 && !cut; ++i) {
+    owd += 0.15;
+    c.on_owd(owd, f.t);
+    if (c.tick(f.t).has_value() && std::strcmp(c.last_reason(), "owd-trend") == 0) cut = true;
+    f.t += 6944us;
+  }
+  EXPECT_TRUE(cut);
+  EXPECT_EQ(c.owd_stall_skips(), skips);
+}
+
+// §VR-NETSEL-HOLD：頭盔通知要切網路後，丟包與延遲都不降碼、隨機丟包不計數；過了那段時間照常降
+TEST_F(VrAbrFastTest, NetSwitchHoldSkipsNetworkCuts) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
+
+  const auto t1 = t0 + 10000ms;
+  c.begin_net_switch(8000, t1);
+  c.begin_net_switch(2000, t1 + 100ms);  // 重複通知（ENet 與連線各一份）不會縮短
+  for (int i = 0; i < 20; ++i) {
+    const auto t = t1 + std::chrono::milliseconds(300 * i);
+    c.on_loss(5, t);
+    c.on_drop_block(t);
+    EXPECT_FALSE(c.tick(t).has_value()) << "i=" << i << " reason=" << c.last_reason();
+  }
+  EXPECT_EQ(c.applied_kbps(), 100000);
+  EXPECT_GT(c.net_switch_skips(), 0);
+  EXPECT_EQ(c.random_losses(), 0);
+  // 解碼過載也擋（畫面一次湧進來時解碼 p95 會被拉高）
+  for (int i = 0; i < 10; ++i) {
+    const auto t = t1 + 6000ms + std::chrono::milliseconds(200 * i);
+    c.on_decode(20000, 6944, t);
+    EXPECT_FALSE(c.tick(t).has_value()) << "decode i=" << i << " reason=" << c.last_reason();
+  }
+
+  const auto t2 = t1 + 8500ms;
+  EXPECT_FALSE(c.net_switch_active(t2));
+  c.on_loss(2, t2);
+  auto res = c.tick(t2);
+  ASSERT_TRUE(res.has_value());
+  EXPECT_LT(*res, 100000);
+}
+
+// 超過上限的要求只算 20 秒
+TEST_F(VrAbrFastTest, NetSwitchHoldIsCapped) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.begin_net_switch(60000, t0);
+  EXPECT_TRUE(c.net_switch_active(t0 + 19000ms));
+  EXPECT_FALSE(c.net_switch_active(t0 + 20500ms));
 }

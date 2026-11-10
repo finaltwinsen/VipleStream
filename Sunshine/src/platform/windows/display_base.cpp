@@ -1136,6 +1136,14 @@ namespace platf {
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
     // M1b S1-08：VR 擷取（captureSource=1）只有硬體編碼路徑（display_vr_t）；不看 capture 設定、不碰桌面 output
     if (config.captureSource == 1) {
+      if (hwdevice_type == mem_type_e::dxgi && config.vrClip) {
+        // §VR-NETBENCH：VR 網路測試播放預錄片段
+        auto disp = std::make_shared<dxgi::display_vr_clip_t>();
+        if (!disp->init(config)) {
+          return disp;
+        }
+        return nullptr;
+      }
       if (hwdevice_type == mem_type_e::dxgi) {
         auto disp = std::make_shared<dxgi::display_vr_t>();
         if (!disp->init(config)) {

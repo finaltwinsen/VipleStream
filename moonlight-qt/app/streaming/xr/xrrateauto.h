@@ -16,6 +16,13 @@
 //   試升：升回後 kProbeUs 內最新視窗 ≥ kProbeFail、且和前一個合計 ≥ kProbeFailSum → 退回半速，upDwell 加倍（上限 10 分鐘）；撐過就把 upDwell 還原。
 //   開場 kStartSettleUs、每次切換後 kSwitchSettleUs 內不判斷（切換那一刻的重複是切換本身造成的）。
 //   要求送出後 kReplyTimeoutUs 沒有回覆就重送，連續 kMaxRetries 次沒回覆＝host 不支援，這一場不再自動切。
+//
+// §VR-RATE-CAUSE（2026-11-09）：預期外的重複格分兩種原因。呼叫端在每一格告訴這裡「有沒有一張已經收齊超過兩格、
+// 卻還沒解出的影格」（headsetLate）：有＝頭盔端跟不上（解碼／顯示），沒有＝影格還沒到（網路）。11-09 每眼 2304 兩輪：
+// 網路 0 丟失、每 10 秒 1444～1446 張全到，顯示端照樣每 10 秒跳格 29～63 次，舊版把它標成「network unstable」。
+//   降速照樣做（流暢第一，半速讓解碼多一倍時間），但原因記成 Headset；頭盔端的上限不會自己變好，所以試升的等待
+//   從 kUpDwellHeadsetUs 起算（每 60 秒試一次只會每次都頓一下）。
+//   最近 3 個視窗的短段重複裡頭盔端佔 ≥ kHeadsetShare 才算頭盔端。
 #pragma once
 
 #include <algorithm>
@@ -28,6 +35,7 @@ namespace xrrate {
         uint32_t shortRep = 0;  // 預期外、而且屬於短段的重複格數
         uint32_t stalls = 0;    // 斷流（預期外的重複連續超過 kShortRunSlots 格）的次數
         uint32_t slotCount = 0; // 這個視窗顯示了幾格（太少＝沒在串流，不算數）；不叫 slots：Qt 把它定義成巨集
+        uint32_t headsetRep = 0; // §VR-RATE-CAUSE：shortRep 裡屬於頭盔端（影格收到了還沒解出）的格數
     };
 
     class AutoRate {
@@ -45,6 +53,8 @@ namespace xrrate {
         static constexpr uint32_t kUpSum15 = kDownSum / 2;
         static constexpr uint64_t kUpDwellStartUs = 60000000ull;
         static constexpr uint64_t kUpDwellMaxUs = 600000000ull;
+        static constexpr uint64_t kUpDwellHeadsetUs = 300000000ull;  // §VR-RATE-CAUSE：頭盔端降速後 5 分鐘才試升
+        static constexpr double kHeadsetShare = 0.7;
         static constexpr uint64_t kProbeUs = 30000000ull;
         // 試升失敗：最新一個視窗 ≥ kProbeFail 而且和前一個合計 ≥ kProbeFailSum。只看單一視窗時，網路正常（每秒 0.8 次）
         // 偶爾一個 5 秒冒出十幾格就會判失敗（離線模擬重現），白白退回半速再等兩倍時間
@@ -58,7 +68,7 @@ namespace xrrate {
         static constexpr int kMaxRetries = 3;
         static constexpr int kHist = 8;
 
-        enum class Reason : uint8_t { None = 0, Down = 1, Up = 2, ProbeFail = 3 };
+        enum class Reason : uint8_t { None = 0, Down = 1, Up = 2, ProbeFail = 3, HeadsetDown = 4 };
 
         struct Request {
             int div = 0;  // 0＝不用送
@@ -73,8 +83,9 @@ namespace xrrate {
             m_SettleUntilUs = nowUs + kStartSettleUs;
         }
 
-        // 每個顯示格呼叫一次。newFrame＝這一格顯示的是新影像
-        void onSlot(bool newFrame, uint64_t nowUs)
+        // 每個顯示格呼叫一次。newFrame＝這一格顯示的是新影像；headsetLate＝這一格有一張影格已經收齊超過兩格還沒解出
+        //（§VR-RATE-CAUSE，只在預期外的重複格有意義）
+        void onSlot(bool newFrame, uint64_t nowUs, bool headsetLate = false)
         {
             if (m_StartUs == 0) {
                 reset(nowUs);
@@ -86,7 +97,14 @@ namespace xrrate {
             else {
                 ++m_SinceNew;
                 if (m_SinceNew >= static_cast<uint32_t>(m_Div)) {
-                    ++m_RunUnexpected;  // 已經顯示滿該佔的格數，這一格是網路晚到造成的
+                    ++m_RunUnexpected;  // 已經顯示滿該佔的格數，這一格是晚到（網路或頭盔端）造成的
+                    if (headsetLate) {
+                        ++m_RunHeadset;
+                        ++m_TotHeadsetSlots;
+                    }
+                    else {
+                        ++m_TotNetSlots;
+                    }
                 }
             }
             ++m_Cur.slotCount;
@@ -124,6 +142,9 @@ namespace xrrate {
                 m_Decision = Request();
                 m_PendingDiv = r.div;
                 m_PendingReason = r.reason;
+                if (r.div == 2) {
+                    m_PendingCause = r.reason;
+                }
                 m_SentUs = nowUs;
                 m_Retries = 0;
                 ++m_Seq;
@@ -155,6 +176,18 @@ namespace xrrate {
         uint32_t ups() const { return m_Ups; }
         uint32_t probeFails() const { return m_ProbeFails; }
         uint32_t outageSkips() const { return m_OutageSkips; }  // 因為最近有中斷而沒做降速判斷的次數
+        // §VR-RATE-CAUSE：整場累計的預期外重複格，分網路（影格還沒到）與頭盔端（收到了還沒解出）
+        uint64_t totalNetSlots() const { return m_TotNetSlots; }
+        uint64_t totalHeadsetSlots() const { return m_TotHeadsetSlots; }
+        uint32_t headsetDowns() const { return m_HeadsetDowns; }
+        uint32_t recentHeadsetSum(int n) const
+        {
+            uint32_t sum = 0;
+            for (int i = 0; i < (std::min)(n, m_HistN); ++i) {
+                sum += hist(i).headsetRep;
+            }
+            return sum;
+        }
         // 最近一個完成的視窗（log 用）
         const Window& lastWindow() const { return m_Hist[(m_HistHead + kHist - 1) % kHist]; }
         uint32_t recentSum(int n) const
@@ -175,12 +208,14 @@ namespace xrrate {
             if (m_RunUnexpected > 0) {
                 if (m_RunUnexpected <= kShortRunSlots) {
                     m_Cur.shortRep += m_RunUnexpected;
+                    m_Cur.headsetRep += m_RunHeadset;
                 }
                 else {
                     ++m_Cur.stalls;
                 }
             }
             m_RunUnexpected = 0;
+            m_RunHeadset = 0;
         }
 
         void setDiv(int div, uint64_t nowUs)
@@ -193,6 +228,7 @@ namespace xrrate {
             m_Div = div;
             m_SinceNew = 0;
             m_RunUnexpected = 0;
+            m_RunHeadset = 0;
             m_SwitchUs = nowUs;
             m_SettleUntilUs = (std::max)(m_SettleUntilUs, nowUs + kSwitchSettleUs);
             // 舊分頻量到的視窗不能拿來判斷新分頻
@@ -204,6 +240,11 @@ namespace xrrate {
                 if (m_ProbeUntilUs != 0 && nowUs < m_ProbeUntilUs) {
                     ++m_ProbeFails;
                     m_UpDwellUs = (std::min)(m_UpDwellUs * 2, kUpDwellMaxUs);
+                }
+                if (m_PendingCause == Reason::HeadsetDown) {
+                    // §VR-RATE-CAUSE：頭盔端跟不上不會自己變好，試升至少等 5 分鐘
+                    ++m_HeadsetDowns;
+                    m_UpDwellUs = (std::max)(m_UpDwellUs, kUpDwellHeadsetUs);
                 }
                 m_ProbeUntilUs = 0;
             }
@@ -260,7 +301,9 @@ namespace xrrate {
                     each += hist(i).shortRep >= kDownEach ? 1 : 0;
                 }
                 if (sum >= kDownSum && each >= 2) {
-                    m_Decision = Request {2, Reason::Down, false};
+                    // §VR-RATE-CAUSE：頭盔端佔大多數就記成 HeadsetDown（一樣降速，只是原因與試升等待不同）
+                    const bool headset = static_cast<double>(recentHeadsetSum(3)) >= kHeadsetShare * static_cast<double>(sum);
+                    m_Decision = Request {2, headset ? Reason::HeadsetDown : Reason::Down, false};
                 }
                 return;
             }
@@ -288,6 +331,7 @@ namespace xrrate {
         uint64_t m_WinStartUs = 0;
         uint32_t m_SinceNew = 0;
         uint32_t m_RunUnexpected = 0;
+        uint32_t m_RunHeadset = 0;  // §VR-RATE-CAUSE：這一段連續重複裡屬於頭盔端的格數
         Window m_Cur;
         std::array<Window, kHist> m_Hist {};
         int m_HistHead = 0;
@@ -306,6 +350,9 @@ namespace xrrate {
         uint64_t m_ProbeUntilUs = 0;
         uint32_t m_Downs = 0, m_Ups = 0, m_ProbeFails = 0;
         uint32_t m_OutageSkips = 0;
+        Reason m_PendingCause = Reason::None;  // 最近一次送出的降速要求的原因
+        uint64_t m_TotNetSlots = 0, m_TotHeadsetSlots = 0;
+        uint32_t m_HeadsetDowns = 0;
     };
 
 }  // namespace xrrate

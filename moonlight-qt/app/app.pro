@@ -325,6 +325,7 @@ SOURCES += \
     backend/systemproperties.cpp \
     backend/hidprobe.cpp \
     backend/vrlauncher.cpp \
+    backend/vrnetbenchrunner.cpp \
     backend/tailscalepath.cpp \
     backend/xrshell.cpp \
     backend/medialibrary.cpp \
@@ -395,8 +396,10 @@ HEADERS += \
     settings/streamingpreferences.h \
     streaming/input/input.h \
     streaming/session.h \
+    streaming/wifiscanblock.h \
     streaming/batterymonitor.h \
     streaming/vr/vrnetmode.h \
+    streaming/vr/vrnetbench.h \
     streaming/audio/miccapture.h \
     streaming/audio/renderers/renderer.h \
     streaming/audio/renderers/sdl.h \
@@ -421,6 +424,7 @@ HEADERS += \
     backend/systemproperties.h \
     backend/hidprobe.h \
     backend/vrlauncher.h \
+    backend/vrnetbenchrunner.h \
     backend/tailscalepath.h \
     backend/xrshell.h \
     backend/medialibrary.h \

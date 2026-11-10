@@ -48,6 +48,8 @@ public:
     // 一般啟動時直接開影片模式的某個分頁、瀏覽器開這個網址、幾秒後把畫面存成 PNG、幾秒後按「Play in VR」、PC 分頁上線後
     // 自動點進這台主機（帶 dir＝再進第一個分享資料夾裡的這個子資料夾，「.」＝分享資料夾本身）（無人驗測用）。沒帶＝空字串
     QString devVideo() const { return m_DevVideo; }
+    // §VR-NETBENCH（dev）：--dev-netbench——一般啟動後主機一上線就自動開始設定頁的「測試網路」（無人驗測用）
+    bool devNetBench() const { return m_DevNetBench; }
     // §VR-SHELL（dev）：--vr-shell "<xr|noxr|off>[,dump=<秒>:<png>][,test=<腳本>]"——頭盔 VR 介面（Frame 上預設就是 xr；
     // 格式見 backend/xrshell.h，parse() 已經檢查過）。沒帶＝空字串
     QString vrShell() const { return m_VrShell; }
@@ -55,6 +57,7 @@ public:
 private:
     QString m_VrTestPreflight;
     QString m_DevVideo;
+    bool m_DevNetBench = false;
     QString m_VrShell;
 };
 

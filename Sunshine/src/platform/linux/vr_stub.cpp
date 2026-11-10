@@ -197,6 +197,10 @@ namespace vr::bridge {
   void set_pacing_step(int32_t, int32_t, uint32_t) {
   }
 
+  int32_t pacing_ppm_now() {
+    return 0;
+  }
+
   void set_pacing(const vripc_pacing_t &) {
   }
 #endif

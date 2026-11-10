@@ -354,6 +354,7 @@ public:
     Q_PROPERTY(bool vrNetRetest MEMBER vrNetRetest NOTIFY vrSettingsChanged)
     Q_PROPERTY(int vrWheelRange MEMBER vrWheelRange NOTIFY vrSettingsChanged)
     Q_PROPERTY(int vrFoveation MEMBER vrFoveation NOTIFY vrSettingsChanged)
+    Q_PROPERTY(int vrFoveaTiles MEMBER vrFoveaTiles NOTIFY vrSettingsChanged)
     Q_PROPERTY(CaptureSysKeysMode captureSysKeysMode MEMBER captureSysKeysMode NOTIFY captureSysKeysModeChanged)
     Q_PROPERTY(Language language MEMBER language NOTIFY languageChanged);
 
@@ -487,11 +488,19 @@ public:
     QString xrDumpFramePath;         // dev（M3a X2）：XR 影像 quad 第 300 幀讀回存 PNG（最長邊 ≤ 1280），不存設定
     int xrTestStallMs = 0;           // dev（M3a X3）：第一幀 20 s 後丟 N ms 影像幀，驗 stale 轉換，不存設定
     QString vrTestJitter;            // dev（§VR-LDIAG）：--vr-test-jitter，PCVR 影像的到達抖動注入（xrlatch::Jitter 的格式），不存設定
+    bool vrFovSingleLayer = false;   // dev（§VR-FOVEA-LAYERS）：--vr-fovea-single-layer，中央區不另交 quad layer、照舊還原成一張大圖，不存設定
+    int vrFoveaTilesReq = -1;        // dev（§VR-FOVEA-TILES）：--vr-fovea-tiles off|small|medium|large → 0～3；-1＝沒指定（照下面存的 vrFoveaTiles），不存設定
+    bool vrSyntheticGaze = false;    // dev（§VR-FOVEA-TILES）：--vr-synthetic-gaze，送給 host 的視線換成合成的掃視／追視（沒人戴也能量），不存設定
+    bool vrUnwarpRgb = false;        // dev（§VR-UNWARP-YUV）：--vr-unwarp-rgb，還原前先轉成 RGB 中間圖（舊做法，A/B 用），不存設定
+    double vrUnwarpMax = 2.0;        // dev（§VR-UNWARP-MAX，2026-11-10）：--vr-unwarp-max，注視點還原後 swapchain 對解碼影像的放大倍率上限（1.0～2.0），不存設定
     int vrGpuPriority = 0;           // dev（§VR-GPU-PRIO）：--vr-gpu-priority，XR VkDevice queue 的全域優先權（0 預設／1 high／2 realtime），不存設定
     int xrTestRecenterSec = 0;       // dev（M3a X3）：bring-up 後第 N 秒自動 recenter 一次，不存設定
     bool xrTestPointer = false;       // §VR M3a X4（dev）：--xr-test-pointer，不寫入設定
     bool vrTestInput = false;         // §VR M4a R2（dev）：--vr-test-input 合成控制器按鍵，不寫入設定
     bool vrLinkSelftest = false;      // §VR-MULTILINK（dev）：--vr-link-selftest 在同一張網卡再開一條連線，不寫入設定
+    // §VR-FOVEA-TILES（2.0.122）：注視點開著（vrFoveation > 100）時「每眼兩塊影像」的大小：1 小、2 中、3 大。設定頁的
+    // 「關／小／中／大」＝vrFoveation（100 或 200）＋這個值；寫入設定（vrfoveatiles）。host 不支援分塊時不看它
+    int  vrFoveaTiles = 1;
     int  vrFoveation = 200;           // §VR-FOVEA（2.0.30 起預設 200）：--vr-foveation，正前方的像素密度（%，100＝關）；寫入設定（vrfoveation）
     bool vrSynth = false;             // §VR-SYNTH：--vr-synth，半速串流時合成中間那一格；寫入設定（vrsynth）
     // §VR-WHEEL（2026-11-05）：Xbox 手把模式時，兩支手把像握方向盤一樣轉動＝左搖桿 X。串流中兩支搖桿同時按住 1.5 秒切換，

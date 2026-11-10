@@ -122,6 +122,9 @@ public:
     NvAddress ipv6Address;
     NvAddress manualAddress;
     NvAddress vpnAddress;       // §VPN-ADDR：host 廣告的 Tailscale 等 VPN 位址（100.64.0.0/10），最後才試
+    // §LAN-PREF（2026-11-08）：host 廣告的區網位址（有線先）。平常從 Tailscale 連進來時 LocalIP 是 Tailscale 位址，client 原本
+    // 不知道 host 在區網的位址；輪詢時目前位址是 VPN 就先探這幾個，通了就改走區網
+    QVector<NvAddress> lanAddresses;
     NvAddress stunAddress;      // VipleStream: STUN-discovered public endpoint
     QString stunNatType;        // "punchable" or "symmetric"
     // §REVIEW-1104（使用者決策 B）：STUN 回報的公網「控制埠」（打洞目標）。NAT 會換埠時不等於 HTTP 埠＋10。

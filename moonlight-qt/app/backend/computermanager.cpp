@@ -14,6 +14,8 @@
 #include <QCoreApplication>
 #include <QRandomGenerator>
 #include <QDateTime>     // VipleStream §K.X — currentMSecsSinceEpoch for wake-cadence deadline
+#include <QHostAddress>
+#include <QTcpSocket>    // §LAN-PREF：輪詢前先用短逾時的 TCP 連線探區網位址
 
 #define SER_HOSTS "hosts"
 #define SER_HOSTS_BACKUP "hostsbackup"
@@ -71,6 +73,47 @@ public:
     }
 
 private:
+    // §LAN-PREF（2026-11-08）：目前用的位址是 VPN（Tailscale 的 100.64.0.0/10）而 host 有廣告區網位址時，每 15 秒探一次區網：
+    // 400 ms 內 TCP 連得上就用它輪詢，成功的話 activeAddress 換成區網位址（之後串流、/launch、/cancel 都走區網）。
+    // 原本 activeAddress 一律排第一，從外面用 Tailscale 連過一次，回家後就一直繞 Tailscale
+    // （11-08 頭盔實測：控制通道綁在家用 Wi-Fi 上的 Tailscale，家用 Wi-Fi 一暫停就斷 18 秒）。
+    // 離開區網時探不到，只多一次 400 ms 的 TCP 嘗試，照原本的順序輪詢
+    bool tryLanPreferred(QNetworkAccessManager* nam, bool& changed)
+    {
+        NvAddress active;
+        QVector<NvAddress> lans;
+        {
+            QReadLocker lock(&m_Computer->lock);
+            active = m_Computer->activeAddress;
+            lans = m_Computer->lanAddresses;
+        }
+        const QHostAddress activeHost(active.address());
+        if (lans.isEmpty() || activeHost.protocol() != QAbstractSocket::IPv4Protocol ||
+                !activeHost.isInSubnet(QHostAddress(QStringLiteral("100.64.0.0")), 10)) {
+            return false;
+        }
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (m_LanProbeAtMs != 0 && now - m_LanProbeAtMs < 15000) {
+            return false;
+        }
+        m_LanProbeAtMs = now;
+        for (const NvAddress& lan : lans) {
+            QTcpSocket probe;
+            probe.connectToHost(lan.address(), lan.port());
+            const bool reachable = probe.waitForConnected(400);
+            probe.abort();
+            if (!reachable) {
+                continue;
+            }
+            if (tryPollComputer(nam, lan, changed)) {
+                qInfo() << "[VIPLE-LAN-PREF]" << m_Computer->name << "reachable on the LAN - using it instead of the VPN address";
+                changed = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool tryPollComputer(QNetworkAccessManager* nam, NvAddress address, bool& changed)
     {
         NvHTTP http(address, 0, m_Computer->serverCert, nam);
@@ -155,6 +198,7 @@ private:
             bool online = false;
             bool relayOnly = false;  // true if only reachable via relay (no TCP)
             bool wasOnline = m_Computer->state == NvComputer::CS_ONLINE;
+            online = tryLanPreferred(&nam, stateChanged);
             for (int i = 0; i < (wasOnline ? TRIES_BEFORE_OFFLINING : 1) && !online; i++) {
                 for (auto& address : m_Computer->uniqueAddresses()) {
                     if (isInterruptionRequested()) {
@@ -375,6 +419,7 @@ private:
     StreamingPreferences* m_Prefs;       // VipleStream §K.X — for autoWakeOnLan gating
     ComputerManager* m_Manager;          // §VR-LAUNCHER：app 清單模式與世代號
     std::atomic<bool> m_AppListRefresh {false};
+    qint64 m_LanProbeAtMs = 0;           // §LAN-PREF：上次探區網位址的時間（只在輪詢執行緒存取）
     qint64 m_ExplicitWakeUntil;          // wallclock ms; protected by m_WakeMutex
     QMutex m_WakeMutex;
     QWaitCondition m_WakeCondition;

@@ -26,6 +26,9 @@ struct VrLaunchConfig {
     QString controller = QStringLiteral("touch");
     int overscan = 0;              // deg×10
     int fovea = 100;               // §VR-FOVEA：正前方的像素密度是均勻取樣的幾 %（100＝關）
+    // §VR-FOVEA-TILES：「每眼兩塊影像」的大小（1 small、2 medium、3 large＝設定頁的小／中／大；0＝這一場不分塊，
+    // dev 的 --vr-fovea-tiles off）；-1＝不帶 vrFoveaTiles（注視點關著），host 照它自己的 vr_fovea_tiles
+    int foveaTilesReq = -1;
     // §VR-HALF-RATE：頭盔的顯示更新率（Hz）。半速串流時 refreshHz 是串流的更新率（顯示的一半），host 光看
     // vrHz 分不出「60 Hz 的顯示器」和「120 Hz 顯示器跑半速」。0 或等於 refreshHz＝不帶 vrDispHz
     int displayHz = 0;
@@ -59,6 +62,14 @@ struct VrSessionInfo {
     QString layout;
     int overscan = 0;
     int fovea = 100;          // §VR-FOVEA：server 回了 fovea=N 才是 N（否則 100：影像沒有壓縮，不必還原）
+    int foveaInsetU0 = 0;     // §VR-FOVEA-INSET：server 回了 foveaInset=N（u0×10000）＝分段曲線；0＝三次曲線
+    // §VR-FOVEA-TILES：server 回了 foveaTiles=WxH 與 foveaRender=WxH＝每眼兩塊影像（packed＝2W×2H：上排左右眼的全視野、
+    // 下排左右眼的注視點裁切，裁切＝每眼 foveaRender 尺寸的影像裡 W×H 的一塊）。tileW＝0＝沒有分塊
+    int tileW = 0;
+    int tileH = 0;
+    int tileRenderW = 0;
+    int tileRenderH = 0;
+    bool tilesInvalid = false;  // server 回了分塊但尺寸對不上（valid 會是 false：照畫一定是錯的）
     bool recoveryIntra = false;
     bool multilink = false;   // §VR-MULTILINK：server 回了 multilink=1（雙方都支援）
     bool gazeFovea = false;   // §VR-GAZE-FOVEA：server 回了 gazeFovea=1

@@ -94,6 +94,8 @@ namespace proc {
     // VipleStream 2.0 §VR M1b V5（S1-16、§D.12）：只在 vr_pcvr=enabled 時設定
     bool vr_class = false;  ///< 「SteamVR Home」：只在 /applist?vr=1 出現，一般 /launch 回 VR_NEEDS_VR_CLIENT
     std::string vr_launch_url;  ///< steamapps.vrmanifest 裡的 VR 遊戲：`steam://launch/<id>/VR`
+    /// §VR-NETBENCH（2026-11-08）：「VR Network Test」——不啟動 SteamVR，host 播放預錄片段（vr_netbench_clip）
+    bool vr_bench = false;
   };
 
   class proc_t {

@@ -91,6 +91,10 @@ typedef struct _VRML_LINK {
     volatile uint32_t ackVideo;     // 影像接收執行緒寫：已換到哪一代
     volatile uint32_t ackAudio;     // 音訊接收執行緒寫
 
+    // §VR-LINK-STANDBY（2026-11-08）：走 Tailscale 的這條在有區網直連時待命——PING 不帶 CONFIRMED（server 就不在上面送影像、
+    // 也不算它活著），追蹤與控制訊息也不在上面送。直連都斷了（1 s 收不到 PONG）就自動回來。ping 執行緒寫、其他執行緒讀
+    volatile bool standby;
+
     // ping／pong
     uint32_t pingSeq;
     volatile uint64_t lastPongMs; // 影像接收執行緒寫
@@ -253,6 +257,26 @@ static bool isConfirmed(const VRML_LINK* L, uint64_t nowMs) {
     uint64_t t = L->lastPongMs;
     // t 可能比 nowMs 新（另一條執行緒剛更新）：無號相減會下溢，要先比大小
     return L->ready && t != 0 && (t >= nowMs || nowMs - t < VRML_CONFIRM_TIMEOUT_MS);
+}
+
+// §VR-LINK-STANDBY：server 位址在 Tailscale 的 CGNAT 範圍（100.64.0.0/10）＝走 VPN 隧道的那一條
+static bool isVpnLink(const VRML_LINK* L) {
+    return (ntohl(L->serverV.sin_addr.s_addr) & 0xFFC00000u) == 0x64400000u;
+}
+
+// 有沒有一條不走 VPN、兩個方向都通的連線（區網直連或轉接器熱點）
+static bool directLinkConfirmed(uint64_t nowMs) {
+    for (int i = 0; i < linkCount; i++) {
+        if (!links[i].ifGone && !isVpnLink(&links[i]) && isConfirmed(&links[i], nowMs)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// §VR-LINK-DEDICATED：頭盔自己的串流轉接器熱點（SteamOS 的 softap 介面叫 wlanap，專用 6 GHz）
+static bool isDedicatedIf(const char* ifName) {
+    return ifName != NULL && strncmp(ifName, "wlanap", 6) == 0;
 }
 
 static void closeLinkSockets(VRML_LINK* L) {
@@ -515,7 +539,8 @@ static void sendHello(void) {
         // 我們支援的；要不要啟用由 server 決定（LINK_READY 的 hubCaps）。§VR-REPAIR-RTT 另外看 client 這一端要不要用
         // （設定或 --vr-repair-rtt off 可以不提，那就整場照原本的規則）
         d.flags = VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_HOTADD |
-                  ((StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) ? VIPLE_VR_LINK_F_REPAIR_RTT : 0);
+                  ((StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) ? VIPLE_VR_LINK_F_REPAIR_RTT : 0) |
+                  (isDedicatedIf(L->pending ? L->pendingIfName : L->ifName) ? VIPLE_VR_LINK_F_DEDICATED : 0);
         // §VR-MULTILINK-HOTADD：重綁中要送的是新路徑的埠與位址（LINK_READY 之後才會換掉 L->videoSock）
         if (L->pending) {
             d.clientVideoPort = LE16(L->pendingLocalVideoPort);
@@ -567,7 +592,7 @@ static void logStats(uint64_t nowMs) {
                         " | L%d %s %s rx=%u used=%u gapMaxMs=%.1f rttMs=%s burstMbps=%u lagMs=%.1f trk=%u drop=%u epoch=%u",
                         (int)L->id, L->ifName[0] ? L->ifName : "?",
                         L->ifGone ? "ifgone" : (L->pending ? "rebind" :
-                                                (L->refused ? "refused" : (isConfirmed(L, nowMs) ? "up" : (L->ready ? "unconfirmed" : "pending")))),
+                                                (L->refused ? "refused" : (isConfirmed(L, nowMs) ? (L->standby ? "standby" : "up") : (L->ready ? "unconfirmed" : "pending")))),
                         rx - L->rxPktsPrev, used - L->rxUsedPrev, gap / 1000.0, rttStr, (unsigned)L->burstMbps,
                         L->lagUs / 1000.0, ts - L->trkSentPrev, td - L->trkDropPrev, (unsigned)L->epoch);
         L->rxPktsPrev = rx;
@@ -1033,6 +1058,7 @@ static void PingThreadProc(void* context) {
             hotaddScan(nowMs);
         }
 
+        const bool directUp = directLinkConfirmed(nowMs);
         for (i = 0; i < linkCount; i++) {
             VRML_LINK* L = &links[i];
             struct {
@@ -1051,7 +1077,17 @@ static void PingThreadProc(void* context) {
             pkt.hdr.linkId = L->id;
             pkt.hdr.seq = LE32(++L->pingSeq);
             pkt.hdr.arg = LE32((uint32_t)PltGetMicroseconds());  // PONG 原樣帶回，用來算往返時間
-            pkt.ping.flags = isConfirmed(L, nowMs) ? VIPLE_VR_LINK_PING_F_CONFIRMED : 0;
+            {
+                const bool conf = isConfirmed(L, nowMs);
+                const bool sb = conf && isVpnLink(L) && directUp;
+                if (sb != L->standby) {
+                    L->standby = sb;
+                    Limelog("[VIPLE-VR-LINK] link %d '%s' %s\n", (int)L->id, L->ifName[0] ? L->ifName : "?",
+                            sb ? "on standby: a direct link to the host is up, no video over the VPN"
+                               : "back in use: no direct link to the host");
+                }
+                pkt.ping.flags = conf && !sb ? VIPLE_VR_LINK_PING_F_CONFIRMED : 0;
+            }
             pkt.ping.rttMs10 = LE16(L->rttMs10);
             pkt.ping.rxPkts = LE32(L->rxPkts);
             pkt.ping.rxUsed = LE32(L->rxUsed);
@@ -1718,8 +1754,11 @@ int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr
         return 0;
     }
     const struct sockaddr_in* ex = (const struct sockaddr_in*)exclude;
+    // §VR-LINK-STANDBY：先找不走 VPN 的（區網直連、轉接器）；VPN 隧道多半跟著同一張網卡，那張斷了它也斷
+    for (int pass = 0; pass < 2; pass++)
     for (int i = 0; i < linkCount; i++) {
-        if (!isConfirmed(&links[i], nowMs) || links[i].serverV.sin_addr.s_addr == ex->sin_addr.s_addr) {
+        if (!isConfirmed(&links[i], nowMs) || links[i].serverV.sin_addr.s_addr == ex->sin_addr.s_addr ||
+                isVpnLink(&links[i]) != (pass == 1)) {
             continue;
         }
         struct sockaddr_in a;
@@ -1731,6 +1770,25 @@ int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr
         return 1;
     }
     return 0;
+}
+
+int vrmlServerAddrState(const struct sockaddr_storage* addr) {
+    const uint64_t nowMs = PltGetMillis();
+    int state = -1;
+    if (addr == NULL || addr->ss_family != AF_INET) {
+        return -1;
+    }
+    const struct sockaddr_in* a = (const struct sockaddr_in*)addr;
+    for (int i = 0; i < linkCount; i++) {
+        if (!links[i].ready || links[i].serverV.sin_addr.s_addr != a->sin_addr.s_addr) {
+            continue;
+        }
+        if (isConfirmed(&links[i], nowMs)) {
+            return 1;
+        }
+        state = 0;
+    }
+    return state;
 }
 
 int vrmlVideoCarryMask(void) {
@@ -2124,7 +2182,7 @@ static int sendC2S(uint16_t ptype, const void* sample, int length, bool tracking
     hdr.seq = LE32(seq);
     for (i = 0; i < linkCount; i++) {
         VRML_LINK* L = &links[i];
-        if (!isConfirmed(L, nowMs)) {
+        if (!isConfirmed(L, nowMs) || L->standby) {
             continue;
         }
         hdr.linkId = L->id;
@@ -2234,6 +2292,7 @@ void vrmlNoteVideoUsed(int linkIdx) { (void)linkIdx; }
 int vrmlVideoCarrying(void) { return 0; }
 int vrmlAnyAlive(void) { return 0; }
 int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr_storage* out) { (void)exclude; (void)out; return 0; }
+int vrmlServerAddrState(const struct sockaddr_storage* addr) { (void)addr; return -1; }
 int vrmlVideoCarryMask(void) { return 0; }
 uint32_t vrmlVideoLinkLagUs(int linkIdx) { (void)linkIdx; return 0; }
 int vrmlRecvAudio(SOCKET legacy, char* buffer, int size) { (void)legacy; (void)buffer; (void)size; return -1; }

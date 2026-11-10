@@ -313,6 +313,9 @@ namespace config {
     /// 把 driver 交來的原始畫面（編碼前、BGRA 8-bit、打包尺寸）連續存 <張數> 張到 config 目錄的 rawdump_<寬>x<高>_<張數>f.bgra。
     /// 先在 GPU 複製到 staging 貼圖、抓滿才讀回寫檔（寫檔那幾秒擷取會停）。給離線比較編碼器用
     std::string dev_rawdump;
+    /// §VR-NETBENCH（2026-11-08）：vr_netbench_clip＝VR 網路測試播放的片段（.mp4，HEVC／H.264，兩眼左右並排）。
+    /// 預設空＝config 目錄的 netbench/clip.mp4。檔案存在時 VR 應用清單多一個「VR Network Test」
+    std::string netbench_clip;
 
     /// §VR-CTRL-OFFSET：vr_ctrl_pose_offset（enabled 預設）。enabled＝控制器也設 poseTimeOffset（driver pose_flags bit0）
     bool ctrl_pose_offset = true;
@@ -427,6 +430,11 @@ namespace config {
     bool gaze_fovea = true;
     /// vr_fovea_gaze_slew_dps：注視點中心角速度上限（30–600 deg/s，預設 200）。
     int fovea_gaze_slew_dps = 200;
+    /// §VR-FOVEA-TILES（2026-11-10）：vr_fovea_tiles。注視點改成每眼兩塊影像（全視野縮小一塊＋注視點原生裁切一塊），
+    /// 不做幾何變形；需要 client 宣告支援（否則照舊用注視點曲線）。0＝disabled（一律不分塊）；1＝small（像素量約等於
+    /// 不分塊）、2＝medium、3＝large（每塊＝串流的每眼尺寸）是 client 沒有指定大小時用的值——2.0.122 起 client 的設定頁
+    /// 有「小／中／大」，會隨 /launch 帶來。預設 small
+    int fovea_tiles = 1;
   };
 
   struct nvhttp_t {

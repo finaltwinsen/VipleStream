@@ -42,6 +42,8 @@ bool logOnceOnChange(const QString& key, const QString& signature)
 #define SER_IPV6PORT "ipv6port"
 #define SER_VPNADDR "vpnaddress"
 #define SER_VPNPORT "vpnport"
+#define SER_LANADDRS "lanaddresses"
+#define SER_LANPORT "lanport"
 #define SER_STUNADDR "stunaddress"
 #define SER_STUNPORT "stunport"
 #define SER_STUNNATTYPE "stunnattype"
@@ -71,6 +73,14 @@ NvComputer::NvComputer(QSettings& settings)
                                     settings.value(SER_MANUALPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
     this->vpnAddress = NvAddress(settings.value(SER_VPNADDR).toString(),
                                  settings.value(SER_VPNPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt());
+    {
+        const uint16_t lanPort = settings.value(SER_LANPORT, QVariant(DEFAULT_HTTP_PORT)).toUInt();
+        for (const QString& a : settings.value(SER_LANADDRS).toStringList()) {
+            if (!a.isEmpty()) {
+                this->lanAddresses.append(NvAddress(a, lanPort));
+            }
+        }
+    }
     this->serverCert = QSslCertificate(settings.value(SER_SRVCERT).toByteArray());
     this->isNvidiaServerSoftware = settings.value(SER_NVIDIASOFTWARE).toBool();
     this->directLaunchDesktop = settings.value(SER_DIRECT_LAUNCH_DESKTOP, false).toBool();
@@ -127,6 +137,14 @@ void NvComputer::serialize(QSettings& settings, bool serializeApps) const
     settings.setValue(SER_MANUALPORT, manualAddress.port());
     settings.setValue(SER_VPNADDR, vpnAddress.address());
     settings.setValue(SER_VPNPORT, vpnAddress.port());
+    {
+        QStringList lans;
+        for (const NvAddress& a : lanAddresses) {
+            lans.append(a.address());
+        }
+        settings.setValue(SER_LANADDRS, lans);
+        settings.setValue(SER_LANPORT, lanAddresses.isEmpty() ? DEFAULT_HTTP_PORT : lanAddresses.first().port());
+    }
     settings.setValue(SER_STUNADDR, stunAddress.address());
     settings.setValue(SER_STUNPORT, stunAddress.port());
     settings.setValue(SER_STUNNATTYPE, stunNatType);
@@ -158,6 +176,7 @@ bool NvComputer::isEqualSerialized(const NvComputer &that) const
            this->ipv6Address == that.ipv6Address &&
            this->manualAddress == that.manualAddress &&
            this->vpnAddress == that.vpnAddress &&
+           this->lanAddresses == that.lanAddresses &&
            this->stunAddress == that.stunAddress &&
            this->stunNatType == that.stunNatType &&
            this->serverCert == that.serverCert &&
@@ -308,6 +327,20 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
             if (ha.protocol() == QAbstractSocket::IPv4Protocol && ha.isInSubnet(QHostAddress(QStringLiteral("100.64.0.0")), 10)) {
                 this->vpnAddress = NvAddress(a, http.httpPort());
                 break;
+            }
+        }
+    }
+
+    // §LAN-PREF：host 廣告的區網位址，只收私有 IPv4（10/8、172.16/12、192.168/16），順序照 host 給的（有線先）
+    {
+        const QStringList lanAddrs = NvHTTP::getXmlStringList(serverInfo, "VipleStreamLanAddress");
+        for (const QString& a : lanAddrs) {
+            const QHostAddress ha(a);
+            if (ha.protocol() == QAbstractSocket::IPv4Protocol &&
+                    (ha.isInSubnet(QHostAddress(QStringLiteral("10.0.0.0")), 8) ||
+                     ha.isInSubnet(QHostAddress(QStringLiteral("172.16.0.0")), 12) ||
+                     ha.isInSubnet(QHostAddress(QStringLiteral("192.168.0.0")), 16))) {
+                this->lanAddresses.append(NvAddress(a, http.httpPort()));
             }
         }
     }
@@ -768,6 +801,7 @@ bool NvComputer::updateUnlocked(const NvComputer& that)
     ASSIGN_IF_CHANGED_AND_NONNULL(ipv6Address);
     ASSIGN_IF_CHANGED_AND_NONNULL(manualAddress);
     ASSIGN_IF_CHANGED_AND_NONNULL(vpnAddress);
+    ASSIGN_IF_CHANGED_AND_NONEMPTY(lanAddresses);  // 舊 host 不廣告：不清掉已存的
     // §REVIEW-1104：poll 的 STUN 位址與 NAT 類型沒寫回，會一直對舊端點打洞；空值不覆蓋，避免沒送 StunEndpoint 的 poll 把已存值清掉
     ASSIGN_IF_CHANGED_AND_NONNULL(stunAddress);
     ASSIGN_IF_CHANGED_AND_NONEMPTY(stunNatType);

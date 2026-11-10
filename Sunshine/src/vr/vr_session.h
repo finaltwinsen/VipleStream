@@ -59,6 +59,17 @@ namespace vr {
     std::string ctrl = "touch";  ///< vrCtrl："touch"|"index"
     int overscan = 0;  ///< vrOverscan：deg×10
     int fovea = 100;  ///< vrFovea（§VR-FOVEA）：正前方的像素密度是均勻取樣的幾 %（100＝關，上限 250）
+    /// §VR-FOVEA-INSET：分段注視點曲線的 u0（×10000，0＝用舊的三次曲線）。協商時由 host 算好（見 vr_fovea_profile.h），
+    /// 這時 fovea 也改成實際的中央密度；/resume 沿用進行中的編排
+    int fovea_inset_u0 = 0;
+    /// §VR-FOVEA-TILES：vrFoveaTiles（選填）＝client 選的大小（1 small、2 medium、3 large；0＝這一場不分塊，dev 用）；
+    /// -1＝沒帶，照 host 的 vr_fovea_tiles
+    int fovea_tiles_req = -1;
+    /// §VR-FOVEA-TILES：協商時由 host 算好的每塊尺寸與每眼算圖尺寸（tile_w＝0＝不用）；/resume 沿用進行中的編排
+    int tile_w = 0;
+    int tile_h = 0;
+    int tile_render_w = 0;
+    int tile_render_h = 0;
     int disp_hz = 0;  ///< vrDispHz：頭盔的顯示更新率，只在和 hz 不同時才有值（§VR-HALF-RATE 半速串流）；0＝沒帶＝和 hz 相同
     bool force = false;  ///< vrForce：0|1
     // §VR-PLAYAREA（2026-10-30）：遊玩區（寬、深 mm）與坐姿零點（pos x,y,z mm、yaw 毫度）
@@ -137,13 +148,20 @@ namespace vr {
     bool haptic_redundancy = true;
     /// §VR-GAZE-FOVEA：眼動追蹤驅動注視點渲染協商結果。
     bool gaze_fovea = false;
+    /// §VR-NETBENCH：「VR Network Test」——不經過 SteamVR，host 播放預錄片段（只在 host 內部用，不上線）
+    bool bench = false;
+
+    /// §VR-FOVEA-TILES：每眼兩塊影像（上排全視野、下排注視點）
+    bool tiles() const {
+      return params.tile_w > 0 && params.tile_h > 0;
+    }
 
     int packed_width() const {
-      return params.eye_width * 2;  // layout=sbs
+      return tiles() ? params.tile_w * 2 : params.eye_width * 2;  // layout=sbs
     }
 
     int packed_height() const {
-      return params.eye_height;
+      return tiles() ? params.tile_h * 2 : params.eye_height;
     }
 
     /// video::config_t::videoFormat 的編號（0 = H.264、1 = HEVC、3 = PyroWave）

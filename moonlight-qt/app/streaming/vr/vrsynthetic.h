@@ -54,6 +54,13 @@ void vrSyntheticHands(double tSec, VIPLE_VR_TRACKING* out);
 // 只寫按鍵：左手控制器沒有 active（沒被追蹤、也沒有合成的手）時 host 會整個忽略。
 void vrSyntheticMenu(double tSec, double pressAtSec, VIPLE_VR_TRACKING* out);
 
+// 2026-11-10（dev，--vr-synthetic-gaze，§VR-FOVEA-TILES）：把樣本的視線換成合成的（頭盔沒人戴時眼動無效，host 的注視點
+// 那塊不會動，量不到「視線跳動時編碼器與流暢度的表現」）。固定的可重現序列，每 0.7 秒一段：
+//   多數是掃視（幾十毫秒內跳到新目標再停住，目標在 yaw ±20°、pitch ±12° 內，停住時帶 0.15° 的抖動）；
+//   每 8 段有 2 段是追視（整段等速移到新目標，像眼睛跟著球）；每 9 秒有 150 ms 無效（眨眼）。
+// 只寫 gaze 與 VIPLE_VR_TRK_GAZE 旗標，其餘不動。
+void vrSyntheticGaze(double tSec, VIPLE_VR_TRACKING* out);
+
 // 2026-11-04（dev，--vr-synthetic-pad-test，§VR-PADMODE）：從 startSec 起跑一段固定的按鍵序列，給 host 的 Xbox 手把模式
 // 做無人驗證（host 端讀 XInput 對照）。每輪 4 s：[0,1) 右手 A、[1,2) 右扳機全壓＋左搖桿推到最左、[2,3) 左手 dpad 上＋
 // 右 bumper、[3,4) 放開。第 1 輪 [0,4)；[4,6.5) 兩支選單鍵長按（手動切換）；第 2 輪 [8,12)；[12,14.5) 再長按一次；

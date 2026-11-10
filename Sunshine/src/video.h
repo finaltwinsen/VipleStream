@@ -52,6 +52,8 @@ namespace video {
     int vrIntraRefreshPeriodFrames = 0;  // 週期性 intra refresh 安全網的間隔（幀），0 = 關閉
     int captureSource = 0;  // M1b S1-08：0 = 桌面（DDA／WGC），1 = VR（display_vr_t，driver 交來的 SBS ring）
     int packetSize = 1392;  // RTP packet size for PyroWave slot-aligned packetization
+    /// §VR-NETBENCH（2026-11-08）：captureSource=1 時改由 display_vr_clip_t 播放預錄片段（VR 網路測試），不經過 SteamVR
+    bool vrClip = false;
   };
 
   /**

@@ -271,6 +271,66 @@ void vrSyntheticPadTest(double t, double startAt, VIPLE_VR_TRACKING* out)
     }
 }
 
+namespace {
+
+// 第 k 段的目標（度）：固定的雜湊，每次執行都一樣
+void synthGazeTarget(int64_t k, double* yawDeg, double* pitchDeg)
+{
+    uint64_t h = static_cast<uint64_t>(k) * 0x9E3779B97F4A7C15ull + 0xD1B54A32D192ED03ull;
+    h ^= h >> 29;
+    h *= 0xBF58476D1CE4E5B9ull;
+    h ^= h >> 32;
+    const double u = static_cast<double>(h & 0xFFFFFu) / 1048575.0;
+    const double v = static_cast<double>((h >> 20) & 0xFFFFFu) / 1048575.0;
+    *yawDeg = (2.0 * u - 1.0) * 20.0;
+    *pitchDeg = (2.0 * v - 1.0) * 12.0;
+}
+
+}  // namespace
+
+void vrSyntheticGaze(double t, VIPLE_VR_TRACKING* out)
+{
+    if (t < 0.0) {
+        t = 0.0;
+    }
+    // 眨眼：每 9 秒的第 4.00～4.15 秒沒有視線
+    const double tb = std::fmod(t, 9.0);
+    if (tb >= 4.0 && tb < 4.15) {
+        memset(&out->gaze, 0, sizeof(out->gaze));
+        out->flags &= ~VIPLE_VR_TRK_GAZE;
+        return;
+    }
+    constexpr double kSlot = 0.7;
+    const int64_t k = static_cast<int64_t>(t / kSlot);
+    const double ts = t - static_cast<double>(k) * kSlot;
+    double y0, p0, y1, p1;
+    synthGazeTarget(k - 1, &y0, &p0);
+    synthGazeTarget(k, &y1, &p1);
+    double s;  // 0→1：從上一個目標到這一個目標走了多少
+    const bool pursuit = (k % 8) == 5 || (k % 8) == 6;
+    if (pursuit) {
+        s = ts / kSlot;  // 追視：整段等速
+    }
+    else {
+        // 掃視：時間＝20 ms＋每度 2.2 ms（20° 約 64 ms），位置照 minimum-jerk
+        const double amp = std::sqrt((y1 - y0) * (y1 - y0) + (p1 - p0) * (p1 - p0));
+        const double dur = 0.020 + 0.0022 * amp;
+        const double x = ts >= dur ? 1.0 : ts / dur;
+        s = x * x * x * (10.0 - 15.0 * x + 6.0 * x * x);
+    }
+    double yaw = y0 + (y1 - y0) * s;
+    double pitch = p0 + (p1 - p0) * s;
+    // 停住時的小抖動（追蹤器的雜訊）
+    yaw += 0.15 * std::sin(2.0 * kPi * 7.3 * t);
+    pitch += 0.15 * std::sin(2.0 * kPi * 11.1 * t + 1.0);
+    out->gaze.yawF16 = VipleVrFloatToHalf(static_cast<float>(yaw * kDegToRad));
+    out->gaze.pitchF16 = VipleVrFloatToHalf(static_cast<float>(pitch * kDegToRad));
+    out->gaze.confidence = 255;
+    out->gaze.flags = 0;
+    out->gaze.sampleAgeMs = 0;
+    out->flags |= VIPLE_VR_TRK_GAZE;
+}
+
 void vrSyntheticMenu(double t, double pressAt, VIPLE_VR_TRACKING* out)
 {
     if (!(pressAt > 0.0) || t < pressAt) {

@@ -298,6 +298,16 @@ namespace vr {
       p.fovea = (int) fovea;
     }
 
+    // vrFoveaTiles（選填）：§VR-FOVEA-TILES 的大小，1 small、2 medium、3 large（client 設定頁的小／中／大）；
+    // 0＝這一場不分塊（dev）；沒帶＝照 host 設定
+    if (auto v = lookup("vrFoveaTiles")) {
+      int64_t tier = 0;
+      if (!parse_int_field("vrFoveaTiles", *v, false, 0, 3, tier, error)) {
+        return fail(error);
+      }
+      p.fovea_tiles_req = (int) tier;
+    }
+
     // vrDispHz（選填）：頭盔的顯示更新率。client 只在它和 vrHz 不同時才帶（半速串流）；不帶或等於 vrHz＝相同
     if (auto v = lookup("vrDispHz")) {
       int64_t disp_hz = 0;
@@ -384,7 +394,7 @@ namespace vr {
 
   std::string format_launch_params(const launch_params_t &p) {
     return std::format(
-      "vr=1&vrEye={}x{}&vrHz={}&vrPeriodNs={}&vrFov={}&vrIpd={}&vrEyeToHead={}&vrCaps={:x}&vrCodecs={}&vrCtrl={}&vrOverscan={}&vrForce={}{}{}{}{}",
+      "vr=1&vrEye={}x{}&vrHz={}&vrPeriodNs={}&vrFov={}&vrIpd={}&vrEyeToHead={}&vrCaps={:x}&vrCodecs={}&vrCtrl={}&vrOverscan={}&vrForce={}{}{}{}{}{}",
       p.eye_width,
       p.eye_height,
       p.hz,
@@ -399,6 +409,8 @@ namespace vr {
       p.force ? 1 : 0,
       // §VR-FOVEA：關閉時不帶（舊 server 不認得的 key 會略過，但字串維持和以前一樣）
       p.fovea > 100 ? std::format("&vrFovea={}", p.fovea) : std::string(),
+      // §VR-FOVEA-TILES：client 有指定大小時才帶（和 moonlight-qt 的 toQuery 同一個位置）
+      p.fovea_tiles_req >= 0 ? std::format("&vrFoveaTiles={}", p.fovea_tiles_req) : std::string(),
       // 半速串流才帶（顯示更新率和 vrHz 不同）；其他時候字串維持和以前一樣
       p.disp_hz > 0 && p.disp_hz != p.hz ? std::format("&vrDispHz={}", p.disp_hz) : std::string(),
       // §VR-PLAYAREA：有指定遊玩區時帶上
@@ -414,7 +426,7 @@ namespace vr {
 
   std::string format_session_element(const negotiated_t &neg) {
     return std::format(
-      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId={};session={};mode={}{}{}{}",
+      "proto={};packed={}x{};hz={};codec={};layout=sbs;overscan={};recovery={};irFrames={};transport=rtp;universeId={};session={};mode={}{}{}{}{}{}",
       VIPLE_VR_PROTO_VERSION,
       neg.packed_width(),
       neg.packed_height(),
@@ -430,8 +442,14 @@ namespace vr {
       // §VR-MULTILINK：只在協商成立時多這一項（舊 client 不認得的 key 會略過）
       neg.multilink ? ";multilink=1" : "",
       // §VR-FOVEA：只有真的 driver 會做（stub 不合成影像）；回了這一項 client 才還原
-      neg.pcvr && neg.params.fovea > 100 ? std::format(";fovea={}", neg.params.fovea) : std::string(),
+      // §VR-FOVEA-TILES：分塊時影像沒有幾何變形，不回 fovea=（client 就不還原）
+      neg.pcvr && neg.params.fovea > 100 && !neg.tiles() ? std::format(";fovea={}", neg.params.fovea) : std::string(),
+      // §VR-FOVEA-INSET：分段注視點曲線的 u0（×10000）；只回給宣告懂的 client（協商時就檢查過）
+      neg.pcvr && neg.params.fovea > 100 && !neg.tiles() && neg.params.fovea_inset_u0 > 0 ? std::format(";foveaInset={}", neg.params.fovea_inset_u0) : std::string(),
+      // §VR-FOVEA-TILES：每塊尺寸與每眼算圖尺寸（packed＝2×每塊）；只回給宣告懂的 client
+      neg.pcvr && neg.tiles() ? std::format(";foveaTiles={}x{};foveaRender={}x{}", neg.params.tile_w, neg.params.tile_h, neg.params.tile_render_w, neg.params.tile_render_h) : std::string(),
       // §VR-GAZE-FOVEA：注視點動態中心協商成功時標註
+      // 11-10：加 foveaInset 時漏了一個 {}，std::format 會丟掉多的參數 → gazeFovea=1 沒送、眼動沒作用；新增項目時佔位符要一起加
       neg.gaze_fovea ? ";gazeFovea=1" : ""
     );
   }

@@ -375,7 +375,13 @@ typedef struct vripc_session_config_t { /* 寫入方：server，WELCOME 前寫�
   uint32_t fovea_slew_dps; /* 注視點中心角速度上限（deg/s，預設 200） */
   uint32_t fovea_max_mdeg; /* 注視點偏離上限（mdeg，預設 20000） */
   uint32_t fovea_deadband_mdeg; /* 死區（mdeg，預設 1500 = 1.5°） */
-  uint8_t reserved[24]; /* 補齊至 64 位元組倍數（512 B） */
+  uint16_t fovea_inset_u0; /* §VR-FOVEA-INSET（2026-11-09）：分段注視點曲線中央段在編碼影像裡的範圍 ×10000（0＝舊的三次曲線；原 reserved 的前 2 位元組） */
+  uint16_t tile_w; /* §VR-FOVEA-TILES（2026-11-10）：每眼兩塊影像時每塊的寬高（0＝不分塊；原 reserved 的第 3～10 位元組）。
+                      packed＝(2·tile_w)×(2·tile_h)：上排左右眼的全視野、下排左右眼的注視點裁切 */
+  uint16_t tile_h;
+  uint16_t tile_render_w; /* 每眼算圖尺寸：注視點那塊＝這張影像裡 tile_w×tile_h 的裁切（左上角對齊整數像素） */
+  uint16_t tile_render_h;
+  uint8_t reserved[14]; /* 補齊至 64 位元組倍數（512 B） */
 } vripc_session_config_t;
 
 typedef struct vripc_pacing_t { /* 寫入方：server；單格 seqlock（seq 偶數 = 完成）；idle generation 也必須寫有效週期。

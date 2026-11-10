@@ -2,6 +2,7 @@
 #include "backend/xrshell.h"                // §VR-SHELL：--vr-shell 的格式檢查
 #include "backend/vrpreflight.h"            // §VR-PREFLIGHT：--vr-test-preflight 的格式檢查（header-only，不依賴 Qt）
 #include "streaming/video/bitstreamdump.h"  // §SF-PROBE：stream --dump-bitstream
+#include "streaming/vr/vrnetbench.h"        // §VR-NETBENCH：--vr-netbench
 #include "streaming/xr/xrlatchstats.h"      // §VR-LDIAG：--vr-test-jitter 的格式檢查（header-only，不依賴 OpenXR）
 
 #include <QCommandLineParser>
@@ -309,6 +310,7 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
                           "x[*<count>], x = no answer; the last item repeats, e.g. 150*8,30");
     parser.addValueOption("vr-shell", "(dev) headset VR interface: \"<xr|noxr|off>[,dump=<sec>:<png>][,test=<script>]\" (xr is the default on the Steam Frame; off = use the window)");
     parser.addValueOption("dev-video", "(dev) open the video mode page at start: \"<tab>[,url=<url>][,grab=<sec>:<png>][,play=<sec>][,host=<name>][,dir=<path>]\"");
+    parser.addFlagOption("dev-netbench", "(dev) start the VR network test (Settings > Test network) as soon as a VR host is online");
     parser.parse(args);
     auto posArgs = parser.positionalArguments();
 
@@ -329,6 +331,7 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
             m_VrTestPreflight = spec;
         }
         m_DevVideo = parser.value("dev-video");
+        m_DevNetBench = parser.isSet("dev-netbench");
         if (parser.isSet("vr-shell")) {
             XrShell::Config shellConfig;
             QString shellErr;
@@ -646,6 +649,13 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("xr-test-stall-ms", "(dev) drop video frames for N ms starting 20 s after the first XR frame (stale-state test)");
     parser.addValueOption("vr-gpu-priority", "(dev) PCVR: global priority of the XR Vulkan queue: default | high | realtime "
                                              "(falls back to default when the driver refuses). Not saved.");
+    parser.addFlagOption("vr-fovea-single-layer", "(dev) PCVR with foveated encoding: restore one full-size image instead of a decoded-size periphery plus a centre layer (the pre-2.0.118 path; not saved)");
+    parser.addFlagOption("vr-unwarp-rgb", "(dev) PCVR with foveated encoding: convert the decoded frame to an RGB image before restoring it (the pre-2.0.117 path; not saved)");
+    parser.addValueOption("vr-fovea-tiles", "(dev) PCVR foveation as two images per eye (whole view + native crop at the gaze): off | small | medium | large. "
+                                            "Overrides the size chosen in the settings for this session (off = the older warped foveation). Not saved.");
+    parser.addFlagOption("vr-synthetic-gaze", "(dev) PCVR: send a synthetic gaze (saccades, pursuit, blinks) to the host instead of the tracked one, "
+                                              "to exercise gaze-driven foveation with nobody wearing the headset. Not saved.");
+    parser.addValueOption("vr-unwarp-max", "(dev) PCVR with foveated encoding: largest scale of the restored image over the decoded one, 1.0-2.0 (default 2.0; not saved)");
     parser.addValueOption("vr-test-jitter", "(dev) PCVR arrival-jitter injection that delays each stream frame before it is rendered (not saved): "
                           "worn | light | early[=<baseUs>:<permille>] | scan=<maxUs>, optionally followed by "
                           ",shift=<startSec>:<us>:<durSec> and ,seed=<n>");
@@ -726,6 +736,10 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                            {"on", "off"});
     parser.addValueOption("vr-eye", "per-eye <width>x<height> for PCVR (default 2160x2160)");
     parser.addValueOption("vr-hz", "HMD refresh rate for PCVR (default 90)");
+    // §VR-NETBENCH：設定頁「測試網路」開的子行程用（一階）。不寫回偏好設定
+    parser.addValueOption("vr-netbench", "PCVR network test step: write the measurements (JSON) to this file and end the stream "
+                          "after --vr-netbench-secs seconds. Preferences are not saved");
+    parser.addValueOption("vr-netbench-secs", "PCVR network test step length in seconds (default 75)");
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
     parser.addValueOption("vr-inject-loss", "(dev) N: inject a VR LOSS report every N seconds");
     parser.addFlagOption("vr-link-selftest", "(dev) PCVR multi-link: open a second link on the same network interface to exercise duplication and de-duplication. Not saved.");
@@ -988,6 +1002,43 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError(QString("vr-gpu-priority must be default, high or realtime: %1").arg(v));
         }
     }
+    if (parser.isSet("vr-fovea-single-layer")) {
+        preferences->vrFovSingleLayer = true;  // §VR-FOVEA-LAYERS（dev）：A/B
+    }
+    if (parser.isSet("vr-unwarp-rgb")) {
+        preferences->vrUnwarpRgb = true;  // §VR-UNWARP-YUV（dev）：A/B
+    }
+    if (parser.isSet("vr-fovea-tiles")) {
+        // §VR-FOVEA-TILES（dev）：指定檔位（host 仍會檢查算圖尺寸夠不夠）
+        const QString v = parser.value("vr-fovea-tiles").toLower();
+        if (v == "off") {
+            preferences->vrFoveaTilesReq = 0;
+        }
+        else if (v == "small") {
+            preferences->vrFoveaTilesReq = 1;
+        }
+        else if (v == "medium") {
+            preferences->vrFoveaTilesReq = 2;
+        }
+        else if (v == "large") {
+            preferences->vrFoveaTilesReq = 3;
+        }
+        else {
+            parser.showError(QString("vr-fovea-tiles must be off, small, medium or large: %1").arg(v));
+        }
+    }
+    if (parser.isSet("vr-synthetic-gaze")) {
+        preferences->vrSyntheticGaze = true;  // §VR-FOVEA-TILES（dev）
+    }
+    if (parser.isSet("vr-unwarp-max")) {
+        // §VR-UNWARP-MAX（dev）：量「還原後的影像有多大」對頭盔功耗的影響（11-10：2.0 倍比關掉注視點多約 4 W）
+        bool ok = false;
+        const double v = parser.value("vr-unwarp-max").toDouble(&ok);
+        if (!ok || v < 1.0 || v > 2.0) {
+            parser.showError(QString("vr-unwarp-max must be within 1.0-2.0: %1").arg(parser.value("vr-unwarp-max")));
+        }
+        preferences->vrUnwarpMax = v;
+    }
     if (parser.isSet("vr-test-jitter")) {
         // §VR-LDIAG（dev）：格式在這裡就檢查（寫錯不可以默默變成不注入）；實際的延後在 XrVideo 的影像 render thread
         const QString spec = parser.value("vr-test-jitter");
@@ -1176,6 +1227,12 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         }
         preferences->vrEyeWidth = eye.first;
         preferences->vrEyeHeight = eye.second;
+    }
+    if (parser.isSet("vr-netbench")) {
+        NetBench::config().resultPath = parser.value("vr-netbench");
+        if (parser.isSet("vr-netbench-secs")) {
+            NetBench::config().seconds = std::clamp(parser.value("vr-netbench-secs").toInt(), 30, 600);
+        }
     }
     if (parser.isSet("vr-hz")) {
         preferences->vrRefreshHz = parser.getIntOption("vr-hz");

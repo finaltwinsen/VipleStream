@@ -19,6 +19,7 @@
 #include <utility>
 
 // lib includes
+#include <boost/asio/ip/address_v4.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/context_base.hpp>
 #include <boost/process/v1/environment.hpp>
@@ -53,6 +54,7 @@
 #include "uuid.h"
 #include "video.h"
 #include "pyrowave_encode.h"
+#include "vr/vr_fovea_profile.h"  // §VR-FOVEA-INSET
 #include "vr/vr_mic.h"
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_platform.h"
@@ -1185,9 +1187,35 @@ namespace nvhttp {
     }
     // §VPN-ADDR（2026-10-21）：VPN 介面（Tailscale 等）的位址一律廣告，不受上面兩個開關影響。client 記下來，離開區網時
     // （頭盔帶出門）用它連；本來 client 只記得區網、熱點與公網位址，Tailscale 連得通卻顯示離線
-    for (const auto &iface : platf::enum_net_interfaces()) {
-      if (iface.type == "vpn") {
-        tree.add("root.VipleStreamVpnAddress", iface.address);
+    // §LAN-PREF（2026-11-08）：區網位址（有線先、Wi-Fi 後；只收私有 IPv4）也一律廣告。client 平常用 Tailscale 連進來時，
+    // LocalIP 回的是 Tailscale 位址，它從不知道 host 在區網的位址，回到家也一直繞 Tailscale（頭盔實測：控制通道綁在
+    // Tailscale 上，家用 Wi-Fi 一暫停就跟著斷 18 秒）。client 看到這份清單、區網連得通就改走區網
+    {
+      std::vector<std::string> lan_wired, lan_wifi;
+      for (const auto &iface : platf::enum_net_interfaces()) {
+        if (iface.type == "vpn") {
+          tree.add("root.VipleStreamVpnAddress", iface.address);
+          continue;
+        }
+        if (iface.type != "ethernet" && iface.type != "wifi") {
+          continue;
+        }
+        boost::system::error_code ec;
+        const auto a = boost::asio::ip::make_address_v4(iface.address, ec);
+        if (ec) {
+          continue;
+        }
+        const auto b = a.to_bytes();
+        const bool priv = b[0] == 10 || (b[0] == 172 && (b[1] & 0xF0) == 16) || (b[0] == 192 && b[1] == 168);
+        if (priv) {
+          (iface.type == "ethernet" ? lan_wired : lan_wifi).push_back(iface.address);
+        }
+      }
+      for (const auto &a : lan_wired) {
+        tree.add("root.VipleStreamLanAddress", a);
+      }
+      for (const auto &a : lan_wifi) {
+        tree.add("root.VipleStreamLanAddress", a);
       }
     }
 
@@ -1379,6 +1407,32 @@ namespace nvhttp {
   }
 
   /**
+   * @brief §VR-FOVEA-TILES：這組 /launch 參數會不會改成每眼兩塊影像，以及每塊多大。協商（vr_negotiate）與
+   *        encoder 探測（vr_shape_of）用同一個判斷：client 懂分塊、真的 driver、要注視點、算圖比一塊大得夠多。
+   *        大小照 client 帶的 vrFoveaTiles（設定頁的小／中／大），沒帶才用 vr_fovea_tiles；vr_fovea_tiles＝disabled 時
+   *        一律不分塊。tier_out：實際用的檔位（給 log）。
+   */
+  ::vr::fovea::tiles_t vr_tiles_of(const ::vr::launch_params_t &params, int *tier_out = nullptr, int *render_w_out = nullptr, int *render_h_out = nullptr) {
+    // host 設成 disabled＝一律不分塊（總開關）；否則照 client 選的大小，client 沒帶才用 host 的值
+    const int tier = config::vr.fovea_tiles <= 0 ? 0 : (params.fovea_tiles_req >= 0 ? params.fovea_tiles_req : config::vr.fovea_tiles);
+    if (tier_out) {
+      *tier_out = tier;
+    }
+    if (!(params.caps & VIPLE_VR_CLIENT_CAP_FOVEA_TILES) || config::vr.pcvr != config::vr_t::pcvr_e::enabled || params.fovea <= 100 || tier <= 0) {
+      return {};
+    }
+    const int render_w = ::vr::fovea::render_width(params.eye_width, config::vr.render_scale_pct, config::vr.render_target_max);
+    const int render_h = ::vr::fovea::render_width(params.eye_height, config::vr.render_scale_pct, config::vr.render_target_max);
+    if (render_w_out) {
+      *render_w_out = render_w;
+    }
+    if (render_h_out) {
+      *render_h_out = render_h;
+    }
+    return ::vr::fovea::compute_tiles(params.eye_width, params.eye_height, render_w, render_h, tier);
+  }
+
+  /**
    * @brief 步驟 5–7：codec 交集（HEVC 優先、其次 H.264；AV1 等 L1 才接受）、recovery 模式、
    *        session GUID。必須在 probe_encoders 之後呼叫（codec 與 intra refresh 能力看這次探測）。
    * @return 協商結果；失敗時已寫好錯誤回應並回傳 nullptr。
@@ -1417,6 +1471,44 @@ namespace nvhttp {
                       config::vr.gaze_fovea &&
                       neg->pcvr &&
                       (params.fovea > 100);
+    // §VR-FOVEA-TILES：client 懂分塊、真的 driver、要注視點、算圖比一塊大得夠多 → 每眼兩塊影像（不做幾何變形）。
+    // 大小照 client 選的（vrFoveaTiles），沒帶才用 vr_fovea_tiles。/resume 沿用進行中編排的值（/resume 那段照抄）
+    if (!is_resume) {
+      neg->params.tile_w = neg->params.tile_h = neg->params.tile_render_w = neg->params.tile_render_h = 0;
+      int tier = 0, renderW = 0, renderH = 0;
+      const auto tiles = vr_tiles_of(params, &tier, &renderW, &renderH);
+      if (renderW > 0) {  // 條件都成立、算過尺寸了（＝0 表示根本不考慮分塊：client 不懂、沒要注視點、檔位關著）
+        if (tiles.on) {
+          neg->params.tile_w = tiles.tile_w;
+          neg->params.tile_h = tiles.tile_h;
+          neg->params.tile_render_w = tiles.render_w;
+          neg->params.tile_render_h = tiles.render_h;
+          BOOST_LOG(info) << "[VIPLE-VR-FOVEA] tiles: tier "sv << tier << " -> "sv << tiles.tile_w << 'x' << tiles.tile_h << " per tile (packed "sv
+                          << tiles.tile_w * 2 << 'x' << tiles.tile_h * 2 << "), render "sv << renderW << 'x' << renderH
+                          << ": periphery density "sv << tiles.tile_w * 100 / renderW << "%, gaze tile covers "sv << tiles.tile_w * 100 / renderW
+                          << "% of the view"sv;
+        } else {
+          BOOST_LOG(info) << "[VIPLE-VR-FOVEA] tiles not used: render "sv << renderW << 'x' << renderH << " is not large enough for tier "sv << tier
+                          << " at "sv << params.eye_width << 'x' << params.eye_height << " per eye"sv;
+        }
+      }
+    }
+    // §VR-FOVEA-INSET：client 懂分段曲線、真的 driver、要注視點、而且算圖比串流大 → 用分段曲線（中央保留原生細節）。
+    // /resume 的 params 已經是進行中編排的值（下面 /resume 那段照抄），不重算。分塊成立時不用曲線
+    if (!is_resume) {
+      neg->params.fovea_inset_u0 = 0;
+      if (!neg->tiles() && (params.caps & VIPLE_VR_CLIENT_CAP_FOVEA_INSET) && neg->pcvr && params.fovea > 100) {
+        const int renderW = ::vr::fovea::render_width(params.eye_width, config::vr.render_scale_pct, config::vr.render_target_max);
+        const auto inset = ::vr::fovea::compute_inset(params.eye_width, renderW, params.fovea);
+        if (inset.on) {
+          neg->params.fovea = inset.fovea_pct;
+          neg->params.fovea_inset_u0 = inset.u0_x10000;
+          BOOST_LOG(info) << "[VIPLE-VR-FOVEA] inset profile: render "sv << renderW << " / stream "sv << params.eye_width
+                          << " -> centre density "sv << inset.fovea_pct << "% over u0="sv << inset.u0_x10000 / 10000.0
+                          << " (client asked up to "sv << params.fovea << "%)"sv;
+        }
+      }
+    }
 
     BOOST_LOG(info) << "[VIPLE-VR-SESSION] accepted "sv << (is_resume ? "/resume"sv : "/launch"sv)
                     << " caller="sv << (caller_uuid.empty() ? "<unknown>"s : caller_uuid)
@@ -1463,6 +1555,14 @@ namespace nvhttp {
       put_vr_error(tree, false, 400, VIPLE_VR_ERR_BAD_PARAMS, "not a VR app");
       return std::nullopt;
     }
+    if (app->vr_bench) {
+      // §VR-NETBENCH：不碰 SteamVR，不看衝突（SteamVR 開著也無妨）
+      if (::vr::selftest::running()) {
+        put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, "selftest running on this host");
+        return std::nullopt;
+      }
+      return ::vr::orchestrator::app_ref_t {app->name, app->vr_class, app->vr_launch_url};
+    }
     const auto c = ::vr::platform::cached_conflicts();
     // §VR-REARM（2026-10-04）：SteamVR 用的是我們的 driver 時，執行中的 VR 遊戲多半是上一個 VR session 留下的
     // （斷線、從頭盔結束串流）。不在這裡擋——交給編排器：HMD 還在 Present 就沿用，standby 先試重新 arm，不行才回
@@ -1484,6 +1584,15 @@ namespace nvhttp {
     video::vr_probe_shape_t shape;
     shape.packed_w = params.eye_width * 2;
     shape.packed_h = params.eye_height;
+    // §VR-FOVEA-TILES：分塊時實際編碼的是 (2·tile_w)×(2·tile_h)。/resume 的 params 已帶進行中編排的尺寸；
+    // /launch 這時還沒協商，用同一個判斷先算
+    if (params.tile_w > 0 && params.tile_h > 0) {
+      shape.packed_w = params.tile_w * 2;
+      shape.packed_h = params.tile_h * 2;
+    } else if (const auto tiles = vr_tiles_of(params); tiles.on) {
+      shape.packed_w = tiles.tile_w * 2;
+      shape.packed_h = tiles.tile_h * 2;
+    }
     shape.hz = params.hz;
     shape.codec_mask = params.codecs;
     shape.ir_frames = config::vr.intra_refresh_frames;
@@ -1694,6 +1803,16 @@ namespace nvhttp {
       if (!launch_session->vr) {
         return;
       }
+      // §VR-NETBENCH：「VR Network Test」標成 bench（RTSP 據此改用片段擷取）
+      if (const auto a = find_app(appid); a && a->vr_bench && launch_session->vr->pcvr) {
+        auto n = std::make_shared<::vr::negotiated_t>(*launch_session->vr);
+        n->bench = true;
+        // §VR-FOVEA-TILES：片段是一般的左右並排影像，不分塊（網路測試的 client 本來就不要求注視點，這裡只是保險）
+        n->params.tile_w = n->params.tile_h = n->params.tile_render_w = n->params.tile_render_h = 0;
+        launch_session->vr = n;
+        BOOST_LOG(info) << "[VIPLE-VR-NETBENCH] /launch: network test session " << n->params.eye_width << 'x' << n->params.eye_height << '@'
+                        << n->params.hz << " (no SteamVR; playing the clip)";
+      }
     }
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
@@ -1721,7 +1840,9 @@ namespace nvhttp {
     }
 
     // M1b V5（S1-17）：pcvr 交給編排器（背景執行緒從 PRECHECK 開始）；探測狀態改由 VR session 結束時還原
-    if (vr_app) {
+    if (vr_app && launch_session->vr && launch_session->vr->bench) {
+      vr_scope->handoff_to_session();  // §VR-NETBENCH：不啟動編排器
+    } else if (vr_app) {
       if (!::vr::orchestrator::start(*launch_session->vr, *vr_app, vr_params->force)) {
         proc::proc.terminate();
         put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, std::format("SteamVR orchestration busy (state={})", ::vr::orchestrator::state_name(::vr::orchestrator::state().state)));
@@ -1868,6 +1989,21 @@ namespace nvhttp {
         BOOST_LOG(info) << "[VIPLE-VR-SESSION] /resume: foveation stays at "sv << cur->fovea << "% (running orchestration; client asked for "sv << vr_params->fovea << "%)"sv;
         vr_params->fovea = cur->fovea;
       }
+      // §VR-FOVEA-INSET：driver 正在用分段曲線，client 卻不懂 → 還原會錯位，不接
+      if (cur->fovea_inset_u0 > 0 && !(vr_params->caps & VIPLE_VR_CLIENT_CAP_FOVEA_INSET)) {
+        put_vr_error(tree, true, 503, VIPLE_VR_ERR_BUSY, "the running orchestration uses the inset foveation profile, which this client does not support");
+        return;
+      }
+      vr_params->fovea_inset_u0 = cur->fovea_inset_u0;
+      // §VR-FOVEA-TILES：同理——driver 正在出分塊的影像，client 不懂就不接；懂就沿用同一組尺寸
+      if (cur->tile_w > 0 && !(vr_params->caps & VIPLE_VR_CLIENT_CAP_FOVEA_TILES)) {
+        put_vr_error(tree, true, 503, VIPLE_VR_ERR_BUSY, "the running orchestration uses foveation tiles, which this client does not support");
+        return;
+      }
+      vr_params->tile_w = cur->tile_w;
+      vr_params->tile_h = cur->tile_h;
+      vr_params->tile_render_w = cur->tile_render_w;
+      vr_params->tile_render_h = cur->tile_render_h;
       // vrDispHz 同理：姿態預測在編排開始時就照當時的顯示更新率起算，/resume 不會重設。log 與之後用到的值都照進行中的那一次
       if (cur->disp_hz != vr_params->disp_hz) {
         BOOST_LOG(info) << "[VIPLE-VR-SESSION] /resume: display rate for pose prediction stays at "sv << (cur->disp_hz > 0 ? cur->disp_hz : cur->hz)

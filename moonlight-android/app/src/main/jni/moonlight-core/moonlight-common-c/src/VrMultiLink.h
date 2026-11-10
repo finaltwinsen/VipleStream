@@ -42,6 +42,8 @@ int vrmlAnyAlive(void);
 // §VR-LINK-REHOME：已確認的連線裡，找一條 server 位址和 exclude 不同的，把它的 server 位址（IPv4，port 0）寫到 out。
 // 回 1＝有。ENet 控制連線重連時，session 位址連不上就改連這個位址。
 int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr_storage* out);
+// §VR-CTRL-ROUTE：連到這個 host 位址（IPv4）的連線狀態。-1＝沒有連到它的連線、0＝有但 1 s 內沒收到 PONG、1＝通
+int vrmlServerAddrState(const struct sockaddr_storage* addr);
 // 同一份統計的另外兩個面向（只在影像接收執行緒呼叫）：哪幾條在送（bit i＝連線索引 i），以及每條連線平常比最先
 // 送到的那條晚多久（us；每一幀比各條連線第一個封包的到達時刻）。§VR-LINK-REPAIR 用來決定回報缺包的時機。
 int vrmlVideoCarryMask(void);

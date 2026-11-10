@@ -31,6 +31,7 @@ extern "C" {
 #include <libplacebo/utils/libav.h>
 #include <libplacebo/dispatch.h>
 #include <libplacebo/shaders/custom.h>
+#include <libplacebo/shaders/colorspace.h>  // §VR-UNWARP-YUV：pl_shader_decode_color／pl_shader_color_map
 
 namespace {
 
@@ -415,6 +416,16 @@ void XrVideo::destroy(bool gpuWedged)
     pl_log_destroy(&m_Log);
 }
 
+uint64_t XrVideo::waitingAgeUs() const
+{
+    const uint64_t since = m_WaitSinceUs.load(std::memory_order_relaxed);
+    if (since == 0) {
+        return 0;
+    }
+    const uint64_t now = nowUs();
+    return now > since ? now - since : 0;
+}
+
 void XrVideo::submit(const AVFrame* frame)
 {
     if (!usable() || frame == nullptr) {
@@ -450,6 +461,9 @@ void XrVideo::submit(const AVFrame* frame)
         }
         m_Pending = c;
         m_PendingAtUs = nowUs();  // §VR-XRLOOP：放進 mailbox 的時刻（影像 render thread 取出時算等了多久）
+        if (m_WaitSinceUs.load(std::memory_order_relaxed) == 0) {
+            m_WaitSinceUs.store(m_PendingAtUs, std::memory_order_relaxed);  // §VR-RATE-CAUSE：已經有在等的就保留較早的
+        }
     }
     m_MailboxCv.notify_one();
     std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -802,12 +816,13 @@ void XrVideo::dumpSynthInputs(const QString& prevPath, const QString& curPath, c
     }
     float fv[4];
     float fvCyR;
-    loadFoveation(fv, &fvCyR);
+    float fvU0;
+    loadFoveation(fv, &fvCyR, &fvU0);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] synth input dump: %s small=%dx%d(%s) flow=%dx%d(%s, %d bytes/texel) fv=(%.4f,%.4f,%.4f,%.4f,%.4f)",
+                "[VIPLE-XR] synth input dump: %s small=%dx%d(%s) flow=%dx%d(%s, %d bytes/texel) fv=(%.4f,%.4f,%.4f,%.4f,%.4f) u0=%.4f",
                 qUtf8Printable(flowPath), smalls[1]->params.w, smalls[1]->params.h, smalls[1]->params.format->name,
                 flow->params.w, flow->params.h, flow->params.format->name, static_cast<int>(flow->params.format->texel_size),
-                fv[0], fv[1], fv[2], fv[3], fvCyR);
+                fv[0], fv[1], fv[2], fv[3], fvCyR, fvU0);
 }
 
 bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
@@ -962,7 +977,19 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     std::memset(&mapped, 0, sizeof(mapped));
     const bool mappedOk = mapFrame(frame, &mapped, m_Tex, true);
     bool rendered = false;
-    const int frameH = m_Config.synth ? m_Sw.height / 2 : m_Sw.height;  // swapchain 裡一張影像的高度
+    int insetW = 0, insetH = 0;
+    // §VR-FOVEA-LAYERS：swapchain 的高度＝影像＋中央區那一條（outputSize 用同一個條件算的）。高度對不上（條件剛變、
+    // swapchain 還是舊的）就這張不畫中央區
+    const bool wantInset = insetSize(frame->width, frame->height, &insetW, &insetH) && m_Sw.height == frame->height + insetH &&
+                           m_Sw.width >= 2 * insetW;
+    // §VR-FOVEA-TILES：解碼出來的是分塊的畫面（上排全視野、下排注視點）。swapchain 用同樣的排法、同樣的尺寸
+    // （outputSize 這時不放大）；尺寸對不上（swapchain 還是舊的）就這張當一般影像畫，下一張就對了
+    int tileW = 0, tileH = 0, tileRW = 0, tileRH = 0;
+    const bool tiles = !m_Config.synth && tilesFor(frame->width, frame->height, &tileW, &tileH, &tileRW, &tileRH) &&
+                       m_Sw.width == frame->width && m_Sw.height == frame->height;
+    // swapchain 裡一張影像的高度（分塊時＝上排全視野那一列）
+    const int frameH = tiles ? tileH : (m_Config.synth ? m_Sw.height / 2 : (wantInset ? m_Sw.height - insetH : m_Sw.height));
+    m_PendInset = false;
     const bool fovea = m_FvA.load(std::memory_order_relaxed) < 0.999f;
     pl_frame target;
     std::memset(&target, 0, sizeof(target));
@@ -982,14 +1009,74 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         // 第一張：只畫真的那一張（開著合成時 swapchain 是兩倍高，畫在上半）。和沒開合成時一樣的工作量，
         // 所以真的那一張不會被合成的運算拖慢。
         pl_frame t1 = target;
-        if (m_Config.synth) {
+        if (m_Config.synth || wantInset) {
             t1.crop.x0 = 0.0f;
             t1.crop.y0 = 0.0f;
             t1.crop.x1 = static_cast<float>(m_Sw.width);
             t1.crop.y1 = static_cast<float>(frameH);
         }
-        if (fovea && !m_UnwarpFailed) {
+        if (tiles) {
+            const char* why = nullptr;
+            rendered = !m_TilesFailed && renderTiles(&mapped, &target, tex, tileW, tileH, &why);
+            if (!rendered) {
+                if (!m_TilesFailed) {
+                    m_TilesFailed = true;
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-FOVEA] tiles: direct pass not used (%s) - plain conversion for this session, the gaze tile keeps a hard edge",
+                                why ? why : "?");
+                }
+                rendered = pl_render_image(m_Renderer, &mapped, &target, &m_RenderParams);  // 整張 1:1，排法不變
+            }
+            if (rendered && hasMeta && meta.foveated) {
+                // 0x82 的四欄在分塊時是注視點那塊左上角的算圖像素座標（common-c 轉成 ／65535 的 float，乘回去就是原值）
+                m_PendInset = true;
+                for (int e = 0; e < 2; e++) {
+                    const long px = std::clamp(std::lround(meta.foveaCentre[e][0] * 65535.0f), 0L, static_cast<long>(tileRW - tileW));
+                    const long py = std::clamp(std::lround(meta.foveaCentre[e][1] * 65535.0f), 0L, static_cast<long>(tileRH - tileH));
+                    m_PendInsetRect[e].offset = {e * tileW, tileH};
+                    m_PendInsetRect[e].extent = {tileW, tileH};
+                    m_PendInsetOut[e][0] = static_cast<float>(px) / static_cast<float>(tileRW);
+                    m_PendInsetOut[e][1] = static_cast<float>(py) / static_cast<float>(tileRH);
+                    m_PendInsetOut[e][2] = static_cast<float>(px + tileW) / static_cast<float>(tileRW);
+                    m_PendInsetOut[e][3] = static_cast<float>(py + tileH) / static_cast<float>(tileRH);
+                }
+            }
+        }
+        else if (fovea && !m_UnwarpFailed) {
             rendered = renderUnwarp(&mapped, &t1, tex, frame->width, frame->height, hasMeta, meta);
+            if (rendered && wantInset && !m_UnwarpYuvFailed) {
+                float fv[4];
+                float cyR;
+                float u0;
+                loadFoveation(fv, &cyR, &u0);
+                if (hasMeta && meta.foveated) {
+                    fv[1] = meta.foveaCentre[0][0];
+                    fv[2] = meta.foveaCentre[1][0];
+                    fv[3] = meta.foveaCentre[0][1];
+                    cyR = meta.foveaCentre[1][1];
+                }
+                if (renderInsets(&mapped, tex, frameH, insetW, insetH, fv, cyR, u0)) {
+                    m_PendInset = true;
+                    // 中央區在每眼影像裡的範圍：[c−a·u0·c, c+a·u0·(1−c)]（x、y 各自；c＝這張的注視中心）
+                    const float au = fv[0] * u0;
+                    for (int e = 0; e < 2; e++) {
+                        m_PendInsetRect[e].offset = {e * insetW, frameH};
+                        m_PendInsetRect[e].extent = {insetW, insetH};
+                        const float cx = std::clamp(e == 0 ? fv[1] : fv[2], 0.05f, 0.95f);
+                        const float cy = std::clamp(e == 0 ? fv[3] : cyR, 0.05f, 0.95f);
+                        m_PendInsetOut[e][0] = cx * (1.0f - au);
+                        m_PendInsetOut[e][1] = cy * (1.0f - au);
+                        m_PendInsetOut[e][2] = cx + au * (1.0f - cx);
+                        m_PendInsetOut[e][3] = cy + au * (1.0f - cy);
+                    }
+                }
+                else {
+                    // 這一張的上方已經是解碼原尺寸的周邊（不會自己變清楚）：照樣發布，下一張起 outputSize 改回單一大圖
+                    m_InsetFailed = true;
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-FOVEA] centre layer pass failed - back to one full-size image for this session");
+                }
+            }
         }
         else {
             rendered = pl_render_image(m_Renderer, &mapped, &t1, &m_RenderParams);
@@ -1085,6 +1172,13 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         m_Published.synthRect.offset = {0, frameH};
         m_Published.synthRect.extent = {m_Sw.width, frameH};
         m_Published.synthMeta = {};
+        m_Published.hasInset = m_PendInset;  // §VR-FOVEA-LAYERS
+        for (int e = 0; e < 2; e++) {
+            m_Published.insetRect[e] = m_PendInsetRect[e];
+            for (int k = 0; k < 4; k++) {
+                m_Published.insetOut[e][k] = m_PendInsetOut[e][k];
+            }
+        }
         m_Published.generation = m_Sw.generation;
         m_Published.lastDrawnUs = tGpuEnd;
         m_Published.seq++;
@@ -1273,9 +1367,9 @@ void XrVideo::bufferMaybeLog()
     const uint32_t lag1 = m_BufLag1.exchange(0), lag0 = m_BufLag0.exchange(0);
     const uint32_t rep = m_BufRepeat.exchange(0), skip = m_BufSkipped.exchange(0);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-VR-BUFFER] 10s buffer=%d%s depth=%d up=%u down=%u shown lag1=%u lag0=%u repeat=%u skipped=%u",
+                "[VIPLE-VR-BUFFER] 10s buffer=%d%s depth=%d up=%u down=%u shown lag1=%u lag0=%u repeat=%u skipped=%u shed=%u",
                 m_Config.buffer, m_Config.bufferAuto ? " auto" : "", m_BufDepthLog.load(std::memory_order_relaxed),
-                m_BufUp.exchange(0), m_BufDown.exchange(0), lag1, lag0, rep, skip);
+                m_BufUp.exchange(0), m_BufDown.exchange(0), lag1, lag0, rep, skip, m_BufShed.exchange(0));
 }
 
 void XrVideo::renderThreadMain()
@@ -1306,6 +1400,15 @@ void XrVideo::renderThreadMain()
         if (f == nullptr) {
             continue;
         }
+        // §VR-RATE-CAUSE：這一張處理完（發布、丟掉或失敗都一樣）之後，「在等的」換成 mailbox 裡那一張（沒有＝0）
+        struct WaitReset {
+            XrVideo* v;
+            ~WaitReset()
+            {
+                std::lock_guard<std::mutex> lk(v->m_MailboxMutex);
+                v->m_WaitSinceUs.store(v->m_Pending != nullptr ? v->m_PendingAtUs : 0, std::memory_order_relaxed);
+            }
+        } waitReset{this};
         if (m_Ctx->gpuWedged()) {
             // M4a 收尾：已判定 GPU 卡住——不再送新工作（新工作只會跟著卡住）
             av_frame_free(&f);
@@ -1407,7 +1510,12 @@ bool XrVideo::current(Current* out)
             want = m_BufLastShown;
         }
         else {
-            const int pickDepth = streamDiv >= 2 ? (m_BufDepth >= 2 ? 1 : 0) : m_BufDepth;
+            int pickDepth = streamDiv >= 2 ? (m_BufDepth >= 2 ? 1 : 0) : m_BufDepth;
+            // §VR-BUFFER-SHED：深度 2 卻連續幾秒都排兩張（斷線後一口氣補進來）→ 這一格跳一張、回到落後 1 張
+            if (m_Config.bufferAuto && m_BufAuto.wantShed(m_BufLastShown, newest, nowUs(), streamDiv)) {
+                pickDepth = 1;
+                m_BufShed.fetch_add(1, std::memory_order_relaxed);
+            }
             want = xrbuf::pick(m_BufLastShown, newest, pickDepth);
         }
         if (want > newest) {
@@ -1599,9 +1707,18 @@ float uy = (uv.y - cy) / exty;
 float fb = 1.0 - vs_fv.x;
 float tx = (vs_fv.x * ux + fb * ux * ux * ux) * extx * vs_tan.x;
 float ty = -(vs_fv.x * uy + fb * uy * uy * uy) * exty * vs_tan.y;
+// §VR-FOVEA-INSET：分段曲線（中央段斜率 a、外面 k2）
+float ik2 = vs_fu > 0.0 ? (1.0 - vs_fv.x * vs_fu) / (1.0 - vs_fu) : 1.0;
+if (vs_fu > 0.0) {
+    float fx = abs(ux) <= vs_fu ? vs_fv.x * abs(ux) : vs_fv.x * vs_fu + ik2 * (abs(ux) - vs_fu);
+    float fy = abs(uy) <= vs_fu ? vs_fv.x * abs(uy) : vs_fv.x * vs_fu + ik2 * (abs(uy) - vs_fu);
+    tx = sign(ux) * fx * extx * vs_tan.x;
+    ty = -sign(uy) * fy * exty * vs_tan.y;
+}
 float dtx = vs_w.y * (1.0 + tx * tx) + vs_w.z * ty - vs_w.x * tx * ty;
 float dty = -vs_w.x * (1.0 + ty * ty) - vs_w.z * tx + vs_w.y * tx * ty;
-vec2 slope = vec2(vs_fv.x + 3.0 * fb * ux * ux, vs_fv.x + 3.0 * fb * uy * uy);
+vec2 slope = vs_fu > 0.0 ? vec2(abs(ux) <= vs_fu ? vs_fv.x : ik2, abs(uy) <= vs_fu ? vs_fv.x : ik2)
+                        : vec2(vs_fv.x + 3.0 * fb * ux * ux, vs_fv.x + 3.0 * fb * uy * uy);
 vec2 g = vec2(-0.5 * dtx / vs_tan.x, dty / vs_tan.y) / slope * sz;
 for (int j = -1; j <= 1; j++) {
     for (int i = -1; i <= 1; i++) {
@@ -1648,7 +1765,7 @@ const char* kCombineBody = R"GLSL(
 vec2 tsz = vec2(textureSize(vs_full, 0));
 vec2 fc = gl_FragCoord.xy;
 bool bottom = fc.y >= vs_osz.y;
-vec2 uv = vs_unwarp(vec2(fc.x, bottom ? fc.y - vs_osz.y : fc.y) / vs_osz, vs_fv, vs_cyr);
+vec2 uv = vs_unwarp(vec2(fc.x, bottom ? fc.y - vs_osz.y : fc.y) / vs_osz, vs_fv, vs_cyr, vs_fu);
 if (!bottom) {
     color = texture(vs_full, uv);
 } else {
@@ -1701,9 +1818,17 @@ if (!bottom) {
 // 不同（cy 左 0.3978、右 0.4077）：右眼還原出來的畫面中央往上偏 (cyR−cyL)·(1−a) 個影像高度，注視點 150% 時約 0.6°，
 // 只有右眼偏＝兩眼之間的垂直視差。
 const char* kFovHeader = R"GLSL(
-float vs_inv1(float x, float c, float a) {
+float vs_inv1(float x, float c, float a, float u0) {
     float ext = x < c ? c : 1.0 - c;
     float t = (x - c) / ext;
+    if (u0 > 0.0) {
+        // §VR-FOVEA-INSET：分段曲線的反解（host 的 fovea_warp_inset：|e| ≤ u0 時 t = a·e，外面線性到邊緣）
+        float at = abs(t);
+        float t0 = a * u0;
+        float k2 = (1.0 - t0) / (1.0 - u0);
+        float ae = at <= t0 ? at / a : u0 + (at - t0) / k2;
+        return c + sign(t) * clamp(ae, 0.0, 1.0) * ext;
+    }
     float b = 1.0 - a;
     float p = a / b;
     float q = t / b;
@@ -1714,12 +1839,12 @@ float vs_inv1(float x, float c, float a) {
     e -= (b * e * e * e + a * e - t) / (3.0 * b * e * e + a);
     return c + clamp(e, -1.0, 1.0) * ext;
 }
-vec2 vs_unwarp(vec2 uv, vec4 fv, float cyR) {
+vec2 vs_unwarp(vec2 uv, vec4 fv, float cyR, float u0) {
     if (fv.x >= 0.999) { return uv; }
     bool right = uv.x >= 0.5;
     float ex = (right ? uv.x - 0.5 : uv.x) * 2.0;
-    float x = vs_inv1(ex, right ? fv.z : fv.y, fv.x);
-    float y = vs_inv1(uv.y, right ? cyR : fv.w, fv.x);
+    float x = vs_inv1(ex, right ? fv.z : fv.y, fv.x, u0);
+    float y = vs_inv1(uv.y, right ? cyR : fv.w, fv.x, u0);
     return vec2((right ? 0.5 : 0.0) + 0.5 * x, y);
 }
 )GLSL";
@@ -1753,7 +1878,66 @@ vec4 vs_catrom(vec2 uv) {
 )GLSL";
 
 const char* kUnwarpBody = R"GLSL(
-color = vs_catrom(vs_unwarp(gl_FragCoord.xy / vs_osz, vs_fv, vs_cyr));
+color = vs_catrom(vs_unwarp(gl_FragCoord.xy / vs_osz, vs_fv, vs_cyr, vs_fu));
+)GLSL";
+
+// §VR-UNWARP-YUV（2026-11-10）：還原直接讀解碼出的 YUV 兩個平面，不先轉成一張 RGB 的中間圖（m_Full）。
+// 11-10 和 Steam 內建串流對照：頭盔多耗約 4 W，來源是「轉 RGB → 還原成大圖 → 合成器再讀」這幾趟的記憶體頻寬；
+// Steam 的合成器是用 YCbCr 取樣器直接讀解碼器的輸出（vrcompositor 的 CompositorImportDmaBuf＋SamplerYcbcrConversion）。
+// 亮度用 Catmull-Rom（同 vs_catrom 的 9 次取樣，座標是亮度平面的像素），色度用雙線性（色度平面本來就是一半解析度）。
+// vs_crop＝(x0, y0, 寬, 高) 亮度像素；vs_csh＝色度平面相對亮度的位移（亮度像素，libplacebo 的 plane.shift，
+// 取樣位置＝(亮度座標 − shift) ÷ 比例，同 libplacebo renderer）；vs_rr＝亮度/色度的像素比；vs_ysz、vs_csz＝兩個平面
+// 材質的尺寸。輸出 (Y, Cb, Cr)，之後接 libplacebo 自己的 pl_shader_decode_color＋pl_shader_color_map
+// （和原本 pl_render_image 用的同一套轉換）
+const char* kCatromYHeader = R"GLSL(
+float vs_caty(vec2 sp) {
+    vec2 p1 = floor(sp - 0.5) + 0.5;
+    vec2 f = sp - p1;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 t0 = (p1 - 1.0) / vs_ysz;
+    vec2 t3 = (p1 + 2.0) / vs_ysz;
+    vec2 t12 = (p1 + w2 / w12) / vs_ysz;
+    float r = texture(vs_y, vec2(t0.x, t0.y)).r * (w0.x * w0.y)
+            + texture(vs_y, vec2(t12.x, t0.y)).r * (w12.x * w0.y)
+            + texture(vs_y, vec2(t3.x, t0.y)).r * (w3.x * w0.y)
+            + texture(vs_y, vec2(t0.x, t12.y)).r * (w0.x * w12.y)
+            + texture(vs_y, vec2(t12.x, t12.y)).r * (w12.x * w12.y)
+            + texture(vs_y, vec2(t3.x, t12.y)).r * (w3.x * w12.y)
+            + texture(vs_y, vec2(t0.x, t3.y)).r * (w0.x * w3.y)
+            + texture(vs_y, vec2(t12.x, t3.y)).r * (w12.x * w3.y)
+            + texture(vs_y, vec2(t3.x, t3.y)).r * (w3.x * w3.y);
+    return clamp(r, 0.0, 1.0);
+}
+)GLSL";
+
+const char* kUnwarpYuvBody = R"GLSL(
+vec2 uvn = vs_unwarp(gl_FragCoord.xy / vs_osz, vs_fv, vs_cyr, vs_fu);
+vec2 lp = vs_crop.xy + uvn * vs_crop.zw;
+// §VR-FOVEA-LAYERS：周邊畫成解碼原尺寸（約 1:1）時 Catmull-Rom 沒有好處，改一次雙線性（vs_bil＝1）。
+// 但中央區在這一層是縮小的（每個輸出像素跨 1/a≈1.9 個編碼像素）：單點雙線性會漏掉一半像素、轉頭時閃，
+// 而且那一塊正好是 quad 漸層帶底下的內容（11-10 配戴：接縫明顯）→ 用相鄰輸出像素的位置差估出覆蓋範圍，
+// 超過 1.25 個像素就取 4 個雙線性點平均（每點涵蓋 2×2，合起來約等於覆蓋範圍）
+float yy;
+if (vs_bil > 0.5) {
+    vec2 lpx = vs_crop.xy + vs_unwarp((gl_FragCoord.xy + vec2(1.0, 0.0)) / vs_osz, vs_fv, vs_cyr, vs_fu) * vs_crop.zw;
+    vec2 lpy = vs_crop.xy + vs_unwarp((gl_FragCoord.xy + vec2(0.0, 1.0)) / vs_osz, vs_fv, vs_cyr, vs_fu) * vs_crop.zw;
+    vec2 fd = vec2(abs(lpx.x - lp.x), abs(lpy.y - lp.y));
+    if (max(fd.x, fd.y) > 1.25) {
+        vec2 o = 0.25 * clamp(fd, vec2(1.0), vec2(3.0));  // 上限：左右眼交界那一欄的差是半張圖寬，不是縮放
+        yy = 0.25 * (texture(vs_y, (lp + vec2(-o.x, -o.y)) / vs_ysz).r + texture(vs_y, (lp + vec2(o.x, -o.y)) / vs_ysz).r
+                   + texture(vs_y, (lp + vec2(-o.x, o.y)) / vs_ysz).r + texture(vs_y, (lp + vec2(o.x, o.y)) / vs_ysz).r);
+    } else {
+        yy = texture(vs_y, lp / vs_ysz).r;
+    }
+} else {
+    yy = vs_caty(lp);
+}
+vec2 cc = texture(vs_uv, ((lp - vs_csh) / vs_rr) / vs_csz).rg;
+color = vec4(yy, cc.x, cc.y, 1.0);
 )GLSL";
 
 // 縮到 1/8：每個輸出像素取來源 8x8 區塊的平均（4x4 個雙線性取樣點，各涵蓋 2x2）。直接雙線性縮 8 倍只看得到其中
@@ -1797,7 +1981,8 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     const float ow = static_cast<float>(m_Sw.width), oh = static_cast<float>(m_Sw.height / 2);  // swapchain 裡一張影像的尺寸
     float fv[4];
     float fvCyR;
-    loadFoveation(fv, &fvCyR);
+    float fvU0;
+    loadFoveation(fv, &fvCyR, &fvU0);
     if (hasMeta && meta.foveated) {
         fv[1] = meta.foveaCentre[0][0];
         fv[2] = meta.foveaCentre[1][0];
@@ -1958,7 +2143,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                     float pvec[2] = {radius, useInit};
                     pl_shader shf = pl_dispatch_begin(m_Dp);
                     pl_shader_desc fd[3] = {sampledTex("vs_cur", curT), sampledTex("vs_prev", prevT), sampledTex("vs_init", initT)};
-                    pl_shader_var gv[5] = {};
+                    pl_shader_var gv[6] = {};
                     gv[0].var = pl_var_vec3("vs_w");
                     gv[0].data = wvec;
                     gv[0].dynamic = true;
@@ -1974,6 +2159,9 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                     gv[4].var = pl_var_float("vs_cyr");
                     gv[4].data = &fvCyR;
                     gv[4].dynamic = true;
+                    gv[5].var = pl_var_float("vs_fu");  // §VR-FOVEA-INSET
+                    gv[5].data = &fvU0;
+                    gv[5].dynamic = true;
                     pl_custom_shader cs = {};
                     cs.description = "viple vr synth flow";
                     cs.header = kFlowHeader;
@@ -1983,7 +2171,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                     cs.descriptors = fd;
                     cs.num_descriptors = 3;
                     cs.variables = gv;
-                    cs.num_variables = 5;
+                    cs.num_variables = 6;
                     if (!pl_shader_custom(shf, &cs)) {
                         pl_dispatch_abort(m_Dp, &shf);
                         return false;
@@ -2009,7 +2197,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     {
         pl_shader shc = pl_dispatch_begin(m_Dp);
         pl_shader_desc cd[2] = {sampledTex("vs_full", m_Full), sampledTex("vs_flow", m_Flow)};
-        pl_shader_var kv[4] = {};
+        pl_shader_var kv[5] = {};
         kv[0].var = pl_var_float("vs_k");
         kv[0].data = &k;
         kv[0].dynamic = true;
@@ -2022,6 +2210,9 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         kv[3].var = pl_var_float("vs_cyr");
         kv[3].data = &fvCyR;
         kv[3].dynamic = true;
+        kv[4].var = pl_var_float("vs_fu");  // §VR-FOVEA-INSET
+        kv[4].data = &fvU0;
+        kv[4].dynamic = true;
         pl_custom_shader cs = {};
         cs.description = "viple vr synth combine";
         cs.header = kFovHeader;
@@ -2031,7 +2222,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         cs.descriptors = cd;
         cs.num_descriptors = 2;
         cs.variables = kv;
-        cs.num_variables = 4;
+        cs.num_variables = 5;
         if (pl_shader_custom(shc, &cs)) {
             pl_dispatch_params dpar = {};
             dpar.shader = &shc;
@@ -2068,8 +2259,9 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     return true;
 }
 
-void XrVideo::loadFoveation(float fv[4], float* cyR) const
+void XrVideo::loadFoveation(float fv[4], float* cyR, float* u0) const
 {
+    *u0 = m_FvU0.load(std::memory_order_relaxed);
     fv[0] = m_FvA.load(std::memory_order_relaxed);
     fv[1] = m_FvCxL.load(std::memory_order_relaxed);
     fv[2] = m_FvCxR.load(std::memory_order_relaxed);
@@ -2080,14 +2272,55 @@ void XrVideo::loadFoveation(float fv[4], float* cyR) const
     }
 }
 
+// §VR-FOVEA-LAYERS：分段注視點（u0＞0）的中央 |e|≤u0 在編碼影像裡是 1:1、密度最高的一塊，原樣放進 swapchain 下方，
+// 每眼 u0×(每眼寬) × u0×(高)。只在直接讀 YUV 的還原可用、沒開補幀（補幀用兩倍高的 swapchain）時才做
+bool XrVideo::tilesFor(int fw, int fh, int* tw, int* th, int* rw, int* rh) const
+{
+    const int w = m_TileW.load(std::memory_order_relaxed);
+    const int h = m_TileH.load(std::memory_order_relaxed);
+    const int renderW = m_TileRW.load(std::memory_order_relaxed);
+    const int renderH = m_TileRH.load(std::memory_order_relaxed);
+    if (w < 64 || h < 64 || renderW <= w || renderH <= h || fw != 2 * w || fh != 2 * h) {
+        return false;
+    }
+    *tw = w;
+    *th = h;
+    *rw = renderW;
+    *rh = renderH;
+    return true;
+}
+
+bool XrVideo::insetSize(int fw, int fh, int* iw, int* ih) const
+{
+    int tw = 0, th = 0, rw = 0, rh = 0;
+    if (tilesFor(fw, fh, &tw, &th, &rw, &rh)) {
+        return false;  // §VR-FOVEA-TILES：分塊的畫面沒有幾何變形，swapchain 就是解碼尺寸
+    }
+    const float a = m_FvA.load(std::memory_order_relaxed);
+    const float u0 = m_FvU0.load(std::memory_order_relaxed);
+    if (!m_Config.fovLayers || m_InsetFailed || m_Config.synth || !m_Config.unwarpYuv || m_UnwarpYuvFailed ||
+        m_UnwarpFailed || !(a >= 0.4f && a < 0.999f) || !(u0 > 0.05f && u0 < 0.95f) || fw < 4 || fh < 2) {
+        return false;
+    }
+    *iw = std::max(2, static_cast<int>(u0 * static_cast<float>(fw / 2) + 0.5f));
+    *ih = std::max(2, static_cast<int>(u0 * static_cast<float>(fh) + 0.5f));
+    return true;
+}
+
 void XrVideo::outputSize(int fw, int fh, int* ow, int* oh) const
 {
     *ow = fw;
     *oh = fh;
+    int iw = 0, ih = 0;
+    if (insetSize(fw, fh, &iw, &ih)) {
+        // §VR-FOVEA-LAYERS：周邊＝解碼原尺寸（上方），兩眼的中央區並排在下方一條
+        *oh = fh + ih;
+        return;
+    }
     const float a = m_FvA.load(std::memory_order_relaxed);
     if (a >= 0.4f && a < 0.999f && fw > 0 && fh > 0) {
         // 正前方的像素密度是 1/a 倍：swapchain 跟著放大才放得下那些細節。每眼最高 2304（頭盔面板每眼 2160）
-        const float s = std::min(1.0f / a, 2.0f);
+        const float s = std::min(1.0f / a, std::clamp(m_Config.unwarpMax, 1.0f, 2.0f));  // §VR-UNWARP-MAX
         int h = std::min(static_cast<int>(static_cast<float>(fh) * s + 0.5f), 2304);
         h = std::max(h, fh) & ~1;
         *oh = h;
@@ -2115,6 +2348,460 @@ bool XrVideo::ensureFull(int fw, int fh)
 }
 
 // §VR-FOVEA（不合成中間格時）：mapped → m_Full → 還原後寫進 swapchain。失敗就改回直接畫（影像是壓縮過的樣子）。
+// §VR-UNWARP-YUV：見 kUnwarpYuvBody。只處理「亮度一個平面＋CbCr 交錯一個平面」（NV12／P010 這類）；其他排法回 false
+bool XrVideo::renderUnwarpYuv(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, bool hasMeta,
+                              const VIPLE_VR_FRAME_META& meta, const char** why)
+{
+    if (mapped->num_planes != 2 || mapped->planes[0].texture == nullptr || mapped->planes[1].texture == nullptr) {
+        *why = "not two planes";
+        return false;
+    }
+    const pl_plane& py = mapped->planes[0];
+    const pl_plane& pc = mapped->planes[1];
+    if (py.components != 1 || py.component_mapping[0] != PL_CHANNEL_Y || pc.components != 2 ||
+        pc.component_mapping[0] != PL_CHANNEL_CB || pc.component_mapping[1] != PL_CHANNEL_CR) {
+        *why = "plane layout is not Y + CbCr";
+        return false;
+    }
+    if (!pl_color_system_is_ycbcr_like(mapped->repr.sys)) {
+        *why = "colour system is not YCbCr";
+        return false;
+    }
+    const pl_tex ty = py.texture;
+    const pl_tex tc = pc.texture;
+    if (!(ty->params.format->caps & PL_FMT_CAP_LINEAR) || !(tc->params.format->caps & PL_FMT_CAP_LINEAR) ||
+        !ty->params.sampleable || !tc->params.sampleable) {
+        *why = "planes are not linearly sampleable";
+        return false;
+    }
+    const float yw = static_cast<float>(ty->params.w);
+    const float yh = static_cast<float>(ty->params.h);
+    const float cw = static_cast<float>(tc->params.w);
+    const float ch = static_cast<float>(tc->params.h);
+    float crop[4] = {mapped->crop.x0, mapped->crop.y0, mapped->crop.x1 - mapped->crop.x0, mapped->crop.y1 - mapped->crop.y0};
+    if (crop[2] <= 0.0f || crop[3] <= 0.0f) {
+        crop[0] = 0.0f;
+        crop[1] = 0.0f;
+        crop[2] = yw;
+        crop[3] = yh;
+    }
+    float ysz[2] = {yw, yh};
+    float csz[2] = {cw, ch};
+    float rr[2] = {std::round(yw / cw), std::round(yh / ch)};  // libplacebo 也只認整數倍（無條件進位的那一格不算）
+    float csh[2] = {pc.shift_x, pc.shift_y};
+    float fv[4];
+    float fvCyR;
+    float fvU0;
+    loadFoveation(fv, &fvCyR, &fvU0);
+    if (hasMeta && meta.foveated) {
+        fv[1] = meta.foveaCentre[0][0];
+        fv[2] = meta.foveaCentre[1][0];
+        fv[3] = meta.foveaCentre[0][1];
+        fvCyR = meta.foveaCentre[1][1];
+    }
+    // §VR-FOVEA-LAYERS：targetProto 有 crop（下方留給中央區）時只畫上面那一塊
+    const int outH = targetProto->crop.y1 > 0.0f ? static_cast<int>(targetProto->crop.y1 + 0.5f)
+                                                 : (m_Config.synth ? m_Sw.height / 2 : m_Sw.height);
+    float osz[2] = {static_cast<float>(m_Sw.width), static_cast<float>(outH)};
+    if (!m_LoggedUnwarpYuvGeom) {
+        m_LoggedUnwarpYuvGeom = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-FOVEA] YUV unwarp: luma %dx%d chroma %dx%d crop %.0f,%.0f %.0fx%.0f chroma shift %.2f,%.2f sys=%d levels=%d -> %dx%d",
+                    ty->params.w, ty->params.h, tc->params.w, tc->params.h, crop[0], crop[1], crop[2], crop[3],
+                    csh[0], csh[1], static_cast<int>(mapped->repr.sys), static_cast<int>(mapped->repr.levels),
+                    static_cast<int>(osz[0]), static_cast<int>(osz[1]));
+    }
+
+    pl_shader sh = pl_dispatch_begin(m_Dp);
+    pl_shader_desc dd[2] = {sampledTex("vs_y", ty), sampledTex("vs_uv", tc)};
+    // 輸出不比解碼影像大（兩圖層的周邊）時亮度改一次雙線性
+    float bil = osz[1] <= crop[3] + 0.5f ? 1.0f : 0.0f;
+    pl_shader_var vv[10] = {};
+    vv[0].var = pl_var_vec2("vs_osz");
+    vv[0].data = osz;
+    vv[1].var = pl_var_vec4("vs_fv");
+    vv[1].data = fv;
+    vv[2].var = pl_var_float("vs_cyr");
+    vv[2].data = &fvCyR;
+    vv[3].var = pl_var_float("vs_fu");
+    vv[3].data = &fvU0;
+    vv[4].var = pl_var_vec4("vs_crop");
+    vv[4].data = crop;
+    vv[5].var = pl_var_vec2("vs_ysz");
+    vv[5].data = ysz;
+    vv[6].var = pl_var_vec2("vs_csz");
+    vv[6].data = csz;
+    vv[7].var = pl_var_vec2("vs_rr");
+    vv[7].data = rr;
+    vv[8].var = pl_var_vec2("vs_csh");
+    vv[8].data = csh;
+    vv[9].var = pl_var_float("vs_bil");
+    vv[9].data = &bil;
+    for (pl_shader_var& v : vv) {
+        v.dynamic = true;
+    }
+    static const std::string s_Header = std::string(kFovHeader) + kCatromYHeader;
+    pl_custom_shader cs = {};
+    cs.description = "viple vr fovea unwarp yuv";  // PassStats 照 "fovea unwarp" 歸到 unwarp
+    cs.header = s_Header.c_str();
+    cs.body = kUnwarpYuvBody;
+    cs.input = PL_SHADER_SIG_NONE;
+    cs.output = PL_SHADER_SIG_COLOR;
+    cs.descriptors = dd;
+    cs.num_descriptors = 2;
+    cs.variables = vv;
+    cs.num_variables = 10;
+    if (!pl_shader_custom(sh, &cs)) {
+        pl_dispatch_abort(m_Dp, &sh);
+        *why = "custom shader rejected";
+        return false;
+    }
+    // 和 pl_render_image 同一套：YCbCr（含 limited range、位元深度）→ RGB，再從影像的色彩空間轉到 swapchain 的
+    pl_color_repr repr = mapped->repr;
+    repr.alpha = PL_ALPHA_NONE;
+    pl_shader_decode_color(sh, &repr, nullptr);
+    pl_color_space src = mapped->color;
+    pl_color_space dst = targetProto->color;
+    pl_color_space_infer_map(&src, &dst);
+    pl_shader_color_map(sh, nullptr, src, dst, nullptr, false);
+    pl_dispatch_params dpar = {};
+    dpar.shader = &sh;
+    dpar.target = swTex;
+    dpar.rect = {0, 0, m_Sw.width, outH};
+    if (!pl_dispatch_finish(m_Dp, &dpar)) {
+        *why = "dispatch failed";
+        return false;
+    }
+    return true;
+}
+
+// §VR-FOVEA-LAYERS：兩眼的中央區（編碼影像裡 1:1 的那一塊）原樣搬到 swapchain 的 y＝top 那一條，左眼在左、右眼在右，
+// 各 iw×ih。取樣同 kUnwarpYuvBody（亮度 Catmull-Rom、色度雙線性、libplacebo 的色彩轉換），最後把四邊做 alpha 漸層
+// （預乘），quad 疊在 projection 上時邊緣不會有一條硬線
+static const char* const kInsetBody = R"GLSL(
+vec2 ip = gl_FragCoord.xy - vec2(0.0, vs_top);
+float eye = ip.x >= vs_isz.x ? 1.0 : 0.0;
+vec2 iq = (ip - vec2(eye * vs_isz.x, 0.0)) / vs_isz;
+vec2 ic = eye > 0.5 ? vec2(vs_fv.z, vs_cyr) : vec2(vs_fv.y, vs_fv.w);
+vec2 ie = ic * (1.0 - vs_fu) + iq * vs_fu;
+vec2 uvn = vec2(eye * 0.5 + 0.5 * ie.x, ie.y);
+vec2 lp = vs_crop.xy + uvn * vs_crop.zw;
+// 中央區是原樣搬移（1:1）：亮度對齊到最近的像素中心直接取（位移不到半個像素），不做 9 次取樣也不會變糊
+float yy = texture(vs_y, (floor(lp) + 0.5) / vs_ysz).r;
+vec2 cc = texture(vs_uv, ((lp - vs_csh) / vs_rr) / vs_csz).rg;
+color = vec4(yy, cc.x, cc.y, 1.0);
+)GLSL";
+
+// 2026-11-10：alpha 預乘要在線性光做。合成器把 swapchain（sRGB）解成線性光再混合（quad layer 的 alpha 當預乘），
+// 2.0.118～2.0.120 是直接在 sRGB 編碼值上乘 alpha：解回線性後變成 lin·fa^2.2，比該有的 lin·fa 暗——漸層帶亮度只剩
+// 約 80%，配戴時就是中央區外圍一圈暗框。vs_enc*＝1：這趟輸出的是 sRGB 編碼值（SrgbMutable），先解回線性、乘 alpha、
+// 再編回去；0：輸出本來就是線性（硬體寫入時才編碼），直接乘
+static const char* const kInsetFeatherBody = R"GLSL(
+vec2 fp = gl_FragCoord.xy - vec2(0.0, vs_top2);
+float fx = fp.x >= vs_isz2.x ? fp.x - vs_isz2.x : fp.x;
+vec2 fq = vec2(fx, fp.y) / vs_isz2;
+float fm = min(min(fq.x, 1.0 - fq.x), min(fq.y, 1.0 - fq.y));
+float fa = smoothstep(0.0, vs_fe, fm);
+if (vs_enc2 > 0.5) {
+    vec3 fc = max(color.rgb, vec3(0.0));
+    vec3 fl = mix(fc / 12.92, pow((fc + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), fc)) * fa;
+    color.rgb = mix(fl * 12.92, 1.055 * pow(fl, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), fl));
+} else {
+    color.rgb *= fa;
+}
+color.a = fa;
+)GLSL";
+
+// §VR-FOVEA-TILES（2026-11-10）：解碼出來的畫面和 swapchain 同尺寸、同排法，整張 1:1 搬——亮度取所在像素、色度雙線性
+// （4:2:0 的取樣位置照 libplacebo 的平面位移），輸出 (Y, Cb, Cr)，之後接 libplacebo 的色彩轉換
+static const char* const kTilesBody = R"GLSL(
+vec2 lp = vs_crop.xy + gl_FragCoord.xy;
+float yy = texture(vs_y, (floor(lp) + 0.5) / vs_ysz).r;
+vec2 cc = texture(vs_uv, ((lp - vs_csh) / vs_rr) / vs_csz).rg;
+color = vec4(yy, cc.x, cc.y, 1.0);
+)GLSL";
+
+// 下排注視點那兩塊的邊緣漸層，照 Steam 自己的 OpenXR 客戶端（Quest 版 Steam Link，libvrlink_scene.so 內嵌的 GLSL）：
+//   alpha = pow(1.05 − 1.06·(|2dx|^10 + |2dy|^10), 1.5)，dx、dy＝離那一塊中心的距離（0～0.5）
+// ＝指數 10 的圓角方形：離中心 74% 半寬以內是 1，到邊緣降到 0（圓角只丟掉約 1.4% 的像素）。上排全視野 alpha＝1。
+// 預乘在線性光做（見 kInsetFeatherBody 上面的說明）
+static const char* const kTilesMaskBody = R"GLSL(
+float ta = 1.0;
+vec2 tp = gl_FragCoord.xy - vec2(0.0, vs_tile.y);
+if (tp.y >= 0.0) {
+    float tx = tp.x >= vs_tile.x ? tp.x - vs_tile.x : tp.x;
+    vec2 td = abs(vec2(tx, tp.y) / vs_tile - 0.5) * 2.0;
+    vec2 td2 = td * td;
+    vec2 td4 = td2 * td2;
+    vec2 td10 = td4 * td4 * td2;
+    ta = pow(clamp(1.05 - 1.06 * (td10.x + td10.y), 0.0, 1.0), 1.5);
+    if (tp.x >= 2.0 * vs_tile.x) {
+        ta = 0.0;
+    }
+    if (ta < 1.0) {
+        if (vs_enc > 0.5) {
+            vec3 tc = max(color.rgb, vec3(0.0));
+            vec3 tl = mix(tc / 12.92, pow((tc + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), tc)) * ta;
+            color.rgb = mix(tl * 12.92, 1.055 * pow(tl, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), tl));
+        } else {
+            color.rgb *= ta;
+        }
+    }
+}
+color.a = ta;
+)GLSL";
+
+bool XrVideo::renderInsets(pl_frame* mapped, pl_tex swTex, int top, int iw, int ih, const float fv[4], float cyR, float u0)
+{
+    if (mapped->num_planes != 2 || mapped->planes[0].texture == nullptr || mapped->planes[1].texture == nullptr) {
+        return false;
+    }
+    const pl_plane& pc = mapped->planes[1];
+    const pl_tex ty = mapped->planes[0].texture;
+    const pl_tex tc = pc.texture;
+    const float yw = static_cast<float>(ty->params.w);
+    const float yh = static_cast<float>(ty->params.h);
+    const float cw = static_cast<float>(tc->params.w);
+    const float ch = static_cast<float>(tc->params.h);
+    float crop[4] = {mapped->crop.x0, mapped->crop.y0, mapped->crop.x1 - mapped->crop.x0, mapped->crop.y1 - mapped->crop.y0};
+    if (crop[2] <= 0.0f || crop[3] <= 0.0f) {
+        crop[0] = 0.0f;
+        crop[1] = 0.0f;
+        crop[2] = yw;
+        crop[3] = yh;
+    }
+    float ysz[2] = {yw, yh};
+    float csz[2] = {cw, ch};
+    float rr[2] = {std::round(yw / cw), std::round(yh / ch)};
+    float csh[2] = {pc.shift_x, pc.shift_y};
+    float fvv[4] = {fv[0], fv[1], fv[2], fv[3]};
+    float cyr = cyR;
+    float fu = u0;
+    float topF = static_cast<float>(top);
+    float isz[2] = {static_cast<float>(iw), static_cast<float>(ih)};
+    // 漸層寬度＝中央區邊長的 20%（11-10 配戴：8% 接縫太明顯，中央 1:1 與周邊的密度差約 4.5 倍、8% 只有約 3°
+    // 就換過去；20% 約 8°，完全清晰的範圍仍有中央區的 60%，眼動追蹤下約 ±12°）
+    float fe = 0.20f;
+
+    pl_shader sh = pl_dispatch_begin(m_Dp);
+    pl_shader_desc dd[2] = {sampledTex("vs_y", ty), sampledTex("vs_uv", tc)};
+    pl_shader_var vv[10] = {};
+    vv[0].var = pl_var_float("vs_top");
+    vv[0].data = &topF;
+    vv[1].var = pl_var_vec2("vs_isz");
+    vv[1].data = isz;
+    vv[2].var = pl_var_vec4("vs_fv");
+    vv[2].data = fvv;
+    vv[3].var = pl_var_float("vs_cyr");
+    vv[3].data = &cyr;
+    vv[4].var = pl_var_float("vs_fu");
+    vv[4].data = &fu;
+    vv[5].var = pl_var_vec4("vs_crop");
+    vv[5].data = crop;
+    vv[6].var = pl_var_vec2("vs_ysz");
+    vv[6].data = ysz;
+    vv[7].var = pl_var_vec2("vs_csz");
+    vv[7].data = csz;
+    vv[8].var = pl_var_vec2("vs_rr");
+    vv[8].data = rr;
+    vv[9].var = pl_var_vec2("vs_csh");
+    vv[9].data = csh;
+    for (pl_shader_var& v : vv) {
+        v.dynamic = true;
+    }
+    pl_custom_shader cs = {};
+    cs.description = "viple vr fovea centre";
+    cs.header = kCatromYHeader;
+    cs.body = kInsetBody;
+    cs.input = PL_SHADER_SIG_NONE;
+    cs.output = PL_SHADER_SIG_COLOR;
+    cs.descriptors = dd;
+    cs.num_descriptors = 2;
+    cs.variables = vv;
+    cs.num_variables = 10;
+    if (!pl_shader_custom(sh, &cs)) {
+        pl_dispatch_abort(m_Dp, &sh);
+        return false;
+    }
+    pl_color_repr repr = mapped->repr;
+    repr.alpha = PL_ALPHA_NONE;
+    pl_shader_decode_color(sh, &repr, nullptr);
+    pl_color_space src = mapped->color;
+    pl_color_space dst = pl_color_space_srgb;
+    if (m_Mode != TargetMode::SrgbMutable) {
+        dst.transfer = PL_COLOR_TRC_LINEAR;
+    }
+    pl_color_space_infer_map(&src, &dst);
+    pl_shader_color_map(sh, nullptr, src, dst, nullptr, false);
+    float enc2 = m_Mode == TargetMode::SrgbMutable ? 1.0f : 0.0f;  // 輸出是 sRGB 編碼值 → 預乘前先解回線性
+    pl_shader_var fvar[4] = {};
+    fvar[0].var = pl_var_float("vs_top2");
+    fvar[0].data = &topF;
+    fvar[1].var = pl_var_vec2("vs_isz2");
+    fvar[1].data = isz;
+    fvar[2].var = pl_var_float("vs_fe");
+    fvar[2].data = &fe;
+    fvar[3].var = pl_var_float("vs_enc2");
+    fvar[3].data = &enc2;
+    for (pl_shader_var& v : fvar) {
+        v.dynamic = true;
+    }
+    pl_custom_shader fs = {};
+    fs.description = "viple vr fovea centre feather";
+    fs.body = kInsetFeatherBody;
+    fs.input = PL_SHADER_SIG_COLOR;
+    fs.output = PL_SHADER_SIG_COLOR;
+    fs.variables = fvar;
+    fs.num_variables = 4;
+    if (!pl_shader_custom(sh, &fs)) {
+        pl_dispatch_abort(m_Dp, &sh);
+        return false;
+    }
+    pl_dispatch_params dpar = {};
+    dpar.shader = &sh;
+    dpar.target = swTex;
+    dpar.rect = {0, top, 2 * iw, top + ih};
+    if (!m_LoggedInset) {
+        m_LoggedInset = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-FOVEA] centre layers: %dx%d per eye at y=%d (u0=%.3f a=%.3f) under a %dx%d periphery",
+                    iw, ih, top, static_cast<double>(u0), static_cast<double>(fv[0]), m_Sw.width, top);
+    }
+    return pl_dispatch_finish(m_Dp, &dpar);
+}
+
+// §VR-FOVEA-TILES：見 kTilesBody／kTilesMaskBody。只處理「亮度一個平面＋CbCr 交錯一個平面」（同 renderUnwarpYuv），
+// 其他排法回 false，呼叫端改用 pl_render_image（畫面一樣對，只是注視點那塊沒有漸層）
+bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int tw, int th, const char** why)
+{
+    if (m_Dp == nullptr) {
+        m_Dp = pl_dispatch_create(m_Log, m_Vulkan->gpu);  // 沒開合成時 init() 不會建
+        if (m_Dp != nullptr && m_Config.passTimers) {
+            pl_dispatch_callback(m_Dp, this, &XrVideo::passInfoCb);  // §VR-PASS
+        }
+    }
+    if (m_Dp == nullptr) {
+        *why = "no dispatch";
+        return false;
+    }
+    if (mapped->num_planes != 2 || mapped->planes[0].texture == nullptr || mapped->planes[1].texture == nullptr) {
+        *why = "not two planes";
+        return false;
+    }
+    const pl_plane& py = mapped->planes[0];
+    const pl_plane& pc = mapped->planes[1];
+    if (py.components != 1 || py.component_mapping[0] != PL_CHANNEL_Y || pc.components != 2 ||
+        pc.component_mapping[0] != PL_CHANNEL_CB || pc.component_mapping[1] != PL_CHANNEL_CR) {
+        *why = "plane layout is not Y + CbCr";
+        return false;
+    }
+    if (!pl_color_system_is_ycbcr_like(mapped->repr.sys)) {
+        *why = "colour system is not YCbCr";
+        return false;
+    }
+    const pl_tex ty = py.texture;
+    const pl_tex tc = pc.texture;
+    if (!(ty->params.format->caps & PL_FMT_CAP_LINEAR) || !(tc->params.format->caps & PL_FMT_CAP_LINEAR) ||
+        !ty->params.sampleable || !tc->params.sampleable) {
+        *why = "planes are not linearly sampleable";
+        return false;
+    }
+    const float yw = static_cast<float>(ty->params.w);
+    const float yh = static_cast<float>(ty->params.h);
+    const float cw = static_cast<float>(tc->params.w);
+    const float ch = static_cast<float>(tc->params.h);
+    float crop[4] = {mapped->crop.x0, mapped->crop.y0, mapped->crop.x1 - mapped->crop.x0, mapped->crop.y1 - mapped->crop.y0};
+    if (crop[2] <= 0.0f || crop[3] <= 0.0f) {
+        crop[0] = 0.0f;
+        crop[1] = 0.0f;
+        crop[2] = yw;
+        crop[3] = yh;
+    }
+    float ysz[2] = {yw, yh};
+    float csz[2] = {cw, ch};
+    float rr[2] = {std::round(yw / cw), std::round(yh / ch)};
+    float csh[2] = {pc.shift_x, pc.shift_y};
+    float tile[2] = {static_cast<float>(tw), static_cast<float>(th)};
+    float enc = m_Mode == TargetMode::SrgbMutable ? 1.0f : 0.0f;
+    if (!m_LoggedTiles) {
+        m_LoggedTiles = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-FOVEA] tiles: %dx%d per tile, frame %dx%d -> swapchain %dx%d 1:1 (whole view on top, gaze tiles below with a rounded soft edge); "
+                    "luma %dx%d chroma %dx%d crop %.0f,%.0f chroma shift %.2f,%.2f sys=%d levels=%d",
+                    tw, th, static_cast<int>(crop[2]), static_cast<int>(crop[3]), m_Sw.width, m_Sw.height, ty->params.w, ty->params.h,
+                    tc->params.w, tc->params.h, crop[0], crop[1], csh[0], csh[1], static_cast<int>(mapped->repr.sys),
+                    static_cast<int>(mapped->repr.levels));
+    }
+
+    pl_shader sh = pl_dispatch_begin(m_Dp);
+    pl_shader_desc dd[2] = {sampledTex("vs_y", ty), sampledTex("vs_uv", tc)};
+    pl_shader_var vv[5] = {};
+    vv[0].var = pl_var_vec4("vs_crop");
+    vv[0].data = crop;
+    vv[1].var = pl_var_vec2("vs_ysz");
+    vv[1].data = ysz;
+    vv[2].var = pl_var_vec2("vs_csz");
+    vv[2].data = csz;
+    vv[3].var = pl_var_vec2("vs_rr");
+    vv[3].data = rr;
+    vv[4].var = pl_var_vec2("vs_csh");
+    vv[4].data = csh;
+    for (pl_shader_var& v : vv) {
+        v.dynamic = true;
+    }
+    pl_custom_shader cs = {};
+    cs.description = "viple vr fovea unwarp tiles";  // PassStats 照 "fovea unwarp" 歸到 unwarp（沿用同一格，方便和之前的數字比）
+    cs.body = kTilesBody;
+    cs.input = PL_SHADER_SIG_NONE;
+    cs.output = PL_SHADER_SIG_COLOR;
+    cs.descriptors = dd;
+    cs.num_descriptors = 2;
+    cs.variables = vv;
+    cs.num_variables = 5;
+    if (!pl_shader_custom(sh, &cs)) {
+        pl_dispatch_abort(m_Dp, &sh);
+        *why = "custom shader rejected";
+        return false;
+    }
+    // 和 pl_render_image 同一套：YCbCr（含 limited range、位元深度）→ RGB，再從影像的色彩空間轉到 swapchain 的
+    pl_color_repr repr = mapped->repr;
+    repr.alpha = PL_ALPHA_NONE;
+    pl_shader_decode_color(sh, &repr, nullptr);
+    pl_color_space src = mapped->color;
+    pl_color_space dst = targetProto->color;
+    pl_color_space_infer_map(&src, &dst);
+    pl_shader_color_map(sh, nullptr, src, dst, nullptr, false);
+    pl_shader_var mv[2] = {};
+    mv[0].var = pl_var_vec2("vs_tile");
+    mv[0].data = tile;
+    mv[1].var = pl_var_float("vs_enc");
+    mv[1].data = &enc;
+    for (pl_shader_var& v : mv) {
+        v.dynamic = true;
+    }
+    pl_custom_shader ms = {};
+    ms.description = "viple vr fovea tiles mask";
+    ms.body = kTilesMaskBody;
+    ms.input = PL_SHADER_SIG_COLOR;
+    ms.output = PL_SHADER_SIG_COLOR;
+    ms.variables = mv;
+    ms.num_variables = 2;
+    if (!pl_shader_custom(sh, &ms)) {
+        pl_dispatch_abort(m_Dp, &sh);
+        *why = "mask shader rejected";
+        return false;
+    }
+    pl_dispatch_params dpar = {};
+    dpar.shader = &sh;
+    dpar.target = swTex;
+    dpar.rect = {0, 0, m_Sw.width, m_Sw.height};
+    if (!pl_dispatch_finish(m_Dp, &dpar)) {
+        *why = "dispatch failed";
+        return false;
+    }
+    return true;
+}
+
 bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
                            bool hasMeta, const VIPLE_VR_FRAME_META& meta)
 {
@@ -2124,6 +2811,21 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         if (m_Dp != nullptr && m_Config.passTimers) {
             pl_dispatch_callback(m_Dp, this, &XrVideo::passInfoCb);  // §VR-PASS
         }
+    }
+    if (m_Dp != nullptr && m_Config.unwarpYuv && !m_UnwarpYuvFailed) {
+        // §VR-UNWARP-YUV：成功就不需要 m_Full；失敗（格式不合或 shader 失敗）整場改回原本的兩趟
+        const char* why = nullptr;
+        if (renderUnwarpYuv(mapped, targetProto, swTex, hasMeta, meta, &why)) {
+            if (!m_LoggedUnwarpYuv) {
+                m_LoggedUnwarpYuv = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-FOVEA] unwarp reads the decoded YUV planes directly (no RGB intermediate)");
+            }
+            return true;
+        }
+        m_UnwarpYuvFailed = true;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-FOVEA] direct YUV unwarp not used (%s) - converting to RGB first as before", why ? why : "?");
     }
     if (m_Dp != nullptr && ensureFull(fw, fh)) {
         pl_frame tFull = *targetProto;
@@ -2142,7 +2844,8 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         }
         float fv[4];
         float fvCyR;
-        loadFoveation(fv, &fvCyR);
+        float fvU0;
+        loadFoveation(fv, &fvCyR, &fvU0);
         if (hasMeta && meta.foveated) {
             fv[1] = meta.foveaCentre[0][0];
             fv[2] = meta.foveaCentre[1][0];
@@ -2154,7 +2857,7 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         pl_shader sh = pl_dispatch_begin(m_Dp);
         pl_shader_desc dd[1] = {sampledTex("vs_full", m_Full)};
         float fsz[2] = {static_cast<float>(fw), static_cast<float>(fh)};
-        pl_shader_var vv[4] = {};
+        pl_shader_var vv[5] = {};
         vv[0].var = pl_var_vec2("vs_osz");
         vv[0].data = osz;
         vv[0].dynamic = true;
@@ -2167,6 +2870,9 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         vv[3].var = pl_var_vec2("vs_fsz");  // §VR-UPSCALE
         vv[3].data = fsz;
         vv[3].dynamic = true;
+        vv[4].var = pl_var_float("vs_fu");  // §VR-FOVEA-INSET
+        vv[4].data = &fvU0;
+        vv[4].dynamic = true;
         static const std::string s_UnwarpHeader = std::string(kFovHeader) + kCatromHeader;
         pl_custom_shader cs = {};
         cs.description = "viple vr fovea unwarp";
@@ -2177,7 +2883,7 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         cs.descriptors = dd;
         cs.num_descriptors = 1;
         cs.variables = vv;
-        cs.num_variables = 4;
+        cs.num_variables = 5;
         if (pl_shader_custom(sh, &cs)) {
             pl_dispatch_params dpar = {};
             dpar.shader = &sh;

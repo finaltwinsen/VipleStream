@@ -366,8 +366,19 @@ VR 相關 tag 只在 VR session 出現：client 帶 `--display-target pcvr`，�
 - 判斷（`streaming/xr/xrrateauto.h`）：只算預期外、連續不超過 6 格的重複（更長的是斷流，半速救不了）。5 秒一個視窗；
   降＝最近 3 個視窗合計 ≥ 45 且至少 2 個視窗各 ≥ 10、而且 3 個都不是中斷（斷流 ≥ 3 次的視窗＝網路中斷，不觸發降速；試升失敗也不看它）；升＝半速滿 60 秒（試升失敗後加倍，上限 10 分鐘）且最近 30 秒每個視窗 ≤ 10、每 15 秒合計 ≤ 22、沒有斷流；
   升回後 30 秒內最新視窗 ≥ 12 且和前一個合計 ≥ 22 就退回半速。半速且自動緩衝 2 格時鎖住每張顯示兩格（節奏鎖）。開場 15 秒、每次切換後 4 秒不判斷。
+- §VR-RATE-CAUSE（2026-11-09）：每個預期外的重複格分成網路（影格還沒到）與頭盔端（解碼器裡有一張收齊超過兩格還沒解出、或解出後超過一格還沒發布）。
+  降速時頭盔端佔最近 3 個視窗 ≥ 70% 就記成 `(headset cannot keep up (frames arrive but decode late))`、試升等 5 分鐘起算；
+  `request` 行多 `(headset <格>)`；`[VIPLE-VR-MTP10]` 尾端多 `lateNet=<累計> lateHeadset=<累計>`。
 - server：`[VIPLE-VR-RATE] request div=<n> seq=<n> reason=auto-down|auto-up|manual (was <n>)`、`refused ...`、
   `applied div=<n> from f=<幀號> (stream <fps> fps, skipped so far <n>)`；`[VIPLE-VR-TX] 10s` 尾端 `rateDiv=<n> skipped=<累計>`。
+
+#### `[VIPLE-VR-NETBENCH]`（client）—— 設定頁「測試網路」（§VR-NETBENCH，2026-11-09）
+
+- GUI：`start: host=<位址> loc=<地點雜湊>`、`state B|C: pausing home Wi-Fi|giving home Wi-Fi back|no switch needed`、
+  `state <B|C> eye=<寬> exit=<碼> held=<0|1> deficit=<%> rep10= run= half= mtp95= recv=<Mbps> lateNet= lateHeadset=`（每一階）、
+  `result: adapter only|keep home Wi-Fi (basis: <哪一項分出勝負>, level <寬>) top B=<寬> C=<寬> B2=<寬>`、`ended without a result: <原因>`。
+- 子行程（`--vr-netbench <檔>`）：`step eye=<寬> windows=<n> deficit= rep10= run= half= mtp50= mtp95= recv= lateNet= lateHeadset= held= headsetLimited= -> written`。
+- GUI 啟動子行程：`[VIPLE-VR-LAUNCHER] launching network test step: eye=<WxW> secs=<n> host=<位址>`。
 
 #### `[VIPLE-VR-SESSION]` —— 協商與 session 狀態
 
@@ -499,6 +510,36 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
                                                                                  （§VR-LINK-CTRL／§VR-LINK-REPAIR／§VR-REPAIR-RTT；`vr_multilink_ctrl`、
                                                                                  `vr_multilink_repair`、`vr_multilink_repair_rtt` 開著、而且 client 支援）
 [VIPLE-VR-LINK] link features agreed by the server: ctrl=… repair=… repairRtt=…   ← client：同上（LINK_READY 尾端的 hubCaps）
+[VIPLE-VR-LINK] link N '<if>' on standby: a direct link to the host is up, no video over the VPN
+[VIPLE-VR-LINK] link N '<if>' back in use: no direct link to the host
+                                                                              ← client §VR-LINK-STANDBY（2.0.99）：走 Tailscale（host 位址在 100.64.0.0/10）的那一條，在有
+                                                                                 區網直連或轉接器連線時 PING 不帶 CONFIRMED，host 不在上面送影像、也不算它活著（以前同一張
+                                                                                 網卡上的隧道與直連各收一份，空中流量變兩倍）；10 s 行的狀態欄顯示 standby。直連都 1 s 收不到
+                                                                                 PONG 就回來
+[VIPLE-VR-LINK] control route: lost <addr> (no route, or no answer on its link); reconnecting the control connection now (<addr> is up)
+                                                                              ← client §VR-CTRL-ROUTE（2.0.99；2.0.100 加上連線回應）：ENet 連的 host 位址連續兩次（500 ms 一次）
+                                                                                 沒有路由、或連到同一個位址的那條連線 1 s 收不到 PONG，就直接進重連，改連另一條連線的 host 位址
+                                                                                 （以前要等 ENet 10 秒逾時，自動網路選擇暫停家用 Wi-Fi 時控制通道斷 18～25 秒）
+[VIPLE-VR-LINK] control connection back: N haptic event(s) went over the links meanwhile, M reliable message(s) held and sent now (K over the limit dropped), J real-time message(s) dropped
+                                                                              ← host §VR-CTRL-DOWN-S2C（2.0.100）：ENet 斷線、多連線還活著的期間，震動照樣走連線，可靠訊息留著
+                                                                                 （上限 256）等 ENet 回來補送，其餘即時訊息丟掉。以前整段卡住，回來才一次送、多半過期
+[VIPLE-VR-NETSEL] test: smooth with home Wi-Fi; not switching (adapter-only could not win by enough)
+[VIPLE-VR-NETSEL] test: not smooth, but this location was already tested and home Wi-Fi won; not switching again
+                                                                              ← client（2.0.100）：只有不順時才測。B 缺額 < 0.5% 就不暫停家用 Wi-Fi（暫停再接回會讓頭盔 Steam
+                                                                                 登出再登入，觸發 steamwebhelper 崩潰）
+[VIPLE-VR-NETSEL] asked the host not to cut the bitrate for N s while home Wi-Fi pauses|reconnects
+[VIPLE-VR-NETSEL] headset is pausing home Wi-Fi|reconnecting home Wi-Fi: no network-driven bitrate cuts for N ms (now K kbps)
+                                                                              ← §VR-NETSEL-HOLD（2.0.99）：client（第一行）切網路前送 C2S 0x0F；host（第二行）收到後這段時間
+                                                                                 丟包、延遲、送達率都不降碼，隨機丟包不計數（解碼過載照常）；擋下的次數在
+                                                                                 `[VIPLE-VR-ABR-FAST] 10s` 的 `netSwitchSkips=`
+[VIPLE-VR-ABR-FAST] 10s: cuts=… ramps=… target=… cap=… … lastCong=A/B owdStall=N netSwitchSkips=N … recv/send=…kbps[ outage=refK/cleanN/quietMs/progressMs[/restored]] qp=…
+                                                                              ← host：VR 快速碼率控制每 10 秒一行。`owdStall`（§ABR-OWD-STALL，2.0.98）＝延遲趨勢判過載、但最近 8 張
+                                                                                 已回到基準（Wi-Fi 停頓）而不降的次數；`netSwitchSkips`（2.0.99）見上；`outage=`（2.0.99，只在斷訊
+                                                                                 事件進行中）＝要拉回的值／之後的乾淨視窗數／距最後一個斷訊訊號／距 LATCH 幀號最後一次前進（−1＝從沒收過），
+                                                                                 拉回要 clean≥2、quiet≥1000、progress≤300
+[VIPLE-LAN-PREF] <name> reachable on the LAN - using it instead of the VPN address
+                                                                              ← client §LAN-PREF（2.0.99）：目前位址是 Tailscale、host 的 /serverinfo 有廣告
+                                                                                 `VipleStreamLanAddress`，每 15 秒用 400 ms 的 TCP 連線探一次，通了就改走區網
 [VIPLE-VR-REPAIR] nack frame=F block=B have=N/T (data D) attempt=K (…)[ SEND FAILED][ eta=… idle=…]
                                                                               ← client：回報正在等的 FEC block 缺 shard。have＝手上有幾個／這個 block 共幾個；
                                                                                  0/0＝一個封包都沒收到。括號是觸發原因：tail seen（最後一個 shard 到了還不夠）、
@@ -1796,3 +1837,48 @@ pwsh scripts\benchmark\analyze_client_log.ps1 -Path C:\Users\me\Downloads -Json 
 
 **不要**用「相對本場實測中位數」當卡頓門檻：場次愈爛中位數愈低、門檻反而愈鬆，
 會把最嚴重的場次算成最順（實測踩過這個坑）。
+
+### `[VIPLE-WIFI-SCANBLOCK]` —— 串流期間擋住 Frame 的 Wi-Fi 背景掃描（client，§WIFI-SCANBLOCK，2026-11-09）
+`streaming/wifiscanblock.h`
+
+```
+[VIPLE-WIFI-SCANBLOCK] background Wi-Fi scans blocked while streaming (wlan0,wlanap)   ← 連線建立後；對每張有 IP 的無線網卡送了 streamon（Steam 內建串流同一個做法）
+[VIPLE-WIFI-SCANBLOCK] released                                                       ← LiStopConnection 前關 socket，softapmanager 自動解除
+[VIPLE-WIFI-SCANBLOCK] connect failed (errno <n>) / send failed (errno <n>)              ← 沒擋成：串流照常，只是背景掃描時家用 Wi-Fi 那條會卡 50～190 ms
+```
+不是 Frame（沒有 `/run/softapmanager.streaming.socket`）時完全不印。頭盔上確認：`cat /sys/module/cfg80211/parameters/cfg80211_block_scans`（串流中 1 或 6、結束 0）。
+
+`[VIPLE-VR-BUFFER] 10s ... shed=<n>`：§VR-BUFFER-SHED（2026-11-09）——自動緩衝在深度 2、連續 3 秒都落後最新 2 張以上（斷線後一口氣補進來）時跳一張、回到落後 1 張的次數（2.0.115 起；2.0.113／114 是落後 ≥1 就跳到最新，太常觸發）。
+
+### `[VIPLE-VR-FOVEA]` 直接讀 YUV 的還原（§VR-UNWARP-YUV，2.0.117）
+- `YUV unwarp: luma WxH chroma WxH crop … chroma shift sx,sy sys=… levels=… -> 輸出WxH`：第一張用這條路時印一次幾何與色彩表示。
+- `unwarp reads the decoded YUV planes directly (no RGB intermediate)`：這個 session 走直接讀 YUV。
+- `direct YUV unwarp not used (<原因>) - converting to RGB first as before`：不適用（平面排法、色彩系統、取樣能力）或失敗，整場改回舊的兩趟。
+- 走這條路時 `[VIPLE-VR-PASS]` 只剩 `unwarp:`，不會有 `convert0`／`convert1`。
+
+### `[VIPLE-VR-FOVEA]` 每眼兩塊影像（§VR-FOVEA-TILES，2.0.121）
+- server `tiles: tier <1-3> -> <tw>x<th> per tile (packed <W>x<H>), render <rw>x<rh>: periphery density <N>%, gaze tile covers <N>% of the view`：
+  協商成立（/launch）。`tiles not used: render … is not large enough for tier …`＝條件都成立但算圖不夠大，照舊用注視點曲線。
+- server `[VIPLE-VR-ORCH] foveation tiles: <tw>x<th> per tile, packed <W>x<H>, gaze tile = native crop of the <rw>x<rh> render`：寫給 driver 的設定。
+- driver `tiles: <tw>x<th> per tile (ring <W>x<H>), gaze tile = native crop of the <rw>x<rh> render, gaze=<0|1> deadband=<mdeg>`：
+  driver 載入這個 generation 的分塊設定（Activate 與每次 TEXTURES；設定有變才印）。`tiles off (fovea a=… u0=…)`＝這一場不分塊。
+- driver `[VIPLE-VR-GAZE] host: tiles originL=(x,y) originR=(x,y) of <rw>x<rh> valid=… stale=… moves=… clamped=…`：每 10 秒。
+  origin＝注視點那塊的左上角（算圖像素）；moves＝這 10 秒移了幾次（視線偏離超過死區才移）；clamped＝視線靠近視野邊緣、
+  那一塊被夾在影像內的幀數；stale＝沒有有效視線的幀數（沒戴、眨眼）。
+- client `tiles: <tw>x<th> per tile, stream <W>x<H> (was <w>x<h>), gaze tile = native crop of the <rw>x<rh> render`：協商回應帶了分塊，
+  解碼尺寸改成 packed。
+- client `tiles: <tw>x<th> per tile, frame <W>x<H> -> swapchain <W>x<H> 1:1 (…); luma … chroma … crop … chroma shift … sys=… levels=…`：
+  render thread 第一次用分塊那一趟（直接讀 YUV、整張 1:1）。
+- client `tiles: direct pass not used (<原因>) - plain conversion for this session, the gaze tile keeps a hard edge`：那一趟不適用或失敗，
+  整場改用一般的轉換（畫面仍然正確，只是注視點那塊沒有邊緣漸層）。
+- client `centre quads: L <w>x<h> covers x a-b y c-d of the eye image, size <寬>x<高> m @50 m; R … (first frame)`：frame thread 第一次交
+  兩個 quad（分段曲線的中央區也印這一行）。位置每幀都在變，這裡只印第一幀的。
+- client `[VIPLE-VR-GAZE] dev: --vr-synthetic-gaze - …`：送給 host 的視線是合成的（dev）。
+- `[VIPLE-VR-PASS]` 裡分塊那一趟記在 `unwarp:`（名稱含 fovea）。
+
+### `[VIPLE-VR-FOVEA]` 中央區兩圖層（§VR-FOVEA-LAYERS，2.0.118）
+- `centre layers: <w>x<h> per eye at y=<top> (u0=… a=…) under a <W>x<H> periphery`：render thread 第一次畫中央區。
+- `centre quads: L <w>x<h> covers x a-b y c-d of the eye image, size <寬>x<高> m @50 m; R …`：frame thread 第一次交兩個 quad
+  （2.0.121 起改印它蓋住的範圍；之前印的是注視中心）。
+- `centre layer pass failed - back to one full-size image for this session`：中央區那一趟失敗，整場改回單一大圖。
+- `[VIPLE-VR-PASS]` 裡中央區那一趟記在 `other:`。

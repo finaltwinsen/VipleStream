@@ -89,6 +89,9 @@ namespace vrdrv {
     const swapset_t *find_locked(uint64_t handle, uint32_t &index) const;
     IDXGIKeyedMutex *sync_mutex_locked(uint64_t handle);
     void compose_and_publish_locked(int64_t present_qpc, uint32_t &exit_code);
+    void tile_origin_locked(int64_t present_qpc, uint16_t org[2][2]);  // §VR-FOVEA-TILES
+    // 注視點／分塊的設定：只影響我們自己的合成，不是 SteamVR 的 K20 參數，每個 generation 都重新載入
+    void load_fovea_config_locked(const vripc_session_config_t &cfg);
 
     driver_ctx_t &ctx_;
     SRWLOCK lock_ = SRWLOCK_INIT;
@@ -120,6 +123,7 @@ namespace vrdrv {
     uint32_t eye_w_ = 0;
     uint32_t eye_h_ = 0;
     math::rect_t eye_rect_[2];
+    float fovea_u0_ = 0.0f;  // §VR-FOVEA-INSET：分段曲線中央段的範圍（0＝舊的三次曲線）
     float fovea_a_ = 0.0f;  // §VR-FOVEA：正前方的斜率 a＝100/fovea_pct；0＝關
     LUID act_luid_ {};
 
@@ -142,6 +146,19 @@ namespace vrdrv {
     uint64_t stat_gaze_frozen_ = 0;
     uint64_t stat_gaze_clamped_ = 0;
     int64_t stat_gaze_last_log_ = 0;
+
+    // §VR-FOVEA-TILES（2026-11-10）：每眼兩塊影像（tile_w_＝0＝不分塊）。注視點那塊跟著「已採用的視線方向」
+    // （tangent，x 右、y 上；0,0＝正前方）：新的視線偏離超過死區才採用、一次移到位
+    uint32_t tile_w_ = 0;
+    uint32_t tile_h_ = 0;
+    uint32_t tile_render_w_ = 0;
+    uint32_t tile_render_h_ = 0;
+    float tile_gaze_tx_ = 0.0f;
+    float tile_gaze_ty_ = 0.0f;
+    bool tile_gaze_init_ = false;
+    int64_t tile_last_valid_qpc_ = 0;
+    uint64_t stat_tile_moves_ = 0;
+    uint16_t tile_last_org_[2][2] = {{0, 0}, {0, 0}};
 
     // PostPresent／GetFrameTiming（同一條 compositor 執行緒依序呼叫）
     virtual_vsync_t vsync_;

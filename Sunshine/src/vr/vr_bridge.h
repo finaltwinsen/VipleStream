@@ -334,6 +334,12 @@ namespace vr::bridge {
 #endif
 
   /**
+   * @brief §VR-NETBENCH（2026-11-08）：最近一次 set_pacing_ppm／set_pacing_step 要求的「現在」該用的 ppm（burst 期間回 burst 值）。
+   *        網路測試沒有 driver，host 的片段播放器自己照這個值調整出幀週期，頭盔的節拍回授才有作用。任何執行緒；沒設過回 0
+   */
+  int32_t pacing_ppm_now();
+
+  /**
    * @brief selftest 的 dev mode：之後的 WELCOME 帶 VRIPC_WF_DEV_PACING，允許 pacing.mode ≠ 0、
    *        config.dev_flags／dev_arg 與 STATE DEV_SET_V2P。production 一律 false。
    */

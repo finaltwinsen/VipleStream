@@ -31,6 +31,15 @@ namespace vrdrv {
     compose_eye_t eye[2];
   };
 
+  // §VR-FOVEA-TILES（2026-11-10）：每眼兩塊影像。rtv＝(2·tile_w)×(2·tile_h)：上排左、右眼的全視野（整眼縮小），
+  // 下排左、右眼的注視點（本眼影像裡 origin 起、cover 大小的裁切，不變形）
+  struct tile_layout_t {
+    uint32_t tile_w = 0;
+    uint32_t tile_h = 0;
+    float origin[2][2] = {};  // [eye][x, y]：注視點那塊的左上角（本眼影像的正規化座標，y 由上緣算）
+    float cover[2] = {};  // 注視點那塊佔本眼影像的比例（x、y）
+  };
+
   class frame_compositor_t {
   public:
     // 建 shader、sampler、blend、constant buffer。device 換了要重建（K19：device 活到 Cleanup，不會換）。
@@ -43,7 +52,9 @@ namespace vrdrv {
     // 合成到 rtv（packed：左眼在左半、右眼在右半）。eye_rect：本眼的 tangent 範圍（fov_to_rect）。
     // layer 為 0 層時清成黑色（仍發布，讓串流不中斷）。
     // fovea_a（§VR-FOVEA）：0＝均勻取樣；0.4–1＝注視點編碼，正前方（tangent 0）的斜率（見 compositor_ps.hlsl）。
-    void compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a = 0.0f, const float fovea_centre[2][2] = nullptr);
+    // fovea_u0（§VR-FOVEA-INSET）：> 0 時改用分段曲線（中央段斜率 fovea_a、範圍 fovea_u0），0＝三次曲線
+    // tiles（§VR-FOVEA-TILES）：不是 nullptr 時改畫成每眼兩塊（eye_w／eye_h 與 fovea_* 不看）
+    void compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a = 0.0f, const float fovea_centre[2][2] = nullptr, float fovea_u0 = 0.0f, const tile_layout_t *tiles = nullptr);
 
   private:
     ComPtr<ID3D11VertexShader> vs_;

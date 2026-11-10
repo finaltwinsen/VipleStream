@@ -221,6 +221,24 @@ namespace config {
       return vr_t::gpu_priority_e::high;
     }
 
+    /// §VR-FOVEA-TILES：vr_fovea_tiles＝disabled｜small｜medium｜large（值寫錯警告並維持 small）
+    int fovea_tiles_from_view(const std::string_view value, const std::string_view key) {
+      if (value == "disabled"sv) {
+        return 0;
+      }
+      if (value == "small"sv) {
+        return 1;
+      }
+      if (value == "medium"sv) {
+        return 2;
+      }
+      if (value == "large"sv) {
+        return 3;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: disabled, small, medium, large. Falling back to 'small'", key, value));
+      return 1;
+    }
+
     /**
      * @brief 嚴格解析 vr_* 的整數設定項：不是十進位整數、或不在允許範圍就警告並保留預設值。
      *
@@ -1608,6 +1626,7 @@ namespace config {
     vr_opt::int_strict_f(vars, "vr_dev_kick_every_s", vr.dev_kick_every_s, 5, 600, true);
     vr_opt::int_strict_f(vars, "vr_dev_kick_ms", vr.dev_kick_ms, 1, 200, false);
     string_f(vars, "vr_dev_rawdump", vr.dev_rawdump);  // §VR-RAWDUMP（dev）：原樣字串，VR 擷取 init 時才驗
+    string_f(vars, "vr_netbench_clip", vr.netbench_clip);  // §VR-NETBENCH
     vr_opt::bool_strict_f(vars, "vr_ctrl_pose_offset", vr.ctrl_pose_offset);
     vr_opt::bool_strict_f(vars, "vr_angvel_local", vr.angvel_local);
     vr_opt::bool_strict_f(vars, "vr_abr_fast", vr.abr_fast);
@@ -1640,6 +1659,8 @@ namespace config {
     // §VR-GAZE-FOVEA（2026-10-31）：眼動追蹤驅動注視點渲染開關（預設 disabled）與角速度上限（30–600 dps）
     vr_opt::bool_strict_f(vars, "vr_gaze_fovea", vr.gaze_fovea);
     vr_opt::int_strict_f(vars, "vr_fovea_gaze_slew_dps", vr.fovea_gaze_slew_dps, 30, 600, false);
+    // §VR-FOVEA-TILES（2026-11-10）：注視點改成每眼兩塊影像（disabled｜small｜medium｜large，預設 small）
+    generic_f(vars, "vr_fovea_tiles", vr.fovea_tiles, vr_opt::fovea_tiles_from_view);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

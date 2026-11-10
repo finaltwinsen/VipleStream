@@ -1301,6 +1301,7 @@ namespace rtsp_stream {
           }
         };
         config.monitor.captureSource = 1;
+        config.monitor.vrClip = neg.bench;  // §VR-NETBENCH
         const bool vr_10bit = config.monitor.dynamicRange != 0 && neg.video_format() == 1 && video::hevc_10bit_supported();
         override_field("dynamicRange", config.monitor.dynamicRange, vr_10bit ? 1 : 0);
         if (vr_10bit) {

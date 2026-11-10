@@ -82,6 +82,9 @@ public:
         // §VR-LDIAG（dev）：--vr-test-jitter。影像 render thread 畫每一張串流影像之前照這個字串延後（xrlatch::Jitter
         // 的格式），模擬到達抖動；空字串＝不注入
         QString testJitter;
+        float unwarpMax = 2.0f;  // §VR-UNWARP-MAX（dev）
+        bool unwarpYuv = true;   // §VR-UNWARP-YUV（--vr-unwarp-rgb 關）
+        bool fovLayers = true;   // §VR-FOVEA-LAYERS（--vr-fovea-single-layer 關）
         // X4：射線滑鼠事件的出口（Session 提供，從 XR frame thread 呼叫；推 SDL_USEREVENT 到 main thread）
         XrInputSink inputSink;
         // §VR-WHEEL：PCVR 方向盤模式的初始值（input[0].reserved：VIPLE_VR_WHEEL_ON | 轉向範圍/10，0＝關）
@@ -275,14 +278,24 @@ public:
     void queueHaptic(uint8_t device, uint32_t durationUs, float frequencyHz, float amplitude);
     // §VR-FOVEA：server 在協商回應裡確認的注視點編碼強度（%，100＝關）。main thread 在 /launch 之後設，frame thread 讀
     void setPcvrFoveation(int pct) { m_PcvrFoveaPct.store(pct, std::memory_order_relaxed); }
+    // §VR-FOVEA-INSET：server 回的 foveaInset（u0×10000，0＝三次曲線）
+    void setPcvrFoveaInset(int u0x10000) { m_PcvrFoveaInsetU0.store(u0x10000, std::memory_order_relaxed); }
     void setPcvrGazeFovea(bool enabled) { m_PcvrGazeFovea.store(enabled, std::memory_order_relaxed); }
     bool pcvrGazeFovea() const { return m_PcvrGazeFovea.load(std::memory_order_relaxed); }
+    // §VR-FOVEA-TILES：server 回的 foveaTiles／foveaRender（每塊尺寸、每眼算圖尺寸；tw＝0＝沒有分塊）
+    void setPcvrFoveaTiles(int tw, int th, int rw, int rh)
+    {
+        m_PcvrTileH.store(th, std::memory_order_relaxed);
+        m_PcvrTileRW.store(rw, std::memory_order_relaxed);
+        m_PcvrTileRH.store(rh, std::memory_order_relaxed);
+        m_PcvrTileW.store(tw, std::memory_order_relaxed);
+    }
     // §VR-LATCH-WAIT：串流一幀佔幾個顯示格（半速串流 2）。main thread 在決定串流更新率之後設，frame thread 讀
     void setPcvrStreamDiv(int div) { m_PcvrStreamDiv.store(div >= 1 ? div : 1, std::memory_order_relaxed); }
     // §VR-RATE-AUTO：main thread 收到 host 的 S2C_RATE。accepted 時立刻換分頻（等待閘門、補包上限、緩衝），
     // 判斷器的狀態交給 frame thread 在下一格更新
     void onPcvrRateApplied(int div, bool accepted, uint16_t seq);
-    void pcvrRateSlot(bool newFrame, uint64_t nowUs);
+    void pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs);
     // §VR-RATE-AUTO：新的一場從全速重新開始（main thread；判斷器由 frame thread 在下一格重設）
     void resetPcvrRate();
     bool trackingThreadMode() const { return m_TimeConv != nullptr; }
@@ -558,6 +571,11 @@ private:
     uint32_t m_QueueFamily = 0;
     VkQueue m_Queue = VK_NULL_HANDLE;
     std::atomic<int> m_PcvrFoveaPct{100};
+    std::atomic<int> m_PcvrFoveaInsetU0{0};  // §VR-FOVEA-INSET
+    std::atomic<int> m_PcvrTileW{0};         // §VR-FOVEA-TILES
+    std::atomic<int> m_PcvrTileH{0};
+    std::atomic<int> m_PcvrTileRW{0};
+    std::atomic<int> m_PcvrTileRH{0};
     std::atomic<int> m_PcvrStreamDiv{1};   // §VR-LATCH-WAIT（見 setPcvrStreamDiv）
     std::atomic<bool> m_LostByGpu{false};  // frame thread 看到就當成 session loss
     std::atomic<bool> m_GpuWedged{false};  // M4a 收尾：GPU 等待逾時（見 waitSemaphoreBounded）
@@ -633,6 +651,10 @@ private:
     bool buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, const float renderRot[4], const float renderPos[3],
                          uint32_t echoSampleId, XrCompositionLayerProjection* proj,
                          XrCompositionLayerProjectionView views[2]);
+    // §VR-FOVEA-LAYERS：中央區的兩個 quad（views＝這一格的 projection views；out＝每眼蓋住的範圍 x0, y0, x1, y1）
+    bool buildInsetQuads(XrSwapchain swapchain, const XrRect2Di rects[2], const float out[2][4],
+                         const XrCompositionLayerProjectionView views[2], XrCompositionLayerQuad quads[2]);
+    bool m_LoggedInsetQuads = false;
     // frame loop 最近一次的 HMD locate（frameloop 模式樣本；thread 模式也用它的 predict 估計）
     struct HmdSample {
         bool valid = false;

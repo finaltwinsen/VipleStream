@@ -7,6 +7,7 @@
 #include <thread>  // §VR-DECPOLL2
 #include <vector>
 #include "ffmpeg.h"
+#include "streaming/vr/vrnetbench.h"  // §VR-NETBENCH
 #include "bitstreamdump.h"
 #include "utils.h"
 #include "streaming/session.h"
@@ -781,10 +782,26 @@ void FFmpegVideoDecoder::reset()
 {
     // Terminate the decoder thread before doing anything else.
     // It might be touching things we're about to free.
+    // §DEC-JOIN-TIMEOUT（2026-11-09）：最多等 3 秒。11-09 頭盔實測：硬體解碼器（v4l2m2m／iris）整場 0 張解出時，解碼執行緒卡在
+    // avcodec_receive_frame 裡的 v4l2 poll（FFmpeg 的 v4l2m2m 用無限等待），SDL_WaitThread 永遠不回來，串流結束不了、
+    // 程式也關不掉。等不到就放生這條執行緒，並且留著它可能還會碰到的東西（解碼器 context、Pacer、renderer）不釋放
+    bool abandoned = false;
     if (m_DecoderThread != nullptr) {
         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 1);
         LiWakeWaitForVideoFrame();
-        SDL_WaitThread(m_DecoderThread, NULL);
+        for (int waited = 0; !m_DecoderThreadExited.load() && waited < 3000; waited += 10) {
+            SDL_Delay(10);
+        }
+        if (m_DecoderThreadExited.load()) {
+            SDL_WaitThread(m_DecoderThread, NULL);
+        }
+        else {
+            abandoned = true;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-DEC] decoder thread did not stop within 3 s (stuck in the hardware decoder) - leaving it and "
+                        "its decoder objects behind (frames in=%d out=%d)", m_FramesIn, m_FramesOut);
+            SDL_DetachThread(m_DecoderThread);
+        }
         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 0);
         m_DecoderThread = nullptr;
     }
@@ -815,7 +832,9 @@ void FFmpegVideoDecoder::reset()
     // 靜默失效。它只在 initialize() 開頭重建，decoder 解構時才釋放（印 final 統計）。
     m_VrConsecutiveDecodeErrors = 0;
 
-    delete m_Pacer;
+    if (!abandoned) {
+        delete m_Pacer;
+    }
     m_Pacer = nullptr;
 
     {
@@ -837,18 +856,24 @@ void FFmpegVideoDecoder::reset()
     // However, it must be called before deleting the IFFmpegRenderer
     // since the codec context may be referencing objects that we
     // need to delete in the renderer destructor.
-    avcodec_free_context(&m_VideoDecoderCtx);
+    if (!abandoned) {
+        avcodec_free_context(&m_VideoDecoderCtx);
+    }
+    m_VideoDecoderCtx = nullptr;
 
     if (m_CurrentTestMode != TestMode::TestFrameOnly) {
         Session::get()->getOverlayManager().setOverlayRenderer(nullptr);
     }
 
     // If we have a separate frontend renderer, free that first
-    if (m_FrontendRenderer != m_BackendRenderer) {
-        delete m_FrontendRenderer;
-    }
+    // §DEC-JOIN-TIMEOUT：放生的解碼執行緒解出影格時會交給 renderer，留著不釋放
+    if (!abandoned) {
+        if (m_FrontendRenderer != m_BackendRenderer) {
+            delete m_FrontendRenderer;
+        }
 
-    delete m_BackendRenderer;
+        delete m_BackendRenderer;
+    }
 
     m_FrontendRenderer = m_BackendRenderer = nullptr;
 
@@ -1498,6 +1523,7 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
 
         // Only create the decoder thread when instantiating the decoder for real. It will use APIs from
         // moonlight-common-c that can only be legally called with an established connection.
+        m_DecoderThreadExited.store(false);
         m_DecoderThread = SDL_CreateThread(FFmpegVideoDecoder::decoderThreadProcThunk, "FFDecoder", (void*)this);
         if (m_DecoderThread == nullptr) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -3209,6 +3235,7 @@ bool FFmpegVideoDecoder::initializePyroWave(PDECODER_PARAMETERS params)
             Session::get()->getOverlayManager().setOverlayRenderer(m_FrontendRenderer);
             m_FrontendRenderer->prepareToRender();
 
+            m_DecoderThreadExited.store(false);
             m_DecoderThread = SDL_CreateThread(FFmpegVideoDecoder::decoderThreadProcThunk, "FFDecoder", (void*)this);
             if (!m_DecoderThread) {
                 reset();
@@ -3706,6 +3733,7 @@ bool FFmpegVideoDecoder::pyroWaveSkipStale(VIDEO_FRAME_HANDLE handle, PDECODE_UN
 int FFmpegVideoDecoder::decoderThreadProcThunk(void *context)
 {
     ((FFmpegVideoDecoder*)context)->decoderThreadProc();
+    ((FFmpegVideoDecoder*)context)->m_DecoderThreadExited.store(true);  // §DEC-JOIN-TIMEOUT
     return 0;
 }
 
@@ -3737,6 +3765,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
         const int st = submitDecodeUnit(du);
         const uint64_t t1 = LiGetMicroseconds();
         vrPoll.lastSubmitUs = t1;
+        // §VR-RATE-CAUSE：送進去的這張排在佇列尾，最舊的那張可能是它（佇列原本是空的）
+        VrDecodeTiming::publishOldestPending(m_FrameInfoQueue.isEmpty() ? 0 : m_FrameInfoQueue.head().enqueueTimeUs);
         vrPoll.queueWaitUs.push_back((uint32_t)(std::min<uint64_t>)(t0 > enq ? t0 - enq : 0, 0xffffffffu));
         vrPoll.submitUs.push_back((uint32_t)(std::min<uint64_t>)(t1 - t0, 0xffffffffu));
         return st;
@@ -3926,6 +3956,11 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     if (!m_FrameInfoQueue.isEmpty()) {
                         // Data buffers in the DU are not valid here!
                         DECODE_UNIT du = m_FrameInfoQueue.dequeue();
+                        if (m_VrDropOnMetaMiss) {
+                            // §VR-RATE-CAUSE：這張解出來了，換下一張最舊的（沒有＝0）
+                            VrDecodeTiming::publishOldestPending(
+                                m_FrameInfoQueue.isEmpty() ? 0 : m_FrameInfoQueue.head().enqueueTimeUs);
+                        }
 
                         // Count time in avcodec_send_packet() and avcodec_receive_frame()
                         // as time spent decoding. Also count time spent in the decode unit
@@ -4744,6 +4779,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     if (m_VrTracker) {
         m_Pkt->pts = du->frameNumber;
         m_VrTracker->onSubmit(du);
+        NetBench::Collector::get().addBytes(static_cast<uint32_t>(du->fullLength));  // §VR-NETBENCH：收包碼率（不是網路測試時不做事）
     }
 
     m_ActiveWndVideoStats.totalReassemblyTimeUs += (du->enqueueTimeUs - du->receiveTimeUs);

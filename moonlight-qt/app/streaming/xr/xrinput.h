@@ -106,6 +106,9 @@ struct XrInputSink {
     std::function<void()> exitCombo;
     // §VR-WHEEL：PCVR 時兩支搖桿同時按住 1.5 秒切換方向盤模式，on＝切換後的狀態（frame thread 呼叫，只推事件）。沒設＝不偵測
     std::function<void(bool on)> wheelToggled;
+    // §VR-RECENTER（2026-11-09）：一般模式（不是影片模式）長按選單鍵（開關鍵盤那顆）kRecenterHoldNs＝把螢幕／介面重新擺到正前方。
+    // 短按照舊開關鍵盤（改成放開時才切換，長按就不切）。XrContext 沒設時自己接到 requestRecenter()
+    std::function<void()> recenter;
 };
 
 class XrInput
@@ -201,6 +204,8 @@ private:
     XrAction m_Stick = XR_NULL_HANDLE;
     XrAction m_KbToggleAction = XR_NULL_HANDLE;
     bool m_KbToggleWas[2] = {false, false};
+    uint64_t m_MenuDownNs[2] = {0, 0};      // §VR-RECENTER：選單鍵按下的時刻（一般模式）
+    bool m_MenuLongFired[2] = {false, false};  // 這次按住已經觸發重新置中（放開時不切鍵盤）
     XrSpace m_AimSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     XrAction m_EyeGazeAction = XR_NULL_HANDLE;
     XrSpace m_EyeGazeSpace = XR_NULL_HANDLE;

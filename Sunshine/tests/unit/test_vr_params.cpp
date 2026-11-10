@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 
+#include <src/vr/vr_fovea_profile.h>
 #include <src/vr/vr_session.h>
 
 namespace {
@@ -241,6 +242,90 @@ TEST(VrParamsTest, Foveation) {
   EXPECT_EQ(el.substr(el.size() - 10), ";fovea=150") << el;
   neg.params.fovea = 100;
   EXPECT_EQ(vr::format_session_element(neg).find("fovea"), std::string::npos);
+}
+
+// 11-10：加 foveaInset 時格式字串少一個 {}，std::format 默默丟掉最後的 gazeFovea=1（眼動注視點整個沒作用）。
+// 所有選填項目同時成立時每一項都要在
+TEST(VrParamsTest, SessionElementAllOptional) {
+  vr::negotiated_t neg;
+  neg.params = *parse_map(minimal_args()).params;
+  neg.guid = "g";
+  neg.pcvr = true;
+  neg.multilink = true;
+  neg.params.fovea = 187;
+  neg.params.fovea_inset_u0 = 7500;
+  neg.gaze_fovea = true;
+  const auto el = vr::format_session_element(neg);
+  EXPECT_NE(el.find(";multilink=1"), std::string::npos) << el;
+  EXPECT_NE(el.find(";fovea=187"), std::string::npos) << el;
+  EXPECT_NE(el.find(";foveaInset=7500"), std::string::npos) << el;
+  EXPECT_EQ(el.substr(el.size() - 12), ";gazeFovea=1") << el;
+}
+
+// §VR-FOVEA-TILES（2026-11-10）：每眼兩塊影像。檔位決定每塊多大（32 的倍數），算圖要比串流大得夠多才分塊
+TEST(VrParamsTest, FoveaTilesSizes) {
+  const int rw = vr::fovea::render_width(1152, 187, 2700);
+  EXPECT_EQ(rw, 2154);
+  const auto s = vr::fovea::compute_tiles(1152, 1152, rw, rw, 1);
+  ASSERT_TRUE(s.on);
+  EXPECT_EQ(s.tile_w, 832);
+  EXPECT_EQ(s.tile_h, 832);
+  EXPECT_EQ(s.render_w, 2154);
+  const auto m = vr::fovea::compute_tiles(1152, 1152, rw, rw, 2);
+  ASSERT_TRUE(m.on);
+  EXPECT_EQ(m.tile_w, 960);
+  const auto l = vr::fovea::compute_tiles(1152, 1152, rw, rw, 3);
+  ASSERT_TRUE(l.on);
+  EXPECT_EQ(l.tile_w, 1152);
+  EXPECT_FALSE(vr::fovea::compute_tiles(1152, 1152, rw, rw, 0).on);
+  EXPECT_FALSE(vr::fovea::compute_tiles(1152, 1152, rw, rw, 4).on);
+  // 算圖沒有比串流大（或只大一點）：不分塊
+  EXPECT_FALSE(vr::fovea::compute_tiles(1152, 1152, 1152, 1152, 1).on);
+  EXPECT_FALSE(vr::fovea::compute_tiles(1152, 1152, 1400, 1400, 1).on);
+  // 一塊已經佔算圖影像的八成以上：不分塊（每眼 2160、算圖上限 2700 的 large）
+  EXPECT_FALSE(vr::fovea::compute_tiles(2160, 2160, 2700, 2700, 3).on);
+}
+
+// 分塊時 packed＝2×每塊，回應帶 foveaTiles／foveaRender、不帶 fovea／foveaInset（影像沒有幾何變形）
+TEST(VrParamsTest, FoveaTilesSessionElement) {
+  vr::negotiated_t neg;
+  neg.params = *parse_map(minimal_args()).params;
+  neg.params.eye_width = 1152;
+  neg.params.eye_height = 1152;
+  neg.guid = "g";
+  neg.pcvr = true;
+  neg.params.fovea = 200;
+  EXPECT_FALSE(neg.tiles());
+  EXPECT_EQ(neg.packed_width(), 2304);
+  EXPECT_EQ(neg.packed_height(), 1152);
+  neg.params.tile_w = 832;
+  neg.params.tile_h = 832;
+  neg.params.tile_render_w = 2154;
+  neg.params.tile_render_h = 2154;
+  neg.gaze_fovea = true;
+  EXPECT_TRUE(neg.tiles());
+  EXPECT_EQ(neg.packed_width(), 1664);
+  EXPECT_EQ(neg.packed_height(), 1664);
+  const auto el = vr::format_session_element(neg);
+  EXPECT_NE(el.find("packed=1664x1664;"), std::string::npos) << el;
+  EXPECT_NE(el.find(";foveaTiles=832x832;foveaRender=2154x2154"), std::string::npos) << el;
+  EXPECT_EQ(el.find(";fovea="), std::string::npos) << el;
+  EXPECT_EQ(el.find(";foveaInset="), std::string::npos) << el;
+  EXPECT_EQ(el.substr(el.size() - 12), ";gazeFovea=1") << el;
+}
+
+// vrFoveaTiles（dev）：0～3，沒帶＝-1；format 只在有帶時輸出，位置在 vrFovea 之後
+TEST(VrParamsTest, FoveaTilesRequest) {
+  const auto plain = parse_map(minimal_args());
+  ASSERT_TRUE(plain.params.has_value()) << plain.error;
+  EXPECT_EQ(plain.params->fovea_tiles_req, -1);
+  EXPECT_EQ(vr::format_launch_params(*plain.params).find("vrFoveaTiles"), std::string::npos);
+  const auto req = parse_map(with(with(minimal_args(), "vrFovea", "200"), "vrFoveaTiles", "2"));
+  ASSERT_TRUE(req.params.has_value()) << req.error;
+  EXPECT_EQ(req.params->fovea_tiles_req, 2);
+  const auto q = vr::format_launch_params(*req.params);
+  EXPECT_NE(q.find("&vrFovea=200&vrFoveaTiles=2"), std::string::npos) << q;
+  expect_error(with(minimal_args(), "vrFoveaTiles", "4"), "vrFoveaTiles=4 out of range");
 }
 
 // §VR-PREDICT（2026-10-10）：vrDispHz 選填＝頭盔的顯示更新率。client 只在它和 vrHz 不同時才帶（§VR-HALF-RATE 半速串流）；

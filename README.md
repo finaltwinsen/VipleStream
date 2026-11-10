@@ -147,6 +147,15 @@ VipleStream opens in its own VR interface (laser pointer: trigger = click, grip 
 
 **Xbox controller mode (2.0.68+):** some VR games (for example Assetto Corsa, Assetto Corsa Competizione, GRIP) only read a gamepad or wheel, so VR controllers do nothing in them. When the running game's Steam store page does not list *Tracked Controller Support*, the host plugs in a virtual Xbox 360 controller and drives it from both Frame controllers (right A/B/X/Y, left d-pad, bumpers → LB/RB, triggers → LT/RT, sticks → LS/RS, right menu → Start, left view → Back). Hold **both menu buttons for 2 seconds** to switch by hand; the choice is remembered per game. Needs ViGEmBus on the host; turn it off with `vr_padmode = disabled`.
 
+**Steering wheel (2.0.75+):** in Xbox controller mode you can steer by turning the two controllers like a wheel; the angle replaces the left stick's left/right. Turn it on in the settings, or press and hold both thumbsticks for 1.5 seconds during a stream, and pick the steering range (180° to 900°).
+
+**VR settings (2.0.122):**
+- **Sharper where you look (foveated streaming)** — Off / Small / Medium / Large. Each eye is sent as a reduced picture of the whole view plus a full-detail picture that follows your gaze (it stays straight ahead without eye tracking). Small is the default and draws the least headset power; a larger size keeps more detail away from where you look, at the cost of bandwidth, power and a little delay. Needs a 2.0.122 host.
+- **Frame rate** — Automatic (half rate while the network is unstable, back to full by itself), Full, Half, or Half with synthesized in-between frames.
+- **Test network** — streams a fixed clip from the host at rising resolutions, once with home Wi-Fi kept and once over the adapter only, and remembers which one held the full frame rate. The host needs a test clip (`vr_netbench_clip`); none is shipped.
+- **Send the headset microphone to the PC** — your voice arrives on the host's *Steam Streaming Microphone* device; select it in the game or voice chat app.
+- **Recentre** — a SteamVR recentre (hold the Steam button) also re-places the VipleStream panels; in the VipleStream interface, hold the menu button for 1 second.
+
 **Low battery (2.0.70+):** while streaming, a small battery icon appears at the top right of your view at 15 % or less (not charging), with one beep. Note that under a heavy streaming load the Frame can power off well above 15 % (see [SteamOS#3040](https://github.com/ValveSoftware/SteamOS/issues/3040)); keep a power bank at hand for long sessions.
 
 To leave a desktop or VR stream, hold **A+X+trigger+grip**; you return to the VipleStream interface. If SteamVR opens the Steam menu over a new session, press the Steam button to close it.
@@ -162,9 +171,9 @@ More: [`docs/setup_guide.md`](docs/setup_guide.md) (configuration and troublesho
 ## Features beyond upstream
 
 **Steam Frame / VR**
-- PC VR streaming with its own SteamVR driver; pose prediction, latency-aware pacing, adaptive buffer (1 or 2 frames), eye-tracked foveated encoding, half-rate streaming with frame synthesis.
+- PC VR streaming with its own SteamVR driver; pose prediction, latency-aware pacing, adaptive buffer (1 or 2 frames), eye-tracked foveated streaming (two pictures per eye, selectable size), automatic half rate on an unstable network, half-rate streaming with frame synthesis.
 - Multi-link: one full copy of the stream per network link (home Wi-Fi, the headset hotspot to the host's adapter, Ethernet), with repair requests that follow the measured round trip.
-- Full VR interface on the headset, video mode, Frame controllers exposed as Frame controllers (with hand skeleton, 2.0.68+), Xbox controller mode, low-battery icon.
+- Full VR interface on the headset, video mode, Frame controllers exposed as Frame controllers (with hand skeleton, 2.0.68+), Xbox controller mode with steering-wheel emulation, headset microphone, a network test that chooses between home Wi-Fi and the adapter, low-battery icon.
 - Coexists with Steam's own streaming: when Steam Link asks for SteamVR, the host hands it over.
 
 **Networking**
@@ -212,6 +221,7 @@ More: [`docs/setup_guide.md`](docs/setup_guide.md) (configuration and troublesho
 
 | Version | Highlights |
 |---|---|
+| **2.0.122** | Steam Frame foveation rebuilt as two pictures per eye (a reduced full view plus a full-detail picture that follows the gaze) with an Off / Small / Medium / Large setting, taking headset power from about 13 W to under 10 W in our test; automatic half rate when the network is unstable; "Test network" in the headset settings; background Wi-Fi scans blocked while streaming; steering-wheel emulation; headset microphone; automatic updates on every platform; 2D bitrate fixes for congestion and a relative mouse that survives packet loss. |
 | **2.0.63** | Automatic bitrate that adapts to the network (delay trend, loss type, QP-based cap); Tailscale relay-to-direct recovery during a stream; headset buffer fixed and switching between 1 and 2 frames automatically; a large batch of review fixes; Android minimum is now Android 9; Linux .deb depends on Ayatana AppIndicator. |
 | **2.0.31** | Eye-tracked foveated encoding on the Steam Frame; faster pacing lock at session start; worn-tested VR settings become the defaults; links added mid-stream join multi-link; redundant haptics. |
 | **2.0.25** | Fast VR bitrate drop and recovery on weak signal; Frame controllers exposed as Frame controllers; real play area and seated height; coexistence with Steam's built-in streaming. |
@@ -383,6 +393,15 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 
 **Xbox 手把模式（2.0.68 起）：** 有些 VR 遊戲（例如 Assetto Corsa、Assetto Corsa Competizione、GRIP）只讀手把或方向盤，VR 手把在裡面完全沒反應。執行中的遊戲在 Steam 商店沒有標「Tracked Controller Support」時，主機會插上一支虛擬 Xbox 360 手把，用兩支 Frame 手把操作（右手 A／B／X／Y、左手十字鍵、肩鍵→LB／RB、扳機→LT／RT、搖桿→LS／RS、右手 menu→Start、左手 view→Back）。**兩支選單鍵同時按住 2 秒**可以手動切換，每款遊戲會記住你的選擇。主機要裝 ViGEmBus；用 `vr_padmode = disabled` 可以關閉。
 
+**方向盤（2.0.75 起）：** Xbox 手把模式下，可以把兩支手把像握方向盤一樣轉動來轉向，角度取代左搖桿的左右。在設定頁打開，或串流中同時按住兩支搖桿 1.5 秒切換；轉向角度可選（180°～900°）。
+
+**VR 設定（2.0.122）：**
+- **視線所在更清晰（注視點串流）**——關閉／小／中／大。每隻眼睛送兩張畫面：整個視野縮小的一張，加上跟著視線走、保留完整細節的一張（沒有眼動追蹤時固定在正前方）。預設「小」，頭盔最省電；選大一點，視線以外的地方也比較清楚，代價是流量、耗電和一點延遲。主機要 2.0.122。
+- **幀率**——自動（網路不穩時降到半速，穩定後自己回來）、全速、半速、半速加補幀。
+- **測試網路**——主機播放固定的片段，解析度一階一階往上，「保留家用 Wi-Fi」與「只用轉接器」各跑一輪，記住比較撐得住全速的那一種。主機上要放測試片段（`vr_netbench_clip`），安裝包沒有附。
+- **傳送頭盔麥克風至電腦**——聲音會出現在主機的「Steam Streaming Microphone」裝置，在遊戲或語音軟體裡選它。
+- **重新置中**——SteamVR 的重新置中（長按 Steam 鍵）也會重擺 VipleStream 的面板；在 VipleStream 介面裡長按選單鍵 1 秒。
+
 **低電量（2.0.70 起）：** 串流時電量 ≤ 15% 且沒在充電，視野右上角會出現小電池圖示並嘟一聲。注意：高負載串流時 Frame 可能在電量遠高於 15% 時就斷電（見 [SteamOS#3040](https://github.com/ValveSoftware/SteamOS/issues/3040)），長時間遊玩建議準備行動電源。
 
 要離開桌面或 VR 串流，按住 **A+X+扳機+握把**，會回到 VipleStream 介面。新場次開始時如果 SteamVR 的 Steam 選單蓋在上面，按 Steam 鍵關掉即可。
@@ -398,9 +417,9 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 ## 比上游多的功能
 
 **Steam Frame／VR**
-- 自帶 SteamVR driver 的 PC VR 串流；姿態預測、依延遲調整的節拍、自動 1／2 格緩衝、眼動注視點編碼、半速串流加補幀。
+- 自帶 SteamVR driver 的 PC VR 串流；姿態預測、依延遲調整的節拍、自動 1／2 格緩衝、眼動注視點串流（每眼兩張畫面，大小可選）、網路不穩時自動半速、半速串流加補幀。
 - 多連線：每條網路連線（家用 Wi-Fi、頭盔熱點到主機網卡、有線）各送一份完整串流，補包時機跟著實測往返時間走。
-- 頭盔全 VR 介面、影片模式、Frame 手把以 Frame 手把身分出現（含手部骨架，2.0.68 起）、Xbox 手把模式、低電量圖示。
+- 頭盔全 VR 介面、影片模式、Frame 手把以 Frame 手把身分出現（含手部骨架，2.0.68 起）、Xbox 手把模式（含方向盤模擬）、頭盔麥克風、在家用 Wi-Fi 與轉接器之間選擇的網路測試、低電量圖示。
 - 與 Steam 內建串流共存：Steam Link 要用 SteamVR 時，主機會讓出來。
 
 **網路**
@@ -448,6 +467,7 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 
 | 版本 | 重點 |
 |---|---|
+| **2.0.122** | Steam Frame 注視點改成每眼兩張畫面（整個視野縮小的一張＋跟著視線、保留完整細節的一張），設定頁可選關閉／小／中／大，實測頭盔耗電從約 13 W 降到 10 W 以下；網路不穩時自動半速；頭盔設定頁「測試網路」；串流時擋掉 Wi-Fi 背景掃描；方向盤模擬；頭盔麥克風；各平台自動更新；2D 塞車時的碼率修正、相對滑鼠不怕掉包。 |
 | **2.0.63** | 碼率依網路自動調整（延遲趨勢、丟包類型、以 QP 決定上限）；串流中 Tailscale 從中繼自動恢復直連；頭盔緩衝修好並自動在 1／2 格之間切換；大批程式碼審查修正；Android 最低改為 Android 9；Linux .deb 改依賴 Ayatana AppIndicator。 |
 | **2.0.31** | Steam Frame 眼動注視點編碼；開場更快鎖定節拍；配戴驗過的 VR 設定改為預設；串流中新增的連線自動加入多連線；震動冗餘發送。 |
 | **2.0.25** | 訊號差時 VR 快速降碼與回升；Frame 手把以 Frame 手把身分出現；正確的遊玩區與坐姿高度；與 Steam 內建串流共存。 |

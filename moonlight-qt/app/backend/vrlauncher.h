@@ -152,6 +152,13 @@ public:
     // 回傳 false＝沒有接受（已經有子行程在跑、來源空白、這個環境不能跑 XR）
     Q_INVOKABLE bool launchPlayer(const QString& source, const QString& format, const QString& title, const QString& audioSource);
 
+    // §VR-NETBENCH（2026-11-09）：設定頁「測試網路」的一階。另開子行程
+    //   stream --display-target pcvr --vr-eye WxW --vr-hz 144 --vr-netbench <resultPath> --vr-netbench-secs N -- <主機> "VR Network Test"
+    // 不做往返時間檢查（測試本身就是在量網路）。子行程不寫回偏好設定、不碰網路狀態。回傳 false＝沒有接受
+    bool launchNetBenchStep(const QString& hostAddress, int eye, int seconds, const QString& resultPath);
+    // §VR-NETBENCH：網路測試的一階逾時（子行程沒有自己結束）時強制結束它；結束後照常發 finished()
+    void killChild();
+
     // §VR-PREFLIGHT：對話框的兩個按鈕。不在檢查中時不做事
     Q_INVOKABLE void preflightStartAnyway();
     Q_INVOKABLE void preflightCancel();

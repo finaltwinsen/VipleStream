@@ -891,6 +891,12 @@ namespace stream {
       // §VR-MULTILINK-HOTADD：上一次送出的 server 位址快照（1 Hz 比對；只在 control 執行緒存取）
       std::vector<std::array<uint8_t, 4>> linkAddrs;
       bool linkAddrsSent = false;
+      // §VR-CTRL-DOWN-S2C（2026-11-08）：ENet 斷線、多連線還活著的期間（只在 control 執行緒存取）：震動照樣走連線，
+      // 要可靠送達的訊息先留著，ENet 回來再補送；其餘即時訊息過期就沒用，丟掉
+      std::vector<::vr::s2c_msg_t> heldReliable;
+      uint32_t heldDropped = 0;
+      uint32_t downHaptics = 0;
+      uint32_t downDropped = 0;
     } vrCtrl;
 
     // 只在 videoBroadcastThread 存取：[VIPLE-VR-TX] 每個 session 印一次
@@ -1670,6 +1676,19 @@ namespace stream {
 
   /// §VR-ABR-OUTAGE：斷訊訊號（丟包 ≥ 30% 的視窗或 client 回報連掉多幀）。applied＝降碼前的已套用位元率；
   /// resend＝client 重送的 LOSS（只延長事件）。ABR 關閉時不開事件（不會有人拉回）。呼叫者持 abrMutex。
+  /// §VR-ABR-OUTAGE 診斷（11-08）：斷訊事件進行中時，把拉回的條件印在 10 秒行（ref＝要拉回的值、clean＝之後的乾淨視窗數、
+  /// quiet＝距最後一個斷訊訊號、progress＝距 LATCH 幀號最後一次前進）。11-08 傍晚一次斷訊後 30 秒都沒拉回、原因看不出來。呼叫者持 abrMutex
+  static std::string vr_outage_diag(const vr::abr::outage_state_t &st, std::chrono::steady_clock::time_point now) {
+    if (st.ref_kbps == 0) {
+      return {};
+    }
+    const auto ago = [&](std::chrono::steady_clock::time_point t) -> long long {
+      return t == std::chrono::steady_clock::time_point {} ? -1 : (long long) std::chrono::duration_cast<std::chrono::milliseconds>(now - t).count();
+    };
+    return std::format(" outage=ref{}/clean{}/quiet{}ms/progress{}ms{}", st.ref_kbps, st.clean_windows, ago(st.last_outage), ago(st.last_progress),
+                       st.restored_at != std::chrono::steady_clock::time_point {} ? "/restored" : "");
+  }
+
   static void vr_abr_mark_outage_locked(session_t *session, int applied, std::chrono::steady_clock::time_point now, const char *src, bool resend = false) {
     if (!session->video.autoAdjustBitrate || session->video.configuredBitrateKbps <= 0 || applied <= 0) {
       return;
@@ -2064,6 +2083,30 @@ namespace stream {
   }
 
   /// 0x5507/08 LATCH 的共同處理（control 執行緒、QUIC IO 執行緒，或 §VR-LINK-CTRL 的連線接收執行緒）
+  /// §VR-NETSEL-HOLD（11-08）：頭盔要暫停／接回家用 Wi-Fi。ENet 與每條連線各送一份，重複收到只延長結束時間；只在新的一次切換時記 log
+  static void vr_handle_net_switch(session_t *session, const std::uint8_t *body, std::uint8_t len) {
+    if (len < sizeof(VIPLE_VR_TLV_NET_SWITCH)) {
+      return;
+    }
+    VIPLE_VR_TLV_NET_SWITCH ns {};
+    std::memcpy(&ns, body, sizeof(ns));
+    std::lock_guard<std::mutex> lk(session->video.abrMutex);
+    if (!session->video.vrAbrFast) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const bool was = session->video.vrAbrFast->net_switch_active(now);
+    session->video.vrAbrFast->begin_net_switch(ns.holdMs, now);
+    if (!was) {
+      BOOST_LOG(info) << "[VIPLE-VR-NETSEL] headset is "
+                      << (ns.phase == VIPLE_VR_NET_SWITCH_PAUSE_HOME  ? "pausing home Wi-Fi" :
+                          ns.phase == VIPLE_VR_NET_SWITCH_RESUME_HOME ? "reconnecting home Wi-Fi" :
+                                                                        "switching networks")
+                      << ": no network-driven bitrate cuts for " << std::min<int>(ns.holdMs, ::vr::abr::k_fast_net_switch_max_ms) << " ms (now "
+                      << session->video.vrAbrFast->applied_kbps() << " kbps)";
+    }
+  }
+
   static void vr_handle_latch(session_t *session, ::vr::session_state_t &vr_state, const VIPLE_VR_TLV_LATCH &latch) {
     // M4a R3：LATCH 相位回授 → 頻率鎖（pcvr 寫 driver pacing；stub 只記錄）。
     // 補過包的幀比正常晚到，它的相位不是節拍造成的；但 frameId 是 client 的發布序號、不是線上的幀號，這裡認不出是
@@ -2296,6 +2339,9 @@ namespace stream {
       } else if (type == VIPLE_VR_C2S_FRAME_FEEDBACK) {
         vr_state.count_c2s(type);
         vr_handle_frame_feedback(session, body, len);
+      } else if (type == VIPLE_VR_C2S_NET_SWITCH) {
+        vr_state.count_c2s(type);
+        vr_handle_net_switch(session, body, len);
       } else if (type == VIPLE_VR_C2S_NACK && session->vrLinks) {
         // §VR-LINK-REPAIR：client 回報某個 FEC block 缺哪些 shard；補哪些、走哪條由 hub 決定
         vr_state.count_c2s(type);
@@ -2346,6 +2392,32 @@ namespace stream {
    * @brief VR session 的控制迴圈工作（只在 control 執行緒、peer 已連上時呼叫）：
    *        STATE（連上後一次）、1 Hz STATS 與 RTT 下限、drain outbox、10 秒統計 log。
    */
+  /**
+   * @brief §VR-CTRL-DOWN-S2C（2026-11-08）：ENet 斷線、多連線還活著時（control 執行緒）。以前這段期間整個 outbox 不動，
+   *        震動全卡在 host，ENet 回來才一次送出、多半已過期（頭盔自動網路選擇暫停家用 Wi-Fi 時，手把震動消失 18～25 秒）。
+   *        震動照樣走連線；可靠訊息留到 ENet 回來（上限 256 則）；其餘即時訊息丟掉。
+   */
+  static void vr_drain_s2c_ctrl_down(session_t *session) {
+    auto &ctl = session->vrCtrl;
+    for (auto &msg : session->vr->drain_s2c()) {
+      if (msg.tlv.empty()) {
+        continue;
+      }
+      if (msg.tlv[0] == VIPLE_VR_S2C_HAPTIC && vr_link_ctrl(session)) {
+        session->vrLinks->send_s2c(std::string_view {(const char *) msg.tlv.data(), msg.tlv.size()});
+        ++ctl.downHaptics;
+      } else if (msg.reliable) {
+        if (ctl.heldReliable.size() < 256) {
+          ctl.heldReliable.push_back(std::move(msg));
+        } else {
+          ++ctl.heldDropped;
+        }
+      } else {
+        ++ctl.downDropped;
+      }
+    }
+  }
+
   static void vr_control_tick(session_t *session, std::chrono::steady_clock::time_point now) {
     auto &vr_state = *session->vr;
     auto &ctl = session->vrCtrl;
@@ -2368,8 +2440,16 @@ namespace stream {
         ctl.stateSeq = UINT64_MAX;  // 換 peer：重送目前的編排狀態
       }
     }
+    // §VR-NETBENCH：網路測試不經過編排器，直接回報 HMD_ACTIVE（client 等這個才開始顯示）
+    if (pcvr && vr_state.negotiated().bench) {
+      if (ctl.stateSeq != 1) {
+        ctl.stateSeq = 1;
+        vr_state.queue_state(VIPLE_VR_STATE_HMD_ACTIVE, 100, VIPLE_VR_STATE_CODE_NONE);
+        BOOST_LOG(info) << "[VIPLE-VR-NETBENCH] STATE hmd-active (network test, session=" << ::vr::log_guid(vr_state.negotiated().guid) << ')';
+      }
+    }
     // M1b V5（§D.2）：pcvr 每 tick 比對編排器快照，變了就送 STATE（reliable）
-    if (pcvr) {
+    else if (pcvr) {
       const auto snap = ::vr::orchestrator::state();
       if (snap.seq != ctl.stateSeq) {
         ctl.stateSeq = snap.seq;
@@ -2432,6 +2512,17 @@ namespace stream {
       }
     }
 
+    // §VR-CTRL-DOWN-S2C：ENet 斷線期間留下來的可靠訊息先補送
+    if (!ctl.heldReliable.empty() || ctl.downHaptics || ctl.downDropped) {
+      BOOST_LOG(info) << "[VIPLE-VR-LINK] control connection back: " << ctl.downHaptics << " haptic event(s) went over the links meanwhile, "
+                      << ctl.heldReliable.size() << " reliable message(s) held and sent now (" << ctl.heldDropped << " over the limit dropped), "
+                      << ctl.downDropped << " real-time message(s) dropped";
+      for (const auto &msg : ctl.heldReliable) {
+        (void) send_vr_s2c(session, msg);
+      }
+      ctl.heldReliable.clear();
+      ctl.heldDropped = ctl.downHaptics = ctl.downDropped = 0;
+    }
     for (const auto &msg : vr_state.drain_s2c()) {
       if (!msg.reliable && session->vrLinks && session->vrLinks->fault_ctrl_blocked()) {
         continue;  // 開發用故障注入（c: 規則）：ENet 上的即時訊息在這段期間送不到
@@ -2605,12 +2696,15 @@ namespace stream {
                         << " lossRateCuts=" << f.loss_rate_cuts() << '/' << f.loss_rate_reverts()
                         << (f.loss_rate_disabled(now) ? "(off)" : "")
                         << " lastCong=" << f.last_congested_kbps() << '/' << f.effective_congested_kbps()
+                        << " owdStall=" << f.owd_stall_skips()
+                        << " netSwitchSkips=" << f.net_switch_skips()
                         << std::format(" rtt base/jit/p50={:.0f}/{:.0f}/{:.0f}ms trend={:.1f} gamma={:.1f} {}", rt.base_ms, rt.jitter_ms, rt.p50_ms,
                                        rt.trend_ms, rt.gamma_ms, ::vr::abr::trend_state_name(rt.state))
                         << (owd ? std::format(" owd jit={:.1f}ms trend={:.1f} gamma={:.1f} {}", ot.jitter_ms, ot.trend_ms, ot.gamma_ms,
                                               ::vr::abr::trend_state_name(ot.state)) :
                                   std::string(" owd=off"))
                         << " recv/send=" << f.recv_kbps() << '/' << f.send_kbps() << "kbps"
+                        << vr_outage_diag(session->video.vrOutage, now)
                         << " qp=" << (qp >= 0 ? std::format("{:.1f}", qp / 100.0) : std::string("-"))
                         << " fb=" << session->video.abrFeedbackRecs << '/' << session->video.abrFeedbackMiss;
         session->video.abrFeedbackRecs = 0;
@@ -2785,7 +2879,10 @@ namespace stream {
       // 只剩一條連線（沒有適配器直連，只走家用 Wi-Fi）時先把上限壓在 75 Mbps：10-30 實測 149 Mbps（含 FEC 約 195 Mbps）
       // 塞家用 Wi-Fi，人一走動每 10 s 就有幾十張救不回。之後依兩端訊號強弱細分（設計稿第 3 節，§VR-LINK-SIGNAL）
       constexpr int kVrSingleLinkCapKbps = 75000;
-      const bool singleLink = !session->vrLinks || session->vrLinks->alive_count() <= 1;
+      // §VR-LINK-DEDICATED（11-08 傍晚）：活著的只剩頭盔自己的轉接器熱點（專用 6 GHz）時不壓：實測「只用轉接器」被壓在 75 Mbps，
+      // 同一場兩條都活著時跑到 95 Mbps 都沒事。家用 Wi-Fi 上的 Tailscale 隧道在有區網直連時由 client 設成待命（不算活著）
+      const bool singleLink = !session->vrLinks ||
+                              (session->vrLinks->alive_count() <= 1 && session->vrLinks->alive_dedicated_count() == 0);
       session->video.vrAbrFast->set_cap_kbps(singleLink ? std::min(maxBr, kVrSingleLinkCapKbps) : maxBr);
       // §ABR-ADAPT（第 3 期）：畫質飽和（編碼器平均 QP）——飽和時不再加碼，畫質多到用不完時小幅回收
       session->video.vrAbrFast->on_quality(abr_signals::avg_qp_x100.load(std::memory_order_relaxed),
@@ -3559,6 +3656,9 @@ namespace stream {
         } else if (type == VIPLE_VR_C2S_FRAME_FEEDBACK) {
           vr_state->count_c2s(type);
           vr_handle_frame_feedback(session, body, len);
+        } else if (type == VIPLE_VR_C2S_NET_SWITCH) {
+          vr_state->count_c2s(type);
+          vr_handle_net_switch(session, body, len);
         } else if (type == VIPLE_VR_C2S_CLIENT_TIMING) {
           // M4a R3：1 Hz client 時序（依 len 能讀多少算多少）
           vr_state->count_c2s(type);
@@ -3987,6 +4087,8 @@ namespace stream {
             // VipleStream 2.0 §VR：S→C 只能在這條執行緒送（STATE／STATS／REFRESH_START 等）
             if (session->vr && session->control.peer) {
               vr_control_tick(session, now);
+            } else if (session->vr && session->vrLinks && session->vrLinks->any_alive()) {
+              vr_drain_s2c_ctrl_down(session);  // §VR-CTRL-DOWN-S2C
             }
           }
 
@@ -4699,8 +4801,9 @@ namespace stream {
         }
         frame_header.frame_processing_latency = frame_latency;
         frame_header_bytes = std::string_view {(char *) &frame_header, sizeof(frame_header)};
-      } else if (session->vr->negotiated().gaze_fovea) {
-        // §VR-GAZE-FOVEA：協商啟用 gaze fovea，每幀送 32 B 的 0x82 header
+      } else if (session->vr->negotiated().gaze_fovea || session->vr->negotiated().tiles()) {
+        // §VR-GAZE-FOVEA：協商啟用 gaze fovea，每幀送 32 B 的 0x82 header。
+        // §VR-FOVEA-TILES：分塊時不論有沒有眼動都送（那四欄放注視點那塊的左上角像素座標）
         fill_vr_frame_header_gaze(vr_gaze_header, *packet, payload.size(), session->config.packetsize, frame_latency);
         frame_header_bytes = std::string_view {(char *) &vr_gaze_header, sizeof(vr_gaze_header)};
 

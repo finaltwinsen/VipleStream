@@ -225,11 +225,13 @@ bool VrRenderMetaRing::lookup(int64_t pts, VIPLE_VR_FRAME_META* meta)
 // ── 2026-10-05：VrDecodeTiming ──
 std::mutex VrDecodeTiming::s_Lock;
 std::vector<uint32_t> VrDecodeTiming::s_Samples;
+std::atomic<uint64_t> VrDecodeTiming::s_OldestPendingUs {0};
 
 void VrDecodeTiming::reset()
 {
     std::lock_guard<std::mutex> lock(s_Lock);
     s_Samples.clear();
+    s_OldestPendingUs.store(0, std::memory_order_relaxed);
 }
 
 void VrDecodeTiming::record(uint64_t us)

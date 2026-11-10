@@ -12,6 +12,7 @@
 #include "settings/streamingpreferences.h"
 #include "input/input.h"
 #include "input/sc_hid.h"
+#include "wifiscanblock.h"  // §WIFI-SCANBLOCK
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
 #include "audio/miccapture.h"  // §VR-MIC
@@ -381,6 +382,7 @@ private:
     uint32_t m_XrRebuildGeneration = 0;
     SDL_TimerID m_XrRebuildTimer = 0;
     ScHidPassthrough m_ScHid;
+    WifiScanBlock m_WifiScanBlock;  // §WIFI-SCANBLOCK：串流期間擋住 Frame 的 Wi-Fi 背景掃描
     Uint32 m_ScHidHotplugTick = 0;   // §SC-HOTPLUG：pollScHidHotplug() 的節流
     std::atomic<int> m_MouseEmulationRefCount;  // §REVIEW-1103：主執行緒寫、解碼執行緒讀
     int m_FlushingWindowEventsRef;
@@ -442,6 +444,10 @@ private:
     bool m_VrRequested = false;
     QString m_VrNoFlatError;  // §VR-LAUNCHER：無頭 PCVR 不能退回平面時的錯誤訊息（給使用者看）
     bool m_VrServerErrorHandled = false;  // §VR-LAUNCHER：STATE ERROR 只處理一次
+    // §VR-NETBENCH：網路測試的一階（--vr-netbench）。主迴圈第一次看到 XR 的時刻、結果寫了沒
+    Uint32 m_NetBenchStartMs = 0;
+    bool m_NetBenchDone = false;
+    void netBenchTick();
     VrLaunchConfig m_VrLaunch;
     VrSessionInfo m_VrSession;
     VrTrackingSender m_VrTracking;

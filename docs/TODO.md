@@ -61,13 +61,13 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
   時好時壞、跟手把加入時機無關（手把在遊戲連上前 10 s 就啟用了）；逾時後 binding 照常載入，11-04 那場桌球就是逾時的場次、手把正常。
 - **§VR-WHEEL（2.0.72，v2.0.75 已提交）**：手把模式時兩支手把像握方向盤一樣轉＝左搖桿 X；設定頁開關＋轉向角度（180／270／360／540／900°），
   串流中兩支搖桿同時按住 1.5 秒切換（結果寫回設定）。開關與角度放在 0x5506 左手輸入的保留位元組，舊版兩端忽略。host 單元測試 14 項過；
-  頭盔 dev 已是 2.0.96、host 2.0.95。**待驗（頭盔不在家）**：配戴 ACC／GRIP 試手感、快捷鍵提示、轉超過 90 度與轉身時的穩定度。
+  **待驗**：配戴 ACC／GRIP 試手感、快捷鍵提示、轉超過 90 度與轉身時的穩定度。
 
 ### §AUTO-UPDATE 各平台自動更新（2.0.73，v2.0.75 已提交；預設自動安裝）
 - host：`update_mode`（off／notify／install，預設 install），開機 3 分鐘後、之後每天查；連續 10 分鐘沒人串流才裝。host 2.0.73 已確認
   `auto check` 會跑（最新 2.0.63，判定已是最新）。電腦版：設定頁「軟體更新」，啟動時在電腦／程式清單才自動裝。Android：gemini 寫、我修過，
   release 編譯過。Steam Frame：安裝腳本裝 `viplestream-update.timer`（每 6 小時），讀 app 的 `updatemode`。
-- **待驗**：下一次發佈後實際走一次下載＋驗證＋安裝（四個平台各一次）；Android 第一次的「安裝未知應用程式」授權流程；
+- **待驗**：2.0.122 是第一個帶自動更新的正式版，要等它之後的下一次發佈才驗得到實際的下載＋驗證＋安裝（四個平台各一次）；Android 第一次的「安裝未知應用程式」授權流程；
   頭盔的 `auto-update.sh` 還沒在頭盔上跑過——**測試頭盔跑的是 dev 版，執行新安裝腳本前先把它的「軟體更新」設成不要自動檢查**，
   避免版號判斷出錯時被 GitHub 正式版蓋掉。
 
@@ -76,7 +76,7 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 最大兩塊是兩端 SteamVR 的管線；換語言（C、組合語言）不會改善（等待時間不是 CPU 指令，編解碼在硬體）。
 1. **G 每段延遲儀表**：每張影像記錄擷取→編碼→送出→收齊→解碼→挑選→顯示各段時間（host 與頭盔時鐘對齊已有），10 秒彙整 p50／p95，
    另做自動 A/B 腳本。**狀態：host 端完成（2.0.78／client 2.0.79）**：`[VIPLE-VR-LAT10]` 每 10 秒列 present→enc、enc、enc→send、send、oneway、host、to-client 的 p50/p95/max（時鐘：client 收包報告改用 tracking 同一個 steady_clock，見 `LiSetVrFeedbackClockOffsetUs`；host 的 QPC 與 steady_clock 用同一刻讀數換算）。模擬頭盔（開發機→host）實測：host 4.1 ms、oneway p50 3.6～4.8／p95 4.7～8.6／max 13～19、present→頭盔收齊 p50 7.7～8.9 ms。頭盔端各段沿用 `chain dec … sum=`。自動 A/B 腳本：沿用 `scripts/vr/s0_game.sh`，之後依需要再包。
-2. **C 頭盔無線電三項**：§VR-NETSEL（已寫）、關 wlan0 背景掃描、送 softapmanager `streamon`——頭盔回家驗。**狀態：等頭盔**
+2. **C 頭盔無線電三項**：§VR-NETSEL、關 wlan0 背景掃描、送 softapmanager `streamon`。**狀態：完成**——選網路改由設定頁「測試網路」決定（2.0.107），背景掃描用 `streamon` 擋掉（§WIFI-SCANBLOCK，2.0.114）；剩下的空檔見「頭盔家用 Wi-Fi 的空檔」。
 3. **B1 每格大小固定（VBV 一格）＋B2 全面 intra refresh 取代 IDR**：**狀態：查明不必做（11-05）**——VBV 本來就是一格＋20%，每幀大小 max 只比 p50 多約一成（49／52／55 KB）；VBV 改 1 格沒有可量的差別（A/B 各 60 s，碼率不同無法直接比）；VR 只有開場 3 次 IDR（f=1 request、f=11 request、f=16 startup-retry），之後全是 intra refresh。單向延遲尖峰與每幀大小無關。
 3b. **ABR 塞車反應太慢（11-05 從 LAT10 發現）**：模擬頭盔 75 Mbps 時送 84.8／收 58.6 Mbps（收到的少三成＝在排隊），單向延遲 p95 83 ms、max 172 ms，ABR 要等 owd 趨勢累積到 overuse（約 10 s）才降。改法：收／送速率比連續低於門檻就直接降（不等趨勢），並檢查開場直接用上限 75 Mbps 起跳是否合理。**狀態：已加規則、待頭盔驗（host 2.0.81）**——`vr_abr_fast.h` 的 on_rates：送 ≥ 收 × 1.15 連續 2 次（約 1 s）就降（rate-shortfall+delay，降幅照收／送比），單元測試 27 項過（新增兩項）。模擬頭盔 90 s 這條規則沒觸發：塞車時是 owd-trend 先降；而且收送速率只在處理收包報告時更新，**整段卡住時報告也送不過來，速率停在舊值**——下一步補「超過 N ms 收不到收包報告＝塞住」直接降。開發機這條 Wi-Fi 本身會整段卡 1.7 s，不能拿來判斷效果。
 4. **A2 主機畫面節拍對齊頭盔顯示＋A4 依實測動態調整延後挑影像**。**狀態：調查完（11-05），全部要頭盔驗**——`--vr-emulate` 不跑 OpenXR 迴圈、不送 LATCH，模擬頭盔量不到。候選（依序）：① host 改 `vr_latch_mode = v3`＋`vr_latch_acquire = enabled`（開場對齊約 40 s→約 3 s 的說法待驗）；② 延後挑影像依顯示週期比例縮放（144 Hz 一格 6.94 ms，固定延後佔比太大）；③ 依實測 GPU 完成時間（tail max、heldMiss）在 3～6 ms 間動態調。死路（不要重做）：host 目標餘裕 40%（撞頭盔合成器 GPU 忙碌段，重複幀 3.39%）、依晚到比例自動調餘裕（底噪讓積分器一路推到上限）、延後挑影像 > 6.5 ms（`kLatchSpanMaxUs`，7 ms 時 runtime 重投影 71 格）。調查報告：`temp/lat_a2/survey_out.md`。
@@ -93,28 +93,60 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 4. **解碼端**：各平台硬體解碼的輸出延遲（Android 解碼器常多緩衝 1～2 張）、零複製。**狀態：未開始**
 5. **輸入延遲**：滑鼠鍵盤與手把從 client 到 host 的路徑（批次、Nagle、優先權）。**狀態：相對滑鼠完成（2.0.89）**——量測：client `--input-test`（每 4 ms ±1 px）＋host `[VIPLE-INPUT10]`（到達間隔 p50/p95/p99/max、>20 ms 次數；順帶修好：加密控制通道的輸入從沒經過舊的 [VIPLE-INPUT-GAP] 診斷）。限速 15 Mbps A/B：可靠傳送在解除限速時卡 279／526 ms，不等 ACK（`--input-test-unreliable`）就沒有 → 新增累計位移封包 `SS_MOUSE_MOVE_REL_CUM_MAGIC 0x5500000A`（{seq, cumX, cumY}，UNSEQUENCED、每筆送兩份，host 依 seq 去重、位移＝累計差），host 宣告 `<VipleStreamInput>1` 才用。G 組整場 100 s **超過 20 ms 的間隔 0 次、最大 16 ms**。剩下：按鍵／鍵盤／手把按鈕仍是可靠傳送（漏一個按下或放開會錯，要另外設計）；Android client 用同一份 common-c，重建就會用新封包（還沒在手機上驗）。
 
-### §VR-NETSEL 網路狀態自動選擇＋§VR-MIC 頭盔麥克風（v2.0.75 已提交；頭盔不在家、待驗）
-- **§VR-NETSEL**：安裝腳本裝 `viplestream-netmode.service`（app 寫 netmode-request.json 心跳；5 秒沒更新、轉接器沒連線、6 小時上限都會交還
-  wlan0）；app `vrnetmode.h` 在 VR 串流中量 B（家用＋轉接器）與 C（只用轉接器）各 20 秒，比每秒新影像數，選順的並記住地點（家用 SSID 雜湊，14 天重測）。
-  設定頁「VR 網路」：自動／一律保留家用 Wi-Fi／串流時暫停家用 Wi-Fi，另有「下次重測」。**待驗**：服務在使用者工作階段能不能 `nmcli device set wlan0 managed no`；
-  C 狀態下頭盔離線的影響；B→C 切換時 ENet 走家用那條會斷、靠 §VR-LINK-GRACE／REHOME 撐住的實際頓多久。
+### §VR-FOVEA-TILES 注視點＝每眼兩塊影像（2.0.121；設定頁「關／小／中／大」2.0.122）
+每眼送「整個視野縮小的一塊」＋「視線所在位置原生細節的一塊」，不做幾何變形；協定見 `docs/vr_protocol.md`（§VR-FOVEA-TILES），
+log 見 `docs/log_tags.md`，host 設定 `vr_fovea_tiles`。11-11 使用者配戴 small：「效果非常好」（交界、眼動都過）。
+無人量測（桌球、每眼 1152＠144、模擬視線、程式有焦點）：small 9.6 W／MTP 45 ms／190 秒 0 重複幀，medium 10.0 W，
+large 10.9 W（MTP 多約 2 ms）；同條件舊做法（分段曲線）單一大圖 13.1 W、兩圖層 10.5 W；Steam 內建串流 9.5～11.8 W。
+- **待驗**：設定頁選 medium／large 的配戴比較（只做過無人量測）；`test_vr_params.cpp` 新增的四項單元測試還沒跑過；
+  同位置同遊戲和 Steam 內建串流的配戴對照（使用者）。
+- **限制（待做）**：「半速＋補幀」時不用分塊（補幀還不認得這種排法），退回分段曲線——周邊較糊、交界看得出來；這時設定頁的
+  小／中／大只有開關的作用。dev 的 `--vr-fovea-single-layer`、`--vr-unwarp-rgb` 也一樣。
+- **之後可選**：三層金字塔（同像素量下交界更淡）、NVENC 外部移動向量提示（注視點那塊跳動時幾乎不花碼率）、
+  中央／周邊分開的 QP、周邊銳化。
+- **量功耗的陷阱**：無人場次要 client log 有 `state=FOCUSED` 才能比（停在 VISIBLE＝頭盔自己的選單開著，多 1～2 W）；
+  11-10 下午那批「比 Steam 多 4.5 W」就是這樣高估的，以上面的數字為準。`hs_run.sh` 沒拿到焦點會印 `!! NOT FOCUSED`。
+- 頭盔端其他耗電（11-10 對照時看到的）：viplestream 約 30% CPU、pipewire 7～12%（麥克風一直上傳）——可評估 host 沒人收音時不送。
+
+### §VR-NETBENCH 設定頁「測試網路」（2.0.107；頭盔兩輪實測的結論：保留家用 Wi-Fi）
+- **待查**：只用轉接器（C）兩輪都有連續 4～7 格的短凍結（缺額才 0.04～0.09%）——那幾階的頭盔 log 已被輪替刪掉，
+  下次跑測試時當場拉回 C 的子行程 log。
+- **待查**：頭盔硬體解碼器（v4l2m2m／iris）偶爾整階 0 張解出（in=2 out=0）。收尾卡住已繞過（§DEC-JOIN-TIMEOUT，2.0.109：
+  等 3 秒就放生解碼執行緒），原因未知，再遇到要抓 dmesg。
+- **待驗**：§VR-ABR-SATURATED-NO-RESTORE（2.0.110）——碼率爬到上限附近時有沒有再出現「拉回→再斷」；§VR-RATE-CAUSE（2.0.106）——
+  實機還沒遇到頭盔端降速；§VR-BUFFER-SHED（2.0.115，斷線後多壓的一格 3 秒內讓掉）的配戴體感。
+- 每眼 2304 是頭盔端上限（網路 0 丟失仍跳格），階梯上限定在 2016。「只用家用 6 GHz」不是可選的狀態（要關轉接器、沒有 API），不測。
+- 重錄母片的注意事項：host 傾印 4608×2304 會暫存約 57 GB；NVENC 轉 4608×2304 的 `-maxrate` 要 ≤ 600M；
+  頭盔解析度改成 2304 後平常的遊戲解不開，錄完要改回。
+
+### 頭盔家用 Wi-Fi 的空檔（§WIFI-SCANBLOCK 2.0.114 之後剩下的）
+- 背景掃描造成的 100～190 ms 空檔已擋掉（串流期間 `cfg80211_block_scans` 是 1 或 6、結束歸 0；擋掃描期間 wlan0 不會主動漫遊）。
+- **仍有另一種空檔（待查）**：11-09 的 8 場中 4 場有 156／250～290 ms、一次 5.5 s——wlan0 沒斷線、beacon loss 0，host 端看到
+  那條連線前 20 秒就開始掉追蹤封包，頭盔系統 log 沒有任何事件、跟掃描無關（可能在路由器端）。畫面都靠轉接器那條接住。
+- host 的轉接器網卡偶爾連著但收不到：§VR-HOTSPOT-RXSTALL（2.0.108）連著但 20 秒只送不收就重啟網卡。11-09 有一次是收、送計數
+  都不動，手動重啟網卡才恢復——看門狗有沒有涵蓋這種情況待確認。
+
+### §VR-NETSEL 網路狀態選擇＋§VR-MIC 頭盔麥克風（v2.0.75；選網路 2.0.107 起由設定頁「測試網路」決定）
+- **§VR-NETSEL**：`viplestream-netmode.service` 代為暫停／接回家用 Wi-Fi（心跳 5 秒沒更新、轉接器沒連線、6 小時上限都會交還）。
+  遊戲中的自動比較已拿掉（暫停再接回會讓頭盔 Steam 登出再登入、觸發 steamwebhelper 崩潰），「自動」只套用設定頁「測試網路」
+  存下的結果。11-08 頭盔實測過：服務可以暫停 wlan0、區網優先（§LAN-PREF）、轉接器直連不套單連線上限、暫停時不降碼（§VR-NETSEL-HOLD）。
+  **待驗**：§VR-CTRL-DOWN-S2C（控制通道斷線期間震動改走連線）與 §VR-CTRL-ROUTE 的 PONG 判斷（2.0.100）還沒在實際切換時驗到；
+  斷訊後拉回沒拉（§VR-ABR-OUTAGE）那次的原因——10 秒行已加 `outage=` 欄位，再遇到時看。
 - **A 狀態（只用家用 Wi-Fi）**：目前沒有一般使用者可用的方法關頭盔熱點（SteamOS#2991 在要 API），只能手動關「串流轉接器」來測。
-- **WiVRn 學到的兩件事（待頭盔驗）**：① 串流時把 wlan0 的 wpa_supplicant `bgscan` 設成空字串（WiVRn PR #1194；要一次性 root 放 D-Bus policy
-  到 /etc/dbus-1/system.d/＋/etc/atomic-update.conf.d/ 才能保留過更新），可改善 B 狀態的週期性空白；② Steam 的 vrlink 會對
-  `/var/run/softapmanager.streaming.socket` 送 `streamon`／`streamoff`（反組譯得知、未公開）——先看 socket 權限，再比送前送後的掉包。
+- **WiVRn 的做法（未做）**：串流時把 wlan0 的 wpa_supplicant `bgscan` 設成空字串（WiVRn PR #1194；要一次性 root 放 D-Bus policy 到
+  /etc/dbus-1/system.d/＋/etc/atomic-update.conf.d/ 才能保留過更新）。背景掃描已改用 §WIFI-SCANBLOCK 擋，這條先不做。
+
 - **§VR-MIC（11-05 模擬頭盔端到端通過：client 每 10 s 送 500 則、host 收 501 則、0 掉包、緩衝 50～70 ms、開場 1 次 underrun；host 裝置 float32／48 kHz／2 ch）**：頭盔 SDL 錄音＋Opus（48 kHz 單聲道、20 ms、24 kbps、in-band FEC）→ C2S MIC 0x0D（VR 控制通道 unsequenced）→ host 解碼寫進
   「Steam Streaming Microphone」播放端（做法同 Apollo PR #1428）；`vr_mic`（預設開）、能力位元 `VIPLE_VR_SERVER_CAP_MIC 0x100`、找不到裝置回 NOTICE 5；
   設定頁「把頭盔麥克風送到電腦」（預設開）。兩個模組 gemini 寫、我核對並修過（COM 物件全在播放執行緒、SDL 子系統釋放）。
   **待驗**：host 上的裝置名稱與格式、實際收音品質與延遲、掉包時有沒有嗡嗡聲（WiVRn #1012 的教訓）。
 
-### §VR-RADIO 頭盔單一無線電輪流用的掉包（2026-11-05 討論，頭盔不在家、待測）
-- 頭盔只有一個無線電，家用 Wi-Fi 與適配器熱點兩條連線輪流用；離開熱點頻道的那段是整段連續掉包（20～30 ms＝144 Hz 的 3～4 張），
-  FEC 與「偵測到再雙送」都救不回，現在的「每條各送一份」也只救得了一部分，還讓同一個無線電多搬一倍。
-- **先量**（同位置、同遊戲各 3～5 分鐘）：① 適配器＋家用 Wi-Fi（現狀）② 只用家用 Wi-Fi（頭盔關「啟用串流轉接器」，有 6 GHz 要先清 band=no6）
-  ③ 只用適配器（家用 Wi-Fi 斷開，只當測試條件）。比掉包率、救不回的幀、延遲（多連線統計），另外從現有 log 算「主路掉、另一條救回」與「兩條同時掉」的比例。
-- **依結果選方案**：③ 明顯最好 → 串流時自動斷家用 Wi-Fi、結束（含異常結束）自動接回（頭盔串流期間沒有網路；沙盒權限可能要靠安裝腳本的 systemd 小服務代辦）；
-  或讓頭盔經熱點由主機分享上網（要改頭盔路由／DNS，較複雜）。② 夠好 → 可以不用適配器。都不明顯 → 改多連線為「主路完整＋備路 FEC、不穩才雙送」。
-  使用者 11-05 更正：家用 Wi-Fi 不斷開的原因是適配器熱點不提供對外網路，不是不能斷。
+### §VR-RADIO 頭盔單一無線電輪流用的掉包（2026-11-05 討論；11-08～09 量過）
+- 頭盔只有一個無線電，家用 Wi-Fi 與轉接器熱點兩條連線輪流用；離開熱點頻道的那段是整段連續掉包（20～30 ms＝144 Hz 的 3～4 張），
+  FEC 救不回，現在靠「每條各送一份」接住（同一個無線電多搬一倍）。
+- 11-08 三態量測＋11-09 網路測試兩輪的結論：家裡保留「家用 Wi-Fi＋轉接器」——只用轉接器沒有比較順（還有短凍結，見 §VR-NETBENCH），
+  只用家用 6 GHz（訊號較弱）延遲多 8 ms 還會降碼。
+- **未做**：多連線改成「主路完整＋備路 FEC、不穩才雙送」（省空中流量）；讓頭盔經熱點由主機分享上網（要改頭盔路由／DNS）。
 
 ### 2.0.59 待驗（§ABR-ADAPT、§TS-PATH、§VR-BUFFER-AUTO、§REVIEW-1104）
 - **頭盔配戴**：11-04 晚網路差的時段（單向延遲常跳 250 ms）緩衝自動停在 2 格、塞車點放寬有作用，使用者認為比舊版穩。
@@ -124,14 +156,12 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 - **§VR-RATE-AUTO（2.0.96，自動半速，不重開 session）**：11-08 配戴一場（144 Hz）升降時機正確、半速節奏鎖有效（3 格以上重複每 10 s 0～1）。
   2.0.97 起長凍結（每 5 s 視窗 ≥3 次）＝中斷，不算降速理由；11-08 下午在家兩場開場短重複 63／71 被擋下、整場全速（`temp/launchertest/ml/worn_1108_lan/`）。
   **還沒做**：降解析度那一半（第 4 期另一半）。
-  Windows／Linux x64 client 還沒建這一版（設定頁依模式顯示也在裡面）。
 - **§ABR-LOSSRATE-VERIFY／§ABR-RESTORE-STABLE（2.0.94～95）**：11-08 配戴看到兩者都有動作（撤銷 3 次、不拉回沒撐住的碼率）；再看幾場遠端的碼率曲線。
 - **補幀畫面目視**：vkfruc_interp 4-tap shader 第一次真的生效（5 月 24e98950 的 .frag 從沒重編）。NCNN（RIFE）後端輸出全黑仍在。
 - **沒有環境驗的**：relay 打洞改用 STUN 實際埠（Qt＋Android，要沒有 Tailscale 的外網）；Android 開 MP-QUIC 時行動網路保活與 Wi-Fi→行動網路接手（要有 SIM 的手機、host 可從外網連）；Linux VAAPI 實機。
 - **2.0.63 發佈後可驗**：host 常駐圖示走一次真實的「Check for updates」（§SELF-UPDATE）、電腦版 client 更新對話框的摘要（§UPDATE-NOTES）、Windows 更新等 90 s 不覆蓋的提示視窗。
 - **Android 低於 9 的相容分支**：minSdk 已是 28，舊分支可另外清（不要夾在 bug 修正裡）。
-- **審查剩下沒修的**：relay 經 proxy 時的身分（/resume、/cancel 會被擋，決策維持）。B062（nvvideoparser 補 `IdrPicFlag`／`idr_pic_id`）2.0.97 已補，
-  Windows client 還沒編譯過（原生 Vulkan 解碼預設關）。
+- **審查剩下沒修的**：relay 經 proxy 時的身分（/resume、/cancel 會被擋，決策維持）。
 
 ### Linux 安裝包與更新摘要（2.0.33）
 

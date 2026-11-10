@@ -712,12 +712,31 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             gi.subactionPath = m_Hands[h];
             XrActionStateBoolean bs = xrStruct<XrActionStateBoolean>(XR_TYPE_ACTION_STATE_BOOLEAN);
             const bool now = XR_SUCCEEDED(xrGetActionStateBoolean(m_Session, &gi, &bs)) && bs.isActive && bs.currentState;
-            if (now && !m_KbToggleWas[h]) {
-                if (m_Sink.menu && (playerMode || !m_Sink.playerActive)) {
+            const bool toCaller = m_Sink.menu && (playerMode || !m_Sink.playerActive);
+            if (toCaller) {
+                if (now && !m_KbToggleWas[h]) {
                     m_Sink.menu();  // §VR-PLAYER：這顆鍵交給呼叫端（切換控制列）
                 }
-                else {
-                    setKeyboardOpen(!m_KbOpen, "controller");
+            }
+            else {
+                // §VR-RECENTER：按住 1 秒＝重新置中；沒到 1 秒就放開＝開關鍵盤
+                constexpr uint64_t kRecenterHoldNs = 1000000000ull;
+                if (now && !m_KbToggleWas[h]) {
+                    m_MenuDownNs[h] = nowNs;
+                    m_MenuLongFired[h] = false;
+                }
+                else if (now && !m_MenuLongFired[h] && m_MenuDownNs[h] != 0 && nowNs - m_MenuDownNs[h] >= kRecenterHoldNs) {
+                    m_MenuLongFired[h] = true;
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] menu held 1 s: recenter");
+                    if (m_Sink.recenter) {
+                        m_Sink.recenter();
+                    }
+                }
+                else if (!now && m_KbToggleWas[h]) {
+                    if (!m_MenuLongFired[h]) {
+                        setKeyboardOpen(!m_KbOpen, "controller");
+                    }
+                    m_MenuDownNs[h] = 0;
                 }
             }
             m_KbToggleWas[h] = now;

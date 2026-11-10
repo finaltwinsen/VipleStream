@@ -306,8 +306,10 @@ namespace vrdrv {
   void hmd_device_t::GetWindowBounds(int32_t *pnX, int32_t *pnY, uint32_t *pnWidth, uint32_t *pnHeight) {
     *pnX = 0;
     *pnY = 0;
-    *pnWidth = cfg_.packed_width;
-    *pnHeight = cfg_.packed_height;
+    // §VR-FOVEA-TILES：分塊時 ring 是 (2·tile_w)×(2·tile_h)，但那是我們自己合成的排法；SteamVR 看到的仍是
+    // 「左右各一眼、每眼 eye_width×eye_height」（和 GetEyeOutputViewport 一致）。不分塊時這就是 packed 的尺寸
+    *pnWidth = cfg_.eye_width * 2;
+    *pnHeight = cfg_.eye_height;
   }
 
   bool hmd_device_t::IsDisplayOnDesktop() {

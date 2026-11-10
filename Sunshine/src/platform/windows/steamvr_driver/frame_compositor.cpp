@@ -15,7 +15,8 @@ namespace vrdrv {
       float uv_rect[4];
       uint32_t mode;
       uint32_t force_alpha;
-      uint32_t pad[2];
+      uint32_t fovea_mode;  // §VR-FOVEA-TILES：1＝注視點那塊（fovea＝裁切左上角 xy、大小 zw）
+      uint32_t pad;
       float fovea[4];  // §VR-FOVEA：a（0＝關）、正前方在本眼影像裡的位置 cx、cy（0–1，y 從上緣算）、保留
     };
 
@@ -108,7 +109,7 @@ namespace vrdrv {
     return dev->CreateBuffer(&cbd, nullptr, &cb_);
   }
 
-  void frame_compositor_t::compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a, const float fovea_centre[2][2]) {
+  void frame_compositor_t::compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a, const float fovea_centre[2][2], float fovea_u0, const tile_layout_t *tiles) {
     const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     ctx->ClearRenderTargetView(rtv, black);
     if (count == 0 || !ready()) {
@@ -134,11 +135,20 @@ namespace vrdrv {
       if (!(ew > 1e-6f) || !(eh > 1e-6f)) {
         continue;
       }
+     // §VR-FOVEA-TILES：分塊時每眼畫兩趟——第 0 趟全視野（上排）、第 1 趟注視點裁切（下排）
+     for (uint32_t pass = 0; pass < (tiles ? 2u : 1u); ++pass) {
       D3D11_VIEWPORT vp {};
-      vp.TopLeftX = (float) (e * eye_w);
-      vp.TopLeftY = 0.0f;
-      vp.Width = (float) eye_w;
-      vp.Height = (float) eye_h;
+      if (tiles) {
+        vp.TopLeftX = (float) (e * tiles->tile_w);
+        vp.TopLeftY = (float) (pass * tiles->tile_h);
+        vp.Width = (float) tiles->tile_w;
+        vp.Height = (float) tiles->tile_h;
+      } else {
+        vp.TopLeftX = (float) (e * eye_w);
+        vp.TopLeftY = 0.0f;
+        vp.Width = (float) eye_w;
+        vp.Height = (float) eye_h;
+      }
       vp.MaxDepth = 1.0f;
       ctx->RSSetViewports(1, &vp);
       for (uint32_t i = 0; i < count; ++i) {
@@ -161,7 +171,15 @@ namespace vrdrv {
         c.uv_rect[3] = L.bounds[3];
         c.mode = L.mode;
         c.force_alpha = L.force_alpha ? 1u : 0u;
-        if (fovea_a >= 0.4f && fovea_a < 0.999f) {
+        if (tiles) {
+          if (pass == 1) {
+            c.fovea_mode = 1;
+            c.fovea[0] = tiles->origin[e][0];
+            c.fovea[1] = tiles->origin[e][1];
+            c.fovea[2] = tiles->cover[0];
+            c.fovea[3] = tiles->cover[1];
+          }
+        } else if (fovea_a >= 0.4f && fovea_a < 0.999f) {
           // 正前方（tangent 0）在本眼影像裡的位置；若有傳入動態中心則使用傳入值
           float cx = -E.left / ew;
           float cy = E.bottom / eh;
@@ -172,6 +190,7 @@ namespace vrdrv {
           c.fovea[0] = fovea_a;
           c.fovea[1] = cx < 0.05f ? 0.05f : cx > 0.95f ? 0.95f : cx;
           c.fovea[2] = cy < 0.05f ? 0.05f : cy > 0.95f ? 0.95f : cy;
+          c.fovea[3] = fovea_u0;  // §VR-FOVEA-INSET：> 0＝分段曲線
         }
         /*
           // 正前方（tangent 0）在本眼影像裡的位置；rect 的 top 是下緣的 tangent、bottom 是上緣（影像上方＝up）
@@ -193,6 +212,7 @@ namespace vrdrv {
         ctx->PSSetShaderResources(0, 1, &srv);
         ctx->Draw(4, 0);
       }
+     }
     }
     ID3D11ShaderResourceView *null_srv = nullptr;
     ctx->PSSetShaderResources(0, 1, &null_srv);

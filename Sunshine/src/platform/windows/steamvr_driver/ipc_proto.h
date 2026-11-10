@@ -191,6 +191,13 @@ namespace vrdrv::proto {
       why = "config-packed-size";
       return false;
     }
+    // §VR-FOVEA-TILES：分塊時 packed＝(2·tile_w)×(2·tile_h)，算圖尺寸要比一塊大（不然注視點那塊沒有東西可裁）
+    if ((c.tile_w != 0 || c.tile_h != 0) &&
+        (c.tile_w < 64 || c.tile_h < 64 || c.tile_render_w <= c.tile_w || c.tile_render_h <= c.tile_h ||
+         c.packed_width != 2u * c.tile_w || c.packed_height != 2u * c.tile_h)) {
+      why = "config-tiles";
+      return false;
+    }
     if (c.dxgi_format != VRIPC_DXGI_FORMAT_B8G8R8A8_UNORM) {
       why = "config-format";
       return false;

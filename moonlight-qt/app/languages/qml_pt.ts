@@ -4,188 +4,188 @@
 <context>
     <name>AppContent</name>
     <message>
-        <location filename="../gui/AppContent.qml" line="350" />
+        <location filename="../gui/AppContent.qml" line="350"/>
         <source>Add PC manually</source>
         <translation>Adicione o PC manualmente</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="380" />
+        <location filename="../gui/AppContent.qml" line="380"/>
         <source>VR mode (switch mode)</source>
         <translation>Modo VR (mudar de modo)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="380" />
+        <location filename="../gui/AppContent.qml" line="380"/>
         <source>Desktop mode (switch mode)</source>
         <translation>Modo de ambiente de trabalho (mudar de modo)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="418" />
+        <location filename="../gui/AppContent.qml" line="418"/>
         <source>Update available for VipleStream: Version %1</source>
         <translation>Atualização disponível para o VipleStream: versão %1</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="456" />
+        <location filename="../gui/AppContent.qml" line="456"/>
         <source>Help</source>
         <translation>Ajuda</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="482" />
+        <location filename="../gui/AppContent.qml" line="482"/>
         <source>Gamepad Mapper</source>
         <translation>Mapeador de Controle</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="237" />
-        <location filename="../gui/AppContent.qml" line="513" />
+        <location filename="../gui/AppContent.qml" line="237"/>
+        <location filename="../gui/AppContent.qml" line="513"/>
         <source>Settings</source>
         <translation>Configurações</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="227" />
+        <location filename="../gui/AppContent.qml" line="227"/>
         <source>HOSTS</source>
         <translation>HOSTS</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="228" />
+        <location filename="../gui/AppContent.qml" line="228"/>
         <source>LIBRARY</source>
         <translation>BIBLIOTECA</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="229" />
+        <location filename="../gui/AppContent.qml" line="229"/>
         <source>SETTINGS</source>
         <translation>CONFIGURAÇÕES</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="235" />
+        <location filename="../gui/AppContent.qml" line="235"/>
         <source>Hosts</source>
         <translation>Hosts</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="236" />
+        <location filename="../gui/AppContent.qml" line="236"/>
         <source>Library</source>
         <translation>Biblioteca</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="520" />
+        <location filename="../gui/AppContent.qml" line="520"/>
         <source>No functioning hardware accelerated video decoder was detected by VipleStream. Your streaming performance may be severely degraded in this configuration.</source>
         <translation>O VipleStream não detetou nenhum descodificador de vídeo com aceleração por hardware funcional. O desempenho da transmissão pode ficar muito degradado com esta configuração.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="522" />
+        <location filename="../gui/AppContent.qml" line="522"/>
         <source>Click the Help button for more information on solving this problem.</source>
         <translation>Clique no botão de Ajuda para mais informações sobre a resolução deste problema.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="529" />
-        <source>Hardware acceleration doesn't work on XWayland. Continuing on XWayland may result in poor streaming performance. Try running with QT_QPA_PLATFORM=wayland or switch to X11.</source>
+        <location filename="../gui/AppContent.qml" line="529"/>
+        <source>Hardware acceleration doesn&apos;t work on XWayland. Continuing on XWayland may result in poor streaming performance. Try running with QT_QPA_PLATFORM=wayland or switch to X11.</source>
         <translation>Aceleração de hardware não funciona no XWayland. Continuando com o XWayLand pode resultar em baixa performance de streaming. Tente rodar com QT_QPA_PLATFORM=wayland ou troque para X11.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="531" />
+        <location filename="../gui/AppContent.qml" line="531"/>
         <source>Click the Help button for more information.</source>
         <translation>Clique o botão de Ajuda para mais informações.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="539" />
-        <source>This version of VipleStream isn't optimized for your PC. Please download the '%1' version of VipleStream for the best streaming performance.</source>
-        <translation>Esta versão do VipleStream não está otimizada para o seu PC. Transfira a versão '%1' do VipleStream para obter o melhor desempenho de transmissão.</translation>
+        <location filename="../gui/AppContent.qml" line="539"/>
+        <source>This version of VipleStream isn&apos;t optimized for your PC. Please download the &apos;%1&apos; version of VipleStream for the best streaming performance.</source>
+        <translation>Esta versão do VipleStream não está otimizada para o seu PC. Transfira a versão &apos;%1&apos; do VipleStream para obter o melhor desempenho de transmissão.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="554" />
+        <location filename="../gui/AppContent.qml" line="554"/>
         <source>VipleStream detected gamepads without a mapping:</source>
         <translation>O VipleStream detetou comandos sem mapeamento:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="556" />
+        <location filename="../gui/AppContent.qml" line="556"/>
         <source>Click the Help button for information on how to map your gamepads.</source>
         <translation>Clique no botão de Ajuda para informações em como mapear seus controles.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="567" />
+        <location filename="../gui/AppContent.qml" line="567"/>
         <source>VipleStream found a HID device that is not responding:</source>
         <translation>O VipleStream encontrou um dispositivo HID que não responde:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="568" />
+        <location filename="../gui/AppContent.qml" line="568"/>
         <source>Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.</source>
         <translation>A deteção de comandos e o passthrough do Steam Controller estão desativados até que o dispositivo volte a responder. Desligue e volte a ligar o dispositivo; se o VipleStream continuar sem o ver, reinicie o VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="576" />
+        <location filename="../gui/AppContent.qml" line="576"/>
         <source>Are you sure you want to quit?</source>
         <translation>Tem certeza que deseja sair?</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="606" />
+        <location filename="../gui/AppContent.qml" line="606"/>
         <source>Enter the IP address of your host PC:</source>
         <translation>Introduza o endereço IP do seu PC host:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="650" />
+        <location filename="../gui/AppContent.qml" line="650"/>
         <source>Choose a mode</source>
         <translation>Escolha um modo</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="685" />
+        <location filename="../gui/AppContent.qml" line="685"/>
         <source>Desktop mode</source>
         <translation>Modo de ambiente de trabalho</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="685" />
-        <source>Your PC's desktop on a virtual screen</source>
+        <location filename="../gui/AppContent.qml" line="685"/>
+        <source>Your PC&apos;s desktop on a virtual screen</source>
         <translation>O ambiente de trabalho do seu PC num ecrã virtual</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="696" />
+        <location filename="../gui/AppContent.qml" line="696"/>
         <source>VR mode</source>
         <translation>Modo VR</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="696" />
+        <location filename="../gui/AppContent.qml" line="696"/>
         <source>Play SteamVR games from your PC</source>
         <translation>Jogue jogos SteamVR a partir do seu PC</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="710" />
+        <location filename="../gui/AppContent.qml" line="710"/>
         <source>Video mode</source>
         <translation>Modo de vídeo</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="710" />
+        <location filename="../gui/AppContent.qml" line="710"/>
         <source>Watch videos, 3D, 180° and 360° videos in the headset</source>
         <translation>Veja vídeos, vídeos 3D, 180° e 360° no headset</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="780" />
+        <location filename="../gui/AppContent.qml" line="780"/>
         <source>Starting %1...</source>
         <translation>Iniciando %1...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="781" />
+        <location filename="../gui/AppContent.qml" line="781"/>
         <source>Starting the stream...</source>
         <translation>A iniciar a transmissão...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="789" />
+        <location filename="../gui/AppContent.qml" line="789"/>
         <source>The headset switches to the stream when it is ready. This can take a few seconds.</source>
         <translation>O headset muda para a transmissão quando esta estiver pronta. Isto pode demorar alguns segundos.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="790" />
+        <location filename="../gui/AppContent.qml" line="790"/>
         <source>Tip:</source>
         <translation>Dica:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="790" />
+        <location filename="../gui/AppContent.qml" line="790"/>
         <source>To end the stream, hold A+X+trigger+grip on the VR controller</source>
         <translation>Para terminar a transmissão, mantenha premidos A+X+gatilho+grip no comando VR</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="831" />
+        <location filename="../gui/AppContent.qml" line="831"/>
         <source>Opening the video...</source>
         <translation>A abrir o vídeo...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="839" />
+        <location filename="../gui/AppContent.qml" line="839"/>
         <source>Press B to cancel.</source>
         <translation>Prima B para cancelar.</translation>
     </message>
@@ -193,46 +193,46 @@
 <context>
     <name>AppModel</name>
     <message>
-        <location filename="../gui/appmodel.cpp" line="70" />
-        <source>%1 doesn't offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
+        <location filename="../gui/appmodel.cpp" line="70"/>
+        <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 não oferece transmissão VR. É necessário o VipleStream Server 2.0 ou posterior com o PCVR ativado.</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="74" />
+        <location filename="../gui/appmodel.cpp" line="74"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1 só está acessível através do relay. A transmissão VR precisa de uma ligação direta.</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="78" />
+        <location filename="../gui/appmodel.cpp" line="78"/>
         <source>%1 is offline.</source>
         <translation>%1 está offline.</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="650" />
-        <location filename="../gui/appmodel.cpp" line="658" />
-        <location filename="../gui/appmodel.cpp" line="667" />
-        <location filename="../gui/appmodel.cpp" line="681" />
-        <location filename="../gui/appmodel.cpp" line="811" />
+        <location filename="../gui/appmodel.cpp" line="650"/>
+        <location filename="../gui/appmodel.cpp" line="658"/>
+        <location filename="../gui/appmodel.cpp" line="667"/>
+        <location filename="../gui/appmodel.cpp" line="681"/>
+        <location filename="../gui/appmodel.cpp" line="811"/>
         <source>Switch cancelled</source>
         <translation>Mudança cancelada</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="714" />
+        <location filename="../gui/appmodel.cpp" line="714"/>
         <source>No host selected</source>
         <translation>Nenhum host selecionado</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="750" />
+        <location filename="../gui/appmodel.cpp" line="750"/>
         <source>Server returned no task id</source>
         <translation>O servidor não devolveu nenhum ID de tarefa</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="671" />
+        <location filename="../gui/appmodel.cpp" line="671"/>
         <source>Switch task disappeared on host</source>
         <translation>A tarefa de mudança desapareceu no host</translation>
     </message>
     <message>
-        <location filename="../gui/appmodel.cpp" line="706" />
+        <location filename="../gui/appmodel.cpp" line="706"/>
         <source>Switch timed out (&gt;150s without server reaching a terminal state)</source>
         <translation>A mudança excedeu o tempo limite (&gt;150s sem o servidor atingir um estado final)</translation>
     </message>
@@ -240,146 +240,146 @@
 <context>
     <name>AppView</name>
     <message>
-        <location filename="../gui/AppView.qml" line="205" />
-        <location filename="../gui/AppView.qml" line="514" />
-        <location filename="../gui/AppView.qml" line="738" />
+        <location filename="../gui/AppView.qml" line="205"/>
+        <location filename="../gui/AppView.qml" line="514"/>
+        <location filename="../gui/AppView.qml" line="738"/>
         <source>LIBRARY</source>
         <translation>BIBLIOTECA</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="215" />
+        <location filename="../gui/AppView.qml" line="215"/>
         <source>HOST</source>
         <translation>HOST</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="216" />
+        <location filename="../gui/AppView.qml" line="216"/>
         <source>TITLES</source>
         <translation>TÍTULOS</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="225" />
+        <location filename="../gui/AppView.qml" line="225"/>
         <source>● SESSION ACTIVE</source>
         <translation>● SESSÃO ATIVA</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="225" />
+        <location filename="../gui/AppView.qml" line="225"/>
         <source>IDLE</source>
         <translation>INATIVO</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="228" />
+        <location filename="../gui/AppView.qml" line="228"/>
         <source>TAP HERO TO LAUNCH</source>
         <translation>TOQUE NO DESTAQUE PARA INICIAR</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="229" />
+        <location filename="../gui/AppView.qml" line="229"/>
         <source>NO TITLES</source>
         <translation>SEM TÍTULOS</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="249" />
+        <location filename="../gui/AppView.qml" line="249"/>
         <source>FEATURED</source>
         <translation>DESTAQUE</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="268" />
+        <location filename="../gui/AppView.qml" line="268"/>
         <source>PICK A TITLE TO LAUNCH</source>
         <translation>ESCOLHA UM TÍTULO PARA INICIAR</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="292" />
+        <location filename="../gui/AppView.qml" line="292"/>
         <source>LAUNCH · TO · STREAM</source>
         <translation>INICIAR · PARA · TRANSMITIR</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="451" />
-        <location filename="../gui/AppView.qml" line="695" />
+        <location filename="../gui/AppView.qml" line="451"/>
+        <location filename="../gui/AppView.qml" line="695"/>
         <source>Resume Game</source>
         <translation>Resumir Jogo</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="477" />
-        <location filename="../gui/AppView.qml" line="699" />
+        <location filename="../gui/AppView.qml" line="477"/>
+        <location filename="../gui/AppView.qml" line="699"/>
         <source>Quit Game</source>
         <translation>Sair do Jogo</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="556" />
+        <location filename="../gui/AppView.qml" line="556"/>
         <source>PLAYING</source>
         <translation>A JOGAR</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="695" />
+        <location filename="../gui/AppView.qml" line="695"/>
         <source>Launch Game</source>
         <translation>Iniciar o Jogo</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="706" />
+        <location filename="../gui/AppView.qml" line="706"/>
         <source>Direct Launch</source>
         <translation>Execução Direta</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="710" />
+        <location filename="../gui/AppView.qml" line="710"/>
         <source>Launch this app immediately when the host is selected, bypassing the app selection grid.</source>
         <translation>Execute este aplicativo imediatamente quando o host for selecionado, ignorando a grade de seleção do aplicaivo.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="718" />
+        <location filename="../gui/AppView.qml" line="718"/>
         <source>Hide Game</source>
         <translation>Minimizar Jogo</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="722" />
+        <location filename="../gui/AppView.qml" line="722"/>
         <source>Hide this game from the app grid. To access hidden games, right-click on the host and choose %1.</source>
         <translation>Esconda este jogo da grade de aplicativos. Para acessar jogos escondidos, botão-direito no host e escolha %1.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="722" />
+        <location filename="../gui/AppView.qml" line="722"/>
         <source>View All Apps</source>
         <translation>Ver Todos Aplicativos</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="738" />
+        <location filename="../gui/AppView.qml" line="738"/>
         <source>EMPTY</source>
         <translation>VAZIO</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="748" />
-        <source>This computer doesn't seem to have any applications or some applications are hidden</source>
+        <location filename="../gui/AppView.qml" line="748"/>
+        <source>This computer doesn&apos;t seem to have any applications or some applications are hidden</source>
         <translation>Este computador parece não ter aplicações ou algumas aplicações estão ocultas</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="751" />
+        <location filename="../gui/AppView.qml" line="751"/>
         <source>No VR apps were found on this computer. Switch to desktop mode to see all apps.</source>
         <translation>Não foram encontradas aplicações VR neste computador. Mude para o modo de ambiente de trabalho para ver todas as aplicações.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="767" />
+        <location filename="../gui/AppView.qml" line="767"/>
         <source>Are you sure you want to quit %1? Any unsaved progress will be lost.</source>
         <translation>Tem certeza que deseja sair %1? Todo progresso não salvo será perdido.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="805" />
+        <location filename="../gui/AppView.qml" line="805"/>
         <source>%1 is currently using this host. Do you want to take over the session? Their session will be disconnected.</source>
         <translation>%1 está a utilizar este host neste momento. Pretende assumir a sessão? A sessão dessa pessoa será desligada.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="871" />
+        <location filename="../gui/AppView.qml" line="871"/>
         <source>STEAM PROFILE</source>
         <translation>CONTA STEAM</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="896" />
+        <location filename="../gui/AppView.qml" line="896"/>
         <source>This Steam account has no saved password on the host. Sign in on the host once before switching to it.</source>
         <translation>Esta conta Steam não tem palavra-passe guardada no host. Inicie sessão uma vez no host antes de mudar para ela.</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="1035" />
+        <location filename="../gui/AppView.qml" line="1035"/>
         <source>Switching Steam account…</source>
         <translation>A mudar de conta Steam…</translation>
     </message>
     <message>
-        <location filename="../gui/AppView.qml" line="1048" />
+        <location filename="../gui/AppView.qml" line="1048"/>
         <source>Steam will close and re-login on the host.
 This can take 60–90 seconds on a typical box.
 If it stalls longer, check the host — Steam Guard 2FA may be prompting.</source>
@@ -391,17 +391,17 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>CliPair</name>
     <message>
-        <location filename="../gui/CliPair.qml" line="8" />
+        <location filename="../gui/CliPair.qml" line="8"/>
         <source>Establishing connection to PC...</source>
         <translation>Estabelecendo conexão com o PC...</translation>
     </message>
     <message>
-        <location filename="../gui/CliPair.qml" line="12" />
-        <source>Pairing... Please enter '%1' on %2.</source>
-        <translation>Pareando... Por favor inserir '%1' em %2.</translation>
+        <location filename="../gui/CliPair.qml" line="12"/>
+        <source>Pairing... Please enter &apos;%1&apos; on %2.</source>
+        <translation>Pareando... Por favor inserir &apos;%1&apos; em %2.</translation>
     </message>
     <message>
-        <location filename="../gui/CliPair.qml" line="81" />
+        <location filename="../gui/CliPair.qml" line="81"/>
         <source>Pairing completed successfully</source>
         <translation>Pareamento realizado com sucesso</translation>
     </message>
@@ -409,13 +409,13 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>CliQuitStreamSegue</name>
     <message>
-        <location filename="../gui/CliQuitStreamSegue.qml" line="9" />
-        <location filename="../gui/CliQuitStreamSegue.qml" line="12" />
+        <location filename="../gui/CliQuitStreamSegue.qml" line="9"/>
+        <location filename="../gui/CliQuitStreamSegue.qml" line="12"/>
         <source>Establishing connection to PC...</source>
         <translation>Estabeleçendo conexão com o PC...</translation>
     </message>
     <message>
-        <location filename="../gui/CliQuitStreamSegue.qml" line="16" />
+        <location filename="../gui/CliQuitStreamSegue.qml" line="16"/>
         <source>Quitting app...</source>
         <translation>Saindo do aplicativo...</translation>
     </message>
@@ -423,17 +423,17 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>CliStartStreamSegue</name>
     <message>
-        <location filename="../gui/CliStartStreamSegue.qml" line="8" />
+        <location filename="../gui/CliStartStreamSegue.qml" line="8"/>
         <source>Establishing connection to PC...</source>
         <translation>Estabeleçendo conexão com o PC...</translation>
     </message>
     <message>
-        <location filename="../gui/CliStartStreamSegue.qml" line="12" />
+        <location filename="../gui/CliStartStreamSegue.qml" line="12"/>
         <source>Loading app list...</source>
         <translation>Carregando a lista de aplicativos...</translation>
     </message>
     <message>
-        <location filename="../gui/CliStartStreamSegue.qml" line="114" />
+        <location filename="../gui/CliStartStreamSegue.qml" line="114"/>
         <source>Are you sure you want to quit %1? Any unsaved progress will be lost.</source>
         <translation>Tem certeza que deseja sair %1? Todo progresso não salvo será perdido.</translation>
     </message>
@@ -441,91 +441,91 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>ComputerModel</name>
     <message>
-        <location filename="../gui/computermodel.cpp" line="143" />
+        <location filename="../gui/computermodel.cpp" line="143"/>
         <source>Online</source>
         <translation>Online</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="146" />
+        <location filename="../gui/computermodel.cpp" line="146"/>
         <source>Offline</source>
         <translation>Offline</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="149" />
-        <location filename="../gui/computermodel.cpp" line="161" />
-        <location filename="../gui/computermodel.cpp" line="173" />
-        <location filename="../gui/computermodel.cpp" line="175" />
-        <location filename="../gui/computermodel.cpp" line="176" />
+        <location filename="../gui/computermodel.cpp" line="149"/>
+        <location filename="../gui/computermodel.cpp" line="161"/>
+        <location filename="../gui/computermodel.cpp" line="173"/>
+        <location filename="../gui/computermodel.cpp" line="175"/>
+        <location filename="../gui/computermodel.cpp" line="176"/>
         <source>Unknown</source>
         <translation>Desconhecido</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="155" />
+        <location filename="../gui/computermodel.cpp" line="155"/>
         <source>Paired</source>
         <translation>Emparelhado</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="158" />
+        <location filename="../gui/computermodel.cpp" line="158"/>
         <source>Unpaired</source>
         <translation>Não emparelhado</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="165" />
+        <location filename="../gui/computermodel.cpp" line="165"/>
         <source>Name: %1</source>
         <translation>Nome: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="166" />
+        <location filename="../gui/computermodel.cpp" line="166"/>
         <source>Status: %1</source>
         <translation>Estado: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="167" />
+        <location filename="../gui/computermodel.cpp" line="167"/>
         <source>Active Address: %1</source>
         <translation>Endereço ativo: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="168" />
+        <location filename="../gui/computermodel.cpp" line="168"/>
         <source>UUID: %1</source>
         <translation>UUID: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="169" />
+        <location filename="../gui/computermodel.cpp" line="169"/>
         <source>Local Address: %1</source>
         <translation>Endereço local: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="170" />
+        <location filename="../gui/computermodel.cpp" line="170"/>
         <source>Remote Address: %1</source>
         <translation>Endereço remoto: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="171" />
+        <location filename="../gui/computermodel.cpp" line="171"/>
         <source>IPv6 Address: %1</source>
         <translation>Endereço IPv6: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="172" />
+        <location filename="../gui/computermodel.cpp" line="172"/>
         <source>Manual Address: %1</source>
         <translation>Endereço manual: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="173" />
+        <location filename="../gui/computermodel.cpp" line="173"/>
         <source>MAC Address: %1</source>
         <translation>Endereço MAC: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="174" />
+        <location filename="../gui/computermodel.cpp" line="174"/>
         <source>Pair State: %1</source>
         <translation>Estado de emparelhamento: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="175" />
+        <location filename="../gui/computermodel.cpp" line="175"/>
         <source>Running Game ID: %1</source>
         <translation>ID do jogo em execução: %1</translation>
     </message>
     <message>
-        <location filename="../gui/computermodel.cpp" line="176" />
+        <location filename="../gui/computermodel.cpp" line="176"/>
         <source>HTTPS Port: %1</source>
         <translation>Porta HTTPS: %1</translation>
     </message>
@@ -533,52 +533,52 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>FileTransferClient</name>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="198" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="198"/>
         <source>File transfer: nothing to cancel</source>
         <translation>Transferência de ficheiros: nada para cancelar</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="216" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="216"/>
         <source>File transfer cancelled</source>
         <translation>Transferência de ficheiros cancelada</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="432" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="432"/>
         <source>Receiving file: %1 (0%)</source>
         <translation>A receber ficheiro: %1 (0%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="456" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="456"/>
         <source>Receiving file: %1 (%2%)</source>
         <translation>A receber ficheiro: %1 (%2%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="501" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="501"/>
         <source>Received: %1 → Downloads</source>
         <translation>Recebido: %1 → Transferências</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="580" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="580"/>
         <source>Zipping folder: %1…</source>
         <translation>A comprimir pasta: %1…</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="683" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="683"/>
         <source>Sending: %1 (0%)</source>
         <translation>A enviar: %1 (0%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="698" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="698"/>
         <source>Sending: %1 (%2%)</source>
         <translation>A enviar: %1 (%2%)</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="722" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="722"/>
         <source>Sent: %1</source>
         <translation>Enviado: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/transfer/filetransferclient.cpp" line="724" />
+        <location filename="../streaming/transfer/filetransferclient.cpp" line="724"/>
         <source>Send failed: %1 (%2)</source>
         <translation>Falha no envio: %1 (%2)</translation>
     </message>
@@ -586,7 +586,7 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>GamepadMapper</name>
     <message>
-        <location filename="../gui/GamepadMapper.qml" line="4" />
+        <location filename="../gui/GamepadMapper.qml" line="4"/>
         <source>Gamepad Mapping</source>
         <translation>Mapeando o Controle</translation>
     </message>
@@ -594,37 +594,37 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>MediaLibrary</name>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="81" />
+        <location filename="../backend/medialibrary.cpp" line="81"/>
         <source>Videos</source>
         <translation>Vídeos</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="82" />
+        <location filename="../backend/medialibrary.cpp" line="82"/>
         <source>Downloads</source>
         <translation>Transferências</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="95" />
+        <location filename="../backend/medialibrary.cpp" line="95"/>
         <source>Home</source>
         <translation>Pasta pessoal</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="249" />
+        <location filename="../backend/medialibrary.cpp" line="249"/>
         <source>The PC is not online.</source>
         <translation>O PC não está online.</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="281" />
-        <source>This PC doesn't share its videos. Update VipleStream Server on that PC, and check that media_share isn't disabled in its configuration.</source>
+        <location filename="../backend/medialibrary.cpp" line="281"/>
+        <source>This PC doesn&apos;t share its videos. Update VipleStream Server on that PC, and check that media_share isn&apos;t disabled in its configuration.</source>
         <translation>Este PC não partilha os seus vídeos. Atualize o VipleStream Server nesse PC e verifique se o media_share não está desativado na respetiva configuração.</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="328" />
+        <location filename="../backend/medialibrary.cpp" line="328"/>
         <source>Could not reach the PC. Make sure VipleStream Server is running.</source>
         <translation>Não foi possível contactar o PC. Certifique-se de que o VipleStream Server está em execução.</translation>
     </message>
     <message>
-        <location filename="../backend/medialibrary.cpp" line="329" />
+        <location filename="../backend/medialibrary.cpp" line="329"/>
         <source>Could not read this folder from the PC.</source>
         <translation>Não foi possível ler esta pasta a partir do PC.</translation>
     </message>
@@ -632,7 +632,7 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>NvHTTP</name>
     <message>
-        <location filename="../backend/nvhttp.cpp" line="423" />
+        <location filename="../backend/nvhttp.cpp" line="423"/>
         <source>Missing audio capture device. Reinstalling GeForce Experience should resolve this error.</source>
         <translation>Dispositivo de captura de áudio faltando. Re-instalando o GeForce Experience deve resolver este erro.</translation>
     </message>
@@ -640,242 +640,242 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>PcView</name>
     <message>
-        <location filename="../gui/PcView.qml" line="26" />
+        <location filename="../gui/PcView.qml" line="26"/>
         <source>Computers</source>
         <translation>Computadores</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="77" />
+        <location filename="../gui/PcView.qml" line="77"/>
         <source>Unable to connect to the specified PC.</source>
         <translation>Impossível conectar-se com o PC especificado.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="83" />
+        <location filename="../gui/PcView.qml" line="83"/>
         <source>Click the Help button for possible solutions.</source>
         <translation>Clique o botão de Ajuda por possíveis soluções.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="114" />
+        <location filename="../gui/PcView.qml" line="114"/>
         <source>Automatic PC discovery is disabled. Add your PC manually.</source>
         <translation>Descoberta automática de PCs está desabilitada. Adicione seu PC manualmente.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="113" />
+        <location filename="../gui/PcView.qml" line="113"/>
         <source>Searching for compatible hosts on your local network...</source>
         <translation>A procurar hosts compatíveis na sua rede local...</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="80" />
-        <source>This PC's Internet connection is blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
+        <location filename="../gui/PcView.qml" line="80"/>
+        <source>This PC&apos;s Internet connection is blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
         <translation>A ligação à Internet deste PC está a bloquear o VipleStream. A transmissão pela Internet pode não funcionar enquanto estiver ligado a esta rede.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="204" />
+        <location filename="../gui/PcView.qml" line="204"/>
         <source>HOSTS</source>
         <translation>HOSTS</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="212" />
+        <location filename="../gui/PcView.qml" line="212"/>
         <source>LOCAL NETWORK</source>
         <translation>REDE LOCAL</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="222" />
+        <location filename="../gui/PcView.qml" line="222"/>
         <source>MDNS ON</source>
         <translation>MDNS LIGADO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="222" />
+        <location filename="../gui/PcView.qml" line="222"/>
         <source>MDNS OFF</source>
         <translation>MDNS DESLIGADO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="224" />
+        <location filename="../gui/PcView.qml" line="224"/>
         <source>FOUND</source>
         <translation>ENCONTRADOS</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="227" />
+        <location filename="../gui/PcView.qml" line="227"/>
         <source>READY TO LAUNCH</source>
         <translation>PRONTO PARA INICIAR</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="228" />
+        <location filename="../gui/PcView.qml" line="228"/>
         <source>NO PAIRED HOST</source>
         <translation>NENHUM HOST EMPARELHADO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="250" />
+        <location filename="../gui/PcView.qml" line="250"/>
         <source>FEATURED</source>
         <translation>DESTAQUE</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="270" />
+        <location filename="../gui/PcView.qml" line="270"/>
         <source>PICK A HOST TO CONNECT</source>
         <translation>ESCOLHA UM HOST PARA LIGAR</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="295" />
+        <location filename="../gui/PcView.qml" line="295"/>
         <source>STREAM · PATCH · 2026</source>
         <translation>TRANSMISSÃO · PATCH · 2026</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="376" />
+        <location filename="../gui/PcView.qml" line="376"/>
         <source>OFFLINE</source>
         <translation>OFFLINE</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="377" />
+        <location filename="../gui/PcView.qml" line="377"/>
         <source>UNPAIRED</source>
         <translation>NÃO EMPARELHADO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="378" />
+        <location filename="../gui/PcView.qml" line="378"/>
         <source>READY</source>
         <translation>PRONTO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="437" />
+        <location filename="../gui/PcView.qml" line="437"/>
         <source>MULTI-LINK</source>
         <translation>MULTILIGAÇÃO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="589" />
+        <location filename="../gui/PcView.qml" line="589"/>
         <source>Wake PC</source>
         <translation>Acordar o PC</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="595" />
+        <location filename="../gui/PcView.qml" line="595"/>
         <source>Auto Wake-on-LAN: ON</source>
         <translation>Wake-on-LAN automático: LIGADO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="596" />
+        <location filename="../gui/PcView.qml" line="596"/>
         <source>Auto Wake-on-LAN: OFF</source>
         <translation>Wake-on-LAN automático: DESLIGADO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="616" />
+        <location filename="../gui/PcView.qml" line="616"/>
         <source>Test Network</source>
         <translation>Testar a Rede</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="640" />
+        <location filename="../gui/PcView.qml" line="640"/>
         <source>Rename PC</source>
         <translation>Renomear o PC</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="649" />
+        <location filename="../gui/PcView.qml" line="649"/>
         <source>Delete PC</source>
         <translation>Deletar o PC</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="658" />
+        <location filename="../gui/PcView.qml" line="658"/>
         <source>View Details</source>
         <translation>Ver detalhes</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="670" />
+        <location filename="../gui/PcView.qml" line="670"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of VipleStream. You must update VipleStream to stream from %1.</source>
         <translation>A versão do GeForce Experience em %1 não é suportada por esta versão do VipleStream. Tem de atualizar o VipleStream para transmitir a partir de %1.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="777" />
+        <location filename="../gui/PcView.qml" line="777"/>
         <source>PAIRING</source>
         <translation>EMPARELHAMENTO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="777" />
+        <location filename="../gui/PcView.qml" line="777"/>
         <source>STEP 02 / 03</source>
         <translation>PASSO 02 / 03</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="786" />
+        <location filename="../gui/PcView.qml" line="786"/>
         <source>Enter PIN on host</source>
         <translation>Introduza o PIN no host</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="826" />
+        <location filename="../gui/PcView.qml" line="826"/>
         <source>If your host PC is running VipleStream-Server, navigate to the VipleStream-Server web UI to enter the PIN.</source>
         <translation>Se o seu PC host estiver a executar o VipleStream-Server, aceda à interface web do VipleStream-Server para introduzir o PIN.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="845" />
+        <location filename="../gui/PcView.qml" line="845"/>
         <source>WAITING FOR HOST</source>
         <translation>A AGUARDAR PELO HOST</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="878" />
+        <location filename="../gui/PcView.qml" line="878"/>
         <source>VipleStream is testing your network connection to determine if any required ports are blocked.</source>
         <translation>O VipleStream está a testar a sua ligação de rede para determinar se alguma porta necessária está bloqueada.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="885" />
-        <source>The network test could not be performed because none of VipleStream's connection testing servers were reachable from this PC. Check your Internet connection or try again later.</source>
+        <location filename="../gui/PcView.qml" line="885"/>
+        <source>The network test could not be performed because none of VipleStream&apos;s connection testing servers were reachable from this PC. Check your Internet connection or try again later.</source>
         <translation>Não foi possível realizar o teste de rede porque nenhum dos servidores de teste de ligação do VipleStream estava acessível a partir deste PC. Verifique a sua ligação à Internet ou tente novamente mais tarde.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="889" />
-        <source>This network does not appear to be blocking VipleStream. If you still have trouble connecting, check your PC's firewall settings.</source>
+        <location filename="../gui/PcView.qml" line="889"/>
+        <source>This network does not appear to be blocking VipleStream. If you still have trouble connecting, check your PC&apos;s firewall settings.</source>
         <translation>Esta rede não parece estar a bloquear o VipleStream. Se continuar a ter problemas de ligação, verifique as definições da firewall do seu PC.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="889" />
-        <source>If you are trying to stream over the Internet, install the VipleStream-Server Internet Hosting Tool on your gaming PC and run the included Internet Streaming Tester to check your gaming PC's Internet connection.</source>
+        <location filename="../gui/PcView.qml" line="889"/>
+        <source>If you are trying to stream over the Internet, install the VipleStream-Server Internet Hosting Tool on your gaming PC and run the included Internet Streaming Tester to check your gaming PC&apos;s Internet connection.</source>
         <translation>Se está a tentar transmitir pela Internet, instale a VipleStream-Server Internet Hosting Tool no seu PC de jogos e execute o Internet Streaming Tester incluído para verificar a ligação à Internet do seu PC de jogos.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="893" />
-        <source>Your PC's current network connection seems to be blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
+        <location filename="../gui/PcView.qml" line="893"/>
+        <source>Your PC&apos;s current network connection seems to be blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
         <translation>A ligação de rede atual do seu PC parece estar a bloquear o VipleStream. A transmissão pela Internet pode não funcionar enquanto estiver ligado a esta rede.</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="878" />
+        <location filename="../gui/PcView.qml" line="878"/>
         <source>This may take a few seconds…</source>
         <translation>Isto deve levar alguns segundos…</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="893" />
+        <location filename="../gui/PcView.qml" line="893"/>
         <source>The following network ports were blocked:</source>
         <translation>Os seguintes portes da rede foram bloqueados:</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="574" />
+        <location filename="../gui/PcView.qml" line="574"/>
         <source>PC Status: %1</source>
         <translation>Status do PC: %1</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="574" />
+        <location filename="../gui/PcView.qml" line="574"/>
         <source>Online</source>
         <translation>Online</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="574" />
+        <location filename="../gui/PcView.qml" line="574"/>
         <source>Offline</source>
         <translation>Offline</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="579" />
+        <location filename="../gui/PcView.qml" line="579"/>
         <source>View All Apps</source>
         <translation>Ver Todos Aplicativos</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="631" />
+        <location filename="../gui/PcView.qml" line="631"/>
         <source>Click goes straight to desktop: On</source>
         <translation>Clicar para ir diretamente para o ambiente de trabalho: LIGADO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="632" />
+        <location filename="../gui/PcView.qml" line="632"/>
         <source>Click goes straight to desktop: Off</source>
         <translation>Clicar para ir diretamente para o ambiente de trabalho: DESLIGADO</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="861" />
-        <source>Are you sure you want to remove '%1'?</source>
-        <translation>Tem a certeza de que pretende remover '%1'?</translation>
+        <location filename="../gui/PcView.qml" line="861"/>
+        <source>Are you sure you want to remove &apos;%1&apos;?</source>
+        <translation>Tem a certeza de que pretende remover &apos;%1&apos;?</translation>
     </message>
     <message>
-        <location filename="../gui/PcView.qml" line="905" />
+        <location filename="../gui/PcView.qml" line="905"/>
         <source>Enter the new name for this PC:</source>
         <translation>Digite o novo nome para este PC:</translation>
     </message>
@@ -883,27 +883,27 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>PendingPairingTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="926" />
-        <source>The PIN from the PC didn't match. Please try again.</source>
+        <location filename="../backend/computermanager.cpp" line="971"/>
+        <source>The PIN from the PC didn&apos;t match. Please try again.</source>
         <translation>O PIN do PC não correspondeu. Tente novamente.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="930" />
+        <location filename="../backend/computermanager.cpp" line="975"/>
         <source>You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again.</source>
         <translation>Não é possível emparelhar enquanto uma sessão anterior ainda estiver em execução no PC host. Feche os jogos em execução ou reinicie o PC host e tente emparelhar novamente.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="933" />
+        <location filename="../backend/computermanager.cpp" line="978"/>
         <source>Pairing failed. Please try again.</source>
         <translation>O emparelhamento falhou. Tente novamente.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="937" />
+        <location filename="../backend/computermanager.cpp" line="982"/>
         <source>Another pairing attempt is already in progress.</source>
         <translation>Já está em curso outra tentativa de emparelhamento.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="947" />
+        <location filename="../backend/computermanager.cpp" line="992"/>
         <source>GeForce Experience returned error: %1</source>
         <translation>GeForce Experience retornou um erro: %1</translation>
     </message>
@@ -911,49 +911,49 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>PendingQuitTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="997" />
-        <source>The running game wasn't started by this PC. You must quit the game on the host PC manually or use the device that originally started the game.</source>
+        <location filename="../backend/computermanager.cpp" line="1042"/>
+        <source>The running game wasn&apos;t started by this PC. You must quit the game on the host PC manually or use the device that originally started the game.</source>
         <translation>O jogo atualmente rodando não foi iniciado por este PC. Você deve sair do jogo no PC de host manualmente ou usar o dispositivo que originalmente executou o jogo.</translation>
     </message>
 </context>
 <context>
     <name>QObject</name>
     <message>
-        <location filename="../cli/pair.cpp" line="80" />
+        <location filename="../cli/pair.cpp" line="80"/>
         <source>%1 is already paired</source>
         <translation>%1 já se encontra pareado</translation>
     </message>
     <message>
-        <location filename="../cli/pair.cpp" line="109" />
-        <location filename="../cli/quitstream.cpp" line="80" />
-        <location filename="../cli/startstream.cpp" line="133" />
+        <location filename="../cli/pair.cpp" line="109"/>
+        <location filename="../cli/quitstream.cpp" line="80"/>
+        <location filename="../cli/startstream.cpp" line="133"/>
         <source>Failed to connect to %1</source>
         <translation>Falha ao conectar ao %1</translation>
     </message>
     <message>
-        <location filename="../cli/quitstream.cpp" line="85" />
+        <location filename="../cli/quitstream.cpp" line="85"/>
         <source>Quitting app timed out</source>
         <translation>Tempo limite excedido ao sair do aplicativo</translation>
     </message>
     <message>
-        <location filename="../cli/quitstream.cpp" line="102" />
-        <location filename="../cli/startstream.cpp" line="89" />
+        <location filename="../cli/quitstream.cpp" line="102"/>
+        <location filename="../cli/startstream.cpp" line="89"/>
         <source>Computer %1 has not been paired. Please open Moonlight to pair before streaming.</source>
         <translation>O Computador %1 não foi conectado. Por favor abrir o Moonlight para conectar-se antes de streamar.</translation>
     </message>
     <message>
-        <location filename="../cli/quitstream.cpp" line="118" />
-        <location filename="../cli/startstream.cpp" line="126" />
+        <location filename="../cli/quitstream.cpp" line="118"/>
+        <location filename="../cli/startstream.cpp" line="126"/>
         <source>Quitting app failed, reason: %1</source>
         <translation>Não foi possível sair do aplicativo, razão: %1</translation>
     </message>
     <message>
-        <location filename="../cli/startstream.cpp" line="137" />
+        <location filename="../cli/startstream.cpp" line="137"/>
         <source>Failed to find application %1</source>
         <translation>Falha ao encontrar aplicativo %1</translation>
     </message>
     <message>
-        <location filename="../cli/listapps.cpp" line="122" />
+        <location filename="../cli/listapps.cpp" line="122"/>
         <source>Computer %1 has not been paired. Please open Moonlight to pair before retrieving games list.</source>
         <translation>Computador %1 ainda não foi pareado. Por favor abrir o Moonlight para parear antes de buscar lista de jogos.</translation>
     </message>
@@ -961,27 +961,27 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1464" />
+        <location filename="../main.cpp" line="1466"/>
         <source>&amp;Yes</source>
         <translation>&amp;Sim</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1465" />
+        <location filename="../main.cpp" line="1467"/>
         <source>&amp;No</source>
         <translation>&amp;Não</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1466" />
+        <location filename="../main.cpp" line="1468"/>
         <source>OK</source>
         <translation>OK</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1467" />
+        <location filename="../main.cpp" line="1469"/>
         <source>Help</source>
         <translation>Ajuda</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1468" />
+        <location filename="../main.cpp" line="1470"/>
         <source>Cancel</source>
         <translation>Cancelar</translation>
     </message>
@@ -989,7 +989,7 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>QuitSegue</name>
     <message>
-        <location filename="../gui/QuitSegue.qml" line="15" />
+        <location filename="../gui/QuitSegue.qml" line="15"/>
         <source>Quitting %1...</source>
         <translation>Saindo %1...</translation>
     </message>
@@ -997,399 +997,399 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="379" />
+        <location filename="../streaming/session.cpp" line="382"/>
         <source>No video received from host.</source>
         <translation>Nenhum vídeo recebido do host.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="380" />
+        <location filename="../streaming/session.cpp" line="383"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>Verifique suas regras de Firewall e Port Forwarding para o(s) port(s): %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="385" />
-        <source>Your network connection isn't performing well. Reduce your video bitrate setting or try a faster connection.</source>
+        <location filename="../streaming/session.cpp" line="388"/>
+        <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>Sua conexão de rede não está funcionando bem. Reduza sua configuração de bitrate ou tente uma conexão mais rápida.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="391" />
+        <location filename="../streaming/session.cpp" line="394"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>Algo deu errado no seu PC de host quando a stream estava iniciando-se.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="392" />
-        <source>Make sure you don't have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
+        <location filename="../streaming/session.cpp" line="395"/>
+        <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>Assegure que não há nenhum conteúdo DRM-protegido aberto no seu PC de host. Você pode tentar re-iniciar seu PC de host.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="397" />
+        <location filename="../streaming/session.cpp" line="400"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>O PC host comunicou um erro fatal de codificação de vídeo.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="398" />
-        <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution.</source>
+        <location filename="../streaming/session.cpp" line="401"/>
+        <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>Experimente desativar o modo HDR, alterar a resolução da transmissão ou alterar a resolução do ecrã do seu PC host.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="405" />
+        <location filename="../streaming/session.cpp" line="408"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>A ligação de controlo com o servidor foi interrompida — possivelmente uma falha momentânea de rede ou o servidor está offline. Pode tentar retomar a transmissão mais tarde (resume)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="413" />
+        <location filename="../streaming/session.cpp" line="416"/>
         <source>Connection terminated</source>
         <translation>Conexão eliminada</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="414" />
+        <location filename="../streaming/session.cpp" line="417"/>
         <source>Error code: %1</source>
         <translation>Código de erro: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1942" />
+        <location filename="../streaming/session.cpp" line="1952"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>A versão do GeForce Experience no %1 não é suportada por esta versão do Moonlight. Você deve atualizar O Moonlight para streamar do %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1948" />
+        <location filename="../streaming/session.cpp" line="1958"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>A sua seleção para ativar o modo rato da área de trabalho remoto deve causar problemas em jogos.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1952" />
+        <location filename="../streaming/session.cpp" line="1962"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>Suas configurações de seleção para forçar decodificação por software deve causar performance de streaming degradada.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2011" />
-        <source>Your host PC doesn't support encoding HEVC.</source>
+        <location filename="../streaming/session.cpp" line="2021"/>
+        <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>O seu PC host não suporta codificação HEVC.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2029" />
+        <location filename="../streaming/session.cpp" line="2039"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>Usando decodificação por software pela sua seleção para força HEVC sem suporte da GPU. Isso deve causar performance de streaming degradada.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1981" />
-        <source>Your host software or GPU doesn't support encoding AV1.</source>
+        <location filename="../streaming/session.cpp" line="1991"/>
+        <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>O software ou a GPU do seu host não suporta codificação AV1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1999" />
+        <location filename="../streaming/session.cpp" line="2009"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>A utilizar descodificação por software devido à sua opção de forçar AV1 sem suporte da GPU. Isto pode causar um fraco desempenho de transmissão.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2076" />
-        <source>Your host PC doesn't support HDR streaming.</source>
+        <location filename="../streaming/session.cpp" line="2086"/>
+        <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>O seu PC host não suporta transmissão HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2068" />
+        <location filename="../streaming/session.cpp" line="2078"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>O HDR não é suportado com o codec H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2103" />
-        <source>This PC's GPU doesn't support AV1 Main10 decoding for HDR streaming.</source>
+        <location filename="../streaming/session.cpp" line="2113"/>
+        <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>A GPU deste PC não suporta descodificação AV1 Main10 para transmissão HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2072" />
-        <source>This PC's GPU doesn't support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
+        <location filename="../streaming/session.cpp" line="2082"/>
+        <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>A GPU deste PC não suporta descodificação HEVC ou AV1 de 10 bits para transmissão HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2136" />
-        <source>Your host PC and client PC don't support the same HDR video codecs.</source>
+        <location filename="../streaming/session.cpp" line="2146"/>
+        <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>O seu PC host e o PC cliente não suportam os mesmos codecs de vídeo HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2239" />
+        <location filename="../streaming/session.cpp" line="2249"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>Resoluções de vídeo superiores a 4K não são suportadas pelo codec H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3614" />
+        <location filename="../streaming/session.cpp" line="3693"/>
         <source>Host returned error: %1</source>
         <translation>O host devolveu um erro: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2048" />
+        <location filename="../streaming/session.cpp" line="2058"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>Usando decodificação por software pela sua seleção para forçar H.264 sem suporte de GPU. Isso deve causar performance de streaming degradada.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="615" />
-        <source>This game doesn't use VR controllers - switched to Xbox controller mode</source>
+        <location filename="../streaming/session.cpp" line="618"/>
+        <source>This game doesn&apos;t use VR controllers - switched to Xbox controller mode</source>
         <translation>Este jogo não usa comandos VR - mudado para o modo de comando Xbox</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="619" />
+        <location filename="../streaming/session.cpp" line="622"/>
         <source>Xbox controller mode: on</source>
         <translation>Modo de comando Xbox: ativado</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="623" />
+        <location filename="../streaming/session.cpp" line="626"/>
         <source>Xbox controller mode: off (VR controllers)</source>
         <translation>Modo de comando Xbox: desativado (comandos VR)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="627" />
+        <location filename="../streaming/session.cpp" line="630"/>
         <source>Xbox controller mode unavailable: install ViGEmBus on the host</source>
         <translation>Modo de comando Xbox indisponível: instale o ViGEmBus no host</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="630" />
-        <source>Microphone not available on the host: Steam's "Steam Streaming Microphone" device was not found</source>
-        <translation>Microfone indisponível no host: o dispositivo "Steam Streaming Microphone" da Steam não foi encontrado</translation>
+        <location filename="../streaming/session.cpp" line="633"/>
+        <source>Microphone not available on the host: Steam&apos;s &quot;Steam Streaming Microphone&quot; device was not found</source>
+        <translation>Microfone indisponível no host: o dispositivo &quot;Steam Streaming Microphone&quot; da Steam não foi encontrado</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="787" />
+        <location filename="../streaming/session.cpp" line="790"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>Outro headset está a utilizar o SteamVR em %1 (por exemplo, o Steam Link). Desligue-o e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="789" />
+        <location filename="../streaming/session.cpp" line="792"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>Já está em execução um jogo VR em %1 sem o VipleStream. Feche-o e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="791" />
+        <location filename="../streaming/session.cpp" line="794"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>O SteamVR em %1 tem de reiniciar, mas ainda há um jogo VR em execução. Feche primeiro o jogo (Sair do Jogo na lista de aplicações) e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="794" />
+        <location filename="../streaming/session.cpp" line="797"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>O SteamVR em %1 iniciou em modo de segurança e bloqueou o controlador do VipleStream. Reinicie o SteamVR no host e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="796" />
+        <location filename="../streaming/session.cpp" line="799"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>O SteamVR não está instalado em %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="798" />
+        <location filename="../streaming/session.cpp" line="801"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>O Steam não tem sessão iniciada em %1. Inicie sessão no Steam no host (por exemplo, no modo de ambiente de trabalho) e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="800" />
+        <location filename="../streaming/session.cpp" line="803"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>Ninguém tem sessão iniciada no Windows em %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="802" />
+        <location filename="../streaming/session.cpp" line="805"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 está no ecrã de início de sessão ou de bloqueio do Windows. Inicie sessão no host e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="805" />
+        <location filename="../streaming/session.cpp" line="808"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>O SteamVR em %1 não iniciou a tempo. Tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="807" />
+        <location filename="../streaming/session.cpp" line="810"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1 não conseguiu iniciar o VR (erro %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="832" />
-        <source>%1 doesn't offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
+        <location filename="../streaming/session.cpp" line="835"/>
+        <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 não oferece transmissão VR. É necessário o VipleStream Server 2.0 ou posterior com o PCVR ativado.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="842" />
+        <location filename="../streaming/session.cpp" line="845"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1 só está acessível através do relay. A transmissão VR precisa de uma ligação direta.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="850" />
+        <location filename="../streaming/session.cpp" line="853"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>A definição de codec de vídeo força AV1, mas a transmissão VR precisa de HEVC ou H.264. Altere o codec de vídeo nas Configurações.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1350" />
+        <location filename="../streaming/session.cpp" line="1357"/>
         <source>Failed to initialize video subsystem: %1</source>
         <translation>Falha ao inicializar o subsistema de vídeo: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1435" />
+        <location filename="../streaming/session.cpp" line="1442"/>
         <source>Failed to create window for hardware decode test: %1</source>
         <translation>Falha ao criar a janela para o teste de descodificação por hardware: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1541" />
+        <location filename="../streaming/session.cpp" line="1551"/>
         <source>Invalid stream frame rate (%1 FPS).</source>
         <translation>Taxa de fotogramas da transmissão inválida (%1 FPS).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1887" />
+        <location filename="../streaming/session.cpp" line="1897"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>Este dispositivo não tem um descodificador de vídeo HEVC ou H.264 de 8 bits para transmissão VR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1916" />
+        <location filename="../streaming/session.cpp" line="1926"/>
         <source>Failed to initialize video decoder.</source>
         <translation>Falha ao inicializar o descodificador de vídeo.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1958" />
-        <source>Your host software or GPU doesn't support encoding PyroWave.</source>
+        <location filename="../streaming/session.cpp" line="1968"/>
+        <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>O software ou a GPU do seu host não suporta codificação PyroWave.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1969" />
-        <source>Your client GPU doesn't support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
+        <location filename="../streaming/session.cpp" line="1979"/>
+        <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>A GPU do seu cliente não suporta a descodificação PyroWave com Vulkan 1.3. A recorrer a HEVC/H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2058" />
-        <source>Your host PC and client PC don't support the same video codecs. This may cause poor streaming performance.</source>
+        <location filename="../streaming/session.cpp" line="2068"/>
+        <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>Seu PC de host e o PC de cliente não suportam os mesmos codecs de vídeo. Isso deve causar performance de streaming degradada.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2061" />
-        <source>Your client GPU doesn't support H.264 decoding. This may cause poor streaming performance.</source>
+        <location filename="../streaming/session.cpp" line="2071"/>
+        <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>Seu GPU do cliente não suporta decodificação H.264. Isso deve causar performance de streaming degradada.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2091" />
-        <source>This PC's GPU doesn't support PyroWave Main10 decoding for HDR streaming.</source>
+        <location filename="../streaming/session.cpp" line="2101"/>
+        <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>A GPU deste PC não suporta descodificação PyroWave Main10 para transmissão HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2109" />
-        <location filename="../streaming/session.cpp" line="2127" />
+        <location filename="../streaming/session.cpp" line="2119"/>
+        <location filename="../streaming/session.cpp" line="2137"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>A utilizar descodificação por software devido à sua opção de forçar HDR sem suporte da GPU. Isto pode causar um fraco desempenho de transmissão.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2121" />
-        <source>This PC's GPU doesn't support HEVC Main10 decoding for HDR streaming.</source>
+        <location filename="../streaming/session.cpp" line="2131"/>
+        <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>A GPU deste PC não suporta decodificação HEVC Main10 para streaming em HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2143" />
-        <source>Your host PC doesn't support YUV 4:4:4 streaming.</source>
+        <location filename="../streaming/session.cpp" line="2153"/>
+        <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>O seu PC host não suporta transmissão YUV 4:4:4.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2151" />
-        <source>Your host PC doesn't support YUV 4:4:4 streaming for selected video codec.</source>
+        <location filename="../streaming/session.cpp" line="2161"/>
+        <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>O seu PC host não suporta transmissão YUV 4:4:4 para o codec de vídeo selecionado.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2166" />
+        <location filename="../streaming/session.cpp" line="2176"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>A utilizar descodificação por software devido à sua opção de forçar YUV 4:4:4 sem suporte da GPU. Isto pode causar um fraco desempenho de transmissão.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2172" />
-        <source>This PC's GPU doesn't support YUV 4:4:4 decoding for selected video codec.</source>
+        <location filename="../streaming/session.cpp" line="2182"/>
+        <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>A GPU deste PC não suporta descodificação YUV 4:4:4 para o codec de vídeo selecionado.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2181" />
+        <location filename="../streaming/session.cpp" line="2191"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>GeForce Experience 3.0 or superior é requerido para streaming em 4K.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2198" />
+        <location filename="../streaming/session.cpp" line="2208"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>Sua configuração de surround seleçionada não é suportada pelo dispositivo de áudio atual.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2204" />
+        <location filename="../streaming/session.cpp" line="2214"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>Falha ao abrir o dispositivo de áudio. Áudio estará indisponível durante esta sessão.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2213" />
+        <location filename="../streaming/session.cpp" line="2223"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>Um dispositivo HID não está a responder (%1). A entrada de comandos e o passthrough do Steam Controller estão desativados nesta sessão. Desligue e volte a ligar o dispositivo e inicie novamente a transmissão.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2217" />
-        <source>An attached gamepad has no mapping and won't be usable. Visit the Moonlight help to resolve this.</source>
+        <location filename="../streaming/session.cpp" line="2227"/>
+        <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>Um controle conectado não tem mapeamento e não será usável. Visite a Ajuda do Moonlight para resolver isso.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2235" />
-        <source>Your host PC's GPU doesn't support streaming video resolutions over 4K.</source>
+        <location filename="../streaming/session.cpp" line="2245"/>
+        <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>A GPU do seu PC de host não suporta streaming de resoluções de vídeo superiores à 4K.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2253" />
-        <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC's GPU.</source>
+        <location filename="../streaming/session.cpp" line="2263"/>
+        <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>Sua seleção de forçar decodificação por hardware não pôde ser satisfeita pela fata de suporte à decodificação por hardware na GPU deste PC.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2256" />
-        <source>Your codec selection and force hardware decoding setting are not compatible. This PC's GPU lacks support for decoding your chosen codec.</source>
+        <location filename="../streaming/session.cpp" line="2266"/>
+        <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>Sua seleção de codec e forçamento de decodificação por hardware não são compatíveis. A GPU deste PC não tem suprte para decodificar seu codec selecionado.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3121" />
+        <location filename="../streaming/session.cpp" line="3180"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>O runtime XR %1 depois de a sessão VR ter iniciado, pelo que a transmissão foi terminada.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3122" />
+        <location filename="../streaming/session.cpp" line="3181"/>
         <source>exited</source>
         <translation>terminou</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3122" />
+        <location filename="../streaming/session.cpp" line="3181"/>
         <source>stopped responding or was lost</source>
         <translation>deixou de responder ou foi perdido</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3278" />
+        <location filename="../streaming/session.cpp" line="3337"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>Não foi possível iniciar o VR neste headset (%1). Certifique-se de que o SteamVR está em execução e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3287" />
-        <source>The headset's VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
+        <location filename="../streaming/session.cpp" line="3346"/>
+        <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>O runtime VR do headset não respondeu a tempo. Certifique-se de que o SteamVR está em execução e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3510" />
+        <location filename="../streaming/session.cpp" line="3576"/>
         <source>Failed to launch via relay proxy</source>
         <translation>Falha ao iniciar através do proxy do relay</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3586" />
+        <location filename="../streaming/session.cpp" line="3665"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 não iniciou uma sessão VR. Certifique-se de que o PCVR está ativado no host e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3595" />
-        <location filename="../streaming/session.cpp" line="3602" />
+        <location filename="../streaming/session.cpp" line="3674"/>
+        <location filename="../streaming/session.cpp" line="3681"/>
         <source>Connection to host failed</source>
         <translation>Falha na ligação ao host</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4886" />
+        <location filename="../streaming/session.cpp" line="4991"/>
         <source>Steering wheel: off (left stick steers)</source>
         <translation>Volante: desativado (o manípulo esquerdo vira)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4887" />
+        <location filename="../streaming/session.cpp" line="4992"/>
         <source>Steering wheel: on - turn both controllers like a wheel</source>
         <translation>Volante: ativado - rode ambos os comandos como um volante</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4888" />
+        <location filename="../streaming/session.cpp" line="4993"/>
         <source>Steering wheel: on (works in Xbox controller mode)</source>
         <translation>Volante: ativado (funciona no Modo de comando Xbox)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="5112" />
+        <location filename="../streaming/session.cpp" line="5217"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>Impossivel inicializar o decodificador de vídeo. Por favor verificar suas configurações de streaming e tente novamente.</translation>
     </message>
@@ -1397,112 +1397,112 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
 <context>
     <name>SettingsView</name>
     <message>
-        <location filename="../gui/SettingsView.qml" line="14" />
+        <location filename="../gui/SettingsView.qml" line="15"/>
         <source>Settings</source>
         <translation>Configurações</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="646" />
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>Resolution and FPS</source>
         <translation>Resolução e FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="654" />
+        <location filename="../gui/SettingsView.qml" line="745"/>
         <source>Setting values too high for your PC or network connection may cause lag, stuttering, or errors.</source>
         <translation>Valores de configuração muito altos para seu PC ou conexão de rede podem causar atrasos, travamentos, ou erros.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="636" />
+        <location filename="../gui/SettingsView.qml" line="727"/>
         <source>Basic Settings</source>
         <translation>Configurações Básicas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="846" />
+        <location filename="../gui/SettingsView.qml" line="937"/>
         <source>Auto (best for this display)</source>
         <translation>Automático (melhor para este ecrã)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="852" />
+        <location filename="../gui/SettingsView.qml" line="943"/>
         <source>720p</source>
         <translation>720p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="858" />
+        <location filename="../gui/SettingsView.qml" line="949"/>
         <source>1080p</source>
         <translation>1080p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="864" />
+        <location filename="../gui/SettingsView.qml" line="955"/>
         <source>1440p</source>
         <translation>1440p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="870" />
+        <location filename="../gui/SettingsView.qml" line="961"/>
         <source>4K</source>
         <translation>4K</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="987" />
+        <location filename="../gui/SettingsView.qml" line="1078"/>
         <source>Custom resolutions are not officially supported by GeForce Experience, so it will not set your host display resolution. You will need to set it manually while in game.</source>
         <translation>Resoluções customizadas não são oficialmente suportadas pelo GeForce Experience, então ele não colocará a resolução do display do host. Você terá de colocar ela manualmente dentro do jogo.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="988" />
+        <location filename="../gui/SettingsView.qml" line="1079"/>
         <source>Resolutions that are not supported by your client or host PC may cause streaming errors.</source>
         <translation>Resoluções que não são suportadas pelo seu PC de host ou cliente deve causar erros de streaming.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="994" />
+        <location filename="../gui/SettingsView.qml" line="1085"/>
         <source>Enter a custom resolution:</source>
         <translation>Coloque uma resolução customizada:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1255" />
+        <location filename="../gui/SettingsView.qml" line="1346"/>
         <source>%1 FPS</source>
         <translation>%1 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1384" />
+        <location filename="../gui/SettingsView.qml" line="1475"/>
         <source>Auto (this display)</source>
         <translation>Automático (este ecrã)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1520" />
+        <location filename="../gui/SettingsView.qml" line="1611"/>
         <source>Frame interpolation (FRUC)</source>
         <translation>Interpolação de fotogramas (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1560" />
+        <location filename="../gui/SettingsView.qml" line="1651"/>
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>Insere um fotograma interpolado entre cada fotograma real, duplicando a taxa de fotogramas de saída efetiva. A taxa de fotogramas real do servidor é reduzida para metade (por exemplo, definição de 120 FPS → pedido de 60 FPS → saída de 120 FPS).</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1670" />
+        <location filename="../gui/SettingsView.qml" line="1761"/>
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute (recomendado — menor latência, qualquer GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1671" />
+        <location filename="../gui/SettingsView.qml" line="1762"/>
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow (fluxo por HW + warp; NVIDIA RTX 20+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1672" />
+        <location filename="../gui/SettingsView.qml" line="1763"/>
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — Modelo ML RIFE (requer GPU potente; Tensor Core RTX 30/40+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1673" />
+        <location filename="../gui/SettingsView.qml" line="1764"/>
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE (experimental; multi-fabricante: NV/AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1683" />
+        <location filename="../gui/SettingsView.qml" line="1774"/>
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
 
-DirectML: runs the bundled RIFE 4.25 lite ONNX model on the D3D12 DirectML EP — *real* motion-compensated ML interpolation, best visual quality on dynamic content. Per-op kernel-launch overhead (~25 ms baseline regardless of resolution) means it needs a Tensor-Core-class GPU (RTX 30/40 mainstream or better) to keep up at 720p+ in real time. On weaker GPUs the client auto-cascades the inference resolution down (1080p → 720p → 540p → 480p → 360p) and falls back to Generic if even 360p can't fit the frame budget.</source>
+DirectML: runs the bundled RIFE 4.25 lite ONNX model on the D3D12 DirectML EP — *real* motion-compensated ML interpolation, best visual quality on dynamic content. Per-op kernel-launch overhead (~25 ms baseline regardless of resolution) means it needs a Tensor-Core-class GPU (RTX 30/40 mainstream or better) to keep up at 720p+ in real time. On weaker GPUs the client auto-cascades the inference resolution down (1080p → 720p → 540p → 480p → 360p) and falls back to Generic if even 360p can&apos;t fit the frame budget.</source>
         <translation>Generic Compute: shader de estimação de movimento + warp em D3D11/GLES. Latência de ~1-2ms, escala até 240 fps, funciona em qualquer GPU D3D11, incluindo iGPU. A predefinição e a melhor opção para a maioria dos utilizadores.
 
 NVIDIA Optical Flow: hardware NVOFA dedicado em Turing+ (séries RTX 20/30/40). ~5ms em placas de consumo, ~13ms em Ampere para estações de trabalho (classe A1000). O optical flow acelerado por hardware produz um perfil de artefactos ligeiramente diferente do Generic nas margens de desoclusão.
@@ -1510,499 +1510,509 @@ NVIDIA Optical Flow: hardware NVOFA dedicado em Turing+ (séries RTX 20/30/40). 
 DirectML: executa o modelo ONNX RIFE 4.25 lite incluído no DirectML EP do D3D12 — interpolação ML *real* com compensação de movimento, a melhor qualidade visual em conteúdo dinâmico. A sobrecarga de lançamento de kernel por operação (~25 ms de base, independentemente da resolução) significa que requer uma GPU da classe Tensor Core (RTX 30/40 de gama média ou superior) para acompanhar em 720p+ em tempo real. Em GPUs mais fracas, o cliente reduz automaticamente e em cascata a resolução de inferência (1080p → 720p → 540p → 480p → 360p) e recorre ao Generic se nem 360p couber no orçamento de tempo por fotograma.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1752" />
+        <location filename="../gui/SettingsView.qml" line="1843"/>
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1753" />
+        <location filename="../gui/SettingsView.qml" line="1844"/>
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1756" />
+        <location filename="../gui/SettingsView.qml" line="1847"/>
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (PERFORMANCE GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1802" />
+        <location filename="../gui/SettingsView.qml" line="1893"/>
         <source>Video bitrate:</source>
         <translation>Bitrate do vídeo:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1810" />
+        <location filename="../gui/SettingsView.qml" line="1901"/>
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>Abaixe o bitrate em conexões mais lentas. Aumente o bitrate para aumentar a qualidade de imagem.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1832" />
+        <location filename="../gui/SettingsView.qml" line="1923"/>
         <source>Video bitrate: %1 Mbps</source>
         <translation>Bitrate do vídeo: %1 Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1879" />
+        <location filename="../gui/SettingsView.qml" line="1970"/>
         <source>Display mode</source>
         <translation>Modo da tela</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1909" />
+        <location filename="../gui/SettingsView.qml" line="2000"/>
         <source>(Recommended)</source>
         <translation>(Recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1890" />
-        <location filename="../gui/SettingsView.qml" line="2459" />
+        <location filename="../gui/SettingsView.qml" line="1981"/>
+        <location filename="../gui/SettingsView.qml" line="2550"/>
         <source>Fullscreen</source>
         <translation>Tela-cheia</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1959" />
+        <location filename="../gui/SettingsView.qml" line="2050"/>
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>O modo Tela-cheia geralmente provém a melhor performance, mas Janela sem-bordas deve funcionar melhor com funcionalidades como o macOS Spaces, Alt+Tab, ferramentas de captura-de-tela, overlays da tela, etc.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1895" />
+        <location filename="../gui/SettingsView.qml" line="1986"/>
         <source>Borderless windowed</source>
         <translation>Janela Sem-bordas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="725" />
+        <location filename="../gui/SettingsView.qml" line="816"/>
         <source>Native</source>
         <translation>Nativa</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="726" />
+        <location filename="../gui/SettingsView.qml" line="817"/>
         <source>Native (Excluding Notch)</source>
         <translation>Nativa (excluindo o notch)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1848" />
+        <location filename="../gui/SettingsView.qml" line="1939"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>Usar predefinição (%1 Mbps)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1900" />
-        <location filename="../gui/SettingsView.qml" line="2451" />
+        <location filename="../gui/SettingsView.qml" line="1991"/>
+        <location filename="../gui/SettingsView.qml" line="2542"/>
         <source>Windowed</source>
         <translation>Janela</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1966" />
+        <location filename="../gui/SettingsView.qml" line="2057"/>
         <source>V-Sync</source>
         <translation>Sincronização Visual (V-Sync)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1976" />
+        <location filename="../gui/SettingsView.qml" line="2067"/>
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>Desabilitando o V-Sync provém latência de renderização Sub-frame, mas pode demonstrar cortes visíveis na tela</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1983" />
+        <location filename="../gui/SettingsView.qml" line="2074"/>
         <source>Frame pacing</source>
         <translation>Rítimo do Frame</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2006" />
+        <location filename="../gui/SettingsView.qml" line="2097"/>
         <source>Audio Settings</source>
         <translation>Configurações de Áudio</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2041" />
+        <location filename="../gui/SettingsView.qml" line="2132"/>
         <source>Stereo</source>
         <translation>Stéreo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2045" />
+        <location filename="../gui/SettingsView.qml" line="2136"/>
         <source>5.1 surround sound</source>
         <translation>Som Surround 5.1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2049" />
+        <location filename="../gui/SettingsView.qml" line="2140"/>
         <source>7.1 surround sound</source>
         <translation>Som Surround 7.1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2063" />
+        <location filename="../gui/SettingsView.qml" line="2154"/>
         <source>Mute host PC speakers while streaming</source>
         <translation>Siencie os alto-falantes do PC de host enquanto streamando</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2073" />
+        <location filename="../gui/SettingsView.qml" line="2164"/>
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>Você deve re-iniciar qualquer jogo atualmente em progresso para esta configuração fazer efeito</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2195" />
+        <location filename="../gui/SettingsView.qml" line="2286"/>
         <source>UI Settings</source>
         <translation>Configurações de UI</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2240" />
+        <location filename="../gui/SettingsView.qml" line="2331"/>
         <source>Language</source>
         <translation>Língua</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2266" />
+        <location filename="../gui/SettingsView.qml" line="2357"/>
         <source>Automatic</source>
         <translation>Automático</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2418" />
+        <location filename="../gui/SettingsView.qml" line="2509"/>
         <source>GUI display mode</source>
         <translation>Modo de exibição da GUI</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2455" />
+        <location filename="../gui/SettingsView.qml" line="2546"/>
         <source>Maximized</source>
         <translation>Maximizado</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2483" />
+        <location filename="../gui/SettingsView.qml" line="2574"/>
         <source>Show configuration warnings</source>
         <translation>Mostrar avisos de configuração</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2565" />
+        <location filename="../gui/SettingsView.qml" line="2656"/>
         <source>Input Settings</source>
         <translation>Configurações de Entrada</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2586" />
-        <source>This enables seamless mouse control without capturing the client's mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
+        <location filename="../gui/SettingsView.qml" line="2677"/>
+        <source>This enables seamless mouse control without capturing the client&apos;s mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>Isto habilita controle perfeito do rato sem capturar o cursor do clente. É ideal para uso do Desktop Remoto mas não funcionará na maioria dos jogos.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2588" />
+        <location filename="../gui/SettingsView.qml" line="2679"/>
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>AVISO: Por causa de um bug no GeForce Experience, esta opção não deve funcionar corretamente se seu PC de host ter múltiplos monitores.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2957" />
+        <location filename="../gui/SettingsView.qml" line="3048"/>
         <source>AV1 (Experimental)</source>
         <translation>AV1 (Experimental)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2977" />
+        <location filename="../gui/SettingsView.qml" line="3068"/>
         <source>Enable HDR (Experimental)</source>
         <translation>Habilitar HDR (Experimental)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2995" />
+        <location filename="../gui/SettingsView.qml" line="3086"/>
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>O stream será HDR-capaz, más alguns jogos podem requerer monitor de HDR no seu host PC para habilitar modo HDR.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2997" />
+        <location filename="../gui/SettingsView.qml" line="3088"/>
         <source>HDR streaming is not supported on this PC.</source>
         <translation>HDR streaming não é suportado por este PC.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3049" />
+        <location filename="../gui/SettingsView.qml" line="3140"/>
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>Desbloqueia taxas de bits de vídeo extremamente elevadas para utilização com hosts VipleStream-Server. Só deve ser usado ao transmitir através de uma ligação Ethernet LAN.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3087" />
+        <location filename="../gui/SettingsView.qml" line="3178"/>
         <source>Show performance stats while streaming</source>
         <translation>Mostrar estatísticas de desempenho durante a transmissão</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3097" />
+        <location filename="../gui/SettingsView.qml" line="3188"/>
         <source>Display real-time stream performance information while streaming.</source>
         <translation>Apresenta informações de desempenho da transmissão em tempo real durante a transmissão.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3098" />
+        <location filename="../gui/SettingsView.qml" line="3189"/>
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>Pode ativá-la ou desativá-la a qualquer momento durante a transmissão com Ctrl+Alt+Shift+S ou Select+L1+R1+X.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3099" />
+        <location filename="../gui/SettingsView.qml" line="3190"/>
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>A sobreposição de desempenho não é suportada no Steam Link nem no Raspberry Pi.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2671" />
+        <location filename="../gui/SettingsView.qml" line="2762"/>
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>Use o touchscreen como um trackpad virtual</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2688" />
+        <location filename="../gui/SettingsView.qml" line="2779"/>
         <source>Swap left and right mouse buttons</source>
         <translation>Inverta os botões esquerdo e direito do rato</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2700" />
+        <location filename="../gui/SettingsView.qml" line="2791"/>
         <source>Reverse mouse scrolling direction</source>
         <translation>Inverta a diração da roda do rato</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2714" />
+        <location filename="../gui/SettingsView.qml" line="2805"/>
         <source>Gamepad Settings</source>
         <translation>Configurações do Controle</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2724" />
+        <location filename="../gui/SettingsView.qml" line="2815"/>
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>Troque os botões A/B e X/Y do Controle</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2734" />
+        <location filename="../gui/SettingsView.qml" line="2825"/>
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>Isto troca controles para um layout de botões estilo-Nintendo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2740" />
+        <location filename="../gui/SettingsView.qml" line="2831"/>
         <source>Force gamepad #1 always connected</source>
         <translation>Forçe o controle #1 sempre estar conectado</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2750" />
+        <location filename="../gui/SettingsView.qml" line="2841"/>
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>Força um único controle sempre se manter conectado com o host, mesmo que nenhum controle esteja realmente conectado neste PC.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2587" />
+        <location filename="../gui/SettingsView.qml" line="2678"/>
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>Você pode habilitar isto enquanto streamando usando Ctrl+Alt+Shift+M.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2758" />
-        <source>Enable mouse control with gamepads by holding the 'Start' button</source>
-        <translation>Habilite o controle do rato com controles enquanto segurando o botão 'Start'</translation>
+        <location filename="../gui/SettingsView.qml" line="2849"/>
+        <source>Enable mouse control with gamepads by holding the &apos;Start&apos; button</source>
+        <translation>Habilite o controle do rato com controles enquanto segurando o botão &apos;Start&apos;</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2099" />
+        <location filename="../gui/SettingsView.qml" line="2190"/>
         <source>Host Settings</source>
         <translation>Configurações de Host</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2853" />
+        <location filename="../gui/SettingsView.qml" line="2944"/>
         <source>Advanced Settings</source>
         <translation>Configurações Avançadas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2016" />
+        <location filename="../gui/SettingsView.qml" line="2107"/>
         <source>Audio configuration</source>
         <translation>Configuração de Áudio</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2472" />
+        <location filename="../gui/SettingsView.qml" line="2563"/>
         <source>Show connection quality warnings</source>
         <translation>Mostre avisos de qualidade de conexão</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2495" />
+        <location filename="../gui/SettingsView.qml" line="2586"/>
         <source>Discord Rich Presence integration</source>
         <translation>Integração de Avantajada Presença do Discord</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2751" />
-        <source>Only enable this option when streaming a game that doesn't support gamepads being connected after startup.</source>
+        <location filename="../gui/SettingsView.qml" line="2842"/>
+        <source>Only enable this option when streaming a game that doesn&apos;t support gamepads being connected after startup.</source>
         <translation>Apenas habilite esta opção quando streamando um jogo que não suporta contoles sendo conectados após a inicialização.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2576" />
+        <location filename="../gui/SettingsView.qml" line="2667"/>
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>Otimize o rato para Desktop Remoto ao contrário de jogos</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1151" />
-        <location filename="../gui/SettingsView.qml" line="1344" />
+        <location filename="../gui/SettingsView.qml" line="1242"/>
+        <location filename="../gui/SettingsView.qml" line="1435"/>
         <source>Custom (%1 FPS)</source>
         <translation>Personalizado (%1 FPS)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1166" />
+        <location filename="../gui/SettingsView.qml" line="1257"/>
         <source>Enter a custom frame rate:</source>
         <translation>Introduza uma taxa de fotogramas personalizada:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="767" />
-        <location filename="../gui/SettingsView.qml" line="815" />
-        <location filename="../gui/SettingsView.qml" line="824" />
-        <location filename="../gui/SettingsView.qml" line="1278" />
+        <location filename="../gui/SettingsView.qml" line="858"/>
+        <location filename="../gui/SettingsView.qml" line="906"/>
+        <location filename="../gui/SettingsView.qml" line="915"/>
+        <location filename="../gui/SettingsView.qml" line="1369"/>
         <source>Custom</source>
         <translation>Personalizado</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1389" />
+        <location filename="../gui/SettingsView.qml" line="1480"/>
         <source>30 FPS</source>
         <translation>30 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1394" />
+        <location filename="../gui/SettingsView.qml" line="1485"/>
         <source>60 FPS</source>
         <translation>60 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2536" />
+        <location filename="../gui/SettingsView.qml" line="2627"/>
         <source>Keep the display awake while streaming</source>
         <translation>Manter o display ativo durante streaming</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2546" />
+        <location filename="../gui/SettingsView.qml" line="2637"/>
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>Impede que a tela de descanso inicie ou que o display adormeça durante streaming.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2598" />
+        <location filename="../gui/SettingsView.qml" line="2689"/>
         <source>Capture system keyboard shortcuts</source>
         <translation>Capture teclas de atalho do sistema</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2606" />
+        <location filename="../gui/SettingsView.qml" line="2697"/>
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>Isto habilita a captura de teclas de atalho do sistema como Alt+Tab que iriam normalmente ser manuseados pelo SO do cliente enquanto streamando.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2636" />
+        <location filename="../gui/SettingsView.qml" line="2727"/>
         <source>in fullscreen</source>
         <translation>em tela-cheia</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2640" />
+        <location filename="../gui/SettingsView.qml" line="2731"/>
         <source>always</source>
         <translation>sempre</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2681" />
+        <location filename="../gui/SettingsView.qml" line="2772"/>
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>Quando selecionado, o touchscreen age como um touchpad. Quando não-selecionado, o touchscreen diretamente controlará o ponteiro do rato.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2109" />
+        <location filename="../gui/SettingsView.qml" line="2200"/>
         <source>Optimize game settings for streaming</source>
         <translation>Otimize as configurações do jogo para streaming</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="346" />
+        <location filename="../gui/SettingsView.qml" line="347"/>
         <source>Show advanced and experimental options</source>
         <translation>Mostrar opções avançadas e experimentais</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="356" />
+        <location filename="../gui/SettingsView.qml" line="357"/>
         <source>Shows options meant for troubleshooting and testing: renderer and video decoder, frame interpolation engines, experimental video formats and network test switches. Hidden options keep their current values.</source>
         <translation>Mostra opções para resolução de problemas e testes: renderizador e descodificador de vídeo, motores de interpolação de fotogramas, formatos de vídeo experimentais e interruptores de testes de rede. As opções ocultas mantêm os valores atuais.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="484" />
+        <location filename="../gui/SettingsView.qml" line="461"/>
+        <source>Sharper where you look (foveated streaming)</source>
+        <translation>Mais nítido para onde olha (transmissão foveada)</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="468"/>
+        <source>Small</source>
+        <translation>Pequeno</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="468"/>
+        <source>Medium</source>
+        <translation>Médio</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="468"/>
+        <source>Large</source>
+        <translation>Grande</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="487"/>
+        <source>Each eye is sent as a reduced picture of the whole view plus a full-detail picture that follows your gaze (it stays straight ahead without eye tracking). A larger size keeps more detail away from where you look, but uses more bandwidth and headset power and adds a little delay.</source>
+        <translation>Cada olho é enviado como uma imagem reduzida de todo o campo de visão mais uma imagem com todo o detalhe que segue o seu olhar (fica em frente se não houver seguimento ocular). Um tamanho maior mantém mais detalhe fora da zona para onde olha, mas usa mais largura de banda e energia do headset e acrescenta um pequeno atraso.</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="494"/>
         <source>Frame rate</source>
         <translation>Taxa de fotogramas</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="494" />
+        <location filename="../gui/SettingsView.qml" line="504"/>
         <source>Automatic (half rate while the network is unstable)</source>
         <translation>Automática (metade da taxa enquanto a rede estiver instável)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="495" />
+        <location filename="../gui/SettingsView.qml" line="505"/>
         <source>Full (same as the headset refresh rate)</source>
         <translation>Total (igual à taxa de atualização do headset)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="496" />
+        <location filename="../gui/SettingsView.qml" line="506"/>
         <source>Half (each frame shown twice)</source>
         <translation>Metade (cada fotograma apresentado duas vezes)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="497" />
+        <location filename="../gui/SettingsView.qml" line="507"/>
         <source>Half with synthesized in-between frames</source>
         <translation>Metade com fotogramas intermédios sintetizados</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="512" />
+        <location filename="../gui/SettingsView.qml" line="522"/>
         <source>Automatic streams at full rate and switches to half rate without restarting the game while the network keeps delaying frames, then tries full rate again once it is stable. Half rate streams every other frame while the headset still displays at full rate: half the network traffic and more time to repair lost packets. Synthesized frames make motion look smoother but can wobble or tear on fast objects.</source>
         <translation>O modo automático transmite à taxa total e muda para metade da taxa sem reiniciar o jogo enquanto a rede continuar a atrasar fotogramas, voltando a tentar a taxa total assim que estabilizar. A metade da taxa transmite um fotograma sim, outro não, enquanto o headset continua a apresentar à taxa total: metade do tráfego de rede e mais tempo para reparar pacotes perdidos. Os fotogramas sintetizados tornam o movimento mais fluido, mas podem ondular ou rasgar em objetos rápidos.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="529" />
+        <location filename="../gui/SettingsView.qml" line="539"/>
         <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers.</source>
         <translation>Reduz o bitrate quando a rede perde pacotes e volta a aumentá-lo quando a rede recupera.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="535" />
+        <location filename="../gui/SettingsView.qml" line="545"/>
         <source>Steering wheel with the controllers (Xbox controller mode)</source>
         <translation>Volante com os comandos (Modo de comando Xbox)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="545" />
-        <source>In games that use the virtual Xbox controller, hold both controllers like a steering wheel and turn them to steer (replaces the left stick's left/right). While streaming, hold both thumbsticks pressed for 1.5 seconds to switch it on or off.</source>
+        <location filename="../gui/SettingsView.qml" line="555"/>
+        <source>In games that use the virtual Xbox controller, hold both controllers like a steering wheel and turn them to steer (replaces the left stick&apos;s left/right). While streaming, hold both thumbsticks pressed for 1.5 seconds to switch it on or off.</source>
         <translation>Nos jogos que usam o comando Xbox virtual, segure ambos os comandos como um volante e rode-os para virar (substitui a esquerda/direita do manípulo esquerdo). Durante a transmissão, mantenha premidos ambos os manípulos durante 1.5 segundos para ligar ou desligar.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="550" />
+        <location filename="../gui/SettingsView.qml" line="560"/>
         <source>Steering wheel rotation (full left to full right)</source>
         <translation>Rotação do volante (totalmente à esquerda ao máximo à direita)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="573" />
-        <source>How far you turn the controllers for full lock. 180° means a quarter turn either way reaches the stick's end.</source>
+        <location filename="../gui/SettingsView.qml" line="583"/>
+        <source>How far you turn the controllers for full lock. 180° means a quarter turn either way reaches the stick&apos;s end.</source>
         <translation>O quanto roda os comandos para a rotação máxima. 180° significa que um quarto de volta para qualquer um dos lados atinge o limite do manípulo.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="579" />
+        <location filename="../gui/SettingsView.qml" line="589"/>
         <source>Headset network during VR (Steam Frame with the streaming adapter)</source>
         <translation>Rede do headset durante a VR (Steam Frame com o adaptador de transmissão)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="586" />
-        <source>Test and choose automatically</source>
-        <translation>Testar e escolher automaticamente</translation>
-    </message>
-    <message>
-        <location filename="../gui/SettingsView.qml" line="586" />
+        <location filename="../gui/SettingsView.qml" line="596"/>
         <source>Always keep home Wi-Fi</source>
         <translation>Manter sempre o Wi-Fi de casa</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="586" />
+        <location filename="../gui/SettingsView.qml" line="596"/>
         <source>Pause home Wi-Fi while streaming</source>
         <translation>Pausar o Wi-Fi de casa durante a transmissão</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="598" />
-        <source>The headset has one Wi-Fi radio, so staying on home Wi-Fi while streaming over the adapter makes it switch back and forth and drop video. The automatic test compares both during a VR stream (about 1 minute) and remembers the result for this place. While home Wi-Fi is paused the headset itself is offline; it reconnects when you stop streaming.</source>
-        <translation>O headset possui apenas um rádio Wi-Fi, pelo que permanecer ligado ao Wi-Fi de casa enquanto transmite através do adaptador faz com que alterne constantemente e perca fotogramas de vídeo. O teste automático compara ambos durante uma transmissão em VR (cerca de 1 minuto) e memoriza o resultado para este local. Enquanto o Wi-Fi de casa estiver em pausa, o próprio headset fica offline; voltará a ligar-se quando parar a transmissão.</translation>
-    </message>
-    <message>
-        <location filename="../gui/SettingsView.qml" line="604" />
+        <location filename="../gui/SettingsView.qml" line="706"/>
         <source>Send the headset microphone to the PC</source>
         <translation>Enviar o microfone do headset para o PC</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="614" />
-        <source>During a VR stream your voice goes to the PC's "Microphone (Steam Streaming Microphone)" device (installed with Steam). Select it in the game or voice chat app.</source>
-        <translation>Durante uma transmissão em VR, a sua voz vai para o dispositivo "Microphone (Steam Streaming Microphone)" do PC (instalado com o Steam). Selecione-o no jogo ou na aplicação de chat de voz.</translation>
+        <location filename="../gui/SettingsView.qml" line="716"/>
+        <source>During a VR stream your voice goes to the PC&apos;s &quot;Microphone (Steam Streaming Microphone)&quot; device (installed with Steam). Select it in the game or voice chat app.</source>
+        <translation>Durante uma transmissão em VR, a sua voz vai para o dispositivo &quot;Microphone (Steam Streaming Microphone)&quot; do PC (instalado com o Steam). Selecione-o no jogo ou na aplicação de chat de voz.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="621" />
-        <source>Run the network test again next time</source>
-        <translation>Executar o teste de rede novamente da próxima vez</translation>
-    </message>
-    <message>
-        <location filename="../gui/SettingsView.qml" line="1423" />
+        <location filename="../gui/SettingsView.qml" line="1514"/>
         <source>Renderer</source>
         <translation>Renderer (motor de renderização)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1441" />
+        <location filename="../gui/SettingsView.qml" line="1532"/>
         <source>Auto (recommended) — let the system pick the most stable hardware decoding path</source>
         <translation>Automático (Auto) — Recomendado: o sistema escolhe o caminho de descodificação por hardware mais estável</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1442" />
+        <location filename="../gui/SettingsView.qml" line="1533"/>
         <source>Direct3D 11 — always use D3D11VA; works with the NV-OF / DirectML / NCNN interpolation engines</source>
         <translation>Direct3D 11 — Fixa o D3D11VA; compatível com os motores de interpolação NV-OF / DirectML / NCNN</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1443" />
+        <location filename="../gui/SettingsView.qml" line="1534"/>
         <source>Vulkan [experimental] — built-in frame interpolation; compatibility issues on some systems (AMD APU / older NVIDIA drivers)</source>
         <translation>Vulkan [Experimental] — Interpolação de fotogramas integrada; alguns sistemas (AMD APU / drivers NV antigos) têm problemas de compatibilidade</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1470" />
-        <source>Auto (recommended): same as upstream Moonlight's hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
+        <location filename="../gui/SettingsView.qml" line="1561"/>
+        <source>Auto (recommended): same as upstream Moonlight&apos;s hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
 
@@ -2014,27 +2024,27 @@ Direct3D 11: fixa explicitamente o D3D11VA; motores de interpolação disponíve
 Vulkan [Experimental]: força o Vulkan-first cascade + pipeline de renderização Vulkan nativo + dual-present, com motor de interpolação integrado (equivalente ao Generic). Problemas conhecidos: no driver NV 596.36, o vkCmdDecodeVideoKHR nativo em modo ONLY provoca NVDEC device-lost; em AMD APU, o driver falha na fase de video session memory bind de 226MB; o caminho PARALLEL+SW upload tem desempenho baixo (80+ ms/fotograma). Voltará a ser a opção recomendada quando estabilizar.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1481" />
+        <location filename="../gui/SettingsView.qml" line="1572"/>
         <source>Linux video output (frontend)</source>
         <translation>Apresentação de vídeo em Linux (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1496" />
+        <location filename="../gui/SettingsView.qml" line="1587"/>
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>Automático (Auto) — Recomendado: aarch64 ou Zink usam Vulkan; os restantes mantêm a ordem original</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1497" />
+        <location filename="../gui/SettingsView.qml" line="1588"/>
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — Dar prioridade à apresentação via Vulkan</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1498" />
+        <location filename="../gui/SettingsView.qml" line="1589"/>
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — Manter a ordem original (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1514" />
+        <location filename="../gui/SettingsView.qml" line="1605"/>
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -2051,107 +2061,107 @@ Vulkan: dá sempre prioridade à apresentação via Vulkan (libplacebo) e volta 
 EGL: mantém a ordem original, sem dar preferência ao Vulkan.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1570" />
+        <location filename="../gui/SettingsView.qml" line="1661"/>
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>O renderer Vulkan usa o motor de interpolação integrado (equivalente ao Generic). Para escolher outro motor de interpolação, mude para Direct3D 11.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1588" />
+        <location filename="../gui/SettingsView.qml" line="1679"/>
         <source>Interpolation mode:</source>
         <translation>Modo de interpolação:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1594" />
+        <location filename="../gui/SettingsView.qml" line="1685"/>
         <source>Active (recommended)</source>
         <translation>Ativo (recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1615" />
+        <location filename="../gui/SettingsView.qml" line="1706"/>
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>O servidor envia fps da UI / 2 (ou / 3 em ecrãs de alta taxa de atualização); o cliente faz sempre interpolação dupla/tripla. Baixa carga no servidor; requer uma GPU suficientemente potente no cliente.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1619" />
+        <location filename="../gui/SettingsView.qml" line="1710"/>
         <source>Passive</source>
         <translation>Passivo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1640" />
+        <location filename="../gui/SettingsView.qml" line="1731"/>
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>O servidor envia o fps total da UI. O cliente aumenta dinamicamente o rácio conforme o recv%: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Adequado quando o servidor nem sempre consegue enviar o fps total.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1736" />
+        <location filename="../gui/SettingsView.qml" line="1827"/>
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY (GPU integradas / mais antigas)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1740" />
+        <location filename="../gui/SettingsView.qml" line="1831"/>
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN (não detetado; reinicie o cliente para detetar)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1742" />
+        <location filename="../gui/SettingsView.qml" line="1833"/>
         <source>(not detected yet)</source>
         <translation>(ainda não detetado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1746" />
+        <location filename="../gui/SettingsView.qml" line="1837"/>
         <source>(not measured)</source>
         <translation>(não medido)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1747" />
+        <location filename="../gui/SettingsView.qml" line="1838"/>
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>Escalonamento automático do FRUC (Vulkan unified autotier v1.4.127):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1748" />
+        <location filename="../gui/SettingsView.qml" line="1839"/>
         <source>   GPU: </source>
         <translation>   GPU: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1749" />
+        <location filename="../gui/SettingsView.qml" line="1840"/>
         <source>   Detected tier: </source>
         <translation>   Tier detetado: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1750" />
+        <location filename="../gui/SettingsView.qml" line="1841"/>
         <source>   Benchmark: </source>
         <translation>   benchmark: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1751" />
+        <location filename="../gui/SettingsView.qml" line="1842"/>
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>O runtime sobe/desce automaticamente ao longo de 7 níveis (T-1..T5):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1754" />
+        <location filename="../gui/SettingsView.qml" line="1845"/>
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (GPU com NVOF de gama média, ênfase no chain)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1755" />
+        <location filename="../gui/SettingsView.qml" line="1846"/>
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (AMD/Intel sem NVOF)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1757" />
+        <location filename="../gui/SettingsView.qml" line="1848"/>
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (FRUC mínimo)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1758" />
+        <location filename="../gui/SettingsView.qml" line="1849"/>
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = FRUC em pausa (a GPU não aguenta; nova tentativa após 5 min)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1770" />
+        <location filename="../gui/SettingsView.qml" line="1861"/>
         <source>Edge MV threshold:</source>
         <translation>Limiar de MV nas margens (Edge MV threshold):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1786" />
+        <location filename="../gui/SettingsView.qml" line="1877"/>
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -2164,328 +2174,393 @@ Valor alto (12-16): margens mais nítidas, mas pode restar mosaico em contornos 
 Recomenda-se começar pela predefinição; se as margens da interpolação mostrarem blocos, baixe para 4-6.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="519" />
-        <location filename="../gui/SettingsView.qml" line="1863" />
+        <location filename="../gui/SettingsView.qml" line="529"/>
+        <location filename="../gui/SettingsView.qml" line="1954"/>
         <source>Adjust bitrate automatically while streaming</source>
         <translation>Ajustar automaticamente o bitrate durante a transmissão</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1873" />
+        <location filename="../gui/SettingsView.qml" line="1964"/>
         <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers. The bitrate above is the maximum.</source>
         <translation>Reduz o bitrate quando a rede perde pacotes e volta a aumentá-lo quando a rede recupera. O bitrate acima é o máximo.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1996" />
+        <location filename="../gui/SettingsView.qml" line="2087"/>
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>O ritmo de fotogramas reduz os micro-engasgos atrasando os fotogramas que chegam demasiado cedo. Também funciona com o V-Sync desativado, por isso mantém a latência baixa enquanto suaviza a chegada irregular de fotogramas.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2079" />
+        <location filename="../gui/SettingsView.qml" line="2170"/>
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>Silenciar o áudio da transmissão quando o VipleStream não é a janela ativa</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2090" />
-        <source>Mutes VipleStream's audio when you Alt+Tab out of the stream or click on a different window.</source>
+        <location filename="../gui/SettingsView.qml" line="2181"/>
+        <source>Mutes VipleStream&apos;s audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>Silencia o áudio do VipleStream quando sai da transmissão com Alt+Tab ou clica noutra janela.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2120" />
+        <location filename="../gui/SettingsView.qml" line="2211"/>
         <source>Quit app on host PC after ending stream</source>
         <translation>Saia do aplicativo no PC de host depois de terminar a stream</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2130" />
+        <location filename="../gui/SettingsView.qml" line="2221"/>
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>Isto fechará o aplicativo ou jogo que estás streamando no momento que ela terminar. Você perderá qualquer progresso não salvo!</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2209" />
+        <location filename="../gui/SettingsView.qml" line="2300"/>
         <source>Design</source>
         <translation>Design</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2216" />
+        <location filename="../gui/SettingsView.qml" line="2307"/>
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>Seguro: grelha editorial, cabeçalho mais discreto.
 Arrojado: energia de capa de revista, títulos de grandes dimensões.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2232" />
+        <location filename="../gui/SettingsView.qml" line="2323"/>
         <source>Safe</source>
         <translation>Seguro</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2233" />
+        <location filename="../gui/SettingsView.qml" line="2324"/>
         <source>Bold</source>
         <translation>Arrojado</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2401" />
+        <location filename="../gui/SettingsView.qml" line="2492"/>
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>Tem de reiniciar o VipleStream para que esta alteração tenha efeito</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2505" />
-        <source>Updates your Discord status to display the name of the game you're streaming. The status reads "Playing &lt;game&gt; · via VipleStream" with the VipleStream icon.</source>
-        <translation>Atualiza o seu estado no Discord para mostrar o nome do jogo que está a transmitir. O estado mostra "Playing &lt;game&gt; · via VipleStream" com o ícone do VipleStream.</translation>
+        <location filename="../gui/SettingsView.qml" line="2596"/>
+        <source>Updates your Discord status to display the name of the game you&apos;re streaming. The status reads &quot;Playing &lt;game&gt; · via VipleStream&quot; with the VipleStream icon.</source>
+        <translation>Atualiza o seu estado no Discord para mostrar o nome do jogo que está a transmitir. O estado mostra &quot;Playing &lt;game&gt; · via VipleStream&quot; com o ícone do VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="366" />
+        <location filename="../gui/SettingsView.qml" line="367"/>
         <source>VR Streaming (Steam Frame)</source>
         <translation>Transmissão VR (Steam Frame)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="375" />
+        <location filename="../gui/SettingsView.qml" line="376"/>
         <source>Resolution per eye</source>
         <translation>Resolução por olho</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="399" />
+        <location filename="../gui/SettingsView.qml" line="401"/>
         <source>Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.</source>
         <translation>Menos píxeis para codificar, enviar e descodificar significa menor latência. O host pode continuar a renderizar numa resolução mais alta e reduzi-la.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="404" />
+        <location filename="../gui/SettingsView.qml" line="406"/>
         <source>Extra field of view (overscan)</source>
         <translation>Campo de visão extra (overscan)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="412" />
-        <location filename="../gui/SettingsView.qml" line="438" />
-        <location filename="../gui/SettingsView.qml" line="464" />
+        <location filename="../gui/SettingsView.qml" line="414"/>
+        <location filename="../gui/SettingsView.qml" line="440"/>
+        <location filename="../gui/SettingsView.qml" line="468"/>
         <source>Off</source>
         <translation>Desligado</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="425" />
+        <location filename="../gui/SettingsView.qml" line="427"/>
         <source>Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.</source>
         <translation>Renderiza um pouco além da margem de cada olho para que, ao rodar a cabeça, não apareçam margens vazias.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="430" />
+        <location filename="../gui/SettingsView.qml" line="432"/>
         <source>Pick the newest frame this late</source>
         <translation>Escolher o fotograma mais recente com este atraso</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="451" />
+        <location filename="../gui/SettingsView.qml" line="453"/>
         <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
         <translation>Espera alguns milissegundos antes de escolher que fotograma mostrar, para que o fotograma seja mais recente. Um valor demasiado alto faz com que o headset salte fotogramas.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="456" />
-        <source>Sharper centre (foveated encoding)</source>
-        <translation>Centro mais nítido (codificação foveada)</translation>
+        <location filename="../gui/SettingsView.qml" line="596"/>
+        <source>Use the network test result</source>
+        <translation>Usar o resultado do teste de rede</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="477" />
-        <source>Spends more of the stream's pixels straight ahead and fewer at the edges of each eye. The stream stays the same size.</source>
-        <translation>Dedica mais píxeis da transmissão à zona em frente e menos às margens de cada olho. A transmissão mantém o mesmo tamanho.</translation>
+        <location filename="../gui/SettingsView.qml" line="608"/>
+        <source>The headset has one Wi-Fi radio, so staying on home Wi-Fi while streaming over the adapter makes it switch back and forth and drop video. &quot;Test network&quot; below compares both and remembers the result for this place; until then home Wi-Fi is kept. While home Wi-Fi is paused the headset itself is offline; it reconnects when you stop streaming.</source>
+        <translation>O headset tem apenas um rádio Wi-Fi, pelo que manter o Wi-Fi de casa ligado enquanto transmite através do adaptador faz com que alterne constantemente e perca vídeo. &quot;Testar rede&quot; abaixo compara ambos os modos e memoriza o resultado para este local; até lá, o Wi-Fi de casa é mantido. Enquanto o Wi-Fi de casa está em pausa, o próprio headset fica offline; volta a ligar-se quando parar a transmissão.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2511" />
+        <location filename="../gui/SettingsView.qml" line="616"/>
+        <source>Cancel test</source>
+        <translation>Cancelar teste</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="616"/>
+        <source>Test network</source>
+        <translation>Testar rede</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="630"/>
+        <source>Plays a recorded table tennis clip from the host at 144 Hz and raises the resolution step by step, first with home Wi-Fi + adapter, then adapter only, then home Wi-Fi again. Takes about 10-20 minutes; you can keep the headset on or take it off. The headset&apos;s home Wi-Fi pauses for part of the test and Steam may sign in again afterwards.</source>
+        <translation>Reproduz um clipe gravado de ténis de mesa a partir do host a 144 Hz e aumenta a resolução passo a passo, primeiro com Wi-Fi de casa + adaptador, depois só com o adaptador e, por fim, novamente com o Wi-Fi de casa. Demora cerca de 10–20 minutos; pode manter o headset colocado ou retirá-lo. O Wi-Fi de casa do headset fica em pausa durante parte do teste e o Steam poderá voltar a iniciar sessão depois.</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="635"/>
+        <source>Apply</source>
+        <translation>Aplicar</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="655"/>
+        <source>Last test: %1</source>
+        <translation>Último teste: %1</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="677"/>
+        <source>Network</source>
+        <translation>Rede</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="677"/>
+        <source>Per eye</source>
+        <translation>Por olho</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="677"/>
+        <source>Missed frames</source>
+        <translation>Fotogramas perdidos</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="677"/>
+        <source>Latency p95 (ms)</source>
+        <translation>Latência p95 (ms)</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="677"/>
+        <source>Mbps</source>
+        <translation>Mbps</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="677"/>
+        <source>144 Hz</source>
+        <translation>144 Hz</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="698"/>
+        <source>yes</source>
+        <translation>sim</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="698"/>
+        <source>no</source>
+        <translation>não</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="2602"/>
         <source>App updates</source>
         <translation>Atualizações da aplicação</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2518" />
-        <source>Don't check automatically</source>
+        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <source>Don&apos;t check automatically</source>
         <translation>Não procurar automaticamente</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2518" />
+        <location filename="../gui/SettingsView.qml" line="2609"/>
         <source>Notify me</source>
         <translation>Notificar-me</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2518" />
+        <location filename="../gui/SettingsView.qml" line="2609"/>
         <source>Install automatically</source>
         <translation>Instalar automaticamente</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2530" />
+        <location filename="../gui/SettingsView.qml" line="2621"/>
         <source>Checks for a new version when VipleStream starts. Install automatically downloads and verifies the update and restarts VipleStream, but never while you are streaming.</source>
-        <translation>Procura uma nova versão quando o VipleStream inicia. "Instalar automaticamente" transfere e verifica a atualização e reinicia o VipleStream, mas nunca durante a transmissão.</translation>
+        <translation>Procura uma nova versão quando o VipleStream inicia. &quot;Instalar automaticamente&quot; transfere e verifica a atualização e reinicia o VipleStream, mas nunca durante a transmissão.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2607" />
+        <location filename="../gui/SettingsView.qml" line="2698"/>
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>NOTA: Alguns atalhos de teclado, como Ctrl+Alt+Del no Windows, não podem ser intercetados por nenhuma aplicação, incluindo o VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2769" />
+        <location filename="../gui/SettingsView.qml" line="2860"/>
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>Processar a entrada de comandos quando o VipleStream está em segundo plano</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2780" />
-        <source>Allows VipleStream to capture gamepad inputs even if it's not the current window in focus</source>
+        <location filename="../gui/SettingsView.qml" line="2871"/>
+        <source>Allows VipleStream to capture gamepad inputs even if it&apos;s not the current window in focus</source>
         <translation>Permite que o VipleStream capture a entrada de comandos mesmo que não seja a janela com foco</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2790" />
+        <location filename="../gui/SettingsView.qml" line="2881"/>
         <source>Network (MP-QUIC)</source>
         <translation>Rede (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2800" />
+        <location filename="../gui/SettingsView.qml" line="2891"/>
         <source>Enable MP-QUIC multipath transport</source>
         <translation>Ativar transporte multipath MP-QUIC</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2810" />
+        <location filename="../gui/SettingsView.qml" line="2901"/>
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>Usa QUIC multipath (RFC 9443) para a transmissão. Permite failover entre WiFi e rede móvel e agregação de largura de banda com duas placas de rede. Requer suporte do servidor.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2815" />
+        <location filename="../gui/SettingsView.qml" line="2906"/>
         <source>Path scheduler</source>
         <translation>Escalonador de caminhos</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2831" />
+        <location filename="../gui/SettingsView.qml" line="2922"/>
         <source>Auto (per stream type)</source>
         <translation>Automático (por tipo de fluxo)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2832" />
+        <location filename="../gui/SettingsView.qml" line="2923"/>
         <source>Lowest latency</source>
         <translation>Menor latência</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2833" />
+        <location filename="../gui/SettingsView.qml" line="2924"/>
         <source>Bandwidth aggregation</source>
         <translation>Agregação de largura de banda</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2834" />
+        <location filename="../gui/SettingsView.qml" line="2925"/>
         <source>Redundant (all paths)</source>
         <translation>Redundante (todos os caminhos)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2835" />
+        <location filename="../gui/SettingsView.qml" line="2926"/>
         <source>Earliest completion</source>
         <translation>Conclusão mais rápida</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2844" />
+        <location filename="../gui/SettingsView.qml" line="2935"/>
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>Automático: vídeo=ECF, áudio=redundante, controlo=min-RTT. Agregação: round-robin por todas as placas de rede para máxima largura de banda.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2864" />
+        <location filename="../gui/SettingsView.qml" line="2955"/>
         <source>Video decoder</source>
         <translation>Decodificador de vídeo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2890" />
-        <location filename="../gui/SettingsView.qml" line="2945" />
+        <location filename="../gui/SettingsView.qml" line="2981"/>
+        <location filename="../gui/SettingsView.qml" line="3036"/>
         <source>Automatic (Recommended)</source>
         <translation>Automático (Recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2894" />
+        <location filename="../gui/SettingsView.qml" line="2985"/>
         <source>Force software decoding</source>
         <translation>Forçar decodificação via software</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2898" />
+        <location filename="../gui/SettingsView.qml" line="2989"/>
         <source>Force hardware decoding</source>
         <translation>Forçar decodificação via hardware</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2914" />
+        <location filename="../gui/SettingsView.qml" line="3005"/>
         <source>Video codec</source>
         <translation>Codec de vídeo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2949" />
+        <location filename="../gui/SettingsView.qml" line="3040"/>
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2953" />
+        <location filename="../gui/SettingsView.qml" line="3044"/>
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2961" />
+        <location filename="../gui/SettingsView.qml" line="3052"/>
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave (latência ultrabaixa em LAN)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3004" />
+        <location filename="../gui/SettingsView.qml" line="3095"/>
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>Ativar YUV 4:4:4 (Experimental)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3027" />
+        <location filename="../gui/SettingsView.qml" line="3118"/>
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>Bom para transmitir o ambiente de trabalho e jogos com muito texto, mas não recomendado para jogos de ritmo rápido.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3029" />
+        <location filename="../gui/SettingsView.qml" line="3120"/>
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>O YUV 4:4:4 não é suportado neste PC.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3036" />
+        <location filename="../gui/SettingsView.qml" line="3127"/>
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>Desbloquear limite de taxa de bits (Experimental)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3055" />
+        <location filename="../gui/SettingsView.qml" line="3146"/>
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>Encontre PCs na rede local automaticamente (Recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3076" />
+        <location filename="../gui/SettingsView.qml" line="3167"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Detecte conexões bloqueadas automaticamente (Recomendado)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1704" />
+        <location filename="../gui/SettingsView.qml" line="1795"/>
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>Qualidade — Melhor qualidade visual, maior carga de GPU</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1705" />
+        <location filename="../gui/SettingsView.qml" line="1796"/>
         <source>Balanced — Recommended (default)</source>
         <translation>Equilibrado — Recomendado (padrão)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1706" />
+        <location filename="../gui/SettingsView.qml" line="1797"/>
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>Desempenho — Menor latência, adequado para iGPU</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2135" />
+        <location filename="../gui/SettingsView.qml" line="2226"/>
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>NAT Traversal (retransmissor de sinalização)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2145" />
+        <location filename="../gui/SettingsView.qml" line="2236"/>
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>URL do relay (ex.: ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2156" />
+        <location filename="../gui/SettingsView.qml" line="2247"/>
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>PSK do relay (chave pré-compartilhada, em branco se nenhuma)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2166" />
+        <location filename="../gui/SettingsView.qml" line="2257"/>
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>Opcional: ajuda a conectar quando ambos os lados estão atrás de NAT. Execute viplestream-relay num servidor com IP público.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2176" />
+        <location filename="../gui/SettingsView.qml" line="2267"/>
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>Forçar transmissão via relay (teste do túnel UDP)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1715" />
+        <location filename="../gui/SettingsView.qml" line="1806"/>
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2494,7 +2569,7 @@ Equilibrado: busca por 8 vizinhos + suavização temporal (~8 ms em iGPU)
 Desempenho: busca por 4 vizinhos + processamento mínimo (~6 ms em iGPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2186" />
+        <location filename="../gui/SettingsView.qml" line="2277"/>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>Sempre transmitir via relay mesmo quando o host é diretamente acessível. Útil para verificar o túnel UDP do relay quando uma VPN (ex. Cloudflare WARP) mantivesse de outra forma o /launch direto a funcionar.</translation>
     </message>
@@ -2502,58 +2577,58 @@ Desempenho: busca por 4 vizinhos + processamento mínimo (~6 ms em iGPU)</transl
 <context>
     <name>StreamSegue</name>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="13" />
+        <location filename="../gui/StreamSegue.qml" line="13"/>
         <source>Resuming %1...</source>
         <translation>Resumindo %1...</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="14" />
-        <location filename="../gui/StreamSegue.qml" line="21" />
+        <location filename="../gui/StreamSegue.qml" line="14"/>
+        <location filename="../gui/StreamSegue.qml" line="21"/>
         <source>Starting %1...</source>
         <translation>Iniciando %1...</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="27" />
+        <location filename="../gui/StreamSegue.qml" line="27"/>
         <source>Starting %1 failed: Error %2</source>
         <translation>Iniciando %1 falhou: Erro %2</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="30" />
+        <location filename="../gui/StreamSegue.qml" line="30"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>Verifique suas regras de firewall e/ou redirecionamento de portas para a(s) porta(s): %1</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="74" />
-        <source>This PC's Internet connection is blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
+        <location filename="../gui/StreamSegue.qml" line="74"/>
+        <source>This PC&apos;s Internet connection is blocking VipleStream. Streaming over the Internet may not work while connected to this network.</source>
         <translation>A ligação à Internet deste PC está a bloquear o VipleStream. A transmissão pela Internet pode não funcionar enquanto estiver ligado a esta rede.</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="192" />
+        <location filename="../gui/StreamSegue.qml" line="192"/>
         <source>VR controller: hold A+X+trigger+grip</source>
         <translation>Comando VR: mantenha premidos A+X+gatilho+grip</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="202" />
+        <location filename="../gui/StreamSegue.qml" line="202"/>
         <source>Failed to start the stream.</source>
         <translation>Falha ao iniciar a transmissão.</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="188" />
+        <location filename="../gui/StreamSegue.qml" line="188"/>
         <source>Tip:</source>
         <translation>Dica:</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="188" />
+        <location filename="../gui/StreamSegue.qml" line="188"/>
         <source>Press %1 to disconnect your session</source>
         <translation>Pressione %1 para des-conectar sua sessão</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="189" />
+        <location filename="../gui/StreamSegue.qml" line="189"/>
         <source>Start+Select+L1+R1</source>
         <translation>Start+Select+L1+R1</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="189" />
+        <location filename="../gui/StreamSegue.qml" line="189"/>
         <source>Ctrl+Alt+Shift+Q</source>
         <translation>Ctrl+Alt+Shift+Q</translation>
     </message>
@@ -2561,77 +2636,77 @@ Desempenho: busca por 4 vizinhos + processamento mínimo (~6 ms em iGPU)</transl
 <context>
     <name>UpdateDialog</name>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="78" />
+        <location filename="../gui/UpdateDialog.qml" line="78"/>
         <source>Download and install VipleStream %1?</source>
         <translation>Transferir e instalar o VipleStream %1?</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="81" />
+        <location filename="../gui/UpdateDialog.qml" line="81"/>
         <source>Working…</source>
         <translation>A processar…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="84" />
+        <location filename="../gui/UpdateDialog.qml" line="84"/>
         <source>VipleStream %1 is available.</source>
         <translation>O VipleStream %1 está disponível.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="86" />
+        <location filename="../gui/UpdateDialog.qml" line="86"/>
         <source>Update failed</source>
         <translation>A atualização falhou</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="98" />
+        <location filename="../gui/UpdateDialog.qml" line="98"/>
         <source>Loading release notes…</source>
         <translation>A carregar as notas da versão…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="99" />
-        <source>Couldn't load the release notes.</source>
+        <location filename="../gui/UpdateDialog.qml" line="99"/>
+        <source>Couldn&apos;t load the release notes.</source>
         <translation>Não foi possível carregar as notas da versão.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="128" />
+        <location filename="../gui/UpdateDialog.qml" line="128"/>
         <source>VipleStream will close and relaunch automatically after the update is applied. On Windows you may be prompted by UAC if installed to Program Files.</source>
         <translation>O VipleStream vai fechar e reiniciar automaticamente depois de a atualização ser aplicada. No Windows, pode ser apresentado um pedido do UAC se estiver instalado em Program Files.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="164" />
+        <location filename="../gui/UpdateDialog.qml" line="164"/>
         <source>%1 / %2 MB</source>
         <translation>%1 / %2 MB</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="166" />
+        <location filename="../gui/UpdateDialog.qml" line="166"/>
         <source>Connecting…</source>
         <translation>A ligar…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="188" />
-        <source>Click 'Open release page' to download manually.</source>
-        <translation>Clique em 'Abrir página da versão' para transferir manualmente.</translation>
+        <location filename="../gui/UpdateDialog.qml" line="188"/>
+        <source>Click &apos;Open release page&apos; to download manually.</source>
+        <translation>Clique em &apos;Abrir página da versão&apos; para transferir manualmente.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="208" />
+        <location filename="../gui/UpdateDialog.qml" line="208"/>
         <source>Yes</source>
         <translation>Sim</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="223" />
+        <location filename="../gui/UpdateDialog.qml" line="223"/>
         <source>No</source>
         <translation>Não</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="235" />
+        <location filename="../gui/UpdateDialog.qml" line="235"/>
         <source>Cancel</source>
         <translation>Cancelar</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="248" />
+        <location filename="../gui/UpdateDialog.qml" line="248"/>
         <source>Open release page</source>
         <translation>Abrir página da versão</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="263" />
+        <location filename="../gui/UpdateDialog.qml" line="263"/>
         <source>Close</source>
         <translation>Fechar</translation>
     </message>
@@ -2639,144 +2714,144 @@ Desempenho: busca por 4 vizinhos + processamento mínimo (~6 ms em iGPU)</transl
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="67" />
+        <location filename="../backend/updater.cpp" line="67"/>
         <source>On the Steam Frame, VipleStream updates itself in the background while it is closed (when installed with the installer script). To update right away, close VipleStream and run the new installer script from the release page.</source>
         <translation>No Steam Frame, o VipleStream atualiza-se em segundo plano enquanto está fechado (quando instalado com o script de instalação). Para atualizar imediatamente, feche o VipleStream e execute o novo script de instalação a partir da página da versão.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="71" />
-        <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with "flatpak install --bundle &lt;file&gt;". If you installed it from a Flatpak repository, run "flatpak update" instead.</source>
-        <translation>Esta cópia do VipleStream está instalada como Flatpak. Transfira o novo .flatpak da página da versão e instale-o com "flatpak install --bundle &lt;file&gt;". Se o instalou a partir de um repositório Flatpak, execute "flatpak update".</translation>
+        <location filename="../backend/updater.cpp" line="71"/>
+        <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
+        <translation>Esta cópia do VipleStream está instalada como Flatpak. Transfira o novo .flatpak da página da versão e instale-o com &quot;flatpak install --bundle &lt;file&gt;&quot;. Se o instalou a partir de um repositório Flatpak, execute &quot;flatpak update&quot;.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="77" />
+        <location filename="../backend/updater.cpp" line="77"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>O VipleStream não está a ser executado a partir de uma AppImage, por isso não se pode substituir. Transfira a nova versão a partir da página da versão.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="80" />
+        <location filename="../backend/updater.cpp" line="80"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>A instalação automática ainda não está disponível para Linux arm64. Transfira a nova versão a partir da página da versão.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="84" />
+        <location filename="../backend/updater.cpp" line="84"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>A instalação automática não está disponível nesta plataforma (%1). Transfira a nova versão a partir da página da versão.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="150" />
+        <location filename="../backend/updater.cpp" line="150"/>
         <source>Querying release assets…</source>
         <translation>A consultar os ficheiros da versão…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="275" />
-        <location filename="../backend/updater.cpp" line="419" />
+        <location filename="../backend/updater.cpp" line="275"/>
+        <location filename="../backend/updater.cpp" line="419"/>
         <source>Update cancelled.</source>
         <translation>Atualização cancelada.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="279" />
+        <location filename="../backend/updater.cpp" line="279"/>
         <source>Failed to query release info: %1</source>
         <translation>Falha ao consultar as informações da versão: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="287" />
+        <location filename="../backend/updater.cpp" line="287"/>
         <source>Release JSON malformed: %1</source>
         <translation>JSON da versão mal formado: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="312" />
+        <location filename="../backend/updater.cpp" line="312"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>As informações da versão do GitHub não têm etiqueta.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="315" />
-        <source>The latest release tag "%1" is not a version number.</source>
-        <translation>A etiqueta da versão mais recente "%1" não é um número de versão.</translation>
+        <location filename="../backend/updater.cpp" line="315"/>
+        <source>The latest release tag &quot;%1&quot; is not a version number.</source>
+        <translation>A etiqueta da versão mais recente &quot;%1&quot; não é um número de versão.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="320" />
-        <source>GitHub's release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
+        <location filename="../backend/updater.cpp" line="320"/>
+        <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>As informações de versão do GitHub ainda não estão atualizadas: continuam a indicar %1, que não é mais recente do que esta versão (%2). Tente novamente dentro de alguns minutos.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="325" />
+        <location filename="../backend/updater.cpp" line="325"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>A versão %1 ainda não tem ficheiros anexados. Tente novamente dentro de alguns minutos.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="332" />
+        <location filename="../backend/updater.cpp" line="332"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>A versão %1 não tem nenhum pacote instalável para esta plataforma (%2).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="341" />
+        <location filename="../backend/updater.cpp" line="341"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>O VipleStream %1 está disponível como %2, mas tem de ser instalado manualmente. %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="356" />
+        <location filename="../backend/updater.cpp" line="356"/>
         <source>Cannot open download file: %1</source>
         <translation>Não é possível abrir o ficheiro de transferência: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="360" />
+        <location filename="../backend/updater.cpp" line="360"/>
         <source>Downloading %1…</source>
         <translation>A transferir %1…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="430" />
+        <location filename="../backend/updater.cpp" line="430"/>
         <source>Download failed: %1</source>
         <translation>A transferência falhou: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="436" />
+        <location filename="../backend/updater.cpp" line="436"/>
         <source>Could not save the downloaded update. The disk may be full.</source>
         <translation>Não foi possível guardar a atualização transferida. O disco pode estar cheio.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="445" />
+        <location filename="../backend/updater.cpp" line="445"/>
         <source>Preparing installer…</source>
         <translation>A preparar o instalador…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="451" />
+        <location filename="../backend/updater.cpp" line="451"/>
         <source>Restarting to apply update…</source>
         <translation>A reiniciar para aplicar a atualização…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="548" />
+        <location filename="../backend/updater.cpp" line="548"/>
         <source>The update was not installed because VipleStream did not exit in time. Please close VipleStream and try updating again.</source>
         <translation>A atualização não foi instalada porque o VipleStream não fechou a tempo. Feche o VipleStream e tente atualizar novamente.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="555" />
-        <location filename="../backend/updater.cpp" line="626" />
+        <location filename="../backend/updater.cpp" line="555"/>
+        <location filename="../backend/updater.cpp" line="626"/>
         <source>Cannot write helper script: %1</source>
         <translation>Não é possível escrever o script auxiliar: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="580" />
+        <location filename="../backend/updater.cpp" line="580"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>Falha ao iniciar o atualizador (UAC recusado ou PowerShell em falta).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="590" />
+        <location filename="../backend/updater.cpp" line="590"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>Não está a ser executado a partir de uma AppImage — a variável APPIMAGE não está definida. Reinstale manualmente.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="600" />
+        <location filename="../backend/updater.cpp" line="600"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>A pasta da AppImage não tem permissão de escrita: %1. Mova o VipleStream para uma localização com permissão de escrita do utilizador (por exemplo, ~/Applications/) e tente novamente.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="639" />
+        <location filename="../backend/updater.cpp" line="639"/>
         <source>Failed to launch updater helper script.</source>
         <translation>Falha ao iniciar o script auxiliar do atualizador.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="645" />
+        <location filename="../backend/updater.cpp" line="645"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>A atualização automática não é suportada nesta plataforma.</translation>
     </message>
@@ -2784,42 +2859,42 @@ Desempenho: busca por 4 vizinhos + processamento mínimo (~6 ms em iGPU)</transl
 <context>
     <name>VideoBrowser</name>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="79" />
+        <location filename="../gui/VideoBrowser.qml" line="79"/>
         <source>Could not start the video player.</source>
         <translation>Não foi possível iniciar o leitor de vídeo.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="126" />
+        <location filename="../gui/VideoBrowser.qml" line="126"/>
         <source>Back</source>
         <translation>Voltar</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="127" />
+        <location filename="../gui/VideoBrowser.qml" line="127"/>
         <source>Forward</source>
         <translation>Avançar</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="128" />
+        <location filename="../gui/VideoBrowser.qml" line="128"/>
         <source>Stop</source>
         <translation>Parar</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="128" />
+        <location filename="../gui/VideoBrowser.qml" line="128"/>
         <source>Reload</source>
         <translation>Recarregar</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="129" />
+        <location filename="../gui/VideoBrowser.qml" line="129"/>
         <source>Home</source>
         <translation>Pasta pessoal</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="135" />
+        <location filename="../gui/VideoBrowser.qml" line="135"/>
         <source>Search or type a web address</source>
         <translation>Pesquise ou introduza um endereço web</translation>
     </message>
     <message>
-        <location filename="../gui/VideoBrowser.qml" line="140" />
+        <location filename="../gui/VideoBrowser.qml" line="140"/>
         <source>Play in VR</source>
         <translation>Reproduzir em VR</translation>
     </message>
@@ -2827,223 +2902,223 @@ Desempenho: busca por 4 vizinhos + processamento mínimo (~6 ms em iGPU)</transl
 <context>
     <name>VideoView</name>
     <message>
-        <location filename="../gui/VideoView.qml" line="19" />
+        <location filename="../gui/VideoView.qml" line="19"/>
         <source>Videos</source>
         <translation>Vídeos</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="134" />
+        <location filename="../gui/VideoView.qml" line="134"/>
         <source>Could not start the video player.</source>
         <translation>Não foi possível iniciar o leitor de vídeo.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="360" />
+        <location filename="../gui/VideoView.qml" line="360"/>
         <source>Nothing found.</source>
         <translation>Nada encontrado.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="374" />
+        <location filename="../gui/VideoView.qml" line="374"/>
         <source>Drive</source>
         <translation>Unidade</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="374" />
+        <location filename="../gui/VideoView.qml" line="374"/>
         <source>Shared folder</source>
         <translation>Pasta partilhada</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="378" />
+        <location filename="../gui/VideoView.qml" line="378"/>
         <source>This folder has no videos.</source>
         <translation>Esta pasta não tem vídeos.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="389" />
-        <location filename="../gui/VideoView.qml" line="720" />
+        <location filename="../gui/VideoView.qml" line="389"/>
+        <location filename="../gui/VideoView.qml" line="720"/>
         <source>Helper: %1</source>
         <translation>Auxiliar: %1</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="389" />
-        <location filename="../gui/VideoView.qml" line="720" />
+        <location filename="../gui/VideoView.qml" line="389"/>
+        <location filename="../gui/VideoView.qml" line="720"/>
         <source>not installed</source>
         <translation>não instalado</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="401" />
+        <location filename="../gui/VideoView.qml" line="401"/>
         <source>This headset</source>
         <translation>Este headset</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="402" />
+        <location filename="../gui/VideoView.qml" line="402"/>
         <source>PC</source>
         <translation>PC</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="404" />
+        <location filename="../gui/VideoView.qml" line="404"/>
         <source>Link</source>
         <translation>Ligação</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="440" />
+        <location filename="../gui/VideoView.qml" line="440"/>
         <source>Up</source>
         <translation>Subir</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="456" />
+        <location filename="../gui/VideoView.qml" line="456"/>
         <source>Choose a folder</source>
         <translation>Escolha uma pasta</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="509" />
+        <location filename="../gui/VideoView.qml" line="509"/>
         <source>No videos here.</source>
         <translation>Não há vídeos aqui.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="524" />
+        <location filename="../gui/VideoView.qml" line="524"/>
         <source>Choose a PC to browse its shared video folders</source>
         <translation>Escolha um PC para navegar pelas suas pastas de vídeo partilhadas</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="547" />
+        <location filename="../gui/VideoView.qml" line="547"/>
         <source>Online</source>
         <translation>Online</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="547" />
+        <location filename="../gui/VideoView.qml" line="547"/>
         <source>Offline</source>
         <translation>Offline</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="559" />
+        <location filename="../gui/VideoView.qml" line="559"/>
         <source>No paired PCs. Pair a PC in Desktop or VR mode first.</source>
         <translation>Não há PCs emparelhados. Emparelhe primeiro um PC no modo de ambiente de trabalho ou VR.</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="575" />
+        <location filename="../gui/VideoView.qml" line="575"/>
         <source>All PCs</source>
         <translation>Todos os PCs</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="579" />
+        <location filename="../gui/VideoView.qml" line="579"/>
         <source>Up one level</source>
         <translation>Subir um nível</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="584" />
+        <location filename="../gui/VideoView.qml" line="584"/>
         <source>Refresh</source>
         <translation>Atualizar</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="641" />
-        <location filename="../gui/VideoView.qml" line="653" />
+        <location filename="../gui/VideoView.qml" line="641"/>
+        <location filename="../gui/VideoView.qml" line="653"/>
         <source>DISK</source>
         <translation>DISCO</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="877" />
+        <location filename="../gui/VideoView.qml" line="877"/>
         <source>List view</source>
         <translation>Vista de lista</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="877" />
+        <location filename="../gui/VideoView.qml" line="877"/>
         <source>Grid view</source>
         <translation>Vista de grelha</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="499" />
-        <location filename="../gui/VideoView.qml" line="641" />
-        <location filename="../gui/VideoView.qml" line="653" />
-        <location filename="../gui/VideoView.qml" line="772" />
+        <location filename="../gui/VideoView.qml" line="499"/>
+        <location filename="../gui/VideoView.qml" line="641"/>
+        <location filename="../gui/VideoView.qml" line="653"/>
+        <location filename="../gui/VideoView.qml" line="772"/>
         <source>VID</source>
         <translation>VÍDEO</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="728" />
-        <source>Search YouTube (try "360 video" or "VR180")</source>
-        <translation>Pesquisar no YouTube (experimente "360 video" ou "VR180")</translation>
+        <location filename="../gui/VideoView.qml" line="728"/>
+        <source>Search YouTube (try &quot;360 video&quot; or &quot;VR180&quot;)</source>
+        <translation>Pesquisar no YouTube (experimente &quot;360 video&quot; ou &quot;VR180&quot;)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="734" />
+        <location filename="../gui/VideoView.qml" line="734"/>
         <source>Search</source>
         <translation>Pesquisar</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="738" />
+        <location filename="../gui/VideoView.qml" line="738"/>
         <source>Searching…</source>
         <translation>A pesquisar…</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="794" />
+        <location filename="../gui/VideoView.qml" line="794"/>
         <source>Update</source>
         <translation>Atualizar</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="797" />
+        <location filename="../gui/VideoView.qml" line="797"/>
         <source>Updating the YouTube helper…</source>
         <translation>A atualizar o auxiliar do YouTube…</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="809" />
+        <location filename="../gui/VideoView.qml" line="809"/>
         <source>Paste a link: a video page (YouTube and many other sites) or a video file or stream (MP4, MKV, WebM, HLS .m3u8).</source>
         <translation>Cole uma ligação: uma página de vídeo (YouTube e muitos outros sites) ou um ficheiro ou stream de vídeo (MP4, MKV, WebM, HLS .m3u8).</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="823" />
+        <location filename="../gui/VideoView.qml" line="823"/>
         <source>Play</source>
         <translation>Reproduzir</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="862" />
+        <location filename="../gui/VideoView.qml" line="862"/>
         <source>Picture format</source>
         <translation>Formato de imagem</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="866" />
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>Auto</source>
         <translation>Automático</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="866" />
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>2D</source>
         <translation>2D</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="866" />
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>3D side-by-side</source>
         <translation>3D lado a lado</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="866" />
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>3D top-bottom</source>
         <translation>3D em cima/em baixo</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="866" />
+        <location filename="../gui/VideoView.qml" line="866"/>
         <source>180° 3D (side-by-side)</source>
         <translation>180° 3D (lado a lado)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="867" />
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>180° 2D</source>
         <translation>180° 2D</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="867" />
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>360° 2D</source>
         <translation>360° 2D</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="867" />
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>360° 3D (top-bottom)</source>
         <translation>360° 3D (em cima/em baixo)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="867" />
+        <location filename="../gui/VideoView.qml" line="867"/>
         <source>360° 3D (side-by-side)</source>
         <translation>360° 3D (lado a lado)</translation>
     </message>
     <message>
-        <location filename="../gui/VideoView.qml" line="868" />
+        <location filename="../gui/VideoView.qml" line="868"/>
         <source>360° cubemap (YouTube EAC)</source>
         <translation>360° cubemap (YouTube EAC)</translation>
     </message>
@@ -3051,80 +3126,243 @@ Desempenho: busca por 4 vizinhos + processamento mínimo (~6 ms em iGPU)</transl
 <context>
     <name>VrLauncher</name>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="263" />
+        <location filename="../backend/vrlauncher.cpp" line="264"/>
         <source>VR and video mode are not available when VipleStream is started this way (Flatpak PID sandbox). Start it from the VipleStream shortcut in your Steam library, which the Steam Frame installer (install-steamframe.sh) adds.</source>
         <translation>Os modos VR e de vídeo não estão disponíveis quando o VipleStream é iniciado desta forma (Flatpak PID sandbox). Inicie-o a partir do atalho do VipleStream na sua biblioteca Steam, que é adicionado pelo instalador do Steam Frame (install-steamframe.sh).</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="269" />
+        <location filename="../backend/vrlauncher.cpp" line="270"/>
         <source>VR mode is not supported on this platform.</source>
         <translation>O modo VR não é suportado nesta plataforma.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="494" />
+        <location filename="../backend/vrlauncher.cpp" line="526"/>
         <source>Could not start the VR stream.</source>
         <translation>Não foi possível iniciar a transmissão VR.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="545" />
+        <location filename="../backend/vrlauncher.cpp" line="577"/>
         <source>The video player stopped unexpectedly.</source>
         <translation>O leitor de vídeo parou inesperadamente.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="548" />
+        <location filename="../backend/vrlauncher.cpp" line="580"/>
         <source>Could not start VR for the video player.</source>
         <translation>Não foi possível iniciar o VR para o leitor de vídeo.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="551" />
+        <location filename="../backend/vrlauncher.cpp" line="583"/>
         <source>Could not play this video.</source>
         <translation>Não foi possível reproduzir este vídeo.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="554" />
+        <location filename="../backend/vrlauncher.cpp" line="586"/>
         <source>The video player ended with an error (code %1).</source>
         <translation>O leitor de vídeo terminou com um erro (código %1).</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="614" />
+        <location filename="../backend/vrlauncher.cpp" line="646"/>
         <source>The VR stream stopped unexpectedly.</source>
         <translation>A transmissão VR parou inesperadamente.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="618" />
+        <location filename="../backend/vrlauncher.cpp" line="650"/>
         <source>Another app is running on the host. Quit it first, then start the VR app again.</source>
         <translation>Está outra aplicação em execução no host. Feche-a primeiro e volte a iniciar a aplicação VR.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="622" />
+        <location filename="../backend/vrlauncher.cpp" line="654"/>
         <source>The VR stream ended with an error (code %1).</source>
         <translation>A transmissão VR terminou com um erro (código %1).</translation>
     </message>
 </context>
 <context>
-    <name>VrNetMode</name>
+    <name>VrNetBenchRunner</name>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="125" />
-        <source>Network test: comparing the headset's connections (about 1 minute)</source>
-        <translation>Teste de rede: a comparar as ligações do headset (cerca de 1 minuto)</translation>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="73"/>
+        <source>Adapter only</source>
+        <translation>Só adaptador</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="175" />
+        <location filename="../backend/vrnetbenchrunner.cpp" line="73"/>
+        <source>Home Wi-Fi + adapter</source>
+        <translation>Wi-Fi de casa + adaptador</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="81"/>
+        <source>no result</source>
+        <translation>sem resultado</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="84"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="87"/>
+        <source>headset limit</source>
+        <translation>limite do headset</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="84"/>
+        <source>dropped to half rate</source>
+        <translation>caiu para metade da taxa</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="87"/>
+        <source>not smooth</source>
+        <translation>não fluido</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="127"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="271"/>
+        <source>The network test is not available here.</source>
+        <translation>O teste de rede não está disponível aqui.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="131"/>
+        <source>Stop the current stream first.</source>
+        <translation>Pare primeiro a transmissão atual.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="145"/>
+        <source>No VR-capable host is online. Turn on the host PC and try again.</source>
+        <translation>Nenhum host compatível com VR está online. Ligue o PC host e tente novamente.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="150"/>
+        <source>The headset network helper is not running. Reinstall VipleStream with the Steam Frame installer script.</source>
+        <translation>O auxiliar de rede do headset não está em execução. Reinstale o VipleStream com o script de instalação do Steam Frame.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="154"/>
+        <source>The streaming adapter is not connected, so there is nothing to compare.</source>
+        <translation>O adaptador de transmissão não está ligado, pelo que não há nada a comparar.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="158"/>
+        <source>The host has no address on the streaming adapter&apos;s network.</source>
+        <translation>O host não tem endereço na rede do adaptador de transmissão.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="177"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="267"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="331"/>
+        <source>Cancelled.</source>
+        <translation>Cancelado.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="180"/>
+        <source>Cancelling after this step...</source>
+        <translation>A cancelar após este passo...</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="196"/>
+        <source>Pausing the headset&apos;s home Wi-Fi...</source>
+        <translation>A pausar o Wi-Fi de casa do headset...</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="196"/>
+        <source>Reconnecting the headset&apos;s home Wi-Fi...</source>
+        <translation>A restabelecer ligação ao Wi-Fi de casa do headset...</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="221"/>
+        <source>Home Wi-Fi paused; waiting for the adapter link to settle...</source>
+        <translation>Wi-Fi de casa em pausa; a aguardar que a ligação do adaptador estabilize...</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="224"/>
+        <source>Could not pause the headset&apos;s home Wi-Fi (%1).</source>
+        <translation>Não foi possível pausar o Wi-Fi de casa do headset (%1).</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="224"/>
+        <source>no answer from the helper</source>
+        <translation>sem resposta do auxiliar</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="232"/>
+        <source>Home Wi-Fi reconnected; waiting for the network to settle...</source>
+        <translation>Wi-Fi de casa novamente ligado; a aguardar que a rede estabilize...</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="235"/>
+        <source>The headset&apos;s home Wi-Fi did not reconnect (state: %1).</source>
+        <translation>O Wi-Fi de casa do headset não voltou a ligar-se (estado: %1).</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="280"/>
+        <source>Could not start the test stream.</source>
+        <translation>Não foi possível iniciar a transmissão de teste.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="285"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="386"/>
+        <source>adapter only</source>
+        <translation>só adaptador</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="285"/>
+        <source>home Wi-Fi + adapter</source>
+        <translation>Wi-Fi de casa + adaptador</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="286"/>
+        <source>Testing %1: %2 x %2 per eye at 144 Hz (step %3 of up to %4)...</source>
+        <translation>A testar %1: %2 x %2 por olho a 144 Hz (passo %3 de até %4)...</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="327"/>
+        <source>The test stream did not run: %1</source>
+        <translation>A transmissão de teste não foi executada: %1</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="378"/>
+        <source>Use adapter only: the headset pauses home Wi-Fi while you play VR here (smoothest: %1 per eye with adapter only, %2 with home Wi-Fi).</source>
+        <translation>Usar só adaptador: o headset pausa o Wi-Fi de casa enquanto joga VR aqui (mais fluido: %1 por olho só com adaptador, %2 com Wi-Fi de casa).</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="380"/>
+        <source>Keep home Wi-Fi: adapter only was not clearly better here (smoothest: %1 per eye with home Wi-Fi, %2 with adapter only).</source>
+        <translation>Manter Wi-Fi de casa: usar só o adaptador não foi claramente melhor aqui (mais fluido: %1 por olho com Wi-Fi de casa, %2 só com adaptador).</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="383"/>
+        <source>The highest step was limited by the headset itself, not the network.</source>
+        <translation>O nível mais alto foi limitado pelo próprio headset, não pela rede.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="386"/>
+        <source>keep home Wi-Fi</source>
+        <translation>manter Wi-Fi de casa</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="387"/>
+        <source>Network test finished.</source>
+        <translation>Teste de rede concluído.</translation>
+    </message>
+</context>
+<context>
+    <name>VrNetMode</name>
+    <message>
+        <location filename="../streaming/vr/vrnetmode.h" line="157"/>
+        <source>Network test: trying adapter only for about 30 seconds (home Wi-Fi pauses, then comes back)</source>
+        <translation>Teste de rede: a experimentar só o adaptador durante cerca de 30 segundos (o Wi-Fi de casa fica em pausa e depois volta)</translation>
+    </message>
+    <message>
+        <location filename="../streaming/vr/vrnetmode.h" line="197"/>
         <source>Network test: smoother with home Wi-Fi paused during VR (missed frames %1% -&gt; %2%). It reconnects when you stop streaming.</source>
         <translation>Teste de rede: mais fluído com o Wi-Fi de casa em pausa durante a VR (fotogramas perdidos %1% -&gt; %2%). Volta a ligar-se ao parar a transmissão.</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="181" />
+        <location filename="../streaming/vr/vrnetmode.h" line="203"/>
         <source>Network test: keeping home Wi-Fi (missed frames %1% with it, %2% without)</source>
         <translation>Teste de rede: a manter o Wi-Fi de casa (fotogramas perdidos %1% com ele, %2% sem ele)</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="229" />
-        <source>Streaming adapter lost - reconnecting the headset's home Wi-Fi</source>
+        <location filename="../streaming/vr/vrnetmode.h" line="251"/>
+        <source>Streaming adapter lost - reconnecting the headset&apos;s home Wi-Fi</source>
         <translation>Adaptador de transmissão perdido - a restabelecer ligação ao Wi-Fi de casa do headset</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="240" />
+        <location filename="../streaming/vr/vrnetmode.h" line="263"/>
         <source>Home Wi-Fi paused during VR for a smoother stream - it reconnects when you stop streaming</source>
         <translation>Wi-Fi de casa em pausa durante a VR para uma transmissão mais fluida - volta a ligar-se ao parar a transmissão</translation>
     </message>
@@ -3132,62 +3370,62 @@ Desempenho: busca por 4 vizinhos + processamento mínimo (~6 ms em iGPU)</transl
 <context>
     <name>VrPreflightDialog</name>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="42" />
+        <location filename="../gui/VrPreflightDialog.qml" line="42"/>
         <source>Connection too slow for VR</source>
         <translation>Ligação demasiado lenta para VR</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="42" />
+        <location filename="../gui/VrPreflightDialog.qml" line="42"/>
         <source>Checking the connection</source>
         <translation>A verificar a ligação</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="241" />
+        <location filename="../gui/VrPreflightDialog.qml" line="241"/>
         <source>The connection to the host is too slow for VR right now. The picture would break up and lag far behind your head.</source>
         <translation>A ligação ao host está demasiado lenta para VR neste momento. A imagem iria fragmentar-se e ficar muito atrasada em relação aos movimentos da sua cabeça.</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="253" />
+        <location filename="../gui/VrPreflightDialog.qml" line="253"/>
         <source>Measured round trip: %1 ms. VR needs %2 ms or less.</source>
         <translation>Tempo de ida e volta medido: %1 ms. O VR precisa de %2 ms ou menos.</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="265" />
+        <location filename="../gui/VrPreflightDialog.qml" line="265"/>
         <source>This usually means the VPN is relaying the connection instead of connecting directly.</source>
         <translation>Normalmente, isto significa que a VPN está a retransmitir a ligação em vez de ligar diretamente.</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="291" />
+        <location filename="../gui/VrPreflightDialog.qml" line="291"/>
         <source>Checking again every %1 seconds. VR starts automatically as soon as the connection is fast enough.</source>
         <translation>A verificar novamente a cada %1 segundos. O VR inicia automaticamente assim que a ligação for suficientemente rápida.</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="293" />
+        <location filename="../gui/VrPreflightDialog.qml" line="293"/>
         <source>Measuring the round trip to the host…</source>
         <translation>A medir o tempo de ida e volta até ao host…</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="304" />
+        <location filename="../gui/VrPreflightDialog.qml" line="304"/>
         <source>Latest: %1 ms</source>
         <translation>Última: %1 ms</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="305" />
+        <location filename="../gui/VrPreflightDialog.qml" line="305"/>
         <source>Latest: no answer from the host</source>
         <translation>Última: sem resposta do host</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="316" />
+        <location filename="../gui/VrPreflightDialog.qml" line="316"/>
         <source>Fast enough %1 of %2 times in a row</source>
         <translation>Suficientemente rápida %1 de %2 vezes seguidas</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="342" />
+        <location filename="../gui/VrPreflightDialog.qml" line="342"/>
         <source>Start anyway</source>
         <translation>Iniciar mesmo assim</translation>
     </message>
     <message>
-        <location filename="../gui/VrPreflightDialog.qml" line="355" />
+        <location filename="../gui/VrPreflightDialog.qml" line="355"/>
         <source>Cancel</source>
         <translation>Cancelar</translation>
     </message>
@@ -3195,40 +3433,40 @@ Desempenho: busca por 4 vizinhos + processamento mínimo (~6 ms em iGPU)</transl
 <context>
     <name>WebResolver</name>
     <message>
-        <location filename="../backend/webresolver.cpp" line="379" />
+        <location filename="../backend/webresolver.cpp" line="379"/>
         <source>The web video helper (yt-dlp) is not installed. Use Update to download it.</source>
         <translation>O auxiliar de vídeo web (yt-dlp) não está instalado. Use Atualizar para o transferir.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="412" />
+        <location filename="../backend/webresolver.cpp" line="412"/>
         <source>Search failed.</source>
         <translation>A pesquisa falhou.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="439" />
+        <location filename="../backend/webresolver.cpp" line="439"/>
         <source>Could not get the checksum list.</source>
         <translation>Não foi possível obter a lista de somas de verificação.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="447" />
+        <location filename="../backend/webresolver.cpp" line="447"/>
         <source>Download failed.</source>
         <translation>A transferência falhou.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="451" />
+        <location filename="../backend/webresolver.cpp" line="451"/>
         <source>The download did not match its checksum.</source>
         <translation>A transferência não corresponde à respetiva soma de verificação.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="458" />
-        <location filename="../backend/webresolver.cpp" line="466" />
-        <location filename="../backend/webresolver.cpp" line="471" />
-        <location filename="../backend/webresolver.cpp" line="478" />
+        <location filename="../backend/webresolver.cpp" line="458"/>
+        <location filename="../backend/webresolver.cpp" line="466"/>
+        <location filename="../backend/webresolver.cpp" line="471"/>
+        <location filename="../backend/webresolver.cpp" line="478"/>
         <source>Could not save the update.</source>
         <translation>Não foi possível guardar a atualização.</translation>
     </message>
     <message>
-        <location filename="../backend/webresolver.cpp" line="486" />
+        <location filename="../backend/webresolver.cpp" line="486"/>
         <source>Updated to %1.</source>
         <translation>Atualizado para %1.</translation>
     </message>

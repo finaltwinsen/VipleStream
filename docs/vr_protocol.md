@@ -36,6 +36,17 @@
    選填 `&vrFovea=<101–250>`（§VR-FOVEA，2026-10-08）：注視點編碼，正前方的像素密度是均勻取樣的幾 %；不帶或 100＝關。
    server 接受而且是真的 driver（`mode=pcvr`）時，在 `<VipleStreamVRSession>` 尾端加 `;fovea=<同一個值>`，client 看到才還原；
    `/resume` 回的是進行中那次編排的值。映射式：每軸以 tangent 0 為中心、每一側各自正規化，`t = a·e + (1−a)·e³`，`a = 100/值`。
+   **§VR-FOVEA-TILES（2026-11-10）：每眼兩塊影像**。client 在 `vrCaps` 帶 `0x80`（`VIPLE_VR_CLIENT_CAP_FOVEA_TILES`）、
+   有帶 `vrFovea`、server 的 `vr_fovea_tiles` 不是 `disabled`、而且每眼算圖尺寸 ≥ 1.25 倍的 `vrEye` 時，server 不做幾何變形，
+   改回 `;foveaTiles=<tw>x<th>;foveaRender=<rw>x<rh>`（這時不回 `fovea=`、`foveaInset=`），`packed` 是 `(2·tw)x(2·th)`：
+   上排左、右眼的全視野（整張算圖影像縮到 `tw×th`），下排左、右眼的注視點（每眼 `rw×rh` 的算圖影像裡 `tw×th` 的原生裁切）。
+   每一幀一律用 0x82 幀標頭（不論有沒有協商眼動），那四個 u16 改放注視點那塊左上角在算圖影像裡的像素座標
+   （左眼 x、y、右眼 x、y），裁切範圍＝`[x/rw, (x+tw)/rw] × [y/rh, (y+th)/rh]`（y 由上往下）。有協商眼動時位置跟著視線
+   （偏離超過死區才移、一次移到位），否則固定在正前方。`tw`、`th` 是 32 的倍數，檔位 `small`＝13/18、`medium`＝5/6、
+   `large`＝1 倍的 `vrEye`。選填 `&vrFoveaTiles=<0–3>`：client 選的大小（1 small、2 medium、3 large＝設定頁的小／中／大，
+   2.0.122 起注視點開著就會帶；0＝這一場不分塊，dev 用），沒帶照 server 的 `vr_fovea_tiles`。server 設成 `disabled` 時
+   不論 client 帶什麼都不分塊。
+   `/resume` 沿用進行中那次編排的尺寸；進行中是分塊而 client 沒帶 `0x80` 時回 503 `VR_BUSY`。
    選填 `&vrDispHz=<60–144>`（§VR-PREDICT，2026-10-10）：頭盔的顯示更新率（Hz，整數）。client 只在它和 `vrHz` 不同時才帶，
    也就是半速串流（§VR-HALF-RATE：`vrHz`、`vrPeriodNs` 是 host 的 SteamVR 與串流跑的更新率與週期，頭盔照樣全速顯示）；
    不帶＝和 `vrHz` 相同。範圍同 `vrHz`；超出範圍或比 `vrHz` 低回 400 `VR_BAD_PARAMS`，等於 `vrHz` 視同沒帶。server 只用它

@@ -30,6 +30,7 @@
 #include "logging.h"
 #include "platform/common.h"
 #include "process.h"
+#include "vr/vr_netbench.h"
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_platform.h"
 #include "system_tray.h"
@@ -599,6 +600,9 @@ namespace proc {
     });
 #endif
 
+    if (_vr_pcvr && _app.vr_bench) {
+      return placebo ? _app_id : 0;  // §VR-NETBENCH：網路測試不經過編排器，terminate() 之前一直算在跑
+    }
     if (_vr_pcvr) {
       // §D.2：pcvr 的 app 在編排器 active（PRECHECK～DRIVER_LOST，或 ERROR 的前 10 s）時才算在跑
       return placebo && ::vr::orchestrator::active() ? _app_id : 0;
@@ -1569,6 +1573,24 @@ namespace proc {
         BOOST_LOG(info) << "[steam-import] merged " << steam_added
                         << " Steam apps (" << steam_skipped
                         << " skipped due to name collision with manual entries)";
+      }
+      // §VR-NETBENCH（2026-11-08）：片段檔存在時合成「VR Network Test」（只在 VR 清單；不啟動 SteamVR、不跑任何程式）
+      if (config::vr.pcvr == config::vr_t::pcvr_e::enabled) {
+        if (const auto clip = ::vr::netbench_clip_path(); !clip.empty() && std::filesystem::exists(clip)) {
+          proc::ctx_t ctx;
+          ctx.name = "VR Network Test";
+          ctx.vr_class = true;
+          ctx.vr_bench = true;
+          ctx.auto_detach = true;
+          ctx.wait_all = false;
+          ctx.elevated = false;
+          ctx.exit_timeout = std::chrono::seconds {1};
+          auto bench_ids = calculate_app_id(ctx.name, ctx.image_path, i++);
+          ctx.id = ids.count(std::get<0>(bench_ids)) == 0 ? std::get<0>(bench_ids) : std::get<1>(bench_ids);
+          ids.insert(ctx.id);
+          apps.emplace_back(std::move(ctx));
+          BOOST_LOG(info) << "[VIPLE-VR-NETBENCH] app \"VR Network Test\" listed (clip " << clip.string() << ')';
+        }
       }
 #endif
 

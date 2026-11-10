@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -982,7 +983,10 @@ namespace vr::bridge {
     bool bridge_t::set_session_config(const vripc_session_config_t &in) {
       vripc_session_config_t cfg = in;
       const bool shape_ok = cfg.eye_width >= 1 && cfg.eye_width <= 8192 && cfg.eye_height >= 1 && cfg.eye_height <= 8192 &&
-                            cfg.packed_width == 2 * cfg.eye_width && cfg.packed_height == cfg.eye_height &&
+                            // §VR-FOVEA-TILES：分塊時 packed＝(2·tile_w)×(2·tile_h)
+                            ((cfg.tile_w == 0 && cfg.tile_h == 0 && cfg.packed_width == 2 * cfg.eye_width && cfg.packed_height == cfg.eye_height) ||
+                             (cfg.tile_w >= 64 && cfg.tile_h >= 64 && cfg.tile_render_w > cfg.tile_w && cfg.tile_render_h > cfg.tile_h &&
+                              cfg.packed_width == 2u * cfg.tile_w && cfg.packed_height == 2u * cfg.tile_h)) &&
                             cfg.dxgi_format == VRIPC_DXGI_FORMAT_B8G8R8A8_UNORM && cfg.refresh_mhz >= 60000 && cfg.refresh_mhz <= 240000 &&
                             (cfg.adapter_luid_low != 0 || cfg.adapter_luid_high != 0) && cfg.universe_id <= 0xFFFFFFFFull;
       if (!shape_ok) {
@@ -3698,12 +3702,35 @@ namespace vr::bridge {
     bridge().set_pacing(pacing);
   }
 
+  // §VR-NETBENCH：pacing_ppm_now() 的鏡像（driver 不在時片段播放器讀）
+  namespace {
+    std::atomic<int32_t> g_pace_base_ppm {0};
+    std::atomic<int32_t> g_pace_burst_ppm {0};
+    std::atomic<int64_t> g_pace_burst_until_ns {0};
+
+    int64_t pace_now_ns() {
+      return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+  }  // namespace
+
   void set_pacing_ppm(int32_t ppm) {
+    g_pace_base_ppm.store(std::clamp<int32_t>(ppm, -200, 200), std::memory_order_relaxed);
+    g_pace_burst_until_ns.store(0, std::memory_order_relaxed);
     bridge().set_pacing_ppm(ppm);
   }
 
   void set_pacing_step(int32_t base_ppm, int32_t burst_ppm, uint32_t burst_us) {
+    g_pace_base_ppm.store(std::clamp<int32_t>(base_ppm, -200, 200), std::memory_order_relaxed);
+    g_pace_burst_ppm.store(std::clamp<int32_t>(burst_ppm, -5000, 5000), std::memory_order_relaxed);
+    g_pace_burst_until_ns.store(pace_now_ns() + (int64_t) std::min<uint32_t>(burst_us, 2'000'000u) * 1000, std::memory_order_relaxed);
     bridge().set_pacing_step(base_ppm, burst_ppm, burst_us);
+  }
+
+  int32_t pacing_ppm_now() {
+    if (pace_now_ns() < g_pace_burst_until_ns.load(std::memory_order_relaxed)) {
+      return g_pace_burst_ppm.load(std::memory_order_relaxed);
+    }
+    return g_pace_base_ppm.load(std::memory_order_relaxed);
   }
 
   void set_dev_mode(bool enabled) {

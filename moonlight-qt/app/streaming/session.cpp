@@ -1,5 +1,7 @@
 #include "session.h"
 #include <chrono>
+#include <cstdlib>
+#include <thread>
 #include "backend/nvcomputer.h"
 #include "backend/identitymanager.h"
 #include "backend/relaylookup.h"
@@ -36,6 +38,7 @@
 #include "backend/tailscalepath.h"
 #include "streaming/batterymonitor.h"  // §VR-LOWBATT
 #include "streaming/vr/vrnetmode.h"  // §VR-NETSEL
+#include "streaming/vr/vrnetbench.h"  // §VR-NETBENCH
 #include "streaming/audio/miccapture.h"  // §VR-MIC
 #endif
 
@@ -661,12 +664,15 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
             }
             break;
         case VIPLE_VR_S2C_RATE:
-            // §VR-RATE-AUTO：host 套用（或拒絕）了「每幾張送一張」
+            // §VR-RATE-AUTO：host 套用（或拒絕）了「每幾張送一張」。只有 OpenXR 的 PCVR 會送要求；沒有 OpenXR 的建置
+            // （Windows、Linux x64）XrContext 只有前向宣告，不能碰它的成員（2.0.96～2.0.121 這裡少了保護，那幾版在這些平台編不過）
+#ifdef HAVE_OPENXR
             if (len >= sizeof(VIPLE_VR_TLV_RATE_APPLIED) && m_XrContext != nullptr) {
                 VIPLE_VR_TLV_RATE_APPLIED a;
                 memcpy(&a, payload, sizeof(a));
                 m_XrContext->onPcvrRateApplied(a.div, a.accepted != 0, a.seq);
             }
+#endif
             break;
         case VIPLE_VR_S2C_STATS: {
             // 欄位只往後加：依 len 能讀多少算多少。計數欄位是 session 累計值
@@ -857,6 +863,10 @@ void Session::decideVrRequest()
     m_VrLaunch.eyeHeight = m_Preferences->vrEyeHeight;
     m_VrLaunch.refreshHz = m_Preferences->vrRefreshHz;
     m_VrLaunch.fovea = m_Preferences->vrFoveation;  // §VR-FOVEA
+    // §VR-FOVEA-TILES：注視點開著時帶上設定頁選的大小（1 小、2 中、3 大）；dev 的 --vr-fovea-tiles 優先（0＝這一場不分塊）。
+    // 注視點關著就不帶。舊 host 不認得這個參數（略過），照它原本的注視點做法
+    m_VrLaunch.foveaTilesReq = m_Preferences->vrFoveaTilesReq >= 0 ? m_Preferences->vrFoveaTilesReq
+                               : (m_Preferences->vrFoveation > 100 ? qBound(1, m_Preferences->vrFoveaTiles, 3) : -1);
 #ifdef HAVE_OPENXR
     if (!m_Preferences->vrEmulate && !setupXrPcvr()) {
         return;  // 已記原因；不變式 5（/launch 前）→ 平面
@@ -1449,7 +1459,10 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // lose the user's last Settings-page changes (fps, FRUC toggle,
     // etc.).  Saving here guarantees the registry reflects the values
     // we are about to use for this session.
-    m_Preferences->save();
+    // §VR-NETBENCH：網路測試的子行程用命令列帶的解析度，不能寫回使用者的設定
+    if (!NetBench::config().active()) {
+        m_Preferences->save();
+    }
 
     m_StreamConfig.fps = m_Preferences->fps;
     m_OriginalFps = m_Preferences->fps;
@@ -2332,6 +2345,7 @@ private:
 
         // §SC-HID: Stop Steam Controller passthrough before LiStopConnection
         m_Session->m_ScHid.stop();
+        m_Session->m_WifiScanBlock.stop();  // §WIFI-SCANBLOCK
         // §VR：tracking 執行緒會呼叫 LiSendVrTracking，必須在 LiStopConnection 之前停
         m_Session->m_VrTracking.stop();
         m_Session->m_Mic.reset();  // §VR-MIC：編碼執行緒會呼叫 LiSendVrMessage，同理
@@ -2981,6 +2995,9 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     xo.pcvrOverscanDeg = m_XrPcvr ? static_cast<float>(m_Preferences->vrOverscanDeg) : 0.0f;  // dev：--vr-overscan
     xo.dumpFramePath = isRebuild ? QString() : m_Preferences->xrDumpFramePath;  // dev：--xr-dump-frame
     xo.testStallMs = isRebuild ? 0 : m_Preferences->xrTestStallMs;             // dev：--xr-test-stall-ms
+    xo.unwarpMax = static_cast<float>(m_Preferences->vrUnwarpMax);  // §VR-UNWARP-MAX（dev）
+    xo.unwarpYuv = !m_Preferences->vrUnwarpRgb;                      // §VR-UNWARP-YUV
+    xo.fovLayers = !m_Preferences->vrFovSingleLayer;                 // §VR-FOVEA-LAYERS
     xo.testJitter = (m_XrPcvr && !isRebuild) ? m_Preferences->vrTestJitter : QString();  // dev：--vr-test-jitter（§VR-LDIAG，只給 PCVR）
     xo.testRecenterSec = isRebuild ? 0 : m_Preferences->xrTestRecenterSec;     // dev：--xr-test-recenter-sec
     xo.testPointer = m_Preferences->xrTestPointer;                              // dev：--xr-test-pointer
@@ -3107,6 +3124,51 @@ bool Session::createXrContext(bool isRebuild, QString* error)
 // 就接回 XR，沒有就是平面）——重建 decoder 本來就需要 IDR，這條路徑已經過大量實戰；改成把
 // XrRenderer 掛到新 context 則要處理舊 XrVideo 內 in-flight 幀的所有權，風險較高。
 // PCVR（DT_PCVR）：VR session 建立後的 XR 失敗應送 /cancel 並顯示錯誤（不變式 5），M4a 接 PCVR XR 時做。
+// §VR-NETBENCH：網路測試的一階。量滿（第一個視窗不算，之後 (秒數−10)/10 個 10 秒視窗）就寫結果並正常結束串流
+// （SDL_QUIT → /cancel，host 停掉測試片段）；XR 一直沒起來或沒有視窗時，逾時寫一份「沒有結果」再結束
+void Session::netBenchTick()
+{
+    if (m_NetBenchDone) {
+        return;
+    }
+    const Uint32 now = SDL_GetTicks();
+    if (m_NetBenchStartMs == 0) {
+        m_NetBenchStartMs = now;
+    }
+    const NetBench::Config& cfg = NetBench::config();
+    const auto windows = NetBench::Collector::get().windows();
+    const size_t need = NetBench::kSkipWindows + static_cast<size_t>((std::max)(1, (cfg.seconds - 10) / 10));
+    const bool full = windows.size() >= need;
+    const bool timeout = SDL_TICKS_PASSED(now, m_NetBenchStartMs + static_cast<Uint32>(cfg.seconds + 60) * 1000u);
+    if (!full && !timeout) {
+        return;
+    }
+    m_NetBenchDone = true;
+    NetBench::StepResult r = NetBench::summarize(m_Preferences->vrEyeWidth, windows, NetBench::Collector::get().sawHalf());
+    if (!full) {
+        r.error = QStringLiteral("timed out after %1 window(s)").arg(windows.size());
+    }
+    const bool ok = NetBench::writeResult(cfg.resultPath, r);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-VR-NETBENCH] step eye=%d windows=%d deficit=%.3f%% rep10=%.1f run=%d half=%d mtp50=%.1f mtp95=%.1f "
+                "recv=%.1f Mbps lateNet=%llu lateHeadset=%llu held=%d headsetLimited=%d%s%s -> %s",
+                r.eye, r.windows, r.deficitPct, r.rep10, r.maxRun, r.half ? 1 : 0, r.mtp50, r.mtp95, r.recvMbps,
+                static_cast<unsigned long long>(r.lateNet), static_cast<unsigned long long>(r.lateHeadset), r.held ? 1 : 0,
+                r.headsetLimited ? 1 : 0, r.error.isEmpty() ? "" : " error=", qUtf8Printable(r.error),
+                ok ? "written" : "could not write the result file");
+    SDL_Event quit = {};
+    quit.type = SDL_QUIT;
+    SDL_PushEvent(&quit);
+    // 結果已經寫好：正常收尾 20 秒還沒結束就直接結束程序。11-09 頭盔實測：硬體解碼器（v4l2m2m）整階沒解出任何影格時，
+    // 收尾卡在 ~FFmpegVideoDecoder 等解碼執行緒（它卡在 v4l2 的 poll 裡），子行程永遠不退出，測試流程跟著停住
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(20));
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-NETBENCH] the stream did not shut down within 20 s after the result was written - exiting");
+        fflush(nullptr);
+        std::_Exit(0);
+    }).detach();
+}
+
 void Session::handleXrEnded(int reason)
 {
 #ifdef HAVE_OPENXR
@@ -3339,6 +3401,13 @@ bool Session::setupXrPcvr()
     if (m_XrContext != nullptr && m_XrContext->eyeGazeSupported()) {
         m_VrLaunch.caps |= VIPLE_VR_CLIENT_CAP_GAZE | VIPLE_VR_CLIENT_CAP_GAZE_FOVEA;
     }
+    m_VrLaunch.caps |= VIPLE_VR_CLIENT_CAP_FOVEA_INSET;  // §VR-FOVEA-INSET：懂分段注視點曲線
+    // §VR-FOVEA-TILES：懂「每眼兩塊影像」。要兩個圖層＋直接讀 YUV 平面那一趟才畫得出來：開著補幀（swapchain 是兩倍高的
+    // 另一種排法）、或 dev 選項把那兩條路關掉時不宣告，host 就照舊用注視點曲線
+    if (m_XrPcvr && !m_Preferences->vrFovSingleLayer && !m_Preferences->vrUnwarpRgb &&
+            !(m_Preferences->vrHalfRate && m_Preferences->vrSynth)) {
+        m_VrLaunch.caps |= VIPLE_VR_CLIENT_CAP_FOVEA_TILES;
+    }
     // §VR-PLAYAREA：真實遊玩區與坐姿零點交給 server 的 chaperone（拿不到就不帶，server 用預設值）
     float areaW = 0.0f, areaD = 0.0f;
     if (m_XrContext->playAreaBounds(&areaW, &areaD)) {
@@ -3561,9 +3630,22 @@ bool Session::startConnectionAsync()
 #ifdef HAVE_OPENXR
                     if (m_XrPcvr && m_XrContext != nullptr) {
                         m_XrContext->setPcvrFoveation(m_VrSession.fovea);  // §VR-FOVEA：server 確認了才還原
+                        m_XrContext->setPcvrFoveaInset(m_VrSession.foveaInsetU0);  // §VR-FOVEA-INSET
                         m_XrContext->setPcvrGazeFovea(m_VrSession.gazeFovea);
+                        // §VR-FOVEA-TILES：每眼兩塊影像（tileW＝0＝沒有分塊）
+                        m_XrContext->setPcvrFoveaTiles(m_VrSession.tileW, m_VrSession.tileH, m_VrSession.tileRenderW, m_VrSession.tileRenderH);
                     }
 #endif
+                    if (m_VrSession.tileW > 0) {
+                        // §VR-FOVEA-TILES：編碼畫面是 (2·每塊寬)×(2·每塊高)，不是「兩眼並排」的尺寸。之後建解碼器、RTSP 都照它
+                        // （host 也會把 RTSP 裡的尺寸改成這個）
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VR-FOVEA] tiles: %dx%d per tile, stream %dx%d (was %dx%d), gaze tile = native crop of the %dx%d render",
+                                    m_VrSession.tileW, m_VrSession.tileH, m_VrSession.packedWidth, m_VrSession.packedHeight,
+                                    m_StreamConfig.width, m_StreamConfig.height, m_VrSession.tileRenderW, m_VrSession.tileRenderH);
+                        m_StreamConfig.width = m_VrSession.packedWidth;
+                        m_StreamConfig.height = m_VrSession.packedHeight;
+                    }
                     if (m_VrSession.packedWidth != m_StreamConfig.width ||
                             m_VrSession.packedHeight != m_StreamConfig.height ||
                             m_VrSession.refreshHz != m_StreamConfig.fps) {
@@ -4094,6 +4176,8 @@ bool Session::startConnectionAsync()
     // §SC-HID: 連線建立後啟動 passthrough 讀取執行緒（vendor 介面已在 Session::start() prepare 好；
     // 暖機查詢由讀取執行緒代跑，這裡不會碰任何 hidapi 呼叫）
     m_ScHid.start();
+    // §WIFI-SCANBLOCK：Steam Frame 上串流期間擋住 Wi-Fi 背景掃描（和 Steam 內建串流同一個做法）；其他平台什麼都不做
+    m_WifiScanBlock.start();
 
     // §VR：tracking 上行（M1a 為合成 pose）。LiStartConnection 已依 vrFlags 生效
     // §LAT-2D（dev，--input-test）：每 4 ms 送一次 +1／-1 像素的相對滑鼠移動（左右交替，游標不會跑掉），
@@ -4166,7 +4250,12 @@ bool Session::startConnectionAsync()
                 }
             }
             const double syntheticMenuAt = m_Preferences->vrSyntheticMenuAtSec;  // dev：第幾秒按一下左手 MENU
-            m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, syntheticMenuAt, synthHead, synthStart](VIPLE_VR_TRACKING* s) {
+            const bool syntheticGaze = m_Preferences->vrSyntheticGaze;  // dev（§VR-FOVEA-TILES）
+            if (syntheticGaze) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-GAZE] dev: --vr-synthetic-gaze - the gaze sent to the host is synthetic (saccades every 0.7 s, pursuit, blinks), not the tracked one");
+            }
+            m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, syntheticGaze, syntheticMenuAt, synthHead, synthStart](VIPLE_VR_TRACKING* s) {
                 uint32_t predict = 0;
                 VIPLE_VR_POSE& hmd = s->pose[VIPLE_VR_POSE_HMD];
                 if (!xr->sampleHmd(hmd.pos, hmd.rot, hmd.linVel, hmd.angVel, &predict)) {
@@ -4178,6 +4267,10 @@ bool Session::startConnectionAsync()
                 xr->sampleControllers(s);
                 if (xr->pcvrGazeFovea()) {  // §VR-GAZE-FOVEA：協商成功才取樣（沒開時省掉每秒 ~576 次 xrLocateSpace）
                     xr->sampleEyeGaze(s);
+                    if (syntheticGaze) {
+                        // dev（--vr-synthetic-gaze）：視線換成合成的掃視／追視（沒人戴時真的視線無效）
+                        vrSyntheticGaze(std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), s);
+                    }
                 }
                 if (syntheticHmd) {
                     // 樣本的語意是「sampleTimeNs＋predictNs 那一刻的姿態」：真的樣本是 runtime 預測到那一刻的，host 也把它當成
@@ -4665,13 +4758,25 @@ void Session::exec()
         pollScHidHotplug();
 #ifdef HAVE_OPENXR
 #ifdef Q_OS_LINUX
-        if (m_XrContext != nullptr && (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED)) {
+        // §VR-NETBENCH：網路測試的子行程不碰網路狀態（由 GUI 的測試流程切換、送心跳）
+        if (m_XrContext != nullptr && (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) && !NetBench::config().active()) {
             if (!netMode) {
                 netMode = std::make_unique<VrNetMode>(m_Preferences->vrNetMode, m_Preferences->vrNetRetest, m_StreamConfig.fps);
                 netMode->toast = [this](const QString& text) {
                     if (m_XrContext != nullptr) {
                         m_XrContext->showToast(text, 6000);
                     }
+                };
+                // §VR-NETSEL-HOLD：切網路前請 host 別因那幾秒的掉包降碼（ENet 與每條連線各送一份）
+                netMode->netSwitch = [](int phase, int holdMs) {
+                    VIPLE_VR_TLV_NET_SWITCH ns{};
+                    ns.phase = static_cast<uint8_t>(phase);
+                    ns.holdMs = static_cast<uint16_t>(std::clamp(holdMs, 0, 65535));
+                    uint8_t tlv[2 + sizeof(ns)];
+                    tlv[0] = VIPLE_VR_C2S_NET_SWITCH;
+                    tlv[1] = sizeof(ns);
+                    memcpy(tlv + 2, &ns, sizeof(ns));
+                    LiSendVrMessage(tlv, sizeof(tlv), true);
                 };
             }
             netMode->tick(SDL_GetTicks(), m_XrContext->pcvrNewFrames());
@@ -4681,6 +4786,9 @@ void Session::exec()
             }
         }
 #endif
+        if (NetBench::config().active()) {
+            netBenchTick();
+        }
         if (m_XrContext != nullptr && SDL_TICKS_PASSED(SDL_GetTicks(), batteryPollTime)) {
             batteryPollTime = SDL_GetTicks() + 10000;
             if (const auto br = battery.read()) {

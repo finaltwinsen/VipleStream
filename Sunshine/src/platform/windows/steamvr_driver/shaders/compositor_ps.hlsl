@@ -11,8 +11,9 @@ cbuffer layer_cb : register(b0) {
   float4 uv_rect;
   uint mode;
   uint force_alpha;
-  uint2 pad;
-  float4 fovea;  // §VR-FOVEA：x＝a（0＝關）、y＝cx、z＝cy：正前方在本眼影像裡的位置
+  uint fovea_mode;  // §VR-FOVEA-TILES：1＝注視點那塊，fovea＝(裁切左上角 x, y, 寬, 高)，本眼影像的正規化座標；0＝看 fovea.x
+  uint pad;
+  float4 fovea;  // §VR-FOVEA：x＝a（0＝關）、y＝cx、z＝cy：正前方在本眼影像裡的位置；w＝u0（§VR-FOVEA-INSET，> 0＝分段曲線）
 };
 
 Texture2D<float4> src : register(t0);
@@ -31,12 +32,32 @@ float fovea_warp(float p, float c, float a) {
   return c + (a * e + (1.0 - a) * e * e * e) * ext;
 }
 
+// §VR-FOVEA-INSET（2026-11-09）：分段曲線。|e| ≤ u0 的中央段斜率是 a（原生細節），外面線性壓縮到邊緣；
+// 頭盔端（xrvideo.cpp 的 kFovHeader）照同一組 a、u0 精確反解。參數由 host 協商時算好（vr_fovea_profile.h）
+float fovea_warp_inset(float p, float c, float a, float u0) {
+  const float ext = p < c ? c : 1.0 - c;
+  const float e = (p - c) / ext;
+  const float ae = abs(e);
+  const float k2 = (1.0 - a * u0) / (1.0 - u0);
+  const float t = ae <= u0 ? a * ae : a * u0 + k2 * (ae - u0);
+  return c + sign(e) * t * ext;
+}
+
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
   float2 suv = uv;
   bool inside = true;
-  if (fovea.x > 0.0) {
+  if (fovea_mode == 1 || fovea.x > 0.0) {
     // uv 是本眼影像的座標：換成均勻取樣的座標 → NDC → 這一層四邊形裡的比例 → 這一層貼圖的 uv
-    const float2 q = float2(fovea_warp(uv.x, fovea.y, fovea.x), fovea_warp(uv.y, fovea.z, fovea.x));
+    float2 q;
+    if (fovea_mode == 1) {
+      // §VR-FOVEA-TILES：注視點那塊＝本眼影像的一塊裁切，不變形。左上角對齊算圖像素、大小＝塊的像素數／算圖尺寸，
+      // 遊戲照建議尺寸算圖時每個輸出像素正好落在一個來源像素的中心（原樣搬）
+      q = fovea.xy + uv * fovea.zw;
+    } else if (fovea.w > 0.0) {
+      q = float2(fovea_warp_inset(uv.x, fovea.y, fovea.x, fovea.w), fovea_warp_inset(uv.y, fovea.z, fovea.x, fovea.w));
+    } else {
+      q = float2(fovea_warp(uv.x, fovea.y, fovea.x), fovea_warp(uv.y, fovea.z, fovea.x));
+    }
     const float2 ndc = float2(2.0 * q.x - 1.0, 1.0 - 2.0 * q.y);
     const float2 f = float2((ndc.x - dst_rect.x) / (dst_rect.z - dst_rect.x), (dst_rect.w - ndc.y) / (dst_rect.w - dst_rect.y));
     suv = lerp(uv_rect.xy, uv_rect.zw, f);

@@ -58,6 +58,10 @@ extern "C" {
 #define VIPLE_VR_CLIENT_CAP_SKELETON        0x08
 #define VIPLE_VR_CLIENT_CAP_MULTILINK       0x10  // §VR-MULTILINK
 #define VIPLE_VR_CLIENT_CAP_GAZE_FOVEA      0x20  // §VR-GAZE-FOVEA：能接收 0x82 幀標頭並還原動態中心
+#define VIPLE_VR_CLIENT_CAP_FOVEA_INSET     0x40  // §VR-FOVEA-INSET：懂分段注視點曲線（協商回應的 foveaInset=）
+// §VR-FOVEA-TILES（2026-11-10）：懂「每眼兩塊影像」的注視點排法（協商回應的 foveaTiles=／foveaRender=），
+// 也代表收得到 0x82 幀標頭（不論有沒有眼動追蹤，注視點那塊的位置都逐幀帶）
+#define VIPLE_VR_CLIENT_CAP_FOVEA_TILES     0x80
 
 // /launch 的 vrCodecs（client 能解的 codec）
 #define VIPLE_VR_CODEC_H264  0x01
@@ -282,7 +286,11 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
     uint32_t echoSampleId;
     uint8_t  renderRot[6];            // smallest-three，48 bit little-endian
     int16_t  renderPos[3];            // 0.1 mm
-    uint16_t foveaCxL;                // 這一幀的注視點中心（0–65535 對應 [0.0, 1.0]，y 由上緣算）
+    // 這一幀的注視點中心（0–65535 對應 [0.0, 1.0]，y 由上緣算）。
+    // §VR-FOVEA-TILES：協商出 foveaTiles 時這四欄改放「注視點那塊的左上角在算圖影像裡的像素座標」（x、y；分母＝
+    // foveaRender 的寬、高），整數才能讓兩端算出完全相同的裁切範圍。client 的 VIPLE_VR_FRAME_META.foveaCentre 仍是
+    // 欄位值／65535，乘回 65535 四捨五入就是原值
+    uint16_t foveaCxL;
     uint16_t foveaCyL;
     uint16_t foveaCxR;
     uint16_t foveaCyR;
@@ -308,6 +316,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
 #define VIPLE_VR_C2S_HOTSPOT_INFO      0x0C  // reliable，§VR-HOTSPOT-AUTO
 #define VIPLE_VR_C2S_MIC               0x0D  // §VR-MIC：VR channel unsequenced，每 20 ms 一則：{u16 seq（LE）, Opus 封包}（48 kHz 單聲道）
 #define VIPLE_VR_C2S_RATE              0x0E  // reliable，§VR-RATE-AUTO：要求 host 每幾張送一張（VIPLE_VR_TLV_RATE）
+#define VIPLE_VR_C2S_NET_SWITCH        0x0F  // reliable（另在連線上各送一份），§VR-NETSEL-HOLD：頭盔要切網路了（VIPLE_VR_TLV_NET_SWITCH）
 #define VIPLE_VR_C2S_RESERVED_MIC      0x7F  // 舊保留值（未使用；新版改用 0x0D）
 
 // S→C subtype
@@ -397,6 +406,17 @@ typedef struct _VIPLE_VR_TLV_RATE_APPLIED {
     uint16_t seq;         // 對應的要求序號
     uint32_t firstFrame;  // 從這個幀號（NV_VIDEO_PACKET.frameIndex）起照新的分頻送
 } VIPLE_VR_TLV_RATE_APPLIED;
+
+// §VR-NETSEL-HOLD（2026-11-08）：頭盔的自動網路選擇要暫停／接回家用 Wi-Fi 了。頭盔只有一個無線電，切換的那幾秒熱點也會
+// 大量掉包；那不是塞車，host 在 holdMs 內不因丟包或延遲降碼（11-08 實測：接回家用 Wi-Fi 時一路降到 2 Mbps、90 秒才回到 60）。
+// ENet 與每條已確認的連線各送一份，host 取最晚的結束時間（重複收到無妨）。舊 host 不認得就忽略。
+#define VIPLE_VR_NET_SWITCH_PAUSE_HOME  1  // 暫停家用 Wi-Fi（只留轉接器）
+#define VIPLE_VR_NET_SWITCH_RESUME_HOME 2  // 接回家用 Wi-Fi
+typedef struct _VIPLE_VR_TLV_NET_SWITCH {
+    uint8_t  phase;     // VIPLE_VR_NET_SWITCH_*
+    uint8_t  reserved;
+    uint16_t holdMs;    // 從收到起這麼久內不因網路訊號降碼（LE；host 端另有上限）
+} VIPLE_VR_TLV_NET_SWITCH;
 
 typedef struct _VIPLE_VR_TLV_LATCH {
     uint32_t frameId;
@@ -523,7 +543,11 @@ typedef struct _VIPLE_VR_TLV_STATS {
                                          // 要同時有 F_REPAIR。舊的一方不認得這個位元，兩邊就都照原本的規則走
 #define VIPLE_VR_LINK_F_HOTADD   0x08  // §VR-MULTILINK-HOTADD：串流中途熱插拔（client 定期掃描網卡、同 id 重綁、死亡 slot 回收）。
                                        // 不依賴 CTRL／REPAIR，可獨立成立；舊的一方不認得這個位元就不做熱插拔
-#define VIPLE_VR_LINK_PING_F_CONFIRMED  0x01  // client 最近 1 s 內在這條連線收過 PONG
+// §VR-LINK-DEDICATED（2026-11-08）：不是功能位元，是這一條連線的屬性——走頭盔自己的串流轉接器熱點（wlanap，專用 6 GHz）。
+// server 的「只剩一條連線就壓上限」只套在家用 Wi-Fi，不套在這一條。舊 server 的功能協商只取認得的位元，不受影響
+#define VIPLE_VR_LINK_F_DEDICATED 0x10
+#define VIPLE_VR_LINK_PING_F_CONFIRMED  0x01  // client 最近 1 s 內在這條連線收過 PONG。§VR-LINK-STANDBY：有區網直連時，
+                                             // 走 Tailscale 的那一條即使收得到 PONG 也不帶（server 就不在上面送影像）
 #define VIPLE_VR_LINK_READY_OK       0
 #define VIPLE_VR_LINK_READY_REFUSED  1
 // S→C 影像 socket 上長度小於這個值的資料報是連線控制（PONG），其餘是影像 RTP。
@@ -637,6 +661,7 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LOSS) == 9, tlv_loss_9);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_LATCH) == 12, tlv_latch_12);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_RATE) == 4, tlv_rate_4);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_RATE_APPLIED) == 8, tlv_rate_applied_8);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_NET_SWITCH) == 4, tlv_net_switch_4);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_REFRESH_START) == 6, tlv_refresh_6);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_CLIENT_TIMING) == 44, tlv_client_timing_44);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_STATE) == 4, tlv_state_4);

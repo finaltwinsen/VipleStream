@@ -5,6 +5,10 @@
 //  - 深度 1：5 秒內缺貨累計到 10 格（每秒 2 格）就加到上限。遠端行動網路平常每秒約 7 格。
 //    升格不跳不重複：只是下一次缺貨時不再追上最新，自然多留一格。
 //  - 深度 2：切換後至少 60 秒，且 30 秒視窗內「少一格就會缺貨」< 15 格（每秒 0.5 格）→ 退回 1（會跳過一張）。
+//  - §VR-BUFFER-SHED（2026-11-09）：深度 2、全速時，連續 kShedUs 每一格都落後最新 2 張以上（沒有重複）→ 跳過一張，
+//    回到落後 1 張。11-09 無人十場：家用 Wi-Fi 斷 ~175 ms 後一口氣補進來，之後整整 60 秒都排兩張（MTP 48→56 ms），
+//    要等退回深度 1 才消掉。2.0.113 第一版用「落後 ≥1 張」當條件：正常狀態本來就大多落後 1 張，結果每 5～10 秒
+//    就跳一張（shed_1109b），改成 ≥2。
 #pragma once
 
 #include <algorithm>
@@ -18,6 +22,7 @@ namespace xrbuf {
         static constexpr uint64_t kDownWindowUs = 30000000ull;
         static constexpr uint32_t kDownStarve = 15;
         static constexpr uint64_t kMinDwellUs = 60000000ull;
+        static constexpr uint64_t kShedUs = 3000000ull;
 
         int maxDepth = 2;
         int depth = 1;
@@ -26,6 +31,8 @@ namespace xrbuf {
         uint32_t starve = 0;     // 視窗內的缺貨格數
         uint32_t ups = 0, downs = 0;
         uint32_t sameRun = 0;    // §VR-RATE-AUTO：這一張已經連續重複幾格
+        uint64_t lag2SinceUs = 0;  // §VR-BUFFER-SHED：連續落後最新 2 張以上的起點（0＝沒有在連續）
+        uint32_t sheds = 0;
 
         void reset(int maxD)
         {
@@ -33,6 +40,18 @@ namespace xrbuf {
             depth = 1;
             winUs = sinceUs = 0;
             starve = 0;
+            lag2SinceUs = 0;
+        }
+
+        // §VR-BUFFER-SHED：挑選之前問一次；true＝這一格改挑「最新的前一張」（跳過一張）。要真的跳得過去（落後 ≥2）才算
+        bool wantShed(uint64_t lastShown, uint64_t newest, uint64_t now, int div = 1)
+        {
+            if (depth < 2 || div > 1 || lag2SinceUs == 0 || now - lag2SinceUs < kShedUs || newest < lastShown + 3) {
+                return false;
+            }
+            lag2SinceUs = 0;
+            sheds++;
+            return true;
         }
 
         // 每顯示一格呼叫一次（shown＝這一格顯示的序號、lastShown＝上一格、newest＝目前最新）。回傳深度有沒有變。
@@ -45,6 +64,14 @@ namespace xrbuf {
                 sinceUs = now;
             }
             sameRun = shown == lastShown ? sameRun + 1 : 0;
+            if (depth >= 2 && div <= 1 && lastShown != 0 && shown == lastShown + 1 && newest >= shown + 2) {
+                if (lag2SinceUs == 0) {
+                    lag2SinceUs = now;
+                }
+            }
+            else {
+                lag2SinceUs = 0;
+            }
             if ((shown == lastShown && sameRun >= static_cast<uint32_t>(div < 1 ? 1 : div)) || (div <= 1 && depth >= 2 && shown == newest)) {
                 starve++;
             }

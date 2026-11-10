@@ -97,6 +97,12 @@ public:
         // §VR-PASS（量測）：把 libplacebo 每個 pass 的 GPU 計時接出來，影像 render thread 每 60 秒印一行
         // [VIPLE-VR-PASS]。只給 PCVR 開（VR 的 tag 不可以出現在一般 session）
         bool passTimers = false;
+        // §VR-UNWARP-MAX（dev，2026-11-10）：注視點還原後 swapchain 對解碼影像的放大倍率上限（outputSize）
+        float unwarpMax = 2.0f;
+        // §VR-UNWARP-YUV（2026-11-10）：還原直接讀 YUV 平面（預設開；--vr-unwarp-rgb 關掉，給 A/B 用）
+        bool unwarpYuv = true;
+        // §VR-FOVEA-LAYERS（2026-11-10）：周邊用解碼原尺寸的 projection、中央區另交 quad layer（預設開；--vr-fovea-single-layer 關）
+        bool fovLayers = true;
         // §VR-BUFFER（2026-10-29）：頭盔端多緩衝幾格（0＝關、1）。開著時影像輪流畫進 kRing 條 swapchain，frame thread
         // 每格顯示「上次顯示的下一張」與「最新的前一張」之中較新的一張（不超過最新）：平常晚一格顯示，某一張晚到時
         // 直接顯示最新的（不重複），晚到的那張和下一張一起到時馬上回到晚一格（不跳）。OpenXR 的 layer 用的是 swapchain
@@ -143,6 +149,13 @@ public:
         // 最後新影像剛好在挑選前才到、緩衝被吃光——10-29 nb1 實測後半場 lag0 100%）。current() 填；沒開緩衝時同 seq／lastDrawnUs
         uint64_t fbSeq = 0;
         uint64_t fbDrawnUs = 0;
+        // §VR-FOVEA-LAYERS（2026-11-10）：swapchain 下方另有兩眼的中央高密度區。insetRect＝兩眼各自在 swapchain 上的
+        // 範圍；insetOut＝它蓋住的那一塊在每眼影像裡的範圍（正規化 x0, y0, x1, y1，y 由上往下）。frame thread 依這些放
+        // 兩個 quad layer 蓋在 projection 上。來源有兩種：分段曲線裡 1:1 的那一塊（§VR-FOVEA-INSET），或
+        // §VR-FOVEA-TILES 的注視點那塊（跟著視線移，位置逐幀由 host 帶來）
+        bool hasInset = false;
+        XrRect2Di insetRect[2] = {};
+        float insetOut[2][4] = {};
     };
 
     // 2026-10-05：目前最後一次 xrReleaseSwapchainImage 的序號（呼叫端持 XrContext::queueMutex() 讀，與 release 互斥）。
@@ -174,6 +187,9 @@ public:
 
     // 影像路徑是否可用（XrRenderer 的 SW 格式測試 map 失敗時標成不可用，之後的 decoder 嘗試改走平面）
     bool usable() const { return m_Usable.load(std::memory_order_acquire); }
+    // §VR-RATE-CAUSE（2026-11-09）：解出來、交給這裡之後還沒發布的影格，最早那一張已經等了多久（µs，0＝沒有在等的）。
+    // XR frame thread 在「預期外的重複格」讀：等超過一個顯示格＝頭盔端（轉換／算圖）跟不上，不是網路晚到
+    uint64_t waitingAgeUs() const;
     void markUnusable(const char* why);
 
     pl_gpu gpu() const;
@@ -220,13 +236,24 @@ public:
     // §VR-FOVEA：a＝正前方的斜率（1＝關）、cxL／cxR、cyL／cyR＝正前方在左右眼影像裡的位置（0–1，y 從上緣算）。
     // 兩眼的上下視角可以不同（Steam Frame 就是），host 是每眼照自己的中心壓縮的，所以垂直中心也要每眼各給一個。
     // XR thread 每幀設
-    void setFoveation(float a, float cxL, float cxR, float cyL, float cyR)
+    // §VR-FOVEA-INSET：u0 > 0＝分段曲線（中央段在編碼影像裡的範圍），0＝三次曲線
+    void setFoveation(float a, float cxL, float cxR, float cyL, float cyR, float u0 = 0.0f)
     {
+        m_FvU0.store(u0, std::memory_order_relaxed);
         m_FvCxL.store(cxL, std::memory_order_relaxed);
         m_FvCxR.store(cxR, std::memory_order_relaxed);
         m_FvCyL.store(cyL, std::memory_order_relaxed);
         m_FvCyR.store(cyR, std::memory_order_relaxed);
         m_FvA.store(a, std::memory_order_relaxed);
+    }
+    // §VR-FOVEA-TILES（2026-11-10）：server 協商出「每眼兩塊影像」時的每塊尺寸與每眼算圖尺寸（tw＝0＝沒有分塊）。
+    // 解碼出來的畫面是 (2·tw)×(2·th)：上排左右眼的全視野、下排左右眼的注視點裁切。XR thread 每幀設
+    void setTiles(int tw, int th, int rw, int rh)
+    {
+        m_TileH.store(th, std::memory_order_relaxed);
+        m_TileRW.store(rw, std::memory_order_relaxed);
+        m_TileRH.store(rh, std::memory_order_relaxed);
+        m_TileW.store(tw, std::memory_order_relaxed);
     }
     // §VR-XRLOOP（量測）：顯示格點——任何一格的預測顯示時刻（steady 時鐘，µs）與顯示週期（µs）。影像 render thread
     // 拿它把送出／GPU 做完的時刻換成相位，只進統計。PCVR 的 XR frame thread 每格設；periodUs＝0＝這一格沒有格點
@@ -286,9 +313,18 @@ private:
     bool ensureProjSwapchain(XrSession session, int width, int height);
     // §VR-FOVEA：swapchain 裡一張影像的尺寸（還原後正前方的細節要有地方放，所以比解碼出來的影像大）
     void outputSize(int fw, int fh, int* ow, int* oh) const;
+    // §VR-FOVEA-LAYERS：這一張要不要畫中央區、畫的話每眼的寬高（回傳 false＝不畫）
+    bool insetSize(int fw, int fh, int* iw, int* ih) const;
+    bool renderInsets(pl_frame* mapped, pl_tex swTex, int top, int iw, int ih, const float fv[4], float cyR, float u0);
+    // §VR-FOVEA-TILES：這一張（fw×fh）是不是分塊的畫面；是的話回傳每塊尺寸與每眼算圖尺寸
+    bool tilesFor(int fw, int fh, int* tw, int* th, int* rw, int* rh) const;
+    // §VR-FOVEA-TILES：整張 1:1 轉進 swapchain（同樣的排法），注視點那兩塊的邊緣做 alpha 漸層（預乘、線性光）
+    bool renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int tw, int th, const char** why);
     bool ensureFull(int fw, int fh);
     // fv＝(a, cxL, cxR, cyL)（shader 的 vec4 vs_fv）、*cyR＝右眼的垂直中心（shader 的 float vs_cyr）
-    void loadFoveation(float fv[4], float* cyR) const;
+    void loadFoveation(float fv[4], float* cyR, float* u0) const;
+    bool renderUnwarpYuv(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, bool hasMeta,
+                         const VIPLE_VR_FRAME_META& meta, const char** why);  // §VR-UNWARP-YUV
     bool renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
                       bool hasMeta = false, const VIPLE_VR_FRAME_META& meta = {});
     void dumpTexture(pl_tex tex, const QString& path);
@@ -334,10 +370,27 @@ private:
     std::atomic<float> m_FovTanW{3.2f};
     std::atomic<float> m_FovTanH{3.2f};
     std::atomic<float> m_FvA{1.0f};
+    std::atomic<float> m_FvU0{0.0f};  // §VR-FOVEA-INSET
     std::atomic<float> m_FvCxL{0.5f};
     std::atomic<float> m_FvCxR{0.5f};
     std::atomic<float> m_FvCyL{0.5f};
     std::atomic<float> m_FvCyR{0.5f};
+    bool m_UnwarpYuvFailed = false;  // §VR-UNWARP-YUV：直接讀 YUV 不適用或失敗過 → 這個 session 走原本的兩趟
+    bool m_LoggedUnwarpYuv = false;
+    bool m_LoggedUnwarpYuvGeom = false;
+    bool m_InsetFailed = false;   // §VR-FOVEA-LAYERS：中央區畫失敗過 → 這個 session 改回單一大圖
+    bool m_LoggedInset = false;
+    // §VR-FOVEA-LAYERS：這一張畫中央區時的參數（render thread 寫、發布時抄進 m_Published）
+    bool m_PendInset = false;
+    XrRect2Di m_PendInsetRect[2] = {};
+    float m_PendInsetOut[2][4] = {};
+    // §VR-FOVEA-TILES
+    std::atomic<int> m_TileW{0};
+    std::atomic<int> m_TileH{0};
+    std::atomic<int> m_TileRW{0};
+    std::atomic<int> m_TileRH{0};
+    bool m_TilesFailed = false;   // 直接讀 YUV 的那一趟不適用或失敗過 → 這個 session 改用一般的轉換（注視點那塊沒有漸層）
+    bool m_LoggedTiles = false;
     bool m_UnwarpFailed = false;     // 還原的 shader 或材質失敗過：這個 session 改回直接畫（影像會是壓縮過的樣子）
     pl_tex m_Tex[4] = {};       // XR thread 的 map 材質
     pl_tex m_TestTex[4] = {};   // testMap 用（m_TestMutex）
@@ -398,7 +451,7 @@ private:
     std::atomic<int> m_StreamDiv {1};      // §VR-RATE-AUTO：串流每張佔幾格（main thread 設、frame thread 讀）
     uint32_t m_BufShownCount = 0;          // §VR-RATE-AUTO：m_BufLastShown 那一張已經顯示了幾格（m_SwMutex）
     std::atomic<int> m_BufDepthLog{0};     // 給 10 s log 讀
-    std::atomic<uint32_t> m_BufUp{0}, m_BufDown{0};
+    std::atomic<uint32_t> m_BufUp{0}, m_BufDown{0}, m_BufShed{0};  // m_BufShed：§VR-BUFFER-SHED 讓掉的次數
     // §VR-BUFFER 量測（frame thread 寫、影像 render thread 每 10 s 印）：顯示「最新的前一張」／最新的一張（新的）／
     // 重複上一張／跳過的張數
     std::atomic<uint32_t> m_BufLag1{0}, m_BufLag0{0}, m_BufRepeat{0}, m_BufSkipped{0};
@@ -416,6 +469,8 @@ private:
     std::condition_variable m_MailboxCv;
     AVFrame* m_Pending = nullptr;
     uint64_t m_PendingAtUs = 0;            // §VR-XRLOOP：m_Pending 放進來的時刻（m_MailboxMutex）
+    // §VR-RATE-CAUSE：最早一張還沒發布的影格交進來的時刻（0＝沒有）。寫在 m_MailboxMutex 內，frame thread 只讀
+    std::atomic<uint64_t> m_WaitSinceUs {0};
     bool m_StopThread = false;
     std::thread m_Thread;
     uint64_t m_FirstSubmitUs = 0;          // stall 測試的起點（submit 端）

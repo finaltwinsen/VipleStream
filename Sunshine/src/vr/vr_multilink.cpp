@@ -94,6 +94,8 @@ namespace vr::multilink {
 
     std::atomic<int64_t> last_confirmed_ns {0};
     std::atomic<int64_t> last_ping_ns {0};  // 最近一個（來源正確的）PING
+    /// §VR-LINK-DEDICATED：client 說這條走頭盔自己的轉接器熱點（LINK_HELLO 的 VIPLE_VR_LINK_F_DEDICATED；hello 時寫、任何執行緒讀）
+    std::atomic<bool> dedicated {false};
     std::atomic<int64_t> muted_until_ns {0};
     // automatic：探測中的連線不送影像，每秒一批當探測；量到夠快才轉成送影像
     std::atomic<bool> probing {false};
@@ -439,6 +441,7 @@ namespace vr::multilink {
 
       L.id = h.id;
       L.desc = h;
+      L.dedicated.store((h.flags & VIPLE_VR_LINK_F_DEDICATED) != 0, std::memory_order_relaxed);
       L.epoch = h.epoch;
       ++L.rebinds;
       L.tx = std::thread {[this, &L] {
@@ -1055,6 +1058,7 @@ namespace vr::multilink {
         auto L = std::make_unique<link_t>(m.io);
         L->id = h.id;
         L->desc = h;
+        L->dedicated.store((h.flags & VIPLE_VR_LINK_F_DEDICATED) != 0, std::memory_order_relaxed);
         L->epoch = h.epoch;
         L->primary = h.client_addr == primary_client_addr;
         for (int i = 0; i < n; ++i) {
@@ -1602,6 +1606,22 @@ namespace vr::multilink {
     return alive;
   }
 
+  int hub_t::alive_dedicated_count() const {
+    if (!impl_) {
+      return 0;
+    }
+    const int64_t now_ns = to_ns(clock::now());
+    const int n = impl_->count.load(std::memory_order_acquire);
+    int alive = 0;
+    for (int i = 0; i < n; ++i) {
+      const auto &L = *impl_->links[i];
+      if (L.dedicated.load(std::memory_order_relaxed) && impl_->alive(L, now_ns)) {
+        ++alive;
+      }
+    }
+    return alive;
+  }
+
   std::string hub_t::take_stats_line() {
     auto &m = *impl_;
     const int n = m.count.load(std::memory_order_acquire);
@@ -1645,12 +1665,13 @@ namespace vr::multilink {
       const uint16_t rtt = L.cl_rtt_ms10.load();
       const int64_t muted_ns = L.muted_until_ns.load() - now_ns;
       s += std::format(
-        " | L{} {}{}{} tx={} ({:.1f} Mbps) dropAge={} dropBlock={} dropFull={} paused={} standby={} fault={} err={} sendMaxMs={:.1f} audio={}/{} mutes={}"
+        " | L{} {}{}{}{} tx={} ({:.1f} Mbps) dropAge={} dropBlock={} dropFull={} paused={} standby={} fault={} err={} sendMaxMs={:.1f} audio={}/{} mutes={}"
         " probes={} starts={} forced={} deliv={} rx ping={} trk={} dup={} bad={} trkFirst={} ctl={} s2c={}/{} client rx={} used={} rttMs={} gapMaxMs={} burstMbps={} epoch={} rebinds={}",
         (int) L.id,
         m.alive(L, now_ns) ? "up" : "down",
         L.probing.load() ? "(probing)" : "",
         muted_ns > 0 ? std::format("(paused {:.0f}s)", muted_ns / 1e9) : "",
+        L.dedicated.load() ? "(adapter)" : "",
         c.tx_pkts - p.tx_pkts,
         (c.tx_bytes - p.tx_bytes) * 8 / secs / 1e6,
         c.drop_age - p.drop_age,

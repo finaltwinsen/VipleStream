@@ -32,6 +32,7 @@
 | 18 | `--filesystem=/run/media:ro` | 同上，外接儲存裝置 | 唯讀 | 新增（2026-10-19）；**UNVERIFIED**（頭盔沒有插外接裝置測過） |
 | 19 | `--env=QTWEBENGINE_DISABLE_SANDBOX=1` | §VR-PLAYER 內建瀏覽器（Qt WebEngine）：Chromium 自己的沙箱在 Flatpak 內要再開一層 bwrap，頭盔上建不了 PID namespace（`bwrap: Setting pidns failed`），建立網頁時 UI 執行緒卡在 `WebContentsAdapter` 建構式永遠不回來 | 網頁的 renderer 少一層 Chromium 沙箱；Flatpak 的沙箱仍在。Flathub 上用 QtWebEngine 的 app 普遍這樣做 | 新增（2026-10-19，頭盔驗過：關掉後 YouTube 3 秒內載入） |
 | 20 | `--filesystem=/run/tailscale` | §TS-PATH：串流的 host 在 Tailscale（100.64.0.0/10）時，client 連本機 tailscaled 的 unix socket（`/run/tailscale/tailscaled.sock`，其次 `/var/run/tailscale/tailscaled.sock`）讀路徑、送 disco ping，必要時 restun／rebind，把 DERP 中繼拉回直連 | 沒加 `:ro`：對 socket 送 HTTP 要能寫。目錄裡是 rw-rw-rw- 的 socket，沒有家目錄。restun／rebind 沒有 operator 會 403，不中斷串流。沒裝 Tailscale 或沒這條權限時連不上，程式記一次 log 就停 | 新增（2026-11-04）；**UNVERIFIED**（還沒在 Frame 上確認掛載） |
+| 21 | `--filesystem=/run/softapmanager.streaming.socket` | §WIFI-SCANBLOCK：串流期間對每張有 IP 的無線網卡送 `streamon`＋tab＋網卡名，softapmanager 擋住 Wi-Fi 背景掃描（家用 Wi-Fi 與熱點共用一顆晶片，掃描時每 0.2 秒卡 50～170 ms）並暫停 wlan0 漫遊；連線一關自動解除。Steam 內建串流（vrlink）用同一個 socket | 只暴露這一個 socket（權限 0777，本來任何使用者都能連）；沒加 `:ro`：connect 要能寫 | 新增（2026-11-09）；**Frame 已驗證**：沙盒內 connect＋send 成功，`cfg80211_block_scans` 變 1，行程結束歸 0 |
 
 `--env=` 原則上只用來**清掉** host 的變數（不變式 7：不以環境變數當使用者設定）。任何功能開關都走 Settings UI 或 CLI 旗標。
 唯一例外是 #19：它不是使用者設定，是 Qt WebEngine 在 Flatpak 內能跑起來的前提（固定值，沒有開關的意義）。

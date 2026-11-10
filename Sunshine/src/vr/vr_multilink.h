@@ -145,6 +145,8 @@ namespace vr::multilink {
 
     /// §VR-ABR-FAST（2026-10-30）：現在活著的連線數（定義同 any_alive）。任何執行緒
     int alive_count() const;
+    /// §VR-LINK-DEDICATED（11-08）：活著的連線裡走頭盔轉接器熱點（專用 6 GHz）的有幾條。任何執行緒
+    int alive_dedicated_count() const;
 
   private:
     struct link_t;

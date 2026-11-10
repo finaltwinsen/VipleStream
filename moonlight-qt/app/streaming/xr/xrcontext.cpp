@@ -6,6 +6,7 @@
 #include <Limelight.h>  // M4a R2：VIPLE_VR_TRACKING（sampleControllers）
 #include "streaming/vr/vrtracking.h"  // M4a R3：VrSampleHistory（MTP）
 #include "streaming/vr/vrframemeta.h"  // 2026-10-05：VrDecodeTiming（CLIENT_TIMING decode 欄位）
+#include "streaming/vr/vrnetbench.h"  // §VR-NETBENCH
 
 #ifdef HAVE_XR_VIDEO
 #include "xrvideo.h"
@@ -441,7 +442,10 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         vc.synth = m_Options.pcvr && m_Options.pcvrSynth;  // §VR-SYNTH
         vc.buffer = m_Options.pcvr && !vc.synth ? m_Options.pcvrBufferFrames : 0;  // §VR-BUFFER：和補幀互斥（都用 swapchain 的配置）
         vc.bufferAuto = vc.buffer > 1 && m_Options.pcvrBufferAuto;                    // §VR-BUFFER-AUTO
-        vc.testJitter = m_Options.testJitter;  // §VR-LDIAG（dev）：--vr-test-jitter
+        vc.testJitter = m_Options.testJitter;
+        vc.unwarpMax = m_Options.unwarpMax;  // §VR-UNWARP-MAX（dev）
+        vc.unwarpYuv = m_Options.unwarpYuv;  // §VR-UNWARP-YUV
+        vc.fovLayers = m_Options.fovLayers;  // §VR-FOVEA-LAYERS  // §VR-LDIAG（dev）：--vr-test-jitter
         vc.passTimers = m_Options.pcvr;        // §VR-PASS：每個 pass 的 GPU 時間（[VIPLE-VR-PASS]；VR 的 tag，XR 桌面不開）
         // §VR-LATCH-RELATCH／§VR-LATCH-WAIT：整場維持（A/B 切換只切 frame thread 那一側，發布的方式不跟著變）
         vc.notifyPublish = pcvrLatchWaitEffUs() > 0;
@@ -1440,7 +1444,11 @@ bool XrContext::createActions(QString* error)
         return true;
     }
     // X4：action set、actions、各 profile 綁定、attach 與 aim space 全交給 XrInput
-    m_Input = new XrInput(m_Options.inputSink, m_Options.testPointer, m_Options.testKeyboardText);
+    XrInputSink sink = m_Options.inputSink;
+    if (!sink.recenter) {
+        sink.recenter = [this]() { requestRecenter(); };  // §VR-RECENTER：長按選單鍵
+    }
+    m_Input = new XrInput(sink, m_Options.testPointer, m_Options.testKeyboardText);
     if (!m_Input->create(m_Instance, m_Session, m_EnabledExtensions, error)) {
         return false;
     }
@@ -1498,6 +1506,15 @@ bool XrContext::pollEvents()
                         static_cast<double>(rc->fromDisplayRefreshRate), static_cast<double>(rc->toDisplayRefreshRate));
             std::lock_guard<std::mutex> lk(m_StatsMutex);
             m_RefreshHz = rc->toDisplayRefreshRate;
+            break;
+        }
+        case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
+            // §VR-RECENTER（2026-11-09）：SteamVR 的重新置中（長按 Steam 鍵等）會改參考空間的原點。面板固定在 LOCAL 空間裡，
+            // 原點換了它不一定會跟著到眼前（11-09 使用者：主畫面怎樣都調不到正中間）——收到就照「重新置中」重擺一次
+            auto* sc = reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&ev);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] reference space %d changed (poseValid=%d) - recentering the screen",
+                        static_cast<int>(sc->referenceSpaceType), sc->poseValid ? 1 : 0);
+            m_Screen->requestRecenter();
             break;
         }
         case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
@@ -2246,7 +2263,7 @@ void XrContext::frameThreadMain()
             }
         }
 
-        const XrCompositionLayerBaseHeader* layers[10];
+        const XrCompositionLayerBaseHeader* layers[12];  // §VR-FOVEA-LAYERS：PCVR 多兩個中央區 quad
         uint32_t layerCount = 0;
         // M4a R1（PCVR）：projection＋淡出 quad（結構體要活到 xrEndFrame）
         XrCompositionLayerProjection proj = xrStruct<XrCompositionLayerProjection>(XR_TYPE_COMPOSITION_LAYER_PROJECTION);
@@ -2262,6 +2279,8 @@ void XrContext::frameThreadMain()
         XrCompositionLayerQuad subLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerQuad toastLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-PADMODE
         XrCompositionLayerQuad battLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-LOWBATT
+        XrCompositionLayerQuad insetQ[2] = {xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD),
+                                            xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD)};  // §VR-FOVEA-LAYERS
         float playerEyeAspect = 0.0f;  // §VR-PLAYER：這一格每眼的畫面比例（螢幕高度＝寬÷它）
         if (m_Options.player && m_PlayerScreenDirty.exchange(false, std::memory_order_acq_rel)) {
             m_Screen->setGeometry(m_PlayerDistM.load(std::memory_order_relaxed), m_PlayerFovDeg.load(std::memory_order_relaxed));
@@ -2288,15 +2307,20 @@ void XrContext::frameThreadMain()
             // §VR-FOVEA：正前方（tangent 0）在每隻眼影像裡的位置，和 host 合成器用同一組視角算。水平、垂直都是每眼
             // 各自算（host 也是）：垂直原本只用左眼的上下視角，兩眼的上下視角不同時右眼會還原錯位置
             // （見 xrvideo.cpp 的 kFovHeader）
+            // §VR-FOVEA-TILES：分塊的畫面沒有幾何變形（server 這時不回 fovea=，下面走「不還原」那一支）
+            m_Video->setTiles(m_PcvrTileW.load(std::memory_order_relaxed), m_PcvrTileH.load(std::memory_order_relaxed),
+                              m_PcvrTileRW.load(std::memory_order_relaxed), m_PcvrTileRH.load(std::memory_order_relaxed));
             const int fpct = m_PcvrFoveaPct.load(std::memory_order_relaxed);
             if (fpct > 100 && fpct <= 250) {
                 const float l0 = std::tan(-m_Fov[0].angleLeft), r0 = std::tan(m_Fov[0].angleRight);
                 const float l1 = std::tan(-m_Fov[1].angleLeft), r1 = std::tan(m_Fov[1].angleRight);
                 const float u0 = std::tan(m_Fov[0].angleUp), d0 = std::tan(-m_Fov[0].angleDown);
                 const float u1 = std::tan(m_Fov[1].angleUp), d1 = std::tan(-m_Fov[1].angleDown);
+                const int insetU0 = m_PcvrFoveaInsetU0.load(std::memory_order_relaxed);
                 m_Video->setFoveation(100.0f / static_cast<float>(fpct), std::clamp(l0 / (l0 + r0), 0.05f, 0.95f),
                                       std::clamp(l1 / (l1 + r1), 0.05f, 0.95f), std::clamp(u0 / (u0 + d0), 0.05f, 0.95f),
-                                      std::clamp(u1 / (u1 + d1), 0.05f, 0.95f));
+                                      std::clamp(u1 / (u1 + d1), 0.05f, 0.95f),
+                                      insetU0 >= 1000 && insetU0 <= 9000 ? static_cast<float>(insetU0) / 10000.0f : 0.0f);
             }
             else {
                 m_Video->setFoveation(1.0f, 0.5f, 0.5f, 0.5f, 0.5f);
@@ -2345,6 +2369,10 @@ void XrContext::frameThreadMain()
                 if (buildProjection(vcur.subImage.swapchain, vcur.subImage.imageRect, vcur.meta.renderRot,
                                     vcur.meta.renderPos, vcur.meta.echoSampleId, &proj, projViews)) {
                     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
+                    if (vcur.hasInset && buildInsetQuads(vcur.subImage.swapchain, vcur.insetRect, vcur.insetOut, projViews, insetQ)) {
+                        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[0]);
+                        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[1]);
+                    }
                     videoLayer = true;
                     videoGen = vcur.generation;
                     pcvrTimingOnLatch(vcur.seq, vcur.lastDrawnUs, vcur.renderUs, vcur.hasMeta,
@@ -3269,7 +3297,7 @@ void XrContext::resetPcvrRate()
 }
 
 // §VR-RATE-AUTO：frame thread，每個顯示格一次。newFrame＝這一格顯示的是新影像
-void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs)
+void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs)
 {
     if (!m_Options.pcvrRateAuto) {
         return;
@@ -3282,7 +3310,20 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs)
     if (reply & 0x80000000u) {
         m_RateAuto.onApplied(static_cast<int>((reply >> 16) & 0xffu), (reply & 0x01000000u) != 0, nowUs);
     }
-    m_RateAuto.onSlot(newFrame, nowUs);
+    // §VR-RATE-CAUSE：沒有新影像的這一格，是影格還沒到（網路），還是到了卻卡在頭盔端：
+    //   解碼器裡有一張已經收齊超過兩個顯示格還沒解出（正常解碼約 5～6 ms），或
+    //   解出來交給影像 render thread 之後超過一個顯示格還沒發布（正常轉換約 2～3 ms）
+    // 11-09 每眼 2304：host 量到送達頭盔的時間（p95 約 9 ms）和 2016 一樣、解碼平均也一樣，跳格卡在解出之後
+    bool headsetLate = false;
+    if (!newFrame && periodUs > 0) {
+        const uint64_t oldest = VrDecodeTiming::oldestPending();
+        const uint64_t now = LiGetMicroseconds();
+        headsetLate = oldest != 0 && now > oldest && now - oldest > 2ull * periodUs;
+        if (!headsetLate && m_Video != nullptr) {
+            headsetLate = m_Video->waitingAgeUs() > periodUs;
+        }
+    }
+    m_RateAuto.onSlot(newFrame, nowUs, headsetLate);
     const xrrate::AutoRate::Request r = m_RateAuto.poll(nowUs);
     if (r.div != 0) {
         VIPLE_VR_TLV_RATE req{};
@@ -3296,10 +3337,12 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs)
         const int rc = LiSendVrMessage(tlv, sizeof(tlv), true);
         const char* why = r.reason == xrrate::AutoRate::Reason::Up ? "network stable, trying full rate"
                         : r.reason == xrrate::AutoRate::Reason::ProbeFail ? "full rate did not hold, back to half"
-                                                                          : "network unstable";
+                        : r.reason == xrrate::AutoRate::Reason::HeadsetDown ? "headset cannot keep up (frames arrive but decode late)"
+                                                                            : "network unstable";
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VR-RATE] request div=%d seq=%u%s (%s): short repeats last 15 s=%u, last 5 s=%u stalls=%u; next try after %llu s%s",
-                    r.div, req.seq, r.retry ? " (resend)" : "", why, m_RateAuto.recentSum(3), m_RateAuto.lastWindow().shortRep,
+                    "[VIPLE-VR-RATE] request div=%d seq=%u%s (%s): short repeats last 15 s=%u (headset %u), last 5 s=%u stalls=%u; next try after %llu s%s",
+                    r.div, req.seq, r.retry ? " (resend)" : "", why, m_RateAuto.recentSum(3), m_RateAuto.recentHeadsetSum(3),
+                    m_RateAuto.lastWindow().shortRep,
                     m_RateAuto.lastWindow().stalls, static_cast<unsigned long long>(m_RateAuto.upDwellUs() / 1000000ull),
                     rc == 0 ? "" : " - send failed");
     }
@@ -3326,7 +3369,7 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     if (seq == 0) {
         return;
     }
-    pcvrRateSlot(seq != t.lastLatchedSeq, latchNs / 1000ull);  // §VR-RATE-AUTO：每個顯示格餵一次
+    pcvrRateSlot(seq != t.lastLatchedSeq, latchNs / 1000ull, periodUs);  // §VR-RATE-AUTO：每個顯示格餵一次
     if (seq == t.lastLatchedSeq) {
         t.repeat10s++;  // 同一張影像重送（沒有新幀）：只計數
         t.lastWasRepeat = true;
@@ -3662,6 +3705,20 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
         const double secs = static_cast<double>(nowNs - t.mtpWindowStartNs) / 1e9;
         t.mtpWindowStartNs = nowNs;
         const size_t n = t.mtp10sUs.size();
+        // §VR-NETBENCH：網路測試的子行程把這個視窗交給 Collector（不是網路測試時 pushWindow 什麼都不做）
+        if (NetBench::Collector::get().enabled()) {
+            NetBench::Window w;
+            w.secs = secs;
+            w.newFrames = t.new10s;
+            w.repeats = t.repeat10s;
+            w.maxRun = (std::max)(t.repRunMax10s, t.repStreak);
+            w.mtp50 = n ? pctOf(t.mtp10sUs, 0.50) / 1000.0 : 0.0;
+            w.mtp95 = n ? pctOf(t.mtp10sUs, 0.95) / 1000.0 : 0.0;
+            w.rateDiv = m_RateDiv.load(std::memory_order_relaxed);
+            w.lateNet = m_RateAuto.totalNetSlots();
+            w.lateHeadset = m_RateAuto.totalHeadsetSlots();
+            NetBench::Collector::get().pushWindow(w, nowNs / 1000ull);
+        }
         // 2026-10-05：尾端加 frames new／repeat／skip（前段欄位順序不變）
         m_AsyncLog.postf(
                          "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
@@ -3700,14 +3757,17 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
                          t.latchSkip10s, t.rrSeen10s == 3u ? "m" : (t.rrSeen10s == 2u ? "1" : "0"),
                          // §VR-RATE-AUTO：目前的分頻與判斷器的統計（自動開著才印）
                          m_Options.pcvrRateAuto
-                             ? qUtf8Printable(QString(" | rate div=%1 short15s=%2 downs=%3 ups=%4 probeFails=%5 outageSkips=%7%6")
+                             ? qUtf8Printable(QString(" | rate div=%1 short15s=%2 downs=%3 ups=%4 probeFails=%5 outageSkips=%7%6 lateNet=%8 lateHeadset=%9")
                                                   .arg(m_RateDiv.load(std::memory_order_relaxed))
                                                   .arg(m_RateAuto.recentSum(3))
                                                   .arg(m_RateAuto.downs())
                                                   .arg(m_RateAuto.ups())
                                                   .arg(m_RateAuto.probeFails())
                                                   .arg(m_RateAuto.disabled() ? " off" : "")
-                                                  .arg(m_RateAuto.outageSkips()))
+                                                  .arg(m_RateAuto.outageSkips())
+                                                  // §VR-RATE-CAUSE：整場累計的預期外重複格（網路晚到／頭盔端解碼晚）
+                                                  .arg(m_RateAuto.totalNetSlots())
+                                                  .arg(m_RateAuto.totalHeadsetSlots()))
                              : "");
         t.repRunMax10s = t.repRunGe3 = t.repRunGe5 = 0;
         t.latchSkip10s = 0;
@@ -4746,6 +4806,56 @@ bool XrContext::buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, co
                     static_cast<double>(head.orientation.x), static_cast<double>(head.orientation.y),
                     static_cast<double>(head.orientation.z), static_cast<double>(head.orientation.w),
                     echoSampleId);
+    }
+    return true;
+}
+
+// §VR-FOVEA-LAYERS（2026-11-10）：中央高密度區的兩個 quad（每眼一個，只給那一眼看）。projection 的每眼影像是整個視角
+// 均勻取樣（tan 空間），中央區蓋住的是其中一塊矩形（out＝正規化的 x0, y0, x1, y1，y 由上往下），換成 tan 之後還是
+// 矩形——在那一眼的視線座標裡、距離 d 的平面上放同樣大小的 quad，從那一眼看就和 projection 的那一塊完全重疊。
+// d 取遠（50 m）：runtime 對沒有深度的 projection 只當成很遠的東西重投影，quad 放遠才會跟著一樣移動、不會錯開。
+// 和 Steam 一樣讓合成器在它本來那一趟裡畫完，不必先還原成一張每眼 2154 的大圖（11-10：頭盔多耗約 3 W 的來源）。
+// 範圍的來源：分段曲線裡 1:1 的那一塊、或 §VR-FOVEA-TILES 的注視點那塊（XrVideo 算好放在 Current::insetOut）
+bool XrContext::buildInsetQuads(XrSwapchain swapchain, const XrRect2Di rects[2], const float out[2][4],
+                                const XrCompositionLayerProjectionView views[2], XrCompositionLayerQuad quads[2])
+{
+    for (int e = 0; e < 2; e++) {
+        if (!(out[e][2] > out[e][0]) || !(out[e][3] > out[e][1]) || out[e][0] < -0.001f || out[e][1] < -0.001f ||
+            out[e][2] > 1.001f || out[e][3] > 1.001f || rects[e].extent.width < 2 || rects[e].extent.height < 2) {
+            return false;
+        }
+    }
+    constexpr float d = 50.0f;
+    for (int e = 0; e < 2; e++) {
+        const XrFovf& fov = views[e].fov;
+        const float tl = std::tan(-fov.angleLeft), tr = std::tan(fov.angleRight);
+        const float tu = std::tan(fov.angleUp), td = std::tan(-fov.angleDown);
+        const float x0 = out[e][0], y0 = out[e][1], x1 = out[e][2], y1 = out[e][3];
+        const float tx0 = -tl + x0 * (tl + tr), tx1 = -tl + x1 * (tl + tr);
+        const float tyTop = tu - y0 * (tu + td), tyBot = tu - y1 * (tu + td);
+        const XrVector3f local = {0.5f * (tx0 + tx1) * d, 0.5f * (tyTop + tyBot) * d, -d};
+        const XrVector3f off = quatRotate(views[e].pose.orientation, local);
+        XrCompositionLayerQuad& q = quads[e];
+        q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;  // 邊緣 alpha 漸層（預乘）
+        q.space = m_TrackSpace;
+        q.eyeVisibility = e == 0 ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+        q.subImage.swapchain = swapchain;
+        q.subImage.imageRect = rects[e];
+        q.subImage.imageArrayIndex = 0;
+        q.pose.orientation = views[e].pose.orientation;
+        q.pose.position = {views[e].pose.position.x + off.x, views[e].pose.position.y + off.y, views[e].pose.position.z + off.z};
+        q.size = {(tx1 - tx0) * d, (tyTop - tyBot) * d};
+    }
+    if (!m_LoggedInsetQuads) {
+        m_LoggedInsetQuads = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-FOVEA] centre quads: L %dx%d covers x %.4f-%.4f y %.4f-%.4f of the eye image, size %.2fx%.2f m @%.0f m; "
+                    "R %dx%d covers x %.4f-%.4f y %.4f-%.4f (first frame)",
+                    rects[0].extent.width, rects[0].extent.height, static_cast<double>(out[0][0]), static_cast<double>(out[0][2]),
+                    static_cast<double>(out[0][1]), static_cast<double>(out[0][3]), static_cast<double>(quads[0].size.width),
+                    static_cast<double>(quads[0].size.height), static_cast<double>(d), rects[1].extent.width, rects[1].extent.height,
+                    static_cast<double>(out[1][0]), static_cast<double>(out[1][2]), static_cast<double>(out[1][1]),
+                    static_cast<double>(out[1][3]));
     }
     return true;
 }

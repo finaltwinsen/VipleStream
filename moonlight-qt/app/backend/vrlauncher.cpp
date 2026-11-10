@@ -1,4 +1,5 @@
 #include "vrlauncher.h"
+#include "streaming/vr/vrnetbench.h"  // §VR-NETBENCH
 
 #include "sfenv.h"
 #include "vrpreflightcheck.h"
@@ -431,6 +432,37 @@ bool VrLauncher::launchPlayer(const QString& source, const QString& format, cons
     args << QStringLiteral("--") << source.trimmed();
     m_ChildIsPlayer = true;
     return startChild(args, QStringLiteral("video player"));
+}
+
+void VrLauncher::killChild()
+{
+    if (m_Proc != nullptr && m_Proc->state() != QProcess::NotRunning) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] killing the child process (did not end on its own)");
+        m_Proc->kill();
+    }
+}
+
+bool VrLauncher::launchNetBenchStep(const QString& hostAddress, int eye, int seconds, const QString& resultPath)
+{
+    if (running() || hostAddress.isEmpty() || resultPath.isEmpty() || eye <= 0) {
+        return false;
+    }
+    const QString eyeArg = QStringLiteral("%1x%1").arg(eye);
+    QStringList args{QStringLiteral("stream"), QStringLiteral("--display-target"), QStringLiteral("pcvr"),
+                     QStringLiteral("--vr-eye"), eyeArg, QStringLiteral("--vr-hz"), QStringLiteral("144"),
+                     QStringLiteral("--vr-netbench"), resultPath, QStringLiteral("--vr-netbench-secs"), QString::number(seconds)};
+    if (s_ChildHook) {
+        args << QStringLiteral("--xr-handback");  // §VR-SHELL
+    }
+    args << QStringLiteral("--") << hostAddress << NetBench::appName();
+    m_ChildIsPlayer = false;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] launching network test step: eye=%s secs=%d host=%s",
+                qPrintable(eyeArg), seconds, qPrintable(hostAddress));
+    if (!startChild(args, QStringLiteral("network test"))) {
+        return false;
+    }
+    setLaunching(true, NetBench::appName(), "network test step started");
+    return true;
 }
 
 bool VrLauncher::startProcess(const QString& hostAddress, const QString& appName, bool takeover)

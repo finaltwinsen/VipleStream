@@ -11,6 +11,8 @@
  */
 #pragma once
 
+#include <atomic>
+
 #include <Limelight.h>
 
 #include <array>
@@ -50,7 +52,14 @@ public:
     // 取走目前累積的樣本；沒有樣本回 false
     static bool take(uint32_t* p50Us, uint32_t* p95Us);
 
+    // §VR-RATE-CAUSE（2026-11-09）：已經收齊、交給解碼器但還沒解出的影格裡最舊那張的收齊時刻（LiGetMicroseconds，
+    // 0＝沒有）。decoder 執行緒每次送出／取出之後更新，XR frame thread 在「預期外的重複格」讀它：那張已經收到超過
+    // 兩格還沒解出＝頭盔端跟不上（解碼），不是網路晚到
+    static void publishOldestPending(uint64_t recvUs) { s_OldestPendingUs.store(recvUs, std::memory_order_relaxed); }
+    static uint64_t oldestPending() { return s_OldestPendingUs.load(std::memory_order_relaxed); }
+
 private:
+    static std::atomic<uint64_t> s_OldestPendingUs;
     static constexpr size_t kCap = 1024;  // 120 Hz 下 1 s 約 120 筆
     static std::mutex s_Lock;
     static std::vector<uint32_t> s_Samples;

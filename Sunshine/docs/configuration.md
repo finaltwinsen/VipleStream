@@ -3156,6 +3156,68 @@ not matter). Any other value is reported in the log as an invalid value and the 
     </tr>
 </table>
 
+### vr_fovea_tiles
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (Windows): foveation as two images per eye instead of a warped image. The stream carries,
+            for each eye, the whole view scaled down to one tile plus a same-sized tile cut at native detail from where
+            the user is looking (it follows the gaze when the client tracks the eyes, and stays straight ahead
+            otherwise). Each tile is a fraction of the per-eye stream size the client asked for: `small` (13/18, about
+            the same pixel count as an unsplit stream), `medium` (5/6) or `large` (1/1, twice the pixels). Clients from
+            2.0.122 pick the size in their own settings (Off / Small / Medium / Large) and the host follows that
+            choice; the value set here is only used for a client that does not send one. `disabled` turns the feature
+            off for every client and keeps the warped foveation.
+            @note{Applies to VR sessions only. Used when the client supports it, asked for foveation, and the render
+            size (vr_render_scale_pct) is at least 1.25 times the per-eye stream size; otherwise the host falls back to
+            the warped foveation.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            small
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_fovea_tiles = medium
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_netbench_clip
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (Windows): the video the host plays for the headset's "Test network" button. The test
+            streams this clip instead of a game, so every run carries the same picture and only the network differs;
+            SteamVR is not started. The clip is a recording of both eyes side by side (width = 2 x height, for example
+            4608x2304), ideally at the refresh rate you stream at, in a format Media Foundation can decode on the GPU
+            (H.264 or HEVC in an MP4 file). It loops.
+            @note{No clip ships with VipleStream. Without one the "VR Network Test" entry is not offered, and the
+            headset reports that the test stream did not run.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            netbench/clip.mp4 in the config directory
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_netbench_clip = D:\clips\vr_test.mp4
+            @endcode</td>
+    </tr>
+</table>
+
 ## Config Files
 
 ### file_apps

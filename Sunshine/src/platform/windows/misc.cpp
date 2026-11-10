@@ -2081,6 +2081,11 @@ namespace platf {
     constexpr auto kAlive = std::chrono::seconds(25);
     constexpr auto kDown = std::chrono::seconds(30);
     constexpr auto kGap = std::chrono::minutes(2);
+    // §VR-HOTSPOT-RXSTALL（2026-11-09）：網卡顯示「已連線」、但只送不收。11-09 頭盔實測：網路測試暫停再接回頭盔的家用 Wi-Fi 之後，
+    // host 的 Wi-Fi 2 一直是 Up、收到的計數完全不動（記憶 reference_host_dongle_rx_wedge：Realtek 8832CU 接收卡住），
+    // 多連線的轉接器那條一直 unconfirmed，之後整場只剩家用 Wi-Fi、開場就卡。斷線看門狗只看連線狀態，抓不到
+    constexpr auto kRxStall = std::chrono::seconds(20);
+    constexpr ULONG64 kRxStallMinSent = 20;  // 這段時間至少送出這麼多封包（多連線的探測、ping）才算「只送不收」
 
     std::mutex mtx;
     GUID guid {};
@@ -2146,6 +2151,17 @@ namespace platf {
       return st == wlan_interface_state_connected ? 1 : 0;
     }
 
+    // 介面的收發封包計數；查不到回 false
+    bool query_counters(const GUID &ifGuid, ULONG64 *in, ULONG64 *out) {
+      MIB_IF_ROW2 row {};
+      if (ConvertInterfaceGuidToLuid(&ifGuid, &row.InterfaceLuid) != NO_ERROR || GetIfEntry2(&row) != NO_ERROR) {
+        return false;
+      }
+      *in = row.InUcastPkts + row.InNUcastPkts;
+      *out = row.OutUcastPkts + row.OutNUcastPkts;
+      return true;
+    }
+
     void loop() {
       HANDLE hClient = nullptr;
       DWORD ver = 0;
@@ -2157,6 +2173,9 @@ namespace platf {
       std::optional<clock::time_point> down_since;
       std::optional<clock::time_point> last_restart;
       bool missing_logged = false;
+      // §VR-HOTSPOT-RXSTALL：連著時，收到的計數最後一次變動的時刻與當時的計數
+      std::optional<clock::time_point> rx_still_since;
+      ULONG64 rx_in0 = 0, rx_out0 = 0;
       while (true) {
         std::this_thread::sleep_for(kPoll);
         const auto now = clock::now();
@@ -2179,8 +2198,44 @@ namespace platf {
           }
           down_since.reset();
           missing_logged = false;
+          // §VR-HOTSPOT-RXSTALL：連著，但收到的計數 kRxStall 都沒動、同時送出的有在增加＝接收卡住，照斷線一樣重啟網卡
+          ULONG64 in = 0, out = 0;
+          if (!query_counters(g, &in, &out)) {
+            rx_still_since.reset();
+            continue;
+          }
+          if (!rx_still_since || in != rx_in0) {
+            rx_still_since = now;
+            rx_in0 = in;
+            rx_out0 = out;
+            continue;
+          }
+          if (now - *rx_still_since < kRxStall || out < rx_out0 + kRxStallMinSent ||
+              (last_restart && now - *last_restart < kGap)) {
+            continue;
+          }
+          std::unique_lock lk(mtx);
+          if (restarts >= max_restarts) {
+            if (!gave_up) {
+              gave_up = true;
+              lk.unlock();
+              BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: still receiving nothing after " << max_restarts
+                                 << " restart(s) - giving up for this session; unplug and replug the adapter";
+            }
+            continue;
+          }
+          const int n = ++restarts;
+          lk.unlock();
+          BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: connected but received nothing for "
+                             << std::chrono::duration_cast<std::chrono::seconds>(now - *rx_still_since).count() << " s while sending "
+                             << (out - rx_out0) << " packet(s) - restarting the adapter (" << n << '/' << max_restarts << ')';
+          const bool ok = restart_adapter(g);
+          BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter restart " << (ok ? "done" : "failed");
+          last_restart = clock::now();
+          rx_still_since.reset();
           continue;
         }
+        rx_still_since.reset();
         if (st < 0) {
           // 網卡不在（被拔掉）：不重啟，插回來後由 Windows 依設定檔自動重連
           if (!missing_logged) {

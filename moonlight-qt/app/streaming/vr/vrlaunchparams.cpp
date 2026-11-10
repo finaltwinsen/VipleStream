@@ -55,6 +55,8 @@ QString VrLaunchConfig::toQuery() const
            "&vrOverscan=" + QString::number(overscan) +
            "&vrForce=" + QString::number(force ? 1 : 0) +
            (fovea > 100 ? "&vrFovea=" + QString::number(fovea) : QString()) +
+           // §VR-FOVEA-TILES：有指定大小時才帶（server 的 format_launch_params 同一個位置）
+           (foveaTilesReq >= 0 ? "&vrFoveaTiles=" + QString::number(foveaTilesReq) : QString()) +
            // §VR-HALF-RATE：和 vrHz 不同才帶（其他情況字串和以前一樣；舊 server 不認得的 key 會略過）
            (displayHz > 0 && displayHz != refreshHz ? "&vrDispHz=" + QString::number(displayHz) : QString());
 
@@ -133,24 +135,57 @@ VrSessionInfo VrSessionInfo::parse(const QString& text)
         else if (key == "gazeFovea") {
             info.gazeFovea = (value == "1");
         }
+        else if (key == "foveaInset") {
+            const int v = value.toInt();
+            info.foveaInsetU0 = (v >= 1000 && v <= 9000) ? v : 0;
+        }
+        else if (key == "foveaTiles") {
+            const QStringList wh = value.split('x');
+            if (wh.size() == 2) {
+                info.tileW = wh[0].toInt();
+                info.tileH = wh[1].toInt();
+            }
+        }
+        else if (key == "foveaRender") {
+            const QStringList wh = value.split('x');
+            if (wh.size() == 2) {
+                info.tileRenderW = wh[0].toInt();
+                info.tileRenderH = wh[1].toInt();
+            }
+        }
         // 不認得的 key 直接略過（server 之後可以往後加欄位）
+    }
+
+    // §VR-FOVEA-TILES：兩個 key 要成對、尺寸關係要對（packed＝2×每塊、算圖比一塊大、位置放得進 u16），不然當成沒有分塊。
+    // server 只在我們宣告 VIPLE_VR_CLIENT_CAP_FOVEA_TILES 時才會回，回了卻對不上＝畫面會錯，寧可整個不認
+    if (info.tileW != 0 || info.tileH != 0 || info.tileRenderW != 0 || info.tileRenderH != 0) {
+        const bool ok = info.tileW >= 64 && info.tileH >= 64 && info.tileRenderW > info.tileW && info.tileRenderH > info.tileH &&
+                        info.tileRenderW <= 65535 && info.tileRenderH <= 65535 &&
+                        info.packedWidth == 2 * info.tileW && info.packedHeight == 2 * info.tileH;
+        if (!ok) {
+            info.tileW = info.tileH = info.tileRenderW = info.tileRenderH = 0;
+            info.tilesInvalid = true;
+        }
     }
 
     info.valid = info.proto >= VIPLE_VR_PROTO_VERSION &&
                  info.packedWidth > 0 && info.packedHeight > 0 &&
-                 info.refreshHz > 0;
+                 info.refreshHz > 0 && !info.tilesInvalid;
     return info;
 }
 
 QString VrSessionInfo::describe() const
 {
     return QString("proto=%1 packed=%2x%3 hz=%4 codec=%5 layout=%6 overscan=%7 recovery=%8 "
-                   "irFrames=%9 transport=%10 mode=%11 session=%12%13%14%15")
+                   "irFrames=%9 transport=%10 mode=%11 session=%12%13%14%15%16")
         .arg(proto).arg(packedWidth).arg(packedHeight).arg(refreshHz)
         .arg(codec, layout).arg(overscan)
         .arg(recoveryIntra ? "intra" : "idr").arg(irFrames)
         .arg(transport, mode, sessionGuid)
         .arg(multilink ? " multilink=1" : "")
-        .arg(fovea > 100 ? QString(" fovea=%1").arg(fovea) : QString())
-        .arg(gazeFovea ? " gazeFovea=1" : "");
+        .arg(fovea > 100 ? QString(" fovea=%1%2").arg(fovea).arg(foveaInsetU0 > 0 ? QString(" foveaInset=%1").arg(foveaInsetU0) : QString())
+                         : QString())
+        .arg(gazeFovea ? " gazeFovea=1" : "")
+        .arg(tileW > 0 ? QString(" foveaTiles=%1x%2 foveaRender=%3x%4").arg(tileW).arg(tileH).arg(tileRenderW).arg(tileRenderH)
+                       : QString());
 }

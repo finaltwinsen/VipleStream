@@ -224,6 +224,8 @@ private:
     TestMode m_CurrentTestMode;
     SDL_Thread* m_DecoderThread;
     SDL_atomic_t m_DecoderThreadShouldQuit;
+    // §DEC-JOIN-TIMEOUT（2026-11-09）：解碼執行緒已經結束（reset() 等它最多 3 秒，卡在硬體解碼器裡就放生）
+    std::atomic<bool> m_DecoderThreadExited{false};
 
     // Data buffers in the queued DU are not valid
     QQueue<DECODE_UNIT> m_FrameInfoQueue;

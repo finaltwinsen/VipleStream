@@ -85,6 +85,7 @@
 #include "gui/sdlgamepadkeynavigation.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
 #include "backend/vrlauncher.h"  // §VR-LAUNCHER
+#include "backend/vrnetbenchrunner.h"  // §VR-NETBENCH
 #include "backend/medialibrary.h"  // §VR-PLAYER
 #include "backend/videothumbs.h"  // §VR-PLAYER-THUMB
 #include "backend/xrshell.h"  // §VR-SHELL
@@ -1444,6 +1445,7 @@ int main(int argc, char *argv[])
         VrLauncher::setTestPreflightScript(parser.vrTestPreflight());
     }
     VrLauncher::setDevVideo(parser.devVideo());  // §VR-PLAYER（dev）
+    VrNetBenchRunner::setDevAutoStart(parser.devNetBench());  // §VR-NETBENCH（dev）
 
     SDL_version compileVersion;
     SDL_VERSION(&compileVersion);
@@ -1640,6 +1642,13 @@ int main(int argc, char *argv[])
                                          [](QQmlEngine*, QJSEngine*) -> QObject* {
                                              return new VrLauncher();
                                          });
+
+    // VipleStream 2.0 §VR-NETBENCH：設定頁「測試網路」
+    qmlRegisterSingletonType<VrNetBenchRunner>("VrNetBench", 1, 0,
+                                               "VrNetBench",
+                                               [](QQmlEngine*, QJSEngine*) -> QObject* {
+                                                   return new VrNetBenchRunner();
+                                               });
 
     // VipleStream 2.0 §VR-PLAYER：影片模式選片頁的資料來源
     qmlRegisterSingletonType<MediaLibrary>("MediaLibrary", 1, 0,

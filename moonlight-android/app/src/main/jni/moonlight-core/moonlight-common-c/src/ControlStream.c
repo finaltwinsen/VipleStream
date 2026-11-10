@@ -1249,6 +1249,11 @@ int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable) {
         return 0;
     }
 
+    // §VR-NETSEL-HOLD：切網路的通知另在每條已確認的連線各送一份——ENet 綁的那張網卡可能正是要被暫停的那張
+    if (reliable && length >= 2 && tlv[0] == VIPLE_VR_C2S_NET_SWITCH && 2 + (int)tlv[1] == length) {
+        (void)vrmlSendCtrl(tlv, length);
+    }
+
     return sendMessageAndForget(VIPLE_VR_PTYPE_C2S, (short)length, tlv,
                                 reliable ? CTRL_CHANNEL_GENERIC : VIPLE_VR_CTRL_CHANNEL,
                                 reliable ? ENET_PACKET_FLAG_RELIABLE : ENET_PACKET_FLAG_UNSEQUENCED,
@@ -2275,6 +2280,11 @@ static void controlReceiveThreadFunc(void* context) {
     //（periodic ping 0x0200 是 reliable，有 ack 才會更新 RTT）。0 = 不印。
     uint64_t enetHealthLogAtMs = 0;
     uint64_t enetHealthReconnectedAtMs = 0;
+    // §VR-CTRL-ROUTE（2026-11-08）：ENet 目前連的 host 位址（re-home 之後就不是 RemoteAddr）與每 500 ms 的路由檢查
+    struct sockaddr_storage enetPeerAddr;
+    memcpy(&enetPeerAddr, &RemoteAddr, sizeof(enetPeerAddr));
+    uint64_t ctrlRouteCheckMs = 0;
+    int ctrlRouteFails = 0;
 #endif
 
     // This is only used for ENet
@@ -2355,6 +2365,30 @@ enet_main_loop:
         PltUnlockMutex(&enetMutex);
 
 #ifdef VIPLE_MPQUIC
+        // §VR-CTRL-ROUTE（2026-11-08）：VR 多連線時每 500 ms 看 ENet 連著的 host 位址還通不通：OS 沒有路由，或連到同一個
+        // 位址的那條連線 1 s 收不到 PONG（頭盔暫停家用 Wi-Fi 後網卡位址還留著、路由也還在，只看路由抓不到——11-08 晚實測）。
+        // ENet 自己要 10 秒逾時才發現（控制通道斷 18～25 秒、這段期間 host 也不送震動）。連著兩次不通、而另一條連線的
+        // host 位址還通，就直接進重連——重連流程會立刻改連那個位址。只在這一圈沒有事件時做（err == 0），不丟掉收到的封包
+        if (err == 0 && !disconnectPending && !ConnectionInterrupted && vrmlLinkCount() > 0 &&
+                PltGetMillis() - ctrlRouteCheckMs >= 500) {
+            struct sockaddr_storage routeLocal, other;
+            SOCKADDR_LEN routeLocalLen = 0;
+            ctrlRouteCheckMs = PltGetMillis();
+            if (enetReconnectProbeRoute(&enetPeerAddr, &routeLocal, &routeLocalLen) == 0 &&
+                    vrmlServerAddrState(&enetPeerAddr) != 0) {
+                ctrlRouteFails = 0;
+            }
+            else if (++ctrlRouteFails >= 2 && controlGraceAvailable() && vrmlOtherAliveServer(&enetPeerAddr, &other)) {
+                char fromStr[URLSAFESTRING_LEN], toStr[URLSAFESTRING_LEN];
+                addrToUrlSafeString(&enetPeerAddr, fromStr, sizeof(fromStr));
+                addrToUrlSafeString(&other, toStr, sizeof(toStr));
+                Limelog("[VIPLE-VR-LINK] control route: lost %s (no route, or no answer on its link); reconnecting the control connection now (%s is up)\n",
+                        fromStr, toStr);
+                ctrlRouteFails = 0;
+                enetReconnectPending = 1;
+                goto enet_reconnect_wait;
+            }
+        }
         if (healthLogNow) {
             if (healthState == ENET_PEER_STATE_CONNECTED) {
                 Limelog("[VIPLE-MPQUIC] §M01-C ENet healthy rtt=%u var=%u inTransit=%u "
@@ -2789,7 +2823,9 @@ enet_reconnect_wait:
             SOCKADDR_LEN probeLocalLen = 0;
             int probeErr = enetReconnectProbeRoute(&reconnTarget, &probeLocal, &probeLocalLen);
             bool haveRoute = (probeErr == 0);
-            if (targetTries >= 2 || (!haveRoute && !reconnAlt)) {
+            // §VR-CTRL-ROUTE：session 位址那條連線已經收不到 PONG，也不必等兩次失敗
+            if (targetTries >= 2 || (!haveRoute && !reconnAlt) ||
+                    (!reconnAlt && vrmlServerAddrState(&reconnTarget) == 0)) {
                 struct sockaddr_storage other;
                 bool haveOther;
                 if (reconnAlt) {
@@ -2993,6 +3029,8 @@ enet_reconnect_wait:
                                 (unsigned long long)(doneMs - waitStartMs),
                                 attempts, rejects, localStr, (unsigned int)boundPort,
                                 currentEnetSequenceNumber);
+                        memcpy(&enetPeerAddr, &reconnTarget, sizeof(enetPeerAddr));  // §VR-CTRL-ROUTE
+                        ctrlRouteFails = 0;
                         if (reconnAlt) {
                             char toStr[URLSAFESTRING_LEN];
                             addrToUrlSafeString(&reconnTarget, toStr, sizeof(toStr));

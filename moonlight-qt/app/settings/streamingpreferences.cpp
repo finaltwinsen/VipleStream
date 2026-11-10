@@ -106,6 +106,7 @@
 #define SER_VRNETRETEST "vrnetretest"
 #define SER_VRWHEELRANGE "vrwheelrange"
 #define SER_VRFOVEATION "vrfoveation"
+#define SER_VRFOVEATILES "vrfoveatiles"
 #define SER_VRDEFAULTSMIG2030 "vrdefaultsmig2030"
 #define SER_VREYEWIDTH "vreyewidth"
 #define SER_VREYEHEIGHT "vreyeheight"
@@ -366,6 +367,7 @@ void StreamingPreferences::reload()
     vrNetRetest = settings.value(SER_VRNETRETEST, false).toBool();
     vrWheelRange = qBound(90, settings.value(SER_VRWHEELRANGE, 180).toInt(), 900);
     vrFoveation = qBound(100, settings.value(SER_VRFOVEATION, 200).toInt(), 250);
+    vrFoveaTiles = qBound(1, settings.value(SER_VRFOVEATILES, 1).toInt(), 3);  // §VR-FOVEA-TILES：1 小、2 中、3 大
     // 每眼解析度（2026-10-07 起寫入設定，GUI 啟動的 VR 也吃得到）。範圍同 --vr-eye；超出範圍就用預設
     {
         const int w = settings.value(SER_VREYEWIDTH, 1440).toInt();
@@ -707,6 +709,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_VRNETRETEST, vrNetRetest);
     settings.setValue(SER_VRWHEELRANGE, vrWheelRange);
     settings.setValue(SER_VRFOVEATION, vrFoveation);
+    settings.setValue(SER_VRFOVEATILES, vrFoveaTiles);
     settings.setValue(SER_VREYEWIDTH, vrEyeWidth);
     settings.setValue(SER_VREYEHEIGHT, vrEyeHeight);
 

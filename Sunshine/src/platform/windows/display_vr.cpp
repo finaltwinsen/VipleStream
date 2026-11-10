@@ -51,7 +51,10 @@
 #include "src/vr/vr_capture_health.h"
 #include "src/vr/vr_capture_publish.h"
 #include "src/vr/vr_ipc_abi.h"
+#include "src/vr/vr_netbench.h"
+#include "src/vr/vr_session.h"
 #include "utf_utils.h"
+#include "vr_clip_source.h"
 
 namespace platf::dxgi {
   using namespace std::literals;
@@ -1245,6 +1248,186 @@ namespace platf::dxgi {
     }
     out = desc.AdapterLuid;
     return true;
+  }
+
+
+  // ───────────────────────── §VR-NETBENCH：片段擷取 ─────────────────────────
+
+  display_vr_clip_t::display_vr_clip_t() = default;
+
+  display_vr_clip_t::~display_vr_clip_t() {
+    for (auto *k : kmutex_) {
+      if (k) {
+        k->Release();
+      }
+    }
+    kmutex_.clear();
+  }
+
+  int display_vr_clip_t::init(const ::video::config_t &config) {
+    if (config.width <= 0 || config.height <= 0 || config.framerate <= 0) {
+      BOOST_LOG(error) << "[VIPLE-VR-NETBENCH] init: invalid shape "sv << config.width << 'x' << config.height << '@' << config.framerate;
+      return -1;
+    }
+    std::string why;
+    adapter = pick_vr_adapter(why);
+    if (!adapter) {
+      BOOST_LOG(error) << "[VIPLE-VR-NETBENCH] no adapter: "sv << why;
+      return -1;
+    }
+    if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory))) {
+      BOOST_LOG(error) << "[VIPLE-VR-NETBENCH] init: CreateDXGIFactory1 failed"sv;
+      return -1;
+    }
+    width = config.width;
+    height = config.height;
+    env_width = width;
+    env_height = height;
+    offset_x = 0;
+    offset_y = 0;
+    width_before_rotation = width;
+    height_before_rotation = height;
+    display_rotation = DXGI_MODE_ROTATION_IDENTITY;
+    capture_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    display_refresh_rate = DXGI_RATIONAL {(UINT) config.framerate, 1};
+    display_refresh_rate_rounded = config.framerate;
+    client_frame_rate = config.framerate;
+    client_frame_rate_strict = {0, 0};
+    framerate_ = config.framerate;
+    if (init_device(adapter.get()) || configure_frame_latency()) {
+      return -1;
+    }
+    if (!device_ctx4 || !timer || !*timer) {
+      BOOST_LOG(error) << "[VIPLE-VR-NETBENCH] init: device context 4 / timer unavailable"sv;
+      return -1;
+    }
+    DXGI_ADAPTER_DESC desc {};
+    adapter->GetDesc(&desc);
+
+    const auto path = ::vr::netbench_clip_path();
+    clip_ = vr_clip_source_t::open(desc.AdapterLuid, path.wstring(), (uint32_t) width, (uint32_t) height);
+    if (!clip_) {
+      BOOST_LOG(error) << "[VIPLE-VR-NETBENCH] could not open the clip "sv << path.string();
+      return -1;
+    }
+    device1_t dev1;
+    if (FAILED(device->QueryInterface(__uuidof(ID3D11Device1), (void **) &dev1))) {
+      BOOST_LOG(error) << "[VIPLE-VR-NETBENCH] ID3D11Device1 not available"sv;
+      return -1;
+    }
+    // 背景解碼輪替寫 ring_size() 張共享貼圖；這裡依序讀（第 k 張讀 slot k % ring），倒帶的停頓被已經解好的幾張吸收
+    for (int i = 0; i < clip_->ring_size(); ++i) {
+      ID3D11Texture2D *tex = nullptr;
+      HRESULT hr = dev1->OpenSharedResource1(clip_->shared_handle(i), __uuidof(ID3D11Texture2D), (void **) &tex);
+      if (FAILED(hr) || !tex) {
+        BOOST_LOG(error) << "[VIPLE-VR-NETBENCH] OpenSharedResource1 failed 0x"sv << std::format("{:08x}", (unsigned) hr);
+        return -1;
+      }
+      shared_.emplace_back(tex);
+      IDXGIKeyedMutex *km = nullptr;
+      hr = tex->QueryInterface(__uuidof(IDXGIKeyedMutex), (void **) &km);
+      if (FAILED(hr) || !km) {
+        BOOST_LOG(error) << "[VIPLE-VR-NETBENCH] keyed mutex not available 0x"sv << std::format("{:08x}", (unsigned) hr);
+        return -1;
+      }
+      kmutex_.push_back(km);
+    }
+    BOOST_LOG(info) << "[VIPLE-VR-NETBENCH] capture init adapter="sv << utf_utils::to_utf8(desc.Description) << " size="sv << width << 'x' << height << '@'
+                    << framerate_ << " clip="sv << clip_->clip_width() << 'x' << clip_->clip_height() << '@' << std::format("{:.2f}", clip_->clip_fps());
+    return 0;
+  }
+
+  capture_e display_vr_clip_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *) {
+    DXGI_ADAPTER_DESC adesc {};
+    adapter->GetDesc(&adesc);
+    gpu_priority_guard prio {adesc.AdapterLuid, adesc.VendorId};
+
+    using clk = std::chrono::steady_clock;
+    const double nominal_ns = 1e9 / (double) framerate_;
+    auto next = clk::now();
+    auto last_log = next;
+    uint64_t pushed = 0, late = 0, busy = 0;
+    uint64_t slot_seq = 0;
+    int32_t ppm = 0;
+    while (true) {
+      // 頭盔的節拍回授（LATCH → ppm／burst）：和 driver 的虛擬 vsync 同一套算法，只是由這裡照著調週期
+      ppm = ::vr::bridge::pacing_ppm_now();
+      const auto period = std::chrono::nanoseconds {(int64_t) (nominal_ns * (1.0 + (double) ppm * 1e-6))};
+      const auto now = clk::now();
+      if (next > now) {
+        timer->sleep_for(next - now);
+      } else if (now - next > 2 * period) {
+        ++late;
+        next = now;  // 落後太多（解碼卡住等）就重新對齊，不連續補送
+      }
+      next += period;
+
+      if (clip_->failed()) {
+        BOOST_LOG(error) << "[VIPLE-VR-NETBENCH] clip decoder gave up; stopping"sv;
+        return capture_e::error;
+      }
+
+      std::shared_ptr<platf::img_t> img_base;
+      if (!pull_free_image_cb(img_base)) {
+        return capture_e::ok;
+      }
+      if (complete_img(img_base.get(), false)) {
+        return capture_e::error;
+      }
+      auto img = static_cast<img_d3d_t *>(img_base.get());
+      const size_t slot = (size_t) (slot_seq % kmutex_.size());
+      if (kmutex_[slot]->AcquireSync(1, 100) != S_OK) {  // WAIT_TIMEOUT 也是成功碼，要比 S_OK
+        ++busy;  // 背景解碼還沒解好這一張（理論上只有倒帶連續卡住才會）：這一格不出，下一格再試同一個 slot
+        continue;
+      }
+      ++slot_seq;
+      {
+        texture_fence_helper fence_helper(device_ctx4.get(), img);
+        if (!fence_helper.arm()) {
+          kmutex_[slot]->ReleaseSync(0);
+          return capture_e::error;
+        }
+        device_ctx->CopyResource(img->capture_texture.get(), shared_[slot].get());
+      }
+      device_ctx->Flush();
+      kmutex_[slot]->ReleaseSync(0);
+      img->blank = false;
+
+      // 每張帶出幀當下最新的頭部姿態（遊戲畫面帶的是遊戲那一格用的姿態；這裡等於遊戲算圖不花時間）
+      const int64_t present_qpc = platf::qpc_counter();
+      ::video::vr_frame_meta_t meta {};
+      if (const auto st = ::vr::active()) {
+        if (const auto sample = st->snapshot()) {
+          meta.valid = true;
+          meta.echoSampleId = sample->sample_id;
+          std::copy(std::begin(sample->pos), std::end(sample->pos), std::begin(meta.pos));
+          std::copy(std::begin(sample->rot), std::end(sample->rot), std::begin(meta.rot));
+          meta.space_epoch = sample->space_epoch;
+          meta.flags = VIPLE_VR_FF_POSE_VALID | VIPLE_VR_FF_ECHO_MATCHED;
+        }
+      }
+      if (!meta.valid) {
+        meta.flags = VIPLE_VR_FF_POSE_FALLBACK;
+      }
+      meta.layout_epoch = 1;
+      meta.frame_id = ++frame_id_;
+      meta.present_qpc = present_qpc;
+      img->vr = meta;
+      img->frame_timestamp = frame_timestamp_from_qpc(present_qpc);
+
+      ++pushed;
+      const auto now2 = clk::now();
+      if (now2 - last_log >= std::chrono::seconds(10)) {
+        BOOST_LOG(info) << "[VIPLE-VR-NETBENCH] 10s: pushed="sv << pushed << " late="sv << late << " notReady="sv << busy
+                        << " decodeMaxMs="sv << std::format("{:.1f}", clip_->decode_ms_max_and_reset()) << " ppm="sv << ppm << " clipLoops="sv << clip_->loops()
+                        << " clipPosMs="sv << clip_->position_ms();
+        last_log = now2;
+        pushed = late = busy = 0;
+      }
+      if (!push_captured_image_cb(std::move(img_base), true)) {
+        return capture_e::ok;
+      }
+    }
   }
 
 }  // namespace platf::dxgi

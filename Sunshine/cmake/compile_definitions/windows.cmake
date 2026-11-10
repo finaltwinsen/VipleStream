@@ -84,6 +84,7 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
         # §VR M1b V3（S1-08）：display_vr_t（VR bridge frame ring 擷取）
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vr.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_clip_source.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utf_utils.h"
@@ -123,6 +124,9 @@ if(MSVC)
             cfgmgr32
             d3d11
             D3DCompiler
+            mfplat
+            mfreadwrite
+            mfuuid
             dwmapi
             dxgi
             hid
@@ -149,6 +153,9 @@ else()
             cfgmgr32
             d3d11
             D3DCompiler
+            mfplat
+            mfreadwrite
+            mfuuid
             dwmapi
             dxgi
             hid
