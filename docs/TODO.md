@@ -98,7 +98,7 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 log 見 `docs/log_tags.md`，host 設定 `vr_fovea_tiles`。11-11 使用者配戴 small：「效果非常好」（交界、眼動都過）。
 無人量測（桌球、每眼 1152＠144、模擬視線、程式有焦點）：small 9.6 W／MTP 45 ms／190 秒 0 重複幀，medium 10.0 W，
 large 10.9 W（MTP 多約 2 ms）；同條件舊做法（分段曲線）單一大圖 13.1 W、兩圖層 10.5 W；Steam 內建串流 9.5～11.8 W。
-- **待驗**：設定頁選 medium／large 的配戴比較（只做過無人量測）；`test_vr_params.cpp` 新增的四項單元測試還沒跑過；
+- **待驗**：設定頁選 medium／large 的配戴比較（只做過無人量測）；
   同位置同遊戲和 Steam 內建串流的配戴對照（使用者）。
 - **限制（待做）**：「半速＋補幀」時不用分塊（補幀還不認得這種排法），退回分段曲線——周邊較糊、交界看得出來；這時設定頁的
   小／中／大只有開關的作用。dev 的 `--vr-fovea-single-layer`、`--vr-unwarp-rgb` 也一樣。

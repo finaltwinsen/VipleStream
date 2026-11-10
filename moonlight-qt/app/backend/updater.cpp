@@ -1,5 +1,6 @@
 #include "updater.h"
 #include "updatenotes.h"
+#include "settings/streamingpreferences.h"
 
 #include <QCoreApplication>
 #include <QStandardPaths>
@@ -215,7 +216,8 @@ void Updater::handleNotesFinished()
         qWarning() << "[VIPLE-UPDATE] release notes for" << m_NotesVersion << "failed:" << reply->errorString();
     }
 
-    m_NotesText = UpdateNotes::summarize(body);
+    // 摘要依介面語系取雙語 release notes 的其中一段（規則在 updatenotes.h）
+    m_NotesText = UpdateNotes::summarize(body, StreamingPreferences::get()->uiLocaleName());
     m_NotesState = m_NotesText.isEmpty() ? QStringLiteral("failed") : QStringLiteral("ready");
     qDebug() << "[VIPLE-UPDATE] release notes for" << m_NotesVersion << m_NotesState
              << "(" << body.size() << "->" << m_NotesText.size() << "chars)";
