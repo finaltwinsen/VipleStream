@@ -1096,6 +1096,10 @@ namespace proc {
     ++_idle_watchdog_gen;
   }
 
+  std::unique_lock<std::recursive_mutex> proc_t::lock_state() {
+    return std::unique_lock<std::recursive_mutex>(_state_mutex);
+  }
+
   void proc_t::adopt_app_list(proc_t &&fresh) {
     // §REVIEW-1111：Web UI 存 app 清單時原本把整個 proc 換掉，沒有拿鎖。有 app 在跑（串流中）時這會把 _app_id、
     // placebo、_vr_pcvr、行程控制代碼一起清成新物件的空值：控制執行緒下一圈看到 running()==0 就把串流收掉，

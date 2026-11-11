@@ -391,7 +391,17 @@ function install_cuda() {
 
     if [[ -n "$math_vector_file" ]]; then
       # patch headers https://bugs.launchpad.net/ubuntu/+source/mumax3/+bug/2032624
-      ${sudo_cmd} cp "$math_vector_file" "$math_vector_file.bak"
+      # VipleStream: keep the first backup. A previous run that died after patching (set -e: a failed download or
+      # installer exits the whole script, and the restore in run_step_cleanup never ran) leaves the patched header
+      # in place; copying again would overwrite the only pristine copy with the patched one.
+      if [[ -f "$math_vector_file.bak" ]]; then
+        ${sudo_cmd} cp -f "$math_vector_file.bak" "$math_vector_file"
+      else
+        ${sudo_cmd} cp "$math_vector_file" "$math_vector_file.bak"
+      fi
+      # ...and put the system header back if this run fails from here on (a successful run restores it in cleanup,
+      # because the CUDA build still needs the patched header until then).
+      trap 'rc=$?; if [[ $rc -ne 0 && -n "${math_vector_file:-}" && -f "$math_vector_file.bak" ]]; then ${sudo_cmd} mv -f "$math_vector_file.bak" "$math_vector_file"; fi; exit $rc' EXIT
       ${sudo_cmd} sed -i 's/__Float32x4_t/int/g' "$math_vector_file"
       ${sudo_cmd} sed -i 's/__Float64x2_t/int/g' "$math_vector_file"
       ${sudo_cmd} sed -i 's/__SVFloat32_t/float/g' "$math_vector_file"
@@ -697,7 +707,7 @@ function run_step_cleanup() {
   echo "Running step: Cleanup"
 
   # restore the math-vector.h file
-  if [[ "$skip_cleanup" == 0 ]] && [[ "$architecture" == "${AARCH64}" ]] && [[ -n "$math_vector_file" ]]; then
+  if [[ "$skip_cleanup" == 0 ]] && [[ "$architecture" == "${AARCH64}" ]] && [[ -n "$math_vector_file" ]] && [[ -f "$math_vector_file.bak" ]]; then
     ${sudo_cmd} mv -f "$math_vector_file.bak" "$math_vector_file"
   fi
   return 0

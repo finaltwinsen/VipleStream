@@ -2255,6 +2255,14 @@ namespace nvhttp {
     // session 由上面的 terminate_sessions → join 撤下）
     ::vr::clear_reservation();
 
+    // §REVIEW-1111：上面的擁有者檢查和這裡之間沒有鎖。這中間若有另一個 /launch 做完（execute 整段持有狀態鎖，
+    // 這裡會等到它結束），現在在跑的已經是別人的新場——照舊往下做就把它關掉了。拿到鎖之後重看一次：
+    // 擁有者和檢查時不同，或已經沒有東西在跑，就不動。
+    auto cancel_state_lk = proc::proc.lock_state();
+    if (app_running && (proc::proc.running() <= 0 || proc::proc.running_owner_uuid() != owner_uuid)) {
+      BOOST_LOG(info) << "[VIPLE-MULTI] /cancel: the running app changed while this request was being handled - leaving it alone"sv;
+      app_running = false;
+    }
     if (app_running) {
       // Soft handover for Steam-source apps when a non-owner takes over: Steam
       // itself runs outside our Job Object via the URL handler, so detach()

@@ -1208,7 +1208,20 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                             reportedCrash = true;
                             crashListener.notifyCrash(e);
                         }
+                        // VipleStream §REVIEW-1111: release the other two threads before leaving. They wait in the
+                        // else-branch below for the recovery type to go back to NONE; throwing from here used to skip
+                        // the notifyAll(), so they woke up once a second forever and the picture stayed frozen.
+                        stopping = true;
+                        codecRecoveryType.set(CR_RECOVERY_TYPE_NONE);
+                        codecRecoveryThreadQuiescedFlags = 0;
+                        codecRecoveryMonitor.notifyAll();
                         throw new RendererException(this, e);
+                    } catch (RuntimeException e) {
+                        // VipleStream §REVIEW-1111: the decoder could not be created at all (createByCodecName threw
+                        // an IOException, which arrives here wrapped). Same situation as an invalid surface: stop.
+                        e.printStackTrace();
+                        stopping = true;
+                        codecRecoveryType.set(CR_RECOVERY_TYPE_NONE);
                     }
                 }
 
@@ -1750,7 +1763,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             pyroWaveActive = false;
             return;
         }
-        videoDecoder.release();
+        // VipleStream §REVIEW-1111: a failed decoder reset leaves videoDecoder null; release() on it threw a
+        // NullPointerException out of the JNI cleanup callback, which aborts the process.
+        if (videoDecoder != null) {
+            videoDecoder.release();
+            videoDecoder = null;
+        }
     }
 
     @Override

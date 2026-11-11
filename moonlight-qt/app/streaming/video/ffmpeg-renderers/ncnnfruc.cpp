@@ -2829,19 +2829,11 @@ bool NcnnFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp)
 void NcnnFRUC::skipFrame(ID3D11DeviceContext* ctx)
 {
     if (!ctx) return;
-    // Even when caller asks us to skip interp (late frame, poor
-    // network), we still stash this frame as the new "prev" so the
-    // next interp uses the freshest reference.
-    ID3D11RenderTargetView* nullRTV = nullptr;
-    ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
-    ctx->CopyResource(m_StagingCurrTex.Get(), m_RenderTex.Get());
-    ncnn::Mat next_mat(static_cast<int>(m_Width), static_cast<int>(m_Height), 3);
-    if (stagingToMat(ctx, m_StagingCurrTex.Get(),
-                     static_cast<int>(m_Width), static_cast<int>(m_Height),
-                     next_mat)) {
-        m_PrevMat = next_mat;
-        if (m_FrameCount == 0) m_FrameCount = 1;
-    }
+    // §REVIEW-1111：這條路是「這一張已經晚了、不補幀、盡快顯示」。原本為了讓下一次補幀有最新的參考，仍然在
+    // Present 之前把整張畫面複製到 staging、Map 讀回（CPU 等 GPU 畫完）、再逐像素轉成浮點（1080p 約 10 ms，
+    // 每次還配置約 25 MB）——已經晚的那一張又被多拖一段，更難追回來。
+    // 改成不讀回，只把「上一張參考」作廢：下一張進 submitFrame 時當成第一張（只存參考、不補），再下一張才開始補。
+    m_FrameCount = 0;
 }
 
 void NcnnFRUC::destroy()

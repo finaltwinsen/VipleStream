@@ -2,4 +2,8 @@
 <full-backup-content>
     <!-- Don't sync preferences because it often contains device-specific data -->
     <exclude domain="sharedpref" path="."/>
+    <!-- VipleStream: the pairing key, certificate, unique id and the paired-host database identify this device to
+         the hosts it is paired with. They must not leave the device in a backup; a restored phone pairs again. -->
+    <exclude domain="file" path="."/>
+    <exclude domain="database" path="."/>
 </full-backup-content>

@@ -128,6 +128,8 @@ namespace proc {
     void terminate();
     /// §REVIEW-1111：換成重新讀進來的 app 清單；有 app 在跑時只換清單，不動執行中的狀態
     void adopt_app_list(proc_t &&fresh);
+    /// §REVIEW-1111：拿狀態鎖（可重入）。呼叫端要把「再看一次擁有者／是否在跑」和接下來的 terminate／detach 當成一個動作時用
+    std::unique_lock<std::recursive_mutex> lock_state();
 
     // VipleStream §M.1 — multi-user ownership.
     //
