@@ -27,8 +27,8 @@ android {
         minSdk 28  // 2026-11-04：最低支援 Android 9（使用者指示）
         targetSdk 34
 
-        versionName "2.0.135"
-        versionCode = 20135
+        versionName "2.0.136"
+        versionCode = 20136
 
         // Generate native debug symbols to allow Google Play to symbolicate our native crashes
         ndk.debugSymbolLevel = 'FULL'

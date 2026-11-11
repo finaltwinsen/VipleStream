@@ -567,6 +567,13 @@ namespace vr::latch {
     if (mode_ != mode_e::v2 || !options_.refill || !have_ema_ || !sent_once_ || refill_pending_ || now_ns < refill_blind_until_ns_) {
       return false;
     }
+    // §REVIEW-1111：burst 最長 kRefillMaxUs（bridge 的上限），最多把相位提前 kRefillMaxUs × kRefillPpm（9 ms）。
+    // 要跨過上一格需要「串流週期 − 目標 slack」；比這個短（60 Hz、或半速時的 2 × 顯示週期）就跨不過去：多不出一張來補緩衝，相位卻被推到半路，
+    // PI 把它當成「晚到」再往回拉幾秒，期間延遲多出約 9 ms、之後照樣跳一張。移不滿就不要做。
+    const double max_move_us = (double) kRefillMaxUs * (double) kRefillPpm / 1e6;
+    if ((double) stream_period_ns() / 1000.0 - target_v2_us() > max_move_us) {
+      return false;
+    }
     refill_pending_ = true;
     return true;
   }

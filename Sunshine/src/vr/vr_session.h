@@ -444,7 +444,7 @@ namespace vr {
      * @param next_frame_nr 這張若編碼，會用的幀號（NV_VIDEO_PACKET.frameIndex）
      * @param applied_div 這次剛套用新的分頻時填入新值（0＝沒變）
      */
-    bool rate_skip_image(uint32_t next_frame_nr, int &applied_div) {
+    bool rate_skip_image(uint32_t next_frame_nr, int &applied_div, int64_t image_ns = 0, int64_t capture_period_ns = 0) {
       applied_div = 0;
       {
         std::lock_guard lk {rate_mtx_};
@@ -453,6 +453,7 @@ namespace vr {
           const int div = rate_pending_div_;
           rate_div_.store(div, std::memory_order_relaxed);
           rate_phase_ = 0;
+          rate_last_sent_ns_ = 0;
           applied_div = div;
           VIPLE_VR_TLV_RATE_APPLIED a {};
           a.div = (uint8_t) div;
@@ -470,8 +471,19 @@ namespace vr {
       if (div <= 1) {
         return false;
       }
-      // 套用後的第一張照送，之後每 div 張送一張
-      const bool skip = (rate_phase_ % (uint32_t) div) != 0;
+      // 套用後的第一張照送，之後每 div 張送一張。
+      // §REVIEW-1111：有影像時間時改看「距上一張送出的時間」。影像是單槽交接的：編碼跨過兩個擷取週期時中間那張被蓋掉、
+      // 沒有經過這裡，用張數算相位就會把本來該送的這張當成要丟的，再多等一個週期——送出間隔從 2 格變 3 格
+      // （120 Hz 半速從 60 fps 掉到 40 fps），而且之後一直維持在錯的節奏。
+      bool skip;
+      if (image_ns > 0 && capture_period_ns > 0) {
+        skip = rate_last_sent_ns_ != 0 && image_ns - rate_last_sent_ns_ < capture_period_ns * (2 * (int64_t) div - 1) / 2;
+        if (!skip) {
+          rate_last_sent_ns_ = image_ns;
+        }
+      } else {
+        skip = (rate_phase_ % (uint32_t) div) != 0;
+      }
       ++rate_phase_;
       if (skip) {
         rate_skipped_.fetch_add(1, std::memory_order_relaxed);
@@ -719,6 +731,7 @@ namespace vr {
     uint16_t rate_pending_seq_ = 0;
     std::atomic<int> rate_div_ {1};
     uint32_t rate_phase_ = 0;  ///< 編碼執行緒專用
+    int64_t rate_last_sent_ns_ = 0;  ///< 編碼執行緒專用：上一張沒被跳過的影像時間（0＝還沒有）
     std::atomic<uint64_t> rate_skipped_ {0};
 
     mutable std::mutex latch_mtx_;

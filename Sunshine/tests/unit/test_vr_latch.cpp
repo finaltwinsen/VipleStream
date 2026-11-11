@@ -3204,6 +3204,17 @@ TEST(VrLatchTest, V2RefillCappedAtBridgeLimit) {
   EXPECT_NEAR(r.step_err_us, -9000.0, 0.5);
 }
 
+// §REVIEW-1111：串流週期超過 burst 能移的量（9 ms）時不排補緩衝——60 Hz 一格 16.7 ms，移不滿
+TEST(VrLatchTest, V2RefillSkippedWhenPeriodExceedsBurstReach) {
+  constexpr int64_t kPeriod60 = 16'666'667;
+  controller_t c;
+  c.configure(mode_e::v2, 40, kPeriod60, refill_on());
+  int64_t now = 0;
+  uint32_t id = 0;
+  feed_v2(c, 6667, 30, now, id, kPeriod60);
+  EXPECT_FALSE(c.request_refill(now));
+}
+
 TEST(VrLatchTest, V2RefillPendingDroppedBySwitchAndBlindHoldsOverload) {
   controller_t c;
   c.configure(mode_e::v2, 40, kPeriod144, refill_on());

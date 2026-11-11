@@ -6,6 +6,7 @@
 #pragma once
 
 // standard includes
+#include <chrono>
 #include <string>
 
 // lib includes
@@ -109,6 +110,9 @@ namespace nvhttp {
      * @brief used as a security measure to prevent out of order calls
      */
     PAIR_PHASE last_phase = PAIR_PHASE::NONE;
+
+    /// §REVIEW-1111：這筆配對是什麼時候開始的（逾時清除、PIN 套用到最新的一筆）
+    std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
   };
 
   /**

@@ -2700,7 +2700,9 @@ namespace video {
           // 跳過的那張不編碼、不送、不佔幀號（client 收到的幀號照樣連續），下一輪等下一張
           if (vr_state && config.captureSource == 1) {
             int vr_rate_applied = 0;
-            const bool vr_rate_skip = vr_state->rate_skip_image((uint32_t) frame_nr, vr_rate_applied);
+            const int64_t vr_img_ns = img->frame_timestamp ? std::chrono::duration_cast<std::chrono::nanoseconds>(img->frame_timestamp->time_since_epoch()).count() : 0;
+            const int64_t vr_cap_period_ns = config.framerate > 0 ? 1'000'000'000ll / config.framerate : 0;
+            const bool vr_rate_skip = vr_state->rate_skip_image((uint32_t) frame_nr, vr_rate_applied, vr_img_ns, vr_cap_period_ns);
             if (vr_rate_applied != 0) {
               BOOST_LOG(info) << "[VIPLE-VR-RATE] applied div=" << vr_rate_applied << " from f=" << frame_nr
                               << " (stream " << config.framerate / vr_rate_applied << " fps, skipped so far " << vr_state->rate_skipped() << ")";

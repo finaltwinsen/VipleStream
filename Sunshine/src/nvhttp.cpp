@@ -171,6 +171,11 @@ namespace nvhttp {
 
   // uniqueID, session
   std::unordered_map<std::string, pair_session_t> map_id_sess;
+  // §REVIEW-1111：配對中的工作階段原本沒有鎖（/pair 在 HTTP／HTTPS 執行緒、PIN 在 Web UI 執行緒）、沒有筆數上限、
+  // 也不會過期——未配對的人只要一直換 uniqueid 送 getservercert，連線與憑證就一直堆著；PIN 還固定套到 map 的第一筆。
+  std::recursive_mutex map_id_sess_mtx;
+  constexpr std::size_t k_pair_sessions_max = 8;
+  constexpr auto k_pair_session_ttl = std::chrono::seconds(180);
   client_t client_root;
   // §REVIEW-1103：client_root 與 cert_chain 會被 confighttp 執行緒（unpair／enable／admin）
   // 改動，同時 nvhttp HTTPS 執行緒在握手驗證時遍歷 → 一把鎖保護兩者。用 recursive_mutex，
@@ -711,6 +716,8 @@ namespace nvhttp {
       response->close_connection_after_response = true;
     });
 
+    std::lock_guard<std::recursive_mutex> pair_lk(map_id_sess_mtx);  // §REVIEW-1111
+
     auto args = request->parse_query_string();
     if (args.find("uniqueid"s) == std::end(args)) {
       tree.put("root.<xmlattr>.status_code", 400);
@@ -730,9 +737,26 @@ namespace nvhttp {
         sess.client.cert = util::from_hex_vec(get_arg(args, "clientcert"), true);
 
         BOOST_LOG(debug) << sess.client.cert;
+        // §REVIEW-1111：先把參數都取完再放進 map（原本 salt 缺了會在 emplace 之後丟例外，留下半筆）
+        auto salt = get_arg(args, "salt");
+        // 過期的清掉（等 PIN 等了三分鐘以上：使用者早就放棄了；連線跟著關閉）
+        const auto now = std::chrono::steady_clock::now();
+        for (auto i = map_id_sess.begin(); i != map_id_sess.end();) {
+          i = now - i->second.created > k_pair_session_ttl ? map_id_sess.erase(i) : std::next(i);
+        }
+        // 同一個 uniqueid 重新開始配對：以新的為準（Moonlight 系的 client 都用同一個固定的 uniqueid；原本 emplace
+        // 不會換掉舊的憑證，卻會蓋掉 salt 與等待中的 response，新舊混在一起）
+        map_id_sess.erase(sess.client.uniqueID);
+        if (map_id_sess.size() >= k_pair_sessions_max) {
+          BOOST_LOG(warning) << "[PAIR-FAIL] too many pairing attempts in progress ("sv << map_id_sess.size() << ") - rejecting a new one"sv;
+          tree.put("root.paired", 0);
+          tree.put("root.<xmlattr>.status_code", 503);
+          tree.put("root.<xmlattr>.status_message", "Too many pairing attempts in progress; try again in a few minutes");
+          return;
+        }
         auto ptr = map_id_sess.emplace(sess.client.uniqueID, std::move(sess)).first;
 
-        ptr->second.async_insert_pin.salt = std::move(get_arg(args, "salt"));
+        ptr->second.async_insert_pin.salt = std::move(salt);
         if (config::sunshine.flags[config::flag::PIN_STDIN]) {
           std::string pin;
 
@@ -788,6 +812,7 @@ namespace nvhttp {
                     << "\" pin_len="sv << pin.size()
                     << " pending_sessions="sv << map_id_sess.size();
     pt::ptree tree;
+    std::lock_guard<std::recursive_mutex> pair_lk(map_id_sess_mtx);  // §REVIEW-1111
     if (map_id_sess.empty()) {
       BOOST_LOG(warning) << "[PAIR-PIN] no pending session — client side didn't initiate getservercert yet"sv;
       return false;
@@ -817,7 +842,18 @@ namespace nvhttp {
     // §REVIEW-1111：getservercert 失敗時（順序不對、salt 太短——同一個 PIN 送兩次就會遇到）fail_pair 會把這個 session
     // 從 map 刪掉。原本之後還繼續寫 sess.client.name、用 sess 裡的 response，等於用已經解構的物件。
     // 先把等著的 response 拿出來，呼叫完再用 uniqueID 重新找一次 session。
-    auto first = std::begin(map_id_sess);
+    // PIN 套到「最近一筆還在等 PIN 的配對」——使用者是看著剛跳出來的那一個在輸入；原本拿 map 的第一筆
+    // （順序由雜湊決定），有人先塞了別的配對請求就會把 PIN 用在那一筆上。
+    auto first = std::end(map_id_sess);
+    for (auto i = map_id_sess.begin(); i != map_id_sess.end(); ++i) {
+      if (i->second.last_phase == PAIR_PHASE::NONE && (first == std::end(map_id_sess) || i->second.created > first->second.created)) {
+        first = i;
+      }
+    }
+    if (first == std::end(map_id_sess)) {
+      BOOST_LOG(warning) << "[PAIR-PIN] no session is waiting for a PIN"sv;
+      return false;
+    }
     const std::string unique_id = first->second.client.uniqueID;
     auto async_response = std::move(first->second.async_insert_pin.response);
     first->second.async_insert_pin.response = std::decay_t<decltype(async_response.left())>();
@@ -1722,7 +1758,9 @@ namespace nvhttp {
                           << " — proceeding (re-launch)"sv;
         }
         // Fall through to standard launch path; execute() calls terminate() first.
-      } else if (caller_admin || takeover_requested) {
+      } else if ((caller_admin || takeover_requested) && !(caller_uuid.empty() && rtsp_stream::session_count() > 0)) {
+        // §REVIEW-1111：沒有配對身分的呼叫（relay 代打的 HTTP，只憑共用的 PSK）不可以搶走「正在串流中」的 session；
+        // 沒有人在串流（上一個 client 斷線、app 還掛著）時照舊可以接手——那是 relay 重連的正常用途。
         BOOST_LOG(info) << "[VIPLE-MULTI] /launch takeover by uuid="sv
                         << (caller_uuid.empty() ? "<unknown>"sv : std::string_view {caller_uuid})
                         << " admin="sv << caller_admin
@@ -3254,6 +3292,16 @@ namespace nvhttp {
         body.read(buf.data(), buf.size());
         auto n = body.gcount();
         if (n <= 0) break;
+        // §REVIEW-1111：本體比事先宣告的檔案大小還長就停——原本照單全收，可以把磁碟寫滿
+        if (t->total_bytes > 0 && total + static_cast<std::uint64_t>(n) > t->total_bytes) {
+          out.close();
+          std::error_code rm_ec;
+          std::filesystem::remove(t->local_path, rm_ec);
+          file_transfer::manager::instance().finalize(token, false, "too_large");
+          response->write(SimpleWeb::StatusCode::client_error_payload_too_large, R"({"error":"too_large"})");
+          BOOST_LOG(warning) << "[VIPLE-XFER] blob_post EXIT 413_too_large declared=" << t->total_bytes << " ssl="sv << ssl_ptr;
+          return;
+        }
         out.write(buf.data(), n);
         if (!out.good()) {
           BOOST_LOG(warning) << "[VIPLE-XFER] blob_post write failed mid-stream token=" << token
@@ -3561,6 +3609,8 @@ namespace nvhttp {
     };
 
     http_server.config.reuse_address = true;
+    // §REVIEW-1111：這個埠不用配對就連得到，處理的全是 GET；請求本體原本沒有上限（先整段讀進記憶體才進 handler）。
+    http_server.config.max_request_streambuf_size = 1024 * 1024;
     http_server.config.address = net::get_bind_address(address_family);
     http_server.config.port = port_http;
 
