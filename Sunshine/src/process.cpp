@@ -855,7 +855,12 @@ namespace proc {
       if (ec) {
         BOOST_LOG(warning) << "[VIPLE-STEAM-QUIT] taskkill failed to start: "sv << ec.message();
       } else {
-        child.wait();
+        // §REVIEW-1111：不帶 error_code 的 wait() 失敗時丟例外；這是 detached 執行緒，沒人接就是整個服務結束
+        std::error_code wait_ec;
+        child.wait(wait_ec);
+        if (wait_ec) {
+          BOOST_LOG(warning) << "[VIPLE-STEAM-QUIT] taskkill wait failed: "sv << wait_ec.message();
+        }
       }
       // 2) 最多等 10 秒
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -1151,17 +1156,17 @@ namespace proc {
   It find_match(It begin, It end) {
     int stack = 0;
 
-    --begin;
-    do {
-      ++begin;
-      switch (*begin) {
-        case '(':
-          ++stack;
-          break;
-        case ')':
-          --stack;
+    // §REVIEW-1111：原本先 ++begin 再解參考，才檢查是不是到結尾——`$(` 沒有對應的 `)` 時會讀到字串結尾之後。
+    for (; begin != end; ++begin) {
+      if (*begin == '(') {
+        ++stack;
+      } else if (*begin == ')') {
+        --stack;
       }
-    } while (begin != end && stack != 0);
+      if (stack == 0) {
+        break;
+      }
+    }
 
     if (begin == end) {
       throw std::out_of_range("Missing closing bracket \')\'");

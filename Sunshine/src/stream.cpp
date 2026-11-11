@@ -4112,6 +4112,12 @@ namespace stream {
             // peer 指標，也要重送 STATE。以前寫在下面 peer 非空的分支裡，永遠執行不到。
             if (session->vr) {
               session->vrCtrl.statePeer = nullptr;
+              // §REVIEW-1111：ENet 斷線、多連線還活著時（家用 Wi-Fi 暫停的那十幾秒），S→C 改走連線送。
+              // 這個呼叫原本只寫在下面「peer 非空」的分支裡，而它自己又要求 peer 是空的——等於永遠不會執行，
+              // 斷線期間的震動與可靠訊息（RATE_APPLIED 等）全部堆著，等 ENet 回來才一次倒出。
+              if (session->vrLinks && session->vrLinks->any_alive()) {
+                vr_drain_s2c_ctrl_down(session);  // §VR-CTRL-DOWN-S2C
+              }
             }
           } else {
             auto &feedback_queue = session->control.feedback_queue;

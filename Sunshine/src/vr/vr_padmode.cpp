@@ -377,7 +377,14 @@ namespace vr::padmode {
       g_inflight.insert(appid);
       std::thread([appid]() {
         std::string why;
-        const auto r = fetch_store(appid, &why);
+        std::optional<bool> r;
+        // §REVIEW-1111：商店回應的欄位型別不如預期（success 是數字、id 是字串）時 nlohmann 會丟例外；
+        // 這是 detached 執行緒，例外沒人接就是整個服務結束。當成查詢失敗、十分鐘後再試。
+        try {
+          r = fetch_store(appid, &why);
+        } catch (const std::exception &e) {
+          why = std::string("unexpected response: ") + e.what();
+        }
         std::lock_guard lk(g_mtx);
         g_inflight.erase(appid);
         if (!r) {
@@ -388,6 +395,12 @@ namespace vr::padmode {
         BOOST_LOG(info) << "[VIPLE-VR-PADMODE] store lookup " << appid << ": tracked=" << (*r ? "yes" : "no")
                         << (why.empty() ? "" : " (" + why + ")");
         reload_locked();
+        if (!g_db.is_object()) {
+          g_db = nlohmann::json::object();
+        }
+        if (!g_db.contains("store") || !g_db["store"].is_object()) {
+          g_db["store"] = nlohmann::json::object();  // 檔案被改壞（陣列、字串）時重建這一段，不要對它做 operator[]
+        }
         g_db["store"][appid] = {{"tracked", *r}, {"t", unix_now()}};
         save_locked();
       }).detach();
@@ -428,6 +441,12 @@ namespace vr::padmode {
   void set_manual_override(const std::string &key, bool pad) {
     std::lock_guard lk(g_mtx);
     reload_locked();
+    if (!g_db.is_object()) {
+      g_db = nlohmann::json::object();
+    }
+    if (!g_db.contains("manual") || !g_db["manual"].is_object()) {
+      g_db["manual"] = nlohmann::json::object();  // §REVIEW-1111：同上
+    }
     g_db["manual"][key] = pad;
     save_locked();
   }

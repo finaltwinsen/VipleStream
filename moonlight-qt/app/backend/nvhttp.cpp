@@ -278,13 +278,15 @@ NvHTTP::getDisplayModeList(QString serverInfo)
             if (name == QString("DisplayMode")) {
                 modes.append(NvDisplayMode());
             }
-            else if (name == QString("Width")) {
+            // §REVIEW-1111：子標籤出現在容器標籤之前（壞掉的代理、別的伺服器）時 last() 會寫到空容器之外，
+            // 整個程式跟著輪詢執行緒一起當掉。容器是空的就不處理這個標籤（下面 getAppList 同）。
+            else if (name == QString("Width") && !modes.isEmpty()) {
                 modes.last().width = xmlReader.readElementText().toInt();
             }
-            else if (name == QString("Height")) {
+            else if (name == QString("Height") && !modes.isEmpty()) {
                 modes.last().height = xmlReader.readElementText().toInt();
             }
-            else if (name == QString("RefreshRate")) {
+            else if (name == QString("RefreshRate") && !modes.isEmpty()) {
                 modes.last().refreshRate = xmlReader.readElementText().toInt();
             }
         }
@@ -348,16 +350,16 @@ NvHTTP::getAppList(bool vr)
                 }
                 apps.append(NvApp());
             }
-            else if (name == QString("AppTitle")) {
+            else if (name == QString("AppTitle") && !apps.isEmpty()) {
                 apps.last().name = xmlReader.readElementText();
             }
-            else if (name == QString("ID")) {
+            else if (name == QString("ID") && !apps.isEmpty()) {
                 apps.last().id = xmlReader.readElementText().toInt();
             }
-            else if (name == QString("IsHdrSupported")) {
+            else if (name == QString("IsHdrSupported") && !apps.isEmpty()) {
                 apps.last().hdrSupported = xmlReader.readElementText() == "1";
             }
-            else if (name == QString("IsAppCollectorGame")) {
+            else if (name == QString("IsAppCollectorGame") && !apps.isEmpty()) {
                 apps.last().isAppCollectorGame = xmlReader.readElementText() == "1";
             }
             // VipleStream H Phase 2: provenance + Steam metadata tags
@@ -366,23 +368,23 @@ NvHTTP::getAppList(bool vr)
             // non-VipleStream hosts; older Moonlight builds will also
             // ignore these tags silently (unknown XML elements fall
             // through the while loop).
-            else if (name == QString("Source")) {
+            else if (name == QString("Source") && !apps.isEmpty()) {
                 apps.last().source = xmlReader.readElementText();
             }
-            else if (name == QString("SteamAppId")) {
+            else if (name == QString("SteamAppId") && !apps.isEmpty()) {
                 apps.last().steamAppId = xmlReader.readElementText();
             }
-            else if (name == QString("SteamOwners")) {
+            else if (name == QString("SteamOwners") && !apps.isEmpty()) {
                 apps.last().steamOwners = xmlReader.readElementText();
             }
-            else if (name == QString("LastPlayed")) {
+            else if (name == QString("LastPlayed") && !apps.isEmpty()) {
                 apps.last().lastPlayed = xmlReader.readElementText().toLongLong();
             }
-            else if (name == QString("Playtime")) {
+            else if (name == QString("Playtime") && !apps.isEmpty()) {
                 apps.last().playtimeMinutes = xmlReader.readElementText().toLongLong();
             }
             // VipleStream 2.0 §VR-LAUNCHER：VR app 標記（vr 類 app 與 Steam VR 遊戲）
-            else if (name == QString("IsVr")) {
+            else if (name == QString("IsVr") && !apps.isEmpty()) {
                 apps.last().isVr = xmlReader.readElementText() == "1";
             }
         }

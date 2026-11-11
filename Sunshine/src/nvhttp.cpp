@@ -364,9 +364,18 @@ namespace nvhttp {
     if (root.count("named_devices")) {
       for (auto &[_, el] : root.get_child("named_devices")) {
         named_cert_t named_cert;
-        named_cert.name = el.get_child("name").get_value<std::string>();
-        named_cert.cert = el.get_child("cert").get_value<std::string>();
-        named_cert.uuid = el.get_child("uuid").get_value<std::string>();
+        // §REVIEW-1111：少了欄位的紀錄（手改、寫到一半）原本在這裡丟 ptree_bad_path。這個函式跑在啟動執行緒上、
+        // 外面沒有人接例外，整個服務直接結束。缺欄位的那一筆跳過，其餘照常載入。
+        const auto name = el.get_optional<std::string>("name");
+        const auto cert = el.get_optional<std::string>("cert");
+        const auto uuid = el.get_optional<std::string>("uuid");
+        if (!name || !cert || !uuid) {
+          BOOST_LOG(warning) << "Skipping a paired-device record without name/cert/uuid in the state file"sv;
+          continue;
+        }
+        named_cert.name = *name;
+        named_cert.cert = *cert;
+        named_cert.uuid = *uuid;
         named_cert.enabled = el.get<bool>("enabled", true);
         // VipleStream §M.1 — default false for state files written before
         // this patch, so old pairings remain non-admin until explicitly granted.
@@ -405,6 +414,12 @@ namespace nvhttp {
 
     auto rikey = util::from_hex_vec(get_arg(args, "rikey"), true);
     std::copy(rikey.cbegin(), rikey.cend(), std::back_inserter(launch_session->gcm_key));
+    // §REVIEW-1111：AES-128-GCM 固定讀 16 bytes 的金鑰。client 給的 rikey 不是 16 bytes 時（短的、空的）原本照用，
+    // 初始化加密時就讀過配置的結尾（空的更是空指標）。補零或截成 16 bytes：金鑰不對的 client 只是解不開，不會讀過界。
+    if (launch_session->gcm_key.size() != 16) {
+      BOOST_LOG(warning) << "rikey is "sv << launch_session->gcm_key.size() << " bytes instead of 16 - padding/truncating; this client will not be able to decrypt"sv;
+      launch_session->gcm_key.resize(16, 0);
+    }
 
     launch_session->host_audio = host_audio;
     std::stringstream mode = std::stringstream(get_arg(args, "mode", "0x0x0"));
@@ -3729,6 +3744,7 @@ namespace nvhttp {
     BOOST_LOG(info) << "[VIPLE-MULTI] /api/force_cancel admin force-disconnect, prior_owner="sv
                     << proc::proc.running_owner_name();
     rtsp_stream::terminate_sessions();
+    ::vr::clear_reservation();  // §REVIEW-1111：同 /cancel——還沒建立 session 的 VR 預約一併作廢，否則之後的 /launch 會被當成 VR 忙碌
     proc::proc.terminate();
     display_device::revert_configuration();
     return true;
