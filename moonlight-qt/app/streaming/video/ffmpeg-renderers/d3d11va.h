@@ -101,6 +101,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Fence> m_DecodeR2DFence, m_RenderR2DFence;
     UINT64 m_R2DFenceValue;
     SDL_mutex* m_ContextLock;
+    SDL_mutex* m_RenderLock;  // REVIEW-1111: held for the whole of renderFrame and while the swapchain is resized
     bool m_BindDecoderOutputTextures;
 
     DECODER_PARAMETERS m_DecoderParams;

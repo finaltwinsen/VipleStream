@@ -1816,7 +1816,15 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             if (computer) {
                 // §REVIEW-1111：getActiveAddressReachability 會對主機做一次 TCP 連線（最多等 3 秒）再列舉網卡，而這裡是
                 // 解碼執行緒、每秒呼叫一次——浮層開著時每秒有一幀卡在這後面。連線類型只跟位址有關，位址沒變就用上次的結果。
-                QString activeAddr = computer->activeAddress.address();
+                // 欄位先在讀鎖下複製出來（輪詢執行緒會改它們），之後只用複本
+                QString activeAddr, stunAddrStr;
+                bool stunNull = true;
+                {
+                    QReadLocker computerLock(&computer->lock);
+                    activeAddr = computer->activeAddress.address();
+                    stunNull = computer->stunAddress.isNull();
+                    stunAddrStr = computer->stunAddress.address();
+                }
                 static QString s_ReachAddr;
                 static NvComputer::ReachabilityType s_Reach = NvComputer::RI_UNKNOWN;
                 if (s_ReachAddr != activeAddr) {
@@ -1824,8 +1832,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                     s_ReachAddr = activeAddr;
                 }
                 NvComputer::ReachabilityType reach = s_Reach;
-                bool isStunAddr = (!computer->stunAddress.isNull() &&
-                                   activeAddr == computer->stunAddress.address());
+                bool isStunAddr = (!stunNull && activeAddr == stunAddrStr);
 
                 if (reach == NvComputer::RI_LAN) {
                     connTypeStr = u8"\u5340\u7DB2\u76F4\u9023"; // 區網直連
@@ -1860,13 +1867,19 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             }
 
             // STUN info (if available)
-            if (computer && !computer->stunAddress.isNull() &&
-                !computer->stunAddress.address().isEmpty()) {
+            QString stunText, stunNat;
+            if (computer) {
+                QReadLocker computerLock(&computer->lock);  // §REVIEW-1111：同上，先複製
+                if (!computer->stunAddress.isNull() && !computer->stunAddress.address().isEmpty()) {
+                    stunText = computer->stunAddress.address() + ":" + QString::number(computer->stunAddress.port());
+                    stunNat = computer->stunNatType;
+                }
+            }
+            if (!stunText.isEmpty()) {
                 ret = snprintf(&output[offset], length - offset,
                     u8"STUN: %s (NAT: %s)\n",
-                    qPrintable(computer->stunAddress.address() + ":" +
-                               QString::number(computer->stunAddress.port())),
-                    qPrintable(computer->stunNatType));
+                    qPrintable(stunText),
+                    qPrintable(stunNat));
                 if (ret >= 0 && ret < length - offset) {
                     offset += ret;
                 }
@@ -3590,18 +3603,19 @@ bool FFmpegVideoDecoder::initializeInternal(PDECODER_PARAMETERS params)
 
 void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
 {
-    if (m_NeedsSpsFixup && entry->bufferType == BUFFER_TYPE_SPS) {
+    // §REVIEW-1111：SPS 是從網路來的。找不到起始碼、解析失敗時原本照樣往下做（nalStart 留在 0 時寫入起點會跑到緩衝區
+    // 前一個位元組；write_nal_unit 回 −1 時 offset 倒退），解析函式庫本身也有兩處沒有上限（已另外補）。
+    // 任何一步不對就照原樣複製這個 SPS，不做修正。
+    bool spsFixed = false;
+    if (m_NeedsSpsFixup && entry->bufferType == BUFFER_TYPE_SPS && entry->length >= 5) {
         h264_stream_t* stream = h264_new();
-        int nalStart, nalEnd;
+        int nalStart = 0, nalEnd = 0;
 
         // Read the old NALU
-        find_nal_unit((uint8_t*)entry->data, entry->length, &nalStart, &nalEnd);
-        read_nal_unit(stream,
-                      (unsigned char *)&entry->data[nalStart],
-                      nalEnd - nalStart);
-
-        SDL_assert(nalStart == 3 || nalStart == 4); // 3 or 4 byte Annex B start sequence
-        SDL_assert(nalEnd == entry->length);
+        const int found = find_nal_unit((uint8_t*)entry->data, entry->length, &nalStart, &nalEnd);
+        const bool parsed = found > 0 && (nalStart == 3 || nalStart == 4) && nalEnd > nalStart && nalEnd <= entry->length &&
+                            read_nal_unit(stream, (unsigned char *)&entry->data[nalStart], nalEnd - nalStart) >= 0;
+        if (parsed) {
 
         // Fixup the SPS to what OS X needs to use hardware acceleration
         // This is also critical for decoding latency on the Pi 2.
@@ -3626,16 +3640,21 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
 
         // Copy the modified NALU data. This clobbers byte 0 and starts NALU data at byte 1.
         // Since it prepended one extra byte, subtract one from the returned length.
-        offset += write_nal_unit(stream, (uint8_t*)&m_DecodeBuffer.data()[initialOffset + nalStart - 1],
-                                 MAX_SPS_EXTRA_SIZE + entry->length - nalStart) - 1;
+        const int written = write_nal_unit(stream, (uint8_t*)&m_DecodeBuffer.data()[initialOffset + nalStart - 1],
+                                           MAX_SPS_EXTRA_SIZE + entry->length - nalStart);
+        if (written > 0) {
+            offset += written - 1;
 
-        // Copy the NALU prefix over from the original SPS
-        memcpy(&m_DecodeBuffer.data()[initialOffset], entry->data, nalStart);
-        offset += nalStart;
+            // Copy the NALU prefix over from the original SPS
+            memcpy(&m_DecodeBuffer.data()[initialOffset], entry->data, nalStart);
+            offset += nalStart;
+            spsFixed = true;
+        }
+        }
 
         h264_free(stream);
     }
-    else {
+    if (!spsFixed) {
         // Write the buffer as-is
         memcpy(&m_DecodeBuffer.data()[offset],
                entry->data,

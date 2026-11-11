@@ -218,7 +218,9 @@ int read_nal_unit(h264_stream_t* h, uint8_t* buf, int size)
             read_seq_parameter_set_rbsp(h->sps, b);
             read_rbsp_trailing_bits(b);
             
-            if( 1 )
+            // VipleStream: sps_table has 32 entries; an id from the bitstream beyond that would copy a whole
+            // sps_t (several KB) over whatever follows the table.
+            if( h->sps->seq_parameter_set_id >= 0 && h->sps->seq_parameter_set_id < 32 )
             {
                 memcpy(h->sps_table[h->sps->seq_parameter_set_id], h->sps, sizeof(sps_t));
             }
@@ -426,6 +428,9 @@ void read_seq_parameter_set_rbsp(sps_t* sps, bs_t* b)
         sps->offset_for_non_ref_pic = bs_read_se(b);
         sps->offset_for_top_to_bottom_field = bs_read_se(b);
         sps->num_ref_frames_in_pic_order_cnt_cycle = bs_read_ue(b);
+        // VipleStream: offset_for_ref_frame has 256 entries (the standard allows 0..255); clamp the count so
+        // neither this loop nor the matching one in the writer runs past the array.
+        if( sps->num_ref_frames_in_pic_order_cnt_cycle > 255 ) { sps->num_ref_frames_in_pic_order_cnt_cycle = 255; }
         for( i = 0; i < sps->num_ref_frames_in_pic_order_cnt_cycle; i++ )
         {
             sps->offset_for_ref_frame[ i ] = bs_read_se(b);
@@ -2878,7 +2883,9 @@ int read_debug_nal_unit(h264_stream_t* h, uint8_t* buf, int size)
             read_debug_seq_parameter_set_rbsp(h->sps, b);
             read_debug_rbsp_trailing_bits(b);
             
-            if( 1 )
+            // VipleStream: sps_table has 32 entries; an id from the bitstream beyond that would copy a whole
+            // sps_t (several KB) over whatever follows the table.
+            if( h->sps->seq_parameter_set_id >= 0 && h->sps->seq_parameter_set_id < 32 )
             {
                 memcpy(h->sps_table[h->sps->seq_parameter_set_id], h->sps, sizeof(sps_t));
             }

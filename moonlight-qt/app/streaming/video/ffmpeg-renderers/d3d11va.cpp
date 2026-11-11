@@ -79,6 +79,7 @@ D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass)
       m_HwDeviceContext(nullptr)
 {
     m_ContextLock = SDL_CreateMutex();
+    m_RenderLock = SDL_CreateMutex();
 
     DwmEnableMMCSS(TRUE);
 
@@ -356,6 +357,7 @@ D3D11VARenderer::~D3D11VARenderer()
     DwmEnableMMCSS(FALSE);
 
     SDL_DestroyMutex(m_ContextLock);
+    SDL_DestroyMutex(m_RenderLock);
 
     m_VideoVertexBuffer.Reset();
     for (auto& shader : m_VideoPixelShaders) {
@@ -1045,6 +1047,16 @@ void D3D11VARenderer::waitToRender()
 
 void D3D11VARenderer::renderFrame(AVFrame* frame)
 {
+    // §REVIEW-1111：繪製整段持有 m_RenderLock。解碼與繪圖用不同裝置時（多數顯示卡的預設），下面不會拿 m_ContextLock，
+    // 而主執行緒的 notifyWindowChanged 會在同一時間對同一個 immediate context 與 swapchain 做 Flush／ResizeBuffers——
+    // immediate context 不能跨執行緒同時用，swapchain 在別的執行緒 Present 期間 ResizeBuffers 會裝置移除或當掉。
+    // 順序固定：先 m_RenderLock、再 m_ContextLock。
+    struct RenderLockGuard {
+        SDL_mutex* m;
+        explicit RenderLockGuard(SDL_mutex* mtx) : m(mtx) { SDL_LockMutex(m); }
+        ~RenderLockGuard() { SDL_UnlockMutex(m); }
+    } renderLockGuard(m_RenderLock);
+
     // Acquire the context lock for rendering to prevent concurrent
     // access from inside FFmpeg's decoding code
     if (m_DecodeDevice == m_RenderDevice) {
@@ -1991,6 +2003,7 @@ bool D3D11VARenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO stateInfo)
         m_SwapChain->GetDesc1(&swapchainDesc);
 
         // Lock the context to avoid concurrent rendering
+        SDL_LockMutex(m_RenderLock);  // §REVIEW-1111：見 renderFrame
         lockContext(this);
 
         m_DisplayWidth = stateInfo->width;
@@ -2021,17 +2034,17 @@ bool D3D11VARenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO stateInfo)
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "IDXGISwapChain::ResizeBuffers() failed: %x",
                          hr);
-            unlockContext(this);
+            unlockContext(this); SDL_UnlockMutex(m_RenderLock);
             return false;
         }
 
         // Reset swapchain-dependent resources (RTV, viewport, etc)
         if (!setupSwapchainDependentResources()) {
-            unlockContext(this);
+            unlockContext(this); SDL_UnlockMutex(m_RenderLock);
             return false;
         }
 
-        unlockContext(this);
+        unlockContext(this); SDL_UnlockMutex(m_RenderLock);
 
         // We've handled this state change
         stateInfo->stateChangeFlags &= ~WINDOW_STATE_CHANGE_SIZE;

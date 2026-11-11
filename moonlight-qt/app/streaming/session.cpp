@@ -3671,8 +3671,11 @@ bool Session::startConnectionAsync()
                 }
             }
         } catch (const QtNetworkReplyException&) {
-            // §VR-LAUNCHER：無頭 PCVR 不改走 relay（relay 只能平面串流，看不到）
-            if (m_VrRequested && pcvrCannotFallBackToFlat()) {
+            // §VR-LAUNCHER：PCVR 不改走 relay（relay 只能平面串流）。
+            // §REVIEW-1111：原本只有無頭時才擋。有桌面的機器會繼續走 relay，但這時串流尺寸已經是 VR 的左右並排、
+            // XR session 也建好了——relay 那邊不帶 VR 參數，結果是 host 送平面畫面、解析度卻是 VR 打包尺寸，
+            // client 又把它交給等不到姿態資料的 XR 後端。要求的是 VR 就直接回報連線失敗。
+            if (m_VrRequested) {
                 emit displayLaunchError(tr("Connection to host failed"));
                 return false;
             }

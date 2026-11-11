@@ -222,14 +222,18 @@ private:
                     auto result = RelayLookup::lookup(prefs->relayUrl, prefs->relayPsk, m_Computer->uuid, 5000);
                     if (result.success) {
                         NvAddress relayAddr;
+                        // §REVIEW-1111：這幾個欄位（QString／NvAddress，隱式共享）同時被效能浮層、開串流的執行緒、
+                        // 存檔執行緒讀；原本在這裡沒拿鎖就賦值，讀的人可能拿到正在被釋放的字串。
                         if (!result.stunIp.isEmpty()) {
                             relayAddr = NvAddress(result.stunIp, 47989);
+                            QWriteLocker computerLock(&m_Computer->lock);
                             m_Computer->stunAddress = relayAddr;
                             m_Computer->stunNatType = result.natType;
                             m_Computer->stunPunchPort = result.stunPort;  // §REVIEW-1104：打洞用 relay 回報的實際埠
                         } else {
                             // No STUN endpoint — use a placeholder address.
                             // All communication will go through relay proxy/tunnel.
+                            QReadLocker computerLock(&m_Computer->lock);
                             relayAddr = m_Computer->activeAddress;
                             qInfo() << "[VIPLE-NAT]" << m_Computer->name
                                     << "online via relay (no STUN, relay-only mode)";
@@ -318,20 +322,23 @@ private:
             }
 
             // Check if we failed after all retry attempts
-            // Note: we don't need to acquire the read lock here,
-            // because we're on the writing thread.
-            if (!online && m_Computer->state != NvComputer::CS_OFFLINE) {
-                qInfo() << m_Computer->name << "is now offline";
-                m_Computer->state = NvComputer::CS_OFFLINE;
-                stateChanged = true;
-            }
+            // §REVIEW-1111：寫入要拿寫鎖——別的執行緒是拿著讀鎖在讀 state／onlineViaRelay 的
+            // （原本的註解說「這條是唯一寫入的執行緒所以不用鎖」，那只保證了寫與寫不衝突）。
+            {
+                QWriteLocker computerLock(&m_Computer->lock);
+                if (!online && m_Computer->state != NvComputer::CS_OFFLINE) {
+                    qInfo() << m_Computer->name << "is now offline";
+                    m_Computer->state = NvComputer::CS_OFFLINE;
+                    stateChanged = true;
+                }
 
-            // VipleStream: expose relay-only reachability to the session layer
-            // so /launch (and /quit) can skip direct HTTPS and go straight to
-            // relay proxy instead of waiting for the direct request to time out.
-            if (m_Computer->onlineViaRelay != relayOnly) {
-                m_Computer->onlineViaRelay = relayOnly;
-                stateChanged = true;
+                // VipleStream: expose relay-only reachability to the session layer
+                // so /launch (and /quit) can skip direct HTTPS and go straight to
+                // relay proxy instead of waiting for the direct request to time out.
+                if (m_Computer->onlineViaRelay != relayOnly) {
+                    m_Computer->onlineViaRelay = relayOnly;
+                    stateChanged = true;
+                }
             }
 
             // Grab the applist if it's empty or it's been long enough that we need to refresh
