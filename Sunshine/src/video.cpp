@@ -2603,7 +2603,10 @@ namespace video {
       }
       // 這一輪的 wave 決定已定案：之後才到的 LOSS 最早從下一幀開始。LOSS handler 用它當
       // REFRESH_START.startFrame，估計值因此幾乎總是精確（encode 後也會再設一次）
-      if (vr_state) {
+      // §REVIEW-1111：半速（分頻 > 1）時先不發布。等影像的那段有一半會「等到了又跳過」（不編碼、幀號不前進），
+      // 這時下一輪的 wave 其實從同一個幀號開始；先發布了 +1，等待期間到的 LOSS 就把起點多報一幀，client 等不到
+      // 對得上的 REFRESH_DONE，一秒後再要一波。少報一幀 client 可以接受，多報不行，所以半速時留到確定要編才發布。
+      if (vr_state && (config.captureSource != 1 || vr_state->rate_div() <= 1)) {
         vr_state->set_next_frame((uint32_t) frame_nr + 1);
       }
 
@@ -2705,6 +2708,7 @@ namespace video {
             if (vr_rate_skip) {
               continue;
             }
+            vr_state->set_next_frame((uint32_t) frame_nr + 1);  // §REVIEW-1111：這張確定要編了
           }
           frame_timestamp = img->frame_timestamp;
           vr_repeated = false;

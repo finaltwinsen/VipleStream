@@ -3402,10 +3402,9 @@ bool Session::setupXrPcvr()
         m_VrLaunch.caps |= VIPLE_VR_CLIENT_CAP_GAZE | VIPLE_VR_CLIENT_CAP_GAZE_FOVEA;
     }
     m_VrLaunch.caps |= VIPLE_VR_CLIENT_CAP_FOVEA_INSET;  // §VR-FOVEA-INSET：懂分段注視點曲線
-    // §VR-FOVEA-TILES：懂「每眼兩塊影像」。要兩個圖層＋直接讀 YUV 平面那一趟才畫得出來：開著補幀（swapchain 是兩倍高的
-    // 另一種排法）、或 dev 選項把那兩條路關掉時不宣告，host 就照舊用注視點曲線
-    if (m_XrPcvr && !m_Preferences->vrFovSingleLayer && !m_Preferences->vrUnwarpRgb &&
-            !(m_Preferences->vrHalfRate && m_Preferences->vrSynth)) {
+    // §VR-FOVEA-TILES：懂「每眼兩塊影像」。要兩個圖層＋直接讀 YUV 平面那一趟才畫得出來：dev 選項把那兩條路關掉時
+    // 不宣告，host 就照舊用注視點曲線。2.0.128 起開著補幀也可以（swapchain 兩倍高，下半是合成的那一張、同樣的排法）
+    if (m_XrPcvr && !m_Preferences->vrFovSingleLayer && !m_Preferences->vrUnwarpRgb) {
         m_VrLaunch.caps |= VIPLE_VR_CLIENT_CAP_FOVEA_TILES;
     }
     // §VR-PLAYAREA：真實遊玩區與坐姿零點交給 server 的 chaperone（拿不到就不帶，server 用預設值）

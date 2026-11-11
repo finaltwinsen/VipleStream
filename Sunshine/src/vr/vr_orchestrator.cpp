@@ -815,14 +815,31 @@ namespace vr::orchestrator {
       }
       idle_since = {};
       pending_since = {};
+      // §REVIEW-1111：st 是進 maintenance 時抄下來的。這中間（上面等了幾十秒的條件、下面等 SteamVR 退出）使用者可能
+      // 已經重新 /launch：start() 把狀態改成 PRECHECK、排了新的 job。那時再關 SteamVR 會把要留給新 session 的遊戲一起關掉。
+      const auto superseded = []() {
+        std::lock_guard lk(g_mtx);
+        return g_pending.has_value() || cur() != state_e::restore_pending;
+      };
+      if (superseded()) {
+        return;
+      }
       const auto t0 = steady::now();
       platform::wait_steamvr_settled();  // §QUIT-SETTLE
+      if (superseded()) {
+        return;
+      }
       bool quit = false;
       if (bs.hmd_added) {
         bridge::request_steamvr_quit();
-        quit = wait_for(5s, []() {
-          return platform::vrserver_pid() == 0;
+        quit = wait_for(5s, [&superseded]() {
+          return platform::vrserver_pid() == 0 || superseded();
         });
+        if (platform::vrserver_pid() != 0 && superseded()) {
+          step("idle-quit-steamvr", false, "new session requested while quitting - not forcing", t0);
+          return;
+        }
+        quit = platform::vrserver_pid() == 0;
       }
       if (!quit) {
         const auto q = platform::quit_steamvr(false);
@@ -860,8 +877,15 @@ namespace vr::orchestrator {
           step("guard-restore", g.result == platform::guard_e::ok, g.detail, t0);
         }
       }
-      if (st == state_e::error || (st == state_e::restore_pending && !platform::guard_pending())) {
-        set_state(platform::guard_pending() ? state_e::restore_pending : state_e::idle);
+      // §REVIEW-1111：用現在的狀態判斷，而且新的 job 已經排進來（start() 把狀態改成 PRECHECK）就不要蓋回 IDLE
+      {
+        std::unique_lock lk(g_mtx);
+        const auto now_st = cur();
+        const bool stale = g_pending.has_value() || now_st != st;
+        lk.unlock();
+        if (!stale && (st == state_e::error || (st == state_e::restore_pending && !platform::guard_pending()))) {
+          set_state(platform::guard_pending() ? state_e::restore_pending : state_e::idle);
+        }
       }
     }
 

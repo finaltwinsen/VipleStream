@@ -483,6 +483,7 @@ public:
     bool effectiveAutoFps() const { return cliAutoFps >= 0 ? cliAutoFps == 1 : autoFps; }
     bool bitrateFromCli = false;     // M4a 收尾：這次 CLI 明確帶了 --bitrate（不存設定；VR 預設位元率不覆蓋它）
     int  vrInjectDropEvery = 0;      // dev：每 N 個解出的幀丟一幀（模擬 decoder 吞幀），0＝關
+    int  vrInjectDecStuckAt = 0;     // dev（§DEC-STUCK-RESET）：第 N 個送進解碼器的封包卡住不回來（模擬硬體解碼器卡死），0＝關；只觸發一次
     int  vrInjectLossSec = 0;        // dev：每 N 秒注入一次 LOSS，0＝關
     QString xrRuntimeJsonPath;       // dev（M3a X1）：xr-desktop 的 OpenXR runtime manifest，行程內設 XR_RUNTIME_JSON
     QString xrDumpFramePath;         // dev（M3a X2）：XR 影像 quad 第 300 幀讀回存 PNG（最長邊 ≤ 1280），不存設定

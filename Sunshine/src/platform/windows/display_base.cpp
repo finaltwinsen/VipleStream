@@ -236,6 +236,17 @@ namespace platf::dxgi {
     std::optional<std::chrono::steady_clock::time_point> frame_pacing_group_start;
     uint32_t frame_pacing_group_frames = 0;
 
+    // §CAP-PHASE：最近 k_phase_window 張的最小畫面年齡；目標 1 ms（留給畫面出現時間的抖動），超過目標 0.5 ms 才拉
+    constexpr int k_phase_window = 32;
+    constexpr auto k_phase_target = 1ms;
+    constexpr auto k_phase_deadband = 500us;
+    int phase_samples = 0;
+    std::chrono::nanoseconds phase_min_age = std::chrono::nanoseconds::max();
+    uint32_t phase_pulls = 0;
+    uint32_t phase_regroups = 0;
+    std::chrono::nanoseconds phase_pull_total {0};
+    std::chrono::steady_clock::time_point phase_log_last = std::chrono::steady_clock::now();
+
     // Keep the display awake during capture. If the display goes to sleep during
     // capture, best case is that capture stops until it powers back on. However,
     // worst case it will trigger us to reinit DD, waking the display back up in
@@ -277,11 +288,49 @@ namespace platf::dxgi {
           sleep_overshoot_logger.first_point(sleep_target);
           sleep_overshoot_logger.second_point_now_and_log();
 
+          snapshot_steady_now.reset();
           status = snapshot(pull_free_image_cb, img_out, 0ms, *cursor);
 
           if (status == capture_e::ok && img_out) {
             frame_pacing_group_frames += 1;
+
+            // §CAP-PHASE（2026-11-11）：節拍用的是 steady_clock，畫面出現的時間跟的是顯示器的時脈，兩者會慢慢漂開。
+            // 漂開之後每次都要等到節拍才取一張早就出現的畫面，「畫面年齡」從 0 一路長到一整格再歸零。
+            // 實測（1080p120、host 顯示器 120 Hz）：同一組設定 host 端時間在 2.7～7.1 ms 之間漂；client 等垂直同步的
+            // 時間跟著此消彼長，年齡一旦超過 client 那邊的餘裕，畫面就晚一整個更新週期才顯示（總和從約 6 ms 跳到約 14 ms）。
+            // 做法：看最近一段的最小年齡（最小值＝節拍相對於畫面出現時間的固定落差，不含偶發的晚到），超過目標就把
+            // 節拍往前拉回去。拉過頭也沒關係：節拍到了畫面還沒來，下面會改成等畫面（年齡約 0）並重新定錨。
+            if (config::stream.capture_phase_lock && img_out->frame_timestamp && snapshot_steady_now) {
+              const auto age = *snapshot_steady_now - *img_out->frame_timestamp;
+              if (age >= 0ns && age < phase_min_age) {
+                phase_min_age = age;
+              }
+              if (++phase_samples >= k_phase_window) {
+                if (phase_min_age > k_phase_target + k_phase_deadband && phase_min_age < 100ms) {
+                  const auto shift = phase_min_age - k_phase_target;
+                  *frame_pacing_group_start -= shift;
+                  ++phase_pulls;
+                  phase_pull_total += shift;
+                }
+                phase_samples = 0;
+                phase_min_age = std::chrono::nanoseconds::max();
+              }
+              const auto now = *snapshot_steady_now;
+              if (now - phase_log_last >= 10s) {
+                if (phase_pulls > 0 || phase_regroups > 0) {
+                  BOOST_LOG(info) << "[VIPLE-CAP-PHASE] 10s: pulls=" << phase_pulls << " pulled=" << std::chrono::duration<double, std::milli>(phase_pull_total).count()
+                                  << "ms regroups=" << phase_regroups << " lastAge=" << std::chrono::duration<double, std::milli>(age).count() << "ms";
+                }
+                phase_log_last = now;
+                phase_pulls = 0;
+                phase_regroups = 0;
+                phase_pull_total = 0ns;
+              }
+            }
           } else {
+            ++phase_regroups;
+            phase_samples = 0;
+            phase_min_age = std::chrono::nanoseconds::max();
             frame_pacing_group_start = std::nullopt;
             frame_pacing_group_frames = 0;
           }

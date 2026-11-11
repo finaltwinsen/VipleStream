@@ -1166,6 +1166,18 @@ namespace rtsp_stream {
       return;
     }
 
+    // §REVIEW-1111：這幾個值直接進影像／音訊執行緒的除法與配置，client 給什麼就是什麼。packetSize＝16 會讓
+    // 「每包可放的位元組數」變 0（% 0），−16 讓分塊大小變 0，太大讓速率控制的每毫秒封包數變 0（0/0）——整數除以零
+    // 不是 C++ 例外，整個服務直接結束。一般 client 用 1024～1392；這裡只擋掉不可能正常運作的值。
+    if (config.packetsize < 128 || config.packetsize > 4096 ||
+        config.minRequiredFecPackets < 0 || config.minRequiredFecPackets > 255 ||
+        config.audio.packetDuration < 1 || config.audio.packetDuration > 120) {
+      BOOST_LOG(warning) << "RTSP ANNOUNCE rejected: packetSize="sv << config.packetsize << " minRequiredFecPackets="sv
+                         << config.minRequiredFecPackets << " audio packetDuration="sv << config.audio.packetDuration;
+      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
+
     // VipleStream §H.4 — record the negotiated client viewport so that any
     // resolution mismatch ("client asked for 1920x1200 but host displays
     // 1920x1080") shows up in the host log without having to attach a

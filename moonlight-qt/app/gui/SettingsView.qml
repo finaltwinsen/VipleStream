@@ -386,8 +386,14 @@ Flickable {
                     model: ["1152 x 1152", "1440 x 1440", "1728 x 1728", "2016 x 2016", "2160 x 2160", "2304 x 2304"]
                     Component.onCompleted: {
                         var i = values.indexOf(StreamingPreferences.vrEyeWidth)
-                        // 不在清單裡的值（例如舊設定）退回 1440，不再跳到最大的選項
+                        // 不在清單裡的值（例如舊設定）退回 1440，不再跳到最大的選項。
+                        // §REVIEW-1111：設定值也要跟著改——原本只改畫面，串流仍照舊值送（畫面寫 1440、實際 2560）；
+                        // 高度不是同一個正方形（1440x2160）時也一樣對不上。
                         currentIndex = i >= 0 ? i : values.indexOf(1440)
+                        if (StreamingPreferences.vrEyeWidth !== values[currentIndex] || StreamingPreferences.vrEyeHeight !== values[currentIndex]) {
+                            StreamingPreferences.vrEyeWidth = values[currentIndex]
+                            StreamingPreferences.vrEyeHeight = values[currentIndex]
+                        }
                         recalculateWidth()
                     }
                     onActivated: {

@@ -217,8 +217,8 @@ namespace config {
       if (value == "realtime"sv) {
         return vr_t::gpu_priority_e::realtime;
       }
-      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: high, realtime. Falling back to 'high'", key, value));
-      return vr_t::gpu_priority_e::high;
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: high, realtime. Falling back to 'realtime'", key, value));
+      return vr_t::gpu_priority_e::realtime;
     }
 
     /// §VR-FOVEA-TILES：vr_fovea_tiles＝disabled｜small｜medium｜large（值寫錯警告並維持 small）
@@ -963,9 +963,13 @@ namespace config {
       }
     }
 
+    // §REVIEW-1111：一般的值只取到 endc（已去掉註解與尾端空白）。原本取到行尾，`update_mode = off # 註解` 會存成
+    // "off "（帶空白），對不到允許清單就無聲用回預設（自動安裝）；`vr_fovea_tiles = disabled ` 也一樣變成沒關。
+    // 清單可以跨行，維持取到對應的 ']'。
+    const bool is_list = *begin_val == '[';
     return std::make_pair(
       endl,
-      std::make_pair(to_string(begin, end_name), to_string(begin_val, endl))
+      std::make_pair(to_string(begin, end_name), is_list ? to_string(begin_val, endl) : std::string(begin_val, endc))
     );
   }
 
@@ -1030,6 +1034,14 @@ namespace config {
         input = std::move(temp);
         return;
       }
+    }
+    // §REVIEW-1111：寫了不在清單裡的值原本無聲沿用預設（例如 update_mode = disabled 仍然自動安裝）；至少講清楚
+    if (!temp.empty()) {
+      std::string list;
+      for (auto &allowed_val : allowed_vals) {
+        list += (list.empty() ? "" : ", ") + std::string(allowed_val);
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: {}. Keeping '{}'", name, temp, list, input));
     }
   }
 
@@ -1164,7 +1176,9 @@ namespace config {
   }
 
   bool to_bool(std::string &boolean) {
-    std::for_each(std::begin(boolean), std::end(boolean), [](char ch) {
+    // §REVIEW-1111：原本用 for_each，轉小寫的結果被丟掉——「Enabled」「TRUE」都會判成關；
+    // 而且只要字串裡有 '1' 就算開（「false1」「10」）。
+    std::transform(std::begin(boolean), std::end(boolean), std::begin(boolean), [](unsigned char ch) {
       return (char) std::tolower(ch);
     });
 
@@ -1173,7 +1187,7 @@ namespace config {
            boolean == "enable"sv ||
            boolean == "enabled"sv ||
            boolean == "on"sv ||
-           (std::find(std::begin(boolean), std::end(boolean), '1') != std::end(boolean));
+           boolean == "1"sv;
   }
 
   void bool_f(std::unordered_map<std::string, std::string> &vars, const std::string &name, bool &input) {
@@ -1574,6 +1588,7 @@ namespace config {
     // 「功能設定不用環境變數」規則）。正式設定一律走 sunshine.conf / Web UI 的
     // smooth_pacing，預設 false（線速 burst，與舊版未設環境變數時相同）。
     bool_f(vars, "smooth_pacing", stream.smooth_pacing);
+    bool_f(vars, "capture_phase_lock", stream.capture_phase_lock);  // §CAP-PHASE
 
     // §F7：環境變數降級為 dev-only 覆寫，方便 A/B 時不改 conf 就能切換。
     // 優先順序：VIPLE_SMOOTH_PACING（有設且非空）> config smooth_pacing > 預設 false。
@@ -1715,7 +1730,7 @@ namespace config {
     string_restricted_f(vars, "update_mode", sunshine.update_mode, {"off"sv, "notify"sv, "install"sv});  // §AUTO-UPDATE
 
     int port = sunshine.port;
-    int_between_f(vars, "port"s, port, {1024 + nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});
+    int_between_f(vars, "port"s, port, {1024 - nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});
     sunshine.port = (std::uint16_t) port;
 
     // Now that we have the port, add web UI port-specific origins to CSRF allowed list
@@ -1824,7 +1839,7 @@ namespace config {
       }
       const auto published = platf::config_acl::read_published_webui_port(platf::appdata());
       // 範圍與 apply_config 對 "port" 的檢查相同
-      if (published && *published >= 1024 + nvhttp::PORT_HTTPS && *published <= 65535 - rtsp_stream::RTSP_SETUP_PORT) {
+      if (published && *published >= 1024 - nvhttp::PORT_HTTPS && *published <= 65535 - rtsp_stream::RTSP_SETUP_PORT) {
         sunshine.port = static_cast<std::uint16_t>(*published);
         return;
       }

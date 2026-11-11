@@ -439,8 +439,15 @@ namespace input {
       << "--end keyboard packet--"sv;
   }
 
+  /// §REVIEW-1111：UTF-8 文字封包的文字長度。header.size 是 client 給的，小於 4 會繞成超大值、大於實際長度會讀過頭；
+  /// client 一次最多送 UTF8_TEXT_EVENT_MAX_COUNT 個位元組，入佇列時封包已補滿到 k_min_input_packet，所以夾在這個範圍內就安全。
+  static int unicode_text_len(PNV_UNICODE_PACKET packet) {
+    const int64_t n = (int64_t) util::endian::big(packet->header.size) - (int64_t) sizeof(packet->header.magic);
+    return (int) std::clamp<int64_t>(n, 0, UTF8_TEXT_EVENT_MAX_COUNT);
+  }
+
   void print(PNV_UNICODE_PACKET packet) {
-    std::string text(packet->text, util::endian::big(packet->header.size) - sizeof(packet->header.magic));
+    std::string text(packet->text, unicode_text_len(packet));
     BOOST_LOG(debug)
       << "--begin unicode packet--"sv << std::endl
       << "text ["sv << text << ']' << std::endl
@@ -1073,8 +1080,7 @@ namespace input {
       return;
     }
 
-    int size = util::endian::big(packet->header.size) - sizeof(packet->header.magic);
-    platf::unicode(platf_input, packet->text, size);
+    platf::unicode(platf_input, packet->text, unicode_text_len(packet));
   }
 
   /**
@@ -2195,7 +2201,7 @@ namespace input {
       // Try to batch with remaining items on the local queue
       auto i = local_queue.begin();
       while (i != local_queue.end()) {
-        auto batchable_entry = *i;
+        auto &batchable_entry = *i;  // §REVIEW-1111：原本每比一次就複製一份封包
         auto batchable_payload = (PNV_INPUT_HEADER) batchable_entry.data();
 
         auto batch_result = batch(payload, batchable_payload);
@@ -2281,6 +2287,20 @@ namespace input {
    * @param input_data The input message.
    */
   void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data) {
+    // §REVIEW-1111：後面依 magic 直接把緩衝區當成各種封包結構來讀（批次合併還會寫），卻沒有對過實際長度。
+    // 空的或不到一個標頭的丟掉（空 vector 的 data() 是空指標，解參考就整個服務結束）；比最大的結構短的補零到
+    // k_min_input_packet——不拒收，舊 client 送的較短封包照樣能用，只是讀不到別人的記憶體。
+    constexpr std::size_t k_min_input_packet = 128;
+    static_assert(k_min_input_packet >= sizeof(SS_SC_HID_FEATURE_PACKET) && k_min_input_packet >= sizeof(NV_MULTI_CONTROLLER_PACKET) &&
+                  k_min_input_packet >= sizeof(SS_PEN_PACKET) && k_min_input_packet >= sizeof(SS_TOUCH_PACKET) &&
+                  k_min_input_packet >= sizeof(NV_UNICODE_PACKET) && k_min_input_packet >= sizeof(SS_CONTROLLER_MOTION_PACKET));
+    if (input_data.size() < sizeof(NV_INPUT_HEADER)) {
+      BOOST_LOG(debug) << "Dropping input packet shorter than its header ("sv << input_data.size() << " bytes)"sv;
+      return;
+    }
+    if (input_data.size() < k_min_input_packet) {
+      input_data.resize(k_min_input_packet, 0);
+    }
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
       input->input_queue.push_back(std::move(input_data));
@@ -2342,9 +2362,62 @@ namespace input {
       return -1;
     }
     // 在 task pool 執行緒上建立並等結果（一般手把的 alloc／update／free 都在這條執行緒，避免與它們並行碰 ViGEm 的陣列）
-    auto fut = task_pool.push([input]() -> int {
+    // §REVIEW-1111：分成兩段任務，中間的 200 ms 用延遲任務排，不在這條執行緒上睡——它是唯一的輸入執行緒，睡著的時候
+    // 滑鼠、鍵盤、其他手把全部停住。另外：呼叫端等 2 秒逾時後任務其實還會跑完，建出來的手把沒有人擁有（padmode 以為失敗、
+    // 不更新也不釋放，還佔著 XInput 第 0 格）；配置失敗時被拔掉的 client 手把也沒有插回去。現在用共用狀態處理這兩種情況。
+    struct pad_alloc_state_t {
+      std::promise<int> result;
+      std::mutex mtx;  // 保護「看 abandoned＋交出結果」與「設 abandoned＋看結果到了沒」這兩段，避免兩邊剛好錯過
+      bool abandoned = false;
+      bool delivered = false;
+      std::vector<size_t> parked;  // 這一次拔掉的 client 手把（只在 task pool 執行緒上讀寫）
+    };
+    auto st = std::make_shared<pad_alloc_state_t>();
+    auto fut = st->result.get_future();
+
+    // 第二段：插上虛擬手把；失敗或呼叫端已經放棄時把剛才拔掉的插回去
+    auto finish = [input, st]() {
+      const auto replug = [&]() {
+        for (const auto i : st->parked) {
+          auto &g = input->gamepads[i];
+          if (!g.parked || g.id >= 0) {
+            continue;
+          }
+          const int rid = alloc_id(gamepadMask);
+          if (rid < 0) {
+            continue;
+          }
+          if (platf::alloc_gamepad(platf_input, {rid, (uint8_t) i}, g.arrival, input->feedback_queue)) {
+            free_id(gamepadMask, rid);
+            continue;
+          }
+          g.id = rid;
+          g.parked = false;
+        }
+      };
+      int id = alloc_id(gamepadMask);
+      if (id >= 0) {
+        platf::gamepad_arrival_t arrival {LI_CTYPE_XBOX, 0, 0};
+        if (platf::alloc_gamepad(platf_input, {id, VR_PAD_CONTROLLER_NUMBER}, arrival, input->feedback_queue)) {
+          free_id(gamepadMask, id);
+          id = -1;
+        }
+      }
+      std::lock_guard lk(st->mtx);
+      if (id >= 0 && st->abandoned) {
+        BOOST_LOG(warning) << "[VIPLE-VR-PADMODE] virtual pad " << id << " was ready after the caller gave up - removing it"sv;
+        free_gamepad(platf_input, id);
+        id = -1;
+      }
+      if (id < 0) {
+        replug();
+      }
+      st->delivered = true;
+      st->result.set_value(id);
+    };
+
+    task_pool.push([input, st, finish]() {
       // §VR-PADMODE-SLOT：先拔掉從沒送過輸入的 client 手把，讓 padmode 的手把拿到 XInput 第 0 格
-      bool parked_any = false;
       for (size_t i = 0; i < input->gamepads.size(); ++i) {
         auto &g = input->gamepads[i];
         if (g.id < 0 || g.seen_input) {
@@ -2360,25 +2433,22 @@ namespace input {
         g.id = -1;
         g.parked = true;
         g.gamepad_state = {};
-        parked_any = true;
+        st->parked.push_back(i);
       }
-      if (parked_any) {
-        std::this_thread::sleep_for(200ms);  // 等 XInput 收回那一格再插新的
+      if (st->parked.empty()) {
+        finish();
+      } else {
+        task_pool.pushDelayed(finish, 200ms);  // 等 XInput 收回那一格再插新的
       }
-      const int id = alloc_id(gamepadMask);
-      if (id < 0) {
-        return -1;
-      }
-      platf::gamepad_arrival_t arrival {LI_CTYPE_XBOX, 0, 0};
-      if (platf::alloc_gamepad(platf_input, {id, VR_PAD_CONTROLLER_NUMBER}, arrival, input->feedback_queue)) {
-        free_id(gamepadMask, id);
-        return -1;
-      }
-      return id;
     });
     if (fut.wait_for(2s) != std::future_status::ready) {
       BOOST_LOG(warning) << "[VIPLE-VR-PADMODE] task pool busy, virtual pad allocation timed out"sv;
-      return -1;
+      std::lock_guard lk(st->mtx);
+      if (!st->delivered) {
+        st->abandoned = true;  // 任務之後看到這個旗標會自己把手把收掉
+        return -1;
+      }
+      // 剛好在逾時的同時完成：結果照用
     }
     return fut.get();
   }

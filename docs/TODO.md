@@ -90,8 +90,25 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 1. **G2 2D 每段延遲**：盤點現有量測（client 效能疊層的網路延遲／host 處理／解碼／算圖／佇列、test_fruc_30s），補成每 10 秒一行的 log，三個平台一致。**狀態：完成（client 2.0.82）**——`[VIPLE-2D-PERF]`：Qt 在 ffmpeg.cpp（Pacer 加 onRendered 回呼取樣，「收到→顯示」因 FFmpeg 7 移除 reordered_opaque 暫印 n/a）、Android 在 MediaCodecDecoderRenderer（logcat 標籤 com.limelight.LimeLog）。REMNANT 實測：**Windows** 133 fps、host 4.9／解碼 0.37／排隊 0.2（p95 3.2）／算圖 1.8 ms；**Android Pixel 5** 60 fps、host 2.1／**解碼 9（p95 13～15）／排隊 13（p95 15.6）／收到→交出 22（p95 28～31）ms**——Android 用戶端多出約 20 ms，第 3、4 項先做 Android。**更正（同日）**：那場 Pixel 5 開著補幀（host 45 fps → GLES 補成 2 倍、90 Hz）；**關補幀**對照：90 fps、解碼 7.4（p95 9.5）、解出→交出 1.1（p95 2.0）、**收到→交出 8.7（p95 11）ms**。補幀多出的約 13 ms 大多是補幀本身（先顯示中間幀再顯示真實那張、每次 swap 等 vsync），解碼迴圈被卡住只佔約 1.6 ms——把補幀移到獨立執行緒不划算。Pixel 5 已選 `c2.qti.hevc.decoder.low_latency`（FEATURE_LowLatency 生效），7.4 ms 是硬體解碼本身。
 2. **2D ABR 塞車反應**：把收／送落差直接降的規則用到 2D 的 AIMD（2D 沒有每幀收包報告，看能不能用現有回報代替）。**狀態：查明兩個問題（11-05 REMNANT）**——① 2D 降碼一律 reset＋IDR（video.cpp `isDecrease && !config.vrProfile`，原本為了快速收斂），等於網路正塞時多送一張大 IDR；VR 早已改平滑降碼＋intra refresh。② 降完回升慢：Android 開場掉包 20.6→8.7 Mbps 後每 5 s 才 +2 Mbps，約 27 s 才回到 19 Mbps。**下一步**：先做 2D 的限速／斷線注入（VR 有 `vr_multilink_fault`，2D 沒有），才能 A/B「降碼 IDR vs 平滑」與回升速度；區網自然塞車一場只有一兩次，不夠比。**已做（host 2.0.85）**：`scripts/net/host_throttle.sh`（Windows QoS 原則限制 viplestream-server.exe 出口，只存在記憶體）＋`scripts/net/ab_2d_throttle.sh`（Desktop＋REMNANT、1080p120、上限 50 Mbps，第 30 s 起限 15 Mbps 30 s）。A/B（各一場）：限速第 2、3 個 10 s 掉幀 A 送 IDR 238／159、B 平滑 158／236、**C 平滑＋延遲修正 0／0（fps 116～123）**、D 再加快回升 6／0；解除後回到約 37～43 Mbps：C 約 33 s → **D 約 13 s**。修正：① 2D 的延遲趨勢判斷蓋掉了舊的絕對門檻，佇列塞滿後延遲停在 300～400 ms 不再上升＝趨勢 normal 照樣回升 → 兩者任一成立都算；② `abr_cut_idr` 預設改 disabled（平滑降碼）；③ 延遲回到基線（多不到 20 ms）時 3 輪就升、加幅 max(上限 5%, 目前 15%)。待看：host 處理時間有幾個 10 s 從 3.9 跳 7.9 ms（與這些修改無關）；Android／Linux client 與 Tailscale 遠端路徑也要跑同一組。
 3. **呈現路徑排隊**：Windows（D3D11 flip model、waitable swapchain、V-Sync 關時的節拍）、Linux（Vulkan／EGL present mode）、Android（MediaCodec 低延遲旗標 KEY_LOW_LATENCY 與廠商選項、Surface 直出、Choreographer 節拍）。**狀態：部分查明（11-05）**——Windows 已是 flip model＋最大排隊 1 格＋waitable＋允許撕裂，用戶端解碼＋排隊＋算圖合計約 2.4 ms；Android 預設「最低延遲」直接 release、排隊 1.1 ms。剩下：Exynos 的低延遲鍵只套 H.264（要擴到 HEVC／AV1，沒有 Exynos 手機可驗）、Choreographer 執行緒優先權（只影響「平衡」模式）。設定頁應註明補幀會多約 13 ms 延遲。
+3a. **Windows client 節拍器固定多等約 7 ms（2026-11-11 查到、未解）**：1080p120、顯示器 120 Hz、V-Sync＋節拍開。新增的 `[VIPLE-PACER10]`（2.0.131）把「佇列」拆成兩段：等垂直同步交接（pace）幾乎每一場都是 p50 6.5～7 ms、p95 7.3 ms，交接後等繪製（rend）約 0.02 ms。兩台顯示器的時脈各走各的，等待應該每場隨機落在 0～8.3 ms，實際卻幾乎固定——解碼完成的時間點像是被垂直同步牽著走（總在垂直同步後 1.3～1.8 ms）。另有一場 74% 的畫面在 pacing 佇列多排一整格（pace p50 12.7 ms；`at vsync: one=301 more=842`，500 ms 的寬鬆丟幀規則清不掉）。**還沒查的**：解碼執行緒是不是在等繪製端釋放東西（解碼表面池＝參考幀數＋3，Pacer 的 deferred free 要等下一張畫完才還一張）、`[VIPLE-PACER-SEQ]` 逐幀序列對照 host 出幀時間、關掉節拍或 V-Sync 的對照。**量測限制**：使用者用遠端桌面連著開發機時，解碼與繪製時間會被拉高到幾十 ms，那種場次不能用。host 端同一天已修：§CAP-PHASE（`capture_phase_lock`，擷取節拍貼著畫面出現的時間，host 端時間從 2.7～7.1 ms 漂移變成穩定 3.8～4.2 ms）。
 4. **解碼端**：各平台硬體解碼的輸出延遲（Android 解碼器常多緩衝 1～2 張）、零複製。**狀態：未開始**
 5. **輸入延遲**：滑鼠鍵盤與手把從 client 到 host 的路徑（批次、Nagle、優先權）。**狀態：相對滑鼠完成（2.0.89）**——量測：client `--input-test`（每 4 ms ±1 px）＋host `[VIPLE-INPUT10]`（到達間隔 p50/p95/p99/max、>20 ms 次數；順帶修好：加密控制通道的輸入從沒經過舊的 [VIPLE-INPUT-GAP] 診斷）。限速 15 Mbps A/B：可靠傳送在解除限速時卡 279／526 ms，不等 ACK（`--input-test-unreliable`）就沒有 → 新增累計位移封包 `SS_MOUSE_MOVE_REL_CUM_MAGIC 0x5500000A`（{seq, cumX, cumY}，UNSEQUENCED、每筆送兩份，host 依 seq 去重、位移＝累計差），host 宣告 `<VipleStreamInput>1` 才用。G 組整場 100 s **超過 20 ms 的間隔 0 次、最大 16 ms**。剩下：按鍵／鍵盤／手把按鈕仍是可靠傳送（漏一個按下或放開會錯，要另外設計）；Android client 用同一份 common-c，重建就會用新封包（還沒在手機上驗）。
+
+### 2026-11-11 這一批（2.0.126～134）待驗與待做
+- **§VR-ABR-TRIM-PROP**（品質過剩時調降幅度隨 QP 落差加大、畫質不足時補回調降前的碼率）：頭盔無人實測開場 84 → 23 Mbps 約 30 秒、QP 穩在 15～18、每條鏈路 28.6 Mbps。**待驗**：載入畫面把碼率收過頭之後的回補只有單元測試驗過；配戴看畫質。
+- **§VR-EXIT-FAST**（PCVR 遊戲行程一結束就收串流）：中途關掉 host 的桌球，1.1 秒後頭盔正常結束（原本 5.1 秒）。**還沒做**：頭盔介面重開 XR 的 2.7 秒（`XrShell::reopenXr` 整個重建 instance＋Vulkan＋session；要在串流期間保留 instance，改動大、要配戴驗）。
+- **§CAP-PHASE**（`capture_phase_lock`，桌面擷取節拍貼著畫面出現的時間）：host 端時間穩定在 3.8～4.2 ms。Web UI 沒有這個選項（只有設定檔）。client 端固定多等的 7 ms 見 §LAT-2D 3a。
+- **`vr_gpu_priority` 預設改 realtime**（使用者 11-11 定案）：桌球一場 host 端 3.95 → 3.15 ms、MTP 44.5 → 43.1 ms。**待驗**：GPU 吃滿的遊戲、配戴。
+- **§MEDIA-DEFAULT**（影片分享預設只開放「公用影片」／`~/Videos`，整台 PC 要寫 `media_dirs = *`）：只有建置驗過，還沒從頭盔逛過；使用者的 host 還沒設 `media_dirs`。
+- **半速＋補幀支援分塊**（2.0.129）、**§DEC-STUCK-RESET／FFmpeg v4l2m2m LAST 緩衝區補丁**（2.0.126～129）：無人驗過，待配戴。
+- **2D 測試內容**：REMNANT 啟動後停在標題畫面，要跑本機的 `scripts/net/remnant_enter.sh` 進到遊戲；11-11 的 2D 五組設定矩陣量到的是標題畫面，要重跑。
+
+### §REVIEW-1111 grok 審查（2026-11-11；索引在本機 `temp/grok_review_1111/INDEX.md`）
+三輪（正確性／效率／安全）×34 批，額度在第 65 份用完：283 項（高 64、中 142、低 77）。**沒審到**：三輪都缺 `xrcontext.cpp`、`xrvideo.cpp`、`xrinput.cpp`、`xrvrcontrollers.cpp`、common-c（G027～G034）；效率輪缺 G026 之後、安全輪缺 G016 之後。
+- **已修（2.0.132～133，host 已部署、頭盔 dev 已裝）**：RTSP `packetSize`／`minRequiredFecPackets`／音訊 `packetDuration` 範圍檢查（除以零）＋FEC 片數上限；輸入封包入佇列時補滿長度、UTF-8 文字長度夾限；`config.cpp`（值的尾端空白、`to_bool` 大小寫與含 1 就算開、`string_restricted_f` 無聲沿用預設、port 下限）；配對 PIN 在 session 被刪後仍使用；Steam 帳號切換任務在鎖著時解構；`quit_steam_game` 用舊 PID 強制結束（改用 handle）；`queue_refresh_start` 第二份沒有上限；半速時 intra-refresh 起點多報一幀；`idle_quit_steamvr` 不看新的 `start()`；解碼執行緒被放生後醒來用到已釋放物件（§DEC-ABANDON：醒來就原地停住、Pacer 照常刪、卡住計數隔一分鐘歸零）；helper 的 `nmcli` 固定英文；每眼解析度選單清單外的值只改畫面不改設定；效能浮層每秒在解碼執行緒做 TCP 連線。
+- **高、還沒修**（依報告編號）：bugs-G002#2／perf-G002#1（`vr_pad_alloc` 逾時後手把沒人擁有、輸入執行緒睡 200 ms）；bugs-G003#3（`/cancel`／takeover 沒作廢還沒被取走的 RTSP launch）、#4（網路測試斷線後 `/resume` 永遠 503）；bugs-G005#1（`streaming_will_start`／`stop` 並行）；bugs-G007#1（`refresh()` 串流中 move-assign `proc`）、#2（用過期的 `running()` 再 `terminate()`）；bugs-G008#2（更新等 UAC 逾時後 updater 還活著）；bugs-G010#1（系統匣選單開著時銷毀 HMENU）；perf-G010#1（半速分頻用 pop 次數計相位）；perf-G007#1（麥克風第一則在控制執行緒同步等 WASAPI）；perf-G009#1（hot-add 每秒在控制執行緒列舉網卡）；perf-G015#1（補緩衝 burst 在 60 Hz／半速移不滿一格）；bugs-G018#1（輪詢執行緒改 `NvComputer` 的 QString 沒拿鎖）；bugs-G023#1（直連 `/launch` 失敗改走 relay 時 VR 狀態留著）；bugs-G024#1（ResizeBuffers 與繪圖執行緒同用 immediate context）；bugs-G025#2（h264bitstream 解析 SPS 沒有上限）；bugs-G026#2（vrnetmode 交還 Wi-Fi 時沒通知 host）；perf-G019#1（影片模式的載入遮罩整段留著）；perf-G023#1（每則震動 6 次配置＋事件）；perf-G024#1（NCNN 補幀 Present 前同步讀回）；perf-G025#2（v4l2m2m 參數集一變就拆解碼器）；sec-G003#2（relay 進來的 `/launch` 沒有配對身分）、#3（未配對 `/pair` 堆積）、#4（HTTP 本體沒有上限）；Android：bugs-G015#1（備份帶走私鑰）、G016#1～#3（`/cancel` 時序與 relay）、G017#1（解碼器重建失敗 NPE）、perf-G016#1、perf-G017#1～#2、sec-G015#1（ShortcutTrampoline 匯出）；建置腳本：bugs-G001#3（aarch64 改系統標頭）。
+- **要使用者決定的**：perf-G001#1／G004#1 `vr_gpu_priority` 預設改 realtime（先前定案是等配戴驗）；sec-G001#2／G003#1 影片分享預設整碟（已配對 client 可讀服務帳號讀得到的檔案）；sec-G001#1 還沒設 Web UI 密碼時區網內任何人可搶先設定（上游行為）。
+- 中、低共 219 項還沒逐項看。
 
 ### §VR-FOVEA-TILES 注視點＝每眼兩塊影像（2.0.121；設定頁「關／小／中／大」2.0.122）
 每眼送「整個視野縮小的一塊」＋「視線所在位置原生細節的一塊」，不做幾何變形；協定見 `docs/vr_protocol.md`（§VR-FOVEA-TILES），
@@ -100,8 +117,14 @@ log 見 `docs/log_tags.md`，host 設定 `vr_fovea_tiles`。11-11 使用者配�
 large 10.9 W（MTP 多約 2 ms）；同條件舊做法（分段曲線）單一大圖 13.1 W、兩圖層 10.5 W；Steam 內建串流 9.5～11.8 W。
 - **待驗**：設定頁選 medium／large 的配戴比較（只做過無人量測）；
   同位置同遊戲和 Steam 內建串流的配戴對照（使用者）。
-- **限制（待做）**：「半速＋補幀」時不用分塊（補幀還不認得這種排法），退回分段曲線——周邊較糊、交界看得出來；這時設定頁的
-  小／中／大只有開關的作用。dev 的 `--vr-fovea-single-layer`、`--vr-unwarp-rgb` 也一樣。
+- **「半速＋補幀」也用分塊（client 2.0.129，未提交；頭盔 dev 已裝）**：swapchain 兩倍高，上半是這一張、下半是合成的那一張，
+  兩半同樣的分塊排法；位移場只從上排（全視野、沒有變形）估，注視點那塊的像素換算到它在全視野裡的位置再取位移。
+  頭盔無人驗過（`temp/launchertest/ml/tsynth_1111/`，模擬手部擺動＋模擬視線）：每 10 秒 720 張真的＋720 張合成、0 張被蓋掉、
+  MTP 37.4 ms、合成那一批 GPU 2.8 ms；存下來的畫面上下兩半排法一致，差異只在會動的球拍，兩塊的位移比例對得上。
+  舊的（不分塊）補幀路徑重構後也跑過、正常。**沒有配戴看過**（補幀的殘影、注視點那塊邊緣只有戴上才看得出來）。
+  dev 的 `--vr-fovea-single-layer`、`--vr-unwarp-rgb` 仍然不宣告分塊。
+  存畫面（`--xr-dump-frame`）每次會讓繪製停約 0.7 秒，量流暢度時不要帶。
+  另外看到一次：shader 編譯失敗的當下程式直接當掉（主執行緒在 libdbus，11-11 `ts1`），原因沒查。
 - **§VR-FOVEA-QP 周邊那塊量化加粗（server 2.0.124，`vr_fovea_periph_qp`，預設 0＝不分；未提交）**：11-11 錄下 Steam 內建串流的
   位元流看結構——1152×4608、Main10、每格 4 個 slice 剛好一塊一個，注視點那塊 QP 約 18、全視野那塊 QP 約 44，
   位元八成五在注視點那塊；頭盔解碼快就是因為周邊幾乎沒有東西要解（解碼核心時脈兩邊都是最高的 600 MHz，不是差在那）。
@@ -123,8 +146,17 @@ large 10.9 W（MTP 多約 2 ms）；同條件舊做法（分段曲線）單一�
   同場順便量的兩件事（`temp/launchertest/ml/buf_1111/`）：顯示緩衝 0 格 MTP 36.1 ms 但每 10 秒 1～13 次重複＋跳過（1 格是 0）→ 維持 1 格；
   關掉麥克風 9.16 W 對 9.22 W，沒有可量到的差別 → 「沒人收音就不送」不做。
   「大」剩下比 Steam 多的約 1.1 W 不是位元造成的（差值 12→24 功耗不再降）。
-- **偶發：開場解碼器只出第一張就沒有輸出（11-11 一場，`qp_1111/novideo_*`）**：`meta-miss: frame pts=0` 之後整場 `video recv=0`、
-  網路照收 74 Mbps；跟 QP 差分圖無關（同設定重跑正常）。還沒查原因；使用者遇到會是整場黑畫面。
+- **§DEC-STUCK-RESET 頭盔硬體解碼器開場卡死 → 自動重建（client 2.0.127，未提交；頭盔 dev 已裝）**：11-11 一場整場沒畫面
+  （`qp_1111/novideo_*`，11-09 也遇過）＝解碼執行緒在第二個封包卡在 FFmpeg v4l2m2m 送輸入後的不限時 poll，iris 一直不回應；
+  看門狗原本只每 5 秒報一次。現在卡在送封包 1.5 秒就走既有的解碼器重建（放掉卡住的執行緒、另開一個解碼器、要 IDR），
+  連續 4 次還卡就放棄。用 `--vr-inject-dec-stuck 30` 模擬（執行緒永遠不回來）驗過：約 2 秒恢復、之後整場正常，
+  舊的那個解碼器實例留著不關也不影響新的。
+  **根因（11-11 補上，2.0.128）**：FFmpeg v4l2m2m 在來源變更事件當下就送 `V4L2_DEC_CMD_START`，有時比驅動交出「標記 LAST 的空
+  capture 緩衝區」還早、被丟掉，之後兩邊互等；那張空緩衝區還被當成影格（失敗那場開場多一張 `meta-miss: frame pts=0`）。
+  在我們自己建的 FFmpeg 補上（`moonlight-qt/scripts/steamframe/flatpak/ffmpeg-v4l2m2m-last-buffer.patch`）：不是收尾時拿到 LAST
+  緩衝區就在那裡再送一次 START、空的還給驅動。連續 14 場短場次（`scripts/vr/startup_soak.sh`）：13 場沒遇到，第 14 場遇到了
+  （log `capture buffer 0 outside draining: last=1 bytesused=0 -> decoder START sent`），那一場照常出畫面、看門狗沒有動作。
+  樣本只有這一次；自動重建留著當保險。
 - **之後可選**：三層金字塔（同像素量下交界更淡）、NVENC 外部移動向量提示（注視點那塊跳動時幾乎不花碼率）、周邊銳化。
 - **量功耗的陷阱**：無人場次要 client log 有 `state=FOCUSED` 才能比（停在 VISIBLE＝頭盔自己的選單開著，多 1～2 W）；
   11-10 下午那批「比 Steam 多 4.5 W」就是這樣高估的，以上面的數字為準。`hs_run.sh` 沒拿到焦點會印 `!! NOT FOCUSED`。

@@ -1,0 +1,37 @@
+--- a/libavcodec/v4l2_context.c	2026-11-11 11:05:42.398745715 +0800
++++ b/libavcodec/v4l2_context.c	2026-11-11 11:05:42.398826751 +0800
+@@ -416,6 +416,34 @@
+             memcpy(avbuf->planes, planes, sizeof(planes));
+             avbuf->buf.m.planes = avbuf->planes;
+         }
++
++        /* VipleStream: a stateful decoder marks the end of the old sequence around a source change with a capture
++         * buffer flagged LAST (usually empty). While we are not draining that buffer is where decoding has to be
++         * resumed with V4L2_DEC_CMD_START: the START sent earlier from the source-change event can arrive before
++         * the driver reached this point and is then lost, after which the driver waits for us and we wait for it
++         * (seen on Qualcomm iris: no picture for the whole session). An empty buffer is also not a picture, so
++         * give it back to the driver instead of returning it as a frame. */
++        if (!V4L2_TYPE_IS_OUTPUT(ctx->type) && !ctx_to_m2mctx(ctx)->draining) {
++            int bytesused = V4L2_TYPE_IS_MULTIPLANAR(buf.type) ?
++                            buf.m.planes[0].bytesused : buf.bytesused;
++            int last = 0;
++#ifdef V4L2_BUF_FLAG_LAST
++            last = !!(buf.flags & V4L2_BUF_FLAG_LAST);
++#endif
++            if (last || bytesused == 0) {
++                int start_ret = last ? v4l2_start_decode(ctx) : 0;
++                av_log(logger(ctx), AV_LOG_WARNING,
++                       "%s buffer %d outside draining: last=%d bytesused=%d -> decoder START %s%s\n",
++                       ctx->name, buf.index, last, bytesused,
++                       last ? (start_ret ? "failed" : "sent") : "not needed",
++                       bytesused == 0 ? ", empty buffer returned to the driver" : "");
++                if (bytesused == 0) {
++                    if (ff_v4l2_buffer_enqueue(avbuf) < 0)
++                        av_log(logger(ctx), AV_LOG_WARNING, "%s could not requeue the empty buffer\n", ctx->name);
++                    return NULL;
++                }
++            }
++        }
+         return avbuf;
+     }
+ 

@@ -125,6 +125,28 @@ std::atomic<uint64_t> s_DecPhaseSinceUs {0};
 std::atomic<uint64_t> s_LastFrameOutUs {0};
 std::atomic<int> s_LiveDecodedFrames {0};
 std::atomic<int> s_LiveDecodedMax {0};
+// §DEC-STUCK-RESET（2026-11-11）：連續幾次因為解碼執行緒卡在送封包而重建解碼器（解出任何一張就歸零）
+std::atomic<int> s_StuckResets {0};
+std::atomic<uint64_t> s_LastStuckUs {0};  // 上一次判定卡住的時間；隔很久才又卡住＝另一場，不算連續
+
+// §DEC-ABANDON（2026-11-11，§REVIEW-1111）：解碼執行緒卡在硬體解碼器裡被放生之後，FFmpegVideoDecoder 物件會被刪掉。
+// 那條執行緒如果之後從 avcodec_send_packet／avcodec_receive_frame 醒來，接下去碰的全是已經釋放的成員。
+// 做法：每條解碼執行緒開跑時把「這個實例的放生旗標」（shared_ptr，獨立於物件）存進 thread_local；會卡住的 FFmpeg 呼叫
+// 一返回就先看旗標，被放生了就在原地永遠睡下去，不再碰 this（執行緒本來就已經 detach，行程結束時跟著消失）。
+// 不是解碼執行緒呼叫的（測試解碼在主執行緒）thread_local 是空的，什麼都不做。
+thread_local std::shared_ptr<std::atomic<bool>> t_DecAbandoned;
+inline void parkIfAbandoned()
+{
+    if (t_DecAbandoned && t_DecAbandoned->load(std::memory_order_acquire)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-DEC] an abandoned decoder thread came back from the hardware decoder - parking it for good");
+        for (;;) {
+            SDL_Delay(60000);
+        }
+    }
+}
+// dev：--vr-inject-dec-stuck 已經觸發過（整個行程只卡一次，重建後的解碼器照常運作）
+std::atomic<bool> s_InjectStuckDone {false};
 
 inline void setDecPhase(int phase)
 {
@@ -789,7 +811,9 @@ void FFmpegVideoDecoder::reset()
     if (m_DecoderThread != nullptr) {
         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 1);
         LiWakeWaitForVideoFrame();
-        for (int waited = 0; !m_DecoderThreadExited.load() && waited < 3000; waited += 10) {
+        // §DEC-STUCK-RESET：看門狗已經確認它卡在送封包（1.5 秒沒回來）時不必再等 3 秒，給 200 ms 就放掉
+        const int joinLimitMs = m_DecoderKnownStuck.load() ? 200 : 3000;
+        for (int waited = 0; !m_DecoderThreadExited.load() && waited < joinLimitMs; waited += 10) {
             SDL_Delay(10);
         }
         if (m_DecoderThreadExited.load()) {
@@ -798,12 +822,16 @@ void FFmpegVideoDecoder::reset()
         else {
             abandoned = true;
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-DEC] decoder thread did not stop within 3 s (stuck in the hardware decoder) - leaving it and "
-                        "its decoder objects behind (frames in=%d out=%d)", m_FramesIn, m_FramesOut);
+                        "[VIPLE-DEC] decoder thread did not stop within %d ms (stuck in the hardware decoder) - leaving it and "
+                        "its decoder objects behind (frames in=%d out=%d)", joinLimitMs, m_FramesIn, m_FramesOut);
             SDL_DetachThread(m_DecoderThread);
+            // §DEC-ABANDON：那條執行緒之後醒來就原地停住，不會再碰這個物件；之後的執行緒用新的旗標
+            m_AbandonFlag->store(true, std::memory_order_release);
+            m_AbandonFlag = std::make_shared<std::atomic<bool>>(false);
         }
         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 0);
         m_DecoderThread = nullptr;
+        m_DecoderKnownStuck.store(false);
     }
 
     // §SF-FREEZE：放在解碼執行緒 join 之後停，解碼執行緒卡住時 watchdog 會繼續回報
@@ -832,9 +860,10 @@ void FFmpegVideoDecoder::reset()
     // 靜默失效。它只在 initialize() 開頭重建，decoder 解構時才釋放（印 final 統計）。
     m_VrConsecutiveDecodeErrors = 0;
 
-    if (!abandoned) {
-        delete m_Pacer;
-    }
+    // §DEC-ABANDON：Pacer 只有我們自己的程式會用（submitFrame），放生的執行緒醒來就停住、不會再送幀，所以照常刪掉。
+    // 原本放生時留著不刪，它的繪製執行緒還在跑、還會寫這個物件的統計並呼叫 onRendered（捕捉了 this）——物件隨後就被釋放。
+    // 解碼器 context 與 renderer 仍然留著：卡在 FFmpeg 裡的那條執行緒返回前還會用到它們。
+    delete m_Pacer;
     m_Pacer = nullptr;
 
     {
@@ -1785,8 +1814,16 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             const char* connIcon = u8"\u2753"; // ❓
 
             if (computer) {
-                NvComputer::ReachabilityType reach = computer->getActiveAddressReachability();
+                // §REVIEW-1111：getActiveAddressReachability 會對主機做一次 TCP 連線（最多等 3 秒）再列舉網卡，而這裡是
+                // 解碼執行緒、每秒呼叫一次——浮層開著時每秒有一幀卡在這後面。連線類型只跟位址有關，位址沒變就用上次的結果。
                 QString activeAddr = computer->activeAddress.address();
+                static QString s_ReachAddr;
+                static NvComputer::ReachabilityType s_Reach = NvComputer::RI_UNKNOWN;
+                if (s_ReachAddr != activeAddr) {
+                    s_Reach = computer->getActiveAddressReachability();
+                    s_ReachAddr = activeAddr;
+                }
+                NvComputer::ReachabilityType reach = s_Reach;
                 bool isStunAddr = (!computer->stunAddress.isNull() &&
                                    activeAddr == computer->stunAddress.address());
 
@@ -3621,6 +3658,9 @@ void FFmpegVideoDecoder::freezeWatchdogProc()
     uint64_t lastReportUs = 0;
     uint64_t lastBeatUs = LiGetMicroseconds();
     uint64_t frozenSinceUs = 0;
+    const uint64_t kStuckResetUs = 1500000;  // §DEC-STUCK-RESET
+    const int kMaxStuckResets = 4;
+    bool stuckResetAsked = false;  // 這個解碼器實例只要求重建一次（重建後是新的實例、新的看門狗）
 
     while (!SDL_AtomicGet(&m_FreezeWatchdogQuit)) {
         SDL_SemWaitTimeout(m_FreezeWatchdogWake, 250);
@@ -3630,6 +3670,42 @@ void FFmpegVideoDecoder::freezeWatchdogProc()
         const uint64_t now = LiGetMicroseconds();
         const uint64_t lastOut = s_LastFrameOutUs.load(std::memory_order_relaxed);
         const int live = s_LiveDecodedFrames.load(std::memory_order_relaxed);
+
+        // §DEC-STUCK-RESET（2026-11-11）：解碼執行緒卡在「送封包」超過 1.5 秒就重建解碼器。
+        // 頭盔的硬體解碼器（v4l2m2m／iris）偶爾在開場第二個封包卡住：FFmpeg 送完輸入後對驅動做不限時的 poll，驅動
+        // 一直不回應，整場沒有畫面（11-09、11-11 各遇到一次；看門狗每 5 秒報一次「no first frame yet」但沒有動作）。
+        // 送封包正常是幾毫秒，1.5 秒不回來就是卡死了。走既有的 SDL_RENDER_DEVICE_RESET：reset() 等不到執行緒結束會
+        // 放掉它（§DEC-JOIN-TIMEOUT），再建一個新的解碼器並要 IDR。只看「送封包」這個相位——等輸出的相位在串流
+        // 停住時本來就會久留。連續 4 次還是卡住就不再試（每次會留下一個放掉的執行緒與裝置代碼）。
+        if (!stuckResetAsked && m_CurrentTestMode == TestMode::NoTesting) {
+            const int dp = s_DecPhase.load(std::memory_order_relaxed);
+            const uint64_t since = s_DecPhaseSinceUs.load(std::memory_order_relaxed);
+            if (dp == DP_SUBMIT && since != 0 && now > since && now - since >= kStuckResetUs) {
+                stuckResetAsked = true;
+                // §REVIEW-1111：計數是行程全域的。超過一分鐘沒卡過＝已經是另一段（另一場串流），重新算；
+                // 否則某一場用完 4 次之後，同一個行程之後的串流第一次卡住就直接放棄。
+                const uint64_t lastStuck = s_LastStuckUs.exchange(now, std::memory_order_relaxed);
+                if (lastStuck != 0 && now > lastStuck && now - lastStuck > 60000000ull) {
+                    s_StuckResets.store(0, std::memory_order_relaxed);
+                }
+                const int n = s_StuckResets.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= kMaxStuckResets) {
+                    m_DecoderKnownStuck.store(true);
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-FREEZE] decoder stuck submitting a packet for %llu ms (in=%d out=%d) - "
+                                "recreating the decoder (attempt %d of %d)",
+                                (unsigned long long)((now - since) / 1000), m_FramesIn, m_FramesOut, n, kMaxStuckResets);
+                    SDL_Event event;
+                    event.type = SDL_RENDER_DEVICE_RESET;
+                    SDL_PushEvent(&event);
+                }
+                else {
+                    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                 "[VIPLE-FREEZE] decoder stuck submitting a packet again after %d recreations - giving up",
+                                 kMaxStuckResets);
+                }
+            }
+        }
 
         // 這個實例還沒出過任何一幀：只看相位——卡在送封包／收幀超過門檻也要報
         // （例如重建後的 decoder 在第一張 IDR 就卡住）
@@ -3732,7 +3808,9 @@ bool FFmpegVideoDecoder::pyroWaveSkipStale(VIDEO_FRAME_HANDLE handle, PDECODE_UN
 
 int FFmpegVideoDecoder::decoderThreadProcThunk(void *context)
 {
+    t_DecAbandoned = ((FFmpegVideoDecoder*)context)->m_AbandonFlag;  // §DEC-ABANDON
     ((FFmpegVideoDecoder*)context)->decoderThreadProc();
+    parkIfAbandoned();
     ((FFmpegVideoDecoder*)context)->m_DecoderThreadExited.store(true);  // §DEC-JOIN-TIMEOUT
     return 0;
 }
@@ -3755,6 +3833,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
     // §VR-DECPOLL2：VR（真 XR）時「沒有輸出也沒有新輸入」改成每 100 µs 問一次（原本 SDL_Delay(1)：頭盔 HEVC 幾乎每幀都
     // 睡一次、recvWait p50 1065 µs＝等滿 1 ms 才拿到早就解好的幀）。平面串流照舊 1 ms
     const uint32_t vrPollUs = m_VrDropOnMetaMiss ? 100u : 0u;
+    const int vrInjectStuckAt = m_VrDropOnMetaMiss && StreamingPreferences::get(nullptr) != nullptr
+                                    ? StreamingPreferences::get(nullptr)->vrInjectDecStuckAt : 0;
     // VR：送一個 decode unit 進解碼器，順便記佇列等待與送出本身的時間
     auto vrTimedSubmit = [&](PDECODE_UNIT du) -> int {
         if (!m_VrDropOnMetaMiss) {
@@ -3762,6 +3842,14 @@ void FFmpegVideoDecoder::decoderThreadProc()
         }
         const uint64_t t0 = LiGetMicroseconds();
         const uint64_t enq = du->enqueueTimeUs;
+        // dev（--vr-inject-dec-stuck N）：第 N 個封包不送、這條執行緒永遠不回來，連結束要求也不理——跟真的卡在驅動裡
+        // 一樣，用來驗 §DEC-STUCK-RESET 的重建與 §DEC-JOIN-TIMEOUT 的放生
+        if (vrInjectStuckAt > 0 && m_FramesIn + 1 >= vrInjectStuckAt && !s_InjectStuckDone.exchange(true)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-FREEZE] (dev) injected: decoder thread hangs on packet %d", m_FramesIn + 1);
+            for (;;) {
+                SDL_Delay(1000);
+            }
+        }
         const int st = submitDecodeUnit(du);
         const uint64_t t1 = LiGetMicroseconds();
         vrPoll.lastSubmitUs = t1;
@@ -3862,6 +3950,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
                 }
                 else {
                     err = avcodec_receive_frame(m_VideoDecoderCtx, frame);
+                    parkIfAbandoned();  // §DEC-ABANDON
                 }
                 if (err == 0) {
                     SDL_assert(m_FrameInfoQueue.size() == m_FramesIn - m_FramesOut);
@@ -4043,6 +4132,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
 #ifndef Q_OS_WIN32
                     tagLiveDecodedFrame(frame);
                     s_LastFrameOutUs.store(LiGetMicroseconds(), std::memory_order_relaxed);
+                    s_StuckResets.store(0, std::memory_order_relaxed);  // §DEC-STUCK-RESET：有解出東西就不算連續卡住
 #endif
 
                     // Queue the frame for rendering (or render now if pacer is disabled)
@@ -4857,6 +4947,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     }
 
     err = avcodec_send_packet(m_VideoDecoderCtx, m_Pkt);
+    parkIfAbandoned();  // §DEC-ABANDON
     if (err < 0) {
         char errorstring[512];
         av_strerror(err, errorstring, sizeof(errorstring));

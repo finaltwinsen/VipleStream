@@ -226,6 +226,10 @@ private:
     SDL_atomic_t m_DecoderThreadShouldQuit;
     // §DEC-JOIN-TIMEOUT（2026-11-09）：解碼執行緒已經結束（reset() 等它最多 3 秒，卡在硬體解碼器裡就放生）
     std::atomic<bool> m_DecoderThreadExited{false};
+    // §DEC-STUCK-RESET（2026-11-11）：看門狗已確認解碼執行緒卡在送封包，reset() 不必等滿 3 秒
+    std::atomic<bool> m_DecoderKnownStuck{false};
+    // §DEC-ABANDON：這個實例的解碼執行緒被放生了沒有（獨立於物件的生命期，見 ffmpeg.cpp 的 parkIfAbandoned）
+    std::shared_ptr<std::atomic<bool>> m_AbandonFlag = std::make_shared<std::atomic<bool>>(false);
 
     // Data buffers in the queued DU are not valid
     QQueue<DECODE_UNIT> m_FrameInfoQueue;

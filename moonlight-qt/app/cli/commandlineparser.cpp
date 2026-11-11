@@ -741,6 +741,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                           "after --vr-netbench-secs seconds. Preferences are not saved");
     parser.addValueOption("vr-netbench-secs", "PCVR network test step length in seconds (default 75)");
     parser.addValueOption("vr-inject-drop", "(dev) N: drop every Nth decoded frame to test VR frame pairing");
+    parser.addValueOption("vr-inject-dec-stuck", "(dev) N: the decoder thread hangs on the Nth packet it submits (once), to test the stuck-decoder recovery");
     parser.addValueOption("vr-inject-loss", "(dev) N: inject a VR LOSS report every N seconds");
     parser.addFlagOption("vr-link-selftest", "(dev) PCVR multi-link: open a second link on the same network interface to exercise duplication and de-duplication. Not saved.");
     parser.addValueOption("vr-buffer-frames", "PCVR: hold this many extra frames on the headset (0, 1 or 2) to absorb network jitter, "
@@ -1242,6 +1243,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     if (parser.isSet("vr-inject-drop")) {
         preferences->vrInjectDropEvery = parser.getIntOption("vr-inject-drop");
+    }
+    if (parser.isSet("vr-inject-dec-stuck")) {
+        preferences->vrInjectDecStuckAt = parser.getIntOption("vr-inject-dec-stuck");
     }
     if (parser.isSet("vr-inject-loss")) {
         preferences->vrInjectLossSec = parser.getIntOption("vr-inject-loss");

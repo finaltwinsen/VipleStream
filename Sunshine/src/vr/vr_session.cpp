@@ -915,6 +915,11 @@ namespace vr {
     // 第二份延到下一次 drain（下一個 control tick，≥ 一次 enet_host_service 之後）：同一輪
     // 排進去的兩份會被 ENet 打包進同一個 datagram，那個 datagram 掉了就兩份一起掉
     std::lock_guard lk {outbox_mtx_};
+    // §REVIEW-1111：這一條原本沒有上限。client 連續送 RESEND 的 LOSS、而送出比收進來慢時（多連線的接收執行緒
+    // 與控制執行緒不是同一條），這裡會一直長。滿了就丟掉這一份——第一份已經排進 outbox_ 了。
+    if (outbox_next_.size() >= kOutboxMax) {
+      return;
+    }
     outbox_next_.push_back({std::move(tlv), false});
   }
 

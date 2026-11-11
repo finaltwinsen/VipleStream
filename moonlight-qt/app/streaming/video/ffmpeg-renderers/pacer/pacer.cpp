@@ -13,6 +13,7 @@
 
 #include <SDL_syswm.h>
 
+#include <algorithm>
 #include <atomic>
 
 // Limit the number of queued frames to prevent excessive memory consumption
@@ -228,6 +229,7 @@ int Pacer::renderThread(void* context)
 
 void Pacer::enqueueFrameForRenderingAndUnlock(AVFrame *frame)
 {
+    frame->duration = (int64_t)LiGetMicroseconds();  // §PACER-DIAG：交到繪製佇列的時間（這個欄位沒有別人用）
     dropFrameForEnqueue(m_RenderQueue);
     m_RenderQueue.enqueue(frame);
     FreezeDiag::s_RenderQueueDepth.store(m_RenderQueue.count(), std::memory_order_relaxed);
@@ -292,6 +294,11 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
         m_FrameQueueLock.lock();
     }
 
+    {
+        const int depth = m_PacingQueue.count();  // §PACER-DIAG
+        (depth == 0 ? m_DiagVsEmpty : depth == 1 ? m_DiagVsOne : m_DiagVsMore).fetch_add(1, std::memory_order_relaxed);
+    }
+
     if (m_PacingQueue.isEmpty()) {
         // Wait for a frame to arrive or for V-Sync to elapse. If V-Sync
         // elapses without a frame, just render the next image again.
@@ -300,6 +307,8 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
             m_FrameQueueLock.unlock();
             return;
         }
+
+        m_DiagVsLate.fetch_add(1, std::memory_order_relaxed);  // §PACER-DIAG
 
         if (m_Stopping) {
             m_FrameQueueLock.unlock();
@@ -310,6 +319,7 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
     // Place the first frame on the render queue
     enqueueFrameForRenderingAndUnlock(m_PacingQueue.dequeue());
 }
+
 
 bool Pacer::initialize(SDL_Window* window, int maxVideoFps, bool enablePacing)
 {
@@ -386,6 +396,43 @@ void Pacer::renderFrame(AVFrame* frame)
     // Count time spent in Pacer's queues
     uint64_t beforeRender = LiGetMicroseconds();
     m_VideoStats->totalPacerTimeUs += (beforeRender - (uint64_t)frame->pkt_dts);
+
+    // §PACER-DIAG（2026-11-11）：把「佇列」拆成兩段——等垂直同步交接（pace）、交接後等繪製執行緒（rend）——
+    // 並記交接當下 pacing 佇列裡還剩幾張、這一張是不是「垂直同步到了才來」的（late＝佇列是空的、等到它才交）。
+    {
+        const uint64_t handoff = (uint64_t)frame->duration;
+        if (handoff >= (uint64_t)frame->pkt_dts && beforeRender >= handoff && m_DiagN < kDiagMax) {
+            m_DiagPaceUs[m_DiagN] = (uint32_t)(handoff - (uint64_t)frame->pkt_dts);
+            m_DiagRendUs[m_DiagN] = (uint32_t)(beforeRender - handoff);
+            m_DiagN++;
+        }
+        if (m_DiagStartUs == 0) {
+            m_DiagStartUs = beforeRender;
+        }
+        if (beforeRender - m_DiagStartUs >= 10000000ull && m_DiagN > 0) {
+            {
+                // 這一窗最後 240 張的逐幀等待（0.1 ms 為單位），看多排的那一格怎麼來、怎麼走
+                char seq[240 * 4 + 8];
+                size_t o = 0;
+                for (uint32_t i = m_DiagN > 240 ? m_DiagN - 240 : 0; i < m_DiagN && o + 5 < sizeof(seq); i++) {
+                    o += (size_t)snprintf(seq + o, sizeof(seq) - o, "%u ", (m_DiagPaceUs[i] + 50) / 100);
+                }
+                seq[o] = 0;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PACER-SEQ] drops=%u %s", (unsigned)m_VideoStats->pacerDroppedFrames, seq);
+            }
+            std::sort(m_DiagPaceUs, m_DiagPaceUs + m_DiagN);
+            std::sort(m_DiagRendUs, m_DiagRendUs + m_DiagN);
+            auto q = [this](const uint32_t* v, double p) { return v[(size_t)(p * (m_DiagN - 1))] / 1000.0; };
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-PACER10] n=%u pace p05/p50/p95=%.2f/%.2f/%.2f ms rend p05/p50/p95=%.2f/%.2f/%.2f ms | at vsync: empty=%u one=%u more=%u late=%u | display=%d Hz stream=%d fps",
+                        m_DiagN, q(m_DiagPaceUs, 0.05), q(m_DiagPaceUs, 0.5), q(m_DiagPaceUs, 0.95),
+                        q(m_DiagRendUs, 0.05), q(m_DiagRendUs, 0.5), q(m_DiagRendUs, 0.95),
+                        m_DiagVsEmpty.exchange(0), m_DiagVsOne.exchange(0), m_DiagVsMore.exchange(0), m_DiagVsLate.exchange(0),
+                        m_DisplayFps, m_MaxVideoFps);
+            m_DiagN = 0;
+            m_DiagStartUs = beforeRender;
+        }
+    }
 
     // Render it
     m_VsyncRenderer->renderFrame(frame);

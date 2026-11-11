@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <chrono>
 #include <system_error>
 
@@ -85,12 +86,41 @@ namespace media_share {
 
   }  // namespace
 
+  fs::path default_dir() {
+#ifdef _WIN32
+    // 「公用影片」（預設在 Public 使用者底下的 Videos）：每台 Windows 都有、每個使用者都能放檔案進去、服務帳號讀得到
+    wchar_t buf[MAX_PATH + 1] = {};
+    const DWORD n = GetEnvironmentVariableW(L"PUBLIC", buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+      return {};
+    }
+    return fs::path(buf) / L"Videos";
+#else
+    const char *home = std::getenv("HOME");
+    return home && *home ? fs::path(home) / "Videos" : fs::path {};
+#endif
+  }
+
   std::vector<root_t> roots() {
     std::vector<root_t> out;
     if (!config::nvhttp.media_share) {
       return out;
     }
+    // §MEDIA-DEFAULT（2026-11-11，使用者定案）：沒設 media_dirs 時只開放一個預設資料夾，不再是整台 PC——
+    // 配對過的 client 原本能讀到服務帳號讀得到的任何檔案。要開放別的資料夾或整台 PC，必須在 server 這邊設定：
+    // media_dirs = <資料夾>,<資料夾>；整台 PC 是 media_dirs = *（單獨一個星號）。
+    const bool whole_pc = config::nvhttp.media_dirs.size() == 1 && config::nvhttp.media_dirs[0] == "*";
     if (config::nvhttp.media_dirs.empty()) {
+      std::error_code ec;
+      const auto def = default_dir();
+      const auto p = def.empty() ? fs::path {} : fs::canonical(def, ec);
+      if (!def.empty() && !ec && fs::is_directory(p, ec)) {
+        auto name = to_utf8(p.filename());
+        out.push_back({0, name.empty() ? to_utf8(p) : name, p, false});
+      }
+      return out;
+    }
+    if (whole_pc) {
       // 整台 PC。編號用磁碟機代號（A＝0…Z＝25），隨身碟插拔不會讓其他磁碟機的編號錯位
 #ifdef _WIN32
       const DWORD mask = GetLogicalDrives();

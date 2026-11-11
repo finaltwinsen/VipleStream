@@ -31,7 +31,9 @@
 #include "platform/common.h"
 #include "process.h"
 #include "vr/vr_netbench.h"
+#include "vr/vr_bridge.h"
 #include "vr/vr_orchestrator.h"
+#include "vr/vr_padmode.h"
 #include "vr/vr_platform.h"
 #include "system_tray.h"
 #include "utility.h"
@@ -303,6 +305,19 @@ namespace proc {
       int gone_polls = 0;
       int stale_polls = 0;
       uint32_t ignored_running_id = 0;
+#if VIPLE_VR_BRIDGE_HAS_ABI
+      // §VR-EXIT-FAST：追蹤中的遊戲行程（SteamVR 的場景程式）
+      constexpr int k_vr_dead_polls = 2;  // 結束後再確認一次（250 ms），讓 SteamVR 有時間回報接手的行程
+      HANDLE vr_game = nullptr;
+      uint32_t vr_game_pid = 0;
+      uint32_t vr_seen_pid = 0;
+      int vr_dead_polls = 0;
+      auto vr_game_close = util::fail_guard([&vr_game]() {
+        if (vr_game) {
+          CloseHandle(vr_game);
+        }
+      });
+#endif
       while (_steam_watchdog_gen.load() == my_gen) {
         const uint32_t cur = read_steam_running_app_id();
         const int app_running = read_steam_app_running(app_id);
@@ -318,6 +333,38 @@ namespace proc {
             return;
           }
         } else {
+#if VIPLE_VR_BRIDGE_HAS_ABI
+          // §VR-EXIT-FAST（2026-11-11）：PCVR 時 driver 會回報 SteamVR 的場景程式 PID。那個行程是這個遊戲、而且已經
+          // 結束、SteamVR 也沒有換成這個遊戲的另一個行程，就不必再等 Steam 的旗標。11-09 配戴實測：遊戲行程 10:48:07.5
+          // 消失，Steam 的旗標約 2 秒後才清，加上下面 3 秒的確認，10:48:12.6 才收串流——使用者在空場景裡多等 5 秒。
+          if (::vr::orchestrator::active()) {
+            const uint32_t spid = ::vr::bridge::status().scene_pid;
+            if (spid != 0 && spid != vr_seen_pid) {
+              vr_seen_pid = spid;
+              const auto a = ::vr::padmode::resolve_pid(spid);
+              if (a && a->appid == std::to_string(app_id)) {
+                if (vr_game) {
+                  CloseHandle(vr_game);
+                }
+                vr_game = OpenProcess(SYNCHRONIZE, FALSE, spid);
+                vr_game_pid = vr_game ? spid : 0;
+                vr_dead_polls = 0;
+              }
+            }
+            if (vr_game && WaitForSingleObject(vr_game, 0) == WAIT_OBJECT_0) {
+              // 場景程式換成同一個遊戲的新行程（啟動器→本體）時上面已經改追新的；這裡是「追的那個結束了」
+              const bool replaced = spid != 0 && spid != vr_game_pid;
+              if (!replaced && ++vr_dead_polls >= k_vr_dead_polls) {
+                BOOST_LOG(info) << "[steam-watchdog "sv << app_id << "] game exited (VR scene process "sv << vr_game_pid
+                                << " ended; RunningAppID="sv << cur << ", Running="sv << app_running << "); ending stream"sv;
+                break;
+              }
+              if (replaced) {
+                vr_dead_polls = 0;
+              }
+            }
+          }
+#endif
           const bool gone = cur != app_id && app_running != 1;
           const bool stale_id = cur == app_id && app_running == 0;
           stale_polls = stale_id ? stale_polls + 1 : 0;
@@ -745,15 +792,6 @@ namespace proc {
       return out;
     }
 
-    bool pid_alive(DWORD pid) {
-      HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
-      if (!h) {
-        return false;
-      }
-      bool alive = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
-      CloseHandle(h);
-      return alive;
-    }
   }  // namespace
 #endif
 
@@ -779,6 +817,22 @@ namespace proc {
         BOOST_LOG(info) << "[VIPLE-STEAM-QUIT] "sv << name << ": no running process under install dir"sv;
         return;
       }
+      // §REVIEW-1111：先把每個行程開成 handle。之後 10 秒的等待與強制結束都用 handle，不再用 PID 重新開——
+      // PID 在行程結束後可以馬上被別的行程拿去用，用 PID 再開一次可能殺到無關的行程。
+      std::vector<std::pair<DWORD, HANDLE>> procs;
+      for (auto pid : pids) {
+        if (HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid)) {
+          procs.emplace_back(pid, h);
+        }
+      }
+      auto close_procs = util::fail_guard([&procs]() {
+        for (auto &p : procs) {
+          CloseHandle(p.second);
+        }
+      });
+      const auto handle_alive = [](HANDLE h) {
+        return WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+      };
       // 1) 以登入使用者身分 taskkill（不加 /F＝送 WM_CLOSE，讓遊戲正常存檔關閉）。服務在
       //    session 0，跨 session 送不到視窗訊息，所以交給使用者 session 的 taskkill。
       std::string cmd = "taskkill.exe";
@@ -799,8 +853,8 @@ namespace proc {
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
       while (std::chrono::steady_clock::now() < deadline) {
         bool any = false;
-        for (auto pid : pids) {
-          any = any || pid_alive(pid);
+        for (auto &p : procs) {
+          any = any || handle_alive(p.second);
         }
         if (!any) {
           BOOST_LOG(info) << "[VIPLE-STEAM-QUIT] "sv << name << ": closed gracefully"sv;
@@ -810,16 +864,12 @@ namespace proc {
       }
       // 3) 還在的強制結束
       int forced = 0;
-      for (auto pid : pids) {
-        if (!pid_alive(pid)) {
+      for (auto &p : procs) {
+        if (!handle_alive(p.second)) {
           continue;
         }
-        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
-        if (h) {
-          if (TerminateProcess(h, 1)) {
-            forced++;
-          }
-          CloseHandle(h);
+        if (TerminateProcess(p.second, 1)) {
+          forced++;
         }
       }
       BOOST_LOG(warning) << "[VIPLE-STEAM-QUIT] "sv << name << ": graceful close timed out — force-terminated "sv

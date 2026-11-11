@@ -2322,6 +2322,15 @@ void XrContext::frameThreadMain()
                                       std::clamp(u1 / (u1 + d1), 0.05f, 0.95f),
                                       insetU0 >= 1000 && insetU0 <= 9000 ? static_cast<float>(insetU0) / 10000.0f : 0.0f);
             }
+            else if (m_PcvrTileW.load(std::memory_order_relaxed) > 0) {
+                // §VR-FOVEA-TILES：不還原（a＝1），但補幀估位移時要知道每眼正前方在影像裡的位置（扣掉頭部轉動用）
+                const float l0 = std::tan(-m_Fov[0].angleLeft), r0 = std::tan(m_Fov[0].angleRight);
+                const float l1 = std::tan(-m_Fov[1].angleLeft), r1 = std::tan(m_Fov[1].angleRight);
+                const float u0 = std::tan(m_Fov[0].angleUp), d0 = std::tan(-m_Fov[0].angleDown);
+                const float u1 = std::tan(m_Fov[1].angleUp), d1 = std::tan(-m_Fov[1].angleDown);
+                m_Video->setFoveation(1.0f, std::clamp(l0 / (l0 + r0), 0.05f, 0.95f), std::clamp(l1 / (l1 + r1), 0.05f, 0.95f),
+                                      std::clamp(u0 / (u0 + d0), 0.05f, 0.95f), std::clamp(u1 / (u1 + d1), 0.05f, 0.95f));
+            }
             else {
                 m_Video->setFoveation(1.0f, 0.5f, 0.5f, 0.5f, 0.5f);
             }

@@ -1816,6 +1816,84 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### capture_phase_lock
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream: keep the desktop capture cadence close to the moment each frame is presented on the host.
+            The capture timer and the display run on different clocks and drift apart, so without this a frame can
+            wait up to one frame interval before it is picked up, and the wait changes from session to session.
+            Windows only.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            capture_phase_lock = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### media_share
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream: let paired clients browse and play video files on this host (the headset's video mode).
+            Read-only; only sub-folders and video files are listed.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            media_share = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### media_dirs
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream: the folders [media_share](#media_share) offers to paired clients, separated by commas.
+            When this is not set, only one default folder is shared: the Public Videos folder on Windows
+            (`%PUBLIC%\Videos`), `~/Videos` on Linux. A single `*` shares every local and removable drive
+            (`/` on Linux).
+            @note{Before 2.0.134 the default was the whole PC. Sharing anything other than the default folder
+            now has to be set here, on the host.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            (not set: the default folder only)
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            media_dirs = D:\Movies,E:\Recordings
+            @endcode</td>
+    </tr>
+</table>
+
 ## VR (VipleStream 2.0)
 
 ### vr_pcvr
@@ -3079,9 +3157,9 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td>Description</td>
         <td colspan="2">
             VipleStream 2.0 (Windows): the GPU scheduling priority of the host process while it captures a PCVR
-            session. `high` (default): as in earlier versions, the priority is lowered from realtime to high for
-            the duration of the capture, so that the host cannot take GPU time away from the game.
-            `realtime`: the priority is not lowered. With `high`, the host's own GPU work for each frame (the copy,
+            session. `realtime` (default since 2.0.134): the priority is not lowered. `high`: as in earlier
+            versions, the priority is lowered from realtime to high for the duration of the capture, so that the
+            host cannot take GPU time away from the game. With `high`, the host's own GPU work for each frame (the copy,
             the colour conversion and the encoder's preparation) is scheduled at the same level as the game: when
             the game keeps the GPU busy, that work waits behind the game's next frame and every stream frame leaves
             about one game frame later. SteamVR's compositor and vrserver already run at realtime priority.
@@ -3094,13 +3172,13 @@ not matter). Any other value is reported in the log as an invalid value and the 
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            high
+            realtime
             @endcode</td>
     </tr>
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            vr_gpu_priority = realtime
+            vr_gpu_priority = high
             @endcode</td>
     </tr>
 </table>

@@ -225,6 +225,8 @@ void VrNetBenchRunner::tick()
             }
         }
         else {
+            // §REVIEW-1111：狀態字來自 helper 的 nmcli；helper 已固定用英文輸出（install-steamframe.sh 的 LC_ALL=C）。
+            // 舊版 helper 在非英文系統會寫成譯文，這裡刻意不放寬——譯文分不出「已連線」還是「已斷線」。
             if (st.applied == QLatin1String("normal") && st.wlan0.startsWith(QLatin1String("connected"))) {
                 log(QStringLiteral("home Wi-Fi reconnected; settling"));
                 m_Phase = Phase::Settle;

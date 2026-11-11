@@ -1,6 +1,8 @@
 #pragma once
 
 #include <functional>
+#include <atomic>
+#include <cstdint>
 #include "../../decoder.h"
 #include "../renderer.h"
 
@@ -97,4 +99,12 @@ private:
     int m_DisplayFps;
     PVIDEO_STATS m_VideoStats;
     int m_RendererAttributes;
+
+    // PACER-DIAG: split of the queue time (see pacer.cpp); samples are touched by the render thread only
+    static constexpr uint32_t kDiagMax = 4096;
+    uint32_t m_DiagPaceUs[kDiagMax];
+    uint32_t m_DiagRendUs[kDiagMax];
+    uint32_t m_DiagN = 0;
+    uint64_t m_DiagStartUs = 0;
+    std::atomic<uint32_t> m_DiagVsEmpty{0}, m_DiagVsOne{0}, m_DiagVsMore{0}, m_DiagVsLate{0};
 };

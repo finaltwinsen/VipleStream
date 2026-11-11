@@ -985,8 +985,12 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     // §VR-FOVEA-TILES：解碼出來的是分塊的畫面（上排全視野、下排注視點）。swapchain 用同樣的排法、同樣的尺寸
     // （outputSize 這時不放大）；尺寸對不上（swapchain 還是舊的）就這張當一般影像畫，下一張就對了
     int tileW = 0, tileH = 0, tileRW = 0, tileRH = 0;
-    const bool tiles = !m_Config.synth && tilesFor(frame->width, frame->height, &tileW, &tileH, &tileRW, &tileRH) &&
-                       m_Sw.width == frame->width && m_Sw.height == frame->height;
+    // 開著補幀時 swapchain 是兩倍高：上半是這一張、下半是合成的那一張，兩半各自是同樣的分塊排法
+    const bool tiles = tilesFor(frame->width, frame->height, &tileW, &tileH, &tileRW, &tileRH) &&
+                       m_Sw.width == frame->width && m_Sw.height == frame->height * (m_Config.synth ? 2 : 1);
+    // 合成的那一張在 swapchain 裡從哪一列開始（分塊時一張影像＝兩列塊）
+    const int synthTop = tiles ? 2 * tileH : (m_Config.synth ? m_Sw.height / 2 : 0);
+    float tileOrg[4] = {0.0f, 0.0f, 0.0f, 0.0f};  // 兩眼注視點那塊左上角的算圖像素（補幀要用）
     // swapchain 裡一張影像的高度（分塊時＝上排全視野那一列）
     const int frameH = tiles ? tileH : (m_Config.synth ? m_Sw.height / 2 : (wantInset ? m_Sw.height - insetH : m_Sw.height));
     m_PendInset = false;
@@ -1025,7 +1029,15 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
                                 "[VIPLE-VR-FOVEA] tiles: direct pass not used (%s) - plain conversion for this session, the gaze tile keeps a hard edge",
                                 why ? why : "?");
                 }
-                rendered = pl_render_image(m_Renderer, &mapped, &target, &m_RenderParams);  // 整張 1:1，排法不變
+                // 整張 1:1，排法不變（開著補幀時只畫上半）
+                pl_frame tp = target;
+                if (m_Config.synth) {
+                    tp.crop.x0 = 0.0f;
+                    tp.crop.y0 = 0.0f;
+                    tp.crop.x1 = static_cast<float>(m_Sw.width);
+                    tp.crop.y1 = static_cast<float>(2 * tileH);
+                }
+                rendered = pl_render_image(m_Renderer, &mapped, &tp, &m_RenderParams);
             }
             if (rendered && hasMeta && meta.foveated) {
                 // 0x82 的四欄在分塊時是注視點那塊左上角的算圖像素座標（common-c 轉成 ／65535 的 float，乘回去就是原值）
@@ -1039,6 +1051,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
                     m_PendInsetOut[e][1] = static_cast<float>(py) / static_cast<float>(tileRH);
                     m_PendInsetOut[e][2] = static_cast<float>(px + tileW) / static_cast<float>(tileRW);
                     m_PendInsetOut[e][3] = static_cast<float>(py + tileH) / static_cast<float>(tileRH);
+                    tileOrg[e * 2] = static_cast<float>(px);
+                    tileOrg[e * 2 + 1] = static_cast<float>(py);
                 }
             }
         }
@@ -1151,7 +1165,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     const bool held = fin > 0;
     const uint64_t tGpuEnd = nowUs();
     // 第二張要再用一次解碼幀（mapped）：做合成時先不放掉
-    const bool doSynth = m_Config.synth && !m_SynthFailed && mappedOk && rendered && held;
+    // 分塊但直接讀 YUV 的那一趟用不了時不做合成（合成的那一半也要靠它）；分塊卻沒帶位置的幀也不做
+    const bool doSynth = m_Config.synth && !m_SynthFailed && mappedOk && rendered && held &&
+                         !(tiles && (m_TilesFailed || !m_PendInset));
     if (!doSynth) {
         if (mappedOk) {
             pl_unmap_avframe(g, &mapped);
@@ -1169,7 +1185,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         m_Published.subImage.imageArrayIndex = 0;
         m_Published.aspect = static_cast<float>(m_Sw.width) / static_cast<float>(frameH);
         m_Published.hasSynth = false;
-        m_Published.synthRect.offset = {0, frameH};
+        m_Published.synthRect.offset = {0, synthTop};
         m_Published.synthRect.extent = {m_Sw.width, frameH};
         m_Published.synthMeta = {};
         m_Published.hasInset = m_PendInset;  // §VR-FOVEA-LAYERS
@@ -1291,7 +1307,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     }
     pl_frame t2 = target;
     t2.planes[0].texture = tex2;
-    const bool r2 = renderSynth(&mapped, &t2, tex2, frame->width, frame->height, hasMeta, meta, frame->pts, &synthOk, &synthMeta);
+    const bool r2 = tiles ? renderTilesSynth(&mapped, &t2, tex2, tileW, tileH, tileRW, tileRH, tileOrg, hasMeta, meta, frame->pts,
+                                             &synthOk, &synthMeta)
+                          : renderSynth(&mapped, &t2, tex2, frame->width, frame->height, hasMeta, meta, frame->pts, &synthOk, &synthMeta);
     if (r2 && wantDump && (synthOk || m_SynthFailed)) {
         dumpTexture(tex2, dumpPathFor(""));
         // 第一次發布的那一張存成 <路徑>-first.png（副檔名之前插 -first）
@@ -1569,6 +1587,12 @@ bool XrVideo::current(Current* out)
             out->subImage.imageRect = m_Published.synthRect;
             out->meta = m_Published.synthMeta;
             out->synthShown = true;
+            if (out->hasInset) {
+                // §VR-FOVEA-TILES：注視點那兩塊在合成的那一半裡的位置＝真的那一半往下移同樣的列數
+                for (int e = 0; e < 2; e++) {
+                    out->insetRect[e].offset.y += m_Published.synthRect.offset.y;
+                }
+            }
             m_SynthShown.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -1969,6 +1993,112 @@ pl_shader_desc sampledTex(const char* name, pl_tex tex)
 
 }  // namespace
 
+// §VR-SYNTH：估「扣掉頭部轉動之後」的位移場（m_Small／m_Mid 的這一張對上一張 → m_Flow）。renderSynth 與分塊版
+// （renderTilesSynth）共用；fv／fvCyR／fvU0 是縮圖所在影像的注視點參數（分塊的上排沒有變形：a＝1、u0＝0）。
+// 回傳 true＝m_Flow 可以用。
+bool XrVideo::synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4], float fvCyR, float fvU0)
+{
+    const int cur = m_SmallCur, prev = cur ^ 1;
+    // 位移：要有上一張、兩張的算圖姿態、而且是連續的兩幀（pts 差 1；掉過幀就不合成），轉動也不能太大
+    bool flowOk = false;
+    float half[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    // 這裡的 pts 已經不是幀號（decoder 把它換成呈現時間）：用間隔的移動平均當一幀的長度，超過 1.6 倍就是中間掉過幀
+    // §REVIEW-1104：幀間隔基準改成成員，destroy 會歸零；單次大間隔仍不上修
+    const int64_t ptsDelta = pts - m_PrevPts;
+    if (m_HavePrevMeta && ptsDelta > 0) {
+        if (m_NominalDelta == 0) {
+            m_NominalDelta = ptsDelta;
+        }
+        else if (ptsDelta < m_NominalDelta * 3) {
+            m_NominalDelta = (m_NominalDelta * 7 + ptsDelta) / 8;
+        }
+    }
+    const bool consecutive = ptsDelta > 0 && m_NominalDelta > 0 && ptsDelta * 10 <= m_NominalDelta * 16;
+    if (smallOk && m_HavePrevSmall && hasMeta && m_HavePrevMeta && consecutive) {
+        // d＝q_prev⁻¹·q_cur（上一張到這一張的轉動，機體座標）；half＝它的一半＝normalize(d ＋ 1)
+        const float* a = m_PrevMeta.renderRot;
+        const float* b = meta.renderRot;
+        const float ax = -a[0], ay = -a[1], az = -a[2], aw = a[3];
+        float d[4] = {
+            aw * b[0] + ax * b[3] + ay * b[2] - az * b[1],
+            aw * b[1] - ax * b[2] + ay * b[3] + az * b[0],
+            aw * b[2] + ax * b[1] - ay * b[0] + az * b[3],
+            aw * b[3] - ax * b[0] - ay * b[1] - az * b[2],
+        };
+        if (d[3] < 0.0f) {
+            d[0] = -d[0]; d[1] = -d[1]; d[2] = -d[2]; d[3] = -d[3];
+        }
+        if (d[3] > 0.9962f) {  // 兩張之間轉不到 10°
+            float h[4] = {d[0], d[1], d[2], d[3] + 1.0f};
+            const float n = std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2] + h[3] * h[3]);
+            if (n > 1e-6f) {
+                for (int i = 0; i < 4; i++) {
+                    half[i] = h[i] / n;
+                }
+                // 頭部轉動造成的整張影像位移（小角度近似）：ω＝2·d.xyz（弧度，機體座標）。往左轉（ω.y > 0）景物往右移、
+                // 抬頭（ω.x > 0）景物往下移；mv 的定義是「上一張的位置 − 現在的位置」，所以取負號。一隻眼佔 UV 寬度的一半。
+                const float tanW = std::max(0.5f, m_FovTanW.load(std::memory_order_relaxed));
+                const float tanH = std::max(0.5f, m_FovTanH.load(std::memory_order_relaxed));
+                float wvec[3] = {2.0f * d[0], 2.0f * d[1], 2.0f * d[2]};
+                float tvec[2] = {tanW, tanH};
+                // 兩層：1/16 尺寸半徑 6（起點 0）→ 1/8 尺寸半徑 3（起點＝粗層的結果）。vs_init 一定要綁一張材質：
+                // 粗層不用它（vs_p.y＝0），綁 m_Flow（這個 pass 不寫它）
+                auto runFlow = [&](pl_tex curT, pl_tex prevT, pl_tex initT, pl_tex target, float radius, float useInit) {
+                    float pvec[2] = {radius, useInit};
+                    pl_shader shf = pl_dispatch_begin(m_Dp);
+                    pl_shader_desc fd[3] = {sampledTex("vs_cur", curT), sampledTex("vs_prev", prevT), sampledTex("vs_init", initT)};
+                    pl_shader_var gv[6] = {};
+                    gv[0].var = pl_var_vec3("vs_w");
+                    gv[0].data = wvec;
+                    gv[0].dynamic = true;
+                    gv[3].var = pl_var_vec2("vs_tan");
+                    gv[3].data = tvec;
+                    gv[3].dynamic = true;
+                    gv[1].var = pl_var_vec4("vs_fv");
+                    gv[1].data = fv;
+                    gv[1].dynamic = true;
+                    gv[2].var = pl_var_vec2("vs_p");
+                    gv[2].data = pvec;
+                    gv[2].dynamic = true;
+                    gv[4].var = pl_var_float("vs_cyr");
+                    gv[4].data = &fvCyR;
+                    gv[4].dynamic = true;
+                    gv[5].var = pl_var_float("vs_fu");  // §VR-FOVEA-INSET
+                    gv[5].data = &fvU0;
+                    gv[5].dynamic = true;
+                    pl_custom_shader cs = {};
+                    cs.description = "viple vr synth flow";
+                    cs.header = kFlowHeader;
+                    cs.body = kFlowBody;
+                    cs.input = PL_SHADER_SIG_NONE;
+                    cs.output = PL_SHADER_SIG_COLOR;
+                    cs.descriptors = fd;
+                    cs.num_descriptors = 3;
+                    cs.variables = gv;
+                    cs.num_variables = 6;
+                    if (!pl_shader_custom(shf, &cs)) {
+                        pl_dispatch_abort(m_Dp, &shf);
+                        return false;
+                    }
+                    pl_dispatch_params dpar = {};
+                    dpar.shader = &shf;
+                    dpar.target = target;
+                    return pl_dispatch_finish(m_Dp, &dpar);
+                };
+                flowOk = runFlow(m_Mid[cur], m_Mid[prev], m_Flow, m_FlowC, 6.0f, 0.0f) &&
+                         runFlow(m_Small[cur], m_Small[prev], m_FlowC, m_Flow, 3.0f, 1.0f);
+                if (!flowOk) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] flow pass failed - frame synthesis off for this session");
+                    m_SynthFailed = true;
+                }
+            }
+        }
+    }
+
+    (void) half;
+    return flowOk;
+}
+
 // §VR-SYNTH：mapped → m_Full／m_Small；有上一張就估位移；最後一個 pass 把上半（複製）與下半（合成）寫進 swapchain。
 // 回傳 false＝真的那一張也沒畫成功。*synthOk＝下半是合成影像（否則下半只是這一張的複製，不拿來顯示）。
 bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
@@ -2095,101 +2225,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         }
     }
 
-    // 位移：要有上一張、兩張的算圖姿態、而且是連續的兩幀（pts 差 1；掉過幀就不合成），轉動也不能太大
-    bool flowOk = false;
-    float half[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    // 這裡的 pts 已經不是幀號（decoder 把它換成呈現時間）：用間隔的移動平均當一幀的長度，超過 1.6 倍就是中間掉過幀
-    // §REVIEW-1104：幀間隔基準改成成員，destroy 會歸零；單次大間隔仍不上修
-    const int64_t ptsDelta = pts - m_PrevPts;
-    if (m_HavePrevMeta && ptsDelta > 0) {
-        if (m_NominalDelta == 0) {
-            m_NominalDelta = ptsDelta;
-        }
-        else if (ptsDelta < m_NominalDelta * 3) {
-            m_NominalDelta = (m_NominalDelta * 7 + ptsDelta) / 8;
-        }
-    }
-    const bool consecutive = ptsDelta > 0 && m_NominalDelta > 0 && ptsDelta * 10 <= m_NominalDelta * 16;
-    if (smallOk && m_HavePrevSmall && hasMeta && m_HavePrevMeta && consecutive) {
-        // d＝q_prev⁻¹·q_cur（上一張到這一張的轉動，機體座標）；half＝它的一半＝normalize(d ＋ 1)
-        const float* a = m_PrevMeta.renderRot;
-        const float* b = meta.renderRot;
-        const float ax = -a[0], ay = -a[1], az = -a[2], aw = a[3];
-        float d[4] = {
-            aw * b[0] + ax * b[3] + ay * b[2] - az * b[1],
-            aw * b[1] - ax * b[2] + ay * b[3] + az * b[0],
-            aw * b[2] + ax * b[1] - ay * b[0] + az * b[3],
-            aw * b[3] - ax * b[0] - ay * b[1] - az * b[2],
-        };
-        if (d[3] < 0.0f) {
-            d[0] = -d[0]; d[1] = -d[1]; d[2] = -d[2]; d[3] = -d[3];
-        }
-        if (d[3] > 0.9962f) {  // 兩張之間轉不到 10°
-            float h[4] = {d[0], d[1], d[2], d[3] + 1.0f};
-            const float n = std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2] + h[3] * h[3]);
-            if (n > 1e-6f) {
-                for (int i = 0; i < 4; i++) {
-                    half[i] = h[i] / n;
-                }
-                // 頭部轉動造成的整張影像位移（小角度近似）：ω＝2·d.xyz（弧度，機體座標）。往左轉（ω.y > 0）景物往右移、
-                // 抬頭（ω.x > 0）景物往下移；mv 的定義是「上一張的位置 − 現在的位置」，所以取負號。一隻眼佔 UV 寬度的一半。
-                const float tanW = std::max(0.5f, m_FovTanW.load(std::memory_order_relaxed));
-                const float tanH = std::max(0.5f, m_FovTanH.load(std::memory_order_relaxed));
-                float wvec[3] = {2.0f * d[0], 2.0f * d[1], 2.0f * d[2]};
-                float tvec[2] = {tanW, tanH};
-                // 兩層：1/16 尺寸半徑 6（起點 0）→ 1/8 尺寸半徑 3（起點＝粗層的結果）。vs_init 一定要綁一張材質：
-                // 粗層不用它（vs_p.y＝0），綁 m_Flow（這個 pass 不寫它）
-                auto runFlow = [&](pl_tex curT, pl_tex prevT, pl_tex initT, pl_tex target, float radius, float useInit) {
-                    float pvec[2] = {radius, useInit};
-                    pl_shader shf = pl_dispatch_begin(m_Dp);
-                    pl_shader_desc fd[3] = {sampledTex("vs_cur", curT), sampledTex("vs_prev", prevT), sampledTex("vs_init", initT)};
-                    pl_shader_var gv[6] = {};
-                    gv[0].var = pl_var_vec3("vs_w");
-                    gv[0].data = wvec;
-                    gv[0].dynamic = true;
-                    gv[3].var = pl_var_vec2("vs_tan");
-                    gv[3].data = tvec;
-                    gv[3].dynamic = true;
-                    gv[1].var = pl_var_vec4("vs_fv");
-                    gv[1].data = fv;
-                    gv[1].dynamic = true;
-                    gv[2].var = pl_var_vec2("vs_p");
-                    gv[2].data = pvec;
-                    gv[2].dynamic = true;
-                    gv[4].var = pl_var_float("vs_cyr");
-                    gv[4].data = &fvCyR;
-                    gv[4].dynamic = true;
-                    gv[5].var = pl_var_float("vs_fu");  // §VR-FOVEA-INSET
-                    gv[5].data = &fvU0;
-                    gv[5].dynamic = true;
-                    pl_custom_shader cs = {};
-                    cs.description = "viple vr synth flow";
-                    cs.header = kFlowHeader;
-                    cs.body = kFlowBody;
-                    cs.input = PL_SHADER_SIG_NONE;
-                    cs.output = PL_SHADER_SIG_COLOR;
-                    cs.descriptors = fd;
-                    cs.num_descriptors = 3;
-                    cs.variables = gv;
-                    cs.num_variables = 6;
-                    if (!pl_shader_custom(shf, &cs)) {
-                        pl_dispatch_abort(m_Dp, &shf);
-                        return false;
-                    }
-                    pl_dispatch_params dpar = {};
-                    dpar.shader = &shf;
-                    dpar.target = target;
-                    return pl_dispatch_finish(m_Dp, &dpar);
-                };
-                flowOk = runFlow(m_Mid[cur], m_Mid[prev], m_Flow, m_FlowC, 6.0f, 0.0f) &&
-                         runFlow(m_Small[cur], m_Small[prev], m_FlowC, m_Flow, 3.0f, 1.0f);
-                if (!flowOk) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] flow pass failed - frame synthesis off for this session");
-                    m_SynthFailed = true;
-                }
-            }
-        }
-    }
+    const bool flowOk = synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0);
 
     // 上半複製、下半合成（沒有位移場時 k＝0：下半只是複製，不會被拿來顯示）
     float k = flowOk ? 0.5f : 0.0f;
@@ -2248,7 +2284,6 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         // 合成那一格沿用這一張的算圖姿態：頭部的轉動交給頭盔的重投影（位移場已經扣掉那一部分），
         // 這裡只外插場景裡在動的東西
         *synthMeta = meta;
-        (void) half;
         *synthOk = true;
     }
     m_HavePrevSmall = smallOk;
@@ -2527,7 +2562,7 @@ color = vec4(yy, cc.x, cc.y, 1.0);
 // 預乘在線性光做（見 kInsetFeatherBody 上面的說明）
 static const char* const kTilesMaskBody = R"GLSL(
 float ta = 1.0;
-vec2 tp = gl_FragCoord.xy - vec2(0.0, vs_tile.y);
+vec2 tp = gl_FragCoord.xy - vec2(0.0, vs_ttop + vs_tile.y);
 if (tp.y >= 0.0) {
     float tx = tp.x >= vs_tile.x ? tp.x - vs_tile.x : tp.x;
     vec2 td = abs(vec2(tx, tp.y) / vs_tile - 0.5) * 2.0;
@@ -2771,11 +2806,14 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     pl_color_space dst = targetProto->color;
     pl_color_space_infer_map(&src, &dst);
     pl_shader_color_map(sh, nullptr, src, dst, nullptr, false);
-    pl_shader_var mv[2] = {};
+    float ttop = 0.0f;
+    pl_shader_var mv[3] = {};
     mv[0].var = pl_var_vec2("vs_tile");
     mv[0].data = tile;
     mv[1].var = pl_var_float("vs_enc");
     mv[1].data = &enc;
+    mv[2].var = pl_var_float("vs_ttop");
+    mv[2].data = &ttop;
     for (pl_shader_var& v : mv) {
         v.dynamic = true;
     }
@@ -2785,7 +2823,7 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     ms.input = PL_SHADER_SIG_COLOR;
     ms.output = PL_SHADER_SIG_COLOR;
     ms.variables = mv;
-    ms.num_variables = 2;
+    ms.num_variables = 3;
     if (!pl_shader_custom(sh, &ms)) {
         pl_dispatch_abort(m_Dp, &sh);
         *why = "mask shader rejected";
@@ -2794,11 +2832,293 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     pl_dispatch_params dpar = {};
     dpar.shader = &sh;
     dpar.target = swTex;
-    dpar.rect = {0, 0, m_Sw.width, m_Sw.height};
+    // 只寫這一張影像的範圍（開著補幀時 swapchain 是兩倍高，下半是合成的那一張）
+    dpar.rect = {0, 0, 2 * tw, 2 * th};
     if (!pl_dispatch_finish(m_Dp, &dpar)) {
         *why = "dispatch failed";
         return false;
     }
+    return true;
+}
+
+// §VR-SYNTH＋§VR-FOVEA-TILES（2026-11-11）：分塊畫面的補幀。位移場只從上排（兩眼的全視野，沒有幾何變形）估；
+// 縮圖直接從亮度平面縮（灰階就夠比對），不經過 RGB 的中間圖。
+static const char* const kTilesDownBody = R"GLSL(
+vec2 osz = vec2(textureSize(vs_ref, 0));
+vec2 c = vs_crop.xy + gl_FragCoord.xy / osz * vs_crop.zw;
+float acc = 0.0;
+for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < 4; i++) {
+        acc += texture(vs_y, (c + (vec2(float(i), float(j)) * 2.0 - 3.0)) / vs_ysz).r;
+    }
+}
+color = vec4(vec3(acc / 16.0), 1.0);
+)GLSL";
+
+// 合成的那一張（寫在 swapchain 下半，排法和上半一樣）：每一塊各自把這一張沿位移場往前推半個串流週期。
+// 位移場的座標是上排（兩眼並排）的 UV。全視野那塊的像素直接對到它；注視點那塊的像素先換成它在該眼全視野裡的位置
+// （vs_org＝那一塊左上角的算圖像素、vs_rsz＝每眼算圖尺寸），位移再乘回算圖像素。取樣不離開自己那一塊。
+// 位移的平滑與物體邊緣的處理照 kCombineBody。輸出 (Y, Cb, Cr)。
+static const char* const kTilesSynthBody = R"GLSL(
+vec2 fc = gl_FragCoord.xy - vec2(0.0, vs_stop);
+bool gaze = fc.y >= vs_stile.y;
+bool right = fc.x >= vs_stile.x;
+vec2 tp = vec2(right ? fc.x - vs_stile.x : fc.x, gaze ? fc.y - vs_stile.y : fc.y);
+vec2 ev = gaze ? ((right ? vs_org.zw : vs_org.xy) + tp) / vs_rsz : tp / vs_stile;
+vec2 uv = vec2((right ? 0.5 : 0.0) + 0.5 * clamp(ev.x, 0.0, 1.0), clamp(ev.y, 0.0, 1.0));
+vec2 tsz = vec2(2.0 * vs_stile.x, vs_stile.y);
+vec2 fpx = 0.75 / vec2(textureSize(vs_flow, 0));
+float fmin = (right ? 0.5 : 0.0) + fpx.x;
+float fmax = fmin + 0.5 - 2.0 * fpx.x;
+vec2 mv = vec2(0.0);
+vec2 mvMax = vec2(0.0);
+for (int j = -1; j <= 1; j += 2) {
+    for (int i = -1; i <= 1; i += 2) {
+        vec2 q = uv + vec2(float(i), float(j)) * fpx;
+        q.x = clamp(q.x, fmin, fmax);
+        vec2 m = texture(vs_flow, q).xy;
+        mv += m;
+        if (dot(m, m) > dot(mvMax, mvMax)) { mvMax = m; }
+    }
+}
+mv *= 0.25;
+if (length(mvMax * tsz) > 1.5 * length(mv * tsz) + 1.0) {
+    vec2 sq = uv + vs_k * mvMax;
+    sq.x = clamp(sq.x, fmin, fmax);
+    vec2 cq = vec2(clamp(uv.x, fmin, fmax), uv.y);
+    vec2 ms = texture(vs_flow, sq).xy;
+    vec2 mc = texture(vs_flow, cq).xy;
+    float big = dot(mvMax, mvMax);
+    mv = (dot(ms, ms) > 0.25 * big || dot(mc, mc) > 0.25 * big) ? mvMax : vec2(0.0);
+}
+vec2 dpx = vs_k * mv * (gaze ? vec2(2.0 * vs_rsz.x, vs_rsz.y) : tsz);
+vec2 sp = clamp(tp + dpx, vec2(0.5), vs_stile - 0.5);
+vec2 lp = vs_crop.xy + vec2(right ? vs_stile.x : 0.0, gaze ? vs_stile.y : 0.0) + sp;
+float yy = texture(vs_y, lp / vs_ysz).r;
+vec2 cc = texture(vs_uv, ((lp - vs_csh) / vs_rr) / vs_csz).rg;
+color = vec4(yy, cc.x, cc.y, 1.0);
+)GLSL";
+
+// swapchain 是兩倍高：上半再畫一次真的（renderTiles），下半畫合成的。org＝兩眼注視點那塊左上角的算圖像素
+// （Lx, Ly, Rx, Ry）。回傳 false＝真的那一半也沒畫成功；*synthOk＝下半可以拿來顯示。
+bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int tw, int th, int rw, int rh,
+                               const float org[4], bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk,
+                               VIPLE_VR_FRAME_META* synthMeta)
+{
+    *synthOk = false;
+    const char* why = nullptr;
+    if (!renderTiles(mapped, targetProto, swTex, tw, th, &why)) {
+        return false;
+    }
+    pl_gpu g = m_Vulkan->gpu;
+    const auto fail = [this](const char* what) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] tiles: %s - frame synthesis off for this session", what);
+        m_SynthFailed = true;
+        return true;  // 上半已經畫好，這張照常顯示
+    };
+    const auto caps = static_cast<pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+    pl_fmt fmtSmall = pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
+    pl_fmt fmtFlow = pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps);
+    // 上排＝2tw×th；縮圖 1/8、再 1/16（和不分塊時同樣的層級）
+    const int sw = std::max(16, 2 * tw / 8), sh = std::max(16, th / 8);
+    const int mw = std::max(8, sw / 2), mh = std::max(8, sh / 2);
+    const int prevSmallW = m_Small[0] != nullptr ? m_Small[0]->params.w : 0;
+    const int prevSmallH = m_Small[0] != nullptr ? m_Small[0]->params.h : 0;
+    const bool devRead = !m_Config.dumpPath.isEmpty();
+    auto mk = [g, devRead](pl_tex* t, int w, int h, pl_fmt f) {
+        pl_tex_params tp = {};
+        tp.w = w;
+        tp.h = h;
+        tp.format = f;
+        tp.sampleable = true;
+        tp.renderable = true;
+        tp.host_readable = devRead && (f->caps & PL_FMT_CAP_HOST_READABLE) != 0;
+        return pl_tex_recreate(g, t, &tp);
+    };
+    if (fmtSmall == nullptr || fmtFlow == nullptr ||
+        !mk(&m_Mid[0], mw, mh, fmtSmall) || !mk(&m_Mid[1], mw, mh, fmtSmall) || !mk(&m_FlowC, mw, mh, fmtFlow) ||
+        !mk(&m_Small[0], sw, sh, fmtSmall) || !mk(&m_Small[1], sw, sh, fmtSmall) || !mk(&m_Flow, sw, sh, fmtFlow)) {
+        return fail("texture setup failed");
+    }
+    if (m_FrameH != th) {
+        m_FrameH = th;
+        m_HavePrevSmall = false;
+        m_HavePrevMeta = false;
+    }
+    if ((prevSmallW != 0 && prevSmallW != sw) || (prevSmallH != 0 && prevSmallH != sh)) {
+        m_HavePrevSmall = false;
+    }
+
+    // renderTiles 已經檢查過平面的排法；這裡直接取用
+    const pl_plane& py = mapped->planes[0];
+    const pl_plane& pc = mapped->planes[1];
+    const pl_tex ty = py.texture;
+    const pl_tex tc = pc.texture;
+    float crop[4] = {mapped->crop.x0, mapped->crop.y0, mapped->crop.x1 - mapped->crop.x0, mapped->crop.y1 - mapped->crop.y0};
+    if (crop[2] <= 0.0f || crop[3] <= 0.0f) {
+        crop[0] = 0.0f;
+        crop[1] = 0.0f;
+    }
+    float ysz[2] = {static_cast<float>(ty->params.w), static_cast<float>(ty->params.h)};
+    float csz[2] = {static_cast<float>(tc->params.w), static_cast<float>(tc->params.h)};
+    float rr[2] = {std::round(ysz[0] / csz[0]), std::round(ysz[1] / csz[1])};
+    float csh[2] = {pc.shift_x, pc.shift_y};
+    float tile[2] = {static_cast<float>(tw), static_cast<float>(th)};
+    float topCrop[4] = {crop[0], crop[1], 2.0f * tile[0], tile[1]};  // 上排（兩眼的全視野）在亮度平面裡的範圍
+
+    const int cur = m_SmallCur, prev = cur ^ 1;
+    bool smallOk = false;
+    {
+        pl_shader shd = pl_dispatch_begin(m_Dp);
+        pl_shader_desc dd[2] = {sampledTex("vs_y", ty), sampledTex("vs_ref", m_Small[prev])};
+        pl_shader_var dv[2] = {};
+        dv[0].var = pl_var_vec4("vs_crop");
+        dv[0].data = topCrop;
+        dv[0].dynamic = true;
+        dv[1].var = pl_var_vec2("vs_ysz");
+        dv[1].data = ysz;
+        dv[1].dynamic = true;
+        pl_custom_shader cs = {};
+        cs.description = "viple vr synth downscale";
+        cs.body = kTilesDownBody;
+        cs.input = PL_SHADER_SIG_NONE;
+        cs.output = PL_SHADER_SIG_COLOR;
+        cs.descriptors = dd;
+        cs.num_descriptors = 2;
+        cs.variables = dv;
+        cs.num_variables = 2;
+        if (pl_shader_custom(shd, &cs)) {
+            pl_dispatch_params dpar = {};
+            dpar.shader = &shd;
+            dpar.target = m_Small[cur];
+            smallOk = pl_dispatch_finish(m_Dp, &dpar);
+        }
+        else {
+            pl_dispatch_abort(m_Dp, &shd);
+        }
+    }
+    if (smallOk) {
+        pl_shader shd = pl_dispatch_begin(m_Dp);
+        pl_shader_desc dd[2] = {sampledTex("vs_full", m_Small[cur]), sampledTex("vs_ref", m_Mid[prev])};
+        pl_custom_shader cs = {};
+        cs.description = "viple vr synth downscale 16";
+        cs.body = "color = vec4(texture(vs_full, gl_FragCoord.xy / vec2(textureSize(vs_ref, 0))).rgb, 1.0);";
+        cs.input = PL_SHADER_SIG_NONE;
+        cs.output = PL_SHADER_SIG_COLOR;
+        cs.descriptors = dd;
+        cs.num_descriptors = 2;
+        smallOk = false;
+        if (pl_shader_custom(shd, &cs)) {
+            pl_dispatch_params dpar = {};
+            dpar.shader = &shd;
+            dpar.target = m_Mid[cur];
+            smallOk = pl_dispatch_finish(m_Dp, &dpar);
+        }
+        else {
+            pl_dispatch_abort(m_Dp, &shd);
+        }
+    }
+
+    // 上排沒有幾何變形：a＝1、不用分段曲線；中心用每眼正前方在影像裡的位置（頭部轉動的補償要用）
+    float fv[4];
+    float fvCyR;
+    float fvU0;
+    loadFoveation(fv, &fvCyR, &fvU0);
+    fv[0] = 1.0f;
+    fvU0 = 0.0f;
+    const bool flowOk = synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0);
+    if (m_SynthFailed) {
+        return true;
+    }
+
+    float k = flowOk ? 0.5f : 0.0f;
+    float ttop = 2.0f * tile[1];
+    float rsz[2] = {static_cast<float>(rw), static_cast<float>(rh)};
+    float orgv[4] = {org[0], org[1], org[2], org[3]};
+    float enc = m_Mode == TargetMode::SrgbMutable ? 1.0f : 0.0f;
+    pl_shader shs = pl_dispatch_begin(m_Dp);
+    pl_shader_desc dd[3] = {sampledTex("vs_y", ty), sampledTex("vs_uv", tc), sampledTex("vs_flow", m_Flow)};
+    pl_shader_var vv[10] = {};
+    vv[0].var = pl_var_vec4("vs_crop");
+    vv[0].data = crop;
+    vv[1].var = pl_var_vec2("vs_ysz");
+    vv[1].data = ysz;
+    vv[2].var = pl_var_vec2("vs_csz");
+    vv[2].data = csz;
+    vv[3].var = pl_var_vec2("vs_rr");
+    vv[3].data = rr;
+    vv[4].var = pl_var_vec2("vs_csh");
+    vv[4].data = csh;
+    vv[5].var = pl_var_vec2("vs_stile");  // 名字不能和後面遮罩那一段的 vs_tile／vs_ttop 相同（同一支 shader）
+    vv[5].data = tile;
+    vv[6].var = pl_var_float("vs_stop");
+    vv[6].data = &ttop;
+    vv[7].var = pl_var_float("vs_k");
+    vv[7].data = &k;
+    vv[8].var = pl_var_vec4("vs_org");
+    vv[8].data = orgv;
+    vv[9].var = pl_var_vec2("vs_rsz");
+    vv[9].data = rsz;
+    for (pl_shader_var& v : vv) {
+        v.dynamic = true;
+    }
+    pl_custom_shader cs = {};
+    cs.description = "viple vr synth combine";
+    cs.body = kTilesSynthBody;
+    cs.input = PL_SHADER_SIG_NONE;
+    cs.output = PL_SHADER_SIG_COLOR;
+    cs.descriptors = dd;
+    cs.num_descriptors = 3;
+    cs.variables = vv;
+    cs.num_variables = 10;
+    if (!pl_shader_custom(shs, &cs)) {
+        pl_dispatch_abort(m_Dp, &shs);
+        return fail("synth shader rejected");
+    }
+    pl_color_repr repr = mapped->repr;
+    repr.alpha = PL_ALPHA_NONE;
+    pl_shader_decode_color(shs, &repr, nullptr);
+    pl_color_space src = mapped->color;
+    pl_color_space dst = targetProto->color;
+    pl_color_space_infer_map(&src, &dst);
+    pl_shader_color_map(shs, nullptr, src, dst, nullptr, false);
+    pl_shader_var mv[3] = {};
+    mv[0].var = pl_var_vec2("vs_tile");
+    mv[0].data = tile;
+    mv[1].var = pl_var_float("vs_enc");
+    mv[1].data = &enc;
+    mv[2].var = pl_var_float("vs_ttop");
+    mv[2].data = &ttop;
+    for (pl_shader_var& v : mv) {
+        v.dynamic = true;
+    }
+    pl_custom_shader ms = {};
+    ms.description = "viple vr fovea tiles mask";
+    ms.body = kTilesMaskBody;
+    ms.input = PL_SHADER_SIG_COLOR;
+    ms.output = PL_SHADER_SIG_COLOR;
+    ms.variables = mv;
+    ms.num_variables = 3;
+    if (!pl_shader_custom(shs, &ms)) {
+        pl_dispatch_abort(m_Dp, &shs);
+        return fail("mask shader rejected");
+    }
+    pl_dispatch_params dpar = {};
+    dpar.shader = &shs;
+    dpar.target = swTex;
+    dpar.rect = {0, 2 * th, 2 * tw, 4 * th};
+    if (!pl_dispatch_finish(m_Dp, &dpar)) {
+        return fail("synth pass failed");
+    }
+    if (flowOk) {
+        *synthMeta = meta;
+        *synthOk = true;
+    }
+    m_HavePrevSmall = smallOk;
+    m_HavePrevMeta = hasMeta;
+    m_PrevMeta = meta;
+    m_PrevPts = pts;
+    m_SmallCur = prev;
     return true;
 }
 

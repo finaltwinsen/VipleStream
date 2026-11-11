@@ -223,6 +223,12 @@ reset 本身的 bug：reset 把 RTP 序號基準清成 0，序號 ≥ 32768 的�
 ```
 [VIPLE-FREEZE] no decoded frame for %llu ms: dec=<相位> %llu ms in=%d out=%d liveFrames=%d | render=<相位> %llu ms renderQueue=%d
 [VIPLE-FREEZE] recovered after %llu ms (liveFrames=%d)
+[VIPLE-FREEZE] decoder stuck submitting a packet for %llu ms (in=%d out=%d) - recreating the decoder (attempt N of 4)   ← §DEC-STUCK-RESET（2026-11-11）
+[VIPLE-FREEZE] decoder stuck submitting a packet again after 4 recreations - giving up
+FFmpeg: [hevc_v4l2m2m …] capture buffer N outside draining: last=1 bytesused=0 -> decoder START sent, empty buffer returned to the driver
+                                                                                    ← 我們補在 FFmpeg 的那一段（§DEC-STUCK-RESET 的根因修正）：開場的來源變更交握走到會卡死的那個順序、已經接回去
+[VIPLE-VR-SYNTH] tiles: <原因> - frame synthesis off for this session                  ← 分塊畫面的補幀失敗（之後照舊重送真的那一張）
+[VIPLE-FREEZE] (dev) injected: decoder thread hangs on packet N                       ← `--vr-inject-dec-stuck N`
 [VIPLE-FREEZE] beat liveFrames=%d max=%d in=%d out=%d
 ```
 
@@ -1803,8 +1809,8 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-MEDIA] file denied root=<n> (<原因>)            ← 路徑跑出分享資料夾、不存在、或不是檔案
 [VIPLE-MEDIA] thumb denied root=<n> (<原因>) / thumb unavailable root=<n>: <原因>   ← §VR-PLAYER-THUMB：縮圖的路徑不對，或系統拿不到縮圖（Windows Shell／Linux 快取與 ffmpeg 都沒有）；成功的只在 debug 等級印耗時
 ```
-- 只有 HTTPS、配對過的 client。`media_dirs` 沒設時根是整台 PC 的磁碟機（`<Kind>drive</Kind>`，編號＝磁碟機代號 A＝0…；
-  Linux 是 `/`）；有設時是那些資料夾（`folder`）；`media_share = disabled` 時 `/viple/media/roots` 回空清單、其他回 404。
+- 只有 HTTPS、配對過的 client。`media_dirs` 沒設時根是預設資料夾（2.0.134 起；Windows「公用影片」、Linux `~/Videos`，`folder`）；
+  `media_dirs = *` 時是整台 PC 的磁碟機（`<Kind>drive</Kind>`，編號＝磁碟機代號 A＝0…；Linux 是 `/`）；其他值是那些資料夾（`folder`）；`media_share = disabled` 時 `/viple/media/roots` 回空清單、其他回 404。
 
 ### `[VIPLE-STEAM-QUIT]` —— 「結束 APP」關掉 Steam 遊戲（server，§STEAM-QUIT，2.0.22）
 
@@ -1884,3 +1890,12 @@ pwsh scripts\benchmark\analyze_client_log.ps1 -Path C:\Users\me\Downloads -Json 
   （2.0.121 起改印它蓋住的範圍；之前印的是注視中心）。
 - `centre layer pass failed - back to one full-size image for this session`：中央區那一趟失敗，整場改回單一大圖。
 - `[VIPLE-VR-PASS]` 裡中央區那一趟記在 `other:`。
+
+### 2026-11-11 新增（2.0.130～133）
+- host `[VIPLE-CAP-PHASE] 10s: pulls=<次> pulled=<ms> regroups=<次> lastAge=<ms>`：§CAP-PHASE 桌面擷取節拍貼著畫面出現的時間。pulls＝這 10 秒把節拍往前拉的次數與總量；regroups＝節拍到了畫面還沒來、改成等畫面並重新定錨的次數；lastAge＝最後一張「出現 → 被擷取」的時間。10 秒內兩者都是 0 就不印。設定 `capture_phase_lock`（預設開）。
+- host `[steam-watchdog <appid>] game exited (VR scene process <pid> ended; …)`：§VR-EXIT-FAST，PCVR 時遊戲行程（SteamVR 的場景程式）一結束就收串流，不等 Steam 的旗標。
+- host `[VIPLE-VR-ABR-FAST] cut reason=quality-trim …`／`ramp reason=quality-restore`：§VR-ABR-TRIM-PROP，品質過剩時的調降幅度隨 QP 離門檻的距離加大（5%～25%）；QP 回到飽和門檻以上時幾步內補回調降前的碼率。
+- host `RTSP ANNOUNCE rejected: packetSize=… minRequiredFecPackets=… audio packetDuration=…`：§REVIEW-1111 參數超出範圍，回 400。
+- client `[VIPLE-PACER10] n=<張> pace p05/p50/p95=… ms rend p05/p50/p95=… ms | at vsync: empty=<次> one=<次> more=<次> late=<次> | display=<Hz> stream=<fps>`：節拍器把「佇列」拆成等垂直同步交接（pace）與交接後等繪製（rend）；at vsync＝每次垂直同步時 pacing 佇列的張數分布（more＝多排了一格以上），late＝垂直同步到了才來的張數。
+- client `[VIPLE-PACER-SEQ] drops=<累計> <逐幀 pace，0.1 ms 為單位，最後 240 張>`：診斷用（§LAT-2D 3a 查完後移除）。
+- client `[VIPLE-DEC] an abandoned decoder thread came back from the hardware decoder - parking it for good`：§DEC-ABANDON，被放生的解碼執行緒從硬體解碼器醒來，原地停住不再碰已釋放的物件。

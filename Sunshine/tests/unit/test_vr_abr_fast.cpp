@@ -742,6 +742,57 @@ TEST_F(VrAbrFastTest, QualityTrimReducesBitrateWithoutHoldAndRecoversWhenQpRises
   EXPECT_GT(c.ramps(), 0);
 }
 
+// 5b. §VR-ABR-TRIM-PROP：QP 比門檻（15）低越多，單步收得越多；QP 13 -> ×0.95×2^(-2/12)，QP 9 -> 封頂 −25%
+TEST_F(VrAbrFastTest, QualityTrimStepGrowsWithQpGap) {
+  auto first_trim = [&](int qp_x100) {
+    fast::fast_controller_t c(kConfigured50Mbps);
+    for (int i = 0; i < 100; ++i) {
+      const auto t = t0 + i * 100ms;
+      if (i % 5 == 0) {
+        c.on_quality(qp_x100, 1, t);
+      }
+      EXPECT_FALSE(c.tick(t).has_value());
+    }
+    c.on_quality(qp_x100, 1, t0 + 10000ms);
+    auto r = c.tick(t0 + 10000ms);
+    EXPECT_TRUE(r.has_value());
+    return r.value_or(0);
+  };
+  EXPECT_EQ(first_trim(1500), 47500);
+  EXPECT_EQ(first_trim(1300), 42318);
+  EXPECT_EQ(first_trim(900), 37500);
+  EXPECT_EQ(first_trim(100), 37500);
+}
+
+// 5c. §VR-ABR-TRIM-PROP 回程：quality-trim 收下來的碼率，QP 變差時幾步內補回收之前的水準（不超過）
+TEST_F(VrAbrFastTest, QualityRestoreReturnsToPreTrimRateQuickly) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  auto t = t0;
+  // 載入畫面：QP 4，30 秒
+  for (int i = 0; i <= 300; ++i) {
+    t = t0 + i * 100ms;
+    if (i % 5 == 0) {
+      c.on_quality(400, 1, t);
+    }
+    c.tick(t);
+  }
+  const int low = c.applied_kbps();
+  EXPECT_LT(low, 15000);
+  EXPECT_EQ(c.cuts(), 0);
+  // 進場景：QP 27，10 秒內要回到 3 萬以上、且不超過收之前的 5 萬
+  const auto t1 = t;
+  for (int i = 1; i <= 100; ++i) {
+    t = t1 + i * 100ms;
+    if (i % 5 == 0) {
+      c.on_quality(c.applied_kbps() < 30000 ? 2700 : 1800, 1, t);
+    }
+    c.tick(t);
+  }
+  EXPECT_GE(c.applied_kbps(), 30000);
+  EXPECT_LE(c.applied_kbps(), 50000);
+  EXPECT_EQ(c.cuts(), 0);
+}
+
 // 6. 解碼：p95 = 0.9×period -> 不回升；連 2 筆 1.1×period -> decode-overload 降 10%；之後 4 s 沒樣本 -> 解除
 TEST_F(VrAbrFastTest, DecodeTightBlocksRampAndOverloadCutsByTenPercent) {
   fast::fast_controller_t c(kConfigured50Mbps);

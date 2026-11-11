@@ -13,7 +13,7 @@
  *   - 實際送達速率（on_rates）：鏈路飽和（send >= recv * 1.05）時，壅塞降碼一步落至 clamp(0.95 * recv / send, 0.5, 0.85)。
  *     §ABR-SHORTFALL（11-05）：送出比收到多 15% 以上連續 2 次回報（約 1 秒）＝已經在排隊，直接降（原因 rate-shortfall+delay），
  *     不等延遲趨勢累積（模擬頭盔實測：送 84.8／收 58.6 Mbps 時單向延遲 p95 83 ms，趨勢要約 10 秒才判 overuse）。
- *   - 畫質飽和（on_quality）：H.264/HEVC QP <= 22 時暫停回升；連續 10 秒 QP <= 17 時每 3 秒小幅回收 5%（quality-trim）。
+ *   - 畫質飽和（on_quality）：H.264/HEVC QP <= 22 時暫停回升；連續 10 秒 QP <= 15 時每 3 秒回收 5%～25%（quality-trim，QP 離門檻越遠收越多）。
  *   - 解碼負載（on_decode）：p95 > 0.85 * period 時暫停回升（有效 3 秒）；連 2 筆 > 1.0 * period 觸發 decode-overload 中度降碼。
  *   - 丟包分類：
  *     * 延遲過載時丟包（或剛脫離過載 1.5 秒內）-> 視為網路壅塞降碼（原因加註 +delay）。
@@ -585,9 +585,16 @@ namespace vr::abr {
       if ((state_ == fast_state_e::healthy || state_ == fast_state_e::ramp) && check_quality_trim_eligible(now)) {
         if (last_trim_time_ == steady::time_point{} || now - last_trim_time_ >= k_fast_quality_trim_interval) {
           const int eff_floor = floor_kbps();
-          int new_target = static_cast<int>(std::round(applied_kbps_ * 0.95));
+          // §VR-ABR-TRIM-PROP（2026-11-11）：步幅隨「QP 比門檻低多少」加大。QP 每低 6 碼率約多一倍，所以離門檻
+          // gap 個 QP 時碼率約多了 2^(gap/6) 倍；每步只收回其中一半（留餘裕，不要一步收過頭又得回升），再乘原本的 5%，
+          // 單步最多收 25%。QP 剛好在門檻時仍是原本的 −5%。實測（桌球、分塊小）開場 QP 約 10：原本 30 秒只從 49 降到
+          // 36 Mbps，約一分鐘後才到穩態的 32 Mbps，這段時間頭盔白白多解碼、多耗電。
+          const double gap_qp = std::max(0, k_fast_qp_trim_threshold_x100 - last_qp_x100_) / 100.0;
+          const double factor = std::max(0.75, 0.95 * std::pow(2.0, -gap_qp / 12.0));
+          int new_target = static_cast<int>(std::round(applied_kbps_ * factor));
           new_target = std::max(eff_floor, new_target);
           if (new_target < applied_kbps_) {
+            trim_origin_kbps_ = std::max(trim_origin_kbps_, applied_kbps_);
             last_trim_time_ = now;
             applied_kbps_ = new_target;
             current_target_kbps_ = new_target;
@@ -619,13 +626,29 @@ namespace vr::abr {
           const auto interval = get_ramp_interval();
           const int step = calculate_ramp_step(interval);
           int new_target = applied_kbps_ + step;
+          const char *reason = "ramp-clean";
+          // §VR-ABR-TRIM-PROP（回程）：這個碼率是 quality-trim 收下來的（不是網路塞車降的），畫面一變複雜、QP 回到飽和門檻
+          // 以上，就照 QP 離「門檻中間值」的距離一步補回去，上限是收之前的碼率——那個碼率幾十秒前網路才剛送得動。
+          // 實測（桌球）：載入畫面 QP 約 4，碼率被收到 3 Mbps；進場景後 QP 27，原本的回升 40 秒才到 12 Mbps。
+          if (trim_origin_kbps_ > applied_kbps_ && last_qp_x100_ > k_fast_qp_saturated_x100) {
+            const double mid_x100 = (k_fast_qp_saturated_x100 + k_fast_qp_trim_threshold_x100) / 2.0;
+            const double up = std::pow(2.0, (last_qp_x100_ - mid_x100) / 600.0);
+            const int restored = static_cast<int>(std::min<double>(trim_origin_kbps_, std::round(applied_kbps_ * up)));
+            if (restored > new_target) {
+              new_target = restored;
+              reason = "quality-restore";
+            }
+          }
+          if (new_target >= trim_origin_kbps_) {
+            trim_origin_kbps_ = 0;
+          }
           if (new_target >= eff_cap) {
             new_target = eff_cap;
             state_ = fast_state_e::healthy;
           }
           current_target_kbps_ = new_target;
           applied_kbps_ = new_target;
-          last_reason_ = "ramp-clean";
+          last_reason_ = reason;
           next_ramp_ = now + get_ramp_interval();
           ++ramps_count_;
           return new_target;
@@ -961,6 +984,7 @@ namespace vr::abr {
       current_target_kbps_ = new_target;
       hold_until_ = now + get_hold_duration();
       ++cuts_count_;
+      trim_origin_kbps_ = 0;  // 網路降的碼率不可以用 quality-restore 一步補回去
     }
 
     int configured_kbps_ = 0;
@@ -1053,6 +1077,7 @@ namespace vr::abr {
     int last_codec_ = -1;
     steady::time_point qp_low_start_{};
     steady::time_point last_trim_time_{};
+    int trim_origin_kbps_ = 0;  ///< §VR-ABR-TRIM-PROP：這一串 quality-trim 開始前的碼率（0＝沒有）；壅塞降碼時歸零
 
     steady::time_point decode_tight_until_{};
     int consecutive_decode_overload_ = 0;

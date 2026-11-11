@@ -626,6 +626,8 @@ prepare_manifest()
 	mkdir -p "$MANIFEST_DIR" || return 1
 	cp -- "$FLATPAK_SRC_DIR/$APP_ID.yml" "$MANIFEST_DIR/" || return 1
 	cp -R -- "$FLATPAK_SRC_DIR/gamescope-wsi" "$MANIFEST_DIR/" || return 1
+	# manifest 裡 type: patch 的來源（路徑相對於 manifest）要跟著過去
+	cp -- "$FLATPAK_SRC_DIR"/*.patch "$MANIFEST_DIR/" 2>/dev/null || true
 	printf '%s\n' "$FLAVOR" > "$MANIFEST_DIR/flavor.txt" || return 1
 
 	if [ "$FLAVOR" = "dev" ]; then

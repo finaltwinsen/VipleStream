@@ -232,6 +232,9 @@ namespace config {
     // 環境變數 VIPLE_SMOOTH_PACING 只保留為 dev-only 覆寫（優先於這裡的值），
     // 在 apply_config 解析完 config 後套用，所以本欄位存的是最終生效值。
     bool smooth_pacing = false;
+
+    // §CAP-PHASE（2026-11-11）：桌面擷取的節拍貼著畫面出現的時間（見 display_base.cpp）。預設開。
+    bool capture_phase_lock = true;
   };
 
   /**
@@ -414,7 +417,7 @@ namespace config {
 
     overload_e capture_overload = overload_e::late;
 
-    /// §VR-GPU-PRIO（2026-10-11）：vr_gpu_priority（只影響 Windows 的 PCVR 擷取期間）。high（預設）＝和之前相同：擷取期間
+    /// §VR-GPU-PRIO（2026-10-11）：vr_gpu_priority（只影響 Windows 的 PCVR 擷取期間）。high＝2.0.133 以前的預設：擷取期間
     /// 把 server 行程的 GPU 排程優先權由 REALTIME 降成 HIGH。realtime＝擷取期間不降（硬體加速 GPU 排程開著、而且
     /// nvenc_realtime_hags 關著時仍然用 HIGH，和桌面串流的規則相同）。
     /// 為什麼要有這個鍵：HIGH 和遊戲在同一個排程層級，遊戲把 GPU 佔滿時 server 的複製、色彩轉換與編碼器的前處理要排在
@@ -424,7 +427,7 @@ namespace config {
       realtime,
     };
 
-    gpu_priority_e gpu_priority = gpu_priority_e::high;
+    gpu_priority_e gpu_priority = gpu_priority_e::realtime;  // 2026-11-11 使用者定案改預設（原本 high）
 
     /// §VR-GAZE-FOVEA（2026-10-31）：vr_gaze_fovea（2.0.30 起 enabled 預設）。enabled＝眼動追蹤驅動注視點渲染（需 client 宣告支援）。
     bool gaze_fovea = true;
@@ -457,7 +460,8 @@ namespace config {
     std::string external_ip;
 
     // VipleStream 2.0 §VR-PLAYER（V3）：已配對的 client（頭盔影片模式）可以瀏覽、播放這台 PC 上的影片。
-    // media_share=false＝整個關掉；media_dirs 空（預設）＝整台 PC（每一個磁碟機，Linux 是 /），有設＝只開放這些資料夾
+    // media_share=false＝整個關掉；media_dirs 空（預設）＝只開放預設資料夾（Windows「公用影片」、Linux ~/Videos；§MEDIA-DEFAULT），
+    // 有設＝只開放這些資料夾；單獨一個 "*"＝整台 PC（每一個磁碟機，Linux 是 /）
     bool media_share = true;
     std::vector<std::string> media_dirs;
   };

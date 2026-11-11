@@ -320,6 +320,12 @@ private:
     bool tilesFor(int fw, int fh, int* tw, int* th, int* rw, int* rh) const;
     // §VR-FOVEA-TILES：整張 1:1 轉進 swapchain（同樣的排法），注視點那兩塊的邊緣做 alpha 漸層（預乘、線性光）
     bool renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int tw, int th, const char** why);
+    // §VR-SYNTH＋§VR-FOVEA-TILES（2026-11-11）：分塊畫面的補幀（swapchain 兩倍高，下半是合成的那一張，同樣的排法）
+    bool renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int tw, int th, int rw, int rh,
+                          const float org[4], bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk,
+                          VIPLE_VR_FRAME_META* synthMeta);
+    // §VR-SYNTH：估扣掉頭部轉動之後的位移場（m_Small／m_Mid → m_Flow）；renderSynth 與 renderTilesSynth 共用
+    bool synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4], float fvCyR, float fvU0);
     bool ensureFull(int fw, int fh);
     // fv＝(a, cxL, cxR, cyL)（shader 的 vec4 vs_fv）、*cyR＝右眼的垂直中心（shader 的 float vs_cyr）
     void loadFoveation(float fv[4], float* cyR, float* u0) const;

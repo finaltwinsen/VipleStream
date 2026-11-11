@@ -236,6 +236,11 @@ modules:
         url: https://github.com/cgutman/FFmpeg.git
         # branch: moonlight_9.0_r1（cgutman 會 rebase，分支 head 會變；只信 commit）
         commit: 'd17de7e33f1332cc2fb3f5afab9ed4f29699c5a0'
+      # §DEC-STUCK-RESET（2026-11-11）：v4l2m2m 在「不是收尾」時拿到標記 LAST 的 capture 緩衝區，要在那裡送
+      # V4L2_DEC_CMD_START 才接得上（來源變更事件當下送的那一次可能太早、被驅動丟掉），空的緩衝區還給驅動不當影格。
+      # 頭盔 iris 偶發整場沒畫面時的現象（開場多一張 pts=0 的空影格、之後驅動不再吃輸入）對得上這個順序問題。
+      - type: patch
+        path: ffmpeg-v4l2m2m-last-buffer.patch
 
   # libplacebo 選 B（v7.360.1）。若和 FFmpeg 9 的 libav helper 編不過，退回 A：
   # Flathub 的 4d82c689 加 libplacebo-disable-internally-synchronized-queues.patch

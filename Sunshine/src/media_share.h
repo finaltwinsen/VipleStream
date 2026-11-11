@@ -34,7 +34,10 @@ namespace media_share {
   /// 功能有沒有開（至少一個存在的分享資料夾）
   bool enabled();
 
-  /// 存在的根：有設 media_dirs 時是那些資料夾（不存在的略過），沒設時是整台 PC 的磁碟機
+  /// §MEDIA-DEFAULT：沒設 media_dirs 時開放的預設資料夾（Windows「公用影片」、Linux ~/Videos）；找不到時回空路徑
+  std::filesystem::path default_dir();
+
+  /// 存在的根：有設 media_dirs 時是那些資料夾（不存在的略過；單獨一個 "*"＝整台 PC 的磁碟機），沒設時是預設資料夾
   std::vector<root_t> roots();
 
   /**

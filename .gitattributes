@@ -7,3 +7,5 @@
 
 # Shell scripts must use LF
 *.sh text eol=lf
+# patch 檔在 Linux 建置機上套用，一律 LF（CRLF 會讓 patch 套不上）
+*.patch text eol=lf

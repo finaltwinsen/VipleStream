@@ -814,15 +814,23 @@ namespace nvhttp {
       return false;
     }
 
-    auto &sess = std::begin(map_id_sess)->second;
-    getservercert(sess, tree, pin);
-    sess.client.name = name;
+    // §REVIEW-1111：getservercert 失敗時（順序不對、salt 太短——同一個 PIN 送兩次就會遇到）fail_pair 會把這個 session
+    // 從 map 刪掉。原本之後還繼續寫 sess.client.name、用 sess 裡的 response，等於用已經解構的物件。
+    // 先把等著的 response 拿出來，呼叫完再用 uniqueID 重新找一次 session。
+    auto first = std::begin(map_id_sess);
+    const std::string unique_id = first->second.client.uniqueID;
+    auto async_response = std::move(first->second.async_insert_pin.response);
+    first->second.async_insert_pin.response = std::decay_t<decltype(async_response.left())>();
+    getservercert(first->second, tree, pin);
+    const auto alive = map_id_sess.find(unique_id);
+    if (alive != std::end(map_id_sess)) {
+      alive->second.client.name = name;
+    }
 
     // response to the request for pin
     std::ostringstream data;
     pt::write_xml(data, tree);
 
-    auto &async_response = sess.async_insert_pin.response;
     if (async_response.has_left() && async_response.left()) {
       async_response.left()->write(data.str());
     } else if (async_response.has_right() && async_response.right()) {
@@ -831,10 +839,8 @@ namespace nvhttp {
       return false;
     }
 
-    // reset async_response
-    async_response = std::decay_t<decltype(async_response.left())>();
-    // response to the current request
-    return true;
+    // response to the current request（配對已經失敗、session 被刪掉時回報失敗）
+    return alive != std::end(map_id_sess);
   }
 
 #ifdef _WIN32
@@ -2470,9 +2476,14 @@ namespace nvhttp {
     std::lock_guard<std::mutex> lk{g_switch_tasks_mu};
     for (auto it = g_switch_tasks.begin(); it != g_switch_tasks.end();) {
       auto &t = *it->second;
-      std::lock_guard<std::mutex> tlk{t.mu};
-      bool finished = t.finished_at != std::chrono::steady_clock::time_point{};
-      if (finished && (now - t.finished_at) > keep) {
+      bool expired = false;
+      {
+        // §REVIEW-1111：鎖只包到讀完為止。原本整個迴圈本體都鎖著，erase 若剛好釋放最後一個參考，
+        // 任務會在自己的 mutex 還鎖著時被解構。
+        std::lock_guard<std::mutex> tlk{t.mu};
+        expired = t.finished_at != std::chrono::steady_clock::time_point{} && (now - t.finished_at) > keep;
+      }
+      if (expired) {
         it = g_switch_tasks.erase(it);
       } else {
         ++it;

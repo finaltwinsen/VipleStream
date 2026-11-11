@@ -358,7 +358,8 @@ except Exception:
     # 地點：目前連著的家用 Wi-Fi 名稱的雜湊（不存名稱本身）；暫停中沿用上一次的
     ssid="$(iw dev wlan0 link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p')"
     [ -n "$ssid" ] && loc="$(printf '%s' "$ssid" | sha256sum | cut -c1-16)"
-    wl="$(nmcli -t -f DEVICE,STATE device 2>/dev/null | sed -n 's/^wlan0://p')"
+    # LC_ALL=C：nmcli 的狀態字會跟著語系翻譯（connected → 已連線），介面那邊是比對英文
+    wl="$(LC_ALL=C nmcli -t -f DEVICE,STATE device 2>/dev/null | sed -n 's/^wlan0://p')"
     mkdir -p -m 0700 "$DIR"
     APPLIED="$applied" STATION="$station" LOC="$loc" WL="$wl" ERR="$err" python3 -c 'import json,os,time
 print(json.dumps({"t":int(time.time()),"applied":os.environ["APPLIED"],"ap_station":os.environ["STATION"]=="true",

@@ -1273,7 +1273,8 @@ namespace stream {
 
       // increase the FEC percentage for this frame if the parity shard minimum is not met
       if (parity_shards < minparityshards && fecpercentage != 0) {
-        parity_shards = minparityshards;
+        // §REVIEW-1111：Reed-Solomon 一個區塊最多 255 片；超過時 reed_solomon_new 回空指標，下面直接解參考
+        parity_shards = data_shards < DATA_SHARDS_MAX ? std::min<size_t>(minparityshards, DATA_SHARDS_MAX - data_shards) : 0;
         fecpercentage = (100 * parity_shards) / data_shards;
 
         BOOST_LOG(verbose) << "Increasing FEC percentage to "sv << fecpercentage << " to meet parity shard minimum"sv << std::endl;
@@ -1334,6 +1335,11 @@ namespace stream {
           s_ps = (int) parity_shards;
         }
 
+        if (!s_rs) {
+          // 片數組合不合法（不該發生：上游已限制每區塊的資料片數）：這一塊不送，不要對空指標編碼
+          s_ds = s_ps = 0;
+          return {};
+        }
         reed_solomon_encode(s_rs.get(), shards_p.begin(), (int) nr_shards, (int) blocksize);
       }
 
@@ -2418,6 +2424,58 @@ namespace stream {
     }
   }
 
+  // §REVIEW-1111：§VR-MULTILINK-HOTADD 用的主機 IPv4 位址快照。第一次要的時候起一條背景執行緒每秒更新一次，
+  // 5 秒沒有人要就自己結束（下次再起）。狀態放在不釋放的堆積物件上，行程結束時背景執行緒還在跑也不會踩到已解構的東西。
+  static bool vr_link_addr_snapshot(std::vector<std::array<uint8_t, 4>> &out) {
+    struct state_t {
+      std::mutex mtx;
+      std::vector<std::array<uint8_t, 4>> addrs;
+      bool valid = false;
+      std::atomic<int64_t> last_req_ms {0};
+      std::atomic<bool> running {false};
+    };
+    static state_t *const st = new state_t;
+    const auto now_ms = []() {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    st->last_req_ms.store(now_ms(), std::memory_order_relaxed);
+    if (!st->running.exchange(true)) {
+      std::thread([now_ms]() {
+        platf::set_thread_name("vr_link_addrs");
+        for (;;) {
+          std::vector<std::array<uint8_t, 4>> addrs;
+          for (const auto &iface : platf::enum_net_interfaces()) {
+            boost::system::error_code ec;
+            const auto a = boost::asio::ip::make_address_v4(iface.address, ec);
+            if (!ec) {
+              addrs.push_back(a.to_bytes());
+            }
+          }
+          std::sort(addrs.begin(), addrs.end());
+          addrs.erase(std::unique(addrs.begin(), addrs.end()), addrs.end());
+          {
+            std::lock_guard lk(st->mtx);
+            st->addrs = std::move(addrs);
+            st->valid = true;
+          }
+          std::this_thread::sleep_for(1s);
+          if (now_ms() - st->last_req_ms.load(std::memory_order_relaxed) > 5000) {
+            std::lock_guard lk(st->mtx);
+            st->valid = false;  // 下次重新起來之前不要給舊資料
+            st->running.store(false);
+            return;
+          }
+        }
+      }).detach();
+    }
+    std::lock_guard lk(st->mtx);
+    if (!st->valid) {
+      return false;
+    }
+    out = st->addrs;
+    return true;
+  }
+
   static void vr_control_tick(session_t *session, std::chrono::steady_clock::time_point now) {
     auto &vr_state = *session->vr;
     auto &ctl = session->vrCtrl;
@@ -2485,17 +2543,10 @@ namespace stream {
       // 不在 vr_hotspot_connect 裡直接送：那是 worker 執行緒，而 send_vr_s2c 限定 control 執行緒。
       // 只在 client 也協商了 F_HOTADD 時才送（舊 client 完全不會收到 0x09）。
       if (session->vrLinks && (session->vrLinks->features() & VIPLE_VR_LINK_F_HOTADD)) {
+        // §REVIEW-1111：列舉網卡（GetAdaptersAddresses＋每張網卡一行 log）改在背景執行緒做，這裡只讀快照。
+        // 這條是 VR 的控制執行緒，一輪的預算只有 4 ms（追蹤、LATCH、震動都在這裡），原本每秒有一輪被列舉佔掉。
         std::vector<std::array<uint8_t, 4>> addrs;
-        for (const auto &iface : platf::enum_net_interfaces()) {
-          boost::system::error_code ec;
-          const auto a = boost::asio::ip::make_address_v4(iface.address, ec);
-          if (!ec) {
-            addrs.push_back(a.to_bytes());
-          }
-        }
-        std::sort(addrs.begin(), addrs.end());
-        addrs.erase(std::unique(addrs.begin(), addrs.end()), addrs.end());
-        if (!ctl.linkAddrsSent || addrs != ctl.linkAddrs) {
+        if (vr_link_addr_snapshot(addrs) && (!ctl.linkAddrsSent || addrs != ctl.linkAddrs)) {
           ::vr::s2c_msg_t msg;
           msg.tlv = ::vr::multilink::format_addrs_tlv(addrs);
           msg.reliable = true;
