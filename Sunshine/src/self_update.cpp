@@ -661,6 +661,10 @@ catch {
           return false;
         }
       }
+      // §REVIEW-1111：放棄時把 updater 結束掉。原本只關 handle：UAC 對話框還開著，使用者過了這 240 秒才按「是」，
+      // 提升後的腳本沒有人在等它，卻照樣強制結束 server、覆蓋檔案、重開。
+      TerminateProcess(child.process, 1);
+      WaitForSingleObject(child.process, 3000);
       CloseHandle(child.process);
       if (error) *error = "updater did not become ready (UAC pending or failed); see " + log_file.string();
       return false;

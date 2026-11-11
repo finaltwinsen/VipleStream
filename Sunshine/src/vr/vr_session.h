@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <thread>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -628,16 +629,26 @@ namespace vr {
         return;
       }
       const uint16_t seq = static_cast<uint16_t>(body[0] | (body[1] << 8));
-      std::lock_guard lk(mic_mtx_);
-      if (!mic_ && !mic_tried_) {
-        mic_tried_ = true;
-        mic_ = mic::sink_t::create();
-        if (!mic_) {
-          queue_notice(VIPLE_VR_NOTICE_MIC_UNAVAILABLE);
-        }
+      // §REVIEW-1111：播放裝置改在背景執行緒開。create() 要列舉端點、初始化並啟動 WASAPI，第一次常常是幾十到幾百毫秒；
+      // 原本在這裡同步做——這是 VR 的控制執行緒（一輪 4 ms：追蹤、LATCH、LOSS、震動），走 QUIC 時還握著 IO 的鎖。
+      // 開好之前到的麥克風封包直接丟掉（開場的零點幾秒）。狀態放在 shared_ptr 裡：session 先結束時背景執行緒照樣能收尾。
+      auto &slot = *mic_slot_;
+      std::lock_guard lk(slot.mtx);
+      if (!slot.started) {
+        slot.started = true;
+        std::thread([s = mic_slot_]() {
+          auto sink = mic::sink_t::create();
+          std::lock_guard lk2(s->mtx);
+          s->failed = !sink;
+          s->sink = std::move(sink);
+        }).detach();
       }
-      if (mic_) {
-        mic_->push(seq, body + 2, len - 2);
+      if (slot.failed && !slot.notified) {
+        slot.notified = true;
+        queue_notice(VIPLE_VR_NOTICE_MIC_UNAVAILABLE);
+      }
+      if (slot.sink) {
+        slot.sink->push(seq, body + 2, len - 2);
       }
     }
 
@@ -652,9 +663,15 @@ namespace vr {
   private:
     mutable std::mutex padmode_mtx_;
     std::shared_ptr<padmode::controller_t> padmode_;
-    std::mutex mic_mtx_;  ///< §VR-MIC
-    std::unique_ptr<mic::sink_t> mic_;
-    bool mic_tried_ = false;
+    /// §VR-MIC：播放端與它的建立狀態（背景執行緒建立，見 on_mic）
+    struct mic_slot_t {
+      std::mutex mtx;
+      std::unique_ptr<mic::sink_t> sink;
+      bool started = false;
+      bool failed = false;
+      bool notified = false;
+    };
+    std::shared_ptr<mic_slot_t> mic_slot_ = std::make_shared<mic_slot_t>();
 
     enum class wave_phase_e {
       idle,

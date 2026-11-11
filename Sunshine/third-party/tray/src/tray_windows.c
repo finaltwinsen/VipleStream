@@ -39,6 +39,8 @@ static WNDCLASSEX wc;
 static NOTIFYICONDATAW nid;
 static HWND hwnd;
 static HMENU hmenu = NULL;
+static SRWLOCK s_menu_lock = SRWLOCK_INIT;  // VipleStream: guards hmenu swaps against the popup being tracked
+static HMENU s_tracked_menu = NULL;         // the menu TrackPopupMenu is showing right now (tray thread)
 static void (*notification_cb)() = 0;
 static UINT wm_taskbarcreated;
 
@@ -58,7 +60,20 @@ static LRESULT CALLBACK _tray_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARA
         POINT p;
         GetCursorPos(&p);
         SetForegroundWindow(hwnd);
-        WORD cmd = TrackPopupMenu(hmenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, p.x, p.y, 0, hwnd, NULL);
+        // VipleStream: tray_update() runs on other threads and used to destroy the previous menu unconditionally,
+        // also while TrackPopupMenu was still showing it (use after free). The menu being tracked is recorded here
+        // under a lock; tray_update() defers destroying that one until the popup has closed.
+        AcquireSRWLockExclusive(&s_menu_lock);
+        s_tracked_menu = hmenu;
+        ReleaseSRWLockExclusive(&s_menu_lock);
+        WORD cmd = TrackPopupMenu(s_tracked_menu, TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, p.x, p.y, 0, hwnd, NULL);
+        AcquireSRWLockExclusive(&s_menu_lock);
+        HMENU stale = (s_tracked_menu != hmenu) ? s_tracked_menu : NULL;
+        s_tracked_menu = NULL;
+        ReleaseSRWLockExclusive(&s_menu_lock);
+        if (stale != NULL) {
+          DestroyMenu(stale);
+        }
         SendMessage(hwnd, WM_COMMAND, cmd, 0);
         return 0;
       } else if (lparam == NIN_BALLOONUSERCLICK && notification_cb != NULL) {
@@ -283,8 +298,15 @@ int tray_loop(int blocking) {
 
 void tray_update(struct tray *tray) {
   UINT id = ID_TRAY_FIRST;
+  HMENU newmenu = _tray_menu(tray->menu, &id);
+  AcquireSRWLockExclusive(&s_menu_lock);
   HMENU prevmenu = hmenu;
-  hmenu = _tray_menu(tray->menu, &id);
+  hmenu = newmenu;
+  // VipleStream: the popup that is open right now keeps its menu until it closes (the tray thread destroys it then)
+  if (prevmenu != NULL && prevmenu == s_tracked_menu) {
+    prevmenu = NULL;
+  }
+  ReleaseSRWLockExclusive(&s_menu_lock);
   SendMessage(hwnd, WM_INITMENUPOPUP, (WPARAM) hmenu, 0);
 
   HICON icon = _fetch_icon(tray->icon, REGULAR);
