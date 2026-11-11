@@ -344,6 +344,7 @@ illegal instruction），`.deb` 的 Depends 也必須是 Ubuntu 的套件名。�
 容器裡要額外注意：
 - 要有 `sudo`（`linux_build.sh` 以 sudo 裝相依）與 `~/.bashrc`（腳本會 source）。
 - client 需要 `qt6-svg-plugins`（linuxdeploy-plugin-qt 會部署 `libqsvgicon.so`）。
+- client 需要 `librsvg2-bin`（`rsvg-convert` 把圖示 SVG 轉成 AppDir 根目錄的 `.DirIcon`；2026-11-11 起沒有它腳本會中止）。
 - **不要裝 `libffmpeg-nvenc-dev`**：server 會抓到系統的 NVENC 標頭而不是預編 FFmpeg 內附的那份，版本檢查會失敗。
 - 產物的 glibc 需求應為 2.43（Ubuntu 26.04），可用 `objdump -T` 核對。
 

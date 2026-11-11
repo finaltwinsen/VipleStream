@@ -50,6 +50,10 @@ namespace video {
     int vrProfile = 0;  // 1 = VR session（M1a stub）：強制 intra refresh、VR IDR cooldown、ABR 降碼不 IDR
     int vrIntraRefreshFrames = 0;  // LOSS 觸發的 intra-refresh wave 長度（幀）
     int vrIntraRefreshPeriodFrames = 0;  // 週期性 intra refresh 安全網的間隔（幀），0 = 關閉
+    /// §VR-FOVEA-QP：分塊（§VR-FOVEA-TILES）時，畫面最上面 vrPeriphRows 列像素是兩眼的全視野那一塊，
+    /// 編碼時 QP 加 vrPeriphQpDelta（0＝不分）。只有 NVENC 會用
+    int vrPeriphQpDelta = 0;
+    int vrPeriphRows = 0;
     int captureSource = 0;  // M1b S1-08：0 = 桌面（DDA／WGC），1 = VR（display_vr_t，driver 交來的 SBS ring）
     int packetSize = 1392;  // RTP packet size for PyroWave slot-aligned packetization
     /// §VR-NETBENCH（2026-11-08）：captureSource=1 時改由 display_vr_clip_t 播放預錄片段（VR 網路測試），不經過 SteamVR

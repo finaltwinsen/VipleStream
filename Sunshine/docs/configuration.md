@@ -3189,6 +3189,39 @@ not matter). Any other value is reported in the log as an invalid value and the 
     </tr>
 </table>
 
+### vr_fovea_periph_qp
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (Windows, NVENC): with @ref vr_fovea_tiles "foveation tiles", how much coarser the
+            whole-view tiles are quantized than the gaze tiles, as a QP difference. The whole-view tiles are scaled
+            down and only show through outside the gaze tile, so they can carry far fewer bits: a larger value lowers
+            the bitrate and the headset's decode time, and makes the area away from where the user looks blurrier.
+            `0` encodes all tiles alike; the default, `26`, is about what Steam's built-in streaming uses. Measured at 1152 per eye, 144 Hz: `12` cut the stream from about 104 to
+            74 Mbps (Small) and from 161 to 74 Mbps (Large), and the headset's decode time from 3.4 to 2.9 ms and
+            from 5.5 to 3.7 ms.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            26
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">0-30</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_fovea_periph_qp = 12
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_netbench_clip
 
 <table>

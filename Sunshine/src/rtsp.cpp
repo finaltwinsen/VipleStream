@@ -1313,6 +1313,11 @@ namespace rtsp_stream {
         override_field("framerate", config.monitor.framerate, neg.params.hz);
         override_field("slicesPerFrame", config.monitor.slicesPerFrame, 4);
         override_field("videoFormat", config.monitor.videoFormat, neg.video_format());
+        // §VR-FOVEA-QP：分塊時上半張＝兩眼的全視野那一塊，量化可以比注視點那塊粗（vr_fovea_periph_qp）
+        if (neg.tiles() && config::vr.fovea_periph_qp > 0) {
+          config.monitor.vrPeriphQpDelta = config::vr.fovea_periph_qp;
+          config.monitor.vrPeriphRows = neg.packed_height() / 2;
+        }
       } else if (config.monitor.width != neg.packed_width() || config.monitor.height != neg.packed_height()) {
         // stub 直接擷取目前桌面、照 client 在 SDP 要求的尺寸／codec 編碼；與 /launch 協商的
         // 打包尺寸、codec、Hz 不一致時只記警告，方便整合測試時對照 client 的設定。

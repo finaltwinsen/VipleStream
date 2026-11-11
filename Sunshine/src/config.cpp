@@ -1661,6 +1661,8 @@ namespace config {
     vr_opt::int_strict_f(vars, "vr_fovea_gaze_slew_dps", vr.fovea_gaze_slew_dps, 30, 600, false);
     // §VR-FOVEA-TILES（2026-11-10）：注視點改成每眼兩塊影像（disabled｜small｜medium｜large，預設 small）
     generic_f(vars, "vr_fovea_tiles", vr.fovea_tiles, vr_opt::fovea_tiles_from_view);
+    // §VR-FOVEA-QP（2026-11-11）：分塊時全視野那一塊比注視點那塊粗多少（QP 差，0＝不分）
+    vr_opt::int_strict_f(vars, "vr_fovea_periph_qp", vr.fovea_periph_qp, 0, 30, false);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

@@ -741,6 +741,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-SESSION] half-rate: display D Hz, stream S Hz                              ← §VR-HALF-RATE（client）：串流跑顯示更新率的一半
 [VIPLE-VR-SYNTH] texture setup failed|flow pass failed|combine pass failed - frame synthesis off for this session   ← §VR-SYNTH（client）：合成失敗，這個 session 改回重送
 [VIPLE-XR] 10s video … synth drawn=N shown=N[ (FAILED: off)]                          ← §VR-SYNTH：這 10 s 合成了幾張、顯示了幾次合成的那一格
+[VIPLE-VR-ENC] periphery qp delta=+N rows=R/H block=B map=WxH avgShift=S           ← §VR-FOVEA-QP（2026-11-11，host）：分塊時上半張
+                                                                                    （全視野那一塊）QP 加 N；rows＝加粗的區塊列數／總列數，avgShift＝回報給 ABR 時扣掉的平均值
 [VIPLE-VR-MTP10] … mismatch=N… synthGuard=N                                           ← §VR-SYNTH（2026-10-10，開著補幀才印）：這一格要顯示合成那一半，但 xrEndFrame 之前
                                                                                     又 release 了下一張的第一次發布（它的下半不是合成畫面）→ 改顯示上半的次數；穩態每 10 s 0～1
 [VIPLE-VR-ENC] probe: HEVC 10-bit supported|not supported                              ← §VR-10BIT：VR 探測（來源 display_vr）測 HEVC 10-bit 的結果

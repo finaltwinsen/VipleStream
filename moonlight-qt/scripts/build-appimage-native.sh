@@ -134,6 +134,12 @@ Plugins = plugins
 Imports = qml
 Qml2Imports = qml
 QTCONF
+# Patch 7（2026-11-11）：AppImage 規範要 AppDir 根目錄有 PNG 的 .DirIcon（檔案管理員顯示用）；
+# 只有 SVG 時 AppImage 目錄（appimage.github.io）的檢查會以「.DirIcon is missing」判失敗。
+# 從 SVG 轉一張 256×256 放根目錄。沒有 rsvg-convert 就明講並中止，不要默默出一個沒圖示的包。
+command -v rsvg-convert >/dev/null 2>&1 || fail "Unable to find 'rsvg-convert' (librsvg2-bin) - needed for the AppImage .DirIcon"
+rsvg-convert -w 256 -h 256 "$SOURCE_ROOT/app/res/moonlight.svg" -o "$DEPLOY_FOLDER/viplestream.png" || fail "rsvg-convert failed!"
+cp -f "$DEPLOY_FOLDER/viplestream.png" "$DEPLOY_FOLDER/.DirIcon" || fail "writing .DirIcon failed!"
 linuxdeploy --appdir $DEPLOY_FOLDER \
     --desktop-file $DEPLOY_FOLDER/usr/share/applications/viplestream.desktop \
     --icon-file $SOURCE_ROOT/app/res/moonlight.svg \

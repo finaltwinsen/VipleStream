@@ -5,6 +5,8 @@
 #pragma once
 
 // lib includes
+#include <cstdint>
+#include <vector>
 #include <ffnvcodec/nvEncodeAPI.h>
 
 // local includes
@@ -149,7 +151,12 @@ namespace nvenc {
       bool rfi = false;
       int video_format = 0;  // §VR：0 H.264、1 HEVC、2 AV1（選 codecPicParams 的哪一個）
       bool vr_intra_refresh = false;  // §VR：VR profile 下已開 intra refresh
+      int qp_map_avg_x100 = 0;  // §VR-FOVEA-QP：qp_delta_map 的平均值 ×100（回報給 ABR 的平均 QP 要扣掉）
     } encoder_params;
+
+    /// §VR-FOVEA-QP：每個編碼區塊（H.264 16×16、HEVC 32×32、AV1 64×64）一個 QP 差，逐列排；空＝不用。
+    /// 內容整場不變，每一幀交同一份給 NVENC。
+    std::vector<int8_t> qp_delta_map;
 
     std::string last_nvenc_error_string;
 

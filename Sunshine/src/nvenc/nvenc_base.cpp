@@ -267,6 +267,26 @@ namespace nvenc {
                                                                                             NV_ENC_MULTI_PASS_DISABLED;
 
     enc_config.rcParams.enableAQ = config.adaptive_quantization;
+
+    // §VR-FOVEA-QP（2026-11-11）：分塊的 VR 串流，上半張（兩眼的全視野那一塊）QP 加 vrPeriphQpDelta。
+    // 用 NVENC 的 QP 差分圖：每個編碼區塊一個值，疊在位元率控制選的 QP 上，所以 CBR 照常運作，省下的位元自然流到
+    // 注視點那塊。區塊大小依 codec（H.264 巨集區塊 16、HEVC CTB 32、AV1 superblock 64）。
+    qp_delta_map.clear();
+    encoder_params.qp_map_avg_x100 = 0;
+    if (client_config.vrPeriphQpDelta > 0 && client_config.vrPeriphRows > 0) {
+      const uint32_t blk = client_config.videoFormat == 0 ? 16u : (client_config.videoFormat == 1 ? 32u : 64u);
+      const uint32_t bw = (encoder_params.width + blk - 1) / blk;
+      const uint32_t bh = (encoder_params.height + blk - 1) / blk;
+      // 只有整個區塊都落在上半張的列才加；交界不在區塊邊界時，跨界那一列留給注視點那塊的品質
+      const uint32_t periph_rows = (std::min) (bh, (uint32_t) client_config.vrPeriphRows / blk);
+      const int8_t delta = (int8_t) std::clamp(client_config.vrPeriphQpDelta, 0, 30);
+      qp_delta_map.assign((size_t) bw * bh, 0);
+      std::fill_n(qp_delta_map.begin(), (size_t) bw * periph_rows, delta);
+      encoder_params.qp_map_avg_x100 = bh > 0 ? (int) (100u * (uint32_t) delta * periph_rows / bh) : 0;
+      enc_config.rcParams.qpMapMode = NV_ENC_QP_MAP_DELTA;
+      BOOST_LOG(info) << "[VIPLE-VR-ENC] periphery qp delta=+" << (int) delta << " rows=" << periph_rows << '/' << bh
+                      << " block=" << blk << " map=" << bw << 'x' << bh << " avgShift=" << encoder_params.qp_map_avg_x100 / 100.0;
+    }
     enc_config.rcParams.averageBitRate = client_config.bitrate * 1000;
 
     if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE)) {
@@ -630,6 +650,10 @@ namespace nvenc {
     });
 
     NV_ENC_PIC_PARAMS pic_params = {min_struct_version(NV_ENC_PIC_PARAMS_VER, 4, 6)};
+    if (!qp_delta_map.empty()) {  // §VR-FOVEA-QP
+      pic_params.qpDeltaMap = qp_delta_map.data();
+      pic_params.qpDeltaMapSize = (uint32_t) qp_delta_map.size();
+    }
     pic_params.inputWidth = encoder_params.width;
     pic_params.inputHeight = encoder_params.height;
     pic_params.encodePicFlags = force_idr ? NV_ENC_PIC_FLAG_FORCEIDR : 0;
@@ -694,7 +718,9 @@ namespace nvenc {
     }
 
     // §ABR-ADAPT：畫質飽和判斷用的平均 QP（NVENC 每幀都有，不另外花成本）
-    abr_signals::note_frame_qp(static_cast<int>(lock_bitstream.frameAvgQP), lock_bitstream.pictureType == NV_ENC_PIC_TYPE_IDR);
+    // §VR-FOVEA-QP：周邊那塊刻意加粗的量不算畫質變差——扣掉差分圖的平均值，ABR 看到的才是注視點那塊的 QP 水準
+    abr_signals::note_frame_qp(static_cast<int>(lock_bitstream.frameAvgQP) - (encoder_params.qp_map_avg_x100 + 50) / 100,
+                               lock_bitstream.pictureType == NV_ENC_PIC_TYPE_IDR);
 
     nvenc_encoded_frame encoded_frame {
       {data_pointer, data_pointer + lock_bitstream.bitstreamSizeInBytes},
