@@ -93,6 +93,11 @@ void VrTrackingSender::run()
 
     const int rateHz = m_DisplayHz * VIPLE_VR_TRACKING_RATE_MUL;
     const auto period = std::chrono::nanoseconds(1000000000LL / rateHz);
+    // §REVIEW-1111：一拍只有約 1.7～3.5 ms，原本是預設優先權——系統忙的時候晚醒 1 ms 以上就佔掉大半拍，
+    // host 來不及拿到這一拍就用上一拍的姿勢。和音訊執行緒同一級（不用即時級，免得反過來擠到顯示）。
+    if (SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH) < 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-POSE] could not raise the tracking thread priority: %s", SDL_GetError());
+    }
     // 合成 pose 沒有真的顯示時間，predictNs 固定用 3 個顯示週期（約等於 M1a 的管線延遲量級）
     const uint32_t predictNs = (uint32_t)(3LL * 1000000000LL / m_DisplayHz);
 

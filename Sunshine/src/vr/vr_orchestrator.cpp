@@ -524,6 +524,12 @@ namespace vr::orchestrator {
           step("arm", false, "rearm: driver not ready", t0);
           return fail(VIPLE_VR_STATE_CODE_STEAMVR_RESTART_REQUIRED, "re-arm from standby: driver not ready and a VR app is running");
         }
+        // §REVIEW-1111：wait_for 在「被要求停止」和「逾時」都回 false。原本只有 rearm 那條會分辨，其餘的把取消當成
+        // 逾時：接著照樣把 SteamVR／遊戲開起來，或回報成「Steam 沒登入」「SteamVR 啟動失敗」並把錯誤狀態留 10 秒。
+        // 每個等待之後、每個會啟動東西的動作之前都先看一次。
+        if (stop_requested()) {
+          return;
+        }
         need_launch = !ready;
       }
       step("arm", true, rearm ? "rearm" : (need_launch ? "launch" : "reuse"), t0);
@@ -553,6 +559,9 @@ namespace vr::orchestrator {
               BOOST_LOG(info) << "[VIPLE-VR-ORCH] steam not running (saved login) - started=" << started;
             }
           }
+          if (stop_requested()) {
+            return;
+          }
           if (!platform::launch_steamvr()) {
             return fail(VIPLE_VR_STATE_CODE_STEAMVR_LAUNCH_FAILED, "open_url");
           }
@@ -560,11 +569,17 @@ namespace vr::orchestrator {
           if (!platform::steam_logged_in() && !wait_for(60s, []() {
                 return platform::steam_logged_in();
               })) {
+            if (stop_requested()) {
+              return;
+            }
             return fail(VIPLE_VR_STATE_CODE_STEAM_NOT_LOGGED_IN, "steam not logged in");
           }
           if (!wait_for(30s, []() {
                 return platform::vrserver_pid() != 0;
               })) {
+            if (stop_requested()) {
+              return;
+            }
             step("launch-steamvr", false, "vrserver did not start", t0);
             return fail(VIPLE_VR_STATE_CODE_STEAMVR_LAUNCH_FAILED, "vrserver did not start in 30 s");
           }
@@ -673,6 +688,9 @@ namespace vr::orchestrator {
       // 11 LAUNCH_APP
       set_state(state_e::launch_app);
       t0 = steady::now();
+      if (stop_requested()) {
+        return;  // §REVIEW-1111：HMD 早就在呈現時上面的等待會直接成立、不看停止要求；取消了就不要再把遊戲開起來
+      }
       if (!job.app.vr_class && !job.app.vr_launch_url.empty()) {
         const bool ok = platform::launch_vr_app(job.app.vr_launch_url);
         step("launch-app", ok, ok ? ""s : "open_url"s, t0);  // 不致命
@@ -1073,11 +1091,14 @@ namespace vr::orchestrator {
 
   snapshot_t state() {
     snapshot_t s;
+    // §REVIEW-1111：先讀 seq、再讀內容。原本相反：讀完內容之後 publish 剛好寫入，就會拿到「舊內容＋新 seq」，
+    // 呼叫端以為這個 seq 已經送過，最後一次狀態（例如錯誤碼）就不會再送。先讀 seq 的話最壞是「舊 seq＋新內容」，
+    // 下一次看到 seq 變了會再讀一次，不會漏。
+    s.seq = g_seq.load();
     s.state = cur();
     s.stream_state = g_stream_state.load();
     s.progress = g_progress.load();
     s.code = g_code.load();
-    s.seq = g_seq.load();
     return s;
   }
 

@@ -765,7 +765,10 @@ Page {
             spacing: 24
 
             BusyIndicator {
-                running: launchingOverlay.visible
+                // §REVIEW-1111：不轉。轉圈的動畫讓整個介面以約 30 Hz 重畫、讀回、上傳到頭盔，
+                // 正好和剛啟動的串流子行程搶同一顆 GPU；這個遮罩只需要一張靜態的畫面。
+                running: false
+                opacity: 0.6
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: 96
                 height: 96
@@ -815,8 +818,20 @@ Page {
             width: parent.width - 120
             spacing: 24
 
-            BusyIndicator {
+            // §REVIEW-1111：這個遮罩的 visible 在整段影片播放期間都是 true（播放器接手後只是不再貼介面圖層，QML 這邊
+            // 不知道）。轉圈動畫會讓頭盔介面每 33 ms 重畫一次並同步讀回整個畫面，影片播幾小時就做幾小時。
+            // 轉圈最多轉 20 秒（正常幾秒內播放器就接手了），之後停住；遮罩與文字照留。
+            Timer {
+                id: playerLoadingSpinLimit
+                interval: 20000
                 running: playerLoadingOverlay.visible
+                onRunningChanged: if (running) playerLoadingSpinner.spin = true
+                onTriggered: playerLoadingSpinner.spin = false
+            }
+            BusyIndicator {
+                id: playerLoadingSpinner
+                property bool spin: true
+                running: playerLoadingOverlay.visible && spin
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: 96
                 height: 96

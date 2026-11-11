@@ -94,6 +94,13 @@ Updater::~Updater()
         m_CurrentReply->abort();
         m_CurrentReply->deleteLater();
     }
+    // §REVIEW-1111：更新摘要的請求也要中止。原本解構後它的 finished 還會進來，槽裡用的是已經解構的 Updater。
+    if (m_NotesReply) {
+        m_NotesReply->disconnect(this);
+        m_NotesReply->abort();
+        m_NotesReply->deleteLater();
+        m_NotesReply = nullptr;
+    }
     if (m_DownloadFile) {
         m_DownloadFile->close();
         delete m_DownloadFile;
@@ -527,12 +534,20 @@ bool Updater::spawnHelperAndQuit()
         "  exit 2\n"
         "}\n"
         "Start-Sleep -Milliseconds 800\n"
+        // §REVIEW-1111：先解到暫存目錄，整包解得開才覆蓋安裝目錄。原本直接解進安裝目錄：下載到的 zip 壞掉、
+        // 解到一半磁碟滿時，安裝目錄已經新舊混雜，而且腳本就此結束、不會再把程式打開。
+        // 現在解壓失敗時安裝目錄沒有動過，照樣把（舊的）程式開回來。
+        "$ok = $true\n"
+        "$stage = Join-Path ([IO.Path]::GetTempPath()) ('viplestream_stage_' + $AppPid)\n"
         "try {\n"
-        "  Expand-Archive -LiteralPath $ZipPath -DestinationPath $InstallDir -Force\n"
+        "  if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }\n"
+        "  Expand-Archive -LiteralPath $ZipPath -DestinationPath $stage -Force\n"
+        "  Copy-Item -Path (Join-Path $stage '*') -Destination $InstallDir -Recurse -Force\n"
         "} catch {\n"
         "  Write-Host \"VipleStream updater: extract failed: $_\"\n"
-        "  exit 1\n"
+        "  $ok = $false\n"
         "}\n"
+        "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue\n"
         "Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue\n"
         "if ($DropAdmin -ne 0) {\n"
         "  try {\n"
@@ -544,6 +559,7 @@ bool Updater::spawnHelperAndQuit()
         "} else {\n"
         "  Start-Process -FilePath $ExePath\n"
         "}\n"
+        "if (-not $ok) { exit 1 }\n"
     );
 
     // §REVIEW-1104：放棄更新時的提示（PowerShell 單引號字串：' 要寫成 ''）
@@ -613,10 +629,16 @@ bool Updater::spawnHelperAndQuit()
         "APP_PID=\"$1\"\n"
         "NEW_APPIMAGE=\"$2\"\n"
         "CURRENT_APPIMAGE=\"$3\"\n"
-        "for i in $(seq 1 60); do\n"
+        // §REVIEW-1111：和 Windows 一樣等 90 秒（VR 收尾可以超過 30 秒），還沒結束就放棄。原本 30 秒後照樣覆蓋並重開：
+        // 舊行程還握著單一實例鎖，新的那個被擋掉就退出，使用者看到的是「更新後程式沒有再打開」。
+        "for i in $(seq 1 180); do\n"
         "  kill -0 \"$APP_PID\" 2>/dev/null || break\n"
         "  sleep 0.5\n"
         "done\n"
+        "if kill -0 \"$APP_PID\" 2>/dev/null; then\n"
+        "  echo \"VipleStream updater: the app did not exit in time; update not installed\" >&2\n"
+        "  exit 2\n"
+        "fi\n"
         "chmod +x \"$NEW_APPIMAGE\" || exit 1\n"
         "mv -f \"$NEW_APPIMAGE\" \"$CURRENT_APPIMAGE\" || exit 1\n"
         "nohup \"$CURRENT_APPIMAGE\" >/dev/null 2>&1 &\n"

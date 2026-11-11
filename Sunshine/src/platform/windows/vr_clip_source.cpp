@@ -664,6 +664,7 @@ namespace platf::dxgi {
 
       // 讀取下一個有效樣本（處理 null 樣本重試最多 8 次及 EOS 重頭循環）
       int null_retries = 0;
+      int eos_retries = 0;
       while (!sample) {
         if (stop_flag_.load(std::memory_order_relaxed)) {
           return false;
@@ -704,8 +705,15 @@ namespace platf::dxgi {
             return false;
           }
           loops_.fetch_add(1, std::memory_order_relaxed);
+          // §REVIEW-1111：回到開頭之後還是一直回「結尾」（空的影片、只有音訊、解碼器沒有清掉狀態）時原本會無限繞，
+          // 而且這時握著共用貼圖的鎖，擷取端永遠拿不到畫面。連續 4 次就放棄這一幀。
+          if (++eos_retries >= 4) {
+            BOOST_LOG(error) << "[VIPLE-VR-CLIP] still at end of stream after seeking back 4 times";
+            return false;
+          }
           continue;
         }
+        eos_retries = 0;
 
         if (!sample) {
           null_retries++;
@@ -801,6 +809,28 @@ namespace platf::dxgi {
           src_pitch = static_cast<LONG>(cur_w);
         }
 
+        // §REVIEW-1111：下面依影片尺寸複製 cur_h × 1.5 列，原本不看來源緩衝區實際多長。Lock2D 可以回負的 pitch
+        // （由下往上），平坦緩衝區的長度也可能不到 NV12 需要的量（輸出型態沒有設成 NV12 時）——都會讀出界，
+        // 讀到的內容還會被編進畫面。對不上就放棄這一幀。
+        {
+          DWORD have = cur_len;
+          if (locked_2d) {
+            have = 0;
+            media_buffer->GetCurrentLength(&have);
+          }
+          const uint64_t need = static_cast<uint64_t>(cur_h + cur_h / 2) * static_cast<uint64_t>(src_pitch > 0 ? src_pitch : 0);
+          if (!src_data || src_pitch <= 0 || need == 0 || need > have) {
+            BOOST_LOG(error) << "[VIPLE-VR-CLIP] software frame does not fit its buffer (pitch=" << src_pitch << " rows=" << (cur_h + cur_h / 2)
+                             << " have=" << have << "); frame dropped";
+            if (locked_2d) {
+              buf2d->Unlock2D();
+            } else {
+              media_buffer->Unlock();
+            }
+            return false;
+          }
+        }
+
         D3D11_MAPPED_SUBRESOURCE mapped{};
         hr = d3d_context_->Map(dynamic_nv12_tex_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
         if (FAILED(hr)) {
@@ -851,6 +881,11 @@ namespace platf::dxgi {
       stream.ppPastSurfacesRight = nullptr;
       stream.ppFutureSurfacesRight = nullptr;
 
+      // §REVIEW-1111：媒體型態變更時 setup_video_processor 會先放掉舊的 processor，重建失敗就留下空的；
+      // 原本照樣拿空指標去 Blt。
+      if (!video_proc_ || !video_context_) {
+        return false;
+      }
       hr = video_context_->VideoProcessorBlt(
         video_proc_.Get(),
         slot.output_view.Get(),

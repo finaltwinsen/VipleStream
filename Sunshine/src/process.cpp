@@ -54,6 +54,9 @@
   // Sunshine runs as LocalSystem and HKCU points to the SYSTEM hive
   // (no Steam keys there).
   #include <windows.h>
+  // §REVIEW-1111：steam_user_sid()
+  #include <sddl.h>
+  #include <wtsapi32.h>
 #endif
 
 namespace proc {
@@ -176,7 +179,37 @@ namespace proc {
   // found at all). Cheap enough to call every second — under normal
   // conditions there are 3-6 user hives loaded and each lookup is a
   // single registry read.
+  // §REVIEW-1111：目前登入（主控台）使用者的 SID 字串。HKEY_USERS 底下可能同時有好幾個使用者的 hive
+  // （快速切換使用者、服務帳號），原本「掃到第一個有值的」會採到別人的：別人的 Running=0 讓活著的遊戲 15 秒後被收掉，
+  // 別人的 Running=1 讓結束的遊戲永遠不收。拿不到（沒有人登入）時回空字串，呼叫端照舊掃全部。
+  std::wstring steam_user_sid() {
+    HANDLE tok = nullptr;
+    const DWORD sess = WTSGetActiveConsoleSessionId();
+    if (sess == 0xFFFFFFFF || !WTSQueryUserToken(sess, &tok)) {
+      // 不是以服務執行（沒有 SE_TCB）：用自己的
+      if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
+        return {};
+      }
+    }
+    std::wstring out;
+    BYTE buf[256];
+    DWORD len = 0;
+    if (GetTokenInformation(tok, TokenUser, buf, sizeof(buf), &len)) {
+      LPWSTR str = nullptr;
+      if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER *>(buf)->User.Sid, &str) && str) {
+        out = str;
+        LocalFree(str);
+      }
+    }
+    CloseHandle(tok);
+    if (out == L"S-1-5-18" || out == L"S-1-5-19" || out == L"S-1-5-20") {
+      out.clear();  // 服務帳號自己沒有 Steam
+    }
+    return out;
+  }
+
   uint32_t read_steam_running_app_id() {
+    const std::wstring only_sid = steam_user_sid();
     HKEY users_root = nullptr;
     if (RegOpenKeyExW(HKEY_USERS, nullptr, 0, KEY_ENUMERATE_SUB_KEYS | KEY_READ, &users_root) != ERROR_SUCCESS) {
       return 0;
@@ -195,6 +228,9 @@ namespace proc {
       }
       // Skip the per-user "_Classes" sub-hives — they aren't user hives.
       if (wcsstr(sid_name, L"_Classes")) {
+        continue;
+      }
+      if (!only_sid.empty() && _wcsicmp(sid_name, only_sid.c_str()) != 0) {
         continue;
       }
 
@@ -223,6 +259,7 @@ namespace proc {
   // 沒有遊戲時 RunningAppID 也會停在舊值。所以判斷遊戲有沒有在跑以這個旗標為準。
   // 回傳 1＝執行中、0＝沒在跑、-1＝找不到這個 app 的鍵（舊版 Steam 等；呼叫端退回只看 RunningAppID）
   int read_steam_app_running(uint32_t app_id) {
+    const std::wstring only_sid = steam_user_sid();
     HKEY users_root = nullptr;
     if (RegOpenKeyExW(HKEY_USERS, nullptr, 0, KEY_ENUMERATE_SUB_KEYS | KEY_READ, &users_root) != ERROR_SUCCESS) {
       return -1;
@@ -239,6 +276,9 @@ namespace proc {
         break;
       }
       if (wcsstr(sid_name, L"_Classes")) {
+        continue;
+      }
+      if (!only_sid.empty() && _wcsicmp(sid_name, only_sid.c_str()) != 0) {
         continue;
       }
       const std::wstring path = std::wstring(sid_name) + L"\\Software\\Valve\\Steam\\Apps\\" + std::to_wstring(app_id);
@@ -515,7 +555,15 @@ namespace proc {
         _env["SUNSHINE_CLIENT_AUDIO_CONFIGURATION"] = "7.1";
         break;
     }
-    _env["SUNSHINE_CLIENT_AUDIO_SURROUND_PARAMS"] = launch_session->surround_params;
+    // §REVIEW-1111：這個值是 client 在 /launch 的 query 給的，原樣放進之後每一個子行程的環境。實際的格式只有十幾個數字；
+    // 其他內容（含 %00 解出來的 NUL，會把環境區塊截斷）一律不放。
+    {
+      const auto &sp = launch_session->surround_params;
+      const bool digits_only = sp.size() <= 16 && std::all_of(sp.begin(), sp.end(), [](unsigned char c) {
+        return c >= '0' && c <= '9';
+      });
+      _env["SUNSHINE_CLIENT_AUDIO_SURROUND_PARAMS"] = digits_only ? sp : std::string {};
+    }
 
     if (!_app.output.empty() && _app.output != "null"sv) {
 #ifdef _WIN32
@@ -812,7 +860,14 @@ namespace proc {
     // 防呆：只動 ...\steamapps\common\<遊戲> 底下（絕不碰 Steam 本體或 SteamVR）
     std::wstring lower = dir;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
-    if (lower.find(L"\\steamapps\\common\\") == std::wstring::npos ||
+    // §REVIEW-1111：再確認「common 後面真的還有一段遊戲資料夾名稱」。appmanifest 的 installdir 是空的時，
+    // 路徑會是 ...\steamapps\common\（結尾只有分隔符號），底下每一個遊戲的行程都會被當成這個遊戲來結束。
+    const auto common_pos = lower.find(L"\\steamapps\\common\\");
+    std::wstring game_part = common_pos == std::wstring::npos ? std::wstring {} : lower.substr(common_pos + 18);
+    while (!game_part.empty() && (game_part.back() == L'\\' || game_part.back() == L'/' || game_part.back() == L' ' || game_part.back() == L'.')) {
+      game_part.pop_back();
+    }
+    if (game_part.empty() ||
         lower.find(L"\\steamapps\\common\\steamvr") != std::wstring::npos) {
       BOOST_LOG(warning) << "[VIPLE-STEAM-QUIT] refusing unexpected install dir: "sv << _app.steam_install_dir;
       return;
@@ -1403,8 +1458,13 @@ namespace proc {
     auto input_with_index = ss.str();
 
     // CRC32 then truncate to signed 32-bit range due to client limitations
-    auto id_no_index = std::to_string(abs((int32_t) calculate_crc32(input_no_index)));
-    auto id_with_index = std::to_string(abs((int32_t) calculate_crc32(input_with_index)));
+    // §REVIEW-1111：abs(INT_MIN) 是未定義行為（CRC 剛好是 0x80000000 時）。其餘的值結果和原本相同。
+    const auto crc_id = [](const std::string &s) {
+      const int64_t v = (int32_t) calculate_crc32(s);
+      return std::to_string(v == INT32_MIN ? (int64_t) INT32_MAX : (v < 0 ? -v : v));
+    };
+    auto id_no_index = crc_id(input_no_index);
+    auto id_with_index = crc_id(input_with_index);
 
     return std::make_tuple(id_no_index, id_with_index);
   }

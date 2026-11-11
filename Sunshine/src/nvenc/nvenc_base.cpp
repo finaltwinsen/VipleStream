@@ -693,8 +693,14 @@ namespace nvenc {
 
     auto _profBeforeWait = std::chrono::steady_clock::now();
     if (async_event_handle && !wait_for_async_event(100)) {
-      BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout";
-      return {};
+      // §REVIEW-1111：原本等 100 ms 沒等到就返回——這張圖其實還在編，返回時卻把它的輸入解除對應，呼叫端收到空結果
+      // 就結束整場串流。GPU 短暫停頓（遊戲載入、驅動重設開始）一次就會中。先再等一段：等到了這一張只是晚到、
+      // 串流繼續；真的等不到（驅動掛了）才照舊放棄。
+      BOOST_LOG(warning) << "NvEnc: frame " << frame_index << " not encoded after 100 ms, still waiting";
+      if (!wait_for_async_event(2000)) {
+        BOOST_LOG(error) << "NvEnc: frame " << frame_index << " encode wait timeout";
+        return {};
+      }
     }
     auto _profAfterWait = std::chrono::steady_clock::now();
 

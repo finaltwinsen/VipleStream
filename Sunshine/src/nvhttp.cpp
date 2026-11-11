@@ -1479,7 +1479,9 @@ namespace nvhttp {
       return {};
     }
     const int render_w = ::vr::fovea::render_width(params.eye_width, config::vr.render_scale_pct, config::vr.render_target_max);
-    const int render_h = ::vr::fovea::render_width(params.eye_height, config::vr.render_scale_pct, config::vr.render_target_max);
+    // §REVIEW-1111：高度用和寬度同一個倍率。driver 回報給遊戲的建議算圖尺寸是用寬度算出的單一倍率；原本這裡兩軸各自封頂，
+    // 每眼不是正方形、只有一軸碰到上限時，協商出去的 tile_render_h 和遊戲實際交出的貼圖高度不一樣，注視點那塊的垂直密度就不是 1:1。
+    const int render_h = params.eye_width > 0 ? (int) ((int64_t) params.eye_height * render_w / params.eye_width) & ~1 : 0;
     if (render_w_out) {
       *render_w_out = render_w;
     }
@@ -2269,6 +2271,9 @@ namespace nvhttp {
     // VipleStream 2.0 §VR：/launch 之後還沒建立 session 的 VR 預約一併作廢（進行中的 VR
     // session 由上面的 terminate_sessions → join 撤下）
     ::vr::clear_reservation();
+    // §REVIEW-1111：VR 探測交給 session 之後、session 還沒建立就 /cancel 的話，沒有人還原桌面的編碼器探測狀態
+    // （正常是 VR session 結束時還原；已經還原過就是空操作）
+    video::restore_desktop_probe_state();
 
     // §REVIEW-1111：上面的擁有者檢查和這裡之間沒有鎖。這中間若有另一個 /launch 做完（execute 整段持有狀態鎖，
     // 這裡會等到它結束），現在在跑的已經是別人的新場——照舊往下做就把它關掉了。拿到鎖之後重看一次：
@@ -3174,8 +3179,9 @@ namespace nvhttp {
         auto token = j.value("token", "");
         std::uint64_t bytes_done = 0;
         if (j.contains("bytes_done") && j["bytes_done"].is_number()) {
+          // §REVIEW-1111：double 超過 uint64 範圍時轉型是未定義行為；先夾在可表示的範圍內
           const double v = j["bytes_done"].get<double>();
-          bytes_done = v > 0 ? static_cast<std::uint64_t>(v) : 0;
+          bytes_done = !(v > 0) ? 0 : (v >= 9.0e18 ? static_cast<std::uint64_t>(9000000000000000000ull) : static_cast<std::uint64_t>(v));
         }
         file_transfer::manager::instance().set_client_progress(token, bytes_done);
         response->write(SimpleWeb::StatusCode::success_ok, R"({"ok":true})");

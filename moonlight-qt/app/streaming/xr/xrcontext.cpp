@@ -1692,7 +1692,14 @@ bool XrContext::ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count,
         std::lock_guard<std::mutex> lk(m_QueueMutex);
         ar = xrAcquireSwapchainImage(sc, &ai, &idx);
     }
-    if (XR_FAILED(ar) || XR_FAILED(xrWaitSwapchainImage(sc, &swi))) {
+    if (XR_FAILED(ar)) {
+        return false;
+    }
+    if (XR_FAILED(xrWaitSwapchainImage(sc, &swi))) {
+        // §REVIEW-1111：acquire 成功之後就算 wait 失敗也要 release，否則這個 swapchain 每失敗一次就少一張可用的影像
+        XrSwapchainImageReleaseInfo failedRi = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        std::lock_guard<std::mutex> lk(m_QueueMutex);
+        xrReleaseSwapchainImage(sc, &failedRi);
         return false;
     }
     const bool drawn = idx < count && clearImage(images[idx], r, g, b, a);
@@ -1817,7 +1824,14 @@ bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, con
         std::lock_guard<std::mutex> lk(m_QueueMutex);
         ar = xrAcquireSwapchainImage(sc, &ai, &idx);
     }
-    if (XR_FAILED(ar) || XR_FAILED(xrWaitSwapchainImage(sc, &swi))) {
+    if (XR_FAILED(ar)) {
+        return false;
+    }
+    if (XR_FAILED(xrWaitSwapchainImage(sc, &swi))) {
+        // §REVIEW-1111：acquire 成功之後就算 wait 失敗也要 release，否則這個 swapchain 每失敗一次就少一張可用的影像
+        XrSwapchainImageReleaseInfo failedRi = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        std::lock_guard<std::mutex> lk(m_QueueMutex);
+        xrReleaseSwapchainImage(sc, &failedRi);
         return false;
     }
     bool ok = idx < count;
@@ -2378,7 +2392,11 @@ void XrContext::frameThreadMain()
                 if (buildProjection(vcur.subImage.swapchain, vcur.subImage.imageRect, vcur.meta.renderRot,
                                     vcur.meta.renderPos, vcur.meta.echoSampleId, &proj, projViews)) {
                     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
-                    if (vcur.hasInset && buildInsetQuads(vcur.subImage.swapchain, vcur.insetRect, vcur.insetOut, projViews, insetQ)) {
+                    // §VR-FOVEA-BOUNDS（2026-11-11，使用者配戴回報）：走出遊玩範圍時，頭盔的系統會把場景（projection 層）
+                    // 換成外界景物，但疊在上面的 quad 層不會跟著換——注視點那一塊還留著遊戲畫面。
+                    // 頭在遊玩範圍外時不疊那一塊（只剩全視野那一層，交給系統處理）。
+                    if (vcur.hasInset && !headOutsidePlayArea(projViews, fs.predictedDisplayTime) &&
+                        buildInsetQuads(vcur.subImage.swapchain, vcur.insetRect, vcur.insetOut, projViews, insetQ)) {
                         layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[0]);
                         layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[1]);
                     }
@@ -2456,7 +2474,20 @@ void XrContext::frameThreadMain()
                 }
             }
             if (!img.isNull() && img.width() == kBattW && img.height() == kBattH) {
-                m_BattUploaded = uploadImage(m_BattSwapchain, m_BattImages, m_BattImageCount, img) || m_BattUploaded;
+                // §REVIEW-1111：上傳失敗（上一筆上傳還沒做完、等不到影像）就下一格再試。原本失敗了也把「要更新」清掉，
+                // 而電量百分比不變就不會再送圖——聽得到提示音、圖示卻整場都不出現。最多試 30 次，免得一直失敗時拖住每一格。
+                static int battUploadRetries = 0;
+                if (uploadImage(m_BattSwapchain, m_BattImages, m_BattImageCount, img)) {
+                    m_BattUploaded = true;
+                    battUploadRetries = 0;
+                }
+                else if (++battUploadRetries <= 30) {
+                    std::lock_guard<std::mutex> lk(m_BattMutex);
+                    m_BattDirty = true;  // m_BattImg 還在（或已經被更新的圖換掉），下一格再傳
+                }
+                else {
+                    battUploadRetries = 0;
+                }
             }
             if (m_BattUploaded) {
                 const float w = 0.13f;
@@ -4825,6 +4856,42 @@ bool XrContext::buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, co
 // d 取遠（50 m）：runtime 對沒有深度的 projection 只當成很遠的東西重投影，quad 放遠才會跟著一樣移動、不會錯開。
 // 和 Steam 一樣讓合成器在它本來那一趟裡畫完，不必先還原成一張每眼 2154 的大圖（11-10：頭盔多耗約 3 W 的來源）。
 // 範圍的來源：分段曲線裡 1:1 的那一塊、或 §VR-FOVEA-TILES 的注視點那塊（XrVideo 算好放在 Current::insetOut）
+// §VR-FOVEA-BOUNDS：頭是不是在遊玩範圍（STAGE 的矩形邊界）之外。STAGE 的原點是範圍中心、y 朝上，
+// 矩形是 x 方向 width、z 方向 height。沒有 STAGE 或沒有邊界資料時一律回 false（照舊疊）。
+// 邊界每 2 秒重新問一次 runtime（使用者中途重畫邊界、切換站立／房間模式）。矩形是 runtime 回報的內接矩形，
+// 實際邊界可能更大（例如站立模式是圓形）：在兩者之間的那一圈會提早不疊，只是注視點那塊少了原生細節。
+bool XrContext::headOutsidePlayArea(const XrCompositionLayerProjectionView views[2], XrTime now)
+{
+    if (m_TrackSpaceName != QLatin1String("STAGE")) {
+        return false;
+    }
+    if (m_BoundsCheckedAt == 0 || now - m_BoundsCheckedAt > 2000000000ll) {
+        m_BoundsCheckedAt = now;
+        XrExtent2Df extent = {};
+        if (xrGetReferenceSpaceBoundsRect(m_Session, XR_REFERENCE_SPACE_TYPE_STAGE, &extent) == XR_SUCCESS &&
+            extent.width > 0.2f && extent.height > 0.2f) {
+            m_BoundsW = extent.width;
+            m_BoundsH = extent.height;
+        }
+        else {
+            m_BoundsW = m_BoundsH = 0.0f;
+        }
+    }
+    if (!(m_BoundsW > 0.0f) || !(m_BoundsH > 0.0f)) {
+        return false;
+    }
+    const float hx = 0.5f * (views[0].pose.position.x + views[1].pose.position.x);
+    const float hz = 0.5f * (views[0].pose.position.z + views[1].pose.position.z);
+    const bool outside = std::fabs(hx) > 0.5f * m_BoundsW || std::fabs(hz) > 0.5f * m_BoundsH;
+    if (outside != m_HeadOutside) {
+        m_HeadOutside = outside;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-FOVEA] head %s the play area (%.2f x %.2f m, head at x=%.2f z=%.2f): centre quads %s",
+                    outside ? "left" : "is back inside", m_BoundsW, m_BoundsH, hx, hz, outside ? "off" : "on");
+    }
+    return outside;
+}
+
 bool XrContext::buildInsetQuads(XrSwapchain swapchain, const XrRect2Di rects[2], const float out[2][4],
                                 const XrCompositionLayerProjectionView views[2], XrCompositionLayerQuad quads[2])
 {

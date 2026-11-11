@@ -3834,9 +3834,39 @@ namespace stream {
               BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] client is on Tailscale (remote) - not joining the headset hotspot this session"sv;
             } else if (config::vr.hotspot_autoconnect) {
               // 丟到背景執行緒處理（不可卡住 control 執行緒）
-              std::thread([hotspot, ssid = std::move(ssid), key = std::move(key)]() mutable {
-                platf::vr_hotspot_connect(hotspot.version, hotspot.authType, hotspot.band, hotspot.channel, std::move(ssid), std::move(key));
-              }).detach();
+              // §REVIEW-1111：同時最多一條背景執行緒。原本每一則 HOTSPOT_INFO 都另起一條去連 Wi-Fi，client 連續送就一直堆
+              // （每條都開 WLAN handle、可以跑好幾秒）。已經有一條在連時，把這一則記成「下一則」（只留最新的一份），
+              // 那條做完會接著處理——client 只在內容改變時才送，所以不能直接丟掉。
+              struct hotspot_req_t {
+                decltype(hotspot) info;
+                std::string ssid;
+                std::string key;
+              };
+              static std::mutex hotspot_mtx;
+              static bool hotspot_running = false;
+              static std::optional<hotspot_req_t> hotspot_next;
+              {
+                std::lock_guard hlk(hotspot_mtx);
+                hotspot_next = hotspot_req_t {hotspot, std::move(ssid), std::move(key)};
+                if (!hotspot_running) {
+                  hotspot_running = true;
+                  std::thread([]() {
+                    for (;;) {
+                      std::optional<hotspot_req_t> req;
+                      {
+                        std::lock_guard hlk2(hotspot_mtx);
+                        if (!hotspot_next) {
+                          hotspot_running = false;
+                          return;
+                        }
+                        req = std::move(hotspot_next);
+                        hotspot_next.reset();
+                      }
+                      platf::vr_hotspot_connect(req->info.version, req->info.authType, req->info.band, req->info.channel, std::move(req->ssid), std::move(req->key));
+                    }
+                  }).detach();
+                }
+              }
             }
           }
 #if defined(_WIN32)

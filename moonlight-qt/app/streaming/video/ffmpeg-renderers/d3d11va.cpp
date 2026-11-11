@@ -733,6 +733,12 @@ Exit:
         *adapterNotFound = !adapter;
     }
     if (!success) {
+        // §REVIEW-1111：共用 fence 是用這張顯示卡的 device 建的；不放掉的話，換下一張顯示卡試的時候，
+        // 上一張的 D3D11 device 會被 fence 一直留到這場結束。
+        m_DecodeD2RFence.Reset();
+        m_RenderD2RFence.Reset();
+        m_DecodeR2DFence.Reset();
+        m_RenderR2DFence.Reset();
         m_RenderDeviceContext.Reset();
         m_RenderDevice.Reset();
         m_DecodeDeviceContext.Reset();

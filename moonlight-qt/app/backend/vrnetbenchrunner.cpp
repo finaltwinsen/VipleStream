@@ -117,8 +117,6 @@ bool VrNetBenchRunner::start(QObject* launcher, QObject* computerManager)
     }
     m_Launcher = qobject_cast<VrLauncher*>(launcher);
     m_Cm = qobject_cast<ComputerManager*>(computerManager);
-    m_Ladders.clear();
-    m_Verdict.clear();
     m_Cancel = false;
     m_Retried = false;
     m_StateIdx = 0;
@@ -159,7 +157,15 @@ bool VrNetBenchRunner::start(QObject* launcher, QObject* computerManager)
         return false;
     }
     m_Loc = st.loc;
-    connect(m_Launcher, &VrLauncher::finished, this, &VrNetBenchRunner::onChildFinished, Qt::UniqueConnection);
+    // §REVIEW-1111：上一輪的表與結論等前面的檢查都過了才清。原本一進來就清，主機離線、轉接器沒接這類
+    // 「根本沒開測」的失敗也會把畫面上的上一輪結果洗掉。
+    m_Ladders.clear();
+    m_Verdict.clear();
+    m_AdapterLostTicks = 0;
+    // §REVIEW-1111：改成排進事件佇列。子行程在 start() 返回之前就失敗時，finished 是在 launchNetBenchStep 裡面
+    // 直接發出來的，那時階段還沒改成 Step、訊號被丟掉，之後整個測試停在那一階，取消也結束不了。
+    connect(m_Launcher, &VrLauncher::finished, this, &VrNetBenchRunner::onChildFinished,
+            static_cast<Qt::ConnectionType>(Qt::QueuedConnection | Qt::UniqueConnection));
     log(QStringLiteral("start: host=%1 loc=%2").arg(hostFor(false), m_Loc.isEmpty() ? QStringLiteral("(none)") : m_Loc));
     m_Timer.start();
     beginState();
@@ -173,8 +179,8 @@ void VrNetBenchRunner::cancel()
     }
     m_Cancel = true;
     log(QStringLiteral("cancel requested"));
-    if (m_Phase != Phase::Step) {
-        finish(tr("Cancelled."));
+    if (m_Phase != Phase::Step || m_Launcher == nullptr || !m_Launcher->running()) {
+        finish(tr("Cancelled."));  // 沒有子行程在跑就不會有人來通知「這一階結束」，直接收
     }
     else {
         setStatus(tr("Cancelling after this step..."));
@@ -247,7 +253,30 @@ void VrNetBenchRunner::tick()
         return;
     }
     case Phase::Step:
+        // §REVIEW-1111：只用轉接器的那幾階進行中，helper 自己把家用 Wi-Fi 交還（轉接器那邊的連線不見了）的話，
+        // 這一階量到的其實是家用 Wi-Fi，卻會被當成「只用轉接器」的成績拿去比、存成這個地點 14 天的選擇。
+        // 連續三次（約 1.5 秒）都不是 adapter-only 就整個放棄、不存結果。
+        if (m_AdapterOnly) {
+            const NetStatus st = readStatus();
+            if (st.fresh && (st.applied != QLatin1String("adapter-only") || !st.apStation)) {
+                if (++m_AdapterLostTicks >= 3) {
+                    log(QStringLiteral("adapter-only state lost during a step (applied=%1 ap_station=%2)").arg(st.applied).arg(st.apStation));
+                    if (m_Launcher != nullptr) {
+                        m_Launcher->killChild();
+                    }
+                    finish(tr("The streaming adapter dropped out during the test, so no choice was saved. Try again."));
+                    return;
+                }
+            }
+            else {
+                m_AdapterLostTicks = 0;
+            }
+        }
         if (now - m_PhaseStartMs > NetBench::kDefaultStepSec * 1000ll + kStepTimeoutExtraMs && m_Launcher != nullptr) {
+            if (!m_Launcher->running()) {
+                finish(tr("Could not start the test stream."));
+                return;
+            }
             log(QStringLiteral("step did not end in time - stopping the stream process"));
             m_PhaseStartMs = now;  // killChild 之後 finished() 會進 onChildFinished
             m_Launcher->killChild();
@@ -427,6 +456,11 @@ VrNetBenchRunner::NetStatus VrNetBenchRunner::readStatus() const
 QString VrNetBenchRunner::hostFor(bool adapterOnly) const
 {
     if (m_Computer == nullptr) {
+        return QString();
+    }
+    // §REVIEW-1111：測試要十幾分鐘，這段時間使用者可以把這台主機從清單移除（物件會被刪掉）。
+    // 用之前先確認它還在清單裡——只比指標、不解參考；移除和這裡都在介面執行緒上。
+    if (m_Cm == nullptr || !m_Cm->getComputers().contains(m_Computer)) {
         return QString();
     }
     QReadLocker lock(&m_Computer->lock);

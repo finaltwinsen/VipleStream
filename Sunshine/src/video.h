@@ -434,6 +434,9 @@ namespace video {
   /// 還原 save_desktop_probe_state() 存的狀態；沒有存過時不動作。桌面從沒探測過時還原成「未探測」。
   void restore_desktop_probe_state();
 
+  /// §REVIEW-1111：快照交給 VR session 了（vr_probe_scope::handoff_to_session 呼叫）
+  void mark_desktop_probe_handed_off();
+
   /**
    * @brief VR 探測的 RAII 守衛（§C.6 第 6 點）。建構時存桌面探測狀態，解構時還原；
    *        只有 VR launch session 成功建立時呼叫 handoff_to_session()，改由 VR session 結束時還原。
@@ -456,6 +459,7 @@ namespace video {
     /// VR session 接手：解構時不還原（VR session 結束或 launch 逾時時呼叫 restore_desktop_probe_state()）
     void handoff_to_session() {
       handed_off_ = true;
+      mark_desktop_probe_handed_off();
     }
 
   private:

@@ -57,6 +57,8 @@ namespace self_update {
     std::atomic<state_e> g_state {state_e::idle};
     std::atomic<bool> g_busy {false};
     std::atomic<bool> g_cancel {false};
+    // §REVIEW-1111：下載期間有人開始串流而放棄的那一次安裝；自動安裝看到就把「這一版試過了」清掉
+    std::atomic<bool> g_deferred_by_stream {false};
     std::mutex g_pending_mtx;
     std::optional<release_info> g_pending;
     std::mutex g_worker_mtx;
@@ -638,9 +640,25 @@ catch {
       }
 
       if (service) {
-        // service 模式：腳本自己 Stop-Service（會結束本行程與 tray）
+        // service 模式：腳本自己 Stop-Service（會結束本行程與 tray）。
+        // §REVIEW-1111：原本一啟動腳本就回成功。腳本在停服務之前失敗（checksum、解壓、找不到 exe）時服務還活著，
+        // 狀態卻停在 installing、自動檢查從此不再跑。「我們還活著而腳本已經結束」就是它沒走到停服務：照失敗處理。
+        const auto svc_deadline = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+        while (std::chrono::steady_clock::now() < svc_deadline && !g_cancel.load()) {
+          if (WaitForSingleObject(child.process, 250) == WAIT_OBJECT_0) {
+            DWORD code = 0;
+            GetExitCodeProcess(child.process, &code);
+            CloseHandle(child.process);
+            if (error) *error = "updater exited with code " + std::to_string(code) + " before restarting the service\n" + log_tail(log_file, 4);
+            return false;
+          }
+        }
         CloseHandle(child.process);
-        return true;
+        if (g_cancel.load()) {
+          return true;  // 服務正在被停下來（腳本做的）
+        }
+        if (error) *error = "updater still running after 10 minutes; see " + log_file.string();
+        return false;
       }
 
       // standalone：等腳本取得權限並解壓成功（proceed 標記）才退出；腳本失敗就不退出
@@ -1078,6 +1096,16 @@ exit 0
         return;
       }
       BOOST_LOG(info) << "[VIPLE-UPDATE] sha256 verified " << sum;
+      // §REVIEW-1111：「串流中不安裝」原本只在開始下載前看一次；下載與驗證期間開始的串流會被停服務打斷。
+      if (rtsp_stream::session_count() > 0) {
+        std::error_code ec;
+        std::filesystem::remove(dest, ec);
+        g_deferred_by_stream.store(true);
+        set_state(state_e::update_available, on_state);
+        BOOST_LOG(info) << "[VIPLE-UPDATE] a stream started during the download; install postponed";
+        if (notify) notify("Update postponed", "A stream started while downloading. The update will be installed later.");
+        return;
+      }
       set_state(state_e::installing, on_state);
       if (notify) notify("Installing update", "Version " + target.version + ". The server will restart shortly.");
       if (!apply_package(dest, target, true, &err)) {
@@ -1180,6 +1208,12 @@ exit 0
         while (steady_clock::now() < next) {
           if (auto_wait(minutes(1))) return;
           if (mode != "install") continue;
+          if (g_deferred_by_stream.exchange(false)) {
+            // 上一次是被串流擋下來的，不算試過
+            std::lock_guard<std::mutex> lg(g_auto_mtx);
+            g_auto_tried.clear();
+            last_stream = steady_clock::now();
+          }
           if (rtsp_stream::session_count() > 0) {
             last_stream = steady_clock::now();
             continue;

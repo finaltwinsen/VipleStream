@@ -171,8 +171,21 @@ namespace platf {
     adapteraddrs_t info {nullptr};
     ULONG size = 0;
 
-    while (GetAdaptersAddresses(AF_UNSPEC, 0, nullptr, info.get(), &size) == ERROR_BUFFER_OVERFLOW) {
-      info.reset((PIP_ADAPTER_ADDRESSES) malloc(size));
+    // §REVIEW-1111：配置失敗時原本會一直繞（緩衝區是空的，API 一直回「太小」）；最後一次呼叫不是成功時
+    // 交出去的是沒有填過的緩衝區，呼叫端沿著 Next 走會讀到垃圾指標。
+    ULONG rc = ERROR_BUFFER_OVERFLOW;
+    for (int tries = 0; tries < 8; ++tries) {
+      rc = GetAdaptersAddresses(AF_UNSPEC, 0, nullptr, info.get(), &size);
+      if (rc != ERROR_BUFFER_OVERFLOW) {
+        break;
+      }
+      info.reset((PIP_ADAPTER_ADDRESSES) calloc(1, size));
+      if (!info) {
+        break;
+      }
+    }
+    if (rc != ERROR_SUCCESS) {
+      info.reset();
     }
 
     return info;
@@ -2089,6 +2102,7 @@ namespace platf {
 
     std::mutex mtx;
     GUID guid {};
+    std::string want_ssid;  // §REVIEW-1111：arm 時記住的熱點 SSID
     bool armed = false;
     bool running = false;
     clock::time_point alive_until {};
@@ -2139,7 +2153,9 @@ namespace platf {
     }
 
     // 介面狀態：1＝已連線、0＝沒連線、-1＝查不到（網卡被拔掉）
-    int query_state(HANDLE hClient, const GUID &ifGuid) {
+    // §REVIEW-1111：連著、但連的不是頭盔熱點（網卡自己改連到家用 Wi-Fi）也算沒連線。原本只看「已連線」，
+    // 那張卡有正常收發，斷線與接收卡住兩條規則都不成立，就一直停在別的網路上。
+    int query_state(HANDLE hClient, const GUID &ifGuid, const std::string &ssid) {
       DWORD sz = 0;
       PVOID data = nullptr;
       WLAN_OPCODE_VALUE_TYPE vt;
@@ -2148,7 +2164,23 @@ namespace platf {
       }
       const auto st = *static_cast<WLAN_INTERFACE_STATE *>(data);
       fn_WlanFreeMemory(data);
-      return st == wlan_interface_state_connected ? 1 : 0;
+      if (st != wlan_interface_state_connected) {
+        return 0;
+      }
+      if (!ssid.empty()) {
+        PWLAN_CONNECTION_ATTRIBUTES conn = nullptr;
+        sz = 0;
+        if (fn_WlanQueryInterface(hClient, &ifGuid, wlan_intf_opcode_current_connection, nullptr, &sz, (PVOID *) &conn, &vt) == ERROR_SUCCESS && conn) {
+          const auto &cur = conn->wlanAssociationAttributes.dot11Ssid;
+          const bool same = cur.uSSIDLength == ssid.size() && std::memcmp(cur.ucSSID, ssid.data(), ssid.size()) == 0;
+          fn_WlanFreeMemory(conn);
+          if (!same) {
+            return 0;
+          }
+        }
+        // 查不到目前的連線（狀態剛好在變）就照「已連線」算，下一輪再看
+      }
+      return 1;
     }
 
     // 介面的收發封包計數；查不到回 false
@@ -2180,6 +2212,7 @@ namespace platf {
         std::this_thread::sleep_for(kPoll);
         const auto now = clock::now();
         GUID g;
+        std::string ssid;
         int max_restarts;
         {
           std::lock_guard lk(mtx);
@@ -2188,9 +2221,10 @@ namespace platf {
             break;
           }
           g = guid;
+          ssid = want_ssid;
           max_restarts = config::vr.hotspot_restart_max;
         }
-        const int st = query_state(hClient, g);
+        const int st = query_state(hClient, g, ssid);
         if (st == 1) {
           if (down_since) {
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter connected again after "
@@ -2277,12 +2311,13 @@ namespace platf {
     }
 
     // vr_hotspot_connect 選定網卡後呼叫：每場重新起算次數
-    void arm(const GUID &g) {
+    void arm(const GUID &g, const std::string &ssid) {
       if (config::vr.hotspot_restart_max <= 0) {
         return;
       }
       std::lock_guard lk(mtx);
       guid = g;
+      want_ssid = ssid;
       armed = true;
       restarts = 0;
       gave_up = false;
@@ -2440,7 +2475,7 @@ namespace platf {
     }
 
     BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] profile set"sv;
-    hotspot_wd::arm(selectedGuid);
+    hotspot_wd::arm(selectedGuid, ssid);
     if (already_connected) {
       fn_WlanCloseHandle(hClient, nullptr);
       SecureZeroMemory(key.data(), key.size());

@@ -120,7 +120,11 @@ namespace vr::abr {
       }
 
       // 2. 趨勢斜率計算：最近 2 秒之 (t 秒, smoothed) 線性迴歸
-      std::vector<const sample_t *> reg_samples;
+      // §REVIEW-1111：三個暫存陣列改成成員、重複使用。這裡每一筆單向延遲都會進來（144 Hz），原本每次配置三塊再放掉，
+      // 就在收追蹤樣本的同一條執行緒上。（同一則回報的各筆不能合併成只算一次：無線停頓後一次到齊的那一批
+      // 要逐筆判，test OwdWifiStallIsNotCongestion 就是這個情況。）
+      auto &reg_samples = scratch_reg_;
+      reg_samples.clear();
       for (auto it = samples_.rbegin(); it != samples_.rend(); ++it) {
         if (now - it->time <= k_trend_regression_window) {
           reg_samples.push_back(&*it);
@@ -156,9 +160,11 @@ namespace vr::abr {
       trend_ms_ = m * 2.0;
 
       // 3. 計算 base、jitter、p50
-      std::vector<double> sorted_raw;
+      auto &sorted_raw = scratch_raw_;
+      auto &sorted_1s = scratch_1s_;
+      sorted_raw.clear();
+      sorted_1s.clear();
       sorted_raw.reserve(samples_.size());
-      std::vector<double> sorted_1s;
       for (const auto &s : samples_) {
         sorted_raw.push_back(s.raw_rtt_ms);
         if (now - s.time <= k_trend_p50_window) {
@@ -288,6 +294,9 @@ namespace vr::abr {
     double smoothed_rtt_ = 0.0;
 
     bool has_prev_sample_ = false;
+    std::vector<const sample_t *> scratch_reg_;
+    std::vector<double> scratch_raw_;
+    std::vector<double> scratch_1s_;
     steady::time_point prev_sample_time_{};
     steady::time_point last_overuse_time_{};
 

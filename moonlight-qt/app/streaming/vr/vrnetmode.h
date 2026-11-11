@@ -124,8 +124,11 @@ public:
             }
             // §VR-NETBENCH（11-08 使用者決定）：遊戲中不再比較網路。「自動」只套用這個地點存下的選擇（之後由設定頁的
             // 「測試網路」量出來）；沒有存過就保留家用 Wi-Fi。舊的量測流程（MeasureB 之後）留著給測試功能沿用，這裡不再進入
-            if (!m_Loc.isEmpty() && rememberedChoice() == QLatin1String("C")) {
-                log(QStringLiteral("saved for this location: adapter only"));
+            // §REVIEW-1111：存檔超過 14 天也照樣套用。原本過期就當成「沒存過」而留在家用 Wi-Fi——測出來比較好的選擇
+            // 兩週後無聲地換回比較差的那個，而且遊戲中早就不會自己重測（重測只在設定頁的「測試網路」）。
+            if (!m_Loc.isEmpty() && rememberedChoice(true) == QLatin1String("C")) {
+                log(rememberedChoice().isEmpty() ? QStringLiteral("saved for this location: adapter only (older than the retest interval; run the network test again)")
+                                                 : QStringLiteral("saved for this location: adapter only"));
                 applyAdapterOnly(nowMs, true);
             }
             else {
@@ -250,6 +253,22 @@ private:
             log("the streaming adapter link is gone; reconnecting home Wi-Fi");
             say(QCoreApplication::translate("VrNetMode", "Streaming adapter lost - reconnecting the headset's home Wi-Fi"));
             backToNormal(nowMs);
+            return;
+        }
+        // §REVIEW-1111：helper 會自己把家用 Wi-Fi 交還（連續暫停滿 6 小時、helper 重啟、暫停失敗）。這時轉接器還連著，
+        // 上面那個判斷不會成立；原本這邊繼續每秒要求「只用轉接器」，helper 下一圈又把 Wi-Fi 暫停一次——兩次切換
+        // 熱點都會掉十幾二十秒，卻沒有通知 host 暫停降碼（碼率會被一路砍到底、約 90 秒才回來）。
+        // 看到 helper 已經交還：通知 host、這一場改回一般模式，不再要求暫停。
+        if (st.fresh && st.applied == QLatin1String("adapter-only")) {
+            m_SeenApplied = true;
+        }
+        else if (st.fresh && m_SeenApplied) {
+            log("the helper handed home Wi-Fi back (time limit, restart or failure); staying on both links for this session");
+            backToNormal(nowMs);
+        }
+        else if (st.fresh && !st.err.isEmpty() && SDL_TICKS_PASSED(nowMs, m_AppliedMs + 15000)) {
+            log("the helper could not pause home Wi-Fi; staying on both links for this session");
+            backToNormal(nowMs);
         }
     }
 
@@ -257,6 +276,7 @@ private:
     {
         m_Want = Want::AdapterOnly;
         m_AppliedMs = nowMs;
+        m_SeenApplied = false;
         notifySwitch(1, kPauseHoldMs);
         writeRequest(nowMs, true);
         if (announce) {
@@ -331,15 +351,15 @@ private:
         return s;
     }
 
-    QString rememberedChoice() const
+    QString rememberedChoice(bool ignoreAge = false) const
     {
         QSettings settings;
         settings.beginGroup(QStringLiteral("vrnetsel"));
         const QString v = settings.value(m_Loc).toString();  // "C|2026-11-05"
         const QString choice = v.section('|', 0, 0);
         const QDate when = QDate::fromString(v.section('|', 1, 1), Qt::ISODate);
-        if (!when.isValid() || when.daysTo(QDate::currentDate()) > kRetestDays) {
-            return QString();  // 太久沒測：重測
+        if (!ignoreAge && (!when.isValid() || when.daysTo(QDate::currentDate()) > kRetestDays)) {
+            return QString();  // 太久沒測
         }
         return choice;
     }
@@ -382,6 +402,7 @@ private:
     uint32_t m_NextBeatMs = 0;
     uint32_t m_StateMs = 0;
     uint32_t m_AppliedMs = 0;
+    bool m_SeenApplied = false;  // 這次要求「只用轉接器」之後，helper 回報過已套用
     uint32_t m_WinStartMs = 0;
     uint64_t m_WinStartFrames = 0;
     double m_DeficitB = 0.0;

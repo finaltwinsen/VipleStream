@@ -738,6 +738,11 @@ namespace input {
     if (!config::input.mouse) {
       return;
     }
+    // §REVIEW-1111：一筆封包的位移上限。累計值相減可以到 ±2^31，下面的迴圈一步最多 32767，
+    // 一筆封包就能打出約六萬次 SendInput，把唯一的輸入執行緒佔住。真實的滑鼠一筆不會超過幾千；
+    // 超過 ±65534（兩步）的部分直接捨棄——那不是滑鼠移動，是序號亂掉或刻意的值。
+    dx = std::clamp<int64_t>(dx, -2 * (int64_t) INT16_MAX, 2 * (int64_t) INT16_MAX);
+    dy = std::clamp<int64_t>(dy, -2 * (int64_t) INT16_MAX, 2 * (int64_t) INT16_MAX);
     while (dx != 0 || dy != 0) {
       const int stepX = (int) std::clamp<int64_t>(dx, INT16_MIN, INT16_MAX);
       const int stepY = (int) std::clamp<int64_t>(dy, INT16_MIN, INT16_MAX);
@@ -2303,6 +2308,16 @@ namespace input {
     }
     {
       std::lock_guard<std::mutex> lg(input->input_queue_lock);
+      // §REVIEW-1111：佇列沒有上限。輸入執行緒卡住（SendInput 被擋、虛擬手把逾時）時 client 還在一直送，
+      // 每則都留一份、再排一個工作，記憶體一路長。正常情況佇列是個位數；積到這麼多的輸入早就過時了，丟掉新的。
+      constexpr std::size_t k_max_queued_inputs = 2048;
+      if (input->input_queue.size() >= k_max_queued_inputs) {
+        static std::atomic<int> dropped {0};
+        if ((dropped.fetch_add(1) % 1000) == 0) {
+          BOOST_LOG(warning) << "Input queue is full ("sv << k_max_queued_inputs << " pending); dropping input"sv;
+        }
+        return;
+      }
       input->input_queue.push_back(std::move(input_data));
       input->input_queue_ts.push_back(std::chrono::steady_clock::now());
     }
@@ -2453,12 +2468,39 @@ namespace input {
     return fut.get();
   }
 
+  namespace {
+    // §REVIEW-1111：每支虛擬手把「還沒送出去的最新狀態」。有這一筆＝已經有一個工作排在輸入執行緒上等著送。
+    std::mutex vr_pad_latest_mtx;
+    std::unordered_map<int, platf::gamepad_state_t> vr_pad_latest;
+  }  // namespace
+
   void vr_pad_update(int id, const platf::gamepad_state_t &state) {
     if (id < 0) {
       return;
     }
-    task_pool.push([id, state]() {
-      platf::gamepad_update(platf_input, id, state);
+    // §REVIEW-1111：追蹤是顯示更新率的 4 倍（144 Hz 就是每秒 576 筆），搖桿或方向盤一動幾乎每筆都不同。
+    // 原本每筆都排一個工作：輸入執行緒一落後，佇列裡每一筆舊狀態都還是會依序打進 ViGEm，把停頓再拉長。
+    // 現在已經有工作在排隊時只換掉內容，工作跑的時候送當下最新的那一筆（順序仍在之後的 pad_free 之前）。
+    {
+      std::lock_guard lk {vr_pad_latest_mtx};
+      const bool queued = vr_pad_latest.find(id) != vr_pad_latest.end();
+      vr_pad_latest[id] = state;
+      if (queued) {
+        return;
+      }
+    }
+    task_pool.push([id]() {
+      platf::gamepad_state_t latest;
+      {
+        std::lock_guard lk {vr_pad_latest_mtx};
+        const auto it = vr_pad_latest.find(id);
+        if (it == vr_pad_latest.end()) {
+          return;
+        }
+        latest = it->second;
+        vr_pad_latest.erase(it);
+      }
+      platf::gamepad_update(platf_input, id, latest);
     });
   }
 

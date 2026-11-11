@@ -638,6 +638,11 @@ private:
     bool m_HavePlayArea = false;
     float m_PlayAreaWidthM = 0.0f;
     float m_PlayAreaHeightM = 0.0f;
+    // VR-FOVEA-BOUNDS: play-area rectangle as last reported by the runtime, and whether the head is outside it
+    XrTime m_BoundsCheckedAt = 0;
+    float m_BoundsW = 0.0f;
+    float m_BoundsH = 0.0f;
+    bool m_HeadOutside = false;
     XrPosef m_EyeToHead[2] = {};              // m_StatsMutex 保護（與 m_Fov 一起）
     bool m_HaveEyeToHead = false;
     uint32_t m_RecW = 0, m_RecH = 0;
@@ -652,6 +657,7 @@ private:
                          uint32_t echoSampleId, XrCompositionLayerProjection* proj,
                          XrCompositionLayerProjectionView views[2]);
     // §VR-FOVEA-LAYERS：中央區的兩個 quad（views＝這一格的 projection views；out＝每眼蓋住的範圍 x0, y0, x1, y1）
+    bool headOutsidePlayArea(const XrCompositionLayerProjectionView views[2], XrTime now);
     bool buildInsetQuads(XrSwapchain swapchain, const XrRect2Di rects[2], const float out[2][4],
                          const XrCompositionLayerProjectionView views[2], XrCompositionLayerQuad quads[2]);
     bool m_LoggedInsetQuads = false;

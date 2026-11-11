@@ -556,6 +556,9 @@ namespace rtsp_stream {
           auto discarded = launch_event.pop(0s);
           if (discarded) {
             BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
+            // §REVIEW-1111：逾時作廢的 launch 也要從「上一筆」的快取拿掉。原本只 pop 事件，之後進來的 RTSP 連線等不到
+            // 新的 launch 就退回用這份快取（舊的金鑰與 ping payload），可以再 ANNOUNCE 開出一條 session。
+            last_session.reset();
           }
         }
       });
@@ -1185,6 +1188,20 @@ namespace rtsp_stream {
     // §REVIEW-1111：這幾個值直接進影像／音訊執行緒的除法與配置，client 給什麼就是什麼。packetSize＝16 會讓
     // 「每包可放的位元組數」變 0（% 0），−16 讓分塊大小變 0，太大讓速率控制的每毫秒封包數變 0（0/0）——整數除以零
     // 不是 C++ 例外，整個服務直接結束。一般 client 用 1024～1392；這裡只擋掉不可能正常運作的值。
+    // 同一批：碼率（kbps，之後會乘 1000 放進 int）、更新率、解析度也是 client 給什麼就是什麼。超出合理範圍的拒絕，
+    // 每幀 slice 數與參考幀數夾在編碼器可接受的範圍（avcodec 路徑把 slice 數直接當成執行緒數）。
+    config.monitor.slicesPerFrame = std::clamp(config.monitor.slicesPerFrame, 1, 16);
+    config.monitor.numRefFrames = std::clamp(config.monitor.numRefFrames, 0, 16);
+    if (config.monitor.bitrate < 1 || config.monitor.bitrate > 2000000 ||
+        config.monitor.framerate < 1 || config.monitor.framerate > 1000 ||
+        config.monitor.framerateX100 < 0 || config.monitor.framerateX100 > 100000 ||
+        config.monitor.width < 16 || config.monitor.width > 16384 ||
+        config.monitor.height < 16 || config.monitor.height > 16384) {
+      BOOST_LOG(warning) << "RTSP ANNOUNCE rejected: "sv << config.monitor.width << 'x' << config.monitor.height << '@' << config.monitor.framerate
+                         << " (x100="sv << config.monitor.framerateX100 << ") bitrate="sv << config.monitor.bitrate << " kbps"sv;
+      respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+      return;
+    }
     if (config.packetsize < 128 || config.packetsize > 4096 ||
         config.minRequiredFecPackets < 0 || config.minRequiredFecPackets > 255 ||
         config.audio.packetDuration < 1 || config.audio.packetDuration > 120) {

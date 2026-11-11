@@ -451,8 +451,11 @@ namespace video {
       }
 
       auto result = device->nvenc->encode_frame(frame_index, force_idr, force_intra_refresh_frames);
-      force_idr = false;
-      force_intra_refresh_frames = 0;
+      // §REVIEW-1111：這一張沒有編出來時，要求的 IDR／intra refresh 留給下一張
+      if (!result.data.empty()) {
+        force_idr = false;
+        force_intra_refresh_frames = 0;
+      }
       return result;
     }
 
@@ -1257,10 +1260,27 @@ namespace video {
     // 桌面探測不會與 VR 探測並行；這把鎖只保護快照本身的存取。
     std::mutex desktop_probe_snapshot_mtx;
     std::optional<desktop_probe_snapshot_t> desktop_probe_snapshot;
+    // §REVIEW-1111：這份快照已經交給一場 VR session（之後由它結束時還原）
+    bool desktop_probe_snapshot_handed_off = false;
   }  // namespace
+
+  void mark_desktop_probe_handed_off() {
+    std::lock_guard lk {desktop_probe_snapshot_mtx};
+    if (desktop_probe_snapshot) {
+      desktop_probe_snapshot_handed_off = true;
+    }
+  }
 
   void save_desktop_probe_state() {
     std::lock_guard lk {desktop_probe_snapshot_mtx};
+    if (desktop_probe_snapshot && desktop_probe_snapshot_handed_off) {
+      // §REVIEW-1111：交出去的那場 VR launch 一直沒有建立 session（client 沒連上來、預約過期），所以沒有人還原。
+      // VR 探測的前提是沒有 session 在跑，走到這裡就代表那份快照是孤兒；留著的話，這一場結束時會把「兩場之前」的
+      // 桌面探測結果蓋回去。丟掉，照現在的狀態重新存（現在若還是 VR 探測的結果，還原後桌面下一次會自己重探）。
+      BOOST_LOG(info) << "[VIPLE-VR-ENC] dropping a stale desktop probe snapshot (its VR launch never started a session)"sv;
+      desktop_probe_snapshot.reset();
+      desktop_probe_snapshot_handed_off = false;
+    }
     if (desktop_probe_snapshot) {
       return;  // 巢狀：保留第一份（最外層的桌面狀態）
     }
@@ -1300,6 +1320,7 @@ namespace video {
     BOOST_LOG(info) << "[VIPLE-VR-ENC] desktop probe state restored (source="sv << s.capture_source
                     << " encoder="sv << (s.chosen ? s.chosen->name : "none"sv) << ')';
     desktop_probe_snapshot.reset();
+    desktop_probe_snapshot_handed_off = false;
   }
 
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
@@ -3195,6 +3216,11 @@ namespace video {
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
+    // §REVIEW-1111：encode_run 一失敗就返回（轉換或編碼錯誤：裝置移除、TDR、格式不合），原本這個迴圈不看原因、
+    // 馬上再建一個編碼器重試，沒有間隔也沒有上限——持續失敗時就是全速空轉（Windows 的 NVENC 每次還多一條拆除執行緒）。
+    // 很快就返回、又不是顯示器重新初始化造成的，算一次快速失敗：之後每次多等一點，連續 30 次就結束這條串流。
+    int fast_failures = 0;
+
     while (!shutdown_event->peek() && images->running()) {
       // Wait for the main capture event when the display is being reinitialized
       if (ref->reinit_event.peek()) {
@@ -3233,6 +3259,7 @@ namespace video {
       }
       hdr_event->raise(std::move(hdr_info));
 
+      const auto run_started = std::chrono::steady_clock::now();
       encode_run(
         frame_nr,
         mail,
@@ -3244,6 +3271,18 @@ namespace video {
         *ref->encoder_p,
         channel_data
       );
+      if (shutdown_event->peek() || !images->running()) {
+        break;
+      }
+      if (std::chrono::steady_clock::now() - run_started < 1s && !ref->reinit_event.peek()) {
+        if (++fast_failures >= 30) {
+          BOOST_LOG(error) << "Encoder failed "sv << fast_failures << " times in a row right after being created; ending the stream"sv;
+          return;
+        }
+        std::this_thread::sleep_for(std::min(100ms * fast_failures, 1000ms));
+      } else {
+        fast_failures = 0;
+      }
     }
   }
 

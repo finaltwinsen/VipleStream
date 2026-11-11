@@ -296,10 +296,23 @@ namespace vr::multilink {
       return to_ns(clock::now()) / 1'000'000;
     }
 
-    void arm_video(link_t &L, uint32_t gen) {
-      L.video_sock.async_receive_from(asio::buffer(L.rx_buf_v), L.rx_peer_v, [this, &L, gen](const boost::system::error_code &ec, size_t n) {
+    // §REVIEW-1111：每一條接收鏈（＝一個世代）用自己的緩衝區與來源端點。原本直接收進 link_t 的 rx_buf_v／rx_peer_v：
+    // 重綁時舊 socket 的那一次接收還沒完成（cancel／close 只是把完成排進佇列），新 socket 就對同一塊記憶體再收一次，
+    // 兩個未完成的接收寫同一塊緩衝區與同一個端點。現在各收各的，世代對了才複製進 link_t（都在 io 執行緒上）。
+    template<size_t N>
+    struct rx_ctx_t {
+      std::array<uint8_t, N> buf {};
+      udp::endpoint peer;
+    };
+
+    void arm_video(link_t &L, uint32_t gen, std::shared_ptr<rx_ctx_t<2048>> ctx = nullptr) {
+      if (!ctx) {
+        ctx = std::make_shared<rx_ctx_t<2048>>();
+      }
+      auto &c = *ctx;
+      L.video_sock.async_receive_from(asio::buffer(c.buf), c.peer, [this, &L, gen, ctx = std::move(ctx)](const boost::system::error_code &ec, size_t n) mutable {
         // §VR-MULTILINK-HOTADD：先比對世代再碰 socket／緩衝區。重綁之後舊 socket 的 completion 一律作廢，
-        // 否則它會重新 arm 舊 socket，兩條接收鏈共用同一個 rx_buf_v。
+        // 否則它會重新 arm 舊 socket。
         if (L.rx_gen.load(std::memory_order_relaxed) != gen) {
           return;
         }
@@ -307,22 +320,29 @@ namespace vr::multilink {
           return;
         }
         if (!ec) {
+          n = std::min(n, L.rx_buf_v.size());
+          std::memcpy(L.rx_buf_v.data(), ctx->buf.data(), n);
+          L.rx_peer_v = ctx->peer;
           on_video_rx(L, n);
         }
-        arm_video(L, gen);
+        arm_video(L, gen, std::move(ctx));
       });
     }
 
-    void arm_audio(link_t &L, uint32_t gen) {
+    void arm_audio(link_t &L, uint32_t gen, std::shared_ptr<rx_ctx_t<256>> ctx = nullptr) {
       // 音訊 socket 只會收到 PING（讓 client 端的防火牆狀態維持住），內容不用看
-      L.audio_sock.async_receive_from(asio::buffer(L.rx_buf_a), L.rx_peer_a, [this, &L, gen](const boost::system::error_code &ec, size_t) {
+      if (!ctx) {
+        ctx = std::make_shared<rx_ctx_t<256>>();
+      }
+      auto &c = *ctx;
+      L.audio_sock.async_receive_from(asio::buffer(c.buf), c.peer, [this, &L, gen, ctx = std::move(ctx)](const boost::system::error_code &ec, size_t) mutable {
         if (L.rx_gen.load(std::memory_order_relaxed) != gen) {
           return;
         }
         if (stop.load(std::memory_order_relaxed) || ec == asio::error::operation_aborted) {
           return;
         }
-        arm_audio(L, gen);
+        arm_audio(L, gen, std::move(ctx));
       });
     }
 
@@ -407,8 +427,21 @@ namespace vr::multilink {
      * §VR-MULTILINK-HOTADD：停掉舊 tx，在 io 執行緒就地換 socket，再起新的 tx（沿用同一個 link_t 物件位址）。
      * 呼叫端（control 執行緒，握 hello_mtx）已決定要重綁／回收哪個 slot。
      */
+    // §REVIEW-1111：HELLO 帶來的兩個位址只收一般的單播位址。0.0.0.0 當本機位址會 bind 成功（＝所有介面），
+    // 「不是本機位址就 bind 失敗」那道檢查擋不住它；對方位址是廣播／多播時，影像會整路送到那裡。
+    static bool link_addrs_ok(const hello_link_t &h) {
+      const auto local = to_v4(h.server_addr);
+      const auto peer = to_v4(h.client_addr);
+      return !local.is_unspecified() && !local.is_multicast() && local != asio::ip::address_v4::broadcast() &&
+             !peer.is_unspecified() && !peer.is_multicast() && peer != asio::ip::address_v4::broadcast();
+    }
+
     bool rebuild_link(link_t &L, const hello_link_t &h, uint8_t old_id) {
       const auto begin = clock::now();
+      if (!link_addrs_ok(h)) {
+        BOOST_LOG(warning) << "[VIPLE-VR-LINK] hot-add link " << (int) old_id << " refused: not a unicast address";
+        return false;
+      }
       L.retire.store(true, std::memory_order_relaxed);
       L.cv.notify_all();
       if (L.tx.joinable()) {
@@ -416,9 +449,18 @@ namespace vr::multilink {
       }
       L.retire.store(false, std::memory_order_relaxed);
 
+      // §REVIEW-1111：原本等 500 ms 沒等到就當失敗、把埠清成 0 返回，但排進 io 執行緒的重綁之後照樣會做完：
+      // socket 換了、接收也開了，卻沒有人把送出執行緒拉回來——連線變成「收得到、沒有人送」，而且兩條執行緒同時寫埠。
+      // 現在這件事只有一個結果：0＝還沒開始、1＝io 執行緒已經開始做、2＝這邊放棄了（io 執行緒看到就不做）。
+      auto claim = std::make_shared<std::atomic<int>>(0);
       auto done = std::make_shared<std::promise<bool>>();
       auto future = done->get_future();
-      asio::post(io, [this, &L, h, done] {
+      asio::post(io, [this, &L, h, done, claim] {
+        int expect = 0;
+        if (!claim->compare_exchange_strong(expect, 1)) {
+          done->set_value(false);
+          return;
+        }
         bool ok = false;
         try {
           ok = reset_link_sockets(L, h);
@@ -431,7 +473,17 @@ namespace vr::multilink {
       if (future.wait_for(500ms) == std::future_status::ready) {
         ok = future.get();
       } else {
-        BOOST_LOG(warning) << "[VIPLE-VR-LINK] hot-add link " << (int) old_id << " socket rebuild timed out (io thread busy)";
+        int expect = 0;
+        if (claim->compare_exchange_strong(expect, 2)) {
+          // 還沒開始就放棄：socket 沒有動過，用原來的把送出執行緒接回去（這條連線本來就是死的才會來重綁，
+          // client 下一則 HELLO 會再試一次）
+          BOOST_LOG(warning) << "[VIPLE-VR-LINK] hot-add link " << (int) old_id << " socket rebuild timed out (io thread busy); keeping the old sockets";
+          L.tx = std::thread {[this, &L] {
+            tx_loop(L);
+          }};
+          return false;
+        }
+        ok = future.get();  // io 執行緒已經在做了：等它做完（只是關開 socket，很快）
       }
       if (!ok) {
         L.server_video_port = 0;
@@ -722,6 +774,9 @@ namespace vr::multilink {
 
     void tx_loop(link_t &L) {
       platf::set_thread_name("vr::link" + std::to_string((int) L.id));
+      // §REVIEW-1111：和一般的影像送出執行緒相同的優先權。原本這幾條停在一般優先權，host 的 CPU 被遊戲吃滿時，
+      // 多連線這條路的影像與補包會排在後面。
+      platf::adjust_thread_priority(platf::thread_priority_e::high);
       L.hp = platf::create_high_precision_timer();
       while (!stop.load(std::memory_order_relaxed) && !L.retire.load(std::memory_order_relaxed)) {
         batch_t b;
@@ -873,6 +928,8 @@ namespace vr::multilink {
       impl_ {std::make_unique<impl_t>(key, std::move(opt), std::move(on_c2s))} {
     impl_->rx = std::thread {[p = impl_.get()] {
       platf::set_thread_name("vr::link-rx");
+      // §REVIEW-1111：這條收的是姿勢、NACK、LATCH（和控制執行緒同一類），用同樣的優先權
+      platf::adjust_thread_priority(platf::thread_priority_e::critical);
       p->io.run();
     }};
     BOOST_LOG(info) << "[VIPLE-VR-LINK] multi-link ready: video="
@@ -955,7 +1012,8 @@ namespace vr::multilink {
       if (existing) {
         if (existing->desc == h) {
           // epoch 不影響「描述相同」；只把防重放的值往前推，重播舊 HELLO 不會讓它倒退
-          if (h.epoch > existing->epoch) {
+          // §REVIEW-1111：epoch 是 8 bit、client 過了 255 會回到 1，用序號比較（往前不到半圈才算新）
+          if (h.epoch != existing->epoch && (uint8_t) (h.epoch - existing->epoch) < 128) {
             existing->epoch = h.epoch;
           }
           // §REVIEW-1103（B040-2）：rebuild_link 等 io 執行緒逾時後，已 post 的重建工作稍後仍可能完成、把埠設回非 0，
@@ -974,7 +1032,8 @@ namespace vr::multilink {
             out.push_back(r);
             continue;
           }
-          if (h.epoch <= existing->epoch) {
+          // §REVIEW-1111：同上。原本用大小比較，同一條連線重綁滿 255 次之後回到 1 的 epoch 會被永遠拒絕
+          if (h.epoch == existing->epoch || (uint8_t) (h.epoch - existing->epoch) >= 128) {
             // 重播或亂序：不讓舊的 HELLO 把 endpoint 拉回上一個位址
             BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add rebind refused: link " << (int) h.id << " epoch " << (int) h.epoch
                             << " <= last accepted " << (int) existing->epoch;
@@ -1066,6 +1125,9 @@ namespace vr::multilink {
         }
         // automatic：session 本身那條先送影像，其餘先探測
         L->probing.store(m.opt.video == options_t::video_e::automatic && !L->primary, std::memory_order_relaxed);
+        if (!impl_t::link_addrs_ok(h)) {
+          throw std::runtime_error("not a unicast address");
+        }
         L->client_video = udp::endpoint {to_v4(h.client_addr), h.client_video_port};
         L->client_audio = udp::endpoint {to_v4(h.client_addr), h.client_audio_port};
         // 綁在 client 配對到的 server 位址：不是本機位址就會 bind 失敗（拒絕這條連線）

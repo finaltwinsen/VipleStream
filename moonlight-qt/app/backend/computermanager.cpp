@@ -225,11 +225,20 @@ private:
                         // §REVIEW-1111：這幾個欄位（QString／NvAddress，隱式共享）同時被效能浮層、開串流的執行緒、
                         // 存檔執行緒讀；原本在這裡沒拿鎖就賦值，讀的人可能拿到正在被釋放的字串。
                         if (!result.stunIp.isEmpty()) {
-                            relayAddr = NvAddress(result.stunIp, 47989);
                             QWriteLocker computerLock(&m_Computer->lock);
+                            // §REVIEW-1111：HTTP 埠原本寫死 47989；主機用別的對外埠（手動位址、<ExternalPort>）時對不到。
+                            uint16_t httpPort = m_Computer->externalPort ? m_Computer->externalPort : m_Computer->activeAddress.port();
+                            if (httpPort == 0) {
+                                httpPort = 47989;
+                            }
+                            relayAddr = NvAddress(result.stunIp, httpPort);
                             m_Computer->stunAddress = relayAddr;
                             m_Computer->stunNatType = result.natType;
-                            m_Computer->stunPunchPort = result.stunPort;  // §REVIEW-1104：打洞用 relay 回報的實際埠
+                            // §REVIEW-1104：打洞用 relay 回報的實際埠。§REVIEW-1111：relay 沒給（0）時不要把
+                            // 先前從 serverinfo 解析到的打洞埠清掉。
+                            if (result.stunPort != 0) {
+                                m_Computer->stunPunchPort = result.stunPort;
+                            }
                         } else {
                             // No STUN endpoint — use a placeholder address.
                             // All communication will go through relay proxy/tunnel.
@@ -861,6 +870,10 @@ QSize ComputerManager::getMaxHostDisplayMode()
             modes = host->displayModes;
         }
         for (const NvDisplayMode& mode : std::as_const(modes)) {
+            // §REVIEW-1111：主機回報的值沒有範圍檢查；負值相乘是正的、太大的相乘會溢位
+            if (mode.width <= 0 || mode.height <= 0 || mode.width > 16384 || mode.height > 16384) {
+                continue;
+            }
             if (mode.width * mode.height > maxW * maxH) {
                 maxW = mode.width;
                 maxH = mode.height;

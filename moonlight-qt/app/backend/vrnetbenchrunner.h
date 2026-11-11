@@ -81,6 +81,7 @@ private:
     qint64 m_PhaseStartMs = 0;
     bool m_AdapterOnly = false;
     bool m_Cancel = false;
+    int m_AdapterLostTicks = 0;  // 只用轉接器的一階進行中，連續幾次看到 helper 不在 adapter-only
     bool m_Retried = false;  // 這一階已經重跑過一次
     QString m_Loc;
     QString m_Status;

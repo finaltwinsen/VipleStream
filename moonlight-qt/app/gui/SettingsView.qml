@@ -419,8 +419,18 @@ Flickable {
                     property var values: [0, 2, 3, 4, 5]
                     model: [qsTr("Off"), "2\u00b0", "3\u00b0", "4\u00b0", "5\u00b0"]
                     Component.onCompleted: {
+                        // §REVIEW-1111：清單外的值（命令列留下的）原本顯示成第一項、串流卻照用原值。選最接近的並寫回。
                         var i = values.indexOf(Math.round(StreamingPreferences.vrOverscanDeg))
-                        currentIndex = i >= 0 ? i : 0
+                        if (i < 0) {
+                            i = 0
+                            for (var k = 1; k < values.length; k++) {
+                                if (Math.abs(values[k] - StreamingPreferences.vrOverscanDeg) < Math.abs(values[i] - StreamingPreferences.vrOverscanDeg)) {
+                                    i = k
+                                }
+                            }
+                            StreamingPreferences.vrOverscanDeg = values[i]
+                        }
+                        currentIndex = i
                         recalculateWidth()
                     }
                     onActivated: {
@@ -446,7 +456,16 @@ Flickable {
                     model: [qsTr("Off"), "3 ms", "5 ms", "6 ms"]
                     Component.onCompleted: {
                         var i = values.indexOf(Math.round(StreamingPreferences.vrLatchDelayMs))
-                        currentIndex = i >= 0 ? i : 0
+                        if (i < 0) {
+                            i = 0
+                            for (var k = 1; k < values.length; k++) {
+                                if (Math.abs(values[k] - StreamingPreferences.vrLatchDelayMs) < Math.abs(values[i] - StreamingPreferences.vrLatchDelayMs)) {
+                                    i = k
+                                }
+                            }
+                            StreamingPreferences.vrLatchDelayMs = values[i]
+                        }
+                        currentIndex = i
                         recalculateWidth()
                     }
                     onActivated: {
@@ -475,6 +494,11 @@ Flickable {
                     Component.onCompleted: {
                         currentIndex = StreamingPreferences.vrFoveation > 100
                                        ? Math.min(3, Math.max(1, StreamingPreferences.vrFoveaTiles)) : 0
+                        // §REVIEW-1111：舊設定留下的其他強度（例如 150、250）在這裡顯示成小／中／大，但值沒有跟著改；
+                        // 沒談成分塊時會照舊的強度走分段曲線，和畫面上選的不一樣。這個選單代表的就是 200。
+                        if (StreamingPreferences.vrFoveation > 100 && StreamingPreferences.vrFoveation !== 200) {
+                            StreamingPreferences.vrFoveation = 200
+                        }
                         recalculateWidth()
                     }
                     onActivated: {
@@ -576,7 +600,16 @@ Flickable {
                     model: ["180°", "270°", "360°", "540°", "900°"]
                     Component.onCompleted: {
                         var i = values.indexOf(StreamingPreferences.vrWheelRange)
-                        currentIndex = i >= 0 ? i : 0
+                        if (i < 0) {
+                            i = 0
+                            for (var k = 1; k < values.length; k++) {
+                                if (Math.abs(values[k] - StreamingPreferences.vrWheelRange) < Math.abs(values[i] - StreamingPreferences.vrWheelRange)) {
+                                    i = k
+                                }
+                            }
+                            StreamingPreferences.vrWheelRange = values[i]
+                        }
+                        currentIndex = i
                         recalculateWidth()
                     }
                     onActivated: {

@@ -450,7 +450,10 @@ bool VrLauncher::launchNetBenchStep(const QString& hostAddress, int eye, int sec
     const QString eyeArg = QStringLiteral("%1x%1").arg(eye);
     QStringList args{QStringLiteral("stream"), QStringLiteral("--display-target"), QStringLiteral("pcvr"),
                      QStringLiteral("--vr-eye"), eyeArg, QStringLiteral("--vr-hz"), QStringLiteral("144"),
-                     QStringLiteral("--vr-netbench"), resultPath, QStringLiteral("--vr-netbench-secs"), QString::number(seconds)};
+                     QStringLiteral("--vr-netbench"), resultPath, QStringLiteral("--vr-netbench-secs"), QString::number(seconds),
+                     // §REVIEW-1111：測試以 144 張／秒算缺額。使用者開著「半速」時每秒只有 72 張新影像，
+                     // 每一階都會被判成撐不住、階梯停在最低一階。測試一律全速。
+                     QStringLiteral("--no-vr-half-rate")};
     if (s_ChildHook) {
         args << QStringLiteral("--xr-handback");  // §VR-SHELL
     }

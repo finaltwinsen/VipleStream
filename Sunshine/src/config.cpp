@@ -957,7 +957,9 @@ namespace config {
       // We know we have a valid closing bracket if:
       // 1. We didn't reach the end, or
       // 2. We reached the end but the last character was the matching closing bracket
-      if (endl == end && end == begin_val + 1) {
+      // §REVIEW-1111：括號沒有對上時 skip_list 會一路掃到檔尾，原本只有「值就是一個 [ 而且檔案在這裡結束」才警告；
+      // 其他情況把這一行之後的整份設定都當成清單內容吃掉，後面的設定（例如 update_mode = off）全部不生效。
+      if (endl == end && (end == begin_val + 1 || *(end - 1) != ']')) {
         warn_config(std::format("config: Missing ']' in config option: {}", to_string(begin, end_name)));
         return std::make_pair(endl, std::nullopt);
       }
@@ -1371,7 +1373,8 @@ namespace config {
           config::sunshine.flags[config::flag::FORCE_VIDEO_HEADER_REPLACE].flip();
           break;
         case 'p':
-          config::sunshine.flags[config::flag::UPNP].flip();
+          // §REVIEW-1111：設位、不反轉。-p 和設定檔的 upnp = enabled 同時存在時，原本翻兩次等於關掉
+          config::sunshine.flags[config::flag::UPNP] = true;
           break;
         default:
           warn_config(std::format("config: Unrecognized flag: [{}]", *line));
@@ -1462,9 +1465,19 @@ namespace config {
       video.amd.amd_usage_av1 = amd::usage_from_view<amd::usage_av1_e>(usage, video.amd.amd_usage_av1);
     }
 
-    bool_f(vars, "amd_preanalysis", (bool &) video.amd.amd_preanalysis);
-    bool_f(vars, "amd_vbaq", (bool &) video.amd.amd_vbaq);
-    bool_f(vars, "amd_enforce_hrd", (bool &) video.amd.amd_enforce_hrd);
+    // §REVIEW-1111：這三個是 optional<int>，原本硬轉成 bool& 寫進去——寫到的是 optional 的第一個位元組，
+    // 「有沒有值」的旗標沒有動，設定等於沒有套用（或套用成壞掉的整數）。
+    for (const auto &[key, dst] : std::initializer_list<std::pair<const char *, std::optional<int> *>> {
+           {"amd_preanalysis", &video.amd.amd_preanalysis},
+           {"amd_vbaq", &video.amd.amd_vbaq},
+           {"amd_enforce_hrd", &video.amd.amd_enforce_hrd},
+         }) {
+      std::string tmp;
+      string_f(vars, key, tmp);
+      if (!tmp.empty()) {
+        *dst = to_bool(tmp) ? 1 : 0;
+      }
+    }
 
     int_f(vars, "vt_coder", video.vt.vt_coder, vt::coder_from_view);
     int_f(vars, "vt_software", video.vt.vt_allow_sw, vt::allow_software_from_view);
@@ -1747,7 +1760,7 @@ namespace config {
     bool_f(vars, "upnp"s, upnp);
 
     if (upnp) {
-      config::sunshine.flags[config::flag::UPNP].flip();
+      config::sunshine.flags[config::flag::UPNP] = true;
     }
 
     string_restricted_f(vars, "locale", config::sunshine.locale, {

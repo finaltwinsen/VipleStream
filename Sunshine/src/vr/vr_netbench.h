@@ -17,7 +17,11 @@ namespace vr {
   /// 片段檔：設定 vr_netbench_clip，沒設就是 config 目錄的 netbench/clip.mp4
   inline std::filesystem::path netbench_clip_path() {
     if (!config::vr.netbench_clip.empty()) {
-      return std::filesystem::path {config::vr.netbench_clip};
+      // §REVIEW-1111：設定檔是 UTF-8。用窄字串直接建 path 在 Windows 會照系統字碼頁解讀，路徑有中文就對不到檔；
+      // 相對路徑也改成相對於 config 目錄（和其他路徑設定一致），原本是相對於服務的工作目錄。
+      const auto &s = config::vr.netbench_clip;
+      std::filesystem::path p {std::u8string(s.begin(), s.end())};
+      return p.is_relative() ? platf::appdata() / p : p;
     }
     return platf::appdata() / "netbench" / "clip.mp4";
   }

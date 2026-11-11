@@ -277,6 +277,10 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
         for (const QString& macOctet : std::as_const(macOctets)) {
             this->macAddress.append((char) macOctet.toInt(nullptr, 16));
         }
+        // §REVIEW-1111：不是 6 個位元組的不要留（會存進設定，之後按「喚醒」組出壞掉的封包）
+        if (this->macAddress.size() != 6) {
+            this->macAddress.clear();
+        }
     }
 
     QString codecSupport = NvHTTP::getXmlString(serverInfo, "ServerCodecModeSupport");
@@ -450,7 +454,7 @@ bool NvComputer::wake() const
             return true;
         }
 
-        if (macAddress.isEmpty()) {
+        if (macAddress.size() != 6) {
             qWarning() << name << "has no MAC address stored";
             return false;
         }
@@ -599,7 +603,9 @@ NvComputer::ReachabilityType NvComputer::getActiveAddressReachability() const
     QTcpSocket s;
     s.setProxy(QNetworkProxy::NoProxy);
     s.connectToHost(copyOfActiveAddress.address(), copyOfActiveAddress.port());
-    if (s.waitForConnected(3000)) {
+    // §REVIEW-1111：這個探測在每次開串流、每次結束串流時都會做。對方的 TCP 埠連不上（只靠 relay、路由黑洞）時
+    // 原本各等滿 3 秒。區網與一般 VPN 一個往返內就會連上；等不到就當成「不知道」（串流設定用自動）。
+    if (s.waitForConnected(800)) {
         Q_ASSERT(!s.localAddress().isNull());
         Q_ASSERT(!s.peerAddress().isNull());
 

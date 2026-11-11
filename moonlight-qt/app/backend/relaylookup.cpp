@@ -244,7 +244,9 @@ RelayLookup::Result RelayLookup::lookup(const QString &relayUrl, const QString &
         // Server is online (connected to relay). May or may not have a STUN endpoint.
         result.success = true;
         result.stunIp = obj["stun_ip"].toString();
-        result.stunPort = (uint16_t)obj["stun_port"].toInt();
+        // §REVIEW-1111：超出範圍的值原本被截成別的埠（-1 → 65535）；不合法就當成沒給
+        const int stunPort = obj["stun_port"].toInt();
+        result.stunPort = (stunPort >= 1 && stunPort <= 65535) ? (uint16_t)stunPort : 0;
         result.natType = obj["nat_type"].toString();
 
         if (!result.stunIp.isEmpty()) {

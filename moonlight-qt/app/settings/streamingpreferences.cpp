@@ -404,6 +404,10 @@ void StreamingPreferences::reload()
                                                          static_cast<int>(CaptureSysKeysMode::CSK_OFF)).toInt());
     audioConfig = static_cast<AudioConfig>(settings.value(SER_AUDIOCFG,
                                                   static_cast<int>(AudioConfig::AC_STEREO)).toInt());
+    // §REVIEW-1111：設定檔裡清單外的值會讓整場串流在 RTSP 交握失敗
+    if (audioConfig != AudioConfig::AC_STEREO && audioConfig != AudioConfig::AC_51_SURROUND && audioConfig != AudioConfig::AC_71_SURROUND) {
+        audioConfig = AudioConfig::AC_STEREO;
+    }
     videoCodecConfig = static_cast<VideoCodecConfig>(settings.value(SER_VIDEOCFG,
                                                   static_cast<int>(VideoCodecConfig::VCC_AUTO)).toInt());
     videoDecoderSelection = static_cast<VideoDecoderSelection>(settings.value(SER_VIDEODEC,
@@ -780,7 +784,9 @@ int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool
 
     // Calculate the resolution factor by linear interpolation of the resolution table
     float resolutionFactor;
-    int pixels = width * height;
+    // §REVIEW-1111：很大的解析度相乘會溢位成負數、落到最低一檔；夾在表的範圍以上就會用最後一檔
+    const long long pixels64 = static_cast<long long>(width) * height;
+    int pixels = pixels64 > 0x7fffffffLL ? 0x7fffffff : (pixels64 < 0 ? 0 : static_cast<int>(pixels64));
     for (int i = 0;; i++) {
         if (pixels == resTable[i].pixels) {
             // We can bail immediately for exact matches

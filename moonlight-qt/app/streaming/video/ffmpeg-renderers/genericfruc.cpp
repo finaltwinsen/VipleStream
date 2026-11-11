@@ -551,8 +551,8 @@ void GenericFRUC::skipFrame(ID3D11DeviceContext* ctx) {
         ctx->CopyResource(m_PrevMotionField.Get(), m_MotionField.Get());
     }
 
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-FRUC-Generic] frame=%d SKIPPED (late arrival)", m_FrameCount);
+    // §REVIEW-1111：這裡原本每一張晚到的幀都寫一行 log（格式化＋寫檔，就在已經晚了的那一幀的 Present 之前）。
+    // 晚到的比例已經有每 5 秒一行的 [VIPLE-FRUC-Stats] skip_ratio。
 }
 
 // VipleStream: allocate a 3-slot ring of TIMESTAMP_DISJOINT +

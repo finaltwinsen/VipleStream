@@ -359,7 +359,8 @@ private:
     std::atomic<bool> m_AudioMuted;
     Uint32 m_FullScreenFlag;
     QQuickWindow* m_QtWindow;
-    bool m_UnexpectedTermination;
+    std::atomic<bool> m_UnexpectedTermination;
+    std::atomic<bool> m_UnexpectedSeen {false};  // 斷線回呼來過（見 exec() 裡清旗標的地方）
     SdlInputHandler* m_InputHandler;
     // §VR M3a X1：--display-target xr-desktop 時在 startConnectionAsync 開頭建立；bring-up 失敗
     // 就是 nullptr（退回平面，不變式 5）。拆除在 decoder 刪除之後、SDL_DestroyWindow 之前。

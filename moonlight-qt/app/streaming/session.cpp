@@ -374,7 +374,7 @@ void Session::clConnectionTerminated(int errorCode)
         break;
 
     case ML_ERROR_NO_VIDEO_TRAFFIC:
-        s_ActiveSession->m_UnexpectedTermination = true;
+        s_ActiveSession->m_UnexpectedSeen = true; s_ActiveSession->m_UnexpectedTermination = true;
 
         char ports[128];
         SDL_assert(portFlags != 0);
@@ -384,19 +384,19 @@ void Session::clConnectionTerminated(int errorCode)
         break;
 
     case ML_ERROR_NO_VIDEO_FRAME:
-        s_ActiveSession->m_UnexpectedTermination = true;
+        s_ActiveSession->m_UnexpectedSeen = true; s_ActiveSession->m_UnexpectedTermination = true;
         emit s_ActiveSession->displayLaunchError(tr("Your network connection isn't performing well. Reduce your video bitrate setting or try a faster connection."));
         break;
 
     case ML_ERROR_PROTECTED_CONTENT:
     case ML_ERROR_UNEXPECTED_EARLY_TERMINATION:
-        s_ActiveSession->m_UnexpectedTermination = true;
+        s_ActiveSession->m_UnexpectedSeen = true; s_ActiveSession->m_UnexpectedTermination = true;
         emit s_ActiveSession->displayLaunchError(tr("Something went wrong on your host PC when starting the stream.") + "\n\n" +
                                                  tr("Make sure you don't have any DRM-protected content open on your host PC. You can also try restarting your host PC."));
         break;
 
     case ML_ERROR_FRAME_CONVERSION:
-        s_ActiveSession->m_UnexpectedTermination = true;
+        s_ActiveSession->m_UnexpectedSeen = true; s_ActiveSession->m_UnexpectedTermination = true;
         emit s_ActiveSession->displayLaunchError(tr("The host PC reported a fatal video encoding error.") + "\n\n" +
                                                  tr("Try disabling HDR mode, changing the streaming resolution, or changing your host PC's display resolution."));
         break;
@@ -404,12 +404,12 @@ void Session::clConnectionTerminated(int errorCode)
     case ML_ERROR_CONTROL_STREAM_DISCONNECT:
         // 原本 -1 落入 default 只給 generic 錯誤碼，使用者無從行動。
         // （qmake mkspec 已注入 -utf-8，中文字面量可直寫。）
-        s_ActiveSession->m_UnexpectedTermination = true;
+        s_ActiveSession->m_UnexpectedSeen = true; s_ActiveSession->m_UnexpectedTermination = true;
         emit s_ActiveSession->displayLaunchError(tr("The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later."));
         break;
 
     default:
-        s_ActiveSession->m_UnexpectedTermination = true;
+        s_ActiveSession->m_UnexpectedSeen = true; s_ActiveSession->m_UnexpectedTermination = true;
 
         // We'll assume large errors are hex values
         bool hexError = qAbs(errorCode) > 1000;
@@ -571,12 +571,36 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
     }
 }
 
+// §REVIEW-1111：clVrMessage 收下的最新震動 eventId（分左右手；bit 32＝已有值）。回呼是靜態函式、會在收影像的
+// 執行緒與 async 回呼執行緒上被呼叫，所以放檔案層級；每一場開始時（startConnectionAsync）歸零。
+static std::atomic<uint64_t> s_VrHapticSeenCb[2];
+
 void Session::clVrMessage(const uint8_t* tlv, int length)
 {
     // common-c 的 async callback 執行緒：複製 payload，一律包成 SDL_USEREVENT
     // 交給主執行緒處理（docs/vr_protocol.md §4.5）
     if (tlv == nullptr || length <= 0) {
         return;
+    }
+    // §REVIEW-1111：震動的重複副本在這裡就丟掉。host 預設每一則震動送三份（0／8／20 ms），每一份又走視訊連線與 ENet
+    // 各一次；原本六份都在這裡配置、複製、推 SDL 事件（其中一半發生在收影像的執行緒上），到主執行緒才用 eventId
+    // 丟掉五份。兩手連續震動時是每秒上千次配置與事件。這裡只看「整則訊息就是一個震動 TLV」的情況，序號比對與
+    // 主執行緒的去重相同（分左右手、32-bit 迴繞安全）；第一份照常往下送。
+    if (length == 2 + (int)sizeof(VIPLE_VR_TLV_HAPTIC) && tlv[0] == VIPLE_VR_S2C_HAPTIC && tlv[1] == sizeof(VIPLE_VR_TLV_HAPTIC)) {
+        VIPLE_VR_TLV_HAPTIC h;
+        memcpy(&h, tlv + 2, sizeof(h));
+        const unsigned dev = (unsigned)h.device - VIPLE_VR_POSE_LEFT;
+        if (dev < 2) {
+            uint64_t seen = s_VrHapticSeenCb[dev].load(std::memory_order_relaxed);
+            for (;;) {
+                if ((seen >> 32) != 0 && (int32_t)(h.eventId - (uint32_t)seen) <= 0) {
+                    return;  // 已經收下過這一則（或更新的）
+                }
+                if (s_VrHapticSeenCb[dev].compare_exchange_weak(seen, (1ull << 32) | h.eventId, std::memory_order_relaxed)) {
+                    break;
+                }
+            }
+        }
     }
     void* copy = SDL_malloc((size_t)length);
     if (copy == nullptr) {
@@ -3162,8 +3186,10 @@ void Session::netBenchTick()
     // 結果已經寫好：正常收尾 20 秒還沒結束就直接結束程序。11-09 頭盔實測：硬體解碼器（v4l2m2m）整階沒解出任何影格時，
     // 收尾卡在 ~FFmpegVideoDecoder 等解碼執行緒（它卡在 v4l2 的 poll 裡），子行程永遠不退出，測試流程跟著停住
     std::thread([] {
-        std::this_thread::sleep_for(std::chrono::seconds(20));
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-NETBENCH] the stream did not shut down within 20 s after the result was written - exiting");
+        // §REVIEW-1111：20 → 45 秒。收尾裡的 /cancel 最多等 30 秒（網路測試當下線路常常就是慢的），加上解碼器收尾約 3 秒；
+        // 20 秒就結束會把還沒送到的 /cancel 砍掉，host 還佔著這一場，下一階的 /launch 就被拒絕。
+        std::this_thread::sleep_for(std::chrono::seconds(45));
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-NETBENCH] the stream did not shut down within 45 s after the result was written - exiting");
         fflush(nullptr);
         std::_Exit(0);
     }).detach();
@@ -3441,6 +3467,8 @@ bool Session::setupXrPcvr()
 
 bool Session::startConnectionAsync()
 {
+    s_VrHapticSeenCb[0].store(0);  // §REVIEW-1111：新的一場，host 的 eventId 重新起算
+    s_VrHapticSeenCb[1].store(0);
     // The UI should have ensured the old game was already quit
     // if we decide to stream a different game.
     Q_ASSERT(m_Computer->currentGameId == 0 ||
@@ -4695,6 +4723,12 @@ void Session::exec()
     // unless it comes from the connection termination callback where
     // (m_UnexpectedTermination is set back to true).
     m_UnexpectedTermination = false;
+    // §REVIEW-1111：連線在上面建視窗的那段時間就已經在跑，斷線回呼可能比這一行早到——它設的 true 會被這一行清掉，
+    // 收尾就改送 /cancel 把 host 上的遊戲關掉，而不是留著給使用者接回去。回呼先設 m_UnexpectedSeen 再設旗標，
+    // 這裡清完再看一次：不論兩邊怎麼交錯，回呼來過最後就是 true。
+    if (m_UnexpectedSeen.load()) {
+        m_UnexpectedTermination = true;
+    }
 
     // Start rich presence to indicate we're in game
     RichPresenceManager presence(*m_Preferences, m_App.name);

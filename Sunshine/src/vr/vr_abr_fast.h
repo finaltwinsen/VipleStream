@@ -891,7 +891,13 @@ namespace vr::abr {
         }
       }
       // §VR-ABR-STARTUP-RESTORE：延遲上升造成的降碼＝真的塞車，這一場沒有穩定值時不再拉回
-      if (std::strstr(reason, "delay") != nullptr || std::strstr(reason, "owd") != nullptr) {
+      // §REVIEW-1111：開場 10 秒內的 rate-shortfall+delay 不算。那個原因只看「送出比收到多」，沒有看延遲趨勢
+      // （+delay 只是分類用的後綴），而開場的 IDR 與起步突發本來就會讓送出暫時大於收到——下面的飽和判斷已經把這段
+      // 排除，這裡卻先一步把旗標設上，整場之後的斷訊恢復都不再拉回。
+      const bool startup_shortfall = std::strcmp(reason, "rate-shortfall+delay") == 0 &&
+                                     first_rates_time_ != steady::time_point {} &&
+                                     now - first_rates_time_ < k_fast_saturated_startup_grace;
+      if (!startup_shortfall && (std::strstr(reason, "delay") != nullptr || std::strstr(reason, "owd") != nullptr)) {
         delay_congestion_seen_ = true;
       }
       restore_time_ = {};
@@ -911,9 +917,9 @@ namespace vr::abr {
       // 記住最後一次因 delay / persistent / owd 降碼前的 applied
       // 11-04：同一次塞車常連降兩刀（例：owd-trend 75→63.5，1.6 s 後 fec-failed+delay 63.5→54），
       // 舊寫法第二刀把塞車點覆寫成 63.5，回升時就不知道真正塞住的是 75。5 秒內的後續刀只取較大值。
-      if (std::strstr(reason, "delay") != nullptr ||
-          std::strstr(reason, "persistent") != nullptr ||
-          std::strstr(reason, "owd") != nullptr) {
+      if (!startup_shortfall && (std::strstr(reason, "delay") != nullptr ||
+                                 std::strstr(reason, "persistent") != nullptr ||
+                                 std::strstr(reason, "owd") != nullptr)) {
         note_congested(applied_kbps_, now);
       }
 

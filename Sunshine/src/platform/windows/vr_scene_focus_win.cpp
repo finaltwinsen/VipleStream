@@ -132,6 +132,7 @@ namespace vr::scene_focus {
       void run() {
         DWORD last_pid = 0;
         int fixes = 0;  // 同一個場景程式被搶回前景的次數（避免和別的程式無限拉鋸）
+        uint32_t ticks = 0;
         while (true) {
           {
             std::unique_lock lk(mtx_);
@@ -146,7 +147,14 @@ namespace vr::scene_focus {
             last_pid = pid;
             fixes = 0;
           }
-          if (pid == 0 || fixes >= 20) {
+          if (pid == 0) {
+            continue;
+          }
+          // §REVIEW-1111：原本拉了 20 次（成功或失敗都算）之後，這一場就再也不拉了——SteamVR 的狀態視窗或 Steam
+          // 多搶幾次前景，遊戲之後就一直留在背景（Unreal 的遊戲會靜音）。改成：遊戲在前景時把次數歸零；
+          // 連續 20 次都沒拉成功就放慢到 30 秒一次，不是永遠停掉。
+          ++ticks;
+          if (fixes >= 20 && ticks % 30 != 0) {
             continue;
           }
           const HWND fg = GetForegroundWindow();
@@ -155,6 +163,7 @@ namespace vr::scene_focus {
             GetWindowThreadProcessId(fg, &fg_pid);
           }
           if (fg_pid == pid) {
+            fixes = 0;
             continue;
           }
           const HWND h = main_window(pid);

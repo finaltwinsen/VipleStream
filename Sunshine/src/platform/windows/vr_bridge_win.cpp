@@ -2731,7 +2731,8 @@ namespace vr::bridge {
       c.last_driver = d;
 
       const bool state_ok = d.driver_state == VRIPC_DRV_MAPPED || (d.driver_state >= VRIPC_DRV_READY && d.driver_state <= VRIPC_DRV_DEGRADED);
-      const bool hb_ok = d.driver_heartbeat_qpc >= now - 10 * qpf() && d.driver_heartbeat_qpc <= now + qpf();
+      // §REVIEW-1111：0＝driver 還沒寫心跳。開機後前 10 秒 now − 10×qpf() 是負的，0 會被當成「有心跳但過期」，跳過第一次心跳的 3 秒寬限直接拆線
+      const bool hb_ok = d.driver_heartbeat_qpc > 0 && d.driver_heartbeat_qpc >= now - 10 * qpf() && d.driver_heartbeat_qpc <= now + qpf();
       const bool act_ok = (d.act_refresh_mhz == 0 || (d.act_refresh_mhz >= 60000 && d.act_refresh_mhz <= 240000)) && d.act_eye_width <= 8192 && d.act_eye_height <= 8192;
       char sys[sizeof d.other_hmd_system + 1] {};
       std::memcpy(sys, d.other_hmd_system, sizeof d.other_hmd_system);

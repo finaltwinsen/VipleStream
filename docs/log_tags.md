@@ -1899,3 +1899,13 @@ pwsh scripts\benchmark\analyze_client_log.ps1 -Path C:\Users\me\Downloads -Json 
 - client `[VIPLE-PACER10] n=<張> pace p05/p50/p95=… ms rend p05/p50/p95=… ms | at vsync: empty=<次> one=<次> more=<次> late=<次> | display=<Hz> stream=<fps>`：節拍器把「佇列」拆成等垂直同步交接（pace）與交接後等繪製（rend）；at vsync＝每次垂直同步時 pacing 佇列的張數分布（more＝多排了一格以上），late＝垂直同步到了才來的張數。
 - client `[VIPLE-PACER-SEQ] drops=<累計> <逐幀 pace，0.1 ms 為單位，最後 240 張>`：診斷用（§LAT-2D 3a 查完後移除）。
 - client `[VIPLE-DEC] an abandoned decoder thread came back from the hardware decoder - parking it for good`：§DEC-ABANDON，被放生的解碼執行緒從硬體解碼器醒來，原地停住不再碰已釋放的物件。
+- client `[VIPLE-VR-FOVEA] head left the play area (<w> x <h> m, head at x=… z=…): centre quads off`／`head is back inside … on`：§VR-FOVEA-BOUNDS（2.0.146），頭走出／回到 STAGE 的邊界矩形時各印一次；在外面時不疊注視點那一塊。
+- host `RTSP ANNOUNCE rejected: <w>x<h>@<fps> (x100=…) bitrate=… kbps`：§REVIEW-1111（2.0.143），串流參數超出範圍。
+- host `[VIPLE-MULTI] dropped a pending launch that was never picked up (id=…)`：/cancel、搶佔時丟掉還沒被控制通道取走的 launch（2.0.135）。
+- host `[VIPLE-UPDATE] a stream started during the download; install postponed`：§REVIEW-1111（2.0.148），下載期間開始串流、這次不裝。
+- host `[VIPLE-VR-LINK] hot-add link <id> socket rebuild timed out (io thread busy); keeping the old sockets`：重綁作廢、沿用舊 socket（2.0.148）；`… refused: not a unicast address`：HELLO 的位址不是單播。
+- host `[VIPLE-VR-ENC] dropping a stale desktop probe snapshot (its VR launch never started a session)`：上一次 VR 啟動沒有建立 session 留下的探測快照（2.0.148）。
+- host `NvEnc: frame <n> not encoded after 100 ms, still waiting`：編碼超過 100 ms、再等最多 2 秒（2.0.148）；接著出現 `encode wait timeout` 才是真的放棄。
+- host `Input queue is full (2048 pending); dropping input`：輸入執行緒卡住時丟掉新的輸入（2.0.148，每 1000 則印一次）。
+- host `[VIPLE-VR-CLIP] software frame does not fit its buffer …; frame dropped`：網路測試片段的軟解影格和緩衝區對不上（2.0.148）。
+- client `[VIPLE-VR-POSE] could not raise the tracking thread priority: …`：追蹤送出執行緒調不到 HIGH（2.0.148，只是提示）。

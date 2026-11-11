@@ -60,7 +60,9 @@ public:
         }
         const QString st = readText(m_Path + "/status");
         // Frame 插著電、充滿時是 "Not charging"：另外看充電器的 online
-        r.charging = st == "Charging" || st == "Full" || chargerOnline();
+        // §REVIEW-1111：只有「Not charging」才參考充電器。原本只要充電器 online 就算在充電，接著供電不足的充電器、
+        // 實際在放電（Discharging）時，低電量提示會被當成「正在充電」而不出現。
+        r.charging = st == "Charging" || st == "Full" || (st == "Not charging" && chargerOnline());
         QString cur = readText(m_Path + "/current_avg");
         if (cur.isEmpty()) {
             cur = readText(m_Path + "/current_now");
