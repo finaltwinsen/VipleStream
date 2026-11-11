@@ -126,6 +126,8 @@ namespace proc {
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
     void terminate();
+    /// §REVIEW-1111：換成重新讀進來的 app 清單；有 app 在跑時只換清單，不動執行中的狀態
+    void adopt_app_list(proc_t &&fresh);
 
     // VipleStream §M.1 — multi-user ownership.
     //

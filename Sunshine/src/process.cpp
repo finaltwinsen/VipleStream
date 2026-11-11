@@ -416,7 +416,15 @@ namespace proc {
       // termination-broadcast block (stream.cpp around line 1306) which
       // does send the 0x80030023 packet to every still-connected session.
       // Sessions then unwind cleanly — no error dialog on the client.
-      std::thread([]() {
+      // §REVIEW-1111：帶著自己的世代，拿到狀態鎖之後再確認一次。execute() 整段持有這把鎖（先 terminate 舊的、跑 prep
+      // 指令、啟動新的，可以好幾秒）；原本這條執行緒堵在鎖上，等新的一場啟動完才 terminate()，把新的一場拆掉，
+      // 還把新場剛套用的顯示設定還原。世代變了＝已經有新的啟動接手，什麼都不做。
+      std::thread([my_gen]() {
+        std::lock_guard<std::recursive_mutex> state_lk(_state_mutex);
+        if (_steam_watchdog_gen.load() != my_gen) {
+          BOOST_LOG(info) << "[steam-watchdog] a newer launch took over while ending the stream - leaving it alone"sv;
+          return;
+        }
         if (proc.running() > 0) {
           proc.terminate();
         }
@@ -1062,7 +1070,13 @@ namespace proc {
         // 避免 deadlock（terminate() 內部 bump _idle_watchdog_gen，
         // 若在同 thread 會自我 cancel）。模式同 start_steam_watchdog_
         // line 295-300。
-        std::thread([]() {
+        std::thread([my_gen]() {
+          // §REVIEW-1111：同 Steam 看門狗——拿到狀態鎖之後世代變了就是新的一場已經啟動，不可以拆它
+          std::lock_guard<std::recursive_mutex> state_lk(_state_mutex);
+          if (_idle_watchdog_gen.load() != my_gen) {
+            BOOST_LOG(info) << "[VIPLE-MULTI] idle watchdog: a newer launch took over - leaving it alone"sv;
+            return;
+          }
           if (proc.running() > 0) {
             BOOST_LOG(info) << "[VIPLE-MULTI] idle watchdog → terminate() "
                                "to fully release server state"sv;
@@ -1080,6 +1094,19 @@ namespace proc {
     // §M.1.f.2 — cancel the in-flight idle watchdog (if any).  We do not
     // join; see comment in start_idle_watchdog_ on deadlock risk.
     ++_idle_watchdog_gen;
+  }
+
+  void proc_t::adopt_app_list(proc_t &&fresh) {
+    // §REVIEW-1111：Web UI 存 app 清單時原本把整個 proc 換掉，沒有拿鎖。有 app 在跑（串流中）時這會把 _app_id、
+    // placebo、_vr_pcvr、行程控制代碼一起清成新物件的空值：控制執行緒下一圈看到 running()==0 就把串流收掉，
+    // 而且沒有經過 terminate()，VR 編排器停不下來，下一次 /launch 回 503。有東西在跑時只換清單。
+    std::lock_guard<std::recursive_mutex> state_lk(_state_mutex);
+    if (_app_id > 0 || placebo) {
+      BOOST_LOG(info) << "App list reloaded while an app is running: replaced the list only ("sv << fresh._apps.size() << " apps)"sv;
+      _apps = std::move(fresh._apps);
+      return;
+    }
+    *this = std::move(fresh);
   }
 
   const std::vector<ctx_t> &proc_t::get_apps() const {
@@ -1659,7 +1686,7 @@ namespace proc {
     auto proc_opt = proc::parse(file_name);
 
     if (proc_opt) {
-      proc = std::move(*proc_opt);
+      proc.adopt_app_list(std::move(*proc_opt));
     }
   }
 }  // namespace proc

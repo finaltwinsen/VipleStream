@@ -6081,6 +6081,11 @@ namespace stream {
 
   namespace session {
     std::atomic_uint running_sessions;
+    // §REVIEW-1111：「改 running_sessions」和「呼叫對應的平台回呼」要當成一個動作。原本第一條 session 還在
+    // streaming_will_start（改 NVIDIA 設定檔、列舉 WLAN，可以到幾百毫秒）時，另一條執行緒做 terminate 會讓 join 看到計數歸零、
+    // 同時呼叫 streaming_will_stop：兩邊同時用 WLAN handle，而且 start 的副作用可能在 stop 之後才做完——
+    // 行程就留在高優先權、0.5 ms 計時器、WLAN 低延遲模式，沒有對應的還原。
+    std::mutex running_sessions_mtx;
 
     state_e state(session_t &session) {
       return session.state.load(std::memory_order_relaxed);
@@ -6217,6 +6222,7 @@ namespace stream {
       }
 
       // If this is the last session, invoke the platform callbacks
+      std::lock_guard running_lk {running_sessions_mtx};
       if (--running_sessions == 0) {
         bool revert_display_config {config::video.dd.config_revert_on_disconnect};
         if (proc::proc.running()) {
@@ -6460,6 +6466,7 @@ namespace stream {
 #endif
 
       // If this is the first session, invoke the platform callbacks
+      std::lock_guard running_lk {running_sessions_mtx};
       if (++running_sessions == 1) {
         platf::streaming_will_start();
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1

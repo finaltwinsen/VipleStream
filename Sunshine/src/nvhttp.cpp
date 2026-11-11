@@ -1979,7 +1979,12 @@ namespace nvhttp {
     // M1b V5（S1-11）：pcvr 的 /resume 只接回進行中的編排，而且 VR 參數要一致
     const bool pcvr_resume = vr_params && config::vr.pcvr == config::vr_t::pcvr_e::enabled;
     std::optional<video::vr_probe_scope> vr_scope;
-    if (pcvr_resume) {
+    // §REVIEW-1111：「VR Network Test」不經過 SteamVR 編排器（host 直接播片段），所以沒有「進行中的編排」可以比對。
+    // 原本這裡一律要求編排器 active：網路測試中途斷線重連時 /resume 永遠 503，而 app 還算在跑，client 下一次仍然走
+    // /resume——要另外送 /cancel 才出得來。
+    const auto resumed_app = pcvr_resume ? find_app(proc::proc.running()) : std::optional<proc::ctx_t> {};
+    const bool bench_resume = resumed_app && resumed_app->vr_bench;
+    if (pcvr_resume && !bench_resume) {
       const auto cur = ::vr::orchestrator::current_params();
       if (!::vr::orchestrator::active() || !cur) {
         put_vr_error(tree, true, 503, VIPLE_VR_ERR_BUSY, "no SteamVR orchestration to resume (use /launch)");
@@ -2094,6 +2099,15 @@ namespace nvhttp {
     // VipleStream 2.0 §VR 步驟 5–7：codec 交集、recovery 模式、GUID（要看這次 probe 的結果）
     if (vr_params) {
       launch_session->vr = vr_negotiate(tree, *vr_params, caller_uuid, true);
+      if (launch_session->vr && bench_resume && launch_session->vr->pcvr) {
+        // 同 /launch：標成 bench，RTSP 據此改用片段擷取；片段不分塊
+        auto n = std::make_shared<::vr::negotiated_t>(*launch_session->vr);
+        n->bench = true;
+        n->params.tile_w = n->params.tile_h = n->params.tile_render_w = n->params.tile_render_h = 0;
+        launch_session->vr = n;
+        BOOST_LOG(info) << "[VIPLE-VR-NETBENCH] /resume: network test session " << n->params.eye_width << 'x' << n->params.eye_height << '@'
+                        << n->params.hz << " (no SteamVR; playing the clip)";
+      }
       if (!launch_session->vr) {
         return;
       }

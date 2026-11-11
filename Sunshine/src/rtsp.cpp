@@ -562,6 +562,21 @@ namespace rtsp_stream {
     }
 
     /**
+     * @brief §REVIEW-1111：丟掉還沒被控制通道取走的 launch（/cancel、takeover、強制斷線時呼叫）。
+     *
+     * 原本這些路徑只收已經建立的 session，待取的 launch 還留著；接著來的新 launch 若不是同一張憑證
+     * （relay 的 HTTP 路徑沒有憑證、或另一台裝置 takeover），session_raise 會因為「還有一筆待取」直接丟掉新的，
+     * /launch 卻已經回 200——client 拿新的 rikey 來握 RTSP，host 手上還是舊的那一筆。
+     */
+    void drop_pending_launch() {
+      raised_timer.cancel();
+      if (auto discarded = launch_event.pop(0s)) {
+        BOOST_LOG(info) << "[VIPLE-MULTI] dropped a pending launch that was never picked up (id="sv << discarded->id << ')';
+      }
+      last_session.reset();
+    }
+
+    /**
      * @brief Clear state for the oldest launch session.
      * @param launch_session_id The ID of the session to clear.
      */
@@ -766,6 +781,7 @@ namespace rtsp_stream {
 
   void terminate_sessions() {
     server.clear(true);
+    server.drop_pending_launch();
   }
 
   int terminate_sessions_for_client(const std::string &uuid, const char *via) {
