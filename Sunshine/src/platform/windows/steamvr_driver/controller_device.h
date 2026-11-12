@@ -101,6 +101,10 @@ namespace vrdrv {
     vr::VRInputComponentHandle_t haptic_ = vr::k_ulInvalidInputComponentHandle;
     vr::VRInputComponentHandle_t skeleton_ = vr::k_ulInvalidInputComponentHandle;  ///< §VR-SKELETON
     bool inputs_released_ = true;
+    // update_skeleton: last curls sent (thumb..pinky), whether anything was sent yet, and how many identical updates were skipped
+    float skel_last_[5] = {};
+    bool skel_sent_ = false;
+    int skel_same_ = 0;
     bool oor_logged_ = false;
     const char *render_model_ = nullptr;  ///< 目前設定的 render model（字串常值）；nullptr＝還沒設
     int render_profile_ = -1;       ///< 目前設定的 render model 對應的 profile；-1＝還沒設

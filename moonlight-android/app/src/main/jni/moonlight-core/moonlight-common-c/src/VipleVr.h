@@ -715,6 +715,22 @@ VIPLE_VR_INLINE void VipleVrPackQuat48(const float q[4], uint8_t out[6]) {
             largest = i;
         }
     }
+    // §REVIEW-1111（第二輪）：有 NaN／無限大（追蹤遺失時 runtime 會給）就送單位四元數；NaN 轉整數是未定義行為
+    {
+        float qq[4];
+        int bad = 0;
+        for (i = 0; i < 4; i++) {
+            if (!(q[i] == q[i]) || q[i] > 1e30f || q[i] < -1e30f) {
+                bad = 1;
+            }
+        }
+        if (bad) {
+            qq[0] = qq[1] = qq[2] = 0.0f;
+            qq[3] = 1.0f;
+            VipleVrPackQuat48(qq, out);
+            return;
+        }
+    }
     sign = q[largest] < 0 ? -1.0f : 1.0f;
     bits = (uint64_t)largest;
     for (i = 0, n = 0; i < 4; i++) {

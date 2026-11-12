@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QTemporaryDir>
+#include <QTemporaryFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
@@ -345,6 +346,7 @@ void Updater::handleAssetListFinished()
 
     m_AssetName = plan.assetName;
     m_AssetUrl  = plan.assetUrl;
+    m_AssetSha256 = plan.assetSha256;
     if (plan.action != UpdateAssetRules::AssetAction::AutoInstall) {
         // §F9：只通知的 asset（arm64 Flatpak／zip 等）絕不自動下載安裝
         fail(tr("VipleStream %1 is available as %2, but it has to be installed manually. %3")
@@ -352,13 +354,35 @@ void Updater::handleAssetListFinished()
         return;
     }
 
-    qDebug() << "[VIPLE-UPDATE] selected asset" << m_AssetName << "→" << m_AssetUrl;
+    qDebug() << "[VIPLE-UPDATE] selected asset" << m_AssetName << "→" << m_AssetUrl
+             << "sha256" << (m_AssetSha256.isEmpty() ? QStringLiteral("<none>") : m_AssetSha256);
 
-    // 開啟 staging 檔。放 TempLocation 而非 install dir，避免半套狀態
-    // 污染目前安裝；helper 接手後才搬到 install dir。
-    QString tempRoot = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
-    QDir().mkpath(tempRoot);
-    m_DownloadPath = QDir(tempRoot).filePath(m_AssetName);
+    // §UPDATE-DIGEST（§REVIEW-1111 第二輪）：下載回來的檔案原本只核對大小就覆蓋安裝目錄（需要時還提權）。
+    // 現在：(1) 只從自己 repo 的 release 下載；(2) release 一定要帶 sha256，下載完核對（host 的自我更新早就這樣做）。
+    if (!m_AssetUrl.startsWith(QLatin1String("https://github.com/finaltwinsen/VipleStream/releases/download/"))) {
+        fail(tr("Download failed: %1").arg(QStringLiteral("unexpected download address")));
+        return;
+    }
+    if (m_AssetSha256.isEmpty()) {
+        fail(tr("Download failed: %1").arg(QStringLiteral("the release does not list a SHA-256 for %1").arg(m_AssetName)));
+        return;
+    }
+    m_DownloadHash.reset();
+
+    // 開啟 staging 檔。放暫存位置而非 install dir，避免半套狀態污染目前安裝；helper 接手後才搬到 install dir。
+    // 用隨機名稱的目錄（QTemporaryDir：只有自己可讀寫）：原本是暫存根目錄下的固定檔名，Linux 的 /tmp 是共用的，
+    // 別的使用者可以先放一個同名的檔案或符號連結。
+    {
+        QTemporaryDir stage(QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                                .filePath(QStringLiteral("viplestream-update-XXXXXX")));
+        stage.setAutoRemove(false);
+        if (!stage.isValid()) {
+            fail(tr("Cannot open download file: %1").arg(stage.errorString()));
+            return;
+        }
+        m_StageDir = stage.path();
+    }
+    m_DownloadPath = QDir(m_StageDir).filePath(m_AssetName);
 
     m_DownloadFile = new QFile(m_DownloadPath);
     if (!m_DownloadFile->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -382,9 +406,15 @@ void Updater::handleAssetListFinished()
     connect(m_CurrentReply, &QNetworkReply::readyRead, this, [this]() {
         if (m_DownloadFile && m_CurrentReply) {
             const QByteArray data = m_CurrentReply->readAll();
+            m_DownloadHash.addData(data);
             // §REVIEW-1104：磁碟滿時 write 會少寫；先記下，收尾改走 fail()，不要把截斷的 zip 交給 helper
             if (m_DownloadFile->write(data) != data.size()) {
                 m_DownloadWriteFailed = true;
+            }
+            // §UPDATE-DIGEST：安裝檔不到 200 MB；超過 1 GB 就不是我們的檔案，別把磁碟寫滿
+            if (m_DownloadFile->size() > (qint64(1) << 30)) {
+                m_DownloadWriteFailed = true;
+                m_CurrentReply->abort();
             }
         }
     });
@@ -407,6 +437,7 @@ void Updater::handleDownloadFinished()
     // Flush 殘留 buffer（readyRead 之後 finished 之前可能還有 bytes）
     if (m_DownloadFile && reply) {
         const QByteArray tail = reply->readAll();
+        m_DownloadHash.addData(tail);
         // §REVIEW-1104：write／flush 失敗或位元組數對不上總長度，不能當成下載成功，否則會關程式去解截斷的 zip
         if (m_DownloadFile->write(tail) != tail.size() || !m_DownloadFile->flush()) {
             m_DownloadWriteFailed = true;
@@ -442,8 +473,21 @@ void Updater::handleDownloadFinished()
     if (reply) reply->deleteLater();
 
     if (m_DownloadWriteFailed) {
+        QFile::remove(m_DownloadPath);
         fail(tr("Could not save the downloaded update. The disk may be full."));
         return;
+    }
+
+    // §UPDATE-DIGEST：和 release 回報的 sha256 不同就不安裝
+    {
+        const QString got = QString::fromLatin1(m_DownloadHash.result().toHex());
+        if (got != m_AssetSha256) {
+            qWarning() << "[VIPLE-UPDATE] sha256 mismatch: got" << got << "expected" << m_AssetSha256;
+            QFile::remove(m_DownloadPath);
+            fail(tr("Download failed: %1").arg(QStringLiteral("SHA-256 mismatch")));
+            return;
+        }
+        qDebug() << "[VIPLE-UPDATE] sha256 verified" << got;
     }
 
     if (m_DownloadFile) {
@@ -476,14 +520,10 @@ void Updater::handleDownloadFinished()
 //   - Start-Process / Wait-Process 簡潔，錯誤訊息可以 echo 出來
 static bool isPathWritable(const QString& dir)
 {
-    QString probe = QDir(dir).filePath(QStringLiteral(".vs-write-test"));
-    QFile f(probe);
-    bool ok = f.open(QIODevice::WriteOnly);
-    if (ok) {
-        f.close();
-        QFile::remove(probe);
-    }
-    return ok;
+    // §REVIEW-1111（第二輪）：隨機檔名、只在不存在時建立。原本是固定檔名：那裡如果已經有一個同名的連結，
+    // 開檔會把連結指到的檔案清空。
+    QTemporaryFile f(QDir(dir).filePath(QStringLiteral(".vs-write-test-XXXXXX")));
+    return f.open();  // 解構時自己刪掉
 }
 
 static bool shellExecuteRunas(const QString& exe, const QString& args, bool elevate)
@@ -516,15 +556,15 @@ bool Updater::spawnHelperAndQuit()
     QString exePath    = QCoreApplication::applicationFilePath();
     qint64  pid        = QCoreApplication::applicationPid();
 
-    // Write helper PS1 to temp
-    QString tempRoot   = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    // Write helper PS1 to temp（和下載的檔案放同一個隨機名稱的暫存目錄）
+    QString tempRoot   = m_StageDir.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::TempLocation) : m_StageDir;
     QString helperPath = QDir(tempRoot).filePath(QStringLiteral("viplestream_update_%1.ps1").arg(m_Version));
 
     // PowerShell 跳過 ExecutionPolicy + 隱藏視窗的標準呼叫慣例
     // ($PSScriptRoot 在 -File 模式下可用，這裡用絕對路徑所以不需要)
     // §REVIEW-1104：目錄要提權時，覆寫仍由已提高權限的 PowerShell 做；重開 exe 改經未提權的 explorer（Shell.Application），避免新行程維持系統管理員。COM 失敗才退回 Start-Process，避免更新好了卻沒有行程再開
     QString script = QStringLiteral(
-        "param([int]$AppPid,[string]$ZipPath,[string]$InstallDir,[string]$ExePath,[int]$DropAdmin)\n"
+        "param([int]$AppPid,[string]$ZipPath,[string]$InstallDir,[string]$ExePath,[int]$DropAdmin,[string]$Sha256)\n"
         "$ErrorActionPreference='Stop'\n"
         // §REVIEW-1104：舊程式最多等 90 秒（自己收尾最多 30 秒，VR 收尾更久）；還沒結束就不要覆蓋——
         // 檔案被鎖時 Expand-Archive 會解到一半中斷，留下新舊混雜、可能再也開不起來的安裝。改成放棄這次更新並提示
@@ -540,8 +580,18 @@ bool Updater::spawnHelperAndQuit()
         "$ok = $true\n"
         "$stage = Join-Path ([IO.Path]::GetTempPath()) ('viplestream_stage_' + $AppPid)\n"
         "try {\n"
+        // §UPDATE-DIGEST：解壓前再核對一次。程式驗完到這裡（可能已提權）之間，暫存檔有可能被換掉。
+        // 用 .NET 算，不用 Get-FileHash：模組路徑被別的 PowerShell 版本帶歪時，5.1 會找不到那個 cmdlet
+        "  if ($Sha256) {\n"
+        "    $fs = [IO.File]::OpenRead($ZipPath)\n"
+        "    try { $hb = [Security.Cryptography.SHA256]::Create().ComputeHash($fs) } finally { $fs.Close() }\n"
+        "    if (([BitConverter]::ToString($hb) -replace '-', '') -ne $Sha256) { throw 'sha256 mismatch' }\n"
+        "  }\n"
         "  if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }\n"
-        "  Expand-Archive -LiteralPath $ZipPath -DestinationPath $stage -Force\n"
+        // 用 .NET 解壓，不用 Expand-Archive：程式從 PowerShell 7 的終端機啟動時，繼承到的模組路徑會讓 5.1 載到
+        // 7 的 Archive 模組而失敗（2026-11-12 實測）
+        "  Add-Type -AssemblyName System.IO.Compression.FileSystem\n"
+        "  [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $stage)\n"
         "  Copy-Item -Path (Join-Path $stage '*') -Destination $InstallDir -Recurse -Force\n"
         "} catch {\n"
         "  Write-Host \"VipleStream updater: extract failed: $_\"\n"
@@ -549,6 +599,8 @@ bool Updater::spawnHelperAndQuit()
         "}\n"
         "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue\n"
         "Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue\n"
+        "$sd = Split-Path -Parent $ZipPath\n"
+        "if ((Split-Path -Leaf $sd) -like 'viplestream-update-*') { Remove-Item -LiteralPath $sd -Recurse -Force -ErrorAction SilentlyContinue }\n"
         "if ($DropAdmin -ne 0) {\n"
         "  try {\n"
         "    $shell = New-Object -ComObject Shell.Application\n"
@@ -585,15 +637,28 @@ bool Updater::spawnHelperAndQuit()
     // 構造 PowerShell argv：-NoProfile -ExecutionPolicy Bypass -File <script> -AppPid ... -ZipPath ...
     QString args = QStringLiteral(
         "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden "
-        "-File \"%1\" -AppPid %2 -ZipPath \"%3\" -InstallDir \"%4\" -ExePath \"%5\" -DropAdmin %6"
+        "-File \"%1\" -AppPid %2 -ZipPath \"%3\" -InstallDir \"%4\" -ExePath \"%5\" -DropAdmin %6 -Sha256 %7"
     ).arg(QDir::toNativeSeparators(helperPath))
      .arg(pid)
      .arg(QDir::toNativeSeparators(m_DownloadPath))
      .arg(QDir::toNativeSeparators(installDir))
      .arg(QDir::toNativeSeparators(exePath))
-     .arg(needElevate ? 1 : 0);
+     .arg(needElevate ? 1 : 0)
+     .arg(m_AssetSha256);
 
-    if (!shellExecuteRunas(QStringLiteral("powershell.exe"), args, needElevate)) {
+    // §REVIEW-1111（第二輪）：用系統目錄裡的 PowerShell 的完整路徑。只給檔名時會照 PATH 找，提權執行到的可能是別人放的同名程式。
+    QString psExe = QStringLiteral("powershell.exe");
+    {
+        wchar_t sysDir[MAX_PATH];
+        const UINT n = GetSystemDirectoryW(sysDir, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            const QString full = QString::fromWCharArray(sysDir, int(n)) + QStringLiteral("\\WindowsPowerShell\\v1.0\\powershell.exe");
+            if (QFileInfo::exists(full)) {
+                psExe = full;
+            }
+        }
+    }
+    if (!shellExecuteRunas(psExe, args, needElevate)) {
         // 使用者取消 UAC prompt 也會走這條
         fail(tr("Failed to launch updater (UAC denied or PowerShell missing)."));
         return false;
@@ -621,7 +686,7 @@ bool Updater::spawnHelperAndQuit()
         return false;
     }
 
-    QString tempRoot   = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    QString tempRoot   = m_StageDir.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::TempLocation) : m_StageDir;
     QString helperPath = QDir(tempRoot).filePath(QStringLiteral("viplestream_update_%1.sh").arg(m_Version));
 
     QString script = QStringLiteral(
@@ -641,6 +706,7 @@ bool Updater::spawnHelperAndQuit()
         "fi\n"
         "chmod +x \"$NEW_APPIMAGE\" || exit 1\n"
         "mv -f \"$NEW_APPIMAGE\" \"$CURRENT_APPIMAGE\" || exit 1\n"
+        "rm -f \"$0\"; rmdir \"$(dirname \"$0\")\" 2>/dev/null\n"
         "nohup \"$CURRENT_APPIMAGE\" >/dev/null 2>&1 &\n"
         "disown\n"
     );

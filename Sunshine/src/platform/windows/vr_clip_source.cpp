@@ -46,6 +46,7 @@
 
 // local includes
 #include "src/logging.h"
+#include "src/platform/common.h"
 
 namespace platf::dxgi {
 
@@ -904,6 +905,9 @@ namespace platf::dxgi {
     /// @brief 背景解碼工作執行緒主迴圈。
     void decode_loop() {
       BOOST_LOG(info) << "[VIPLE-VR-CLIP] decoder thread started";
+      // §REVIEW-1111：原本是一般優先權，而等它出圖的擷取執行緒是 critical、編碼是 high——host 忙的時候解碼排在最後，
+      // 擷取端就在共用貼圖的鎖上空等。調到和編碼同一級。
+      platf::adjust_thread_priority(platf::thread_priority_e::high);
 
       int current_slot = 0;
       int consecutive_errors = 0;

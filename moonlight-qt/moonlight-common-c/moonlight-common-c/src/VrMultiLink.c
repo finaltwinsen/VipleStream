@@ -832,7 +832,8 @@ static bool hotaddApplyCandidate(const VRML_CAND* cand, uint64_t nowMs) {
         if (L->refuseTries >= VRML_HOTADD_REFUSE_MAX) {
             continue;
         }
-        if (L->refusedAtMs != 0 && nowMs - L->refusedAtMs < VRML_HOTADD_REFUSE_MS) {
+        // §REVIEW-1111（第二輪）：refusedAtMs 是另一條執行緒寫的，可能比這一輪的 nowMs 晚；相減會下溢成很大的數、冷卻期被跳過
+        if (L->refusedAtMs != 0 && (nowMs < L->refusedAtMs || nowMs - L->refusedAtMs < VRML_HOTADD_REFUSE_MS)) {
             continue;
         }
         return hotaddStartRebind(L, cand, nowMs);
@@ -986,7 +987,7 @@ static void hotaddServicePending(uint64_t nowMs) {
             VRML_ACQUIRE_FENCE();
             hotaddCommitPending(L, nowMs);
         }
-        else if (!L->ackWarned && L->activateAtMs != 0 && nowMs - L->activateAtMs >= VRML_HOTADD_ACK_MS) {
+        else if (!L->ackWarned && L->activateAtMs != 0 && nowMs > L->activateAtMs && nowMs - L->activateAtMs >= VRML_HOTADD_ACK_MS) {
             L->ackWarned = true;
             Limelog("[VIPLE-VR-LINK] hot-add link %d: receive threads have not switched yet; keeping both socket sets\n",
                     (int)L->id);
@@ -1141,6 +1142,10 @@ void vrmlStart(void) {
         PltDestroyCryptoContext(trkCrypto);
         trkCrypto = NULL;
         PltUnlockMutex(&trkMutex);
+        if (s2cCrypto != NULL) {  // §REVIEW-1111（第二輪）
+            PltDestroyCryptoContext(s2cCrypto);
+            s2cCrypto = NULL;
+        }
         return;
     }
     started = true;

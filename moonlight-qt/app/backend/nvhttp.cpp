@@ -309,6 +309,9 @@ NvHTTP::getNetworkInterfaceList(QString serverInfo)
         while (xmlReader.readNextStartElement()) {
             auto name = xmlReader.name();
             if (name == QString("NetworkInterface")) {
+                if (ifaces.size() >= 32) {
+                    return ifaces;  // §REVIEW-1111（第二輪）：清單來自網路，設上限
+                }
                 ifaces.append(NvNetworkInterface());
             }
             else if (name == QString("Address") && !ifaces.isEmpty()) {

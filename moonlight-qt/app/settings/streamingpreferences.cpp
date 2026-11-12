@@ -196,6 +196,11 @@ void StreamingPreferences::reload()
     if (fps <= 0) {
         fps = 60;
     }
+    // §REVIEW-1111（第二輪）：解析度同理（損毀的設定、舊版寫入的 0 或負值）
+    if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
+        width = 1280;
+        height = 720;
+    }
     // §H.4-AUTO：新安裝（從沒存過解析度／FPS）預設「自動（本機螢幕最佳）」；已存在的使用者設定
     // 一律保留原本的明確值，不會被改成自動。
     autoResolution = settings.value(SER_AUTORES, !settings.contains(SER_WIDTH)).toBool();
@@ -214,6 +219,9 @@ void StreamingPreferences::reload()
     bitrateKbps = settings.value(SER_BITRATE,
         getDefaultBitrate(width, height, fps, enableYUV444,
                           enableFrameInterpolation)).toInt();
+    if (bitrateKbps <= 0) {  // §REVIEW-1111（第二輪）
+        bitrateKbps = getDefaultBitrate(width, height, fps, enableYUV444, enableFrameInterpolation);
+    }
     unlockBitrate = settings.value(SER_UNLOCK_BITRATE, false).toBool();
     autoAdjustBitrate = settings.value(SER_AUTOADJUSTBITRATE, true).toBool();
     adaptiveBitrate = settings.value(SER_ADAPTIVEBITRATE, true).toBool();
@@ -279,6 +287,9 @@ void StreamingPreferences::reload()
     // 256 仍可由 RTX 4070+ 使用者手動 opt-in.  Higher dims listed in
     // SettingsView.qml ComboBox.  See plan §J for full diagnosis chain.
     vkfrucNativeRifeInferDim  = settings.value(SER_VKFRUCRIFEDIM, 128).toInt();
+    if (vkfrucNativeRifeInferDim < 128 || vkfrucNativeRifeInferDim > 1024 || (vkfrucNativeRifeInferDim % 128) != 0) {
+        vkfrucNativeRifeInferDim = 128;  // §REVIEW-1111（第二輪）：只接受 128 的倍數
+    }
     // §J.3.e.2.i.11 (v1.4.66) — auto-tier 偵測結果 cache 讀回。default
     // VGT_UNKNOWN 表示「尚未偵測」，vkfruc.cpp 啟動時若見此值就跑一次
     // heuristic + benchmark 再寫回 QSettings (via save())。
@@ -834,5 +845,6 @@ int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool
     // §REVIEW-1104（使用者決策 B）：headroom 的理由是「一張來源要撐兩張顯示」，只適用主動補幀（host 半幀）
     float frucHeadroom = (fruc && !passiveFullFps) ? 1.15f : 1.0f;
 
-    return qRound(resolutionFactor * frameRateFactor * frucHeadroom) * 1000;
+    // §REVIEW-1111（第二輪）：fps 傳 0 或 1 時算出來會是 0；最少 500 kbps（滑桿的下限）
+    return qMax(500, qRound(resolutionFactor * frameRateFactor * frucHeadroom) * 1000);
 }

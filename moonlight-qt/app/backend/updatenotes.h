@@ -90,7 +90,11 @@ inline QString summarize(const QString& body, const QString& localeName = QStrin
         : intro.join(QLatin1Char('\n')).trimmed() + QStringLiteral("\n\n") + news.join(QLatin1Char('\n')).trimmed();
     out = out.trimmed();
     if (out.size() > kMaxChars) {
-        out = out.left(kMaxChars).trimmed() + QStringLiteral("\n\n…");
+        out = out.left(kMaxChars);
+        if (!out.isEmpty() && out.at(out.size() - 1).isHighSurrogate()) {
+            out.chop(1);  // §REVIEW-1111（第二輪）：不要切在代理對中間
+        }
+        out = out.trimmed() + QStringLiteral("\n\n…");
     }
     return out;
 }

@@ -474,7 +474,9 @@ namespace vr::mic {
 
     stats_.packets.fetch_add(1, std::memory_order_relaxed);
 
-    std::vector<float> decoded;
+    // §REVIEW-1111：重複使用同一塊（原本每 20 ms 在控制執行緒上配置、釋放約 27 KB）
+    static thread_local std::vector<float> decoded;
+    decoded.clear();
     decoded.reserve(960 * 7);
 
     auto decode_step = [this, &decoded](const uint8_t *data, size_t dlen, int fec) {

@@ -160,7 +160,7 @@ VrSessionInfo VrSessionInfo::parse(const QString& text)
     // server 只在我們宣告 VIPLE_VR_CLIENT_CAP_FOVEA_TILES 時才會回，回了卻對不上＝畫面會錯，寧可整個不認
     if (info.tileW != 0 || info.tileH != 0 || info.tileRenderW != 0 || info.tileRenderH != 0) {
         const bool ok = info.tileW >= 64 && info.tileH >= 64 && info.tileRenderW > info.tileW && info.tileRenderH > info.tileH &&
-                        info.tileRenderW <= 65535 && info.tileRenderH <= 65535 &&
+                        info.tileRenderW <= 8192 && info.tileRenderH <= 8192 &&  // REVIEW-1111 (round 2): was 65535; nothing real is near 8192
                         info.packedWidth == 2 * info.tileW && info.packedHeight == 2 * info.tileH;
         if (!ok) {
             info.tileW = info.tileH = info.tileRenderW = info.tileRenderH = 0;

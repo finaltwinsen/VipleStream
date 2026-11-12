@@ -628,9 +628,15 @@ bool XrVideo::ensureSwapchain(XrSession session, int width, int height)
     }
 
     uint32_t n = 0;
-    xrEnumerateSwapchainFormats(session, 0, &n, nullptr);
+    // §REVIEW-1111（第二輪）：查不到格式清單時這一次不建（下一張再試），不要拿空清單把每個候選都判成不支援
+    if (XR_FAILED(xrEnumerateSwapchainFormats(session, 0, &n, nullptr)) || n == 0) {
+        return false;
+    }
     std::vector<int64_t> formats(n);
-    xrEnumerateSwapchainFormats(session, n, &n, formats.data());
+    if (XR_FAILED(xrEnumerateSwapchainFormats(session, n, &n, formats.data()))) {
+        return false;
+    }
+    formats.resize(std::min<size_t>(n, formats.size()));
     auto offered = [&](VkFormat f) {
         return std::find(formats.begin(), formats.end(), static_cast<int64_t>(f)) != formats.end();
     };
@@ -889,11 +895,19 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         // §VR-XRLOOP：只量這個呼叫花多久、回的是不是 XR_SUCCESS（等到逾時回 XR_TIMEOUT_EXPIRED，也是成功碼）。
         // 流程不看結果，和原本一樣
         const uint64_t tw0 = nowUs();
-        const XrResult wr = xrWaitSwapchainImage(m_Sw.swapchain, &wi);
+        XrResult wr = xrWaitSwapchainImage(m_Sw.swapchain, &wi);
+        // §REVIEW-1111（第二輪）：逾時（合成器還沒放掉這張）照規格可以再等——最多再等 4 次（共 500 ms），
+        // 不要在合成器還在讀的影像上畫。到目前為止的 log 裡沒有發生過（swNotOk 一直是 0）。
+        for (int again = 0; wr == XR_TIMEOUT_EXPIRED && again < 4; again++) {
+            wr = xrWaitSwapchainImage(m_Sw.swapchain, &wi);
+        }
         if (swm.waits < 2) {
             swm.waitUs[swm.waits++] = sat32(nowUs() - tw0);
         }
         swm.notOk += wr != XR_SUCCESS ? 1u : 0u;
+        if (XR_FAILED(wr)) {
+            return false;  // session 不在可畫的狀態：這張不畫
+        }
         pl_vulkan_release_params rp = {};
         rp.tex = m_Sw.wrapped[idx];
         rp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -2296,12 +2310,19 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
 
 void XrVideo::loadFoveation(float fv[4], float* cyR, float* u0) const
 {
-    *u0 = m_FvU0.load(std::memory_order_relaxed);
-    fv[0] = m_FvA.load(std::memory_order_relaxed);
-    fv[1] = m_FvCxL.load(std::memory_order_relaxed);
-    fv[2] = m_FvCxR.load(std::memory_order_relaxed);
-    fv[3] = m_FvCyL.load(std::memory_order_relaxed);
-    *cyR = m_FvCyR.load(std::memory_order_relaxed);
+    // §REVIEW-1111（第二輪）：整組讀到同一次寫入的值（寫的那一邊正在寫就重讀；最多試 8 次，XR thread 一格才寫一次）
+    for (int attempt = 0; attempt < 8; attempt++) {
+        const uint32_t s0 = m_ParamSeq.load();
+        *u0 = m_FvU0.load(std::memory_order_relaxed);
+        fv[0] = m_FvA.load(std::memory_order_relaxed);
+        fv[1] = m_FvCxL.load(std::memory_order_relaxed);
+        fv[2] = m_FvCxR.load(std::memory_order_relaxed);
+        fv[3] = m_FvCyL.load(std::memory_order_relaxed);
+        *cyR = m_FvCyR.load(std::memory_order_relaxed);
+        if ((s0 & 1u) == 0 && m_ParamSeq.load() == s0) {
+            break;
+        }
+    }
     if (!(fv[0] >= 0.4f && fv[0] < 0.999f)) {
         fv[0] = 1.0f;
     }
@@ -2311,10 +2332,17 @@ void XrVideo::loadFoveation(float fv[4], float* cyR, float* u0) const
 // 每眼 u0×(每眼寬) × u0×(高)。只在直接讀 YUV 的還原可用、沒開補幀（補幀用兩倍高的 swapchain）時才做
 bool XrVideo::tilesFor(int fw, int fh, int* tw, int* th, int* rw, int* rh) const
 {
-    const int w = m_TileW.load(std::memory_order_relaxed);
-    const int h = m_TileH.load(std::memory_order_relaxed);
-    const int renderW = m_TileRW.load(std::memory_order_relaxed);
-    const int renderH = m_TileRH.load(std::memory_order_relaxed);
+    int w = 0, h = 0, renderW = 0, renderH = 0;
+    for (int attempt = 0; attempt < 8; attempt++) {  // §REVIEW-1111（第二輪）：同 loadFoveation
+        const uint32_t s0 = m_ParamSeq.load();
+        w = m_TileW.load(std::memory_order_relaxed);
+        h = m_TileH.load(std::memory_order_relaxed);
+        renderW = m_TileRW.load(std::memory_order_relaxed);
+        renderH = m_TileRH.load(std::memory_order_relaxed);
+        if ((s0 & 1u) == 0 && m_ParamSeq.load() == s0) {
+            break;
+        }
+    }
     if (w < 64 || h < 64 || renderW <= w || renderH <= h || fw != 2 * w || fh != 2 * h) {
         return false;
     }
@@ -2955,11 +2983,13 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
     const pl_tex ty = py.texture;
     const pl_tex tc = pc.texture;
     float crop[4] = {mapped->crop.x0, mapped->crop.y0, mapped->crop.x1 - mapped->crop.x0, mapped->crop.y1 - mapped->crop.y0};
+    float ysz[2] = {static_cast<float>(ty->params.w), static_cast<float>(ty->params.h)};
     if (crop[2] <= 0.0f || crop[3] <= 0.0f) {
         crop[0] = 0.0f;
         crop[1] = 0.0f;
+        crop[2] = ysz[0];  // §REVIEW-1111（第二輪）：和 renderTiles 一樣補成整張；原本只把位置歸零、大小還是 0
+        crop[3] = ysz[1];
     }
-    float ysz[2] = {static_cast<float>(ty->params.w), static_cast<float>(ty->params.h)};
     float csz[2] = {static_cast<float>(tc->params.w), static_cast<float>(tc->params.h)};
     float rr[2] = {std::round(ysz[0] / csz[0]), std::round(ysz[1] / csz[1])};
     float csh[2] = {pc.shift_x, pc.shift_y};
@@ -3387,11 +3417,21 @@ bool XrVideo::ensureProjSwapchain(XrSession session, int width, int height)
     if (m_Proj.swapchain != XR_NULL_HANDLE && m_Proj.width == width && m_Proj.height == height) {
         return true;
     }
+    // §REVIEW-1111（第二輪）：換尺寸：舊的那一組可能還有送出去沒做完的 GPU 工作，等做完再銷毀
+    if (m_Proj.swapchain != XR_NULL_HANDLE && m_Vulkan != nullptr) {
+        pl_gpu_finish(m_Vulkan->gpu);
+    }
     destroySwapchainSet(m_Proj);
     uint32_t n = 0;
-    xrEnumerateSwapchainFormats(session, 0, &n, nullptr);
+    // §REVIEW-1111（第二輪）：查不到格式清單時這一次不建（下一張再試），不要拿空清單把每個候選都判成不支援
+    if (XR_FAILED(xrEnumerateSwapchainFormats(session, 0, &n, nullptr)) || n == 0) {
+        return false;
+    }
     std::vector<int64_t> formats(n);
-    xrEnumerateSwapchainFormats(session, n, &n, formats.data());
+    if (XR_FAILED(xrEnumerateSwapchainFormats(session, n, &n, formats.data()))) {
+        return false;
+    }
+    formats.resize(std::min<size_t>(n, formats.size()));
     struct Cand {
         VkFormat sw;
         VkFormat view;
@@ -3536,7 +3576,16 @@ bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj
     }
     XrSwapchainImageWaitInfo wi = xrS<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
     wi.timeout = 50000000;  // 50 ms
-    xrWaitSwapchainImage(m_Proj.swapchain, &wi);
+    {
+        // §REVIEW-1111（第二輪）：同 renderNewFrame——逾時再等（共 250 ms），失敗就不畫
+        XrResult wr = xrWaitSwapchainImage(m_Proj.swapchain, &wi);
+        for (int again = 0; wr == XR_TIMEOUT_EXPIRED && again < 4; again++) {
+            wr = xrWaitSwapchainImage(m_Proj.swapchain, &wi);
+        }
+        if (XR_FAILED(wr)) {
+            return false;
+        }
+    }
     std::unique_lock<std::mutex> submitLock(m_PlSubmitMutex);
     pl_tex dst = m_Proj.wrapped[idx];
     pl_vulkan_release_params rp = {};

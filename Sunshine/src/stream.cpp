@@ -1791,7 +1791,10 @@ namespace stream {
       case ::vr::loss_action_e::new_wave:
         // §VR-FEC-LOSS：decoder 自己出錯（reason=DECODE_ERROR）不是網路掉包，加 FEC 沒有用
         if (loss.reason != VIPLE_VR_LOSS_DECODE_ERROR) {
-          vr_fec_on_loss(session, loss.lastLost - loss.firstLost + 1, loss.reason == VIPLE_VR_LOSS_RESEND);  // uint32 相減，迴繞也成立
+          // uint32 相減，迴繞也成立。§REVIEW-1111（第二輪）：但差值要夾住——範圍寫反或亂填時差值接近 2^32，
+          // 後面轉成 int 會變成負的「掉幀數」，整段剛好是 2^32 時則變成 0 被忽略。
+          const uint32_t lost_span = std::clamp<uint32_t>(loss.lastLost - loss.firstLost + 1, 1u, 100000u);
+          vr_fec_on_loss(session, lost_span, loss.reason == VIPLE_VR_LOSS_RESEND);
         }
         session->vrRefreshEvents->raise(vr_state.negotiated().ir_frames);
         // 接受 LOSS 當下就回 REFRESH_START（startFrame = encoder 即將編的幀號）。等 wave 第一幀
@@ -1954,13 +1957,18 @@ namespace stream {
         float rpos[3];
         std::memcpy(lpos, sample.pose[VIPLE_VR_POSE_LEFT].pos, sizeof(lpos));
         std::memcpy(rpos, sample.pose[VIPLE_VR_POSE_RIGHT].pos, sizeof(rpos));
+        // §REVIEW-1111：姿勢先發布、再處理虛擬手把。原本手把這段（上鎖、可能排工作）排在前面，
+        // 每一筆追蹤樣本進 driver 都被它晚一點。
+        vr_publish_tracking(sample, timing);
         pad->on_sample(sample.input,
                        lp ? lpos : nullptr,
                        rp ? rpos : nullptr,
                        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
       }
-      // pcvr：接受為最新樣本之後才寫進 bridge（stub／disabled 時 tracking_wanted() 恆為 false，立即返回）
-      vr_publish_tracking(sample, timing);
+      else {
+        // pcvr：接受為最新樣本之後才寫進 bridge（stub／disabled 時 tracking_wanted() 恆為 false，立即返回）
+        vr_publish_tracking(sample, timing);
+      }
     }
     return latest;
   }
@@ -6508,6 +6516,14 @@ namespace stream {
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
         system_tray::update_tray_playing(proc::proc.get_last_run_app_name());
 #endif
+      }
+
+      // §REVIEW-1111：這條 session 還在 start() 裡的時候，同一個 client 已經又送了 /launch——清理那邊看到「還沒開始」
+      // 只能標記、不能停。原本 start() 不看這個標記，照樣跑起來，新的 VR /launch 就一直被「還有 session」擋成 503，
+      // 直到 ping 逾時（10 秒）。被取代的就在這裡停掉，交給 RTSP 的例行清理收。
+      if (session.superseded.load(std::memory_order_acquire)) {
+        BOOST_LOG(info) << "Session was superseded while it was starting; stopping it"sv;
+        stop(session);
       }
 
       return 0;

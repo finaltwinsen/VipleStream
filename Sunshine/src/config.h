@@ -464,6 +464,10 @@ namespace config {
     // 有設＝只開放這些資料夾；單獨一個 "*"＝整台 PC（每一個磁碟機，Linux 是 /）
     bool media_share = true;
     std::vector<std::string> media_dirs;
+
+    // §STEAM-SWITCH-ACL：沒有 app 在跑時誰可以切換 host 的 Steam 帳號。paired＝任何已配對裝置（預設）、
+    // admin＝只有 Web UI 勾了 Admin 的裝置、disabled＝關閉。有 app 在跑時一律只有啟動它的裝置或 Admin。
+    std::string steam_switch = "paired";
   };
 
   struct input_t {

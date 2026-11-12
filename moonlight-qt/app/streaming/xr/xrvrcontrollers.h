@@ -1,5 +1,7 @@
 #pragma once
 
+#include "xrcombo.h"
+
 // VipleStream 2.0 §VR M4a R2 — PCVR 控制器輸入（0x5506 L/R pose＋input）與 haptic。
 //
 // PCVR 模式時取代 β 的 XrInput（一個 session 只能 attach 一組 action set）：
@@ -87,9 +89,8 @@ private:
         float angVel[3] = {};
         bool linValid = false;  // 2026-10-05：runtime 回報的速度旗標（無效時 linVel／angVel 送 0）
         bool angValid = false;
-        // system 組合
-        uint64_t comboStartNs = 0;
-        bool comboActive = false;
+        // system 組合（規則在 xrcombo.h）
+        xrcombo::State combo;
         // 統計
         uint32_t edges = 0;
     };
@@ -159,7 +160,7 @@ private:
     uint32_t m_StatCombos = 0;
     uint32_t m_StatHapticApplied = 0;
     uint32_t m_StatHapticFailed = 0;
-    uint32_t m_StatHapticDropped = 0;
+    std::atomic<uint32_t> m_StatHapticDropped{0};  // main thread counts, frame thread reads and clears
     uint32_t m_StatFocusLoss = 0;
     // 2026-10-05：送出樣本的控制器速度有效率與最大值（m_Mutex 保護；fill 在 tracking 送出執行緒）
     struct VelStat {

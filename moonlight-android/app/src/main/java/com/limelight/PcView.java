@@ -240,6 +240,10 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
+                            // VipleStream §REVIEW-1111: the GL probe can answer after the activity is gone, or twice
+                            if (isDestroyed || isFinishing() || completeOnCreateCalled) {
+                                return;
+                            }
                             completeOnCreate();
                         }
                     });

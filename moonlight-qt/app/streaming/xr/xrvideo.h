@@ -237,23 +237,29 @@ public:
     // 兩眼的上下視角可以不同（Steam Frame 就是），host 是每眼照自己的中心壓縮的，所以垂直中心也要每眼各給一個。
     // XR thread 每幀設
     // §VR-FOVEA-INSET：u0 > 0＝分段曲線（中央段在編碼影像裡的範圍），0＝三次曲線
+    // §REVIEW-1111（第二輪）：這幾個欄位是一組。寫的時候把 m_ParamSeq 變成奇數、寫完變回偶數；讀的那一邊
+    // （loadFoveation／tilesFor）看到奇數或前後序號不同就重讀，不會拿到新舊各半的一組。只有 XR thread 會寫。
     void setFoveation(float a, float cxL, float cxR, float cyL, float cyR, float u0 = 0.0f)
     {
+        m_ParamSeq.fetch_add(1);
         m_FvU0.store(u0, std::memory_order_relaxed);
         m_FvCxL.store(cxL, std::memory_order_relaxed);
         m_FvCxR.store(cxR, std::memory_order_relaxed);
         m_FvCyL.store(cyL, std::memory_order_relaxed);
         m_FvCyR.store(cyR, std::memory_order_relaxed);
         m_FvA.store(a, std::memory_order_relaxed);
+        m_ParamSeq.fetch_add(1);
     }
     // §VR-FOVEA-TILES（2026-11-10）：server 協商出「每眼兩塊影像」時的每塊尺寸與每眼算圖尺寸（tw＝0＝沒有分塊）。
     // 解碼出來的畫面是 (2·tw)×(2·th)：上排左右眼的全視野、下排左右眼的注視點裁切。XR thread 每幀設
     void setTiles(int tw, int th, int rw, int rh)
     {
+        m_ParamSeq.fetch_add(1);
         m_TileH.store(th, std::memory_order_relaxed);
         m_TileRW.store(rw, std::memory_order_relaxed);
         m_TileRH.store(rh, std::memory_order_relaxed);
         m_TileW.store(tw, std::memory_order_relaxed);
+        m_ParamSeq.fetch_add(1);
     }
     // §VR-XRLOOP（量測）：顯示格點——任何一格的預測顯示時刻（steady 時鐘，µs）與顯示週期（µs）。影像 render thread
     // 拿它把送出／GPU 做完的時刻換成相位，只進統計。PCVR 的 XR frame thread 每格設；periodUs＝0＝這一格沒有格點
@@ -375,6 +381,7 @@ private:
     std::atomic<uint64_t> m_SynthShown{0};
     std::atomic<float> m_FovTanW{3.2f};
     std::atomic<float> m_FovTanH{3.2f};
+    std::atomic<uint32_t> m_ParamSeq{0};  // 注視點／分塊參數的一致性序號（見 setFoveation）
     std::atomic<float> m_FvA{1.0f};
     std::atomic<float> m_FvU0{0.0f};  // §VR-FOVEA-INSET
     std::atomic<float> m_FvCxL{0.5f};

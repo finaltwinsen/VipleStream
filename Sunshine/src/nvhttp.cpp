@@ -692,6 +692,12 @@ namespace nvhttp {
     BOOST_LOG(debug) << " [--] "sv;
 
     for (auto &[name, val] : request->parse_query_string()) {
+      // §REVIEW-1111：串流金鑰與配對用的值不寫進 log，只記長度
+      if (name == "rikey" || name == "rikeyid" || name == "salt" || name == "clientcert" || name == "clientpairingsecret" ||
+          name == "clientchallenge" || name == "serverchallengeresp") {
+        BOOST_LOG(debug) << name << " -- <"sv << val.size() << " chars>"sv;
+        continue;
+      }
       BOOST_LOG(debug) << name << " -- " << val;
     }
 
@@ -1004,6 +1010,42 @@ namespace nvhttp {
     auto local_endpoint = request->local_endpoint();
 
     pt::ptree tree;
+
+    // §SERVERINFO-MIN（2026-11-12）：沒有配對憑證的 HTTP 請求只回配對需要的欄位。原本區網上任何人都拿得到
+    // 所有網卡與 VPN 位址、公網位址、session 擁有者的裝置名稱、顯示器模式與編碼能力。
+    // 完整內容只給 HTTPS（已配對）與 localhost 的 HTTP（同一個行程裡的 relay 代理，已用 PSK 驗過）。
+    // client 配對後下一輪輪詢走 HTTPS 就拿到完整內容。
+    if constexpr (!std::is_same_v<SunshineHTTPS, T>) {
+      const auto remote = net::addr_to_normalized_string(request->remote_endpoint().address());
+      if (remote != "127.0.0.1" && remote != "::1") {
+        const auto appid = proc::proc.running();
+        tree.put("root.<xmlattr>.status_code", 200);
+        tree.put("root.hostname", config::nvhttp.sunshine_name);
+        tree.put("root.VipleStreamProtocol", "1");
+        tree.put("root.VipleStreamVersion", PROJECT_VERSION);
+        tree.put("root.appversion", VERSION);
+        tree.put("root.GfeVersion", GFE_VERSION);
+        tree.put("root.uniqueid", http::unique_id);
+        tree.put("root.HttpsPort", net::map_port(PORT_HTTPS));
+        tree.put("root.ExternalPort", net::map_port(PORT_HTTP));
+        tree.put("root.mac", "00:00:00:00:00:00");
+        // LocalIP 就是對方連進來的那個位址，沒有新資訊；IPv6 照原本的規則回 127.0.0.1
+        if (local_endpoint.address().is_v6() && !local_endpoint.address().to_v6().is_v4_mapped()) {
+          tree.put("root.LocalIP", "127.0.0.1");
+        } else {
+          tree.put("root.LocalIP", net::addr_to_normalized_string(local_endpoint.address()));
+        }
+        tree.put("root.PairStatus", 0);
+        tree.put("root.currentgame", appid);  // client 靠它擋「遊戲執行中不能配對」
+        tree.put("root.state", appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
+
+        std::ostringstream min_data;
+        pt::write_xml(min_data, tree);
+        response->write(min_data.str());
+        response->close_connection_after_response = true;
+        return;
+      }
+    }
 
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put("root.hostname", config::nvhttp.sunshine_name);
@@ -2798,6 +2840,18 @@ namespace nvhttp {
   }
 #endif  // _WIN32
 
+  // §STEAM-SWITCH-ACL（2026-11-12）：閒置時誰可以切換 host 的 Steam 帳號（conf 的 steam_switch）。
+  // 回傳空字串＝可以；否則是拒絕的原因。
+  inline std::string steam_switch_denied_by_config(const std::string &caller_uuid) {
+    if (config::nvhttp.steam_switch == "disabled") {
+      return "Steam account switching is disabled on this host (steam_switch = disabled)";
+    }
+    if (config::nvhttp.steam_switch == "admin" && !is_admin_device(caller_uuid)) {
+      return "Only devices marked Admin on the host may switch the Steam account (steam_switch = admin)";
+    }
+    return {};
+  }
+
   template <class T>
   void steamprofiles(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
                      std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
@@ -2811,6 +2865,13 @@ namespace nvhttp {
     });
 
 #ifdef _WIN32
+    // §STEAM-SWITCH-ACL：這台裝置依 steam_switch 設定不能切換帳號時，連清單也不給（client 收到非 200 就把選單藏起來）
+    if (const auto denied = steam_switch_denied_by_config(caller_uuid_for(request)); !denied.empty()) {
+      tree.put("root.<xmlattr>.status_code", 403);
+      tree.put("root.<xmlattr>.status_message", denied);
+      return;
+    }
+
     auto scan = viple::steam::scan_cached();
     if (!scan) {
       tree.put("root.<xmlattr>.status_code", 503);
@@ -2874,6 +2935,54 @@ namespace nvhttp {
 
 #ifdef _WIN32
     gc_steam_switch_tasks();
+
+    // §STEAM-SWITCH-ACL（2026-11-12）：原本任何已配對裝置都能切換——切換會關掉 Steam，等於把別人正在玩的遊戲踢掉。
+    // 第一層（固定）：比照 /cancel 的 session 擁有權；第二層：steam_switch 設定（閒置時誰可以切）。
+    {
+      const auto caller_uuid = caller_uuid_for(request);
+      const bool caller_admin = is_admin_device(caller_uuid);
+      auto deny = [&](int code, const std::string &why) {
+        BOOST_LOG(warning) << "[VIPLE-STEAM-ACL] /steamswitch denied caller="sv
+                           << (caller_uuid.empty() ? "<unknown>"s : caller_uuid) << " admin="sv << caller_admin << ": "sv << why;
+        tree.put("root.<xmlattr>.status_code", code);
+        tree.put("root.<xmlattr>.status_message", why);
+      };
+      if (const auto denied = steam_switch_denied_by_config(caller_uuid); !denied.empty()) {
+        deny(403, denied);
+        return;
+      }
+      // 別的裝置的 VR session 進行中（或已預約）：admin 也不行，和 /launch 一致
+      if (::vr::busy_for(caller_uuid)) {
+        deny(403, "Another device's VR session is active on this host");
+        return;
+      }
+      if (proc::proc.running() > 0) {
+        const auto owner_uuid = proc::proc.running_owner_uuid();
+        const bool same_caller = !caller_uuid.empty() && caller_uuid == owner_uuid;
+        if (!owner_uuid.empty() && !same_caller && !caller_admin) {
+          const auto owner_name = proc::proc.running_owner_name();
+          deny(403, "An app started by " + (owner_name.empty() ? "another device"s : owner_name) +
+                      " is running; only that device or an Admin device can switch the Steam account now");
+          return;
+        }
+      }
+      // 已經有一個切換在跑：不開第二個（兩條 worker 會同時關、開 Steam）
+      bool in_progress = false;
+      {
+        std::lock_guard<std::mutex> lk {g_switch_tasks_mu};
+        for (const auto &[id, t] : g_switch_tasks) {
+          std::lock_guard<std::mutex> tlk {t->mu};
+          if (t->finished_at == std::chrono::steady_clock::time_point {}) {
+            in_progress = true;
+            break;
+          }
+        }
+      }
+      if (in_progress) {
+        deny(409, "A Steam account switch is already in progress");
+        return;
+      }
+    }
 
     auto args = request->parse_query_string();
     auto it = args.find("account"s);

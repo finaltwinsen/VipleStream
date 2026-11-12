@@ -2145,7 +2145,15 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.op);
         BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.seq);
         BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.queryLen);
-        BbGetBytes(&bb, queuedCb->data.scHidFeatureRequest.query, 64);
+        // VipleStream REVIEW-1111 (round 2): queryLen comes from the wire (0..255) and the query buffer is 64 bytes;
+        // a short packet also left the buffer unfilled. Clamp the length and zero the query when it cannot be read.
+        if (!BbGetBytes(&bb, queuedCb->data.scHidFeatureRequest.query, 64)) {
+            memset(queuedCb->data.scHidFeatureRequest.query, 0, 64);
+            queuedCb->data.scHidFeatureRequest.queryLen = 0;
+        }
+        if (queuedCb->data.scHidFeatureRequest.queryLen > 64) {
+            queuedCb->data.scHidFeatureRequest.queryLen = 64;
+        }
         queuedCb->typeIndex = IDX_SC_HID_FEATURE_REQ;
     }
     else if ((VrFlags & VIPLE_VR_SF_ENABLED) && ctlHdr->type == (unsigned short)VIPLE_VR_PTYPE_S2C) {
@@ -3352,8 +3360,9 @@ void quicSendIdrMarkerRateLimited(const char* tag, const char* what) {
         return;
     }
     static const unsigned char idrMarker = 0x49; // 'I'
+    // §REVIEW-1111（第二輪）：失敗也算一次。原本只在成功時記時間，送不出去的期間每一張掉的幀都試一次、印一行。
+    lastMarkerSentMs = nowMs;
     if (quicSendStream(&idrMarker, 1) == 0) {
-        lastMarkerSentMs = nowMs;
         Limelog("[VIPLE-MPQUIC] %s: %s request sent via QUIC stream\n",
                 tag, what);
     } else {
@@ -4190,7 +4199,7 @@ int LiGetServerAudioStatus(uint32_t* seq) {
 }
 
 bool LiGetHdrMetadata(PSS_HDR_METADATA metadata) {
-    if (!IS_SUNSHINE() || !hdrEnabled) {
+    if (!IS_SUNSHINE() || !hdrEnabled || metadata == NULL) {
         return false;
     }
 

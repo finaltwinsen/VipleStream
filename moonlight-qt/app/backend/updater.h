@@ -4,6 +4,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QFile>
+#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonObject>
 
@@ -87,6 +88,9 @@ private:
     QString                m_AssetUrl;
     QString                m_AssetName;
     QString                m_DownloadPath;
+    QString                m_AssetSha256;    // §UPDATE-DIGEST：release 回報的雜湊
+    QCryptographicHash     m_DownloadHash {QCryptographicHash::Sha256};
+    QString                m_StageDir;       // 這次更新用的暫存目錄（隨機名稱、只有自己可讀寫）
     qint64                 m_BytesReceived;
     qint64                 m_BytesTotal;
     QString                m_Status;

@@ -127,6 +127,17 @@ const effectivePort = computed(() => +config.value?.port ?? defaultMoonlightPort
       <div class="form-text">{{ $t('config.origin_web_ui_allowed_desc') }}</div>
     </div>
 
+    <!-- §STEAM-SWITCH-ACL：誰可以切換 host 的 Steam 帳號 -->
+    <div class="mb-3" v-if="platform === 'windows'">
+      <label for="steam_switch" class="form-label">{{ $t('config.steam_switch') }}</label>
+      <select id="steam_switch" class="form-select" v-model="config.steam_switch">
+        <option value="paired">{{ $t('config.steam_switch_paired') }}</option>
+        <option value="admin">{{ $t('config.steam_switch_admin') }}</option>
+        <option value="disabled">{{ $t('config.steam_switch_disabled') }}</option>
+      </select>
+      <div class="form-text">{{ $t('config.steam_switch_desc') }}</div>
+    </div>
+
     <!-- CSRF Allowed Origins -->
     <div class="mb-3">
       <label for="csrf_allowed_origins" class="form-label">{{ $t('config.csrf_allowed_origins') }}</label>

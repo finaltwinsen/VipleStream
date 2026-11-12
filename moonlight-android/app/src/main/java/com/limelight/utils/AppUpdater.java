@@ -200,6 +200,13 @@ public class AppUpdater {
                     ? latestTag.substring(1) : latestTag;
             final String currentVersion = BuildConfig.VERSION_NAME;
 
+            // VipleStream REVIEW-1111 (round 2): the tag becomes part of a file name and of an API URL; accept plain
+            // dotted numbers only (a tag such as "999.0/../x" passed the numeric comparison below).
+            if (!remoteVersion.matches("[0-9]+([.][0-9]+){0,3}")) {
+                Log.w(TAG, LOG_PREFIX + "unexpected release tag, ignoring: " + latestTag);
+                return;
+            }
+
             // 依據點號數值比對版本號
             if (!isNewerVersion(remoteVersion, currentVersion)) {
                 Log.i(TAG, LOG_PREFIX + "軟體已是最新版本（目前版本：" + currentVersion + "，最新版本：" + remoteVersion + "）。");
@@ -302,6 +309,49 @@ public class AppUpdater {
             }
         }
         return null;
+    }
+
+    /**
+     * §UPDATE-NOTES：抓這個 tag 的 release notes，取摘要（規則同電腦版，見 UpdateNotes），補進還開著的對話框。
+     */
+    private static void loadReleaseNotesInto(final Activity activity, final AlertDialog dialog, final String baseMessage, final String tag) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                HttpURLConnection conn = null;
+                try {
+                    URL url = new URL("https://api.github.com/repos/finaltwinsen/VipleStream/releases/tags/" + tag);
+                    conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("GET");
+                    conn.setConnectTimeout(10000);
+                    conn.setReadTimeout(10000);
+                    conn.setRequestProperty("User-Agent", "VipleStream-Android/" + BuildConfig.VERSION_NAME);
+                    conn.setRequestProperty("Accept", "application/vnd.github.v3+json");
+                    if (conn.getResponseCode() != HttpURLConnection.HTTP_OK) {
+                        return;
+                    }
+                    JSONObject json = new JSONObject(readStreamToString(conn.getInputStream()));
+                    final String notes = UpdateNotes.summarize(json.optString("body", ""), Locale.getDefault().toLanguageTag());
+                    if (notes.isEmpty()) {
+                        return;
+                    }
+                    activity.runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (!activity.isFinishing() && !activity.isDestroyed() && dialog.isShowing()) {
+                                dialog.setMessage(baseMessage + "\n\n" + notes);
+                            }
+                        }
+                    });
+                } catch (Exception e) {
+                    Log.w(TAG, LOG_PREFIX + "更新摘要抓取失敗：" + e.getMessage());
+                } finally {
+                    if (conn != null) {
+                        conn.disconnect();
+                    }
+                }
+            }
+        }, "UpdateNotes").start();
     }
 
     /**
@@ -424,7 +474,10 @@ public class AppUpdater {
                             }
                         });
 
-                sCurrentDialog = builder.show();
+                final AlertDialog shown = builder.show();
+                sCurrentDialog = shown;
+                // §UPDATE-NOTES：對話框先出來，更新摘要在背景抓，抓到了再補在訊息後面（抓不到就維持原樣）
+                loadReleaseNotesInto(activity, shown, message, tag);
             }
         });
     }
@@ -677,7 +730,12 @@ public class AppUpdater {
             int redirectCount = 0;
 
             try {
+                boolean connected = false;
                 while (redirectCount < 5) {
+                    // §REVIEW-1111（第二輪）：只走 https（轉址也是）；轉址沒給位置就當失敗
+                    if (currentUrl == null || !currentUrl.startsWith("https://")) {
+                        throw new IOException("下載位址不是 https");
+                    }
                     URL u = new URL(currentUrl);
                     dlConn = (HttpURLConnection) u.openConnection();
                     dlConn.setInstanceFollowRedirects(true);
@@ -700,7 +758,12 @@ public class AppUpdater {
                     if (code != HttpURLConnection.HTTP_OK) {
                         throw new IOException("下載連線回傳 HTTP " + code);
                     }
+                    connected = true;
                     break;
+                }
+                if (!connected) {
+                    // 轉址次數用完：dlConn 已經 disconnect，不能再拿來讀
+                    throw new IOException("下載轉址次數過多");
                 }
 
                 in = dlConn.getInputStream();
@@ -720,6 +783,10 @@ public class AppUpdater {
                     out.write(buffer, 0, read);
                     sha256Digest.update(buffer, 0, read);
                     totalRead += read;
+                    // §REVIEW-1111（第二輪）：超過 release 回報的大小就停（多給 1 MB 餘裕），不要把儲存空間寫滿
+                    if (expectedSize > 0 && totalRead > expectedSize + (1 << 20)) {
+                        throw new IOException("下載的檔案比預期大");
+                    }
 
                     if (listener != null && expectedSize > 0) {
                         int percent = (int) ((totalRead * 100) / expectedSize);
@@ -771,6 +838,10 @@ public class AppUpdater {
                 }
                 if (dlConn != null) {
                     dlConn.disconnect();
+                }
+                // §REVIEW-1111（第二輪）：中途失敗時不留半個暫存檔（成功時已經改名，這裡刪不到東西）
+                if (partApkFile.exists()) {
+                    partApkFile.delete();
                 }
             }
         } catch (Exception e) {
@@ -849,7 +920,7 @@ public class AppUpdater {
                 // 多簽章情況：比對所有目前簽章者的憑證 SHA-256 集合
                 Set<String> installedSigners = getCertFingerprints(installedSigning.getApkContentsSigners());
                 Set<String> archiveSigners = getCertFingerprints(archiveSigning.getApkContentsSigners());
-                if (!installedSigners.equals(archiveSigners)) {
+                if (installedSigners.isEmpty() || !installedSigners.equals(archiveSigners)) {
                     Log.e(TAG, LOG_PREFIX + "多簽章憑證雜湊集合不相符。");
                     return false;
                 }
@@ -865,7 +936,9 @@ public class AppUpdater {
                 Set<String> archiveHistory = getCertFingerprints(archivePast != null ? archivePast : archiveSigning.getApkContentsSigners());
 
                 // 當前簽章者必須一致，或下載 APK 的歷史憑證鏈包含已安裝的原始根憑證
-                if (!installedCurrent.equals(archiveCurrent) && !archiveHistory.containsAll(installedHistory)) {
+                // VipleStream REVIEW-1111 (round 2): an empty set makes containsAll() true, which let any signer through
+            if (installedCurrent.isEmpty() || archiveCurrent.isEmpty() || installedHistory.isEmpty()
+                    || (!installedCurrent.equals(archiveCurrent) && !archiveHistory.containsAll(installedHistory))) {
                     Log.e(TAG, LOG_PREFIX + "下載的 APK 簽章憑證與已安裝應用程式不相符。");
                     return false;
                 }
@@ -963,6 +1036,14 @@ public class AppUpdater {
                         .setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
                             @Override
                             public void onClick(DialogInterface dialog, int which) {
+                                sPendingInstallApk = null;
+                            }
+                        })
+                        // VipleStream §REVIEW-1111: dismissing the dialog (back key, tap outside) left the pending APK set
+                        // with nothing to prompt again, so the update was stuck until the next 24 h check.
+                        .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                            @Override
+                            public void onCancel(DialogInterface dialog) {
                                 sPendingInstallApk = null;
                             }
                         });

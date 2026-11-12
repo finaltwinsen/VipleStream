@@ -1909,3 +1909,10 @@ pwsh scripts\benchmark\analyze_client_log.ps1 -Path C:\Users\me\Downloads -Json 
 - host `Input queue is full (2048 pending); dropping input`：輸入執行緒卡住時丟掉新的輸入（2.0.148，每 1000 則印一次）。
 - host `[VIPLE-VR-CLIP] software frame does not fit its buffer …; frame dropped`：網路測試片段的軟解影格和緩衝區對不上（2.0.148）。
 - client `[VIPLE-VR-POSE] could not raise the tracking thread priority: …`：追蹤送出執行緒調不到 HIGH（2.0.148，只是提示）。
+- host `[VIPLE-VR-IPC] scene pid <pid> ignored: not in our session (<a> vs <b>)`：driver 回報的場景程式不在服務所在的登入工作階段（2.0.153）；出現就代表前景搶回、手把模式判斷、快速結束都拿不到場景程式。
+- host `Session was superseded while it was starting; stopping it`：同一個 client 在上一條 session 還在啟動時又送了 /launch（2.0.152）。
+- Android `[§M.1.f] unexpected disconnect: not sending /cancel (the host keeps the app for a resume)`：意外斷線、不關 host 的遊戲（2.0.151）。
+- host `[VIPLE-STEAM-ACL] /steamswitch denied caller=<uuid> admin=<0|1>: <原因>`：切換 Steam 帳號的要求被擋（設定不允許、別的裝置的 app 或 VR session 進行中、已有切換在跑；2.0.160）。
+- client `[VIPLE-XR-INPUT] dev mouse button <0|1> down|up`：只有 dev `--xr-test-keyboard` 才印（2.0.163）。測試文字結尾加 `{close}`＝打完字後點鍵盤的關閉鍵、扳機按住不放、射線移到螢幕中央；鍵盤關掉之後不應該出現 `button 0 down`。
+- client `[VIPLE-XR] bring-up stages (ms since start): instance=… vulkan=… video=… session=… swapchain+actions=… ready=…`：XR 啟動各段做完的時間點（2.0.164）。
+- client `[VIPLE-FRUC] YUV 4:4:4 is on and this host offers it: … the host is asked for the full <fps> fps instead of half`：4:4:4 沒有補幀可用，不把 host 幀率砍半（§FRUC-444-FULLFPS，2.0.165）。

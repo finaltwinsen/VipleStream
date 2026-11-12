@@ -148,22 +148,23 @@ namespace platf::dxgi {
       }
     }
 
+    // §REVIEW-1111：都給初值。第一張複製到的畫面還沒帶游標形狀時，擷取執行緒會先讀到這些欄位。
     texture2d_t texture;
-    LONG texture_width;
-    LONG texture_height;
+    LONG texture_width = 0;
+    LONG texture_height = 0;
 
-    LONG topleft_x;
-    LONG topleft_y;
+    LONG topleft_x = 0;
+    LONG topleft_y = 0;
 
-    LONG display_width;
-    LONG display_height;
-    DXGI_MODE_ROTATION display_rotation;
+    LONG display_width = 0;
+    LONG display_height = 0;
+    DXGI_MODE_ROTATION display_rotation = DXGI_MODE_ROTATION_UNSPECIFIED;
 
     shader_res_t input_res;
 
     D3D11_VIEWPORT cursor_view;
 
-    bool visible;
+    bool visible = false;
   };
 
   class display_base_t: public display_t {

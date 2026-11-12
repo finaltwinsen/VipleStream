@@ -926,6 +926,13 @@ namespace vr::bridge {
       }
       if (!ev_stop_ || !ev_cmd_ || !ev_read_ || !ev_write_) {
         BOOST_LOG(error) << "[VIPLE-VR-IPC] disabled reason=event-create-failed err=" << GetLastError();
+        // §REVIEW-1111：全部放掉，下次呼叫才會重建。原本只看 ev_stop_ 在不在：它建成功、後面的失敗時，
+        // 之後每一次 start() 都跳過建立、直接在這裡失敗。
+        ev_stop_.reset();
+        ev_cmd_.reset();
+        ev_read_.reset();
+        ev_write_.reset();
+        timer_.reset();
         return false;
       }
       ResetEvent(ev_stop_.get());
@@ -2759,7 +2766,17 @@ namespace vr::bridge {
         status_.act_eye_w = act_ok ? d.act_eye_width : 0;
         status_.act_eye_h = act_ok ? d.act_eye_height : 0;
         status_.act_luid = act_ok ? luid_t {d.act_luid_low, d.act_luid_high} : luid_t {};
-        status_.scene_pid = d.scene_pid;
+        // §REVIEW-1111：driver 給的 PID 要在我們監看的那個登入工作階段裡才採用——服務會對這個 PID 搶前景、
+        // 查它的映像檔名，不是那個工作階段的行程一律當成沒有。
+        {
+          DWORD pid_session = 0;
+          status_.scene_pid = (d.scene_pid != 0 && ProcessIdToSessionId(d.scene_pid, &pid_session) && pid_session == self_session_) ? d.scene_pid : 0;
+          static uint32_t rejected_pid = 0;
+          if (d.scene_pid != 0 && status_.scene_pid == 0 && rejected_pid != d.scene_pid) {
+            rejected_pid = d.scene_pid;
+            BOOST_LOG(warning) << "[VIPLE-VR-IPC] scene pid " << d.scene_pid << " ignored: not in our session (" << pid_session << " vs " << self_session_ << ")";
+          }
+        }
         if (d.degraded_code) {
           status_.degraded_code = d.degraded_code;
         }

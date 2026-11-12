@@ -11,6 +11,7 @@ import StreamingPreferences 1.0
 import SystemProperties 1.0
 import SdlGamepadKeyNavigation 1.0
 import VrLauncher 1.0
+import VrNetBench 1.0
 
 // §VR-SHELL（2026-10-20）：主畫面的內容（工具列、StackView、對話框）。外殼有兩種：平面視窗 main.qml（ApplicationWindow）
 // 與頭盔 VR 介面 VrShell.qml（離屏畫進 XR 面板，backend/xrshell.cpp）。兩個外殼的根物件都叫 window，都提供 theme、
@@ -249,6 +250,7 @@ Page {
                 color: toolBar.bold ? window.theme.limeInk : window.theme.lime
             }
             Label {
+                textFormat: Text.PlainText  // §REVIEW-1111（第二輪）：主機名稱來自網路，不當成 HTML 解讀
                 text: titleLabel.displayTitle
                 anchors.horizontalCenter: parent.horizontalCenter
                 // Bold: large display-type cover title.
@@ -299,6 +301,7 @@ Page {
                 // We need this label to always be visible so it can occupy
                 // the remaining space in the RowLayout. To "hide" it, we
                 // just set the text to empty string.
+                textFormat: Text.PlainText  // §REVIEW-1111（第二輪）
                 text: !titleLabel.visible && stackView.currentItem ? stackView.currentItem.objectName : ""
             }
 
@@ -731,7 +734,8 @@ Page {
         target: VrLauncher
 
         function onFinished(exitCode, error) {
-            if (error !== "") {
+            // §REVIEW-1111：網路測試的子行程失敗由測試自己處理（重跑或顯示在狀態列），不要另外跳「VR 串流失敗」
+            if (error !== "" && !VrNetBench.running) {
                 vrErrorDialog.text = error
                 vrErrorDialog.open()
             }

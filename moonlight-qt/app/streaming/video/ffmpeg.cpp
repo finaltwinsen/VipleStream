@@ -235,7 +235,8 @@ static bool hasVulkanVideoDecodeQueue()
     // 動態載入 Vulkan 函式庫、取得 vkGetInstanceProcAddr
     PFN_vkGetInstanceProcAddr pfnGIPA = nullptr;
 #ifdef Q_OS_WIN32
-    HMODULE vkLib = LoadLibraryA("vulkan-1.dll");
+    // §REVIEW-1111（第二輪）：只從系統目錄載入
+    HMODULE vkLib = LoadLibraryExA("vulkan-1.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (vkLib)
         pfnGIPA = (PFN_vkGetInstanceProcAddr)GetProcAddress(vkLib, "vkGetInstanceProcAddr");
 #else
@@ -1341,6 +1342,7 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
 
     // Allow the backend renderer to attach data to this decoder
     if (!m_BackendRenderer->prepareDecoderContext(m_VideoDecoderCtx, &options)) {
+        av_dict_free(&options);  // §REVIEW-1111（第二輪）
         return false;
     }
 
@@ -1557,6 +1559,8 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
         if (m_DecoderThread == nullptr) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Failed to create decoder thread: %s", SDL_GetError());
+            // §REVIEW-1111（第二輪）：這個 renderer 接下來會被釋放，別讓浮層管理器留著它的指標
+            Session::get()->getOverlayManager().setOverlayRenderer(nullptr);
             return false;
         }
 
@@ -1675,6 +1679,9 @@ void FFmpegVideoDecoder::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst)
     SDL_assert(dst.measurementStartUs <= src.measurementStartUs);
 
     double timeDiffSecs = (double)(LiGetMicroseconds() - dst.measurementStartUs) / 1000000.0;
+    if (timeDiffSecs <= 0.0) {
+        timeDiffSecs = 1e-6;  // §REVIEW-1111（第二輪）：不除以 0
+    }
     dst.totalFps        = (double)dst.totalFrames / timeDiffSecs;
     dst.receivedFps     = (double)dst.receivedFrames / timeDiffSecs;
     dst.decodedFps      = (double)dst.decodedFrames / timeDiffSecs;
@@ -4848,7 +4855,15 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     int requiredBufferSize = du->fullLength;
     if (du->frameType == FRAME_TYPE_IDR) {
         // Add some extra space in case we need to do an SPS fixup
-        requiredBufferSize += MAX_SPS_EXTRA_SIZE;
+        // §REVIEW-1111（第二輪）：每個 SPS 各留一份。原本整幀只留一份，而每個 SPS 修正後都可能變長；
+        // host 在一個 IDR 裡放好幾個 SPS 時，寫入會超過預留的空間（寫到緩衝區外面）。
+        int spsCount = 0;
+        for (PLENTRY e = du->bufferList; e != nullptr; e = e->next) {
+            if (e->bufferType == BUFFER_TYPE_SPS) {
+                spsCount++;
+            }
+        }
+        requiredBufferSize += MAX_SPS_EXTRA_SIZE * (spsCount > 0 ? spsCount : 1);
     }
 
     // Ensure the decoder buffer is large enough

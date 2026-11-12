@@ -73,6 +73,7 @@ NavigableDialog {
             Layout.maximumWidth: 480
             wrapMode: Text.Wrap
             font.pixelSize: 16
+            textFormat: Text.PlainText  // §REVIEW-1111（第二輪）：版號來自網路
             text: {
                 if (dialog.mode === "confirm") {
                     return qsTr("Download and install VipleStream %1?").arg(dialog.newVersion)
@@ -116,7 +117,12 @@ NavigableDialog {
                 wrapMode: Text.Wrap
                 textFormat: Text.MarkdownText
                 text: Updater.releaseNotes
-                onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                // §REVIEW-1111（第二輪）：release notes 來自網路，只開 https 連結
+                onLinkActivated: function(link) {
+                    if (String(link).indexOf("https://") === 0) {
+                        Qt.openUrlExternally(link)
+                    }
+                }
             }
         }
 
@@ -175,6 +181,7 @@ NavigableDialog {
             Layout.maximumWidth: 480
             wrapMode: Text.Wrap
             color: "#ff7070"
+            textFormat: Text.PlainText  // §REVIEW-1111（第二輪）：錯誤訊息裡有伺服器回的字串
             text: dialog.errorMessage
         }
 
@@ -247,7 +254,13 @@ NavigableDialog {
                 flat: true
                 text: qsTr("Open release page")
                 onClicked: {
-                    Qt.openUrlExternally(dialog.releasePageUrl)
+                    // §REVIEW-1111（第二輪）：網址來自網路回應，只開我們自己的 GitHub 頁面
+                    if (String(dialog.releasePageUrl).indexOf("https://github.com/finaltwinsen/VipleStream/") === 0) {
+                        Qt.openUrlExternally(dialog.releasePageUrl)
+                    }
+                    else {
+                        Qt.openUrlExternally("https://github.com/finaltwinsen/VipleStream/releases/latest")
+                    }
                     dialog.close()
                 }
                 Keys.onReturnPressed: clicked()

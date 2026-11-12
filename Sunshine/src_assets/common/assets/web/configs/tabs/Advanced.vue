@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue'
 import PlatformLayout from '../../PlatformLayout.vue'
+import Checkbox from '../../Checkbox.vue'
 
 const props = defineProps([
   'platform',
@@ -113,6 +114,14 @@ const config = ref(props.config)
       </select>
       <div class="form-text">{{ $t('config.encoder_desc') }}</div>
     </div>
+
+    <!-- §CAP-PHASE：桌面擷取節拍貼著畫面出現的時間（Windows） -->
+    <Checkbox class="mb-3" v-if="platform === 'windows'"
+              id="capture_phase_lock"
+              locale-prefix="config"
+              v-model="config.capture_phase_lock"
+              default="true"
+    ></Checkbox>
 
   </div>
 </template>

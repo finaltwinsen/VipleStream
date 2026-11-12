@@ -62,7 +62,7 @@ static void logInputSendFailSuppressed(const char* path, int err) {
 
 static SOCKET inputSock = INVALID_SOCKET;
 static unsigned char currentAesIv[16];
-static bool initialized;
+static volatile bool initialized;  // §REVIEW-1111（第二輪）：送出執行緒在等待迴圈裡讀、別的執行緒寫
 static bool encryptedControlStream;
 static bool needsBatchedScroll;
 static int batchedScrollDelta;
@@ -493,7 +493,10 @@ static void inputSendThreadProc(void* context) {
                 currentRelativeMouseState.dirty = false;
                 PltUnlockMutex(&batchedInputMutex);
 
-                if (!sendInputPacket(holder, true) || !sendInputPacket(holder, false)) {
+                // VipleStream REVIEW-1111 (round 2): the first copy must be flushed on its own. With moreData=true it
+                // only got queued, and ENet then packed both copies into ONE datagram - losing that datagram lost both,
+                // so the second copy bought nothing.
+                if (!sendInputPacket(holder, false) || !sendInputPacket(holder, false)) {
                     freePacketHolder(holder);
 #ifdef VIPLE_MPQUIC
                     if (isQuicControlFallbackAvailable()) {
@@ -740,7 +743,10 @@ static void inputSendThreadProc(void* context) {
                 memcpy(splitPacket.packet.unicode.text, &holder->packet.unicode.text[i], codePointLength);
 
                 // Encrypt and send the split packet
-                if (!sendInputPacket(&splitPacket, i + 1 < totalLength)) {
+                // VipleStream REVIEW-1111 (round 2): "more data" must look past this whole code point. With i + 1 the
+                // last character of a string ending in a multi-byte character (any CJK text) was queued but not
+                // flushed until some other input came along.
+                if (!sendInputPacket(&splitPacket, i + codePointLength < totalLength)) {
                     freePacketHolder(holder);
 #ifdef VIPLE_MPQUIC
                     if (isQuicControlFallbackAvailable()) goto enet_input_reconnect_wait; // §M01-C
@@ -1040,8 +1046,9 @@ int LiSendMousePositionEvent(short x, short y, short referenceWidth, short refer
     // use LiSendRelativeMotionAsMousePositionEvent() must not mix these function
     // without synchronization (otherwise the state of the cursor on the host is
     // undefined anyway).
-    absCurrentPosX = CLAMP(x, 0, referenceWidth - 1) / (float)(referenceWidth - 1);
-    absCurrentPosY = CLAMP(y, 0, referenceHeight - 1) / (float)(referenceHeight - 1);
+    // §REVIEW-1111（第二輪）：參考尺寸 ≤ 1 時不除以 0
+    absCurrentPosX = referenceWidth > 1 ? CLAMP(x, 0, referenceWidth - 1) / (float)(referenceWidth - 1) : 0.0f;
+    absCurrentPosY = referenceHeight > 1 ? CLAMP(y, 0, referenceHeight - 1) / (float)(referenceHeight - 1) : 0.0f;
 
     return err;
 }
@@ -1179,6 +1186,15 @@ int LiSendUtf8TextEvent(const char *text, unsigned int length) {
 
     if (!initialized) {
         return -2;
+    }
+
+    // VipleStream REVIEW-1111 (round 2): an empty text still queued a packet whose handling stalls the input
+    // queue for 50 ms, and a huge length turned negative in allocatePacketHolder(int) and overflowed the holder.
+    if (text == NULL || length == 0) {
+        return 0;
+    }
+    if (length > 65536) {
+        return -1;
     }
 
     holder = allocatePacketHolder(length);

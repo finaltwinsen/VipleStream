@@ -1894,6 +1894,45 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### steam_switch
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream: which paired devices may switch the Steam account that is signed in on the host
+            (the account menu in the client's app list). Switching restarts Steam, which closes a running game.
+            Whatever this is set to, while an app is running only the device that started it, or a device
+            marked Admin in the Web UI, can switch; nobody else can switch during another device's VR session.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            paired
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            steam_switch = admin
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="3">Choices</td>
+        <td>paired</td>
+        <td>Any paired device.</td>
+    </tr>
+    <tr>
+        <td>admin</td>
+        <td>Only devices marked Admin (Web UI, Troubleshooting page). Other devices do not see the account menu.</td>
+    </tr>
+    <tr>
+        <td>disabled</td>
+        <td>Nobody. The account menu is hidden on every client.</td>
+    </tr>
+</table>
+
 ## VR (VipleStream 2.0)
 
 ### vr_pcvr

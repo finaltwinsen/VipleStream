@@ -793,6 +793,15 @@ public class NvConnection {
                     if (holdsConnectionPermit.compareAndSet(true, false)) {
                         connectionAllowed.release();
                     }
+                    // §REVIEW-1111：走到這裡代表 /launch 已經成功、遊戲已經在 host 上開起來了。離開時送的那一次 /cancel
+                    // 比 /launch 早到（那時 host 上還沒有東西可關），所以這裡要再送一次，不然遊戲會留在 host 上
+                    // 佔著約 60 秒，別的裝置這段時間連不進去。
+                    try {
+                        new NvHTTP(context.serverAddress, context.httpsPort, uniqueId, context.serverCert, cryptoProvider).quitApp();
+                        LimeLog.info("Left while the app was still launching: sent /cancel after the launch finished");
+                    } catch (Exception e) {
+                        LimeLog.warning("Could not cancel the app that finished launching after we left: " + e.getMessage());
+                    }
                     return;
                 }
 

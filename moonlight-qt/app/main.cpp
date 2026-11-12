@@ -155,8 +155,9 @@ bool singleInstanceReacquire()
 static QThreadPool s_LoggerThread;
 static QMutex s_SyncLoggerMutex;
 static bool s_SuppressVerboseOutput;
-static QRegularExpression k_RikeyRegex("&rikey=\\w+");
-static QRegularExpression k_RikeyIdRegex("&rikeyid=[\\d-]+");
+// §REVIEW-1111（第二輪）：金鑰是查詢字串的第一個參數（?rikey=）時原本遮不到
+static QRegularExpression k_RikeyRegex("([?&])rikey=\\w+");
+static QRegularExpression k_RikeyIdRegex("([?&])rikeyid=[\\d-]+");
 #ifdef LOG_TO_FILE
 // Max log file size of 10 MB
 static const uint64_t k_MaxLogSizeBytes = 10 * 1024 * 1024;
@@ -214,15 +215,15 @@ void logToLoggerStream(QString& message)
 #endif
 
     // Strip session encryption keys and IVs from the logs
-    message.replace(k_RikeyRegex, "&rikey=REDACTED");
-    message.replace(k_RikeyIdRegex, "&rikeyid=REDACTED");
+    message.replace(k_RikeyRegex, "\\1rikey=REDACTED");
+    message.replace(k_RikeyIdRegex, "\\1rikeyid=REDACTED");
 
 #ifdef LOG_TO_FILE
     auto oldLogSize = s_LogBytesWritten.fetchAndAddRelaxed(message.size());
     if (oldLogSize >= k_MaxLogSizeBytes) {
         return;
     }
-    else if (oldLogSize >= k_MaxLogSizeBytes - message.size()) {
+    else if (oldLogSize + static_cast<uint64_t>(message.size()) >= k_MaxLogSizeBytes) {  // §REVIEW-1111（第二輪）：原本的減法在訊息比上限大時會下溢
         // Write one final message
         message = "Log size limit reached!";
     }
@@ -366,6 +367,10 @@ void ffmpegLogToDiskHandler(void* ptr, int level, const char* fmt, va_list vl)
     // snprintf 回傳「應寫入」長度，可能超過剩餘空間——夾回實際上限
     if (pendingLen > k_PendingCap - 1) {
         pendingLen = k_PendingCap - 1;
+    }
+    // §REVIEW-1111（第二輪）：snprintf 失敗時回傳負值；加進去之後長度會變成負的，下一次就寫到緩衝區前面
+    if (pendingLen < 0) {
+        pendingLen = 0;
     }
 
     // 累積到換行結尾才寫出；防呆上限：異常長的無換行訊息強制斷行落盤
@@ -551,7 +556,11 @@ int SDLCALL signalHandlerThread(void* data)
 
 void configureSignalHandlers()
 {
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, signalFds) == -1) {
+    // §REVIEW-1111（第二輪）：CLOEXEC，不要讓子行程（VR 串流、更新腳本）繼承這兩個 fd
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC 0  // macOS 沒有這個旗標
+#endif
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, signalFds) == -1) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "socketpair() failed: %d",
                      errno);
@@ -974,7 +983,7 @@ int main(int argc, char *argv[])
 #ifdef LOG_TO_FILE
     if (s_ProbeAction == nullptr) {
         // Prune the oldest existing logs if there are more than 10
-        QStringList existingLogNames = tempDir.entryList(QStringList("VipleStream-*.log"), QDir::NoFilter, QDir::SortFlag::Time);
+        QStringList existingLogNames = tempDir.entryList(QStringList("VipleStream-*.log"), QDir::Files | QDir::NoSymLinks, QDir::SortFlag::Time);  // §REVIEW-1111（第二輪）：只刪一般檔案
         for (int i = 10; i < existingLogNames.size(); i++) {
             qInfo() << "Removing old log file:" << existingLogNames.at(i);
             QFile(tempDir.filePath(existingLogNames.at(i))).remove();
@@ -2009,13 +2018,18 @@ int main(int argc, char *argv[])
         // 解構順序：vrShell（拆介面的 QML 樹，含瀏覽器）→ engine（含 VrLauncher 等子行程）→ app（Qt WebEngine 收子行程）
         vrShell->shutdownXrForExit();
         // 保險：收尾卡住（驅動、子行程不結束）時 20 秒後強制結束，不要讓行程掛在那裡（~VrLauncher 最多等 12 秒）
-        std::thread([err]() {
-            std::this_thread::sleep_for(std::chrono::seconds(20));
-            fprintf(stderr, "[VIPLE-SHELL] exit: teardown did not finish in 20 s - forcing exit\n");
-            fflush(stderr);
-            fflush(stdout);
-            std::_Exit(err);
-        }).detach();
+        // §REVIEW-1111（第二輪）：建不出執行緒（資源用完）時不要讓例外穿出 main；少了保險而已
+        try {
+            std::thread([err]() {
+                std::this_thread::sleep_for(std::chrono::seconds(20));
+                fprintf(stderr, "[VIPLE-SHELL] exit: teardown did not finish in 20 s - forcing exit\n");
+                fflush(stderr);
+                fflush(stdout);
+                std::_Exit(err);
+            }).detach();
+        }
+        catch (const std::exception&) {
+        }
         const auto teardownStart = std::chrono::steady_clock::now();
         vrShell.reset();
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] exit: interface torn down in %lld ms",

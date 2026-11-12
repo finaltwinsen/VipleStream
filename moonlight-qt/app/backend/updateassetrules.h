@@ -284,6 +284,7 @@ struct ReleasePlan {
     AssetAction action = AssetAction::Skip;
     QString assetName;
     QString assetUrl;
+    QString assetSha256;      // §UPDATE-DIGEST：GitHub 回報的 sha256（小寫 hex）；沒有就是空的
     QStringList assetNames;   // 全部 asset 名稱，給 log
     QStringList skippedClient;  // 被跳過的 Client asset：「名稱 — 原因」，給 log
 };
@@ -314,6 +315,7 @@ inline ReleasePlan planRelease(const QJsonObject& release, const Platform& p,
     }
 
     QStringList urls;
+    QStringList digests;
     const QJsonArray assets = release.value(QLatin1String("assets")).toArray();
     for (const QJsonValue& v : assets) {
         const QJsonObject obj = v.toObject();
@@ -322,6 +324,9 @@ inline ReleasePlan planRelease(const QJsonObject& release, const Platform& p,
         if (name.isEmpty() || dl.isEmpty()) continue;
         plan.assetNames.append(name);
         urls.append(dl);
+        // "sha256:<hex>"（host 的自我更新讀的是同一個欄位）
+        QString dg = obj.value(QLatin1String("digest")).toString().trimmed().toLower();
+        digests.append(dg.startsWith(QLatin1String("sha256:")) && dg.size() == 7 + 64 ? dg.mid(7) : QString());
     }
     if (plan.assetNames.isEmpty()) {
         plan.result = PlanResult::NoAssets;
@@ -344,6 +349,7 @@ inline ReleasePlan planRelease(const QJsonObject& release, const Platform& p,
     }
     plan.assetName = plan.assetNames.at(idx);
     plan.assetUrl  = urls.at(idx);
+    plan.assetSha256 = digests.at(idx);
     plan.result    = PlanResult::Ok;
     return plan;
 }

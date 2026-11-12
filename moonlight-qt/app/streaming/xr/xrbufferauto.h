@@ -40,6 +40,7 @@ namespace xrbuf {
             depth = 1;
             winUs = sinceUs = 0;
             starve = 0;
+            sameRun = 0;
             lag2SinceUs = 0;
         }
 

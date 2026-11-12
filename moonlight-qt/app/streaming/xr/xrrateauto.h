@@ -274,6 +274,11 @@ namespace xrrate {
             }
             if (m_Div == 1) {
                 // 試升期間：一個視窗就判
+                if (m_ProbeUntilUs != 0 && m_DownRefused) {
+                    // §REVIEW-1111（第二輪）：host 已經拒絕過降速，這一場不會再要求——試升也到此為止。
+                    // 原本這裡不看 m_DownRefused：試升期間每個視窗都重送一次降速要求（30 秒內最多 6 次）。
+                    m_ProbeUntilUs = 0;
+                }
                 if (m_ProbeUntilUs != 0) {
                     if (nowUs < m_ProbeUntilUs) {
                         const uint32_t prev = m_HistN >= 2 && !outage(hist(1)) ? hist(1).shortRep : 0;

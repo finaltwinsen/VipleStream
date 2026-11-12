@@ -36,6 +36,7 @@
 
 #include <SDL.h>
 
+#include <cstdio>
 #include <functional>
 
 class VrNetMode
@@ -321,17 +322,36 @@ private:
 
     void writeRequest(uint32_t, bool adapterOnly)
     {
-        if (!QDir().mkpath(m_Dir)) {
-            return;
+        // §REVIEW-1111：這是每秒一次的心跳，而且在串流的主迴圈上（震動、輸入事件排在它後面）。
+        // 目錄只建一次；QSaveFile 的 commit 會 fsync（快閃上常見 1～10 ms），心跳不需要落盤，
+        // 改成寫暫存檔再 rename（一樣是整份換掉，helper 不會讀到寫一半的）。
+        if (!m_DirReady) {
+            if (!QDir().mkpath(m_Dir)) {
+                return;
+            }
+            m_DirReady = true;
         }
         QJsonObject o;
         o.insert(QStringLiteral("mode"), adapterOnly ? QStringLiteral("adapter-only") : QStringLiteral("normal"));
         o.insert(QStringLiteral("t"), static_cast<qint64>(QDateTime::currentSecsSinceEpoch()));
-        QSaveFile f(QDir(m_Dir).filePath(QStringLiteral("netmode-request.json")));
+        const QString path = QDir(m_Dir).filePath(QStringLiteral("netmode-request.json"));
+#ifdef Q_OS_UNIX
+        const QString tmp = path + QStringLiteral(".tmp");
+        QFile f(tmp);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+            f.close();
+            if (::rename(QFile::encodeName(tmp).constData(), QFile::encodeName(path).constData()) != 0) {
+                QFile::remove(tmp);
+            }
+        }
+#else
+        QSaveFile f(path);
         if (f.open(QIODevice::WriteOnly)) {
             f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
             f.commit();
         }
+#endif
     }
 
     Status readStatus() const
@@ -343,13 +363,15 @@ private:
         }
         const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
         const qint64 t = o.value(QStringLiteral("t")).toVariant().toLongLong();
-        s.fresh = t > 0 && QDateTime::currentSecsSinceEpoch() - t <= 5;
+        s.fresh = t > 0 && qAbs(QDateTime::currentSecsSinceEpoch() - t) <= 5;  // REVIEW-1111 (round 2): a timestamp in the future is not "fresh" either
         s.apStation = o.value(QStringLiteral("ap_station")).toBool();
         s.applied = o.value(QStringLiteral("applied")).toString();
         s.loc = o.value(QStringLiteral("loc")).toString();
         s.err = o.value(QStringLiteral("err")).toString();
         return s;
     }
+
+    bool m_DirReady = false;  // writeRequest：目錄已經建好
 
     QString rememberedChoice(bool ignoreAge = false) const
     {

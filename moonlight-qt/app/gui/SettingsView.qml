@@ -795,7 +795,7 @@ Flickable {
 
                         function addDetectedResolution(friendlyNamePrefix, rect) {
                             var indexToAdd = 0
-                            for (var j = 0; j < resolutionComboBox.count; j++) {
+                            for (var j = 0; j < resolutionListModel.count; j++) {  // §REVIEW-1111（第二輪）：走訪的是模型，用模型的長度
                                 var existing_width = parseInt(resolutionListModel.get(j).video_width);
                                 var existing_height = parseInt(resolutionListModel.get(j).video_height);
 
@@ -873,7 +873,7 @@ Flickable {
                             }
 
                             if (max_pixels > 0) {
-                                for (var j = 0; j < resolutionComboBox.count; j++) {
+                                for (var j = 0; j < resolutionListModel.count; j++) {  // §REVIEW-1111（第二輪）：走訪的是模型，用模型的長度
                                     var existing_width = parseInt(resolutionListModel.get(j).video_width);
                                     var existing_height = parseInt(resolutionListModel.get(j).video_height);
 
@@ -1801,7 +1801,9 @@ Flickable {
                         frucBackendModel.append({text: qsTr("NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)"), val: 1})
                         frucBackendModel.append({text: qsTr("DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)"), val: 2})
                         frucBackendModel.append({text: qsTr("NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)"), val: 3})
-                        currentIndex = StreamingPreferences.frucBackend
+                        // §REVIEW-1111（第二輪）：存檔的值超出清單時選第一項，不要變成「什麼都沒選」
+                        var fb = StreamingPreferences.frucBackend
+                        currentIndex = (fb >= 0 && fb < frucBackendModel.count) ? fb : 0
                     }
                     onActivated: {
                         StreamingPreferences.frucBackend = frucBackendModel.get(currentIndex).val
@@ -1834,7 +1836,8 @@ Flickable {
                         frucQualityModel.append({text: qsTr("Quality — Best visual quality, higher GPU load"), val: 0})
                         frucQualityModel.append({text: qsTr("Balanced — Recommended (default)"), val: 1})
                         frucQualityModel.append({text: qsTr("Performance — Lowest latency, suitable for iGPU"), val: 2})
-                        currentIndex = StreamingPreferences.frucQuality
+                        var fq = StreamingPreferences.frucQuality
+                        currentIndex = (fq >= 0 && fq < frucQualityModel.count) ? fq : 1
                     }
                     onActivated: {
                         StreamingPreferences.frucQuality = frucQualityModel.get(currentIndex).val

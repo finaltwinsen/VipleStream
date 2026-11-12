@@ -2434,6 +2434,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     }
 
     private void stopConnection() {
+        stopConnection(true);
+    }
+
+    // §REVIEW-1111：releaseOwnership＝要不要送 /cancel。/cancel 在 host 上不只拆串流，還會把遊戲關掉。
+    // 使用者自己離開、或 host 正常結束時才送；意外斷線（沒畫面、控制通道斷、Wi-Fi 切換）不送——
+    // host 會留著遊戲約 60 秒讓同一台裝置接回去（桌面 client 一直是這樣做的）。
+    private void stopConnection(final boolean releaseOwnership) {
         // VipleStream §N — stop transfer polling before tearing down stream
         stopFileTransferClient();
 
@@ -2463,7 +2470,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     // §M.1.f：/cancel 釋放 server 端 _owner_uuid。conn.stop() 只拆串流，
                     // 不放 host 擁有權。這步失敗不可擋住已經做完的 teardown。
                     try {
-                        if (xferHost != null && xferHttpsPort != 0 && xferServerCert != null) {
+                        if (!releaseOwnership) {
+                            android.util.Log.i("VipleStream", "[§M.1.f] unexpected disconnect: not sending /cancel (the host keeps the app for a resume)");
+                        }
+                        else if (xferHost != null && xferHttpsPort != 0 && xferServerCert != null) {
                             String uniqueId = "0123456789ABCDEF";  // same value FileTransferClient uses
                             com.limelight.nvstream.http.NvHTTP cancelHttp =
                                 new com.limelight.nvstream.http.NvHTTP(
@@ -2548,7 +2558,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 if (!displayedFailureDialog) {
                     displayedFailureDialog = true;
                     LimeLog.severe("Connection terminated: " + errorCode);
-                    stopConnection();
+                    stopConnection(errorCode == MoonBridge.ML_ERROR_GRACEFUL_TERMINATION);
 
                     // Display the error dialog if it was an unexpected termination.
                     // Otherwise, just finish the activity immediately.
@@ -2686,6 +2696,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     spinner = null;
                 }
 
+                // VipleStream §REVIEW-1111: this runnable can run after the activity was told to finish (the user left
+                // while connecting). Marking the stream connected then re-grabbed the pointer and restarted the file
+                // transfer poller on a dead activity.
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
+
                 connected = true;
                 connecting = false;
                 updatePipAutoEnter();
@@ -2699,7 +2716,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 h.postDelayed(new Runnable() {
                     @Override
                     public void run() {
-                        setInputGrabState(true);
+                        if (connected && !isFinishing() && !isDestroyed()) {
+                            setInputGrabState(true);
+                        }
                     }
                 }, 500);
 

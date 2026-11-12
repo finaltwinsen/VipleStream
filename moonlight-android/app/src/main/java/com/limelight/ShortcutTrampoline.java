@@ -148,7 +148,10 @@ public class ShortcutTrampoline extends Activity {
                                             return;
                                         }
 
-                                        if (details.state == ComputerDetails.State.ONLINE && details.pairState == PairingManager.PairState.PAIRED) {
+                                        // VipleStream §REVIEW-1111: a host that is only reachable through the relay is ONLINE with a null
+                                        // activeAddress; building the start intent dereferenced it on the UI thread. Treat it as offline here.
+                                        if (details.state == ComputerDetails.State.ONLINE && details.pairState == PairingManager.PairState.PAIRED
+                                                && details.activeAddress != null) {
                                             
                                             // Launch game if provided app ID, otherwise launch app view
                                             if (app != null) {

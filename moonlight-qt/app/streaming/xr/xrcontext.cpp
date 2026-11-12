@@ -374,7 +374,8 @@ PFN_vkGetInstanceProcAddr XrContext::loadVulkanLoader(QString* error)
 #if defined(Q_OS_WIN)
     HMODULE lib = ::GetModuleHandleW(L"vulkan-1.dll");
     if (lib == nullptr) {
-        lib = ::LoadLibraryW(L"vulkan-1.dll");
+        // §REVIEW-1111（第二輪）：只從系統目錄載入。不指定搜尋範圍時，目前工作目錄與 PATH 上的同名檔也會被載入
+        lib = ::LoadLibraryExW(L"vulkan-1.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     }
     if (lib == nullptr) {
         if (error) *error = QStringLiteral("LoadLibrary(vulkan-1.dll) failed (%1)").arg(::GetLastError());
@@ -430,7 +431,16 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
 
     QString err;
     const auto t0 = std::chrono::steady_clock::now();
-    bool ok = createInstance(&err) && createSystem(&err) && createVulkan(&err);
+    // §VR-EXIT-FAST（量測）：bring-up 各段花多久（頭盔介面在串流結束後重開 XR 約 2.7 秒，要知道是哪一段）
+    long long stageMs[6] = {0, 0, 0, 0, 0, 0};  // instance、system＋vulkan、video、session、swapchain＋actions、等 READY
+    auto sinceMs = [&]() {
+        return static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+    };
+    bool ok = createInstance(&err);
+    stageMs[0] = sinceMs();
+    ok = ok && createSystem(&err) && createVulkan(&err);
+    stageMs[1] = sinceMs();
 #ifdef HAVE_XR_VIDEO
     if (ok && m_Options.enableVideo) {
         // X2：影像路徑失敗不影響 session（XrRenderer 會看到 video()==nullptr 而退回平面）
@@ -487,8 +497,16 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         }
     }
 #endif
-    ok = ok && createSession(&err) && createQuadSwapchain(&err) && createActions(&err) &&
-         waitForReadyAndBegin(timeoutMs, &err);
+    stageMs[2] = sinceMs();
+    ok = ok && createSession(&err);
+    stageMs[3] = sinceMs();
+    ok = ok && createQuadSwapchain(&err) && createActions(&err);
+    stageMs[4] = sinceMs();
+    ok = ok && waitForReadyAndBegin(timeoutMs, &err);
+    stageMs[5] = sinceMs();
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR] bring-up stages (ms since start): instance=%lld vulkan=%lld video=%lld session=%lld swapchain+actions=%lld ready=%lld",
+                stageMs[0], stageMs[1], stageMs[2], stageMs[3], stageMs[4], stageMs[5]);
     if (!ok) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] bring-up failed: %s", qUtf8Printable(err));
         destroyAll();
@@ -503,6 +521,10 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
 #endif
     m_StopRequested.store(false);
     m_Lost.store(false);
+    // §REVIEW-1111（第二輪）：上一次是因為 GPU 卡住而結束的話，這兩個旗標還留著——新的 session 第一格就會被當成
+    // 「GPU 造成的中斷」直接結束，新的 device 收尾時也會被當成卡住的而不銷毀。
+    m_LostByGpu.store(false, std::memory_order_release);
+    m_GpuWedged.store(false, std::memory_order_release);
     m_WarmupEndNs = steadyNowNs() + 2000000000ull;
     m_BringUpNs = steadyNowNs();
     m_TestRecenterDone = false;
@@ -524,6 +546,10 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     m_Flight.guard.start(m_BringUpNs);
     if (m_Options.pcvr) {
         m_LoopDiag.reserveWindow();
+        // §REVIEW-1111（第二輪）：這三個也是 frame thread 每格 push 的 10 秒統計，先配好，第一個視窗不在熱路徑上長大
+        m_XrCpuUs.reserve(2048);
+        m_PoseErrPosMm.reserve(2048);
+        m_PoseErrRotDeg.reserve(2048);
     }
     if (pcvrLatchFlightEffUs() > 0) {
         m_Flight.win.reserveWindow();  // 等過的那一格在 xrBeginFrame 之前記帳，那裡不可以配置記憶體
@@ -709,6 +735,7 @@ bool XrContext::createSystem(QString* error)
         sp.next = &eyeGaze;
     }
     xrGetSystemProperties(m_Instance, m_SystemId, &sp);
+    m_EyeGazeSupported = false;  // §REVIEW-1111（第二輪）：重建 session 後新的 instance 沒有這個擴充時，不要沿用上一次的 true
     if (m_EnabledExtensions.contains(QLatin1String(kExtEyeGaze))) {
         m_EyeGazeSupported = (eyeGaze.supportsEyeGazeInteraction != XR_FALSE);
     }
@@ -2325,15 +2352,20 @@ void XrContext::frameThreadMain()
             m_Video->setTiles(m_PcvrTileW.load(std::memory_order_relaxed), m_PcvrTileH.load(std::memory_order_relaxed),
                               m_PcvrTileRW.load(std::memory_order_relaxed), m_PcvrTileRH.load(std::memory_order_relaxed));
             const int fpct = m_PcvrFoveaPct.load(std::memory_order_relaxed);
+            // §REVIEW-1111（第二輪）：第一次 xrLocateViews 之前 m_Fov 全是 0，l/(l+r) 是 0/0＝NaN，而 std::clamp 對 NaN
+            // 原樣放行，NaN 就進了注視點的中心。視角還沒有值時用正中央。
+            const auto fovCentre = [](float a, float b) {
+                return (a + b) > 1e-6f ? std::clamp(a / (a + b), 0.05f, 0.95f) : 0.5f;
+            };
             if (fpct > 100 && fpct <= 250) {
                 const float l0 = std::tan(-m_Fov[0].angleLeft), r0 = std::tan(m_Fov[0].angleRight);
                 const float l1 = std::tan(-m_Fov[1].angleLeft), r1 = std::tan(m_Fov[1].angleRight);
                 const float u0 = std::tan(m_Fov[0].angleUp), d0 = std::tan(-m_Fov[0].angleDown);
                 const float u1 = std::tan(m_Fov[1].angleUp), d1 = std::tan(-m_Fov[1].angleDown);
                 const int insetU0 = m_PcvrFoveaInsetU0.load(std::memory_order_relaxed);
-                m_Video->setFoveation(100.0f / static_cast<float>(fpct), std::clamp(l0 / (l0 + r0), 0.05f, 0.95f),
-                                      std::clamp(l1 / (l1 + r1), 0.05f, 0.95f), std::clamp(u0 / (u0 + d0), 0.05f, 0.95f),
-                                      std::clamp(u1 / (u1 + d1), 0.05f, 0.95f),
+                m_Video->setFoveation(100.0f / static_cast<float>(fpct), fovCentre(l0, r0),
+                                      fovCentre(l1, r1), fovCentre(u0, d0),
+                                      fovCentre(u1, d1),
                                       insetU0 >= 1000 && insetU0 <= 9000 ? static_cast<float>(insetU0) / 10000.0f : 0.0f);
             }
             else if (m_PcvrTileW.load(std::memory_order_relaxed) > 0) {
@@ -2342,14 +2374,14 @@ void XrContext::frameThreadMain()
                 const float l1 = std::tan(-m_Fov[1].angleLeft), r1 = std::tan(m_Fov[1].angleRight);
                 const float u0 = std::tan(m_Fov[0].angleUp), d0 = std::tan(-m_Fov[0].angleDown);
                 const float u1 = std::tan(m_Fov[1].angleUp), d1 = std::tan(-m_Fov[1].angleDown);
-                m_Video->setFoveation(1.0f, std::clamp(l0 / (l0 + r0), 0.05f, 0.95f), std::clamp(l1 / (l1 + r1), 0.05f, 0.95f),
-                                      std::clamp(u0 / (u0 + d0), 0.05f, 0.95f), std::clamp(u1 / (u1 + d1), 0.05f, 0.95f));
+                m_Video->setFoveation(1.0f, fovCentre(l0, r0), fovCentre(l1, r1),
+                                      fovCentre(u0, d0), fovCentre(u1, d1));
             }
             else {
                 m_Video->setFoveation(1.0f, 0.5f, 0.5f, 0.5f, 0.5f);
             }
         }
-        if (m_Video != nullptr && m_Options.pcvrSynth) {
+        if (m_Video != nullptr && m_Options.pcvrSynth && m_Fov[0].angleRight - m_Fov[0].angleLeft > 1e-3f) {
             // §VR-SYNTH：串流用的每眼視角（含 overscan），合成時把頭部轉動換算成影像位移用
             m_Video->setEyeFovTan(std::tan(-m_Fov[0].angleLeft) + std::tan(m_Fov[0].angleRight),
                                   std::tan(m_Fov[0].angleUp) + std::tan(-m_Fov[0].angleDown));
@@ -2444,7 +2476,18 @@ void XrContext::frameThreadMain()
                     }
                 }
                 if (!img.isNull() && img.width() == kToastW && img.height() == kToastH) {
-                    m_ToastUploaded = uploadImage(m_ToastSwapchain, m_ToastImages, m_ToastImageCount, img) || m_ToastUploaded;
+                    // §REVIEW-1111（第二輪）：同低電量圖示——上傳失敗就下一格再試，否則這一則提示不會出現
+                    if (uploadImage(m_ToastSwapchain, m_ToastImages, m_ToastImageCount, img)) {
+                        m_ToastUploaded = true;
+                        m_ToastUploadRetries = 0;
+                    }
+                    else if (++m_ToastUploadRetries <= 30) {
+                        std::lock_guard<std::mutex> lk(m_ToastMutex);
+                        m_ToastDirty = true;
+                    }
+                    else {
+                        m_ToastUploadRetries = 0;
+                    }
                 }
                 if (m_ToastUploaded) {
                     const float w = 0.62f;
@@ -2476,17 +2519,16 @@ void XrContext::frameThreadMain()
             if (!img.isNull() && img.width() == kBattW && img.height() == kBattH) {
                 // §REVIEW-1111：上傳失敗（上一筆上傳還沒做完、等不到影像）就下一格再試。原本失敗了也把「要更新」清掉，
                 // 而電量百分比不變就不會再送圖——聽得到提示音、圖示卻整場都不出現。最多試 30 次，免得一直失敗時拖住每一格。
-                static int battUploadRetries = 0;
                 if (uploadImage(m_BattSwapchain, m_BattImages, m_BattImageCount, img)) {
                     m_BattUploaded = true;
-                    battUploadRetries = 0;
+                    m_BattUploadRetries = 0;
                 }
-                else if (++battUploadRetries <= 30) {
+                else if (++m_BattUploadRetries <= 30) {
                     std::lock_guard<std::mutex> lk(m_BattMutex);
                     m_BattDirty = true;  // m_BattImg 還在（或已經被更新的圖換掉），下一格再傳
                 }
                 else {
-                    battUploadRetries = 0;
+                    m_BattUploadRetries = 0;
                 }
             }
             if (m_BattUploaded) {
@@ -2654,7 +2696,18 @@ void XrContext::frameThreadMain()
             }
             if (!img.isNull() && static_cast<uint32_t>(img.width()) == m_Options.shellWidth &&
                 static_cast<uint32_t>(img.height()) == m_Options.shellHeight) {
-                m_ShellUploaded = uploadImage(m_ShellSwapchain, m_ShellImages, m_ShellImageCount, img) || m_ShellUploaded;
+                // §REVIEW-1111（第二輪）：介面的最後一次重畫上傳失敗時，畫面會停在舊的那一張直到下一次重畫；下一格再試
+                if (uploadImage(m_ShellSwapchain, m_ShellImages, m_ShellImageCount, img)) {
+                    m_ShellUploaded = true;
+                    m_ShellUploadRetries = 0;
+                }
+                else if (++m_ShellUploadRetries <= 30) {
+                    std::lock_guard<std::mutex> lk(m_ShellMutex);
+                    m_ShellDirty = true;
+                }
+                else {
+                    m_ShellUploadRetries = 0;
+                }
             }
             if (m_ShellUploaded && m_Screen->placed()) {
                 screenAspect = static_cast<float>(m_Options.shellWidth) / static_cast<float>(m_Options.shellHeight);
@@ -4462,7 +4515,7 @@ bool XrContext::sampleHmd(float pos[3], float rot[4], float linVel[3], float ang
     XrTime xrNow = 0;
     if (m_SessionBegun.load() && m_TrackSpace != XR_NULL_HANDLE && m_ViewSpace != XR_NULL_HANDLE && nowXrTime(&xrNow)) {
         // thread 模式：當下 locate「現在＋預測提前量」
-        const int64_t ahead = m_PredictAheadNs > 0 ? m_PredictAheadNs : 20000000;
+        const int64_t ahead = m_PredictAheadNs.load() > 0 ? m_PredictAheadNs.load() : 20000000;
         XrSpaceVelocity vel = xrStruct<XrSpaceVelocity>(XR_TYPE_SPACE_VELOCITY);
         XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
         loc.next = &vel;
@@ -4483,7 +4536,8 @@ bool XrContext::sampleHmd(float pos[3], float rot[4], float linVel[3], float ang
             angVel[0] = av ? vel.angularVelocity.x : 0.0f;
             angVel[1] = av ? vel.angularVelocity.y : 0.0f;
             angVel[2] = av ? vel.angularVelocity.z : 0.0f;
-            *predictNs = static_cast<uint32_t>(std::min<int64_t>(ahead, 0xffffffffll));
+            // §REVIEW-1111（第二輪）：目標時間已經過了（ahead 是負的）就送 0，不要迴繞成 4 秒多
+            *predictNs = static_cast<uint32_t>(std::clamp<int64_t>(ahead, 0, 0xffffffffll));
             return true;
         }
     }
@@ -4559,7 +4613,7 @@ void XrContext::sampleControllers(VIPLE_VR_TRACKING* sample)
     XrTime xrTime = 0;
     XrTime xrNow = 0;
     if (m_TimeConv != nullptr && nowXrTime(&xrNow)) {
-        xrTime = xrNow + (m_PredictAheadNs > 0 ? m_PredictAheadNs : 20000000);
+        xrTime = xrNow + (m_PredictAheadNs.load() > 0 ? m_PredictAheadNs.load() : 20000000);
     }
     m_VrCtl->fill(sample, m_TrackSpace, xrTime);
 }
@@ -4578,7 +4632,7 @@ bool XrContext::sampleEyeGaze(VIPLE_VR_TRACKING* sample)
     XrTime xrNow = 0;
     XrTime xrTime = 0;
     if (m_TimeConv != nullptr && nowXrTime(&xrNow)) {
-        xrTime = xrNow + (m_PredictAheadNs > 0 ? m_PredictAheadNs : 20000000);
+        xrTime = xrNow + (m_PredictAheadNs.load() > 0 ? m_PredictAheadNs.load() : 20000000);
     } else {
         std::lock_guard<std::mutex> lk(m_HmdMutex);
         xrNow = m_Hmd.displayTime;
@@ -5227,6 +5281,9 @@ void XrContext::destroyAll()
             const VkResult wr = sr == VK_SUCCESS ? s_Vk.WaitForFences(m_VkDevice, 1, &idle, VK_TRUE, 2000000000ull) : sr;
             if (wr == VK_SUCCESS) {
                 s_Vk.DestroyFence(m_VkDevice, idle, nullptr);
+                // §REVIEW-1111（第二輪）：佇列已經閒下來，先前逾時沒等到的那一批也做完了；
+                // 不清掉的話下面會因為 m_CmdPending 跳過 staging buffer 的釋放、接著裝置就被銷毀
+                m_CmdPending = false;
             }
             else {
                 markGpuWedged(wr == VK_TIMEOUT ? "queue did not go idle within 2 s at teardown" : "queue idle wait failed at teardown");
@@ -5389,11 +5446,17 @@ void XrContext::destroyAll()
     m_Cmd = VK_NULL_HANDLE;
     m_VkDevice = VK_NULL_HANDLE;
     m_Queue = VK_NULL_HANDLE;
-    if (m_VkInstance != VK_NULL_HANDLE && s_Vk.DestroyInstance) {
+    // §REVIEW-1111（第二輪）：GPU 卡住時上面刻意不銷毀 device；device 還在就不能銷毀它的 instance
+    // （驅動的執行緒可能還在用），一起留著。
+    if (m_VkInstance != VK_NULL_HANDLE && s_Vk.DestroyInstance && !gpuWedged()) {
         s_Vk.DestroyInstance(m_VkInstance, nullptr);
     }
     m_VkInstance = VK_NULL_HANDLE;
     m_VkPhysicalDevice = VK_NULL_HANDLE;
+    // 上一筆上傳的等待狀態跟著 device 一起作廢；留著的話重新 bringUp 之後會去等一個從沒送出過的 fence，
+    // 所有貼圖上傳（載入畫面、鍵盤、提示）都被跳過。
+    m_CmdPending = false;
+    m_CmdTimeoutLogged = false;
     if (m_Instance != XR_NULL_HANDLE) {
         xrDestroyInstance(m_Instance);
         m_Instance = XR_NULL_HANDLE;

@@ -345,6 +345,9 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
                      ha.isInSubnet(QHostAddress(QStringLiteral("172.16.0.0")), 12) ||
                      ha.isInSubnet(QHostAddress(QStringLiteral("192.168.0.0")), 16))) {
                 this->lanAddresses.append(NvAddress(a, http.httpPort()));
+                if (this->lanAddresses.size() >= 16) {
+                    break;  // §REVIEW-1111（第二輪）：清單來自網路，設上限
+                }
             }
         }
     }
@@ -545,7 +548,7 @@ bool NvComputer::wake() const
 
             // Send to all static ports
             for (quint16 port : STATIC_WOL_PORTS) {
-                if (sock.writeDatagram(wolPayload, address, port)) {
+                if (sock.writeDatagram(wolPayload, address, port) == wolPayload.size()) {  // REVIEW-1111 (round 2): -1 (failure) is also "true"
                     qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
                     success = true;
                 }
@@ -569,7 +572,7 @@ bool NvComputer::wake() const
                 for (quint16 port : DYNAMIC_WOL_PORTS) {
                     port = (port - 47989) + basePort;
 
-                    if (sock.writeDatagram(wolPayload, address, port)) {
+                    if (sock.writeDatagram(wolPayload, address, port) == wolPayload.size()) {  // REVIEW-1111 (round 2): -1 (failure) is also "true"
                         qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
                         success = true;
                     }
@@ -860,7 +863,8 @@ bool NvComputer::updateUnlocked(const NvComputer& that)
 
     if (!that.appList.isEmpty()) {
         // updateAppList() handles merging client-side attributes
-        updateAppList(that.appList);
+        // §REVIEW-1111（第二輪）：只有 app 清單變了（其他欄位都沒變）也要回報有變更，否則不會存檔、介面也不更新
+        changed |= updateAppList(that.appList);
     }
 
     return changed;

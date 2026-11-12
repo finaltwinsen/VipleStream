@@ -309,6 +309,16 @@ namespace vrdrv {
       const uint32_t thumb_bits = k_btn_stick | k_btn_ab_lo | k_btn_ab_hi | k_btn_thumbrest | k_btn_c | k_btn_d;
       cu.thumb = ((t | b) & thumb_bits) != 0 ? 0.7f : 0.0f;
     }
+    // §REVIEW-1111：彎曲程度和上一次相同就不重算、不重送。這裡每一筆追蹤樣本都會進來（顯示更新率的 4 倍，
+    // 144 Hz 每手每秒 576 次），而手指的彎曲只在按鍵、扳機變化時才變；原本每次都重算 31 根骨頭再送兩份。
+    // 每 64 次仍送一次（約 0.1 秒），之後才接上來的程式也拿得到目前的手形。
+    const float now_curls[5] = {cu.thumb, cu.index, cu.middle, cu.ring, cu.pinky};
+    if (skel_sent_ && std::memcmp(now_curls, skel_last_, sizeof(now_curls)) == 0 && ++skel_same_ < 64) {
+      return;
+    }
+    std::memcpy(skel_last_, now_curls, sizeof(now_curls));
+    skel_sent_ = true;
+    skel_same_ = 0;
     vr::VRBoneTransform_t bones[hand::k_bone_count];
     hand::compute(right_, cu, bones);
     auto *vin = vr::VRDriverInput();

@@ -589,25 +589,11 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
         }
 
         // menu＋trigger 按住 1 s → SYSTEM（期間遮掉 MENU 與 TRIGGER）
-        const bool comboHeld = (buttons & VIPLE_VR_BTN_MENU) && (buttons & VIPLE_VR_BTN_TRIGGER);
-        if (!comboHeld) {
-            hd.comboStartNs = 0;
-            hd.comboActive = false;
-        }
-        else {
-            if (hd.comboStartNs == 0) {
-                hd.comboStartNs = nowNs;
-            }
-            if (!hd.comboActive && nowNs - hd.comboStartNs >= kComboNs) {
-                hd.comboActive = true;
-                std::lock_guard<std::mutex> lk(m_Mutex);
-                m_StatCombos++;
-            }
-        }
-        if (hd.comboActive) {
-            buttons = (buttons & ~(VIPLE_VR_BTN_MENU | VIPLE_VR_BTN_TRIGGER)) | VIPLE_VR_BTN_SYSTEM;
-            touches &= ~VIPLE_VR_BTN_TRIGGER;
-            trigger = 0.0f;
+        // §REVIEW-1111（第二輪）：規則搬到 xrcombo.h（組合結束後還按著的那一鍵繼續遮到放開，不再變成一次新的按下）
+        if (xrcombo::apply(hd.combo, VIPLE_VR_BTN_MENU, VIPLE_VR_BTN_TRIGGER, VIPLE_VR_BTN_SYSTEM, kComboNs, nowNs, buttons,
+                           touches, trigger)) {
+            std::lock_guard<std::mutex> lk(m_Mutex);
+            m_StatCombos++;
         }
 
         // pressCtr：每個按下邊緣把該鍵的 2 bit 計數 +1（mod 4）

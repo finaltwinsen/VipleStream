@@ -22,7 +22,8 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 # M2a 以前 app.pro 其實沒讀 NCNN_PREFIX，是靠 builder 上 /usr/local 的 symlink 才建得起來；
 # 現在 app.pro 真的用它（-I/-L 指到這個 prefix）。
 NCNN_PREFIX="${NCNN_PREFIX:-$HOME/.local/ncnn}"
-export LD_LIBRARY_PATH="$NCNN_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+# no trailing ":" when LD_LIBRARY_PATH is unset (an empty element means the current directory)
+export LD_LIBRARY_PATH="$NCNN_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 BUILD_CONFIG="release"
 
@@ -149,6 +150,8 @@ linuxdeploy --appdir $DEPLOY_FOLDER \
 APPIMAGE_RAW=$(ls VipleStream-*.AppImage 2>/dev/null | head -1)
 if [ -n "$APPIMAGE_RAW" ]; then
     mv "$APPIMAGE_RAW" "VipleStream-Client-${VERSION}-linux-x64.AppImage"
+else
+    fail "linuxdeploy did not produce a VipleStream-*.AppImage"
 fi
 popd
 

@@ -70,4 +70,22 @@ Item {
         ComputerManager.startPolling()
         pollingActive = true
     }
+
+    // §REVIEW-1111：串流子行程在跑的時候停掉主機輪詢。這段時間頭盔已經交給子行程、介面沒有人在看，
+    // 原本卻仍每 3 秒對 host 做一次 HTTPS 查詢（每 30 秒再抓一次 app 清單），和串流用的是同一顆無線電。
+    // 子行程結束就恢復（恢復時會立刻查一次，介面拿到的是最新狀態）。
+    Connections {
+        target: VrLauncher
+
+        function onRunningChanged() {
+            if (VrLauncher.running && window.pollingActive) {
+                ComputerManager.stopPollingAsync()
+                window.pollingActive = false
+            }
+            else if (!VrLauncher.running && !window.pollingActive) {
+                ComputerManager.startPolling()
+                window.pollingActive = true
+            }
+        }
+    }
 }

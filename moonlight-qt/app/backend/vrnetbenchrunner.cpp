@@ -442,7 +442,7 @@ VrNetBenchRunner::NetStatus VrNetBenchRunner::readStatus() const
     }
     const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
     const qint64 t = o.value(QStringLiteral("t")).toVariant().toLongLong();
-    s.fresh = t > 0 && QDateTime::currentSecsSinceEpoch() - t <= 5;
+    s.fresh = t > 0 && qAbs(QDateTime::currentSecsSinceEpoch() - t) <= 5;  // REVIEW-1111 (round 2): a timestamp in the future is not "fresh" either
     s.apStation = o.value(QStringLiteral("ap_station")).toBool();
     s.applied = o.value(QStringLiteral("applied")).toString();
     s.loc = o.value(QStringLiteral("loc")).toString();

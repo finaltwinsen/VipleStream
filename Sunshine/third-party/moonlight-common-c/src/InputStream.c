@@ -595,7 +595,10 @@ static void inputSendThreadProc(void* context) {
                 memcpy(splitPacket.packet.unicode.text, &holder->packet.unicode.text[i], codePointLength);
 
                 // Encrypt and send the split packet
-                if (!sendInputPacket(&splitPacket, i + 1 < totalLength)) {
+                // VipleStream REVIEW-1111 (round 2): "more data" must look past this whole code point. With i + 1 the
+                // last character of a string ending in a multi-byte character (any CJK text) was queued but not
+                // flushed until some other input came along.
+                if (!sendInputPacket(&splitPacket, i + codePointLength < totalLength)) {
                     freePacketHolder(holder);
                     return;
                 }
@@ -972,6 +975,15 @@ int LiSendUtf8TextEvent(const char *text, unsigned int length) {
 
     if (!initialized) {
         return -2;
+    }
+
+    // VipleStream REVIEW-1111 (round 2): an empty text still queued a packet whose handling stalls the input
+    // queue for 50 ms, and a huge length turned negative in allocatePacketHolder(int) and overflowed the holder.
+    if (text == NULL || length == 0) {
+        return 0;
+    }
+    if (length > 65536) {
+        return -1;
     }
 
     holder = allocatePacketHolder(length);

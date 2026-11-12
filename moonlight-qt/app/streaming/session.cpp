@@ -450,7 +450,8 @@ void Session::clRumble(unsigned short controllerNumber, unsigned short lowFreqMo
     rumbleEvent.type = SDL_USEREVENT;
     rumbleEvent.user.code = SDL_CODE_GAMECONTROLLER_RUMBLE;
     rumbleEvent.user.data1 = (void*)(uintptr_t)controllerNumber;
-    rumbleEvent.user.data2 = (void*)(uintptr_t)((lowFreqMotor << 16) | highFreqMotor);
+    // §REVIEW-1111（第二輪）：先轉無號再位移；原本 ≥0x8000 的值位移後是負的 int，轉成指標寬度時高位全是 1
+    rumbleEvent.user.data2 = (void*)(uintptr_t)(((uint32_t)lowFreqMotor << 16) | highFreqMotor);
     SDL_PushEvent(&rumbleEvent);
 }
 
@@ -512,7 +513,7 @@ void Session::clRumbleTriggers(uint16_t controllerNumber, uint16_t leftTrigger, 
     rumbleEvent.type = SDL_USEREVENT;
     rumbleEvent.user.code = SDL_CODE_GAMECONTROLLER_RUMBLE_TRIGGERS;
     rumbleEvent.user.data1 = (void*)(uintptr_t)controllerNumber;
-    rumbleEvent.user.data2 = (void*)(uintptr_t)((leftTrigger << 16) | rightTrigger);
+    rumbleEvent.user.data2 = (void*)(uintptr_t)(((uint32_t)leftTrigger << 16) | rightTrigger);
     SDL_PushEvent(&rumbleEvent);
 }
 
@@ -744,6 +745,9 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
 
                 // §VR-HAPTIC-REDUNDANT：去重（分左右手，32-bit 序號安全迴繞比對）。device 是 VIPLE_VR_POSE_LEFT(1)／RIGHT(2)
                 const unsigned dev = (unsigned)h.device - VIPLE_VR_POSE_LEFT;
+                if (dev >= 2) {
+                    break;  // §REVIEW-1111（第二輪）：不是左右手的裝置編號，不往下送（也不經過去重）
+                }
                 if (dev < 2) {
                     if (m_VrHapticHaveEventId[dev]) {
                         if ((int32_t)(h.eventId - m_VrHapticLastEventId[dev]) <= 0) {
@@ -1420,8 +1424,17 @@ bool Session::initialize(QQuickWindow* qtWindow)
     if (!m_VrRequested && !m_Computer->isNvidiaServerSoftware && !m_Computer->displayModes.isEmpty()) {
         int hostMaxW = 0;
         int hostMaxH = 0;
-        for (const NvDisplayMode &mode : std::as_const(m_Computer->displayModes)) {
-            if (mode.width * mode.height > hostMaxW * hostMaxH) {
+        // §REVIEW-1111（第二輪）：在鎖內複製一份再走訪——輪詢執行緒會整份換掉這個清單
+        QVector<NvDisplayMode> hostModes;
+        {
+            QReadLocker computerLock(&m_Computer->lock);
+            hostModes = m_Computer->displayModes;
+        }
+        for (const NvDisplayMode &mode : std::as_const(hostModes)) {
+            if (mode.width <= 0 || mode.height <= 0 || mode.width > 16384 || mode.height > 16384) {
+                continue;  // 不合理的值不採用
+            }
+            if ((long long)mode.width * mode.height > (long long)hostMaxW * hostMaxH) {
                 hostMaxW = mode.width;
                 hostMaxH = mode.height;
             }
@@ -1525,6 +1538,18 @@ bool Session::initialize(QQuickWindow* qtWindow)
                     "[VIPLE-VR-SESSION] VR request: stream %dx%d@%d (FRUC %s)",
                     m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps,
                     m_Preferences->enableFrameInterpolation ? "ignored" : "off");
+    }
+    else if (m_Preferences->enableFrameInterpolation && m_Preferences->enableYUV444 && m_Computer != nullptr &&
+             (m_Computer->serverCodecModeSupport &
+              (SCM_H264_HIGH8_444 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)) != 0) {
+        // §FRUC-444-FULLFPS（2026-11-12）：4:4:4 的畫面由 libplacebo 顯示，那條路沒有補幀（§FRUC-444-NOTICE 會提示）。
+        // 原本照樣把 host 的幀率砍半，結果是「只有一半的幀率、也沒有補幀」（設定 60 實際 30 fps）。
+        // 補不了就請 host 送完整幀率；兩個設定本身不動。
+        m_StreamConfig.fps = m_Preferences->fps;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-FRUC] YUV 4:4:4 is on and this host offers it: frame interpolation cannot run on a 4:4:4 stream, "
+                    "so the host is asked for the full %d fps instead of half",
+                    m_StreamConfig.fps);
     }
     else if (m_Preferences->enableFrameInterpolation) {
         // §REVIEW-1104：只有 rendererSelection == RS_VULKAN 才啟用被動補幀，其他 renderer 視為關閉以與預設位元率計算一致
@@ -1634,11 +1659,14 @@ bool Session::initialize(QQuickWindow* qtWindow)
                 "Video bitrate: %d kbps",
                 m_StreamConfig.bitrate);
 
-    RAND_bytes(reinterpret_cast<unsigned char*>(m_StreamConfig.remoteInputAesKey),
-               sizeof(m_StreamConfig.remoteInputAesKey));
-
-    // Only the first 4 bytes are populated in the RI key IV
-    RAND_bytes(reinterpret_cast<unsigned char*>(m_StreamConfig.remoteInputAesIv), 4);
+    // §REVIEW-1111（第二輪）：亂數產生失敗時金鑰會是全 0，不能照樣串流
+    if (RAND_bytes(reinterpret_cast<unsigned char*>(m_StreamConfig.remoteInputAesKey),
+                   sizeof(m_StreamConfig.remoteInputAesKey)) != 1 ||
+            // Only the first 4 bytes are populated in the RI key IV
+            RAND_bytes(reinterpret_cast<unsigned char*>(m_StreamConfig.remoteInputAesIv), 4) != 1) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "RAND_bytes() failed; cannot create the input encryption key");
+        return false;
+    }
 
     switch (m_Preferences->audioConfig)
     {
@@ -1786,6 +1814,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
             // have fixup code for HEVC, just avoid it if GFE is too old.
             QVector<int> gfeVersion = NvHTTP::parseQuad(m_Computer->gfeVersion);
             if (gfeVersion.isEmpty() || // Very old versions don't have GfeVersion at all
+                    gfeVersion.size() < 2 ||  // §REVIEW-1111（第二輪）：只有一段的版號不能讀第二段
                     gfeVersion[0] < 3 ||
                     (gfeVersion[0] == 3 && gfeVersion[1] < 11)) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -2495,7 +2524,12 @@ void Session::resolveAutoDisplayMode()
     int hostW = 0, hostH = 0, hostHz = 0;
     const bool hostSwitchable = !m_Computer->isNvidiaServerSoftware && m_Computer->displayModeSwitchable;
     if (hostSwitchable) {
-        for (const NvDisplayMode &mode : std::as_const(m_Computer->displayModes)) {
+        QVector<NvDisplayMode> hostModesCopy;  // §REVIEW-1111（第二輪）：鎖內複製再走訪
+        {
+            QReadLocker computerLock(&m_Computer->lock);
+            hostModesCopy = m_Computer->displayModes;
+        }
+        for (const NvDisplayMode &mode : std::as_const(hostModesCopy)) {
             const long long area = (long long)mode.width * mode.height;
             if (area > (long long)hostW * hostH || (area == (long long)hostW * hostH && mode.refreshRate > hostHz)) {
                 hostW = mode.width;
@@ -2568,7 +2602,12 @@ void Session::applyXrDesktopAutoFps()
     int hostHz = 0;
     if (!m_Computer->isNvidiaServerSoftware && m_Computer->displayModeSwitchable) {
         int hostW = 0, hostH = 0;
-        for (const NvDisplayMode &mode : std::as_const(m_Computer->displayModes)) {
+        QVector<NvDisplayMode> hostModesCopy;  // §REVIEW-1111（第二輪）：鎖內複製再走訪
+        {
+            QReadLocker computerLock(&m_Computer->lock);
+            hostModesCopy = m_Computer->displayModes;
+        }
+        for (const NvDisplayMode &mode : std::as_const(hostModesCopy)) {
             const long long area = (long long)mode.width * mode.height;
             if (area > (long long)hostW * hostH || (area == (long long)hostW * hostH && mode.refreshRate > hostHz)) {
                 hostW = mode.width;
@@ -3483,7 +3522,12 @@ bool Session::startConnectionAsync()
         // the chosen resolution. Avoid that by disabling SOPS when it
         // is not streaming a supported resolution.
         enableGameOptimizations = false;
-        for (const NvDisplayMode &mode : std::as_const(m_Computer->displayModes)) {
+        QVector<NvDisplayMode> hostModesCopy;  // §REVIEW-1111（第二輪）：鎖內複製再走訪
+        {
+            QReadLocker computerLock(&m_Computer->lock);
+            hostModesCopy = m_Computer->displayModes;
+        }
+        for (const NvDisplayMode &mode : std::as_const(hostModesCopy)) {
             if (mode.width == m_StreamConfig.width &&
                     mode.height == m_StreamConfig.height) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -4785,6 +4829,7 @@ void Session::exec()
     BatteryMonitor battery(m_Preferences->vrFakeBatteryPct, m_Preferences->vrLowBatteryAtPct);
     Uint32 batteryPollTime = 0, batteryLogTime = 0;
     int batteryIconPct = -1;
+    const void* batteryIconCtx = nullptr;  // 上一次送圖示的 XrContext
     // §VR-NETSEL：Steam Frame 的網路狀態自動選擇（解構時交還家用 Wi-Fi）
     std::unique_ptr<VrNetMode> netMode;
 
@@ -4836,8 +4881,10 @@ void Session::exec()
                                 battery.low() ? " LOW" : "");
                 }
                 const int want = battery.low() ? br->capacity : -1;
-                if (want != batteryIconPct) {
+                // §REVIEW-1111：XR session 重建後是新的 XrContext（圖示預設不顯示），百分比沒變也要再送一次
+                if (want != batteryIconPct || batteryIconCtx != m_XrContext) {
                     batteryIconPct = want;
+                    batteryIconCtx = m_XrContext;
                     m_XrContext->setBatteryIcon(want);
                 }
                 if (entered) {

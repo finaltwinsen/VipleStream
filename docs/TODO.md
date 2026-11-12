@@ -129,6 +129,36 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 - **中嚴重度第五批（2.0.150；只確認建得過，還沒部署、沒有跑串流）**：perf-G019#2（「啟動中」遮罩不轉圈）；bugs-G026#3（「只用轉接器」的存檔過期仍套用）、#4 前半（網路測試子行程帶 `--no-vr-half-rate`；應有幀數仍寫死 144）；bugs-G018#4（Linux 更新腳本等 90 秒、舊程式還在就放棄）；bugs-G007#8 部分（片段結尾連續 4 次回不到開頭就放棄；沒有加 Flush）；perf-G002#3（虛擬手把更新在輸入執行緒落後時只送最新一筆）。
 - **看過、決定不動的（第五批）**：sec-G005#2（熱點設定檔全使用者、arm 的時機與次數歸零：改了會動到已驗過的重連路徑；「只有區網才連」也還沒做）；sec-G008#3 的「同一筆 launch 只收一次 ANNOUNCE」（通道重連本來就要重新 ANNOUNCE，`last_session` 就是為它留的；accept 裡等 5 秒那一半沒做）；perf-G007#4（麥克風緩衝水位：要用聽的驗）；perf-G005#2（driver 在 present 鎖內寫 log：要重新部署 SteamVR driver）；bugs-G021#1（環境變數與設定不一致：環境變數只給開發用）；perf-G023#3（有手把時主迴圈 1 ms 輪詢：頭盔上改成 10 ms 會影響輸入延遲，要配戴）；perf-G024#4（補幀探測在繪圖執行緒）；bugs-G004#2（`vr_dev_rawdump` 是開發用開關）。
 - **第二輪審查（2026-11-12 起，agy gemini-4／opencode deepseek 免費版）**：grok 沒做完的 36 份改切成 65 個小單位（本機 `temp/grok_review_1111/r2/`：`units.tsv` 依優先權排、`worker.sh` 有產出驗證與斷路器、`reports/`、`logs/r2.log`）。前 25 個＝三個面向都沒審過的檔（XR 主程式、共用協定層），三個面向一次看。
+- **自動化修正（2026-11-12，2.0.151～159，基準 0b97f620、全部未提交）**：grok 剩下的中、低嚴重度逐項處置完畢，逐項紀錄在本機 `temp/grok_review_1111/FIXLOG.md`（已修／不修附原因／待評估）。這一段修的主要項目：host——被取代的 session 在 `start()` 結尾直接停掉、追蹤樣本先發布姿勢再處理虛擬手把、虛擬手把更新合併、driver 的手部骨架在彎曲沒變時不重送、場景程式 PID 要在同一個登入工作階段、掉幀回報的範圍夾限、debug log 不印金鑰；client——頭盔介面在串流子行程跑的時候停掉主機輪詢、網路測試子行程一律全速、「只用轉接器」的存檔過期仍套用、啟動中遮罩不轉圈、Linux 更新等 90 秒、喚醒封包失敗不再當成成功、更新對話框只開自家 GitHub 網址、log 遮蔽 `?rikey=`；Android——意外斷線不送 `/cancel`（Pixel 5 實測）、啟動中離開補送 `/cancel`、捷徑空位址、參數集暫存清單上限、更新標籤與 APK 簽章檢查；共用協定層——累計位移滑鼠的兩份副本各自送出、結尾是多位元組字元的文字輸入、Steam Controller feature 要求的長度。驗證：每一版都跑 `--help` 兩次、2D 一場、頭盔一場；2.0.159 頭盔全速每 10 秒 1441 張、0 重複、延遲 p50 42.6 ms；Pixel 5 HEVC／H.264 各一場；頭盔介面跑過一次網路測試（三段切換正常）。
+- **第二輪審查（agy gemini-4／gemini-3.8-flash、opencode deepseek 免費版）完成 65／65 個單位**（本機 `temp/grok_review_1111/r2/reports/`）。報告引用的程式碼先用 `r2/verify_quotes.py` 對過原始檔（抓到一項捏造的引用）。已修的在上面那份清單；**還沒動、要人決定的**：(1) 頭盔網路 helper（`netmode.sh`）常駐每秒輪詢、每輪啟動 12～15 個外部程式——和頭盔耗電直接相關，但它管家用 Wi-Fi 的暫停與交還，要在場時改並驗；(2) 桌面 client 自動更新下載後沒有驗雜湊（host 的自我更新有驗）；(3) 頭盔繪製核心路徑的一批（`xrWaitSwapchainImage` 失敗仍照畫、補幀第二階段失敗時的發布順序、換尺寸時銷毀使用中的影像、注視點參數不是一次更新）——要配戴驗；(4) client 端多連線熱插拔的幾個競態；(5) VR 虛擬鍵盤與影片控制列的扳機判斷；(6) Android 配對狀態信任明文 HTTP 的回報（上游行為）。
+- **頭盔設定（2026-11-12 使用者同意）**：半速與補幀改回關、更新率模式回到自動；原檔備份在頭盔 `~/viplestream-galpha/conf.backup.before-fullrate-1112`。
+- **§SERVERINFO-MIN／§STEAM-SWITCH-ACL（2026-11-12，server 2.0.160，未提交）**：(1) 沒有配對憑證、不是 localhost 的 HTTP `/serverinfo` 只回配對需要的欄位（原本區網上任何人都拿得到網卡／VPN／公網位址、session 擁有者名稱、顯示器與編碼能力）；HTTPS 與 localhost（relay 代理）不變。(2) `/steamswitch` 加兩層限制：有 app 在跑時只有啟動它的裝置或 Admin 裝置可以切、別人的 VR session 進行中一律不行、已有切換在跑回 409；新設定 `steam_switch = paired｜admin｜disabled`（預設 paired，只在 conf，Web UI 沒有這一項），不允許的裝置 `/steamprofiles` 也回 403、client 的帳號選單自動隱藏。驗證：開發機未配對 HTTP 只剩 13 個欄位、host localhost 與 HTTPS 完整；Pixel 5 開的 app 執行中開發機切換回 403（訊息帶擁有者名稱）、關掉後放行；admin／disabled 兩種設定各回 403；Windows 2D 與頭盔各一場正常。**沒驗**：全新裝置實際走一次 PIN 配對（只對過兩個 client 的必要欄位都在）、Admin 裝置放行、409 那條、client 介面上 403 訊息的呈現。
+- **第二輪審查的待評估項目第二次處置（2026-11-12 下午，2.0.161～162，未提交）**：不需要配戴、不需要使用者在場的都處置完，逐項在本機 `temp/grok_review_1111/FIXLOG.md` 的「待評估項目第二次自動處置」段。已修的主要項目：**§UPDATE-DIGEST**——桌面 client 更新只從自家 release 下載、release 必須帶 sha256、下載完核對，提權後的 helper 解壓前再核對一次，暫存檔放隨機名稱的目錄，helper 的雜湊與解壓都改用 .NET（client 從 PowerShell 7 的終端機啟動時 Expand-Archive 會失敗）；relay 回的 serverinfo 解析不了時不再把主機標成上線；mDNS 探索與 host 廣告的位址清單加上限；主機名稱等來自網路的字串改成純文字顯示；設定載入的範圍檢查；host 顯示模式清單在鎖內複製後再用；協定層的 QUIC IDR 標記節流、絕對座標除零、解密失敗 log 節流、四元數 NaN、`predictNs` 下溢；D3D11 與解碼器的失敗路徑；Android 更新下載只走 https、沒有 H.264 解碼器時的空指標；頭盔安裝腳本挑 bundle 只比檔名版號。驗證：2.0.162 `--help` 兩次、2D 120 fps／0 網路丟幀、頭盔每 10 秒 1441 張（五個視窗共 1 次重複）、延遲 p50 43.6 ms、Pixel 5 一場；更新 helper 用測試架（從 updater.cpp 取出腳本原文、Windows PowerShell 5.1 實跑）驗過雜湊對與錯兩種情況。**沒驗**：client 端下載＋核對的 C++ 路徑（要有比目前新的 release 才觸發得了，下一次 release 後第一件事是在舊版上按一次更新）、Linux AppImage 的更新、Android 的更新下載。**還留著的**：要配戴的（核心繪製路徑、VR 鍵盤與影片控制列、控制器組合鍵、熱路徑上的診斷統計）、頭盔網路 helper 每秒輪詢（要使用者在場）、協定層送收執行緒之間的競態與 VrSend 每 2 ms 喚醒（沒有可重現的症狀前不動；後者和耗電有關，建議和 helper 一起量）、Steam Controller 兩項。
+- **原本標「待配戴」的審查項目用模擬輸入處置（2026-11-12，2.0.163，未提交）**：逐項在本機 `temp/grok_review_1111/FIXLOG.md` 最後一段。已修並驗過：VR 鍵盤按關閉鍵後扳機穿透點到後面的螢幕（頭盔上用 `--xr-test-keyboard "ab{close}"` 修前重現、修後消失）；menu＋trigger 組合放開時多一次按下（規則抽到 `xrcombo.h`，本機單元測試 7 項）；`xrWaitSwapchainImage` 逾時改成再等、失敗不畫；注視點／分塊參數加一致性序號；分塊補幀的 crop、沉浸式影片換尺寸、統計容器預先配置。無人場次：PCVR 全速、頭在動＋合成注視點、半速＋補幀、XR 桌面鍵盤、影片模式平面與 180° 各一場，都沒有繪製錯誤、延遲與修改前相同。**還是只能配戴確認**：體感、§VR-FOVEA-BOUNDS、影片模式進片與離開時的按鍵（G029-02#2、#5）。測試用的改動：`hs_run.sh` 多了 `HS_TARGET`（預設 pcvr，可給 xr-desktop）；鍵盤測試不需要真的拿到焦點。
+- **2026-11-12 下午依序處理的待辦（2.0.164～166，未提交）**：
+  1. **2D 五組設定矩陣重跑（在遊戲畫面內）**：`temp/lat_2d/mat_1112/`，十場都滿幀率、0 網路丟幀。1080p120：HEVC host 4.0～4.2 ms、AV1 3.0～3.4、H.264 3.1～3.4；
+     佇列 p50 2.4～9.5 ms（隨場次變）；1080p180 佇列 6.9～9.2 ms。第五組（60 fps＋補幀）實際只有 30 fps——見第 13 點。
+  2. **§MEDIA-DEFAULT**：頭盔介面逛這台電腦只看到「Videos」（公用影片）一個資料夾（`temp/launchertest/ml/media_1112/`）。host 的那個資料夾目前是空的。
+  3. **Web UI**：`steam_switch`（Network 頁）、`capture_phase_lock`（Advanced 頁）加進設定頁，英文與繁中字串已補；其他語系顯示英文。只建置驗過，沒有開 Web UI 目視。
+  4. **Android 更新摘要**：`UpdateNotes.java`（規則同電腦版），「有新版」對話框出來後在背景抓 release notes、補在訊息後面。開發機 JVM 用 v2.0.122 的內容測過中英兩段。
+     對話框本身要等下一次 release 才看得到。host 常駐圖示的摘要還沒做。
+  5. **`cachy_install.sh` 補 setcap**：已改，CachyOS 不在線上、沒驗。
+  6. **Android 9 以下的相容分支**：沒做。96 處、20 個檔，純清理沒有功能差異；要用 Android Studio 的 ObsoleteSdkInt 快速修正才不會改錯，手改風險不值得。
+  7. **追蹤送出執行緒每 2 ms 喚醒**：量過，不改。輪詢改成 20 ms 的實驗版兩場 9.38／9.38 W，同一天六場基準 9.22～9.44 W，差別在雜訊內。
+  8. **§LAT-2D 3a「固定多等 7 ms」**：不是固定的——十場的等待 p50 介於 1.5～9.4 ms，隨兩台顯示器的相位而定。多排的那一格是在吸收畫面到達的抖動
+     （`at vsync` 的 empty 幾乎都是 0、more 佔 10～90%）；把它丟掉會變成重複畫面。流暢優先，不改。要更低延遲只能關節拍或用可變更新率。
+  9. **2D ABR 限速對照（Android）**：Pixel 5、REMNANT 1080p、host 限速 6 Mbps 30 秒：碼率平滑降到約 4.7 Mbps（沒有重設編碼器），限速期間 37～56 fps，
+     解除後 17 秒回到 26 Mbps、幀率立刻回到 90（`temp/lat_2d/ab_and_1112/`）。Linux client 與 Tailscale 路徑還沒跑。
+  10. **§VR-EXIT-FAST 剩下的 2.7 秒**：加了分段計時（`[VIPLE-XR] bring-up stages`）。頭盔 bring-up 2338 ms 裡 `xrCreateInstance` 佔 2125 ms，其餘合計約 0.2 秒。
+      要縮短只能在串流期間保留 instance（session 與 Vulkan 照樣重建）；會動 XR 生命週期，待決定。
+  11. **「只用轉接器」的短凍結**：重跑一輪網路測試（`temp/launchertest/ml/nb_1112b/`，各階段的 log 用頭盔上的小程式每 20 秒另存到 `~/nb_keep`，這次都留下來了）。
+      沒有重現 4～7 格的凍結：C 最長連續重複 3 格、四個解析度都通過；結論仍是保留家用 Wi-Fi。
+  12. **shader 編譯失敗時當掉**：看了 11-11 那份 log——當掉發生在 libplacebo 印完失敗的 shader 與堆疊之後。只有 shader 本身寫錯才走得到（那是開發中的 shader），出貨的 shader 不會失敗；不再追。
+  13. **NCNN 後端全黑**：還在，但有防護——啟動時的自我檢測偵測到輸出全零就退回一般補幀（`probe REJECTED — RIFE output all-zero`），使用者看不到黑畫面。根因（ncnn 與驅動）沒查。
+      **順帶修掉 §FRUC-444-FULLFPS（client 2.0.165）**：開著 YUV 4:4:4 又開補幀時，4:4:4 的畫面沒有補幀可用，但 host 的幀率照樣被砍半——設定 60 實際只有 30 fps、也沒有補幀。
+      現在這種情況請 host 送完整幀率（兩個設定不動、提示照舊）。驗證：同一組參數 30 → 60 fps。
+  14. **Assetto Corsa 啟動卡住**：沒做。要看 host 桌面上 Steam 與 2D 啟動器的狀態，應該有人在場。
+  15. **PyroWave 在頭盔上主機處理延遲只回報一次**：沒做（實驗性編碼，排在後面）。
 - **`test_vr_latch` 有 3 項在修改前就失敗**（`V3DefaultUnchanged`、`V3InvariantsUnderRandomInput`、`TlvLayouts`——最後一項是 `VIPLE_VR_TLV_CLIENT_TIMING` 已是 44 bytes、測試還寫 36）：測試過期，待整理。
 - **觀察到一次、沒重現**：2.0.135 部署後第一輪回歸，host 服務在 17:31:37 當掉一次（0xc0000005，位置是送封包用的 `thread_local std::vector<WSABUF>` 解構，也就是某條送封包的執行緒結束時；一秒後系統記了一筆 NDIS 的 LiveKernelEvent 15e）。同樣的順序再跑六輪沒有再發生；前三天也沒有這種當機。原因未明，再遇到要留 dump。
 - **高、還沒修**（依報告編號）：perf-G025#2（v4l2m2m 參數集一變就拆解碼器）；sec-G003#2（relay 進來的 `/launch` 沒有配對身分）、（只做了緩解，見上）；Android：bugs-G016#1～#3（`/cancel` 時序與 relay）、perf-G016#1、perf-G017#1～#2、sec-G015#1（ShortcutTrampoline 匯出）；

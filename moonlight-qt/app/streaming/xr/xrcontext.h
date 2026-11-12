@@ -516,6 +516,10 @@ private:
     // §VR-LOWBATT
     std::mutex m_BattMutex;
     QImage m_BattImg;                           // m_BattMutex
+    // frame thread only: consecutive failed uploads of the current image (retry is bounded)
+    int m_BattUploadRetries = 0;
+    int m_ToastUploadRetries = 0;
+    int m_ShellUploadRetries = 0;
     bool m_BattDirty = false;                   // m_BattMutex
     std::atomic<bool> m_BattVisible{false};
     XrSwapchain m_BattSwapchain = XR_NULL_HANDLE;
@@ -673,7 +677,7 @@ private:
     };
     mutable std::mutex m_HmdMutex;
     HmdSample m_Hmd;
-    int64_t m_PredictAheadNs = 0;             // predictedDisplayTime − xrWaitFrame 返回時的 XrTime（EMA）
+    std::atomic<int64_t> m_PredictAheadNs{0};  // written by the frame thread, read by the tracking thread             // predictedDisplayTime − xrWaitFrame 返回時的 XrTime（EMA）
     // §VR-POSEERR（2026-10-03）：算繪姿態（0x81）對「這一幀實際顯示時的頭部姿態」的誤差與落後時間。
     // 頭盔的重投影只修轉動，平移落後多少就是近物晃動的幅度。全部只在 frame thread 存取。
     struct PoseTrailPoint {

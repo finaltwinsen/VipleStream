@@ -252,7 +252,11 @@ private:
     // dev --xr-test-keyboard
     struct TestKbStep {
         int key;
+        bool holdPast = false;  // 這一步按下後不放，一直按到下一步的前半（測「按鍵讓鍵盤消失之後扳機還按著」）
     };
+    XrRay::Vec3 m_TestKbLastOrigin = {0, 0, 0};  // 上一次合成射線（鍵盤關掉之後沿用同一條）
+    XrRay::Vec3 m_TestKbLastDir = {0, 0, -1};
+    bool m_TestKbHaveLast = false;
     QString m_TestKbText;
     std::vector<TestKbStep> m_TestKbSteps;
     uint64_t m_TestKbStartNs = 0;

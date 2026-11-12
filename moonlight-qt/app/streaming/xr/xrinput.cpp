@@ -277,7 +277,13 @@ XrInput::XrInput(const XrInputSink& sink, bool testPointer, const QString& testK
 {
     // dev --xr-test-keyboard：把文字展開成按鍵序列（大寫／Shift 字元先點一次黏滯 Shift）
     const int shiftKey = m_Kb.findKind(XrKeyboard::Kind::Shift);
-    for (const QChar c : m_TestKbText) {
+    // 結尾的 "{close}"：打完字之後點鍵盤的關閉鍵，扳機按住 0.6 秒才放（驗關掉鍵盤之後不會點到後面的螢幕）
+    QString typed = m_TestKbText;
+    const bool closeAtEnd = typed.endsWith(QLatin1String("{close}"));
+    if (closeAtEnd) {
+        typed.chop(7);
+    }
+    for (const QChar c : typed) {
         int idx = -1;
         bool needShift = false;
         if (!m_Kb.keyForChar(c, &idx, &needShift)) {
@@ -289,6 +295,15 @@ XrInput::XrInput(const XrInputSink& sink, bool testPointer, const QString& testK
             m_TestKbSteps.push_back({shiftKey});
         }
         m_TestKbSteps.push_back({idx});
+    }
+    if (closeAtEnd) {
+        const int closeKey = m_Kb.findKind(XrKeyboard::Kind::Close);
+        if (closeKey >= 0) {
+            TestKbStep st = {closeKey};
+            st.holdPast = true;
+            m_TestKbSteps.push_back(st);
+            m_TestKbSteps.push_back({-1});  // 空的一步：只用來把扳機多按半步
+        }
     }
 }
 
@@ -562,6 +577,9 @@ void XrInput::setButton(int idx, bool pressed)
     }
     m_Pressed[idx] = pressed;
     m_StatButtons++;
+    if (!m_TestKbText.isEmpty()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev mouse button %d %s", idx, pressed ? "down" : "up");
+    }
     if (m_Sink.button) {
         m_Sink.button(idx == 0 ? BUTTON_LEFT : BUTTON_RIGHT, pressed);
     }
@@ -630,11 +648,21 @@ bool XrInput::syntheticRay(XrTime t, XrSpace local, XrSpace view, const Screen& 
 void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Screen& screen, bool focused, uint64_t nowNs)
 {
     m_StatFrames++;
+    // dev：合成射線的測試不需要真的拿到焦點（無人場次頭盔的選單常開著、session 停在 VISIBLE）
+    if (!m_TestKbText.isEmpty() && !m_TestKbDone) {
+        focused = true;
+    }
     if (!focused) {
         if (m_WasFocused) {
             releaseAll("focus lost");
             releaseKeyboard("focus lost");
             m_WasFocused = false;
+            // §REVIEW-1111（第二輪）：選單鍵的長按狀態一起清。原本失去焦點時按著的那一下，回來放開會被當成短按（開關鍵盤）
+            for (int h = 0; h < 2; h++) {
+                m_KbToggleWas[h] = false;
+                m_MenuDownNs[h] = 0;
+                m_MenuLongFired[h] = false;
+            }
         }
         m_Hit = false;
         m_FiltU.reset();
@@ -894,6 +922,8 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             m_Hit = true;
             if (!leftDesired) {
                 m_TrigOnPanel = false;
+                m_TrigOnKb = false;
+                kbRelease();  // §REVIEW-1111（第二輪）：按著鍵盤的鍵滑到控制列上才放開扳機：鍵也要放，否則 host 那邊一直按著
             }
             m_KbTrigPrev = leftDesired;
             if (!leftDesired && m_Pressed[0]) {
@@ -919,6 +949,10 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
     if (!screen.valid) {
         m_Hit = false;
+        if (!leftDesired) {
+            m_TrigOnKb = false;
+            kbRelease();  // §REVIEW-1111（第二輪）：同上（螢幕不在時）
+        }
         m_KbTrigPrev = leftDesired;
         return;
     }
@@ -1074,7 +1108,8 @@ void XrInput::releaseKeyboard(const char* why)
     }
     m_KbHover = -1;
     m_KbTrigPrev = false;
-    m_TrigOnKb = false;
+    // §REVIEW-1111（第二輪）：m_TrigOnKb 不在這裡清。按關閉鍵（或按著鍵時鍵盤被關掉）的那一下扳機還按著，
+    // 清掉的話下一格會被當成在螢幕上按左鍵；它在扳機放開時才清（update 裡）。
     if (had) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] keyboard keys and modifiers released (%s)", why);
     }
@@ -1178,7 +1213,7 @@ bool XrInput::syntheticKeyboardRay(XrTime t, XrSpace local, XrSpace view, const 
         setKeyboardOpen(true, "dev test");
         return false;
     }
-    if (!s.kbValid) {
+    if (!s.kbValid && m_TestKbShownNs == 0) {
         return false;  // 開啟後，貼圖畫好並擺好才顯示
     }
     if (m_TestKbShownNs == 0) {
@@ -1197,16 +1232,34 @@ bool XrInput::syntheticKeyboardRay(XrTime t, XrSpace local, XrSpace view, const 
         return false;
     }
     const double f = seq / kStep - step;
+    const TestKbStep& cur = m_TestKbSteps[static_cast<size_t>(step)];
+    const bool heldFromPrev = step > 0 && m_TestKbSteps[static_cast<size_t>(step) - 1].holdPast;
+    if (cur.key < 0 || !s.kbValid) {
+        // 鍵盤已經不在（上一步點了關閉鍵）：射線留在原地，扳機照上一步的要求多按半步
+        if (!m_TestKbHaveLast) {
+            return false;
+        }
+        // 射線移到螢幕中央（使用者的射線穿過鍵盤原本的位置打到後面螢幕的情況）
+        const XrRay::Vec3 centre = s.cylinder ? XrRay::cylinderPoint(s.pose, s.radiusM, s.angleRad, s.aspect, 0.5f, 0.5f)
+                                              : XrRay::quadPoint(s.pose, s.widthM, s.heightM, 0.5f, 0.5f);
+        *origin = m_TestKbLastOrigin;
+        *dir = normalize(sub(centre, *origin));
+        *trigger = (heldFromPrev && f < 0.5) || (cur.holdPast && f >= 0.5);
+        return true;
+    }
     XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
     if (XR_FAILED(xrLocateSpace(view, local, t, &loc)) || !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
         return false;
     }
     float cu = 0.0f, cv = 0.0f, du = 0.0f, dv = 0.0f;
-    m_Kb.keyUv(m_TestKbSteps[static_cast<size_t>(step)].key, &cu, &cv, &du, &dv);
+    m_Kb.keyUv(cur.key, &cu, &cv, &du, &dv);
     const XrRay::Vec3 target = XrRay::quadPoint(s.kbPose, s.kbWidthM, s.kbHeightM, cu, cv);
     *origin = fromXr(loc.pose.position);
     *dir = normalize(sub(target, *origin));
-    *trigger = f >= 0.5 && f < 0.7;
+    m_TestKbLastOrigin = *origin;
+    m_TestKbLastDir = *dir;
+    m_TestKbHaveLast = true;
+    *trigger = f >= 0.5 && (cur.holdPast || f < 0.7);
     return true;
 }
 

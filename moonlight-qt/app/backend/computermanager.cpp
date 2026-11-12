@@ -313,14 +313,9 @@ private:
                                         relayOnly = true;
                                     }
                                 } catch (...) {
-                                    QWriteLocker computerLock(&m_Computer->lock);
-                                    m_Computer->state = NvComputer::CS_ONLINE;
-                                    m_Computer->pairState = !cachedAppList.isEmpty() ?
-                                        NvComputer::PS_PAIRED : cachedPairState;
-                                    m_Computer->activeAddress = relayAddr;
-                                    online = true;
-                                    relayOnly = true;
-                                    stateChanged = true;
+                                    // §REVIEW-1111（第二輪）：relay 回的內容解析不了＝沒有拿到任何 serverinfo。
+                                    // 原本在這裡把主機標成「上線、已配對、走 relay」；現在當成這一輪沒查到。
+                                    qWarning() << "[VIPLE-NAT] Relay HTTP proxy returned an unusable serverinfo for" << m_Computer->name;
                                 }
                             } else {
                                 qWarning() << "[VIPLE-NAT] Relay HTTP proxy failed for" << m_Computer->name;
@@ -660,6 +655,11 @@ void ComputerManager::startPolling()
         connect(m_MdnsBrowser, &QMdnsEngine::Browser::serviceAdded,
                 this, [this](const QMdnsEngine::Service& service) {
             qInfo() << "Discovered mDNS host:" << service.hostname();
+
+            // §REVIEW-1111（第二輪）：同網段的裝置可以無限制地送應答；等待解析的最多留 64 個
+            if (m_PendingResolution.size() >= 64) {
+                return;
+            }
 
             MdnsPendingComputer* pendingComputer = new MdnsPendingComputer(m_MdnsServer, service);
             connect(pendingComputer, &MdnsPendingComputer::resolvedHost,
@@ -1248,6 +1248,12 @@ private:
             existingComputer = m_ComputerManager->m_KnownHosts.value(newComputer->uuid);
             if (existingComputer != nullptr) {
                 http.setServerCert(existingComputer->serverCert);
+            }
+            // §REVIEW-1111（第二輪）：自動探索到的新主機最多收到 64 台（每台都會多一條輪詢執行緒、一筆設定）；手動加入不受限
+            else if (m_Mdns && m_ComputerManager->m_KnownHosts.size() >= 64) {
+                qWarning() << "Ignoring mDNS host" << newComputer->name << "- too many known hosts";
+                delete newComputer;
+                return;
             }
         }
 

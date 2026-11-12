@@ -67,8 +67,12 @@ fi
 # 找 bundle：腳本所在資料夾優先，再找目前資料夾；同時有多個版本時取版號最大的
 if [ -z "$BUNDLE" ]; then
     here="$(dirname "$(readlink -f "$0")")"
-    BUNDLE="$( { ls "$here"/VipleStream-Client-*-linux-arm64.flatpak "$PWD"/VipleStream-Client-*-linux-arm64.flatpak 2>/dev/null || true; } \
-               | sort -uV | tail -n 1)"
+    # §REVIEW-1111（第二輪）：只拿檔名比版號（原本連資料夾路徑一起排序，兩個資料夾都有檔案時變成比路徑的字母順序）；
+    # 同版號時腳本所在資料夾的排在後面、被 tail 選到
+    BUNDLE="$( for f in "$PWD"/VipleStream-Client-*-linux-arm64.flatpak "$here"/VipleStream-Client-*-linux-arm64.flatpak; do
+                   if [ -f "$f" ]; then printf '%s\n' "$f"; fi
+               done \
+               | awk -F/ '{ print $NF "\t" $0 }' | sort -s -t "$(printf '\t')" -k1,1V | tail -n 1 | cut -f2-)"
     [ -n "$BUNDLE" ] || die "no VipleStream-Client-*-linux-arm64.flatpak next to this script or in $PWD; pass its path"
 fi
 [ -f "$BUNDLE" ] || die "not found: $BUNDLE"
@@ -199,7 +203,8 @@ say "installed and enabled viplestream-hotspot.service"
 
 # §AUTO-UPDATE：記下裝的版號（從 bundle 檔名），給自動更新比對
 ver="$(basename "$BUNDLE" | sed -n 's/^VipleStream-Client-\([0-9][0-9.]*\)-linux-arm64.*\.flatpak$/\1/p')"
-[ -n "$ver" ] && echo "$ver" > "$DEST/installed-version"
+# set -e: a bare `[ ... ] && ...` aborts the whole installer when the test is false (bundle name without a version)
+if [ -n "$ver" ]; then echo "$ver" > "$DEST/installed-version"; fi
 
 # 自動更新小工具。先寫暫存檔再 rename：自動更新本身就是在跑這支安裝腳本，換成新 inode 才不會改到正在執行的那份
 cat > "$DEST/auto-update.sh.tmp" <<'AUTO_EOF'
@@ -250,6 +255,8 @@ for a in json.load(sys.stdin).get("assets", []):
         print(want[a["name"]], a["name"], d.split(":", 1)[1] if d.startswith("sha256:") else "", a.get("browser_download_url", ""))
 ' "$loc")" || { log "cannot parse release"; exit 0; }
 n=0
+# §REVIEW-1111（第二輪）：release 裡沒有頭盔的檔案時 plan 是空的；原本照樣進迴圈一次、記成「沒有 sha256」
+if [ -z "$plan" ]; then log "release v$loc is missing the Steam Frame files"; exit 0; fi
 while read -r kind name sha url; do
     if [ -z "$sha" ] || [ -z "$url" ]; then log "$name has no sha256 digest; refusing"; exit 0; fi
     curl -fsSL --max-time 1800 -o "$WORK/$name" "$url" || { log "download failed: $name"; exit 0; }

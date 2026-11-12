@@ -526,6 +526,7 @@ Exit:
         m_RenderD2RFence.Reset();
         m_DecodeR2DFence.Reset();
         m_RenderR2DFence.Reset();
+        m_DecodeDeviceContext.Reset();  // §REVIEW-1111（第二輪）：裝置一起放掉，否則 context 還抓著它
         m_DecodeDevice.Reset();
     }
 
@@ -886,8 +887,11 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
 
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
-    SDL_GetWindowWMInfo(params->window, &info);
-    SDL_assert(info.subsystem == SDL_SYSWM_WINDOWS);
+    // §REVIEW-1111（第二輪）：失敗時 info 沒有填，不能拿裡面的視窗代碼去建 swap chain
+    if (!SDL_GetWindowWMInfo(params->window, &info) || info.subsystem != SDL_SYSWM_WINDOWS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "SDL_GetWindowWMInfo() failed: %s", SDL_GetError());
+        return false;
+    }
 
     // Always use windowed or borderless windowed mode.. SDL does mode-setting for us in
     // full-screen exclusive mode (SDL_WINDOW_FULLSCREEN), so this actually works out okay.
@@ -986,6 +990,9 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
 bool D3D11VARenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary**)
 {
     context->hw_device_ctx = av_buffer_ref(m_HwDeviceContext);
+    if (context->hw_device_ctx == nullptr) {  // §REVIEW-1111（第二輪）
+        return false;
+    }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Using D3D11VA accelerated renderer");
@@ -1764,9 +1771,19 @@ void D3D11VARenderer::renderVideo(AVFrame* frame)
     }
     else {
         // Copy this frame into our video texture
+        // §REVIEW-1111（第二輪）：和上面那個分支一樣先對過索引。重建解碼用的貼圖陣列之後，佇列裡還可能有
+        // 舊陣列的影格，它的索引對新的陣列可能已經超出範圍。
+        D3D11_TEXTURE2D_DESC arrayDesc = {};
+        m_RenderSharedTextureArray->GetDesc(&arrayDesc);
+        const UINT sliceIndex = (UINT)(uintptr_t)frame->data[1];
+        if (sliceIndex >= arrayDesc.ArraySize) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Frame slice index %u is out of range for the texture array (%u)", sliceIndex, arrayDesc.ArraySize);
+            return;
+        }
         m_RenderDeviceContext->CopySubresourceRegion1(m_VideoTexture.Get(), 0, 0, 0, 0,
                                                       m_RenderSharedTextureArray.Get(),
-                                                      (int)(intptr_t)frame->data[1],
+                                                      sliceIndex,
                                                       nullptr, D3D11_COPY_DISCARD);
 
         // SRV 0 is always mapped to the video texture

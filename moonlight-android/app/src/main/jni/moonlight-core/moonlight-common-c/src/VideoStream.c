@@ -794,7 +794,14 @@ static void VideoReceiveThreadProc(void* context) {
 #ifndef LC_FUZZING
                 diagDecryptFailPkts++; // §M01-D：只計數
 #endif
-                Limelog("Failed to decrypt video packet!\n");
+                {
+                    // §REVIEW-1111（第二輪）：每一包印一行會把接收執行緒綁在 log 上；第 1、2、4、8… 次才印
+                    static unsigned int decryptFailLogged;
+                    decryptFailLogged++;
+                    if ((decryptFailLogged & (decryptFailLogged - 1)) == 0) {
+                        Limelog("Failed to decrypt video packet! (%u so far)\n", decryptFailLogged);
+                    }
+                }
                 continue;
             }
         }

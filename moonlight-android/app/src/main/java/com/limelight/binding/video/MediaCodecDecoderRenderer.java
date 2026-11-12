@@ -422,8 +422,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     private boolean decoderCanMeetPerformancePointWithAv1AndNotAvc(MediaCodecInfo av1DecoderInfo, MediaCodecInfo avcDecoderInfo, PreferenceConfiguration prefs) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            MediaCodecInfo.VideoCapabilities avcCaps = avcDecoderInfo.getCapabilitiesForType("video/avc").getVideoCapabilities();
             MediaCodecInfo.VideoCapabilities av1Caps = av1DecoderInfo.getCapabilitiesForType("video/av01").getVideoCapabilities();
+            // §REVIEW-1111（第二輪）：裝置沒有 H.264 解碼器時 avcDecoderInfo 是 null——當成「H.264 達不到」
+            if (avcDecoderInfo == null) {
+                return decoderCanMeetPerformancePoint(av1Caps, prefs);
+            }
+            MediaCodecInfo.VideoCapabilities avcCaps = avcDecoderInfo.getCapabilitiesForType("video/avc").getVideoCapabilities();
 
             return !decoderCanMeetPerformancePoint(avcCaps, prefs) && decoderCanMeetPerformancePoint(av1Caps, prefs);
         }
@@ -2125,6 +2129,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 escapedNalu.get(naluBuffer, startSeqLen + 1, escapedNalu.limit());
 
                 // Batch this to submit together with other CSD per AOSP docs
+                // VipleStream REVIEW-1111 (round 2): keep the list bounded. Every IDR appends a copy and nothing
+                // trimmed it for the whole session; the whole list is also what gets written into one input buffer.
+                if (spsBuffers.size() >= 8) { spsBuffers.clear(); }
                 spsBuffers.add(naluBuffer);
                 return MoonBridge.DR_OK;
             }
@@ -2134,6 +2141,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 // Batch this to submit together with other CSD per AOSP docs
                 byte[] naluBuffer = new byte[decodeUnitLength];
                 System.arraycopy(decodeUnitData, 0, naluBuffer, 0, decodeUnitLength);
+                // VipleStream REVIEW-1111 (round 2): keep the list bounded. Every IDR appends a copy and nothing
+                // trimmed it for the whole session; the whole list is also what gets written into one input buffer.
+                if (vpsBuffers.size() >= 8) { vpsBuffers.clear(); }
                 vpsBuffers.add(naluBuffer);
                 return MoonBridge.DR_OK;
             }
@@ -2144,6 +2154,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 // Batch this to submit together with other CSD per AOSP docs
                 byte[] naluBuffer = new byte[decodeUnitLength];
                 System.arraycopy(decodeUnitData, 0, naluBuffer, 0, decodeUnitLength);
+                // VipleStream REVIEW-1111 (round 2): keep the list bounded. Every IDR appends a copy and nothing
+                // trimmed it for the whole session; the whole list is also what gets written into one input buffer.
+                if (spsBuffers.size() >= 8) { spsBuffers.clear(); }
                 spsBuffers.add(naluBuffer);
                 return MoonBridge.DR_OK;
             }
@@ -2153,6 +2166,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 // Batch this to submit together with other CSD per AOSP docs
                 byte[] naluBuffer = new byte[decodeUnitLength];
                 System.arraycopy(decodeUnitData, 0, naluBuffer, 0, decodeUnitLength);
+                // VipleStream REVIEW-1111 (round 2): keep the list bounded. Every IDR appends a copy and nothing
+                // trimmed it for the whole session; the whole list is also what gets written into one input buffer.
+                if (ppsBuffers.size() >= 8) { ppsBuffers.clear(); }
                 ppsBuffers.add(naluBuffer);
                 return MoonBridge.DR_OK;
             }
