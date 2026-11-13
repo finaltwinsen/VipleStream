@@ -4,188 +4,461 @@
 <context>
     <name>AppContent</name>
     <message>
-        <location filename="../gui/AppContent.qml" line="350"/>
+        <location filename="../gui/AppContent.qml" line="353"/>
         <source>Add PC manually</source>
         <translation>Legg til PC manuelt</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="380"/>
+        <location filename="../gui/AppContent.qml" line="383"/>
         <source>VR mode (switch mode)</source>
         <translation>VR-modus (bytt modus)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="380"/>
+        <location filename="../gui/AppContent.qml" line="383"/>
         <source>Desktop mode (switch mode)</source>
         <translation>Skrivebordsmodus (bytt modus)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="418"/>
+        <location filename="../gui/AppContent.qml" line="421"/>
         <source>Update available for VipleStream: Version %1</source>
         <translation>Oppdatering tilgjengelig for VipleStream: versjon %1</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="456"/>
+        <location filename="../gui/AppContent.qml" line="459"/>
         <source>Help</source>
         <translation>Hjelp</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="482"/>
+        <location filename="../gui/AppContent.qml" line="485"/>
         <source>Gamepad Mapper</source>
         <translation>Knappetilknytning for spillkontrollere</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="237"/>
-        <location filename="../gui/AppContent.qml" line="513"/>
+        <location filename="../gui/AppContent.qml" line="238"/>
+        <location filename="../gui/AppContent.qml" line="516"/>
         <source>Settings</source>
         <translation>Innstillinger</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="227"/>
+        <location filename="../gui/AppContent.qml" line="228"/>
         <source>HOSTS</source>
         <translation>VERTER</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="228"/>
+        <location filename="../gui/AppContent.qml" line="229"/>
         <source>LIBRARY</source>
         <translation>BIBLIOTEK</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="229"/>
+        <location filename="../gui/AppContent.qml" line="230"/>
         <source>SETTINGS</source>
         <translation>INNSTILLINGER</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="235"/>
+        <location filename="../gui/AppContent.qml" line="236"/>
         <source>Hosts</source>
         <translation>Verter</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="236"/>
+        <location filename="../gui/AppContent.qml" line="237"/>
         <source>Library</source>
         <translation>Bibliotek</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="520"/>
+        <location filename="../gui/AppContent.qml" line="523"/>
         <source>No functioning hardware accelerated video decoder was detected by VipleStream. Your streaming performance may be severely degraded in this configuration.</source>
         <translation>VipleStream fant ingen fungerende maskinvareakselerert videodekoder. Strømmeytelsen kan bli kraftig redusert med dette oppsettet.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="522"/>
+        <location filename="../gui/AppContent.qml" line="525"/>
         <source>Click the Help button for more information on solving this problem.</source>
         <translation>Klikk på Hjelp-knappen for mer informasjon om problemløsning.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="529"/>
+        <location filename="../gui/AppContent.qml" line="532"/>
         <source>Hardware acceleration doesn&apos;t work on XWayland. Continuing on XWayland may result in poor streaming performance. Try running with QT_QPA_PLATFORM=wayland or switch to X11.</source>
         <translation>Maskinvareakselerasjon fungerer ikke på XWayland. Fortsatt bruk av XWayland kan resultere i dårlig strømmeytelse. Prøv å kjøre med QT_QPA_PLATFORM=wayland, eller bytt til X11.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="531"/>
+        <location filename="../gui/AppContent.qml" line="534"/>
         <source>Click the Help button for more information.</source>
         <translation>Klikk Hjelp-knappen for mer informasjon.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="539"/>
+        <location filename="../gui/AppContent.qml" line="542"/>
         <source>This version of VipleStream isn&apos;t optimized for your PC. Please download the &apos;%1&apos; version of VipleStream for the best streaming performance.</source>
         <translation>Denne versjonen av VipleStream er ikke optimalisert for din PC. Last ned «%1»-versjonen av VipleStream for best strømmeytelse.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="554"/>
+        <location filename="../gui/AppContent.qml" line="557"/>
         <source>VipleStream detected gamepads without a mapping:</source>
         <translation>VipleStream oppdaget spillkontrollere uten tastetilknytning:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="556"/>
+        <location filename="../gui/AppContent.qml" line="559"/>
         <source>Click the Help button for information on how to map your gamepads.</source>
         <translation>Klikk på Hjelp-knappen for info om hvordan du tilknytter taster til dine spillkontrollere.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="567"/>
+        <location filename="../gui/AppContent.qml" line="570"/>
         <source>VipleStream found a HID device that is not responding:</source>
         <translation>VipleStream fant en HID-enhet som ikke svarer:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="568"/>
+        <location filename="../gui/AppContent.qml" line="571"/>
         <source>Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.</source>
         <translation>Oppdagelse av spillkontrollere og Steam Controller-videresending er deaktivert til den svarer igjen. Koble enheten fra og til igjen; hvis VipleStream fortsatt ikke ser den, start VipleStream på nytt.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="576"/>
+        <location filename="../gui/AppContent.qml" line="579"/>
         <source>Are you sure you want to quit?</source>
         <translation>Er du sikker på at du vil avslutte?</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="606"/>
+        <location filename="../gui/AppContent.qml" line="624"/>
+        <source>VR controllers - flat-screen and VR streams</source>
+        <translation>VR-kontrollere – skjermstrøm og VR-strøm</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="625"/>
+        <source>A + X + trigger + grip</source>
+        <translation>A + X + avtrekker + grep</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="625"/>
+        <location filename="../gui/AppContent.qml" line="645"/>
+        <location filename="../gui/AppContent.qml" line="655"/>
+        <source>End the stream</source>
+        <translation>Avslutt strømmen</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="626"/>
+        <source>Both menu buttons, 2 seconds</source>
+        <translation>Begge menyknappene, 2 sekunder</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="626"/>
+        <source>Switch Xbox controller mode</source>
+        <translation>Bytt Xbox-kontrollermodus</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="627"/>
+        <source>Both thumbsticks pressed, 1.5 seconds</source>
+        <translation>Begge tommelspakene trykket inn, 1,5 sekunder</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="627"/>
+        <source>Switch steering wheel mode (in Xbox controller mode)</source>
+        <translation>Bytt rattmodus (i Xbox-kontrollermodus)</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="628"/>
+        <source>VR controllers - flat-screen stream only</source>
+        <translation>VR-kontrollere – bare skjermstrøm</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="629"/>
+        <source>Trigger / grip</source>
+        <translation>Avtrekker / grep</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="629"/>
+        <source>Left click / right click</source>
+        <translation>Venstreklikk / høyreklikk</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="630"/>
+        <source>Thumbstick up / down</source>
+        <translation>Tommelspak opp / ned</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="630"/>
+        <source>Scroll</source>
+        <translation>Rull</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="631"/>
+        <source>Left menu button</source>
+        <translation>Venstre menyknapp</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="631"/>
+        <location filename="../gui/AppContent.qml" line="635"/>
+        <source>Open or close the virtual keyboard</source>
+        <translation>Åpne eller lukk det virtuelle tastaturet</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="632"/>
+        <source>Left menu button, 1 second</source>
+        <translation>Venstre menyknapp, 1 sekund</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="632"/>
+        <source>Bring the screen back in front of you</source>
+        <translation>Hent skjermen tilbake foran deg</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="633"/>
+        <source>VR controllers - VR stream only</source>
+        <translation>VR-kontrollere – bare VR-strøm</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="634"/>
+        <source>Menu + trigger on one hand, 1 second</source>
+        <translation>Meny + avtrekker på én hånd, 1 sekund</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="634"/>
+        <source>Open the SteamVR dashboard on the PC</source>
+        <translation>Åpne SteamVR-dashbordet på PC-en</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="635"/>
+        <source>Menu + grip on one hand, 1 second</source>
+        <translation>Meny + grep på én hånd, 1 sekund</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="636"/>
+        <source>Trigger on the white bar under the keyboard</source>
+        <translation>Avtrekker på den hvite linjen under tastaturet</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="636"/>
+        <source>Drag the virtual keyboard</source>
+        <translation>Dra det virtuelle tastaturet</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="637"/>
+        <source>Xbox controller mode</source>
+        <translation>Xbox-kontrollermodus</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="638"/>
+        <source>Right A / B / X / Y</source>
+        <translation>Høyre A / B / X / Y</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="638"/>
+        <source>A / B / X / Y</source>
+        <translation>A / B / X / Y</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="639"/>
+        <source>Left D-pad buttons</source>
+        <translation>Venstre styrekorsknapper</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="639"/>
+        <source>D-pad</source>
+        <translation>Styrekors</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="640"/>
+        <source>Thumbsticks, triggers, shoulder buttons</source>
+        <translation>Tommelspaker, avtrekkere, skulderknapper</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="640"/>
+        <source>Sticks, LT / RT, LB / RB</source>
+        <translation>Spaker, LT / RT, LB / RB</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="641"/>
+        <source>Right menu / left menu</source>
+        <translation>Høyre meny / venstre meny</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="641"/>
+        <source>Start / Back</source>
+        <translation>Start / Back</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="644"/>
+        <source>Keyboard</source>
+        <translation>Tastatur</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="645"/>
+        <source>Ctrl+Alt+Shift+Q</source>
+        <translation type="unfinished">Ctrl+Alt+Skift+Q</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="646"/>
+        <source>Ctrl+Alt+Shift+E</source>
+        <translation>Ctrl+Alt+Skift+E</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="646"/>
+        <source>End the stream and close VipleStream</source>
+        <translation>Avslutt strømmen og lukk VipleStream</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="647"/>
+        <source>Ctrl+Alt+Shift+S</source>
+        <translation>Ctrl+Alt+Skift+S</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="647"/>
+        <source>Show or hide the performance overlay</source>
+        <translation>Vis eller skjul ytelsesoverlegget</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="648"/>
+        <source>Ctrl+Alt+Shift+X</source>
+        <translation>Ctrl+Alt+Skift+X</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="648"/>
+        <source>Switch between windowed and full-screen</source>
+        <translation>Bytt mellom vindus- og fullskjermsvisning</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="649"/>
+        <source>Ctrl+Alt+Shift+Z</source>
+        <translation>Ctrl+Alt+Skift+Z</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="649"/>
+        <source>Release or capture the mouse and keyboard</source>
+        <translation>Slipp eller fang mus og tastatur</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="650"/>
+        <source>Ctrl+Alt+Shift+M</source>
+        <translation>Ctrl+Alt+Skift+M</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="650"/>
+        <source>Switch the mouse between game mode and remote desktop mode</source>
+        <translation>Bytt musen mellom spillmodus og eksternt skrivebordsmodus</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="651"/>
+        <source>Ctrl+Alt+Shift+C</source>
+        <translation>Ctrl+Alt+Skift+C</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="651"/>
+        <source>Show or hide the local mouse cursor</source>
+        <translation>Vis eller skjul den lokale musepekeren</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="652"/>
+        <source>Ctrl+Alt+Shift+V</source>
+        <translation>Ctrl+Alt+Skift+V</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="652"/>
+        <source>Type the clipboard text on the host</source>
+        <translation>Skriv inn utklippstavlens tekst på verten</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="653"/>
+        <source>Ctrl+Alt+Shift+D</source>
+        <translation>Ctrl+Alt+Skift+D</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="653"/>
+        <source>Minimize the stream window</source>
+        <translation>Minimer strømmens vindu</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="654"/>
+        <source>Gamepad</source>
+        <translation>Spillkontroller</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="655"/>
+        <source>Start+Select+L1+R1</source>
+        <translation type="unfinished">Start+Select+L1+R1</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="656"/>
+        <source>Hold Start</source>
+        <translation>Hold Start</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="656"/>
+        <source>Use the gamepad as a mouse</source>
+        <translation>Bruk spillkontrolleren som mus</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="664"/>
+        <source>Shortcuts while streaming</source>
+        <translation>Hurtigtaster under strømming</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="679"/>
         <source>Enter the IP address of your host PC:</source>
         <translation>Skriv inn IP-adressen til din verts-PC:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="650"/>
+        <location filename="../gui/AppContent.qml" line="723"/>
         <source>Choose a mode</source>
         <translation>Velg en modus</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="685"/>
+        <location filename="../gui/AppContent.qml" line="758"/>
         <source>Desktop mode</source>
         <translation>Skrivebordsmodus</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="685"/>
+        <location filename="../gui/AppContent.qml" line="758"/>
         <source>Your PC&apos;s desktop on a virtual screen</source>
         <translation>PCens skrivebord på en virtuell skjerm</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="696"/>
+        <location filename="../gui/AppContent.qml" line="769"/>
         <source>VR mode</source>
         <translation>VR-modus</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="696"/>
+        <location filename="../gui/AppContent.qml" line="769"/>
         <source>Play SteamVR games from your PC</source>
         <translation>Spill SteamVR-spill fra PCen din</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="710"/>
+        <location filename="../gui/AppContent.qml" line="783"/>
         <source>Video mode</source>
         <translation>Videomodus</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="710"/>
+        <location filename="../gui/AppContent.qml" line="783"/>
         <source>Watch videos, 3D, 180° and 360° videos in the headset</source>
         <translation>Se videoer, 3D-, 180°- og 360°-videoer i headsettet</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="780"/>
+        <location filename="../gui/AppContent.qml" line="857"/>
         <source>Starting %1...</source>
         <translation>Starter %1...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="781"/>
+        <location filename="../gui/AppContent.qml" line="858"/>
         <source>Starting the stream...</source>
         <translation>Starter strømmen...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="789"/>
+        <location filename="../gui/AppContent.qml" line="866"/>
         <source>The headset switches to the stream when it is ready. This can take a few seconds.</source>
         <translation>Headsettet bytter til strømmen når den er klar. Dette kan ta noen sekunder.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="790"/>
+        <location filename="../gui/AppContent.qml" line="867"/>
         <source>Tip:</source>
         <translation>Tips:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="790"/>
+        <location filename="../gui/AppContent.qml" line="867"/>
         <source>To end the stream, hold A+X+trigger+grip on the VR controller</source>
         <translation>For å avslutte strømmen, hold inne A+X+avtrekker+grep på VR-kontrolleren</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="831"/>
+        <location filename="../gui/AppContent.qml" line="920"/>
         <source>Opening the video...</source>
         <translation>Åpner videoen...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="839"/>
+        <location filename="../gui/AppContent.qml" line="928"/>
         <source>Press B to cancel.</source>
         <translation>Trykk B for å avbryte.</translation>
     </message>
@@ -632,7 +905,7 @@ Hvis det tar lenger tid, sjekk verten — Steam Guard 2FA kan be om bekreftelse.
 <context>
     <name>NvHTTP</name>
     <message>
-        <location filename="../backend/nvhttp.cpp" line="423"/>
+        <location filename="../backend/nvhttp.cpp" line="428"/>
         <source>Missing audio capture device. Reinstalling GeForce Experience should resolve this error.</source>
         <translation>Mangler lydopptaksenhet. Reinstallasjon av GeForce Experience bør løse dette problemet.</translation>
     </message>
@@ -883,27 +1156,27 @@ Hvis det tar lenger tid, sjekk verten — Steam Guard 2FA kan be om bekreftelse.
 <context>
     <name>PendingPairingTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="971"/>
+        <location filename="../backend/computermanager.cpp" line="991"/>
         <source>The PIN from the PC didn&apos;t match. Please try again.</source>
         <translation>PIN-koden fra PCen matcher ikke. Prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="975"/>
+        <location filename="../backend/computermanager.cpp" line="995"/>
         <source>You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again.</source>
         <translation>Du kan pare mens en tidligere økt fremdeles kjører på din verts-PC. Avslutt alle kjørende spill eller start verten på nytt. Prøv deretter å pare på nytt.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="978"/>
+        <location filename="../backend/computermanager.cpp" line="998"/>
         <source>Pairing failed. Please try again.</source>
         <translation>Paring feilet. Prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="982"/>
+        <location filename="../backend/computermanager.cpp" line="1002"/>
         <source>Another pairing attempt is already in progress.</source>
         <translation>Et annet paringsforsøk er allerede i gang.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="992"/>
+        <location filename="../backend/computermanager.cpp" line="1012"/>
         <source>GeForce Experience returned error: %1</source>
         <translation>GeForce Experience returnerte en feil: %1</translation>
     </message>
@@ -911,7 +1184,7 @@ Hvis det tar lenger tid, sjekk verten — Steam Guard 2FA kan be om bekreftelse.
 <context>
     <name>PendingQuitTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="1042"/>
+        <location filename="../backend/computermanager.cpp" line="1062"/>
         <source>The running game wasn&apos;t started by this PC. You must quit the game on the host PC manually or use the device that originally started the game.</source>
         <translation>Det kjørende spillet ble ikke startet av denne PCen. Du må avslutte spillet på verts-PCen manuelt eller bruke enheten som opprinnelig startet spillet.</translation>
     </message>
@@ -961,27 +1234,27 @@ Hvis det tar lenger tid, sjekk verten — Steam Guard 2FA kan be om bekreftelse.
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1466"/>
+        <location filename="../main.cpp" line="1475"/>
         <source>&amp;Yes</source>
         <translation>Ja</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1467"/>
+        <location filename="../main.cpp" line="1476"/>
         <source>&amp;No</source>
         <translation>&amp;Nei</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1468"/>
+        <location filename="../main.cpp" line="1477"/>
         <source>OK</source>
         <translation>OK</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1469"/>
+        <location filename="../main.cpp" line="1478"/>
         <source>Help</source>
         <translation>Hjelp</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1470"/>
+        <location filename="../main.cpp" line="1479"/>
         <source>Cancel</source>
         <translation>Avbryt</translation>
     </message>
@@ -997,401 +1270,416 @@ Hvis det tar lenger tid, sjekk verten — Steam Guard 2FA kan be om bekreftelse.
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="382"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>No video received from host.</source>
         <translation>Fikk ingen video fra vert.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="383"/>
+        <location filename="../streaming/session.cpp" line="387"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>Sjekk din brannmur og portvideresendingsregler for port(ene): %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="388"/>
+        <location filename="../streaming/session.cpp" line="392"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>Din nettverkstilkobling fungerer ikke så bra. Reduser videobitraten fra dens innstilling, eller prøv en raskere tilkobling.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="394"/>
+        <location filename="../streaming/session.cpp" line="398"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>Noe gikk galt på din verts-PC under oppstart av strømmen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="395"/>
+        <location filename="../streaming/session.cpp" line="399"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>Forsikre deg om at du ikke har noe DRM-beskyttet innhold åpent på din verts-PC. Du kan også prøve å starte verts-PCen på ny.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="400"/>
+        <location filename="../streaming/session.cpp" line="404"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>Verts-PCen har rapportert en alvorlig videokodingsfeil.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="401"/>
+        <location filename="../streaming/session.cpp" line="405"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>Prøv å deaktivere HDR-modus, endre strømmeoppløsningen eller endre din verts-PCs skjermoppløsning.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="408"/>
+        <location filename="../streaming/session.cpp" line="412"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>Kontrolltilkoblingen til serveren ble brutt — det kan skyldes et kortvarig nettverksbrudd eller at serveren er frakoblet. Du kan prøve å fortsette strømmen (resume) senere.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="416"/>
+        <location filename="../streaming/session.cpp" line="420"/>
         <source>Connection terminated</source>
         <translation>Tilkobling avsluttet</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="417"/>
+        <location filename="../streaming/session.cpp" line="421"/>
         <source>Error code: %1</source>
         <translation>Feilkode: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1952"/>
+        <location filename="../streaming/session.cpp" line="2012"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>Versjonen av GeForce Experience på %1 støttes ikke av denne byggversjonen av Moonlight. Du må oppdatere Moonlight for å strømme fra %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1958"/>
+        <location filename="../streaming/session.cpp" line="2018"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>Din aktivering av musemodus for eksternt skrivebord kan forårsake problemer i spill.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1962"/>
+        <location filename="../streaming/session.cpp" line="2022"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>Din aktivering av tvungen programvaredekoding kan forårsake dårlig strømmeytelse.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2021"/>
+        <location filename="../streaming/session.cpp" line="2081"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>Din verts-PC støtter ikke HEVC-koding.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2039"/>
+        <location filename="../streaming/session.cpp" line="2099"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>Bruker programvaredekoding som følge av ditt valg om å påtvinge HEVC uten GPU-støtte. Dette kan forårsake dårlig strømmeytelse.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1991"/>
+        <location filename="../streaming/session.cpp" line="2051"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>Din verts programvare eller GPU støtter ikke AV1-koding.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2009"/>
+        <location filename="../streaming/session.cpp" line="2069"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>Bruker programvaredekoding som følge av ditt valg om å påtvinge AV1 uten GPU-støtte. Dette kan forårsake dårlig strømmeytelse.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2086"/>
+        <location filename="../streaming/session.cpp" line="2146"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>Din verts-PC støtter ikke HDR-strømming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2078"/>
+        <location filename="../streaming/session.cpp" line="2138"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>HDR er ikke støttet når H.264-kodeken brukes.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2113"/>
+        <location filename="../streaming/session.cpp" line="2173"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>Denne PCens GPU støtter ikke dekoding av AV1 Main10 for HDR-strømming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2082"/>
+        <location filename="../streaming/session.cpp" line="2142"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>Denne PCens GPU støtter ikke dekoding av 10-biters HEVC eller AV1 for HDR-strømming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2146"/>
+        <location filename="../streaming/session.cpp" line="2206"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>Verts-PCen og klient-PCen støtter ikke de samme HDR-videokodekene.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2249"/>
+        <location filename="../streaming/session.cpp" line="2309"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>Videooppløsning over 4K støttes ikke av H.264-kodeken.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3693"/>
+        <location filename="../streaming/session.cpp" line="3798"/>
         <source>Host returned error: %1</source>
         <translation>Verten returnerte feil: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2058"/>
+        <location filename="../streaming/session.cpp" line="2118"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>Bruker programvaredekoding som følge av ditt valg om å påtvinge H.264 uten GPU-støtte. Dette kan forårsake dårlig strømmeytelse.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="618"/>
+        <location filename="../streaming/session.cpp" line="647"/>
         <source>This game doesn&apos;t use VR controllers - switched to Xbox controller mode</source>
         <translation>Dette spillet bruker ikke VR-kontrollere – byttet til Xbox-kontrollermodus</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="622"/>
+        <location filename="../streaming/session.cpp" line="651"/>
         <source>Xbox controller mode: on</source>
         <translation>Xbox-kontrollermodus: på</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="626"/>
+        <location filename="../streaming/session.cpp" line="655"/>
         <source>Xbox controller mode: off (VR controllers)</source>
         <translation>Xbox-kontrollermodus: av (VR-kontrollere)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="630"/>
+        <location filename="../streaming/session.cpp" line="659"/>
         <source>Xbox controller mode unavailable: install ViGEmBus on the host</source>
         <translation>Xbox-kontrollermodus er utilgjengelig: installer ViGEmBus på verten</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="633"/>
+        <location filename="../streaming/session.cpp" line="662"/>
         <source>Microphone not available on the host: Steam&apos;s &quot;Steam Streaming Microphone&quot; device was not found</source>
         <translation>Mikrofon er ikke tilgjengelig på verten: Steams «Steam Streaming Microphone»-enhet ble ikke funnet</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="790"/>
+        <location filename="../streaming/session.cpp" line="825"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>Et annet headset bruker SteamVR på %1 (for eksempel Steam Link). Koble det fra og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="792"/>
+        <location filename="../streaming/session.cpp" line="827"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>Et VR-spill kjører allerede på %1 uten VipleStream. Avslutt det og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="794"/>
+        <location filename="../streaming/session.cpp" line="829"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>SteamVR på %1 må startes på nytt, men et VR-spill kjører fortsatt der. Avslutt spillet først (Avslutt spill i programlisten), og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="797"/>
+        <location filename="../streaming/session.cpp" line="832"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>SteamVR på %1 startet i sikker modus og blokkerte VipleStream-driveren. Start SteamVR på nytt på verten, og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="799"/>
+        <location filename="../streaming/session.cpp" line="834"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>SteamVR er ikke installert på %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="801"/>
+        <location filename="../streaming/session.cpp" line="836"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>Steam er ikke pålogget på %1. Logg inn på Steam på verten (for eksempel i skrivebordsmodus), og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="803"/>
+        <location filename="../streaming/session.cpp" line="838"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>Ingen er logget inn på Windows på %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="805"/>
+        <location filename="../streaming/session.cpp" line="840"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 viser påloggings- eller låseskjermen i Windows. Logg inn på verten og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="808"/>
+        <location filename="../streaming/session.cpp" line="843"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>SteamVR på %1 startet ikke i tide. Prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="810"/>
+        <location filename="../streaming/session.cpp" line="845"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1 kunne ikke starte VR (feil %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="835"/>
+        <location filename="../streaming/session.cpp" line="870"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 tilbyr ikke VR-strømming. Det krever VipleStream Server 2.0 eller nyere med PCVR aktivert.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="845"/>
+        <location filename="../streaming/session.cpp" line="880"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1 kan bare nås via reléet. VR-strømming krever en direkte tilkobling.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="853"/>
+        <location filename="../streaming/session.cpp" line="888"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>Videokodekinnstillingen tvinger AV1, men VR-strømming krever HEVC eller H.264. Endre videokodeken i Innstillinger.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1357"/>
+        <location filename="../streaming/session.cpp" line="1392"/>
         <source>Failed to initialize video subsystem: %1</source>
         <translation>Klarte ikke å initialisere videodelsystemet: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1442"/>
+        <location filename="../streaming/session.cpp" line="1486"/>
         <source>Failed to create window for hardware decode test: %1</source>
         <translation>Klarte ikke å opprette vindu for maskinvaredekodingstesten: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1551"/>
+        <location filename="../streaming/session.cpp" line="1607"/>
         <source>Invalid stream frame rate (%1 FPS).</source>
         <translation>Ugyldig bildefrekvens for strømmen (%1 FPS).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1897"/>
+        <location filename="../streaming/session.cpp" line="1957"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>Denne enheten har ingen 8-biters HEVC- eller H.264-videodekoder for VR-strømming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1926"/>
+        <location filename="../streaming/session.cpp" line="1986"/>
         <source>Failed to initialize video decoder.</source>
         <translation>Klarte ikke å initialisere videodekoderen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1968"/>
+        <location filename="../streaming/session.cpp" line="2028"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>Din verts programvare eller GPU støtter ikke PyroWave-koding.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1979"/>
+        <location filename="../streaming/session.cpp" line="2039"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>GPU-en på klienten støtter ikke PyroWave-dekoding med Vulkan 1.3. Bruker HEVC/H.264 i stedet.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2068"/>
+        <location filename="../streaming/session.cpp" line="2128"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>Verts-PCen og klient-PCen støtter ikke de samme videokodekene. Dette kan forårsake dårlig strømmeytelse.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2071"/>
+        <location filename="../streaming/session.cpp" line="2131"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>Din klients GPU støtter ikke H.264-dekoding. Dette kan forårsake dårlig strømmeytelse.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2101"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>Denne PCens GPU støtter ikke dekoding av PyroWave Main10 for HDR-strømming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2119"/>
-        <location filename="../streaming/session.cpp" line="2137"/>
+        <location filename="../streaming/session.cpp" line="2179"/>
+        <location filename="../streaming/session.cpp" line="2197"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>Bruker programvaredekoding som følge av ditt valg om å påtvinge HDR uten GPU-støtte. Dette kan forårsake dårlig strømmeytelse.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2131"/>
+        <location filename="../streaming/session.cpp" line="2191"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>Denne PCens GPU støtter ikke dekoding av HEVC Main10 for HDR-strømming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2153"/>
+        <location filename="../streaming/session.cpp" line="2213"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>Din verts-PC støtter ikke YUV 4:4:4-strømming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2161"/>
+        <location filename="../streaming/session.cpp" line="2221"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>Din verts-PC støtter ikke YUV 4:4:4-strømming for valgte videokodek.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2176"/>
+        <location filename="../streaming/session.cpp" line="2236"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>Bruker programvaredekoding som følge av ditt valg om å påtvinge YUV 4:4:4 uten GPU-støtte. Dette kan forårsake dårlig strømmeytelse.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2182"/>
+        <location filename="../streaming/session.cpp" line="2242"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>Denne PCens GPU støtter ikke YUV 4:4:4-strømming for valgte videokodek.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2191"/>
+        <location filename="../streaming/session.cpp" line="2251"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>GeForce Experience 3.0 eller senere kreves for 4K-strømming.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2208"/>
+        <location filename="../streaming/session.cpp" line="2268"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>Din valgte surroundlydinnstilling støttes ikke på nåværende lydenhet.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2214"/>
+        <location filename="../streaming/session.cpp" line="2274"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>Kunne ikke åpne lydenhet. Lyd vil være utilgjengelig under denne økten.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2223"/>
+        <location filename="../streaming/session.cpp" line="2283"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>En HID-enhet svarer ikke (%1). Inndata fra spillkontroller og Steam Controller-videresending er deaktivert for denne økten. Koble enheten fra og til igjen, og start strømmen på nytt.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2227"/>
+        <location filename="../streaming/session.cpp" line="2287"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>En tilknyttet spillkontroller har ingen tastetilknytninger og vil ikke kunne brukes. Besøk Moonlight-hjelpen for å løse dette.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2245"/>
+        <location filename="../streaming/session.cpp" line="2305"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>Verts-PCen sin GPU støtter ikke strømming av videooppløsninger over 4K.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2263"/>
+        <location filename="../streaming/session.cpp" line="2323"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>Din aktivering av tvungen maskingvaredekoding har ingen innvirkning siden det ikke støttes av denne PCens GPU.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2266"/>
+        <location filename="../streaming/session.cpp" line="2326"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>Din valgte kodek er ikke kompatibel med aktivering av tvungen maskingvaredekoding. Denne PCens GPU mangler støtte for dekoding av valgt kodek.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3180"/>
+        <location filename="../streaming/session.cpp" line="3276"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>XR-kjøretiden %1 etter at VR-økten startet, så strømmen ble avsluttet.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3181"/>
+        <location filename="../streaming/session.cpp" line="3277"/>
         <source>exited</source>
         <translation>avsluttet</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3181"/>
+        <location filename="../streaming/session.cpp" line="3277"/>
         <source>stopped responding or was lost</source>
         <translation>sluttet å svare eller gikk tapt</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3337"/>
+        <location filename="../streaming/session.cpp" line="3433"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>Kunne ikke starte VR på dette headsettet (%1). Sørg for at SteamVR kjører, og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3346"/>
+        <location filename="../streaming/session.cpp" line="3442"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>VR-kjøretiden i headsettet svarte ikke i tide. Sørg for at SteamVR kjører, og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3576"/>
+        <location filename="../streaming/session.cpp" line="3678"/>
         <source>Failed to launch via relay proxy</source>
         <translation>Kunne ikke starte via relé-proxy</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3665"/>
+        <location filename="../streaming/session.cpp" line="3767"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 startet ingen VR-økt. Sørg for at PCVR er aktivert på verten, og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3674"/>
-        <location filename="../streaming/session.cpp" line="3681"/>
+        <location filename="../streaming/session.cpp" line="3779"/>
+        <location filename="../streaming/session.cpp" line="3786"/>
         <source>Connection to host failed</source>
         <translation>Tilkobling til verten mislyktes</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4991"/>
+        <location filename="../streaming/session.cpp" line="5105"/>
         <source>Steering wheel: off (left stick steers)</source>
         <translation>Ratt: av (venstre spak styrer)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4992"/>
+        <location filename="../streaming/session.cpp" line="5106"/>
         <source>Steering wheel: on - turn both controllers like a wheel</source>
         <translation>Ratt: på - vri begge kontrollerne som et ratt</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4993"/>
+        <location filename="../streaming/session.cpp" line="5107"/>
         <source>Steering wheel: on (works in Xbox controller mode)</source>
         <translation>Ratt: på (fungerer i Xbox-kontrollermodus)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="5217"/>
+        <location filename="../streaming/session.cpp" line="5127"/>
+        <source>Xbox controller mode: on (hold both menu buttons to switch back)</source>
+        <translation>Xbox-kontrollermodus: på (hold begge menyknappene inne for å bytte tilbake)</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="5128"/>
+        <source>Xbox controller mode: off (laser pointer)</source>
+        <translation>Xbox-kontrollermodus: av (laserpeker)</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="5352"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>Kunne ikke starte videodekoder. Sjekk strømmeinnstillingene dine og prøv igjen.</translation>
+    </message>
+    <message>
+        <location filename="../streaming/xr/xrcontext.cpp" line="1732"/>
+        <source>Waiting for video from the host</source>
+        <translation>Venter på video fra verten</translation>
     </message>
 </context>
 <context>
@@ -1402,102 +1690,102 @@ Hvis det tar lenger tid, sjekk verten — Steam Guard 2FA kan be om bekreftelse.
         <translation>Innstillinger</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="737"/>
+        <location filename="../gui/SettingsView.qml" line="776"/>
         <source>Resolution and FPS</source>
         <translation>Oppløsning og FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="745"/>
+        <location filename="../gui/SettingsView.qml" line="784"/>
         <source>Setting values too high for your PC or network connection may cause lag, stuttering, or errors.</source>
         <translation>Å sette verdier som er for høye for PCen eller nettverkstilkoblingen kan forårsake forsinkelse, hakking, eller feil.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="727"/>
+        <location filename="../gui/SettingsView.qml" line="766"/>
         <source>Basic Settings</source>
         <translation>Grunnleggende innstillinger</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="937"/>
+        <location filename="../gui/SettingsView.qml" line="976"/>
         <source>Auto (best for this display)</source>
         <translation>Auto (best for denne skjermen)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="943"/>
+        <location filename="../gui/SettingsView.qml" line="982"/>
         <source>720p</source>
         <translation>720p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="949"/>
+        <location filename="../gui/SettingsView.qml" line="988"/>
         <source>1080p</source>
         <translation>1080p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="955"/>
+        <location filename="../gui/SettingsView.qml" line="994"/>
         <source>1440p</source>
         <translation>1440p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="961"/>
+        <location filename="../gui/SettingsView.qml" line="1000"/>
         <source>4K</source>
         <translation>4K</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1078"/>
+        <location filename="../gui/SettingsView.qml" line="1117"/>
         <source>Custom resolutions are not officially supported by GeForce Experience, so it will not set your host display resolution. You will need to set it manually while in game.</source>
         <translation>Brukerdefinerte oppløsninger støttes ikke offisielt av GeForce Experience, så det vil ikke sette vertens skjermoppløsning. Du vil måtte sette den manuelt mens du er inne i et spill.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1079"/>
+        <location filename="../gui/SettingsView.qml" line="1118"/>
         <source>Resolutions that are not supported by your client or host PC may cause streaming errors.</source>
         <translation>Oppløsninger som ikke er støttet av din klient- eller verts-PC kan forårsake strømmefeil.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1085"/>
+        <location filename="../gui/SettingsView.qml" line="1124"/>
         <source>Enter a custom resolution:</source>
         <translation>Skriv inn egendefinert oppløsning:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1346"/>
+        <location filename="../gui/SettingsView.qml" line="1385"/>
         <source>%1 FPS</source>
         <translation>%1 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1475"/>
+        <location filename="../gui/SettingsView.qml" line="1514"/>
         <source>Auto (this display)</source>
         <translation>Auto (denne skjermen)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1611"/>
+        <location filename="../gui/SettingsView.qml" line="1650"/>
         <source>Frame interpolation (FRUC)</source>
         <translation>Bildeinterpolering (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1651"/>
+        <location filename="../gui/SettingsView.qml" line="1690"/>
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>Setter inn et interpolert bilde mellom hvert ekte bilde, slik at den effektive bilderaten dobles. Serverens faktiske bilderate halveres (f.eks. 120 FPS-innstilling → ber om 60 FPS → viser 120 FPS).</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1761"/>
+        <location filename="../gui/SettingsView.qml" line="1800"/>
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute (anbefalt — lavest forsinkelse, alle GPU-er)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1762"/>
+        <location filename="../gui/SettingsView.qml" line="1801"/>
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow (HW-flyt + warp; NVIDIA RTX 20+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1763"/>
+        <location filename="../gui/SettingsView.qml" line="1802"/>
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — RIFE ML-modell (krever kraftig GPU; Tensor Core RTX 30/40+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1764"/>
+        <location filename="../gui/SettingsView.qml" line="1803"/>
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE (eksperimentell; på tvers av produsenter: NV/AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1774"/>
+        <location filename="../gui/SettingsView.qml" line="1815"/>
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
@@ -1510,368 +1798,368 @@ NVIDIA Optical Flow: dedikert NVOFA-maskinvare på Turing+ (RTX 20/30/40-serien)
 DirectML: kjører den medfølgende RIFE 4.25 lite ONNX-modellen på D3D12 DirectML EP — *ekte* bevegelseskompensert ML-interpolering, best bildekvalitet på dynamisk innhold. Overhead per operasjon (~25 ms grunnlinje uavhengig av oppløsning) betyr at det krever en GPU i Tensor Core-klassen (RTX 30/40 mellomklasse eller bedre) for å holde følge i sanntid på 720p+. På svakere GPU-er senker klienten automatisk inferensoppløsningen trinnvis (1080p → 720p → 540p → 480p → 360p) og faller tilbake til Generic hvis selv 360p ikke passer i bildebudsjettet.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1843"/>
+        <location filename="../gui/SettingsView.qml" line="1885"/>
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1844"/>
+        <location filename="../gui/SettingsView.qml" line="1886"/>
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1847"/>
+        <location filename="../gui/SettingsView.qml" line="1889"/>
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (PERFORMANCE GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1893"/>
+        <location filename="../gui/SettingsView.qml" line="1935"/>
         <source>Video bitrate:</source>
         <translation>Videobitrate:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1901"/>
+        <location filename="../gui/SettingsView.qml" line="1943"/>
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>Senk bitraten på tregere tilkoblinger. Øk bitraten for å forbedre bildekvalitet.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1923"/>
+        <location filename="../gui/SettingsView.qml" line="1965"/>
         <source>Video bitrate: %1 Mbps</source>
         <translation>Videobitrate: %1 Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1970"/>
+        <location filename="../gui/SettingsView.qml" line="2012"/>
         <source>Display mode</source>
         <translation>Visningsmodus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2000"/>
+        <location filename="../gui/SettingsView.qml" line="2042"/>
         <source>(Recommended)</source>
         <translation>(anbefalt)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1981"/>
-        <location filename="../gui/SettingsView.qml" line="2550"/>
+        <location filename="../gui/SettingsView.qml" line="2023"/>
+        <location filename="../gui/SettingsView.qml" line="2592"/>
         <source>Fullscreen</source>
         <translation>Fullskjermsvisning</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2050"/>
+        <location filename="../gui/SettingsView.qml" line="2092"/>
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>Fullskjermsvisning gir vanligvis best ytelse, men kantløs vindusmodus kan fungere med funksjoner som macOS Spaces, Alt+Tab, skjermbildeverktøy, overleggslag på skjermen, osv.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1986"/>
+        <location filename="../gui/SettingsView.qml" line="2028"/>
         <source>Borderless windowed</source>
         <translation>Kantløs vindusmodus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="816"/>
+        <location filename="../gui/SettingsView.qml" line="855"/>
         <source>Native</source>
         <translation>Innebygget</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="817"/>
+        <location filename="../gui/SettingsView.qml" line="856"/>
         <source>Native (Excluding Notch)</source>
         <translation>Innebygget (ekskludert skjermutskjæring)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1939"/>
+        <location filename="../gui/SettingsView.qml" line="1981"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>Bruk standard (%1 Mbps)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1991"/>
-        <location filename="../gui/SettingsView.qml" line="2542"/>
+        <location filename="../gui/SettingsView.qml" line="2033"/>
+        <location filename="../gui/SettingsView.qml" line="2584"/>
         <source>Windowed</source>
         <translation>Vindusmodus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2057"/>
+        <location filename="../gui/SettingsView.qml" line="2099"/>
         <source>V-Sync</source>
         <translation>V-Sync</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2067"/>
+        <location filename="../gui/SettingsView.qml" line="2109"/>
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>Å skru av V-Sync tillater rendringslatens, men det kan forårsake synlig bilderevning</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2074"/>
+        <location filename="../gui/SettingsView.qml" line="2116"/>
         <source>Frame pacing</source>
         <translation>Lås bilderammetakt</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2097"/>
+        <location filename="../gui/SettingsView.qml" line="2139"/>
         <source>Audio Settings</source>
         <translation>Lydinnstillinger</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2132"/>
+        <location filename="../gui/SettingsView.qml" line="2174"/>
         <source>Stereo</source>
         <translation>Stereo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2136"/>
+        <location filename="../gui/SettingsView.qml" line="2178"/>
         <source>5.1 surround sound</source>
         <translation>5.1-surroundlyd</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2140"/>
+        <location filename="../gui/SettingsView.qml" line="2182"/>
         <source>7.1 surround sound</source>
         <translation>7.1-surroundlyd</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2154"/>
+        <location filename="../gui/SettingsView.qml" line="2196"/>
         <source>Mute host PC speakers while streaming</source>
         <translation>Demp lyden på verts-PCens høyttalere under strømming</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2164"/>
+        <location filename="../gui/SettingsView.qml" line="2206"/>
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>Du må restarte kjørende spill for at denne innstillingen skal tre i kraft</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2286"/>
+        <location filename="../gui/SettingsView.qml" line="2328"/>
         <source>UI Settings</source>
         <translation>Grensesnittinnstillinger</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2331"/>
+        <location filename="../gui/SettingsView.qml" line="2373"/>
         <source>Language</source>
         <translation>Språk</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2357"/>
+        <location filename="../gui/SettingsView.qml" line="2399"/>
         <source>Automatic</source>
         <translation>Automatisk</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2509"/>
+        <location filename="../gui/SettingsView.qml" line="2551"/>
         <source>GUI display mode</source>
         <translation>Visningsmodus for brukergrensesnitt</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2546"/>
+        <location filename="../gui/SettingsView.qml" line="2588"/>
         <source>Maximized</source>
         <translation>Maksimert</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2574"/>
+        <location filename="../gui/SettingsView.qml" line="2616"/>
         <source>Show configuration warnings</source>
         <translation>Vis konfigurasjonsadvarsler</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2656"/>
+        <location filename="../gui/SettingsView.qml" line="2698"/>
         <source>Input Settings</source>
         <translation>Inndata-innstillinger</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2677"/>
+        <location filename="../gui/SettingsView.qml" line="2719"/>
         <source>This enables seamless mouse control without capturing the client&apos;s mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>Skrur på sømløs musekontroll uten å fange klientens musepeker. Dette er ideelt for bruk til eksternt skrivebord, men fungerer ikke i de fleste spill.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2679"/>
+        <location filename="../gui/SettingsView.qml" line="2721"/>
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>MERK: Som følge av en feil i GeForce Experience, vil dette alternativet muligens ikke fungere riktig hvis din verts-PC har flere skjermer.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3048"/>
+        <location filename="../gui/SettingsView.qml" line="3090"/>
         <source>AV1 (Experimental)</source>
         <translation>AV1 (eksperimentell)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3068"/>
+        <location filename="../gui/SettingsView.qml" line="3110"/>
         <source>Enable HDR (Experimental)</source>
         <translation>Aktiver HDR (eksperimentell)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3086"/>
+        <location filename="../gui/SettingsView.qml" line="3128"/>
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>Strømmen vil være HDR-kompatibel, men noen spill kan kreve en HDR-skjerm på verts-PCen for å aktivere HDR-modus.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3088"/>
+        <location filename="../gui/SettingsView.qml" line="3130"/>
         <source>HDR streaming is not supported on this PC.</source>
         <translation>HDR-strømming støttes ikke på denne PCen.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3140"/>
+        <location filename="../gui/SettingsView.qml" line="3182"/>
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>Dette låser opp svært høye videobitrater for bruk med VipleStream-Server-verter. Bør bare brukes ved strømming over en kablet Ethernet-tilkobling i lokalnettet.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3178"/>
+        <location filename="../gui/SettingsView.qml" line="3220"/>
         <source>Show performance stats while streaming</source>
         <translation>Vis ytelsesdata under strømming</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3188"/>
+        <location filename="../gui/SettingsView.qml" line="3230"/>
         <source>Display real-time stream performance information while streaming.</source>
         <translation>Vis sanntidsdata om strømmeytelsen under strømming.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3189"/>
+        <location filename="../gui/SettingsView.qml" line="3231"/>
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>Du kan aktivere og deaktivere dette når som helst under strømming ved å bruke Ctrl+Alt+Skift+S eller Select+L1+R1+X.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3190"/>
+        <location filename="../gui/SettingsView.qml" line="3232"/>
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>Ytelsesoverlegget støttes ikke på Steam Link og Raspberry Pi.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2762"/>
+        <location filename="../gui/SettingsView.qml" line="2804"/>
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>Bruk berøringsskjerm som virtuell styreflate</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2779"/>
+        <location filename="../gui/SettingsView.qml" line="2821"/>
         <source>Swap left and right mouse buttons</source>
         <translation>Bytt venstre og høyre museknapper</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2791"/>
+        <location filename="../gui/SettingsView.qml" line="2833"/>
         <source>Reverse mouse scrolling direction</source>
         <translation>Omvendt muserullingsretning</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2805"/>
+        <location filename="../gui/SettingsView.qml" line="2847"/>
         <source>Gamepad Settings</source>
         <translation>Spillkontrolller-innstillinger</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2815"/>
+        <location filename="../gui/SettingsView.qml" line="2857"/>
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>Bytt A/B- og X/Y-spillkontrollerknapper</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2825"/>
+        <location filename="../gui/SettingsView.qml" line="2867"/>
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>Dette bytter spillkontrollere til knappeoppsett i Nintendo-stil</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2831"/>
+        <location filename="../gui/SettingsView.qml" line="2873"/>
         <source>Force gamepad #1 always connected</source>
         <translation>Tving at spillkontroller nr. 1 alltid er tilkoblet</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2841"/>
+        <location filename="../gui/SettingsView.qml" line="2883"/>
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>Påtvinger at en spillkontroller alltid forblir tilkoblet verten, selv når ingen spillkontrollere faktisk er tilkoblet til denne PCen.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2678"/>
+        <location filename="../gui/SettingsView.qml" line="2720"/>
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>Du kan aktivere/deaktivere dette under strømming ved bruk av Ctrl+Alt+Skift+M.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2849"/>
+        <location filename="../gui/SettingsView.qml" line="2891"/>
         <source>Enable mouse control with gamepads by holding the &apos;Start&apos; button</source>
         <translation>Skru på musekontroll med spillkontrollere ved å holde Start-knappen</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2190"/>
+        <location filename="../gui/SettingsView.qml" line="2232"/>
         <source>Host Settings</source>
         <translation>Vertsinnstillinger</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2944"/>
+        <location filename="../gui/SettingsView.qml" line="2986"/>
         <source>Advanced Settings</source>
         <translation>Avanserte innstillinger</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2107"/>
+        <location filename="../gui/SettingsView.qml" line="2149"/>
         <source>Audio configuration</source>
         <translation>Lydoppsett</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2563"/>
+        <location filename="../gui/SettingsView.qml" line="2605"/>
         <source>Show connection quality warnings</source>
         <translation>Vis advarsler om tilkoblingskvalitet</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2586"/>
+        <location filename="../gui/SettingsView.qml" line="2628"/>
         <source>Discord Rich Presence integration</source>
         <translation>Integrasjon med Discord Rik tilstedeværelse</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2842"/>
+        <location filename="../gui/SettingsView.qml" line="2884"/>
         <source>Only enable this option when streaming a game that doesn&apos;t support gamepads being connected after startup.</source>
         <translation>Skru kun på dette når du strømmer et spill som ikke støtter at spillkontrollere kobles til etter oppstart.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2667"/>
+        <location filename="../gui/SettingsView.qml" line="2709"/>
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>Optimaliser mus for eksternt skrivebord i stedet for spill</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1242"/>
-        <location filename="../gui/SettingsView.qml" line="1435"/>
+        <location filename="../gui/SettingsView.qml" line="1281"/>
+        <location filename="../gui/SettingsView.qml" line="1474"/>
         <source>Custom (%1 FPS)</source>
         <translation>Egendefinert (%1 FPS)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1257"/>
+        <location filename="../gui/SettingsView.qml" line="1296"/>
         <source>Enter a custom frame rate:</source>
         <translation>Skriv inn egendefinert bilderate:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="858"/>
-        <location filename="../gui/SettingsView.qml" line="906"/>
-        <location filename="../gui/SettingsView.qml" line="915"/>
-        <location filename="../gui/SettingsView.qml" line="1369"/>
+        <location filename="../gui/SettingsView.qml" line="897"/>
+        <location filename="../gui/SettingsView.qml" line="945"/>
+        <location filename="../gui/SettingsView.qml" line="954"/>
+        <location filename="../gui/SettingsView.qml" line="1408"/>
         <source>Custom</source>
         <translation>Egendefinert</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1480"/>
+        <location filename="../gui/SettingsView.qml" line="1519"/>
         <source>30 FPS</source>
         <translation>30 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1485"/>
+        <location filename="../gui/SettingsView.qml" line="1524"/>
         <source>60 FPS</source>
         <translation>60 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2627"/>
+        <location filename="../gui/SettingsView.qml" line="2669"/>
         <source>Keep the display awake while streaming</source>
         <translation>Hold skjermen våken under strømming</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2637"/>
+        <location filename="../gui/SettingsView.qml" line="2679"/>
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>Forhindrer at skjermspareren starter eller at skjermen går i dvale under strømming.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2689"/>
+        <location filename="../gui/SettingsView.qml" line="2731"/>
         <source>Capture system keyboard shortcuts</source>
         <translation>Fang systemtastatursarveier</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2697"/>
+        <location filename="../gui/SettingsView.qml" line="2739"/>
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>Lar deg fange tastatursnarveier på hele systemet under strømming, slik som Alt+Tab, som normalt ville blitt håndtert av klienten operativsystem.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2727"/>
+        <location filename="../gui/SettingsView.qml" line="2769"/>
         <source>in fullscreen</source>
         <translation>i fullskjermsmodus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2731"/>
+        <location filename="../gui/SettingsView.qml" line="2773"/>
         <source>always</source>
         <translation>alltid</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2772"/>
+        <location filename="../gui/SettingsView.qml" line="2814"/>
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>Når aktivert vil berøringsskjermen oppføre seg som styreflate. Ellers vil berøringsskjermen kontrollere musepekeren direkte.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2200"/>
+        <location filename="../gui/SettingsView.qml" line="2242"/>
         <source>Optimize game settings for streaming</source>
         <translation>Optimaliser spillinnstillinger for strømming</translation>
     </message>
@@ -1886,132 +2174,132 @@ DirectML: kjører den medfølgende RIFE 4.25 lite ONNX-modellen på D3D12 Direct
         <translation>Viser innstillinger for feilsøking og testing: renderer og videodekoder, motorer for bildeinterpolering, eksperimentelle videoformater og brytere for nettverkstester. Skjulte innstillinger beholder gjeldende verdier.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="461"/>
+        <location filename="../gui/SettingsView.qml" line="486"/>
         <source>Sharper where you look (foveated streaming)</source>
         <translation>Skarpere der du ser (foveert strømming)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Small</source>
         <translation>Liten</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Medium</source>
         <translation>Middels</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Large</source>
         <translation>Stor</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="487"/>
+        <location filename="../gui/SettingsView.qml" line="517"/>
         <source>Each eye is sent as a reduced picture of the whole view plus a full-detail picture that follows your gaze (it stays straight ahead without eye tracking). A larger size keeps more detail away from where you look, but uses more bandwidth and headset power and adds a little delay.</source>
         <translation>Hvert øye sendes som et forminsket bilde av hele synsfeltet pluss et bilde med full detalj som følger blikket ditt (uten øyesporing ligger det rett fremover). En større størrelse beholder flere detaljer utenfor der du ser, men bruker mer båndbredde og strøm i headsettet og gir litt mer forsinkelse.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="494"/>
+        <location filename="../gui/SettingsView.qml" line="524"/>
         <source>Frame rate</source>
         <translation>Bildefrekvens</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="504"/>
+        <location filename="../gui/SettingsView.qml" line="534"/>
         <source>Automatic (half rate while the network is unstable)</source>
         <translation>Automatisk (halv frekvens mens nettverket er ustabilt)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="505"/>
+        <location filename="../gui/SettingsView.qml" line="535"/>
         <source>Full (same as the headset refresh rate)</source>
         <translation>Full (samme som headsettets oppdateringsfrekvens)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="506"/>
+        <location filename="../gui/SettingsView.qml" line="536"/>
         <source>Half (each frame shown twice)</source>
         <translation>Halv (hvert bilde vises to ganger)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="507"/>
+        <location filename="../gui/SettingsView.qml" line="537"/>
         <source>Half with synthesized in-between frames</source>
         <translation>Halv med syntetiserte mellombilder</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="522"/>
+        <location filename="../gui/SettingsView.qml" line="552"/>
         <source>Automatic streams at full rate and switches to half rate without restarting the game while the network keeps delaying frames, then tries full rate again once it is stable. Half rate streams every other frame while the headset still displays at full rate: half the network traffic and more time to repair lost packets. Synthesized frames make motion look smoother but can wobble or tear on fast objects.</source>
         <translation>Automatisk strømmer med full frekvens og bytter til halv frekvens uten å starte spillet på nytt mens nettverket stadig forsinker bilder, og prøver full frekvens igjen når det er stabilt. Halv frekvens strømmer annethvert bilde mens headsettet fortsatt viser med full frekvens: halvparten så mye nettverkstrafikk og mer tid til å reparere tapte pakker. Syntetiserte bilder gjør bevegelser jevnere, men kan bølge eller revne på raske objekter.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="539"/>
+        <location filename="../gui/SettingsView.qml" line="569"/>
         <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers.</source>
         <translation>Senker bitraten når nettverket mister pakker, og hever den igjen når nettverket tar seg opp.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="545"/>
+        <location filename="../gui/SettingsView.qml" line="575"/>
         <source>Steering wheel with the controllers (Xbox controller mode)</source>
         <translation>Ratt med kontrollerne (Xbox-kontrollermodus)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="555"/>
+        <location filename="../gui/SettingsView.qml" line="585"/>
         <source>In games that use the virtual Xbox controller, hold both controllers like a steering wheel and turn them to steer (replaces the left stick&apos;s left/right). While streaming, hold both thumbsticks pressed for 1.5 seconds to switch it on or off.</source>
         <translation>I spill som bruker den virtuelle Xbox-kontrolleren, holder du begge kontrollerne som et ratt og vrir dem for å styre (erstatter venstre spaks venstre/høyre). Under strømming holder du begge tommelspakene inne i 1.5 sekunder for å slå det på eller av.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="560"/>
+        <location filename="../gui/SettingsView.qml" line="590"/>
         <source>Steering wheel rotation (full left to full right)</source>
         <translation>Rattrotasjon (fullt venstre til fullt høyre)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="583"/>
+        <location filename="../gui/SettingsView.qml" line="622"/>
         <source>How far you turn the controllers for full lock. 180° means a quarter turn either way reaches the stick&apos;s end.</source>
         <translation>Hvor langt du vrir kontrollerne for fullt utslag. 180° betyr at en kvart omdreining i begge retninger når spakens ende.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="589"/>
+        <location filename="../gui/SettingsView.qml" line="628"/>
         <source>Headset network during VR (Steam Frame with the streaming adapter)</source>
         <translation>Headsettets nettverk under VR (Steam Frame med strømmeadapteren)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="596"/>
+        <location filename="../gui/SettingsView.qml" line="635"/>
         <source>Always keep home Wi-Fi</source>
         <translation>Alltid behold hjemme-Wi-Fi</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="596"/>
+        <location filename="../gui/SettingsView.qml" line="635"/>
         <source>Pause home Wi-Fi while streaming</source>
         <translation>Sett hjemme-Wi-Fi på pause under strømming</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="706"/>
+        <location filename="../gui/SettingsView.qml" line="745"/>
         <source>Send the headset microphone to the PC</source>
         <translation>Send headset-mikrofonen til PC-en</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="716"/>
+        <location filename="../gui/SettingsView.qml" line="755"/>
         <source>During a VR stream your voice goes to the PC&apos;s &quot;Microphone (Steam Streaming Microphone)&quot; device (installed with Steam). Select it in the game or voice chat app.</source>
         <translation>Under en VR-strøm sendes stemmen din til PC-ens «Microphone (Steam Streaming Microphone)»-enhet (installert med Steam). Velg den i spillet eller talechat-appen.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1514"/>
+        <location filename="../gui/SettingsView.qml" line="1553"/>
         <source>Renderer</source>
         <translation>Renderer</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1532"/>
+        <location filename="../gui/SettingsView.qml" line="1571"/>
         <source>Auto (recommended) — let the system pick the most stable hardware decoding path</source>
         <translation>Automatisk (Auto) — anbefalt: lar systemet velge den mest stabile maskinvaredekodingsbanen</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1533"/>
+        <location filename="../gui/SettingsView.qml" line="1572"/>
         <source>Direct3D 11 — always use D3D11VA; works with the NV-OF / DirectML / NCNN interpolation engines</source>
         <translation>Direct3D 11 — låser D3D11VA, kan brukes med bildeinterpoleringsmotorene NV-OF / DirectML / NCNN</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1534"/>
+        <location filename="../gui/SettingsView.qml" line="1573"/>
         <source>Vulkan [experimental] — built-in frame interpolation; compatibility issues on some systems (AMD APU / older NVIDIA drivers)</source>
         <translation>Vulkan [eksperimentell] — innebygd bildeinterpolering, kompatibilitetsproblemer på enkelte maskiner (AMD APU / eldre NV-drivere)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1561"/>
+        <location filename="../gui/SettingsView.qml" line="1600"/>
         <source>Auto (recommended): same as upstream Moonlight&apos;s hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
@@ -2024,27 +2312,27 @@ Direct3D 11: låser eksplisitt D3D11VA; bildeinterpoleringsmotor kan velges mell
 Vulkan [eksperimentell]: tvinger Vulkan-first-kaskade + innebygd Vulkan-renderingskjede + dual-present, med innebygd bildeinterpolering (tilsvarer Generic). Kjente problemer: på NV-driver 596.36 gir innebygd vkCmdDecodeVideoKHR NVDEC device-lost i ONLY-modus; på AMD APU krasjer driveren ved video session memory bind på 226 MB; PARALLEL+SW-opplastingsbanen har lav ytelse (80+ ms/bilde). Blir anbefalt valg igjen når det er stabilt.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1572"/>
+        <location filename="../gui/SettingsView.qml" line="1611"/>
         <source>Linux video output (frontend)</source>
         <translation>Linux-videovisning (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1587"/>
+        <location filename="../gui/SettingsView.qml" line="1626"/>
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>Automatisk (Auto) — anbefalt: aarch64 eller Zink bruker Vulkan, ellers beholdes den opprinnelige rekkefølgen</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1588"/>
+        <location filename="../gui/SettingsView.qml" line="1627"/>
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — bruk Vulkan-visning først</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1589"/>
+        <location filename="../gui/SettingsView.qml" line="1628"/>
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — behold den opprinnelige rekkefølgen (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1605"/>
+        <location filename="../gui/SettingsView.qml" line="1644"/>
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -2061,107 +2349,107 @@ Vulkan: bruker alltid Vulkan (libplacebo) først, og faller automatisk tilbake t
 EGL: beholder den opprinnelige rekkefølgen og foretrekker ikke Vulkan.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1661"/>
+        <location filename="../gui/SettingsView.qml" line="1700"/>
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>Vulkan-rendereren bruker den innebygde bildeinterpoleringsmotoren (tilsvarer Generic). Bytt til Direct3D 11 for å velge en annen motor.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1679"/>
+        <location filename="../gui/SettingsView.qml" line="1718"/>
         <source>Interpolation mode:</source>
         <translation>Interpoleringsmodus:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1685"/>
+        <location filename="../gui/SettingsView.qml" line="1724"/>
         <source>Active (recommended)</source>
         <translation>Aktiv (anbefalt)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1706"/>
+        <location filename="../gui/SettingsView.qml" line="1745"/>
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>Serveren sender UI-fps / 2 (eller / 3 på skjermer med høy oppdateringsfrekvens), klienten interpolerer alltid dobbelt/trippelt. Lav serverbelastning, men krever en kraftig GPU i klienten.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1710"/>
+        <location filename="../gui/SettingsView.qml" line="1749"/>
         <source>Passive</source>
         <translation>Passiv</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1731"/>
+        <location filename="../gui/SettingsView.qml" line="1770"/>
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>Serveren sender full UI-fps. Klienten øker forholdet dynamisk etter recv%: ≥ 70 % gjennomgang, 40–70 % 2x, &lt; 40 % 3x. Egnet når serveren ikke alltid klarer full bilderate.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1827"/>
+        <location filename="../gui/SettingsView.qml" line="1869"/>
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY (integrerte / eldre GPU-er)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1831"/>
+        <location filename="../gui/SettingsView.qml" line="1873"/>
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN (ikke oppdaget; start klienten på nytt for å oppdage)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1833"/>
+        <location filename="../gui/SettingsView.qml" line="1875"/>
         <source>(not detected yet)</source>
         <translation>(ikke oppdaget ennå)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1837"/>
+        <location filename="../gui/SettingsView.qml" line="1879"/>
         <source>(not measured)</source>
         <translation>(ikke målt)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1838"/>
+        <location filename="../gui/SettingsView.qml" line="1880"/>
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>FRUC automatisk nivå (Vulkan unified autotier v1.4.127):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1839"/>
+        <location filename="../gui/SettingsView.qml" line="1881"/>
         <source>   GPU: </source>
         <translation>   GPU: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1840"/>
+        <location filename="../gui/SettingsView.qml" line="1882"/>
         <source>   Detected tier: </source>
         <translation>   Oppdaget nivå: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1841"/>
+        <location filename="../gui/SettingsView.qml" line="1883"/>
         <source>   Benchmark: </source>
         <translation>   benchmark: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1842"/>
+        <location filename="../gui/SettingsView.qml" line="1884"/>
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>Kjøretiden går automatisk opp og ned langs 7 nivåer (T-1..T5):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1845"/>
+        <location filename="../gui/SettingsView.qml" line="1887"/>
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (NVOF-GPU, chain er tung)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1846"/>
+        <location filename="../gui/SettingsView.qml" line="1888"/>
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (AMD/Intel uten NVOF)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1848"/>
+        <location filename="../gui/SettingsView.qml" line="1890"/>
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (laveste FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1849"/>
+        <location filename="../gui/SettingsView.qml" line="1891"/>
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = FRUC satt på pause (GPU-en klarer det ikke, hold 5 min og prøv igjen)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1861"/>
+        <location filename="../gui/SettingsView.qml" line="1903"/>
         <source>Edge MV threshold:</source>
         <translation>Terskel for kant-MV (Edge MV threshold):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1877"/>
+        <location filename="../gui/SettingsView.qml" line="1919"/>
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -2174,70 +2462,70 @@ Høy verdi (12–16): skarpere kanter, men det kan bli igjen mosaikk ved bevegel
 Bruk standardverdien først; hvis interpolerte kanter ser blokkete ut, senk til 4–6.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="529"/>
-        <location filename="../gui/SettingsView.qml" line="1954"/>
+        <location filename="../gui/SettingsView.qml" line="559"/>
+        <location filename="../gui/SettingsView.qml" line="1996"/>
         <source>Adjust bitrate automatically while streaming</source>
         <translation>Juster bitrate automatisk under strømming</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1964"/>
+        <location filename="../gui/SettingsView.qml" line="2006"/>
         <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers. The bitrate above is the maximum.</source>
         <translation>Senker bitraten når nettverket mister pakker, og hever den igjen når nettverket tar seg opp. Bitraten ovenfor er maksimum.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2087"/>
+        <location filename="../gui/SettingsView.qml" line="2129"/>
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>Lås bilderammetakt reduserer mikrohakking ved å forsinke bilder som kommer for tidlig. Det fungerer også med V-Sync av, så du beholder lav forsinkelse samtidig som ujevn bildeankomst jevnes ut.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2170"/>
+        <location filename="../gui/SettingsView.qml" line="2212"/>
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>Demp lydstrømmen når VipleStream ikke er det aktive vinduet</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2181"/>
+        <location filename="../gui/SettingsView.qml" line="2223"/>
         <source>Mutes VipleStream&apos;s audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>Demper lyden fra VipleStream når du bruker Alt+Tab ut av strømmen eller klikker på et annet vindu.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2211"/>
+        <location filename="../gui/SettingsView.qml" line="2253"/>
         <source>Quit app on host PC after ending stream</source>
         <translation>Lukk program på verts-PCen etter at strømmen er avsluttet</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2221"/>
+        <location filename="../gui/SettingsView.qml" line="2263"/>
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>Dette vil lukke programmet eller spillet du strømmer når du avslutter strømmen din. All ulagret fremdrift vil gå tapt!</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2300"/>
+        <location filename="../gui/SettingsView.qml" line="2342"/>
         <source>Design</source>
         <translation>Design</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2307"/>
+        <location filename="../gui/SettingsView.qml" line="2349"/>
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>Trygg: redaksjonelt rutenett, roligere toppfelt.
 Dristig: magasinforside-energi, overdimensjonerte titler.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2323"/>
+        <location filename="../gui/SettingsView.qml" line="2365"/>
         <source>Safe</source>
         <translation>Trygg</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2324"/>
+        <location filename="../gui/SettingsView.qml" line="2366"/>
         <source>Bold</source>
         <translation>Dristig</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2492"/>
+        <location filename="../gui/SettingsView.qml" line="2534"/>
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>Du må starte VipleStream på nytt for at endringen skal tre i kraft</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2596"/>
+        <location filename="../gui/SettingsView.qml" line="2638"/>
         <source>Updates your Discord status to display the name of the game you&apos;re streaming. The status reads &quot;Playing &lt;game&gt; · via VipleStream&quot; with the VipleStream icon.</source>
         <translation>Oppdaterer Discord-statusen din til å vise navnet på spillet du strømmer. Statusen viser «Spiller &lt;game&gt; · via VipleStream» med VipleStream-ikonet.</translation>
     </message>
@@ -2252,315 +2540,315 @@ Dristig: magasinforside-energi, overdimensjonerte titler.</translation>
         <translation>Oppløsning per øye</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="401"/>
+        <location filename="../gui/SettingsView.qml" line="407"/>
         <source>Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.</source>
         <translation>Færre piksler å kode, sende og dekode gir lavere forsinkelse. Verten kan fortsatt rendre i høyere oppløsning og skalere ned.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="406"/>
+        <location filename="../gui/SettingsView.qml" line="412"/>
         <source>Extra field of view (overscan)</source>
         <translation>Ekstra synsfelt (overscan)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="414"/>
-        <location filename="../gui/SettingsView.qml" line="440"/>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="420"/>
+        <location filename="../gui/SettingsView.qml" line="456"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Off</source>
         <translation>Av</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="427"/>
+        <location filename="../gui/SettingsView.qml" line="443"/>
         <source>Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.</source>
         <translation>Rendrer litt utenfor kanten for hvert øye, slik at det ikke dukker opp tomme kanter når du snur hodet.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="432"/>
+        <location filename="../gui/SettingsView.qml" line="448"/>
         <source>Pick the newest frame this late</source>
         <translation>Velg nyeste bilde så sent som</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="453"/>
+        <location filename="../gui/SettingsView.qml" line="478"/>
         <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
         <translation>Venter noen millisekunder før den velger hvilket bilde som skal vises, slik at bildet er ferskere. For lang ventetid gjør at headsettet hopper over bilder.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="596"/>
+        <location filename="../gui/SettingsView.qml" line="635"/>
         <source>Use the network test result</source>
         <translation>Bruk resultatet fra nettverkstesten</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="608"/>
+        <location filename="../gui/SettingsView.qml" line="647"/>
         <source>The headset has one Wi-Fi radio, so staying on home Wi-Fi while streaming over the adapter makes it switch back and forth and drop video. &quot;Test network&quot; below compares both and remembers the result for this place; until then home Wi-Fi is kept. While home Wi-Fi is paused the headset itself is offline; it reconnects when you stop streaming.</source>
         <translation>Headsettet har bare én Wi-Fi-radio, så hvis det blir værende på hjemme-Wi-Fi mens du strømmer via adapteren, bytter det frem og tilbake og mister videobilder. «Test nettverk» nedenfor sammenligner begge deler og husker resultatet for dette stedet; inntil da beholdes hjemme-Wi-Fi. Mens hjemme-Wi-Fi er satt på pause, er selve headsettet frakoblet; det kobler til igjen når du slutter å strømme.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="616"/>
+        <location filename="../gui/SettingsView.qml" line="655"/>
         <source>Cancel test</source>
         <translation>Avbryt test</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="616"/>
+        <location filename="../gui/SettingsView.qml" line="655"/>
         <source>Test network</source>
         <translation>Test nettverk</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="630"/>
+        <location filename="../gui/SettingsView.qml" line="669"/>
         <source>Plays a recorded table tennis clip from the host at 144 Hz and raises the resolution step by step, first with home Wi-Fi + adapter, then adapter only, then home Wi-Fi again. Takes about 10-20 minutes; you can keep the headset on or take it off. The headset&apos;s home Wi-Fi pauses for part of the test and Steam may sign in again afterwards.</source>
         <translation>Spiller av et innspilt bordtennisklipp fra verten ved 144 Hz og øker oppløsningen trinn for trinn – først med hjemme-Wi-Fi + adapter, deretter kun adapter, og så hjemme-Wi-Fi igjen. Tar omtrent 10–20 minutter; du kan beholde headsettet på eller ta det av. Headsettets hjemme-Wi-Fi settes på pause under deler av testen, og Steam logger kanskje inn på nytt etterpå.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="635"/>
+        <location filename="../gui/SettingsView.qml" line="674"/>
         <source>Apply</source>
         <translation>Bruk</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="655"/>
+        <location filename="../gui/SettingsView.qml" line="694"/>
         <source>Last test: %1</source>
         <translation>Siste test: %1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Network</source>
         <translation>Nettverk</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Per eye</source>
         <translation>Per øye</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Missed frames</source>
         <translation>Tapte bilder</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Latency p95 (ms)</source>
         <translation>Forsinkelse p95 (ms)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Mbps</source>
         <translation>Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>144 Hz</source>
         <translation>144 Hz</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="698"/>
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>yes</source>
         <translation>ja</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="698"/>
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>no</source>
         <translation>nei</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2602"/>
+        <location filename="../gui/SettingsView.qml" line="2644"/>
         <source>App updates</source>
         <translation>App-oppdateringer</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <location filename="../gui/SettingsView.qml" line="2651"/>
         <source>Don&apos;t check automatically</source>
         <translation>Ikke sjekk automatisk</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <location filename="../gui/SettingsView.qml" line="2651"/>
         <source>Notify me</source>
         <translation>Varsle meg</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <location filename="../gui/SettingsView.qml" line="2651"/>
         <source>Install automatically</source>
         <translation>Installer automatisk</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2621"/>
+        <location filename="../gui/SettingsView.qml" line="2663"/>
         <source>Checks for a new version when VipleStream starts. Install automatically downloads and verifies the update and restarts VipleStream, but never while you are streaming.</source>
         <translation>Søker etter ny versjon når VipleStream starter. «Installer automatisk» laster ned og verifiserer oppdateringen og starter VipleStream på nytt, men aldri mens du strømmer.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2698"/>
+        <location filename="../gui/SettingsView.qml" line="2740"/>
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>MERK: Enkelte tastatursnarveier, som Ctrl+Alt+Del på Windows, kan ikke fanges opp av noe program, heller ikke VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2860"/>
+        <location filename="../gui/SettingsView.qml" line="2902"/>
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>Behandle inndata fra spillkontroller når VipleStream er i bakgrunnen</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2871"/>
+        <location filename="../gui/SettingsView.qml" line="2913"/>
         <source>Allows VipleStream to capture gamepad inputs even if it&apos;s not the current window in focus</source>
         <translation>Lar VipleStream fange inndata fra spillkontrollere selv om det ikke er vinduet som har fokus</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2881"/>
+        <location filename="../gui/SettingsView.qml" line="2923"/>
         <source>Network (MP-QUIC)</source>
         <translation>Nettverk (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2891"/>
+        <location filename="../gui/SettingsView.qml" line="2933"/>
         <source>Enable MP-QUIC multipath transport</source>
         <translation>Aktiver MP-QUIC flerbanetransport</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2901"/>
+        <location filename="../gui/SettingsView.qml" line="2943"/>
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>Bruker QUIC multipath (RFC 9443) til strømming. Gir failover mellom Wi‑Fi og mobilnett og samling av båndbredde over to nettverkskort. Krever støtte på serveren.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2906"/>
+        <location filename="../gui/SettingsView.qml" line="2948"/>
         <source>Path scheduler</source>
         <translation>Baneplanlegger</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2922"/>
+        <location filename="../gui/SettingsView.qml" line="2964"/>
         <source>Auto (per stream type)</source>
         <translation>Auto (per strømtype)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2923"/>
+        <location filename="../gui/SettingsView.qml" line="2965"/>
         <source>Lowest latency</source>
         <translation>Lavest forsinkelse</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2924"/>
+        <location filename="../gui/SettingsView.qml" line="2966"/>
         <source>Bandwidth aggregation</source>
         <translation>Samling av båndbredde</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2925"/>
+        <location filename="../gui/SettingsView.qml" line="2967"/>
         <source>Redundant (all paths)</source>
         <translation>Redundant (alle baner)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2926"/>
+        <location filename="../gui/SettingsView.qml" line="2968"/>
         <source>Earliest completion</source>
         <translation>Tidligst fullført</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2935"/>
+        <location filename="../gui/SettingsView.qml" line="2977"/>
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>Auto: video=ECF, lyd=redundant, kontroll=min-RTT. Samling: round-robin over alle nettverkskort for maksimal båndbredde.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2955"/>
+        <location filename="../gui/SettingsView.qml" line="2997"/>
         <source>Video decoder</source>
         <translation>Videodekoder</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2981"/>
-        <location filename="../gui/SettingsView.qml" line="3036"/>
+        <location filename="../gui/SettingsView.qml" line="3023"/>
+        <location filename="../gui/SettingsView.qml" line="3078"/>
         <source>Automatic (Recommended)</source>
         <translation>Automatisk (anbefalt)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2985"/>
+        <location filename="../gui/SettingsView.qml" line="3027"/>
         <source>Force software decoding</source>
         <translation>Påtving mykvaredekoding</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2989"/>
+        <location filename="../gui/SettingsView.qml" line="3031"/>
         <source>Force hardware decoding</source>
         <translation>Påtving maskinvaredekoding</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3005"/>
+        <location filename="../gui/SettingsView.qml" line="3047"/>
         <source>Video codec</source>
         <translation>Videokodek</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3040"/>
+        <location filename="../gui/SettingsView.qml" line="3082"/>
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3044"/>
+        <location filename="../gui/SettingsView.qml" line="3086"/>
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3052"/>
+        <location filename="../gui/SettingsView.qml" line="3094"/>
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave (ekstremt lav forsinkelse, LAN)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3095"/>
+        <location filename="../gui/SettingsView.qml" line="3137"/>
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>Aktiver YUV 4:4:4 (eksperimentell)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3118"/>
+        <location filename="../gui/SettingsView.qml" line="3160"/>
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>Bra for strømming av skrivebord og spill med mye tekst, men ikke anbefalt for spill med raskt tempo.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3120"/>
+        <location filename="../gui/SettingsView.qml" line="3162"/>
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>YUV 4:4:4 støttes ikke på denne PC-en.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3127"/>
+        <location filename="../gui/SettingsView.qml" line="3169"/>
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>Lås opp bitrategrense (eksperimentell)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3146"/>
+        <location filename="../gui/SettingsView.qml" line="3188"/>
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>Finn PC-er på lokalnettverket automatisk (anbefales)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3167"/>
+        <location filename="../gui/SettingsView.qml" line="3209"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Oppdag blokkerte tilkoblinger automatisk (anbefales)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1795"/>
+        <location filename="../gui/SettingsView.qml" line="1836"/>
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>Kvalitet — Beste bildekvalitet, høyere GPU-belastning</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1796"/>
+        <location filename="../gui/SettingsView.qml" line="1837"/>
         <source>Balanced — Recommended (default)</source>
         <translation>Balansert — Anbefalt (standard)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1797"/>
+        <location filename="../gui/SettingsView.qml" line="1838"/>
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>Ytelse — Lavest forsinkelse, egnet for iGPU</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2226"/>
+        <location filename="../gui/SettingsView.qml" line="2268"/>
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>NAT-traversering (signalrelé)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2236"/>
+        <location filename="../gui/SettingsView.qml" line="2278"/>
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>Relé-URL (f.eks. ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2247"/>
+        <location filename="../gui/SettingsView.qml" line="2289"/>
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>Relé-PSK (forhåndsdelt nøkkel, tom hvis ingen)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2257"/>
+        <location filename="../gui/SettingsView.qml" line="2299"/>
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>Valgfritt: hjelper tilkobling når begge sider er bak NAT. Kjør viplestream-relay på en server med offentlig IP.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2267"/>
+        <location filename="../gui/SettingsView.qml" line="2309"/>
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>Tving strømming via relé (for UDP-tunnel-testing)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1806"/>
+        <location filename="../gui/SettingsView.qml" line="1848"/>
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2569,7 +2857,7 @@ Balansert: 8-nabo-søk + tidsmessig utjevning (~8 ms på iGPU)
 Ytelse: 4-nabo-søk + minimal behandling (~6 ms på iGPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2277"/>
+        <location filename="../gui/SettingsView.qml" line="2319"/>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>Alltid strøm via relé selv når verten er direkte tilgjengelig. Nyttig for å verifisere relé-UDP-tunnelen når en VPN (f.eks. Cloudflare WARP) ellers ville latt direkte /launch fungere.</translation>
     </message>
@@ -2603,32 +2891,128 @@ Ytelse: 4-nabo-søk + minimal behandling (~6 ms på iGPU)</translation>
         <translation>Internettilkoblingen til denne PCen blokkerer VipleStream. Strømming over Internett fungerer kanskje ikke så lenge du er koblet til dette nettverket.</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="192"/>
-        <source>VR controller: hold A+X+trigger+grip</source>
-        <translation>VR-kontroller: hold inne A+X+avtrekker+grep</translation>
+        <location filename="../gui/StreamSegue.qml" line="195"/>
+        <location filename="../gui/StreamSegue.qml" line="196"/>
+        <source>VR controller: hold A+X+trigger+grip to end the stream</source>
+        <translation>VR-kontroller: hold inne A+X+avtrekker+grep for å avslutte strømmen</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="197"/>
+        <source>Flat-screen stream: press the left menu button to open or close the virtual keyboard</source>
+        <translation>Skjermstrøm: trykk venstre menyknapp for å åpne eller lukke det virtuelle tastaturet</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="198"/>
+        <source>Flat-screen stream: hold the left menu button to bring the screen back in front of you</source>
+        <translation>Skjermstrøm: hold venstre menyknapp inne for å hente skjermen tilbake foran deg</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="199"/>
+        <source>Flat-screen stream: trigger = left click, grip = right click, thumbstick up/down = scroll</source>
+        <translation>Skjermstrøm: avtrekker = venstreklikk, grep = høyreklikk, tommelspak opp/ned = rull</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="200"/>
+        <source>VR stream: hold menu+trigger for one second to open the SteamVR dashboard on the PC</source>
+        <translation>VR-strøm: hold meny+avtrekker inne i ett sekund for å åpne SteamVR-dashbordet på PC-en</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="201"/>
+        <source>VR stream: hold menu+grip on one hand for one second to open or close the virtual keyboard</source>
+        <translation>VR-strøm: hold meny+grep på én hånd inne i ett sekund for å åpne eller lukke det virtuelle tastaturet</translation>
     </message>
     <message>
         <location filename="../gui/StreamSegue.qml" line="202"/>
+        <source>Hold both menu buttons for 2 seconds to switch Xbox controller mode (flat-screen and VR streams)</source>
+        <translation>Hold begge menyknappene inne i 2 sekunder for å bytte Xbox-kontrollermodus (skjermstrøm og VR-strøm)</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="203"/>
+        <source>Hold both thumbsticks down for 1.5 seconds to switch steering wheel mode (in Xbox controller mode)</source>
+        <translation>Hold begge tommelspakene nede i 1,5 sekunder for å bytte rattmodus (i Xbox-kontrollermodus)</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="204"/>
+        <source>VR stream: games without VR controller support get an Xbox controller automatically</source>
+        <translation>VR-strøm: spill uten støtte for VR-kontrollere får automatisk en Xbox-kontroller</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="207"/>
+        <source>Press %1 to show or hide the performance overlay</source>
+        <translation>Trykk %1 for å vise eller skjule ytelsesoverlegget</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="207"/>
+        <source>Ctrl+Alt+Shift+S</source>
+        <translation>Ctrl+Alt+Skift+S</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="208"/>
+        <source>Press %1 to switch between windowed and full-screen</source>
+        <translation>Trykk %1 for å bytte mellom vindus- og fullskjermsvisning</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="208"/>
+        <source>Ctrl+Alt+Shift+X</source>
+        <translation>Ctrl+Alt+Skift+X</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="209"/>
+        <source>Press %1 to release or capture the mouse and keyboard</source>
+        <translation>Trykk %1 for å slippe eller fange mus og tastatur</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="209"/>
+        <source>Ctrl+Alt+Shift+Z</source>
+        <translation>Ctrl+Alt+Skift+Z</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="210"/>
+        <source>Press %1 to switch the mouse between game mode and remote desktop mode</source>
+        <translation>Trykk %1 for å bytte musen mellom spillmodus og eksternt skrivebordsmodus</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="210"/>
+        <source>Ctrl+Alt+Shift+M</source>
+        <translation>Ctrl+Alt+Skift+M</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="211"/>
+        <source>Press %1 to type the clipboard text on the host</source>
+        <translation>Trykk %1 for å skrive inn utklippstavlens tekst på verten</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="211"/>
+        <source>Ctrl+Alt+Shift+V</source>
+        <translation>Ctrl+Alt+Skift+V</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="213"/>
+        <source>Gamepad: hold Start to use the gamepad as a mouse</source>
+        <translation>Spillkontroller: hold Start inne for å bruke spillkontrolleren som mus</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="225"/>
         <source>Failed to start the stream.</source>
         <translation>Klarte ikke å starte strømmen.</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="188"/>
+        <location filename="../gui/StreamSegue.qml" line="216"/>
         <source>Tip:</source>
         <translation>Tips:</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="188"/>
+        <location filename="../gui/StreamSegue.qml" line="190"/>
         <source>Press %1 to disconnect your session</source>
         <translation>Trykk %1 for å koble fra økten</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="189"/>
+        <location filename="../gui/StreamSegue.qml" line="191"/>
         <source>Start+Select+L1+R1</source>
         <translation>Start+Select+L1+R1</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="189"/>
+        <location filename="../gui/StreamSegue.qml" line="191"/>
         <source>Ctrl+Alt+Shift+Q</source>
         <translation>Ctrl+Alt+Skift+Q</translation>
     </message>
@@ -2636,77 +3020,77 @@ Ytelse: 4-nabo-søk + minimal behandling (~6 ms på iGPU)</translation>
 <context>
     <name>UpdateDialog</name>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="78"/>
+        <location filename="../gui/UpdateDialog.qml" line="79"/>
         <source>Download and install VipleStream %1?</source>
         <translation>Laste ned og installere VipleStream %1?</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="81"/>
+        <location filename="../gui/UpdateDialog.qml" line="82"/>
         <source>Working…</source>
         <translation>Arbeider…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="84"/>
+        <location filename="../gui/UpdateDialog.qml" line="85"/>
         <source>VipleStream %1 is available.</source>
         <translation>VipleStream %1 er tilgjengelig.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="86"/>
+        <location filename="../gui/UpdateDialog.qml" line="87"/>
         <source>Update failed</source>
         <translation>Oppdatering mislyktes</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="98"/>
+        <location filename="../gui/UpdateDialog.qml" line="99"/>
         <source>Loading release notes…</source>
         <translation>Laster inn versjonsmerknader…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="99"/>
+        <location filename="../gui/UpdateDialog.qml" line="100"/>
         <source>Couldn&apos;t load the release notes.</source>
         <translation>Kunne ikke laste inn versjonsmerknadene.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="128"/>
+        <location filename="../gui/UpdateDialog.qml" line="134"/>
         <source>VipleStream will close and relaunch automatically after the update is applied. On Windows you may be prompted by UAC if installed to Program Files.</source>
         <translation>VipleStream lukkes og startes automatisk på nytt når oppdateringen er installert. På Windows kan du få en UAC-forespørsel hvis programmet er installert i Program Files.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="164"/>
+        <location filename="../gui/UpdateDialog.qml" line="170"/>
         <source>%1 / %2 MB</source>
         <translation>%1 / %2 MB</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="166"/>
+        <location filename="../gui/UpdateDialog.qml" line="172"/>
         <source>Connecting…</source>
         <translation>Kobler til…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="188"/>
+        <location filename="../gui/UpdateDialog.qml" line="195"/>
         <source>Click &apos;Open release page&apos; to download manually.</source>
         <translation>Klikk «Åpne utgivelsessiden» for å laste ned manuelt.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="208"/>
+        <location filename="../gui/UpdateDialog.qml" line="215"/>
         <source>Yes</source>
         <translation>Ja</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="223"/>
+        <location filename="../gui/UpdateDialog.qml" line="230"/>
         <source>No</source>
         <translation>Nei</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="235"/>
+        <location filename="../gui/UpdateDialog.qml" line="242"/>
         <source>Cancel</source>
         <translation>Avbryt</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="248"/>
+        <location filename="../gui/UpdateDialog.qml" line="255"/>
         <source>Open release page</source>
         <translation>Åpne utgivelsessiden</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="263"/>
+        <location filename="../gui/UpdateDialog.qml" line="276"/>
         <source>Close</source>
         <translation>Lukk</translation>
     </message>
@@ -2714,144 +3098,148 @@ Ytelse: 4-nabo-søk + minimal behandling (~6 ms på iGPU)</translation>
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="67"/>
+        <location filename="../backend/updater.cpp" line="69"/>
         <source>On the Steam Frame, VipleStream updates itself in the background while it is closed (when installed with the installer script). To update right away, close VipleStream and run the new installer script from the release page.</source>
         <translation>På Steam Frame oppdaterer VipleStream seg i bakgrunnen mens det er lukket (når det er installert med installasjonsskriptet). For å oppdatere med en gang, lukk VipleStream og kjør det nye installasjonsskriptet fra utgivelsessiden.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="71"/>
+        <location filename="../backend/updater.cpp" line="73"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>Denne kopien av VipleStream er installert som Flatpak. Last ned den nye .flatpak-filen fra utgivelsessiden og installer den med «flatpak install --bundle &lt;file&gt;». Hvis du installerte fra et Flatpak-depot, kjør «flatpak update» i stedet.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="77"/>
+        <location filename="../backend/updater.cpp" line="79"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>VipleStream kjører ikke fra en AppImage og kan derfor ikke erstatte seg selv. Last ned den nye versjonen fra utgivelsessiden.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="80"/>
+        <location filename="../backend/updater.cpp" line="82"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>Automatisk installasjon er ikke tilgjengelig for Linux arm64 ennå. Last ned den nye versjonen fra utgivelsessiden.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="84"/>
+        <location filename="../backend/updater.cpp" line="86"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>Automatisk installasjon er ikke tilgjengelig på denne plattformen (%1). Last ned den nye versjonen fra utgivelsessiden.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="150"/>
+        <location filename="../backend/updater.cpp" line="159"/>
         <source>Querying release assets…</source>
         <translation>Henter utgivelsesfiler…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="275"/>
-        <location filename="../backend/updater.cpp" line="419"/>
+        <location filename="../backend/updater.cpp" line="285"/>
+        <location filename="../backend/updater.cpp" line="459"/>
         <source>Update cancelled.</source>
         <translation>Oppdatering avbrutt.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="279"/>
+        <location filename="../backend/updater.cpp" line="289"/>
         <source>Failed to query release info: %1</source>
         <translation>Kunne ikke hente utgivelsesinformasjon: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="287"/>
+        <location filename="../backend/updater.cpp" line="297"/>
         <source>Release JSON malformed: %1</source>
         <translation>Ugyldig utgivelses-JSON: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="312"/>
+        <location filename="../backend/updater.cpp" line="322"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>Utgivelsesinformasjonen fra GitHub har ingen tag.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="315"/>
+        <location filename="../backend/updater.cpp" line="325"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>Den nyeste utgivelsestaggen «%1» er ikke et versjonsnummer.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="320"/>
+        <location filename="../backend/updater.cpp" line="330"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>Utgivelsesinformasjonen fra GitHub er ikke oppdatert ennå: den viser fortsatt %1, som ikke er nyere enn denne versjonen (%2). Prøv igjen om noen minutter.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="325"/>
+        <location filename="../backend/updater.cpp" line="335"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>Utgivelse %1 har ingen vedlagte filer ennå. Prøv igjen om noen minutter.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="332"/>
+        <location filename="../backend/updater.cpp" line="342"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>Utgivelse %1 har ingen installerbar pakke for denne plattformen (%2).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="341"/>
+        <location filename="../backend/updater.cpp" line="352"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>VipleStream %1 er tilgjengelig som %2, men må installeres manuelt. %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="356"/>
+        <location filename="../backend/updater.cpp" line="380"/>
+        <location filename="../backend/updater.cpp" line="389"/>
         <source>Cannot open download file: %1</source>
         <translation>Kan ikke åpne nedlastingsfilen: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="360"/>
+        <location filename="../backend/updater.cpp" line="393"/>
         <source>Downloading %1…</source>
         <translation>Laster ned %1…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="430"/>
+        <location filename="../backend/updater.cpp" line="363"/>
+        <location filename="../backend/updater.cpp" line="367"/>
+        <location filename="../backend/updater.cpp" line="470"/>
+        <location filename="../backend/updater.cpp" line="487"/>
         <source>Download failed: %1</source>
         <translation>Nedlasting mislyktes: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="436"/>
+        <location filename="../backend/updater.cpp" line="477"/>
         <source>Could not save the downloaded update. The disk may be full.</source>
         <translation>Kunne ikke lagre den nedlastede oppdateringen. Disken kan være full.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="445"/>
+        <location filename="../backend/updater.cpp" line="498"/>
         <source>Preparing installer…</source>
         <translation>Klargjør installasjonsprogrammet…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="451"/>
+        <location filename="../backend/updater.cpp" line="504"/>
         <source>Restarting to apply update…</source>
         <translation>Starter på nytt for å installere oppdateringen…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="548"/>
+        <location filename="../backend/updater.cpp" line="618"/>
         <source>The update was not installed because VipleStream did not exit in time. Please close VipleStream and try updating again.</source>
         <translation>Oppdateringen ble ikke installert fordi VipleStream ikke avsluttet i tide. Lukk VipleStream og prøv å oppdatere på nytt.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="555"/>
-        <location filename="../backend/updater.cpp" line="626"/>
+        <location filename="../backend/updater.cpp" line="625"/>
+        <location filename="../backend/updater.cpp" line="716"/>
         <source>Cannot write helper script: %1</source>
         <translation>Kan ikke skrive hjelpeskript: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="580"/>
+        <location filename="../backend/updater.cpp" line="663"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>Kunne ikke starte oppdateringsprogrammet (UAC avvist eller PowerShell mangler).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="590"/>
+        <location filename="../backend/updater.cpp" line="673"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>Kjører ikke fra AppImage — APPIMAGE-miljøvariabelen er ikke satt. Installer på nytt manuelt.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="600"/>
+        <location filename="../backend/updater.cpp" line="683"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>AppImage-mappen er ikke skrivbar: %1. Flytt VipleStream til et sted brukeren kan skrive til (f.eks. ~/Applications/) og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="639"/>
+        <location filename="../backend/updater.cpp" line="729"/>
         <source>Failed to launch updater helper script.</source>
         <translation>Kunne ikke starte hjelpeskriptet for oppdatering.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="645"/>
+        <location filename="../backend/updater.cpp" line="735"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>Automatisk oppdatering støttes ikke på denne plattformen.</translation>
     </message>
@@ -3136,42 +3524,42 @@ Ytelse: 4-nabo-søk + minimal behandling (~6 ms på iGPU)</translation>
         <translation>VR-modus støttes ikke på denne plattformen.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="526"/>
+        <location filename="../backend/vrlauncher.cpp" line="529"/>
         <source>Could not start the VR stream.</source>
         <translation>Kunne ikke starte VR-strømmen.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="577"/>
+        <location filename="../backend/vrlauncher.cpp" line="580"/>
         <source>The video player stopped unexpectedly.</source>
         <translation>Videospilleren stoppet uventet.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="580"/>
+        <location filename="../backend/vrlauncher.cpp" line="583"/>
         <source>Could not start VR for the video player.</source>
         <translation>Kunne ikke starte VR for videospilleren.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="583"/>
+        <location filename="../backend/vrlauncher.cpp" line="586"/>
         <source>Could not play this video.</source>
         <translation>Kunne ikke spille av denne videoen.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="586"/>
+        <location filename="../backend/vrlauncher.cpp" line="589"/>
         <source>The video player ended with an error (code %1).</source>
         <translation>Videospilleren ble avsluttet med en feil (kode %1).</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="646"/>
+        <location filename="../backend/vrlauncher.cpp" line="649"/>
         <source>The VR stream stopped unexpectedly.</source>
         <translation>VR-strømmen stoppet uventet.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="650"/>
+        <location filename="../backend/vrlauncher.cpp" line="653"/>
         <source>Another app is running on the host. Quit it first, then start the VR app again.</source>
         <translation>Et annet program kjører på verten. Avslutt det først, og start VR-programmet på nytt.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="654"/>
+        <location filename="../backend/vrlauncher.cpp" line="657"/>
         <source>The VR stream ended with an error (code %1).</source>
         <translation>VR-strømmen ble avsluttet med en feil (kode %1).</translation>
     </message>
@@ -3210,131 +3598,137 @@ Ytelse: 4-nabo-søk + minimal behandling (~6 ms på iGPU)</translation>
         <translation>ikke jevnt</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="127"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="271"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="125"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="302"/>
         <source>The network test is not available here.</source>
         <translation>Nettverkstesten er ikke tilgjengelig her.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="131"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="129"/>
         <source>Stop the current stream first.</source>
         <translation>Stopp den pågående strømmen først.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="145"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="143"/>
         <source>No VR-capable host is online. Turn on the host PC and try again.</source>
         <translation>Ingen VR-kompatibel vert er tilkoblet. Slå på verts-PC-en og prøv igjen.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="150"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="148"/>
         <source>The headset network helper is not running. Reinstall VipleStream with the Steam Frame installer script.</source>
         <translation>Nettverkshjelperen på headsettet kjører ikke. Installer VipleStream på nytt med installasjonsskriptet for Steam Frame.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="154"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="152"/>
         <source>The streaming adapter is not connected, so there is nothing to compare.</source>
         <translation>Strømmeadapteren er ikke tilkoblet, så det er ingenting å sammenligne.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="158"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="156"/>
         <source>The host has no address on the streaming adapter&apos;s network.</source>
         <translation>Verten har ingen adresse på strømmeadapterens nettverk.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="177"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="267"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="331"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="183"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="298"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="362"/>
         <source>Cancelled.</source>
         <translation>Avbrutt.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="180"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="186"/>
         <source>Cancelling after this step...</source>
         <translation>Avbryter etter dette trinnet...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="196"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="202"/>
         <source>Pausing the headset&apos;s home Wi-Fi...</source>
         <translation>Setter headsettets hjemme-Wi-Fi på pause...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="196"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="202"/>
         <source>Reconnecting the headset&apos;s home Wi-Fi...</source>
         <translation>Kobler til headsettets hjemme-Wi-Fi på nytt...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="221"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="227"/>
         <source>Home Wi-Fi paused; waiting for the adapter link to settle...</source>
         <translation>Hjemme-Wi-Fi satt på pause; venter på at adapterforbindelsen skal stabilisere seg...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="224"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="230"/>
         <source>Could not pause the headset&apos;s home Wi-Fi (%1).</source>
         <translation>Kunne ikke sette headsettets hjemme-Wi-Fi på pause (%1).</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="224"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="230"/>
         <source>no answer from the helper</source>
         <translation>ikke noe svar fra hjelperen</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="232"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="240"/>
         <source>Home Wi-Fi reconnected; waiting for the network to settle...</source>
         <translation>Hjemme-Wi-Fi koblet til på nytt; venter på at nettverket skal stabilisere seg...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="235"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="243"/>
         <source>The headset&apos;s home Wi-Fi did not reconnect (state: %1).</source>
         <translation>Headsettets hjemme-Wi-Fi koblet ikke til på nytt (tilstand: %1).</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="280"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="267"/>
+        <source>The streaming adapter dropped out during the test, so no choice was saved. Try again.</source>
+        <translation>Strømmeadapteren falt ut under testen, så ingen valg ble lagret. Prøv igjen.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="277"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="311"/>
         <source>Could not start the test stream.</source>
         <translation>Kunne ikke starte teststrømmen.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="285"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="386"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="316"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="417"/>
         <source>adapter only</source>
         <translation>kun adapter</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="285"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="316"/>
         <source>home Wi-Fi + adapter</source>
         <translation>hjemme-Wi-Fi + adapter</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="286"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="317"/>
         <source>Testing %1: %2 x %2 per eye at 144 Hz (step %3 of up to %4)...</source>
         <translation>Tester %1: %2 x %2 per øye ved 144 Hz (trinn %3 av opptil %4)...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="327"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="358"/>
         <source>The test stream did not run: %1</source>
         <translation>Teststrømmen kjørte ikke: %1</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="378"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="409"/>
         <source>Use adapter only: the headset pauses home Wi-Fi while you play VR here (smoothest: %1 per eye with adapter only, %2 with home Wi-Fi).</source>
         <translation>Bruk kun adapter: headsettet setter hjemme-Wi-Fi på pause mens du spiller VR her (jevnest: %1 per øye med kun adapter, %2 med hjemme-Wi-Fi).</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="380"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="411"/>
         <source>Keep home Wi-Fi: adapter only was not clearly better here (smoothest: %1 per eye with home Wi-Fi, %2 with adapter only).</source>
         <translation>Behold hjemme-Wi-Fi: kun adapter var ikke tydelig bedre her (jevnest: %1 per øye med hjemme-Wi-Fi, %2 med kun adapter).</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="383"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="414"/>
         <source>The highest step was limited by the headset itself, not the network.</source>
         <translation>Det høyeste trinnet ble begrenset av selve headsettet, ikke nettverket.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="386"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="417"/>
         <source>keep home Wi-Fi</source>
         <translation>behold hjemme-Wi-Fi</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="387"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="418"/>
         <source>Network test finished.</source>
         <translation>Nettverkstest fullført.</translation>
     </message>
@@ -3342,27 +3736,27 @@ Ytelse: 4-nabo-søk + minimal behandling (~6 ms på iGPU)</translation>
 <context>
     <name>VrNetMode</name>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="157"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="161"/>
         <source>Network test: trying adapter only for about 30 seconds (home Wi-Fi pauses, then comes back)</source>
         <translation>Nettverkstest: prøver kun adapter i omtrent 30 sekunder (hjemme-Wi-Fi settes på pause og kobler deretter til igjen)</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="197"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="201"/>
         <source>Network test: smoother with home Wi-Fi paused during VR (missed frames %1% -&gt; %2%). It reconnects when you stop streaming.</source>
         <translation>Nettverkstest: jevnere med hjemme-Wi-Fi satt på pause under VR (tapte bilder %1% -&gt; %2%). Kobler til igjen når du slutter å strømme.</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="203"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="207"/>
         <source>Network test: keeping home Wi-Fi (missed frames %1% with it, %2% without)</source>
         <translation>Nettverkstest: beholder hjemme-Wi-Fi (tapte bilder %1% med det, %2% uten)</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="251"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="255"/>
         <source>Streaming adapter lost - reconnecting the headset&apos;s home Wi-Fi</source>
         <translation>Mistet strømmeadapter – kobler til headsettets hjemme-Wi-Fi på nytt</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="263"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="284"/>
         <source>Home Wi-Fi paused during VR for a smoother stream - it reconnects when you stop streaming</source>
         <translation>Hjemme-Wi-Fi satt på pause under VR for jevnere strømming – kobler til igjen når du slutter å strømme</translation>
     </message>

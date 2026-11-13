@@ -4,188 +4,461 @@
 <context>
     <name>AppContent</name>
     <message>
-        <location filename="../gui/AppContent.qml" line="350"/>
+        <location filename="../gui/AppContent.qml" line="353"/>
         <source>Add PC manually</source>
         <translation>Додати ПК вручну</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="380"/>
+        <location filename="../gui/AppContent.qml" line="383"/>
         <source>VR mode (switch mode)</source>
         <translation>Режим VR (змінити режим)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="380"/>
+        <location filename="../gui/AppContent.qml" line="383"/>
         <source>Desktop mode (switch mode)</source>
         <translation>Режим робочого столу (змінити режим)</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="418"/>
+        <location filename="../gui/AppContent.qml" line="421"/>
         <source>Update available for VipleStream: Version %1</source>
         <translation>Доступне оновлення VipleStream: версія %1</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="456"/>
+        <location filename="../gui/AppContent.qml" line="459"/>
         <source>Help</source>
         <translation>Довідка</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="482"/>
+        <location filename="../gui/AppContent.qml" line="485"/>
         <source>Gamepad Mapper</source>
         <translation>Розкладка геймпада</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="237"/>
-        <location filename="../gui/AppContent.qml" line="513"/>
+        <location filename="../gui/AppContent.qml" line="238"/>
+        <location filename="../gui/AppContent.qml" line="516"/>
         <source>Settings</source>
         <translation>Налаштування</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="227"/>
+        <location filename="../gui/AppContent.qml" line="228"/>
         <source>HOSTS</source>
         <translation>ХОСТИ</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="228"/>
+        <location filename="../gui/AppContent.qml" line="229"/>
         <source>LIBRARY</source>
         <translation>БІБЛІОТЕКА</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="229"/>
+        <location filename="../gui/AppContent.qml" line="230"/>
         <source>SETTINGS</source>
         <translation>НАЛАШТУВАННЯ</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="235"/>
+        <location filename="../gui/AppContent.qml" line="236"/>
         <source>Hosts</source>
         <translation>Хости</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="236"/>
+        <location filename="../gui/AppContent.qml" line="237"/>
         <source>Library</source>
         <translation>Бібліотека</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="520"/>
+        <location filename="../gui/AppContent.qml" line="523"/>
         <source>No functioning hardware accelerated video decoder was detected by VipleStream. Your streaming performance may be severely degraded in this configuration.</source>
         <translation>VipleStream не виявив робочого апаратного відеодекодера. У цій конфігурації продуктивність трансляції може значно погіршитися.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="522"/>
+        <location filename="../gui/AppContent.qml" line="525"/>
         <source>Click the Help button for more information on solving this problem.</source>
         <translation>Натисніть кнопку «Довідка», щоб дізнатися більше про вирішення цієї проблеми.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="529"/>
+        <location filename="../gui/AppContent.qml" line="532"/>
         <source>Hardware acceleration doesn&apos;t work on XWayland. Continuing on XWayland may result in poor streaming performance. Try running with QT_QPA_PLATFORM=wayland or switch to X11.</source>
         <translation>Апаратне прискорення не працює в XWayland. Робота в XWayland може призвести до низької продуктивності трансляції. Спробуйте запустити з QT_QPA_PLATFORM=wayland або перейдіть на X11.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="531"/>
+        <location filename="../gui/AppContent.qml" line="534"/>
         <source>Click the Help button for more information.</source>
         <translation>Натисніть кнопку «Довідка», щоб дізнатися більше.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="539"/>
+        <location filename="../gui/AppContent.qml" line="542"/>
         <source>This version of VipleStream isn&apos;t optimized for your PC. Please download the &apos;%1&apos; version of VipleStream for the best streaming performance.</source>
         <translation>Ця версія VipleStream не оптимізована для вашого ПК. Завантажте версію VipleStream «%1» для найкращої продуктивності трансляції.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="554"/>
+        <location filename="../gui/AppContent.qml" line="557"/>
         <source>VipleStream detected gamepads without a mapping:</source>
         <translation>VipleStream виявив геймпади без налаштування кнопок:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="556"/>
+        <location filename="../gui/AppContent.qml" line="559"/>
         <source>Click the Help button for information on how to map your gamepads.</source>
         <translation>Натисніть кнопку «Довідка», щоб дізнатися, як налаштувати кнопки геймпадів.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="567"/>
+        <location filename="../gui/AppContent.qml" line="570"/>
         <source>VipleStream found a HID device that is not responding:</source>
         <translation>VipleStream знайшов HID-пристрій, який не відповідає:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="568"/>
+        <location filename="../gui/AppContent.qml" line="571"/>
         <source>Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.</source>
         <translation>Виявлення геймпадів і передавання Steam Controller вимкнено, доки пристрій знову не відповість. Від&apos;єднайте й знову під&apos;єднайте пристрій; якщо VipleStream і далі його не бачить, перезапустіть VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="576"/>
+        <location filename="../gui/AppContent.qml" line="579"/>
         <source>Are you sure you want to quit?</source>
         <translation>Ви впевнені, що хочете вийти?</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="606"/>
+        <location filename="../gui/AppContent.qml" line="624"/>
+        <source>VR controllers - flat-screen and VR streams</source>
+        <translation>VR-контролери — звичайна трансляція та VR-трансляція</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="625"/>
+        <source>A + X + trigger + grip</source>
+        <translation>A + X + курок + грип</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="625"/>
+        <location filename="../gui/AppContent.qml" line="645"/>
+        <location filename="../gui/AppContent.qml" line="655"/>
+        <source>End the stream</source>
+        <translation>Завершити трансляцію</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="626"/>
+        <source>Both menu buttons, 2 seconds</source>
+        <translation>Обидві кнопки меню, 2 секунди</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="626"/>
+        <source>Switch Xbox controller mode</source>
+        <translation>Перемкнути режим контролера Xbox</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="627"/>
+        <source>Both thumbsticks pressed, 1.5 seconds</source>
+        <translation>Обидва стіки натиснуті, 1,5 секунди</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="627"/>
+        <source>Switch steering wheel mode (in Xbox controller mode)</source>
+        <translation>Перемкнути режим керма (у режимі контролера Xbox)</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="628"/>
+        <source>VR controllers - flat-screen stream only</source>
+        <translation>VR-контролери — лише звичайна трансляція</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="629"/>
+        <source>Trigger / grip</source>
+        <translation>Курок / грип</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="629"/>
+        <source>Left click / right click</source>
+        <translation>Ліве клацання / праве клацання</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="630"/>
+        <source>Thumbstick up / down</source>
+        <translation>Стік угору / вниз</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="630"/>
+        <source>Scroll</source>
+        <translation>Прокручування</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="631"/>
+        <source>Left menu button</source>
+        <translation>Ліва кнопка меню</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="631"/>
+        <location filename="../gui/AppContent.qml" line="635"/>
+        <source>Open or close the virtual keyboard</source>
+        <translation>Відкрити або закрити віртуальну клавіатуру</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="632"/>
+        <source>Left menu button, 1 second</source>
+        <translation>Ліва кнопка меню, 1 секунда</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="632"/>
+        <source>Bring the screen back in front of you</source>
+        <translation>Повернути екран перед собою</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="633"/>
+        <source>VR controllers - VR stream only</source>
+        <translation>VR-контролери — лише VR-трансляція</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="634"/>
+        <source>Menu + trigger on one hand, 1 second</source>
+        <translation>Меню + курок на одній руці, 1 секунда</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="634"/>
+        <source>Open the SteamVR dashboard on the PC</source>
+        <translation>Відкрити панель SteamVR на ПК</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="635"/>
+        <source>Menu + grip on one hand, 1 second</source>
+        <translation>Меню + грип на одній руці, 1 секунда</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="636"/>
+        <source>Trigger on the white bar under the keyboard</source>
+        <translation>Курок на білій смузі під клавіатурою</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="636"/>
+        <source>Drag the virtual keyboard</source>
+        <translation>Перетягнути віртуальну клавіатуру</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="637"/>
+        <source>Xbox controller mode</source>
+        <translation>Режим контролера Xbox</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="638"/>
+        <source>Right A / B / X / Y</source>
+        <translation>Права A / B / X / Y</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="638"/>
+        <source>A / B / X / Y</source>
+        <translation>A / B / X / Y</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="639"/>
+        <source>Left D-pad buttons</source>
+        <translation>Ліві кнопки D-pad</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="639"/>
+        <source>D-pad</source>
+        <translation>D-pad</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="640"/>
+        <source>Thumbsticks, triggers, shoulder buttons</source>
+        <translation>Стіки, курки, бампери</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="640"/>
+        <source>Sticks, LT / RT, LB / RB</source>
+        <translation>Стіки, LT / RT, LB / RB</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="641"/>
+        <source>Right menu / left menu</source>
+        <translation>Праве меню / ліве меню</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="641"/>
+        <source>Start / Back</source>
+        <translation>Start / Back</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="644"/>
+        <source>Keyboard</source>
+        <translation>Клавіатура</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="645"/>
+        <source>Ctrl+Alt+Shift+Q</source>
+        <translation type="unfinished">Ctrl+Alt+Shift+Q</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="646"/>
+        <source>Ctrl+Alt+Shift+E</source>
+        <translation>Ctrl+Alt+Shift+E</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="646"/>
+        <source>End the stream and close VipleStream</source>
+        <translation>Завершити трансляцію й закрити VipleStream</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="647"/>
+        <source>Ctrl+Alt+Shift+S</source>
+        <translation>Ctrl+Alt+Shift+S</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="647"/>
+        <source>Show or hide the performance overlay</source>
+        <translation>Показати або сховати накладку продуктивності</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="648"/>
+        <source>Ctrl+Alt+Shift+X</source>
+        <translation>Ctrl+Alt+Shift+X</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="648"/>
+        <source>Switch between windowed and full-screen</source>
+        <translation>Перемкнути між віконним і повноекранним режимом</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="649"/>
+        <source>Ctrl+Alt+Shift+Z</source>
+        <translation>Ctrl+Alt+Shift+Z</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="649"/>
+        <source>Release or capture the mouse and keyboard</source>
+        <translation>Звільнити або захопити мишу й клавіатуру</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="650"/>
+        <source>Ctrl+Alt+Shift+M</source>
+        <translation>Ctrl+Alt+Shift+M</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="650"/>
+        <source>Switch the mouse between game mode and remote desktop mode</source>
+        <translation>Перемкнути мишу між ігровим режимом і режимом віддаленого робочого столу</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="651"/>
+        <source>Ctrl+Alt+Shift+C</source>
+        <translation>Ctrl+Alt+Shift+C</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="651"/>
+        <source>Show or hide the local mouse cursor</source>
+        <translation>Показати або сховати локальний курсор миші</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="652"/>
+        <source>Ctrl+Alt+Shift+V</source>
+        <translation>Ctrl+Alt+Shift+V</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="652"/>
+        <source>Type the clipboard text on the host</source>
+        <translation>Ввести текст із буфера обміну на хості</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="653"/>
+        <source>Ctrl+Alt+Shift+D</source>
+        <translation>Ctrl+Alt+Shift+D</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="653"/>
+        <source>Minimize the stream window</source>
+        <translation>Згорнути вікно трансляції</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="654"/>
+        <source>Gamepad</source>
+        <translation>Геймпад</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="655"/>
+        <source>Start+Select+L1+R1</source>
+        <translation type="unfinished">Start+Select+L1+R1</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="656"/>
+        <source>Hold Start</source>
+        <translation>Утримуйте Start</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="656"/>
+        <source>Use the gamepad as a mouse</source>
+        <translation>Використовувати геймпад як мишу</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="664"/>
+        <source>Shortcuts while streaming</source>
+        <translation>Сполучення клавіш під час трансляції</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="679"/>
         <source>Enter the IP address of your host PC:</source>
         <translation>Введіть IP-адресу хост-ПК:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="650"/>
+        <location filename="../gui/AppContent.qml" line="723"/>
         <source>Choose a mode</source>
         <translation>Виберіть режим</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="685"/>
+        <location filename="../gui/AppContent.qml" line="758"/>
         <source>Desktop mode</source>
         <translation>Режим робочого столу</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="685"/>
+        <location filename="../gui/AppContent.qml" line="758"/>
         <source>Your PC&apos;s desktop on a virtual screen</source>
         <translation>Робочий стіл вашого ПК на віртуальному екрані</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="696"/>
+        <location filename="../gui/AppContent.qml" line="769"/>
         <source>VR mode</source>
         <translation>Режим VR</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="696"/>
+        <location filename="../gui/AppContent.qml" line="769"/>
         <source>Play SteamVR games from your PC</source>
         <translation>Грайте в ігри SteamVR зі свого ПК</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="710"/>
+        <location filename="../gui/AppContent.qml" line="783"/>
         <source>Video mode</source>
         <translation>Режим відео</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="710"/>
+        <location filename="../gui/AppContent.qml" line="783"/>
         <source>Watch videos, 3D, 180° and 360° videos in the headset</source>
         <translation>Дивіться відео, 3D-, 180°- і 360°-відео в гарнітурі</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="780"/>
+        <location filename="../gui/AppContent.qml" line="857"/>
         <source>Starting %1...</source>
         <translation>Запуск %1...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="781"/>
+        <location filename="../gui/AppContent.qml" line="858"/>
         <source>Starting the stream...</source>
         <translation>Запуск трансляції...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="789"/>
+        <location filename="../gui/AppContent.qml" line="866"/>
         <source>The headset switches to the stream when it is ready. This can take a few seconds.</source>
         <translation>Гарнітура перемкнеться на трансляцію, коли вона буде готова. Це може зайняти кілька секунд.</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="790"/>
+        <location filename="../gui/AppContent.qml" line="867"/>
         <source>Tip:</source>
         <translation>Порада:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="790"/>
+        <location filename="../gui/AppContent.qml" line="867"/>
         <source>To end the stream, hold A+X+trigger+grip on the VR controller</source>
         <translation>Щоб завершити трансляцію, утримуйте A+X+курок+грип на VR-контролері</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="831"/>
+        <location filename="../gui/AppContent.qml" line="920"/>
         <source>Opening the video...</source>
         <translation>Відкриття відео...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="839"/>
+        <location filename="../gui/AppContent.qml" line="928"/>
         <source>Press B to cancel.</source>
         <translation>Натисніть B, щоб скасувати.</translation>
     </message>
@@ -632,7 +905,7 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>NvHTTP</name>
     <message>
-        <location filename="../backend/nvhttp.cpp" line="423"/>
+        <location filename="../backend/nvhttp.cpp" line="428"/>
         <source>Missing audio capture device. Reinstalling GeForce Experience should resolve this error.</source>
         <translation>Відсутній пристрій запису звуку. Перевстановлення GeForce Experience має усунути цю помилку.</translation>
     </message>
@@ -883,27 +1156,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>PendingPairingTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="971"/>
+        <location filename="../backend/computermanager.cpp" line="991"/>
         <source>The PIN from the PC didn&apos;t match. Please try again.</source>
         <translation>ПІН-код від ПК не збігається. Спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="975"/>
+        <location filename="../backend/computermanager.cpp" line="995"/>
         <source>You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again.</source>
         <translation>Ви не можете створити пару, доки попередній сеанс не закінчено на хост-ПК. Вийдіть із запущених ігор або перезавантажте хост-ПК, а потім спробуйте створити пару знову.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="978"/>
+        <location filename="../backend/computermanager.cpp" line="998"/>
         <source>Pairing failed. Please try again.</source>
         <translation>З&apos;єднання не вдалося. Спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="982"/>
+        <location filename="../backend/computermanager.cpp" line="1002"/>
         <source>Another pairing attempt is already in progress.</source>
         <translation>Ще одна спроба з&apos;єднатися вже триває.</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="992"/>
+        <location filename="../backend/computermanager.cpp" line="1012"/>
         <source>GeForce Experience returned error: %1</source>
         <translation>Помилка GeForce Experience: %1</translation>
     </message>
@@ -911,7 +1184,7 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>PendingQuitTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="1042"/>
+        <location filename="../backend/computermanager.cpp" line="1062"/>
         <source>The running game wasn&apos;t started by this PC. You must quit the game on the host PC manually or use the device that originally started the game.</source>
         <translation>Цю гру запустив не цей ПК. Ви повинні вийти з гри на хост-ПК вручну або використовувати пристрій, з якого була запущена гра.</translation>
     </message>
@@ -961,27 +1234,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1466"/>
+        <location filename="../main.cpp" line="1475"/>
         <source>&amp;Yes</source>
         <translation>Т&amp;ак</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1467"/>
+        <location filename="../main.cpp" line="1476"/>
         <source>&amp;No</source>
         <translation>&amp;Ні</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1468"/>
+        <location filename="../main.cpp" line="1477"/>
         <source>OK</source>
         <translation>OK</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1469"/>
+        <location filename="../main.cpp" line="1478"/>
         <source>Help</source>
         <translation>Довідка</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1470"/>
+        <location filename="../main.cpp" line="1479"/>
         <source>Cancel</source>
         <translation>Скасувати</translation>
     </message>
@@ -997,401 +1270,416 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="382"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>No video received from host.</source>
         <translation>Відео трансляцію не було отримано від хост-ПК.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="383"/>
+        <location filename="../streaming/session.cpp" line="387"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>Перевірте ваш брандмауер та правила відкриття наступних портів: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="388"/>
+        <location filename="../streaming/session.cpp" line="392"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>Ваша мережа не справляється. Зменшіть бітрейт або спробуйте швидшу мережу.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="394"/>
+        <location filename="../streaming/session.cpp" line="398"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>Щось пішло не так під час запуску трансляції на хост-ПК.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="395"/>
+        <location filename="../streaming/session.cpp" line="399"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>Переконайтеся, що на вашому хост-ПК не відкрито вміст, захищений DRM. Ви також можете спробувати перезавантажити хост-ПК.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="408"/>
+        <location filename="../streaming/session.cpp" line="412"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>Керуюче з&apos;єднання із сервером розірвано — можливо, це короткий збій мережі або сервер поза мережею. Спробуйте відновити трансляцію (resume) пізніше.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="416"/>
+        <location filename="../streaming/session.cpp" line="420"/>
         <source>Connection terminated</source>
         <translation>З&apos;єднання розірване</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1952"/>
+        <location filename="../streaming/session.cpp" line="2012"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>Версія GeForce Experience на %1 не підтримується цією збіркою Moonlight. Ви повинні оновити Moonlight для потокової передачі з %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1958"/>
+        <location filename="../streaming/session.cpp" line="2018"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>Ваш вибір увімкнути режим миші &quot;віддалений робочий стіл&quot; може викликати проблеми в іграх.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1962"/>
+        <location filename="../streaming/session.cpp" line="2022"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>Ваш вибір примусити програмне декодування може викликати погану продуктивність трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2021"/>
+        <location filename="../streaming/session.cpp" line="2081"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>Ваш хост-ПК не підтримує кодування HEVC.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2039"/>
+        <location filename="../streaming/session.cpp" line="2099"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>Використовується програмне декодування, оскільки ви примусово вибрали HEVC без підтримки GPU. Це може погіршити продуктивність трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1991"/>
+        <location filename="../streaming/session.cpp" line="2051"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>Програмне забезпечення або GPU вашого хоста не підтримує кодування AV1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2009"/>
+        <location filename="../streaming/session.cpp" line="2069"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>Використовується програмне декодування, оскільки ви примусово вибрали AV1 без підтримки GPU. Це може погіршити продуктивність трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2086"/>
+        <location filename="../streaming/session.cpp" line="2146"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>Ваш хост-ПК не підтримує трансляцію HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2078"/>
+        <location filename="../streaming/session.cpp" line="2138"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>HDR не підтримується з кодеком H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2113"/>
+        <location filename="../streaming/session.cpp" line="2173"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>GPU цього ПК не підтримує декодування AV1 Main10 для трансляції HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2082"/>
+        <location filename="../streaming/session.cpp" line="2142"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>GPU цього ПК не підтримує декодування 10-бітного HEVC або AV1 для трансляції HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2146"/>
+        <location filename="../streaming/session.cpp" line="2206"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>Ваш хост-ПК і клієнтський ПК не підтримують однакові відеокодеки HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2249"/>
+        <location filename="../streaming/session.cpp" line="2309"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>Роздільна здатність відео понад 4K не підтримується кодеком H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3693"/>
+        <location filename="../streaming/session.cpp" line="3798"/>
         <source>Host returned error: %1</source>
         <translation>Хост повернув помилку: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="400"/>
+        <location filename="../streaming/session.cpp" line="404"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>Хост-ПК повідомив про критичну помилку кодування відео.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="401"/>
+        <location filename="../streaming/session.cpp" line="405"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>Спробуйте вимкнути режим HDR, змінити роздільну здатність трансляції або змінити роздільну здатність екрана хост-ПК.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="417"/>
+        <location filename="../streaming/session.cpp" line="421"/>
         <source>Error code: %1</source>
         <translation>Код помилки: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="618"/>
+        <location filename="../streaming/session.cpp" line="647"/>
         <source>This game doesn&apos;t use VR controllers - switched to Xbox controller mode</source>
         <translation>Ця гра не використовує VR-контролери — перемкнено на режим контролера Xbox</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="622"/>
+        <location filename="../streaming/session.cpp" line="651"/>
         <source>Xbox controller mode: on</source>
         <translation>Режим контролера Xbox: увімк.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="626"/>
+        <location filename="../streaming/session.cpp" line="655"/>
         <source>Xbox controller mode: off (VR controllers)</source>
         <translation>Режим контролера Xbox: вимк. (VR-контролери)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="630"/>
+        <location filename="../streaming/session.cpp" line="659"/>
         <source>Xbox controller mode unavailable: install ViGEmBus on the host</source>
         <translation>Режим контролера Xbox недоступний: встановіть ViGEmBus на хості</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="633"/>
+        <location filename="../streaming/session.cpp" line="662"/>
         <source>Microphone not available on the host: Steam&apos;s &quot;Steam Streaming Microphone&quot; device was not found</source>
         <translation>Мікрофон недоступний на хості: пристрій Steam «Steam Streaming Microphone» не знайдено</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="790"/>
+        <location filename="../streaming/session.cpp" line="825"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>Інша гарнітура використовує SteamVR на %1 (наприклад, Steam Link). Від&apos;єднайте її та спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="792"/>
+        <location filename="../streaming/session.cpp" line="827"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>На %1 уже запущено VR-гру без VipleStream. Закрийте її та спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="794"/>
+        <location filename="../streaming/session.cpp" line="829"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>SteamVR на %1 має перезапуститися, але там досі запущено VR-гру. Спершу закрийте гру («Вийти з гри» у списку застосунків), потім спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="797"/>
+        <location filename="../streaming/session.cpp" line="832"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>SteamVR на %1 запустився в безпечному режимі й заблокував драйвер VipleStream. Перезапустіть SteamVR на хості та спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="799"/>
+        <location filename="../streaming/session.cpp" line="834"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>SteamVR не встановлено на %1.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="801"/>
+        <location filename="../streaming/session.cpp" line="836"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>На %1 не виконано вхід у Steam. Увійдіть у Steam на хості (наприклад, у режимі робочого столу) та спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="803"/>
+        <location filename="../streaming/session.cpp" line="838"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>На %1 ніхто не ввійшов у Windows.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="805"/>
+        <location filename="../streaming/session.cpp" line="840"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 показує екран входу або блокування Windows. Увійдіть на хості та спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="808"/>
+        <location filename="../streaming/session.cpp" line="843"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>SteamVR на %1 не запустився вчасно. Спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="810"/>
+        <location filename="../streaming/session.cpp" line="845"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1 не вдалося запустити VR (помилка %2).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="835"/>
+        <location filename="../streaming/session.cpp" line="870"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 не підтримує VR-трансляцію. Потрібен VipleStream Server 2.0 або новіший з увімкненим PCVR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="845"/>
+        <location filename="../streaming/session.cpp" line="880"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1 доступний лише через ретранслятор. Для VR-трансляції потрібне пряме з&apos;єднання.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="853"/>
+        <location filename="../streaming/session.cpp" line="888"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>Налаштування відеокодека примусово вибирає AV1, але для VR-трансляції потрібен HEVC або H.264. Змініть відеокодек у налаштуваннях.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1357"/>
+        <location filename="../streaming/session.cpp" line="1392"/>
         <source>Failed to initialize video subsystem: %1</source>
         <translation>Не вдалося ініціалізувати відеопідсистему: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1442"/>
+        <location filename="../streaming/session.cpp" line="1486"/>
         <source>Failed to create window for hardware decode test: %1</source>
         <translation>Не вдалося створити вікно для тесту апаратного декодування: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1551"/>
+        <location filename="../streaming/session.cpp" line="1607"/>
         <source>Invalid stream frame rate (%1 FPS).</source>
         <translation>Недійсна частота кадрів трансляції (%1 FPS).</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1897"/>
+        <location filename="../streaming/session.cpp" line="1957"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>Цей пристрій не має 8-бітного відеодекодера HEVC або H.264 для VR-трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1926"/>
+        <location filename="../streaming/session.cpp" line="1986"/>
         <source>Failed to initialize video decoder.</source>
         <translation>Не вдалося ініціалізувати відеодекодер.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1968"/>
+        <location filename="../streaming/session.cpp" line="2028"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>Програмне забезпечення або GPU вашого хоста не підтримує кодування PyroWave.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1979"/>
+        <location filename="../streaming/session.cpp" line="2039"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>GPU клієнта не підтримує декодування PyroWave через Vulkan 1.3. Буде використано HEVC/H.264.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2058"/>
+        <location filename="../streaming/session.cpp" line="2118"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>Використовується програмне декодування, оскільки ви примусово вибрали H.264 без підтримки GPU. Це може погіршити продуктивність трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2068"/>
+        <location filename="../streaming/session.cpp" line="2128"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>Ваш хост-ПК і клієнтський ПК не підтримують однакові відеокодеки. Це може погіршити продуктивність трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2071"/>
+        <location filename="../streaming/session.cpp" line="2131"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>GPU вашого клієнта не підтримує декодування H.264. Це може погіршити продуктивність трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2101"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>GPU цього ПК не підтримує декодування PyroWave Main10 для трансляції HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2119"/>
-        <location filename="../streaming/session.cpp" line="2137"/>
+        <location filename="../streaming/session.cpp" line="2179"/>
+        <location filename="../streaming/session.cpp" line="2197"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>Використовується програмне декодування, оскільки ви примусово ввімкнули HDR без підтримки GPU. Це може погіршити продуктивність трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2131"/>
+        <location filename="../streaming/session.cpp" line="2191"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>GPU цього ПК не підтримує декодування HEVC Main10 для трансляції HDR.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2153"/>
+        <location filename="../streaming/session.cpp" line="2213"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>Ваш хост-ПК не підтримує трансляцію YUV 4:4:4.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2161"/>
+        <location filename="../streaming/session.cpp" line="2221"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>Ваш хост-ПК не підтримує трансляцію YUV 4:4:4 для вибраного відеокодека.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2176"/>
+        <location filename="../streaming/session.cpp" line="2236"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>Використовується програмне декодування, оскільки ви примусово ввімкнули YUV 4:4:4 без підтримки GPU. Це може погіршити продуктивність трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2182"/>
+        <location filename="../streaming/session.cpp" line="2242"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>GPU цього ПК не підтримує декодування YUV 4:4:4 для вибраного відеокодека.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2191"/>
+        <location filename="../streaming/session.cpp" line="2251"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>Для трансляції у 4K потрібен GeForce Experience 3.0 або новіший.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2208"/>
+        <location filename="../streaming/session.cpp" line="2268"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>Вибране налаштування об&apos;ємного звуку не підтримується поточним аудіопристроєм.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2214"/>
+        <location filename="../streaming/session.cpp" line="2274"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>Не вдалося відкрити аудіопристрій. Звук буде недоступний під час цього сеансу.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2223"/>
+        <location filename="../streaming/session.cpp" line="2283"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>HID-пристрій не відповідає (%1). Введення з геймпада й передавання Steam Controller вимкнено для цього сеансу. Від&apos;єднайте й знову під&apos;єднайте пристрій, потім знову запустіть трансляцію.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2227"/>
+        <location filename="../streaming/session.cpp" line="2287"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>Під&apos;єднаний геймпад не має налаштування кнопок і не працюватиме. Зверніться до довідки Moonlight, щоб це виправити.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2245"/>
+        <location filename="../streaming/session.cpp" line="2305"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>GPU вашого хост-ПК не підтримує трансляцію відео з роздільною здатністю понад 4K.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2263"/>
+        <location filename="../streaming/session.cpp" line="2323"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>Неможливо примусово ввімкнути апаратне декодування, оскільки GPU цього ПК не підтримує апаратне декодування.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2266"/>
+        <location filename="../streaming/session.cpp" line="2326"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>Вибраний кодек і примусове апаратне декодування несумісні. GPU цього ПК не підтримує декодування вибраного кодека.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3180"/>
+        <location filename="../streaming/session.cpp" line="3276"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>Середовище XR %1 після запуску VR-сеансу, тому трансляцію завершено.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3181"/>
+        <location filename="../streaming/session.cpp" line="3277"/>
         <source>exited</source>
         <translation>завершило роботу</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3181"/>
+        <location filename="../streaming/session.cpp" line="3277"/>
         <source>stopped responding or was lost</source>
         <translation>перестало відповідати або було втрачено</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3337"/>
+        <location filename="../streaming/session.cpp" line="3433"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>Не вдалося запустити VR на цій гарнітурі (%1). Переконайтеся, що SteamVR запущено, і спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3346"/>
+        <location filename="../streaming/session.cpp" line="3442"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>Середовище VR гарнітури не відповіло вчасно. Переконайтеся, що SteamVR запущено, і спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3576"/>
+        <location filename="../streaming/session.cpp" line="3678"/>
         <source>Failed to launch via relay proxy</source>
         <translation>Не вдалося запустити через проксі ретранслятора</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3665"/>
+        <location filename="../streaming/session.cpp" line="3767"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 не запустив VR-сеанс. Переконайтеся, що на хості ввімкнено PCVR, і спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3674"/>
-        <location filename="../streaming/session.cpp" line="3681"/>
+        <location filename="../streaming/session.cpp" line="3779"/>
+        <location filename="../streaming/session.cpp" line="3786"/>
         <source>Connection to host failed</source>
         <translation>Не вдалося під&apos;єднатися до хоста</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4991"/>
+        <location filename="../streaming/session.cpp" line="5105"/>
         <source>Steering wheel: off (left stick steers)</source>
         <translation>Кермо: вимк. (керування лівим стіком)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4992"/>
+        <location filename="../streaming/session.cpp" line="5106"/>
         <source>Steering wheel: on - turn both controllers like a wheel</source>
         <translation>Кермо: увімк. - повертайте обидва контролери як кермо</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4993"/>
+        <location filename="../streaming/session.cpp" line="5107"/>
         <source>Steering wheel: on (works in Xbox controller mode)</source>
         <translation>Кермо: увімк. (працює в: Режим контролера Xbox)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="5217"/>
+        <location filename="../streaming/session.cpp" line="5127"/>
+        <source>Xbox controller mode: on (hold both menu buttons to switch back)</source>
+        <translation>Режим контролера Xbox: увімк. (утримуйте обидві кнопки меню, щоб повернутися)</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="5128"/>
+        <source>Xbox controller mode: off (laser pointer)</source>
+        <translation>Режим контролера Xbox: вимк. (лазерна вказівка)</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="5352"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>Не вдалося ініціалізувати відеодекодер. Перевірте налаштування трансляції та спробуйте ще раз.</translation>
+    </message>
+    <message>
+        <location filename="../streaming/xr/xrcontext.cpp" line="1732"/>
+        <source>Waiting for video from the host</source>
+        <translation>Очікування відео від хоста</translation>
     </message>
 </context>
 <context>
@@ -1402,102 +1690,102 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>Налаштування</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="737"/>
+        <location filename="../gui/SettingsView.qml" line="776"/>
         <source>Resolution and FPS</source>
         <translation>Роздільна здатність і FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="745"/>
+        <location filename="../gui/SettingsView.qml" line="784"/>
         <source>Setting values too high for your PC or network connection may cause lag, stuttering, or errors.</source>
         <translation>Надто високі значення для вашого ПК або мережі можуть спричинити затримки, підвисання або помилки.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="727"/>
+        <location filename="../gui/SettingsView.qml" line="766"/>
         <source>Basic Settings</source>
         <translation>Основні налаштування</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="937"/>
+        <location filename="../gui/SettingsView.qml" line="976"/>
         <source>Auto (best for this display)</source>
         <translation>Авто (найкраще для цього екрана)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="943"/>
+        <location filename="../gui/SettingsView.qml" line="982"/>
         <source>720p</source>
         <translation>720p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="949"/>
+        <location filename="../gui/SettingsView.qml" line="988"/>
         <source>1080p</source>
         <translation>1080p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="955"/>
+        <location filename="../gui/SettingsView.qml" line="994"/>
         <source>1440p</source>
         <translation>1440p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="961"/>
+        <location filename="../gui/SettingsView.qml" line="1000"/>
         <source>4K</source>
         <translation>4K</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1078"/>
+        <location filename="../gui/SettingsView.qml" line="1117"/>
         <source>Custom resolutions are not officially supported by GeForce Experience, so it will not set your host display resolution. You will need to set it manually while in game.</source>
         <translation>Користувацькі роздільні здатності офіційно не підтримуються GeForce Experience, тому він не змінить роздільну здатність екрана хоста. Вам доведеться встановити її вручну в грі.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1079"/>
+        <location filename="../gui/SettingsView.qml" line="1118"/>
         <source>Resolutions that are not supported by your client or host PC may cause streaming errors.</source>
         <translation>Роздільні здатності, які не підтримує ваш клієнт або хост-ПК, можуть спричинити помилки трансляції.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1085"/>
+        <location filename="../gui/SettingsView.qml" line="1124"/>
         <source>Enter a custom resolution:</source>
         <translation>Введіть користувацьку роздільну здатність:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1346"/>
+        <location filename="../gui/SettingsView.qml" line="1385"/>
         <source>%1 FPS</source>
         <translation>%1 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1475"/>
+        <location filename="../gui/SettingsView.qml" line="1514"/>
         <source>Auto (this display)</source>
         <translation>Авто (цей екран)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1611"/>
+        <location filename="../gui/SettingsView.qml" line="1650"/>
         <source>Frame interpolation (FRUC)</source>
         <translation>Інтерполяція кадрів (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1651"/>
+        <location filename="../gui/SettingsView.qml" line="1690"/>
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>Вставляє інтерпольований кадр між кожними двома справжніми кадрами, подвоюючи ефективну частоту кадрів. Фактична частота кадрів сервера зменшується вдвічі (напр. налаштування 120 FPS → запит 60 FPS → виведення 120 FPS).</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1761"/>
+        <location filename="../gui/SettingsView.qml" line="1800"/>
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute (рекомендовано — найнижча затримка, будь-який GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1762"/>
+        <location filename="../gui/SettingsView.qml" line="1801"/>
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow (апаратний потік + warp; NVIDIA RTX 20+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1763"/>
+        <location filename="../gui/SettingsView.qml" line="1802"/>
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — ML-модель RIFE (потрібен потужний GPU; Tensor Core RTX 30/40+)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1764"/>
+        <location filename="../gui/SettingsView.qml" line="1803"/>
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE (експериментально; різні виробники: NV/AMD/Intel)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1774"/>
+        <location filename="../gui/SettingsView.qml" line="1815"/>
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
@@ -1510,363 +1798,363 @@ NVIDIA Optical Flow: окреме апаратне ядро NVOFA на Turing+ (
 DirectML: запускає вбудовану ONNX-модель RIFE 4.25 lite на D3D12 DirectML EP — *справжня* ML-інтерполяція з компенсацією руху, найкраща якість на динамічному вмісті. Накладні витрати на запуск ядра для кожної операції (~25 мс базово незалежно від роздільної здатності) означають, що потрібен GPU із Tensor Core (RTX 30/40 середнього рівня або краще), щоб встигати в реальному часі при 720p+. На слабших GPU клієнт автоматично знижує роздільну здатність інференсу (1080p → 720p → 540p → 480p → 360p) і повертається до Generic, якщо навіть 360p не вкладається в бюджет кадру.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1843"/>
+        <location filename="../gui/SettingsView.qml" line="1885"/>
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (GPU QUALITY)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1844"/>
+        <location filename="../gui/SettingsView.qml" line="1886"/>
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (GPU BALANCED)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1847"/>
+        <location filename="../gui/SettingsView.qml" line="1889"/>
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (GPU PERFORMANCE)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1893"/>
+        <location filename="../gui/SettingsView.qml" line="1935"/>
         <source>Video bitrate:</source>
         <translation>Бітрейт відео:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1901"/>
+        <location filename="../gui/SettingsView.qml" line="1943"/>
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>Зменште бітрейт на повільних з&apos;єднаннях. Збільште бітрейт, щоб покращити якість зображення.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1923"/>
+        <location filename="../gui/SettingsView.qml" line="1965"/>
         <source>Video bitrate: %1 Mbps</source>
         <translation>Бітрейт відео: %1 Мбіт/с</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1970"/>
+        <location filename="../gui/SettingsView.qml" line="2012"/>
         <source>Display mode</source>
         <translation>Режим відображення</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1981"/>
-        <location filename="../gui/SettingsView.qml" line="2550"/>
+        <location filename="../gui/SettingsView.qml" line="2023"/>
+        <location filename="../gui/SettingsView.qml" line="2592"/>
         <source>Fullscreen</source>
         <translation>Повноекранний</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2050"/>
+        <location filename="../gui/SettingsView.qml" line="2092"/>
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>Повноекранний режим зазвичай забезпечує найкращу продуктивність, але вікно без рамки може краще працювати з такими функціями, як macOS Spaces, Alt+Tab, інструменти знімків екрана, екранні накладки тощо.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1986"/>
+        <location filename="../gui/SettingsView.qml" line="2028"/>
         <source>Borderless windowed</source>
         <translation>Вікно без рамки</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="816"/>
+        <location filename="../gui/SettingsView.qml" line="855"/>
         <source>Native</source>
         <translation>Рідна</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="817"/>
+        <location filename="../gui/SettingsView.qml" line="856"/>
         <source>Native (Excluding Notch)</source>
         <translation>Рідна (без виїмки)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1939"/>
+        <location filename="../gui/SettingsView.qml" line="1981"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>Типово (%1 Мбіт/с)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1991"/>
-        <location filename="../gui/SettingsView.qml" line="2542"/>
+        <location filename="../gui/SettingsView.qml" line="2033"/>
+        <location filename="../gui/SettingsView.qml" line="2584"/>
         <source>Windowed</source>
         <translation>У вікні</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2000"/>
+        <location filename="../gui/SettingsView.qml" line="2042"/>
         <source>(Recommended)</source>
         <translation>(Рекомендовано)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2057"/>
+        <location filename="../gui/SettingsView.qml" line="2099"/>
         <source>V-Sync</source>
         <translation>V-Sync</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2067"/>
+        <location filename="../gui/SettingsView.qml" line="2109"/>
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>Вимкнення V-Sync дає затримку рендерингу менше одного кадру, але може спричинити помітні розриви зображення</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2074"/>
+        <location filename="../gui/SettingsView.qml" line="2116"/>
         <source>Frame pacing</source>
         <translation>Рівномірність кадрів (frame pacing)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2097"/>
+        <location filename="../gui/SettingsView.qml" line="2139"/>
         <source>Audio Settings</source>
         <translation>Налаштування звуку</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2132"/>
+        <location filename="../gui/SettingsView.qml" line="2174"/>
         <source>Stereo</source>
         <translation>Стерео</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2136"/>
+        <location filename="../gui/SettingsView.qml" line="2178"/>
         <source>5.1 surround sound</source>
         <translation>Об&apos;ємний звук 5.1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2140"/>
+        <location filename="../gui/SettingsView.qml" line="2182"/>
         <source>7.1 surround sound</source>
         <translation>Об&apos;ємний звук 7.1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2154"/>
+        <location filename="../gui/SettingsView.qml" line="2196"/>
         <source>Mute host PC speakers while streaming</source>
         <translation>Вимкнути звук динаміків хост-ПК під час трансляції</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2164"/>
+        <location filename="../gui/SettingsView.qml" line="2206"/>
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>Щоб це налаштування набуло чинності, перезапустіть гру, яка зараз запущена</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2286"/>
+        <location filename="../gui/SettingsView.qml" line="2328"/>
         <source>UI Settings</source>
         <translation>Налаштування інтерфейсу</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2331"/>
+        <location filename="../gui/SettingsView.qml" line="2373"/>
         <source>Language</source>
         <translation>Мова</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2357"/>
+        <location filename="../gui/SettingsView.qml" line="2399"/>
         <source>Automatic</source>
         <translation>Автоматично</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2509"/>
+        <location filename="../gui/SettingsView.qml" line="2551"/>
         <source>GUI display mode</source>
         <translation>Режим вікна інтерфейсу</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2546"/>
+        <location filename="../gui/SettingsView.qml" line="2588"/>
         <source>Maximized</source>
         <translation>Розгорнуто</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2574"/>
+        <location filename="../gui/SettingsView.qml" line="2616"/>
         <source>Show configuration warnings</source>
         <translation>Показувати попередження про налаштування</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2656"/>
+        <location filename="../gui/SettingsView.qml" line="2698"/>
         <source>Input Settings</source>
         <translation>Налаштування введення</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2677"/>
+        <location filename="../gui/SettingsView.qml" line="2719"/>
         <source>This enables seamless mouse control without capturing the client&apos;s mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>Дає змогу плавно керувати мишею без захоплення курсора клієнта. Ідеально для віддаленого робочого столу, але не працює в більшості ігор.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2679"/>
+        <location filename="../gui/SettingsView.qml" line="2721"/>
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>ПРИМІТКА: через помилку в GeForce Experience цей параметр може працювати неправильно, якщо до хост-ПК під&apos;єднано кілька моніторів.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3068"/>
+        <location filename="../gui/SettingsView.qml" line="3110"/>
         <source>Enable HDR (Experimental)</source>
         <translation>Увімкнути HDR (експериментально)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3086"/>
+        <location filename="../gui/SettingsView.qml" line="3128"/>
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>Трансляція підтримуватиме HDR, але деяким іграм може знадобитися HDR-монітор на хост-ПК для ввімкнення режиму HDR.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3088"/>
+        <location filename="../gui/SettingsView.qml" line="3130"/>
         <source>HDR streaming is not supported on this PC.</source>
         <translation>Трансляція HDR не підтримується на цьому ПК.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3140"/>
+        <location filename="../gui/SettingsView.qml" line="3182"/>
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>Розблоковує надзвичайно високий бітрейт відео для хостів VipleStream-Server. Використовуйте лише під час трансляції через дротову локальну мережу Ethernet.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3178"/>
+        <location filename="../gui/SettingsView.qml" line="3220"/>
         <source>Show performance stats while streaming</source>
         <translation>Показувати статистику продуктивності під час трансляції</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3188"/>
+        <location filename="../gui/SettingsView.qml" line="3230"/>
         <source>Display real-time stream performance information while streaming.</source>
         <translation>Відображає інформацію про продуктивність трансляції в реальному часі.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3189"/>
+        <location filename="../gui/SettingsView.qml" line="3231"/>
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>Її можна будь-коли ввімкнути або вимкнути під час трансляції за допомогою Ctrl+Alt+Shift+S або Select+L1+R1+X.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3190"/>
+        <location filename="../gui/SettingsView.qml" line="3232"/>
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>Накладка продуктивності не підтримується на Steam Link і Raspberry Pi.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2762"/>
+        <location filename="../gui/SettingsView.qml" line="2804"/>
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>Використовувати сенсорний екран як віртуальний трекпад</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2779"/>
+        <location filename="../gui/SettingsView.qml" line="2821"/>
         <source>Swap left and right mouse buttons</source>
         <translation>Поміняти місцями ліву й праву кнопки миші</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2791"/>
+        <location filename="../gui/SettingsView.qml" line="2833"/>
         <source>Reverse mouse scrolling direction</source>
         <translation>Інвертувати напрямок прокручування миші</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2805"/>
+        <location filename="../gui/SettingsView.qml" line="2847"/>
         <source>Gamepad Settings</source>
         <translation>Налаштування геймпада</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2815"/>
+        <location filename="../gui/SettingsView.qml" line="2857"/>
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>Поміняти місцями кнопки A/B і X/Y геймпада</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2825"/>
+        <location filename="../gui/SettingsView.qml" line="2867"/>
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>Перемикає геймпади на розкладку кнопок у стилі Nintendo</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2831"/>
+        <location filename="../gui/SettingsView.qml" line="2873"/>
         <source>Force gamepad #1 always connected</source>
         <translation>Примусово тримати геймпад №1 під&apos;єднаним</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2841"/>
+        <location filename="../gui/SettingsView.qml" line="2883"/>
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>Примусово тримає один геймпад завжди під&apos;єднаним до хоста, навіть якщо до цього ПК насправді не під&apos;єднано жодного геймпада.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2678"/>
+        <location filename="../gui/SettingsView.qml" line="2720"/>
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>Це можна перемикати під час трансляції за допомогою Ctrl+Alt+Shift+M.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2849"/>
+        <location filename="../gui/SettingsView.qml" line="2891"/>
         <source>Enable mouse control with gamepads by holding the &apos;Start&apos; button</source>
         <translation>Керувати мишею з геймпада, утримуючи кнопку «Start»</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2190"/>
+        <location filename="../gui/SettingsView.qml" line="2232"/>
         <source>Host Settings</source>
         <translation>Налаштування хоста</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2944"/>
+        <location filename="../gui/SettingsView.qml" line="2986"/>
         <source>Advanced Settings</source>
         <translation>Додаткові налаштування</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2107"/>
+        <location filename="../gui/SettingsView.qml" line="2149"/>
         <source>Audio configuration</source>
         <translation>Конфігурація звуку</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2563"/>
+        <location filename="../gui/SettingsView.qml" line="2605"/>
         <source>Show connection quality warnings</source>
         <translation>Показувати попередження про якість з&apos;єднання</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2586"/>
+        <location filename="../gui/SettingsView.qml" line="2628"/>
         <source>Discord Rich Presence integration</source>
         <translation>Інтеграція з Discord Rich Presence</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2842"/>
+        <location filename="../gui/SettingsView.qml" line="2884"/>
         <source>Only enable this option when streaming a game that doesn&apos;t support gamepads being connected after startup.</source>
         <translation>Вмикайте цей параметр лише під час трансляції гри, яка не підтримує під&apos;єднання геймпадів після запуску.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2667"/>
+        <location filename="../gui/SettingsView.qml" line="2709"/>
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>Оптимізувати мишу для віддаленого робочого столу замість ігор</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1242"/>
-        <location filename="../gui/SettingsView.qml" line="1435"/>
+        <location filename="../gui/SettingsView.qml" line="1281"/>
+        <location filename="../gui/SettingsView.qml" line="1474"/>
         <source>Custom (%1 FPS)</source>
         <translation>Користувацька (%1 FPS)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1257"/>
+        <location filename="../gui/SettingsView.qml" line="1296"/>
         <source>Enter a custom frame rate:</source>
         <translation>Введіть користувацьку частоту кадрів:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="858"/>
-        <location filename="../gui/SettingsView.qml" line="906"/>
-        <location filename="../gui/SettingsView.qml" line="915"/>
-        <location filename="../gui/SettingsView.qml" line="1369"/>
+        <location filename="../gui/SettingsView.qml" line="897"/>
+        <location filename="../gui/SettingsView.qml" line="945"/>
+        <location filename="../gui/SettingsView.qml" line="954"/>
+        <location filename="../gui/SettingsView.qml" line="1408"/>
         <source>Custom</source>
         <translation>Користувацька</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1480"/>
+        <location filename="../gui/SettingsView.qml" line="1519"/>
         <source>30 FPS</source>
         <translation>30 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1485"/>
+        <location filename="../gui/SettingsView.qml" line="1524"/>
         <source>60 FPS</source>
         <translation>60 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2627"/>
+        <location filename="../gui/SettingsView.qml" line="2669"/>
         <source>Keep the display awake while streaming</source>
         <translation>Не вимикати екран під час трансляції</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2637"/>
+        <location filename="../gui/SettingsView.qml" line="2679"/>
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>Не дає запуститися заставці та не дає екрану перейти в режим сну під час трансляції.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2689"/>
+        <location filename="../gui/SettingsView.qml" line="2731"/>
         <source>Capture system keyboard shortcuts</source>
         <translation>Перехоплювати системні сполучення клавіш</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2697"/>
+        <location filename="../gui/SettingsView.qml" line="2739"/>
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>Дає змогу перехоплювати системні сполучення клавіш, як-от Alt+Tab, які зазвичай обробляє ОС клієнта, під час трансляції.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2727"/>
+        <location filename="../gui/SettingsView.qml" line="2769"/>
         <source>in fullscreen</source>
         <translation>у повноекранному режимі</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2731"/>
+        <location filename="../gui/SettingsView.qml" line="2773"/>
         <source>always</source>
         <translation>завжди</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2772"/>
+        <location filename="../gui/SettingsView.qml" line="2814"/>
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>Якщо позначено, сенсорний екран працює як трекпад. Якщо не позначено, сенсорний екран безпосередньо керує вказівником миші.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2200"/>
+        <location filename="../gui/SettingsView.qml" line="2242"/>
         <source>Optimize game settings for streaming</source>
         <translation>Оптимізувати налаштування гри для трансляції</translation>
     </message>
@@ -1881,132 +2169,132 @@ DirectML: запускає вбудовану ONNX-модель RIFE 4.25 lite �
         <translation>Показує параметри для діагностики й тестування: рендерер і відеодекодер, рушії інтерполяції кадрів, експериментальні відеоформати та перемикачі мережевих тестів. Приховані параметри зберігають поточні значення.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="461"/>
+        <location filename="../gui/SettingsView.qml" line="486"/>
         <source>Sharper where you look (foveated streaming)</source>
         <translation>Чіткіше там, куди ви дивитеся (фовеальна трансляція)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Small</source>
         <translation>Малий</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Medium</source>
         <translation>Середній</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Large</source>
         <translation>Великий</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="487"/>
+        <location filename="../gui/SettingsView.qml" line="517"/>
         <source>Each eye is sent as a reduced picture of the whole view plus a full-detail picture that follows your gaze (it stays straight ahead without eye tracking). A larger size keeps more detail away from where you look, but uses more bandwidth and headset power and adds a little delay.</source>
         <translation>Для кожного ока надсилаються зменшене зображення всього поля зору та зображення з повною деталізацією, яке слідує за поглядом (без відстеження очей воно залишається прямо перед вами). Більший розмір зберігає більше деталей поза місцем, куди ви дивитеся, але потребує більше пропускної здатності й енергії гарнітури та трохи збільшує затримку.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="494"/>
+        <location filename="../gui/SettingsView.qml" line="524"/>
         <source>Frame rate</source>
         <translation>Частота кадрів</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="504"/>
+        <location filename="../gui/SettingsView.qml" line="534"/>
         <source>Automatic (half rate while the network is unstable)</source>
         <translation>Автоматично (половинна частота, доки мережа нестабільна)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="505"/>
+        <location filename="../gui/SettingsView.qml" line="535"/>
         <source>Full (same as the headset refresh rate)</source>
         <translation>Повна (така сама, як частота оновлення гарнітури)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="506"/>
+        <location filename="../gui/SettingsView.qml" line="536"/>
         <source>Half (each frame shown twice)</source>
         <translation>Половинна (кожен кадр показується двічі)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="507"/>
+        <location filename="../gui/SettingsView.qml" line="537"/>
         <source>Half with synthesized in-between frames</source>
         <translation>Половинна із синтезованими проміжними кадрами</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="522"/>
+        <location filename="../gui/SettingsView.qml" line="552"/>
         <source>Automatic streams at full rate and switches to half rate without restarting the game while the network keeps delaying frames, then tries full rate again once it is stable. Half rate streams every other frame while the headset still displays at full rate: half the network traffic and more time to repair lost packets. Synthesized frames make motion look smoother but can wobble or tear on fast objects.</source>
         <translation>Автоматичний режим транслює з повною частотою та перемикається на половинну без перезапуску гри, доки мережа затримує кадри, а після стабілізації знову пробує повну частоту. Половинна частота передає кожен другий кадр, тоді як гарнітура й далі показує з повною частотою: удвічі менший трафік мережі та більше часу на відновлення втрачених пакетів. Синтезовані кадри роблять рух плавнішим, але на швидких об&apos;єктах можливі коливання або розриви зображення.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="539"/>
+        <location filename="../gui/SettingsView.qml" line="569"/>
         <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers.</source>
         <translation>Знижує бітрейт, коли в мережі губляться пакети, і підвищує його знову, коли мережа відновлюється.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="545"/>
+        <location filename="../gui/SettingsView.qml" line="575"/>
         <source>Steering wheel with the controllers (Xbox controller mode)</source>
         <translation>Кермо за допомогою контролерів (Режим контролера Xbox)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="555"/>
+        <location filename="../gui/SettingsView.qml" line="585"/>
         <source>In games that use the virtual Xbox controller, hold both controllers like a steering wheel and turn them to steer (replaces the left stick&apos;s left/right). While streaming, hold both thumbsticks pressed for 1.5 seconds to switch it on or off.</source>
         <translation>В іграх, які використовують віртуальний контролер Xbox, тримайте обидва контролери як кермо та повертайте їх для керування (замінює ліво/право лівого стіка). Під час трансляції утримуйте обидва стіки натиснутими протягом 1.5 секунди, щоб увімкнути або вимкнути.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="560"/>
+        <location filename="../gui/SettingsView.qml" line="590"/>
         <source>Steering wheel rotation (full left to full right)</source>
         <translation>Поворот керма (від крайнього лівого до крайнього правого положення)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="583"/>
+        <location filename="../gui/SettingsView.qml" line="622"/>
         <source>How far you turn the controllers for full lock. 180° means a quarter turn either way reaches the stick&apos;s end.</source>
         <translation>Наскільки повертати контролери до повного блокування. 180° означає, що чверть оберту в будь-який бік досягає краю стіка.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="589"/>
+        <location filename="../gui/SettingsView.qml" line="628"/>
         <source>Headset network during VR (Steam Frame with the streaming adapter)</source>
         <translation>Мережа гарнітури під час VR (Steam Frame з адаптером трансляції)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="596"/>
+        <location filename="../gui/SettingsView.qml" line="635"/>
         <source>Always keep home Wi-Fi</source>
         <translation>Завжди зберігати домашній Wi-Fi</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="596"/>
+        <location filename="../gui/SettingsView.qml" line="635"/>
         <source>Pause home Wi-Fi while streaming</source>
         <translation>Призупиняти домашній Wi-Fi під час трансляції</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="706"/>
+        <location filename="../gui/SettingsView.qml" line="745"/>
         <source>Send the headset microphone to the PC</source>
         <translation>Передавати мікрофон гарнітури на ПК</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="716"/>
+        <location filename="../gui/SettingsView.qml" line="755"/>
         <source>During a VR stream your voice goes to the PC&apos;s &quot;Microphone (Steam Streaming Microphone)&quot; device (installed with Steam). Select it in the game or voice chat app.</source>
         <translation>Під час VR-трансляції ваш голос надсилається на пристрій ПК «Microphone (Steam Streaming Microphone)» (встановлюється разом зі Steam). Виберіть його в грі або програмі голосового чату.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1514"/>
+        <location filename="../gui/SettingsView.qml" line="1553"/>
         <source>Renderer</source>
         <translation>Рендерер</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1532"/>
+        <location filename="../gui/SettingsView.qml" line="1571"/>
         <source>Auto (recommended) — let the system pick the most stable hardware decoding path</source>
         <translation>Авто — рекомендовано: система вибирає найстабільніший шлях апаратного декодування</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1533"/>
+        <location filename="../gui/SettingsView.qml" line="1572"/>
         <source>Direct3D 11 — always use D3D11VA; works with the NV-OF / DirectML / NCNN interpolation engines</source>
         <translation>Direct3D 11 — фіксує D3D11VA; можна використовувати з рушіями інтерполяції NV-OF / DirectML / NCNN</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1534"/>
+        <location filename="../gui/SettingsView.qml" line="1573"/>
         <source>Vulkan [experimental] — built-in frame interpolation; compatibility issues on some systems (AMD APU / older NVIDIA drivers)</source>
         <translation>Vulkan [експериментально] — вбудована інтерполяція; на деяких пристроях (AMD APU / старий драйвер NV) є проблеми сумісності</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1561"/>
+        <location filename="../gui/SettingsView.qml" line="1600"/>
         <source>Auto (recommended): same as upstream Moonlight&apos;s hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
@@ -2019,27 +2307,27 @@ Direct3D 11: явно фіксує D3D11VA; рушій інтерполяції 
 Vulkan [експериментально]: примусовий Vulkan-first cascade + нативний конвеєр рендерингу Vulkan + dual-present, рушій інтерполяції вбудований (відповідає Generic). Відомі проблеми: на драйвері NV 596.36 нативний vkCmdDecodeVideoKHR у режимі ONLY спричиняє NVDEC device-lost; на AMD APU драйвер аварійно завершується на етапі bind 226 МБ пам&apos;яті video session; шлях PARALLEL+SW upload має низьку продуктивність (80+ мс/кадр). Коли стане стабільним, знову буде рекомендованим варіантом.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1572"/>
+        <location filename="../gui/SettingsView.qml" line="1611"/>
         <source>Linux video output (frontend)</source>
         <translation>Виведення відео в Linux (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1587"/>
+        <location filename="../gui/SettingsView.qml" line="1626"/>
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>Авто — рекомендовано: aarch64 або Zink використовують Vulkan, решта зберігає початковий порядок</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1588"/>
+        <location filename="../gui/SettingsView.qml" line="1627"/>
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — пріоритет виведення через Vulkan</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1589"/>
+        <location filename="../gui/SettingsView.qml" line="1628"/>
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — зберігає початковий порядок (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1605"/>
+        <location filename="../gui/SettingsView.qml" line="1644"/>
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -2056,107 +2344,107 @@ Vulkan: завжди надає пріоритет виведенню через
 EGL: зберігає початковий порядок, не надаючи переваги Vulkan.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1661"/>
+        <location filename="../gui/SettingsView.qml" line="1700"/>
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>Рендерер Vulkan використовує вбудований рушій інтерполяції (відповідає Generic). Щоб вибрати інший рушій інтерполяції, перейдіть на Direct3D 11.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1679"/>
+        <location filename="../gui/SettingsView.qml" line="1718"/>
         <source>Interpolation mode:</source>
         <translation>Режим інтерполяції:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1685"/>
+        <location filename="../gui/SettingsView.qml" line="1724"/>
         <source>Active (recommended)</source>
         <translation>Активний (рекомендовано)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1706"/>
+        <location filename="../gui/SettingsView.qml" line="1745"/>
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>Сервер надсилає FPS інтерфейсу / 2 (або / 3 для екранів із високою частотою оновлення), клієнт завжди виконує подвійну/потрійну інтерполяцію. Низьке навантаження на сервер, потрібен потужний GPU клієнта.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1710"/>
+        <location filename="../gui/SettingsView.qml" line="1749"/>
         <source>Passive</source>
         <translation>Пасивний</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1731"/>
+        <location filename="../gui/SettingsView.qml" line="1770"/>
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>Сервер надсилає повний FPS інтерфейсу. Клієнт динамічно підвищує коефіцієнт залежно від recv%: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Підходить, коли сервер не завжди встигає видавати повний FPS.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1827"/>
+        <location filename="../gui/SettingsView.qml" line="1869"/>
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY (вбудовані / старіші GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1831"/>
+        <location filename="../gui/SettingsView.qml" line="1873"/>
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN (не визначено; перезапустіть клієнт для визначення)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1833"/>
+        <location filename="../gui/SettingsView.qml" line="1875"/>
         <source>(not detected yet)</source>
         <translation>(ще не визначено)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1837"/>
+        <location filename="../gui/SettingsView.qml" line="1879"/>
         <source>(not measured)</source>
         <translation>(не виміряно)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1838"/>
+        <location filename="../gui/SettingsView.qml" line="1880"/>
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>Автоматичний рівень FRUC (Vulkan unified autotier v1.4.127):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1839"/>
+        <location filename="../gui/SettingsView.qml" line="1881"/>
         <source>   GPU: </source>
         <translation>   GPU: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1840"/>
+        <location filename="../gui/SettingsView.qml" line="1882"/>
         <source>   Detected tier: </source>
         <translation>   Виявлений рівень: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1841"/>
+        <location filename="../gui/SettingsView.qml" line="1883"/>
         <source>   Benchmark: </source>
         <translation>   Benchmark: </translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1842"/>
+        <location filename="../gui/SettingsView.qml" line="1884"/>
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>Під час роботи автоматично перемикається між 7 рівнями (T-1..T5):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1845"/>
+        <location filename="../gui/SettingsView.qml" line="1887"/>
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (GPU з NVOF, важча chain)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1846"/>
+        <location filename="../gui/SettingsView.qml" line="1888"/>
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (AMD/Intel без NVOF)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1848"/>
+        <location filename="../gui/SettingsView.qml" line="1890"/>
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (мінімальний FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1849"/>
+        <location filename="../gui/SettingsView.qml" line="1891"/>
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = FRUC призупинено (GPU не справляється, повтор через 5 хв)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1861"/>
+        <location filename="../gui/SettingsView.qml" line="1903"/>
         <source>Edge MV threshold:</source>
         <translation>Поріг MV на краях (Edge MV threshold):</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1877"/>
+        <location filename="../gui/SettingsView.qml" line="1919"/>
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -2169,70 +2457,70 @@ Start with the default; if interpolated edges look blocky, lower it to 4-6.</sou
 Спершу використовуйте типове значення; якщо краї інтерпольованих кадрів виглядають блоковими, зменште до 4-6.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="529"/>
-        <location filename="../gui/SettingsView.qml" line="1954"/>
+        <location filename="../gui/SettingsView.qml" line="559"/>
+        <location filename="../gui/SettingsView.qml" line="1996"/>
         <source>Adjust bitrate automatically while streaming</source>
         <translation>Автоматично підлаштовувати бітрейт під час трансляції</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1964"/>
+        <location filename="../gui/SettingsView.qml" line="2006"/>
         <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers. The bitrate above is the maximum.</source>
         <translation>Знижує бітрейт, коли в мережі губляться пакети, і підвищує його знову, коли мережа відновлюється. Зазначений вище бітрейт — максимальний.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2087"/>
+        <location filename="../gui/SettingsView.qml" line="2129"/>
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>Рівномірність кадрів зменшує мікрозатримки, притримуючи кадри, що надходять зарано. Працює й з вимкненим V-Sync, тож ви зберігаєте низьку затримку й згладжуєте нерівномірне надходження кадрів.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2170"/>
+        <location filename="../gui/SettingsView.qml" line="2212"/>
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>Вимикати звук трансляції, коли VipleStream не є активним вікном</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2181"/>
+        <location filename="../gui/SettingsView.qml" line="2223"/>
         <source>Mutes VipleStream&apos;s audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>Вимикає звук VipleStream, коли ви виходите з трансляції через Alt+Tab або клацаєте інше вікно.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2211"/>
+        <location filename="../gui/SettingsView.qml" line="2253"/>
         <source>Quit app on host PC after ending stream</source>
         <translation>Закривати застосунок на хост-ПК після завершення трансляції</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2221"/>
+        <location filename="../gui/SettingsView.qml" line="2263"/>
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>Застосунок або гра, які ви транслюєте, буде закрито після завершення трансляції. Увесь незбережений прогрес буде втрачено!</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2300"/>
+        <location filename="../gui/SettingsView.qml" line="2342"/>
         <source>Design</source>
         <translation>Оформлення</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2307"/>
+        <location filename="../gui/SettingsView.qml" line="2349"/>
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>Стримане: редакційна сітка, спокійніший заголовок.
 Сміливе: стиль обкладинки журналу, великі заголовки.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2323"/>
+        <location filename="../gui/SettingsView.qml" line="2365"/>
         <source>Safe</source>
         <translation>Стримане</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2324"/>
+        <location filename="../gui/SettingsView.qml" line="2366"/>
         <source>Bold</source>
         <translation>Сміливе</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2492"/>
+        <location filename="../gui/SettingsView.qml" line="2534"/>
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>Щоб ця зміна набула чинності, перезапустіть VipleStream</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2596"/>
+        <location filename="../gui/SettingsView.qml" line="2638"/>
         <source>Updates your Discord status to display the name of the game you&apos;re streaming. The status reads &quot;Playing &lt;game&gt; · via VipleStream&quot; with the VipleStream icon.</source>
         <translation>Оновлює ваш статус у Discord, показуючи назву гри, яку ви транслюєте. Статус має вигляд &quot;Грає в &lt;game&gt; · via VipleStream&quot; зі значком VipleStream.</translation>
     </message>
@@ -2247,320 +2535,320 @@ Bold: magazine-cover energy, oversized display titles.</source>
         <translation>Роздільна здатність на око</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="401"/>
+        <location filename="../gui/SettingsView.qml" line="407"/>
         <source>Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.</source>
         <translation>Менше пікселів для кодування, надсилання й декодування — менша затримка. Хост усе одно може рендерити з вищою роздільною здатністю та зменшувати її.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="406"/>
+        <location filename="../gui/SettingsView.qml" line="412"/>
         <source>Extra field of view (overscan)</source>
         <translation>Додаткове поле зору (overscan)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="414"/>
-        <location filename="../gui/SettingsView.qml" line="440"/>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="420"/>
+        <location filename="../gui/SettingsView.qml" line="456"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Off</source>
         <translation>Вимк.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="427"/>
+        <location filename="../gui/SettingsView.qml" line="443"/>
         <source>Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.</source>
         <translation>Рендерить трохи за межами краю для кожного ока, щоб під час повороту голови не було видно порожніх країв.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="432"/>
+        <location filename="../gui/SettingsView.qml" line="448"/>
         <source>Pick the newest frame this late</source>
         <translation>Вибирати найновіший кадр із такою затримкою</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="453"/>
+        <location filename="../gui/SettingsView.qml" line="478"/>
         <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
         <translation>Чекає кілька мілісекунд перед вибором кадру для показу, щоб кадр був свіжішим. Надто довге очікування змушує гарнітуру пропускати кадри.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="596"/>
+        <location filename="../gui/SettingsView.qml" line="635"/>
         <source>Use the network test result</source>
         <translation>Використовувати результат тесту мережі</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="608"/>
+        <location filename="../gui/SettingsView.qml" line="647"/>
         <source>The headset has one Wi-Fi radio, so staying on home Wi-Fi while streaming over the adapter makes it switch back and forth and drop video. &quot;Test network&quot; below compares both and remembers the result for this place; until then home Wi-Fi is kept. While home Wi-Fi is paused the headset itself is offline; it reconnects when you stop streaming.</source>
         <translation>У гарнітурі один радіомодуль Wi-Fi, тому збереження домашнього Wi-Fi під час трансляції через адаптер змушує її перемикатися туди-сюди та втрачати кадри відео. «Перевірити мережу» нижче порівнює обидва варіанти й запам&apos;ятовує результат для цього місця; доти домашній Wi-Fi зберігається. Поки домашній Wi-Fi призупинено, сама гарнітура поза мережею; вона перепідключиться після завершення трансляції.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="616"/>
+        <location filename="../gui/SettingsView.qml" line="655"/>
         <source>Cancel test</source>
         <translation>Скасувати тест</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="616"/>
+        <location filename="../gui/SettingsView.qml" line="655"/>
         <source>Test network</source>
         <translation>Перевірити мережу</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="630"/>
+        <location filename="../gui/SettingsView.qml" line="669"/>
         <source>Plays a recorded table tennis clip from the host at 144 Hz and raises the resolution step by step, first with home Wi-Fi + adapter, then adapter only, then home Wi-Fi again. Takes about 10-20 minutes; you can keep the headset on or take it off. The headset&apos;s home Wi-Fi pauses for part of the test and Steam may sign in again afterwards.</source>
         <translation>Відтворює з хоста записаний ролик настільного тенісу при 144 Hz і крок за кроком підвищує роздільну здатність: спершу з домашнім Wi-Fi + адаптером, потім лише через адаптер, а тоді знову з домашнім Wi-Fi. Триває приблизно 10–20 хвилин; гарнітуру можна залишити на собі або зняти. На частині тесту домашній Wi-Fi гарнітури призупиняється, а після цього Steam може виконати повторний вхід.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="635"/>
+        <location filename="../gui/SettingsView.qml" line="674"/>
         <source>Apply</source>
         <translation>Застосувати</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="655"/>
+        <location filename="../gui/SettingsView.qml" line="694"/>
         <source>Last test: %1</source>
         <translation>Останній тест: %1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Network</source>
         <translation>Мережа</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Per eye</source>
         <translation>На око</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Missed frames</source>
         <translation>Втрачені кадри</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Latency p95 (ms)</source>
         <translation>Затримка p95 (мс)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Mbps</source>
         <translation>Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>144 Hz</source>
         <translation>144 Hz</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="698"/>
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>yes</source>
         <translation>так</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="698"/>
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>no</source>
         <translation>ні</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2602"/>
+        <location filename="../gui/SettingsView.qml" line="2644"/>
         <source>App updates</source>
         <translation>Оновлення програми</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <location filename="../gui/SettingsView.qml" line="2651"/>
         <source>Don&apos;t check automatically</source>
         <translation>Не перевіряти автоматично</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <location filename="../gui/SettingsView.qml" line="2651"/>
         <source>Notify me</source>
         <translation>Повідомляти мене</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <location filename="../gui/SettingsView.qml" line="2651"/>
         <source>Install automatically</source>
         <translation>Встановлювати автоматично</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2621"/>
+        <location filename="../gui/SettingsView.qml" line="2663"/>
         <source>Checks for a new version when VipleStream starts. Install automatically downloads and verifies the update and restarts VipleStream, but never while you are streaming.</source>
         <translation>Перевіряє наявність нової версії під час запуску VipleStream. «Встановлювати автоматично» завантажує та перевіряє оновлення й перезапускає VipleStream, але ніколи під час трансляції.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2698"/>
+        <location filename="../gui/SettingsView.qml" line="2740"/>
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>ПРИМІТКА: деякі сполучення клавіш, як-от Ctrl+Alt+Del у Windows, не може перехопити жоден застосунок, зокрема VipleStream.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2860"/>
+        <location filename="../gui/SettingsView.qml" line="2902"/>
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>Обробляти введення з геймпада, коли VipleStream у фоні</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2871"/>
+        <location filename="../gui/SettingsView.qml" line="2913"/>
         <source>Allows VipleStream to capture gamepad inputs even if it&apos;s not the current window in focus</source>
         <translation>Дозволяє VipleStream отримувати введення з геймпада, навіть якщо його вікно не у фокусі</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2881"/>
+        <location filename="../gui/SettingsView.qml" line="2923"/>
         <source>Network (MP-QUIC)</source>
         <translation>Мережа (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2891"/>
+        <location filename="../gui/SettingsView.qml" line="2933"/>
         <source>Enable MP-QUIC multipath transport</source>
         <translation>Увімкнути багатошляховий транспорт MP-QUIC</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2901"/>
+        <location filename="../gui/SettingsView.qml" line="2943"/>
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>Використовує багатошляховий QUIC (RFC 9443) для трансляції. Дає змогу перемикатися між Wi-Fi і мобільною мережею та об&apos;єднувати пропускну здатність двох мережевих адаптерів. Потрібна підтримка сервера.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2906"/>
+        <location filename="../gui/SettingsView.qml" line="2948"/>
         <source>Path scheduler</source>
         <translation>Планувальник шляхів</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2922"/>
+        <location filename="../gui/SettingsView.qml" line="2964"/>
         <source>Auto (per stream type)</source>
         <translation>Авто (за типом потоку)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2923"/>
+        <location filename="../gui/SettingsView.qml" line="2965"/>
         <source>Lowest latency</source>
         <translation>Найнижча затримка</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2924"/>
+        <location filename="../gui/SettingsView.qml" line="2966"/>
         <source>Bandwidth aggregation</source>
         <translation>Об&apos;єднання пропускної здатності</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2925"/>
+        <location filename="../gui/SettingsView.qml" line="2967"/>
         <source>Redundant (all paths)</source>
         <translation>Надлишковий (усі шляхи)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2926"/>
+        <location filename="../gui/SettingsView.qml" line="2968"/>
         <source>Earliest completion</source>
         <translation>Найшвидше завершення</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2935"/>
+        <location filename="../gui/SettingsView.qml" line="2977"/>
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>Авто: відео=ECF, звук=надлишковий, керування=min-RTT. Об&apos;єднання: round-robin через усі мережеві адаптери для максимальної пропускної здатності.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2955"/>
+        <location filename="../gui/SettingsView.qml" line="2997"/>
         <source>Video decoder</source>
         <translation>Відеодекодер</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2981"/>
-        <location filename="../gui/SettingsView.qml" line="3036"/>
+        <location filename="../gui/SettingsView.qml" line="3023"/>
+        <location filename="../gui/SettingsView.qml" line="3078"/>
         <source>Automatic (Recommended)</source>
         <translation>Автоматично (рекомендовано)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2985"/>
+        <location filename="../gui/SettingsView.qml" line="3027"/>
         <source>Force software decoding</source>
         <translation>Примусове програмне декодування</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2989"/>
+        <location filename="../gui/SettingsView.qml" line="3031"/>
         <source>Force hardware decoding</source>
         <translation>Примусове апаратне декодування</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3005"/>
+        <location filename="../gui/SettingsView.qml" line="3047"/>
         <source>Video codec</source>
         <translation>Відеокодек</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3040"/>
+        <location filename="../gui/SettingsView.qml" line="3082"/>
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3044"/>
+        <location filename="../gui/SettingsView.qml" line="3086"/>
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3048"/>
+        <location filename="../gui/SettingsView.qml" line="3090"/>
         <source>AV1 (Experimental)</source>
         <translation>AV1 (експериментально)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3052"/>
+        <location filename="../gui/SettingsView.qml" line="3094"/>
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave (наднизька затримка, LAN)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3095"/>
+        <location filename="../gui/SettingsView.qml" line="3137"/>
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>Увімкнути YUV 4:4:4 (експериментально)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3118"/>
+        <location filename="../gui/SettingsView.qml" line="3160"/>
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>Добре для трансляції робочого столу та ігор із великою кількістю тексту, але не рекомендується для динамічних ігор.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3120"/>
+        <location filename="../gui/SettingsView.qml" line="3162"/>
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>YUV 4:4:4 не підтримується на цьому ПК.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3127"/>
+        <location filename="../gui/SettingsView.qml" line="3169"/>
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>Зняти обмеження бітрейту (експериментально)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3146"/>
+        <location filename="../gui/SettingsView.qml" line="3188"/>
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>Автоматично знаходити ПК у локальній мережі (рекомендовано)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3167"/>
+        <location filename="../gui/SettingsView.qml" line="3209"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>Автоматично виявляти заблоковані з&apos;єднання (рекомендовано)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1795"/>
+        <location filename="../gui/SettingsView.qml" line="1836"/>
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>Якість — Найкраща якість зображення, більше навантаження на GPU</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1796"/>
+        <location filename="../gui/SettingsView.qml" line="1837"/>
         <source>Balanced — Recommended (default)</source>
         <translation>Збалансований — Рекомендовано (за замовчуванням)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1797"/>
+        <location filename="../gui/SettingsView.qml" line="1838"/>
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>Продуктивність — Найнижча затримка, підходить для iGPU</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2226"/>
+        <location filename="../gui/SettingsView.qml" line="2268"/>
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>Обхід NAT (сигнальний ретранслятор)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2236"/>
+        <location filename="../gui/SettingsView.qml" line="2278"/>
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>URL ретранслятора (напр. ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2247"/>
+        <location filename="../gui/SettingsView.qml" line="2289"/>
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>PSK ретранслятора (спільний ключ, залиште порожнім якщо немає)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2257"/>
+        <location filename="../gui/SettingsView.qml" line="2299"/>
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>Додатково: допомагає з&apos;єднатися, коли обидві сторони за NAT. Запустіть viplestream-relay на сервері з публічним IP.</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2267"/>
+        <location filename="../gui/SettingsView.qml" line="2309"/>
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>Примусово через ретранслятор (тест UDP-тунелю)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1806"/>
+        <location filename="../gui/SettingsView.qml" line="1848"/>
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2569,7 +2857,7 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 Продуктивність: пошук по 4 сусідах + мінімальна обробка (~6 мс на iGPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2277"/>
+        <location filename="../gui/SettingsView.qml" line="2319"/>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>Завжди транслювати через ретранслятор, навіть коли хост доступний напряму. Корисно для перевірки UDP-тунелю, коли VPN (напр. Cloudflare WARP) інакше дозволив би пряме /launch.</translation>
     </message>
@@ -2603,32 +2891,128 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <translation>Інтернет-з&apos;єднання цього ПК блокує VipleStream. Трансляція через Інтернет може не працювати, поки ви підключені до цієї мережі.</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="192"/>
-        <source>VR controller: hold A+X+trigger+grip</source>
-        <translation>VR-контролер: утримуйте A+X+курок+грип</translation>
+        <location filename="../gui/StreamSegue.qml" line="195"/>
+        <location filename="../gui/StreamSegue.qml" line="196"/>
+        <source>VR controller: hold A+X+trigger+grip to end the stream</source>
+        <translation>VR-контролер: утримуйте A+X+курок+грип, щоб завершити трансляцію</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="197"/>
+        <source>Flat-screen stream: press the left menu button to open or close the virtual keyboard</source>
+        <translation>Звичайна трансляція: натисніть ліву кнопку меню, щоб відкрити або закрити віртуальну клавіатуру</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="198"/>
+        <source>Flat-screen stream: hold the left menu button to bring the screen back in front of you</source>
+        <translation>Звичайна трансляція: утримуйте ліву кнопку меню, щоб повернути екран перед собою</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="199"/>
+        <source>Flat-screen stream: trigger = left click, grip = right click, thumbstick up/down = scroll</source>
+        <translation>Звичайна трансляція: курок = ліве клацання, грип = праве клацання, стік угору/вниз = прокручування</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="200"/>
+        <source>VR stream: hold menu+trigger for one second to open the SteamVR dashboard on the PC</source>
+        <translation>VR-трансляція: утримуйте меню+курок одну секунду, щоб відкрити панель SteamVR на ПК</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="201"/>
+        <source>VR stream: hold menu+grip on one hand for one second to open or close the virtual keyboard</source>
+        <translation>VR-трансляція: утримуйте меню+грип на одній руці одну секунду, щоб відкрити або закрити віртуальну клавіатуру</translation>
     </message>
     <message>
         <location filename="../gui/StreamSegue.qml" line="202"/>
+        <source>Hold both menu buttons for 2 seconds to switch Xbox controller mode (flat-screen and VR streams)</source>
+        <translation>Утримуйте обидві кнопки меню 2 секунди, щоб перемкнути режим контролера Xbox (звичайна та VR-трансляція)</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="203"/>
+        <source>Hold both thumbsticks down for 1.5 seconds to switch steering wheel mode (in Xbox controller mode)</source>
+        <translation>Утримуйте обидва стіки натиснутими 1,5 секунди, щоб перемкнути режим керма (у режимі контролера Xbox)</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="204"/>
+        <source>VR stream: games without VR controller support get an Xbox controller automatically</source>
+        <translation>VR-трансляція: ігри без підтримки VR-контролерів автоматично отримують контролер Xbox</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="207"/>
+        <source>Press %1 to show or hide the performance overlay</source>
+        <translation>Натисніть %1, щоб показати або сховати накладку продуктивності</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="207"/>
+        <source>Ctrl+Alt+Shift+S</source>
+        <translation>Ctrl+Alt+Shift+S</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="208"/>
+        <source>Press %1 to switch between windowed and full-screen</source>
+        <translation>Натисніть %1, щоб перемкнути між віконним і повноекранним режимом</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="208"/>
+        <source>Ctrl+Alt+Shift+X</source>
+        <translation>Ctrl+Alt+Shift+X</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="209"/>
+        <source>Press %1 to release or capture the mouse and keyboard</source>
+        <translation>Натисніть %1, щоб звільнити або захопити мишу й клавіатуру</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="209"/>
+        <source>Ctrl+Alt+Shift+Z</source>
+        <translation>Ctrl+Alt+Shift+Z</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="210"/>
+        <source>Press %1 to switch the mouse between game mode and remote desktop mode</source>
+        <translation>Натисніть %1, щоб перемкнути мишу між ігровим режимом і режимом віддаленого робочого столу</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="210"/>
+        <source>Ctrl+Alt+Shift+M</source>
+        <translation>Ctrl+Alt+Shift+M</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="211"/>
+        <source>Press %1 to type the clipboard text on the host</source>
+        <translation>Натисніть %1, щоб ввести текст із буфера обміну на хості</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="211"/>
+        <source>Ctrl+Alt+Shift+V</source>
+        <translation>Ctrl+Alt+Shift+V</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="213"/>
+        <source>Gamepad: hold Start to use the gamepad as a mouse</source>
+        <translation>Геймпад: утримуйте Start, щоб використовувати геймпад як мишу</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="225"/>
         <source>Failed to start the stream.</source>
         <translation>Не вдалося запустити трансляцію.</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="188"/>
+        <location filename="../gui/StreamSegue.qml" line="216"/>
         <source>Tip:</source>
         <translation>Порада:</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="188"/>
+        <location filename="../gui/StreamSegue.qml" line="190"/>
         <source>Press %1 to disconnect your session</source>
         <translation>Натисніть %1, щоб від&apos;єднати сеанс</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="189"/>
+        <location filename="../gui/StreamSegue.qml" line="191"/>
         <source>Start+Select+L1+R1</source>
         <translation>Start+Select+L1+R1</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="189"/>
+        <location filename="../gui/StreamSegue.qml" line="191"/>
         <source>Ctrl+Alt+Shift+Q</source>
         <translation>Ctrl+Alt+Shift+Q</translation>
     </message>
@@ -2636,77 +3020,77 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>UpdateDialog</name>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="78"/>
+        <location filename="../gui/UpdateDialog.qml" line="79"/>
         <source>Download and install VipleStream %1?</source>
         <translation>Завантажити й установити VipleStream %1?</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="81"/>
+        <location filename="../gui/UpdateDialog.qml" line="82"/>
         <source>Working…</source>
         <translation>Виконується…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="84"/>
+        <location filename="../gui/UpdateDialog.qml" line="85"/>
         <source>VipleStream %1 is available.</source>
         <translation>Доступна версія VipleStream %1.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="86"/>
+        <location filename="../gui/UpdateDialog.qml" line="87"/>
         <source>Update failed</source>
         <translation>Не вдалося оновити</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="98"/>
+        <location filename="../gui/UpdateDialog.qml" line="99"/>
         <source>Loading release notes…</source>
         <translation>Завантаження приміток до випуску…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="99"/>
+        <location filename="../gui/UpdateDialog.qml" line="100"/>
         <source>Couldn&apos;t load the release notes.</source>
         <translation>Не вдалося завантажити примітки до випуску.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="128"/>
+        <location filename="../gui/UpdateDialog.qml" line="134"/>
         <source>VipleStream will close and relaunch automatically after the update is applied. On Windows you may be prompted by UAC if installed to Program Files.</source>
         <translation>VipleStream закриється й автоматично перезапуститься після застосування оновлення. У Windows може з&apos;явитися запит UAC, якщо програму встановлено в Program Files.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="164"/>
+        <location filename="../gui/UpdateDialog.qml" line="170"/>
         <source>%1 / %2 MB</source>
         <translation>%1 / %2 МБ</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="166"/>
+        <location filename="../gui/UpdateDialog.qml" line="172"/>
         <source>Connecting…</source>
         <translation>Підключення…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="188"/>
+        <location filename="../gui/UpdateDialog.qml" line="195"/>
         <source>Click &apos;Open release page&apos; to download manually.</source>
         <translation>Натисніть «Відкрити сторінку випуску», щоб завантажити вручну.</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="208"/>
+        <location filename="../gui/UpdateDialog.qml" line="215"/>
         <source>Yes</source>
         <translation>Так</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="223"/>
+        <location filename="../gui/UpdateDialog.qml" line="230"/>
         <source>No</source>
         <translation>Ні</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="235"/>
+        <location filename="../gui/UpdateDialog.qml" line="242"/>
         <source>Cancel</source>
         <translation>Скасувати</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="248"/>
+        <location filename="../gui/UpdateDialog.qml" line="255"/>
         <source>Open release page</source>
         <translation>Відкрити сторінку випуску</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="263"/>
+        <location filename="../gui/UpdateDialog.qml" line="276"/>
         <source>Close</source>
         <translation>Закрити</translation>
     </message>
@@ -2714,144 +3098,148 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="67"/>
+        <location filename="../backend/updater.cpp" line="69"/>
         <source>On the Steam Frame, VipleStream updates itself in the background while it is closed (when installed with the installer script). To update right away, close VipleStream and run the new installer script from the release page.</source>
         <translation>На Steam Frame VipleStream оновлюється у фоновому режимі, поки закритий (якщо встановлений за допомогою скрипта встановлення). Щоб оновити негайно, закрийте VipleStream і запустіть новий скрипт встановлення зі сторінки випуску.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="71"/>
+        <location filename="../backend/updater.cpp" line="73"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>Цю копію VipleStream встановлено як Flatpak. Завантажте новий .flatpak зі сторінки випуску й установіть його командою &quot;flatpak install --bundle &lt;file&gt;&quot;. Якщо ви встановили його з репозиторію Flatpak, натомість виконайте &quot;flatpak update&quot;.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="77"/>
+        <location filename="../backend/updater.cpp" line="79"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>VipleStream запущено не з AppImage, тому він не може замінити сам себе. Завантажте нову версію зі сторінки випуску.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="80"/>
+        <location filename="../backend/updater.cpp" line="82"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>Автоматичне встановлення для Linux arm64 поки недоступне. Завантажте нову версію зі сторінки випуску.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="84"/>
+        <location filename="../backend/updater.cpp" line="86"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>Автоматичне встановлення недоступне на цій платформі (%1). Завантажте нову версію зі сторінки випуску.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="150"/>
+        <location filename="../backend/updater.cpp" line="159"/>
         <source>Querying release assets…</source>
         <translation>Отримання файлів випуску…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="275"/>
-        <location filename="../backend/updater.cpp" line="419"/>
+        <location filename="../backend/updater.cpp" line="285"/>
+        <location filename="../backend/updater.cpp" line="459"/>
         <source>Update cancelled.</source>
         <translation>Оновлення скасовано.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="279"/>
+        <location filename="../backend/updater.cpp" line="289"/>
         <source>Failed to query release info: %1</source>
         <translation>Не вдалося отримати інформацію про випуск: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="287"/>
+        <location filename="../backend/updater.cpp" line="297"/>
         <source>Release JSON malformed: %1</source>
         <translation>Некоректний JSON випуску: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="312"/>
+        <location filename="../backend/updater.cpp" line="322"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>Інформація про випуск із GitHub не містить тегу.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="315"/>
+        <location filename="../backend/updater.cpp" line="325"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>Тег останнього випуску &quot;%1&quot; не є номером версії.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="320"/>
+        <location filename="../backend/updater.cpp" line="330"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>Інформація про випуски на GitHub ще не оновилася: там досі вказано %1, що не новіше за цю версію (%2). Спробуйте ще раз за кілька хвилин.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="325"/>
+        <location filename="../backend/updater.cpp" line="335"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>До випуску %1 ще не додано файлів. Спробуйте ще раз за кілька хвилин.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="332"/>
+        <location filename="../backend/updater.cpp" line="342"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>Випуск %1 не містить пакета для встановлення на цій платформі (%2).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="341"/>
+        <location filename="../backend/updater.cpp" line="352"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>VipleStream %1 доступний як %2, але його потрібно встановити вручну. %3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="356"/>
+        <location filename="../backend/updater.cpp" line="380"/>
+        <location filename="../backend/updater.cpp" line="389"/>
         <source>Cannot open download file: %1</source>
         <translation>Не вдалося відкрити файл завантаження: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="360"/>
+        <location filename="../backend/updater.cpp" line="393"/>
         <source>Downloading %1…</source>
         <translation>Завантаження %1…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="430"/>
+        <location filename="../backend/updater.cpp" line="363"/>
+        <location filename="../backend/updater.cpp" line="367"/>
+        <location filename="../backend/updater.cpp" line="470"/>
+        <location filename="../backend/updater.cpp" line="487"/>
         <source>Download failed: %1</source>
         <translation>Не вдалося завантажити: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="436"/>
+        <location filename="../backend/updater.cpp" line="477"/>
         <source>Could not save the downloaded update. The disk may be full.</source>
         <translation>Не вдалося зберегти завантажене оновлення. Можливо, диск заповнений.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="445"/>
+        <location filename="../backend/updater.cpp" line="498"/>
         <source>Preparing installer…</source>
         <translation>Підготовка інсталятора…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="451"/>
+        <location filename="../backend/updater.cpp" line="504"/>
         <source>Restarting to apply update…</source>
         <translation>Перезапуск для застосування оновлення…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="548"/>
+        <location filename="../backend/updater.cpp" line="618"/>
         <source>The update was not installed because VipleStream did not exit in time. Please close VipleStream and try updating again.</source>
         <translation>Оновлення не встановлено, бо VipleStream не завершив роботу вчасно. Закрийте VipleStream і повторіть оновлення.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="555"/>
-        <location filename="../backend/updater.cpp" line="626"/>
+        <location filename="../backend/updater.cpp" line="625"/>
+        <location filename="../backend/updater.cpp" line="716"/>
         <source>Cannot write helper script: %1</source>
         <translation>Не вдалося записати допоміжний скрипт: %1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="580"/>
+        <location filename="../backend/updater.cpp" line="663"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>Не вдалося запустити засіб оновлення (UAC відхилено або немає PowerShell).</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="590"/>
+        <location filename="../backend/updater.cpp" line="673"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>Запущено не з AppImage — змінну APPIMAGE не задано. Перевстановіть вручну.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="600"/>
+        <location filename="../backend/updater.cpp" line="683"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>Тека AppImage недоступна для запису: %1. Перемістіть VipleStream у теку, доступну для запису користувачу (напр. ~/Applications/), і спробуйте ще раз.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="639"/>
+        <location filename="../backend/updater.cpp" line="729"/>
         <source>Failed to launch updater helper script.</source>
         <translation>Не вдалося запустити допоміжний скрипт оновлення.</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="645"/>
+        <location filename="../backend/updater.cpp" line="735"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>Автоматичне оновлення не підтримується на цій платформі.</translation>
     </message>
@@ -3136,42 +3524,42 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <translation>Режим VR не підтримується на цій платформі.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="526"/>
+        <location filename="../backend/vrlauncher.cpp" line="529"/>
         <source>Could not start the VR stream.</source>
         <translation>Не вдалося запустити VR-трансляцію.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="577"/>
+        <location filename="../backend/vrlauncher.cpp" line="580"/>
         <source>The video player stopped unexpectedly.</source>
         <translation>Відеопрогравач несподівано зупинився.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="580"/>
+        <location filename="../backend/vrlauncher.cpp" line="583"/>
         <source>Could not start VR for the video player.</source>
         <translation>Не вдалося запустити VR для відеопрогравача.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="583"/>
+        <location filename="../backend/vrlauncher.cpp" line="586"/>
         <source>Could not play this video.</source>
         <translation>Не вдалося відтворити це відео.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="586"/>
+        <location filename="../backend/vrlauncher.cpp" line="589"/>
         <source>The video player ended with an error (code %1).</source>
         <translation>Відеопрогравач завершив роботу з помилкою (код %1).</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="646"/>
+        <location filename="../backend/vrlauncher.cpp" line="649"/>
         <source>The VR stream stopped unexpectedly.</source>
         <translation>VR-трансляція несподівано зупинилася.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="650"/>
+        <location filename="../backend/vrlauncher.cpp" line="653"/>
         <source>Another app is running on the host. Quit it first, then start the VR app again.</source>
         <translation>На хості запущено інший застосунок. Спершу закрийте його, потім знову запустіть VR-застосунок.</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="654"/>
+        <location filename="../backend/vrlauncher.cpp" line="657"/>
         <source>The VR stream ended with an error (code %1).</source>
         <translation>VR-трансляція завершилася з помилкою (код %1).</translation>
     </message>
@@ -3210,131 +3598,137 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <translation>не плавно</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="127"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="271"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="125"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="302"/>
         <source>The network test is not available here.</source>
         <translation>Тест мережі тут недоступний.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="131"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="129"/>
         <source>Stop the current stream first.</source>
         <translation>Спершу зупиніть поточну трансляцію.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="145"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="143"/>
         <source>No VR-capable host is online. Turn on the host PC and try again.</source>
         <translation>Немає доступних у мережі хостів із підтримкою VR. Увімкніть хост-ПК і спробуйте знову.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="150"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="148"/>
         <source>The headset network helper is not running. Reinstall VipleStream with the Steam Frame installer script.</source>
         <translation>Мережевий помічник гарнітури не запущено. Перевстановіть VipleStream за допомогою скрипту встановлення Steam Frame.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="154"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="152"/>
         <source>The streaming adapter is not connected, so there is nothing to compare.</source>
         <translation>Адаптер трансляції не підключено, тому немає чого порівнювати.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="158"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="156"/>
         <source>The host has no address on the streaming adapter&apos;s network.</source>
         <translation>Хост не має адреси в мережі адаптера трансляції.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="177"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="267"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="331"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="183"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="298"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="362"/>
         <source>Cancelled.</source>
         <translation>Скасовано.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="180"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="186"/>
         <source>Cancelling after this step...</source>
         <translation>Скасування після цього кроку...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="196"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="202"/>
         <source>Pausing the headset&apos;s home Wi-Fi...</source>
         <translation>Призупинення домашнього Wi-Fi гарнітури...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="196"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="202"/>
         <source>Reconnecting the headset&apos;s home Wi-Fi...</source>
         <translation>Повторне підключення домашнього Wi-Fi гарнітури...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="221"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="227"/>
         <source>Home Wi-Fi paused; waiting for the adapter link to settle...</source>
         <translation>Домашній Wi-Fi призупинено; очікування стабілізації зв&apos;язку через адаптер...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="224"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="230"/>
         <source>Could not pause the headset&apos;s home Wi-Fi (%1).</source>
         <translation>Не вдалося призупинити домашній Wi-Fi гарнітури (%1).</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="224"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="230"/>
         <source>no answer from the helper</source>
         <translation>немає відповіді від помічника</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="232"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="240"/>
         <source>Home Wi-Fi reconnected; waiting for the network to settle...</source>
         <translation>Домашній Wi-Fi перепідключено; очікування стабілізації мережі...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="235"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="243"/>
         <source>The headset&apos;s home Wi-Fi did not reconnect (state: %1).</source>
         <translation>Домашній Wi-Fi гарнітури не перепідключився (стан: %1).</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="280"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="267"/>
+        <source>The streaming adapter dropped out during the test, so no choice was saved. Try again.</source>
+        <translation>Під час перевірки адаптер трансляції від&apos;єднався, тому вибір не збережено. Спробуйте ще раз.</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="277"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="311"/>
         <source>Could not start the test stream.</source>
         <translation>Не вдалося запустити тестову трансляцію.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="285"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="386"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="316"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="417"/>
         <source>adapter only</source>
         <translation>лише адаптер</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="285"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="316"/>
         <source>home Wi-Fi + adapter</source>
         <translation>домашній Wi-Fi + адаптер</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="286"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="317"/>
         <source>Testing %1: %2 x %2 per eye at 144 Hz (step %3 of up to %4)...</source>
         <translation>Тестування (%1): %2 x %2 на око при 144 Hz (крок %3 із макс. %4)...</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="327"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="358"/>
         <source>The test stream did not run: %1</source>
         <translation>Тестова трансляція не запустилася: %1</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="378"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="409"/>
         <source>Use adapter only: the headset pauses home Wi-Fi while you play VR here (smoothest: %1 per eye with adapter only, %2 with home Wi-Fi).</source>
         <translation>Використовувати лише адаптер: гарнітура призупиняє домашній Wi-Fi під час гри у VR тут (найплавніше: %1 на око лише через адаптер, %2 з домашнім Wi-Fi).</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="380"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="411"/>
         <source>Keep home Wi-Fi: adapter only was not clearly better here (smoothest: %1 per eye with home Wi-Fi, %2 with adapter only).</source>
         <translation>Зберігати домашній Wi-Fi: режим лише через адаптер не був тут відчутно кращим (найплавніше: %1 на око з домашнім Wi-Fi, %2 лише через адаптер).</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="383"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="414"/>
         <source>The highest step was limited by the headset itself, not the network.</source>
         <translation>Найвищий крок був обмежений самою гарнітурою, а не мережею.</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="386"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="417"/>
         <source>keep home Wi-Fi</source>
         <translation>зберігати домашній Wi-Fi</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="387"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="418"/>
         <source>Network test finished.</source>
         <translation>Тест мережі завершено.</translation>
     </message>
@@ -3342,27 +3736,27 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>VrNetMode</name>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="157"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="161"/>
         <source>Network test: trying adapter only for about 30 seconds (home Wi-Fi pauses, then comes back)</source>
         <translation>Тест мережі: спроба режиму «лише адаптер» приблизно на 30 секунд (домашній Wi-Fi призупиниться, а потім повернеться)</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="197"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="201"/>
         <source>Network test: smoother with home Wi-Fi paused during VR (missed frames %1% -&gt; %2%). It reconnects when you stop streaming.</source>
         <translation>Тест мережі: плавніше з призупиненим домашнім Wi-Fi під час VR (втрачені кадри %1% -&gt; %2%). Відновить з&apos;єднання після зупинки трансляції.</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="203"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="207"/>
         <source>Network test: keeping home Wi-Fi (missed frames %1% with it, %2% without)</source>
         <translation>Тест мережі: збереження домашнього Wi-Fi (втрачені кадри %1% з ним, %2% без нього)</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="251"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="255"/>
         <source>Streaming adapter lost - reconnecting the headset&apos;s home Wi-Fi</source>
         <translation>Адаптер трансляції втрачено — повторне підключення гарнітури до домашнього Wi-Fi</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="263"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="284"/>
         <source>Home Wi-Fi paused during VR for a smoother stream - it reconnects when you stop streaming</source>
         <translation>Домашній Wi-Fi призупинено під час VR для плавнішої трансляції — перепідключиться після завершення трансляції</translation>
     </message>

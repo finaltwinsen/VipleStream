@@ -53,6 +53,22 @@ SdlInputHandler::findStateForGamepad(SDL_JoystickID id)
     return nullptr;
 }
 
+// §XR-PADMODE（2026-11-13）：頭盔 2D 串流的手把模式。固定用第一支（index 0）：很多遊戲只讀第一支 XInput 手把，
+// 而頭盔上的 Steam Virtual Gamepad 佔著 index 0 卻不送任何輸入（XR 模式下控制器走 OpenXR）。index 0 還沒有手把時
+// 先送一次到達通知，讓 host 插一支 Xbox 手把。
+void SdlInputHandler::handleXrGamepad(int buttons, uint8_t lt, uint8_t rt, short lx, short ly, short rx, short ry)
+{
+    if (!(m_GamepadMask & 0x1)) {
+        m_GamepadMask |= 0x1;
+        LiSendControllerArrivalEvent(0, m_GamepadMask, LI_CTYPE_XBOX,
+                                     A_FLAG | B_FLAG | X_FLAG | Y_FLAG | UP_FLAG | DOWN_FLAG | LEFT_FLAG | RIGHT_FLAG |
+                                         LB_FLAG | RB_FLAG | PLAY_FLAG | BACK_FLAG | LS_CLK_FLAG | RS_CLK_FLAG,
+                                     LI_CCAP_ANALOG_TRIGGERS);
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-PADMODE] virtual Xbox controller attached as gamepad 0");
+    }
+    LiSendMultiControllerEvent(0, m_GamepadMask, buttons, lt, rt, lx, ly, rx, ry);
+}
+
 void SdlInputHandler::sendGamepadState(GamepadState* state)
 {
     SDL_assert(m_GamepadMask == 0x1 || m_MultiController);

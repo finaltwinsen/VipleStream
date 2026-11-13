@@ -2180,6 +2180,17 @@ namespace quic_server {
       }
     }
 #endif
+    // §Q-SOCK-SNDBUF（2026-11-12，頭盔 2D 串流實測）：改成非阻塞之後沒有把送出緩衝加大，Windows 預設只有 64 KB，
+    // 一張大一點的畫面（1440p 的 IDR 約 74 KB，加上 FEC）一口氣送就滿 → 整串封包被丟 → client 等 IDR、畫面停 1 秒以上
+    // （四分鐘 16 次）。緩衝加到 4 MB；滿的時候先等一下再丟（見下面送出迴圈）。
+    {
+      int want = 4 * 1024 * 1024;
+      setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char *) &want, sizeof(want));
+      int got = 0;
+      socklen_t gotLen = sizeof(got);
+      getsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char *) &got, &gotLen);
+      BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SOCK-SNDBUF: send buffer " << got << " bytes (asked for " << want << ")";
+    }
 
 #ifdef _WIN32
     // §Q-MP-PKTINFO: 動態載入 WSARecvMsg（Windows 要求透過
@@ -2328,6 +2339,8 @@ namespace quic_server {
       // and walks the wake queue internally, returning the cnx it sent
       // for via p_last_cnx.
       int pktsSentThisCycle = 0;
+      int64_t wouldBlockWaitUs = 0;  // §Q-SOCK-SNDBUF：這一輪為了等送出緩衝花掉的時間
+      static uint64_t wouldBlockRetries = 0;
       while (true) {
         struct sockaddr_storage destAddr{};
         struct sockaddr_storage fromAddr{};
@@ -2371,6 +2384,28 @@ namespace quic_server {
         }
         int sendResult = sendto(sock, (const char *)sendBuf, (int)sendLen, 0,
                (struct sockaddr *)&actualDest, destLen);
+        // §Q-SOCK-SNDBUF：緩衝滿的時候等它消化再送一次，每包最多等 2 ms、這一輪合計最多 8 ms
+        // （卡住的網卡不會讓整個 IO 迴圈停擺；短暫的突發不必丟包）。
+        for (int retry = 0; sendResult <= 0 && retry < 2 && wouldBlockWaitUs < 8000; retry++) {
+#ifdef _WIN32
+          if (WSAGetLastError() != WSAEWOULDBLOCK) {
+            break;
+          }
+#else
+          if (errno != EWOULDBLOCK && errno != EAGAIN) {
+            break;
+          }
+#endif
+          fd_set wfds;
+          FD_ZERO(&wfds);
+          FD_SET(sock, &wfds);
+          struct timeval tv {0, 1000};
+          const auto w0 = std::chrono::steady_clock::now();
+          select((int) sock + 1, nullptr, &wfds, nullptr, &tv);
+          wouldBlockWaitUs += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - w0).count();
+          wouldBlockRetries++;
+          sendResult = sendto(sock, (const char *) sendBuf, (int) sendLen, 0, (struct sockaddr *) &actualDest, destLen);
+        }
         if (sendResult > 0) {
           totalSent++;
           pktsSentThisCycle++;
@@ -2391,7 +2426,7 @@ namespace quic_server {
             static uint64_t wouldBlockDrops = 0;
             if ((++wouldBlockDrops & (wouldBlockDrops - 1)) == 0) {  // 1,2,4,8… 次才印
               BOOST_LOG(warning) << "[VIPLE-MPQUIC] §Q-SOCK-NONBLOCK: sendto would block — dropped "
-                                 << wouldBlockDrops << " packet(s) so far";
+                                 << wouldBlockDrops << " packet(s) so far (waited for the buffer " << wouldBlockRetries << " times)";
             }
             continue;
           }

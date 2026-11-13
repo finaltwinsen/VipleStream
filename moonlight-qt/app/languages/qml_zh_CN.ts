@@ -4,188 +4,461 @@
 <context>
     <name>AppContent</name>
     <message>
-        <location filename="../gui/AppContent.qml" line="350"/>
+        <location filename="../gui/AppContent.qml" line="353"/>
         <source>Add PC manually</source>
         <translation>手动添加计算机</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="380"/>
+        <location filename="../gui/AppContent.qml" line="383"/>
         <source>VR mode (switch mode)</source>
         <translation>VR 模式（切换模式）</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="380"/>
+        <location filename="../gui/AppContent.qml" line="383"/>
         <source>Desktop mode (switch mode)</source>
         <translation>桌面模式（切换模式）</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="418"/>
+        <location filename="../gui/AppContent.qml" line="421"/>
         <source>Update available for VipleStream: Version %1</source>
         <translation>VipleStream 有可用更新：版本 %1</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="456"/>
+        <location filename="../gui/AppContent.qml" line="459"/>
         <source>Help</source>
         <translation>帮助</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="482"/>
+        <location filename="../gui/AppContent.qml" line="485"/>
         <source>Gamepad Mapper</source>
         <translation>手柄按键映射</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="237"/>
-        <location filename="../gui/AppContent.qml" line="513"/>
+        <location filename="../gui/AppContent.qml" line="238"/>
+        <location filename="../gui/AppContent.qml" line="516"/>
         <source>Settings</source>
         <translation>设置</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="227"/>
+        <location filename="../gui/AppContent.qml" line="228"/>
         <source>HOSTS</source>
         <translation>主机</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="228"/>
+        <location filename="../gui/AppContent.qml" line="229"/>
         <source>LIBRARY</source>
         <translation>游戏库</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="229"/>
+        <location filename="../gui/AppContent.qml" line="230"/>
         <source>SETTINGS</source>
         <translation>设置</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="235"/>
+        <location filename="../gui/AppContent.qml" line="236"/>
         <source>Hosts</source>
         <translation>主机</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="236"/>
+        <location filename="../gui/AppContent.qml" line="237"/>
         <source>Library</source>
         <translation>游戏库</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="520"/>
+        <location filename="../gui/AppContent.qml" line="523"/>
         <source>No functioning hardware accelerated video decoder was detected by VipleStream. Your streaming performance may be severely degraded in this configuration.</source>
         <translation>VipleStream 未检测到可正常工作的硬件加速视频解码器。在此配置下，串流性能可能会严重下降。</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="522"/>
+        <location filename="../gui/AppContent.qml" line="525"/>
         <source>Click the Help button for more information on solving this problem.</source>
         <translation>单击帮助按钮以获取有关解决此问题的更多信息。</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="529"/>
+        <location filename="../gui/AppContent.qml" line="532"/>
         <source>Hardware acceleration doesn&apos;t work on XWayland. Continuing on XWayland may result in poor streaming performance. Try running with QT_QPA_PLATFORM=wayland or switch to X11.</source>
         <translation>硬件加速在 XWayland 上不起作用。在 XWayland 上继续操作可能会导致流式传输性能下降。</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="531"/>
+        <location filename="../gui/AppContent.qml" line="534"/>
         <source>Click the Help button for more information.</source>
         <translation>单击帮助按钮以获取更多信息。</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="539"/>
+        <location filename="../gui/AppContent.qml" line="542"/>
         <source>This version of VipleStream isn&apos;t optimized for your PC. Please download the &apos;%1&apos; version of VipleStream for the best streaming performance.</source>
         <translation>此版本的 VipleStream 未针对你的电脑进行优化。请下载 VipleStream 的“%1”版本以获得最佳串流性能。</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="554"/>
+        <location filename="../gui/AppContent.qml" line="557"/>
         <source>VipleStream detected gamepads without a mapping:</source>
         <translation>VipleStream 检测到没有映射的手柄：</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="556"/>
+        <location filename="../gui/AppContent.qml" line="559"/>
         <source>Click the Help button for information on how to map your gamepads.</source>
         <translation>单击帮助按钮以获取有关如何映射手柄的信息。</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="567"/>
+        <location filename="../gui/AppContent.qml" line="570"/>
         <source>VipleStream found a HID device that is not responding:</source>
         <translation>VipleStream 发现一个没有响应的 HID 设备：</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="568"/>
+        <location filename="../gui/AppContent.qml" line="571"/>
         <source>Gamepad detection and Steam Controller passthrough are disabled until it responds again. Unplug and replug the device; if VipleStream still does not see it, restart VipleStream.</source>
         <translation>在设备恢复响应之前，手柄检测和 Steam Controller 直通将被禁用。请拔下并重新插入设备；如果 VipleStream 仍然无法识别，请重新启动 VipleStream。</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="576"/>
+        <location filename="../gui/AppContent.qml" line="579"/>
         <source>Are you sure you want to quit?</source>
         <translation>确定要退出吗？</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="606"/>
+        <location filename="../gui/AppContent.qml" line="624"/>
+        <source>VR controllers - flat-screen and VR streams</source>
+        <translation>VR 控制器 - 普通画面串流和 VR 串流</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="625"/>
+        <source>A + X + trigger + grip</source>
+        <translation>A + X + 扳机 + 握把</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="625"/>
+        <location filename="../gui/AppContent.qml" line="645"/>
+        <location filename="../gui/AppContent.qml" line="655"/>
+        <source>End the stream</source>
+        <translation>结束串流</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="626"/>
+        <source>Both menu buttons, 2 seconds</source>
+        <translation>两个菜单键，2 秒</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="626"/>
+        <source>Switch Xbox controller mode</source>
+        <translation>切换 Xbox 控制器模式</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="627"/>
+        <source>Both thumbsticks pressed, 1.5 seconds</source>
+        <translation>按下两个摇杆，1.5 秒</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="627"/>
+        <source>Switch steering wheel mode (in Xbox controller mode)</source>
+        <translation>切换方向盘模式（在 Xbox 控制器模式下）</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="628"/>
+        <source>VR controllers - flat-screen stream only</source>
+        <translation>VR 控制器 - 仅普通画面串流</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="629"/>
+        <source>Trigger / grip</source>
+        <translation>扳机 / 握把</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="629"/>
+        <source>Left click / right click</source>
+        <translation>左键单击 / 右键单击</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="630"/>
+        <source>Thumbstick up / down</source>
+        <translation>摇杆上 / 下</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="630"/>
+        <source>Scroll</source>
+        <translation>滚动</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="631"/>
+        <source>Left menu button</source>
+        <translation>左菜单键</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="631"/>
+        <location filename="../gui/AppContent.qml" line="635"/>
+        <source>Open or close the virtual keyboard</source>
+        <translation>打开或关闭虚拟键盘</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="632"/>
+        <source>Left menu button, 1 second</source>
+        <translation>左菜单键，1 秒</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="632"/>
+        <source>Bring the screen back in front of you</source>
+        <translation>把画面移回你面前</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="633"/>
+        <source>VR controllers - VR stream only</source>
+        <translation>VR 控制器 - 仅 VR 串流</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="634"/>
+        <source>Menu + trigger on one hand, 1 second</source>
+        <translation>同一只手上菜单键 + 扳机，1 秒</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="634"/>
+        <source>Open the SteamVR dashboard on the PC</source>
+        <translation>在电脑上打开 SteamVR 控制面板</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="635"/>
+        <source>Menu + grip on one hand, 1 second</source>
+        <translation>同一只手上菜单键 + 握把，1 秒</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="636"/>
+        <source>Trigger on the white bar under the keyboard</source>
+        <translation>用扳机点键盘下方的白色横条</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="636"/>
+        <source>Drag the virtual keyboard</source>
+        <translation>拖动虚拟键盘</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="637"/>
+        <source>Xbox controller mode</source>
+        <translation>Xbox 控制器模式</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="638"/>
+        <source>Right A / B / X / Y</source>
+        <translation>右手 A / B / X / Y</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="638"/>
+        <source>A / B / X / Y</source>
+        <translation>A / B / X / Y</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="639"/>
+        <source>Left D-pad buttons</source>
+        <translation>左手方向键</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="639"/>
+        <source>D-pad</source>
+        <translation>方向键</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="640"/>
+        <source>Thumbsticks, triggers, shoulder buttons</source>
+        <translation>摇杆、扳机、肩键</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="640"/>
+        <source>Sticks, LT / RT, LB / RB</source>
+        <translation>摇杆、LT / RT、LB / RB</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="641"/>
+        <source>Right menu / left menu</source>
+        <translation>右菜单键 / 左菜单键</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="641"/>
+        <source>Start / Back</source>
+        <translation>Start / Back</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="644"/>
+        <source>Keyboard</source>
+        <translation>键盘</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="645"/>
+        <source>Ctrl+Alt+Shift+Q</source>
+        <translation type="unfinished">Ctrl+Alt+Shift+Q</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="646"/>
+        <source>Ctrl+Alt+Shift+E</source>
+        <translation>Ctrl+Alt+Shift+E</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="646"/>
+        <source>End the stream and close VipleStream</source>
+        <translation>结束串流并关闭 VipleStream</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="647"/>
+        <source>Ctrl+Alt+Shift+S</source>
+        <translation>Ctrl+Alt+Shift+S</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="647"/>
+        <source>Show or hide the performance overlay</source>
+        <translation>显示或隐藏性能叠加信息</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="648"/>
+        <source>Ctrl+Alt+Shift+X</source>
+        <translation>Ctrl+Alt+Shift+X</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="648"/>
+        <source>Switch between windowed and full-screen</source>
+        <translation>在窗口和全屏之间切换</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="649"/>
+        <source>Ctrl+Alt+Shift+Z</source>
+        <translation>Ctrl+Alt+Shift+Z</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="649"/>
+        <source>Release or capture the mouse and keyboard</source>
+        <translation>释放或捕获鼠标和键盘</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="650"/>
+        <source>Ctrl+Alt+Shift+M</source>
+        <translation>Ctrl+Alt+Shift+M</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="650"/>
+        <source>Switch the mouse between game mode and remote desktop mode</source>
+        <translation>在游戏模式和远程桌面模式之间切换鼠标</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="651"/>
+        <source>Ctrl+Alt+Shift+C</source>
+        <translation>Ctrl+Alt+Shift+C</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="651"/>
+        <source>Show or hide the local mouse cursor</source>
+        <translation>显示或隐藏本地鼠标指针</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="652"/>
+        <source>Ctrl+Alt+Shift+V</source>
+        <translation>Ctrl+Alt+Shift+V</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="652"/>
+        <source>Type the clipboard text on the host</source>
+        <translation>在主机上输入剪贴板文字</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="653"/>
+        <source>Ctrl+Alt+Shift+D</source>
+        <translation>Ctrl+Alt+Shift+D</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="653"/>
+        <source>Minimize the stream window</source>
+        <translation>最小化串流窗口</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="654"/>
+        <source>Gamepad</source>
+        <translation>手柄</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="655"/>
+        <source>Start+Select+L1+R1</source>
+        <translation type="unfinished">Start+Select+L1+R1</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="656"/>
+        <source>Hold Start</source>
+        <translation>按住 Start</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="656"/>
+        <source>Use the gamepad as a mouse</source>
+        <translation>把手柄当作鼠标使用</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="664"/>
+        <source>Shortcuts while streaming</source>
+        <translation>串流中的快捷键</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="679"/>
         <source>Enter the IP address of your host PC:</source>
         <translation>输入你主机的 IP 地址：</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="650"/>
+        <location filename="../gui/AppContent.qml" line="723"/>
         <source>Choose a mode</source>
         <translation>选择模式</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="685"/>
+        <location filename="../gui/AppContent.qml" line="758"/>
         <source>Desktop mode</source>
         <translation>桌面模式</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="685"/>
+        <location filename="../gui/AppContent.qml" line="758"/>
         <source>Your PC&apos;s desktop on a virtual screen</source>
         <translation>在虚拟屏幕上显示电脑桌面</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="696"/>
+        <location filename="../gui/AppContent.qml" line="769"/>
         <source>VR mode</source>
         <translation>VR 模式</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="696"/>
+        <location filename="../gui/AppContent.qml" line="769"/>
         <source>Play SteamVR games from your PC</source>
         <translation>畅玩电脑上的 SteamVR 游戏</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="710"/>
+        <location filename="../gui/AppContent.qml" line="783"/>
         <source>Video mode</source>
         <translation>视频模式</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="710"/>
+        <location filename="../gui/AppContent.qml" line="783"/>
         <source>Watch videos, 3D, 180° and 360° videos in the headset</source>
         <translation>在头显中观看视频、3D、180° 和 360° 视频</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="780"/>
+        <location filename="../gui/AppContent.qml" line="857"/>
         <source>Starting %1...</source>
         <translation>正在启动 %1...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="781"/>
+        <location filename="../gui/AppContent.qml" line="858"/>
         <source>Starting the stream...</source>
         <translation>正在启动串流...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="789"/>
+        <location filename="../gui/AppContent.qml" line="866"/>
         <source>The headset switches to the stream when it is ready. This can take a few seconds.</source>
         <translation>准备就绪后头显会切换到串流画面。这可能需要几秒钟。</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="790"/>
+        <location filename="../gui/AppContent.qml" line="867"/>
         <source>Tip:</source>
         <translation>提示:</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="790"/>
+        <location filename="../gui/AppContent.qml" line="867"/>
         <source>To end the stream, hold A+X+trigger+grip on the VR controller</source>
         <translation>要结束串流，请在 VR 控制器上同时按住 A+X+扳机+握把</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="831"/>
+        <location filename="../gui/AppContent.qml" line="920"/>
         <source>Opening the video...</source>
         <translation>正在打开视频...</translation>
     </message>
     <message>
-        <location filename="../gui/AppContent.qml" line="839"/>
+        <location filename="../gui/AppContent.qml" line="928"/>
         <source>Press B to cancel.</source>
         <translation>按 B 键取消。</translation>
     </message>
@@ -632,7 +905,7 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>NvHTTP</name>
     <message>
-        <location filename="../backend/nvhttp.cpp" line="423"/>
+        <location filename="../backend/nvhttp.cpp" line="428"/>
         <source>Missing audio capture device. Reinstalling GeForce Experience should resolve this error.</source>
         <translation>缺少音频捕获设备。重新安装 GeForce Experience 可以解决此错误。</translation>
     </message>
@@ -883,27 +1156,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>PendingPairingTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="971"/>
+        <location filename="../backend/computermanager.cpp" line="991"/>
         <source>The PIN from the PC didn&apos;t match. Please try again.</source>
         <translation>来自电脑的密码不匹配。请再试一次。</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="975"/>
+        <location filename="../backend/computermanager.cpp" line="995"/>
         <source>You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again.</source>
         <translation>当主机 PC 上仍在运行之前的会话时，你无法配对。 退出任何正在运行的游戏或重新启动主机 PC，然后再次尝试配对。</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="978"/>
+        <location filename="../backend/computermanager.cpp" line="998"/>
         <source>Pairing failed. Please try again.</source>
         <translation>配对失败，请重试。</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="982"/>
+        <location filename="../backend/computermanager.cpp" line="1002"/>
         <source>Another pairing attempt is already in progress.</source>
         <translation>另一个配对请求正在进程中。</translation>
     </message>
     <message>
-        <location filename="../backend/computermanager.cpp" line="992"/>
+        <location filename="../backend/computermanager.cpp" line="1012"/>
         <source>GeForce Experience returned error: %1</source>
         <translation>GeForce Experience 返回错误: %1</translation>
     </message>
@@ -911,7 +1184,7 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>PendingQuitTask</name>
     <message>
-        <location filename="../backend/computermanager.cpp" line="1042"/>
+        <location filename="../backend/computermanager.cpp" line="1062"/>
         <source>The running game wasn&apos;t started by this PC. You must quit the game on the host PC manually or use the device that originally started the game.</source>
         <translation>正在运行的游戏不是由这台计算机启动的。你必须在目标计算机上手动退出游戏或使用最初启动游戏的设备。</translation>
     </message>
@@ -961,27 +1234,27 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>QPlatformTheme</name>
     <message>
-        <location filename="../main.cpp" line="1466"/>
+        <location filename="../main.cpp" line="1475"/>
         <source>&amp;Yes</source>
         <translation>是(&amp;Y)</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1467"/>
+        <location filename="../main.cpp" line="1476"/>
         <source>&amp;No</source>
         <translation>否(&amp;N)</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1468"/>
+        <location filename="../main.cpp" line="1477"/>
         <source>OK</source>
         <translation>确定</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1469"/>
+        <location filename="../main.cpp" line="1478"/>
         <source>Help</source>
         <translation>帮助</translation>
     </message>
     <message>
-        <location filename="../main.cpp" line="1470"/>
+        <location filename="../main.cpp" line="1479"/>
         <source>Cancel</source>
         <translation>取消</translation>
     </message>
@@ -997,401 +1270,416 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
 <context>
     <name>Session</name>
     <message>
-        <location filename="../streaming/session.cpp" line="382"/>
+        <location filename="../streaming/session.cpp" line="386"/>
         <source>No video received from host.</source>
         <translation>没有从目标计算机接收到视频画面。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="383"/>
+        <location filename="../streaming/session.cpp" line="387"/>
         <source>Check your firewall and port forwarding rules for port(s): %1</source>
         <translation>检查防火墙和端口转发规则: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="388"/>
+        <location filename="../streaming/session.cpp" line="392"/>
         <source>Your network connection isn&apos;t performing well. Reduce your video bitrate setting or try a faster connection.</source>
         <translation>网络连接性能不佳。请降低视频比特率或尝试更快的网络连接。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="394"/>
+        <location filename="../streaming/session.cpp" line="398"/>
         <source>Something went wrong on your host PC when starting the stream.</source>
         <translation>目标计算机启动流式传输时出现问题。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="395"/>
+        <location filename="../streaming/session.cpp" line="399"/>
         <source>Make sure you don&apos;t have any DRM-protected content open on your host PC. You can also try restarting your host PC.</source>
         <translation>确保目标计算机上没有打开任何受 DRM 保护的内容。你也可以尝试重新启动目标计算机。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="400"/>
+        <location filename="../streaming/session.cpp" line="404"/>
         <source>The host PC reported a fatal video encoding error.</source>
         <translation>主机 PC 报告了致命的视频编码错误。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="401"/>
+        <location filename="../streaming/session.cpp" line="405"/>
         <source>Try disabling HDR mode, changing the streaming resolution, or changing your host PC&apos;s display resolution.</source>
         <translation>尝试禁用 HDR 模式、更改流分辨率或更改主机 PC 的显示分辨率。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="408"/>
+        <location filename="../streaming/session.cpp" line="412"/>
         <source>The control connection to the host was lost. The network may have dropped briefly or the host went offline. You can try to resume the stream later.</source>
         <translation>与服务器的控制连接已中断——可能是网络瞬断或服务器离线，可稍后尝试继续串流（resume）</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="416"/>
+        <location filename="../streaming/session.cpp" line="420"/>
         <source>Connection terminated</source>
         <translation>会话已终止</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="417"/>
+        <location filename="../streaming/session.cpp" line="421"/>
         <source>Error code: %1</source>
         <translation>错误代码: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1952"/>
+        <location filename="../streaming/session.cpp" line="2012"/>
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>在 %1 安装的 GeForce Experience 版本不受当前版本的 Moonlight 支持。你必须升级 Moonlight 才能从 %1 串流。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1958"/>
+        <location filename="../streaming/session.cpp" line="2018"/>
         <source>Your selection to enable remote desktop mouse mode may cause problems in games.</source>
         <translation>启用远程桌面鼠标模式可能会导致游戏出现问题。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1962"/>
+        <location filename="../streaming/session.cpp" line="2022"/>
         <source>Your settings selection to force software decoding may cause poor streaming performance.</source>
         <translation>你选择的用于强制软件解码的设置可能会导致流式传输性能不佳。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2021"/>
+        <location filename="../streaming/session.cpp" line="2081"/>
         <source>Your host PC doesn&apos;t support encoding HEVC.</source>
         <translation>你的 PC 主机不支持使用HEVC编码。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2039"/>
+        <location filename="../streaming/session.cpp" line="2099"/>
         <source>Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.</source>
         <translation>根据你的选择使用软件解码，以在没有显卡支持的情况下强制 HEVC。这可能会导致流式传输性能不佳。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1991"/>
+        <location filename="../streaming/session.cpp" line="2051"/>
         <source>Your host software or GPU doesn&apos;t support encoding AV1.</source>
         <translation>你的主机软件或显卡不支持进行 AV1 编码。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2009"/>
+        <location filename="../streaming/session.cpp" line="2069"/>
         <source>Using software decoding due to your selection to force AV1 without GPU support. This may cause poor streaming performance.</source>
         <translation>由于你选择在没有显卡支持的情况下强制使用 AV1，因此目前使用软件解码。这可能会导致视频流解码处理性能不佳。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2086"/>
+        <location filename="../streaming/session.cpp" line="2146"/>
         <source>Your host PC doesn&apos;t support HDR streaming.</source>
         <translation>你的 PC 主机不支持 HDR 串流。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2078"/>
+        <location filename="../streaming/session.cpp" line="2138"/>
         <source>HDR is not supported using the H.264 codec.</source>
         <translation>使用 H.264 编解码器的情况下不支持 HDR。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2113"/>
+        <location filename="../streaming/session.cpp" line="2173"/>
         <source>This PC&apos;s GPU doesn&apos;t support AV1 Main10 decoding for HDR streaming.</source>
         <translation>这台电脑的显卡不支持包含 HDR 的 AV1 Main10 解码。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2082"/>
+        <location filename="../streaming/session.cpp" line="2142"/>
         <source>This PC&apos;s GPU doesn&apos;t support 10-bit HEVC or AV1 decoding for HDR streaming.</source>
         <translation>这台电脑的显卡不支持包含 HDR 的 HEVC 或 AV1 Main10 解码。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2146"/>
+        <location filename="../streaming/session.cpp" line="2206"/>
         <source>Your host PC and client PC don&apos;t support the same HDR video codecs.</source>
         <translation>主机电脑和客户端电脑不支持相同的 HDR 视频编解码器。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2249"/>
+        <location filename="../streaming/session.cpp" line="2309"/>
         <source>Video resolutions over 4K are not supported by the H.264 codec.</source>
         <translation>H.264 编解码器不支持超过 4K 的视频分辨率。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3693"/>
+        <location filename="../streaming/session.cpp" line="3798"/>
         <source>Host returned error: %1</source>
         <translation>主机返回错误：%1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2058"/>
+        <location filename="../streaming/session.cpp" line="2118"/>
         <source>Using software decoding due to your selection to force H.264 without GPU support. This may cause poor streaming performance.</source>
         <translation>使用软件解码，因为你选择强制使用没有 GPU 支持的 H.264。这可能会导致较差的流性能。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="618"/>
+        <location filename="../streaming/session.cpp" line="647"/>
         <source>This game doesn&apos;t use VR controllers - switched to Xbox controller mode</source>
         <translation>此游戏不使用 VR 控制器，已切换为 Xbox 控制器模式</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="622"/>
+        <location filename="../streaming/session.cpp" line="651"/>
         <source>Xbox controller mode: on</source>
         <translation>Xbox 控制器模式: 开</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="626"/>
+        <location filename="../streaming/session.cpp" line="655"/>
         <source>Xbox controller mode: off (VR controllers)</source>
         <translation>Xbox 控制器模式: 关 (VR 控制器)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="630"/>
+        <location filename="../streaming/session.cpp" line="659"/>
         <source>Xbox controller mode unavailable: install ViGEmBus on the host</source>
         <translation>Xbox 控制器模式不可用: 请在主机上安装 ViGEmBus</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="633"/>
+        <location filename="../streaming/session.cpp" line="662"/>
         <source>Microphone not available on the host: Steam&apos;s &quot;Steam Streaming Microphone&quot; device was not found</source>
         <translation>主机端麦克风不可用：未找到 Steam 的“Steam Streaming Microphone”设备</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="790"/>
+        <location filename="../streaming/session.cpp" line="825"/>
         <source>Another headset is using SteamVR on %1 (for example Steam Link). Disconnect it, then try again.</source>
         <translation>%1 上有另一台头显正在使用 SteamVR（例如 Steam Link）。请断开它后再试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="792"/>
+        <location filename="../streaming/session.cpp" line="827"/>
         <source>A VR game is already running on %1 without VipleStream. Quit it, then try again.</source>
         <translation>%1 上已有一个不经过 VipleStream 运行的 VR 游戏。请退出该游戏后再试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="794"/>
+        <location filename="../streaming/session.cpp" line="829"/>
         <source>SteamVR on %1 has to restart, but a VR game is still running there. Quit the game first (Quit Game in the app list), then try again.</source>
         <translation>%1 上的 SteamVR 需要重启，但仍有 VR 游戏在运行。请先退出游戏（应用列表中的“退出游戏”），然后再试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="797"/>
+        <location filename="../streaming/session.cpp" line="832"/>
         <source>SteamVR on %1 started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.</source>
         <translation>%1 上的 SteamVR 以安全模式启动并阻止了 VipleStream 驱动程序。请在主机上重启 SteamVR 后再试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="799"/>
+        <location filename="../streaming/session.cpp" line="834"/>
         <source>SteamVR is not installed on %1.</source>
         <translation>%1 上未安装 SteamVR。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="801"/>
+        <location filename="../streaming/session.cpp" line="836"/>
         <source>Steam is not signed in on %1. Sign in to Steam on the host (for example in desktop mode), then try again.</source>
         <translation>%1 上未登录 Steam。请在主机上登录 Steam（例如在桌面模式中）后再试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="803"/>
+        <location filename="../streaming/session.cpp" line="838"/>
         <source>Nobody is signed in to Windows on %1.</source>
         <translation>%1 上没有用户登录 Windows。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="805"/>
+        <location filename="../streaming/session.cpp" line="840"/>
         <source>%1 is on the Windows sign-in or lock screen. Sign in on the host, then try again.</source>
         <translation>%1 正处于 Windows 登录或锁屏界面。请在主机上登录后再试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="808"/>
+        <location filename="../streaming/session.cpp" line="843"/>
         <source>SteamVR on %1 did not start in time. Try again.</source>
         <translation>%1 上的 SteamVR 未能及时启动。请重试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="810"/>
+        <location filename="../streaming/session.cpp" line="845"/>
         <source>%1 could not start VR (error %2).</source>
         <translation>%1 无法启动 VR（错误 %2）。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="835"/>
+        <location filename="../streaming/session.cpp" line="870"/>
         <source>%1 doesn&apos;t offer VR streaming. It needs VipleStream Server 2.0 or later with PCVR enabled.</source>
         <translation>%1 不提供 VR 串流。需要启用了 PCVR 的 VipleStream Server 2.0 或更高版本。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="845"/>
+        <location filename="../streaming/session.cpp" line="880"/>
         <source>%1 is only reachable through the relay. VR streaming needs a direct connection.</source>
         <translation>%1 只能通过中继访问。VR 串流需要直接连接。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="853"/>
+        <location filename="../streaming/session.cpp" line="888"/>
         <source>The video codec setting forces AV1, but VR streaming needs HEVC or H.264. Change the video codec in Settings.</source>
         <translation>视频编解码器设置强制使用 AV1，但 VR 串流需要 HEVC 或 H.264。请在设置中更改视频编解码器。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1357"/>
+        <location filename="../streaming/session.cpp" line="1392"/>
         <source>Failed to initialize video subsystem: %1</source>
         <translation>无法初始化视频子系统: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1442"/>
+        <location filename="../streaming/session.cpp" line="1486"/>
         <source>Failed to create window for hardware decode test: %1</source>
         <translation>无法创建硬件解码测试窗口: %1</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1551"/>
+        <location filename="../streaming/session.cpp" line="1607"/>
         <source>Invalid stream frame rate (%1 FPS).</source>
         <translation>串流帧率无效 (%1 FPS)。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1897"/>
+        <location filename="../streaming/session.cpp" line="1957"/>
         <source>This device has no 8-bit HEVC or H.264 video decoder for VR streaming.</source>
         <translation>此设备没有可用于 VR 串流的 8 位 HEVC 或 H.264 视频解码器。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1926"/>
+        <location filename="../streaming/session.cpp" line="1986"/>
         <source>Failed to initialize video decoder.</source>
         <translation>无法初始化视频解码器。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1968"/>
+        <location filename="../streaming/session.cpp" line="2028"/>
         <source>Your host software or GPU doesn&apos;t support encoding PyroWave.</source>
         <translation>你的主机软件或显卡不支持进行 PyroWave 编码。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="1979"/>
+        <location filename="../streaming/session.cpp" line="2039"/>
         <source>Your client GPU doesn&apos;t support PyroWave Vulkan 1.3 decoding. Falling back to HEVC/H.264.</source>
         <translation>您的客户端 GPU 不支持通过 Vulkan 1.3 解码 PyroWave，将改用 HEVC/H.264。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2068"/>
+        <location filename="../streaming/session.cpp" line="2128"/>
         <source>Your host PC and client PC don&apos;t support the same video codecs. This may cause poor streaming performance.</source>
         <translation>你的主机和客户端 PC 不支持相同的视频编解码器。这可能会导致较差的流性能。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2071"/>
+        <location filename="../streaming/session.cpp" line="2131"/>
         <source>Your client GPU doesn&apos;t support H.264 decoding. This may cause poor streaming performance.</source>
         <translation>你的客户端 GPU 不支持 H.264 解码。这可能会导致较差的流性能。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2101"/>
+        <location filename="../streaming/session.cpp" line="2161"/>
         <source>This PC&apos;s GPU doesn&apos;t support PyroWave Main10 decoding for HDR streaming.</source>
         <translation>这台电脑的显卡不支持包含 HDR 的 PyroWave Main10 解码。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2119"/>
-        <location filename="../streaming/session.cpp" line="2137"/>
+        <location filename="../streaming/session.cpp" line="2179"/>
+        <location filename="../streaming/session.cpp" line="2197"/>
         <source>Using software decoding due to your selection to force HDR without GPU support. This may cause poor streaming performance.</source>
         <translation>由于您选择强制使用未经 GPU 支持的 HDR，因此将采用软件解码。这可能会导致串流性能不佳。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2131"/>
+        <location filename="../streaming/session.cpp" line="2191"/>
         <source>This PC&apos;s GPU doesn&apos;t support HEVC Main10 decoding for HDR streaming.</source>
         <translation>此计算机的显卡不支持 HEVC Main10 解码 HDR 流。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2153"/>
+        <location filename="../streaming/session.cpp" line="2213"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming.</source>
         <translation>您的主机 PC 不支持 YUV 4:4:4 串流。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2161"/>
+        <location filename="../streaming/session.cpp" line="2221"/>
         <source>Your host PC doesn&apos;t support YUV 4:4:4 streaming for selected video codec.</source>
         <translation>您的主机 PC 不支持所选视频编解码器的 YUV 4:4:4 串流。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2176"/>
+        <location filename="../streaming/session.cpp" line="2236"/>
         <source>Using software decoding due to your selection to force YUV 4:4:4 without GPU support. This may cause poor streaming performance.</source>
         <translation>由于您选择强制使用未经 GPU 支持的 YUV 4:4:4，因此将采用软件解码。这可能会导致串流性能不佳。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2182"/>
+        <location filename="../streaming/session.cpp" line="2242"/>
         <source>This PC&apos;s GPU doesn&apos;t support YUV 4:4:4 decoding for selected video codec.</source>
         <translation>这台 PC 的 GPU 不支持所选视频编解码器的 YUV 4:4:4 解码。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2191"/>
+        <location filename="../streaming/session.cpp" line="2251"/>
         <source>GeForce Experience 3.0 or higher is required for 4K streaming.</source>
         <translation>4K 流式传输需要 GeForce Experience 3.0 或更高版本。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2208"/>
+        <location filename="../streaming/session.cpp" line="2268"/>
         <source>Your selected surround sound setting is not supported by the current audio device.</source>
         <translation>当前音频设备不支持你选择的环绕声设置。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2214"/>
+        <location filename="../streaming/session.cpp" line="2274"/>
         <source>Failed to open audio device. Audio will be unavailable during this session.</source>
         <translation>无法打开音频设备。音频在此会话期间将不可用。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2223"/>
+        <location filename="../streaming/session.cpp" line="2283"/>
         <source>A HID device is not responding (%1). Gamepad input and Steam Controller passthrough are disabled for this session. Unplug and replug the device, then start the stream again.</source>
         <translation>有 HID 设备没有响应（%1）。本次会话中手柄输入和 Steam Controller 直通已被禁用。请拔下并重新插入设备，然后重新开始串流。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2227"/>
+        <location filename="../streaming/session.cpp" line="2287"/>
         <source>An attached gamepad has no mapping and won&apos;t be usable. Visit the Moonlight help to resolve this.</source>
         <translation>附加的手柄没有映射，因此无法使用。请访问 Moonlight 帮助解决此问题。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2245"/>
+        <location filename="../streaming/session.cpp" line="2305"/>
         <source>Your host PC&apos;s GPU doesn&apos;t support streaming video resolutions over 4K.</source>
         <translation>目标计算机的显卡不支持 4K 以上的流式传输视频分辨率。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2263"/>
+        <location filename="../streaming/session.cpp" line="2323"/>
         <source>Your selection to force hardware decoding cannot be satisfied due to missing hardware decoding support on this PC&apos;s GPU.</source>
         <translation>由于此计算机的显卡上缺少硬件解码支持，无法满足强制硬件解码的选择。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="2266"/>
+        <location filename="../streaming/session.cpp" line="2326"/>
         <source>Your codec selection and force hardware decoding setting are not compatible. This PC&apos;s GPU lacks support for decoding your chosen codec.</source>
         <translation>你选择的编解码器和强制硬件解码设置不兼容。此计算机的显卡不支持解码你选择的编解码器。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3180"/>
+        <location filename="../streaming/session.cpp" line="3276"/>
         <source>The XR runtime %1 after the VR session started, so the stream was ended.</source>
         <translation>VR 会话开始后 XR 运行时%1，因此串流已结束。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3181"/>
+        <location filename="../streaming/session.cpp" line="3277"/>
         <source>exited</source>
         <translation>已退出</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3181"/>
+        <location filename="../streaming/session.cpp" line="3277"/>
         <source>stopped responding or was lost</source>
         <translation>停止响应或已丢失</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3337"/>
+        <location filename="../streaming/session.cpp" line="3433"/>
         <source>Could not start VR on this headset (%1). Make sure SteamVR is running, then try again.</source>
         <translation>无法在此头显上启动 VR（%1）。请确认 SteamVR 正在运行，然后再试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3346"/>
+        <location filename="../streaming/session.cpp" line="3442"/>
         <source>The headset&apos;s VR runtime did not respond in time. Make sure SteamVR is running, then try again.</source>
         <translation>头显的 VR 运行时未能及时响应。请确认 SteamVR 正在运行，然后再试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3576"/>
+        <location filename="../streaming/session.cpp" line="3678"/>
         <source>Failed to launch via relay proxy</source>
         <translation>通过中继代理启动失败</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3665"/>
+        <location filename="../streaming/session.cpp" line="3767"/>
         <source>%1 did not start a VR session. Make sure PCVR is enabled on the host, then try again.</source>
         <translation>%1 没有启动 VR 会话。请确认主机上已启用 PCVR，然后再试。</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="3674"/>
-        <location filename="../streaming/session.cpp" line="3681"/>
+        <location filename="../streaming/session.cpp" line="3779"/>
+        <location filename="../streaming/session.cpp" line="3786"/>
         <source>Connection to host failed</source>
         <translation>连接主机失败</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4991"/>
+        <location filename="../streaming/session.cpp" line="5105"/>
         <source>Steering wheel: off (left stick steers)</source>
         <translation>方向盘: 关 (左摇杆转向)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4992"/>
+        <location filename="../streaming/session.cpp" line="5106"/>
         <source>Steering wheel: on - turn both controllers like a wheel</source>
         <translation>方向盘: 开 - 像转动方向盘一样转动双手控制器</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="4993"/>
+        <location filename="../streaming/session.cpp" line="5107"/>
         <source>Steering wheel: on (works in Xbox controller mode)</source>
         <translation>方向盘: 开 (在 Xbox 控制器模式下生效)</translation>
     </message>
     <message>
-        <location filename="../streaming/session.cpp" line="5217"/>
+        <location filename="../streaming/session.cpp" line="5127"/>
+        <source>Xbox controller mode: on (hold both menu buttons to switch back)</source>
+        <translation>Xbox 控制器模式: 开 (按住两个菜单键可切回)</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="5128"/>
+        <source>Xbox controller mode: off (laser pointer)</source>
+        <translation>Xbox 控制器模式: 关 (激光指针)</translation>
+    </message>
+    <message>
+        <location filename="../streaming/session.cpp" line="5352"/>
         <source>Unable to initialize video decoder. Please check your streaming settings and try again.</source>
         <translation>无法初始化视频解码器。请检查你的流式传输设置，然后重试。</translation>
+    </message>
+    <message>
+        <location filename="../streaming/xr/xrcontext.cpp" line="1732"/>
+        <source>Waiting for video from the host</source>
+        <translation>正在等待主机的视频画面</translation>
     </message>
 </context>
 <context>
@@ -1402,113 +1690,113 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>设置</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="727"/>
+        <location filename="../gui/SettingsView.qml" line="766"/>
         <source>Basic Settings</source>
         <translation>基本设置</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="737"/>
+        <location filename="../gui/SettingsView.qml" line="776"/>
         <source>Resolution and FPS</source>
         <translation>分辨率和 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="745"/>
+        <location filename="../gui/SettingsView.qml" line="784"/>
         <source>Setting values too high for your PC or network connection may cause lag, stuttering, or errors.</source>
         <translation>如果你的计算机或网络连接设置的值过高，可能会导致延迟，卡顿或错误。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="937"/>
+        <location filename="../gui/SettingsView.qml" line="976"/>
         <source>Auto (best for this display)</source>
         <translation>自动（最适合此显示器）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="943"/>
+        <location filename="../gui/SettingsView.qml" line="982"/>
         <source>720p</source>
         <translation>720p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="949"/>
+        <location filename="../gui/SettingsView.qml" line="988"/>
         <source>1080p</source>
         <translation>1080p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="955"/>
+        <location filename="../gui/SettingsView.qml" line="994"/>
         <source>1440p</source>
         <translation>1440p</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="961"/>
+        <location filename="../gui/SettingsView.qml" line="1000"/>
         <source>4K</source>
         <translation>4K</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1078"/>
+        <location filename="../gui/SettingsView.qml" line="1117"/>
         <source>Custom resolutions are not officially supported by GeForce Experience, so it will not set your host display resolution. You will need to set it manually while in game.</source>
         <translation>自定义分辨率不受 GeForce Experience 的正式支持，因此不会设置目标计算机的分辨率。你需要在游戏中手动设置。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1079"/>
+        <location filename="../gui/SettingsView.qml" line="1118"/>
         <source>Resolutions that are not supported by your client or host PC may cause streaming errors.</source>
         <translation>使用当前计算机或目标计算机不支持的分辨率可能会导致流式传输错误。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1085"/>
+        <location filename="../gui/SettingsView.qml" line="1124"/>
         <source>Enter a custom resolution:</source>
         <translation>输入自定义分辨率:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1242"/>
-        <location filename="../gui/SettingsView.qml" line="1435"/>
+        <location filename="../gui/SettingsView.qml" line="1281"/>
+        <location filename="../gui/SettingsView.qml" line="1474"/>
         <source>Custom (%1 FPS)</source>
         <translation>自定义(%1 FPS)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1257"/>
+        <location filename="../gui/SettingsView.qml" line="1296"/>
         <source>Enter a custom frame rate:</source>
         <translation>输入自定义帧率:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1346"/>
+        <location filename="../gui/SettingsView.qml" line="1385"/>
         <source>%1 FPS</source>
         <translation>%1 FPS</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1475"/>
+        <location filename="../gui/SettingsView.qml" line="1514"/>
         <source>Auto (this display)</source>
         <translation>自动（此显示器）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1611"/>
+        <location filename="../gui/SettingsView.qml" line="1650"/>
         <source>Frame interpolation (FRUC)</source>
         <translation>插帧 (FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1651"/>
+        <location filename="../gui/SettingsView.qml" line="1690"/>
         <source>Inserts an interpolated frame between each real frame, doubling the effective output frame rate. The actual server frame rate is halved (e.g. 120 FPS setting → request 60 FPS → output 120 FPS).</source>
         <translation>在每两个真实帧之间插入一个插值帧，使实际输出帧率翻倍。服务器的实际帧率会减半（例如设置 120 FPS → 请求 60 FPS → 输出 120 FPS）。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1761"/>
+        <location filename="../gui/SettingsView.qml" line="1800"/>
         <source>Generic Compute (recommended — lowest latency, any GPU)</source>
         <translation>Generic Compute（推荐 — 延迟最低，适用于任何 GPU）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1762"/>
+        <location filename="../gui/SettingsView.qml" line="1801"/>
         <source>NVIDIA Optical Flow (HW flow + warp; NVIDIA RTX 20+)</source>
         <translation>NVIDIA Optical Flow（硬件光流 + warp；NVIDIA RTX 20 及以上）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1763"/>
+        <location filename="../gui/SettingsView.qml" line="1802"/>
         <source>DirectML — RIFE ML model (needs strong GPU; Tensor Core RTX 30/40+)</source>
         <translation>DirectML — RIFE ML 模型（需要强劲 GPU；Tensor Core RTX 30/40 及以上）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1764"/>
+        <location filename="../gui/SettingsView.qml" line="1803"/>
         <source>NCNN-Vulkan RIFE (experimental; cross-vendor: NV/AMD/Intel)</source>
         <translation>NCNN-Vulkan RIFE（实验性；跨厂商：NV/AMD/Intel）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1774"/>
+        <location filename="../gui/SettingsView.qml" line="1815"/>
         <source>Generic Compute: D3D11/GLES motion-estimation + warp shader. ~1-2ms latency, scales to 240 fps, works on every D3D11 GPU including iGPU. The default and best fit for most users.
 
 NVIDIA Optical Flow: dedicated NVOFA hardware on Turing+ (RTX 20/30/40 series). ~5ms on consumer cards, ~13ms on workstation Ampere (A1000-class). HW-accelerated optical flow gives slightly different artefact profile from Generic on disocclusion edges.
@@ -1521,48 +1809,48 @@ NVIDIA Optical Flow：Turing 及以上（RTX 20/30/40 系列）的专用 NVOFA �
 DirectML：在 D3D12 DirectML EP 上运行内置的 RIFE 4.25 lite ONNX 模型——*真正的*运动补偿 ML 插帧，在动态内容上画质最佳。每个算子都有内核启动开销（无论分辨率如何，基线约 25 ms），因此需要 Tensor Core 级 GPU（RTX 30/40 主流型号或更好）才能实时处理 720p 以上。在较弱的 GPU 上，客户端会自动逐级降低推理分辨率（1080p → 720p → 540p → 480p → 360p），如果连 360p 都无法满足帧预算，则回退到 Generic。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1843"/>
+        <location filename="../gui/SettingsView.qml" line="1885"/>
         <source>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</source>
         <translation>  T5 = NVOF + TRIPLE + chain_lv3 + RIFE 256 (QUALITY GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1844"/>
+        <location filename="../gui/SettingsView.qml" line="1886"/>
         <source>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</source>
         <translation>  T4 = NVOF + chain_lv3 + RIFE 128 (BALANCED GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1847"/>
+        <location filename="../gui/SettingsView.qml" line="1889"/>
         <source>  T1 = chain_lv1 (PERFORMANCE GPU)</source>
         <translation>  T1 = chain_lv1 (PERFORMANCE GPU)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1893"/>
+        <location filename="../gui/SettingsView.qml" line="1935"/>
         <source>Video bitrate:</source>
         <translation>视频比特率:</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1901"/>
+        <location filename="../gui/SettingsView.qml" line="1943"/>
         <source>Lower the bitrate on slower connections. Raise the bitrate to increase image quality.</source>
         <translation>在较慢的连接上降低比特率。提高比特率以提高图像质量。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1923"/>
+        <location filename="../gui/SettingsView.qml" line="1965"/>
         <source>Video bitrate: %1 Mbps</source>
         <translation>视频比特率: %1 Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1970"/>
+        <location filename="../gui/SettingsView.qml" line="2012"/>
         <source>Display mode</source>
         <translation>显示模式</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2000"/>
+        <location filename="../gui/SettingsView.qml" line="2042"/>
         <source>(Recommended)</source>
         <translation>(推荐)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1981"/>
-        <location filename="../gui/SettingsView.qml" line="2550"/>
+        <location filename="../gui/SettingsView.qml" line="2023"/>
+        <location filename="../gui/SettingsView.qml" line="2592"/>
         <source>Fullscreen</source>
         <translation>全屏</translation>
     </message>
@@ -1577,542 +1865,542 @@ DirectML：在 D3D12 DirectML EP 上运行内置的 RIFE 4.25 lite ONNX 模型�
         <translation>显示用于排查问题与测试的选项：渲染器与视频解码器、补帧引擎、实验性视频格式，以及网络测试开关。隐藏的选项仍沿用目前的值。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="545"/>
+        <location filename="../gui/SettingsView.qml" line="575"/>
         <source>Steering wheel with the controllers (Xbox controller mode)</source>
         <translation>使用控制器作为方向盘 (Xbox 控制器模式)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="555"/>
+        <location filename="../gui/SettingsView.qml" line="585"/>
         <source>In games that use the virtual Xbox controller, hold both controllers like a steering wheel and turn them to steer (replaces the left stick&apos;s left/right). While streaming, hold both thumbsticks pressed for 1.5 seconds to switch it on or off.</source>
         <translation>在使用虚拟 Xbox 控制器的游戏中，像握住方向盘一样握住双手控制器并转动即可转向 (替代左摇杆的左右输入)。串流时，按住两边的摇杆 1.5 秒即可开启或关闭。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="560"/>
+        <location filename="../gui/SettingsView.qml" line="590"/>
         <source>Steering wheel rotation (full left to full right)</source>
         <translation>方向盘旋转角度 (向左打满到向右打满)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="583"/>
+        <location filename="../gui/SettingsView.qml" line="622"/>
         <source>How far you turn the controllers for full lock. 180° means a quarter turn either way reaches the stick&apos;s end.</source>
         <translation>将控制器转动到打满所需的角度。180° 表示向任一方向转动四分之一圈即可达到摇杆最边缘。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="589"/>
+        <location filename="../gui/SettingsView.qml" line="628"/>
         <source>Headset network during VR (Steam Frame with the streaming adapter)</source>
         <translation>VR 期间头显网络 (Steam Frame 与串流适配器)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="596"/>
+        <location filename="../gui/SettingsView.qml" line="635"/>
         <source>Always keep home Wi-Fi</source>
         <translation>始终保留家庭 Wi-Fi</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="596"/>
+        <location filename="../gui/SettingsView.qml" line="635"/>
         <source>Pause home Wi-Fi while streaming</source>
         <translation>串流时暂停家庭 Wi-Fi</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="706"/>
+        <location filename="../gui/SettingsView.qml" line="745"/>
         <source>Send the headset microphone to the PC</source>
         <translation>将头显麦克风发送至电脑</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="716"/>
+        <location filename="../gui/SettingsView.qml" line="755"/>
         <source>During a VR stream your voice goes to the PC&apos;s &quot;Microphone (Steam Streaming Microphone)&quot; device (installed with Steam). Select it in the game or voice chat app.</source>
         <translation>在 VR 串流期间，您的声音将传输到电脑的“Microphone (Steam Streaming Microphone)”设备（随 Steam 一同安装）。请在游戏或语音聊天应用中选择该设备。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="816"/>
+        <location filename="../gui/SettingsView.qml" line="855"/>
         <source>Native</source>
         <translation>原生</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="817"/>
+        <location filename="../gui/SettingsView.qml" line="856"/>
         <source>Native (Excluding Notch)</source>
         <translation>原生(不包括刻痕)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="858"/>
-        <location filename="../gui/SettingsView.qml" line="906"/>
-        <location filename="../gui/SettingsView.qml" line="915"/>
-        <location filename="../gui/SettingsView.qml" line="1369"/>
+        <location filename="../gui/SettingsView.qml" line="897"/>
+        <location filename="../gui/SettingsView.qml" line="945"/>
+        <location filename="../gui/SettingsView.qml" line="954"/>
+        <location filename="../gui/SettingsView.qml" line="1408"/>
         <source>Custom</source>
         <translation>自定义</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1480"/>
+        <location filename="../gui/SettingsView.qml" line="1519"/>
         <source>30 FPS</source>
         <translation>30 帧</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1485"/>
+        <location filename="../gui/SettingsView.qml" line="1524"/>
         <source>60 FPS</source>
         <translation>60 帧</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1939"/>
+        <location filename="../gui/SettingsView.qml" line="1981"/>
         <source>Use Default (%1 Mbps)</source>
         <translation>使用默认 (%1 Mbps)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="529"/>
-        <location filename="../gui/SettingsView.qml" line="1954"/>
+        <location filename="../gui/SettingsView.qml" line="559"/>
+        <location filename="../gui/SettingsView.qml" line="1996"/>
         <source>Adjust bitrate automatically while streaming</source>
         <translation>串流时自动调整比特率</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="461"/>
+        <location filename="../gui/SettingsView.qml" line="486"/>
         <source>Sharper where you look (foveated streaming)</source>
         <translation>注视处更清晰（注视点串流）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Small</source>
         <translation>小</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Medium</source>
         <translation>中</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Large</source>
         <translation>大</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="487"/>
+        <location filename="../gui/SettingsView.qml" line="517"/>
         <source>Each eye is sent as a reduced picture of the whole view plus a full-detail picture that follows your gaze (it stays straight ahead without eye tracking). A larger size keeps more detail away from where you look, but uses more bandwidth and headset power and adds a little delay.</source>
         <translation>每只眼睛传送两幅图像：缩小的整个视野，加上一幅跟随视线、保留完整细节的图像（没有眼动追踪时固定在正前方）。尺寸越大，视线以外的区域保留的细节越多，但会占用更多带宽和头显电量，延迟也会略有增加。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="494"/>
+        <location filename="../gui/SettingsView.qml" line="524"/>
         <source>Frame rate</source>
         <translation>帧率</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="504"/>
+        <location filename="../gui/SettingsView.qml" line="534"/>
         <source>Automatic (half rate while the network is unstable)</source>
         <translation>自动（网络不稳时改用半帧率）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="505"/>
+        <location filename="../gui/SettingsView.qml" line="535"/>
         <source>Full (same as the headset refresh rate)</source>
         <translation>全帧率（与头显刷新率相同）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="506"/>
+        <location filename="../gui/SettingsView.qml" line="536"/>
         <source>Half (each frame shown twice)</source>
         <translation>半帧率（每帧显示两次）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="507"/>
+        <location filename="../gui/SettingsView.qml" line="537"/>
         <source>Half with synthesized in-between frames</source>
         <translation>半帧率并合成中间帧</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="522"/>
+        <location filename="../gui/SettingsView.qml" line="552"/>
         <source>Automatic streams at full rate and switches to half rate without restarting the game while the network keeps delaying frames, then tries full rate again once it is stable. Half rate streams every other frame while the headset still displays at full rate: half the network traffic and more time to repair lost packets. Synthesized frames make motion look smoother but can wobble or tear on fast objects.</source>
         <translation>自动模式平时以全帧率串流，网络持续延迟帧时无需重启游戏即可切换为半帧率，网络稳定后再尝试恢复全帧率。半帧率每隔一帧传输一帧，而头显仍以全帧率显示：网络流量减半，也有更多时间修复丢失的数据包。合成帧能让运动看起来更平滑，但在快速移动的物体上可能出现晃动或撕裂。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="539"/>
+        <location filename="../gui/SettingsView.qml" line="569"/>
         <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers.</source>
         <translation>网络丢包时降低比特率，网络恢复后再调回。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="596"/>
+        <location filename="../gui/SettingsView.qml" line="635"/>
         <source>Use the network test result</source>
         <translation>使用网络测试的结果</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="608"/>
+        <location filename="../gui/SettingsView.qml" line="647"/>
         <source>The headset has one Wi-Fi radio, so staying on home Wi-Fi while streaming over the adapter makes it switch back and forth and drop video. &quot;Test network&quot; below compares both and remembers the result for this place; until then home Wi-Fi is kept. While home Wi-Fi is paused the headset itself is offline; it reconnects when you stop streaming.</source>
         <translation>头显只有一个 Wi-Fi 无线电，通过转接器串流时若同时连着家用 Wi-Fi，会来回切换而掉画面。下方的「测试网络」会比较两种做法，并记住这个地点的结果；测试前一律保留家用 Wi-Fi。家用 Wi-Fi 暂停时头显本身没有网络，停止串流后会自动接回。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="616"/>
+        <location filename="../gui/SettingsView.qml" line="655"/>
         <source>Cancel test</source>
         <translation>取消测试</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="616"/>
+        <location filename="../gui/SettingsView.qml" line="655"/>
         <source>Test network</source>
         <translation>测试网络</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="630"/>
+        <location filename="../gui/SettingsView.qml" line="669"/>
         <source>Plays a recorded table tennis clip from the host at 144 Hz and raises the resolution step by step, first with home Wi-Fi + adapter, then adapter only, then home Wi-Fi again. Takes about 10-20 minutes; you can keep the headset on or take it off. The headset&apos;s home Wi-Fi pauses for part of the test and Steam may sign in again afterwards.</source>
         <translation>从主机以 144 Hz 播放预录的乒乓球片段，逐步提高分辨率：先用家用 Wi-Fi＋转接器，再只用转接器，最后再用一次家用 Wi-Fi。约需 10～20 分钟，头显可以戴着或拿下。测试中有一段时间会暂停头显的家用 Wi-Fi，之后 Steam 可能会重新登录。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="635"/>
+        <location filename="../gui/SettingsView.qml" line="674"/>
         <source>Apply</source>
         <translation>应用</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="655"/>
+        <location filename="../gui/SettingsView.qml" line="694"/>
         <source>Last test: %1</source>
         <translation>上次测试：%1</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Network</source>
         <translation>网络</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Per eye</source>
         <translation>每眼</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Missed frames</source>
         <translation>缺帧</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Latency p95 (ms)</source>
         <translation>延迟 p95（ms）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>Mbps</source>
         <translation>Mbps</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="677"/>
+        <location filename="../gui/SettingsView.qml" line="716"/>
         <source>144 Hz</source>
         <translation>144 Hz</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="698"/>
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>yes</source>
         <translation>是</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="698"/>
+        <location filename="../gui/SettingsView.qml" line="737"/>
         <source>no</source>
         <translation>否</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1964"/>
+        <location filename="../gui/SettingsView.qml" line="2006"/>
         <source>Lowers the bitrate when the network drops packets and raises it back when the network recovers. The bitrate above is the maximum.</source>
         <translation>网络丢包时降低比特率，网络恢复后再调回。上方设置的比特率为最大值。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1986"/>
+        <location filename="../gui/SettingsView.qml" line="2028"/>
         <source>Borderless windowed</source>
         <translation>无边框窗口</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1991"/>
-        <location filename="../gui/SettingsView.qml" line="2542"/>
+        <location filename="../gui/SettingsView.qml" line="2033"/>
+        <location filename="../gui/SettingsView.qml" line="2584"/>
         <source>Windowed</source>
         <translation>窗口化</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2050"/>
+        <location filename="../gui/SettingsView.qml" line="2092"/>
         <source>Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.</source>
         <translation>全屏通常提供最好的性能，但是无边框窗口可以更好地与 macOS Spaces、Alt+Tab、屏幕截图工具、屏幕覆盖等功能配合使用。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2057"/>
+        <location filename="../gui/SettingsView.qml" line="2099"/>
         <source>V-Sync</source>
         <translation>垂直同步</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2067"/>
+        <location filename="../gui/SettingsView.qml" line="2109"/>
         <source>Disabling V-Sync allows sub-frame rendering latency, but it can display visible tearing</source>
         <translation>禁用垂直同步可允许子帧渲染延迟，但会显示可见的撕裂</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2074"/>
+        <location filename="../gui/SettingsView.qml" line="2116"/>
         <source>Frame pacing</source>
         <translation>帧速调节</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2097"/>
+        <location filename="../gui/SettingsView.qml" line="2139"/>
         <source>Audio Settings</source>
         <translation>音频设置</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2107"/>
+        <location filename="../gui/SettingsView.qml" line="2149"/>
         <source>Audio configuration</source>
         <translation>音频配置</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2132"/>
+        <location filename="../gui/SettingsView.qml" line="2174"/>
         <source>Stereo</source>
         <translation>立体声</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2136"/>
+        <location filename="../gui/SettingsView.qml" line="2178"/>
         <source>5.1 surround sound</source>
         <translation>5.1 环绕声</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2140"/>
+        <location filename="../gui/SettingsView.qml" line="2182"/>
         <source>7.1 surround sound</source>
         <translation>7.1 环绕声</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2154"/>
+        <location filename="../gui/SettingsView.qml" line="2196"/>
         <source>Mute host PC speakers while streaming</source>
         <translation>流式传输启动时将目标计算机的扬声器静音</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2164"/>
+        <location filename="../gui/SettingsView.qml" line="2206"/>
         <source>You must restart any game currently in progress for this setting to take effect</source>
         <translation>要使此设置生效，必须重新启动当前正在进行的所有游戏</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2286"/>
+        <location filename="../gui/SettingsView.qml" line="2328"/>
         <source>UI Settings</source>
         <translation>界面设置</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2331"/>
+        <location filename="../gui/SettingsView.qml" line="2373"/>
         <source>Language</source>
         <translation>语言</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2357"/>
+        <location filename="../gui/SettingsView.qml" line="2399"/>
         <source>Automatic</source>
         <translation>自动化</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2509"/>
+        <location filename="../gui/SettingsView.qml" line="2551"/>
         <source>GUI display mode</source>
         <translation>窗口显示模式</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2546"/>
+        <location filename="../gui/SettingsView.qml" line="2588"/>
         <source>Maximized</source>
         <translation>最大化</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2563"/>
+        <location filename="../gui/SettingsView.qml" line="2605"/>
         <source>Show connection quality warnings</source>
         <translation>显示连接质量警告</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2574"/>
+        <location filename="../gui/SettingsView.qml" line="2616"/>
         <source>Show configuration warnings</source>
         <translation>显示配置警告</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2586"/>
+        <location filename="../gui/SettingsView.qml" line="2628"/>
         <source>Discord Rich Presence integration</source>
         <translation>Discord Rich Presence 集成</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2602"/>
+        <location filename="../gui/SettingsView.qml" line="2644"/>
         <source>App updates</source>
         <translation>应用更新</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <location filename="../gui/SettingsView.qml" line="2651"/>
         <source>Don&apos;t check automatically</source>
         <translation>不自动检查</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <location filename="../gui/SettingsView.qml" line="2651"/>
         <source>Notify me</source>
         <translation>通知我</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2609"/>
+        <location filename="../gui/SettingsView.qml" line="2651"/>
         <source>Install automatically</source>
         <translation>自动安装</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2621"/>
+        <location filename="../gui/SettingsView.qml" line="2663"/>
         <source>Checks for a new version when VipleStream starts. Install automatically downloads and verifies the update and restarts VipleStream, but never while you are streaming.</source>
         <translation>在 VipleStream 启动时检查新版本。“自动安装”会下载并验证更新，然后重启 VipleStream，但绝不会在串流时进行。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2627"/>
+        <location filename="../gui/SettingsView.qml" line="2669"/>
         <source>Keep the display awake while streaming</source>
         <translation>在串流时保持屏幕开启</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2637"/>
+        <location filename="../gui/SettingsView.qml" line="2679"/>
         <source>Prevents the screensaver from starting or the display from going to sleep while streaming.</source>
         <translation>防止串流时进入屏保或屏幕休眠。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2656"/>
+        <location filename="../gui/SettingsView.qml" line="2698"/>
         <source>Input Settings</source>
         <translation>输入设置</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2667"/>
+        <location filename="../gui/SettingsView.qml" line="2709"/>
         <source>Optimize mouse for remote desktop instead of games</source>
         <translation>为远程桌面而不是游戏优化鼠标</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2677"/>
+        <location filename="../gui/SettingsView.qml" line="2719"/>
         <source>This enables seamless mouse control without capturing the client&apos;s mouse cursor. It is ideal for remote desktop usage but will not work in most games.</source>
         <translation>这可以实现无缝鼠标控制，而无需捕获客户端的鼠标光标。这是理想的远程桌面使用方案，但不会在大多数游戏中工作。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2678"/>
+        <location filename="../gui/SettingsView.qml" line="2720"/>
         <source>You can toggle this while streaming using Ctrl+Alt+Shift+M.</source>
         <translation>你可以使用 Ctrl+Alt+Shift+M 切换鼠标控制模式。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2679"/>
+        <location filename="../gui/SettingsView.qml" line="2721"/>
         <source>NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.</source>
         <translation>注意：由于 GeForce Experience 的 Bug，如果你的目标计算机有多个显示器，则此选项可能无法正常工作。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2689"/>
+        <location filename="../gui/SettingsView.qml" line="2731"/>
         <source>Capture system keyboard shortcuts</source>
         <translation>捕获系统快捷键</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2697"/>
+        <location filename="../gui/SettingsView.qml" line="2739"/>
         <source>This enables the capture of system-wide keyboard shortcuts like Alt+Tab that would normally be handled by the client OS while streaming.</source>
         <translation>这样可以捕获系统范围的键盘快捷键，例如 Alt + Tab，这些快捷键通常在流式传输时由客户端系统处理。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3048"/>
+        <location filename="../gui/SettingsView.qml" line="3090"/>
         <source>AV1 (Experimental)</source>
         <translation>AV1 (实验性)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3068"/>
+        <location filename="../gui/SettingsView.qml" line="3110"/>
         <source>Enable HDR (Experimental)</source>
         <translation>启用HDR（实验性）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3086"/>
+        <location filename="../gui/SettingsView.qml" line="3128"/>
         <source>The stream will be HDR-capable, but some games may require an HDR monitor on your host PC to enable HDR mode.</source>
         <translation>HDR功能将在串流中可用，但一些游戏可能需要PC端接入HDR显示器以启用HDR模式。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3088"/>
+        <location filename="../gui/SettingsView.qml" line="3130"/>
         <source>HDR streaming is not supported on this PC.</source>
         <translation>此PC不支持HDR。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3140"/>
+        <location filename="../gui/SettingsView.qml" line="3182"/>
         <source>This unlocks extremely high video bitrates for use with VipleStream-Server hosts. It should only be used when streaming over an Ethernet LAN connection.</source>
         <translation>为 VipleStream-Server 主机解锁极高的视频比特率。仅应在通过有线以太网局域网串流时使用。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3178"/>
+        <location filename="../gui/SettingsView.qml" line="3220"/>
         <source>Show performance stats while streaming</source>
         <translation>在流中显示性能统计数据</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3188"/>
+        <location filename="../gui/SettingsView.qml" line="3230"/>
         <source>Display real-time stream performance information while streaming.</source>
         <translation>在流中显示实时流性能信息。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3189"/>
+        <location filename="../gui/SettingsView.qml" line="3231"/>
         <source>You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.</source>
         <translation>你可以在任何时候使用 Ctrl + Alt + Shift + S 或选择 + L1 + R1 + X 来切换它。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3190"/>
+        <location filename="../gui/SettingsView.qml" line="3232"/>
         <source>The performance overlay is not supported on Steam Link or Raspberry Pi.</source>
         <translation>Steam链接或树莓派不支持性能覆盖。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2727"/>
+        <location filename="../gui/SettingsView.qml" line="2769"/>
         <source>in fullscreen</source>
         <translation>全屏</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2731"/>
+        <location filename="../gui/SettingsView.qml" line="2773"/>
         <source>always</source>
         <translation>总是</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2762"/>
+        <location filename="../gui/SettingsView.qml" line="2804"/>
         <source>Use touchscreen as a virtual trackpad</source>
         <translation>将触摸屏用作虚拟触控板</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2772"/>
+        <location filename="../gui/SettingsView.qml" line="2814"/>
         <source>When checked, the touchscreen acts like a trackpad. When unchecked, the touchscreen will directly control the mouse pointer.</source>
         <translation>选中时，触摸屏就像一个触控板。取消选中时，触摸屏将直接控制鼠标指针。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2779"/>
+        <location filename="../gui/SettingsView.qml" line="2821"/>
         <source>Swap left and right mouse buttons</source>
         <translation>交换鼠标左键和右键</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2791"/>
+        <location filename="../gui/SettingsView.qml" line="2833"/>
         <source>Reverse mouse scrolling direction</source>
         <translation>反转鼠标滚动方向</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2805"/>
+        <location filename="../gui/SettingsView.qml" line="2847"/>
         <source>Gamepad Settings</source>
         <translation>手柄设置</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2815"/>
+        <location filename="../gui/SettingsView.qml" line="2857"/>
         <source>Swap A/B and X/Y gamepad buttons</source>
         <translation>交换手柄的 A/B 和 X/Y 按钮</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2825"/>
+        <location filename="../gui/SettingsView.qml" line="2867"/>
         <source>This switches gamepads into a Nintendo-style button layout</source>
         <translation>这会将手柄切换为任天堂风格的按钮布局</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2831"/>
+        <location filename="../gui/SettingsView.qml" line="2873"/>
         <source>Force gamepad #1 always connected</source>
         <translation>强制手柄 #1 始终连接</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2841"/>
+        <location filename="../gui/SettingsView.qml" line="2883"/>
         <source>Forces a single gamepad to always stay connected to the host, even if no gamepads are actually connected to this PC.</source>
         <translation>强制单个手柄始终与目标计算机保持连接，即使没有任何手柄实际连接到此计算机。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2842"/>
+        <location filename="../gui/SettingsView.qml" line="2884"/>
         <source>Only enable this option when streaming a game that doesn&apos;t support gamepads being connected after startup.</source>
         <translation>仅在游戏启动后不支持手柄连接时才启用此选项。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2849"/>
+        <location filename="../gui/SettingsView.qml" line="2891"/>
         <source>Enable mouse control with gamepads by holding the &apos;Start&apos; button</source>
         <translation>按住手柄的“Start”按钮启用鼠标控制</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2190"/>
+        <location filename="../gui/SettingsView.qml" line="2232"/>
         <source>Host Settings</source>
         <translation>目标计算机设置</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1514"/>
+        <location filename="../gui/SettingsView.qml" line="1553"/>
         <source>Renderer</source>
         <translation>渲染器 (Renderer)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1532"/>
+        <location filename="../gui/SettingsView.qml" line="1571"/>
         <source>Auto (recommended) — let the system pick the most stable hardware decoding path</source>
         <translation>自动 (Auto) — 推荐：让系统选择最稳定的硬件解码路径</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1533"/>
+        <location filename="../gui/SettingsView.qml" line="1572"/>
         <source>Direct3D 11 — always use D3D11VA; works with the NV-OF / DirectML / NCNN interpolation engines</source>
         <translation>Direct3D 11 — 锁定 D3D11VA，可搭配 NV-OF / DirectML / NCNN 插帧引擎</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1534"/>
+        <location filename="../gui/SettingsView.qml" line="1573"/>
         <source>Vulkan [experimental] — built-in frame interpolation; compatibility issues on some systems (AMD APU / older NVIDIA drivers)</source>
         <translation>Vulkan [实验性] — 内置插帧，部分机型（AMD APU / 旧 NV 驱动）有兼容性问题</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1561"/>
+        <location filename="../gui/SettingsView.qml" line="1600"/>
         <source>Auto (recommended): same as upstream Moonlight&apos;s hwaccel cascade. ffmpeg picks the first hardware decoder that initializes (usually D3D11VA on Windows). Choose this unless you have a specific need.
 
 Direct3D 11: always use D3D11VA; the interpolation engine can be Generic / NV-OF / DirectML / NCNN. It currently behaves the same as Auto, but is kept as a hard pin for a future option that stops the helper from switching to Vulkan.
@@ -2125,27 +2413,27 @@ Direct3D 11：明确锁定 D3D11VA，插帧引擎可选 Generic / NV-OF / Direct
 Vulkan [实验性]：强制 Vulkan-first cascade + 原生 Vulkan 渲染管线 + dual-present，插帧引擎内置（等同 Generic）。已知问题：NV 驱动 596.36 上原生 vkCmdDecodeVideoKHR 在 ONLY 模式下会 NVDEC device-lost；AMD APU 上在 video session memory bind 226MB 阶段驱动崩溃；PARALLEL+SW upload 路径性能偏低（80+ ms/frame）。稳定后会恢复为推荐选项。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1572"/>
+        <location filename="../gui/SettingsView.qml" line="1611"/>
         <source>Linux video output (frontend)</source>
         <translation>Linux 视频呈现 (frontend)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1587"/>
+        <location filename="../gui/SettingsView.qml" line="1626"/>
         <source>Auto (recommended) — Vulkan on aarch64 or Zink, otherwise the original order</source>
         <translation>自动 (Auto) — 推荐：aarch64 或 Zink 使用 Vulkan，其余保持原有顺序</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1588"/>
+        <location filename="../gui/SettingsView.qml" line="1627"/>
         <source>Vulkan (libplacebo) — prefer Vulkan output</source>
         <translation>Vulkan (libplacebo) — 优先使用 Vulkan 呈现</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1589"/>
+        <location filename="../gui/SettingsView.qml" line="1628"/>
         <source>EGL — keep the original order (EGL / DRM / SDL)</source>
         <translation>EGL — 保持原有顺序 (EGL / DRM / SDL)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1605"/>
+        <location filename="../gui/SettingsView.qml" line="1644"/>
         <source>Only chooses the frontend that presents the picture; the decoding path is still set by Renderer above.
 
 Auto (recommended): prefers Vulkan (libplacebo) on aarch64 (e.g. Steam Frame) or when GL runs on Zink; other platforms keep the original EGL / DRM / SDL order.
@@ -2162,107 +2450,107 @@ Vulkan：始终优先使用 Vulkan (libplacebo) 呈现，失败时自动回退�
 EGL：保持原有顺序，不主动优先 Vulkan。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1661"/>
+        <location filename="../gui/SettingsView.qml" line="1700"/>
         <source>The Vulkan renderer uses the built-in interpolation engine (same as Generic). Switch to Direct3D 11 to choose a different engine.</source>
         <translation>Vulkan 渲染器使用内置插帧引擎（等同 Generic）。如需选择其他插帧引擎，请切换到 Direct3D 11。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1679"/>
+        <location filename="../gui/SettingsView.qml" line="1718"/>
         <source>Interpolation mode:</source>
         <translation>插帧模式：</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1685"/>
+        <location filename="../gui/SettingsView.qml" line="1724"/>
         <source>Active (recommended)</source>
         <translation>主动（推荐）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1706"/>
+        <location filename="../gui/SettingsView.qml" line="1745"/>
         <source>The host streams at the UI frame rate / 2 (or / 3 on high-refresh displays) and the client always interpolates 2x/3x. Low host load; needs a strong client GPU.</source>
         <translation>服务器按 UI fps / 2（高刷新率显示器为 / 3）推流，客户端始终进行 dual/triple 插帧。服务器负载低，但需要客户端 GPU 足够强。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1710"/>
+        <location filename="../gui/SettingsView.qml" line="1749"/>
         <source>Passive</source>
         <translation>被动</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1731"/>
+        <location filename="../gui/SettingsView.qml" line="1770"/>
         <source>The host streams at the full UI frame rate. The client raises the ratio based on how many frames arrive: ≥ 70% pass-through, 40-70% 2x, &lt; 40% 3x. Good when the host cannot always keep up.</source>
         <translation>服务器全力按 UI fps 推流。客户端根据 recv% 动态提高倍率：≥ 70% 直通，40-70% 2x，&lt; 40% 3x。适合服务器不一定能满帧推流的情况。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1827"/>
+        <location filename="../gui/SettingsView.qml" line="1869"/>
         <source>ENTRY (integrated / older GPUs)</source>
         <translation>ENTRY（集成显卡／旧显卡）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1831"/>
+        <location filename="../gui/SettingsView.qml" line="1873"/>
         <source>UNKNOWN (not detected; restart the client to detect)</source>
         <translation>UNKNOWN（未检测到，重启客户端以检测）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1833"/>
+        <location filename="../gui/SettingsView.qml" line="1875"/>
         <source>(not detected yet)</source>
         <translation>（尚未检测）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1837"/>
+        <location filename="../gui/SettingsView.qml" line="1879"/>
         <source>(not measured)</source>
         <translation>（未测量）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1838"/>
+        <location filename="../gui/SettingsView.qml" line="1880"/>
         <source>FRUC auto tiering (Vulkan unified autotier v1.4.127):</source>
         <translation>FRUC 自动分级 (Vulkan unified autotier v1.4.127)：</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1839"/>
+        <location filename="../gui/SettingsView.qml" line="1881"/>
         <source>   GPU: </source>
         <translation>   GPU：</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1840"/>
+        <location filename="../gui/SettingsView.qml" line="1882"/>
         <source>   Detected tier: </source>
         <translation>   检测到的 tier：</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1841"/>
+        <location filename="../gui/SettingsView.qml" line="1883"/>
         <source>   Benchmark: </source>
         <translation>   benchmark：</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1842"/>
+        <location filename="../gui/SettingsView.qml" line="1884"/>
         <source>At runtime it moves up and down 7 tiers (T-1..T5):</source>
         <translation>运行时沿 7 级 (T-1..T5) 自动升降：</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1845"/>
+        <location filename="../gui/SettingsView.qml" line="1887"/>
         <source>  T3 = NVOF + chain_lv2 (NVOF GPU, chain-heavy)</source>
         <translation>  T3 = NVOF + chain_lv2 (NVOF GPU 中 chain 偏重)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1846"/>
+        <location filename="../gui/SettingsView.qml" line="1888"/>
         <source>  T2 = chain_lv2 (AMD/Intel, no NVOF)</source>
         <translation>  T2 = chain_lv2 (AMD/Intel 无 NVOF)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1848"/>
+        <location filename="../gui/SettingsView.qml" line="1890"/>
         <source>  T0 = SYNC chain (minimum FRUC)</source>
         <translation>  T0 = SYNC chain (最低 FRUC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1849"/>
+        <location filename="../gui/SettingsView.qml" line="1891"/>
         <source>  T-1 = FRUC paused (GPU too slow; retry after 5 min)</source>
         <translation>  T-1 = 暂停 FRUC (GPU 跑不动，hold 5min 后重试)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1861"/>
+        <location filename="../gui/SettingsView.qml" line="1903"/>
         <source>Edge MV threshold:</source>
         <translation>边缘 MV 阈值 (Edge MV threshold)：</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1877"/>
+        <location filename="../gui/SettingsView.qml" line="1919"/>
         <source>Edge-detection threshold for motion vectors in the warp shader (in L² diff units).
 Default 8 (= 2.83 px L2 diff).
 Lower (4): more edge protection and less blocky mosaic, but edges may look softer.
@@ -2275,49 +2563,49 @@ Start with the default; if interpolated edges look blocky, lower it to 4-6.</sou
 建议先用默认值，若插帧边缘有方块感再降到 4-6。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2200"/>
+        <location filename="../gui/SettingsView.qml" line="2242"/>
         <source>Optimize game settings for streaming</source>
         <translation>优化游戏设置以进行流式传输</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2211"/>
+        <location filename="../gui/SettingsView.qml" line="2253"/>
         <source>Quit app on host PC after ending stream</source>
         <translation>流式传输结束后退出目标计算机上的应用程序</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2221"/>
+        <location filename="../gui/SettingsView.qml" line="2263"/>
         <source>This will close the app or game you are streaming when you end your stream. You will lose any unsaved progress!</source>
         <translation>当你结束流式传输时，这将关闭正在运行的应用程序或游戏。这会导致你失去所有未保存的游戏进度！</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2300"/>
+        <location filename="../gui/SettingsView.qml" line="2342"/>
         <source>Design</source>
         <translation>设计</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2307"/>
+        <location filename="../gui/SettingsView.qml" line="2349"/>
         <source>Safe: editorial grid, quieter masthead.
 Bold: magazine-cover energy, oversized display titles.</source>
         <translation>稳重：编辑式网格，低调的刊头。
 大胆：杂志封面般的冲击力，超大标题。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2323"/>
+        <location filename="../gui/SettingsView.qml" line="2365"/>
         <source>Safe</source>
         <translation>稳重</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2324"/>
+        <location filename="../gui/SettingsView.qml" line="2366"/>
         <source>Bold</source>
         <translation>大胆</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2492"/>
+        <location filename="../gui/SettingsView.qml" line="2534"/>
         <source>You must restart VipleStream for this change to take effect</source>
         <translation>必须重新启动 VipleStream 才能使此更改生效</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2596"/>
+        <location filename="../gui/SettingsView.qml" line="2638"/>
         <source>Updates your Discord status to display the name of the game you&apos;re streaming. The status reads &quot;Playing &lt;game&gt; · via VipleStream&quot; with the VipleStream icon.</source>
         <translation>更新你的 Discord 状态以显示正在串流的游戏名称。状态显示为“Playing &lt;game&gt; · via VipleStream”，并附带 VipleStream 图标。</translation>
     </message>
@@ -2332,220 +2620,220 @@ Bold: magazine-cover energy, oversized display titles.</source>
         <translation>单眼分辨率</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="401"/>
+        <location filename="../gui/SettingsView.qml" line="407"/>
         <source>Fewer pixels to encode, send and decode means lower latency. The host can still render at a higher resolution and scale it down.</source>
         <translation>需要编码、发送和解码的像素越少，延迟越低。主机仍可以用更高分辨率渲染后再缩小。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="406"/>
+        <location filename="../gui/SettingsView.qml" line="412"/>
         <source>Extra field of view (overscan)</source>
         <translation>额外视野（过扫描）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="414"/>
-        <location filename="../gui/SettingsView.qml" line="440"/>
-        <location filename="../gui/SettingsView.qml" line="468"/>
+        <location filename="../gui/SettingsView.qml" line="420"/>
+        <location filename="../gui/SettingsView.qml" line="456"/>
+        <location filename="../gui/SettingsView.qml" line="493"/>
         <source>Off</source>
         <translation>关</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="427"/>
+        <location filename="../gui/SettingsView.qml" line="443"/>
         <source>Renders a little beyond the edge of each eye so that turning your head does not reveal empty borders.</source>
         <translation>在每只眼睛的边缘之外多渲染一点，这样转头时不会露出空白边框。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="432"/>
+        <location filename="../gui/SettingsView.qml" line="448"/>
         <source>Pick the newest frame this late</source>
         <translation>延后选取最新帧的时间</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="453"/>
+        <location filename="../gui/SettingsView.qml" line="478"/>
         <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
         <translation>在选择要显示的帧之前等待几毫秒，让显示的帧更新。等太久会导致头显跳帧。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2698"/>
+        <location filename="../gui/SettingsView.qml" line="2740"/>
         <source>NOTE: Certain keyboard shortcuts like Ctrl+Alt+Del on Windows cannot be intercepted by any application, including VipleStream.</source>
         <translation>注意：某些键盘快捷键（例如 Windows 上的 Ctrl+Alt+Del）无法被任何应用程序拦截，包括 VipleStream。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2860"/>
+        <location filename="../gui/SettingsView.qml" line="2902"/>
         <source>Process gamepad input when VipleStream is in the background</source>
         <translation>VipleStream 在后台时仍处理手柄输入</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2871"/>
+        <location filename="../gui/SettingsView.qml" line="2913"/>
         <source>Allows VipleStream to capture gamepad inputs even if it&apos;s not the current window in focus</source>
         <translation>允许 VipleStream 在不是当前焦点窗口时也能捕获手柄输入</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2881"/>
+        <location filename="../gui/SettingsView.qml" line="2923"/>
         <source>Network (MP-QUIC)</source>
         <translation>网络 (MP-QUIC)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2891"/>
+        <location filename="../gui/SettingsView.qml" line="2933"/>
         <source>Enable MP-QUIC multipath transport</source>
         <translation>启用 MP-QUIC 多路径传输</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2901"/>
+        <location filename="../gui/SettingsView.qml" line="2943"/>
         <source>Uses QUIC multipath (RFC 9443) for streaming. Enables WiFi + cellular failover and dual-NIC bandwidth aggregation. Requires server support.</source>
         <translation>使用 QUIC 多路径 (RFC 9443) 进行串流。支持 Wi-Fi + 蜂窝网络故障切换以及双网卡带宽聚合。需要服务器支持。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2906"/>
+        <location filename="../gui/SettingsView.qml" line="2948"/>
         <source>Path scheduler</source>
         <translation>路径调度器</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2922"/>
+        <location filename="../gui/SettingsView.qml" line="2964"/>
         <source>Auto (per stream type)</source>
         <translation>自动（按流类型）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2923"/>
+        <location filename="../gui/SettingsView.qml" line="2965"/>
         <source>Lowest latency</source>
         <translation>最低延迟</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2924"/>
+        <location filename="../gui/SettingsView.qml" line="2966"/>
         <source>Bandwidth aggregation</source>
         <translation>带宽聚合</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2925"/>
+        <location filename="../gui/SettingsView.qml" line="2967"/>
         <source>Redundant (all paths)</source>
         <translation>冗余（所有路径）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2926"/>
+        <location filename="../gui/SettingsView.qml" line="2968"/>
         <source>Earliest completion</source>
         <translation>最早完成</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2935"/>
+        <location filename="../gui/SettingsView.qml" line="2977"/>
         <source>Auto: video=ECF, audio=redundant, control=min-RTT. Aggregation: round-robin across all NICs for maximum bandwidth.</source>
         <translation>自动：视频=ECF，音频=冗余，控制=min-RTT。聚合：在所有网卡之间轮询以获得最大带宽。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2944"/>
+        <location filename="../gui/SettingsView.qml" line="2986"/>
         <source>Advanced Settings</source>
         <translation>高级设置</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2955"/>
+        <location filename="../gui/SettingsView.qml" line="2997"/>
         <source>Video decoder</source>
         <translation>视频解码器</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2981"/>
-        <location filename="../gui/SettingsView.qml" line="3036"/>
+        <location filename="../gui/SettingsView.qml" line="3023"/>
+        <location filename="../gui/SettingsView.qml" line="3078"/>
         <source>Automatic (Recommended)</source>
         <translation>自动 (推荐)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2985"/>
+        <location filename="../gui/SettingsView.qml" line="3027"/>
         <source>Force software decoding</source>
         <translation>强制软件解码</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2989"/>
+        <location filename="../gui/SettingsView.qml" line="3031"/>
         <source>Force hardware decoding</source>
         <translation>强制硬件解码</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3005"/>
+        <location filename="../gui/SettingsView.qml" line="3047"/>
         <source>Video codec</source>
         <translation>视频编解码器</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3040"/>
+        <location filename="../gui/SettingsView.qml" line="3082"/>
         <source>H.264</source>
         <translation>H.264</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3044"/>
+        <location filename="../gui/SettingsView.qml" line="3086"/>
         <source>HEVC (H.265)</source>
         <translation>HEVC (H.265)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3052"/>
+        <location filename="../gui/SettingsView.qml" line="3094"/>
         <source>PyroWave (Ultra-Low Latency LAN)</source>
         <translation>PyroWave（局域网超低延迟）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3095"/>
+        <location filename="../gui/SettingsView.qml" line="3137"/>
         <source>Enable YUV 4:4:4 (Experimental)</source>
         <translation>启用 YUV 4:4:4（实验性）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3118"/>
+        <location filename="../gui/SettingsView.qml" line="3160"/>
         <source>Good for streaming desktop and text-heavy games, but not recommended for fast-paced games.</source>
         <translation>适合串流桌游和文字类游戏，但不推荐用于快节奏游戏。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3120"/>
+        <location filename="../gui/SettingsView.qml" line="3162"/>
         <source>YUV 4:4:4 is not supported on this PC.</source>
         <translation>此电脑不支持 YUV 4:4:4。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3127"/>
+        <location filename="../gui/SettingsView.qml" line="3169"/>
         <source>Unlock bitrate limit (Experimental)</source>
         <translation>解锁比特率限制（实验性）</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3146"/>
+        <location filename="../gui/SettingsView.qml" line="3188"/>
         <source>Automatically find PCs on the local network (Recommended)</source>
         <translation>自动在本地网络上查找计算机 (推荐)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="3167"/>
+        <location filename="../gui/SettingsView.qml" line="3209"/>
         <source>Automatically detect blocked connections (Recommended)</source>
         <translation>自动检测被阻止的连接 (推荐)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1795"/>
+        <location filename="../gui/SettingsView.qml" line="1836"/>
         <source>Quality — Best visual quality, higher GPU load</source>
         <translation>品质 — 最佳画质,GPU 负载较高</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1796"/>
+        <location filename="../gui/SettingsView.qml" line="1837"/>
         <source>Balanced — Recommended (default)</source>
         <translation>均衡 — 推荐 (默认)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1797"/>
+        <location filename="../gui/SettingsView.qml" line="1838"/>
         <source>Performance — Lowest latency, suitable for iGPU</source>
         <translation>性能 — 最低延迟,适合集显</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2226"/>
+        <location filename="../gui/SettingsView.qml" line="2268"/>
         <source>NAT Traversal (Signaling Relay)</source>
         <translation>NAT 穿透 (信令中继)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2236"/>
+        <location filename="../gui/SettingsView.qml" line="2278"/>
         <source>Relay URL (e.g. ws://relay.example.com:9999)</source>
         <translation>中继 URL (例如 ws://relay.example.com:9999)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2247"/>
+        <location filename="../gui/SettingsView.qml" line="2289"/>
         <source>Relay PSK (pre-shared key, leave empty if none)</source>
         <translation>中继 PSK (预共享密钥,没有则留空)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2257"/>
+        <location filename="../gui/SettingsView.qml" line="2299"/>
         <source>Optional: helps connect when both sides are behind NAT. Run viplestream-relay on a server with a public IP.</source>
         <translation>可选:两端都在 NAT 后方时有助于建立连线。请在具有公网 IP 的服务器上执行 viplestream-relay。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2267"/>
+        <location filename="../gui/SettingsView.qml" line="2309"/>
         <source>Force streaming via relay (for testing UDP tunnel)</source>
         <translation>强制通过中继串流 (用于测试 UDP 隧道)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="1806"/>
+        <location filename="../gui/SettingsView.qml" line="1848"/>
         <source>Quality: 8-neighbor search + sub-pixel + adaptive blend (~12ms on iGPU)
 Balanced: 8-neighbor search + temporal smoothing (~8ms on iGPU)
 Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
@@ -2554,22 +2842,22 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 性能: 4 邻域搜索 + 最少处理 (集显约 6 ms)</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2087"/>
+        <location filename="../gui/SettingsView.qml" line="2129"/>
         <source>Frame pacing reduces micro-stutter by delaying frames that come in too early. It works with V-Sync off too, so you keep low latency while smoothing out uneven frame arrival.</source>
         <translation>帧速调节通过延迟过早到达的帧来减少微卡顿。关闭垂直同步时也能工作，因此可以在保持低延迟的同时平滑不均匀的帧到达。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2170"/>
+        <location filename="../gui/SettingsView.qml" line="2212"/>
         <source>Mute audio stream when VipleStream is not the active window</source>
         <translation>VipleStream 不是活动窗口时将音频流静音</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2181"/>
+        <location filename="../gui/SettingsView.qml" line="2223"/>
         <source>Mutes VipleStream&apos;s audio when you Alt+Tab out of the stream or click on a different window.</source>
         <translation>当你用 Alt+Tab 切出串流或点击其他窗口时，将 VipleStream 的音频静音。</translation>
     </message>
     <message>
-        <location filename="../gui/SettingsView.qml" line="2277"/>
+        <location filename="../gui/SettingsView.qml" line="2319"/>
         <source>Always stream via the relay even when the host is directly reachable. Useful for verifying the relay UDP tunnel when a VPN (e.g. Cloudflare WARP) would otherwise keep direct /launch working.</source>
         <translation>即使主机可直接连线,也总是透过中继串流。当 VPN(例如 Cloudflare WARP)仍让 /launch 直连时,适合用来验证中继的 UDP 隧道。</translation>
     </message>
@@ -2603,32 +2891,128 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <translation>这台电脑的互联网连接正在阻止 VipleStream。连接到此网络时，通过互联网串流可能无法正常工作。</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="192"/>
-        <source>VR controller: hold A+X+trigger+grip</source>
-        <translation>VR 控制器：按住 A+X+扳机+握把</translation>
+        <location filename="../gui/StreamSegue.qml" line="195"/>
+        <location filename="../gui/StreamSegue.qml" line="196"/>
+        <source>VR controller: hold A+X+trigger+grip to end the stream</source>
+        <translation>VR 控制器：按住 A+X+扳机+握把结束串流</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="197"/>
+        <source>Flat-screen stream: press the left menu button to open or close the virtual keyboard</source>
+        <translation>普通画面串流：按左菜单键打开或关闭虚拟键盘</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="198"/>
+        <source>Flat-screen stream: hold the left menu button to bring the screen back in front of you</source>
+        <translation>普通画面串流：按住左菜单键把画面移回你面前</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="199"/>
+        <source>Flat-screen stream: trigger = left click, grip = right click, thumbstick up/down = scroll</source>
+        <translation>普通画面串流：扳机 = 左键单击，握把 = 右键单击，摇杆上/下 = 滚动</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="200"/>
+        <source>VR stream: hold menu+trigger for one second to open the SteamVR dashboard on the PC</source>
+        <translation>VR 串流：按住菜单键+扳机 1 秒，在电脑上打开 SteamVR 控制面板</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="201"/>
+        <source>VR stream: hold menu+grip on one hand for one second to open or close the virtual keyboard</source>
+        <translation>VR 串流：在同一只手上按住菜单键+握把 1 秒，打开或关闭虚拟键盘</translation>
     </message>
     <message>
         <location filename="../gui/StreamSegue.qml" line="202"/>
+        <source>Hold both menu buttons for 2 seconds to switch Xbox controller mode (flat-screen and VR streams)</source>
+        <translation>按住两个菜单键 2 秒切换 Xbox 控制器模式（普通画面串流和 VR 串流）</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="203"/>
+        <source>Hold both thumbsticks down for 1.5 seconds to switch steering wheel mode (in Xbox controller mode)</source>
+        <translation>按住两个摇杆 1.5 秒切换方向盘模式（在 Xbox 控制器模式下）</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="204"/>
+        <source>VR stream: games without VR controller support get an Xbox controller automatically</source>
+        <translation>VR 串流：不支持 VR 控制器的游戏会自动获得一个 Xbox 手柄</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="207"/>
+        <source>Press %1 to show or hide the performance overlay</source>
+        <translation>按 %1 显示或隐藏性能叠加信息</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="207"/>
+        <source>Ctrl+Alt+Shift+S</source>
+        <translation>Ctrl+Alt+Shift+S</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="208"/>
+        <source>Press %1 to switch between windowed and full-screen</source>
+        <translation>按 %1 在窗口和全屏之间切换</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="208"/>
+        <source>Ctrl+Alt+Shift+X</source>
+        <translation>Ctrl+Alt+Shift+X</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="209"/>
+        <source>Press %1 to release or capture the mouse and keyboard</source>
+        <translation>按 %1 释放或捕获鼠标和键盘</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="209"/>
+        <source>Ctrl+Alt+Shift+Z</source>
+        <translation>Ctrl+Alt+Shift+Z</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="210"/>
+        <source>Press %1 to switch the mouse between game mode and remote desktop mode</source>
+        <translation>按 %1 在游戏模式和远程桌面模式之间切换鼠标</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="210"/>
+        <source>Ctrl+Alt+Shift+M</source>
+        <translation>Ctrl+Alt+Shift+M</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="211"/>
+        <source>Press %1 to type the clipboard text on the host</source>
+        <translation>按 %1 在主机上输入剪贴板文字</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="211"/>
+        <source>Ctrl+Alt+Shift+V</source>
+        <translation>Ctrl+Alt+Shift+V</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="213"/>
+        <source>Gamepad: hold Start to use the gamepad as a mouse</source>
+        <translation>手柄：按住 Start 把手柄当作鼠标使用</translation>
+    </message>
+    <message>
+        <location filename="../gui/StreamSegue.qml" line="225"/>
         <source>Failed to start the stream.</source>
         <translation>无法启动串流。</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="188"/>
+        <location filename="../gui/StreamSegue.qml" line="216"/>
         <source>Tip:</source>
         <translation>提示:</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="188"/>
+        <location filename="../gui/StreamSegue.qml" line="190"/>
         <source>Press %1 to disconnect your session</source>
         <translation>按 %1 来断开会话</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="189"/>
+        <location filename="../gui/StreamSegue.qml" line="191"/>
         <source>Start+Select+L1+R1</source>
         <translation>Start+Select+L1+R1</translation>
     </message>
     <message>
-        <location filename="../gui/StreamSegue.qml" line="189"/>
+        <location filename="../gui/StreamSegue.qml" line="191"/>
         <source>Ctrl+Alt+Shift+Q</source>
         <translation>Ctrl+Alt+Shift+Q</translation>
     </message>
@@ -2636,77 +3020,77 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>UpdateDialog</name>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="78"/>
+        <location filename="../gui/UpdateDialog.qml" line="79"/>
         <source>Download and install VipleStream %1?</source>
         <translation>要下载并安装 VipleStream %1 吗？</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="81"/>
+        <location filename="../gui/UpdateDialog.qml" line="82"/>
         <source>Working…</source>
         <translation>处理中…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="84"/>
+        <location filename="../gui/UpdateDialog.qml" line="85"/>
         <source>VipleStream %1 is available.</source>
         <translation>VipleStream %1 现已推出。</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="86"/>
+        <location filename="../gui/UpdateDialog.qml" line="87"/>
         <source>Update failed</source>
         <translation>更新失败</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="98"/>
+        <location filename="../gui/UpdateDialog.qml" line="99"/>
         <source>Loading release notes…</source>
         <translation>正在加载更新说明…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="99"/>
+        <location filename="../gui/UpdateDialog.qml" line="100"/>
         <source>Couldn&apos;t load the release notes.</source>
         <translation>无法加载更新说明。</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="128"/>
+        <location filename="../gui/UpdateDialog.qml" line="134"/>
         <source>VipleStream will close and relaunch automatically after the update is applied. On Windows you may be prompted by UAC if installed to Program Files.</source>
         <translation>应用更新后，VipleStream 会自动关闭并重新启动。在 Windows 上，如果安装在 Program Files 中，可能会弹出 UAC 提示。</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="164"/>
+        <location filename="../gui/UpdateDialog.qml" line="170"/>
         <source>%1 / %2 MB</source>
         <translation>%1 / %2 MB</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="166"/>
+        <location filename="../gui/UpdateDialog.qml" line="172"/>
         <source>Connecting…</source>
         <translation>正在连接…</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="188"/>
+        <location filename="../gui/UpdateDialog.qml" line="195"/>
         <source>Click &apos;Open release page&apos; to download manually.</source>
         <translation>点击“打开发布页面”以手动下载。</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="208"/>
+        <location filename="../gui/UpdateDialog.qml" line="215"/>
         <source>Yes</source>
         <translation>是</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="223"/>
+        <location filename="../gui/UpdateDialog.qml" line="230"/>
         <source>No</source>
         <translation>否</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="235"/>
+        <location filename="../gui/UpdateDialog.qml" line="242"/>
         <source>Cancel</source>
         <translation>取消</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="248"/>
+        <location filename="../gui/UpdateDialog.qml" line="255"/>
         <source>Open release page</source>
         <translation>打开发布页面</translation>
     </message>
     <message>
-        <location filename="../gui/UpdateDialog.qml" line="263"/>
+        <location filename="../gui/UpdateDialog.qml" line="276"/>
         <source>Close</source>
         <translation>关闭</translation>
     </message>
@@ -2714,144 +3098,148 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>Updater</name>
     <message>
-        <location filename="../backend/updater.cpp" line="67"/>
+        <location filename="../backend/updater.cpp" line="69"/>
         <source>On the Steam Frame, VipleStream updates itself in the background while it is closed (when installed with the installer script). To update right away, close VipleStream and run the new installer script from the release page.</source>
         <translation>在 Steam Frame 上，VipleStream 在关闭时会在后台自动更新（使用安装脚本安装时）。若要立即更新，请关闭 VipleStream 并从发布页面运行新的安装脚本。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="71"/>
+        <location filename="../backend/updater.cpp" line="73"/>
         <source>This copy of VipleStream is installed as a Flatpak. Download the new .flatpak from the release page and install it with &quot;flatpak install --bundle &lt;file&gt;&quot;. If you installed it from a Flatpak repository, run &quot;flatpak update&quot; instead.</source>
         <translation>此 VipleStream 以 Flatpak 方式安装。请从发布页面下载新的 .flatpak，并使用“flatpak install --bundle &lt;file&gt;”安装。如果你是从 Flatpak 仓库安装的，请改为运行“flatpak update”。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="77"/>
+        <location filename="../backend/updater.cpp" line="79"/>
         <source>VipleStream is not running from an AppImage, so it cannot replace itself. Download the new version from the release page.</source>
         <translation>VipleStream 不是从 AppImage 运行的，因此无法替换自身。请从发布页面下载新版本。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="80"/>
+        <location filename="../backend/updater.cpp" line="82"/>
         <source>Automatic install is not available for Linux arm64 yet. Download the new version from the release page.</source>
         <translation>Linux arm64 暂不支持自动安装。请从发布页面下载新版本。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="84"/>
+        <location filename="../backend/updater.cpp" line="86"/>
         <source>Automatic install is not available on this platform (%1). Download the new version from the release page.</source>
         <translation>此平台 (%1) 不支持自动安装。请从发布页面下载新版本。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="150"/>
+        <location filename="../backend/updater.cpp" line="159"/>
         <source>Querying release assets…</source>
         <translation>正在查询发布文件…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="275"/>
-        <location filename="../backend/updater.cpp" line="419"/>
+        <location filename="../backend/updater.cpp" line="285"/>
+        <location filename="../backend/updater.cpp" line="459"/>
         <source>Update cancelled.</source>
         <translation>更新已取消。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="279"/>
+        <location filename="../backend/updater.cpp" line="289"/>
         <source>Failed to query release info: %1</source>
         <translation>查询发布信息失败：%1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="287"/>
+        <location filename="../backend/updater.cpp" line="297"/>
         <source>Release JSON malformed: %1</source>
         <translation>发布 JSON 格式错误：%1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="312"/>
+        <location filename="../backend/updater.cpp" line="322"/>
         <source>Release info from GitHub has no tag.</source>
         <translation>GitHub 的发布信息中没有标签。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="315"/>
+        <location filename="../backend/updater.cpp" line="325"/>
         <source>The latest release tag &quot;%1&quot; is not a version number.</source>
         <translation>最新发布标签“%1”不是版本号。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="320"/>
+        <location filename="../backend/updater.cpp" line="330"/>
         <source>GitHub&apos;s release information is not up to date yet: it still reports %1, which is not newer than this version (%2). Please try again in a few minutes.</source>
         <translation>GitHub 的发布信息尚未更新：它仍显示 %1，并不比当前版本 (%2) 新。请过几分钟再试。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="325"/>
+        <location filename="../backend/updater.cpp" line="335"/>
         <source>Release %1 has no files attached yet. Please try again in a few minutes.</source>
         <translation>发布 %1 尚未附带任何文件。请过几分钟再试。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="332"/>
+        <location filename="../backend/updater.cpp" line="342"/>
         <source>Release %1 has no installable package for this platform (%2).</source>
         <translation>发布 %1 没有适用于此平台 (%2) 的安装包。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="341"/>
+        <location filename="../backend/updater.cpp" line="352"/>
         <source>VipleStream %1 is available as %2, but it has to be installed manually. %3</source>
         <translation>VipleStream %1 以 %2 形式提供，但需要手动安装。%3</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="356"/>
+        <location filename="../backend/updater.cpp" line="380"/>
+        <location filename="../backend/updater.cpp" line="389"/>
         <source>Cannot open download file: %1</source>
         <translation>无法打开下载文件：%1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="360"/>
+        <location filename="../backend/updater.cpp" line="393"/>
         <source>Downloading %1…</source>
         <translation>正在下载 %1…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="430"/>
+        <location filename="../backend/updater.cpp" line="363"/>
+        <location filename="../backend/updater.cpp" line="367"/>
+        <location filename="../backend/updater.cpp" line="470"/>
+        <location filename="../backend/updater.cpp" line="487"/>
         <source>Download failed: %1</source>
         <translation>下载失败：%1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="436"/>
+        <location filename="../backend/updater.cpp" line="477"/>
         <source>Could not save the downloaded update. The disk may be full.</source>
         <translation>无法保存已下载的更新。磁盘可能已满。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="445"/>
+        <location filename="../backend/updater.cpp" line="498"/>
         <source>Preparing installer…</source>
         <translation>正在准备安装程序…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="451"/>
+        <location filename="../backend/updater.cpp" line="504"/>
         <source>Restarting to apply update…</source>
         <translation>正在重启以应用更新…</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="548"/>
+        <location filename="../backend/updater.cpp" line="618"/>
         <source>The update was not installed because VipleStream did not exit in time. Please close VipleStream and try updating again.</source>
         <translation>由于 VipleStream 未能及时退出，更新未安装。请关闭 VipleStream 后重新尝试更新。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="555"/>
-        <location filename="../backend/updater.cpp" line="626"/>
+        <location filename="../backend/updater.cpp" line="625"/>
+        <location filename="../backend/updater.cpp" line="716"/>
         <source>Cannot write helper script: %1</source>
         <translation>无法写入辅助脚本：%1</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="580"/>
+        <location filename="../backend/updater.cpp" line="663"/>
         <source>Failed to launch updater (UAC denied or PowerShell missing).</source>
         <translation>无法启动更新程序（UAC 被拒绝或缺少 PowerShell）。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="590"/>
+        <location filename="../backend/updater.cpp" line="673"/>
         <source>Not running from AppImage — APPIMAGE env not set. Please reinstall manually.</source>
         <translation>不是从 AppImage 运行 — 未设置 APPIMAGE 环境变量。请手动重新安装。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="600"/>
+        <location filename="../backend/updater.cpp" line="683"/>
         <source>AppImage directory not writable: %1. Move VipleStream to a user-writable location (e.g. ~/Applications/) and retry.</source>
         <translation>AppImage 所在目录不可写：%1。请将 VipleStream 移到用户可写的位置（例如 ~/Applications/）后重试。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="639"/>
+        <location filename="../backend/updater.cpp" line="729"/>
         <source>Failed to launch updater helper script.</source>
         <translation>无法启动更新辅助脚本。</translation>
     </message>
     <message>
-        <location filename="../backend/updater.cpp" line="645"/>
+        <location filename="../backend/updater.cpp" line="735"/>
         <source>Automatic update not supported on this platform.</source>
         <translation>此平台不支持自动更新。</translation>
     </message>
@@ -3136,42 +3524,42 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <translation>此平台不支持 VR 模式。</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="526"/>
+        <location filename="../backend/vrlauncher.cpp" line="529"/>
         <source>Could not start the VR stream.</source>
         <translation>无法启动 VR 串流。</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="577"/>
+        <location filename="../backend/vrlauncher.cpp" line="580"/>
         <source>The video player stopped unexpectedly.</source>
         <translation>视频播放器意外停止。</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="580"/>
+        <location filename="../backend/vrlauncher.cpp" line="583"/>
         <source>Could not start VR for the video player.</source>
         <translation>无法为视频播放器启动 VR。</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="583"/>
+        <location filename="../backend/vrlauncher.cpp" line="586"/>
         <source>Could not play this video.</source>
         <translation>无法播放此视频。</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="586"/>
+        <location filename="../backend/vrlauncher.cpp" line="589"/>
         <source>The video player ended with an error (code %1).</source>
         <translation>视频播放器因错误而结束（代码 %1）。</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="646"/>
+        <location filename="../backend/vrlauncher.cpp" line="649"/>
         <source>The VR stream stopped unexpectedly.</source>
         <translation>VR 串流意外停止。</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="650"/>
+        <location filename="../backend/vrlauncher.cpp" line="653"/>
         <source>Another app is running on the host. Quit it first, then start the VR app again.</source>
         <translation>主机上正在运行另一个应用。请先退出它，然后再次启动 VR 应用。</translation>
     </message>
     <message>
-        <location filename="../backend/vrlauncher.cpp" line="654"/>
+        <location filename="../backend/vrlauncher.cpp" line="657"/>
         <source>The VR stream ended with an error (code %1).</source>
         <translation>VR 串流因错误而结束（代码 %1）。</translation>
     </message>
@@ -3210,131 +3598,137 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <translation>不流畅</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="127"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="271"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="125"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="302"/>
         <source>The network test is not available here.</source>
         <translation>这里无法使用网络测试。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="131"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="129"/>
         <source>Stop the current stream first.</source>
         <translation>请先结束当前的串流。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="145"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="143"/>
         <source>No VR-capable host is online. Turn on the host PC and try again.</source>
         <translation>没有可串流 VR 的主机在线。请打开主机电脑后再试一次。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="150"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="148"/>
         <source>The headset network helper is not running. Reinstall VipleStream with the Steam Frame installer script.</source>
         <translation>头显的网络辅助服务没有在运行。请用 Steam Frame 安装脚本重新安装 VipleStream。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="154"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="152"/>
         <source>The streaming adapter is not connected, so there is nothing to compare.</source>
         <translation>串流转接器没有连接，没有可以比较的对象。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="158"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="156"/>
         <source>The host has no address on the streaming adapter&apos;s network.</source>
         <translation>主机在串流转接器的网络上没有地址。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="177"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="267"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="331"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="183"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="298"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="362"/>
         <source>Cancelled.</source>
         <translation>已取消。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="180"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="186"/>
         <source>Cancelling after this step...</source>
         <translation>这一档结束后取消…</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="196"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="202"/>
         <source>Pausing the headset&apos;s home Wi-Fi...</source>
         <translation>正在暂停头显的家用 Wi-Fi…</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="196"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="202"/>
         <source>Reconnecting the headset&apos;s home Wi-Fi...</source>
         <translation>正在接回头显的家用 Wi-Fi…</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="221"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="227"/>
         <source>Home Wi-Fi paused; waiting for the adapter link to settle...</source>
         <translation>家用 Wi-Fi 已暂停，等待转接器连接稳定…</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="224"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="230"/>
         <source>Could not pause the headset&apos;s home Wi-Fi (%1).</source>
         <translation>无法暂停头显的家用 Wi-Fi（%1）。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="224"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="230"/>
         <source>no answer from the helper</source>
         <translation>辅助服务没有响应</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="232"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="240"/>
         <source>Home Wi-Fi reconnected; waiting for the network to settle...</source>
         <translation>家用 Wi-Fi 已接回，等待网络稳定…</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="235"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="243"/>
         <source>The headset&apos;s home Wi-Fi did not reconnect (state: %1).</source>
         <translation>头显的家用 Wi-Fi 没有接回（状态：%1）。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="280"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="267"/>
+        <source>The streaming adapter dropped out during the test, so no choice was saved. Try again.</source>
+        <translation>测试期间串流转接器断开了，因此没有保存选择。请重试。</translation>
+    </message>
+    <message>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="277"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="311"/>
         <source>Could not start the test stream.</source>
         <translation>无法开始测试串流。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="285"/>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="386"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="316"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="417"/>
         <source>adapter only</source>
         <translation>只用转接器</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="285"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="316"/>
         <source>home Wi-Fi + adapter</source>
         <translation>家用 Wi-Fi＋转接器</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="286"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="317"/>
         <source>Testing %1: %2 x %2 per eye at 144 Hz (step %3 of up to %4)...</source>
         <translation>测试%1：每眼 %2 x %2、144 Hz（第 %3 档，最多 %4 档）…</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="327"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="358"/>
         <source>The test stream did not run: %1</source>
         <translation>测试串流没有运行：%1</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="378"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="409"/>
         <source>Use adapter only: the headset pauses home Wi-Fi while you play VR here (smoothest: %1 per eye with adapter only, %2 with home Wi-Fi).</source>
         <translation>只用转接器：在这里玩 VR 时头显会暂停家用 Wi-Fi（能流畅的最高分辨率：只用转接器每眼 %1，家用 Wi-Fi %2）。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="380"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="411"/>
         <source>Keep home Wi-Fi: adapter only was not clearly better here (smoothest: %1 per eye with home Wi-Fi, %2 with adapter only).</source>
         <translation>保留家用 Wi-Fi：在这里只用转接器没有明显比较好（能流畅的最高分辨率：家用 Wi-Fi 每眼 %1，只用转接器 %2）。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="383"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="414"/>
         <source>The highest step was limited by the headset itself, not the network.</source>
         <translation>最高的那一档是受限于头显本身，不是网络。</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="386"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="417"/>
         <source>keep home Wi-Fi</source>
         <translation>保留家用 Wi-Fi</translation>
     </message>
     <message>
-        <location filename="../backend/vrnetbenchrunner.cpp" line="387"/>
+        <location filename="../backend/vrnetbenchrunner.cpp" line="418"/>
         <source>Network test finished.</source>
         <translation>网络测试完成。</translation>
     </message>
@@ -3342,27 +3736,27 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
 <context>
     <name>VrNetMode</name>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="157"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="161"/>
         <source>Network test: trying adapter only for about 30 seconds (home Wi-Fi pauses, then comes back)</source>
         <translation>网络测试：试用“仅用转接器”约 30 秒（家用 Wi-Fi 会暂停，之后自动恢复）</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="197"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="201"/>
         <source>Network test: smoother with home Wi-Fi paused during VR (missed frames %1% -&gt; %2%). It reconnects when you stop streaming.</source>
         <translation>网络测试：在 VR 期间暂停家庭 Wi-Fi 串流更顺畅 (丢帧 %1% -&gt; %2%)。停止串流时会自动重连。</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="203"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="207"/>
         <source>Network test: keeping home Wi-Fi (missed frames %1% with it, %2% without)</source>
         <translation>网络测试：保留家庭 Wi-Fi (保留时丢帧 %1%，不保留时 %2%)</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="251"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="255"/>
         <source>Streaming adapter lost - reconnecting the headset&apos;s home Wi-Fi</source>
         <translation>串流适配器连接丢失 - 正在重新连接头显的家庭 Wi-Fi</translation>
     </message>
     <message>
-        <location filename="../streaming/vr/vrnetmode.h" line="263"/>
+        <location filename="../streaming/vr/vrnetmode.h" line="284"/>
         <source>Home Wi-Fi paused during VR for a smoother stream - it reconnects when you stop streaming</source>
         <translation>VR 期间已暂停家庭 Wi-Fi 以获得更顺畅的串流 - 停止串流时会自动重连</translation>
     </message>

@@ -360,6 +360,7 @@ HEADERS += \
     streaming/xr/xrbufferauto.h \
     streaming/xr/xrphase.h \
     streaming/xr/xrcombo.h \
+    streaming/xr/xrwheel.h \
     streaming/xr/xrvideostats.h \
     streaming/xr/xrflight.h \
     streaming/xr/xrguard.h \

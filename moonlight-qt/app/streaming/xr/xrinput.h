@@ -34,6 +34,18 @@
 #include <vector>
 
 #include "xrkeyboard.h"
+#include "xrwheel.h"
+
+// §XR-PADMODE（2026-11-13）：XR 桌面（2D 串流）的 Xbox 手把模式送出的狀態。buttons 用 Limelight 的 *_FLAG。
+struct XrPadState {
+    uint16_t buttons = 0;
+    uint8_t lt = 0, rt = 0;
+    int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+    bool operator==(const XrPadState& o) const
+    {
+        return buttons == o.buttons && lt == o.lt && rt == o.rt && lx == o.lx && ly == o.ly && rx == o.rx && ry == o.ry;
+    }
+};
 
 namespace XrRay {
 
@@ -109,6 +121,11 @@ struct XrInputSink {
     // §VR-RECENTER（2026-11-09）：一般模式（不是影片模式）長按選單鍵（開關鍵盤那顆）kRecenterHoldNs＝把螢幕／介面重新擺到正前方。
     // 短按照舊開關鍵盤（改成放開時才切換，長按就不切）。XrContext 沒設時自己接到 requestRecenter()
     std::function<void()> recenter;
+    // §XR-PADMODE：有設 gamepad 才有手把模式（只有 2D 串流設；介面與影片模式不設）。操作與 VR 串流一致：
+    // 兩支選單鍵同時按住 2 秒＝切換 Xbox 手把模式（padMode 回報切換後的狀態）、兩支搖桿同時按住 1.5 秒＝切換方向盤
+    // （wheelToggled）。手把模式開著時不送射線滑鼠，兩支控制器合成一支 Xbox 手把，狀態有變就呼叫 gamepad。
+    std::function<void(const XrPadState& s)> gamepad;
+    std::function<void(bool on)> padMode;
 };
 
 class XrInput
@@ -157,6 +174,14 @@ public:
     // frame thread：10 s 彙總（呼叫後清零）
     QString takeStatsLine();
 
+    // §XR-PADMODE：方向盤模式的初始值與轉向總角度（bring-up 時設一次）
+    void setWheel(bool on, int rangeDeg)
+    {
+        m_WheelOn = on;
+        m_WheelRangeDeg = rangeDeg;
+    }
+    bool padMode() const { return m_PadMode; }
+
     // ── 虛擬鍵盤 ──
     // 任何執行緒：要求切換開關（熱鍵），frame thread 下一幀處理
     void requestKeyboardToggle() { m_KbToggleReq.fetch_add(1, std::memory_order_acq_rel); }
@@ -181,6 +206,9 @@ private:
     bool syntheticKeyboardRay(XrTime t, XrSpace local, XrSpace view, const Screen& s, uint64_t nowNs,
                               XrRay::Vec3* origin, XrRay::Vec3* dir, bool* trigger);
     void setButton(int idx, bool pressed);
+    bool padBool(XrAction a, int hand);
+    bool updatePad(XrTime displayTime, XrSpace local, uint64_t nowNs);
+    void setPadMode(bool on, const char* why);
     bool locateAim(int hand, XrTime t, XrSpace local, XrRay::Vec3* origin, XrRay::Vec3* dir);
     bool syntheticRay(XrTime t, XrSpace local, XrSpace view, const Screen& s, uint64_t nowNs,
                       XrRay::Vec3* origin, XrRay::Vec3* dir, bool* trigger);
@@ -207,6 +235,21 @@ private:
     uint64_t m_MenuDownNs[2] = {0, 0};      // §VR-RECENTER：選單鍵按下的時刻（一般模式）
     bool m_MenuLongFired[2] = {false, false};  // 這次按住已經觸發重新置中（放開時不切鍵盤）
     XrSpace m_AimSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    // §XR-PADMODE：手把模式多讀的鍵。Frame：右手 a/b/x/y＝A/B/X/Y、左手 dpad＝十字鍵、shoulder＝LB/RB、
+    // 右手 menu＝Start、左手 view＝Back；Touch／Index 沒有的鍵就不綁
+    XrAction m_PadA = XR_NULL_HANDLE, m_PadB = XR_NULL_HANDLE, m_PadX = XR_NULL_HANDLE, m_PadY = XR_NULL_HANDLE;
+    XrAction m_PadUp = XR_NULL_HANDLE, m_PadDown = XR_NULL_HANDLE, m_PadLeft = XR_NULL_HANDLE, m_PadRight = XR_NULL_HANDLE;
+    XrAction m_PadBumper = XR_NULL_HANDLE, m_PadStickClick = XR_NULL_HANDLE;
+    XrAction m_PadStart = XR_NULL_HANDLE, m_PadBack = XR_NULL_HANDLE;
+    bool m_PadBound = false;     // 至少有一個 profile 接受了手把模式的綁定
+    bool m_PadMode = false;
+    XrPadState m_PadSent;
+    xrwheel::Hold m_PadMenuHold;   // 兩支選單鍵
+    xrwheel::Hold m_PadWheelHold;  // 兩支搖桿
+    xrwheel::Wheel m_Wheel;
+    bool m_WheelOn = false;
+    int m_WheelRangeDeg = 360;
+    uint64_t m_StatPadSends = 0;
     XrAction m_EyeGazeAction = XR_NULL_HANDLE;
     XrSpace m_EyeGazeSpace = XR_NULL_HANDLE;
 

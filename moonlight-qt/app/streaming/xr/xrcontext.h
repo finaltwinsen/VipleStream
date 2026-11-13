@@ -478,8 +478,9 @@ private:
     uint32_t m_StatusImageCount = 0;
     VkImage* m_StatusImages = nullptr;
     bool m_StatusReady = false;
-    static constexpr uint32_t kStatusW = 256;
-    static constexpr uint32_t kStatusH = 32;
+    static constexpr uint32_t kStatusW = 768;   // 2026-11-12：原本是 256x32 的純色條，使用者看不懂（「黃底通知但看不到字」）→ 加字
+    static constexpr uint32_t kStatusH = 96;
+    bool ensureStatusLabel();
     // §VR-PLAYER
     std::atomic<int> m_PlayerProj{0};
     std::atomic<int> m_PlayerStereo{0};
@@ -649,6 +650,22 @@ private:
     bool m_HeadOutside = false;
     XrPosef m_EyeToHead[2] = {};              // m_StatsMutex 保護（與 m_Fov 一起）
     bool m_HaveEyeToHead = false;
+    // §VR-VIEWS-LOCK（2026-11-13）：PCVR 的每眼視角與眼位在第一次量到（＝/launch 協商給 host 的那一組）之後就不再改。
+    // 之後每秒量到的值只拿來比對、記在這裡（frame thread）
+    struct ViewDrift {
+        uint32_t checks = 0, changed = 0;
+        uint32_t moved = 0;        // 和上一次量到的不一樣的次數（＝runtime 的值自己在動；原本每動一次畫面就挪一次）
+        float movedFovDeg = 0.0f;  // 相鄰兩次量測之間最大的視角差
+        bool havePrev = false;
+        XrFovf prevFov[2] = {};
+        XrQuaternionf prevRot[2] = {};
+        float fovDeg = 0.0f, posMm = 0.0f, rotDeg = 0.0f;  // 這個視窗裡的最大差距
+        uint64_t lastLogNs = 0;
+        bool everLogged = false;
+    } m_ViewDrift;
+    // §VR-KBD：VR 串流的虛擬鍵盤擺在哪（打開那一刻的頭部前下方，追蹤空間；frame thread）
+    bool m_VrKbPlaced = false;
+    XrPosef m_VrKbPose = {};
     uint32_t m_RecW = 0, m_RecH = 0;
     std::condition_variable m_ViewsCv;        // waitViews 等 m_HaveEyeToHead 與 m_PeriodSettled
     // XrTime 換算（沒有＝nullptr，tracking 走 frameloop 模式）：Linux timespec、Windows QPC

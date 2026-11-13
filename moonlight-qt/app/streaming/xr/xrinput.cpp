@@ -352,6 +352,21 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         !mk("keyboard", "Virtual keyboard (toggle)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_KbToggleAction)) {
         return false;
     }
+    // §XR-PADMODE：手把模式的鍵。建不起來只是沒有手把模式
+    const bool padActions = static_cast<bool>(m_Sink.gamepad) &&
+        mk("pad_a", "Gamepad mode: A", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadA) &&
+        mk("pad_b", "Gamepad mode: B", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadB) &&
+        mk("pad_x", "Gamepad mode: X", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadX) &&
+        mk("pad_y", "Gamepad mode: Y", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadY) &&
+        mk("pad_up", "Gamepad mode: D-pad up", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadUp) &&
+        mk("pad_down", "Gamepad mode: D-pad down", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadDown) &&
+        mk("pad_left", "Gamepad mode: D-pad left", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadLeft) &&
+        mk("pad_right", "Gamepad mode: D-pad right", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadRight) &&
+        mk("pad_bumper", "Gamepad mode: LB / RB", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadBumper) &&
+        mk("pad_stick_click", "Gamepad mode: stick click", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadStickClick) &&
+        mk("pad_start", "Gamepad mode: Start (hold with Back: switch gamepad mode)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadStart) &&
+        mk("pad_back", "Gamepad mode: Back (hold with Start: switch gamepad mode)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_PadBack);
+    error->clear();  // mk 失敗會寫 error；手把模式是選用的
 
     if (enabledExts.contains(QStringLiteral("XR_EXT_eye_gaze_interaction"))) {
         XrActionCreateInfo aci = xrStruct<XrActionCreateInfo>(XR_TYPE_ACTION_CREATE_INFO);
@@ -401,9 +416,19 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
     };
     // 鍵盤開關鍵是選用綁定：同一 profile 的建議會整組被接受或拒絕，路徑不被 runtime 認得時
     // 去掉它重送，射線滑鼠的綁定不受影響（每次建議會取代同 profile 的前一次）
-    auto suggestWithKb = [&](const char* profile, std::vector<B> list, const char* kbPath) {
+    auto suggestWithKb = [&](const char* profile, std::vector<B> list, const char* kbPath, const std::vector<B>& pad = {}) {
         std::vector<B> withKb = list;
         withKb.push_back({m_KbToggleAction, kbPath});
+        // §XR-PADMODE：手把模式的綁定也是選用的，先試整組，不被接受就照原本的清單
+        if (padActions && !pad.empty()) {
+            std::vector<B> withPad = withKb;
+            withPad.insert(withPad.end(), pad.begin(), pad.end());
+            if (suggest(profile, withPad)) {
+                m_PadBound = true;
+                return;
+            }
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] %s: retrying without the gamepad mode bindings", profile);
+        }
         if (!suggest(profile, withKb)) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-XR-INPUT] %s: retrying without the keyboard toggle (%s)", profile, kbPath);
@@ -434,7 +459,14 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
         {m_Stick, "/user/hand/left/input/thumbstick"},
         {m_Stick, "/user/hand/right/input/thumbstick"},
     };
-    suggestWithKb("/interaction_profiles/oculus/touch_controller", touchLike, "/user/hand/left/input/menu/click");
+    suggestWithKb("/interaction_profiles/oculus/touch_controller", touchLike, "/user/hand/left/input/menu/click",
+                  {{m_PadA, "/user/hand/right/input/a/click"},
+                   {m_PadB, "/user/hand/right/input/b/click"},
+                   {m_PadX, "/user/hand/left/input/x/click"},
+                   {m_PadY, "/user/hand/left/input/y/click"},
+                   {m_PadStickClick, "/user/hand/left/input/thumbstick/click"},
+                   {m_PadStickClick, "/user/hand/right/input/thumbstick/click"},
+                   {m_PadBack, "/user/hand/left/input/menu/click"}});
     suggestWithKb("/interaction_profiles/valve/index_controller",
             {{m_Aim, "/user/hand/left/input/aim/pose"},
              {m_Aim, "/user/hand/right/input/aim/pose"},
@@ -471,7 +503,21 @@ bool XrInput::create(XrInstance instance, XrSession session, const QStringList& 
                  {m_ComboX, "/user/hand/right/input/x/click"},
                  {m_Stick, "/user/hand/left/input/thumbstick"},
                  {m_Stick, "/user/hand/right/input/thumbstick"}},
-                "/user/hand/left/input/view/click");
+                "/user/hand/left/input/view/click",
+                {{m_PadA, "/user/hand/right/input/a/click"},
+                 {m_PadB, "/user/hand/right/input/b/click"},
+                 {m_PadX, "/user/hand/right/input/x/click"},
+                 {m_PadY, "/user/hand/right/input/y/click"},
+                 {m_PadUp, "/user/hand/left/input/dpad_up/click"},
+                 {m_PadDown, "/user/hand/left/input/dpad_down/click"},
+                 {m_PadLeft, "/user/hand/left/input/dpad_left/click"},
+                 {m_PadRight, "/user/hand/left/input/dpad_right/click"},
+                 {m_PadBumper, "/user/hand/left/input/shoulder/click"},
+                 {m_PadBumper, "/user/hand/right/input/shoulder/click"},
+                 {m_PadStickClick, "/user/hand/left/input/thumbstick/click"},
+                 {m_PadStickClick, "/user/hand/right/input/thumbstick/click"},
+                 {m_PadStart, "/user/hand/right/input/menu/click"},
+                 {m_PadBack, "/user/hand/left/input/view/click"}});
     }
 
     if (m_EyeGazeAction != XR_NULL_HANDLE) {
@@ -542,7 +588,9 @@ void XrInput::destroy()
             s = XR_NULL_HANDLE;
         }
     }
-    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Primary, &m_ComboA, &m_ComboX, &m_Stick, &m_KbToggleAction}) {
+    for (XrAction* a : {&m_Aim, &m_Trigger, &m_Squeeze, &m_Secondary, &m_Primary, &m_ComboA, &m_ComboX, &m_Stick, &m_KbToggleAction,
+                        &m_PadA, &m_PadB, &m_PadX, &m_PadY, &m_PadUp, &m_PadDown, &m_PadLeft, &m_PadRight, &m_PadBumper,
+                        &m_PadStickClick, &m_PadStart, &m_PadBack}) {
         if (*a != XR_NULL_HANDLE) {
             xrDestroyAction(*a);
             *a = XR_NULL_HANDLE;
@@ -656,6 +704,12 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         if (m_WasFocused) {
             releaseAll("focus lost");
             releaseKeyboard("focus lost");
+            if (m_PadMode && m_Sink.gamepad && !(m_PadSent == XrPadState())) {
+                m_PadSent = XrPadState();  // §XR-PADMODE：失去焦點時把手把放開（模式本身不變）
+                m_Sink.gamepad(m_PadSent);
+            }
+            m_PadMenuHold = xrwheel::Hold();
+            m_PadWheelHold = xrwheel::Hold();
             m_WasFocused = false;
             // §REVIEW-1111（第二輪）：選單鍵的長按狀態一起清。原本失去焦點時按著的那一下，回來放開會被當成短按（開關鍵盤）
             for (int h = 0; h < 2; h++) {
@@ -733,8 +787,23 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         // （2026-11-02 使用者回報；180°／360° 時下面會提早 return，m_BackWas 也一直沒更新到）
         m_BackWas = true;
     }
-    if (!m_TestPointer && m_TestKbText.isEmpty() && m_KbToggleAction != XR_NULL_HANDLE) {
+    // §XR-PADMODE：2D 串流的 Xbox 手把模式。開著時不做射線滑鼠（下面整段跳過）
+    if (!playerMode && m_PadBound && !m_TestPointer && m_TestKbText.isEmpty() && updatePad(displayTime, local, nowNs)) {
         for (int h = 0; h < 2; h++) {
+            m_KbToggleWas[h] = false;  // 選單鍵在手把模式是 Back：回到滑鼠模式時不要把還按著的那一下當成短按
+            m_MenuDownNs[h] = 0;
+            m_MenuLongFired[h] = true;
+        }
+        m_Hit = false;
+        return;
+    }
+    if (!m_TestPointer && m_TestKbText.isEmpty() && m_KbToggleAction != XR_NULL_HANDLE) {
+        // §XR-PADMODE：另一支選單鍵也按著＝正在長按切換手把模式，這一下不算鍵盤開關也不算重新置中
+        const bool padCombo = m_PadBound && m_PadMenuHold.held();
+        for (int h = 0; h < 2; h++) {
+            if (padCombo) {
+                m_MenuLongFired[h] = true;
+            }
             XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
             gi.action = m_KbToggleAction;
             gi.subactionPath = m_Hands[h];
@@ -1083,6 +1152,131 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     else {
         m_ScrollAccum = 0.0f;
     }
+}
+
+bool XrInput::padBool(XrAction a, int hand)
+{
+    if (a == XR_NULL_HANDLE) {
+        return false;
+    }
+    XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
+    gi.action = a;
+    gi.subactionPath = m_Hands[hand];
+    XrActionStateBoolean bs = xrStruct<XrActionStateBoolean>(XR_TYPE_ACTION_STATE_BOOLEAN);
+    return XR_SUCCEEDED(xrGetActionStateBoolean(m_Session, &gi, &bs)) && bs.isActive && bs.currentState;
+}
+
+void XrInput::setPadMode(bool on, const char* why)
+{
+    if (on == m_PadMode) {
+        return;
+    }
+    m_PadMode = on;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-PADMODE] gamepad mode %s (%s)", on ? "on" : "off", why);
+    if (on) {
+        releaseAll("gamepad mode");
+        setKeyboardOpen(false, "gamepad mode");
+        m_Wheel = xrwheel::Wheel();
+    }
+    else if (m_Sink.gamepad) {
+        m_PadSent = XrPadState();
+        m_Sink.gamepad(m_PadSent);  // 全部放開
+    }
+    if (m_Sink.padMode) {
+        m_Sink.padMode(on);
+    }
+}
+
+// §XR-PADMODE：每格讀兩支控制器。回傳 true＝手把模式開著（呼叫端跳過射線滑鼠）。
+// 兩個長按（切換手把模式、切換方向盤）不論模式開關都偵測，和 VR 串流的操作一致。
+bool XrInput::updatePad(XrTime displayTime, XrSpace local, uint64_t nowNs)
+{
+    constexpr uint64_t kPadHoldNs = 2000000000ull;    // 兩支選單鍵：同 host 的 vr_padmode（2 秒）
+    constexpr uint64_t kWheelHoldNs = 1500000000ull;  // 兩支搖桿：同 VR 串流的方向盤快捷鍵
+    const bool start = padBool(m_PadStart, 1);
+    const bool back = padBool(m_PadBack, 0);
+    const bool clickL = padBool(m_PadStickClick, 0);
+    const bool clickR = padBool(m_PadStickClick, 1);
+    // 只有一顆選單鍵的控制器（Touch／Index）沒有這個長按，手把模式開不起來——目前只支援 Frame
+    if (m_PadMenuHold.step(start && back, nowNs, kPadHoldNs)) {
+        setPadMode(!m_PadMode, "both menu buttons held");
+    }
+    if (m_PadWheelHold.step(clickL && clickR, nowNs, kWheelHoldNs)) {
+        m_WheelOn = !m_WheelOn;
+        m_Wheel = xrwheel::Wheel();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-PADMODE] hotkey (both stick clicks): steering wheel %s",
+                    m_WheelOn ? "on" : "off");
+        if (m_Sink.wheelToggled) {
+            m_Sink.wheelToggled(m_WheelOn);
+        }
+    }
+    if (!m_PadMode) {
+        return false;
+    }
+
+    XrPadState s;
+    if (padBool(m_PadA, 1)) s.buttons |= 0x1000;
+    if (padBool(m_PadB, 1)) s.buttons |= 0x2000;
+    if (padBool(m_PadX, 0) || padBool(m_PadX, 1)) s.buttons |= 0x4000;
+    if (padBool(m_PadY, 0) || padBool(m_PadY, 1)) s.buttons |= 0x8000;
+    if (padBool(m_PadUp, 0)) s.buttons |= 0x0001;
+    if (padBool(m_PadDown, 0)) s.buttons |= 0x0002;
+    if (padBool(m_PadLeft, 0)) s.buttons |= 0x0004;
+    if (padBool(m_PadRight, 0)) s.buttons |= 0x0008;
+    if (padBool(m_PadBumper, 0)) s.buttons |= 0x0100;
+    if (padBool(m_PadBumper, 1)) s.buttons |= 0x0200;
+    if (!(clickL && clickR)) {  // 兩支同時按＝方向盤快捷鍵，那段期間不送 LS／RS
+        if (clickL) s.buttons |= 0x0040;
+        if (clickR) s.buttons |= 0x0080;
+    }
+    if (!(start && back)) {  // 兩支同時按＝切換手把模式，不送 Start／Back
+        if (start) s.buttons |= 0x0010;
+        if (back) s.buttons |= 0x0020;
+    }
+    for (int h = 0; h < 2; h++) {
+        XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
+        gi.subactionPath = m_Hands[h];
+        gi.action = m_Trigger;
+        XrActionStateFloat tf = xrStruct<XrActionStateFloat>(XR_TYPE_ACTION_STATE_FLOAT);
+        const float trig = XR_SUCCEEDED(xrGetActionStateFloat(m_Session, &gi, &tf)) && tf.isActive ? std::clamp(tf.currentState, 0.0f, 1.0f) : 0.0f;
+        gi.action = m_Stick;
+        XrActionStateVector2f sv = xrStruct<XrActionStateVector2f>(XR_TYPE_ACTION_STATE_VECTOR2F);
+        float sx = 0.0f, sy = 0.0f;
+        if (XR_SUCCEEDED(xrGetActionStateVector2f(m_Session, &gi, &sv)) && sv.isActive) {
+            sx = std::clamp(sv.currentState.x, -1.0f, 1.0f);
+            sy = std::clamp(sv.currentState.y, -1.0f, 1.0f);
+        }
+        const uint8_t t8 = static_cast<uint8_t>(std::lround(trig * 255.0f));
+        const int16_t x16 = static_cast<int16_t>(std::lround(sx * 32767.0f));
+        const int16_t y16 = static_cast<int16_t>(std::lround(sy * 32767.0f));
+        if (h == 0) {
+            s.lt = t8;
+            s.lx = x16;
+            s.ly = y16;
+        }
+        else {
+            s.rt = t8;
+            s.rx = x16;
+            s.ry = y16;
+        }
+    }
+    // 方向盤：兩手的位置（aim pose 的原點）算出轉角，取代左搖桿 X；算不出來就維持搖桿
+    if (m_WheelOn) {
+        XrRay::Vec3 ol = {}, orr = {}, dl = {}, dr = {};
+        const bool both = locateAim(0, displayTime, local, &ol, &dl) && locateAim(1, displayTime, local, &orr, &dr);
+        const float l[3] = {ol.x, ol.y, ol.z};
+        const float r[3] = {orr.x, orr.y, orr.z};
+        float ang = 0.0f;
+        if (m_Wheel.step(l, r, both, &ang)) {
+            s.lx = xrwheel::toStick(ang, m_WheelRangeDeg);
+        }
+    }
+    if (!(s == m_PadSent)) {
+        m_PadSent = s;
+        m_StatPadSends++;
+        m_Sink.gamepad(s);
+    }
+    return true;
 }
 
 void XrInput::setKeyboardOpen(bool open, const char* why)

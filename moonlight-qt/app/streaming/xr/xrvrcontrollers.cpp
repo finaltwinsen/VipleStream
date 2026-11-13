@@ -42,6 +42,7 @@ constexpr float kClickOn = 0.70f;     // 類比值視為「按下」的門檻（
 constexpr float kTouchOn = 0.05f;
 constexpr uint64_t kComboNs = 1000000000ull;  // menu＋trigger 1 s → SYSTEM
 constexpr uint64_t kWheelComboNs = 1500000000ull;  // §VR-WHEEL：兩支搖桿同時按住 1.5 s → 切換方向盤模式
+constexpr uint64_t kKbComboNs = 1000000000ull;     // §VR-KBD：同一手 menu＋grip 按住 1 s → 開關虛擬鍵盤
 
 uint16_t unorm16(float v)
 {
@@ -76,6 +77,20 @@ void XrVrControllers::setWheel(uint8_t wire, std::function<void(bool on)> toggle
 {
     m_Wheel.store(wire, std::memory_order_relaxed);
     m_WheelToggled = std::move(toggled);
+}
+
+void XrVrControllers::setKeyboard(std::function<void(int vk, bool down, uint8_t mods)> key, const QString& testText)
+{
+    m_KbKey = std::move(key);
+    m_KbTestText = testText;
+    m_KbTestKeys.clear();
+    for (const QChar c : testText) {
+        int idx = -1;
+        bool needShift = false;
+        if (m_Kb.keyForChar(c, &idx, &needShift) && !needShift) {
+            m_KbTestKeys.push_back(idx);
+        }
+    }
 }
 
 bool XrVrControllers::create(XrInstance instance, XrSession session, const QStringList& enabledExts, QString* error)
@@ -128,7 +143,8 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
         !mk("system", "System", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_System) ||
         !mk("thumbrest_touch", "Thumbrest touch", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_ThumbrestTouch) ||
         !mk("haptic", "Haptics", XR_ACTION_TYPE_VIBRATION_OUTPUT, &m_Haptic) ||
-        !mk("combo_x", "X (with A, trigger and grip: end the stream)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_ComboX)) {
+        !mk("combo_x", "X (with A, trigger and grip: end the stream)", XR_ACTION_TYPE_BOOLEAN_INPUT, &m_ComboX) ||
+        !mk("aim_pose", "Pointer (virtual keyboard)", XR_ACTION_TYPE_POSE_INPUT, &m_AimPose)) {
         return false;
     }
 
@@ -187,6 +203,10 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
                     profile);
         suggestOnce(profile, core, false);
     };
+    // §VR-KBD：aim pose 只放在完整清單（被拒就退回核心清單＝沒有鍵盤的射線，其他按鍵不受影響）
+    const std::vector<B> aim = {
+        {m_AimPose, "/user/hand/left/input/aim/pose"}, {m_AimPose, "/user/hand/right/input/aim/pose"},
+    };
     // ── khr/simple_controller：select 當 trigger，menu，grip pose，haptic ──
     {
         std::vector<B> v = {
@@ -196,7 +216,9 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
             {m_Menu, "/user/hand/left/input/menu/click"},     {m_Menu, "/user/hand/right/input/menu/click"},
             {m_Haptic, "/user/hand/left/output/haptic"},      {m_Haptic, "/user/hand/right/output/haptic"},
         };
-        suggest("/interaction_profiles/khr/simple_controller", v, v);
+        std::vector<B> full = v;
+        full.insert(full.end(), aim.begin(), aim.end());
+        suggest("/interaction_profiles/khr/simple_controller", full, v);
     }
     // ── oculus/touch_controller：左 x/y/menu、右 a/b/system；沒有 trigger/click（由 value 門檻推）──
     {
@@ -221,6 +243,7 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
             {m_ThumbrestTouch, "/user/hand/left/input/thumbrest/touch"}, {m_ThumbrestTouch, "/user/hand/right/input/thumbrest/touch"},
             {m_System, "/user/hand/right/input/system/click"},
         });
+        full.insert(full.end(), aim.begin(), aim.end());
         suggest("/interaction_profiles/oculus/touch_controller", full, core);
     }
     // ── valve/index_controller：兩手 a/b、system、trigger click/value/touch、squeeze value ──
@@ -244,6 +267,7 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
             {m_BtnHiTouch, "/user/hand/left/input/b/touch"},   {m_BtnHiTouch, "/user/hand/right/input/b/touch"},
             {m_System, "/user/hand/left/input/system/click"},  {m_System, "/user/hand/right/input/system/click"},
         });
+        full.insert(full.end(), aim.begin(), aim.end());
         suggest("/interaction_profiles/valve/index_controller", full, core);
     }
     // ── valve/frame_controller_valve（Valve OpenXR Unity 套件文件，見 xrinput.cpp）──
@@ -281,7 +305,11 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
         full.insert(full.end(), extra.begin(), extra.end());
         std::vector<B> coreExtra = core;
         coreExtra.insert(coreExtra.end(), extra.begin(), extra.end());
-        if (!suggestOnce("/interaction_profiles/valve/frame_controller_valve", full, true)) {
+        // §VR-KBD：再多一層——含 aim pose 的清單被拒時，退回這次改動之前的那一組（full）
+        std::vector<B> fullAim = full;
+        fullAim.insert(fullAim.end(), aim.begin(), aim.end());
+        if (!suggestOnce("/interaction_profiles/valve/frame_controller_valve", fullAim, true) &&
+            !suggestOnce("/interaction_profiles/valve/frame_controller_valve", full, true)) {
             suggest("/interaction_profiles/valve/frame_controller_valve", coreExtra, core);
         }
     }
@@ -327,6 +355,18 @@ bool XrVrControllers::create(XrInstance instance, XrSession session, const QStri
                         qUtf8Printable(xrStr(instance, r)));
         }
     }
+    for (int h = 0; h < 2; h++) {
+        XrActionSpaceCreateInfo sci = xrStruct<XrActionSpaceCreateInfo>(XR_TYPE_ACTION_SPACE_CREATE_INFO);
+        sci.action = m_AimPose;
+        sci.subactionPath = m_Hands[h];
+        sci.poseInActionSpace.orientation.w = 1.0f;
+        r = xrCreateActionSpace(session, &sci, &m_AimSpace[h]);
+        if (XR_FAILED(r)) {
+            m_AimSpace[h] = XR_NULL_HANDLE;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] aim space (%s): %s", handName(h),
+                        qUtf8Printable(xrStr(instance, r)));
+        }
+    }
     if (m_EyeGazeAction != XR_NULL_HANDLE) {
         XrActionSpaceCreateInfo sci = xrStruct<XrActionSpaceCreateInfo>(XR_TYPE_ACTION_SPACE_CREATE_INFO);
         sci.action = m_EyeGazeAction;
@@ -366,9 +406,15 @@ void XrVrControllers::destroy()
             s = XR_NULL_HANDLE;
         }
     }
+    for (XrSpace& s : m_AimSpace) {
+        if (s != XR_NULL_HANDLE) {
+            xrDestroySpace(s);
+            s = XR_NULL_HANDLE;
+        }
+    }
     for (XrAction* a : {&m_GripPose, &m_TriggerValue, &m_TriggerClick, &m_TriggerTouch, &m_SqueezeValue,
                         &m_SqueezeClick, &m_Stick, &m_StickClick, &m_StickTouch, &m_BtnLo, &m_BtnLoTouch,
-                        &m_BtnHi, &m_BtnHiTouch, &m_BtnC, &m_BtnD, &m_Bumper, &m_Menu, &m_System, &m_ThumbrestTouch, &m_Haptic, &m_ComboX}) {
+                        &m_BtnHi, &m_BtnHiTouch, &m_BtnC, &m_BtnD, &m_Bumper, &m_Menu, &m_System, &m_ThumbrestTouch, &m_Haptic, &m_ComboX, &m_AimPose}) {
         if (*a != XR_NULL_HANDLE) {
             xrDestroyAction(*a);
             *a = XR_NULL_HANDLE;
@@ -525,6 +571,40 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
         m_ExitComboWas = false;
     }
 
+    // §VR-KBD：開關（同一手 menu＋grip 按住 1 s；扳機也按著時不算，那是別的組合）與這一格真實的扳機
+    for (int n = m_KbToggleReq.exchange(0, std::memory_order_acq_rel); n > 0; n--) {
+        setKeyboardOpen(!m_KbOpen, "request");
+    }
+    bool kbAnyHeld = false;
+    for (int h = 0; h < 2; h++) {
+        const bool live = focused && !m_TestInput && m_KbKey;
+        const bool trig = live && (floatState(m_TriggerValue, h) >= kClickOn || boolState(m_TriggerClick, h));
+        const bool grip = live && (floatState(m_SqueezeValue, h) >= kClickOn || boolState(m_SqueezeClick, h));
+        const bool menu = live && boolState(m_Menu, h);
+        m_KbRawTrigger[h] = trig;
+        kbAnyHeld = kbAnyHeld || trig || grip || menu;
+        if (!(menu && grip && !trig)) {
+            m_KbComboStartNs[h] = 0;
+            m_KbComboFired[h] = false;
+        }
+        else {
+            if (m_KbComboStartNs[h] == 0) {
+                m_KbComboStartNs[h] = nowNs;
+            }
+            if (!m_KbComboFired[h] && nowNs - m_KbComboStartNs[h] >= kKbComboNs) {
+                m_KbComboFired[h] = true;
+                setKeyboardOpen(!m_KbOpen, "menu+grip");
+            }
+        }
+    }
+    if (m_KbMaskUntilRelease && !kbAnyHeld) {
+        m_KbMaskUntilRelease = false;
+    }
+    if (m_KbOpen && !focused && m_KbTestState != 1) {
+        kbRelease();  // 失去焦點：按著的鍵放開（鍵盤留著）。dev 測試不看焦點（無人場次多半沒有焦點）
+    }
+    const bool kbMask = m_KbOpen || m_KbMaskUntilRelease;
+
     for (int h = 0; h < 2; h++) {
         Hand& hd = next[h];
         hd.poseActive = poseIsActive(h);
@@ -582,8 +662,8 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
         touches |= buttons & (VIPLE_VR_BTN_A | VIPLE_VR_BTN_B | VIPLE_VR_BTN_C | VIPLE_VR_BTN_D | VIPLE_VR_BTN_BUMPER |
                               VIPLE_VR_BTN_THUMBSTICK | VIPLE_VR_BTN_TRIGGER);
 
-        if (!focused && !m_TestInput) {
-            // 沒有輸入焦點：全部放開（pressCtr 不動）
+        if ((!focused && !m_TestInput) || kbMask) {
+            // 沒有輸入焦點、或 §VR-KBD 鍵盤開著：全部放開（pressCtr 不動）
             buttons = touches = 0;
             trigger = grip = sx = sy = 0.0f;
         }
@@ -643,6 +723,290 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
     std::lock_guard<std::mutex> lk(m_Mutex);
     m_Hand[0] = next[0];
     m_Hand[1] = next[1];
+}
+
+// ── §VR-KBD ──
+void XrVrControllers::setKeyboardOpen(bool open, const char* why)
+{
+    if (open == m_KbOpen || !m_KbKey) {
+        return;
+    }
+    if (!open) {
+        kbRelease();
+        m_KbSticky = 0;
+        m_KbHover = -1;
+        m_KbHit = false;
+        m_KbDragHand = -1;
+        m_KbBarHover = false;
+        m_KbMoveReq = false;
+    }
+    m_KbOpen = open;
+    m_KbMaskUntilRelease = true;  // 開關那一下按著的鍵（menu、grip、或按關閉鍵的扳機）不送給遊戲
+    m_KbTrigPrev[0] = m_KbRawTrigger[0];
+    m_KbTrigPrev[1] = m_KbRawTrigger[1];
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] keyboard %s (%s)", open ? "opened" : "closed", why);
+}
+
+void XrVrControllers::kbSend(int vk, bool down, uint8_t mods)
+{
+    if (!m_KbTestText.isEmpty()) {
+        // dev 才逐鍵記錄（一般模式只記數量，避免 log 變成 keylogger）
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] dev key vk=0x%02X %s mods=0x%X", vk, down ? "down" : "up",
+                    static_cast<unsigned>(mods));
+    }
+    if (m_KbKey) {
+        m_KbKey(vk, down, mods);
+    }
+}
+
+// 規則同 XrInput::kbPress／kbRelease（XR 桌面的鍵盤）
+void XrVrControllers::kbPress(int idx)
+{
+    using K = XrKeyboard::Kind;
+    const XrKeyboard::Key& k = m_Kb.key(idx);
+    switch (k.kind) {
+    case K::Shift:
+    case K::Ctrl:
+    case K::Alt:
+    case K::Win:
+        m_KbSticky ^= XrKeyboard::modBit(k.kind);  // 黏滯：按一下保持，下一個一般鍵放開後自動放開
+        break;
+    case K::Close:
+        setKeyboardOpen(false, "close key");
+        break;
+    case K::Ime:
+        kbSend(k.vk, true, MODIFIER_SHIFT);  // 中/英：Shift 單擊（見 xrkeyboard.h）
+        kbSend(k.vk, false, 0);
+        m_StatKbKeys++;
+        break;
+    case K::Normal: {
+        const uint8_t mods = m_KbSticky;
+        uint8_t cur = 0;
+        for (K mk : {K::Ctrl, K::Alt, K::Shift, K::Win}) {
+            if (mods & XrKeyboard::modBit(mk)) {
+                cur |= XrKeyboard::modBit(mk);
+                kbSend(XrKeyboard::modVk(mk), true, cur);
+            }
+        }
+        kbSend(k.vk, true, mods);
+        m_KbActiveKey = idx;
+        m_KbActiveMods = mods;
+        m_StatKbKeys++;
+        break;
+    }
+    }
+}
+
+void XrVrControllers::kbRelease()
+{
+    using K = XrKeyboard::Kind;
+    m_KbPressHand = -1;
+    if (m_KbActiveKey < 0) {
+        return;
+    }
+    uint8_t cur = m_KbActiveMods;
+    kbSend(m_Kb.key(m_KbActiveKey).vk, false, cur);
+    for (K mk : {K::Win, K::Shift, K::Alt, K::Ctrl}) {
+        if (cur & XrKeyboard::modBit(mk)) {
+            cur &= static_cast<uint8_t>(~XrKeyboard::modBit(mk));
+            kbSend(XrKeyboard::modVk(mk), false, cur);
+        }
+    }
+    m_KbActiveKey = -1;
+    m_KbActiveMods = 0;
+    m_KbSticky = 0;  // 黏滯修飾鍵只作用一個鍵
+}
+
+bool XrVrControllers::keyboardPointer(XrPosef* pose) const
+{
+    if (!m_KbOpen || !m_KbHit) {
+        return false;
+    }
+    *pose = m_KbHitPose;
+    return true;
+}
+
+void XrVrControllers::updateKeyboard(XrTime t, XrSpace space, bool shown, const XrPosef& pose, float w, float h, const XrPosef& bar,
+                                     float barW, float barH)
+{
+    // dev --xr-test-keyboard：20 s 後打開，鍵盤畫出來 1 s 後每 0.4 s 按一個鍵（前半按住），按完 1 s 後關
+    if (!m_KbTestKeys.empty() && m_KbTestState < 2) {
+        const uint64_t nowNs = steadyNowNs();
+        if (m_KbTestState == 0) {
+            if (nowNs - m_CreatedNs > 20000000000ull) {
+                m_KbTestState = 1;
+                m_KbTestShownNs = 0;
+                setKeyboardOpen(true, "dev test");
+            }
+            return;
+        }
+        if (!shown) {
+            return;
+        }
+        if (m_KbTestShownNs == 0) {
+            m_KbTestShownNs = nowNs;
+        }
+        const int64_t ms = static_cast<int64_t>((nowNs - m_KbTestShownNs) / 1000000ull) - 1000;
+        const int step = ms < 0 ? -1 : static_cast<int>(ms / 400);
+        if (step >= static_cast<int>(m_KbTestKeys.size())) {
+            kbRelease();
+            if (!m_KbTestMoved && ms > static_cast<int64_t>(m_KbTestKeys.size()) * 400 + 300) {
+                // §VR-KBD-DRAG 的自測：把鍵盤往右 10 cm、往上 5 cm 移一次（走和拖動相同的路徑）
+                m_KbTestMoved = true;
+                const XrRay::Vec3 d = XrRay::rotate(pose.orientation, {0.10f, 0.05f, 0.0f});
+                m_KbMovePos = {pose.position.x + d.x, pose.position.y + d.y, pose.position.z + d.z};
+                m_KbMoveReq = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] dev move: keyboard centre -> (%.2f, %.2f, %.2f)",
+                            static_cast<double>(m_KbMovePos.x), static_cast<double>(m_KbMovePos.y), static_cast<double>(m_KbMovePos.z));
+            }
+            if (ms > static_cast<int64_t>(m_KbTestKeys.size()) * 400 + 1000) {
+                m_KbTestState = 2;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] dev test done: %u keys, keyboard at (%.2f, %.2f, %.2f)", m_StatKbKeys,
+                            static_cast<double>(pose.position.x), static_cast<double>(pose.position.y), static_cast<double>(pose.position.z));
+                setKeyboardOpen(false, "dev test");
+            }
+            return;
+        }
+        if (step < 0) {
+            return;
+        }
+        const int idx = m_KbTestKeys[static_cast<size_t>(step)];
+        const bool down = (ms % 400) < 200;
+        float cu = 0.0f, cv = 0.0f, du = 0.0f, dv = 0.0f;
+        m_Kb.keyUv(idx, &cu, &cv, &du, &dv);
+        const XrRay::Vec3 c = XrRay::quadPoint(pose, w, h, cu, cv);
+        const XrRay::Vec3 nrm = XrRay::rotate(pose.orientation, {0.0f, 0.0f, 0.004f});
+        m_KbHover = idx;
+        m_KbHit = true;
+        m_KbHitPose.orientation = pose.orientation;
+        m_KbHitPose.position = {c.x + nrm.x, c.y + nrm.y, c.z + nrm.z};
+        if (down && m_KbActiveKey != idx) {
+            kbRelease();
+            kbPress(idx);
+        }
+        else if (!down) {
+            kbRelease();
+        }
+        return;
+    }
+
+    if (!m_KbOpen || !shown || !m_Focused) {
+        if (m_KbOpen) {
+            kbRelease();
+        }
+        m_KbHover = -1;
+        m_KbHit = false;
+        m_KbDragHand = -1;
+        m_KbBarHover = false;
+        m_KbTrigPrev[0] = m_KbRawTrigger[0];
+        m_KbTrigPrev[1] = m_KbRawTrigger[1];
+        return;
+    }
+    // 兩手各自求交
+    int key[2] = {-1, -1};
+    bool hit[2] = {false, false};
+    bool barHit[2] = {false, false};
+    bool aimOk[2] = {false, false};
+    XrPosef aim[2] = {};
+    XrRay::Vec3 point[2] = {};
+    for (int hnd = 0; hnd < 2; hnd++) {
+        if (m_AimSpace[hnd] == XR_NULL_HANDLE) {
+            continue;
+        }
+        XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
+        const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+        if (XR_FAILED(xrLocateSpace(m_AimSpace[hnd], space, t, &loc)) || (loc.locationFlags & need) != need) {
+            continue;
+        }
+        const XrRay::Vec3 origin = {loc.pose.position.x, loc.pose.position.y, loc.pose.position.z};
+        const XrRay::Vec3 dir = XrRay::rotate(loc.pose.orientation, {0.0f, 0.0f, -1.0f});
+        aimOk[hnd] = true;
+        aim[hnd] = loc.pose;
+        float u = 0.0f, v = 0.0f, dist = 0.0f;
+        if (XrRay::intersectQuad(pose, w, h, origin, dir, &u, &v, &dist)) {
+            hit[hnd] = true;
+            key[hnd] = m_Kb.keyAt(u, v);
+            point[hnd] = XrRay::quadPoint(pose, w, h, u, v);
+        }
+        else if (barW > 0.0f && XrRay::intersectQuad(bar, barW, barH, origin, dir, &u, &v, &dist)) {
+            barHit[hnd] = true;
+            point[hnd] = XrRay::quadPoint(bar, barW, barH, u, v);
+        }
+    }
+    // §VR-KBD-DRAG：抓著白條時鍵盤像黏在那一手的射線上（抓住那一刻的相對位置不變），放開扳機就停在那裡
+    if (m_KbDragHand >= 0) {
+        const int d = m_KbDragHand;
+        const bool held = m_KbRawTrigger[d] && !m_KbMaskUntilRelease;
+        if (held && aimOk[d]) {
+            const XrRay::Vec3 off = XrRay::rotate(aim[d].orientation, {m_KbDragRel.x, m_KbDragRel.y, m_KbDragRel.z});
+            m_KbMovePos = {aim[d].position.x + off.x, aim[d].position.y + off.y, aim[d].position.z + off.z};
+            m_KbMoveReq = true;
+        }
+        if (!held) {
+            m_KbDragHand = -1;
+            m_StatKbDrags++;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] keyboard moved (%s hand), now at (%.2f, %.2f, %.2f)",
+                        d == 0 ? "left" : "right", static_cast<double>(pose.position.x), static_cast<double>(pose.position.y),
+                        static_cast<double>(pose.position.z));
+        }
+        m_KbBarHover = true;
+        m_KbHover = -1;
+        m_KbHit = false;
+        m_KbTrigPrev[0] = m_KbRawTrigger[0] && !m_KbMaskUntilRelease;
+        m_KbTrigPrev[1] = m_KbRawTrigger[1] && !m_KbMaskUntilRelease;
+        return;
+    }
+    // 扳機邊緣：按下的那一手變成目前的手；指著鍵、而且沒有別的鍵按著時按下那個鍵。放開看按下的那一手
+    for (int hnd = 0; hnd < 2; hnd++) {
+        const bool now = m_KbRawTrigger[hnd] && !m_KbMaskUntilRelease;
+        if (now && !m_KbTrigPrev[hnd]) {
+            m_KbHand = hnd;
+            if (hit[hnd] && key[hnd] >= 0 && m_KbPressHand < 0) {
+                m_KbPressHand = hnd;
+                kbPress(key[hnd]);
+                if (!m_KbOpen) {
+                    return;  // 按到關閉鍵
+                }
+            }
+            else if (barHit[hnd] && m_KbPressHand < 0) {
+                // 鍵盤中心換到這一手的 aim 座標（共軛四元數＝反向旋轉）
+                const XrQuaternionf inv = {-aim[hnd].orientation.x, -aim[hnd].orientation.y, -aim[hnd].orientation.z, aim[hnd].orientation.w};
+                const XrRay::Vec3 rel = XrRay::rotate(inv, {pose.position.x - aim[hnd].position.x, pose.position.y - aim[hnd].position.y,
+                                                             pose.position.z - aim[hnd].position.z});
+                m_KbDragRel = {rel.x, rel.y, rel.z};
+                m_KbDragHand = hnd;
+                m_KbBarHover = true;
+                m_KbHover = -1;
+                m_KbTrigPrev[hnd] = true;
+                return;
+            }
+        }
+        else if (!now && m_KbTrigPrev[hnd] && m_KbPressHand == hnd) {
+            kbRelease();
+        }
+        m_KbTrigPrev[hnd] = now;
+    }
+    // 沒有按著鍵時，目前的手沒指著鍵盤而另一手有，就換成另一手
+    if (m_KbPressHand < 0 && !hit[m_KbHand] && hit[1 - m_KbHand]) {
+        m_KbHand = 1 - m_KbHand;
+    }
+    if (m_KbPressHand < 0 && !hit[m_KbHand] && !barHit[m_KbHand] && barHit[1 - m_KbHand]) {
+        m_KbHand = 1 - m_KbHand;
+    }
+    const int hnd = m_KbPressHand >= 0 ? m_KbPressHand : m_KbHand;
+    m_KbBarHover = m_KbPressHand < 0 && barHit[hnd];
+    m_KbHit = hit[hnd] || m_KbBarHover;
+    m_KbHover = hit[hnd] ? key[hnd] : -1;
+    if (m_KbBarHover) {
+        const XrRay::Vec3 nrm = XrRay::rotate(bar.orientation, {0.0f, 0.0f, 0.004f});
+        m_KbHitPose.orientation = bar.orientation;
+        m_KbHitPose.position = {point[hnd].x + nrm.x, point[hnd].y + nrm.y, point[hnd].z + nrm.z};
+    }
+    if (hit[hnd]) {
+        const XrRay::Vec3 nrm = XrRay::rotate(pose.orientation, {0.0f, 0.0f, 0.004f});
+        m_KbHitPose.orientation = pose.orientation;
+        m_KbHitPose.position = {point[hnd].x + nrm.x, point[hnd].y + nrm.y, point[hnd].z + nrm.z};
+    }
 }
 
 void XrVrControllers::fill(_VIPLE_VR_TRACKING* sample, XrSpace trackSpace, XrTime xrTime)
@@ -804,7 +1168,12 @@ QString XrVrControllers::takeStatsLine()
             .arg(static_cast<double>(v.linMax), 0, 'f', 2)
             .arg(static_cast<double>(v.angMax), 0, 'f', 2);
     };
-    const QString velLine = QStringLiteral(" | vel L %1 | vel R %2").arg(velText(vel[0]), velText(vel[1]));
+    QString velLine = QStringLiteral(" | vel L %1 | vel R %2").arg(velText(vel[0]), velText(vel[1]));
+    if (m_KbOpen || m_StatKbKeys != 0) {
+        // §VR-KBD：只記數量，不記按了哪些鍵
+        velLine += QStringLiteral(" | kbd %1 keys=%2 moves=%3").arg(m_KbOpen ? QStringLiteral("open") : QStringLiteral("closed")).arg(m_StatKbKeys).arg(m_StatKbDrags);
+        m_StatKbKeys = 0;
+    }
     return QStringLiteral("L active=%1 edges=%2 pressCtr=0x%3 | R active=%4 edges=%5 pressCtr=0x%6 | focused=%7 "
                           "systemCombos=%8 focusLoss=%9 | haptic applied=%10 failed=%11 dropped=%12%13%14")
         .arg(snap[0].poseActive && snap[0].poseValid ? 1 : 0)

@@ -149,6 +149,8 @@ VipleStream opens in its own VR interface (laser pointer: trigger = click, grip 
 
 **Steering wheel (2.0.75+):** in Xbox controller mode you can steer by turning the two controllers like a wheel; the angle replaces the left stick's left/right. Turn it on in the settings, or press and hold both thumbsticks for 1.5 seconds during a stream, and pick the steering range (180° to 900°).
 
+**Virtual keyboard and flat-screen streams (2.0.175+):** in a VR stream, hold **menu + grip on one hand for 1 second** to open a keyboard in front of you; point and pull the trigger to type on the host, and drag the white bar under it to move it. While it is open, controller buttons are not sent to the game. In a flat-screen stream on the headset the same two gestures as in VR work: both menu buttons for 2 seconds turns the controllers into an Xbox controller instead of a laser mouse, both thumbsticks for 1.5 seconds switches the steering wheel. Some racing games need their own input setting changed first (Assetto Corsa Competizione: Options → Controls → Driving control → gamepad). The **?** button in the toolbar lists every shortcut.
+
 **VR settings (2.0.122):**
 - **Sharper where you look (foveated streaming)** — Off / Small / Medium / Large. Each eye is sent as a reduced picture of the whole view plus a full-detail picture that follows your gaze (it stays straight ahead without eye tracking). Small is the default and draws the least headset power; a larger size keeps more detail away from where you look, at the cost of bandwidth, power and a little delay. Needs a 2.0.122 host.
 - **Frame rate** — Automatic (half rate while the network is unstable, back to full by itself), Full, Half, or Half with synthesized in-between frames.
@@ -221,6 +223,7 @@ More: [`docs/setup_guide.md`](docs/setup_guide.md) (configuration and troublesho
 
 | Version | Highlights |
 |---|---|
+| **2.0.175** | Virtual keyboard inside VR streams (draggable); Xbox controller and steering wheel modes for flat-screen streams on the Steam Frame; the slight picture shift every second or two in VR is gone; fewer bits spent on the periphery (32 Mbps per link in our table tennis test, headset decode 3.2 → 2.0 ms); shortcut list in the toolbar; a full code review worked through, with unpaired `/serverinfo` reduced to pairing fields, Steam account switching limited to the session owner, video sharing limited to one folder by default and updates verified by sha256; QUIC stalls on large frames fixed. |
 | **2.0.122** | Steam Frame foveation rebuilt as two pictures per eye (a reduced full view plus a full-detail picture that follows the gaze) with an Off / Small / Medium / Large setting, taking headset power from about 13 W to under 10 W in our test; automatic half rate when the network is unstable; "Test network" in the headset settings; background Wi-Fi scans blocked while streaming; steering-wheel emulation; headset microphone; automatic updates on every platform; 2D bitrate fixes for congestion and a relative mouse that survives packet loss. |
 | **2.0.63** | Automatic bitrate that adapts to the network (delay trend, loss type, QP-based cap); Tailscale relay-to-direct recovery during a stream; headset buffer fixed and switching between 1 and 2 frames automatically; a large batch of review fixes; Android minimum is now Android 9; Linux .deb depends on Ayatana AppIndicator. |
 | **2.0.31** | Eye-tracked foveated encoding on the Steam Frame; faster pacing lock at session start; worn-tested VR settings become the defaults; links added mid-stream join multi-link; redundant haptics. |
@@ -395,6 +398,8 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 
 **方向盤（2.0.75 起）：** Xbox 手把模式下，可以把兩支手把像握方向盤一樣轉動來轉向，角度取代左搖桿的左右。在設定頁打開，或串流中同時按住兩支搖桿 1.5 秒切換；轉向角度可選（180°～900°）。
 
+**虛擬鍵盤與 2D 串流（2.0.175 起）：** VR 串流中**同一手的選單鍵＋握把按住 1 秒**，面前會出現鍵盤；指著鍵扣扳機就是在主機上打字，拖鍵盤下方的白條可以移動它。鍵盤開著時控制器的按鍵不會送給遊戲。頭盔上的 2D 串流用和 VR 相同的兩個操作：兩支選單鍵 2 秒把控制器從雷射滑鼠變成 Xbox 手把，兩支搖桿 1.5 秒切換方向盤。有些賽車遊戲要先改遊戲自己的輸入設定（Assetto Corsa Competizione：選項 → 控制 → DRIVING CONTROL → 手柄）。工具列的 **?** 鍵會列出所有快捷鍵。
+
 **VR 設定（2.0.122）：**
 - **視線所在更清晰（注視點串流）**——關閉／小／中／大。每隻眼睛送兩張畫面：整個視野縮小的一張，加上跟著視線走、保留完整細節的一張（沒有眼動追蹤時固定在正前方）。預設「小」，頭盔最省電；選大一點，視線以外的地方也比較清楚，代價是流量、耗電和一點延遲。主機要 2.0.122。
 - **幀率**——自動（網路不穩時降到半速，穩定後自己回來）、全速、半速、半速加補幀。
@@ -467,6 +472,7 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 
 | 版本 | 重點 |
 |---|---|
+| **2.0.175** | VR 串流裡的虛擬鍵盤（可拖動）；Steam Frame 2D 串流的 Xbox 手把與方向盤模式；VR 畫面每一兩秒輕微挪動的問題消失；周邊少花位元（桌球實測每條連線 32 Mbps、頭盔解碼 3.2 → 2.0 ms）；工具列的快捷鍵列表；整份程式碼審查逐項處理，未配對的 `/serverinfo` 只回配對欄位、Steam 帳號切換限 session 擁有者、影片分享預設只開一個資料夾、更新核對 sha256；QUIC 大畫面停頓已修。 |
 | **2.0.122** | Steam Frame 注視點改成每眼兩張畫面（整個視野縮小的一張＋跟著視線、保留完整細節的一張），設定頁可選關閉／小／中／大，實測頭盔耗電從約 13 W 降到 10 W 以下；網路不穩時自動半速；頭盔設定頁「測試網路」；串流時擋掉 Wi-Fi 背景掃描；方向盤模擬；頭盔麥克風；各平台自動更新；2D 塞車時的碼率修正、相對滑鼠不怕掉包。 |
 | **2.0.63** | 碼率依網路自動調整（延遲趨勢、丟包類型、以 QP 決定上限）；串流中 Tailscale 從中繼自動恢復直連；頭盔緩衝修好並自動在 1／2 格之間切換；大批程式碼審查修正；Android 最低改為 Android 9；Linux .deb 改依賴 Ayatana AppIndicator。 |
 | **2.0.31** | Steam Frame 眼動注視點編碼；開場更快鎖定節拍；配戴驗過的 VR 設定改為預設；串流中新增的連線自動加入多連線；震動冗餘發送。 |

@@ -185,12 +185,35 @@ Item {
             // in the hintText control itself to synchronize
             // with Session.exec() which requires no concurrent
             // gamepad usage.
-            hintText.text = qsTr("Tip:") + " " + qsTr("Press %1 to disconnect your session").arg(SdlGamepadKeyNavigation.getConnectedGamepads() > 0 ?
+            // §TIPS（2026-11-12）：原本只有「怎麼結束串流」一句。改成每次轉場從一份清單隨機挑一條，
+            // 清單依這台裝置有什麼（頭盔控制器／手把／鍵盤）組出來；結束串流那一條出現的機會加倍。
+            var quitTip = qsTr("Press %1 to disconnect your session").arg(SdlGamepadKeyNavigation.getConnectedGamepads() > 0 ?
                                                   qsTr("Start+Select+L1+R1") : qsTr("Ctrl+Alt+Shift+Q"))
-            // §VR-EXIT-COMBO：頭盔上（XR 桌面）也能用 VR 控制器結束
+            var tips = [quitTip, quitTip]
             if (VrLauncher.available) {
-                hintText.text += "\n" + qsTr("VR controller: hold A+X+trigger+grip")
+                // §VR-EXIT-COMBO：頭盔上（XR 桌面與 VR 串流）用 VR 控制器結束
+                tips = [qsTr("VR controller: hold A+X+trigger+grip to end the stream"),
+                        qsTr("VR controller: hold A+X+trigger+grip to end the stream"),
+                        qsTr("Flat-screen stream: press the left menu button to open or close the virtual keyboard"),
+                        qsTr("Flat-screen stream: hold the left menu button to bring the screen back in front of you"),
+                        qsTr("Flat-screen stream: trigger = left click, grip = right click, thumbstick up/down = scroll"),
+                        qsTr("VR stream: hold menu+trigger for one second to open the SteamVR dashboard on the PC"),
+                        qsTr("VR stream: hold menu+grip on one hand for one second to open or close the virtual keyboard"),
+                        qsTr("Hold both menu buttons for 2 seconds to switch Xbox controller mode (flat-screen and VR streams)"),
+                        qsTr("Hold both thumbsticks down for 1.5 seconds to switch steering wheel mode (in Xbox controller mode)"),
+                        qsTr("VR stream: games without VR controller support get an Xbox controller automatically")]
             }
+            else {
+                tips.push(qsTr("Press %1 to show or hide the performance overlay").arg(qsTr("Ctrl+Alt+Shift+S")))
+                tips.push(qsTr("Press %1 to switch between windowed and full-screen").arg(qsTr("Ctrl+Alt+Shift+X")))
+                tips.push(qsTr("Press %1 to release or capture the mouse and keyboard").arg(qsTr("Ctrl+Alt+Shift+Z")))
+                tips.push(qsTr("Press %1 to switch the mouse between game mode and remote desktop mode").arg(qsTr("Ctrl+Alt+Shift+M")))
+                tips.push(qsTr("Press %1 to type the clipboard text on the host").arg(qsTr("Ctrl+Alt+Shift+V")))
+                if (SdlGamepadKeyNavigation.getConnectedGamepads() > 0) {
+                    tips.push(qsTr("Gamepad: hold Start to use the gamepad as a mouse"))
+                }
+            }
+            hintText.text = qsTr("Tip:") + " " + tips[Math.floor(Math.random() * tips.length)]
 
             // Stop GUI gamepad usage now
             SdlGamepadKeyNavigation.disable()

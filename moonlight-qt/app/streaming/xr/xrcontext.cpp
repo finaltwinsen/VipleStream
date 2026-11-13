@@ -336,6 +336,9 @@ void XrContext::requestKeyboardToggle()
     if (m_Input != nullptr) {
         m_Input->requestKeyboardToggle();
     }
+    if (m_VrCtl != nullptr) {
+        m_VrCtl->requestKeyboardToggle();  // §VR-KBD
+    }
 }
 
 void XrContext::requestKeyboard(bool open)
@@ -594,10 +597,12 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     // 否則 Qt Fatal「Must construct a QGuiApplication before accessing QFontDatabase」→ SIGABRT
     // （M4a R4 發現：xr-probe --session 自鍵盤 commit 起一律 rc=134）。
     const bool haveGuiApp = qobject_cast<QGuiApplication*>(QCoreApplication::instance()) != nullptr;
-    if (!haveGuiApp && !m_Options.pcvr && m_Input != nullptr && m_KbSwapchain != XR_NULL_HANDLE) {
+    if (!haveGuiApp && (m_Input != nullptr || m_VrCtl != nullptr) && m_KbSwapchain != XR_NULL_HANDLE) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] keyboard disabled (no QGuiApplication, e.g. xr-probe)");
     }
-    if (haveGuiApp && !m_Options.pcvr && m_Input != nullptr && m_KbSwapchain != XR_NULL_HANDLE && !m_KbRenderThread.joinable()) {
+    // §VR-KBD：VR 串流（m_VrCtl）也有鍵盤
+    if (haveGuiApp && (m_Input != nullptr || m_VrCtl != nullptr) && m_KbSwapchain != XR_NULL_HANDLE &&
+        !m_KbRenderThread.joinable()) {
         {
             std::lock_guard<std::mutex> lk(m_KbRenderMutex);
             m_KbRenderCancel = false;
@@ -1389,11 +1394,9 @@ bool XrContext::createQuadSwapchain(QString* error)
     createSolidSwapchain(static_cast<uint32_t>(kBattW), static_cast<uint32_t>(kBattH), &m_BattSwapchain, &m_BattImages,
                          &m_BattImageCount, "battery icon");
 
-    // §VR-PADMODE：PCVR 提示。建不起來只是看不到提示
-    if (m_Options.pcvr) {
-        createSolidSwapchain(static_cast<uint32_t>(kToastW), static_cast<uint32_t>(kToastH), &m_ToastSwapchain, &m_ToastImages,
-                             &m_ToastImageCount, "pcvr notice");
-    }
+    // §VR-PADMODE：提示（§XR-PADMODE 起 2D 串流也用）。建不起來只是看不到提示
+    createSolidSwapchain(static_cast<uint32_t>(kToastW), static_cast<uint32_t>(kToastH), &m_ToastSwapchain, &m_ToastImages,
+                         &m_ToastImageCount, "notice");
 
     // 虛擬鍵盤：貼圖（尺寸同 XrKeyboard）＋hover／按下高亮。建不起來只是沒有鍵盤，其他照常
     {
@@ -1464,6 +1467,10 @@ bool XrContext::createActions(QString* error)
         // M4a R2：PCVR 的控制器（grip pose、按鍵、haptic）→ 0x5506
         m_VrCtl = new XrVrControllers(m_Options.testVrInput, m_Options.inputSink.exitCombo);
         m_VrCtl->setWheel(m_Options.vrWheel, m_Options.inputSink.wheelToggled);  // §VR-WHEEL
+        // §VR-KBD：沒有 QGuiApplication（xr-probe）就畫不了鍵盤貼圖，不開這個功能
+        if (qobject_cast<QGuiApplication*>(QCoreApplication::instance()) != nullptr) {
+            m_VrCtl->setKeyboard(m_Options.inputSink.key, m_Options.testKeyboardText);
+        }
         if (!m_VrCtl->create(m_Instance, m_Session, m_EnabledExtensions, error)) {
             return false;
         }
@@ -1480,6 +1487,8 @@ bool XrContext::createActions(QString* error)
         return false;
     }
     m_ActionSet = m_Input->actionSet();
+    // §XR-PADMODE：2D 串流的方向盤模式沿用 VR 的設定（VIPLE_VR_WHEEL_ON | 轉向範圍/10）
+    m_Input->setWheel((m_Options.vrWheel & 0x80) != 0, (m_Options.vrWheel & 0x7F) * 10);
     return true;
 }
 
@@ -1698,6 +1707,32 @@ bool XrContext::clearImage(VkImage img, float r, float g, float b, float a)
     }
     cmdSubmitted();
     return true;
+}
+
+// X3 的狀態條：影像超過 1 秒沒更新時疊在螢幕上緣。橘底深色字，說明畫面為什麼停住。
+bool XrContext::ensureStatusLabel()
+{
+    if (m_StatusReady) {
+        return true;  // runtime 沿用最後 release 的影像
+    }
+    if (m_StatusSwapchain == XR_NULL_HANDLE || m_StatusImages == nullptr) {
+        return false;
+    }
+    QImage img(static_cast<int>(kStatusW), static_cast<int>(kStatusH), shellImageFormat());
+    img.fill(QColor(236, 150, 40));
+    {
+        QPainter p(&img);
+        p.setRenderHint(QPainter::TextAntialiasing, true);
+        QFont f = p.font();
+        f.setPixelSize(44);
+        f.setBold(true);
+        p.setFont(f);
+        p.setPen(QColor(24, 18, 8));
+        p.drawText(QRect(16, 0, static_cast<int>(kStatusW) - 32, static_cast<int>(kStatusH)), Qt::AlignCenter,
+                   QCoreApplication::translate("Session", "Waiting for video from the host"));
+    }
+    m_StatusReady = uploadImage(m_StatusSwapchain, m_StatusImages, m_StatusImageCount, img);
+    return m_StatusReady;
 }
 
 bool XrContext::ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count, bool* ready,
@@ -2320,6 +2355,10 @@ void XrContext::frameThreadMain()
         XrCompositionLayerQuad subLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
         XrCompositionLayerQuad toastLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-PADMODE
         XrCompositionLayerQuad battLayer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);  // §VR-LOWBATT
+        // §XR-HUD-ORDER（2026-11-13）：合成層是照送出的順序疊的（後送的在上面），不看遠近。PCVR 的影像在這之前就送了，
+        // 提示與低電量圖示可以馬上接在後面；2D 串流、影片、介面的螢幕是後面才送的 quad，這兩層要等螢幕、鍵盤、指標
+        // 都送完再接，不然整片被螢幕蓋住（2D 的手把模式提示就是這樣看不到）。
+        bool toastPending = false, battPending = false;
         XrCompositionLayerQuad insetQ[2] = {xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD),
                                             xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD)};  // §VR-FOVEA-LAYERS
         float playerEyeAspect = 0.0f;  // §VR-PLAYER：這一格每眼的畫面比例（螢幕高度＝寬÷它）
@@ -2461,8 +2500,7 @@ void XrContext::frameThreadMain()
             pcvrTimingTick(cpuT0, static_cast<uint64_t>(fs.predictedDisplayPeriod));  // M4a R3
         }
         // §VR-PADMODE：PCVR 提示——跟著頭（view space），正前方 1 m、往下 0.18 m、寬 0.62 m，蓋在遊戲畫面上
-        if (m_Options.pcvr && fs.shouldRender && m_ToastSwapchain != XR_NULL_HANDLE && m_ViewSpace != XR_NULL_HANDLE &&
-            layerCount < 9) {
+        if (fs.shouldRender && m_ToastSwapchain != XR_NULL_HANDLE && m_ViewSpace != XR_NULL_HANDLE && layerCount < 9) {
             const int64_t until = m_ToastUntilMs.load(std::memory_order_acquire);
             const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                       std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -2501,7 +2539,12 @@ void XrContext::frameThreadMain()
                     toastLayer.pose.orientation.w = 1.0f;
                     toastLayer.pose.position = {0.0f, -0.18f, -1.0f};
                     toastLayer.size = {w, w * static_cast<float>(kToastH) / static_cast<float>(kToastW)};
-                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&toastLayer);
+                    if (m_Options.pcvr) {
+                        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&toastLayer);
+                    }
+                    else {
+                        toastPending = true;
+                    }
                 }
             }
         }
@@ -2543,7 +2586,12 @@ void XrContext::frameThreadMain()
                 battLayer.pose.orientation.w = 1.0f;
                 battLayer.pose.position = {0.30f, 0.22f, -1.0f};
                 battLayer.size = {w, w * static_cast<float>(kBattH) / static_cast<float>(kBattW)};
-                layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&battLayer);
+                if (m_Options.pcvr) {
+                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&battLayer);
+                }
+                else {
+                    battPending = true;
+                }
             }
         }
         // §VR-PLAYER（V2）：180°／360°——影像 render thread 改畫進全景材質，這裡每一格依兩眼的姿態畫投影影像
@@ -2667,9 +2715,8 @@ void XrContext::frameThreadMain()
             videoLayer = true;
             videoGen = vcur.generation;
             screenAspect = playerEyeAspect > 0.0f ? playerEyeAspect : vcur.aspect;
-            if (stale == 2 &&
-                ensureSolidQuad(m_StatusSwapchain, m_StatusImages, m_StatusImageCount, &m_StatusReady, 0.85f, 0.45f, 0.05f)) {
-                const float statusW = screenW * 0.3f;
+            if (stale == 2 && ensureStatusLabel()) {
+                const float statusW = screenW * 0.36f;
                 const float statusH = statusW * static_cast<float>(kStatusH) / static_cast<float>(kStatusW);
                 status.layerFlags = 0;
                 status.space = m_LocalSpace;
@@ -2754,11 +2801,9 @@ void XrContext::frameThreadMain()
         bool kbShown = false;
         XrPosef kbPose = {};
         float kbW = 0.0f, kbH = 0.0f;
-        if (!m_Options.pcvr && m_Input != nullptr && fs.shouldRender && m_Input->keyboardOpen() && m_Screen->placed() &&
-            (videoLayer || loadingLayer || shellLayer) && m_KbSwapchain != XR_NULL_HANDLE) {
-            const XrKeyboard& kb = m_Input->keyboard();
-            m_Input->takeKeyboardDirty();
-            const int wantMods = m_Input->stickyModifiers() & 0x0F;
+        // 鍵盤貼圖：要的那一種修飾鍵組合還沒畫好就請背景執行緒畫，畫好了而 swapchain 裡不是它就上傳。回傳 swapchain 裡
+        // 有沒有可以顯示的貼圖（XR 桌面與 §VR-KBD 共用）
+        auto kbTexture = [&](int wantMods) -> bool {
             const bool ready = (m_KbReadyMask.load(std::memory_order_acquire) & (1u << wantMods)) != 0;
             if (!ready) {
                 std::lock_guard<std::mutex> lk(m_KbRenderMutex);
@@ -2786,7 +2831,13 @@ void XrContext::frameThreadMain()
                                 out.height(), qUtf8Printable(m_Options.dumpKeyboardPath), saved ? "ok" : "FAILED");
                 }
             }
-            if (m_KbUploaded) {
+            return m_KbUploaded;
+        };
+        if (!m_Options.pcvr && m_Input != nullptr && fs.shouldRender && m_Input->keyboardOpen() && m_Screen->placed() &&
+            (videoLayer || loadingLayer || shellLayer) && m_KbSwapchain != XR_NULL_HANDLE) {
+            const XrKeyboard& kb = m_Input->keyboard();
+            m_Input->takeKeyboardDirty();
+            if (kbTexture(m_Input->stickyModifiers() & 0x0F)) {
                 const XrPosef sp = m_Screen->quadPose();
                 const float scrH = (useCylinder && videoLayer ? m_Screen->cylinderRadiusM() * m_Screen->cylinderAngleRad() : screenW) /
                                    screenAspect;
@@ -2814,6 +2865,155 @@ void XrContext::frameThreadMain()
                 kbLayer.size = {kbW, kbH};
                 layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kbLayer);
                 kbShown = true;
+            }
+        }
+
+        // §VR-KBD（2026-11-13）：VR 串流的虛擬鍵盤。打開的那一刻擺在頭部前方 0.55 m、比眼睛低 0.32 m、後仰 30°、寬 0.56 m，
+        // 之後固定在追蹤空間裡（不跟著頭動），蓋在遊戲畫面上。開關、射線與按鍵在 XrVrControllers。
+        XrCompositionLayerQuad vrKbPointer = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        // §VR-KBD-DRAG（2026-11-13 使用者要求，仿系統介面視窗下方的白條）：鍵盤下緣外 2.8 cm 一條白條，指著它按住扳機就拖著鍵盤走，
+        // 放開停住；拖到哪裡鍵盤都轉成正對頭部（開啟時的後仰 30° 也是這個角度）。
+        XrCompositionLayerQuad vrKbBar = xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD);
+        if (m_Options.pcvr && m_VrCtl != nullptr) {
+            if (!m_VrCtl->keyboardOpen()) {
+                m_VrKbPlaced = false;
+            }
+            else if (fs.shouldRender && m_KbSwapchain != XR_NULL_HANDLE && m_ViewSpace != XR_NULL_HANDLE && layerCount < 9) {
+                const XrKeyboard& kb = m_VrCtl->keyboard();
+                if (!m_VrKbPlaced) {
+                    XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
+                    const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+                    if (XR_SUCCEEDED(xrLocateSpace(m_ViewSpace, m_TrackSpace, fs.predictedDisplayTime, &loc)) &&
+                        (loc.locationFlags & need) == need) {
+                        const XrRay::Vec3 f = XrRay::rotate(loc.pose.orientation, {0.0f, 0.0f, -1.0f});
+                        const float yaw = (std::fabs(f.x) + std::fabs(f.z)) > 1e-3f ? std::atan2(-f.x, -f.z) : 0.0f;
+                        const float tilt = -30.0f * 3.14159265f / 180.0f;
+                        const XrQuaternionf qy = {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
+                        const XrQuaternionf qx = {std::sin(tilt * 0.5f), 0.0f, 0.0f, std::cos(tilt * 0.5f)};
+                        // qy∘qx（qy 只有 y、w；qx 只有 x、w）
+                        m_VrKbPose.orientation = {qy.w * qx.x, qy.y * qx.w, -qy.y * qx.x, qy.w * qx.w};
+                        m_VrKbPose.position = {loc.pose.position.x - std::sin(yaw) * 0.55f, loc.pose.position.y - 0.32f,
+                                               loc.pose.position.z - std::cos(yaw) * 0.55f};
+                        m_VrKbPlaced = true;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] keyboard placed (yaw %.0f deg, %.2f m below the eyes)",
+                                    static_cast<double>(yaw) * 57.29578, 0.32);
+                    }
+                }
+                if (m_VrKbPlaced && kbTexture(m_VrCtl->stickyModifiers() & 0x0F)) {
+                    kbW = 0.56f;
+                    kbH = kbW / kb.aspect();
+                    kbPose = m_VrKbPose;
+                    kbLayer.layerFlags = 0;
+                    kbLayer.space = m_TrackSpace;
+                    kbLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                    kbLayer.subImage.swapchain = m_KbSwapchain;
+                    kbLayer.subImage.imageRect.offset = {0, 0};
+                    kbLayer.subImage.imageRect.extent = {kb.width(), kb.height()};
+                    kbLayer.subImage.imageArrayIndex = 0;
+                    kbLayer.pose = kbPose;
+                    kbLayer.size = {kbW, kbH};
+                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kbLayer);
+                    kbShown = true;
+                }
+            }
+            XrPosef barPose = kbPose;
+            if (kbShown) {
+                const XrRay::Vec3 down = XrRay::rotate(kbPose.orientation, {0.0f, -(kbH * 0.5f + 0.028f), 0.0f});
+                barPose.position = {kbPose.position.x + down.x, kbPose.position.y + down.y, kbPose.position.z + down.z};
+            }
+            m_VrCtl->updateKeyboard(fs.predictedDisplayTime, m_TrackSpace, kbShown, kbPose, kbW, kbH, barPose, kbShown ? 0.30f : 0.0f,
+                                    0.06f);
+            XrVector3f moved;
+            if (kbShown && m_VrKbPlaced && m_VrCtl->takeKeyboardMove(&moved) && std::isfinite(moved.x) && std::isfinite(moved.y) &&
+                std::isfinite(moved.z)) {
+                m_VrKbPose.position = moved;
+                XrSpaceLocation loc = xrStruct<XrSpaceLocation>(XR_TYPE_SPACE_LOCATION);
+                if (XR_SUCCEEDED(xrLocateSpace(m_ViewSpace, m_TrackSpace, fs.predictedDisplayTime, &loc)) &&
+                    (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+                    // 鍵盤的正面（+Z）朝向頭部：水平方向決定 yaw，高低差決定後仰（頭在上方＝往後仰），限制在 -80°～+30°
+                    const float dx = loc.pose.position.x - moved.x;
+                    const float dy = loc.pose.position.y - moved.y;
+                    const float dz = loc.pose.position.z - moved.z;
+                    const float horiz = std::sqrt(dx * dx + dz * dz);
+                    if (horiz > 0.05f) {
+                        const float yaw = std::atan2(dx, dz);
+                        float tilt = -std::atan2(dy, horiz);
+                        tilt = std::max(-1.396f, std::min(0.524f, tilt));
+                        const XrQuaternionf qy = {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
+                        const XrQuaternionf qx = {std::sin(tilt * 0.5f), 0.0f, 0.0f, std::cos(tilt * 0.5f)};
+                        m_VrKbPose.orientation = {qy.w * qx.x, qy.y * qx.w, -qy.y * qx.x, qy.w * qx.w};
+                    }
+                }
+            }
+            if (kbShown && m_VrCtl->keyboardOpen() && layerCount < 10) {
+                // 白條：平常白色，指著或拖動中換成按鍵按下的顏色
+                const int barState = m_VrCtl->keyboardBarState();
+                if (!m_PointerReady && m_PointerSwapchain != XR_NULL_HANDLE && m_PointerImages != nullptr) {
+                    ensureSolidQuad(m_PointerSwapchain, m_PointerImages, m_PointerImageCount, &m_PointerReady, 1.0f, 1.0f, 1.0f);
+                }
+                const bool hiReady = barState != 0 &&
+                                     ensureSolidQuad(m_KbPressSwapchain, m_KbPressImages, m_KbPressImageCount, &m_KbPressReady,
+                                                     0.10f * 0.55f, 0.45f * 0.55f, 1.0f * 0.55f, 0.55f) &&
+                                     m_KbPressSwapchain != XR_NULL_HANDLE;
+                if (hiReady || m_PointerReady) {
+                    vrKbBar.layerFlags = hiReady ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0;
+                    vrKbBar.space = m_TrackSpace;
+                    vrKbBar.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                    vrKbBar.subImage.swapchain = hiReady ? m_KbPressSwapchain : m_PointerSwapchain;
+                    vrKbBar.subImage.imageRect.offset = {0, 0};
+                    const int32_t px = hiReady ? 8 : static_cast<int32_t>(kPointerPx);
+                    vrKbBar.subImage.imageRect.extent = {px, px};
+                    vrKbBar.subImage.imageArrayIndex = 0;
+                    vrKbBar.pose = barPose;
+                    vrKbBar.size = {barState == 2 ? 0.24f : 0.20f, 0.012f};
+                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&vrKbBar);
+                }
+            }
+            if (kbShown && m_VrCtl->keyboardOpen()) {
+                // 高亮：射線指著的鍵（按住時換色），貼在鍵盤面前 2 mm；指標：命中點上的小方塊
+                bool hiPressed = false;
+                const int hover = m_VrCtl->keyboardHover(&hiPressed);
+                if (hover >= 0 && layerCount < 11) {
+                    XrSwapchain hsc = hiPressed ? m_KbPressSwapchain : m_KbHoverSwapchain;
+                    const bool ready = hiPressed
+                                           ? ensureSolidQuad(m_KbPressSwapchain, m_KbPressImages, m_KbPressImageCount, &m_KbPressReady,
+                                                             0.10f * 0.55f, 0.45f * 0.55f, 1.0f * 0.55f, 0.55f)
+                                           : ensureSolidQuad(m_KbHoverSwapchain, m_KbHoverImages, m_KbHoverImageCount, &m_KbHoverReady,
+                                                             0.30f, 0.30f, 0.30f, 0.30f);
+                    if (ready && hsc != XR_NULL_HANDLE) {
+                        float cu = 0.0f, cv = 0.0f, du = 0.0f, dv = 0.0f;
+                        m_VrCtl->keyboard().keyUv(hover, &cu, &cv, &du, &dv);
+                        const XrRay::Vec3 c = XrRay::quadPoint(kbPose, kbW, kbH, cu, cv);
+                        const XrRay::Vec3 nrm = XrRay::rotate(kbPose.orientation, {0.0f, 0.0f, 0.002f});
+                        kbHi.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                        kbHi.space = m_TrackSpace;
+                        kbHi.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                        kbHi.subImage.swapchain = hsc;
+                        kbHi.subImage.imageRect.offset = {0, 0};
+                        kbHi.subImage.imageRect.extent = {8, 8};
+                        kbHi.subImage.imageArrayIndex = 0;
+                        kbHi.pose.orientation = kbPose.orientation;
+                        kbHi.pose.position = {c.x + nrm.x, c.y + nrm.y, c.z + nrm.z};
+                        kbHi.size = {du * kbW, dv * kbH};
+                        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&kbHi);
+                    }
+                }
+                XrPosef pp;
+                if (!m_PointerReady && m_PointerSwapchain != XR_NULL_HANDLE && m_PointerImages != nullptr) {
+                    ensureSolidQuad(m_PointerSwapchain, m_PointerImages, m_PointerImageCount, &m_PointerReady, 1.0f, 1.0f, 1.0f);
+                }
+                if (m_PointerReady && m_VrCtl->keyboardPointer(&pp) && layerCount < 12) {
+                    vrKbPointer.layerFlags = 0;
+                    vrKbPointer.space = m_TrackSpace;
+                    vrKbPointer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                    vrKbPointer.subImage.swapchain = m_PointerSwapchain;
+                    vrKbPointer.subImage.imageRect.offset = {0, 0};
+                    vrKbPointer.subImage.imageRect.extent = {static_cast<int32_t>(kPointerPx), static_cast<int32_t>(kPointerPx)};
+                    vrKbPointer.subImage.imageArrayIndex = 0;
+                    vrKbPointer.pose = pp;
+                    vrKbPointer.size = {0.006f, 0.006f};
+                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&vrKbPointer);
+                }
             }
         }
 
@@ -3014,6 +3214,13 @@ void XrContext::frameThreadMain()
                 layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&pointer);
             }
         }
+        // §XR-HUD-ORDER：不是 PCVR 時，提示與低電量圖示疊在最上面
+        if (toastPending && layerCount < 12) {
+            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&toastLayer);
+        }
+        if (battPending && layerCount < 12) {
+            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&battLayer);
+        }
         if (fs.shouldRender) {
             // FOV／眼位：每秒 locate 一次即可（X1 只做量測）
             const uint64_t nowNs = steadyNowNs();
@@ -3048,23 +3255,97 @@ void XrContext::frameThreadMain()
                         bool first = false;
                         // dev --vr-overscan：四邊各放大 δ（左、下是負角度）；/launch 與 projection 都讀 m_Fov
                         const float ov = m_Options.pcvrOverscanDeg * 0.017453293f;
+                        // §VR-VIEWS-LOCK（2026-11-13）：只有第一次量到的那一組寫進 m_Fov／m_EyeToHead——它就是 /launch 協商給
+                        // host 的值，host 整場都照它算繪。原本每秒用新量到的值蓋掉：runtime 回報的每眼視角或眼位只要有一點
+                        // 變動，projection 宣告的視角就和影像實際算繪的視角不一樣，整個畫面每秒跟著挪一下（使用者配戴回報
+                        // 「每 1～2 秒像重新定位、位移很小」的嫌疑之一）。之後量到的值只比對、記下差距。
+                        float dFov = 0.0f, dPos = 0.0f, dRot = 0.0f;
                         {
                             std::lock_guard<std::mutex> lk(m_StatsMutex);
-                            for (int e = 0; e < 2; e++) {
-                                m_EyeToHead[e] = hv[e].pose;
-                                m_Fov[e] = hv[e].fov;
-                                if (ov > 0.0f) {
-                                    m_Fov[e].angleLeft -= ov;
-                                    m_Fov[e].angleRight += ov;
-                                    m_Fov[e].angleUp += ov;
-                                    m_Fov[e].angleDown -= ov;
-                                }
-                            }
                             first = !m_HaveEyeToHead;
+                            for (int e = 0; e < 2; e++) {
+                                XrFovf fv = hv[e].fov;
+                                if (ov > 0.0f) {
+                                    fv.angleLeft -= ov;
+                                    fv.angleRight += ov;
+                                    fv.angleUp += ov;
+                                    fv.angleDown -= ov;
+                                }
+                                if (first) {
+                                    m_EyeToHead[e] = hv[e].pose;
+                                    m_Fov[e] = fv;
+                                    continue;
+                                }
+                                dFov = (std::max)({dFov, std::fabs(fv.angleLeft - m_Fov[e].angleLeft),
+                                                   std::fabs(fv.angleRight - m_Fov[e].angleRight),
+                                                   std::fabs(fv.angleUp - m_Fov[e].angleUp),
+                                                   std::fabs(fv.angleDown - m_Fov[e].angleDown)});
+                                const XrVector3f& a = hv[e].pose.position;
+                                const XrVector3f& b = m_EyeToHead[e].position;
+                                dPos = (std::max)(dPos, std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) +
+                                                                  (a.z - b.z) * (a.z - b.z)));
+                                const XrQuaternionf& qa = hv[e].pose.orientation;
+                                const XrQuaternionf& qb = m_EyeToHead[e].orientation;
+                                const float dot = std::fabs(qa.x * qb.x + qa.y * qb.y + qa.z * qb.z + qa.w * qb.w);
+                                dRot = (std::max)(dRot, 2.0f * std::acos((std::min)(dot, 1.0f)));
+                            }
                             m_HaveEyeToHead = true;
                         }
                         if (first) {
                             m_ViewsCv.notify_all();
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                        "[VIPLE-VR-VIEWS] per-eye views locked for this session: L fov %.2f/%.2f/%.2f/%.2f R fov "
+                                        "%.2f/%.2f/%.2f/%.2f deg (left/right/up/down), eye separation %.1f mm",
+                                        m_Fov[0].angleLeft * 57.29578, m_Fov[0].angleRight * 57.29578, m_Fov[0].angleUp * 57.29578,
+                                        m_Fov[0].angleDown * 57.29578, m_Fov[1].angleLeft * 57.29578, m_Fov[1].angleRight * 57.29578,
+                                        m_Fov[1].angleUp * 57.29578, m_Fov[1].angleDown * 57.29578,
+                                        static_cast<double>(hv[1].pose.position.x - hv[0].pose.position.x) * 1000.0);
+                        }
+                        else {
+                            ViewDrift& vd = m_ViewDrift;
+                            vd.checks++;
+                            if (vd.havePrev) {
+                                float mFov = 0.0f, mRot = 0.0f;
+                                for (int e = 0; e < 2; e++) {
+                                    mFov = (std::max)({mFov, std::fabs(hv[e].fov.angleLeft - vd.prevFov[e].angleLeft),
+                                                       std::fabs(hv[e].fov.angleRight - vd.prevFov[e].angleRight),
+                                                       std::fabs(hv[e].fov.angleUp - vd.prevFov[e].angleUp),
+                                                       std::fabs(hv[e].fov.angleDown - vd.prevFov[e].angleDown)});
+                                    const XrQuaternionf& qa = hv[e].pose.orientation;
+                                    const XrQuaternionf& qb = vd.prevRot[e];
+                                    const float dot = std::fabs(qa.x * qb.x + qa.y * qb.y + qa.z * qb.z + qa.w * qb.w);
+                                    mRot = (std::max)(mRot, 2.0f * std::acos((std::min)(dot, 1.0f)));
+                                }
+                                if (mFov * 57.29578f > 0.005f || mRot * 57.29578f > 0.005f) {
+                                    vd.moved++;
+                                    vd.movedFovDeg = (std::max)(vd.movedFovDeg, mFov * 57.29578f);
+                                }
+                            }
+                            for (int e = 0; e < 2; e++) {
+                                vd.prevFov[e] = hv[e].fov;
+                                vd.prevRot[e] = hv[e].pose.orientation;
+                            }
+                            vd.havePrev = true;
+                            // 門檻：視角 0.005°、眼位 0.05 mm、眼睛朝向 0.005°（浮點雜訊以上）
+                            if (dFov * 57.29578f > 0.005f || dPos * 1000.0f > 0.05f || dRot * 57.29578f > 0.005f) {
+                                vd.changed++;
+                                vd.fovDeg = (std::max)(vd.fovDeg, dFov * 57.29578f);
+                                vd.posMm = (std::max)(vd.posMm, dPos * 1000.0f);
+                                vd.rotDeg = (std::max)(vd.rotDeg, dRot * 57.29578f);
+                            }
+                            if (vd.changed > 0 && (!vd.everLogged || nowNs - vd.lastLogNs >= 10000000000ull)) {
+                                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                            "[VIPLE-VR-VIEWS] runtime now reports different per-eye views than the locked ones: "
+                                            "fov %.3f deg, eye position %.2f mm, eye rotation %.3f deg (largest; %u of %u checks); "
+                                            "moved between checks %u times (up to %.3f deg) - projection keeps the locked values",
+                                            static_cast<double>(vd.fovDeg), static_cast<double>(vd.posMm),
+                                            static_cast<double>(vd.rotDeg), vd.changed, vd.checks, vd.moved,
+                                            static_cast<double>(vd.movedFovDeg));
+                                vd.everLogged = true;
+                                vd.lastLogNs = nowNs;
+                                vd.checks = vd.changed = vd.moved = 0;
+                                vd.fovDeg = vd.posMm = vd.rotDeg = vd.movedFovDeg = 0.0f;
+                            }
                         }
                     }
                 }

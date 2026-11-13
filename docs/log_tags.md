@@ -1387,7 +1387,15 @@ PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 
 ```
 [VIPLE-VR-INPUT] bindings accepted: <profile> (N)             ← 完整清單被拒時：… full binding list rejected, retrying core set
 [VIPLE-VR-INPUT] interaction profile L|R: <profile> (wire profile <n>)   ← M4a 收尾：0x5506 input.profile（1 Touch、2 Index、3 Frame、4 其他）
-[VIPLE-VR-INPUT] 10s L active=0|1 edges=N pressCtr=0x… | R active=… | focused=0|1 systemCombos=N focusLoss=N | haptic applied=N failed=N dropped=N
+[VIPLE-VR-INPUT] 10s L active=0|1 edges=N pressCtr=0x… | R active=… | focused=0|1 systemCombos=N focusLoss=N | haptic applied=N failed=N dropped=N[ | kbd open|closed keys=N]
+[VIPLE-VR-KBD] keyboard opened|closed (menu+grip|close key|request|dev test)   ← §VR-KBD：VR 串流的虛擬鍵盤（同一手 menu＋grip 1 s）
+[VIPLE-VR-KBD] keyboard placed (yaw <deg> deg, 0.32 m below the eyes)         ← 打開那一刻擺在頭部前下方（追蹤空間）
+[VIPLE-VR-KBD] keyboard moved (left|right hand), now at (x, y, z)              ← §VR-KBD-DRAG：放開白條那一刻記一次（追蹤空間，公尺）
+[VIPLE-VR-KBD] dev move: keyboard centre -> (x, y, z)                         ← dev 自測：按完鍵後把鍵盤移一次；結尾的 dev test done 行印最後位置
+[VIPLE-VR-KBD] dev key vk=0x.. down|up mods=0x..                              ← 只有 dev --xr-test-keyboard 逐鍵記錄；一般只在 10s 行記數量
+[VIPLE-VR-VIEWS] per-eye views locked for this session: L fov …/…/…/… R fov …/…/…/… deg (left/right/up/down), eye separation <mm> mm
+[VIPLE-VR-VIEWS] runtime now reports different per-eye views than the locked ones: fov <deg> deg, eye position <mm> mm, eye rotation <deg> deg (largest; N of M checks); moved between checks K times (up to <deg> deg) - projection keeps the locked values
+                                                                               ← §VR-VIEWS-LOCK：第一次量到的每眼視角／眼位（＝協商給 host 的）整場不變；之後每秒比對，有差才印（最多 10 s 一行）
 [VIPLE-VR-HAPTIC] rx=N queued=N device=1|2 dur=<us> freq=<Hz> amp=<0-1> id=N   ← 前 3 則與每 50 則印一次
 [VIPLE-VR-HAPTIC] xrApplyHapticFeedback(L|R): <XrResult>        ← 前 3 次失敗
 ```
@@ -1916,3 +1924,4 @@ pwsh scripts\benchmark\analyze_client_log.ps1 -Path C:\Users\me\Downloads -Json 
 - client `[VIPLE-XR-INPUT] dev mouse button <0|1> down|up`：只有 dev `--xr-test-keyboard` 才印（2.0.163）。測試文字結尾加 `{close}`＝打完字後點鍵盤的關閉鍵、扳機按住不放、射線移到螢幕中央；鍵盤關掉之後不應該出現 `button 0 down`。
 - client `[VIPLE-XR] bring-up stages (ms since start): instance=… vulkan=… video=… session=… swapchain+actions=… ready=…`：XR 啟動各段做完的時間點（2.0.164）。
 - client `[VIPLE-FRUC] YUV 4:4:4 is on and this host offers it: … the host is asked for the full <fps> fps instead of half`：4:4:4 沒有補幀可用，不把 host 幀率砍半（§FRUC-444-FULLFPS，2.0.165）。
+- host `[VIPLE-MPQUIC] §Q-SOCK-SNDBUF: send buffer <n> bytes (asked for <n>)`：QUIC socket 的送出緩衝（2.0.167）；`§Q-SOCK-NONBLOCK … dropped <n> packet(s) so far (waited for the buffer <n> times)` 是緩衝滿了、等過還是送不出去而丟掉的封包數。

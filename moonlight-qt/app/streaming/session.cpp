@@ -257,6 +257,10 @@ static int inputStallWatchdogProc(void*)
 #define SDL_CODE_XR_KEY 113
 // §VR-WHEEL：快捷鍵切換了方向盤模式（XR frame thread 推），data1＝1 開／0 關
 #define SDL_CODE_XR_WHEEL 114
+// §XR-PADMODE：2D 串流的手把模式。PAD＝手把狀態（data1＝SDL_malloc 的 XrPadState，收的那一邊釋放）；
+// PADMODE＝模式切換了（data1＝1 開／0 關）
+#define SDL_CODE_XR_PAD 115
+#define SDL_CODE_XR_PADMODE 116
 
 #include <openssl/rand.h>
 #include <algorithm>
@@ -3152,6 +3156,30 @@ bool Session::createXrContext(bool isRebuild, QString* error)
         const int range = qBound(90, m_Preferences->vrWheelRange, 900);
         xo.vrWheel = m_Preferences->vrWheel ? static_cast<uint8_t>(VIPLE_VR_WHEEL_ON | (range / 10)) : 0;
     }
+    if (!xo.pcvr) {
+        // §XR-PADMODE：2D 串流的 Xbox 手把模式（兩支選單鍵同時按住 2 秒切換，和 VR 串流同一個操作）
+        xo.inputSink.gamepad = [](const XrPadState& s) {
+            XrPadState* copy = static_cast<XrPadState*>(SDL_malloc(sizeof(XrPadState)));
+            if (copy == nullptr) {
+                return;
+            }
+            *copy = s;
+            SDL_Event ev = {};
+            ev.type = SDL_USEREVENT;
+            ev.user.code = SDL_CODE_XR_PAD;
+            ev.user.data1 = copy;
+            if (SDL_PushEvent(&ev) != 1) {
+                SDL_free(copy);
+            }
+        };
+        xo.inputSink.padMode = [](bool on) {
+            SDL_Event ev = {};
+            ev.type = SDL_USEREVENT;
+            ev.user.code = SDL_CODE_XR_PADMODE;
+            ev.user.data1 = (void*)(uintptr_t)(on ? 1 : 0);
+            SDL_PushEvent(&ev);
+        };
+    }
     xo.inputSink.wheelToggled = [](bool on) {
         SDL_Event ev = {};
         ev.type = SDL_USEREVENT;
@@ -5082,6 +5110,27 @@ void Session::exec()
 #endif
                 break;
             }
+#ifdef HAVE_OPENXR
+            case SDL_CODE_XR_PAD: {
+                // §XR-PADMODE：兩支控制器合成的 Xbox 手把狀態
+                XrPadState* s = static_cast<XrPadState*>(event.user.data1);
+                if (s != nullptr) {
+                    m_InputHandler->handleXrGamepad(s->buttons, s->lt, s->rt, s->lx, s->ly, s->rx, s->ry);
+                    SDL_free(s);
+                }
+                break;
+            }
+            case SDL_CODE_XR_PADMODE: {
+                const bool on = event.user.data1 != nullptr;
+                m_VrPadModeOn = on;
+                if (m_XrContext != nullptr) {
+                    m_XrContext->showToast(on ? tr("Xbox controller mode: on (hold both menu buttons to switch back)")
+                                              : tr("Xbox controller mode: off (laser pointer)"),
+                                           3000);
+                }
+                break;
+            }
+#endif
             case SDL_CODE_XR_REBUILD:
                 handleXrRebuild((uint32_t)(uintptr_t)event.user.data1);
                 break;

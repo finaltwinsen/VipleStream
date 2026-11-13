@@ -150,7 +150,7 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
   9. **2D ABR 限速對照（Android）**：Pixel 5、REMNANT 1080p、host 限速 6 Mbps 30 秒：碼率平滑降到約 4.7 Mbps（沒有重設編碼器），限速期間 37～56 fps，
      解除後 17 秒回到 26 Mbps、幀率立刻回到 90（`temp/lat_2d/ab_and_1112/`）。Linux client 與 Tailscale 路徑還沒跑。
   10. **§VR-EXIT-FAST 剩下的 2.7 秒**：加了分段計時（`[VIPLE-XR] bring-up stages`）。頭盔 bring-up 2338 ms 裡 `xrCreateInstance` 佔 2125 ms，其餘合計約 0.2 秒。
-      要縮短只能在串流期間保留 instance（session 與 Vulkan 照樣重建）；會動 XR 生命週期，待決定。
+      **保留 instance 實測不可行（11-12，`temp/launchertest/ml/reopen_1112/`）**：自動化「介面 → VR 模式 → 桌球 → host 關掉遊戲 → 回介面」量基準：重開 2715～2744 ms＝instance 2131＋Vulkan 44＋session 約 400（另一個 session 還在時比較慢）＋swapchain 與 actions 約 170。做了只在 dev 旗標下生效的原型（交出頭盔時不銷毀 instance、拿回來時接著用），兩次結果相同：串流行程的 session 到了 FOCUSED，但 3 秒內拿不到視角資料（`XR views not available within 3 s`）、只好交還；介面接著用舊 instance 重開，卡在 system 之後、6 秒內沒有接手。也就是 SteamVR 把「頭盔交給誰」綁在行程與 runtime 的連線上：前一個行程的 instance 不放掉，下一個行程拿不到完整的頭盔。原型已移除。剩下能動的只有 session 那 0.4 秒與 swapchain 的 0.17 秒，不值得；這一項結案，維持現狀。
   11. **「只用轉接器」的短凍結**：重跑一輪網路測試（`temp/launchertest/ml/nb_1112b/`，各階段的 log 用頭盔上的小程式每 20 秒另存到 `~/nb_keep`，這次都留下來了）。
       沒有重現 4～7 格的凍結：C 最長連續重複 3 格、四個解析度都通過；結論仍是保留家用 Wi-Fi。
   12. **shader 編譯失敗時當掉**：看了 11-11 那份 log——當掉發生在 libplacebo 印完失敗的 shader 與堆疊之後。只有 shader 本身寫錯才走得到（那是開發中的 shader），出貨的 shader 不會失敗；不再追。
@@ -159,6 +159,62 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
       現在這種情況請 host 送完整幀率（兩個設定不動、提示照舊）。驗證：同一組參數 30 → 60 fps。
   14. **Assetto Corsa 啟動卡住**：沒做。要看 host 桌面上 Steam 與 2D 啟動器的狀態，應該有人在場。
   15. **PyroWave 在頭盔上主機處理延遲只回報一次**：沒做（實驗性編碼，排在後面）。
+- **2026-11-12 晚使用者配戴回報五項（log 在 `temp/launchertest/ml/worn_1112/`；server 2.0.167、client 2.0.168，未提交）**：
+  1. **頭盔 2D 串流斷斷續續＋上方黃底通知沒有字——已修（§Q-SOCK-SNDBUF）**。host 的 QUIC socket 改成非阻塞（§Q-SOCK-NONBLOCK）時沒有加大送出緩衝，
+     Windows 預設 64 KB，1440p 的大畫面一口氣送就滿、整串封包被丟；頭盔等 IDR，每次停 1 秒以上（使用者那 4 分鐘 16 次）。
+     黃底那條是 XR 螢幕「超過 1 秒沒新畫面」的狀態條，原本是純色。修正：緩衝 4 MB、滿了先等（每包最多 2 ms、每輪 8 ms）再丟；
+     狀態條加字「Waiting for video from the host」。驗證（頭盔 2D、QUIC、REMNANT 2560x1440@60、110 秒）：
+     舊 server 丟 1024 包以上、畫面停 6 次、丟幀 386；新 server 丟 0 包、丟幀 4。狀態條的字沒有目視（只驗了那段程式有跑、場次正常）。
+  2. **轉場提示改成隨機（§TIPS）**：`StreamSegue.qml` 依裝置組一份清單隨機挑一條（頭盔 8 條、電腦 7～8 條），結束串流那條機率加倍。
+     新字串還沒進翻譯檔（顯示英文）。**快捷鍵列表頁還沒做。**
+  3. **VR 串流中叫不出虛擬鍵盤**：不是壞掉——PCVR 不建 XrInput，從來沒有虛擬鍵盤。待設計（按鍵都屬於遊戲，要選一個不衝突的組合鍵；開著時要把射線與扳機從遊戲那邊遮掉）。
+  4. **2D 串流切 Xbox 手把模式**：XR 桌面模式目前只有射線滑鼠，沒有手把模式（PCVR 的 §VR-PADMODE 在 host 端、2D 用不到）。待設計。
+  5. **CarX Drift Racing Online 只有音樂、畫面停在 SteamVR 場景**：有用 `steam://launch/635260/VR` 啟動、遊戲也以 OpenXR 連上 SteamVR，
+     但 `xrCreateInstance` 之後就沒有下文（11-10 也一樣）；無人重現時啟動 40 秒視窗整片白、之後視窗消失，全程沒有 scene application。根因未查。
+     下一步：同一台 host 用 Steam 內建串流開 CarX 對照，看是不是我們的 driver 才會這樣。
+  6. **VR 串流規律定格**：The Thrill of the Fight 8 分鐘兩端都乾淨（頭盔重複幀接近 0、host 擷取 1440／10 秒、遊戲只在載入時掉幀）；
+     ACC 兩場遊戲只出約 57 fps（合成器統計 2051 張對 2948 張掉幀），144 Hz 下是規律的頓挫。待使用者確認是哪個遊戲。ACC 為什麼只有 57 fps 沒查。
+  7. **11-13 凌晨續做（client 2.0.171，未提交）**：
+     - **§XR-PADMODE：2D 串流的 Xbox 手把模式與方向盤**。操作和 VR 串流統一：兩支選單鍵同時按住 2 秒＝切換手把模式、
+       兩支搖桿同時按下 1.5 秒＝切換方向盤。手把模式時不送射線滑鼠，兩支控制器合成一支 Xbox 手把（對應同 host 的 `vr_padmode_map.h`），
+       固定當第一支手把送出；方向盤算法在 `xrwheel.h`（與 host 那份同一套，改一邊要改另一邊）。提示圖層改成 2D 串流也有。
+       只支援 Frame 控制器（Touch／Index 只有一顆選單鍵，切不進去）。**驗到的**：頭盔上 SteamVR 接受整組綁定（29 個）、2D 場次正常；
+       **沒驗到的**：實際按鍵切換、按鍵對應、方向盤手感、host 上遊戲有沒有吃到手把——要配戴。手把模式下不能開虛擬鍵盤（左手選單鍵是 Back）。
+     - **§SHORTCUTS 快捷鍵列表**：工具列的「？」改成打開列表（頭盔列控制器的操作，電腦列鍵盤與手把的）；原本頭盔上這顆鍵不顯示。
+       繁中已翻（72 句）；其他 29 個語系還沒翻（顯示英文），release 前要補。
+  8. **11-13 上午續做（client 2.0.173、頭盔 dev 已裝，未提交）**：
+     - **使用者配戴結果：host 預測時間固定 36 ms 之後微小位移還在、注視點關掉也還在** → 兩個嫌疑都排除，host 那行暫時設定已拿掉。
+     - **§VR-VIEWS-LOCK（目前最有力的嫌疑，待配戴確認）**：client 原本每秒重新 `xrLocateViews` 一次，把量到的每眼視角與眼位直接寫回
+       projection 用的 `m_Fov`／`m_EyeToHead`；host 卻整場照 /launch 協商的那一組算繪。新加的比對紀錄（`[VIPLE-VR-VIEWS]`）在無人場次
+       就看到 runtime 的值自己在動：開場幾秒差到 1.1～2.2°，之後 10 次檢查有 6～8 次和上一次不同（最多 0.031°）——也就是原本
+       畫面每 1～2 秒被挪一下，和使用者說的節奏、幅度、「所有遊戲、待機場景也有」都對得上。修正：第一次量到的那一組（＝協商給 host 的）
+       整場不變，之後只比對、記差距。**還沒有配戴確認位移消失**；下一場配戴後看 `[VIPLE-VR-VIEWS]` 的 moved 次數與使用者感受。
+     - **§VR-KBD：VR 串流的虛擬鍵盤**。同一手選單鍵＋握把按住 1 秒開關（扳機也按著不算）；打開時擺在頭部前方 0.55 m、眼睛下方 0.32 m、
+       後仰 30°、寬 0.56 m，固定在追蹤空間。開著時按鍵與類比值不送給遊戲（姿態照送），兩手都能用射線＋扳機按鍵，規則同 XR 桌面的鍵盤
+       （黏滯修飾鍵、中/英、✕ 關閉）；開關那一下還按著的鍵遮到全部放開。aim pose 只加在完整綁定清單，被拒會退回原清單。
+       **驗到的**（無人、`--xr-test-keyboard zz`）：四組綁定都被接受（Frame 37 個）、鍵盤開／擺放／按兩鍵／關的流程與貼圖都正常、VR 場次本身不受影響。
+       **沒驗到的**：實際用控制器開關與瞄準、擺放位置順不順手、host 遊戲有沒有收到字——要配戴。
+     - 快捷鍵列表與轉場提示加了這一項；繁中已翻，其他 29 語系未翻。
+   9. **11-13 早上使用者配戴結果（log 在 `temp/launchertest/ml/worn_1113/`）與後續**：
+      - **微小位移消失**（§VR-VIEWS-LOCK 確認是原因）。**VR 鍵盤可用**：在 ACC 輸入姓名成功、進了練習賽。
+      - **ACC 車子不會動——原因在 ACC 自己的設定，不是串流**：使用者文件夾下 `Assetto Corsa Competizione/Config/controls.json` 的
+        `carControllerMode` 是 0（方向盤），而方向盤的轉向／油門／煞車全部沒綁定（全新安裝的狀態），手把的扳機不會被當成油門。
+        host 那場的手把模式有開、虛擬手把也插上了。在 host 上以一般模式開 ACC，「選項 → 控制 → DRIVING CONTROL」切到「手柄」
+        （設定檔變成 1；備份 `controls.json.bak-1113`），再用 ViGEm 虛擬手把踩右扳機：練習賽裡時速到 131 km/h、自動進 2 檔。
+        VR 場次沒有重驗（ACC 的 VR 選單不出現在 host 鏡像畫面，無人操作不了），但對 ACC 來說是同一種 XInput 手把。
+        ACC 手把模式有轉向輔助、速度靈敏度、轉向伽馬 3.0 等濾波，用我們的方向盤模式時手感會不線性，使用者可以在同一頁調。
+      - **§VR-KBD-DRAG（使用者要求）**：鍵盤下緣外一條白條（20 cm × 1.2 cm），指著它按住扳機＝拖著鍵盤走（抓住那一刻鍵盤相對那一手
+        射線的位置不變），放開停住；拖到哪裡都轉成正對頭部。指著或拖動中白條變色。快捷鍵列表加一列（繁中已翻）。
+      - **11-13 下午：使用者確認 ACC 可以開了，要求整理成 release**。
+        - **§XR-HUD-ORDER**：整理時發現 2D 串流的提示（手把模式開／關）與低電量圖示排在螢幕 quad 之前送出——合成層是照順序疊的，
+          整片被螢幕蓋住。改成不是 PCVR 時等螢幕、鍵盤、指標都送完再接。**只確認編得過，沒有配戴看過。**
+        - 新增的 76 句介面字串補齊其餘 29 語系（OpenCode Go 的 deepseek 翻譯，`trtools.py validate` 全過；只有自動檢查）。
+        - README 版本摘要與操作說明、release notes 草稿（`temp/release_notes_2.0.175.md`）。
+        - 留到下一版：VR 鍵盤記住上次拖到的位置、2D 手把模式下開鍵盤、CarX 以 VR 啟動卡住、ACC 約 57 fps。
+     - **「規律定格」＝使用者更正為「像重新定位、約 1～2 秒一次、位移很小、所有遊戲、SteamVR 待機場景也有」**。
+       兩端沒有掉格。頭號嫌疑是 §VR-PREDICT 每秒調一次 `vsync_to_photons`（每步 0.5～1 ms，探測時 8 ms，開場那幾十秒幾乎每秒一次）。
+       **host 的 `sunshine.conf` 暫時加了 `vr_vsync_to_photons_us = 36000`（固定、不調）做對照，等使用者配戴確認**：
+       消失 → 把調整改成平滑的小步；還在 → 第二個對照是設定頁把注視點關掉。確認後記得把這一行拿掉。
 - **`test_vr_latch` 有 3 項在修改前就失敗**（`V3DefaultUnchanged`、`V3InvariantsUnderRandomInput`、`TlvLayouts`——最後一項是 `VIPLE_VR_TLV_CLIENT_TIMING` 已是 44 bytes、測試還寫 36）：測試過期，待整理。
 - **觀察到一次、沒重現**：2.0.135 部署後第一輪回歸，host 服務在 17:31:37 當掉一次（0xc0000005，位置是送封包用的 `thread_local std::vector<WSABUF>` 解構，也就是某條送封包的執行緒結束時；一秒後系統記了一筆 NDIS 的 LiveKernelEvent 15e）。同樣的順序再跑六輪沒有再發生；前三天也沒有這種當機。原因未明，再遇到要留 dump。
 - **高、還沒修**（依報告編號）：perf-G025#2（v4l2m2m 參數集一變就拆解碼器）；sec-G003#2（relay 進來的 `/launch` 沒有配對身分）、（只做了緩解，見上）；Android：bugs-G016#1～#3（`/cancel` 時序與 relay）、perf-G016#1、perf-G017#1～#2、sec-G015#1（ShortcutTrampoline 匯出）；

@@ -449,7 +449,7 @@ Page {
 
             NavigableToolButton {
                 id: helpButton
-                visible: SystemProperties.hasBrowser
+                // §SHORTCUTS（2026-11-13）：這顆鍵改成打開快捷鍵列表（原本只開線上說明，頭盔上沒有瀏覽器就整顆不見）
 
                 iconSource: "qrc:/res/question_mark.svg"
 
@@ -468,7 +468,7 @@ Page {
                 // TODO need to make sure browser is brought to foreground.
                 // VipleStream rebrand: 與 Android 端 HelpLauncher.launchSetupGuide
                 // 對齊，導向 fork 的 README；upstream moonlight-docs/wiki 已不適用。
-                onClicked: Qt.openUrlExternally("https://github.com/finaltwinsen/VipleStream#readme");
+                onClicked: shortcutsDialog.open()
 
                 Keys.onDownPressed: {
                     stackView.currentItem.forceActiveFocus(Qt.TabFocus)
@@ -601,6 +601,76 @@ Page {
             // StreamSegue assumes its dialog will be re-created each time we
             // start streaming, so fake it by wiping out the text each time.
             text = ""
+        }
+    }
+
+    // §SHORTCUTS：串流中的快捷鍵列表。頭盔（VrLauncher.available）列控制器的操作，其他裝置列鍵盤與手把的。
+    // 2D 串流與 VR 串流的操作盡量一樣；只有一邊有的那幾項分開列。
+    NavigableDialog {
+        id: shortcutsDialog
+        standardButtons: SystemProperties.hasBrowser ? (Dialog.Ok | Dialog.Help) : Dialog.Ok
+        onHelpRequested: Qt.openUrlExternally("https://github.com/finaltwinsen/VipleStream#readme")
+        onClosed: modeDialog.refocusIfOpen()
+
+        function row(keys, what) {
+            return "<tr><td style='padding-right:18px'><b>" + keys + "</b></td><td>" + what + "</td></tr>"
+        }
+        function section(title) {
+            return "<tr><td colspan='2' style='padding-top:10px'><u>" + title + "</u></td></tr>"
+        }
+        function build() {
+            var t = "<table>"
+            if (VrLauncher.available) {
+                t += section(qsTr("VR controllers - flat-screen and VR streams"))
+                t += row(qsTr("A + X + trigger + grip"), qsTr("End the stream"))
+                t += row(qsTr("Both menu buttons, 2 seconds"), qsTr("Switch Xbox controller mode"))
+                t += row(qsTr("Both thumbsticks pressed, 1.5 seconds"), qsTr("Switch steering wheel mode (in Xbox controller mode)"))
+                t += section(qsTr("VR controllers - flat-screen stream only"))
+                t += row(qsTr("Trigger / grip"), qsTr("Left click / right click"))
+                t += row(qsTr("Thumbstick up / down"), qsTr("Scroll"))
+                t += row(qsTr("Left menu button"), qsTr("Open or close the virtual keyboard"))
+                t += row(qsTr("Left menu button, 1 second"), qsTr("Bring the screen back in front of you"))
+                t += section(qsTr("VR controllers - VR stream only"))
+                t += row(qsTr("Menu + trigger on one hand, 1 second"), qsTr("Open the SteamVR dashboard on the PC"))
+                t += row(qsTr("Menu + grip on one hand, 1 second"), qsTr("Open or close the virtual keyboard"))
+                t += row(qsTr("Trigger on the white bar under the keyboard"), qsTr("Drag the virtual keyboard"))
+                t += section(qsTr("Xbox controller mode"))
+                t += row(qsTr("Right A / B / X / Y"), qsTr("A / B / X / Y"))
+                t += row(qsTr("Left D-pad buttons"), qsTr("D-pad"))
+                t += row(qsTr("Thumbsticks, triggers, shoulder buttons"), qsTr("Sticks, LT / RT, LB / RB"))
+                t += row(qsTr("Right menu / left menu"), qsTr("Start / Back"))
+            }
+            else {
+                t += section(qsTr("Keyboard"))
+                t += row(qsTr("Ctrl+Alt+Shift+Q"), qsTr("End the stream"))
+                t += row(qsTr("Ctrl+Alt+Shift+E"), qsTr("End the stream and close VipleStream"))
+                t += row(qsTr("Ctrl+Alt+Shift+S"), qsTr("Show or hide the performance overlay"))
+                t += row(qsTr("Ctrl+Alt+Shift+X"), qsTr("Switch between windowed and full-screen"))
+                t += row(qsTr("Ctrl+Alt+Shift+Z"), qsTr("Release or capture the mouse and keyboard"))
+                t += row(qsTr("Ctrl+Alt+Shift+M"), qsTr("Switch the mouse between game mode and remote desktop mode"))
+                t += row(qsTr("Ctrl+Alt+Shift+C"), qsTr("Show or hide the local mouse cursor"))
+                t += row(qsTr("Ctrl+Alt+Shift+V"), qsTr("Type the clipboard text on the host"))
+                t += row(qsTr("Ctrl+Alt+Shift+D"), qsTr("Minimize the stream window"))
+                t += section(qsTr("Gamepad"))
+                t += row(qsTr("Start+Select+L1+R1"), qsTr("End the stream"))
+                t += row(qsTr("Hold Start"), qsTr("Use the gamepad as a mouse"))
+            }
+            return t + "</table>"
+        }
+        onAboutToShow: shortcutsText.text = build()
+
+        ColumnLayout {
+            Label {
+                text: qsTr("Shortcuts while streaming")
+                font.bold: true
+                font.pointSize: 14
+            }
+            Label {
+                id: shortcutsText
+                textFormat: Text.RichText
+                wrapMode: Text.Wrap
+                Layout.maximumWidth: 760
+            }
         }
     }
 

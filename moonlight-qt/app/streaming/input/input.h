@@ -107,6 +107,8 @@ public:
     void handleXrScroll(int amount);
     // §VR M3a：XR 虛擬鍵盤（Win32 VK＋Limelight MODIFIER_*）
     void handleXrKey(int vk, bool down, uint8_t modifiers);
+    // §XR-PADMODE：XR 桌面的手把模式——兩支 VR 控制器合成的一支 Xbox 手把（buttons＝Limelight *_FLAG）
+    void handleXrGamepad(int buttons, uint8_t lt, uint8_t rt, short lx, short ly, short rx, short ry);
 
     void handleControllerAxisEvent(SDL_ControllerAxisEvent* event);
 

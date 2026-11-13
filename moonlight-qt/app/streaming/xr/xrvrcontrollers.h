@@ -14,12 +14,18 @@
 // - 沒有 FOCUSED：按鍵、類比值全部放開（server 看到 flags.focused=0 也會視為無輸入），pressCtr 不動。
 // - 同一手 menu＋trigger 按住 1 s → SYSTEM（期間遮掉 MENU 與 TRIGGER），任一放開即結束。
 // - haptic：main thread 經 queueHaptic 放進佇列，XR frame thread 呼叫 xrApplyHapticFeedback。
+// - §VR-KBD（2026-11-13）：VR 串流中的虛擬鍵盤。同一手 menu＋grip 按住 1 s 開關（和 menu＋trigger＝SYSTEM 同一種
+//   操作）。鍵盤開著時按鍵與類比值一律不送給 host（姿態照送，遊戲裡的手還在），扳機改成按鍵盤上的鍵；開關的那一下
+//   還按著的鍵遮到全部放開為止，不會變成遊戲裡的一次按下。版面、黏滯修飾鍵、中/英鍵的規則同 XR 桌面（xrkeyboard.h）。
+//   鍵盤擺在哪、貼圖與高亮由 XrContext 負責，這裡只做開關、射線命中與按鍵事件。
 //
 // 執行緒：create／destroy／updateFrame／applyPendingHaptics 在 XR frame thread（或 bring-up 執行緒，
 // 早於 frame thread 啟動）；fill 在 tracking 送出執行緒；queueHaptic 在 main thread。狀態快照以
 // m_Mutex 保護。
 
 #ifdef HAVE_OPENXR
+
+#include "xrinput.h"  // §VR-KBD：XrRay（射線與 quad 求交）、XrKeyboard（版面）
 
 #include <openxr/openxr.h>
 
@@ -31,6 +37,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <vector>
 
 struct _VIPLE_VR_TRACKING;
 
@@ -70,6 +77,39 @@ public:
     // toggled：兩支搖桿同時按住 1.5 秒切換時呼叫（frame thread），空＝不偵測快捷鍵
     void setWheel(uint8_t wire, std::function<void(bool on)> toggled);
 
+    // ── §VR-KBD：虛擬鍵盤 ──
+    // key：按鍵事件（Win32 VK＋Limelight MODIFIER_*，frame thread 呼叫）；空＝沒有鍵盤。
+    // testText（dev --xr-test-keyboard）：開始 20 s 後自動打開鍵盤、逐字按完再關，不必有控制器
+    void setKeyboard(std::function<void(int vk, bool down, uint8_t mods)> key, const QString& testText);
+    // 任何執行緒：要求切換開關（frame thread 下一格處理）
+    void requestKeyboardToggle() { m_KbToggleReq.fetch_add(1, std::memory_order_acq_rel); }
+    // 以下都在 frame thread
+    bool keyboardOpen() const { return m_KbOpen; }
+    const XrKeyboard& keyboard() const { return m_Kb; }
+    uint8_t stickyModifiers() const { return m_KbSticky; }
+    int keyboardHover(bool* pressed) const
+    {
+        *pressed = m_KbActiveKey >= 0 && m_KbActiveKey == m_KbHover;
+        return m_KbHover;
+    }
+    bool keyboardPointer(XrPosef* pose) const;
+    // updateFrame 之後、鍵盤那一層擺好之後呼叫：shown＝這一格鍵盤有畫出來；pose／w／h＝鍵盤 quad（space 座標）
+    // bar／barW／barH＝鍵盤下方那條白條的命中範圍（§VR-KBD-DRAG；比畫出來的大）
+    void updateKeyboard(XrTime t, XrSpace space, bool shown, const XrPosef& pose, float w, float h, const XrPosef& bar, float barW,
+                        float barH);
+    // §VR-KBD-DRAG：0＝沒指著白條、1＝指著、2＝拖動中
+    int keyboardBarState() const { return m_KbDragHand >= 0 ? 2 : (m_KbBarHover ? 1 : 0); }
+    // 拖動中每一格回報鍵盤中心的新位置（取走就清掉）；朝向由呼叫端決定
+    bool takeKeyboardMove(XrVector3f* center)
+    {
+        if (!m_KbMoveReq) {
+            return false;
+        }
+        m_KbMoveReq = false;
+        *center = m_KbMovePos;
+        return true;
+    }
+
 private:
     struct Hand {
         // 按鍵快照（updateFrame 寫、fill 讀）
@@ -95,6 +135,10 @@ private:
         uint32_t edges = 0;
     };
 
+    void setKeyboardOpen(bool open, const char* why);
+    void kbPress(int idx);
+    void kbRelease();
+    void kbSend(int vk, bool down, uint8_t mods);
     bool boolState(XrAction a, int h) const;
     float floatState(XrAction a, int h) const;
     XrVector2f vecState(XrAction a, int h) const;
@@ -137,6 +181,40 @@ private:
     // §VR-EXIT-COMBO：X（Touch 在左手、Frame 在右手）。只給結束組合鍵用、不轉送；Frame 右手的 x 本來沒有綁
     XrAction m_ComboX = XR_NULL_HANDLE;
     XrSpace m_GripSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    // §VR-KBD（都只在 frame thread 用，m_KbToggleReq 除外）
+    XrAction m_AimPose = XR_NULL_HANDLE;
+    XrSpace m_AimSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    std::function<void(int, bool, uint8_t)> m_KbKey;
+    std::atomic<int> m_KbToggleReq{0};
+    XrKeyboard m_Kb;
+    bool m_KbOpen = false;
+    bool m_KbMaskUntilRelease = false;  // 開關那一下還按著的鍵：全部放開之前不送給 host
+    uint64_t m_KbComboStartNs[2] = {0, 0};
+    bool m_KbComboFired[2] = {false, false};
+    bool m_KbRawTrigger[2] = {false, false};  // 這一格真實的扳機（沒被遮掉的）
+    bool m_KbTrigPrev[2] = {false, false};
+    int m_KbHand = 1;            // 目前用哪一手指（最近按過扳機、或唯一指著鍵盤的那一手）
+    int m_KbPressHand = -1;      // 按著鍵的那一手
+    uint8_t m_KbSticky = 0;
+    int m_KbHover = -1;
+    int m_KbActiveKey = -1;
+    uint8_t m_KbActiveMods = 0;
+    bool m_KbHit = false;
+    XrPosef m_KbHitPose = {};
+    uint32_t m_StatKbKeys = 0;
+    // §VR-KBD-DRAG
+    int m_KbDragHand = -1;         // 抓著白條的那一手
+    XrVector3f m_KbDragRel = {};   // 抓住那一刻鍵盤中心在那一手 aim 座標裡的位置
+    bool m_KbBarHover = false;
+    bool m_KbMoveReq = false;
+    XrVector3f m_KbMovePos = {};
+    uint32_t m_StatKbDrags = 0;
+    bool m_KbTestMoved = false;
+    // dev --xr-test-keyboard
+    QString m_KbTestText;
+    std::vector<int> m_KbTestKeys;
+    int m_KbTestState = 0;  // 0＝還沒開、1＝按鍵中、2＝做完
+    uint64_t m_KbTestShownNs = 0;
     XrAction m_EyeGazeAction = XR_NULL_HANDLE;
     XrSpace m_EyeGazeSpace = XR_NULL_HANDLE;
 
