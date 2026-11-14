@@ -42,11 +42,14 @@ public class PcGridAdapter extends GenericGridAdapter<PcView.ComputerObject> {
         super.notifyDataSetChanged();
     }
 
+    // 排序與下面的 populateView 都只讀 ComputerObject 的 shown* 欄位（UI 執行緒在
+    // PcView.updateComputer 同步的那一份），不直接讀輪詢執行緒會原地改的 details：
+    // 這樣「有沒有變」的比對與實際畫出的內容永遠是同一份值。
     public void sortList() {
         Collections.sort(itemList, new Comparator<PcView.ComputerObject>() {
             @Override
             public int compare(PcView.ComputerObject lhs, PcView.ComputerObject rhs) {
-                return lhs.details.name.toLowerCase().compareTo(rhs.details.name.toLowerCase());
+                return lhs.shownName.toLowerCase().compareTo(rhs.shownName.toLowerCase());
             }
         });
     }
@@ -58,37 +61,37 @@ public class PcGridAdapter extends GenericGridAdapter<PcView.ComputerObject> {
     @Override
     public void populateView(View parentView, ImageView imgView, ProgressBar prgView, TextView txtView, ImageView overlayView, PcView.ComputerObject obj) {
         imgView.setImageResource(R.drawable.ic_computer);
-        if (obj.details.state == ComputerDetails.State.ONLINE) {
+        if (obj.shownState == ComputerDetails.State.ONLINE) {
             imgView.setAlpha(1.0f);
         }
         else {
             imgView.setAlpha(0.4f);
         }
 
-        if (obj.details.state == ComputerDetails.State.UNKNOWN) {
+        if (obj.shownState == ComputerDetails.State.UNKNOWN) {
             prgView.setVisibility(View.VISIBLE);
         }
         else {
             prgView.setVisibility(View.INVISIBLE);
         }
 
-        txtView.setText(obj.details.name);
-        if (obj.details.state == ComputerDetails.State.ONLINE) {
+        txtView.setText(obj.shownName);
+        if (obj.shownState == ComputerDetails.State.ONLINE) {
             txtView.setAlpha(1.0f);
         }
         else {
             txtView.setAlpha(0.4f);
         }
 
-        if (obj.details.state == ComputerDetails.State.OFFLINE) {
+        if (obj.shownState == ComputerDetails.State.OFFLINE) {
             overlayView.setImageResource(R.drawable.ic_pc_offline);
             overlayView.setAlpha(0.4f);
             overlayView.setVisibility(View.VISIBLE);
         }
         // We must check if the status is exactly online and unpaired
         // to avoid colliding with the loading spinner when status is unknown
-        else if (obj.details.state == ComputerDetails.State.ONLINE &&
-                obj.details.pairState == PairingManager.PairState.NOT_PAIRED) {
+        else if (obj.shownState == ComputerDetails.State.ONLINE &&
+                obj.shownPairState == PairingManager.PairState.NOT_PAIRED) {
             overlayView.setImageResource(R.drawable.ic_lock);
             overlayView.setAlpha(1.0f);
             overlayView.setVisibility(View.VISIBLE);
@@ -104,7 +107,7 @@ public class PcGridAdapter extends GenericGridAdapter<PcView.ComputerObject> {
         // case isVipleStreamPeer is false by default).
         View vipleBadge = parentView.findViewById(R.id.grid_viple_badge);
         if (vipleBadge != null) {
-            vipleBadge.setVisibility(obj.details.isVipleStreamPeer ? View.VISIBLE : View.GONE);
+            vipleBadge.setVisibility(obj.shownViplePeer ? View.VISIBLE : View.GONE);
         }
     }
 }

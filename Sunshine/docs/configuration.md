@@ -1459,7 +1459,13 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Sunshine tries to save bandwidth when content on screen is static or a low framerate. Because many clients expect a constant stream of video frames, a certain amount of duplicate frames are sent when this happens. This setting controls the lowest effective framerate a stream can reach.
+            The lowest effective framerate a stream can reach. Many clients expect a constant stream of video frames, so
+            when capture delivers no new frame within one frame interval at this rate (static screen, or content running
+            below the stream's framerate), the previous frame is encoded and sent again as a duplicate.
+            @note{With the default of 0 a regular desktop stream keeps sending frames at close to the full framerate the
+            client requested even when nothing on screen changes. The duplicates are small, but each one is still
+            encoded, sent and decoded. Set a lower value to save encoder time and bandwidth on static or low-framerate
+            content.}
         </td>
     </tr>
     <tr>
@@ -1471,11 +1477,14 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td rowspan="3">Choices</td>
         <td>0</td>
-        <td>Use half the stream's FPS as the minimum target.</td>
+        <td>Use the framerate requested by the client as the minimum target (the full framerate, not half of it).
+            Exceptions: VR sessions use 10 FPS, and event-driven capture (the XDG portal capture on Linux) uses 1 FPS.</td>
     </tr>
     <tr>
         <td>1-1000</td>
-        <td>Specify your own value. The real minimum may differ from this value.</td>
+        <td>Specify your own value; it also replaces the 10 FPS used for VR sessions. A setting of 20 is recommended if
+            you stream 24 or 30 FPS content. The real minimum may differ from this value, because each duplicate frame
+            is sent one encode time after the wait runs out.</td>
     </tr>
 </table>
 
@@ -1488,6 +1497,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             Sunshine will attempt to open ports for streaming over the internet.
+            @note{The port mappings are refreshed every 2 minutes. While no UPnP gateway can be found on the network
+            (no device answers the discovery, or the one that answers is not an internet gateway), the retry interval
+            grows from 2 minutes up to 30 minutes; once a gateway has been found in this run it stays at 2 minutes.
+            Restart the service to retry immediately after enabling UPnP on the router.}
         </td>
     </tr>
     <tr>
@@ -2778,17 +2791,32 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td>Description</td>
         <td colspan="2">
             VipleStream 2.0: what the SteamVR driver does when no new tracking sample arrives for more than two
-            display periods (stale threshold: max(2T, 25 ms)). `blend` (default) linearly decays linear and angular velocities to zero over 40 ms without zeroing the pose time offset, holding the pose at the extrapolated end point, and smoothly interpolates (linear for position, slerp for rotation) back to new tracking samples over 40 ms upon recovery (short gaps under 2T without entering stale do not blend). `legacy` zeroes the velocities and the pose time offset, which makes the head and the
+            display periods (stale threshold: max(2T, 25 ms)). `blend` (the default until 2.0.186) linearly decays linear and angular velocities to zero over 40 ms without zeroing the pose time offset, holding the pose at the extrapolated end point, and smoothly interpolates (linear for position, slerp for rotation) back to new tracking samples over 40 ms upon recovery (short gaps under 2T without entering stale do not blend). `legacy` zeroes the velocities and the pose time offset, which makes the head and the
             controllers jump back and then forward again when the next sample arrives. `hold` keeps extrapolating
             from the last sample for gaps of up to 300 ms (the angular velocity fades out over 50 ms) and only
             then falls back to `legacy`.
-            @note{Applies to VR sessions only.}
+            `coast` (the default) fixes three problems of `blend` that show on a path with gaps in the uplink (for
+            example over a VPN from a remote location, where the controllers jumped around): `blend` re-timed the
+            last pose to "now" when it entered stale without moving it, which pulled the head and the controllers
+            back by velocity x 25-50 ms; it started to slow down after 25 ms although most gaps are shorter than
+            40 ms; and on recovery it interpolated from a fixed point towards a moving one. With `coast` the pose
+            keeps moving at its last velocity until the total extrapolation that is shown (SteamVR's own plus the
+            gap) reaches about 80 ms - for gaps of up to 60 ms on a local network, the same as SteamVR's own
+            extrapolation, so a gap is invisible for steady motion - then slows down to a stop over 40 ms; the pose
+            is resent every 5 ms meanwhile; and on recovery the difference between where the pose was shown and the
+            new sample is removed over 40 ms while the velocity of the new sample is used at once. The driver takes
+            SteamVR's prediction time into account so that the displayed pose neither pulls back while slowing
+            down nor jumps when samples return. Samples that arrive in a burst after a delay and are already more
+            than 50 ms past their target time are skipped in favour of the newer ones of the same burst.
+            @note{Applies to VR sessions only. `coast` was verified with unit tests and with an emulated headset
+            (uplink gaps of 40 ms every 540 ms: the pose moved 5.2 mm on recovery with `blend`, 0.8 mm with `coast`);
+            it has not been judged on a worn headset yet - set `blend` to compare.}
         </td>
     </tr>
     <tr>
         <td>Default</td>
         <td colspan="2">@code{}
-            blend
+            coast
             @endcode</td>
     </tr>
     <!--
@@ -2808,7 +2836,54 @@ not matter). Any other value is reported in the log as an invalid value and the 
     <tr>
         <td>Example</td>
         <td colspan="2">@code{}
-            vr_stale_policy = blend
+            vr_stale_policy = coast
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_ctrl_extrap_ms
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: the longest time SteamVR may extrapolate the controllers, in milliseconds; `auto`
+            (default) is 20 ms and `unlimited` removes the limit. SteamVR has a single prediction time (the headset's vsync-to-photons time). The host
+            sets it to 30-60 ms so that the head pose matches the moment the streamed picture is shown, and the
+            controllers are extrapolated to the same moment: after the headset has already predicted them about
+            24 ms ahead, SteamVR extends them in a straight line for another 18-25 ms on a local network (45-55 ms
+            over a remote path), using the velocity of the sample, and the velocity it reports to the game is not
+            extrapolated at all. A swing is a high-acceleration movement, so the game gets a position that was
+            extended linearly together with an older velocity - in a game like table tennis the ball then leaves
+            the paddle too fast or too slow depending on where in the swing it is hit. (The same game running on
+            the headset itself only has the first 24 ms.)
+            With a number, the driver moves each controller pose back along its own velocity by whatever exceeds
+            the limit before reporting it, so SteamVR's extrapolation ends up no longer than the limit; the pose
+            time itself is not changed. `0` gives the game exactly the pose the headset predicted, with the
+            velocity of that same moment; the price is that the hands are shown later than they really are by the
+            removed time (about 20 ms on a local network, about 50 ms over a remote path). A value such as `10`
+            is a compromise. `auto` limits it to 20 ms: that is about what happens on a local network anyway, so
+            nothing changes there, while over a remote path the 45-55 ms are cut to 20 ms.
+            @note{The amount is derived from the prediction time SteamVR reports for each submitted frame, so a few
+            milliseconds of extrapolation remain at `0`. Verified with an emulated headset against the real
+            SteamVR (the right controller trails the head by 23.1 ms at `0`, 13.1 ms at `10`, 0.0 ms at
+            `unlimited`); not judged on a worn headset yet - set `unlimited` for the behaviour before 2.0.186.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            auto
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">auto, unlimited, 0-50</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_ctrl_extrap_ms = 10
             @endcode</td>
     </tr>
 </table>
@@ -3055,6 +3130,145 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td>Example</td>
         <td colspan="2">@code{}
             vr_multilink_fault = 1:60:40,2:40:60:40
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_multilink_uso
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0 (Windows only): hand each video batch of a link to the system in one call (UDP send
+            offload) instead of one call per packet. The packets on the wire are the same. A link where the batched
+            call fails while single packets work falls back to one call per packet for the rest of the session.
+            Batches are sent one packet at a time anyway while fault injection is active, while
+            [vr_pace_spread_pct](#vr_pace_spread_pct) spreads the frame, and when a batch is larger than 64 KB.
+            @note{Not tested on a headset yet, which is why it is off by default.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_multilink_uso = enabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_pace_spread_pct
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: spread the packets of each video frame evenly over part of the stream frame period
+            instead of sending them all at once. Meant for paths that drop everything for a few milliseconds
+            several times per second (measured over a VPN from a remote location): a frame sent at once often
+            falls into such a gap as a whole and cannot be recovered, while a spread frame loses only a few
+            packets that error correction can rebuild. Measured on such a path with the two ways of sending
+            alternating within one session: at 72 fps the client lost a frame 3 times per 10 s instead of 8,
+            showed runs of three or more repeated display refreshes about half as often, and the bitrate control
+            held a 20-40% higher bitrate, for 7-9 ms more latency; at 144 fps 6 instead of 10 losses per 10 s
+            for 3.6 ms more latency.
+            `auto` (default): the host turns spreading on by itself while a single link carries the video, no
+            resend requests arrive (see below), and the client keeps reporting blocks it could not recover
+            (4 or more in each of two consecutive 10-second windows); it turns it off again after two minutes
+            with at most one such block per window. While on, each frame is spread over about 6.5 ms (85% of the
+            frame period at 144 fps, 46% at 72 fps) - a longer spread did not help more and costs latency. Every
+            switch is logged as `[VIPLE-VR-LINK] pacing auto: on|off`.
+            `0`: never spread. `1`-`95`: always spread over this percentage of the frame period (for comparisons).
+            Packets of one frame are never more than 1 ms apart (small frames are spread over less time), each
+            frame is scheduled from the moment it is queued (a late start is caught up at once rather than
+            pushed onto the next frame), and resends are not delayed. Links that are being measured, and in
+            `vr_multilink = always` a link that only gets a short deadline because another link is carrying
+            video, send without spreading.
+            @note{Applies only to video sent over [vr_multilink](#vr_multilink) links. Do not force it on with a
+            number on a local network: where resends ([vr_multilink_repair](#vr_multilink_repair)) are active, a
+            gap of 3 ms in the middle of a spread frame makes the client report the packets that have not been
+            sent yet as missing, and the host sends them twice. `auto` never turns it on there.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            auto
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">auto, 0, 1-95</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_pace_spread_pct = 0
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_pace_ab_s
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Development only: when [vr_pace_spread_pct](#vr_pace_spread_pct) is set, alternate within each VR session
+            between spreading frames and sending them at once every this many seconds, starting with spreading.
+            Every switch is logged as `[VIPLE-VR-LINK] pacing A/B: on|off`, right after a 10-second statistics line,
+            so that each 10-second window belongs to one state. Used to compare the two on a path whose quality
+            changes within minutes. 0 = no switching. Every switch moves the moment a frame is complete by most of a
+            frame period and the display-phase control needs 10-20 s to follow, so use at least 120 and ignore the
+            first 20 s after each switch.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            0
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">0 or 10-600</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_pace_ab_s = 30
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_abr_experimental
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Development only: turn on four VR bitrate rules added on 2026-11-13 (verify a "persistent loss" cut
+            against the measured delivery, treat losses during a stall as congestion, hold the bitrate during an
+            outage, and ramp up faster after the VPN path changes from relayed to direct). Measurements the same
+            night contradicted their assumptions and a headset session with them felt worse, so they are off;
+            with `disabled` the bitrate control behaves as in 2.0.175. Kept for comparison while they are redesigned.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_abr_experimental = enabled
             @endcode</td>
     </tr>
 </table>

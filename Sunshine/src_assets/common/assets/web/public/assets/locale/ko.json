@@ -263,7 +263,7 @@
     "max_bitrate": "최대 비트",
     "max_bitrate_desc": "VipleStream-Server이 스트림을 인코딩할 최대 비트 전송률(Kbps)입니다. 0으로 설정하면 항상 VipleStream에서 요청한 비트레이트를 사용합니다.",
     "minimum_fps_target": "최소 FPS 목표",
-    "minimum_fps_target_desc": "스트림이 도달할 수 있는 가장 낮은 유효 FPS입니다. 값이 0이면 스트림 FPS의 약 절반으로 간주됩니다. 24 또는 30fps 콘텐츠를 스트리밍하는 경우 20을 설정하는 것이 좋습니다.",
+    "minimum_fps_target_desc": "스트림이 도달할 수 있는 가장 낮은 유효 FPS입니다. 값이 0이면 클라이언트가 요청한 FPS(절반이 아닌 전체)를 사용합니다. 24 또는 30fps 콘텐츠를 스트리밍하는 경우 20을 설정하는 것이 좋습니다.",
     "min_log_level": "로그 레벨",
     "min_log_level_0": "Verbose",
     "min_log_level_1": "Debug",

@@ -13,6 +13,11 @@
 #include "streaming/session.h"
 #include "backend/nvcomputer.h"
 
+#include <QScopeGuard>  // §PERF-1113：每秒統計延到送完封包之後
+#ifdef __linux__
+#include <sys/prctl.h>  // §PERF-1113：PR_SET_TIMERSLACK（解碼執行緒的 100 µs 輪詢）
+#endif
+
 #ifdef VIPLE_MPQUIC
 // common-c 的 PlatformSockets.h（經 QuicTransport.h／PlatformNetIf.h 帶入）在 Windows 會把
 // EAGAIN、EINTR、EWOULDBLOCK 等 errno 巨集改成 WSA 的值。這個檔案後面拿 AVERROR(EAGAIN)
@@ -739,7 +744,6 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
     : m_Pkt(av_packet_alloc()),
       m_VideoDecoderCtx(nullptr),
       m_RequiredPixelFormat(AV_PIX_FMT_NONE),
-      m_DecodeBuffer(1024 * 1024, 0),
       m_HwDecodeCfg(nullptr),
       m_BackendRenderer(nullptr),
       m_FrontendRenderer(nullptr),
@@ -794,6 +798,8 @@ FFmpegVideoDecoder::~FFmpegVideoDecoder()
     av_log_set_level(AV_LOG_INFO);
 
     av_packet_free(&m_Pkt);
+    // §PERF-1113：pool 本身有參照計數，還被解碼器扣著的緩衝區（例如被放生的解碼執行緒）歸還之後才真的釋放
+    av_buffer_pool_uninit(&m_PktBufPool);
 }
 
 IFFmpegRenderer* FFmpegVideoDecoder::getBackendRenderer()
@@ -850,6 +856,13 @@ void FFmpegVideoDecoder::reset()
 
     m_FramesIn = m_FramesOut = 0;
     m_FrameInfoQueue.clear();
+    // §PERF-1113：正常情況 submitDecodeUnit 送完就放掉了；只有解碼執行緒卡在 avcodec_send_packet 裡被放生時這裡還留著
+    // 一份參照（FFmpeg 進函式時已經自己加了參照，這裡放掉不影響它）。清掉，免得重用這個物件時測試幀帶著舊的 buf
+    if (m_Pkt != nullptr && m_Pkt->buf != nullptr) {
+        av_buffer_unref(&m_Pkt->buf);
+        m_Pkt->data = nullptr;
+        m_Pkt->size = 0;
+    }
     while (!m_PyroWaveFrameQueue.isEmpty()) {
         AVFrame* pwFrame = m_PyroWaveFrameQueue.dequeue();
         av_frame_free(&pwFrame);
@@ -3610,6 +3623,7 @@ bool FFmpegVideoDecoder::initializeInternal(PDECODER_PARAMETERS params)
 
 void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
 {
+    // §PERF-1113：寫入目標是 m_Pkt->buf（submitDecodeUnit 從 pool 取好、大小已經夠），不再是 m_DecodeBuffer
     // §REVIEW-1111：SPS 是從網路來的。找不到起始碼、解析失敗時原本照樣往下做（nalStart 留在 0 時寫入起點會跑到緩衝區
     // 前一個位元組；write_nal_unit 回 −1 時 offset 倒退），解析函式庫本身也有兩處沒有上限（已另外補）。
     // 任何一步不對就照原樣複製這個 SPS，不做修正。
@@ -3647,13 +3661,13 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
 
         // Copy the modified NALU data. This clobbers byte 0 and starts NALU data at byte 1.
         // Since it prepended one extra byte, subtract one from the returned length.
-        const int written = write_nal_unit(stream, (uint8_t*)&m_DecodeBuffer.data()[initialOffset + nalStart - 1],
+        const int written = write_nal_unit(stream, &m_Pkt->buf->data[initialOffset + nalStart - 1],
                                            MAX_SPS_EXTRA_SIZE + entry->length - nalStart);
         if (written > 0) {
             offset += written - 1;
 
             // Copy the NALU prefix over from the original SPS
-            memcpy(&m_DecodeBuffer.data()[initialOffset], entry->data, nalStart);
+            memcpy(&m_Pkt->buf->data[initialOffset], entry->data, nalStart);
             offset += nalStart;
             spsFixed = true;
         }
@@ -3663,7 +3677,7 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
     }
     if (!spsFixed) {
         // Write the buffer as-is
-        memcpy(&m_DecodeBuffer.data()[offset],
+        memcpy(&m_Pkt->buf->data[offset],
                entry->data,
                entry->length);
         offset += entry->length;
@@ -3855,17 +3869,58 @@ void FFmpegVideoDecoder::decoderThreadProc()
         // 「在解碼佇列等了多久」與「submitDecodeUnit 本身花多久」（v4l2m2m 的 send_packet 可能在裡面就等解碼）
         std::vector<uint32_t> queueWaitUs;
         std::vector<uint32_t> submitUs;
+        // §PERF-1113（先睡一段再輪詢）：送進一張之後，解碼器要固定一段時間才有輸出；那段時間每 100 µs 問一次都是白問。
+        // preSleepUs＝第一次睡多久（0＝不用，直接 100 µs 輪詢），由上一個 10 秒視窗的 recvWait p05 減保護量得出
+        uint32_t preSleepUs = 0;
+        bool freshSubmit = false;      // 剛送進一張、而且解碼器裡只有這一張：下一次等待可以用 preSleepUs
+        bool preSlept = false;         // 上一次等待是 preSleepUs，之後還沒有再輪詢過
+        uint32_t preSleepBackoffs = 0; // 這個視窗：睡完第一次問就有輸出（可能睡過頭）而縮短了幾次
     } vrPoll;
     // §VR-DECPOLL2：VR（真 XR）時「沒有輸出也沒有新輸入」改成每 100 µs 問一次（原本 SDL_Delay(1)：頭盔 HEVC 幾乎每幀都
-    // 睡一次、recvWait p50 1065 µs＝等滿 1 ms 才拿到早就解好的幀）。平面串流照舊 1 ms
-    const uint32_t vrPollUs = m_VrDropOnMetaMiss ? 100u : 0u;
+    // 睡一次、recvWait p50 1065 µs＝等滿 1 ms 才拿到早就解好的幀）。
+    // §PERF-1113：條件從「真 XR」放寬成「真 XR 或 v4l2m2m 解碼器」——v4l2m2m 的取幀是非同步的，頭盔的平面串流與
+    // 其他 v4l2m2m 裝置原本還是等滿 1 ms 一格。D3D11VA／VAAPI 的取幀是同步的，走不到輪詢，維持 1 ms 不受影響。
+    // 統計（[VIPLE-VR-DECPOLL]）跟著同一個條件一起印
+    const bool v4l2m2mDecoder = m_VideoDecoderCtx != nullptr && m_VideoDecoderCtx->codec != nullptr &&
+                                strstr(m_VideoDecoderCtx->codec->name, "_v4l2m2m") != nullptr;
+    const bool pollStats = m_VrDropOnMetaMiss || v4l2m2mDecoder;
+    const uint32_t vrPollUs = pollStats ? 100u : 0u;
     const int vrInjectStuckAt = m_VrDropOnMetaMiss && StreamingPreferences::get(nullptr) != nullptr
                                     ? StreamingPreferences::get(nullptr)->vrInjectDecStuckAt : 0;
-    // VR：送一個 decode unit 進解碼器，順便記佇列等待與送出本身的時間
+
+    // §PERF-1113：解碼執行緒原本是一般優先權，一張影像從解出到交給 renderer 要經過它；被別的執行緒擋住一個排程片段
+    // 就是一張晚到的影像。硬體解碼時這條執行緒只做「送封包、取幀、交出去」的短工作，比照 PacerRender 要求 HIGH。
+    // 軟體解碼不提（slice threading 時這條執行緒自己就在解碼，是長時間吃 CPU 的工作）；PyroWave 也不提。
+    // Flatpak 沙盒裡可能拿不到（沒有 rtkit、RLIMIT_NICE 不夠）：失敗就照原本的優先權跑，整個行程只印一次結果
+    {
+        bool prioWanted = false, prioOk = false;
+        if (!m_PyroWaveBridge && (v4l2m2mDecoder || isHardwareAccelerated())) {
+            prioWanted = true;
+            prioOk = SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH) == 0;
+        }
+        int slackState = -1;  // -1＝沒有設（不是 Linux 或不走細輪詢）、0＝失敗、1＝成功
+#ifdef __linux__
+        if (vrPollUs != 0) {
+            // Linux 預設的 timer slack 是 50 µs，sleep_for(100 µs) 實際約 150 µs；這條執行緒改成 1 µs
+            slackState = prctl(PR_SET_TIMERSLACK, 1000UL, 0UL, 0UL, 0UL) == 0 ? 1 : 0;
+        }
+#endif
+        static std::atomic<bool> s_PrioLogged {false};
+        if (!s_PrioLogged.exchange(true)) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-DEC-PRIO] decoder thread: high priority %s, timer slack %s, pollUs=%u (logged once per process)",
+                        !prioWanted ? "not requested" : prioOk ? "ok" : "refused (keeping default priority)",
+                        slackState < 0 ? "unchanged" : slackState == 1 ? "1us" : "refused",
+                        vrPollUs);
+        }
+    }
+
+    // 送一個 decode unit 進解碼器，順便記佇列等待與送出本身的時間（VR 或 v4l2m2m 才記）
     auto vrTimedSubmit = [&](PDECODE_UNIT du) -> int {
-        if (!m_VrDropOnMetaMiss) {
+        if (!pollStats) {
             return submitDecodeUnit(du);
         }
+        const int framesInBefore = m_FramesIn;
         const uint64_t t0 = LiGetMicroseconds();
         const uint64_t enq = du->enqueueTimeUs;
         // dev（--vr-inject-dec-stuck N）：第 N 個封包不送、這條執行緒永遠不回來，連結束要求也不理——跟真的卡在驅動裡
@@ -3879,8 +3934,14 @@ void FFmpegVideoDecoder::decoderThreadProc()
         const int st = submitDecodeUnit(du);
         const uint64_t t1 = LiGetMicroseconds();
         vrPoll.lastSubmitUs = t1;
-        // §VR-RATE-CAUSE：送進去的這張排在佇列尾，最舊的那張可能是它（佇列原本是空的）
-        VrDecodeTiming::publishOldestPending(m_FrameInfoQueue.isEmpty() ? 0 : m_FrameInfoQueue.head().enqueueTimeUs);
+        // §PERF-1113：只有「這一張真的送進去了、而且解碼器裡只有它」才可以先睡一段；還有更早的一張在裡面時，
+        // 先睡會把那一張的輸出一起拖晚
+        vrPoll.freshSubmit = m_FramesIn == framesInBefore + 1 && m_FramesIn - m_FramesOut == 1;
+        vrPoll.preSlept = false;
+        if (m_VrDropOnMetaMiss) {
+            // §VR-RATE-CAUSE：送進去的這張排在佇列尾，最舊的那張可能是它（佇列原本是空的）
+            VrDecodeTiming::publishOldestPending(m_FrameInfoQueue.isEmpty() ? 0 : m_FrameInfoQueue.head().enqueueTimeUs);
+        }
         vrPoll.queueWaitUs.push_back((uint32_t)(std::min<uint64_t>)(t0 > enq ? t0 - enq : 0, 0xffffffffu));
         vrPoll.submitUs.push_back((uint32_t)(std::min<uint64_t>)(t1 - t0, 0xffffffffu));
         return st;
@@ -3905,20 +3966,32 @@ void FFmpegVideoDecoder::decoderThreadProc()
         };
         auto pct = [&](double p) -> uint32_t { return pctOf(v, p); };
         const uint32_t maxUs = v.empty() ? 0u : *std::max_element(v.begin(), v.end());
-        // pollUs＝輪詢的間隔（0＝SDL_Delay(1)）、mixed＝這個視窗裡間隔有沒有變過。§VR-DECPOLL2 的兩欄加在行尾
+        const uint32_t usedPreSleepUs = vrPoll.preSleepUs;  // 這個視窗用的值（中途可能被縮短，印視窗結束時的）
+        const uint32_t p05Us = pct(0.05);
+#ifdef __linux__
+        // §PERF-1113：下一個視窗第一次睡多久＝這個視窗 recvWait 的 p05 減 250 µs（排程喚醒的誤差＋解碼時間的抖動），
+        // 上限 2 ms；樣本不到 200 筆就不用。同時有兩張在解碼器裡的幀 recvWait 很短，會把 p05 拉低，等於自動停用。
+        // 只在 Linux 啟用：別的平台 sleep_for 的粒度是毫秒級，睡不準
+        vrPoll.preSleepUs = (v.size() >= 200 && p05Us > 250u) ? (std::min)(p05Us - 250u, 2000u) : 0u;
+#endif
+        // pollUs＝輪詢的間隔（0＝SDL_Delay(1)）、mixed＝這個視窗裡間隔有沒有變過。§VR-DECPOLL2 的兩欄加在行尾；
+        // §PERF-1113 再加 recvWait p05、這個視窗的 preSleep 與縮短次數、下一個視窗的 preSleep
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-DECPOLL] 10s frames=%u recvWait p50/p95/max=%u/%u/%u us polls=%u pollUs=%u mixed=0"
-                    " queueWait p50/p95=%u/%u us submit p50/p95=%u/%u us",
+                    " queueWait p50/p95=%u/%u us submit p50/p95=%u/%u us"
+                    " recvWait p05=%u us preSleep=%u us backoffs=%u nextPreSleep=%u us",
                     (unsigned)v.size(), pct(0.50), pct(0.95), maxUs, vrPoll.polls, vrPollUs,
                     pctOf(vrPoll.queueWaitUs, 0.50), pctOf(vrPoll.queueWaitUs, 0.95),
-                    pctOf(vrPoll.submitUs, 0.50), pctOf(vrPoll.submitUs, 0.95));
+                    pctOf(vrPoll.submitUs, 0.50), pctOf(vrPoll.submitUs, 0.95),
+                    p05Us, usedPreSleepUs, vrPoll.preSleepBackoffs, vrPoll.preSleepUs);
         vrPoll.windowStartUs = nowUs;
         v.clear();
         vrPoll.queueWaitUs.clear();
         vrPoll.submitUs.clear();
         vrPoll.polls = 0;
+        vrPoll.preSleepBackoffs = 0;
     };
-    if (m_VrDropOnMetaMiss) {
+    if (pollStats) {
         // 一個 10 秒視窗（120 fps 是 1200 筆）先配好：每一筆是在把那一幀交出去之前推的，不讓它在那裡重新配置
         vrPoll.recvWaitUs.reserve(2048);
         vrPoll.queueWaitUs.reserve(2048);  // §VR-DECPOLL2
@@ -4062,11 +4135,25 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // Capture a frame timestamp to measuring pacing delay
                     const uint64_t receivedAtUs = LiGetMicroseconds();
                     frame->pkt_dts = receivedAtUs;
-                    if (m_VrDropOnMetaMiss && vrPoll.lastSubmitUs != 0) {
+                    if (pollStats && vrPoll.lastSubmitUs != 0) {
                         // §VR-DECPOLL：沿用上面那一次讀到的時鐘，不另外取
                         vrPoll.recvWaitUs.push_back((uint32_t)(std::min<uint64_t>)(
                             receivedAtUs > vrPoll.lastSubmitUs ? receivedAtUs - vrPoll.lastSubmitUs : 0, 0xffffffffu));
                     }
+                    if (vrPoll.preSlept) {
+                        // §PERF-1113：先睡的那一段一結束、第一次問就有輸出＝這一張可能早就好了（解碼變快，例如碼率降了）。
+                        // 不等 10 秒視窗，立刻把先睡的長度縮 150 µs；連續幾張就會退到安全的長度或 0
+                        vrPoll.preSleepUs = vrPoll.preSleepUs > 150u ? vrPoll.preSleepUs - 150u : 0u;
+                        vrPoll.preSleepBackoffs++;
+                        vrPoll.preSlept = false;
+                    }
+
+                    // §PERF-1113（A33）：[VIPLE-DEC-DEPTH] 只在這一幀已經晚了的時候印，印的成本不該再加在它身上——
+                    // 值在原位置抄好，等這一幀交給 Pacer 之後才印（0＝不印、1＝事件、2＝heartbeat）
+                    int decDepthLog = 0;
+                    int decDepthQueue = 0;
+                    long long decDepthLatencyUs = 0;
+                    double decDepthRingMaxMs = 0.0;
 
                     if (!m_FrameInfoQueue.isEmpty()) {
                         // Data buffers in the DU are not valid here!
@@ -4134,22 +4221,18 @@ void FFmpegVideoDecoder::decoderThreadProc()
                             m_FrameInfoQueue.size() > 0 || maxLatMs > 8.0;
                         if (depthAbnormal &&
                                 depthNowMs - s_DecDepthLastEventMs >= 1000) {
-                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                        "[VIPLE-DEC-DEPTH] queueDepth=%d "
-                                        "frameLatencyUs=%lld latRingMaxMs=%.2f",
-                                        (int)m_FrameInfoQueue.size(),
-                                        (long long)thisFrameDecodeUs, maxLatMs);
+                            decDepthLog = 1;
                             s_DecDepthLastEventMs = depthNowMs;
                             s_DecDepthLastBeatMs = depthNowMs;
                         }
                         else if (depthNowMs - s_DecDepthLastBeatMs >= 60000) {
-                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                        "[VIPLE-DEC-DEPTH] queueDepth=%d "
-                                        "frameLatencyUs=%lld latRingMaxMs=%.2f "
-                                        "heartbeat",
-                                        (int)m_FrameInfoQueue.size(),
-                                        (long long)thisFrameDecodeUs, maxLatMs);
+                            decDepthLog = 2;
                             s_DecDepthLastBeatMs = depthNowMs;
+                        }
+                        if (decDepthLog != 0) {
+                            decDepthQueue = (int)m_FrameInfoQueue.size();
+                            decDepthLatencyUs = (long long)thisFrameDecodeUs;
+                            decDepthRingMaxMs = maxLatMs;
                         }
                     }
 
@@ -4164,7 +4247,14 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // Queue the frame for rendering (or render now if pacer is disabled)
                     setDecPhase(DP_TO_PACER);
                     m_Pacer->submitFrame(frame);
-                    if (m_VrDropOnMetaMiss) {
+                    if (decDepthLog != 0) {
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-DEC-DEPTH] queueDepth=%d "
+                                    "frameLatencyUs=%lld latRingMaxMs=%.2f%s",
+                                    decDepthQueue, decDepthLatencyUs, decDepthRingMaxMs,
+                                    decDepthLog == 2 ? " heartbeat" : "");
+                    }
+                    if (pollStats) {
                         vrPollMaybeLog(receivedAtUs);  // §VR-DECPOLL：這一幀已經交出去了
                     }
                 }
@@ -4184,11 +4274,21 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         // No output data or input data. Let's wait a little bit.
                         // VIPLE §perf — was 2ms; 1ms halves EAGAIN polling latency
                         // at 120fps (8.3ms budget → 1ms = 12% vs 24%).
-                        if (m_VrDropOnMetaMiss) {
+                        if (pollStats) {
                             vrPoll.polls++;  // §VR-DECPOLL
                         }
                         if (vrPollUs != 0) {
-                            std::this_thread::sleep_for(std::chrono::microseconds(vrPollUs));  // §VR-DECPOLL2
+                            if (vrPoll.freshSubmit && vrPoll.preSleepUs != 0 && m_FramesIn - m_FramesOut == 1) {
+                                // §PERF-1113：剛送進去的這一張至少要 preSleepUs 才會有輸出，一次睡過去，不要每 100 µs 白問。
+                                // 這段時間到的下一張輸入要等睡完才送（上限 2 ms；正常情況下一張在一個幀週期之後才到）
+                                std::this_thread::sleep_for(std::chrono::microseconds(vrPoll.preSleepUs));
+                                vrPoll.preSlept = true;
+                            }
+                            else {
+                                std::this_thread::sleep_for(std::chrono::microseconds(vrPollUs));  // §VR-DECPOLL2
+                                vrPoll.preSlept = false;
+                            }
+                            vrPoll.freshSubmit = false;
                         }
                         else {
                             SDL_Delay(1);
@@ -4391,7 +4491,17 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     m_BwTracker.AddBytes(du->fullLength);
 
     // Flip stats windows roughly every second
-    if (LiGetMicroseconds() > m_ActiveWndVideoStats.measurementStartUs + 1000000) {
+    // §PERF-1113：每秒一次的視窗翻頁（排序、[VIPLE-NET10]、被動補幀控制器、overlay 文字）原本排在
+    // avcodec_send_packet 之前，那一張的解碼因此晚開始幾十微秒（開著效能 overlay 時更多）。整段包成 scope guard，
+    // 在這個函式返回時才跑——也就是封包已經送進解碼器之後；所有返回路徑（含送封包失敗）都會跑到，不會漏翻頁。
+    // 差別只有：觸發翻頁的這一張的 received／host latency 等計數算在舊視窗而不是新視窗。
+    // 被動補幀控制器看的「解碼器裡還有幾張」在這裡先取，維持「不含這一張」的原語意
+    const bool statsFlipDue = LiGetMicroseconds() > m_ActiveWndVideoStats.measurementStartUs + 1000000;
+    const int inFlightAtEntry = m_FramesIn - m_FramesOut;
+    auto statsFlipGuard = qScopeGuard([&]() {
+        if (!statsFlipDue) {
+            return;
+        }
         // §LOGHYG-NET10 — [VIPLE-NET]/[VIPLE-RATIO] 舊制每秒各 1 行佔 log
         // 37.6%。改為：每秒統計照算存 ring，正常時每 10 秒印 [VIPLE-NET10]
         // （+ [VIPLE-RATIO10]）彙總；異常秒立即用原格式印出並回補前 3 秒
@@ -4590,9 +4700,16 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                 }
 
                 // v1.5.6 §R2-ι — 升 ratio 必須 gate by client struggling 訊號.
-                // 之前 controller 只看 recv/display 比例 → 誤把 server 主動降
-                // fps [Sunshine static-frame mode: 畫面不動時自動把實際送出
-                // fps 壓低省 encode + bandwidth] 當成 client 跟不上，亂升 3x.
+                // 之前 controller 只看 recv/display 比例 → 誤把「host 送來的幀率
+                // 本來就比較低」當成 client 跟不上，亂升 3x.
+                // 更正（2026-11-14）：這裡原本寫 host 有「畫面不動就自動降幀率」的
+                // static-frame mode，實際上預設（minimum_fps_target = 0）沒有——
+                // 一般 2D 擷取在畫面靜止時，host 每等滿一個幀間隔沒有新畫面就把上一張
+                // 再編一次送出（Sunshine video.cpp 的 encode_run），收到的幀率約是
+                // 串流幀率的八成（每張重複幀多花一次編碼時間；60 fps 實測約 49）。
+                // 收到的幀率會明顯偏低的情況只有：host 把 minimum_fps_target 設成
+                // 非 0、事件驅動的擷取（Linux portal，下限 1 fps）、或 host 的擷取／
+                // 編碼跟不上。這些都不是 client 跟不上，所以下面的 gate 照舊成立.
                 // 真正的 struggling signal 必須是 client GPU/CPU 真的跟不上.
                 //
                 // §R2-κ (v1.5.6) — 三訊號 OR, 避免單一訊號在某 decoder path 失準:
@@ -4609,7 +4726,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                                              ? (1000.0 / (double)displayHz)
                                              : 8.33;  // assume 120Hz fallback
                 const double chainMsLocal   = g_VkFrucChainMs.load(std::memory_order_relaxed);
-                const int    inFlightFrames = m_FramesIn - m_FramesOut;
+                const int    inFlightFrames = inFlightAtEntry;  // §PERF-1113：這段延到送完封包才跑，用進函式時的值
                 const bool   decodeTimerReliable = decodeMeanMsLocal > 1.0;
                 const bool   strugglingChain  = (chainMsLocal > frameBudgetMs * 0.70);
                 const bool   strugglingQueue  = (inFlightFrames >= 3);
@@ -4808,7 +4925,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         SDL_memcpy(&m_LastWndVideoStats, &m_ActiveWndVideoStats, sizeof(m_ActiveWndVideoStats));
         SDL_zero(m_ActiveWndVideoStats);
         m_ActiveWndVideoStats.measurementStartUs = LiGetMicroseconds();
-    }
+    });
 
     if (du->frameHostProcessingLatency != 0) {
         if (!isVrSession()) {
@@ -4867,7 +4984,26 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     }
 
     // Ensure the decoder buffer is large enough
-    m_DecodeBuffer.reserve(requiredBufferSize + AV_INPUT_BUFFER_PADDING_SIZE);
+    // §PERF-1113：從 pool 拿一塊有參照計數的緩衝區直接組封包。原本組在自己的 QByteArray、m_Pkt->buf 是空的，
+    // avcodec_send_packet 內部的 av_packet_ref 因此每幀配置一塊同樣大小的記憶體再整包複製一次。
+    // pool 的每一塊一樣大（起始 1 MB，與原本的緩衝區相同）；遇到更大的幀就換一個更大的 pool，
+    // 舊 pool 等還在外面的緩衝區歸還後自己釋放
+    const int neededBufferSize = requiredBufferSize + AV_INPUT_BUFFER_PADDING_SIZE;
+    if (m_PktBufPool == nullptr || neededBufferSize > m_PktBufPoolSize) {
+        av_buffer_pool_uninit(&m_PktBufPool);
+        m_PktBufPoolSize = qMax(neededBufferSize + neededBufferSize / 4, 1024 * 1024);
+        m_PktBufPool = av_buffer_pool_init(m_PktBufPoolSize, nullptr);
+    }
+    av_buffer_unref(&m_Pkt->buf);  // 正常是空的（上一次送完就放了），保險
+    m_Pkt->buf = m_PktBufPool != nullptr ? av_buffer_pool_get(m_PktBufPool) : nullptr;
+    if (m_Pkt->buf == nullptr) {
+        // 配置失敗：這一張沒有送進解碼器，比照送封包失敗要一張 IDR
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Failed to allocate a %d byte packet buffer (frame %d)", neededBufferSize, du->frameNumber);
+        m_Pkt->data = nullptr;
+        m_Pkt->size = 0;
+        return DR_NEED_IDR;
+    }
 
     int offset = 0;
     while (entry != nullptr) {
@@ -4876,9 +5012,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     }
 
     // FFmpeg 要求封包後面 AV_INPUT_BUFFER_PADDING_SIZE 個位元組是 0（SIMD 解析器會讀過頭）；
-    // 上面只 reserve 了空間沒清零，那裡是堆積殘值（opt B050）
-    memset(&m_DecodeBuffer.data()[offset], 0, AV_INPUT_BUFFER_PADDING_SIZE);
-    m_Pkt->data = reinterpret_cast<uint8_t*>(m_DecodeBuffer.data());
+    // pool 給的記憶體沒有清零，那裡是堆積殘值（opt B050）
+    memset(&m_Pkt->buf->data[offset], 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    m_Pkt->data = m_Pkt->buf->data;
     m_Pkt->size = offset;
 
     if (du->frameType == FRAME_TYPE_IDR) {
@@ -4970,6 +5106,10 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                 synth->pts    = (int64_t)du->enqueueTimeUs;
                 m_Pacer->submitFrame(synth);
             }
+            // §PERF-1113：這條路不送 avcodec，自己的參照在這裡放掉
+            av_buffer_unref(&m_Pkt->buf);
+            m_Pkt->data = nullptr;
+            m_Pkt->size = 0;
             m_FrameInfoQueue.enqueue(*du);
             m_FramesIn++;
             return DR_OK;
@@ -4982,6 +5122,10 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     err = avcodec_send_packet(m_VideoDecoderCtx, m_Pkt);
     parkIfAbandoned();  // §DEC-ABANDON
+    // §PERF-1113：FFmpeg 已經自己加了參照（或失敗了沒有收），放掉我們這一份，緩衝區用完才會回 pool
+    av_buffer_unref(&m_Pkt->buf);
+    m_Pkt->data = nullptr;
+    m_Pkt->size = 0;
     if (err < 0) {
         char errorstring[512];
         av_strerror(err, errorstring, sizeof(errorstring));

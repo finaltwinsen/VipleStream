@@ -215,6 +215,7 @@ namespace vripc_abi_table {
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, tile_h),
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, tile_render_w),
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, tile_render_h),
+      VRIPC_ABI_ROW_OFF(vripc_session_config_t, ctrl_keep_ms_p1),  // §VR-CTRL-EXTRAP（2026-11-13）：reserved 的第 11 位元組
       VRIPC_ABI_ROW_OFF(vripc_session_config_t, reserved),
       VRIPC_ABI_ROW_SIZE(vripc_pacing_t),
       VRIPC_ABI_ROW_ALIGN(vripc_pacing_t),

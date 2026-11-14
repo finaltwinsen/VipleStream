@@ -293,6 +293,405 @@ int rtpvTakeFrameFeedback(VIPLE_VR_FRAME_FEEDBACK_REC* out, int maxRecs,
     return n;
 }
 
+// §PERF-1113 A32 ────────────────────────────────────────────────────────────
+// 逐幀的丟失行（這裡的 Unrecoverable frame、VideoDepacketizer 的 Network dropped）在路徑劣化時每秒幾十行：頭盔的 log
+// 一小時內寫滿，每一行還在接收執行緒上付一次 log 的成本。行數用 token bucket 限流（一口氣 20 行、之後每秒 5 行）；
+// 事件照數，每 10 秒由 [VIPLE-VIDEO] loss 10s 帶出，被壓掉的行數也在那一行。
+// 狀態是檔案範圍的：看門狗的 RtpvInitializeQueue 會把整個 queue memset 掉，放在 struct 裡等於每秒補滿。
+// 只有影像接收執行緒會碰（RtpvShutdownFeedback 在它結束之後才呼叫），不加鎖。
+// 不為了限流多讀時鐘：時刻用佇列本來就讀過的（block 第一個封包到達的時刻）；0＝沒有時刻，只扣不補。
+#define RTPV_LL_BURST 20u
+#define RTPV_LL_REFILL_US 200000u     // 每 200 ms 補一行＝每秒 5 行
+#define RTPV_LL_WINDOW_US 10000000u
+
+static struct {
+    bool primed;                // 第一次用到時補滿
+    uint32_t tokens;
+    uint64_t refillUs;          // 上一次補的時刻
+    uint64_t windowUs;          // 這一窗第一個事件的時刻（0＝還沒有帶時刻的事件）
+    uint64_t lastUs;            // 最近一個事件的時刻
+    uint32_t unrecFrame;        // 單一 block 的幀收到的不夠
+    uint32_t unrecBlock;        // 多 block 的幀，其中一個 block 收到的不夠
+    uint32_t unrecLostBlocks;   // 前面的 block 整個沒到
+    uint32_t parityZero;        // unrecFrame 裡 parity 一個都沒到的
+    uint32_t shardsHave;        // unrecFrame 各次收到的 shard 數合計（data＋parity）
+    uint32_t shardsNeed;        // 同上，還原需要的 shard 數合計
+    uint32_t minPct;            // unrecFrame 裡收到比例最低的一次（%）
+    uint32_t dropEvents;        // Network dropped 的次數
+    uint32_t dropFrames;        // 與幀數
+    uint32_t lines;             // 這一窗印出的逐筆行
+    uint32_t suppressed;        // 被壓掉的
+} ll;
+
+// 印這一窗的彙總並開新的一窗（token 不動）。沒有事件就不印
+static void llSummary(uint64_t nowUs, bool final) {
+    const uint32_t unrec = ll.unrecFrame + ll.unrecBlock + ll.unrecLostBlocks;
+
+    if (unrec != 0 || ll.dropEvents != 0) {
+        const uint32_t secs = ll.windowUs != 0 && nowUs > ll.windowUs ? (uint32_t)((nowUs - ll.windowUs + 500000u) / 1000000u) : 0;
+
+        Limelog("[VIPLE-VIDEO] loss 10s: secs=%u unrecoverable=%u (frame=%u block=%u lostBlocks=%u) shards=%u/%u minPct=%u parity0=%u "
+                "netDropped=%u/%u lines=%u suppressed=%u%s\n",
+                secs, unrec, ll.unrecFrame, ll.unrecBlock, ll.unrecLostBlocks, ll.shardsHave, ll.shardsNeed,
+                ll.unrecFrame != 0 ? ll.minPct : 100u, ll.parityZero, ll.dropFrames, ll.dropEvents, ll.lines, ll.suppressed,
+                final ? " (final)" : "");
+    }
+    ll.windowUs = 0;
+    ll.lastUs = 0;
+    ll.unrecFrame = ll.unrecBlock = ll.unrecLostBlocks = 0;
+    ll.parityZero = ll.shardsHave = ll.shardsNeed = ll.minPct = 0;
+    ll.dropEvents = ll.dropFrames = 0;
+    ll.lines = ll.suppressed = 0;
+}
+
+// 這一窗滿 10 秒就印。事件進來之前、每個 block 開始時各看一次（丟失停了也要印得出來）
+static void llRoll(uint64_t nowUs) {
+    if (ll.windowUs != 0 && nowUs > ll.windowUs && nowUs - ll.windowUs >= RTPV_LL_WINDOW_US) {
+        llSummary(nowUs, false);
+    }
+}
+
+// 一個事件的逐筆行能不能印（呼叫端已經把事件記進這一窗）
+static bool llTake(uint64_t nowUs) {
+    if (!ll.primed) {
+        ll.primed = true;
+        ll.tokens = RTPV_LL_BURST;
+        ll.refillUs = nowUs;
+    }
+    else if (nowUs != 0) {
+        if (ll.refillUs == 0) {
+            ll.refillUs = nowUs;  // 之前沒有時刻（佇列剛被看門狗重設）：從這裡起算，不補
+        }
+        else if (nowUs > ll.refillUs) {
+            const uint64_t n = (nowUs - ll.refillUs) / RTPV_LL_REFILL_US;
+            if (n != 0) {
+                ll.tokens = n >= RTPV_LL_BURST - ll.tokens ? RTPV_LL_BURST : ll.tokens + (uint32_t)n;
+                ll.refillUs += n * RTPV_LL_REFILL_US;
+            }
+        }
+    }
+    if (nowUs != 0) {
+        if (ll.windowUs == 0) {
+            ll.windowUs = nowUs;
+        }
+        ll.lastUs = nowUs;
+    }
+    if (ll.tokens != 0) {
+        ll.tokens--;
+        ll.lines++;
+        return true;
+    }
+    ll.suppressed++;
+    return false;
+}
+
+// 佇列放棄了正在等的對象。kind：0＝單一 block 的幀、1＝多 block 幀的其中一個 block、2＝前面的 block 整個沒到。
+// 要在佇列清掉收到的封包數之前呼叫。回傳 true＝這一筆的 Unrecoverable 行可以印
+static bool llNoteUnrecoverable(PRTP_VIDEO_QUEUE queue, int kind) {
+    const uint64_t nowUs = queue->bufferFirstRecvTimeUs;
+
+    llRoll(nowUs);
+    if (kind == 0) {
+        // 這三個數字與那一行印的相同（分析腳本原本逐行算的 FEC shard 到達率改由彙總行算）
+        const uint32_t have = queue->pendingFecBlockList.count;
+        const uint32_t need = queue->bufferDataPackets;
+        const uint32_t pct = need != 0 ? (uint32_t)((uint64_t)have * 100u / need) : 100u;
+
+        if (ll.unrecFrame == 0 || pct < ll.minPct) {
+            ll.minPct = pct;
+        }
+        ll.unrecFrame++;
+        ll.shardsHave += have;
+        ll.shardsNeed += need;
+        if (queue->receivedParityPackets == 0) {
+            ll.parityZero++;
+        }
+    }
+    else if (kind == 1) {
+        ll.unrecBlock++;
+    }
+    else {
+        ll.unrecLostBlocks++;
+    }
+    return llTake(nowUs);
+}
+
+// VideoDepacketizer 的「Network dropped」行（frames＝這一次跳過幾幀；nowUs＝這一幀第一個封包到達的時刻，和上面同一個時鐘）。
+// 回傳 true＝這一行可以印。宣告在兩個 .c 各寫一份：這一輪只動這兩個檔，之後可以搬進 Limelight-internal.h
+bool RtpvLossLogDropped(uint32_t frames, uint64_t nowUs);
+bool RtpvLossLogDropped(uint32_t frames, uint64_t nowUs) {
+    llRoll(nowUs);
+    ll.dropEvents++;
+    ll.dropFrames = frames > UINT32_MAX - ll.dropFrames ? UINT32_MAX : ll.dropFrames + frames;
+    return llTake(nowUs);
+}
+
+// §PERF-1113 A48（量測）─────────────────────────────────────────────────────
+// 只有一條連線在送影像的 VR session：救不回來的、與靠 FEC 還原的 block，缺的 data shard 落在哪裡、空白多長，每 10 秒印成
+// [VIPLE-VR-FECGAP]。要回答的是「parity 晚一點送（§VR-FEC-SPREAD）值不值得做」：救不回來的 block 若多半是 data 尾段
+// 連同後面的 parity 一起不見、或整幀整個 block 都沒到，延後才有用；缺在中段、parity 有到只是不夠的，延後沒有幫助。
+// 只記帳，不影響任何判斷。狀態是檔案範圍的（理由同上面的 ll），只有影像接收執行緒會碰。
+// 不多讀時鐘：時刻用 §ABR-ADAPT 替每個收下的封包記的（fb.lastUs，VR session 才有——量測也只在 VR session 做）。
+#define RTPV_GS_WINDOW_US 10000000u
+#define RTPV_GS_MAX_SHARDS 256u       // have 記得下的 block 大小（RS 的上限是 255）；更大的 block 不看
+
+static struct {
+    // 正在看的 block（佇列正在等的那一個）
+    bool valid;
+    bool fits;                  // have 記得下這個 block、而且可信（太大的、被佇列重設打斷的只記時刻，不分類）
+    bool dual;                  // 期間有兩條以上的連線在送影像：不計
+    uint8_t block;
+    uint32_t frame;
+    uint32_t data;              // data shard 數
+    uint32_t total;             // data＋parity
+    uint32_t top;               // 收到的最大 shard 序號
+    uint32_t holeMaxUs;         // block 內跨過缺口的到達間隔（缺口前後兩個收到的封包隔多久），最大的一次
+    uint64_t lastRxUs;          // 這個 block 最近一個收下的封包到達的時刻（0＝沒有時刻）
+    uint8_t have[RTPV_GS_MAX_SHARDS / 8];
+    // 不分 block
+    uint64_t prevRxUs;          // 最近一個收下的封包到達的時刻
+    uint64_t blackoutFromUs;    // 一段丟失之前最後一個收下的封包的時刻（0＝沒有待量的）
+    // 10 秒統計
+    uint64_t logUs;
+    uint32_t failed;            // 救不回來的 block（收到一部分）
+    uint32_t failedPos[5];      // 缺的 data shard 在哪裡：頭／中／尾（各只有一段）、不只一段、全部
+    uint32_t failedIntoParity;  // 其中：最後一個 data 與第一個 parity 都沒到（缺口從 data 尾段連進 parity 區）
+    uint32_t failedParity0;     // 其中：parity 一個都沒到
+    uint32_t recovered;         // 靠 FEC 還原的 block
+    uint32_t recoveredPos[5];
+    uint32_t recoveredShards;   // 還原的 data shard 數合計
+    uint32_t recoveredMax;      // 與最多的一次
+    uint32_t wholeFrames;       // 一個封包都沒到的幀
+    uint32_t wholeBlocks;       // 整個沒到的 block（同一幀的其他 block 有到）
+    uint32_t hole[6];           // holeMaxUs：≤1／≤2／≤4／≤8／≤16／>16 ms（每個 failed／recovered 的 block 一筆）
+    uint32_t blackout[6];       // 一段丟失之後第一個收下的封包，距離丟失之前最後一個多久：≤4／≤8／≤16／≤32／≤64／>64 ms
+} gs;
+
+static bool gsSingle(PRTP_VIDEO_QUEUE q) {
+    return (q->mlCarryMask & (q->mlCarryMask - 1)) == 0;
+}
+
+static bool gsHave(uint32_t idx) {
+    return (gs.have[idx >> 3] & (1u << (idx & 7))) != 0;
+}
+
+// 第一格的上限是 firstEdgeUs，之後每格加倍，共 6 格
+static unsigned gsBucket(uint64_t us, uint32_t firstEdgeUs) {
+    uint64_t edge = firstEdgeUs;
+    unsigned b = 0;
+
+    while (b < 5 && us > edge) {
+        edge <<= 1;
+        b++;
+    }
+    return b;
+}
+
+static void gsLog(bool final) {
+    if (gs.failed + gs.recovered + gs.wholeFrames + gs.wholeBlocks != 0) {
+        Limelog("[VIPLE-VR-FECGAP] 10s: failed=%u (head=%u mid=%u tail=%u multi=%u all=%u | intoParity=%u parity0=%u) "
+                "recovered=%u (head=%u mid=%u tail=%u multi=%u all=%u | shards=%u max=%u) wholeFrames=%u wholeBlocks=%u "
+                "| holeMs le1=%u le2=%u le4=%u le8=%u le16=%u gt16=%u | blackoutMs le4=%u le8=%u le16=%u le32=%u le64=%u gt64=%u%s\n",
+                gs.failed, gs.failedPos[0], gs.failedPos[1], gs.failedPos[2], gs.failedPos[3], gs.failedPos[4],
+                gs.failedIntoParity, gs.failedParity0,
+                gs.recovered, gs.recoveredPos[0], gs.recoveredPos[1], gs.recoveredPos[2], gs.recoveredPos[3], gs.recoveredPos[4],
+                gs.recoveredShards, gs.recoveredMax, gs.wholeFrames, gs.wholeBlocks,
+                gs.hole[0], gs.hole[1], gs.hole[2], gs.hole[3], gs.hole[4], gs.hole[5],
+                gs.blackout[0], gs.blackout[1], gs.blackout[2], gs.blackout[3], gs.blackout[4], gs.blackout[5],
+                final ? " (final)" : "");
+    }
+    gs.failed = gs.failedIntoParity = gs.failedParity0 = 0;
+    gs.recovered = gs.recoveredShards = gs.recoveredMax = 0;
+    gs.wholeFrames = gs.wholeBlocks = 0;
+    memset(gs.failedPos, 0, sizeof(gs.failedPos));
+    memset(gs.recoveredPos, 0, sizeof(gs.recoveredPos));
+    memset(gs.hole, 0, sizeof(gs.hole));
+    memset(gs.blackout, 0, sizeof(gs.blackout));
+}
+
+// 佇列正在等的 block 收下一個封包（idx＝它在 block 裡的序號）。要在 FB_ON_ACCEPTED 之後呼叫：時刻取自 fb
+static void gsOnAccepted(PRTP_VIDEO_QUEUE q, uint32_t idx) {
+    const uint64_t rxUs = q->fb.active && q->fb.frame == q->currentFrameNumber ? q->fb.lastUs : 0;
+
+    if (!gs.valid || gs.frame != q->currentFrameNumber || gs.block != q->multiFecCurrentBlockNumber) {
+        // 換了一個 block：先收尾（10 秒行、待量的那一段丟失），再開始看這一個
+        const uint32_t total = q->bufferDataPackets + q->bufferParityPackets;
+
+        if (rxUs != 0) {
+            if (gs.logUs == 0) {
+                gs.logUs = rxUs;
+            }
+            else if (rxUs > gs.logUs && rxUs - gs.logUs >= RTPV_GS_WINDOW_US) {
+                gsLog(false);
+                gs.logUs = rxUs;
+            }
+            if (gs.blackoutFromUs != 0) {
+                if (rxUs > gs.blackoutFromUs) {
+                    gs.blackout[gsBucket(rxUs - gs.blackoutFromUs, 4000)]++;
+                }
+                gs.blackoutFromUs = 0;
+            }
+            gs.prevRxUs = rxUs;
+        }
+        gs.valid = true;
+        gs.fits = total != 0 && total <= RTPV_GS_MAX_SHARDS && idx < total;
+        gs.dual = !gsSingle(q);
+        gs.block = q->multiFecCurrentBlockNumber;
+        gs.frame = q->currentFrameNumber;
+        gs.data = q->bufferDataPackets;
+        gs.total = total;
+        gs.top = idx;
+        gs.holeMaxUs = 0;
+        gs.lastRxUs = rxUs;
+        memset(gs.have, 0, sizeof(gs.have));
+        if (gs.fits) {
+            gs.have[idx >> 3] |= (uint8_t)(1u << (idx & 7));
+        }
+        return;
+    }
+    if (!gsSingle(q)) {
+        gs.dual = true;
+    }
+    if (gs.fits && idx < gs.total) {
+        if (idx > gs.top) {
+            if (idx > gs.top + 1 && rxUs > gs.lastRxUs && gs.lastRxUs != 0) {
+                const uint64_t d = rxUs - gs.lastRxUs;
+                if (d > gs.holeMaxUs) {
+                    gs.holeMaxUs = d > UINT32_MAX ? UINT32_MAX : (uint32_t)d;
+                }
+            }
+            gs.top = idx;
+        }
+        gs.have[idx >> 3] |= (uint8_t)(1u << (idx & 7));
+    }
+    if (rxUs != 0) {
+        gs.lastRxUs = rxUs;
+        gs.prevRxUs = rxUs;
+    }
+}
+
+// 佇列正在等的 block 結束了：done＝收齊（true）或放棄（false）。要在佇列清掉它的封包、換對象之前呼叫
+static void gsOnBlockEnd(PRTP_VIDEO_QUEUE q, bool done) {
+    uint32_t lost = 0, runs = 0, first = 0, last = 0, i;
+    unsigned pos;
+
+    if (!gs.valid || gs.frame != q->currentFrameNumber || gs.block != q->multiFecCurrentBlockNumber) {
+        gs.valid = false;
+        return;
+    }
+    gs.valid = false;
+    if (!gs.fits || gs.dual || !gsSingle(q)) {
+        return;
+    }
+    if (done && q->receivedDataPackets == q->bufferDataPackets) {
+        return;  // data 全到了，沒用到 FEC
+    }
+    for (i = 0; i < gs.data; i++) {
+        if (!gsHave(i)) {
+            if (lost == 0) {
+                first = i;
+            }
+            if (lost == 0 || last + 1 != i) {
+                runs++;
+            }
+            last = i;
+            lost++;
+        }
+    }
+    if (lost == 0) {
+        return;  // 放棄時 data 其實都在（不支援 FEC 還原的舊 server）：不是缺片
+    }
+    pos = lost == gs.data ? 4u : runs > 1 ? 3u : first == 0 ? 0u : last + 1 == gs.data ? 2u : 1u;
+    if (done) {
+        gs.recovered++;
+        gs.recoveredPos[pos]++;
+        gs.recoveredShards += lost;
+        if (lost > gs.recoveredMax) {
+            gs.recoveredMax = lost;
+        }
+    }
+    else {
+        gs.failed++;
+        gs.failedPos[pos]++;
+        if (gs.total > gs.data) {
+            uint32_t got = 0;
+            for (i = gs.data; i < gs.total; i++) {
+                if (gsHave(i)) {
+                    got++;
+                }
+            }
+            if (got == 0) {
+                gs.failedParity0++;
+            }
+            if (!gsHave(gs.data - 1) && !gsHave(gs.data)) {
+                gs.failedIntoParity++;
+            }
+        }
+        // 尾端沒到：之後第一個收下的封包到的時候，量這一段丟失多長（已經有待量的就沿用更早的那個起點）
+        if (!gsHave(gs.total - 1) && gs.blackoutFromUs == 0) {
+            gs.blackoutFromUs = gs.lastRxUs;
+        }
+    }
+    if (gs.holeMaxUs != 0) {
+        gs.hole[gsBucket(gs.holeMaxUs, 1000)]++;
+    }
+}
+
+// 佇列正在等的幀要跳到 newFrame。hadPending＝正在等的那個 block 收到過封包（它算救不回來的，gsOnBlockEnd 記過了）。
+// 要在佇列改動 currentFrameNumber 與 block 號之前呼叫
+static void gsOnSkip(PRTP_VIDEO_QUEUE q, uint32_t newFrame, bool hadPending) {
+    bool any = false;
+    uint32_t n;
+
+    if (q->currentFrameNumber == 0 || !gsSingle(q)) {
+        return;  // 0＝§FRZ-RESYNC-SENTINEL：沒有基準幀號，不是掉幀
+    }
+    n = newFrame - q->currentFrameNumber;
+    if (n == 0 || n > 0x7FFFFFFFu) {
+        return;
+    }
+    if (hadPending || q->multiFecCurrentBlockNumber != 0) {
+        // 正在等的那一幀收到過東西，不算整幀沒到；它前面的 block 收齊了、剩下的一個封包都沒來＝整個 block 沒到
+        n--;
+        if (!hadPending) {
+            gs.wholeBlocks++;
+            any = true;
+        }
+    }
+    if (n > 4096) {
+        n = 4096;  // 和 §FRZ-GAP-FEC 的上限一致（幀號不可信時不讓計數爆掉）
+    }
+    if (n != 0) {
+        gs.wholeFrames += n;
+        any = true;
+    }
+    // 只有正在等的那一幀救不回來、後面沒有整幀不見的，丟失多長由 gsOnBlockEnd 決定要不要量
+    if (any && gs.blackoutFromUs == 0) {
+        gs.blackoutFromUs = gs.prevRxUs;
+    }
+}
+
+// 這個封包所屬的幀，前面的 block 整個沒到（佇列印 lost FEC blocks 的那條路）
+static void gsOnLostBlocks(PRTP_VIDEO_QUEUE q) {
+    if (q->currentFrameNumber == 0 || !gsSingle(q)) {
+        return;
+    }
+    gs.wholeBlocks++;
+    if (gs.blackoutFromUs == 0) {
+        gs.blackoutFromUs = gs.prevRxUs;
+    }
+}
+
+// 桌面 session 連函式都不呼叫（和 FB_* 一樣）
+#define GS_ON_ACCEPTED(q, idx) \
+    do { if ((VrFlags & VIPLE_VR_SF_ENABLED) != 0) gsOnAccepted((q), (idx)); } while (0)
+#define GS_ON_BLOCK_END(q, done) \
+    do { if ((VrFlags & VIPLE_VR_SF_ENABLED) != 0) gsOnBlockEnd((q), (done)); } while (0)
+#define GS_ON_SKIP(q, newFrame, hadPending) \
+    do { if ((VrFlags & VIPLE_VR_SF_ENABLED) != 0) gsOnSkip((q), (newFrame), (hadPending)); } while (0)
+#define GS_ON_LOST_BLOCKS(q) \
+    do { if ((VrFlags & VIPLE_VR_SF_ENABLED) != 0) gsOnLostBlocks((q)); } while (0)
+
 // §ABR-ADAPT（11-04 修）：fbLock 每場只建一次（RtpvInitializeQueue 會被 watchdog 重複呼叫），連線拆除時刪掉。
 // 原本從沒刪，每場漏一個 mutex，debug 版在 cleanupPlatform 的 activeMutexes==0 斷言中止
 void RtpvShutdownFeedback(void) {
@@ -301,6 +700,12 @@ void RtpvShutdownFeedback(void) {
         fbLockReady = false;
     }
     fbQueue = NULL;
+
+    // §PERF-1113 A32／A48：這裡每場只來一次、所有執行緒都結束了——把還沒印的那一窗印出來，下一場從頭算
+    llSummary(ll.lastUs, true);
+    memset(&ll, 0, sizeof(ll));
+    gsLog(true);
+    memset(&gs, 0, sizeof(gs));
 }
 
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
@@ -311,6 +716,9 @@ void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
         PltLockMutex(&fbLock);
     }
     memset(queue, 0, sizeof(*queue));
+    // §PERF-1113 A48：佇列收過的 shard 清掉了。正在看的那個 block 若還有封包來（看門狗保留幀號時會），它之後缺什麼是
+    // 這次重設造成的、不是網路——位圖不再可信，不分類也不計（只有影像接收執行緒與連線建立時會到這裡）
+    gs.fits = false;
 
     queue->currentFrameNumber = 1;
     queue->multiFecCapable = APP_VERSION_AT_LEAST(7, 1, 431);
@@ -2408,7 +2816,15 @@ static int mlAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, P
 
 // 下一個要處理的期限（等待到期、或該回報缺包了）還有幾毫秒；0＝沒有。每個期限到了之後 RtpvPollHold 一定會讓狀態
 // 前進（放行、回報次數加一），不會一直回 1。
+// §PERF-1113：算法搬到 RtpvHoldTimeoutUs（微秒）；這裡只做無條件進位，回傳值和原本完全相同（已到期＝1）。
 int RtpvHoldTimeoutMs(PRTP_VIDEO_QUEUE queue) {
+    const int us = RtpvHoldTimeoutUs(queue);
+    return us == 0 ? 0 : (us + 999) / 1000;
+}
+
+// §PERF-1113：同上，單位是微秒（0＝沒有；已到期＝1）。原本只有毫秒版，傳給 poll 時無條件進位，到期的幀平均晚 0.5 ms、
+// 最壞 1 ms 才放行或回報；多連線的接收迴圈在 Linux 上改用這個值配 ppoll。
+int RtpvHoldTimeoutUs(PRTP_VIDEO_QUEUE queue) {
     uint64_t nowUs = PltGetMicroseconds();
     uint64_t due = 0;
 
@@ -2437,7 +2853,10 @@ int RtpvHoldTimeoutMs(PRTP_VIDEO_QUEUE queue) {
     if (due <= nowUs) {
         return 1;
     }
-    return (int)((due - nowUs + 999) / 1000);
+    if (due - nowUs > 1000000000ull) {
+        return 1000000000;  // 不會發生（期限都在幾十毫秒內）；只是不讓轉成 int 時溢位
+    }
+    return (int)(due - nowUs);
 }
 
 void RtpvPollHold(PRTP_VIDEO_QUEUE queue) {
@@ -2783,15 +3202,19 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         if (queue->pendingFecBlockList.count != 0) {
             // Report the final status of the FEC queue before dropping this frame
             reportFinalFrameFecStatus(queue);
+            GS_ON_BLOCK_END(queue, false);  // §PERF-1113 A48（量測）：救不回來的 block 缺了哪些
 
             if (queue->multiFecLastBlockNumber != 0) {
-                Limelog("Unrecoverable frame %d (block %d of %d): %d+%d=%d received < %d needed\n",
-                        queue->currentFrameNumber, queue->multiFecCurrentBlockNumber+1,
-                        queue->multiFecLastBlockNumber+1,
-                        queue->receivedDataPackets,
-                        queue->receivedParityPackets,
-                        queue->pendingFecBlockList.count,
-                        queue->bufferDataPackets);
+                // §PERF-1113 A32：逐筆行限流；次數由 [VIPLE-VIDEO] loss 10s 帶出（下面兩處相同）
+                if (llNoteUnrecoverable(queue, 1)) {
+                    Limelog("Unrecoverable frame %d (block %d of %d): %d+%d=%d received < %d needed\n",
+                            queue->currentFrameNumber, queue->multiFecCurrentBlockNumber+1,
+                            queue->multiFecLastBlockNumber+1,
+                            queue->receivedDataPackets,
+                            queue->receivedParityPackets,
+                            queue->pendingFecBlockList.count,
+                            queue->bufferDataPackets);
+                }
 
                 // If we just missed a block of this frame rather than the whole thing,
                 // we must manually advance the queue to the next frame. Parsing this
@@ -2825,11 +3248,13 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
                 }
             }
             else {
-                Limelog("Unrecoverable frame %d: %d+%d=%d received < %d needed\n",
-                        queue->currentFrameNumber, queue->receivedDataPackets,
-                        queue->receivedParityPackets,
-                        queue->pendingFecBlockList.count,
-                        queue->bufferDataPackets);
+                if (llNoteUnrecoverable(queue, 0)) {
+                    Limelog("Unrecoverable frame %d: %d+%d=%d received < %d needed\n",
+                            queue->currentFrameNumber, queue->receivedDataPackets,
+                            queue->receivedParityPackets,
+                            queue->pendingFecBlockList.count,
+                            queue->bufferDataPackets);
+                }
             }
         }
 
@@ -2840,10 +3265,13 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
             // Report the final status of the FEC queue before dropping this frame
             reportFinalFrameFecStatus(queue);
 
-            Limelog("Unrecoverable frame %d: lost FEC blocks %d to %d\n",
-                    nvPacket->frameIndex,
-                    expectedFecBlockNumber + 1,
-                    fecCurrentBlockNumber);
+            if (llNoteUnrecoverable(queue, 2)) {
+                Limelog("Unrecoverable frame %d: lost FEC blocks %d to %d\n",
+                        nvPacket->frameIndex,
+                        expectedFecBlockNumber + 1,
+                        fecCurrentBlockNumber);
+            }
+            GS_ON_LOST_BLOCKS(queue);  // §PERF-1113 A48（量測）
 
             // §VR-REPAIR-RTT（量測）：這個封包所屬的那一幀也救不回來了（前面的 block 沒到），之後改等它的下一幀
             msNoteLost(queue, nvPacket->frameIndex + 1, hadPending, have);
@@ -2909,6 +3337,7 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
             }
 
             msNoteLost(queue, nvPacket->frameIndex, hadPending, have);  // §VR-REPAIR-RTT（量測）
+            GS_ON_SKIP(queue, nvPacket->frameIndex, hadPending);  // §PERF-1113 A48（量測）
 
             // If the frame immediately preceding this one was lost, we may have already
             // reported it using our speculative RFI logic. Don't report it again.
@@ -2977,6 +3406,7 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         connectionSawFrame(queue->currentFrameNumber);
 
         queue->bufferFirstRecvTimeUs = PltGetMicroseconds();
+        llRoll(queue->bufferFirstRecvTimeUs);  // §PERF-1113 A32：丟失彙總滿 10 秒就印（用剛讀到的時刻，不多讀時鐘）
 
         // §M01-B：這裡用本封包的序號重建基準。舊基準若在本封包「前半窗之外」，
         // 代表基準已失效（見上方 §M01-B 序號檢查的說明）；只印 log，不改行為。
@@ -3039,6 +3469,7 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
     else {
         // §ABR-ADAPT：queuePacket 回 false 的是複本，不會進到這裡。FEC 還原合成的封包不走這條。
         FB_ON_ACCEPTED(queue, queue->currentFrameNumber, packet->sequenceNumber, fbPayloadLen(length, dataOffset));
+        GS_ON_ACCEPTED(queue, U16(packet->sequenceNumber - queue->bufferLowestSequenceNumber));  // §PERF-1113 A48（量測）
         if (queue->mlMeas) {
             // §VR-REPAIR-RTT（量測）：block 內的停頓。receivedHighestSequenceNumber 還是這個封包之前的值（下面才更新）
             msNoteAccepted(queue, queue->pendingFecBlockList.count > 1 &&
@@ -3081,6 +3512,8 @@ static int RtpvAddPacketInternal(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int
         // Try to submit this frame. If we haven't received enough packets,
         // this will fail and we'll keep waiting.
         if (reconstructFrame(queue) == 0) {
+            GS_ON_BLOCK_END(queue, true);  // §PERF-1113 A48（量測）：靠 FEC 還原的 block 缺了哪些
+
             // Stage the complete FEC block for use once reassembly is complete
             stageCompleteFecBlock(queue);
 

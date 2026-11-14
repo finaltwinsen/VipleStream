@@ -113,6 +113,21 @@ kill server 之後約 33 ms pose 就失效（V4 實測，門檻 1 s）；新 ser
   SteamVR 從樣本的目標時間繼續外插；角速度的座標語意還沒以探測確認，hold 期間 50 ms 內線性衰減到 0。重送的樣本
   （角速度已衰減）也記進 pose_history。超過 100 ms 才回到舊規則（`holdExpired` 計數）。舊規則每輪約 150 次讓頭與拍子
   先往回跳（外插整段被拿掉）、新樣本到了再往前跳；上行空窗多半是延遲尖峰而不是掉包（POSE-RX gap 只有 0～9）。
+- **bit3 §VR-STALE-BLEND**（`vr_stale_policy = blend`，2026-10-31～11-13 的預設）：進 stale 後 offset 不歸零、速度 40 ms 內衰減到 0、
+  恢復時 40 ms 內插回新樣本。它有三個問題（2026-11-13 設計評審，`temp/perf_review_1113/phys_0_design.md`）：重送時把同一個位置
+  重新標成晚 25～50 ms 的時刻，SteamVR 顯示的頭與拍子往回跳「速度×25～50 ms」；25 ms 就開始降速，而外出的空窗七成不到 40 ms；
+  恢復時拿固定的凍結點對移動中的新位置做內插。
+- **bit4 §VR-STALE-COAST**（`vr_stale_policy = coast`，2026-11-14 起的預設；和 bit3 一起設，舊 driver 只認得 bit3）：重送的姿態取自
+  一條連續的軌跡——顯示出來的總外插（SteamVR 的那一段＋空窗）到約 80 ms 之前照最後的速度等速前進（區網是空窗 60 ms 以內，
+  和 SteamVR 自己外插的結果相同），之後 40 ms 內降到 0；stale 期間每 5 ms 重送；恢復時把「這一刻顯示出來的位置」在換樣本前後
+  的落差當成 40 ms 內消掉的偏移量。降速與恢復都把 SteamVR 自己的外插長度算進去（`pred_us_recent`：scene 層 SubmitLayer 給的
+  預測時間），顯示位置不回縮、不前跳。成批晚到、目標時間已過 50 ms 以上的樣本略過，等同一批裡比較新的。
+  區網無人實測（每 540 ms 斷 40 ms、合成動作 0.13 m/s）：恢復時的落差 blend 中位數 5.2 mm、coast 0.8 mm。
+- **§VR-CTRL-EXTRAP**（`vr_ctrl_extrap_ms`，session config 的 `ctrl_keep_ms_p1`；預設 auto＝不限制）：SteamVR 只有一個預測時間，
+  控制器跟著 HMD 被外插到同一個時刻（區網實測 43.5 − 20.5 ≈ 23 ms，直線、速度不跟著外插）。設成數值時 driver 在回報前把控制器的
+  姿態沿著它自己的速度往回推「超過上限的那一段」，`poseTimeOffset` 不動。`vr_probe --mode predict` 實測（頭與右手同一個合成動作）：
+  auto 時 `hmdMinusRight` 0.0 ms、上限 10 時 −13.1 ms、上限 0 時 −23.1 ms，和 `predUs − ctrlOffUs − 上限` 相符。
+  對桌球這類看揮拍速度的遊戲有沒有幫助要配戴比較（家裡比 auto／10／0）。
 
 - **bit2 §VR-ANGVEL-LOCAL**（`vr_angvel_local = enabled`）：HMD 與控制器的角速度轉成機體座標（`ω_local = q⁻¹ ω q`）
   再交給 SteamVR。`vr_probe --mode predict`（client `--vr-emulate --vr-synthetic-motion tilt30yaw`：頭與右手先傾 30°、

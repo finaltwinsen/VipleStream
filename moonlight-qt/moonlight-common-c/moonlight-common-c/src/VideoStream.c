@@ -422,7 +422,13 @@ static void VideoReceiveThreadProc(void* context) {
     // 多連線：下一幀先到時，還沒收齊的這一幀最多再等一個幀週期（等落後那條連線送來的那一份）。
     // server 每條連線最多把一批留兩個幀週期，等一個週期是延遲與救回率的折衷
     uint32_t mlHoldUs = 0;
-    int mlHoldPollMs = 0;
+    // §PERF-1113：單位從毫秒改成微秒（見 RtpvHoldTimeoutUs）；> 0＝這一次的接收逾時是為了佇列的期限縮短的
+    int mlHoldPollUs = 0;
+    // §PERF-1113：多連線＋影像加密時，收到的封包不複製到 encryptedBuffer，直接指到連線層的暫存（見 vrmlRecvVideo 的 direct）。
+    // 其餘情況就是 encryptedBuffer（或 NULL）。
+    char* encSrc;
+    // §PERF-1113：這個封包的時刻，每個封包只讀一次時鐘，看門狗與補包決定共用（原本各讀各的，連線層還再讀兩次）
+    uint64_t pktNowUs;
     // §VR-REPAIR-RTT：串流的幀週期（不夾；上面的 mlHoldUs 是夾在 4～14 ms 的同一個值）
     const uint32_t mlBasePeriodUs = StreamConfig.fps > 0 ? 1000000u / (uint32_t)StreamConfig.fps : 11111u;
     uint32_t mlFramePeriodUs = mlBasePeriodUs;
@@ -479,6 +485,8 @@ static void VideoReceiveThreadProc(void* context) {
         // §VR-REPAIR-RTT：上一圈（加封包、等待到期、收到 REPAIR_GONE）若放行了被補包拖晚的幀，在開始等下一個封包之前記下來
         rrNoteDelayedRelease();
 
+        encSrc = encryptedBuffer;  // §PERF-1113：預設在 encryptedBuffer；多連線＋加密時 vrmlRecvVideo 會改指到它的暫存
+
 #ifdef VIPLE_MPQUIC
         if (useQuicVideo && !quicVideoFellBack) {
             // §K.10: 不在此層加背壓 — ring buffer 必須盡快清空，
@@ -511,23 +519,43 @@ static void VideoReceiveThreadProc(void* context) {
             while (vrmlTakeGone(&goneFrame, &goneBlock)) {
                 RtpvRepairGone(&rtpQueue, goneFrame, goneBlock);
             }
-            mlHoldPollMs = RtpvHoldTimeoutMs(&rtpQueue);
+            mlHoldPollUs = RtpvHoldTimeoutUs(&rtpQueue);
             err = vrmlRecvVideo(rtpSocket,
                                 encrypted ? encryptedBuffer : buffer,
                                 receiveSize,
                                 &rxLink,
-                                mlHoldPollMs);
+                                mlHoldPollUs,
+                                encrypted ? &encSrc : NULL);
             while (err == 0 && vrmlTakeGone(&goneFrame, &goneBlock)) {
                 // 只收到 GONE、沒有影像封包：vrmlRecvVideo 提早返回，不是逾時
                 RtpvRepairGone(&rtpQueue, goneFrame, goneBlock);
                 goneOnly = true;
             }
             if (goneOnly) {
-                mlHoldPollMs = 0;
+                mlHoldPollUs = 0;
                 continue;
             }
         }
         else {
+            // §PERF-1113：單一路徑（2D）有封包被 §K.17 延後時，這一次最多只等到它的期限（RTPV_GRACE_MAX_US，10 ms）。
+            // 原本這裡一律等 SO_RCVTIMEO 的 100 ms：host 剛好沒有下一個封包（畫面靜止）時，已經到齊、只是被延後的那一幀
+            // 要多卡將近 100 ms 才放行。多連線那條路徑本來就有處理（上面的 RtpvHoldTimeoutUs）。
+            if (rtpQueue.deferredCount > 0) {
+                const int graceMs = RtpvHoldTimeoutMs(&rtpQueue);
+                if (graceMs > 0 && graceMs < UDP_RECV_POLL_TIMEOUT_MS) {
+                    struct pollfd gracePfd;
+
+                    gracePfd.fd = rtpSocket;
+                    gracePfd.events = POLLIN;
+                    gracePfd.revents = 0;
+                    if (pollSockets(&gracePfd, 1, graceMs) == 0) {
+                        // 期限內沒有封包：放行延後的（還沒到期的話 RtpvPollGrace 不會動，下一圈再等剩下的時間）
+                        RtpvPollGrace(&rtpQueue);
+                        continue;
+                    }
+                    // 有封包（或 poll 出錯）：照常往下收，錯誤由 recvUdpSocket 回報
+                }
+            }
             err = recvUdpSocket(rtpSocket,
                                 encrypted ? encryptedBuffer : buffer,
                                 receiveSize,
@@ -540,10 +568,10 @@ static void VideoReceiveThreadProc(void* context) {
         }
         else if  (err == 0) {
             RtpvPollGrace(&rtpQueue);  // §K.17-GRACE-TIMEOUT：接收逾時也要放行延後的封包
-            if (mlHoldPollMs > 0) {
+            if (mlHoldPollUs > 0) {
                 // 為了等待期限而縮短的逾時：把到期的放行，不算進「一直沒有影像」的計時
                 RtpvPollHold(&rtpQueue);
-                mlHoldPollMs = 0;
+                mlHoldPollUs = 0;
                 continue;
             }
             if (!receivedDataFromPeer) {
@@ -573,6 +601,8 @@ static void VideoReceiveThreadProc(void* context) {
 
             firstDataTimeMs = PltGetMillis();
         }
+
+        pktNowUs = PltGetMicroseconds();  // §PERF-1113：這個封包只讀這一次時鐘
 
 #ifndef LC_FUZZING
         // §FRZ-DIAG：此處 err > 0，計入所有收到的 datagram（含 runt / FEC /
@@ -642,7 +672,7 @@ static void VideoReceiveThreadProc(void* context) {
         // 要求 IDR。誤觸（server 出 IDR 慢於 2s）僅多要一張 IDR。
         if (receivedFullFrame) {
             static uint64_t lastWatchdogCheckUs, lastWatchdogFireUs;
-            uint64_t nowUs = PltGetMicroseconds();
+            const uint64_t nowUs = pktNowUs;  // §PERF-1113：共用這個封包已經讀過的時刻
             if (nowUs - lastWatchdogCheckUs > 250000) {
                 lastWatchdogCheckUs = nowUs;
                 // §FRZ-DIAG：1 秒視窗滾動（藉 250ms 檢查節奏進行；封包完全
@@ -748,7 +778,8 @@ static void VideoReceiveThreadProc(void* context) {
 
         // Decrypt the packet into the buffer if encryption is enabled
         if (encrypted) {
-            PENC_VIDEO_HEADER encHeader = (PENC_VIDEO_HEADER)encryptedBuffer;
+            // §PERF-1113：encSrc＝這個封包實際所在的位置（多連線時在連線層的暫存裡，其餘是 encryptedBuffer）
+            PENC_VIDEO_HEADER encHeader = (PENC_VIDEO_HEADER)encSrc;
 
             // If this frame is below our current frame number, discard it before decryption
             // to save CPU cycles decrypting FEC shards for a frame we already reassembled.
@@ -848,11 +879,13 @@ static void VideoReceiveThreadProc(void* context) {
             in.negotiatedRepair = (feat & VIPLE_VR_LINK_F_REPAIR) != 0;
             in.negotiatedRtt = (feat & VIPLE_VR_LINK_F_REPAIR_RTT) != 0;
             in.carrying = vrmlVideoCarrying();
-            in.legacyRttMs = in.negotiatedRepair ? vrmlCtrlRttMs() : -1;
+            // §PERF-1113：以下三處原本各讀一次時鐘（vrmlCtrlRttMs、這裡、vrmlRepairRtt），改成共用 pktNowUs。
+            // pktNowUs 是解密之前讀的，比原本早幾微秒（一次 AES-GCM 的時間），對毫秒級的判斷沒有影響。
+            in.legacyRttMs = in.negotiatedRepair ? vrmlCtrlRttMsAt(pktNowUs / 1000) : -1;
             rtpQueue.mlCarryMask = (uint8_t)vrmlVideoCarryMask();
-            in.nowUs = in.negotiatedRepair ? PltGetMicroseconds() : 0;
+            in.nowUs = in.negotiatedRepair ? pktNowUs : 0;
             // 往返時間的統計只看正在送影像的連線（補包只從那幾條回來）。沒協商 RTT 規則時也算：量測要用最短的那一筆
-            haveRtt = in.negotiatedRepair && vrmlRepairRtt(rtpQueue.mlCarryMask, &in.st);
+            haveRtt = in.negotiatedRepair && vrmlRepairRttAt(rtpQueue.mlCarryMask, &in.st, pktNowUs / 1000);
             in.haveStats = in.negotiatedRtt && haveRtt;
             in.armRtt = !in.negotiatedRtt || rrArmRtt(in.nowUs);
             in.holdUs = mlHoldUs;

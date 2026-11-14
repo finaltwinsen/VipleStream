@@ -54,7 +54,9 @@ namespace vrdrv {
     // fovea_a（§VR-FOVEA）：0＝均勻取樣；0.4–1＝注視點編碼，正前方（tangent 0）的斜率（見 compositor_ps.hlsl）。
     // fovea_u0（§VR-FOVEA-INSET）：> 0 時改用分段曲線（中央段斜率 fovea_a、範圍 fovea_u0），0＝三次曲線
     // tiles（§VR-FOVEA-TILES）：不是 nullptr 時改畫成每眼兩塊（eye_w／eye_h 與 fovea_* 不看）
-    void compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a = 0.0f, const float fovea_centre[2][2] = nullptr, float fovea_u0 = 0.0f, const tile_layout_t *tiles = nullptr);
+    // rt_w／rt_h（§PERF-1113）：rtv 的實際像素尺寸。有給、而且確定第 0 層會把整張寫滿時不先清成黑色；
+    // 0＝不知道，一律先清（原本的行為）
+    void compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a = 0.0f, const float fovea_centre[2][2] = nullptr, float fovea_u0 = 0.0f, const tile_layout_t *tiles = nullptr, uint32_t rt_w = 0, uint32_t rt_h = 0);
 
   private:
     ComPtr<ID3D11VertexShader> vs_;

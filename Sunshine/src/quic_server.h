@@ -497,6 +497,13 @@ namespace quic_server {
     // Log aggregate stats for all sessions (called periodically)
     void logStats();
 
+    /**
+     * §PERF-1113（審查 05 第 4 項）：叫醒 IO 執行緒，讓它馬上把各 session 的 _pendingQueue 送進 picoquic，不必等
+     * select 的 1 ms 逾時或下一個入站封包。任何執行緒；送出端把一批 datagram 入列完之後呼叫一次（不要每個 datagram
+     * 都叫）。喚醒用的 socket 沒建成時是 no-op，行為退回原本的 1 ms 輪詢。
+     */
+    void wake();
+
   private:
     void ioLoop();
 
@@ -514,6 +521,11 @@ namespace quic_server {
 
     std::mutex _sessionMutex;
     std::unordered_map<std::string, std::shared_ptr<QuicSession>> _sessions;
+
+    // §PERF-1113：喚醒用的 loopback UDP socket（自己連自己；IO 執行緒建立與關閉、把它放進 select 的讀取集合）。
+    // -1＝沒有。_wakeMutex 包住 wake() 的 send 與 IO 執行緒的關閉，關掉之後不會有人還對舊的 handle 送
+    std::mutex _wakeMutex;
+    std::intptr_t _wakeSock = -1;
 
     SessionCallback _sessionCallback;
     uint16_t _port = 0;

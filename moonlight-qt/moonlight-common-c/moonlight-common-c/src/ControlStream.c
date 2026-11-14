@@ -648,7 +648,11 @@ void LiRequestFpsChange(int newFps) {
 #define VR_WAVE_TIMEOUT_MS        1000
 #define VR_IDR_RETRY_MS           1000
 #define VR_STATS_LOG_INTERVAL_MS  10000
-#define VR_SEND_TICK_MS           2     // VrSend 執行緒的輪詢間隔
+#define VR_SEND_TICK_MS           2     // VrSend 執行緒等待的下限（期限已到或快到時）
+// §PERF-1113：VrSend 改成「有事才醒」。等待上限：degraded／第二份 LOSS 待送時 20 ms（期限算漏的保險；
+// §VR-LOSS-NO-IDR-PATH 那兩個分支看的是連線狀態、沒有期限可算，也靠這個上限），平常 100 ms（收包報告的週期）。
+#define VR_SEND_WAIT_BUSY_MAX_MS  20
+#define VR_SEND_WAIT_IDLE_MAX_MS  100
 #define VR_LOSS_TWIN_DELAY_MS     5     // LOSS 第二份延後送（分開兩個 datagram，避開同一個 burst）
 #define VR_TRACKING_FAIL_BACKOFF  3
 #define VR_TRACKING_BACKOFF_MS    1000
@@ -697,7 +701,9 @@ static struct {
 // 分支可能持鎖 service 將近 1 秒），而送 LOSS 要加密＋enet_host_service。
 static PLT_THREAD vrSendThread;
 static bool vrSendThreadStarted;
-// §ABR-ADAPT：下一則 FRAME_FEEDBACK 最早什麼時候送（VrSend 每 2 ms 醒一次，這裡隔 100 ms）
+// §PERF-1113：VrSend 在這個條件變數上等（配 vrRecMutex）；登記 LOSS 或結束串流時 signal
+static PLT_COND vrSendCond;
+// §ABR-ADAPT：下一則 FRAME_FEEDBACK 最早什麼時候送（隔 100 ms；VrSend 的等待逾時會對到這個時間）
 static uint64_t vrFbDueMs;
 // 送失敗的那一則留著下一輪先重送（失敗通常就是傳送緩衝滿了；丟掉的話 server 少算這段收到的位元組，會把它看成鏈路飽和）
 static uint8_t vrFbPendingTlv[2 + sizeof(VIPLE_VR_TLV_FRAME_FEEDBACK_HDR) + VIPLE_VR_FRAME_FEEDBACK_MAX * sizeof(VIPLE_VR_FRAME_FEEDBACK_REC)];
@@ -713,6 +719,7 @@ static int vrQuicKeepaliveTicks;
 
 static void vrRecoveryInit(void) {
     PltCreateMutex(&vrRecMutex);
+    PltCreateConditionVariable(&vrSendCond, &vrRecMutex);
     memset(&vrRec, 0, sizeof(vrRec));
     vrSessionAtInit = (VrFlags & VIPLE_VR_SF_ENABLED) != 0;
     vrSendThreadStarted = false;
@@ -734,6 +741,7 @@ static void vrRecoveryDestroy(void) {
                 vrRec.totalLossEvents, vrRec.totalRecovered, vrRec.totalIdrFallbacks,
                 vrRec.totalRefreshRx, vrTrackingSent, vrTrackingDropped);
     }
+    PltDeleteConditionVariable(&vrSendCond);
     PltDeleteMutex(&vrRecMutex);
 }
 
@@ -774,8 +782,20 @@ static void vrSendLossOnce(uint32_t firstLost, uint32_t lastLost, uint8_t reason
                          VIPLE_VR_CTRL_CHANNEL, ENET_PACKET_FLAG_UNSEQUENCED, false);
 }
 
-// 持 vrRecMutex 呼叫：每 10 秒（有動靜時）印一次區間統計
-static void vrMaybeLogStatsLocked(uint64_t now) {
+// §PERF-1113（A33）：10 秒區間統計的那一行不在 vrRecMutex 內印——VideoRecv 每組好一幀都要拿這把鎖，
+// VrSend、控制接收、decoder 也在等它。鎖內只把數字抄進這個結構並歸零，放鎖之後由呼叫端印（vrLogStats）。
+typedef struct {
+    bool due;
+    bool degraded;
+    uint32_t lossEvents, lossSends, lossResends, refreshRx, refreshStale;
+    uint32_t recovered, idrFallbacks;
+    uint32_t rttAvgMs, rttMaxMs;
+    uint32_t recoverAvgMs, recoverMaxMs;
+} VR_LOSS_STATS_SNAPSHOT;
+
+// 持 vrRecMutex 呼叫：每 10 秒（有動靜時）把區間統計抄進 snap（snap->due）並歸零
+static void vrTakeStatsLocked(uint64_t now, VR_LOSS_STATS_SNAPSHOT* snap) {
+    snap->due = false;
     if (vrRec.lastStatsLogMs == 0) {
         vrRec.lastStatsLogMs = now;
         return;
@@ -784,13 +804,19 @@ static void vrMaybeLogStatsLocked(uint64_t now) {
         return;
     }
     if (vrRec.lossEvents || vrRec.refreshRx || vrRec.idrFallbacks || vrRec.degraded) {
-        Limelog("[VIPLE-VR-LOSS] 10s: lossEvents=%u sends=%u resends=%u refreshRx=%u stale=%u "
-                "recovered=%u idrFallback=%u lossToRefresh avg=%ums max=%ums recover avg=%ums max=%ums%s\n",
-                vrRec.lossEvents, vrRec.lossSends, vrRec.lossResends, vrRec.refreshRx, vrRec.refreshStale,
-                vrRec.recovered, vrRec.idrFallbacks,
-                vrRec.rttSamples ? (unsigned)(vrRec.rttSumMs / vrRec.rttSamples) : 0, vrRec.rttMaxMs,
-                vrRec.recoverSamples ? (unsigned)(vrRec.recoverSumMs / vrRec.recoverSamples) : 0, vrRec.recoverMaxMs,
-                vrRec.degraded ? " (still degraded)" : "");
+        snap->due = true;
+        snap->degraded = vrRec.degraded;
+        snap->lossEvents = vrRec.lossEvents;
+        snap->lossSends = vrRec.lossSends;
+        snap->lossResends = vrRec.lossResends;
+        snap->refreshRx = vrRec.refreshRx;
+        snap->refreshStale = vrRec.refreshStale;
+        snap->recovered = vrRec.recovered;
+        snap->idrFallbacks = vrRec.idrFallbacks;
+        snap->rttAvgMs = vrRec.rttSamples ? (uint32_t)(vrRec.rttSumMs / vrRec.rttSamples) : 0;
+        snap->rttMaxMs = vrRec.rttMaxMs;
+        snap->recoverAvgMs = vrRec.recoverSamples ? (uint32_t)(vrRec.recoverSumMs / vrRec.recoverSamples) : 0;
+        snap->recoverMaxMs = vrRec.recoverMaxMs;
     }
     vrRec.lossEvents = vrRec.lossSends = vrRec.lossResends = vrRec.refreshRx = vrRec.refreshStale = 0;
     vrRec.recovered = vrRec.idrFallbacks = 0;
@@ -799,6 +825,20 @@ static void vrMaybeLogStatsLocked(uint64_t now) {
     vrRec.recoverSamples = vrRec.recoverMaxMs = 0;
     vrRec.recoverSumMs = 0;
     vrRec.lastStatsLogMs = now;
+}
+
+// 放掉 vrRecMutex 之後呼叫：印 vrTakeStatsLocked 抄出來的那一行（沒到期就什麼都不做）
+static void vrLogStats(const VR_LOSS_STATS_SNAPSHOT* snap) {
+    if (!snap->due) {
+        return;
+    }
+    Limelog("[VIPLE-VR-LOSS] 10s: lossEvents=%u sends=%u resends=%u refreshRx=%u stale=%u "
+            "recovered=%u idrFallback=%u lossToRefresh avg=%ums max=%ums recover avg=%ums max=%ums%s\n",
+            snap->lossEvents, snap->lossSends, snap->lossResends, snap->refreshRx, snap->refreshStale,
+            snap->recovered, snap->idrFallbacks,
+            snap->rttAvgMs, snap->rttMaxMs,
+            snap->recoverAvgMs, snap->recoverMaxMs,
+            snap->degraded ? " (still degraded)" : "");
 }
 
 // 持 vrRecMutex 呼叫：決定逾時動作（實際送出由呼叫端在鎖外做）
@@ -942,6 +982,8 @@ static void vrRecoveryReportLoss(uint32_t firstLost, uint32_t lastLost, uint8_t 
         if (vrSendThreadStarted) {
             vrRec.lossSendPending = true;
             vrRec.lossSendReason = reason;
+            // §PERF-1113：叫醒 VrSend 立刻送（原本要等它下一個 2 ms 的輪詢）
+            PltSignalConditionVariable(&vrSendCond);
         }
         else {
             // VrSend 執行緒沒起來（建立失敗）：退回同步送，至少功能正確
@@ -987,6 +1029,7 @@ static void vrRecoveryOnRefreshStart(uint32_t startFrame, uint8_t frameCnt) {
 // VideoRecv 執行緒：每組好一幀呼叫一次。只判斷是否恢復，不做任何網路 I/O。
 void vrRecoveryOnFrame(uint32_t frameIndex, uint8_t vrFrameFlags, bool isIdr) {
     uint64_t now;
+    VR_LOSS_STATS_SNAPSHOT stats;
 
     if (!vrIntraRecoveryActive()) {
         return;
@@ -1021,8 +1064,9 @@ void vrRecoveryOnFrame(uint32_t frameIndex, uint8_t vrFrameFlags, bool isIdr) {
             }
         }
     }
-    vrMaybeLogStatsLocked(now);
+    vrTakeStatsLocked(now, &stats);
     PltUnlockMutex(&vrRecMutex);
+    vrLogStats(&stats);
 }
 
 // §ABR-ADAPT：每 100 ms 把這段收齊的幀組成 0x07（超過 18 筆就連送多則）。沒有收齊的幀就不送。
@@ -1078,16 +1122,67 @@ static void vrSendFrameFeedback(uint64_t nowMs) {
     }
 }
 
+// §PERF-1113：持 vrRecMutex 呼叫（在 vrEvaluateTimersLocked 之後）：離下一個要處理的期限還有幾毫秒。
+// 回傳 -1＝恢復狀態機目前沒有期限（沒有 degraded、沒有待送的第二份 LOSS）。
+// 期限的算法要和 vrEvaluateTimersLocked 的判斷式一一對應；算漏的後果由 VR_SEND_WAIT_BUSY_MAX_MS 擋住。
+static int vrNextDeadlineMsLocked(uint64_t now, uint32_t rttMs) {
+    uint64_t due = UINT64_MAX;
+    uint64_t d;
+
+    if (vrRec.lossSendPending) {
+        return 0;
+    }
+    if (vrRec.twinPending) {
+        due = vrRec.twinDueMs;
+    }
+    if (vrRec.degraded) {
+        if (vrRec.idrRequested) {
+            d = vrRec.idrRequestedMs + VR_IDR_RETRY_MS;
+        }
+        else if (vrRec.refreshSeen) {
+            d = vrRec.refreshSeenMs + VR_WAVE_TIMEOUT_MS;
+        }
+        else if (vrRec.resendCount >= VR_LOSS_RESEND_MAX) {
+            // 複核（11-13）：對應 vrEvaluateTimersLocked 裡不看時間的那個條件——重送次數用完，下一輪就退回 IDR
+            // （回 0 會被 VR_SEND_TICK_MS 的下限夾成 2 ms，和改成條件變數之前相同；漏了它會晚到 20 ms 才退回）
+            d = now;
+        }
+        else {
+            uint64_t resend = vrRec.lastLossSendMs + 2 * (uint64_t)rttMs + VR_LOSS_RESEND_BASE_MS;
+            d = vrRec.pendingSinceMs + VR_UNANSWERED_IDR_MS;
+            if (resend < d) {
+                d = resend;
+            }
+        }
+        if (d < due) {
+            due = d;
+        }
+    }
+    if (due == UINT64_MAX) {
+        return -1;
+    }
+    if (due <= now) {
+        return 0;
+    }
+    if (due - now > VR_SEND_WAIT_BUSY_MAX_MS) {
+        return VR_SEND_WAIT_BUSY_MAX_MS;
+    }
+    return (int)(due - now);
+}
+
 // VrSend 執行緒的一輪：送出登記的 LOSS（第二份延後 VR_LOSS_TWIN_DELAY_MS），並推進
 // 重送／退回 IDR 的逾時。這條執行緒可以持 enetMutex（讀 RTT、送封包）。
-static void vrSendTick(void) {
+// §PERF-1113：回傳下一輪最晚幾毫秒後要再跑（VrSend 執行緒拿來當等待逾時；lossStats 的退路不看回傳值）。
+static int vrSendTick(void) {
     VR_RECOVERY_ACTION action;
+    int waitMs;
     uint32_t firstLost = 0, lastLost = 0;
     uint32_t rttMs = 0;
     uint64_t now;
     bool sendFirst = false, sendTwin = false;
     uint32_t f1 = 0, l1 = 0, f2 = 0, l2 = 0;
     uint8_t r1 = 0, r2 = 0;
+    VR_LOSS_STATS_SNAPSHOT stats;
 
     // 鎖外讀 degraded 只當提示（讀到舊值的代價是這一輪用 RTT=0 算逾時）
     if (vrRec.degraded) {
@@ -1122,7 +1217,8 @@ static void vrSendTick(void) {
         firstLost = vrRec.firstLost;
         lastLost = vrRec.lastLost;
     }
-    vrMaybeLogStatsLocked(now);
+    vrTakeStatsLocked(now, &stats);
+    waitMs = vrNextDeadlineMsLocked(now, rttMs);
     PltUnlockMutex(&vrRecMutex);
 
     if (sendFirst) {
@@ -1133,12 +1229,42 @@ static void vrSendTick(void) {
     }
     vrPerformAction(action, firstLost, lastLost);
     vrSendFrameFeedback(now);
+    vrLogStats(&stats);  // LOSS、退回動作、收包報告都送出去之後才印
+
+    // §PERF-1113：再併入收包報告的期限。vrFbDueMs 還沒設（VR API 還沒開、vrSendFrameFeedback 直接返回）時
+    // 用 20 ms 輪詢，API 一開第一則報告最多晚 20 ms。
+    {
+        int fbWaitMs;
+        if (vrFbDueMs > now) {
+            uint64_t left = vrFbDueMs - now;
+            fbWaitMs = left > VR_SEND_WAIT_IDLE_MAX_MS ? VR_SEND_WAIT_IDLE_MAX_MS : (int)left;
+        }
+        else {
+            fbWaitMs = VR_SEND_WAIT_BUSY_MAX_MS;
+        }
+        if (waitMs < 0 || fbWaitMs < waitMs) {
+            waitMs = fbWaitMs;
+        }
+    }
+    // 下限：期限已到（這一輪剛處理完、或 RTT 是鎖外讀到的舊值）時不要空轉，維持原本 2 ms 的節奏
+    if (waitMs < VR_SEND_TICK_MS) {
+        waitMs = VR_SEND_TICK_MS;
+    }
+    return waitMs;
 }
 
 static void vrSendThreadFunc(void* context) {
     while (!PltIsThreadInterrupted(&vrSendThread)) {
-        vrSendTick();
-        PltSleepMsInterruptible(&vrSendThread, VR_SEND_TICK_MS);
+        int waitMs = vrSendTick();
+
+        // §PERF-1113：原本固定每 2 ms 醒一次（每秒 500 次、沒丟包時幾乎全是空轉）。改成等到下一個期限，
+        // 有 LOSS 登記（vrRecoveryReportLoss）或結束串流（stopControlStream）時被 signal 提早叫醒。
+        // 條件在鎖內檢查，signal 的那一邊也在鎖內設旗標，不會漏掉喚醒；假喚醒只是多跑一輪 vrSendTick。
+        PltLockMutex(&vrRecMutex);
+        if (!vrRec.lossSendPending && !PltIsThreadInterrupted(&vrSendThread)) {
+            PltWaitForConditionVariableTimed(&vrSendCond, &vrRecMutex, waitMs);
+        }
+        PltUnlockMutex(&vrRecMutex);
     }
 }
 
@@ -1191,6 +1317,10 @@ static void configureVrThrottle(ENetPeer* p) {
 
 int LiGetVrFlags(void) {
     return VrFlags;
+}
+
+int LiGetVrLinkCount(void) {
+    return vrmlLinkCount();
 }
 
 int LiSendVrTracking(const VIPLE_VR_TRACKING* sample) {
@@ -3680,7 +3810,11 @@ int stopControlStream(void) {
     PltInterruptThread(&controlReceiveThread);
     PltInterruptThread(&asyncCallbackThread);
     if (vrSendThreadStarted) {
+        // §PERF-1113：VrSend 現在睡在條件變數上（最長 100 ms）；在鎖內設中斷旗標再 signal，它才會馬上醒來結束
+        PltLockMutex(&vrRecMutex);
         PltInterruptThread(&vrSendThread);
+        PltSignalConditionVariable(&vrSendCond);
+        PltUnlockMutex(&vrRecMutex);
     }
 
     PltJoinThread(&requestIdrFrameThread);

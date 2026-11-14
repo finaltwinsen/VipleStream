@@ -263,7 +263,7 @@
     "max_bitrate": "Maximum Bitrate",
     "max_bitrate_desc": "The maximum bitrate (in Kbps) that VipleStream-Server will encode the stream at. If set to 0, it will always use the bitrate requested by VipleStream.",
     "minimum_fps_target": "Minimum FPS Target",
-    "minimum_fps_target_desc": "The lowest effective FPS a stream can reach. A value of 0 is treated as roughly half of the stream's FPS. A setting of 20 is recommended if you stream 24 or 30fps content.",
+    "minimum_fps_target_desc": "The lowest effective FPS a stream can reach. A value of 0 uses the FPS requested by the client (the full rate, not half), so a static screen is still sent at close to the full stream FPS (VR streams use 10). A setting of 20 is recommended if you stream 24 or 30fps content.",
     "min_log_level": "Log Level",
     "min_log_level_0": "Verbose",
     "min_log_level_1": "Debug",

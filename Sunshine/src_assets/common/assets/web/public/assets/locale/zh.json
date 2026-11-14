@@ -263,7 +263,7 @@
     "max_bitrate": "最大比特率",
     "max_bitrate_desc": "VipleStream-Server 的最大比特率(Kbps) 将编码流。如果设置为 0，它将始终使用月亮请求的比特率。",
     "minimum_fps_target": "最低FPS 目标",
-    "minimum_fps_target_desc": "一个流可以达到的最低有效的FPS值。0的值被处理为流的 FPS 的大约一半。 如果您流 24 或 30 fps 内容，建议设置为 20。",
+    "minimum_fps_target_desc": "一个流可以达到的最低有效的FPS值。0 表示使用客户端请求的 FPS（完整帧率，不是一半）。 如果您流 24 或 30 fps 内容，建议设置为 20。",
     "min_log_level": "日志级别",
     "min_log_level_0": "详细 (Verbose)",
     "min_log_level_1": "调试 (Debug)",

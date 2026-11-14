@@ -1027,14 +1027,22 @@ QString SdlInputHandler::getUnmappedGamepads()
         return ret;
     }
 
-    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+    // §PERF-1113 A31：手把子系統已經開著＝介面的手把導覽（SdlGamepadKeyNavigation::enable()，GUI 啟動時先跑）
+    // 開的，對應表已經載入、它也正在用 SDL 的事件佇列。這時只借用（下面的 Init／Quit 只動引用計數）：
+    // 不重載對應表，結尾也不清事件——清掉的話導覽會漏掉這段時間剛接上的手把
+    const bool alreadyUp = SDL_WasInit(SDL_INIT_GAMECONTROLLER) != 0;
+
+    const bool inited = SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) == 0;
+    if (!inited) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) failed: %s",
                      SDL_GetError());
     }
 
-    MappingManager mappingManager;
-    mappingManager.applyMappings();
+    if (!alreadyUp) {
+        MappingManager mappingManager;
+        mappingManager.applyMappings();
+    }
 
     int numJoysticks = SDL_NumJoysticks();
     for (int i = 0; i < numJoysticks; i++) {
@@ -1077,11 +1085,16 @@ QString SdlInputHandler::getUnmappedGamepads()
         }
     }
 
-    SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+    // Init 失敗時 SDL 自己已經收掉；這裡再 Quit 一次，在借用的情況下會把別人的引用計數扣掉
+    if (inited) {
+        SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+    }
 
-    // Flush stale events so they aren't processed by the main session event loop
-    SDL_FlushEvents(SDL_JOYDEVICEADDED, SDL_JOYDEVICEREMOVED);
-    SDL_FlushEvents(SDL_CONTROLLERDEVICEADDED, SDL_CONTROLLERDEVICEREMAPPED);
+    if (!alreadyUp) {
+        // Flush stale events so they aren't processed by the main session event loop
+        SDL_FlushEvents(SDL_JOYDEVICEADDED, SDL_JOYDEVICEREMOVED);
+        SDL_FlushEvents(SDL_CONTROLLERDEVICEADDED, SDL_CONTROLLERDEVICEREMAPPED);
+    }
 
     return ret;
 }

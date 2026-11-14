@@ -88,7 +88,7 @@ namespace vrdrv {
     void destroy_set_locked(swapset_t *set);
     const swapset_t *find_locked(uint64_t handle, uint32_t &index) const;
     IDXGIKeyedMutex *sync_mutex_locked(uint64_t handle);
-    void compose_and_publish_locked(int64_t present_qpc, uint32_t &exit_code);
+    void compose_and_publish_locked(int64_t present_qpc, uint32_t &exit_code, IDXGIKeyedMutex *held_sync, bool &sync_released);
     void tile_origin_locked(int64_t present_qpc, uint16_t org[2][2]);  // §VR-FOVEA-TILES
     // 注視點／分塊的設定：只影響我們自己的合成，不是 SteamVR 的 K20 參數，每個 generation 都重新載入
     void load_fovea_config_locked(const vripc_session_config_t &cfg);

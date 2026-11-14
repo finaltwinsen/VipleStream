@@ -59,10 +59,23 @@ Page {
                 unresponsiveHidDialog.open()
             }
 
+            // §PERF-1113 A31：先把手把導覽開起來（doEarlyInit 也會呼叫，有防重入），下面的未對應手把檢查就沿用
+            // 已經開好的手把子系統與載好的對應表；順序反過來的話，檢查做完會把子系統整個關掉（對應表一起清掉），
+            // 導覽再從頭初始化、再解析一次對應表
+            SdlGamepadKeyNavigation.enable()
+
             // Hardware acceleration and unmapped gamepads are checked asynchronously
             SystemProperties.hasHardwareAccelerationChanged.connect(hasHardwareAccelerationChanged)
             SystemProperties.unmappedGamepadsChanged.connect(hasUnmappedGamepadsChanged)
-            SystemProperties.startAsyncLoad()
+            if (window.vrShell === true) {
+                // §PERF-1113 A21：頭盔 VR 介面只查未對應的手把。解碼器探測與顯示器列舉在這裡用不到
+                // （VR 串流在子行程自己探測，頭盔上的探測結果也等於預設值），省下主執行緒建測試視窗與背景那次探測。
+                // 用外殼自己的 vrShell 屬性判斷：VrLauncher.shellActive 在這個時間點還是 false
+                SystemProperties.startLightLoad()
+            }
+            else {
+                SystemProperties.startAsyncLoad()
+            }
         }
     }
 
@@ -435,6 +448,11 @@ Page {
                     // finaltwinsen/VipleStream (the upstream moonlight-stream.org
                     // endpoint is not applicable to the fork; see backend/
                     // autoupdatechecker.cpp).
+                    // §PERF-1113 A6：命令列的串流／結束（runConfigChecks=false）不檢查更新：這顆按鈕在那裡沒有人看得到，
+                    // 每個串流子行程卻都對外發一次查詢
+                    if (!runConfigChecks) {
+                        return
+                    }
                     AutoUpdateChecker.onUpdateAvailable.connect(updateAvailable)
                     // §AUTO-UPDATE：0＝不自動檢查（設定頁可改）
                     if (StreamingPreferences.updateMode !== 0) {

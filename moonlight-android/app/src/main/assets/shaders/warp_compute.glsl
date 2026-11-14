@@ -142,10 +142,9 @@ void main() {
     vec2 pp = vec2(float(px), float(py));
     vec2 dims = vec2(float(frameWidth), float(frameHeight));
 
-    // D3 iter 7: hoist the curr-frame texel once. Used by the
-    // static-skip path and the out-of-bounds fallback.
-    vec4 sameCurr = texelFetch(currFrame, ivec2(px, py), 0);
-
+    // 同位置的 curr 取樣（原 D3 iter 7 提到這裡）只有靜止像素與越界時用得到；
+    // texelFetch 不會被編譯器移進分支，放在最上面等於每個移動像素白取一次，
+    // 所以改在下面兩個用到的分支裡各自取。
     vec2 mv = sampleMV(pp);
     // ±48 px clamp matches the ME shader's actual search radius;
     // tighter than ±64 avoids bilinear MV overshoots on motion
@@ -164,6 +163,7 @@ void main() {
     // `lerp(prevAtPP, sameCurr, 0.5)`.
     if (dot(mv, mv) < 1.0) {
         vec4 prevAtPP = texelFetch(prevFrame, ivec2(px, py), 0);
+        vec4 sameCurr = texelFetch(currFrame, ivec2(px, py), 0);
         imageStore(interpFrame, ivec2(px, py), mix(prevAtPP, sameCurr, 0.5));
         return;
     }
@@ -223,6 +223,8 @@ void main() {
         // D3 iter 5: branchless single-valid fallback. The old 3-way
         // else-if chain divergeed threads on frame borders; a pair of
         // selects produces uniform ALU.
+        // 只有畫面邊緣的像素會走到這裡，取樣放這裡不影響內部像素；select 維持不變。
+        vec4 sameCurr = texelFetch(currFrame, ivec2(px, py), 0);
         result = prevValid ? prevSample
                : (currValid ? currSample : sameCurr);
     }

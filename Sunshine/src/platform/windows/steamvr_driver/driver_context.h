@@ -34,6 +34,11 @@ namespace vrdrv {
     std::atomic<bool> quit_pending {false};  // STATE REQUEST_QUIT
     std::atomic<uint32_t> v2p_pending {0};  // STATE DEV_SET_V2P 的 µs（0 = 沒有）
     std::atomic<uint32_t> link_events {0};  // on_mapped／on_teardown 次數（RunFrame 偵測變化用）
+    // §VR-STALE-COAST（2026-11-13）：SteamVR 最近幾幀替 app 預測姿態的時間（SubmitLayer 給的
+    // flHmdPosePredictionTimeInSecondsFromNow，µs，1/8 平滑；0＝還沒有畫面）。tracking 用它估「SteamVR 會把我們回報的姿態
+    // 再照回報的速度外插多久」，stale 期間降速與恢復時才不會讓顯示位置回縮或前跳。提交時刻比 app 取姿態晚一個算圖時間，
+    // 所以略偏小（幾毫秒），只當估計值用
+    std::atomic<int32_t> pred_us_recent {0};
 
     // ── HMD ──
     std::atomic<uint32_t> hmd_index {k_invalid_index};  // Activate 後有效；Deactivate 設回無效

@@ -40,6 +40,9 @@
 #else
 #include <dlfcn.h>
 #endif
+#ifdef __linux__
+#include <sys/prctl.h>  // §PERF-1113：PR_SET_TIMERSLACK（frame thread 的定時等待）
+#endif
 
 namespace {
 
@@ -433,6 +436,10 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     shutdown();  // 重入：清掉前一次
 
     QString err;
+    // [VIPLE-STARTUP]（A44，量測）：log 的時間戳只到秒，開場的時間點自己帶毫秒。t 是 steady clock 的絕對值，和 session.cpp
+    // 印的是同一個時鐘（同一台機器上跨行程也一樣），可以直接相減。放在 t0 之前：這一行自己的耗時不算進下面的 stages
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld xr bring-up begin",
+                static_cast<long long>(steadyNowNs() / 1000000ull));
     const auto t0 = std::chrono::steady_clock::now();
     // §VR-EXIT-FAST（量測）：bring-up 各段花多久（頭盔介面在串流結束後重開 XR 約 2.7 秒，要知道是哪一段）
     long long stageMs[6] = {0, 0, 0, 0, 0, 0};  // instance、system＋vulkan、video、session、swapchain＋actions、等 READY
@@ -681,14 +688,28 @@ bool XrContext::createInstance(QString* error)
     const XrVersion apiTry[] = {XR_MAKE_VERSION(1, 0, XR_VERSION_PATCH(XR_CURRENT_API_VERSION))};
 #endif
     r = XR_ERROR_RUNTIME_UNAVAILABLE;
+    // §PERF-1113（A45，量測）：每次嘗試各花多久。SteamVR 每次 bring-up 都先被拒一次 1.1，那一次佔 instance 這一段的多少
+    // 要有數字（只計時、不改嘗試的順序）
+    std::string attempts;
     for (XrVersion v : apiTry) {
         ci.applicationInfo.apiVersion = v;
+        const auto a0 = std::chrono::steady_clock::now();
         r = xrCreateInstance(&ci, &m_Instance);
+        const double attemptMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a0).count();
+        char one[112];
+        std::snprintf(one, sizeof(one), "%sapi %d.%d -> %s in %.1f ms", attempts.empty() ? "" : ", ",
+                      static_cast<int>(XR_VERSION_MAJOR(v)), static_cast<int>(XR_VERSION_MINOR(v)),
+                      r == XR_SUCCESS ? "OK"
+                      : r == XR_ERROR_API_VERSION_UNSUPPORTED ? "API_VERSION_UNSUPPORTED"
+                                                              : qUtf8Printable(xrResultStr(XR_NULL_HANDLE, r)),
+                      attemptMs);
+        attempts += one;
         if (r != XR_ERROR_API_VERSION_UNSUPPORTED) {
             m_ApiVersion = v;
             break;
         }
     }
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] instance attempts: %s", attempts.c_str());
     if (XR_FAILED(r) || m_Instance == XR_NULL_HANDLE) {
         m_Instance = XR_NULL_HANDLE;
         *error = QStringLiteral("xrCreateInstance: %1").arg(xrResultStr(XR_NULL_HANDLE, r));
@@ -1033,7 +1054,28 @@ bool XrContext::createVulkanAt(QString* error, bool pyroWave13)
             dci.ppEnabledExtensionNames = m_DevExts.data();
         }
     }
+    // §XR-FEATCHAIN（2026-11-14）：xrCreateVulkanDeviceKHR 會改我們交給它的 feature 鏈。Frame 上的 SteamVR 把它自己
+    // stack 上的一個結構接在鏈尾（m_EnF12.pNext 從 null 變成一個 stack 位址），返回後不拿掉。這條鏈之後還要交給
+    // libplacebo（pl_vulkan_import 會一路走到鏈尾）與 FFmpeg 的 Vulkan hwcontext，走到那個已經失效的節點時讀到什麼，
+    // 全看那塊 stack 後來被誰用過：2.0.187 之前碰巧都讀到「鏈結束」，2.0.188 dev 讀到一段 log 文字，XR 啟動時就當掉
+    // （core：下一個節點的位址＝0x6e726157，"Warn"）。所以每次呼叫返回都照我們自己的四個結構重新串一次——重試之前
+    // 也要，runtime 會再走一次這條鏈。runtime 改過的各個 VkBool32 留著（device 實際開了什麼就回報什麼）
+    bool featChainTouched = false;
+    const auto relinkFeatureChain = [&]() {
+        if (!m_HaveFeatureChain) {
+            return;
+        }
+        void* const f12Next = pyroWave13 ? static_cast<void*>(&m_EnF13) : nullptr;
+        if (m_EnFeat2.pNext != &m_EnF11 || m_EnF11.pNext != &m_EnF12 || m_EnF12.pNext != f12Next || m_EnF13.pNext != nullptr) {
+            featChainTouched = true;
+        }
+        m_EnFeat2.pNext = &m_EnF11;
+        m_EnF11.pNext = &m_EnF12;
+        m_EnF12.pNext = f12Next;
+        m_EnF13.pNext = nullptr;
+    };
     r = pfnCreateDev(m_Instance, &xdci, &m_VkDevice, &vr);
+    relinkFeatureChain();
     if (prioOn && (XR_FAILED(r) || vr != VK_SUCCESS)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-XR] GPU queue priority %s refused (xr=%d vk=%d) - creating the device at the default priority",
@@ -1046,11 +1088,16 @@ bool XrContext::createVulkanAt(QString* error, bool pyroWave13)
         m_VkDevice = VK_NULL_HANDLE;
         vr = VK_SUCCESS;
         r = pfnCreateDev(m_Instance, &xdci, &m_VkDevice, &vr);
+        relinkFeatureChain();
     }
     if (XR_FAILED(r) || vr != VK_SUCCESS) {
         m_VkDevice = VK_NULL_HANDLE;
         *error = QStringLiteral("xrCreateVulkanDeviceKHR: %1 vk=%2").arg(xrResultStr(m_Instance, r)).arg(static_cast<int>(vr));
         return false;
+    }
+    if (featChainTouched) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] vulkan: the runtime changed the device feature chain it was given - restored to our own structures");
     }
     if (prioOn) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] GPU queue priority: %s",
@@ -1996,11 +2043,13 @@ bool XrContext::maybeLogStats(uint64_t nowNs, bool deferPrint)
     d.missed = cur.missed - prev.missed;
     double cpuP50 = 0.0, cpuP95 = 0.0;
     if (!m_XrCpuUs.empty()) {
-        std::vector<uint32_t> v;
-        v.swap(m_XrCpuUs);
+        // §PERF-1113：原本 swap 到區域變數，m_XrCpuUs 的容量跟著歸零，下一個視窗的 push_back 要重新配置十來次。
+        // 只有 frame thread 讀寫它，直接原地排序再 clear()（容量留著）
+        std::vector<uint32_t>& v = m_XrCpuUs;
         std::sort(v.begin(), v.end());
         cpuP50 = v[v.size() / 2] / 1000.0;
         cpuP95 = v[(std::min)(v.size() - 1, (v.size() * 95) / 100)] / 1000.0;
+        v.clear();
     }
     m_AsyncLog.postf(
                      "[VIPLE-XR] 10s frames=%llu missed=%llu (%.2f%%) notRendered=%llu endFrameErr=%llu state=%s period=%.2f ms "
@@ -2113,6 +2162,12 @@ bool XrContext::maybeLogStats(uint64_t nowNs, bool deferPrint)
 
 void XrContext::frameThreadMain()
 {
+#ifdef __linux__
+    // §PERF-1113：一般排程類別的執行緒，核心預設把定時器到期放寬 50 µs 以便合併喚醒。這條執行緒的定時等待
+    // （延後挑影像的 sleep_for、§VR-LATCH-WAIT／FLIGHT 的 wait_until）都吃到它。只影響呼叫的這條執行緒、
+    // 不需要權限（Flatpak 沙箱裡也能用）；失敗就維持預設，不必處理
+    prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
+#endif
     XrEnvironmentBlendMode blend = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     {
         uint32_t n = 0;
@@ -2128,6 +2183,11 @@ void XrContext::frameThreadMain()
 
     bool exitRequested = false;
     uint64_t lastViewLocateNs = 0;
+#ifdef HAVE_XR_VIDEO
+    // §PERF-1113：畫面沒在顯示的偵測（見迴圈裡 xrWaitFrame 之後）。idleSinceNs＝第一個 shouldRender＝false 的時刻（0＝沒有）
+    uint64_t idleSinceNs = 0;
+    bool displayIdle = false;
+#endif
     while (true) {
         m_LoopDiag.loopNo++;  // §VR-XRLOOP（量測）：第幾圈——[VIPLE-VR-XRLOOP] 的 tail 只算緊鄰的兩圈，見 pcvrLoopDiag
         if (m_StopRequested.load()) {
@@ -2186,6 +2246,14 @@ void XrContext::frameThreadMain()
             syi.activeActionSets = &active;
             xrSyncActions(m_Session, &syi);
         }
+        if (m_Options.pcvr && m_VrCtl != nullptr) {
+            // §PERF-1113：按鍵快照緊接在 xrSyncActions 後面發布。action state 只在 sync 那一刻更新，原本要等
+            // xrWaitFrame 放行＋延後挑影像之後才讀出來（144 Hz 約晚 6.7 ms），tracking 送出執行緒在那之前送的都是
+            // 上一格的按鍵。這裡是回到 xrWaitFrame 之前的空檔；haptic 也一併移過來，不佔「延後睡完 → 挑影像」那一段。
+            // 握把姿態要這一格的 predictedDisplayTime，留在下面原位置（updateGripPose）
+            m_VrCtl->updateButtons(m_State.load() == XR_SESSION_STATE_FOCUSED, steadyNowNs());
+            m_VrCtl->applyPendingHaptics();
+        }
 
         XrFrameState fs = xrStruct<XrFrameState>(XR_TYPE_FRAME_STATE);
         XrFrameWaitInfo wi = xrStruct<XrFrameWaitInfo>(XR_TYPE_FRAME_WAIT_INFO);
@@ -2211,6 +2279,31 @@ void XrContext::frameThreadMain()
             m_Lost.store(true);
             break;
         }
+#ifdef HAVE_XR_VIDEO
+        if (m_Video != nullptr) {
+            // §PERF-1113：runtime 連續 1 秒都回 shouldRender＝false（頭盔拿下、畫面沒在顯示）就告訴影像路徑不必每張
+            // 都畫（XrVideo::setDisplayIdle：只影響顯示端，解碼照舊）。第一個 shouldRender＝true 的格馬上恢復——
+            // 在延後挑影像之前就叫醒 render thread。1 秒的門檻是避開開場與狀態切換時零星的幾格；log 只在切換時印
+            if (fs.shouldRender) {
+                idleSinceNs = 0;
+                if (displayIdle) {
+                    displayIdle = false;
+                    m_Video->setDisplayIdle(false);
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-IDLE] display visible again - video path back to every frame");
+                }
+            }
+            else if (idleSinceNs == 0) {
+                idleSinceNs = wakeNs;
+            }
+            else if (!displayIdle && wakeNs - idleSinceNs >= 1000000000ull) {
+                displayIdle = true;
+                m_Video->setDisplayIdle(true);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-XR-IDLE] shouldRender=false for 1 s (state=%d) - video path drawing one frame per 200 ms",
+                            m_State.load());
+            }
+        }
+#endif
         if (m_Options.player && fs.predictedDisplayPeriod > 0) {
             // §VR-PLAYER：播放器照這一格的挑影像時刻與預測顯示時刻排每一張影片幀（playersync.h）
             const uint64_t wake = tw0 + m_DiagWaitNs;
@@ -2236,9 +2329,9 @@ void XrContext::frameThreadMain()
                 std::this_thread::sleep_for(std::chrono::microseconds(m_Options.pcvrLatchDelayUs));
             }
             if (m_VrCtl != nullptr) {
-                // M4a R2：按鍵快照＋frameloop 的 grip pose（xrSyncActions 已在本幀 xrWaitFrame 前做過）
-                m_VrCtl->updateFrame(fs.predictedDisplayTime, m_State.load() == XR_SESSION_STATE_FOCUSED, m_TrackSpace);
-                m_VrCtl->applyPendingHaptics();
+                // M4a R2：frameloop 的 grip pose（thread 模式 locate 失敗時的後備）
+                // §PERF-1113：按鍵快照與 haptic 已經移到 xrSyncActions 後面，這裡只剩要用這一格預測顯示時間的姿態
+                m_VrCtl->updateGripPose(fs.predictedDisplayTime, m_TrackSpace);
             }
 #ifdef HAVE_XR_VIDEO
             // §VR-LATCH-FLIGHT：有一張串流影像已經送進 GPU、只差一點就做完的話多等它一下（見 pcvrFlightWait）。和下面的
@@ -3334,7 +3427,9 @@ void XrContext::frameThreadMain()
                                 vd.rotDeg = (std::max)(vd.rotDeg, dRot * 57.29578f);
                             }
                             if (vd.changed > 0 && (!vd.everLogged || nowNs - vd.lastLogNs >= 10000000000ull)) {
-                                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                // §PERF-1113（A33）：這裡在組 XrFrameEndInfo、xrEndFrame 之前（差異一直在的頭盔每 10 秒一次），
+                                // 交給 log 執行緒印，不佔 latch 到 xrEndFrame 的那一段
+                                m_AsyncLog.postf(
                                             "[VIPLE-VR-VIEWS] runtime now reports different per-eye views than the locked ones: "
                                             "fov %.3f deg, eye position %.2f mm, eye rotation %.3f deg (largest; %u of %u checks); "
                                             "moved between checks %u times (up to %.3f deg) - projection keeps the locked values",
@@ -3451,6 +3546,8 @@ void XrContext::frameThreadMain()
         // maybeLogStats 滿了也留到下一格。各組花多久記在 m_LoopDiag，下一次的 XRLOOP 行印出來（logCost）
         // §VR-LOGASYNC（2026-10-18）：錯開之後 maybeLogStats 那一組仍要 0.6～1.1 ms，大半是 log 本身（regex、丟進 thread pool），
         // 10 s 行改成只在這裡組字串、交給 m_AsyncLog 的執行緒印；logCost 量的就只剩排序與組字串
+        // （§PERF-1113 A28 之後 main.cpp 的 log callback 在呼叫端只抄欄位與入列，組行在 log 執行緒、regex 只在含 rikey 的行跑；
+        // 上面兩組數字是那之前量的）
         bool diagLoggedNow = false;
         if (m_LatchDiag.logDue) {
             // §VR-LDIAG：pcvrTimingTick 在這一格印了 [VIPLE-VR-MTP10]，同一個視窗的逐張量測接著印。排序與組字串
@@ -3713,7 +3810,8 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs)
                         : r.reason == xrrate::AutoRate::Reason::ProbeFail ? "full rate did not hold, back to half"
                         : r.reason == xrrate::AutoRate::Reason::HeadsetDown ? "headset cannot keep up (frames arrive but decode late)"
                                                                             : "network unstable";
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+        // §PERF-1113（A33）：pcvrRateSlot 在 frame thread 每個顯示格都跑；這一行交給 log 執行緒印
+        m_AsyncLog.postf(
                     "[VIPLE-VR-RATE] request div=%d seq=%u%s (%s): short repeats last 15 s=%u (headset %u), last 5 s=%u stalls=%u; next try after %llu s%s",
                     r.div, req.seq, r.retry ? " (resend)" : "", why, m_RateAuto.recentSum(3), m_RateAuto.recentHeadsetSum(3),
                     m_RateAuto.lastWindow().shortRep,
@@ -4372,6 +4470,10 @@ void XrContext::pcvrLoopDiagLog()
     const int32_t slackP50 = static_cast<int32_t>(r.at(0.50));
     r.scan(d.tailUs);
     const uint32_t tailP50 = u32(r.at(0.50)), tailMax = u32(r.maxValue());
+    // §PERF-1113（量測）：挑影像 → 呼叫 xrEndFrame。每 100 ms／每秒／每 10 秒的記帳與送訊息還排在這一段裡，
+    // 要不要搬到 xrEndFrame 之後先看這一欄的 p95／max 比 p50 多多少
+    r.scan(d.latch2endUs);
+    const uint32_t l2eP50 = u32(r.at(0.50)), l2eP95 = u32(r.at(0.95)), l2eMax = u32(r.maxValue());
     // 延遲鏈：這個視窗沒有樣本的那一項印 -（不印 0.00，免得被當成一條正常、只是比較短的鏈）——解碼計時沒有樣本的
     // dec；一張新影像都沒挑到（影像停住、全被丟掉）時的 render 與 slack；每一格的預測顯示時刻都換算不出來時的 lead。
     // 少任何一項，總和就沒有意義，也印 -
@@ -4401,14 +4503,15 @@ void XrContext::pcvrLoopDiagLog()
                      "endLead p50/p05/min=%.2f/%.2f/%.2f ms | span p50/p95/max=%u/%u/%u us | beginCall max=%u us "
                      "endCall p50/p95/max=%u/%u/%u us | ahead p50/min/max=%.2f/%.2f/%.2f ms%s | waitShort=%u | "
                      "chain dec/render/slack/lead p50=%s/%s/%s/%s ms sum=%s ms | tail p50/max=%u/%u us"
-                     " logCost ldiag/loop/stats=%u/%u/%u us statsBy xr/video/pcvr/input=%u/%u/%u/%u us%s",
+                     " logCost ldiag/loop/stats=%u/%u/%u us statsBy xr/video/pcvr/input=%u/%u/%u/%u us"
+                     " | latch2end p50/p95/max=%u/%u/%u us%s",
                      wakeP50, wakeP95, wakeMax, leadP50 / 1000.0, leadP05 / 1000.0, endLeadP50 / 1000.0, endLeadP05 / 1000.0,
                      endLeadMin / 1000.0, spanP50, spanP95, spanMax, d.beginCallMaxUs, endCallP50, endCallP95, endCallMax,
                      aheadP50 / 1000.0, aheadMin / 1000.0, aheadMax / 1000.0, m_TimeConv != nullptr ? "" : " (approx)", d.waitShort,
                      decText, renderText, slackText, leadText, sumText, tailP50, tailMax,
                      // §VR-LOGSPLIT：ldiag 是這一次量的（已經印完），loop、stats 是上一次的
                      d.logCostLdiagUs, d.logCostLoopUs, d.logCostStatsUs, d.statsByUs[0], d.statsByUs[1], d.statsByUs[2],
-                     d.statsByUs[3],
+                     d.statsByUs[3], l2eP50, l2eP95, l2eMax,
                      // §VR-LATCH A/B：和同一輪的 [VIPLE-VR-LDIAG] 相同（10 s 區塊在換邊之前記下來的那一邊）
                      m_Options.pcvrLatchAbSec > 0 ? (m_LatchDiag.logAb ? " ab=1" : " ab=0") : "");
     d.wakePhaseUs.clear();
@@ -4421,6 +4524,7 @@ void XrContext::pcvrLoopDiagLog()
     d.slack10s.clear();
     d.dec1s.clear();
     d.tailUs.clear();
+    d.latch2endUs.clear();
     d.beginCallMaxUs = 0;
     d.waitShort = 0;
 }
@@ -4537,6 +4641,7 @@ void XrContext::pcvrLoopDiag(uint64_t wakeNs, uint64_t latchNs, uint64_t endCall
     }
     d.spanUs.push_back(sat32(endNs > wakeNs ? (endNs - wakeNs) / 1000ull : 0));
     d.endCallUs.push_back(sat32(endNs > endCallNs ? (endNs - endCallNs) / 1000ull : 0));
+    d.latch2endUs.push_back(sat32(endCallNs > latchNs ? (endCallNs - latchNs) / 1000ull : 0));  // §PERF-1113（量測）
     d.beginCallMaxUs = (std::max)(d.beginCallMaxUs, sat32(m_DiagBeginNs / 1000ull));
     if (d.lastWakeNs != 0 && wakeNs > d.lastWakeNs && wakeNs - d.lastWakeNs < periodNs / 2) {
         d.waitShort++;

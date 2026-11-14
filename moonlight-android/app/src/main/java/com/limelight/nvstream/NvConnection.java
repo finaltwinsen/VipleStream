@@ -746,6 +746,89 @@ public class NvConnection {
         return false;
     }
 
+    // §PERF-1113 A22：Tailscale 的位址（IPv4 100.64.0.0/10、IPv6 fd7a:115c:a1e0::/48）
+    private static boolean isTailscaleAddress(String addressStr) {
+        if (addressStr == null || addressStr.isEmpty()) {
+            return false;
+        }
+        try {
+            byte[] bytes = InetAddress.getByName(addressStr).getAddress();
+            if (bytes.length == 4) {
+                return (bytes[0] & 0xFF) == 100 && (bytes[1] & 0xC0) == 0x40;
+            } else if (bytes.length == 16) {
+                return (bytes[0] & 0xFF) == 0xFD && (bytes[1] & 0xFF) == 0x7A
+                        && (bytes[2] & 0xFF) == 0x11 && (bytes[3] & 0xFF) == 0x5C
+                        && (bytes[4] & 0xFF) == 0xA1 && (bytes[5] & 0xFF) == 0xE0;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    // §PERF-1113 A22：走 VPN 時影像封包預設 1024，那是「不知道這條 VPN 的 MTU」時的保守值。Tailscale 兩端的 MTU
+    // 固定 1280，可以用 1184（IPv4 封包 1228 B、IPv6 1248 B；common-c 對遠端 IPv6 用的也是這個值），同碼率下
+    // 每秒少約一成的封包。下面的條件缺一個就回 0（呼叫端維持 1024）：
+    //   - 目前的網路是 VPN，主機位址是 Tailscale 的位址
+    //   - VPN 介面的 MTU ≥ 1280（讀不到＝不知道，也回 0）
+    //   - 沒有走 relay、沒有開 MP-QUIC（QUIC 的 datagram 上限另外算）、使用者設定的封包大小沒有比 1184 小
+    private int tailscaleVideoPacketSize() {
+        final int tailscalePacketSize = 1184;
+        try {
+            ConnectivityManager connMgr = (ConnectivityManager) appContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (connMgr == null) {
+                return 0;
+            }
+            Network activeNetwork = connMgr.getActiveNetwork();
+            if (activeNetwork == null) {
+                return 0;
+            }
+            NetworkCapabilities netCaps = connMgr.getNetworkCapabilities(activeNetwork);
+            if (netCaps == null || !netCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                // 不是 VPN（行動網路等）：原本的 1024 另有理由，不動也不印
+                return 0;
+            }
+
+            int size = 0;
+            int mtu = 0;
+            String reason;
+            if (!isTailscaleAddress(context.serverAddress.address)) {
+                reason = "VPN with unknown MTU";
+            }
+            else {
+                LinkProperties linkProperties = connMgr.getLinkProperties(activeNetwork);
+                String ifName = linkProperties != null ? linkProperties.getInterfaceName() : null;
+                java.net.NetworkInterface nif = ifName != null ? java.net.NetworkInterface.getByName(ifName) : null;
+                mtu = nif != null ? nif.getMTU() : 0;
+                if (mtu <= 0) {
+                    mtu = 0;
+                    reason = "Tailscale host, interface MTU unknown";
+                }
+                else if (mtu < 1280) {
+                    reason = "Tailscale host, interface MTU below 1280";
+                }
+                else if (usedRelay || relayTunnel != null) {
+                    reason = "Tailscale host, relay in use";
+                }
+                else if (context.streamConfig.getMpQuicEnabled()) {
+                    reason = "Tailscale host, MP-QUIC enabled";
+                }
+                else if (context.streamConfig.getMaxPacketSize() < tailscalePacketSize) {
+                    reason = "Tailscale host, packet size setting below 1184";
+                }
+                else {
+                    size = tailscalePacketSize;
+                    reason = "Tailscale host, interface MTU at least 1280";
+                }
+            }
+            LimeLog.info("[VIPLE-PKTSIZE] video packet size " + (size > 0 ? size : 1024) + " over VPN ("
+                    + reason + "; host " + context.serverAddress.address + ", interface MTU " + mtu + ")");
+            return size;
+        } catch (Exception e) {
+            LimeLog.warning("[VIPLE-PKTSIZE] could not check the VPN interface, keeping 1024: " + e.getMessage());
+            return 0;
+        }
+    }
+
     public void start(final AudioRenderer audioRenderer, final VideoDecoderRenderer videoDecoderRenderer, final NvConnectionListener connectionListener)
     {
         new Thread(new Runnable() {
@@ -915,6 +998,17 @@ public class NvConnection {
                         } catch (Exception e) {
                             LimeLog.warning("[VIPLE-MPQUIC] Ticket store unavailable: " + e.getMessage());
                             MoonBridge.setQuicTicketStorePath(null);
+                        }
+                    }
+
+                    // §PERF-1113 A22：自動判定成遠端（VPN）而用了 1024 的保守值時，確定是 Tailscale 就改 1184。
+                    // 放在這裡而不是 startApp()：要等 /launch 做完才知道有沒有改走 relay
+                    if (context.streamConfig.getRemote() == StreamConfiguration.STREAM_CFG_AUTO
+                            && context.negotiatedRemoteStreaming == StreamConfiguration.STREAM_CFG_REMOTE
+                            && context.negotiatedPacketSize == 1024) {
+                        int tailscaleSize = tailscaleVideoPacketSize();
+                        if (tailscaleSize > 0) {
+                            context.negotiatedPacketSize = tailscaleSize;
                         }
                     }
 

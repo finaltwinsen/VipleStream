@@ -2332,6 +2332,9 @@ bool D3D11VARenderer::initFRUC()
 
     // FRUC does 2x Present per input frame. Increase max frame latency from 1 to 2
     // so the second Present doesn't stall waiting for buffer recycle.
+    // §PERF-1113：上面寫「2」但值從第一版（v1.1.65）就是 3，toggleFRUC() 與 v1.2.56 的 4K120 分析
+    // 也都以 3 為前提，所以 3 不是筆誤、是這段註解沒跟上。降到 2 可能少排一格（8～17 ms），但要先用
+    // PresentMon／[VIPLE-PRESENT-Stats] 量過 4K120 不會回到真實幀率減半，這裡不動值。
     auto boostLatency = [this]() {
         m_SwapChain->SetMaximumFrameLatency(3);
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,

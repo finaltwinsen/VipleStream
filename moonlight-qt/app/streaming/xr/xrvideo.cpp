@@ -18,6 +18,10 @@
 #include <chrono>
 #include <cstring>
 
+#ifdef __linux__
+#include <sys/prctl.h>  // §PERF-1113：PR_SET_TIMERSLACK（影像 render thread 的定時等待）
+#endif
+
 extern "C" {
 #include <libavutil/buffer.h>
 #include <libavutil/frame.h>
@@ -424,6 +428,28 @@ uint64_t XrVideo::waitingAgeUs() const
     }
     const uint64_t now = nowUs();
     return now > since ? now - since : 0;
+}
+
+void XrVideo::setDisplayIdle(bool idle)
+{
+    if (m_DisplayIdle.exchange(idle, std::memory_order_acq_rel) == idle) {
+        return;
+    }
+    if (!idle) {
+        // §PERF-1113：恢復顯示。render thread 的等待條件是在 m_MailboxMutex 內判斷的，所以先拿一次鎖再叫醒，
+        // 不會漏掉這一次；mailbox 裡有等著的那一張就馬上畫。「等了多久」從現在重新算——閒置時是故意不取的，
+        // 不該被 §VR-RATE-CAUSE 當成頭盔端跟不上
+        // 複核（11-13）：記下恢復的時刻——緩衝（§VR-BUFFER）挑到閒置期間畫的那一張時改用最新的（見 current()）
+        m_IdleEndUs.store(nowUs(), std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(m_MailboxMutex);
+            // 有在等的（mailbox 裡，或剛被取走正在畫）都從現在算，不然 §VR-RATE-CAUSE 會多記一次「頭盔端跟不上」
+            if (m_WaitSinceUs.load(std::memory_order_relaxed) != 0) {
+                m_WaitSinceUs.store(nowUs(), std::memory_order_relaxed);
+            }
+        }
+        m_MailboxCv.notify_one();
+    }
 }
 
 void XrVideo::submit(const AVFrame* frame)
@@ -1406,20 +1432,36 @@ void XrVideo::bufferMaybeLog()
 
 void XrVideo::renderThreadMain()
 {
+#ifdef __linux__
+    // §PERF-1113：同 XrContext::frameThreadMain——把這條執行緒的定時器放寬量從預設 50 µs 降到最小，讓有期限的等待
+    // （全景影片的 500 µs 輪詢、GPU 等待的逾時）準時醒。只影響這條執行緒、不需要權限
+    prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
+#endif
     while (true) {
         AVFrame* f = nullptr;
         XrSession session = XR_NULL_HANDLE;
         uint64_t pendingAtUs = 0;
         {
             std::unique_lock<std::mutex> lk(m_MailboxMutex);
+            // §PERF-1113：畫面沒在顯示時（setDisplayIdle）每 kIdleTakeIntervalUs 才取一張，其餘留在 mailbox 讓更新的
+            // 蓋掉——沒有任何一格會引用的影像不必每張都轉換、等 GPU、release。平常 m_DisplayIdle 是 false，
+            // 這個判斷只多讀一個 atomic；恢復顯示時 setDisplayIdle(false) 會叫醒這裡
+            const auto idleHold = [this] {
+                return m_DisplayIdle.load(std::memory_order_acquire) && nowUs() - m_IdleLastTakeUs < kIdleTakeIntervalUs;
+            };
             m_MailboxCv.wait_for(lk, std::chrono::milliseconds(100),
-                                 [this] { return m_StopThread || m_Pending != nullptr; });
+                                 [&] { return m_StopThread || (m_Pending != nullptr && !idleHold()); });
             if (m_StopThread) {
                 break;
             }
-            f = m_Pending;
-            m_Pending = nullptr;
-            pendingAtUs = m_PendingAtUs;
+            if (m_Pending != nullptr && !idleHold()) {
+                f = m_Pending;
+                m_Pending = nullptr;
+                pendingAtUs = m_PendingAtUs;
+                if (m_DisplayIdle.load(std::memory_order_acquire)) {
+                    m_IdleLastTakeUs = nowUs();
+                }
+            }
             session = m_Session;
         }
         // §VR-XRLOOP：這一幀在 mailbox 裡等了多久（放進去 → 取出）；只進統計。dev 的抖動注入睡在這之後，不算在內
@@ -1478,9 +1520,6 @@ void XrVideo::renderThreadMain()
                 }
             }
         } ringRestore{this, slot, m_Published.seq};
-        if (slot >= 0) {
-            bufferMaybeLog();
-        }
         if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, outW, m_Config.synth ? outH * 2 : outH)) {
             renderNewFrame(f, mboxUs);
             if (m_Config.passTimers) {
@@ -1496,6 +1535,10 @@ void XrVideo::renderThreadMain()
             if (session != XR_NULL_HANDLE && usable() && m_Sw.swapchain == XR_NULL_HANDLE) {
                 markUnusable("no usable video swapchain");
             }
+        }
+        if (slot >= 0) {
+            // §PERF-1113（A33）：10 秒行等這一張發布（或放棄）之後才印，和上面的 [VIPLE-VR-PASS] 一樣不佔它的時間
+            bufferMaybeLog();
         }
     }
 }
@@ -1557,6 +1600,11 @@ bool XrVideo::current(Current* out)
         if (want != newest) {
             for (const Current& c : m_RingPub) {
                 if (c.seq == want && c.aspect > 0.0f && c.generation != 0) {
+                    // 複核（11-13）：這一張是畫面沒在顯示時（每 200 ms 一張）畫的 → 不當緩衝用，直接顯示最新的。
+                    // 不然重新戴上的頭幾格會顯示 200～600 ms 前的影像
+                    if (c.lastDrawnUs < m_IdleEndUs.load(std::memory_order_relaxed)) {
+                        break;
+                    }
                     *out = c;
                     out->fbSeq = m_Published.seq;
                     out->fbDrawnUs = m_Published.lastDrawnUs;
@@ -1711,6 +1759,25 @@ namespace {
 // 的結果（vs_init）為起點。粗的一層沒過門檻時輸出 0，細的一層就等於在 0 附近找。
 const char* kFlowHeader = R"GLSL(
 float vs_lum(sampler2D t, vec2 uv) { return dot(texture(t, uv).rgb, vec3(0.299, 0.587, 0.114)); }
+float vs_c0[9];
+float vs_cost(sampler2D prev, vec2 uv, vec2 off, vec2 px, float xmin, float xmax) {
+    float c = 0.0;
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 p = uv + (vec2(float(i), float(j)) * 1.5 + off) * px;
+            p.x = clamp(p.x, xmin, xmax);
+            c += abs(vs_c0[(j + 1) * 3 + (i + 1)] - vs_lum(prev, p));
+        }
+    }
+    return c;
+}
+)GLSL";
+
+// §PERF-1113：分塊補幀（renderTilesSynth）的縮圖是從亮度平面縮的，三個通道同一個值——加權和（權重合計 1）就是它
+// 自己，直接讀一個通道，搜尋的每次取樣少一次 dot。不分塊的縮圖（renderSynth）是彩色的，仍用上面那一份；
+// 除了 vs_lum，其餘要和 kFlowHeader 保持一樣
+const char* kFlowHeaderGray = R"GLSL(
+float vs_lum(sampler2D t, vec2 uv) { return texture(t, uv).r; }
 float vs_c0[9];
 float vs_cost(sampler2D prev, vec2 uv, vec2 off, vec2 px, float xmin, float xmax) {
     float c = 0.0;
@@ -1887,6 +1954,46 @@ vec2 vs_unwarp(vec2 uv, vec4 fv, float cyR, float u0) {
 }
 )GLSL";
 
+// §PERF-1113：同 vs_inv1／vs_unwarp，多回傳「輸出座標對輸入座標的斜率」（每一軸；每眼的 0..1 對 0..1）。
+// 只給 kUnwarpYuvBody 用（估一個輸出像素蓋到幾個編碼像素）；另外兩支 shader 仍用上面那一組，簽名不能動。
+// 分段曲線的斜率是常數（中央段 1/a、外面 1/k2）；三次曲線是 1/(a＋3(1−a)e²)，和反解一起算出來
+const char* kFovSlopeHeader = R"GLSL(
+float vs_inv1s(float x, float c, float a, float u0, out float sl) {
+    float ext = x < c ? c : 1.0 - c;
+    float t = (x - c) / ext;
+    if (u0 > 0.0) {
+        float at = abs(t);
+        float t0 = a * u0;
+        float k2 = (1.0 - t0) / (1.0 - u0);
+        bool mid = at <= t0;
+        float ae = mid ? at / a : u0 + (at - t0) / k2;
+        sl = mid ? 1.0 / a : 1.0 / k2;
+        return c + sign(t) * clamp(ae, 0.0, 1.0) * ext;
+    }
+    float b = 1.0 - a;
+    float p = a / b;
+    float q = t / b;
+    float d = sqrt(q * q * 0.25 + p * p * p / 27.0);
+    float u = q * 0.5 + d;
+    float v = q * 0.5 - d;
+    float e = sign(u) * pow(abs(u), 1.0 / 3.0) + sign(v) * pow(abs(v), 1.0 / 3.0);
+    e -= (b * e * e * e + a * e - t) / (3.0 * b * e * e + a);
+    sl = 1.0 / (3.0 * b * e * e + a);
+    return c + clamp(e, -1.0, 1.0) * ext;
+}
+vec2 vs_unwarps(vec2 uv, vec4 fv, float cyR, float u0, out vec2 sl) {
+    if (fv.x >= 0.999) { sl = vec2(1.0); return uv; }
+    bool right = uv.x >= 0.5;
+    float ex = (right ? uv.x - 0.5 : uv.x) * 2.0;
+    float sx;
+    float sy;
+    float x = vs_inv1s(ex, right ? fv.z : fv.y, fv.x, u0, sx);
+    float y = vs_inv1s(uv.y, right ? cyR : fv.w, fv.x, u0, sy);
+    sl = vec2(sx, sy);
+    return vec2((right ? 0.5 : 0.0) + 0.5 * x, y);
+}
+)GLSL";
+
 // §VR-UPSCALE：Catmull-Rom 放大，借硬體雙線性把 4x4 個點併成 9 次取樣（中間兩個權重同號，可合成一次雙線性）。
 // vs_fsz＝vs_full 的像素尺寸。只在還原 pass 用（每眼 1152 放大到 2304 那一步）
 const char* kCatromHeader = R"GLSL(
@@ -1953,19 +2060,23 @@ float vs_caty(vec2 sp) {
 )GLSL";
 
 const char* kUnwarpYuvBody = R"GLSL(
-vec2 uvn = vs_unwarp(gl_FragCoord.xy / vs_osz, vs_fv, vs_cyr, vs_fu);
+vec2 sl;
+vec2 uvn = vs_unwarps(gl_FragCoord.xy / vs_osz, vs_fv, vs_cyr, vs_fu, sl);
 vec2 lp = vs_crop.xy + uvn * vs_crop.zw;
 // §VR-FOVEA-LAYERS：周邊畫成解碼原尺寸（約 1:1）時 Catmull-Rom 沒有好處，改一次雙線性（vs_bil＝1）。
 // 但中央區在這一層是縮小的（每個輸出像素跨 1/a≈1.9 個編碼像素）：單點雙線性會漏掉一半像素、轉頭時閃，
-// 而且那一塊正好是 quad 漸層帶底下的內容（11-10 配戴：接縫明顯）→ 用相鄰輸出像素的位置差估出覆蓋範圍，
-// 超過 1.25 個像素就取 4 個雙線性點平均（每點涵蓋 2×2，合起來約等於覆蓋範圍）
+// 而且那一塊正好是 quad 漸層帶底下的內容（11-10 配戴：接縫明顯）→ 估出每個輸出像素的覆蓋範圍，
+// 超過 1.25 個像素就取 4 個雙線性點平均（每點涵蓋 2×2，合起來約等於覆蓋範圍）。
+// §PERF-1113：覆蓋範圍＝(編碼像素／輸出像素)×曲線的斜率，斜率和反解一起算出來（vs_unwarps）；原本是對右一格、
+// 下一格各再反解一次取位置差，每像素多兩次 vs_unwarp，左右眼交界那一欄還會得到半張圖寬的假值。
+// vs_bil＝2：CPU 已經確定整張的覆蓋範圍都不超過 1.25（見 renderUnwarpYuv），一律單點
 float yy;
-if (vs_bil > 0.5) {
-    vec2 lpx = vs_crop.xy + vs_unwarp((gl_FragCoord.xy + vec2(1.0, 0.0)) / vs_osz, vs_fv, vs_cyr, vs_fu) * vs_crop.zw;
-    vec2 lpy = vs_crop.xy + vs_unwarp((gl_FragCoord.xy + vec2(0.0, 1.0)) / vs_osz, vs_fv, vs_cyr, vs_fu) * vs_crop.zw;
-    vec2 fd = vec2(abs(lpx.x - lp.x), abs(lpy.y - lp.y));
+if (vs_bil > 1.5) {
+    yy = texture(vs_y, lp / vs_ysz).r;
+} else if (vs_bil > 0.5) {
+    vec2 fd = vs_crop.zw / vs_osz * sl;
     if (max(fd.x, fd.y) > 1.25) {
-        vec2 o = 0.25 * clamp(fd, vec2(1.0), vec2(3.0));  // 上限：左右眼交界那一欄的差是半張圖寬，不是縮放
+        vec2 o = 0.25 * clamp(fd, vec2(1.0), vec2(3.0));
         yy = 0.25 * (texture(vs_y, (lp + vec2(-o.x, -o.y)) / vs_ysz).r + texture(vs_y, (lp + vec2(o.x, -o.y)) / vs_ysz).r
                    + texture(vs_y, (lp + vec2(-o.x, o.y)) / vs_ysz).r + texture(vs_y, (lp + vec2(o.x, o.y)) / vs_ysz).r);
     } else {
@@ -2009,10 +2120,17 @@ pl_shader_desc sampledTex(const char* name, pl_tex tex)
 
 // §VR-SYNTH：估「扣掉頭部轉動之後」的位移場（m_Small／m_Mid 的這一張對上一張 → m_Flow）。renderSynth 與分塊版
 // （renderTilesSynth）共用；fv／fvCyR／fvU0 是縮圖所在影像的注視點參數（分塊的上排沒有變形：a＝1、u0＝0）。
+// grayThumbs＝縮圖是灰階（三個通道同值；分塊版才是），比對時直接讀一個通道（kFlowHeaderGray）。
 // 回傳 true＝m_Flow 可以用。
-bool XrVideo::synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4], float fvCyR, float fvU0)
+bool XrVideo::synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4], float fvCyR, float fvU0,
+                        bool grayThumbs)
 {
     const int cur = m_SmallCur, prev = cur ^ 1;
+    if (m_PrevThumbsGray != grayThumbs) {
+        // 分塊↔不分塊剛切換：上一張的縮圖是另一種（彩色對灰階），只讀一個通道會比錯 → 這一張不估位移
+        m_PrevThumbsGray = grayThumbs;
+        m_HavePrevSmall = false;
+    }
     // 位移：要有上一張、兩張的算圖姿態、而且是連續的兩幀（pts 差 1；掉過幀就不合成），轉動也不能太大
     bool flowOk = false;
     float half[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -2082,7 +2200,7 @@ bool XrVideo::synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& m
                     gv[5].dynamic = true;
                     pl_custom_shader cs = {};
                     cs.description = "viple vr synth flow";
-                    cs.header = kFlowHeader;
+                    cs.header = grayThumbs ? kFlowHeaderGray : kFlowHeader;
                     cs.body = kFlowBody;
                     cs.input = PL_SHADER_SIG_NONE;
                     cs.output = PL_SHADER_SIG_COLOR;
@@ -2239,7 +2357,7 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         }
     }
 
-    const bool flowOk = synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0);
+    const bool flowOk = synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, false);  // 縮圖是彩色的
 
     // 上半複製、下半合成（沒有位移場時 k＝0：下半只是複製，不會被拿來顯示）
     float k = flowOk ? 0.5f : 0.0f;
@@ -2479,6 +2597,14 @@ bool XrVideo::renderUnwarpYuv(pl_frame* mapped, const pl_frame* targetProto, pl_
     pl_shader_desc dd[2] = {sampledTex("vs_y", ty), sampledTex("vs_uv", tc)};
     // 輸出不比解碼影像大（兩圖層的周邊）時亮度改一次雙線性
     float bil = osz[1] <= crop[3] + 0.5f ? 1.0f : 0.0f;
+    if (bil > 0.5f) {
+        // §PERF-1113：曲線最陡的地方在中央（分段曲線的中央段、三次曲線的中心，斜率都是 1/a）。連那裡的覆蓋範圍
+        // 都不超過 1.25 個像素，shader 就不必逐像素判斷要不要取 4 點（門檻和 kUnwarpYuvBody 的同一個）
+        const float maxSl = fv[0] < 0.999f ? 1.0f / fv[0] : 1.0f;
+        if (maxSl * std::max(crop[2] / osz[0], crop[3] / osz[1]) <= 1.25f) {
+            bil = 2.0f;
+        }
+    }
     pl_shader_var vv[10] = {};
     vv[0].var = pl_var_vec2("vs_osz");
     vv[0].data = osz;
@@ -2503,7 +2629,7 @@ bool XrVideo::renderUnwarpYuv(pl_frame* mapped, const pl_frame* targetProto, pl_
     for (pl_shader_var& v : vv) {
         v.dynamic = true;
     }
-    static const std::string s_Header = std::string(kFovHeader) + kCatromYHeader;
+    static const std::string s_Header = std::string(kFovSlopeHeader) + kCatromYHeader;  // 這支只用帶斜率的那一組反解
     pl_custom_shader cs = {};
     cs.description = "viple vr fovea unwarp yuv";  // PassStats 照 "fovea unwarp" 歸到 unwarp
     cs.header = s_Header.c_str();
@@ -2559,6 +2685,11 @@ color = vec4(yy, cc.x, cc.y, 1.0);
 // 2.0.118～2.0.120 是直接在 sRGB 編碼值上乘 alpha：解回線性後變成 lin·fa^2.2，比該有的 lin·fa 暗——漸層帶亮度只剩
 // 約 80%，配戴時就是中央區外圍一圈暗框。vs_enc*＝1：這趟輸出的是 sRGB 編碼值（SrgbMutable），先解回線性、乘 alpha、
 // 再編回去；0：輸出本來就是線性（硬體寫入時才編碼），直接乘
+// §PERF-1113：「解回線性 → 乘 alpha → 編回去」不必真的算兩組 vec3 pow。編碼值 s 在冪次段（≥0.04045）時
+// enc(dec(s)·a) ＝ (s＋0.055)·a^(1/2.4) − 0.055，三個通道共用一次 a^(1/2.4)；結果掉進 sRGB 的線性段（<0.04045）時
+// 該是 12.92·x^2.4（x＝(s＋0.055)·a^(1/2.4)／1.055 ≤ 0.0905），用 x²(0.19920＋2.05522x) 近似（12.92 已乘進係數）；
+// s 本身在線性段時就是 s·a。和原本的寫法最大差 0.072／255（只用第一條、不處理線性段會差到 2.75／255，暗場景的
+// 漸層外緣會多一圈淡淡的暗邊，所以那一支不能省）。alpha＝1 的像素不動
 static const char* const kInsetFeatherBody = R"GLSL(
 vec2 fp = gl_FragCoord.xy - vec2(0.0, vs_top2);
 float fx = fp.x >= vs_isz2.x ? fp.x - vs_isz2.x : fp.x;
@@ -2566,9 +2697,15 @@ vec2 fq = vec2(fx, fp.y) / vs_isz2;
 float fm = min(min(fq.x, 1.0 - fq.x), min(fq.y, 1.0 - fq.y));
 float fa = smoothstep(0.0, vs_fe, fm);
 if (vs_enc2 > 0.5) {
-    vec3 fc = max(color.rgb, vec3(0.0));
-    vec3 fl = mix(fc / 12.92, pow((fc + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), fc)) * fa;
-    color.rgb = mix(fl * 12.92, 1.055 * pow(fl, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), fl));
+    if (fa < 1.0) {
+        vec3 fs = max(color.rgb, vec3(0.0));
+        float fte = pow(fa, 1.0 / 2.4);
+        vec3 fsp = fs + 0.055;
+        vec3 fhi = fsp * fte - 0.055;
+        vec3 fx3 = fsp * (fte * (1.0 / 1.055));
+        vec3 fdk = fx3 * fx3 * (2.573664 + 26.553442 * fx3);
+        color.rgb = mix(fs * fa, mix(fdk, fhi, step(vec3(0.04045), fhi)), step(vec3(0.04045), fs));
+    }
 } else {
     color.rgb *= fa;
 }
@@ -2584,10 +2721,20 @@ vec2 cc = texture(vs_uv, ((lp - vs_csh) / vs_rr) / vs_csz).rg;
 color = vec4(yy, cc.x, cc.y, 1.0);
 )GLSL";
 
+// §PERF-1113：同 kTilesBody，取樣座標改由頂點屬性內插（vs_yc＝亮度、vs_cc＝色度，四個角在 renderTiles 算好）。
+// 兩個座標都是像素位置的一次函數，不必每像素算；座標直接來自內插值，GPU 也能在 shader 開始前先取樣。
+// 亮度用最近點取樣（vs_y 在這一版綁的是最近點），取到的就是原本 floor()＋0.5 的那一個像素
+static const char* const kTilesVaBody = R"GLSL(
+float yy = texture(vs_y, vs_yc).r;
+vec2 cc = texture(vs_uv, vs_cc).rg;
+color = vec4(yy, cc.x, cc.y, 1.0);
+)GLSL";
+
 // 下排注視點那兩塊的邊緣漸層，照 Steam 自己的 OpenXR 客戶端（Quest 版 Steam Link，libvrlink_scene.so 內嵌的 GLSL）：
 //   alpha = pow(1.05 − 1.06·(|2dx|^10 + |2dy|^10), 1.5)，dx、dy＝離那一塊中心的距離（0～0.5）
 // ＝指數 10 的圓角方形：離中心 74% 半寬以內是 1，到邊緣降到 0（圓角只丟掉約 1.4% 的像素）。上排全視野 alpha＝1。
-// 預乘在線性光做（見 kInsetFeatherBody 上面的說明）
+// 預乘在線性光做（見 kInsetFeatherBody 上面的說明；不真的解碼再編碼的寫法也在那裡）。tb＝還沒取 1.5 次方的值：
+// alpha＝tb·sqrt(tb)、alpha^(1/2.4)＝tb^0.625。要不要處理用 tb 判斷（clamp 出來的 1.0 是精確值）
 static const char* const kTilesMaskBody = R"GLSL(
 float ta = 1.0;
 vec2 tp = gl_FragCoord.xy - vec2(0.0, vs_ttop + vs_tile.y);
@@ -2597,15 +2744,20 @@ if (tp.y >= 0.0) {
     vec2 td2 = td * td;
     vec2 td4 = td2 * td2;
     vec2 td10 = td4 * td4 * td2;
-    ta = pow(clamp(1.05 - 1.06 * (td10.x + td10.y), 0.0, 1.0), 1.5);
+    float tb = clamp(1.05 - 1.06 * (td10.x + td10.y), 0.0, 1.0);
     if (tp.x >= 2.0 * vs_tile.x) {
-        ta = 0.0;
+        tb = 0.0;
     }
-    if (ta < 1.0) {
+    if (tb < 1.0) {
+        ta = tb * sqrt(tb);
         if (vs_enc > 0.5) {
-            vec3 tc = max(color.rgb, vec3(0.0));
-            vec3 tl = mix(tc / 12.92, pow((tc + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), tc)) * ta;
-            color.rgb = mix(tl * 12.92, 1.055 * pow(tl, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), tl));
+            vec3 ts = max(color.rgb, vec3(0.0));
+            float tte = pow(tb, 0.625);
+            vec3 tsp = ts + 0.055;
+            vec3 thi = tsp * tte - 0.055;
+            vec3 tx3 = tsp * (tte * (1.0 / 1.055));
+            vec3 tdk = tx3 * tx3 * (2.573664 + 26.553442 * tx3);
+            color.rgb = mix(ts * ta, mix(tdk, thi, step(vec3(0.04045), thi)), step(vec3(0.04045), ts));
         } else {
             color.rgb *= ta;
         }
@@ -2796,74 +2948,132 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                     static_cast<int>(mapped->repr.levels));
     }
 
-    pl_shader sh = pl_dispatch_begin(m_Dp);
-    pl_shader_desc dd[2] = {sampledTex("vs_y", ty), sampledTex("vs_uv", tc)};
-    pl_shader_var vv[5] = {};
-    vv[0].var = pl_var_vec4("vs_crop");
-    vv[0].data = crop;
-    vv[1].var = pl_var_vec2("vs_ysz");
-    vv[1].data = ysz;
-    vv[2].var = pl_var_vec2("vs_csz");
-    vv[2].data = csz;
-    vv[3].var = pl_var_vec2("vs_rr");
-    vv[3].data = rr;
-    vv[4].var = pl_var_vec2("vs_csh");
-    vv[4].data = csh;
-    for (pl_shader_var& v : vv) {
-        v.dynamic = true;
+    // §PERF-1113：取樣座標在四個角算好、交給頂點屬性內插（見 kTilesVaBody）。順序是左上、右上、左下、右下；
+    // 範圍要和下面 dpar.rect 一致（從 swapchain 的 (0,0) 起 2tw×2th，所以角上的像素位置就是 0 與寬、高）。
+    // 亮度的原點先取整：內插到像素中心正好是 kTilesBody 的 floor(lp)＋0.5 那一點（crop 不是整數時也一樣）
+    const float rcW = 2.0f * tile[0], rcH = 2.0f * tile[1];
+    const float yOrg[2] = {std::floor(crop[0] + 0.5f), std::floor(crop[1] + 0.5f)};
+    float vaY[4][2];
+    float vaC[4][2];
+    for (int i = 0; i < 4; i++) {
+        const float fx = (i & 1) != 0 ? rcW : 0.0f;
+        const float fy = (i & 2) != 0 ? rcH : 0.0f;
+        vaY[i][0] = (yOrg[0] + fx) / ysz[0];
+        vaY[i][1] = (yOrg[1] + fy) / ysz[1];
+        vaC[i][0] = ((crop[0] + fx - csh[0]) / rr[0]) / csz[0];
+        vaC[i][1] = ((crop[1] + fy - csh[1]) / rr[1]) / csz[1];
     }
-    pl_custom_shader cs = {};
-    cs.description = "viple vr fovea unwarp tiles";  // PassStats 照 "fovea unwarp" 歸到 unwarp（沿用同一格，方便和之前的數字比）
-    cs.body = kTilesBody;
-    cs.input = PL_SHADER_SIG_NONE;
-    cs.output = PL_SHADER_SIG_COLOR;
-    cs.descriptors = dd;
-    cs.num_descriptors = 2;
-    cs.variables = vv;
-    cs.num_variables = 5;
-    if (!pl_shader_custom(sh, &cs)) {
-        pl_dispatch_abort(m_Dp, &sh);
-        *why = "custom shader rejected";
-        return false;
+    // 拿不到頂點格式、或這一版失敗過，就用原本每像素算座標的 kTilesBody
+    const pl_fmt vaFmt = m_TilesVaFailed ? nullptr : pl_find_vertex_fmt(m_Vulkan->gpu, PL_FMT_FLOAT, 2);
+
+    // 畫一次。回傳 nullptr＝畫好了，否則是失敗的原因
+    const auto drawPass = [&](bool useVa) -> const char* {
+        pl_shader sh = pl_dispatch_begin(m_Dp);
+        pl_shader_desc dd[2] = {sampledTex("vs_y", ty), sampledTex("vs_uv", tc)};
+        pl_shader_var vv[5] = {};
+        vv[0].var = pl_var_vec4("vs_crop");
+        vv[0].data = crop;
+        vv[1].var = pl_var_vec2("vs_ysz");
+        vv[1].data = ysz;
+        vv[2].var = pl_var_vec2("vs_csz");
+        vv[2].data = csz;
+        vv[3].var = pl_var_vec2("vs_rr");
+        vv[3].data = rr;
+        vv[4].var = pl_var_vec2("vs_csh");
+        vv[4].data = csh;
+        for (pl_shader_var& v : vv) {
+            v.dynamic = true;
+        }
+        pl_shader_va va[2] = {};
+        pl_custom_shader cs = {};
+        cs.description = "viple vr fovea unwarp tiles";  // PassStats 照 "fovea unwarp" 歸到 unwarp（沿用同一格，方便和之前的數字比）
+        cs.input = PL_SHADER_SIG_NONE;
+        cs.output = PL_SHADER_SIG_COLOR;
+        cs.descriptors = dd;
+        cs.num_descriptors = 2;
+        if (useVa) {
+            dd[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;  // 亮度取所在的那一個像素，內插的捨入誤差不會混進隔壁
+            va[0].attr.name = "vs_yc";
+            va[0].attr.fmt = vaFmt;
+            va[1].attr.name = "vs_cc";
+            va[1].attr.fmt = vaFmt;
+            for (int i = 0; i < 4; i++) {
+                va[0].data[i] = vaY[i];
+                va[1].data[i] = vaC[i];
+            }
+            cs.body = kTilesVaBody;
+            cs.vertex_attribs = va;
+            cs.num_vertex_attribs = 2;
+        }
+        else {
+            cs.body = kTilesBody;
+            cs.variables = vv;
+            cs.num_variables = 5;
+        }
+        if (!pl_shader_custom(sh, &cs)) {
+            pl_dispatch_abort(m_Dp, &sh);
+            return "custom shader rejected";
+        }
+        // 和 pl_render_image 同一套：YCbCr（含 limited range、位元深度）→ RGB，再從影像的色彩空間轉到 swapchain 的
+        pl_color_repr repr = mapped->repr;
+        repr.alpha = PL_ALPHA_NONE;
+        pl_shader_decode_color(sh, &repr, nullptr);
+        pl_color_space src = mapped->color;
+        pl_color_space dst = targetProto->color;
+        pl_color_space_infer_map(&src, &dst);
+        pl_shader_color_map(sh, nullptr, src, dst, nullptr, false);
+        float ttop = 0.0f;
+        pl_shader_var mv[3] = {};
+        mv[0].var = pl_var_vec2("vs_tile");
+        mv[0].data = tile;
+        mv[1].var = pl_var_float("vs_enc");
+        mv[1].data = &enc;
+        mv[2].var = pl_var_float("vs_ttop");
+        mv[2].data = &ttop;
+        for (pl_shader_var& v : mv) {
+            v.dynamic = true;
+        }
+        pl_custom_shader ms = {};
+        ms.description = "viple vr fovea tiles mask";
+        ms.body = kTilesMaskBody;
+        ms.input = PL_SHADER_SIG_COLOR;
+        ms.output = PL_SHADER_SIG_COLOR;
+        ms.variables = mv;
+        ms.num_variables = 3;
+        if (!pl_shader_custom(sh, &ms)) {
+            pl_dispatch_abort(m_Dp, &sh);
+            return "mask shader rejected";
+        }
+        pl_dispatch_params dpar = {};
+        dpar.shader = &sh;
+        dpar.target = swTex;
+        // 只寫這一張影像的範圍（開著補幀時 swapchain 是兩倍高，下半是合成的那一張）
+        dpar.rect = {0, 0, 2 * tw, 2 * th};
+        if (!pl_dispatch_finish(m_Dp, &dpar)) {
+            return "dispatch failed";
+        }
+        return nullptr;
+    };
+
+    if (!m_TilesVaFailed) {
+        // 拿不到頂點格式也當成這一版失敗：記下來，之後每格不必再查格式表，log 也留得下原因
+        const char* vaErr = vaFmt != nullptr ? drawPass(true) : "no vertex format";
+        if (vaErr == nullptr) {
+            if (!m_LoggedTilesVa) {
+                m_LoggedTilesVa = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-FOVEA] tiles: sampling positions come from vertex attributes (interpolated from the four corners)");
+            }
+            return true;
+        }
+        // 這一版畫不出來：整場改回每像素算座標，這一張馬上用那一版重畫（swapchain 這張還沒被寫過）
+        m_TilesVaFailed = true;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-FOVEA] tiles: vertex-attribute sampling positions not used (%s) - computing them per pixel as before", vaErr);
     }
-    // 和 pl_render_image 同一套：YCbCr（含 limited range、位元深度）→ RGB，再從影像的色彩空間轉到 swapchain 的
-    pl_color_repr repr = mapped->repr;
-    repr.alpha = PL_ALPHA_NONE;
-    pl_shader_decode_color(sh, &repr, nullptr);
-    pl_color_space src = mapped->color;
-    pl_color_space dst = targetProto->color;
-    pl_color_space_infer_map(&src, &dst);
-    pl_shader_color_map(sh, nullptr, src, dst, nullptr, false);
-    float ttop = 0.0f;
-    pl_shader_var mv[3] = {};
-    mv[0].var = pl_var_vec2("vs_tile");
-    mv[0].data = tile;
-    mv[1].var = pl_var_float("vs_enc");
-    mv[1].data = &enc;
-    mv[2].var = pl_var_float("vs_ttop");
-    mv[2].data = &ttop;
-    for (pl_shader_var& v : mv) {
-        v.dynamic = true;
-    }
-    pl_custom_shader ms = {};
-    ms.description = "viple vr fovea tiles mask";
-    ms.body = kTilesMaskBody;
-    ms.input = PL_SHADER_SIG_COLOR;
-    ms.output = PL_SHADER_SIG_COLOR;
-    ms.variables = mv;
-    ms.num_variables = 3;
-    if (!pl_shader_custom(sh, &ms)) {
-        pl_dispatch_abort(m_Dp, &sh);
-        *why = "mask shader rejected";
-        return false;
-    }
-    pl_dispatch_params dpar = {};
-    dpar.shader = &sh;
-    dpar.target = swTex;
-    // 只寫這一張影像的範圍（開著補幀時 swapchain 是兩倍高，下半是合成的那一張）
-    dpar.rect = {0, 0, 2 * tw, 2 * th};
-    if (!pl_dispatch_finish(m_Dp, &dpar)) {
-        *why = "dispatch failed";
+    const char* err = drawPass(false);
+    if (err != nullptr) {
+        *why = err;
         return false;
     }
     return true;
@@ -3056,7 +3266,8 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
     loadFoveation(fv, &fvCyR, &fvU0);
     fv[0] = 1.0f;
     fvU0 = 0.0f;
-    const bool flowOk = synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0);
+    // 縮圖是 kTilesDownBody 從亮度平面縮的（再縮一半那一張也是）：灰階
+    const bool flowOk = synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, true);
     if (m_SynthFailed) {
         return true;
     }
@@ -3263,48 +3474,55 @@ namespace {
 // 等角立方體（EAC，YouTube 的 360°）：方向 → 六個面之一 → 面上的角度（等角）→ 3×2 排法裡的位置。排法與每個面的
 // 轉向照 FFmpeg v360 的 eac（上排左、前、右；下排下、後、上，各轉 270／90／270 度）；座標換成 v360 的（y 朝下、z 朝前）。
 // 2026-10-19 用 v360 轉出來的 EAC 再用這個公式轉回經緯圖驗過（和原圖每像素平均差 1.7／765）
+// §PERF-1113：這一趟每個顯示格、兩眼各 2048² 都跑。選面改成比三個分量誰最大——和原本「方位角分四段、仰角再和
+// atan(cos(·)) 比」是同一個判斷，但不必算 atan2／asin／cos，只剩面上兩個座標各一次 atan；只用到分量的比值，
+// 所以方向不必先正規化。剛好壓在兩個面交界上的方向可能判到隔壁那一面，兩邊對到的是同一個方向的內容
 const char* kEquiHeader = R"GLSL(
 vec2 vs_eac(vec3 d) {
     vec3 v = vec3(d.x, -d.y, -d.z);
-    float phi = atan(v.x, v.z);
-    float th = asin(clamp(v.y, -1.0, 1.0));
-    int dir = 0;
-    float pn = phi;
-    if (phi >= -0.78539816 && phi < 0.78539816) { dir = 0; pn = phi; }
-    else if (phi >= -2.35619449 && phi < -0.78539816) { dir = 2; pn = phi + 1.57079633; }
-    else if (phi >= 0.78539816 && phi < 2.35619449) { dir = 3; pn = phi - 1.57079633; }
-    else { dir = 1; pn = phi + (phi > 0.0 ? -3.14159265 : 3.14159265); }
-    float t = atan(cos(pn));
-    if (th > t) { dir = 5; } else if (th < -t) { dir = 4; }
-    float uf; float vf; float face; float rot;
-    if (dir == 3) { uf = -v.z / v.x; vf = v.y / v.x; face = 2.0; rot = 0.0; }
-    else if (dir == 2) { uf = -v.z / v.x; vf = -v.y / v.x; face = 0.0; rot = 0.0; }
-    else if (dir == 4) { uf = -v.x / v.y; vf = -v.z / v.y; face = 5.0; rot = 270.0; }
-    else if (dir == 5) { uf = v.x / v.y; vf = -v.z / v.y; face = 3.0; rot = 270.0; }
-    else if (dir == 0) { uf = v.x / v.z; vf = v.y / v.z; face = 1.0; rot = 0.0; }
-    else { uf = v.x / v.z; vf = -v.y / v.z; face = 4.0; rot = 90.0; }
-    if (rot > 45.0 && rot < 135.0) { float tmp = uf; uf = -vf; vf = tmp; }
-    else if (rot > 225.0) { float tmp = -uf; uf = vf; vf = tmp; }
-    uf = 0.63661977 * atan(uf) + 0.5;
-    vf = 0.63661977 * atan(vf) + 0.5;
-    return vec2((uf + mod(face, 3.0)) / 3.0, vf * 0.5 + 0.5 * floor(face / 3.0));
+    vec3 a = abs(v);
+    vec2 r;
+    float face;
+    if (a.y > max(a.x, a.z)) {
+        // 上、下（已經轉過 270 度）
+        r = v.y > 0.0 ? vec2(-v.z, -v.x) / v.y : vec2(-v.z, v.x) / v.y;
+        face = v.y > 0.0 ? 3.0 : 5.0;
+    } else if (a.x >= a.z) {
+        // 右、左
+        r = v.x > 0.0 ? vec2(-v.z, v.y) / v.x : vec2(-v.z, -v.y) / v.x;
+        face = v.x > 0.0 ? 2.0 : 0.0;
+    } else {
+        // 前、後（後面那一面已經轉過 90 度）
+        r = v.z > 0.0 ? vec2(v.x, v.y) / v.z : vec2(v.y, v.x) / v.z;
+        face = v.z > 0.0 ? 1.0 : 4.0;
+    }
+    r = 0.63661977 * atan(r) + 0.5;
+    return vec2((r.x + mod(face, 3.0)) / 3.0, r.y * 0.5 + 0.5 * floor(face / 3.0));
 }
 )GLSL";
 
+// 先依投影方式分支（vs_mode 是 uniform）：等角立方體用不到經緯度，不算 normalize／atan2／asin；經緯度那一支照舊
 const char* kEquiBody = R"GLSL(
 vec2 uv = (gl_FragCoord.xy - vs_off) / vs_esz;
 vec3 dv = vec3(mix(vs_tan.x, vs_tan.y, uv.x), mix(vs_tan.z, vs_tan.w, uv.y), -1.0);
-vec3 d = normalize(vs_rot * dv);
-float lon = atan(d.x, -d.z);
-float lat = asin(clamp(d.y, -1.0, 1.0));
-float ex = vs_mode.x > 1.5 ? fract(0.5 + lon * 0.15915494) : 0.5 + lon * 0.31830989;
-float ey = 0.5 - lat * 0.31830989;
-vec2 e2 = vs_mode.x > 2.5 ? vs_eac(d) : vec2(ex, ey);
+vec3 rd = vs_rot * dv;
+vec2 e2;
+bool outside = false;
+if (vs_mode.x > 2.5) {
+    e2 = vs_eac(rd);
+} else {
+    vec3 d = normalize(rd);
+    float lon = atan(d.x, -d.z);
+    float lat = asin(clamp(d.y, -1.0, 1.0));
+    float ex = vs_mode.x > 1.5 ? fract(0.5 + lon * 0.15915494) : 0.5 + lon * 0.31830989;
+    float ey = 0.5 - lat * 0.31830989;
+    e2 = vec2(ex, ey);
+    outside = vs_mode.x < 1.5 && abs(lon) > 1.5707964;
+}
 vec3 c = texture(vs_equi, vs_src.xy + e2 * vs_src.zw).rgb;
 if (vs_mode.y > 0.5) {
     c = pow(c, vec3(2.2));
 }
-bool outside = vs_mode.x < 1.5 && abs(lon) > 1.5707964;
 color = outside ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(c, 1.0);
 )GLSL";
 
@@ -3773,6 +3991,17 @@ std::function<std::string()> XrVideo::takeStatsDeferred()
         snap->mode = modeName(static_cast<int>(m_Mode));
         snap->w = m_Sw.width;
         snap->h = m_Sw.height;
+        if (snap->w == 0 && m_Config.buffer > 0) {
+            // §PERF-1113（量測修正）：開緩衝時 swapchain 都放在 m_RingSets，只有正在畫的那一張會暫時換進 m_Sw
+            // （換進換出都在這把 m_StatsMutex 內），其餘時間 m_Sw 是空的，這一行就印成 0x0。改讀任一條有尺寸的
+            for (int i = 0; i < ringSize(); i++) {
+                if (m_RingSets[i].width != 0) {
+                    snap->w = m_RingSets[i].width;
+                    snap->h = m_RingSets[i].height;
+                    break;
+                }
+            }
+        }
         snap->synth = m_Config.synth;
         snap->jitter = m_Jitter.enabled();
         snap->cpu.swap(m_CpuUs);

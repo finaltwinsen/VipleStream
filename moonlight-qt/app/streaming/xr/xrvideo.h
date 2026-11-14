@@ -194,6 +194,13 @@ public:
 
     pl_gpu gpu() const;
 
+    // §PERF-1113（XR frame thread）：runtime 持續回報 shouldRender＝false（頭盔拿下、畫面沒在顯示）時設 true。
+    // 設了之後影像 render thread 每 kIdleTakeIntervalUs 才從 mailbox 取一張來畫（原本每張都轉換、等 GPU、release，
+    // 但沒有任何一格會引用它）；其餘的照舊留在 mailbox 被更新的蓋掉。解碼與 submit 完全不變（參考鏈不受影響），
+    // mailbox 裡永遠是最新的一張；設回 false 時馬上叫醒 render thread 把它畫出來。保留低頻率的更新是為了恢復
+    // 顯示的那一格手上的影像還夠新（PCVR 超過 500 ms 會變暗、2 s 會換成載入畫面）
+    void setDisplayIdle(bool idle);
+
     // decoder／render thread
     void submit(const AVFrame* frame);
     bool testMap(const AVFrame* frame);
@@ -241,6 +248,13 @@ public:
     // （loadFoveation／tilesFor）看到奇數或前後序號不同就重讀，不會拿到新舊各半的一組。只有 XR thread 會寫。
     void setFoveation(float a, float cxL, float cxR, float cyL, float cyR, float u0 = 0.0f)
     {
+        // §PERF-1113：這一組值整場幾乎不變，但 XR thread 每格都設。值沒變就不寫——不必每格推兩次序號，
+        // 讀的那一邊也不會剛好撞到「正在寫」而重讀。只有 XR thread 會寫，所以先比再寫沒有競爭
+        if (m_FvA.load(std::memory_order_relaxed) == a && m_FvCxL.load(std::memory_order_relaxed) == cxL &&
+            m_FvCxR.load(std::memory_order_relaxed) == cxR && m_FvCyL.load(std::memory_order_relaxed) == cyL &&
+            m_FvCyR.load(std::memory_order_relaxed) == cyR && m_FvU0.load(std::memory_order_relaxed) == u0) {
+            return;
+        }
         m_ParamSeq.fetch_add(1);
         m_FvU0.store(u0, std::memory_order_relaxed);
         m_FvCxL.store(cxL, std::memory_order_relaxed);
@@ -254,6 +268,11 @@ public:
     // 解碼出來的畫面是 (2·tw)×(2·th)：上排左右眼的全視野、下排左右眼的注視點裁切。XR thread 每幀設
     void setTiles(int tw, int th, int rw, int rh)
     {
+        // §PERF-1113：同 setFoveation，值沒變就不寫
+        if (m_TileW.load(std::memory_order_relaxed) == tw && m_TileH.load(std::memory_order_relaxed) == th &&
+            m_TileRW.load(std::memory_order_relaxed) == rw && m_TileRH.load(std::memory_order_relaxed) == rh) {
+            return;
+        }
         m_ParamSeq.fetch_add(1);
         m_TileH.store(th, std::memory_order_relaxed);
         m_TileRW.store(rw, std::memory_order_relaxed);
@@ -330,8 +349,10 @@ private:
     bool renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int tw, int th, int rw, int rh,
                           const float org[4], bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk,
                           VIPLE_VR_FRAME_META* synthMeta);
-    // §VR-SYNTH：估扣掉頭部轉動之後的位移場（m_Small／m_Mid → m_Flow）；renderSynth 與 renderTilesSynth 共用
-    bool synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4], float fvCyR, float fvU0);
+    // §VR-SYNTH：估扣掉頭部轉動之後的位移場（m_Small／m_Mid → m_Flow）；renderSynth 與 renderTilesSynth 共用。
+    // grayThumbs＝縮圖三個通道同值（分塊版從亮度平面縮的），比對時只讀一個通道
+    bool synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4], float fvCyR, float fvU0,
+                   bool grayThumbs);
     bool ensureFull(int fw, int fh);
     // fv＝(a, cxL, cxR, cyL)（shader 的 vec4 vs_fv）、*cyR＝右眼的垂直中心（shader 的 float vs_cyr）
     void loadFoveation(float fv[4], float* cyR, float* u0) const;
@@ -370,6 +391,7 @@ private:
     pl_tex m_FlowC = nullptr;        // 1/16 尺寸的位移場（粗層的結果，給 1/8 那一層當起點）
     int m_SmallCur = 0;
     bool m_HavePrevSmall = false;
+    bool m_PrevThumbsGray = false;   // 上一張的縮圖是不是灰階（分塊版）；和這一張不同種就不拿來比（見 synthFlow）
     bool m_HavePrevMeta = false;
     VIPLE_VR_FRAME_META m_PrevMeta = {};
     int64_t m_PrevPts = 0;
@@ -404,6 +426,8 @@ private:
     std::atomic<int> m_TileRH{0};
     bool m_TilesFailed = false;   // 直接讀 YUV 的那一趟不適用或失敗過 → 這個 session 改用一般的轉換（注視點那塊沒有漸層）
     bool m_LoggedTiles = false;
+    bool m_TilesVaFailed = false; // §PERF-1113：取樣座標用頂點屬性的那一版畫失敗過（或拿不到頂點格式）→ 這個 session 改回每像素算座標
+    bool m_LoggedTilesVa = false;
     bool m_UnwarpFailed = false;     // 還原的 shader 或材質失敗過：這個 session 改回直接畫（影像會是壓縮過的樣子）
     pl_tex m_Tex[4] = {};       // XR thread 的 map 材質
     pl_tex m_TestTex[4] = {};   // testMap 用（m_TestMutex）
@@ -484,6 +508,11 @@ private:
     uint64_t m_PendingAtUs = 0;            // §VR-XRLOOP：m_Pending 放進來的時刻（m_MailboxMutex）
     // §VR-RATE-CAUSE：最早一張還沒發布的影格交進來的時刻（0＝沒有）。寫在 m_MailboxMutex 內，frame thread 只讀
     std::atomic<uint64_t> m_WaitSinceUs {0};
+    // §PERF-1113：畫面沒在顯示（見 setDisplayIdle）。frame thread 寫；render thread 在 m_MailboxMutex 內讀
+    std::atomic<bool> m_DisplayIdle {false};
+    std::atomic<uint64_t> m_IdleEndUs {0};  // 最近一次恢復顯示的時刻（us）；這之前畫的影像不拿來當緩衝的那一張
+    uint64_t m_IdleLastTakeUs = 0;         // 閒置時上一次從 mailbox 取出的時刻（只有影像 render thread 用）
+    static constexpr uint64_t kIdleTakeIntervalUs = 200000;  // 閒置時每 200 ms 畫一張
     bool m_StopThread = false;
     std::thread m_Thread;
     uint64_t m_FirstSubmitUs = 0;          // stall 測試的起點（submit 端）

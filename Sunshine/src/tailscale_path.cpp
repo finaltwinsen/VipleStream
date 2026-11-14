@@ -2,7 +2,9 @@
  * @file src/tailscale_path.cpp
  * @brief §TS-PATH：串流中若 Tailscale 路徑掉到中繼，依序 ping、restun、rebind 嘗試打回直連。
  *
- * rebind 只重建 UDP socket，DERP（TCP）那條不受影響，不該把正在走的串流打斷。
+ * rebind 不是沒有代價：tailscaled 除了重建 UDP socket，還會清掉「所有」peer 已經打通的直連位址（全部先退回
+ * DERP 再重新打洞），並對 DERP 連線送 ping、3 秒沒回就關掉重連。所以它排在階梯最後、間隔 120 秒、每個 session
+ * 最多 5 次，不可以為了早點打通而提早或加密。restun 只是重新問 STUN（非同步、冪等），開場就在中繼時當輪就做。
  * 呼叫端的 session 物件這個模組碰不到；停掉時只動自己的旗標。
  */
 #include "tailscale_path.h"
@@ -49,6 +51,7 @@ namespace bp = boost::process::v1;
 
 namespace tailscale_path {
   namespace {
+    std::atomic<std::uint64_t> g_direct_upgrades {0};  // §ABR-PATH-UPGRADE
 
     constexpr auto k_poll = 5s;
     constexpr auto k_cmd_timeout = 10s;
@@ -564,6 +567,8 @@ namespace tailscale_path {
       bp::filesystem::path cli;
       path_kind path = path_kind::unknown;
       std::optional<steady::time_point> relay_since;
+      /// §PERF-1113 A34：這一段中繼是「第一次讀到狀態就在中繼」（開場），不是串流中途從直連掉下來的
+      bool relay_at_open = false;
       int stage = 0;
       int rebinds = 0;
       std::optional<steady::time_point> last_rebind;
@@ -744,6 +749,7 @@ namespace tailscale_path {
           if (!log_ok(*s.eng)) {
             return false;
           }
+          g_direct_upgrades.fetch_add(1, std::memory_order_relaxed);  // §ABR-PATH-UPGRADE
           BOOST_LOG(info) << "[VIPLE-TS-PATH] peer "sv << s.ip << " relay -> direct after "sv << relay_seconds(s) << "s cur="sv << obs.cur;
         } else if (s.path != path_kind::direct) {
           if (!log_ok(*s.eng)) {
@@ -767,6 +773,8 @@ namespace tailscale_path {
         } else {
           BOOST_LOG(info) << "[VIPLE-TS-PATH] peer "sv << s.ip << " on relay region="sv << region;
         }
+        // 兩端閒置一陣子後直連路徑過期是常態，開場走中繼不代表網路變了：escalate 不必先等 k_stage1
+        s.relay_at_open = s.path == path_kind::unknown;
         s.path = path_kind::relay;
         s.relay_since = steady::now();
         s.stage = 0;
@@ -781,6 +789,18 @@ namespace tailscale_path {
       }
       const auto elapsed = steady::now() - *s.relay_since;
       if (s.stage <= 0) {
+        if (s.relay_at_open) {
+          // 開場就是中繼：當輪就 restun＋ping，取代 k_stage1 那次單獨的 ping。之後照原本的時間走
+          // （k_stage2 再 restun＋ping、k_stage3 才 rebind）；rebind 的時間點與次數不因此提早。
+          if (!s.privilege_blocked && !do_restun(s)) {
+            return false;
+          }
+          if (!session_alive(s) || !do_ping(s)) {
+            return false;
+          }
+          s.stage = 1;
+          return session_alive(s);
+        }
         if (elapsed < k_stage1) {
           return true;
         }
@@ -1027,4 +1047,7 @@ namespace tailscale_path {
     eng->cv.notify_all();
   }
 
+  std::uint64_t direct_upgrade_count() {
+    return g_direct_upgrades.load(std::memory_order_relaxed);
+  }
 }  // namespace tailscale_path

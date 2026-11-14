@@ -498,6 +498,24 @@ public class MediaCodecHelper {
 
         boolean setNewOption = false;
 
+        // §PERF-1113：回報 FEATURE_LowLatency 的解碼器（Android 11+）原本在 try 0 只拿到 low-latency=1 就
+        // 定案，後面的 KEY_PRIORITY 永遠走不到。low-latency 只管「不囤幀」，不管排程優先權，所以在最前面
+        // 多插一階「low-latency＋KEY_PRIORITY=0（realtime，標準鍵）」；configure 失敗時 try 1 就是原本的
+        // try 0，其後的階梯整個往後移一格、內容不變。operating-rate 刻意不設（部分 Qualcomm 會多耗電或
+        // configure 失敗，要實機量過才能決定）。
+        // 複核（11-13）：只給原本階梯就會拿到 KEY_PRIORITY 的那一群。decoderSupportsMaxOperatingRate() 為 true 的
+        // Qualcomm 解碼器原本刻意只給 operating-rate、不給 realtime 優先權（速率滿足不了時解碼器會當掉，而且
+        // 是 configure 成功之後才出錯，階梯接不住），那一群維持原本的 try 0。
+        if (decoderSupportsAndroidRLowLatency(decoderInfo, videoFormat.getString(MediaFormat.KEY_MIME))
+                && !decoderSupportsMaxOperatingRate(decoderInfo.getName())) {
+            if (tryNumber == 0) {
+                videoFormat.setInteger("low-latency", 1);
+                videoFormat.setInteger(MediaFormat.KEY_PRIORITY, 0);
+                return true;
+            }
+            tryNumber--;
+        }
+
         if (tryNumber < 1) {
             // Official Android 11+ low latency option (KEY_LOW_LATENCY).
             videoFormat.setInteger("low-latency", 1);

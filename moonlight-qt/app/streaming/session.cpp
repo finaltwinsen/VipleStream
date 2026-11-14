@@ -180,7 +180,13 @@ static int inputStallWatchdogProc(void*)
     int32_t reportedPhase = -2;
     uint32_t stallCount = 0;
     while (s_StallWatchdogRun.load()) {
+#ifdef Q_OS_WIN32
         SDL_Delay(10);
+#else
+        // §PERF-1113：非 Windows 沒有輸入時刻也沒有堆疊擷取，這條執行緒只剩「卡在自己的事件處理 ≥50 ms 就印一行」，
+        // 卻整場串流（含頭盔 VR 串流）每 10 ms 醒一次。改 25 ms：門檻仍是 50 ms，回報的毫秒數解析度變成 25 ms
+        SDL_Delay(25);
+#endif
         uint32_t now = stallNowMs();
         uint32_t beat = s_LoopBeat.load();
         if (beat != lastBeat) {
@@ -314,6 +320,14 @@ static bool wants10Bit(const StreamingPreferences* prefs)
 
 #define CONN_TEST_SERVER "qt.conntest.moonlight-stream.org"
 
+// [VIPLE-STARTUP]（A44，量測）：client log 的時間戳只到秒，開場各階段的時間點自己帶毫秒。steady clock 的絕對值：
+// 和 xrcontext.cpp 的 bring-up 行、同一台機器上的另一個行程（VR 介面與它生出的串流子行程）都是同一個時鐘，可以直接相減
+static long long startupNowMs()
+{
+    return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clStageStarting,
     nullptr,
@@ -337,6 +351,9 @@ QSemaphore Session::s_ActiveSessionSemaphore(1);
 
 void Session::clStageStarting(int stage)
 {
+    // [VIPLE-STARTUP]：連線各階段開始的時刻（下一個階段開始＝這一個結束；最後一個結束看「LiStartConnection returned」）
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld stage %s", startupNowMs(), LiGetStageName(stage));
+
     // We know this is called on the same thread as LiStartConnection()
     // which happens to be the main thread, so it's cool to interact
     // with the GUI in these callbacks.
@@ -947,6 +964,21 @@ bool Session::chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
     // §VR M3a X2：只有真正串流的 decoder 才接 XR（能力探測的 testOnly 實例一律平面）
     params.xr = testOnly ? nullptr : xr;
 
+    // [VIPLE-STARTUP]：這一次（探測或真的解碼器）花多久，出函式時印，成功與失敗都印
+    struct StartupTimer {
+        long long t0Ms;
+        bool testOnly;
+        int fmt, w, h, fps;
+        IVideoDecoder** chosen;  // 呼叫端的變數：成功時是新的解碼器，失敗時下面會設成 nullptr
+        ~StartupTimer()
+        {
+            const long long nowMs = startupNowMs();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-STARTUP] t=%lld chooseDecoder testOnly=%d fmt=0x%x %dx%d@%d ok=%d took=%lld ms",
+                        nowMs, testOnly ? 1 : 0, fmt, w, h, fps, *chosen != nullptr ? 1 : 0, nowMs - t0Ms);
+        }
+    } startupTimer{startupNowMs(), testOnly, videoFormat, width, height, frameRate, &chosenDecoder};
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "V-sync %s",
                 enableVsync ? "enabled" : "disabled");
@@ -1218,6 +1250,22 @@ Session::getDecoderAvailability(SDL_Window* window,
                 "[VIPLE-DIAG] getDecoderAvailability: format=0x%x -> %s",
                 videoFormat, hw ? "HARDWARE" : "SOFTWARE");
 
+    // §PERF-1113 A5：趁這個測試解碼器還在，把 populateDecoderProperties() 要讀的屬性記在這個 Session 上
+    // （不放進上面行程層級的 s_probeCache，理由見 session.h 的 m_ProbedDecoderProps）
+    {
+        ProbedDecoderProps props;
+        props.videoFormat = videoFormat;
+        props.vds = (int)vds;
+        props.width = width;
+        props.height = height;
+        props.frameRate = frameRate;
+        props.capabilities = decoder->getDecoderCapabilities();
+        props.colorSpace = decoder->getDecoderColorspace();
+        props.colorRange = decoder->getDecoderColorRange();
+        props.alwaysFullScreen = decoder->isAlwaysFullScreen();
+        m_ProbedDecoderProps.push_back(props);
+    }
+
     delete decoder;
 
     auto result = hw ? DecoderAvailability::Hardware : DecoderAvailability::Software;
@@ -1227,19 +1275,57 @@ Session::getDecoderAvailability(SDL_Window* window,
 
 bool Session::populateDecoderProperties(SDL_Window* window)
 {
-    IVideoDecoder* decoder;
+    const int videoFormat = m_SupportedVideoFormats.first();
+    const int vds = (int)m_Preferences->videoDecoderSelection;
 
-    if (!chooseDecoder(m_Preferences->videoDecoderSelection,
-                       window,
-                       m_SupportedVideoFormats.first(),
-                       m_StreamConfig.width,
-                       m_StreamConfig.height,
-                       m_StreamConfig.fps,
-                       false, false, true, decoder)) {
-        return false;
+    // §PERF-1113 A5：這一次 initialize() 的探測若已經用一模一樣的參數建過測試解碼器（同樣是 testOnly、沒有 V-sync、
+    // 沒有節拍），就沿用它的屬性。沒有的情況照舊建一次：探測命中行程層級的快取（同行程的第二場起）、
+    // 或驗證時改過解析度
+    ProbedDecoderProps props {};
+    bool reused = false;
+    for (const ProbedDecoderProps& p : m_ProbedDecoderProps) {
+        if (p.videoFormat == videoFormat && p.vds == vds &&
+                p.width == m_StreamConfig.width && p.height == m_StreamConfig.height &&
+                p.frameRate == m_StreamConfig.fps) {
+            props = p;
+            reused = true;
+            break;
+        }
     }
 
-    m_VideoCallbacks.capabilities = decoder->getDecoderCapabilities();
+    if (!reused) {
+        IVideoDecoder* decoder;
+
+        if (!chooseDecoder(m_Preferences->videoDecoderSelection,
+                           window,
+                           videoFormat,
+                           m_StreamConfig.width,
+                           m_StreamConfig.height,
+                           m_StreamConfig.fps,
+                           false, false, true, decoder)) {
+            return false;
+        }
+
+        props.videoFormat = videoFormat;
+        props.vds = vds;
+        props.width = m_StreamConfig.width;
+        props.height = m_StreamConfig.height;
+        props.frameRate = m_StreamConfig.fps;
+        props.capabilities = decoder->getDecoderCapabilities();
+        props.colorSpace = decoder->getDecoderColorspace();
+        props.colorRange = decoder->getDecoderColorRange();
+        props.alwaysFullScreen = decoder->isAlwaysFullScreen();
+
+        delete decoder;
+    }
+
+    // 沿用與實建印同一個格式，兩條路徑的數值可以直接比
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-STARTUP] decoder props src=%s fmt=0x%x %dx%d@%d vds=%d caps=0x%x colorspace=%d range=%d alwaysFullScreen=%d",
+                reused ? "probe" : "built", props.videoFormat, props.width, props.height, props.frameRate, props.vds,
+                props.capabilities, props.colorSpace, props.colorRange, props.alwaysFullScreen ? 1 : 0);
+
+    m_VideoCallbacks.capabilities = props.capabilities;
     if (m_VideoCallbacks.capabilities & CAPABILITY_PULL_RENDERER) {
         // It is an error to pass a push callback when in pull mode
         m_VideoCallbacks.submitDecodeUnit = nullptr;
@@ -1254,7 +1340,7 @@ bool Session::populateDecoderProperties(SDL_Window* window)
                     m_StreamConfig.colorSpace);
     }
     else {
-        m_StreamConfig.colorSpace = decoder->getDecoderColorspace();
+        m_StreamConfig.colorSpace = props.colorSpace;
     }
 
     if (Utils::getEnvironmentVariableOverride("COLOR_RANGE_OVERRIDE", &m_StreamConfig.colorRange)) {
@@ -1263,14 +1349,12 @@ bool Session::populateDecoderProperties(SDL_Window* window)
                     m_StreamConfig.colorRange);
     }
     else {
-        m_StreamConfig.colorRange = decoder->getDecoderColorRange();
+        m_StreamConfig.colorRange = props.colorRange;
     }
 
-    if (decoder->isAlwaysFullScreen()) {
+    if (props.alwaysFullScreen) {
         m_IsFullScreen = true;
     }
-
-    delete decoder;
 
     return true;
 }
@@ -1326,6 +1410,22 @@ Session::~Session()
 bool Session::initialize(QQuickWindow* qtWindow)
 {
     m_QtWindow = qtWindow;
+
+    // [VIPLE-STARTUP]：initialize 的起點與終點（XR bring-up、解碼器探測、音訊測試都在這中間）；出函式時印，失敗的路徑也印
+    struct StartupTimer {
+        long long t0Ms;
+        bool ok;
+        ~StartupTimer()
+        {
+            const long long nowMs = startupNowMs();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld initialize done ok=%d took=%lld ms",
+                        nowMs, ok ? 1 : 0, nowMs - t0Ms);
+        }
+    } startupTimer{startupNowMs(), false};
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld initialize begin", startupTimer.t0Ms);
+
+    // §PERF-1113 A5：探測到的解碼器屬性只在這一次 initialize() 裡有效
+    m_ProbedDecoderProps.clear();
 
 #ifdef Q_OS_DARWIN
     if (qEnvironmentVariableIntValue("I_WANT_BUGGY_FULLSCREEN") == 0) {
@@ -1994,6 +2094,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
         return false;
     }
 
+    startupTimer.ok = true;
     return true;
 }
 
@@ -3683,7 +3784,11 @@ bool Session::startConnectionAsync()
         try {
             NvHTTP http(m_Computer);
             QString launchResponse;
-            http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
+            // [VIPLE-STARTUP]：/launch（或 /resume）送出與回來的時刻；VR 的回應要等 host 的編排器，這一段就是 host 那邊花的
+            const char* const launchVerb = m_Computer->currentGameId != 0 ? "resume" : "launch";
+            const long long launchT0Ms = startupNowMs();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld %s request", launchT0Ms, launchVerb);
+            http.startApp(launchVerb,
                           m_Computer->isNvidiaServerSoftware,
                           m_App.id, &m_StreamConfig,
                           enableGameOptimizations,
@@ -3694,6 +3799,11 @@ bool Session::startConnectionAsync()
                           m_Takeover,
                           m_VrRequested ? m_VrLaunch.toQuery() : QString(),
                           &launchResponse);
+            {
+                const long long nowMs = startupNowMs();
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld %s reply took=%lld ms",
+                            nowMs, launchVerb, nowMs - launchT0Ms);
+            }
 
             // §VR：不變式 1——client 送了 vr=1 **而且** server 回了
             // <VipleStreamVRSession> 才啟用；不看 IS_SUNSHINE／isVipleStreamPeer
@@ -3942,7 +4052,9 @@ bool Session::startConnectionAsync()
 
         // getActiveAddressReachability() does network I/O, so we only attempt to check
         // reachability if we've already contacted the PC successfully.
-        switch (m_Computer->getActiveAddressReachability()) {
+        int reachMtu = 0;          // §PERF-1113 A22：出口介面的 MTU（0＝不知道）
+        QHostAddress reachPeer;    // 實際連上的對端位址
+        switch (m_Computer->getActiveAddressReachability(&reachMtu, &reachPeer)) {
         case NvComputer::RI_LAN:
             // This address is on-link, so treat it as a local address
             // even if it's not in RFC 1918 space or it's an IPv6 address.
@@ -3953,6 +4065,46 @@ bool Session::startConnectionAsync()
             // Treat it as remote even if the target address is in RFC 1918 address space.
             m_StreamConfig.streamingRemotely = STREAM_CFG_REMOTE;
             m_StreamConfig.packetSize = 1024;
+            // §PERF-1113 A22：1024 是「不知道這條 VPN 的 MTU」時的保守值。Tailscale 兩端的 MTU 固定 1280，影像封包可以用
+            // 1184（common-c 對遠端 IPv6 用的就是這個值：IPv4 封包 1228 B、IPv6 1248 B；開影像加密時 common-c 會從
+            // packetSize 扣掉加密前綴，封包大小不變），同碼率下每秒少約一成的封包。下面的條件缺一個就維持 1024：
+            //   - 對端是 Tailscale 位址（100.64.0.0/10 或 fd7a:115c:a1e0::/48）
+            //   - 出口介面回報的 MTU ≥ 1280（0＝不知道；使用者把 Tailscale 的 MTU 調小時也會擋在這裡）
+            //   - 影像不經 relay 的通道、也不走 QUIC（MP-QUIC 的 datagram 上限另外算，這裡不動）
+            {
+                bool peerIsV4 = false;
+                const quint32 peerV4 = reachPeer.toIPv4Address(&peerIsV4);
+                const bool tailscalePeer = peerIsV4 ? ((peerV4 & 0xFFC00000u) == 0x64400000u)
+                                                    : reachPeer.isInSubnet(QHostAddress(QStringLiteral("fd7a:115c:a1e0::")), 48);
+                bool videoOverQuic = false;
+#ifdef VIPLE_MPQUIC
+                // 和下面「Wire MP-QUIC preferences」的條件相同
+                videoOverQuic = m_Preferences->enableMpQuic && m_Computer->isMpQuicCapable && !m_VrRequested;
+#endif
+                const char* reason;
+                if (!tailscalePeer) {
+                    reason = "VPN with unknown MTU";
+                }
+                else if (reachMtu == 0) {
+                    reason = "Tailscale peer, interface MTU unknown";
+                }
+                else if (reachMtu < 1280) {
+                    reason = "Tailscale peer, interface MTU below 1280";
+                }
+                else if (useRelayForStream) {
+                    reason = "Tailscale peer, video through the relay tunnel";
+                }
+                else if (videoOverQuic) {
+                    reason = "Tailscale peer, video over QUIC";
+                }
+                else {
+                    m_StreamConfig.packetSize = 1184;
+                    reason = "Tailscale peer, interface MTU at least 1280";
+                }
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-PKTSIZE] video packet size %d over VPN (%s; peer %s, interface MTU %d)",
+                            m_StreamConfig.packetSize, reason, qPrintable(reachPeer.toString()), reachMtu);
+            }
             // §P4-TUNNEL 2026-08-27 — 目標是同網段私網位址、卻被判定要走
             // VPN/通道，代表「看起來的 LAN 串流」其實整條繞出去再繞回來。
             // 這個坑非常安靜：使用者以為在區網直連，實測卻是延遲 25-36ms
@@ -4230,6 +4382,8 @@ bool Session::startConnectionAsync()
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);
+    // [VIPLE-STARTUP]：最後一個連線階段結束的時刻（各階段的起點在 clStageStarting 印）
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld LiStartConnection returned %d", startupNowMs(), err);
 
     // VipleStream: Clean up RTSP tunnel after handshake completes (or fails).
     // The tunnel is only needed for the RTSP handshake — streaming uses UDP.
@@ -4268,6 +4422,11 @@ bool Session::startConnectionAsync()
                                                        status.toUtf8().constData());
                     m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
                 });
+        // §PERF-1113：頭盔 VR 串流時每 10 秒才問一次（原本 2 秒）。功能保留，只是 host 送檔最多晚 10 秒才開始；
+        // 每次輪詢都是一次 HTTPS 往返，戴著的時候不值得每 2 秒把 Wi-Fi 叫醒一次
+        if (m_XrPcvr) {
+            m_FileTransferClient->setPollIntervalMs(10000);
+        }
         m_FileTransferClient->start();
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-XFER] FileTransferClient started for %s:%u (worker thread)",
@@ -4460,6 +4619,8 @@ bool Session::startConnectionAsync()
     }
 #endif
 
+    // [VIPLE-STARTUP]：連線執行緒這一側做完（LiStartConnection 之後的雜項也算在內）；之後回主執行緒建視窗與解碼器
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld connectionStarted", startupNowMs());
     emit connectionStarted();
     return true;
 }
@@ -4502,6 +4663,9 @@ void Session::setShouldExit(bool quitHostApp)
 
 void Session::start()
 {
+    // [VIPLE-STARTUP]：initialize 結束到這裡之間是介面那一側（啟動警告的提示等）
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld start", startupNowMs());
+
     // Wait for any old session to finish cleanup
     s_ActiveSessionSemaphore.acquire();
 
@@ -4630,6 +4794,9 @@ void Session::exec()
         QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
         return;
     }
+
+    // [VIPLE-STARTUP]：連線執行緒結束、回到主執行緒的時刻（之後建視窗，SHOWN 才建解碼器）
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld exec begin", startupNowMs());
 
     // Pump the Qt event loop one last time before we create our SDL window
     // This is sometimes necessary for the QML code to process any signals
@@ -5272,6 +5439,9 @@ void Session::exec()
                             event.type);
             }
 
+            // [VIPLE-STARTUP]：開始建（或重建）解碼器的時刻；開場的第一次就是視窗 SHOWN 之後這一次
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld decoder (re)create begin", startupNowMs());
+
             SDL_LockMutex(m_DecoderLock);
 
             // Destroy the old decoder
@@ -5373,6 +5543,9 @@ void Session::exec()
             m_InputHandler->updatePointerRegionLock();
 
             SDL_UnlockMutex(m_DecoderLock);
+            // [VIPLE-STARTUP]：解碼器建好、要了 IDR（真正送出是 common-c 的「IDR frame request sent」，那一行沒有毫秒）。
+            // 放掉 m_DecoderLock 之後才印
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld IDR requested (decoder ready)", startupNowMs());
             break;
 
         case SDL_KEYUP:

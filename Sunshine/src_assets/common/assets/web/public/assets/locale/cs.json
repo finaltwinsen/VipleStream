@@ -263,7 +263,7 @@
     "max_bitrate": "Maximální bitrate",
     "max_bitrate_desc": "Maximální bitrate (v Kb/s), kterým bude VipleStream-Server kódovat datový tok. Pokud je nastaven na 0, bude vždy použit bitrate požadovaný aplikací VipleStream.",
     "minimum_fps_target": "Minimální cílová hodnota FPS",
-    "minimum_fps_target_desc": "Nejnižší efektivní FPS, kterého může stream dosáhnout. Hodnota 0 je považována za zhruba polovinu FPS streamu. Pokud streamujete obsah s 24 nebo 30 snímky za sekundu, doporučuje se nastavení 20.",
+    "minimum_fps_target_desc": "Nejnižší efektivní FPS, kterého může stream dosáhnout. Hodnota 0 znamená FPS požadované klientem (plné, ne poloviční). Pokud streamujete obsah s 24 nebo 30 snímky za sekundu, doporučuje se nastavení 20.",
     "min_log_level": "Úroveň logu",
     "min_log_level_0": "Verbose",
     "min_log_level_1": "Ladit",

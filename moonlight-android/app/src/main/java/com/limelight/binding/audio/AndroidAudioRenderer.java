@@ -25,6 +25,9 @@ public class AndroidAudioRenderer implements AudioRenderer {
     private int bufferSize;
     private boolean lowLatency;
     private volatile boolean stopping = false;
+    // §PERF-1113：音訊解碼／播放執行緒是 common-c 用 pthread 開的（nice 0），第一次進 playDecodedAudio
+    // 時提到 THREAD_PRIORITY_AUDIO（−16，Android 給音訊執行緒的標準級距），CPU 有競爭時不被背景工作擠掉
+    private boolean playThreadPriorityRaised = false;
 
     public AndroidAudioRenderer(Context context, boolean enableAudioFx) {
         this.context = context;
@@ -174,6 +177,7 @@ public class AndroidAudioRenderer implements AudioRenderer {
                 this.bufferSize = bufferSize;
                 this.lowLatency = lowLatency;
                 this.stopping = false;
+                this.playThreadPriorityRaised = false;
 
                 // Successfully created working AudioTrack. We're done here.
                 LimeLog.info("Audio track configuration: "+bufferSize+" "+lowLatency);
@@ -203,6 +207,15 @@ public class AndroidAudioRenderer implements AudioRenderer {
         // §REVIEW-1104：若已進入停止流程則直接丟棄音訊資料，避免阻塞解碼執行緒
         if (stopping) {
             return;
+        }
+        if (!playThreadPriorityRaised) {
+            playThreadPriorityRaised = true;
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
+                LimeLog.info("[VIPLE-THREAD-PRIO] audio play thread tid=" + android.os.Process.myTid() + " -> THREAD_PRIORITY_AUDIO");
+            } catch (Throwable t) {
+                LimeLog.warning("[VIPLE-THREAD-PRIO] audio play thread priority not changed: " + t);
+            }
         }
         // Only queue up to 40 ms of pending audio data in addition to what AudioTrack is buffering for us.
         if (MoonBridge.getPendingAudioDuration() < 40) {

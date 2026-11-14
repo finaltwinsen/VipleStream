@@ -70,9 +70,15 @@ public:
 
     void save();
 
+    // §PERF-1113 A31：設了之後，手上已經有對應表的快取檔時這個行程不再上網查新版（沒有快取檔照舊去抓）。
+    // 給 VR 串流的子行程用：生出它的介面行程啟動時已經查過。要在第一個 MappingManager 建立之前設（GUI 執行緒）
+    static void setSkipFetchIfCached(bool skip);
+
 private:
     QMap<QString, SdlGamepadMapping> m_Mappings;
 
     static MappingFetcher* s_MappingFetcher;
+    static bool s_SkipFetchIfCached;
+    static bool s_FetchDecided;
 };
 

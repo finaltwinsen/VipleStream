@@ -14,6 +14,9 @@ namespace abr_signals {
   inline std::atomic<int> avg_qp_x100 {-1};
   /// 目前編碼器的格式：0＝H.264、1＝HEVC、2＝AV1、-1＝未知（QP 尺度不同，飽和點要分開看）
   inline std::atomic<int> codec {-1};
+  /// 編碼器實際在用的目標碼率（kbps）：建立時的值，之後每次 reconfigure 成功更新；-1＝不知道（編碼器不回報）。
+  /// 只給 log 用（[VIPLE-VR-ABR-FAST] 10s 的 enc=）：和控制器的 target 對不上＝決定沒有進編碼器
+  inline std::atomic<int> enc_kbps {-1};
 
   /// 編碼器每出一幀呼叫（IDR 的 QP 和 P 幀不同，不算）
   inline void note_frame_qp(int qp, bool idr) {
@@ -25,9 +28,10 @@ namespace abr_signals {
     avg_qp_x100.store(next, std::memory_order_relaxed);
   }
 
-  /// 編碼器建立時呼叫，清掉上一個 session 的值
-  inline void reset(int codec_id) {
+  /// 編碼器建立時呼叫，清掉上一個 session 的值。kbps＝編碼器初始化用的目標碼率（不知道給 -1）
+  inline void reset(int codec_id, int kbps = -1) {
     avg_qp_x100.store(-1, std::memory_order_relaxed);
     codec.store(codec_id, std::memory_order_relaxed);
+    enc_kbps.store(kbps, std::memory_order_relaxed);
   }
 }  // namespace abr_signals

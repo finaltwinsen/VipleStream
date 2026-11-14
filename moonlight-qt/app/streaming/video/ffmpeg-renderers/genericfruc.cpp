@@ -81,7 +81,7 @@ bool GenericFRUC::loadShaders() {
 bool GenericFRUC::createTextures() {
     HRESULT hr;
 
-    // --- Full-resolution previous frame (R8G8B8A8) ---
+    // --- Full-resolution frame textures (R8G8B8A8) ---
     D3D11_TEXTURE2D_DESC fullDesc = {};
     fullDesc.Width = m_Width;
     fullDesc.Height = m_Height;
@@ -92,20 +92,20 @@ bool GenericFRUC::createTextures() {
     fullDesc.Usage = D3D11_USAGE_DEFAULT;
     fullDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
-    hr = m_Device->CreateTexture2D(&fullDesc, nullptr, &m_PrevFrame);
-    if (FAILED(hr)) return false;
-    hr = m_Device->CreateShaderResourceView(m_PrevFrame.Get(), nullptr, &m_PrevFrameSRV);
-    if (FAILED(hr)) return false;
-
-    // --- Render texture (caller renders video into this via RTV) ---
+    // --- Two render textures (caller renders video into one via RTV) ---
+    // §PERF-1113：兩張都要能當 render target 與 SRV，才能每幀輪替（這一幀／上一幀參考）而不必複製。
     D3D11_TEXTURE2D_DESC renderDesc = fullDesc;
     renderDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-    hr = m_Device->CreateTexture2D(&renderDesc, nullptr, &m_RenderTexture);
-    if (FAILED(hr)) return false;
-    hr = m_Device->CreateRenderTargetView(m_RenderTexture.Get(), nullptr, &m_RenderRTV);
-    if (FAILED(hr)) return false;
-    hr = m_Device->CreateShaderResourceView(m_RenderTexture.Get(), nullptr, &m_RenderSRV);
-    if (FAILED(hr)) return false;
+    for (int i = 0; i < 2; i++) {
+        hr = m_Device->CreateTexture2D(&renderDesc, nullptr, &m_FrameTex[i]);
+        if (FAILED(hr)) return false;
+        hr = m_Device->CreateRenderTargetView(m_FrameTex[i].Get(), nullptr, &m_FrameRTV[i]);
+        if (FAILED(hr)) return false;
+        hr = m_Device->CreateShaderResourceView(m_FrameTex[i].Get(), nullptr, &m_FrameSRV[i]);
+        if (FAILED(hr)) return false;
+    }
+    m_RenderIdx = 0;
+    m_LastIdx = 0;
 
     // --- 1/4 resolution textures for motion estimation ---
     D3D11_TEXTURE2D_DESC quarterDesc = fullDesc;
@@ -243,7 +243,11 @@ void GenericFRUC::destroy() {
     m_ConstantBuffer.Reset();
     m_PointSampler.Reset();
     m_LinearSampler.Reset();
-    m_PrevFrame.Reset(); m_PrevFrameSRV.Reset();
+    for (int i = 0; i < 2; i++) {
+        m_FrameTex[i].Reset(); m_FrameRTV[i].Reset(); m_FrameSRV[i].Reset();
+    }
+    m_RenderIdx = 0;
+    m_LastIdx = 0;
     m_PrevFrameQuarter.Reset(); m_PrevFrameQuarterSRV.Reset();
     m_CurrFrameQuarter.Reset(); m_CurrFrameQuarterSRV.Reset();
     m_MotionField.Reset(); m_MotionFieldUAV.Reset(); m_MotionFieldSRV.Reset();
@@ -265,13 +269,22 @@ void GenericFRUC::destroy() {
 bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
     m_FrameCount++;
 
-    // CRITICAL: Unbind render target before using m_RenderTexture as SRV input.
+    // CRITICAL: Unbind render target before using the render texture as SRV input.
     // D3D11 silently unbinds SRVs that are also bound as render targets.
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
 
+    // §PERF-1113：這一幀＝呼叫端剛畫進去的那張；上一幀參考＝另一張。getLastRenderSRV() 從現在起
+    // 指向這一幀，之後不管有沒有輪替都不變（呼叫端在 submitFrame 之後才拿它去貼真實幀）。
+    const int curIdx = m_RenderIdx;
+    const int prevIdx = 1 - curIdx;
+    m_LastIdx = curIdx;
+    ID3D11ShaderResourceView* const curSRV = m_FrameSRV[curIdx].Get();
+    ID3D11ShaderResourceView* const prevSRV = m_FrameSRV[prevIdx].Get();
+
     if (m_FrameCount <= 1) {
-        ctx->CopyResource(m_PrevFrame.Get(), m_RenderTexture.Get());
+        // §PERF-1113：原本是 CopyResource(prev, render)；改成輪替，下一幀畫進另一張。
+        m_RenderIdx = prevIdx;
         return false;
     }
 
@@ -352,7 +365,7 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
         // Still nothing to optimize at the shader level — the effective
         // cap is on the other end of the network.
         ctx->CSSetShader(m_MotionEstCS[m_QualityLevel].Get(), nullptr, 0);
-        ID3D11ShaderResourceView* srvs[] = { m_PrevFrameSRV.Get(), m_RenderSRV.Get(), m_PrevMotionFieldSRV.Get() };
+        ID3D11ShaderResourceView* srvs[] = { prevSRV, curSRV, m_PrevMotionFieldSRV.Get() };
         ctx->CSSetShaderResources(0, 3, srvs);
         ID3D11UnorderedAccessView* uavs[] = { m_MotionFieldUAV.Get() };
         ctx->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
@@ -439,7 +452,7 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
         // the raw ME output. The filter kills 1-block outliers that
         // would otherwise bleed into static neighbors via bilinear
         // MV sampling.
-        ID3D11ShaderResourceView* srvs[] = { m_PrevFrameSRV.Get(), m_RenderSRV.Get(), m_MotionFieldFilteredSRV.Get() };
+        ID3D11ShaderResourceView* srvs[] = { prevSRV, curSRV, m_MotionFieldFilteredSRV.Get() };
         ctx->CSSetShaderResources(0, 3, srvs);
         ID3D11UnorderedAccessView* uavs[] = { m_InterpUAV.Get() };
         ctx->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
@@ -470,7 +483,9 @@ bool GenericFRUC::submitFrame(ID3D11DeviceContext* ctx, double timestamp) {
     }
 
     // --- Save current frame as previous for next iteration ---
-    ctx->CopyResource(m_PrevFrame.Get(), m_RenderTexture.Get());
+    // §PERF-1113：不再整張 CopyResource；下一幀畫進原本當參考的那張，這一幀那張就地變成參考。
+    // （前面 Map 失敗提早 return 的路徑不輪替：下一幀重畫同一張，參考維持舊的，與原本沒複製時一致。）
+    m_RenderIdx = prevIdx;
     // VipleStream: MV field copy moved here from inside the ME stage
     // (was the line immediately after the ME Dispatch(), which forced
     // the D3D11 driver to serialize the copy against Median's upcoming
@@ -544,7 +559,9 @@ void GenericFRUC::skipFrame(ID3D11DeviceContext* ctx) {
     ID3D11RenderTargetView* nullRTV = nullptr;
     ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
 
-    ctx->CopyResource(m_PrevFrame.Get(), m_RenderTexture.Get());
+    // §PERF-1113：同 submitFrame，用輪替取代整張複製。這一幀那張變成下一幀的參考。
+    m_LastIdx = m_RenderIdx;
+    m_RenderIdx = 1 - m_RenderIdx;
 
     // Also copy MV field to prev MV (temporal smoothing expects it)
     if (m_PrevMotionField) {

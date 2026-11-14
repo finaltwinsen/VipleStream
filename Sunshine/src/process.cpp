@@ -97,15 +97,31 @@ namespace proc {
           BOOST_LOG(info) << "Successfully requested the app to exit. Waiting up to "sv << exit_timeout.count() << " seconds for it to close."sv;
 
           // group::wait_for() and similar functions are broken and deprecated, so we use a simple polling loop
-          while (platf::process_group_running((std::uintptr_t) group.native_handle()) && (--exit_timeout).count() >= 0) {
-            std::this_thread::sleep_for(1s);
+          // §PERF-1113：原本 1 秒看一次，app 100 ms 就關了也要等滿 1 秒（Linux 要多一輪回收 zombie，
+          // 平均 1.5 秒），下一個 /launch 整段卡在這裡。改成期限＋50 ms 輪詢，等待上限不變。
+          // 逾時與否只看「最後一次輪詢」的結果：Linux／macOS 的 process_group_running 是
+          // waitpid(WNOHANG)，回收 zombie 的那一次也回 true，迴圈外再問一次會把結果弄反。
+          const auto wait_start = std::chrono::steady_clock::now();
+          const auto deadline = wait_start + exit_timeout;
+          bool still_running = true;
+          while ((still_running =platf::process_group_running((std::uintptr_t) group.native_handle()))) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+              break;
+            }
+            const std::chrono::steady_clock::duration remaining = deadline - now;
+            const std::chrono::steady_clock::duration step = 50ms;
+            std::this_thread::sleep_for(remaining < step ? remaining : step);
           }
+          const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_start).count();
 
-          if (exit_timeout.count() < 0) {
+          if (still_running) {
             BOOST_LOG(warning) << "App did not fully exit within the timeout. Terminating the app's remaining processes."sv;
           } else {
             BOOST_LOG(info) << "All app processes have successfully exited."sv;
           }
+          BOOST_LOG(info) << "[VIPLE-PROC-EXIT] waited="sv << waited_ms << "ms timeout="sv << exit_timeout.count()
+                          << "s exited="sv << (still_running ? 0 : 1);
         } else {
           BOOST_LOG(info) << "App did not respond to a graceful termination request. Forcefully terminating the app's processes."sv;
         }

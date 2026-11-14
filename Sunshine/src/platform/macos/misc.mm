@@ -179,10 +179,7 @@ namespace platf {
       result.push_back({std::string(addrStr), ifname, type});
     }
 
-    BOOST_LOG(info) << "[VIPLE-MPADV] Enumerated " << result.size() << " network interface(s) for advertisement";
-    for (const auto &iface : result) {
-      BOOST_LOG(info) << "[VIPLE-MPADV]   " << iface.name << " (" << iface.type << "): " << iface.address;
-    }
+    log_advertised_interfaces_if_changed(result);  // §PERF-1113-R2（A2）：清單變了才印
 
     return result;
   }
@@ -220,7 +217,10 @@ namespace platf {
       }
     }
 
-    BOOST_LOG(warning) << "Unable to find MAC address for "sv << address;
+    // §PERF-1113-R2（A2）：每個位址只警告一次（VPN 介面沒有實體位址，原本每次 /serverinfo 都印）
+    if (mac_miss_first_time(address)) {
+      BOOST_LOG(warning) << "Unable to find MAC address for "sv << address << " (logged once per address)"sv;
+    }
     return "00:00:00:00:00:00"s;
   }
 

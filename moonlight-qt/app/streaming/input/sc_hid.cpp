@@ -672,6 +672,14 @@ void ScHidPassthrough::stop() {
         m_running = false;   // 讀取執行緒每個 hidapi 呼叫前都看它；正常情況 ≤ ~150 ms 退出
     }
 
+    // 沒有裝置時丟掉的 feature 請求：上一行彙總之後還沒報的補印一行（不滿 60 秒的場次，前 3 筆之後就只有這一行）
+    {
+        const uint32_t noDev = m_noDevReq.load();
+        if (noDev != m_noDevReqReported.load()) {
+            logNoDeviceSummary(noDev, SDL_GetTicks());
+        }
+    }
+
     if (m_thread) {
         ScHidThreadCtx* ctx = m_threadCtx;
         const Uint32 t0 = SDL_GetTicks();
@@ -748,15 +756,40 @@ int SDLCALL ScHidPassthrough::readThreadFunc(void* p) {
     return 0;
 }
 
+// 沒有裝置時丟掉的 feature 請求的彙總行（callback 執行緒每 kNoDevSummaryMs 一次；stop() 補印還沒報的）
+void ScHidPassthrough::logNoDeviceSummary(uint32_t total, Uint32 now) {
+    // stop() 在 LiStopConnection() 之前跑，callback 執行緒可能同時帶著較新的 total 進來：已報告數只前進不後退，
+    // 晚到而 total 較舊的那一邊不印（直接 exchange 會讓 total - reported 無號下溢，還把已報告數倒退）。
+    uint32_t reported = m_noDevReqReported.load();
+    do {
+        if (total <= reported) return;
+    } while (!m_noDevReqReported.compare_exchange_weak(reported, total));
+    const Uint32 last = m_noDevLogTick.exchange(now);
+    // 兩邊各自取的 now 可能和寫入順序相反，差值當有號數看、負的算 0
+    const Uint32 spanMs = static_cast<int32_t>(now - last) > 0 ? now - last : 0u;
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+        "[SC-HID] forwardFeatureRequest: no device open x%u in the last %u s (%u in total)",
+        total - reported, (spanMs + 500) / 1000, total);
+}
+
 void ScHidPassthrough::forwardFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
                                              const uint8_t* query, uint8_t queryLen) {
     // §SC-THREAD-OWNER：本函式在 common-c control stream 的 async callback 執行緒上被呼叫，
     // 只把請求排進佇列（≤ 1 ms 後由讀取執行緒代跑），絕不碰 hidapi——卡死的裝置永遠
     // 只會困住我們自己的執行緒，不會困住 common-c 的（LiStopConnection 要 join 它）。
     if (!m_running || m_devCount == 0) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-            "[SC-HID] forwardFeatureRequest: no device open (id=0x%02x op=%s seq=%u)",
-            reportId, opName(op), seq);
+        // 前 3 筆照印，之後每 kNoDevSummaryMs 一行彙總（原因見 sc_hid.h 的 m_noDevReq）
+        const uint32_t n = m_noDevReq.fetch_add(1) + 1;
+        const Uint32 now = SDL_GetTicks();
+        if (n <= 3) {
+            m_noDevReqReported = n;
+            m_noDevLogTick = now;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[SC-HID] forwardFeatureRequest: no device open (id=0x%02x op=%s seq=%u)",
+                reportId, opName(op), seq);
+        } else if (now - m_noDevLogTick.load() >= kNoDevSummaryMs) {
+            logNoDeviceSummary(n, now);
+        }
         return;
     }
 

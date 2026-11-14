@@ -105,7 +105,7 @@ private:
             if (!reachable) {
                 continue;
             }
-            if (tryPollComputer(nam, lan, changed)) {
+            if (tryPollComputer(nam, lan, changed, true)) {
                 qInfo() << "[VIPLE-LAN-PREF]" << m_Computer->name << "reachable on the LAN - using it instead of the VPN address";
                 changed = true;
                 return true;
@@ -114,9 +114,28 @@ private:
         return false;
     }
 
-    bool tryPollComputer(QNetworkAccessManager* nam, NvAddress address, bool& changed)
+    // §PERF-1113：allowCachedHttpsPort＝主機上一輪還在線上、這個位址的 HTTP 埠和目前用的位址相同時，直接帶上一輪
+    // 學到的 HTTPS 埠（Sunshine 的埠都以 HTTP 埠為基準；同 Android 的 portMatchesActiveAddress）。原本一律傳 0，
+    // 已配對的線上主機每 3 秒都先打一次 HTTP 只為了問 HTTPS 埠，再打 HTTPS。
+    // 帶快取埠失敗時不在這裡退回重試：睡著的主機判定離線的時間與 SYN 數會翻倍。線上主機原本就有第 2 輪，
+    // 那一輪傳 false 走原本的路徑，host 換了埠也在那一輪修好。
+    bool tryPollComputer(QNetworkAccessManager* nam, NvAddress address, bool& changed, bool allowCachedHttpsPort)
     {
-        NvHTTP http(address, 0, m_Computer->serverCert, nam);
+        uint16_t httpsPort = 0;
+        QSslCertificate serverCert;
+        {
+            // 讀完就放：下面的 update() 要拿寫鎖（這把鎖不可重入）
+            QReadLocker computerLock(&m_Computer->lock);
+            serverCert = m_Computer->serverCert;
+            if (allowCachedHttpsPort &&
+                    m_Computer->state == NvComputer::CS_ONLINE &&
+                    m_Computer->activeHttpsPort != 0 &&
+                    address.port() == m_Computer->activeAddress.port()) {
+                httpsPort = m_Computer->activeHttpsPort;
+            }
+        }
+
+        NvHTTP http(address, httpsPort, serverCert, nam);
 
         QString serverInfo;
         try {
@@ -205,7 +224,8 @@ private:
                         return;
                     }
 
-                    if (tryPollComputer(&nam, address, stateChanged)) {
+                    // §PERF-1113：只有第 1 輪帶快取的 HTTPS 埠；第 2 輪照原本先問 HTTP
+                    if (tryPollComputer(&nam, address, stateChanged, i == 0)) {
                         if (!wasOnline) {
                             qInfo() << m_Computer->name << "is now online at" << m_Computer->activeAddress.toString();
                         }
@@ -249,8 +269,9 @@ private:
                         }
 
                         // First try direct poll (works if UPnP mapped the HTTP port)
+                        // §PERF-1113：這裡不帶快取的 HTTPS 埠——失敗就直接改走 relay proxy，沒有第 2 輪可以修正
                         if (!result.stunIp.isEmpty() &&
-                            tryPollComputer(&nam, relayAddr, stateChanged)) {
+                            tryPollComputer(&nam, relayAddr, stateChanged, false)) {
                             qInfo() << "[VIPLE-NAT]" << m_Computer->name
                                     << "is now ONLINE via relay (direct poll)!";
                             online = true;

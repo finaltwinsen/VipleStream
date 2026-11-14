@@ -43,6 +43,12 @@ public:
     void start();
 
     /**
+     * §PERF-1113：輪詢間隔（毫秒）。要在 start() 之前設；預設 2000。
+     * 頭盔 VR 串流用較長的間隔：每次輪詢是一次 HTTPS 往返，會把 Wi-Fi 從省電叫醒。
+     */
+    void setPollIntervalMs(int ms) { m_PollIntervalMs = ms < 500 ? 500 : ms; }
+
+    /**
      * 停止 polling 並中止 in-flight transfer。
      */
     void stop();
@@ -141,6 +147,7 @@ private:
     QThread *m_Worker = nullptr;
     QNetworkAccessManager *m_Nam = nullptr;   ///< Heap-allocated 才能 moveToThread + lazy init
     QTimer *m_PollTimer = nullptr;
+    int m_PollIntervalMs = 2000;  // §PERF-1113：見 setPollIntervalMs
     QPointer<QNetworkReply> m_PollReply;
     QPointer<QNetworkReply> m_ActiveTransferReply;
     QString m_ActiveToken;

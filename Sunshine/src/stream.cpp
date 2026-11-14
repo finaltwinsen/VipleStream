@@ -29,6 +29,7 @@ extern "C" {
 
 // local includes
 #include "config.h"
+#include "desktop_fec.h"
 #include "display_device.h"
 #include "globals.h"
 #include "input.h"
@@ -48,6 +49,7 @@ extern "C" {
 #include "udp_tunnel.h"
 #include "utility.h"
 #include "vr/vr_multilink.h"
+#include "vr/vr_pace_auto.h"
 #include "vr/vr_bridge.h"
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_padmode.h"
@@ -598,6 +600,7 @@ namespace stream {
       std::atomic<int> adaptiveFecPercentage{0};  // 0 = use config default
       std::chrono::steady_clock::time_point lastLossTime;
       int zeroLossStreak{0};
+      std::chrono::steady_clock::time_point lastFecDecayTime{};  // 2D：上一次回降（握 abrMutex；規則見 desktop_fec.h）
 
       // VipleStream: adaptive bitrate (AIMD) based on client loss reports
       // §ABR-RAMP v1.5.218：target / applied 分離。
@@ -655,6 +658,8 @@ namespace stream {
       // §VR-REPAIR-RTT（量測）：client 回報的 FEC status 這 10 秒的分類（握 abrMutex；vr_control_tick 印出並歸零）。
       // 只記帳，位元率與 FEC 的調整不看它
       ::vr::fecspread::status_stats_t vrFecStat;
+      // 量測：FEC 高於基準的這段期間，多送的 parity 有沒有用到（握 abrMutex；規則見 vr_fec_spread.h 的 episode_t）
+      ::vr::fecspread::episode_t vrFecEpisode;
 
       // §ABR-RAMP-TICK：periodic ping 驅動的零丟包 tick 節流（500ms 一輪）。
       // client 只在有 missing 時送 FEC status，零丟包輪由 ping handler 合成。
@@ -734,6 +739,10 @@ namespace stream {
       std::vector<double> latHost;
       std::vector<double> latToClient;
       std::vector<double> latKB;  ///< 每幀實際收到的大小（KB，含 FEC）：看單向延遲的尖峰是不是大畫面造成的
+      // §PERF-1113（審查 05 第 8 項）：多連線時「入列完成 → 幀尾真正交給系統送出」的時間（送出執行緒的佇列＋逐包送出）；
+      // latWireFrames＝其中查得到實際送出時刻的幀數（查不到的幀，send／oneway／host 仍用入列時刻）
+      std::vector<double> latTxQueue;
+      int latWireFrames {0};
       int latMatchedFrames {0};
       std::chrono::steady_clock::time_point latLastLog {};
     } video;
@@ -802,6 +811,13 @@ namespace stream {
     // §TS-PATH：這次監看的代號（on_session_start 的回傳）。0＝沒有監看。
     // stop 只拿這個代號去停，已經不是目前那一次就不動。
     std::uint64_t tsPathGen = 0;
+    std::uint64_t tsPathUpgradesSeen = 0;  // §ABR-PATH-UPGRADE：上次看到的「中繼 → 直連」次數
+    // §VR-PACE-AB（vr_pace_ab_s）：同一場內輪流開關攤開送的下一個切換時刻與目前狀態（只在控制執行緒的 10 秒統計裡讀寫）
+    std::chrono::steady_clock::time_point paceAbNext {};
+    bool paceAbOn = true;
+    // §VR-PACE-AUTO：攤開送的自動開關（vr_pace_spread_pct = auto；只在控制執行緒的 10 秒統計裡讀寫）
+    ::vr::pace::auto_t paceAuto;
+    bool paceNackSeen = false;  ///< 這個 10 秒視窗有沒有收到補包請求
 
     std::uint32_t launch_session_id;
 
@@ -1535,13 +1551,12 @@ namespace stream {
       plaintext.queryLen = msg.data.sc_hid_feature.queryLen;
       for (int i = 0; i < 64; i++) plaintext.query[i] = msg.data.sc_hid_feature.query[i];
 
-      // §SC-HID Round 1：維持 info——這是握手取證（G4 門檻）的 server→client
-      // 那一半；頻率由 driver 端節流（無 SET 在途的 GET 事件 500 ms 一筆、SET
-      // 只在 Steam 真的查詢時發生），不會刷 log。
-      BOOST_LOG(info) << "[SC-HID] Sending feature request to client: reportId=0x"sv
-                      << util::hex(msg.data.sc_hid_feature.reportId).to_string_view()
-                      << " op="sv << (unsigned)msg.data.sc_hid_feature.op
-                      << " seq="sv << (unsigned)msg.data.sc_hid_feature.seq;
+      // 同一筆事件 input.cpp 已經印過「Steam feature → client」（握手取證 G4 看那一行），這裡只留 debug。
+      // driver 端的節流只管 GET；client 沒有實體 SC 時 Steam 等不到回應，SET 每秒重送 5～24 筆、整場不停。
+      BOOST_LOG(debug) << "[SC-HID] Sending feature request to client: reportId=0x"sv
+                       << util::hex(msg.data.sc_hid_feature.reportId).to_string_view()
+                       << " op="sv << (unsigned)msg.data.sc_hid_feature.op
+                       << " seq="sv << (unsigned)msg.data.sc_hid_feature.seq;
 
       std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) + crypto::cipher::tag_size>
         encrypted_payload;
@@ -1718,6 +1733,15 @@ namespace stream {
     session->video.zeroLossStreak = 0;
   }
 
+  /// VR session：FEC 百分比剛變動（升或降）。印這段升高期間到目前為止的實效——只是量測，調整規則不看它。
+  /// 欄位見 vr_fec_spread.h 的 episode_t；FEC 停在高檔不動的期間由 [VIPLE-VR-FECSTAT] 10s 行帶同一組數字。呼叫者持 abrMutex。
+  static void vr_fec_episode_changed_locked(session_t *session, int pct, std::chrono::steady_clock::time_point now) {
+    const std::string line = session->video.vrFecEpisode.on_fec_changed(pct, config::stream.fec_percentage, now);
+    if (!line.empty()) {
+      BOOST_LOG(info) << "[VIPLE-FEC] VR episode: " << line;
+    }
+  }
+
   /// client 回報了救不回的幀（新的 refresh wave）。lostFrames＝這筆 LOSS 涵蓋的幀數；resend＝client 重送的 LOSS。
   /// 任何執行緒；內部取 abrMutex。
   void run_abr_aimd(session_t *session, int lossCount, long long elapsedMs, const char *src);
@@ -1732,6 +1756,11 @@ namespace stream {
     }
     {  // §VR-ABR-FAST：救不回幀事件通知反應式快速降碼率
     if (session->vr && session->video.vrAbrFast && !resend) {
+      // §ABR-OUTAGE-HOLD：一次掉 4 張以上（144 Hz 約 28 ms 以上的空檔）先問是不是斷訊；是的話這一筆與接下來 1.5 秒不降碼
+      if (lostFrames >= 4) {
+        const int fps = session->config.monitor.framerate > 0 ? session->config.monitor.framerate : 90;
+        session->video.vrAbrFast->on_outage(static_cast<int>(lostFrames * 1000u / static_cast<unsigned>(fps)), now);
+      }
       session->video.vrAbrFast->on_loss(lostFrames, now);
       if (lostFrames >= 2) {
         run_abr_aimd(session, 0, 0, "fast-loss");
@@ -1752,6 +1781,7 @@ namespace stream {
     if (next != cur) {
       session->video.adaptiveFecPercentage.store(next);
       BOOST_LOG(info) << "[VIPLE-FEC] VR unrecoverable frame, FEC: " << cur << "% -> " << next << '%';
+      vr_fec_episode_changed_locked(session, next, now);
     }
   }
 
@@ -1767,6 +1797,23 @@ namespace stream {
     // 下一階再等 5 s：把基準點往後推，維持「距 lastLossTime ≥ 30 s」的同一個判斷
     session->video.lastLossTime = now - kVrFecHold + kVrFecDecayEvery;
     BOOST_LOG(info) << "[VIPLE-FEC] VR no unrecoverable frame for a while, FEC: " << cur << "% -> " << next << '%';
+    vr_fec_episode_changed_locked(session, next, now);
+  }
+
+  /// 2D session：沒有缺包的一輪（FEC status 的零缺包視窗或 ping tick），該回降就降一階。規則在 desktop_fec.h。
+  /// 呼叫者持 abrMutex，並且已經把這一輪算進 zeroLossStreak。
+  static void desktop_fec_decay_locked(session_t *session, std::chrono::steady_clock::time_point now) {
+    const int cur = session->video.adaptiveFecPercentage.load();
+    const auto sinceLoss = now - session->video.lastLossTime;
+    const int next = desktop_fec::decayed(cur, config::stream.fec_percentage, sinceLoss, session->video.zeroLossStreak,
+                                          now - session->video.lastFecDecayTime);
+    if (next == cur) {
+      return;
+    }
+    session->video.adaptiveFecPercentage.store(next);
+    session->video.lastFecDecayTime = now;
+    BOOST_LOG(info) << "[VIPLE-FEC] No loss for " << std::chrono::duration_cast<std::chrono::seconds>(sinceLoss).count()
+                    << "s, FEC: " << cur << "% -> " << next << "%";
   }
 
   /// §VR-LINK-CTRL：協商了連線層控制通道（任何執行緒）
@@ -2183,7 +2230,13 @@ namespace stream {
                     << " | oneway " << vr_format_lat_stats(v.latOneway, true, clk_unlocked)
                     << " | host " << vr_format_lat_stats(v.latHost, false, clk_unlocked)
                     << " | to-client " << vr_format_lat_stats(v.latToClient, true, clk_unlocked)
-                    << " | KB " << vr_format_lat_stats(v.latKB, false, clk_unlocked);
+                    << " | KB " << vr_format_lat_stats(v.latKB, false, clk_unlocked)
+                    // §PERF-1113：新欄位加在行尾。txq＝入列完成到幀尾送出；wire＝這 10 秒有幾幀的 send／oneway／host 是用
+                    // 實際送出時刻算的（多連線才有；0＝全部仍是入列時刻，和之前的定義相同）
+                    << " | txq " << vr_format_lat_stats(v.latTxQueue, false, clk_unlocked)
+                    << " wire=" << v.latWireFrames;
+    v.latTxQueue.clear();
+    v.latWireFrames = 0;
     v.latPresentToEnc.clear();
     v.latEnc.clear();
     v.latEncToSend.clear();
@@ -2227,7 +2280,21 @@ namespace stream {
         ++v.abrFeedbackMiss;
         continue;
       }
-      const int64_t txUs = slot.us.load(std::memory_order_relaxed);
+      int64_t txUs = slot.us.load(std::memory_order_relaxed);
+      // §VR-PACE：攤開送時，幀尾實際離開的時刻比「入列完成」（slot.us）晚，而且晚多少跟著幀的大小變（封包少的幀間隔
+      // 有 1 ms 上限、攤得短；一般的幀攤滿設定的比例）。照入列時刻算，單向延遲會隨幀的大小起伏好幾毫秒，趨勢偵測
+      // 會把「畫面變複雜、幀變大」當成線路開始塞。所以「攤開送出去的那一幀」改用送出執行緒記下的幀尾送完時刻。
+      // 依的是那一幀送出時有沒有攤開（紀錄上的旗標），不是現在的設定——同場切換、收包報告晚到時才不會拿錯起點。
+      // 沒攤開的幀、沒經過 hub 的幀（退回原本的 socket，本來就一次送完）、紀錄已經被蓋掉的幀都照舊用入列時刻，
+      // 不可以整筆丟掉：線路塞住時正是最需要這個訊號的時候（複核 client-1：丟掉之後控制器只剩往返時間的趨勢）。
+      // 沒開攤開送時旗標恆為假，控制器看到的數字和之前相同。
+      if (session->vrLinks) {
+        bool paced = false;
+        const int64_t wireUs = session->vrLinks->frame_sent_us(frame, &paced);
+        if (wireUs > 0 && paced) {
+          txUs = wireUs;
+        }
+      }
       // client 時間只有低 32 位元（µs，約 71 分鐘繞回一次）：照順序展開
       const uint32_t lo = hdr.baseTimeUs + rec.lastArrOffUs;
       if (v.abrRxHave && lo < v.abrRxPrevLo && v.abrRxPrevLo - lo > 0x80000000u) {
@@ -2258,7 +2325,20 @@ namespace stream {
       const int64_t encStartUs = slot.enc_start_us.load(std::memory_order_relaxed);
       const int64_t encEndUs = slot.enc_end_us.load(std::memory_order_relaxed);
       const int64_t firstSendUs = slot.first_send_us.load(std::memory_order_relaxed);
-      const int64_t lastSendUs = slot.last_send_us.load(std::memory_order_relaxed);
+      int64_t lastSendUs = slot.last_send_us.load(std::memory_order_relaxed);
+      // §PERF-1113（審查 05 第 8 項）：多連線時 slot 裡記的是「複製進各連線佇列完成」的時刻，封包要等送出執行緒逐包送完才
+      // 離開。向 hub 查幀尾那一批實際送完的時刻（多條連線取最早的），查得到就用它算 send／oneway／host，並另外統計兩者的差
+      // （txq）。查不到（單一路徑、幀尾沒送完）維持原值。ABR 的單向延遲趨勢用的 slot.us 不動，控制器看到的數字不變。
+      if (lastSendUs > 0 && session->vrLinks) {
+        const int64_t wireUs = session->vrLinks->frame_sent_us(frame);
+        if (wireUs > 0 && (firstSendUs <= 0 || wireUs >= firstSendUs)) {
+          ++v.latWireFrames;
+          if (v.latTxQueue.size() < 4096) {
+            v.latTxQueue.push_back((double) std::max<int64_t>(0, wireUs - lastSendUs) / 1000.0);
+          }
+          lastSendUs = wireUs;
+        }
+      }
       // client 時間只有低 32 位元（rxUs 的高位是從 0 展開的，只能看相對變化）：用時鐘偏移推出 client 現在大約的時間，
       // 再把低 32 位元補到離它最近的那一圈，得到完整的 client 時間，才能換成 server 時鐘
       // 時鐘偏移是「server 的 vr_clock（QPC）− client」，這裡的各段時間戳是 steady_clock，兩者起點不同：用同一刻的兩個讀數換算
@@ -2369,6 +2449,7 @@ namespace stream {
           session->video.vrRepairAccum.fetch_add((int) r.needed);
           session->video.videoShardsSentAccum.fetch_add((int) r.resent);
           vr_fec_hold_locked(session, std::chrono::steady_clock::now());
+          session->video.vrFecEpisode.on_nack_hold();  // 量測：升高期間有幾次是補包在延後回降
         }
       }
       off += 2 + len;
@@ -2394,6 +2475,21 @@ namespace stream {
     const unsigned recvData = be16(14);
     const unsigned recvParity = be16(16);
     session->video.vrFecStat.add(totalData, totalParity, recvData, recvParity);
+    {
+      // 量測：這一份相對於基準 FEC 與再高一級的位置（升高的 parity 有沒有用到、差一級就救得回的失敗）。
+      // 「再高一級」照 vr_fec_on_loss 的升法；status 比 FEC 變動晚到的那幾份會差一級，只影響變動當下
+      const int base = config::stream.fec_percentage;
+      int cur = session->video.adaptiveFecPercentage.load();
+      if (cur == 0) {
+        cur = base;
+      }
+      const int next = cur >= kVrFecLossMax ? cur : std::min(cur + kVrFecLossStep, kVrFecLossMax);
+      const auto use = ::vr::fecspread::account_status(totalData, totalParity, recvData, recvParity, base, next,
+                                                       (unsigned) std::max(session->config.minRequiredFecPackets, 0));
+      session->video.vrFecStat.elevated_use += use.elevated_use ? 1 : 0;
+      session->video.vrFecStat.near_miss += use.near_miss ? 1 : 0;
+      session->video.vrFecEpisode.on_status(use, std::chrono::steady_clock::now());
+    }
     if (session->video.vrAbrFast) {
       const auto st = ::vr::fecspread::classify_status(totalData, totalParity, recvData, recvParity);
       if (st == ::vr::fecspread::status_e::failed) {
@@ -2629,6 +2725,24 @@ namespace stream {
       if (session->vrLinks) {
         if (const auto line = session->vrLinks->take_stats_line(); !line.empty()) {
           BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s: " << line;
+          // §VR-PACE-AB（2026-11-13，對照測試用；vr_pace_ab_s，預設 0＝不切換）：同一場內每 N 秒在「照 vr_pace_spread_pct 攤開」
+          // 與「一次送完」之間輪流。外出經 VPN 的線路幾分鐘內就會變（同一晚有一場碰上幾十秒的塌陷），分場對照比不出差別；
+          // 同一場內輪流才比得出來。切換點緊接在這一行 10 秒統計之後，host 的每個 10 秒視窗都只屬於一種狀態；
+          // 切換也印一行，分析腳本照它把 client 的統計分開
+          if (config::vr.pace_ab_s > 0 && config::vr.pace_spread_pct > 0) {
+            const auto nowAb = std::chrono::steady_clock::now();
+            if (session->paceAbNext == std::chrono::steady_clock::time_point {}) {
+              session->paceAbOn = true;
+              session->paceAbNext = nowAb + std::chrono::seconds(config::vr.pace_ab_s);
+              BOOST_LOG(info) << "[VIPLE-VR-LINK] pacing A/B: on (" << config::vr.pace_spread_pct << "%), switching every "
+                              << config::vr.pace_ab_s << " s (vr_pace_ab_s)";
+            } else if (nowAb + std::chrono::seconds(2) >= session->paceAbNext) {  // 2 s 餘裕：落在 N 秒附近的那一次統計就切
+              session->paceAbOn = !session->paceAbOn;
+              session->vrLinks->set_pace_spread_pct(session->paceAbOn ? config::vr.pace_spread_pct : 0);
+              session->paceAbNext = nowAb + std::chrono::seconds(config::vr.pace_ab_s);
+              BOOST_LOG(info) << "[VIPLE-VR-LINK] pacing A/B: " << (session->paceAbOn ? "on" : "off");
+            }
+          }
           if (session->video.vrAbrFast) {
             std::lock_guard<std::mutex> lk(session->video.abrMutex);
             size_t pos = 0;
@@ -2659,20 +2773,48 @@ namespace stream {
         }
         if (const auto line = session->vrLinks->take_repair_line(); !line.empty()) {
           BOOST_LOG(info) << "[VIPLE-VR-REPAIR] 10s: " << line;
+          session->paceNackSeen = true;  // 這一行只在這 10 秒有收到補包請求時才有內容
         }
       }
-      // §VR-REPAIR-RTT（量測）：client 回報的 FEC status 這 10 秒的分類（有回報才印）。fec＝目前的 FEC 百分比
+      // §VR-REPAIR-RTT（量測）：client 回報的 FEC status 這 10 秒的分類（有回報、或 FEC 高於基準時印）。fec＝目前的 FEC 百分比
       {
         ::vr::fecspread::status_stats_t fec_stat;
         int fec_pct = 0;
+        std::string episode;  // FEC 高於基準時：這段升高期間到目前為止的實效（欄位同 [VIPLE-FEC] VR episode）
         {
           std::lock_guard<std::mutex> lk(session->video.abrMutex);
           fec_stat = std::exchange(session->video.vrFecStat, {});
           fec_pct = session->video.adaptiveFecPercentage.load();
+          if (session->video.vrFecEpisode.active) {
+            episode = " | episode " + session->video.vrFecEpisode.summary(now);
+          }
         }
-        if (fec_stat.any()) {
-          BOOST_LOG(info) << "[VIPLE-VR-FECSTAT] 10s: " << fec_stat.line() << " | fec=" << (fec_pct != 0 ? fec_pct : config::stream.fec_percentage) << '%';
+        // FEC 升高期間就算這 10 秒一份回報都沒有也印：停在高檔不動時沒有變動行，而「多送的 parity 完全沒用到」正是要看的。
+        // elevatedUse／nearMiss 是這 10 秒的份數（定義見 vr_fec_spread.h 的 status_use_t），接在原有欄位後面
+        if (fec_stat.any() || !episode.empty()) {
+          BOOST_LOG(info) << "[VIPLE-VR-FECSTAT] 10s: " << fec_stat.line() << " | fec=" << (fec_pct != 0 ? fec_pct : config::stream.fec_percentage) << '%'
+                          << " elevatedUse=" << fec_stat.elevated_use << " nearMiss=" << fec_stat.near_miss << episode;
         }
+        // §VR-PACE-AUTO（vr_pace_spread_pct = auto）：攤開送由線路狀況自動開關（條件與依據見 vr_pace_auto.h）。
+        // 開的條件：只有一條連線活著、這 10 秒沒有收到補包請求、救不回的 block（含整幀沒到）連續兩個視窗都 ≥ 4。
+        // 開著時比例跟著幀週期走（自動半速切換時攤開的時間維持約 6.5 ms）。
+        if (session->vrLinks && config::vr.pace_spread_pct < 0) {
+          const bool eligible = session->vrLinks->alive_count() == 1 && !session->paceNackSeen;
+          const int64_t period_us = session->vrLinks->video_max_age_us() / 2;
+          const uint32_t failed = fec_stat.failed + fec_stat.gap;
+          if (session->paceAuto.on_window(eligible, failed)) {
+            const int pct = session->paceAuto.on ? ::vr::pace::pct_for_period(period_us) : 0;
+            session->vrLinks->set_pace_spread_pct(pct);
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] pacing auto: " << (session->paceAuto.on ? "on" : "off") << " (" << session->paceAuto.reason
+                            << ") spread=" << pct << "% of " << std::format("{:.1f}", period_us / 1000.0) << " ms, unrecovered blocks in the last 10 s="
+                            << failed << " switches=" << session->paceAuto.switches;
+          } else if (session->paceAuto.on) {
+            if (const int pct = ::vr::pace::pct_for_period(period_us); pct != session->vrLinks->pace_spread_pct()) {
+              session->vrLinks->set_pace_spread_pct(pct);  // 幀率變了：比例跟著調
+            }
+          }
+        }
+        session->paceNackSeen = false;
       }
       // §M1b S1-12：時鐘對映 10 秒行（欄位順序見 clk::format_stats，F.10 分析腳本依賴）
       if (const auto cs = vr_state.clock_stats(true)) {
@@ -2743,6 +2885,8 @@ namespace stream {
         const bool owd = f.owd_active(now);
         const auto ot = f.owd_trend().snapshot();
         const int qp = abr_signals::avg_qp_x100.load(std::memory_order_relaxed);
+        // 行尾的 applied／enc：已套用的碼率與編碼器回報實際在用的碼率（- ＝編碼器不回報）。兩個對不上＝決定沒有進編碼器
+        const int encKbps = abr_signals::enc_kbps.load(std::memory_order_relaxed);
         BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] 10s: cuts=" << f.cuts()
                         << " ramps=" << f.ramps()
                         << " trims=" << f.trims()
@@ -2754,6 +2898,7 @@ namespace stream {
                         << " randomLoss=" << f.random_losses()
                         << " lossRateCuts=" << f.loss_rate_cuts() << '/' << f.loss_rate_reverts()
                         << (f.loss_rate_disabled(now) ? "(off)" : "")
+                        << " persist=" << f.persistent_reverts() << '/' << f.persistent_skips() << (f.persistent_disabled(now) ? "(off)" : "") << " outageSkips=" << f.shortfall_outage_skips() << " outageHold=" << f.outage_holds() << '/' << f.outage_hold_skips()
                         << " lastCong=" << f.last_congested_kbps() << '/' << f.effective_congested_kbps()
                         << " owdStall=" << f.owd_stall_skips()
                         << " netSwitchSkips=" << f.net_switch_skips()
@@ -2765,7 +2910,9 @@ namespace stream {
                         << " recv/send=" << f.recv_kbps() << '/' << f.send_kbps() << "kbps"
                         << vr_outage_diag(session->video.vrOutage, now)
                         << " qp=" << (qp >= 0 ? std::format("{:.1f}", qp / 100.0) : std::string("-"))
-                        << " fb=" << session->video.abrFeedbackRecs << '/' << session->video.abrFeedbackMiss;
+                        << " fb=" << session->video.abrFeedbackRecs << '/' << session->video.abrFeedbackMiss
+                        << " applied=" << f.applied_kbps()
+                        << " enc=" << (encKbps >= 0 ? std::to_string(encKbps) : std::string("-"));
         session->video.abrFeedbackRecs = 0;
         session->video.abrFeedbackMiss = 0;
       }
@@ -2946,6 +3093,21 @@ namespace stream {
       // §ABR-ADAPT（第 3 期）：畫質飽和（編碼器平均 QP）——飽和時不再加碼，畫質多到用不完時小幅回收
       session->video.vrAbrFast->on_quality(abr_signals::avg_qp_x100.load(std::memory_order_relaxed),
                                            abr_signals::codec.load(std::memory_order_relaxed), abrNow);
+      // §ABR-PATH-UPGRADE：這一場的對象走 Tailscale、而且剛從中繼轉成直連 -> 舊路徑上學到的塞車點與上限作廢，加速回升
+      if (session->tsPathGen != 0) {
+        if (const auto up = tailscale_path::direct_upgrade_count(); up != session->tsPathUpgradesSeen) {
+          session->tsPathUpgradesSeen = up;
+          session->video.vrAbrFast->on_path_upgraded(abrNow);
+          // 複核 abr-3：vr_abr_experimental 關著時 on_path_upgraded 什麼都不做，log 不可以寫成已經清掉記憶、加速回升
+          if (config::vr.abr_experimental) {
+            BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] path upgraded (relay -> direct): congestion memory cleared, fast ramp for 30 s from "
+                            << session->video.vrAbrFast->applied_kbps() << " kbps";
+          } else {
+            BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] path upgraded (relay -> direct) at " << session->video.vrAbrFast->applied_kbps()
+                            << " kbps (no change to the bitrate rules: vr_abr_experimental is off)";
+          }
+        }
+      }
       const int revertsBefore = session->video.vrAbrFast->loss_rate_reverts();
       auto fastTarget = session->video.vrAbrFast->tick(abrNow);
       if (session->video.vrAbrFast->loss_rate_reverts() != revertsBefore) {
@@ -2955,6 +3117,15 @@ namespace stream {
                         << " after=" << std::format("{:.1f}", session->video.vrAbrFast->loss_rate_post_per10s())
                         << " (not bitrate-related), restore=" << (fastTarget ? *fastTarget : 0)
                         << " kbps, rule off for 10 min";
+      }
+      if (session->video.vrAbrFast->take_persistent_revert_event()) {
+        // §ABR-PERSIST-VERIFY：+persistent 降了碼、丟的比例沒有變小 -> 丟包跟碼率無關，停止再降
+        const auto &f = *session->video.vrAbrFast;
+        BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] persistent cuts judged ineffective: episode start=" << f.persistent_episode_start_kbps()
+                        << " kbps, loss share before=" << std::format("{:.1f}", f.persistent_loss_pct_before())
+                        << "% now=" << std::format("{:.1f}", f.persistent_loss_pct_now())
+                        << "% (not bitrate-related), restore=" << (fastTarget ? *fastTarget : 0)
+                        << " kbps, rule off for " << f.persistent_off_minutes(abrNow) << " min";
       }
       if (fastTarget.has_value()) {
         target = *fastTarget;
@@ -3238,18 +3409,27 @@ namespace stream {
       if (session->vr && session->video.vrAbrFast) {
         session->video.vrAbrFast->set_applied_kbps(target);
         const char *act = (target < applied) ? "cut" : (target > applied ? "ramp" : "hold");
+        // 每套用一步只印這一行：以前同一步另有 [VIPLE-ABR] Bitrate 與 NvEnc 各一行，回升時每分鐘多一兩百行。
+        // 到 state= 為止的欄位照舊（分析腳本比對行首）；後面是原本 Bitrate 行的內容。by＝這一步誰決定的：
+        // fast＝控制器；aimd＝舊 AIMD、斷訊拉回或上限移動（這時 reason 是控制器上一次的理由，不是這一步的）
         BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] " << act
                         << " reason=" << session->video.vrAbrFast->last_reason()
                         << " from=" << applied << " to=" << target
-                        << " state=" << session->video.vrAbrFast->state_str();
+                        << " state=" << session->video.vrAbrFast->state_str()
+                        << " by=" << (fastBitrateChanged ? "fast" : "aimd")
+                        << " loss=" << lossCount << " staleDrops=" << staleDrops
+                        << " in=" << elapsedMs << "ms src=" << src
+                        // lossPct 的分母是照位元率估的影像封包數（不含 FEC），> 100 標成估計值（見下面 2D 那一行的說明）
+                        << (lossPct >= 0.0f ? std::format(" lossPct={:.2f}{}", lossPct, lossPct > 100.0f ? "(est)" : "") : std::string {});
+      } else {
+        // 2D，以及 vr_abr_fast 關閉的 VR session
+        BOOST_LOG(info) << "[VIPLE-ABR] Bitrate: " << applied << " -> " << target
+          << " kbps (" << (target < applied ? "cut" : "ramp")
+          << ", loss=" << lossCount << " staleDrops=" << staleDrops
+          << " in " << elapsedMs << "ms, src=" << src
+          // 分母是照位元率估的影像封包數（不含 FEC），斷訊時回報的缺包（含 FEC、前一段累積的）可能超過它：> 100 標成估計值
+          << (lossPct >= 0.0f ? std::format(", vr lossPct={:.2f}{}", lossPct, lossPct > 100.0f ? "(est)" : "") : std::string {}) << ")";
       }
-
-      BOOST_LOG(info) << "[VIPLE-ABR] Bitrate: " << applied << " -> " << target
-        << " kbps (" << (target < applied ? "cut" : "ramp")
-        << ", loss=" << lossCount << " staleDrops=" << staleDrops
-        << " in " << elapsedMs << "ms, src=" << src
-        // 分母是照位元率估的影像封包數（不含 FEC），斷訊時回報的缺包（含 FEC、前一段累積的）可能超過它：> 100 標成估計值
-        << (lossPct >= 0.0f ? std::format(", vr lossPct={:.2f}{}", lossPct, lossPct > 100.0f ? "(est)" : "") : std::string {}) << ")";
     }
 
     // §Q-ABR-FLOOR-ESCAPE 2026-07-02 (Fix C)：低檔困死偵測。持續 loss
@@ -3342,6 +3522,14 @@ namespace stream {
       }
       if (session->vr) {
         vr_fec_decay_locked(session, now);  // §VR-FEC-LOSS
+      } else if (residual > 0) {
+        // 2D：丟包尾巴只延後回降；升不升由 FEC status 那條路徑的完整視窗決定
+        session->video.lastLossTime = now;
+        session->video.zeroLossStreak = 0;
+      } else {
+        // 2D：client 沒有缺包時不送 FEC status，回降只能靠這裡的零缺包輪
+        session->video.zeroLossStreak++;
+        desktop_fec_decay_locked(session, now);
       }
       run_abr_aimd(session, residual, 500,
                    residual > 0 ? "ping-tick-residual" : "ping-tick");
@@ -3393,7 +3581,7 @@ namespace stream {
       if (lossSignificant && session->vr) {
         vr_fec_hold_locked(session, now);  // §VR-FEC-LOSS：VR 的 FEC 只跟著 LOSS 升，這裡只延後回降
       } else if (lossSignificant) {
-        int newFec = std::min(currentFec + 10, 50);
+        int newFec = desktop_fec::raised(currentFec, config::stream.fec_percentage);
         if (newFec != currentFec) {
           session->video.adaptiveFecPercentage.store(newFec);
           BOOST_LOG(info) << "[VIPLE-FEC] FEC status (" << src << "): " << count << " lost in " << elapsed
@@ -3406,17 +3594,7 @@ namespace stream {
         vr_fec_decay_locked(session, now);  // §VR-FEC-LOSS：30 s 沒有救不回的幀才開始降
       } else {
         session->video.zeroLossStreak++;
-        auto sinceLastLoss = std::chrono::duration_cast<std::chrono::seconds>(
-          now - session->video.lastLossTime).count();
-        if (sinceLastLoss > 5 && session->video.zeroLossStreak >= 3) {
-          int baseFec = config::stream.fec_percentage;
-          int newFec = std::max(currentFec - 5, baseFec);
-          if (newFec != currentFec) {
-            session->video.adaptiveFecPercentage.store(newFec);
-            BOOST_LOG(info) << "[VIPLE-FEC] No loss for " << sinceLastLoss
-              << "s, FEC: " << currentFec << "% -> " << newFec << "%";
-          }
-        }
+        desktop_fec_decay_locked(session, now);  // 和 ping tick 共用同一條回降規則
       }
 
       // AIMD bitrate adjustment — 共用 §ABR-RAMP 邏輯
@@ -4931,7 +5109,9 @@ namespace stream {
       // [VIPLE-PERF] QUIC session 查找從發送段（§K.5 區塊）hoist 到
       // packetize 之前——FEC clamp 與發送路徑共用同一次 per-frame 查找。
       std::shared_ptr<quic_server::QuicSession> quicVideoSession;
-      if (config::stream.mpquic_enabled && quic_server::g_listener) {
+      // §PERF-1113（審查 05 第 10 項）：VR 影像一律走 RTP，查到的 QUIC session 只用在第一幀那行 [VIPLE-VR-TX] 的
+      // present／absent。之後每幀再查只是白拿一次 _sessionMutex（QUIC IO 執行緒 drain 時整段握著它），所以 VR 只查第一幀。
+      if (config::stream.mpquic_enabled && quic_server::g_listener && (!vr_force_rtp || !session->vrTxLogged)) {
         quicVideoSession = quic_server::g_listener->getSession(
             session->video.peer.address());
       }
@@ -5117,7 +5297,8 @@ namespace stream {
         // 若 session 不存在則自動 fallback 到 tunnel 或直接 UDP。
         // §K.5-FEC-CLAMP-FIX：quicVideoSession 查找已 hoist 到 packetize
         // 段（FEC clamp 共用同一次查找），這裡只留狀態轉變 diag log。
-        if (config::stream.mpquic_enabled && quic_server::g_listener) {
+        // §PERF-1113：VR session 第一幀之後不再查 QUIC session（見上），這裡的 FOUND／NULL 對它沒有意義，不印
+        if (config::stream.mpquic_enabled && quic_server::g_listener && !vr_force_rtp) {
           // §Q-REMOTE Fix R.1 diag——§K.5-LOG-FIX (review)：此區塊在
           // per-frame 迴圈內（60-120/s），原本無節流會在整場串流洪水
           // 數百 MB log。改為僅在「session 找到/找不到」狀態轉變時印一次。
@@ -5419,6 +5600,10 @@ namespace stream {
                     }
                   }
                 }
+                // §PERF-1113（審查 05 第 4 項）：這一批都入列了，叫醒 QUIC 的 IO 執行緒馬上送，不等它 select 的 1 ms 逾時
+                if (quic_server::g_listener) {
+                  quic_server::g_listener->wake();
+                }
               } else
 #endif
               if (use_tunnel) {
@@ -5449,7 +5634,11 @@ namespace stream {
                 meta.first_shard = (uint16_t) next_shard_to_send;
                 meta.data_shards = (uint16_t) std::min<size_t>(shards.data_shards, UINT16_MAX);
                 meta.total_shards = (uint16_t) std::min<size_t>(shards.size(), UINT16_MAX);
-                vr_links->send_video((const uint8_t *) scratch.data(), pre + dat, current_batch_size, &meta);
+                // §PERF-1113（審查 05 第 8 項）：告訴 hub 這是不是這一幀的最後一批，送出執行緒送完時記下時刻（LAT10 用）
+                const bool frame_end = (size_t) blockIndex + 1 == (size_t) fec_blocks_needed && (size_t) x + 1 == (size_t) shards.size();
+                // §VR-PACE：整幀大約幾個封包（各 block 的 shard 數相同，最後一個 block 可能較少 → 略為高估，間隔略短，安全）
+                const auto frame_pkts = (uint32_t) std::min<size_t>((size_t) fec_blocks_needed * shards.size(), UINT32_MAX);
+                vr_links->send_video((const uint8_t *) scratch.data(), pre + dat, current_batch_size, &meta, frame_end, frame_pkts);
               } else if (!platf::send_batch(batch_info)) {
                 // Batched send is not available, so send each packet individually
                 BOOST_LOG(verbose) << "Falling back to unbatched send"sv;
@@ -6468,18 +6657,28 @@ namespace stream {
         // §ABR-ADAPT：上限＝邊際效應，不是 client 設定。編碼器用 vr_abr_ceiling_kbps 初始化（level／tier 夠用到這裡），
         // client 設定的碼率當起始值：先發一次 bitrate_change，編碼執行緒第一幀就降到起始值（VR 降碼不送 IDR）。
         const int startKbps = session.config.monitor.bitrate;
+        // 事件一律先持有：client 要求的碼率不低於上限時這裡不發起始值，但控制器開場的降碼（單連線上限的 cut reason=cap）
+        // 會在編碼執行緒訂閱之前 raise——沒人持有的事件連同值一起消失，編碼器就照 client 的值跑到下一次調整（11-08 三場約 8 s）
+        auto ev = session.mail->event<int>(mail::bitrate_change);
+        session.video.vrStartBitrateEvent = ev;
+        // 10 秒行的 enc=：先清掉上一場留下的值，這一場的編碼器建好時自己填（不回報的編碼器就維持「不知道」）
+        abr_signals::enc_kbps.store(-1, std::memory_order_relaxed);
         if (config::vr.abr_ceiling_kbps > startKbps) {
           session.config.monitor.bitrate = config::vr.abr_ceiling_kbps;
           session.video.configuredBitrateKbps = config::vr.abr_ceiling_kbps;
           session.video.adaptiveBitrateKbps.store(startKbps);
           session.video.targetBitrateKbps.store(startKbps);
-          auto ev = session.mail->event<int>(mail::bitrate_change);
           ev->raise(startKbps);
-          session.video.vrStartBitrateEvent = ev;
           BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] ceiling " << config::vr.abr_ceiling_kbps << " kbps (encoder init), start " << startKbps
                           << " kbps (client setting)";
         }
         session.video.vrAbrFast = std::make_unique<::vr::abr::fast_controller_t>(session.video.configuredBitrateKbps);
+        // 11-13 晚：當天加的四組碼率規則（PERSIST-VERIFY、STALL-LOSS、OUTAGE-HOLD、PATH-UPGRADE）前提被逐封包量測推翻，
+        // 收到開關後面、預設關；關著時控制器的決定和 2.0.175 相同
+        session.video.vrAbrFast->set_experimental_rules(config::vr.abr_experimental);
+        if (config::vr.abr_experimental) {
+          BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] experimental rules are ON (vr_abr_experimental)"sv;
+        }
         session.video.vrAbrFast->set_applied_kbps(session.video.adaptiveBitrateKbps.load() > 0 ? session.video.adaptiveBitrateKbps.load() : session.video.configuredBitrateKbps);
         // 2026-10-30 實測：頭盔這場沒開「自動調整位元率」，run_abr_aimd 一進去就 return，控制器降了 4 次都沒套用、
         // 149 Mbps 硬塞家用 Wi-Fi（每 10 s 救不回 68 張）。使用者要「體驗第一、寧可糊不要卡」→ VR 開了快速降碼就一律啟用
@@ -6501,6 +6700,7 @@ namespace stream {
       // §TS-PATH：先記下監看代號，再以 release 標成 RUNNING。
       // stop() 的 CAS 看得到 RUNNING 時，也看得到這個代號（不是 Tailscale 就是 0）。
       session.tsPathGen = tailscale_path::on_session_start(session.control.expected_peer_address);
+      session.tsPathUpgradesSeen = tailscale_path::direct_upgrade_count();
       session.state.store(state_e::RUNNING, std::memory_order_release);
 
 #ifdef VIPLE_MPQUIC
@@ -6675,6 +6875,16 @@ namespace stream {
           }
           // §VR-MULTILINK-HOTADD：串流中途插上適配器／主機後連熱點（client 也要支援才會啟用）
           opt.hotadd = config::vr.multilink_hotadd;
+          opt.video_uso = config::vr.multilink_uso;  // §PERF-1113：預設關
+          opt.pace_spread_pct = std::max(config::vr.pace_spread_pct, 0);  // §VR-PACE：auto（−1）從「一次送完」開始，之後由 10 秒統計決定
+          if (config::vr.pace_spread_pct < 0) {
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] pacing: auto (vr_pace_spread_pct) - spreads each frame over about 6.5 ms while a single link keeps "
+                               "losing frames and no resends are in use"sv;
+          }
+          if (opt.pace_spread_pct > 0) {
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] pacing: each frame's packets are spread over " << opt.pace_spread_pct
+                            << "% of the stream frame period (vr_pace_spread_pct)"sv;
+          }
           if (!config::vr.multilink_fault.empty()) {
             if (auto f = ::vr::multilink::fault_t::parse(config::vr.multilink_fault)) {
               opt.fault = *f;

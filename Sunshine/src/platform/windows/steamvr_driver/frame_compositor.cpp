@@ -48,6 +48,54 @@ namespace vrdrv {
       out.bottom = b;
       return true;
     }
+
+    // §PERF-1113：第 0 層（不透明混合）是不是一定會把整張 rtv 的每個像素都寫到。算法和 compose() 的迴圈相同
+    // （同一個 proj_to_rect、同一條 dst_rect 式子），只是不畫。回 false＝不確定，呼叫端照舊先清成黑色。
+    //  1. viewport 要鋪滿 rtv：不分塊時兩眼各 eye_w×eye_h 並排，分塊時 2×2 塊；
+    //  2. 兩眼的 tangent 範圍都有效、第 0 層兩眼都有貼圖（缺一眼那半邊不會被畫）；
+    //  3. 第 0 層在兩眼的目的矩形都蓋滿 NDC 的 [-1,1]：一般路徑是光柵化的範圍，注視點／分塊路徑是 pixel shader
+    //     裡 discard 的範圍（compositor_ps.hlsl 的 inside），兩者用的是同一個 dst_rect。
+    //     最靠邊的像素中心離邊緣是 1/寬（NDC），容許誤差取它的四分之一：浮點誤差（約 1e-6）會過，真的少蓋一個像素不會過。
+    bool layer0_fills_target(uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, const tile_layout_t *tiles, uint32_t rt_w, uint32_t rt_h) {
+      if (count == 0 || layers == nullptr || rt_w == 0 || rt_h == 0) {
+        return false;
+      }
+      const uint32_t vp_w = tiles ? tiles->tile_w : eye_w;
+      const uint32_t vp_h = tiles ? tiles->tile_h : eye_h;
+      if (vp_w == 0 || vp_h == 0) {
+        return false;
+      }
+      if ((uint64_t) vp_w * 2u != rt_w || (uint64_t) vp_h * (tiles ? 2u : 1u) != rt_h) {
+        return false;
+      }
+      const float tol_x = 0.25f / (float) vp_w;
+      const float tol_y = 0.25f / (float) vp_h;
+      for (uint32_t e = 0; e < 2; ++e) {
+        const math::rect_t &E = eye_rect[e];
+        const float ew = E.right - E.left;
+        const float eh = E.bottom - E.top;
+        if (!(ew > 1e-6f) || !(eh > 1e-6f)) {
+          return false;
+        }
+        const compose_eye_t &L = layers[0].eye[e];
+        if (!L.srv) {
+          return false;
+        }
+        math::rect_t lr;
+        if (!proj_to_rect(L.proj, lr)) {
+          lr = E;
+        }
+        const float x0 = (2.0f * lr.left - (E.right + E.left)) / ew;
+        const float y0 = (2.0f * lr.top - (E.bottom + E.top)) / eh;
+        const float x1 = (2.0f * lr.right - (E.right + E.left)) / ew;
+        const float y1 = (2.0f * lr.bottom - (E.bottom + E.top)) / eh;
+        // 寫成「肯定的比較」：NaN 時每一項都是 false，整個條件不成立 → 回 false（先清）
+        if (!(x0 <= -1.0f + tol_x && x1 >= 1.0f - tol_x && y0 <= -1.0f + tol_y && y1 >= 1.0f - tol_y)) {
+          return false;
+        }
+      }
+      return true;
+    }
   }  // namespace
 
   HRESULT frame_compositor_t::init(ID3D11Device *dev) {
@@ -109,9 +157,15 @@ namespace vrdrv {
     return dev->CreateBuffer(&cbd, nullptr, &cb_);
   }
 
-  void frame_compositor_t::compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a, const float fovea_centre[2][2], float fovea_u0, const tile_layout_t *tiles) {
-    const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    ctx->ClearRenderTargetView(rtv, black);
+  void frame_compositor_t::compose(ID3D11DeviceContext *ctx, ID3D11RenderTargetView *rtv, uint32_t eye_w, uint32_t eye_h, const math::rect_t eye_rect[2], const compose_layer_t *layers, uint32_t count, float fovea_a, const float fovea_centre[2][2], float fovea_u0, const tile_layout_t *tiles, uint32_t rt_w, uint32_t rt_h) {
+    // §PERF-1113：第 0 層不透明、而且確定把整張 rtv 寫滿時，先清成黑色只是多寫一遍（每眼 2304 時約 42 MB），省掉。
+    // 任何一項不確定（尺寸沒給、viewport 沒鋪滿、某一眼沒有貼圖、目的矩形沒蓋滿本眼）都照舊先清——沒蓋到的地方
+    // 不能留著上一次寫進這個 slot 的畫面。
+    // 分塊（tiles）時不省：注視點那一塊是裁切，視線靠邊時裁切範圍會不會超出來源、被 shader discard，沒有實機驗過
+    if (!(ready() && tiles == nullptr && layer0_fills_target(eye_w, eye_h, eye_rect, layers, count, tiles, rt_w, rt_h))) {
+      const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      ctx->ClearRenderTargetView(rtv, black);
+    }
     if (count == 0 || !ready()) {
       return;
     }

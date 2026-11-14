@@ -141,7 +141,10 @@ private:
     AVPacket* m_Pkt;
     AVCodecContext* m_VideoDecoderCtx;
     enum AVPixelFormat m_RequiredPixelFormat;
-    QByteArray m_DecodeBuffer;
+    // §PERF-1113：位元流直接組進有參照計數的緩衝區（m_Pkt->buf），avcodec_send_packet 就只加參照、不再整包配置＋複製。
+    // 緩衝區在 FFmpeg 還扣著時不能重寫，所以從 pool 拿、送完就放掉自己的參照（原本是一塊 QByteArray 重複用）
+    AVBufferPool* m_PktBufPool = nullptr;
+    int m_PktBufPoolSize = 0;
     // §SF-PARAMSETS：v4l2m2m decoder 目前這個實例吃過的 VPS/SPS/PPS（見 submitDecodeUnit）
     QByteArray m_V4l2ParamSets;
     const AVCodecHWConfig* m_HwDecodeCfg;

@@ -92,6 +92,20 @@ static constexpr uint8_t FLOW_CONTROL = 0x03;
 
 namespace quic_server {
 
+  // §K.9-TS6（§PERF-1113）：peer 是不是 Tailscale 的 IPv6 位址（fd7a:115c:a1e0::/48）。
+  // 這種路徑 MTU 固定 1280，超過的封包過不去，§K.8／§K.9 先假設 1500 的作法在這裡必定落空。
+  // 只認 IPv6：IPv4 的 100.64.0.0/10（含 dual-stack socket 上的 ::ffff:100.x.y.z）大包會被 IP 分片
+  // 送達、不是黑洞，boost 在那裡有效；把它也擋掉，區網尺寸（約 1392 B）的 client 換路到 Tailscale
+  // 時影像會全部被 DATAGRAM_TOO_LONG 擋下。
+  static bool isTailscaleUlaV6(const struct sockaddr_storage &addr) {
+    if (addr.ss_family != AF_INET6) {
+      return false;
+    }
+    static constexpr uint8_t kTailscaleUlaPrefix[6] = {0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0};
+    const auto *v6 = reinterpret_cast<const struct sockaddr_in6 *>(&addr);
+    return std::memcmp(v6->sin6_addr.s6_addr, kTailscaleUlaPrefix, sizeof(kTailscaleUlaPrefix)) == 0;
+  }
+
   // ── QuicSession ──────────────────────────────────────────
 
   QuicSession::QuicSession(picoquic_cnx_t *cnx) : _cnx(cnx) {
@@ -1401,6 +1415,9 @@ namespace quic_server {
     // 1500；path 重生（新 path id）自然重新嘗試。
     // 註：不能直接用 nb_mtu_losses==0 當 boost 條件——它在 mtu-size 包
     // 被 ACK 時歸零，會形成 boost→黑洞→reset→ACK 歸零→boost 震盪。
+    // 更正（§K.9-TS6，2026-11-13）：上面「Tailscale(1280) 類路徑黑洞」只對 IPv6（fd7a:）成立。
+    // 這個 socket 沒有要求不分片，IPv4 的 100.64/10 大包由本機分片送達、假釋會通過，boost 照舊；
+    // IPv6 的 Tailscale 路徑改成一開始就不 boost（見迴圈開頭），不必等 1.5 s 假釋到期。
     uint64_t paroleNowUs = picoquic_current_time();
     for (int i = 0; i < _cnx->nb_paths; i++) {
       auto *p = _cnx->path[i];
@@ -1408,6 +1425,20 @@ namespace quic_server {
         continue;
       }
       uint64_t pid = p->unique_path_id;
+      // §K.9-TS6（§PERF-1113）：Tailscale IPv6 路徑第一次見到就交給 PMTUD。原本照樣蓋 1500、
+      // 等假釋 1.5 s 到期才撤銷，開場與每條新路徑的這段時間裡合併成 >1280 B 的封包（多半是
+      // 音訊）全部過不去。只在列入黑名單的這一次 reset：每次 drain 都 reset 會讓 PMTUD 一直歸零。
+      // reset 也涵蓋 path 位址從區網遷到 Tailscale、send_mtu 已經被蓋成 1500 的情況。
+      if (!_mtuBoostBlocked.count(pid) && p->first_tuple != nullptr &&
+          isTailscaleUlaV6(p->first_tuple->peer_addr)) {
+        _mtuBoostBlocked.insert(pid);
+        p->viple_mtu_pinned = 0;  // §Q-MTU-PIN：交還 PMTUD
+        picoquic_reset_path_mtu(p);
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.9-TS6 no boost: path=" << i
+                        << " id=" << pid
+                        << " peer is Tailscale IPv6 (MTU 1280) — send_mtu reset to " << p->send_mtu
+                        << ", PMTUD converges real MTU";
+      }
       // §K.9-LATCH-THRESH 2026-07-17：門檻 >0 → >=10。LAN 握手期的 RACK
       // 假陽性會讓 nb_mtu_losses 到 1-2（07-17 LAN 迴歸實測：latch 誤觸發
       // → send_mtu 打回 1232 → PMTUD 重爬升窗口內 1420B video shard 被
@@ -2118,6 +2149,17 @@ namespace quic_server {
     _sessionCallback = std::move(cb);
   }
 
+  void QuicListener::wake() {
+    // §PERF-1113（審查 05 第 4 項）：對喚醒 socket 送一個位元組，IO 執行緒的 select 立刻返回。非阻塞：
+    // 它的接收緩衝滿了（已經有一堆喚醒還沒被讀）就送不進去，那也無妨
+    std::lock_guard<std::mutex> lock(_wakeMutex);
+    if (_wakeSock < 0) {
+      return;
+    }
+    const char one = 1;
+    ::send((SOCKET) _wakeSock, &one, 1, 0);
+  }
+
   void QuicListener::ioLoop() {
     uint8_t recvBuf[2048];
     uint8_t sendBuf[2048];
@@ -2192,6 +2234,43 @@ namespace quic_server {
       BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SOCK-SNDBUF: send buffer " << got << " bytes (asked for " << want << ")";
     }
 
+    // §PERF-1113（審查 05 第 4 項）：喚醒用的 socket。影像執行緒把 datagram 推進 _pendingQueue 之後，IO 執行緒原本要等
+    // 下面 select 的 1 ms 逾時（或剛好有 ACK 進來）才會 drain，每一批平均多等約 0.5 ms。這裡開一個綁在 127.0.0.1、
+    // 自己連自己的 UDP socket 一起放進 select；wake() 對它送一個位元組就能把 select 叫醒。建不起來就不用（退回 1 ms 輪詢）。
+    SOCKET wakeSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (wakeSock != INVALID_SOCKET) {
+      struct sockaddr_in wakeAddr{};
+      wakeAddr.sin_family = AF_INET;
+      wakeAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      wakeAddr.sin_port = 0;
+      socklen_t wakeAddrLen = sizeof(wakeAddr);
+      bool wakeOk = bind(wakeSock, (struct sockaddr *) &wakeAddr, sizeof(wakeAddr)) == 0 &&
+                    getsockname(wakeSock, (struct sockaddr *) &wakeAddr, &wakeAddrLen) == 0 &&
+                    connect(wakeSock, (struct sockaddr *) &wakeAddr, sizeof(wakeAddr)) == 0;
+#ifdef _WIN32
+      {
+        u_long wakeNonBlocking = 1;
+        wakeOk = wakeOk && ioctlsocket(wakeSock, FIONBIO, &wakeNonBlocking) == 0;
+      }
+#else
+      {
+        int wakeFl = fcntl(wakeSock, F_GETFL, 0);
+        wakeOk = wakeOk && wakeFl >= 0 && fcntl(wakeSock, F_SETFL, wakeFl | O_NONBLOCK) == 0;
+      }
+      // select 的 fd_set 放不下太大的描述元（Linux 的 FD_SETSIZE 是 1024）：放不下就不用
+      wakeOk = wakeOk && wakeSock < FD_SETSIZE;
+#endif
+      if (!wakeOk) {
+        closesocket(wakeSock);
+        wakeSock = INVALID_SOCKET;
+      }
+    }
+    {
+      std::lock_guard<std::mutex> wakeLock(_wakeMutex);
+      _wakeSock = wakeSock == INVALID_SOCKET ? (std::intptr_t) -1 : (std::intptr_t) wakeSock;
+    }
+    BOOST_LOG(info) << "[VIPLE-MPQUIC] §PERF-1113 io wake socket: " << (wakeSock == INVALID_SOCKET ? "unavailable (1 ms polling only)" : "ready");
+
 #ifdef _WIN32
     // §Q-MP-PKTINFO: 動態載入 WSARecvMsg（Windows 要求透過
     // WSAIoctl 取得函式指標，無法直接呼叫）。
@@ -2227,9 +2306,24 @@ namespace quic_server {
       tv.tv_usec = 1000;
       FD_ZERO(&readSet);
       FD_SET(sock, &readSet);
+      // §PERF-1113：喚醒 socket 一起等（Windows 的 select 不看第一個參數；其他平台要給最大的描述元＋1）
+      int selNfds = (int) (sock + 1);
+      if (wakeSock != INVALID_SOCKET) {
+        FD_SET(wakeSock, &readSet);
+#ifndef _WIN32
+        selNfds = (int) (std::max(sock, wakeSock) + 1);
+#endif
+      }
 
-      int selRet = select((int)(sock + 1), &readSet, nullptr, nullptr, &tv);
-      if (selRet > 0) {
+      int selRet = select(selNfds, &readSet, nullptr, nullptr, &tv);
+      if (selRet > 0 && wakeSock != INVALID_SOCKET && FD_ISSET(wakeSock, &readSet)) {
+        // 把累積的喚醒位元組讀光（非阻塞；沒讀光的話下一輪 select 會立刻返回、變成空轉）。一次最多讀 64 個，
+        // 讀不完下一輪再讀：送的一方不會被這裡卡住，這裡也不會被連續的喚醒拖住
+        char wakeBuf[16];
+        for (int i = 0; i < 64 && recv(wakeSock, wakeBuf, sizeof(wakeBuf), 0) > 0; ++i) {
+        }
+      }
+      if (selRet > 0 && FD_ISSET(sock, &readSet)) {
         // §Q-MP-PKTINFO: 用 WSARecvMsg 取得封包到達的實際本地
         // 地址，讓 picoquic 正確辨識 multipath PATH_CHALLENGE。
         int recvLen = 0;
@@ -2460,6 +2554,14 @@ namespace quic_server {
                     << " durationMs=" << loopMs
                     << " _running=" << _running.load();
 
+    // §PERF-1113：先讓 wake() 看不到它，再關
+    {
+      std::lock_guard<std::mutex> wakeLock(_wakeMutex);
+      _wakeSock = -1;
+    }
+    if (wakeSock != INVALID_SOCKET) {
+      closesocket(wakeSock);
+    }
     closesocket(sock);
   }
 
@@ -2494,10 +2596,18 @@ namespace quic_server {
       // 後立即開始發送。LAN Ethernet MTU = 1500，安全直設。
       if (cnx->nb_paths > 0 && cnx->path[0] != nullptr) {
         size_t oldMtu = cnx->path[0]->send_mtu;
-        cnx->path[0]->send_mtu = 1500;
-        cnx->path[0]->viple_mtu_pinned = 1;  // §Q-MTU-PIN
-        BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.8 path[0] send_mtu boosted: "
-                        << oldMtu << " → 1500";
+        // §K.9-TS6（§PERF-1113）：Tailscale IPv6 的 peer 不蓋 1500（MTU 固定 1280，蓋了只會讓
+        // 開場的大包過不去）；drainPendingToQuic 第一次見到這條路徑時會把它列入不 boost 的名單。
+        if (cnx->path[0]->first_tuple != nullptr &&
+            isTailscaleUlaV6(cnx->path[0]->first_tuple->peer_addr)) {
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.8 path[0] send_mtu not boosted (Tailscale IPv6 peer): stays "
+                          << oldMtu;
+        } else {
+          cnx->path[0]->send_mtu = 1500;
+          cnx->path[0]->viple_mtu_pinned = 1;  // §Q-MTU-PIN
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.8 path[0] send_mtu boosted: "
+                          << oldMtu << " → 1500";
+        }
 
         // §K.9-PMTUD-FIX 2026-07-16：立即積極 PMTUD。boost 假設路徑
         // MTU=1500，但 VPN/Tailscale(1280)/PPPoE 路徑更小——07-15 事故

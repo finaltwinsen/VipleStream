@@ -11,15 +11,33 @@
 #define SER_MAPPING "mapping"
 
 MappingFetcher* MappingManager::s_MappingFetcher;
+bool MappingManager::s_SkipFetchIfCached = false;
+bool MappingManager::s_FetchDecided = false;
+
+void MappingManager::setSkipFetchIfCached(bool skip)
+{
+    s_SkipFetchIfCached = skip;
+}
 
 MappingManager::MappingManager()
 {
     QSettings settings;
 
     // Load updated mappings from the Internet once per Moonlight launch
-    if (s_MappingFetcher == nullptr) {
-        s_MappingFetcher = new MappingFetcher();
-        s_MappingFetcher->start();
+    // §PERF-1113 A31：每個行程只決定一次。VR 串流的子行程（setSkipFetchIfCached）手上有快取檔就不查——只看檔案在不在、
+    // 有沒有內容，不看它多舊：伺服器回「沒有更新」時檔案的時間不會變，用時間判斷會變成每次都查
+    if (!s_FetchDecided) {
+        s_FetchDecided = true;
+
+        bool fetch = true;
+        if (s_SkipFetchIfCached) {
+            const QFileInfo cached = Path::getCacheFileInfo("gamecontrollerdb.txt");
+            fetch = !(cached.exists() && cached.size() > 0);
+        }
+        if (fetch) {
+            s_MappingFetcher = new MappingFetcher();
+            s_MappingFetcher->start();
+        }
     }
 
     // First load existing saved mappings. This ensures the user's
@@ -32,6 +50,11 @@ MappingManager::MappingManager()
         addMapping(mapping);
     }
     settings.endArray();
+
+    // §PERF-1113 A31：記下設定裡原本的樣子，結尾只在真的有變時才寫回。原本每建一次就整組刪掉重寫（一個行程裡
+    // 兩三次），Linux 上是整份設定檔重寫再 fsync。個數對不上＝設定裡有重複的 GUID，照舊寫一次把它整理掉
+    const QMap<QString, SdlGamepadMapping> savedMappings = m_Mappings;
+    const bool savedIsNormalized = (mappingCount == m_Mappings.size());
 
     // Finally load mappings from SDL_HINT_GAMECONTROLLERCONFIG
     QStringList sdlMappings =
@@ -47,7 +70,9 @@ MappingManager::MappingManager()
     }
 
     // Save the updated mappings to settings
-    save();
+    if (!savedIsNormalized || m_Mappings != savedMappings) {
+        save();
+    }
 }
 
 void MappingManager::save()

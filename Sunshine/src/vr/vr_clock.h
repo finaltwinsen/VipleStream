@@ -76,8 +76,13 @@ namespace vr::clk {
     int64_t rtt_ns = 0;  ///< 來源為 none 時一律 0
   };
 
-  /// ENet 值 < 16 ms 視為 0（GetTickCount 的 15/16 ms 量化，scout F B2）
+  /// ENet 的值有 GetTickCount 的 15/16 ms 量化（scout F B2）：小的值只是雜訊，當 0；kEnetQuantMs 以上照實用。
+  /// §VR-CLK-RTT-CONT（2026-11-13）：兩者之間不可以是一刀切。原本「< 16 當 0」，往返基線在 16～21 ms 的路徑（外出經 VPN）
+  /// 上基線一掉到 15 就變成 0、回到 16 又變回來，扣掉的那一半差 8～10 ms、超過 clock_map_t::kStepNs 就一次跳——頭和手的
+  /// 姿態時刻一起移（實測 14 分鐘 7 次，拍子瞬移「速度×8～16 ms」）。現在 kEnetZeroMs 以下當 0，到 kEnetQuantMs 之間
+  /// 線性接上（斜率 2），16 以上不變：15 → 14、12 → 8、8 → 0。區網的基線（30 s 以上的最小值）在 0～2 ms，不受影響。
   inline constexpr int64_t kEnetQuantMs = 16;
+  inline constexpr int64_t kEnetZeroMs = 8;
 
   /**
    * @brief 依 §F.1 的優先序選 RTT。
@@ -145,6 +150,11 @@ namespace vr::clk {
     static constexpr double kSkewClampPpm = 1000.0;
     static constexpr int64_t kSlewNsPerSec = 500'000;  ///< 往上追的速度上限 0.5 ms/s
     static constexpr int64_t kStepNs = 5'000'000;  ///< 差距 > 5 ms 才一次跳
+    /// §VR-CLK-POSTGAP（2026-11-13）：超過 kGapNs 沒有樣本（斷訊）之後的 kPostGapHoldNs 內，往上超過 kStepNs 的差距不跳也不追。
+    /// 斷訊一結束，積在路上的樣本一起到，2 s 視窗裡只有這幾筆排隊最久的，m2s 偏高十幾毫秒是假的（外出實測一次 +15.8 ms：
+    /// 頭和手的姿態時刻一起移，正常的樣本一到又跳回來）。這段時間照 skew 外插原本的值；一秒後差距還在才是真的，照常處理
+    static constexpr int64_t kGapNs = 2'000'000'000;
+    static constexpr int64_t kPostGapHoldNs = 1'000'000'000;
     /// 新的 2 s 最小值偏離「上一點 + skew 外插」超過這個值 → 視為位準跳動（上行延遲改變、壅塞、
     /// 換路徑），清空 Theil–Sen 歷史（skew 沿用）。不清的話，位準跳動之後跨越跳動的點對會在
     /// 30 s 內超過一半，中位數斜率變成垃圾。200 ppm 漂移每 2 s 只有 0.4 ms，雜訊約 0.01–0.1 ms。
@@ -246,6 +256,8 @@ namespace vr::clk {
 
     bool have_now_ = false;
     int64_t last_now_ = 0;  ///< 單調化後的最近時刻（兩條執行緒搶鎖可能讓到達時刻小幅倒退）
+    bool gap_end_valid_ = false;  ///< §VR-CLK-POSTGAP
+    int64_t gap_end_ns_ = 0;  ///< 最近一次斷訊（> kGapNs 沒有樣本）結束的時刻
     bool have_transport_ = false;
     bool cur_quic_ = false;
 

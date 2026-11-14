@@ -173,8 +173,17 @@ void SystemProperties::updateDecoderProperties(bool hasHardwareAcceleration, boo
     emit asyncLoadInProgressChanged();
 }
 
+void SystemProperties::ensureDisplaysQueried()
+{
+    if (!displaysQueried) {
+        refreshDisplays();
+    }
+}
+
 QRect SystemProperties::getNativeResolution(int displayIndex)
 {
+    ensureDisplaysQueried();
+
     // Returns default constructed QRect if out of bounds
     Q_ASSERT(!monitorNativeResolutions.isEmpty());
     return monitorNativeResolutions.value(displayIndex);
@@ -182,6 +191,8 @@ QRect SystemProperties::getNativeResolution(int displayIndex)
 
 QRect SystemProperties::getSafeAreaResolution(int displayIndex)
 {
+    ensureDisplaysQueried();
+
     // Returns default constructed QRect if out of bounds
     Q_ASSERT(!monitorSafeAreaResolutions.isEmpty());
     return monitorSafeAreaResolutions.value(displayIndex);
@@ -189,6 +200,8 @@ QRect SystemProperties::getSafeAreaResolution(int displayIndex)
 
 int SystemProperties::getRefreshRate(int displayIndex)
 {
+    ensureDisplaysQueried();
+
     // Returns 0 if out of bounds
     Q_ASSERT(!monitorRefreshRates.isEmpty());
     return monitorRefreshRates.value(displayIndex);
@@ -196,8 +209,23 @@ int SystemProperties::getRefreshRate(int displayIndex)
 
 QList<int> SystemProperties::getSupportedRefreshRates(int displayIndex)
 {
+    ensureDisplaysQueried();
+
     // Returns empty list if out of bounds
     return monitorSupportedRefreshRates.value(displayIndex);
+}
+
+void SystemProperties::startLightLoad()
+{
+    if (unmappedGamepadsChecked) {
+        return;
+    }
+
+    unmappedGamepadsChecked = true;
+    unmappedGamepads = SdlInputHandler::getUnmappedGamepads();
+    if (!unmappedGamepads.isEmpty()) {
+        emit unmappedGamepadsChanged();
+    }
 }
 
 void SystemProperties::startAsyncLoad()
@@ -210,7 +238,12 @@ void SystemProperties::startAsyncLoad()
     // This isn't actually asynchronous (due to the need to synchronize with
     // SdlGamepadKeyNavigation), but we don't query it in the constructor
     // because it's expensive.
-    unmappedGamepads = SdlInputHandler::getUnmappedGamepads();
+    // §PERF-1113 A21：startLightLoad() 先查過（VR 介面開不起來、退回平面視窗時）就不再查一次，
+    // 但照樣發訊號：新的 AppContent 剛連上，要靠它開對話框
+    if (!unmappedGamepadsChecked) {
+        unmappedGamepadsChecked = true;
+        unmappedGamepads = SdlInputHandler::getUnmappedGamepads();
+    }
     if (!unmappedGamepads.isEmpty()) {
         emit unmappedGamepadsChanged();
     }
@@ -265,6 +298,9 @@ void SystemProperties::waitForAsyncLoad()
 
 void SystemProperties::refreshDisplays()
 {
+    // §PERF-1113 A21：記下「列舉過了」（失敗也算：下面的 getter 不要每次都重試一遍 SDL 初始化）
+    displaysQueried = true;
+
     // §REVIEW-1104：探測執行緒（Session::getDecoderInfo 用 testWindow）還在跑時，主執行緒不可同時操作 SDL 視訊
     // 子系統（設定頁一打開就呼叫這裡）。先等它結束；探測執行緒自己不會呼叫 refreshDisplays，不會自己等自己
     if (asyncLoadInProgress && systemPropertyQueryThread != nullptr &&

@@ -265,7 +265,9 @@ namespace platf::dxgi {
      * §VR-GPU-PRIO（2026-10-11）：vr_gpu_priority = realtime 時擷取期間不降，用「依設定該有的值」。量到的依據（重負載、
      * 同一場由外部來回切）：HIGH 時進 NVENC 的兩個呼叫平均多等約 4.4 ms、Present→第一個封包 p50 16.8 ms；REALTIME 時
      * 回到輕負載的水準（9.5 ms），遊戲的 presentToFence 只多 0.2 ms、出幀數不變。HIGH 和遊戲在同一個排程層級，
-     * 不會搶佔；合成器與 vrserver 本來就是 REALTIME。預設仍是 high（行為和之前相同）。
+     * 不會搶佔；合成器與 vrserver 本來就是 REALTIME。
+     * §PERF-1113（註解更正）：vr_gpu_priority 的預設值現在是 realtime（config.h），擷取期間預設不降；
+     * 設成 high 才是第一段描述的舊行為。
      */
     class gpu_priority_guard {
     public:
@@ -469,6 +471,16 @@ namespace platf::dxgi {
     if (!device_ctx4) {
       BOOST_LOG(error) << "[VIPLE-VR-CAP] init: ID3D11DeviceContext4 is required for fence synchronization"sv;
       return -1;
+    }
+    {
+      // §PERF-1113：capture device 的 GPU 執行緒優先權也設成 7，和 encoder device（display_vram.cpp）、桌面擷取
+      // （display_base.cpp）一致。VR 不走桌面那個優先權區塊，這一行原本漏掉：同一個行程裡複製排在色彩轉換前面，
+      // 兩者的相對優先權卻不一樣。行程層級的排程類別不在這裡動（仍由 capture() 的 gpu_priority_guard 管）。
+      // 失敗只警告、照常繼續（和另外兩處相同）；init 每個 display 只跑一次。
+      dxgi::dxgi_t dxgi_dev;
+      if (FAILED(device->QueryInterface(IID_IDXGIDevice, (void **) &dxgi_dev)) || FAILED(dxgi_dev->SetGPUThreadPriority(7))) {
+        BOOST_LOG(warning) << "[VIPLE-VR-CAP] init: failed to raise capture GPU thread priority"sv;
+      }
     }
     if (!timer || !*timer) {
       BOOST_LOG(error) << "Uninitialized high precision timer";
@@ -779,17 +791,37 @@ namespace platf::dxgi {
                          << " nextAllowedMs="sv << next_allowed_ns / 1'000'000;
     };
 
+    // §PERF-1113：10 s 視窗的樣本向量先配好容量（每 10 s 換新的一組時也是）：每張 push_back 不再偶爾重新配置。
+    // 4096 筆＝10 s × 409 Hz，超過了 vector 自己會長，不會掉樣本
+    auto reserve_window = [](stats_t &s) {
+      constexpr size_t k_window_reserve = 4096;
+      s.evt_to_push_ms.reserve(k_window_reserve);
+      s.present_to_push_ms.reserve(k_window_reserve);
+      s.echo_age_ms.reserve(k_window_reserve);
+      s.fence_wait_ms.reserve(k_window_reserve);
+      s.present_to_fence_ms.reserve(k_window_reserve);
+    };
+    {
+      std::lock_guard lk {stats_mtx_};
+      reserve_window(window_);
+    }
+    uint64_t rate_dropped = 0;  ///< §PERF-1113：這個 10 s 視窗裡，半速時在複製之前就丟掉的張數（只有擷取執行緒在用）
+
     auto log_window = [&]() {
       const auto now = std::chrono::steady_clock::now();
       if (now - last_log_ < 10s) {
         return;
       }
       stats_t w;
+      stats_t fresh;
+      reserve_window(fresh);  // 配置在鎖外面
       {
         std::lock_guard lk {stats_mtx_};
         w = std::move(window_);
-        window_ = stats_t {};
+        window_ = std::move(fresh);
       }
+      const uint64_t rate_dropped_w = rate_dropped;
+      rate_dropped = 0;
       double e50, e95, p50, p95, a50, a95, f50, f95, pf50, pf95;
       const double fmax = w.fence_wait_ms.empty() ? 0.0 : *std::max_element(w.fence_wait_ms.begin(), w.fence_wait_ms.end());
       const double pfmax = w.present_to_fence_ms.empty() ? 0.0 : *std::max_element(w.present_to_fence_ms.begin(), w.present_to_fence_ms.end());
@@ -826,7 +858,9 @@ namespace platf::dxgi {
                       << " abandonOvl="sv << (health_pub.abandon_overload() ? 1 : 0)
                       << " latchHold="sv << (health_pub.latch_hold() ? 1 : 0)
                       << " predictHold="sv << (health_pub.predict_hold() ? 1 : 0)
-                      << " cadHold="sv << (health_pub.published() && health_.latch_hold_if_cadence() ? 1 : 0);
+                      << " cadHold="sv << (health_pub.published() && health_.latch_hold_if_cadence() ? 1 : 0)
+                      // §PERF-1113：行尾再加一欄。rateDrop＝半速時在複製之前就丟掉的張數（copied 不含它；全速恆為 0）
+                      << " rateDrop="sv << rate_dropped_w;
       last_log_ = now;
     };
 
@@ -1119,6 +1153,37 @@ namespace platf::dxgi {
       cs->fence_timeout_since = 0;
       const int64_t fence_qpc = platf::qpc_counter();  // fence 到值的時刻（fenceWait 的終點）
 
+      // 影像時間只換算一次：下面的提早丟判斷和交給 encoder 的 frame_timestamp 用同一個值（S1-01 修正後的換算）
+      const auto frame_ts = frame_timestamp_from_qpc(d.present_qpc);
+
+      // §PERF-1113：§VR-RATE-AUTO 半速時，編碼執行緒本來就會把一半的影像丟掉（rate_skip_image），但那是在整張複製、
+      // 交接、把它叫醒之後。這裡在複製之前用它發布的分頻與「上一張確定要編的影像時間」（video.h）套同一條規則
+      // （距上一張送出不到 (2·div−1)/2 個週期就丟；§REVIEW-1111 的時間判斷，不數張數）：會被丟的這一張只交還 slot。
+      // 發布值只會比編碼執行緒手上的舊、不會比它新，所以這裡丟的一定是它也會丟的；讀到舊值就照常複製交給它判斷。
+      // 全速（div ≤ 1）或沒有編碼執行緒在發布（selftest、探測）時這一段不會成立。
+      // 位置在等完 fence 之後：健康判定、過載旗標、回聲年齡照樣每一張都餵，和之前相同；少的只有複製與交接。
+      if (const int rate_div = ::video::vr_rate_pub_div.load(std::memory_order_relaxed); rate_div > 1 && client_frame_rate > 0) {
+        const int64_t last_sent_ns = ::video::vr_rate_pub_last_sent_ns.load(std::memory_order_relaxed);
+        const int64_t img_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(frame_ts.time_since_epoch()).count();
+        const int64_t cap_period_ns = 1'000'000'000ll / client_frame_rate;
+        if (last_sent_ns != 0 && img_ns > 0 && img_ns - last_sent_ns < cap_period_ns * (2 * (int64_t) rate_div - 1) / 2) {
+          signal_consumed(d.fence_value);  // 不複製，slot 立刻交還 driver
+          ++rate_dropped;
+          const int64_t drop_qpc = platf::qpc_counter();
+          feed(late ? vr::capture::outcome_e::late : vr::capture::outcome_e::on_time, d, observed, fence_qpc - evt_qpc, drop_qpc);
+          publish_health(drop_qpc);
+          if (kick_echo) {
+            if (const int64_t pub = cs->reader->last_echo_published_qpc(); pub != 0 && d.present_qpc > pub) {
+              vr::bridge::report_echo_age(cs->src->generation, d.present_qpc, d.present_qpc - pub);
+            }
+          }
+          if (!keepalive(false)) {
+            return capture_e::ok;
+          }
+          continue;
+        }
+      }
+
       std::shared_ptr<platf::img_t> img_base;
       if (!pull_free_image_cb(img_base)) {
         signal_consumed(d.fence_value);
@@ -1160,7 +1225,7 @@ namespace platf::dxgi {
       meta.frame_id = d.frame_id;
       meta.present_qpc = d.present_qpc;
       img->vr = meta;
-      img->frame_timestamp = frame_timestamp_from_qpc(d.present_qpc);  // S1-01 修正後的換算
+      img->frame_timestamp = frame_ts;  // S1-01 修正後的換算（§PERF-1113：上面已經換算過，同一個值）
 
       vripc_consume_status_t status {};
       {
@@ -1184,27 +1249,28 @@ namespace platf::dxgi {
 
       const int64_t push_qpc = platf::qpc_counter();
       int64_t echo_age_qpc = 0;  ///< 這一張的回聲年齡（0＝沒有對到姿態）
+      if (const int64_t pub = cs->reader->last_echo_published_qpc(); pub != 0 && d.present_qpc > pub) {
+        echo_age_qpc = d.present_qpc - pub;
+      }
+      const bool keep_going = push_captured_image_cb(std::move(img_base), true);
+      last_push_cb_qpc = push_qpc;
+      // §VR-FENCE-LATE：這個功能加的量測與健康判定全部放在交出影像之後——準時那條路徑在 push 之前只多讀一次時鐘
+      // （fence_qpc）。新的樣本另開一個鎖區段記（配置記憶體也在這裡，不在 push 之前）。
+      // §PERF-1113：evtToPush／presentToPush／echoAge 的樣本原本在 push 之前另一個鎖區段記，併到這裡——
+      // 數值在 push 之前就量好了（push_qpc、echo_age_qpc），只是寫進向量的動作挪到交出影像之後，少一次上鎖。
       {
         std::lock_guard lk {stats_mtx_};
         const double e = qpc_to_ms(push_qpc - evt_qpc);
         const double p = qpc_to_ms(push_qpc - d.present_qpc);
         window_.evt_to_push_ms.push_back(e);
         window_.present_to_push_ms.push_back(p);
-        if (const int64_t pub = cs->reader->last_echo_published_qpc(); pub != 0 && d.present_qpc > pub) {
-          echo_age_qpc = d.present_qpc - pub;
+        if (echo_age_qpc > 0) {
           window_.echo_age_ms.push_back(qpc_to_ms(echo_age_qpc));
         }
         if (stats_.evt_to_push_ms.size() < k_stats_samples_max) {
           stats_.evt_to_push_ms.push_back(e);
           stats_.present_to_push_ms.push_back(p);
         }
-      }
-      const bool keep_going = push_captured_image_cb(std::move(img_base), true);
-      last_push_cb_qpc = push_qpc;
-      // §VR-FENCE-LATE：這個功能加的量測與健康判定全部放在交出影像之後——準時那條路徑在 push 之前只多讀一次時鐘
-      // （fence_qpc）。新的樣本另開一個鎖區段記（配置記憶體也在這裡，不在 push 之前）。
-      {
-        std::lock_guard lk {stats_mtx_};
         const double fw = qpc_to_ms(fence_qpc - evt_qpc);
         const double pf = qpc_to_ms(fence_qpc - d.present_qpc);
         const bool over_period = period_qpc > 0 && fence_qpc - evt_qpc >= period_qpc;
@@ -1247,6 +1313,46 @@ namespace platf::dxgi {
       return false;
     }
     out = desc.AdapterLuid;
+    return true;
+  }
+
+  /**
+   * @brief vr_pick_adapter_luid() 的快取版：上一次成功選到之後 DXGI 的 adapter 列舉沒變過（IDXGIFactory1::IsCurrent）、
+   *        `adapter_name` 也沒改，就直接回上一次的 LUID。只給編排器閒置時每 60 秒的例行探測用——完整重選要對每張
+   *        硬體顯示卡建一次 D3D11 device，host 開著就是一天 1,440 次。PRECHECK、selftest、display_vr_t::init 不走這裡，
+   *        照舊完整重選。只快取成功的結果：選不出來（沒有候選、候選不只一張）時每次重選。
+   */
+  bool vr_pick_adapter_luid_cached(LUID &out, std::string &why) {
+    struct cache_t {
+      std::mutex mtx;  // 只保護這份快取，不和任何 display 物件共用
+      factory1_t factory;  // 只拿來問 IsCurrent()：在選擇之前建立，選擇期間的變動下一次也看得到
+      std::string adapter_name;  // 選的時候的 config::video.adapter_name
+      LUID luid {};
+      bool valid = false;
+    };
+    static cache_t cache;
+
+    std::lock_guard lk {cache.mtx};
+    if (cache.valid && cache.factory && cache.factory->IsCurrent() && cache.adapter_name == config::video.adapter_name) {
+      out = cache.luid;
+      return true;
+    }
+
+    cache.valid = false;
+    cache.factory.reset();
+    if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &cache.factory))) {
+      cache.factory.release();  // 建不出來就沒有東西可以問「變了沒」：這次照選、不存
+    }
+    LUID luid {};
+    if (!vr_pick_adapter_luid(luid, why)) {
+      return false;
+    }
+    out = luid;
+    if (cache.factory) {
+      cache.luid = luid;
+      cache.adapter_name = config::video.adapter_name;
+      cache.valid = true;
+    }
     return true;
   }
 

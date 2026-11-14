@@ -1336,4 +1336,25 @@ namespace platf {
       return false;
     }
   }
+
+  /**
+   * @brief §VR-PROBE-CACHE：VR 編碼器探測的快取要不要作廢（說明見 common.h）。
+   *        和 needs_encoder_reenumeration() 各留各的 factory：那一個被問過就換新，桌面探測靠它的變動訊號。
+   */
+  bool vr_probe_gpu_changed() {
+    static std::mutex vr_probe_state_lock;
+    auto lg = std::lock_guard(vr_probe_state_lock);
+
+    static dxgi::factory1_t factory;
+    if (factory && factory->IsCurrent()) {
+      return false;
+    }
+
+    // 先換新的 factory 再回報：呼叫端接著做的探測期間若又有變動，下一次問會看到
+    factory.reset();
+    if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1, (void **) &factory))) {
+      factory.release();
+    }
+    return true;
+  }
 }  // namespace platf

@@ -48,6 +48,9 @@ static jmethodID BridgeClSetMotionEventStateMethod;
 static jmethodID BridgeClSetControllerLEDMethod;
 static jmethodID BridgeClScHidFeatureRequestMethod;
 static jbyteArray DecodedFrameBuffer;
+// §PERF-1113：PyroWave 場次的影像資料由 native 直接從 bufferList 讀（thread-local 的 decode unit），
+// Java 那份 byte[] 沒人看，記下來好跳過每幀的整幀複製。只在 BridgeDrSetup 寫、解碼執行緒讀。
+static int DecoderIsPyroWave;
 static jshortArray DecodedAudioBuffer;
 
 void DetachThread(void* context) {
@@ -127,6 +130,8 @@ int BridgeDrSetup(int videoFormat, int width, int height, int redrawRate, void* 
         return err;
     }
 
+    DecoderIsPyroWave = (videoFormat & VIDEO_FORMAT_MASK_PYROWAVE) != 0;
+
     // Use a 32K frame buffer that will increase if needed
     DecodedFrameBuffer = (*env)->NewGlobalRef(env, (*env)->NewByteArray(env, 32768));
 
@@ -153,14 +158,46 @@ void BridgeDrCleanup(void) {
     (*env)->CallStaticVoidMethod(env, GlobalBridgeClass, BridgeDrCleanupMethod);
 }
 
+// §PERF-1113：DecodedFrameBuffer 不夠大時一次至少長 1.5 倍。原本只長到「剛好這一幀」，碼率往上爬
+// （ABR 升碼率、畫面變複雜）的過程會一再配新的大陣列、丟舊的。順便釋放 local ref：這條是 native
+// 附掛的執行緒，local ref 要到 detach 才會回收。
+static void EnsureDecodedFrameBufferCapacity(JNIEnv* env, int needed) {
+    jsize curLen = (*env)->GetArrayLength(env, DecodedFrameBuffer);
+    jsize newLen;
+    jbyteArray newArray;
+
+    if (curLen >= needed) {
+        return;
+    }
+
+    newLen = curLen + curLen / 2;
+    if (newLen < needed) {
+        newLen = needed;
+    }
+
+    newArray = (*env)->NewByteArray(env, newLen);
+    if (newArray == NULL && newLen != needed) {
+        // 1.5 倍配不到就退回原本「剛好這一幀」的大小
+        (*env)->ExceptionClear(env);
+        newArray = (*env)->NewByteArray(env, needed);
+    }
+
+    (*env)->DeleteGlobalRef(env, DecodedFrameBuffer);
+    DecodedFrameBuffer = (*env)->NewGlobalRef(env, newArray);
+    if (newArray != NULL) {
+        (*env)->DeleteLocalRef(env, newArray);
+    }
+}
+
 int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
     JNIEnv* env = GetThreadEnv();
     int ret;
 
     // Increase the size of our frame data buffer if our frame won't fit
-    if ((*env)->GetArrayLength(env, DecodedFrameBuffer) < decodeUnit->fullLength) {
-        (*env)->DeleteGlobalRef(env, DecodedFrameBuffer);
-        DecodedFrameBuffer = (*env)->NewGlobalRef(env, (*env)->NewByteArray(env, decodeUnit->fullLength));
+    // §PERF-1113：PyroWave 不用這份陣列裝影像資料（見下面 PICDATA 分支），不必跟著幀大小長大；
+    // 它若有非 PICDATA 的區段，在該分支依區段長度另外確保容量。
+    if (!DecoderIsPyroWave) {
+        EnsureDecodedFrameBufferCapacity(env, decodeUnit->fullLength);
     }
 
     PLENTRY currentEntry;
@@ -173,6 +210,9 @@ int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
         if (currentEntry->bufferType != BUFFER_TYPE_PICDATA) {
             // Use the beginning of the buffer each time since this is a separate
             // invocation of the decoder each time.
+            if (DecoderIsPyroWave) {
+                EnsureDecodedFrameBufferCapacity(env, currentEntry->length);
+            }
             (*env)->SetByteArrayRegion(env, DecodedFrameBuffer, 0, currentEntry->length, (jbyte*)currentEntry->data);
 
             PyroWaveAndroid_SetCurrentDecodeUnit(decodeUnit);
@@ -191,7 +231,11 @@ int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
             }
         }
         else {
-            (*env)->SetByteArrayRegion(env, DecodedFrameBuffer, offset, currentEntry->length, (jbyte*)currentEntry->data);
+            // §PERF-1113：PyroWave 的 pyroWaveDecodeAndRender 走 PyroWaveAndroid_SetCurrentDecodeUnit 設好的
+            // decode unit，不讀 Java 陣列；跳過這次複製（每幀數百 KB），只累計長度給 Java 端。
+            if (!DecoderIsPyroWave) {
+                (*env)->SetByteArrayRegion(env, DecodedFrameBuffer, offset, currentEntry->length, (jbyte*)currentEntry->data);
+            }
             offset += currentEntry->length;
         }
 

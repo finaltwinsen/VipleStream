@@ -263,7 +263,7 @@
     "max_bitrate": "Maximal bithastighet",
     "max_bitrate_desc": "Maximal bithastighet (i Kbps) som VipleStream-Server kommer att koda strömmen på. Om satt till 0, kommer den alltid att använda den bithastighet som VipleStream begärt.",
     "minimum_fps_target": "Minsta FPS mål",
-    "minimum_fps_target_desc": "Den lägsta effektiva FPS en ström kan nå. Värdet 0 behandlas som ungefär hälften av strömmens FPS. En inställning på 20 rekommenderas om du strömmar 24 eller 30 fps innehåll.",
+    "minimum_fps_target_desc": "Den lägsta effektiva FPS en ström kan nå. Värdet 0 använder den FPS som klienten begär (hela, inte hälften). En inställning på 20 rekommenderas om du strömmar 24 eller 30 fps innehåll.",
     "min_log_level": "Loggnivå",
     "min_log_level_0": "Verbose",
     "min_log_level_1": "Debug",

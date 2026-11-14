@@ -7,6 +7,7 @@
 #include <charconv>
 #include <cstdint>
 #include <fstream>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
@@ -67,7 +68,9 @@ namespace platf::config_acl {
     };
 
     // prepare_log_file 的結果：它在 logging::init() 之前執行、不能寫 log，
-    // 交給 tighten_config_dir 計入統計（兩者都在啟動時的主執行緒，不需要鎖）
+    // 交給 tighten_config_dir 計入統計。
+    // §PERF-1113-R2（A14）：log 執行中輪替時，prepare_log_file 會在 log sink 的執行緒上再被呼叫，所以要鎖。
+    std::mutex g_prepared_mtx;
     std::wstring g_prepared_path;  // 小寫後的完整路徑
     bool g_prepared_changed = false;
 
@@ -498,8 +501,15 @@ namespace platf::config_acl {
     }
 
     if (full) {
-      g_prepared_path = ascii_lower(path);
-      g_prepared_changed = changed;
+      auto lowered = ascii_lower(path);
+      std::lock_guard lk {g_prepared_mtx};
+      if (lowered == g_prepared_path) {
+        // 同一個檔第二次進來（server 模式：啟動時先收緊舊檔，輪替後再為新檔呼叫一次）：有改過就算改過
+        g_prepared_changed = g_prepared_changed || changed;
+      } else {
+        g_prepared_path = std::move(lowered);
+        g_prepared_changed = changed;
+      }
     }
   }
 
@@ -537,6 +547,15 @@ namespace platf::config_acl {
       state_names.push_back(ascii_lower(file.filename().native()));
     }
 
+    // prepare_log_file 的結果先複製出來（它之後可能在 log sink 的執行緒上再被呼叫）
+    std::wstring prepared_path;
+    bool prepared_changed = false;
+    {
+      std::lock_guard lk {g_prepared_mtx};
+      prepared_path = g_prepared_path;
+      prepared_changed = g_prepared_changed;
+    }
+
     stats_t stats;
     const bool listed = for_each_entry(dir, [&](std::wstring_view name, DWORD attrs) {
       if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
@@ -553,7 +572,7 @@ namespace platf::config_acl {
       }
       const std::wstring path = dir + L"\\" + std::wstring {name};
       auto result = secure_existing_file(path, target);
-      if (result.outcome == outcome_e::compliant && g_prepared_changed && ascii_lower(path) == g_prepared_path) {
+      if (result.outcome == outcome_e::compliant && prepared_changed && ascii_lower(path) == prepared_path) {
         // prepare_log_file 在 logging::init() 之前已經收緊（或以目標 SD 建立）的 log 檔
         result.outcome = outcome_e::tightened;
       }

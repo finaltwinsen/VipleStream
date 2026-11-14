@@ -880,6 +880,7 @@ private:
         std::vector<int32_t> slack10s;      // 10 s：每張新影像的 slack（GPU 做完 → latch）
         std::vector<uint32_t> dec1s;        // 10 s：每秒的解碼時間中位數（VrDecodeTiming；那一秒沒有樣本就沒有）
         std::vector<uint32_t> tailUs;       // 10 s：上一格的 xrEndFrame 返回 → 這一格呼叫 xrWaitFrame（兩格之間 frame thread 花多久）
+        std::vector<uint32_t> latch2endUs;  // 10 s：§PERF-1113（量測）挑影像 → 呼叫 xrEndFrame
         uint32_t beginCallMaxUs = 0;        // 10 s：xrBeginFrame 這個呼叫的最大值
         uint32_t waitShort = 0;             // 10 s：相鄰兩次 xrWaitFrame 返回的間隔不到半格的次數
         // §VR-LOGSPLIT（量測）：上一次印 10 s 行時，xrEndFrame 之後各組花了多久（µs）：ldiag＝pcvrLatchDiagLog、
@@ -899,7 +900,8 @@ private:
         // 那一段不可以配置記憶體
         void reserveWindow()
         {
-            for (std::vector<uint32_t>* v : {&wakePhaseUs, &latchLeadUs, &endLeadUs, &spanUs, &endCallUs, &aheadUs, &render10s, &tailUs}) {
+            for (std::vector<uint32_t>* v : {&wakePhaseUs, &latchLeadUs, &endLeadUs, &spanUs, &endCallUs, &aheadUs, &render10s, &tailUs,
+                                             &latch2endUs}) {
                 v->reserve(2048);
             }
             slack10s.reserve(2048);

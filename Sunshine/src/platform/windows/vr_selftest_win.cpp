@@ -2470,7 +2470,7 @@ namespace vr::selftest::platform {
     std::pair<int, bool> vr_probe_once() {
       ::video::vr_probe_scope scope;
       const auto shape = t1_shape();
-      const int rc = ::video::probe_encoders(1, &shape);
+      const int rc = ::video::probe_encoders(1, &shape, false);  // 要測的是探測本身：不用 §VR-PROBE-CACHE
       return {rc, ::video::last_encoder_probe_supported_vr_intra_refresh};
     }
 
@@ -2980,7 +2980,7 @@ namespace vr::selftest::platform {
       {
         ::video::vr_probe_scope scope;
         const auto shape = t1_shape();
-        prc = ::video::probe_encoders(1, &shape);
+        prc = ::video::probe_encoders(1, &shape, false);  // 同上：每個出口都要真的探測一次
         // 出口：沒有 handoff_to_session() 就離開（scope 解構 → 還原桌面探測狀態）
       }
       const auto a = fetch_serverinfo_xml(err);

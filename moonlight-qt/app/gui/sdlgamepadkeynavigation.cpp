@@ -24,6 +24,14 @@ void SdlGamepadKeyNavigation::noteExternalScroll()
     s_ExternalScrollTicks = SDL_GetTicks();
 }
 
+// §PERF-1113 A31：見標頭的 setSuppressed()
+static bool s_Suppressed = false;
+
+void SdlGamepadKeyNavigation::setSuppressed(bool suppressed)
+{
+    s_Suppressed = suppressed;
+}
+
 #define AXIS_NAVIGATION_REPEAT_DELAY 150
 
 // 左搖桿推過這個值才算一次上下左右。原本是 30000（滿量程 32767 的 92%），要幾乎直直推到底才會觸發；
@@ -42,6 +50,8 @@ void SdlGamepadKeyNavigation::noteExternalScroll()
 #define SCROLL_MAX_PAGES_PER_SEC 4.0
 #define SCROLL_POLL_MS 33
 #define SCROLL_BUTTON_PAGES 0.8            // LB／RB 一次捲多少
+// §PERF-1113：沒有手把時的輪詢間隔（只用來發現新接上的手把；見 pollIntervalMs）
+#define NO_GAMEPAD_POLL_MS 500
 
 SdlGamepadKeyNavigation::SdlGamepadKeyNavigation(StreamingPreferences* prefs)
     : m_Prefs(prefs),
@@ -71,9 +81,20 @@ void SdlGamepadKeyNavigation::enable()
         return;
     }
 
+    // §PERF-1113 A31：沒有可以導覽的視窗（見 setSuppressed）。m_Enabled 維持 false，其餘函式都是安全的 no-op
+    if (s_Suppressed) {
+        static bool s_SuppressLogged = false;
+        if (!s_SuppressLogged) {
+            s_SuppressLogged = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-UI-NAV] gamepad navigation not started: this process has no window to navigate");
+        }
+        return;
+    }
+
     // §HID-PROBE：有 HID 裝置卡死時，下面的 SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER)
-    // 會在 hidapi 列舉（HidD_GetProductString）永久阻塞主執行緒。GUI 路徑在這之前已先
-    // 經過 getUnmappedGamepads；CLI stream/quit 路徑（runConfigChecks=false）則最先到這裡。
+    // 會在 hidapi 列舉（HidD_GetProductString）永久阻塞主執行緒。§PERF-1113 A31 之後 GUI 路徑也最先到這裡
+    // （AppContent 先 enable() 再 startAsyncLoad → getUnmappedGamepads）；CLI stream/quit 路徑（runConfigChecks=false）一樣。
     // 每次從 UI 回來重新啟用前先 refresh（正常機器 ~ms）：涵蓋「串流中才卡死」與
     // 「使用者已重插」兩種狀態改變，重插後不必重啟程式。
     // m_Enabled 維持 false → disable() / updateTimerState() / getConnectedGamepads() 都是安全的 no-op。
@@ -303,6 +324,10 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-UI-NAV] gamepad added: %s (now %d)",
                                 name != nullptr ? name : "(unnamed)", (int)m_Gamepads.size());
+                    // §PERF-1113：第一支手把接上，從慢速（等手把）換回正常的輪詢間隔
+                    if (m_PollingTimer->interval() != pollIntervalMs()) {
+                        m_PollingTimer->setInterval(pollIntervalMs());
+                    }
                 }
                 else {
                     // We already have this game controller open
@@ -435,6 +460,11 @@ void SdlGamepadKeyNavigation::updateTimerState()
 
 int SdlGamepadKeyNavigation::pollIntervalMs() const
 {
+    // §PERF-1113：沒有任何手把開著時，輪詢只剩「等手把接上」（SDL_CONTROLLERDEVICEADDED）這一個用途，
+    // 不必每 100／33 ms 醒一次；手把接上後（onPollingTimerFired 的 ADDED 分支）馬上換回正常間隔
+    if (m_Gamepads.isEmpty()) {
+        return NO_GAMEPAD_POLL_MS;
+    }
     // 捲動要連續，捲動模式／Tab 導覽模式輪詢快一點；其他時候維持 100 ms
     return (m_ScrollMode || m_UiNavMode) ? SCROLL_POLL_MS : 100;
 }
@@ -514,8 +544,9 @@ int SdlGamepadKeyNavigation::getConnectedGamepads()
     // §HID-PROBE：enable() 被閘控（或 SDL init 失敗）時 m_Enabled 仍為 false、joystick 子系統
     // 沒開，直接回 0（AppView/PcView/SettingsView 的 StackView.onActivated 都會呼叫）。
     // 正常路徑維持原本的 Q_ASSERT 語意：未 enable 就呼叫仍是 bug。
+    // §PERF-1113 A31：setSuppressed(true) 的行程同樣回 0（enable() 是刻意不做事）
     if (!m_Enabled) {
-        Q_ASSERT(HidProbe::anyUnresponsive() || s_InitFailed);
+        Q_ASSERT(HidProbe::anyUnresponsive() || s_InitFailed || s_Suppressed);
         return 0;
     }
 

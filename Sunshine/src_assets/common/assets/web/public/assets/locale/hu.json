@@ -263,7 +263,7 @@
     "max_bitrate": "Maximális bitráta",
     "max_bitrate_desc": "A maximális bitráta (Kbps-ben), amit a VipleStream-Server a stream kódolásához használ. Ha 0-ra állítod, mindig a VipleStream által kért bitrátát használja.",
     "minimum_fps_target": "Minimális FPS cél",
-    "minimum_fps_target_desc": "A legalacsonyabb effektív FPS, amit egy stream elérhet. A 0 érték körülbelül a stream FPS-ének felét jelenti. A 20-as beállítás ajánlott, ha 24- vagy 30fps tartalmakat streamelsz.",
+    "minimum_fps_target_desc": "A legalacsonyabb effektív FPS, amit egy stream elérhet. A 0 érték a kliens által kért FPS-t jelenti (a teljeset, nem a felét). A 20-as beállítás ajánlott, ha 24- vagy 30fps tartalmakat streamelsz.",
     "min_log_level": "Napló szint",
     "min_log_level_0": "Részletes",
     "min_log_level_1": "Hibakeresés",

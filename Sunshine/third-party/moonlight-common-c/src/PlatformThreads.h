@@ -68,6 +68,8 @@ int PltCreateConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex);
 void PltDeleteConditionVariable(PLT_COND* cond);
 void PltSignalConditionVariable(PLT_COND* cond);
 void PltWaitForConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex);
+// §PERF-1113：帶逾時的等待；被喚醒回傳 true、逾時回傳 false（可能假喚醒，呼叫端重新檢查條件）
+bool PltWaitForConditionVariableTimed(PLT_COND* cond, PLT_MUTEX* mutex, int timeoutMs);
 
 void PltSleepMs(int ms);
 void PltSleepMsInterruptible(PLT_THREAD* thread, int ms);

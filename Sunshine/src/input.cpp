@@ -1419,6 +1419,20 @@ namespace input {
     int notify_fail_streak = 0;
     constexpr int kNotifyFailCloseAt = 50;
 
+    // 逐筆 op 行的配額（只在本執行緒讀寫）。client 沒有實體 SC 時 Steam 等不到回應，對虛擬裝置的 SET_FEATURE 每秒
+    // 重送 5～24 筆、整場不停，逐筆印佔 VR 中 host log 的三到八成。每次 reconnect 之後前 kFeatureLogBudget 筆照印
+    // （Steam 重跑的握手都在這裡，G4 對帳用），之後只每 1000 筆印一行累計——筆數本來就在 10 秒的 write stats
+    // （featureEvtsS）。client 有實體 SC（有回應交付、或最近有真實 report 注入）時握手是真的，補滿配額照印。
+    constexpr int kFeatureLogBudget = 32;
+    int feature_log_left = kFeatureLogBudget;
+    unsigned long feature_log_muted = 0;
+    unsigned long feature_responses_seen = 0;
+    {
+      VipleSCHidStats st {};
+      VipleSCHidGetStats(&st);
+      feature_responses_seen = st.responsesDelivered;  // process 累計：只看之後有沒有再動
+    }
+
     // §SC-HID WP2.3：每 10 s 有變才印一行 write stats——本 session 差值
     // （okS/skippedS/failedS/featureEvtsS/responsesS + keepalive）+ process 累計
     // + driver Feature 0x05 統計。判讀：okS − keepalive ≈ 本 session 真實注入數；
@@ -1469,9 +1483,34 @@ namespace input {
           if (r == 0) break;
           inp->feedback_queue->raise(
               platf::gamepad_feedback_msg_t::make_sc_hid_feature_request(reportId, op, seq, query, (uint8_t)qlen));
-          BOOST_LOG(info) << "[SC-HID] Poll-thread: Steam feature → client: op=" << (unsigned)op
-                          << " reportId=0x" << util::hex(reportId).to_string_view()
-                          << " seq=" << (unsigned)seq;
+          {
+            VipleSCHidStats st {};
+            VipleSCHidGetStats(&st);
+            const int64_t last_real_us = inp->sc_last_real_inject_us.load(std::memory_order_relaxed);
+            const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (st.responsesDelivered != feature_responses_seen || (last_real_us != 0 && now_us - last_real_us < 5000000)) {
+              feature_responses_seen = st.responsesDelivered;
+              feature_log_left = kFeatureLogBudget;
+            }
+          }
+          if (feature_log_left > 0) {
+            BOOST_LOG(info) << "[SC-HID] Poll-thread: Steam feature → client: op=" << (unsigned)op
+                            << " reportId=0x" << util::hex(reportId).to_string_view()
+                            << " seq=" << (unsigned)seq;
+            if (--feature_log_left == 0) {
+              BOOST_LOG(info) << "[SC-HID] Poll-thread: per-op lines muted after " << kFeatureLogBudget
+                              << " ops with no feature response or input report from the client"
+                                 " (totals stay in write stats: featureEvtsS)";
+            }
+          }
+          else if (++feature_log_muted % 1000 == 0) {
+            // 字樣刻意不含「Steam feature → client」：那是和 Feature response delivered 逐筆配對用的 grep 樣式
+            BOOST_LOG(info) << "[SC-HID] Poll-thread: " << feature_log_muted
+                            << " Steam feature ops forwarded with per-op lines muted since the last reconnect (last op="
+                            << (unsigned)op << " reportId=0x" << util::hex(reportId).to_string_view()
+                            << " seq=" << (unsigned)seq << ")";
+          }
         }
         if (notify_fail_streak >= kNotifyFailCloseAt) {
           BOOST_LOG(warning) << "[SC-HID] Poll-thread: GET_FEATURE(0x03) failed " << notify_fail_streak
@@ -1543,6 +1582,10 @@ namespace input {
         if (poll_h) { VipleSCHidClose(poll_h); poll_h = nullptr; }
         int rc = VipleSCHidForceReconnect();
         BOOST_LOG(info) << "[SC-HID] Device reconnect result=" << rc;
+        // 逐筆 op 行的配額從這裡重算：reconnect 前的 500 ms 就有十幾到三十幾筆，會把配額用完，
+        // 而要對帳的握手（Steam 重新列舉後重跑 GetControllerInfo）全在這之後。
+        feature_log_left = kFeatureLogBudget;
+        feature_log_muted = 0;
         // §SC-REOPEN-BACKOFF-FIX (review batch 2)：reconnect 後重置退避，
         // 重啟快速重試窗口——PnP 重新列舉通常 <500ms 完成，poll handle
         // 要能立刻接回。

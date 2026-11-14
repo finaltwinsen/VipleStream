@@ -63,6 +63,17 @@ namespace vr::multilink {
     bool repair_rtt = false;
     /// §VR-MULTILINK-HOTADD（vr_multilink_hotadd）：client 也支援時，允許同 id 重綁與死亡 slot 回收
     bool hotadd = false;
+    /// §PERF-1113（審查 05 第 1 項）：影像批次改成一次 WSASendMsg＋UDP_SEND_MSG_SIZE（USO）交給系統，不再逐包 send_to。
+    /// 預設 false＝行為和之前完全一樣（逐包）；線上的封包位元組不變。只有 Windows 有這條路，其他平台忽略這個旗標。
+    /// 設定項是 vr_multilink_uso（預設 disabled）：還沒在實機上對照過（飽和偵測、dropBlock、頭盔端幀到齊跨度）。
+    bool video_uso = false;
+    /// §VR-PACE（vr_pace_spread_pct，2026-11-13）：把每一幀的封包平均攤開在「串流幀週期 × 這個百分比」的時間內送，
+    /// 不再一次送完。0＝不攤開（預設，行為和之前相同）。外出逐封包量測（經 VPN，線路每秒數次、每次幾毫秒的全斷）：
+    /// 一次送完的整幀常整個落在中斷裡；攤開之後每次中斷只損失一小部分，FEC 補得回來（72 fps／12 Mbps：每 10 秒
+    /// 救不回 27 次 → 攤開 13 ms 時 3 次）。代價是幀尾晚這麼久才到齊；144 fps 的幀週期太短，攤開幫助不大。
+    /// 排程以每一幀自己入列的時刻為起點（晚開始就連續送出追上，不往後累積）；封包間隔最多 1 ms、不到 20 µs 就不排。
+    /// 不攤開的批次：探測中的連線（頭盔靠整批到齊的速度量鏈路）、always 模式下只留四分之一期限的連線、補包。
+    int pace_spread_pct = 0;
     fault_t fault;
   };
 
@@ -108,8 +119,19 @@ namespace vr::multilink {
     /**
      * @brief 影像執行緒：一批大小相同、連續存放的封包。複製進每條可用連線的佇列後立刻返回。
      * @param meta 這一批屬於哪一幀、哪個 FEC block 的哪幾個 shard（§VR-LINK-REPAIR 的封包倉用；nullptr＝不存）
+     * @param frame_pkts §VR-PACE：這一幀總共大約幾個封包（data＋parity，所有 FEC block 合計；0＝不知道，不攤開）
+     * @param frame_end §PERF-1113：這一批是這一幀的最後一批（要有 meta 才有幀號）。送出執行緒把它整批送完的時刻記下來，
+     *        給 frame_sent_us() 查
      */
-    void send_video(const uint8_t *pkts, size_t pkt_size, size_t count, const video_meta_t *meta = nullptr);
+    void send_video(const uint8_t *pkts, size_t pkt_size, size_t count, const video_meta_t *meta = nullptr, bool frame_end = false, uint32_t frame_pkts = 0);
+
+    /**
+     * @brief §PERF-1113（審查 05 第 8 項）：這一幀的最後一批「真正交給系統送出」的時刻（steady_clock 的 µs；多條連線取最早
+     *        送完的那一條）。send_video 返回時封包只是進了佇列，[VIPLE-VR-LAT10] 的送出段要用這個才含佇列與逐包送出的時間。
+     *        任何執行緒。
+     * @return 0＝查不到（最後一批沒有整批送完、每條連線都沒送這一幀，或已被後面的幀蓋掉——每條連線只留最近 256 幀）
+     */
+    int64_t frame_sent_us(uint32_t frame, bool *paced = nullptr) const;
 
     /// on_nack() 的結果（呼叫端拿去記 ABR 的帳）
     struct nack_result_t {
@@ -142,6 +164,12 @@ namespace vr::multilink {
     bool any_alive() const;
     /// §VR-RATE-AUTO：影像批次的期限（補包期限跟著它走）。串流中途改送出週期時呼叫；任何執行緒
     void set_video_max_age(std::chrono::microseconds age);
+    /// 目前的影像批次期限（µs；兩個串流幀週期）。任何執行緒
+    int64_t video_max_age_us() const;
+    /// §VR-PACE：改攤開的比例（0～95；0＝一次送完）。任何執行緒；下一幀起生效
+    void set_pace_spread_pct(int pct);
+    /// §VR-PACE：目前攤開的比例（0＝沒開）。任何執行緒
+    int pace_spread_pct() const;
 
     /// §VR-ABR-FAST（2026-10-30）：現在活著的連線數（定義同 any_alive）。任何執行緒
     int alive_count() const;

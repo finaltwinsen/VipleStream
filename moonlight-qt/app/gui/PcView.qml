@@ -8,6 +8,7 @@ import ComputerManager 1.0
 import StreamingPreferences 1.0
 import SystemProperties 1.0
 import SdlGamepadKeyNavigation 1.0
+import VrLauncher 1.0
 
 CenteredGridView {
     property ComputerModel computerModel : createModel()
@@ -304,6 +305,7 @@ CenteredGridView {
             // Small lime live-pip top-right above the tape — also wide-only
             // since on narrow there's no tape to anchor against.
             Rectangle {
+                id: heroLivePip
                 visible: heroBanner.wide
                 anchors.right: parent.right
                 anchors.top: parent.top
@@ -312,6 +314,10 @@ CenteredGridView {
                 width: 12; height: 12; radius: 2
                 color: "#D4FF3A"
                 SequentialAnimation on opacity {
+                    // §PERF-1113：橫幅預設（DV_SAFE）是隱藏的，這個頁面又一直在 StackView 最底層；動畫不看可見與否，
+                    // 每個 tick 都改 opacity、要求重畫（頭盔 VR 介面＝每秒 30 張重畫＋讀回＋上傳）。只在真的看得到時跑
+                    // （visible 讀到的是含父項的有效可見）；頭盔 VR 介面上一律不跑，理由同 §REVIEW-1111 的 BusyIndicator
+                    running: heroLivePip.visible && !VrLauncher.shellActive
                     loops: Animation.Infinite
                     NumberAnimation { from: 1.0; to: 0.35; duration: 900 }
                     NumberAnimation { from: 0.35; to: 1.0; duration: 900 }
@@ -566,7 +572,9 @@ CenteredGridView {
 
         Loader {
             id: pcContextMenuLoader
-            asynchronous: true
+            // §PERF-1113：選單用到才建（理由同 AppView.qml 的 appContextMenuLoader），由 openContextMenu() 第一次
+            // 呼叫時建。不可加回 asynchronous（active 設好當下 item 就要在），開過就留著、不在關閉時卸載
+            active: false
             sourceComponent: NavigableMenu {
                 id: pcContextMenu
                 initiator: pcContextMenuLoader.parent
@@ -692,19 +700,29 @@ CenteredGridView {
                 }
             } else if (!model.online) {
                 // Using open() here because it may be activated by keyboard
-                pcContextMenu.open()
+                openContextMenu(false)
             }
         }
 
-        onPressAndHold: {
-            // popup() ensures the menu appears under the mouse cursor
-            if (pcContextMenu.popup) {
+        // §PERF-1113：右鍵選單用到才建（見上方 pcContextMenuLoader），所有開啟點都要走這裡。
+        // atCursor：滑鼠／觸控開的出現在游標下；鍵盤／手把開的貼著這一格
+        function openContextMenu(atCursor) {
+            pcContextMenuLoader.active = true
+            if (!pcContextMenu) {
+                return
+            }
+            if (atCursor && pcContextMenu.popup) {
+                // popup() ensures the menu appears under the mouse cursor
                 pcContextMenu.popup()
             }
             else {
                 // Qt 5.9 doesn't have popup()
                 pcContextMenu.open()
             }
+        }
+
+        onPressAndHold: {
+            openContextMenu(true)
         }
 
         MouseArea {
@@ -718,7 +736,7 @@ CenteredGridView {
         Keys.onMenuPressed: {
             // We must use open() here so the menu is positioned on
             // the ItemDelegate and not where the mouse cursor is
-            pcContextMenu.open()
+            openContextMenu(false)
         }
 
         Keys.onDeletePressed: {
@@ -833,9 +851,12 @@ CenteredGridView {
             RowLayout {
                 spacing: 6
                 Rectangle {
+                    id: pairWaitPip
                     width: 6; height: 6; radius: 1
                     color: "#D4FF3A"
                     SequentialAnimation on opacity {
+                        // §PERF-1113：對話框關著時不跑（同上方橫幅的小方塊）
+                        running: pairWaitPip.visible
                         loops: Animation.Infinite
                         NumberAnimation { from: 1.0; to: 0.35; duration: 800 }
                         NumberAnimation { from: 0.35; to: 1.0; duration: 800 }

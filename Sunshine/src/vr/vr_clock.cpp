@@ -133,8 +133,12 @@ namespace vr::clk {
     }
     if (enet_rtt_ms >= 0) {
       out.src = rtt_src_e::enet;
-      // GetTickCount 15/16 ms 量化：LAN 上 0/15/16 只是雜訊，直接當 0（scout F B2）
-      out.rtt_ns = enet_rtt_ms < kEnetQuantMs ? 0 : std::min(enet_rtt_ms, kRttMaxNs / 1'000'000) * 1'000'000;
+      // GetTickCount 15/16 ms 量化：LAN 上的小值只是雜訊，當 0（scout F B2）。§VR-CLK-RTT-CONT：8～16 ms 之間線性接上，
+      // 不可以一刀切（見 vr_clock.h 的 kEnetQuantMs）
+      const int64_t eff_ms = enet_rtt_ms >= kEnetQuantMs ? enet_rtt_ms :
+                             enet_rtt_ms <= kEnetZeroMs ? 0 :
+                                                          (enet_rtt_ms - kEnetZeroMs) * kEnetQuantMs / (kEnetQuantMs - kEnetZeroMs);
+      out.rtt_ns = std::min(eff_ms, kRttMaxNs / 1'000'000) * 1'000'000;
       return out;
     }
     return out;
@@ -335,6 +339,10 @@ namespace vr::clk {
     if (have_now_ && now < last_now_) {
       now = last_now_;
     }
+    if (have_now_ && now - last_now_ > kGapNs) {
+      gap_end_valid_ = true;  // §VR-CLK-POSTGAP：斷訊剛結束
+      gap_end_ns_ = now;
+    }
     have_now_ = true;
     last_now_ = now;
 
@@ -404,7 +412,9 @@ namespace vr::clk {
       const int64_t dt = std::min(now - last_apply_, (int64_t) 3600 * kNsPerSec);
       applied_ = e.proj(applied_, last_apply_, now);
       const int64_t diff = sat_sub(raw, applied_);
-      if (diff > kStepNs || diff < -kStepNs) {
+      if (diff > kStepNs && gap_end_valid_ && now - gap_end_ns_ < kPostGapHoldNs) {
+        // §VR-CLK-POSTGAP：斷訊剛結束、往上的大差距——先不信（見 vr_clock.h），留著照 skew 外插的值
+      } else if (diff > kStepNs || diff < -kStepNs) {
         res.step = true;
         res.step_ns = diff;
         ++steps_;
@@ -769,7 +779,9 @@ namespace vr::clk {
       };
       check(select_rtt(5 * kMs, 30), rtt_src_e::quic, 5 * kMs);  // QUIC 優先
       check(select_rtt(0, 30), rtt_src_e::enet, 30 * kMs);  // rtt_min 0 = 還沒有樣本
-      check(select_rtt(-1, 15), rtt_src_e::enet, 0);  // < 16 ms 當 0
+      check(select_rtt(-1, 8), rtt_src_e::enet, 0);  // ≤ 8 ms 當 0
+      check(select_rtt(-1, 12), rtt_src_e::enet, 8 * kMs);  // 8～16 ms 線性接上（§VR-CLK-RTT-CONT）
+      check(select_rtt(-1, 15), rtt_src_e::enet, 14 * kMs);
       check(select_rtt(-1, 16), rtt_src_e::enet, 16 * kMs);
       check(select_rtt(-1, 0), rtt_src_e::enet, 0);
       check(select_rtt(-1, -1), rtt_src_e::none, 0);
@@ -822,10 +834,10 @@ namespace vr::clk {
         c.quic_rtt_ns = 0;
         c.enet_rtt_ms = seq[(t_rel / (500 * kMs)) % 3];
       });
-      // 15 → 0，10 s 最小值濾波後固定用 0：offset 偏 +RTT/2 = +10 ms（粗後備的已知偏差），但要穩定
+      // 15 → 14（§VR-CLK-RTT-CONT），10 s 最小值濾波後固定用 14：offset 偏「單程 10 ms − 14/2」= +3 ms（粗後備的已知偏差），但要穩定
       const double bias = mean_err(o, 30 * kSec, cfg.duration_ns);
-      const int64_t lo = 10 * kMs - kErrMaxNs;
-      const int64_t hi = 10 * kMs + kErrMaxNs;
+      const int64_t lo = 3 * kMs - kErrMaxNs;
+      const int64_t hi = 3 * kMs + kErrMaxNs;
       int64_t worst = 0;
       for (const auto &r : o.recs) {
         if (r.t_rel >= 30 * kSec && (r.err_ns < lo || r.err_ns > hi)) {
@@ -834,8 +846,35 @@ namespace vr::clk {
       }
       selftest_case_t c;
       c.name = "clk.rtt-enet-quantized";
-      c.pass = worst == 0 && o.st.steps == 0 && o.st.rtt_src == rtt_src_e::enet && o.st.rtt_ns == 0;
-      c.detail = std::format("bias={:.1f}us expect=10000us+-300 (30-60s) rtt={}us {}", us((int64_t) bias), o.st.rtt_ns / 1000, common_detail(o));
+      c.pass = worst == 0 && o.st.steps == 0 && o.st.rtt_src == rtt_src_e::enet && o.st.rtt_ns == 14 * kMs;
+      c.detail = std::format("bias={:.1f}us expect=3000us+-300 (30-60s) rtt={}us {}", us((int64_t) bias), o.st.rtt_ns / 1000, common_detail(o));
+      return c;
+    }
+
+    selftest_case_t case_rtt_enet_dips() {
+      sim_cfg_t cfg;
+      cfg.seed = 14;
+      cfg.d_min_ns = 9 * kMs;  // 真實 RTT 18 ms：ENet 平常回報 18，偶爾有一筆掉到門檻（16）以下——外出經 VPN 的實況
+      const auto o = run_sim(cfg, [](int64_t t_rel, sim_ctl_t &c) {
+        c.quic_rtt_ns = 0;
+        const int64_t s = t_rel / kSec;
+        c.enet_rtt_ms = ((s == 20 || s == 45) && t_rel % kSec < 100 * kMs) ? 15 : 18;
+      });
+      // 原本每次掉到門檻以下，10 s 最小值就變 0、十秒後回到 18，扣掉的 RTT/2 差 9 ms，超過 5 ms 就一次跳（所有姿態的時間標記
+      // 一起移）。§VR-CLK-RTT-CONT 之後 15 → 14：扣掉的那一半只差 2 ms——不可以有 step，相隔 1 s 的 offset 變化不超過 2 ms＋雜訊
+      int64_t worst = 0;
+      const std::size_t per_sec = (std::size_t) (2 * cfg.hz);
+      for (std::size_t i = 0; i + per_sec < o.recs.size(); ++i) {
+        if (o.recs[i].t_rel < 5 * kSec || o.recs[i].outlier || o.recs[i + per_sec].outlier) {
+          continue;
+        }
+        const int64_t dv = o.recs[i + per_sec].err_ns - o.recs[i].err_ns;
+        worst = std::max(worst, dv < 0 ? -dv : dv);
+      }
+      selftest_case_t c;
+      c.name = "clk.rtt-enet-dips";
+      c.pass = o.st.steps == 0 && worst < 2'400'000 && o.st.rtt_src == rtt_src_e::enet;
+      c.detail = std::format("maxOffsetChangePerSec={:.1f}us (limit 2400us, steps=0) rttMin={}us {}", us(worst), o.st.rtt_ns / 1000, common_detail(o));
       return c;
     }
 
@@ -937,6 +976,34 @@ namespace vr::clk {
       c.name = "clk.gap";
       c.pass = o.st.steps == 0 && err < kErrMaxNs;
       c.detail = std::format("offsetErrEnd={:.1f}us (limit 300us, steps=0) {}", us(err), common_detail(o));
+      return c;
+    }
+
+    selftest_case_t case_gap_burst() {
+      sim_cfg_t cfg;
+      cfg.seed = 52;
+      cfg.duration_ns = 40 * kSec;
+      const auto o = run_sim(cfg, [](int64_t t_rel, sim_ctl_t &c) {
+        // 20–23 s 斷訊；恢復後前 200 ms 到的是積在路上的樣本（多排了 15 ms），之後恢復正常
+        if (t_rel >= 20 * kSec && t_rel < 23 * kSec) {
+          c.send = false;
+        } else if (t_rel >= 23 * kSec && t_rel < 23 * kSec + 200 * kMs) {
+          c.extra_up_ns = 15 * kMs;
+        }
+      });
+      // 原本：恢復那一刻 m2s 偏高 15 ms → 一次跳上去，200 ms 後正常的樣本一到再跳回來。§VR-CLK-POSTGAP 之後不可以有 step，
+      // offset 在斷訊前後不可以離開原本的值
+      int64_t lo = INT64_MAX, hi = INT64_MIN;
+      for (const auto &r : o.recs) {
+        if (r.t_rel >= 15 * kSec && r.t_rel < 30 * kSec && !r.outlier) {
+          lo = std::min(lo, r.err_ns);
+          hi = std::max(hi, r.err_ns);
+        }
+      }
+      selftest_case_t c;
+      c.name = "clk.gap-burst";
+      c.pass = o.st.steps == 0 && lo != INT64_MAX && hi - lo < 2 * kErrMaxNs;
+      c.detail = std::format("offsetErr range (15-30s)={:.1f}..{:.1f}us (spread limit 600us, steps=0) {}", us(lo), us(hi), common_detail(o));
       return c;
     }
 
@@ -1069,12 +1136,14 @@ namespace vr::clk {
     out.push_back(case_rtt_none());
     out.push_back(case_rtt_noise_quic());
     out.push_back(case_rtt_enet_quantized());
+    out.push_back(case_rtt_enet_dips());
     out.push_back(case_asym("clk.asym-small", 4 * kMs, 0, 5));
     out.push_back(case_asym("clk.asym-large", 20 * kMs, 2, 6));
     out.push_back(case_transport_switch());
     out.push_back(case_outlier());
     out.push_back(case_clock_jump());
     out.push_back(case_gap());
+    out.push_back(case_gap_burst());
     return out;
   }
 }  // namespace vr::clk

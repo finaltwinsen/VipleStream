@@ -263,7 +263,7 @@
     "max_bitrate": "最大ビットレート",
     "max_bitrate_desc": "VipleStream-Serverがストリームをエンコードする最大ビットレート（Kbps単位）。0に設定すると、VipleStreamが要求するビットレートが常に使用されます。",
     "minimum_fps_target": "最小FPSターゲット",
-    "minimum_fps_target_desc": "ストリームが到達できる最も低い実効FPS。0の値は、ストリームのFPSの約半分として扱われます。 24または30fpsのコンテンツをストリーミングする場合は、20の設定をお勧めします。",
+    "minimum_fps_target_desc": "ストリームが到達できる最も低い実効FPS。0の値は、クライアントが要求したFPS（半分ではなく全体）を使用します。 24または30fpsのコンテンツをストリーミングする場合は、20の設定をお勧めします。",
     "min_log_level": "ログレベル",
     "min_log_level_0": "Verbose",
     "min_log_level_1": "Debug",

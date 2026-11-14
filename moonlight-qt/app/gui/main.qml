@@ -14,6 +14,11 @@ import VrLauncher 1.0
 ApplicationWindow {
     property bool pollingActive: false
 
+    // §PERF-1113 A6：CLI 串流（main.cpp 的 StreamRequested）自己有一個 ComputerManager 在找主機；這個視窗再開一次
+    // 輪詢，只是把所有已知主機各多問兩輪。cliStreamMode 是 bool 的 context property（不能用 cliStreamSession：
+    // 那是 QObject，Session 刪掉後會變成 null，守門就失效）
+    readonly property bool hostPollingWanted: !(typeof cliStreamMode !== "undefined" && cliStreamMode)
+
     // Set by SettingsView to force the back operation to pop all
     // pages except the initial view. This is required when doing
     // a retranslate() because AppView breaks for some reason.
@@ -122,7 +127,7 @@ ApplicationWindow {
             inactivityTimer.stop()
 
             // Restart polling if it was stopped
-            if (!pollingActive) {
+            if (!pollingActive && hostPollingWanted) {
                 ComputerManager.startPolling()
                 pollingActive = true
             }
@@ -138,7 +143,7 @@ ApplicationWindow {
             inactivityTimer.stop()
 
             // Restart polling if it was stopped
-            if (!pollingActive) {
+            if (!pollingActive && hostPollingWanted) {
                 ComputerManager.startPolling()
                 pollingActive = true
             }

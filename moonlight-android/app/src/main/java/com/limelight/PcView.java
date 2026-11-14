@@ -5,7 +5,6 @@ import java.io.IOException;
 import java.net.UnknownHostException;
 
 import com.limelight.binding.PlatformBinding;
-import com.limelight.binding.crypto.AndroidCryptoProvider;
 import com.limelight.computers.ComputerManagerListener;
 import com.limelight.computers.ComputerManagerService;
 import com.limelight.grid.PcGridAdapter;
@@ -97,7 +96,8 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                     startComputerUpdates();
 
                     // Force a keypair to be generated early to avoid discovery delays
-                    new AndroidCryptoProvider(PcView.this).getClientCertificate();
+                    // （走共用的那一個 provider，載入一次之後輪詢就不必再讀檔解析）
+                    PlatformBinding.getCryptoProvider(PcView.this).getClientCertificate();
                 }
             }.start();
         }
@@ -208,15 +208,9 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // VipleStream Phase A2 recon: enumerate Vulkan extensions on this
-        // device once on app launch. Fires off the EDT and just logs to
-        // logcat under [VIPLE-VK-PROBE]. Decides whether the planned
-        // GLES → Vulkan FRUC migration (docs/TODO.md §I) is viable on
-        // this hardware. Cheap (~ms) and idempotent — leave running until
-        // Phase B starts, then either evolve into the real Vulkan helper
-        // or remove entirely.
-        new Thread(() -> com.limelight.binding.video.VkProbe.run(),
-                   "VipleStream-VkProbe").start();
+        // 這裡原本每次啟動都跑一次只寫 log 的 Vulkan 探測（[VIPLE-VK-PROBE]）。
+        // VkBackend 初始化時會自己呼叫 VkProbe.run()，啟動時那一次的結果沒人用，
+        // 還讓所有使用者多跑一次 vkCreateInstance，所以拿掉。
 
         // Assume we're in the foreground when created to avoid a race
         // between binding to CMS and onResume()
@@ -793,9 +787,13 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
             }
         }
 
+        // 輪詢每 1.5 秒通知一次，傳進來的多半是同一個 details 物件；
+        // 格子用到的值沒變就不重排、不重綁、不重畫。
+        boolean changed;
         if (existingEntry != null) {
             // Replace the information in the existing entry
             existingEntry.details = details;
+            changed = existingEntry.syncShown();
         }
         else {
             // Add a new entry
@@ -803,10 +801,13 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
 
             // Remove the "Discovery in progress" view
             noPcFoundLayout.setVisibility(View.INVISIBLE);
+            changed = true;
         }
 
         // Notify the view that the data has changed
-        pcGridAdapter.notifyDataSetChanged();
+        if (changed) {
+            pcGridAdapter.notifyDataSetChanged();
+        }
     }
 
     @Override
@@ -841,11 +842,38 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     public static class ComputerObject {
         public ComputerDetails details;
 
+        // 格子實際畫的值（PcGridAdapter 只讀這幾個）。details 是輪詢執行緒原地更新的
+        // 同一個物件，拿它比不出「跟上次畫的有沒有不同」，所以另存一份只在 UI 執行緒
+        // 更新的；畫面讀這一份，就不會有「比對時與畫出時讀到不同值」的空窗。
+        public ComputerDetails.State shownState;
+        public PairState shownPairState;
+        public String shownName;
+        public boolean shownViplePeer;
+
         public ComputerObject(ComputerDetails details) {
             if (details == null) {
                 throw new IllegalArgumentException("details must not be null");
             }
             this.details = details;
+            syncShown();
+        }
+
+        // 把 details 目前的值抄進畫面用的那一份，回傳有沒有任何一項變了。只在 UI 執行緒呼叫。
+        public boolean syncShown() {
+            ComputerDetails.State state = details.state;
+            PairState pairState = details.pairState;
+            String name = details.name;
+            boolean viplePeer = details.isVipleStreamPeer;
+
+            boolean changed = state != shownState || pairState != shownPairState ||
+                    viplePeer != shownViplePeer ||
+                    (name == null ? shownName != null : !name.equals(shownName));
+
+            shownState = state;
+            shownPairState = pairState;
+            shownName = name;
+            shownViplePeer = viplePeer;
+            return changed;
         }
 
         @Override

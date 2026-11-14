@@ -1,5 +1,8 @@
 #define _GNU_SOURCE
 #include "Limelight-internal.h"
+#if defined(__linux__)
+#include <time.h>   // §PERF-1113：clock_gettime／CLOCK_MONOTONIC（PltWaitForConditionVariableTimed）
+#endif
 #if defined(__vita__)
 #include <pthread.h>
 #include <psp2/kernel/processmgr.h>
@@ -379,6 +382,17 @@ int PltCreateConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex) {
     OSFastCond_Init(cond, "");
 #elif defined(__3DS__)
     CondVar_Init(cond);
+#elif defined(__linux__)
+    {
+        // §PERF-1113：Linux（含 Android）的條件變數改用 CLOCK_MONOTONIC 計時，給 PltWaitForConditionVariableTimed
+        // 用——預設的 CLOCK_REALTIME 在系統時間被往回調時會讓帶逾時的等待卡很久。不帶逾時的等待不受影響。
+        // （glibc／bionic 的 pthread_condattr_init 不會失敗；不做「失敗就用預設時鐘」的退路，那樣期限會對不上時鐘）
+        pthread_condattr_t attr;
+        pthread_condattr_init(&attr);
+        pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+        pthread_cond_init(cond, &attr);
+        pthread_condattr_destroy(&attr);
+    }
 #else
     pthread_cond_init(cond, NULL);
 #endif
@@ -421,6 +435,49 @@ void PltWaitForConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex) {
     CondVar_Wait(cond, mutex);
 #else
     pthread_cond_wait(cond, mutex);
+#endif
+}
+
+// §PERF-1113：帶逾時的條件變數等待（給 VrSend 執行緒用，取代固定 2 ms 的輪詢）。
+// 被喚醒回傳 true、逾時回傳 false；和一般條件變數一樣可能假喚醒，呼叫端要自己重新檢查條件。
+// 沒有對應 API 的平台退回「放鎖、短睡、拿鎖」，行為等同原本的輪詢。
+bool PltWaitForConditionVariableTimed(PLT_COND* cond, PLT_MUTEX* mutex, int timeoutMs) {
+    if (timeoutMs < 0) {
+        timeoutMs = 0;
+    }
+#if defined(LC_WINDOWS)
+    return SleepConditionVariableSRW(cond, mutex, (DWORD)timeoutMs, 0) != 0;
+#elif defined(__linux__)
+    {
+        // 條件變數在 PltCreateConditionVariable 設成 CLOCK_MONOTONIC，這裡要用同一個時鐘算期限
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+            PltUnlockMutex(mutex);
+            PltSleepMs(timeoutMs < 2 ? timeoutMs : 2);
+            PltLockMutex(mutex);
+            return false;
+        }
+        ts.tv_sec += timeoutMs / 1000;
+        ts.tv_nsec += (long)(timeoutMs % 1000) * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000L;
+        }
+        return pthread_cond_timedwait(cond, mutex, &ts) == 0;
+    }
+#elif defined(LC_DARWIN)
+    {
+        // Darwin 沒有 pthread_condattr_setclock；用相對時間的版本，不受系統時間調整影響
+        struct timespec rel;
+        rel.tv_sec = timeoutMs / 1000;
+        rel.tv_nsec = (long)(timeoutMs % 1000) * 1000000L;
+        return pthread_cond_timedwait_relative_np(cond, mutex, &rel) == 0;
+    }
+#else
+    PltUnlockMutex(mutex);
+    PltSleepMs(timeoutMs < 2 ? timeoutMs : 2);
+    PltLockMutex(mutex);
+    return false;
 #endif
 }
 

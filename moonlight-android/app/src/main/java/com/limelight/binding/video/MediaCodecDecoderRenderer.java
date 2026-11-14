@@ -201,6 +201,45 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private int perfNetDrops = 0;
     private long perfSummaryWindowStartMs = 0;
 
+    // §PERF-1113：統計摘要與效能浮層的排序／字串格式化不再佔用送幀執行緒（direct submit 時就是
+    // 收包執行緒，做完才把這一幀送進解碼器）。第一次用到才建，prepareForStop／stop 收掉。
+    private final Object perfReportLock = new Object();
+    private HandlerThread perfReportThread;
+    private Handler perfReportHandler;
+    private final java.util.concurrent.atomic.AtomicBoolean perfSummaryBusy =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    // §PERF-1113：RTT 估計值只在收到 ping 回應時才變，改成每秒取樣一次（原本每幀一次 JNI，還在 perfLock 內）
+    private long lastRttSampleNs = 0;
+    // §PERF-1113：送幀執行緒（common-c 用 pthread 開的，nice 0）第一次進來時提高優先權
+    private boolean submitThreadPriorityRaised = false;
+
+    private boolean postPerfReportWork(Runnable work) {
+        synchronized (perfReportLock) {
+            if (stopping) {
+                return false;
+            }
+            if (perfReportThread == null) {
+                // 比預設略低、但留在前景排程群組，浮層更新不會被背景群組拖住
+                perfReportThread = new HandlerThread("Video - PerfReport",
+                        Process.THREAD_PRIORITY_DEFAULT + Process.THREAD_PRIORITY_LESS_FAVORABLE);
+                perfReportThread.start();
+                perfReportHandler = new Handler(perfReportThread.getLooper());
+            }
+            return perfReportHandler.post(work);
+        }
+    }
+
+    // 呼叫前 stopping 必須已經是 true，postPerfReportWork 才不會在這之後又把執行緒建回來
+    private void quitPerfReportThread() {
+        synchronized (perfReportLock) {
+            if (perfReportThread != null) {
+                perfReportThread.quitSafely();
+                perfReportThread = null;
+                perfReportHandler = null;
+            }
+        }
+    }
+
     // 記錄輸入緩衝區排入 MediaCodec (submit) 事件
     private void onInputBufferQueued(long timestampUs, long recvNs, long submitNs, char hostLatency) {
         synchronized (perfLock) {
@@ -215,11 +254,14 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 stageHost.add((long) hostLatency * 100_000L);
             }
 
-            long rttInfo = MoonBridge.getEstimatedRttInfo();
-            if (rttInfo != -1) {
-                int rttMs = (int) (rttInfo >> 32);
-                if (rttMs >= 0) {
-                    stageRtt.add((long) rttMs * 1_000_000L);
+            if (lastRttSampleNs == 0 || submitNs - lastRttSampleNs >= 1_000_000_000L) {
+                lastRttSampleNs = submitNs;
+                long rttInfo = MoonBridge.getEstimatedRttInfo();
+                if (rttInfo != -1) {
+                    int rttMs = (int) (rttInfo >> 32);
+                    if (rttMs >= 0) {
+                        stageRtt.add((long) rttMs * 1_000_000L);
+                    }
                 }
             }
         }
@@ -280,15 +322,21 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     }
 
     // 每 10 秒輸出 [VIPLE-2D-PERF] 統計摘要至 logcat
-    private void emit2DPerfSummary(long nowMs) {
-        long elapsedMs = nowMs - perfSummaryWindowStartMs;
-        if (elapsedMs <= 0) {
-            elapsedMs = 10000;
+    // §PERF-1113：這裡（送幀執行緒）只做快照，五次排序＋格式化＋log 丟到 perfReportThread。
+    // 回傳 false 表示上一份摘要還沒處理完、這次沒有快照；呼叫端不要推進視窗起點，下一幀再試
+    // （樣本留在環狀緩衝裡併入下一份）。
+    private boolean emit2DPerfSummary(long nowMs) {
+        final long elapsedMs = (nowMs - perfSummaryWindowStartMs) > 0 ? (nowMs - perfSummaryWindowStartMs) : 10000;
+
+        // 快照陣列在背景執行緒用完之前不能再被 snapshotAndReset 換回去當 ring
+        if (!perfSummaryBusy.compareAndSet(false, true)) {
+            return false;
         }
 
-        int frames;
-        int netDrop;
-        int hostN, rttN, decN, qN, totN;
+        final int frames;
+        final int netDrop;
+        final int hostN, rttN, decN, qN, totN;
+        final long[] hostArr, rttArr, decArr, qArr, totArr;
 
         synchronized (perfLock) {
             frames = perfRenderedFramesCount;
@@ -302,46 +350,67 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             decN = stageDecode.snapshotAndReset();
             qN = stageQueue.snapshotAndReset();
             totN = stageTotal.snapshotAndReset();
+
+            // snapshot 欄位下次會被換掉，陣列參考要在鎖內先抄下來
+            hostArr = stageHost.snapshot;
+            rttArr = stageRtt.snapshot;
+            decArr = stageDecode.snapshot;
+            qArr = stageQueue.snapshot;
+            totArr = stageTotal.snapshot;
         }
 
-        double fps = (double) frames / (elapsedMs / 1000.0);
+        Runnable work = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    double fps = (double) frames / (elapsedMs / 1000.0);
 
-        // 於鎖外排序與計算分位數，避免阻塞渲染或解碼執行緒
-        Arrays.sort(stageHost.snapshot, 0, hostN);
-        double hostP50 = hostN > 0 ? stageHost.snapshot[Math.min((int) (hostN * 0.50), hostN - 1)] / 1_000_000.0 : 0.0;
-        double hostP95 = hostN > 0 ? stageHost.snapshot[Math.min((int) (hostN * 0.95), hostN - 1)] / 1_000_000.0 : 0.0;
-        double hostMax = hostN > 0 ? stageHost.snapshot[hostN - 1] / 1_000_000.0 : 0.0;
+                    Arrays.sort(hostArr, 0, hostN);
+                    double hostP50 = hostN > 0 ? hostArr[Math.min((int) (hostN * 0.50), hostN - 1)] / 1_000_000.0 : 0.0;
+                    double hostP95 = hostN > 0 ? hostArr[Math.min((int) (hostN * 0.95), hostN - 1)] / 1_000_000.0 : 0.0;
+                    double hostMax = hostN > 0 ? hostArr[hostN - 1] / 1_000_000.0 : 0.0;
 
-        Arrays.sort(stageRtt.snapshot, 0, rttN);
-        double rttP50 = rttN > 0 ? stageRtt.snapshot[Math.min((int) (rttN * 0.50), rttN - 1)] / 1_000_000.0 : 0.0;
-        double rttP95 = rttN > 0 ? stageRtt.snapshot[Math.min((int) (rttN * 0.95), rttN - 1)] / 1_000_000.0 : 0.0;
+                    Arrays.sort(rttArr, 0, rttN);
+                    double rttP50 = rttN > 0 ? rttArr[Math.min((int) (rttN * 0.50), rttN - 1)] / 1_000_000.0 : 0.0;
+                    double rttP95 = rttN > 0 ? rttArr[Math.min((int) (rttN * 0.95), rttN - 1)] / 1_000_000.0 : 0.0;
 
-        Arrays.sort(stageDecode.snapshot, 0, decN);
-        double decP50 = decN > 0 ? stageDecode.snapshot[Math.min((int) (decN * 0.50), decN - 1)] / 1_000_000.0 : 0.0;
-        double decP95 = decN > 0 ? stageDecode.snapshot[Math.min((int) (decN * 0.95), decN - 1)] / 1_000_000.0 : 0.0;
-        double decMax = decN > 0 ? stageDecode.snapshot[decN - 1] / 1_000_000.0 : 0.0;
+                    Arrays.sort(decArr, 0, decN);
+                    double decP50 = decN > 0 ? decArr[Math.min((int) (decN * 0.50), decN - 1)] / 1_000_000.0 : 0.0;
+                    double decP95 = decN > 0 ? decArr[Math.min((int) (decN * 0.95), decN - 1)] / 1_000_000.0 : 0.0;
+                    double decMax = decN > 0 ? decArr[decN - 1] / 1_000_000.0 : 0.0;
 
-        Arrays.sort(stageQueue.snapshot, 0, qN);
-        double qP50 = qN > 0 ? stageQueue.snapshot[Math.min((int) (qN * 0.50), qN - 1)] / 1_000_000.0 : 0.0;
-        double qP95 = qN > 0 ? stageQueue.snapshot[Math.min((int) (qN * 0.95), qN - 1)] / 1_000_000.0 : 0.0;
-        double qMax = qN > 0 ? stageQueue.snapshot[qN - 1] / 1_000_000.0 : 0.0;
+                    Arrays.sort(qArr, 0, qN);
+                    double qP50 = qN > 0 ? qArr[Math.min((int) (qN * 0.50), qN - 1)] / 1_000_000.0 : 0.0;
+                    double qP95 = qN > 0 ? qArr[Math.min((int) (qN * 0.95), qN - 1)] / 1_000_000.0 : 0.0;
+                    double qMax = qN > 0 ? qArr[qN - 1] / 1_000_000.0 : 0.0;
 
-        Arrays.sort(stageTotal.snapshot, 0, totN);
-        double totP50 = totN > 0 ? stageTotal.snapshot[Math.min((int) (totN * 0.50), totN - 1)] / 1_000_000.0 : 0.0;
-        double totP95 = totN > 0 ? stageTotal.snapshot[Math.min((int) (totN * 0.95), totN - 1)] / 1_000_000.0 : 0.0;
-        double totMax = totN > 0 ? stageTotal.snapshot[totN - 1] / 1_000_000.0 : 0.0;
+                    Arrays.sort(totArr, 0, totN);
+                    double totP50 = totN > 0 ? totArr[Math.min((int) (totN * 0.50), totN - 1)] / 1_000_000.0 : 0.0;
+                    double totP95 = totN > 0 ? totArr[Math.min((int) (totN * 0.95), totN - 1)] / 1_000_000.0 : 0.0;
+                    double totMax = totN > 0 ? totArr[totN - 1] / 1_000_000.0 : 0.0;
 
-        String logLine = String.format(Locale.US,
-                "[VIPLE-2D-PERF] 10s: frames=%d fps=%.1f | host=%.2f/%.2f/%.2f | rtt p50/p95=%.2f/%.2f | decode(submit->output)=%.2f/%.2f/%.2f | queue(output->release)=%.2f/%.2f/%.2f | total(recv->release)=%.2f/%.2f/%.2f | netDrop=%d",
-                frames, fps,
-                hostP50, hostP95, hostMax,
-                rttP50, rttP95,
-                decP50, decP95, decMax,
-                qP50, qP95, qMax,
-                totP50, totP95, totMax,
-                netDrop);
+                    String logLine = String.format(Locale.US,
+                            "[VIPLE-2D-PERF] 10s: frames=%d fps=%.1f | host=%.2f/%.2f/%.2f | rtt p50/p95=%.2f/%.2f | decode(submit->output)=%.2f/%.2f/%.2f | queue(output->release)=%.2f/%.2f/%.2f | total(recv->release)=%.2f/%.2f/%.2f | netDrop=%d",
+                            frames, fps,
+                            hostP50, hostP95, hostMax,
+                            rttP50, rttP95,
+                            decP50, decP95, decMax,
+                            qP50, qP95, qMax,
+                            totP50, totP95, totMax,
+                            netDrop);
 
-        LimeLog.info(logLine);
+                    LimeLog.info(logLine);
+                } finally {
+                    perfSummaryBusy.set(false);
+                }
+            }
+        };
+
+        if (!postPerfReportWork(work)) {
+            // 正在停止：這一份丟掉
+            perfSummaryBusy.set(false);
+        }
+        return true;
     }
 
     private MediaCodecInfo findAvcDecoder() {
@@ -1061,6 +1130,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
             if (!newFormat) {
                 // We couldn't even configure a decoder without any low latency options
+                // 複核（11-13）：這條路徑不會走到 stop()／cleanup()，補幀 renderer 的專用執行緒要在這裡收掉
+                if (frucRenderer != null) {
+                    frucRenderer.destroy();
+                    frucRenderer = null;
+                }
                 return -5;
             }
         }
@@ -1671,6 +1745,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         // Let the decoding code know to ignore codec exceptions now
         stopping = true;
 
+        // §PERF-1113：收掉統計／浮層的背景執行緒（已排入的工作會跑完；不 join）
+        quitPerfReportThread();
+
         // Halt the rendering thread
         if (rendererThread != null) {
             rendererThread.interrupt();
@@ -1707,6 +1784,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         // VipleStream: Cleanup FRUC
         if (pyroWaveActive) {
             stopping = true;
+            // §PERF-1113：PyroWave 路徑不一定會先經過 prepareForStop
+            quitPerfReportThread();
             return;
         }
         if (frucRenderer != null) {
@@ -1881,6 +1960,19 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         long recvTimeNs = System.nanoTime();
 
+        // §PERF-1113：送幀執行緒是整條管線的入口（direct submit 時＝common-c 的影像收包執行緒），
+        // 預設 nice 0、跟檔案傳輸輪詢、OkHttp、GC 輔助同級。第一次進來時提到 DISPLAY（−4），
+        // 跟輸出執行緒（Java 優先權 7）同一級距。
+        if (!submitThreadPriorityRaised) {
+            submitThreadPriorityRaised = true;
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
+                LimeLog.info("[VIPLE-THREAD-PRIO] video submit thread tid=" + Process.myTid() + " -> THREAD_PRIORITY_DISPLAY");
+            } catch (Throwable t) {
+                LimeLog.warning("[VIPLE-THREAD-PRIO] video submit thread priority not changed: " + t);
+            }
+        }
+
         if (lastFrameNumber == 0) {
             activeWindowVideoStats.measurementStartTimestamp = SystemClock.uptimeMillis();
         } else if (frameNumber != lastFrameNumber && frameNumber != lastFrameNumber + 1) {
@@ -1909,11 +2001,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         // Flip stats windows roughly every second
         if (SystemClock.uptimeMillis() >= activeWindowVideoStats.measurementStartTimestamp + 1000) {
             if (prefs.enablePerfOverlay) {
-                VideoStats lastTwo = new VideoStats();
+                // §PERF-1113：數值在這裡（送幀執行緒）取好，十來次 getString 格式化與 StringBuilder
+                // 丟到 perfReportThread 做；onPerfUpdate 本來就會再轉到 UI 執行緒。
+                final VideoStats lastTwo = new VideoStats();
                 lastTwo.add(lastWindowVideoStats);
                 lastTwo.add(activeWindowVideoStats);
-                VideoStatsFps fps = lastTwo.getFps();
-                String decoder;
+                final VideoStatsFps fps = lastTwo.getFps();
+                final String decoder;
 
                 if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_H264) != 0) {
                     decoder = avcDecoder.getName();
@@ -1928,24 +2022,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     decoder = "(unknown)";
                 }
 
-                float decodeTimeMs = (float)lastTwo.decoderTimeUs / 1000.0f / lastTwo.totalFramesReceived;
-                long rttInfo = MoonBridge.getEstimatedRttInfo();
-                StringBuilder sb = new StringBuilder();
-                sb.append(context.getString(R.string.perf_overlay_streamdetails, initialWidth + "x" + initialHeight, fps.totalFps)).append('\n');
-                sb.append(context.getString(R.string.perf_overlay_decoder, decoder)).append('\n');
-                sb.append(context.getString(R.string.perf_overlay_incomingfps, fps.receivedFps)).append('\n');
-                sb.append(context.getString(R.string.perf_overlay_renderingfps, fps.renderedFps)).append('\n');
-                sb.append(context.getString(R.string.perf_overlay_netdrops,
-                        (float)lastTwo.framesLost / lastTwo.totalFrames * 100)).append('\n');
-                sb.append(context.getString(R.string.perf_overlay_netlatency,
-                        (int)(rttInfo >> 32), (int)rttInfo)).append('\n');
-                if (lastTwo.framesWithHostProcessingLatency > 0) {
-                    sb.append(context.getString(R.string.perf_overlay_hostprocessinglatency,
-                            (float)lastTwo.minHostProcessingLatency / 10,
-                            (float)lastTwo.maxHostProcessingLatency / 10,
-                            (float)lastTwo.totalHostProcessingLatency / 10 / lastTwo.framesWithHostProcessingLatency)).append('\n');
-                }
-                sb.append(context.getString(R.string.perf_overlay_dectime, decodeTimeMs)).append('\n');
+                final float decodeTimeMs = (float)lastTwo.decoderTimeUs / 1000.0f / lastTwo.totalFramesReceived;
+                final long rttInfo = MoonBridge.getEstimatedRttInfo();
 
                 // VipleStream: FRUC status in performance overlay (PC-style layout).
                 // Always emits the separator + a status line so the section is
@@ -1954,28 +2032,55 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 // and effective output FPS (= actual swapchain present rate
                 // since v1.2.184 — pre-184 the Vulkan path falsely reported
                 // input rate).
-                sb.append(context.getString(R.string.perf_overlay_fruc_separator)).append('\n');
-                if (frucEnabled && frucRenderer != null) {
-                    sb.append(context.getString(R.string.perf_overlay_fruc_active,
-                              frucRenderer.backendName())).append('\n');
-                    int interp = frucRenderer.getInterpolatedCount();
-                    int sessionRendered = globalVideoStats.totalFramesRendered
-                                        + activeWindowVideoStats.totalFramesRendered;
-                    float ratio = sessionRendered > 0
-                                ? (float) interp / sessionRendered * 100f
-                                : 0f;
-                    sb.append(context.getString(R.string.perf_overlay_fruc_count,
-                              interp, sessionRendered, ratio)).append('\n');
-                    sb.append(context.getString(R.string.perf_overlay_fruc_effective_fps,
-                              frucRenderer.getOutputFps())).append('\n');
-                } else if (prefs.enableFruc) {
-                    sb.append(context.getString(R.string.perf_overlay_fruc_pending)).append('\n');
-                }
-                else {
-                    sb.append(context.getString(R.string.perf_overlay_fruc_off)).append('\n');
-                }
+                final IFrucBackend overlayFruc = frucRenderer;
+                final boolean frucActive = frucEnabled && overlayFruc != null;
+                final String frucBackendName = frucActive ? overlayFruc.backendName() : null;
+                final int interp = frucActive ? overlayFruc.getInterpolatedCount() : 0;
+                final float frucOutputFps = frucActive ? overlayFruc.getOutputFps() : 0f;
+                final int sessionRendered = globalVideoStats.totalFramesRendered
+                                          + activeWindowVideoStats.totalFramesRendered;
 
-                perfListener.onPerfUpdate(sb.toString());
+                postPerfReportWork(new Runnable() {
+                    @Override
+                    public void run() {
+                        StringBuilder sb = new StringBuilder();
+                        sb.append(context.getString(R.string.perf_overlay_streamdetails, initialWidth + "x" + initialHeight, fps.totalFps)).append('\n');
+                        sb.append(context.getString(R.string.perf_overlay_decoder, decoder)).append('\n');
+                        sb.append(context.getString(R.string.perf_overlay_incomingfps, fps.receivedFps)).append('\n');
+                        sb.append(context.getString(R.string.perf_overlay_renderingfps, fps.renderedFps)).append('\n');
+                        sb.append(context.getString(R.string.perf_overlay_netdrops,
+                                (float)lastTwo.framesLost / lastTwo.totalFrames * 100)).append('\n');
+                        sb.append(context.getString(R.string.perf_overlay_netlatency,
+                                (int)(rttInfo >> 32), (int)rttInfo)).append('\n');
+                        if (lastTwo.framesWithHostProcessingLatency > 0) {
+                            sb.append(context.getString(R.string.perf_overlay_hostprocessinglatency,
+                                    (float)lastTwo.minHostProcessingLatency / 10,
+                                    (float)lastTwo.maxHostProcessingLatency / 10,
+                                    (float)lastTwo.totalHostProcessingLatency / 10 / lastTwo.framesWithHostProcessingLatency)).append('\n');
+                        }
+                        sb.append(context.getString(R.string.perf_overlay_dectime, decodeTimeMs)).append('\n');
+
+                        sb.append(context.getString(R.string.perf_overlay_fruc_separator)).append('\n');
+                        if (frucActive) {
+                            sb.append(context.getString(R.string.perf_overlay_fruc_active,
+                                      frucBackendName)).append('\n');
+                            float ratio = sessionRendered > 0
+                                        ? (float) interp / sessionRendered * 100f
+                                        : 0f;
+                            sb.append(context.getString(R.string.perf_overlay_fruc_count,
+                                      interp, sessionRendered, ratio)).append('\n');
+                            sb.append(context.getString(R.string.perf_overlay_fruc_effective_fps,
+                                      frucOutputFps)).append('\n');
+                        } else if (prefs.enableFruc) {
+                            sb.append(context.getString(R.string.perf_overlay_fruc_pending)).append('\n');
+                        }
+                        else {
+                            sb.append(context.getString(R.string.perf_overlay_fruc_off)).append('\n');
+                        }
+
+                        perfListener.onPerfUpdate(sb.toString());
+                    }
+                });
             }
 
             globalVideoStats.add(activeWindowVideoStats);
@@ -1989,8 +2094,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         if (perfSummaryWindowStartMs == 0) {
             perfSummaryWindowStartMs = currentUptimeMs;
         } else if (currentUptimeMs >= perfSummaryWindowStartMs + 10000) {
-            emit2DPerfSummary(currentUptimeMs);
-            perfSummaryWindowStartMs = currentUptimeMs;
+            if (emit2DPerfSummary(currentUptimeMs)) {
+                perfSummaryWindowStartMs = currentUptimeMs;
+            }
         }
 
         boolean csdSubmittedForThisFrame = false;

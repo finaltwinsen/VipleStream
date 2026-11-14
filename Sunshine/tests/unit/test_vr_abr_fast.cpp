@@ -1272,3 +1272,397 @@ TEST_F(VrAbrFastTest, NetSwitchHoldIsCapped) {
   EXPECT_TRUE(c.net_switch_active(t0 + 19000ms));
   EXPECT_FALSE(c.net_switch_active(t0 + 20500ms));
 }
+
+// ==============================================================================
+// §ABR-PERSIST-VERIFY（11-13）：丟包跟碼率無關時，+persistent 不可以一路降到下限
+// ==============================================================================
+namespace {
+  /// 每 period 一次短暫斷訊（一筆回報掉 13 張），送出與收到相近（沒有持續的落差，只有斷訊那一下收得少）。回傳最後的碼率
+  int run_bursty_line(fast::fast_controller_t &c, fast::steady::time_point t0, std::chrono::milliseconds from, std::chrono::milliseconds to,
+                      std::chrono::milliseconds period, int *lowest = nullptr) {
+    int applied = c.applied_kbps();
+    auto next_burst = from + 3000ms;  // 先有幾秒乾淨的收／送回報
+    for (auto t = from; t < to; t += 100ms) {
+      const auto now = t0 + t;
+      c.on_rtt(35, now);
+      if (t >= next_burst) {
+        c.on_rates(applied * 80 / 100, applied, now);  // 斷訊那一下收到的比送出的少
+        c.on_loss(13, now);
+        next_burst += period;
+      } else {
+        c.on_rates(applied, applied, now);
+      }
+      if (auto r = c.tick(now)) {
+        applied = *r;
+        c.set_applied_kbps(applied);
+      }
+      if (lowest && applied < *lowest) {
+        *lowest = applied;
+      }
+    }
+    return applied;
+  }
+}  // namespace
+
+TEST_F(VrAbrFastTest, PersistentCutsRevertedWhenLossIgnoresBitrate) {
+  fast::fast_controller_t c(75000);
+  c.set_experimental_rules(true);
+  int lowest = 75000;
+  // 每 1.5 秒一次斷訊，持續 60 秒（實測那天每分鐘 15～35 次）
+  const int end = run_bursty_line(c, t0, 1000ms, 61000ms, 1500ms, &lowest);
+  EXPECT_EQ(c.persistent_reverts(), 1);
+  EXPECT_TRUE(c.persistent_disabled(t0 + 61000ms));
+  EXPECT_GT(c.persistent_skips(), 10);
+  // 舊行為：一路降到 2000。新行為：降兩三刀就停，之後回升
+  EXPECT_GE(lowest, 20000);
+  EXPECT_GE(end, 37000);
+  EXPECT_EQ(c.persistent_episode_start_kbps(), 75000);
+}
+
+TEST_F(VrAbrFastTest, PersistentRevertNeverLeavesBitrateBelowHalfOfEpisodeStart) {
+  // 判定之後碼率不低於這一串開始時的一半：兩刀後還高於一半就停在那裡，已經低於一半就拉回一半
+  fast::fast_controller_t c(75000);
+  c.set_experimental_rules(true);
+  int applied = 75000;
+  int at_judged = 0;
+  for (auto t = 1000ms; t < 12000ms; t += 100ms) {
+    const auto now = t0 + t;
+    c.on_rtt(35, now);
+    const bool burst = t >= 4000ms && (t.count() % 1500) == 0;
+    c.on_rates(burst ? applied * 80 / 100 : applied, applied, now);
+    if (burst) {
+      c.on_loss(13, now);
+    }
+    if (auto r = c.tick(now)) {
+      applied = *r;
+      c.set_applied_kbps(applied);
+    }
+    if (c.persistent_reverts() == 1 && at_judged == 0) {
+      at_judged = applied;
+    }
+  }
+  ASSERT_EQ(c.persistent_reverts(), 1);
+  EXPECT_GE(at_judged, 37500);
+  EXPECT_GE(applied, at_judged);  // 判定之後沒有再往下
+}
+
+TEST_F(VrAbrFastTest, PersistentCutsKeptWhenLossStopsAfterCut) {
+  // 真的送不動：降了之後丟包就停 → 不判定無效、規則照常
+  fast::fast_controller_t c(75000);
+  c.set_experimental_rules(true);
+  int applied = 75000;
+  for (auto t = 1000ms; t < 30000ms; t += 100ms) {
+    const auto now = t0 + t;
+    c.on_rtt(35, now);
+    const bool lossy = applied > 50000 && (t.count() % 500) == 0;
+    c.on_rates(lossy ? applied * 80 / 100 : applied, applied, now);
+    if (lossy) {
+      c.on_loss(13, now);
+    }
+    if (auto r = c.tick(now)) {
+      applied = *r;
+      c.set_applied_kbps(applied);
+    }
+  }
+  EXPECT_EQ(c.persistent_reverts(), 0);
+  EXPECT_FALSE(c.persistent_disabled(t0 + 30000ms));
+  EXPECT_LE(applied, 60000);
+}
+
+TEST_F(VrAbrFastTest, PersistentOffTimeDoublesOnRepeat) {
+  fast::fast_controller_t c(75000);
+  c.set_experimental_rules(true);
+  run_bursty_line(c, t0, 1000ms, 30000ms, 1500ms);
+  ASSERT_EQ(c.persistent_reverts(), 1);
+  // 5 分鐘後規則恢復，線路還是一樣 → 再判定一次，這次停用 10 分鐘
+  run_bursty_line(c, t0, 30000ms, 30000ms + 6 * 60000ms, 1500ms);
+  EXPECT_EQ(c.persistent_reverts(), 2);
+  EXPECT_TRUE(c.persistent_disabled(t0 + 30000ms + 6 * 60000ms + 8 * 60000ms));
+}
+
+// 複核（11-13）補的案例
+TEST_F(VrAbrFastTest, PolicedLinkIsNotJudgedIneffective) {
+  // 限速器直接丟、延遲不漲：容量 34 Mbps、開場 75。降了之後丟的比例跟著降 → 不可以判成「跟碼率無關」，要一路降到容量以下
+  fast::fast_controller_t c(75000);
+  c.set_experimental_rules(true);
+  const int capacity = 34000;
+  int applied = 75000;
+  for (auto t = 1000ms; t < 40000ms; t += 100ms) {
+    const auto now = t0 + t;
+    c.on_rtt(35, now);
+    if ((t.count() % 500) == 0) {
+      c.on_rates(std::min(applied, capacity), applied, now);
+    }
+    if (applied > capacity && (t.count() % 300) == 0) {
+      c.on_loss(13, now);
+    }
+    if (auto r = c.tick(now)) {
+      applied = *r;
+      c.set_applied_kbps(applied);
+    }
+  }
+  EXPECT_EQ(c.persistent_reverts(), 0);
+  EXPECT_LE(applied, capacity * 115 / 100);
+}
+
+TEST_F(VrAbrFastTest, UniformRandomLossIsJudgedOnceAndDoesNotOscillate) {
+  // 均勻 6% 隨機丟包（每一筆回報都收得比送的少 6%）：判定一次就停，之後 4 分鐘內不可以反覆恢復規則再降
+  fast::fast_controller_t c(75000);
+  c.set_experimental_rules(true);
+  int applied = 75000;
+  int lowest_after = 0;
+  for (auto t = 1000ms; t < 240000ms; t += 100ms) {
+    const auto now = t0 + t;
+    c.on_rtt(35, now);
+    if ((t.count() % 500) == 0) {
+      c.on_rates(applied * 94 / 100, applied, now);
+    }
+    if ((t.count() % 700) == 0) {
+      c.on_loss(13, now);
+    }
+    if (auto r = c.tick(now)) {
+      applied = *r;
+      c.set_applied_kbps(applied);
+    }
+    if (c.persistent_reverts() >= 1 && t > 30000ms) {
+      lowest_after = lowest_after == 0 ? applied : std::min(lowest_after, applied);
+    }
+  }
+  EXPECT_EQ(c.persistent_reverts(), 1);
+  EXPECT_GE(lowest_after, 9000);  // 丟包率規則最多再試一次 −10%（之後會撤銷），不會回到一路往下
+}
+
+TEST_F(VrAbrFastTest, RealCongestionCutAfterJudgementIsNotOverwritten) {
+  fast::fast_controller_t c(75000);
+  c.set_experimental_rules(true);
+  int applied = 75000;
+  fast::steady::time_point judged {};
+  // 先讓它判定無效，但判定之後、下一個 tick 之前塞一刀真的塞車
+  for (auto t = 1000ms; t < 20000ms && judged == fast::steady::time_point {}; t += 100ms) {
+    const auto now = t0 + t;
+    c.on_rtt(35, now);
+    const bool burst = (t.count() % 1500) == 0;
+    if ((t.count() % 500) == 0) {
+      c.on_rates(burst ? applied * 80 / 100 : applied, applied, now);
+    }
+    if (burst) {
+      c.on_loss(13, now);
+      if (c.persistent_reverts() == 1) {
+        judged = now;
+        break;  // 不 tick
+      }
+    }
+    if (auto r = c.tick(now)) {
+      applied = *r;
+      c.set_applied_kbps(applied);
+    }
+  }
+  ASSERT_NE(judged, fast::steady::time_point {});
+  const int before = applied;
+  make_trend_overuse(c, judged + 10ms);  // delay-trend 真塞車
+  int after = applied;
+  for (int i = 0; i < 8; ++i) {
+    if (auto r = c.tick(judged + 7200ms + i * 250ms)) {
+      after = *r;
+      c.set_applied_kbps(after);
+      if (i == 0) {
+        EXPECT_LT(after, before);
+      }
+    }
+  }
+  EXPECT_LE(after, before);  // 沒有被「拉回一半」蓋過去
+}
+
+namespace {
+  /// 穩在 25 Mbps，15～19 秒那 4 秒收到的只剩 pct%。回傳 {最低碼率, 最後碼率}
+  std::pair<int, int> run_outage(fast::fast_controller_t &c, fast::steady::time_point t0, int pct) {
+    int applied = 25000;
+    int lowest = applied;
+    for (auto t = 1000ms; t < 30000ms; t += 100ms) {
+      const auto now = t0 + t;
+      c.on_rtt(35, now);
+      const bool outage = t >= 15000ms && t < 19000ms;
+      if ((t.count() % 500) == 0) {
+        c.on_rates(outage ? applied * pct / 100 : applied, applied, now);
+      }
+      if (auto r = c.tick(now)) {
+        applied = *r;
+        c.set_applied_kbps(applied);
+      }
+      lowest = std::min(lowest, applied);
+    }
+    return {lowest, applied};
+  }
+}  // namespace
+
+TEST_F(VrAbrFastTest, TotalOutageDoesNotCutByShortfall) {
+  // 11-13 第二輪實測：一次一秒以上幾乎完全收不到的斷訊，rate-shortfall 2.5 秒內連降三刀 25 → 8.7 Mbps
+  fast::fast_controller_t c(25000);
+  c.set_experimental_rules(true);
+  const auto [lowest, end] = run_outage(c, t0, 10);
+  EXPECT_GE(lowest, 24000);
+  EXPECT_GE(end, 24000);
+  EXPECT_GT(c.shortfall_outage_skips(), 0);
+}
+
+TEST_F(VrAbrFastTest, PartialOutageShortfallIsJudgedAndRestoredToStable) {
+  // 收到剩一半、持續 4 秒：降了兩刀落差沒變小 → 判定無效，拉回先前穩定撐住的碼率
+  fast::fast_controller_t c(25000);
+  c.set_experimental_rules(true);
+  const auto [lowest, end] = run_outage(c, t0, 50);
+  EXPECT_EQ(c.persistent_reverts(), 1);
+  EXPECT_GE(lowest, 5000);
+  EXPECT_GE(end, 24000);
+}
+
+TEST_F(VrAbrFastTest, ShortfallOnPolicedLinkStillConverges) {
+  // 只有收／送落差、沒有成串丟包回報的限速線路（容量 30、開場 60）：rate-shortfall 要照常降到容量附近，不可以被判成無效
+  fast::fast_controller_t c(60000);
+  c.set_experimental_rules(true);
+  const int capacity = 30000;
+  int applied = 60000;
+  for (auto t = 1000ms; t < 30000ms; t += 100ms) {
+    const auto now = t0 + t;
+    c.on_rtt(35, now);
+    if ((t.count() % 500) == 0) {
+      c.on_rates(std::min(applied, capacity), applied, now);
+    }
+    if (auto r = c.tick(now)) {
+      applied = *r;
+      c.set_applied_kbps(applied);
+    }
+  }
+  EXPECT_EQ(c.persistent_reverts(), 0);
+  EXPECT_LE(applied, capacity * 115 / 100);
+}
+
+TEST_F(VrAbrFastTest, PathUpgradeClearsCongestionMemoryAndRampsFast) {
+  // 11-13 第三輪實測：開場在中繼上被延遲規則壓到 2 Mbps，30 秒後轉直連；舊行為每秒 +0.5%，兩分鐘後還在 3 Mbps
+  fast::fast_controller_t c(75000);
+  c.set_experimental_rules(true);
+  int applied = 75000;
+  auto drive = [&](std::chrono::milliseconds from, std::chrono::milliseconds to, int rtt) {
+    for (auto t = from; t < to; t += 100ms) {
+      const auto now = t0 + t;
+      c.on_rtt(rtt, now);
+      if ((t.count() % 500) == 0) {
+        c.on_rates(applied, applied, now);
+      }
+      if (auto r = c.tick(now)) {
+        applied = *r;
+        c.set_applied_kbps(applied);
+      }
+    }
+  };
+  // 中繼上：已經被壓到低點，而且塞車點就記在低點（在 2.5 Mbps 時又因延遲上升降了一刀）
+  applied = 2500;
+  c.set_applied_kbps(applied);
+  make_trend_overuse(c, t0);
+  if (auto r = c.tick(t0 + 7100ms)) {
+    applied = *r;
+    c.set_applied_kbps(applied);
+  }
+  ASSERT_GT(c.last_congested_kbps(), 0);
+  ASSERT_LE(c.last_congested_kbps(), 3000);
+  const auto up = 30000ms;
+  drive(8000ms, up, 220);  // 延遲停在高點不再漲，慢爬
+  const int low = applied;
+  ASSERT_LE(low, 4000);    // 舊行為：22 秒只爬一點點
+  c.on_path_upgraded(t0 + up);
+  EXPECT_EQ(c.last_congested_kbps(), 0);
+  EXPECT_TRUE(c.path_boost_active(t0 + up + 1000ms));
+  drive(up, up + 15000ms, 20);
+  EXPECT_GE(applied, low * 8);  // 15 秒內至少 8 倍（每秒 +25%）；舊行為約 +8%
+}
+
+TEST_F(VrAbrFastTest, LossRateRuleStaysOffWhilePersistentIsJudgedIneffective) {
+  fast::fast_controller_t c(75000);
+  c.set_experimental_rules(true);
+  run_bursty_line(c, t0, 1000ms, 20000ms, 1500ms);
+  ASSERT_EQ(c.persistent_reverts(), 1);
+  const int cuts_before = c.loss_rate_cuts();
+  run_bursty_line(c, t0, 20000ms, 120000ms, 1500ms);
+  EXPECT_EQ(c.loss_rate_cuts(), cuts_before);
+}
+
+// §ABR-OUTAGE-HOLD（11-13 第四輪）
+TEST_F(VrAbrFastTest, OutageWithoutPriorCongestionDoesNotCut) {
+  // 延遲一直正常，每 3 秒一次斷訊（掉 20 張＝約 140 ms），斷訊結束那一下延遲量測被灌爆、丟包跟著回報
+  fast::fast_controller_t c(40000);
+  c.set_experimental_rules(true);
+  int applied = 40000;
+  int lowest = applied;
+  for (auto t = 1000ms; t < 60000ms; t += 100ms) {
+    const auto now = t0 + t;
+    const bool burst = t >= 5000ms && (t.count() % 3000) == 0;
+    c.on_owd(burst ? 180.0 : 25.0, now);
+    c.on_rtt(burst ? 300 : 35, now);
+    if ((t.count() % 500) == 0) {
+      c.on_rates(burst ? applied * 70 / 100 : applied, applied, now);
+    }
+    if (burst) {
+      EXPECT_TRUE(c.on_outage(140, now));
+      c.on_loss(20, now);
+      c.on_fec_failed(2, now + 20ms);
+    }
+    if (auto r = c.tick(now)) {
+      applied = *r;
+      c.set_applied_kbps(applied);
+    }
+    lowest = std::min(lowest, applied);
+  }
+  EXPECT_GE(lowest, 40000);
+  EXPECT_GT(c.outage_holds(), 10);
+}
+
+TEST_F(VrAbrFastTest, LossDuringOngoingCongestionIsNotTreatedAsOutage) {
+  // 延遲已經連續上升好幾秒（真的塞車）才開始成串丟包：不可以當成斷訊，要照常降
+  fast::fast_controller_t c(40000);
+  c.set_experimental_rules(true);
+  make_trend_overuse(c, t0);              // 5 秒基準＋2 秒一路上升，結束在 t0+7000ms
+  const auto now = t0 + 7050ms;
+  EXPECT_FALSE(c.on_outage(140, now));
+  c.on_loss(20, now);
+  auto r = c.tick(now + 10ms);
+  ASSERT_TRUE(r.has_value());
+  EXPECT_LT(*r, 40000);
+}
+
+TEST_F(VrAbrFastTest, SustainedShortfallIsNotTreatedAsOutage) {
+  // 限速器直接丟（延遲不漲、收到的一直比送出的少）：成串丟包不可以被當成斷訊而永遠不降
+  fast::fast_controller_t c(60000);
+  c.set_experimental_rules(true);
+  const int capacity = 30000;
+  int applied = 60000;
+  for (auto t = 1000ms; t < 40000ms; t += 100ms) {
+    const auto now = t0 + t;
+    c.on_rtt(35, now);
+    if ((t.count() % 500) == 0) {
+      c.on_rates(std::min(applied, capacity), applied, now);
+    }
+    if (applied > capacity && (t.count() % 400) == 0) {
+      c.on_outage(140, now);
+      c.on_loss(20, now);
+    }
+    if (auto r = c.tick(now)) {
+      applied = *r;
+      c.set_applied_kbps(applied);
+    }
+  }
+  EXPECT_LE(applied, capacity * 115 / 100);
+}
+
+
+TEST_F(VrAbrFastTest, ExperimentalRulesOffBehavesLikeBefore) {
+  // 開關關著（預設）：成串丟包照舊每次都降，不判定、不暫停、不因斷訊而擋
+  fast::fast_controller_t c(75000);
+  EXPECT_FALSE(c.experimental_rules());
+  const int end = run_bursty_line(c, t0, 1000ms, 61000ms, 1500ms);
+  EXPECT_EQ(c.persistent_reverts(), 0);
+  EXPECT_FALSE(c.persistent_disabled(t0 + 61000ms));
+  EXPECT_FALSE(c.on_outage(140, t0 + 61000ms));
+  EXPECT_EQ(c.outage_holds(), 0);
+  EXPECT_LE(end, 10000);  // 一路降下去（原本的行為）
+  c.on_path_upgraded(t0 + 62000ms);
+  EXPECT_EQ(c.path_upgrades(), 0);
+}

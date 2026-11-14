@@ -51,6 +51,7 @@ using namespace std::literals;
 
 namespace platf::dxgi {
   bool vr_pick_adapter_luid(LUID &out, std::string &why);  // display_vr.cpp（K22）
+  bool vr_pick_adapter_luid_cached(LUID &out, std::string &why);  // 同上，adapter 沒變過就沿用上一次成功的結果
 }
 
 namespace vr {
@@ -881,7 +882,24 @@ namespace vr {
     }  // namespace
 
     // ── 環境 ─────────────────────────────────────────────────────────────
-    env_t probe_environment(bool force_refresh) {
+    void refresh_volatile_environment(env_t &e) {
+      e.user_present = console_user().has_value();
+      e.console_locked = false;
+      {
+        // §VR-HOST-LOCKED：WTSSessionInfoEx 的 SessionFlags＝WTS_SESSIONSTATE_LOCK 表示鎖定（含開機自動登入後停在鎖定畫面）
+        PWTSINFOEXW info = nullptr;
+        DWORD bytes = 0;
+        if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTSGetActiveConsoleSessionId(), WTSSessionInfoEx, (LPWSTR *) &info, &bytes) && info) {
+          e.console_locked = bytes >= sizeof(WTSINFOEXW) && info->Level == 1 && info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK;
+          WTSFreeMemory(info);
+        }
+      }
+      DWORD self_sess = 0;
+      ProcessIdToSessionId(GetCurrentProcessId(), &self_sess);
+      e.session_ok = platf::is_running_as_system() && self_sess == WTSGetActiveConsoleSessionId();
+    }
+
+    env_t probe_environment(bool force_refresh, bool reuse_adapter) {
       {
         std::lock_guard lk(g_mtx);
         if (!force_refresh && g_env.probed && steady::now() - g_env_at < 60s) {
@@ -904,23 +922,13 @@ namespace vr {
         e.install_dir_safe = true;
       }
 
-      e.user_present = console_user().has_value();
-      {
-        // §VR-HOST-LOCKED：WTSSessionInfoEx 的 SessionFlags＝WTS_SESSIONSTATE_LOCK 表示鎖定（含開機自動登入後停在鎖定畫面）
-        PWTSINFOEXW info = nullptr;
-        DWORD bytes = 0;
-        if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTSGetActiveConsoleSessionId(), WTSSessionInfoEx, (LPWSTR *) &info, &bytes) && info) {
-          e.console_locked = bytes >= sizeof(WTSINFOEXW) && info->Level == 1 && info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK;
-          WTSFreeMemory(info);
-        }
-      }
-      DWORD self_sess = 0;
-      ProcessIdToSessionId(GetCurrentProcessId(), &self_sess);
-      e.session_ok = platf::is_running_as_system() && self_sess == WTSGetActiveConsoleSessionId();
+      // 隨時會變的三項（使用者、鎖定、session）：和 PRECHECK 沿用探測結果時的補查是同一段
+      refresh_volatile_environment(e);
 
       LUID luid {};
       std::string why;
-      e.adapter_rule_ok = platf::dxgi::vr_pick_adapter_luid(luid, why);
+      // 閒置時每 60 秒的例行探測：adapter 沒變過就不必再對每張卡建一次 D3D11 device
+      e.adapter_rule_ok = reuse_adapter ? platf::dxgi::vr_pick_adapter_luid_cached(luid, why) : platf::dxgi::vr_pick_adapter_luid(luid, why);
       e.adapter_reason = e.adapter_rule_ok ? std::format("luid=0x{:08x}{:08x}", (uint32_t) luid.HighPart, luid.LowPart) : why;
       e.adapter_luid_low = luid.LowPart;
       e.adapter_luid_high = luid.HighPart;
@@ -1005,6 +1013,48 @@ namespace vr {
       return v.empty() ? 0 : v.front().pid;
     }
 
+    proc_snapshot_t snapshot_procs() {
+      // 一次走訪取齊；每一欄的取法要和各自的無參數函式一致（vrserver_pid()＝第一個 vrserver.exe，
+      // vrserver_image_running()＝第一個查得到映像的，detect_conflicts 的 VirtualDesktop 檢查＝有就算）
+      proc_snapshot_t out;
+      const DWORD console = WTSGetActiveConsoleSessionId();
+      handle_t snap {CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)};
+      if (!snap) {
+        return out;
+      }
+      PROCESSENTRY32W pe {};
+      pe.dwSize = sizeof(pe);
+      for (BOOL ok = Process32FirstW(snap.h, &pe); ok; ok = Process32NextW(snap.h, &pe)) {
+        const bool is_vrserver = _wcsicmp(pe.szExeFile, L"vrserver.exe") == 0;
+        if (!is_vrserver && _wcsicmp(pe.szExeFile, L"VirtualDesktop.Streamer.exe") != 0) {
+          continue;
+        }
+        DWORD sess = 0;
+        if (!ProcessIdToSessionId(pe.th32ProcessID, &sess) || sess != console) {
+          continue;
+        }
+        if (!is_vrserver) {
+          out.vd_streamer = true;
+          continue;
+        }
+        if (out.vrserver_pid == 0) {
+          out.vrserver_pid = pe.th32ProcessID;
+        }
+        if (out.vrserver_image.empty()) {
+          handle_t h {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID)};
+          if (h) {
+            std::wstring buf(1024, L'\0');
+            DWORD n = static_cast<DWORD>(buf.size());
+            if (QueryFullProcessImageNameW(h.h, 0, buf.data(), &n)) {
+              buf.resize(n);
+              out.vrserver_image = std::move(buf);
+            }
+          }
+        }
+      }
+      return out;
+    }
+
     uint32_t vrserver_uptime_ms() {
       const DWORD pid = vrserver_pid();
       if (!pid) {
@@ -1051,7 +1101,13 @@ namespace vr {
     }
 
     std::wstring expected_driver_host_image() {
-      auto img = vrserver_image_running();
+      proc_snapshot_t procs;
+      procs.vrserver_image = vrserver_image_running();
+      return expected_driver_host_image(procs);
+    }
+
+    std::wstring expected_driver_host_image(const proc_snapshot_t &procs) {
+      auto img = procs.vrserver_image;
       if (img.empty()) {
         const auto e = cached_environment();
         if (!e.steamvr_runtime.empty()) {
@@ -1588,10 +1644,14 @@ namespace vr {
 
     // ── 衝突 ─────────────────────────────────────────────────────────────
     conflict_t detect_conflicts(bool driver_connected, uint32_t other_hmd) {
+      return detect_conflicts(driver_connected, other_hmd, snapshot_procs());
+    }
+
+    conflict_t detect_conflicts(bool driver_connected, uint32_t other_hmd, const proc_snapshot_t &procs) {
       conflict_t c;
       const auto env = cached_environment();
       c.openxr_other = env.openxr_other;
-      c.steamvr_running = vrserver_pid() != 0;
+      c.steamvr_running = procs.vrserver_pid != 0;
       c.our_driver = c.steamvr_running && driver_connected && other_hmd != VRIPC_OTHER_HMD_PRESENT;
       if (auto u = console_user()) {
         const auto id = reg_dword(HKEY_USERS, u->sid + L"\\Software\\Valve\\Steam", L"RunningAppID");
@@ -1616,7 +1676,7 @@ namespace vr {
         c.kind = "vrlink";
       } else if (c.vr_app_running) {
         c.kind = "vr-app";
-      } else if (!console_procs(L"VirtualDesktop.Streamer.exe").empty()) {
+      } else if (procs.vd_streamer) {
         c.kind = "vd-streamer";
       }
       c.any = !c.kind.empty();

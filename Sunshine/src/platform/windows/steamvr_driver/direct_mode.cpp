@@ -395,6 +395,12 @@ namespace vrdrv {
     });
     unlock();
     push_timing(ctx_, VRIPC_TE_SUBMIT_LAYER, (uint32_t) frame_id_, index_for_timing, pred_us);
+    // §VR-STALE-COAST／§VR-CTRL-EXTRAP：記下 SteamVR 這幾幀的姿態預測時間（tracking 估外插量用；見 driver_context.h）。
+    // 只收每一幀的第 0 層（scene）：儀表板與覆蓋層是 SteamVR 自己畫的，它們的預測時間不是遊戲拿姿態用的那一個
+    if (index_for_timing == 0 && pred_us > 0 && pred_us < 150000) {
+      const int32_t prev = ctx_.pred_us_recent.load(std::memory_order_relaxed);
+      ctx_.pred_us_recent.store(prev == 0 ? (int32_t) pred_us : prev + ((int32_t) pred_us - prev) / 8, std::memory_order_relaxed);
+    }
   }
 
   // ── Present ─────────────────────────────────────────────────────────
@@ -539,7 +545,9 @@ namespace vrdrv {
     }
   }
 
-  void direct_mode_t::compose_and_publish_locked(int64_t present_qpc, uint32_t &exit_code) {
+  // §PERF-1113：held_sync＝Present 已經 AcquireSync 成功的 keyed mutex（沒有就 nullptr）。走到合成並 Flush 的那條路徑
+  // 會順便把它放掉並把 sync_released 設成 true；其他提早 return 的路徑不碰它，由 Present 尾端放（原本的做法）。
+  void direct_mode_t::compose_and_publish_locked(int64_t present_qpc, uint32_t &exit_code, IDXGIKeyedMutex *held_sync, bool &sync_released) {
     last_presented_ = false;
     auto &st = ctx_.ipc->status();
     if (!ring_ || !gen_ || !ctx_.active() || comp_failed_) {
@@ -796,13 +804,31 @@ namespace vrdrv {
       }
       tl.cover[0] = (float) tile_w_ / (float) tile_render_w_;
       tl.cover[1] = (float) tile_h_ / (float) tile_render_h_;
-      comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, 0.0f, nullptr, 0.0f, &tl);
+      // §PERF-1113：最後兩個參數＝ring 的實際尺寸，讓 compose 判斷第 0 層蓋滿時不必先清整張
+      comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, 0.0f, nullptr, 0.0f, &tl, R.width, R.height);
     } else {
-      comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, fovea_a_, fovea_active ? fovea_out_centre : nullptr, fovea_u0_);
+      comp_.compose(ctx, R.rtv[slot].Get(), R.width / 2, R.height, eye_rect_, in, n, fovea_a_, fovea_active ? fovea_out_centre : nullptr, fovea_u0_, nullptr, R.width, R.height);
     }
     const uint64_t value = ++R.fence_n;
     HRESULT hr = device_.ctx4()->Signal(R.shared_fence.Get(), value);
-    ctx->Flush();  // 跨行程 CPU 觀察需要（§B.7）
+    // §PERF-1113：sync texture 的 keyed mutex 在這裡就放，和合成的 draw、Signal 用同一次 Flush 送出（原本 Present 尾端
+    // 另外 ReleaseSync＋第二次 Flush，每幀多一次核心態提交）。語意不變的理由：
+    //  - release 是排進 immediate context 命令流的一筆（見 Present 尾端的註解），位置在讀 app 貼圖的 draw 之後；
+    //    之後到 Present 結束都不再讀 app 貼圖。命令的先後和原本一樣（draw → Signal → release），只是少一個 Flush 邊界；
+    //  - shared_fence 的 Signal 仍然緊接著 Flush，server 端 CPU 觀察到完成值的時機不變（§B.7）；
+    //  - vrcompositor 拿到鎖的時刻只會提早（少掉 publish_frame 那幾十微秒），不會變晚。
+    // 旗標在 Flush 之後才設：中間若丟出例外，Present 尾端照舊 ReleaseSync＋Flush（重複 release 只會回錯誤碼）。
+    HRESULT sync_rhr = S_OK;
+    if (held_sync) {
+      sync_rhr = held_sync->ReleaseSync(0);
+    }
+    ctx->Flush();  // 跨行程 CPU 觀察需要（§B.7）；§PERF-1113：同時把上面的 release 送出去
+    if (held_sync) {
+      sync_released = true;
+      if (FAILED(sync_rhr)) {
+        ++sync_release_failed_;
+      }
+    }
     if (FAILED(hr)) {
       const HRESULT rr = device_.removed_reason();
       VRDRV_LOG_ERROR("signal-failed hr=0x%08x removed=0x%08x", (unsigned) hr, (unsigned) rr);
@@ -920,6 +946,7 @@ namespace vrdrv {
       km = sync_mutex_locked(syncTexture);
     });
     bool acquired = false;
+    bool sync_released = false;  // §PERF-1113：compose_and_publish_locked 已經放掉 keyed mutex 並 Flush
     if (km) {
       // §VR-ACQ-WAIT（2026-11-05）：這把鎖要等 vrcompositor 在 GPU 上的合成做完才放；重的遊戲（ACC）GPU 排在前面，
       // 放鎖常在 Present 之後 15～20 ms。舊的 5 ms 逾時讓每一張都被丟掉（composed=0、acqTimeout=全部＝頭盔定格）。
@@ -943,10 +970,12 @@ namespace vrdrv {
     if (!degraded() && (acquired || !km)) {
       // 內層只做合成；攔到例外時外層照樣 ReleaseSync(0)，vrcompositor 不會卡在 sync texture
       guarded("Present", [&]() {
-        compose_and_publish_locked(present_qpc, exit_code);
+        compose_and_publish_locked(present_qpc, exit_code, acquired ? km : nullptr, sync_released);
       });
     }
-    if (acquired) {
+    // §PERF-1113：有合成的那條路徑已經把 release 併進它自己的 Flush（sync_released）；沒有合成（noslot、standby、
+    // 沒有 ring、例外）時維持下面原本的 ReleaseSync＋Flush
+    if (acquired && !sync_released) {
       const HRESULT rhr = km->ReleaseSync(0);
       // keyed mutex 的 release 排在 immediate context 的命令流裡：沒有合成（noslot、standby）時本幀沒有其他 Flush，
       // release 會一直留在本行程，vrcompositor 的 AcquireSync 就逾時（V4 host 實測：standby 時 compositor 掉到 10 fps、

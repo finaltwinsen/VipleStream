@@ -16,6 +16,9 @@ Item {
 
     property bool pollingActive: false
     property bool clearOnBack: false
+    // §PERF-1113 A21：這個外殼是頭盔 VR 介面（平面視窗 main.qml 沒有這個屬性）。AppContent 在 Component.onCompleted
+    // 就要知道——那時 VrLauncher.shellActive 還是 false（要等 XR session 起來才設）
+    readonly property bool vrShell: true
     // 介面一直顯示在 XR 面板上
     property bool active: true
     property Theme theme: Theme {}
@@ -65,10 +68,37 @@ Item {
         }
     }
 
-    Component.onCompleted: {
-        // 平面視窗看「可見＋有焦點」決定要不要輪詢主機；VR 介面一直都在
-        ComputerManager.startPolling()
-        pollingActive = true
+    // §PERF-1113：要不要輪詢主機，所有條件收在這一個函式（ComputerManager 是引用計數，start／stop 一定要成對，
+    // 只靠 pollingActive 這一個旗標把關）：
+    //   - visible：同一個行程裡的串流（StreamSegue 在連上後設 window.visible = false、結束時設回 true）。平面視窗靠
+    //     onVisibleChanged 停輪詢，這裡的根是 Item，原本沒有對應的處理，整場串流每 3 秒一次 HTTPS 握手照跑
+    //   - VrLauncher.running：串流子行程或影片在跑（§REVIEW-1111）
+    //   - unfocusedLong：XR session 不在前景超過 unfocusedTimer 的時間（頭盔取下、被儀表板蓋住）。
+    //     VrLauncher.shellFocused 目前恆為 true（XR 那一側還沒把狀態傳出來），所以這一條現在不會成立
+    property bool unfocusedLong: false
+
+    function updatePolling() {
+        var want = window.visible && !VrLauncher.running && !window.unfocusedLong
+        if (want && !window.pollingActive) {
+            // 恢復時會立刻查一次，介面拿到的是最新狀態
+            ComputerManager.startPolling()
+            window.pollingActive = true
+        }
+        else if (!want && window.pollingActive) {
+            ComputerManager.stopPollingAsync()
+            window.pollingActive = false
+        }
+    }
+
+    Component.onCompleted: updatePolling()
+    onVisibleChanged: updatePolling()
+    onUnfocusedLongChanged: updatePolling()
+
+    Timer {
+        id: unfocusedTimer
+        // 開一下儀表板不要馬上停
+        interval: 60000
+        onTriggered: window.unfocusedLong = true
     }
 
     // §REVIEW-1111：串流子行程在跑的時候停掉主機輪詢。這段時間頭盔已經交給子行程、介面沒有人在看，
@@ -78,13 +108,16 @@ Item {
         target: VrLauncher
 
         function onRunningChanged() {
-            if (VrLauncher.running && window.pollingActive) {
-                ComputerManager.stopPollingAsync()
-                window.pollingActive = false
+            window.updatePolling()
+        }
+
+        function onShellFocusedChanged() {
+            if (VrLauncher.shellFocused) {
+                unfocusedTimer.stop()
+                window.unfocusedLong = false
             }
-            else if (!VrLauncher.running && !window.pollingActive) {
-                ComputerManager.startPolling()
-                window.pollingActive = true
+            else {
+                unfocusedTimer.restart()
             }
         }
     }

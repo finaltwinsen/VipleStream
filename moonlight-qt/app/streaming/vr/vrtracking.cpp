@@ -1,5 +1,7 @@
 #include "vrtracking.h"
 
+#include "backend/tailscalepath.h"  // 中繼時降頻
+
 #include <SDL.h>
 
 #include <chrono>
@@ -112,6 +114,16 @@ void VrTrackingSender::run()
     uint32_t sampleId = 0;
     uint32_t sent = 0, failed = 0, late = 0, noPose = 0;
     uint32_t totalSent = 0, totalFailed = 0, totalLate = 0, totalNoPose = 0;
+    // §PERF-1113：量每一拍花在「取姿態」（m_Source：xrLocateSpace 頭＋雙手＋視線）與「送出」（LiSendVrTracking：加密＋
+    // 每條連線一次 sendto）的時間，每 10 秒印平均與最大。只量不改行為——每秒 576 拍值不值得降，要先有這兩個數字。
+    uint64_t srcNsSum = 0, sendNsSum = 0;
+    uint32_t srcNsMax = 0, sendNsMax = 0, srcCount = 0, sendCount = 0;
+    // §PERF-1113 A35 中繼降頻：session 位址那條 Tailscale 路徑走 DERP（TCP 轉送，往返動輒數百毫秒）而且 tracking 只有這一條路時，
+    // 每個顯示週期只送一筆——每 1.7 ms 一筆最新姿態在這種延遲下沒有意義，只是佔掉中繼的上行。
+    // 有第二條連線就不降：那條可能是區網，降了它也跟著變稀。封包格式不變，host 照舊拿最新一筆。
+    bool thinning = false;
+    uint32_t thinTick = 0, thinSkipped = 0;
+    auto thinSince = start;
 
     while (m_Running.load()) {
         VIPLE_VR_TRACKING sample;
@@ -120,13 +132,45 @@ void VrTrackingSender::run()
         const auto now = clock::now();
         const uint64_t sampleTimeNs = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
             now.time_since_epoch()).count();
+        const bool thin = TailscalePath::onDerpRelay() && LiGetVrLinkCount() <= 1;
+        if (thin != thinning) {
+            thinning = thin;
+            if (thin) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-POSE] relay thinning on: sending 1 of %d ticks (Tailscale path is on a DERP relay, single link)",
+                            VIPLE_VR_TRACKING_RATE_MUL);
+                thinSince = now;
+            }
+            else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-POSE] relay thinning off after %.1f s (%u ticks skipped)",
+                            std::chrono::duration<double>(now - thinSince).count(), thinSkipped);
+            }
+            thinTick = 0;  // 切換的這一拍照送
+            thinSkipped = 0;
+        }
+        // 跳過的拍子整拍不做：不取樣、不遞增 sampleId、不記進 VrSampleHistory（下面兩處的 skipTick 分支）
+        const bool skipTick = thinning && (thinTick++ % VIPLE_VR_TRACKING_RATE_MUL) != 0;
         bool havePose = true;
-        if (m_Source) {
+        if (skipTick) {
+            thinSkipped++;
+        }
+        else if (m_Source) {
             // M4a R1：真 XR。來源填 pose[HMD]、flags、predictNs；取樣時間仍是 client 單調時鐘（M1a 定義），
             // 先填好讓來源讀得到（--vr-synthetic-hmd 的合成姿態照「取樣時間＋predictNs」那一刻算）
             sample.predictNs = predictNs;
             sample.sampleTimeNs = sampleTimeNs;
             havePose = m_Source(&sample);
+            {
+                // §PERF-1113：取姿態花了多久（見上面的說明）
+                const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - now).count();
+                const uint32_t v = ns <= 0 ? 0u : (ns > 0xFFFFFFFFLL ? 0xFFFFFFFFu : (uint32_t)ns);
+                srcNsSum += v;
+                srcCount++;
+                if (v > srcNsMax) {
+                    srcNsMax = v;
+                }
+            }
         }
         else {
             // §REVIEW-1104：合成姿態要對到 sampleTimeNs+predictNs，否則 host 不再補這一段，畫面固定落後約 3 個顯示週期
@@ -143,13 +187,17 @@ void VrTrackingSender::run()
         sample.spaceEpoch = 0;
         sample.sampleTimeNs = sampleTimeNs;
 
-        if (!havePose) {
+        if (skipTick) {
+            // 中繼降頻：這一拍不送（也不算進 noPose）
+        }
+        else if (!havePose) {
             noPose++;
             totalNoPose++;
         }
         else {
             sample.sampleId = ++sampleId;
             VrSampleHistory::record(sample.sampleId, sample.sampleTimeNs);
+            const auto sendStart = clock::now();  // §PERF-1113：送出花了多久
             if (LiSendVrTracking(&sample) == 0) {
                 sent++;
                 totalSent++;
@@ -158,6 +206,15 @@ void VrTrackingSender::run()
                 failed++;
                 totalFailed++;
             }
+            {
+                const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - sendStart).count();
+                const uint32_t v = ns <= 0 ? 0u : (ns > 0xFFFFFFFFLL ? 0xFFFFFFFFu : (uint32_t)ns);
+                sendNsSum += v;
+                sendCount++;
+                if (v > sendNsMax) {
+                    sendNsMax = v;
+                }
+            }
         }
 
         if (now - lastLog >= std::chrono::seconds(10)) {
@@ -165,6 +222,13 @@ void VrTrackingSender::run()
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VR-POSE] 10s: sent=%u (%.1f/s) fail=%u late=%u noPose=%u lastId=%u",
                         sent, sent / secs, failed, late, noPose, sampleId);
+            // §PERF-1113：另外印一行（原本那一行的欄位不動）。src＝取姿態、send＝送出，單位微秒；src 的 n＝0 代表用的是合成姿態
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-POSE] cost 10s: src avg=%.1f max=%.1f us (n=%u) send avg=%.1f max=%.1f us (n=%u)",
+                        srcCount ? srcNsSum / 1000.0 / srcCount : 0.0, srcNsMax / 1000.0, srcCount,
+                        sendCount ? sendNsSum / 1000.0 / sendCount : 0.0, sendNsMax / 1000.0, sendCount);
+            srcNsSum = sendNsSum = 0;
+            srcNsMax = sendNsMax = srcCount = sendCount = 0;
             sent = failed = late = noPose = 0;
             lastLog = now;
         }

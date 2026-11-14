@@ -183,6 +183,8 @@
           </div>
         </div>
         <div>
+          <!-- 畫面只載入檔尾時標出「顯示量／總量」；只有數字與單位，不需要翻譯 -->
+          <div class="small text-muted text-end pb-1" v-if="logStart > 0">&hellip; {{ logShownMB }} / {{ logTotalMB }} MB</div>
           <div class="troubleshooting-logs" ref="logsContainer">
             <div class="log-nav-overlay">
               <div class="log-nav-controls">
@@ -200,6 +202,7 @@
                 </button>
                 <button class="log-nav-btn" @click="copyLogs" title="Copy Logs">
                   <check :size="18" class="icon text-success" v-if="logsCopied"></check>
+                  <x-circle :size="18" class="icon text-danger" v-else-if="logsCopyFailed"></x-circle>
                   <copy :size="18" class="icon" v-else></copy>
                 </button>
               </div>
@@ -234,6 +237,10 @@
       XCircle,
     } from 'lucide-vue-next'
 
+    // 輪詢只抓 log 檔尾這麼多位元組：整份可能幾十 MB，每 5 秒重抓、重新解析整份很貴。
+    // 完整內容在按 Copy Logs 時另外抓。
+    const LOG_TAIL_BYTES = 4 * 1024 * 1024;
+
     const app = createApp({
       components: {
         Navbar,
@@ -261,7 +268,11 @@
           ddResetPressed: false,
           ddResetStatus: null,
           logsCopied: false,
+          logsCopyFailed: false,
           logs: 'Loading...',
+          // 伺服器回的 X-Log-Start／X-Log-Size：logStart > 0 代表畫面上只有檔尾
+          logStart: 0,
+          logSize: 0,
           logFilter: null,
           logInterval: null,
           restartPressed: false,
@@ -285,12 +296,15 @@
       },
       computed: {
         actualLogs() {
-          if (!this.logFilter) return this.logs;
-          const filterLower = this.logFilter.toLowerCase();
-          return this.logs
-            .split("\n")
-            .filter((x) => x.toLowerCase().includes(filterLower))
-            .join("\n");
+          return this.filterLogText(this.logs);
+        },
+
+        logShownMB() {
+          return ((this.logSize - this.logStart) / 1048576).toFixed(1);
+        },
+
+        logTotalMB() {
+          return (this.logSize / 1048576).toFixed(1);
         },
 
         /**
@@ -403,6 +417,8 @@
       },
       created() {
         this._logsCopyTimeout = null;
+        this._logsFetching = false;
+        this._logsJumpUntil = 0;
         fetch("/api/config")
           .then((r) => r.json())
           .then((r) => {
@@ -424,12 +440,94 @@
         clearInterval(this.logInterval);
       },
       methods: {
+        filterLogText(text) {
+          if (!this.logFilter) return text;
+          const filterLower = this.logFilter.toLowerCase();
+          return text
+            .split("\n")
+            .filter((x) => x.toLowerCase().includes(filterLower))
+            .join("\n");
+        },
         refreshLogs() {
-          fetch("./api/logs",)
-            .then((r) => r.text())
+          // 上一次還沒回來就不再發：log 大或連線慢時，5 秒一次的請求會疊起來
+          if (this._logsFetching) return;
+          this._logsFetching = true;
+          fetch("./api/logs?tail=" + LOG_TAIL_BYTES)
             .then((r) => {
-              this.logs = r;
+              // 舊版伺服器沒有這兩個標頭（也不認得 tail，回的是整份）：當成沒有省略
+              const start = Number(r.headers.get("X-Log-Start")) || 0;
+              const size = Number(r.headers.get("X-Log-Size")) || 0;
+              return r.text().then((text) => {
+                // 檔尾的起點往後移了，每一筆的序號都會變：用內容把選取的那一筆找回來，
+                // 找不到（已經移出畫面）就取消選取，免得標到別筆
+                const moved = start !== this.logStart;
+                const selected = moved && this.currentLogIndex >= 0
+                  ? this.parsedLogEntries[this.currentLogIndex]
+                  : null;
+                // 開頭被裁掉的量和尾端增加的差不多，捲軸數值不變時同一個位置的內容會往後跑：
+                // 記下可視範圍最上面那一筆，畫完再捲回原位（平滑捲動進行中不做，改 scrollTop 會打斷它）
+                const anchor = moved && Date.now() >= this._logsJumpUntil
+                  ? this.captureLogAnchor()
+                  : null;
+                this.logStart = start;
+                this.logSize = size;
+                this.logs = text;
+                if (selected) {
+                  this.currentLogIndex = this.relocateLogEntry(selected);
+                }
+                if (anchor) {
+                  const index = this.relocateLogEntry(anchor.entry);
+                  // 找不到＝那一筆已經移出載入範圍，沒有原位可回
+                  if (index >= 0) {
+                    this.$nextTick(() => this.restoreLogAnchor(index, anchor.offset));
+                  }
+                }
+              });
+            })
+            .catch((err) => {
+              console.error('Failed to fetch logs:', err);
+            })
+            .finally(() => {
+              this._logsFetching = false;
             });
+        },
+        // 檔尾只從開頭被裁、在尾端增加，同一筆的新序號不會比舊的大：從舊序號往回找
+        relocateLogEntry(old) {
+          const entries = this.parsedLogEntries;
+          for (let i = Math.min(old.index, entries.length - 1); i >= 0; i--) {
+            if (entries[i].raw === old.raw) return i;
+          }
+          return -1;
+        },
+        // log 區可視範圍最上面的那一筆，以及它的上緣離可視範圍頂端多遠（要在換內容之前呼叫）
+        captureLogAnchor() {
+          const container = this.$refs.logsContainer;
+          const pre = container && container.querySelector('pre');
+          const entries = this.parsedLogEntries;
+          // 畫面上每筆一個 span、順序與 entries 相同；數量對不上（畫面還沒跟上）就不做
+          if (!pre || pre.children.length !== entries.length) return null;
+          const spans = pre.children;
+          const top = container.getBoundingClientRect().top + container.clientTop;
+          // 每筆的下緣由上往下遞增：二分找第一筆下緣還在可視範圍內的
+          let lo = 0;
+          let hi = spans.length;
+          while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (spans[mid].getBoundingClientRect().bottom > top) hi = mid;
+            else lo = mid + 1;
+          }
+          if (lo >= spans.length) return null;
+          return { entry: entries[lo], offset: spans[lo].getBoundingClientRect().top - top };
+        },
+        // 新內容畫出來之後（$nextTick）把那一筆捲回原本的位置
+        restoreLogAnchor(index, offset) {
+          const container = this.$refs.logsContainer;
+          const pre = container && container.querySelector('pre');
+          const el = pre && pre.children[index];
+          if (!el) return;
+          const top = container.getBoundingClientRect().top + container.clientTop;
+          const delta = el.getBoundingClientRect().top - top - offset;
+          if (Math.abs(delta) >= 1) container.scrollTop += delta;
         },
         closeApp() {
           this.closeAppPressed = true;
@@ -521,21 +619,55 @@
           this.showApplyMessage = false;
         },
         copyLogs() {
-          // Copy the filtered view if a filter is active.
-          navigator.clipboard.writeText(this.actualLogs).then(() => {
+          const show = (ok) => {
             // Clear any existing reset timer (handles rapid successive clicks).
             if (this._logsCopyTimeout) clearTimeout(this._logsCopyTimeout);
 
-            // Show checkmark feedback.
-            this.logsCopied = true;
+            // Show checkmark feedback. 失敗時換成紅色的叉：只寫 console 的話按了像沒反應
+            this.logsCopied = ok;
+            this.logsCopyFailed = !ok;
 
             // Revert icon after 2 seconds.
             this._logsCopyTimeout = setTimeout(() => {
               this.logsCopied = false;
+              this.logsCopyFailed = false;
             }, 2000);
-          }).catch((err) => {
+          };
+          const done = () => show(true);
+          const fail = (err) => {
             console.error('Failed to copy logs:', err);
-          });
+            show(false);
+          };
+
+          // Copy the filtered view if a filter is active.
+          if (!(this.logStart > 0)) {
+            // 畫面上就是整份：照原本同步寫入剪貼簿
+            navigator.clipboard.writeText(this.actualLogs).then(done).catch(fail);
+            return;
+          }
+          // 畫面上只有檔尾：複製的要是完整的 log，另外抓一次再套同一個篩選條件
+          const full = fetch("./api/logs")
+            .then((r) => {
+              // 錯誤回應（例如登入逾時）的內容不是 log，不要複製出去
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              return r.text();
+            })
+            .then((text) => this.filterLogText(text));
+          const writeLater = () => full.then((text) => navigator.clipboard.writeText(text));
+          let pending;
+          try {
+            // Safari 只准在點擊的同步路徑上寫剪貼簿，等 fetch 回來才寫會被拒絕：
+            // 現在就呼叫 write()，內容用 Promise 交給 ClipboardItem
+            pending = navigator.clipboard.write([
+              new ClipboardItem({
+                'text/plain': full.then((text) => new Blob([text], { type: 'text/plain' })),
+              }),
+            ]).catch(writeLater);
+          } catch (e) {
+            // 沒有 ClipboardItem、或它不收 Promise（較舊的瀏覽器）：抓完再寫
+            pending = writeLater();
+          }
+          pending.then(done).catch(fail);
         },
         restart() {
           this.restartPressed = true;
@@ -661,6 +793,9 @@
 
           // Reset the selected error/warning index when jumping to top or bottom
           this.currentLogIndex = -1;
+
+          // 平滑捲動要一點時間，這段期間輪詢不做捲動錨定（見 refreshLogs）
+          this._logsJumpUntil = Date.now() + 1500;
 
           if (where === 'top') {
             container.scrollTo({ top: 0, behavior: 'smooth' });

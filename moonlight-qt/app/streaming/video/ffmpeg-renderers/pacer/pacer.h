@@ -72,7 +72,7 @@ private:
 
     static int renderThread(void* context);
 
-    void handleVsync(int timeUntilNextVsyncMillis);
+    void handleVsync(int timeUntilNextVsyncUs);  // §PERF-1113：單位改成微秒（原本整數毫秒，144／240 Hz 會少算將近 1 ms）
 
     void enqueueFrameForRenderingAndUnlock(AVFrame* frame);
 

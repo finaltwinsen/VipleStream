@@ -837,6 +837,13 @@ Flickable {
 
                         // ignore setting the index at first, and actually set it when the component is loaded
                         Component.onCompleted: {
+                            // §PERF-1113 A21：VR 模式的設定頁不顯示 2D 這一區（basicSettingsGroupBox 的 visible），清單不必建，
+                            // 也就不必為它列舉顯示器（SDL 視訊子系統初始化＋模式列舉，每開一次設定頁做一次）。
+                            // 設定頁開著的時候模式不會變：切換模式一定先把這一頁退掉（AppContent 的 modeDialog.choose）
+                            if (settingsPage.vrSettingsMode) {
+                                return
+                            }
+
                             // Refresh display data before using it to build the list
                             SystemProperties.refreshDisplays()
 
@@ -1360,6 +1367,11 @@ Flickable {
                         }
 
                         function reinitialize() {
+                            // §PERF-1113 A21：同上面的解析度清單，VR 模式不建（換語言時再被叫進來也一樣）
+                            if (settingsPage.vrSettingsMode) {
+                                return
+                            }
+
                             // VipleStream: populate the FPS dropdown with every
                             // refresh rate each attached display advertises at its
                             // desktop resolution (seed 30/60 are already in

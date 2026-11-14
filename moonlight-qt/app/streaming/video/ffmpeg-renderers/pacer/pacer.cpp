@@ -13,8 +13,11 @@
 
 #include <SDL_syswm.h>
 
+#include <QDeadlineTimer>
+
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 
 // Limit the number of queued frames to prevent excessive memory consumption
 // if the V-Sync source or renderer is blocked for a while. It's important
@@ -174,7 +177,9 @@ int Pacer::vsyncThread(void *context)
             break;
         }
 
-        me->handleVsync(1000 / me->m_DisplayFps);
+        // §PERF-1113：週期改用微秒。整數毫秒在 144 Hz 得到 6 ms（實際 6.94）、240 Hz 得到 4 ms（實際 4.17），
+        // 「來不及趕上這個 vblank」的區間因此比設計的 TIMER_SLACK_MS 多出將近 1 ms
+        me->handleVsync(1000000 / me->m_DisplayFps);
     }
 
     return 0;
@@ -251,7 +256,7 @@ void Pacer::enqueueFrameForRenderingAndUnlock(AVFrame *frame)
 
 // Called in an arbitrary thread by the IVsyncSource on V-sync
 // or an event synchronized with V-sync
-void Pacer::handleVsync(int timeUntilNextVsyncMillis)
+void Pacer::handleVsync(int timeUntilNextVsyncUs)
 {
     // Make sure initialize() has been called
     SDL_assert(m_MaxVideoFps != 0);
@@ -302,8 +307,20 @@ void Pacer::handleVsync(int timeUntilNextVsyncMillis)
     if (m_PacingQueue.isEmpty()) {
         // Wait for a frame to arrive or for V-Sync to elapse. If V-Sync
         // elapses without a frame, just render the next image again.
-        if (!m_PacingQueueNotEmpty.wait(&m_FrameQueueLock,
-                SDL_max(timeUntilNextVsyncMillis, TIMER_SLACK_MS) - TIMER_SLACK_MS)) {
+        // §PERF-1113：等到「下一個 vblank 前 TIMER_SLACK_MS」為止，以微秒計算。slack 本身沒有改。
+        const int slackUs = TIMER_SLACK_MS * 1000;
+        const int waitUs = SDL_max(timeUntilNextVsyncUs, slackUs) - slackUs;
+        bool gotFrame;
+#ifdef Q_OS_WIN32
+        // Windows 的 QWaitCondition 只有毫秒精度，而且 QDeadlineTimer 換算成毫秒時是無條件進位（會吃掉最多 1 ms 的
+        // slack）。這裡自己換算成毫秒、無條件捨去——和改成微秒之前在每個更新率都相同（複核 11-13：原本寫成
+        // 「讓出 0.1 ms」會讓 144 Hz 多等 1 ms，留給繪製的時間從 2.9 ms 剩 1.9 ms）
+        gotFrame = m_PacingQueueNotEmpty.wait(&m_FrameQueueLock, (unsigned long)(waitUs / 1000));
+#else
+        gotFrame = m_PacingQueueNotEmpty.wait(&m_FrameQueueLock,
+                                              QDeadlineTimer(std::chrono::microseconds(waitUs), Qt::PreciseTimer));
+#endif
+        if (!gotFrame) {
             m_FrameQueueLock.unlock();
             return;
         }
@@ -409,6 +426,27 @@ void Pacer::renderFrame(AVFrame* frame)
         if (m_DiagStartUs == 0) {
             m_DiagStartUs = beforeRender;
         }
+    }
+
+    // Render it
+    m_VsyncRenderer->renderFrame(frame);
+    uint64_t afterRender = LiGetMicroseconds();
+
+    m_VideoStats->totalRenderTimeUs += (afterRender - beforeRender);
+    if (onRendered) {
+        onRendered(beforeRender, afterRender, frame);  // §VIPLE-2D-PERF
+    }
+    m_VideoStats->renderedFrames++;
+
+    // VipleStream: Track FRUC interpolated frames.
+    // §B2 2026-05-06 — TRIPLE 模式 1 server frame 推 2 張 interp，必須 +2
+    // 才能讓 ffmpeg.cpp effectiveFps 算出正確「有效輸出幀率」.  接口
+    // lastFrameInterpolatedCount() 預設行為兼容 DUAL (回傳 1).
+    m_VideoStats->frucInterpolatedFrames += m_VsyncRenderer->lastFrameInterpolatedCount();
+
+    // §PERF-1113：每 10 秒一次的彙總（240 次 snprintf、兩次排序、兩行 log）原本排在 renderFrame 之前，
+    // 那一幀因此晚交 0.1～0.3 ms；搬到這一幀交出去之後。上面只留每幀兩筆樣本的記錄
+    {
         if (beforeRender - m_DiagStartUs >= 10000000ull && m_DiagN > 0) {
             {
                 // 這一窗最後 240 張的逐幀等待（0.1 ms 為單位），看多排的那一格怎麼來、怎麼走
@@ -433,22 +471,6 @@ void Pacer::renderFrame(AVFrame* frame)
             m_DiagStartUs = beforeRender;
         }
     }
-
-    // Render it
-    m_VsyncRenderer->renderFrame(frame);
-    uint64_t afterRender = LiGetMicroseconds();
-
-    m_VideoStats->totalRenderTimeUs += (afterRender - beforeRender);
-    if (onRendered) {
-        onRendered(beforeRender, afterRender, frame);  // §VIPLE-2D-PERF
-    }
-    m_VideoStats->renderedFrames++;
-
-    // VipleStream: Track FRUC interpolated frames.
-    // §B2 2026-05-06 — TRIPLE 模式 1 server frame 推 2 張 interp，必須 +2
-    // 才能讓 ffmpeg.cpp effectiveFps 算出正確「有效輸出幀率」.  接口
-    // lastFrameInterpolatedCount() 預設行為兼容 DUAL (回傳 1).
-    m_VideoStats->frucInterpolatedFrames += m_VsyncRenderer->lastFrameInterpolatedCount();
 
     // Wait until after next frame to free this one to ensure the GPU
     // doesn't stall or read garbage if the backing buffer gets returned

@@ -587,9 +587,16 @@ bool NvComputer::wake() const
     return success;
 }
 
-NvComputer::ReachabilityType NvComputer::getActiveAddressReachability() const
+NvComputer::ReachabilityType NvComputer::getActiveAddressReachability(int* mtuOut, QHostAddress* peerOut) const
 {
     NvAddress copyOfActiveAddress;
+
+    if (mtuOut != nullptr) {
+        *mtuOut = 0;
+    }
+    if (peerOut != nullptr) {
+        *peerOut = QHostAddress();
+    }
 
     {
         QReadLocker readLocker(&lock);
@@ -634,7 +641,16 @@ NvComputer::ReachabilityType NvComputer::getActiveAddressReachability() const
                         qInfo() << "Found matching interface:" << nic.humanReadableName() << nic.hardwareAddress() << nic.flags();
                     }
 
+                    // §PERF-1113 A22：對端位址與這張介面的 MTU 交給呼叫端（在下面任何一個 return 之前填）
+                    if (peerOut != nullptr) {
+                        *peerOut = s.peerAddress();
+                    }
+
 #if QT_VERSION >= QT_VERSION_CHECK(5, 11, 0)
+                    if (mtuOut != nullptr) {
+                        *mtuOut = nic.maximumTransmissionUnit();
+                    }
+
                     if (logNic) {
                         qInfo() << "Interface Type:" << nic.type();
                         qInfo() << "Interface MTU:" << nic.maximumTransmissionUnit();

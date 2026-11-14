@@ -306,6 +306,7 @@ typedef struct _RTP_VIDEO_QUEUE {
 // §VR-MULTILINK-HOLD：沒有封包到的時候也要檢查等待的期限。RtpvHoldTimeoutMs 回傳最前面那個還能等幾毫秒
 // （0＝沒有在等）；接收逾時後呼叫 RtpvPollHold 把到期的放行。
 int RtpvHoldTimeoutMs(PRTP_VIDEO_QUEUE queue);
+int RtpvHoldTimeoutUs(PRTP_VIDEO_QUEUE queue);  // §PERF-1113：同上，單位微秒（0＝沒有在等；已到期＝1）
 void RtpvPollHold(PRTP_VIDEO_QUEUE queue);
 void RtpvPollGrace(PRTP_VIDEO_QUEUE queue);  // §K.17-GRACE-TIMEOUT
 // §VR-LINK-REPAIR：server 回了 REPAIR_GONE（這個 block 補不了）。只在影像接收執行緒呼叫。

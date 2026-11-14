@@ -46,6 +46,10 @@ public class FrucRenderer implements IFrucBackend {
     private int oesTextureId;
     private SurfaceTexture surfaceTexture;
     private Surface inputSurface;
+    // §PERF-1113：「影像到了」的通知改在專用執行緒收。建立 SurfaceTexture 的執行緒沒有 Looper 時，
+    // 不帶 Handler 的 listener 會被丟到主執行緒；主執行緒忙（觸控、虛擬手把重繪、浮層）時每一幀都要
+    // 多等，等超過 50 ms 那一幀就不顯示。
+    private android.os.HandlerThread frameAvailThread;
 
     // GL textures
     private int prevFrameTex, currFrameTex;
@@ -85,12 +89,6 @@ public class FrucRenderer implements IFrucBackend {
 
     // FBO for OES→RGBA conversion
     private int conversionFbo;
-
-    // Pre-allocated FBOs reused per frame in copyTexture / copyMVTexture.
-    // Old code did glGenFramebuffers + glDeleteFramebuffers around every
-    // single copy (4 GL calls × 2 copies × ~45 fps = ~360 GL calls/sec
-    // just for FBO lifecycle). Allocate once at init.
-    private int copyReadFbo, copyDrawFbo;
 
     // Fullscreen quad
     private FloatBuffer quadVertices;
@@ -297,6 +295,9 @@ public class FrucRenderer implements IFrucBackend {
 
         surfaceTexture = new SurfaceTexture(oesTextureId);
         surfaceTexture.setDefaultBufferSize(width, height);
+        // §PERF-1113：listener 本體只設旗標＋notifyAll、不碰 GL，換到專用 HandlerThread 沒有 context 問題
+        frameAvailThread = new android.os.HandlerThread("FRUC-FrameAvail");
+        frameAvailThread.start();
         surfaceTexture.setOnFrameAvailableListener(new SurfaceTexture.OnFrameAvailableListener() {
             @Override
             public void onFrameAvailable(SurfaceTexture st) {
@@ -305,7 +306,7 @@ public class FrucRenderer implements IFrucBackend {
                     frameSyncLock.notifyAll();
                 }
             }
-        });
+        }, new android.os.Handler(frameAvailThread.getLooper()));
         inputSurface = new Surface(surfaceTexture);
 
         // RGBA textures for prev/curr frames
@@ -348,13 +349,11 @@ public class FrucRenderer implements IFrucBackend {
         // Interpolated output
         interpFrameTex = createRgbaTexture(width, height);
 
-        // FBO for OES → RGBA conversion + 2 reusable FBOs for the
-        // per-frame copyTexture / copyMVTexture blits.
-        int[] fbos = new int[3];
-        GLES31.glGenFramebuffers(3, fbos, 0);
+        // FBO for OES → RGBA conversion.
+        // §PERF-1113：原本另外兩個給 copyTexture / copyMVTexture 用的 FBO 已隨每幀複製一起拿掉
+        int[] fbos = new int[1];
+        GLES31.glGenFramebuffers(1, fbos, 0);
         conversionFbo = fbos[0];
-        copyReadFbo = fbos[1];
-        copyDrawFbo = fbos[2];
 
         Log.i(TAG, "Textures: " + width + "x" + height + ", MV " + mvW + "x" + mvH);
     }
@@ -503,10 +502,10 @@ public class FrucRenderer implements IFrucBackend {
         if (shouldDump) frucDump.kickReadbackReal(currFrameTex);
 
         if (frameCount <= 1) {
-            copyTexture(currFrameTex, prevFrameTex);
             blitToScreen(currFrameTex);
             EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, System.nanoTime());
             EGL14.eglSwapBuffers(eglDisplay, eglSurface);
+            swapFrameTextures();
             lastRenderTimeMs = android.os.SystemClock.elapsedRealtime();
             logToFile("frame=1: first frame stored, no interp");
             // §B-DUMP-ANDROID: commit cycle 0 (real_0 only, no warp ran)
@@ -526,10 +525,11 @@ public class FrucRenderer implements IFrucBackend {
         // VipleStream v17: Skip FRUC on late frame or poor connection
         if (frameLate || connectionPoor) {
             // Skip ME/warp, just present real frame immediately and update state
-            copyTexture(currFrameTex, prevFrameTex);
             blitToScreen(currFrameTex);
             EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, System.nanoTime());
             EGL14.eglSwapBuffers(eglDisplay, eglSurface);
+            // §PERF-1113：這條分支原本也只更新「上一張」影像、不動 MV 場，交換版照舊
+            swapFrameTextures();
             if (frameLate && frameCount % 100 == 0) {
                 logToFile("frame=" + frameCount + " SKIPPED (late=" + gap + "ms, poor=" + connectionPoor + ")");
             }
@@ -539,27 +539,38 @@ public class FrucRenderer implements IFrucBackend {
             return false;
         }
 
+        // §PERF-1113：glGetError 的結果只在開頭幾幀才印，之後不再每幀呼叫四次
+        // （多執行緒 GL 驅動上每次都要跟驅動執行緒同步）。
+        // 複核（11-13）：傾印那一幀也要查——FrucDumpWriter 之後用 glGetError 判斷讀回有沒有成功，旗標要先清乾淨
+        final boolean checkGlErrors = frameCount <= 10 || shouldDump;
+
         // Check GL errors before compute
-        int glErr = GLES31.glGetError();
-        if (glErr != GLES31.GL_NO_ERROR && frameCount <= 5) {
-            logToFile("frame=" + frameCount + " GL error before compute: 0x" + Integer.toHexString(glErr));
+        if (checkGlErrors) {
+            int glErr = GLES31.glGetError();
+            if (glErr != GLES31.GL_NO_ERROR && frameCount <= 5) {
+                logToFile("frame=" + frameCount + " GL error before compute: 0x" + Integer.toHexString(glErr));
+            }
         }
 
         // Motion estimation (v17: with temporal predictor)
         runMotionEstimation();
 
-        glErr = GLES31.glGetError();
-        if (glErr != GLES31.GL_NO_ERROR && frameCount <= 10) {
-            logToFile("frame=" + frameCount + " GL error after motionEst: 0x" + Integer.toHexString(glErr));
+        if (checkGlErrors) {
+            int glErr = GLES31.glGetError();
+            if (glErr != GLES31.GL_NO_ERROR) {
+                logToFile("frame=" + frameCount + " GL error after motionEst: 0x" + Integer.toHexString(glErr));
+            }
         }
 
         // VipleStream v1.1.136: 3x3 median filter on the MV field
         // before warp consumes it.
         runMvMedian();
 
-        glErr = GLES31.glGetError();
-        if (glErr != GLES31.GL_NO_ERROR && frameCount <= 10) {
-            logToFile("frame=" + frameCount + " GL error after mvMedian: 0x" + Integer.toHexString(glErr));
+        if (checkGlErrors) {
+            int glErr = GLES31.glGetError();
+            if (glErr != GLES31.GL_NO_ERROR) {
+                logToFile("frame=" + frameCount + " GL error after mvMedian: 0x" + Integer.toHexString(glErr));
+            }
         }
 
         // §B-DUMP-ANDROID: snapshot the MV field warp will consume.
@@ -568,9 +579,11 @@ public class FrucRenderer implements IFrucBackend {
         // Warp + blend → interpFrameTex (v17: adaptive blend)
         runWarp();
 
-        glErr = GLES31.glGetError();
-        if (glErr != GLES31.GL_NO_ERROR && frameCount <= 10) {
-            logToFile("frame=" + frameCount + " GL error after warp: 0x" + Integer.toHexString(glErr));
+        if (checkGlErrors) {
+            int glErr = GLES31.glGetError();
+            if (glErr != GLES31.GL_NO_ERROR) {
+                logToFile("frame=" + frameCount + " GL error after warp: 0x" + Integer.toHexString(glErr));
+            }
         }
 
         // §B-DUMP-ANDROID: snapshot the warp output before it's blitted.
@@ -594,8 +607,9 @@ public class FrucRenderer implements IFrucBackend {
         EGL14.eglSwapBuffers(eglDisplay, eglSurface);
 
         // Save current as previous (frame + MV field)
-        copyTexture(currFrameTex, prevFrameTex);
-        copyMVTexture();
+        // §PERF-1113：交換貼圖 id，不搬像素。warp 讀的是 filteredMotionFieldTex，不受 MV 場交換影響。
+        swapFrameTextures();
+        swapMotionFieldTextures();
 
         interpolatedCount++;
 
@@ -739,37 +753,21 @@ public class FrucRenderer implements IFrucBackend {
         GLES31.glDisableVertexAttribArray(texLoc);
     }
 
-    private void copyTexture(int src, int dst) {
-        // FBO blit (glCopyImageSubData would require GLES 3.2). FBOs are
-        // pre-allocated in initTextures and reused — only the texture
-        // attachments change per call.
-        GLES31.glBindFramebuffer(GLES31.GL_READ_FRAMEBUFFER, copyReadFbo);
-        GLES31.glFramebufferTexture2D(GLES31.GL_READ_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, src, 0);
-
-        GLES31.glBindFramebuffer(GLES31.GL_DRAW_FRAMEBUFFER, copyDrawFbo);
-        GLES31.glFramebufferTexture2D(GLES31.GL_DRAW_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, dst, 0);
-
-        GLES31.glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GLES31.GL_COLOR_BUFFER_BIT, GLES31.GL_NEAREST);
-
-        GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, 0);
+    // §PERF-1113：「這張」變「上一張」改成交換兩個貼圖 id。兩張規格相同（createRgbaTexture），原本每張
+    // 輸入影像都做一次全解析度 FBO blit（1080p 讀＋寫約 16 MB）。交換後的 currFrameTex 內容是更舊的
+    // 一張，下一幀 convertOesToRgba 會整張覆寫；compute 的 sampler／image 綁定本來就每幀重綁。
+    private void swapFrameTextures() {
+        int t = prevFrameTex;
+        prevFrameTex = currFrameTex;
+        currFrameTex = t;
     }
 
-    // VipleStream v17: copy current MV field to previous for temporal smoothing
-    private void copyMVTexture() {
-        // §REVIEW-1104：以 FBO blit 讀取 compute shader 寫入之紋理前需插入 GL_FRAMEBUFFER_BARRIER_BIT
-        GLES31.glMemoryBarrier(GLES31.GL_FRAMEBUFFER_BARRIER_BIT);
-        int mvW = width / BLOCK_SIZE;
-        int mvH = height / BLOCK_SIZE;
-
-        GLES31.glBindFramebuffer(GLES31.GL_READ_FRAMEBUFFER, copyReadFbo);
-        GLES31.glFramebufferTexture2D(GLES31.GL_READ_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, motionFieldTex, 0);
-
-        GLES31.glBindFramebuffer(GLES31.GL_DRAW_FRAMEBUFFER, copyDrawFbo);
-        GLES31.glFramebufferTexture2D(GLES31.GL_DRAW_FRAMEBUFFER, GLES31.GL_COLOR_ATTACHMENT0, GLES31.GL_TEXTURE_2D, prevMotionFieldTex, 0);
-
-        GLES31.glBlitFramebuffer(0, 0, mvW, mvH, 0, 0, mvW, mvH, GLES31.GL_COLOR_BUFFER_BIT, GLES31.GL_NEAREST);
-
-        GLES31.glBindFramebuffer(GLES31.GL_FRAMEBUFFER, 0);
+    // §PERF-1113：MV 場同理（v17 的時間預測只讀 prevMotionFieldTex）。下一幀 ME 會整張覆寫
+    // motionFieldTex，讀寫之間有 runMotionEstimation 結尾的 barrier。
+    private void swapMotionFieldTextures() {
+        int t = prevMotionFieldTex;
+        prevMotionFieldTex = motionFieldTex;
+        motionFieldTex = t;
     }
 
     @Override
@@ -790,7 +788,23 @@ public class FrucRenderer implements IFrucBackend {
         }
         if (logWriter != null) { logWriter.close(); logWriter = null; }
         if (inputSurface != null) { inputSurface.release(); inputSurface = null; }
-        if (surfaceTexture != null) { surfaceTexture.release(); surfaceTexture = null; }
+        if (surfaceTexture != null) {
+            // §PERF-1113：先摘掉 listener 再 release，之後才收通知執行緒
+            surfaceTexture.setOnFrameAvailableListener(null);
+            surfaceTexture.release();
+            surfaceTexture = null;
+        }
+        if (frameAvailThread != null) {
+            // §PERF-1113：listener 只會短暫拿 frameSyncLock，這裡沒有握著它，join 不會互等；
+            // 加上逾時，萬一卡住也不拖住串流收尾。
+            frameAvailThread.quitSafely();
+            try {
+                frameAvailThread.join(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            frameAvailThread = null;
+        }
         // §REVIEW-1104：銷毀 EGL 資源前確保解除 EGL Context 與 Surface 綁定
         if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);

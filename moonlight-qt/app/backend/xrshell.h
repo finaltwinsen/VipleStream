@@ -75,6 +75,12 @@ public:
     // Steam 的 bug（任何遊戲結束都會，steam-for-linux #13690），跟我們怎麼結束無關。空畫面留著：關 session 前不會停在最後一張
     void shutdownXrForExit();
 
+    // §PERF-1113：XR session 的狀態（GUI 執行緒呼叫）。rendered＝runtime 要我們畫（VISIBLE／FOCUSED），focused＝FOCUSED。
+    // 目前沒有人呼叫（XrContext 還沒有把 session 狀態往外傳的回呼），兩個都維持預設的 true＝行為同以往。
+    // 接上之後：rendered=false 時介面不重畫（回來時補畫一張）；focused 轉給 VrLauncher.shellFocused，
+    // VrShell.qml 在不是 FOCUSED 超過一段時間後停主機輪詢
+    void setXrSessionState(bool rendered, bool focused);
+
     // 面板的像素尺寸
     static constexpr int kWidth = 1280;
     static constexpr int kHeight = 800;
@@ -82,6 +88,11 @@ public:
 private:
     void scheduleRender(bool sync);
     void renderNow();
+    // §PERF-1113：真的畫一張＋讀回＋交給 XR（不看閘控；renderNow() 與補畫用）。沒畫成回 false
+    bool renderFrame();
+    // §PERF-1113：介面的畫面現在有沒有人看得到／影片是否已經蓋住介面（見 .cpp 的 scheduleRender）
+    bool renderBlocked() const;
+    bool videoCoversShell() const;
     bool bringUpXr(QString* error);
     void shutdownXr();
     // 桌面模式的串流要用 XR：wantsXr＝true 先關掉自己的 session，false 再開回來
@@ -120,6 +131,10 @@ private:
     uint64_t m_RenderNs = 0;  // 10 秒視窗：畫＋讀回的時間
     uint64_t m_WinStartNs = 0;
     uint64_t m_LastRenderNs = 0;
+    // §PERF-1113：沒有 XR session（交給串流）期間有畫面變更被略過；session 回來時要先補畫一張再顯示
+    bool m_SkippedWhileHidden = false;
+    // §PERF-1113：見 setXrSessionState()；沒有人設＝true
+    bool m_XrSessionRendered = true;
 
     XrContext* m_Xr = nullptr;
     bool m_XrSuspended = false;   // 自己的 XR session 關著（交給子行程或桌面模式的串流）

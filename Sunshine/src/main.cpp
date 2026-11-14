@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 
 #ifdef __APPLE__
   #include <mach-o/dyld.h>
@@ -226,7 +227,31 @@ int main(int argc, char *argv[]) {
   platf::config_acl::prepare_log_file(platf::appdata(), log_path);
 #endif
 
-  auto log_deinit_guard = logging::init(config::sunshine.min_log_level, log_path);
+  // §PERF-1113-R2（A14）：server 模式的 sunshine.log 不再一啟動就清掉——上一輪留成 sunshine.log.1（再前一輪 .2；
+  // 很短的一輪收進 sunshine.log.0，連續啟動失敗才不會把當機前那一輪擠掉），
+  // 執行中寫到 32 MB 也同樣輪替（原本沒有上限，VR 中每小時 8～15 MB）。CLI 模式照舊（sunshine-cli.log、截斷、stdout 照印）。
+  logging::file_options_t log_file_options;
+  if (config::sunshine.cmd.name.empty()) {
+    log_file_options.max_bytes = 32ull * 1024 * 1024;
+    {
+      // 和下面啟動時印的 version 行同一個格式：執行中輪替出來的新檔開頭也要有
+      std::ostringstream version_line;
+      version_line << PROJECT_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
+      log_file_options.first_line = version_line.str();
+    }
+#ifdef _WIN32
+    // 輪替出來的新檔也要先以 protected SD 建立，否則會繼承 config 目錄的 Users:(RX)
+    log_file_options.prepare_file = [config_dir = platf::appdata()](const std::string &path) {
+      platf::config_acl::prepare_log_file(config_dir, path);
+    };
+    // 服務模式的 stdout 是 viplestream-svc.log（磁碟檔）：不再把每一行也寫過去。那個檔只在服務啟動時清一次，
+    // 跨多次 server 重啟一直累積；上面的輪替已經留住前一輪，不必靠它。判斷用「stdout 是不是磁碟檔」而不是
+    // 「是不是主控台」：SSH 管線下的輸出（pipe）要照常印。
+    log_file_options.no_stdout_mirror = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_DISK;
+#endif
+  }
+
+  auto log_deinit_guard = logging::init(config::sunshine.min_log_level, log_path, log_file_options);
   if (!log_deinit_guard) {
     BOOST_LOG(error) << "Logging failed to initialize"sv;
   }
@@ -543,6 +568,9 @@ int main(int argc, char *argv[]) {
 
 #ifdef _WIN32
   // Restore global NVIDIA control panel settings
+  // §PERF-1113-R2（A4）：開場重套設定檔的工作改在背景做。還原之前先等它做完，再看 owning_undo_file——
+  // 那個狀態是它寫的，而且 nvprefs_instance 不可以兩條執行緒同時用。
+  platf::streaming_start_tasks_wait();
   if (nvprefs_instance.owning_undo_file() && nvprefs_instance.load()) {
     nvprefs_instance.restore_global_profile();
     nvprefs_instance.unload();

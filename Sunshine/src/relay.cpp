@@ -926,13 +926,22 @@ namespace relay {
           break;
         }
         if (frame.opcode == 0xFE) {
-          if (std::chrono::steady_clock::now() - lastRx > kRxDeadAfter) {
+          const auto afterRecv = std::chrono::steady_clock::now();
+          if (afterRecv - lastRx > kRxDeadAfter) {
             BOOST_LOG(warning) << "[RELAY] No frame from relay for "
-                               << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - lastRx).count()
+                               << std::chrono::duration_cast<std::chrono::seconds>(afterRecv - lastRx).count()
                                << "s, treating connection as dead";
             break;
           }
-          if (shutdown_event->view(std::chrono::seconds(1))) break;
+          // §PERF-1113：逾時代表 recv 已經等滿 RECV_TIMEOUT_MS，原本還固定再睡 1 秒，這 1 秒內
+          // relay 送來的請求（http_proxy_request／tcp_tunnel_open）只能在 socket 裡等。現在等滿就
+          // 直接回去收；只有「沒等就回逾時」（EINTR、WANT_READ 之類）才補到 1 秒，維持原本
+          // 每秒最多一圈的上限，不會變成空轉。關機仍由迴圈條件的 peek() 接手。
+          const auto waited = afterRecv - now;
+          if (waited < std::chrono::seconds(1) &&
+              shutdown_event->view(std::chrono::seconds(1) - waited)) {
+            break;
+          }
           continue;
         }
         rxSeen = true;

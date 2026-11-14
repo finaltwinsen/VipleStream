@@ -355,14 +355,29 @@ namespace config {
 
     /// §VR-STALE-HOLD／§VR-STALE-BLEND（2026-10-31）：vr_stale_policy。blend（預設）＝平滑混合＋速度衰減；
     /// hold＝100 ms 內的空窗保留速度與 offset（driver pose_flags bit1）
+    /// §VR-STALE-COAST（2026-11-13）：coast＝空窗 60 ms 內照最後的速度等速前進、之後 40 ms 降到 0，重送與恢復都接在
+    /// 同一條軌跡上。修 blend 進 stale 時把姿態往回拉「速度×25～50 ms」、25 ms 就開始把速度壓到 0、恢復時持續落後這三點
+    /// （外出經 VPN、上行有空檔時拍子亂跳）。2026-11-14 起是預設：單元測試（SteamVR 的外插語意、掉包型與成批到達的空窗）
+    /// 與區網無人實測（每 540 ms 斷 40 ms：恢復時的落差 blend 中位數 5.2 mm、coast 0.8 mm）都過；blend 留著當對照
     enum class stale_e {
       blend,
 
       legacy,
       hold,
+      coast,
     };
 
-    stale_e stale_policy = stale_e::blend;
+    stale_e stale_policy = stale_e::coast;
+
+    /// §VR-CTRL-EXTRAP（2026-11-13）：vr_ctrl_extrap_ms＝auto（預設）或 0～50。SteamVR 只有一個預測時間（HMD 的
+    /// vsync-to-photons），我們為了讓頭對上串流畫面顯示的時刻把它設成 30～60 ms，控制器也跟著被外插到那裡：頭盔已經
+    /// 預測了約 24 ms 之後，SteamVR 再用「回報當下的速度」直線外插 18～25 ms（區網）／45～55 ms（外出），而且回給遊戲的
+    /// 速度不跟著外插。揮拍是高加速度的動作——位置被直線延伸、速度卻是舊的，桌球的力道與方向因此忽大忽小
+    /// （頭盔直接執行遊戲時只有前面那 24 ms）。設成數值＝SteamVR 對控制器最多只外插這麼多毫秒（0＝遊戲拿到的就是頭盔
+    /// 預測的姿態與同一時刻的速度；代價：畫面上的手比實際晚被砍掉的那一段）。auto＝不限制＝現況。還沒配戴驗過，預設不變。
+    /// 2026-11-14：auto（−2，預設）＝上限 20 ms——區網本來就只外插約 20 ms，等於不變；外出時外插 45～55 ms，砍到 20 ms。
+    /// unlimited（−1）＝不限制（2.0.186 之前的行為）
+    int ctrl_extrap_ms = -2;
 
     /// §VR-MULTILINK：vr_multilink。disabled（預設）＝單一路徑，行為與之前相同；
     /// all＝client 的每張網卡各一條連線，影像、音訊、追蹤每條各送一份（送不動的連線會自動暫停送影像）；
@@ -392,6 +407,23 @@ namespace config {
     /// 把年齡上限由三個幀週期放寬到 100 ms。原本這幾道上限都用幀週期訂，往返 10 ms 上下、120 Hz 時補包多半趕不上。
     /// 關著時（或 client 不支援）兩端的行為與之前完全相同。
     bool multilink_repair_rtt = false;
+    /// §PERF-1113：vr_multilink_uso（disabled 預設）。enabled＝多連線的影像整批一次系統呼叫送出（Windows USO），
+    /// 不支援或送失敗的連線自動退回逐包。線上封包不變；還沒在實機 A/B 過，所以預設關
+    bool multilink_uso = false;
+    /// §VR-PACE（2026-11-13）：vr_pace_spread_pct（0～95，預設 0）。多連線送影像時，把每一幀的封包平均攤開在
+    /// 「串流幀週期 × 這個百分比」內送；0＝一次送完。線路有每秒數次、每次幾毫秒的全斷時（外出經 VPN 實測），攤開後
+    /// 每次中斷只損失一小部分、FEC 補得回來；代價是幀尾晚這麼久到齊（72 fps、85% ≈ 11.8 ms）。區網不需要
+    /// §VR-PACE-AUTO（2026-11-14）：−1＝auto（預設）。由線路狀況自動開關：只有一條連線在送、沒有補包請求、救不回的 block
+    /// 持續出現才開（比例照幀週期算，攤開約 6.5 ms），連續兩分鐘乾淨才關；條件與依據見 src/vr/vr_pace_auto.h。
+    /// 0＝固定關；1～95＝固定開在這個比例（對照測試用）
+    int pace_spread_pct = -1;
+    /// §VR-PACE-AB（2026-11-13，對照測試用）：vr_pace_ab_s（0 或 10～600，預設 0）。vr_pace_spread_pct 有設時，同一場內每這麼多秒
+    /// 在「攤開」與「一次送完」之間輪流（從攤開開始），每次切換印一行 [VIPLE-VR-LINK] pacing A/B。0＝不切換
+    int pace_ab_s = 0;
+    /// vr_abr_experimental（disabled 預設）：2026-11-13 加的四組 VR 碼率規則（§ABR-PERSIST-VERIFY、§ABR-STALL-LOSS、
+    /// §ABR-OUTAGE-HOLD、§ABR-PATH-UPGRADE）。當晚的逐封包量測推翻了它們的前提（丟包其實隨碼率上升、幾乎沒有長斷訊），
+    /// 配戴結果也變差，所以預設關；關著時控制器的決定和 2.0.175 相同。留著程式是為了之後重新設計時對照
+    bool abr_experimental = false;
 
     /// 開發用：vr_multilink_fault = <linkId>:<on_ms>:<off_ms>[:<phase_ms>][,…]，在指定連線上週期性丟掉全部收送，
     /// 用來在單一網卡上模擬鏈路空檔。空字串＝關閉。

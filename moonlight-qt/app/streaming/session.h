@@ -6,6 +6,7 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <vector>
 
 #include <Limelight.h>
 #include <opus_multistream.h>
@@ -254,10 +255,27 @@ private:
         Hardware
     };
 
-    static
+    // 不是 static：真的建過解碼器時要把它的屬性記在這個 Session 上（見 m_ProbedDecoderProps）
     DecoderAvailability getDecoderAvailability(SDL_Window* window,
                                                StreamingPreferences::VideoDecoderSelection vds,
                                                int videoFormat, int width, int height, int frameRate);
+
+    // §PERF-1113 A5：這一次 initialize() 的探測真的建過解碼器時記下它的屬性，populateDecoderProperties() 的
+    // 五項（格式、解碼器選擇、寬、高、fps）都相同就沿用，不再為了讀這四個值多建一次完整的測試解碼器。
+    // 只活在這個 Session 的這一次 initialize()：不可以搬進行程層級的探測快取——同一個行程的下一場若換過 renderer
+    // 設定，會沿用上一場 renderer 的 RFI 能力與色彩範圍（破圖、黑位偏移）
+    struct ProbedDecoderProps {
+        int videoFormat;
+        int vds;
+        int width;
+        int height;
+        int frameRate;
+        int capabilities;
+        int colorSpace;
+        int colorRange;
+        bool alwaysFullScreen;
+    };
+    std::vector<ProbedDecoderProps> m_ProbedDecoderProps;
 
     static
     bool chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,

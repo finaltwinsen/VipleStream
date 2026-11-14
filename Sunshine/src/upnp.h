@@ -20,9 +20,15 @@ namespace upnp {
   constexpr auto PORT_MAPPING_LIFETIME = 3600s;
   constexpr auto REFRESH_INTERVAL = 120s;
   // VipleStream §UPNP-DIAG: 同一種失敗連續達此輪數後，改為每 FAIL_REPORT_INTERVAL 印一行 warning（含連續次數），
-  // 直到成功再印一行恢復訊息；不改變 REFRESH_INTERVAL 的重試節奏。
+  // 直到成功再印一行恢復訊息。
   constexpr unsigned FAIL_FULL_DETAIL_CYCLES = 3;
   constexpr auto FAIL_REPORT_INTERVAL = 30min;
+  // §PERF-1113：區網裡沒有 IGD（沒有任何 SSDP 回應、或回應的裝置都不是 IGD）而且這次執行從來沒找到過 IGD 時，
+  // 同一種失敗連續 FAIL_FULL_DETAIL_CYCLES 輪之後拉長重試間隔：從 FAIL_BACKOFF_FIRST 起每次加倍、
+  // FAIL_BACKOFF_MAX 封頂（4／8／16／30 分鐘）。這種區網每 REFRESH_INTERVAL 探一次只是白送多播與 HTTP。
+  // 其餘的失敗（IGD 未連線、port mapping 失敗、discover 自己出錯）與成功之後的定期更新都維持 REFRESH_INTERVAL。
+  constexpr auto FAIL_BACKOFF_FIRST = 4min;
+  constexpr auto FAIL_BACKOFF_MAX = 30min;
 
   using device_t = util::safe_ptr<UPNPDev, freeUPNPDevlist>;
 

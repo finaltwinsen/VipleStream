@@ -1035,7 +1035,12 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         enet_host_flush(client);
     }
 
-    {
+    // §PERF-1113 A19：每個 RTSP 請求各開一條 TCP（約 2 RTT；relay 更久）。Sunshine 系 host 的
+    // OPTIONS 與 PLAY 只回 200、不帶任何狀態（session 在 ANNOUNCE 就啟動），略過這兩個；GFE 照舊。
+    if (IS_SUNSHINE()) {
+        Limelog("[VIPLE-RTSP] Sunshine host: skipping OPTIONS and PLAY\n");
+    }
+    else {
         RTSP_MESSAGE response;
         int error = -1;
 
@@ -1378,8 +1383,11 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         freeMessage(&response);
     }
 
+    if (IS_SUNSHINE()) {
+        // §PERF-1113 A19：不送 PLAY（理由見上面略過 OPTIONS 的地方）
+    }
     // GFE 3.22 uses a single PLAY message
-    if (APP_VERSION_AT_LEAST(7, 1, 431)) {
+    else if (APP_VERSION_AT_LEAST(7, 1, 431)) {
         RTSP_MESSAGE response;
         int error = -1;
 

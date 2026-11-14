@@ -12,10 +12,11 @@
 // 解法：main() 早期（log 已開、QML 尚未載入）用純 Win32 對每個 HID 介面做一次
 // 有逾時的探測；無回應的裝置記進清單，之後所有會觸發 SDL joystick／hidapi 列舉
 // 的進入點都以此清單閘控：
-//   1. SdlInputHandler::getUnmappedGamepads()（GUI 路徑最先到這裡：main.qml
-//      ApplicationWindow.onCompleted → startAsyncLoad；每場 validateLaunch 也會）
-//   2. SdlGamepadKeyNavigation::enable()（StackView.onCompleted → doEarlyInit；
-//      CLI stream/quit 路徑最先到這裡）
+//   1. SdlInputHandler::getUnmappedGamepads()（GUI 啟動時 AppContent 的 Component.onCompleted →
+//      startAsyncLoad；每場 validateLaunch 也會）
+//   2. SdlGamepadKeyNavigation::enable()（§PERF-1113 A31 之後 GUI 路徑也最先到這裡：AppContent 的
+//      Component.onCompleted 先 enable() 再 startAsyncLoad；CLI stream/quit 路徑是 StackView.onCompleted →
+//      doEarlyInit。兩個進入點各自閘控，誰先誰後都安全）
 //   3. SdlInputHandler 建構子（Session::start，每場串流）
 //   4. ScHidPassthrough::start()（SDL_hid_enumerate / open / feature report，鎖內）
 // 另外 refresh() 讓「串流中才卡死」的情境在下一次 validateLaunch / enable() 前重測，

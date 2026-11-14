@@ -263,7 +263,7 @@
     "max_bitrate": "Tasa de bits máxima",
     "max_bitrate_desc": "La tasa de bits máxima (en Kbps) que VipleStream-Server codificará la secuencia. Si se establece en 0, siempre utilizará la tasa de bits solicitada por la luz lunar.",
     "minimum_fps_target": "Objetivo mínimo de FPS",
-    "minimum_fps_target_desc": "El FPS efectivo más bajo que una corriente puede alcanzar. Un valor de 0 es tratado como aproximadamente la mitad del FPS del flujo. Se recomienda un ajuste de 20 si transmite contenido de 24 o 30 fps.",
+    "minimum_fps_target_desc": "El FPS efectivo más bajo que una corriente puede alcanzar. Un valor de 0 usa los FPS solicitados por el cliente (completos, no la mitad). Se recomienda un ajuste de 20 si transmite contenido de 24 o 30 fps.",
     "min_log_level": "Nivel de Log",
     "min_log_level_0": "Verbose",
     "min_log_level_1": "Debug",

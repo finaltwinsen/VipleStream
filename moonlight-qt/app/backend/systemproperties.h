@@ -52,6 +52,9 @@ public:
     Q_INVOKABLE QList<int> getSupportedRefreshRates(int displayIndex);
 
     Q_INVOKABLE void startAsyncLoad();
+    // §PERF-1113 A21：頭盔 VR 介面啟動時用它取代 startAsyncLoad()：只查未對應的手把。不建測試視窗、不列舉顯示器、
+    // 不探測解碼器（上面那組非同步屬性維持建構時的預設值；顯示器資料等有人要才查，見 ensureDisplaysQueried）
+    Q_INVOKABLE void startLightLoad();
     Q_INVOKABLE void waitForAsyncLoad();
     Q_INVOKABLE void refreshDisplays();
 
@@ -68,8 +71,14 @@ private slots:
     void updateDecoderProperties(bool hasHardwareAcceleration, bool rendererAlwaysFullScreen, QSize maximumResolution, bool supportsHdr);
 
 private:
+    // §PERF-1113 A21：顯示器還沒列舉過就先列舉一次（四個顯示器 getter 的開頭呼叫）。startLightLoad() 的路徑沒有
+    // startAsyncLoad() 裡那一次 refreshDisplays()，「getter 之前一定查過顯示器」的前提要靠這裡保住
+    void ensureDisplaysQueried();
+
     QThread* systemPropertyQueryThread = nullptr;
     SDL_Window* testWindow = nullptr;
+    bool unmappedGamepadsChecked = false;  // 未對應手把查過了（startLightLoad 或 startAsyncLoad）
+    bool displaysQueried = false;          // refreshDisplays() 跑過了（不論有沒有成功）
 
     // Properties set by the constructor
     bool isRunningWayland;

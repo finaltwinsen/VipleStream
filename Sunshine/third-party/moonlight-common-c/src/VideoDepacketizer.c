@@ -44,6 +44,11 @@ static bool resyncFrameNumberPending;
 #define CONSECUTIVE_DROP_LIMIT 120
 static unsigned int consecutiveFrameDrops;
 
+// §PERF-1113 A32：定義在 RtpVideoQueue.c——「Network dropped」行和那邊的 Unrecoverable 行共用同一組限流與 10 秒彙總
+// （[VIPLE-VIDEO] loss 10s）。回傳 true＝這一行可以印。宣告在兩個 .c 各寫一份：這一輪只動這兩個檔，之後可以搬進
+// Limelight-internal.h
+bool RtpvLossLogDropped(uint32_t frames, uint64_t nowUs);
+
 static LINKED_BLOCKING_QUEUE decodeUnitQueue;
 
 typedef struct _BUFFER_DESC {
@@ -905,14 +910,17 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
     if (firstPacket) {
         // Make sure this is the next consecutive frame
         if (isBefore32(nextFrameNumber, frameIndex)) {
-            if (nextFrameNumber + 1 == frameIndex) {
-                Limelog("Network dropped 1 frame (frame %d)\n", frameIndex - 1);
-            }
-            else {
-                Limelog("Network dropped %d frames (frames %d to %d)\n",
-                        frameIndex - nextFrameNumber,
-                        nextFrameNumber,
-                        frameIndex - 1);
+            // §PERF-1113 A32：路徑劣化時這一行每秒幾十筆，行數限流；次數與幀數由 [VIPLE-VIDEO] loss 10s 帶出
+            if (RtpvLossLogDropped(frameIndex - nextFrameNumber, receiveTimeUs)) {
+                if (nextFrameNumber + 1 == frameIndex) {
+                    Limelog("Network dropped 1 frame (frame %d)\n", frameIndex - 1);
+                }
+                else {
+                    Limelog("Network dropped %d frames (frames %d to %d)\n",
+                            frameIndex - nextFrameNumber,
+                            nextFrameNumber,
+                            frameIndex - 1);
+                }
             }
 
             if ((vrIntraRecovery || (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE)) && idrFrameProcessed && !waitingForIdrFrame) {

@@ -36,6 +36,34 @@
  *     拉回斷訊前碼率時一起清掉，否則下一輪就被上限壓回斷訊時的低點（11-07：拉回 29.6 Mbps 後 0.6 秒被壓回 5.9 Mbps）。
  *     但只拉回到斷訊前穩定撐住 10 秒的碼率（§ABR-RESTORE-STABLE，11-08：拉回沒撐住過的 75 Mbps，3 分鐘內塞了 6 次）。
  *   - 防振盪懲罰：RAMP 中 5 秒內再次降碼 -> 上限暫壓至 applied * 0.85 維持 30 秒。
+ *   - ※ 以下四組（§ABR-PERSIST-VERIFY、§ABR-STALL-LOSS、§ABR-OUTAGE-HOLD、§ABR-PATH-UPGRADE）都在 set_experimental_rules(true)
+ *     才生效（host 設定 vr_abr_experimental，預設關）。11-13 晚的逐封包量測推翻了它們的前提：那條線路的丟包隨碼率上升
+ *     （3 Mbps 1.0% → 24 Mbps 5.8%）、超過 0.1 秒的斷訊每分鐘約 1 次，並不是「與碼率無關的頻繁長斷訊」；配戴結果也是
+ *     碼率撐高之後定格變多。關著時控制器的決定和 2.0.175 相同。真正有效的是送出端把每一幀攤開送（§VR-PACE）。
+ *   - §ABR-PERSIST-VERIFY（11-13 外出實測，場地對外線路每分鐘 15～35 次短暫斷訊、一次掉 11～36 張）：+persistent 的降碼也要驗證。
+ *     * 判定：同一串（相隔 20 秒內、中間沒有別種降碼）+persistent 實際降過 2 刀以上、累計降到這一串開始時的六成以下、過了 2 秒，
+ *       而「收到比送出少的比例」（最近 3 秒）沒有降到這一串開始前的一半以下＝丟包跟碼率無關 → 不再降、規則停用 5 分鐘
+ *       （每多判定一次加倍，上限 30 分鐘），碼率拉回這一串開始時的一半（之後照常回升），這一串記下的塞車點等還原。
+ *       真的送不動（限速器直接丟）時，碼率降了丟的比例就跟著降（75→37.5 Mbps、容量 34：55% → 9%），不會被判成無效。
+ *       沒有收／送速率的 client 不做這個判定（照舊每次都降）。
+ *     * 停用期間若連續 2 秒每一筆回報都收得比送的少、而且少的比例比判定當時高出一截（兩倍或多 5 個百分點）
+ *       ＝情況變了（例如回升後真的超過線路容量、延遲又沒漲）→ 規則立刻恢復。
+ *       實測那天 40 次降碼有 30 次是 +persistent，75 Mbps 一路降到 2 Mbps，丟包頻率沒有變。
+ *     * rate-shortfall+delay 也歸同一串、受同一個判定管（11-13 第二輪實測：一次一秒以上的斷訊讓「送出比收到多」連續成立，
+ *       2.5 秒內連降三刀 25 → 8.7 Mbps，斷訊照舊）。
+ *     * 判定無效期間丟包率規則（loss-rate）也不降：同一個證據（丟包跟碼率無關），11-13 第三輪實測它每次 −10% 把碼率慢慢往下帶。
+ *     * 判定無效後拉回的目標：有穩定值（先前 10 秒沒降碼時撐住的碼率）就拉回它（不超過這一串開始時的碼率），
+ *       沒有才拉回開始時的一半。
+ *   - §ABR-STALL-LOSS（11-13 第三輪）：斷訊結束時積壓的封包一次湧到，單向延遲瞬間升高、延遲趨勢判過載，緊接著的丟包就被歸成
+ *     「+delay」快速降碼。is_congested() 在單向延遲可用時多看一眼「最近 8 張的延遲是不是已經回到基準」（同 §ABR-OWD-STALL），
+ *     已經回到＝停頓不是排隊，這時的丟包照隨機／成串丟包處理。
+ *   - §ABR-OUTAGE-HOLD（11-13 第四輪）：場地線路的斷訊長到 2 秒，斷訊前後單向延遲都正常（p50 19～27 ms、送達率 99%），
+ *     但每次斷訊結束那一下延遲與往返時間的量測被灌爆，丟包被歸成「+delay」連降，3 分鐘從 17 Mbps 降到 4～6 Mbps。
+ *     client 回報一次成串丟包（斷訊）時，如果延遲趨勢在這段空檔「之前」並沒有過載、收／送也沒有連續 3 秒以上的落差，
+ *     就判定是斷訊：之後 1.5 秒內網路類的訊號都不降碼、不計入丟包統計（解碼過載照常）。斷訊前就已經在過載＝塞車，照舊降。
+ *   - §ABR-PATH-UPGRADE（11-13 第三輪）：Tailscale 從中繼轉成直連（或其他「換到更好的路」）時，舊路徑上記下的塞車點、
+ *     各種暫壓的上限、延遲基準都作廢，之後 30 秒內回升加快（每秒 +25%，原本 +8%），第一次降碼就結束加速。
+ *     實測：開場在中繼上被壓到 2 Mbps，30 秒後轉直連，因為塞車點記的是 2.1 Mbps，只能每秒 +0.5% 慢爬，兩分鐘後還在 3 Mbps。
  *
  * 純邏輯、無 I/O、無 log、無全域狀態，可單元測試。呼叫端（stream.cpp）持 abrMutex 加鎖呼叫並負責記錄 log。
  */
@@ -97,6 +125,7 @@ namespace vr::abr {
   constexpr double k_fast_shortfall_ratio = 1.15;    ///< §ABR-SHORTFALL：送出 ≥ 收到 × 1.15 才算排隊（避開無線零星掉包的小落差）
   constexpr int k_fast_shortfall_reports = 2;        ///< 連續幾次回報（每 500 ms 一次）
   constexpr int k_fast_shortfall_min_kbps = 5000;    ///< 送出太少時不判（量測誤差大）
+  constexpr int k_fast_shortfall_outage_div = 4;     ///< 收到 < 送出 ÷ 4＝斷訊，rate-shortfall 不降
   constexpr auto k_fast_quality_recent_window = std::chrono::milliseconds(1500); ///< QP 飽和判定視窗 1.5 秒
   constexpr auto k_fast_quality_trim_duration = std::chrono::seconds(10);      ///< quality-trim 連續門檻 10 秒
   constexpr auto k_fast_quality_trim_interval = std::chrono::seconds(3);       ///< quality-trim 間隔 3 秒
@@ -115,6 +144,26 @@ namespace vr::abr {
   constexpr auto k_fast_loss_rate_settle = std::chrono::seconds(2);        ///< 降碼生效前的丟包不算
   constexpr double k_fast_loss_rate_effective_ratio = 0.6;                 ///< 降後頻率要低於降前的這個比例才算有效
   constexpr auto k_fast_loss_rate_off = std::chrono::minutes(10);          ///< 無效時停用這條規則多久
+  // §ABR-PERSIST-VERIFY（11-13）
+  constexpr auto k_fast_persist_episode_gap = std::chrono::seconds(20);      ///< 相隔多久以內算同一串
+  constexpr auto k_fast_persist_min_trial = std::chrono::seconds(2);         ///< 這一串至少觀察多久才判定
+  constexpr int k_fast_persist_min_cuts = 2;                                 ///< 這一串至少降過幾刀才判定
+  constexpr double k_fast_persist_ineffective_ratio = 0.6;                   ///< 碼率已降到開始時的這個比例以下還在丟＝無效
+  constexpr double k_fast_persist_restore_ratio = 0.5;                       ///< 判定無效後拉回到開始時的這個比例
+  constexpr double k_fast_persist_loss_drop_ratio = 0.5;                     ///< 丟的比例要降到開始前的這個比例以下才算「降碼有效」
+  constexpr auto k_fast_persist_before_window = std::chrono::seconds(3);     ///< 這一串開始前看多久的收／送
+  constexpr auto k_fast_persist_now_window = std::chrono::seconds(3);        ///< 判定時看最近多久的收／送（和開始前同長，才能比）
+  constexpr auto k_fast_persist_rates_keep = std::chrono::seconds(8);        ///< 收／送紀錄保留多久
+  constexpr int k_fast_persist_sustained_reports = 4;                        ///< 連續幾筆回報（每 500 ms）都收得比送的少才算持續
+  constexpr auto k_fast_persist_off = std::chrono::minutes(5);               ///< 無效時停用這條規則多久（每多判定一次加倍）
+  constexpr auto k_fast_persist_off_max = std::chrono::minutes(30);          ///< 停用時間上限
+  // §ABR-OUTAGE-HOLD（11-13）
+  constexpr auto k_fast_outage_hold = std::chrono::milliseconds(1500);  ///< 斷訊回報之後多久內不降碼
+  constexpr auto k_fast_outage_pre_margin = std::chrono::milliseconds(500);  ///< 過載比空檔早這麼多才算「斷訊前就在塞」
+  constexpr int k_fast_outage_sustained_reports = 6;  ///< 收／送連續這麼多筆（每 500 ms）都有落差＝不是斷訊
+  // §ABR-PATH-UPGRADE（11-13）
+  constexpr auto k_fast_path_boost = std::chrono::seconds(30);   ///< 換到更好的路之後加速回升多久
+  constexpr double k_fast_path_boost_rate = 0.25;                ///< 加速期間每秒回升的比例
   // §ABR-RESTORE-STABLE（11-08）
   constexpr auto k_fast_stable_window = std::chrono::seconds(10);          ///< 撐住多久才算穩定
   constexpr auto k_fast_restore_fail_window = std::chrono::seconds(5);     ///< 拉回後多久內又降碼算拉回失敗
@@ -170,6 +219,24 @@ namespace vr::abr {
     double loss_rate_pre_per10s() const { return lr_pre_rate_ * 10.0; }
     double loss_rate_post_per10s() const { return lr_post_rate_ * 10.0; }
     bool loss_rate_disabled(steady::time_point now) const { return now < lr_disabled_until_; }
+    /// §ABR-PERSIST-VERIFY：判定「丟包跟碼率無關」的次數、停用期間略過的降碼次數、目前是否停用中
+    int persistent_reverts() const { return persist_reverts_; }
+    int persistent_skips() const { return persist_skips_; }
+    int shortfall_outage_skips() const { return shortfall_outage_skips_; }
+    bool persistent_disabled(steady::time_point now) const { return now < persist_off_until_; }
+    /// 最近一次判定時這一串開始的碼率、開始前與判定時「收到比送出少」的百分比（給呼叫端印 log）
+    int persistent_episode_start_kbps() const { return pe_logged_start_kbps_; }
+    double persistent_loss_pct_before() const { return pe_logged_f_start_ * 100.0; }
+    double persistent_loss_pct_now() const { return pe_logged_f_now_ * 100.0; }
+    int persistent_off_minutes(steady::time_point now) const {
+      return now < persist_off_until_ ? static_cast<int>(std::chrono::duration_cast<std::chrono::minutes>(persist_off_until_ - now).count()) + 1 : 0;
+    }
+    /// 有新的判定還沒印過 log 時回 true 一次
+    bool take_persistent_revert_event() {
+      if (persist_reverts_reported_ == persist_reverts_) return false;
+      persist_reverts_reported_ = persist_reverts_;
+      return true;
+    }
 
     /// §VR-ABR-OUTAGE：斷訊結束、呼叫端想把碼率拉回斷訊前的值（kbps）。回傳實際允許拉回的值，0＝不拉回。
     /// 只拉回到「斷訊前 10 秒沒有任何降碼、穩定撐住」的碼率（§ABR-RESTORE-STABLE，11-08）：那晚的路只撐得住約 30 Mbps，
@@ -203,6 +270,7 @@ namespace vr::abr {
       loss_cap_until_ = {};
       lr_trial_active_ = false;
       pending_target_.reset();
+      pending_restore_.reset();  // §ABR-PERSIST-VERIFY：斷訊拉回有自己的上限（穩定值），不可以再被「拉回一半」蓋過去
       applied_kbps_ = std::min(kbps, std::max(floor_kbps(), cap_kbps_));
       current_target_kbps_ = applied_kbps_;
       if (last_congested_kbps_ > 0 && last_congested_kbps_ < applied_kbps_) {
@@ -213,6 +281,84 @@ namespace vr::abr {
       last_reason_ = half_restore_ ? "outage-restore-half" : "outage-restore";
       return applied_kbps_;
     }
+    /// 11-13 當天加的四組規則的總開關（見檔頭 ※）。預設關
+    void set_experimental_rules(bool on) { experimental_rules_ = on; }
+    bool experimental_rules() const { return experimental_rules_; }
+
+    /// §ABR-OUTAGE-HOLD：client 回報了一次成串丟包，涵蓋約 gap_ms。要在 on_loss 之前呼叫。
+    /// 回傳 true＝判定是斷訊（接下來 k_fast_outage_hold 內不降碼）
+    bool on_outage(int gap_ms, steady::time_point now) {
+      if (!experimental_rules_) {
+        return false;
+      }
+      const auto since = owd_active(now) ? owd_overuse_since_ : rtt_overuse_since_;
+      const auto gap = std::chrono::milliseconds(std::clamp(gap_ms, 0, 10000));
+      // 斷訊結束時積壓的封包一次湧到也會讓趨勢判過載，所以只看「比這段空檔更早」就開始的過載
+      const bool pre_congested = since != steady::time_point {} && now > since && now - since > gap + k_fast_outage_pre_margin;
+      const bool sustained_shortfall = sat_run_ >= k_fast_outage_sustained_reports;
+      if (pre_congested || sustained_shortfall) {
+        return false;
+      }
+      const auto until = now + k_fast_outage_hold;
+      if (until > outage_hold_until_) {
+        outage_hold_until_ = until;
+      }
+      ++outage_holds_;
+      return true;
+    }
+    bool outage_hold_active(steady::time_point now) const { return now < outage_hold_until_; }
+    int outage_holds() const { return outage_holds_; }
+    int outage_hold_skips() const { return outage_hold_skips_; }
+
+    /// §ABR-PATH-UPGRADE：傳輸路徑換成更好的（例如 Tailscale 中繼 → 直連）。舊路徑上學到的東西全部作廢，
+    /// 之後一段時間加速回升；碼率本身不跳（新路徑的容量還不知道），由回升去探
+    void on_path_upgraded(steady::time_point now) {
+      if (!experimental_rules_) {
+        return;
+      }
+      last_congested_kbps_ = 0;
+      last_congested_time_ = {};
+      penalty_until_ = {};
+      loss_cap_until_ = {};
+      lr_trial_active_ = false;
+      lr_disabled_until_ = {};
+      loss_rate_events_.clear();
+      stable_kbps_ = 0;
+      applied_hist_.clear();
+      last_cut_time_ = {};
+      first_tick_ = now;
+      delay_congestion_seen_ = false;
+      half_restore_blocked_ = false;
+      last_saturated_cut_ = {};
+      pe_last_cut_ = {};
+      persist_off_until_ = {};
+      pending_restore_.reset();
+      persistent_losses_.clear();
+      fec_fails_.clear();
+      rates_hist_.clear();
+      sat_run_ = 0;
+      shortfall_reports_ = 0;
+      // 延遲基準是舊路徑的（中繼的往返比直連長得多），重新學
+      trend_ = delay_trend_t {};
+      owd_trend_ = delay_trend_t {};
+      owd_have_offset_ = false;
+      owd_recent_pos_ = 0;
+      last_owd_time_ = {};
+      outage_hold_until_ = {};
+      owd_overuse_since_ = {};
+      rtt_overuse_since_ = {};
+      path_boost_until_ = now + k_fast_path_boost;
+      ++path_upgrades_;
+      if (!pending_target_.has_value() && (state_ == fast_state_e::hold || state_ == fast_state_e::cut || state_ == fast_state_e::healthy)) {
+        state_ = fast_state_e::ramp;
+        hold_until_ = now;
+        ramp_start_ = {};
+        next_ramp_ = now;
+      }
+    }
+    int path_upgrades() const { return path_upgrades_; }
+    bool path_boost_active(steady::time_point now) const { return now < path_boost_until_; }
+
     /// §ABR-RESTORE-STABLE：最近一次「10 秒內沒有降碼」時撐住的碼率（0＝還沒有）
     int stable_kbps() const { return stable_kbps_; }
     int last_congested_kbps() const { return last_congested_kbps_; }
@@ -294,6 +440,11 @@ namespace vr::abr {
       const auto prev_state = trend_.state();
       trend_.on_rtt(rtt_ms == 0 ? 0.5 : static_cast<double>(rtt_ms), now);
       const auto cur_state = trend_.state();
+      if (cur_state != trend_state_e::overuse) {
+        rtt_overuse_since_ = {};
+      } else if (prev_state != trend_state_e::overuse) {
+        rtt_overuse_since_ = now;  // §ABR-OUTAGE-HOLD
+      }
 
       if (!owd_active(now)) {
         if (cur_state == trend_state_e::overuse) {
@@ -324,6 +475,11 @@ namespace vr::abr {
       const auto prev_state = owd_trend_.state();
       owd_trend_.on_rtt(rel_owd_ms, now);
       const auto cur_state = owd_trend_.state();
+      if (cur_state != trend_state_e::overuse) {
+        owd_overuse_since_ = {};
+      } else if (prev_state != trend_state_e::overuse) {
+        owd_overuse_since_ = now;  // §ABR-OUTAGE-HOLD
+      }
 
       if (cur_state == trend_state_e::overuse) {
         const bool first = prev_state != trend_state_e::overuse;
@@ -370,12 +526,29 @@ namespace vr::abr {
       recv_kbps_ = std::max(0, recv_kbps);
       send_kbps_ = std::max(0, send_kbps);
       last_rates_time_ = now;
+      // §ABR-PERSIST-VERIFY：留最近幾秒的收／送，判定「降碼有沒有讓丟的比例變小」用
+      rates_hist_.push_back({now, send_kbps_, recv_kbps_});
+      while (!rates_hist_.empty() && now - rates_hist_.front().at > k_fast_persist_rates_keep) {
+        rates_hist_.pop_front();
+      }
+      if (send_kbps_ > 0 && static_cast<double>(send_kbps_) >= static_cast<double>(recv_kbps_) * k_fast_rates_saturated_ratio) {
+        ++sat_run_;
+      } else {
+        sat_run_ = 0;
+      }
       // §ABR-SHORTFALL：收到的明顯少於送出＝鏈路已經塞住在排隊，直接降（降幅由 trigger_cut 依收／送比算）
       if (send_kbps_ >= k_fast_shortfall_min_kbps &&
           static_cast<double>(send_kbps_) >= static_cast<double>(recv_kbps_) * k_fast_shortfall_ratio) {
         if (++shortfall_reports_ >= k_fast_shortfall_reports) {
           shortfall_reports_ = 0;
-          trigger_cut(severity_e::moderate, "rate-shortfall+delay", now);
+          // §ABR-PERSIST-VERIFY：收到的不到送出的四分之一＝斷訊，不是排隊（排隊時還是收得到一大半）。
+          // 斷訊時降碼沒有用，交給斷訊恢復那一套；真的超出容量好幾倍時，成串丟包與延遲的規則照樣會降。
+          // 其餘情況和 +persistent 同一串、同一個判定——降了之後落差沒有變小就不要再降
+          if (experimental_rules_ && static_cast<int64_t>(recv_kbps_) * k_fast_shortfall_outage_div < send_kbps_) {
+            ++shortfall_outage_skips_;
+          } else if (persistent_gate(now)) {
+            trigger_cut(severity_e::moderate, "rate-shortfall+delay", now);
+          }
         }
       } else {
         shortfall_reports_ = 0;
@@ -449,7 +622,7 @@ namespace vr::abr {
         clean_old_persistent_losses(now);
         persistent_losses_.push_back({n, now});
         int p_sum = get_persistent_loss_sum();
-        if (p_sum >= k_fast_persistent_threshold && persistent_allowed(now)) {
+        if (p_sum >= k_fast_persistent_threshold && persistent_gate(now)) {
           persistent_losses_.clear();
           if (total >= 2) {
             trigger_cut(severity_e::fast, "fec-failed-ge-2+persistent", now);
@@ -471,7 +644,7 @@ namespace vr::abr {
           clean_old_persistent_losses(now);
           persistent_losses_.push_back({static_cast<int>(lost_frames), now});
           int p_sum = get_persistent_loss_sum();
-          if (p_sum >= k_fast_persistent_threshold && persistent_allowed(now)) {
+          if (p_sum >= k_fast_persistent_threshold && persistent_gate(now)) {
             persistent_losses_.clear();
             trigger_cut(severity_e::fast, "loss-ge-2+persistent", now);
           } else {
@@ -489,7 +662,7 @@ namespace vr::abr {
         clean_old_persistent_losses(now);
         persistent_losses_.push_back({3, now});
         int p_sum = get_persistent_loss_sum();
-        if (p_sum >= k_fast_persistent_threshold && persistent_allowed(now)) {
+        if (p_sum >= k_fast_persistent_threshold && persistent_gate(now)) {
           persistent_losses_.clear();
           trigger_cut(severity_e::fast, "drop-block+persistent", now);
         } else {
@@ -520,7 +693,7 @@ namespace vr::abr {
           clean_old_persistent_losses(now);
           persistent_losses_.push_back({1, now});
           int p_sum = get_persistent_loss_sum();
-          if (p_sum >= k_fast_persistent_threshold && persistent_allowed(now)) {
+          if (p_sum >= k_fast_persistent_threshold && persistent_gate(now)) {
             persistent_losses_.clear();
             trigger_cut(severity_e::moderate, "delivery-low+persistent", now);
           } else {
@@ -541,6 +714,20 @@ namespace vr::abr {
         applied_kbps_ = target;
         state_ = fast_state_e::hold;
         return target;
+      }
+
+      // 1'. §ABR-PERSIST-VERIFY：判定 +persistent 無效後的拉回
+      if (pending_restore_.has_value()) {
+        const int target = std::min(*pending_restore_, effective_cap_kbps(now));
+        pending_restore_.reset();
+        if (target > applied_kbps_) {
+          applied_kbps_ = target;
+          current_target_kbps_ = target;
+          state_ = fast_state_e::healthy;
+          hold_until_ = now;
+          last_reason_ = "persistent-revert";
+          return target;
+        }
       }
 
       // 1a. §ABR-LOSSRATE-VERIFY：丟包率降碼的試驗到期 -> 判定有沒有效，沒效就撤銷
@@ -670,9 +857,17 @@ namespace vr::abr {
     };
 
     bool is_congested(steady::time_point now) const {
-      const auto &t = owd_active(now) ? owd_trend_ : trend_;
-      return t.state() == trend_state_e::overuse ||
-             t.overuse_recently(now, k_fast_delay_overuse_recent_window);
+      const bool owd = owd_active(now);
+      const auto &t = owd ? owd_trend_ : trend_;
+      if (!(t.state() == trend_state_e::overuse || t.overuse_recently(now, k_fast_delay_overuse_recent_window))) {
+        return false;
+      }
+      // §ABR-STALL-LOSS：趨勢判過載，但最近幾張的單向延遲已經回到基準＝一段時間收不到、之後一次全到（停頓），不是排隊。
+      // 排隊時佇列要等碼率降下來才會消，最新的幀一定還是慢的
+      if (experimental_rules_ && owd && owd_spike_drained()) {
+        return false;
+      }
+      return true;
     }
 
     bool check_quality_trim_eligible(steady::time_point now) const {
@@ -688,6 +883,104 @@ namespace vr::abr {
       while (!fec_fails_.empty() && now - fec_fails_.front().at > k_fast_cut_window) {
         fec_fails_.pop_front();
       }
+    }
+
+    /// §ABR-PERSIST-VERIFY：[now - window, now] 內「收到比送出少」的比例（0～1）。沒有資料回 -1。
+    /// 紀錄還不滿一個視窗時（開場），缺的那一段當成沒有丟——不然開場第一次斷訊那一筆會把比例灌得很高，
+    /// 之後怎麼比都像是「降碼有效」
+    double loss_fraction(steady::time_point now, std::chrono::milliseconds window) const {
+      double send = 0.0, recv = 0.0;
+      int n = 0;
+      for (const auto &r : rates_hist_) {
+        if (r.at <= now && now - r.at <= window) {
+          send += r.send_kbps;
+          recv += r.recv_kbps;
+          ++n;
+        }
+      }
+      if (n == 0 || send <= 0.0) return -1.0;
+      double interval_ms = 500.0;  // client 每 500 ms 回報一次
+      if (rates_hist_.size() >= 2) {
+        const double span = std::chrono::duration<double, std::milli>(rates_hist_.back().at - rates_hist_.front().at).count();
+        if (span > 0.0) interval_ms = span / static_cast<double>(rates_hist_.size() - 1);
+      }
+      const double expected = std::max(1.0, static_cast<double>(window.count()) / interval_ms);
+      const double f = std::clamp(1.0 - recv / send, 0.0, 1.0);
+      return n < expected ? f * static_cast<double>(n) / expected : f;
+    }
+
+    /// §ABR-PERSIST-VERIFY：+persistent 這一刀可不可以降。呼叫端已確認視窗內的累計權重過門檻。
+    /// 回 false 時呼叫端照「隨機丟包」記帳（不降碼）。回 true 之後呼叫端一定接著呼叫 trigger_cut（原因含 persistent），
+    /// 刀數與累計降幅在那邊確定真的降了才記。
+    bool persistent_gate(steady::time_point now) {
+      if (!persistent_allowed(now)) {
+        return false;
+      }
+      if (!experimental_rules_) {
+        return true;  // 開關關著：和原本一樣，允許就降
+      }
+      const double f_now = loss_fraction(now, k_fast_persist_now_window);
+      if (now < persist_off_until_) {
+        // 停用中。只有「情況變了」才恢復：連續 2 秒每一筆都收得比送的少，而且少的比例比判定當時高出一截
+        const bool sustained = sat_run_ >= k_fast_persist_sustained_reports;
+        const bool worse = f_now >= 0.0 && f_now >= std::max(2.0 * pe_judged_f_, pe_judged_f_ + 0.05);
+        if (!(sustained && worse)) {
+          ++persist_skips_;
+          persistent_losses_.clear();  // 這一批已經處理過（不降），不要讓視窗裡同一批事件一筆一筆再進來
+          return false;
+        }
+        persist_off_until_ = {};
+        pe_last_cut_ = {};
+      }
+      // 新的一串
+      if (pe_last_cut_ == steady::time_point {} || now - pe_last_cut_ > k_fast_persist_episode_gap) {
+        pe_start_kbps_ = applied_kbps_;
+        pe_start_time_ = now;
+        pe_cuts_ = 0;
+        pe_ratio_ = 1.0;
+        pe_f_start_ = loss_fraction(now, k_fast_persist_before_window);
+        pe_prev_congested_kbps_ = last_congested_kbps_;
+        pe_prev_congested_time_ = last_congested_time_;
+        pe_prev_delay_seen_ = delay_congestion_seen_;
+        pe_prev_saturated_cut_ = last_saturated_cut_;
+        pe_last_cut_ = now;  // 這一串從現在算起；trigger_cut 真的降了會再更新
+      }
+      // 已經降了不少、也等過了，丟的比例卻沒有跟著變小 → 跟碼率無關。沒有收／送資料（舊 client）不判定
+      if (pe_cuts_ >= k_fast_persist_min_cuts && now - pe_start_time_ >= k_fast_persist_min_trial &&
+          pe_ratio_ <= k_fast_persist_ineffective_ratio && pe_f_start_ >= 0.0 && f_now >= 0.0 &&
+          f_now >= pe_f_start_ * k_fast_persist_loss_drop_ratio) {
+        ++persist_reverts_;
+        // 每多判定一次，停用時間加倍（5、10、20、30 分鐘）：這條線路就是這樣，不必每 5 分鐘再試兩刀
+        auto off = std::chrono::duration_cast<std::chrono::seconds>(k_fast_persist_off) * (1 << std::min(persist_reverts_ - 1, 3));
+        persist_off_until_ = now + std::min<std::chrono::seconds>(off, k_fast_persist_off_max);
+        pe_logged_start_kbps_ = pe_start_kbps_;
+        pe_logged_f_start_ = pe_f_start_;
+        pe_logged_f_now_ = f_now;
+        pe_judged_f_ = std::max(f_now, pe_f_start_);
+        pe_last_cut_ = {};
+        persistent_losses_.clear();
+        loss_rate_events_.clear();  // 已判定跟碼率無關：這一串的事件不要再拿去觸發丟包率規則
+        // 這一串全是 +persistent 的刀（別種降碼會讓這一串作廢），它們記下的塞車點、防振盪上限、「曾經塞車」都不是真的
+        last_congested_kbps_ = pe_prev_congested_kbps_;
+        last_congested_time_ = pe_prev_congested_time_;
+        delay_congestion_seen_ = pe_prev_delay_seen_;
+        last_saturated_cut_ = pe_prev_saturated_cut_;
+        penalty_until_ = {};
+        // 拉回目標：先前穩定撐住的碼率（有的話，不超過這一串開始時的碼率）；沒有穩定值才拉回開始時的一半
+        const int restore = stable_kbps_ > 0 ? std::min(stable_kbps_, pe_start_kbps_) :
+                                               static_cast<int>(pe_start_kbps_ * k_fast_persist_restore_ratio);
+        // 還沒套用的那一刀若也屬於這一串就不必降了；別的規則排的降碼要留著
+        const bool pending_is_persistent = pending_target_.has_value() &&
+                                           (last_reason_.find("persistent") != std::string::npos || last_reason_ == "rate-shortfall+delay");
+        if (pending_is_persistent) {
+          pending_target_.reset();
+        }
+        if (restore > applied_kbps_ && !pending_target_.has_value()) {
+          pending_restore_ = restore;
+        }
+        return false;
+      }
+      return true;
     }
 
     void clean_old_persistent_losses(steady::time_point now) {
@@ -730,7 +1023,9 @@ namespace vr::abr {
     int calculate_ramp_step(std::chrono::milliseconds interval) const {
       if (is_multiplicative_ramp()) {
         double sec = interval.count() / 1000.0;
-        int step = static_cast<int>(std::round(applied_kbps_ * 0.08 * sec));
+        // §ABR-PATH-UPGRADE：剛換到更好的路，新容量還不知道，探快一點
+        const double rate = last_tick_ < path_boost_until_ ? k_fast_path_boost_rate : 0.08;
+        int step = static_cast<int>(std::round(applied_kbps_ * rate * sec));
         return std::max(50, step);  // §ABR-ADAPT（審查）：窄路徑上 200 kbps 下限會讓每秒回升遠超過 8%
       } else {
         // 11-04 桌球實測：舊的每 0.5 s +2%（約 4%/s）9 秒就從 54 衝回 75 Mbps 再塞一次，形成鋸齒、每輪丟幾張
@@ -770,7 +1065,13 @@ namespace vr::abr {
       if (net_switch_active(now)) {
         return;  // §VR-NETSEL-HOLD：切網路時的掉包不算進丟包率
       }
+      if (outage_hold_active(now)) {
+        return;  // §ABR-OUTAGE-HOLD：斷訊那一下的掉包同樣不算
+      }
       ++random_loss_events_;
+      if (pending_restore_.has_value()) {
+        return;  // §ABR-PERSIST-VERIFY：剛判定這批丟包跟碼率無關、正要拉回，不要同一筆又觸發丟包率降碼
+      }
       while (!loss_rate_events_.empty() && now - loss_rate_events_.front() > k_fast_loss_rate_window) {
         loss_rate_events_.pop_front();
       }
@@ -784,6 +1085,7 @@ namespace vr::abr {
         return;
       }
       if (now < lr_disabled_until_) return;
+      if (now < persist_off_until_) return;  // §ABR-PERSIST-VERIFY：已判定丟包跟碼率無關，這條規則同樣不降
       if (static_cast<int>(loss_rate_events_.size()) < k_fast_loss_rate_threshold) return;
       // 要「持續」：最早一筆至少 10 秒前，短時間的密集丟包交給 persistent／延遲規則
       if (now - loss_rate_events_.front() < k_fast_loss_rate_window / 2) return;
@@ -883,6 +1185,20 @@ namespace vr::abr {
         ++net_switch_skips_;
         return;
       }
+      // §ABR-OUTAGE-HOLD：剛判定是斷訊——丟包、延遲、收送落差都是斷訊本身造成的。解碼過載與 latch 不是網路訊號，照常
+      if (outage_hold_active(now) && std::strcmp(reason, "decode-overload") != 0 && std::strcmp(reason, "latch-slack-late") != 0) {
+        ++outage_hold_skips_;
+        return;
+      }
+      // §ABR-PERSIST-VERIFY：真的要降了 → 還沒套用的「拉回一半」作廢（不然下一個 tick 會把這一刀蓋掉）
+      pending_restore_.reset();
+      path_boost_until_ = {};  // §ABR-PATH-UPGRADE：探到頂了，回到平常的回升速度
+      // 同一串＝+persistent 與 rate-shortfall（兩者的依據都是「收到的比送出的少」）
+      const bool persistent_cut = std::strstr(reason, "persistent") != nullptr || std::strcmp(reason, "rate-shortfall+delay") == 0;
+      if (!persistent_cut) {
+        pe_last_cut_ = {};  // 這一串中間有別種降碼（真塞車、解碼過載…）→ 作廢，之後重新開始算
+      }
+      const int pe_applied_before = applied_kbps_;
       // §ABR-RESTORE-STABLE：拉回後 5 秒內又降碼＝拉回的值撐不住，穩定值作廢
       if (restore_time_ != steady::time_point {} && now - restore_time_ <= k_fast_restore_fail_window) {
         stable_kbps_ = 0;
@@ -984,6 +1300,15 @@ namespace vr::abr {
       const int eff_floor = floor_kbps();
       new_target = std::clamp(new_target, eff_floor, eff_cap);
 
+      if (persistent_cut && pe_last_cut_ != steady::time_point {}) {
+        // 這一串實際降了一刀：刀數與累計降幅（只算 +persistent 自己降的，quality-trim 之類不算）
+        pe_last_cut_ = now;
+        ++pe_cuts_;
+        if (pe_applied_before > 0) {
+          pe_ratio_ *= static_cast<double>(new_target) / static_cast<double>(pe_applied_before);
+        }
+      }
+
       state_ = fast_state_e::cut;
       last_reason_ = reason;
       pending_target_ = new_target;
@@ -1041,6 +1366,43 @@ namespace vr::abr {
     steady::time_point lr_disabled_until_ {};
     int loss_rate_reverts_ = 0;
 
+    // §ABR-PERSIST-VERIFY
+    steady::time_point pe_last_cut_ {};       ///< 這一串最近一次 +persistent 降碼
+    steady::time_point pe_start_time_ {};     ///< 這一串第一刀的時刻
+    int pe_start_kbps_ = 0;                   ///< 這一串開始時的碼率
+    int pe_cuts_ = 0;                         ///< 這一串已經降了幾刀
+    int pe_prev_congested_kbps_ = 0;
+    steady::time_point pe_prev_congested_time_ {};
+    steady::time_point persist_off_until_ {};
+    std::optional<int> pending_restore_;
+    int persist_reverts_ = 0;
+    int persist_skips_ = 0;
+    int pe_logged_start_kbps_ = 0;
+    double pe_ratio_ = 1.0;                   ///< 這一串 +persistent 累計降到開始時的幾成
+    double pe_f_start_ = -1.0;                ///< 這一串開始前「收到比送出少」的比例（-1＝沒有資料）
+    double pe_judged_f_ = 0.0;                ///< 判定無效當時的比例（停用期間用來看情況有沒有變）
+    double pe_logged_f_start_ = 0.0;
+    double pe_logged_f_now_ = 0.0;
+    bool pe_prev_delay_seen_ = false;
+    steady::time_point pe_prev_saturated_cut_ {};
+    int persist_reverts_reported_ = 0;
+    bool experimental_rules_ = false;         ///< 見 set_experimental_rules
+    steady::time_point path_boost_until_ {};  ///< §ABR-PATH-UPGRADE：這之前回升加速
+    // §ABR-OUTAGE-HOLD
+    steady::time_point outage_hold_until_ {};
+    steady::time_point owd_overuse_since_ {};  ///< 單向延遲趨勢這一次進入過載的時刻（不在過載＝空）
+    steady::time_point rtt_overuse_since_ {};
+    int outage_holds_ = 0;
+    int outage_hold_skips_ = 0;
+    int path_upgrades_ = 0;
+    struct rates_record_t {
+      steady::time_point at;
+      int send_kbps;
+      int recv_kbps;
+    };
+    std::deque<rates_record_t> rates_hist_;
+    int sat_run_ = 0;                         ///< 連續幾筆回報收得比送的少（≥ 5%）
+
     // §ABR-RESTORE-STABLE
     steady::time_point first_tick_ {};
     steady::time_point last_cut_time_ {};
@@ -1077,6 +1439,7 @@ namespace vr::abr {
     int recv_kbps_ = 0;
     int send_kbps_ = 0;
     int shortfall_reports_ = 0;  ///< §ABR-SHORTFALL：連續幾次收／送落差超過門檻
+    int shortfall_outage_skips_ = 0;  ///< 落差大到算斷訊而沒降的次數
 
     steady::time_point last_quality_time_{};
     int last_qp_x100_ = -1;

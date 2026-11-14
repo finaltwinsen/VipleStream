@@ -24,10 +24,12 @@ public:
 
     // Get the RTV for the render texture. Caller renders video into this,
     // then calls submitFrame(). Same pattern as NvOFFRUC.
-    ID3D11RenderTargetView* getRenderRTV() const override { return m_RenderRTV.Get(); }
+    // §PERF-1113：兩張全解析度貼圖輪替，這裡回傳「下一張要畫進去」的那張。
+    ID3D11RenderTargetView* getRenderRTV() const override { return m_FrameRTV[m_RenderIdx].Get(); }
 
     // Get the SRV for the last rendered frame (for blitting real frame to swapchain).
-    ID3D11ShaderResourceView* getLastRenderSRV() const override { return m_RenderSRV.Get(); }
+    // §PERF-1113：submitFrame／skipFrame 之後仍指向「這一幀」那張（m_LastIdx），不受輪替影響。
+    ID3D11ShaderResourceView* getLastRenderSRV() const override { return m_FrameSRV[m_LastIdx].Get(); }
 
     // Submit the already-rendered frame for interpolation.
     // Returns true if an interpolated frame is available.
@@ -82,14 +84,16 @@ private:
     Microsoft::WRL::ComPtr<ID3D11SamplerState> m_PointSampler;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> m_LinearSampler;
 
-    // Render texture (caller renders into via RTV, GenericFRUC reads as current frame)
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_RenderTexture;
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_RenderRTV;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_RenderSRV;
-
-    // Full-resolution textures
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_PrevFrame;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_PrevFrameSRV;
+    // §PERF-1113：原本是 m_RenderTexture（呼叫端畫進去）＋m_PrevFrame（上一幀參考），每幀結尾整張
+    // CopyResource 過去。改成兩張同規格貼圖輪替：這一幀畫的那張，下一幀直接當上一幀參考，省掉複製。
+    //   m_RenderIdx＝下一次 getRenderRTV() 給出去的那張（也是 submitFrame 進來時的「這一幀」）
+    //   m_LastIdx  ＝最近一次 submitFrame／skipFrame 處理的那張（getLastRenderSRV() 用）
+    //   上一幀參考＝1 - m_RenderIdx
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_FrameTex[2];
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_FrameRTV[2];
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_FrameSRV[2];
+    int m_RenderIdx = 0;
+    int m_LastIdx = 0;
 
     // 1/4-resolution textures for motion estimation
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_PrevFrameQuarter;

@@ -4,6 +4,10 @@
  */
 #pragma once
 
+// standard includes
+#include <atomic>
+#include <cstdint>
+
 // local includes
 #include "input.h"
 #include "platform/common.h"
@@ -399,6 +403,13 @@ namespace video {
   // 查不到時 LOSS 會退回 IDR）。決定 /serverinfo 的 RECOVERY_INTRA 與 launch 的 recovery 模式。
   extern bool last_encoder_probe_supported_vr_intra_refresh;
 
+  // §PERF-1113：§VR-RATE-AUTO 半速時，編碼執行緒把「目前的分頻」與「上一張確定要編的影像時間」發布出來，
+  // 擷取執行緒（display_vr_t::capture）在複製之前用同一條時間規則先判斷這一張會不會被丟——會丟就不複製、不喚醒編碼。
+  // 最後決定仍在編碼執行緒（vr::session_state_t::rate_skip_image）；這兩個值只是它的結果的副本，擷取端讀到舊值時
+  // 只會少丟（照舊交給編碼執行緒判斷），不會多丟。inline 變數：不需要 video.cpp 提供定義（單獨編譯的測試也連得過）。
+  inline std::atomic<int> vr_rate_pub_div {1};  ///< 1＝全速（擷取端不提早丟）
+  inline std::atomic<int64_t> vr_rate_pub_last_sent_ns {0};  ///< steady_clock 的 ns；0＝還沒有
+
   void capture(
     safe::mail_t mail,
     config_t config,
@@ -421,8 +432,10 @@ namespace video {
    * @param capture_source M1b S1-09：0 = 桌面（預設，行為與舊版相同）；1 = VR。VR 探測前一定要先建立
    *        vr_probe_scope，探測結束（或 VR session 結束）時才能把桌面的探測結果還原。
    * @param shape VR 形狀（capture_source == 1 時必填）。
+   * @param vr_cache §VR-PROBE-CACHE：VR 探測可以沿用行程內快取的同形狀結果（命中時只用 VR 形狀真的開一次編碼器確認）。
+   *        false＝一律完整探測、結果也不存（selftest 要測的就是探測本身）。桌面探測不看這個參數。
    */
-  int probe_encoders(int capture_source = 0, const vr_probe_shape_t *shape = nullptr);
+  int probe_encoders(int capture_source = 0, const vr_probe_shape_t *shape = nullptr, bool vr_cache = true);
 
   /**
    * @brief M1b S1-09（§C.6 第 6 點）：把桌面探測的全域狀態（chosen_encoder、active_*_mode、

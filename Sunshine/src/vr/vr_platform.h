@@ -54,11 +54,20 @@ namespace vr {
     /**
      * @brief 重新探測環境（會讀使用者可寫檔案；只在背景執行緒呼叫）。結果同時更新快取。
      * @param force_refresh false 且快取未滿 60 s 時直接回快取。
+     * @param reuse_adapter true＝K22 的 adapter 選擇可以沿用上一次成功的結果，只要 DXGI 說 adapter 沒變過
+     *        （不必每次對每張卡建一次 D3D11 device）。只給編排器閒置時每 60 秒的例行探測用；PRECHECK 與 selftest
+     *        傳 false 完整重選——選到的 LUID 會寫進 session config。
      */
-    env_t probe_environment(bool force_refresh);
+    env_t probe_environment(bool force_refresh, bool reuse_adapter = false);
 
     /// 最近一次 probe_environment() 的結果（任何執行緒）
     env_t cached_environment();
+
+    /**
+     * @brief 只重查 env 裡隨時會變的三項：有沒有主控台使用者、主控台是否鎖定、自身 session 是否對得上；其餘欄位不動，
+     *        也不更新快取。不讀使用者可寫的檔案。編排器的 PRECHECK 沿用同一次 /launch 稍早探測的結果時，用它補查。
+     */
+    void refresh_volatile_environment(env_t &env);
 
     /**
      * @brief `vr_pcvr=enabled` 時 serverinfo PCVR bit 與 /launch 的前提（只讀快取）。
@@ -79,6 +88,20 @@ namespace vr {
     /// 執行中的 vrserver（主控台 session）；沒有回 0
     uint32_t vrserver_pid();
 
+    /**
+     * @brief 編排器一輪維護要看的行程，一次全系統快照取齊（主控台 session）。維護每 2 秒一輪，各自呼叫
+     *        vrserver_pid()／expected_driver_host_image()／detect_conflicts() 的話一輪要拍 3～4 次。
+     *        只代表拍的那一刻：動作之後要重新確認（例如剛結束 SteamVR）時仍用無參數的版本。
+     */
+    struct proc_snapshot_t {
+      uint32_t vrserver_pid = 0;  ///< 同 vrserver_pid()
+      std::wstring vrserver_image;  ///< 執行中 vrserver 的完整映像路徑；沒在跑或查不到為空
+      bool vd_streamer = false;  ///< VirtualDesktop.Streamer.exe 在跑
+    };
+
+    /// 拍一次（只在背景執行緒呼叫）
+    proc_snapshot_t snapshot_procs();
+
     /// vrserver 已執行多久（毫秒，至少 1）；沒在跑或查不到回 0
     uint32_t vrserver_uptime_ms();
 
@@ -94,6 +117,9 @@ namespace vr {
 
     /// 「合法 driver 宿主」映像：執行中的 vrserver，否則 `<runtime>\bin\win64\vrserver.exe`（沒有回空；直接交給 bridge）
     std::wstring expected_driver_host_image();
+
+    /// 同上，執行中的 vrserver 取自已經拍好的快照（不另外拍）
+    std::wstring expected_driver_host_image(const proc_snapshot_t &procs);
 
     /// Steam 已登入（HKU 的 ActiveUser ≠ 0；code 17 用）
     bool steam_logged_in();
@@ -210,6 +236,9 @@ namespace vr {
 
     /// 重新判定（會讀使用者可寫的 vrserver.txt；只在背景執行緒呼叫）。driver_connected／other_hmd 取自 bridge
     conflict_t detect_conflicts(bool driver_connected, uint32_t other_hmd);
+
+    /// 同上，行程狀態取自已經拍好的快照（不另外拍）
+    conflict_t detect_conflicts(bool driver_connected, uint32_t other_hmd, const proc_snapshot_t &procs);
 
     /// 最近一次 detect_conflicts() 的結果（HTTP 執行緒用）
     conflict_t cached_conflicts();

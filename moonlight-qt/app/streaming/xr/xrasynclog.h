@@ -1,8 +1,9 @@
 // VipleStream 2.0 §VR-LOGASYNC — 10 秒彙總行交給另一條執行緒印（純邏輯）。
 //
 // 每 10 秒印彙總的那一格，frame thread 在 xrEndFrame 之後要多做 0.6～1.1 ms（2026-10-18 頭盔：maybeLogStats 那五行中位數
-// 約 640 µs），回到 xrWaitFrame 最晚，「等在途的幀」與延後挑影像都因此要避開那一格。量過大半花在 log 本身：每一行經過
-// main.cpp 的 log callback 兩次 QRegularExpression 取代、再丟進 QThreadPool。這裡讓 frame thread 只組好字串放進佇列，
+// 約 640 µs），回到 xrWaitFrame 最晚，「等在途的幀」與延後挑影像都因此要避開那一格。量過大半花在 log 本身：當時每一行經過
+// main.cpp 的 log callback 兩次 QRegularExpression 取代、再丟進 QThreadPool（§PERF-1113 A28 之後那個 callback 在呼叫端只抄
+// 欄位與入列，組行搬到 log 執行緒、取代只在含 rikey 的行做；這裡的數字是改之前量的）。這裡讓 frame thread 只組好字串放進佇列，
 // 由一條自己的執行緒呼叫 sink（XrContext 給的是 SDL_LogInfo）。同一個 AsyncLines 進來的行照順序印。
 // 2026-10-18 頭盔細分：改成非同步之後剩下的大頭是排序與組字串（10s video 約 200～250 µs、POSEERR 約 220～280 µs），
 // 所以另有 postTask：frame thread 只把這個視窗的資料整包交出來，字串到了這條執行緒才算。

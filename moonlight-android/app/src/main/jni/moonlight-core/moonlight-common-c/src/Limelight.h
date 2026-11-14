@@ -1143,6 +1143,10 @@ int LiGetVrFlags(void);
 // （呼叫端只要繼續送下一筆，不可據此終止連線）。可從任何執行緒呼叫。
 int LiSendVrTracking(const VIPLE_VR_TRACKING* sample);
 
+// §VR-MULTILINK 的連線數（每張網卡一條，含還沒確認或待命的；0＝沒啟用多連線，tracking 走 ENet）。
+// app 用它判斷 tracking 上行是不是只有 session 位址那一條路可走。可從任何執行緒呼叫。
+int LiGetVrLinkCount(void);
+
 // 送一則 0x5507 VR_C2S（TLV 串，1–251 B）。reliable=true 走一般控制 channel
 // 的可靠傳輸；false 走 VR channel UNSEQUENCED。回傳 0 表示已送出。
 int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable);

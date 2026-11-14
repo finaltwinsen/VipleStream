@@ -263,7 +263,7 @@
     "max_bitrate": "Débit maximum",
     "max_bitrate_desc": "Le débit maximum (en Kbps) auquel VipleStream-Server encode le flux. Si réglé sur 0, il utilisera toujours le débit demandé par Lune.",
     "minimum_fps_target": "Cible FPS minimale",
-    "minimum_fps_target_desc": "Le FPS effectif le plus bas qu'un flux peut atteindre. Une valeur de 0 est traitée comme la moitié environ du FPS du flux. Un réglage de 20 est recommandé si vous streamez du contenu de 24 ou 30 images par seconde.",
+    "minimum_fps_target_desc": "Le FPS effectif le plus bas qu'un flux peut atteindre. Une valeur de 0 utilise le FPS demandé par le client (la totalité, pas la moitié). Un réglage de 20 est recommandé si vous streamez du contenu de 24 ou 30 images par seconde.",
     "min_log_level": "Niveau du journal",
     "min_log_level_0": "Verbose",
     "min_log_level_1": "Debug",

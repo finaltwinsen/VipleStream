@@ -25,7 +25,7 @@ namespace vr {
 
 // M1b V5：Linux／macOS 沒有 SteamVR 編排；全部回報不可用（不變式 10）
 namespace vr::platform {
-  env_t probe_environment(bool) {
+  env_t probe_environment(bool, bool) {
     env_t e;
     e.probed = true;
     return e;
@@ -33,6 +33,9 @@ namespace vr::platform {
 
   env_t cached_environment() {
     return probe_environment(false);
+  }
+
+  void refresh_volatile_environment(env_t &) {
   }
 
   bool pcvr_available(std::string *reason) {
@@ -57,6 +60,10 @@ namespace vr::platform {
     return 0;
   }
 
+  proc_snapshot_t snapshot_procs() {
+    return {};
+  }
+
   uint32_t vrserver_uptime_ms() {
     return 0;
   }
@@ -66,6 +73,10 @@ namespace vr::platform {
   }
 
   std::wstring expected_driver_host_image() {
+    return {};
+  }
+
+  std::wstring expected_driver_host_image(const proc_snapshot_t &) {
     return {};
   }
 
@@ -145,6 +156,10 @@ namespace vr::platform {
   }
 
   conflict_t detect_conflicts(bool, uint32_t) {
+    return {};
+  }
+
+  conflict_t detect_conflicts(bool, uint32_t, const proc_snapshot_t &) {
     return {};
   }
 

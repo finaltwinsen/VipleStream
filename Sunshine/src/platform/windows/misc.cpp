@@ -6,6 +6,7 @@
 #include <csignal>
 #include <exception>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <iterator>
 #include <chrono>
@@ -168,21 +169,24 @@ namespace platf {
   }
 
   adapteraddrs_t get_adapteraddrs() {
+    // §PERF-1113-R2（A2）：先給 16 KB，一般一次就成功（原本每次都先用 0 大小問一遍，等於列舉兩次）；
+    // 沒有呼叫端用的 anycast／multicast／DNS 伺服器清單不收。family 要維持 AF_UNSPEC（查 MAC 要比對 IPv6 位址），
+    // 也不可以加 GAA_FLAG_SKIP_FRIENDLY_NAME（廣告清單要介面名稱）。
+    constexpr ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG size = 16 * 1024;
     adapteraddrs_t info {nullptr};
-    ULONG size = 0;
+    info.reset((PIP_ADAPTER_ADDRESSES) calloc(1, size));
 
     // §REVIEW-1111：配置失敗時原本會一直繞（緩衝區是空的，API 一直回「太小」）；最後一次呼叫不是成功時
     // 交出去的是沒有填過的緩衝區，呼叫端沿著 Next 走會讀到垃圾指標。
     ULONG rc = ERROR_BUFFER_OVERFLOW;
-    for (int tries = 0; tries < 8; ++tries) {
-      rc = GetAdaptersAddresses(AF_UNSPEC, 0, nullptr, info.get(), &size);
+    for (int tries = 0; info && tries < 8; ++tries) {
+      rc = GetAdaptersAddresses(AF_UNSPEC, flags, nullptr, info.get(), &size);
       if (rc != ERROR_BUFFER_OVERFLOW) {
         break;
       }
+      // 不夠大：size 已經被改成需要的大小
       info.reset((PIP_ADAPTER_ADDRESSES) calloc(1, size));
-      if (!info) {
-        break;
-      }
     }
     if (rc != ERROR_SUCCESS) {
       info.reset();
@@ -191,8 +195,8 @@ namespace platf {
     return info;
   }
 
-  std::string get_mac_address(const std::string_view &address) {
-    adapteraddrs_t info = get_adapteraddrs();
+  // 從原始列舉（沒過濾：全部網卡、含 IPv6 與虛擬網卡）找 address 所在網卡的 MAC；找不到回空字串
+  static std::string mac_from_adapters(const adapteraddrs_t &info, const std::string_view &address) {
     for (auto adapter_pos = info.get(); adapter_pos != nullptr; adapter_pos = adapter_pos->Next) {
       for (auto addr_pos = adapter_pos->FirstUnicastAddress; addr_pos != nullptr; addr_pos = addr_pos->Next) {
         if (adapter_pos->PhysicalAddressLength != 0 && address == from_sockaddr(addr_pos->Address.lpSockaddr)) {
@@ -208,8 +212,22 @@ namespace platf {
         }
       }
     }
-    BOOST_LOG(warning) << "Unable to find MAC address for "sv << address;
+    return {};
+  }
+
+  // 查不到 MAC 時回佔位值；警告每個位址只印一次（§PERF-1113-R2 A2）
+  static std::string mac_or_placeholder(std::string mac, const std::string_view &address) {
+    if (!mac.empty()) {
+      return mac;
+    }
+    if (mac_miss_first_time(address)) {
+      BOOST_LOG(warning) << "Unable to find MAC address for "sv << address << " (logged once per address)"sv;
+    }
     return "00:00:00:00:00:00"s;
+  }
+
+  std::string get_mac_address(const std::string_view &address) {
+    return mac_or_placeholder(mac_from_adapters(get_adapteraddrs(), address), address);
   }
 
   /**
@@ -217,9 +235,8 @@ namespace platf {
    * 複用 get_adapteraddrs() helper，遍歷 UnicastAddress 收集 IPv4。
    * 過濾規則對齊客戶端 PlatformNetIf.c 的 classifyWindowsAdapter()。
    */
-  std::vector<advertised_interface> enum_net_interfaces() {
+  static std::vector<advertised_interface> advertised_from_adapters(const adapteraddrs_t &adapters) {
     std::vector<advertised_interface> result;
-    adapteraddrs_t adapters = get_adapteraddrs();
 
     for (auto adapter = adapters.get(); adapter != nullptr; adapter = adapter->Next) {
       // 跳過非 UP 介面
@@ -290,11 +307,26 @@ namespace platf {
       }
     }
 
-    BOOST_LOG(info) << "[VIPLE-MPADV] Enumerated " << result.size() << " network interface(s) for advertisement";
-    for (const auto &iface : result) {
-      BOOST_LOG(info) << "[VIPLE-MPADV]   " << iface.name << " (" << iface.type << "): " << iface.address;
-    }
+    return result;
+  }
 
+  std::vector<advertised_interface> enum_net_interfaces() {
+    auto result = advertised_from_adapters(get_adapteraddrs());
+    log_advertised_interfaces_if_changed(result);  // §PERF-1113-R2（A2）：清單變了才印
+    return result;
+  }
+
+  // §PERF-1113-R2（A2）：/serverinfo 用——一次 GetAdaptersAddresses 同時給 MAC 與廣告清單
+  std::vector<advertised_interface> enum_net_interfaces(const std::string_view &mac_for, std::string &mac_out) {
+    const adapteraddrs_t adapters = get_adapteraddrs();
+    if (mac_for.empty()) {
+      mac_out = "00:00:00:00:00:00"s;
+    } else {
+      // MAC 從沒過濾的列舉找，不可以從下面的 result 找（見 common.h 的說明）
+      mac_out = mac_or_placeholder(mac_from_adapters(adapters, mac_for), mac_for);
+    }
+    auto result = advertised_from_adapters(adapters);
+    log_advertised_interfaces_if_changed(result);
     return result;
   }
 
@@ -1294,6 +1326,21 @@ namespace platf {
     });
   }
 
+  // §PERF-1113-R2（A4）：streaming_will_start() 丟到背景的工作（重套 NVIDIA 設定檔）
+  static std::mutex start_task_mtx;
+  static std::future<void> start_task;
+
+  void streaming_start_tasks_wait() {
+    std::future<void> task;
+    {
+      std::lock_guard lk {start_task_mtx};
+      task = std::move(start_task);
+    }
+    if (task.valid()) {
+      task.wait();
+    }
+  }
+
   void streaming_will_start() {
     ensure_wlanapi_loaded();
 
@@ -1309,17 +1356,65 @@ namespace platf {
       used_nt_set_timer_resolution = false;
     }
 
+    // §PERF-1113（審查 05 第 3 項）：Windows 11 對沒有可見視窗的行程（我們是 service）可以不理會它要求的計時器解析度，
+    // 上面調高的 0.5 ms 就沒有作用，select／sleep 的逾時退回 15.6 ms 一格（vr_multilink.cpp 的 precise_sleep 註解有
+    // 2026-10-07 的實測）。明確告訴系統「這個行程的計時器解析度要求要照辦」。旗標是 Windows 11 才有的，舊系統會回
+    // ERROR_INVALID_PARAMETER——那些系統本來就照辦，失敗不必處理。行程存活期間有效，streaming_will_stop 不還原
+    // （沒有調高解析度時這個設定沒有任何效果）。
+    {
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+  #define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+      static bool timer_honor_logged = false;
+      PROCESS_POWER_THROTTLING_STATE throttling = {};
+      throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+      throttling.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+      throttling.StateMask = 0;  // 0＝不要忽略（照辦）
+      const BOOL honored = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
+      const DWORD honor_err = honored ? 0 : GetLastError();
+      if (!timer_honor_logged) {
+        timer_honor_logged = true;
+        if (honored) {
+          BOOST_LOG(info) << "[VIPLE-TIMER-RES] timer resolution requests of this process are now always honored"sv;
+        } else {
+          BOOST_LOG(info) << "[VIPLE-TIMER-RES] could not opt out of timer-resolution throttling (err="sv << honor_err
+                          << ") - expected before Windows 11"sv;
+        }
+      }
+    }
+
     // Promote ourselves to high priority class
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 
     // Modify NVIDIA control panel settings again, in case they have been changed externally since sunshine launch
-    if (nvprefs_instance.load()) {
-      if (!nvprefs_instance.owning_undo_file()) {
-        nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
+    // §PERF-1113-R2（A4）：這一段每場約 0.4 秒（29 場的中位數，結果全是「No need to modify」），原本擋在 RTSP ANNOUNCE 的
+    // 回應前面，client 的 PLAY、解碼器建立全部跟著晚。改到背景做：設定在 server 啟動時已經套過一次，這裡只是再確認。
+    // streaming_will_stop() 與行程結束前的還原（main.cpp）都先等它做完。下面的 WLAN 與 enable_mouse_keys() 要留同步——
+    // 後者編碼執行緒也會呼叫，搬到背景會兩邊同時寫同一組全域。
+    {
+      const auto reapply_nvprefs = [] {
+        if (nvprefs_instance.load()) {
+          if (!nvprefs_instance.owning_undo_file()) {
+            nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
+          }
+          nvprefs_instance.modify_application_profile();
+          nvprefs_instance.modify_global_profile();
+          nvprefs_instance.unload();
+        }
+      };
+
+      // 上一場的還沒做完就先等：nvprefs_instance 不是執行緒安全的（正常不會發生，stop 已經等過）
+      streaming_start_tasks_wait();
+
+      std::lock_guard lk {start_task_mtx};
+      try {
+        start_task = std::async(std::launch::async, [reapply_nvprefs] {
+          set_thread_name("nvprefs");
+          reapply_nvprefs();
+        });
+      } catch (const std::system_error &) {
+        reapply_nvprefs();  // 開不了執行緒：照原本同步做
       }
-      nvprefs_instance.modify_application_profile();
-      nvprefs_instance.modify_global_profile();
-      nvprefs_instance.unload();
     }
 
     // Enable low latency mode on all connected WLAN NICs if wlanapi.dll is available
@@ -1385,6 +1480,9 @@ namespace platf {
   }
 
   void streaming_will_stop() {
+    // §PERF-1113-R2（A4）：start 丟到背景的工作做完之前不開始還原（§REVIEW-1111：start 與 stop 要成對、不可交錯）
+    streaming_start_tasks_wait();
+
     // Demote ourselves back to normal priority class
     SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
 
@@ -1693,6 +1791,71 @@ namespace platf {
     return WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR;
   }
 
+  // §PERF-1113（審查 05 第 1 項）：VR 多連線的送出執行緒用。一塊連續緩衝＋UDP_SEND_MSG_SIZE，系統照 packet_size 切成
+  // 一個個資料報（線上的位元組和逐包送相同）。socket 是非阻塞的：緩衝滿時回 0，呼叫端自己決定重試到什麼時候。
+  int send_uso_nonblocking(std::uintptr_t native_socket, const boost::asio::ip::address &target_address, uint16_t target_port, const char *data, size_t packet_size, size_t packet_count, int *err) {
+    if (!data || packet_size == 0 || packet_count == 0) {
+      if (err) {
+        *err = WSAEINVAL;
+      }
+      return -1;
+    }
+
+    WSAMSG msg = {};
+    SOCKADDR_IN taddr_v4;
+    SOCKADDR_IN6 taddr_v6;
+    if (target_address.is_v6()) {
+      taddr_v6 = to_sockaddr(target_address.to_v6(), target_port);
+      msg.name = (PSOCKADDR) &taddr_v6;
+      msg.namelen = sizeof(taddr_v6);
+    } else {
+      taddr_v4 = to_sockaddr(target_address.to_v4(), target_port);
+      msg.name = (PSOCKADDR) &taddr_v4;
+      msg.namelen = sizeof(taddr_v4);
+    }
+
+    WSABUF buf;
+    buf.buf = (char *) data;
+    buf.len = (ULONG) (packet_size * packet_count);
+    msg.lpBuffers = &buf;
+    msg.dwBufferCount = 1;
+    msg.dwFlags = 0;
+
+    char cmbuf[WSA_CMSG_SPACE(sizeof(DWORD))] = {};
+    if (packet_count > 1) {
+      msg.Control.buf = cmbuf;
+      msg.Control.len = sizeof(cmbuf);
+      auto cm = WSA_CMSG_FIRSTHDR(&msg);
+      if (!cm) {
+        if (err) {
+          *err = WSAEINVAL;
+        }
+        return -1;
+      }
+      cm->cmsg_level = IPPROTO_UDP;
+      cm->cmsg_type = UDP_SEND_MSG_SIZE;
+      cm->cmsg_len = WSA_CMSG_LEN(sizeof(DWORD));
+      *((DWORD *) WSA_CMSG_DATA(cm)) = (DWORD) packet_size;
+    } else {
+      msg.Control.buf = nullptr;
+      msg.Control.len = 0;
+    }
+
+    DWORD bytes_sent = 0;
+    if (WSASendMsg((SOCKET) native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR) {
+      return 1;
+    }
+    const int e = WSAGetLastError();
+    if (err) {
+      *err = e;
+    }
+    return e == WSAEWOULDBLOCK ? 0 : -1;
+  }
+
+  // §PERF-1113-R2（A13）：送出失敗 log 的彙總狀態。每條送出執行緒各一份，不共用——
+  // 音訊的 10022 和影像的 10051 混在一起就看不出是哪一條在失敗
+  static thread_local send_fail_log_t send_fail_log;
+
   bool send(send_info_t &send_info) {
     WSAMSG msg;
 
@@ -1768,9 +1931,24 @@ namespace platf {
 
     DWORD bytes_sent;
     if (WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) == SOCKET_ERROR) {
-      auto winerr = WSAGetLastError();
-      BOOST_LOG(warning) << "WSASendMsg() failed: "sv << winerr;
+      auto winerr = WSAGetLastError();  // 失敗後第一件事就取：下面取時間、動 thread_local 都可能改掉它
+      // §PERF-1113-R2（A13）：路徑斷掉時每一包都會走到這裡（實測每秒約 1.6 萬行），改成每個錯誤碼每秒最多一行
+      std::uint32_t repeated = 0;
+      switch (send_fail_log.on_fail(winerr, repeated)) {
+        case send_fail_log_t::action_e::first:
+          BOOST_LOG(warning) << "WSASendMsg() failed: "sv << winerr;
+          break;
+        case send_fail_log_t::action_e::repeated:
+          BOOST_LOG(warning) << "WSASendMsg() failed: "sv << winerr << " (repeated "sv << repeated << " times since the last line)"sv;
+          break;
+        case send_fail_log_t::action_e::none:
+          break;
+      }
       return false;
+    }
+
+    if (std::uint32_t unlogged = 0; send_fail_log.on_ok(unlogged)) {
+      BOOST_LOG(info) << "WSASendMsg() is working again on this thread ("sv << unlogged << " more failures since the last line)"sv;
     }
 
     return true;

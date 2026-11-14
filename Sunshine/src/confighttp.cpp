@@ -8,6 +8,9 @@
 
 // standard includes
 #include <algorithm>
+#include <charconv>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -1703,10 +1706,52 @@ pollListing();
     }
   }
 
+  constexpr std::uint64_t LOG_TAIL_MIN_BYTES = 64ULL * 1024;  ///< `/api/logs?tail=` 的下限（位元組），低於就夾上來
+  constexpr std::uint64_t LOG_TAIL_MAX_BYTES = 16ULL * 1024 * 1024;  ///< `/api/logs?tail=` 的上限（位元組），超過就夾下來
+
+  /**
+   * @brief 把 CRLF 就地併成 LF（單獨的 CR 保留）。
+   * @param s 要處理的內容。
+   *
+   * log 檔在 Windows 以文字模式寫入，磁碟上是 CRLF；原本以文字模式讀回，回應是 LF。
+   * 改成二進位一次讀之後在這裡併回去，回應內容才和原本相同。
+   */
+  static void log_crlf_to_lf(std::string &s) {
+    char *const base = s.data();
+    const char *const end = base + s.size();
+    const char *r = static_cast<const char *>(std::memchr(base, '\r', s.size()));
+    if (!r) {
+      return;  // Linux／macOS 的 log 沒有 CR，不必搬動
+    }
+
+    char *w = base + (r - base);
+    while (r < end) {
+      const char *cr = static_cast<const char *>(std::memchr(r, '\r', static_cast<std::size_t>(end - r)));
+      const char *const chunk_end = cr ? cr : end;
+      const auto chunk = static_cast<std::size_t>(chunk_end - r);
+      if (chunk && w != r) {
+        std::memmove(w, r, chunk);
+      }
+      w += chunk;
+      if (!cr) {
+        break;
+      }
+      if (cr + 1 >= end || cr[1] != '\n') {
+        *w++ = '\r';
+      }
+      r = cr + 1;
+    }
+    s.resize(static_cast<std::size_t>(w - base));
+  }
+
   /**
    * @brief Get the logs from the log file.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
+   *
+   * 不帶參數回整個檔。帶 `tail=N`（位元組，夾在 64 KB～16 MB，例如 `/api/logs?tail=4194304`）
+   * 只回檔尾，並從第一個換行之後開始，不會回半行。兩種都帶 `X-Log-Size`（檔案大小）與
+   * `X-Log-Start`（回應內容在檔案裡的起點，大於 0 代表前面有省略），單位是磁碟上的位元組。
    *
    * @api_examples{/api/logs| GET| null}
    */
@@ -1717,11 +1762,60 @@ pollListing();
 
     print_req(request);
 
-    std::string content = file_handler::read_file(config::sunshine.log_file.c_str());
+    bool tail_requested = false;
+    std::uint64_t tail_bytes = 0;
+    {
+      const auto args = request->parse_query_string();
+      if (const auto it = args.find("tail"); it != args.end()) {
+        const std::string &value = it->second;
+        std::uint64_t parsed = 0;
+        const auto [parse_end, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+        if (ec != std::errc() || parse_end != value.data() + value.size()) {
+          bad_request(response, request, "Invalid tail value");
+          return;
+        }
+        tail_requested = true;
+        tail_bytes = std::clamp(parsed, LOG_TAIL_MIN_BYTES, LOG_TAIL_MAX_BYTES);
+      }
+    }
+
+    // §PERF-1113：原本用 istreambuf_iterator 逐字元讀進沒有 reserve 的字串（倍增成長），峰值
+    // 是檔案的 3～5 倍；疑難排解頁每 5 秒抓一次，log 幾十 MB 時每次都是上百 MB 的暫時配置，
+    // 這條 HTTPS 伺服器又是單執行緒。改成先量大小、一次讀進剛好大小的緩衝。
+    std::string content;
+    std::uint64_t file_size = 0;
+    std::uint64_t start = 0;
+    if (std::ifstream in {config::sunshine.log_file, std::ios::binary}; in) {
+      in.seekg(0, std::ios::end);
+      const std::streamoff end_off = in.tellg();
+      if (end_off > 0) {
+        file_size = static_cast<std::uint64_t>(end_off);
+        if (tail_requested && file_size > tail_bytes) {
+          start = file_size - tail_bytes;
+        }
+        content.resize(static_cast<std::size_t>(file_size - start));
+        in.seekg(static_cast<std::streamoff>(start), std::ios::beg);
+        in.read(content.data(), static_cast<std::streamsize>(content.size()));
+        content.resize(static_cast<std::size_t>(in.gcount()));
+
+        if (start > 0) {
+          // 起點多半落在一行中間：丟到第一個換行為止（前端的解析以時間戳開頭的整行為單位）
+          if (const auto nl = content.find('\n'); nl != std::string::npos) {
+            content.erase(0, nl + 1);
+            start += nl + 1;
+          }
+        }
+        log_crlf_to_lf(content);
+      }
+    }
+
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/plain");
     headers.emplace("X-Frame-Options", "DENY");
     headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    // 省略與否放標頭：寫成沒有時間戳的文字行會被前端的解析丟掉
+    headers.emplace("X-Log-Size", std::to_string(file_size));
+    headers.emplace("X-Log-Start", std::to_string(start));
     response->write(SimpleWeb::StatusCode::success_ok, content, headers);
   }
 

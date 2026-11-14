@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <bitset>
+#include <format>
 #include <list>
 #include <thread>
 
@@ -31,6 +32,7 @@ extern "C" {
 #include "sync.h"
 #include "video.h"
 #include "pyrowave_encode.h"
+#include "vr/vr_bridge.h"
 #include "vr/vr_session.h"
 
 #ifdef _WIN32
@@ -1262,6 +1264,38 @@ namespace video {
     std::optional<desktop_probe_snapshot_t> desktop_probe_snapshot;
     // §REVIEW-1111：這份快照已經交給一場 VR session（之後由它結束時還原）
     bool desktop_probe_snapshot_handed_off = false;
+
+    /// 把探測會改的那組全域抄成一份快照。桌面狀態的存檔與 §VR-PROBE-CACHE 共用這一對函式，新增欄位時兩邊不會漏。
+    desktop_probe_snapshot_t capture_probe_globals() {
+      desktop_probe_snapshot_t s;
+      s.chosen = chosen_encoder;
+      s.hevc_mode = active_hevc_mode;
+      s.av1_mode = active_av1_mode;
+      s.ref_frames_invalidation = last_encoder_probe_supported_ref_frames_invalidation;
+      s.yuv444 = last_encoder_probe_supported_yuv444_for_codec;
+      s.vr_intra_refresh = last_encoder_probe_supported_vr_intra_refresh;
+      s.capture_source = last_probe_capture_source;
+      for (auto *e : encoders) {
+        s.caps.push_back({e, e->h264.capabilities, e->hevc.capabilities, e->av1.capabilities});
+      }
+      return s;
+    }
+
+    /// capture_probe_globals() 的反向：把快照寫回那組全域
+    void apply_probe_globals(const desktop_probe_snapshot_t &s) {
+      chosen_encoder = s.chosen;
+      active_hevc_mode = s.hevc_mode;
+      active_av1_mode = s.av1_mode;
+      last_encoder_probe_supported_ref_frames_invalidation = s.ref_frames_invalidation;
+      last_encoder_probe_supported_yuv444_for_codec = s.yuv444;
+      last_encoder_probe_supported_vr_intra_refresh = s.vr_intra_refresh;
+      last_probe_capture_source = s.capture_source;
+      for (const auto &c : s.caps) {
+        c.enc->h264.capabilities = c.h264;
+        c.enc->hevc.capabilities = c.hevc;
+        c.enc->av1.capabilities = c.av1;
+      }
+    }
   }  // namespace
 
   void mark_desktop_probe_handed_off() {
@@ -1284,17 +1318,7 @@ namespace video {
     if (desktop_probe_snapshot) {
       return;  // 巢狀：保留第一份（最外層的桌面狀態）
     }
-    desktop_probe_snapshot_t s;
-    s.chosen = chosen_encoder;
-    s.hevc_mode = active_hevc_mode;
-    s.av1_mode = active_av1_mode;
-    s.ref_frames_invalidation = last_encoder_probe_supported_ref_frames_invalidation;
-    s.yuv444 = last_encoder_probe_supported_yuv444_for_codec;
-    s.vr_intra_refresh = last_encoder_probe_supported_vr_intra_refresh;
-    s.capture_source = last_probe_capture_source;
-    for (auto *e : encoders) {
-      s.caps.push_back({e, e->h264.capabilities, e->hevc.capabilities, e->av1.capabilities});
-    }
+    auto s = capture_probe_globals();
     desktop_probe_snapshot = std::move(s);
     BOOST_LOG(debug) << "[VIPLE-VR-ENC] desktop probe state saved (source="sv << s.capture_source << ')';
   }
@@ -1305,23 +1329,81 @@ namespace video {
       return;
     }
     const auto &s = *desktop_probe_snapshot;
-    chosen_encoder = s.chosen;
-    active_hevc_mode = s.hevc_mode;
-    active_av1_mode = s.av1_mode;
-    last_encoder_probe_supported_ref_frames_invalidation = s.ref_frames_invalidation;
-    last_encoder_probe_supported_yuv444_for_codec = s.yuv444;
-    last_encoder_probe_supported_vr_intra_refresh = s.vr_intra_refresh;
-    last_probe_capture_source = s.capture_source;
-    for (const auto &c : s.caps) {
-      c.enc->h264.capabilities = c.h264;
-      c.enc->hevc.capabilities = c.hevc;
-      c.enc->av1.capabilities = c.av1;
-    }
+    apply_probe_globals(s);
     BOOST_LOG(info) << "[VIPLE-VR-ENC] desktop probe state restored (source="sv << s.capture_source
                     << " encoder="sv << (s.chosen ? s.chosen->name : "none"sv) << ')';
     desktop_probe_snapshot.reset();
     desktop_probe_snapshot_handed_off = false;
   }
+
+  // ── §VR-PROBE-CACHE：VR 形狀探測結果的行程內快取 ─────────────────────────────────
+  // 每次 VR /launch、/resume 都重跑整套探測（H.264、HEVC、HEVC 10-bit、VR 形狀各建一次編碼器、各編一張），擋在
+  // SteamVR 啟動之前約半秒。同一張卡、同一個形狀的結果在行程內幾乎不會變：把探測完成當下的那組全域存下來，
+  // 命中時套回去，只留 VR 形狀那一次真的開編碼器（編碼器被佔滿之類的狀況 /launch 當下就要知道，不能整個跳過）。
+  // 作廢的時機：顯示卡／驅動的列舉變了、命中後的那一次驗證失敗、串流時編碼器建不起來。
+  namespace {
+    struct vr_probe_cache_key_t {
+      int packed_w = 0;
+      int packed_h = 0;
+      int hz = 0;
+      unsigned codec_mask = 0;
+      int ir_frames = 0;
+      uint32_t luid_low = 0;  ///< display_vr_t 建 device 用的那張卡（session config 的 LUID）
+      int32_t luid_high = 0;
+      std::string encoder;  ///< config::video.encoder：指定的編碼器不同，選到的結果就不同
+      int hevc_mode = 0;  ///< config::video.hevc_mode
+
+      bool operator==(const vr_probe_cache_key_t &) const = default;
+    };
+
+    struct vr_probe_cache_entry_t {
+      vr_probe_cache_key_t key;
+      desktop_probe_snapshot_t state;  ///< 探測成功結束當下的那組全域
+    };
+
+    constexpr size_t k_vr_probe_cache_max = 8;  // 形狀＝每眼尺寸×更新率×分塊，一台 host 實際只會有幾種
+    // HTTP 執行緒（探測）與編碼執行緒（編碼器建不起來時作廢）都會碰
+    std::mutex vr_probe_cache_mtx;
+    std::vector<vr_probe_cache_entry_t> vr_probe_cache;
+
+    /// 這次探測的快取鍵；回 nullopt＝不查也不存
+    std::optional<vr_probe_cache_key_t> vr_probe_cache_key(const vr_probe_shape_t &shape) {
+#if defined(_WIN32) && VIPLE_VR_BRIDGE_HAS_ABI
+      // 還沒有 session config（服務啟動後的第一場）時 display_vr_t 是臨時挑一張卡，結果不綁在哪一張卡上，不快取
+      const auto luid = ::vr::bridge::session_config_luid();
+      if (!luid || luid->is_zero()) {
+        return std::nullopt;
+      }
+      vr_probe_cache_key_t k;
+      k.packed_w = shape.packed_w;
+      k.packed_h = shape.packed_h;
+      k.hz = shape.hz;
+      k.codec_mask = shape.codec_mask;
+      k.ir_frames = shape.ir_frames;
+      k.luid_low = luid->low;
+      k.luid_high = luid->high;
+      k.encoder = config::video.encoder;
+      k.hevc_mode = config::video.hevc_mode;
+      return k;
+#else
+      (void) shape;
+      return std::nullopt;  // 沒有 VR 擷取的平台
+#endif
+    }
+
+    /// 整個快取作廢（任何執行緒）
+    void vr_probe_cache_invalidate(std::string_view why) {
+      size_t dropped = 0;
+      {
+        std::lock_guard lk {vr_probe_cache_mtx};
+        dropped = vr_probe_cache.size();
+        vr_probe_cache.clear();
+      }
+      if (dropped) {
+        BOOST_LOG(info) << "[VIPLE-VR-ENC] probe cache cleared ("sv << why << ", entries="sv << dropped << ')';
+      }
+    }
+  }  // namespace
 
   void reset_display(std::shared_ptr<platf::display_t> &disp, const platf::mem_type_e &type, const std::string &display_name, const config_t &config) {
     // We try this twice, in case we still get an error on reinitialization
@@ -2429,6 +2511,10 @@ namespace video {
   ) {
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
+      // §VR-PROBE-CACHE：探測說可以、真的要用時卻建不起來——快取的結果不可信了，下一次 /launch 重新完整探測
+      if (config.captureSource == 1) {
+        vr_probe_cache_invalidate("the stream could not create its encoder"sv);
+      }
       return;
     }
 
@@ -2483,6 +2569,14 @@ namespace video {
       // 新的 encoder 生命期：上一個 encoder 沒走完的 wave 作廢（client 會照逾時重送 LOSS）
       vr_state->on_wave_abort();
     }
+    // §PERF-1113：給擷取端提早丟影像用的副本（video.h）。進來時先清成「全速、還沒有送過」，擷取端這時一張都不會提早丟；
+    // 離開時（session 結束、encoder 重建）也清掉，沒有編碼執行緒在更新的期間擷取端不會拿著舊的分頻自己丟。
+    vr_rate_pub_div.store(1, std::memory_order_relaxed);
+    vr_rate_pub_last_sent_ns.store(0, std::memory_order_relaxed);
+    auto vr_rate_pub_guard = util::fail_guard([]() {
+      vr_rate_pub_div.store(1, std::memory_order_relaxed);
+      vr_rate_pub_last_sent_ns.store(0, std::memory_order_relaxed);
+    });
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -2531,6 +2625,68 @@ namespace video {
     // forceIDR 快速收斂）還是回升（ramp，平滑過渡不打斷畫面）
     int last_applied_bitrate_kbps = config.bitrate;
 
+    // §VR-RATE-ENC（2026-11-14）：半速（§VR-RATE-AUTO，每 div 張只編一張）時編碼器的碼率控制仍照建立時的幀率分配每一張的
+    // 位元，實際輸出只剩目標的一半。11-14 配戴場次（72 fps）：目標 2.0～3.9 Mbps，編碼器實際輸出 0.75～1.5 Mbps
+    // （平均是目標的 42%；同一場全速時是 66～89%）——半速時畫質白白少了一半位元。
+    // 所以分頻大於 1 時，交給編碼器的設定值乘上分頻（NVENC／AVCodec：每一張的預算與 VBV 跟著變成兩倍，剛好是 72 fps
+    // 一張的份量）；PyroWave 自己用幀率算每張的上限，改傳實際的幀率。設定值不超過這個 session 建立時的碼率
+    // （編碼器的 level 是照它選的）。
+    int vr_enc_div = 1;
+    const auto apply_encoder_bitrate = [&](int kbps, bool is_decrease) {
+      const int div = std::max(1, vr_enc_div);
+      const int enc_kbps = div > 1 ? std::min(kbps * div, std::max(config.bitrate, kbps)) : kbps;
+      auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
+      if (avcodec_session && avcodec_session->avcodec_ctx) {
+        auto &ctx = avcodec_session->avcodec_ctx;
+        int64_t newBitrate = enc_kbps * 1000LL;
+        ctx->bit_rate = newBitrate;
+        ctx->rc_max_rate = newBitrate;
+        // §REVIEW-1103：比照初始化——CBR_WITH_VBR 要讓 bit_rate≠rc_max_rate 維持 VBR 模擬 CBR，
+        // 其他編碼器 rc_min_rate 要跟著改，否則留在舊值（降速後 min > max）
+        if (encoder.flags & CBR_WITH_VBR) {
+          ctx->bit_rate--;
+        } else {
+          ctx->rc_min_rate = newBitrate;
+        }
+        if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
+          ctx->rc_buffer_size = newBitrate / std::max(1, config.framerate);
+        }
+        BOOST_LOG(info) << "[VIPLE-ABR] AVCodec bitrate updated to " << kbps
+                        << " kbps (" << (is_decrease ? "cut" : "ramp") << (div > 1 ? std::format(", encoder setting {} kbps for 1/{} rate", enc_kbps, div) : std::string {}) << ")";
+        return;
+      }
+      if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(session.get())) {
+        auto nvenc_dev = nvenc_session->get_nvenc_device();
+        if (nvenc_dev && nvenc_dev->nvenc) {
+          // §VR F13：VR session 降碼也走平滑過渡（不 reset、不 IDR）；一幀大 IDR 在 VR
+          // 就是一次明顯卡頓，恢復交給 intra refresh。一般 session 行為不變。
+          // §LAT-2D：abr_cut_idr = disabled 時 2D 也平滑降碼（A/B 用）
+          nvenc_dev->nvenc->reconfigure_bitrate(enc_kbps, config.framerate,
+                                                is_decrease && !config.vrProfile && config::video.abr_cut_idr);
+        }
+        return;
+      }
+      if (auto pyro_session = dynamic_cast<pyrowave::pyrowave_encode_session_t *>(session.get())) {
+        pyro_session->reconfigure_bitrate(kbps, config.framerate / div);
+      }
+    };
+    // 編碼器在半速期間重建（解析度／格式變更）時，新的編碼器是照全速建立的：一開始就換算一次
+    if (vr_state && config.captureSource == 1 && vr_state->rate_div() > 1) {
+      vr_enc_div = vr_state->rate_div();
+      apply_encoder_bitrate(last_applied_bitrate_kbps, false);
+      BOOST_LOG(info) << "[VIPLE-VR-RATE] encoder bitrate setting rescaled for 1/" << vr_enc_div << " rate (new encoder, target "
+                      << last_applied_bitrate_kbps << " kbps)";
+    }
+
+    // §ENC-DUP（量測，行為不變）：2D 來源等滿一個幀間隔沒有新畫面就重編上一張（重複幀）；重複幀編碼期間才到的
+    // 真畫面要等它編完才輪得到。這裡只數兩者各發生幾次，給「第一張重複幀要不要晚一點發」的評估用。
+    // VR 來源另有 REPEATED 旗標的統計，不在這裡算。
+    const bool enc_dup_track = config.captureSource == 0;
+    uint32_t enc_dup_frames = 0;  // 這一段編了幾張（含重複幀）
+    uint32_t enc_dup_count = 0;  // 其中等到逾時、重編上一張的
+    uint32_t enc_dup_late = 0;  // 重複幀編完時已經有真畫面在等的
+    auto enc_dup_log_at = std::chrono::steady_clock::now();
+
     while (true) {
       // Break out of the encoding loop if any of the following are true:
       // a) The stream is ending
@@ -2565,8 +2721,14 @@ namespace video {
         auto now = std::chrono::steady_clock::now();
         if (now >= last_idr_emit + idr_cooldown) {
           session->request_idr_frame();
-          last_idr_emit = now;
-          BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << " (cooldown OK)";
+          // §IDR-OPEN：f=1 是 capture() 開場自己要的那一張（frame_nr 跨 encoder 重建累加，1 只出現在 session 的第一個
+          // encoder）。這時 client 的解碼器還沒建好、一定解不到；讓它啟動冷卻的話，client 建好解碼器後要的第一張 IDR
+          // 會落在冷卻裡被丟掉（2D 1.5 s）。冷卻要擋的是丟包時成串的請求，不是 host 自己發的這一張。
+          const bool opening_idr = frame_nr == 1;
+          if (!opening_idr) {
+            last_idr_emit = now;
+          }
+          BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << (opening_idr ? " (opening, cooldown not started)" : " (cooldown OK)");
           if (vr_state) {
             // idr_events 的來源：起播、client 的 IDR 要求、recovery=idr 的 LOSS
             BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=request f=" << frame_nr;
@@ -2638,41 +2800,7 @@ namespace video {
         if (auto newBitrateKbps = bitrate_events->pop(0ms)) {
           bool isDecrease = *newBitrateKbps < last_applied_bitrate_kbps;
           last_applied_bitrate_kbps = *newBitrateKbps;
-
-          auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
-          if (avcodec_session && avcodec_session->avcodec_ctx) {
-            auto &ctx = avcodec_session->avcodec_ctx;
-            int64_t newBitrate = *newBitrateKbps * 1000LL;
-            ctx->bit_rate = newBitrate;
-            ctx->rc_max_rate = newBitrate;
-            // §REVIEW-1103：比照初始化——CBR_WITH_VBR 要讓 bit_rate≠rc_max_rate 維持 VBR 模擬 CBR，
-            // 其他編碼器 rc_min_rate 要跟著改，否則留在舊值（降速後 min > max）
-            if (encoder.flags & CBR_WITH_VBR) {
-              ctx->bit_rate--;
-            } else {
-              ctx->rc_min_rate = newBitrate;
-            }
-            if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
-              ctx->rc_buffer_size = newBitrate / std::max(1, config.framerate);
-            }
-            BOOST_LOG(info) << "[VIPLE-ABR] AVCodec bitrate updated to " << *newBitrateKbps
-                            << " kbps (" << (isDecrease ? "cut" : "ramp") << ")";
-          }
-          else {
-            auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(session.get());
-            if (nvenc_session) {
-              auto nvenc_dev = nvenc_session->get_nvenc_device();
-              if (nvenc_dev && nvenc_dev->nvenc) {
-                // §VR F13：VR session 降碼也走平滑過渡（不 reset、不 IDR）；一幀大 IDR 在 VR
-                // 就是一次明顯卡頓，恢復交給 intra refresh。一般 session 行為不變。
-                // §LAT-2D：abr_cut_idr = disabled 時 2D 也平滑降碼（A/B 用）
-                nvenc_dev->nvenc->reconfigure_bitrate(*newBitrateKbps, config.framerate,
-                                                      isDecrease && !config.vrProfile && config::video.abr_cut_idr);
-              }
-            } else if (auto pyro_session = dynamic_cast<pyrowave::pyrowave_encode_session_t *>(session.get())) {
-              pyro_session->reconfigure_bitrate(*newBitrateKbps, config.framerate);
-            }
-          }
+          apply_encoder_bitrate(*newBitrateKbps, isDecrease);
         }
       }
 
@@ -2713,6 +2841,7 @@ namespace video {
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
       bool vr_repeated = true;  // M1b S1-08（§C.4）：這一幀沒有 pop 到新影像（逾時重編上一張）
+      bool enc_dup_this = false;  // §ENC-DUP：這一張是等到逾時才重編的（要了 IDR 而不等影像的那種不算）
 
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
@@ -2724,9 +2853,23 @@ namespace video {
             const int64_t vr_img_ns = img->frame_timestamp ? std::chrono::duration_cast<std::chrono::nanoseconds>(img->frame_timestamp->time_since_epoch()).count() : 0;
             const int64_t vr_cap_period_ns = config.framerate > 0 ? 1'000'000'000ll / config.framerate : 0;
             const bool vr_rate_skip = vr_state->rate_skip_image((uint32_t) frame_nr, vr_rate_applied, vr_img_ns, vr_cap_period_ns);
+            // §PERF-1113：把這次的結果發布給擷取端（display_vr_t::capture 在複製之前先用同一條規則判斷）。
+            // 先寫時間、再寫分頻：擷取端看到新的分頻時，時間一定已經是「套用當下那一張」或更新的值；
+            // 讀到較舊的時間只會讓它少丟（照舊交到這裡判斷），不會多丟。
+            if (!vr_rate_skip && vr_img_ns > 0) {
+              vr_rate_pub_last_sent_ns.store(vr_img_ns, std::memory_order_relaxed);
+            }
+            vr_rate_pub_div.store(vr_state->rate_div(), std::memory_order_relaxed);
             if (vr_rate_applied != 0) {
               BOOST_LOG(info) << "[VIPLE-VR-RATE] applied div=" << vr_rate_applied << " from f=" << frame_nr
                               << " (stream " << config.framerate / vr_rate_applied << " fps, skipped so far " << vr_state->rate_skipped() << ")";
+              if (vr_rate_applied != vr_enc_div) {
+                // §VR-RATE-ENC：分頻變了，編碼器的設定值跟著換算（平滑過渡，不重設、不要 IDR）
+                vr_enc_div = vr_rate_applied;
+                apply_encoder_bitrate(last_applied_bitrate_kbps, false);
+                BOOST_LOG(info) << "[VIPLE-VR-RATE] encoder bitrate setting rescaled for 1/" << vr_enc_div << " rate (target "
+                                << last_applied_bitrate_kbps << " kbps)";
+              }
             }
             if (vr_rate_skip) {
               continue;
@@ -2744,6 +2887,8 @@ namespace video {
           }
         } else if (!images->running()) {
           break;
+        } else {
+          enc_dup_this = true;
         }
       }
 
@@ -2754,7 +2899,8 @@ namespace video {
       // 收到完整關鍵幀。配合 §K.14 的握手後 cwnd 重設使用。
       if (frame_nr == STARTUP_IDR_RETRY_FRAME) {
         session->request_idr_frame();
-        last_idr_emit = std::chrono::steady_clock::now();
+        // §IDR-OPEN：這一張也是 host 自己重送的，不更新 last_idr_emit——原本會把冷卻從第 16 幀重新起算，
+        // client 這時才建好解碼器的話，第一個請求又被壓一整個冷卻。
         BOOST_LOG(info) << "[VIPLE-IDR] §K.14 startup IDR retry at frame " << frame_nr;
         if (vr_state) {
           BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=startup-retry f=" << frame_nr;
@@ -2810,6 +2956,26 @@ namespace video {
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp, vr_state ? &vr_meta : nullptr)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         return;
+      }
+
+      if (enc_dup_track) {
+        ++enc_dup_frames;
+        if (enc_dup_this) {
+          ++enc_dup_count;
+          // 緊接在編碼之後看：這時已經有影像在等，就是重複幀編碼期間到的
+          if (images->peek()) {
+            ++enc_dup_late;
+          }
+        }
+        // 有重複幀時每 5 秒一行；完全沒有時每 60 秒一行（win 是這一行涵蓋的實際時間，算每秒次數用它）
+        const auto enc_dup_now = std::chrono::steady_clock::now();
+        if (enc_dup_now - enc_dup_log_at >= (enc_dup_count ? 5s : 60s)) {
+          BOOST_LOG(info) << "[VIPLE-ENC-DUP] win=" << std::chrono::duration_cast<std::chrono::milliseconds>(enc_dup_now - enc_dup_log_at).count()
+                          << "ms frames=" << enc_dup_frames << " dups=" << enc_dup_count << " lateBehindDup=" << enc_dup_late
+                          << " wait=" << max_frametime.count() << "ms";
+          enc_dup_frames = enc_dup_count = enc_dup_late = 0;
+          enc_dup_log_at = enc_dup_now;
+        }
       }
 
       if (vr_state) {
@@ -3242,6 +3408,9 @@ namespace video {
 
       auto encode_device = make_encode_device(*display, encoder, config);
       if (!encode_device) {
+        if (config.captureSource == 1) {
+          vr_probe_cache_invalidate("the stream could not create its encode device"sv);  // §VR-PROBE-CACHE（同 encode_run）
+        }
         return;
       }
 
@@ -3371,6 +3540,19 @@ namespace video {
 
     return flag;
   }
+
+  namespace {
+    /// VR 形狀驗證用的編碼設定（1:1、slices=4、intra refresh 開）。完整探測與 §VR-PROBE-CACHE 命中後的複驗共用同一份，
+    /// 兩邊驗的才是同一件事。
+    config_t vr_probe_shape_config(const vr_probe_shape_t &shape, bool want_hevc) {
+      config_t vr_cfg {shape.packed_w, shape.packed_h, shape.hz, 0, 50000, 4, 0, 1, want_hevc ? 1 : 0, 0, 0};
+      vr_cfg.enableIntraRefresh = 1;
+      vr_cfg.vrProfile = 1;
+      vr_cfg.vrIntraRefreshFrames = shape.ir_frames;
+      vr_cfg.captureSource = 1;
+      return vr_cfg;
+    }
+  }  // namespace
 
   bool validate_encoder(encoder_t &encoder, bool expect_failure, int capture_source, const vr_probe_shape_t *shape) {
     // M1b S1-09（§C.6 第 3 點）：VR 探測不碰 output——display_vr_t 只在 adapter 上建 device，
@@ -3584,11 +3766,7 @@ namespace video {
     encoder_vr_shape_ok = false;
     if (vr_probe && shape && shape->packed_w > 0 && shape->packed_h > 0) {
       const bool want_hevc = (shape->codec_mask & 0x2) && encoder.hevc[encoder_t::PASSED];
-      config_t vr_cfg {shape->packed_w, shape->packed_h, shape->hz, 0, 50000, 4, 0, 1, want_hevc ? 1 : 0, 0, 0};
-      vr_cfg.enableIntraRefresh = 1;
-      vr_cfg.vrProfile = 1;
-      vr_cfg.vrIntraRefreshFrames = shape->ir_frames;
-      vr_cfg.captureSource = 1;
+      config_t vr_cfg = vr_probe_shape_config(*shape, want_hevc);
       // C27：H.264 3456×1728@90 超過 level 5.2（MaxMBPS 2073600）；只接受 72 Hz 或每眼 1440²
       const int64_t mbps = (int64_t) ((shape->packed_w + 15) / 16) * ((shape->packed_h + 15) / 16) * shape->hz;
       if (!want_hevc && mbps > 2073600) {
@@ -3620,7 +3798,95 @@ namespace video {
     return true;
   }
 
-  int probe_encoders(int capture_source, const vr_probe_shape_t *shape) {
+  namespace {
+    /**
+     * @brief §VR-PROBE-CACHE：查快取。命中就把存下來的探測結果套回全域，再用 VR 形狀真的開一次編碼器確認。
+     * @return true＝這次探測可以直接結束（全域已經是完整探測會留下的狀態）；false＝照舊完整探測。
+     */
+    bool vr_probe_cache_try(const vr_probe_cache_key_t &key, const vr_probe_shape_t &shape) {
+      const auto t0 = std::chrono::steady_clock::now();
+      const auto shape_str = std::format("shape={}x{}@{} irFrames={} codecs=0x{:x}", shape.packed_w, shape.packed_h, shape.hz, shape.ir_frames, shape.codec_mask);
+
+      // 顯示卡／驅動的列舉變過就全部作廢。在鎖外問：它有自己的鎖
+      const bool gpu_changed = platf::vr_probe_gpu_changed();
+      std::optional<desktop_probe_snapshot_t> hit;
+      auto why = "not cached"sv;
+      {
+        std::lock_guard lk {vr_probe_cache_mtx};
+        if (gpu_changed) {
+          if (!vr_probe_cache.empty()) {
+            why = "adapters changed"sv;
+          }
+          vr_probe_cache.clear();
+        } else {
+          for (const auto &e : vr_probe_cache) {
+            if (e.key == key) {
+              hit = e.state;
+              break;
+            }
+          }
+        }
+      }
+      if (!hit || !hit->chosen) {
+        BOOST_LOG(info) << "[VIPLE-VR-ENC] probe cache miss ("sv << why << ") "sv << shape_str;
+        return false;
+      }
+
+      // 先套回、再驗：驗的時候各編碼器的能力旗標和串流真正建編碼器時一樣
+      auto *const chosen_before = chosen_encoder;
+      apply_probe_globals(*hit);
+      auto &encoder = *chosen_encoder;
+      const bool want_hevc = (shape.codec_mask & 0x2) && encoder.hevc[encoder_t::PASSED];
+      config_t vr_cfg = vr_probe_shape_config(shape, want_hevc);
+      std::shared_ptr<platf::display_t> disp;
+      reset_display(disp, encoder.platform_formats->dev_type, std::string {}, vr_cfg);
+      const bool ok = disp && disp->is_codec_supported(encoder.codec_from_config(vr_cfg).name, vr_cfg) &&
+                      validate_config(disp, encoder, vr_cfg) >= 0;
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+      if (!ok) {
+        // 存的結果現在行不通（編碼器被佔滿、驅動狀態變了）：丟掉這一筆，交給完整探測下結論。
+        // 其餘套回去的全域完整探測一開始就會重設；chosen_encoder 還原成原本的，它拿來決定探測順序
+        chosen_encoder = chosen_before;
+        {
+          std::lock_guard lk {vr_probe_cache_mtx};
+          std::erase_if(vr_probe_cache, [&](const auto &e) {
+            return e.key == key;
+          });
+        }
+        BOOST_LOG(warning) << "[VIPLE-VR-ENC] probe cache hit but the VR shape no longer validates; running the full probe ms="sv << ms << ' ' << shape_str;
+        return false;
+      }
+
+      encoder_vr_shape_ok = true;
+      BOOST_LOG(info) << "[VIPLE-VR-ENC] probe cache hit encoder="sv << encoder.name
+                      << " codec="sv << (want_hevc ? "hevc"sv : "h264"sv)
+                      << " intraRefresh="sv << (last_encoder_probe_supported_vr_intra_refresh ? 1 : 0)
+                      << " hevc10bit="sv << (encoder.hevc[encoder_t::PASSED] && encoder.hevc[encoder_t::DYNAMIC_RANGE] ? 1 : 0)
+                      << " ms="sv << ms << ' ' << shape_str;
+      return true;
+    }
+
+    /// §VR-PROBE-CACHE：把剛完成的 VR 探測結果存起來（同一個鍵只留一筆；滿了丟最舊的）
+    void vr_probe_cache_store(const vr_probe_cache_key_t &key) {
+      auto state = capture_probe_globals();
+      size_t entries = 0;
+      {
+        std::lock_guard lk {vr_probe_cache_mtx};
+        std::erase_if(vr_probe_cache, [&](const auto &e) {
+          return e.key == key;
+        });
+        if (vr_probe_cache.size() >= k_vr_probe_cache_max) {
+          vr_probe_cache.erase(vr_probe_cache.begin());
+        }
+        vr_probe_cache.push_back({key, std::move(state)});
+        entries = vr_probe_cache.size();
+      }
+      BOOST_LOG(info) << "[VIPLE-VR-ENC] probe cache stored shape="sv << key.packed_w << 'x' << key.packed_h << '@' << key.hz
+                      << " irFrames="sv << key.ir_frames << " entries="sv << entries;
+    }
+  }  // namespace
+
+  int probe_encoders(int capture_source, const vr_probe_shape_t *shape, bool vr_cache) {
     const bool vr_probe = capture_source == 1;
     // M1b S1-09（§C.6 第 2 點）：VR 探測不碰 output（只在 adapter 上建 device），不受「沒有 active
     // 顯示器時探測會弄壞 DXGI」的閘門限制。UNVERIFIED：headless 且完全沒有 active 顯示器時
@@ -3639,16 +3905,30 @@ namespace video {
     // If we already have a good encoder, check to see if another probe is required
     // M1b S1-09（§C.6 第 5 點）：來源不同時不沿用。桌面連續探測時第二個條件恆真，
     // 短路順序與舊版相同（needs_encoder_reenumeration() 的副作用時機不變）。
-    // VR 探測一律重跑：形狀（尺寸、Hz）每個 session 可能不同。
+    // VR 探測不走這條省略（形狀每個 session 可能不同，也不可以問 needs_encoder_reenumeration()：會吃掉桌面的變動訊號）；
+    // 同形狀的沿用由下面的 §VR-PROBE-CACHE 負責。
     if (!vr_probe && chosen_encoder && last_probe_capture_source == capture_source && !(chosen_encoder->flags & ALWAYS_REPROBE) && !platf::needs_encoder_reenumeration()) {
       return 0;
+    }
+
+    // §VR-PROBE-CACHE：同一張卡、同一個形狀探測過就沿用，只複驗 VR 形狀那一次
+    std::optional<vr_probe_cache_key_t> vr_cache_key;
+    if (vr_probe && vr_cache) {
+      vr_cache_key = vr_probe_cache_key(*shape);
+      if (!vr_cache_key) {
+        BOOST_LOG(info) << "[VIPLE-VR-ENC] probe cache not used (no session adapter yet)"sv;
+      } else if (vr_probe_cache_try(*vr_cache_key, *shape)) {
+        return 0;
+      }
     }
 
     // Restart encoder selection
     auto previous_encoder = chosen_encoder;
     chosen_encoder = nullptr;
     active_hevc_mode = config::video.hevc_mode;
-    active_av1_mode = config::video.av1_mode;
+    // VR 用不到 AV1（client 對 VR 一律拿掉），不測。設成 1（不提供）而不是只跳過測試：av1_mode >= 2 時下面
+    // 「要特定 codec」那一輪會因為 AV1 沒過而略過每一個編碼器，最後再整個重驗一次。VR session 結束時連同其他探測狀態還原。
+    active_av1_mode = vr_probe ? 1 : config::video.av1_mode;
     last_encoder_probe_supported_ref_frames_invalidation = false;
     last_encoder_probe_supported_vr_intra_refresh = false;
 
@@ -3838,6 +4118,11 @@ namespace video {
 
     if (active_av1_mode == 0) {
       active_av1_mode = encoder.av1[encoder_t::PASSED] ? (encoder.av1[encoder_t::DYNAMIC_RANGE] ? 3 : 2) : 1;
+    }
+
+    // §VR-PROBE-CACHE：只存「VR 形狀真的驗過」的成功結果；每次都要重探的編碼器（ALWAYS_REPROBE）不存
+    if (vr_cache_key && encoder_vr_shape_ok && !(encoder.flags & ALWAYS_REPROBE)) {
+      vr_probe_cache_store(*vr_cache_key);
     }
 
     return 0;

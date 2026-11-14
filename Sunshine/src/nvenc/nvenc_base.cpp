@@ -508,7 +508,8 @@ namespace nvenc {
     stored_init_params = init_params;
     stored_init_params.encodeConfig = &stored_enc_config;
     pin_level_for_reconfigure(client_config.videoFormat);
-    abr_signals::reset(client_config.videoFormat);  // §ABR-ADAPT：0=H.264、1=HEVC、2=AV1
+    // §ABR-ADAPT：0=H.264、1=HEVC、2=AV1；第二個參數＝這個編碼器初始化用的碼率（10 秒行的 enc=）
+    abr_signals::reset(client_config.videoFormat, static_cast<int>(stored_enc_config.rcParams.averageBitRate / 1000));
 
     if (async_event_handle) {
       NV_ENC_EVENT_PARAMS event_params = {min_struct_version(NV_ENC_EVENT_PARAMS_VER)};
@@ -968,9 +969,16 @@ namespace nvenc {
       return false;
     }
 
-    BOOST_LOG(info) << "[VIPLE-ABR] NvEnc: bitrate reconfigured to " << bitrate_kbps << " kbps"
-                    << " (vbv=" << stored_enc_config.rcParams.vbvBufferSize
-                    << (force_idr ? ", reset+IDR" : ", smooth") << ")";
+    abr_signals::enc_kbps.store(bitrate_kbps, std::memory_order_relaxed);
+    // 平滑過渡每一步都成功是常態（VR 回升時每秒數次），留 debug：有沒有進編碼器看 [VIPLE-VR-ABR-FAST] 10s 的 enc=。
+    // reset+IDR 會讓畫面頓一下，照舊 info
+    if (force_idr) {
+      BOOST_LOG(info) << "[VIPLE-ABR] NvEnc: bitrate reconfigured to " << bitrate_kbps << " kbps"
+                      << " (vbv=" << stored_enc_config.rcParams.vbvBufferSize << ", reset+IDR)";
+    } else {
+      BOOST_LOG(debug) << "[VIPLE-ABR] NvEnc: bitrate reconfigured to " << bitrate_kbps << " kbps"
+                       << " (vbv=" << stored_enc_config.rcParams.vbvBufferSize << ", smooth)";
+    }
     return true;
   }
 

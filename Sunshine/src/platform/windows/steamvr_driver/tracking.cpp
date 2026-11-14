@@ -168,6 +168,8 @@ namespace vrdrv {
     rate_limiter_t limiter_enter;
     rate_limiter_t limiter_recover;
     uint64_t n_blend_recoveries = 0;
+    // §VR-CTRL-EXTRAP：控制器最近一筆回報被往回推了多久（10 秒統計用）
+    double ctrl_back_last_s = 0.0;
     const int64_t f = ctx_.qpf;
 
     for (;;) {
@@ -211,10 +213,21 @@ namespace vrdrv {
         hmd_blender.reset();
         ctrl_blender[0].reset();
         ctrl_blender[1].reset();
+        ctrl_back_last_s = 0.0;
       }
       const vripc_session_config_t &cfg = gen->config();
       uint32_t zero_vel_us = cfg.stale_zero_vel_us != 0 ? cfg.stale_zero_vel_us : 22222;
-      const DWORD wait_ms = zero_vel_us / 1000 > 0 ? zero_vel_us / 1000 : 1;
+      DWORD wait_ms = zero_vel_us / 1000 > 0 ? zero_vel_us / 1000 : 1;
+      if ((cfg.pose_flags & VRIPC_POSE_F_STALE_COAST) != 0) {
+        // §VR-STALE-COAST：stale 而且軌跡還在變的期間（等速 60 ms＋衰減 40 ms）每 5 ms 重送一次——原本要等到下一個門檻
+        // （25 ms）才送，衰減曲線只被取樣一兩次，兩次之間 SteamVR 照上一次回報的速度外插，軌跡是鋸齒。
+        // 還沒 stale 時多等 1 ms：逾時剛好落在門檻上，「age > 門檻」常差幾微秒不成立，要再等一整個門檻才進得去
+        if (!stale) {
+          wait_ms += 1;
+        } else if (have && (now_qpc() - last_new_qpc) * 1000 / f < (int64_t) k_coast_resend_until_ms) {
+          wait_ms = k_coast_resend_ms;
+        }
+      }
       HANDLE hs[2] = {stop_evt_, gen->evt_trk()};
       const DWORD w = WaitForMultipleObjects(2, hs, FALSE, wait_ms);
       if (w == WAIT_OBJECT_0) {
@@ -293,6 +306,7 @@ namespace vrdrv {
         pin.ctrl_offset = (cfg.pose_flags & VRIPC_POSE_F_CTRL_OFFSET) != 0;
         pin.stale_hold = (cfg.pose_flags & VRIPC_POSE_F_STALE_HOLD) != 0;
         pin.stale_blend = (cfg.pose_flags & VRIPC_POSE_F_STALE_BLEND) != 0;
+        pin.stale_coast = (cfg.pose_flags & VRIPC_POSE_F_STALE_COAST) != 0;
         pin.raw_off_s = (double) (last.target_server_qpc - now) / (double) f;
         pin.hmd_cap_us = cfg.hmd_extrap_cap_us;
         pin.ctrl_cap_us = cfg.ctrl_extrap_cap_us;
@@ -301,6 +315,10 @@ namespace vrdrv {
         const bool zero_vel = pol.zero_vel;
         const double off = pol.hmd_off_s;
         const double ctrl_off = pol.ctrl_off_s;
+        // SteamVR 目前的姿態預測時間（0＝還沒有畫面）：§VR-STALE-COAST 的軌跡與 §VR-CTRL-EXTRAP 用
+        const double pred_s = (double) ctx_.pred_us_recent.load(std::memory_order_relaxed) / 1e6;
+        // §VR-CTRL-EXTRAP：SteamVR 對控制器最多外插多久（< 0＝不限制＝原本的行為）；超過的部分由 blender 把姿態往回推
+        const double ctrl_keep_s = cfg.ctrl_keep_ms_p1 != 0 ? (double) (cfg.ctrl_keep_ms_p1 - 1) / 1000.0 : -1.0;
         if (hold && !in_hold) {
           in_hold = true;
           ++n_hold;
@@ -319,7 +337,11 @@ namespace vrdrv {
               const bool hand_fresh = fresh && hand_have;
               const vripc_pose_t &cp = last.pose[1 + h];
 
-              const auto cres = ctrl_blender[h].process(hand_fresh, cp.pos, cp.rot, cp.lin_vel, cp.ang_vel, pol, ctrl_off, now, f);
+              const auto cres = ctrl_blender[h].process(hand_fresh, cp.pos, cp.rot, cp.lin_vel, cp.ang_vel, pol, ctrl_off, now, f, pred_s, ctrl_keep_s,
+                                                        pin.raw_off_s, (double) ctrl_oor_us / 1e6);
+              if (hand_have) {
+                ctrl_back_last_s = cres.back_s;
+              }
 
               if (cres.log_enter && limiter_enter.allow(now, f, 5)) {
                 VRDRV_LOG_INFO("[VIPLE-VR-STALE] %s enter age=%.1fms off0=%+.1fms v=%.2fm/s",
@@ -357,7 +379,8 @@ namespace vrdrv {
           }
         }
         const vripc_pose_t &hp = last.pose[0];
-        const auto hres = hmd_blender.process(fresh, hp.pos, hp.rot, hp.lin_vel, hp.ang_vel, pol, off, now, f);
+        const auto hres = hmd_blender.process(fresh, hp.pos, hp.rot, hp.lin_vel, hp.ang_vel, pol, off, now, f, pred_s, -1.0, pin.raw_off_s,
+                                              (double) ctrl_oor_us / 1e6);
 
         if (hres.log_enter && limiter_enter.allow(now, f, 5)) {
           VRDRV_LOG_INFO("[VIPLE-VR-STALE] hmd enter age=%.1fms off0=%+.1fms v=%.2fm/s",
@@ -455,6 +478,9 @@ namespace vrdrv {
                        hmd_off_us.pct(0.50), ctrl_off_us.pct(0.50), ctrl_off_us.pct(0.95), (double) arrival_max_us / 1000.0,
                        (unsigned long long) n_arrival_gt2t, (unsigned long long) n_hold, (unsigned long long) n_hold_expired, cfg.pose_flags,
                        (unsigned long long) n_blend_recoveries);
+        // 另外一行：上面那一行已經接近 driver log 單行的長度上限，接在後面的欄位會被截掉（2.0.186 實測 ctrlBackUs 印不出來）
+        VRDRV_LOG_INFO("tracking 10s ctrl: predUs=%d ctrlKeepMs=%d ctrlBackUs=%d", (int) ctx_.pred_us_recent.load(std::memory_order_relaxed),
+                       cfg.ctrl_keep_ms_p1 != 0 ? (int) cfg.ctrl_keep_ms_p1 - 1 : -1, (int) (ctrl_back_last_s * 1e6));
         t0 = now;
         n_new = n_stale_sends = n_stale = n_oor = n_invalid = n_torn = 0;
         n_blend_recoveries = 0;

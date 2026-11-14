@@ -56,6 +56,7 @@ QString userFacingError(const QString& line)
 std::function<void(VrLauncher::ChildEvent)> s_ChildHook;  // §VR-SHELL
 std::function<bool(const VrLauncher::PlayRequest&)> s_PlayerHandler;  // §VR-SHELL（A2）
 VrLauncher* s_Instance = nullptr;  // QML singleton（playerFinished 用）
+bool s_ShellFocused = true;        // §PERF-1113：見 VrLauncher::setShellFocused
 
 }  // namespace
 
@@ -225,6 +226,22 @@ QString VrLauncher::devLaunchHide() const { return s_DevVideo.hide; }
 bool VrLauncher::shellActive() const
 {
     return static_cast<bool>(s_ChildHook);
+}
+
+bool VrLauncher::shellFocused() const
+{
+    return s_ShellFocused;
+}
+
+void VrLauncher::setShellFocused(bool focused)
+{
+    if (focused == s_ShellFocused) {
+        return;
+    }
+    s_ShellFocused = focused;
+    if (s_Instance != nullptr) {
+        emit s_Instance->shellFocusedChanged();
+    }
 }
 
 bool VrLauncher::launchDesktop(const QString& hostAddress, const QString& appName, bool takeover)

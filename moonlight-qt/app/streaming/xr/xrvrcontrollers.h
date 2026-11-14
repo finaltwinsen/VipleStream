@@ -19,7 +19,7 @@
 //   還按著的鍵遮到全部放開為止，不會變成遊戲裡的一次按下。版面、黏滯修飾鍵、中/英鍵的規則同 XR 桌面（xrkeyboard.h）。
 //   鍵盤擺在哪、貼圖與高亮由 XrContext 負責，這裡只做開關、射線命中與按鍵事件。
 //
-// 執行緒：create／destroy／updateFrame／applyPendingHaptics 在 XR frame thread（或 bring-up 執行緒，
+// 執行緒：create／destroy／updateButtons／updateGripPose／applyPendingHaptics 在 XR frame thread（或 bring-up 執行緒，
 // 早於 frame thread 啟動）；fill 在 tracking 送出執行緒；queueHaptic 在 main thread。狀態快照以
 // m_Mutex 保護。
 
@@ -58,11 +58,17 @@ public:
     XrActionSet actionSet() const { return m_Set; }
     XrSpace eyeGazeSpace() const { return m_EyeGazeSpace; }
 
-    // frame thread，xrSyncActions 之後：讀按鍵狀態；trackSpace 非空時以 predictedDisplayTime locate
-    // grip（frameloop 模式的 pose 樣本）
-    void updateFrame(XrTime predictedDisplayTime, bool focused, XrSpace trackSpace);
+    // §PERF-1113：原本的 updateFrame 拆成兩半。按鍵與類比值只在 xrSyncActions 那一刻更新，所以按鍵這一半緊接在
+    // xrSyncActions 後面做（不必等 xrWaitFrame 與延後挑影像，快照早一整格發布給 tracking 送出執行緒）；握把姿態
+    // 要用這一格的 predictedDisplayTime，留在 xrWaitFrame 之後的原位置。
+    // frame thread，緊接在 xrSyncActions 之後：讀按鍵狀態、組合鍵、§VR-KBD 的開關與扳機。
+    // syncDoneNs＝xrSyncActions 返回的時刻（steady clock，ns；0＝不量），只用來統計「sync → 快照寫入」花多久
+    void updateButtons(bool focused, uint64_t syncDoneNs);
+    // frame thread，xrWaitFrame 之後：trackSpace 非空時以 predictedDisplayTime locate grip（frameloop 模式的 pose
+    // 樣本、thread 模式 locate 失敗時的後備）。只動 Hand 的姿態欄位，不碰按鍵
+    void updateGripPose(XrTime predictedDisplayTime, XrSpace trackSpace);
     // tracking 送出執行緒：填 pose[LEFT/RIGHT]、input[0/1] 與 flags 的 LEFT/RIGHT bit。
-    // thread 模式（xrTime != 0）當下 locate grip；否則沿用 updateFrame 最近一次的 pose。
+    // thread 模式（xrTime != 0）當下 locate grip；否則沿用 updateGripPose 最近一次的 pose。
     void fill(_VIPLE_VR_TRACKING* sample, XrSpace trackSpace, XrTime xrTime);
 
     // main thread：device 1＝左、2＝右（VIPLE_VR_POSE_LEFT/RIGHT）
@@ -93,7 +99,7 @@ public:
         return m_KbHover;
     }
     bool keyboardPointer(XrPosef* pose) const;
-    // updateFrame 之後、鍵盤那一層擺好之後呼叫：shown＝這一格鍵盤有畫出來；pose／w／h＝鍵盤 quad（space 座標）
+    // updateButtons 之後、鍵盤那一層擺好之後呼叫：shown＝這一格鍵盤有畫出來；pose／w／h＝鍵盤 quad（space 座標）
     // bar／barW／barH＝鍵盤下方那條白條的命中範圍（§VR-KBD-DRAG；比畫出來的大）
     void updateKeyboard(XrTime t, XrSpace space, bool shown, const XrPosef& pose, float w, float h, const XrPosef& bar, float barW,
                         float barH);
@@ -112,7 +118,7 @@ public:
 
 private:
     struct Hand {
-        // 按鍵快照（updateFrame 寫、fill 讀）
+        // 按鍵快照（updateButtons 寫、fill 讀）
         uint32_t buttons = 0;
         uint32_t touches = 0;
         uint32_t pressCtr = 0;
@@ -240,6 +246,10 @@ private:
     uint32_t m_StatHapticFailed = 0;
     std::atomic<uint32_t> m_StatHapticDropped{0};  // main thread counts, frame thread reads and clears
     uint32_t m_StatFocusLoss = 0;
+    // §PERF-1113：xrSyncActions 返回 → 按鍵快照寫進 m_Hand 的時間（µs；m_Mutex 保護，takeStatsLine 歸零）
+    uint64_t m_StatSnapSumUs = 0;
+    uint32_t m_StatSnapN = 0;
+    uint32_t m_StatSnapMaxUs = 0;
     // 2026-10-05：送出樣本的控制器速度有效率與最大值（m_Mutex 保護；fill 在 tracking 送出執行緒）
     struct VelStat {
         uint32_t samples = 0;

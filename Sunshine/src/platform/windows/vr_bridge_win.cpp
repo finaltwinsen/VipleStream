@@ -2303,7 +2303,14 @@ namespace vr::bridge {
         tracking_wanted_.store(true, std::memory_order_release);
       }
       BOOST_LOG(info) << log_line;
-      arm_timer();
+      // §PERF-1113：2 ms 的 timer 只掛給有 config 的 generation（VR session）。閒置 generation（vrserver 開著、
+      // server 沒有要它出畫面）的 ring 是空的，只剩 100 ms 的 heartbeat 要做，原本照樣每秒醒 500 次。
+      // config 一變就換 generation、重新握手，所以只有這裡要決定；有沒有 arm（set_armed）不影響這個判斷。
+      if (gen->has_config) {
+        arm_timer();
+      } else {
+        disarm_timer();
+      }
       emit({event_e::handshake, gen->generation, dver, is_peer ? 1u : 0u, {}});
 
       if (gen->has_config) {
@@ -3223,7 +3230,17 @@ namespace vr::bridge {
 
     DWORD bridge_t::compute_timeout(int64_t now, int64_t next_pipe_try, int64_t next_user_poll) const {
       if (conn_) {
-        return timer_armed_ ? 100 : 2;
+        if (timer_armed_) {
+          return 100;
+        }
+        // 有 config 而 timer 沒掛上（建不起來或設定失敗）：照舊用 2 ms 逾時輪詢。定時 burst 進行中也一樣，
+        // 到期要準時由 periodic() 寫回基準
+        if ((conn_->gen && conn_->gen->has_config) || conn_->burst_until != 0) {
+          return 2;
+        }
+        // §PERF-1113：閒置 generation 只要趕上下一次 heartbeat（periodic() 裡其餘的事在這種 generation 都沒有
+        // 時效）；pipe 訊息與指令各有自己的 event 會把這條執行緒叫醒，不靠這個逾時
+        return std::clamp<DWORD>(ceil_ms(conn_->next_heartbeat - now), 1, (DWORD) kHeartbeatMs);
       }
       int64_t next = now + ms_to_qpc(1000);
       if (!pipe_) {

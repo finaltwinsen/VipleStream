@@ -4,6 +4,12 @@
  */
 #pragma once
 
+// standard includes
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+
 // lib includes
 #include <boost/log/common.hpp>
 #include <boost/log/sinks.hpp>
@@ -46,15 +52,36 @@ namespace logging {
   void formatter(const boost::log::record_view &view, boost::log::formatting_ostream &os);
 
   /**
+   * @brief §PERF-1113-R2（A14）：log 檔的輪替與 stdout 鏡像。全部用預設值時和原本的行為相同
+   *        （啟動時截斷、執行中不設限、每一行也寫到 stdout）；server 模式由 main.cpp 填。
+   */
+  struct file_options_t {
+    /// 單一 log 檔的大小上限（位元組），0＝不輪替。大於 0 時：啟動時把上一輪的檔留成 `<檔名>.1`
+    /// （再前一輪是 `.2`），執行中寫到上限也照樣輪替一次。很短的一輪（小於 64 KB 與上限四分之一的較小者，
+    /// 例如啟動就失敗、連續重啟）改收進 `<檔名>.0`（累積，最多 1 MB），不佔 `.1`／`.2`。
+    /// POSIX 上另有 `<檔名>.lock`：別的行程正在寫同一個檔時不輪替。
+    std::uintmax_t max_bytes = 0;
+    /// 每次建立新的 log 檔之前呼叫（Windows 用它先以受保護的安全描述元建檔，否則新檔會繼承 Users 可讀）。
+    /// 執行中輪替時是在 log sink 的執行緒上呼叫，裡面不可以寫 log。可為空。
+    std::function<void(const std::string &path)> prepare_file;
+    /// 執行中輪替之後新檔的第一行（版本資訊；部署流程會看 log 開頭的 version 行）。空字串＝不寫。
+    std::string first_line;
+    /// true＝log 檔開成功時不再把每一行也寫到 stdout。服務模式的 stdout 是 viplestream-svc.log：
+    /// 每一行寫兩個檔、各 flush 一次，而且那個檔跨多次 server 重啟一直累積、沒有上限。
+    bool no_stdout_mirror = false;
+  };
+
+  /**
    * @brief Initialize the logging system.
    * @param min_log_level The minimum log level to output.
    * @param log_file The log file to write to.
+   * @param file_options 輪替與 stdout 鏡像的設定（見 file_options_t）。
    * @return An object that will deinitialize the logging system when it goes out of scope.
    * @examples
    * log_init(2, "sunshine.log");
    * @examples_end
    */
-  [[nodiscard]] std::unique_ptr<deinit_t> init(int min_log_level, const std::string &log_file);
+  [[nodiscard]] std::unique_ptr<deinit_t> init(int min_log_level, const std::string &log_file, const file_options_t &file_options = {});
 
   /**
    * @brief Setup AV logging.

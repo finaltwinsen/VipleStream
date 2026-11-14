@@ -263,7 +263,7 @@
     "max_bitrate": "Bitrate Máximo",
     "max_bitrate_desc": "A taxa de bits máxima (em Kbps) que VipleStream-Server irá codificar o stream. Se definido como 0, ele sempre usará a bitrate solicitada pela luar.",
     "minimum_fps_target": "Alvo Mínimo de FPS",
-    "minimum_fps_target_desc": "O FPS mais baixo efetivo que o fluxo pode alcançar. Um valor de 0 é tratado como cerca de metade do FPS do fluxo. Uma configuração de 20 é recomendada se você transmitir conteúdo de 24 ou 30fps.",
+    "minimum_fps_target_desc": "O FPS mais baixo efetivo que o fluxo pode alcançar. Um valor de 0 usa o FPS solicitado pelo cliente (o valor total, não a metade). Uma configuração de 20 é recomendada se você transmitir conteúdo de 24 ou 30fps.",
     "min_log_level": "Nível do Registro",
     "min_log_level_0": "Verbose",
     "min_log_level_1": "Debug",

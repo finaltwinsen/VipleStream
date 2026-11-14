@@ -49,6 +49,8 @@ namespace platf::config_acl {
    *     開發機上以管理員身分跑 portable 建置時不會把 log 鎖起來；
    *   - 其他身分：什麼都不做。
    * logging 還沒初始化，所以這個函式不寫 log；結果在 tighten_config_dir 的統計行一起計入。
+   * §PERF-1113-R2（A14）：server 模式的 log 輪替（啟動時與執行中寫滿上限時）在建立新檔之前也會呼叫它，
+   * 執行中那一次是在 log sink 的執行緒上——所以它可以在任何執行緒呼叫，而且一樣不可以寫 log。
    *
    * @param config_dir `platf::appdata()`（`<install>\config`）。
    * @param log_file 即將交給 logging::init() 的 log 檔路徑。

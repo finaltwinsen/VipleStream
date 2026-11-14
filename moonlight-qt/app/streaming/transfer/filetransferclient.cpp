@@ -20,10 +20,11 @@
 #include <QStringList>
 #include <QUuid>
 
-Q_LOGGING_CATEGORY(lcXfer, "viple.xfer")
+// §PERF-1113-R2（A12）：預設等級設成 Info。沒有指定時 Qt 的分類連 debug 都開著，下面「poll firing」那行
+// 每次輪詢都寫進 log 檔（頭盔上每小時約 160 KB）。要看時用 QT_LOGGING_RULES="viple.xfer.debug=true" 打開。
+Q_LOGGING_CATEGORY(lcXfer, "viple.xfer", QtInfoMsg)
 
 namespace {
-constexpr int k_PollIntervalMs = 2000;
 constexpr int k_PollTimeoutMs = 15000;       // 從 5s 提高 — 連線握手 + 偶發網路延遲不算錯
 constexpr int k_TransferTimeoutMs = 0;       // 無 timeout — 大檔可能很久
 constexpr qint64 k_ChunkBytes = 64 * 1024;
@@ -51,7 +52,7 @@ void FileTransferClient::onWorkerStarted()
     qCInfo(lcXfer) << "[VIPLE-XFER] worker thread started, initializing Nam + timer";
     m_Nam = new QNetworkAccessManager();
     m_PollTimer = new QTimer();
-    m_PollTimer->setInterval(k_PollIntervalMs);
+    m_PollTimer->setInterval(m_PollIntervalMs);
     m_PollTimer->setSingleShot(false);
     connect(m_PollTimer, &QTimer::timeout, this, &FileTransferClient::onPollTimer);
     connect(m_Nam, &QNetworkAccessManager::sslErrors,
@@ -161,7 +162,9 @@ void FileTransferClient::start()
 {
     if (m_Started) return;
     m_Started = true;
-    qCInfo(lcXfer) << "[VIPLE-XFER] FileTransferClient start — host" << m_HostAddress << "port" << m_HttpsPort;
+    // interval=：逐次輪詢的行預設不印了，輪詢節奏（§PERF-1113：頭盔 10 秒）從這一行看
+    qCInfo(lcXfer) << "[VIPLE-XFER] FileTransferClient start — host" << m_HostAddress << "port" << m_HttpsPort
+                   << qPrintable(QStringLiteral("interval=%1ms").arg(m_PollIntervalMs));
     m_Worker = new QThread();
     moveToThread(m_Worker);
     connect(m_Worker, &QThread::started, this, &FileTransferClient::onWorkerStarted);
@@ -270,7 +273,7 @@ void FileTransferClient::onPollTimer()
     // 現在傳輸中照常 poll；dispatch 對「傳輸中又來一筆傳輸」回報 busy（server 的 busy() 本來就擋，實務上不會發生）。
 
     QUrl url = buildUrl(QStringLiteral("/transfer/poll"));
-    // 每 2 秒一發，常態靜音；錯誤路徑在 onPollFinished 已有 qCWarning
+    // 每次輪詢一發，常態靜音（lcXfer 預設等級是 Info）；錯誤路徑在 onPollFinished 已有 qCWarning
     qCDebug(lcXfer) << "[VIPLE-XFER] poll firing url=" << url.toString();
     QNetworkRequest req = buildRequest(url);
     m_PollReply = m_Nam->get(req);

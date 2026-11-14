@@ -1,13 +1,19 @@
 // §TS-PATH：串流期間若 host 在 Tailscale CGNAT，背景看路徑是直連還是 DERP 中繼。
 //
 // 只在看到中繼時升級，而且每一段連續中繼各做一次（不是每 5 秒重做）：
-//   第一次看到中繼只開始計時。
-//   ≥ 5 s   disco ping
-//   ≥ 15 s  restun，接著 ping
+//   第一次看到中繼的那一輪  restun，接著 disco ping（兩端閒置後直連路徑過期是常態，
+//                           不先等；restun 非同步、冪等。沒有 operator 時只 ping）
 //   ≥ 30 s  rebind，接著 ping（算第 1 次 rebind）
 //   之後距離上一次 rebind ≥ 90 s 再 rebind，整個串流最多 5 次。
-// 回到直連就清掉這一段的升級階段（5／15／30）。rebind 次數與「沒有 operator」
+// rebind 不可提早或加密：tailscaled 會清掉所有 peer 已打通的直連位址，並 ping DERP、3 秒沒回就關掉重連。
+// 回到直連就清掉這一段的升級階段。rebind 次數與「沒有 operator」
 // 這個結論留到這次串流結束，不因中途恢復直連而重算。
+//
+// 另外把「目前是 DERP 中繼」公開成一個 atomic（TailscalePath::onDerpRelay），VR 的姿態上行用它降頻。
+// 連續兩輪讀不到狀態就當作不是中繼（不知道狀態時不降頻）。
+//
+// 輪詢週期從每一輪的起點算（和 host 一樣）：當輪做了 ping 等動作，下一次讀狀態不因此往後延，
+// 只在動作比週期久時留 1 秒。rebind 的門檻（≥ 30 s、間隔 ≥ 90 s）是下限，不受這個影響。
 //
 // stop() 只設旗標、關掉正在用的 socket、叫醒等待，不 join。
 // 行程結束時才 join：每個請求自己有逾時，socket 被 shutdown 會立刻從 recv 回來。
@@ -57,8 +63,13 @@
 namespace {
 
 constexpr int kPollSec = 5;
-constexpr int kPingSec = 5;
-constexpr int kRestunSec = 15;
+// 一輪的動作（ping 等）做得比 kPollSec 久時，下一次讀狀態前至少還等這麼久
+constexpr int kMinWaitMs = 1000;
+// §PERF-1113 A35：連續這麼多輪讀不到狀態，就不再沿用上一次的「DERP 中繼」
+constexpr int kRelayStaleReads = 2;
+// §PERF-1113 A34：0＝第一次看到中繼的那一輪就做（見檔頭）。rebind 的兩個數字不要跟著縮
+constexpr int kPingSec = 0;
+constexpr int kRestunSec = 0;
 constexpr int kRebindSec = 30;
 constexpr int kRebindGapSec = 90;
 constexpr int kMaxRebinds = 5;
@@ -71,6 +82,9 @@ using clock = std::chrono::steady_clock;
 
 // 行程要結束時關掉，避免靜態解構階段還去碰 SDL。
 std::atomic<bool> g_Log{true};
+
+// §PERF-1113 A35：TailscalePath::onDerpRelay() 讀的值。只由 Monitor 在 mu 內寫（publishRelay／start／stop／shutdownJoin）。
+std::atomic<bool> g_DerpRelay{false};
 
 void tsLog(const QString& line)
 {
@@ -174,6 +188,8 @@ struct Snapshot {
     enum class Kind { Missing, Direct, Relay } kind = Kind::Missing;
     QString curAddr;
     QString relay;
+    // UDP peer relay 的位址（較新的 tailscaled 才有這一欄）。走它的時候 CurAddr 也是空的，kind 一樣是 Relay
+    QString peerRelay;
     QString hostName;
 };
 
@@ -220,7 +236,11 @@ struct Monitor {
         return !quit.load() && generation.load() == gen;
     }
 
-    bool waitInterval(quint64 gen);
+    // 等到這一輪的起點（cycleStart）之後 kPollSec；這一輪已經花掉的時間不另外再等，但至少等 kMinWaitMs。
+    bool waitInterval(quint64 gen, clock::time_point cycleStart);
+
+    // 更新 g_DerpRelay。gen 已經不是目前這一次監看就不寫：stop／重新 start 清掉之後，還沒離開的舊迴圈寫不回來。
+    void publishRelay(quint64 gen, bool derp);
 
 #if defined(Q_OS_LINUX)
     // 登記正在用的 socket，讓 stop()／解構能 shutdown 把它從 recv 叫醒。
@@ -279,6 +299,7 @@ void Monitor::shutdownJoin()
         quit.store(true);
         active = false;
         generation.fetch_add(1);
+        g_DerpRelay.store(false);
 #if defined(Q_OS_LINUX)
         if (sockFd >= 0) {
             ::shutdown(sockFd, SHUT_RDWR);
@@ -309,6 +330,7 @@ void Monitor::start(const QString& hostAddress)
         host = hostAddress;
         active = true;
         generation.fetch_add(1);
+        g_DerpRelay.store(false);  // 新的一次監看讀到狀態之前當作不是中繼
 #if defined(Q_OS_LINUX)
         if (sockFd >= 0) {
             ::shutdown(sockFd, SHUT_RDWR);
@@ -330,6 +352,7 @@ void Monitor::stop()
         }
         active = false;
         generation.fetch_add(1);
+        g_DerpRelay.store(false);
 #if defined(Q_OS_LINUX)
         if (sockFd >= 0) {
             ::shutdown(sockFd, SHUT_RDWR);
@@ -339,13 +362,28 @@ void Monitor::stop()
     cv.notify_all();
 }
 
-bool Monitor::waitInterval(quint64 gen)
+bool Monitor::waitInterval(quint64 gen, clock::time_point cycleStart)
 {
+    // §PERF-1113 A34／A35：和 host 的 watch_session 一樣從輪的起點算週期。看到中繼的那一輪做 restun＋ping
+    // 可能花掉好幾秒，做完再等一整個週期的話，路徑已經回直連了 onDerpRelay 還要多拖那幾秒才變回 false
+    auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(
+        cycleStart + std::chrono::seconds(kPollSec) - clock::now());
+    if (wait < std::chrono::milliseconds(kMinWaitMs)) {
+        wait = std::chrono::milliseconds(kMinWaitMs);
+    }
     std::unique_lock<std::mutex> lock(mu);
-    cv.wait_for(lock, std::chrono::seconds(kPollSec), [&] {
+    cv.wait_for(lock, wait, [&] {
         return quit.load() || generation.load() != gen;
     });
     return !quit.load() && generation.load() == gen;
+}
+
+void Monitor::publishRelay(quint64 gen, bool derp)
+{
+    std::lock_guard<std::mutex> lock(mu);
+    if (!quit.load() && generation.load() == gen) {
+        g_DerpRelay.store(derp);
+    }
 }
 
 #if defined(Q_OS_LINUX)
@@ -794,6 +832,7 @@ bool fillPeer(const QByteArray& body, const QString& host, Snapshot* snap, QStri
         }
         snap->curAddr = peer.value(QStringLiteral("CurAddr")).toString().trimmed();
         snap->relay = peer.value(QStringLiteral("Relay")).toString().trimmed();
+        snap->peerRelay = peer.value(QStringLiteral("PeerRelay")).toString().trimmed();
         snap->hostName = peer.value(QStringLiteral("HostName")).toString().trimmed();
         snap->kind = snap->curAddr.isEmpty() ? Snapshot::Kind::Relay : Snapshot::Kind::Direct;
         return true;
@@ -1226,6 +1265,7 @@ ReadResult readStatus(Monitor& m, quint64 gen, const QString& host, Endpoint* ep
         }
         r.snap.curAddr = peer.value(QStringLiteral("CurAddr")).toString().trimmed();
         r.snap.relay = peer.value(QStringLiteral("Relay")).toString().trimmed();
+        r.snap.peerRelay = peer.value(QStringLiteral("PeerRelay")).toString().trimmed();
         r.snap.hostName = peer.value(QStringLiteral("HostName")).toString().trimmed();
         r.snap.kind = r.snap.curAddr.isEmpty() ? Snapshot::Kind::Relay : Snapshot::Kind::Direct;
         r.kind = ReadKind::Ok;
@@ -1325,12 +1365,16 @@ bool Monitor::watch(const QString& hostAddress, quint64 gen)
     bool haveLastRebind = false;
     clock::time_point lastRebind{};
     bool transientLogged = false;
+    // §PERF-1113 A35：連續讀不到狀態的輪數，以及這次監看最後公開出去的「是不是 DERP」
+    int transientRun = 0;
+    bool derpPublished = false;
 
     auto resetStreak = [&]() {
         streak = {};
     };
 
     while (current(gen)) {
+        const auto cycleStart = clock::now();
         const ReadResult read = readStatus(*this, gen, hostAddress, &ep);
         if (!current(gen)) {
             break;
@@ -1339,6 +1383,7 @@ bool Monitor::watch(const QString& hostAddress, quint64 gen)
             if (!read.error.isEmpty()) {
                 tsLog(read.error);
             }
+            publishRelay(gen, false);  // 之後不再看了，不能把「中繼」留著
             return true;
         }
         if (read.kind == ReadKind::Transient) {
@@ -1346,9 +1391,24 @@ bool Monitor::watch(const QString& hostAddress, quint64 gen)
                 transientLogged = true;
                 tsLog(read.error);
             }
+            // 單次讀不到先沿用上一次的結果（不讓姿態降頻來回跳）。連續讀不到就不能再說是中繼：
+            // 這段時間路徑可能已經回直連，不知道狀態時要回到不降頻
+            if (transientRun < kRelayStaleReads) {
+                ++transientRun;
+            }
+            if (transientRun >= kRelayStaleReads && derpPublished) {
+                derpPublished = false;
+                publishRelay(gen, false);
+                tsLog(QStringLiteral("status unreadable for %1 polls; no longer reporting DERP relay until it reads again")
+                          .arg(kRelayStaleReads));
+            }
         } else {
             transientLogged = false;
+            transientRun = 0;
             const Snapshot& snap = read.snap;
+            // 先公開再做下面的動作（ping 可能卡好幾秒）。只有 DERP 算：peer relay 的 CurAddr 也是空的，但那條是 UDP
+            derpPublished = snap.kind == Snapshot::Kind::Relay && snap.peerRelay.isEmpty();
+            publishRelay(gen, derpPublished);
             if (snap.kind == Snapshot::Kind::Direct) {
                 if (seen == Seen::Relay) {
                     const auto sec = std::chrono::duration_cast<std::chrono::seconds>(clock::now() - streak.since).count();
@@ -1372,14 +1432,20 @@ bool Monitor::watch(const QString& hostAddress, quint64 gen)
                     streak = {};
                     streak.since = now;
                     seen = Seen::Relay;
-                    const QString relayShown = snap.relay.isEmpty() ? QStringLiteral("-") : snap.relay;
+                    QString relayShown = snap.relay.isEmpty() ? QStringLiteral("-") : snap.relay;
+                    if (!snap.peerRelay.isEmpty()) {
+                        // 走 UDP peer relay：不算 DERP（onDerpRelay 回 false），升級階梯照走
+                        relayShown += QStringLiteral(" peer-relay=") + snap.peerRelay;
+                    }
                     if (snap.hostName.isEmpty()) {
                         tsLog(QStringLiteral("relay: peer %1 CurAddr empty relay=%2").arg(hostAddress, relayShown));
                     } else {
                         tsLog(QStringLiteral("relay: peer %1 host=%2 CurAddr empty relay=%3")
                                   .arg(hostAddress, snap.hostName, relayShown));
                     }
-                } else {
+                }
+                // 第一次看到中繼的那一輪也落到下面的動作判斷（kPingSec／kRestunSec 是 0），不先空等一個輪詢週期
+                {
                     const auto sec = std::chrono::duration_cast<std::chrono::seconds>(now - streak.since).count();
 
                     auto ping = [&]() -> bool {
@@ -1422,9 +1488,11 @@ bool Monitor::watch(const QString& hostAddress, quint64 gen)
                         return true;
                     };
 
+                    // restun 那一段自己會接一次 ping；兩者同一輪到期時不要連 ping 兩次（一次 ping 可能卡好幾秒）
+                    const bool restunDue = !streak.didRestun && sec >= kRestunSec;
                     if (!streak.didPing && sec >= kPingSec) {
                         streak.didPing = true;
-                        if (!ping()) {
+                        if (!restunDue && !ping()) {
                             break;
                         }
                     }
@@ -1471,7 +1539,7 @@ bool Monitor::watch(const QString& hostAddress, quint64 gen)
                 }
             }
         }
-        if (!waitInterval(gen)) {
+        if (!waitInterval(gen, cycleStart)) {
             break;
         }
     }
@@ -1492,4 +1560,9 @@ void TailscalePath::start(const QString& hostAddress)
 void TailscalePath::stop()
 {
     monitor().stop();
+}
+
+bool TailscalePath::onDerpRelay()
+{
+    return g_DerpRelay.load(std::memory_order_relaxed);
 }

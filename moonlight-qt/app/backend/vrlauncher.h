@@ -42,6 +42,9 @@ class VrLauncher : public QObject
     // 不能是 CONSTANT：XrShell 先建 QML、之後才 setChildHook()，CONSTANT 的綁定在載入時讀到 false 就再也不更新
     // （2026-10-22 頭盔實測：「正在啟動」遮罩因此從來沒出現）
     Q_PROPERTY(bool shellActive READ shellActive NOTIFY shellActiveChanged)
+    // §PERF-1113：頭盔 VR 介面的 XR session 在前景（FOCUSED）。沒有人設＝true（XrShell::setXrSessionState 目前沒人呼叫）；
+    // VrShell.qml 用它在頭盔取下／被儀表板蓋住一段時間後停主機輪詢
+    Q_PROPERTY(bool shellFocused READ shellFocused NOTIFY shellFocusedChanged)
     // §VR-PLAYER：這個建置有內建瀏覽器（Qt WebEngine）
     Q_PROPERTY(bool browserAvailable READ browserAvailable CONSTANT)
     // §VR-PLAYER（dev，--dev-video）：見 commandlineparser.h。devVideoTab＝-1＝沒帶
@@ -85,6 +88,9 @@ public:
     bool running() const;
     bool playerAvailable() const;
     bool shellActive() const;
+    bool shellFocused() const;
+    // §PERF-1113：XrShell 轉進來（GUI 執行緒）
+    static void setShellFocused(bool focused);
     bool browserAvailable() const
     {
 #ifdef HAVE_WEBENGINE
@@ -167,6 +173,7 @@ signals:
     void vrModeChanged();
     void launchingChanged();
     void shellActiveChanged();
+    void shellFocusedChanged();
     void runningChanged();
     void preflightChanged();
     // 子行程結束；error 非空＝異常結束（給 GUI 顯示）

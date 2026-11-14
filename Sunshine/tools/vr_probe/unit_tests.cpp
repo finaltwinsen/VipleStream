@@ -197,7 +197,7 @@ namespace probe {
       t.check(proto::check_welcome(w0, own_qpf(), why), "welcome-ok", "why=%s", why);
       {
         auto w = w0;
-        w.abi_version = 2;
+        w.abi_version = VRIPC_ABI_VERSION + 1;  // 原本寫死 2，ABI 升到 2 之後這一項就變成在測「版號相同應該失敗」
         t.check(!proto::check_welcome(w, own_qpf(), why), "welcome-abi");
       }
       {
@@ -1329,6 +1329,8 @@ namespace probe {
         vrdrv::pose_policy_in_t in;
         in.age_us = (int64_t) std::llround((now - last_fresh_arrival) * 1e6);
         in.zero_vel_us = zero_vel_us;
+        in.stale_blend = false;  // 這一組比的是舊規則與 hold（stale_blend 的預設 10-31 起是 true，不明講就變成在測 blend）
+        in.hold_max_us = 100000;  // hold 上限的預設後來放寬到 300 ms；這一組的案例是照 100 ms 寫的
         in.stale_hold = hold;
         in.raw_off_s = last_target - now;
         const auto p = vrdrv::decide_pose_policy(in);
@@ -1355,8 +1357,9 @@ namespace probe {
       using vrdrv::decide_pose_policy;
       using vrdrv::pose_policy_in_t;
       {
-        // 新樣本：offset 照算、控制器 offset 預設 0（舊行為）
+        // 新樣本：offset 照算；ctrl_offset 關著時控制器 offset 是 0（舊行為；預設後來改成開）
         pose_policy_in_t in;
+        in.ctrl_offset = false;
         in.raw_off_s = 0.025;
         auto p = decide_pose_policy(in);
         t.check(!p.stale && !p.hold && !p.zero_vel && p.ang_scale == 1.0, "fresh-flags");
@@ -1381,6 +1384,7 @@ namespace probe {
       {
         // stale 舊規則：速度與 offset（HMD、控制器）歸零
         pose_policy_in_t in;
+        in.stale_blend = false;
         in.age_us = 30000;
         in.raw_off_s = -0.005;
         in.ctrl_offset = true;
@@ -1390,6 +1394,8 @@ namespace probe {
       {
         // hold：2T 之後保留 offset，下限放寬到 −100 ms；角速度 50 ms 內線性衰減；超過 100 ms 回到舊規則
         pose_policy_in_t in;
+        in.stale_blend = false;
+        in.hold_max_us = 100000;
         in.stale_hold = true;
         in.zero_vel_us = 22222;
         in.age_us = 22222 + 25000;
@@ -1451,6 +1457,260 @@ namespace probe {
       t.end();
     }
 
+    // ── stale_blender_t（2026-11-13：§VR-STALE-COAST；blend 的往回跳留一個案例當對照） ─────────────
+    struct gap_result_t {
+      double max_err_mm = 0;  ///< 顯示位置對真值的最大誤差（空窗前 10 ms 到結束後 100 ms）
+      double max_back_mm = 0;  ///< 相鄰兩次查詢之間顯示位置倒退的最大量（真值一直往 +x 走，倒退就是我們製造的）
+      double max_ang_err_deg = 0;
+      int stale_reports = 0;
+      double recover_jump_mm = 0;
+      double lag_min_ms = 1e9;  ///< 空窗之前的穩定段裡（等速時），顯示的位置比真值晚多久
+      double lag_max_ms = -1e9;
+    };
+
+    /**
+     * 手沿 +x 以 x(t) = v·t + ½·a·t² 移動、同時繞 z 軸以 w_z 等角速度轉。client 每 1/576 s 取樣、預測到「取樣＋24 ms」
+     * （用真值，等於預測完全正確）、上行 5 ms；t=200 ms 起有 gap_ms 的上行空窗。
+     * driver 的節奏照 tracking.cpp：新樣本到就回報；否則照等待時間醒來（coast：還沒 stale 時 26 ms、stale 後 5 ms；其餘 25 ms），
+     * 已經 stale 才重送。first_wake_miss＝第一次逾時差幾微秒沒判成 stale（實機常見），要到下一次醒來才進得去。
+     * SteamVR 的語意：姿態時刻＝回報時刻＋offset，照回報的速度（線速度、角速度）外插到「現在＋horizon」。
+     * know_pred＝driver 知道 SteamVR 的預測時間（從 SubmitLayer 得知；不知道時 coast 只保證回報的姿態連續）。
+     * keep_ms＝§VR-CTRL-EXTRAP 的上限（< 0＝不限制）。batch＝空窗裡的樣本不是掉了而是晚到：空窗結束時一次全到（舊的在前）。
+     * 每次醒來比排定的時刻晚 0.2 ms（排程延遲；剛好落在門檻上時 age 不會大於門檻）。
+     */
+    gap_result_t run_gap(bool coast, double gap_ms, double v, double a, double w_z, bool first_wake_miss, bool know_pred = true, double horizon_s = 0.040,
+                         double keep_ms = -1.0, bool batch = false) {
+      namespace vm = vrdrv::math;
+      constexpr int64_t qpf = 10'000'000;
+      constexpr double dt_s = 1.0 / 576.0;
+      constexpr double ahead_s = 0.024;
+      constexpr double uplink_s = 0.005;
+      constexpr uint32_t zero_vel_us = 25000;
+      const double gap_start = 0.2, gap_end = 0.2 + gap_ms / 1000.0;
+      auto x_at = [&](double t) {
+        return v * t + 0.5 * a * t * t;
+      };
+      auto rot_at = [&](double t) {
+        const double h = 0.5 * w_z * t;
+        return vm::quat_t {0.0, 0.0, std::sin(h), std::cos(h)};
+      };
+      gap_result_t r;
+      vrdrv::stale_blender_t bl;
+      double next_sample = 0, last_fresh_arrival = -1, last_target = 0, next_wake = 1e9;
+      bool stale = false, missed = false, have_rep = false, have_prev = false;
+      double rep_t = 0, rep_off = 0, prev_disp = 0;
+      vm::vec3_t rep_pos, rep_vel, rep_w;
+      vm::quat_t rep_rot;
+      float s_pos[3] = {0, 0, 0}, s_rot[4] = {0, 0, 0, 1}, s_vel[3] = {0, 0, 0}, s_ang[3] = {0, 0, 0};
+      std::vector<double> held;  // batch：空窗裡取樣、還積在路上的樣本（各自的目標時間）
+      // driver 的一次處理（tracking.cpp 的迴圈本體）：fresh＝這一次有新樣本（目標時間 target）
+      auto driver_step = [&](double now, bool fresh, double target) {
+        if (fresh) {
+          last_target = target;
+          last_fresh_arrival = now;
+          const vm::quat_t q = rot_at(target);
+          s_pos[0] = (float) x_at(target);
+          s_vel[0] = (float) (v + a * target);
+          s_rot[0] = (float) q.x;
+          s_rot[1] = (float) q.y;
+          s_rot[2] = (float) q.z;
+          s_rot[3] = (float) q.w;
+          s_ang[2] = (float) w_z;
+        }
+        vrdrv::pose_policy_in_t in;
+        in.age_us = (int64_t) std::llround((now - last_fresh_arrival) * 1e6);
+        in.zero_vel_us = zero_vel_us;
+        in.stale_blend = true;  // coast 連 BLEND 一起設（vr_orchestrator.cpp）
+        in.stale_coast = coast;
+        in.ctrl_offset = true;
+        in.raw_off_s = last_target - now;
+        const auto p = vrdrv::decide_pose_policy(in);
+        bool now_stale = p.stale;
+        if (fresh) {
+          stale = false;
+          missed = false;
+        } else if (first_wake_miss && !missed && !stale) {
+          now_stale = false;  // 這一次差幾微秒沒過門檻
+          missed = true;
+        }
+        if (fresh || now_stale) {
+          if (!fresh) {
+            stale = true;
+            ++r.stale_reports;
+          }
+          const auto o = bl.process(fresh, s_pos, s_rot, s_vel, s_ang, p, p.ctrl_off_s, (int64_t) std::llround(now * (double) qpf), qpf,
+                                    know_pred ? horizon_s : 0.0, keep_ms < 0.0 ? -1.0 : keep_ms / 1000.0, in.raw_off_s, 0.3);
+          rep_t = now;
+          rep_off = o.off_s;
+          rep_pos = o.pos;
+          rep_rot = o.rot;
+          rep_vel = o.lin_vel;
+          rep_w = o.ang_vel;
+          have_rep = true;
+          if (o.log_recover) {
+            r.recover_jump_mm = o.recover_jump_mm;
+          }
+        }
+        const double wait_s = coast ? (stale ? (now - last_fresh_arrival < 0.2 ? 0.005 : 0.025) : 0.026) : 0.025;
+        next_wake = now + wait_s + 0.0002;
+      };
+      for (int step = 0; step < 6000; ++step) {  // 0.1 ms 步進、0.6 s
+        const double now = step * 0.0001;
+        std::vector<double> arrivals;
+        while (next_sample + uplink_s <= now + 1e-9) {
+          const bool in_gap = next_sample >= gap_start && next_sample < gap_end;
+          if (!in_gap) {
+            arrivals.push_back(next_sample + ahead_s);
+          } else if (batch) {
+            held.push_back(next_sample + ahead_s);
+          }
+          next_sample += dt_s;
+        }
+        if (!held.empty() && now + 1e-9 >= gap_end + uplink_s) {
+          arrivals.insert(arrivals.begin(), held.begin(), held.end());  // 積在路上的一起到，舊的在前
+          held.clear();
+        }
+        // 成批到達時 driver 可能每一格都讀到（最壞的情況）：每筆各處理一次
+        for (const double tgt : arrivals) {
+          driver_step(now, true, tgt);
+        }
+        if (arrivals.empty() && last_fresh_arrival >= 0 && now + 1e-9 >= next_wake) {
+          driver_step(now, false, 0.0);
+        }
+        if (!have_rep) {
+          continue;
+        }
+        const double tau = now + horizon_s;
+        const double dtq = tau - (rep_t + rep_off);
+        const double disp = rep_pos.x + rep_vel.x * dtq;
+        if (now >= 0.1 && now < gap_start && v > 0.0 && a == 0.0) {
+          // 等速時「顯示的位置比真值晚多久」
+          const double lag_ms = (x_at(tau) - disp) / v * 1000.0;
+          r.lag_min_ms = (std::min)(r.lag_min_ms, lag_ms);
+          r.lag_max_ms = (std::max)(r.lag_max_ms, lag_ms);
+        }
+        if (now >= gap_start - 0.01 && now <= gap_end + 0.1) {
+          r.max_err_mm = (std::max)(r.max_err_mm, std::abs(disp - x_at(tau)) * 1000.0);
+          if (have_prev && disp < prev_disp) {
+            r.max_back_mm = (std::max)(r.max_back_mm, (prev_disp - disp) * 1000.0);
+          }
+          const vm::quat_t qd = vm::normalize(vm::mul(vm::quat_from_angvel(rep_w, dtq), rep_rot));
+          r.max_ang_err_deg = (std::max)(r.max_ang_err_deg, vm::angle_deg(qd, rot_at(tau)));
+        }
+        prev_disp = disp;
+        have_prev = true;
+      }
+      return r;
+    }
+
+    void test_stale_blender(tally_t &t) {
+      t.begin("stale-blender");
+      // 對照：blend（目前的預設）進 stale 時把姿態重新標成晚 25 ms 的時刻、位置卻沒補——3 m/s 時顯示位置倒退好幾公分
+      {
+        const auto b = run_gap(false, 45.0, 3.0, 0.0, 10.0, false);
+        t.check(b.max_back_mm > 50.0, "blend-snaps-back", "back=%.1fmm err=%.1fmm", b.max_back_mm, b.max_err_mm);
+      }
+      // coast：等速運動、空窗 60 ms 以內——和沒有空窗一樣（位置、角度都連續，沒有倒退）
+      for (const double g : {27.0, 45.0, 58.0}) {
+        const auto c = run_gap(true, g, 3.0, 0.0, 10.0, false);
+        char name[48];
+        snprintf(name, sizeof(name), "coast-const-%.0fms", g);
+        t.check(c.max_err_mm < 1.0 && c.max_back_mm < 0.01 && c.max_ang_err_deg < 0.05, name, "err=%.3fmm back=%.4fmm ang=%.4fdeg stale=%d jump=%.3fmm",
+                c.max_err_mm, c.max_back_mm, c.max_ang_err_deg, c.stale_reports, c.recover_jump_mm);
+      }
+      {
+        // 第一次逾時沒判成 stale（要到 52 ms 才進得去）：一樣連續
+        const auto c = run_gap(true, 58.0, 3.0, 0.0, 10.0, true);
+        t.check(c.max_err_mm < 1.0 && c.max_back_mm < 0.01 && c.max_ang_err_deg < 0.05, "coast-late-entry", "err=%.3fmm back=%.4fmm ang=%.4fdeg stale=%d",
+                c.max_err_mm, c.max_back_mm, c.max_ang_err_deg, c.stale_reports);
+      }
+      {
+        // 空窗 90 ms：60 ms 起衰減，顯示位置的落後量最多「速度 × y²/2T」（y＝30 ms → 11.25 ms），恢復時 40 ms 內補回，沒有倒退
+        const auto c = run_gap(true, 90.0, 1.0, 0.0, 5.0, false);
+        // （每 5 ms 重送一次：兩次之間 SteamVR 照上一次的速度外插，降速時每次多走 ½·(v/T)·Δt² ≈ 每 1 m/s 0.31 mm，下一次重送收回）
+        t.check(c.max_err_mm < 14.0 && c.max_back_mm < 0.4 && c.stale_reports >= 8, "coast-90ms-decays", "err=%.2fmm back=%.4fmm stale=%d jump=%.2fmm",
+                c.max_err_mm, c.max_back_mm, c.stale_reports, c.recover_jump_mm);
+      }
+      {
+        // 空窗 150 ms：停在「60 ms 等速＋衰減積分 20 ms」之後不再前進（落後最多 70 ms 的路程）；恢復時在 40 ms 內補回，沒有倒退
+        const auto c = run_gap(true, 150.0, 1.0, 0.0, 5.0, false);
+        t.check(c.max_err_mm > 60.0 && c.max_err_mm < 75.0 && c.max_back_mm < 0.4, "coast-150ms-stops", "err=%.2fmm back=%.4fmm stale=%d jump=%.2fmm",
+                c.max_err_mm, c.max_back_mm, c.stale_reports, c.recover_jump_mm);
+      }
+      {
+        // 外出的情況：SteamVR 的預測時間 70 ms（外插量約 51 ms，比衰減時間還長）。知道預測時間：顯示位置一樣平順減速、不倒退
+        const auto c = run_gap(true, 90.0, 3.0, 0.0, 10.0, false, true, 0.070);
+        // （外插量 51 ms 時 29 ms 就開始降速、69 ms 停：到 90 ms 時落後 41 ms 的路程）
+        t.check(c.max_err_mm < 3.0 * 43.0 && c.max_back_mm < 3.0 * 0.4, "coast-90ms-long-horizon", "err=%.2fmm back=%.4fmm jump=%.2fmm", c.max_err_mm, c.max_back_mm, c.recover_jump_mm);
+        // 不知道預測時間（還沒有畫面）：回報的姿態連續，但降速時 SteamVR 少外插的那一段會縮回去——有界（不超過 速度×外插量）
+        const auto n = run_gap(true, 90.0, 3.0, 0.0, 10.0, false, false, 0.070);
+        t.check(n.max_back_mm > 1.0 && n.max_back_mm < 3.0 * 51.0, "coast-no-pred-bounded", "err=%.2fmm back=%.2fmm", n.max_err_mm, n.max_back_mm);
+      }
+      {
+        // 加速中（10 m/s²）遇到 45 ms 的空窗：空窗裡的加速度沒有資料，誤差修不掉，但不倒退，而且比 blend 小
+        const auto c = run_gap(true, 45.0, 0.0, 10.0, 5.0, false);
+        const auto b = run_gap(false, 45.0, 0.0, 10.0, 5.0, false);
+        t.check(c.max_back_mm < 0.01 && c.max_err_mm < b.max_err_mm, "coast-accel-no-snap", "coast err=%.2fmm back=%.4fmm | blend err=%.2fmm back=%.2fmm",
+                c.max_err_mm, c.max_back_mm, b.max_err_mm, b.max_back_mm);
+      }
+      {
+        // decide_pose_policy：coast 開著時 stale 也算 blend（沿用 keep_offset 與 pose_history 的路徑），速度不在這裡歸零
+        vrdrv::pose_policy_in_t in;
+        in.stale_coast = true;
+        in.age_us = 90000;
+        in.raw_off_s = 0.02;
+        const auto p = vrdrv::decide_pose_policy(in);
+        t.check(p.stale && p.blend && p.coast && p.keep_offset && !p.zero_vel && !p.hold, "coast-policy-flags");
+        in.age_us = 1000;
+        const auto q = vrdrv::decide_pose_policy(in);
+        t.check(!q.stale && !q.blend && q.coast && q.blend_enabled && !q.zero_vel, "coast-policy-fresh");
+      }
+      {
+        // §VR-CTRL-EXTRAP：要往回推多久＝SteamVR 會外插的長度（預測時間 − offset，0～100 ms）超過上限的部分
+        using vrdrv::ctrl_backdate_s;
+        t.check(ctrl_backdate_s(0.045, 0.0236, -1.0) == 0.0, "ctrl-back-auto");
+        t.check(std::abs(ctrl_backdate_s(0.045, 0.0236, 0.0) - 0.0214) < 1e-9, "ctrl-back-keep0");
+        t.check(std::abs(ctrl_backdate_s(0.045, 0.0236, 0.010) - 0.0114) < 1e-9, "ctrl-back-keep10");
+        t.check(ctrl_backdate_s(0.045, 0.0236, 0.030) == 0.0, "ctrl-back-under-limit");
+        t.check(ctrl_backdate_s(0.0, 0.0236, 0.0) == 0.0, "ctrl-back-no-pred");
+        t.check(ctrl_backdate_s(0.020, 0.0236, 0.0) == 0.0, "ctrl-back-not-negative");
+        t.check(std::abs(ctrl_backdate_s(0.300, 0.010, 0.020) - 0.080) < 1e-12, "ctrl-back-capped-at-100ms");
+        t.check(ctrl_backdate_s(0.045, std::numeric_limits<double>::quiet_NaN(), 0.0) == 0.0, "ctrl-back-nan");
+        // 整段模擬（預測時間 40 ms、offset 19 ms → SteamVR 外插 21 ms）：顯示的拍子比真值晚「21 ms − 上限」，純粹是時間平移
+        // （模擬以 0.1 ms 步進，樣本到達時刻有 0～0.1 ms 的量化，offset 與外插量跟著差這麼多）
+        const auto full = run_gap(false, 0.0, 3.0, 0.0, 10.0, false, true, 0.040, -1.0);
+        const auto k10 = run_gap(false, 0.0, 3.0, 0.0, 10.0, false, true, 0.040, 10.0);
+        const auto k0 = run_gap(false, 0.0, 3.0, 0.0, 10.0, false, true, 0.040, 0.0);
+        t.check(std::abs(full.lag_min_ms) < 0.05 && std::abs(full.lag_max_ms) < 0.05, "ctrl-extrap-auto", "lag=%.3f..%.3fms", full.lag_min_ms, full.lag_max_ms);
+        t.check(std::abs(k10.lag_min_ms - 11.0) < 0.15 && std::abs(k10.lag_max_ms - 11.0) < 0.15, "ctrl-extrap-10", "lag=%.3f..%.3fms", k10.lag_min_ms, k10.lag_max_ms);
+        t.check(std::abs(k0.lag_min_ms - 21.0) < 0.15 && std::abs(k0.lag_max_ms - 21.0) < 0.15, "ctrl-extrap-0", "lag=%.3f..%.3fms", k0.lag_min_ms, k0.lag_max_ms);
+        // 上限 0 再遇到空窗（coast）：一樣連續，顯示的拍子固定晚 21 ms（3 m/s → 63 mm、10 rad/s → 12°），空窗前後不變
+        const auto c = run_gap(true, 45.0, 3.0, 0.0, 10.0, false, true, 0.040, 0.0);
+        t.check(c.max_back_mm < 0.01 && c.max_err_mm > 62.5 && c.max_err_mm < 63.5 && c.max_ang_err_deg < 12.2, "ctrl-extrap-0-coast",
+                "back=%.4fmm ang=%.4fdeg err=%.2fmm", c.max_back_mm, c.max_ang_err_deg, c.max_err_mm);
+        // 舊的 blend 政策也套同一步（最後一步是共用的）：穩定段一樣只是時間平移
+        const auto b0 = run_gap(false, 0.0, 3.0, 0.0, 10.0, false, true, 0.040, 0.0);
+        t.check(std::abs(b0.lag_max_ms - 21.0) < 0.15, "ctrl-extrap-0-blend", "lag=%.3f..%.3fms", b0.lag_min_ms, b0.lag_max_ms);
+      }
+      {
+        // 成批到達（空窗裡的樣本不是掉了而是晚到，結束時一次全到）：外出的空窗多半是這種
+        // 45 ms：最舊的那筆目標時間才過去 26 ms（沒過期），每一筆都照實接受——等速時不倒退、落差接近 0
+        const auto s45 = run_gap(true, 45.0, 3.0, 0.0, 10.0, false, true, 0.040, -1.0, true);
+        t.check(s45.max_back_mm < 0.01 && s45.max_err_mm < 1.0 && s45.recover_jump_mm < 2.0, "coast-batch-45ms", "err=%.3fmm back=%.4fmm jump=%.3fmm",
+                s45.max_err_mm, s45.max_back_mm, s45.recover_jump_mm);
+        // 100 ms：前面幾筆的目標時間已經過去 50 ms 以上（offset 會被夾在 −50 ms）——略過，等同一批裡沒過期的；不倒退，
+        // 恢復的落差就是降速造成的那一段（第一次在 59 ms 之後重送時起降速，到 100 ms 時少走約 17.5 ms 的路程＝53 mm），
+        // 沒有多出「速度×被夾掉的量」（略過之前是 53＋93 mm）
+        const auto s100 = run_gap(true, 100.0, 3.0, 0.0, 10.0, false, true, 0.040, -1.0, true);
+        t.check(s100.max_back_mm < 3.0 * 0.4 && s100.recover_jump_mm > 45.0 && s100.recover_jump_mm < 60.0, "coast-batch-100ms-skips-expired",
+                "err=%.2fmm back=%.4fmm jump=%.2fmm", s100.max_err_mm, s100.max_back_mm, s100.recover_jump_mm);
+        // 外出的預測時間（70 ms）＋成批 45 ms：晚到的樣本 offset 是負的、SteamVR 把它多外插一段，落差要在顯示位置上算才不會跳
+        const auto f45 = run_gap(true, 45.0, 3.0, 0.0, 10.0, false, true, 0.070, -1.0, true);
+        t.check(f45.max_back_mm < 3.0 * 0.4, "coast-batch-45ms-long-horizon", "err=%.2fmm back=%.4fmm jump=%.2fmm", f45.max_err_mm, f45.max_back_mm, f45.recover_jump_mm);
+      }
+      t.end();
+    }
+
   }  // namespace
 
   int run_unit(const args_t &a) {
@@ -1466,6 +1726,7 @@ namespace probe {
     test_v4(t);
     test_pose_history(t);
     test_pose_policy(t);
+    test_stale_blender(t);
     if (a.no_loopback) {
       line("unit-skip case=loop reason=no-loopback");
     } else {

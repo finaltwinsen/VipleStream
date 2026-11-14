@@ -21,6 +21,7 @@
 #include <chrono>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef Q_OS_UNIX
@@ -83,6 +84,7 @@
 #include "streaming/session.h"
 #include "settings/streamingpreferences.h"
 #include "gui/sdlgamepadkeynavigation.h"
+#include "settings/mappingmanager.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
 #include "backend/vrlauncher.h"  // §VR-LAUNCHER
 #include "backend/vrnetbenchrunner.h"  // §VR-NETBENCH
@@ -164,6 +166,9 @@ static const uint64_t k_MaxLogSizeBytes = 10 * 1024 * 1024;
 static QAtomicInteger<uint64_t> s_LogBytesWritten = 0;
 static QFile* s_LoggerFile;
 #endif
+// §PERF-1113（A28）：非同步模式已入列、還沒寫完的量（估計值，見 LoggerTask::markQueued）。s_LogBytesWritten 改由寫入端
+// 累加之後，handler 入口要連這個一起看，log 執行緒落後或卡住時佇列才有上限（只有 LOG_TO_FILE 會讀）
+static QAtomicInteger<uint64_t> s_LogBytesQueued = 0;
 
 #ifdef HAVE_DRM_MASTER_HOOKS
 extern "C" bool g_DisableDrmHooks;
@@ -177,29 +182,88 @@ static const char* s_ProbeAction = nullptr;
 // §VR-PLAYER：一般啟動（圖形介面，沒有任何動作名稱、也不是 --help／--version）。內建瀏覽器的 Qt WebEngine 只在這種啟動初始化
 static bool s_GuiStart = false;
 
+void logToLoggerStream(QString& message);
+
+// §PERF-1113（A28）：寫 log 的執行緒（SDL3 此時還持著它的全域 log 鎖）只把原始欄位抄進來；時間字串、組行、遮罩、
+// 上限與寫檔都在 run()。串流中（非同步模式）run() 在 log 執行緒跑；其餘時候由呼叫端自己跑，和原本一樣寫完才返回
 class LoggerTask : public QRunnable
 {
+    enum class Kind { SdlMsg, QtMsg, Line };
+
 public:
-    LoggerTask(const QString& msg) : m_Msg(msg)
+    // SDL：訊息緩衝在 callback 返回後就失效，位元組要先抄走
+    LoggerTask(int elapsedMs, const char* levelTxt, int category, const char* sdlMessage)
+        : m_Kind(Kind::SdlMsg), m_ElapsedMs(elapsedMs), m_LevelTxt(levelTxt), m_Category(category), m_Raw(sdlMessage)
     {
         setAutoDelete(true);
     }
 
+    // Qt：內容整份抄一次，不靠隱式共享（訊息若是包著別人緩衝的 QString，handler 返回後那塊緩衝不保證還在）
+    LoggerTask(int elapsedMs, const char* levelTxt, const QString& qtMessage)
+        : m_Kind(Kind::QtMsg), m_ElapsedMs(elapsedMs), m_LevelTxt(levelTxt), m_Text(qtMessage.constData(), qtMessage.size())
+    {
+        setAutoDelete(true);
+    }
+
+    // 已經組好的整行（FFmpeg：時間與前綴在 handler 累積半行時就寫進去了）
+    explicit LoggerTask(const QByteArray& line) : m_Kind(Kind::Line), m_Raw(line)
+    {
+        setAutoDelete(true);
+    }
+
+    ~LoggerTask() override
+    {
+        // 寫完、或沒跑到就被丟掉，都在這裡扣回
+        if (m_QueuedBytes != 0) {
+            s_LogBytesQueued.fetchAndSubRelaxed(m_QueuedBytes);
+        }
+    }
+
+    // 只給非同步入列用，而且要在 start() 之前呼叫（之後這個物件可能已經在 log 執行緒跑完、刪掉）。
+    // 原始長度加每行前綴的概數，略大於寫入端實際累加的量：不必準，只要 log 執行緒不動時 handler 入口看得到佇列在長
+    void markQueued()
+    {
+        m_QueuedBytes = static_cast<uint64_t>(m_Raw.size()) + static_cast<uint64_t>(m_Text.size()) + 32;
+        s_LogBytesQueued.fetchAndAddRelaxed(m_QueuedBytes);
+    }
+
     void run() override
     {
-        // QTextStream is not thread-safe, so we must lock. This will generally
-        // only contend in synchronous logging mode or during a transition
-        // between synchronous and asynchronous. Asynchronous won't contend in
-        // the common case because we only have a single logging thread.
-        QMutexLocker locker(&s_SyncLoggerMutex);
-        s_LoggerStream << m_Msg;
-        s_LoggerStream.flush();
+        QString line;
+
+        switch (m_Kind) {
+        case Kind::SdlMsg:
+            line = QString("%1 - SDL %2 (%3): %4\n")
+                       .arg(QTime::fromMSecsSinceStartOfDay(m_ElapsedMs).toString())
+                       .arg(QLatin1String(m_LevelTxt))
+                       .arg(m_Category)
+                       .arg(QString::fromUtf8(m_Raw));
+            break;
+        case Kind::QtMsg:
+            line = QString("%1 - Qt %2: %3\n")
+                       .arg(QTime::fromMSecsSinceStartOfDay(m_ElapsedMs).toString())
+                       .arg(QLatin1String(m_LevelTxt))
+                       .arg(m_Text);
+            break;
+        case Kind::Line:
+            line = QString::fromUtf8(m_Raw);
+            break;
+        }
+
+        logToLoggerStream(line);
     }
 
 private:
-    QString m_Msg;
+    Kind m_Kind;
+    int m_ElapsedMs = 0;              // s_LoggerTime 的毫秒，呼叫端取（行上的時間是發生的時間，不是寫出的時間）
+    const char* m_LevelTxt = "";      // 指向字面量
+    int m_Category = 0;
+    QByteArray m_Raw;
+    QString m_Text;
+    uint64_t m_QueuedBytes = 0;       // markQueued() 算進 s_LogBytesQueued 的量；同步模式的暫時物件是 0
 };
 
+// 寫入端（LoggerTask::run）：偵錯器輸出、遮罩、檔案上限、寫出
 void logToLoggerStream(QString& message)
 {
 #if defined(QT_DEBUG) && defined(Q_OS_WIN32)
@@ -215,8 +279,11 @@ void logToLoggerStream(QString& message)
 #endif
 
     // Strip session encryption keys and IVs from the logs
-    message.replace(k_RikeyRegex, "\\1rikey=REDACTED");
-    message.replace(k_RikeyIdRegex, "\\1rikeyid=REDACTED");
+    // §PERF-1113（A28）：兩個樣式都含 "rikey"，沒有這個字的行（幾乎只有 HTTP 請求的 URL 才有）不必各建一次 match 物件
+    if (message.contains(QLatin1String("rikey"))) {
+        message.replace(k_RikeyRegex, "\\1rikey=REDACTED");
+        message.replace(k_RikeyIdRegex, "\\1rikeyid=REDACTED");
+    }
 
 #ifdef LOG_TO_FILE
     auto oldLogSize = s_LogBytesWritten.fetchAndAddRelaxed(message.size());
@@ -229,19 +296,64 @@ void logToLoggerStream(QString& message)
     }
 #endif
 
+    // QTextStream is not thread-safe, so we must lock. This will generally
+    // only contend in synchronous logging mode or during a transition
+    // between synchronous and asynchronous. Asynchronous won't contend in
+    // the common case because we only have a single logging thread.
+    QMutexLocker locker(&s_SyncLoggerMutex);
+    s_LoggerStream << message;
+    s_LoggerStream.flush();
+}
+
+// §PERF-1113（A28）：寫滿上限之後，三個 handler 一進來就返回（原本格式化與遮罩照做、最後才丟掉）。
+// 「已寫」由寫入端累加，所以要加上「已入列、還沒寫完」的量一起比：原本是呼叫端先累加才入列，排進 log 執行緒的
+// 文字總量不會超過上限；只看已寫的話，log 執行緒落後或卡住（磁碟 I/O）時佇列會一直長。
+// 入列的量是略大的估計值，接近上限而且佇列有積壓時可能早幾行開始擋，寫入端追上後會再放行到真的寫滿
+static bool logSizeLimitReached()
+{
+#ifdef LOG_TO_FILE
+    // 先讀入列的量：這兩個讀取之間剛好有一行寫完的話，那一行兩邊都算到（偏早擋，不會漏算）
+    const uint64_t queued = s_LogBytesQueued.loadRelaxed();
+    if (queued >= k_MaxLogSizeBytes) {
+        // 光是還沒寫的就超過上限（log 執行緒卡住）：接著偵錯器也不再排
+        return true;
+    }
+    if (s_LogBytesWritten.loadRelaxed() + queued >= k_MaxLogSizeBytes) {
+#if defined(QT_DEBUG) && defined(Q_OS_WIN32)
+        // 偵錯器輸出不受檔案上限限制：接著偵錯器時照舊走完
+        if (IsDebuggerPresent()) {
+            return false;
+        }
+#endif
+        return true;
+    }
+#endif
+    return false;
+}
+
+// 同步／非同步的切換點和原本相同（g_AsyncLoggingEnabled）；參數直接交給 LoggerTask 的建構子
+template <typename... Args>
+static void postLog(Args&&... args)
+{
     if (g_AsyncLoggingEnabled) {
         // Queue the log message to be written asynchronously
-        s_LoggerThread.start(new LoggerTask(message));
+        auto* task = new LoggerTask(std::forward<Args>(args)...);
+        task->markQueued();
+        s_LoggerThread.start(task);
     }
     else {
         // Log the message immediately
-        LoggerTask(message).run();
+        LoggerTask(std::forward<Args>(args)...).run();
     }
 }
 
 void sdlLogToDiskHandler(void*, int category, SDL_LogPriority priority, const char* message)
 {
-    QString priorityTxt;
+    const char* priorityTxt;
+
+    if (logSizeLimitReached()) {
+        return;
+    }
 
     switch (priority) {
     case SDL_LOG_PRIORITY_VERBOSE:
@@ -279,15 +391,16 @@ void sdlLogToDiskHandler(void*, int category, SDL_LogPriority priority, const ch
         break;
     }
 
-    QTime logTime = QTime::fromMSecsSinceStartOfDay(s_LoggerTime.elapsed());
-    QString txt = QString("%1 - SDL %2 (%3): %4\n").arg(logTime.toString()).arg(priorityTxt).arg(category).arg(message);
-
-    logToLoggerStream(txt);
+    postLog(static_cast<int>(s_LoggerTime.elapsed()), priorityTxt, category, message);
 }
 
 void qtLogToDiskHandler(QtMsgType type, const QMessageLogContext&, const QString& msg)
 {
-    QString typeTxt;
+    const char* typeTxt = "";
+
+    if (logSizeLimitReached()) {
+        return;
+    }
 
     switch (type) {
     case QtDebugMsg:
@@ -316,10 +429,7 @@ void qtLogToDiskHandler(QtMsgType type, const QMessageLogContext&, const QString
         break;
     }
 
-    QTime logTime = QTime::fromMSecsSinceStartOfDay(s_LoggerTime.elapsed());
-    QString txt = QString("%1 - Qt %2: %3\n").arg(logTime.toString()).arg(typeTxt).arg(msg);
-
-    logToLoggerStream(txt);
+    postLog(static_cast<int>(s_LoggerTime.elapsed()), typeTxt, msg);
 }
 
 #ifdef HAVE_FFMPEG
@@ -342,6 +452,9 @@ void ffmpegLogToDiskHandler(void* ptr, int level, const char* fmt, va_list vl)
         return;
     }
     else if ((level & 0xFF) > AV_LOG_WARNING && s_SuppressVerboseOutput) {
+        return;
+    }
+    else if (logSizeLimitReached()) {
         return;
     }
 
@@ -380,9 +493,8 @@ void ffmpegLogToDiskHandler(void* ptr, int level, const char* fmt, va_list vl)
         flush = true;
     }
     if (flush) {
-        // logToLoggerStream 收非 const 左值參考，需具名變數
-        QString flushedLine = QString::fromUtf8(pendingBuf, pendingLen);
-        logToLoggerStream(flushedLine);
+        // 整行的位元組交出去，UTF-8 轉換在寫入端做
+        postLog(QByteArray(pendingBuf, pendingLen));
         pendingLen = 0;
     }
 }
@@ -1126,8 +1238,16 @@ int main(int argc, char *argv[])
 
     bool forceGles;
     if (!Utils::getEnvironmentVariableOverride("FORCE_QT_GLES", &forceGles)) {
-        forceGles = WMUtils::isRunningNvidiaProprietaryDriverX11() ||
-                    !WMUtils::supportsDesktopGLWithEGL();
+        // §PERF-1113 A6：Qt 用 offscreen 而且沒有 X11／Wayland（頭盔的 VR／影片子行程、SSH 下的 --help）時 Qt 不會建
+        // 任何 GL 視窗，下面兩次 eglInitialize 探測（X11 的 NVIDIA 判斷、GBM 的桌面 GL 判斷）是白做。
+        // 條件只看這兩件事，不看是不是 PCVR：--vr-emulate 與 Linux 桌面上的 PCVR 有平面視窗，照舊要探測
+        if (qgetenv("QT_QPA_PLATFORM") == "offscreen" && !WMUtils::isRunningWindowManager()) {
+            forceGles = false;
+        }
+        else {
+            forceGles = WMUtils::isRunningNvidiaProprietaryDriverX11() ||
+                        !WMUtils::supportsDesktopGLWithEGL();
+        }
     }
     if (forceGles) {
         // The Nvidia proprietary driver causes Qt to render a black window when using
@@ -1393,33 +1513,52 @@ int main(int argc, char *argv[])
     // QGuiApplication ctor — same Qt 6 ordering constraint as the bundled
     // editorial fonts above.
     {
-        QStringList candidatePaths;
-        // 1. AppImage relative — applicationDirPath() = AppDir/usr/bin/, font in usr/share/fonts/truetype/
-        candidatePaths << QCoreApplication::applicationDirPath() +
-            QStringLiteral("/../share/fonts/truetype/NotoSansCJK-Regular.ttc");
-        candidatePaths << QCoreApplication::applicationDirPath() +
-            QStringLiteral("/../share/fonts/opentype/NotoSansCJK-Regular.ttc");
-        // 2. System fontconfig path (.deb / native build) — Ubuntu / Debian
-        candidatePaths << QStringLiteral("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
-        candidatePaths << QStringLiteral("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc");
+        // §PERF-1113 A16：系統路徑上有這個字型＝系統的 fontconfig 早就索引過它，Qt 的 fallback 本來就找得到。
+        // 再 addApplicationFont 一次只是讓 fontconfig 把 TTC 裡約 10 個 face 逐一重掃（主執行緒約 25 ms），
+        // 所以只印 log、不註冊；系統上沒有才試 AppImage 內附的那一份
+        QStringList systemPaths;
+        // System fontconfig path (.deb / native build) — Ubuntu / Debian
+        systemPaths << QStringLiteral("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+        systemPaths << QStringLiteral("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc");
         // Arch／CachyOS（noto-fonts-cjk）
-        candidatePaths << QStringLiteral("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc");
+        systemPaths << QStringLiteral("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc");
 
-        bool loaded = false;
-        for (const QString& p : candidatePaths) {
+        QString systemFont;
+        for (const QString& p : std::as_const(systemPaths)) {
             if (QFileInfo::exists(p)) {
-                int id = QFontDatabase::addApplicationFont(p);
-                if (id >= 0) {
-                    qInfo("Loaded CJK font: %s", qPrintable(p));
-                    loaded = true;
-                    break;
-                }
+                systemFont = p;
+                break;
             }
         }
-        if (!loaded) {
-            qInfo("CJK font (NotoSansCJK) not found in AppImage or system; "
-                  "Traditional Chinese / Japanese / Korean text may render "
-                  "as fallback boxes.  apt install fonts-noto-cjk on .deb.");
+
+        if (!systemFont.isEmpty()) {
+            qInfo("CJK font found on the system (%s); using it through fontconfig, not registering it again",
+                  qPrintable(systemFont));
+        }
+        else {
+            QStringList bundledPaths;
+            // AppImage relative — applicationDirPath() = AppDir/usr/bin/, font in usr/share/fonts/truetype/
+            bundledPaths << QCoreApplication::applicationDirPath() +
+                QStringLiteral("/../share/fonts/truetype/NotoSansCJK-Regular.ttc");
+            bundledPaths << QCoreApplication::applicationDirPath() +
+                QStringLiteral("/../share/fonts/opentype/NotoSansCJK-Regular.ttc");
+
+            bool loaded = false;
+            for (const QString& p : std::as_const(bundledPaths)) {
+                if (QFileInfo::exists(p)) {
+                    int id = QFontDatabase::addApplicationFont(p);
+                    if (id >= 0) {
+                        qInfo("Loaded CJK font: %s", qPrintable(p));
+                        loaded = true;
+                        break;
+                    }
+                }
+            }
+            if (!loaded) {
+                qInfo("CJK font (NotoSansCJK) not found in AppImage or system; "
+                      "Traditional Chinese / Japanese / Korean text may render "
+                      "as fallback boxes.  apt install fonts-noto-cjk on .deb.");
+            }
         }
     }
 #endif
@@ -1484,9 +1623,9 @@ int main(int argc, char *argv[])
     //   - log 檔與 handler 已就緒，probe 的 [VIPLE-HID] 行會進 log；
     //   - QGuiApplication 已建、翻譯已套（retranslate）；
     //   - --help/--version fast-path 已在 parser.parse() 內 _exit（smoke test 不受影響）；
-    //   - 早於 engine.load：GUI 路徑先到 ApplicationWindow.onCompleted → startAsyncLoad →
-    //     getUnmappedGamepads，CLI stream/quit 路徑先到 StackView.onCompleted → doEarlyInit →
-    //     SdlGamepadKeyNavigation::enable()；兩者都在這之後。
+    //   - 早於 engine.load：GUI 路徑在 AppContent 的 Component.onCompleted 先 SdlGamepadKeyNavigation::enable()
+    //     再 startAsyncLoad → getUnmappedGamepads（§PERF-1113 A31 之後的順序），CLI stream/quit 路徑先到
+    //     StackView.onCompleted → doEarlyInit → SdlGamepadKeyNavigation::enable()；兩者都在這之後。
     // 正常機器 ~ms；有裝置卡死時最多等 HidProbe::kPerDeviceWaitMs（1 s）。
     // 之後四個閘控點：gamepad.cpp getUnmappedGamepads / sdlgamepadkeynavigation.cpp
     // enable / input.cpp SdlInputHandler ctor / sc_hid.cpp start。
@@ -1718,6 +1857,16 @@ int main(int argc, char *argv[])
 #ifdef HAVE_OPENXR
             XrContext::setHandBackOnShutdown(streamParser.isXrHandBack());  // §VR-SHELL
 #endif
+            // §PERF-1113 A31：無頭的串流行程（Qt 用 offscreen：頭盔的 VR／XR 桌面子行程）沒有視窗可以導覽，
+            // 介面的手把導覽不必開（每次開都是一次手把子系統初始化＋對應表解析）。有平面視窗的 CLI 串流照舊
+            if (QGuiApplication::platformName() == QLatin1String("offscreen")) {
+                SdlGamepadKeyNavigation::setSuppressed(true);
+            }
+            // §PERF-1113 A31：VR 串流的行程（頭盔介面開的子行程、PCVR）手上已經有對應表的快取檔就不再上網問一次：
+            // 生出它的介面行程啟動時問過了，每場各問一次只是多一次對外的 HTTPS
+            if (streamParser.isXrHandBack() || preferences->displayTarget == StreamingPreferences::DT_PCVR) {
+                MappingManager::setSkipFetchIfCached(true);
+            }
             engine.rootContext()->setContextProperty("launcher", launcher);
 
             QObject::connect(launcher, &CliStartStream::Launcher::searchingComputer,
@@ -1774,6 +1923,10 @@ int main(int argc, char *argv[])
                                      "initialView",
                                      QString("qrc:/gui/CliStartStreamSegue.qml"));
                                  engine.rootContext()->setContextProperty("runConfigChecks", false);
+                                 // §PERF-1113 A6：main.qml 看這個旗標，不再另外輪詢所有已知主機（上面的 launcher
+                                 // 自己有一個 ComputerManager 在找）。用 bool 而不是 cliStreamSession：那是 QObject，
+                                 // Session 刪掉之後在 QML 裡會變成 null，視窗再出現時又會開始輪詢
+                                 engine.rootContext()->setContextProperty("cliStreamMode", true);
                                  QTimer::singleShot(0, &app, [&engine, &app]() {
                                      engine.load(QUrl(QStringLiteral("qrc:/gui/main.qml")));
                                      if (engine.rootObjects().isEmpty()) {
@@ -1932,6 +2085,7 @@ int main(int argc, char *argv[])
     if (hasGUI) {
         engine.rootContext()->setContextProperty("initialView", initialView);
         engine.rootContext()->setContextProperty("runConfigChecks", commandLineParserResult == GlobalCommandLineParser::NormalStartRequested);
+        engine.rootContext()->setContextProperty("cliStreamMode", false);  // §PERF-1113 A6：只有 CLI 串流是 true
 
         // §VR-SHELL：Frame 上一般啟動預設開頭盔 VR 介面（--vr-shell 可以指定 xr／noxr／off）
         XrShell::Config shellConfig;

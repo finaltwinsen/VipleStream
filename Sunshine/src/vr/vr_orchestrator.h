@@ -76,9 +76,11 @@ namespace vr::orchestrator {
   /**
    * @brief /launch（pcvr）成功後呼叫；背景執行緒從 PRECHECK 開始跑。
    * @param force vrForce：允許關掉現有 SteamVR（§D.8）
+   * @param prewarm_token 這一次 /launch 自己呼叫 `prewarm()` 拿到的值；PRECHECK 只沿用那一次探測的環境。
+   *        0（預設，selftest 用）＝沒有預先探測，PRECHECK 一律自己完整探測。
    * @return 已排入；已有編排進行中（非 IDLE／RESTORE_PENDING／ERROR）時 false。
    */
-  bool start(const negotiated_t &neg, const app_ref_t &app, bool force);
+  bool start(const negotiated_t &neg, const app_ref_t &app, bool force, uint64_t prewarm_token = 0);
 
   /// session 結束：STOPPING → RESTORE_PENDING（不關 SteamVR，§D.8）
   void stop(stop_reason_e reason);
@@ -93,6 +95,15 @@ namespace vr::orchestrator {
 
   /// 立刻跑一次維護（guard 還原、環境與衝突探測）；selftest 與登入事件用
   void kick();
+
+  /**
+   * @brief §PREWARM：/launch（pcvr）通過擁有權檢查、確定會走到 start() 之前呼叫（任何執行緒；只設旗標、叫醒編排執行緒）。
+   *        編排執行緒先把環境探測一次，和呼叫端接下來的編碼器探測並行；把回傳值交給隨後的 start()，它的 PRECHECK
+   *        才沿用這一次的結果，只補查隨時會變的項目。探測在編排執行緒上做——會讀使用者可寫的檔案，不可以放在 HTTP 執行緒。
+   *        之後沒有 start()（/launch 中途失敗）也無妨：結果只認這個回傳值，別的 start() 拿不到。
+   * @return 交給 start() 的 prewarm_token；0＝沒有安排探測（編排器沒在跑、或編排進行中）。
+   */
+  [[nodiscard]] uint64_t prewarm();
 
   /// 等到狀態是 IDLE（或 timeout）；selftest 用
   bool wait_idle(std::chrono::milliseconds timeout);

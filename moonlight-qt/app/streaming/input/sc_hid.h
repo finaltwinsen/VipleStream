@@ -147,6 +147,17 @@ private:
     void enqueueFeatureRequest(const FeatureReq& req);
     bool dequeueFeatureRequest(FeatureReq* out);
 
+    // ── 沒有裝置時丟掉的 feature 請求（log 節流用）──
+    // 這裡沒有實體 SC 時，host 的 Steam 等不到回應，對虛擬裝置的 SET 每秒重送 5～24 筆、整場不停；逐筆警告曾佔
+    // 頭盔 log 的四到六成。前 3 筆照印，之後每 60 秒一行彙總。control stream 的 callback 執行緒計數，它和 stop()
+    // 可能同時印彙總行（stop() 在 LiStopConnection() 之前跑），所以已報告數只用 CAS 往前推；
+    // prepare() 不歸零（§SC-HOTPLUG 會在串流中反覆 prepare，歸零等於每次 HID 變動又印 3 行）。
+    std::atomic<uint32_t> m_noDevReq{0};          // 累計筆數
+    std::atomic<uint32_t> m_noDevReqReported{0};  // 已經印進 log 的累計筆數
+    std::atomic<Uint32> m_noDevLogTick{0};        // 上次印的 SDL_GetTicks()
+    static constexpr Uint32 kNoDevSummaryMs = 60000;
+    void logNoDeviceSummary(uint32_t total, Uint32 now);
+
     // ── 讀取統計（每場 prepare() 歸零）：只在讀取執行緒（與 join 之後的 stop()）存取 ──
     uint32_t m_seenMask[8] = {};        // report id 0..255 首見 bitmap
     uint32_t m_rxTotal = 0;             // 所有 dev 讀到的 report 數

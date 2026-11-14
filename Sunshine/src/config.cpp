@@ -195,8 +195,11 @@ namespace config {
       if (value == "hold"sv) {
         return vr_t::stale_e::hold;
       }
-      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: blend, legacy, hold. Falling back to 'blend'", key, value));
-      return vr_t::stale_e::blend;
+      if (value == "coast"sv) {
+        return vr_t::stale_e::coast;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: coast, blend, legacy, hold. Falling back to 'coast'", key, value));
+      return vr_t::stale_e::coast;
     }
 
     vr_t::overload_e overload_from_view(const std::string_view value, const std::string_view key) {
@@ -1663,6 +1666,13 @@ namespace config {
     vr_opt::bool_strict_f(vars, "vr_hotspot_autoconnect", vr.hotspot_autoconnect);
     vr_opt::int_strict_f(vars, "vr_hotspot_restart_max", vr.hotspot_restart_max, 1, 5, true);
     generic_f(vars, "vr_stale_policy", vr.stale_policy, vr_opt::stale_from_view);
+    // §VR-CTRL-EXTRAP：auto（不限制）或 0～50（SteamVR 對控制器最多外插幾毫秒）
+    if (const auto it = vars.find("vr_ctrl_extrap_ms"); it != std::end(vars) && (it->second == "auto" || it->second == "unlimited")) {
+      vr.ctrl_extrap_ms = it->second == "auto" ? -2 : -1;
+      vars.erase(it);
+    } else {
+      vr_opt::int_strict_f(vars, "vr_ctrl_extrap_ms", vr.ctrl_extrap_ms, 1, 50, true);
+    }
     generic_f(vars, "vr_multilink", vr.multilink, vr_opt::multilink_from_view);
     string_f(vars, "vr_multilink_fault", vr.multilink_fault);
     vr_opt::bool_strict_f(vars, "vr_multilink_ctrl", vr.multilink_ctrl);
@@ -1670,6 +1680,16 @@ namespace config {
     // §VR-REPAIR-RTT：要 vr_multilink_repair（與 vr_multilink_ctrl）也開；只設這一個時在多連線的 VR session 建立時警告、
     // 維持關閉（stream.cpp）。預設關＝兩端的行為與之前完全相同
     vr_opt::bool_strict_f(vars, "vr_multilink_repair_rtt", vr.multilink_repair_rtt);
+    vr_opt::bool_strict_f(vars, "vr_multilink_uso", vr.multilink_uso);  // §PERF-1113
+    // §VR-PACE：auto（預設，依線路自動開關）、0（一次送完）或 1～95（固定攤開的比例）
+    if (const auto it = vars.find("vr_pace_spread_pct"); it != std::end(vars) && it->second == "auto") {
+      vr.pace_spread_pct = -1;
+      vars.erase(it);
+    } else {
+      vr_opt::int_strict_f(vars, "vr_pace_spread_pct", vr.pace_spread_pct, 1, 95, true);
+    }
+    vr_opt::int_strict_f(vars, "vr_pace_ab_s", vr.pace_ab_s, 10, 600, true);  // §VR-PACE-AB（0＝不切換）
+    vr_opt::bool_strict_f(vars, "vr_abr_experimental", vr.abr_experimental);
     // §VR-HAPTIC-REDUNDANT（2026-10-31）：HAPTIC S2C 冗餘發送開關，預設 enabled
     vr_opt::bool_strict_f(vars, "vr_haptic_redundancy", vr.haptic_redundancy);
     vr_opt::bool_strict_f(vars, "vr_multilink_hotadd", vr.multilink_hotadd);

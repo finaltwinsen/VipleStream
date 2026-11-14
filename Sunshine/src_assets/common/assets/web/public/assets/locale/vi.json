@@ -263,7 +263,7 @@
     "max_bitrate": "Tốc độ bit tối đa",
     "max_bitrate_desc": "Tốc độ bit tối đa (đơn vị Kbps) mà VipleStream-Server sẽ mã hóa luồng. Nếu đặt thành 0, nó sẽ luôn sử dụng tốc độ bit được yêu cầu bởi VipleStream.",
     "minimum_fps_target": "Mục tiêu FPS tối thiểu",
-    "minimum_fps_target_desc": "Tốc độ khung hình hiệu quả thấp nhất mà luồng có thể đạt được. Giá trị 0 được coi là khoảng một nửa tốc độ khung hình của luồng. Nên thiết lập giá trị 20 nếu bạn phát nội dung có tốc độ khung hình 24 hoặc 30fps.",
+    "minimum_fps_target_desc": "Tốc độ khung hình hiệu quả thấp nhất mà luồng có thể đạt được. Giá trị 0 sử dụng tốc độ khung hình mà máy khách yêu cầu (toàn bộ, không phải một nửa). Nên thiết lập giá trị 20 nếu bạn phát nội dung có tốc độ khung hình 24 hoặc 30fps.",
     "min_log_level": "Mức độ ghi nhật ký",
     "min_log_level_0": "Chi tiết",
     "min_log_level_1": "Gỡ lỗi",

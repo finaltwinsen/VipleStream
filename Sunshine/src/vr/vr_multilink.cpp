@@ -55,7 +55,22 @@ namespace vr::multilink {
       uint32_t pkt_size = 0;
       uint32_t count = 0;
       clock::time_point enq;
+      // §PERF-1113：這一批是哪一幀的（has_frame）、是不是那一幀的最後一批（frame_end）。送出執行緒送完幀尾時記下時刻
+      uint32_t frame = 0;
+      bool has_frame = false;
+      bool frame_end = false;
+      uint32_t pace_gap_ns = 0;  // §VR-PACE：這一幀的封包之間隔多久送（0＝不攤開，一次送完）
     };
+
+    // §VR-PACE：封包間隔的上下限。上限 1 ms——client 的補包規則把「同一個 block 3 ms 沒有新封包」當成缺包
+    // （RTPV_NACK_IDLE_US），間隔加上計時器睡過頭（約 0.5 ms）與線路抖動不可以接近它（低碼率時一幀只有三四個封包，
+    // 照比例攤會隔 3～4 ms）；下限 20 µs——再短等於一次送完，不必排
+    constexpr int64_t kPaceGapMaxNs = 1'000'000;
+    constexpr int64_t kPaceGapMinNs = 20'000;
+    // §PERF-1113：每條連線記最近這麼多幀的「幀尾送完」時刻。原本 256（144 fps 約 1.8 s）：線路塞到單向延遲超過 1.8 s 時，
+    // 收包報告回來那一幀的紀錄已經被下一圈蓋掉，§VR-PACE 的單向延遲整段配不到（複核 client-1）。改成和 stream.cpp 的
+    // abrTx 一樣 2048（144 fps 約 14 s）
+    constexpr uint32_t kSentRing = 2048;
   }  // namespace
 
   struct hub_t::link_t {
@@ -113,6 +128,12 @@ namespace vr::multilink {
     std::atomic<int64_t> promoted_ns {0};  // 最近一次從探測轉為送影像的時刻
     std::atomic<int> strikes {0};  // 連續幾次「剛放行就又送不動」（見 probe_need_good）
     clock::time_point fault_next_free {};  // 故障注入的限速（只在 tx 執行緒存取）
+    // §VR-PACE（前三個只在 tx 執行緒存取）：下一個封包最早什麼時候送、目前在排的是哪一幀
+    clock::time_point pace_next {};
+    uint32_t pace_frame = 0;
+    bool pace_have_frame = false;
+    std::atomic<uint32_t> pace_frames {0};  ///< 這 10 秒攤開送完的幀數（幀尾那一批有攤開而且整批送完）
+    std::atomic<uint32_t> pace_gap_us {0}, pace_late {0};  // 給 10 秒那一行：最近用的間隔、晚 1 ms 以上才送出的封包數
 
     // 影像佇列
     std::mutex mtx;
@@ -129,6 +150,16 @@ namespace vr::multilink {
     std::thread tx;
     saturation_t sat;  // 只在 tx 執行緒存取
     std::unique_ptr<platf::high_precision_timer> hp;  // 短暫睡眠用（tx 執行緒建立、只有它用）
+    // §PERF-1113（審查 05 第 8 項）：幀尾那一批整批送完的時刻（tx 執行緒寫、任何執行緒讀）。寫法和 stream.cpp 的 abrTx 相同：
+    // 先作廢幀號、寫時間、最後發布幀號，讀的一方不會拿到「舊幀號配新時間」
+    struct sent_slot_t {
+      std::atomic<uint32_t> frame {0xFFFFFFFFu};
+      std::atomic<int64_t> us {0};
+      std::atomic<bool> paced {false};  ///< §VR-PACE：這一幀的幀尾那一批是攤開送的
+    };
+    std::array<sent_slot_t, kSentRing> sent_ring;
+    // §PERF-1113（審查 05 第 1 項）：這條連線的 USO 整批送出失敗過、而逐包送得出去 → 之後都逐包（只在 tx 執行緒存取）
+    bool uso_off = false;
 
     // 累計統計
     std::atomic<uint64_t> tx_pkts {0}, tx_bytes {0}, drop_age {0}, drop_block {0}, drop_full {0}, drop_muted {0}, drop_policy {0}, drop_fault {0}, tx_err {0};
@@ -168,6 +199,8 @@ namespace vr::multilink {
     c2s_cb_t on_c2s;
     // §VR-RATE-AUTO：影像批次的期限（opt.video_max_age 是起始值）。半速時送出週期變兩倍，期限跟著放寬（set_video_max_age）
     std::atomic<int64_t> max_age_us {opt.video_max_age.count()};
+    // §VR-PACE：每一幀的封包攤開在幀週期的百分之幾（0＝一次送完）。幀週期取 max_age_us 的一半（它一直跟著串流幀率走）
+    std::atomic<int> pace_pct {std::clamp(opt.pace_spread_pct, 0, 95)};
 
     // 解密與去重（只在 io 執行緒存取）
     crypto::cipher::gcm_t cipher;
@@ -702,6 +735,36 @@ namespace vr::multilink {
       }
     }
 
+#ifdef _WIN32
+    /**
+     * §PERF-1113（審查 05 第 1 項）：整批用一次 WSASendMsg＋UDP_SEND_MSG_SIZE 交給系統（批次裡的封包本來就連續、等長；
+     * 系統照 pkt_size 切回一個個資料報，線上的位元組和逐包送完全相同）。socket 仍是非阻塞：would_block 時整批都沒送，
+     * 和 send_one 一樣重試到期限。sock_mtx 只包住那一次系統呼叫。
+     * 回傳 1＝整批送出、-1＝期限到了（一個都沒送）、0＝其他錯誤（一個都沒送；呼叫端退回逐包）
+     */
+    int send_batch_uso(link_t &L, const batch_t &b, clock::time_point deadline, int &err) {
+      for (;;) {
+        int r;
+        {
+          std::lock_guard sk {L.sock_mtx};
+          const boost::asio::ip::address target = L.client_video.address();
+          r = platf::send_uso_nonblocking((uintptr_t) L.video_sock.native_handle(), target, L.client_video.port(),
+                                          (const char *) b.data.data(), b.pkt_size, b.count, &err);
+        }
+        if (r > 0) {
+          return 1;
+        }
+        if (r < 0) {
+          return 0;
+        }
+        if (clock::now() >= deadline || stop.load(std::memory_order_relaxed) || L.retire.load(std::memory_order_relaxed)) {
+          return -1;
+        }
+        precise_sleep(L, kBlockRetry);
+      }
+    }
+#endif
+
     /// §VR-LINK-REPAIR：送一批補包（tx 執行緒）。期限很短（補了來不及就沒有意義）；不進飽和統計，也不受成串掉包的
     /// 注入影響（那條規則只算第一次送出的封包）。鏈路空檔的注入照樣適用：那段時間送什麼都到不了。
     void send_repair(link_t &L, batch_t &b) {
@@ -815,6 +878,11 @@ namespace vr::multilink {
         const bool fresh_only = opt.video == options_t::video_e::always && good_carrier_besides(L, to_ns(begin));
         const std::chrono::microseconds max_age {max_age_us.load(std::memory_order_relaxed)};
         const auto deadline = b.enq + fault_delay + (fresh_only ? max_age / 4 : max_age);
+        // §VR-PACE：這一批要不要攤開送。兩種情況照舊一次送完——
+        //  - fresh_only：期限只剩半個幀週期，攤開到接近一個幀週期的話後半段全部過期（兩條都在送時會兩條都丟後半幀）；
+        //    這時另一條本來就各送一份，短暫空檔由它補。
+        //  - 探測中：頭盔是從「整批封包多快到齊」量這條鏈路的速度，攤開了量到的就是我們自己的送出節奏。
+        const uint32_t pace_gap_ns = (fresh_only || L.probing.load(std::memory_order_relaxed)) ? 0 : b.pace_gap_ns;
         size_t sent = 0;
         bool faulted = false;
         if (opt.fault.blocked(L.id, to_ns(b.enq) / 1'000'000)) {  // 以入列時刻判斷：每條連線的同一批入列時刻相同，互補的規則不會把同一批在兩條都丟掉
@@ -824,7 +892,31 @@ namespace vr::multilink {
           L.drop_age.fetch_add(b.count, std::memory_order_relaxed);
         } else {
           const auto burst = opt.fault.burst_rule(L.id);
-          for (uint32_t k = 0; k < b.count; ++k) {
+          uint32_t k_begin = 0;
+#ifdef _WIN32
+          // §PERF-1113（審查 05 第 1 項）：opt.video_uso 開著時整批一次系統呼叫送出（預設關＝走下面原本的逐包迴圈）。
+          // 故障注入的成串掉包與限速是逐包的規則，開著時維持逐包。補包插隊改成在整批之前檢查一次（一批不到 0.1 ms）。
+          // 整批失敗（不是 would_block）就退回逐包把這一批送完；逐包送得出去才認定是這條連線不支援，之後不再試
+          bool uso_failed = false;
+          int uso_err = 0;
+          // 複核（11-13）：一批總長超過 64 KB 的不走整批（每包多了連線前綴，批次大小是照不含前綴的長度算的）
+          if (opt.video_uso && !L.uso_off && b.count > 1 && (uint64_t) b.count * b.pkt_size <= 65535 && burst.pkts <= 0 && opt.fault.rate_cap(L.id) <= 0 &&
+              pace_gap_ns == 0) {  // §VR-PACE：要攤開送的幀不可以整批交給系統
+            if (L.rq_pending.load(std::memory_order_relaxed) && fault_delay.count() == 0) {
+              flush_repairs(L);
+            }
+            const int r = send_batch_uso(L, b, deadline, uso_err);
+            if (r > 0) {
+              sent = b.count;
+              k_begin = b.count;
+            } else if (r < 0) {
+              k_begin = b.count;  // 期限到了：和逐包時第一包就 would_block 到期限相同，這一批不送
+            } else {
+              uso_failed = true;
+            }
+          }
+#endif
+          for (uint32_t k = k_begin; k < b.count; ++k) {
             // §VR-LINK-REPAIR：補包插隊（送影像批次的途中也先送）。有延遲注入時不插，維持「晚到」的順序
             if (L.rq_pending.load(std::memory_order_relaxed) && fault_delay.count() == 0) {
               flush_repairs(L);
@@ -849,6 +941,28 @@ namespace vr::multilink {
                 continue;
               }
             }
+            // §VR-PACE：這一幀的封包照固定間隔送。排程是絕對時刻，而且以「這一幀自己入列的時刻」為起點（第 k 個封包
+            // 排在入列＋k 個間隔）：睡過頭、或上一幀還沒送完而晚開始時，已經到時刻的封包立刻連續送出追上進度，整幀仍在
+            // 入列後的預定時間內送完——延遲不會一幀一幀往後累積（起點若接在上一幀排到的時刻之後，連續幾幀擠在一起到時
+            // 會越排越晚，最後排到期限外被丟掉）。補包不排（上面的 flush_repairs 照樣插隊）。
+            if (pace_gap_ns > 0) {
+              const auto now = clock::now();
+              if (!L.pace_have_frame || L.pace_frame != b.frame) {
+                L.pace_have_frame = true;
+                L.pace_frame = b.frame;
+                L.pace_next = b.enq + fault_delay;
+                L.pace_gap_us.store(pace_gap_ns / 1000, std::memory_order_relaxed);
+              }
+              if (L.pace_next > deadline) {
+                break;  // 保險：排程起點是入列時刻、最多攤開 95% 的幀週期，正常不會排到期限（兩個幀週期）之後
+              }
+              if (L.pace_next > now) {
+                precise_sleep(L, L.pace_next - now);
+              } else if (now - L.pace_next > 1ms) {
+                L.pace_late.fetch_add(1, std::memory_order_relaxed);
+              }
+              L.pace_next += std::chrono::nanoseconds {pace_gap_ns};
+            }
             // 故障注入：模擬慢鏈路。每個封包依速率上限排隊，排到期限之後的就送不出去（等同 would_block 到期限）
             if (!fault_pace(L, b.pkt_size, deadline)) {
               break;
@@ -859,6 +973,13 @@ namespace vr::multilink {
             }
             sent += r > 0 ? 1 : 0;
           }
+#ifdef _WIN32
+          if (uso_failed && sent > 0) {
+            L.uso_off = true;
+            BOOST_LOG(warning) << "[VIPLE-VR-LINK] link " << (int) L.id << " batched (USO) send failed (err=" << uso_err
+                               << ") while per-packet sends work - per-packet from now on";
+          }
+#endif
           if (sent < b.count) {
             L.drop_block.fetch_add(b.count - sent, std::memory_order_relaxed);
           }
@@ -870,6 +991,18 @@ namespace vr::multilink {
         const auto spent_us = (uint32_t) std::min<int64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count(), UINT32_MAX);
         if (spent_us > L.block_max_us.load(std::memory_order_relaxed)) {
           L.block_max_us.store(spent_us, std::memory_order_relaxed);
+        }
+        // §PERF-1113（審查 05 第 8 項）：幀尾那一批整批送完（最後一次送出呼叫已返回）→ 記下時刻，[VIPLE-VR-LAT10] 的送出段
+        // 用它取代「入列完成」。沒送完（過期、送不動、故障注入丟掉）的不記，查的人會退回入列時刻
+        if (b.frame_end && b.has_frame && !faulted && sent == b.count) {
+          auto &slot = L.sent_ring[b.frame % kSentRing];
+          slot.frame.store(0xFFFFFFFFu, std::memory_order_release);
+          slot.us.store(std::chrono::duration_cast<std::chrono::microseconds>(end.time_since_epoch()).count(), std::memory_order_relaxed);
+          slot.paced.store(pace_gap_ns > 0, std::memory_order_relaxed);
+          slot.frame.store(b.frame, std::memory_order_release);
+          if (pace_gap_ns > 0) {
+            L.pace_frames.fetch_add(1, std::memory_order_relaxed);  // 這 10 秒實際攤開送完的幀數（統計行）
+          }
         }
 
         // 飽和偵測：故障注入丟掉的不算（那是模擬鏈路空檔，不是送不動）
@@ -1265,7 +1398,38 @@ namespace vr::multilink {
     return sent;
   }
 
-  void hub_t::send_video(const uint8_t *pkts, size_t pkt_size, size_t count, const video_meta_t *meta) {
+  int64_t hub_t::frame_sent_us(uint32_t frame, bool *paced) const {
+    if (paced) {
+      *paced = false;
+    }
+    if (!impl_) {
+      return 0;
+    }
+    const auto &m = *impl_;
+    const int n = m.count.load(std::memory_order_acquire);
+    int64_t best = 0;
+    for (int i = 0; i < n; ++i) {
+      const auto &slot = m.links[i]->sent_ring[frame % kSentRing];
+      if (slot.frame.load(std::memory_order_acquire) != frame) {
+        continue;
+      }
+      const int64_t us = slot.us.load(std::memory_order_relaxed);
+      // 讀時間的途中被下一圈的幀蓋掉：這一筆不算
+      const bool slot_paced = slot.paced.load(std::memory_order_relaxed);
+      if (slot.frame.load(std::memory_order_acquire) != frame || us <= 0) {
+        continue;
+      }
+      if (best == 0 || us < best) {
+        best = us;
+        if (paced) {
+          *paced = slot_paced;
+        }
+      }
+    }
+    return best;
+  }
+
+  void hub_t::send_video(const uint8_t *pkts, size_t pkt_size, size_t count, const video_meta_t *meta, bool frame_end, uint32_t frame_pkts) {
     auto &m = *impl_;
     if (m.stop.load(std::memory_order_relaxed) || count == 0 || pkt_size == 0) {
       return;
@@ -1284,6 +1448,19 @@ namespace vr::multilink {
     const bool primary_alive = m.primary_usable(now_ns);
 
     const size_t bytes = pkt_size * count;
+
+    // §VR-PACE：這一幀的封包之間要隔多久。同一幀的每一批算出來的值相同（frame_pkts 是整幀的估計值），每條連線各自照它排
+    uint32_t pace_gap_ns = 0;
+    if (meta && frame_pkts >= 3) {
+      const int pct = m.pace_pct.load(std::memory_order_relaxed);
+      if (pct > 0) {
+        const int64_t period_ns = m.max_age_us.load(std::memory_order_relaxed) * 1000 / 2;
+        const int64_t gap = std::min<int64_t>(period_ns * pct / 100 / frame_pkts, kPaceGapMaxNs);
+        if (gap >= kPaceGapMinNs) {
+          pace_gap_ns = (uint32_t) gap;
+        }
+      }
+    }
 
     // 影像位元率（automatic 的恢復門檻用）
     m.rate_bytes += bytes;
@@ -1379,6 +1556,10 @@ namespace vr::multilink {
       b.pkt_size = (uint32_t) pkt_size;
       b.count = (uint32_t) count;
       b.enq = now;
+      b.frame = meta ? meta->frame : 0;
+      b.has_frame = meta != nullptr;
+      b.frame_end = frame_end && meta != nullptr;
+      b.pace_gap_ns = pace_gap_ns;
       {
         std::lock_guard lk {L.mtx};
         L.q_bytes += b.data.size();
@@ -1639,6 +1820,20 @@ namespace vr::multilink {
     }
   }
 
+  int64_t hub_t::video_max_age_us() const {
+    return impl_ ? impl_->max_age_us.load(std::memory_order_relaxed) : 0;
+  }
+
+  void hub_t::set_pace_spread_pct(int pct) {
+    if (impl_) {
+      impl_->pace_pct.store(std::clamp(pct, 0, 95), std::memory_order_relaxed);
+    }
+  }
+
+  int hub_t::pace_spread_pct() const {
+    return impl_ ? impl_->pace_pct.load(std::memory_order_relaxed) : 0;
+  }
+
   bool hub_t::any_alive() const {
     if (!impl_) {
       return false;
@@ -1728,7 +1923,7 @@ namespace vr::multilink {
       const int64_t muted_ns = L.muted_until_ns.load() - now_ns;
       s += std::format(
         " | L{} {}{}{}{} tx={} ({:.1f} Mbps) dropAge={} dropBlock={} dropFull={} paused={} standby={} fault={} err={} sendMaxMs={:.1f} audio={}/{} mutes={}"
-        " probes={} starts={} forced={} deliv={} rx ping={} trk={} dup={} bad={} trkFirst={} ctl={} s2c={}/{} client rx={} used={} rttMs={} gapMaxMs={} burstMbps={} epoch={} rebinds={}",
+        " probes={} starts={} forced={} deliv={} rx ping={} trk={} dup={} bad={} trkFirst={} ctl={} s2c={}/{} client rx={} used={} rttMs={} gapMaxMs={} burstMbps={} epoch={} rebinds={} paceGapUs={} paceLate={} paceFrames={}",
         (int) L.id,
         m.alive(L, now_ns) ? "up" : "down",
         L.probing.load() ? "(probing)" : "",
@@ -1765,7 +1960,10 @@ namespace vr::multilink {
         L.cl_gap_max_ms.exchange(0),
         L.cl_burst_mbps.load(),
         (unsigned) L.epoch,
-        L.rebinds
+        L.rebinds,
+        L.pace_gap_us.exchange(0),
+        L.pace_late.exchange(0),
+        L.pace_frames.exchange(0)
       );
       L.prev = c;
     }

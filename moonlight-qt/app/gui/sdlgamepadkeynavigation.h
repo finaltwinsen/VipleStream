@@ -33,6 +33,12 @@ public:
     // §VR-SHELL-SCROLL：頭盔 VR 介面剛用 XR 搖桿捲了頁面（GUI 執行緒）。之後 300 ms 內這裡不發 scrollRequested
     static void noteExternalScroll();
 
+    // §PERF-1113 A31：這個行程沒有可以用手把導覽的視窗（頭盔 VR 介面用 XR 控制器、無頭的串流子行程根本沒有視窗）。
+    // 這兩種情況沒有人呼叫 notifyWindowFocus(true)，輪詢永遠不會開始；enable() 卻照樣把手把子系統初始化、
+    // 解析一次對應表，之後一直開著。設了之後 enable() 不做事、getConnectedGamepads() 回 0。
+    // static：要在 QML 建立這個單例之前就能設（GUI 執行緒）。QML 那一側照常呼叫 enable()／disable()，不必知道
+    static void setSuppressed(bool suppressed);
+
 signals:
     // §UI-SCROLL：手把要求捲動目前這一頁。pages＝幾個可見高度，正值往下（看下面的內容）。
     // 只在 Tab 導覽模式（設定頁、沒有下拉選單開著）或捲動模式（影片選片頁）發出，由那一頁自己捲。

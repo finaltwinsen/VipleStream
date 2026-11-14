@@ -6,6 +6,7 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -900,6 +901,84 @@ namespace nvhttp {
     return alive != std::end(map_id_sess);
   }
 
+  namespace {
+    // §PERF-1113-R2（A12）：每個請求都印的診斷行改成「內容變了才印」，另外每 10 分鐘補印一次——client 停在主機清單時
+    // /serverinfo 每 1.5～3 秒一次，這些行佔 host log 的一到兩成；補印是因為讀 host 顯示狀態的工具只掃 log 的最後幾千行。
+    // key 固定不變時就是「第一次＋每 10 分鐘一次」的取樣。HTTP 與 HTTPS 是兩條執行緒，而且 serverinfo 是樣板
+    // （函式內的 static 會各有一份），所以狀態放在函式外並加鎖。
+    class changed_log_gate_t {
+    public:
+      bool should_log(std::string_view key) {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lk {mtx_};
+        if (valid_ && key == last_ && now - at_ < std::chrono::minutes(10)) {
+          return false;
+        }
+        valid_ = true;
+        last_.assign(key);
+        at_ = now;
+        return true;
+      }
+
+      /// 只記下目前的狀態、不印：之後 key 再變回別的值時才認得出「變了」
+      void note(std::string_view key) {
+        (void) should_log(key);
+      }
+
+    private:
+      std::mutex mtx_;
+      bool valid_ = false;
+      std::string last_;
+      std::chrono::steady_clock::time_point at_ {};
+    };
+
+    changed_log_gate_t serverinfo_diag_gate;  // [VIPLE-DIAG] ServerCodecModeSupport
+    changed_log_gate_t serverinfo_res_gate;  // [VIPLE-RES] /serverinfo advertising ...
+    [[maybe_unused]] changed_log_gate_t serverinfo_dd_gate;  // [VIPLE-RES] dd 目標裝置找不到／列舉不到模式（只有 Windows 用）
+    // 每個 key 各自「第一次＋每 10 分鐘一次」的取樣：兩台以上 client 同時連著時每一台都留得到一組
+    // （§N.5.bug 要看的是特定那一台）。只記上一個 key 的話兩台交替進來會每次都印，所以記一張小表；
+    // 滿了換掉最久沒印的那一格。
+    class keyed_sample_gate_t {
+    public:
+      bool should_log(std::string_view key) {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lk {mtx_};
+        slot_t *victim = &slots_[0];
+        for (auto &slot : slots_) {
+          if (slot.used && slot.key == key) {
+            if (now - slot.at < std::chrono::minutes(10)) {
+              return false;
+            }
+            slot.at = now;
+            return true;
+          }
+          // 空格優先，其次是最久沒印的
+          if (victim->used && (!slot.used || slot.at < victim->at)) {
+            victim = &slot;
+          }
+        }
+        victim->used = true;
+        victim->key.assign(key);
+        victim->at = now;
+        return true;
+      }
+
+    private:
+      struct slot_t {
+        bool used = false;
+        std::string key;
+        std::chrono::steady_clock::time_point at {};
+      };
+
+      std::mutex mtx_;
+      std::array<slot_t, 32> slots_;
+    };
+
+    changed_log_gate_t verify_sample_gate;  // [VIPLE-VERIFY] enter（＋同一條連線的 OK）的取樣
+    keyed_sample_gate_t verify_ok_sample_gate;  // [VIPLE-VERIFY] OK：每台 client（uuid）各自取樣
+    keyed_sample_gate_t xfer_poll_sample_gate;  // [VIPLE-XFER] poll ENTER／EXIT：每個來源位址各自取樣
+  }  // namespace
+
 #ifdef _WIN32
   namespace {
     // §H.4-SWITCH：dd 會在串流前切換的目標裝置，其「可切換最高模式」。
@@ -944,8 +1023,11 @@ namespace nvhttp {
         }
       }
       if (display_name.empty()) {
-        BOOST_LOG(info) << "[VIPLE-RES] dd target '" << output_name
-                        << "' not active/enumerable; falling back to primary current mode";
+        // §PERF-1113-R2（A12）：這條路徑沒有快取，目標裝置沒啟用時每次 /serverinfo 都會走到
+        if (serverinfo_dd_gate.should_log("inactive/" + output_name)) {
+          BOOST_LOG(info) << "[VIPLE-RES] dd target '" << output_name
+                          << "' not active/enumerable; falling back to primary current mode";
+        }
         cached.reset();
         return std::nullopt;
       }
@@ -979,12 +1061,15 @@ namespace nvhttp {
         dm.dmSize = sizeof(dm);
       }
       if (best_area <= 0 || best.refresh_hz <= 1) {
-        BOOST_LOG(warning) << "[VIPLE-RES] EnumDisplaySettingsW(" << display_name
-                           << ") returned no usable modes; falling back to primary current mode";
+        if (serverinfo_dd_gate.should_log("nomodes/" + display_name)) {  // §PERF-1113-R2（A12）：同上
+          BOOST_LOG(warning) << "[VIPLE-RES] EnumDisplaySettingsW(" << display_name
+                             << ") returned no usable modes; falling back to primary current mode";
+        }
         cached.reset();
         return std::nullopt;
       }
 
+      serverinfo_dd_gate.note("ok");  // 之後又找不到時要再印
       cached = best;
       cached_key = output_name;
       cached_at = now;
@@ -1123,11 +1208,16 @@ namespace nvhttp {
 
     // Only include the MAC address for requests sent from paired clients over HTTPS.
     // For HTTP requests, use a placeholder MAC address that Moonlight knows to ignore.
+    // §PERF-1113-R2（A2）：網卡在這裡列舉一次，MAC、下面的 NetworkInterface 清單、VPN／區網位址清單共用。
+    // 原本一次 HTTPS 請求列舉三遍（各約 15 ms），而 HTTPS 伺服器只有一條處理執行緒。
+    std::string mac_address = "00:00:00:00:00:00";
+    std::vector<platf::advertised_interface> net_ifaces;
     if constexpr (std::is_same_v<SunshineHTTPS, T>) {
-      tree.put("root.mac", platf::get_mac_address(net::addr_to_normalized_string(local_endpoint.address())));
+      net_ifaces = platf::enum_net_interfaces(net::addr_to_normalized_string(local_endpoint.address()), mac_address);
     } else {
-      tree.put("root.mac", "00:00:00:00:00:00");
+      net_ifaces = platf::enum_net_interfaces();
     }
+    tree.put("root.mac", mac_address);
 
     // Moonlight clients track LAN IPv6 addresses separately from LocalIP which is expected to
     // always be an IPv4 address. If we return that same IPv6 address here, it will clobber the
@@ -1176,10 +1266,13 @@ namespace nvhttp {
       codec_mode_flags |= SCM_PYROWAVE_MAIN8 | SCM_PYROWAVE_MAIN10 | SCM_PYROWAVE_444_8 | SCM_PYROWAVE_444_10;
     }
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
-    BOOST_LOG(info) << "[VIPLE-DIAG] ServerCodecModeSupport=0x" << std::hex << codec_mode_flags << std::dec
-                    << " (hevc_mode=" << video::active_hevc_mode
-                    << " av1_mode=" << video::active_av1_mode
-                    << " MaxLumaHEVC=" << (video::active_hevc_mode > 1 ? "1869449984" : "0") << ")";
+    // §PERF-1113-R2（A12）：值變了才印（另外每 10 分鐘補印一次）
+    if (serverinfo_diag_gate.should_log(std::format("{:x}/{}/{}", codec_mode_flags, (int) video::active_hevc_mode, (int) video::active_av1_mode))) {
+      BOOST_LOG(info) << "[VIPLE-DIAG] ServerCodecModeSupport=0x" << std::hex << codec_mode_flags << std::dec
+                      << " (hevc_mode=" << video::active_hevc_mode
+                      << " av1_mode=" << video::active_av1_mode
+                      << " MaxLumaHEVC=" << (video::active_hevc_mode > 1 ? "1869449984" : "0") << ")";
+    }
 
     // VipleStream: expose STUN-discovered public endpoint for NAT traversal
     {
@@ -1233,14 +1326,20 @@ namespace nvhttp {
           tree.add_child("root.DisplayMode", mode);
           tree.put("root.DisplayModeSwitchable", 1);
           advertised_switchable = true;
-          BOOST_LOG(info) << "[VIPLE-RES] /serverinfo advertising switchable max of "
-                          << best->display_name << ": " << best->width << "x" << best->height
-                          << " @ " << best->refresh_hz << "Hz (" << best->mode_count << " modes"
-                          << (best->from_cache ? ", cached" : "") << ")";
+          // §PERF-1113-R2（A12）：內容變了才印。比較的內容不含 from_cache——它每 10 秒就翻一次，不算改變
+          if (serverinfo_res_gate.should_log(std::format("switchable/{}/{}x{}@{}/{}", best->display_name, best->width, best->height, best->refresh_hz, best->mode_count))) {
+            BOOST_LOG(info) << "[VIPLE-RES] /serverinfo advertising switchable max of "
+                            << best->display_name << ": " << best->width << "x" << best->height
+                            << " @ " << best->refresh_hz << "Hz (" << best->mode_count << " modes"
+                            << (best->from_cache ? ", cached" : "") << ")";
+          }
         }
       }
 #endif
       if (!advertised_switchable) {
+        // §PERF-1113-R2（A12）：先收起來，整組內容和上次不同才印
+        std::string res_key = "primary";
+        std::vector<std::string> res_modes;
         const auto enumerated = display_device::enumerate_devices();
         for (const auto &device : enumerated) {
           if (!device.m_info || !device.m_info->m_primary) {
@@ -1263,8 +1362,14 @@ namespace nvhttp {
           mode.put("Height", res.m_height);
           mode.put("RefreshRate", refresh_hz);
           tree.add_child("root.DisplayMode", mode);
-          BOOST_LOG(info) << "[VIPLE-RES] /serverinfo advertising primary display current mode: "
-                          << res.m_width << "x" << res.m_height << " @ " << refresh_hz << "Hz";
+          res_modes.push_back(std::format("{}x{} @ {}Hz", res.m_width, res.m_height, refresh_hz));
+          res_key += '/';
+          res_key += res_modes.back();
+        }
+        if (serverinfo_res_gate.should_log(res_key)) {
+          for (const auto &mode_text : res_modes) {
+            BOOST_LOG(info) << "[VIPLE-RES] /serverinfo advertising primary display current mode: " << mode_text;
+          }
         }
       }
     }
@@ -1275,7 +1380,6 @@ namespace nvhttp {
     // XML parser 會忽略未知元素，不影響相容性。
     // §VR-MULTILINK：多連線的 client 也靠這份清單找「和它每張網卡同子網路的 server 位址」
     if (config::stream.mpquic_enabled || config::vr.multilink != config::vr_t::multilink_e::disabled) {
-      auto net_ifaces = platf::enum_net_interfaces();
       for (const auto &iface : net_ifaces) {
         pt::ptree node;
         node.put("Address", iface.address);
@@ -1291,7 +1395,7 @@ namespace nvhttp {
     // Tailscale 上，家用 Wi-Fi 一暫停就跟著斷 18 秒）。client 看到這份清單、區網連得通就改走區網
     {
       std::vector<std::string> lan_wired, lan_wifi;
-      for (const auto &iface : platf::enum_net_interfaces()) {
+      for (const auto &iface : net_ifaces) {
         if (iface.type == "vpn") {
           tree.add("root.VipleStreamVpnAddress", iface.address);
           continue;
@@ -1864,6 +1968,8 @@ namespace nvhttp {
     auto launch_session = make_launch_session(host_audio, args);
     launch_session->client_cert_uuid = caller_uuid;  // §M01-D：A1／A3 的身分依據
 
+    // §PREWARM：這一次 /launch 自己要求的預先探測（0＝沒有）；下面交給 orchestrator::start()，PRECHECK 只認它
+    uint64_t vr_prewarm_token = 0;
     if (rtsp_stream::session_count() == 0) {
       if (!vr_params) {
         // The display should be restored in case something fails as there are no other sessions.
@@ -1885,6 +1991,11 @@ namespace nvhttp {
       // or any number of other factors).
       // M1b S1-11（§C.6）：pcvr 以 VR 形狀探測（display_vr_t），守衛保證任何失敗出口都還原桌面探測狀態
       if (vr_app) {
+        // §PREWARM：編排器 PRECHECK 要用的環境探測先在它自己的執行緒上跑，和下面的編碼器探測並行（這裡只設旗標）。
+        // 擁有權與 VR 獨佔的檢查都過了才走到這裡。網路測試不啟動編排器，不必探。
+        if (const auto a = find_app(appid); !(a && a->vr_bench)) {
+          vr_prewarm_token = ::vr::orchestrator::prewarm();
+        }
         vr_scope.emplace();
         const auto shape = vr_shape_of(*vr_params);
         if (video::probe_encoders(1, &shape)) {
@@ -1946,7 +2057,7 @@ namespace nvhttp {
     if (vr_app && launch_session->vr && launch_session->vr->bench) {
       vr_scope->handoff_to_session();  // §VR-NETBENCH：不啟動編排器
     } else if (vr_app) {
-      if (!::vr::orchestrator::start(*launch_session->vr, *vr_app, vr_params->force)) {
+      if (!::vr::orchestrator::start(*launch_session->vr, *vr_app, vr_params->force, vr_prewarm_token)) {
         proc::proc.terminate();
         put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, std::format("SteamVR orchestration busy (state={})", ::vr::orchestrator::state_name(::vr::orchestrator::state().state)));
         return;
@@ -3185,6 +3296,18 @@ namespace nvhttp {
     std::string xfer_caller(req_https_t request) {
       return caller_uuid_for(request);
     }
+
+    // poll 的 log 取樣用的 key：來源位址（ENTER 那一行在還不知道是哪台 client 時就要印，拿不到 uuid）。
+    // 拿不到位址就全部歸成同一組；不可以往外丟例外（這一行在 handler 的 try 之外）。
+    std::string xfer_poll_sample_key(const req_https_t &request) {
+      try {
+        if (request) {
+          return net::addr_to_normalized_string(request->remote_endpoint().address());
+        }
+      } catch (...) {
+      }
+      return {};
+    }
   }  // namespace
 
   void xfer_poll(resp_https_t response, req_https_t request) {
@@ -3195,10 +3318,14 @@ namespace nvhttp {
     // (EXIT fire?).  Spam ~2s 一次但 retest window 短 (1-2 min) 可接受，找完
     // root cause 後升回 debug 級.
     void *ssl_ptr = request ? (void *)request->native_handle() : nullptr;
-    BOOST_LOG(info) << "[VIPLE-XFER] poll ENTER ssl="sv << ssl_ptr;
+    // §PERF-1113-R2（A12）：照上面說的降回 debug——每次輪詢兩行，串流中每台 client 每小時約 0.6 MB。
+    // 每個來源位址第一次與之後每 10 分鐘留一組 info（ENTER＋EXIT），「handler 有進來、有寫完」的證據還在；
+    // 要逐次看就把 min_log_level 調成 debug。401、200_cmd、EXCEPTION 照舊。
+    const bool poll_sampled = xfer_poll_sample_gate.should_log(xfer_poll_sample_key(request));
+    BOOST_LOG(poll_sampled ? info : debug) << "[VIPLE-XFER] poll ENTER ssl="sv << ssl_ptr;
     try {
       if (!xfer_gate_stream(response)) {
-        BOOST_LOG(info) << "[VIPLE-XFER] poll EXIT gate_blocked ssl="sv << ssl_ptr;
+        BOOST_LOG(poll_sampled ? info : debug) << "[VIPLE-XFER] poll EXIT gate_blocked ssl="sv << ssl_ptr;
         return;
       }
       auto uuid = xfer_caller(request);
@@ -3214,7 +3341,7 @@ namespace nvhttp {
       headers.emplace("Content-Type", "application/json");
       if (!cmd) {
         response->write(SimpleWeb::StatusCode::success_no_content, std::string {}, headers);
-        BOOST_LOG(info) << "[VIPLE-XFER] poll EXIT 204_no_cmd ssl="sv << ssl_ptr;
+        BOOST_LOG(poll_sampled ? info : debug) << "[VIPLE-XFER] poll EXIT 204_no_cmd ssl="sv << ssl_ptr;
         return;
       }
       const char *type_str = "unknown";
@@ -3580,7 +3707,12 @@ namespace nvhttp {
       //   (B) verify_callback fired + verified=1 → handler-level issue
       //       (SSL_get_ex_data NULL / set_caller_uuid_on_ssl race)
       //   (C) verify_callback fired + verified=0 → reject path triggered
-      BOOST_LOG(info) << "[VIPLE-VERIFY] enter ssl="sv << (void *)ssl;
+      // §PERF-1113-R2（A12）：每條 TLS 連線（/serverinfo、輪詢、封面都是新連線）兩行 info 降成 debug；第一次與之後
+      // 每 10 分鐘留一組 info 當「握手驗證還在運作」的證據（§N.5.bug 要逐條看時把 min_log_level 調成 debug）。
+      // enter 與 OK 要一起降——只降一邊還是留一半。enter 這時還不知道是哪台 client，只能全域取樣；
+      // OK 另外每台 client 各留一行（見下面）。各種 DENY 照舊。
+      const bool verify_sampled = verify_sample_gate.should_log("verify"sv);
+      BOOST_LOG(verify_sampled ? info : debug) << "[VIPLE-VERIFY] enter ssl="sv << (void *)ssl;
 
       crypto::x509_t x509 {
 #if OPENSSL_VERSION_MAJOR >= 3
@@ -3642,8 +3774,11 @@ namespace nvhttp {
 
       verified = 1;
 
-      BOOST_LOG(info) << "[VIPLE-VERIFY] OK ssl="sv << (void *)ssl
-                      << " uuid="sv << (matched_uuid.empty() ? "<unnamed>"sv : std::string_view {matched_uuid});
+      // OK 另外照 uuid 各自取樣：每台 client 每 10 分鐘至少留一行（有 OK 就代表那條連線的 enter 也發生過）。
+      // 先問再合併——短路掉的話，全域取樣到的那一台下一條連線又會被當成第一次。
+      const bool ok_sampled = verify_ok_sample_gate.should_log(matched_uuid);
+      BOOST_LOG((verify_sampled || ok_sampled) ? info : debug) << "[VIPLE-VERIFY] OK ssl="sv << (void *)ssl
+                                                               << " uuid="sv << (matched_uuid.empty() ? "<unnamed>"sv : std::string_view {matched_uuid});
       return verified;
     };
 

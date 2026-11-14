@@ -299,10 +299,7 @@ namespace platf {
       result.push_back({std::string(addrStr), ifname, type});
     }
 
-    BOOST_LOG(info) << "[VIPLE-MPADV] Enumerated " << result.size() << " network interface(s) for advertisement";
-    for (const auto &iface : result) {
-      BOOST_LOG(info) << "[VIPLE-MPADV]   " << iface.name << " (" << iface.type << "): " << iface.address;
-    }
+    log_advertised_interfaces_if_changed(result);  // §PERF-1113-R2（A2）：清單變了才印
 
     return result;
   }
@@ -355,7 +352,10 @@ namespace platf {
     }
 #endif
 
-    BOOST_LOG(warning) << "Unable to find MAC address for "sv << address;
+    // §PERF-1113-R2（A2）：每個位址只警告一次（VPN 介面沒有實體位址，原本每次 /serverinfo 都印）
+    if (mac_miss_first_time(address)) {
+      BOOST_LOG(warning) << "Unable to find MAC address for "sv << address << " (logged once per address)"sv;
+    }
     return "00:00:00:00:00:00"s;
   }
 
@@ -807,6 +807,10 @@ namespace platf {
     }
   }
 
+  // §PERF-1113-R2（A13）：送出失敗 log 的彙總狀態。每條送出執行緒各一份，不共用——
+  // 影像與音訊的錯誤碼混在一起就看不出是哪一條在失敗
+  static thread_local send_fail_log_t send_fail_log;
+
   bool send(send_info_t &send_info) {
     auto sockfd = (int) send_info.native_socket;
     struct msghdr msg = {};
@@ -921,8 +925,24 @@ namespace platf {
     }
 
     if (bytes_sent < 0) {
-      BOOST_LOG(warning) << "sendmsg() failed: "sv << errno;
+      const int err = errno;  // 失敗後第一件事就存：下面取時間、動 thread_local 都可能改掉它
+      // §PERF-1113-R2（A13）：路徑斷掉時每一包都會走到這裡，改成每個錯誤碼每秒最多一行
+      std::uint32_t repeated = 0;
+      switch (send_fail_log.on_fail(err, repeated)) {
+        case send_fail_log_t::action_e::first:
+          BOOST_LOG(warning) << "sendmsg() failed: "sv << err;
+          break;
+        case send_fail_log_t::action_e::repeated:
+          BOOST_LOG(warning) << "sendmsg() failed: "sv << err << " (repeated "sv << repeated << " times since the last line)"sv;
+          break;
+        case send_fail_log_t::action_e::none:
+          break;
+      }
       return false;
+    }
+
+    if (std::uint32_t unlogged = 0; send_fail_log.on_ok(unlogged)) {
+      BOOST_LOG(info) << "sendmsg() is working again on this thread ("sv << unlogged << " more failures since the last line)"sv;
     }
 
     return true;

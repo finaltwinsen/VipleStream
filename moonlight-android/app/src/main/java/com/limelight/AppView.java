@@ -918,6 +918,8 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
             @Override
             public void run() {
                 boolean updated = false;
+                // 這一輪新出現的 app；它們的捷徑在迴圈結束後一次查、一次啟用
+                ArrayList<NvApp> addedApps = new ArrayList<>();
 
                 // First handle app updates and additions
                 for (NvApp app : appList) {
@@ -971,11 +973,15 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                         // We could have a leftover shortcut from last time this PC was paired
                         // or if this app was removed then added again. Enable those shortcuts
                         // again if present.
-                        shortcutHelper.enableAppShortcut(computer, app);
+                        addedApps.add(app);
 
                         updated = true;
                     }
                 }
+
+                // AppView 每次建立，整份清單（Steam 匯入時上百款）都算新 app；
+                // 逐個啟用是每個 app 3 次跨行程呼叫，批次只要 3 次
+                shortcutHelper.enableAppShortcuts(computer, addedApps);
 
                 // Next handle app removals
                 int i = 0;

@@ -6,6 +6,9 @@ import java.io.StringReader;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.X509Certificate;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
@@ -202,8 +205,21 @@ public class ComputerManagerService extends Service {
             // due to detecting the PC via mDNS) without the saved external address. If we
             // write to the DB without doing this first, we can overwrite our existing data.
             if (existingComputer != null) {
+                // existingComputer 是剛從資料庫讀出來的，這裡先記下「資料庫裡現在的值」。
+                // 位址要抄成值再比：update() 會原地改 remoteAddress.port。
+                String persistedBefore = persistedFieldsOf(existingComputer);
+                X509Certificate certBefore = existingComputer.serverCert;
+
                 existingComputer.update(details);
-                dbManager.updateComputer(existingComputer);
+
+                // 輪詢每 1.5 秒一輪、多半什麼都沒變；要存的欄位（名稱、位址、MAC、憑證）
+                // 有變才寫，否則每輪每台主機都是一次內容相同的 INSERT OR REPLACE。
+                if (!persistedBefore.equals(persistedFieldsOf(existingComputer)) ||
+                        !sameCert(certBefore, existingComputer.serverCert)) {
+                    dbManager.updateComputer(existingComputer);
+                    // 靜置時不該一直出現；一直出現表示有欄位每輪在變
+                    LimeLog.info("[VIPLE-PCLIST] saved " + existingComputer.name + " (persisted fields changed)");
+                }
             }
             else {
                 try {
@@ -231,6 +247,28 @@ public class ComputerManagerService extends Service {
 
         releaseLocalDatabaseReference();
         return true;
+    }
+
+    // ComputerDatabaseManager.updateComputer 會寫的欄位（憑證另外比）串成一個字串，
+    // 用來判斷這一輪輪詢有沒有東西要存。AddressTuple 的字串含位址與埠。
+    private static String persistedFieldsOf(ComputerDetails d) {
+        return d.name + '\0' + d.localAddress + '\0' + d.remoteAddress + '\0' +
+                d.manualAddress + '\0' + d.ipv6Address + '\0' + d.macAddress;
+    }
+
+    // 釘選的憑證有沒有變（比 DER 內容，不比物件）。編不出 DER 就當成有變，照舊寫入。
+    private static boolean sameCert(X509Certificate a, X509Certificate b) {
+        if (a == b) {
+            return true;
+        }
+        if (a == null || b == null) {
+            return false;
+        }
+        try {
+            return Arrays.equals(a.getEncoded(), b.getEncoded());
+        } catch (CertificateEncodingException e) {
+            return false;
+        }
     }
 
     private Thread createPollingThread(final PollingTuple tuple) {

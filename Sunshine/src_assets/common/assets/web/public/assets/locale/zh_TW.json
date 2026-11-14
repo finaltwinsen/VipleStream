@@ -263,7 +263,7 @@
     "max_bitrate": "最大位元率",
     "max_bitrate_desc": "VipleStream-Server 會以最大位元率（單位為 Kbps）來編碼串流。如果設為0，則會使用VipleStream所要求的位元率。",
     "minimum_fps_target": "最低 FPS 目標",
-    "minimum_fps_target_desc": "串流可達到的最低有效 FPS。0 的值會被視為串流 FPS 的一半左右。如果您串流 24 或 30fps 的內容，建議設定為 20。",
+    "minimum_fps_target_desc": "串流可達到的最低有效 FPS。0 表示使用用戶端要求的 FPS（完整幀率，不是一半），所以畫面靜止時仍以接近完整幀率送出重複的畫面（VR 串流是 10 FPS）。如果您串流 24 或 30fps 的內容，建議設定為 20。",
     "min_log_level": "日誌層級",
     "min_log_level_0": "繁體",
     "min_log_level_1": "除錯",

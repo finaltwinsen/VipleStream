@@ -5,13 +5,18 @@
 #pragma once
 
 // standard includes
+#include <array>
 #include <bitset>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
+#include <string_view>
+#include <vector>
 
 // lib includes
 #include <boost/core/noncopyable.hpp>
@@ -647,6 +652,75 @@ namespace platf {
   };
   std::vector<advertised_interface> enum_net_interfaces();
 
+  /**
+   * @brief §PERF-1113-R2（A2）：一次列舉同時拿到廣告清單與 `mac_for` 那個本機位址所在網卡的 MAC（/serverinfo 用，
+   *        原本一次請求列舉三遍）。MAC 從沒過濾的列舉找（全部網卡、含 IPv6 與虛擬網卡）；不可以改成從回傳的清單找——
+   *        那份只有 IPv4、濾掉虛擬網卡，從 IPv6 或 vEthernet 連進來的 client 會拿到全 0，網路喚醒失效。
+   * @param mac_for 要查 MAC 的本機位址；空字串＝不查。
+   * @param mac_out 查到的 MAC；沒查或查不到是 "00:00:00:00:00:00"。
+   */
+#ifdef _WIN32
+  std::vector<advertised_interface> enum_net_interfaces(const std::string_view &mac_for, std::string &mac_out);
+#else
+  // getifaddrs 很便宜，不必併成一次
+  inline std::vector<advertised_interface> enum_net_interfaces(const std::string_view &mac_for, std::string &mac_out) {
+    mac_out = mac_for.empty() ? std::string {"00:00:00:00:00:00"} : get_mac_address(mac_for);
+    return enum_net_interfaces();
+  }
+#endif
+
+  /**
+   * @brief §PERF-1113-R2（A2）：廣告清單和上一次印的不同（或第一次）才印 [VIPLE-MPADV]。
+   *        VR 多連線中每秒列舉一次、/serverinfo 每次請求也列舉，每次都印佔了 host log 的 15～46%。
+   *        HTTP、HTTPS、vr_link_addrs 三條執行緒共用，所以有鎖；「上次印的清單」放在不釋放的堆積物件上——
+   *        vr_link_addrs 是 detach 的執行緒，行程結束、靜態物件解構之後還可能在跑。
+   */
+  inline void log_advertised_interfaces_if_changed(const std::vector<advertised_interface> &ifaces) {
+    struct state_t {
+      std::mutex mtx;
+      bool valid = false;
+      std::vector<advertised_interface> last;
+    };
+    static state_t *const state = new state_t;  // 故意不釋放
+
+    {
+      std::lock_guard lk {state->mtx};
+      bool same = state->valid && state->last.size() == ifaces.size();
+      for (std::size_t i = 0; same && i < ifaces.size(); ++i) {
+        same = state->last[i].address == ifaces[i].address && state->last[i].name == ifaces[i].name && state->last[i].type == ifaces[i].type;
+      }
+      if (same) {
+        return;
+      }
+      state->last = ifaces;
+      state->valid = true;
+    }
+
+    BOOST_LOG(info) << "[VIPLE-MPADV] Enumerated " << ifaces.size() << " network interface(s) for advertisement (logged only when the list changes)";
+    for (const auto &iface : ifaces) {
+      BOOST_LOG(info) << "[VIPLE-MPADV]   " << iface.name << " (" << iface.type << "): " << iface.address;
+    }
+  }
+
+  /**
+   * @brief §PERF-1113-R2（A2）：這個位址第一次查不到 MAC 才回 true。「Unable to find MAC address」每個位址只印一次：
+   *        Tailscale 之類沒有實體位址的介面，原本每次 HTTPS /serverinfo 都印一行。
+   */
+  inline bool mac_miss_first_time(const std::string_view &address) {
+    struct state_t {
+      std::mutex mtx;
+      std::set<std::string, std::less<>> seen;
+    };
+    static state_t *const state = new state_t;  // 故意不釋放（理由同上）
+
+    std::lock_guard lk {state->mtx};
+    if (state->seen.find(address) != state->seen.end() || state->seen.size() >= 64) {
+      return false;  // 本機位址數量有限，上限只是保險
+    }
+    state->seen.emplace(address);
+    return true;
+  }
+
   std::string from_sockaddr(const sockaddr *const);
   std::pair<std::uint16_t, std::string> from_sockaddr_ex(const sockaddr *const);
 
@@ -671,6 +745,19 @@ namespace platf {
    */
   bool needs_encoder_reenumeration();
 
+  /**
+   * @brief §VR-PROBE-CACHE：上次呼叫之後顯示卡／驅動的列舉有沒有變過（VR 編碼器探測的快取要不要作廢）。
+   *        自己留一個 DXGI factory：不可以借用 needs_encoder_reenumeration() 的那一個，問過它就會吃掉桌面探測要看的變動訊號。
+   * @return `true`＝變過、第一次呼叫、或無法判斷。只有 Windows 有 VR 探測，其他平台一律回 `true`（不快取）。
+   */
+#ifdef _WIN32
+  bool vr_probe_gpu_changed();
+#else
+  inline bool vr_probe_gpu_changed() {
+    return true;
+  }
+#endif
+
   boost::process::v1::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const boost::process::v1::environment &env, FILE *file, std::error_code &ec, boost::process::v1::group *group);
 
   enum class thread_priority_e : int {
@@ -692,6 +779,18 @@ namespace platf {
   // Allow OS-specific actions to be taken to prepare for streaming
   void streaming_will_start();
   void streaming_will_stop();
+
+  /**
+   * @brief §PERF-1113-R2（A4）：等 streaming_will_start() 丟到背景的工作做完（Windows 重套 NVIDIA 設定檔，約 0.4 秒；
+   *        原本同步做，擋在 RTSP ANNOUNCE 的回應前面）。streaming_will_stop() 自己會先等；行程結束前要還原
+   *        NVIDIA 全域設定的地方（main.cpp）也要先呼叫，nvprefs_instance 不是執行緒安全的。其他平台沒有背景工作。
+   */
+#ifdef _WIN32
+  void streaming_start_tasks_wait();
+#else
+  inline void streaming_start_tasks_wait() {
+  }
+#endif
 
   void restart();
 
@@ -771,6 +870,17 @@ namespace platf {
 
   bool send_batch(batched_send_info_t &send_info);
 
+#ifdef _WIN32
+  /**
+   * @brief §PERF-1113（審查 05 第 1 項）：把一塊連續、每包等長的緩衝用一次 WSASendMsg＋UDP_SEND_MSG_SIZE 送出（非阻塞 socket）。
+   *        和 send_batch 的差別：不帶來源位址（socket 已綁在指定的本機位址）、分得出 would_block 與其他錯誤。
+   *        只有 Windows 有（VR 多連線的送出執行緒用）；其他平台沒有這個函式，呼叫端要包在 `#ifdef _WIN32` 裡。
+   * @param err 失敗時的 WSA 錯誤碼（可為 nullptr）
+   * @return 1＝整批交給系統、0＝would_block（一個都沒送）、-1＝其他錯誤（一個都沒送）
+   */
+  int send_uso_nonblocking(std::uintptr_t native_socket, const boost::asio::ip::address &target_address, uint16_t target_port, const char *data, size_t packet_size, size_t packet_count, int *err);
+#endif
+
   struct send_info_t {
     const char *header;
     size_t header_size;
@@ -784,6 +894,101 @@ namespace platf {
   };
 
   bool send(send_info_t &send_info);
+
+  /**
+   * @brief §PERF-1113-R2（A13）：platf::send 失敗 warning 的彙總，每條送出執行緒各一份（thread_local）。
+   *        路徑斷掉時每一包都失敗、每包一行，實測每秒約 1.6 萬行。規則：某個錯誤碼第一次出現照原格式印，
+   *        之後同一個碼每秒最多一行（帶這段期間又失敗幾次），最後一次失敗過了一秒之後第一次送成功時印一行恢復。
+   *        各執行緒不共用：影像與音訊的錯誤碼不同，混在一起就看不出是哪一條在失敗。
+   *        這個類別只算、不印（Windows 與 Linux 的訊息前綴不同）。
+   */
+  class send_fail_log_t {
+  public:
+    enum class action_e {
+      none,  ///< 不印
+      first,  ///< 這個錯誤碼第一次出現（或隔了很久又出現）：照原格式印
+      repeated,  ///< 同一個錯誤碼的彙總行；repeated_out＝上一行之後又失敗的次數
+    };
+
+    /// 送出失敗時呼叫。錯誤碼要在失敗後立刻取出再傳進來（這裡會取時間）。
+    action_e on_fail(int err, std::uint32_t &repeated_out) {
+      const auto now = std::chrono::steady_clock::now();
+      if (active_ && now - last_fail_ >= std::chrono::seconds(5)) {
+        // 上一輪失敗之後這條執行緒沒有再送成功過（session 拆掉了），沒機會印恢復：當成新的一輪
+        slots_ = {};
+      }
+      active_ = true;
+      last_fail_ = now;
+
+      slot_t *slot = nullptr;
+      for (auto &s : slots_) {
+        if (s.used && s.err == err) {
+          slot = &s;
+          break;
+        }
+      }
+      if (!slot) {
+        // 新的錯誤碼：用空的那一格，沒有空的就換掉最久沒印的
+        slot = &slots_[0];
+        for (auto &s : slots_) {
+          if (!s.used) {
+            slot = &s;
+            break;
+          }
+          if (s.last_log < slot->last_log) {
+            slot = &s;
+          }
+        }
+        slot->used = true;
+        slot->err = err;
+        slot->repeated = 0;
+        slot->last_log = now;
+        return action_e::first;
+      }
+
+      ++slot->repeated;
+      if (now - slot->last_log < std::chrono::seconds(1)) {
+        return action_e::none;
+      }
+      repeated_out = slot->repeated;
+      slot->repeated = 0;
+      slot->last_log = now;
+      return action_e::repeated;
+    }
+
+    /// 送出成功時呼叫（每一包都會經過）：沒有進行中的失敗時只有一次比較。回 true＝該印恢復行，
+    /// unlogged_out＝還沒印出來的失敗次數。
+    bool on_ok(std::uint32_t &unlogged_out) {
+      if (!active_) {
+        return false;
+      }
+      if (std::chrono::steady_clock::now() - last_fail_ < std::chrono::seconds(1)) {
+        // 同一條執行緒上別的目的地還在失敗（多個 session 共用送出執行緒）：不要每包交替印失敗與恢復
+        return false;
+      }
+      unlogged_out = 0;
+      for (const auto &s : slots_) {
+        if (s.used) {
+          unlogged_out += s.repeated;
+        }
+      }
+      slots_ = {};
+      active_ = false;
+      return true;
+    }
+
+  private:
+    struct slot_t {
+      bool used = false;
+      int err = 0;
+      std::uint32_t repeated = 0;
+      std::chrono::steady_clock::time_point last_log {};
+    };
+
+    std::array<slot_t, 4> slots_ {};  // 同時在彙總的錯誤碼（同一條執行緒很少超過一兩種）
+    std::chrono::steady_clock::time_point last_fail_ {};
+    bool active_ = false;
+  };
 
   enum class qos_data_type_e : int {
     audio,  ///< Audio

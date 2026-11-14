@@ -48,6 +48,8 @@ constexpr int kBlankBeforeExitMs = 600;
 constexpr qreal kClickSlopPx = 40.0;
 // 介面重畫的最小間隔（最多約 30 張／秒）
 constexpr uint64_t kMinFrameNs = 33000000ull;
+// §PERF-1113：影片蓋住介面時兩張之間的間隔（見 scheduleRender）
+constexpr uint64_t kCoveredFrameNs = 1000000000ull;
 // 介面面板的距離與水平張角（影片模式結束後換回來）
 constexpr float kShellDistanceM = 1.5f;
 constexpr float kShellFovDeg = 62.0f;
@@ -233,6 +235,8 @@ void XrShell::shutdownXrForExit()
 XrShell::~XrShell()
 {
     prepareExit();
+    // §PERF-1113 A31：start() 設的旗標還回去。start() 失敗時 main() 會改載入平面視窗，那裡要用手把導覽
+    SdlGamepadKeyNavigation::setSuppressed(false);
     // Qt Quick 的東西要在 GL context 還在的時候拆（render control 要釋放場景圖的 GL 資源）。XR 最後才關（見 shutdownXrForExit）
     if (m_Gl != nullptr && m_Surface != nullptr) {
         m_Gl->makeCurrent(m_Surface);
@@ -261,6 +265,11 @@ XrShell::~XrShell()
 bool XrShell::start(QString* error)
 {
     m_StartMs = QDateTime::currentMSecsSinceEpoch();
+
+    // §PERF-1113 A31：VR 介面用 XR 控制器操作（射線、搖桿捲動），離屏視窗沒有人會呼叫 notifyWindowFocus，
+    // 手把導覽的輪詢從來不會開始；不關掉的話 AppContent 照樣把手把子系統初始化、解析對應表，
+    // 而且整個行程存活期間（含 VR 串流子行程在跑的時候）都開著。要在下面載入 VrShell.qml 之前設
+    SdlGamepadKeyNavigation::setSuppressed(true);
 
     // ── 離屏的 OpenGL 與 Qt Quick ──
     m_Gl = new QOpenGLContext();
@@ -448,9 +457,19 @@ bool XrShell::bringUpXr(QString* error)
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] XR up in %llu ms",
                 static_cast<unsigned long long>((steadyNowNs() - t0) / 1000000ull));
     // 新的 session 要重新上傳目前的畫面
+    // §PERF-1113：session 關著的期間不重畫（見 scheduleRender），m_Last 可能是串流開始前的舊畫面；有略過就當場
+    // 補畫一張（renderFrame 會自己交給 XR），畫不成才退回上傳 m_Last
+    // 複核（11-13）：不在這裡同步重畫——bringUpXr 可能是從 QML 的訊號處理一路呼叫進來的（串流結束、交還 session），
+    // 在 polish／綁定求值途中重入 render control 有風險。先上傳手上的那一張，再排一張正常的重畫（約 33 ms 內），
+    // 排的那一張失敗也會照平常的路徑再排
     if (!m_Last.isNull()) {
         m_Xr->setShellImage(m_Last.convertToFormat(m_Xr->shellImageFormat()));
     }
+    if (m_SkippedWhileHidden) {
+        m_SkippedWhileHidden = false;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] XR back: UI changed while hidden, redraw scheduled");
+    }
+    scheduleRender(true);
     return true;
 #else
     *error = QStringLiteral("this build has no OpenXR");
@@ -574,6 +593,9 @@ bool XrShell::startPlayer(const QString& source, const QString& format, const QS
         const QString shownError = m_PlayerCancel ? QString() : error;
         m_PlayerCancel = false;
         VrLauncher::playerFinished(shownRc, shownError);
+        // §PERF-1113：播放中重畫被放慢到每秒一張（見 scheduleRender），計時器可能還排在將近一秒後；
+        // 介面已經回到螢幕上，取消它、馬上補畫一張
+        m_RenderTimer.stop();
         scheduleRender(true);
     });
     {
@@ -592,23 +614,79 @@ bool XrShell::startPlayer(const QString& source, const QString& format, const QS
 #endif
 }
 
+bool XrShell::renderBlocked() const
+{
+    // §PERF-1113：介面的圖沒有地方可以顯示——自己的 XR session 關著（VR 串流子行程或桌面模式的串流拿走了），
+    // 或 runtime 說現在不必畫（setXrSessionState，目前沒有人設）。noxr（開發機離屏）一律照畫
+    if (m_Config.noXr) {
+        return false;
+    }
+    return m_Xr == nullptr || !m_XrSessionRendered;
+}
+
+bool XrShell::videoCoversShell() const
+{
+#ifdef HAVE_VR_PLAYER
+    // 載入中（videoShown()==false）介面還在螢幕上，不算。m_Player 只在 GUI 執行緒動，這裡不必拿 m_RouteMutex
+    return m_Player != nullptr && m_Player->videoShown();
+#else
+    return false;
+#endif
+}
+
+void XrShell::setXrSessionState(bool rendered, bool focused)
+{
+    VrLauncher::setShellFocused(focused);
+    if (rendered == m_XrSessionRendered) {
+        return;
+    }
+    m_XrSessionRendered = rendered;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] XR session %s: UI redraw %s", rendered ? "visible" : "not visible",
+                rendered ? "resumed" : "paused");
+    if (rendered && m_SkippedWhileHidden) {
+        // 回到看得到的狀態：補畫一張最新的
+        m_SkippedWhileHidden = false;
+        m_RenderTimer.stop();
+        scheduleRender(true);
+    }
+}
+
 void XrShell::scheduleRender(bool sync)
 {
     m_NeedSync = m_NeedSync || sync;
+    // §PERF-1113：沒有人看得到介面時不畫。原本這裡沒有任何條件：VR 串流期間（自己的 session 關著）每張仍然
+    // 完整重畫＋同步讀回 4 MB 再丟掉，跟串流搶頭盔的 GPU。略過的變更記下來，session 回來時（bringUpXr）補畫一張
+    if (renderBlocked()) {
+        m_SkippedWhileHidden = true;
+        return;
+    }
     if (!m_RenderTimer.isActive()) {
         // 合併同一輪事件裡的多次變更；兩張之間至少隔 kMinFrameNs（介面上有動畫時一直在重畫，每張都要讀回、在 XR frame
         // thread 上傳：開發機量到動畫中每秒 72 張）。指標是 XR 自己畫的圖層，不受這個限制
+        // §PERF-1113：影片已經蓋住介面（播放中）時放慢到每秒一張。不完全停：播放器把螢幕換回介面到 finished 送到
+        // GUI 執行緒之間有一小段，那時顯示的是最後交出去的那張，留著每秒一張讓它最多舊一秒；finished 時再馬上補畫
+        const uint64_t minNs = videoCoversShell() ? kCoveredFrameNs : kMinFrameNs;
         const uint64_t now = steadyNowNs();
         const uint64_t since = now - m_LastRenderNs;
-        const uint64_t waitNs = since >= kMinFrameNs ? 0 : kMinFrameNs - since;
+        const uint64_t waitNs = since >= minNs ? 0 : minNs - since;
         m_RenderTimer.start(static_cast<int>(std::max<uint64_t>(waitNs / 1000000ull, 4)));
     }
 }
 
 void XrShell::renderNow()
 {
-    if (m_Rc == nullptr || !m_Gl->makeCurrent(m_Surface)) {
+    // §PERF-1113：計時器排好之後 session 才被關掉的情況
+    if (renderBlocked()) {
+        m_SkippedWhileHidden = true;
         return;
+    }
+    renderFrame();
+}
+
+bool XrShell::renderFrame()
+{
+    if (m_Rc == nullptr || !m_Gl->makeCurrent(m_Surface)) {
+        return false;
     }
     const uint64_t t0 = steadyNowNs();
     m_LastRenderNs = t0;
@@ -618,6 +696,7 @@ void XrShell::renderNow()
     m_Rc->render();
     m_Rc->endFrame();
     m_NeedSync = false;
+    m_SkippedWhileHidden = false;  // §PERF-1113：這一張已經包含之前略過的變更
 
     // 讀回：GL 的列由下往上，翻成 QImage 的由上往下。介面整片不透明（VrShell.qml 的底色），直接當成不預乘的 RGBA
     QOpenGLExtraFunctions* f = m_Gl->extraFunctions();
@@ -650,6 +729,7 @@ void XrShell::renderNow()
         m_RenderNs = 0;
         m_WinStartNs = t1;
     }
+    return true;
 }
 
 void XrShell::pointerMoved(float u, float v)
@@ -842,7 +922,7 @@ void XrShell::runTest()
         }
 #endif
         else if (cmd == QLatin1String("dump")) {
-            renderNow();
+            renderFrame();  // §PERF-1113：dev 截圖不看閘控
             const bool ok = m_Last.save(a.mid(2).join(QLatin1Char(':')), "PNG");
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] dev dump %s", ok ? "ok" : "FAILED");
         }

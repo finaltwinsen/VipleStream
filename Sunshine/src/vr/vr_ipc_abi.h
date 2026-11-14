@@ -172,6 +172,8 @@ static inline void vripc_seq_write_begin(uint64_t *p, uint64_t v) {
 #define VRIPC_POSE_F_STALE_BLEND 0x8u /* §VR-STALE-BLEND（2026-10-31）：stale 期間速度線性衰減、恢復時 40 ms 平滑混合（預設） */
 #define VRIPC_POSE_F_ANGVEL_LOCAL 0x4u /* §VR-ANGVEL-LOCAL：角速度轉成機體座標再交給 SteamVR（SteamVR 把 vecAngularVelocity 當本地座標，
                                          10-05 vr_probe --mode predict 實測；client／OpenXR 給的是世界座標） */
+#define VRIPC_POSE_F_STALE_COAST 0x10u /* §VR-STALE-COAST（2026-11-13，vr_stale_policy = coast）：空窗 60 ms 內照最後的速度等速前進、之後 40 ms
+                                          降到 0，重送與恢復都接在同一條軌跡上（不往回跳）；和 STALE_BLEND 一起設（舊 driver 只認得後者） */
 
 /* frame descriptor flags：低 8 bit 與 0x81 vrFlags 同值；server 轉送時只取 & 0x2F */
 #define VRIPC_FRM_POSE_VALID 0x01u
@@ -381,7 +383,9 @@ typedef struct vripc_session_config_t { /* 寫入方：server，WELCOME 前寫�
   uint16_t tile_h;
   uint16_t tile_render_w; /* 每眼算圖尺寸：注視點那塊＝這張影像裡 tile_w×tile_h 的裁切（左上角對齊整數像素） */
   uint16_t tile_render_h;
-  uint8_t reserved[14]; /* 補齊至 64 位元組倍數（512 B） */
+  uint8_t ctrl_keep_ms_p1; /* §VR-CTRL-EXTRAP（2026-11-13，vr_ctrl_extrap_ms）：0＝不限制（舊行為）；n＋1＝SteamVR 對控制器最多外插 n 毫秒
+                              （n＝0～50），超過的部分由 driver 把姿態往回推。原 reserved 的第 11 位元組 */
+  uint8_t reserved[13]; /* 補齊至 64 位元組倍數（512 B） */
 } vripc_session_config_t;
 
 typedef struct vripc_pacing_t { /* 寫入方：server；單格 seqlock（seq 偶數 = 完成）；idle generation 也必須寫有效週期。

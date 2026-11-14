@@ -68,6 +68,42 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
                 "SDL audio driver: %s",
                 SDL_GetCurrentAudioDriver());
 
+    // §PERF-1113：佇列深度改用毫秒看。門檻刻意放寬（寧可少丟）：至少 30 ms、至少 4 個 Opus 幀、
+    // 至少兩個裝置週期——這是「谷底」的門檻，正常抖動只會讓谷底更低，不會碰到它。
+    {
+        Uint32 bytesPerSec = (Uint32)opusConfig->sampleRate *
+                             (Uint32)opusConfig->channelCount *
+                             (Uint32)getAudioBufferSampleSize();
+        m_BytesPerMs = bytesPerSec / 1000;
+
+        Uint32 frameMs = opusConfig->sampleRate > 0 ?
+                    (Uint32)(opusConfig->samplesPerFrame * 1000 / opusConfig->sampleRate) : 5;
+        Uint32 devPeriodMs = have.freq > 0 ? (Uint32)((Uint32)have.samples * 1000 / (Uint32)have.freq) : 10;
+
+        m_TrimThresholdMs = 30;
+        if (m_TrimThresholdMs < frameMs * 4) {
+            m_TrimThresholdMs = frameMs * 4;
+        }
+        if (m_TrimThresholdMs < devPeriodMs * 2) {
+            m_TrimThresholdMs = devPeriodMs * 2;
+        }
+
+        Uint32 now = SDL_GetTicks();
+        m_TrimWinStart = now;
+        m_TrimWinFloorMs = 0xFFFFFFFFu;
+        m_TrimArmed = false;
+        m_LastLowFloorAt = now;  // 開場一分鐘內不修
+        m_StatStart = now;
+        m_StatMinMs = 0xFFFFFFFFu;
+        m_StatMaxMs = 0;
+        m_StatPendingMaxMs = 0;
+        m_TrimTotal = 0;
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-AUDIO-Q] trim threshold: floor > %u ms (frame %u ms, device period %u ms)",
+                    m_TrimThresholdMs, frameMs, devPeriodMs);
+    }
+
     // Start playback
     SDL_PauseAudioDevice(m_AudioDevice, 0);
 
@@ -137,6 +173,91 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
         }
 
         SDL_Delay(1);
+    }
+
+    // §PERF-1113：主動把常駐的多餘佇列深度拉回來。
+    // 判斷用「觀察窗內送出前的最小深度（谷底）」：抖動會讓谷底變低，所以谷底還高於門檻就表示
+    // 那一段純粹是延遲、不是抖動緩衝。每個觀察窗最多丟一個 Opus 幀（不做重取樣調速），
+    // 丟之前先等一個接近無聲的幀（最多等 1 秒），把爆音的機會壓低。
+    if (m_BytesPerMs != 0) {
+        const Uint32 kTrimWindowMs = 3000;      // 觀察窗長度，同時也是兩次丟幀的最短間隔
+        const Uint32 kTrimQuietWaitMs = 1000;   // 等安靜幀的上限
+        const float kTrimQuietPeak = 0.003f;    // 約 -50 dBFS
+        const Uint32 kStatIntervalMs = 30000;
+
+        Uint32 now = SDL_GetTicks();
+        Uint32 queuedMs = SDL_GetQueuedAudioSize(m_AudioDevice) / m_BytesPerMs;
+
+        if (queuedMs < m_StatMinMs) m_StatMinMs = queuedMs;
+        if (queuedMs > m_StatMaxMs) m_StatMaxMs = queuedMs;
+        Uint32 pendingMs = (Uint32)LiGetPendingAudioDuration();
+        if (pendingMs > m_StatPendingMaxMs) m_StatPendingMaxMs = pendingMs;
+
+        bool dropThisFrame = false;
+
+        if (!m_TrimArmed) {
+            if (queuedMs < m_TrimWinFloorMs) m_TrimWinFloorMs = queuedMs;
+            if (now - m_TrimWinStart >= kTrimWindowMs) {
+                // 複核（11-13）：佇列的常駐深度同時也是抖動緩衝。最近一分鐘內谷底曾經貼到底（不到一個 Opus 幀＝
+                // 差一點或已經斷音），表示這段深度是用得到的，不修；遠端或擁擠 Wi-Fi 上抖動 30～50 ms 時才不會
+                // 修掉之後下一次抖動又斷音
+                const Uint32 kTrimQuietAfterLowMs = 60000;
+                const Uint32 frameMs = m_BytesPerMs != 0 ? (Uint32)m_FrameSize / m_BytesPerMs : 5;
+                if (m_TrimWinFloorMs != 0xFFFFFFFFu && m_TrimWinFloorMs <= frameMs) {
+                    m_LastLowFloorAt = now;
+                }
+                if (m_TrimWinFloorMs != 0xFFFFFFFFu && m_TrimWinFloorMs > m_TrimThresholdMs &&
+                    now - m_LastLowFloorAt > kTrimQuietAfterLowMs) {
+                    m_TrimArmed = true;
+                    m_TrimArmedAt = now;
+                }
+                m_TrimWinStart = now;
+                m_TrimWinFloorMs = 0xFFFFFFFFu;
+            }
+        }
+
+        if (m_TrimArmed) {
+            if (queuedMs <= m_TrimThresholdMs) {
+                // 等待期間深度自己降下來了，不必丟
+                m_TrimArmed = false;
+                m_TrimWinStart = now;
+                m_TrimWinFloorMs = 0xFFFFFFFFu;
+            }
+            else {
+                bool quiet = true;
+                const float* pcm = (const float*)m_AudioBuffer;
+                int sampleCount = bytesWritten / (int)sizeof(float);
+                for (int s = 0; s < sampleCount; s++) {
+                    if (pcm[s] > kTrimQuietPeak || pcm[s] < -kTrimQuietPeak) {
+                        quiet = false;
+                        break;
+                    }
+                }
+                if (quiet || now - m_TrimArmedAt >= kTrimQuietWaitMs) {
+                    dropThisFrame = true;
+                    m_TrimArmed = false;
+                    m_TrimWinStart = now;
+                    m_TrimWinFloorMs = 0xFFFFFFFFu;
+                    m_TrimTotal++;
+                }
+            }
+        }
+
+        // 節流：30 秒一行，含這段時間的佇列深度範圍與累計丟幀數
+        if (now - m_StatStart >= kStatIntervalMs) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-AUDIO-Q] sdl queue min=%u max=%u ms, pending max=%u ms, trimmed=%u frames (thr %u ms)",
+                        m_StatMinMs == 0xFFFFFFFFu ? 0 : m_StatMinMs, m_StatMaxMs,
+                        m_StatPendingMaxMs, m_TrimTotal, m_TrimThresholdMs);
+            m_StatStart = now;
+            m_StatMinMs = 0xFFFFFFFFu;
+            m_StatMaxMs = 0;
+            m_StatPendingMaxMs = 0;
+        }
+
+        if (dropThisFrame) {
+            return true;
+        }
     }
 
     if (SDL_QueueAudio(m_AudioDevice, m_AudioBuffer, bytesWritten) < 0) {

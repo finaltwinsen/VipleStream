@@ -8,6 +8,11 @@
 //   - 追蹤執行緒：vrmlSendTracking；VrSend 執行緒與 XR 執行緒：vrmlSendCtrl（LOSS、LATCH）
 // 每個統計欄位只有一條執行緒寫，其他執行緒讀到稍舊的值也無妨，所以不加鎖；加密用的 context 有自己的鎖。
 
+// §PERF-1113：recvmmsg／ppoll 在 glibc 要有 _GNU_SOURCE 才宣告，而且要在第一個系統標頭之前定義（Android 的 bionic 不需要，定義了也無妨）
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "Limelight-internal.h"
 #include "VrMultiLink.h"
 
@@ -46,11 +51,15 @@
 #define VRML_RUN_IDLE_US          20000  // 這麼久沒有下一個封包：這一幀在這條連線算結束了（約兩個幀週期，server 也只留這麼久）
 #define VRML_RUN_MIN_PKTS         32     // 至少這麼多個才算一次速率量測
 #define VRML_STAGE_MAX            256    // 一次最多暫存、排序的影像封包數（約一幀）
+// §PERF-1113：Linux（含 Android）一次 recvmmsg 最多收幾個。16＝和 VRML_REPOLL_EVERY 同一個量級：一條連線連續收這麼多個
+// 就換下一條，輪流讀的公平性和原本一樣（之後本來就會依幀號排序）
+#define VRML_MMSG_MAX             16
 #define VRML_LEAD_RING            8      // 記最近幾幀「最先送到的那一份」的到達時刻（量各條連線晚多久用）
 #define VRML_LAG_MAX_US           50000  // 一次取樣的上限
 #define VRML_LAG_HIST             4      // 上升時看最近幾個樣本（取第二大：單一離群值不採用）
 #define VRML_LEAD_JUMP_MAX        4096   // 幀號比目前最新的大超過這麼多：不可信（影像加密時幀號取自還沒驗證的標頭）
 #define VRML_LEAD_STALE_RESET     64     // 連續這麼多次遇到「比最新的舊太多」：紀錄多半被壞封包帶歪了，整個重來
+#define VRML_DUP_SLOTS            8192   // §PERF-1113 A46：以封包序號取模；每條連線每秒約 9,000 個封包，一格大約留一秒（要是 2 的次方）
 
 typedef struct _VRML_LINK {
     uint8_t id;
@@ -143,6 +152,18 @@ typedef struct _VRML_LINK {
     uint32_t lagHist[VRML_LAG_HIST];
     volatile uint32_t lagUs;
 
+    // §PERF-1113 A46（量測）：這條連線送來的那一份有多少是「只有它送到」（影像接收執行緒寫、ping 執行緒印；說明見 dupNote）
+    volatile uint32_t dupFirst;    // 這條送來第一份的封包
+    volatile uint32_t dupPaired;   // 其中，別條在一個幀週期內也送到的
+    volatile uint32_t dupLate;     // 這條送來的那一份比第一份晚超過一個幀週期（對佇列來說等於沒到）
+    volatile uint32_t leadFrames;  // 這條最先送到的幀
+    volatile uint32_t soloFrames;  // 其中，一個幀週期內沒有別條送到同一幀的
+    uint32_t dupFirstPrev;
+    uint32_t dupPairedPrev;
+    uint32_t dupLatePrev;
+    uint32_t leadFramesPrev;
+    uint32_t soloFramesPrev;
+
     // 追蹤（追蹤執行緒寫）
     volatile uint32_t trkSent;
     volatile uint32_t trkDrop;
@@ -161,6 +182,7 @@ typedef struct _VRML_RXSET {
     int next;
     int sincePoll;
     uint64_t lastTsUs;   // 最近收到的那個封包的核心時戳（us）；0＝這個平台或這個 socket 沒有
+    int legacyErr;       // 批次收時原本的 socket 出的錯，留給下一次 recvRxSet 回報（0＝沒有）
 } VRML_RXSET;
 
 static VRML_LINK links[VIPLE_VR_LINK_MAX];
@@ -195,7 +217,8 @@ static uint32_t hotaddGen;             // pending 世代的來源（只由 ping 
 static int hotaddScans;
 static int hotaddRebinds;
 static int hotaddRefusals;
-static int videoPollMs = UDP_RECV_POLL_TIMEOUT_MS;  // 影像這一次 poll 最多等多久（影像接收執行緒寫）
+// §PERF-1113：單位從毫秒改成微秒（Linux 用 ppoll 等到期限當下；原本無條件進位到毫秒，到期的幀平均晚 0.5 ms 才放行）
+static int videoPollUs = UDP_RECV_POLL_TIMEOUT_MS * 1000;  // 影像這一次 poll 最多等多久（影像接收執行緒寫）
 static uint64_t carryWinStartUs;
 static int carryKeep;
 static volatile int carryLinks;
@@ -204,12 +227,26 @@ static struct {
     bool valid;
     bool paired;     // 已經有另一條連線也送到這一幀（領先那條的樣本算過了）
     int8_t link;     // 最先送到的是哪一條
+    uint8_t seenMask;  // §PERF-1113 A46：不晚於最先讀到的那一份一個幀週期送到這一幀的連線（bit i＝links[i]）；0＝不結算
     uint32_t frame;
     uint64_t us;
 } leadRing[VRML_LEAD_RING];                // 每一幀最先送到的那一份的到達時刻（只在影像接收執行緒存取）
 static bool leadAny;
 static uint32_t leadNewest;
 static int leadStale;
+// §PERF-1113 A46（量測）：每個影像封包「第一份什麼時候到、期限內哪幾條送到」（只在影像接收執行緒存取）
+typedef struct _VRML_DUP_SLOT {
+    uint32_t frame;
+    uint32_t seq;
+    uint32_t firstUs;  // 第一份到達的時刻（低 32 bit）
+    uint8_t mask;      // 第一份到達後一個幀週期內送到這個封包的連線（bit i＝links[i]）；0＝空格
+    uint8_t lateMask;  // 超過期限才送到的連線（每條只算一次）
+    uint8_t first;     // 第一份是哪一條
+} VRML_DUP_SLOT;
+VIPLE_VR_STATIC_ASSERT((VRML_DUP_SLOTS & (VRML_DUP_SLOTS - 1)) == 0, vrml_dup_slots_pow2);
+VIPLE_VR_STATIC_ASSERT(VIPLE_VR_LINK_MAX <= 8, vrml_dup_mask_8bit);
+static VRML_DUP_SLOT dupRing[VRML_DUP_SLOTS];
+static uint32_t dupWindowUs;              // 「同到」的期限＝一個幀週期（夾在 4～14 ms，和佇列等另一條連線的上限同一個算法）
 static volatile uint32_t legacyRxPkts;
 
 // §VR-LINK-CTRL
@@ -405,7 +442,7 @@ int vrmlPrepare(void) {
     ctlSentPrev = ctlDropPrev = s2cRxPrev = s2cDupPrev = s2cBadPrev = 0;
     memset(&videoSet, 0, sizeof(videoSet));
     memset(&audioSet, 0, sizeof(audioSet));
-    videoPollMs = UDP_RECV_POLL_TIMEOUT_MS;
+    videoPollUs = UDP_RECV_POLL_TIMEOUT_MS * 1000;
     carryWinStartUs = 0;
     carryKeep = 0;
     carryLinks = 0;
@@ -439,6 +476,16 @@ int vrmlPrepare(void) {
             return 0;
         }
         sockMutexCreated = true;
+    }
+
+    // §PERF-1113 A46：只有多連線的 VR session 會用到這張表，非 VR 的 session 不去碰它（128 KB）
+    memset(dupRing, 0, sizeof(dupRing));
+    dupWindowUs = StreamConfig.fps > 0 ? 1000000u / (uint32_t)StreamConfig.fps : 11111u;
+    if (dupWindowUs < 4000) {
+        dupWindowUs = 4000;
+    }
+    if (dupWindowUs > 14000) {
+        dupWindowUs = 14000;
     }
 
     localBe = ((struct sockaddr_in*)&LocalAddr)->sin_addr.s_addr;
@@ -566,7 +613,7 @@ static void sendHello(void) {
 }
 
 static void logStats(uint64_t nowMs) {
-    char line[1280];
+    char line[1600];  // §PERF-1113 A46：行尾多一段 dup10s（四條連線約 350 個字元）
     int off = 0;
     int i;
     uint32_t lg = legacyRxPkts;
@@ -632,6 +679,26 @@ static void logStats(uint64_t nowMs) {
         }
         L->rttSampleCountPrev = count;
         L->rttSampleSumPrev = sum;
+    }
+    // §PERF-1113 A46（量測）：第二份副本的貢獻（記法見 dupNote、noteLag）。first＝這條送來第一份的封包；uniq＝其中別條在
+    // 一個幀週期內沒送到的；late＝這條送來的那一份比第一份晚超過一個幀週期；solo＝這條最先送到的幀（斜線後）裡，
+    // 一個幀週期內沒有別條送到同一幀的。最近 8 幀還沒結算、10 秒邊界上的封包可能算到隔壁，數字是近似值。只有一條連線時不印
+    for (i = 0; i < linkCount; i++) {
+        VRML_LINK* L = &links[i];
+        const uint32_t df = L->dupFirst, dp = L->dupPaired, dl = L->dupLate, lf = L->leadFrames, sf = L->soloFrames;
+        const uint32_t first = df - L->dupFirstPrev, paired = dp - L->dupPairedPrev;
+
+        if (linkCount >= 2 && off < (int)sizeof(line) - 104) {
+            off += snprintf(line + off, sizeof(line) - off, "%s L%d first=%u uniq=%u late=%u solo=%u/%u", i == 0 ? " | dup10s" : "",
+                            (int)L->id, first, first > paired ? first - paired : 0, dl - L->dupLatePrev, sf - L->soloFramesPrev,
+                            lf - L->leadFramesPrev);
+        }
+        // 沒印也要跟上：之後才多出第二條連線時，第一次印的不能是整場的累計
+        L->dupFirstPrev = df;
+        L->dupPairedPrev = dp;
+        L->dupLatePrev = dl;
+        L->leadFramesPrev = lf;
+        L->soloFramesPrev = sf;
     }
     Limelog("[VIPLE-VR-LINK] 10s: %s\n", line);
 }
@@ -1417,7 +1484,94 @@ static int recvWithTs(SOCKET s, char* buffer, int size, uint64_t* tsUs) {
 #endif
 }
 
-static int pollRxSet(VRML_RXSET* set, int timeoutMs) {
+// 收包出錯時的分類，recvRxSet 與批次收共用。回傳 true＝原本的 socket 出錯（和單一路徑時一樣要交給呼叫端處理）。
+// UDP socket 上的錯誤讀一次就清掉，所以誰讀到誰就要處理，不能指望下一次再讀到
+static bool rxSetOnError(VRML_RXSET* set, int i, int err) {
+    if (wouldBlock(err)) {
+        set->readable[i] = false;
+        return false;
+    }
+    if (icmpNoise(err)) {
+        return false;  // 留著 readable，下一輪再讀
+    }
+    if (set->link[i] < 0) {
+        return true;
+    }
+    if (set->deadLogs < 20) {
+        set->deadLogs++;
+        Limelog("[VIPLE-VR-LINK] link %d socket error %d - pausing this link's receive side for %d ms\n",
+                (int)links[set->link[i]].id, err, VRML_DEAD_RETRY_MS);
+    }
+    set->dead[i] = true;
+    set->deadAtMs[i] = PltGetMillis();
+    set->readable[i] = false;
+    return false;
+}
+
+#if defined(__linux__) && defined(SO_TIMESTAMPNS)
+#define VRML_HAVE_RECVMMSG 1
+// §PERF-1113：一次系統呼叫把 set 第 slot 個 socket 上已經到的資料報收進 base 起連續的幾格（每格 slotSize），不等待。
+// 回傳收到幾個（0＝現在沒有，或出錯）；lens[i]／tsUs[i] 是第 i 個的長度與核心接收時戳（沒有時戳＝0），和 recvWithTs 相同。
+// 收到的比要求的少＝這個 socket 空了，直接清掉 readable，省掉原本靠一次 EAGAIN 的 recvmsg 才知道的那個系統呼叫。
+// EAGAIN 以外的錯誤這裡不處理也不清 readable：下一輪 recvRxSet 會再讀到同一個狀況，照它原本的規則處理（忽略、停收、回報）。
+static int recvBatchWithTs(VRML_RXSET* set, int slot, char* base, int slotSize, int maxN, int* lens, uint64_t* tsUs) {
+    struct mmsghdr msgs[VRML_MMSG_MAX];
+    struct iovec iovs[VRML_MMSG_MAX];
+    union {
+        char buf[64];
+        struct cmsghdr align;  // 讓每一格對齊到 cmsghdr 的要求
+    } ctrl[VRML_MMSG_MAX];
+    int i, n;
+
+    if (maxN > VRML_MMSG_MAX) {
+        maxN = VRML_MMSG_MAX;
+    }
+    if (maxN <= 0) {
+        return 0;
+    }
+    memset(msgs, 0, sizeof(msgs[0]) * (size_t)maxN);
+    for (i = 0; i < maxN; i++) {
+        iovs[i].iov_base = base + (size_t)i * (size_t)slotSize;
+        iovs[i].iov_len = (size_t)slotSize;
+        msgs[i].msg_hdr.msg_iov = &iovs[i];
+        msgs[i].msg_hdr.msg_iovlen = 1;
+        msgs[i].msg_hdr.msg_control = ctrl[i].buf;
+        msgs[i].msg_hdr.msg_controllen = sizeof(ctrl[i].buf);
+    }
+    n = (int)recvmmsg(set->socks[slot], msgs, (unsigned int)maxN, MSG_DONTWAIT, NULL);
+    if (n <= 0) {
+        if (n < 0) {
+            // 複核（11-13）：錯誤要在這裡分類處理（讀一次就清掉了）；原本的 socket 出錯就記下來，下一次 recvRxSet 回報
+            const int err = LastSocketError();
+            if (rxSetOnError(set, slot, err)) {
+                set->legacyErr = err;
+            }
+        }
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        struct cmsghdr* cm;
+
+        lens[i] = (int)msgs[i].msg_len;
+        tsUs[i] = 0;
+        for (cm = CMSG_FIRSTHDR(&msgs[i].msg_hdr); cm != NULL; cm = CMSG_NXTHDR(&msgs[i].msg_hdr, cm)) {
+            if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_TIMESTAMPNS) {
+                struct timespec ts;
+                memcpy(&ts, CMSG_DATA(cm), sizeof(ts));
+                tsUs[i] = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+            }
+        }
+    }
+    if (n < maxN) {
+        set->readable[slot] = false;
+    }
+    set->sincePoll += n;
+    return n;
+}
+#endif
+
+// §PERF-1113：timeoutUs 是微秒（0＝不等）。Linux 用 ppoll 照微秒等；其他平台照舊進位到毫秒走 pollSockets。
+static int pollRxSet(VRML_RXSET* set, int timeoutUs) {
     struct pollfd pfds[VIPLE_VR_LINK_MAX + 1];
     int map[VIPLE_VR_LINK_MAX + 1];
     int n = 0;
@@ -1436,7 +1590,22 @@ static int pollRxSet(VRML_RXSET* set, int timeoutMs) {
         map[n] = i;
         n++;
     }
-    err = pollSockets(pfds, n, timeoutMs);
+#if defined(__linux__)
+    if (timeoutUs > 0) {
+        // 多等 20 us：ppoll 用 CLOCK_MONOTONIC 計時，佇列的期限用 PltGetMicroseconds（CLOCK_MONOTONIC_RAW）算，
+        // 兩個時鐘的速率差一點點；剛好提早幾微秒醒來的話，呼叫端會發現期限還沒到、再多繞一圈
+        const int us = timeoutUs + 20;
+        struct timespec ts;
+        ts.tv_sec = us / 1000000;
+        ts.tv_nsec = (long)(us % 1000000) * 1000L;
+        err = ppoll(pfds, (nfds_t)n, &ts, NULL);
+    }
+    else {
+        err = pollSockets(pfds, n, 0);
+    }
+#else
+    err = pollSockets(pfds, n, timeoutUs > 0 ? (timeoutUs + 999) / 1000 : 0);
+#endif
     if (err <= 0) {
         return err;
     }
@@ -1451,6 +1620,14 @@ static int pollRxSet(VRML_RXSET* set, int timeoutMs) {
 // 回傳 > 0＝資料長度（*slot 是 set 裡的位置）、0＝逾時（wait=false 時是「現在沒有資料」）、< 0＝原本的 socket 出錯
 static int recvRxSet(VRML_RXSET* set, char* buffer, int size, int* slot, bool wait) {
     bool polledNoWait = false;
+
+    if (set->legacyErr != 0) {
+        // 上一次批次收時原本的 socket 出的錯
+        const int e = set->legacyErr;
+        set->legacyErr = 0;
+        SetLastSocketError(e);
+        return -1;
+    }
 
     for (;;) {
         int n, err;
@@ -1478,25 +1655,9 @@ static int recvRxSet(VRML_RXSET* set, char* buffer, int size, int* slot, bool wa
                 continue;  // 空資料報：當沒收到
             }
             err = LastSocketError();
-            if (wouldBlock(err)) {
-                set->readable[i] = false;
-            }
-            else if (icmpNoise(err)) {
-                // 留著 readable，下一輪再讀
-            }
-            else if (set->link[i] < 0) {
+            if (rxSetOnError(set, i, err)) {
                 SetLastSocketError(err);
                 return -1;  // 原本的 socket 出錯：和單一路徑時一樣交給呼叫端處理
-            }
-            else {
-                if (set->deadLogs < 20) {
-                    set->deadLogs++;
-                    Limelog("[VIPLE-VR-LINK] link %d socket error %d - pausing this link's receive side for %d ms\n",
-                            (int)links[set->link[i]].id, err, VRML_DEAD_RETRY_MS);
-                }
-                set->dead[i] = true;
-                set->deadAtMs[i] = PltGetMillis();
-                set->readable[i] = false;
             }
         }
         if (any) {
@@ -1512,7 +1673,7 @@ static int recvRxSet(VRML_RXSET* set, char* buffer, int size, int* slot, bool wa
             polledNoWait = true;
             continue;
         }
-        err = pollRxSet(set, set == &videoSet ? videoPollMs : UDP_RECV_POLL_TIMEOUT_MS);
+        err = pollRxSet(set, set == &videoSet ? videoPollUs : UDP_RECV_POLL_TIMEOUT_MS * 1000);
         if (err < 0) {
             if (wouldBlock(LastSocketError())) {
                 continue;
@@ -1853,12 +2014,22 @@ static void noteLag(VRML_LINK* L, uint32_t frame, uint64_t arriveUs) {
         if (!(carryMask & (1u << idx))) {
             return;
         }
+        // §PERF-1113 A46（量測）：這一格要被覆寫了，結算原本那一幀（同一格的上一幀至少是 8 幀之前，落後的那條早該到了）：
+        // 一個幀週期內只有最先那條送到＝這一幀靠它一條。不在幀收齊的當下算——那時落後的那條還沒到，只量得出「誰先到」
+        if (leadRing[slot].seenMask != 0) {
+            VRML_LINK* lead = &links[leadRing[slot].link];
+            lead->leadFrames++;
+            if ((leadRing[slot].seenMask & (leadRing[slot].seenMask - 1)) == 0) {
+                lead->soloFrames++;
+            }
+        }
         leadAny = true;
         leadNewest = frame;
         leadStale = 0;
         leadRing[slot].valid = true;
         leadRing[slot].paired = false;
         leadRing[slot].link = (int8_t)idx;
+        leadRing[slot].seenMask = (uint8_t)(1u << idx);
         leadRing[slot].frame = frame;
         leadRing[slot].us = arriveUs;
     }
@@ -1879,8 +2050,54 @@ static void noteLag(VRML_LINK* L, uint32_t frame, uint64_t arriveUs) {
         for (i = 0; i < linkCount; i++) {
             links[i].lagValid = false;
         }
+        for (i = 0; i < VRML_LEAD_RING; i++) {
+            leadRing[i].seenMask = 0;  // §PERF-1113 A46：重來之前的紀錄不可信，不結算
+        }
     }
     // 其餘：那一幀的紀錄已經被覆寫（落後超過 VRML_LEAD_RING 幀），或時戳對不上——不取樣
+
+    // §PERF-1113 A46（量測）：這條也送到了這一幀。不能掛在上面取樣的那個分支裡：Linux 的時戳是核心收到的時刻，讀 socket
+    // 卻是輪流、一次一批，兩條都有資料時後讀到的那條時戳可能比較早（差值為負）——它不取樣，但確實送到了，和 dupNote
+    // 一樣當成同到（否則這一幀會被算成先讀到的那條獨力送到）。晚超過一個幀週期的不算送到
+    if (leadRing[slot].valid && leadRing[slot].frame == frame && leadRing[slot].seenMask != 0 &&
+        (arriveUs <= leadRing[slot].us || arriveUs - leadRing[slot].us <= dupWindowUs)) {
+        leadRing[slot].seenMask |= (uint8_t)(1u << idx);
+    }
+}
+
+// §PERF-1113 A46（量測）：這條連線送來一個影像封包（解密之前；frame／seq＝stageKey 讀到的，兩條連線送的是同一份密文，
+// 兩個值都相同）。第一份記下到達時刻；別條在一個幀週期內送到同一個封包才算「同到」，更晚的對佇列來說等於沒到
+// （佇列最多只等那麼久）。每條的「唯一到達」＝它送來的第一份減掉被別條配到的，由 logStats 算。
+// 只記帳：不讀時鐘、不影響收包；同一條重送的（補包）不重複算
+static void dupNote(VRML_LINK* L, int idx, uint32_t frame, uint32_t seq, uint64_t arriveUs) {
+    VRML_DUP_SLOT* s = &dupRing[seq & (VRML_DUP_SLOTS - 1)];
+    const uint8_t bit = (uint8_t)(1u << idx);
+
+    if (s->mask != 0 && s->frame == frame && s->seq == seq) {
+        // 核心時戳是牆上時鐘：往回跳（差值為負）的當成同到，不製造假的「唯一到達」
+        const int32_t d = (int32_t)((uint32_t)arriveUs - s->firstUs);
+
+        if ((s->mask | s->lateMask) & bit) {
+            return;
+        }
+        if (d > 0 && (uint32_t)d > dupWindowUs) {
+            s->lateMask |= bit;
+            L->dupLate++;
+            return;
+        }
+        if ((s->mask & (s->mask - 1)) == 0) {
+            links[s->first].dupPaired++;  // 第一份第一次被別條配到
+        }
+        s->mask |= bit;
+        return;
+    }
+    s->frame = frame;
+    s->seq = seq;
+    s->firstUs = (uint32_t)arriveUs;
+    s->mask = bit;
+    s->lateMask = 0;
+    s->first = (uint8_t)idx;
+    L->dupFirst++;
 }
 
 // ── 影像：暫存與排序 ──────────────────────────────────────────────
@@ -1939,7 +2156,9 @@ static bool stagedBefore(const VRML_STAGED* a, const VRML_STAGED* b) {
 }
 
 // 把剛收進 stageBuf 第 n 格的封包登記進排序表；回傳 false＝是連線控制資料報（已處理，不佔格子）
-static bool stageAccept(int n, int len, int rxSlot) {
+// §PERF-1113：batchNowUs≠0＝呼叫端替這一批（同一次 recvmmsg 收進來的）讀好的時刻，整批共用，不必每個封包讀一次時鐘；
+// 0＝自己讀（原本的行為）。這個時刻只用在連線的間隔統計、閒置判斷與 200 ms 視窗；到達時刻的量測用的是核心時戳，不受影響。
+static bool stageAccept(int n, int len, int rxSlot, uint64_t batchNowUs) {
     char* pkt = stageBuf + (size_t)n * stageSlotSize;
     int idx = videoSet.link[rxSlot];
     VRML_STAGED e;
@@ -1950,7 +2169,7 @@ static bool stageAccept(int n, int len, int rxSlot) {
         stageKey(pkt, len, &e.frame, &e.seq);
         if (linkCount > 0) {
             // 影像退回原本的 socket 時（所有連線都不通）也要結算，否則「幾條在送」會停在最後一次的值
-            uint64_t nowUs = PltGetMicroseconds();
+            uint64_t nowUs = batchNowUs != 0 ? batchNowUs : PltGetMicroseconds();
             if (nowUs - carryWinStartUs >= VRML_CARRY_WINDOW_US) {
                 rollCarryWindow(nowUs);
             }
@@ -1966,7 +2185,7 @@ static bool stageAccept(int n, int len, int rxSlot) {
             return false;
         }
         stageKey(pkt, len, &e.frame, &e.seq);
-        nowUs = PltGetMicroseconds();
+        nowUs = batchNowUs != 0 ? batchNowUs : PltGetMicroseconds();
         if (L->lastRxUs != 0) {
             uint64_t gap = nowUs - L->lastRxUs;
             uint32_t g = gap > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)gap;
@@ -1989,6 +2208,10 @@ static bool stageAccept(int n, int len, int rxSlot) {
             // §VR-LINK-REPAIR：這條連線每送來新的一幀就取一次「比最先送到的那條晚多久」（補包是舊幀，不取）
             if (e.frame != 0 && (!L->lagValid || isBefore32(L->lagFrame, e.frame))) {
                 noteLag(L, e.frame, arriveUs);
+            }
+            // §PERF-1113 A46（量測）：只有一條連線時沒有第二份可比，不記
+            if (linkCount > 1 && e.frame != 0) {
+                dupNote(L, idx, e.frame, e.seq, arriveUs);
             }
             // §VR-LINK-REPAIR：補回來的是比較舊的幀的封包，夾在目前這一幀中間到——不算進量測，也不拿它來切段
             if (!(L->runCount > 0 && isBefore32(e.frame, L->runFrame))) {
@@ -2021,13 +2244,33 @@ static bool stageAccept(int n, int len, int rxSlot) {
     return true;
 }
 
-int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeoutMs) {
+// 等待途中收到連線控制資料報（PONG、T_S2C）之後呼叫：回傳 true＝之後只把已經到的收完、不再等。
+// （原本寫在 vrmlRecvVideo 的迴圈裡；§PERF-1113 批次收的那一段也要用，抽出來共用，邏輯不變）
+static bool stageAfterCtrl(uint64_t deadlineUs) {
+    // 連線控制資料報不是影像。REPAIR_GONE 要盡快交給呼叫端（它返回後就會取走）；其餘的
+    // 不能讓這一次的等待從頭算起——每條連線每秒 4 個 PONG，佇列等待的期限會一再被往後推。
+    // 兩種情況都不直接返回：先把其他 socket 上已經到的收進來（不等待）。GONE 和另一條連線上的補包同時到的
+    // 時候，先讀到哪一個只是輪流順序的巧合——補包要排在 GONE 前面處理（vrmlTakeGone 會等這一批交完）
+    if (gonePending) {
+        return true;
+    }
+    else {
+        const uint64_t nowUs = PltGetMicroseconds();
+        if (nowUs >= deadlineUs) {
+            return true;
+        }
+        videoPollUs = (int)(deadlineUs - nowUs);
+        return false;
+    }
+}
+
+int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeoutUs, char** direct) {
     uint64_t deadlineUs = 0;  // 這一次最晚等到什麼時候（開始等之前才算，手上有暫存封包可交時不必讀時鐘）
 
     if (videoSet.count == 0) {
         initRxSet(&videoSet, legacy, true);
     }
-    videoPollMs = timeoutMs > 0 && timeoutMs < UDP_RECV_POLL_TIMEOUT_MS ? timeoutMs : UDP_RECV_POLL_TIMEOUT_MS;
+    videoPollUs = timeoutUs > 0 && timeoutUs < UDP_RECV_POLL_TIMEOUT_MS * 1000 ? timeoutUs : UDP_RECV_POLL_TIMEOUT_MS * 1000;
     if (!ensureStage(size)) {
         // 記憶體不足：退回不排序的收法
         int slot = 0;
@@ -2035,16 +2278,26 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
         syncRxSet(&videoSet, true);
         err = recvRxSet(&videoSet, buffer, size, &slot, true);
         *linkIdx = err > 0 ? videoSet.link[slot] : -1;
+        if (direct != NULL) {
+            *direct = buffer;
+        }
         return err;
     }
 
     for (;;) {
-        int used = 0;  // stageBuf 已使用的格數（控制資料報不佔格子）
+        int used = 0;  // stageBuf 已使用的格數（控制資料報不佔格子；§PERF-1113 批次收進來的控制資料報會留下空格，無妨）
         bool drainOnly = false;  // 已經決定要返回了（GONE 要交出去、或等到期了）：只把各 socket 上已經到的收完，不再等
 
         if (stageNext < stageCount) {
             const VRML_STAGED* e = &stageIdx[stageNext++];
-            memcpy(buffer, stageBuf + (size_t)e->slot * stageSlotSize, e->len);
+            char* src = stageBuf + (size_t)e->slot * stageSlotSize;
+            if (direct != NULL) {
+                // §PERF-1113：呼叫端要的是指標（影像有加密時，它接著就把這一格解密到自己的緩衝）：省一次複製
+                *direct = src;
+            }
+            else {
+                memcpy(buffer, src, e->len);
+            }
             *linkIdx = e->link;
             return e->len;
         }
@@ -2062,7 +2315,7 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
             int err;
 
             if (wait && deadlineUs == 0) {
-                deadlineUs = PltGetMicroseconds() + (uint64_t)videoPollMs * 1000;
+                deadlineUs = PltGetMicroseconds() + (uint64_t)videoPollUs;
             }
             err = recvRxSet(&videoSet, stageBuf + (size_t)used * stageSlotSize, stageSlotSize, &slot, wait);
             if (err < 0) {
@@ -2080,27 +2333,37 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
                 *linkIdx = -1;
                 return 0;  // 逾時
             }
-            if (stageAccept(used, err, slot)) {
+            if (stageAccept(used, err, slot, 0)) {
                 used++;
             }
             else if (stageCount == 0 && !drainOnly) {
-                // 連線控制資料報（PONG、T_S2C）不是影像。REPAIR_GONE 要盡快交給呼叫端（它返回後就會取走）；其餘的
-                // 不能讓這一次的等待從頭算起——每條連線每秒 4 個 PONG，佇列等待的期限會一再被往後推。
-                // 兩種情況都不直接返回：先把其他 socket 上已經到的收進來（不等待）。GONE 和另一條連線上的補包同時到的
-                // 時候，先讀到哪一個只是輪流順序的巧合——補包要排在 GONE 前面處理（vrmlTakeGone 會等這一批交完）
-                if (gonePending) {
-                    drainOnly = true;
-                }
-                else {
-                    const uint64_t nowUs = PltGetMicroseconds();
-                    if (nowUs >= deadlineUs) {
-                        drainOnly = true;
+                drainOnly = stageAfterCtrl(deadlineUs);
+            }
+#ifdef VRML_HAVE_RECVMMSG
+            // §PERF-1113：剛才那個 socket 上多半還有同一批到的封包——用一次 recvmmsg 直接收進接下來的幾格，
+            // 不必每個封包各一次 recvmsg（兩條連線各 8,900 封包／秒時約每秒少一萬多次系統呼叫）。
+            // 每個資料報仍然各有自己的核心時戳，處理方式和上面單獨收的那一個完全相同。
+            if (used < VRML_STAGE_MAX && videoSet.readable[slot] && !videoSet.dead[slot]) {
+                int lens[VRML_MMSG_MAX];
+                uint64_t tss[VRML_MMSG_MAX];
+                const int got = recvBatchWithTs(&videoSet, slot, stageBuf + (size_t)used * stageSlotSize, stageSlotSize,
+                                                VRML_STAGE_MAX - used, lens, tss);
+                if (got > 0) {
+                    const uint64_t batchNowUs = PltGetMicroseconds();
+                    int j;
+                    for (j = 0; j < got; j++) {
+                        if (lens[j] <= 0) {
+                            continue;  // 空資料報：當沒收到（那一格留空）
+                        }
+                        videoSet.lastTsUs = tss[j];
+                        if (!stageAccept(used + j, lens[j], slot, batchNowUs) && stageCount == 0 && !drainOnly) {
+                            drainOnly = stageAfterCtrl(deadlineUs);
+                        }
                     }
-                    else {
-                        videoPollMs = (int)((deadlineUs - nowUs + 999) / 1000);
-                    }
+                    used += got;  // 控制資料報與空資料報佔掉的格子不回收：stageIdx 記的是格號，中間有空格不影響
                 }
             }
+#endif
         }
     }
 }
@@ -2230,14 +2493,20 @@ int vrmlSendCtrl(const unsigned char* tlv, int length) {
 }
 
 int vrmlCtrlRttMs(void) {
-    uint64_t nowMs;
+    return vrmlCtrlRttMsAt(0);
+}
+
+// §PERF-1113：nowMs≠0＝呼叫端已經讀過的時刻（影像接收執行緒每個封包只讀一次時鐘）；0＝自己讀
+int vrmlCtrlRttMsAt(uint64_t nowMs) {
     uint32_t best = VIPLE_VR_LINK_RTT_UNKNOWN;
     int i;
 
     if (!(hubCaps & VIPLE_VR_LINK_F_CTRL) || linkCount == 0) {
         return -1;
     }
-    nowMs = PltGetMillis();
+    if (nowMs == 0) {
+        nowMs = PltGetMillis();
+    }
     for (i = 0; i < linkCount; i++) {
         uint16_t rtt = links[i].rttMs10;
         if (isConfirmed(&links[i], nowMs) && rtt < best) {
@@ -2252,16 +2521,22 @@ int vrmlFeatures(void) {
 }
 
 bool vrmlRepairRtt(unsigned mask, VRRR_RTT_STATS* out) {
+    return vrmlRepairRttAt(mask, out, 0);
+}
+
+// §PERF-1113：nowMs 同 vrmlCtrlRttMsAt
+bool vrmlRepairRttAt(unsigned mask, VRRR_RTT_STATS* out, uint64_t nowMs) {
     VRRR_RTT_STATS per[VIPLE_VR_LINK_MAX];
     unsigned have = 0;
-    uint64_t nowMs;
     int i;
 
     if (linkCount == 0) {
         return false;
     }
     memset(per, 0, sizeof(per));
-    nowMs = PltGetMillis();
+    if (nowMs == 0) {
+        nowMs = PltGetMillis();
+    }
     for (i = 0; i < linkCount; i++) {
         if (links[i].rttHave && isConfirmed(&links[i], nowMs)) {
             per[i] = links[i].rttStats;
@@ -2292,7 +2567,7 @@ void vrmlStart(void) {}
 void vrmlStop(void) {}
 int vrmlLinkCount(void) { return 0; }
 void vrmlOnS2C(const unsigned char* tlv, int len) { (void)tlv; (void)len; }
-int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeoutMs) { (void)legacy; (void)buffer; (void)size; (void)timeoutMs; *linkIdx = -1; return -1; }
+int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeoutUs, char** direct) { (void)legacy; (void)size; (void)timeoutUs; *linkIdx = -1; if (direct != NULL) { *direct = buffer; } return -1; }
 void vrmlNoteVideoUsed(int linkIdx) { (void)linkIdx; }
 int vrmlVideoCarrying(void) { return 0; }
 int vrmlAnyAlive(void) { return 0; }
@@ -2304,8 +2579,10 @@ int vrmlRecvAudio(SOCKET legacy, char* buffer, int size) { (void)legacy; (void)b
 int vrmlSendTracking(const void* sample, int length) { (void)sample; (void)length; return 0; }
 int vrmlSendCtrl(const unsigned char* tlv, int length) { (void)tlv; (void)length; return 0; }
 int vrmlCtrlRttMs(void) { return -1; }
+int vrmlCtrlRttMsAt(uint64_t nowMs) { (void)nowMs; return -1; }
 int vrmlFeatures(void) { return 0; }
 bool vrmlRepairRtt(unsigned mask, VRRR_RTT_STATS* out) { (void)mask; (void)out; return false; }
+bool vrmlRepairRttAt(unsigned mask, VRRR_RTT_STATS* out, uint64_t nowMs) { (void)mask; (void)out; (void)nowMs; return false; }
 bool vrmlTakeGone(uint32_t* frame, uint8_t* block) { (void)frame; (void)block; return false; }
 
 #endif

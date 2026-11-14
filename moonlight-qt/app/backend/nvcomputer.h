@@ -69,8 +69,11 @@ public:
         RI_VPN,
     };
 
+    // §PERF-1113 A22：mtuOut／peerOut 給串流端決定影像封包大小用。找到對應的本機介面時才填：
+    // mtuOut＝那張介面的 MTU（0＝系統沒回報，當成不知道），peerOut＝實際連上的對端位址（主機名稱解析後的結果）。
+    // 沒連上、找不到介面時維持 0 與空位址
     ReachabilityType
-    getActiveAddressReachability() const;
+    getActiveAddressReachability(int* mtuOut = nullptr, QHostAddress* peerOut = nullptr) const;
 
     QVector<NvAddress>
     uniqueAddresses() const;

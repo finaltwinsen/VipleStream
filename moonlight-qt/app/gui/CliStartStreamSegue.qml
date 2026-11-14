@@ -58,7 +58,9 @@ Item {
                     "session":   cliStreamSession,
                     "quitAfter": true
                 })
-                stackView.push(segue)
+                // §PERF-1113 A6：不跑轉場動畫。StreamSegue 要等 StackView.onActivated（轉場結束）才開始
+                // session.initialize()，Material 的轉場約 200 ms；這一頁只是過場，無頭的 VR 子行程更是沒人看
+                stackView.push(segue, StackView.Immediate)
             })
         }
     }

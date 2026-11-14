@@ -75,7 +75,13 @@ Item {
         }
 
         // Re-enable GUI gamepad usage now
-        SdlGamepadKeyNavigation.enable()
+        // §PERF-1113 A31：下面兩條「馬上結束行程」的路（命令列串流正常結束、C++ 驅動的命令列串流出錯）不必再把
+        // 手把子系統開起來——開了也是立刻被關掉。條件和下面的 if／else if 一致
+        var exitingNow = quitAfter && (!streamSegueErrorDialog.text ||
+                                       (typeof cliStreamSession !== "undefined" && cliStreamSession))
+        if (!exitingNow) {
+            SdlGamepadKeyNavigation.enable()
+        }
 
         // Pop the StreamSegue off the stack if this is a GUI-based app launch
         if (!quitAfter) {
@@ -232,11 +238,18 @@ Item {
             // Don't wait unless we have toasts to display
             startSessionTimer.interval = 0
 
+            // §PERF-1113 A24：Qt 用 offscreen（頭盔的 VR／XR 桌面子行程）時沒有任何人看得到提示：警告照樣寫進 log，
+            // 不建提示、也不為它多等 3.5 秒才開始串流。不能用 window.visible 判斷（offscreen 下也是 true）
+            var headless = Qt.platform.pluginName === "offscreen"
+
             // Display the toasts together in a vertical centered arrangement
             var yOffset = 0
             for (var i = 0; i < session.launchWarnings.length; i++) {
                 var text = session.launchWarnings[i]
                 console.warn(text)
+                if (headless) {
+                    continue
+                }
 
                 // Show the tooltip for 3 seconds
                 var toast = Qt.createQmlObject('import QtQuick.Controls 2.2; ToolTip {}', parent, '')

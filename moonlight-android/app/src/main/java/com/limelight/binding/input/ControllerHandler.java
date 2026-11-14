@@ -1594,43 +1594,39 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         }
     }
 
-    private Vector2d populateCachedVector(float x, float y) {
-        // §REVIEW-1104：主執行緒與 USB 執行緒不能共用同一顆 Vector2d，否則搖桿分量會被蓋掉
-        Vector2d vector = new Vector2d();
-        vector.initialize(x, y);
-        return vector;
-    }
-
-    private void handleDeadZone(Vector2d stickVector, float deadzoneRadius) {
-        if (stickVector.getMagnitude() <= deadzoneRadius) {
-            // Deadzone
-            stickVector.initialize(0, 0);
-        }
-
+    // §PERF-1113：搖桿死區判斷改成純量運算。原本每個手把事件替兩支搖桿各 new 一顆 Vector2d
+    // （高回報率手把每秒上千顆），是串流期間唯一持續產生垃圾的輸入路徑；純量版沒有共用狀態，
+    // 所以 §REVIEW-1104 要的執行緒隔離仍然成立。算式與 Vector2d.getMagnitude() 相同（double 精度）。
+    private static boolean isInDeadZone(float x, float y, float deadzoneRadius) {
         // We're not normalizing here because we let the computer handle the deadzones.
         // Normalizing can make the deadzones larger than they should be after the computer also
         // evaluates the deadzone.
+        return Math.sqrt((double) x * x + (double) y * y) <= deadzoneRadius;
     }
 
     private void handleAxisSet(InputDeviceContext context, float lsX, float lsY, float rsX,
                                float rsY, float lt, float rt, float hatX, float hatY) {
 
         if (context.leftStickXAxis != -1 && context.leftStickYAxis != -1) {
-            Vector2d leftStickVector = populateCachedVector(lsX, lsY);
-
-            handleDeadZone(leftStickVector, context.leftStickDeadzoneRadius);
-
-            context.leftStickX = (short) (leftStickVector.getX() * 0x7FFE);
-            context.leftStickY = (short) (-leftStickVector.getY() * 0x7FFE);
+            if (isInDeadZone(lsX, lsY, context.leftStickDeadzoneRadius)) {
+                context.leftStickX = 0;
+                context.leftStickY = 0;
+            }
+            else {
+                context.leftStickX = (short) (lsX * 0x7FFE);
+                context.leftStickY = (short) (-lsY * 0x7FFE);
+            }
         }
 
         if (context.rightStickXAxis != -1 && context.rightStickYAxis != -1) {
-            Vector2d rightStickVector = populateCachedVector(rsX, rsY);
-
-            handleDeadZone(rightStickVector, context.rightStickDeadzoneRadius);
-
-            context.rightStickX = (short) (rightStickVector.getX() * 0x7FFE);
-            context.rightStickY = (short) (-rightStickVector.getY() * 0x7FFE);
+            if (isInDeadZone(rsX, rsY, context.rightStickDeadzoneRadius)) {
+                context.rightStickX = 0;
+                context.rightStickY = 0;
+            }
+            else {
+                context.rightStickX = (short) (rsX * 0x7FFE);
+                context.rightStickY = (short) (-rsY * 0x7FFE);
+            }
         }
 
         if (context.leftTriggerAxis != -1 && context.rightTriggerAxis != -1) {
@@ -2882,19 +2878,24 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
             return;
         }
 
-        Vector2d leftStickVector = populateCachedVector(leftStickX, leftStickY);
+        // §PERF-1113：同 handleAxisSet，死區判斷不再配置 Vector2d
+        if (isInDeadZone(leftStickX, leftStickY, context.leftStickDeadzoneRadius)) {
+            context.leftStickX = 0;
+            context.leftStickY = 0;
+        }
+        else {
+            context.leftStickX = (short) (leftStickX * 0x7FFE);
+            context.leftStickY = (short) (-leftStickY * 0x7FFE);
+        }
 
-        handleDeadZone(leftStickVector, context.leftStickDeadzoneRadius);
-
-        context.leftStickX = (short) (leftStickVector.getX() * 0x7FFE);
-        context.leftStickY = (short) (-leftStickVector.getY() * 0x7FFE);
-
-        Vector2d rightStickVector = populateCachedVector(rightStickX, rightStickY);
-
-        handleDeadZone(rightStickVector, context.rightStickDeadzoneRadius);
-
-        context.rightStickX = (short) (rightStickVector.getX() * 0x7FFE);
-        context.rightStickY = (short) (-rightStickVector.getY() * 0x7FFE);
+        if (isInDeadZone(rightStickX, rightStickY, context.rightStickDeadzoneRadius)) {
+            context.rightStickX = 0;
+            context.rightStickY = 0;
+        }
+        else {
+            context.rightStickX = (short) (rightStickX * 0x7FFE);
+            context.rightStickY = (short) (-rightStickY * 0x7FFE);
+        }
 
         if (leftTrigger <= context.triggerDeadzone) {
             leftTrigger = 0;

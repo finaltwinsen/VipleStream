@@ -299,6 +299,7 @@ CenteredGridView {
             }
 
             Rectangle {
+                id: libraryLivePip
                 visible: libraryBanner.wide
                 anchors.right: parent.right
                 anchors.top: parent.top
@@ -307,6 +308,9 @@ CenteredGridView {
                 width: 12; height: 12; radius: 2
                 color: "#D4FF3A"
                 SequentialAnimation on opacity {
+                    // §PERF-1113：橫幅隱藏（預設 DV_SAFE）或頁面不在最上層時不跑，否則每個 tick 都要求重畫；
+                    // 頭盔 VR 介面上一律不跑（見 PcView.qml 同一處）
+                    running: libraryLivePip.visible && !VrLauncher.shellActive
                     loops: Animation.Infinite
                     NumberAnimation { from: 1.0; to: 0.35; duration: 900 }
                     NumberAnimation { from: 0.35; to: 1.0; duration: 900 }
@@ -391,7 +395,16 @@ CenteredGridView {
             id: appIcon
             anchors.horizontalCenter: parent.horizontalCenter
             y: 10
+            // Bold scales the box-art ~35% bigger to match the
+            // roomier cell; Safe keeps the packed grid proportions.
+            // §PERF-1113：寬高改成宣告式（原本在 onSourceSizeChanged 裡才設）。封面改非同步解碼後，
+            // 載入完成前也要有尺寸——名稱文字與「繼續／結束」按鈕都錨在這張圖上
+            width: appGrid.bold ? 280 : 200
+            height: appGrid.bold ? 373 : 267
             source: model.boxart
+            // §PERF-1113：快取的封面不在 GUI 執行緒解碼（一頁約 20 張，同步解開頁要卡 80～130 ms，捲動每列再卡一次）。
+            // 不設 sourceSize：下面的佔位圖判斷要看原始尺寸，綁自己的寬高還會讓每格解兩次
+            asynchronous: true
 
             onSourceSizeChanged: {
                 // Nearly all of Nvidia's official box art does not match the dimensions of placeholder
@@ -410,11 +423,6 @@ CenteredGridView {
                 {
                     isPlaceholder = false
                 }
-
-                // Bold scales the box-art ~35% bigger to match the
-                // roomier cell; Safe keeps the packed grid proportions.
-                width  = appGrid.bold ? 280 : 200
-                height = appGrid.bold ? 373 : 267
             }
 
             // Display a tooltip with the full name if it's truncated
@@ -632,15 +640,25 @@ CenteredGridView {
             }
         }
 
-        onPressAndHold: {
-            // popup() ensures the menu appears under the mouse cursor
-            if (appContextMenu.popup) {
+        // §PERF-1113：右鍵選單用到才建（見下方 appContextMenuLoader），所有開啟點都要走這裡。
+        // atCursor：滑鼠／觸控開的出現在游標下；鍵盤／手把開的貼著這一格
+        function openContextMenu(atCursor) {
+            appContextMenuLoader.active = true
+            if (!appContextMenu) {
+                return
+            }
+            if (atCursor && appContextMenu.popup) {
+                // popup() ensures the menu appears under the mouse cursor
                 appContextMenu.popup()
             }
             else {
                 // Qt 5.9 doesn't have popup()
                 appContextMenu.open()
             }
+        }
+
+        onPressAndHold: {
+            openContextMenu(true)
         }
 
         MouseArea {
@@ -658,7 +676,7 @@ CenteredGridView {
             if (model.running) {
                 // This will be keyboard/gamepad driven so use
                 // open() instead of popup()
-                appContextMenu.open()
+                openContextMenu(false)
             }
         }
 
@@ -669,13 +687,13 @@ CenteredGridView {
             if (model.running) {
                 // This will be keyboard/gamepad driven so use
                 // open() instead of popup()
-                appContextMenu.open()
+                openContextMenu(false)
             }
         }
 
         Keys.onMenuPressed: {
             // This will be keyboard/gamepad driven so use open() instead of popup()
-            appContextMenu.open()
+            openContextMenu(false)
         }
 
         function doQuitGame() {
@@ -687,7 +705,10 @@ CenteredGridView {
 
         Loader {
             id: appContextMenuLoader
-            asynchronous: true
+            // §PERF-1113：原本每一格都預先建一份選單（約 140 個物件），多數格子永遠不會開；頭盔 VR 介面沒有
+            // incubation controller，asynchronous 等於同步，開頁與捲動都卡在這裡。改成 openContextMenu() 第一次
+            // 呼叫時才建。不可加回 asynchronous（active 設好當下 item 就要在），開過就留著、不在關閉時卸載
+            active: false
             sourceComponent: NavigableMenu {
                 id: appContextMenu
                 initiator: appContextMenuLoader.parent

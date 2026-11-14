@@ -541,7 +541,42 @@ void XrVrControllers::applyTestInput(int h, uint32_t* buttons, uint32_t* touches
     *touches = *buttons;
 }
 
-void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrSpace trackSpace)
+// §PERF-1113：握把姿態這一半（原本在 updateFrame 的每手迴圈開頭）。留在 xrWaitFrame 之後，用這一格的預測顯示時間。
+// 只寫 Hand 的姿態欄位；按鍵欄位由 updateButtons 寫（兩者都在 frame thread，不會交錯）
+void XrVrControllers::updateGripPose(XrTime predictedDisplayTime, XrSpace trackSpace)
+{
+    bool active[2] = {false, false};
+    bool ok[2] = {false, false};
+    Hand located[2];
+    for (int h = 0; h < 2; h++) {
+        active[h] = poseIsActive(h);
+        ok[h] = locateGrip(h, trackSpace, predictedDisplayTime, &located[h]);
+    }
+    std::lock_guard<std::mutex> lk(m_Mutex);
+    for (int h = 0; h < 2; h++) {
+        Hand& hd = m_Hand[h];
+        hd.poseActive = active[h];
+        if (ok[h]) {
+            hd.poseValid = true;
+            memcpy(hd.pos, located[h].pos, sizeof(hd.pos));
+            memcpy(hd.rot, located[h].rot, sizeof(hd.rot));
+            memcpy(hd.linVel, located[h].linVel, sizeof(hd.linVel));
+            memcpy(hd.angVel, located[h].angVel, sizeof(hd.angVel));
+            // §REVIEW-1104：frameloop 不重 locate，速度有效旗標沒抄的話統計永遠是 0%
+            hd.linValid = located[h].linValid;
+            hd.angValid = located[h].angValid;
+        }
+        else {
+            hd.poseValid = false;
+            // §REVIEW-1104：locate 失敗時清掉上一格留下的速度有效旗標
+            hd.linValid = false;
+            hd.angValid = false;
+        }
+    }
+}
+
+// §PERF-1113：按鍵這一半。緊接在 xrSyncActions 後面呼叫（action state 只在 sync 那一刻更新，晚讀只是晚發布）
+void XrVrControllers::updateButtons(bool focused, uint64_t syncDoneNs)
 {
     const uint64_t nowNs = steadyNowNs();
     Hand next[2];
@@ -606,26 +641,7 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
     const bool kbMask = m_KbOpen || m_KbMaskUntilRelease;
 
     for (int h = 0; h < 2; h++) {
-        Hand& hd = next[h];
-        hd.poseActive = poseIsActive(h);
-        Hand located = hd;
-        located.poseValid = false;
-        if (locateGrip(h, trackSpace, predictedDisplayTime, &located)) {
-            hd.poseValid = true;
-            memcpy(hd.pos, located.pos, sizeof(hd.pos));
-            memcpy(hd.rot, located.rot, sizeof(hd.rot));
-            memcpy(hd.linVel, located.linVel, sizeof(hd.linVel));
-            memcpy(hd.angVel, located.angVel, sizeof(hd.angVel));
-            // §REVIEW-1104：frameloop 不重 locate，速度有效旗標沒抄的話統計永遠是 0%
-            hd.linValid = located.linValid;
-            hd.angValid = located.angValid;
-        }
-        else {
-            hd.poseValid = false;
-            // §REVIEW-1104：locate 失敗時清掉上一格留下的速度有效旗標
-            hd.linValid = false;
-            hd.angValid = false;
-        }
+        Hand& hd = next[h];  // 姿態欄位是從 m_Hand 抄來的原值，這裡不動（updateGripPose 負責）
 
         uint32_t buttons = 0, touches = 0;
         float trigger = 0.0f, grip = 0.0f, sx = 0.0f, sy = 0.0f;
@@ -720,9 +736,18 @@ void XrVrControllers::updateFrame(XrTime predictedDisplayTime, bool focused, XrS
     }
 
     // edges 只在 frame thread 累加（takeStatsLine 也在 frame thread 歸零），直接以 next 覆蓋
+    // （姿態欄位也只有 frame thread 的 updateGripPose 會寫，next 裡的就是目前的值）
+    const uint64_t doneNs = syncDoneNs != 0 ? steadyNowNs() : 0;
     std::lock_guard<std::mutex> lk(m_Mutex);
     m_Hand[0] = next[0];
     m_Hand[1] = next[1];
+    if (syncDoneNs != 0 && doneNs >= syncDoneNs) {
+        // §PERF-1113：xrSyncActions 返回 → 快照可以被送出（改之前約一整格，改之後應該在 0.1 ms 上下）
+        const uint32_t us = static_cast<uint32_t>((std::min<uint64_t>)((doneNs - syncDoneNs) / 1000ull, 0xffffffffu));
+        m_StatSnapSumUs += us;
+        m_StatSnapN++;
+        m_StatSnapMaxUs = (std::max)(m_StatSnapMaxUs, us);
+    }
 }
 
 // ── §VR-KBD ──
@@ -1140,6 +1165,7 @@ QString XrVrControllers::takeStatsLine()
     bool focused;
     uint32_t combos, focusLoss;
     VelStat vel[2];
+    uint32_t snapAvgUs = 0, snapMaxUs = 0, snapN = 0;  // §PERF-1113
     {
         std::lock_guard<std::mutex> lk(m_Mutex);
         snap[0] = m_Hand[0];
@@ -1155,6 +1181,12 @@ QString XrVrControllers::takeStatsLine()
         vel[1] = m_VelStat[1];
         m_VelStat[0] = VelStat {};
         m_VelStat[1] = VelStat {};
+        snapAvgUs = m_StatSnapN ? static_cast<uint32_t>(m_StatSnapSumUs / m_StatSnapN) : 0;
+        snapMaxUs = m_StatSnapMaxUs;
+        snapN = m_StatSnapN;
+        m_StatSnapSumUs = 0;
+        m_StatSnapN = 0;
+        m_StatSnapMaxUs = 0;
     }
     const uint32_t applied = m_StatHapticApplied, failed = m_StatHapticFailed, dropped = m_StatHapticDropped;
     m_StatHapticApplied = m_StatHapticFailed = m_StatHapticDropped = 0;
@@ -1173,6 +1205,10 @@ QString XrVrControllers::takeStatsLine()
         // §VR-KBD：只記數量，不記按了哪些鍵
         velLine += QStringLiteral(" | kbd %1 keys=%2 moves=%3").arg(m_KbOpen ? QStringLiteral("open") : QStringLiteral("closed")).arg(m_StatKbKeys).arg(m_StatKbDrags);
         m_StatKbKeys = 0;
+    }
+    if (snapN != 0) {
+        // §PERF-1113：尾端加一欄，前段欄位順序不變
+        velLine += QStringLiteral(" | sync2snap avg=%1 max=%2 us").arg(snapAvgUs).arg(snapMaxUs);
     }
     return QStringLiteral("L active=%1 edges=%2 pressCtr=0x%3 | R active=%4 edges=%5 pressCtr=0x%6 | focused=%7 "
                           "systemCombos=%8 focusLoss=%9 | haptic applied=%10 failed=%11 dropped=%12%13%14")

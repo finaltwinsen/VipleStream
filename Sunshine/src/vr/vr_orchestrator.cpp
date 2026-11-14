@@ -37,6 +37,14 @@ namespace vr::orchestrator {
       negotiated_t neg;
       app_ref_t app;
       bool force = false;
+      uint64_t prewarm_seq = 0;  ///< 呼叫端交給 start() 的 prewarm() 回傳值（0＝這次 start() 沒有預先探測）
+    };
+
+    /// §PREWARM：編排執行緒替某一次 prewarm() 探測好的環境
+    struct prewarm_done_t {
+      uint64_t seq = 0;
+      platform::env_t env;
+      std::chrono::steady_clock::time_point at {};
     };
 
     std::mutex g_mtx;
@@ -48,6 +56,11 @@ namespace vr::orchestrator {
     bool g_stop_req = false;
     std::optional<job_t> g_pending;
     std::optional<launch_params_t> g_cur_params;
+    // §PREWARM（三個都在 g_mtx 下讀寫）：prewarm() 設要求、把序號加一並回傳給呼叫端；編排執行緒探測完存進
+    // g_prewarm_done；PRECHECK 只在序號對得上「呼叫端交給 start() 的那一個」時沿用，用過就清
+    bool g_prewarm_req = false;
+    uint64_t g_prewarm_seq = 0;
+    std::optional<prewarm_done_t> g_prewarm_done;
 
     std::atomic<uint8_t> g_state {0};
     std::atomic<uint8_t> g_start_from {0};  ///< start() 先把狀態設成 PRECHECK；轉換 log 要印真正的來源狀態
@@ -154,7 +167,7 @@ namespace vr::orchestrator {
       return g_stop_req || g_quit;
     }
 
-    /// 在編排執行緒上等條件（每 50 ms 查一次）；stop 要求或逾時回 false
+    /// 在編排執行緒上等條件（每 50 ms 查一次，bridge 有狀態事件時由 on_bridge_event 提早叫醒）；stop 要求或逾時回 false
     template<class F>
     bool wait_for(std::chrono::milliseconds timeout, F &&cond) {
       const auto end = steady::now() + timeout;
@@ -169,6 +182,62 @@ namespace vr::orchestrator {
         g_cv.wait_for(lk, 50ms);
       }
       return cond();
+    }
+
+    /**
+     * @brief bridge 的事件 sink（在 bridge 執行緒上呼叫，不可阻塞）：只把編排執行緒從等待裡叫醒，讓它早一點看到
+     *        「driver 好了／斷了／HMD 開始或停止呈現」，條件照舊由編排執行緒自己判斷。
+     *
+     * 不呼叫 kick()：那會跑一整輪維護，連得上 pipe 的本機行程就能反覆觸發。握手被拒、pipe 狀態、WELCOME 也不叫醒——
+     * 那些不必通過驗證就能產生。叫醒與等待之間沒有共用的鎖，漏掉一次就是照舊等到 50 ms 的輪詢。
+     */
+    void on_bridge_event(const bridge::event_t &e) {
+      switch (e.kind) {
+        case bridge::event_e::ready:
+        case bridge::event_e::teardown:
+          // 每條通過握手的連線各只有一次，不限速也不佔下面的限速額度：SteamVR 已開著時 READY 之後一兩個幀週期
+          // 就是 HMD_PRESENTING，共用額度的話後者會被丟掉、WAIT_HMD 又得等 50 ms 的輪詢
+          g_cv.notify_all();
+          return;
+        case bridge::event_e::driver_state:
+#if VIPLE_VR_BRIDGE_HAS_ABI
+          if (e.a == VRIPC_ST_HMD_PRESENTING || e.a == VRIPC_ST_HMD_STANDBY || e.a == VRIPC_ST_DEGRADED) {
+            break;
+          }
+#endif
+          return;
+        default:
+          return;
+      }
+      // 通過握手的對端可以連續送 STATE：這幾種 STATE 合起來 20 ms 內只叫醒一次，其餘交給 50 ms 的輪詢
+      static std::atomic<int64_t> last_wake_ms {0};
+      const int64_t now = now_ms();
+      const int64_t last = last_wake_ms.load(std::memory_order_relaxed);
+      if (last != 0 && now - last < 20) {
+        return;
+      }
+      last_wake_ms.store(now, std::memory_order_relaxed);
+      g_cv.notify_all();
+    }
+
+    /// §PREWARM：PRECHECK 能沿用的探測結果最多放多久（中間隔著編碼器探測與啟動 app；超過就照舊完整探測）
+    constexpr auto k_prewarm_max_age = 5s;
+    // §VR-CTRL-EXTRAP：vr_ctrl_extrap_ms = auto 時 SteamVR 對控制器的外插上限。區網本來就只外插約 20 ms（等於不變），
+    // 外出時是 45～55 ms（砍到 20 ms）——上限以內的部分維持原樣，手的畫面不會比在家裡時更晚
+    constexpr int k_ctrl_extrap_auto_ms = 20;
+
+    /// 取出替這個 job 的 /launch 預先探測好的環境（序號要對得上、而且夠新）；取過就清，不會被下一場誤用
+    [[maybe_unused]] std::optional<platform::env_t> take_prewarmed_env(uint64_t seq) {
+      std::lock_guard lk(g_mtx);
+      if (!g_prewarm_done) {
+        return std::nullopt;
+      }
+      auto done = std::move(*g_prewarm_done);
+      g_prewarm_done.reset();
+      if (seq == 0 || done.seq != seq || steady::now() - done.at > k_prewarm_max_age) {
+        return std::nullopt;
+      }
+      return std::move(done.env);
     }
 
     /// 失敗：ERROR(code)；disarm；STATE 保留 10 s
@@ -272,10 +341,20 @@ namespace vr::orchestrator {
       c.pose_flags = (config::vr.ctrl_pose_offset ? VRIPC_POSE_F_CTRL_OFFSET : 0u) |
                      (config::vr.stale_policy == config::vr_t::stale_e::hold ? VRIPC_POSE_F_STALE_HOLD : 0u) |
                      (config::vr.stale_policy == config::vr_t::stale_e::blend ? VRIPC_POSE_F_STALE_BLEND : 0u) |
+                     // §VR-STALE-COAST：連 BLEND 一起設——driver 認得 COAST 就走新的軌跡，認不得（舊 driver）就照 blend
+                     (config::vr.stale_policy == config::vr_t::stale_e::coast ? (VRIPC_POSE_F_STALE_BLEND | VRIPC_POSE_F_STALE_COAST) : 0u) |
                      (config::vr.angvel_local ? VRIPC_POSE_F_ANGVEL_LOCAL : 0u);
       BOOST_LOG(info) << "[VIPLE-VR-ORCH] pose flags ctrlOffset=" << (config::vr.ctrl_pose_offset ? 1 : 0)
-                      << " stalePolicy=" << (config::vr.stale_policy == config::vr_t::stale_e::blend ? "blend" : config::vr.stale_policy == config::vr_t::stale_e::hold ? "hold" : "legacy")
-                      << " angvelLocal=" << (config::vr.angvel_local ? 1 : 0);
+                      << " stalePolicy=" << (config::vr.stale_policy == config::vr_t::stale_e::blend ? "blend" : config::vr.stale_policy == config::vr_t::stale_e::hold ? "hold" : config::vr.stale_policy == config::vr_t::stale_e::coast ? "coast" : "legacy")
+                      << " angvelLocal=" << (config::vr.angvel_local ? 1 : 0)
+                      << " ctrlExtrapMs="
+                      << (config::vr.ctrl_extrap_ms == -1 ? std::string {"unlimited"} :
+                          config::vr.ctrl_extrap_ms < 0 ? std::format("auto({})", k_ctrl_extrap_auto_ms) :
+                                                          std::to_string(std::min(config::vr.ctrl_extrap_ms, 50)));
+      // §VR-CTRL-EXTRAP：0＝不限制（舊行為；舊 driver 讀到的是原本的 reserved，不受影響），n＋1＝最多外插 n 毫秒
+      c.ctrl_keep_ms_p1 = config::vr.ctrl_extrap_ms == -1 ? (uint8_t) 0 :
+                          config::vr.ctrl_extrap_ms < 0 ? (uint8_t) (k_ctrl_extrap_auto_ms + 1) :
+                                                          (uint8_t) (std::min(config::vr.ctrl_extrap_ms, 50) + 1);
       // §VR-RENDER-SCALE：算圖尺寸與串流尺寸分開（100＝相同）
       c.render_scale_pct = (uint16_t) (config::vr.render_scale_pct < 100 ? 100 : config::vr.render_scale_pct > 250 ? 250 : config::vr.render_scale_pct);
       // §VR-RENDER-CAP（2026-10-30）：算圖尺寸上限 vr_render_target_max（不低於串流尺寸）——倍率固定時每眼 2160 會要遊戲算 4060
@@ -335,7 +414,16 @@ namespace vr::orchestrator {
 
       // 1 PRECHECK
       set_state(state_e::precheck);
-      const auto env = platform::probe_environment(true);
+      // §PREWARM：/launch 一通過檢查就請這條執行緒先探測過環境了（和 HTTP 執行緒上的編碼器探測並行），這裡沿用
+      // 「這一次 /launch」的結果，只補查隨時會變的幾項（使用者、鎖定、session；pipe 狀態下面本來就現查）。
+      // 對不上（探測還沒輪到 job 就來了、隔太久）就照舊完整探測。不可以改用 60 秒的例行快取：選到的 LUID 會寫進
+      // session config。
+      auto prewarmed = take_prewarmed_env(job.prewarm_seq);
+      const bool env_prewarmed = prewarmed.has_value();
+      if (prewarmed) {
+        platform::refresh_volatile_environment(*prewarmed);
+      }
+      const auto env = prewarmed ? std::move(*prewarmed) : platform::probe_environment(true);
       {
         const auto bs = bridge::status();
         uint16_t code = 0;
@@ -354,7 +442,7 @@ namespace vr::orchestrator {
         } else if (!env.install_dir_safe) {
           code = VIPLE_VR_STATE_CODE_DEPLOY_REFUSED, why = "install dir unsafe: " + env.unsafe_reason;
         }
-        step("precheck", code == 0, why, t0);
+        step("precheck", code == 0, code == 0 && env_prewarmed ? "prewarmed"s : why, t0);
         if (code) {
           return fail(code, why);
         }
@@ -874,15 +962,19 @@ namespace vr::orchestrator {
     void maintenance(steady::time_point &last_env) {
       if (steady::now() - last_env >= 60s) {
         last_env = steady::now();
-        platform::probe_environment(true);
+        // 例行探測：adapter 沒變過就沿用上一次選到的，不必每分鐘對每張卡建一次 D3D11 device（PRECHECK 仍完整重選）
+        platform::probe_environment(true, true);
       }
+      // 這一輪要看的行程一次拍齊：下面三處原本各拍一次全系統快照，閒置時就是每 2 秒 3～4 次。
+      // idle_quit_steamvr 裡的檢查與它之後的 guard 還原不用這一份、照舊現拍——那時 SteamVR 可能剛被我們結束。
+      const auto procs = platform::snapshot_procs();
       // STEP0-3：vrserver 在跑時 bridge 一律知道合法 driver 宿主映像（server 重啟後 driver 才連得回來，
       // 否則衝突偵測會把我們自己的 SteamVR 當成 vrlink）
-      if (platform::vrserver_pid() != 0) {
-        bridge::set_expected_driver_host_image(platform::expected_driver_host_image());
+      if (procs.vrserver_pid != 0) {
+        bridge::set_expected_driver_host_image(platform::expected_driver_host_image(procs));
       }
       const auto bs = bridge::status();
-      platform::detect_conflicts(bs.connected && !bs.peer_is_selftest, bs.other_hmd);
+      platform::detect_conflicts(bs.connected && !bs.peer_is_selftest, bs.other_hmd, procs);
       const auto st = cur();
       if (st == state_e::error && now_ms() < g_error_until_ms.load()) {
         return;
@@ -914,15 +1006,25 @@ namespace vr::orchestrator {
       maintenance(last_env);
       for (;;) {
         std::optional<job_t> job;
+        std::optional<uint64_t> prewarm_seq;
         {
           std::unique_lock lk(g_mtx);
           g_cv.wait_for(lk, 2s, []() {
-            return g_quit || g_pending.has_value() || g_kick;
+            return g_quit || g_pending.has_value() || g_kick || g_prewarm_req;
           });
           if (g_quit) {
             break;
           }
-          g_kick = false;
+          // §PREWARM：job 已經排進來的話 PRECHECK 自己會完整探測，不必先探一次
+          if (g_prewarm_req) {
+            g_prewarm_req = false;
+            if (!g_pending) {
+              prewarm_seq = g_prewarm_seq;
+            }
+          }
+          if (!prewarm_seq) {
+            g_kick = false;  // 這一輪只做預先探測時留著，探完回到這裡再處理
+          }
           if (g_pending) {
             job = std::move(g_pending);
             g_pending.reset();
@@ -935,6 +1037,17 @@ namespace vr::orchestrator {
             BOOST_LOG(info) << "[VIPLE-VR-ORCH] start cancelled before run - leaving PRECHECK";
             set_state(platform::guard_pending() ? state_e::restore_pending : state_e::idle);
           }
+        }
+        if (prewarm_seq) {
+          // §PREWARM：只探測環境、不跑這一輪維護——job 隨後就到，不讓它排在維護（行程快照、可能的 guard 還原）後面。
+          // 完整探測（adapter 重選）：結果是給 PRECHECK 用的
+          const auto t0 = steady::now();
+          auto env = platform::probe_environment(true);
+          BOOST_LOG(info) << "[VIPLE-VR-ORCH] prewarm: environment probed ahead of PRECHECK ms="
+                          << std::chrono::duration_cast<std::chrono::milliseconds>(steady::now() - t0).count();
+          std::lock_guard lk(g_mtx);
+          g_prewarm_done = prewarm_done_t {*prewarm_seq, std::move(env), steady::now()};
+          continue;
         }
         if (job) {
           g_idle_quit_reset = true;  // §REVIEW-1103（B041-1）
@@ -1006,13 +1119,17 @@ namespace vr::orchestrator {
   }
 
   void init() {
-    std::lock_guard lk(g_mtx);
-    if (g_running || !::vr::platform_supported()) {
-      return;
+    {
+      std::lock_guard lk(g_mtx);
+      if (g_running || !::vr::platform_supported()) {
+        return;
+      }
+      g_quit = false;
+      g_running = true;
+      g_thread = std::thread(thread_main);
     }
-    g_quit = false;
-    g_running = true;
-    g_thread = std::thread(thread_main);
+    // 放掉 g_mtx 才設：不在自己的鎖裡去拿 bridge 的鎖
+    bridge::set_event_sink(on_bridge_event);
   }
 
   void shutdown() {
@@ -1024,6 +1141,8 @@ namespace vr::orchestrator {
       g_quit = true;
       g_stop_req = true;
     }
+    // join 之前就拿掉：編排執行緒結束之後，bridge 不該再有東西往這裡叫
+    bridge::set_event_sink(nullptr);
     g_cv.notify_all();
     if (g_thread.joinable()) {
       g_thread.join();
@@ -1037,7 +1156,7 @@ namespace vr::orchestrator {
     return g_running;
   }
 
-  bool start(const negotiated_t &neg, const app_ref_t &app, bool force) {
+  bool start(const negotiated_t &neg, const app_ref_t &app, bool force, uint64_t prewarm_token) {
     {
       std::lock_guard lk(g_mtx);
       if (!g_running || g_pending) {
@@ -1048,6 +1167,9 @@ namespace vr::orchestrator {
         return false;
       }
       g_pending = job_t {neg, app, force};
+      // §PREWARM：PRECHECK 只沿用呼叫端自己那一次 prewarm() 探測出來的環境。不可以改記「當下最新的序號」：
+      // 沒有呼叫 prewarm() 的 start()（selftest）會撿到別次 /launch 留下來、沒人取走的結果
+      g_pending->prewarm_seq = prewarm_token;
       g_cur_params = neg.params;
       g_stop_req = false;
       // 從這裡起 active() 為 true（PRECHECK 由執行緒記轉換 log）
@@ -1113,6 +1235,28 @@ namespace vr::orchestrator {
       g_kick = true;
     }
     g_cv.notify_all();
+  }
+
+  uint64_t prewarm() {
+    uint64_t token = 0;
+    {
+      std::lock_guard lk(g_mtx);
+      if (!g_running) {
+        return 0;
+      }
+      // 先換序號、丟掉先前的結果：那是替別次 /launch 探測的，不能算在這一次頭上
+      ++g_prewarm_seq;
+      g_prewarm_done.reset();
+      // 編排進行中或 job 已經排進來：start() 會被拒，或環境由 run_session 自己探測，不必先探
+      const auto s = cur();
+      if (g_pending || (s != state_e::idle && s != state_e::restore_pending && s != state_e::error)) {
+        return 0;
+      }
+      g_prewarm_req = true;
+      token = g_prewarm_seq;  // 從 1 起算，0 留給「沒有預先探測」
+    }
+    g_cv.notify_all();
+    return token;
   }
 
   bool wait_idle(std::chrono::milliseconds timeout) {

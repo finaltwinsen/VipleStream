@@ -75,6 +75,34 @@ namespace upnp {
     return "Unrecognized IGD status"sv;
   }
 
+  // §PERF-1113：UPNP_GetValidIGD() 回「有 UPnP 裝置回應，但不是 IGD」的狀態碼（兩代 API 的數值不同，見上）。
+  // 只有這一種和「完全沒有 SSDP 回應」會拉長重試間隔。
+#if (MINIUPNPC_API_VERSION >= 18)
+  static constexpr int IGD_STATUS_NOT_IGD = 4;  // UPNP_UNKNOWN_DEVICE
+#else
+  static constexpr int IGD_STATUS_NOT_IGD = 3;
+#endif
+
+  /**
+   * §PERF-1113：同一種「區網沒有 IGD」的失敗連續 streak 輪之後，下一次探測前要跳過幾輪（一輪＝REFRESH_INTERVAL）。
+   * 前 FAIL_FULL_DETAIL_CYCLES − 1 次不跳（照原節奏重試，開機時路由器還沒就緒多半在這幾輪內恢復），
+   * 之後 4／8／16／30 分鐘。用跳過輪數而不是加長等待，執行緒的等待方式與關機反應都和原本相同。
+   */
+  static unsigned backoff_skip_cycles(unsigned streak) {
+    if (streak < FAIL_FULL_DETAIL_CYCLES) {
+      return 0;
+    }
+    std::chrono::seconds delay = FAIL_BACKOFF_FIRST;
+    for (unsigned i = FAIL_FULL_DETAIL_CYCLES; i < streak && delay < FAIL_BACKOFF_MAX; ++i) {
+      delay *= 2;
+    }
+    if (delay > FAIL_BACKOFF_MAX) {
+      delay = FAIL_BACKOFF_MAX;
+    }
+    const auto cycles = delay / REFRESH_INTERVAL;
+    return cycles > 1 ? (unsigned) (cycles - 1) : 0u;
+  }
+
   /**
    * VipleStream §UPNP-DIAG: miniupnpc / UPnP SOAP 錯誤碼 → "<數值> (<文字>)"。
    * strupnperror() 涵蓋 UPNPCOMMAND_*、UPNPDISCOVER_* 與 UPnP 標準錯誤碼（606、714、718…），
@@ -136,10 +164,14 @@ namespace upnp {
      * 第 FAIL_FULL_DETAIL_CYCLES 輪再補一行 warning 宣告降級；之後每 FAIL_REPORT_INTERVAL 才印一行 warning
      * 帶連續次數與估計時間；失敗種類一變就重新計數；成功時由 report_cycle_success() 印一行 info 並歸零。
      * 上游行為（每 REFRESH_INTERVAL 一行 error、永不停止）在 host 上是 45 次 × ~124 s 全是同一句
-     * "Unknown status"。這裡只改 log，不改重試節奏，也不影響串流（本執行緒獨立、無人等它）。
+     * "Unknown status"。不影響串流（本執行緒獨立、無人等它）。
      * 只在 upnp 執行緒上呼叫，不需要鎖。
+     *
+     * §PERF-1113：may_back_off＝這種失敗代表「區網裡沒有 IGD」而且這次執行沒找到過 IGD。連續幾輪之後
+     * 把下一次探測往後延（skip_cycles，見 backoff_skip_cycles()）；其餘的失敗照舊每 REFRESH_INTERVAL 重試。
+     * log 印的是實際的下一次延遲；連續時間改用實際經過的時間（間隔不再固定，不能用輪數乘出來）。
      */
-    void report_cycle_failure(std::string_view op, int code, const std::string &detail) {
+    void report_cycle_failure(std::string_view op, int code, const std::string &detail, bool may_back_off = false) {
       auto now = std::chrono::steady_clock::now();
       if (fail.op == op && fail.code == code) {
         ++fail.streak;
@@ -147,23 +179,31 @@ namespace upnp {
         fail.op = op;
         fail.code = code;
         fail.streak = 1;
+        fail.since = now;
       }
+
+      skip_cycles = may_back_off ? backoff_skip_cycles(fail.streak) : 0;
+      const auto retry_s = (skip_cycles + 1) * REFRESH_INTERVAL.count();
 
       if (fail.streak <= FAIL_FULL_DETAIL_CYCLES) {
         BOOST_LOG(error) << "[VIPLE-UPNP] "sv << op << " failed (code "sv << code << "): "sv << detail
                          << " [attempt "sv << fail.streak << '/' << FAIL_FULL_DETAIL_CYCLES
-                         << ", retry in "sv << REFRESH_INTERVAL.count() << " s]"sv;
+                         << ", retry in "sv << retry_s << " s]"sv;
         if (fail.streak == FAIL_FULL_DETAIL_CYCLES) {
           BOOST_LOG(warning) << "[VIPLE-UPNP] "sv << op << " failed "sv << FAIL_FULL_DETAIL_CYCLES
                              << " cycles in a row with the same code; further reports every "sv
                              << std::chrono::duration_cast<std::chrono::minutes>(FAIL_REPORT_INTERVAL).count()
-                             << " min until it recovers"sv;
+                             << " min until it recovers"sv
+                             << (skip_cycles ? "; no IGD on this network so far, retrying less often (backing off to every "s
+                                                 + std::to_string(std::chrono::duration_cast<std::chrono::minutes>(FAIL_BACKOFF_MAX).count()) + " min)"s
+                                             : ""s);
         }
         fail.last_report = now;
       } else if (now - fail.last_report >= FAIL_REPORT_INTERVAL) {
-        auto elapsed_min = fail.streak * REFRESH_INTERVAL.count() / 60;
+        auto elapsed_min = std::chrono::duration_cast<std::chrono::minutes>(now - fail.since).count();
         BOOST_LOG(warning) << "[VIPLE-UPNP] "sv << op << " still failing (code "sv << code << "): "sv << detail
-                           << " [x"sv << fail.streak << " consecutive cycles, ~"sv << elapsed_min << " min]"sv;
+                           << " [x"sv << fail.streak << " consecutive cycles, ~"sv << elapsed_min << " min, next retry in "sv
+                           << retry_s << " s]"sv;
         fail.last_report = now;
       }
     }
@@ -409,12 +449,20 @@ namespace upnp {
       // Refresh UPnP rules every few minutes. They can be lost if the router reboots,
       // WAN IP address changes, or various other conditions.
       do {
+        // §PERF-1113：退避中的輪次不探測（continue 會走到底下的 view(REFRESH_INTERVAL)，等待與關機反應不變）
+        if (skip_cycles > 0) {
+          --skip_cycles;
+          continue;
+        }
+
         int err = 0;
         device_t device {upnpDiscover(2000, nullptr, nullptr, 0, IPv4, 2, &err)};
         if (!device || err) {
           // VipleStream §UPNP-DIAG: 上游這裡是 warning 且不印碼；err == 0 代表 2000 ms 內沒有任何 SSDP 回應
+          // §PERF-1113：只有「沒有回應」可以退避；discover 自己出錯（socket 之類）多半是暫時的，照原節奏
           report_cycle_failure("upnpDiscover(IPv4)"sv, err,
-                               err ? "Couldn't discover any IPv4 UPNP devices: "s + err_string(err) : "no SSDP response within 2000 ms"s);
+                               err ? "Couldn't discover any IPv4 UPNP devices: "s + err_string(err) : "no SSDP response within 2000 ms"s,
+                               err == 0 && !igd_ever_found);
           mapped = false;
           continue;
         }
@@ -439,11 +487,16 @@ namespace upnp {
         auto status = upnp::UPNP_GetValidIGDStatus(device, &urls, &data, lan_addr);
         if (status != 1 && status != 2) {
           // VipleStream §UPNP-DIAG: 印出操作、數值碼、文字與回應者；重複失敗由 report_cycle_failure() 去重／降級
+          // §PERF-1113：回應者都不是 IGD 才退避；「IGD 未連線」（WAN 斷線）可能很快恢復，照原節奏
           report_cycle_failure("UPNP_GetValidIGD"sv, status,
-                               std::string(status_string(status)) + "; "s + std::to_string(responder_count) + " SSDP responder(s): "s + responders);
+                               std::string(status_string(status)) + "; "s + std::to_string(responder_count) + " SSDP responder(s): "s + responders,
+                               status == IGD_STATUS_NOT_IGD && !igd_ever_found);
           mapped = false;
           continue;
         }
+
+        // §PERF-1113：這個區網找到過 IGD，之後就算暫時找不到（路由器重開）也不退避，映射掉了才補得快
+        igd_ever_found = true;
 
         std::string lan_addr_str {lan_addr.data()};
 
@@ -511,8 +564,12 @@ namespace upnp {
       int code = 0;            // 該操作的數值碼
       unsigned streak = 0;     // 連續相同失敗的輪數
       std::chrono::steady_clock::time_point last_report {};
+      std::chrono::steady_clock::time_point since {};  // 這一串連續失敗的第一次（§PERF-1113：間隔不固定，連續時間用它算）
     } fail;
     int last_port_err = 0;  // map_upnp_port() 最後一次失敗的碼，供本輪彙整行使用
+    // §PERF-1113：退避（只在 upnp 執行緒上讀寫）
+    unsigned skip_cycles = 0;  // 下一次探測前還要跳過幾輪（一輪＝REFRESH_INTERVAL）
+    bool igd_ever_found = false;  // 這次執行找到過有效的 IGD：之後的失敗不退避
   };
 
   std::unique_ptr<platf::deinit_t> start() {
