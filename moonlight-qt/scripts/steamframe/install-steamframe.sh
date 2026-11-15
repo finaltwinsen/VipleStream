@@ -134,9 +134,41 @@ TARGET_FILE="$TARGET_DIR/hotspot.json"
 
 parse_and_update() {
     local line rest ssid key band_tok _unused hidden=false
+    rm -f "$TARGET_DIR"/hotspot.json.tmp.* 2>/dev/null || true  # 被中斷的寫入留下的暫存檔（含金鑰）
     line="$(journalctl -u softapmanager.service -b --no-pager -o cat 2>/dev/null | grep -F "[create$(printf '\t')" | tail -n 1 || true)"
     if [ -z "$line" ]; then
-        rm -f "$TARGET_FILE"
+        # §FRAME-HOTSPOT-AUTO（2026-11-15）：這次開機熱點沒有開過（使用者把「啟用串流轉接器」關掉）。以前這裡把檔案刪掉，
+        # client 就沒有資料可以在 host 就在旁邊時自動把熱點開起來。改成從 Steam 的設定讀配對時定下的那一組
+        # （config.vdf 的 WifiAPPairedSSID／WifiAPPairedPassword，Steam 開機時送 create 用的就是它）；讀不到就留著舊檔。
+        # 整段在 python 裡做：金鑰不經過 shell 變數、不輸出。
+        mkdir -p -m 0700 "$TARGET_DIR"
+        HS_TARGET="$TARGET_FILE" python3 - <<'PYEOF' || true
+import json, os, re
+target = os.environ["HS_TARGET"]
+try:
+    text = open(os.path.expanduser("~/.local/share/Steam/config/config.vdf"), encoding="utf-8", errors="replace").read()
+except OSError:
+    raise SystemExit(0)
+def val(name):
+    m = re.search(r'"%s"\s*"([^"\\\t\r\n]*)"' % name, text)
+    return m.group(1) if m else ""
+ssid, key = val("WifiAPPairedSSID"), val("WifiAPPairedPassword")
+if not (1 <= len(ssid.encode()) <= 32 and 8 <= len(key) <= 64):
+    raise SystemExit(0)
+body = json.dumps({"version": 1, "ssid": ssid, "key": key, "band": "6GHz", "channel": 0, "auth_type": 2,
+                   "hidden": True, "source": "steam-config"}, indent=2)
+try:
+    if open(target, encoding="utf-8").read().strip() == body:
+        raise SystemExit(0)
+except OSError:
+    pass
+tmp = "%s.tmp.%d" % (target, os.getpid())
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write(body + "\n")
+os.replace(tmp, target)
+print("[VIPLE-VR-HOTSPOT] hotspot is off - kept the paired credentials from the Steam settings (ssid=%s*** keylen=%d)" % (ssid[:3], len(key)))
+PYEOF
         return 0
     fi
     # 欄位以 Tab 分隔（2026-10-30 在頭盔上確認），SSID 可能含空白，所以只用 Tab 切
@@ -173,6 +205,40 @@ print(json.dumps({"version": 1, "ssid": os.environ["HS_SSID"], "key": os.environ
 
 if [ "${1:-}" = "--daemon" ] || [ "${1:-}" = "--follow" ]; then
     parse_and_update || true
+    # §FRAME-HOTSPOT-AUTO（2026-11-16）：App 在區網場次自動開的熱點記在它名下（hotspot-opened，它每幾秒更新一次檔案時間）。
+    # App 不正常結束、之後也沒有再開時沒有人會關——這裡在沙箱外補關：標記檔超過 120 秒沒被更新、熱點還開著就送 teardown。
+    (
+        while sleep 20; do
+            MARK="$TARGET_DIR/hotspot-opened"
+            [ -f "$MARK" ] || continue
+            age=$(( $(date +%s) - $(stat -c %Y "$MARK" 2>/dev/null || echo 0) ))
+            [ "$age" -ge 120 ] || continue
+            HS_MARK="$MARK" python3 - <<'PYEOF' || true
+import os, socket
+def ask(cmd):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    try:
+        s.connect("/run/softapmanager.socket")
+        s.sendall(cmd.encode())
+        return s.recv(256).decode("utf-8", "replace").split("\t")[0]
+    except OSError:
+        return ""
+    finally:
+        s.close()
+state = ask("status")
+if state == "2" and ask("teardown") != "1":
+    raise SystemExit(0)
+if state in ("0", "2"):
+    try:
+        os.unlink(os.environ["HS_MARK"])
+    except OSError:
+        pass
+    if state == "2":
+        print("[VIPLE-VR-HOTSPOT] the app that switched the hotspot on is gone - hotspot switched off")
+PYEOF
+        done
+    ) &
     # softapmanager 有新紀錄（熱點重建、換頻道）就重新解析
     journalctl -u softapmanager.service -b -n 0 -f -o cat 2>/dev/null | while read -r _; do
         parse_and_update || true

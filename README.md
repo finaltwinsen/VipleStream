@@ -223,6 +223,7 @@ More: [`docs/setup_guide.md`](docs/setup_guide.md) (configuration and troublesho
 
 | Version | Highlights |
 |---|---|
+| **2.0.206** | VR from outside over a VPN: lost packets re-requested on remote paths, packets spread out on lines with short gaps, half rate getting its full bitrate, the idle headset hotspot paused; controllers predicted to the displayed frame (bat path error 1.39 → 0.34 mm median over the VPN) with a trigger-held hand left steady; sharp centre and periphery moving together; at home the local address is preferred from the start, the headset hotspot switches on and off by itself and the host joins it in about 6 s instead of 20–30; a start-up crash on the headset fixed. |
 | **2.0.175** | Virtual keyboard inside VR streams (draggable); Xbox controller and steering wheel modes for flat-screen streams on the Steam Frame; the slight picture shift every second or two in VR is gone; fewer bits spent on the periphery (32 Mbps per link in our table tennis test, headset decode 3.2 → 2.0 ms); shortcut list in the toolbar; a full code review worked through, with unpaired `/serverinfo` reduced to pairing fields, Steam account switching limited to the session owner, video sharing limited to one folder by default and updates verified by sha256; QUIC stalls on large frames fixed. |
 | **2.0.122** | Steam Frame foveation rebuilt as two pictures per eye (a reduced full view plus a full-detail picture that follows the gaze) with an Off / Small / Medium / Large setting, taking headset power from about 13 W to under 10 W in our test; automatic half rate when the network is unstable; "Test network" in the headset settings; background Wi-Fi scans blocked while streaming; steering-wheel emulation; headset microphone; automatic updates on every platform; 2D bitrate fixes for congestion and a relative mouse that survives packet loss. |
 | **2.0.63** | Automatic bitrate that adapts to the network (delay trend, loss type, QP-based cap); Tailscale relay-to-direct recovery during a stream; headset buffer fixed and switching between 1 and 2 frames automatically; a large batch of review fixes; Android minimum is now Android 9; Linux .deb depends on Ayatana AppIndicator. |
@@ -472,6 +473,7 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 
 | 版本 | 重點 |
 |---|---|
+| **2.0.206** | 在外面經 VPN 玩 VR：遠端路徑也會重新要求掉的封包、線路有短空檔時封包攤開送、半速拿到完整碼率、閒置的頭盔熱點自動暫停；手把預測到畫面顯示的那一刻（經 VPN 的球拍軌跡誤差中位數 1.39 → 0.34 mm），扳機按著的手保持穩定；清楚的中央和周邊一起動；在家一開始就優先用區域網路位址，頭盔熱點自動開關、主機約 6 秒連上（原本 20～30 秒）；修掉頭盔啟動 VR 時的當機。 |
 | **2.0.175** | VR 串流裡的虛擬鍵盤（可拖動）；Steam Frame 2D 串流的 Xbox 手把與方向盤模式；VR 畫面每一兩秒輕微挪動的問題消失；周邊少花位元（桌球實測每條連線 32 Mbps、頭盔解碼 3.2 → 2.0 ms）；工具列的快捷鍵列表；整份程式碼審查逐項處理，未配對的 `/serverinfo` 只回配對欄位、Steam 帳號切換限 session 擁有者、影片分享預設只開一個資料夾、更新核對 sha256；QUIC 大畫面停頓已修。 |
 | **2.0.122** | Steam Frame 注視點改成每眼兩張畫面（整個視野縮小的一張＋跟著視線、保留完整細節的一張），設定頁可選關閉／小／中／大，實測頭盔耗電從約 13 W 降到 10 W 以下；網路不穩時自動半速；頭盔設定頁「測試網路」；串流時擋掉 Wi-Fi 背景掃描；方向盤模擬；頭盔麥克風；各平台自動更新；2D 塞車時的碼率修正、相對滑鼠不怕掉包。 |
 | **2.0.63** | 碼率依網路自動調整（延遲趨勢、丟包類型、以 QP 決定上限）；串流中 Tailscale 從中繼自動恢復直連；頭盔緩衝修好並自動在 1／2 格之間切換；大批程式碼審查修正；Android 最低改為 Android 9；Linux .deb 改依賴 Ayatana AppIndicator。 |

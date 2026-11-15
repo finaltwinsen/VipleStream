@@ -23,6 +23,20 @@
 // 沒有還原就結束（被強制結束、當掉）時的保險：暫停前把還原用的指令和自己的 pid 寫到資料目錄的 hotspot-paused（0600）。
 // 下一次有人呼叫 recoverStale()（VR 介面啟動時、串流子行程結束時、下一場開始前）看到那個 pid 已經不在就補做還原。
 //
+// §FRAME-HOTSPOT-AUTO（2026-11-15，11-16 改生命週期）：反過來的那一半。熱點關著（使用者在外面為了不讓它搶無線電而關掉）、
+// 這一場不是經 VPN（host 在區網裡，可能就在旁邊）時，串流開始自動把熱點開起來，讓 host 的無線網卡照 §VR-HOTSPOT-AUTO 連上、
+// 多連線熱加入；kJoinWaitS 秒內這台 host 沒有連上就關掉（空開著只會搶無線電）。
+// 什麼時候關（11-16 使用者指定）：**不是**每一場串流結束時——連著玩幾個遊戲時每場都要重等 host 連上。關的時機是
+//   1. App（VR 介面那個行程）結束：正常結束時它自己關（closeIfOwner）；
+//   2. 換到另一台 host 開遊戲：那一台可能有自己的無線網卡，重新等它 kJoinWaitS 秒，等不到就關；
+//   3. App 不正常結束：標記檔 hotspot-opened 沒有人再更新（擁有者每幾秒 touch 一次），下一次啟動的 recoverStale()、
+//      或頭盔上常駐的 update-hotspot.sh（沙箱外，看得到同一個檔）發現它過期就補關。
+// 擁有者：串流行程是 App 開的子行程時，擁有者是 App（父行程）；直接從命令列跑的串流行程自己就是 App，結束時關。
+// 標記檔（0600，沒有機密）：第一行擁有者的 pid、第二行開給哪一台 host（uuid）。pid 只在同一個沙箱裡有意義，
+// 所以「還活著」＝pid 在而且檔案最近 kOwnerFreshS 秒內被更新過。
+// SSID 與金鑰來自 hotspot.json（頭盔上的 update-hotspot.sh 維護），指令格式是 2026-11-14 在頭盔上確認的
+// "create\t<SSID>\t<金鑰>\thbs6\tnoroute\t--hidden"；softapmanager 不接受就什麼都不做。
+//
 // 安全：還原指令含熱點的金鑰。只放在記憶體與那個 0600 的檔案裡，任何 log 都不印它和 status 的回覆。
 // Flatpak 要 --filesystem=/run/softapmanager.socket 與 --filesystem=/run/softapmanager.laststate:ro；沒有就什麼都不做。
 #pragma once
@@ -45,13 +59,162 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <thread>
+#include <time.h>
 #include <unistd.h>
+#include <vector>
 #endif
 
 class FrameHotspot
 {
 public:
     ~FrameHotspot() { resume(); }
+
+    // §FRAME-HOTSPOT-AUTO：不是經 VPN 的 VR 場次開始時呼叫。hostId＝這一場的 host（uuid）；ssid／key 會被清掉
+    void openForLan(std::string& ssid, std::string& key, const std::string& hostId)
+    {
+#if defined(__linux__)
+        std::string cmd;
+        const bool fieldsOk = !ssid.empty() && ssid.size() <= 32 && key.size() >= 8 && key.size() <= 64 &&
+                              ssid.find_first_of("\t\r\n") == std::string::npos && key.find_first_of("\t\r\n") == std::string::npos;
+        if (fieldsOk) {
+            cmd = "create\t" + ssid + "\t" + key + "\thbs6\tnoroute\t--hidden";
+        }
+        scrub(ssid);
+        scrub(key);
+        struct stat st;
+        if (!fieldsOk || m_Opened || m_GaveUp || !m_RestoreCmd.empty() || stat(kSocket, &st) != 0) {
+            scrub(cmd);
+            return;
+        }
+        std::string reply;
+        const bool asked = ask("status", &reply, 2000);
+        const std::string state = firstField(reply);
+        scrub(reply);
+        if (!asked) {
+            scrub(cmd);
+            return;
+        }
+        const long owner = appPid();
+        m_OwnerIsSelf = owner == static_cast<long>(getpid());
+        m_Baseline.clear();
+        if (state == "2") {
+            scrub(cmd);
+            // 已經開著。是我們之前開的（App 還在、連著玩下一個遊戲）就接手；不是就是使用者自己開的，不碰
+            long pid = 0;
+            std::string prevHost;
+            if (!readOpenedMarker(&pid, &prevHost)) {
+                return;
+            }
+            writeOpenedMarker(owner, hostId);
+            m_Opened = true;
+            m_OpenedAt = std::chrono::steady_clock::now();
+            if (prevHost == hostId) {
+                m_PeerSeen = hotspotHasNewPeer(m_Baseline);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: the hotspot is still on from the previous session with this host (%s)",
+                            m_PeerSeen ? "host connected" : "waiting for the host again");
+            }
+            else {
+                // 換了一台 host：上一台的網卡可能還掛在熱點上，不算數——等一個新的對端
+                m_Baseline = hotspotPeers();
+                m_PeerSeen = false;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: the hotspot is on from a session with another host - waiting up to %d s for "
+                            "this host to join (%d device(s) of the previous one ignored)",
+                            kJoinWaitS, static_cast<int>(m_Baseline.size()));
+            }
+            return;
+        }
+        if (state != "0") {
+            scrub(cmd);
+            return;
+        }
+        writeOpenedMarker(owner, hostId);
+        const bool ok = sendCreate(cmd);
+        scrub(cmd);
+        if (!ok) {
+            removeOpenedMarker();
+            m_GaveUp = true;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: softapmanager did not accept create - hotspot left off");
+            return;
+        }
+        m_Opened = true;
+        m_PeerSeen = false;
+        m_OpenedAt = std::chrono::steady_clock::now();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-HOTSPOT] auto: the host is on the local network and the streaming adapter hotspot was off - "
+                    "switched it on; it is switched off again if the host does not join within %d s, %s",
+                    kJoinWaitS, m_OwnerIsSelf ? "and when this session ends" : "and when the app exits (it stays on between games)");
+#else
+        (void) ssid;
+        (void) key;
+        (void) hostId;
+#endif
+    }
+
+    // §FRAME-HOTSPOT-AUTO：串流中定期呼叫（約每 5 秒）。更新標記檔的時間；等對端，等不到就關掉
+    void tick()
+    {
+#if defined(__linux__)
+        if (!m_Opened) {
+            return;
+        }
+        touchOpenedMarker();
+        if (m_PeerSeen) {
+            return;
+        }
+        const int waitedS = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_OpenedAt).count());
+        if (hotspotHasNewPeer(m_Baseline)) {
+            m_PeerSeen = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: the host joined the hotspot after %d s - keeping it on",
+                        waitedS);
+            return;
+        }
+        if (waitedS >= kJoinWaitS) {
+            closeOpened("the host did not join the hotspot");
+            m_GaveUp = true;
+        }
+#endif
+    }
+
+    // §FRAME-HOTSPOT-AUTO：App 的行程定期呼叫（約每 15 秒）：熱點是這個行程名下的就更新標記檔的時間
+    static void heartbeat()
+    {
+#if defined(__linux__)
+        long pid = 0;
+        std::string host;
+        if (readOpenedMarker(&pid, &host) && pid == static_cast<long>(getpid())) {
+            touchOpenedMarker();
+        }
+#endif
+    }
+
+    // §FRAME-HOTSPOT-AUTO：App 正常結束時呼叫：熱點是這個行程名下的就關掉
+    static void closeIfOwner()
+    {
+#if defined(__linux__)
+        long pid = 0;
+        std::string host;
+        if (!readOpenedMarker(&pid, &host) || pid != static_cast<long>(getpid())) {
+            return;
+        }
+        std::string reply;
+        const bool asked = ask("status", &reply, 2000);
+        const std::string state = firstField(reply);
+        scrub(reply);
+        if (!asked) {
+            return;  // 標記留著：之後由 recoverStale() 或頭盔上的常駐腳本補關
+        }
+        if (state == "2" && !(ask("teardown", &reply, 5000) && firstField(reply) == "1")) {
+            return;
+        }
+        removeOpenedMarker();
+        if (state == "2") {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: the app is exiting - hotspot switched off again");
+        }
+#endif
+    }
 
     // 串流開始、擋 Wi-Fi 掃描之前呼叫。viaVpn＝這一場經 VPN 連到 host。
     // 不是經 VPN 的場次只做一件事：把上一個沒有還原就結束的行程留下的暫停補回來
@@ -79,6 +242,20 @@ public:
             // 熱點沒有在運作。可能是使用者自己關的（不碰），也可能是上一個行程暫停之後沒有還原：那一種接手，結束時還原
             adoptStale();
             return;
+        }
+        {
+            // §FRAME-HOTSPOT-AUTO：開著的熱點是我們之前在區網場次自動開的（App 沒關、人帶著頭盔出門了）：直接關掉，不必還原
+            long pid = 0;
+            std::string host;
+            if (readOpenedMarker(&pid, &host) && !hotspotHasPeer()) {
+                if (ask("teardown", &reply, 5000) && firstField(reply) == "1") {
+                    removeOpenedMarker();
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-HOTSPOT] auto: remote session and the hotspot we switched on earlier has nothing on it - switched off");
+                }
+                scrub(reply);
+                return;
+            }
         }
         if (hotspotHasPeer()) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -123,6 +300,17 @@ public:
     void resume()
     {
 #if defined(__linux__)
+        if (m_Opened) {
+            if (m_OwnerIsSelf) {
+                closeOpened("the session ended");
+            }
+            else {
+                // App 還在：留著給下一個遊戲（App 結束、換 host 等不到、或 App 當掉時才關）
+                touchOpenedMarker();
+                m_Opened = false;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: the session ended - hotspot left on until the app exits");
+            }
+        }
         if (m_RestoreCmd.empty()) {
             return;
         }
@@ -145,6 +333,7 @@ public:
     static void recoverStale()
     {
 #if defined(__linux__)
+        recoverStaleOpened();
         long pid = 0;
         std::string cmd;
         if (!readMarker(&pid, &cmd)) {
@@ -186,6 +375,149 @@ private:
     static constexpr const char* kSocket = "/run/softapmanager.socket";
     static constexpr const char* kLastState = "/run/softapmanager.laststate";
     static constexpr const char* kApInterface = "wlanap";
+    static constexpr int kJoinWaitS = 45;    // §FRAME-HOTSPOT-AUTO：自動開了之後等這台 host 多久
+    static constexpr int kOwnerFreshS = 60;  // 標記檔這麼久沒被更新＝擁有者不在了
+
+    // §FRAME-HOTSPOT-AUTO：關掉這個行程開的熱點
+    void closeOpened(const char* why)
+    {
+        std::string reply;
+        const bool ok = ask("teardown", &reply, 5000) && firstField(reply) == "1";
+        scrub(reply);
+        m_Opened = false;
+        if (ok) {
+            removeOpenedMarker();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: %s - hotspot switched off again", why);
+        }
+        else {
+            // 標記留著：下一次 recoverStale() 再關
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: %s, but softapmanager did not accept teardown - it will be retried", why);
+        }
+    }
+
+    // 擁有者不在了（App 當掉、被強制結束）而熱點還開著：補關。擁有者是自己、或還活著就不動
+    static void recoverStaleOpened()
+    {
+        long pid = 0;
+        std::string host;
+        if (!readOpenedMarker(&pid, &host)) {
+            return;
+        }
+        if (pid == static_cast<long>(getpid())) {
+            touchOpenedMarker();
+            return;
+        }
+        if (pid > 0 && processAlive(pid) && openedMarkerAgeS() < kOwnerFreshS) {
+            return;
+        }
+        std::string reply;
+        if (!ask("status", &reply, 2000)) {
+            scrub(reply);
+            return;
+        }
+        const std::string state = firstField(reply);
+        scrub(reply);
+        if (state == "2" && !(ask("teardown", &reply, 5000) && firstField(reply) == "1")) {
+            return;
+        }
+        removeOpenedMarker();
+        if (state == "2") {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: hotspot switched off (the app that switched it on ended without switching it off)");
+        }
+    }
+
+    // 這個串流行程屬於哪一個 App 行程：父行程是同一支程式（VR 介面開的子行程）就是父行程，否則是自己
+    static long appPid()
+    {
+        char self[64] = {}, parent[64] = {};
+        char path[64];
+        const long ppid = static_cast<long>(getppid());
+        snprintf(path, sizeof(path), "/proc/%ld/comm", ppid);
+        FILE* f = fopen("/proc/self/comm", "r");
+        if (f != nullptr) {
+            if (fgets(self, sizeof(self), f) == nullptr) {
+                self[0] = '\0';
+            }
+            fclose(f);
+        }
+        f = fopen(path, "r");
+        if (f != nullptr) {
+            if (fgets(parent, sizeof(parent), f) == nullptr) {
+                parent[0] = '\0';
+            }
+            fclose(f);
+        }
+        return (ppid > 1 && self[0] != '\0' && strcmp(self, parent) == 0) ? ppid : static_cast<long>(getpid());
+    }
+
+    static std::string openedMarkerPath()
+    {
+        const std::string p = markerPath();
+        return p.empty() ? p : p.substr(0, p.size() - strlen("hotspot-paused")) + "hotspot-opened";
+    }
+
+    static void writeOpenedMarker(long owner, const std::string& hostId)
+    {
+        const std::string path = openedMarkerPath();
+        if (path.empty()) {
+            return;
+        }
+        const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            const std::string body = std::to_string(owner) + "\n" + hostId + "\n";
+            if (write(fd, body.data(), body.size()) < 0) {
+                // 寫不進去只是少了當掉時的保險
+            }
+            close(fd);
+        }
+    }
+
+    static bool readOpenedMarker(long* pid, std::string* hostId)
+    {
+        const std::string path = openedMarkerPath();
+        std::string s;
+        if (path.empty() || !readSmallFile(path.c_str(), &s)) {
+            return false;
+        }
+        *pid = strtol(s.c_str(), nullptr, 10);
+        hostId->clear();
+        const size_t nl = s.find('\n');
+        if (nl != std::string::npos) {
+            *hostId = s.substr(nl + 1);
+            while (!hostId->empty() && (hostId->back() == '\n' || hostId->back() == '\r')) {
+                hostId->pop_back();
+            }
+        }
+        return *pid > 0;
+    }
+
+    static void touchOpenedMarker()
+    {
+        const std::string path = openedMarkerPath();
+        if (!path.empty()) {
+            utimensat(AT_FDCWD, path.c_str(), nullptr, 0);
+        }
+    }
+
+    static long openedMarkerAgeS()
+    {
+        struct stat st;
+        const std::string path = openedMarkerPath();
+        if (path.empty() || stat(path.c_str(), &st) != 0) {
+            return 1L << 30;
+        }
+        return static_cast<long>(time(nullptr) - st.st_mtime);
+    }
+
+    static void removeOpenedMarker()
+    {
+        const std::string path = openedMarkerPath();
+        if (!path.empty()) {
+            unlink(path.c_str());
+        }
+    }
 
     // 熱點沒在運作、而且有上一個行程留下的暫停：接手，這一場結束時還原
     void adoptStale()
@@ -327,25 +659,40 @@ private:
         return s;
     }
 
-    // 熱點上有沒有對端：ARP 表裡 wlanap 有完成的項目（Flags 不是 0x0）。沙箱和系統共用網路命名空間，/proc/net/arp 是同一份
-    static bool hotspotHasPeer()
+    // 熱點上的對端：ARP 表裡 wlanap 有完成的項目（Flags 不是 0x0）的位址。沙箱和系統共用網路命名空間，/proc/net/arp 是同一份
+    static std::vector<std::string> hotspotPeers()
     {
+        std::vector<std::string> peers;
         FILE* f = fopen("/proc/net/arp", "r");
         if (f == nullptr) {
-            return false;
+            return peers;
         }
         char line[256];
-        bool found = false;
         while (fgets(line, sizeof(line), f) != nullptr) {
             char ip[64], hw[32], flags[16], mac[32], mask[16], dev[32];
             if (sscanf(line, "%63s %31s %15s %31s %15s %31s", ip, hw, flags, mac, mask, dev) == 6 &&
                 strcmp(dev, kApInterface) == 0 && strcmp(flags, "0x0") != 0) {
-                found = true;
-                break;
+                peers.emplace_back(ip);
             }
         }
         fclose(f);
-        return found;
+        return peers;
+    }
+
+    static bool hotspotHasPeer()
+    {
+        return !hotspotPeers().empty();
+    }
+
+    // 有沒有不在 baseline 裡的對端（baseline＝換 host 時上一台留在熱點上的裝置）
+    static bool hotspotHasNewPeer(const std::vector<std::string>& baseline)
+    {
+        for (const std::string& ip : hotspotPeers()) {
+            if (std::find(baseline.begin(), baseline.end(), ip) == baseline.end()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static std::string markerPath()
@@ -427,5 +774,11 @@ private:
     }
 
     std::string m_RestoreCmd;  // 暫停之前的 create 指令（含金鑰）；空＝這個行程沒有暫停熱點
+    bool m_Opened = false;     // §FRAME-HOTSPOT-AUTO：這個行程把熱點開起來了
+    bool m_PeerSeen = false;
+    bool m_GaveUp = false;     // 這一場試過、沒有成功：不再試
+    bool m_OwnerIsSelf = true; // 熱點記在這個行程名下（不是 App 的子行程）：這一場結束就關
+    std::vector<std::string> m_Baseline;  // 換 host 時上一台留在熱點上的裝置，不算這一台連上
+    std::chrono::steady_clock::time_point m_OpenedAt;
 #endif
 };

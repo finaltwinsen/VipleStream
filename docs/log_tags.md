@@ -588,6 +588,8 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
                                                                                  或 FEC 上限移動，這時 reason= 是控制器上一次的理由。loss／staleDrops／in／src／lossPct 同原本的
                                                                                  Bitrate 行。`vr_abr_fast = disabled` 的 VR 與 2D 仍印 `[VIPLE-ABR] Bitrate`
 [VIPLE-LAN-PREF] <name> reachable on the LAN - using it instead of the VPN address
+                                                                              ← 2.0.206 起行程剛啟動（目前位址還是空的）時也先探區網：原本第一輪照存檔順序
+                                                                                 選到 Tailscale 位址就直接開始串流，在家整場走 VPN 位址（封包縮小、host 不連頭盔熱點）
                                                                               ← client §LAN-PREF（2.0.99）：目前位址是 Tailscale、host 的 /serverinfo 有廣告
                                                                                  `VipleStreamLanAddress`，每 15 秒用 400 ms 的 TCP 連線探一次，通了就改走區網
 [VIPLE-VR-REPAIR] nack frame=F block=B have=N/T (data D) attempt=K (…)[ SEND FAILED][ eta=… idle=…]
@@ -1793,6 +1795,33 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 [VIPLE-VR-HOTSPOT] watchdog: adapter not present - not restarting
 ```
   - 看門狗只在 VR 串流中監看；斷線連續 30 s 才重啟、每場最多 `vr_hotspot_restart_max` 次（預設 2）、間隔至少 2 min。
+
+host（§VR-HOTSPOT-FASTJOIN，2026-11-16）：熱點資訊到達後 40 秒內，網卡是「未連線」就每 2 秒再連一次
+（頭盔在串流開始時才開熱點，約 3 秒後才出現；只靠 Windows 的自動連線要 20～30 秒，主動重試後約 6 秒）：
+```
+[VIPLE-VR-HOTSPOT] joined the headset hotspot N ms after the hotspot info (K extra connect attempt(s))
+[VIPLE-VR-HOTSPOT] not joined after 40 s (K extra connect attempt(s)) - leaving it to the automatic reconnect
+```
+
+client（§FRAME-HOTSPOT-AUTO，2026-11-15～16，同一個檔；區網的 VR 場次、熱點關著時自動開，host 沒連上就關）：
+```
+[VIPLE-VR-HOTSPOT] auto: the host is on the local network and the streaming adapter hotspot was off - switched it on; it is switched off again if the host does not join within 45 s, and when this session ends | and when the app exits (it stays on between games)
+[VIPLE-VR-HOTSPOT] auto: the host joined the hotspot after N s - keeping it on
+[VIPLE-VR-HOTSPOT] auto: the host did not join the hotspot - hotspot switched off again
+[VIPLE-VR-HOTSPOT] auto: the session ended - hotspot left on until the app exits        ← 串流行程是 App 開的：留給下一個遊戲
+[VIPLE-VR-HOTSPOT] auto: the session ended - hotspot switched off again                  ← 直接從命令列跑的串流：自己就是 App
+[VIPLE-VR-HOTSPOT] auto: the hotspot is still on from the previous session with this host (host connected|waiting for the host again)
+[VIPLE-VR-HOTSPOT] auto: the hotspot is on from a session with another host - waiting up to 45 s for this host to join (N device(s) of the previous one ignored)
+[VIPLE-VR-HOTSPOT] auto: the app is exiting - hotspot switched off again
+[VIPLE-VR-HOTSPOT] auto: hotspot switched off (the app that switched it on ended without switching it off)
+[VIPLE-VR-HOTSPOT] auto: remote session and the hotspot we switched on earlier has nothing on it - switched off
+[VIPLE-VR-HOTSPOT] auto: softapmanager did not accept create - hotspot left off
+```
+頭盔上常駐的 `update-hotspot.sh`（`journalctl --user -u viplestream-hotspot.service`）：
+```
+[VIPLE-VR-HOTSPOT] hotspot is off - kept the paired credentials from the Steam settings (ssid=abc*** keylen=N)
+[VIPLE-VR-HOTSPOT] the app that switched the hotspot on is gone - hotspot switched off     ← 標記檔 120 秒沒被更新
+```
 
 client（§FRAME-HOTSPOT-PAUSE，2026-11-14，`moonlight-qt/app/streaming/framehotspot.h`；只在 Steam Frame 上有作用）：
 ```

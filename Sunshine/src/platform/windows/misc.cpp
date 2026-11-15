@@ -2277,6 +2277,13 @@ namespace platf {
     // 多連線的轉接器那條一直 unconfirmed，之後整場只剩家用 Wi-Fi、開場就卡。斷線看門狗只看連線狀態，抓不到
     constexpr auto kRxStall = std::chrono::seconds(20);
     constexpr ULONG64 kRxStallMinSent = 20;  // 這段時間至少送出這麼多封包（多連線的探測、ping）才算「只送不收」
+    // §VR-HOTSPOT-FASTJOIN（2026-11-16）：頭盔在串流開始時才把熱點開起來（§FRAME-HOTSPOT-AUTO），約 3 秒後熱點才出現。
+    // 熱點資訊一到就發的那一次 WlanConnect 這時一定落空，之後只剩 Windows 自己的自動連線，實測要 20～30 秒才連上
+    // （11-16 四場：20、25、30、30 秒），這段時間只有家用 Wi-Fi 一條路徑。arm 之後的 kFastJoin 內、網卡是「未連線」時
+    // 每 kFastRetry 主動再連一次（隱藏的 SSID 靠設定檔的 nonBroadcast 探測），輪詢也縮短到 kFastPoll。
+    constexpr auto kFastJoin = std::chrono::seconds(40);
+    constexpr auto kFastRetry = std::chrono::seconds(2);
+    constexpr auto kFastPoll = std::chrono::milliseconds(500);
 
     std::mutex mtx;
     GUID guid {};
@@ -2284,6 +2291,7 @@ namespace platf {
     bool armed = false;
     bool running = false;
     clock::time_point alive_until {};
+    clock::time_point armed_at {};  // §VR-HOTSPOT-FASTJOIN
     int restarts = 0;
     bool gave_up = false;
 
@@ -2361,6 +2369,32 @@ namespace platf {
       return 1;
     }
 
+    // §VR-HOTSPOT-FASTJOIN：網卡是不是「未連線、也沒有正在連」（正在關聯或驗證時不要打斷它）
+    bool is_idle_disconnected(HANDLE hClient, const GUID &ifGuid) {
+      DWORD sz = 0;
+      PVOID data = nullptr;
+      WLAN_OPCODE_VALUE_TYPE vt;
+      if (fn_WlanQueryInterface(hClient, &ifGuid, wlan_intf_opcode_interface_state, nullptr, &sz, &data, &vt) != ERROR_SUCCESS || !data) {
+        return false;
+      }
+      const auto st = *static_cast<WLAN_INTERFACE_STATE *>(data);
+      fn_WlanFreeMemory(data);
+      return st == wlan_interface_state_disconnected;
+    }
+
+    // §VR-HOTSPOT-FASTJOIN：照 VipleStream-Frame 設定檔再連一次
+    DWORD connect_profile(HANDLE hClient, const GUID &ifGuid, const std::string &ssid) {
+      DOT11_SSID dot11Ssid {};
+      dot11Ssid.uSSIDLength = static_cast<ULONG>(std::min<std::size_t>(ssid.size(), sizeof(dot11Ssid.ucSSID)));
+      std::memcpy(dot11Ssid.ucSSID, ssid.data(), dot11Ssid.uSSIDLength);
+      WLAN_CONNECTION_PARAMETERS params {};
+      params.wlanConnectionMode = wlan_connection_mode_profile;
+      params.strProfile = L"VipleStream-Frame";
+      params.pDot11Ssid = &dot11Ssid;
+      params.dot11BssType = dot11_BSS_type_infrastructure;
+      return fn_WlanConnect(hClient, &ifGuid, &params, nullptr);
+    }
+
     // 介面的收發封包計數；查不到回 false
     bool query_counters(const GUID &ifGuid, ULONG64 *in, ULONG64 *out) {
       MIB_IF_ROW2 row {};
@@ -2386,12 +2420,18 @@ namespace platf {
       // §VR-HOTSPOT-RXSTALL：連著時，收到的計數最後一次變動的時刻與當時的計數
       std::optional<clock::time_point> rx_still_since;
       ULONG64 rx_in0 = 0, rx_out0 = 0;
+      // §VR-HOTSPOT-FASTJOIN
+      bool fast = true;
+      int fast_tries = 0;
+      clock::time_point fast_armed_at {};
+      std::optional<clock::time_point> fast_last_try;
       while (true) {
-        std::this_thread::sleep_for(kPoll);
+        std::this_thread::sleep_for(fast ? std::chrono::duration_cast<clock::duration>(kFastPoll) : std::chrono::duration_cast<clock::duration>(kPoll));
         const auto now = clock::now();
         GUID g;
         std::string ssid;
         int max_restarts;
+        clock::time_point armed;
         {
           std::lock_guard lk(mtx);
           if (now > alive_until) {
@@ -2401,8 +2441,37 @@ namespace platf {
           g = guid;
           ssid = want_ssid;
           max_restarts = config::vr.hotspot_restart_max;
+          armed = armed_at;
+        }
+        if (armed != fast_armed_at) {
+          // 新的一場（或同一場重新送了熱點資訊）：重新進入快速加入
+          fast_armed_at = armed;
+          fast = true;
+          fast_tries = 0;
+          fast_last_try.reset();
         }
         const int st = query_state(hClient, g, ssid);
+        if (fast) {
+          if (st == 1) {
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] joined the headset hotspot "
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(now - armed).count() << " ms after the hotspot info ("
+                            << fast_tries << " extra connect attempt(s))";
+            fast = false;
+          } else if (st < 0 || now - armed > kFastJoin) {
+            fast = false;
+            if (st == 0) {
+              BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not joined after " << std::chrono::duration_cast<std::chrono::seconds>(kFastJoin).count()
+                              << " s (" << fast_tries << " extra connect attempt(s)) - leaving it to the automatic reconnect";
+            }
+          } else {
+            if ((!fast_last_try || now - *fast_last_try >= kFastRetry) && is_idle_disconnected(hClient, g)) {
+              fast_last_try = now;
+              ++fast_tries;
+              connect_profile(hClient, g, ssid);
+            }
+            continue;  // 快速加入期間不算斷線、不重啟網卡
+          }
+        }
         if (st == 1) {
           if (down_since) {
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter connected again after "
@@ -2500,6 +2569,7 @@ namespace platf {
       restarts = 0;
       gave_up = false;
       alive_until = clock::now() + kAlive;
+      armed_at = clock::now();
       if (!running) {
         running = true;
         std::thread(loop).detach();

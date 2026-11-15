@@ -6,6 +6,7 @@
 #include "vrpreflightcheck.h"
 
 #include <QCoreApplication>
+#include <QTimer>
 #include <QFile>
 #include <QProcessEnvironment>
 
@@ -103,6 +104,15 @@ VrLauncher::VrLauncher(QObject* parent)
     // §FRAME-HOTSPOT-PAUSE：上一次的串流行程暫停了頭盔的串流轉接器熱點、沒有還原就結束（被強制結束、當掉）時，在這裡補做。
     // 沒有那個標記檔時只是一次開檔失敗；Frame 以外的平台什麼都不做
     FrameHotspot::recoverStale();
+    // §FRAME-HOTSPOT-AUTO：區網場次自動開的熱點記在這個行程（App）名下，連著玩幾個遊戲時留著。這裡負責兩件事：
+    // 定期更新標記檔的時間（沒有人更新＝App 不在了，別人會補關），以及 App 正常結束時關掉
+    {
+        auto* hotspotBeat = new QTimer(this);
+        hotspotBeat->setInterval(15000);
+        connect(hotspotBeat, &QTimer::timeout, this, []() { FrameHotspot::heartbeat(); });
+        hotspotBeat->start();
+        connect(qApp, &QCoreApplication::aboutToQuit, this, []() { FrameHotspot::closeIfOwner(); });
+    }
     // §VR-PREFLIGHT：檢查的結果。proceed＝可以開了（夠快、量不到、連續夠快、使用者堅持）
     connect(m_Preflight, &VrPreflightCheck::changed, this, &VrLauncher::preflightChanged);
     connect(m_Preflight, &VrPreflightCheck::proceed, this, &VrLauncher::preflightPassed);
@@ -130,6 +140,7 @@ VrLauncher::~VrLauncher()
     if (s_Instance == this) {
         s_Instance = nullptr;
     }
+    FrameHotspot::closeIfOwner();  // §FRAME-HOTSPOT-AUTO：App 結束
     if (m_Proc == nullptr) {
         return;
     }

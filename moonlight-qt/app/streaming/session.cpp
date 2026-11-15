@@ -4451,6 +4451,14 @@ bool Session::startConnectionAsync()
                      hostAddr.isInSubnet(QHostAddress(QStringLiteral("fd7a:115c:a1e0::")), 48);
         }
         m_FrameHotspot.pauseIfUnused(viaVpn);
+        // §FRAME-HOTSPOT-AUTO：host 在區網裡、熱點關著：自動開起來。等不到這台 host 就關掉；連著玩下一個遊戲時留著，
+        // App 結束（或當掉）、換到另一台 host 等不到時才關
+        if (!viaVpn && (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED)) {
+            std::string ssid, key;
+            if (readVrHotspotCreds(&ssid, &key)) {
+                m_FrameHotspot.openForLan(ssid, key, m_Computer->uuid.toStdString());
+            }
+        }
     }
     // §WIFI-SCANBLOCK：Steam Frame 上串流期間擋住 Wi-Fi 背景掃描（和 Steam 內建串流同一個做法）；其他平台什麼都不做
     m_WifiScanBlock.start();
@@ -5118,6 +5126,7 @@ void Session::exec()
             if (SDL_TICKS_PASSED(SDL_GetTicks(), lastHotspotPollTime + 5000)) {
                 lastHotspotPollTime = SDL_GetTicks();
                 checkAndSendVrHotspotInfo();
+                m_FrameHotspot.tick();  // §FRAME-HOTSPOT-AUTO
             }
         }
         if (!audioSilenceChecked && SDL_TICKS_PASSED(SDL_GetTicks(), audioSilenceCheckTime)) {
@@ -5787,6 +5796,30 @@ DispatchDeferredCleanup:
     QThreadPool::globalInstance()->start(new DeferredSessionCleanupTask(this));
 }
 
+
+// §FRAME-HOTSPOT-AUTO：hotspot.json 裡的 SSID 與金鑰（呼叫端用完要清掉；這裡不印任何內容）
+bool Session::readVrHotspotCreds(std::string* ssid, std::string* key)
+{
+    QString dataHome = qEnvironmentVariable("XDG_DATA_HOME");
+    if (dataHome.isEmpty()) {
+        dataHome = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    }
+    if (dataHome.isEmpty()) {
+        return false;
+    }
+    QFile file(QDir(dataHome).filePath(QStringLiteral("viplestream/hotspot.json")));
+    if (!file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+    // 自動開只認 6 GHz 的那一種（指令格式固定是 hbs6）
+    if (!obj.value(QStringLiteral("band")).toString().contains(QStringLiteral("6G"), Qt::CaseInsensitive)) {
+        return false;
+    }
+    *ssid = obj.value(QStringLiteral("ssid")).toString().toStdString();
+    *key = obj.value(QStringLiteral("key")).toString().toStdString();
+    return !ssid->empty() && !key->empty();
+}
 
 void Session::checkAndSendVrHotspotInfo()
 {

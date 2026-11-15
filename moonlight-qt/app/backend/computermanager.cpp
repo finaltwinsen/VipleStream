@@ -88,8 +88,12 @@ private:
             lans = m_Computer->lanAddresses;
         }
         const QHostAddress activeHost(active.address());
-        if (lans.isEmpty() || activeHost.protocol() != QAbstractSocket::IPv4Protocol ||
-                !activeHost.isInSubnet(QHostAddress(QStringLiteral("100.64.0.0")), 10)) {
+        // 2026-11-15：行程剛啟動時 activeAddress 還是空的，原本這裡直接放棄、第一輪照存檔的順序輪詢——在外面用過 Tailscale
+        // 之後存檔的第一個位址就是 Tailscale，而命令列的 stream（頭盔 VR 介面開串流也是這一條）第一輪一成功就開始串流，
+        // 等不到 15 秒後的下一次探測：在家整場走 VPN 位址（封包縮小、host 當成遠端不連頭盔熱點）。空的也先探區網
+        const bool activeIsVpn = activeHost.protocol() == QAbstractSocket::IPv4Protocol &&
+                                 activeHost.isInSubnet(QHostAddress(QStringLiteral("100.64.0.0")), 10);
+        if (lans.isEmpty() || !(active.isNull() || activeIsVpn)) {
             return false;
         }
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
