@@ -682,6 +682,12 @@ private:
     bool buildInsetQuads(XrSwapchain swapchain, const XrRect2Di rects[2], const float out[2][4],
                          const XrCompositionLayerProjectionView views[2], XrCompositionLayerQuad quads[2]);
     bool m_LoggedInsetQuads = false;
+    // §VR-FOVEA-REPROJ（2026-11-15，見 xrdevknobs.h）：projection 的眼睛位置改用顯示時的位置、全視野那塊也疊一份 quad
+    void relocateViewsToDisplay(XrCompositionLayerProjectionView views[2]);
+    bool buildFullQuads(const XrCompositionLayerProjectionView views[2], XrCompositionLayerQuad quads[2]);
+    int m_LoggedLayersMode = -1;
+    uint64_t m_LayersCycleStartNs = 0;  // 輪流（xrdev::effectiveCycleSec）從什麼時候起算
+    int m_LayersCyclePhase = -1;
     // frame loop 最近一次的 HMD locate（frameloop 模式樣本；thread 模式也用它的 predict 估計）
     struct HmdSample {
         bool valid = false;

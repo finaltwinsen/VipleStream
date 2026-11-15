@@ -94,8 +94,46 @@ TEST(VrPaceAutoTest, CleanRunIsResetByALossyWindow) {
   EXPECT_FALSE(a.on);
 }
 
-TEST(VrPaceAutoTest, NotEligibleTurnsOffAtOnceAndBlocksTurningOn) {
-  // 收到補包請求（區網、補包有在用）或有第二條連線在送：馬上關，而且不管丟多少都不開
+TEST(VrPaceAutoTest, AFewResendRequestsDoNotSwitchItOff) {
+  // 11-14 外地半速兩場：開著時頭盔每 10 秒送 1～5 份補包請求。原本一份就關，10 分鐘切了 13 次
+  auto_t a;
+  a.on_window(true, 8, 0);
+  a.on_window(true, 8, 2);
+  ASSERT_TRUE(a.on);
+  for (int i = 0; i < 60; ++i) {
+    EXPECT_FALSE(a.on_window(true, 3 + i % 5, 1 + i % 5));
+  }
+  EXPECT_TRUE(a.on);
+  EXPECT_EQ(a.switches, 1u);
+  // 少量補包請求也不擋它打開
+  auto_t b;
+  EXPECT_FALSE(b.on_window(true, 10, 5));
+  EXPECT_TRUE(b.on_window(true, 6, 19));
+}
+
+TEST(VrPaceAutoTest, BusyResendsSwitchItOffAfterTwoWindowsAndKeepItOff) {
+  // 區網補包在用時每 10 秒 50～190 份：連續兩個視窗才關（單一個視窗的尖峰不算），而且補包在用期間不開
+  auto_t a;
+  a.on_window(true, 8, 0);
+  a.on_window(true, 8, 0);
+  ASSERT_TRUE(a.on);
+  EXPECT_FALSE(a.on_window(true, 8, 90));
+  EXPECT_FALSE(a.on_window(true, 8, 3));  // 中斷：重新數
+  EXPECT_FALSE(a.on_window(true, 8, 60));
+  EXPECT_TRUE(a.on_window(true, 8, 20));
+  EXPECT_FALSE(a.on);
+  EXPECT_STREQ(a.reason, "resends are in use");
+  for (int i = 0; i < 20; ++i) {
+    EXPECT_FALSE(a.on_window(true, 12, 80));
+  }
+  EXPECT_FALSE(a.on);
+  // 補包安靜下來、丟包還在：重新連續兩個視窗才再開
+  EXPECT_FALSE(a.on_window(true, 8, 4));
+  EXPECT_TRUE(a.on_window(true, 8, 4));
+}
+
+TEST(VrPaceAutoTest, SecondLinkTurnsOffAtOnceAndBlocksTurningOn) {
+  // 有第二條連線在送：馬上關，而且不管丟多少都不開
   auto_t a;
   a.on_window(true, 8);
   a.on_window(true, 8);

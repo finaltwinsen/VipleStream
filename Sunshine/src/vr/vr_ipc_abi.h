@@ -174,6 +174,9 @@ static inline void vripc_seq_write_begin(uint64_t *p, uint64_t v) {
                                          10-05 vr_probe --mode predict 實測；client／OpenXR 給的是世界座標） */
 #define VRIPC_POSE_F_STALE_COAST 0x10u /* §VR-STALE-COAST（2026-11-13，vr_stale_policy = coast）：空窗 60 ms 內照最後的速度等速前進、之後 40 ms
                                           降到 0，重送與恢復都接在同一條軌跡上（不往回跳）；和 STALE_BLEND 一起設（舊 driver 只認得後者） */
+#define VRIPC_POSE_F_CTRL_PREDICT 0x20u /* §VR-CTRL-PREDICT（2026-11-15，vr_ctrl_extrap_ms = auto）：控制器預測到顯示時刻，速度與位置用加速度修正
+                                           （pose_policy.h 的 ctrl_predictor_t）、扳機按著的手不預測；ctrl_keep_ms_p1 不看。
+                                           舊 driver 不認得＝固定用 ctrl_keep_ms_p1（server 這時給 20 ms） */
 
 /* frame descriptor flags：低 8 bit 與 0x81 vrFlags 同值；server 轉送時只取 & 0x2F */
 #define VRIPC_FRM_POSE_VALID 0x01u

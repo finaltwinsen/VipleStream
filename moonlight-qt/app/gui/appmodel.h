@@ -54,6 +54,8 @@ public:
     // §M.2: 查詢目前佔用 session 的 owner 資訊（供 QML takeover 對話框使用）
     Q_INVOKABLE QString getSessionOwnerUuid();
     Q_INVOKABLE QString getSessionOwnerName();
+    // §M.2-SELF：host 認定目前的 session 是這台裝置自己開的（接管對話框不該出現）
+    Q_INVOKABLE bool isSessionOwnedByCaller();
     Q_INVOKABLE QString getLocalUniqueId();
 
     Q_INVOKABLE void quitRunningApp();

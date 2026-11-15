@@ -578,4 +578,303 @@ namespace probe {
     return rc_ok;
   }
 
+  // ── swing（2026-11-14）：遊戲每一格看到的右手控制器軌跡有多平滑 ───────────────────────────────
+  // 桌球這類遊戲把球拍當成跟著控制器走的運動學物體，擊球的速度來自相鄰兩格之間球拍的位移（或 API 回報的速度）。
+  // 這個模式像一個 legacy scene app 那樣每個顯示格取一次姿態（預測到下一個顯示時刻再多一格＝ETT 遊戲邏輯用的 game pose），
+  // 然後看：
+  //   - vd＝相鄰兩格位置差分出來的速度；dv＝|vd_k − vd_{k−1}|（一格之間速度變了多少）。真實的手 6.9 ms 內速度最多變
+  //     a·Δt（合成揮動 a≤17 m/s²→0.12 m/s；真人揮拍 100 m/s²→0.7 m/s），dv 遠大於這個量＝軌跡在跳；
+  //   - apiErr＝|vd − API 回報的速度|：位置的走法和回報的速度對不上的程度；
+  //   - 角速度同樣兩項（由相鄰兩格的旋轉差分）；
+  //   - frozen＝位置幾乎沒動（<0.2 mm）而回報速度 >0.3 m/s 的格數（那一格遊戲看到拍子停住）；
+  //   - jumps＝差分速度超過回報速度兩倍再加 0.5 m/s 的格數（那一格拍子瞬間衝出去）。
+  // 搭配 client --vr-synthetic-hands（右手 x 方向 ±25 cm @1.3 Hz、繞 Z 滾 ±40°）。每一格的原始值寫進 swing.csv。
+  int run_swing(const args_t &a) {
+    vr_session_t s(vr::VRApplication_Background);
+    if (!init_or_report(s, "swing")) {
+      return rc_failed;
+    }
+    const uint32_t right = s.sys->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_RightHand);
+    vr::ETrackedPropertyError perr = vr::TrackedProp_Success;
+    double hz = s.sys->GetFloatTrackedDeviceProperty(0, vr::Prop_DisplayFrequency_Float, &perr);
+    if (perr != vr::TrackedProp_Success || !(hz > 1.0)) {
+      hz = 90.0;
+    }
+    double v2p = s.sys->GetFloatTrackedDeviceProperty(0, vr::Prop_SecondsFromVsyncToPhotons_Float, &perr);
+    if (perr != vr::TrackedProp_Success || !(v2p >= 0.0)) {
+      v2p = 0.0;
+    }
+    const double period = 1.0 / hz;
+    line("swing start right=%u hz=%.2f v2pMs=%.2f seconds=%.0f (client: --vr-synthetic-hands)", (unsigned) right, hz, v2p * 1000.0, a.seconds);
+    if (right >= vr::k_unMaxTrackedDeviceCount) {
+      line("result mode=swing status=no-right-controller");
+      return rc_failed;
+    }
+    std::wstring out_dir;
+    csv_t csv;
+    if (prepare_out_dir(a.out, out_dir)) {
+      csv.open(out_dir, L"swing.csv", "qpc,target_s,pred_ms,x,y,z,qx,qy,qz,qw,vx,vy,vz,wx,wy,wz");
+    }
+    struct sample_t {
+      double target = 0;  // 這一格姿態對應的時刻（秒，QPC 時基）
+      vm::vec3_t p {};
+      vm::quat_t q {};
+      vm::vec3_t v {};
+      vm::vec3_t w {};
+    };
+    std::vector<sample_t> samples;
+    samples.reserve((size_t) (a.seconds * hz) + 64);
+    const double qf = (double) qpf();
+    const int64_t t_end = qpc() + (int64_t) (a.seconds * qf);
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    uint64_t invalid = 0;
+    static vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+    while (qpc() < t_end) {
+      float since = 0.0f;
+      uint64_t frame = 0;
+      s.sys->GetTimeSinceLastVsync(&since, &frame);
+      // legacy app 的算法：到下一個顯示時刻（算圖姿態）；遊戲邏輯的姿態再多一格
+      const double pred = period - (double) since + v2p + period;
+      const int64_t now = qpc();
+      s.sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, (float) pred, poses, vr::k_unMaxTrackedDeviceCount);
+      if (poses[right].bPoseIsValid) {
+        sample_t smp;
+        smp.target = (double) now / qf + pred;
+        pose_of(poses[right].mDeviceToAbsoluteTracking, smp.q, smp.p);
+        smp.v = vm::vec3_t {poses[right].vVelocity.v[0], poses[right].vVelocity.v[1], poses[right].vVelocity.v[2]};
+        smp.w = vm::vec3_t {poses[right].vAngularVelocity.v[0], poses[right].vAngularVelocity.v[1], poses[right].vAngularVelocity.v[2]};
+        samples.push_back(smp);
+        csv.row("%lld,%.6f,%.3f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f", (long long) now, smp.target, pred * 1000.0, smp.p.x, smp.p.y,
+                smp.p.z, smp.q.x, smp.q.y, smp.q.z, smp.q.w, smp.v.x, smp.v.y, smp.v.z, smp.w.x, smp.w.y, smp.w.z);
+      } else {
+        ++invalid;
+      }
+      // 睡到下一個顯示格開始後約 1 ms（每格在同一個相位取樣，像遊戲那樣）
+      double wait_s = period - (double) since + 0.001;
+      if (wait_s < 0.0005) {
+        wait_s += period;
+      }
+      LARGE_INTEGER due;
+      due.QuadPart = -(LONGLONG) (wait_s * 1e7);
+      if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+        WaitForSingleObject(timer, 100);
+      } else {
+        Sleep(1);
+      }
+    }
+    if (timer) {
+      CloseHandle(timer);
+    }
+    auto sub = [](const vm::vec3_t &x, const vm::vec3_t &y) {
+      return vm::vec3_t {x.x - y.x, x.y - y.y, x.z - y.z};
+    };
+    auto len = [](const vm::vec3_t &x) {
+      return std::sqrt(x.x * x.x + x.y * x.y + x.z * x.z);
+    };
+    std::vector<double> speed, dv, api_err, omega, dw, w_err, dt_ms;
+    uint64_t frozen = 0, jumps = 0, used = 0;
+    vm::vec3_t vd_prev {}, wd_prev {};
+    bool have_prev = false;
+    for (size_t i = 1; i < samples.size(); ++i) {
+      const sample_t &c = samples[i], &p = samples[i - 1];
+      const double dt = c.target - p.target;
+      dt_ms.push_back(dt * 1000.0);
+      if (!(dt > period * 0.5) || dt > period * 1.5) {
+        have_prev = false;  // 取樣漏了一格（或兩次落在同一格）：這一段不算，免得把取樣本身的抖動算進去
+        continue;
+      }
+      ++used;
+      const vm::vec3_t d = sub(c.p, p.p);
+      const vm::vec3_t vd {d.x / dt, d.y / dt, d.z / dt};
+      // 世界座標的角速度：R_c·R_p⁻¹ 的旋轉向量 ÷ dt
+      vm::quat_t dq = vm::normalize(vm::mul(c.q, vm::conj(p.q)));
+      if (dq.w < 0.0) {
+        dq = vm::quat_t {-dq.x, -dq.y, -dq.z, -dq.w};
+      }
+      const double sn = std::sqrt(dq.x * dq.x + dq.y * dq.y + dq.z * dq.z);
+      const double ang = 2.0 * std::atan2(sn, dq.w);
+      const double k = sn > 1e-9 ? ang / sn / dt : 0.0;
+      const vm::vec3_t wd {dq.x * k, dq.y * k, dq.z * k};
+      const double api_speed = len(c.v);
+      speed.push_back(len(vd));
+      omega.push_back(len(wd));
+      api_err.push_back(len(sub(vd, c.v)));
+      // API 的角速度：SteamVR 交給 app 的是世界座標還是機體座標沒有文件可查，兩種都比，取小的那個
+      const vm::vec3_t w_world = c.w;
+      const vm::vec3_t w_as_local = vm::rotate(c.q, c.w);
+      w_err.push_back(std::min(len(sub(wd, w_world)), len(sub(wd, w_as_local))));
+      if (len(d) < 0.0002 && api_speed > 0.3) {
+        ++frozen;
+      }
+      if (len(vd) > 2.0 * api_speed + 0.5) {
+        ++jumps;
+      }
+      if (have_prev) {
+        dv.push_back(len(sub(vd, vd_prev)));
+        dw.push_back(len(sub(wd, wd_prev)));
+      }
+      vd_prev = vd;
+      wd_prev = wd;
+      have_prev = true;
+    }
+    line("swing summary frames=%u used=%llu invalid=%llu dtMs p50=%.2f p99=%.2f | speed p50=%.2f p95=%.2f m/s | dv p50=%.3f p95=%.3f p99=%.3f max=%.3f m/s | "
+         "apiErr p50=%.3f p95=%.3f p99=%.3f m/s | frozen=%llu jumps=%llu",
+         (unsigned) samples.size(), (unsigned long long) used, (unsigned long long) invalid, pct(dt_ms, 0.5), pct(dt_ms, 0.99), pct(speed, 0.5), pct(speed, 0.95),
+         pct(dv, 0.5), pct(dv, 0.95), pct(dv, 0.99), pct(dv, 1.0), pct(api_err, 0.5), pct(api_err, 0.95), pct(api_err, 0.99), (unsigned long long) frozen,
+         (unsigned long long) jumps);
+    line("swing summary angular omega p50=%.2f p95=%.2f rad/s | dw p50=%.3f p95=%.3f p99=%.3f max=%.3f rad/s | apiErr p50=%.3f p95=%.3f p99=%.3f rad/s",
+         pct(omega, 0.5), pct(omega, 0.95), pct(dw, 0.5), pct(dw, 0.95), pct(dw, 0.99), pct(dw, 1.0), pct(w_err, 0.5), pct(w_err, 0.95), pct(w_err, 0.99));
+    return rc_ok;
+  }
+
+  // ── toss（2026-11-14）：拋球——放開扳機的那一格，遊戲看到的左手速度 ─────────────────────────────
+  // 桌球的發球：左手按住扳機拿著球、往上移、放開扳機。遊戲拿放開那一刻的手速當球的初速；那一格讀到的速度偏掉
+  // （甚至是負的）球就往下掉。搭配 client --vr-synthetic-hands --vr-synthetic-toss --vr-synthetic-motion still：
+  // 左手每 2 秒拋一次，放開時真值是往上 2.00 m/s；放開之後手在 0.12 秒內停住（晚 30／60／90 ms 是 1.79／1.00／0.21 m/s），
+  // 所以「放開的訊號晚到」會直接變成讀到的速度偏低。held＝扳機按住了幾格（144 Hz 時準時是 115 格左右，多的就是晚到）。
+  // 像 legacy scene app 那樣每個顯示格取一次左手的 game pose 與按鍵狀態（legacy 的 GetControllerState，ETT 用的就是這一條）。
+  // 扳機由按住變成放開的那一格記下：
+  //   api＝API 回報的垂直速度；diff1＝這一格與上一格位置差分的垂直速度；diff3＝最近 3 格平均（遊戲常做的平滑）。
+  // 摘要：三種量各自的分佈、是負值的次數、偏離真值一半以上（<1.00 或 >3.00 m/s）的次數。逐次寫進 toss.csv。
+  int run_toss(const args_t &a) {
+    vr_session_t s(vr::VRApplication_Background);
+    if (!init_or_report(s, "toss")) {
+      return rc_failed;
+    }
+    const uint32_t left = s.sys->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_LeftHand);
+    vr::ETrackedPropertyError perr = vr::TrackedProp_Success;
+    double hz = s.sys->GetFloatTrackedDeviceProperty(0, vr::Prop_DisplayFrequency_Float, &perr);
+    if (perr != vr::TrackedProp_Success || !(hz > 1.0)) {
+      hz = 90.0;
+    }
+    double v2p = s.sys->GetFloatTrackedDeviceProperty(0, vr::Prop_SecondsFromVsyncToPhotons_Float, &perr);
+    if (perr != vr::TrackedProp_Success || !(v2p >= 0.0)) {
+      v2p = 0.0;
+    }
+    const double period = 1.0 / hz;
+    line("toss start left=%u hz=%.2f v2pMs=%.2f seconds=%.0f (client: --vr-synthetic-hands --vr-synthetic-toss --vr-synthetic-motion still)", (unsigned) left, hz,
+         v2p * 1000.0, a.seconds);
+    if (left >= vr::k_unMaxTrackedDeviceCount) {
+      line("result mode=toss status=no-left-controller");
+      return rc_failed;
+    }
+    std::wstring out_dir;
+    csv_t csv;
+    if (prepare_out_dir(a.out, out_dir)) {
+      csv.open(out_dir, L"toss.csv", "qpc,api_vy,diff1_vy,diff3_vy,y_m,rise_m,frames_held,trigger_before,trigger_after");
+    }
+    const double qf = (double) qpf();
+    const int64_t t_end = qpc() + (int64_t) (a.seconds * qf);
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    static vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+    std::vector<double> api, d1, d3;
+    uint64_t frames = 0, invalid = 0, state_fail = 0;
+    bool held = false;
+    double hold_y0 = 0.0;
+    uint32_t hold_frames = 0;
+    double trig_prev = 0.0;
+    double ys[4] = {0, 0, 0, 0}, ts[4] = {0, 0, 0, 0};
+    int have = 0;
+    while (qpc() < t_end) {
+      float since = 0.0f;
+      uint64_t frame = 0;
+      s.sys->GetTimeSinceLastVsync(&since, &frame);
+      const double pred = period - (double) since + v2p + period;
+      const int64_t now = qpc();
+      s.sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, (float) pred, poses, vr::k_unMaxTrackedDeviceCount);
+      vr::VRControllerState_t st {};
+      const bool got_state = s.sys->GetControllerState(left, &st, sizeof(st));
+      ++frames;
+      if (!got_state) {
+        ++state_fail;
+      }
+      if (poses[left].bPoseIsValid && got_state) {
+        vm::quat_t q;
+        vm::vec3_t p;
+        pose_of(poses[left].mDeviceToAbsoluteTracking, q, p);
+        const double target = (double) now / qf + pred;
+        for (int i = 3; i > 0; --i) {
+          ys[i] = ys[i - 1];
+          ts[i] = ts[i - 1];
+        }
+        ys[0] = p.y;
+        ts[0] = target;
+        if (have < 4) {
+          ++have;
+        }
+        // 扳機：軸 1 的 x（k_EButton_SteamVR_Trigger），或按鍵位元
+        const double trig = (std::max)((double) st.rAxis[1].x, (st.ulButtonPressed & vr::ButtonMaskFromId(vr::k_EButton_SteamVR_Trigger)) ? 1.0 : 0.0);
+        const bool down = trig >= 0.5;
+        if (down && !held) {
+          held = true;
+          hold_y0 = p.y;
+          hold_frames = 0;
+        }
+        if (down) {
+          ++hold_frames;
+        }
+        if (!down && held) {
+          held = false;
+          // 放開的這一格
+          if (have >= 4 && hold_frames >= 20 && ts[0] > ts[1] && ts[1] > ts[3]) {
+            const double api_vy = poses[left].vVelocity.v[1];
+            const double diff1 = (ys[0] - ys[1]) / (ts[0] - ts[1]);
+            const double diff3 = (ys[0] - ys[3]) / (ts[0] - ts[3]);
+            api.push_back(api_vy);
+            d1.push_back(diff1);
+            d3.push_back(diff3);
+            csv.row("%lld,%.4f,%.4f,%.4f,%.5f,%.5f,%u,%.3f,%.3f", (long long) now, api_vy, diff1, diff3, p.y, p.y - hold_y0, hold_frames, trig_prev, trig);
+          }
+        }
+        trig_prev = trig;
+      } else if (!poses[left].bPoseIsValid) {
+        ++invalid;
+      }
+      double wait_s = period - (double) since + 0.001;
+      if (wait_s < 0.0005) {
+        wait_s += period;
+      }
+      LARGE_INTEGER due;
+      due.QuadPart = -(LONGLONG) (wait_s * 1e7);
+      if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+        WaitForSingleObject(timer, 100);
+      } else {
+        Sleep(1);
+      }
+    }
+    if (timer) {
+      CloseHandle(timer);
+    }
+    auto count_if = [](const std::vector<double> &v, double lo, double hi) {
+      unsigned n = 0;
+      for (double x : v) {
+        if (x < lo || x > hi) {
+          ++n;
+        }
+      }
+      return n;
+    };
+    auto neg = [](const std::vector<double> &v) {
+      unsigned n = 0;
+      for (double x : v) {
+        if (x < 0.0) {
+          ++n;
+        }
+      }
+      return n;
+    };
+    constexpr double k_truth = 2.00;
+    line("toss summary tosses=%u frames=%llu invalid=%llu stateFail=%llu truth=%.2f m/s up", (unsigned) api.size(), (unsigned long long) frames, (unsigned long long) invalid,
+         (unsigned long long) state_fail, k_truth);
+    const struct {
+      const char *name;
+      const std::vector<double> *v;
+    } rows[3] = {{"api", &api}, {"diff1", &d1}, {"diff3", &d3}};
+    for (const auto &r : rows) {
+      line("toss %-5s vy min=%.2f p10=%.2f p50=%.2f p90=%.2f max=%.2f m/s | negative=%u of %u | off by more than half=%u", r.name, pct(*r.v, 0.0), pct(*r.v, 0.1),
+           pct(*r.v, 0.5), pct(*r.v, 0.9), pct(*r.v, 1.0), neg(*r.v), (unsigned) r.v->size(), count_if(*r.v, k_truth * 0.5, k_truth * 1.5));
+    }
+    return rc_ok;
+  }
+
 }  // namespace probe

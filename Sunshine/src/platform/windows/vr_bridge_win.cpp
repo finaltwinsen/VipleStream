@@ -52,6 +52,7 @@
 #include "src/platform/windows/utf_utils.h"
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_direct_kick.h"
+#include "src/vr/vr_edge_hold.h"
 #include "src/vr/vr_echo_handoff.h"
 
 using namespace std::literals;
@@ -617,6 +618,8 @@ namespace vr::bridge {
       uint64_t trk_write_index = 0;  ///< tracking 寫入端的本地計數（只在 trk_mtx_ 內存取；絕不從 shm 讀回）
       bool trk_have_last = false;  ///< 本 generation 已寫過樣本（trk_mtx_）
       uint32_t trk_last_id = 0;  ///< 最近寫進 ring 的 sampleId（trk_mtx_）
+      ::vr::edge_hold::hold_t trk_hold;  ///< §VR-EDGE-HOLD：晚到的按鍵變化先配上當時的姿態（trk_mtx_）
+      int64_t trk_hold_log_qpc = 0;  ///< 上一次印 [VIPLE-VR-EDGE] 的時刻（trk_mtx_）
 
       ~gen_t() {
         if (shm) {
@@ -1312,6 +1315,32 @@ namespace vr::bridge {
       }
       g->trk_have_last = true;
       g->trk_last_id = s.sample_id;
+      // §VR-EDGE-HOLD：按鍵的變化晚到時，這一筆寫進去之後的一小段時間不寫沒有變化的樣本，讓遊戲下一格看到的是
+      // 「變化那一刻」的手（規則在 src/vr/vr_edge_hold.h）。沒寫的樣本照樣算已經處理過（上面的 trk_last_id）
+      {
+        auto &eh = g->trk_hold;
+        const int64_t f = qpf();
+        const int64_t now = now_qpc();
+        eh.hold_ticks = config::vr.edge_hold_ms > 0 ? (int64_t) config::vr.edge_hold_ms * f / 1000 : 0;
+        eh.late_ticks = 12 * f / 1000;
+        eh.max_ticks = 100 * f / 1000;
+        ::vr::edge_hold::inputs_t in;
+        for (int h = 0; h < 2; ++h) {
+          in.buttons[h] = s.input[h].buttons;
+          in.trigger[h] = s.input[h].trigger;
+          in.grip[h] = s.input[h].grip;
+        }
+        const uint64_t holds_before = eh.holds;
+        if (!eh.on_sample(in, s.target_server_qpc - s.arrival_qpc, now)) {
+          return;
+        }
+        if (eh.holds != holds_before && (g->trk_hold_log_qpc == 0 || now - g->trk_hold_log_qpc >= f)) {
+          g->trk_hold_log_qpc = now;
+          BOOST_LOG(info) << "[VIPLE-VR-EDGE] a button or trigger change arrived " << std::format("{:.1f}", (double) eh.last_late_ticks * 1000.0 / (double) f)
+                          << " ms later than usual: the game gets the hands as they were at that moment for " << config::vr.edge_hold_ms
+                          << " ms (so far this session: " << eh.holds << " times, " << eh.deferred << " samples skipped)";
+        }
+      }
       auto &ring = g->shm->tracking;
       const uint64_t idx = g->trk_write_index;
       auto *slot = &ring.slot[idx % VRIPC_TRK_SLOTS];

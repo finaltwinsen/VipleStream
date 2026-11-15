@@ -15,7 +15,7 @@
 #   1. 不當掉、不卡住，跑得完。
 #   2. 沒被動到的幀（第一條連線上一個封包都沒掉）一定收齊。
 #   3. 單一連線時，沒被動到的幀被補包機制壓住不超過「等待上限＋2 ms」。toggle（執行途中切換規則與估計值）用
-#      可能出現的最大上限：33 ms 與指定值取大的。
+#      可能出現的最大上限：80 ms（VRRR_CAP_MAX_US；§VR-REPAIR-WAN 之前是 33 ms）與指定值取大的。
 # 另外印出和現行規則的對照（沒收齊的幀數、回報數、補送封包數、第一次 LOSS 晚多少）——這些是模型的數字，固定種子下
 # 是確定的，all 會拿來和 fuzz_expected.txt 比：規則一有變動就看得到差在哪裡。
 import os
@@ -32,12 +32,12 @@ KINDS = ("design", "judge", "toggle", "multi", "burst", "frozen")
 SIM = os.path.join(S.default_build_dir(), "sim_final" + (".exe" if os.name == "nt" else ""))
 
 
-def cap_ms(fps, lo, hi, capms):
-    """和 vrrrCapUs 同樣的算法（毫秒）"""
+def cap_ms(fps, mid, hi, capms):
+    """和 vrrrCapUs 同樣的算法（毫秒）。§VR-REPAIR-WAN：第二輪照中位數的往返（原本是最短的）、封頂 80 ms（原本 33）"""
     if capms:
         return max(8, min(100, capms))
     hold = max(4.0, min(14.0, 1000.0 / fps))
-    return min(33.0, max(2 * hold, (hi * 1.25 + 2.0) + (lo + 2.0) + 2.0))
+    return min(80.0, max(2 * hold, (hi * 1.25 + 2.0) + (mid + 2.0) + 2.0))
 
 
 def run(args):
@@ -199,9 +199,9 @@ def fuzz(kind, n, seed, out):
             out.append("CRASH/TIMEOUT: " + desc)
             continue
         res, summ, t = new
-        cap = cap_ms(c["fps"], c["lo"], c["hi"], c["capms"])
+        cap = cap_ms(c["fps"], c["mid"], c["hi"], c["capms"])
         if kind == "toggle":
-            cap = max(33.0, float(c["capms"]))   # 途中會切換規則與估計值：用可能出現的最大上限
+            cap = max(80.0, float(c["capms"]))   # 途中會切換規則與估計值：用可能出現的最大上限
         for f in range(1, frames - 3):
             r = res[f]
             if r["dropped"]:

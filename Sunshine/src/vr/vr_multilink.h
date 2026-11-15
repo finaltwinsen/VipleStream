@@ -61,6 +61,9 @@ namespace vr::multilink {
     /// §VR-REPAIR-RTT（vr_multilink_repair_rtt）：client 也支援時，補包的時間預算由它照量到的往返時間決定，
     /// server 對帶旗標的回報放寬年齡上限與「還在路上」的視窗；要 repair 也開
     bool repair_rtt = false;
+    /// §VR-REPAIR-WAN（vr_multilink_repair_far）：repair_rtt 關著時，認得 VIPLE_VR_LINK_F_REPAIR_FAR 的 client 仍可用 RTT 規則，
+    /// 但只用在原本規則不補的路徑上（遠端）
+    bool repair_far = false;
     /// §VR-MULTILINK-HOTADD（vr_multilink_hotadd）：client 也支援時，允許同 id 重綁與死亡 slot 回收
     bool hotadd = false;
     /// §PERF-1113（審查 05 第 1 項）：影像批次改成一次 WSASendMsg＋UDP_SEND_MSG_SIZE（USO）交給系統，不再逐包 send_to。
@@ -147,7 +150,8 @@ namespace vr::multilink {
     nack_result_t on_nack(const uint8_t *body, size_t len);
 
     /// §VR-LINK-REPAIR 的 10 秒統計（control 執行緒；沒協商補包或這 10 秒沒有任何動靜時回空字串）
-    std::string take_repair_line();
+    /// @param requests 不是 nullptr 時填這段期間收到的補包請求份數（§VR-PACE-AUTO 用；沒有就是 0）
+    std::string take_repair_line(uint32_t *requests = nullptr);
 
     /// 音訊執行緒：在每條可用連線送一份
     void send_audio(const uint8_t *hdr, size_t hdr_len, const uint8_t *payload, size_t payload_len);

@@ -356,6 +356,7 @@ HEADERS += \
     cli/xrprobe.h \
     streaming/video/bitstreamdump.h \
     streaming/video/v4l2/v4l2caps.h \
+    streaming/xr/xrdevknobs.h \
     streaming/xr/xrlatchstats.h \
     streaming/xr/xrbufferauto.h \
     streaming/xr/xrphase.h \
@@ -399,6 +400,7 @@ HEADERS += \
     streaming/input/input.h \
     streaming/session.h \
     streaming/wifiscanblock.h \
+    streaming/framehotspot.h \
     streaming/batterymonitor.h \
     streaming/vr/vrnetmode.h \
     streaming/vr/vrnetbench.h \

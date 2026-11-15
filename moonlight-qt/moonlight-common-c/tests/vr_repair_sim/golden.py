@@ -64,6 +64,9 @@ def run_all(variants, sc):
 
 
 def digest(text):
+    # 2026-11-15：§K.17 那一行 log 後來多了放棄的原因（" (budget)"／" (deadline)"），時間軸本身沒變。golden 是照改動前的
+    # 佇列記的，比對時把這個字尾拿掉（否則 9 個情境只因為這一句的文字不同就算失敗）
+    text = text.replace("giving up (budget)", "giving up").replace("giving up (deadline)", "giving up")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 

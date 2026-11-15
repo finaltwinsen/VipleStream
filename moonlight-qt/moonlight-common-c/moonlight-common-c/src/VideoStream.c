@@ -142,7 +142,7 @@ static void rrGateLog(uint32_t holdUs) {
         const uint32_t etaUs = vrrrEtaUs(st.hiUs);
         snprintf(rtt, sizeof(rtt), "lo=%.1f mid=%.1f hi=%.1f eta=%.1f try=%.1f cap=%.1f", st.loUs / 1000.0, st.midUs / 1000.0,
                  st.hiUs / 1000.0, etaUs / 1000.0, vrrrEtaTryUs(st.midUs) / 1000.0,
-                 vrrrCapUs(holdUs, etaUs, vrrrEtaFastUs(st.loUs), rr.capOverrideMs) / 1000.0);
+                 vrrrCapUs(holdUs, etaUs, vrrrEtaTryUs(st.midUs), rr.capOverrideMs) / 1000.0);
     }
     else {
         snprintf(rtt, sizeof(rtt), "lo=- mid=- hi=- eta=- try=- cap=-");
@@ -878,6 +878,7 @@ static void VideoReceiveThreadProc(void* context) {
             memset(&in, 0, sizeof(in));
             in.negotiatedRepair = (feat & VIPLE_VR_LINK_F_REPAIR) != 0;
             in.negotiatedRtt = (feat & VIPLE_VR_LINK_F_REPAIR_RTT) != 0;
+            in.farOnly = (feat & VIPLE_VR_LINK_F_REPAIR_FAR) != 0;  // §VR-REPAIR-WAN
             in.carrying = vrmlVideoCarrying();
             // §PERF-1113：以下三處原本各讀一次時鐘（vrmlCtrlRttMs、這裡、vrmlRepairRtt），改成共用 pktNowUs。
             // pktNowUs 是解密之前讀的，比原本早幾微秒（一次 AES-GCM 的時間），對毫秒級的判斷沒有影響。

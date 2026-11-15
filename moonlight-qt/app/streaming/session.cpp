@@ -2504,6 +2504,7 @@ private:
         // §SC-HID: Stop Steam Controller passthrough before LiStopConnection
         m_Session->m_ScHid.stop();
         m_Session->m_WifiScanBlock.stop();  // §WIFI-SCANBLOCK
+        m_Session->m_FrameHotspot.resume();  // §FRAME-HOTSPOT-PAUSE：這一場暫停過熱點就還原
         // §VR：tracking 執行緒會呼叫 LiSendVrTracking，必須在 LiStopConnection 之前停
         m_Session->m_VrTracking.stop();
         m_Session->m_Mic.reset();  // §VR-MIC：編碼執行緒會呼叫 LiSendVrMessage，同理
@@ -4064,6 +4065,7 @@ bool Session::startConnectionAsync()
             // It looks like our route to this PC is over a VPN, so cap at 1024 bytes.
             // Treat it as remote even if the target address is in RFC 1918 address space.
             m_StreamConfig.streamingRemotely = STREAM_CFG_REMOTE;
+            m_ViaVpn = true;  // §FRAME-HOTSPOT-PAUSE
             m_StreamConfig.packetSize = 1024;
             // §PERF-1113 A22：1024 是「不知道這條 VPN 的 MTU」時的保守值。Tailscale 兩端的 MTU 固定 1280，影像封包可以用
             // 1184（common-c 對遠端 IPv6 用的就是這個值：IPv4 封包 1228 B、IPv6 1248 B；開影像加密時 common-c 會從
@@ -4437,6 +4439,19 @@ bool Session::startConnectionAsync()
     // §SC-HID: 連線建立後啟動 passthrough 讀取執行緒（vendor 介面已在 Session::start() prepare 好；
     // 暖機查詢由讀取執行緒代跑，這裡不會碰任何 hidapi 呼叫）
     m_ScHid.start();
+    // §FRAME-HOTSPOT-PAUSE：經 VPN 連到 host 的場次，Steam Frame 自己的串流轉接器熱點沒有人用，卻要和外面的 Wi-Fi 分同一顆
+    // 無線電（每約 30 秒搶走幾秒）。熱點開著、上面又沒有任何裝置時先暫停它，串流結束還原；使用者自己關掉的不碰。
+    // 放在擋掃描之前：熱點停下來之後 wlanap 就不會被列進去。其他平台與不是經 VPN 的場次什麼都不做
+    {
+        bool viaVpn = m_ViaVpn;
+        const QHostAddress hostAddr(m_Computer->activeAddress.address());
+        if (!viaVpn && !hostAddr.isNull()) {
+            // 自訂封包大小時上面不查路徑：對端是 Tailscale 位址也算（100.64.0.0/10、fd7a:115c:a1e0::/48）
+            viaVpn = hostAddr.isInSubnet(QHostAddress(QStringLiteral("100.64.0.0")), 10) ||
+                     hostAddr.isInSubnet(QHostAddress(QStringLiteral("fd7a:115c:a1e0::")), 48);
+        }
+        m_FrameHotspot.pauseIfUnused(viaVpn);
+    }
     // §WIFI-SCANBLOCK：Steam Frame 上串流期間擋住 Wi-Fi 背景掃描（和 Steam 內建串流同一個做法）；其他平台什麼都不做
     m_WifiScanBlock.start();
 
@@ -4488,6 +4503,7 @@ bool Session::startConnectionAsync()
             // 無人配戴的場次頭盔是靜止的，host 端「對不到算圖姿態」這類只有頭在動才出現的現象驗不到
             const bool syntheticHmd = m_Preferences->vrSyntheticHmd;
             const bool syntheticHands = m_Preferences->vrSyntheticHands;  // dev：控制器換成在眼前揮動的合成姿態
+            const bool syntheticToss = m_Preferences->vrSyntheticToss;    // dev：左手換成每 2 秒一次的拋球動作
             const auto synthStart = std::chrono::steady_clock::now();
             // dev（--vr-synthetic-hmd）：頭的合成軌跡，起點就是 synthStart。下面的來源照它算送給 host 的樣本，XrContext 量
             // 姿態誤差／落後時也拿同一條當基準（頭盔真的姿態放著不動，拿來比只會量到一兩公尺的誤差、估不出落後）
@@ -4516,7 +4532,7 @@ bool Session::startConnectionAsync()
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VR-GAZE] dev: --vr-synthetic-gaze - the gaze sent to the host is synthetic (saccades every 0.7 s, pursuit, blinks), not the tracked one");
             }
-            m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, syntheticGaze, syntheticMenuAt, synthHead, synthStart](VIPLE_VR_TRACKING* s) {
+            m_VrTracking.setSource([xr, syntheticHmd, syntheticHands, syntheticToss, syntheticGaze, syntheticMenuAt, synthHead, synthStart](VIPLE_VR_TRACKING* s) {
                 uint32_t predict = 0;
                 VIPLE_VR_POSE& hmd = s->pose[VIPLE_VR_POSE_HMD];
                 if (!xr->sampleHmd(hmd.pos, hmd.rot, hmd.linVel, hmd.angVel, &predict)) {
@@ -4540,8 +4556,14 @@ bool Session::startConnectionAsync()
                     // （頭盔上約 26 ms），拿合成軌跡當基準量落後、讓 host 的 §VR-PREDICT 去補，收斂的值就和實際配戴不同
                     synthHead.poseAt(s->sampleTimeNs + predict, &hmd);
                 }
+                // 合成的手和合成的頭一樣，照「sampleTimeNs＋predictNs 那一刻」算（2026-11-14：原本用「現在」——取樣之後才讀時鐘，
+                // 這條執行緒被擠到的那幾拍，合成的姿態就和它標的時刻差了那麼多；量拍子軌跡的平滑度時這會算成是我們的抖動）
+                const double synthT = (double)(int64_t)(s->sampleTimeNs + predict - synthHead.startNs) * 1e-9;
                 if (syntheticHands) {
-                    vrSyntheticHands(std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), s);
+                    vrSyntheticHands(synthT, s);
+                }
+                if (syntheticToss) {
+                    vrSyntheticToss(synthT, s);
                 }
                 vrSyntheticMenu(std::chrono::duration<double>(std::chrono::steady_clock::now() - synthStart).count(), syntheticMenuAt, s);
                 return true;
@@ -4549,6 +4571,7 @@ bool Session::startConnectionAsync()
         }
 #endif
         m_VrTracking.setSyntheticHands(m_Preferences->vrSyntheticHands);
+        m_VrTracking.setSyntheticToss(m_Preferences->vrSyntheticToss);
         m_VrTracking.setSyntheticMenuAt(m_Preferences->vrSyntheticMenuAtSec);
         m_VrTracking.setSyntheticPadTest(m_Preferences->vrSyntheticPadTestSec);
         if (m_Preferences->vrSyntheticPadTestSec > 0.0) {

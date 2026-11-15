@@ -71,6 +71,7 @@ namespace probe {
     bool no_render = false;  // --peer-no-render：握手後不發布幀（只測握手／tracking）
 
     // unit
+    bool unit_verbose = false;  // --unit-verbose：unit 模式通過的項目也印出數值
     bool no_loopback = false;  // --no-loopback：只跑純函式測試
 
     // space（V4）
@@ -90,6 +91,8 @@ namespace probe {
   int run_watch(const args_t &a);
   int run_space(const args_t &a);
   int run_predict(const args_t &a);
+  int run_swing(const args_t &a);
+  int run_toss(const args_t &a);
 
   // 回傳碼（selftest 依此判讀；情境的預期結果以 stdout 的 key=value 為準）
   constexpr int rc_ok = 0;  // 跑完（不代表情境「成功」，見 summary 行）

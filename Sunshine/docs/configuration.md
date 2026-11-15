@@ -2862,8 +2862,25 @@ not matter). Any other value is reported in the log as an invalid value and the 
             time itself is not changed. `0` gives the game exactly the pose the headset predicted, with the
             velocity of that same moment; the price is that the hands are shown later than they really are by the
             removed time (about 20 ms on a local network, about 50 ms over a remote path). A value such as `10`
-            is a compromise. `auto` limits it to 20 ms: that is about what happens on a local network anyway, so
-            nothing changes there, while over a remote path the 45-55 ms are cut to 20 ms.
+            is a compromise.
+            `auto` (default) does not shorten the extrapolation: the controllers are predicted all the way to the
+            moment the picture is shown, so the hands are in step with the image, and the two problems of the
+            straight-line extrapolation are corrected instead. The driver estimates each hand's acceleration from
+            consecutive samples (using their own timestamps) and reports a velocity of `v + a*E` and a position
+            of `x - a*E*E` (`E` = the smoothed extrapolation length): SteamVR's result is then the straight-line
+            prediction from the sample, followed along its own slope, so the arrival jitter of the samples no
+            longer shows as position noise, and the velocity given to the game is the velocity at display time,
+            consistent with how the position moves. Measured over a remote path with a synthetic swing (same
+            session conditions): the positions the game sees deviate from a smooth path by 0.34 / 1.06 / 2.44 mm
+            (median / 90th / 99th percentile) against 1.39 / 4.36 / 9.01 mm with `unlimited`, and the reported
+            velocity differs from the actual motion by 0.23 against 1.02 m/s; neither lags behind the picture
+            (a fixed limit of 20 ms lagged by 31-47 ms there, which threw off the timing of hits).
+            A hand that holds its trigger is the exception: it is not predicted (the limit goes to 0 over about
+            0.2 s and returns 0.15 s after the release). A predicted pose is ahead of the button state by the
+            extrapolation plus the uplink delay - about 80 ms over a remote path - so a toss (hand moves up,
+            trigger released, hand stops) would be read after the hand has already slowed down, and the ball would
+            drop. With the hand unpredicted the game reads 1.91-2.00 m/s at the release of a synthetic 2.00 m/s
+            toss. Logged every 10 s as `predict=1 ctrlKeepNowUs=... ctrlBackUs=...`.
             @note{The amount is derived from the prediction time SteamVR reports for each submitted frame, so a few
             milliseconds of extrapolation remain at `0`. Verified with an emulated headset against the real
             SteamVR (the right controller trails the head by 23.1 ms at `0`, 13.1 ms at `10`, 0.0 ms at
@@ -3162,6 +3179,79 @@ not matter). Any other value is reported in the log as an invalid value and the 
     </tr>
 </table>
 
+### vr_multilink_repair_far
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: let the client ask for missing video packets again over paths where the original
+            rules give up - a round trip longer than one and a half stream frame periods, in practice a remote
+            path. There a single frame with too many missing packets used to cost an intra refresh: 120-190 ms of
+            a damaged picture (with the two-image foveated layout the outer image is repaired half a wave before
+            the gaze image, so the two do not line up meanwhile). A resend takes one round trip, 30-45 ms of a held
+            picture, and the picture stays clean. The round-trip rules of
+            [vr_multilink_repair_rtt](#vr_multilink_repair_rtt) are used for this (waiting up to 80 ms, median
+            round trip up to 50 ms), but only on such paths: where the original rules repair (a local network),
+            nothing changes. Needs [vr_multilink_repair](#vr_multilink_repair); only clients that know this
+            restriction (2.0.202 and later) get it, older clients behave as before. Has no effect when
+            `vr_multilink_repair_rtt` is enabled (the round-trip rules are then used everywhere).
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_multilink_repair_far = disabled
+            @endcode</td>
+    </tr>
+</table>
+
+### vr_edge_hold_ms
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream 2.0: when a button, trigger or grip change reaches the host later than usual, let the game
+            see it together with the hand pose of that same moment, for this many milliseconds, before the newest
+            pose is used again. The headset sends a tracking sample (poses and buttons) every 1.7 ms. When the
+            uplink stalls for a few tens of milliseconds (twice per second over a poor remote path), the samples
+            of that time arrive together when it ends and only the newest one is used: the poses were bridged by
+            extrapolation meanwhile, but a button cannot be extrapolated - the game learns of a released trigger
+            only then, and reads the hand as it is by then. Tossing a ball shows it: the hand moves up, the trigger
+            is released, the hand stops; seen 60 ms late the hand is already slow, and the ball does not rise or
+            even drops. With this setting the late sample that carries the change is given to the SteamVR driver
+            and samples without a further change wait; if the change continues within the same batch (an analog
+            trigger going from pressed to released) each step is passed on and the wait restarts, so it ends on the
+            sample where the change is complete. Changes that arrive on time are not touched. The head pose is
+            part of the same sample and also updates this much later during the wait (SteamVR extrapolates it as
+            usual). `0` turns it off. Each use is logged as `[VIPLE-VR-EDGE]`.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            12
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Range</td>
+        <td colspan="2">0, 4-30</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_edge_hold_ms = 0
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_pace_spread_pct
 
 <table>
@@ -3177,12 +3267,14 @@ not matter). Any other value is reported in the log as an invalid value and the 
             showed runs of three or more repeated display refreshes about half as often, and the bitrate control
             held a 20-40% higher bitrate, for 7-9 ms more latency; at 144 fps 6 instead of 10 losses per 10 s
             for 3.6 ms more latency.
-            `auto` (default): the host turns spreading on by itself while a single link carries the video, no
-            resend requests arrive (see below), and the client keeps reporting blocks it could not recover
+            `auto` (default): the host turns spreading on by itself while a single link carries the video, resends
+            are not carrying the path (see below), and the client keeps reporting blocks it could not recover
             (4 or more in each of two consecutive 10-second windows); it turns it off again after two minutes
-            with at most one such block per window. While on, each frame is spread over about 6.5 ms (85% of the
-            frame period at 144 fps, 46% at 72 fps) - a longer spread did not help more and costs latency. Every
-            switch is logged as `[VIPLE-VR-LINK] pacing auto: on|off`.
+            with at most one such block per window, or when resends come into use (20 or more resend requests
+            in each of two consecutive windows - a local network where resends work sees 50-190 per window, a
+            remote path 1-5). While on, each frame is spread over about 6.5 ms (85% of the frame period at
+            144 fps, 46% at 72 fps) - a longer spread did not help more and costs latency. Every switch is
+            logged as `[VIPLE-VR-LINK] pacing auto: on|off`.
             `0`: never spread. `1`-`95`: always spread over this percentage of the frame period (for comparisons).
             Packets of one frame are never more than 1 ms apart (small frames are spread over less time), each
             frame is scheduled from the moment it is queued (a late start is caught up at once rather than
@@ -3192,7 +3284,8 @@ not matter). Any other value is reported in the log as an invalid value and the 
             @note{Applies only to video sent over [vr_multilink](#vr_multilink) links. Do not force it on with a
             number on a local network: where resends ([vr_multilink_repair](#vr_multilink_repair)) are active, a
             gap of 3 ms in the middle of a spread frame makes the client report the packets that have not been
-            sent yet as missing, and the host sends them twice. `auto` never turns it on there.}
+            sent yet as missing, and the host sends them twice. `auto` does not turn it on there, and turns it
+            off within 20 seconds if resends come into use.}
         </td>
     </tr>
     <tr>

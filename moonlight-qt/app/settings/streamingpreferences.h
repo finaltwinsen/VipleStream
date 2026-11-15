@@ -460,6 +460,7 @@ public:
     // 無人配戴時用來跑「頭在動」才走得到的路徑；畫面會在頭盔裡甩動，不可以戴著用。
     // 2026-10-10 起姿態誤差／落後（[VIPLE-VR-POSEERR]、回報給 host 的 poseLag）也改拿這條合成軌跡當基準
     bool vrSyntheticHmd = false;
+    bool vrSyntheticToss = false;     // 2026-11-14（dev）：--vr-synthetic-toss，左手每 2 秒做一次拋球（按住扳機、上移、放開）
     bool vrSyntheticHands = false;    // 2026-10-08（dev）：--vr-synthetic-hands，控制器換成在眼前揮動的合成姿態，不寫入設定
     // 2026-10-09（dev，--vr-synthetic-menu-at，不寫入設定）：追蹤開始後第幾秒在左手按一下 MENU（host 當成 SteamVR 系統鍵，
     // 只是「切換」儀表板：開著就關、關著就開）。0＝不按。用按鍵關掉之後 host 的時序和有人配戴時不同，量測請改用停用儀表板

@@ -1673,6 +1673,7 @@ namespace config {
     } else {
       vr_opt::int_strict_f(vars, "vr_ctrl_extrap_ms", vr.ctrl_extrap_ms, 1, 50, true);
     }
+    vr_opt::int_strict_f(vars, "vr_edge_hold_ms", vr.edge_hold_ms, 4, 30, true);  // §VR-EDGE-HOLD（0＝關）
     generic_f(vars, "vr_multilink", vr.multilink, vr_opt::multilink_from_view);
     string_f(vars, "vr_multilink_fault", vr.multilink_fault);
     vr_opt::bool_strict_f(vars, "vr_multilink_ctrl", vr.multilink_ctrl);
@@ -1680,6 +1681,7 @@ namespace config {
     // §VR-REPAIR-RTT：要 vr_multilink_repair（與 vr_multilink_ctrl）也開；只設這一個時在多連線的 VR session 建立時警告、
     // 維持關閉（stream.cpp）。預設關＝兩端的行為與之前完全相同
     vr_opt::bool_strict_f(vars, "vr_multilink_repair_rtt", vr.multilink_repair_rtt);
+    vr_opt::bool_strict_f(vars, "vr_multilink_repair_far", vr.multilink_repair_far);  // §VR-REPAIR-WAN
     vr_opt::bool_strict_f(vars, "vr_multilink_uso", vr.multilink_uso);  // §PERF-1113
     // §VR-PACE：auto（預設，依線路自動開關）、0（一次送完）或 1～95（固定攤開的比例）
     if (const auto it = vars.find("vr_pace_spread_pct"); it != std::end(vars) && it->second == "auto") {

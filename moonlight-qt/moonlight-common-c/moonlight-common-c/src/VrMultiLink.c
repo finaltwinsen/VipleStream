@@ -586,7 +586,8 @@ static void sendHello(void) {
         // 我們支援的；要不要啟用由 server 決定（LINK_READY 的 hubCaps）。§VR-REPAIR-RTT 另外看 client 這一端要不要用
         // （設定或 --vr-repair-rtt off 可以不提，那就整場照原本的規則）
         d.flags = VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_HOTADD |
-                  ((StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) ? VIPLE_VR_LINK_F_REPAIR_RTT : 0) |
+                  // §VR-REPAIR-WAN：提 RTT 規則的同時也表示認得「只用在遠端路徑」的限制（server 預設只給這一種）
+                  ((StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) ? (VIPLE_VR_LINK_F_REPAIR_RTT | VIPLE_VR_LINK_F_REPAIR_FAR) : 0) |
                   (isDedicatedIf(L->pending ? L->pendingIfName : L->ifName) ? VIPLE_VR_LINK_F_DEDICATED : 0);
         // §VR-MULTILINK-HOTADD：重綁中要送的是新路徑的埠與位址（LINK_READY 之後才會換掉 L->videoSock）
         if (L->pending) {
@@ -1338,10 +1339,14 @@ void vrmlOnS2C(const unsigned char* tlv, int len) {
                 if (!(StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) || !(caps & VIPLE_VR_LINK_F_REPAIR)) {
                     caps &= (uint8_t)~VIPLE_VR_LINK_F_REPAIR_RTT;
                 }
+                // §VR-REPAIR-WAN：「只用在遠端路徑」是 RTT 規則的限制，RTT 規則沒成立就沒有意義
+                if (!(caps & VIPLE_VR_LINK_F_REPAIR_RTT)) {
+                    caps &= (uint8_t)~VIPLE_VR_LINK_F_REPAIR_FAR;
+                }
                 if (caps != hubCaps) {
                     Limelog("[VIPLE-VR-LINK] link features agreed by the server: ctrl=%s repair=%s repairRtt=%s\n",
                             (caps & VIPLE_VR_LINK_F_CTRL) ? "on" : "off", (caps & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off",
-                            (caps & VIPLE_VR_LINK_F_REPAIR_RTT) ? "on" : "off");
+                            !(caps & VIPLE_VR_LINK_F_REPAIR_RTT) ? "off" : ((caps & VIPLE_VR_LINK_F_REPAIR_FAR) ? "far paths only" : "on"));
                 }
                 hubCaps = caps;
             }

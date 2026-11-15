@@ -120,6 +120,12 @@ QString AppModel::getSessionOwnerName()
     return m_Computer->sessionOwnerName;
 }
 
+bool AppModel::isSessionOwnedByCaller()
+{
+    QReadLocker lock(&m_Computer->lock);
+    return m_Computer->sessionOwnedByCaller;
+}
+
 QString AppModel::getLocalUniqueId()
 {
     return IdentityManager::get()->getUniqueId();

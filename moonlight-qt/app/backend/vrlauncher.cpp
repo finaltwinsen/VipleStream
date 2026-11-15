@@ -1,5 +1,6 @@
 #include "vrlauncher.h"
 #include "streaming/vr/vrnetbench.h"  // §VR-NETBENCH
+#include "streaming/framehotspot.h"   // §FRAME-HOTSPOT-PAUSE
 
 #include "sfenv.h"
 #include "vrpreflightcheck.h"
@@ -99,6 +100,9 @@ VrLauncher::VrLauncher(QObject* parent)
       m_Preflight(new VrPreflightCheck(this))
 {
     s_Instance = this;
+    // §FRAME-HOTSPOT-PAUSE：上一次的串流行程暫停了頭盔的串流轉接器熱點、沒有還原就結束（被強制結束、當掉）時，在這裡補做。
+    // 沒有那個標記檔時只是一次開檔失敗；Frame 以外的平台什麼都不做
+    FrameHotspot::recoverStale();
     // §VR-PREFLIGHT：檢查的結果。proceed＝可以開了（夠快、量不到、連續夠快、使用者堅持）
     connect(m_Preflight, &VrPreflightCheck::changed, this, &VrLauncher::preflightChanged);
     connect(m_Preflight, &VrPreflightCheck::proceed, this, &VrLauncher::preflightPassed);
@@ -675,6 +679,8 @@ void VrLauncher::processEnded(int exitCode, QProcess::ExitStatus status)
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] stream process finished exit=%d status=%d%s%s",
                 exitCode, static_cast<int>(status), error.isEmpty() ? "" : " error=", qPrintable(error));
+    // §FRAME-HOTSPOT-PAUSE：子行程正常結束時自己會還原熱點；被強制結束或當掉的話在這裡補做
+    FrameHotspot::recoverStale();
     setLaunching(false, QString(), "process ended");
     emit runningChanged();
     emit finished(exitCode, error);

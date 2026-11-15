@@ -817,7 +817,7 @@ namespace stream {
     bool paceAbOn = true;
     // §VR-PACE-AUTO：攤開送的自動開關（vr_pace_spread_pct = auto；只在控制執行緒的 10 秒統計裡讀寫）
     ::vr::pace::auto_t paceAuto;
-    bool paceNackSeen = false;  ///< 這個 10 秒視窗有沒有收到補包請求
+    uint32_t paceResendRequests = 0;  ///< 這個 10 秒視窗收到幾份補包請求
 
     std::uint32_t launch_session_id;
 
@@ -2771,9 +2771,8 @@ namespace stream {
             }
           }
         }
-        if (const auto line = session->vrLinks->take_repair_line(); !line.empty()) {
+        if (const auto line = session->vrLinks->take_repair_line(&session->paceResendRequests); !line.empty()) {
           BOOST_LOG(info) << "[VIPLE-VR-REPAIR] 10s: " << line;
-          session->paceNackSeen = true;  // 這一行只在這 10 秒有收到補包請求時才有內容
         }
       }
       // §VR-REPAIR-RTT（量測）：client 回報的 FEC status 這 10 秒的分類（有回報、或 FEC 高於基準時印）。fec＝目前的 FEC 百分比
@@ -2796,25 +2795,25 @@ namespace stream {
                           << " elevatedUse=" << fec_stat.elevated_use << " nearMiss=" << fec_stat.near_miss << episode;
         }
         // §VR-PACE-AUTO（vr_pace_spread_pct = auto）：攤開送由線路狀況自動開關（條件與依據見 vr_pace_auto.h）。
-        // 開的條件：只有一條連線活著、這 10 秒沒有收到補包請求、救不回的 block（含整幀沒到）連續兩個視窗都 ≥ 4。
+        // 開的條件：只有一條連線活著、補包沒有在用（每 10 秒不到 20 份請求）、救不回的 block（含整幀沒到）連續兩個視窗都 ≥ 4。
         // 開著時比例跟著幀週期走（自動半速切換時攤開的時間維持約 6.5 ms）。
         if (session->vrLinks && config::vr.pace_spread_pct < 0) {
-          const bool eligible = session->vrLinks->alive_count() == 1 && !session->paceNackSeen;
+          const bool single_link = session->vrLinks->alive_count() == 1;
           const int64_t period_us = session->vrLinks->video_max_age_us() / 2;
           const uint32_t failed = fec_stat.failed + fec_stat.gap;
-          if (session->paceAuto.on_window(eligible, failed)) {
+          if (session->paceAuto.on_window(single_link, failed, session->paceResendRequests)) {
             const int pct = session->paceAuto.on ? ::vr::pace::pct_for_period(period_us) : 0;
             session->vrLinks->set_pace_spread_pct(pct);
             BOOST_LOG(info) << "[VIPLE-VR-LINK] pacing auto: " << (session->paceAuto.on ? "on" : "off") << " (" << session->paceAuto.reason
                             << ") spread=" << pct << "% of " << std::format("{:.1f}", period_us / 1000.0) << " ms, unrecovered blocks in the last 10 s="
-                            << failed << " switches=" << session->paceAuto.switches;
+                            << failed << " resend requests=" << session->paceResendRequests << " switches=" << session->paceAuto.switches;
           } else if (session->paceAuto.on) {
             if (const int pct = ::vr::pace::pct_for_period(period_us); pct != session->vrLinks->pace_spread_pct()) {
               session->vrLinks->set_pace_spread_pct(pct);  // 幀率變了：比例跟著調
             }
           }
         }
-        session->paceNackSeen = false;
+        session->paceResendRequests = 0;
       }
       // §M1b S1-12：時鐘對映 10 秒行（欄位順序見 clk::format_stats，F.10 分析腳本依賴）
       if (const auto cs = vr_state.clock_stats(true)) {
@@ -6870,6 +6869,7 @@ namespace stream {
           }
           // §VR-REPAIR-RTT：要補包本身也開著（client 也要支援才會真的啟用，見 negotiate_link_features）
           opt.repair_rtt = config::vr.multilink_repair_rtt && opt.repair;
+          opt.repair_far = config::vr.multilink_repair_far && opt.repair;  // §VR-REPAIR-WAN：RTT 規則只用在遠端路徑（預設）
           if (config::vr.multilink_repair_rtt && !opt.repair) {
             BOOST_LOG(warning) << "[VIPLE-VR-LINK] vr_multilink_repair_rtt needs vr_multilink_repair and vr_multilink_ctrl = enabled - it stays off"sv;
           }

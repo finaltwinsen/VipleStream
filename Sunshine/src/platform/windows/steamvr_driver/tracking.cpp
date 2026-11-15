@@ -170,6 +170,10 @@ namespace vrdrv {
     uint64_t n_blend_recoveries = 0;
     // §VR-CTRL-EXTRAP：控制器最近一筆回報被往回推了多久（10 秒統計用）
     double ctrl_back_last_s = 0.0;
+    // §VR-CTRL-PREDICT：兩手各一個預測器；最近一筆保留的預測長度（10 秒統計用，−1＝沒有在用）
+    ctrl_predictor_t ctrl_pred[2];
+    double ctrl_keep_last_s = -1.0;
+    double ctrl_acc_max = 0.0;
     const int64_t f = ctx_.qpf;
 
     for (;;) {
@@ -214,6 +218,10 @@ namespace vrdrv {
         ctrl_blender[0].reset();
         ctrl_blender[1].reset();
         ctrl_back_last_s = 0.0;
+        ctrl_pred[0].reset();
+        ctrl_pred[1].reset();
+        ctrl_keep_last_s = -1.0;
+        ctrl_acc_max = 0.0;
       }
       const vripc_session_config_t &cfg = gen->config();
       uint32_t zero_vel_us = cfg.stale_zero_vel_us != 0 ? cfg.stale_zero_vel_us : 22222;
@@ -318,7 +326,13 @@ namespace vrdrv {
         // SteamVR 目前的姿態預測時間（0＝還沒有畫面）：§VR-STALE-COAST 的軌跡與 §VR-CTRL-EXTRAP 用
         const double pred_s = (double) ctx_.pred_us_recent.load(std::memory_order_relaxed) / 1e6;
         // §VR-CTRL-EXTRAP：SteamVR 對控制器最多外插多久（< 0＝不限制＝原本的行為）；超過的部分由 blender 把姿態往回推
-        const double ctrl_keep_s = cfg.ctrl_keep_ms_p1 != 0 ? (double) (cfg.ctrl_keep_ms_p1 - 1) / 1000.0 : -1.0;
+        const double ctrl_keep_cfg_s = cfg.ctrl_keep_ms_p1 != 0 ? (double) (cfg.ctrl_keep_ms_p1 - 1) / 1000.0 : -1.0;
+        // §VR-CTRL-PREDICT：auto 時控制器預測到顯示時刻（ctrl_predictor_t 先把樣本改好，blender 不再往回推）
+        const bool ctrl_predict = (cfg.pose_flags & VRIPC_POSE_F_CTRL_PREDICT) != 0;
+        const double ctrl_keep_s = ctrl_predict ? -1.0 : ctrl_keep_cfg_s;
+        if (!ctrl_predict) {
+          ctrl_keep_last_s = ctrl_keep_cfg_s;
+        }
         if (hold && !in_hold) {
           in_hold = true;
           ++n_hold;
@@ -335,12 +349,24 @@ namespace vrdrv {
             if (auto *d = ctrl_[h].load()) {
               const bool hand_have = (last.flags & hand_flag[h]) != 0;
               const bool hand_fresh = fresh && hand_have;
-              const vripc_pose_t &cp = last.pose[1 + h];
+              vripc_pose_t cp = last.pose[1 + h];
+              if (ctrl_predict) {
+                if (hand_fresh) {
+                  // 扳機按著（類比值 12.5% 以上或按鍵位元）＝這隻手在拿東西：不預測（見 ctrl_predictor_t）
+                  const bool held = last.input[h].trigger >= 0x2000 || (last.input[h].buttons & (1u << 5)) != 0;
+                  ctrl_pred[h].on_fresh(cp.pos, cp.rot, cp.lin_vel, cp.ang_vel, last.target_server_qpc, steamvr_extrap_s(pred_s, ctrl_off), held, now, f);
+                  ctrl_acc_max = (std::max)(ctrl_acc_max, ctrl_pred[h].acc_len());
+                }
+                ctrl_pred[h].apply(cp.pos, cp.rot, cp.lin_vel, cp.ang_vel);
+              }
 
               const auto cres = ctrl_blender[h].process(hand_fresh, cp.pos, cp.rot, cp.lin_vel, cp.ang_vel, pol, ctrl_off, now, f, pred_s, ctrl_keep_s,
                                                         pin.raw_off_s, (double) ctrl_oor_us / 1e6);
               if (hand_have) {
-                ctrl_back_last_s = cres.back_s;
+                ctrl_back_last_s = ctrl_predict ? ctrl_pred[h].lag_s() : cres.back_s;
+                if (ctrl_predict) {
+                  ctrl_keep_last_s = ctrl_pred[h].keep_s();
+                }
               }
 
               if (cres.log_enter && limiter_enter.allow(now, f, 5)) {
@@ -479,8 +505,11 @@ namespace vrdrv {
                        (unsigned long long) n_arrival_gt2t, (unsigned long long) n_hold, (unsigned long long) n_hold_expired, cfg.pose_flags,
                        (unsigned long long) n_blend_recoveries);
         // 另外一行：上面那一行已經接近 driver log 單行的長度上限，接在後面的欄位會被截掉（2.0.186 實測 ctrlBackUs 印不出來）
-        VRDRV_LOG_INFO("tracking 10s ctrl: predUs=%d ctrlKeepMs=%d ctrlBackUs=%d", (int) ctx_.pred_us_recent.load(std::memory_order_relaxed),
-                       cfg.ctrl_keep_ms_p1 != 0 ? (int) cfg.ctrl_keep_ms_p1 - 1 : -1, (int) (ctrl_back_last_s * 1e6));
+        VRDRV_LOG_INFO("tracking 10s ctrl: predUs=%d ctrlKeepMs=%d ctrlBackUs=%d ctrlKeepNowUs=%d predict=%d accMax=%.0f",
+                       (int) ctx_.pred_us_recent.load(std::memory_order_relaxed), cfg.ctrl_keep_ms_p1 != 0 ? (int) cfg.ctrl_keep_ms_p1 - 1 : -1,
+                       (int) (ctrl_back_last_s * 1e6), ctrl_keep_last_s < 0.0 ? -1 : (int) (ctrl_keep_last_s * 1e6),
+                       (cfg.pose_flags & VRIPC_POSE_F_CTRL_PREDICT) != 0 ? 1 : 0, ctrl_acc_max);
+        ctrl_acc_max = 0.0;
         t0 = now;
         n_new = n_stale_sends = n_stale = n_oor = n_invalid = n_torn = 0;
         n_blend_recoveries = 0;

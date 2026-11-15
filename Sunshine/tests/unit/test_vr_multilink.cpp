@@ -856,9 +856,9 @@ TEST(VrMultilinkRepairRtt, MaxAge) {
   EXPECT_EQ(ml::repair_max_age_ns(false, 16'666'000), 24'999'000);
   EXPECT_EQ(ml::repair_max_age_ns(false, 33'333'000), 49'999'500);
   EXPECT_EQ(ml::repair_max_age_ns(false, 22'222'000), 33'333'000);
-  // 帶旗標的回報：100 ms，和更新率無關
-  EXPECT_EQ(ml::repair_max_age_ns(true, 16'666'000), 100'000'000);
-  EXPECT_EQ(ml::repair_max_age_ns(true, 40'000'000), 100'000'000);
+  // 帶旗標的回報：160 ms（§VR-REPAIR-WAN 之前是 100 ms），和更新率無關
+  EXPECT_EQ(ml::repair_max_age_ns(true, 16'666'000), 160'000'000);
+  EXPECT_EQ(ml::repair_max_age_ns(true, 40'000'000), 160'000'000);
 }
 
 TEST(VrMultilinkRepairRtt, InFlightGap) {
@@ -892,6 +892,14 @@ TEST(VrMultilinkRepairRtt, FeatureNegotiation) {
   EXPECT_EQ(ml::negotiate_link_features(0x01, true, true, false, false), 0x01);
   EXPECT_EQ(ml::negotiate_link_features(0x02, true, true, false, false), 0x00);
   EXPECT_EQ(ml::negotiate_link_features(0x00, true, true, true, false), 0x00);
+  // §VR-REPAIR-WAN：repair_rtt 關著、repair_far 開著時，client 有提 REPAIR_FAR（0x20）才給 REPAIR_RTT｜REPAIR_FAR
+  EXPECT_EQ(ml::negotiate_link_features(0x27, true, true, false, false, true), 0x27);
+  EXPECT_EQ(ml::negotiate_link_features(0x07, true, true, false, false, true), 0x03);  // 舊 client 沒提 0x20：照舊拿不到 RTT 規則
+  EXPECT_EQ(ml::negotiate_link_features(0x23, true, true, false, false, true), 0x03);  // 只提 0x20 沒提 RTT
+  EXPECT_EQ(ml::negotiate_link_features(0x27, true, true, true, false, true), 0x07);  // repair_rtt 明確開著：到處都用，不帶 0x20
+  EXPECT_EQ(ml::negotiate_link_features(0x27, true, true, false, false, false), 0x03);  // 兩個都關
+  EXPECT_EQ(ml::negotiate_link_features(0x27, true, false, false, false, true), 0x01);  // 補包沒開
+  EXPECT_EQ(ml::negotiate_link_features(0x27, false, true, false, false, true), 0x00);
 }
 
 // ── §VR-MULTILINK-HOTADD ─────────────────────────────────────────
@@ -970,8 +978,11 @@ TEST(VrMultilinkHotadd, RebindAndReclaimDeadlines) {
 TEST(VrMultilinkHotadd, FeatureIsIndependent) {
   // HOTADD 不依賴 CTRL／REPAIR：只要兩邊都支援就成立
   EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_HOTADD, false, false, false, true), VIPLE_VR_LINK_F_HOTADD);
-  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_HOTADD | VIPLE_VR_LINK_F_CTRL, true, true, true, true),
+  // 2026-11-15：這一項原本只提 HOTADD｜CTRL 卻期望拿到 REPAIR 與 REPAIR_RTT（測試寫錯，從加進來就沒過）。
+  // 要驗的是「全部都提、全部都開時四個都成立」，以及「只提 HOTADD｜CTRL 時就只有這兩個」
+  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_HOTADD | VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_REPAIR_RTT, true, true, true, true),
             VIPLE_VR_LINK_F_HOTADD | VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_REPAIR_RTT);
+  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_HOTADD | VIPLE_VR_LINK_F_CTRL, true, true, true, true), VIPLE_VR_LINK_F_HOTADD | VIPLE_VR_LINK_F_CTRL);
   // server 的開關關著、或舊 client 沒提：都不回
   EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_HOTADD, true, true, true, false), 0x00);
   EXPECT_EQ(ml::negotiate_link_features(0x00, true, true, true, true), 0x00);

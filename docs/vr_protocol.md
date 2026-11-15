@@ -470,6 +470,7 @@ FEC 補不回來的 block（掉的比 parity 多）原本只能整幀放棄、�
 |---|---|
 | `STREAM_CONFIGURATION.vrFlags` | `0x10 VIPLE_VR_SF_REPAIR_RTT`：本機用，client 願意用（決定 `LINK_HELLO` 帶不帶下一列的位元） |
 | `VIPLE_VR_LINK_DESC.flags`／`hubCaps` | `0x04 VIPLE_VR_LINK_F_REPAIR_RTT`：server 的主開關開著、補包成立、client 有帶，`hubCaps` 才有 |
+| `VIPLE_VR_LINK_DESC.flags`／`hubCaps` | `0x20 VIPLE_VR_LINK_F_REPAIR_FAR`（§VR-REPAIR-WAN，2026-11-15）：client 提出＝認得「RTT 規則只用在原本規則不補的路徑上」這個限制（提 `0x04` 的同時一律帶）。server 的 `vr_multilink_repair_rtt` 關著、`vr_multilink_repair_far` 開著（預設）、而且 client 有提時，`hubCaps` 回 `0x04｜0x20`：client 只在原本規則的門檻關著（往返＋2 ms > 一個半 hold）時用 RTT 規則，其餘照原本的規則逐位元不變。`vr_multilink_repair_rtt` 開著時只回 `0x04`。沒提 `0x20` 的舊 client 在預設設定下拿不到 `0x04`，行為不變 |
 | `VIPLE_VR_TLV_NACK.flags` | bit7 `VIPLE_VR_NACK_F_RTT`＝這份回報照這一段的規則送出；低 7 bit（`VIPLE_VR_NACK_ETA_MASK`）＝client 的 `eta`，毫秒、無條件進位、1～127。只有協商了 `REPAIR_RTT` 才看 |
 
 `VIPLE_VR_TLV_NACK` 仍是 9 B，`LINK_HELLO`／`LINK_READY` 的長度不變；預先回報用既有的 `total＝0` NACK。
@@ -482,12 +483,19 @@ FEC 補不回來的 block（掉的比 parity 多）原本只能整幀放棄、�
   `mid`＝中位數（偶數筆取較大的）、`hi`＝第二大（不到 3 筆取最大）。只看正在送影像的連線（補包只從那幾條回來）；
   還不知道哪條在送時看全部有樣本的；在送的那條沒有樣本就不適用。
 - **三個估計**：`eta`＝hi×1.25＋2 ms（補包「該到了」：多久重報、等待上限多大）；`etaTry`＝mid＋2 ms（第一份回報
-  值不值得送）；`etaFast`＝lo＋2 ms（再報一輪值不值得）。往返 8.1／9.6／10.9 ms 時是 15.6／11.6／10.1 ms。
-- **等待上限 `cap`**（後面的封包最多被壓住多久）＝clamp(eta＋etaFast＋2 ms, 2×hold, 33 ms)，`hold`＝上一段的
-  clamp(幀週期, 4, 14 ms)——所以不會比上一段「等待中有進展」時短。上例是 27.7 ms；區網往返 3 ms、120 Hz 時是
-  16.7 ms。client 可以指定（`--vr-repair-hold`，8～100 ms）。一張完整到達的幀最多被壓住 `cap`。
-- **門檻**：etaTry ≤ min(cap, 25 ms) 才開，關掉之後要 etaTry＋2 ms ≤ 才再開——往返的中位數超過 23 ms 就整個不
+  值不值得送、再報一輪趕不趕得上）；`etaFast`＝lo＋2 ms（補包不可能比它更早到：放棄之後的暫停用）。
+  往返 8.1／9.6／10.9 ms 時是 15.6／11.6／10.1 ms。
+- **等待上限 `cap`**（後面的封包最多被壓住多久）＝clamp(eta＋etaTry＋2 ms, 2×hold, 80 ms)，`hold`＝上一段的
+  clamp(幀週期, 4, 14 ms)——所以不會比上一段「等待中有進展」時短。上例是 29.2 ms；區網往返 3 ms、120 Hz 時是
+  16.7 ms；外地實測的路徑（往返 23.5／26.7／28.2 ms）是 68 ms。client 可以指定（`--vr-repair-hold`，8～100 ms）。
+  一張完整到達的幀最多被壓住 `cap`。
+- **門檻**：etaTry ≤ min(cap, 52 ms) 才開，關掉之後要 etaTry＋2 ms ≤ 才再開——往返的中位數超過 50 ms 就整個不
   回報、不等。
+- **§VR-REPAIR-WAN（2026-11-15）改了上面三項**：`cap` 的封頂 33 → 80 ms、門檻 25 → 52 ms（原本的值是照區網訂的，
+  往返 25 ms 上下的遠端路徑整個被擋在門外）；`cap` 的第二輪與重報的可行性由 `etaFast` 改成 `etaTry`（照最短往返算
+  趕得上、照實際往返差幾毫秒錯過期限的情況佔多數：白送一輪、白等到上限）；第一份回報的「多久沒有新封包」在
+  etaTry ≥ 幀週期（遠端）時改用一個幀週期（3 ms 的規則在那種路徑上誤報是真事件的 4～30 倍）。server 的年齡上限
+  `kRepairRttMaxAgeNs` 100 → 160 ms。預設只在遠端路徑生效（`VIPLE_VR_LINK_F_REPAIR_FAR`，見上表）。
 - **第一份回報**：時機和上一段相同（最後一個 shard 到了還不夠；一段時間沒有新封包；下一幀的封包到了），改兩件事。
   一、「多久沒有新封包」：幀週期 ≤ 10 ms 時，shard 總數 ≤ 32 的 block 3 ms、其餘等一個幀週期（等於交給「下一幀
   到了」那一條——實驗建置裡大的 block 用 3 ms 時，回報幾乎都是幀內停頓造成的，補包流量是鏈路丟包的十倍）；

@@ -544,11 +544,13 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
                                                                                  block 數、server 回「補不了」的次數。可以補包時 maxWaitMs 可能大於 limitMs：
                                                                                  等待期間前面的 block 收齊過，期限會從那一刻起再延一個幀週期（上限兩個）。
                                                                                  照 §VR-REPAIR-RTT 的規則跑過的視窗行尾多一段 ` | rtt …`（見 5b-5）
-[VIPLE-VR-LINK] link features: ctrl=on|off repair=on|off repairRtt=on|off (client offered 0x.., server ctrl=… repair=… repairRtt=enabled|disabled)
+[VIPLE-VR-LINK] link features: ctrl=on|off repair=on|off repairRtt=on|far|off hotadd=on|off (client offered 0x.., server ctrl=… repair=… repairRtt=enabled|disabled repairFar=enabled|disabled hotadd=…)
+                                                                              ← repairRtt=far（§VR-REPAIR-WAN，2026-11-15）：往返時間的補包規則只用在原本規則不補的路徑上
+                                                                                 （預設：`vr_multilink_repair_far` 開著、client 有提 0x20）；on＝到處都用（`vr_multilink_repair_rtt`）
                                                                               ← server（2026-10-07）：這個 session 協商出來的連線層功能
                                                                                  （§VR-LINK-CTRL／§VR-LINK-REPAIR／§VR-REPAIR-RTT；`vr_multilink_ctrl`、
                                                                                  `vr_multilink_repair`、`vr_multilink_repair_rtt` 開著、而且 client 支援）
-[VIPLE-VR-LINK] link features agreed by the server: ctrl=… repair=… repairRtt=…   ← client：同上（LINK_READY 尾端的 hubCaps）
+[VIPLE-VR-LINK] link features agreed by the server: ctrl=… repair=… repairRtt=on|far paths only|off   ← client：同上（LINK_READY 尾端的 hubCaps）
 [VIPLE-VR-LINK] link N '<if>' on standby: a direct link to the host is up, no video over the VPN
 [VIPLE-VR-LINK] link N '<if>' back in use: no direct link to the host
                                                                               ← client §VR-LINK-STANDBY（2.0.99）：走 Tailscale（host 位址在 100.64.0.0/10）的那一條，在有
@@ -638,9 +640,12 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
 [VIPLE-VR-LINK] skipping '<if>' (USB network link is not used for multi-link)  ← client：USB 網路 gadget 不當連線
 [VIPLE-VR-LINK] pacing: each frame's packets are spread over P% of the stream frame period (vr_pace_spread_pct)  ← server：§VR-PACE 固定開著（session 開始時一行）
 [VIPLE-VR-LINK] pacing: auto (vr_pace_spread_pct) - spreads each frame over about 6.5 ms while …            ← server：§VR-PACE-AUTO（預設），session 開始時一行
-[VIPLE-VR-LINK] pacing auto: on|off (<原因>) spread=P% of T ms, unrecovered blocks in the last 10 s=N switches=N  ← server：自動開關切換的當下。開：只有一條連線、
-                                                                                 這 10 秒沒有補包請求、救不回的 block（FECSTAT 的 failed＋wholeFrame）連續兩個視窗 ≥ 4；
-                                                                                 關：連續 12 個視窗 ≤ 1，或出現補包請求／第二條連線（規則在 src/vr/vr_pace_auto.h）
+[VIPLE-VR-LINK] pacing auto: on|off (<原因>) spread=P% of T ms, unrecovered blocks in the last 10 s=N resend requests=N switches=N
+                                                                              ← server：自動開關切換的當下。開：只有一條連線、救不回的 block
+                                                                                 （FECSTAT 的 failed＋wholeFrame）連續兩個視窗 ≥ 4，而且那兩個視窗的補包請求都不到 20 份；
+                                                                                 關：連續 12 個視窗 ≤ 1、補包請求連續兩個視窗 ≥ 20 份（補包真的在用，區網是 50～190 份）、
+                                                                                 或出現第二條連線（規則在 src/vr/vr_pace_auto.h）。resend requests＝這 10 秒收到的補包請求份數
+                                                                                 （2026-11-14 加；原本只要有一份就關，外地每 10 秒 1～5 份時會來回切換）
 [VIPLE-VR-LINK] pacing A/B: on (P%), switching every N s (vr_pace_ab_s)    ← server：§VR-PACE-AB（對照測試用）第一個 10 秒統計之後；
 [VIPLE-VR-LINK] pacing A/B: on|off                                          ←   之後每 N 秒切換一次，緊接在 10s 統計那一行之後
 [VIPLE-VR-LINK] 10s: trkFirst enet=N | L1 up|down[(probing)][(paused Ns)] tx=N (… Mbps) dropAge=N dropBlock=N dropFull=N paused=N standby=N fault=N err=N
@@ -788,7 +793,8 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-DRV] controller hand=<left|right> <out-of-range|tracking> age_ms=<n>                   ← 控制器狀態切換（沒資料、active=0、> 100 ms）
 [VIPLE-VR-DRV] tracking 10s: new=N staleSends=N stale=N oor=N invalid=N torn=N offsetUs min=… max=… p50=… ctrlOffUs p50=… p95=…
                arrivalMaxMs=… gt2T=N hold=N holdExpired=N poseFlags=0x<n> blendRecoveries=N
-[VIPLE-VR-DRV] tracking 10s ctrl: predUs=N ctrlKeepMs=N ctrlBackUs=N              ← 緊接在上一行之後（另外一行：上一行已接近 driver log 單行長度上限）
+[VIPLE-VR-DRV] tracking 10s ctrl: predUs=N ctrlKeepMs=N ctrlBackUs=N ctrlKeepNowUs=N predict=<0|1> accMax=N
+                                                                                    ← 緊接在上一行之後（另外一行：上一行已接近 driver log 單行長度上限）
                                                                                     ← 2026-10-05 起尾端加：HMD offset 中位數、控制器 offset（§VR-CTRL-OFFSET 開才有值）、
                                                                                        driver 收到新樣本的最大間隔與 > 2T 次數、§VR-STALE-HOLD 次數與超過 100 ms 的次數、
                                                                                        pose_flags（bit0 控制器 offset、bit1 stale hold、bit2 角速度轉機體座標、
@@ -798,11 +804,22 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
                                                                                        predUs＝SteamVR 最近幾幀的姿態預測時間（scene 層提交時給的值，1/8 平滑；0＝還沒有畫面）。
                                                                                        SteamVR 對拍子的外插量約＝predUs − ctrlOffUs；
                                                                                        ctrlKeepMs／ctrlBackUs＝§VR-CTRL-EXTRAP（vr_ctrl_extrap_ms）：外插上限（−1＝unlimited，不限制；auto 是 20）、
-                                                                                       控制器最近一筆回報因此被往回推了多久（約＝predUs − ctrlOffUs − 上限）
+                                                                                       控制器最近一筆回報因此被往回推了多久（約＝predUs − ctrlOffUs − 上限；
+                                                                                       2026-11-14 起是約 2 秒的平滑值，各筆共用——§VR-CTRL-EXTRAP-SMOOTH）；
+                                                                                       predict／ctrlKeepNowUs／accMax＝§VR-CTRL-PREDICT（2026-11-15，vr_ctrl_extrap_ms = auto）：
+                                                                                       predict=1 時控制器預測到顯示時刻（速度與位置用加速度修正，ctrlKeepMs 不看）；
+                                                                                       ctrlKeepNowUs＝最近一筆保留的預測長度（平常＝SteamVR 會外插的整段，例 50000；
+                                                                                       扳機按著的手降到 0），ctrlBackUs＝那隻手比顯示時刻晚多久（平常 0；扳機按著時＝整段），
+                                                                                       accMax＝這 10 秒估到的最大加速度（m/s²）。predict=0 時 ctrlKeepNowUs＝設定的上限（−1＝不限制）
 [VIPLE-VR-DRV] [VIPLE-VR-STALE] <hmd|ctrl left|ctrl right> enter age=…ms off0=…ms v=…m/s       ← 進入 stale（每秒最多 5 行，三個裝置共用）
 [VIPLE-VR-DRV] [VIPLE-VR-STALE] <hmd|ctrl left|ctrl right> recover gap=…ms jumpMm=… blend=<0|1>  ← 恢復；jumpMm＝恢復那一刻的落差。blend 是「重送的姿態」到新樣本的距離；
                                                                                        coast 是「SteamVR 顯示出來的位置」的落差（含它照速度外插的那一段），等速運動時接近 0
 [VIPLE-VR-DRV] tracking recovered gap_ms=… total_ms=… hold=<0|1>                  ← stale 之後收到新樣本；gap_ms＝距上次 stale 重送、total_ms＝整段空窗（2026-10-05 起）
+[VIPLE-VR-EDGE] a button or trigger change arrived N ms later than usual: the game gets the hands as they were at that moment for H ms
+                (so far this session: N times, N samples skipped)                    ← server（§VR-EDGE-HOLD，2026-11-14，`vr_edge_hold_ms`，每秒最多一行）：
+                                                                                       按鍵或扳機／握把的變化比平常晚 12 ms 以上到（上行空窗後成批到達），那一筆寫給
+                                                                                       driver 之後 H ms 內不寫沒有變化的樣本，遊戲下一格同時讀到變化和當時的手。
+                                                                                       規則在 `src/vr/vr_edge_hold.h`
 ```
 
 - 選卡（K22）：`<install>\config\steamvr\state.json` 的 `vrcompositor_adapter` 以 **LUID** 記錄 vrcompositor 實際使用的卡（`<host>` 上 IddCx 虛擬卡與實體卡同名，不能用名稱比對）。
@@ -1470,6 +1487,8 @@ PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 
 [VIPLE-VR-SESSION] PCVR has no flat window to fall back to: <原因>                  ← error：無頭 PCVR 不退回平面，以啟動錯誤結束
 [VIPLE-VR-POSE] tracking sender started: <Hz> …, source=<xr-thread|xr-frameloop|sine|…>
 [VIPLE-VR-POSE] 10s: sent=… fail=… late=… noPose=…    ← noPose：XR 還沒有有效 HMD pose 的拍數（不送）
+[VIPLE-VR-POSE] dev: uplink gap test - tracking samples are held back for G ms out of every P ms and sent together afterwards
+                                                     ← dev（`--vr-synthetic-uplink-gap P:G`，2026-11-14）：重現上行空窗後樣本成批晚到；session 開始時一行
 ```
 
 - `--display-target pcvr` 不帶 `--vr-emulate` 時，XrContext 在 `initialize()` bring-up（串流尺寸決定之前）並量每眼 FOV、
@@ -1775,6 +1794,21 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 ```
   - 看門狗只在 VR 串流中監看；斷線連續 30 s 才重啟、每場最多 `vr_hotspot_restart_max` 次（預設 2）、間隔至少 2 min。
 
+client（§FRAME-HOTSPOT-PAUSE，2026-11-14，`moonlight-qt/app/streaming/framehotspot.h`；只在 Steam Frame 上有作用）：
+```
+[VIPLE-VR-HOTSPOT] streaming adapter hotspot paused for this remote session (…); interface down after N ms
+[VIPLE-VR-HOTSPOT] streaming adapter hotspot restored
+[VIPLE-VR-HOTSPOT] streaming adapter hotspot restored (a previous run paused it and ended without restoring)
+[VIPLE-VR-HOTSPOT] streaming adapter hotspot was left paused by a previous run - keeping it paused for this remote session and restoring it at the end
+[VIPLE-VR-HOTSPOT] remote session, but a device is connected to the headset hotspot - leaving it on
+[VIPLE-VR-HOTSPOT] the hotspot is running but its create command cannot be read - leaving it on
+[VIPLE-VR-HOTSPOT] softapmanager did not accept teardown - hotspot left on
+[VIPLE-VR-HOTSPOT] could not restore the streaming adapter hotspot now - it will be retried; …
+```
+  - 暫停的條件：這一場經 VPN 連到 host、熱點正在運作、熱點上沒有任何對端（ARP 表）。使用者自己在 Steam 設定關掉的不碰，也不會被打開。
+  - 沒有任何一行＝條件不成立（區網場次、熱點本來就關著、不是 Frame、沙箱沒有那兩個路徑）。
+  - 這些行都不含 SSID 與金鑰。
+
 ### `[VIPLE-PORTAL]` —— Linux 擷取權限對話框被拒（§PORTAL-DENY-BACKOFF，2026-11-01）
 伺服器端（`Sunshine/src/platform/linux/portalgrab.cpp`）。使用者在 XDG portal 的權限對話框按取消（回應碼 1）後，
 擷取重試迴圈原本每 ~200 ms 就再開一次對話框。
@@ -2041,6 +2075,10 @@ pwsh scripts\benchmark\analyze_client_log.ps1 -Path C:\Users\me\Downloads -Json 
 - client `[VIPLE-PACER10] n=<張> pace p05/p50/p95=… ms rend p05/p50/p95=… ms | at vsync: empty=<次> one=<次> more=<次> late=<次> | display=<Hz> stream=<fps>`：節拍器把「佇列」拆成等垂直同步交接（pace）與交接後等繪製（rend）；at vsync＝每次垂直同步時 pacing 佇列的張數分布（more＝多排了一格以上），late＝垂直同步到了才來的張數。
 - client `[VIPLE-PACER-SEQ] drops=<累計> <逐幀 pace，0.1 ms 為單位，最後 240 張>`：診斷用（§LAT-2D 3a 查完後移除）。
 - client `[VIPLE-DEC] an abandoned decoder thread came back from the hardware decoder - parking it for good`：§DEC-ABANDON，被放生的解碼執行緒從硬體解碼器醒來，原地停住不再碰已釋放的物件。
+- client `[VIPLE-VR-FOVEA] layers: mode <0|1|2> (…)`：§VR-FOVEA-REPROJ（2026-11-15，`streaming/xr/xrdevknobs.h`）。有注視點 quad 時 projection 層的做法，
+  每場一行（dev 的 `--vr-fovea-layers cycle` 每 20 秒換一次時各一行）：0＝projection 用算圖當時的眼睛位置（原本）；1＝改用顯示時的
+  眼睛位置（預設：合成器只補轉動，和 50 m 外的注視點 quad 一致）；2＝同 1，全視野那塊也疊一份 quad。
+  `layers (no gaze quads): mode …` 是沒開注視點時的 dev 切換（預設關）。
 - client `[VIPLE-VR-FOVEA] head left the play area (<w> x <h> m, head at x=… z=…): centre quads off`／`head is back inside … on`：§VR-FOVEA-BOUNDS（2.0.146），頭走出／回到 STAGE 的邊界矩形時各印一次；在外面時不疊注視點那一塊。
 - host `RTSP ANNOUNCE rejected: <w>x<h>@<fps> (x100=…) bitrate=… kbps`：§REVIEW-1111（2.0.143），串流參數超出範圍。
 - host `[VIPLE-MULTI] dropped a pending launch that was never picked up (id=…)`：/cancel、搶佔時丟掉還沒被控制通道取走的 launch（2.0.135）。

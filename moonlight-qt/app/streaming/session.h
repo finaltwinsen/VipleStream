@@ -14,6 +14,7 @@
 #include "input/input.h"
 #include "input/sc_hid.h"
 #include "wifiscanblock.h"  // §WIFI-SCANBLOCK
+#include "framehotspot.h"   // §FRAME-HOTSPOT-PAUSE
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
 #include "audio/miccapture.h"  // §VR-MIC
@@ -402,6 +403,8 @@ private:
     SDL_TimerID m_XrRebuildTimer = 0;
     ScHidPassthrough m_ScHid;
     WifiScanBlock m_WifiScanBlock;  // §WIFI-SCANBLOCK：串流期間擋住 Frame 的 Wi-Fi 背景掃描
+    FrameHotspot m_FrameHotspot;    // §FRAME-HOTSPOT-PAUSE：經 VPN 的場次暫停 Frame 沒人在用的串流轉接器熱點，結束時還原
+    bool m_ViaVpn = false;          // 到 host 的路徑經 VPN（getActiveAddressReachability 回 RI_VPN）
     Uint32 m_ScHidHotplugTick = 0;   // §SC-HOTPLUG：pollScHidHotplug() 的節流
     std::atomic<int> m_MouseEmulationRefCount;  // §REVIEW-1103：主執行緒寫、解碼執行緒讀
     int m_FlushingWindowEventsRef;

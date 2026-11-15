@@ -378,6 +378,11 @@ namespace config {
     /// 2026-11-14：auto（−2，預設）＝上限 20 ms——區網本來就只外插約 20 ms，等於不變；外出時外插 45～55 ms，砍到 20 ms。
     /// unlimited（−1）＝不限制（2.0.186 之前的行為）
     int ctrl_extrap_ms = -2;
+    /// §VR-EDGE-HOLD（2026-11-14）：vr_edge_hold_ms（0 或 4～30，預設 12）。按鍵或扳機／握把的變化比平常晚到（上行有空窗）時，
+    /// 那一筆樣本寫給 driver 之後這麼多毫秒內不寫沒有變化的樣本——遊戲下一格同時讀到這個變化和「變化那一刻」的手，
+    /// 而不是空窗結束時最新的手（拋球：放開扳機之後手馬上停住，晚幾十毫秒看到放開，球就拋不起來）。0＝關。
+    /// 規則與依據見 src/vr/vr_edge_hold.h
+    int edge_hold_ms = 12;
 
     /// §VR-MULTILINK：vr_multilink。disabled（預設）＝單一路徑，行為與之前相同；
     /// all＝client 的每張網卡各一條連線，影像、音訊、追蹤每條各送一份（送不動的連線會自動暫停送影像）；
@@ -407,6 +412,11 @@ namespace config {
     /// 把年齡上限由三個幀週期放寬到 100 ms。原本這幾道上限都用幀週期訂，往返 10 ms 上下、120 Hz 時補包多半趕不上。
     /// 關著時（或 client 不支援）兩端的行為與之前完全相同。
     bool multilink_repair_rtt = false;
+    /// §VR-REPAIR-WAN（2026-11-15）：vr_multilink_repair_far（enabled 預設；要 vr_multilink_repair 也開）。往返時間的補包規則
+    /// 只用在原本規則不補的路徑上（往返比一個半幀週期長：遠端）。原本那種路徑缺一個封包就是一次 intra refresh（恢復 120～190 ms、
+    /// 破圖）；補一輪是 30～45 ms 的定格、畫面乾淨。區網（原本規則會補的）完全不變。vr_multilink_repair_rtt = enabled 時
+    /// RTT 規則到處都用，這個選項沒有作用。只有認得這個限制的 client（2.0.202 起）才會啟用
+    bool multilink_repair_far = true;
     /// §PERF-1113：vr_multilink_uso（disabled 預設）。enabled＝多連線的影像整批一次系統呼叫送出（Windows USO），
     /// 不支援或送失敗的連線自動退回逐包。線上封包不變；還沒在實機 A/B 過，所以預設關
     bool multilink_uso = false;

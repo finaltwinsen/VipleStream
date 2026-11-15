@@ -44,6 +44,11 @@ namespace xrrate {
         static constexpr uint64_t kStartSettleUs = 15000000ull;
         static constexpr uint64_t kSwitchSettleUs = 4000000ull;
         static constexpr uint32_t kShortRunSlots = 6;
+        // §VR-REPAIR-WAN（2026-11-15）：補包（遠端路徑）把缺封包的那一張拖晚一輪到兩輪往返才放行，放行前那一段重複最長約
+        // 等待上限 80 ms＋一個幀週期（144 Hz 是 14 格）。那不是線路停住——補回來的畫面是乾淨的、而且正是「缺封包多」的訊號：
+        // 算成一段短重複（封頂在 kShortRunSlots 格），不算斷流。否則缺封包越多（越該降半速）的線路越容易被當成「中斷」
+        // 而跳過降速判斷，半速時只要有一次就不試升
+        static constexpr uint32_t kRepairRunSlots = 14;
         static constexpr uint32_t kDownSum = 45;
         static constexpr uint32_t kDownEach = 10;
         static constexpr int kUpWindows = 6;  // 30 秒
@@ -84,14 +89,15 @@ namespace xrrate {
         }
 
         // 每個顯示格呼叫一次。newFrame＝這一格顯示的是新影像；headsetLate＝這一格有一張影格已經收齊超過兩格還沒解出
-        //（§VR-RATE-CAUSE，只在預期外的重複格有意義）
-        void onSlot(bool newFrame, uint64_t nowUs, bool headsetLate = false)
+        //（§VR-RATE-CAUSE，只在預期外的重複格有意義）；repairReleased＝這一張新影像是被補包拖晚、剛放行的
+        //（§VR-REPAIR-WAN，只在 newFrame 時有意義）
+        void onSlot(bool newFrame, uint64_t nowUs, bool headsetLate = false, bool repairReleased = false)
         {
             if (m_StartUs == 0) {
                 reset(nowUs);
             }
             if (newFrame) {
-                closeRun();
+                closeRun(repairReleased);
                 m_SinceNew = 0;
             }
             else {
@@ -176,6 +182,7 @@ namespace xrrate {
         uint32_t ups() const { return m_Ups; }
         uint32_t probeFails() const { return m_ProbeFails; }
         uint32_t outageSkips() const { return m_OutageSkips; }  // 因為最近有中斷而沒做降速判斷的次數
+        uint32_t repairRuns() const { return m_RepairRuns; }  // §VR-REPAIR-WAN：因為是等補包而沒算成斷流的段數（累計）
         // §VR-RATE-CAUSE：整場累計的預期外重複格，分網路（影格還沒到）與頭盔端（收到了還沒解出）
         uint64_t totalNetSlots() const { return m_TotNetSlots; }
         uint64_t totalHeadsetSlots() const { return m_TotHeadsetSlots; }
@@ -203,12 +210,16 @@ namespace xrrate {
         const Window& hist(int back) const { return m_Hist[(m_HistHead + kHist - 1 - back) % kHist]; }
         static bool outage(const Window& w) { return w.stalls >= kOutageStalls; }
 
-        void closeRun()
+        void closeRun(bool repairReleased = false)
         {
             if (m_RunUnexpected > 0) {
                 if (m_RunUnexpected <= kShortRunSlots) {
                     m_Cur.shortRep += m_RunUnexpected;
                     m_Cur.headsetRep += m_RunHeadset;
+                }
+                else if (repairReleased && m_RunUnexpected <= kRepairRunSlots) {
+                    m_Cur.shortRep += kShortRunSlots;  // 等補包的那一段：一段短重複，不是斷流
+                    ++m_RepairRuns;
                 }
                 else {
                     ++m_Cur.stalls;
@@ -355,6 +366,7 @@ namespace xrrate {
         uint64_t m_ProbeUntilUs = 0;
         uint32_t m_Downs = 0, m_Ups = 0, m_ProbeFails = 0;
         uint32_t m_OutageSkips = 0;
+        uint32_t m_RepairRuns = 0;
         Reason m_PendingCause = Reason::None;  // 最近一次送出的降速要求的原因
         uint64_t m_TotNetSlots = 0, m_TotHeadsetSlots = 0;
         uint32_t m_HeadsetDowns = 0;

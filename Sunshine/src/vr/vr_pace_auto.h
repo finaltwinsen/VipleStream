@@ -11,9 +11,14 @@
  *   - 線路乾淨（沒有救不回的幀）：只多延遲，沒有好處；
  *   - 補包（§VR-LINK-REPAIR）在用的線路（區網）：幀中途 3 ms 的空檔會讓頭盔把還沒送出的封包報成缺的，host 會重複送；
  *   - 兩條以上的連線都在送影像：另一條本來就各送一份，短暫的空檔由它補。
- * 所以自動的條件是：只有一條連線在送、這 10 秒沒有收到任何補包請求、而且救不回的 block 持續出現才開；
+ * 所以自動的條件是：只有一條連線在送、補包沒有在用、而且救不回的 block 持續出現才開；
  * 連續兩分鐘幾乎沒有救不回的 block 才關（開著時丟包本來就會變少，門檻要比開的門檻低很多，否則會來回切換——
  * 每切換一次，幀到齊的時刻移大半個幀週期，頭盔的顯示相位要十幾秒才追上）。
+ *
+ * 「補包在用」看的是補包請求的份數，不是有沒有（2026-11-14 修正）。原本只要 10 秒內收到一份補包請求就當成在用、馬上關。
+ * 11-14 晚上外地配戴兩場（半速，往返約 25 ms）：頭盔每 10 秒送 1～5 份請求，攤開送就被關掉，20～60 秒後因為救不回的
+ * block 變多又打開——10 分鐘切了 13 次；開著的時段每 10 秒救不回約 5.5 個、關著的時段約 9.7 個。區網補包真的在用時每 10 秒
+ * 是 50～190 份（latchab 的幾場），所以門檻訂在 20 份，而且要連續兩個視窗才算。
  */
 #pragma once
 
@@ -42,47 +47,66 @@ namespace vr::pace {
     static constexpr int k_on_windows = 2;  ///< 連續這麼多個視窗都有才開（20 秒）
     static constexpr uint32_t k_off_failed = 1;  ///< 一個視窗裡救不回的 block ≤ 這麼多＝這個視窗「乾淨」
     static constexpr int k_off_windows = 12;  ///< 連續這麼多個視窗都乾淨才關（2 分鐘）
+    static constexpr uint32_t k_resend_busy = 20;  ///< 一個視窗裡的補包請求 ≥ 這麼多份＝這個視窗「補包在用」
+    static constexpr int k_resend_windows = 2;  ///< 連續這麼多個視窗補包都在用才關
 
     bool on = false;
     int bad_run = 0;
     int clean_run = 0;
+    int resend_run = 0;
     uint32_t switches = 0;
     const char *reason = "";  ///< 最近一次切換的原因（log 用）
 
     /**
-     * @param eligible 只有一條連線在送影像，而且這個視窗沒有收到補包請求
+     * @param single_link 只有一條連線在送影像
      * @param failed 這個視窗裡頭盔回報救不回的 block 數（含整幀沒到的）
+     * @param resend_requests 這個視窗裡收到的補包請求份數
      * @return 狀態有沒有變
      */
-    bool on_window(bool eligible, uint32_t failed) {
-      if (!eligible) {
+    bool on_window(bool single_link, uint32_t failed, uint32_t resend_requests = 0) {
+      if (!single_link) {
         bad_run = 0;
         clean_run = 0;
+        resend_run = 0;
         if (on) {
           on = false;
           ++switches;
-          reason = "resend requests seen or more than one link";
+          reason = "more than one link is carrying video";
           return true;
         }
         return false;
       }
+      const bool resends_busy = resend_requests >= k_resend_busy;
       if (!on) {
-        bad_run = failed >= k_on_failed ? bad_run + 1 : 0;
+        // 補包在用的視窗不算「成串丟包沒人補」：那種線路靠補包，不靠攤開
+        bad_run = (failed >= k_on_failed && !resends_busy) ? bad_run + 1 : 0;
         if (bad_run >= k_on_windows) {
           on = true;
           bad_run = 0;
           clean_run = 0;
+          resend_run = 0;
           ++switches;
-          reason = "frames keep being lost on a single link without resends";
+          reason = "frames keep being lost on a single link and resends are not carrying it";
           return true;
         }
         return false;
+      }
+      resend_run = resends_busy ? resend_run + 1 : 0;
+      if (resend_run >= k_resend_windows) {
+        on = false;
+        bad_run = 0;
+        clean_run = 0;
+        resend_run = 0;
+        ++switches;
+        reason = "resends are in use";
+        return true;
       }
       clean_run = failed <= k_off_failed ? clean_run + 1 : 0;
       if (clean_run >= k_off_windows) {
         on = false;
         bad_run = 0;
         clean_run = 0;
+        resend_run = 0;
         ++switches;
         reason = "the path has been clean for two minutes";
         return true;

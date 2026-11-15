@@ -435,6 +435,9 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     // §M.2: 從 serverinfo 解析 session owner 資訊（VipleStream 擴充欄位）
     this->sessionOwnerUuid = NvHTTP::getXmlString(serverInfo, "SessionOwnerUuid");
     this->sessionOwnerName = NvHTTP::getXmlString(serverInfo, "SessionOwnerName");
+    // §M.2-SELF（2026-11-14）：SessionOwnerUuid 是 host 那邊配對紀錄的編號，和我們的 uniqueid 不是同一種東西，比不出
+    // 「是不是自己」。host 依 TLS 憑證判斷之後放在這一欄；2.0.191 以前的 host 沒有這一欄
+    this->sessionOwnedByCaller = NvHTTP::getXmlString(serverInfo, "SessionOwnedByCaller") == "1";
 
     this->appVersion = NvHTTP::getXmlString(serverInfo, "appversion");
     this->gfeVersion = NvHTTP::getXmlString(serverInfo, "GfeVersion");
@@ -840,6 +843,7 @@ bool NvComputer::updateUnlocked(const NvComputer& that)
     ASSIGN_IF_CHANGED(currentGameId);
     ASSIGN_IF_CHANGED(sessionOwnerUuid);
     ASSIGN_IF_CHANGED(sessionOwnerName);
+    ASSIGN_IF_CHANGED(sessionOwnedByCaller);
     ASSIGN_IF_CHANGED(activeAddress);
     ASSIGN_IF_CHANGED(state);
     ASSIGN_IF_CHANGED(gfeVersion);

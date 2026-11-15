@@ -52,6 +52,14 @@
 int AppVersionQuad[4] = {7, 1, 431, -1};
 STREAM_CONFIGURATION StreamConfig;
 CONNECTION_LISTENER_CALLBACKS ListenerCallbacks;
+// 2026-11-15：RtpVideoQueue.c 後來多了 FEC 回報的統計（fb*／gs*，只在 VrFlags 帶 VIPLE_VR_SF_ENABLED 時動作）與它的鎖。
+// 模擬器不測那一段：VrFlags＝0 讓它整個不動，鎖給空的替身
+int VrFlags = 0;
+int NegotiatedVideoFormat = 0;
+int PltCreateMutex(PLT_MUTEX* mutex) { (void) mutex; return 0; }
+void PltDeleteMutex(PLT_MUTEX* mutex) { (void) mutex; }
+void PltLockMutex(PLT_MUTEX* mutex) { (void) mutex; }
+void PltUnlockMutex(PLT_MUTEX* mutex) { (void) mutex; }
 
 static uint64_t g_now;
 static uint64_t g_t0;

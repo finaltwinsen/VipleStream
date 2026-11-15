@@ -3,6 +3,8 @@
 #include "backend/vrpreflight.h"            // §VR-PREFLIGHT：--vr-test-preflight 的格式檢查（header-only，不依賴 Qt）
 #include "streaming/video/bitstreamdump.h"  // §SF-PROBE：stream --dump-bitstream
 #include "streaming/vr/vrnetbench.h"        // §VR-NETBENCH：--vr-netbench
+#include "streaming/vr/vrtracking.h"        // dev：--vr-synthetic-uplink-gap
+#include "streaming/xr/xrdevknobs.h"        // §VR-FOVEA-REPROJ：--vr-fovea-layers、--vr-test-pose-offset（header-only，不依賴 OpenXR）
 #include "streaming/xr/xrlatchstats.h"      // §VR-LDIAG：--vr-test-jitter 的格式檢查（header-only，不依賴 OpenXR）
 
 #include <QCommandLineParser>
@@ -14,6 +16,7 @@
 #include <VrRepairRtt.h>  // §VR-REPAIR-RTT：--vr-repair-idle 的 VRRR_IDLE_*（header-only）
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -656,6 +659,17 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addFlagOption("vr-synthetic-gaze", "(dev) PCVR: send a synthetic gaze (saccades, pursuit, blinks) to the host instead of the tracked one, "
                                               "to exercise gaze-driven foveation with nobody wearing the headset. Not saved.");
     parser.addValueOption("vr-unwarp-max", "(dev) PCVR with foveated encoding: largest scale of the restored image over the decoded one, 1.0-2.0 (default 2.0; not saved)");
+    parser.addChoiceOption("vr-fovea-layers", "(dev) PCVR with gaze tiles: how the two image layers are given to the headset's compositor (not saved): "
+                           "legacy = the whole view is a projection layer that keeps the eye positions it was rendered from; "
+                           "pos = its eye positions are those at display time, so only rotation is reprojected, like the gaze quads (default); "
+                           "quads = as pos, and the whole view is also drawn as quads on the same path as the gaze quads; "
+                           "cycle = legacy, pos, quads in turn for 20 s each, with A, B or C shown at every change",
+                           QStringList() << "legacy" << "pos" << "quads" << "cycle");
+    parser.addValueOption("vr-test-pose-offset", "(dev) PCVR: shift the render pose given to the compositor by <x>,<y>,<z> metres (right, up, back in head "
+                          "coordinates, each within +-1) - a known amount of reprojection while the headset does not move. Not saved.");
+    parser.addValueOption("vr-synthetic-uplink-gap", "(dev) PCVR: hold the tracking samples back for <gap> ms out of every <period> ms and send them together "
+                          "afterwards, in order - an uplink that stalls and then delivers late. Format <period>:<gap> in ms, "
+                          "period 50-10000, gap 5-200 and shorter than the period (e.g. 230:50). Not saved.");
     parser.addValueOption("vr-test-jitter", "(dev) PCVR arrival-jitter injection that delays each stream frame before it is rendered (not saved): "
                           "worn | light | early[=<baseUs>:<permille>] | scan=<maxUs>, optionally followed by "
                           ",shift=<startSec>:<us>:<durSec> and ,seed=<n>");
@@ -675,6 +689,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                          "motion-dependent paths with nobody wearing the headset. The picture swings in the headset - do not wear it. Not saved.");
     parser.addFlagOption("vr-synthetic-hands", "(dev) PCVR: replace both controller poses with a synthetic swing in front of the head (buttons untouched), "
                          "so an unattended session has moving near objects in view. Works with --vr-emulate and on a real XR runtime. Not saved.");
+    parser.addFlagOption("vr-synthetic-toss", "(dev) PCVR: the left hand repeats a ball toss every 2 s (hold the trigger, rise 40 cm in 0.4 s, release the "
+                         "trigger at 1.84 m/s upwards); the host's vr_probe --mode toss records the hand velocity the game sees at the release. "
+                         "Use after --vr-synthetic-hands, with --vr-synthetic-motion still. Not saved.");
     parser.addValueOption("vr-synthetic-menu-at", "(dev) PCVR: press the left MENU button for 150 ms this many seconds after tracking starts (0 = off). "
                           "The host maps it to the SteamVR system button, which only TOGGLES the SteamVR dashboard: it closes a dashboard that is open "
                           "(the usual state with nobody wearing the headset) and opens one that is closed. Closing it this way does not give the timing "
@@ -1040,6 +1057,43 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         }
         preferences->vrUnwarpMax = v;
     }
+    if (parser.isSet("vr-fovea-layers")) {
+        const QString mode = parser.getChoiceOptionValue("vr-fovea-layers").toLower();
+        if (mode == "cycle") {
+            xrdev::cycleSec.store(20, std::memory_order_relaxed);
+        }
+        else {
+            xrdev::layersMode.store(mode == "legacy" ? 0 : (mode == "pos" ? 1 : 2), std::memory_order_relaxed);
+        }
+    }
+    if (parser.isSet("vr-test-pose-offset")) {
+        // dev：格式在這裡就檢查（寫錯不可以默默變成不平移）
+        const QString spec = parser.value("vr-test-pose-offset");
+        const QStringList parts = spec.split(',');
+        bool ok[3] = {false, false, false};
+        float v[3] = {0.0f, 0.0f, 0.0f};
+        for (int i = 0; i < 3 && i < parts.size(); i++) {
+            v[i] = parts.at(i).trimmed().toFloat(&ok[i]);
+        }
+        if (parts.size() != 3 || !ok[0] || !ok[1] || !ok[2] || std::fabs(v[0]) > 1.0f || std::fabs(v[1]) > 1.0f || std::fabs(v[2]) > 1.0f) {
+            parser.showError(QString("vr-test-pose-offset: expected <x>,<y>,<z> in metres, each within +-1 (got '%1')").arg(spec));
+        }
+        xrdev::poseOffsetX.store(v[0], std::memory_order_relaxed);
+        xrdev::poseOffsetY.store(v[1], std::memory_order_relaxed);
+        xrdev::poseOffsetZ.store(v[2], std::memory_order_relaxed);
+    }
+    if (parser.isSet("vr-synthetic-uplink-gap")) {
+        // dev：格式在這裡就檢查（寫錯不可以默默變成不注入）；實際的動作在 tracking 送出執行緒
+        const QString spec = parser.value("vr-synthetic-uplink-gap");
+        const QStringList parts = spec.split(':');
+        bool okPeriod = false, okGap = false;
+        const int periodMs = parts.value(0).toInt(&okPeriod);
+        const int gapMs = parts.value(1).toInt(&okGap);
+        if (parts.size() != 2 || !okPeriod || !okGap || periodMs < 50 || periodMs > 10000 || gapMs < 5 || gapMs > 200 || gapMs >= periodMs) {
+            parser.showError(QString("vr-synthetic-uplink-gap: expected <period>:<gap> in ms, period 50-10000, gap 5-200 and shorter than the period (got '%1')").arg(spec));
+        }
+        VrTrackingSender::setUplinkGapTest(periodMs, gapMs);
+    }
     if (parser.isSet("vr-test-jitter")) {
         // §VR-LDIAG（dev）：格式在這裡就檢查（寫錯不可以默默變成不注入）；實際的延後在 XrVideo 的影像 render thread
         const QString spec = parser.value("vr-test-jitter");
@@ -1094,6 +1148,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     preferences->vrSyntheticHmd = parser.isSet("vr-synthetic-hmd");
     preferences->vrSyntheticHands = parser.isSet("vr-synthetic-hands");
+    preferences->vrSyntheticToss = parser.isSet("vr-synthetic-toss");
     if (parser.isSet("vr-synthetic-menu-at")) {
         bool ok = false;
         const double sec = parser.value("vr-synthetic-menu-at").toDouble(&ok);

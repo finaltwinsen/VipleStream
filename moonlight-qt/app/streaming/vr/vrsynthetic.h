@@ -49,6 +49,12 @@ struct VrSyntheticHeadTrack {
 // 按鍵不動。無人配戴時畫面裡才有會動的近物，看得到手部的預測與重投影。
 void vrSyntheticHands(double tSec, VIPLE_VR_TRACKING* out);
 
+// 2026-11-14（dev，--vr-synthetic-toss）：左手每 2 秒做一次「拋球」——按住扳機停在低點 0.5 秒、0.3 秒內加速到往上 2.0 m/s、
+// 在最快的那一刻放開扳機、放開之後 0.12 秒內停住（人拋球的樣子：放開之後手馬上急減速）、停在高點、再慢慢放回去。
+// host 的 vr_probe --mode toss 在扳機放開的那一格記下遊戲看到的左手垂直速度：桌球的發球就是拿這一刻的手速當球的初速，
+// 讀到的值偏掉（甚至是負的）球就往下掉。蓋掉左手的姿態與扳機，其餘不動；要在 vrSyntheticHands 之後呼叫。
+void vrSyntheticToss(double tSec, VIPLE_VR_TRACKING* out);
+
 // 2026-10-09（dev，--vr-synthetic-menu-at）：tSec 落在 [pressAtSec, pressAtSec + 0.15) 時在左手按住 MENU，
 // 之後 pressCtr 的 MENU 計數比原值多 1（照協定填；host 目前只看 buttons 的準位）。pressAtSec <= 0＝不做。其餘輸入不動。
 // 只寫按鍵：左手控制器沒有 active（沒被追蹤、也沒有合成的手）時 host 會整個忽略。

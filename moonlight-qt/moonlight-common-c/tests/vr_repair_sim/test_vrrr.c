@@ -76,19 +76,23 @@ int main(void) {
     // ── C：等待上限（跟著往返時間走）──
     EQ(vrrrCapUs(8333, 15625, 10100, 0), 27725);    // 這條路徑的典型值（lo 8.1／hi 10.9）
     EQ(vrrrCapUs(8333, 14500, 12000, 0), 28500);    // 往返 10 ms、估計準確
-    EQ(vrrrCapUs(8333, 20750, 11000, 0), 33000);    // hi 15：33750 → 夾在上限
+    EQ(vrrrCapUs(8333, 20750, 11000, 0), 33750);    // hi 15（§VR-REPAIR-WAN 之前在這裡被 33 ms 的上限夾住）
+    EQ(vrrrCapUs(13888, 37250, 28700, 0), 67950);   // 外地實測的路徑（往返 23.5／26.7／28.2 ms）：一輪＋照中位數再一輪
+    EQ(vrrrCapUs(8333, 57000, 40000, 0), 80000);    // 夾在上限 80 ms
     EQ(vrrrCapUs(8333, 5750, 5000, 0), 16666);      // 區網往返 3 ms：不少於現行規則有進展時的上限（兩個幀週期）
     EQ(vrrrCapUs(8333, 3250, 3000, 0), 16666);      // 區網往返 1 ms
     EQ(vrrrCapUs(11111, 5750, 5000, 0), 22222);     // 90 Hz、區網
     EQ(vrrrCapUs(14000, 3250, 3000, 0), 28000);     // 60 Hz、區網：現行的 2×14 ms
     EQ(vrrrCapUs(14000, 14500, 12000, 0), 28500);   // 60 Hz、往返 10 ms
-    EQ(vrrrCapUs(14000, 20750, 11000, 0), 33000);   // 60 Hz、hi 15
+    EQ(vrrrCapUs(14000, 20750, 11000, 0), 33750);   // 60 Hz、hi 15
     EQ(vrrrCapUs(8333, 15625, 10100, 20), 20000); EQ(vrrrCapUs(8333, 15625, 10100, 4), 8000); EQ(vrrrCapUs(8333, 15625, 10100, 500), 100000);
     EQ(vrrrCapUs(8333, 15625, 10100, 8), 8000); EQ(vrrrCapUs(8333, 15625, 10100, 100), 100000);
 
     // ── G：門檻（依往返時間退場，含遲滯）──
-    YES(vrrrGateOpen(25000, 33000, true)); NO(vrrrGateOpen(25001, 33000, true));
-    YES(vrrrGateOpen(23000, 33000, false)); NO(vrrrGateOpen(23001, 33000, false));
+    YES(vrrrGateOpen(52000, 80000, true)); NO(vrrrGateOpen(52001, 80000, true));     // §VR-REPAIR-WAN：門檻 52 ms（原本 25 ms）
+    YES(vrrrGateOpen(50000, 80000, false)); NO(vrrrGateOpen(50001, 80000, false));   // 關掉之後要低 2 ms 才再開
+    YES(vrrrGateOpen(28700, 67950, false));                                           // 外地實測的路徑：原本關著，現在開
+    YES(vrrrGateOpen(33000, 33000, true)); NO(vrrrGateOpen(33001, 33000, true));     // 等待上限比門檻小時門檻跟著等待上限
     YES(vrrrGateOpen(14000, 14000, true)); NO(vrrrGateOpen(14001, 14000, true));     // 等待上限被指定成 14 ms：門檻跟著降
     YES(vrrrGateOpen(12000, 14000, false)); NO(vrrrGateOpen(12001, 14000, false));
     YES(vrrrGateOpen(11600, 27725, false));                                           // 這條路徑的典型值
@@ -147,11 +151,16 @@ int main(void) {
 
     // ── S：block 內的停頓與「多久沒有新封包才回報」──
     memset(&s, 0, sizeof(s));
-    EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 8333), VRRR_IDLE_SIZE); EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 10000), VRRR_IDLE_SIZE);
-    EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 10001), VRRR_IDLE_FIXED3); EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 16666), VRRR_IDLE_FIXED3);
-    EQ(vrrrIdlePolicy(VRRR_IDLE_LEARNED, 8333), VRRR_IDLE_LEARNED); EQ(vrrrIdlePolicy(VRRR_IDLE_FRAME, 16666), VRRR_IDLE_FRAME);
-    EQ(vrrrIdlePolicy(VRRR_IDLE_FIXED3, 8333), VRRR_IDLE_FIXED3); EQ(vrrrIdlePolicy(VRRR_IDLE_SIZE, 16666), VRRR_IDLE_SIZE);
-    EQ(vrrrIdlePolicy(9, 16666), VRRR_IDLE_FIXED3);
+    EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 8333, 0), VRRR_IDLE_SIZE); EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 10000, 0), VRRR_IDLE_SIZE);
+    EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 10001, 0), VRRR_IDLE_FIXED3); EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 16666, 0), VRRR_IDLE_FIXED3);
+    EQ(vrrrIdlePolicy(VRRR_IDLE_LEARNED, 8333, 0), VRRR_IDLE_LEARNED); EQ(vrrrIdlePolicy(VRRR_IDLE_FRAME, 16666, 0), VRRR_IDLE_FRAME);
+    EQ(vrrrIdlePolicy(VRRR_IDLE_FIXED3, 8333, 0), VRRR_IDLE_FIXED3); EQ(vrrrIdlePolicy(VRRR_IDLE_SIZE, 16666, 0), VRRR_IDLE_SIZE);
+    EQ(vrrrIdlePolicy(9, 16666, 0), VRRR_IDLE_FIXED3);
+    // §VR-REPAIR-WAN：補一輪不比一個幀週期短（遠端）→ FRAME；比較短（區網）照舊；明確指定的做法不受影響
+    EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 6944, 28700), VRRR_IDLE_FRAME); EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 13888, 28700), VRRR_IDLE_FRAME);
+    EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 13888, 13888), VRRR_IDLE_FRAME); EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 13888, 13887), VRRR_IDLE_FIXED3);
+    EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 6944, 5000), VRRR_IDLE_SIZE); EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 8333, 8332), VRRR_IDLE_SIZE);
+    EQ(vrrrIdlePolicy(VRRR_IDLE_FIXED3, 6944, 28700), VRRR_IDLE_FIXED3); EQ(vrrrIdlePolicy(VRRR_IDLE_SIZE, 6944, 28700), VRRR_IDLE_SIZE);
     EQ(vrrrIdleUs(VRRR_IDLE_FIXED3, &s, 1000000, 8333, 101), 3000);
     EQ(vrrrIdleUs(VRRR_IDLE_FRAME, &s, 1000000, 8333, 9), 8333); EQ(vrrrIdleUs(VRRR_IDLE_FRAME, &s, 1000000, 2000, 9), 3000);
     EQ(vrrrIdleUs(VRRR_IDLE_SIZE, &s, 1000000, 8333, 9), 3000); EQ(vrrrIdleUs(VRRR_IDLE_SIZE, &s, 1000000, 8333, 32), 3000);
@@ -264,14 +273,14 @@ int main(void) {
         memset(&s0, 0, sizeof(s0));
         vrrrDecide(&in, &s0, &o);                                                                                      // P6：RTT 規則
         YES(o.eligible); YES(o.mlRttMode); YES(o.mlRepair); NO(o.mlHoldDual); EQ(o.etaUs, 15625); EQ(o.etaTryUs, 11600);
-        EQ(o.etaFastUs, 10100); EQ(o.capUs, 27725); EQ(o.loUs, 8100); EQ(o.mlRepairRtoUs, 15625); EQ(o.mlHoldMaxUs, 8333);
-        EQ(o.idlePolicy, VRRR_IDLE_SIZE);
+        EQ(o.etaFastUs, 10100); EQ(o.capUs, 29225); EQ(o.loUs, 8100); EQ(o.mlRepairRtoUs, 15625); EQ(o.mlHoldMaxUs, 8333);   // 第二輪照中位數：15625＋11600＋2000
+        EQ(o.idlePolicy, VRRR_IDLE_FRAME);                                                                             // 補一輪 11.6 ms ≥ 幀週期 8.3 ms
         in.armRtt = false; vrrrDecide(&in, &s0, &o);                                                                   // P7：A/B 的現行那一邊
         NO(o.eligible); NO(o.mlRttMode); YES(o.mlRepair); EQ(o.mlRepairRtoUs, 10000);
         in.armRtt = true; in.haveStats = false; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode); YES(o.mlRepair);            // P8：沒有樣本 → 現行規則
         in.haveStats = true; in.capOverrideMs = 14; vrrrDecide(&in, &s0, &o); YES(o.mlRttMode); EQ(o.capUs, 14000);    // P9：指定等待上限
         in.capOverrideMs = 0; in.framePeriodUs = 16666; in.holdUs = 14000; vrrrDecide(&in, &s0, &o);                   // P10：60 Hz
-        YES(o.mlRttMode); EQ(o.capUs, 28000); EQ(o.idlePolicy, VRRR_IDLE_FIXED3); EQ(o.mlHoldMaxUs, 14000);
+        YES(o.mlRttMode); EQ(o.capUs, 29225); EQ(o.idlePolicy, VRRR_IDLE_FIXED3); EQ(o.mlHoldMaxUs, 14000);
         in.negotiatedRepair = false; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode); NO(o.mlRepair);                        // P10b：沒協商補包就沒有 RTT 規則
         in.negotiatedRepair = true; in.legacyRttMs = -1; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode); NO(o.mlRepair);    // P10c：沒有已確認的連線
     }
@@ -281,12 +290,14 @@ int main(void) {
         VRRR_OUT o;
         memset(&s0, 0, sizeof(s0));
         vrrrDecide(&in, &s0, &o); YES(o.mlRttMode);
-        in.st.midUs = 24000; in.st.hiUs = 26000; vrrrDecide(&in, &s0, &o);                                             // P11：門檻關（26000 > 25000）
+        in.st.midUs = 24000; in.st.hiUs = 26000; vrrrDecide(&in, &s0, &o);                                             // P11a：§VR-REPAIR-WAN 之前在這裡關（26000 > 25000），現在開著
+        YES(o.eligible); YES(o.mlRttMode); YES(o.mlRepair); EQ(o.capUs, 62500);
+        in.st.midUs = 51000; in.st.hiUs = 53000; vrrrDecide(&in, &s0, &o);                                             // P11：門檻關（53000 > 52000）
         YES(o.eligible); NO(o.mlRttMode); NO(o.mlRepair); EQ(o.mlHoldMaxUs, 0);
-        in.st.midUs = 22500; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode);                                                //      遲滯：24500＋2000 > 25000
-        in.st.midUs = 21000; vrrrDecide(&in, &s0, &o); YES(o.mlRttMode);                                               //      23000＋2000 ≤ 25000 → 再開
-        in.st.midUs = 24000; in.latched = true; vrrrDecide(&in, &s0, &o);                                              // P12：正在等的 block 沿用 RTT 規則
-        YES(o.mlRttMode); YES(o.mlRepair); EQ(o.etaTryUs, 26000);
+        in.st.midUs = 49000; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode);                                                //      遲滯：51000＋2000 > 52000
+        in.st.midUs = 48000; vrrrDecide(&in, &s0, &o); YES(o.mlRttMode);                                               //      50000＋2000 ≤ 52000 → 再開
+        in.st.midUs = 51000; in.latched = true; vrrrDecide(&in, &s0, &o);                                              // P12：正在等的 block 沿用 RTT 規則
+        YES(o.mlRttMode); YES(o.mlRepair); EQ(o.etaTryUs, 53000);
         in.latched = false; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode); NO(o.mlRepair);                                 //      等完了 → 關
         in.latched = true; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode);                                                  //      關著的時候才開始等的不算（上一個封包不是 RTT 規則）
     }
@@ -297,7 +308,7 @@ int main(void) {
         memset(&s0, 0, sizeof(s0));
         vrrrDecide(&in, &s0, &o); YES(o.mlRttMode);
         in.carrying = 2; in.latched = true; vrrrDecide(&in, &s0, &o);                                                  // P13：第二條連線開始送、但這個 block 還在等
-        NO(o.eligible); YES(o.mlRttMode); NO(o.mlHoldDual); EQ(o.etaUs, 15625); EQ(o.capUs, 27725);
+        NO(o.eligible); YES(o.mlRttMode); NO(o.mlHoldDual); EQ(o.etaUs, 15625); EQ(o.capUs, 29225);
         in.latched = false; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode); YES(o.mlHoldDual); YES(o.mlRepair);             //      等完了 → 兩條連線的現行規則
         in.carrying = 1; in.armRtt = false; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode);
     }
@@ -308,8 +319,25 @@ int main(void) {
         memset(&s0, 0, sizeof(s0));
         vrrrDecide(&in, &s0, &o); YES(o.mlRttMode);
         in.armRtt = false; in.latched = true; vrrrDecide(&in, &s0, &o);                                                // P13b：A/B 換到現行那一邊、但這個 block 還在等
-        NO(o.eligible); YES(o.mlRttMode); EQ(o.capUs, 27725);
+        NO(o.eligible); YES(o.mlRttMode); EQ(o.capUs, 29225);
         in.latched = false; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode); YES(o.mlRepair); EQ(o.mlRepairRtoUs, 10000);    //       等完了 → 現行規則
+    }
+    {
+        // §VR-REPAIR-WAN：farOnly（協商了 VIPLE_VR_LINK_F_REPAIR_FAR）——RTT 規則只用在現行規則不補的路徑上
+        VRRR_IN in = baseIn();
+        VRRR_STATE s0;
+        VRRR_OUT o;
+        memset(&s0, 0, sizeof(s0));
+        in.farOnly = true; vrrrDecide(&in, &s0, &o);                                                                   // F1：現行的門檻開著（區網）→ 照現行規則
+        NO(o.eligible); NO(o.mlRttMode); YES(o.mlRepair); EQ(o.mlRepairRtoUs, 10000); EQ(o.mlHoldMaxUs, 8333); EQ(o.idlePolicy, VRRR_IDLE_SIZE);
+        in.legacyRttMs = 26; in.st.loUs = 23500; in.st.midUs = 26700; in.st.hiUs = 28200; vrrrDecide(&in, &s0, &o);    // F2：往返 26 ms（現行規則不補）→ RTT 規則
+        YES(o.eligible); YES(o.mlRttMode); YES(o.mlRepair); EQ(o.etaUs, 37250); EQ(o.etaTryUs, 28700); EQ(o.capUs, 67950); EQ(o.idlePolicy, VRRR_IDLE_FRAME);
+        in.legacyRttMs = 10; vrrrDecide(&in, &s0, &o);                                                                 // F3：現行門檻的邊界（10000＋2000 ≤ 12499）→ 現行規則
+        NO(o.eligible); NO(o.mlRttMode); YES(o.mlRepair);
+        in.legacyRttMs = 11; vrrrDecide(&in, &s0, &o); YES(o.eligible); YES(o.mlRttMode);                              // F4：11000＋2000 > 12499 → RTT 規則
+        in.legacyRttMs = 10; in.latched = true; vrrrDecide(&in, &s0, &o); NO(o.eligible); YES(o.mlRttMode);            // F5：正在等的 block 沿用 RTT 規則
+        in.latched = false; vrrrDecide(&in, &s0, &o); NO(o.mlRttMode); YES(o.mlRepair);                                //     等完了 → 現行規則
+        in.farOnly = false; vrrrDecide(&in, &s0, &o); YES(o.eligible); YES(o.mlRttMode);                               // F6：沒有這個限制（server 明確開了）→ 區網也用 RTT 規則
     }
     {
         VRRR_IN in = baseIn();

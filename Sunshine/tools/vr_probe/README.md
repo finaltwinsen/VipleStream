@@ -39,4 +39,14 @@ server（MinGW GCC）自己的表逐字比對。
 CSV（ipcpeer）寫 `%LOCALAPPDATA%\VipleStream\vr_probe\<utc>-<pid>\ipcpeer.csv`；stdout 寫入失敗一律忽略。
 所有輸出都不含 handle 值（只印 `GrantedAccess` 之類的權限遮罩）。
 
+- 遊戲看到的控制器（2026-11-14；都要在 PCVR session 進行中、以主控台使用者身分跑，本機工具 `scripts/vr/run_probe_user.sh <模式> <秒> <tag>`）：
+  - `--mode swing --seconds N [--out DIR]`：像 legacy scene app 那樣每個顯示格取一次右手的 game pose（`GetDeviceToAbsoluteTrackingPose`，
+    預測到下一格的顯示時刻），看軌跡平不平滑。搭配 client `--vr-synthetic-hmd --vr-synthetic-hands`。摘要 `swing summary`：
+    `dv`＝相鄰兩格位置差分的速度變化量、`apiErr`＝API 回報的速度與差分速度的差、`frozen`＝位置完全沒動的格數、`jumps`＝單格位移
+    超過預期三倍的次數；逐格寫 `swing.csv`（`target_s,x,y,z,vx,vy,vz,qpc…`，離線算「偏離局部二次曲線多少」）。
+  - `--mode toss --seconds N [--out DIR]`：拋球——左手按住扳機、往上、放開。搭配 client `--vr-synthetic-hmd --vr-synthetic-motion still
+    --vr-synthetic-hands --vr-synthetic-toss`（每 2 秒拋一次，放開那一刻真值是往上 2.00 m/s，之後 0.12 秒內停住）。每個顯示格取左手的
+    game pose 與 legacy `GetControllerState`；扳機由按住變成放開的那一格記下 `api`（API 回報的垂直速度）、`diff1`（和上一格的位置差分）、
+    `diff3`（最近 3 格平均）。摘要 `toss summary tosses=N …` 之後三行各自的分佈、負值的次數、偏離真值一半以上的次數；
+    逐次寫 `toss.csv`（`frames_held`＝扳機按住幾格，144 Hz 準時是 115 左右，多的就是放開的訊號晚到）。
 - M4a 收尾：`--mode scene|timing --haptic-every-ms N`（50～60000）每 N ms 對每支控制器送一次 legacy `TriggerHapticPulse`（3 ms），log `haptic mode=… pulses=N`；用來驗 driver→server→client 的 haptic 轉送（client 看 `[VIPLE-VR-INPUT] … haptic applied=`）。以一般使用者身分在 PCVR session 中執行即成為 scene app，不必登記進 apps.json。

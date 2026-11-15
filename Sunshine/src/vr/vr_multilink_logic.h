@@ -625,8 +625,10 @@ namespace vr::multilink {
   // 往返時間決定來不來得及、等多久，並把它的估計（eta）放在 NACK 的 flags；server 這一端只留保險用的上限。
   // 沒協商、或 client 這一份回報沒帶旗標（它這一刻走的是原本的規則）時，兩道上限都和原本相同。
 
-  /// 帶旗標的回報：block 第一批送出超過這麼久才不補（缺幀 34 ms＋上行＋一次重報的餘裕；封包倉留 24 個 block）
-  inline constexpr int64_t kRepairRttMaxAgeNs = 100'000'000;
+  /// 帶旗標的回報：block 第一批送出超過這麼久才不補（封包倉留 24 個 block：144 fps 是 167 ms、72 fps 是 333 ms）。
+  /// §VR-REPAIR-WAN（2026-11-15）：100 → 160 ms。client 合法的最大年齡≈(缺幀＋1)×幀週期＋往返＋eta；72 fps、往返 34 ms 的
+  /// 遠端路徑一輪就到 97 ms、重報一輪要 140 ms 上下，100 ms 的上限會把還來得及的回報擋掉
+  inline constexpr int64_t kRepairRttMaxAgeNs = 160'000'000;
   /// 帶旗標的回報：「上一輪還在路上」的視窗上限
   inline constexpr int64_t kRepairRttGapMaxNs = 60'000'000;
 
@@ -657,8 +659,10 @@ namespace vr::multilink {
   /**
    * @brief 連線層功能的協商：client 提出的（每條連線的 flags 取交集）裡，server 的開關也開的才啟用。
    *        REPAIR 要 CTRL 成立，REPAIR_RTT 要 REPAIR 成立；HOTADD 獨立（不依賴 CTRL／REPAIR）。不認得的位元一律不回。
+   *        §VR-REPAIR-WAN：repair_rtt 關著、repair_far 開著（預設）時，client 有提 REPAIR_FAR 才給 REPAIR_RTT｜REPAIR_FAR
+   *        （RTT 規則只用在原本規則不補的路徑上）；沒提 REPAIR_FAR 的舊 client 照舊拿不到 REPAIR_RTT。
    */
-  inline uint8_t negotiate_link_features(uint8_t offered, bool ctrl, bool repair, bool repair_rtt, bool hotadd) {
+  inline uint8_t negotiate_link_features(uint8_t offered, bool ctrl, bool repair, bool repair_rtt, bool hotadd, bool repair_far = false) {
     uint8_t feat = 0;
     if (hotadd && (offered & VIPLE_VR_LINK_F_HOTADD)) {
       feat |= VIPLE_VR_LINK_F_HOTADD;
@@ -669,6 +673,8 @@ namespace vr::multilink {
         feat |= VIPLE_VR_LINK_F_REPAIR;
         if (repair_rtt && (offered & VIPLE_VR_LINK_F_REPAIR_RTT)) {
           feat |= VIPLE_VR_LINK_F_REPAIR_RTT;
+        } else if (repair_far && (offered & VIPLE_VR_LINK_F_REPAIR_RTT) && (offered & VIPLE_VR_LINK_F_REPAIR_FAR)) {
+          feat |= VIPLE_VR_LINK_F_REPAIR_RTT | VIPLE_VR_LINK_F_REPAIR_FAR;
         }
       }
     }

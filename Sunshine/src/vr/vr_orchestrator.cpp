@@ -223,7 +223,8 @@ namespace vr::orchestrator {
     /// §PREWARM：PRECHECK 能沿用的探測結果最多放多久（中間隔著編碼器探測與啟動 app；超過就照舊完整探測）
     constexpr auto k_prewarm_max_age = 5s;
     // §VR-CTRL-EXTRAP：vr_ctrl_extrap_ms = auto 時 SteamVR 對控制器的外插上限。區網本來就只外插約 20 ms（等於不變），
-    // 外出時是 45～55 ms（砍到 20 ms）——上限以內的部分維持原樣，手的畫面不會比在家裡時更晚
+    // 外出時是 45～55 ms（砍到 20 ms）——上限以內的部分維持原樣，手的畫面不會比在家裡時更晚。
+    // §VR-CTRL-PREDICT（2026-11-15）：auto 改成「預測到顯示時刻＋用加速度修正」（driver 的 ctrl_predictor_t），這個值只給舊 driver 用
     constexpr int k_ctrl_extrap_auto_ms = 20;
 
     /// 取出替這個 job 的 /launch 預先探測好的環境（序號要對得上、而且夠新）；取過就清，不會被下一場誤用
@@ -343,13 +344,15 @@ namespace vr::orchestrator {
                      (config::vr.stale_policy == config::vr_t::stale_e::blend ? VRIPC_POSE_F_STALE_BLEND : 0u) |
                      // §VR-STALE-COAST：連 BLEND 一起設——driver 認得 COAST 就走新的軌跡，認不得（舊 driver）就照 blend
                      (config::vr.stale_policy == config::vr_t::stale_e::coast ? (VRIPC_POSE_F_STALE_BLEND | VRIPC_POSE_F_STALE_COAST) : 0u) |
-                     (config::vr.angvel_local ? VRIPC_POSE_F_ANGVEL_LOCAL : 0u);
+                     (config::vr.angvel_local ? VRIPC_POSE_F_ANGVEL_LOCAL : 0u) |
+                     // §VR-CTRL-PREDICT：auto＝控制器預測到顯示時刻（driver 的 ctrl_predictor_t）；ctrl_keep_ms_p1 只給不認得這個旗標的舊 driver 用
+                     (config::vr.ctrl_extrap_ms == -2 ? VRIPC_POSE_F_CTRL_PREDICT : 0u);
       BOOST_LOG(info) << "[VIPLE-VR-ORCH] pose flags ctrlOffset=" << (config::vr.ctrl_pose_offset ? 1 : 0)
                       << " stalePolicy=" << (config::vr.stale_policy == config::vr_t::stale_e::blend ? "blend" : config::vr.stale_policy == config::vr_t::stale_e::hold ? "hold" : config::vr.stale_policy == config::vr_t::stale_e::coast ? "coast" : "legacy")
                       << " angvelLocal=" << (config::vr.angvel_local ? 1 : 0)
                       << " ctrlExtrapMs="
                       << (config::vr.ctrl_extrap_ms == -1 ? std::string {"unlimited"} :
-                          config::vr.ctrl_extrap_ms < 0 ? std::format("auto({})", k_ctrl_extrap_auto_ms) :
+                          config::vr.ctrl_extrap_ms < 0 ? std::string {"auto(predicted to the display time; a hand holding its trigger is not predicted)"} :
                                                           std::to_string(std::min(config::vr.ctrl_extrap_ms, 50)));
       // §VR-CTRL-EXTRAP：0＝不限制（舊行為；舊 driver 讀到的是原本的 reserved，不受影響），n＋1＝最多外插 n 毫秒
       c.ctrl_keep_ms_p1 = config::vr.ctrl_extrap_ms == -1 ? (uint8_t) 0 :

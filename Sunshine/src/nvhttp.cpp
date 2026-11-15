@@ -6,7 +6,9 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -1295,8 +1297,31 @@ namespace nvhttp {
     if (current_appid > 0) {
       auto owner_uuid = proc::proc.running_owner_uuid();
       auto owner_name = proc::proc.running_owner_name();
+      // §M.2-SELF（2026-11-14）：告訴 client「這個 session 是不是你自己的」。
+      // SessionOwnerUuid 是配對紀錄的編號（server 配對時產生的），client 卻拿它和自己的 uniqueid 比——兩個本來就不是同一種
+      // 東西，永遠不相等。結果是用熱鍵離開串流（session 留在 host）再進來，client 一律跳「<自己的名字> 正在使用這台主機，
+      // 要接管嗎」（/launch 與 /resume 本身認得同一張憑證，一直都放行，錯的只有這個提示）。
+      //   - SessionOwnedByCaller：憑證對得上擁有者就是 1（新的 client 看這一欄）；
+      //   - 同時把 SessionOwnerUuid 換成對方在這個請求裡帶來的 uniqueid：已經發佈的 client 照舊拿它和自己的 uniqueid 比，
+      //     這樣不必更新 client 也會判斷成「是自己」。別的裝置問到的仍是配對紀錄的編號。
+      // 身分只看 TLS 憑證（caller_uuid_for）；uniqueid 參數只回填給帶它來的那個請求，而且只接受十六進位與連字號。
+      bool owned_by_caller = false;
+      if (const auto caller_uuid = caller_uuid_for(request); !caller_uuid.empty() && caller_uuid == owner_uuid) {
+        owned_by_caller = true;
+        const auto query = request->parse_query_string();
+        if (const auto it = query.find("uniqueid"s); it != std::end(query)) {
+          const std::string &id = it->second;
+          const bool sane = !id.empty() && id.size() <= 64 && std::all_of(id.begin(), id.end(), [](unsigned char c) {
+            return std::isxdigit(c) || c == '-';
+          });
+          if (sane) {
+            owner_uuid = id;
+          }
+        }
+      }
       tree.put("root.SessionOwnerUuid", owner_uuid);
       tree.put("root.SessionOwnerName", owner_name);
+      tree.put("root.SessionOwnedByCaller", owned_by_caller ? 1 : 0);
     }
 
     // VipleStream §H.4 — expose host primary display mode(s) so the client

@@ -4,17 +4,20 @@
 # vr_multilink_logic.h＝gtest→scen→matrix→golden→fuzz；「現行規則不變」那幾列先跑 golden。
 # SURVIVED＝沒有任何測試失敗（不該出現）；標成「等價」的那幾列本來就不該有測試失敗，理由寫在同一列。
 baseline | （對照） | — | 沒有改動 | 全部通過
-gate-limit | 門檻 | VrRepairRtt.h | 門檻由 25 ms 放寬到 35 ms | unit
+gate-limit | 門檻 | VrRepairRtt.h | 門檻由 52 ms 放寬到 62 ms | unit
 gate-hyst | 門檻 | VrRepairRtt.h | 門檻沒有遲滯 | unit
 eta | 估計 eta | VrRepairRtt.h | eta 少了四分之一的餘裕 | unit
 eta-try | 估計 etaTry | VrRepairRtt.h | etaTry 少了 2 ms | unit
 eta-fast | 估計 etaFast | VrRepairRtt.h | etaFast 少了 2 ms | unit
 rtt-hi | 往返的高估值 | VrRepairRtt.h | hi 取最大值而不是第二大 | unit
 rtt-carry | 只看在送的連線 | VrRepairRtt.h | 往返的統計不分連線有沒有在送影像 | unit
-cap-max | 等待上限 | VrRepairRtt.h | 等待上限的封頂由 33 ms 改成 48 ms | unit
+cap-max | 等待上限 | VrRepairRtt.h | 等待上限的封頂由 80 ms 改成 95 ms | unit
 cap-floor | 等待上限 | VrRepairRtt.h | 等待上限的下限由 2×hold 改成 1×hold | unit
 retry-feasible | 重報 | VrRepairRtt.h | 重報不看趕不趕得上期限 | unit
-retry-interval | 重報 | VrRepairRtt.h | 重報的間隔由 eta 改成 etaFast | unit
+retry-interval | 重報 | VrRepairRtt.h | 重報的間隔由 eta 改成再報一輪的估計 | unit
+cap-second-round | 等待上限 | VrRepairRtt.h | 等待上限的第二輪照最短往返（改回舊的） | unit
+idle-far-frame | 多久沒有新封包就回報 | VrRepairRtt.h | 補一輪比幀週期長時不改用 FRAME（遠端也用 3 ms 規則） | unit
+far-only | 只用在遠端 | VrRepairRtt.h | farOnly 沒有作用（區網也用 RTT 規則） | unit
 deadline-unasked | 等到什麼時候 | VrRepairRtt.h | 沒報過、現在報也趕不上的 block 照樣等到上限 | unit
 holdoff | 放棄後暫停 | VrRepairRtt.h | 放棄之後的暫停長度變成 0 | unit
 ahead-max | 預先回報 | VrRepairRtt.h | 一次最多預先回報 5 幀 | unit
@@ -53,11 +56,13 @@ q-ring-settle | 保險 | RtpVideoQueue.c | 預先報過、在環裡收齊的幀�
 q-gap-carry | 預先回報 | RtpVideoQueue.c | 「後面整幀沒到」不分是哪條連線送來的封包 | scen
 q-legacy-idle | 現行規則不變 | RtpVideoQueue.c | 現行規則的 3 ms 改成 4 ms | golden
 q-legacy-clock | 現行規則不變 | RtpVideoQueue.c | 每個封包多讀一次時鐘（時間軸差 1 µs） | golden
-s-max-age | server 的年齡上限 | vr_multilink_logic.h | 帶旗標的回報的年齡上限由 100 ms 改成 50 ms | gtest
+s-max-age | server 的年齡上限 | vr_multilink_logic.h | 帶旗標的回報的年齡上限由 160 ms 改成 50 ms | gtest
 s-max-age-flag | server 的年齡上限 | vr_multilink_logic.h | 沒帶旗標的回報也放寬到 100 ms | gtest
 s-gap | server「還在路上」的視窗 | vr_multilink_logic.h | 視窗由 eta 的四分之三改成整個 eta | gtest
 s-gap-flag | server「還在路上」的視窗 | vr_multilink_logic.h | 沒帶旗標的回報也用 eta 算視窗 | gtest
 s-master-switch | 協商 | vr_multilink_logic.h | server 的主開關關著也同意 | gtest
 s-needs-repair | 協商 | vr_multilink_logic.h | client 沒提 REPAIR 也同意（RTT 跟著成立） | gtest
+s-far-needs-client | 協商 | vr_multilink_logic.h | 舊 client 沒提 REPAIR_FAR 也給 RTT 規則 | gtest
+s-far-switch | 協商 | vr_multilink_logic.h | server 的 repair_far 關著也同意 | gtest
 s-flag-negotiated | NACK 的旗標 | vr_multilink_logic.h | 沒協商也看旗標 | gtest
 s-parse-flags | NACK 的旗標 | vr_multilink_logic.h | 解析 NACK 時不讀 flags | gtest

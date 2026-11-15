@@ -1984,7 +1984,8 @@ static uint64_t nkNextDueUs(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool idleOk)
             if (at < nowUs) {
                 at = nowUs;
             }
-            return vrrrRetryAtUs(nowUs, queue->nkLastUs, queue->mlRepairEtaUs, queue->mlRepairEtaFastUs, nkRttLimitUs(queue, at),
+            // §VR-REPAIR-WAN：再報一輪趕不趕得上照中位數的往返算（mlRepairEtaTryUs），不是最短的那一個
+            return vrrrRetryAtUs(nowUs, queue->nkLastUs, queue->mlRepairEtaUs, queue->mlRepairEtaTryUs, nkRttLimitUs(queue, at),
                                  queue->nkCount, RTPV_NACK_MAX);
         }
         return queue->nkLastUs + queue->mlRepairRtoUs;

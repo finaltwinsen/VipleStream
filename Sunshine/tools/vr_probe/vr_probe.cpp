@@ -176,12 +176,12 @@ namespace {
   }
 
   void usage() {
-    probe::line("usage vr_probe --mode whoami|space|timing|scene|watch|predict|ipcpeer|unit --out DIR --seconds N");
+    probe::line("usage vr_probe --mode whoami|space|timing|scene|watch|predict|swing|toss|ipcpeer|unit --out DIR --seconds N");
     probe::line("usage predict: needs the client in --vr-emulate --vr-synthetic-motion tilt30yaw (SteamVR extrapolation semantics)");
     probe::line("usage ipcpeer: --abi N --hello-size B --peer-stop-signal-after N --peer-crash-after N --peer-never-read");
     probe::line("usage ipcpeer: --peer-close-after-welcome --peer-fence-max --peer-fence-max-after N --peer-escalate");
     probe::line("usage ipcpeer: --peer-gpu-hold-ms X --peer-writers N --peer-no-flush --peer-no-render --hello-repeat N --hello-interval-ms M --pipe NAME");
-    probe::line("usage unit: --no-loopback");
+    probe::line("usage unit: --no-loopback --unit-verbose");
     probe::line("usage space: --reset-seated");
     probe::line("usage scene/timing: --haptic-every-ms N (50..60000; legacy TriggerHapticPulse to every controller)");
   }
@@ -250,6 +250,8 @@ int wmain(int argc, wchar_t **argv) {
       ok = need(v) && parse_u32(v, a.hello_interval_ms) && a.hello_interval_ms >= 10 && a.hello_interval_ms <= 60000;
     } else if (k == L"--no-loopback") {
       a.no_loopback = true;
+    } else if (k == L"--unit-verbose") {
+      a.unit_verbose = true;
     } else if (k == L"--reset-seated") {
       a.reset_seated = true;
     } else if (k == L"--haptic-every-ms") {
@@ -294,6 +296,12 @@ int wmain(int argc, wchar_t **argv) {
   }
   if (a.mode == "predict") {
     return probe::run_predict(a);
+  }
+  if (a.mode == "swing") {
+    return probe::run_swing(a);
+  }
+  if (a.mode == "toss") {
+    return probe::run_toss(a);
   }
   probe::line("error reason=unknown-mode mode=%s", a.mode.c_str());
   usage();

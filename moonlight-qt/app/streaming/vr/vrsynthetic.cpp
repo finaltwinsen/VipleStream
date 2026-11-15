@@ -224,6 +224,72 @@ void vrSyntheticHands(double t, VIPLE_VR_TRACKING* out)
     out->flags |= VIPLE_VR_TRK_LEFT | VIPLE_VR_TRK_RIGHT;
 }
 
+void vrSyntheticToss(double t, VIPLE_VR_TRACKING* out)
+{
+    const VIPLE_VR_POSE& head = out->pose[VIPLE_VR_POSE_HMD];
+    // 人拋球的樣子：手加速往上、在最快的那一刻放開、放開之後 0.12 秒內就停住。速度用 minimum-jerk 的形狀升降
+    // （s(τ)=10τ³−15τ⁴+6τ⁵，頭尾的加速度都是 0），所以放開那一刻的加速度是 0、之後才急減速（平均 −16.7 m/s²）：
+    // 放開的訊號晚 30／60／90 ms 才被遊戲看到時，手速已經是 1.79／1.00／0.21 m/s（真值 2.00）
+    constexpr double kCycle = 2.0, kHold = 0.5, kAccel = 0.30, kDecel = 0.12, kTop = 0.3, kFall = 0.6;
+    constexpr double kPeak = 2.0, kReleaseAt = kHold + kAccel;
+    constexpr double kUp = kPeak * kAccel * 0.5, kHeight = kUp + kPeak * kDecel * 0.5;
+    const double u = t - std::floor(t / kCycle) * kCycle;
+    // minimum-jerk：s(τ)=10τ³−15τ⁴+6τ⁵，s'(τ)=30τ²−60τ³+30τ⁴，∫s=2.5τ⁴−3τ⁵+τ⁶
+    auto mj = [](double tau, double* ds) {
+        tau = tau < 0.0 ? 0.0 : (tau > 1.0 ? 1.0 : tau);
+        const double t2 = tau * tau, t3 = t2 * tau, t4 = t3 * tau, t5 = t4 * tau;
+        *ds = 30.0 * t2 - 60.0 * t3 + 30.0 * t4;
+        return 10.0 * t3 - 15.0 * t4 + 6.0 * t5;
+    };
+    auto mjInt = [](double tau) {
+        tau = tau < 0.0 ? 0.0 : (tau > 1.0 ? 1.0 : tau);
+        const double t4 = tau * tau * tau * tau;
+        return 2.5 * t4 - 3.0 * t4 * tau + t4 * tau * tau;
+    };
+    double y = 0.0, vy = 0.0, ds = 0.0;
+    if (u < kHold) {
+        y = 0.0;
+    }
+    else if (u < kHold + kAccel) {
+        // 速度 0 → kPeak
+        const double tau = (u - kHold) / kAccel;
+        vy = kPeak * mj(tau, &ds);
+        y = kPeak * kAccel * mjInt(tau);
+    }
+    else if (u < kHold + kAccel + kDecel) {
+        // 速度 kPeak → 0
+        const double tau = (u - kHold - kAccel) / kDecel;
+        vy = kPeak * (1.0 - mj(tau, &ds));
+        y = kUp + kPeak * kDecel * (tau - mjInt(tau));
+    }
+    else if (u < kHold + kAccel + kDecel + kTop) {
+        y = kHeight;
+    }
+    else if (u < kHold + kAccel + kDecel + kTop + kFall) {
+        y = kHeight * (1.0 - mj((u - kHold - kAccel - kDecel - kTop) / kFall, &ds));
+        vy = -kHeight * ds / kFall;
+    }
+    const float pos[3] = { head.pos[0] - 0.22f, (float)(head.pos[1] - 0.45 + y), head.pos[2] - 0.40f };
+    const float lin[3] = { head.linVel[0], (float)(head.linVel[1] + vy), head.linVel[2] };
+    const float identity[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    const float zero[3] = { 0.0f, 0.0f, 0.0f };
+    setPose(&out->pose[VIPLE_VR_POSE_LEFT], pos, identity, lin, zero);
+    VIPLE_VR_CONTROLLER_INPUT& left = out->input[0];
+    left.flags |= VIPLE_VR_CTRL_ACTIVE | VIPLE_VR_CTRL_FOCUSED;
+    if (left.battery == 0) {
+        left.battery = 100;
+    }
+    if (u < kReleaseAt) {
+        left.buttons |= VIPLE_VR_BTN_TRIGGER;
+        left.trigger = 0xFFFF;
+    }
+    else {
+        left.buttons &= ~static_cast<uint32_t>(VIPLE_VR_BTN_TRIGGER);
+        left.trigger = 0;
+    }
+    out->flags |= VIPLE_VR_TRK_LEFT;
+}
+
 void vrSyntheticPadTest(double t, double startAt, VIPLE_VR_TRACKING* out)
 {
     if (!(startAt > 0.0) || t < startAt) {

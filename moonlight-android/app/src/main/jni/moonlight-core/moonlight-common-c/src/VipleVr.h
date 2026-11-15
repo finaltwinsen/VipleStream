@@ -546,6 +546,12 @@ typedef struct _VIPLE_VR_TLV_STATS {
 // §VR-LINK-DEDICATED（2026-11-08）：不是功能位元，是這一條連線的屬性——走頭盔自己的串流轉接器熱點（wlanap，專用 6 GHz）。
 // server 的「只剩一條連線就壓上限」只套在家用 Wi-Fi，不套在這一條。舊 server 的功能協商只取認得的位元，不受影響
 #define VIPLE_VR_LINK_F_DEDICATED 0x10
+// §VR-REPAIR-WAN（2026-11-15）：往返時間的補包規則「只用在原本的規則不補的路徑上」。原本的規則只在往返比一個半幀週期短
+// （區網）時才補，遠端路徑缺一個封包就是一次 intra refresh；RTT 規則補得到遠端，但在區網上還沒有配戴驗證過。
+// client 提出這個位元＝認得這個限制；server 回這個位元（連同 F_REPAIR_RTT）＝請 client 只在原本規則的門檻關著時用 RTT 規則，
+// 區網照舊。server 明確開了 vr_multilink_repair_rtt 時只回 F_REPAIR_RTT（RTT 規則到處都用）。
+// 不認得的舊 client 不會提，server 就不給它 F_REPAIR_RTT：舊 client 的行為完全不變。
+#define VIPLE_VR_LINK_F_REPAIR_FAR 0x20
 #define VIPLE_VR_LINK_PING_F_CONFIRMED  0x01  // client 最近 1 s 內在這條連線收過 PONG。§VR-LINK-STANDBY：有區網直連時，
                                              // 走 Tailscale 的那一條即使收得到 PONG 也不帶（server 就不在上面送影像）
 #define VIPLE_VR_LINK_READY_OK       0

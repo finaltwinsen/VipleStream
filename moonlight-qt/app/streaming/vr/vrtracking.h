@@ -65,6 +65,10 @@ public:
     static void setDisplayGrid(uint64_t displayNs, uint64_t periodNs);
     // 相位（奈秒，0 到一個樣本間隔）：往後移＝樣本比較新，但太晚會趕不上 host 那一幀讀姿態。由 XrContext 依 MTP 調整
     static void setPhaseNs(int64_t phaseNs);
+    // dev（--vr-synthetic-uplink-gap <週期ms>:<空窗ms>，2026-11-14）：每個週期的頭一段不送、先存著，時間到了照順序一次送出——
+    // 重現外地上行「幾十毫秒的空窗、空窗裡的樣本成批晚到」（host 的 §VR-STALE-COAST、§VR-EDGE-HOLD、外插上限 auto 都是為它做的），
+    // 在區網也能固定重現。開場 5 秒不做。兩個都是 0＝關（預設）
+    static void setUplinkGapTest(int periodMs, int gapMs);
 
 private:
     void run();
@@ -75,10 +79,12 @@ private:
     VrSyntheticMotion m_Motion = VrSyntheticMotion::Sine;
     double m_SyntheticMenuAtSec = 0.0;
     double m_SyntheticPadTestSec = 0.0;
+    bool m_SyntheticToss = false;   // dev（--vr-synthetic-toss）：左手的合成拋球動作
     bool m_SyntheticHands = false;  // dev（--vr-synthetic-hands）：--vr-emulate 時也把控制器換成揮動的合成姿態；start() 之前設
 
 public:
     void setSyntheticHands(bool on) { m_SyntheticHands = on; }
+    void setSyntheticToss(bool on) { m_SyntheticToss = on; }  // dev（--vr-synthetic-toss）
     // dev（--vr-synthetic-menu-at）：--vr-emulate 時第幾秒按一下左手 MENU（0＝不做）；start() 之前設
     void setSyntheticMenuAt(double sec) { m_SyntheticMenuAtSec = sec; }
     // dev（--vr-synthetic-pad-test）：--vr-emulate 時從第幾秒起跑 §VR-PADMODE 的按鍵序列（0＝不做）；start() 之前設

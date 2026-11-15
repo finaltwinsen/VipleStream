@@ -1117,15 +1117,16 @@ namespace vr::multilink {
       for (const auto &h : links) {
         offered &= h.flags;
       }
-      const uint8_t feat = negotiate_link_features(offered, m.opt.ctrl, m.opt.repair, m.opt.repair_rtt, m.opt.hotadd);
+      const uint8_t feat = negotiate_link_features(offered, m.opt.ctrl, m.opt.repair, m.opt.repair_rtt, m.opt.hotadd, m.opt.repair_far);
       if (m.features.exchange(feat, std::memory_order_relaxed) != feat || m.count.load(std::memory_order_relaxed) == 0) {
         BOOST_LOG(info) << "[VIPLE-VR-LINK] link features: ctrl=" << ((feat & VIPLE_VR_LINK_F_CTRL) ? "on" : "off")
                         << " repair=" << ((feat & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off")
-                        << " repairRtt=" << ((feat & VIPLE_VR_LINK_F_REPAIR_RTT) ? "on" : "off")
+                        << " repairRtt=" << (!(feat & VIPLE_VR_LINK_F_REPAIR_RTT) ? "off" : (feat & VIPLE_VR_LINK_F_REPAIR_FAR) ? "far" : "on")
                         << " hotadd=" << ((feat & VIPLE_VR_LINK_F_HOTADD) ? "on" : "off")
                         << " (client offered 0x" << std::format("{:02x}", (unsigned) offered)
                         << ", server ctrl=" << (m.opt.ctrl ? "enabled" : "disabled") << " repair=" << (m.opt.repair ? "enabled" : "disabled")
-                        << " repairRtt=" << (m.opt.repair_rtt ? "enabled" : "disabled") << " hotadd=" << (m.opt.hotadd ? "enabled" : "disabled") << ')';
+                        << " repairRtt=" << (m.opt.repair_rtt ? "enabled" : "disabled") << " repairFar=" << (m.opt.repair_far ? "enabled" : "disabled")
+                        << " hotadd=" << (m.opt.hotadd ? "enabled" : "disabled") << ')';
       }
     }
 
@@ -1752,8 +1753,11 @@ namespace vr::multilink {
     return res;
   }
 
-  std::string hub_t::take_repair_line() {
+  std::string hub_t::take_repair_line(uint32_t *requests) {
     auto &m = *impl_;
+    if (requests) {
+      *requests = 0;
+    }
     if (!(m.features.load(std::memory_order_relaxed) & VIPLE_VR_LINK_F_REPAIR)) {
       return {};
     }
@@ -1766,6 +1770,9 @@ namespace vr::multilink {
     }
     const auto &p = m.rstats_prev;
     std::string s;
+    if (requests) {
+      *requests = (uint32_t) (c.nack - p.nack);
+    }
     if (c.nack != p.nack) {
       s = std::format("nack={} rounds={} pkts={} gone={} (expired={} budget={} unknown={}) nothingToSend={} exhausted={}",
                       c.nack - p.nack, c.rounds - p.rounds, c.pkts - p.pkts,

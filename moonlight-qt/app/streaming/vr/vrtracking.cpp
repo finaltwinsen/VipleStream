@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <vector>
 
 std::mutex VrSampleHistory::s_Lock;
 VrSampleHistory::Entry VrSampleHistory::s_Entries[VrSampleHistory::kSize];
@@ -47,6 +48,14 @@ namespace {
 std::atomic<uint64_t> s_GridNs{0};
 std::atomic<uint64_t> s_GridPeriodNs{0};
 std::atomic<int64_t> s_PhaseNs{0};
+std::atomic<int> s_GapPeriodMs{0};  // dev（--vr-synthetic-uplink-gap）
+std::atomic<int> s_GapMs{0};
+}
+
+void VrTrackingSender::setUplinkGapTest(int periodMs, int gapMs)
+{
+    s_GapPeriodMs.store(periodMs, std::memory_order_relaxed);
+    s_GapMs.store(gapMs, std::memory_order_relaxed);
 }
 
 void VrTrackingSender::setDisplayGrid(uint64_t displayNs, uint64_t periodNs)
@@ -108,6 +117,12 @@ void VrTrackingSender::run()
                 rateHz, m_DisplayHz, VIPLE_VR_TRACKING_RATE_MUL,
                 m_Source ? (m_SourceName ? m_SourceName : "xr") : vrSyntheticMotionName(m_Motion));
 
+    std::vector<VIPLE_VR_TRACKING> gapHeld;  // dev（--vr-synthetic-uplink-gap）：空窗裡存著還沒送的樣本
+    if (s_GapPeriodMs.load(std::memory_order_relaxed) > 0 && s_GapMs.load(std::memory_order_relaxed) > 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-POSE] dev: uplink gap test - tracking samples are held back for %d ms out of every %d ms and sent together afterwards",
+                    s_GapMs.load(std::memory_order_relaxed), s_GapPeriodMs.load(std::memory_order_relaxed));
+    }
     const auto start = clock::now();
     auto next = start;
     auto lastLog = start;
@@ -179,6 +194,9 @@ void VrTrackingSender::run()
             if (m_SyntheticHands) {
                 vrSyntheticHands(t, &sample);
             }
+            if (m_SyntheticToss) {
+                vrSyntheticToss(t, &sample);
+            }
             vrSyntheticMenu(t, m_SyntheticMenuAtSec, &sample);
             vrSyntheticPadTest(t, m_SyntheticPadTestSec, &sample);
             sample.predictNs = predictNs;
@@ -198,13 +216,35 @@ void VrTrackingSender::run()
             sample.sampleId = ++sampleId;
             VrSampleHistory::record(sample.sampleId, sample.sampleTimeNs);
             const auto sendStart = clock::now();  // §PERF-1113：送出花了多久
-            if (LiSendVrTracking(&sample) == 0) {
-                sent++;
-                totalSent++;
+            // dev（--vr-synthetic-uplink-gap）：空窗裡的樣本先存著，空窗結束後的第一拍照順序一次送出（舊的在前）
+            const int gapPeriodMs = s_GapPeriodMs.load(std::memory_order_relaxed);
+            const int gapMs = s_GapMs.load(std::memory_order_relaxed);
+            const int64_t sinceStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+            if (gapPeriodMs > 0 && gapMs > 0 && sinceStartMs >= 5000 && (sinceStartMs % gapPeriodMs) < gapMs) {
+                if (gapHeld.size() < 512) {
+                    gapHeld.push_back(sample);
+                }
             }
             else {
-                failed++;
-                totalFailed++;
+                for (VIPLE_VR_TRACKING& h : gapHeld) {
+                    if (LiSendVrTracking(&h) == 0) {
+                        sent++;
+                        totalSent++;
+                    }
+                    else {
+                        failed++;
+                        totalFailed++;
+                    }
+                }
+                gapHeld.clear();
+                if (LiSendVrTracking(&sample) == 0) {
+                    sent++;
+                    totalSent++;
+                }
+                else {
+                    failed++;
+                    totalFailed++;
+                }
             }
             {
                 const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - sendStart).count();

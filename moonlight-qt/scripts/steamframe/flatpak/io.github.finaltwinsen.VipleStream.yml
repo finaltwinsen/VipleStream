@@ -65,6 +65,11 @@ finish-args:
   - --filesystem=/run/tailscale
   # §WIFI-SCANBLOCK：串流期間請 softapmanager 擋住 Wi-Fi 背景掃描（Steam 內建串流 vrlink 同一個 socket）
   - --filesystem=/run/softapmanager.streaming.socket
+  # §FRAME-HOTSPOT-PAUSE：經 VPN 的場次暫停頭盔沒人在用的串流轉接器熱點（它和外面的 Wi-Fi 分同一顆無線電），結束時還原。
+  # 控制通道和 Steam 設定頁的開關用的是同一個（teardown／create）；laststate 是 softapmanager 自己存的上一則指令，
+  # 還原時原樣送回去，只讀。
+  - --filesystem=/run/softapmanager.socket
+  - --filesystem=/run/softapmanager.laststate:ro
   # §VR-PLAYER（內建瀏覽器）：Chromium 自己的沙箱在 Flatpak 裡要再開一層 bwrap，頭盔上建不了 PID namespace
   # （bwrap: Setting pidns failed）→ 建立網頁時 UI 執行緒永遠卡住。關掉它（Flathub 用 QtWebEngine 的 app 也這樣做）；
   # Flatpak 本身的沙箱仍在

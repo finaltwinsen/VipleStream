@@ -23,9 +23,13 @@ extern "C" {
 #define VRRR_RTT_WIN              8        // 最近幾筆往返時間樣本（PING 每 250 ms 一筆 → 約 2 s）
 #define VRRR_ETA_MARGIN_US        2000u    // server 收到回報到補包送完（實測 ≤ 1 ms）＋接收逾時進位到整數毫秒
 #define VRRR_GATE_HYST_US         2000u    // 門檻關掉之後，要低這麼多才再打開
-#define VRRR_CAP_SLACK_US         2000u    // 等待上限＝一輪（eta）＋再一輪（最短往返＋餘裕）＋這麼多……
-#define VRRR_CAP_MAX_US           33000u   // ……但不超過這麼久（120 Hz 的 4 個顯示格、60 Hz 的 2 個幀週期）
-#define VRRR_GATE_US              25000u   // 門檻：中位數的往返＋餘裕超過這麼久（120 Hz 的 3 個顯示格）就整個不回報、不等
+#define VRRR_CAP_SLACK_US         2000u    // 等待上限＝一輪（eta）＋再一輪（中位數的往返＋餘裕）＋這麼多……
+// §VR-REPAIR-WAN（2026-11-15）：上限 33 → 80 ms、門檻 25 → 52 ms。原本的值是照區網訂的（120 Hz 的 3～4 個顯示格），
+// 往返 25 ms 上下的遠端路徑整個被擋在門外：缺一個封包就是一次 LOSS → intra refresh，實測恢復要 120～190 ms 而且破圖
+// （兩塊影像的版面下，周邊先修好、注視點晚半個波才修好，中間兩者對不上）。補一輪只要 30～45 ms、畫面是乾淨的。
+// 80 ms＝一輪＋重報一輪在往返 30 ms 上下的路徑上要的時間；52 ms＝往返中位數 50 ms 以內才試（再長就算補回來也定格太久）。
+#define VRRR_CAP_MAX_US           80000u   // ……但不超過這麼久
+#define VRRR_GATE_US              52000u   // 門檻：中位數的往返＋餘裕超過這麼久就整個不回報、不等
 #define VRRR_CAP_OVERRIDE_MIN_MS  8u
 #define VRRR_CAP_OVERRIDE_MAX_MS  100u
 #define VRRR_IDLE_MIN_US          3000u    // 「這個 block 這麼久沒有新封包就回報」的下限（＝原本固定的 3 ms）
@@ -143,15 +147,17 @@ VIPLE_VR_INLINE uint32_t vrrrEtaTryUs(uint32_t rttMidUs) {
     return rttMidUs + VRRR_ETA_MARGIN_US;
 }
 
-// 再報一輪值不值得：用最短的往返（已經在等了，多報一份的代價很小）
+// 最短的往返＋餘裕：補包不可能比它更早到（放棄之後的暫停、log 用）。
+// §VR-REPAIR-WAN：第二輪的時間與重報的可行性原本用這個值，實測「照最短往返算趕得上、照實際往返差幾毫秒錯過期限」佔多數
+// （61 個 10 秒視窗裡 57 個會送第二份、只有 19 個趕得上）：白送一輪、白等到上限。現在兩處都改用中位數（vrrrEtaTryUs）
 VIPLE_VR_INLINE uint32_t vrrrEtaFastUs(uint32_t rttLoUs) {
     return rttLoUs + VRRR_ETA_MARGIN_US;
 }
 
-// 後面的封包（下一幀）最多被壓住多久。overrideMs＝0：跟著往返時間走——夠補一輪（etaUs）再重報一輪（etaFastUs），
-// 不少於現行規則在等待中有進展時的上限（2×holdUs；holdUs＝clamp(幀週期, 4, 14 ms)），不超過 VRRR_CAP_MAX_US；
-// 否則用指定值（夾在 8～100 ms）
-VIPLE_VR_INLINE uint32_t vrrrCapUs(uint32_t holdUs, uint32_t etaUs, uint32_t etaFastUs, uint32_t overrideMs) {
+// 後面的封包（下一幀）最多被壓住多久。overrideMs＝0：跟著往返時間走——夠補一輪（etaUs）再重報一輪（etaRetryUs；
+// 呼叫端給中位數的那一個，vrrrEtaTryUs），不少於現行規則在等待中有進展時的上限（2×holdUs；holdUs＝clamp(幀週期, 4, 14 ms)），
+// 不超過 VRRR_CAP_MAX_US；否則用指定值（夾在 8～100 ms）
+VIPLE_VR_INLINE uint32_t vrrrCapUs(uint32_t holdUs, uint32_t etaUs, uint32_t etaRetryUs, uint32_t overrideMs) {
     uint64_t cap;
 
     if (overrideMs != 0) {
@@ -163,7 +169,7 @@ VIPLE_VR_INLINE uint32_t vrrrCapUs(uint32_t holdUs, uint32_t etaUs, uint32_t eta
         }
         return overrideMs * 1000u;
     }
-    cap = (uint64_t)etaUs + etaFastUs + VRRR_CAP_SLACK_US;
+    cap = (uint64_t)etaUs + etaRetryUs + VRRR_CAP_SLACK_US;
     if (cap < 2ull * holdUs) {
         cap = 2ull * holdUs;
     }
@@ -202,8 +208,9 @@ VIPLE_VR_INLINE bool vrrrFeasible(uint64_t atUs, uint32_t etaUs, uint64_t limitU
     return atUs + etaUs <= limitUs;
 }
 
-// 下一次重報的時刻；0＝不會再報（次數用完、或再報也趕不上）。lastNackUs＝0（還沒有上一份的時刻）：現在
-VIPLE_VR_INLINE uint64_t vrrrRetryAtUs(uint64_t nowUs, uint64_t lastNackUs, uint32_t etaUs, uint32_t etaFastUs, uint64_t limitUs,
+// 下一次重報的時刻；0＝不會再報（次數用完、或再報也趕不上）。lastNackUs＝0（還沒有上一份的時刻）：現在。
+// etaRetryUs＝再報一輪要多久才到（呼叫端給中位數的那一個，vrrrEtaTryUs；見 vrrrEtaFastUs 的說明）
+VIPLE_VR_INLINE uint64_t vrrrRetryAtUs(uint64_t nowUs, uint64_t lastNackUs, uint32_t etaUs, uint32_t etaRetryUs, uint64_t limitUs,
                                        unsigned nackCount, unsigned nackMax) {
     uint64_t at;
 
@@ -214,7 +221,7 @@ VIPLE_VR_INLINE uint64_t vrrrRetryAtUs(uint64_t nowUs, uint64_t lastNackUs, uint
     if (at < nowUs) {
         at = nowUs;
     }
-    return vrrrFeasible(at, etaFastUs, limitUs) ? at : 0;
+    return vrrrFeasible(at, etaRetryUs, limitUs) ? at : 0;
 }
 
 // 排在最前面那個後面的封包最晚等到什麼時候。
@@ -341,10 +348,16 @@ VIPLE_VR_INLINE uint32_t vrrrStallHiUs(const VRRR_STALLS* s, uint64_t nowUs) {
     return n >= 2 ? second : 0;
 }
 
-// VRRR_IDLE_AUTO（與不認得的值）換成實際的做法
-VIPLE_VR_INLINE uint8_t vrrrIdlePolicy(uint8_t policy, uint32_t framePeriodUs) {
+// VRRR_IDLE_AUTO（與不認得的值）換成實際的做法。etaTryUs＝補一輪大約要多久（0＝不知道／RTT 規則不適用）。
+// §VR-REPAIR-WAN：補一輪要的時間不比一個幀週期短時（遠端路徑）用 FRAME——「3 ms 沒有新封包」在那種路徑上的誤報是真事件的
+// 4～30 倍（封包本來就會晚幾毫秒到），每一份誤報 server 都白補一輪、還被記成「補包救回的缺包」讓自動位元率不回升；
+// 早 10 ms 回報對 27 ms 的往返只省四分之一。區網（補一輪比一個幀週期短）照舊
+VIPLE_VR_INLINE uint8_t vrrrIdlePolicy(uint8_t policy, uint32_t framePeriodUs, uint32_t etaTryUs) {
     if (policy == VRRR_IDLE_FIXED3 || policy == VRRR_IDLE_FRAME || policy == VRRR_IDLE_LEARNED || policy == VRRR_IDLE_SIZE) {
         return policy;
+    }
+    if (etaTryUs != 0 && etaTryUs >= framePeriodUs) {
+        return VRRR_IDLE_FRAME;
     }
     return framePeriodUs <= 10000u ? VRRR_IDLE_SIZE : VRRR_IDLE_FIXED3;
 }
@@ -468,6 +481,7 @@ VIPLE_VR_INLINE bool vrrrAbArmRtt(uint64_t elapsedUs, uint32_t abSec) {
 typedef struct _VRRR_IN {
     bool negotiatedRepair;      // 協商了 VIPLE_VR_LINK_F_REPAIR
     bool negotiatedRtt;         // 協商了 VIPLE_VR_LINK_F_REPAIR_RTT
+    bool farOnly;               // §VR-REPAIR-WAN：協商了 VIPLE_VR_LINK_F_REPAIR_FAR——RTT 規則只在現行規則的門檻關著時用
     bool armRtt;                // 這個時刻允許用 RTT 規則（沒有 A/B 時恆為 true；A/B 的現行那一邊是 false）
     int carrying;               // 幾條連線實際在送影像（vrmlVideoCarrying()）
     int legacyRttMs;            // vrmlCtrlRttMs()：−1＝沒有已確認的連線
@@ -513,15 +527,19 @@ VIPLE_VR_INLINE void vrrrDecide(const VRRR_IN* in, VRRR_STATE* s, VRRR_OUT* out)
         s->gateOpen = true;
     }
     memset(out, 0, sizeof(*out));
-    out->idlePolicy = vrrrIdlePolicy(in->idlePolicy, in->framePeriodUs);
 
     eligible = in->negotiatedRepair && in->negotiatedRtt && in->armRtt && in->legacyRttMs >= 0 && !dual && in->haveStats;
+    // §VR-REPAIR-WAN：只用在現行規則不補的路徑上（現行的門檻開著＝區網，照現行規則，逐位元不變）
+    if (eligible && in->farOnly && (uint32_t)in->legacyRttMs * 1000u + 2000u <= in->holdUs + in->holdUs / 2u) {
+        eligible = false;
+    }
     out->eligible = eligible;
+    out->idlePolicy = vrrrIdlePolicy(in->idlePolicy, in->framePeriodUs, eligible ? vrrrEtaTryUs(in->st.midUs) : 0u);
     if (eligible) {
         s->etaUs = vrrrEtaUs(in->st.hiUs);
         s->etaTryUs = vrrrEtaTryUs(in->st.midUs);
         s->etaFastUs = vrrrEtaFastUs(in->st.loUs);
-        s->capUs = vrrrCapUs(in->holdUs, s->etaUs, s->etaFastUs, in->capOverrideMs);
+        s->capUs = vrrrCapUs(in->holdUs, s->etaUs, s->etaTryUs, in->capOverrideMs);
         s->loUs = in->st.loUs;
         out->tripped = vrrrBreakerNote(&s->brk, in->nowUs, in->okDelta, in->badDelta);
         s->gateOpen = vrrrGateOpen(s->etaTryUs, s->capUs, s->gateOpen);

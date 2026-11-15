@@ -123,11 +123,28 @@ kill server 之後約 33 ms pose 就失效（V4 實測，門檻 1 s）；新 ser
   的落差當成 40 ms 內消掉的偏移量。降速與恢復都把 SteamVR 自己的外插長度算進去（`pred_us_recent`：scene 層 SubmitLayer 給的
   預測時間），顯示位置不回縮、不前跳。成批晚到、目標時間已過 50 ms 以上的樣本略過，等同一批裡比較新的。
   區網無人實測（每 540 ms 斷 40 ms、合成動作 0.13 m/s）：恢復時的落差 blend 中位數 5.2 mm、coast 0.8 mm。
-- **§VR-CTRL-EXTRAP**（`vr_ctrl_extrap_ms`，session config 的 `ctrl_keep_ms_p1`；預設 auto＝不限制）：SteamVR 只有一個預測時間，
+- **§VR-CTRL-EXTRAP**（`vr_ctrl_extrap_ms`，session config 的 `ctrl_keep_ms_p1`；預設 auto＝§VR-CTRL-PREDICT，見下面最後一點；數值＝固定上限）：SteamVR 只有一個預測時間，
   控制器跟著 HMD 被外插到同一個時刻（區網實測 43.5 − 20.5 ≈ 23 ms，直線、速度不跟著外插）。設成數值時 driver 在回報前把控制器的
   姿態沿著它自己的速度往回推「超過上限的那一段」，`poseTimeOffset` 不動。`vr_probe --mode predict` 實測（頭與右手同一個合成動作）：
   auto 時 `hmdMinusRight` 0.0 ms、上限 10 時 −13.1 ms、上限 0 時 −23.1 ms，和 `predUs − ctrlOffUs − 上限` 相符。
   對桌球這類看揮拍速度的遊戲有沒有幫助要配戴比較（家裡比 auto／10／0）。
+  - **§VR-CTRL-EXTRAP-SMOOTH（2026-11-14）**：往回推的量是約 2 秒的平滑值、各筆共用（`stale_blender_t::back_smooth_s_`）。原本每一筆
+    各算各的（`pred − offset − 上限`），等於把樣本自己的時刻抵銷掉：位置＝樣本位置＋速度×（查詢時刻−**到達**時刻＋上限），
+    上行到達時間的抖動直接變成位置的抖動（速度×抖動）。改成共用的量之後樣本的時刻留著，晚到的樣本自然被多外插一點。
+  - **coast 的外插長度（2026-11-14）**：`process_coast` 算「SteamVR 實際會把這一筆外插多久」原本是 `min(pred − offset, 上限)`，
+    和上一點改完之後的實際值（`pred − offset − 往回推的量`）不一致——空窗後成批晚到的樣本 offset 比較小，實際會被多外插
+    「晚到的那段時間」，恢復時的落差就多算了「速度×空窗」，補上去之後拍子往前衝再來回幾格。改成同一個算式。
+    無人量測（真頭盔在外地經 VPN、合成揮拍，`vr_probe --mode swing`）：恢復落差中位數 23.8 → 0.6 mm；遊戲看到的拍子位置
+    偏離平滑軌跡 p50／p90／p99＝3.55／12.5／37.5 mm（兩項修正之前）→ 1.04／5.05／18.2 mm。
+  - **§VR-CTRL-PREDICT（2026-11-15，`VRIPC_POSE_F_CTRL_PREDICT`，auto 的做法；`ctrl_predictor_t`）**：把外插縮短（上一版依抖動
+    縮到 10～18 ms）軌跡是平滑了，但手比畫面晚 31～47 ms，配戴回報擊球的時機對不上。改成不縮短、把斜率改對：
+    直線外插的雜訊來自「每一格拿到的樣本年齡不同（δ），而外插的斜率用的是樣本的速度 v」——外插之後那條軌跡真正的斜率是
+    v＋a·E。driver 用相鄰樣本的速度差分估加速度 a（樣本自己的時刻、12 ms 平滑），回報速度 v＋a·E、位置 x − a·E²：SteamVR
+    算出來的是「從樣本直線預測 E」那條軌跡沿著自己的斜率走 δ，抖動只剩二階；交給遊戲的速度就是顯示時刻的速度。
+    同條件無人量測（外地、合成揮拍）：殘差 p50／p90／p99 0.34／1.06／2.44 mm、API 速度與動作的落差 0.23 m/s、延遲 0；
+    `unlimited`（SteamVR 自己外插）是 1.39／4.36／9.01 mm、1.02 m/s。
+    **扳機按著的手不預測**（K 以每秒 0.25 秒降到 0，放開 0.15 秒後才回升）：預測到顯示時刻的姿態比按鍵新了「E＋上行延遲」
+    （外地約 80 ms），拋球時遊戲在放開的那一格拿到的是已經慢下來的手。合成拋球（真值 2.00 m/s）40 次：遊戲讀到 1.91～2.00。
 
 - **bit2 §VR-ANGVEL-LOCAL**（`vr_angvel_local = enabled`）：HMD 與控制器的角速度轉成機體座標（`ω_local = q⁻¹ ω q`）
   再交給 SteamVR。`vr_probe --mode predict`（client `--vr-emulate --vr-synthetic-motion tilt30yaw`：頭與右手先傾 30°、

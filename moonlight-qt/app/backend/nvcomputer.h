@@ -107,6 +107,7 @@ public:
     int currentGameId;
     QString sessionOwnerUuid;   // §M.2: who owns the running session (empty = orphan/free)
     QString sessionOwnerName;   // §M.2: display name of the session owner
+    bool sessionOwnedByCaller = false;  // §M.2-SELF：host 依憑證認定這個 session 是我們自己開的（舊 host 沒有這一欄＝false）
     QString gfeVersion;
     QString appVersion;
     QVector<NvDisplayMode> displayModes;

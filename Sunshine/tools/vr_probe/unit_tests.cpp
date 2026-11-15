@@ -64,21 +64,26 @@ namespace probe {
         line("unit-group name=%s pass=%d fail=%d", group, group_pass, group_fail);
       }
 
+      bool verbose = false;  ///< --unit-verbose：通過的項目也印出數值（看離門檻多遠）
+
       void check(bool ok, const char *name, const char *fmt = nullptr, ...) {
-        if (ok) {
-          ++pass;
-          ++group_pass;
-          return;
-        }
-        ++fail;
-        ++group_fail;
         char detail[200] = "";
-        if (fmt) {
+        if (fmt && (!ok || verbose)) {
           va_list ap;
           va_start(ap, fmt);
           vsnprintf(detail, sizeof(detail), fmt, ap);
           va_end(ap);
         }
+        if (ok) {
+          ++pass;
+          ++group_pass;
+          if (verbose && fmt) {
+            line("unit-ok case=%s.%s %s", group, name, detail);
+          }
+          return;
+        }
+        ++fail;
+        ++group_fail;
         line("unit-fail case=%s.%s %s", group, name, detail);
       }
     };
@@ -1466,6 +1471,8 @@ namespace probe {
       double recover_jump_mm = 0;
       double lag_min_ms = 1e9;  ///< 空窗之前的穩定段裡（等速時），顯示的位置比真值晚多久
       double lag_max_ms = -1e9;
+      double lag_gap_min_ms = 1e9;  ///< 同上，但量的是空窗前 10 ms 到結束後 100 ms：兩者差多少，軌跡在空窗前後就跳了多少
+      double lag_gap_max_ms = -1e9;
     };
 
     /**
@@ -1590,6 +1597,11 @@ namespace probe {
           r.lag_max_ms = (std::max)(r.lag_max_ms, lag_ms);
         }
         if (now >= gap_start - 0.01 && now <= gap_end + 0.1) {
+          if (v > 0.0 && a == 0.0) {
+            const double lag_ms = (x_at(tau) - disp) / v * 1000.0;
+            r.lag_gap_min_ms = (std::min)(r.lag_gap_min_ms, lag_ms);
+            r.lag_gap_max_ms = (std::max)(r.lag_gap_max_ms, lag_ms);
+          }
           r.max_err_mm = (std::max)(r.max_err_mm, std::abs(disp - x_at(tau)) * 1000.0);
           if (have_prev && disp < prev_disp) {
             r.max_back_mm = (std::max)(r.max_back_mm, (prev_disp - disp) * 1000.0);
@@ -1599,6 +1611,196 @@ namespace probe {
         }
         prev_disp = disp;
         have_prev = true;
+      }
+      return r;
+    }
+
+    // ── §VR-CTRL-EXTRAP-SMOOTH（2026-11-14）：上行的到達時間在抖時，SteamVR 交給遊戲的拍子軌跡是不是連續 ──────────
+    // 手等速 v 往 +x 走；client 每 1/576 s 取樣（預測到取樣＋24 ms）；上行延遲＝5 ms＋每一筆不同的抖動（0～jitter_ms，
+    // 決定性的序列），但不會後發先至。driver 每到一筆就回報（照 tracking.cpp）。SteamVR 的語意同 run_gap。
+    // 回傳：暖機之後，「顯示的位置比真值晚多久」的最大值減最小值（毫秒）。等速時這個量應該是常數——差多少，
+    // 遊戲看到的位置就多抖「速度×這個量」。
+    double run_arrival_jitter(double keep_ms, double jitter_ms, double v, double horizon_s = 0.060) {
+      namespace vm = vrdrv::math;
+      constexpr int64_t qpf = 10'000'000;
+      constexpr double dt_s = 1.0 / 576.0;
+      constexpr double ahead_s = 0.024;
+      vrdrv::stale_blender_t bl;
+      vrdrv::pose_policy_in_t in;
+      in.zero_vel_us = 25000;
+      in.stale_blend = true;
+      in.stale_coast = true;
+      in.ctrl_offset = true;
+      double lag_min = 1e9, lag_max = -1e9;
+      double prev_arrival = 0.0;
+      uint32_t seed = 12345u;
+      bool have_rep = false;
+      double rep_t = 0, rep_off = 0, rep_x = 0, rep_v = 0;
+      double next_query = 0.0;
+      for (int i = 0; i < 576 * 6; ++i) {  // 6 秒
+        const double sample_t = i * dt_s;
+        seed = seed * 1664525u + 1013904223u;
+        const double jit = jitter_ms / 1000.0 * (double) ((seed >> 8) & 0xFFFF) / 65535.0;
+        const double arrival = (std::max)(prev_arrival + 1e-5, sample_t + 0.005 + jit);
+        // 這一筆到達之前的查詢（每 1 ms 一次，像遊戲在任意時刻取姿態）
+        while (have_rep && next_query < arrival) {
+          const double tau = next_query + horizon_s;
+          const double disp = rep_x + rep_v * (tau - (rep_t + rep_off));
+          if (next_query > 3.0) {
+            const double lag_ms = (v * tau - disp) / v * 1000.0;
+            lag_min = (std::min)(lag_min, lag_ms);
+            lag_max = (std::max)(lag_max, lag_ms);
+          }
+          next_query += 0.001;
+        }
+        prev_arrival = arrival;
+        const double target = sample_t + ahead_s;
+        float s_pos[3] = {(float) (v * target), 0, 0}, s_rot[4] = {0, 0, 0, 1}, s_vel[3] = {(float) v, 0, 0}, s_ang[3] = {0, 0, 0};
+        in.age_us = 0;
+        in.raw_off_s = target - arrival;
+        const auto p = vrdrv::decide_pose_policy(in);
+        const auto o = bl.process(true, s_pos, s_rot, s_vel, s_ang, p, p.ctrl_off_s, (int64_t) std::llround(arrival * (double) qpf), qpf, horizon_s,
+                                  keep_ms < 0.0 ? -1.0 : keep_ms / 1000.0, in.raw_off_s, 0.3);
+        rep_t = arrival;
+        rep_off = o.off_s;
+        rep_x = o.pos.x;
+        rep_v = o.lin_vel.x;
+        have_rep = true;
+        if (next_query < arrival) {
+          next_query = arrival;
+        }
+      }
+      return lag_max - lag_min;
+    }
+
+    // ── §VR-CTRL-PREDICT（2026-11-15）：有加速度的動作＋到達時間抖動，SteamVR 交給遊戲的軌跡 ───────────────────────
+    struct predict_result_t {
+      double rough_mm = 0;  ///< 顯示位置的二階差分減掉真值的二階差分，最大值：軌跡比真的動作粗多少
+      double ang_rough_deg = 0;  ///< 同上，繞 z 的角度
+      double err_mm = 0;  ///< 顯示位置對「顯示時刻的真值」的最大誤差
+      double vel_err = 0;  ///< 回報的速度對「顯示時刻的真值速度」的最大誤差（m/s）
+      double vel_incons = 0;  ///< 回報的速度對「顯示位置的差分」的最大差（m/s）
+      double held_err_mm = 0;  ///< 扳機按著、穩定之後：顯示位置對「樣本那一刻的真值」的最大誤差
+      double held_vel_err = 0;
+      double release_err_mm = 0;  ///< 放開扳機之後 0.12 秒內：還是樣本那一刻的手（遊戲算拋出速度的那幾格）
+      double max_step_mm = 0;  ///< 相鄰兩格顯示位置的最大位移
+    };
+
+    /**
+     * 手沿 x 做 x(t)＝0.3·sin(2π·1.5·t)，同時繞 z 做 0.8·sin(2π·1.5·t＋1) rad 的擺動。client 每 1/576 s 取樣、預測到取樣＋24 ms
+     * （真值）；上行 5 ms＋0～jitter_ms 的抖動（不會後發先至）。driver 每到一筆就回報（照 tracking.cpp：mode 1 先過
+     * ctrl_predictor_t）。SteamVR 每 1/144 s 取一次「現在＋horizon」的姿態：位置＋速度×時間、旋轉＝exp(ω·時間)·q。
+     * mode：0＝不限制（SteamVR 自己直線外插）、1＝§VR-CTRL-PREDICT、2＝上限 0。with_hold＝第 4～6 秒扳機按著。
+     */
+    predict_result_t run_predict_sim(int mode, double jitter_ms, bool with_hold, double horizon_s = 0.060) {
+      namespace vm = vrdrv::math;
+      constexpr int64_t qpf = 10'000'000;
+      constexpr double dt_s = 1.0 / 576.0;
+      constexpr double ahead_s = 0.024;
+      constexpr double dq_s = 1.0 / 144.0;
+      constexpr double amp = 0.3, w0 = 2.0 * 3.14159265358979323846 * 1.5, th = 0.8;
+      auto x_at = [&](double t) {
+        return amp * std::sin(w0 * t);
+      };
+      auto v_at = [&](double t) {
+        return amp * w0 * std::cos(w0 * t);
+      };
+      auto ang_at = [&](double t) {
+        return th * std::sin(w0 * t + 1.0);
+      };
+      auto angv_at = [&](double t) {
+        return th * w0 * std::cos(w0 * t + 1.0);
+      };
+      vrdrv::stale_blender_t bl;
+      vrdrv::ctrl_predictor_t pred;
+      vrdrv::pose_policy_in_t in;
+      in.zero_vel_us = 25000;
+      in.stale_blend = true;
+      in.stale_coast = true;
+      in.ctrl_offset = true;
+      predict_result_t r;
+      double prev_arrival = 0.0;
+      uint32_t seed = 4242u;
+      bool have_rep = false;
+      double rep_t = 0, rep_off = 0, rep_x = 0, rep_v = 0, rep_w = 0;
+      vm::quat_t rep_rot {0, 0, 0, 1};
+      double next_query = 0.0;
+      double d1 = 0, d2 = 0, a1 = 0, a2 = 0;  // 前兩次查詢的顯示位置與角度
+      double v1 = 0;  // 上一次查詢時回報的速度
+      int nq = 0;
+      for (int i = 0; i < 576 * 8; ++i) {  // 8 秒
+        const double sample_t = i * dt_s;
+        seed = seed * 1664525u + 1013904223u;
+        const double jit = jitter_ms / 1000.0 * (double) ((seed >> 8) & 0xFFFF) / 65535.0;
+        const double arrival = (std::max)(prev_arrival + 1e-5, sample_t + 0.005 + jit);
+        while (next_query < arrival) {
+          if (!have_rep) {
+            next_query += dq_s;  // 查詢固定每 1/144 s 一次（二階差分要等間隔）
+            continue;
+          }
+          const double tq = next_query;
+          const double tau = tq + horizon_s;
+          const double dtq = tau - (rep_t + rep_off);
+          const double disp = rep_x + rep_v * dtq;
+          const vm::quat_t qd = vm::normalize(vm::mul(vm::quat_from_angvel(vm::vec3_t {0, 0, rep_w}, std::abs(dtq)), rep_rot));
+          // 繞 z 的角度（dtq 是負的時候上面少轉了，這個模擬裡 dtq 一律是正的）
+          const double ang = 2.0 * std::atan2(qd.z, qd.w);
+          const bool held_now = with_hold && tq >= 4.0 && tq < 6.0;
+          if (nq >= 2 && tq > 2.0) {
+            const bool steady = !with_hold || tq < 3.9;  // 一般的指標只看沒有按扳機的那一段
+            if (steady) {
+              const double dd = (disp - 2.0 * d1 + d2) - (x_at(tau) - 2.0 * x_at(tau - dq_s) + x_at(tau - 2.0 * dq_s));
+              r.rough_mm = (std::max)(r.rough_mm, std::abs(dd) * 1000.0);
+              const double da = (ang - 2.0 * a1 + a2) - (ang_at(tau) - 2.0 * ang_at(tau - dq_s) + ang_at(tau - 2.0 * dq_s));
+              r.ang_rough_deg = (std::max)(r.ang_rough_deg, std::abs(da) * 180.0 / 3.14159265358979323846);
+              r.err_mm = (std::max)(r.err_mm, std::abs(disp - x_at(tau)) * 1000.0);
+              r.vel_err = (std::max)(r.vel_err, std::abs(rep_v - v_at(tau)));
+              r.vel_incons = (std::max)(r.vel_incons, std::abs((disp - d1) / dq_s - 0.5 * (rep_v + v1)));
+            }
+            if (with_hold) {
+              r.max_step_mm = (std::max)(r.max_step_mm, std::abs(disp - d1) * 1000.0);
+              if (held_now && tq > 4.6 && tq < 5.9) {
+                // 不預測：顯示的是「樣本那一刻」的手＝顯示時刻再往前 E
+                const double te = tau - pred.extrap_s();
+                r.held_err_mm = (std::max)(r.held_err_mm, std::abs(disp - x_at(te)) * 1000.0);
+                r.held_vel_err = (std::max)(r.held_vel_err, std::abs(rep_v - v_at(te)));
+              }
+              if (tq >= 6.0 && tq < 6.12) {
+                r.release_err_mm = (std::max)(r.release_err_mm, std::abs(disp - x_at(tau - pred.extrap_s())) * 1000.0);
+              }
+            }
+          }
+          d2 = d1;
+          d1 = disp;
+          a2 = a1;
+          a1 = ang;
+          v1 = rep_v;
+          ++nq;
+          next_query += dq_s;
+        }
+        prev_arrival = arrival;
+        const double target = sample_t + ahead_s;
+        const double half = 0.5 * ang_at(target);
+        float s_pos[3] = {(float) x_at(target), 0, 0}, s_rot[4] = {0, 0, (float) std::sin(half), (float) std::cos(half)};
+        float s_vel[3] = {(float) v_at(target), 0, 0}, s_ang[3] = {0, 0, (float) angv_at(target)};
+        in.age_us = 0;
+        in.raw_off_s = target - arrival;
+        const auto p = vrdrv::decide_pose_policy(in);
+        const int64_t now_qpc = (int64_t) std::llround(arrival * (double) qpf);
+        if (mode == 1) {
+          const bool held = with_hold && sample_t >= 4.0 && sample_t < 6.0;
+          pred.on_fresh(s_pos, s_rot, s_vel, s_ang, (int64_t) std::llround(target * (double) qpf), vrdrv::steamvr_extrap_s(horizon_s, p.ctrl_off_s), held, now_qpc,
+                        qpf);
+          pred.apply(s_pos, s_rot, s_vel, s_ang);
+        }
+        const auto o = bl.process(true, s_pos, s_rot, s_vel, s_ang, p, p.ctrl_off_s, now_qpc, qpf, horizon_s, mode == 2 ? 0.0 : -1.0, in.raw_off_s, 0.3);
+        rep_t = arrival;
+        rep_off = o.off_s;
+        rep_x = o.pos.x;
+        rep_v = o.lin_vel.x;
+        rep_w = o.ang_vel.z;
+        rep_rot = o.rot;
+        have_rep = true;
       }
       return r;
     }
@@ -1708,6 +1910,72 @@ namespace probe {
         const auto f45 = run_gap(true, 45.0, 3.0, 0.0, 10.0, false, true, 0.070, -1.0, true);
         t.check(f45.max_back_mm < 3.0 * 0.4, "coast-batch-45ms-long-horizon", "err=%.2fmm back=%.4fmm jump=%.2fmm", f45.max_err_mm, f45.max_back_mm, f45.recover_jump_mm);
       }
+      {
+        // §VR-CTRL-EXTRAP-SMOOTH：上行到達時間抖 0～8 ms、手 3 m/s。不限制外插時軌跡本來就連續；限制在 20 ms／0 ms 時也要連續
+        // （每一筆照自己的 offset 往回推的舊做法：抖動一比一進到位置，這裡會是約 8 ms＝24 mm）
+        const double un = run_arrival_jitter(-1.0, 8.0, 3.0);
+        const double k20 = run_arrival_jitter(20.0, 8.0, 3.0);
+        const double k0 = run_arrival_jitter(0.0, 8.0, 3.0);
+        t.check(un < 0.05, "ctrl-extrap.jitter-unlimited-continuous", "spread=%.3f ms", un);
+        t.check(k20 < 0.5, "ctrl-extrap.jitter-keep20-continuous", "spread=%.3f ms", k20);
+        t.check(k0 < 0.5, "ctrl-extrap.jitter-keep0-continuous", "spread=%.3f ms", k0);
+        // 沒有抖動時照舊是常數
+        const double flat = run_arrival_jitter(20.0, 0.0, 3.0);
+        t.check(flat < 0.05, "ctrl-extrap.no-jitter-keep20-constant", "spread=%.3f ms", flat);
+      }
+      {
+        // 外插上限開著、35 ms 的上行空窗、空窗裡的樣本晚到（成批、舊的在前）、手等速 3 m/s：等速時 SteamVR 的外插是對的，
+        // 顯示出來的位置在空窗前後應該一路連續。舊的算法把晚到的樣本少算「晚到的那段時間」，恢復時多補 3 m/s×35 ms＝105 mm
+        for (const double keep : {20.0, 0.0}) {
+          const auto b = run_gap(true, 35.0, 3.0, 0.0, 10.0, false, true, 0.060, keep, true);
+          const double spread = b.lag_gap_max_ms - b.lag_gap_min_ms;
+          t.check(spread < 3.0, keep > 0.0 ? "ctrl-extrap.batch-gap-keep20-continuous" : "ctrl-extrap.batch-gap-keep0-continuous", "lagSpread=%.2f ms back=%.1f mm", spread,
+                  b.max_back_mm);
+          t.check(b.max_back_mm < 3.0, keep > 0.0 ? "ctrl-extrap.batch-gap-keep20-no-back" : "ctrl-extrap.batch-gap-keep0-no-back", "back=%.1f mm", b.max_back_mm);
+        }
+        // 樣本真的掉了（不是晚到）時也一樣
+        const auto d = run_gap(true, 35.0, 3.0, 0.0, 10.0, false, true, 0.060, 20.0, false);
+        t.check(d.lag_gap_max_ms - d.lag_gap_min_ms < 3.0, "ctrl-extrap.drop-gap-keep20-continuous", "lagSpread=%.2f ms", d.lag_gap_max_ms - d.lag_gap_min_ms);
+      }
+      {
+        // §VR-CTRL-PREDICT：手做 1.5 Hz 的來回（最快 2.83 m/s、26.6 m/s²）加繞 z 的擺動，上行到達時間抖 0～8 ms。
+        // unlimited＝SteamVR 自己直線外插（2.0.175 的行為）；predict＝ctrl_predictor_t；keep0＝完全不外插（最平滑、但晚一整段）
+        const auto un = run_predict_sim(0, 8.0, false);
+        const auto pr = run_predict_sim(1, 8.0, false);
+        const auto k0 = run_predict_sim(2, 8.0, false);
+        // 軌跡的粗細：predict 要比 unlimited 細很多
+        t.check(pr.rough_mm < 2.0 && un.rough_mm > 3.0 * pr.rough_mm, "predict.smoother-than-linear", "rough predict=%.2f unlimited=%.2f keep0=%.2f mm", pr.rough_mm,
+                un.rough_mm, k0.rough_mm);
+        t.check(pr.ang_rough_deg < un.ang_rough_deg / 3.0, "predict.rotation-smoother", "ang rough predict=%.3f unlimited=%.3f deg", pr.ang_rough_deg, un.ang_rough_deg);
+        // 不延遲：對「顯示時刻的真值」的誤差只有直線預測本身的量（½·a·E²≈27 mm），不是 keep0 那種「速度×E」（約 127 mm）
+        t.check(pr.err_mm < 45.0 && k0.err_mm > 100.0, "predict.no-lag", "err predict=%.1f unlimited=%.1f keep0=%.1f mm", pr.err_mm, un.err_mm, k0.err_mm);
+        // 速度：回報的就是顯示時刻的速度，而且和顯示位置的差分一致
+        t.check(pr.vel_err < 0.5 && un.vel_err > 0.9, "predict.velocity-at-display-time", "velErr predict=%.2f unlimited=%.2f m/s", pr.vel_err, un.vel_err);
+        t.check(pr.vel_incons < 0.35 && un.vel_incons > 2.0 * pr.vel_incons, "predict.velocity-matches-motion", "incons predict=%.2f unlimited=%.2f m/s",
+                pr.vel_incons, un.vel_incons);
+        // 沒有抖動時也不能變差
+        const auto pr0 = run_predict_sim(1, 0.0, false);
+        t.check(pr0.rough_mm < 0.5, "predict.no-jitter-smooth", "rough=%.3f mm", pr0.rough_mm);
+        // 扳機按著：那隻手不預測（位置＝樣本那一刻、速度＝那一刻的速度），進出時不跳
+        const auto hd = run_predict_sim(1, 8.0, true);
+        t.check(hd.held_err_mm < 3.0 && hd.held_vel_err < 0.3, "predict.held-is-unpredicted", "heldErr=%.2f mm heldVelErr=%.2f m/s", hd.held_err_mm, hd.held_vel_err);
+        t.check(hd.max_step_mm < 2.83 * 1.3 * 1000.0 / 144.0 + 3.0, "predict.held-transition-no-jump", "maxStep=%.1f mm", hd.max_step_mm);
+        // 放開之後的 0.12 秒內還沒開始回到預測：遊戲算拋出速度的那幾格看到的是樣本那一刻的手
+        t.check(hd.release_err_mm < 3.0, "predict.release-holds-before-ramping", "releaseErr=%.2f mm", hd.release_err_mm);
+        // 還不知道 SteamVR 的預測時間（full＝0）：樣本原樣通過
+        {
+          vrdrv::ctrl_predictor_t cp;
+          const float pos[3] = {0.1f, 0.2f, 0.3f}, rot[4] = {0, 0, 0, 1}, v1[3] = {1, 0, 0}, v2[3] = {2, 0, 0}, w[3] = {0, 0, 3};
+          cp.on_fresh(pos, rot, v1, w, 1000000, 0.0, false, 1000000, 10'000'000);
+          cp.on_fresh(pos, rot, v2, w, 1017361, 0.0, false, 1017361, 10'000'000);
+          float op[3] = {9, 9, 9}, orot[4] = {9, 9, 9, 9}, ov[3] = {9, 9, 9}, ow[3] = {9, 9, 9};
+          cp.apply(op, orot, ov, ow);
+          t.check(op[0] == 0.1f && ov[0] == 2.0f && ow[2] == 3.0f && orot[3] == 1.0f && cp.lag_s() == 0.0, "predict.unknown-pred-passthrough");
+          // 空窗（兩筆相隔 30 ms 以上）之後加速度歸零，不拿跨空窗的差分去放大
+          cp.on_fresh(pos, rot, v1, w, 1017361 + 400000, 0.045, false, 1017361 + 400000, 10'000'000);
+          t.check(cp.acc_len() == 0.0, "predict.gap-resets-acceleration");
+        }
+      }
       t.end();
     }
 
@@ -1718,6 +1986,7 @@ namespace probe {
     print_abi_table();
 
     tally_t t;
+    t.verbose = a.unit_verbose;
     test_messages(t);
     test_validation(t);
     test_rings(t);

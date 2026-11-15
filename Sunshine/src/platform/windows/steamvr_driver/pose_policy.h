@@ -177,6 +177,209 @@ namespace vrdrv {
     return full - (std::min)(full, keep_s);
   }
 
+  /// §VR-CTRL-PREDICT（2026-11-15，pose_flags 的 VRIPC_POSE_F_CTRL_PREDICT；vr_ctrl_extrap_ms = auto）：控制器預測到畫面顯示的
+  /// 時刻，而且軌跡不因為上行的抖動變粗。
+  ///
+  /// 背景。SteamVR 把最新一筆樣本照它的速度直線外插到顯示時刻（外地約 40～60 ms）。兩個問題：
+  ///   1. 每一格拿到的樣本年齡不一樣（上行抖動 δ）。直線外插的斜率是樣本的速度 v，但「外插之後的那條軌跡」真正的斜率是
+  ///      v＋a·E（E＝外插長度、a＝加速度）——差的那一項 a·E·δ 就是每一格的位置雜訊（揮拍 30 m/s²、E 41 ms、δ 5 ms → 6 mm），
+  ///      回給遊戲的速度也是舊的（v，不是顯示時刻的速度）。桌球的反彈因此忽大忽小。
+  ///   2. 11-13～14 的做法是把外插縮短（上限 20 ms，後來依抖動再縮）：軌跡平滑了，但手比畫面晚 31～47 ms，
+  ///      擊球的時機對不上（2026-11-15 配戴回報）。
+  /// 做法。照樣外插到顯示時刻，但把斜率改對：回報的速度＝v＋a·K，位置＝x − v·B − a·K·E。
+  ///   E＝SteamVR 會外插的長度（pred − offset）的平滑值（約 2 秒）；K＝要保留的預測長度（平常＝E）；B＝E − K（平常＝0）。
+  ///   SteamVR 算出來的是 位置＋速度×(E＋δ) ＝ x ＋ v·(K＋δ) ＋ a·K·δ：等於「從樣本往前直線預測 K」那條軌跡，沿著它自己的
+  ///   斜率走 δ——抖動只剩二階的量；遊戲拿到的速度就是這條軌跡的斜率（位置的差分和 API 的速度一致）。旋轉同理（角加速度）。
+  ///   a 取相鄰兩筆樣本速度的差分（用樣本自己的時刻，和到達時間無關），再以 12 ms 的時間常數平滑。
+  /// 扳機按著的那隻手（held）：K 慢慢降到 0（每秒 0.25 秒，40 ms 約 160 ms 走完）、放開之後再慢慢回到 E。
+  ///   預測到顯示時刻的姿態比按鍵「新」了 E＋上行延遲（外地 80 ms 上下）：拋球時手往上、放開、馬上停住，遊戲在放開的那一格
+  ///   拿到的是 80 ms 之後、已經慢下來（v＋a·E 甚至是負的）的手，球就往下掉。按著扳機的手在做的是「放開那一刻要準」的事
+  ///   （拿球、拋、抓），所以那隻手不預測，交給遊戲的是樣本那一刻的位置與速度；另一隻手（拍子）照常預測。
+  struct ctrl_predictor_t {
+    static constexpr double k_acc_tau_s = 0.012;  ///< 加速度的平滑時間常數
+    static constexpr double k_dt_min_s = 0.0003;  ///< 兩筆樣本的時刻差小於這個值：不更新加速度（同一筆或重複）
+    static constexpr double k_dt_max_s = 0.030;  ///< 大於這個值（空窗）：加速度歸零重新估
+    static constexpr double k_acc_max = 150.0;  ///< m/s²
+    static constexpr double k_alpha_max = 3000.0;  ///< rad/s²
+    static constexpr int k_e_warm_n = 64;
+    static constexpr double k_e_alpha_warm = 1.0 / 16.0;
+    static constexpr double k_e_alpha = 1.0 / 1024.0;
+    static constexpr double k_keep_slew = 0.25;  ///< K 每秒最多變這麼多秒
+    static constexpr double k_keep_held_s = 0.0;  ///< 扳機按著時的 K
+    /// 放開扳機之後這麼久才開始回到預測：K 在變的時候位置的差分會比真的速度多（或少）25%，遊戲算拋出速度用的那幾格
+    /// （放開的那一格與前後）要落在 K 不動的時候（2026-11-15 無人量測：放開就開始回升時，放開那一格的差分速度偏高 16%）
+    static constexpr double k_release_hold_s = 0.15;
+
+    void reset() {
+      have_prev_ = false;
+      acc_ = math::vec3_t {};
+      alpha_ = math::vec3_t {};
+      e_valid_ = false;
+      e_s_ = 0.0;
+      e_warm_ = 0;
+      keep_valid_ = false;
+      keep_s_ = 0.0;
+      held_seen_ = false;
+      out_valid_ = false;
+    }
+
+    /**
+     * @brief 每一筆新樣本呼叫一次。
+     * @param target_qpc 這一筆姿態所在的時刻（server tick）
+     * @param full_s SteamVR 會把這一筆外插多久（steamvr_extrap_s；0＝還不知道預測時間 → 不改動樣本）
+     * @param held 這隻手的扳機按著
+     */
+    void on_fresh(const float pos[3], const float rot[4], const float lin_vel[3], const float ang_vel[3], int64_t target_qpc, double full_s, bool held,
+                  int64_t now_qpc, int64_t qpf) {
+      const double qf = qpf > 0 ? (double) qpf : 1.0;
+      const math::vec3_t x {pos[0], pos[1], pos[2]};
+      const math::quat_t q = math::normalize(math::quat_t {rot[0], rot[1], rot[2], rot[3]});
+      const math::vec3_t v {lin_vel[0], lin_vel[1], lin_vel[2]};
+      const math::vec3_t w {ang_vel[0], ang_vel[1], ang_vel[2]};
+
+      // 加速度：相鄰兩筆的速度差分（樣本自己的時刻）＋一階平滑
+      bool take_prev = true;
+      if (have_prev_) {
+        const double dt = (double) (target_qpc - tau_prev_qpc_) / qf;
+        if (dt < 0.0 || dt > k_dt_max_s) {
+          acc_ = math::vec3_t {};
+          alpha_ = math::vec3_t {};
+        } else if (dt < k_dt_min_s) {
+          take_prev = false;
+        } else {
+          const double g = 1.0 - std::exp(-dt / k_acc_tau_s);
+          acc_ = clamp_len(math::vec3_t {acc_.x + ((v.x - v_prev_.x) / dt - acc_.x) * g, acc_.y + ((v.y - v_prev_.y) / dt - acc_.y) * g,
+                                         acc_.z + ((v.z - v_prev_.z) / dt - acc_.z) * g},
+                           k_acc_max);
+          alpha_ = clamp_len(math::vec3_t {alpha_.x + ((w.x - w_prev_.x) / dt - alpha_.x) * g, alpha_.y + ((w.y - w_prev_.y) / dt - alpha_.y) * g,
+                                           alpha_.z + ((w.z - w_prev_.z) / dt - alpha_.z) * g},
+                             k_alpha_max);
+        }
+      }
+      if (take_prev) {
+        have_prev_ = true;
+        tau_prev_qpc_ = target_qpc;
+        v_prev_ = v;
+        w_prev_ = w;
+      }
+
+      // E：SteamVR 外插長度的平滑值
+      if (!(full_s > 0.0) || !std::isfinite(full_s)) {
+        e_valid_ = false;
+        e_s_ = 0.0;
+        e_warm_ = 0;
+      } else if (!e_valid_) {
+        e_valid_ = true;
+        e_s_ = full_s;
+        e_warm_ = 1;
+      } else {
+        e_s_ += (full_s - e_s_) * (e_warm_ < k_e_warm_n ? k_e_alpha_warm : k_e_alpha);
+        if (e_warm_ < k_e_warm_n) {
+          ++e_warm_;
+        }
+      }
+
+      // K：保留的預測長度。平常＝E；扳機按著時慢慢降到 0，放開之後過 k_release_hold_s 才開始回升
+      if (held) {
+        held_seen_ = true;
+        held_qpc_ = now_qpc;
+      }
+      const bool hold = held || (held_seen_ && (double) (now_qpc - held_qpc_) / qf < k_release_hold_s);
+      const double target = hold ? (std::min)(k_keep_held_s, e_s_) : e_s_;
+      if (!keep_valid_) {
+        keep_valid_ = true;
+        keep_s_ = target;
+      } else {
+        const double step = k_keep_slew * std::clamp((double) (now_qpc - keep_qpc_) / qf, 0.0, 0.1);
+        keep_s_ += std::clamp(target - keep_s_, -step, step);
+      }
+      keep_s_ = std::clamp(keep_s_, 0.0, e_s_);
+      keep_qpc_ = now_qpc;
+
+      const double k = keep_s_;
+      const double b = e_s_ - k;
+      const double ke = k * e_s_;
+      const math::vec3_t xo {x.x - v.x * b - acc_.x * ke, x.y - v.y * b - acc_.y * ke, x.z - v.z * b - acc_.z * ke};
+      const math::vec3_t vo {v.x + acc_.x * k, v.y + acc_.y * k, v.z + acc_.z * k};
+      // 旋轉向量 −(ω·B ＋ α·K·E)（世界座標，和 stale_blender_t 往回推的寫法相同）
+      const math::vec3_t r {-(w.x * b + alpha_.x * ke), -(w.y * b + alpha_.y * ke), -(w.z * b + alpha_.z * ke)};
+      const math::quat_t qo = math::normalize(math::mul(math::quat_from_angvel(r, 1.0), q));
+      const math::vec3_t wo {w.x + alpha_.x * k, w.y + alpha_.y * k, w.z + alpha_.z * k};
+      out_pos_ = xo;
+      out_rot_ = qo;
+      out_lin_vel_ = vo;
+      out_ang_vel_ = wo;
+      out_valid_ = true;
+    }
+
+    /// 把最近一筆算好的結果寫回去（沒有結果就不動）
+    void apply(float pos[3], float rot[4], float lin_vel[3], float ang_vel[3]) const {
+      if (!out_valid_) {
+        return;
+      }
+      pos[0] = (float) out_pos_.x;
+      pos[1] = (float) out_pos_.y;
+      pos[2] = (float) out_pos_.z;
+      rot[0] = (float) out_rot_.x;
+      rot[1] = (float) out_rot_.y;
+      rot[2] = (float) out_rot_.z;
+      rot[3] = (float) out_rot_.w;
+      lin_vel[0] = (float) out_lin_vel_.x;
+      lin_vel[1] = (float) out_lin_vel_.y;
+      lin_vel[2] = (float) out_lin_vel_.z;
+      ang_vel[0] = (float) out_ang_vel_.x;
+      ang_vel[1] = (float) out_ang_vel_.y;
+      ang_vel[2] = (float) out_ang_vel_.z;
+    }
+
+    double keep_s() const {
+      return keep_s_;
+    }
+
+    /// 手比顯示時刻晚多久（＝E − K；平常是 0）
+    double lag_s() const {
+      return e_s_ - keep_s_;
+    }
+
+    double extrap_s() const {
+      return e_s_;
+    }
+
+    double acc_len() const {
+      return std::sqrt(acc_.x * acc_.x + acc_.y * acc_.y + acc_.z * acc_.z);
+    }
+
+  private:
+    static math::vec3_t clamp_len(const math::vec3_t &a, double max_len) {
+      const double n = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+      if (n <= max_len || n <= 0.0) {
+        return a;
+      }
+      const double s = max_len / n;
+      return math::vec3_t {a.x * s, a.y * s, a.z * s};
+    }
+
+    bool have_prev_ = false;
+    int64_t tau_prev_qpc_ = 0;
+    math::vec3_t v_prev_ {};
+    math::vec3_t w_prev_ {};
+    math::vec3_t acc_ {};
+    math::vec3_t alpha_ {};
+    bool e_valid_ = false;
+    double e_s_ = 0.0;
+    int e_warm_ = 0;
+    bool keep_valid_ = false;
+    double keep_s_ = 0.0;
+    int64_t keep_qpc_ = 0;
+    bool held_seen_ = false;
+    int64_t held_qpc_ = 0;
+    bool out_valid_ = false;
+    math::vec3_t out_pos_ {};
+    math::quat_t out_rot_ {};
+    math::vec3_t out_lin_vel_ {};
+    math::vec3_t out_ang_vel_ {};
+  };
+
   /// 輸出 log 的頻率限制器（以 QPC 計時，每秒最多 allow 次）
   struct rate_limiter_t {
     int64_t window_start_qpc = 0;
@@ -220,6 +423,9 @@ namespace vrdrv {
   class stale_blender_t {
   public:
     void reset() {
+      back_valid_ = false;
+      back_smooth_s_ = 0.0;
+      back_warm_ = 0;
       has_last_output_ = false;
       in_stale_ = false;
       was_stale_ = false;
@@ -242,12 +448,42 @@ namespace vrdrv {
                                  const float in_ang_vel[3], const pose_policy_t &pol, double nominal_off_s,
                                  int64_t now_qpc, int64_t qpf, double pred_s = 0.0, double keep_s = -1.0,
                                  double raw_off_s = std::numeric_limits<double>::quiet_NaN(), double expired_max_s = 0.3) {
+      // §VR-CTRL-EXTRAP-SMOOTH：先決定這一筆要往回推多少（平滑值，說明見下面套用的地方）。coast 要知道這個量——它算
+      // 「SteamVR 實際會把這一筆外插多久」時用的是 pred_s − offset − 這個量
+      double back = 0.0;
+      if (keep_s >= 0.0 && pred_s > 0.0) {
+        if (!back_valid_ || fresh) {
+          // 只照新樣本更新：過期重送沿用上一筆的 offset
+          const double back_now = ctrl_backdate_s(pred_s, nominal_off_s, keep_s);
+          if (!back_valid_) {
+            back_smooth_s_ = back_now;
+            back_valid_ = true;
+            back_warm_ = 1;
+          } else {
+            const double alpha = back_warm_ < k_back_warm_n ? k_back_alpha_warm : k_back_alpha;
+            back_smooth_s_ += (back_now - back_smooth_s_) * alpha;
+            if (back_warm_ < k_back_warm_n) {
+              ++back_warm_;
+            }
+          }
+        }
+        back = back_smooth_s_;
+      } else {
+        back_valid_ = false;  // 不限制、或還不知道 SteamVR 的預測時間：下一次知道的時候重新起算
+      }
       stale_blend_result_t res = pol.coast ?
-                                   process_coast(fresh, in_pos, in_rot, in_lin_vel, in_ang_vel, nominal_off_s, now_qpc, qpf, pred_s, keep_s, raw_off_s, expired_max_s) :
+                                   process_coast(fresh, in_pos, in_rot, in_lin_vel, in_ang_vel, nominal_off_s, now_qpc, qpf, pred_s, keep_s, raw_off_s, expired_max_s, back) :
                                    process_basic(fresh, in_pos, in_rot, in_lin_vel, in_ang_vel, pol, nominal_off_s, now_qpc, qpf);
       // §VR-CTRL-EXTRAP：最後一步，所有政策共用——把姿態沿著「這一筆回報的速度」往回推超過上限的那一段。
       // 內部狀態（軌跡、上一筆輸出）都留在沒推過的座標，推的只有交出去的這一份
-      const double back = ctrl_backdate_s(pred_s, res.off_s, keep_s);
+      //
+      // §VR-CTRL-EXTRAP-SMOOTH（2026-11-14）：往回推的量要用「平滑過的」，不可以每一筆照自己的 offset 算。
+      // 每一筆照自己的 offset 算時，SteamVR 交給遊戲的位置＝樣本位置＋速度×（回報至今的時間＋上限）——樣本自己的時刻被
+      // 消掉了，換成它「到達」的時刻。上行每一筆的到達時間都在抖（Wi-Fi、VPN：幾毫秒），這個抖動就一比一變成位置的抖動
+      // （速度×到達抖動）。11-14 無人量測（真頭盔經 VPN、合成揮手 2～5 m/s，vr_probe --mode swing）：遊戲相鄰兩格看到的
+      // 拍子速度平均差 0.95 m/s、5% 的格差 4.7 m/s 以上、4.4% 的格瞬間衝出去——桌球的力道與方向因此亂跳。
+      // 用同一個量去推每一筆時，位置＝樣本位置＋速度×（查詢時刻＋預測時間−樣本時刻−這個量）：樣本的時刻留著，晚到的樣本
+      // 自然被多外插一點，等速時軌跡是連續的。這個量跟著（預測時間−offset−上限）的慢變化走：時間常數約 2 秒。
       if (back > 0.0) {
         res.pos = math::vec3_t {res.pos.x - res.lin_vel.x * back, res.pos.y - res.lin_vel.y * back, res.pos.z - res.lin_vel.z * back};
         // quat_from_angvel 不吃負的時間：把角速度反過來轉 back 秒（世界座標的角速度，和 SteamVR 的 q·exp(ω_local·t) 同軸）
@@ -405,8 +641,8 @@ namespace vrdrv {
      * 降速時「速度×hl」那一段會跟著縮回去（外出 hl 約 50 ms，3 m/s 時回縮 15 cm），恢復時新速度又讓它一次前跳。
      * 所以降速時把回報的位置往前補「速度×hl×(1 − 倍率)」，恢復的落差也在「外插之後」的位置上算：顯示位置平順地減速到停、
      * 恢復時不跳。pred_s 不知道（0）時 hl 當 0，退回只保證回報的姿態連續。
-     * §VR-CTRL-EXTRAP 開著（keep_s ≥ 0）時 hl 是「實際會被外插的長度」＝min(pred_s − offset, keep_s)：process() 最後會把
-     * 超過的那一段往回推，降速的補償與恢復的落差都要在這個長度上算。
+     * §VR-CTRL-EXTRAP 開著（keep_s ≥ 0）時 hl 是「實際會被外插的長度」＝pred_s − offset − back_s：process() 最後會把每一筆
+     * 往回推 back_s（各筆共用的平滑值，穩定時＝pred_s − offset − keep_s），降速的補償與恢復的落差都要在這個長度上算。
      *
      * 過期的樣本（2026-11-13 設計評審 C1-a）：外出的空窗多半不是掉包而是延遲，結束時積在路上的樣本成批到達，先讀到的
      * 可能是目標時間已經過去 50 ms 以上的舊樣本——它的 offset 被夾在 −50 ms（k_offset_floor_s），拿夾過的值算落差會多出
@@ -415,13 +651,16 @@ namespace vrdrv {
      */
     stale_blend_result_t process_coast(bool fresh, const float in_pos[3], const float in_rot[4], const float in_lin_vel[3],
                                        const float in_ang_vel[3], double nominal_off_s, int64_t now_qpc, int64_t qpf, double pred_s,
-                                       double keep_s, double raw_off_s, double expired_max_s) {
+                                       double keep_s, double raw_off_s, double expired_max_s, double back_s) {
       stale_blend_result_t res;
       const double qf = qpf > 0 ? (double) qpf : 1.0;
-      // SteamVR 把「offset 是 off 的回報」實際再外插多久（估計值；§VR-CTRL-EXTRAP 開著時不超過 keep_s）
+      // SteamVR 把「offset 是 off 的回報」實際再外插多久（估計值）。§VR-CTRL-EXTRAP 開著時＝整段減掉 process() 會往回推的
+      // 那個量（back_s，各筆共用的平滑值）。2026-11-14 之前這裡寫的是 min(整段, keep_s)——晚到的樣本 offset 比較小，
+      // 實際會被多外插「晚到的那段時間」，夾在 keep_s 就把它少算了：恢復時的落差多出「速度×空窗」，補上去之後拍子往前
+      // 衝 5～11 公分再來回幾格（11-14 無人量測：外地每秒 2～5 次 27～44 ms 的上行空窗，每次都這樣）
       auto lookahead = [&](double off) {
         const double full = steamvr_extrap_s(pred_s, off);
-        return keep_s < 0.0 ? full : (std::min)(full, keep_s);
+        return keep_s < 0.0 ? full : full - back_s;
       };
       if (fresh && was_stale_ && last_new_qpc_ != 0 && std::isfinite(raw_off_s) && raw_off_s < k_offset_floor_s &&
           (double) (now_qpc - last_new_qpc_) / qf < expired_max_s) {
@@ -556,6 +795,13 @@ namespace vrdrv {
 
     math::vec3_t last_output_pos_ {};
     math::quat_t last_output_rot_ {};
+    // §VR-CTRL-EXTRAP-SMOOTH：往回推的量（秒）的低通值。576 Hz 的樣本：前 k_back_warm_n 筆用 1/16 很快收斂，之後 1/1024（約 2 秒）
+    static constexpr uint32_t k_back_warm_n = 64;
+    static constexpr double k_back_alpha_warm = 1.0 / 16.0;
+    static constexpr double k_back_alpha = 1.0 / 1024.0;
+    bool back_valid_ = false;
+    double back_smooth_s_ = 0.0;
+    uint32_t back_warm_ = 0;
     bool has_last_output_ = false;
 
     math::vec3_t base_pos_ {};

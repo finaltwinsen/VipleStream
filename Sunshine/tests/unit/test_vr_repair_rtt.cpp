@@ -142,7 +142,9 @@ TEST(VrRepairRtt, ThreeEstimates) {
 TEST(VrRepairRtt, HoldCapFollowsTheRoundTrip) {
   EXPECT_EQ(vrrrCapUs(8333, 15625, 10100, 0), 27725u);  // 這條路徑的典型值
   EXPECT_EQ(vrrrCapUs(8333, 14500, 12000, 0), 28500u);
-  EXPECT_EQ(vrrrCapUs(8333, 20750, 11000, 0), 33000u);  // 上限 33 ms
+  EXPECT_EQ(vrrrCapUs(8333, 20750, 11000, 0), 33750u);  // §VR-REPAIR-WAN：原本在這裡被 33 ms 的封頂夾住
+  EXPECT_EQ(vrrrCapUs(13888, 37250, 28700, 0), 67950u);  // 外地實測的路徑（往返 23.5／26.7／28.2 ms）：一輪＋照中位數再一輪
+  EXPECT_EQ(vrrrCapUs(8333, 57000, 40000, 0), 80000u);  // 上限 80 ms
   EXPECT_EQ(vrrrCapUs(8333, 5750, 5000, 0), 16666u);  // 區網：不少於原本有進展時的兩個幀週期
   EXPECT_EQ(vrrrCapUs(11111, 5750, 5000, 0), 22222u);
   EXPECT_EQ(vrrrCapUs(14000, 3250, 3000, 0), 28000u);
@@ -153,10 +155,13 @@ TEST(VrRepairRtt, HoldCapFollowsTheRoundTrip) {
 }
 
 TEST(VrRepairRtt, GateWithHysteresis) {
-  EXPECT_TRUE(vrrrGateOpen(25000, 33000, true));
-  EXPECT_FALSE(vrrrGateOpen(25001, 33000, true));
-  EXPECT_TRUE(vrrrGateOpen(23000, 33000, false));  // 關掉之後要低 2 ms 才再開
-  EXPECT_FALSE(vrrrGateOpen(23001, 33000, false));
+  EXPECT_TRUE(vrrrGateOpen(52000, 80000, true));  // §VR-REPAIR-WAN：門檻 52 ms（原本 25 ms）
+  EXPECT_FALSE(vrrrGateOpen(52001, 80000, true));
+  EXPECT_TRUE(vrrrGateOpen(50000, 80000, false));  // 關掉之後要低 2 ms 才再開
+  EXPECT_FALSE(vrrrGateOpen(50001, 80000, false));
+  EXPECT_TRUE(vrrrGateOpen(28700, 67950, false));  // 外地實測的路徑：原本關著，現在開
+  EXPECT_TRUE(vrrrGateOpen(33000, 33000, true));  // 等待上限比門檻小時門檻跟著等待上限
+  EXPECT_FALSE(vrrrGateOpen(33001, 33000, true));
   EXPECT_TRUE(vrrrGateOpen(14000, 14000, true));  // 等待上限被指定成 14 ms：門檻跟著降
   EXPECT_FALSE(vrrrGateOpen(14001, 14000, true));
   EXPECT_TRUE(vrrrGateOpen(12000, 14000, false));
@@ -244,10 +249,18 @@ TEST(VrRepairRtt, WholeFramesMissingBehind) {
 TEST(VrRepairRtt, IdlePolicy) {
   VRRR_STALLS s;
   std::memset(&s, 0, sizeof(s));
-  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 8333), VRRR_IDLE_SIZE);  // 100 Hz 以上依 block 大小
-  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 10000), VRRR_IDLE_SIZE);
-  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 10001), VRRR_IDLE_FIXED3);
-  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 16666), VRRR_IDLE_FIXED3);
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 8333, 0), VRRR_IDLE_SIZE);  // 100 Hz 以上依 block 大小
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 10000, 0), VRRR_IDLE_SIZE);
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 10001, 0), VRRR_IDLE_FIXED3);
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 16666, 0), VRRR_IDLE_FIXED3);
+  // §VR-REPAIR-WAN：補一輪不比一個幀週期短（遠端）→ FRAME；比較短（區網）照舊；明確指定的做法不受影響
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 6944, 28700), VRRR_IDLE_FRAME);
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 13888, 28700), VRRR_IDLE_FRAME);
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 13888, 13888), VRRR_IDLE_FRAME);
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 13888, 13887), VRRR_IDLE_FIXED3);
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_AUTO, 6944, 5000), VRRR_IDLE_SIZE);
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_FIXED3, 6944, 28700), VRRR_IDLE_FIXED3);
+  EXPECT_EQ(vrrrIdlePolicy(VRRR_IDLE_SIZE, 6944, 28700), VRRR_IDLE_SIZE);
 
   EXPECT_EQ(vrrrIdleUs(VRRR_IDLE_FIXED3, &s, 1000000, 8333, 101), 3000u);
   EXPECT_EQ(vrrrIdleUs(VRRR_IDLE_FRAME, &s, 1000000, 8333, 9), 8333u);
@@ -374,10 +387,10 @@ TEST(VrRepairRtt, DecideRttRules) {
   EXPECT_EQ(o.etaUs, 15625u);
   EXPECT_EQ(o.etaTryUs, 11600u);
   EXPECT_EQ(o.etaFastUs, 10100u);
-  EXPECT_EQ(o.capUs, 27725u);
+  EXPECT_EQ(o.capUs, 29225u);  // §VR-REPAIR-WAN：第二輪照中位數（15625＋11600＋2000）
   EXPECT_EQ(o.loUs, 8100u);
   EXPECT_EQ(o.mlHoldMaxUs, 8333u);
-  EXPECT_EQ(o.idlePolicy, VRRR_IDLE_SIZE);
+  EXPECT_EQ(o.idlePolicy, VRRR_IDLE_FRAME);  // 補一輪 11.6 ms ≥ 幀週期 8.3 ms
 
   in.armRtt = false;  // A/B 的現行那一邊
   o = decide(in, s);
@@ -400,7 +413,7 @@ TEST(VrRepairRtt, DecideRttRules) {
   in.framePeriodUs = 16666;  // 60 Hz
   in.holdUs = 14000;
   o = decide(in, s);
-  EXPECT_EQ(o.capUs, 28000u);
+  EXPECT_EQ(o.capUs, 29225u);
   EXPECT_EQ(o.idlePolicy, VRRR_IDLE_FIXED3);
 }
 
@@ -417,20 +430,59 @@ TEST(VrRepairRtt, DecideOnlyWhenOneLinkCarriesVideo) {
   EXPECT_EQ(o.mlHoldMaxUs, 8333u);
 }
 
-TEST(VrRepairRtt, DecideGateClosesAboveTwentyThreeMs) {
+TEST(VrRepairRtt, DecideGateClosesAboveFiftyMs) {
+  // §VR-REPAIR-WAN：門檻從「往返中位數 23 ms」放寬到 50 ms
   VRRR_IN in = base_in();
   VRRR_STATE s {};
   EXPECT_TRUE(decide(in, s).mlRttMode);
-  in.st.midUs = 24000;
+  in.st.midUs = 24000;  // 原本在這裡關，現在照 RTT 規則補
   in.st.hiUs = 26000;
-  VRRR_OUT o = decide(in, s);  // 門檻關：不回報、不等
+  VRRR_OUT o = decide(in, s);
+  EXPECT_TRUE(o.mlRttMode);
+  EXPECT_TRUE(o.mlRepair);
+  EXPECT_EQ(o.capUs, 62500u);
+  in.st.midUs = 51000;
+  in.st.hiUs = 53000;
+  o = decide(in, s);  // 門檻關：不回報、不等
   EXPECT_TRUE(o.eligible);
   EXPECT_FALSE(o.mlRttMode);
   EXPECT_FALSE(o.mlRepair);
   EXPECT_EQ(o.mlHoldMaxUs, 0u);
-  in.st.midUs = 22500;
+  in.st.midUs = 49000;
   EXPECT_FALSE(decide(in, s).mlRttMode);  // 遲滯
-  in.st.midUs = 21000;
+  in.st.midUs = 48000;
+  EXPECT_TRUE(decide(in, s).mlRttMode);
+}
+
+TEST(VrRepairRtt, DecideFarOnlyLeavesNearPathsOnTheOriginalRule) {
+  // §VR-REPAIR-WAN：協商了 VIPLE_VR_LINK_F_REPAIR_FAR——RTT 規則只用在原本規則不補的路徑上
+  VRRR_IN in = base_in();
+  VRRR_STATE s {};
+  in.farOnly = true;
+  VRRR_OUT o = decide(in, s);  // 原本的門檻開著（往返 10 ms、120 Hz）：照原本的規則
+  EXPECT_FALSE(o.eligible);
+  EXPECT_FALSE(o.mlRttMode);
+  EXPECT_TRUE(o.mlRepair);
+  EXPECT_EQ(o.mlRepairRtoUs, 10000u);
+  EXPECT_EQ(o.idlePolicy, VRRR_IDLE_SIZE);
+  in.legacyRttMs = 26;  // 外地實測的路徑：原本的規則不補 → RTT 規則
+  in.st.loUs = 23500;
+  in.st.midUs = 26700;
+  in.st.hiUs = 28200;
+  o = decide(in, s);
+  EXPECT_TRUE(o.eligible);
+  EXPECT_TRUE(o.mlRttMode);
+  EXPECT_TRUE(o.mlRepair);
+  EXPECT_EQ(o.capUs, 67950u);
+  EXPECT_EQ(o.idlePolicy, VRRR_IDLE_FRAME);
+  in.legacyRttMs = 10;  // 回到原本門檻以內：正在等的 block 沿用，等完了回到原本的規則
+  in.latched = true;
+  EXPECT_TRUE(decide(in, s).mlRttMode);
+  in.latched = false;
+  o = decide(in, s);
+  EXPECT_FALSE(o.mlRttMode);
+  EXPECT_TRUE(o.mlRepair);
+  in.farOnly = false;  // server 明確開了 vr_multilink_repair_rtt：區網也用 RTT 規則
   EXPECT_TRUE(decide(in, s).mlRttMode);
 }
 
@@ -440,8 +492,8 @@ TEST(VrRepairRtt, DecideKeepsTheRulesForABlockAlreadyWaiting) {
     VRRR_IN in = base_in();
     VRRR_STATE s {};
     EXPECT_TRUE(decide(in, s).mlRttMode);
-    in.st.midUs = 24000;
-    in.st.hiUs = 26000;
+    in.st.midUs = 51000;
+    in.st.hiUs = 53000;
     in.latched = true;
     VRRR_OUT o = decide(in, s);
     EXPECT_TRUE(o.mlRttMode);
@@ -462,7 +514,7 @@ TEST(VrRepairRtt, DecideKeepsTheRulesForABlockAlreadyWaiting) {
     EXPECT_FALSE(o.eligible);
     EXPECT_TRUE(o.mlRttMode);
     EXPECT_FALSE(o.mlHoldDual);
-    EXPECT_EQ(o.capUs, 27725u);
+    EXPECT_EQ(o.capUs, 29225u);
     in.latched = false;
     o = decide(in, s);
     EXPECT_FALSE(o.mlRttMode);

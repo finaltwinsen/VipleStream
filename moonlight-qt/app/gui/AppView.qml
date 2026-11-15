@@ -591,8 +591,10 @@ CenteredGridView {
                 var ownerName = appModel.getSessionOwnerName()
                 var localUuid = appModel.getLocalUniqueId()
 
-                // owner 非空且不是自己 → 需要接管確認
-                if (ownerUuid !== "" && ownerUuid !== localUuid) {
+                // owner 非空且不是自己 → 需要接管確認。
+                // §M.2-SELF：「是不是自己」以 host 的判斷為準（它認得我們的憑證）。ownerUuid 是 host 配對紀錄的編號，
+                // 和 localUuid 本來就不是同一種東西；只有新的 host 會在擁有者是我們時把它換成我們的 uniqueid
+                if (ownerUuid !== "" && ownerUuid !== localUuid && !appModel.isSessionOwnedByCaller()) {
                     takeoverDialog.ownerName = ownerName || ownerUuid
                     takeoverDialog.targetAppName = model.name
                     takeoverDialog.targetAppIndex = index

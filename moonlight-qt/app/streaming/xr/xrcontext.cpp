@@ -3,6 +3,7 @@
 #include "xrcontext.h"
 #include "xrdesktopscreen.h"
 #include "xrphase.h"  // §VR-XRLOOP：相位換算、延遲鏈（header-only）
+#include "xrdevknobs.h"  // §VR-FOVEA-REPROJ：圖層的做法（header-only，不依賴 OpenXR）
 #include <Limelight.h>  // M4a R2：VIPLE_VR_TRACKING（sampleControllers）
 #include "streaming/vr/vrtracking.h"  // M4a R3：VrSampleHistory（MTP）
 #include "streaming/vr/vrframemeta.h"  // 2026-10-05：VrDecodeTiming（CLIENT_TIMING decode 欄位）
@@ -2432,7 +2433,7 @@ void XrContext::frameThreadMain()
             }
         }
 
-        const XrCompositionLayerBaseHeader* layers[12];  // §VR-FOVEA-LAYERS：PCVR 多兩個中央區 quad
+        const XrCompositionLayerBaseHeader* layers[16];  // §VR-FOVEA-LAYERS：PCVR 多兩個中央區 quad；§VR-FOVEA-REPROJ 再多兩個全視野 quad
         uint32_t layerCount = 0;
         // M4a R1（PCVR）：projection＋淡出 quad（結構體要活到 xrEndFrame）
         XrCompositionLayerProjection proj = xrStruct<XrCompositionLayerProjection>(XR_TYPE_COMPOSITION_LAYER_PROJECTION);
@@ -2454,6 +2455,8 @@ void XrContext::frameThreadMain()
         bool toastPending = false, battPending = false;
         XrCompositionLayerQuad insetQ[2] = {xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD),
                                             xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD)};  // §VR-FOVEA-LAYERS
+        XrCompositionLayerQuad fullQ[2] = {xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD),
+                                           xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD)};  // §VR-FOVEA-REPROJ
         float playerEyeAspect = 0.0f;  // §VR-PLAYER：這一格每眼的畫面比例（螢幕高度＝寬÷它）
         if (m_Options.player && m_PlayerScreenDirty.exchange(false, std::memory_order_acq_rel)) {
             m_Screen->setGeometry(m_PlayerDistM.load(std::memory_order_relaxed), m_PlayerFovDeg.load(std::memory_order_relaxed));
@@ -2555,14 +2558,60 @@ void XrContext::frameThreadMain()
             if (ps == 1 || ps == 2) {
                 if (buildProjection(vcur.subImage.swapchain, vcur.subImage.imageRect, vcur.meta.renderRot,
                                     vcur.meta.renderPos, vcur.meta.echoSampleId, &proj, projViews)) {
-                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
                     // §VR-FOVEA-BOUNDS（2026-11-11，使用者配戴回報）：走出遊玩範圍時，頭盔的系統會把場景（projection 層）
                     // 換成外界景物，但疊在上面的 quad 層不會跟著換——注視點那一塊還留著遊戲畫面。
                     // 頭在遊玩範圍外時不疊那一塊（只剩全視野那一層，交給系統處理）。
-                    if (vcur.hasInset && !headOutsidePlayArea(projViews, fs.predictedDisplayTime) &&
-                        buildInsetQuads(vcur.subImage.swapchain, vcur.insetRect, vcur.insetOut, projViews, insetQ)) {
-                        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[0]);
-                        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[1]);
+                    const bool insets = vcur.hasInset && !headOutsidePlayArea(projViews, fs.predictedDisplayTime);
+                    // §VR-FOVEA-REPROJ（2026-11-15）：有注視點 quad 時，兩種圖層對頭部平移的補償要一致（見 xrdevknobs.h）
+                    int layersMode = insets ? xrdev::effectiveLayersMode() : 0;
+                    if (const int cyc = xrdev::effectiveCycleSec(); insets && cyc > 0) {
+                        // 同一場內輪流三種做法，換的時候在畫面上標 A／B／C（見 xrdevknobs.h 的 cycleSec）
+                        if (m_LayersCycleStartNs == 0) {
+                            m_LayersCycleStartNs = cpuT0;
+                        }
+                        const int phase = static_cast<int>(((cpuT0 - m_LayersCycleStartNs) / (static_cast<uint64_t>(cyc) * 1000000000ull)) % 3ull);
+                        layersMode = phase;
+                        if (phase != m_LayersCyclePhase) {
+                            m_LayersCyclePhase = phase;
+                            showToast(QString(QChar(QLatin1Char(static_cast<char>('A' + phase)))), 2500);
+                        }
+                    }
+                    else if (const int ncyc = xrdev::effectiveNoInsetCycleSec(); !vcur.hasInset && ncyc > 0) {
+                        // 實驗（見 xrdevknobs.h 的 kNoInsetCycleDefaultSec）：沒開注視點時在 A＝原本、B＝只補轉動 之間切換
+                        if (m_LayersCycleStartNs == 0) {
+                            m_LayersCycleStartNs = cpuT0;
+                        }
+                        const int phase = static_cast<int>(((cpuT0 - m_LayersCycleStartNs) / (static_cast<uint64_t>(ncyc) * 1000000000ull)) % 2ull);
+                        layersMode = phase;
+                        if (phase != m_LayersCyclePhase) {
+                            m_LayersCyclePhase = phase;
+                            showToast(QString(QChar(QLatin1Char(static_cast<char>('A' + phase)))), 2500);
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-FOVEA] layers (no gaze quads): mode %d (%s)", phase,
+                                        phase == 0 ? "projection keeps the eye positions it was rendered from" :
+                                                     "projection uses the eye positions at display time, so only rotation is reprojected");
+                        }
+                    }
+                    if (layersMode != m_LoggedLayersMode && insets) {
+                        m_LoggedLayersMode = layersMode;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VR-FOVEA] layers: mode %d (%s)", layersMode,
+                                    layersMode == 0 ? "projection keeps the eye positions it was rendered from" :
+                                    layersMode == 1 ? "projection uses the eye positions at display time, so only rotation is reprojected - same as the gaze quads" :
+                                                      "as mode 1, plus the whole view is also drawn as quads on the same path as the gaze quads");
+                    }
+                    if (layersMode >= 1) {
+                        relocateViewsToDisplay(projViews);
+                    }
+                    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
+                    if (insets) {
+                        if (layersMode >= 2 && buildFullQuads(projViews, fullQ)) {
+                            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fullQ[0]);
+                            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fullQ[1]);
+                        }
+                        if (buildInsetQuads(vcur.subImage.swapchain, vcur.insetRect, vcur.insetOut, projViews, insetQ)) {
+                            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[0]);
+                            layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[1]);
+                        }
                     }
                     videoLayer = true;
                     videoGen = vcur.generation;
@@ -3794,7 +3843,9 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs)
             headsetLate = m_Video->waitingAgeUs() > periodUs;
         }
     }
-    m_RateAuto.onSlot(newFrame, nowUs, headsetLate);
+    // §VR-REPAIR-WAN：這一張新影像是被補包拖晚、剛放行的（放行到顯示約 20～30 ms）→ 它前面那段重複是等補包，不是斷流
+    const bool repairReleased = newFrame && LiGetVrRepairQuietMs() < 50u;
+    m_RateAuto.onSlot(newFrame, nowUs, headsetLate, repairReleased);
     const xrrate::AutoRate::Request r = m_RateAuto.poll(nowUs);
     if (r.div != 0) {
         VIPLE_VR_TLV_RATE req{};
@@ -5262,6 +5313,15 @@ bool XrContext::buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, co
     XrPosef head;
     head.orientation = {renderRot[0], renderRot[1], renderRot[2], renderRot[3]};
     head.position = {renderPos[0], renderPos[1], renderPos[2]};
+    {
+        // dev（--vr-test-pose-offset，見 xrdevknobs.h）：把算圖姿態平移一段再交給合成器，製造已知的重投影量
+        const XrVector3f devOff = {xrdev::poseOffsetX.load(std::memory_order_relaxed), xrdev::poseOffsetY.load(std::memory_order_relaxed),
+                                   xrdev::poseOffsetZ.load(std::memory_order_relaxed)};
+        if (devOff.x != 0.0f || devOff.y != 0.0f || devOff.z != 0.0f) {
+            const XrVector3f w = quatRotate(head.orientation, devOff);
+            head.position = {head.position.x + w.x, head.position.y + w.y, head.position.z + w.z};
+        }
+    }
     for (int e = 0; e < 2; e++) {
         const XrVector3f off = quatRotate(head.orientation, eye[e].position);
         views[e].pose.orientation = quatMul(head.orientation, eye[e].orientation);
@@ -5372,6 +5432,64 @@ bool XrContext::buildInsetQuads(XrSwapchain swapchain, const XrRect2Di rects[2],
                     static_cast<double>(quads[0].size.height), static_cast<double>(d), rects[1].extent.width, rects[1].extent.height,
                     static_cast<double>(out[1][0]), static_cast<double>(out[1][2]), static_cast<double>(out[1][1]),
                     static_cast<double>(out[1][3]));
+    }
+    return true;
+}
+
+// §VR-FOVEA-REPROJ（2026-11-15）：把 projection 每一眼的位置換成「這一格顯示時」那一眼的位置（方向不動，仍是算圖當時的）。
+// 合成器對 projection 的重投影包含位置：它把畫面當成在某個固定距離的平面上，照「送出的眼睛位置 → 顯示時的眼睛位置」
+// 的位移去移動畫面。注視點那塊是世界座標裡 50 m 外的 quad，同樣的位移對它幾乎沒有影響——頭在往返的 80 ms 裡平移幾公分，
+// 兩層就往相反的方向偏。位置改用顯示時的值之後，合成器看到的位移只剩「這裡預測的位置 → 掃描輸出時的位置」（不到 1～2 mm），
+// 兩層都只補轉動。m_Hmd 是 pcvrAfterWaitFrame 剛 locate 的 predictedDisplayTime 姿態；還沒有值時不動。
+void XrContext::relocateViewsToDisplay(XrCompositionLayerProjectionView views[2])
+{
+    HmdSample d;
+    {
+        std::lock_guard<std::mutex> lk(m_HmdMutex);
+        d = m_Hmd;
+    }
+    XrPosef eye[2];
+    {
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        if (!m_HaveEyeToHead) {
+            return;
+        }
+        eye[0] = m_EyeToHead[0];
+        eye[1] = m_EyeToHead[1];
+    }
+    if (!d.valid || d.displayTime == 0) {
+        return;
+    }
+    const XrQuaternionf hq = {d.rot[0], d.rot[1], d.rot[2], d.rot[3]};
+    for (int e = 0; e < 2; e++) {
+        const XrVector3f off = quatRotate(hq, eye[e].position);
+        views[e].pose.position = {d.pos[0] + off.x, d.pos[1] + off.y, d.pos[2] + off.z};
+    }
+}
+
+// §VR-FOVEA-REPROJ：全視野那塊也用 quad 疊一份（每眼一個，蓋住 projection 那一眼的整個視角），和注視點的 quad 走合成器的
+// 同一條路，兩層對頭部動作的反應一定相同。projection 照樣留在最底下：頭轉得比 overscan 多時 quad 邊緣外面露出來的是它。
+bool XrContext::buildFullQuads(const XrCompositionLayerProjectionView views[2], XrCompositionLayerQuad quads[2])
+{
+    constexpr float d = 50.0f;
+    for (int e = 0; e < 2; e++) {
+        const XrFovf& fov = views[e].fov;
+        const float tl = std::tan(-fov.angleLeft), tr = std::tan(fov.angleRight);
+        const float tu = std::tan(fov.angleUp), td = std::tan(-fov.angleDown);
+        if (!(tl + tr > 1e-3f) || !(tu + td > 1e-3f) || views[e].subImage.imageRect.extent.width < 2 ||
+            views[e].subImage.imageRect.extent.height < 2) {
+            return false;
+        }
+        const XrVector3f local = {0.5f * (tr - tl) * d, 0.5f * (tu - td) * d, -d};
+        const XrVector3f off = quatRotate(views[e].pose.orientation, local);
+        XrCompositionLayerQuad& q = quads[e];
+        q.layerFlags = 0;  // 不透明
+        q.space = m_TrackSpace;
+        q.eyeVisibility = e == 0 ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+        q.subImage = views[e].subImage;
+        q.pose.orientation = views[e].pose.orientation;
+        q.pose.position = {views[e].pose.position.x + off.x, views[e].pose.position.y + off.y, views[e].pose.position.z + off.z};
+        q.size = {(tl + tr) * d, (tu + td) * d};
     }
     return true;
 }
