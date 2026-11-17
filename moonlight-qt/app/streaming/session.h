@@ -498,7 +498,9 @@ private:
 
     // §VR-HOTSPOT-AUTO：讀取頭盔熱點資訊並以 reliable TLV 同步至 host
     void checkAndSendVrHotspotInfo();
-    static bool readVrHotspotCreds(std::string* ssid, std::string* key);  // §FRAME-HOTSPOT-AUTO
+public:
+    static bool readVrHotspotCreds(std::string* ssid, std::string* key);  // §FRAME-HOTSPOT-AUTO；§FRAME-HOTSPOT-EARLY 從 VrLauncher 也會用
+private:
     QByteArray m_LastVrHotspotPayload;
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;

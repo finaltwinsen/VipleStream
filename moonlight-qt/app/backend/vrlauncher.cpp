@@ -1,16 +1,20 @@
 #include "vrlauncher.h"
 #include "streaming/vr/vrnetbench.h"  // §VR-NETBENCH
 #include "streaming/framehotspot.h"   // §FRAME-HOTSPOT-PAUSE
+#include "streaming/session.h"        // §FRAME-HOTSPOT-EARLY：readVrHotspotCreds
 
 #include "sfenv.h"
 #include "vrpreflightcheck.h"
 
 #include <QCoreApplication>
+#include <QPointer>
+#include <QThreadPool>
 #include <QTimer>
 #include <QFile>
 #include <QProcessEnvironment>
 
 #include <atomic>
+#include <memory>
 #include <chrono>
 #include <climits>
 
@@ -59,6 +63,7 @@ std::function<void(VrLauncher::ChildEvent)> s_ChildHook;  // §VR-SHELL
 std::function<bool(const VrLauncher::PlayRequest&)> s_PlayerHandler;  // §VR-SHELL（A2）
 VrLauncher* s_Instance = nullptr;  // QML singleton（playerFinished 用）
 bool s_ShellFocused = true;        // §PERF-1113：見 VrLauncher::setShellFocused
+bool s_LanVrHostSeen = false;      // §FRAME-HOTSPOT-EARLY：VrLauncher 建立之前就看到區網上的 host 了
 
 }  // namespace
 
@@ -68,6 +73,55 @@ void VrLauncher::setChildHook(std::function<void(ChildEvent)> hook)
     if (s_Instance != nullptr) {
         emit s_Instance->shellActiveChanged();
     }
+}
+
+// §FRAME-HOTSPOT-EARLY：見 framehotspot.h。開與關都要等 softapmanager 回覆，放到執行緒池；等裝置連上的輪詢在介面執行緒
+void VrLauncher::lanVrHostOnline()
+{
+#if defined(Q_OS_LINUX)
+    static bool s_Tried = false;  // 這個行程只試一次（等不到就交給場次開始時的那條路徑）
+    if (s_Tried) {
+        return;
+    }
+    if (s_Instance == nullptr) {
+        // 沒有 VrLauncher＝沒有人更新標記檔、結束時也沒有人關：先記著，它建立時再開
+        s_LanVrHostSeen = true;
+        return;
+    }
+    s_Tried = true;
+    QPointer<VrLauncher> self(s_Instance);
+    QThreadPool::globalInstance()->start([self]() {
+        std::string ssid, key;
+        if (!Session::readVrHotspotCreds(&ssid, &key) || !FrameHotspot::openAtAppStart(ssid, key)) {
+            return;
+        }
+        QMetaObject::invokeMethod(qApp, [self]() {
+            if (self.isNull()) {
+                return;
+            }
+            auto* wait = new QTimer(self.data());
+            wait->setInterval(5000);
+            auto waited = std::make_shared<int>(0);
+            connect(wait, &QTimer::timeout, self.data(), [wait, waited]() {
+                *waited += 5;
+                const FrameHotspot::AppWait st = FrameHotspot::appStartState();
+                if (st == FrameHotspot::AppWait::Waiting && *waited < FrameHotspot::kAppJoinWaitS) {
+                    return;
+                }
+                wait->stop();
+                wait->deleteLater();
+                if (st == FrameHotspot::AppWait::Joined) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-HOTSPOT] app: a device joined the hotspot after about %d s - keeping it on", *waited);
+                }
+                else if (st == FrameHotspot::AppWait::Waiting) {
+                    QThreadPool::globalInstance()->start([]() { FrameHotspot::closeAppStart(); });
+                }
+            });
+            wait->start();
+        }, Qt::QueuedConnection);
+    });
+#endif
 }
 
 void VrLauncher::setPlayerHandler(std::function<bool(const PlayRequest&)> handler)
@@ -112,6 +166,10 @@ VrLauncher::VrLauncher(QObject* parent)
         connect(hotspotBeat, &QTimer::timeout, this, []() { FrameHotspot::heartbeat(); });
         hotspotBeat->start();
         connect(qApp, &QCoreApplication::aboutToQuit, this, []() { FrameHotspot::closeIfOwner(); });
+        // §FRAME-HOTSPOT-EARLY
+        if (s_LanVrHostSeen) {
+            QTimer::singleShot(0, this, []() { lanVrHostOnline(); });
+        }
     }
     // §VR-PREFLIGHT：檢查的結果。proceed＝可以開了（夠快、量不到、連續夠快、使用者堅持）
     connect(m_Preflight, &VrPreflightCheck::changed, this, &VrLauncher::preflightChanged);

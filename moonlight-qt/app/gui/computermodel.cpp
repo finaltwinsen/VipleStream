@@ -1,4 +1,5 @@
 #include "computermodel.h"
+#include "backend/vrlauncher.h"  // §FRAME-HOTSPOT-EARLY
 
 #include <algorithm>
 
@@ -470,6 +471,24 @@ void ComputerModel::handlePairingCompleted(NvComputer*, QString error)
 
 void ComputerModel::handleComputerStateChanged(NvComputer* computer)
 {
+    // §FRAME-HOTSPOT-EARLY：已配對、能跑 VR 的 host 用區網位址上線了：頭盔先把串流轉接器的熱點開起來（Frame 以外什麼都不做）。
+    // 只看位址是不是私有 IPv4（Tailscale 的 100.64.0.0/10 不算）；別的 VPN 剛好用私有網段時，場次開始會發現是 VPN 而把它關掉
+    if (computer != nullptr) {
+        bool lanVr = false;
+        {
+            QReadLocker lock(&computer->lock);
+            if (computer->state == NvComputer::CS_ONLINE && computer->pairState == NvComputer::PS_PAIRED &&
+                    (computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_PCVR)) {
+                bool isV4 = false;
+                const quint32 a = QHostAddress(computer->activeAddress.address()).toIPv4Address(&isV4);
+                lanVr = isV4 && ((a >> 24) == 10 || (a >> 20) == 0xAC1 || (a >> 16) == 0xC0A8);
+            }
+        }
+        if (lanVr) {
+            VrLauncher::lanVrHostOnline();
+        }
+    }
+
     QVector<NvComputer*> newComputerList = visibleComputers();  // §UI-HIDE-SELF
 
     // Reset the model if the structural layout of the list has changed

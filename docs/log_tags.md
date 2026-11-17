@@ -1800,7 +1800,33 @@ host（§VR-HOTSPOT-FASTJOIN，2026-11-16）：熱點資訊到達後 40 秒內�
 （頭盔在串流開始時才開熱點，約 3 秒後才出現；只靠 Windows 的自動連線要 20～30 秒，主動重試後約 6 秒）：
 ```
 [VIPLE-VR-HOTSPOT] joined the headset hotspot N ms after the hotspot info (K extra connect attempt(s))
-[VIPLE-VR-HOTSPOT] not joined after 40 s (K extra connect attempt(s)) - leaving it to the automatic reconnect
+[VIPLE-VR-HOTSPOT] not joined after 40 s (K connect attempt(s) of ours) - leaving it to the automatic reconnect
+```
+host（§VR-HOTSPOT-YIELD，2.0.207）：這張網卡上有別的程式在連（host 的 Steam 開著時它自己一直用暫時設定檔連，而且會中斷
+不是它發起的連線）就退讓，不再自己連；收到熱點資訊後先聽 3 秒（上一場看過別人時 11 秒），沒有別人才照 FASTJOIN 連。
+`joined …` 那一行的括號改成 `(K connect attempt(s) of ours[; the connection was left to the other program])`：
+```
+[VIPLE-VR-HOTSPOT] another program (usually Steam) is connecting this adapter N ms after the hotspot info - leaving the connection to it (K attempt(s) of ours so far)
+[VIPLE-VR-HOTSPOT] the other program stopped connecting this adapter - connecting it ourselves
+```
+
+host（§VR-HOTSPOT-PROFILE，2.0.209）：設定檔名稱改成熱點的 SSID、手動連線（以前 `VipleStream-Frame`、自動）。host 的 Steam 用
+SSID 當名稱認連線，名稱不對會切掉我們的連線、甚至停止連線（它的紀錄：Steam 的 `logs/remote_connections.txt`，
+`Incorrect profile connected`／`Connect event`／`RTK_VRFeatureConfig`）。別人的連線改用連線模式（暫時設定檔）分辨；
+斷線後沒有別人在連時看門狗每 5 秒自己重連。
+```
+[VIPLE-VR-HOTSPOT] removed the old auto-connect profile (VipleStream-Frame)
+[VIPLE-VR-HOTSPOT] already connected - ensuring the reconnect profile
+```
+
+client（§FRAME-HOTSPOT-EARLY，2.0.208，`framehotspot.h`＋`vrlauncher.cpp`；App 看到已配對、能跑 VR 的 host 用區網位址上線時
+就先開熱點，讓 host 的 Steam 在選遊戲的時候連好；60 秒內沒有裝置連上、也沒有場次接手就關，場次開始時照 AUTO 再開）：
+```
+[VIPLE-VR-HOTSPOT] app: a paired host is online on the local network and the streaming adapter hotspot was off - switched it on ahead of the first game; it is switched off again if nothing joins within 60 s, and when the app exits
+[VIPLE-VR-HOTSPOT] app: a device joined the hotspot after about N s - keeping it on
+[VIPLE-VR-HOTSPOT] app: nothing joined the hotspot within 60 s - switched off again (a game on the local network switches it on again)
+[VIPLE-VR-HOTSPOT] app: softapmanager did not accept create - hotspot left off
+[VIPLE-VR-HOTSPOT] auto: the hotspot was switched on when the app started (a device is already connected to it|nothing connected to it yet - waiting for the host)   ← 場次接手
 ```
 
 client（§FRAME-HOTSPOT-AUTO，2026-11-15～16，同一個檔；區網的 VR 場次、熱點關著時自動開，host 沒連上就關）：

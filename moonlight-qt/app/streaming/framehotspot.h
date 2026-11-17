@@ -108,7 +108,14 @@ public:
             writeOpenedMarker(owner, hostId);
             m_Opened = true;
             m_OpenedAt = std::chrono::steady_clock::now();
-            if (prevHost == hostId) {
+            if (prevHost.empty()) {
+                // §FRAME-HOTSPOT-EARLY：App 啟動時先開的（還沒有對應到哪一台 host）：上面已經有裝置就算這台連上了
+                m_PeerSeen = hotspotHasNewPeer(m_Baseline);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: the hotspot was switched on when the app started (%s)",
+                            m_PeerSeen ? "a device is already connected to it" : "nothing connected to it yet - waiting for the host");
+            }
+            else if (prevHost == hostId) {
                 m_PeerSeen = hotspotHasNewPeer(m_Baseline);
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VR-HOTSPOT] auto: the hotspot is still on from the previous session with this host (%s)",
@@ -177,6 +184,109 @@ public:
         }
 #endif
     }
+
+    // §FRAME-HOTSPOT-EARLY（2026-11-17）：App 啟動、看到已配對的 host 在區網上線時就先把熱點開起來（不等串流開始）。
+    // host 的 Steam 開著時它自己會連這張網卡（熱點出現後 5～15 秒），使用者選遊戲的這段時間剛好讓它連好，開場就有兩條路徑。
+    // 標記檔的 host 欄留空＝還沒有對應到哪一台；場次開始時 openForLan() 接手。kAppJoinWaitS 秒內沒有裝置連上、
+    // 也沒有場次接手就關掉（host 的 Steam 沒開時沒有人會連，空開著只會分走無線電；場次開始時照原本的路徑再開）。
+    // 會等 softapmanager 回覆（最久十幾秒），不要在介面執行緒呼叫。ssid／key 會被清掉
+    static bool openAtAppStart(std::string& ssid, std::string& key)
+    {
+#if defined(__linux__)
+        std::string cmd;
+        const bool fieldsOk = !ssid.empty() && ssid.size() <= 32 && key.size() >= 8 && key.size() <= 64 &&
+                              ssid.find_first_of("\t\r\n") == std::string::npos && key.find_first_of("\t\r\n") == std::string::npos;
+        if (fieldsOk) {
+            cmd = "create\t" + ssid + "\t" + key + "\thbs6\tnoroute\t--hidden";
+        }
+        scrub(ssid);
+        scrub(key);
+        struct stat st;
+        const std::string paused = markerPath();
+        // 有暫停標記＝經 VPN 的場次把熱點停掉了（或它的還原還沒補做）：不插手
+        if (!fieldsOk || stat(kSocket, &st) != 0 || paused.empty() || stat(paused.c_str(), &st) == 0) {
+            scrub(cmd);
+            return false;
+        }
+        std::string reply;
+        const bool asked = ask("status", &reply, 2000);
+        const std::string state = firstField(reply);
+        scrub(reply);
+        if (!asked || state != "0") {
+            scrub(cmd);  // 已經開著（使用者自己開的、或上一個 App 留下的）或正在變動：不碰
+            return false;
+        }
+        writeOpenedMarker(static_cast<long>(getpid()), std::string());
+        const bool ok = sendCreate(cmd);
+        scrub(cmd);
+        if (!ok) {
+            removeOpenedMarker();
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] app: softapmanager did not accept create - hotspot left off");
+            return false;
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-HOTSPOT] app: a paired host is online on the local network and the streaming adapter hotspot was off - "
+                    "switched it on ahead of the first game; it is switched off again if nothing joins within %d s, and when the app exits",
+                    kAppJoinWaitS);
+        return true;
+#else
+        (void) ssid;
+        (void) key;
+        return false;
+#endif
+    }
+
+    // §FRAME-HOTSPOT-EARLY：openAtAppStart() 成功之後，App 每幾秒問一次
+    enum class AppWait {
+        Waiting,  // 還沒有裝置連上
+        Joined,   // 有裝置連上了：留著
+        Handed,   // 場次接手了（之後由它等、等不到由它關）
+        Gone,     // 不在這個行程名下了（被關掉、被別人接走）
+    };
+    static AppWait appStartState()
+    {
+#if defined(__linux__)
+        long pid = 0;
+        std::string host;
+        if (!readOpenedMarker(&pid, &host) || pid != static_cast<long>(getpid())) {
+            return AppWait::Gone;
+        }
+        if (!host.empty()) {
+            return AppWait::Handed;
+        }
+        return hotspotHasPeer() ? AppWait::Joined : AppWait::Waiting;
+#else
+        return AppWait::Gone;
+#endif
+    }
+
+    // §FRAME-HOTSPOT-EARLY：等不到裝置：關掉（關之前再確認一次還是「沒人連、沒有場次接手」）。會等 softapmanager 回覆
+    static void closeAppStart()
+    {
+#if defined(__linux__)
+        if (appStartState() != AppWait::Waiting) {
+            return;
+        }
+        std::string reply;
+        const bool ok = ask("teardown", &reply, 5000) && firstField(reply) == "1";
+        scrub(reply);
+        if (ok) {
+            removeOpenedMarker();
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] app: nothing joined the hotspot within %d s - switched off again (a game on the local "
+                        "network switches it on again)",
+                        kAppJoinWaitS);
+        }
+        else {
+            // 標記留著：App 結束時 closeIfOwner() 再關
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] app: nothing joined the hotspot, but softapmanager did not accept teardown - it is retried "
+                        "when the app exits");
+        }
+#endif
+    }
+
+    static constexpr int kAppJoinWaitS = 60;  // §FRAME-HOTSPOT-EARLY：App 啟動時開了之後等裝置連上多久
 
     // §FRAME-HOTSPOT-AUTO：App 的行程定期呼叫（約每 15 秒）：熱點是這個行程名下的就更新標記檔的時間
     static void heartbeat()

@@ -3,6 +3,7 @@
  * @brief Miscellaneous definitions for Windows.
  */
 // standard includes
+#include <atomic>
 #include <csignal>
 #include <exception>
 #include <filesystem>
@@ -132,6 +133,8 @@ namespace platf {
   decltype(WlanGetAvailableNetworkList) *fn_WlanGetAvailableNetworkList = nullptr;
   decltype(WlanSetProfile) *fn_WlanSetProfile = nullptr;
   decltype(WlanConnect) *fn_WlanConnect = nullptr;
+  decltype(WlanRegisterNotification) *fn_WlanRegisterNotification = nullptr;  // §VR-HOTSPOT-YIELD（沒有也能跑）
+  decltype(WlanDeleteProfile) *fn_WlanDeleteProfile = nullptr;  // §VR-HOTSPOT-PROFILE（沒有也能跑）
 
   std::filesystem::path appdata() {
     WCHAR sunshine_path[MAX_PATH];
@@ -1306,6 +1309,8 @@ namespace platf {
       fn_WlanGetAvailableNetworkList = (decltype(fn_WlanGetAvailableNetworkList)) GetProcAddress(wlanapi, "WlanGetAvailableNetworkList");
       fn_WlanSetProfile = (decltype(fn_WlanSetProfile)) GetProcAddress(wlanapi, "WlanSetProfile");
       fn_WlanConnect = (decltype(fn_WlanConnect)) GetProcAddress(wlanapi, "WlanConnect");
+      fn_WlanRegisterNotification = (decltype(fn_WlanRegisterNotification)) GetProcAddress(wlanapi, "WlanRegisterNotification");
+      fn_WlanDeleteProfile = (decltype(fn_WlanDeleteProfile)) GetProcAddress(wlanapi, "WlanDeleteProfile");
 
       if (!fn_WlanOpenHandle || !fn_WlanCloseHandle || !fn_WlanFreeMemory || !fn_WlanEnumInterfaces || !fn_WlanSetInterface) {
         BOOST_LOG(error) << "wlanapi.dll is missing exports?"sv;
@@ -1319,6 +1324,8 @@ namespace platf {
         fn_WlanGetAvailableNetworkList = nullptr;
         fn_WlanSetProfile = nullptr;
         fn_WlanConnect = nullptr;
+        fn_WlanRegisterNotification = nullptr;
+        fn_WlanDeleteProfile = nullptr;
 
         FreeLibrary(wlanapi);
         return;
@@ -2284,6 +2291,26 @@ namespace platf {
     constexpr auto kFastJoin = std::chrono::seconds(40);
     constexpr auto kFastRetry = std::chrono::seconds(2);
     constexpr auto kFastPoll = std::chrono::milliseconds(500);
+    // §VR-HOTSPOT-YIELD（2026-11-16）：host 上的 Steam 開著時，它自己一直用暫時設定檔連這張網卡（每 4～6 秒一次，
+    // 沒有場次時也在跑），而且看到不是它發起的連線就中斷：實測我們連上 0.6 秒後被斷、再連再被斷，最後是它自己連上
+    // （「連上約 5 秒後斷開又接回」就是這個）；兩邊的嘗試還會互相擋住，連上的時間從 6 秒到 20 多秒不等。
+    // 我們不開串流、手動開熱點的六次與把 vr_hotspot_autoconnect 關掉的三場：只有它在連時 4～14 秒連上、一次都沒斷。
+    // 所以這張網卡上看到別人發起的連線（設定檔名稱不是我們的）就退讓，只在沒有別人時才照 FASTJOIN 自己連。
+    // arm 之後先只聽 kHold（熱點約 3 秒後才出現，這段本來就連不上）；上一場看過別人時聽 kHoldKnown（它的一輪最長約 10 秒）。
+    // 退讓中超過 kRivalQuiet 沒再看到它的動作＝它不在了，回到自己連。
+    constexpr auto kHold = std::chrono::seconds(3);
+    constexpr auto kHoldKnown = std::chrono::seconds(11);
+    constexpr auto kRivalQuiet = std::chrono::seconds(15);
+    // §VR-HOTSPOT-PROFILE（2026-11-17）：設定檔的名稱＝熱點的 SSID、connectionMode=manual（以前是 "VipleStream-Frame"、auto）。
+    // host 的 Steam 用 SSID 當名稱認這張網卡上的連線（它的紀錄在 Steam 的 logs/remote_connections.txt）：名稱不對就每秒記 4 行
+    // "Incorrect profile connected (VipleStream-Frame) expected (<SSID>)"，把我們的連線切掉自己重連；那條連線若是在它沒看到
+    // 斷線的情況下結束，它還會停在那個狀態、完全不再發起連線（11-17 實測三小時），直到下一場或重啟 Steam。
+    // 名稱改成 SSID 之後實測：我們連上，它記 "Connect event"、替網卡開 VR 模式（RTK_VRFeatureConfig(1)），不切、不卡。
+    // 改 manual：Windows 不再背著 Steam 用這份設定檔自動連；斷線後沒有別人在連時由看門狗自己重連（kDownRetry）。
+    // 別人（Steam）的連線用的是暫時設定檔，改用連線模式分辨（名稱現在一樣）。
+    constexpr wchar_t kLegacyProfile[] = L"VipleStream-Frame";
+    constexpr auto kDownRetry = std::chrono::seconds(5);
+    std::atomic<std::int64_t> rival_last_ms {0};  // 最後一次看到別人在這張網卡上連線的時刻（steady_clock 毫秒；0＝沒看過）
 
     std::mutex mtx;
     GUID guid {};
@@ -2369,6 +2396,33 @@ namespace platf {
       return 1;
     }
 
+    std::int64_t now_ms() {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(clock::now().time_since_epoch()).count();
+    }
+
+    // §VR-HOTSPOT-YIELD：連線事件的通知（wlansvc 的執行緒）。只記「這張網卡上有不是我們的設定檔在連」
+    void WINAPI on_acm(PWLAN_NOTIFICATION_DATA data, PVOID) {
+      if (!data || data->NotificationSource != WLAN_NOTIFICATION_SOURCE_ACM || !data->pData ||
+          data->dwDataSize < sizeof(WLAN_CONNECTION_NOTIFICATION_DATA)) {
+        return;
+      }
+      const auto code = data->NotificationCode;
+      if (code != wlan_notification_acm_connection_start && code != wlan_notification_acm_connection_complete &&
+          code != wlan_notification_acm_connection_attempt_fail) {
+        return;
+      }
+      {
+        std::lock_guard lk(mtx);
+        if (!IsEqualGUID(data->InterfaceGuid, guid)) {
+          return;
+        }
+      }
+      const auto *info = static_cast<const WLAN_CONNECTION_NOTIFICATION_DATA *>(data->pData);
+      if (info->wlanConnectionMode != wlan_connection_mode_profile) {  // §VR-HOTSPOT-PROFILE：我們一律用已存的設定檔連
+        rival_last_ms.store(now_ms());
+      }
+    }
+
     // §VR-HOTSPOT-FASTJOIN：網卡是不是「未連線、也沒有正在連」（正在關聯或驗證時不要打斷它）
     bool is_idle_disconnected(HANDLE hClient, const GUID &ifGuid) {
       DWORD sz = 0;
@@ -2382,14 +2436,15 @@ namespace platf {
       return st == wlan_interface_state_disconnected;
     }
 
-    // §VR-HOTSPOT-FASTJOIN：照 VipleStream-Frame 設定檔再連一次
+    // §VR-HOTSPOT-FASTJOIN：照我們的設定檔（名稱＝SSID）再連一次
     DWORD connect_profile(HANDLE hClient, const GUID &ifGuid, const std::string &ssid) {
       DOT11_SSID dot11Ssid {};
       dot11Ssid.uSSIDLength = static_cast<ULONG>(std::min<std::size_t>(ssid.size(), sizeof(dot11Ssid.ucSSID)));
       std::memcpy(dot11Ssid.ucSSID, ssid.data(), dot11Ssid.uSSIDLength);
       WLAN_CONNECTION_PARAMETERS params {};
       params.wlanConnectionMode = wlan_connection_mode_profile;
-      params.strProfile = L"VipleStream-Frame";
+      const std::wstring profile = utf_utils::from_utf8(ssid);  // §VR-HOTSPOT-PROFILE
+      params.strProfile = profile.c_str();
       params.pDot11Ssid = &dot11Ssid;
       params.dot11BssType = dot11_BSS_type_infrastructure;
       return fn_WlanConnect(hClient, &ifGuid, &params, nullptr);
@@ -2425,6 +2480,13 @@ namespace platf {
       int fast_tries = 0;
       clock::time_point fast_armed_at {};
       std::optional<clock::time_point> fast_last_try;
+      // §VR-HOTSPOT-YIELD
+      if (fn_WlanRegisterNotification) {
+        fn_WlanRegisterNotification(hClient, WLAN_NOTIFICATION_SOURCE_ACM, TRUE, on_acm, nullptr, nullptr, nullptr);
+      }
+      bool rival_known = false;   // 這一場開始時，上一場看過別人
+      bool yield_logged = false;
+      bool resumed_logged = false;
       while (true) {
         std::this_thread::sleep_for(fast ? std::chrono::duration_cast<clock::duration>(kFastPoll) : std::chrono::duration_cast<clock::duration>(kPoll));
         const auto now = clock::now();
@@ -2449,21 +2511,49 @@ namespace platf {
           fast = true;
           fast_tries = 0;
           fast_last_try.reset();
+          rival_known = rival_last_ms.load() != 0;
+          yield_logged = false;
+          resumed_logged = false;
         }
         const int st = query_state(hClient, g, ssid);
         if (fast) {
           if (st == 1) {
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] joined the headset hotspot "
                             << std::chrono::duration_cast<std::chrono::milliseconds>(now - armed).count() << " ms after the hotspot info ("
-                            << fast_tries << " extra connect attempt(s))";
+                            << fast_tries << " connect attempt(s) of ours"
+                            << (yield_logged ? "; the connection was left to the other program" : "") << ')';
             fast = false;
           } else if (st < 0 || now - armed > kFastJoin) {
             fast = false;
             if (st == 0) {
               BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not joined after " << std::chrono::duration_cast<std::chrono::seconds>(kFastJoin).count()
-                              << " s (" << fast_tries << " extra connect attempt(s)) - leaving it to the automatic reconnect";
+                              << " s (" << fast_tries << " connect attempt(s) of ours) - leaving it to the automatic reconnect";
             }
           } else {
+            // §VR-HOTSPOT-YIELD：先聽、有別人在連就退讓
+            const auto armed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(armed.time_since_epoch()).count();
+            const auto rival_ms = rival_last_ms.load();
+            const bool rival_this_session = rival_ms >= armed_ms;
+            if (now - armed < (rival_known ? kHoldKnown : kHold) && !rival_this_session) {
+              continue;  // 還在聽
+            }
+            if (rival_this_session && now_ms() - rival_ms < std::chrono::duration_cast<std::chrono::milliseconds>(kRivalQuiet).count()) {
+              if (!yield_logged) {
+                yield_logged = true;
+                BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] another program (usually Steam) is connecting this adapter "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(now - armed).count()
+                                << " ms after the hotspot info - leaving the connection to it (" << fast_tries << " attempt(s) of ours so far)";
+              }
+              continue;
+            }
+            if (!rival_this_session && rival_known) {
+              rival_last_ms.store(0);  // 上一場有、這一場整段沒看到：它不在了
+              rival_known = false;
+            }
+            if (yield_logged && !resumed_logged) {
+              resumed_logged = true;
+              BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] the other program stopped connecting this adapter - connecting it ourselves";
+            }
             if ((!fast_last_try || now - *fast_last_try >= kFastRetry) && is_idle_disconnected(hClient, g)) {
               fast_last_try = now;
               ++fast_tries;
@@ -2530,6 +2620,12 @@ namespace platf {
           down_since = now;
           BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter disconnected from the headset hotspot"sv;
           continue;
+        }
+        // §VR-HOTSPOT-PROFILE：設定檔是 manual，Windows 不會自己連回去。沒有別人（Steam）在連就自己再連
+        if (now_ms() - rival_last_ms.load() >= std::chrono::duration_cast<std::chrono::milliseconds>(kRivalQuiet).count() &&
+            (!fast_last_try || now - *fast_last_try >= kDownRetry) && is_idle_disconnected(hClient, g)) {
+          fast_last_try = now;
+          connect_profile(hClient, g, ssid);
         }
         if (now - *down_since < kDown || (last_restart && now - *last_restart < kGap)) {
           continue;
@@ -2635,8 +2731,9 @@ namespace platf {
           if (already) {
             // §VR-HOTSPOT-RECONNECT（2026-10-31 實測）：已連上通常是 Steam 自己用臨時連線接的（host 上沒有任何設定檔）。
             // 以前這裡直接返回，網卡一斷（拔插、Restart-NetAdapter）就沒有設定檔可以自動重連，多連線少一條直到下一場。
-            // 現在照樣把我們的 all-user 設定檔（connectionMode=auto）建在這張網卡上，只是不再主動 WlanConnect。
-            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] already connected - ensuring the auto-reconnect profile"sv;
+            // 現在照樣把我們的 all-user 設定檔建在這張網卡上（§VR-HOTSPOT-PROFILE：名稱＝SSID、manual，斷線後由看門狗重連），
+            // 只是不再主動 WlanConnect。
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] already connected - ensuring the reconnect profile"sv;
             selectedGuid = ifInfo.InterfaceGuid;
             found = true;
             already_connected = true;
@@ -2663,7 +2760,7 @@ namespace platf {
       return;
     }
 
-    // 建立或更新 all-user 設定檔（名稱 VipleStream-Frame，WPA2/WPA3-Personal，自動連線）
+    // 建立或更新 all-user 設定檔（§VR-HOTSPOT-PROFILE：名稱＝SSID，WPA2/WPA3-Personal，手動連線）
     std::string authStr = (auth_type == VIPLE_VR_HOTSPOT_AUTH_WPA3_SAE) ? "WPA3SAE" : "WPA2PSK";
     auto xml_escape = [](const std::string &s) {
       std::string o;
@@ -2682,7 +2779,7 @@ namespace platf {
     std::string profileXml =
       "<?xml version=\"1.0\"?>\n"
       "<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">\n"
-      "    <name>VipleStream-Frame</name>\n"
+      "    <name>" + xml_escape(ssid) + "</name>\n"
       "    <SSIDConfig>\n"
       "        <SSID>\n"
       "            <name>" + xml_escape(ssid) + "</name>\n"
@@ -2690,7 +2787,7 @@ namespace platf {
       "        <nonBroadcast>true</nonBroadcast>\n"
       "    </SSIDConfig>\n"
       "    <connectionType>ESS</connectionType>\n"
-      "    <connectionMode>auto</connectionMode>\n"
+      "    <connectionMode>manual</connectionMode>\n"
       "    <MSM>\n"
       "        <security>\n"
       "            <authEncryption>\n"
@@ -2723,6 +2820,10 @@ namespace platf {
     }
 
     BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] profile set"sv;
+    // §VR-HOTSPOT-PROFILE：舊版留下的那一份（auto、名稱 Steam 不認）拿掉
+    if (fn_WlanDeleteProfile && fn_WlanDeleteProfile(hClient, &selectedGuid, hotspot_wd::kLegacyProfile, nullptr) == ERROR_SUCCESS) {
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] removed the old auto-connect profile (VipleStream-Frame)"sv;
+    }
     hotspot_wd::arm(selectedGuid, ssid);
     if (already_connected) {
       fn_WlanCloseHandle(hClient, nullptr);
@@ -2730,24 +2831,8 @@ namespace platf {
       return;
     }
 
-    // 發起 WlanConnect
-    DOT11_SSID dot11Ssid {};
-    dot11Ssid.uSSIDLength = static_cast<ULONG>(ssid.size());
-    std::memcpy(dot11Ssid.ucSSID, ssid.data(), ssid.size());
-
-    WLAN_CONNECTION_PARAMETERS connParams {};
-    connParams.wlanConnectionMode = wlan_connection_mode_profile;
-    connParams.strProfile = L"VipleStream-Frame";
-    connParams.pDot11Ssid = &dot11Ssid;
-    connParams.dot11BssType = dot11_BSS_type_infrastructure;
-    connParams.dwFlags = 0;
-
-    DWORD connRes = fn_WlanConnect(hClient, &selectedGuid, &connParams, nullptr);
-    if (connRes == ERROR_SUCCESS) {
-      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] connect ok"sv;
-    } else {
-      BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] connect failed err=" << connRes;
-    }
+    // §VR-HOTSPOT-YIELD：這裡不再立刻 WlanConnect。熱點多半這時才被頭盔開起來（約 3 秒後才出現），這一次一定落空，
+    // 還會擋住 Steam 自己的連線嘗試；改由看門狗先聽 kHold，沒有別人在連才照 FASTJOIN 連。
 
     fn_WlanCloseHandle(hClient, nullptr);
     SecureZeroMemory(key.data(), key.size());

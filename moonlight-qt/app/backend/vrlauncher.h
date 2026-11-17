@@ -130,6 +130,9 @@ public:
     static void setPlayerHandler(std::function<bool(const PlayRequest&)> handler);
     // §VR-SHELL：VR 介面裡的那一場播完（GUI 執行緒）。exitCode 同 viplestream play 的結束碼，error 是播放器給的說明
     static void playerFinished(int exitCode, const QString& error);
+
+    // §FRAME-HOTSPOT-EARLY：已配對、能跑 VR 的 host 在區網上線（介面執行緒呼叫）。這個行程第一次看到時先把頭盔的熱點開起來
+    static void lanVrHostOnline();
     int devVideoTab() const;
     QString devVideoUrl() const;
     int devVideoGrabSec() const;

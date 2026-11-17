@@ -100,16 +100,15 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 - **§LAN-PREF 啟動時就優先區網（已修）**：在外面用過 Tailscale 之後，回家從頭盔 VR 介面（或命令列）開串流整場走 Tailscale 位址——
   行程剛啟動時「目前位址」是空的，優先區網的檢查只在目前位址已經是 Tailscale 時才做，第一輪照存檔順序選到 Tailscale 就開始串流。
   後果：封包縮到 1184、host 判定「人在外面」不連頭盔熱點、client 把這一場當成經 VPN。現在空的也先探區網（不在家只多一次 400 ms）。
-- **§FRAME-HOTSPOT-AUTO 區網場次自動開熱點（已實作，無人驗過；App 那條路徑待配戴）**：熱點關著（使用者在外面關的）、不是經 VPN 的
-  VR 場次開始時自動開，host 照 §VR-HOTSPOT-AUTO 連上、多連線熱加入；45 秒內這台 host 沒連上就關。關的時機不是每場結束：
-  App 結束（正常結束自己關；當掉由下次啟動或頭盔常駐的 `update-hotspot.sh` 在 2 分鐘後補關）、換另一台 host 等不到。
-  熱點憑證在熱點關著時改從 Steam 設定（config.vdf 的配對那一組）讀，`update-hotspot.sh` 不再刪 `hotspot.json`。
-  11-16 配戴三場（關閉時機改之前的版本）：每場自動開、host 20～30 秒連上、結束關閉，0～1 次丟幀。
-  **待配戴**：從 VR 介面連開兩個遊戲（第二場應該立刻雙路徑）、退出 App 後熱點關掉。**還沒做**：熱點本來就開著但沒有裝置連上的
-  區網場次仍然不動；App 啟動時就先開熱點（現在是串流開始才開，開場約 17 秒只有一條路徑）。
-- **§VR-HOTSPOT-FASTJOIN host 主動重連（已修）**：熱點資訊一到就發的那一次連線一定落空（熱點約 3 秒後才出現），之後只剩 Windows 的
-  自動連線（實測 20、25、30、30 秒）。收到資訊後 40 秒內網卡未連線就每 2 秒再連一次：兩場無人 6.0、6.5 秒連上，第二條路徑
-  第 17～18 秒確認。其中一場連上約 5 秒後看門狗記到網卡斷開 5 秒又接回，另一場沒有，原因未查。
+- **頭盔熱點＋host 無線網卡的區網雙路徑（v2.0.209，11-17 配戴五場確認）**：§FRAME-HOTSPOT-AUTO／EARLY（App 看到已配對、能跑 VR
+  的 host 用區網位址上線就開熱點；60 秒沒人連、沒有場次接手就關；連開遊戲時留著，退出 App 才關，當掉由下次啟動或頭盔常駐的
+  `update-hotspot.sh` 補關）＋host 的 §VR-HOTSPOT-YIELD（Steam 在連就退讓）與 §VR-HOTSPOT-PROFILE（設定檔名稱＝SSID、手動；
+  `VipleStream-Frame` 會被 host 的 Steam 當成錯的設定檔而切斷，甚至整個停止連線）。配戴結果：App 啟動第 8 秒 host 連上，
+  五場都在開場第 4～5 秒確認第二條路徑、0 丟幀；其中一場家用 Wi-Fi 那條斷了約 70 秒（原因沒查到：頭盔、host、路由器都沒有紀錄），
+  影像靠熱點那條繼續。查法：host 的 Steam 紀錄 `logs/remote_connections.txt`、無線事件紀錄
+  `Microsoft-Windows-WLAN-AutoConfig/Operational`（約 12 分鐘就被洗掉）。
+  **沒實測**：Steam 沒在連時 server 自己連上的那條（只用 netsh 手動驗過 Steam 會接受）；換另一台 host 的路徑；熱點本來就開著但
+  沒有裝置連上的區網場次仍然不動。不要用關 host 的 `WifiAPEnabled` 當解法（Steam 反而會切斷我們的連線）。
 - **區網無人量測（熱點＋家用 Wi-Fi，host 2.0.202／頭盔 2.0.205）**：0 丟幀、0 刷新波、MTP p50／p95 40.5／42 ms；
   揮拍殘差 p50／p90／p99 0.10／0.27／0.54 mm（外地 0.34／1.06／2.44）；拋球 20 次 API 速度全部 2.00 m/s。資料在
   `temp/launchertest/ml/lan_1115/`。
