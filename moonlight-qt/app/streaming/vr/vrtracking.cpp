@@ -199,6 +199,9 @@ void VrTrackingSender::run()
             }
             vrSyntheticMenu(t, m_SyntheticMenuAtSec, &sample);
             vrSyntheticPadTest(t, m_SyntheticPadTestSec, &sample);
+            if (!m_PuppetPath.empty()) {
+                vrSyntheticPuppet(t, m_PuppetPath.c_str(), &sample);
+            }
             sample.predictNs = predictNs;
         }
         sample.version = VIPLE_VR_TRACKING_VERSION;

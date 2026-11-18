@@ -2993,10 +2993,15 @@ SteamVR 的合成器手上有沒有一張「遊戲上一格已經交、還沒送
   拍得太近、看了會鬥雞眼的 VR180 片用）。控制列的「Screen」鈕顯示格數（例如「M +3」）。
 - **`<host>` 上的影片（V3）**：**2.0.134 起預設只開放一個預設資料夾**（§MEDIA-DEFAULT，使用者 2026-11-11 定案；原本預設是整台 PC，
   配對過的 client 讀得到服務帳號讀得到的任何檔案）：Windows 是「公用影片」（`%PUBLIC%\Videos`）、Linux 是 `~/Videos`，資料夾不存在就沒有
-  東西可逛。其他來源必須在 server 的設定檔指定：`media_dirs = <資料夾>,<資料夾>` 只開放這些資料夾；`media_dirs = *` 是整台 PC
+  東西可逛。其他來源在 server 的網頁設定頁「General」最下面的「Shared video folders」填（§MEDIA-UI，2026-11-18），或直接寫設定檔：`media_dirs = <資料夾>,<資料夾>` 只開放這些資料夾；`media_dirs = *` 是整台 PC
   （Windows 的每一個本機／抽取式磁碟機，光碟與網路磁碟機略過；隱藏、系統屬性的檔案與資料夾不列；Linux 的 `/`）；
-  `media_share = disabled` 整個關掉。只列子資料夾與影片檔、唯讀。HTTPS 端點
-  `/viple/media/roots`、`/viple/media/list?root=&path=`、`/viple/media/file?root=&path=`，只有配對過的 client 憑證進得來；
+  `media_share = disabled` 整個關掉。只列子資料夾與影片檔。預設唯讀；`media_write = enabled`
+  （§MEDIA-FILEOPS，預設 disabled）之後，已配對的裝置才能在分享資料夾裡新增資料夾、複製、移動、永久刪除（不進資源回收筒，同時只跑一個背景工作）。
+  整台 PC（`media_dirs = *`，根是磁碟機）即使打開 `media_write` 也不能改。HTTPS 端點
+  `/viple/media/roots`（每個 `<Folder>` 多 `<Writable>0|1</Writable>`；舊 server 沒有這個欄位時當成唯讀）、
+  `/viple/media/list?root=&path=`、`/viple/media/file?root=&path=`、
+  `/viple/media/op`（`mkdir` 同步完成；`delete`／`copy`／`move` 受理後回 `<Job>`）、
+  `/viple/media/opstatus?id=`、`/viple/media/opcancel?id=`，只有配對過的 client 憑證進得來；
   路徑正規化後確認還在分享資料夾之內。檔案每次最多回 8 MB 的 206 範圍（SimpleWeb 會把整個回應先放進記憶體），FFmpeg
   讀完一段會在同一條連線要下一段。頭盔端用配對憑證開這個網址（寫在 app 自己的快取資料夾，播完刪掉）。
   網路斷一下（頭盔 Wi-Fi 換基地台實測斷 13 秒）時，播放器每秒重開這一段、最多 30 秒（log `lost the PC's shared folder`／

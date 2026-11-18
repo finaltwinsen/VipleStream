@@ -101,7 +101,8 @@ static PLT_THREAD asyncCallbackThread;
 static uint32_t lastGoodFrame;
 static uint32_t lastSeenFrame;
 static bool stopping;
-static bool disconnectPending;
+// §REVIEW-1118：sendMessageEnet 在鎖內寫、控制接收執行緒在鎖外讀。沒有 volatile 時編譯器可以把讀值留在暫存器，斷線旗標會看不到。
+static volatile bool disconnectPending;
 static bool encryptedControlStream;
 static bool hdrEnabled;
 static SS_HDR_METADATA hdrMetadata;
@@ -373,8 +374,23 @@ static void freeBasicLbqList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
 // Cleans up control stream
 void destroyControlStream(void) {
     LC_ASSERT(stopping);
-    PltDestroyCryptoContext(encryptionCtx);
-    PltDestroyCryptoContext(decryptionCtx);
+    // §REVIEW-1118B：encryptControlMessage 只在已持 enetMutex 時使用 encryptionCtx。
+    // 這裡先拿同一把鎖再銷毀，銷毀後立刻清成 NULL，後來的送出看到 NULL 就失敗，
+    // 不會拿到已釋放的 context。mutex 是本函式末尾才刪，這個時間點還在。
+    // 呼叫端是 LiStopConnection：stopControlStream 已 join 完控制、lossStats、
+    // IDR、async、RFI；啟動失敗時 startControlStream 也先 join 接收執行緒。
+    // 這些路徑都先放鎖才返回。外部執行緒若還停在 sendMessageEnet，本鎖會等它放掉，
+    // 它不會反過來等銷毀，所以不會死結。
+    PltLockMutex(&enetMutex);
+    if (encryptionCtx != NULL) {
+        PltDestroyCryptoContext(encryptionCtx);
+        encryptionCtx = NULL;
+    }
+    if (decryptionCtx != NULL) {
+        PltDestroyCryptoContext(decryptionCtx);
+        decryptionCtx = NULL;
+    }
+    PltUnlockMutex(&enetMutex);
     PltCloseEvent(&idrFrameRequiredEvent);
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&referenceFrameControlQueue));
     freeBasicLbqList(LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue));
@@ -556,6 +572,12 @@ static bool encryptControlMessage(PNVCTL_ENCRYPTED_PACKET_HEADER encPacket, PNVC
     int ivSize;
     int encryptedSize = sizeof(*packet) + packet->payloadLength;
 
+    // §REVIEW-1118B：呼叫端已持 enetMutex。destroyControlStream 在同一把鎖裡銷毀並清成 NULL。
+    // 這裡不再加鎖（這把鎖不可重入）。看到 NULL 就失敗，避免用到已釋放的 context。
+    if (encryptionCtx == NULL) {
+        return false;
+    }
+
     // NB: Setting the IV must happen while encPacket->seq is still in native byte-order!
     if (EncryptionFeaturesEnabled & SS_ENC_CONTROL_V2) {
         // Populate the IV in little endian byte order
@@ -602,6 +624,12 @@ static bool decryptControlMessageToV1(PNVCTL_ENCRYPTED_PACKET_HEADER encPacket, 
     int ivSize;
 
     *packet = NULL;
+
+    // §REVIEW-1118B：接收執行緒在 destroyControlStream 之前就已 join，正常不會和銷毀並行。
+    // context 建立失敗或已被清成 NULL 時直接失敗，不要把 NULL 傳進解密。
+    if (decryptionCtx == NULL) {
+        return false;
+    }
 
     // It must be an encrypted packet to begin with
     LC_ASSERT(encPacket->encryptedHeaderType == 0x0001);
@@ -1050,33 +1078,45 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
     BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
 
     if (ctlHdr->type == packetTypes[IDX_RUMBLE_DATA]) {
-        BbAdvanceBuffer(&bb, 4);
-
-        BbGet16(&bb, &queuedCb->data.rumble.controllerNumber);
-        BbGet16(&bb, &queuedCb->data.rumble.lowFreqRumble);
-        BbGet16(&bb, &queuedCb->data.rumble.highFreqRumble);
+        // §REVIEW-1118：截斷封包時 BbAdvanceBuffer 失敗不會推進位置，後面的 BbGet* 會把前面的位元組讀成錯誤欄位。讀不齊就丟棄，不要送進回呼。
+        if (!BbAdvanceBuffer(&bb, 4) ||
+            !BbGet16(&bb, &queuedCb->data.rumble.controllerNumber) ||
+            !BbGet16(&bb, &queuedCb->data.rumble.lowFreqRumble) ||
+            !BbGet16(&bb, &queuedCb->data.rumble.highFreqRumble)) {
+            free(queuedCb);
+            return;
+        }
 
         queuedCb->typeIndex = IDX_RUMBLE_DATA;
     }
     else if (ctlHdr->type == packetTypes[IDX_RUMBLE_TRIGGER_DATA]) {
-        BbGet16(&bb, &queuedCb->data.rumbleTriggers.controllerNumber);
-        BbGet16(&bb, &queuedCb->data.rumbleTriggers.leftTriggerMotor);
-        BbGet16(&bb, &queuedCb->data.rumbleTriggers.rightTriggerMotor);
+        if (!BbGet16(&bb, &queuedCb->data.rumbleTriggers.controllerNumber) ||
+            !BbGet16(&bb, &queuedCb->data.rumbleTriggers.leftTriggerMotor) ||
+            !BbGet16(&bb, &queuedCb->data.rumbleTriggers.rightTriggerMotor)) {
+            free(queuedCb);
+            return;
+        }
 
         queuedCb->typeIndex = IDX_RUMBLE_TRIGGER_DATA;
     }
     else if (ctlHdr->type == packetTypes[IDX_SET_MOTION_EVENT]) {
-        BbGet16(&bb, &queuedCb->data.setMotionEventState.controllerNumber);
-        BbGet16(&bb, &queuedCb->data.setMotionEventState.reportRateHz);
-        BbGet8(&bb, &queuedCb->data.setMotionEventState.motionType);
+        if (!BbGet16(&bb, &queuedCb->data.setMotionEventState.controllerNumber) ||
+            !BbGet16(&bb, &queuedCb->data.setMotionEventState.reportRateHz) ||
+            !BbGet8(&bb, &queuedCb->data.setMotionEventState.motionType)) {
+            free(queuedCb);
+            return;
+        }
 
         queuedCb->typeIndex = IDX_SET_MOTION_EVENT;
     }
     else if (ctlHdr->type == packetTypes[IDX_SET_RGB_LED]) {
-        BbGet16(&bb, &queuedCb->data.setControllerLed.controllerNumber);
-        BbGet8(&bb, &queuedCb->data.setControllerLed.r);
-        BbGet8(&bb, &queuedCb->data.setControllerLed.g);
-        BbGet8(&bb, &queuedCb->data.setControllerLed.b);
+        if (!BbGet16(&bb, &queuedCb->data.setControllerLed.controllerNumber) ||
+            !BbGet8(&bb, &queuedCb->data.setControllerLed.r) ||
+            !BbGet8(&bb, &queuedCb->data.setControllerLed.g) ||
+            !BbGet8(&bb, &queuedCb->data.setControllerLed.b)) {
+            free(queuedCb);
+            return;
+        }
 
         queuedCb->typeIndex = IDX_SET_RGB_LED;
     }
@@ -1084,13 +1124,15 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         queuedCb->typeIndex = IDX_HDR_INFO;
     }
     else if (ctlHdr->type == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS]){
-        BbGet16(&bb, &queuedCb->data.dsAdaptiveTrigger.controllerNumber);
-        BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.eventFlags);
-        BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeLeft);
-        BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeRight);
-
-        BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.left, DS_EFFECT_PAYLOAD_SIZE);
-        BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.right, DS_EFFECT_PAYLOAD_SIZE);
+        if (!BbGet16(&bb, &queuedCb->data.dsAdaptiveTrigger.controllerNumber) ||
+            !BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.eventFlags) ||
+            !BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeLeft) ||
+            !BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeRight) ||
+            !BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.left, DS_EFFECT_PAYLOAD_SIZE) ||
+            !BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.right, DS_EFFECT_PAYLOAD_SIZE)) {
+            free(queuedCb);
+            return;
+        }
         queuedCb->typeIndex = IDX_DS_ADAPTIVE_TRIGGERS;
     }
     else {
@@ -1272,30 +1314,53 @@ static void controlReceiveThreadFunc(void* context) {
             // The actual client callback will be invoked in the async callback thread.
             if (ctlHdr->type == packetTypes[IDX_HDR_INFO]) {
                 BYTE_BUFFER bb;
-                uint8_t enableByte;
+                uint8_t enableByte = 0;
+                bool hdrOk;
 
                 BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
 
-                BbGet8(&bb, &enableByte);
-                if (IS_SUNSHINE()) {
-                    // Zero the metadata buffer to properly handle older servers if we have to add new fields
-                    memset(&hdrMetadata, 0, sizeof(hdrMetadata));
+                // §REVIEW-1118B：先解析進區域變數，全部成功才一次發布。截斷的封包整包丟掉，
+                // 既有 HDR 狀態不變（BbGet 失敗會把輸出清成 0，就地寫會把模式關掉或寫成半包）。
+                // 不加鎖：LiGetHdrMetadata 可能在控制串流初始化之前或銷毀之後被呼叫，
+                // 這個檔案的 mutex 活不過那段時間。發布是整份結構賦值。
+                hdrOk = BbGet8(&bb, &enableByte);
+                if (hdrOk && IS_SUNSHINE()) {
+                    SS_HDR_METADATA parsed;
 
-                    // Sunshine sends HDR metadata in this message too
+                    memset(&parsed, 0, sizeof(parsed));
                     for (int i = 0; i < 3; i++) {
-                        BbGet16(&bb, &hdrMetadata.displayPrimaries[i].x);
-                        BbGet16(&bb, &hdrMetadata.displayPrimaries[i].y);
+                        if (!BbGet16(&bb, &parsed.displayPrimaries[i].x) ||
+                                !BbGet16(&bb, &parsed.displayPrimaries[i].y)) {
+                            hdrOk = false;
+                            break;
+                        }
                     }
-                    BbGet16(&bb, &hdrMetadata.whitePoint.x);
-                    BbGet16(&bb, &hdrMetadata.whitePoint.y);
-                    BbGet16(&bb, &hdrMetadata.maxDisplayLuminance);
-                    BbGet16(&bb, &hdrMetadata.minDisplayLuminance);
-                    BbGet16(&bb, &hdrMetadata.maxContentLightLevel);
-                    BbGet16(&bb, &hdrMetadata.maxFrameAverageLightLevel);
-                    BbGet16(&bb, &hdrMetadata.maxFullFrameLuminance);
+                    if (hdrOk &&
+                            (!BbGet16(&bb, &parsed.whitePoint.x) ||
+                             !BbGet16(&bb, &parsed.whitePoint.y) ||
+                             !BbGet16(&bb, &parsed.maxDisplayLuminance) ||
+                             !BbGet16(&bb, &parsed.minDisplayLuminance) ||
+                             !BbGet16(&bb, &parsed.maxContentLightLevel) ||
+                             !BbGet16(&bb, &parsed.maxFrameAverageLightLevel) ||
+                             !BbGet16(&bb, &parsed.maxFullFrameLuminance))) {
+                        hdrOk = false;
+                    }
+                    if (hdrOk) {
+                        hdrMetadata = parsed;
+                        hdrEnabled = (enableByte != 0);
+                    }
+                }
+                else if (hdrOk) {
+                    hdrEnabled = (enableByte != 0);
                 }
 
-                hdrEnabled = (enableByte != 0);
+                if (!hdrOk) {
+                    static int hdrTruncLogCount;
+                    if (hdrTruncLogCount < 3) {
+                        hdrTruncLogCount++;
+                        Limelog("[VIPLE-CTRL] discarding truncated HDR info (existing HDR state unchanged)\n");
+                    }
+                }
             }
 
             // Process client callbacks in a separate thread
@@ -1311,7 +1376,10 @@ static void controlReceiveThreadFunc(void* context) {
                 if (packetLength >= 6) {
                     // This is the extended termination message which contains a full HRESULT
                     BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_BIG);
-                    BbGet32(&bb, &terminationErrorCode);
+                    if (!BbGet32(&bb, &terminationErrorCode)) {
+                        // §REVIEW-1118：payload 不足 4 bytes 時 BbGet32 把錯誤碼清成 0（正常結束）。讀不到就當成提早結束。
+                        terminationErrorCode = ML_ERROR_UNEXPECTED_EARLY_TERMINATION;
+                    }
 
                     Limelog("Server notified termination reason: 0x%08x\n", terminationErrorCode);
 
@@ -1343,8 +1411,11 @@ static void controlReceiveThreadFunc(void* context) {
 
                     // This is the short termination message
                     BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
-                    BbGet16(&bb, &terminationReason);
-
+                    // §REVIEW-1118：讀不到原因時 BbGet16 會把值清成 0，而 0 就是 ML_ERROR_GRACEFUL_TERMINATION，截斷封包會被當成正常結束。
+                    if (!BbGet16(&bb, &terminationReason)) {
+                        terminationErrorCode = ML_ERROR_UNEXPECTED_EARLY_TERMINATION;
+                    }
+                    else {
                     Limelog("Server notified termination reason: 0x%04x\n", terminationReason);
 
                     // SERVER_TERMINATED_INTENDED
@@ -1362,6 +1433,7 @@ static void controlReceiveThreadFunc(void* context) {
                     else {
                         // Otherwise pass the reason unmodified
                         terminationErrorCode = terminationReason;
+                    }
                     }
                 }
 
@@ -1864,10 +1936,15 @@ int startControlStream(void) {
             ctlSock = INVALID_SOCKET;
         }
         else {
-            enet_peer_disconnect_now(peer, 0);
-            peer = NULL;
-            enet_host_destroy(client);
-            client = NULL;
+            // §REVIEW-1118：重連迴圈可能已把 peer／client 清成 NULL（接收執行緒已 join）。再解參考會崩潰。
+            if (peer != NULL) {
+                enet_peer_disconnect_now(peer, 0);
+                peer = NULL;
+            }
+            if (client != NULL) {
+                enet_host_destroy(client);
+                client = NULL;
+            }
         }
         return err;
     }
@@ -1898,10 +1975,15 @@ int startControlStream(void) {
             ctlSock = INVALID_SOCKET;
         }
         else {
-            enet_peer_disconnect_now(peer, 0);
-            peer = NULL;
-            enet_host_destroy(client);
-            client = NULL;
+            // §REVIEW-1118：重連迴圈可能已把 peer／client 清成 NULL（接收執行緒已 join）。再解參考會崩潰。
+            if (peer != NULL) {
+                enet_peer_disconnect_now(peer, 0);
+                peer = NULL;
+            }
+            if (client != NULL) {
+                enet_host_destroy(client);
+                client = NULL;
+            }
         }
         return err;
     }
@@ -1932,10 +2014,15 @@ int startControlStream(void) {
             ctlSock = INVALID_SOCKET;
         }
         else {
-            enet_peer_disconnect_now(peer, 0);
-            peer = NULL;
-            enet_host_destroy(client);
-            client = NULL;
+            // §REVIEW-1118：重連迴圈可能已把 peer／client 清成 NULL（接收執行緒已 join）。再解參考會崩潰。
+            if (peer != NULL) {
+                enet_peer_disconnect_now(peer, 0);
+                peer = NULL;
+            }
+            if (client != NULL) {
+                enet_host_destroy(client);
+                client = NULL;
+            }
         }
         return err;
     }
@@ -1959,10 +2046,15 @@ int startControlStream(void) {
             ctlSock = INVALID_SOCKET;
         }
         else {
-            enet_peer_disconnect_now(peer, 0);
-            peer = NULL;
-            enet_host_destroy(client);
-            client = NULL;
+            // §REVIEW-1118：重連迴圈可能已把 peer／client 清成 NULL（接收執行緒已 join）。再解參考會崩潰。
+            if (peer != NULL) {
+                enet_peer_disconnect_now(peer, 0);
+                peer = NULL;
+            }
+            if (client != NULL) {
+                enet_host_destroy(client);
+                client = NULL;
+            }
         }
         return err;
     }
@@ -1989,10 +2081,15 @@ int startControlStream(void) {
             ctlSock = INVALID_SOCKET;
         }
         else {
-            enet_peer_disconnect_now(peer, 0);
-            peer = NULL;
-            enet_host_destroy(client);
-            client = NULL;
+            // §REVIEW-1118：重連迴圈可能已把 peer／client 清成 NULL（接收執行緒已 join）。再解參考會崩潰。
+            if (peer != NULL) {
+                enet_peer_disconnect_now(peer, 0);
+                peer = NULL;
+            }
+            if (client != NULL) {
+                enet_host_destroy(client);
+                client = NULL;
+            }
         }
 
         return err;
@@ -2024,10 +2121,15 @@ int startControlStream(void) {
             ctlSock = INVALID_SOCKET;
         }
         else {
-            enet_peer_disconnect_now(peer, 0);
-            peer = NULL;
-            enet_host_destroy(client);
-            client = NULL;
+            // §REVIEW-1118：重連迴圈可能已把 peer／client 清成 NULL（接收執行緒已 join）。再解參考會崩潰。
+            if (peer != NULL) {
+                enet_peer_disconnect_now(peer, 0);
+                peer = NULL;
+            }
+            if (client != NULL) {
+                enet_host_destroy(client);
+                client = NULL;
+            }
         }
 
         return err;
@@ -2065,10 +2167,15 @@ int startControlStream(void) {
                 ctlSock = INVALID_SOCKET;
             }
             else {
-                enet_peer_disconnect_now(peer, 0);
-                peer = NULL;
-                enet_host_destroy(client);
-                client = NULL;
+                // §REVIEW-1118：重連迴圈可能已把 peer／client 清成 NULL（接收執行緒已 join）。再解參考會崩潰。
+                if (peer != NULL) {
+                    enet_peer_disconnect_now(peer, 0);
+                    peer = NULL;
+                }
+                if (client != NULL) {
+                    enet_host_destroy(client);
+                    client = NULL;
+                }
             }
 
             return err;

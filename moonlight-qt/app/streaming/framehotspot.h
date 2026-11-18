@@ -44,6 +44,7 @@
 #include <SDL_log.h>
 
 #include <string>
+#include <vector>
 
 #if defined(__linux__)
 #include <algorithm>
@@ -287,6 +288,16 @@ public:
     }
 
     static constexpr int kAppJoinWaitS = 60;  // §FRAME-HOTSPOT-EARLY：App 啟動時開了之後等裝置連上多久
+
+    // §HOTSPOT-FLAT：熱點上現在有哪些裝置（IPv4 字串）。平面場次用它把 host 無線網卡的位址交給 MP-QUIC 當第二條路徑
+    static std::vector<std::string> peerAddresses()
+    {
+#if defined(__linux__)
+        return hotspotPeers();
+#else
+        return {};
+#endif
+    }
 
     // §FRAME-HOTSPOT-AUTO：App 的行程定期呼叫（約每 15 秒）：熱點是這個行程名下的就更新標記檔的時間
     static void heartbeat()

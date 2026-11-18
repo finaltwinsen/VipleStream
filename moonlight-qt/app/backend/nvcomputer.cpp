@@ -21,10 +21,17 @@ bool logOnceOnChange(const QString& key, const QString& signature)
     static QHash<QString, QString> s_LastLoggedSignature;
 
     QMutexLocker locker(&s_Mutex);
-    if (s_LastLoggedSignature.value(key) == signature) {
+    // §REVIEW-1118：這張表以 uuid 當鍵、行程結束前都不清。區網一直冒出不同的 uuid 就會一直長大；
+    // 單筆簽章也可能是超長的介面字串。放不下就整表丟掉（最多多印一輪），單筆先截短。
+    const QString cacheKey = key.size() > 256 ? key.left(256) : key;
+    const QString stored = signature.size() > 8192 ? signature.left(8192) : signature;
+    if (s_LastLoggedSignature.size() >= 512 && !s_LastLoggedSignature.contains(cacheKey)) {
+        s_LastLoggedSignature.clear();
+    }
+    if (s_LastLoggedSignature.value(cacheKey) == stored) {
         return false;
     }
-    s_LastLoggedSignature.insert(key, signature);
+    s_LastLoggedSignature.insert(cacheKey, stored);
     return true;
 }
 }
@@ -262,15 +269,28 @@ void NvComputer::sortAppList()
 
 NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
 {
+    // §REVIEW-1118：/serverinfo 整包讀進記憶體後沒有長度上限（輪詢最多等 5 秒，能灌多少算多少）。
+    // 太大就不要逐個標籤再掃一次，也不要把超長的名稱、uuid 存進設定。
+    if (serverInfo.size() > (1 << 20)) {
+        serverInfo.clear();
+    }
+
     this->serverCert = http.serverCert();
 
     this->hasCustomName = false;
     this->name = NvHTTP::getXmlString(serverInfo, "hostname");
+    if (this->name.size() > 256) {
+        this->name.truncate(256);
+    }
     if (this->name.isEmpty()) {
         this->name = "UNKNOWN";
     }
 
     this->uuid = NvHTTP::getXmlString(serverInfo, "uniqueid");
+    // §REVIEW-1118：正式 host 的 uniqueid 是 36 字元的 UUID。更長的不要留，避免被當成另一台主機的鍵。
+    if (this->uuid.size() > 128) {
+        this->uuid.clear();
+    }
     QString newMacString = NvHTTP::getXmlString(serverInfo, "mac");
     if (newMacString != "00:00:00:00:00:00") {
         QStringList macOctets = newMacString.split(':');
@@ -301,6 +321,20 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     }
 
     this->displayModes = NvHTTP::getDisplayModeList(serverInfo);
+    // §REVIEW-1118：寬高、更新率來自未驗證的 XML。負值讓下面的 uint64 比較不是嚴格弱序（排序是未定義行為），
+    // 也會在「自動解析度」把負負得正當成最大模式。不合理的先拿掉，剩下的再排。
+    {
+        QVector<NvDisplayMode> kept;
+        kept.reserve(this->displayModes.size());
+        for (const NvDisplayMode& m : std::as_const(this->displayModes)) {
+            if (m.width <= 0 || m.height <= 0 || m.refreshRate <= 0 ||
+                    m.width > 16384 || m.height > 16384) {
+                continue;
+            }
+            kept.append(m);
+        }
+        this->displayModes.swap(kept);
+    }
     std::stable_sort(this->displayModes.begin(), this->displayModes.end(),
                      [](const NvDisplayMode& mode1, const NvDisplayMode& mode2) {
         return (uint64_t)mode1.width * mode1.height * mode1.refreshRate <
@@ -728,6 +762,11 @@ NvComputer::ReachabilityType NvComputer::getActiveAddressReachability(int* mtuOu
 }
 
 bool NvComputer::updateAppList(QVector<NvApp> newAppList) {
+    // §REVIEW-1118：已配對的 host 回的 applist 沒有筆數上限，整包會進記憶體與設定檔。
+    // 正常收藏庫到不了這個數；再多只留前面，避免設定檔被灌爆。
+    if (newAppList.size() > 8192) {
+        newAppList.resize(8192);
+    }
     if (appList == newAppList) {
         return false;
     }

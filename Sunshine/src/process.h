@@ -9,6 +9,7 @@
 #endif
 
 // standard includes
+#include <functional>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -164,6 +165,11 @@ namespace proc {
      * 只能從 /cancel 呼叫：terminate() 也會在啟動器結束、換 app 等時機被呼叫。
      */
     void quit_steam_game();
+
+    /// §VR-FOCUS（2026-11-18）：回傳一個函式，呼叫時列出「目前這個 Steam 遊戲安裝目錄底下正在執行的行程」。
+    /// 不是 Steam 遊戲（或目錄不像 ...\steamapps\common\<遊戲>）時回傳空的函式。安裝目錄在呼叫這個方法時就複製好，
+    /// 回傳的函式可以在別的執行緒用。
+    std::function<std::vector<uint32_t>()> steam_game_pid_lister();
 
     /**
      * §M.1.f defensive fix (2026-05-14) — clear `_owner_uuid` / `_owner_name`

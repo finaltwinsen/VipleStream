@@ -396,6 +396,13 @@ static void VideoReceiveThreadProc(void* context) {
     int queueStatus;
     bool useSelect;
     int waitingForVideoMs;
+    // §REVIEW-1118B：逾時分支的「影像封包停住」計時。有封包只清旗標，時鐘只在逾時分支讀。
+    bool noVideoClock;
+    uint64_t noVideoSinceMs;
+    uint64_t lastNoVideoIdrMs;
+#ifdef VIPLE_MPQUIC
+    unsigned int noVideoPolls;
+#endif
     bool encrypted;
 #ifndef LC_FUZZING
     // §FRZ-DIAG 2026-08-07：滾動 1 秒視訊 datagram 計數。watchdog fire 時
@@ -470,6 +477,12 @@ static void VideoReceiveThreadProc(void* context) {
     }
 
     waitingForVideoMs = 0;
+    noVideoClock = false;
+    noVideoSinceMs = 0;
+    lastNoVideoIdrMs = 0;
+#ifdef VIPLE_MPQUIC
+    noVideoPolls = 0;
+#endif
     while (!PltIsThreadInterrupted(&receiveThread)) {
         PRTP_PACKET packet;
 
@@ -591,8 +604,40 @@ static void VideoReceiveThreadProc(void* context) {
                 }
             }
 
+            // §REVIEW-1118B：收過完整幀後，這次逾時表示中間沒有影像封包。約 2 秒要求一次 IDR
+            // （每 2 秒最多一次），請還活著的控制通道讓 host 恢復。不在這裡結束連線：家用 Wi-Fi
+            // 暫停／接回、primary 只走主路、ENet 重連時，正常可以超過 10 秒沒有影像封包。
+            // LiRequestIdrFrame 只喚醒 IDR 執行緒（清參考幀佇列、設事件），這裡不送網路、不加鎖。
+            // QUIC 空 ring 約 1 ms 一圈，每 64 圈才讀一次時鐘；連續收包的路徑不進這裡。
+#ifdef VIPLE_MPQUIC
+            if (receivedFullFrame &&
+                    (!(useQuicVideo && !quicVideoFellBack) || (++noVideoPolls & 63) == 0))
+#else
+            if (receivedFullFrame)
+#endif
+            {
+                uint64_t nowMs = PltGetMillis();
+
+                if (!noVideoClock) {
+                    noVideoClock = true;
+                    noVideoSinceMs = nowMs;
+                }
+                else if (nowMs - noVideoSinceMs >= 2000 &&
+                         (lastNoVideoIdrMs == 0 || nowMs - lastNoVideoIdrMs >= 2000)) {
+                    lastNoVideoIdrMs = nowMs;
+                    Limelog("[VIPLE-VIDEO] no video packets for %llu ms, requesting IDR\n",
+                            (unsigned long long)(nowMs - noVideoSinceMs));
+                    LiRequestIdrFrame();
+                }
+            }
+
             // Receive timed out; try again
             continue;
+        }
+
+        // §REVIEW-1118B：有封包就把停住計時作廢。旗標平常是 false，連續收包不多做事。
+        if (noVideoClock) {
+            noVideoClock = false;
         }
 
         if (!receivedDataFromPeer) {

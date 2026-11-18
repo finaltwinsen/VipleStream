@@ -704,6 +704,8 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("vr-synthetic-pad-test", "(dev) PCVR with --vr-emulate: starting this many seconds after tracking starts, play a fixed "
                           "button sequence for the host's Xbox controller mode (A, trigger + left stick, d-pad up + bumper, then both menu buttons "
                           "held 2.5 s, repeated three times over 20 s), to check the host's virtual pad unattended (0 = off). Not saved.");
+    parser.addValueOption("vr-puppet", "(dev) PCVR with --vr-emulate: the head and both controllers (pose, buttons, sticks) follow this text "
+                          "file, re-read every 50 ms, to operate a VR game's menus unattended. See vrsynthetic.h for the format. Not saved.");
     parser.addValueOption("vr-fake-battery", "(dev) headset: pretend the battery is at this percentage (0-100) and not charging, to check the "
                           "low-battery icon and beeps (shown at 15% or less). Not saved.");
     parser.addValueOption("vr-low-battery-at", "(dev) headset: show the low-battery icon (and beep) at this percentage or less instead of 15%, "
@@ -1186,6 +1188,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             parser.showError(QString("vr-synthetic-pad-test must be a number of seconds within 0-3600 (0 = off): %1").arg(parser.value("vr-synthetic-pad-test")));
         }
         preferences->vrSyntheticPadTestSec = sec;
+    }
+    if (parser.isSet("vr-puppet")) {
+        preferences->vrPuppetFile = parser.value("vr-puppet");
     }
     preferences->vrHalfRate = parser.getToggleOptionValue("vr-half-rate", preferences->vrHalfRate);
     preferences->vrRateAuto = parser.getToggleOptionValue("vr-rate-auto", preferences->vrRateAuto);

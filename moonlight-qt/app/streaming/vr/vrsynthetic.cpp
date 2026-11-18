@@ -1,7 +1,10 @@
 #include "vrsynthetic.h"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace {
 
@@ -409,4 +412,223 @@ void vrSyntheticMenu(double t, double pressAt, VIPLE_VR_TRACKING* out)
     // MENU 是第 1 個鍵（pressCtr 的 bit 2..3）：按過之後計數比原值多 1（照協定填；host 目前只看 buttons 的準位，不讀 pressCtr）
     const uint32_t ctr = (((left.pressCtr >> 2) & 3u) + 1u) & 3u;
     left.pressCtr = (left.pressCtr & ~(3u << 2)) | (ctr << 2);
+}
+
+namespace {
+
+struct PuppetPose {
+    double pos[3];
+    double ypr[3];  // 度
+};
+
+struct PuppetState {
+    bool init = false;
+    double lastReadT = -1.0, lastT = 0.0;
+    double tau = 0.12;
+    PuppetPose target[3], cur[3];  // 0 頭、1 左、2 右
+    uint32_t buttons[2] = { 0, 0 };
+    double trig[2] = { -1.0, -1.0 }, grip[2] = { -1.0, -1.0 };
+    double stick[2][2] = { { 0, 0 }, { 0, 0 } };
+};
+
+PuppetState s_Puppet;
+
+uint32_t puppetButtons(const std::string& v)
+{
+    static const struct { const char* name; uint32_t bit; } kNames[] = {
+        { "trigger", VIPLE_VR_BTN_TRIGGER }, { "grip", VIPLE_VR_BTN_GRIP }, { "a", VIPLE_VR_BTN_A }, { "b", VIPLE_VR_BTN_B },
+        { "menu", VIPLE_VR_BTN_MENU }, { "system", VIPLE_VR_BTN_SYSTEM }, { "stick", VIPLE_VR_BTN_THUMBSTICK },
+        { "trackpad", VIPLE_VR_BTN_TRACKPAD }, { "c", VIPLE_VR_BTN_C }, { "d", VIPLE_VR_BTN_D }, { "bumper", VIPLE_VR_BTN_BUMPER },
+    };
+    uint32_t bits = 0;
+    size_t i = 0;
+    while (i <= v.size()) {
+        size_t j = v.find(',', i);
+        if (j == std::string::npos) {
+            j = v.size();
+        }
+        std::string tok = v.substr(i, j - i);
+        while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\r' || tok.back() == '\n' || tok.back() == '\t')) {
+            tok.pop_back();
+        }
+        while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t')) {
+            tok.erase(tok.begin());
+        }
+        for (const auto& n : kNames) {
+            if (tok == n.name) {
+                bits |= n.bit;
+            }
+        }
+        i = j + 1;
+    }
+    return bits;
+}
+
+void puppetRead(const char* path, PuppetState* st)
+{
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) {
+        return;
+    }
+    char line[256];
+    // 沒寫的按鍵類欄位＝放開；姿態沒寫＝維持
+    uint32_t buttons[2] = { 0, 0 };
+    double trig[2] = { -1.0, -1.0 }, grip[2] = { -1.0, -1.0 };
+    double stick[2][2] = { { 0, 0 }, { 0, 0 } };
+    bool any = false;
+    while (fgets(line, sizeof(line), f) != nullptr) {
+        char* eq = strchr(line, '=');
+        if (eq == nullptr || line[0] == '#') {
+            continue;
+        }
+        std::string key(line, eq - line);
+        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) {
+            key.pop_back();
+        }
+        const char* val = eq + 1;
+        double v[6] = { 0, 0, 0, 0, 0, 0 };
+        const int n = sscanf(val, "%lf %lf %lf %lf %lf %lf", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+        any = true;
+        if (key == "head" || key == "left" || key == "right") {
+            const int idx = key == "head" ? 0 : (key == "left" ? 1 : 2);
+            if (n >= 3) {
+                for (int k = 0; k < 3; k++) {
+                    st->target[idx].pos[k] = v[k];
+                    st->target[idx].ypr[k] = n >= 4 + k ? v[3 + k] : 0.0;
+                }
+            }
+        }
+        else if (key == "lbtn") {
+            buttons[0] = puppetButtons(val);
+        }
+        else if (key == "rbtn") {
+            buttons[1] = puppetButtons(val);
+        }
+        else if (key == "ltrig" && n >= 1) {
+            trig[0] = v[0];
+        }
+        else if (key == "rtrig" && n >= 1) {
+            trig[1] = v[0];
+        }
+        else if (key == "lgrip" && n >= 1) {
+            grip[0] = v[0];
+        }
+        else if (key == "rgrip" && n >= 1) {
+            grip[1] = v[0];
+        }
+        else if (key == "lstick" && n >= 2) {
+            stick[0][0] = v[0];
+            stick[0][1] = v[1];
+        }
+        else if (key == "rstick" && n >= 2) {
+            stick[1][0] = v[0];
+            stick[1][1] = v[1];
+        }
+        else if (key == "tau" && n >= 1 && v[0] >= 0.005 && v[0] <= 5.0) {
+            st->tau = v[0];
+        }
+    }
+    fclose(f);
+    if (!any) {
+        return;  // 寫到一半讀到空檔：這一次不算
+    }
+    for (int h = 0; h < 2; h++) {
+        st->buttons[h] = buttons[h];
+        st->trig[h] = trig[h];
+        st->grip[h] = grip[h];
+        st->stick[h][0] = stick[h][0];
+        st->stick[h][1] = stick[h][1];
+    }
+}
+
+// q = qYaw(Y)·qPitch(X)·qRoll(Z)，存成 x, y, z, w
+void yprToQuat(const double yprDeg[3], float q[4])
+{
+    float yp[4];
+    yawPitchToQuat(yprDeg[0] * kDegToRad, yprDeg[1] * kDegToRad, yp);
+    const double r = yprDeg[2] * kDegToRad;
+    const double rz = std::sin(r * 0.5), rw = std::cos(r * 0.5);
+    // (yp) * (0, 0, rz, rw)
+    q[0] = (float)(yp[0] * rw + yp[1] * rz);
+    q[1] = (float)(yp[1] * rw - yp[0] * rz);
+    q[2] = (float)(yp[2] * rw + yp[3] * rz);
+    q[3] = (float)(yp[3] * rw - yp[2] * rz);
+}
+
+}  // namespace
+
+void vrSyntheticPuppet(double t, const char* path, VIPLE_VR_TRACKING* out)
+{
+    if (path == nullptr || path[0] == '\0') {
+        return;
+    }
+    PuppetState& st = s_Puppet;
+    if (!st.init) {
+        st.init = true;
+        const PuppetPose head = { { 0.0, kHeadHeightM, 0.0 }, { 0.0, 0.0, 0.0 } };
+        const PuppetPose left = { { -0.20, kHeadHeightM - 0.35, -0.35 }, { 0.0, 0.0, 0.0 } };
+        const PuppetPose right = { { 0.20, kHeadHeightM - 0.35, -0.35 }, { 0.0, 0.0, 0.0 } };
+        st.target[0] = st.cur[0] = head;
+        st.target[1] = st.cur[1] = left;
+        st.target[2] = st.cur[2] = right;
+        st.lastT = t;
+    }
+    if (st.lastReadT < 0.0 || t - st.lastReadT >= 0.05 || t < st.lastReadT) {
+        st.lastReadT = t;
+        puppetRead(path, &st);
+    }
+    double dt = t - st.lastT;
+    st.lastT = t;
+    if (dt < 0.0 || dt > 0.5) {
+        dt = 0.0;
+    }
+    const double k = 1.0 - std::exp(-dt / st.tau);
+    static const int kPoseIdx[3] = { VIPLE_VR_POSE_HMD, VIPLE_VR_POSE_LEFT, VIPLE_VR_POSE_RIGHT };
+    for (int i = 0; i < 3; i++) {
+        float pos[3], lin[3], rot[4];
+        for (int a = 0; a < 3; a++) {
+            const double err = st.target[i].pos[a] - st.cur[i].pos[a];
+            st.cur[i].pos[a] += err * k;
+            // 平滑之後還剩的誤差除以時間常數＝這一刻的速度
+            lin[a] = (float)((st.target[i].pos[a] - st.cur[i].pos[a]) / st.tau);
+            pos[a] = (float)st.cur[i].pos[a];
+            st.cur[i].ypr[a] += (st.target[i].ypr[a] - st.cur[i].ypr[a]) * k;
+        }
+        // 真人的手不會完全不動：加一點很小的晃動（位置 ±1.5 mm、角度 ±0.3°，幾種不成整數比的頻率）。完全靜止的控制器
+        // 有的遊戲會當成沒人拿著而把指標雷射收起來（Premium Bowling）。頭不加
+        double ypr[3] = { st.cur[i].ypr[0], st.cur[i].ypr[1], st.cur[i].ypr[2] };
+        if (i != 0) {
+            const double ph = i * 1.7;
+            const double w[3] = { 2 * kPi * 0.9, 2 * kPi * 1.3, 2 * kPi * 0.7 };
+            for (int a = 0; a < 3; a++) {
+                pos[a] += (float)(0.0015 * std::sin(w[a] * t + ph + a));
+                lin[a] += (float)(0.0015 * w[a] * std::cos(w[a] * t + ph + a));
+                ypr[a] += 0.3 * std::sin(w[(a + 1) % 3] * t + ph * 2 + a);
+            }
+        }
+        yprToQuat(ypr, rot);
+        const float zero[3] = { 0.0f, 0.0f, 0.0f };
+        setPose(&out->pose[kPoseIdx[i]], pos, rot, lin, zero);
+    }
+    out->flags |= VIPLE_VR_TRK_HMD | VIPLE_VR_TRK_LEFT | VIPLE_VR_TRK_RIGHT | VIPLE_VR_TRK_PRESENCE;
+    for (int h = 0; h < 2; h++) {
+        VIPLE_VR_CONTROLLER_INPUT& in = out->input[h];
+        in.flags |= VIPLE_VR_CTRL_ACTIVE | VIPLE_VR_CTRL_FOCUSED;
+        in.profile = VIPLE_VR_CTRL_PROFILE_FRAME;
+        in.battery = 100;
+        in.buttons = st.buttons[h];
+        in.touches = st.buttons[h];
+        auto axis = [](double v, bool pressed) {
+            const double x = v >= 0.0 ? v : (pressed ? 1.0 : 0.0);
+            return (uint16_t)(x <= 0.0 ? 0 : (x >= 1.0 ? 65535 : (int)(x * 65535.0)));
+        };
+        in.trigger = axis(st.trig[h], (st.buttons[h] & VIPLE_VR_BTN_TRIGGER) != 0);
+        in.grip = axis(st.grip[h], (st.buttons[h] & VIPLE_VR_BTN_GRIP) != 0);
+        auto stickv = [](double v) {
+            const double x = v < -1.0 ? -1.0 : (v > 1.0 ? 1.0 : v);
+            return (int16_t)(x * 32767.0);
+        };
+        in.stickX = stickv(st.stick[h][0]);
+        in.stickY = stickv(st.stick[h][1]);
+    }
 }

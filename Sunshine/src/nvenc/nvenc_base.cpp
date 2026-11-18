@@ -289,7 +289,12 @@ namespace nvenc {
     }
     enc_config.rcParams.averageBitRate = client_config.bitrate * 1000;
 
+    // §REVIEW-1118B：記下來給 reconfigure_framerate 用同一條式子。下面的式子本身不變。
+    custom_vbv_buffer = false;
+    vbv_percentage_increase = 0;
     if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE)) {
+      custom_vbv_buffer = true;
+      vbv_percentage_increase = config.vbv_percentage_increase;
       const auto safe_framerate = std::max(1, client_config.framerate);
       enc_config.rcParams.vbvBufferSize = static_cast<uint32_t>(static_cast<uint64_t>(client_config.bitrate) * 1000 / safe_framerate);
       if (config.vbv_percentage_increase > 0) {
@@ -612,6 +617,8 @@ namespace nvenc {
     encoder_params = {};
     stored_init_params = {};
     stored_enc_config = {};
+    custom_vbv_buffer = false;
+    vbv_percentage_increase = 0;
     level_pinned = false;
     pinned_video_format = -1;
     unpinned_level = 0;
@@ -979,6 +986,66 @@ namespace nvenc {
       BOOST_LOG(debug) << "[VIPLE-ABR] NvEnc: bitrate reconfigured to " << bitrate_kbps << " kbps"
                        << " (vbv=" << stored_enc_config.rcParams.vbvBufferSize << ", smooth)";
     }
+    return true;
+  }
+
+  // §REVIEW-1118B：中途改幀率。VBV 用建立時同一條式子（現在的 averageBitRate／fps，再加上當時的百分比），
+  // 不 reset、不強制 IDR。失敗就把本機參數放回去，呼叫端不會去改擷取節拍。
+  bool nvenc_base::reconfigure_framerate(int framerate) {
+    if (!encoder || !nvenc) {
+      BOOST_LOG(error) << "[VIPLE-FPS] NvEnc: framerate reconfigure called on uninitialized encoder";
+      return false;
+    }
+    if (framerate <= 0) {
+      return false;
+    }
+    // framerateX100 建立時分母不是 1。這個封包只有整數 fps，改掉會把 59.94 收成整數。呼叫端也會擋。
+    if (stored_init_params.frameRateDen != 1) {
+      BOOST_LOG(info) << "[VIPLE-FPS] NvEnc: keeping fractional frame rate "
+                      << stored_init_params.frameRateNum << "/" << stored_init_params.frameRateDen;
+      return false;
+    }
+    if (stored_init_params.frameRateNum == static_cast<uint32_t>(framerate)) {
+      return true;
+    }
+
+    const uint32_t old_num = stored_init_params.frameRateNum;
+    const uint32_t old_den = stored_init_params.frameRateDen;
+    const uint32_t old_vbv = stored_enc_config.rcParams.vbvBufferSize;
+    const uint32_t old_delay = stored_enc_config.rcParams.vbvInitialDelay;
+
+    stored_init_params.frameRateNum = static_cast<uint32_t>(framerate);
+    stored_init_params.frameRateDen = 1;
+    if (custom_vbv_buffer) {
+      const int safe_fps = std::max(1, framerate);
+      uint32_t vbv = static_cast<uint32_t>(static_cast<uint64_t>(stored_enc_config.rcParams.averageBitRate) / static_cast<uint32_t>(safe_fps));
+      if (vbv_percentage_increase > 0) {
+        vbv += static_cast<uint32_t>(static_cast<uint64_t>(vbv) * static_cast<uint32_t>(vbv_percentage_increase) / 100);
+      }
+      stored_enc_config.rcParams.vbvBufferSize = vbv;
+      stored_enc_config.rcParams.vbvInitialDelay = vbv;
+    }
+
+    NV_ENC_RECONFIGURE_PARAMS reconfigure_params = {min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER)};
+    reconfigure_params.reInitEncodeParams = stored_init_params;
+    // 標頭的不支援清單沒有 frame rate。resetEncoder 是清碼率控制狀態，註解寫要配 IDR。
+    // 封包處理端已經 raise idr，這裡再 forceIDR 會連送兩張。
+    reconfigure_params.resetEncoder = 0;
+    reconfigure_params.forceIDR = 0;
+
+    // 不在這裡 unpin level 再重試。bitrate 那條失敗會把釘住的 level 拆掉再送一次；
+    // 幀率若是因為別的原因被拒，拆掉 level 會讓下一筆 ABR 重設改到參數集。失敗就整筆放回去。
+    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params))) {
+      BOOST_LOG(error) << "[VIPLE-FPS] NvEnc: NvEncReconfigureEncoder() failed: " << last_nvenc_error_string;
+      stored_init_params.frameRateNum = old_num;
+      stored_init_params.frameRateDen = old_den;
+      stored_enc_config.rcParams.vbvBufferSize = old_vbv;
+      stored_enc_config.rcParams.vbvInitialDelay = old_delay;
+      return false;
+    }
+
+    BOOST_LOG(info) << "[VIPLE-FPS] NvEnc: frame rate reconfigured to " << framerate
+                    << " fps (vbv=" << stored_enc_config.rcParams.vbvBufferSize << ", no reset)";
     return true;
   }
 

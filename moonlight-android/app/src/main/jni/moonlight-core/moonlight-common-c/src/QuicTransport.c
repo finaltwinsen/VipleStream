@@ -644,6 +644,9 @@ int quicConnect(const QUIC_CONNECT_PARAMS* params) {
     picoquic_set_default_tp_value(g_ctx.quic,
         picoquic_tp_max_datagram_frame_size, 65535);
     picoquic_set_default_multipath_option(g_ctx.quic, 1);
+    // §HOTSPOT-FLAT：picoquic 開多路徑時把 initial_max_path_id 設成 2（最多 3 個 path ID）。頭盔在家時 wlan0 一條、
+    // Tailscale 介面兩條就用完，熱點那條落得 PATH_ID_BLOCKED（1088）。兩端都提高到 4；對端是舊版時仍是它的 2
+    picoquic_set_default_tp_value(g_ctx.quic, picoquic_tp_initial_max_path_id, 4);
     // §Q-MP-FIX 2026-05-24: 必須啟用 path callbacks，否則
     // picoquic_callback_path_available / path_suspended / path_deleted
     // 永遠不會觸發。picoquic 預設 are_path_callbacks_enabled=0。
@@ -918,6 +921,9 @@ int quicServerStart(unsigned short port, const char* certPath,
     picoquic_set_default_tp_value(g_ctx.quic,
         picoquic_tp_max_datagram_frame_size, 65535);
     picoquic_set_default_multipath_option(g_ctx.quic, 1);
+    // §HOTSPOT-FLAT：picoquic 開多路徑時把 initial_max_path_id 設成 2（最多 3 個 path ID）。頭盔在家時 wlan0 一條、
+    // Tailscale 介面兩條就用完，熱點那條落得 PATH_ID_BLOCKED（1088）。兩端都提高到 4；對端是舊版時仍是它的 2
+    picoquic_set_default_tp_value(g_ctx.quic, picoquic_tp_initial_max_path_id, 4);
     picoquic_enable_path_callbacks_default(g_ctx.quic, 1);
     quicApplyCongestionAlgo(g_ctx.quic);
 
@@ -3142,6 +3148,11 @@ static void quicTryRecoverPaths(int* rejectedIfs, int* rejectedCount) {
             if (!sf->picoquicDeleted || sf->peerUsedLen == 0 ||
                 quicSamePeer(&sf->peerUsed, &g_ctx.peerAddr))
                 continue;
+            // §HOTSPOT-FLAT：從來沒收到過任何封包的那一種不重建。例：Tailscale 介面配 server 的公網位址，建了 2 秒就死；
+            // 以前 path ID 用完（PATH_ID_BLOCKED）所以重建一直失敗、看不出來，上限提高後變成每 10 秒建一條、死一條。
+            // 通過、之後才斷的路徑（pktsRecv > 0）照舊每輪重建
+            if (sf->pktsRecv == 0)
+                continue;
             bool dup = false;
             for (int k = 0; k < altCount; k++) {
                 if (alt[k].ifIndex == sf->interfaceIndex && quicSamePeer(&alt[k].peer, &sf->peerUsed)) {
@@ -3308,6 +3319,26 @@ void quicSetAltPeers(const struct sockaddr_storage* addrs,
         }
         g_ctx.altPeerCount = count;
     }
+}
+
+// §HOTSPOT-FLAT：只在尾端加一筆、最後才把筆數加一——復原執行緒同時在讀也只會看到加之前或加之後的清單
+bool quicAddAltPeer(const struct sockaddr_storage* addr, SOCKADDR_LEN addrLen) {
+    if (!addr || addrLen <= 0 || addrLen > (SOCKADDR_LEN)sizeof(struct sockaddr_storage))
+        return false;
+    if (g_ctx.peerAddrLen > 0 && quicSamePeer(addr, &g_ctx.peerAddr))
+        return false;
+    int n = g_ctx.altPeerCount;
+    for (int i = 0; i < n; i++) {
+        if (quicSamePeer(addr, &g_ctx.altPeerAddrs[i]))
+            return false;
+    }
+    if (n >= QUIC_MAX_ALT_PEERS)
+        return false;
+    memset(&g_ctx.altPeerAddrs[n], 0, sizeof(g_ctx.altPeerAddrs[n]));
+    memcpy(&g_ctx.altPeerAddrs[n], addr, addrLen);
+    g_ctx.altPeerAddrLens[n] = addrLen;
+    g_ctx.altPeerCount = n + 1;
+    return true;
 }
 
 // §MP-ONLINK：前 prefixLen 位元相同即同子網路。

@@ -1941,6 +1941,81 @@ Flickable {
                 // does 240 fps on the benchmark machine; the old red
                 // ⚠ label was a leftover from the v1.2.56-era cap.
 
+                // §PYROWAVE-HINT（2026-11-18）：編碼格式放在碼率上面——它決定碼率要多少才夠，放在後面的群組裡沒有人會注意到
+                Label {
+                    width: parent.width
+                    id: resVCCTitle
+                    text: qsTr("Video codec")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                AutoResizingComboBox {
+                    // ignore setting the index at first, and actually set it when the component is loaded
+                    Component.onCompleted: {
+                        var saved_vcc = StreamingPreferences.videoCodecConfig
+
+                        // Default to Automatic (relevant if HDR is enabled,
+                        // where we will match none of the codecs in the list)
+                        currentIndex = 0
+
+                        for(var i = 0; i < codecListModel.count; i++) {
+                            var el_vcc = codecListModel.get(i).val;
+                            if (saved_vcc === el_vcc) {
+                                currentIndex = i
+                                break
+                            }
+                        }
+
+                        activated(currentIndex)
+                    }
+
+                    id: codecComboBox
+                    textRole: "text"
+                    model: ListModel {
+                        id: codecListModel
+                        ListElement {
+                            text: qsTr("Automatic (Recommended)")
+                            val: StreamingPreferences.VCC_AUTO
+                        }
+                        ListElement {
+                            text: qsTr("H.264")
+                            val: StreamingPreferences.VCC_FORCE_H264
+                        }
+                        ListElement {
+                            text: qsTr("HEVC (H.265)")
+                            val: StreamingPreferences.VCC_FORCE_HEVC
+                        }
+                        ListElement {
+                            text: qsTr("AV1 (Experimental)")
+                            val: StreamingPreferences.VCC_FORCE_AV1
+                        }
+                        ListElement {
+                            text: qsTr("PyroWave (Ultra-Low Latency LAN)")
+                            val: StreamingPreferences.VCC_FORCE_PYROWAVE
+                        }
+                    }
+                    // ::onActivated must be used, as it only listens for when the index is changed by a human
+                    onActivated : {
+                        if (enabled) {
+                            StreamingPreferences.videoCodecConfig = codecListModel.get(currentIndex).val
+                        }
+                    }
+                }
+
+                // §PYROWAVE-HINT（2026-11-18）：選了 PyroWave 而碼率不夠時直接講（否則畫面整片糊，使用者不知道原因）
+                Label {
+                    id: pyroWaveBitrateHint
+                    readonly property int recommendedKbps: StreamingPreferences.getPyroWaveRecommendedBitrate(StreamingPreferences.width, StreamingPreferences.height, StreamingPreferences.fps)
+                    width: parent.width
+                    visible: StreamingPreferences.videoCodecConfig === StreamingPreferences.VCC_FORCE_PYROWAVE
+                             && StreamingPreferences.bitrateKbps < recommendedKbps
+                    text: qsTr("PyroWave needs a much higher bitrate than other codecs and is meant for a wired LAN. At the current %1 Mbps the picture will be blurry: raise the bitrate to at least %2 Mbps, or use Automatic.").arg(StreamingPreferences.bitrateKbps / 1000.0).arg(recommendedKbps / 1000.0)
+                    color: "#FFB347"
+                    font.pointSize: 9
+                    wrapMode: Text.Wrap
+                }
+
                 Label {
                     width: parent.width
                     id: bitrateTitle
@@ -3048,69 +3123,6 @@ Flickable {
                     onActivated: {
                         if (enabled) {
                             StreamingPreferences.videoDecoderSelection = decoderListModel.get(currentIndex).val
-                        }
-                    }
-                }
-
-                Label {
-                    width: parent.width
-                    id: resVCCTitle
-                    visible: !settingsPage.vrSettingsMode  // §SETTINGS-MODE：VR 固定 HEVC／8-bit，不看這個
-                    text: qsTr("Video codec")
-                    font.pointSize: 12
-                    wrapMode: Text.Wrap
-                }
-
-                AutoResizingComboBox {
-                    // ignore setting the index at first, and actually set it when the component is loaded
-                    Component.onCompleted: {
-                        var saved_vcc = StreamingPreferences.videoCodecConfig
-
-                        // Default to Automatic (relevant if HDR is enabled,
-                        // where we will match none of the codecs in the list)
-                        currentIndex = 0
-
-                        for(var i = 0; i < codecListModel.count; i++) {
-                            var el_vcc = codecListModel.get(i).val;
-                            if (saved_vcc === el_vcc) {
-                                currentIndex = i
-                                break
-                            }
-                        }
-
-                        activated(currentIndex)
-                    }
-
-                    id: codecComboBox
-                    visible: !settingsPage.vrSettingsMode  // §SETTINGS-MODE：VR 固定 HEVC／8-bit，不看這個
-                    textRole: "text"
-                    model: ListModel {
-                        id: codecListModel
-                        ListElement {
-                            text: qsTr("Automatic (Recommended)")
-                            val: StreamingPreferences.VCC_AUTO
-                        }
-                        ListElement {
-                            text: qsTr("H.264")
-                            val: StreamingPreferences.VCC_FORCE_H264
-                        }
-                        ListElement {
-                            text: qsTr("HEVC (H.265)")
-                            val: StreamingPreferences.VCC_FORCE_HEVC
-                        }
-                        ListElement {
-                            text: qsTr("AV1 (Experimental)")
-                            val: StreamingPreferences.VCC_FORCE_AV1
-                        }
-                        ListElement {
-                            text: qsTr("PyroWave (Ultra-Low Latency LAN)")
-                            val: StreamingPreferences.VCC_FORCE_PYROWAVE
-                        }
-                    }
-                    // ::onActivated must be used, as it only listens for when the index is changed by a human
-                    onActivated : {
-                        if (enabled) {
-                            StreamingPreferences.videoCodecConfig = codecListModel.get(currentIndex).val
                         }
                     }
                 }

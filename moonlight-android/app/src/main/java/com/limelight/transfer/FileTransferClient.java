@@ -33,9 +33,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
+import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLHandshakeException;
+import javax.net.ssl.SSLProtocolException;
+
 import okhttp3.Call;
+import okhttp3.ConnectionPool;
 import okhttp3.HttpUrl;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -52,6 +58,13 @@ public class FileTransferClient {
     private static final String TAG = "VipleXfer";
     private static final long POLL_INTERVAL_MS = 2000;
     private static final long CHUNK_BYTES = 64 * 1024;
+    /**
+     * §REVIEW-1118B：閒置連線留多久。必須大於 POLL_INTERVAL_MS，否則 204 回來的
+     * 連線會在下一輪 poll 之前被清掉，keep-alive 等於沒做。5 分鐘是 OkHttp 預設。
+     */
+    private static final int TLS_KEEPALIVE_MINUTES = 5;
+    /** §REVIEW-1118B：重用／重建累計只每 5 分鐘印一次，不可跟著 2 秒 poll 印。 */
+    private static final long CLIENT_STATS_LOG_INTERVAL_NS = 5L * 60L * 1000000000L;
 
     /** UI 回呼介面：給 Game 顯示 toast / 更新 overlay。 */
     public interface Listener {
@@ -60,16 +73,31 @@ public class FileTransferClient {
 
     private final Context appContext;
     /**
-     * §N.5.bug fix (2026-05-14): Supplier 替代 OkHttpClient field. 原 cached
-     * OkHttpClient instance 用整個 FileTransferClient lifetime — Conscrypt/
-     * OkHttp 內部 SSL state 累積到第 K 個 request 後 TLS handshake corrupt,
-     * 報 TLSV1_ALERT_INTERNAL_ERROR (server-side verify_callback 沒對應 fire).
-     * 改成每次 newCall 之前 supplier.get() 拿 fresh wrapped client
-     * (NvHTTP.getLongConnectClient now returns fresh per call) — emulate
-     * NvHTTP short-lived call pattern (openHttpConnection 每次 fresh wrap)，
-     * 該 pattern 一直工作正常.
+     * §N.5.bug fix (2026-05-14): supplier 仍是 NvHTTP.getLongConnectClient。
+     * 那個方法每次都做新的 SSLContext。同一顆 client 累積太多次握手後，
+     * Pixel 5 的 Conscrypt 會丟 TLSV1_ALERT_INTERNAL_ERROR。
+     *
+     * §REVIEW-1118B：不再每次 newCall 都呼叫 supplier。每次新的 SSLSocketFactory
+     * 讓 OkHttp 連線位址對不上，204 也會完整握手。這裡留一顆 client 重用；
+     * 只有握手失敗才標成要換，而且傳輸中的 Call 不換。
      */
     private final java.util.function.Supplier<OkHttpClient> clientSupplier;
+    /** §REVIEW-1118B：整場共用的 client。null 表示還沒建立。交換時要拿 sharedClientLock。 */
+    private volatile OkHttpClient sharedClient;
+    /** §REVIEW-1118B：這顆 client 的握手已壞，下次沒有傳輸中的 Call 才換。 */
+    private volatile boolean clientStale;
+    /**
+     * §REVIEW-1118B：只保護 client 的交換。不在持鎖時做 newCall().execute()。
+     * start／stop 鎖的是 this，兩邊不互相呼叫，不會死結。
+     */
+    private final Object sharedClientLock = new Object();
+    /** §REVIEW-1118B：交出既有 client 的次數。第一顆以及每次重建的那一次不算。 */
+    private final AtomicLong reuseCount = new AtomicLong();
+    /** §REVIEW-1118B：握手失敗後真正換掉 client 的次數。 */
+    private final AtomicLong rebuildCount = new AtomicLong();
+    /** §REVIEW-1118B：只由 poll 執行緒寫。用來每 5 分鐘印一次累計。 */
+    private long nextClientStatsLogNs;
+    private boolean clientStatsLogArmed;
     private final HttpUrl baseHttpsUrl;
     private final Listener listener;
     private final ScheduledExecutorService scheduler =
@@ -172,15 +200,150 @@ public class FileTransferClient {
         return !started || token.equals(canceledToken) || !token.equals(activeToken.get());
     }
 
+    /**
+     * §REVIEW-1118B：getLongConnectClient 繼承 NvHTTP 的 ConnectionPool(0, 1ms)，
+     * 閒置連線會立刻關掉，同一顆 client 也不會 keep-alive。這裡換一顆只給
+     * 檔案傳輸用的 pool。SSLSocketFactory 沿用，連線位址才對得上。
+     */
+    private static OkHttpClient keepAliveClient(OkHttpClient fresh) {
+        return fresh.newBuilder()
+                .connectionPool(new ConnectionPool(1, TLS_KEEPALIVE_MINUTES, TimeUnit.MINUTES))
+                .build();
+    }
+
+    /**
+     * §REVIEW-1118B：正常情況不拿鎖，直接交出現有的 client。
+     * 要新建或重建才進 sharedClientLock，而且鎖裡不做 HTTP。
+     * activeCall 還在時不換：那次傳輸的 Call 已經綁在舊 client 上，
+     * poll 與 /transfer/result 也繼續用同一顆，避免傳輸中途換連線。
+     */
+    private OkHttpClient clientForNewCall() {
+        OkHttpClient current = sharedClient;
+        if (current != null && !clientStale) {
+            reuseCount.incrementAndGet();
+            return current;
+        }
+        synchronized (sharedClientLock) {
+            current = sharedClient;
+            if (current != null && !clientStale) {
+                reuseCount.incrementAndGet();
+                return current;
+            }
+            if (current != null && activeCall.get() != null) {
+                reuseCount.incrementAndGet();
+                return current;
+            }
+            OkHttpClient created = keepAliveClient(clientSupplier.get());
+            boolean rebuild = current != null;
+            // 先公布新 client，再清 stale。反過來的話，另一條執行緒可能看到
+            // stale==false 卻還拿到舊的那顆。
+            sharedClient = created;
+            clientStale = false;
+            if (rebuild) {
+                long rebuilds = rebuildCount.incrementAndGet();
+                Log.i(TAG, "[VIPLE-XFER] tls client rebuilt reuse=" + reuseCount.get()
+                        + " rebuild=" + rebuilds);
+            }
+            return created;
+        }
+    }
+
+    /**
+     * §REVIEW-1118B：涵蓋當初 Pixel 5 的 TLSV1_ALERT_INTERNAL_ERROR。
+     * Conscrypt 有時把 alert 包在 SSLHandshakeException／SSLProtocolException，
+     * 有時只出現在 SSLException 或 IOException 的訊息裡，原因鏈也要看。
+     * 一般斷線、逾時不要算，否則 host 不在時又會每 2 秒換一顆 client。
+     */
+    private static boolean isTlsHandshakeFailure(Throwable error) {
+        Throwable current = error;
+        for (int depth = 0; current != null && depth < 8; depth++) {
+            if (current instanceof SSLHandshakeException || current instanceof SSLProtocolException) {
+                return true;
+            }
+            if (current instanceof SSLException || current instanceof IOException) {
+                String message = current.getMessage();
+                if (message != null && message.contains("TLSV1_ALERT")) {
+                    return true;
+                }
+            }
+            Throwable next = current.getCause();
+            if (next == current) {
+                break;
+            }
+            current = next;
+        }
+        return false;
+    }
+
+    /** §REVIEW-1118B：只把「還在用的那顆」標成要換。已經換過的新 client 不要連坐。 */
+    private void noteTlsHandshakeFailure(OkHttpClient used, Throwable error) {
+        if (used == null || !isTlsHandshakeFailure(error)) {
+            return;
+        }
+        synchronized (sharedClientLock) {
+            if (sharedClient == used) {
+                clientStale = true;
+            }
+        }
+    }
+
+    /** §REVIEW-1118B：只由 poll 執行緒呼叫。第一次不印，之後每 5 分鐘一行。 */
+    private void maybeLogClientStats() {
+        long now = System.nanoTime();
+        if (!clientStatsLogArmed) {
+            clientStatsLogArmed = true;
+            nextClientStatsLogNs = now + CLIENT_STATS_LOG_INTERVAL_NS;
+            return;
+        }
+        if (now - nextClientStatsLogNs < 0) {
+            return;
+        }
+        nextClientStatsLogNs = now + CLIENT_STATS_LOG_INTERVAL_NS;
+        Log.i(TAG, "[VIPLE-XFER] tls client reuse=" + reuseCount.get()
+                + " rebuild=" + rebuildCount.get());
+    }
+
     private void pollOnce() {
         if (!started) return;
+        maybeLogClientStats();
         // §REVIEW-1103：傳輸中也照常 poll（才收得到 cancel）；新的傳輸命令在 dispatch 回 busy
-        try {
-            Request req = new Request.Builder()
-                    .url(baseHttpsUrl.newBuilder().addPathSegments("transfer/poll").build())
-                    .get()
-                    .build();
-            try (Response r = clientSupplier.get().newCall(req).execute()) {
+        // §REVIEW-1118B：這一次輪詢最多重建一次。第二次握手失敗就等到下一輪，
+        // 避免 Conscrypt 一直壞時在這條執行緒上忙迴圈。
+        boolean rebuiltThisPoll = false;
+        long rebuildsAtStart = rebuildCount.get();
+        for (int attempt = 0; attempt < 2; attempt++) {
+            OkHttpClient used = null;
+            Response opened = null;
+            try {
+                Request req = new Request.Builder()
+                        .url(baseHttpsUrl.newBuilder().addPathSegments("transfer/poll").build())
+                        .get()
+                        .build();
+                used = clientForNewCall();
+                // execute() 失敗才考慮重打。已經拿到回應就不要重打，避免 host 已交出的命令被丟掉。
+                opened = used.newCall(req).execute();
+            } catch (Exception e) {
+                boolean retry = false;
+                if (isTlsHandshakeFailure(e)) {
+                    synchronized (sharedClientLock) {
+                        // 傳輸中不重試：clientForNewCall 不會換 client，重打只是再失敗一次。
+                        if (used != null && sharedClient == used) {
+                            clientStale = true;
+                            retry = !rebuiltThisPoll
+                                    && rebuildCount.get() == rebuildsAtStart
+                                    && activeCall.get() == null;
+                        }
+                    }
+                }
+                if (retry) {
+                    rebuiltThisPoll = true;
+                    continue;
+                }
+                // Silent — server 短暫不在、stream 收尾、暫時 SSL 重連都會這裡產生例外
+                Log.d(TAG, "[VIPLE-XFER] poll error: " + e.getMessage());
+                return;
+            }
+            try (Response r = opened) {
                 int code = r.code();
                 if (code == 204) return;
                 if (code != 200) {
@@ -191,10 +354,12 @@ public class FileTransferClient {
                 if (body == null) return;
                 JSONObject cmd = new JSONObject(body.string());
                 dispatch(cmd);
+                return;
+            } catch (Exception e) {
+                noteTlsHandshakeFailure(used, e);
+                Log.d(TAG, "[VIPLE-XFER] poll error: " + e.getMessage());
+                return;
             }
-        } catch (Exception e) {
-            // Silent — server 短暫不在、stream 收尾、暫時 SSL 重連都會這裡產生例外
-            Log.d(TAG, "[VIPLE-XFER] poll error: " + e.getMessage());
         }
     }
 
@@ -334,6 +499,7 @@ public class FileTransferClient {
         boolean ok = false;
         boolean canceled = false;
         long total = 0;
+        OkHttpClient usedClient = null;
         try {
             uri = cr.insert(downloadsCollection(), values);
             if (uri == null) {
@@ -349,9 +515,9 @@ public class FileTransferClient {
                             .addQueryParameter("token", token).build())
                     .get()
                     .build();
-            // §N.5.bug fix (2026-05-14): clientSupplier.get() returns fresh wrapped
-            // OkHttpClient per call (NvHTTP.getLongConnectClient cache removed).
-            Call call = clientSupplier.get().newCall(req);
+            // §REVIEW-1118B：跟 poll 共用同一顆 keep-alive client，不要每次新握一次手。
+            usedClient = clientForNewCall();
+            Call call = usedClient.newCall(req);
             activeCall.set(call);
             if (isCanceled(token)) {
                 call.cancel();
@@ -399,6 +565,7 @@ public class FileTransferClient {
                 canceled = true;
             } else {
                 // §N.5.bug diagnostic (2026-05-14) — full stack trace
+                noteTlsHandshakeFailure(usedClient, e);
                 Log.w(TAG, "[VIPLE-XFER] download failed", e);
             }
         } finally {
@@ -502,7 +669,8 @@ public class FileTransferClient {
                         .addQueryParameter("token", token).build())
                 .post(body)
                 .build();
-        Call call = clientSupplier.get().newCall(req);
+        OkHttpClient usedClient = clientForNewCall();
+        Call call = usedClient.newCall(req);
         activeCall.set(call);
         if (isCanceled(token)) {
             call.cancel();
@@ -512,6 +680,7 @@ public class FileTransferClient {
             ok = resp.isSuccessful();
         } catch (Exception e) {
             if (!isCanceled(token)) {
+                noteTlsHandshakeFailure(usedClient, e);
                 Log.w(TAG, "[VIPLE-XFER] upload failed", e);
             }
         }
@@ -563,19 +732,22 @@ public class FileTransferClient {
     }
 
     private void postResultSync(JSONObject obj) {
+        OkHttpClient usedClient = null;
         try {
             RequestBody body = RequestBody.create(obj.toString(), MediaType.parse("application/json"));
             Request req = new Request.Builder()
                     .url(baseHttpsUrl.newBuilder().addPathSegments("transfer/result").build())
                     .post(body)
                     .build();
-            // §N.5.bug fix — fresh client per call (see field comment).
-            try (Response r = clientSupplier.get().newCall(req).execute()) {
+            // §REVIEW-1118B：跟 poll 同一顆 client。傳輸中的 Call 還在時不會在這裡換。
+            usedClient = clientForNewCall();
+            try (Response r = usedClient.newCall(req).execute()) {
                 // ignore body
             }
         } catch (Exception e) {
             // §N.5.bug diagnostic — full stack trace, same root cause as
             // handleDownload SSL fail.
+            noteTlsHandshakeFailure(usedClient, e);
             Log.w(TAG, "[VIPLE-XFER] postResult err", e);
         }
     }

@@ -1728,5 +1728,38 @@ namespace vr {
       g_vr_ids_loaded = true;
       return ids;
     }
+
+    bool openxr_controller_bindings(const std::string &appid) {
+      if (appid.empty() || appid.size() > 10 || !std::all_of(appid.begin(), appid.end(), [](char c) {
+            return c >= '0' && c <= '9';
+          })) {
+        return false;
+      }
+      auto root = cached_environment().steam_root;
+      if (root.empty()) {
+        root = utf_utils::to_utf8(reg_sz(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Valve\\Steam", L"InstallPath"));
+      }
+      if (root.empty()) {
+        return false;
+      }
+      const std::string prefix = "steam.app." + appid + "_";
+      std::error_code ec;
+      for (fs::directory_iterator it {fs::path {utf_utils::from_utf8(root)} / L"config" / L"openxr", ec}, end; !ec && it != end; it.increment(ec)) {
+        const auto name = utf_utils::to_utf8(it->path().filename().wstring());
+        if (name.rfind(prefix, 0) != 0 || name.size() < prefix.size() + 13 || name.compare(name.size() - 13, 13, "_binding.json") != 0) {
+          continue;
+        }
+        // 檔名中段＝<手把類型>_<序號>
+        const auto type = name.substr(prefix.size(), name.size() - prefix.size() - 13);
+        if (type.find("gamepad") != std::string::npos || type.find("hand_interaction") != std::string::npos) {
+          continue;
+        }
+        if (type.find("touch") != std::string::npos || type.find("knuckles") != std::string::npos || type.find("controller") != std::string::npos ||
+            type.find("cosmos") != std::string::npos) {
+          return true;
+        }
+      }
+      return false;
+    }
   }  // namespace platform
 }  // namespace vr

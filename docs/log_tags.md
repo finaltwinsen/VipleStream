@@ -337,6 +337,14 @@ client：`streaming/input/sc_hid.cpp`；host 端 `Sunshine/src/input.cpp` 與
 INPUT 類別，app 從未設該類別等級，所以**永遠不會出現在 log**——別拿舊 log 推論
 「沒有丟棄」）。下表格式以 Round 1 實際碼為準；欄位名是判讀依據。
 
+**host 行（§SC-HID-GATE，2026-11-18）**
+
+| 行 | 何時印 | 判讀 |
+|---|---|---|
+| `[SC-HID] startup: virtual Steam Controller disabled until a client brings a real one (result=N; …)` | service 啟動（`input::init()`） | 虛擬裝置平常是停用的（Steam 看不到）。`1`＝停用了、`2`＝本來就停用、`0`＝CM_* 失敗、`-1`＝driver 沒安裝 |
+| `[SC-HID] client has a Steam Controller - virtual device enabled (result=N; …)` | 這一場第一次收到 client 的 feature 回應或 input report | client 有實體手把（睡著的也會回暖機查詢）。整場沒有這一行＝client 沒有手把在回應，虛擬裝置沒啟用；手把按了沒反應先看這一行有沒有 |
+| `[SC-HID] session ended - virtual Steam Controller disabled again (result=N)` | 啟用過虛擬裝置的場次結束（沒有別的場次在用） | — |
+
 **client 行**
 
 | 行 | 何時印 | 判讀 |
@@ -1808,6 +1816,30 @@ host（§VR-HOTSPOT-YIELD，2.0.207）：這張網卡上有別的程式在連（
 ```
 [VIPLE-VR-HOTSPOT] another program (usually Steam) is connecting this adapter N ms after the hotspot info - leaving the connection to it (K attempt(s) of ours so far)
 [VIPLE-VR-HOTSPOT] the other program stopped connecting this adapter - connecting it ourselves
+```
+
+§FLAT-ML（2.0.213 起，平面／2D 場次的多連線：每張網卡一條 UDP、影像與音訊各送一份）。log 沿用 `[VIPLE-VR-LINK]`
+（每條連線的 10 秒統計、`link N confirmed`、`hot-add` 都和 VR 相同），另外多這幾行：
+```
+client  [VIPLE-VR-LINK] flat (2D) session: the server accepted multi-link - video and audio go over every usable network interface (MP-QUIC stays off for this session)
+client  [VIPLE-VR-LINK] flat (2D) session: only N network interface(s) can reach the host - multi-link not requested
+host    [VIPLE-VR-LINK] flat (2D) session: multi-link negotiated (fps=N, repair=off, ctrl=off)
+```
+控制連線換路（§CTRL-TAKEOVER、§CTRL-LINK-LOCAL、§CTRL-REGAIN，VR 與平面共用）：
+```
+host    [VIPLE-VR-LINK] control connection taken over by a new connection from the same client (<ip>:<port>) - the old one is dropped
+client  [VIPLE-VR-LINK] control reconnect: the link on <local> gets no answer - using the interface of another live link (<local> '<ifname>')
+client  [VIPLE-VR-LINK] control connection now on interface '<ifname>' (local=<ip>)
+client  [VIPLE-VR-LINK] control connection: the session interface has been answering for 15 s - moving back to it
+```
+換路花多久看 client 的 `§Q-ENET-RECONNECT: ENet reconnected! (§M01-C after N ms, attempts=…, rejects=…)`。
+
+§HOTSPOT-FLAT（2.0.210，平面／2D 場次也用頭盔熱點當第二條路徑）：host 在 `<VipleStreamVR>` 多宣告 `0x200`
+（`VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT`），平面場次的 0x5507 只認 HOTSPOT_INFO、其餘照舊丟掉；client 在「不是經 VPN、這一場有
+MP-QUIC、host 有這個能力」時照 VR 場次一樣開熱點、送熱點資訊，並把熱點上的裝置位址交給 MP-QUIC 當 alt peer
+（開場時一次，之後每 5 秒補）。熱點的 log 沿用 `[VIPLE-VR-HOTSPOT]`，路徑看 `[VIPLE-MPQUIC] §MP-ONLINK`／`§Q.path-recovery`：
+```
+[VIPLE-MPQUIC] §HOTSPOT-FLAT: alt peer <ip>:48010 added mid-session (path is built by the next recovery pass)
 ```
 
 host（§VR-HOTSPOT-PROFILE，2.0.209）：設定檔名稱改成熱點的 SSID、手動連線（以前 `VipleStream-Frame`、自動）。host 的 Steam 用

@@ -51,6 +51,126 @@ projection 20 Hz 每幀、回聲 100%、stale 轉換正確。**下一步（M3a �
 
 ## 各章節待辦補充
 
+### 2026-11-18 深夜：影片模式檔案管理、選取狀態、熱點加入、server 設定頁（client 2.0.234／server 2.0.233，未提交）
+- **§MEDIA-FILEOPS 檔案管理**（使用者定案：頭盔本機＋host 分享各自內部、不做跨裝置、確認後永久刪除）：每個項目的「⋯」選單
+  （複製／移動／刪除）＋「新增資料夾」「貼上」；host 端 `/viple/media/op`、`opstatus`、`opcancel`，要 server 設定 `media_write`（預設關，
+  設定頁 General 最下面）才可寫，整台 PC 模式的磁碟機一律唯讀。頭盔的 Flatpak 對影片／下載／外接儲存改成可寫。
+  驗過：host 端 27 項實測（正常 8、惡意與不合法 19 全擋；`temp` 外的腳本在 scratchpad，測試資料已清）、開發機與頭盔的介面流程
+  （複製資料夾→貼上→刪除）、30 語系翻譯。**沒驗**：大檔的進度與取消、外接儲存裝置、跨磁碟區移動、Linux server。
+- **§VIDEO-LASTPLAYED 播放項目的選取狀態**：點下去播放的那一項有藍色外框、回到清單游標停在它上面（設定 `VideoView/lastPlayed`）。
+  對使用者一律稱「播放項目的選取狀態」，不要說「最後播放」（和已拿掉的「最近播過」分頁混淆，11-18 被糾正）。
+- **§MEDIA-UI**：server 設定頁可以設 `media_share`、`media_dirs`、`media_write`。
+- **§VR-HOTSPOT-RESTART-EARLY**：host 網卡隔一陣子沒連頭盔熱點會進入「找不到熱點」的狀態（46 秒以上，頭盔 45 秒就關熱點）；
+  改成 12 秒沒連上就提早重啟網卡一次。**還沒遇到那個狀態、修法沒被觸發過**（23:35 那場 5 秒就連上）；下次看到
+  `restarting the adapter early` 再確認之後幾秒有 `joined`。原因不明（不是掃描快取：重啟網卡後 6 秒就連上；主動 WlanScan 一律 ERROR_BUSY）。
+- **netmode helper 新版已裝到頭盔**（舊版備份 `netmode.sh.bak-1118`）：實測暫停 2 秒內生效、停止要求 6 秒後交還、約 11 秒重新連上。
+- 頭盔熱點金鑰 11-18 被印進對話的工具輸出（查 softapmanager journal 的 create 行），使用者表示不處理。
+
+### 2026-11-18 晚：§REVIEW-1111 的 19 項「需設計」實作（client 2.0.229／server 2.0.230，未提交）
+逐項結果在 `temp/grok_review_1111/FIXLOG.md` 最後一節（已修 16、不修 3）。還沒驗到、要補的：
+- **實體 Steam Controller（CachyOS 接手把、裝新版 client）**：短按不被 keepalive 蓋掉、feature 握手成對、
+  場次結束後 host log 有沒有 `disabled on retry N`（§SC-HID-GATE 停用被拒絕的背景重試；失敗時會印 CONFIGRET）。
+- **影片模式播 host 分享的檔案**（憑證只給已配對電腦）：從媒體庫與「最近播放」各播一支；瀏覽器把來源指到別的主機時
+  log 要有 `not presenting the client certificate`。
+- **頭盔無人 VR 場次＋第二條連線熱插拔**（`pendMutex`）。
+- **桌面改幀率**（NVENC `reconfigure_framerate`＋擷取節拍）：要 client 補幀判定吃緊才會送，無人狀態沒觸發到；
+  看 host log `[VIPLE-FPS] NVENC frame rate updated` 與 `Capture frame pacing updated`。
+- Linux x64 client／server 沒有建。
+
+### 2026-11-18 傍晚：§REVIEW-1111 剩餘項目全部重評（2.0.228，未提交）
+11-11 審查的後半段（G016～G034，agy／opencode 審的 65 個單位）報告都在；這一輪把還沒定案的、漏掉的 `G024-04`、沒有編號的「待確認」、
+以及標「不修（這一輪）」的延後項目共 79 項交給 Grok 重評並修（12 組、每組檔案不重疊），我逐段審過。逐項結果在本機
+`temp/grok_review_1111/FIXLOG.md` 最後一節，Grok 的原始報告（含需設計項目的建議做法）在 `temp/review_1118/reports/`。
+- 結果：已修 37、不修 13、不成立 5、已不存在 5、需設計 19。程式註解標 `§REVIEW-1118`。
+- 我退掉／調整的：driver `Present` 的 log 搬到鎖外（139 行，退掉）、「短封包不一定是控制封包」（退掉）、PONG 來源檢查放寬成 host 報過的
+  任何位址、頭盔 helper 的時間判斷容許超前 2 秒。
+- **需設計、還沒做的 19 項**（都要實體裝置、配戴、或要動執行緒同步）：Steam Controller 轉發兩項（bugs-G002#3、perf-G002#2）、
+  Android 檔案傳輸每 2 秒一次 TLS 握手（perf-G016#2）、PyroWave 每幀等 fence（perf-G017#3）、影片播放器對任意 https 主機出示配對用的
+  用戶端憑證（G018-03#T1，**安全性，建議優先**）、更新解壓前不檢查 zip 路徑（G018-03#T2）、桌面改 FPS 時編碼器不跟著改（perf-G010#2）、
+  協定層的競態 11 項（G032-01#1、#4、#5、G032-02#4、#6、G033-01#3、G033-02#1、#5、G033-03#1、G033-04#1、#3）、熱插拔 pending socket
+  重複關閉（G034-02#1）。
+- 驗證與沒驗到的部分見 FIXLOG 那一節。另外觀察到：頭盔無人場次裡 host 的無線網卡 40 秒內沒有連上頭盔熱點
+  （`another program (usually Steam) is connecting this adapter`→`not joined after 40 s`），第二條連線因此沒建立；原因沒查。
+- 頭盔的網路 helper（`netmode.sh`）改成閒置時少輪詢，**新版還沒裝到頭盔上**；裝的時候要人在場驗暫停／交還家用 Wi-Fi。
+
+### 2026-11-18 下午：遠端 2D 糊清循環＋PyroWave 提示（host／client 2.0.226，未提交）
+使用者從遠端電腦（發佈的 2.0.206，經 Cloudflare WARP）連回開發機，兩段 log：
+- **第一段整片糊**：client 的編碼格式固定成 PyroWave、碼率 20 Mbps。不是 bug，是設定沒有任何提示。
+  改：設定頁把「視訊編解碼器」移到碼率上面（基本設定）；選了 PyroWave 而碼率低於建議值時在下拉選單下方顯示橘色說明，
+  串流前也加啟動警告（`[VIPLE-PYROWAVE] bitrate … is below …`）。建議值＝`getPyroWaveRecommendedBitrate()`
+  （和 VR 的 PyroWave 預設同一個基準，1080p60≈60 Mbps、4K60≈235 Mbps；**這個門檻沒有用畫質量測驗過**）。
+- **第二段糊一下清一下＝server 的 bug（§Q-STALE-DGLEN）**：`_approxVideoQueueDepth` 用「已送位元組 ÷ 1420」扣帳，
+  經 VPN 時 client 的影像封包是 1024（線上約 1076 B），每送 4 個只扣 3 個；grace 一結束估計值就超過
+  `STALE_STARVE_THRESHOLD`，空的佇列被當成塞滿、影像整批丟 3 秒 → SAFETY-VALVE → grace 500 個 drain → 再來。
+  每 14 秒一輪、ABR 被壓到 1.5 Mbps 再爬回去。**發佈的 2.0.206 就有，所有經 VPN 的 2D 串流都會中。**
+  改：換算用這一場影像 datagram 的實際大小、餘數留到下一次；飢餓分支丟棄前先實際數一次佇列。
+  驗證（開發機 → host，區網、`--packet-size 1024`、Desktop）：2.0.224 第 60 秒起開始循環；2.0.226 跑 150 秒
+  `stale=0`、沒有 ABR cut、沒有 SAFETY-VALVE。**還沒有經真的 VPN 路徑驗過**（要請使用者從遠端再連一次；開發機本機的
+  server 還是 2.0.206）。
+- 繁中「AV1 (實驗性)」誤植成「AV (實驗性)」已修；其餘 29 語系正確。兩句新提示 30 語系已補（28 個由 Grok 翻）。
+- **經真的 VPN 驗過了**（15:17～15:33，使用者從遠端經 WARP 連開發機的 2.0.226，16 分鐘）：client 0 次 `FRZ-WATCHDOG`
+  （修正前 5 分鐘 18 次）、server 0 次 SAFETY-VALVE、碼率多數時間在 13～17 Mbps。剩下的降碼率（16 分鐘 31 次 cut、
+  stale 共 1681）都伴隨真的丟包（`lostB` 382 KB），大約每 30～40 秒在 17 Mbps 附近發生一次——像是 WARP 路徑的上限，還沒細查。
+- **§QUIT-HANG（client 2.0.227）**：退出串流後按「結束遊戲」卡在「結束 Desktop...」。串流結束時已經送過 `/cancel`，
+  清單還顯示執行中的那幾秒按下去，`PendingQuitTask` 看到 `currentGameId==0` 就什麼都不做，而完成通知只在狀態有變時才發。
+  改成工作自己通知完成（`[VIPLE-QUIT] nothing is running …`）。**修正後沒有實際重現驗過**（要在 UI 上搶那幾秒）。
+- **還沒處理**：靜止桌面時 server 只送 36～46 fps（要求 60，`[VIPLE-ENC-DUP]` 重複幀補得不夠），開發機與 host 都有；
+  client 把自己送出的 ACK 封包算成「send loss 30～60%」（`§Q-LOSS-RXCHECK` 有擋住換路，但浮層上的丟包率是假的）。
+
+### 2026-11-18 VR 遊戲可用性（host 2.0.224／client 2.0.225，未提交）
+使用者要求：host 上每一款支援 VR 的遊戲都開起來、操作選單、確認能玩，有問題就修。做法是開發機當模擬頭盔
+（`--vr-emulate`），頭與手把由新的 dev 參數 `--vr-puppet <檔案>` 控制（格式在 `moonlight-qt/app/streaming/vr/vrsynthetic.h`），
+從 client 視窗截圖判斷——**沒有人戴著玩過**，下面「通過」只代表啟動、畫面、追蹤與選單輸入都對。
+
+**修掉的三個問題（都在 host）**
+- **§SC-HID-GATE**：虛擬 Steam Controller（VipleSCHid）在 client 沒有實體手把時沒有人回 Steam 的 feature 查詢，Steam 的
+  `CGetControllerInfoWorkItem` 每 15 秒卡 11 秒（27 次 × driver 的 400 ms 閘控），**不管有沒有在串流**；遊戲啟動時 Steam 介面
+  執行緒排在它後面停 5～8 秒（11-17 晚上配戴的兩場也有），SteamVR 向 Steam 要按鍵對應跟著晚到——OpenXR 遊戲只等 2 秒
+  （`[OpenXR] SetXrInputConfig failed. After 2 seconds loading is still in progress`），逾時後整場沒有按鍵（Toy Trains 重現）。
+  改成：service 啟動就把虛擬裝置停用，這一場的 client 送來實體手把的 feature 回應或 input report 才啟用，場次結束再停用。
+  實測：Steam 的 11 秒迴圈消失、`SetXrInputConfig` 2.02 s（失敗）→ 0.05～0.10 s。
+  **待驗（重要）**：用真的 Steam Controller（醒著、睡著各一次）串流一場，確認 Steam 仍然認得手把、按鍵與震動正常——
+  開發機的接收器上沒有連著的手把，這條路徑這次完全沒有實測。
+- **§VR-PADMODE 誤判**：Pixel Dungeon VR 商店沒有分類 52 卻是用 VR 手把玩的 OpenXR 遊戲，被自動切成 Xbox 手把模式。
+  商店說不支援時再看 `<Steam>\config\openxr\steam.app.<id>_<手把類型>_N_binding.json` 有沒有（遊戲向 SteamVR 的 OpenXR
+  登記過 VR 手把的按鍵對應才會有）；有就維持 VR 手把。限制：遊戲第一次執行、檔案還沒產生的那一場仍會判成手把模式。
+- **§VR-FOCUS 擴充**：全螢幕獨占的遊戲（CarX）啟動後被 SteamVR 狀態視窗搶走前景就自己縮到最小、整個暫停，而它還不是
+  場景程式（scene_pid＝0），原本的邏輯不會動。沒有場景程式時改看這一場啟動的遊戲行程（安裝目錄底下的行程），
+  視窗在背景或縮小著就拉回前景。
+
+**19 款的結果**
+| 遊戲 | 結果 |
+|---|---|
+| The Thrill of the Fight、Premium Bowling、PowerBeatsVR、Half-Life: Alyx、Moss II、DeoVR、All-In-One Sports VR、剑途、Pixel Dungeon VR、The Forest、Eleven Table Tennis | 通過：進得去、選單／移動／按鍵有反應 |
+| Assetto Corsa Competizione、GRIP | 通過：VR 主選單顯示、自動切 Xbox 手把模式（手把按鍵這次沒有逐一驗） |
+| Moss、Dance Dash、Toy Trains | 部分：啟動、追蹤、按鍵都對，但開場的手勢（翻書／踩按鈕／拉燈繩）用模擬手把沒做出來，**要配戴確認** |
+| Tilt Brush | 不能用，和串流無關：遊戲啟動時呼叫 `wmic.exe`，host 沒有這個元件（Windows 選用功能 `WMIC~~~~`），初始化中斷、全黑 |
+| CarX Drift Racing Online | 未解：視窗縮小的問題修了，但遊戲停在 host 桌面的平面主選單、沒有開始 VR 畫面（只建立 OpenXR instance） |
+| Assetto Corsa | 未解：見下 |
+
+**11-18 中午追加（使用者決定：主控台改回啟用、裝 WMIC、續查 CarX）**
+- host 的 `steamvr.vrsettings` 拿掉 `dashboard.enableDashboard=false` 與 `arcadeMode=true`（備份 `steamvr.vrsettings.bak-1118-dash-reenable`）。
+  備份檔顯示它是 10-03～10-29 之間被關的，最可能是 10-09～10 無人驗測腳本中斷後沒還原。主控台回來之後，無人場次開場時它是開著的
+  （疊在遊戲前面）；**配戴時開場會不會自己關、對延遲有沒有影響還沒有人看過**。
+- **CarX 查明**：`-steamxr` 只是讓它連上 SteamVR，VR 畫面要在遊戲裡「設定 → 繪圖 → VR 模式」打開才開始（打開後場景程式立刻出現、
+  選單變成 VR 裡的一塊虛擬螢幕、自動切 Xbox 手把模式）。**這個設定不會保留**：用 Alt+F4 正常結束再開，還是平面。和主控台無關。
+  每次都要在 host 桌面（或 SteamVR 主控台的桌面檢視）手動開一次；要不要由 server 代為處理還沒決定。
+  另外 CarX 收到關閉要求 10 秒內關不完，`[VIPLE-STEAM-QUIT]` 會強制結束它。
+- **WMIC**：用 SYSTEM 身分的排程工作跑 DISM 裝好了（`WMIC~~~~` Installed），但 `System32\wbem\WMIC.exe` 還沒出現
+  （檔案在元件存放區、有待處理的檔案搬移），Tilt Brush 仍然失敗；host 下次重新啟動後再驗。
+
+**還沒解的**
+- **Assetto Corsa**：Steam 把它的 2D 啟動器當成非 VR 程式，啟動前在 SteamVR 主控台跳一次性的「VR 劇院螢幕」說明等人按確定。
+  host 的主控台是停用的（`steamvr.vrsettings` 的 `dashboard.enableDashboard=false`，10-03 起就是這樣），所以看不到、
+  Steam 永遠停在啟動中。11-18 用 Steam 的除錯介面代按了確定（之後不會再出現）；啟動器起來了，但頭盔裡的劇院螢幕整片綠色
+  （Steam 的桌面串流沒有畫面），沒辦法操作啟動器。要查：劇院螢幕在主控台停用時能不能用、綠色是不是和我們的擷取或編碼衝突。
+- **host 的 SteamVR 主控台是停用的**：使用者在頭盔裡叫不出 SteamVR 主控台，Steam 需要人回應的提示（像上面那個）都看不到。
+  這是 10 月測試時留下的設定還是刻意的，要問使用者；要不要改回來由使用者決定。
+- **CarX**：要知道它怎麼進 VR（可能要進賽道才開始）；現在頭盔裡只有 SteamVR 的空場景，看不到桌面上的選單。
+- **Tilt Brush**：要不要在 host 裝 WMIC 選用功能由使用者決定（SSH 下 `Add-WindowsCapability` 回 Access is denied）。
+- 這一輪的 dev 工具：`temp/vrgames/vg.sh`（start／set／click／shot／stop）、`sweep.py`、`clicksweep.py`；每款的截圖與紀錄在
+  `temp/vrgames/out/`、`temp/vrgames/results.md`（本機，不入 git）。
+
 ### VR 手把相容性（§VR-PADMODE、§VR-SKELETON，2.0.68）
 - **§VR-PADMODE**：不使用 VR 手把的遊戲（商店沒有 Tracked Controller Support）自動插虛擬 Xbox 360 手把；ACC、GRIP 用模擬頭盔
   端到端驗過（XInput 對照、手動長按切換、結束移除）。**待驗**：配戴實玩 ACC／GRIP 的操控手感；頭盔 dev 版的切換提示圖層（還沒人看過）。
@@ -109,6 +229,27 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
   `Microsoft-Windows-WLAN-AutoConfig/Operational`（約 12 分鐘就被洗掉）。
   **沒實測**：Steam 沒在連時 server 自己連上的那條（只用 netsh 手動驗過 Steam 會接受）；換另一台 host 的路徑；熱點本來就開著但
   沒有裝置連上的區網場次仍然不動。不要用關 host 的 `WifiAPEnabled` 當解法（Steam 反而會切斷我們的連線）。
+- **§FLAT-ML 補洞（2.0.219）**：要求多連線的判斷原本沒有排除「經 VPN」。頭盔有熱點憑證，經由剛好用私有網段的 VPN
+  （自架 WireGuard 的 10.x）連回來時會誤要求多連線，那一場只有一條連線又不走 QUIC。現在路徑是 VPN 就不要求
+  （log：`flat (2D) session: the host is reached through a VPN - multi-link not requested`）。**沒有實機驗**（手邊沒有這種 VPN）。
+- **§FLAT-ML 2D 區網多路徑（host／client 2.0.218，11-18 無人驗過三台，未提交）**：使用者 11-18 要的是真正的多路徑（兩條同時送），
+  不只是備援。做法＝平面場次在區網、雙方新版、這台有第二條路時不走 QUIC，改用和 VR 相同的多連線 hub（不補包、不走連線上的
+  控制訊息）。協定見 `docs/vr_protocol.md` §4.2，log 見 `docs/log_tags.md`。同一輪另外做了：
+  - §CTRL-TAKEOVER：host 讓同一個 client 的新控制連線直接接手舊的（以前要等舊的逾時，11-17 的 VR 場次被拒 20 多次、斷 77 秒）。
+  - §CTRL-LINK-LOCAL：控制連線看「它那張網卡的那條連線」有沒有 PONG（250 ms 一次、600 ms 沒有就算斷），不通就改綁另一張網卡
+    （Linux 另加 SO_BINDTODEVICE）；重連的等待從固定 1 秒／1.3 秒改成 100 ms＋量到的往返時間。
+  - §CTRL-REGAIN：桌機控制連線被移到 Wi-Fi 後，有線連續 15 秒都通就移回去（頭盔的專用熱點不移）。
+  - §HOTSPOT-FLAT 留著當退路（host 舊版或只有一張網卡時走 MP-QUIC＋待命的熱點路徑；path ID 上限 2→4、不重建從沒通過的路徑）。
+  量測（資料在 `temp/launchertest/ml/pc_1118/`、`lan_1117/`）：
+  - 頭盔 2D（家用 Wi-Fi＋熱點）：擋 wlan0 20～30 秒，影像 0 丟幀；控制連線 7.9 秒 → 約 1.2 秒（偵測約 0.85＋重連 0.35）。
+  - CachyOS（有線＋Wi-Fi 同網段，nft 擋 eno1）：影像由 Wi-Fi 接續，控制 0.35 秒改綁 wlan0，有線恢復 15 秒後移回。
+  - Windows 開發機（有線＋Wi-Fi，host 故障注入停掉 L1 25 秒）：影像 0 丟幀，控制 1.5 秒（改版前）改綁 Wi-Fi。
+  - VR 回歸：補包與連線上的控制訊息照舊開著；擋 wlan0 時控制 0.27～0.36 秒換到熱點，影像 0 丟幀。
+  - REMNANT 1080p60：多路徑和單一路徑（QUIC）在乾淨環境沒有差別（開發機 host 延遲 4.5／4.7 ms、幀時間 p95 18.5／18.9 ms；
+    頭盔 p99 18.1／18.6 ms）；1440p120 也是 0 丟幀。只有一張網卡的電腦不要求多連線、維持原本的 MP-QUIC。
+  **限制／沒驗**：只有 Windows host 宣告（Linux host 的 hub 沒跑過）；新 client 對舊 host 只用「host 關掉 vr_multilink」代替驗過；
+  Android client 不會要求；控制連線換路的約 1.2 秒內輸入會斷；CachyOS 那台螢幕關著時解碼佇列會滿（每 7 秒要一次 IDR，
+  單一路徑也一樣，和多連線無關）；沒有配戴實際玩。研究報告（Grok）`temp/specs/2d_dualpath_grok.md`、`2d_multilink_grok.md`。
 - **區網無人量測（熱點＋家用 Wi-Fi，host 2.0.202／頭盔 2.0.205）**：0 丟幀、0 刷新波、MTP p50／p95 40.5／42 ms；
   揮拍殘差 p50／p90／p99 0.10／0.27／0.54 mm（外地 0.34／1.06／2.44）；拋球 20 次 API 速度全部 2.00 m/s。資料在
   `temp/launchertest/ml/lan_1115/`。

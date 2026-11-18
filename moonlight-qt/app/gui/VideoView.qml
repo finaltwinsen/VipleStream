@@ -27,6 +27,9 @@ Item {
         property bool grid: true
         // 上次停在哪個分頁（下次打開回到那裡）
         property int tab: 0
+        // §VIDEO-LASTPLAYED（2026-11-18）：最後播放的那一項（本機路徑／「主機 uuid|根|路徑」／網址）。播完回到清單時
+        // 那一項有外框、而且清單會捲到它——清單項目多的時候，使用者分不出剛才播的是哪一個。存在設定裡，介面重建後還在
+        property string lastPlayed: ""
     }
     // 分頁順序（TabBar 與 StackLayout 一致；--dev-video 的分頁號碼也照這個）
     readonly property int tabHeadset: 0
@@ -61,6 +64,33 @@ Item {
     function cellH(view, rowHeight) { return gridMode ? Math.round((Math.floor(view.width / gridColumns) - 12) * 9 / 16) + 72 : rowHeight }
 
     // 格狀模式的一格：16:9 縮圖（拿不到時是色塊＋標籤）、片名（最多兩行）、副標
+    // §VIDEO-LASTPLAYED：最後播放那一項的外框（蓋在清單項目上，不擋點擊）
+    component PlayedFrame: Rectangle {
+        anchors.fill: parent
+        anchors.margins: 2
+        z: 3
+        radius: 6
+        color: "#224da3ff"
+        border.color: "#4da3ff"
+        border.width: 3
+    }
+    function hostKey(root, path) { return hostIndex + "|" + root + "|" + path }
+    // 清單載入後：游標移到最後播放的那一項並捲到看得見；沒有就停在第一項
+    function focusPlayed(view, listModel, keyOf) {
+        var at = 0
+        for (var i = 0; viewSettings.lastPlayed !== "" && i < listModel.count; i++) {
+            var e = listModel.get(i)
+            if (!e.isDir && keyOf(e) === viewSettings.lastPlayed) {
+                at = i
+                break
+            }
+        }
+        view.currentIndex = at
+        if (at > 0) {
+            view.positionViewAtIndex(at, GridView.Contain)
+        }
+    }
+
     component ThumbCard: ColumnLayout {
         property string thumb: ""
         property string title: ""
@@ -125,6 +155,172 @@ Item {
     // 瀏覽器第一次切到那一頁才載入，之後留著（不重新整理網頁）
     property bool browserWanted: false
     property int hostRequest: 0
+    // §MEDIA-FILEOPS：剪貼簿。null，或 {side, host, root, path, name, isDir, mode:"copy"|"move"}。
+    // 只在同一邊貼上（本機對本機；同一台 host 對同一台）。移動成功才清掉。
+    property var fileClip: null
+    property var fileOpTarget: null
+    property string opKind: ""
+    property string opSide: ""
+    property real opDone: 0
+    property real opTotal: 0
+    // 「⋯」跟項目本體疊在同一格。按鈕先吃掉點擊，這面旗標擋住隨後冒上來的 onClicked。
+    property bool suppressItemClick: false
+    // 目前這台 host、這個分享根可不可寫（根清單那一層沒有「目前的根」）
+    property bool hostRootWritable: false
+    readonly property bool localCanWrite: currentDir !== "" && MediaLibrary.localWritable(currentDir)
+
+    function canPaste(side) {
+        var c = fileClip
+        if (!c || c.side !== side || MediaLibrary.opBusy) {
+            return false
+        }
+        if (side === "host") {
+            return c.host === hostIndex && hostRoot >= 0 && hostRootWritable
+        }
+        return localCanWrite
+    }
+
+    // 名稱裡的 % 不要被 String.arg 再吃掉，否則確認框會少掉檔名的一段。
+    function clipHint() {
+        var c = fileClip
+        if (!c) {
+            return ""
+        }
+        var shown = (c.name || "").replace(/%/g, "%%")
+        if (c.mode === "move") {
+            return qsTr("Selected to move: %1").arg(shown)
+        }
+        return qsTr("Copied: %1").arg(shown)
+    }
+
+    function setFileClip(mode, target) {
+        fileClip = {
+            "side": target.side,
+            "host": target.host,
+            "root": target.root,
+            "path": target.path,
+            "name": target.name,
+            "isDir": target.isDir,
+            "mode": mode
+        }
+    }
+
+    function openFileMenu(button, target) {
+        fileOpTarget = target
+        fileMenu.initiator = target.side === "local" ? fileList : hostEntryList
+        if (fileMenu.popup) {
+            fileMenu.popup(button, 0, button.height)
+        }
+        else {
+            fileMenu.open()
+        }
+    }
+
+    // 忙的時候不要把進行中那次的進度清成 0。C++ 也會擋，這裡先擋掉介面閃一下。
+    function startOp(kind, side, go) {
+        if (MediaLibrary.opBusy) {
+            errorLabel.text = opErrorText("busy")
+            return
+        }
+        opKind = kind
+        opSide = side
+        opDone = 0
+        opTotal = 0
+        errorLabel.text = ""
+        go()
+    }
+
+    function commitMkdir(forHost, folderName) {
+        startOp("mkdir", forHost ? "host" : "local", function() {
+            if (forHost) {
+                MediaLibrary.hostOp(ComputerManager, hostIndex, "mkdir", hostRoot, hostPath, 0, "", folderName)
+            }
+            else {
+                MediaLibrary.localOp("mkdir", currentDir, "", folderName)
+            }
+        })
+    }
+
+    function commitDelete(target) {
+        if (!target) {
+            return
+        }
+        startOp("delete", target.side, function() {
+            if (target.side === "local") {
+                MediaLibrary.localOp("delete", target.path, "", "")
+            }
+            else {
+                MediaLibrary.hostOp(ComputerManager, target.host, "delete", target.root, target.path, 0, "", "")
+            }
+        })
+    }
+
+    function commitPaste(side) {
+        var c = fileClip
+        if (!c || !canPaste(side)) {
+            return
+        }
+        startOp(c.mode, side, function() {
+            if (side === "local") {
+                MediaLibrary.localOp(c.mode, c.path, currentDir, "")
+            }
+            else {
+                MediaLibrary.hostOp(ComputerManager, hostIndex, c.mode, c.root, c.path, hostRoot, hostPath, "")
+            }
+        })
+    }
+
+    function refreshAfterOp() {
+        if (opSide === "local") {
+            openDir(currentDir)
+        }
+        else if (opSide === "host" && hostIndex !== "") {
+            openHostDir(hostRoot, hostPath, "")
+        }
+    }
+
+    function handleOpFinished(error) {
+        if (error === "busy") {
+            errorLabel.text = opErrorText(error)
+            return
+        }
+        var kind = opKind
+        if (error === "") {
+            if (kind === "move") {
+                fileClip = null
+            }
+            errorLabel.text = ""
+        }
+        else {
+            errorLabel.text = opErrorText(error)
+        }
+        // 成功、取消、刪到一半的刪除／移動，清單要重讀。複製失敗若清不掉目的，也要重讀才看得到留下的檔。
+        // 純失敗的複製（目的已刪掉）不重讀，避免清單閃一下。busy 在上面就返回，不重讀。
+        if (error === "" || error === "cancelled" || kind === "delete" || kind === "move"
+                || error === "failed: cleanup failed") {
+            refreshAfterOp()
+        }
+        opKind = ""
+        opSide = ""
+    }
+
+    function opErrorText(error) {
+        if (error === "read-only") return qsTr("This folder is read-only.")
+        if (error === "not found") return qsTr("That item was not found.")
+        if (error === "bad name") return qsTr("That name cannot be used.")
+        if (error === "bad request") return qsTr("That file operation is not valid.")
+        if (error === "exists") return qsTr("An item with that name already exists.")
+        if (error === "into itself") return qsTr("A folder cannot be copied or moved into itself.")
+        if (error === "busy") return qsTr("A file operation is already in progress.")
+        if (error === "no space") return qsTr("Not enough free space.")
+        if (error === "cancelled") return qsTr("Cancelled.")
+        if (error.indexOf("failed:") === 0) {
+            var reason = error.substring(7).trim()
+            return reason.length > 0 ? qsTr("The file operation failed.") + " " + reason
+                                     : qsTr("The file operation failed.")
+        }
+        return qsTr("The file operation failed.") + " " + error
+    }
     // 畫面格式選單：顯示文字與播放器的格式名稱（playerformat.h）
     readonly property var formatNames: ["auto", "flat", "flat-sbs", "flat-tb", "180-sbs", "180-mono", "360-mono", "360-tb", "360-sbs", "360eac-mono"]
 
@@ -149,7 +345,7 @@ Item {
                               "detail": path === "" ? e.path : e.detail,
                               "format": path === "" ? "" : e.format })
         }
-        fileList.currentIndex = 0
+        focusPlayed(fileList, dirModel, function(e) { return e.path })
     }
 
     function refreshHosts() {
@@ -223,6 +419,11 @@ Item {
 
     // root＝-1：分享資料夾清單；rootName 只給路徑列顯示
     function openHostDir(root, path, rootName) {
+        // §MEDIA-FILEOPS：回到根清單就沒有「目前這個根」。重新整理或走進子資料夾時不要把可寫旗標清掉，
+        // 否則「⋯」會在同一層裡忽然消失。旗標是進來的時候從 <Writable> 抄的。
+        if (root < 0) {
+            hostRootWritable = false
+        }
         hostRoot = root
         hostPath = path
         if (rootName !== undefined && rootName !== "") {
@@ -373,13 +574,17 @@ Item {
                                    "isDir": root < 0 ? true : e.isDir,
                                    "detail": root < 0 ? (e.drive ? qsTr("Drive") : qsTr("Shared folder")) : e.detail,
                                    "format": root < 0 ? "" : e.format, "drive": root < 0 && e.drive === true,
-                                   "stamp": root < 0 ? "" : (e.stamp || "") })
+                                   "stamp": root < 0 ? "" : (e.stamp || ""),
+                                   // 只有根清單帶 Writable。沒有這個欄位（舊 server）當成不可寫。
+                                   "writable": root < 0 ? e.writable === true : false })
             }
             hostMessage.text = error !== "" ? error : (entries.length === 0 ? qsTr("This folder has no videos.") : "")
-            hostEntryList.currentIndex = 0
+            videoView.focusPlayed(hostEntryList, hostModel, function(e) { return videoView.hostKey(e.root, e.path) })
             hostEntryList.forceActiveFocus(Qt.TabFocus)
             if (videoView.devHostStep === 1 && root < 0 && entries.length > 0) {
                 videoView.devHostStep = 2
+                // 自動走進第一個根之前先抄可寫，openHostDir 只在回到根清單時才清掉。
+                videoView.hostRootWritable = entries[0].writable === true
                 videoView.openHostDir(entries[0].index, VrLauncher.devVideoDir === "." ? "" : VrLauncher.devVideoDir, entries[0].name)
             }
         }
@@ -387,6 +592,14 @@ Item {
             webStatus.text = message
             webUpdateButton.enabled = true
             webVersionLabel.text = qsTr("Helper: %1").arg(MediaLibrary.webVersion() || qsTr("not installed"))
+        }
+        // §MEDIA-FILEOPS：進度與結束都在 GUI 執行緒（C++ 已排回來）。
+        function onOpProgress(done, total) {
+            videoView.opDone = done
+            videoView.opTotal = total
+        }
+        function onOpFinished(error) {
+            videoView.handleOpFinished(error)
         }
     }
 
@@ -458,6 +671,38 @@ Item {
                             Layout.fillWidth: true
                             opacity: 0.8
                         }
+                        // §MEDIA-FILEOPS：只在目前資料夾可寫時出現。起點清單（currentDir 空）沒有這些按鈕。
+                        Button {
+                            text: qsTr("New folder")
+                            visible: videoView.localCanWrite
+                            enabled: visible && !MediaLibrary.opBusy
+                            onClicked: {
+                                newFolderDialog.forHost = false
+                                folderNameField.text = ""
+                                newFolderDialog.open()
+                            }
+                        }
+                        Button {
+                            text: qsTr("Paste")
+                            visible: videoView.localCanWrite
+                            enabled: visible && videoView.canPaste("local")
+                            onClicked: videoView.commitPaste("local")
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: videoView.fileClip && videoView.fileClip.side === "local"
+                        Label {
+                            text: videoView.clipHint()
+                            elide: Text.ElideMiddle
+                            Layout.fillWidth: true
+                            opacity: 0.8
+                        }
+                        Button {
+                            text: qsTr("Clear")
+                            enabled: !MediaLibrary.opBusy
+                            onClicked: videoView.fileClip = null
+                        }
                     }
                     GridView {
                         id: fileList
@@ -467,7 +712,8 @@ Item {
                         model: dirModel
                         keyNavigationEnabled: true
                         cellWidth: videoView.cellW(fileList)
-                        cellHeight: videoView.cellH(fileList, 52)
+                        // 清單列加高，右側 48px 的「⋯」才放得下，片名仍走省略。
+                        cellHeight: videoView.cellH(fileList, 72)
                         ScrollBar.vertical: ScrollBar {}
                         delegate: ItemDelegate {
                             width: fileList.cellWidth
@@ -477,6 +723,8 @@ Item {
                             contentItem: Item {
                                 RowLayout {
                                     anchors.fill: parent
+                                    // 清單模式把片名讓出「⋯」的寬度；格狀模式片名維持整格寬，按鈕蓋在縮圖角上。
+                                    anchors.rightMargin: !videoView.gridMode && videoView.localCanWrite ? 44 : 0
                                     visible: !videoView.gridMode
                                     spacing: 12
                                     Label {
@@ -499,7 +747,44 @@ Item {
                                     badge: model.isDir ? "" : qsTr("VID")
                                 }
                             }
-                            onClicked: model.isDir ? openDir(model.path) : play(model.path, "")
+                            PlayedFrame { visible: !model.isDir && model.path === viewSettings.lastPlayed }
+                            // 不進手把焦點鏈（跟右側捲動鈕一樣）。按下時先擋住項目本體的 onClicked，避免點「⋯」就開播。
+                            Button {
+                                id: localMoreButton
+                                z: 6
+                                width: 48
+                                height: 48
+                                padding: 0
+                                focusPolicy: Qt.NoFocus
+                                visible: videoView.localCanWrite
+                                enabled: visible && !MediaLibrary.opBusy
+                                text: "⋯"
+                                font.pixelSize: 20
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.rightMargin: 4
+                                anchors.topMargin: videoView.gridMode ? 4 : Math.max(0, (parent.height - height) / 2)
+                                onPressed: videoView.suppressItemClick = true
+                                onReleased: suppressClickTimer.restart()
+                                onCanceled: videoView.suppressItemClick = false
+                                onClicked: videoView.openFileMenu(localMoreButton, {
+                                               "side": "local", "host": "", "root": -1,
+                                               "path": model.path, "name": model.name, "isDir": model.isDir
+                                           })
+                            }
+                            onClicked: {
+                                if (videoView.suppressItemClick) {
+                                    return
+                                }
+                                if (model.isDir) {
+                                    openDir(model.path)
+                                }
+                                else {
+                                    fileList.currentIndex = index
+                                    viewSettings.lastPlayed = model.path
+                                    play(model.path, "")
+                                }
+                            }
                             Keys.onReturnPressed: clicked()
                             Keys.onEnterPressed: clicked()
                         }
@@ -585,6 +870,23 @@ Item {
                                 enabled: !videoView.hostLoading
                                 onClicked: openHostDir(videoView.hostRoot, videoView.hostPath, "")
                             }
+                            // §MEDIA-FILEOPS：分享根清單那一層沒有「目前的根」，按鈕先不出現。磁碟機的 Writable 是 0。
+                            Button {
+                                text: qsTr("New folder")
+                                visible: videoView.hostRoot >= 0 && videoView.hostRootWritable
+                                enabled: visible && !MediaLibrary.opBusy && !videoView.hostLoading
+                                onClicked: {
+                                    newFolderDialog.forHost = true
+                                    folderNameField.text = ""
+                                    newFolderDialog.open()
+                                }
+                            }
+                            Button {
+                                text: qsTr("Paste")
+                                visible: videoView.hostRoot >= 0 && videoView.hostRootWritable
+                                enabled: visible && videoView.canPaste("host") && !videoView.hostLoading
+                                onClicked: videoView.commitPaste("host")
+                            }
                             BusyIndicator {
                                 running: videoView.hostLoading
                                 visible: running
@@ -615,6 +917,21 @@ Item {
                                 }
                             }
                         }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            visible: videoView.fileClip && videoView.fileClip.side === "host"
+                            Label {
+                                text: videoView.clipHint()
+                                elide: Text.ElideMiddle
+                                Layout.fillWidth: true
+                                opacity: 0.8
+                            }
+                            Button {
+                                text: qsTr("Clear")
+                                enabled: !MediaLibrary.opBusy
+                                onClicked: videoView.fileClip = null
+                            }
+                        }
                         GridView {
                             id: hostEntryList
                             Layout.fillWidth: true
@@ -623,13 +940,14 @@ Item {
                             model: hostModel
                             keyNavigationEnabled: true
                             cellWidth: videoView.cellW(hostEntryList)
-                            cellHeight: videoView.cellH(hostEntryList, 56)
+                            cellHeight: videoView.cellH(hostEntryList, 72)
                             ScrollBar.vertical: ScrollBar {}
                             delegate: ItemDelegate {
                                 width: hostEntryList.cellWidth
                                 height: hostEntryList.cellHeight
                                 padding: videoView.gridMode ? 6 : 12
                                 highlighted: hostEntryList.activeFocus && hostEntryList.currentIndex === index
+                                PlayedFrame { visible: !model.isDir && videoView.hostKey(model.root, model.path) === viewSettings.lastPlayed }
                                 contentItem: Item {
                                 ThumbCard {
                                     anchors.fill: parent
@@ -642,6 +960,7 @@ Item {
                                 }
                                 RowLayout {
                                     anchors.fill: parent
+                                    anchors.rightMargin: !videoView.gridMode && videoView.hostRoot >= 0 && videoView.hostRootWritable ? 44 : 0
                                     visible: !videoView.gridMode
                                     spacing: 12
                                     Rectangle {
@@ -666,11 +985,44 @@ Item {
                                     Label { text: model.detail; opacity: 0.6 }
                                 }
                                 }
+                                // 根清單（分享資料夾本身、磁碟機）不放「⋯」。只在已進入、而且這個根可寫時給檔案與資料夾。
+                                Button {
+                                    id: hostMoreButton
+                                    z: 6
+                                    width: 48
+                                    height: 48
+                                    padding: 0
+                                    focusPolicy: Qt.NoFocus
+                                    visible: videoView.hostRoot >= 0 && videoView.hostRootWritable
+                                    enabled: visible && !MediaLibrary.opBusy
+                                    text: "⋯"
+                                    font.pixelSize: 20
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.rightMargin: 4
+                                    anchors.topMargin: videoView.gridMode ? 4 : Math.max(0, (parent.height - height) / 2)
+                                    onPressed: videoView.suppressItemClick = true
+                                    onReleased: suppressClickTimer.restart()
+                                    onCanceled: videoView.suppressItemClick = false
+                                    onClicked: videoView.openFileMenu(hostMoreButton, {
+                                                   "side": "host", "host": videoView.hostIndex, "root": model.root,
+                                                   "path": model.path, "name": model.name, "isDir": model.isDir
+                                               })
+                                }
                                 onClicked: {
+                                    if (videoView.suppressItemClick) {
+                                        return
+                                    }
                                     if (model.isDir) {
+                                        // 從根清單點進去才更新可寫。子資料夾沿用進來時抄下的旗標。
+                                        if (videoView.hostRoot < 0) {
+                                            videoView.hostRootWritable = model.writable === true
+                                        }
                                         openHostDir(model.root, model.path, videoView.hostRoot < 0 ? model.name : "")
                                     }
                                     else {
+                                        hostEntryList.currentIndex = index
+                                        viewSettings.lastPlayed = videoView.hostKey(model.root, model.path)
                                         // §REVIEW-1104：改傳主機 uuid 組出播放網址
                                         play(MediaLibrary.hostFileUrl(ComputerManager, videoView.hostIndex, model.root, model.path), model.name)
                                     }
@@ -772,7 +1124,12 @@ Item {
                                         badge: qsTr("VID")
                                     }
                                 }
-                                onClicked: play(model.url, model.title)
+                                PlayedFrame { visible: model.url === viewSettings.lastPlayed }
+                                onClicked: {
+                                    webList.currentIndex = index
+                                    viewSettings.lastPlayed = model.url
+                                    play(model.url, model.title)
+                                }
                                 Keys.onReturnPressed: clicked()
                                 Keys.onEnterPressed: clicked()
                             }
@@ -856,6 +1213,26 @@ Item {
             }
         }
 
+        // §MEDIA-FILEOPS：進行中放在分頁外面，切到別頁也看得到、也能取消。total 還沒算好（0）用不確定模式。
+        RowLayout {
+            visible: MediaLibrary.opBusy
+            Layout.fillWidth: true
+            spacing: 8
+            ProgressBar {
+                Layout.fillWidth: true
+                from: 0
+                to: videoView.opTotal > 0 ? videoView.opTotal : 1
+                value: videoView.opDone
+                // 這一列藏起來時 ProgressBar 自己的 visible 仍是 true，不確定模式會在背後空轉。
+                indeterminate: MediaLibrary.opBusy && videoView.opTotal <= 0
+            }
+            Button {
+                text: qsTr("Cancel")
+                focusPolicy: Qt.NoFocus
+                onClicked: MediaLibrary.cancelOp()
+            }
+        }
+
         RowLayout {
             Layout.fillWidth: true
             spacing: 12
@@ -871,12 +1248,90 @@ Item {
                 id: errorLabel
                 color: "#ff8080"
                 Layout.fillWidth: true
+                // 失敗原因接在通用句子後面，一行省略會把原因切掉。
+                wrapMode: Text.Wrap
+                maximumLineCount: 2
                 elide: Text.ElideRight
             }
             Button {
                 text: videoView.gridMode ? qsTr("List view") : qsTr("Grid view")
                 focusPolicy: Qt.NoFocus
                 onClicked: viewSettings.grid = !viewSettings.grid
+            }
+        }
+    }
+
+    // 「⋯」的 onPressed 先把旗標立起來。項目的 onClicked 若在同一次點擊裡跟著來，會被擋下。
+    // 0 ms 的計時器排到這次事件處理完才清，避免旗標卡住下一次真正要開的項目。
+    Timer {
+        id: suppressClickTimer
+        interval: 0
+        onTriggered: videoView.suppressItemClick = false
+    }
+
+    NavigableMenu {
+        id: fileMenu
+        NavigableMenuItem {
+            text: qsTr("Copy")
+            enabled: visible && !MediaLibrary.opBusy
+            onTriggered: {
+                if (videoView.fileOpTarget) {
+                    videoView.setFileClip("copy", videoView.fileOpTarget)
+                }
+            }
+        }
+        NavigableMenuItem {
+            text: qsTr("Move")
+            enabled: visible && !MediaLibrary.opBusy
+            onTriggered: {
+                if (videoView.fileOpTarget) {
+                    videoView.setFileClip("move", videoView.fileOpTarget)
+                }
+            }
+        }
+        NavigableMenuItem {
+            text: qsTr("Delete")
+            enabled: visible && !MediaLibrary.opBusy
+            onTriggered: deleteFileDialog.open()
+        }
+    }
+
+    NavigableMessageDialog {
+        id: deleteFileDialog
+        standardButtons: Dialog.Yes | Dialog.No
+        text: {
+            var t = videoView.fileOpTarget
+            if (!t) {
+                return ""
+            }
+            var shown = (t.name || "").replace(/%/g, "%%")
+            var line = qsTr("Delete \"%1\" permanently?").arg(shown)
+            if (t.isDir) {
+                line += "\n" + qsTr("This folder and everything inside it, including files that are not videos, will be permanently deleted.")
+            }
+            return line
+        }
+        onAccepted: videoView.commitDelete(videoView.fileOpTarget)
+    }
+
+    // 不設 inputMethodHints：資料夾名稱要能打各種字，跟這一頁的搜尋框一樣（網址框的 ImhUrlCharactersOnly 會擋掉）。
+    // 一打開就把焦點放在欄位，頭盔的虛擬鍵盤才有目標（跟重新命名電腦的對話框一樣）。
+    NavigableDialog {
+        id: newFolderDialog
+        property bool forHost: false
+        title: qsTr("New folder")
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onOpened: folderNameField.forceActiveFocus()
+        onClosed: folderNameField.text = ""
+        onAccepted: videoView.commitMkdir(forHost, folderNameField.text)
+        ColumnLayout {
+            TextField {
+                id: folderNameField
+                Layout.fillWidth: true
+                Layout.preferredWidth: 360
+                placeholderText: qsTr("Folder name")
+                Keys.onReturnPressed: newFolderDialog.accept()
+                Keys.onEnterPressed: newFolderDialog.accept()
             }
         }
     }

@@ -90,6 +90,29 @@ void LiInterruptConnection(void) {
 }
 
 // Stop the connection by undoing the step at the current stage and those before it
+// §HOTSPOT-FLAT：見 Limelight.h
+void LiAddQuicAltPeer(const char* ipv4) {
+#ifdef VIPLE_MPQUIC
+    struct sockaddr_storage ss;
+    struct sockaddr_in* sa4 = (struct sockaddr_in*)&ss;
+    if (ipv4 == NULL || !StreamConfig.useQuicTransport || StreamConfig.quicPort <= 0) {
+        return;
+    }
+    memset(&ss, 0, sizeof(ss));
+    if (inet_pton(AF_INET, ipv4, &sa4->sin_addr) != 1) {
+        return;
+    }
+    sa4->sin_family = AF_INET;
+    sa4->sin_port = htons((unsigned short)StreamConfig.quicPort);
+    if (quicAddAltPeer(&ss, (SOCKADDR_LEN)sizeof(struct sockaddr_in))) {
+        Limelog("[VIPLE-MPQUIC] §HOTSPOT-FLAT: alt peer %s:%u added mid-session (path is built by the next recovery pass)\n",
+                ipv4, (unsigned)StreamConfig.quicPort);
+    }
+#else
+    (void)ipv4;
+#endif
+}
+
 void LiStopConnection(void) {
     // §VR-API-GATE：先關 VR 公開 API，再拆控制串流
     vrApiSetReady(false);

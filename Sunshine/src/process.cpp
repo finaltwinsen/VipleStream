@@ -867,6 +867,35 @@ namespace proc {
   }  // namespace
 #endif
 
+  std::function<std::vector<uint32_t>()> proc_t::steam_game_pid_lister() {
+#ifdef _WIN32
+    if (_app_id <= 0 || _app.source != "steam" || _app.steam_install_dir.empty()) {
+      return {};
+    }
+    const std::wstring dir = utf_utils::from_utf8(_app.steam_install_dir);
+    // 和 quit_steam_game 同樣的防呆：只認 ...\steamapps\common\<遊戲>，不碰 Steam 本體與 SteamVR
+    std::wstring lower = dir;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+    const auto common_pos = lower.find(L"\\steamapps\\common\\");
+    std::wstring game_part = common_pos == std::wstring::npos ? std::wstring {} : lower.substr(common_pos + 18);
+    while (!game_part.empty() && (game_part.back() == L'\\' || game_part.back() == L'/' || game_part.back() == L' ' || game_part.back() == L'.')) {
+      game_part.pop_back();
+    }
+    if (game_part.empty() || lower.find(L"\\steamapps\\common\\steamvr") != std::wstring::npos) {
+      return {};
+    }
+    return [dir]() {
+      std::vector<uint32_t> out;
+      for (const auto pid : pids_under_dir(dir)) {
+        out.push_back(pid);
+      }
+      return out;
+    };
+#else
+    return {};
+#endif
+  }
+
   void proc_t::quit_steam_game() {
 #ifdef _WIN32
     if (_app_id <= 0 || _app.source != "steam" || _app.steam_install_dir.empty()) {

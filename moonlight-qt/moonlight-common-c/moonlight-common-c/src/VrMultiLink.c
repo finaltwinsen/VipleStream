@@ -46,6 +46,8 @@
 #define VRML_HOTADD_REFUSE_MS     10000
 #define VRML_HOTADD_REFUSE_MAX    3
 #define VRML_HOTADD_ACK_MS        1000
+#define VRML_PEND_PUB_VIDEO       1u  // §REVIEW-1118B：pendPub 的影像 bit。接收執行緒換檔時設上，abort 看到就不得關
+#define VRML_PEND_PUB_AUDIO       2u
 #define VRML_STATS_INTERVAL_MS    10000
 #define VRML_REPOLL_EVERY         16     // 連續收這麼多個封包就重新看一次其他 socket，免得一條連線的積壓擋住另一條
 #define VRML_RUN_IDLE_US          20000  // 這麼久沒有下一個封包：這一幀在這條連線算結束了（約兩個幀週期，server 也只留這麼久）
@@ -99,6 +101,9 @@ typedef struct _VRML_LINK {
     volatile uint32_t activateGen;  // control 執行緒寫：接收執行緒要把 pending socket 換進來
     volatile uint32_t ackVideo;     // 影像接收執行緒寫：已換到哪一代
     volatile uint32_t ackAudio;     // 音訊接收執行緒寫
+    // §REVIEW-1118B：bit0 影像、bit1 音訊已把 pending fd 抄進自己的 poll set。跟 activateGen 一起在 pendMutex 裡看；
+    // 設上之後 abort／晚到的 REFUSED 不得再關那個 fd（poll 裡那份沒有第二個擁有者）。
+    volatile uint8_t pendPub;
 
     // §VR-LINK-STANDBY（2026-11-08）：走 Tailscale 的這條在有區網直連時待命——PING 不帶 CONFIRMED（server 就不在上面送影像、
     // 也不算它活著），追蹤與控制訊息也不在上面送。直連都斷了（1 s 收不到 PONG）就自動回來。ping 執行緒寫、其他執行緒讀
@@ -182,6 +187,8 @@ typedef struct _VRML_RXSET {
     int next;
     int sincePoll;
     uint64_t lastTsUs;   // 最近收到的那個封包的核心時戳（us）；0＝這個平台或這個 socket 沒有
+    struct sockaddr_in lastSrc; // §REVIEW-1118：剛剛那一包的來源。只有 PONG 要比對，影像封包不看
+    bool lastSrcOk;             // 來源是 IPv4 才算數；拿不到就不擋，避免把真的 PONG 丟掉
     int legacyErr;       // 批次收時原本的 socket 出的錯，留給下一次 recvRxSet 回報（0＝沒有）
 } VRML_RXSET;
 
@@ -195,6 +202,12 @@ static bool trkMutexCreated;  // 只建立一次、不刪除：追蹤執行緒�
 // 這把鎖只包住單一次非阻塞 sendto 與 fd 的交換，不包加解密。
 static PLT_MUTEX sockMutex;
 static bool sockMutexCreated;
+// §REVIEW-1118B：熱插拔 pending fd 的擁有權（abort、OK／REFUSED、接收執行緒換進 poll set）。
+// 跟 sockMutex 的順序寫死成「絕不同時拿」：要兩把的地方都是先 pendMutex、放開，之後才 sockMutex。
+// 不在 vrmlStop 刪。vrmlStop 比 stopControlStream 早，控制執行緒還可能在 vrmlOnS2C；刪了再鎖就是用到已銷毀的 mutex。
+// 和 trkMutex 一樣留到行程結束（debug 的 activeMutexes 會因此多一個，理由相同）。
+static PLT_MUTEX pendMutex;
+static bool pendMutexCreated;
 static PPLT_CRYPTO_CONTEXT trkCrypto;
 static uint32_t dataSeq;
 static VRML_RXSET videoSet;
@@ -213,6 +226,7 @@ typedef struct _VRML_CAND {
     int strikes;
 } VRML_CAND;
 static VRML_CAND scanCand;
+static uint32_t scanFailBe; // §REVIEW-1118：熱插拔時開不起 socket 的本機位址。下一輪先跳過，沒有別張再清掉重試
 static uint32_t hotaddGen;             // pending 世代的來源（只由 ping 執行緒遞增）
 static int hotaddScans;
 static int hotaddRebinds;
@@ -456,10 +470,13 @@ int vrmlPrepare(void) {
     serverAddrCount = 0;
     memset(serverAddrs, 0, sizeof(serverAddrs));
     memset(&scanCand, 0, sizeof(scanCand));
+    scanFailBe = 0;
     hotaddGen = 0;
     hotaddScans = hotaddRebinds = hotaddRefusals = 0;
 
-    if (!(StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) || !(StreamConfig.vrFlags & VIPLE_VR_SF_MULTILINK)) {
+    // §FLAT-ML：VR 協商了多連線，或平面場次協商了多連線
+    if (!((StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) && (StreamConfig.vrFlags & VIPLE_VR_SF_MULTILINK)) &&
+            !StreamConfig.flatMultilink) {
         return 0;
     }
     if (RemoteAddr.ss_family != AF_INET || LocalAddr.ss_family != AF_INET) {
@@ -476,6 +493,14 @@ int vrmlPrepare(void) {
             return 0;
         }
         sockMutexCreated = true;
+    }
+    // §REVIEW-1118B：要在 addLink 之前建好。之後 linkCount > 0 就一定有這把鎖，接收路徑才敢直接拿。
+    if (!pendMutexCreated) {
+        if (PltCreateMutex(&pendMutex) != 0) {
+            Limelog("[VIPLE-VR-LINK] could not create the hot-add mutex; staying on the single path\n");
+            return 0;
+        }
+        pendMutexCreated = true;
     }
 
     // §PERF-1113 A46：只有多連線的 VR session 會用到這張表，非 VR 的 session 不去碰它（128 KB）
@@ -704,43 +729,187 @@ static void logStats(uint64_t nowMs) {
     Limelog("[VIPLE-VR-LINK] 10s: %s\n", line);
 }
 
-static void hotaddClosePending(VRML_LINK* L) {
-    if (L->pendingVideoSock != INVALID_SOCKET) {
-        closeSocket(L->pendingVideoSock);
-        L->pendingVideoSock = INVALID_SOCKET;
+// §REVIEW-1118B：呼叫端已持有 pendMutex。把 pending 欄位換成 INVALID_SOCKET，回傳換出來的值。
+// 1＝這次拿走了至少一個 fd（呼叫端解鎖之後才能 close）；-1＝欄位已經是 INVALID，沒有東西可關。
+// 不在這裡 close：close 可能堵住，不能佔著這把鎖讓接收執行緒換檔等。
+static int pendTake(VRML_LINK* L, SOCKET* video, SOCKET* audio) {
+    *video = INVALID_SOCKET;
+    *audio = INVALID_SOCKET;
+    if (L->pendingVideoSock == INVALID_SOCKET && L->pendingAudioSock == INVALID_SOCKET) {
+        // 別人已經換走了。pending 還留著會讓後面的熱插拔一直看到「有人在重綁」。
+        L->pending = false;
+        L->pendingGen = 0;
+        L->activateGen = 0;
+        L->pendPub = 0;
+        return -1;
     }
-    if (L->pendingAudioSock != INVALID_SOCKET) {
-        closeSocket(L->pendingAudioSock);
-        L->pendingAudioSock = INVALID_SOCKET;
-    }
-}
-
-// 這次重綁作廢（server 拒絕、或 HELLO 重送用完）。只有在接收執行緒還沒換 fd（activateGen 還是 0）時才能呼叫：
-// 一旦有人換了，關掉 fd 會讓 poll 拿到已關閉的 handle。
-static void hotaddAbortPending(VRML_LINK* L, const char* why) {
-    if (L->activateGen != 0) {
-        // 已經有接收執行緒換上 pending fd：留著讓它繼續用，等 vrmlStop 再關（寧可漏一個 fd，也不要 poll 到已關閉的 handle）
-        Limelog("[VIPLE-VR-LINK] hot-add link %d %s after activation; keeping the new sockets until stop\n", (int)L->id, why);
-        return;
-    }
-    hotaddClosePending(L);
+    *video = L->pendingVideoSock;
+    L->pendingVideoSock = INVALID_SOCKET;
+    *audio = L->pendingAudioSock;
+    L->pendingAudioSock = INVALID_SOCKET;
     L->pending = false;
     L->pendingGen = 0;
     L->activateGen = 0;
     L->activateAtMs = 0;
     L->ackWarned = false;
+    L->pendPub = 0;
+    return 1;
+}
+
+static void pendFinishClose(VRML_LINK* L, SOCKET video, SOCKET audio, const char* why, bool fromServer, int tries) {
+    // 解鎖之後才關。同一個 fd 值只會被一個呼叫端從欄位換走，這裡不會關到第二遍。
+    closeSocket(video);
+    closeSocket(audio);
+    if (fromServer) {
+        Limelog("[VIPLE-VR-LINK] hot-add link %d refused by the server (try %d/%d)\n", (int)L->id,
+                tries, VRML_HOTADD_REFUSE_MAX);
+    }
     Limelog("[VIPLE-VR-LINK] hot-add link %d %s; will retry after %d ms\n", (int)L->id, why, VRML_HOTADD_REFUSE_MS);
+}
+
+// vrmlStop 用。接收執行緒已經結束，poll set 不會再讀，所以連已經標進 pendPub 的 fd 也要關，否則沒 commit 的重綁會漏 fd。
+// 跟還在 vrmlOnS2C 裡的 REFUSED 搶的是欄位裡的值：先換成 INVALID_SOCKET 的那個才 close。
+static void hotaddClosePending(VRML_LINK* L) {
+    SOCKET vs;
+    SOCKET as;
+
+    if (!pendMutexCreated) {
+        if (L->pendingVideoSock != INVALID_SOCKET) {
+            closeSocket(L->pendingVideoSock);
+            L->pendingVideoSock = INVALID_SOCKET;
+        }
+        if (L->pendingAudioSock != INVALID_SOCKET) {
+            closeSocket(L->pendingAudioSock);
+            L->pendingAudioSock = INVALID_SOCKET;
+        }
+        return;
+    }
+    PltLockMutex(&pendMutex);
+    vs = L->pendingVideoSock;
+    L->pendingVideoSock = INVALID_SOCKET;
+    as = L->pendingAudioSock;
+    L->pendingAudioSock = INVALID_SOCKET;
+    L->pending = false;
+    L->pendingGen = 0;
+    L->activateGen = 0;
+    L->pendPub = 0;
+    PltUnlockMutex(&pendMutex);
+    closeSocket(vs);
+    closeSocket(as);
+}
+
+// HELLO 重送用完，這次重綁作廢。已經啟動（activateGen）或已經進 poll set（pendPub）就不關：
+// fd 已經交出去了，在這裡 close 會讓 poll 拿到已關閉的 handle。refuseTries 只在真的拿走 fd 時加，
+// 跟控制執行緒的 REFUSED 不會各加一次。
+static void hotaddAbortPending(VRML_LINK* L, const char* why, uint64_t nowMs) {
+    SOCKET vs = INVALID_SOCKET;
+    SOCKET as = INVALID_SOCKET;
+    int took = -1;
+    int tries = 0;
+
+    if (!pendMutexCreated) {
+        return;
+    }
+    PltLockMutex(&pendMutex);
+    if (L->ready || L->activateGen != 0 || L->pendPub != 0) {
+        PltUnlockMutex(&pendMutex);
+        Limelog("[VIPLE-VR-LINK] hot-add link %d %s after activation; keeping the new sockets until stop\n", (int)L->id, why);
+        return;
+    }
+    if (L->pending && L->helloTries >= VRML_HELLO_MAX_TRIES) {
+        took = pendTake(L, &vs, &as);
+        if (took == 1) {
+            L->refusedAtMs = nowMs;
+            if (L->refuseTries < 255) {
+                L->refuseTries++;
+            }
+            tries = L->refuseTries;
+        }
+    }
+    PltUnlockMutex(&pendMutex);
+    if (took == 1) {
+        pendFinishClose(L, vs, as, why, false, tries);
+    }
+}
+
+// 控制執行緒收到 REFUSED。activateGen 已經非 0、或 fd 已經進 poll set、或 commit 已經把 ready 設上：
+// 這筆是晚到的拒絕，忽略，不要 abort，也不要動 refuseTries（間隔與次數都留給還沒啟動的那次）。
+static void noteLinkRefused(VRML_LINK* L, uint64_t nowMs) {
+    SOCKET vs = INVALID_SOCKET;
+    SOCKET as = INVALID_SOCKET;
+    int took = -1;
+    int tries = 0;
+    bool late = false;
+    bool plainLog = false;
+
+    if (!pendMutexCreated) {
+        if (!L->refused) {
+            Limelog("[VIPLE-VR-LINK] link %d refused by the server\n", (int)L->id);
+        }
+        L->refused = true;
+        return;
+    }
+    PltLockMutex(&pendMutex);
+    if (L->ready || L->activateGen != 0 || L->pendPub != 0) {
+        // ready 已經設上、而且 pending 也清了：commit 或一般的 OK 贏了，這筆拒絕沒有熱插拔可收。
+        late = (L->activateGen != 0) || (L->pendPub != 0) || L->pending;
+        PltUnlockMutex(&pendMutex);
+        if (late) {
+            Limelog("[VIPLE-VR-LINK] hot-add link %d refused by the server after activation; ignoring the late refusal\n",
+                    (int)L->id);
+        }
+        return;
+    }
+    if (L->pending && L->pendingGen != 0) {
+        took = pendTake(L, &vs, &as);
+        if (took == 1) {
+            L->refused = true;
+            L->refusedAtMs = nowMs;
+            if (L->refuseTries < 255) {
+                L->refuseTries++;
+            }
+            tries = L->refuseTries;
+            hotaddRefusals++;
+        }
+        PltUnlockMutex(&pendMutex);
+        if (took == 1) {
+            pendFinishClose(L, vs, as, "was refused by the server", true, tries);
+        }
+        return;
+    }
+    plainLog = !L->refused;
+    L->refused = true;
+    PltUnlockMutex(&pendMutex);
+    if (plainLog) {
+        Limelog("[VIPLE-VR-LINK] link %d refused by the server\n", (int)L->id);
+    }
 }
 
 // 兩條接收執行緒都換好 fd 之後才由 ping 執行緒收尾：舊 socket 已經不在任何 poll set 裡，可以安全關閉。
 static void hotaddCommitPending(VRML_LINK* L, uint64_t nowMs) {
-    const SOCKET vs = L->pendingVideoSock;
-    const SOCKET as = L->pendingAudioSock;
-    const struct sockaddr_in local = L->pendingLocal;
-    const struct sockaddr_in serverV = L->pendingServerV;
-    const struct sockaddr_in serverA = L->pendingServerA;
-    const uint16_t vp = L->pendingLocalVideoPort;
-    const uint16_t ap = L->pendingLocalAudioPort;
+    SOCKET vs;
+    SOCKET as;
+    struct sockaddr_in local;
+    struct sockaddr_in serverV;
+    struct sockaddr_in serverA;
+    uint16_t vp;
+    uint16_t ap;
+
+    // §REVIEW-1118B：先在 pendMutex 裡把 fd 讀出來，先不要清欄位。清太早的話，音訊執行緒
+    // 正要換檔會看到 INVALID，poll set 留在舊 fd 上，下面又把舊 fd 關掉。abort 在 activateGen
+    // 還不是 0 時不會關，所以這段期間欄位留著是安全的。不跟 sockMutex 同時拿。
+    PltLockMutex(&pendMutex);
+    vs = L->pendingVideoSock;
+    as = L->pendingAudioSock;
+    local = L->pendingLocal;
+    serverV = L->pendingServerV;
+    serverA = L->pendingServerA;
+    vp = L->pendingLocalVideoPort;
+    ap = L->pendingLocalAudioPort;
+    PltUnlockMutex(&pendMutex);
+    if (vs == INVALID_SOCKET || as == INVALID_SOCKET) {
+        return;
+    }
 
     PltLockMutex(&sockMutex);
     if (L->videoSock != INVALID_SOCKET) {
@@ -763,13 +932,21 @@ static void hotaddCommitPending(VRML_LINK* L, uint64_t nowMs) {
         snprintf(L->ifName, sizeof(L->ifName), "%s", L->pendingIfName);
         L->pendingIfName[0] = '\0';
     }
-    L->pendingVideoSock = INVALID_SOCKET;
-    L->pendingAudioSock = INVALID_SOCKET;
+    // 擁有權已經在 videoSock／audioSock。這裡只把 pending 欄位換成 INVALID，不 close；
+    // 跟 activateGen 清成 0 放在同一把鎖裡，abort 才不會看到「已結束」但又讀到舊的 fd 值。
+    PltLockMutex(&pendMutex);
+    if (L->pendingVideoSock == vs) {
+        L->pendingVideoSock = INVALID_SOCKET;
+    }
+    if (L->pendingAudioSock == as) {
+        L->pendingAudioSock = INVALID_SOCKET;
+    }
     L->pending = false;
     L->pendingGen = 0;
     L->activateGen = 0;
     L->activateAtMs = 0;
     L->ackWarned = false;
+    L->pendPub = 0;
     L->ready = true;
     L->refused = false;
     L->ifGone = false;
@@ -778,19 +955,9 @@ static void hotaddCommitPending(VRML_LINK* L, uint64_t nowMs) {
     L->refuseTries = 0;
     L->helloTries = 0;
     L->lastHelloMs = nowMs;
+    PltUnlockMutex(&pendMutex);
 
-    // 新的路徑要從頭確認：舊的 PONG、到達間隔與速率量測都不能帶過來
-    L->lastPongMs = 0;
-    L->rttMs10 = VIPLE_VR_LINK_RTT_UNKNOWN;
-    vrrrRttReset(&L->rttWin);
-    L->rttHave = false;
-    L->lagValid = false;
-    L->lagUs = 0;
-    L->runCount = 0;
-    L->runBytes = 0;
-    L->winPkts = 0;
-    L->lastRxUs = 0;
-    L->burstMbps = 0;
+    // §REVIEW-1118：接收統計改在影像執行緒換上新 socket 時清（replaceRxSet）。留在這裡會由 ping 執行緒跨執行緒把 runCount 寫成 0，finishRun 可能除到零。
     hotaddRebinds++;
     Limelog("[VIPLE-VR-LINK] hot-add link %d rebound to %s (video:%u audio:%u, epoch=%u)\n", (int)L->id, L->ifName,
             (unsigned)ntohs(L->serverV.sin_port), (unsigned)ntohs(L->serverA.sin_port), (unsigned)L->epoch);
@@ -825,6 +992,9 @@ static bool hotaddStartRebind(VRML_LINK* L, const VRML_CAND* cand, uint64_t nowM
         return false;
     }
 
+    // §REVIEW-1118B：新 fd 跟 pending=true 要在同一把鎖裡公開。否則 abort 可能先看到 pending，
+    // 鎖裡卻還讀到上一輪留下的 INVALID，把這次重綁當成已經收掉。sendHello 是網路傳送，放在鎖外面。
+    PltLockMutex(&pendMutex);
     memset(&L->pendingLocal, 0, sizeof(L->pendingLocal));
     L->pendingLocal.sin_family = AF_INET;
     L->pendingLocal.sin_addr.s_addr = cand->localBe;
@@ -845,10 +1015,12 @@ static bool hotaddStartRebind(VRML_LINK* L, const VRML_CAND* cand, uint64_t nowM
     L->activateGen = 0;
     L->activateAtMs = 0;
     L->ackWarned = false;
+    L->pendPub = 0;
     VRML_RELEASE_FENCE();  // 先讓 pending 的 fd／位址／埠都可見，再公開 pending
     L->pending = true;
     L->ready = false;
     L->refused = false;
+    PltUnlockMutex(&pendMutex);
     L->epoch = (uint8_t)(L->epoch + 1);
     if (L->epoch == 0) {
         L->epoch = 1;  // 0 在 server 是「舊 client」的預設值；不要繞回去
@@ -952,8 +1124,10 @@ static void hotaddScan(uint64_t nowMs) {
         VRML_LINK* L = &links[i];
         bool present = false;
 
-        if (L->primary) {
-            continue;  // 主連線是 session 本身那條，換掉會讓 ENet 與 primary 模式失去意義
+        // 主連線是 session 本身那條，換掉會讓 ENet 與 primary 模式失去意義。
+        // §REVIEW-1118：重綁進行中 local 仍是舊網卡。舊網卡短暫回來不能把進行中的重綁狀態清掉。
+        if (L->primary || L->pending) {
+            continue;
         }
         for (c = 0; c < ifCount; c++) {
             if (!ifUsable(&ifs[c])) {
@@ -1012,6 +1186,10 @@ static void hotaddScan(uint64_t nowMs) {
         if (used) {
             continue;
         }
+        // §REVIEW-1118：上一輪這張開 socket 失敗。先跳過，讓排在後面的介面進得了這個迴圈。
+        if (scanFailBe != 0 && localBe == scanFailBe) {
+            continue;
+        }
         for (k = 0; k < addrCount; k++) {
             if (sameSubnet4(localBe, addrs[k], ifs[c].prefixLen)) {
                 serverBe = addrs[k];
@@ -1034,13 +1212,20 @@ static void hotaddScan(uint64_t nowMs) {
             scanCand.strikes = 1;
         }
         if (scanCand.strikes >= VRML_HOTADD_STABLE_SCANS) {
-            if (hotaddApplyCandidate(&scanCand, nowMs)) {
+            if (!hotaddApplyCandidate(&scanCand, nowMs)) {
+                // §REVIEW-1118：這張開不起 socket。記下來並改看下一張，否則排在前面的壞網卡會讓後面的整場掃不到。
+                scanFailBe = localBe;
                 scanCand.valid = false;
+                continue;
             }
+            scanFailBe = 0;
+            scanCand.valid = false;
         }
         return;
     }
     scanCand.valid = false;
+    // §REVIEW-1118：沒有別張可試。清掉失敗記號，下一輪再給那張一次機會（暫時開不起來的錯誤才回得來）。
+    scanFailBe = 0;
 }
 
 // 已經 READY OK、等兩條接收執行緒換好 fd 的連線：兩邊都 ack 才收尾（關舊 socket）。
@@ -1051,7 +1236,9 @@ static void hotaddServicePending(uint64_t nowMs) {
         if (!L->pending || L->activateGen == 0 || L->activateGen != L->pendingGen) {
             continue;
         }
-        if (L->ackVideo == L->activateGen && L->ackAudio == L->activateGen) {
+        // §REVIEW-1118：音訊接收沒在用這個 set（例如音訊走 QUIC、從來沒進 vrmlRecvAudio）時 ackAudio 永遠等不到，
+        // 這條連線與之後的熱插拔會一直卡在 pending。有人在收才等音訊那側。
+        if (L->ackVideo == L->activateGen && (audioSet.count == 0 || L->ackAudio == L->activateGen)) {
             VRML_ACQUIRE_FENCE();
             hotaddCommitPending(L, nowMs);
         }
@@ -1087,11 +1274,8 @@ static void hotaddHelloRetries(uint64_t nowMs) {
     for (i = 0; i < linkCount; i++) {
         VRML_LINK* L = &links[i];
         if (L->pending && L->activateGen == 0 && L->helloTries >= VRML_HELLO_MAX_TRIES) {
-            L->refusedAtMs = nowMs;
-            if (L->refuseTries < 255) {
-                L->refuseTries++;
-            }
-            hotaddAbortPending(L, "got no LINK_READY after the HELLO retries");
+            // §REVIEW-1118B：refuseTries 改在鎖裡、而且只有真的拿走 fd 才加。這裡先加的話，跟 REFUSED 會各算一次。
+            hotaddAbortPending(L, "got no LINK_READY after the HELLO retries", nowMs);
             continue;
         }
         if (hotaddHelloEligible(L, nowMs)) {
@@ -1266,10 +1450,13 @@ void vrmlStop(void) {
 
 void vrmlOnS2C(const unsigned char* tlv, int len) {
     int off = 0;
+    // §REVIEW-1118：先把 linkCount 讀進區域變數再 acquire，之後才碰 slot。這支檔案其他讀取點都有屏障，這裡漏了；ARM 上可能看到 count 已增加、欄位還是舊的。
+    const int nLinks = linkCount;
 
-    if (linkCount == 0) {
+    if (nLinks == 0) {
         return;
     }
+    VRML_ACQUIRE_FENCE();
     while (off + 2 <= len) {
         uint8_t type = tlv[off];
         uint8_t blen = tlv[off + 1];
@@ -1283,7 +1470,7 @@ void vrmlOnS2C(const unsigned char* tlv, int len) {
             for (i = 0; i < count && 1 + (i + 1) * (int)sizeof(VIPLE_VR_LINK_PORTS) <= blen; i++) {
                 VIPLE_VR_LINK_PORTS p;
                 memcpy(&p, body + 1 + i * sizeof(p), sizeof(p));
-                for (k = 0; k < linkCount; k++) {
+                for (k = 0; k < nLinks; k++) {
                     VRML_LINK* L = &links[k];
                     if (L->id != p.linkId) {
                         continue;
@@ -1291,13 +1478,20 @@ void vrmlOnS2C(const unsigned char* tlv, int len) {
                     if (p.status == VIPLE_VR_LINK_READY_OK && p.serverVideoPort != 0 && p.serverAudioPort != 0) {
                         if (L->pending && L->pendingGen != 0) {
                             // §VR-MULTILINK-HOTADD：先只記下新埠，等兩條接收執行緒都換好 fd 才由 ping 執行緒接手
-                            L->pendingServerV.sin_port = htons(LE16(p.serverVideoPort));
-                            L->pendingServerA.sin_port = htons(LE16(p.serverAudioPort));
-                            if (L->activateGen != L->pendingGen) {
-                                L->activateAtMs = PltGetMillis();
+                            // §REVIEW-1118B：activateGen 從 0 變成這一代要跟 abort 的檢查在同一把鎖裡。
+                            // 否則 abort 看過 0 之後這裡才寫上，接收執行緒會把即將被關掉的 fd 抄進 poll set。
+                            const uint64_t actMs = PltGetMillis();
+                            uint32_t gen;
+                            PltLockMutex(&pendMutex);
+                            gen = L->pendingGen;
+                            if (L->pending && gen != 0 && L->activateGen != gen) {
+                                L->pendingServerV.sin_port = htons(LE16(p.serverVideoPort));
+                                L->pendingServerA.sin_port = htons(LE16(p.serverAudioPort));
+                                L->activateAtMs = actMs;
                                 VRML_RELEASE_FENCE();
-                                L->activateGen = L->pendingGen;
+                                L->activateGen = gen;
                             }
+                            PltUnlockMutex(&pendMutex);
                         }
                         else {
                             L->serverV.sin_port = htons(LE16(p.serverVideoPort));
@@ -1310,31 +1504,20 @@ void vrmlOnS2C(const unsigned char* tlv, int len) {
                         }
                     }
                     else if (!L->ready) {
-                        if (L->pending && L->pendingGen != 0) {
-                            // 熱插拔被拒絕：收掉 pending socket，10 s 後由掃描再試（最多 3 次）
-                            L->refused = true;
-                            L->refusedAtMs = PltGetMillis();
-                            if (L->refuseTries < 255) {
-                                L->refuseTries++;
-                            }
-                            hotaddRefusals++;
-                            Limelog("[VIPLE-VR-LINK] hot-add link %d refused by the server (try %d/%d)\n", (int)L->id,
-                                    L->refuseTries, VRML_HOTADD_REFUSE_MAX);
-                            hotaddAbortPending(L, "was refused by the server");
-                        }
-                        else {
-                            if (!L->refused) {
-                                Limelog("[VIPLE-VR-LINK] link %d refused by the server\n", (int)L->id);
-                            }
-                            L->refused = true;
-                        }
+                        // §REVIEW-1118B：熱插拔跟一般拒絕都進這裡再重看。外面這次讀到的 pending／ready 可能已經過期。
+                        noteLinkRefused(L, PltGetMillis());
                     }
                 }
             }
             {
-                // §VR-LINK-CTRL：陣列之後多一個 byte＝server 同意啟用的功能（舊 server 不附）
+                // §VR-LINK-CTRL：陣列之後多一個 byte＝server 同意啟用的功能（舊 server 不附，used == blen）
                 int used = 1 + count * (int)sizeof(VIPLE_VR_LINK_PORTS);
-                uint8_t caps = (count >= 0 && used < blen) ? body[used] : 0;
+                // §REVIEW-1118：count 比這段放得下的多時，後面沒有 caps。不能把它當成 0，否則已經談好的連線層功能會被清掉且回不來。
+                // used == blen 是舊 server 不附這個 byte（功能就是 0），維持原樣。count 是一個 byte，乘上 6 不會溢位。
+                uint8_t caps = (used < blen) ? body[used] : 0;
+                if (used > blen) {
+                    caps = hubCaps;
+                }
                 // §VR-REPAIR-RTT：我們沒提的（設定或 --vr-repair-rtt off）、或補包本身沒成立的，server 就算回了也不用
                 if (!(StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) || !(caps & VIPLE_VR_LINK_F_REPAIR)) {
                     caps &= (uint8_t)~VIPLE_VR_LINK_F_REPAIR_RTT;
@@ -1404,23 +1587,57 @@ static void replaceRxSet(VRML_RXSET* set, bool video) {
     for (i = 0; i + 1 < set->count && i < linkCount; i++) {
         VRML_LINK* L = &links[i];
         const uint32_t gen = L->activateGen;
+        uint32_t genHeld;
+        SOCKET sock;
+        const uint8_t pubBit = video ? (uint8_t)VRML_PEND_PUB_VIDEO : (uint8_t)VRML_PEND_PUB_AUDIO;
+        // §REVIEW-1118B：沒有要換的 fd 就停在這裡，不拿 pendMutex。這條路每輪收包都會走。
         if (gen == 0 || (video ? L->ackVideo : L->ackAudio) == gen) {
             continue;
         }
-        VRML_ACQUIRE_FENCE();
-        set->socks[i + 1] = video ? L->pendingVideoSock : L->pendingAudioSock;
+        PltLockMutex(&pendMutex);
+        genHeld = L->activateGen;
+        if (genHeld == 0 || (video ? L->ackVideo : L->ackAudio) == genHeld) {
+            PltUnlockMutex(&pendMutex);
+            continue;
+        }
+        sock = video ? L->pendingVideoSock : L->pendingAudioSock;
+        // 鎖裡決定這次換檔算數：標上 pendPub 之後，abort 與晚到的 REFUSED 不得再關這個 fd。
+        if (sock == INVALID_SOCKET || (L->pendPub & pubBit) != 0) {
+            PltUnlockMutex(&pendMutex);
+            continue;
+        }
+        set->socks[i + 1] = sock;
         set->readable[i + 1] = false;
         set->dead[i + 1] = false;
         set->deadAtMs[i + 1] = 0;
-        VRML_RELEASE_FENCE();  // fd 換好之後才公開 ack；ping 執行緒看到兩個 ack 才會關舊 fd
+        L->pendPub = (uint8_t)(L->pendPub | pubBit);
+        PltUnlockMutex(&pendMutex);
         if (video) {
-            L->ackVideo = gen;
+            // §REVIEW-1118：這些欄位只由影像接收執行緒寫。在換上新 socket 的當下、公開 ack 之前清，新路徑才不會沿用舊的 PONG、
+            // 速率與 lag 歷史；也不會讓 ping 執行緒事後把 runCount 寫成 0，finishRun 除到零。屏障在清完之後，ping 執行緒看到 ack 時這些值已經是 0。
+            L->lastPongMs = 0;
+            L->rttMs10 = VIPLE_VR_LINK_RTT_UNKNOWN;
+            vrrrRttReset(&L->rttWin);
+            L->rttHave = false;
+            L->lagValid = false;
+            L->lagUs = 0;
+            L->lagHistCount = 0;
+            L->lagHistPos = 0;
+            L->runCount = 0;
+            L->runBytes = 0;
+            L->winPkts = 0;
+            L->lastRxUs = 0;
+            L->burstMbps = 0;
+        }
+        VRML_RELEASE_FENCE();  // fd 與統計都換好之後才公開 ack；ping 執行緒看到兩個 ack 才會關舊 fd
+        if (video) {
+            L->ackVideo = genHeld;
         }
         else {
-            L->ackAudio = gen;
+            L->ackAudio = genHeld;
         }
         Limelog("[VIPLE-VR-LINK] link %d: %s receive side switched to the new socket (gen %u)\n", (int)L->id,
-                video ? "video" : "audio", (unsigned)gen);
+                video ? "video" : "audio", (unsigned)genHeld);
     }
 }
 
@@ -1454,9 +1671,12 @@ static bool icmpNoise(int err) {
 #endif
 }
 
-// recvfrom，另外取核心的接收時戳（有的話）
-static int recvWithTs(SOCKET s, char* buffer, int size, uint64_t* tsUs) {
+// recvfrom，另外取核心的接收時戳（有的話）。src 可為 NULL；有的話寫入來源位址（PONG 要比對）。
+static int recvWithTs(SOCKET s, char* buffer, int size, uint64_t* tsUs, struct sockaddr_in* src) {
     *tsUs = 0;
+    if (src != NULL) {
+        memset(src, 0, sizeof(*src));
+    }
 #if defined(__linux__) && defined(SO_TIMESTAMPNS)
     {
         struct msghdr msg;
@@ -1472,6 +1692,9 @@ static int recvWithTs(SOCKET s, char* buffer, int size, uint64_t* tsUs) {
         msg.msg_iovlen = 1;
         msg.msg_control = ctrl;
         msg.msg_controllen = sizeof(ctrl);
+        // §REVIEW-1118：把來源留著。多出來的只是核心填一個 sockaddr，沒有加鎖、配置或 log。
+        msg.msg_name = src;
+        msg.msg_namelen = src != NULL ? (SOCKADDR_LEN)sizeof(*src) : 0;
         n = (int)recvmsg(s, &msg, 0);
         if (n > 0) {
             for (cm = CMSG_FIRSTHDR(&msg); cm != NULL; cm = CMSG_NXTHDR(&msg, cm)) {
@@ -1485,7 +1708,12 @@ static int recvWithTs(SOCKET s, char* buffer, int size, uint64_t* tsUs) {
         return n;
     }
 #else
-    return (int)recvfrom(s, buffer, size, 0, NULL, NULL);
+    {
+        SOCKADDR_LEN srcLen = src != NULL ? (SOCKADDR_LEN)sizeof(*src) : 0;
+        return (int)recvfrom(s, buffer, size, 0,
+                             src != NULL ? (struct sockaddr*)src : NULL,
+                             src != NULL ? &srcLen : NULL);
+    }
 #endif
 }
 
@@ -1515,6 +1743,8 @@ static bool rxSetOnError(VRML_RXSET* set, int i, int err) {
 
 #if defined(__linux__) && defined(SO_TIMESTAMPNS)
 #define VRML_HAVE_RECVMMSG 1
+// §REVIEW-1118：批次收的每一包來源。只有影像執行緒會進來（音訊不走 recvmmsg），所以用檔案內的陣列，不在每幀配置。
+static struct sockaddr_in batchSrc[VRML_MMSG_MAX];
 // §PERF-1113：一次系統呼叫把 set 第 slot 個 socket 上已經到的資料報收進 base 起連續的幾格（每格 slotSize），不等待。
 // 回傳收到幾個（0＝現在沒有，或出錯）；lens[i]／tsUs[i] 是第 i 個的長度與核心接收時戳（沒有時戳＝0），和 recvWithTs 相同。
 // 收到的比要求的少＝這個 socket 空了，直接清掉 readable，省掉原本靠一次 EAGAIN 的 recvmsg 才知道的那個系統呼叫。
@@ -1542,6 +1772,9 @@ static int recvBatchWithTs(VRML_RXSET* set, int slot, char* base, int slotSize, 
         msgs[i].msg_hdr.msg_iovlen = 1;
         msgs[i].msg_hdr.msg_control = ctrl[i].buf;
         msgs[i].msg_hdr.msg_controllen = sizeof(ctrl[i].buf);
+        memset(&batchSrc[i], 0, sizeof(batchSrc[i]));
+        msgs[i].msg_hdr.msg_name = &batchSrc[i];
+        msgs[i].msg_hdr.msg_namelen = (SOCKADDR_LEN)sizeof(batchSrc[i]);
     }
     n = (int)recvmmsg(set->socks[slot], msgs, (unsigned int)maxN, MSG_DONTWAIT, NULL);
     if (n <= 0) {
@@ -1649,8 +1882,9 @@ static int recvRxSet(VRML_RXSET* set, char* buffer, int size, int* slot, bool wa
                 continue;
             }
             any = true;
-            err = recvWithTs(set->socks[i], buffer, size, &set->lastTsUs);
+            err = recvWithTs(set->socks[i], buffer, size, &set->lastTsUs, &set->lastSrc);
             if (err > 0) {
+                set->lastSrcOk = set->lastSrc.sin_family == AF_INET;
                 set->next = (i + 1) % set->count;  // 輪流，兩條連線同時有資料時不偏袒任何一條
                 set->sincePoll++;
                 *slot = i;
@@ -1794,6 +2028,38 @@ static void onLinkS2C(const VIPLE_VR_LINK_HDR* hdr, const char* buffer, int len)
     vrLinkS2C(plain + 2, plainLen - 2);
 }
 
+// §REVIEW-1118：PONG 是明文。來源必須是這條連線已知的 host（重綁中新位址在 pendingServerV，commit 才寫回 serverV）。
+// 不符就丟掉，區網上別人不能把斷掉的連線釘成還活著。拿不到來源時不擋，避免平台差異把真的 PONG 丟掉。不加鎖、不記 log。
+static bool pongFromHost(const VRML_LINK* L) {
+    uint32_t src;
+
+    if (!videoSet.lastSrcOk) {
+        return true;
+    }
+    src = videoSet.lastSrc.sin_addr.s_addr;
+    if (src == L->serverV.sin_addr.s_addr) {
+        return true;
+    }
+    if (L->pending) {
+        VRML_ACQUIRE_FENCE();
+        if (src == L->pendingServerV.sin_addr.s_addr) {
+            return true;
+        }
+    }
+    // host 有多張網卡在同一個網段時，回程封包的來源位址由 host 的路由決定，不一定是我們送去的那一個：
+    // 只要是 host 自己報過的位址就算數（只認 serverV 會把真的 PONG 丟掉，整條連線被判成斷線）。
+    {
+        const int n = serverAddrCount;
+        int k;
+        for (k = 0; k < n && k < VIPLE_VR_LINK_ADDR_MAX; k++) {
+            if (serverAddrs[k] == src) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void onVideoCtrl(VRML_LINK* L, const char* buffer, int len) {
     VIPLE_VR_LINK_HDR hdr;
 
@@ -1805,7 +2071,11 @@ static void onVideoCtrl(VRML_LINK* L, const char* buffer, int len) {
         return;
     }
     if (hdr.type == VIPLE_VR_LINK_T_PONG) {
-        uint32_t rttUs = (uint32_t)PltGetMicroseconds() - LE32(hdr.arg);
+        uint32_t rttUs;
+        if (!pongFromHost(L)) {
+            return;
+        }
+        rttUs = (uint32_t)PltGetMicroseconds() - LE32(hdr.arg);
         const uint64_t nowMs = PltGetMillis();
         if (rttUs < 2000000) {
             const uint16_t ms10 = (uint16_t)(rttUs / 100 >= VIPLE_VR_LINK_RTT_UNKNOWN ? VIPLE_VR_LINK_RTT_UNKNOWN - 1 : rttUs / 100);
@@ -1938,6 +2208,69 @@ int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr
         a.sin_addr = links[i].serverV.sin_addr;
         memset(out, 0, sizeof(*out));
         memcpy(out, &a, sizeof(a));
+        return 1;
+    }
+    return 0;
+}
+
+int vrmlLinkQuietMsByLocal(const struct sockaddr_storage* local) {
+    const uint64_t nowMs = PltGetMillis();
+    if (local == NULL || local->ss_family != AF_INET) {
+        return -1;
+    }
+    const struct sockaddr_in* a = (const struct sockaddr_in*)local;
+    for (int i = 0; i < linkCount; i++) {
+        uint64_t t;
+        if (!links[i].ready || links[i].ifGone || links[i].local.sin_addr.s_addr != a->sin_addr.s_addr) {
+            continue;
+        }
+        t = links[i].lastPongMs;
+        if (t == 0) {
+            return 60000;  // 這條連線從來沒通過
+        }
+        return t >= nowMs ? 0 : (nowMs - t > 60000 ? 60000 : (int)(nowMs - t));
+    }
+    return -1;
+}
+
+int vrmlLocalIsDedicated(const struct sockaddr_storage* local) {
+    if (local == NULL || local->ss_family != AF_INET) {
+        return 0;
+    }
+    const struct sockaddr_in* a = (const struct sockaddr_in*)local;
+    for (int i = 0; i < linkCount; i++) {
+        if (links[i].ready && links[i].local.sin_addr.s_addr == a->sin_addr.s_addr) {
+            return isDedicatedIf(links[i].ifName) ? 1 : 0;
+        }
+    }
+    return 0;
+}
+
+int vrmlPickOtherAlive(const struct sockaddr_storage* excludeLocal, struct sockaddr_storage* serverOut,
+                       struct sockaddr_storage* localOut, char* ifNameOut, int ifNameLen) {
+    const uint64_t nowMs = PltGetMillis();
+    if (excludeLocal == NULL || serverOut == NULL || localOut == NULL || excludeLocal->ss_family != AF_INET) {
+        return 0;
+    }
+    const struct sockaddr_in* ex = (const struct sockaddr_in*)excludeLocal;
+    for (int pass = 0; pass < 2; pass++)
+    for (int i = 0; i < linkCount; i++) {
+        struct sockaddr_in a;
+        if (links[i].ifGone || !isConfirmed(&links[i], nowMs) || links[i].local.sin_addr.s_addr == ex->sin_addr.s_addr ||
+                isVpnLink(&links[i]) != (pass == 1)) {
+            continue;
+        }
+        memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_addr = links[i].serverV.sin_addr;
+        memset(serverOut, 0, sizeof(*serverOut));
+        memcpy(serverOut, &a, sizeof(a));
+        a.sin_addr = links[i].local.sin_addr;
+        memset(localOut, 0, sizeof(*localOut));
+        memcpy(localOut, &a, sizeof(a));
+        if (ifNameOut != NULL && ifNameLen > 0) {
+            snprintf(ifNameOut, (size_t)ifNameLen, "%s", links[i].ifName);
+        }
         return 1;
     }
     return 0;
@@ -2184,7 +2517,8 @@ static bool stageAccept(int n, int len, int rxSlot, uint64_t batchNowUs) {
         VRML_LINK* L = &links[idx];
         uint64_t nowUs;
 
-        // 影像封包一定比這個長；短的是連線控制（PONG）
+        // 影像封包一定比這個長（同一場的影像封包等長，由 FEC 決定）；短的是連線控制（PONG），格式不對的由 onVideoCtrl 丟掉。
+        // 2026-11-18 審查 G034-03#2 建議改成「magic 對得上才算控制、其餘當影像」：不採用——那會讓任意的短封包進到影像暫存。
         if (len < VIPLE_VR_LINK_CTRL_MAX_LEN) {
             onVideoCtrl(L, pkt, len);
             return false;
@@ -2361,6 +2695,8 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
                             continue;  // 空資料報：當沒收到（那一格留空）
                         }
                         videoSet.lastTsUs = tss[j];
+                        videoSet.lastSrc = batchSrc[j];
+                        videoSet.lastSrcOk = batchSrc[j].sin_family == AF_INET;
                         if (!stageAccept(used + j, lens[j], slot, batchNowUs) && stageCount == 0 && !drainOnly) {
                             drainOnly = stageAfterCtrl(deadlineUs);
                         }
@@ -2578,6 +2914,12 @@ int vrmlVideoCarrying(void) { return 0; }
 int vrmlAnyAlive(void) { return 0; }
 int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr_storage* out) { (void)exclude; (void)out; return 0; }
 int vrmlServerAddrState(const struct sockaddr_storage* addr) { (void)addr; return -1; }
+int vrmlLinkQuietMsByLocal(const struct sockaddr_storage* local) { (void)local; return -1; }
+int vrmlLocalIsDedicated(const struct sockaddr_storage* local) { (void)local; return 0; }
+int vrmlPickOtherAlive(const struct sockaddr_storage* excludeLocal, struct sockaddr_storage* serverOut,
+                       struct sockaddr_storage* localOut, char* ifNameOut, int ifNameLen) {
+    (void)excludeLocal; (void)serverOut; (void)localOut; (void)ifNameOut; (void)ifNameLen; return 0;
+}
 int vrmlVideoCarryMask(void) { return 0; }
 uint32_t vrmlVideoLinkLagUs(int linkIdx) { (void)linkIdx; return 0; }
 int vrmlRecvAudio(SOCKET legacy, char* buffer, int size) { (void)legacy; (void)buffer; (void)size; return -1; }

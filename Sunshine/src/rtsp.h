@@ -56,6 +56,9 @@ namespace rtsp_stream {
     // 之後唯讀）；nullptr = 一般 session。cmd_announce 據此設 vrProfile，session::alloc
     // 據此建立 vr::session_state_t。
     std::shared_ptr<const ::vr::negotiated_t> vr;
+
+    // §FLAT-ML：平面場次協商了多連線（/launch 或 /resume 帶 flatMl=1、不是 VR、vr_multilink 沒關）
+    bool flat_ml = false;
   };
 
   void launch_session_raise(std::shared_ptr<launch_session_t> launch_session);

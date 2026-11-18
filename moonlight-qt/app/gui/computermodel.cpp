@@ -478,7 +478,7 @@ void ComputerModel::handleComputerStateChanged(NvComputer* computer)
         {
             QReadLocker lock(&computer->lock);
             if (computer->state == NvComputer::CS_ONLINE && computer->pairState == NvComputer::PS_PAIRED &&
-                    (computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_PCVR)) {
+                    (computer->vipleStreamVr & (VIPLE_VR_SERVER_CAP_PCVR | VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT))) {
                 bool isV4 = false;
                 const quint32 a = QHostAddress(computer->activeAddress.address()).toIPv4Address(&isV4);
                 lanVr = isV4 && ((a >> 24) == 10 || (a >> 20) == 0xAC1 || (a >> 16) == 0xC0A8);

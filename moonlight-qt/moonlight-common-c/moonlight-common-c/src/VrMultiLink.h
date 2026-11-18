@@ -47,6 +47,16 @@ int vrmlAnyAlive(void);
 int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr_storage* out);
 // §VR-CTRL-ROUTE：連到這個 host 位址（IPv4）的連線狀態。-1＝沒有連到它的連線、0＝有但 1 s 內沒收到 PONG、1＝通
 int vrmlServerAddrState(const struct sockaddr_storage* addr);
+
+// §CTRL-LINK-LOCAL（2026-11-18）：以「本機位址」認連線。控制連線（ENet）走的是哪一張網卡，就看那張網卡的那條連線
+// 多久沒收到 PONG——兩張網卡在同一個網段（桌機的有線＋Wi-Fi）時，兩條連線的 server 位址相同，用 server 位址分不出來。
+// 回傳毫秒；沒有那個本機位址的連線回 -1。
+int vrmlLinkQuietMsByLocal(const struct sockaddr_storage* local);
+// 找一條「已確認、本機位址不是 excludeLocal」的連線（先找不走 VPN 的）。回傳 1＝找到，填 server 位址、本機位址、介面名稱
+// 這個本機位址的那條連線是不是頭盔自己的串流轉接器熱點（專用鏈路）
+int vrmlLocalIsDedicated(const struct sockaddr_storage* local);
+int vrmlPickOtherAlive(const struct sockaddr_storage* excludeLocal, struct sockaddr_storage* serverOut,
+                       struct sockaddr_storage* localOut, char* ifNameOut, int ifNameLen);
 // 同一份統計的另外兩個面向（只在影像接收執行緒呼叫）：哪幾條在送（bit i＝連線索引 i），以及每條連線平常比最先
 // 送到的那條晚多久（us；每一幀比各條連線第一個封包的到達時刻）。§VR-LINK-REPAIR 用來決定回報缺包的時機。
 int vrmlVideoCarryMask(void);

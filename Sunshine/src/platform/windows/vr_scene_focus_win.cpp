@@ -110,8 +110,9 @@ namespace vr::scene_focus {
 
     class focus_t {
     public:
-      explicit focus_t(std::function<uint32_t()> scene_pid):
+      focus_t(std::function<uint32_t()> scene_pid, std::function<std::vector<uint32_t>()> launched_pids):
           scene_pid_ {std::move(scene_pid)},
+          launched_pids_ {std::move(launched_pids)},
           th_ {[this]() {
             run();
           }} {
@@ -132,6 +133,7 @@ namespace vr::scene_focus {
       void run() {
         DWORD last_pid = 0;
         int fixes = 0;  // 同一個場景程式被搶回前景的次數（避免和別的程式無限拉鋸）
+        uint32_t idle_ticks = 0;  // 沒有場景程式的拍數
         uint32_t ticks = 0;
         while (true) {
           {
@@ -142,7 +144,29 @@ namespace vr::scene_focus {
               return;
             }
           }
-          const DWORD pid = scene_pid_ ? scene_pid_() : 0;
+          DWORD pid = scene_pid_ ? scene_pid_() : 0;
+          // 還沒有場景程式：看這一場啟動的遊戲有沒有開出視窗（每 2 秒列一次行程）。有多個行程時挑視窗最大的那個
+          bool launched = false;
+          if (pid == 0 && launched_pids_ && (++idle_ticks % 2) == 0) {
+            LONG best_area = -1;
+            for (const auto p : launched_pids_()) {
+              const HWND h = main_window(p);
+              if (!h) {
+                continue;
+              }
+              RECT r {};
+              GetWindowRect(h, &r);
+              const LONG area = std::max<LONG>(0, r.right - r.left) * std::max<LONG>(0, r.bottom - r.top);
+              if (area > best_area) {
+                best_area = area;
+                pid = p;
+                launched = true;
+              }
+            }
+          }
+          if (pid == 0 && last_pid != 0 && launched_pids_) {
+            continue;  // 隔一拍才列一次行程：沒列的那一拍不要把 last_pid 與次數清掉
+          }
           if (pid != last_pid) {
             last_pid = pid;
             fixes = 0;
@@ -162,23 +186,27 @@ namespace vr::scene_focus {
           if (fg) {
             GetWindowThreadProcessId(fg, &fg_pid);
           }
-          if (fg_pid == pid) {
+          const HWND h = main_window(pid);
+          // 視窗縮到最小時，Windows 有時仍把它報成前景（全螢幕獨占的遊戲被搶走前景後自己縮小）：縮小著就一定要還原
+          const bool iconic = h && IsIconic(h);
+          if (fg_pid == pid && !iconic) {
             fixes = 0;
             continue;
           }
-          const HWND h = main_window(pid);
-          if (!h || !foreground_is_ours_to_take(fg_pid)) {
+          if (!h || (!(iconic && fg_pid == pid) && !foreground_is_ours_to_take(fg_pid))) {
             continue;  // 遊戲視窗還沒出來，或前景是別人在用的程式
           }
           const bool ok = bring_to_front(h);
           ++fixes;
-          BOOST_LOG(info) << "[VIPLE-VR-FOCUS] scene app pid=" << pid << " was in the background (foreground "
+          BOOST_LOG(info) << "[VIPLE-VR-FOCUS] " << (launched ? "launched game (no VR scene yet)" : "scene app") << " pid=" << pid
+                          << " was in the background (foreground "
                           << process_name(fg_pid) << " pid=" << fg_pid << "), brought to front: " << (ok ? "ok" : "failed")
                           << " (" << fixes << ')';
         }
       }
 
       std::function<uint32_t()> scene_pid_;
+      std::function<std::vector<uint32_t>()> launched_pids_;
       std::mutex mtx_;
       std::condition_variable cv_;
       bool stop_ = false;
@@ -186,7 +214,7 @@ namespace vr::scene_focus {
     };
   }  // namespace
 
-  std::shared_ptr<void> start(std::function<uint32_t()> scene_pid) {
-    return std::make_shared<focus_t>(std::move(scene_pid));
+  std::shared_ptr<void> start(std::function<uint32_t()> scene_pid, std::function<std::vector<uint32_t>()> launched_pids) {
+    return std::make_shared<focus_t>(std::move(scene_pid), std::move(launched_pids));
   }
 }  // namespace vr::scene_focus

@@ -76,6 +76,9 @@ public class AppUpdater {
     // 下載任務取消控制旗標
     private static volatile boolean sDownloadCancelled = false;
 
+    // §REVIEW-1118：串流中途中止下載後補查一次；24 小時戳記在檢查開始就寫了，不補查會拖到明天。
+    private static volatile boolean sRetryAfterStream = false;
+
     /**
      * 當主畫面（PcView）恢復執行（onResume）時呼叫
      */
@@ -160,12 +163,18 @@ public class AppUpdater {
         // 4. 檢查上次檢查時間，最多每 24 小時執行一次
         long lastCheck = prefs.getLong(PREF_LAST_CHECK_TIME, 0);
         long now = System.currentTimeMillis();
-        if (now - lastCheck < CHECK_INTERVAL_MS && now >= lastCheck) {
+        // §REVIEW-1118：串流中途中止的那次，戳記已經寫過，回來要立刻補查，不能再被 24 小時擋下。
+        boolean retryAfterStream = sRetryAfterStream;
+        if (retryAfterStream) {
+            sRetryAfterStream = false;
+        } else if (now - lastCheck < CHECK_INTERVAL_MS && now >= lastCheck) {
             return;
         }
 
-        // 更新最後檢查時間
-        prefs.edit().putLong(PREF_LAST_CHECK_TIME, now).apply();
+        if (!retryAfterStream) {
+            // 更新最後檢查時間（補查沿用原戳記，避免每次回主畫面都打一次 GitHub）
+            prefs.edit().putLong(PREF_LAST_CHECK_TIME, now).apply();
+        }
 
         // 在背景執行緒執行網路檢查
         sExecutor.execute(new Runnable() {
@@ -233,6 +242,11 @@ public class AppUpdater {
                 if (targetApk.exists() && verifyApk(context, targetApk)) {
                     Log.i(TAG, LOG_PREFIX + "新版本 APK 先前已下載並驗證成功，顯示安裝提示對話方塊。");
                     showDownloadedDialog(activity, remoteVersion, targetApk);
+                    return;
+                }
+
+                // §REVIEW-1118：查版本的這段時間使用者可能已經進遊戲，不要在串流中才開始傳 APK。
+                if (abortDownloadBecauseStreaming(false, null)) {
                     return;
                 }
 
@@ -732,6 +746,10 @@ public class AppUpdater {
             try {
                 boolean connected = false;
                 while (redirectCount < 5) {
+                    // §REVIEW-1118：轉址期間若已進串流，不要接著把整包抓下來。
+                    if (abortDownloadBecauseStreaming(userInitiated, callback)) {
+                        return;
+                    }
                     // §REVIEW-1111（第二輪）：只走 https（轉址也是）；轉址沒給位置就當失敗
                     if (currentUrl == null || !currentUrl.startsWith("https://")) {
                         throw new IOException("下載位址不是 https");
@@ -765,6 +783,9 @@ public class AppUpdater {
                     // 轉址次數用完：dlConn 已經 disconnect，不能再拿來讀
                     throw new IOException("下載轉址次數過多");
                 }
+                if (abortDownloadBecauseStreaming(userInitiated, callback)) {
+                    return;
+                }
 
                 in = dlConn.getInputStream();
                 out = new FileOutputStream(partApkFile);
@@ -775,8 +796,11 @@ public class AppUpdater {
                 int read;
 
                 while ((read = in.read(buffer)) != -1) {
+                    // §REVIEW-1118：資料在流時下一個 8KB 就停；對端卡住要等這次 read 逾時（30 秒）。
+                    if (abortDownloadBecauseStreaming(userInitiated, callback)) {
+                        return;
+                    }
                     if (sDownloadCancelled) {
-                        partApkFile.delete();
                         callback.onFailure("下載已取消");
                         return;
                     }
@@ -1075,6 +1099,21 @@ public class AppUpdater {
 
     private static boolean isStreamRunning() {
         return Game.isStreaming();
+    }
+
+    // §REVIEW-1118：為什麼在這裡停——檢查只在下載開始前看串流旗標，進遊戲後 APK 仍跟畫面搶同一條 Wi-Fi。
+    // 部分檔案由呼叫端 finally 刪掉。使用者手動取消不走這裡，不會被當成「等一下再查」。
+    private static boolean abortDownloadBecauseStreaming(boolean userInitiated, DownloadCallback callback) {
+        if (!isStreamRunning()) {
+            return false;
+        }
+        sRetryAfterStream = true;
+        sDownloadCancelled = true;
+        Log.i(TAG, LOG_PREFIX + "串流已開始，中止更新下載，回到主畫面再檢查。");
+        if (userInitiated && callback != null) {
+            callback.onFailure("下載已取消");
+        }
+        return true;
     }
 
     private static String readStreamToString(InputStream is) throws IOException {

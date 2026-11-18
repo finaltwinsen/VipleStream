@@ -205,7 +205,8 @@ public class NvHTTP {
      * `client.newBuilder().sslSocketFactory(...)` 才有 self-signed pinned
      * cert 信任。直接 return 原 client 給 long-lived caller 用會踩
      * `CertPathValidatorException: Trust anchor for certification path not
-     * found`。這裡跑一次 hack 把 SSL config baked-in 之後 cache 起來。
+     * found`。這裡跑一次 hack 把 SSL config baked-in。instance 不要在這個
+     * 方法裡 cache；留著重用與握手失敗才重建是 FileTransferClient 的事。
      */
     public OkHttpClient getLongConnectClient() {
         // §N.5.bug fix (2026-05-14): 不再 cache OkHttpClient instance.
@@ -216,13 +217,14 @@ public class NvHTTP {
         // 沒對應 fire，確認 TCP/TLS layer 之前 fail).
         //
         // NvHTTP 其他 endpoint (short-lived call e.g. /serverinfo /launch) 經
-        // openHttpConnection (line 474) 每次都 performAndroidTlsHack 新 wrap
+        // openHttpConnection 每次都 performAndroidTlsHack 新 wrap
         // 一個 OkHttpClient — fresh SSLContext + SSLSocketFactory 一直工作正常.
-        // FileTransferClient 改成每次 newCall 之前 nvHttp.getLongConnectClient()
-        // 拿 fresh wrapped client，emulate 同 pattern.
         //
-        // Trade-off: 每個 request 多一次 performAndroidTlsHack call (~10us)，
-        // 對 file transfer 整體 RTT 不影響.
+        // §REVIEW-1118B：這個方法仍每次回傳新的 SSLContext，不要在這裡 cache，
+        // 也不要改基底 client 的 ConnectionPool(0)。FileTransferClient 會把
+        // 回傳值留成一顆並自己換上會留閒置連線的 pool，讓 /transfer/poll 走
+        // keep-alive；只有握手失敗才再呼叫一次。改這裡的 pool 會讓
+        // /serverinfo、/launch 也開始留連線。
         return performAndroidTlsHack(httpClientLongConnectTimeout);
     }
 

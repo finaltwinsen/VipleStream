@@ -203,6 +203,15 @@ namespace platf::dxgi {
     release_frame();
   }
 
+  void display_base_t::set_client_frame_rate(int fps) {
+    // §REVIEW-1118B：framerateX100 的節拍用 client_frame_rate_strict 的分子／分母，整數 fps 不能蓋。
+    // init 在 display 交出去之前就寫好 strict，之後不再寫；這裡只讀。只寫 atomic，不碰節拍群組。
+    if (fps <= 0 || client_frame_rate_strict.Numerator > 0) {
+      return;
+    }
+    client_frame_rate_live.store(fps, std::memory_order_relaxed);
+  }
+
   capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
       // Use exactly the requested rate if the client sent an X100 value
@@ -235,6 +244,8 @@ namespace platf::dxgi {
     DXGI_RATIONAL client_frame_rate_adjusted = adjust_client_frame_rate();
     std::optional<std::chrono::steady_clock::time_point> frame_pacing_group_start;
     uint32_t frame_pacing_group_frames = 0;
+    // §REVIEW-1118B：0 與 atomic 初值相同。沒有 IDX_FPS_CHANGE 時迴圈裡只多一次整數比較。
+    int pacing_fps_applied = 0;
 
     // §CAP-PHASE：最近 k_phase_window 張的最小畫面年齡；目標 1 ms（留給畫面出現時間的抖動），超過目標 0.5 ms 才拉
     constexpr int k_phase_window = 32;
@@ -264,6 +275,24 @@ namespace platf::dxgi {
       // the display subsystem. It is recommended to call this once per frame.
       if (!factory->IsCurrent()) {
         return platf::capture_e::reinit;
+      }
+
+      // §REVIEW-1118B：編碼執行緒把新的整數幀率寫進 client_frame_rate_live。沒變就只比較這一次，
+      // 不重算、不作廢節拍群組，桌面擷取的時序與現在相同。變了才重算（含對顯示器更新率的微調）
+      // 並作廢這一組的起點，否則舊錨點配新間隔會把節拍拉歪。
+      // framerateX100 的分子／分母不該被整數 fps 蓋掉，strict 有值就不動。
+      {
+        const int live_fps = client_frame_rate_live.load(std::memory_order_relaxed);
+        if (live_fps != pacing_fps_applied) {
+          if (live_fps > 0 && client_frame_rate_strict.Numerator == 0 && live_fps != client_frame_rate) {
+            client_frame_rate = live_fps;
+            client_frame_rate_adjusted = adjust_client_frame_rate();
+            frame_pacing_group_start = std::nullopt;
+            frame_pacing_group_frames = 0;
+            BOOST_LOG(info) << "[VIPLE-FPS] Capture frame pacing updated to " << live_fps << " fps";
+          }
+          pacing_fps_applied = live_fps;
+        }
       }
 
       platf::capture_e status = capture_e::ok;

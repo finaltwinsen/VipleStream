@@ -2291,6 +2291,7 @@ namespace platf {
     constexpr auto kFastJoin = std::chrono::seconds(40);
     constexpr auto kFastRetry = std::chrono::seconds(2);
     constexpr auto kFastPoll = std::chrono::milliseconds(500);
+    constexpr auto kFastRestart = std::chrono::seconds(12);  // §VR-HOTSPOT-RESTART-EARLY
     // §VR-HOTSPOT-YIELD（2026-11-16）：host 上的 Steam 開著時，它自己一直用暫時設定檔連這張網卡（每 4～6 秒一次，
     // 沒有場次時也在跑），而且看到不是它發起的連線就中斷：實測我們連上 0.6 秒後被斷、再連再被斷，最後是它自己連上
     // （「連上約 5 秒後斷開又接回」就是這個）；兩邊的嘗試還會互相擋住，連上的時間從 6 秒到 20 多秒不等。
@@ -2487,6 +2488,7 @@ namespace platf {
       bool rival_known = false;   // 這一場開始時，上一場看過別人
       bool yield_logged = false;
       bool resumed_logged = false;
+      bool fast_restarted = false;  // §VR-HOTSPOT-RESTART-EARLY
       while (true) {
         std::this_thread::sleep_for(fast ? std::chrono::duration_cast<clock::duration>(kFastPoll) : std::chrono::duration_cast<clock::duration>(kPoll));
         const auto now = clock::now();
@@ -2511,6 +2513,7 @@ namespace platf {
           fast = true;
           fast_tries = 0;
           fast_last_try.reset();
+          fast_restarted = false;
           rival_known = rival_last_ms.load() != 0;
           yield_logged = false;
           resumed_logged = false;
@@ -2520,7 +2523,7 @@ namespace platf {
           if (st == 1) {
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] joined the headset hotspot "
                             << std::chrono::duration_cast<std::chrono::milliseconds>(now - armed).count() << " ms after the hotspot info ("
-                            << fast_tries << " connect attempt(s) of ours"
+                            << fast_tries << " connect attempt(s) of ours" << (fast_restarted ? ", after an early adapter restart" : "")
                             << (yield_logged ? "; the connection was left to the other program" : "") << ')';
             fast = false;
           } else if (st < 0 || now - armed > kFastJoin) {
@@ -2530,6 +2533,27 @@ namespace platf {
                               << " s (" << fast_tries << " connect attempt(s) of ours) - leaving it to the automatic reconnect";
             }
           } else {
+            // §VR-HOTSPOT-RESTART-EARLY（2026-11-18）：網卡隔一陣子（實測 57 分鐘、3 小時、15 小時）沒連頭盔熱點之後，
+            // 會進入「找不到熱點」的狀態：Windows 每 4 秒連一次都回「無法使用指定的網路」，46 秒以上才連得上，而頭盔等
+            // 45 秒沒人加入就關熱點。這時重啟網卡，6 秒就連上（重啟後兩次都是）。主動發指定名稱的掃描沒有用——
+            // Steam 一直在重連，WlanScan 每次都回 ERROR_BUSY。所以 kFastRestart 還沒連上就先重啟一次（算進這一場的重啟次數）；
+            // 平常 3～8 秒就連上，不會走到這裡。
+            if (!fast_restarted && now - armed >= kFastRestart && st == 0) {
+              fast_restarted = true;
+              std::unique_lock lk(mtx);
+              const bool allowed = restarts < max_restarts;
+              const int n = allowed ? ++restarts : restarts;
+              lk.unlock();
+              if (allowed) {
+                BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] not joined "
+                                   << std::chrono::duration_cast<std::chrono::seconds>(now - armed).count()
+                                   << " s after the hotspot info - restarting the adapter early (" << n << '/' << max_restarts << ')';
+                const bool ok = restart_adapter(g);
+                BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] early adapter restart " << (ok ? "done" : "failed");
+                last_restart = clock::now();
+                continue;
+              }
+            }
             // §VR-HOTSPOT-YIELD：先聽、有別人在連就退讓
             const auto armed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(armed.time_since_epoch()).count();
             const auto rival_ms = rival_last_ms.load();

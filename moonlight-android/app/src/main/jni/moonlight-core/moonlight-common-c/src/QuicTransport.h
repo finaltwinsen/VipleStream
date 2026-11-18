@@ -172,6 +172,9 @@ int quicRemoveSubflow(int subflowId);
 // §MP-ADV: 儲存伺服器的所有 alt peer 位址（供未來動態路徑管理用）。
 // Connection.c Phase B 透過 quicAddSubflowEx 的 peerOverride 直接傳入，
 // 這裡的儲存是為了 quicRecheckPaths 將來需要時可用。
+// §HOTSPOT-FLAT：場次中途加一個 alt peer（已經有、或滿了就不動）。回傳 true＝新加的
+bool quicAddAltPeer(const struct sockaddr_storage* addr, SOCKADDR_LEN addrLen);
+
 void quicSetAltPeers(const struct sockaddr_storage* addrs,
                      const SOCKADDR_LEN* addrLens,
                      int count);

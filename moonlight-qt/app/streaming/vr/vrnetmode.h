@@ -373,8 +373,18 @@ private:
 
     bool m_DirReady = false;  // writeRequest：目錄已經建好
 
+    // §REVIEW-1118：狀態檔的 loc 若含 /、\ 或換行，QSettings 會把它切成子群組
+    bool locKeySafe() const
+    {
+        return !m_Loc.contains(QLatin1Char('/')) && !m_Loc.contains(QLatin1Char('\\'))
+            && !m_Loc.contains(QLatin1Char('\n')) && !m_Loc.contains(QLatin1Char('\r'));
+    }
+
     QString rememberedChoice(bool ignoreAge = false) const
     {
+        if (!locKeySafe()) {
+            return QString();
+        }
         QSettings settings;
         settings.beginGroup(QStringLiteral("vrnetsel"));
         const QString v = settings.value(m_Loc).toString();  // "C|2026-11-05"
@@ -388,7 +398,7 @@ private:
 
     void remember(const char* choice)
     {
-        if (m_Loc.isEmpty()) {
+        if (m_Loc.isEmpty() || !locKeySafe()) {
             return;
         }
         QSettings settings;

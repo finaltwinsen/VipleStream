@@ -404,6 +404,7 @@ private:
     ScHidPassthrough m_ScHid;
     WifiScanBlock m_WifiScanBlock;  // §WIFI-SCANBLOCK：串流期間擋住 Frame 的 Wi-Fi 背景掃描
     FrameHotspot m_FrameHotspot;    // §FRAME-HOTSPOT-PAUSE：經 VPN 的場次暫停 Frame 沒人在用的串流轉接器熱點，結束時還原
+    bool m_HotspotFlat = false;     // §HOTSPOT-FLAT：這一場（平面）也開頭盔熱點、把熱點資訊送給 host
     bool m_ViaVpn = false;          // 到 host 的路徑經 VPN（getActiveAddressReachability 回 RI_VPN）
     Uint32 m_ScHidHotplugTick = 0;   // §SC-HOTPLUG：pollScHidHotplug() 的節流
     std::atomic<int> m_MouseEmulationRefCount;  // §REVIEW-1103：主執行緒寫、解碼執行緒讀

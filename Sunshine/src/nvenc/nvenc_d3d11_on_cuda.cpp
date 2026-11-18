@@ -56,6 +56,16 @@ namespace nvenc {
     return d3d_input_texture.GetInterfacePtr();
   }
 
+  bool nvenc_d3d11_on_cuda::reconfigure_framerate(int framerate) {
+    // §REVIEW-1118B：這個裝置型別的 NVENC 呼叫（init、synchronize_input_buffer、解構）都先 push context。
+    // 改幀率若沒把 context 設成 current，driver 可能回錯，桌面 yuv444 的 IDX_FPS_CHANGE 就不會生效。
+    auto autopop_context = push_context();
+    if (!autopop_context) {
+      return false;
+    }
+    return nvenc_base::reconfigure_framerate(framerate);
+  }
+
   bool nvenc_d3d11_on_cuda::init_library() {
     if (!nvenc_d3d11::init_library()) {
       return false;

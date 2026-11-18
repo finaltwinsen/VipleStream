@@ -92,6 +92,15 @@ namespace nvenc {
      */
     bool reconfigure_bitrate(int bitrate_kbps, int framerate, bool force_idr);
 
+    /**
+     * @brief §REVIEW-1118B：中途只改幀率。不要塞進 reconfigure_bitrate——那支是 ABR 每一步都在叫的。
+     *        標頭列的不支援重設是 GOP、sync/async、MaxWidth/MaxHeight、PTD；改 frameRateNum 不需要 resetEncoder。
+     *        resetEncoder 會清掉碼率控制狀態，而且註解寫要配 IDR。這條封包的處理端已經另外要求 IDR。
+     *        nvenc_d3d11 與 nvenc_d3d11_native 沒有額外步驟，直接繼承。CUDA 裝置覆寫它，先把 context 設成 current。
+     * @return `true` 已是這個幀率或重設成功；`false` 失敗或拒絕（分數幀率不改）。
+     */
+    virtual bool reconfigure_framerate(int framerate);
+
   protected:
     /**
      * @brief Required. Used for loading NvEnc library and setting `nvenc` variable with `NvEncodeAPICreateInstance()`.
@@ -177,6 +186,11 @@ namespace nvenc {
     // VipleStream §ABR: stored for mid-stream NvEncReconfigureEncoder() calls
     NV_ENC_INITIALIZE_PARAMS stored_init_params {};
     NV_ENC_CONFIG stored_enc_config {};
+
+    // §REVIEW-1118B：建立時有沒有套自訂 VBV，以及當時的 vbv_percentage_increase。
+    // 中途改幀率要用同一條式子重算，不能沿用 reconfigure_bitrate 照平均位元率比例縮的做法。
+    bool custom_vbv_buffer = false;
+    int vbv_percentage_increase = 0;
 
     // VipleStream §SF-PARAMSETS: pin the auto-selected level (and HEVC tier) into
     // stored_enc_config so ABR reconfigures never change the VPS/SPS mid-session.

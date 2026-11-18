@@ -466,6 +466,15 @@ namespace video {
       return device.get();
     }
 
+    // §REVIEW-1118B：桌面 IDX_FPS_CHANGE 改 NVENC 幀率。不走 reconfigure_bitrate，
+    // 那支是 ABR 每一步都在叫的，塞進 frameRateNum 會把碼率調整的語意一起改掉。
+    bool reconfigure_framerate(int framerate) {
+      if (!device || !device->nvenc) {
+        return false;
+      }
+      return device->nvenc->reconfigure_framerate(framerate);
+    }
+
   private:
     std::unique_ptr<platf::nvenc_encode_device_t> device;
     bool force_idr = false;
@@ -2831,6 +2840,20 @@ namespace video {
               BOOST_LOG(info) << "[VIPLE-FPS] Encoder framerate updated: " << oldFps << " -> " << *newFps << " fps";
             } else if (auto pyro_session = dynamic_cast<pyrowave::pyrowave_encode_session_t *>(session.get())) {
               pyro_session->reconfigure_fps(*newFps);
+            } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(session.get())) {
+              // §REVIEW-1118B：只有整數幀率的桌面 NVENC 才改 frameRateNum 與擷取節拍。
+              // VR（事件驅動）與 framerateX100 維持原本的路徑：編碼器幀率不動，下面照舊只警告。
+              // 重設失敗也不改擷取節拍，否則擷取變快、編碼器仍用舊幀率算每一張的預算，位元率會變得更大。
+              if (disp->is_event_driven() || config.framerateX100 > 0) {
+                BOOST_LOG(warning) << "[VIPLE-FPS] Non-avcodec encoder (e.g. NVENC): framerate change may require stream restart. "
+                                   << "Capture timing updated: " << oldFps << " -> " << *newFps << " fps";
+              } else if (nvenc_session->reconfigure_framerate(*newFps)) {
+                disp->set_client_frame_rate(*newFps);
+                BOOST_LOG(info) << "[VIPLE-FPS] NVENC frame rate updated: " << oldFps << " -> " << *newFps << " fps";
+              } else {
+                BOOST_LOG(warning) << "[VIPLE-FPS] NVENC frame rate reconfigure failed, capture pacing left unchanged: "
+                                   << oldFps << " -> " << *newFps << " fps";
+              }
             } else {
               BOOST_LOG(warning) << "[VIPLE-FPS] Non-avcodec encoder (e.g. NVENC): framerate change may require stream restart. "
                                  << "Capture timing updated: " << oldFps << " -> " << *newFps << " fps";

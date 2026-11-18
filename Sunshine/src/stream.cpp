@@ -53,6 +53,7 @@ extern "C" {
 #include "vr/vr_bridge.h"
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_padmode.h"
+#include "vr/vr_platform.h"
 #include "vr/vr_scene_focus.h"
 #include "vr/vr_abr_outage.h"
 #include "vr/vr_abr_fast.h"
@@ -922,6 +923,14 @@ namespace stream {
     std::chrono::steady_clock::time_point vrTxLastLog {};
     uint64_t vrTxFrames = 0;
 
+    // §FLAT-ML（2026-11-18）：平面場次的多連線。hub 和 VR 用同一個（下面的 vrLinks），但沒有 session->vr：
+    // 不補包、不走連線上的控制訊息、不收追蹤；週期工作（LINK_ADDRS、10 秒統計）在控制迴圈的平面分支做
+    bool flatMl = false;
+    std::vector<std::array<std::uint8_t, 4>> flatLinkAddrs;
+    bool flatLinkAddrsSent = false;
+    std::chrono::steady_clock::time_point flatAddrsAt {};
+    std::chrono::steady_clock::time_point flatStatsAt {};
+
     // §VR-MULTILINK：/launch 協商了多連線的 VR session 才有值（alloc 建立，join 時 stop）。
     // 有連線可用時影像與音訊改由它在每條連線各送一份，原本的單一路徑暫停；nullptr 時行為完全不變。
     // 宣告在最後：hub 的接收執行緒會經 callback 碰這個 session 的其他成員（§VR-LINK-CTRL），成員反序解構時
@@ -1016,7 +1025,27 @@ namespace stream {
 
       // Skip sessions that are already established
       if (session_p->control.peer) {
-        continue;
+        // §CTRL-TAKEOVER（2026-11-18）：多連線的場次（VR 或平面）裡，client 發現控制連線走的那條路不通，會改從另一條
+        // 連線的位址重連。這時 host 的舊 peer 多半還沒逾時（ENet 要幾秒到幾十秒才判定），以前一律當成「已經有連線」
+        // 拒絕——11-17 配戴的 VR 場次被拒 20 多次、控制通道斷了 77 秒；平面場次輸入斷 8 秒。
+        // 連線識別碼（connect data，每場隨機、經 RTSP 協商）相同、多連線還有連線活著、來源和舊 peer 不同：就是同一個
+        // client 換路，舊 peer 直接作廢、由新的接手。控制訊息本身仍要通過加密驗證，光有識別碼只能打斷一次連線
+        const bool takeover = session_p->vrLinks && session_p->vrLinks->any_alive() &&
+                              (session_p->config.mlFeatureFlags & ML_FF_SESSION_ID_V1) &&
+                              connect_data != 0 && session_p->control.connect_data == connect_data &&
+                              session_p->control.peer != peer;
+        if (!takeover) {
+          continue;
+        }
+        BOOST_LOG(info) << "[VIPLE-VR-LINK] control connection taken over by a new connection from the same client ("sv
+                        << peer_addr << ':' << peer_port << ") - the old one is dropped"sv;
+        {
+          auto ptslg = _peer_to_session.lock();
+          _peer_to_session->erase(session_p->control.peer);
+        }
+        enet_peer_reset(session_p->control.peer);
+        session_p->control.peer = nullptr;
+        abr_forget_enet_rtt(session_p);  // §ABR-RTT-STALE
       }
 
       // Identify the connection by the unique connect data if the client supports it.
@@ -1677,6 +1706,68 @@ namespace stream {
       BOOST_LOG(warning) << "[VIPLE-VR-SESSION] dropping VR control message 0x"sv << util::hex(type).to_string_view()
                          << " on a non-VR session (logged once per session)"sv;
     }
+  }
+
+  // §HOTSPOT-FLAT：C2S HOTSPOT_INFO 的處理（VR 與平面場次共用）。body 至少 sizeof(VIPLE_VR_TLV_HOTSPOT_INFO)
+  static void vr_hotspot_info_received(session_t *session, const std::uint8_t *body) {
+    VIPLE_VR_TLV_HOTSPOT_INFO hotspot {};
+    std::memcpy(&hotspot, body, sizeof(hotspot));
+    if (hotspot.ssidLen > 0 && hotspot.ssidLen <= 32 && hotspot.keyLen > 0 && hotspot.keyLen <= 64) {
+      std::string ssid(reinterpret_cast<const char *>(hotspot.ssid), hotspot.ssidLen);
+      std::string key(reinterpret_cast<const char *>(hotspot.key), hotspot.keyLen);
+
+      // 安全鐵律：log 只能印 SSID 的前 3 個字元＋***、金鑰長度
+      std::string ssid_prefix = ssid.substr(0, std::min<std::size_t>(3, ssid.size()));
+      const char *band_name = (hotspot.band == VIPLE_VR_HOTSPOT_BAND_6GHZ || hotspot.band == 0) ? "6GHz" :
+                              (hotspot.band == VIPLE_VR_HOTSPOT_BAND_5GHZ) ? "5GHz" : "2.4GHz";
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] received ssid=" << ssid_prefix << "*** keylen=" << (int) hotspot.keyLen << " band=" << band_name;
+
+      if (config::vr.hotspot_autoconnect && session->tsPathGen != 0) {
+        // 11-04：client 經 Tailscale 連進來（人在外面）時頭盔熱點不在附近，連了也連不上，
+        // 看門狗還會在 30 s 後重啟 host 的熱點網卡——這場不連、不監看
+        BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] client is on Tailscale (remote) - not joining the headset hotspot this session"sv;
+      } else if (config::vr.hotspot_autoconnect) {
+        // 丟到背景執行緒處理（不可卡住 control 執行緒）
+        // §REVIEW-1111：同時最多一條背景執行緒。原本每一則 HOTSPOT_INFO 都另起一條去連 Wi-Fi，client 連續送就一直堆
+        // （每條都開 WLAN handle、可以跑好幾秒）。已經有一條在連時，把這一則記成「下一則」（只留最新的一份），
+        // 那條做完會接著處理——client 只在內容改變時才送，所以不能直接丟掉。
+        struct hotspot_req_t {
+          decltype(hotspot) info;
+          std::string ssid;
+          std::string key;
+        };
+        static std::mutex hotspot_mtx;
+        static bool hotspot_running = false;
+        static std::optional<hotspot_req_t> hotspot_next;
+        {
+          std::lock_guard hlk(hotspot_mtx);
+          hotspot_next = hotspot_req_t {hotspot, std::move(ssid), std::move(key)};
+          if (!hotspot_running) {
+            hotspot_running = true;
+            std::thread([]() {
+              for (;;) {
+                std::optional<hotspot_req_t> req;
+                {
+                  std::lock_guard hlk2(hotspot_mtx);
+                  if (!hotspot_next) {
+                    hotspot_running = false;
+                    return;
+                  }
+                  req = std::move(hotspot_next);
+                  hotspot_next.reset();
+                }
+                platf::vr_hotspot_connect(req->info.version, req->info.authType, req->info.band, req->info.channel, std::move(req->ssid), std::move(req->key));
+              }
+            }).detach();
+          }
+        }
+      }
+    }
+#if defined(_WIN32)
+    SecureZeroMemory(&hotspot, sizeof(hotspot));
+#else
+    explicit_bzero(&hotspot, sizeof(hotspot));
+#endif
   }
 
   // §VR-FEC-LOSS（2026-10-03，Frame 實測）：VR 的 FEC 跟著「救不回的幀」調，而不是跟著缺包數調。
@@ -2578,6 +2669,33 @@ namespace stream {
     }
     out = st->addrs;
     return true;
+  }
+
+  // §FLAT-ML：平面場次的多連線週期工作（控制執行緒；放在函式裡——控制迴圈在 KITTY_WHILE_LOOP 巨集內，逗號會被當成引數分隔）
+  static void flat_link_tick(session_t *session, std::chrono::steady_clock::time_point now) {
+    // §FLAT-ML：VR 場次在 vr_control_tick 做的兩件事——熱加入的位址通知、每條連線的 10 秒統計
+    if (session->flatMl && session->vrLinks) {
+      if (now - session->flatAddrsAt >= 1s && (session->vrLinks->features() & VIPLE_VR_LINK_F_HOTADD)) {
+        session->flatAddrsAt = now;
+        std::vector<std::array<uint8_t, 4>> addrs;
+        if (vr_link_addr_snapshot(addrs) && (!session->flatLinkAddrsSent || addrs != session->flatLinkAddrs)) {
+          ::vr::s2c_msg_t msg;
+          msg.tlv = ::vr::multilink::format_addrs_tlv(addrs);
+          msg.reliable = true;
+          if (!send_vr_s2c(session, msg)) {
+            session->flatLinkAddrs = addrs;
+            session->flatLinkAddrsSent = true;
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] hot-add server link addresses updated (" << addrs.size() << ")";
+          }
+        }
+      }
+      if (now - session->flatStatsAt >= 10s) {
+        session->flatStatsAt = now;
+        if (const auto line = session->vrLinks->take_stats_line(); !line.empty()) {
+          BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s: " << line;
+        }
+      }
+    }
   }
 
   static void vr_control_tick(session_t *session, std::chrono::steady_clock::time_point now) {
@@ -3831,7 +3949,46 @@ namespace stream {
     server->map(VIPLE_VR_PTYPE_C2S, [](session_t *session, const std::string_view &payload) {
       auto vr_state = session->vr;
       if (!vr_state) {
-        vr_drop_non_vr(session, VIPLE_VR_PTYPE_C2S);
+        // §HOTSPOT-FLAT：平面場次只認 HOTSPOT_INFO，其餘照舊丟掉
+        const auto *fp = (const std::uint8_t *) payload.data();
+        const std::size_t fsize = payload.size();
+        bool handled = false;
+        for (std::size_t foff = 0; foff + 2 <= fsize;) {
+          const std::uint8_t ftype = fp[foff];
+          const std::uint8_t flen = fp[foff + 1];
+          if (foff + 2 + flen > fsize) {
+            break;
+          }
+          if (ftype == VIPLE_VR_C2S_HOTSPOT_INFO && flen >= sizeof(VIPLE_VR_TLV_HOTSPOT_INFO)) {
+            vr_hotspot_info_received(session, fp + foff + 2);
+            handled = true;
+          } else if (ftype == VIPLE_VR_C2S_LINK_HELLO && session->flatMl && session->vrLinks) {
+            // §FLAT-ML：和 VR 分支同一套處理（只在 control 執行緒；從 QUIC 轉進來的不理）
+            handled = true;
+            std::vector<::vr::multilink::hello_link_t> hello;
+            if (!t_ctrl_via_quic && ::vr::multilink::parse_hello(fp + foff + 2, flen, hello)) {
+              std::array<uint8_t, 4> primary {};
+              if (const auto addr = session->video.peer.address(); addr.is_v4()) {
+                primary = addr.to_v4().to_bytes();
+              } else if (addr.is_v6() && addr.to_v6().is_v4_mapped()) {
+                primary = boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, addr.to_v6()).to_bytes();
+              }
+              ::vr::s2c_msg_t msg;
+              const auto ready = session->vrLinks->on_hello(hello, primary);
+              msg.tlv = ::vr::multilink::format_ready_tlv(ready, session->vrLinks->features());
+              msg.reliable = true;
+              if (send_vr_s2c(session, msg)) {
+                BOOST_LOG(warning) << "[VIPLE-VR-LINK] could not send LINK_READY"sv;
+              }
+            } else {
+              BOOST_LOG(warning) << "[VIPLE-VR-LINK] malformed LINK_HELLO ignored (len=" << (int) flen << ")";
+            }
+          }
+          foff += 2 + flen;
+        }
+        if (!handled) {
+          vr_drop_non_vr(session, VIPLE_VR_PTYPE_C2S);
+        }
         return;
       }
 
@@ -4001,64 +4158,7 @@ namespace stream {
           }
         } else if (type == VIPLE_VR_C2S_HOTSPOT_INFO && len >= sizeof(VIPLE_VR_TLV_HOTSPOT_INFO)) {
           vr_state->count_c2s(type);
-          VIPLE_VR_TLV_HOTSPOT_INFO hotspot {};
-          std::memcpy(&hotspot, body, sizeof(hotspot));
-          if (hotspot.ssidLen > 0 && hotspot.ssidLen <= 32 && hotspot.keyLen > 0 && hotspot.keyLen <= 64) {
-            std::string ssid(reinterpret_cast<const char *>(hotspot.ssid), hotspot.ssidLen);
-            std::string key(reinterpret_cast<const char *>(hotspot.key), hotspot.keyLen);
-
-            // 安全鐵律：log 只能印 SSID 的前 3 個字元＋***、金鑰長度
-            std::string ssid_prefix = ssid.substr(0, std::min<std::size_t>(3, ssid.size()));
-            const char *band_name = (hotspot.band == VIPLE_VR_HOTSPOT_BAND_6GHZ || hotspot.band == 0) ? "6GHz" :
-                                    (hotspot.band == VIPLE_VR_HOTSPOT_BAND_5GHZ) ? "5GHz" : "2.4GHz";
-            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] received ssid=" << ssid_prefix << "*** keylen=" << (int) hotspot.keyLen << " band=" << band_name;
-
-            if (config::vr.hotspot_autoconnect && session->tsPathGen != 0) {
-              // 11-04：client 經 Tailscale 連進來（人在外面）時頭盔熱點不在附近，連了也連不上，
-              // 看門狗還會在 30 s 後重啟 host 的熱點網卡——這場不連、不監看
-              BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] client is on Tailscale (remote) - not joining the headset hotspot this session"sv;
-            } else if (config::vr.hotspot_autoconnect) {
-              // 丟到背景執行緒處理（不可卡住 control 執行緒）
-              // §REVIEW-1111：同時最多一條背景執行緒。原本每一則 HOTSPOT_INFO 都另起一條去連 Wi-Fi，client 連續送就一直堆
-              // （每條都開 WLAN handle、可以跑好幾秒）。已經有一條在連時，把這一則記成「下一則」（只留最新的一份），
-              // 那條做完會接著處理——client 只在內容改變時才送，所以不能直接丟掉。
-              struct hotspot_req_t {
-                decltype(hotspot) info;
-                std::string ssid;
-                std::string key;
-              };
-              static std::mutex hotspot_mtx;
-              static bool hotspot_running = false;
-              static std::optional<hotspot_req_t> hotspot_next;
-              {
-                std::lock_guard hlk(hotspot_mtx);
-                hotspot_next = hotspot_req_t {hotspot, std::move(ssid), std::move(key)};
-                if (!hotspot_running) {
-                  hotspot_running = true;
-                  std::thread([]() {
-                    for (;;) {
-                      std::optional<hotspot_req_t> req;
-                      {
-                        std::lock_guard hlk2(hotspot_mtx);
-                        if (!hotspot_next) {
-                          hotspot_running = false;
-                          return;
-                        }
-                        req = std::move(hotspot_next);
-                        hotspot_next.reset();
-                      }
-                      platf::vr_hotspot_connect(req->info.version, req->info.authType, req->info.band, req->info.channel, std::move(req->ssid), std::move(req->key));
-                    }
-                  }).detach();
-                }
-              }
-            }
-          }
-#if defined(_WIN32)
-          SecureZeroMemory(&hotspot, sizeof(hotspot));
-#else
-          explicit_bzero(&hotspot, sizeof(hotspot));
-#endif
+          vr_hotspot_info_received(session, body);
         } else {
           // 不認得的 subtype 依 len 跳過
           vr_state->count_c2s(type);
@@ -4361,6 +4461,14 @@ namespace stream {
               vr_control_tick(session, now);
             } else if (session->vr && session->vrLinks && session->vrLinks->any_alive()) {
               vr_drain_s2c_ctrl_down(session);  // §VR-CTRL-DOWN-S2C
+            } else if (!session->vr && session->control.peer) {
+              // §HOTSPOT-FLAT：平面場次沒有 vr_control_tick，熱點網卡的看門狗在這裡續命（沒有 arm 過時只是一次上鎖）
+              static std::chrono::steady_clock::time_point flat_keepalive {};
+              if (now - flat_keepalive >= 10s) {
+                flat_keepalive = now;
+                platf::vr_hotspot_keepalive();
+              }
+              flat_link_tick(session, now);  // §FLAT-ML
             }
           }
 
@@ -5317,7 +5425,7 @@ namespace stream {
           }
         }
         // §VR：VR session 一律 false（見上面 vr_force_rtp）
-        const bool use_quic = (quicVideoSession != nullptr) && !vr_force_rtp;
+        const bool use_quic = (quicVideoSession != nullptr) && !vr_force_rtp && !session->flatMl;  // §FLAT-ML：平面多連線走 RTP
         if (use_quic) {
           static bool logged_once = false;
           if (!logged_once) {
@@ -5806,7 +5914,7 @@ namespace stream {
           }
           quicAudioSession = session->audio.quicCache;
         }
-        const bool use_quic_audio = (quicAudioSession != nullptr);
+        const bool use_quic_audio = (quicAudioSession != nullptr) && !session->flatMl;  // §FLAT-ML
         {
           // §K.5-LOG-FIX (review)：此區塊在 per-packet 迴圈內（~200/s），
           // 原本無節流（註解誤寫「不用 static」）會在整場串流洪水百 MB
@@ -6554,7 +6662,17 @@ namespace stream {
           return ::vr::bridge::status().scene_pid;
         };
         h.resolve = ::vr::padmode::resolve_pid;
-        h.tracked = ::vr::padmode::tracked_controller;
+        // 商店說「不支援 VR 手把」時再看一眼：遊戲向 SteamVR 的 OpenXR 登記過 VR 手把的按鍵對應，就是用 VR 手把玩的
+        // （Pixel Dungeon VR：商店沒有那個分類，實際上有 Touch／Index 的對應）
+        h.tracked = [](const std::string &appid) -> std::optional<bool> {
+          const auto t = ::vr::padmode::tracked_controller(appid);
+          if (t && !*t && ::vr::platform::openxr_controller_bindings(appid)) {
+            BOOST_LOG(info) << "[VIPLE-VR-PADMODE] " << appid
+                            << ": the store has no tracked-controller category, but the game registered VR controller bindings with SteamVR's OpenXR -> treated as supported";
+            return true;
+          }
+          return t;
+        };
         h.get_override = ::vr::padmode::manual_override;
         h.set_override = ::vr::padmode::set_manual_override;
         h.pad_alloc = [in = session.input]() {
@@ -6577,7 +6695,7 @@ namespace stream {
       if (session.vr && session.vr->negotiated().pcvr) {
         session.vr_focus = ::vr::scene_focus::start([]() {
           return ::vr::bridge::status().scene_pid;
-        });
+        }, proc::proc.steam_game_pid_lister());
       }
 #endif
 
@@ -6911,6 +7029,39 @@ namespace stream {
         }
         session->vrRefreshEvents = mail->event<int>(mail::vr_refresh);
         session->control.loopTimeout.store(std::chrono::milliseconds {4}, std::memory_order_relaxed);
+      } else if (launch_session.flat_ml && (config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2)) {
+        // §FLAT-ML：平面場次的多連線 hub。影像照 auto（第二條先量、夠快才送滿；主連線不通時每條還活著的都送）。
+        // 補包與連線上的控制訊息都不開（那兩樣綁著 VR 的恢復機制）；熱加入開著（熱點、之後才插上的網卡）
+        ::vr::multilink::options_t opt;
+        opt.video = config::vr.multilink == config::vr_t::multilink_e::primary ? ::vr::multilink::options_t::video_e::primary :
+                    config::vr.multilink == config::vr_t::multilink_e::always  ? ::vr::multilink::options_t::video_e::always :
+                    config::vr.multilink == config::vr_t::multilink_e::all     ? ::vr::multilink::options_t::video_e::all :
+                                                                                 ::vr::multilink::options_t::video_e::automatic;
+        const int fps = launch_session.fps > 0 ? launch_session.fps : 60;
+        opt.video_max_age = std::chrono::microseconds {std::clamp<int64_t>(2 * 1'000'000LL / fps, 8000, 40000)};
+        opt.video_qos = config.videoQosType != 0;
+        opt.audio_qos = config.audioQosType != 0;
+        opt.ctrl = false;
+        opt.repair = false;
+        opt.repair_rtt = false;
+        opt.repair_far = false;
+        opt.hotadd = config::vr.multilink_hotadd;
+        opt.video_uso = config::vr.multilink_uso;
+        opt.pace_spread_pct = 0;
+        if (!config::vr.multilink_fault.empty()) {
+          if (auto f = ::vr::multilink::fault_t::parse(config::vr.multilink_fault)) {
+            opt.fault = *f;
+          }
+        }
+        session->vrLinks = std::make_shared<::vr::multilink::hub_t>(
+          launch_session.gcm_key,
+          opt,
+          [](uint8_t, uint16_t, std::string_view) {
+            return false;  // 平面場次沒有追蹤，也沒有協商連線上的控制訊息
+          }
+        );
+        session->flatMl = true;
+        BOOST_LOG(info) << "[VIPLE-VR-LINK] flat (2D) session: multi-link negotiated (fps=" << fps << ", repair=off, ctrl=off)";
       }
 
       session->mail = std::move(mail);

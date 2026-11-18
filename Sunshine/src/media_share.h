@@ -4,9 +4,12 @@
  *
  * sunshine.conf 的 `media_dirs`（逗號分隔的資料夾清單）有設＝只開放這些資料夾；沒設（預設）＝整台 PC：Windows 的
  * 每一個本機／抽取式磁碟機、Linux 的 /（使用者 2026-10-19 要求「不用設定，直接逛整台 PC」）。`media_share = disabled`
- * 整個關掉。只列子資料夾與影片檔、唯讀；隱藏與系統的檔案、資料夾不列。所有路徑先正規化（解開 . . 與符號連結）再確認
+ * 整個關掉。只列子資料夾與影片檔；隱藏與系統的檔案、資料夾不列。所有路徑先正規化（解開 . . 與符號連結）再確認
  * 還在某一個根之內，跑出去的一律拒絕。端點在 nvhttp 的 HTTPS 伺服器上，只有配對過、而且沒被停用的 client 憑證連得進來
  * （同 /launch）。
+ *
+ * §MEDIA-FILEOPS：預設唯讀。`media_write` 打開後，已配對的裝置可以在「資料夾」根裡面新增資料夾、複製、移動、永久刪除
+ * （不進資源回收筒）。整台 PC 的磁碟機根即使打開也不能改。背景的複製／刪除／移動同時只跑一個。
  */
 #pragma once
 
@@ -65,7 +68,47 @@ namespace media_share {
    */
   bool thumbnail(const std::filesystem::path &path, std::string *data, std::string *content_type, std::string *error);
 
-  /// 純邏輯的自測（路徑檢查與 Range 解析）；回傳失敗數
+  /// §MEDIA-FILEOPS：media_write 開著、而且這個根是資料夾（不是整台 PC 的磁碟機）才是 true
+  bool root_writable(const root_t &root);
+
+  /**
+   * @brief §MEDIA-FILEOPS：client 給的單一路徑元件。
+   * 空、`.`、`..`、含 `/ \ : * ? " < > |`、控制字元、UTF-8 超過 255 bytes 都不合法。
+   * 另拒不合法的 UTF-8、結尾的空白或句點、Windows 保留裝置名（CON、NUL、COM1…）：那些名稱寫進去會被系統改掉，或指到裝置。
+   */
+  bool valid_name(const std::string &name);
+
+  /// 檔案操作的結果。status 是 XML 的 status_code；message 空表示成功，否則是協定的固定英文字串
+  struct op_result_t {
+    int status = 200;
+    std::string message;
+    std::uint64_t job = 0;  // 背景工作受理成功時才是正整數
+  };
+
+  /// /viple/media/opstatus 的內容。state 是 running、done、failed、cancelled
+  struct job_status_t {
+    std::string state;
+    std::uint64_t done = 0;
+    std::uint64_t total = 0;
+    std::string error;
+  };
+
+  /// 同步建立資料夾（父資料夾必須已存在）。成功時 status＝200、message 空
+  op_result_t make_directory(int root, const std::string &parent, const std::string &name);
+
+  /**
+   * @brief 受理 delete、copy 或 move。成功時 status＝200、job 是正整數；工作在另一條執行緒跑完。
+   * @param has_dest delete 為 false；copy／move 為 true，並使用 droot、dpath（目的資料夾）
+   */
+  op_result_t start_background(const std::string &op, int root, const std::string &path, int droot, const std::string &dpath, bool has_dest);
+
+  /// 不認得的 id：status＝404、message 是 "not found"
+  op_result_t background_status(std::uint64_t id, job_status_t *out);
+
+  /// 這個 id 是目前這一個工作（含剛跑完的）就回 200，還在跑會要求取消。不認得回 404
+  op_result_t background_cancel(std::uint64_t id);
+
+  /// 純邏輯的自測（路徑檢查、Range 解析、名稱與「into itself」）；回傳失敗數
   int self_test();
 
 }  // namespace media_share

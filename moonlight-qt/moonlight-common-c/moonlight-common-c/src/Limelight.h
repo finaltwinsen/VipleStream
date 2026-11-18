@@ -118,6 +118,10 @@ typedef struct _STREAM_CONFIGURATION {
     int vrRepairHoldMs;   // 等待上限（後面的幀最多被壓住多久），毫秒：0＝自動（跟著往返時間走，最多 33），否則 8～100
     int vrRepairAbSec;    // 開發用：同一場每這麼多秒（20～600）在原本的規則與新規則之間切換，從原本的規則開始；0＝不切換
     int vrRepairIdle;     // 開發用：「多久沒有新封包才回報」的做法，VRRR_IDLE_*（VrRepairRtt.h）；0＝自動
+    // §FLAT-ML（2026-11-18）：平面（2D）場次用多連線。只有 client 在 /launch 帶了 flatMl=1、而且 server 回了
+    // <VipleStreamFlatMl>1 時才可以設；和 vrFlags 無關（VR 場次留 0）
+    int flatMultilink;
+
     int vrRepairNoAhead;  // 開發用：非 0＝後面整幀沒到的幀不一起回報（只給對照用）
 
 #ifdef VIPLE_MPQUIC
@@ -253,8 +257,10 @@ typedef struct _DECODE_UNIT {
 // Specifies an audio configuration by channel count and channel mask
 // See https://docs.microsoft.com/en-us/windows-hardware/drivers/audio/channel-mask for channelMask values
 // NOTE: Not all combinations are supported by GFE and/or this library.
+// §REVIEW-1118：channelMask、channelCount 是有號 int。遮罩 bit 15 為 1 時 << 16 會移進符號位（未定義行為）。
+// 先轉 uint32_t 再移，立體聲／5.1／7.1 常數的位元與原本相同。channelCount 補括號，避免傳入加法式時先加再移。
 #define MAKE_AUDIO_CONFIGURATION(channelCount, channelMask) \
-    (((channelMask) << 16) | (channelCount << 8) | 0xCA)
+    ((int)(((uint32_t)(channelMask) << 16) | ((uint32_t)(channelCount) << 8) | 0xCAu))
 
 // Helper macros for retreiving channel count and channel mask from the audio configuration
 #define CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(x) (((x) >> 8) & 0xFF)
@@ -262,8 +268,9 @@ typedef struct _DECODE_UNIT {
 
 // Helper macro to retreive the surroundAudioInfo parameter value that must be passed in
 // the /launch and /resume HTTPS requests when starting the session.
+// §REVIEW-1118：取出的遮罩最大 0xFFFF，再 << 16 會碰到符號位。轉 uint32_t 後位元與兩補數實作相同，而且有定義。
 #define SURROUNDAUDIOINFO_FROM_AUDIO_CONFIGURATION(x) \
-    (CHANNEL_MASK_FROM_AUDIO_CONFIGURATION(x) << 16 | CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(x))
+    ((int)(((uint32_t)CHANNEL_MASK_FROM_AUDIO_CONFIGURATION(x) << 16) | (uint32_t)CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(x)))
 
 // The maximum number of channels supported
 #define AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT 8
@@ -332,7 +339,8 @@ typedef struct _DECODE_UNIT {
 // If set in the video renderer capabilities field, this macro specifies that the renderer
 // supports slicing to increase decoding performance. The parameter specifies the desired
 // number of slices per frame. This capability is only valid on video renderers.
-#define CAPABILITY_SLICES_PER_FRAME(x) (((unsigned char)(x)) << 24)
+// §REVIEW-1118：unsigned char 在 << 之前會提升成有號 int，x >= 128 時左移 24 位會進入符號位。先轉 uint32_t。實際切片數小於 128，位元不變。
+#define CAPABILITY_SLICES_PER_FRAME(x) ((int)((uint32_t)(unsigned char)(x) << 24))
 
 // This callback is invoked to provide details about the video stream and allow configuration of the decoder.
 // Returns 0 on success, non-zero on failure.
@@ -1150,6 +1158,10 @@ int LiGetVrLinkCount(void);
 // 送一則 0x5507 VR_C2S（TLV 串，1–251 B）。reliable=true 走一般控制 channel
 // 的可靠傳輸；false 走 VR channel UNSEQUENCED。回傳 0 表示已送出。
 int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable);
+
+// §HOTSPOT-FLAT：場次中途才知道的 server 位址（例：host 的無線網卡這時才連上頭盔熱點）加進 MP-QUIC 的 alt peer。
+// 已經有就不動；路徑由復原執行緒下一輪探測時建立（以待命路徑加入）。沒有編 MP-QUIC、這一場沒開 QUIC 時什麼都不做
+void LiAddQuicAltPeer(const char* ipv4);
 
 // decoder 端回報掉幀（例如解碼錯誤）。recovery=intra 時送 LOSS 並進入恢復
 // 狀態機（逾時會重送，最後退回 IDR）；recovery=idr 時等同 LiRequestIdrFrame()。

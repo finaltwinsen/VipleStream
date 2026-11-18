@@ -5,7 +5,7 @@
 #include "vr_scene_focus.h"
 
 namespace vr::scene_focus {
-  std::shared_ptr<void> start(std::function<uint32_t()>) {
+  std::shared_ptr<void> start(std::function<uint32_t()>, std::function<std::vector<uint32_t>()>) {
     return nullptr;
   }
 }  // namespace vr::scene_focus

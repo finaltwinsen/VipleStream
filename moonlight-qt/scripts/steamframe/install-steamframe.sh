@@ -387,6 +387,7 @@ applied=normal
 since=0
 loc=""
 err=""
+station=false; wl=""; next_probe=0  # §REVIEW-1118：閒置時沿用上一輪網卡狀態，不要每秒重查
 
 give_back() {
     nmcli device set wlan0 managed yes >/dev/null 2>&1 || true
@@ -397,19 +398,29 @@ give_back  # 開機或服務重啟：一律從「交還」開始
 ap_iface() { iw dev 2>/dev/null | awk '/Interface/ {i=$2} /type AP/ {print i; exit}'; }
 
 while :; do
-    now=$(date +%s)
+    printf -v now '%(%s)T' -1 2>/dev/null || now=$(date +%s)  # §REVIEW-1118：內建時鐘，省掉每秒的 date。格式不支援才退回 date。
     want=normal
+    mode=normal
+    t=0
     if [ -f "$REQ" ]; then
-        read -r mode t < <(python3 -c 'import json,sys
-try:
-    d=json.load(open(sys.argv[1])); print(d.get("mode","normal"), int(d.get("t",0)))
-except Exception:
-    print("normal 0")' "$REQ" 2>/dev/null) || { mode=normal; t=0; }
-        if [ "$mode" = adapter-only ] && [ $((now - t)) -le 5 ]; then want=adapter-only; fi
+        # §REVIEW-1118：沒有空白的 JSON 用 bash 取 mode／t，省掉每秒的 python。對不上就當 normal，不會誤暫停家用 Wi-Fi。
+        req_raw=$(<"$REQ") || req_raw=
+        req_raw=${req_raw//[[:space:]]/}
+        case "$req_raw" in *'"mode":"adapter-only"'*) mode=adapter-only ;; esac
+        req_t=${req_raw#*'"t":'}; [ "$req_t" != "$req_raw" ] && t=${req_t%%[^0-9]*}; [ -n "$t" ] || t=0
+        # §REVIEW-1118：t 在未來很遠（時鐘被回撥）時 now-t 是負的，-le 5 會成立，家用 Wi-Fi 會一直停著。
+        # 容許超前 2 秒：app 在我們讀完時鐘之後才寫請求、剛好跨秒時 t 會比 now 大 1；當成不新鮮會讓暫停中的 Wi-Fi 被交還一圈再暫停。
+        if [ "$mode" = adapter-only ] && [ $((t - now)) -le 2 ] && [ $((now - t)) -le 5 ]; then want=adapter-only; fi
     fi
+    # §REVIEW-1118：沒在暫停、也沒有新要求時，網卡 5 秒才查一次。要暫停或已暫停則每次都查，不能拿過期 station 去動 wlan0。
+    probe_rest=0
+    # 家用 Wi-Fi 還沒連回來時也每圈查：實機測試（2026-11-18）交還後狀態檔的 wlan0 比實際晚了 5 秒才變成 connected。
+    if [ "$want" = adapter-only ] || [ "$applied" = adapter-only ] || [ "$now" -ge "$next_probe" ] || [ "${wl#connected}" = "$wl" ]; then
     ap="$(ap_iface)"
     station=false
     if [ -n "$ap" ] && iw dev "$ap" station dump 2>/dev/null | grep -q '^Station'; then station=true; fi
+    probe_rest=1; next_probe=$((now + 5))
+    fi # §REVIEW-1118：沒進來就沿用上一輪 station，不重跑 iw
     [ "$station" = true ] || want=normal
     if [ "$applied" = adapter-only ] && [ $((now - since)) -ge 21600 ]; then want=normal; fi
 
@@ -425,19 +436,29 @@ except Exception:
         else
             give_back
             applied=normal; err=""
+            next_probe=$now  # §REVIEW-1118：剛交還，下一圈就重查 wlan0，不要吃到 5 秒快取
             echo "[VIPLE-VR-NETSEL] home Wi-Fi given back"
         fi
     fi
+    if [ "$probe_rest" = 1 ]; then
     # 地點：目前連著的家用 Wi-Fi 名稱的雜湊（不存名稱本身）；暫停中沿用上一次的
     ssid="$(iw dev wlan0 link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p')"
     [ -n "$ssid" ] && loc="$(printf '%s' "$ssid" | sha256sum | cut -c1-16)"
     # LC_ALL=C：nmcli 的狀態字會跟著語系翻譯（connected → 已連線），介面那邊是比對英文
     wl="$(LC_ALL=C nmcli -t -f DEVICE,STATE device 2>/dev/null | sed -n 's/^wlan0://p')"
-    mkdir -p -m 0700 "$DIR"
-    APPLIED="$applied" STATION="$station" LOC="$loc" WL="$wl" ERR="$err" python3 -c 'import json,os,time
-print(json.dumps({"t":int(time.time()),"applied":os.environ["APPLIED"],"ap_station":os.environ["STATION"]=="true",
-                  "loc":os.environ["LOC"],"wlan0":os.environ["WL"],"err":os.environ["ERR"]}))' > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
-    sleep 1
+    fi # §REVIEW-1118：沒進來就沿用上一輪的 loc 與 wlan0，不重跑 iw／nmcli
+    # §REVIEW-1118：目錄在就不要每秒 mkdir。狀態改由 shell 組（欄位順序與 json.dumps 相同）；跳脫引號與換行，避免錯誤文字把 JSON 弄壞。
+    [ -d "$DIR" ] || mkdir -p -m 0700 "$DIR"
+    e_wl=$wl; e_wl=${e_wl//\\/\\\\}; e_wl=${e_wl//\"/\\\"}; e_wl=${e_wl//$'\n'/ }; e_wl=${e_wl//$'\r'/ }
+    e_err=$err; e_err=${e_err//\\/\\\\}; e_err=${e_err//\"/\\\"}; e_err=${e_err//$'\n'/ }; e_err=${e_err//$'\r'/ }
+    if [ "$station" = true ]; then ap_json=true; else ap_json=false; fi
+    printf -v now '%(%s)T' -1 2>/dev/null || now=$(date +%s)  # §REVIEW-1118：nmcli 之後再取時間，t 才不會把查詢耗掉的秒數算進 5 秒新鮮窗口
+    printf '{"t": %s, "applied": "%s", "ap_station": %s, "loc": "%s", "wlan0": "%s", "err": "%s"}\n' \
+        "$now" "$applied" "$ap_json" "$loc" "$e_wl" "$e_err" > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
+    # §REVIEW-1118：沒有 VipleStream、也沒在切換時改 3 秒醒一次。t 超過 5 秒 app 會當成服務不在，所以不睡更久；暫停中仍 1 秒。
+    nap=1
+    { [ "$applied" = adapter-only ] || [ "$want" = adapter-only ] || pgrep -x viplestream >/dev/null 2>&1 || pgrep -x VipleStream >/dev/null 2>&1; } || nap=3
+    sleep "$nap"
 done
 NETMODE_EOF
 chmod 755 "$DEST/netmode.sh.tmp"

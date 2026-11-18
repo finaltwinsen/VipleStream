@@ -26,6 +26,7 @@
 #include <mutex>       // §SC-HID WP2.4：安裝執行緒 ↔ VipleSCHidOpen 交換安裝結果
 #include <string>      // std::wstring（安裝執行緒帶走 installer 路徑）
 #include <thread>      // §SC-HID WP2.4：一次性 detached 安裝執行緒
+#include <vector>      // §SC-HID-GATE：CM_Get_Device_ID_ListW 的緩衝區
 
 #pragma comment(lib, "hid.lib")
 #pragma comment(lib, "setupapi.lib")
@@ -512,6 +513,68 @@ int VipleSCHidForceReconnect(void) {
 
     // Allow VipleSCHidOpen to proceed immediately after re-enumeration.
     VipleSCHidResetOpenThrottle();
+    if (cr != CR_SUCCESS) {
+        SetLastError(static_cast<DWORD>(cr));
+        return 0;
+    }
+    return 1;
+}
+
+// §SC-HID-GATE：找虛擬裝置的 root devnode。停用中的 devnode 仍在裝置樹裡（problem code 22），
+// CM_LOCATE_DEVNODE_NORMAL 找得到；用介面列舉（DIGCF_PRESENT）反而找不到停用中的裝置。
+static bool findRootDevNode(DEVINST* out) {
+    static const wchar_t kPrefix[] = L"ROOT\\VID_28DE&PID_1302\\";
+    const size_t prefixLen = (sizeof(kPrefix) / sizeof(kPrefix[0])) - 1;
+    ULONG len = 0;
+    if (CM_Get_Device_ID_List_SizeW(&len, L"ROOT", CM_GETIDLIST_FILTER_ENUMERATOR) != CR_SUCCESS || len < 2) {
+        return false;
+    }
+    std::vector<wchar_t> buf(len + 2, L'\0');
+    if (CM_Get_Device_ID_ListW(L"ROOT", buf.data(), len, CM_GETIDLIST_FILTER_ENUMERATOR) != CR_SUCCESS) {
+        return false;
+    }
+    for (const wchar_t* p = buf.data(); *p != L'\0'; p += wcslen(p) + 1) {
+        if (_wcsnicmp(p, kPrefix, prefixLen) == 0) {
+            if (CM_Locate_DevNodeW(out, const_cast<DEVINSTID_W>(p), CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int VipleSCHidSetEnabled(int enable) {
+    DEVINST inst = 0;
+    if (!findRootDevNode(&inst)) {
+        return -1;
+    }
+    ULONG status = 0, problem = 0;
+    bool disabled = false;
+    if (CM_Get_DevNode_Status(&status, &problem, inst, 0) == CR_SUCCESS) {
+        disabled = (status & DN_HAS_PROBLEM) != 0 && problem == CM_PROB_DISABLED;
+    }
+    if (enable) {
+        if (!disabled) {
+            return 2;
+        }
+        CONFIGRET cr = CM_Enable_DevNode(inst, 0);
+        if (cr != CR_SUCCESS) {
+            Sleep(300);
+            cr = CM_Enable_DevNode(inst, 0);
+        }
+        if (cr != CR_SUCCESS) {
+            SetLastError(static_cast<DWORD>(cr));
+            return 0;
+        }
+        // PnP 重新列舉 HID 子裝置要一點時間；之後的 VipleSCHidOpen 不受 5 秒節流擋
+        Sleep(300);
+        VipleSCHidResetOpenThrottle();
+        return 1;
+    }
+    if (disabled) {
+        return 2;
+    }
+    const CONFIGRET cr = CM_Disable_DevNode(inst, 0);
     if (cr != CR_SUCCESS) {
         SetLastError(static_cast<DWORD>(cr));
         return 0;

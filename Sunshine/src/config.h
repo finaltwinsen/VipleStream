@@ -506,6 +506,8 @@ namespace config {
     // 有設＝只開放這些資料夾；單獨一個 "*"＝整台 PC（每一個磁碟機，Linux 是 /）
     bool media_share = true;
     std::vector<std::string> media_dirs;
+    // §MEDIA-FILEOPS：預設關。打開後已配對的裝置才能改「資料夾」根；整台 PC 的磁碟機根仍然不可寫（見 media_share::root_writable）
+    bool media_write = false;
 
     // §STEAM-SWITCH-ACL：沒有 app 在跑時誰可以切換 host 的 Steam 帳號。paired＝任何已配對裝置（預設）、
     // admin＝只有 Web UI 勾了 Admin 的裝置、disabled＝關閉。有 app 在跑時一律只有啟動它的裝置或 Admin。

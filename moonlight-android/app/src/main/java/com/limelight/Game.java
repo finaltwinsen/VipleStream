@@ -2410,10 +2410,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     xferServerCert,
                     com.limelight.binding.PlatformBinding.getCryptoProvider(this));
             okhttp3.HttpUrl base = http.getHttpsUrl(true);
-            // §N.5.bug fix (2026-05-14): pass NvHTTP::getLongConnectClient as
-            // supplier so FileTransferClient pulls fresh wrapped OkHttpClient
-            // (new SSLContext) per newCall. Avoids cached SSL state corruption
-            // accumulating across N+ long-poll requests on Pixel 5 Conscrypt.
+            // §N.5.bug fix (2026-05-14): supplier 仍是 getLongConnectClient
+            // （每次呼叫都是新的 SSLContext）。Pixel 5 的 Conscrypt 在同一顆
+            // client 累積太多次握手後會丟 TLSV1_ALERT_INTERNAL_ERROR。
+            // §REVIEW-1118B：不要在這裡把回傳值抓成 final。FileTransferClient
+            // 會自己留一顆讓 /transfer/poll 走 keep-alive，只有握手失敗才再要一顆。
             //
             // §N.5 UX (2026-05-14): emit() 改走 fileTransferOverlay 替代原 Toast,
             // 整個 transfer 期間持續可見 (0-100%), 完成或失敗 3 秒後自動 hide.

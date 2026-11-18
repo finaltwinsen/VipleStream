@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <thread>
 
 // sampleId → client 取樣時間。decoder 執行緒用它把 0x81 的 echoSampleId 換回取樣
@@ -79,6 +80,7 @@ private:
     VrSyntheticMotion m_Motion = VrSyntheticMotion::Sine;
     double m_SyntheticMenuAtSec = 0.0;
     double m_SyntheticPadTestSec = 0.0;
+    std::string m_PuppetPath;       // dev（--vr-puppet）：姿態與按鍵由這個檔案決定
     bool m_SyntheticToss = false;   // dev（--vr-synthetic-toss）：左手的合成拋球動作
     bool m_SyntheticHands = false;  // dev（--vr-synthetic-hands）：--vr-emulate 時也把控制器換成揮動的合成姿態；start() 之前設
 
@@ -89,6 +91,8 @@ public:
     void setSyntheticMenuAt(double sec) { m_SyntheticMenuAtSec = sec; }
     // dev（--vr-synthetic-pad-test）：--vr-emulate 時從第幾秒起跑 §VR-PADMODE 的按鍵序列（0＝不做）；start() 之前設
     void setSyntheticPadTest(double sec) { m_SyntheticPadTestSec = sec; }
+    // dev（--vr-puppet）：--vr-emulate 時頭與控制器照這個檔案的內容擺（空字串＝不做）；start() 之前設
+    void setPuppetPath(const std::string& path) { m_PuppetPath = path; }
 
 private:
     Source m_Source;

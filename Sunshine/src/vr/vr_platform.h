@@ -248,5 +248,12 @@ namespace vr {
     /// Steam app：id → 啟動選項（"VR"／"openxr"；快取，refresh 時重讀）。新的 OpenXR 遊戲（例：Pixel Dungeon VR）
     /// 登記的是 `/openxr`，只認 `/VR` 會把它們當成一般 app，/launch 回「not a VR app」。
     std::map<std::string, std::string> vr_manifest_app_ids(bool refresh);
+
+    /// §VR-PADMODE（2026-11-18）：這個 Steam app 有沒有向 SteamVR 的 OpenXR 登記過 VR 手把的按鍵對應
+    /// （`<steam_root>\config\openxr\steam.app.<id>_<手把類型>_<n>_binding.json`，遊戲呼叫
+    /// xrSuggestInteractionProfileBindings 時 SteamVR 產生；只看檔名、不讀內容）。gamepad、hand_interaction 之類不算。
+    /// 商店沒有「Tracked Controller Support」分類、實際上用 VR 手把玩的 OpenXR 遊戲靠它認出來（例：Pixel Dungeon VR）。
+    /// 遊戲第一次執行、檔案還沒產生時回 false。只能在場次的背景執行緒呼叫（不在 HTTP 執行緒）。
+    bool openxr_controller_bindings(const std::string &appid);
   }  // namespace platform
 }  // namespace vr

@@ -27,6 +27,9 @@ namespace nvenc {
 
     ID3D11Texture2D *get_input_texture() override;
 
+    // §REVIEW-1118B：CUDA 裝置的 NVENC 呼叫都在 context 為 current 時進行。改幀率比照，否則 driver 可能直接拒絕。
+    bool reconfigure_framerate(int framerate) override;
+
   private:
     bool init_library() override;
 

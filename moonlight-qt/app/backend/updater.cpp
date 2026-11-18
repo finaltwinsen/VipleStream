@@ -591,6 +591,22 @@ bool Updater::spawnHelperAndQuit()
         // 用 .NET 解壓，不用 Expand-Archive：程式從 PowerShell 7 的終端機啟動時，繼承到的模組路徑會讓 5.1 載到
         // 7 的 Archive 模組而失敗（2026-11-12 實測）
         "  Add-Type -AssemblyName System.IO.Compression.FileSystem\n"
+        // §REVIEW-1118B：解壓前先看每一筆路徑。有些 .NET Framework 的 ExtractToDirectory 不擋項目名稱裡的 ..，
+        // 提權後會在覆蓋安裝目錄之前把檔案寫到 stage 外面。GetFullPath 之後必須落在 stage 底下，否則丟例外，
+        // 沿用下面的 catch（安裝目錄不動、把舊程式開回來）。
+        "  $zip = [IO.Compression.ZipFile]::OpenRead($ZipPath)\n"
+        "  try {\n"
+        "    $stageFull = [IO.Path]::GetFullPath($stage)\n"
+        "    $sep = [string]([IO.Path]::DirectorySeparatorChar)\n"
+        "    $stagePrefix = $stageFull\n"
+        "    if (-not $stagePrefix.EndsWith($sep)) { $stagePrefix += $sep }\n"
+        "    foreach ($entry in $zip.Entries) {\n"
+        "      $dest = [IO.Path]::GetFullPath([IO.Path]::Combine($stageFull, $entry.FullName))\n"
+        "      if ($dest.Length -lt $stagePrefix.Length -or $dest.Substring(0, $stagePrefix.Length) -ne $stagePrefix) { throw ('zip entry is outside the stage directory: ' + $entry.FullName) }\n"
+        "    }\n"
+        "  } finally {\n"
+        "    $zip.Dispose()\n"
+        "  }\n"
         "  [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $stage)\n"
         "  Copy-Item -Path (Join-Path $stage '*') -Destination $InstallDir -Recurse -Force\n"
         "} catch {\n"
@@ -626,8 +642,15 @@ bool Updater::spawnHelperAndQuit()
         return false;
     }
     // §REVIEW-1104：加 UTF-8 BOM，Windows PowerShell 5.1 才不會把翻譯後的提示文字當 ANSI 讀成亂碼
-    sf.write("\xEF\xBB\xBF");
-    sf.write(script.toUtf8());
+    // §REVIEW-1118：磁碟滿時 write 會少寫。原本不看回傳值，提權後跑的是半截腳本，程式也已經關了。
+    const QByteArray scriptBytes = script.toUtf8();
+    if (sf.write("\xEF\xBB\xBF", 3) != 3 || sf.write(scriptBytes) != scriptBytes.size() || !sf.flush()) {
+        const QString err = sf.errorString();
+        sf.close();
+        QFile::remove(helperPath);
+        fail(tr("Cannot write helper script: %1").arg(err));
+        return false;
+    }
     sf.close();
 
     bool needElevate = !isPathWritable(installDir);
@@ -716,7 +739,15 @@ bool Updater::spawnHelperAndQuit()
         fail(tr("Cannot write helper script: %1").arg(sf.errorString()));
         return false;
     }
-    sf.write(script.toUtf8());
+    // §REVIEW-1118：同 Windows。寫不完整就不要交給 bash，否則更新會安靜失敗、程式也已經關了。
+    const QByteArray scriptBytes = script.toUtf8();
+    if (sf.write(scriptBytes) != scriptBytes.size() || !sf.flush()) {
+        const QString err = sf.errorString();
+        sf.close();
+        QFile::remove(helperPath);
+        fail(tr("Cannot write helper script: %1").arg(err));
+        return false;
+    }
     sf.close();
     QFile::setPermissions(helperPath,
         QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |

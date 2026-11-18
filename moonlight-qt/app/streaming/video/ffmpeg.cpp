@@ -3402,6 +3402,10 @@ bool FFmpegVideoDecoder::initializeInternal(PDECODER_PARAMETERS params)
     bool envForceVulkan_2  = qEnvironmentVariableIntValue("VIPLE_VKFRUC_SW") != 0 || envDumpDir_2;
     // §B-DUMP — same suppression as block 1.
     bool envWantVkDecoder  = shouldPreferVulkanDecoderCascade() && !envDumpDir_2;
+    // §REVIEW-1118：強制軟體解碼時這段自動優先會直接載入 Vulkan 硬解並 return，使用者的設定不會生效
+    if (params->vds == StreamingPreferences::VDS_FORCE_SOFTWARE) {
+        envWantVkDecoder = false;
+    }
     if (envWantVkDecoder) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VKFRUC-SW] Vulkan decoder cascade active (RS_VULKAN "
@@ -4072,30 +4076,34 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     if (LiGetHdrMetadata(&hdrMetadata)) {
                         if (av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA) == nullptr) {
                             auto mdm = av_mastering_display_metadata_create_side_data(frame);
+                            // §REVIEW-1118：配置失敗回空指標，解碼執行緒不能解參考；這一幀略過附加
+                            if (mdm) {
+                                mdm->display_primaries[0][0] = av_make_q(hdrMetadata.displayPrimaries[0].x, 50000);
+                                mdm->display_primaries[0][1] = av_make_q(hdrMetadata.displayPrimaries[0].y, 50000);
+                                mdm->display_primaries[1][0] = av_make_q(hdrMetadata.displayPrimaries[1].x, 50000);
+                                mdm->display_primaries[1][1] = av_make_q(hdrMetadata.displayPrimaries[1].y, 50000);
+                                mdm->display_primaries[2][0] = av_make_q(hdrMetadata.displayPrimaries[2].x, 50000);
+                                mdm->display_primaries[2][1] = av_make_q(hdrMetadata.displayPrimaries[2].y, 50000);
 
-                            mdm->display_primaries[0][0] = av_make_q(hdrMetadata.displayPrimaries[0].x, 50000);
-                            mdm->display_primaries[0][1] = av_make_q(hdrMetadata.displayPrimaries[0].y, 50000);
-                            mdm->display_primaries[1][0] = av_make_q(hdrMetadata.displayPrimaries[1].x, 50000);
-                            mdm->display_primaries[1][1] = av_make_q(hdrMetadata.displayPrimaries[1].y, 50000);
-                            mdm->display_primaries[2][0] = av_make_q(hdrMetadata.displayPrimaries[2].x, 50000);
-                            mdm->display_primaries[2][1] = av_make_q(hdrMetadata.displayPrimaries[2].y, 50000);
+                                mdm->white_point[0] = av_make_q(hdrMetadata.whitePoint.x, 50000);
+                                mdm->white_point[1] = av_make_q(hdrMetadata.whitePoint.y, 50000);
 
-                            mdm->white_point[0] = av_make_q(hdrMetadata.whitePoint.x, 50000);
-                            mdm->white_point[1] = av_make_q(hdrMetadata.whitePoint.y, 50000);
+                                mdm->min_luminance = av_make_q(hdrMetadata.minDisplayLuminance, 10000);
+                                mdm->max_luminance = av_make_q(hdrMetadata.maxDisplayLuminance, 1);
 
-                            mdm->min_luminance = av_make_q(hdrMetadata.minDisplayLuminance, 10000);
-                            mdm->max_luminance = av_make_q(hdrMetadata.maxDisplayLuminance, 1);
-
-                            mdm->has_luminance = hdrMetadata.maxDisplayLuminance != 0 ? 1 : 0;
-                            mdm->has_primaries = hdrMetadata.displayPrimaries[0].x != 0 ? 1 : 0;
+                                mdm->has_luminance = hdrMetadata.maxDisplayLuminance != 0 ? 1 : 0;
+                                mdm->has_primaries = hdrMetadata.displayPrimaries[0].x != 0 ? 1 : 0;
+                            }
                         }
 
                         if ((hdrMetadata.maxContentLightLevel != 0 || hdrMetadata.maxFrameAverageLightLevel != 0) &&
                                 av_frame_get_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL) == nullptr) {
                             auto clm = av_content_light_metadata_create_side_data(frame);
-
-                            clm->MaxCLL = hdrMetadata.maxContentLightLevel;
-                            clm->MaxFALL = hdrMetadata.maxFrameAverageLightLevel;
+                            // §REVIEW-1118：同上，配置失敗就略過，不要解參考空指標
+                            if (clm) {
+                                clm->MaxCLL = hdrMetadata.maxContentLightLevel;
+                                clm->MaxFALL = hdrMetadata.maxFrameAverageLightLevel;
+                            }
                         }
                     }
 

@@ -737,6 +737,14 @@ void StreamingPreferences::save()
             << "enableFrameInterpolation =" << enableFrameInterpolation;
 }
 
+int StreamingPreferences::getPyroWaveRecommendedBitrate(int width, int height, int fps)
+{
+    const double pixRate = static_cast<double>(qMax(width, 1)) * qMax(height, 1) * qMax(fps, 1);
+    const double kbps = 250000.0 * pixRate / (3456.0 * 1728.0 * 90.0);
+    const int rounded = static_cast<int>((kbps + 2500.0) / 5000.0) * 5000;
+    return qBound(20000, rounded, 350000);
+}
+
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444, bool fruc)
 {
     // v1.4.151 §R2-α-2: 還原 v1.4.145 半切邏輯 (R1-2 revert).

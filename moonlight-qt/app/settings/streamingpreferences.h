@@ -24,6 +24,12 @@ public:
     Q_INVOKABLE static int
     getDefaultBitrate(int width, int height, int fps, bool yuv444, bool fruc = false);
 
+    // §PYROWAVE-HINT（2026-11-18）：PyroWave 每一張都獨立壓縮，需要的碼率遠高於 HEVC／AV1。回傳這個解析度與
+    // 幀率下畫面不糊的建議碼率（kbps）；設定頁的提示與啟動前的警告共用。基準與 VR 的 PyroWave 預設相同
+    // （3456x1728@90＝250 Mbps，按像素率線性縮放），四捨五入到 5 Mbps。
+    Q_INVOKABLE static int
+    getPyroWaveRecommendedBitrate(int width, int height, int fps);
+
     Q_INVOKABLE void save();
 
     void reload();
@@ -466,6 +472,7 @@ public:
     // 只是「切換」儀表板：開著就關、關著就開）。0＝不按。用按鍵關掉之後 host 的時序和有人配戴時不同，量測請改用停用儀表板
     double vrSyntheticMenuAtSec = 0.0;
     double vrSyntheticPadTestSec = 0.0;  // dev（--vr-synthetic-pad-test）：不存檔
+    QString vrPuppetFile;                // dev（--vr-puppet）：不存檔
     int vrFakeBatteryPct = -1;  // dev（--vr-fake-battery）：>= 0 時低電量提示改看這個電量；不存檔
     bool inputTest = false;
     bool inputTestUnreliable = false;  // §LAT-2D（dev，--input-test-unreliable）：相對滑鼠改不保證送達；不存檔  // §LAT-2D（dev，--input-test）：串流時每 4 ms 送一次 ±1 像素的滑鼠移動，量 host 端輸入封包間隔；不存檔

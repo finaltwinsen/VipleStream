@@ -195,6 +195,16 @@ namespace input {
   };
 
 #ifdef _WIN32
+  // §SC-HID-GATE：有幾個場次正在用（啟用著）虛擬 Steam Controller。最後一個結束時才停用裝置
+  static std::atomic<int> sc_hid_gate_users {0};
+  static void sc_hid_gate_acquire() {
+    sc_hid_gate_users.fetch_add(1);
+  }
+  // 回傳 true＝沒有別的場次在用了，呼叫端可以停用裝置
+  static bool sc_hid_gate_release() {
+    return sc_hid_gate_users.fetch_sub(1) <= 1;
+  }
+
   // §SC-HID Round 1：把 driver 端 Feature 0x05 統計格式化成 10 s / final stats 的
   // drv 段。valid=false 時印 n/a 與 GetLastError（舊 driver 1.0.4.0 沒宣告 0x05
   // 會落到這裡；err=0 代表 poll 執行緒還沒讀過）。
@@ -275,6 +285,12 @@ namespace input {
     // with the proxy already active.
     std::thread sc_hid_poll_thread;
     std::atomic<bool> sc_hid_thread_active{false};
+
+    // §SC-HID-GATE（2026-11-18）：虛擬裝置平常是停用的（Steam 看不到）。這一場的 client 送來實體手把的 feature 回應或
+    // input report（sc_client_evidence）之後，poll 執行緒才把裝置啟用（sc_dev_ready）；在那之前 input 路徑不開 handle
+    // ——VipleSCHidOpen 找不到裝置會去跑安裝腳本。
+    std::atomic<bool> sc_client_evidence{false};
+    std::atomic<bool> sc_dev_ready{false};
 
     // §SC-KEEPALIVE 2026-07-02：Steam 的 CGetControllerInfoWorkItem 需要
     // input pipe 有資料——真實有線 SC 醒著時持續吐 0x45，read 乾涸時
@@ -359,6 +375,33 @@ namespace input {
       if (sc_hid_handle) {
         VipleSCHidClose(sc_hid_handle);
         sc_hid_handle = nullptr;
+      }
+      // §SC-HID-GATE：這一場啟用過虛擬裝置：沒有別的場次還在用就停用回去
+      if (sc_dev_ready.load() && sc_hid_gate_release()) {
+        int rc = VipleSCHidSetEnabled(0);
+        const unsigned long cr = rc == 0 ? GetLastError() : 0;
+        BOOST_LOG(info) << "[SC-HID] session ended - virtual Steam Controller disabled again (result=" << rc << ")";
+        if (rc == 0) {
+          // §SC-HID-GATE（2026-11-18 晚，實體手把實測）：場次剛結束時停用會被拒絕（每一場都是 result=0），
+          // 裝置就一直留著、Steam 的 11 秒迴圈又回來；同一台機器稍後手動停用是成功的。所以在背景每秒再試，
+          // 最多 20 秒；期間有新的場次把裝置拿去用就放棄（那一場結束時會再停用）。
+          BOOST_LOG(warning) << "[SC-HID] disabling the virtual Steam Controller was refused (CONFIGRET=" << cr << "); retrying in the background";
+          std::thread([]() {
+            for (int i = 1; i <= 20; i++) {
+              std::this_thread::sleep_for(std::chrono::seconds(1));
+              if (sc_hid_gate_users.load() > 0) {
+                return;
+              }
+              const int r = VipleSCHidSetEnabled(0);
+              if (r != 0) {
+                BOOST_LOG(info) << "[SC-HID] virtual Steam Controller disabled on retry " << i << " (result=" << r << ")";
+                return;
+              }
+            }
+            BOOST_LOG(warning) << "[SC-HID] could not disable the virtual Steam Controller after 20 s (CONFIGRET=" << GetLastError()
+                               << "); it stays enabled until the next session ends or the service restarts";
+          }).detach();
+        }
       }
     }
 #endif
@@ -1361,6 +1404,7 @@ namespace input {
   // 事件（Steam 對虛擬裝置做 SET/GET_FEATURE 時 driver 會 push）。有事件就經 0x5505
   // 控制訊息把「Steam 實際的 query」轉給 client → 實體 SC。Steam 的 feature 動作不頻繁，
   // 用 ~100Hz 的 input rate 輪詢延遲足夠低，且省掉一條背景執行緒。
+  // §REVIEW-1118B：input report 路徑不再呼叫。poll 執行緒每 20 ms 已經輪詢；feature 回應交付後仍會再呼叫一次。
   void poll_sc_hid_notify(std::shared_ptr<input_t> &input) {
     if (!input->sc_hid_handle) return;
     uint8_t op = 0, reportId = 0, seq = 0, query[64] = {};
@@ -1394,22 +1438,12 @@ namespace input {
     int reopen_fail_streak = 0;
     int reopen_cooldown = 0;   // 還要跳過幾輪才再嘗試 reopen
 
-    VIPLE_SCHID_HANDLE poll_h = VipleSCHidOpenDirect();
-    if (poll_h) {
-      BOOST_LOG(info) << "[SC-HID] Polling thread started, handle open";
-    }
-    else {
-      // §SC-HID WP2.3：舊碼開不到裝置零 log（F10）——host 三天的 log 只看得到
-      // "Polling thread started"，裝置缺席時什麼都沒有。每個失敗 streak 的
-      // 首次印一行 warning 帶探測軌跡；這裡算 streak 的第一次，迴圈內不重印。
-      reopen_fail_streak = 1;
-      // 字串刻意不含 "Polling thread started"——log-grep 對帳時才分得出「開了」
-      // 與「沒開」兩種啟動結果。
-      BOOST_LOG(warning) << "[SC-HID] Polling thread: device NOT open (retry with backoff): "
-                         << VipleSCHidLastDiag();
-    }
+    // §SC-HID-GATE：裝置平常停用著，這裡不開；等 client 的實體手把有回應（迴圈開頭）才啟用、開 handle
+    VIPLE_SCHID_HANDLE poll_h = nullptr;
 
-    bool reconnect_done = false;
+    // §SC-HID-GATE：以前場次開始 500 ms 無條件重連一次（讓 Steam 重跑握手）。client 沒有實體手把時那只會讓 Steam
+    // 白等 11 秒；現在改由迴圈開頭的 GATE 在「有實體手把」時啟用裝置（等同重連），這個旗標只是讓下面的舊段落不再執行
+    bool reconnect_done = true;
     int iter = 0;
 
     // §SC-HID Round 1（審查修正 major）：GET_FEATURE(0x03) 連續失敗計數。handle
@@ -1443,6 +1477,38 @@ namespace input {
     while (true) {
       auto inp = weak_inp.lock();
       if (!inp || !inp->sc_hid_thread_active.load(std::memory_order_relaxed)) break;
+
+      // §SC-HID-GATE：這一場的 client 還沒有實體手把的任何回應：裝置維持停用，什麼都不做
+      if (!inp->sc_dev_ready.load(std::memory_order_relaxed)) {
+        if (!inp->sc_client_evidence.load(std::memory_order_relaxed)) {
+          inp.reset();
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          continue;
+        }
+        sc_hid_gate_acquire();
+        int rc = VipleSCHidSetEnabled(1);
+        if (rc == 2) {
+          // 裝置本來就啟用著（另一場啟用的、或 service 啟動時沒停用成功）：照舊重連一次，讓 Steam 重跑握手
+          rc = VipleSCHidForceReconnect() ? 3 : 2;
+        }
+        BOOST_LOG(info) << "[SC-HID] client has a Steam Controller - virtual device enabled (result=" << rc
+                        << "; 1=enabled 3=was enabled, reconnected 2=was enabled, reconnect failed 0=failed -1=driver not installed)";
+        inp->sc_dev_ready.store(true);
+        reconnect_done = true;
+        feature_log_left = kFeatureLogBudget;
+        feature_log_muted = 0;
+        reopen_fail_streak = 0;
+        reopen_cooldown = 0;
+        poll_h = VipleSCHidOpenDirect();
+        if (poll_h) {
+          BOOST_LOG(info) << "[SC-HID] Polling thread started, handle open";
+        }
+        else {
+          // 字串刻意不含 "Polling thread started"：log 對帳時才分得出「開了」與「沒開」。算失敗 streak 的第一次，迴圈內不重印
+          reopen_fail_streak = 1;
+          BOOST_LOG(warning) << "[SC-HID] Polling thread: device NOT open (retry with backoff): " << VipleSCHidLastDiag();
+        }
+      }
 
       // Reopen if handle was closed by reconnect or device removal.
       if (!poll_h) {
@@ -1532,23 +1598,35 @@ namespace input {
         int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         int64_t lastReal = inp->sc_last_real_inject_us.load(std::memory_order_relaxed);
+        // §REVIEW-1118B：還沒到該重放的時候不拿鎖。手把有在送 report 時，這是每 20 ms 的快速路徑。
         if ((nowUs - lastReal) > 500000 && (nowUs - lastKeepaliveUs) >= 250000) {
-          lastKeepaliveUs = nowUs;
           uint8_t buf[64];
+          int wr = 0;
+          bool wrote = false;
           {
             std::lock_guard<std::mutex> lk(inp->sc_last_report_mutex);
-            memcpy(buf, inp->sc_last_report, sizeof(buf));
+            // §REVIEW-1118B：鎖內再讀一次時間戳，並在同一把鎖裡 WriteFile。
+            // 真實注入會在自己的 WriteFile 之前先改時間戳；這裡看得到就不要寫。
+            // 否則兩支 handle 進同一個循序佇列，後完成的 keepalive 會把短按蓋回舊快照。
+            // VipleSCHidWrite 只做 WriteFile，不會再拿這把鎖，也不會回呼這裡。
+            nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            lastReal = inp->sc_last_real_inject_us.load(std::memory_order_relaxed);
+            if ((nowUs - lastReal) > 500000) {
+              lastKeepaliveUs = nowUs;
+              memcpy(buf, inp->sc_last_report, sizeof(buf));
+              // §SC-HID WP2.2：重放最後一筆真實 report 的「原 id」（0x45 或經 Puck 的
+              // 0x42），不再硬改成 0x45；本 session 尚無真實資料（byte0 仍為 0）才用
+              // 中性零值 0x45。快照只在 0x45／0x42 更新，所以 byte0 不會是未宣告的 id。
+              if (buf[0] != 0x45 && buf[0] != 0x42) {
+                memset(buf, 0, sizeof(buf));
+                buf[0] = 0x45;  // 中性 idle report（本 session 尚無真實資料）
+              }
+              wr = VipleSCHidWrite(poll_h, buf, sizeof(buf));
+              wrote = true;
+            }
           }
-          // §SC-HID WP2.2：重放最後一筆真實 report 的「原 id」（0x45 或經 Puck 的
-          // 0x42），不再硬改成 0x45；本 session 尚無真實資料（byte0 仍為 0）才用
-          // 中性零值 0x45。sc_last_report 只在 wr==1 時更新，所以 byte0 不會是
-          // 未宣告的 id。
-          if (buf[0] != 0x45 && buf[0] != 0x42) {
-            memset(buf, 0, sizeof(buf));
-            buf[0] = 0x45;  // 中性 idle report（本 session 尚無真實資料）
-          }
-          int wr = VipleSCHidWrite(poll_h, buf, sizeof(buf));
-          if (wr == 1) {
+          if (wrote && wr == 1) {
             inp->sc_keepalive_count.fetch_add(1, std::memory_order_relaxed);
             if (!keepaliveLogged) {
               keepaliveLogged = true;
@@ -1557,11 +1635,12 @@ namespace input {
                               << "; suppressed while real input flows)";
             }
           }
-          else if (wr < 0) {
+          else if (wrote && wr < 0) {
             // §SC-HID Round 1（審查修正 major）：keepalive 寫入回 fatal（裝置
             // 消失：1167/2/6/995/433/55）——舊碼只有 input 端的寫入會 close/
             // reopen，poll 執行緒抱著死 handle 每 250 ms 失敗一次直到 session
             // 結束。這裡同樣關掉，交給既有 reopen 退避（從快速重試窗口起算）。
+            // log 與關 handle 留在鎖外。
             BOOST_LOG(warning) << "[SC-HID] Poll-thread: keepalive write fatal, closing handle for reopen: "
                                << VipleSCHidWriteDiag();
             VipleSCHidClose(poll_h);
@@ -1681,12 +1760,31 @@ namespace input {
   }
 
   void passthrough_sc_hid_input(std::shared_ptr<input_t> &input, PSS_SC_HID_INPUT_PACKET packet) {
+    // §SC-HID-GATE：client 的實體手把在送 report：讓 poll 執行緒把虛擬裝置啟用；啟用完成之前的 report 丟掉
+    input->sc_client_evidence.store(true, std::memory_order_relaxed);
+    if (!input->sc_dev_ready.load(std::memory_order_relaxed)) {
+      return;
+    }
     if (!ensure_sc_hid_handle(input)) {
       return;
     }
 
-    // 轉送 Steam 的待辦 feature 事件（透明 proxy 的 driver→client 方向）。
-    poll_sc_hid_notify(input);
+    // §REVIEW-1118B：不在這裡輪詢 feature。poll 執行緒每 20 ms 已經用另一個 handle 做同一件事，
+    // 輸入執行緒再同步 HidD_GetFeature 會擋到同一條 task pool 上的滑鼠與鍵盤。
+    // feature 回應交付之後那一次 poll_sc_hid_notify 留著，握手鏈還是緊的。
+
+    // §REVIEW-1118B：0x45／0x42 才會進裝置。先在鎖內更新時間戳與快照，WriteFile 留在鎖外，
+    // 避免每筆 report 都把 poll 執行緒擋在這把鎖上。其他 id（VipleSCHidWrite 回 2、不碰裝置）不寫進快照。
+    // 寫入失敗時時間戳已經更新，keepalive 會多靜音約 500 ms，之後重放的是這一筆沒寫進裝置的 report。
+    const uint8_t report_id = packet->data[0];
+    if (report_id == 0x45 || report_id == 0x42) {
+      const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+      std::lock_guard<std::mutex> lk(input->sc_last_report_mutex);
+      input->sc_last_real_inject_us.store(now_us, std::memory_order_relaxed);
+      memcpy(input->sc_last_report, packet->data, sizeof(input->sc_last_report));
+    }
 
     // All 0x55000009 packets carry live SC input reports. VipleSCHidWrite injects
     // 0x45 / 0x42 (the gen-2 gamepad report, direct / via Puck) and returns 2 for
@@ -1699,19 +1797,11 @@ namespace input {
       // skip（當時也回 1）當成注入：keepalive 快取被未宣告的 report 覆蓋、
       // "First report injected" 印在從未到達裝置的封包上（F17 的假陽性來源）。
       // Log first successful injection as positive evidence of end-to-end flow.
+      // 時間戳與快照已在 WriteFile 之前寫入（見上面），這裡不再寫第二次。
       if (!input->sc_first_inject_logged) {
         input->sc_first_inject_logged = true;
         BOOST_LOG(info) << "[SC-HID] First report injected (id=0x"
                         << util::hex(packet->data[0]).to_string_view() << ")";
-      }
-      // §SC-KEEPALIVE：記錄真實注入時刻與內容，poll thread 據此讓位/重放
-      input->sc_last_real_inject_us.store(
-          std::chrono::duration_cast<std::chrono::microseconds>(
-              std::chrono::steady_clock::now().time_since_epoch()).count(),
-          std::memory_order_relaxed);
-      {
-        std::lock_guard<std::mutex> lk(input->sc_last_report_mutex);
-        memcpy(input->sc_last_report, packet->data, sizeof(input->sc_last_report));
       }
     }
     else if (wr == 2) {
@@ -1750,6 +1840,12 @@ namespace input {
     // §SC-HID eager-poll 2026-07-02：改為自行 lazy-open——舊註解「feature
     // 回應總在 input 之後」在控制器睡眠情境不成立（只有握手、沒有 input），
     // 早退會把 client 轉發回來的實體 SC 回應整批丟掉。
+    // §SC-HID-GATE：client 開場的暖機查詢有回應＝它有實體手把（睡著的也會回）：讓 poll 執行緒把虛擬裝置啟用。
+    // 啟用完成之前到的回應丟掉——Steam 看到裝置出現之後會自己重跑一次握手
+    input->sc_client_evidence.store(true, std::memory_order_relaxed);
+    if (!input->sc_dev_ready.load(std::memory_order_relaxed)) {
+      return;
+    }
     if (!ensure_sc_hid_handle(input)) {
       return;
     }
@@ -2400,6 +2496,14 @@ namespace input {
 
   [[nodiscard]] std::unique_ptr<platf::deinit_t> init() {
     platf_input = platf::input();
+#ifdef _WIN32
+    {
+      // §SC-HID-GATE：沒有場次時虛擬 Steam Controller 一律停用（說明在 VipleSCHid.h 的 VipleSCHidSetEnabled）
+      const int rc = VipleSCHidSetEnabled(0);
+      BOOST_LOG(info) << "[SC-HID] startup: virtual Steam Controller disabled until a client brings a real one (result=" << rc
+                      << "; 1=disabled 2=already disabled 0=failed -1=driver not installed)";
+    }
+#endif
 
     return std::make_unique<deinit_t>();
   }

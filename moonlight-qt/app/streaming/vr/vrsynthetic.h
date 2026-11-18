@@ -72,3 +72,15 @@ void vrSyntheticGaze(double tSec, VIPLE_VR_TRACKING* out);
 // 右 bumper、[3,4) 放開。第 1 輪 [0,4)；[4,6.5) 兩支選單鍵長按（手動切換）；第 2 輪 [8,12)；[12,14.5) 再長按一次；
 // 第 3 輪 [16,20)。之後不動。startSec <= 0＝不做。兩手都標 active。
 void vrSyntheticPadTest(double tSec, double startSec, VIPLE_VR_TRACKING* out);
+
+// 2026-11-18（dev，--vr-puppet <檔案>）：頭與兩支控制器的姿態、按鍵由一個文字檔決定，每 50 ms 重讀一次——
+// 無人操作 VR 遊戲的選單用（改檔案 → 看畫面 → 再改）。只在 --vr-emulate 有作用。檔案每行一個 `鍵 = 值`：
+//   head  = x y z yaw pitch          公尺、度；yaw 正＝往左轉、pitch 正＝往上。預設 0 1.6 0 0 0
+//   left  = x y z yaw pitch roll     控制器的絕對位置與指向（-Z 是前方）。預設在頭的前下方
+//   right = x y z yaw pitch roll
+//   lbtn / rbtn = trigger,grip,a,b,menu,system,stick,trackpad,c,d,bumper（逗號分隔，沒寫＝全放開）
+//   ltrig / rtrig / lgrip / rgrip = 0..1（沒寫時跟著 trigger／grip 鍵：按著＝1）
+//   lstick / rstick = x y            -1..1
+//   tau = 秒                          姿態追上目標的時間常數（預設 0.12；甩動、投擲用小一點）
+// 姿態以指數平滑追目標，線速度照平滑的導數回報（投球、發球的遊戲讀得到合理的手速）。讀不到檔案時維持上一次的值。
+void vrSyntheticPuppet(double tSec, const char* path, VIPLE_VR_TRACKING* out);

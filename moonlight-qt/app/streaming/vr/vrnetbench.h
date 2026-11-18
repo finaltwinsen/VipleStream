@@ -176,8 +176,13 @@ namespace NetBench {
             r.mtp50 = o.value(QStringLiteral("mtp50")).toDouble();
             r.mtp95 = o.value(QStringLiteral("mtp95")).toDouble();
             r.recvMbps = o.value(QStringLiteral("recvMbps")).toDouble();
-            r.lateNet = static_cast<uint64_t>(o.value(QStringLiteral("lateNet")).toDouble());
-            r.lateHeadset = static_cast<uint64_t>(o.value(QStringLiteral("lateHeadset")).toDouble());
+            // §REVIEW-1118：負數、NaN、無限大直接轉 uint64_t 是未定義行為（結果檔可能只寫到一半）
+            const double lateNetD = o.value(QStringLiteral("lateNet")).toDouble();
+            const double lateHeadsetD = o.value(QStringLiteral("lateHeadset")).toDouble();
+            r.lateNet = (std::isfinite(lateNetD) && lateNetD >= 0.0 && lateNetD < 1.0e15)
+                        ? static_cast<uint64_t>(lateNetD) : 0;
+            r.lateHeadset = (std::isfinite(lateHeadsetD) && lateHeadsetD >= 0.0 && lateHeadsetD < 1.0e15)
+                            ? static_cast<uint64_t>(lateHeadsetD) : 0;
             r.held = o.value(QStringLiteral("held")).toBool();
             r.headsetLimited = o.value(QStringLiteral("headsetLimited")).toBool();
             return r;

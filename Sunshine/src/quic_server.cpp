@@ -500,9 +500,13 @@ namespace quic_server {
       }
       int64_t delta = (int64_t)(currentBytesSent - _lastTotalBytesSent);
       _lastTotalBytesSent = currentBytesSent;
-      // 估算已發送的 datagram 數（含 QUIC header overhead ~21 bytes）
+      // 估算已發送的 datagram 數。§Q-STALE-DGLEN：用這一場影像 datagram 實際的線上大小換算，餘數留到下一次
+      // （bytes_sent 也含 ACK 與音訊，所以是多扣不是少扣——偏向「佇列比實際淺」，真的堆積由 500-drain 的實數校正）
       if (delta > 0) {
-        _approxVideoQueueDepth -= delta / 1420;
+        _sentBytesCarry += (uint64_t) delta;
+        const uint64_t sent = _sentBytesCarry / _videoDgramWireLen;
+        _sentBytesCarry -= sent * _videoDgramWireLen;
+        _approxVideoQueueDepth -= (int64_t) sent;
       }
       if (_approxVideoQueueDepth < 0) _approxVideoQueueDepth = 0;
     }
@@ -1534,9 +1538,33 @@ namespace quic_server {
       // §ABR-QSTALE-FEEDBACK 2026-07-16：server 自己丟掉的 video datagram
       // ＝下行壅塞最直接的證據，回饋 run_abr_aimd。
       // §Q-STALE-ONCE (ultrareview #6)：條件與丟棄帳本以前寫了兩份，合成一份。
-      const bool staleDrop = ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 &&
+      bool staleDrop = ft == FLOW_VIDEO && _pathSwitchGraceCycles == 0 &&
           ((quicBackpressured && _approxVideoQueueDepth > MAX_VIDEO_QUEUE_DEPTH) ||
            _approxVideoQueueDepth > STALE_STARVE_THRESHOLD);
+      // §Q-STALE-DGLEN：飢餓分支（沒有 backpressure、只憑估計值）在丟之前先實際數一次佇列。估計值是用位元組
+      // 換算的，偏掉時會把空佇列當成塞滿。只在單一路徑（影像走連線層佇列，和 §K.11 的實數同一條）時查核，
+      // 每 100 ms 最多一次；佇列真的很深時走訪成本才高，而那時本來就該丟。
+      if (staleDrop && !quicBackpressured && bestVideoPath < 0) {
+        const uint64_t nowVerify = picoquic_current_time();
+        if (nowVerify - _lastStaleVerifyUs > 100000) {
+          _lastStaleVerifyUs = nowVerify;
+          int64_t real = 0;
+          for (picoquic_misc_frame_header_t *q = _cnx->first_datagram; q != NULL; q = q->next_misc_frame) {
+            if (picoquic_queued_datagram_flow(q) == FLOW_VIDEO) {
+              real++;
+            }
+          }
+          if (real <= STALE_STARVE_THRESHOLD) {
+            static int corrected = 0;
+            if (corrected++ < 20) {
+              BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-STALE-DGLEN: estimate " << _approxVideoQueueDepth << " but the queue really holds "
+                              << real << " video datagram(s) - corrected, nothing dropped (dgram wire len " << _videoDgramWireLen << ")";
+            }
+            staleDrop = false;
+          }
+          _approxVideoQueueDepth = real;
+        }
+      }
       if (staleDrop) {
         uint64_t nowStale = picoquic_current_time();
         if (_staleStallStart != 0 && nowStale - _staleStallStart > 3000000) {  // 3 秒
@@ -1648,7 +1676,14 @@ namespace quic_server {
         _dgramQueuedByFlow[ft]++;
         _bytesByFlow[ft] += dg.data.size();
         // §Q-STALE: 追蹤 approximate queue depth
-        if (ft == FLOW_VIDEO) _approxVideoQueueDepth++;
+        if (ft == FLOW_VIDEO) {
+          _approxVideoQueueDepth++;
+          // §Q-STALE-DGLEN：記這一場影像 datagram 的線上大小（同一場的影像封包等長；32＝QUIC 短標頭＋frame 標頭＋AEAD tag 的概數）
+          const uint32_t wire = (uint32_t) std::clamp<size_t>(dg.data.size() + 32, 200, 1500);
+          if (wire != _videoDgramWireLen) {
+            _videoDgramWireLen = wire;
+          }
+        }
         // §AUD-Q-TRIM: 本批有 audio 入隊 → 批尾修剪 audio 佇列
         if (ft == FLOW_AUDIO) audioQueuedThisBatch = true;
         // §K.8 diag: 首筆 datagram 成功送出時記錄一次
@@ -1997,6 +2032,9 @@ namespace quic_server {
     picoquic_set_default_tp_value(_quic,
         picoquic_tp_max_datagram_frame_size, 65535);
     picoquic_set_default_multipath_option(_quic, 1);
+    // §HOTSPOT-FLAT：預設的 initial_max_path_id 是 2（client 最多開 3 個 path ID）。頭盔在家時 wlan0 一條、Tailscale 介面
+    // 兩條就用完，熱點那條被擋（client 端 PATH_ID_BLOCKED）。提高到 4；下面的路徑統計陣列是 8 格
+    picoquic_set_default_tp_value(_quic, picoquic_tp_initial_max_path_id, 4);
 
     // §M.2 (2026-06-16) — 設定 QUIC idle timeout。未設定時 picoquic 預設
     // 無 idle timeout，client 異常斷線後 server 端 QUIC session 可存活

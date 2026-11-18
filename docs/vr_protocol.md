@@ -32,6 +32,16 @@
 ### 4.2 能力協商
 
 1. **`/serverinfo`**：`<VipleStreamVR>` 是 bitmask。b0 PROTO_V1、b1 PCVR（只有 Windows）、b2 HAPTICS、b3 GAZE_UPLINK、b4 QP_FOVEATION、b5 RECOVERY_INTRA（encoder 支援 IR）、b7 GAZE_FOVEA (0x80)。
+   b8 MIC (0x100)、b9 HOTSPOT_FLAT (0x200，平面場次也收 C2S `HOTSPOT_INFO`)、b10 FLAT_ML (0x400，平面場次的多連線，見下)。
+   **§FLAT-ML（2026-11-18）平面（2D）場次的多連線**：client 在「不是 VR、host 位址是私有 IPv4、host 有 0x400、而且這台有第二條路
+   （兩張以上的網卡和 host 同網段，或是有串流轉接器熱點的頭盔）」時在 `/launch`／`/resume` 帶 `&flatMl=1`；server 接受
+   （`vr_multilink` 沒關、請求沒有 `vr=1`）就在回應加根元素 `<VipleStreamFlatMl>1</VipleStreamFlatMl>`。client 看到才設
+   `StreamConfig.flatMultilink`：這一場不走 QUIC，影像與音訊走 RTP/UDP，多連線 hub 與 VR 相同（`LINK_HELLO`／`LINK_READY`／
+   `LINK_ADDRS`、PING/PONG、熱加入、`auto` 探測），但補包（`F_REPAIR`）與連線上的控制訊息（`F_CTRL`）一律不協商，
+   0x5507 在平面場次只認 `HOTSPOT_INFO` 與 `LINK_HELLO`、0x5508 只交給多連線。舊 client 不送 `flatMl`、舊 server 不回元素，
+   兩種組合都和以前一樣。
+   **§CTRL-TAKEOVER（2026-11-18）**：多連線的場次（VR 或平面）裡，連線識別碼（connect data）相同的新 ENet 連線可以直接接手
+   還沒逾時的舊控制連線（client 換路重連時不必等 host 的 ENet 逾時）。
 2. **`/launch`**：`&vr=1&vrEye=WxH&vrHz=N&vrPeriodNs=<平均週期>&vrFov=<8 個 tan×10000，逗號分隔>&vrIpd=<mm×100>&vrEyeToHead=<14 個逗號分隔整數：每眼 pos mm×100 ×3、quat×10000 ×4>&vrCaps=<hex>&vrCodecs=<mask>&vrCtrl=touch|index&vrOverscan=<deg×10>&vrForce=0|1`。
    選填 `&vrFovea=<101–250>`（§VR-FOVEA，2026-10-08）：注視點編碼，正前方的像素密度是均勻取樣的幾 %；不帶或 100＝關。
    server 接受而且是真的 driver（`mode=pcvr`）時，在 `<VipleStreamVRSession>` 尾端加 `;fovea=<同一個值>`，client 看到才還原；

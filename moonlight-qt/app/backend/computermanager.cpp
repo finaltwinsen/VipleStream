@@ -1063,10 +1063,13 @@ public:
     {
         connect(this, &PendingQuitTask::quitAppFailed,
                 computerManager, &ComputerManager::quitAppCompleted);
+        connect(this, &PendingQuitTask::computerStateChanged,
+                computerManager, &ComputerManager::handleComputerStateChanged);
     }
 
 signals:
     void quitAppFailed(QString error);
+    void computerStateChanged(NvComputer* computer);
 
 private:
     void run()
@@ -1074,9 +1077,27 @@ private:
         NvHTTP http(m_Computer);
 
         try {
-            if (m_Computer->currentGameId != 0) {
+            int runningGame;
+            {
+                QReadLocker lock(&m_Computer->lock);
+                runningGame = m_Computer->currentGameId;
+            }
+            if (runningGame != 0) {
+                // 成功回來＝host 已經回報沒有遊戲在跑（quitApp 內部查過 serverinfo，還在跑會丟 599）
                 http.quitApp();
             }
+            else {
+                qInfo() << "[VIPLE-QUIT] nothing is running on" << m_Computer->name << "any more - quit finishes right away";
+            }
+            // §QUIT-HANG（2026-11-18）：完成要自己通知，不能只等輪詢發現「狀態變了」。
+            // 串流結束時 client 已經送過一次 /cancel；清單還顯示「執行中」的那幾秒按「結束遊戲」，輪到這裡時
+            // currentGameId 已經被輪詢更新成 0——原本什麼都不做，而 handleComputerStateChanged 只在狀態有變時才
+            // 被呼叫，「結束 XXX...」就永遠轉下去（使用者只能關掉程式）。
+            {
+                QWriteLocker lock(&m_Computer->lock);
+                m_Computer->currentGameId = 0;
+            }
+            emit computerStateChanged(m_Computer);
         } catch (const GfeHttpResponseException& e) {
             {
                 QWriteLocker lock(&m_Computer->lock);
@@ -1266,6 +1287,15 @@ private:
         // Create initial newComputer using HTTP serverinfo with no pinned cert
         NvComputer* newComputer = new NvComputer(http, serverInfo);
 
+        // §REVIEW-1118：沒有 uniqueid（或 serverinfo 大到被丟棄）不能放進清單，否則每一筆都會共用同一個空鍵。
+        if (newComputer->uuid.isEmpty()) {
+            delete newComputer;
+            if (!m_Mdns) {
+                emit computerAddCompleted(false, false);
+            }
+            return;
+        }
+
         // Check if we have a record of this host UUID to pull the pinned cert
         NvComputer* existingComputer;
         {
@@ -1294,6 +1324,15 @@ private:
 
             // Update the polled computer with the HTTPS information
             NvComputer httpsComputer(http, serverInfo);
+            // §REVIEW-1118：uuid 對不上就不要 update。update() 在偵錯版會斷言；發行版會把空的欄位蓋上去
+            // （serverinfo 超過長度上限時建構子會把 uuid 清掉）。
+            if (httpsComputer.uuid != newComputer->uuid) {
+                delete newComputer;
+                if (!m_Mdns) {
+                    emit computerAddCompleted(false, false);
+                }
+                return;
+            }
             newComputer->update(httpsComputer);
         }
 

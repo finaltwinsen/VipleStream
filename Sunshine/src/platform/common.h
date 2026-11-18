@@ -580,6 +580,10 @@ namespace platf {
       return false;
     }
 
+    // §REVIEW-1118B：桌面 IDX_FPS_CHANGE 通知擷取端改節拍。預設什麼都不做，
+    // Linux／macOS 的擷取、以及不覆寫的來源維持現況。編碼執行緒呼叫，不可在這裡阻塞。
+    virtual void set_client_frame_rate(int /*fps*/) {}
+
     virtual ~display_t() = default;
 
     // Offsets for when streaming a specific monitor. By default, they are 0.

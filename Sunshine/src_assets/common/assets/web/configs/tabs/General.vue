@@ -159,6 +159,29 @@ function removeCmd(index) {
               v-model="config.system_tray"
               default="true"
     ></Checkbox>
+
+    <!-- §MEDIA-UI（2026-11-18）：影片分享。原本只能改 sunshine.conf，使用者在設定頁找不到 -->
+    <Checkbox class="mb-3"
+              id="media_share"
+              locale-prefix="config"
+              v-model="config.media_share"
+              default="true"
+    ></Checkbox>
+    <div class="mb-3" v-if="config.media_share !== 'disabled'">
+      <label for="media_dirs" class="form-label">{{ $t('config.media_dirs') }}</label>
+      <input type="text" class="form-control" id="media_dirs"
+             :placeholder="platform === 'windows' ? 'C:\\Users\\Public\\Videos, D:\\Movies' : '~/Videos, /mnt/movies'"
+             v-model="config.media_dirs" />
+      <div class="form-text">{{ $t(platform === 'windows' ? 'config.media_dirs_desc_windows' : 'config.media_dirs_desc') }}</div>
+    </div>
+    <!-- §MEDIA-FILEOPS：預設關。打開後任何已配對的裝置都能改分享資料夾，所以跟 media_dirs 一起，只在分享沒關時出現 -->
+    <Checkbox class="mb-3"
+              v-if="config.media_share !== 'disabled'"
+              id="media_write"
+              locale-prefix="config"
+              v-model="config.media_write"
+              default="false"
+    ></Checkbox>
   </div>
 </template>
 

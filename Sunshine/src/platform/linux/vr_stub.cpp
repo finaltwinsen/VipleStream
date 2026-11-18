@@ -167,6 +167,10 @@ namespace vr::platform {
     return {};
   }
 
+  bool openxr_controller_bindings(const std::string &) {
+    return false;
+  }
+
   std::map<std::string, std::string> vr_manifest_app_ids(bool) {
     return {};
   }

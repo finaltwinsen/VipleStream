@@ -770,7 +770,10 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
     // §VR-PLAYER／§VR-SHELL：影片模式（按鍵與搖桿交給呼叫端）。playerActive 有設時在執行期切換（介面與影片模式共用 session）
     const bool playerMode = m_Sink.playerButton && (m_Sink.playerActive ? m_Sink.playerActive() : true);
-    if (playerMode && !m_PlayerModeWas) {
+    // §REVIEW-1118：進片這一格，殼層上按著的鍵（點播放的扳機）還在。上升緣先吞掉，只記住狀態，
+    // 否則會被當成影片模式的新按下（扳機＝把一開始就開著的控制列關掉）。
+    const bool enteredPlayer = playerMode && !m_PlayerModeWas;
+    if (enteredPlayer) {
         // §REVIEW-1104：進片當下左鍵可能還按著，先放開，避免在殼層頁面上繼續拖曳
         if (m_Pressed[0] || m_Pressed[1]) {
             releaseAll("player mode");
@@ -841,6 +844,8 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
 
     // ── §VR-PLAYER：影片模式的按鍵與搖桿。180°／360° 沒有平面螢幕、控制列收起來時下面會提早 return，所以在這裡讀 ──
+    // §REVIEW-1118：扳機的上升緣先記著，等本格控制列求交之後再送（m_PanelHit 此時還是上一格的）。
+    bool trigRise[2] = {false, false};
     if (playerMode && !m_TestPointer && m_TestKbText.isEmpty()) {
         const XrAction acts[4] = {m_Trigger, m_Primary, m_Secondary, m_Squeeze};
         float sx = 0.0f, sy = 0.0f;
@@ -859,8 +864,13 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
                     XrActionStateBoolean bs = xrStruct<XrActionStateBoolean>(XR_TYPE_ACTION_STATE_BOOLEAN);
                     now = XR_SUCCEEDED(xrGetActionStateBoolean(m_Session, &gi, &bs)) && bs.isActive && bs.currentState;
                 }
-                // 扳機指在控制列上時是點控制列（panelClick），不另外送
-                if (now && !m_PlayerWas[b][h] && !(b == 0 && m_PanelHit)) {
+                // §REVIEW-1118：用上一格的 m_PanelHit 會在射線移入的那一格多送一次開關控制列、移出的那一格把扳機吞掉。
+                if (b == 0) {
+                    if (now && !m_PlayerWas[0][h] && !enteredPlayer) {
+                        trigRise[h] = true;
+                    }
+                }
+                else if (now && !m_PlayerWas[b][h] && !enteredPlayer) {
                     m_StatButtons++;
                     m_Sink.playerButton(static_cast<XrInputSink::PlayerButton>(b));
                 }
@@ -878,6 +888,20 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             m_Sink.stick(std::fabs(sx) > kStickDeadzone ? sx : 0.0f, std::fabs(sy) > kStickDeadzone ? sy : 0.0f);
         }
     }
+    // §REVIEW-1118：求交結果確定後才送扳機。打在控制列上的留給 panelClick，上升緣用過就清掉。
+    auto sendPlayerTrigger = [&]() {
+        const bool onPanel = m_PanelHit;
+        for (int h = 0; h < 2; h++) {
+            if (!trigRise[h]) {
+                continue;
+            }
+            trigRise[h] = false;
+            if (!onPanel) {
+                m_StatButtons++;
+                m_Sink.playerButton(XrInputSink::PlayerButton::Trigger);
+            }
+        }
+    };
 
     if (!screen.valid && !screen.panelValid) {
         m_Hit = false;
@@ -889,6 +913,7 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         if (playerMode && !m_TestPointer && m_TestKbText.isEmpty()) {
             m_TrigOnKb = m_PlayerWas[0][0] || m_PlayerWas[0][1];
         }
+        sendPlayerTrigger();
         return;
     }
 
@@ -948,7 +973,11 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             }
             rightDesired = squeeze;
         }
-        m_BackWas = secondary;
+        if (!playerMode) {
+            // §REVIEW-1118：影片模式每格開頭已把 m_BackWas 設成 true。這裡再寫慣用手的 B，
+            // 非慣用手按 B 離開會被清成 false，回到介面時那一下又變成返回。
+            m_BackWas = secondary;
+        }
         gi.action = m_Stick;
         XrActionStateVector2f st = xrStruct<XrActionStateVector2f>(XR_TYPE_ACTION_STATE_VECTOR2F);
         float stickX = 0.0f;
@@ -1023,8 +1052,11 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             kbRelease();  // §REVIEW-1111（第二輪）：同上（螢幕不在時）
         }
         m_KbTrigPrev = leftDesired;
+        sendPlayerTrigger();
         return;
     }
+
+    sendPlayerTrigger();
 
     // ── 虛擬鍵盤（優先於影像螢幕）──
     bool kbHit = false;

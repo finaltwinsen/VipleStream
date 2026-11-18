@@ -338,6 +338,14 @@ namespace quic_server {
     // 超過 MAX 就丟棄多餘 video datagram 不入 picoquic queue。
     int64_t _approxVideoQueueDepth = 0;
     uint64_t _lastTotalBytesSent = 0;
+    // §Q-STALE-DGLEN（2026-11-18）：估計值的換算單位＝這一場影像 datagram 實際的線上大小（payload＋約 32 B 封包開銷）。
+    // 原本寫死 1420：經 VPN 的場次 client 把影像封包縮成 1024（線上約 1076 B），每送 4 個只扣 3 個，估計值每秒
+    // 虛增數百；再加上整數除法每次 drain 丟掉餘數。grace 期間沒有人看這個值，grace 一結束就超過
+    // STALE_STARVE_THRESHOLD，佇列明明是空的卻把影像整批丟掉 3 秒（到 SAFETY-VALVE 才停），然後 grace 500 個
+    // drain、再來一次：11-18 遠端 2D 實測每 14 秒停格一次、碼率被 ABR 壓到 1.5 Mbps 再爬回去（糊→清→糊）。
+    uint32_t _videoDgramWireLen = 1420;
+    uint64_t _sentBytesCarry = 0;      // 還沒換算成 datagram 個數的已送位元組
+    uint64_t _lastStaleVerifyUs = 0;   // 上次實際數佇列（飢餓分支丟棄前的查核）的時間
     static constexpr int64_t MAX_VIDEO_QUEUE_DEPTH = 60; // ~4 frames × 14 dgrams/frame
 
     // §Q-STALE-STARVE 2026-07-17：pacing 飢餓型無條件淘汰門檻。

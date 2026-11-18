@@ -503,6 +503,8 @@ static void inputSendThreadProc(void* context) {
                 }
 
                 // Replace the current packet with the new one
+                // §REVIEW-1118：按鍵變化那一筆是 RELIABLE。批次合併若只留後一筆（旗標可能是 0），按鍵變化就變成可丟棄。把舊封包的可靠旗標併進留下的那一筆。
+                penBatchHolder->enetPacketFlags |= holder->enetPacketFlags;
                 freePacketHolder(holder);
                 holder = penBatchHolder;
             }
@@ -729,14 +731,13 @@ int LiSendMouseMoveEvent(short deltaX, short deltaY) {
 
     // Queue a packet holder if this is the only pending relative mouse event
     if (!currentRelativeMouseState.dirty) {
-        // Set the dirty flag to claim ownership of inserting the packet holder
-        // and unlock to allow other threads to enqueue or process input.
-        currentRelativeMouseState.dirty = true;
+        // §REVIEW-1118B：dirty 代表佇列裡已經有 holder。配置在鎖外做，回到鎖內才入佇列，
+        // 成功才把 dirty 設成真。若先設成真再入佇列失敗，另一條執行緒會只改位移就回傳成功，
+        // 失敗的那條再清掉 dirty，最新的位移就沒有人送。
         PltUnlockMutex(&batchedInputMutex);
 
         holder = allocatePacketHolder(0);
         if (holder == NULL) {
-            currentRelativeMouseState.dirty = false;
             return -1;
         }
 
@@ -756,14 +757,26 @@ int LiSendMouseMoveEvent(short deltaX, short deltaY) {
 
         // Remaining fields are set in the input thread based on the latest currentRelativeMouseState values
 
-        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
-        if (err != LBQ_SUCCESS) {
-            LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
-            Limelog("Input queue reached maximum size limit\n");
-            freePacketHolder(holder);
+        PltLockMutex(&batchedInputMutex);
+        // 等待配置時另一條執行緒可能已經排進佇列。持鎖檢查，避免排兩份。
+        if (!currentRelativeMouseState.dirty) {
+            err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+            if (err == LBQ_SUCCESS) {
+                currentRelativeMouseState.dirty = true;
+                holder = NULL;
+            }
+            else {
+                LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+                Limelog("Input queue reached maximum size limit\n");
+            }
+        }
+        else {
+            err = 0;
+        }
+        PltUnlockMutex(&batchedInputMutex);
 
-            // We weren't able to insert the entry, so let the next call try again
-            currentRelativeMouseState.dirty = false;
+        if (holder != NULL) {
+            freePacketHolder(holder);
         }
     }
     else {
@@ -794,14 +807,13 @@ int LiSendMousePositionEvent(short x, short y, short referenceWidth, short refer
 
     // Queue a packet holder if this is the only pending absolute mouse event
     if (!currentAbsoluteMouseState.dirty) {
-        // Set the dirty flag to claim ownership of inserting the packet holder
-        // and unlock to allow other threads to enqueue or process input.
-        currentAbsoluteMouseState.dirty = true;
+        // §REVIEW-1118B：dirty 代表佇列裡已經有 holder。配置在鎖外做，回到鎖內才入佇列，
+        // 成功才把 dirty 設成真。若先設成真再入佇列失敗，另一條執行緒會只改座標就回傳成功，
+        // 失敗的那條再清掉 dirty，最新的座標就沒有人送。
         PltUnlockMutex(&batchedInputMutex);
 
         holder = allocatePacketHolder(0);
         if (holder == NULL) {
-            currentAbsoluteMouseState.dirty = false;
             return -1;
         }
 
@@ -816,14 +828,26 @@ int LiSendMousePositionEvent(short x, short y, short referenceWidth, short refer
 
         // Remaining fields are set in the input thread based on the latest currentAbsoluteMouseState values
 
-        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
-        if (err != LBQ_SUCCESS) {
-            LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
-            Limelog("Input queue reached maximum size limit\n");
-            freePacketHolder(holder);
+        PltLockMutex(&batchedInputMutex);
+        // 等待配置時另一條執行緒可能已經排進佇列。持鎖檢查，避免排兩份。
+        if (!currentAbsoluteMouseState.dirty) {
+            err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+            if (err == LBQ_SUCCESS) {
+                currentAbsoluteMouseState.dirty = true;
+                holder = NULL;
+            }
+            else {
+                LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+                Limelog("Input queue reached maximum size limit\n");
+            }
+        }
+        else {
+            err = 0;
+        }
+        PltUnlockMutex(&batchedInputMutex);
 
-            // We weren't able to insert the entry, so let the next call try again
-            currentAbsoluteMouseState.dirty = false;
+        if (holder != NULL) {
+            freePacketHolder(holder);
         }
     }
     else {
@@ -1014,7 +1038,7 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
     short leftStickX, short leftStickY, short rightStickX, short rightStickY)
 {
     PPACKET_HOLDER holder;
-    int err;
+    int err = 0;
     bool enqueueHolder = false;
 
     if (!initialized) {
@@ -1141,33 +1165,32 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         holder->packet.multiController.buttonFlags2 = IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0;
         holder->packet.multiController.tailB = LE16(MC_TAIL_B);
 
-        if (enqueueHolder) {
-            // Make this new packet holder the current enqueued packet
+    }
+
+    // §REVIEW-1118B：持著 batchedInputMutex 入佇列，成功才發布指標。
+    // 先發布再解鎖的話，另一條執行緒會看到還沒進佇列的 holder：按鍵不同時，後發生的
+    // 放開可能比按下更早入佇列；佇列滿時又會把軸值寫進即將釋放的 holder 並回傳成功。
+    // LbqOfferQueueItem 滿了立刻回傳、不會等待，也不會叫回輸入程式。送出執行緒是先
+    // 取出並放開佇列鎖，之後才拿 batchedInputMutex，所以這裡先拿這把鎖再拿佇列鎖不會死結。
+    // 多一次被叫醒後堵住，只發生在新 holder（按鍵變化）。軸值批次仍不入佇列。
+    if (enqueueHolder) {
+        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+        if (err == LBQ_SUCCESS && AppVersionQuad[0] != 3) {
             currentQueuedControllerPacket[controllerNumber] = holder;
         }
-    }
-
-    // We can unlock the batched input mutex before enqueuing the new holder because
-    // the input thread only cares if currentQueuedControllerPacket is equal to the
-    // holder it's currently processing. Since it cannot be processing the holder
-    // until we enqueue it, there's no risk here of it processing/freeing the
-    // holder when we're still touching it.
-    //
-    // Unlocking early saves a context switch in the common case where the newly
-    // queued packet wakes up the input thread which then immediately blocks on
-    // the batched input mutex until this thread runs again to release it.
-    PltUnlockMutex(&batchedInputMutex);
-
-    if (enqueueHolder) {
-        // Enqueue the new packet holder
-        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
-        if (err != LBQ_SUCCESS) {
+        else if (err != LBQ_SUCCESS) {
             LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
             Limelog("Input queue reached maximum size limit\n");
-            freePacketHolder(holder);
         }
     }
-    else {
+
+    PltUnlockMutex(&batchedInputMutex);
+
+    if (enqueueHolder && err != LBQ_SUCCESS) {
+        // 指標沒發布，送出執行緒和其他生產端都看不到這個 holder。
+        freePacketHolder(holder);
+    }
+    else if (!enqueueHolder) {
         // The packet holder we updated was already enqueued
         err = 0;
     }
@@ -1410,7 +1433,6 @@ int LiSendPenEvent(uint8_t eventType, uint8_t toolType, uint8_t penButtons,
     // Allow move and hover events to be dropped if a newer one arrives (if no buttons changed),
     // but don't allow state changing events like up/down/leave events to be dropped.
     holder->enetPacketFlags = (TOUCH_EVENT_IS_BATCHABLE(eventType) && !(penButtons ^ currentPenButtonState)) ? 0 : ENET_PACKET_FLAG_RELIABLE;
-    currentPenButtonState = penButtons;
 
     holder->packet.pen.header.size = BE32(sizeof(SS_PEN_PACKET) - sizeof(uint32_t));
     holder->packet.pen.header.magic = LE32(SS_PEN_MAGIC);
@@ -1432,6 +1454,10 @@ int LiSendPenEvent(uint8_t eventType, uint8_t toolType, uint8_t penButtons,
         LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
         Limelog("Input queue reached maximum size limit\n");
         freePacketHolder(holder);
+    }
+    else {
+        // §REVIEW-1118：入佇列失敗時不能先改按鍵狀態，否則下一筆重試會失去 RELIABLE。
+        currentPenButtonState = penButtons;
     }
 
     return err;
@@ -1558,14 +1584,13 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
 
     // Queue a packet holder if this is the only pending sensor event
     if (!currentGamepadSensorState[controllerNumber][motionType - 1].dirty) {
-        // Set the dirty flag to claim ownership of inserting the packet holder
-        // and unlock to allow other threads to enqueue or process input.
-        currentGamepadSensorState[controllerNumber][motionType - 1].dirty = true;
+        // §REVIEW-1118B：dirty 代表佇列裡已經有 holder。配置在鎖外做，回到鎖內才入佇列，
+        // 成功才把 dirty 設成真。若先設成真再入佇列失敗，另一條執行緒會只改數值就回傳成功，
+        // 失敗的那條再清掉 dirty，最新的感測值就沒有人送。
         PltUnlockMutex(&batchedInputMutex);
 
         holder = allocatePacketHolder(0);
         if (holder == NULL) {
-            currentGamepadSensorState[controllerNumber][motionType - 1].dirty = false;
             return -1;
         }
 
@@ -1580,14 +1605,26 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
 
         // Remaining fields are set in the input thread based on the latest currentGamepadSensorState values
 
-        err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
-        if (err != LBQ_SUCCESS) {
-            LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
-            Limelog("Input queue reached maximum size limit\n");
-            freePacketHolder(holder);
+        PltLockMutex(&batchedInputMutex);
+        // 等待配置時另一條執行緒可能已經排進佇列。持鎖檢查，避免排兩份。
+        if (!currentGamepadSensorState[controllerNumber][motionType - 1].dirty) {
+            err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+            if (err == LBQ_SUCCESS) {
+                currentGamepadSensorState[controllerNumber][motionType - 1].dirty = true;
+                holder = NULL;
+            }
+            else {
+                LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
+                Limelog("Input queue reached maximum size limit\n");
+            }
+        }
+        else {
+            err = 0;
+        }
+        PltUnlockMutex(&batchedInputMutex);
 
-            // We weren't able to insert the entry, so let the next call try again
-            currentGamepadSensorState[controllerNumber][motionType - 1].dirty = false;
+        if (holder != NULL) {
+            freePacketHolder(holder);
         }
     }
     else {
@@ -1706,7 +1743,10 @@ int LiSendScHidFeatureReport(uint8_t seq, uint8_t reportId, const uint8_t* data,
     }
 
     holder->channelId = CTRL_CHANNEL_GAMEPAD_BASE;
-    holder->enetPacketFlags = ENET_PACKET_FLAG_UNSEQUENCED;
+    // §REVIEW-1118B：GET_FEATURE 回應是低頻握手，掉一包 Steam 會把手把踢掉。
+    // 可靠傳送的頭部阻塞只擋同一 ENet 通道上排在後面的可靠封包。手把 0 的狀態本來就是
+    // 可靠的，其他通道與不排序的 input report 不受影響。接收端只看封包內容。
+    holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
 
     holder->packet.scHidFeature.header.size = BE32(sizeof(SS_SC_HID_FEATURE_PACKET) - sizeof(uint32_t));
     holder->packet.scHidFeature.header.magic = LE32(SS_SC_HID_FEATURE_MAGIC);

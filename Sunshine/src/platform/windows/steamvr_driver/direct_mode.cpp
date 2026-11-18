@@ -438,6 +438,13 @@ namespace vrdrv {
     fovea_centre_init_ = false;
     saccade_frozen_ = false;
     low_vel_samples_ = 0;
+    // §REVIEW-1118：速度基準不跟著清的話，新 generation 第一幀會拿上一場的角度差除以單幀 dt，
+    // 超過 250°/s 就把注視點凍在上一場的 pre_saccade_target_。清掉後第一筆只當基準。
+    last_gaze_sample_qpc_ = 0;
+    last_fovea_qpc_ = 0;
+    last_gaze_yaw_[0] = last_gaze_yaw_[1] = last_gaze_pitch_[0] = last_gaze_pitch_[1] = 0.0f;
+    pre_saccade_target_[0][0] = pre_saccade_target_[1][0] = 0.5f;
+    pre_saccade_target_[0][1] = pre_saccade_target_[1][1] = 0.5f;
     // ipc_proto 的 check_config 已經驗過尺寸關係；這裡再擋一次不合理的值（當成不分塊）
     const bool tiles_ok = cfg.tile_w >= 64 && cfg.tile_h >= 64 && cfg.tile_render_w > cfg.tile_w && cfg.tile_render_h > cfg.tile_h;
     const bool changed = (tiles_ok ? cfg.tile_w : 0u) != tile_w_ || (tiles_ok ? cfg.tile_h : 0u) != tile_h_ ||

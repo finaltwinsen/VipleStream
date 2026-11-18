@@ -3,6 +3,7 @@
 #include "playersession.h"
 
 #include "backend/identitymanager.h"
+#include "backend/medialibrary.h"
 #include "backend/webresolver.h"
 #include "streaming/xr/xrcontext.h"
 #include "streaming/xr/xrvideo.h"
@@ -150,7 +151,15 @@ int PlayerSession::run(QString* error)
     // §VR-PLAYER（V3）：host 分享的影片要用配對憑證連（server 只讓配對過的 client 進來）。FFmpeg 的 TLS 只吃檔案，
     // 寫到 app 自己的快取資料夾（只有自己能讀），結束時刪掉
     QString tlsCert, tlsKey;
-    if (m_Config.source.contains(QLatin1String("/viple/media/file")) && m_Config.source.startsWith(QLatin1String("https://"))) {
+    // §REVIEW-1118B：只看字串的話，網頁把影片來源指到 https://任意主機/viple/media/file 就能讓我們對它出示配對憑證。
+    // 改成只認媒體庫記下的已配對電腦端點（主機與埠都要對上、路徑要完全相同）。
+    const bool looksLikeHostShare = m_Config.source.contains(QLatin1String("/viple/media/file")) && m_Config.source.startsWith(QLatin1String("https://"));
+    const bool certAllowed = looksLikeHostShare && MediaLibrary::isCertEndpoint(QUrl(m_Config.source));
+    if (looksLikeHostShare && !certAllowed) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-PLAYER] source looks like a host share but its host is not a known paired PC; not presenting the client certificate");
+    }
+    if (certAllowed) {
         const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
         QDir().mkpath(dir);
         tlsCert = dir + QStringLiteral("/player-client-cert.pem");

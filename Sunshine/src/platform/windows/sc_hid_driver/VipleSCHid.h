@@ -169,6 +169,18 @@ VIPLE_SCHID_HANDLE VipleSCHidOpenDirect(void);
 // active. Returns 1 on success, 0 if the device node was not found.
 int VipleSCHidForceReconnect(void);
 
+// §SC-HID-GATE（2026-11-18）：停用／啟用虛擬裝置的 root devnode（ROOT\VID_28DE&PID_1302\xxxx）。
+// client 沒有實體 Steam Controller 時，虛擬裝置對 Steam 的 feature 查詢沒有人回，Steam 的
+// CGetControllerInfoWorkItem 每一輪卡 11 秒（27 次 × driver 的 400 ms 閘控）、每 15 秒重來一次；遊戲啟動時 Steam 的
+// 介面執行緒排在它後面停 5～8 秒，SteamVR 向 Steam 要按鍵對應也跟著晚到——OpenXR 遊戲只等 2 秒，逾時後整場沒有按鍵。
+// 所以平常把裝置停用（Steam 看不到），client 的實體手把有回應（feature 回應或 input report）才啟用。
+// 停用不帶 CM_DISABLE_PERSIST：重開機後裝置自己回來，service 啟動時再停用一次。
+// 回傳： 1 = 狀態已改成要求的樣子
+//        2 = 本來就是要求的狀態（什麼都沒做）
+//        0 = CM_* 失敗（GetLastError 是 CONFIGRET）
+//       -1 = 找不到 devnode（driver 沒安裝）
+int VipleSCHidSetEnabled(int enable);
+
 #ifdef __cplusplus
 }
 #endif

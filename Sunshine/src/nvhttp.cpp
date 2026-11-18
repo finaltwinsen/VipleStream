@@ -449,6 +449,11 @@ namespace nvhttp {
     launch_session->continuous_audio = util::from_view(get_arg(args, "continuousAudio", "0"));
     launch_session->gcmap = (int) util::from_view(get_arg(args, "gcmap", "0"));
     launch_session->enable_hdr = util::from_view(get_arg(args, "hdrMode", "0"));
+    // §FLAT-ML：client 要求平面場次用多連線。帶了 vr=1 的請求不理（VR 有自己的協商）；舊 client 不會送這個參數
+#ifdef _WIN32
+    launch_session->flat_ml = get_arg(args, "flatMl", "0") == "1" && get_arg(args, "vr", "0") != "1" &&
+                              config::vr.multilink != config::vr_t::multilink_e::disabled;
+#endif
 
     // Encrypted RTSP is enabled with client reported corever >= 1
     auto corever = util::from_view(get_arg(args, "corever", "0"));
@@ -1197,6 +1202,18 @@ namespace nvhttp {
           vr_caps |= VIPLE_VR_SERVER_CAP_MIC;
         }
       }
+#ifdef _WIN32
+      // §FLAT-ML（2026-11-18）：平面場次的多連線（每張網卡一條 UDP、影像與音訊各送一份）。和 pcvr 無關。
+      // 只在 Windows 宣告：多連線 hub 至今只在 Windows host 跑過（VR 的 0x40 也只有 Windows 會設），Linux host 還沒驗
+      if (config::vr.multilink != config::vr_t::multilink_e::disabled) {
+        vr_caps |= VIPLE_VR_SERVER_CAP_FLAT_ML;
+      }
+      // §HOTSPOT-FLAT（2026-11-18）：平面（2D）場次也收頭盔的熱點資訊、讓無線網卡連上去，給 MP-QUIC 當第二條路徑。
+      // 和 pcvr 無關；只有 Windows 有連熱點的實作
+      if (config::vr.hotspot_autoconnect) {
+        vr_caps |= VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT;
+      }
+#endif
       tree.put("root.VipleStreamVR", vr_caps);
       tree.put("root.VipleStreamVRProto", VIPLE_VR_PROTO_VERSION);
     }
@@ -2107,6 +2124,9 @@ namespace nvhttp {
     if (launch_session->vr) {
       tree.put("root.VipleStreamVRSession", ::vr::format_session_element(*launch_session->vr));
       ::vr::reserve(caller_uuid, vr_reservation_ttl());
+      launch_session->flat_ml = false;
+    } else if (launch_session->flat_ml) {
+      tree.put("root.VipleStreamFlatMl", 1);  // §FLAT-ML：client 看到這個元素才啟用
     }
 
     rtsp_stream::launch_session_raise(launch_session);
@@ -2376,6 +2396,9 @@ namespace nvhttp {
     if (launch_session->vr) {
       tree.put("root.VipleStreamVRSession", ::vr::format_session_element(*launch_session->vr));
       ::vr::reserve(caller_uuid, vr_reservation_ttl());
+      launch_session->flat_ml = false;
+    } else if (launch_session->flat_ml) {
+      tree.put("root.VipleStreamFlatMl", 1);  // §FLAT-ML：client 看到這個元素才啟用
     }
 
     rtsp_stream::launch_session_raise(launch_session);
@@ -2507,6 +2530,8 @@ namespace nvhttp {
       node.put("Index", r.index);
       node.put("Name", r.name);
       node.put("Kind", r.drive ? "drive" : "folder");  // §VR-PLAYER：舊 client 不認得這個欄位，會忽略
+      // §MEDIA-FILEOPS：舊 client 忽略。新 client 連舊 server、讀不到這個欄位時要當成 0。
+      node.put("Writable", media_share::root_writable(r) ? 1 : 0);
       tree.add_child("root.Folder", node);
     }
     media_xml_reply(response, tree);
@@ -2634,6 +2659,182 @@ namespace nvhttp {
       h.emplace("Cache-Control", "private, max-age=86400");
       response->write(SimpleWeb::StatusCode::success_ok, data, h);
     }).detach();
+  }
+
+  // §MEDIA-FILEOPS：失敗都走跟 /list 一樣的 XML 外殼（HTTP 仍是 200），status_code／status_message 給 client 對翻譯。
+  void media_fail(resp_https_t response, int code, const std::string &message) {
+    pt::ptree tree;
+    tree.put("root.<xmlattr>.status_code", code);
+    tree.put("root.<xmlattr>.status_message", message);
+    media_xml_reply(response, tree);
+  }
+
+  bool media_has_arg(const args_t &args, const char *name) {
+    return args.find(name) != std::end(args);
+  }
+
+  bool media_parse_i32(const std::string &s, int *out) {
+    if (s.empty() || s.size() > 11) {
+      return false;
+    }
+    std::size_t i = 0;
+    int sign = 1;
+    if (s[0] == '-') {
+      if (s.size() == 1) {
+        return false;
+      }
+      sign = -1;
+      i = 1;
+    }
+    // Windows 的 long 是 32 位元，先乘再比會溢位。用 64 位元，而且在乘之前就擋掉。
+    unsigned long long value = 0;
+    for (; i < s.size(); i++) {
+      if (s[i] < '0' || s[i] > '9') {
+        return false;
+      }
+      const auto digit = static_cast<unsigned long long>(s[i] - '0');
+      if (value > (2147483647ull - digit) / 10ull) {
+        return false;
+      }
+      value = value * 10ull + digit;
+    }
+    *out = static_cast<int>(sign * static_cast<long long>(value));
+    return true;
+  }
+
+  bool media_parse_job_id(const std::string &s, std::uint64_t *out) {
+    if (s.empty() || s.size() > 20) {
+      return false;
+    }
+    std::uint64_t value = 0;
+    for (unsigned char c : s) {
+      if (c < '0' || c > '9') {
+        return false;
+      }
+      const auto digit = static_cast<std::uint64_t>(c - '0');
+      if (value > (~std::uint64_t {0} - digit) / 10) {
+        return false;
+      }
+      value = value * 10 + digit;
+    }
+    if (value == 0) {
+      return false;
+    }
+    *out = value;
+    return true;
+  }
+
+  // 參數在進 media_share 之前就缺了：那裡不會記 log，這裡補一行。op 只允許四個已知名字，避免把 client 的字串寫進 log。
+  void media_log_reject(const std::string &op) {
+    const char *shown = "unknown";
+    if (op == "mkdir" || op == "delete" || op == "copy" || op == "move") {
+      shown = op.c_str();
+    }
+    BOOST_LOG(info) << "[VIPLE-MEDIA] op="sv << shown << " result=bad request"sv;
+  }
+
+  void media_op(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+    const auto args = request->parse_query_string();
+    if (!media_has_arg(args, "op")) {
+      media_log_reject("");
+      media_fail(response, 400, "bad request");
+      return;
+    }
+    const auto op = get_arg(args, "op");
+    const bool is_mkdir = op == "mkdir";
+    const bool is_delete = op == "delete";
+    const bool is_copy = op == "copy";
+    const bool is_move = op == "move";
+    if (!is_mkdir && !is_delete && !is_copy && !is_move) {
+      media_log_reject(op);
+      media_fail(response, 400, "bad request");
+      return;
+    }
+    if (!media_has_arg(args, "root") || !media_has_arg(args, "path") || (is_mkdir && !media_has_arg(args, "name")) ||
+        ((is_copy || is_move) && (!media_has_arg(args, "droot") || !media_has_arg(args, "dpath")))) {
+      media_log_reject(op);
+      media_fail(response, 400, "bad request");
+      return;
+    }
+    int root = 0;
+    if (!media_parse_i32(get_arg(args, "root"), &root)) {
+      media_log_reject(op);
+      media_fail(response, 400, "bad request");
+      return;
+    }
+    const auto path = get_arg(args, "path");
+    media_share::op_result_t result;
+    if (is_mkdir) {
+      result = media_share::make_directory(root, path, get_arg(args, "name"));
+    } else if (is_delete) {
+      result = media_share::start_background("delete", root, path, 0, {}, false);
+    } else {
+      int droot = 0;
+      if (!media_parse_i32(get_arg(args, "droot"), &droot)) {
+        media_log_reject(op);
+        media_fail(response, 400, "bad request");
+        return;
+      }
+      result = media_share::start_background(op, root, path, droot, get_arg(args, "dpath"), true);
+    }
+    pt::ptree tree;
+    tree.put("root.<xmlattr>.status_code", result.status);
+    if (result.status != 200) {
+      tree.put("root.<xmlattr>.status_message", result.message);
+    } else if (result.job != 0) {
+      tree.put("root.Job", result.job);
+    }
+    media_xml_reply(response, tree);
+  }
+
+  void media_opstatus(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+    const auto args = request->parse_query_string();
+    if (!media_has_arg(args, "id")) {
+      media_fail(response, 400, "bad request");
+      return;
+    }
+    std::uint64_t id = 0;
+    if (!media_parse_job_id(get_arg(args, "id"), &id)) {
+      media_fail(response, 400, "bad request");
+      return;
+    }
+    media_share::job_status_t status;
+    const auto result = media_share::background_status(id, &status);
+    if (result.status != 200) {
+      media_fail(response, result.status, result.message);
+      return;
+    }
+    pt::ptree tree;
+    tree.put("root.<xmlattr>.status_code", 200);
+    tree.put("root.State", status.state);
+    tree.put("root.Done", status.done);
+    tree.put("root.Total", status.total);
+    tree.put("root.Error", status.error);
+    media_xml_reply(response, tree);
+  }
+
+  void media_opcancel(resp_https_t response, req_https_t request) {
+    print_req<SunshineHTTPS>(request);
+    const auto args = request->parse_query_string();
+    if (!media_has_arg(args, "id")) {
+      media_fail(response, 400, "bad request");
+      return;
+    }
+    std::uint64_t id = 0;
+    if (!media_parse_job_id(get_arg(args, "id"), &id)) {
+      media_fail(response, 400, "bad request");
+      return;
+    }
+    const auto result = media_share::background_cancel(id);
+    if (result.status != 200) {
+      media_fail(response, result.status, result.message);
+      return;
+    }
+    pt::ptree tree;
+    tree.put("root.<xmlattr>.status_code", 200);
+    media_xml_reply(response, tree);
   }
 
   void appasset(resp_https_t response, req_https_t request) {
@@ -3829,11 +4030,15 @@ namespace nvhttp {
     };
     https_server.resource["^/applist$"]["GET"] = applist<SunshineHTTPS>;
     https_server.resource["^/appasset$"]["GET"] = appasset;
-    // §VR-PLAYER（V3）：沒有設定 media_dirs 時這三個端點照樣存在，只是沒有資料夾可看（roots 回空清單、其他回 404）
+    // §VR-PLAYER（V3）：沒有設定 media_dirs 時這些端點照樣存在，只是沒有資料夾可看（roots 回空清單、其他回 404）
+    // §MEDIA-FILEOPS：op／opstatus／opcancel 跟 list 一樣只掛在 HTTPS（已配對的 client 憑證）
     https_server.resource["^/viple/media/roots$"]["GET"] = media_roots;
     https_server.resource["^/viple/media/list$"]["GET"] = media_list;
     https_server.resource["^/viple/media/file$"]["GET"] = media_file;
     https_server.resource["^/viple/media/thumb$"]["GET"] = media_thumb;  // §VR-PLAYER-THUMB
+    https_server.resource["^/viple/media/op$"]["GET"] = media_op;
+    https_server.resource["^/viple/media/opstatus$"]["GET"] = media_opstatus;
+    https_server.resource["^/viple/media/opcancel$"]["GET"] = media_opcancel;
     https_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) {
       launch<SunshineHTTPS>(host_audio, resp, req);
     };

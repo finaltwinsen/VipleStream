@@ -49,6 +49,8 @@ extern "C" {
 #define VIPLE_VR_SERVER_CAP_RECOVERY_INTRA  0x20  // encoder 支援 intra refresh
 #define VIPLE_VR_SERVER_CAP_MULTILINK       0x40  // §VR-MULTILINK：支援多連線
 #define VIPLE_VR_SERVER_CAP_GAZE_FOVEA      0x80  // §VR-GAZE-FOVEA：支援 0x82 幀標頭（逐幀動態注視點中心）
+#define VIPLE_VR_SERVER_CAP_FLAT_ML         0x400 // §FLAT-ML：平面（2D）場次也能用多連線（/launch 帶 flatMl=1，回應 <VipleStreamFlatMl>1）
+#define VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT    0x200 // §HOTSPOT-FLAT：不是 VR 的場次也收 C2S HOTSPOT_INFO（host 的無線網卡照樣連上頭盔熱點）
 #define VIPLE_VR_SERVER_CAP_MIC             0x100 // §VR-MIC：收頭盔麥克風（C2S MIC），寫進 host 的虛擬麥克風（<VipleStreamVR> 是十進位整數，放得下）
 
 // /launch 的 vrCaps（十六進位）
@@ -135,7 +137,9 @@ extern "C" {
 #define VIPLE_VR_ENET_THROTTLE_DECELERATION  0
 
 // tracking 送出頻率 = 顯示 Hz × 這個倍數。2026-10-29 §VR-TRACK-RATE：2 → 4（144 Hz 時 576 Hz）。相位鎖定下仍有約 14% 的格
-// 用到前一筆樣本（多老一個取樣間隔），間隔減半讓那些格少老一半；上行約 0.42 → 0.84 Mbps。server 不依賴這個倍數
+// 用到前一筆樣本（多老一個取樣間隔），間隔減半讓那些格少老一半。server 不依賴這個倍數。
+// §REVIEW-1118：232 B × 576 Hz 的 payload 約 1.07 Mbps，加上 ENet／V2／ptype／UDP／IP 標頭約 1.24 Mbps、576 包／秒。
+// 舊的「0.42 → 0.84 Mbps」是用大約 182 B 估的，少算了加倍的相位樣本。這裡只更正數字，送出頻率與封包內容都不動。
 #define VIPLE_VR_TRACKING_RATE_MUL  4
 
 // ── 0x5506 TRACKING（232 B）────────────────────────────────────────

@@ -1589,9 +1589,10 @@ void D3D11VARenderer::renderOverlay(Overlay::OverlayType type)
         return;
     }
 
-    // If there was a texture, there must also be a vertex buffer and SRV
-    SDL_assert(overlayVertexBuffer);
-    SDL_assert(overlayTextureResourceView);
+    // §REVIEW-1118：頂點緩衝或 SRV 沒建起來就不要畫。release 版的 SDL_assert 擋不住，會把空指標送進 IASetVertexBuffers
+    if (!overlayVertexBuffer || !overlayTextureResourceView) {
+        return;
+    }
 
     // Bind vertex buffer
     UINT stride = sizeof(VERTEX);
@@ -2020,33 +2021,34 @@ bool D3D11VARenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO stateInfo)
     }
 
     if (stateInfo->stateChangeFlags & WINDOW_STATE_CHANGE_SIZE) {
+        // §REVIEW-1118：0×0（最小化殘留的尺寸）不能拿去 ResizeBuffers，寫進顯示尺寸後繪製會 0 去除出 NaN
+        if (stateInfo->width <= 0 || stateInfo->height <= 0) {
+            stateInfo->stateChangeFlags &= ~WINDOW_STATE_CHANGE_SIZE;
+            return stateInfo->stateChangeFlags == 0;
+        }
+
         // Resize our swapchain and reconstruct size-dependent resources
 
-        DXGI_SWAP_CHAIN_DESC1 swapchainDesc;
-        m_SwapChain->GetDesc1(&swapchainDesc);
+        // §REVIEW-1118：GetDesc1 失敗時結構沒被填，Flags 是堆疊上的殘值，不能拿去 ResizeBuffers
+        DXGI_SWAP_CHAIN_DESC1 swapchainDesc = {};
+        if (FAILED(m_SwapChain->GetDesc1(&swapchainDesc))) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "IDXGISwapChain::GetDesc1() failed");
+            return false;
+        }
 
         // Lock the context to avoid concurrent rendering
         SDL_LockMutex(m_RenderLock);  // §REVIEW-1111：見 renderFrame
         lockContext(this);
 
+        // §REVIEW-1118：ResizeBuffers 或 RTV 重建失敗時尺寸要回到舊值，避免繪製用到半套的新尺寸
+        const int oldDisplayWidth = m_DisplayWidth;
+        const int oldDisplayHeight = m_DisplayHeight;
         m_DisplayWidth = stateInfo->width;
         m_DisplayHeight = stateInfo->height;
 
         // Release the video vertex buffer so we will upload a new one after resize
         m_VideoVertexBuffer.Reset();
-
-        // Create new vertex buffers for active overlays
-        SDL_AtomicLock(&m_OverlayLock);
-        for (size_t i = 0; i < m_OverlayVertexBuffers.size(); i++) {
-            if (!m_OverlayTextures[i]) {
-                continue;
-            }
-
-            D3D11_TEXTURE2D_DESC textureDesc;
-            m_OverlayTextures[i]->GetDesc(&textureDesc);
-            createOverlayVertexBuffer((Overlay::OverlayType)i, textureDesc.Width, textureDesc.Height, m_OverlayVertexBuffers[i]);
-        }
-        SDL_AtomicUnlock(&m_OverlayLock);
 
         // We must release all references to the back buffer
         m_RenderTargetView.Reset();
@@ -2057,15 +2059,36 @@ bool D3D11VARenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO stateInfo)
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "IDXGISwapChain::ResizeBuffers() failed: %x",
                          hr);
+            m_DisplayWidth = oldDisplayWidth;
+            m_DisplayHeight = oldDisplayHeight;
             unlockContext(this); SDL_UnlockMutex(m_RenderLock);
             return false;
         }
 
         // Reset swapchain-dependent resources (RTV, viewport, etc)
         if (!setupSwapchainDependentResources()) {
+            m_DisplayWidth = oldDisplayWidth;
+            m_DisplayHeight = oldDisplayHeight;
             unlockContext(this); SDL_UnlockMutex(m_RenderLock);
             return false;
         }
+
+        // §REVIEW-1118：尺寸真的改成之後才換浮層頂點緩衝。直接把成員的位址傳進去時，ComPtr 會先放掉舊緩衝
+        SDL_AtomicLock(&m_OverlayLock);
+        for (size_t i = 0; i < m_OverlayVertexBuffers.size(); i++) {
+            if (!m_OverlayTextures[i]) {
+                continue;
+            }
+
+            D3D11_TEXTURE2D_DESC textureDesc;
+            m_OverlayTextures[i]->GetDesc(&textureDesc);
+            ComPtr<ID3D11Buffer> newVertexBuffer;
+            if (!createOverlayVertexBuffer((Overlay::OverlayType)i, textureDesc.Width, textureDesc.Height, newVertexBuffer)) {
+                continue;
+            }
+            m_OverlayVertexBuffers[i] = std::move(newVertexBuffer);
+        }
+        SDL_AtomicUnlock(&m_OverlayLock);
 
         unlockContext(this); SDL_UnlockMutex(m_RenderLock);
 
@@ -2106,7 +2129,8 @@ bool D3D11VARenderer::checkDecoderSupport(IDXGIAdapter* adapter)
     }
 
     // Check if the format is supported by this decoder
-    BOOL supported;
+    // §REVIEW-1118：CheckVideoDecoderFormat 失敗時下面的 log 仍會印 supported，不能是未初始化的殘值
+    BOOL supported = FALSE;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-DIAG] D3D11VA: Checking codec support for videoFormat=0x%x on GPU %S (VendorId=0x%x DeviceId=0x%x) using %s device",
@@ -2446,9 +2470,10 @@ bool D3D11VARenderer::initFRUC()
         uint32_t dmlH = fruH;
         uint32_t dmlCapW = dmlW, dmlCapH = dmlH;
         {
-            char buf[16] = {}; size_t sz = 0;
-            getenv_s(&sz, buf, sizeof(buf), "VIPLE_DML_RES");
-            if (sz > 0) {
+            // §REVIEW-1118：getenv_s 的 16 bytes 不夠時會觸發 CRT invalid parameter，行程直接結束。qgetenv 沒有這個上限
+            const QByteArray resEnv = qgetenv("VIPLE_DML_RES");
+            if (!resEnv.isEmpty()) {
+                const char* buf = resEnv.constData();
                 if      (_stricmp(buf, "540")    == 0) { dmlCapW =  960; dmlCapH =  540; }
                 else if (_stricmp(buf, "720")    == 0) { dmlCapW = 1280; dmlCapH =  720; }
                 else if (_stricmp(buf, "1080")   == 0) { dmlCapW = 1920; dmlCapH = 1080; }
@@ -2468,9 +2493,9 @@ bool D3D11VARenderer::initFRUC()
         struct ModelEntry { const char* filename; const char* tag; };
         std::vector<ModelEntry> modelCascade;
         {
-            char buf[16] = {}; size_t sz = 0;
-            getenv_s(&sz, buf, sizeof(buf), "VIPLE_FRUC_MODEL");
-            std::string mode = (sz > 0) ? std::string(buf) : "auto";
+            // §REVIEW-1118：同上，VIPLE_FRUC_MODEL 不要用固定 16 bytes 的 getenv_s
+            const QByteArray modelEnv = qgetenv("VIPLE_FRUC_MODEL");
+            std::string mode = modelEnv.isEmpty() ? std::string("auto") : std::string(modelEnv.constData());
             // Lowercase
             for (auto& c : mode) c = (char)tolower((unsigned char)c);
             if      (mode == "fp16")    modelCascade = {{ "fruc_fp16.onnx",       "fp16" }};

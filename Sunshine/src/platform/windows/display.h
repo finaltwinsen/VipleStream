@@ -15,6 +15,7 @@
 #include <winrt/windows.graphics.capture.h>
 
 // standard includes
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -173,6 +174,9 @@ namespace platf::dxgi {
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override;
 
+    // §REVIEW-1118B：編碼執行緒通知新的整數目標幀率。只寫 atomic，不碰節拍群組（那是擷取執行緒的）。
+    void set_client_frame_rate(int fps) override;
+
     factory1_t factory;
     adapter_t adapter;
     output_t output;
@@ -188,6 +192,11 @@ namespace platf::dxgi {
 
     int client_frame_rate {};
     DXGI_RATIONAL client_frame_rate_strict {};
+
+    // §REVIEW-1118B：編碼執行緒經 set_client_frame_rate 寫入的目標整數幀率。
+    // 0 表示這場沒有中途改幀率，擷取節拍繼續用上面的 client_frame_rate。
+    // 擷取執行緒每拍讀一次；沒變只比較這個整數，不拿鎖。
+    std::atomic<int> client_frame_rate_live {0};
 
     DXGI_FORMAT capture_format {DXGI_FORMAT_UNKNOWN};
     D3D_FEATURE_LEVEL feature_level {};

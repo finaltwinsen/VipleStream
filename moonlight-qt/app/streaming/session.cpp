@@ -14,6 +14,7 @@
 #include "backend/richpresencemanager.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
 #include "backend/sfenv.h"      // §SF-ENV（M2a）
+#include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
@@ -270,6 +271,7 @@ static int inputStallWatchdogProc(void*)
 
 #include <openssl/rand.h>
 #include <algorithm>
+#include <QNetworkInterface>  // §FLAT-ML
 #include <cmath>
 
 #include <QtEndian>
@@ -2142,6 +2144,18 @@ bool Session::validateLaunch(SDL_Window* testWindow)
             }
             else if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_PYROWAVE) {
                 m_SupportedVideoFormats.removeByMask(~VIDEO_FORMAT_MASK_PYROWAVE);
+
+                // §PYROWAVE-HINT（2026-11-18）：PyroWave 在一般碼率下整個畫面都是糊的（11-18 遠端 1080p60＠20 Mbps
+                // 實際遇到），串流前先講。VR 場次的碼率另有 PyroWave 預設，不在這裡管
+                const int recommended = StreamingPreferences::getPyroWaveRecommendedBitrate(m_StreamConfig.width, m_StreamConfig.height,
+                                                                                            m_StreamConfig.fps);
+                if (!m_VrRequested && m_StreamConfig.bitrate < recommended) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-PYROWAVE] bitrate %d kbps is below the %d kbps PyroWave needs for %dx%d@%d - the picture will be blurry",
+                                m_StreamConfig.bitrate, recommended, m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps);
+                    emitLaunchWarning(tr("PyroWave needs a much higher bitrate than other codecs and is meant for a wired LAN. At %1 Mbps the picture will be blurry: raise the bitrate to at least %2 Mbps, or set the video codec to Automatic.")
+                                          .arg(m_StreamConfig.bitrate / 1000.0).arg(recommended / 1000.0));
+                }
             }
         }
     }
@@ -3785,6 +3799,66 @@ bool Session::startConnectionAsync()
         try {
             NvHTTP http(m_Computer);
             QString launchResponse;
+            // §FLAT-ML（2026-11-18）：平面場次、host 在區網（私有 IPv4）、host 支援時要求多連線
+            bool flatMlAsked = false;
+            m_StreamConfig.flatMultilink = 0;
+            if (!m_VrRequested && (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_FLAT_ML)) {
+                bool isV4 = false;
+                const quint32 a4 = QHostAddress(m_Computer->activeAddress.address()).toIPv4Address(&isV4);
+                flatMlAsked = isV4 && ((a4 >> 24) == 10 || (a4 >> 20) == 0xAC1 || (a4 >> 16) == 0xC0A8);
+                // 這台裝置要有第二條路可用才要求：兩張以上的網卡和 host 的某個位址同網段（桌機的有線＋Wi-Fi），
+                // 或者是有串流轉接器熱點的頭盔（熱點在場次開始後才出現）。只有一條路時維持原本的傳輸（例如使用者開著的 MP-QUIC）
+                if (flatMlAsked) {
+                    QVector<QHostAddress> hostAddrs;
+                    hostAddrs.append(QHostAddress(m_Computer->activeAddress.address()));
+                    for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
+                        const QHostAddress ha(iface.address);
+                        if (!ha.isNull() && ha.protocol() == QAbstractSocket::IPv4Protocol) {
+                            hostAddrs.append(ha);
+                        }
+                    }
+                    int paired = 0;
+                    const auto netIfs = QNetworkInterface::allInterfaces();
+                    for (const QNetworkInterface& nif : netIfs) {
+                        if (!(nif.flags() & QNetworkInterface::IsUp) || !(nif.flags() & QNetworkInterface::IsRunning) ||
+                                (nif.flags() & QNetworkInterface::IsLoopBack)) {
+                            continue;
+                        }
+                        bool hit = false;
+                        const auto entries = nif.addressEntries();
+                        for (const QNetworkAddressEntry& e : entries) {
+                            if (e.ip().protocol() != QAbstractSocket::IPv4Protocol || e.prefixLength() <= 0 || e.prefixLength() >= 32) {
+                                continue;
+                            }
+                            for (const QHostAddress& ha : std::as_const(hostAddrs)) {
+                                if (ha.isInSubnet(e.ip(), e.prefixLength())) {
+                                    hit = true;
+                                    break;
+                                }
+                            }
+                        }
+                        paired += hit ? 1 : 0;
+                    }
+                    std::string hsSsid, hsKey;
+                    const bool frameHotspot = readVrHotspotCreds(&hsSsid, &hsKey);
+                    std::fill(hsSsid.begin(), hsSsid.end(), '\0');
+                    std::fill(hsKey.begin(), hsKey.end(), '\0');
+                    if (paired < 2 && !frameHotspot) {
+                        flatMlAsked = false;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VR-LINK] flat (2D) session: only %d network interface(s) can reach the host - multi-link not requested",
+                                    paired);
+                    }
+                    // 經 VPN 連回來（別的 VPN 剛好用私有網段，例如自架 WireGuard 的 10.x）不要求：那種場次只有一條連線，
+                    // 多連線沒有好處、還會讓它用不了 QUIC。頭盔有熱點憑證時上面的網卡檢查擋不住這種情況。
+                    // m_ViaVpn 在使用者自訂封包大小時不會被設定，所以這裡自己問一次（會做一次 TCP 連線，host 在線上時很快）
+                    else if (m_ViaVpn || m_Computer->getActiveAddressReachability() == NvComputer::RI_VPN) {
+                        flatMlAsked = false;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VR-LINK] flat (2D) session: the host is reached through a VPN - multi-link not requested");
+                    }
+                }
+            }
             // [VIPLE-STARTUP]：/launch（或 /resume）送出與回來的時刻；VR 的回應要等 host 的編排器，這一段就是 host 那邊花的
             const char* const launchVerb = m_Computer->currentGameId != 0 ? "resume" : "launch";
             const long long launchT0Ms = startupNowMs();
@@ -3798,8 +3872,15 @@ bool Session::startConnectionAsync()
                           !m_Preferences->multiController,
                           rtspSessionUrl,
                           m_Takeover,
-                          m_VrRequested ? m_VrLaunch.toQuery() : QString(),
+                          m_VrRequested ? m_VrLaunch.toQuery() : (flatMlAsked ? QStringLiteral("&flatMl=1") : QString()),
                           &launchResponse);
+            // §FLAT-ML：送了 flatMl=1 而且 server 回了 <VipleStreamFlatMl>1 才啟用（舊 server 不會回，維持現狀）
+            if (flatMlAsked && NvHTTP::getXmlString(launchResponse, "VipleStreamFlatMl") == QLatin1String("1")) {
+                m_StreamConfig.flatMultilink = 1;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-LINK] flat (2D) session: the server accepted multi-link - video and audio go over every "
+                            "usable network interface (MP-QUIC stays off for this session)");
+            }
             {
                 const long long nowMs = startupNowMs();
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld %s reply took=%lld ms",
@@ -4263,7 +4344,7 @@ bool Session::startConnectionAsync()
     }
     // §VR-MULTILINK：多連線要知道 server 的每個位址，才能替 client 的每張網卡找到同子網路的那一個。
     // 沿用 MP-QUIC 的 alt peer 清單欄位（QUIC 本身在 VR session 維持關閉）。
-    if (m_VrRequested && (m_StreamConfig.vrFlags & VIPLE_VR_SF_MULTILINK)) {
+    if ((m_VrRequested && (m_StreamConfig.vrFlags & VIPLE_VR_SF_MULTILINK)) || m_StreamConfig.flatMultilink) {
         const QString activeAddr = m_Computer->activeAddress.address();
         m_StreamConfig.quicAltPeerCount = 0;
         auto addPeer = [&](const QString& ip) {
@@ -4297,7 +4378,7 @@ bool Session::startConnectionAsync()
                     (m_StreamConfig.vrFlags & VIPLE_VR_SF_MULTILINK_SELFTEST) ? " [selftest]" : "");
     }
     // Wire MP-QUIC preferences into stream config for moonlight-common-c
-    if (m_Preferences->enableMpQuic && m_Computer->isMpQuicCapable && !m_VrRequested) {
+    if (m_Preferences->enableMpQuic && m_Computer->isMpQuicCapable && !m_VrRequested && !m_StreamConfig.flatMultilink) {
         m_StreamConfig.useQuicTransport = 1;
         m_StreamConfig.quicPort = 48010;
         m_StreamConfig.quicScheduler = m_Preferences->mpQuicScheduler;
@@ -4333,6 +4414,13 @@ bool Session::startConnectionAsync()
             // 第一優先：伺服器廣告的介面（/serverinfo 的 NetworkInterface）
             for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
                 tryAdd(iface.address);
+            }
+            // §HOTSPOT-FLAT：頭盔熱點上已經連著的裝置（App 啟動時先開的熱點，host 的無線網卡多半已經連上）。
+            // /serverinfo 的快取可能還是它連上之前的，這裡直接補。不是 host 的裝置只會多一次沒有回應的探測
+            if (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT) {
+                for (const std::string& ip : FrameHotspot::peerAddresses()) {
+                    tryAdd(QString::fromStdString(ip));
+                }
             }
 
             // 第二優先：客戶端探測到的位址（向後相容無 §MP-ADV 的舊版伺服器）
@@ -4453,7 +4541,11 @@ bool Session::startConnectionAsync()
         m_FrameHotspot.pauseIfUnused(viaVpn);
         // §FRAME-HOTSPOT-AUTO：host 在區網裡、熱點關著：自動開起來。等不到這台 host 就關掉；連著玩下一個遊戲時留著，
         // App 結束（或當掉）、換到另一台 host 等不到時才關
-        if (!viaVpn && (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED)) {
+        // §HOTSPOT-FLAT（2026-11-18）：平面場次也開——host 收得了熱點資訊、而且這一場有 MP-QUIC（第二條路徑由它用）
+        m_HotspotFlat = !viaVpn && !(m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) &&
+                        (m_StreamConfig.useQuicTransport || m_StreamConfig.flatMultilink) &&
+                        (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT);
+        if (!viaVpn && ((m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) || m_HotspotFlat)) {
             std::string ssid, key;
             if (readVrHotspotCreds(&ssid, &key)) {
                 m_FrameHotspot.openForLan(ssid, key, m_Computer->uuid.toStdString());
@@ -4482,6 +4574,9 @@ bool Session::startConnectionAsync()
         });
     }
 
+    if (m_HotspotFlat) {
+        checkAndSendVrHotspotInfo();  // §HOTSPOT-FLAT
+    }
     if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
         checkAndSendVrHotspotInfo();
         // §VR-MIC：頭盔麥克風 → host 的 Steam Streaming Microphone
@@ -4582,6 +4677,12 @@ bool Session::startConnectionAsync()
         m_VrTracking.setSyntheticToss(m_Preferences->vrSyntheticToss);
         m_VrTracking.setSyntheticMenuAt(m_Preferences->vrSyntheticMenuAtSec);
         m_VrTracking.setSyntheticPadTest(m_Preferences->vrSyntheticPadTestSec);
+        m_VrTracking.setPuppetPath(m_Preferences->vrPuppetFile.toStdString());
+        if (!m_Preferences->vrPuppetFile.isEmpty()) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-INPUT] dev: --vr-puppet - poses and buttons follow %s (only with --vr-emulate)",
+                        qUtf8Printable(m_Preferences->vrPuppetFile));
+        }
         if (m_Preferences->vrSyntheticPadTestSec > 0.0) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VR-PADMODE] dev: --vr-synthetic-pad-test - the Xbox controller mode button sequence starts %.1f s after tracking "
@@ -5121,12 +5222,18 @@ void Session::exec()
             }
         }
 #endif
-        if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
+        if ((m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) || m_HotspotFlat) {
             static Uint32 lastHotspotPollTime = 0;
             if (SDL_TICKS_PASSED(SDL_GetTicks(), lastHotspotPollTime + 5000)) {
                 lastHotspotPollTime = SDL_GetTicks();
                 checkAndSendVrHotspotInfo();
                 m_FrameHotspot.tick();  // §FRAME-HOTSPOT-AUTO
+                if (m_HotspotFlat) {
+                    // §HOTSPOT-FLAT：host 的無線網卡這時才連上熱點：把它的位址交給 MP-QUIC（已經有就不動）
+                    for (const std::string& ip : FrameHotspot::peerAddresses()) {
+                        LiAddQuicAltPeer(ip.c_str());
+                    }
+                }
             }
         }
         if (!audioSilenceChecked && SDL_TICKS_PASSED(SDL_GetTicks(), audioSilenceCheckTime)) {
@@ -5823,8 +5930,24 @@ bool Session::readVrHotspotCreds(std::string* ssid, std::string* key)
 
 void Session::checkAndSendVrHotspotInfo()
 {
-    // §VR-HOTSPOT-AUTO：只在 VR session 生效
-    if (!(m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED)) {
+    // §REVIEW-1118：QByteArray 解構不會把熱點金鑰清成 0，含提前 return 都要抹掉
+    struct ZQa {
+        QByteArray b;
+        ~ZQa()
+        {
+            if (b.size() > 0) {
+                // constData() 不會再配置；data() 在解構裡 detach 可能丟例外
+#if defined(_WIN32)
+                SecureZeroMemory(const_cast<char*>(b.constData()), static_cast<size_t>(b.size()));
+#else
+                explicit_bzero(const_cast<char*>(b.constData()), static_cast<size_t>(b.size()));
+#endif
+            }
+        }
+    };
+
+    // §VR-HOTSPOT-AUTO：VR session，或 §HOTSPOT-FLAT 成立的平面場次
+    if (!(m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) && !m_HotspotFlat) {
         return;
     }
 
@@ -5843,14 +5966,15 @@ void Session::checkAndSendVrHotspotInfo()
         return;
     }
 
-    QByteArray rawJson = file.readAll();
+    ZQa rawJson;
+    rawJson.b = file.readAll();
     file.close();
-    if (rawJson.isEmpty()) {
+    if (rawJson.b.isEmpty()) {
         return;
     }
 
     QJsonParseError parseErr;
-    QJsonDocument doc = QJsonDocument::fromJson(rawJson, &parseErr);
+    QJsonDocument doc = QJsonDocument::fromJson(rawJson.b, &parseErr);
     if (doc.isNull() || !doc.isObject()) {
         return;
     }
@@ -5862,10 +5986,12 @@ void Session::checkAndSendVrHotspotInfo()
     int channel = obj.value(QStringLiteral("channel")).toInt(0);
     int authType = obj.value(QStringLiteral("auth_type")).toInt(VIPLE_VR_HOTSPOT_AUTH_WPA2_PSK);
 
-    QByteArray ssidBytes = ssid.toUtf8();
-    QByteArray keyBytes = key.toUtf8();
+    ZQa ssidBytes;
+    ssidBytes.b = ssid.toUtf8();
+    ZQa keyBytes;
+    keyBytes.b = key.toUtf8();
 
-    if (ssidBytes.isEmpty() || ssidBytes.size() > 32 || keyBytes.isEmpty() || keyBytes.size() > 64) {
+    if (ssidBytes.b.isEmpty() || ssidBytes.b.size() > 32 || keyBytes.b.isEmpty() || keyBytes.b.size() > 64) {
         return;
     }
 
@@ -5882,18 +6008,21 @@ void Session::checkAndSendVrHotspotInfo()
         info.band = VIPLE_VR_HOTSPOT_BAND_6GHZ;
     }
     info.channel = static_cast<uint8_t>(channel);
-    info.ssidLen = static_cast<uint8_t>(ssidBytes.size());
-    info.keyLen = static_cast<uint8_t>(keyBytes.size());
-    std::memcpy(info.ssid, ssidBytes.constData(), info.ssidLen);
-    std::memcpy(info.key, keyBytes.constData(), info.keyLen);
+    info.ssidLen = static_cast<uint8_t>(ssidBytes.b.size());
+    info.keyLen = static_cast<uint8_t>(keyBytes.b.size());
+    std::memcpy(info.ssid, ssidBytes.b.constData(), info.ssidLen);
+    std::memcpy(info.key, keyBytes.b.constData(), info.keyLen);
 
     uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_HOTSPOT_INFO)];
     tlv[0] = VIPLE_VR_C2S_HOTSPOT_INFO;
     tlv[1] = static_cast<uint8_t>(sizeof(info));
     std::memcpy(tlv + 2, &info, sizeof(info));
 
-    QByteArray currentPayload(reinterpret_cast<const char*>(tlv), sizeof(tlv));
-    if (currentPayload == m_LastVrHotspotPayload) {
+    // §REVIEW-1118：比對用的快取只留摘要，熱點金鑰不要在 Session 裡留到解構
+    ZQa currentPayload;
+    currentPayload.b = QByteArray(reinterpret_cast<const char*>(tlv), sizeof(tlv));
+    const QByteArray payloadDigest = QCryptographicHash::hash(currentPayload.b, QCryptographicHash::Sha256);
+    if (payloadDigest == m_LastVrHotspotPayload) {
         // 內容未變更，不重複發送；立即抹除暫存記憶體
 #if defined(_WIN32)
         SecureZeroMemory(&info, sizeof(info));
@@ -5907,13 +6036,13 @@ void Session::checkAndSendVrHotspotInfo()
 
     // 發送 reliable TLV
     if (LiSendVrMessage(tlv, sizeof(tlv), true) == 0) {
-        m_LastVrHotspotPayload = currentPayload;
+        m_LastVrHotspotPayload = payloadDigest;
         // 安全鐵律：log 只能印 SSID 的前 3 個字元＋***、金鑰長度
         QString prefix = ssid.left(3);
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-HOTSPOT] sent hotspot info ssid=%s*** keylen=%d band=6GHz",
                     prefix.toUtf8().constData(),
-                    static_cast<int>(keyBytes.size()));
+                    static_cast<int>(keyBytes.b.size()));
     }
 
     // 抹除記憶體中的機密金鑰
