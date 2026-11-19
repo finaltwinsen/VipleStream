@@ -34,6 +34,13 @@
 #include <QStandardPaths>
 #include <QString>
 
+#ifdef Q_OS_UNIX
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include <SDL.h>
 
 #include <cstdio>
@@ -88,11 +95,19 @@ public:
         }
         if (m_StartMs == 0) {
             m_StartMs = nowMs;
+            // §REVIEW-1119：下次輪詢的初值是 0。SDL_GetTicks 超過約 24.8 天（高半段）時，
+            // SDL_TICKS_PASSED(now, 0) 為假，暖身會一直進不去。
+            m_NextPollMs = nowMs;
         }
         if (!SDL_TICKS_PASSED(nowMs, m_NextPollMs)) {
             return;
         }
         m_NextPollMs = nowMs + 250;
+        // §REVIEW-1119：暖身這 40 秒還沒有人讀狀態檔（keepAlive 在還沒切到轉接器時也直接返回）。
+        // 這是 SDL 主迴圈，每 250 ms 同步開檔會卡在遊戲載入最容易抖的那一段。
+        if (m_State == State::Warmup && !SDL_TICKS_PASSED(nowMs, m_StartMs + kWarmupMs)) {
+            return;
+        }
         const Status st = readStatus();
         keepAlive(nowMs);
 
@@ -162,6 +177,8 @@ public:
             m_Want = Want::AdapterOnly;
             notifySwitch(1, kPauseHoldMs);
             writeRequest(nowMs, true);
+            // §REVIEW-1119：寫完就把下一次心跳推到 1 秒後。初值 0 會讓下一次輪詢立刻再寫一次。
+            m_NextBeatMs = nowMs + 1000;
             m_StateMs = nowMs;
             m_State = State::ApplyC;
             return;
@@ -248,7 +265,8 @@ private:
             return;
         }
         m_NextBeatMs = nowMs + 1000;
-        writeRequest(nowMs, true);
+        // §REVIEW-1119：先讀狀態再寫心跳。交還的那一次若先寫 adapter-only，helper 可能在
+        // 兩次寫入之間讀到，再暫停一次家用 Wi-Fi（熱點再掉一輪，而且這次沒先通知 host）。
         const Status st = readStatus();
         if (st.fresh && !st.apStation && SDL_TICKS_PASSED(nowMs, m_AppliedMs + 10000)) {
             log("the streaming adapter link is gone; reconnecting home Wi-Fi");
@@ -266,11 +284,14 @@ private:
         else if (st.fresh && m_SeenApplied) {
             log("the helper handed home Wi-Fi back (time limit, restart or failure); staying on both links for this session");
             backToNormal(nowMs);
+            return;
         }
         else if (st.fresh && !st.err.isEmpty() && SDL_TICKS_PASSED(nowMs, m_AppliedMs + 15000)) {
             log("the helper could not pause home Wi-Fi; staying on both links for this session");
             backToNormal(nowMs);
+            return;
         }
+        writeRequest(nowMs, true);
     }
 
     void applyAdapterOnly(uint32_t nowMs, bool announce)
@@ -280,6 +301,9 @@ private:
         m_SeenApplied = false;
         notifySwitch(1, kPauseHoldMs);
         writeRequest(nowMs, true);
+        // §REVIEW-1119：這裡沒記下一次心跳。呼叫端隨即把狀態改成 Done，下一圈主迴圈會立刻再讀再寫一次。
+        // 初值 0 在 SDL_GetTicks 過半時，心跳比較也會一直失敗，服務 5 秒後自己交還家用 Wi-Fi。
+        m_NextBeatMs = nowMs + 1000;
         if (announce) {
             say(QCoreApplication::translate("VrNetMode", "Home Wi-Fi paused during VR for a smoother stream - it reconnects when you stop streaming"));
         }
@@ -326,9 +350,34 @@ private:
         // 目錄只建一次；QSaveFile 的 commit 會 fsync（快閃上常見 1～10 ms），心跳不需要落盤，
         // 改成寫暫存檔再 rename（一樣是整份換掉，helper 不會讀到寫一半的）。
         if (!m_DirReady) {
+#if defined(Q_OS_UNIX) && defined(O_NOFOLLOW) && defined(O_DIRECTORY)
+            // §REVIEW-1119：::chmod(路徑) 會跟著符號連結，把別的目錄改成 0700，失敗也照樣寫。
+            // 不存在才 mkpath；open 對連結回 ELOOP 就不建立。fd 確認是自己的目錄再 fchmod。
+            const QByteArray dirPath = QFile::encodeName(m_Dir);
+            const int dflags = O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW;
+            int dfd = ::open(dirPath.constData(), dflags);
+            if (dfd < 0) {
+                if (errno != ENOENT || !QDir().mkpath(m_Dir)) {
+                    return;
+                }
+                dfd = ::open(dirPath.constData(), dflags);
+                if (dfd < 0) {
+                    return;
+                }
+            }
+            struct stat dst;
+            const bool ok = ::fstat(dfd, &dst) == 0 && S_ISDIR(dst.st_mode)
+                && dst.st_uid == ::geteuid()
+                && ((dst.st_mode & 0777) == 0700 || ::fchmod(dfd, 0700) == 0);
+            ::close(dfd);
+            if (!ok) {
+                return;
+            }
+#else
             if (!QDir().mkpath(m_Dir)) {
                 return;
             }
+#endif
             m_DirReady = true;
         }
         QJsonObject o;
@@ -336,14 +385,45 @@ private:
         o.insert(QStringLiteral("t"), static_cast<qint64>(QDateTime::currentSecsSinceEpoch()));
         const QString path = QDir(m_Dir).filePath(QStringLiteral("netmode-request.json"));
 #ifdef Q_OS_UNIX
-        const QString tmp = path + QStringLiteral(".tmp");
-        QFile f(tmp);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
-            f.close();
-            if (::rename(QFile::encodeName(tmp).constData(), QFile::encodeName(path).constData()) != 0) {
-                QFile::remove(tmp);
+        // §REVIEW-1119：固定的 .tmp 若先被做成符號連結，Truncate 會跟著把目標截斷。
+        // 寫入失敗仍 rename，磁碟滿時會把有效的請求檔蓋成空檔，helper 5 秒後交還
+        // 家用 Wi-Fi，而且這次沒先通知 host 暫停降碼。每次用新名字、O_EXCL，不跟連結，寫完才換名。
+        const QByteArray payload = QJsonDocument(o).toJson(QJsonDocument::Compact);
+        int flags = O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC;
+#ifdef O_NOFOLLOW
+        flags |= O_NOFOLLOW;
+#endif
+        static uint32_t seq = 0;
+        const QByteArray tmpName = QFile::encodeName(
+            path + QStringLiteral(".%1-%2.tmp").arg(++seq).arg(QDateTime::currentMSecsSinceEpoch()));
+        const int fd = ::open(tmpName.constData(), flags, 0600);
+        if (fd < 0) {
+            return;
+        }
+        const char* wp = payload.constData();
+        qint64 left = payload.size();
+        bool ok = left > 0;
+        while (left > 0) {
+            const ssize_t n = ::write(fd, wp, static_cast<size_t>(left));
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                ok = false;
+                break;
             }
+            if (n == 0) {
+                ok = false;
+                break;
+            }
+            wp += n;
+            left -= n;
+        }
+        if (::close(fd) != 0) {
+            ok = false;
+        }
+        if (!ok || ::rename(tmpName.constData(), QFile::encodeName(path).constData()) != 0) {
+            ::unlink(tmpName.constData());
         }
 #else
         QSaveFile f(path);
@@ -357,11 +437,58 @@ private:
     Status readStatus() const
     {
         Status s;
-        QFile f(QDir(m_Dir).filePath(QStringLiteral("netmode-status.json")));
+        const QString path = QDir(m_Dir).filePath(QStringLiteral("netmode-status.json"));
+#ifdef Q_OS_UNIX
+        // §REVIEW-1119：SDL 主迴圈上讀。FIFO 的 open 會堵住，超大檔的 readAll 會在主迴圈上配置。
+        // 不跟符號連結；不是一般檔、或超過 8 KB（正常約一百多位元組）就當沒有狀態。
+        int rflags = O_RDONLY | O_CLOEXEC | O_NONBLOCK;
+#ifdef O_NOFOLLOW
+        rflags |= O_NOFOLLOW;
+#endif
+        const int fd = ::open(QFile::encodeName(path).constData(), rflags);
+        if (fd < 0) {
+            return s;
+        }
+        struct stat stbuf;
+        if (::fstat(fd, &stbuf) != 0 || !S_ISREG(stbuf.st_mode) || stbuf.st_size <= 0 || stbuf.st_size > 8192) {
+            ::close(fd);
+            return s;
+        }
+        QByteArray raw(static_cast<int>(stbuf.st_size), '\0');
+        char* rp = raw.data();
+        size_t got = 0;
+        const size_t want = static_cast<size_t>(stbuf.st_size);
+        while (got < want) {
+            const ssize_t n = ::read(fd, rp + got, want - got);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            if (n == 0) {
+                break;
+            }
+            got += static_cast<size_t>(n);
+        }
+        ::close(fd);
+        // §REVIEW-1119：單次 read 遇 EINTR 或短讀會當成沒有服務。暖身結束只看這一次，
+        // 整場會停用；keepAlive 也會沒看到交還、又寫一次 adapter-only。這裡讀滿為止。
+        // 提前 EOF（比 fstat 短）仍放棄。helper 寫暫存檔再改名，不會截斷同一個 inode。
+        if (got != want) {
+            return s;
+        }
+#else
+        QFile f(path);
         if (!f.open(QIODevice::ReadOnly)) {
             return s;
         }
-        const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+        const QByteArray raw = f.read(8193);
+        if (raw.size() > 8192) {
+            return s;
+        }
+#endif
+        const QJsonObject o = QJsonDocument::fromJson(raw).object();
         const qint64 t = o.value(QStringLiteral("t")).toVariant().toLongLong();
         s.fresh = t > 0 && qAbs(QDateTime::currentSecsSinceEpoch() - t) <= 5;  // REVIEW-1111 (round 2): a timestamp in the future is not "fresh" either
         s.apStation = o.value(QStringLiteral("ap_station")).toBool();

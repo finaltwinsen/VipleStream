@@ -167,9 +167,12 @@ namespace xrrate {
                 if (div == 1) {
                     m_DownRefused = true;
                 }
+                m_PendingCause = Reason::None;
                 return;
             }
             setDiv(div, nowUs);
+            // §REVIEW-1119：原因只給這一次 setDiv 用。留著的話，下一次不是試升失敗的降速也會把退避再加倍。
+            m_PendingCause = Reason::None;
         }
 
         int div() const { return m_Div; }
@@ -248,7 +251,9 @@ namespace xrrate {
             m_WinStartUs = nowUs;
             if (div == 2 && before == 1) {
                 ++m_Downs;
-                if (m_ProbeUntilUs != 0 && nowUs < m_ProbeUntilUs) {
+                // §REVIEW-1119：回覆的往返若跨過試升截止，單看 nowUs 已經不在試升期，退避不會加倍，60 秒後又試一次。
+                // 送出當下的原因還在 m_PendingCause。
+                if (m_PendingCause == Reason::ProbeFail || (m_ProbeUntilUs != 0 && nowUs < m_ProbeUntilUs)) {
                     ++m_ProbeFails;
                     m_UpDwellUs = (std::min)(m_UpDwellUs * 2, kUpDwellMaxUs);
                 }
@@ -267,7 +272,23 @@ namespace xrrate {
 
         void rollWindow(uint64_t nowUs)
         {
-            const bool settling = nowUs < m_SettleUntilUs;
+            // §REVIEW-1119：新影像還沒到就切視窗的話，進行中的重複不會進 closeRun。整段斷流的視窗
+            // shortRep 與 stalls 都是 0，半速會把它當成乾淨而升回全速。長過補包上限才在這裡算斷流並歸零；
+            // 還可能是補包（7～14 格）的先留著，等 newFrame 的 repairReleased，避免把補包記成斷流。m_SinceNew 不重設。
+            if (m_RunUnexpected > kRepairRunSlots) {
+                ++m_Cur.stalls;
+                m_RunUnexpected = 0;
+                m_RunHeadset = 0;
+            }
+            else if (m_RunUnexpected > 0 && m_RunUnexpected <= kShortRunSlots) {
+                m_Cur.shortRep += m_RunUnexpected;
+                m_Cur.headsetRep += m_RunHeadset;
+                m_RunUnexpected = 0;
+                m_RunHeadset = 0;
+            }
+            // §REVIEW-1119：穩定期 4 秒、視窗 5 秒。用結算當下的 now 比，第一個視窗結算時穩定期已經過了，
+            // 切換造成的重複會整段進 decide。改看這個視窗是不是在穩定期內開始的。
+            const bool settling = m_WinStartUs < m_SettleUntilUs;
             if (!settling && m_Cur.slotCount > 0) {
                 m_Hist[m_HistHead] = m_Cur;
                 m_HistHead = (m_HistHead + 1) % kHist;

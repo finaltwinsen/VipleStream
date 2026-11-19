@@ -142,8 +142,91 @@ private:
         NvHTTP http(address, httpsPort, serverCert, nam);
 
         QString serverInfo;
+        bool httpsAttempt = false;
         try {
-            serverInfo = http.getServerInfo(NvHTTP::NvLogLevel::NVLL_NONE, true);
+            if (!serverCert.isNull()) {
+                // §REVIEW-1119：已配對時 getServerInfo 在憑證不符（401）會退回明文，
+                // 同一份 uuid 就能改位址。這裡只採用釘選憑證的 HTTPS。逾時比照 fastFail 的 2 秒。
+                // 埠還沒學到時，明文只拿來讀 HttpsPort。
+                if (http.httpsPort() == 0) {
+                    const QString probe = http.openConnectionToString(
+                        http.m_BaseUrlHttp, QStringLiteral("serverinfo"), QString(), 2000, NvHTTP::NVLL_NONE);
+                    // §REVIEW-1119：這段明文不經過 NvComputer 的 1 MiB 上限。先擋掉再掃描。
+                    if (probe.size() > (1 << 20)) {
+                        return false;
+                    }
+                    NvHTTP::verifyResponseStatus(probe);
+                    const uint16_t learned = NvHTTP::getXmlString(probe, QStringLiteral("HttpsPort")).toUShort();
+                    http.setHttpsPort(learned == 0 ? DEFAULT_HTTPS_PORT : learned);
+                }
+                httpsAttempt = true;
+                serverInfo = http.openConnectionToString(
+                    http.m_BaseUrlHttps, QStringLiteral("serverinfo"), QString(), 2000, NvHTTP::NVLL_NONE);
+                if (serverInfo.size() > (1 << 20)) {
+                    return false;
+                }
+                NvHTTP::verifyResponseStatus(serverInfo);
+            }
+            else {
+                serverInfo = http.getServerInfo(NvHTTP::NvLogLevel::NVLL_NONE, true);
+            }
+        } catch (const GfeHttpResponseException& e) {
+            // 憑證不符或 HTTPS 回 401：明文只拿來確認 uuid，並且 PairStatus 是 0 才把配對降級。
+            // 位址、埠、activeAddress 不採用明文裡的值。不是目前這台的位址就換下一個，避免別的機器把整台降級。
+            if (!httpsAttempt || e.getStatusCode() != 401) {
+                return false;
+            }
+            // §REVIEW-1119：憑證不符和伺服器真的回 401 共用狀態碼。不符代表這個位址不是釘選的那台，
+            // 不能降級、也不能把 activeAddress 鎖在這裡，否則冷啟動會停在攻擊者的位址、不再試後面的位址。
+            if (QLatin1String(e.getStatusMessage()) == QLatin1String("Server certificate mismatch")) {
+                return false;
+            }
+            QString httpInfo;
+            try {
+                httpInfo = http.openConnectionToString(
+                    http.m_BaseUrlHttp, QStringLiteral("serverinfo"), QString(), 2000, NvHTTP::NVLL_NONE);
+                if (httpInfo.size() > (1 << 20)) {
+                    return false;
+                }
+                NvHTTP::verifyResponseStatus(httpInfo);
+            } catch (...) {
+                return false;
+            }
+            NvComputer httpState(http, httpInfo);
+            if (m_Computer->uuid != httpState.uuid || httpState.pairState != NvComputer::PS_NOT_PAIRED) {
+                return false;
+            }
+            QString learnedVersion = httpState.appVersion;
+            if (learnedVersion.size() > 32) {
+                learnedVersion.truncate(32);
+            }
+            const uint16_t learnedHttpsPort = httpState.activeHttpsPort;
+            QWriteLocker computerLock(&m_Computer->lock);
+            if (!m_Computer->activeAddress.isNull() && m_Computer->activeAddress != address) {
+                return false;
+            }
+            if (m_Computer->activeAddress.isNull()) {
+                m_Computer->activeAddress = address;
+                changed = true;
+            }
+            if (m_Computer->pairState != NvComputer::PS_NOT_PAIRED) {
+                m_Computer->pairState = NvComputer::PS_NOT_PAIRED;
+                changed = true;
+            }
+            // §REVIEW-1119：這條降級原本不補 appversion。冷啟動重配對會因 parseQuad 是空的一直失敗。
+            if (m_Computer->appVersion.isEmpty() && !learnedVersion.isEmpty()) {
+                m_Computer->appVersion = learnedVersion;
+                changed = true;
+            }
+            if (m_Computer->activeHttpsPort == 0 && learnedHttpsPort != 0) {
+                m_Computer->activeHttpsPort = learnedHttpsPort;
+                changed = true;
+            }
+            if (m_Computer->state != NvComputer::CS_ONLINE) {
+                m_Computer->state = NvComputer::CS_ONLINE;
+                changed = true;
+            }
+            return true;
         } catch (...) {
             return false;
         }
@@ -246,36 +329,93 @@ private:
                     auto result = RelayLookup::lookup(prefs->relayUrl, prefs->relayPsk, m_Computer->uuid, 5000);
                     if (result.success) {
                         NvAddress relayAddr;
+                        QString stunNatToStore;
+                        uint16_t stunPunchToStore = 0;
+                        NvAddress stunBefore;
+                        QString natBefore;
+                        uint16_t punchBefore = 0;
+                        // §REVIEW-1119：relay 的 stun_ip 沒驗過。不是單播字面值（迴環、鏈路本地、多播、未指定、0.0.0.0/8）就當成沒有 STUN。
+                        // IPv4-mapped 要看 ok：0.0.0.0 和「不是 IPv4」都回 0。
+                        QString stunIp = result.stunIp;
+                        if (!stunIp.isEmpty()) {
+                            QHostAddress stunHost;
+                            bool stunOk = stunIp.size() <= 64 && stunHost.setAddress(stunIp);
+                            if (stunOk && !stunHost.scopeId().isEmpty()) {
+                                stunOk = false;
+                            }
+                            if (stunOk && stunHost.protocol() == QAbstractSocket::IPv6Protocol) {
+                                bool isV4 = false;
+                                const quint32 v4 = stunHost.toIPv4Address(&isV4);
+                                if (isV4) {
+                                    stunHost = QHostAddress(v4);
+                                }
+                            }
+                            if (!stunOk || stunHost.isLoopback() || stunHost.isLinkLocal() || stunHost.isMulticast() ||
+                                    stunHost == QHostAddress::Any || stunHost == QHostAddress::AnyIPv4 ||
+                                    stunHost == QHostAddress::AnyIPv6 || stunHost == QHostAddress::Broadcast ||
+                                    (stunHost.protocol() == QAbstractSocket::IPv4Protocol &&
+                                     stunHost.isInSubnet(QHostAddress(QStringLiteral("0.0.0.0")), 8))) {
+                                stunIp.clear();
+                            }
+                        }
                         // §REVIEW-1111：這幾個欄位（QString／NvAddress，隱式共享）同時被效能浮層、開串流的執行緒、
                         // 存檔執行緒讀；原本在這裡沒拿鎖就賦值，讀的人可能拿到正在被釋放的字串。
-                        if (!result.stunIp.isEmpty()) {
-                            QWriteLocker computerLock(&m_Computer->lock);
+                        if (!stunIp.isEmpty()) {
+                            QReadLocker computerLock(&m_Computer->lock);
                             // §REVIEW-1111：HTTP 埠原本寫死 47989；主機用別的對外埠（手動位址、<ExternalPort>）時對不到。
                             uint16_t httpPort = m_Computer->externalPort ? m_Computer->externalPort : m_Computer->activeAddress.port();
                             if (httpPort == 0) {
                                 httpPort = 47989;
                             }
-                            relayAddr = NvAddress(result.stunIp, httpPort);
-                            m_Computer->stunAddress = relayAddr;
-                            m_Computer->stunNatType = result.natType;
-                            // §REVIEW-1104：打洞用 relay 回報的實際埠。§REVIEW-1111：relay 沒給（0）時不要把
-                            // 先前從 serverinfo 解析到的打洞埠清掉。
-                            if (result.stunPort != 0) {
-                                m_Computer->stunPunchPort = result.stunPort;
+                            relayAddr = NvAddress(stunIp, httpPort);
+                            // §REVIEW-1119：釘選憑證還沒對上就寫進主機的話，輪詢失敗也會留在設定裡。先抄舊值，成功才補。
+                            stunBefore = m_Computer->stunAddress;
+                            natBefore = m_Computer->stunNatType;
+                            punchBefore = m_Computer->stunPunchPort;
+                            if (result.natType == QLatin1String("punchable") ||
+                                    result.natType == QLatin1String("symmetric")) {
+                                stunNatToStore = result.natType;
                             }
+                            stunPunchToStore = result.stunPort;
                         } else {
                             // No STUN endpoint — use a placeholder address.
                             // All communication will go through relay proxy/tunnel.
                             QReadLocker computerLock(&m_Computer->lock);
                             relayAddr = m_Computer->activeAddress;
+                            // §REVIEW-1119：冷啟動 activeAddress 是空的。空位址拿去建 NvHTTP 會在 setAddress 斷言。
+                            if (relayAddr.isNull()) {
+                                const NvAddress* candidates[] = {
+                                    &m_Computer->localAddress, &m_Computer->remoteAddress, &m_Computer->manualAddress,
+                                    &m_Computer->ipv6Address, &m_Computer->vpnAddress, &m_Computer->stunAddress
+                                };
+                                for (const NvAddress* candidate : candidates) {
+                                    if (!candidate->isNull()) {
+                                        relayAddr = *candidate;
+                                        break;
+                                    }
+                                }
+                            }
                             qInfo() << "[VIPLE-NAT]" << m_Computer->name
                                     << "online via relay (no STUN, relay-only mode)";
                         }
 
                         // First try direct poll (works if UPnP mapped the HTTP port)
                         // §PERF-1113：這裡不帶快取的 HTTPS 埠——失敗就直接改走 relay proxy，沒有第 2 輪可以修正
-                        if (!result.stunIp.isEmpty() &&
+                        if (!stunIp.isEmpty() &&
                             tryPollComputer(&nam, relayAddr, stateChanged, false)) {
+                            {
+                                QWriteLocker computerLock(&m_Computer->lock);
+                                // §REVIEW-1119：serverinfo 若已寫入不同的值，那份過了釘選憑證，不要用 relay 蓋掉。
+                                if (m_Computer->stunAddress == stunBefore) {
+                                    m_Computer->stunAddress = relayAddr;
+                                }
+                                if (m_Computer->stunNatType == natBefore && !stunNatToStore.isEmpty()) {
+                                    m_Computer->stunNatType = stunNatToStore;
+                                }
+                                if (m_Computer->stunPunchPort == punchBefore && stunPunchToStore != 0) {
+                                    m_Computer->stunPunchPort = stunPunchToStore;
+                                }
+                            }
                             qInfo() << "[VIPLE-NAT]" << m_Computer->name
                                     << "is now ONLINE via relay (direct poll)!";
                             online = true;
@@ -303,7 +443,11 @@ private:
                                     cachedServerCert = m_Computer->serverCert;
                                 }
 
-                                try {
+                                if (relayAddr.isNull()) {
+                                    // §REVIEW-1119：仍然沒有位址就不要建 NvHTTP（Debug 會斷言）。這一輪當沒查到。
+                                    qWarning() << "[VIPLE-NAT] Relay HTTP proxy skipped for" << m_Computer->name
+                                               << "(no address)";
+                                } else try {
                                     NvHTTP http(relayAddr, 0, cachedServerCert, &nam);
                                     NvComputer newState(http, proxyResp);
 
@@ -629,10 +773,47 @@ void ComputerManager::saveHosts()
     m_DelayedFlushCondition.wakeOne();
 }
 
+// §REVIEW-1119：mDNS 的 A/AAAA 來自同網段、未驗證的封包。迴環、未指定、多播、廣播會讓探索去連本機。
+// 169.254.169.254 是雲端中繼資料服務。其餘 169.254/16 仍留給沒有 DHCP 的直連。
+static bool isAcceptableMdnsAddress(const QHostAddress& address)
+{
+    if (address.isNull() || address.isLoopback() || address.isMulticast() ||
+            address == QHostAddress::Any || address == QHostAddress::AnyIPv4 ||
+            address == QHostAddress::AnyIPv6 || address == QHostAddress::Broadcast) {
+        return false;
+    }
+    QHostAddress v4 = address;
+    if (address.protocol() == QAbstractSocket::IPv6Protocol) {
+        bool isV4 = false;
+        const quint32 mapped = address.toIPv4Address(&isV4);
+        if (!isV4) {
+            return true;
+        }
+        v4 = QHostAddress(mapped);
+    }
+    if (v4.protocol() != QAbstractSocket::IPv4Protocol) {
+        return false;
+    }
+    if (v4 == QHostAddress(QStringLiteral("169.254.169.254")) ||
+            v4.isInSubnet(QHostAddress(QStringLiteral("0.0.0.0")), 8)) {
+        return false;
+    }
+    return true;
+}
+
 QHostAddress ComputerManager::getBestGlobalAddressV6(QVector<QHostAddress> &addresses)
 {
     for (const QHostAddress& address : addresses) {
         if (address.protocol() == QAbstractSocket::IPv6Protocol) {
+            // §REVIEW-1119：::1、多播、未指定，以及 IPv4-mapped（例如 ::ffff:127.0.0.1）不是全球 IPv6。
+            if (!isAcceptableMdnsAddress(address)) {
+                continue;
+            }
+            bool mapped = false;
+            address.toIPv4Address(&mapped);
+            if (mapped) {
+                continue;
+            }
             if (address.isInSubnet(QHostAddress("fe80::"), 10)) {
                 // Link-local
                 continue;
@@ -690,6 +871,14 @@ void ComputerManager::startPolling()
             connect(pendingComputer, &MdnsPendingComputer::resolvedHost,
                     this, &ComputerManager::handleMdnsServiceResolved);
             m_PendingResolution.append(pendingComputer);
+            // §REVIEW-1119：解析放棄只在標頭裡 cleanup()，沒有信號可把物件移出清單。
+            // 10 次、每次 2 秒，超過 30 秒還在就丟掉，否則 64 個失敗的解析會把之後的 mDNS 探索全部擋掉。
+            QTimer::singleShot(30000, pendingComputer, [this, pendingComputer]() {
+                if (!m_PendingResolution.removeOne(pendingComputer)) {
+                    return;
+                }
+                pendingComputer->deleteLater();
+            });
         });
     }
     else {
@@ -744,7 +933,8 @@ void ComputerManager::startPollingComputer(NvComputer* computer)
 // autoWakeOnLan is OFF.
 void ComputerManager::notifyExplicitWake(const QString& uuid)
 {
-    QReadLocker lock(&m_Lock);
+    // §REVIEW-1119：getActiveThread() 會刪掉已結束的執行緒。讀鎖不互斥，和 aboutToQuit 的 interrupt() 會同時改同一份清單。
+    QWriteLocker lock(&m_Lock);
 
     auto it = m_PollEntries.find(uuid);
     if (it == m_PollEntries.end() || it.value() == nullptr) {
@@ -772,7 +962,8 @@ void ComputerManager::handleMdnsServiceResolved(MdnsPendingComputer* computer,
 
     // Add the host using the IPv4 address
     for (const QHostAddress& address : std::as_const(addresses)) {
-        if (address.protocol() == QAbstractSocket::IPv4Protocol) {
+        // §REVIEW-1119：第一筆 IPv4 可能是迴環或中繼資料位址。跳過，改試下一筆。
+        if (address.protocol() == QAbstractSocket::IPv4Protocol && isAcceptableMdnsAddress(address)) {
             // NB: We don't just call addNewHost() here with v6Global because the IPv6
             // address may not be reachable (if the user hasn't installed the IPv6 helper yet
             // or if this host lacks outbound IPv6 capability). We want to add IPv6 even if
@@ -788,7 +979,7 @@ void ComputerManager::handleMdnsServiceResolved(MdnsPendingComputer* computer,
     if (!added) {
         // If we get here, there wasn't an IPv4 address so we'll do it v6-only
         for (const QHostAddress& address : std::as_const(addresses)) {
-            if (address.protocol() == QAbstractSocket::IPv6Protocol) {
+            if (address.protocol() == QAbstractSocket::IPv6Protocol && isAcceptableMdnsAddress(address)) {
                 // Use a link-local or site-local address for the "local address"
                 if (address.isInSubnet(QHostAddress("fe80::"), 10) ||
                         address.isInSubnet(QHostAddress("fec0::"), 10) ||
@@ -977,7 +1168,8 @@ void ComputerManager::clientSideAttributeUpdated(NvComputer* computer)
 
 void ComputerManager::handleAboutToQuit()
 {
-    QReadLocker lock(&m_Lock);
+    // §REVIEW-1119：interrupt() 會改 m_ActiveThread 與 m_InactiveList。讀鎖擋不住另一條也在改這份清單的路徑。
+    QWriteLocker lock(&m_Lock);
 
     // Interrupt polling threads immediately, so they
     // avoid making additional requests while quitting
@@ -1006,27 +1198,54 @@ signals:
 private:
     void run()
     {
+        // §REVIEW-1119：NvHTTP 建構時會複製 serverCert。和輪詢的寫入同時發生是資料競爭。
+        QReadLocker initLock(&m_Computer->lock);
         NvPairingManager pairingManager(m_Computer);
+        initLock.unlock();
+
+        QString appVersion;
+        {
+            QReadLocker lock(&m_Computer->lock);
+            appVersion = m_Computer->appVersion;
+        }
+        // §REVIEW-1119：沒有 <appversion> 時 parseQuad 回空的 QVector，pair() 的 .at(0) 會越界。
+        if (NvHTTP::parseQuad(appVersion).isEmpty()) {
+            emit pairingCompleted(m_Computer, tr("Pairing failed. Please try again."));
+            return;
+        }
 
         try {
-           NvPairingManager::PairState result = pairingManager.pair(m_Computer->appVersion, m_Pin, m_Computer->serverCert);
+           // §REVIEW-1119：pair() 成功時會在這條背景執行緒直接改傳入的憑證。輪詢同時拿讀鎖複製它。
+           QSslCertificate serverCert;
+           NvPairingManager::PairState result = pairingManager.pair(appVersion, m_Pin, serverCert);
            switch (result)
            {
            case NvPairingManager::PairState::PIN_WRONG:
                emit pairingCompleted(m_Computer, tr("The PIN from the PC didn't match. Please try again."));
                break;
            case NvPairingManager::PairState::FAILED:
-               if (m_Computer->currentGameId != 0) {
-                   emit pairingCompleted(m_Computer, tr("You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again."));
-               }
-               else {
-                   emit pairingCompleted(m_Computer, tr("Pairing failed. Please try again."));
+               {
+                   int runningGame = 0;
+                   {
+                       QReadLocker lock(&m_Computer->lock);
+                       runningGame = m_Computer->currentGameId;
+                   }
+                   if (runningGame != 0) {
+                       emit pairingCompleted(m_Computer, tr("You cannot pair while a previous session is still running on the host PC. Quit any running games or reboot the host PC, then try pairing again."));
+                   }
+                   else {
+                       emit pairingCompleted(m_Computer, tr("Pairing failed. Please try again."));
+                   }
                }
                break;
            case NvPairingManager::PairState::ALREADY_IN_PROGRESS:
                emit pairingCompleted(m_Computer, tr("Another pairing attempt is already in progress."));
                break;
            case NvPairingManager::PairState::PAIRED:
+               {
+                   QWriteLocker lock(&m_Computer->lock);
+                   m_Computer->serverCert = serverCert;
+               }
                // Persist the newly pinned server certificate for this host
                m_ComputerManager->saveHost(m_Computer);
 
@@ -1175,6 +1394,28 @@ void ComputerManager::addNewHostManually(QString address)
     }
 }
 
+namespace {
+// §REVIEW-1119：mDNS 可以無限排 PendingAddTask，把全域執行緒池占滿。超過就先丟，等下一次宣告。
+std::atomic<int> s_MdnsAddInFlight{0};
+constexpr int kMaxMdnsAddInFlight = 16;
+
+// §REVIEW-1119：16 筆上限仍大於常見的全域池執行緒數，探測又會卡住數秒。
+// 專用池最多兩條，配對和結束遊戲繼續用全域池。
+QThreadPool* mdnsAddPool()
+{
+    static QThreadPool* const pool = []() {
+        auto* p = new QThreadPool();
+        p->setMaxThreadCount(2);
+        QCoreApplication* app = QCoreApplication::instance();
+        if (app != nullptr && app->thread() == QThread::currentThread()) {
+            p->setParent(app);
+        }
+        return p;
+    }();
+    return pool;
+}
+}
+
 class PendingAddTask : public QObject, public QRunnable
 {
     Q_OBJECT
@@ -1194,6 +1435,13 @@ public:
                 computerManager, &ComputerManager::handleComputerStateChanged);
         connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
                 this, &PendingAddTask::handleAboutToQuit);
+    }
+
+    ~PendingAddTask()
+    {
+        if (m_Mdns) {
+            s_MdnsAddInFlight.fetch_sub(1);
+        }
     }
 
 signals:
@@ -1224,14 +1472,17 @@ private:
             try {
                 serverInfo = http.getServerInfo(NvHTTP::NVLL_VERBOSE);
             } catch (const QtNetworkReplyException& e) {
-                if (e.getError() == QNetworkReply::ServiceUnavailableError) {
+                if (e.getError() == QNetworkReply::ServiceUnavailableError && !m_Mdns) {
                     qWarning() << "Retrying request in 5 seconds after ServiceUnavailableError";
                     QThread::sleep(5);
                     serverInfo = http.getServerInfo(NvHTTP::NVLL_VERBOSE);
                     qInfo() << "Retry successful";
                 }
                 else {
-                    // Rethrow other errors
+                    // §REVIEW-1119：mDNS 的 503 若在全域執行緒池裡睡 5 秒，配對與結束遊戲會排不進去。這一輪放棄。
+                    if (m_Mdns && e.getError() == QNetworkReply::ServiceUnavailableError) {
+                        qWarning() << "mDNS host returned ServiceUnavailableError; not retrying on the thread pool";
+                    }
                     throw e;
                 }
             }
@@ -1297,11 +1548,13 @@ private:
         }
 
         // Check if we have a record of this host UUID to pull the pinned cert
+        bool verifiedWithPinnedCert = false;
         NvComputer* existingComputer;
         {
             QReadLocker lock(&m_ComputerManager->m_Lock);
             existingComputer = m_ComputerManager->m_KnownHosts.value(newComputer->uuid);
             if (existingComputer != nullptr) {
+                QReadLocker computerLock(&existingComputer->lock);
                 http.setServerCert(existingComputer->serverCert);
             }
             // §REVIEW-1111（第二輪）：自動探索到的新主機最多收到 64 台（每台都會多一條輪詢執行緒、一筆設定）；手動加入不受限
@@ -1314,12 +1567,49 @@ private:
 
         // Fetch serverinfo again over HTTPS with the pinned cert
         if (existingComputer != nullptr) {
-            Q_ASSERT(http.httpsPort() != 0);
-            serverInfo = fetchServerInfo(http);
-            if (serverInfo.isEmpty()) {
-                // §REVIEW-1104：已存在主機的 HTTPS serverinfo 失敗直接 return 會漏掉 newComputer
-                delete newComputer;
-                return;
+            if (!http.serverCert().isNull()) {
+                // §REVIEW-1119：getServerInfo 在憑證不符時會退回明文，明文再蓋掉已配對主機。
+                // 已有釘選憑證就只收 HTTPS。失敗就丟掉這次，輪詢那條會另外處理降級。逾時比照原本的 5 秒。
+                bool verified = false;
+                try {
+                    if (http.httpsPort() == 0) {
+                        const QString probe = http.openConnectionToString(
+                            http.m_BaseUrlHttp, QStringLiteral("serverinfo"), QString(), 5000, NvHTTP::NVLL_VERBOSE);
+                        // §REVIEW-1119：跟輪詢同一條，明文先過 1 MiB 再掃描。
+                        if (probe.size() > (1 << 20)) {
+                            throw GfeHttpResponseException(-1, "serverinfo too large");
+                        }
+                        NvHTTP::verifyResponseStatus(probe);
+                        const uint16_t learned = NvHTTP::getXmlString(probe, QStringLiteral("HttpsPort")).toUShort();
+                        http.setHttpsPort(learned == 0 ? DEFAULT_HTTPS_PORT : learned);
+                    }
+                    serverInfo = http.openConnectionToString(
+                        http.m_BaseUrlHttps, QStringLiteral("serverinfo"), QString(), 5000, NvHTTP::NVLL_VERBOSE);
+                    if (serverInfo.size() > (1 << 20)) {
+                        throw GfeHttpResponseException(-1, "serverinfo too large");
+                    }
+                    NvHTTP::verifyResponseStatus(serverInfo);
+                    verified = true;
+                } catch (...) {
+                    verified = false;
+                }
+                if (!verified || serverInfo.isEmpty()) {
+                    delete newComputer;
+                    if (!m_Mdns) {
+                        emit computerAddCompleted(false, false);
+                    }
+                    return;
+                }
+                verifiedWithPinnedCert = true;
+            }
+            else {
+                Q_ASSERT(http.httpsPort() != 0);
+                serverInfo = fetchServerInfo(http);
+                if (serverInfo.isEmpty()) {
+                    // §REVIEW-1104：已存在主機的 HTTPS serverinfo 失敗直接 return 會漏掉 newComputer
+                    delete newComputer;
+                    return;
+                }
             }
 
             // Update the polled computer with the HTTPS information
@@ -1392,6 +1682,20 @@ private:
             }
 
             if (existingComputer != nullptr) {
+                bool rejectUnverified = false;
+                {
+                    QReadLocker computerLock(&existingComputer->lock);
+                    // §REVIEW-1119：查表時還沒有這台（或還沒配對），明文查完才發現已經配對。不能把明文蓋上去。
+                    rejectUnverified = !existingComputer->serverCert.isNull() && !verifiedWithPinnedCert;
+                }
+                if (rejectUnverified) {
+                    m_ComputerManager->m_Lock.unlock();
+                    delete newComputer;
+                    if (!m_Mdns) {
+                        emit computerAddCompleted(false, false);
+                    }
+                    return;
+                }
                 // Fold it into the existing PC
                 bool changed = existingComputer->update(*newComputer);
                 delete newComputer;
@@ -1411,6 +1715,13 @@ private:
                 }
             }
             else {
+                if (m_Mdns && m_ComputerManager->m_KnownHosts.size() >= 64) {
+                    // §REVIEW-1119：64 台的檢查在網路往返之前。兩筆同時通過就會一起寫進來，這裡再擋一次。
+                    m_ComputerManager->m_Lock.unlock();
+                    qWarning() << "Ignoring mDNS host" << newComputer->name << "- too many known hosts";
+                    delete newComputer;
+                    return;
+                }
                 // Store this in our active sets
                 m_ComputerManager->m_KnownHosts[newComputer->uuid] = newComputer;
 
@@ -1454,10 +1765,23 @@ private:
 
 void ComputerManager::addNewHost(NvAddress address, bool mdns, QString name, NvAddress mdnsIpv6Address)
 {
+    if (mdns) {
+        const int prev = s_MdnsAddInFlight.fetch_add(1);
+        if (prev >= kMaxMdnsAddInFlight) {
+            s_MdnsAddInFlight.fetch_sub(1);
+            qWarning() << "Ignoring mDNS host" << name << "- too many pending probes";
+            return;
+        }
+    }
     // Punt to a worker thread to avoid stalling the
     // UI while waiting for serverinfo query to complete
     PendingAddTask* addTask = new PendingAddTask(this, name, address, mdnsIpv6Address, mdns);
-    QThreadPool::globalInstance()->start(addTask);
+    if (mdns) {
+        mdnsAddPool()->start(addTask);
+    }
+    else {
+        QThreadPool::globalInstance()->start(addTask);
+    }
 }
 
 QString ComputerManager::generatePinString()

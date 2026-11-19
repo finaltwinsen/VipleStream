@@ -63,8 +63,14 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     private RelativeLayout noPcFoundLayout;
     private PcGridAdapter pcGridAdapter;
     private ShortcutHelper shortcutHelper;
-    private ComputerManagerService.ComputerManagerBinder managerBinder;
-    private boolean runningPolling, completeOnCreateCalled;
+    // §REVIEW-1119：配對執行緒與 onServiceDisconnected 會跨執行緒讀寫。沒有 volatile 時，
+    // 背景執行緒可能一直看到舊的 binder 或舊的輪詢旗標。
+    private volatile ComputerManagerService.ComputerManagerBinder managerBinder;
+    private volatile boolean runningPolling;
+    private boolean completeOnCreateCalled;
+    // §REVIEW-1119：配對要等主機上輸入 PIN。這段期間選單關閉與 onResume 會把輪詢開回來，
+    // 跟配對請求同時打同一台主機。
+    private volatile boolean pairingInProgress;
     // §REVIEW-1104：freezeUpdates 跨執行緒讀取需設為 volatile，並記錄選單目標主機之 uuid
     private volatile boolean freezeUpdates;
     private String contextMenuComputerUuid;
@@ -89,11 +95,19 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                         return;
                     }
 
-                    // Now make the binder visible
-                    managerBinder = localBinder;
-
-                    // Start updates
-                    startComputerUpdates();
+                    // §REVIEW-1119：startComputerUpdates 會改 runningPolling。放在這條背景執行緒時，
+                    // 可能停在「已檢查尚未設旗標」，onPause 的 stop 以為沒在輪詢就 return，
+                    // 退到背景後 mDNS 與輪詢仍繼續。改回 UI 執行緒，與 onPause／onResume 同一條。
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (isDestroyed) {
+                                return;
+                            }
+                            managerBinder = localBinder;
+                            startComputerUpdates();
+                        }
+                    });
 
                     // Force a keypair to be generated early to avoid discovery delays
                     // （走共用的那一個 provider，載入一次之後輪詢就不必再讀檔解析）
@@ -279,7 +293,9 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     private void startComputerUpdates() {
         // Only allow polling to start if we're bound to CMS, polling is not already running,
         // and our activity is in the foreground.
-        if (managerBinder != null && !runningPolling && inForeground && !isDestroyed) {
+        // §REVIEW-1119：配對進行中不開輪詢。選單項目選完後 onContextMenuClosed 一定會呼叫這裡，
+        // 而 doPair 裡那次 stop 常常因為選單已經先停過、看到沒在輪詢就直接 return。
+        if (managerBinder != null && !runningPolling && inForeground && !isDestroyed && !pairingInProgress) {
             freezeUpdates = false;
             managerBinder.startPolling(new ComputerManagerListener() {
                 @Override
@@ -450,6 +466,14 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
             Toast.makeText(PcView.this, getResources().getString(R.string.error_manager_not_running), Toast.LENGTH_LONG).show();
             return;
         }
+        // §REVIEW-1119：再點一次會開第二組 PIN。先結束的那條會 Dialog.closeDialogs()，
+        // 把還在等輸入的另一個對話方塊一起關掉。執行緒裡用這次的 binder，避免欄位稍後被清成 null。
+        if (pairingInProgress) {
+            Toast.makeText(PcView.this, getResources().getString(R.string.pair_already_in_progress), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        pairingInProgress = true;
+        final ComputerManagerService.ComputerManagerBinder binder = managerBinder;
 
         Toast.makeText(PcView.this, getResources().getString(R.string.pairing), Toast.LENGTH_SHORT).show();
         new Thread(new Runnable() {
@@ -463,7 +487,7 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                     stopComputerUpdates(true);
 
                     httpConn = new NvHTTP(ServerHelper.getCurrentAddressFromComputer(computer),
-                            computer.httpsPort, managerBinder.getUniqueId(), computer.serverCert,
+                            computer.httpsPort, binder.getUniqueId(), computer.serverCert,
                             PlatformBinding.getCryptoProvider(PcView.this));
                     if (httpConn.getPairState() == PairState.PAIRED) {
                         // Don't display any toast, but open the app list
@@ -496,16 +520,25 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                             message = getResources().getString(R.string.pair_already_in_progress);
                         }
                         else if (pairState == PairState.PAIRED) {
-                            // Just navigate to the app view without displaying a toast
-                            message = null;
-                            success = true;
+                            // §REVIEW-1119：getComputer 在這台已從服務移除時回 null；uuid 為 null 時
+                            // 它內部的 uuid.equals 也會 NPE。配對已經成功，但憑證釘不回去，
+                            // 直接解參考會把整個行程打下來。改走既有的配對失敗提示，不要開應用程式清單。
+                            ComputerDetails pinned = computer.uuid == null ? null : binder.getComputer(computer.uuid);
+                            if (pinned == null) {
+                                message = getResources().getString(R.string.pair_fail);
+                            }
+                            else {
+                                // Just navigate to the app view without displaying a toast
+                                message = null;
+                                success = true;
 
-                            // Pin this certificate for later HTTPS use
-                            managerBinder.getComputer(computer.uuid).serverCert = pm.getPairedCert();
+                                // Pin this certificate for later HTTPS use
+                                pinned.serverCert = pm.getPairedCert();
 
-                            // Invalidate reachability information after pairing to force
-                            // a refresh before reading pair state again
-                            managerBinder.invalidateStateForComputer(computer.uuid);
+                                // Invalidate reachability information after pairing to force
+                                // a refresh before reading pair state again
+                                binder.invalidateStateForComputer(computer.uuid);
+                            }
                         }
                         else {
                             // Should be no other values
@@ -519,6 +552,10 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                 } catch (XmlPullParserException | IOException e) {
                     e.printStackTrace();
                     message = e.getMessage();
+                } finally {
+                    // §REVIEW-1119：成功、失敗、例外都要清旗標。留下 true 的話，
+                    // 選單關閉與 onResume 會一直不輪詢。
+                    pairingInProgress = false;
                 }
 
                 Dialog.closeDialogs();
@@ -588,6 +625,8 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
             Toast.makeText(PcView.this, getResources().getString(R.string.error_manager_not_running), Toast.LENGTH_LONG).show();
             return;
         }
+        // §REVIEW-1119：同 doPair。解開配對在背景跑，欄位若被 onServiceDisconnected 清掉會在 getUniqueId NPE。
+        final ComputerManagerService.ComputerManagerBinder binder = managerBinder;
 
         Toast.makeText(PcView.this, getResources().getString(R.string.unpairing), Toast.LENGTH_SHORT).show();
         new Thread(new Runnable() {
@@ -597,7 +636,7 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                 String message;
                 try {
                     httpConn = new NvHTTP(ServerHelper.getCurrentAddressFromComputer(computer),
-                            computer.httpsPort, managerBinder.getUniqueId(), computer.serverCert,
+                            computer.httpsPort, binder.getUniqueId(), computer.serverCert,
                             PlatformBinding.getCryptoProvider(PcView.this));
                     if (httpConn.getPairState() == PairingManager.PairState.PAIRED) {
                         httpConn.unpair();

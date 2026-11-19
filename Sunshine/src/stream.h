@@ -40,6 +40,9 @@ namespace stream {
     std::optional<int> gcmap;
   };
 
+  /// §STREAM-MENU：請控制迴圈對所有已連線的 client 送一次「正常結束」通知（不收 session；約一個迴圈週期內送出）。
+  void request_graceful_termination_notice();
+
   namespace session {
     enum class state_e : int {
       STOPPED,  ///< The session is stopped

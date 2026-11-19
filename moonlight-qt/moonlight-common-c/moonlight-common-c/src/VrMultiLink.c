@@ -932,6 +932,9 @@ static void hotaddCommitPending(VRML_LINK* L, uint64_t nowMs) {
         snprintf(L->ifName, sizeof(L->ifName), "%s", L->pendingIfName);
         L->pendingIfName[0] = '\0';
     }
+    // §REVIEW-1119：位址與 ifName 都寫完再 release，然後才把 ready 設上、ifGone 清掉。
+    // 沒有這道屏障時，ARM 上別的執行緒可能先看到 ready，snprintf 還寫到一半，%s 會讀過緩衝區。
+    VRML_RELEASE_FENCE();
     // 擁有權已經在 videoSock／audioSock。這裡只把 pending 欄位換成 INVALID，不 close；
     // 跟 activateGen 清成 0 放在同一把鎖裡，abort 才不會看到「已結束」但又讀到舊的 fd 值。
     PltLockMutex(&pendMutex);
@@ -1273,7 +1276,10 @@ static void hotaddHelloRetries(uint64_t nowMs) {
 
     for (i = 0; i < linkCount; i++) {
         VRML_LINK* L = &links[i];
-        if (L->pending && L->activateGen == 0 && L->helloTries >= VRML_HELLO_MAX_TRIES) {
+        // §REVIEW-1119：最後一則 HELLO 也要等滿一個重送間隔才算逾時。原本送完第 5 則、下一圈（約 250 ms）就放棄，
+        // 回覆稍慢（控制通道重傳一次）就被當成失敗；三次之後這條連線整場不再重綁。
+        if (L->pending && L->activateGen == 0 && L->helloTries >= VRML_HELLO_MAX_TRIES &&
+            nowMs >= L->lastHelloMs && nowMs - L->lastHelloMs >= VRML_HELLO_RETRY_MS) {
             // §REVIEW-1118B：refuseTries 改在鎖裡、而且只有真的拿走 fd 才加。這裡先加的話，跟 REFUSED 會各算一次。
             hotaddAbortPending(L, "got no LINK_READY after the HELLO retries", nowMs);
             continue;
@@ -2051,6 +2057,8 @@ static bool pongFromHost(const VRML_LINK* L) {
     {
         const int n = serverAddrCount;
         int k;
+        // §REVIEW-1119：和 hotaddScan 一樣，讀完 count 再 acquire，才看得到 vrmlOnS2C 在 release 之前寫好的位址。
+        VRML_ACQUIRE_FENCE();
         for (k = 0; k < n && k < VIPLE_VR_LINK_ADDR_MAX; k++) {
             if (serverAddrs[k] == src) {
                 return true;
@@ -2180,7 +2188,10 @@ int vrmlVideoCarrying(void) {
 // §VR-LINK-GRACE：有沒有任何一條連線「已確認」（最近 VRML_CONFIRM_TIMEOUT_MS 內收過 PONG）
 int vrmlAnyAlive(void) {
     const uint64_t nowMs = PltGetMillis();
-    for (int i = 0; i < linkCount; i++) {
+    // §REVIEW-1119：先讀 linkCount 再 acquire。addLink 是 release 之後才加條數，ARM 上不然會看到新條數、欄位還是上一場的。
+    const int nLinks = linkCount;
+    VRML_ACQUIRE_FENCE();
+    for (int i = 0; i < nLinks; i++) {
         if (isConfirmed(&links[i], nowMs)) {
             return 1;
         }
@@ -2195,13 +2206,17 @@ int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr
         return 0;
     }
     const struct sockaddr_in* ex = (const struct sockaddr_in*)exclude;
+    const int nLinks = linkCount;
+    VRML_ACQUIRE_FENCE();
     // §VR-LINK-STANDBY：先找不走 VPN 的（區網直連、轉接器）；VPN 隧道多半跟著同一張網卡，那張斷了它也斷
     for (int pass = 0; pass < 2; pass++)
-    for (int i = 0; i < linkCount; i++) {
+    for (int i = 0; i < nLinks; i++) {
         if (!isConfirmed(&links[i], nowMs) || links[i].serverV.sin_addr.s_addr == ex->sin_addr.s_addr ||
                 isVpnLink(&links[i]) != (pass == 1)) {
             continue;
         }
+        // §REVIEW-1119：看過 ready 之後才複製重綁後的位址（寫端在公開 ready 前有 release）。
+        VRML_ACQUIRE_FENCE();
         struct sockaddr_in a;
         memset(&a, 0, sizeof(a));
         a.sin_family = AF_INET;
@@ -2219,9 +2234,15 @@ int vrmlLinkQuietMsByLocal(const struct sockaddr_storage* local) {
         return -1;
     }
     const struct sockaddr_in* a = (const struct sockaddr_in*)local;
-    for (int i = 0; i < linkCount; i++) {
+    const int nLinks = linkCount;
+    VRML_ACQUIRE_FENCE();
+    for (int i = 0; i < nLinks; i++) {
         uint64_t t;
-        if (!links[i].ready || links[i].ifGone || links[i].local.sin_addr.s_addr != a->sin_addr.s_addr) {
+        if (!links[i].ready || links[i].ifGone) {
+            continue;
+        }
+        VRML_ACQUIRE_FENCE();
+        if (links[i].local.sin_addr.s_addr != a->sin_addr.s_addr) {
             continue;
         }
         t = links[i].lastPongMs;
@@ -2238,8 +2259,15 @@ int vrmlLocalIsDedicated(const struct sockaddr_storage* local) {
         return 0;
     }
     const struct sockaddr_in* a = (const struct sockaddr_in*)local;
-    for (int i = 0; i < linkCount; i++) {
-        if (links[i].ready && links[i].local.sin_addr.s_addr == a->sin_addr.s_addr) {
+    const int nLinks = linkCount;
+    VRML_ACQUIRE_FENCE();
+    for (int i = 0; i < nLinks; i++) {
+        if (!links[i].ready) {
+            continue;
+        }
+        // §REVIEW-1119：看到 ready 再讀 ifName。重綁的 snprintf 與 ready 中間有 release，不然 %s 可能讀過緩衝區。
+        VRML_ACQUIRE_FENCE();
+        if (links[i].local.sin_addr.s_addr == a->sin_addr.s_addr) {
             return isDedicatedIf(links[i].ifName) ? 1 : 0;
         }
     }
@@ -2253,13 +2281,16 @@ int vrmlPickOtherAlive(const struct sockaddr_storage* excludeLocal, struct socka
         return 0;
     }
     const struct sockaddr_in* ex = (const struct sockaddr_in*)excludeLocal;
+    const int nLinks = linkCount;
+    VRML_ACQUIRE_FENCE();
     for (int pass = 0; pass < 2; pass++)
-    for (int i = 0; i < linkCount; i++) {
+    for (int i = 0; i < nLinks; i++) {
         struct sockaddr_in a;
         if (links[i].ifGone || !isConfirmed(&links[i], nowMs) || links[i].local.sin_addr.s_addr == ex->sin_addr.s_addr ||
                 isVpnLink(&links[i]) != (pass == 1)) {
             continue;
         }
+        VRML_ACQUIRE_FENCE();
         memset(&a, 0, sizeof(a));
         a.sin_family = AF_INET;
         a.sin_addr = links[i].serverV.sin_addr;
@@ -2283,8 +2314,14 @@ int vrmlServerAddrState(const struct sockaddr_storage* addr) {
         return -1;
     }
     const struct sockaddr_in* a = (const struct sockaddr_in*)addr;
-    for (int i = 0; i < linkCount; i++) {
-        if (!links[i].ready || links[i].serverV.sin_addr.s_addr != a->sin_addr.s_addr) {
+    const int nLinks = linkCount;
+    VRML_ACQUIRE_FENCE();
+    for (int i = 0; i < nLinks; i++) {
+        if (!links[i].ready) {
+            continue;
+        }
+        VRML_ACQUIRE_FENCE();
+        if (links[i].serverV.sin_addr.s_addr != a->sin_addr.s_addr) {
             continue;
         }
         if (isConfirmed(&links[i], nowMs)) {
@@ -2390,6 +2427,7 @@ static void noteLag(VRML_LINK* L, uint32_t frame, uint64_t arriveUs) {
         }
         for (i = 0; i < VRML_LEAD_RING; i++) {
             leadRing[i].seenMask = 0;  // §PERF-1113 A46：重來之前的紀錄不可信，不結算
+            leadRing[i].valid = false;  // §REVIEW-1119：seenMask 清了但 valid 還在時，新基準若撞上舊幀號，會用重置前的到達時刻算 lag。
         }
     }
     // 其餘：那一幀的紀錄已經被覆寫（落後超過 VRML_LEAD_RING 幀），或時戳對不上——不取樣
@@ -2625,6 +2663,7 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
 
     for (;;) {
         int used = 0;  // stageBuf 已使用的格數（控制資料報不佔格子；§PERF-1113 批次收進來的控制資料報會留下空格，無妨）
+        int shortDrain = 0;  // §REVIEW-1119：這一輪的短封包數。它們不佔 used，不能拿 used 當迴圈上限。
         bool drainOnly = false;  // 已經決定要返回了（GONE 要交出去、或等到期了）：只把各 socket 上已經到的收完，不再等
 
         if (stageNext < stageCount) {
@@ -2675,8 +2714,22 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
             if (stageAccept(used, err, slot, 0)) {
                 used++;
             }
-            else if (stageCount == 0 && !drainOnly) {
-                drainOnly = stageAfterCtrl(deadlineUs);
+            else {
+                if (stageCount == 0 && !drainOnly) {
+                    drainOnly = stageAfterCtrl(deadlineUs);
+                }
+                // §REVIEW-1119：短於 64 B 的資料報不增加 used。已經有影像封包就先交出去；
+                // 還沒有時累積到暫存上限就當這一次沒有影像封包。否則短封包一直來，
+                // while (used < VRML_STAGE_MAX) 不會結束，接收執行緒回不去看中斷，stop 會卡在 join。
+                // 平常的 PONG 每秒只有幾個，到不了。
+                if (++shortDrain >= VRML_STAGE_MAX) {
+                    if (stageCount > 0) {
+                        break;
+                    }
+                    finishIdleRuns();
+                    *linkIdx = -1;
+                    return 0;
+                }
             }
 #ifdef VRML_HAVE_RECVMMSG
             // §PERF-1113：剛才那個 socket 上多半還有同一批到的封包——用一次 recvmmsg 直接收進接下來的幾格，
@@ -2705,6 +2758,13 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
                 }
             }
 #endif
+        }
+        // §REVIEW-1119：recvmmsg 會把短封包也算進 used。used 滿了但沒有影像封包時，外層 for 會把
+        // drainOnly 清掉再收，短封包持續湧入就一直不返回。控制資料報在 stageAccept 裡已經處理過。
+        if (stageCount == 0) {
+            finishIdleRuns();
+            *linkIdx = -1;
+            return 0;
         }
     }
 }

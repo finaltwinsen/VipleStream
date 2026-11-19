@@ -42,7 +42,9 @@ INSTALLER_FOLDER=$BUILD_ROOT/installer-$BUILD_CONFIG
 if [ -n "${CI_VERSION:-}" ]; then
   VERSION=$CI_VERSION
 else
-  VERSION=`cat $SOURCE_ROOT/app/version.txt`
+  # §REVIEW-1119：讀不到版號時不要默默用空字串；CRLF 的 \r 會進 AppImage 檔名。
+  VERSION=$(tr -d '\r\n' < "$SOURCE_ROOT/app/version.txt") || fail "Unable to read version.txt"
+  [ -n "$VERSION" ] || fail "Unable to read version.txt"
 fi
 
 # Patch 2: locate the genuine SDL2 runtime library actually linked via -lSDL2.

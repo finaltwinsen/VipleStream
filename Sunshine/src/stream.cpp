@@ -3766,6 +3766,13 @@ namespace stream {
     s_lastArrival = now;
   }
 
+  // §STREAM-MENU：見 controlBroadcastThread 裡的 notify_graceful_termination_now
+  static std::atomic<bool> g_graceful_notify_req {false};
+
+  void request_graceful_termination_notice() {
+    g_graceful_notify_req.store(true, std::memory_order_release);
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -4343,8 +4350,30 @@ namespace stream {
     // termination when we shut down.
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
+    // §STREAM-MENU：host 端主動「中斷串流、保留 App」時，先送一次正常結束的通知（和這個函式結尾送的是同一則）。
+    // 不送的話 client 要等自己的逾時（實測約 38 秒）才以「連線已終止」的錯誤結束。只送通知，session 由呼叫端接著收掉。
+    auto notify_graceful_termination_now = [&]() {
+      control_terminate_t note;
+      note.header.type = packetTypes[IDX_TERMINATION];
+      note.header.payloadLength = sizeof(note.ec);
+      note.ec = util::endian::big<uint32_t>(0x80030023);
+      std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(note)) + crypto::cipher::tag_size> note_buf;
+      auto lg = server->_sessions.lock();
+      for (auto pos = std::begin(*server->_sessions); pos != std::end(*server->_sessions); ++pos) {
+        auto session = *pos;
+        if (session->control.peer) {
+          auto payload = encode_control(session, util::view(note), note_buf);
+          server->send(payload, session->control.peer);
+        }
+      }
+      server->flush();
+    };
+
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
       bool has_session_awaiting_peer = false;
+      if (g_graceful_notify_req.exchange(false, std::memory_order_acq_rel)) {
+        notify_graceful_termination_now();
+      }
 
       // §F4 2026-09-23：本輪 iterate 的逾時。控制迴圈由所有 session 共用，
       // 取存活 session 的 control.loopTimeout 最小值；起始值是預設 150 ms，

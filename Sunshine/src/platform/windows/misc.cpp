@@ -57,6 +57,7 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/utility.h"
+#include "stream_menu.h"
 #include "utf_utils.h"
 
 // UDP_SEND_MSG_SIZE was added in the Windows 10 20H1 SDK
@@ -1349,6 +1350,9 @@ namespace platf {
   }
 
   void streaming_will_start() {
+    // §STREAM-MENU：第一個串流 session 開始——之後遠端輸入才會被檢查（是不是 VR 由 stream_menu 自己看）
+    stream_menu::session_started();
+
     ensure_wlanapi_loaded();
 
     // Enable MMCSS scheduling for DWM
@@ -1487,6 +1491,9 @@ namespace platf {
   }
 
   void streaming_will_stop() {
+    // §STREAM-MENU：最後一個串流 session 結束——停止攔截，還開著的選單一併關掉
+    stream_menu::session_stopped();
+
     // §PERF-1113-R2（A4）：start 丟到背景的工作做完之前不開始還原（§REVIEW-1111：start 與 stop 要成對、不可交錯）
     streaming_start_tasks_wait();
 

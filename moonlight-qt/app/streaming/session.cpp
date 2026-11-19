@@ -250,6 +250,9 @@ static int inputStallWatchdogProc(void*)
 #define SDL_CODE_GAMECONTROLLER_SET_CONTROLLER_LED 104
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
 #define SDL_CODE_VR_MESSAGE 106  // §VR：data1＝長度、data2＝SDL_malloc 的 TLV 副本
+// §REVIEW-1119：還在 SDL 佇列裡、沒被主迴圈處理的 VR 訊息數（見 clVrMessage）
+static std::atomic<int> s_VrMsgQueued{0};
+static constexpr int kVrMsgQueueMax = 256;
 // §VR M3a X3：XR 事件（X4 的 xrinput 會從 XR thread 推這些事件到 main loop）
 #define SDL_CODE_XR_RECENTER 107
 // §VR M3a X4：XR 射線滑鼠（XR frame thread → main loop → SdlInputHandler::handleXr*）
@@ -435,7 +438,8 @@ void Session::clConnectionTerminated(int errorCode)
         s_ActiveSession->m_UnexpectedSeen = true; s_ActiveSession->m_UnexpectedTermination = true;
 
         // We'll assume large errors are hex values
-        bool hexError = qAbs(errorCode) > 1000;
+        // §REVIEW-1119：qAbs(INT_MIN) 是有號溢位。錯誤碼來自終止封包，用範圍比較就好。
+        bool hexError = errorCode > 1000 || errorCode < -1000;
         emit s_ActiveSession->displayLaunchError(tr("Connection terminated") + "\n\n" +
                                                  tr("Error code: %1").arg(errorCode, hexError ? 8 : 0, hexError ? 16 : 10, QChar('0')));
         break;
@@ -603,7 +607,13 @@ void Session::clVrMessage(const uint8_t* tlv, int length)
 {
     // common-c 的 async callback 執行緒：複製 payload，一律包成 SDL_USEREVENT
     // 交給主執行緒處理（docs/vr_protocol.md §4.5）
-    if (tlv == nullptr || length <= 0) {
+    // §REVIEW-1119：呼叫端目前有擋 251，這裡再擋一次。長度來自封包，不能直接拿去 SDL_malloc。
+    if (tlv == nullptr || length <= 0 || length > VIPLE_VR_MAX_CTRL_PAYLOAD) {
+        return;
+    }
+    // §REVIEW-1119：主執行緒停住（或 host 灌訊息）時，這裡每一則配置一塊、SDL 佇列可以堆到六萬多筆。
+    // 佇列裡已經有 kVrMsgQueueMax 則還沒處理就丟掉新的（震動、狀態通知晚到也沒有用）。只多一次原子讀。
+    if (s_VrMsgQueued.load(std::memory_order_relaxed) >= kVrMsgQueueMax) {
         return;
     }
     // §REVIEW-1111：震動的重複副本在這裡就丟掉。host 預設每一則震動送三份（0／8／20 ms），每一份又走視訊連線與 ENet
@@ -632,13 +642,17 @@ void Session::clVrMessage(const uint8_t* tlv, int length)
     }
     memcpy(copy, tlv, (size_t)length);
 
-    SDL_Event event;
+    // §REVIEW-1119：沒清掉的話 windowID 等欄位是堆疊殘值，SDL 會整筆複製進佇列。
+    SDL_Event event = {};
     event.type = SDL_USEREVENT;
     event.user.code = SDL_CODE_VR_MESSAGE;
     event.user.data1 = (void*)(uintptr_t)length;
     event.user.data2 = copy;
     if (SDL_PushEvent(&event) <= 0) {
         SDL_free(copy);
+    }
+    else {
+        s_VrMsgQueued.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -936,9 +950,28 @@ void Session::clScHidFeatureRequest(uint8_t reportId, uint8_t op, uint8_t seq,
     // §SC-HID Phase 2C: host relays a Steam feature op to the real SC (transparent
     // proxy). forwardFeatureRequest replays it and returns the SC's response via
     // LiSendScHidFeatureReport (0x55000008), tagged with the same seq.
-    if (s_ActiveSession != nullptr) {
-        s_ActiveSession->m_ScHid.forwardFeatureRequest(reportId, op, seq, query, queryLen);
+    if (s_ActiveSession == nullptr) {
+        return;
     }
+    // §REVIEW-1119：sc_hid 只截長度就對實體裝置下 feature。
+    // op 不是 GET(1)/SET(2)、或 SET 卻沒有 type 位元組的，不要送出去。
+    // report id 不擋：不同世代的 Steam 手把與接收器用的 id 沒有實機清單，擋錯會讓手把失效。
+    // feature type 的白名單不在這裡做：Steam 正常會送的 opcode 沒有完整清單，擋錯會讓手把失效。
+    if ((op != 1 && op != 2) ||
+            (op == 2 && (query == nullptr || queryLen < 2))) {
+        static bool s_rejectLogged = false;
+        static Uint32 s_lastRejectLog = 0;
+        const Uint32 now = SDL_GetTicks();
+        if (!s_rejectLogged || (Uint32)(now - s_lastRejectLog) >= 1000) {
+            s_rejectLogged = true;
+            s_lastRejectLog = now;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[SC-HID] dropping feature request id=0x%02x op=%u seq=%u qlen=%u",
+                        reportId, (unsigned)op, seq, (unsigned)queryLen);
+        }
+        return;
+    }
+    s_ActiveSession->m_ScHid.forwardFeatureRequest(reportId, op, seq, query, queryLen);
 }
 
 
@@ -1409,6 +1442,88 @@ Session::~Session()
     SDL_DestroyMutex(m_DecoderLock);
 }
 
+// §REVIEW-1119：面積比較會把 1×16384 這類細長模式當成比 1080p 小，整組覆寫串流尺寸。
+// 單邊低於一般桌面，或長寬比超過 8（比三個 16:9 並排還寬）的不拿來當上限。
+// 偶數沒有強制：自訂解析度可以是奇數，這裡不改那種模式的行為。
+static bool usableHostDisplayMode(int width, int height)
+{
+    if (width < 320 || height < 240 || width > 16384 || height > 16384) {
+        return false;
+    }
+    if (width > height * 8 || height > width * 8) {
+        return false;
+    }
+    return true;
+}
+
+// §REVIEW-1119：LiHolePunch 會對字串呼叫 getaddrinfo。網域名稱會發 DNS，
+// 迴環、私網、鏈路本地、CGNAT、多播會對本機或內網送 UDP。打洞只留公網單播 IPv4。
+static bool publicUnicastStunIpv4(const QString& text)
+{
+    if (text.size() > 64) {
+        return false;
+    }
+    QHostAddress ha;
+    if (!ha.setAddress(text) || !ha.scopeId().isEmpty()) {
+        return false;
+    }
+    if (ha.protocol() == QAbstractSocket::IPv6Protocol) {
+        bool isV4 = false;
+        const quint32 v4 = ha.toIPv4Address(&isV4);
+        if (!isV4) {
+            return false;
+        }
+        ha = QHostAddress(v4);
+    }
+    if (ha.protocol() != QAbstractSocket::IPv4Protocol || ha.isLoopback() || ha.isLinkLocal() ||
+            ha.isMulticast() || ha.isPrivateUse() ||
+            ha == QHostAddress::Any || ha == QHostAddress::AnyIPv4 || ha == QHostAddress::Broadcast ||
+            ha.isInSubnet(QHostAddress(QStringLiteral("0.0.0.0")), 8) ||
+            ha.isInSubnet(QHostAddress(QStringLiteral("100.64.0.0")), 10)) {
+        return false;
+    }
+    return true;
+}
+
+// §REVIEW-1119：alt peer 會交給 common-c 探測。迴環與多播會打到本機。
+// 私網位址要留（區網第二張網卡）。不改寫成 toString()，送出去的字串維持原來的寫法。
+static bool usableQuicAltPeer(const QString& ip)
+{
+    if (ip.size() > 64) {
+        return false;
+    }
+    QHostAddress ha;
+    if (!ha.setAddress(ip)) {
+        // 不是位址字面值＝主機名稱（使用者手動加入的 DDNS 名稱會走到這裡）。照原本的行為放行，
+        // 只擋掉不可能是主機名稱的字元。
+        for (const QChar ch : ip) {
+            if (!(ch.isLetterOrNumber() && ch.unicode() < 0x80) && ch != QLatin1Char('.') && ch != QLatin1Char('-')) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (!ha.scopeId().isEmpty()) {
+        return false;
+    }
+    if (ha.protocol() == QAbstractSocket::IPv6Protocol) {
+        bool isV4 = false;
+        const quint32 v4 = ha.toIPv4Address(&isV4);
+        if (isV4) {
+            ha = QHostAddress(v4);
+        }
+    }
+    if (ha.isLoopback() || ha.isLinkLocal() || ha.isMulticast() ||
+            ha == QHostAddress::Any || ha == QHostAddress::AnyIPv4 ||
+            ha == QHostAddress::AnyIPv6 || ha == QHostAddress::Broadcast ||
+            (ha.protocol() == QAbstractSocket::IPv4Protocol &&
+             ha.isInSubnet(QHostAddress(QStringLiteral("0.0.0.0")), 8))) {
+        return false;
+    }
+    return ha.protocol() == QAbstractSocket::IPv4Protocol ||
+           ha.protocol() == QAbstractSocket::IPv6Protocol;
+}
+
 bool Session::initialize(QQuickWindow* qtWindow)
 {
     m_QtWindow = qtWindow;
@@ -1506,6 +1621,10 @@ bool Session::initialize(QQuickWindow* qtWindow)
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "[VIPLE-VR-SESSION] PCVR has no flat window to fall back to: %s", qUtf8Printable(m_VrNoFlatError));
         emit displayLaunchError(m_VrNoFlatError);
+        // §REVIEW-1119：decideVrRequest 可能已經佔住 XR。失敗直接 return 要等 QML 回收才還，下一場會拿不到。
+        destroyXrContext();
+        m_XrPcvr = false;
+        releaseXrOwner();
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return false;
     }
@@ -1527,18 +1646,33 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // Sunshine builds advertise host-display modes in /serverinfo (see VipleStream
     // §H.4 patch in nvhttp.cpp); GFE / NVIDIA servers advertise encoder-capable
     // modes instead, so the clamp is gated on the non-NV path.
-    if (!m_VrRequested && !m_Computer->isNvidiaServerSoftware && !m_Computer->displayModes.isEmpty()) {
-        int hostMaxW = 0;
-        int hostMaxH = 0;
-        // §REVIEW-1111（第二輪）：在鎖內複製一份再走訪——輪詢執行緒會整份換掉這個清單
-        QVector<NvDisplayMode> hostModes;
-        {
-            QReadLocker computerLock(&m_Computer->lock);
+    // §REVIEW-1119：isEmpty() 與 isNvidiaServerSoftware 原本在鎖外讀。輪詢執行緒在寫鎖裡整份換掉
+    // displayModes，鎖外讀 QVector 內部指標會用到已釋放的緩衝。先複製再判斷。
+    // gpuModel／gfeVersion 也是 QString，這個函式後面還會讀；鎖外讀一樣會用到已釋放的緩衝，同一把鎖裡一起複製。
+    bool hostIsNvidia = false;
+    bool hostSwitchable = false;
+    QVector<NvDisplayMode> hostModes;
+    QString hostGpuModel;
+    QString hostGfeVersion;
+    int hostCodecModes = 0;
+    {
+        QReadLocker computerLock(&m_Computer->lock);
+        hostIsNvidia = m_Computer->isNvidiaServerSoftware;
+        hostCodecModes = m_Computer->serverCodecModeSupport;
+        hostGpuModel = m_Computer->gpuModel;
+        hostGfeVersion = m_Computer->gfeVersion;
+        if (!m_VrRequested) {
+            hostSwitchable = m_Computer->displayModeSwitchable;
             hostModes = m_Computer->displayModes;
         }
+    }
+    if (!m_VrRequested && !hostIsNvidia && !hostModes.isEmpty()) {
+        int hostMaxW = 0;
+        int hostMaxH = 0;
         for (const NvDisplayMode &mode : std::as_const(hostModes)) {
-            if (mode.width <= 0 || mode.height <= 0 || mode.width > 16384 || mode.height > 16384) {
-                continue;  // 不合理的值不採用
+            // §REVIEW-1119：<=0 與 >16384 在 nvcomputer 已拿掉。這裡再擋細長與過小的模式。
+            if (!usableHostDisplayMode(mode.width, mode.height)) {
+                continue;
             }
             if ((long long)mode.width * mode.height > (long long)hostMaxW * hostMaxH) {
                 hostMaxW = mode.width;
@@ -1548,8 +1682,9 @@ bool Session::initialize(QQuickWindow* qtWindow)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-RES] Stream config requested: %dx%d; host advertises max: %dx%d (%s)",
                     m_StreamConfig.width, m_StreamConfig.height, hostMaxW, hostMaxH,
-                    m_Computer->displayModeSwitchable ? "switchable max" : "current mode");
+                    hostSwitchable ? "switchable max" : "current mode");
         if (hostMaxW > 0 && hostMaxH > 0 &&
+            m_StreamConfig.width > 0 && m_StreamConfig.height > 0 &&
             (long long)m_StreamConfig.width * m_StreamConfig.height >
                 (long long)hostMaxW * hostMaxH) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -1564,8 +1699,8 @@ bool Session::initialize(QQuickWindow* qtWindow)
                     "[VIPLE-RES] Stream config requested: %dx%d (host-display clamp skipped: %s)",
                     m_StreamConfig.width, m_StreamConfig.height,
                     m_VrRequested ? "VR packed frame" :
-                    (m_Computer->isNvidiaServerSoftware ? "NV server"
-                                                        : "host did not advertise DisplayMode"));
+                    (hostIsNvidia ? "NV server"
+                                  : "host did not advertise DisplayMode"));
     }
 
     int x, y, width, height;
@@ -1586,13 +1721,26 @@ bool Session::initialize(QQuickWindow* qtWindow)
                          SDL_GetError());
             // §REVIEW-1104：測試視窗兩次建立都失敗時補發 displayLaunchError
             emit displayLaunchError(tr("Failed to create window for hardware decode test: %1").arg(QString::fromUtf8(SDL_GetError())));
+            // §REVIEW-1119：同上，PCVR 的 XR 已經建好就不能留到 QML 回收。
+            destroyXrContext();
+            m_XrPcvr = false;
+            releaseXrOwner();
             SDL_QuitSubSystem(SDL_INIT_VIDEO);
             return false;
         }
     }
 
-    qInfo() << "Server GPU:" << m_Computer->gpuModel;
-    qInfo() << "Server GFE version:" << m_Computer->gfeVersion;
+    // §REVIEW-1119：這兩個字串來自 /serverinfo。換行與其他控制字元會把 log 拆成假的一行。
+    auto scrubServerLog = [](QString s) {
+        for (int i = 0; i < s.size(); ++i) {
+            if (s.at(i).unicode() < 0x20 || s.at(i).unicode() == 0x7F) {
+                s[i] = QChar(' ');
+            }
+        }
+        return s;
+    };
+    qInfo() << "Server GPU:" << scrubServerLog(hostGpuModel);
+    qInfo() << "Server GFE version:" << scrubServerLog(hostGfeVersion);
 
     LiInitializeVideoCallbacks(&m_VideoCallbacks);
     m_VideoCallbacks.setup = drSetup;
@@ -1630,11 +1778,10 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // VipleStream v1.4.153 §R2-γ-3: 主動 / 被動 兩條 server fps 路徑.
     //   主動 (default): server fps = UI / ratio, always-on dual/triple present.
     //   被動: server fps = UI (全推), client 端依 recv% 動態升 ratio.
+    // §REVIEW-1119：prefs 指標是行程位址，寫進會被分享的 log 就洩漏 ASLR。
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-PREFS] session FRUC gate: enableFrameInterpolation=%d "
-                "(prefs ptr=%p)",
-                (int)m_Preferences->enableFrameInterpolation,
-                (void*)m_Preferences);
+                "[VIPLE-PREFS] session FRUC gate: enableFrameInterpolation=%d",
+                (int)m_Preferences->enableFrameInterpolation);
     if (m_VrRequested) {
         // §VR：fps 一個 session 固定為 HMD 顯示 Hz；VR 不做 FRUC（renderer 端也以
         // LiGetVrFlags() 關掉），偏好設定本身不動（會被 save() 寫回）
@@ -1646,7 +1793,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
                     m_Preferences->enableFrameInterpolation ? "ignored" : "off");
     }
     else if (m_Preferences->enableFrameInterpolation && m_Preferences->enableYUV444 && m_Computer != nullptr &&
-             (m_Computer->serverCodecModeSupport &
+             (hostCodecModes &
               (SCM_H264_HIGH8_444 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)) != 0) {
         // §FRUC-444-FULLFPS（2026-11-12）：4:4:4 的畫面由 libplacebo 顯示，那條路沒有補幀（§FRUC-444-NOTICE 會提示）。
         // 原本照樣把 host 的幀率砍半，結果是「只有一半的幀率、也沒有補幀」（設定 60 實際 30 fps）。
@@ -1707,6 +1854,10 @@ bool Session::initialize(QQuickWindow* qtWindow)
                      "Invalid stream FPS: %d (preference FPS: %d)",
                      m_StreamConfig.fps, m_Preferences ? m_Preferences->fps : 0);
         emit displayLaunchError(tr("Invalid stream frame rate (%1 FPS).").arg(m_StreamConfig.fps));
+        // §REVIEW-1119：同上，失敗就還 XR，不要等 QML 回收 Session。
+        destroyXrContext();
+        m_XrPcvr = false;
+        releaseXrOwner();
         SDL_DestroyWindow(testWindow);
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return false;
@@ -1771,6 +1922,32 @@ bool Session::initialize(QQuickWindow* qtWindow)
             // Only the first 4 bytes are populated in the RI key IV
             RAND_bytes(reinterpret_cast<unsigned char*>(m_StreamConfig.remoteInputAesIv), 4) != 1) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "RAND_bytes() failed; cannot create the input encryption key");
+        // §REVIEW-1119：這條失敗路徑原本直接 return，測試視窗與 SDL video 參考計數都沒還，GUI／CLI 也看不到原因。
+        // 第一個 RAND_bytes 成功時金鑰已經寫進 remoteInputAesKey，不清會留到 QML 回收。
+        // PCVR 的 XR 在 decideVrRequest 就建好了，不還的話下一場拿不到 owner。
+#if defined(_WIN32)
+        SecureZeroMemory(m_StreamConfig.remoteInputAesKey, sizeof(m_StreamConfig.remoteInputAesKey));
+        SecureZeroMemory(m_StreamConfig.remoteInputAesIv, sizeof(m_StreamConfig.remoteInputAesIv));
+#elif defined(__linux__)
+        explicit_bzero(m_StreamConfig.remoteInputAesKey, sizeof(m_StreamConfig.remoteInputAesKey));
+        explicit_bzero(m_StreamConfig.remoteInputAesIv, sizeof(m_StreamConfig.remoteInputAesIv));
+#else
+        // macOS 沒有 explicit_bzero，跟 wipeStdString 一樣用 volatile 寫，編譯器不能省略
+        volatile unsigned char* wipe = reinterpret_cast<volatile unsigned char*>(m_StreamConfig.remoteInputAesKey);
+        for (size_t wi = 0; wi < sizeof(m_StreamConfig.remoteInputAesKey); ++wi) {
+            wipe[wi] = 0;
+        }
+        wipe = reinterpret_cast<volatile unsigned char*>(m_StreamConfig.remoteInputAesIv);
+        for (size_t wi = 0; wi < sizeof(m_StreamConfig.remoteInputAesIv); ++wi) {
+            wipe[wi] = 0;
+        }
+#endif
+        destroyXrContext();
+        m_XrPcvr = false;
+        releaseXrOwner();
+        emit displayLaunchError(tr("Failed to generate input encryption key."));
+        SDL_DestroyWindow(testWindow);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return false;
     }
 
@@ -1918,7 +2095,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
             // the number of reference frames, so we have to fixup the SPS
             // to allow decoding via VideoToolbox on macOS. Since we don't
             // have fixup code for HEVC, just avoid it if GFE is too old.
-            QVector<int> gfeVersion = NvHTTP::parseQuad(m_Computer->gfeVersion);
+            QVector<int> gfeVersion = NvHTTP::parseQuad(hostGfeVersion);
             if (gfeVersion.isEmpty() || // Very old versions don't have GfeVersion at all
                     gfeVersion.size() < 2 ||  // §REVIEW-1111（第二輪）：只有一段的版號不能讀第二段
                     gfeVersion[0] < 3 ||
@@ -2059,6 +2236,8 @@ bool Session::initialize(QQuickWindow* qtWindow)
             vrFallBackToFlat(tr("This device has no 8-bit HEVC or H.264 video decoder for VR streaming."));
             if (!m_VrNoFlatError.isEmpty()) {
                 emit displayLaunchError(m_VrNoFlatError);
+                // §REVIEW-1119：上面拆了 context，owner 還沒還。
+                releaseXrOwner();
                 SDL_DestroyWindow(testWindow);
                 SDL_QuitSubSystem(SDL_INIT_VIDEO);
                 return false;
@@ -2092,6 +2271,10 @@ bool Session::initialize(QQuickWindow* qtWindow)
     SDL_DestroyWindow(testWindow);
 
     if (!ret) {
+        // §REVIEW-1119：validateLaunch 或解碼器探測失敗時 XR 還在，不要等 QML 回收。
+        destroyXrContext();
+        m_XrPcvr = false;
+        releaseXrOwner();
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         return false;
     }
@@ -2111,8 +2294,19 @@ void Session::emitLaunchWarning(QString text)
 
 bool Session::validateLaunch(SDL_Window* testWindow)
 {
-    if (!m_Computer->isSupportedServerVersion) {
-        emit displayLaunchError(tr("The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.").arg(m_Computer->name));
+    // §REVIEW-1119：name／gfeVersion 是 QString。輪詢執行緒在寫鎖裡整份換掉，鎖外讀會用到已釋放的緩衝。
+    // 下面會做解碼器探測，不能一路持鎖。
+    QString hostName;
+    QString hostGfeVersion;
+    bool hostSupported = false;
+    {
+        QReadLocker computerLock(&m_Computer->lock);
+        hostName = m_Computer->name;
+        hostGfeVersion = m_Computer->gfeVersion;
+        hostSupported = m_Computer->isSupportedServerVersion;
+    }
+    if (!hostSupported) {
+        emit displayLaunchError(tr("The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.").arg(hostName));
         return false;
     }
 
@@ -2362,7 +2556,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
 
     if (m_StreamConfig.width >= 3840) {
         // Only allow 4K on GFE 3.x+
-        if (m_Computer->gfeVersion.isEmpty() || m_Computer->gfeVersion.startsWith("2.")) {
+        if (hostGfeVersion.isEmpty() || hostGfeVersion.startsWith("2.")) {
             emitLaunchWarning(tr("GeForce Experience 3.0 or higher is required for 4K streaming."));
 
             m_StreamConfig.width = 1920;
@@ -2449,6 +2643,82 @@ bool Session::validateLaunch(SDL_Window* testWindow)
 }
 
 
+// §REVIEW-1119：std::fill 寫完沒人再讀，最佳化可以整段刪掉。空字串的 data() 可能指到靜態結尾字元，不能寫。
+// §REVIEW-1119：QByteArray 解構不會把內容清成 0。空的 data() 可能指到共用的結尾，不能寫。
+static void wipeQByteArray(QByteArray& b)
+{
+    if (b.size() > 0) {
+#if defined(_WIN32)
+        SecureZeroMemory(b.data(), static_cast<size_t>(b.size()));
+#elif defined(__linux__)
+        explicit_bzero(b.data(), static_cast<size_t>(b.size()));
+#else
+        volatile char* p = b.data();
+        for (int i = 0; i < b.size(); ++i) {
+            p[i] = 0;
+        }
+#endif
+    }
+    b.clear();
+}
+
+static void wipeStdString(std::string& s)
+{
+    if (!s.empty()) {
+#if defined(_WIN32)
+        SecureZeroMemory(s.data(), s.size());
+#elif defined(__linux__)
+        explicit_bzero(s.data(), s.size());
+#else
+        // macOS 沒有 explicit_bzero：透過 volatile 指標寫，編譯器不能省略
+        volatile char* p = s.data();
+        for (size_t i = 0; i < s.size(); i++) {
+            p[i] = 0;
+        }
+#endif
+    }
+    s.clear();
+}
+
+// §REVIEW-1119：主迴圈結束後，clVrMessage、adaptive trigger、XR pad 的 SDL_malloc 不會再被釋放。
+// 要先把 SDL_USEREVENT 整段取完再放回其餘事件。一批 64 筆裡沒有要釋放的就停的話，前面先排了 64 筆別的事件，
+// 後面的 VR 訊息會漏掉；邊取邊放回則會一直重覆同一批。
+// producersStillRunning：主迴圈那次排水時控制執行緒還沒停，還在 SDL_PushEvent。不設上限的話對方一直灌，
+// 這個迴圈不返回，主執行緒走不到 LiStopConnection，沒有配置的事件也會從有上限的 SDL 佇列被搬進無上限的 keep。
+// LiStopConnection 已 join 那些執行緒之後再排的那次傳 false，佇列是有限的，要排完才不會漏掉最後一批。
+static void freeQueuedUserPayloads(bool producersStillRunning)
+{
+    QVector<SDL_Event> keep;
+    SDL_Event pending[64];
+    int n = 0;
+    int batches = 0;
+    while ((n = SDL_PeepEvents(pending, SDL_arraysize(pending), SDL_GETEVENT,
+                               SDL_USEREVENT, SDL_USEREVENT)) > 0) {
+        for (int i = 0; i < n; i++) {
+            if (pending[i].user.code == SDL_CODE_VR_MESSAGE ||
+                    pending[i].user.code == SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS) {
+                if (pending[i].user.code == SDL_CODE_VR_MESSAGE) {
+                    s_VrMsgQueued.fetch_sub(1, std::memory_order_relaxed);
+                }
+                SDL_free(pending[i].user.data2);
+            }
+            else if (pending[i].user.code == SDL_CODE_XR_PAD) {
+                SDL_free(pending[i].user.data1);
+            }
+            else {
+                keep.append(pending[i]);
+            }
+        }
+        if (producersStillRunning && ++batches >= 16) {
+            break;
+        }
+    }
+    if (!keep.isEmpty()) {
+        SDL_PeepEvents(keep.data(), static_cast<int>(keep.size()), SDL_ADDEVENT,
+                       SDL_USEREVENT, SDL_USEREVENT);
+    }
+}
+
 class DeferredSessionCleanupTask : public QRunnable
 {
 public:
@@ -2530,6 +2800,10 @@ private:
 
         // Finish cleanup of the connection state
         LiStopConnection();
+        // §REVIEW-1119：主迴圈那次排水時連線執行緒還能再推進帶 SDL_malloc 的事件。
+        // LiStopConnection 會等那些執行緒停，這裡再排一次才收得到最後那一批（視窗建立失敗、沒走到主迴圈排水的也靠這次）。
+        // 這次執行緒已停，不設上限，避免主迴圈那次為了不被灌住而提早停、漏掉剩下的。
+        freeQueuedUserPayloads(false);
 
         // VipleStream: tear down the relay UDP tunnel. LiStopConnection
         // has already closed all moonlight-common-c sockets so nothing
@@ -2650,6 +2924,11 @@ void Session::resolveAutoDisplayMode()
             hostModesCopy = m_Computer->displayModes;
         }
         for (const NvDisplayMode &mode : std::as_const(hostModesCopy)) {
+            // §REVIEW-1119：負值已在 nvcomputer 拿掉。細長模式與 1 Hz／上千 Hz 仍會把自動解析度或更新率壓壞。
+            if (!usableHostDisplayMode(mode.width, mode.height) ||
+                    mode.refreshRate < 20 || mode.refreshRate > 1000) {
+                continue;
+            }
             const long long area = (long long)mode.width * mode.height;
             if (area > (long long)hostW * hostH || (area == (long long)hostW * hostH && mode.refreshRate > hostHz)) {
                 hostW = mode.width;
@@ -2728,6 +3007,11 @@ void Session::applyXrDesktopAutoFps()
             hostModesCopy = m_Computer->displayModes;
         }
         for (const NvDisplayMode &mode : std::as_const(hostModesCopy)) {
+            // §REVIEW-1119：同 resolveAutoDisplayMode，不採用細長模式與不合理的更新率。
+            if (!usableHostDisplayMode(mode.width, mode.height) ||
+                    mode.refreshRate < 20 || mode.refreshRate > 1000) {
+                continue;
+            }
             const long long area = (long long)mode.width * mode.height;
             if (area > (long long)hostW * hostH || (area == (long long)hostW * hostH && mode.refreshRate > hostHz)) {
                 hostW = mode.width;
@@ -3096,9 +3380,12 @@ void Session::setupXrDesktop()
 #ifdef HAVE_OPENXR
     if (!m_Preferences->xrRuntimeJsonPath.isEmpty()) {
         // dev 覆寫（CLI --xr-runtime-json）：只影響這個行程，不是使用者設定（不變式 7）
-        qputenv("XR_RUNTIME_JSON", QFile::encodeName(m_Preferences->xrRuntimeJsonPath));
+        // §REVIEW-1119：log 只留檔名。完整路徑含家目錄，會進磁碟上的紀錄檔。
+        const QString xrJson = m_Preferences->xrRuntimeJsonPath;
+        const int slash = qMax(xrJson.lastIndexOf(QLatin1Char('/')), xrJson.lastIndexOf(QLatin1Char('\\')));
+        qputenv("XR_RUNTIME_JSON", QFile::encodeName(xrJson));
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev override: XR_RUNTIME_JSON=%s (in-process)",
-                    qUtf8Printable(m_Preferences->xrRuntimeJsonPath));
+                    qUtf8Printable(slash >= 0 ? xrJson.mid(slash + 1) : xrJson));
     }
     m_XrRebuildAttempt = 0;
     QString err;
@@ -3535,9 +3822,12 @@ bool Session::setupXrPcvr()
 {
 #ifdef HAVE_OPENXR
     if (!m_Preferences->xrRuntimeJsonPath.isEmpty()) {
-        qputenv("XR_RUNTIME_JSON", QFile::encodeName(m_Preferences->xrRuntimeJsonPath));
+        // §REVIEW-1119：同 setupXrDesktop，log 不印完整路徑。
+        const QString xrJson = m_Preferences->xrRuntimeJsonPath;
+        const int slash = qMax(xrJson.lastIndexOf(QLatin1Char('/')), xrJson.lastIndexOf(QLatin1Char('\\')));
+        qputenv("XR_RUNTIME_JSON", QFile::encodeName(xrJson));
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev override: XR_RUNTIME_JSON=%s (in-process)",
-                    qUtf8Printable(m_Preferences->xrRuntimeJsonPath));
+                    qUtf8Printable(slash >= 0 ? xrJson.mid(slash + 1) : xrJson));
     }
     m_XrPcvr = true;
     m_XrRebuildAttempt = 0;
@@ -3803,15 +4093,27 @@ bool Session::startConnectionAsync()
             bool flatMlAsked = false;
             m_StreamConfig.flatMultilink = 0;
             if (!m_VrRequested && (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_FLAT_ML)) {
+                // §REVIEW-1119：activeAddress 的字串同樣會被輪詢執行緒整份換掉。先複製再解析。
+                QString activeAddrCopy;
+                {
+                    QReadLocker computerLock(&m_Computer->lock);
+                    activeAddrCopy = m_Computer->activeAddress.address();
+                }
                 bool isV4 = false;
-                const quint32 a4 = QHostAddress(m_Computer->activeAddress.address()).toIPv4Address(&isV4);
+                const quint32 a4 = QHostAddress(activeAddrCopy).toIPv4Address(&isV4);
                 flatMlAsked = isV4 && ((a4 >> 24) == 10 || (a4 >> 20) == 0xAC1 || (a4 >> 16) == 0xC0A8);
                 // 這台裝置要有第二條路可用才要求：兩張以上的網卡和 host 的某個位址同網段（桌機的有線＋Wi-Fi），
                 // 或者是有串流轉接器熱點的頭盔（熱點在場次開始後才出現）。只有一條路時維持原本的傳輸（例如使用者開著的 MP-QUIC）
                 if (flatMlAsked) {
                     QVector<QHostAddress> hostAddrs;
-                    hostAddrs.append(QHostAddress(m_Computer->activeAddress.address()));
-                    for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
+                    QVector<NvNetworkInterface> advertisedIfaces;
+                    {
+                        // §REVIEW-1119：QVector 與 NvAddress 的字串會被輪詢執行緒整份換掉，鎖外走訪會用到已釋放的緩衝。
+                        QReadLocker computerLock(&m_Computer->lock);
+                        hostAddrs.append(QHostAddress(activeAddrCopy));
+                        advertisedIfaces = m_Computer->serverAdvertisedInterfaces;
+                    }
+                    for (const auto& iface : std::as_const(advertisedIfaces)) {
                         const QHostAddress ha(iface.address);
                         if (!ha.isNull() && ha.protocol() == QAbstractSocket::IPv4Protocol) {
                             hostAddrs.append(ha);
@@ -3841,8 +4143,9 @@ bool Session::startConnectionAsync()
                     }
                     std::string hsSsid, hsKey;
                     const bool frameHotspot = readVrHotspotCreds(&hsSsid, &hsKey);
-                    std::fill(hsSsid.begin(), hsSsid.end(), '\0');
-                    std::fill(hsKey.begin(), hsKey.end(), '\0');
+                    // §REVIEW-1119：std::fill 寫完沒人再讀，最佳化可以整段刪掉，熱點金鑰留在 SSO 或堆積。
+                    wipeStdString(hsSsid);
+                    wipeStdString(hsKey);
                     if (paired < 2 && !frameHotspot) {
                         flatMlAsked = false;
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -4048,8 +4351,14 @@ bool Session::startConnectionAsync()
                         "[VIPLE-NAT] UDP tunnel unavailable, falling back to direct UDP");
             delete m_UdpTunnel;
             m_UdpTunnel = nullptr;
-            if (!m_Computer->stunAddress.isNull() && !m_Computer->stunAddress.address().isEmpty()) {
-                hostnameStr = m_Computer->stunAddress.address().toUtf8();
+            // §REVIEW-1119：stunAddress 是 QString，輪詢執行緒會在寫鎖裡換掉。先複製再拿去當位址。
+            QString stunFallback;
+            {
+                QReadLocker computerLock(&m_Computer->lock);
+                stunFallback = m_Computer->stunAddress.address();
+            }
+            if (!stunFallback.isEmpty()) {
+                hostnameStr = stunFallback.toUtf8();
             } else {
                 hostnameStr = QByteArrayLiteral("127.0.0.1");
             }
@@ -4099,6 +4408,9 @@ bool Session::startConnectionAsync()
     QByteArray siAppVersion = m_Computer->appVersion.toUtf8();
 
     SERVER_INFORMATION hostInfo;
+    // §REVIEW-1119：沒有 GfeVersion 或 sessionUrl0 時那兩個指標原本是堆疊上的垃圾。
+    // LiStartConnection 會對 rtspSessionUrl 做 strrchr；不是 NULL 就會解到野指標。
+    LiInitializeServerInformation(&hostInfo);
     hostInfo.address = hostnameStr.data();
     hostInfo.serverInfoAppVersion = siAppVersion.data();
     hostInfo.serverCodecModeSupport = m_Computer->serverCodecModeSupport;
@@ -4249,33 +4561,78 @@ bool Session::startConnectionAsync()
                                                                          m_Preferences->enableFrameInterpolation);
     }
 
-    // VipleStream: If no STUN endpoint cached, try relay lookup
-    if (m_Computer->stunAddress.isNull() || m_Computer->stunAddress.address().isEmpty()) {
+    // VipleStream: If no STUN endpoint cached, try relay lookup.
+    // §REVIEW-1119：stun* 與 uuid 是 QString，輪詢執行緒在寫鎖裡換掉。lookup 最多 5 秒，不能持鎖。
+    // 已存的位址不在這裡清掉（輪詢與設定還在用）。不能當打洞目標的只拿掉這次的複本。
+    QString stunIp;
+    QString stunNat;
+    uint16_t stunPunch = 0;
+    uint16_t stunHttpPort = 0;
+    QString computerUuid;
+    {
+        QReadLocker computerLock(&m_Computer->lock);
+        stunIp = m_Computer->stunAddress.address();
+        stunHttpPort = m_Computer->stunAddress.port();
+        stunNat = m_Computer->stunNatType;
+        stunPunch = m_Computer->stunPunchPort;
+        computerUuid = m_Computer->uuid;
+    }
+    if (stunIp.isEmpty()) {
         QString relayUrl = m_Preferences->relayUrl;
         QString relayPsk = m_Preferences->relayPsk;
-        if (!relayUrl.isEmpty() && !m_Computer->uuid.isEmpty()) {
+        if (!relayUrl.isEmpty() && !computerUuid.isEmpty()) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] No cached STUN endpoint, querying relay: %s",
                         qPrintable(relayUrl));
 
-            auto result = RelayLookup::lookup(relayUrl, relayPsk, m_Computer->uuid, 5000);
-            if (result.success) {
-                // Use the STUN IP with default HTTP port for API access
-                uint16_t httpPort = m_Computer->activeAddress.port() > 0 ?
-                                    m_Computer->activeAddress.port() : 47989;
-                m_Computer->stunAddress = NvAddress(result.stunIp, httpPort);
-                m_Computer->stunNatType = result.natType;
-                m_Computer->stunPunchPort = result.stunPort;  // §REVIEW-1104：打洞用 relay 回報的實際埠
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-NAT] Relay provided endpoint: %s:%d",
-                            qPrintable(result.stunIp), httpPort);
+            auto result = RelayLookup::lookup(relayUrl, relayPsk, computerUuid, 5000);
+            // §REVIEW-1119：不是公網單播 IPv4 就不寫進去，也不拿去打洞。原文不印，避免換行灌進 log。
+            if (result.success && publicUnicastStunIpv4(result.stunIp)) {
+                uint16_t httpPort;
+                {
+                    QReadLocker computerLock(&m_Computer->lock);
+                    httpPort = m_Computer->activeAddress.port();
+                }
+                if (httpPort == 0) {
+                    httpPort = 47989;
+                }
+                {
+                    QWriteLocker computerLock(&m_Computer->lock);
+                    if (m_Computer->stunAddress.address().isEmpty()) {
+                        m_Computer->stunAddress = NvAddress(result.stunIp, httpPort);
+                        m_Computer->stunNatType = result.natType;
+                        m_Computer->stunPunchPort = result.stunPort;  // §REVIEW-1104：打洞用 relay 回報的實際埠
+                    }
+                    stunIp = m_Computer->stunAddress.address();
+                    stunHttpPort = m_Computer->stunAddress.port();
+                    stunNat = m_Computer->stunNatType;
+                    stunPunch = m_Computer->stunPunchPort;
+                }
+                // §REVIEW-1119：lookup 的幾秒內輪詢可能已經寫進別的位址。複本再驗一次才拿去打洞，也不把原文印進 log。
+                if (!publicUnicastStunIpv4(stunIp)) {
+                    stunIp.clear();
+                    LocalControlPort = 0;
+                }
+                else {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-NAT] Relay provided endpoint: %s:%d",
+                                qPrintable(stunIp), (int)stunHttpPort);
+                }
+            }
+            else if (result.success) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-NAT] Ignoring relay STUN endpoint that is not a public IPv4 address");
             }
         }
+    }
+    else if (!publicUnicastStunIpv4(stunIp)) {
+        stunIp.clear();
+        LocalControlPort = 0;
     }
 
     // VipleStream: Attempt hole punch if we have a STUN endpoint for the server.
     // This is best-effort — failure is not fatal (ENet will try connecting anyway).
-    if (!m_Computer->stunAddress.isNull() && !m_Computer->stunAddress.address().isEmpty()) {
+    if (!stunIp.isEmpty()) {
         // 連線目標若是私網（RFC1918）、loopback（LAN 直連、relay tunnel）
         // 或 CGNAT 100.64/10（Tailscale），NAT 打洞沒有意義——對 server 的
         // WAN IP 打洞必定 3 秒逾時（-4 no ACK），每場串流啟動固定多等 3 秒，
@@ -4293,7 +4650,7 @@ bool Session::startConnectionAsync()
             LocalControlPort = 0;
         }
         else {
-            QByteArray serverUuid = m_Computer->uuid.toUtf8().left(16);
+            QByteArray serverUuid = computerUuid.toUtf8().left(16);
             QByteArray clientUuid = QByteArray(16, 0);  // placeholder
             serverUuid.resize(16, 0);
 
@@ -4302,18 +4659,25 @@ bool Session::startConnectionAsync()
             // (see Sunshine/src/stream.h CONTROL_PORT = 10). Previously this sent
             // SYNs to the HTTP port where they were silently dropped.
             // §REVIEW-1104（使用者決策 B）：有 STUN 回報的實際埠就打它（NAT 換埠時 +10 會打錯）；舊版 server 沒給才退回 +10
-            uint16_t controlPort = m_Computer->stunPunchPort != 0 ?
-                                   m_Computer->stunPunchPort :
-                                   static_cast<uint16_t>(m_Computer->stunAddress.port() + 10);
+            // §REVIEW-1119：HTTP 埠大於 65525 時 +10 會繞回小埠。那種就不打。
+            const int portSum = stunPunch != 0 ? (int)stunPunch : (int)stunHttpPort + 10;
+            if (portSum <= 0 || portSum > 65535) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-NAT] Skipping hole punch: control port %d is outside 1..65535",
+                            portSum);
+                LocalControlPort = 0;
+            }
+            else {
+            const uint16_t controlPort = static_cast<uint16_t>(portSum);
 
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] Attempting hole punch to %s:%d (NAT: %s)",
-                        qPrintable(m_Computer->stunAddress.address()),
+                        qPrintable(stunIp),
                         controlPort,
-                        qPrintable(m_Computer->stunNatType));
+                        qPrintable(stunNat));
 
             int punchResult = LiHolePunch(
-                qPrintable(m_Computer->stunAddress.address()),
+                qPrintable(stunIp),
                 controlPort,
                 (const uint8_t *)serverUuid.constData(),
                 (const uint8_t *)clientUuid.constData(),
@@ -4332,6 +4696,7 @@ bool Session::startConnectionAsync()
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-NAT] LocalControlPort = %u (ENet client will bind to this)",
                         LocalControlPort);
+            }
         }
     }
 
@@ -4345,10 +4710,22 @@ bool Session::startConnectionAsync()
     // §VR-MULTILINK：多連線要知道 server 的每個位址，才能替 client 的每張網卡找到同子網路的那一個。
     // 沿用 MP-QUIC 的 alt peer 清單欄位（QUIC 本身在 VR session 維持關閉）。
     if ((m_VrRequested && (m_StreamConfig.vrFlags & VIPLE_VR_SF_MULTILINK)) || m_StreamConfig.flatMultilink) {
-        const QString activeAddr = m_Computer->activeAddress.address();
+        QString activeAddr;
+        QVector<NvNetworkInterface> advertisedIfaces;
+        NvAddress localAddress;
+        NvAddress manualAddress;
+        {
+            // §REVIEW-1119：同上面平面多連線，鎖外走訪 serverAdvertisedInterfaces 會用到已釋放的緩衝。
+            QReadLocker computerLock(&m_Computer->lock);
+            activeAddr = m_Computer->activeAddress.address();
+            advertisedIfaces = m_Computer->serverAdvertisedInterfaces;
+            localAddress = m_Computer->localAddress;
+            manualAddress = m_Computer->manualAddress;
+        }
         m_StreamConfig.quicAltPeerCount = 0;
         auto addPeer = [&](const QString& ip) {
-            if (ip.isEmpty() || ip == activeAddr || m_StreamConfig.quicAltPeerCount >= QUIC_MAX_ALT_PEERS) {
+            if (ip.isEmpty() || !usableQuicAltPeer(ip) || ip == activeAddr ||
+                    m_StreamConfig.quicAltPeerCount >= QUIC_MAX_ALT_PEERS) {
                 return;
             }
             for (int i = 0; i < m_StreamConfig.quicAltPeerCount; i++) {
@@ -4363,18 +4740,18 @@ bool Session::startConnectionAsync()
             memcpy(m_StreamConfig.quicAltPeers[m_StreamConfig.quicAltPeerCount], utf8.constData(), utf8.size() + 1);
             m_StreamConfig.quicAltPeerCount++;
         };
-        for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
+        for (const auto& iface : std::as_const(advertisedIfaces)) {
             addPeer(iface.address);
         }
-        if (!m_Computer->localAddress.isNull()) {
-            addPeer(m_Computer->localAddress.address());
+        if (!localAddress.isNull()) {
+            addPeer(localAddress.address());
         }
-        if (!m_Computer->manualAddress.isNull()) {
-            addPeer(m_Computer->manualAddress.address());
+        if (!manualAddress.isNull()) {
+            addPeer(manualAddress.address());
         }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-LINK] multi-link negotiated: %d other server address(es) known (advertised=%d)%s",
-                    m_StreamConfig.quicAltPeerCount, (int)m_Computer->serverAdvertisedInterfaces.size(),
+                    m_StreamConfig.quicAltPeerCount, (int)advertisedIfaces.size(),
                     (m_StreamConfig.vrFlags & VIPLE_VR_SF_MULTILINK_SELFTEST) ? " [selftest]" : "");
     }
     // Wire MP-QUIC preferences into stream config for moonlight-common-c
@@ -4388,11 +4765,26 @@ bool Session::startConnectionAsync()
         // 優先使用伺服器透過 /serverinfo 廣告的介面（最權威來源），
         // 再 fallback 到客戶端自己探測到的位址（向後相容舊版伺服器）。
         {
-            QString activeAddr = m_Computer->activeAddress.address();
+            QString activeAddr;
+            QVector<NvNetworkInterface> advertisedIfaces;
+            NvAddress localAddress;
+            NvAddress remoteAddress;
+            NvAddress manualAddress;
+            int vrCaps = 0;
+            {
+                // §REVIEW-1119：MP-QUIC 的 alt peer 來源同樣在輪詢執行緒的寫鎖裡被換掉。
+                QReadLocker computerLock(&m_Computer->lock);
+                activeAddr = m_Computer->activeAddress.address();
+                advertisedIfaces = m_Computer->serverAdvertisedInterfaces;
+                localAddress = m_Computer->localAddress;
+                remoteAddress = m_Computer->remoteAddress;
+                manualAddress = m_Computer->manualAddress;
+                vrCaps = m_Computer->vipleStreamVr;
+            }
             m_StreamConfig.quicAltPeerCount = 0;
 
             auto tryAdd = [&](const QString& ip) {
-                if (ip.isEmpty()) return;
+                if (ip.isEmpty() || !usableQuicAltPeer(ip)) return;
                 if (ip == activeAddr) return;  // 跳過當前使用的位址
                 // 去重：檢查是否已加入
                 for (int i = 0; i < m_StreamConfig.quicAltPeerCount; i++) {
@@ -4412,27 +4804,27 @@ bool Session::startConnectionAsync()
             };
 
             // 第一優先：伺服器廣告的介面（/serverinfo 的 NetworkInterface）
-            for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
+            for (const auto& iface : std::as_const(advertisedIfaces)) {
                 tryAdd(iface.address);
             }
             // §HOTSPOT-FLAT：頭盔熱點上已經連著的裝置（App 啟動時先開的熱點，host 的無線網卡多半已經連上）。
             // /serverinfo 的快取可能還是它連上之前的，這裡直接補。不是 host 的裝置只會多一次沒有回應的探測
-            if (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT) {
+            if (vrCaps & VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT) {
                 for (const std::string& ip : FrameHotspot::peerAddresses()) {
                     tryAdd(QString::fromStdString(ip));
                 }
             }
 
             // 第二優先：客戶端探測到的位址（向後相容無 §MP-ADV 的舊版伺服器）
-            tryAddAddr(m_Computer->localAddress);
-            tryAddAddr(m_Computer->remoteAddress);
-            tryAddAddr(m_Computer->manualAddress);
+            tryAddAddr(localAddress);
+            tryAddAddr(remoteAddress);
+            tryAddAddr(manualAddress);
 
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-MPQUIC] Enabled (scheduler=%d, port=%d, cc=BBR, altPeers=%d, serverAdvertised=%d)",
                         m_StreamConfig.quicScheduler, m_StreamConfig.quicPort,
                         m_StreamConfig.quicAltPeerCount,
-                        m_Computer->serverAdvertisedInterfaces.size());
+                        advertisedIfaces.size());
             for (int i = 0; i < m_StreamConfig.quicAltPeerCount; i++) {
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-MPQUIC]   altPeer[%d]: %s",
@@ -4550,6 +4942,9 @@ bool Session::startConnectionAsync()
             if (readVrHotspotCreds(&ssid, &key)) {
                 m_FrameHotspot.openForLan(ssid, key, m_Computer->uuid.toStdString());
             }
+            // §REVIEW-1119：非 Linux 的 openForLan 不會清這兩串。Linux 上它會先 scrub 再 clear，這裡 size 已是 0，不會再寫。
+            wipeStdString(ssid);
+            wipeStdString(key);
         }
     }
     // §WIFI-SCANBLOCK：Steam Frame 上串流期間擋住 Wi-Fi 背景掃描（和 Steam 內建串流同一個做法）；其他平台什麼都不做
@@ -5441,6 +5836,7 @@ void Session::exec()
                 handleXrRebuild((uint32_t)(uintptr_t)event.user.data1);
                 break;
             case SDL_CODE_VR_MESSAGE:
+                s_VrMsgQueued.fetch_sub(1, std::memory_order_relaxed);
                 handleVrMessage((const uint8_t*)event.user.data2, (int)(uintptr_t)event.user.data1);
                 SDL_free(event.user.data2);
                 break;
@@ -5798,28 +6194,9 @@ void Session::exec()
 
 DispatchDeferredCleanup:
     // §VR：主迴圈已結束，佇列裡還沒處理的 VR_S2C 副本（clVrMessage 以 SDL_malloc 複製）
-    // 不會再被 handleVrMessage 釋放，在這裡取出並釋放。其他 user event 放回佇列。
-    {
-        SDL_Event pending[64];
-        int n;
-        while ((n = SDL_PeepEvents(pending, SDL_arraysize(pending), SDL_GETEVENT,
-                                   SDL_USEREVENT, SDL_USEREVENT)) > 0) {
-            bool freedAny = false;
-            for (int i = 0; i < n; i++) {
-                if (pending[i].user.code == SDL_CODE_VR_MESSAGE ||
-                    pending[i].user.code == SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS) {
-                    SDL_free(pending[i].user.data2);
-                    freedAny = true;
-                }
-                else {
-                    SDL_PushEvent(&pending[i]);
-                }
-            }
-            if (!freedAny) {
-                break;  // 剩下的都不是 VR 訊息（已放回佇列），避免無限迴圈
-            }
-        }
-    }
+    // 不會再被 handleVrMessage 釋放。連線執行緒還沒停，最多排 16 批就停，避免對方一直灌就走不到 LiStopConnection。
+    // LiStopConnection 之後還會再排一次（那次不設上限）。
+    freeQueuedUserPayloads(true);
 
     // §INPUT-STALL：收 watchdog
     s_StallWatchdogRun.store(false);
@@ -5918,14 +6295,32 @@ bool Session::readVrHotspotCreds(std::string* ssid, std::string* key)
     if (!file.open(QIODevice::ReadOnly)) {
         return false;
     }
-    const QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+    // §REVIEW-1119：這個檔正常只有幾百 bytes。readAll 遇到被換成大檔會一次配出整份。
+    if (file.size() > 4096) {
+        return false;
+    }
+    QByteArray raw = file.read(4096);
+    const bool truncated = raw.size() == 4096 && !file.atEnd();
+    file.close();
+    if (truncated) {
+        wipeQByteArray(raw);
+        return false;
+    }
+    const QJsonObject obj = QJsonDocument::fromJson(raw).object();
+    wipeQByteArray(raw);
     // 自動開只認 6 GHz 的那一種（指令格式固定是 hbs6）
     if (!obj.value(QStringLiteral("band")).toString().contains(QStringLiteral("6G"), Qt::CaseInsensitive)) {
         return false;
     }
     *ssid = obj.value(QStringLiteral("ssid")).toString().toStdString();
     *key = obj.value(QStringLiteral("key")).toString().toStdString();
-    return !ssid->empty() && !key->empty();
+    if (ssid->empty() || key->empty()) {
+        // 只寫進其中一欄就失敗時，另一欄的明文不能留在呼叫端的 string 裡
+        wipeStdString(*ssid);
+        wipeStdString(*key);
+        return false;
+    }
+    return true;
 }
 
 void Session::checkAndSendVrHotspotInfo()
@@ -5965,11 +6360,16 @@ void Session::checkAndSendVrHotspotInfo()
     if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
         return;
     }
+    // §REVIEW-1119：同 readVrHotspotCreds，不要把整份檔讀進記憶體。
+    if (file.size() > 4096) {
+        return;
+    }
 
     ZQa rawJson;
-    rawJson.b = file.readAll();
+    rawJson.b = file.read(4096);
+    const bool truncated = rawJson.b.size() == 4096 && !file.atEnd();
     file.close();
-    if (rawJson.b.isEmpty()) {
+    if (truncated || rawJson.b.isEmpty()) {
         return;
     }
 

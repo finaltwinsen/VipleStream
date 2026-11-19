@@ -1188,8 +1188,10 @@ QString XrVrControllers::takeStatsLine()
         m_StatSnapN = 0;
         m_StatSnapMaxUs = 0;
     }
-    const uint32_t applied = m_StatHapticApplied, failed = m_StatHapticFailed, dropped = m_StatHapticDropped;
-    m_StatHapticApplied = m_StatHapticFailed = m_StatHapticDropped = 0;
+    const uint32_t applied = m_StatHapticApplied, failed = m_StatHapticFailed;
+    // §REVIEW-1119：main thread 在佇列滿時 ++。先讀再寫 0 是兩次操作，中間的增量會被這次歸零蓋掉。
+    const uint32_t dropped = m_StatHapticDropped.exchange(0, std::memory_order_relaxed);
+    m_StatHapticApplied = m_StatHapticFailed = 0;
     // 2026-10-05：尾端加速度有效率（%）與最大值，前段欄位順序不變
     auto velText = [](const VelStat& v) {
         auto pct = [&v](uint32_t k) { return v.samples ? 100.0 * k / v.samples : 0.0; };
@@ -1201,10 +1203,12 @@ QString XrVrControllers::takeStatsLine()
             .arg(static_cast<double>(v.angMax), 0, 'f', 2);
     };
     QString velLine = QStringLiteral(" | vel L %1 | vel R %2").arg(velText(vel[0]), velText(vel[1]));
-    if (m_KbOpen || m_StatKbKeys != 0) {
+    // §REVIEW-1119：moves 也是這個 10 秒視窗的次數。只拖動、沒按鍵就關掉時原本不印也不歸零，下一窗會把舊次數再印一次。
+    if (m_KbOpen || m_StatKbKeys != 0 || m_StatKbDrags != 0) {
         // §VR-KBD：只記數量，不記按了哪些鍵
         velLine += QStringLiteral(" | kbd %1 keys=%2 moves=%3").arg(m_KbOpen ? QStringLiteral("open") : QStringLiteral("closed")).arg(m_StatKbKeys).arg(m_StatKbDrags);
         m_StatKbKeys = 0;
+        m_StatKbDrags = 0;
     }
     if (snapN != 0) {
         // §PERF-1113：尾端加一欄，前段欄位順序不變

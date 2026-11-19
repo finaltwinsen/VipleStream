@@ -293,7 +293,16 @@ public:
     // ── §VR-PLAYER（V2，180°／360°）──
     // 任何執行緒：開著時影像 render thread 不畫進影像 swapchain，改畫進自己的全景材質（兩張輪流）；XR frame thread
     // 每一格用 renderImmersive() 依兩眼這一格的姿態從它畫出投影影像（頭轉到哪裡就畫哪裡）
-    void setImmersive(bool on) { m_Immersive.store(on, std::memory_order_release); }
+    void setImmersive(bool on)
+    {
+        m_Immersive.store(on, std::memory_order_release);
+        if (!on) {
+            // §REVIEW-1119：切回平面不清這個索引的話，下一次開全景、新的一幀還沒畫完，
+            // immersiveReady() 仍為真，頭盔會先顯示上一部全景的最後一幀。
+            std::lock_guard<std::mutex> lk(m_EquiMutex);
+            m_EquiReady = -1;
+        }
+    }
     // 至少有一張全景影像
     bool immersiveReady();
     // XR frame thread：proj 1＝180°、2＝360°、3＝360° 等角立方體（EAC）；stereo 0 單眼、1 左右、2 上下；yawRad＝內容正前方的朝向（LOCAL 空間，
@@ -320,6 +329,9 @@ private:
         int height = 0;
         std::vector<pl_tex> wrapped;
         uint64_t generation = 0;
+        // §REVIEW-1119：acquire 成功但 wait 還沒回到 XR_SUCCESS 的影像索引，-1＝沒有。
+        // 留著讓下一張繼續等同一張；再 acquire 會拿到新索引，wait 卻等舊的那張，寫入和 release 就錯位。
+        int pendingWait = -1;
     };
 
     bool ensureSwapchain(XrSession session, int width, int height);
@@ -330,7 +342,7 @@ private:
     bool renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex swTex, int fw, int fh,
                      bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, bool* synthOk, VIPLE_VR_FRAME_META* synthMeta);
     // mboxUs＝這一幀在 mailbox 裡等了多久（只進統計）
-    bool renderNewFrame(AVFrame* frame, uint32_t mboxUs);
+    bool renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive);
     void bufferMaybeLog();  // §VR-BUFFER
     // §VR-PLAYER（V2）：全景模式下的 renderNewFrame（畫進 m_Equi，不碰影像 swapchain）
     bool renderEquiFrame(AVFrame* frame, uint64_t t0);
@@ -363,7 +375,7 @@ private:
     void dumpTexture(pl_tex tex, const QString& path);
     // dev（--xr-dump-frame）：把 tex 讀回成縮過的影像（最長邊 ≤ 1280；失敗回空的影像）；saveDump 存檔並印一行。
     // 分成兩步是為了 §VR-SYNTH：第一次發布的那一張要在 hold 之前讀回，等確定這一幀有合成影像才存。
-    QImage readbackTexture(pl_tex tex);
+    QImage readbackTexture(pl_tex tex, bool forceRgba = false);
     void saveDump(const QImage& img, const QString& path, int srcW, int srcH);
     // dev（--xr-dump-frame，補幀開著時）：把這一張估位移用到的東西也存下來——上一張與這一張的 1/8 縮圖（PNG）和位移場
     // （原始資料：寬×高×4 個 float16，xy＝剩餘位移（UV，上一張的位置 − 這一張的位置）、z＝比對成本）。存下來的那一組
@@ -397,7 +409,10 @@ private:
     int64_t m_PrevPts = 0;
     int64_t m_NominalDelta = 0;  // §REVIEW-1104：補幀的幀間隔基準；原本是函式 static，換一場不會歸零
     int m_FrameH = 0;                // 一張影像的高度（synth 時 swapchain 是它的兩倍）
-    bool m_SynthFailed = false;      // shader 或材質建立失敗過：這個 session 不再試
+    // shader 或材質建立失敗過：這個 session 不再試。
+    // §REVIEW-1119：takeStatsDeferred 在 m_StatsMutex 裡讀。寫入（都在失敗路徑）也拿同一把鎖；
+    // 影像 render thread 自己每幀讀，和寫入同一條執行緒，不必為了讀去拿鎖。
+    bool m_SynthFailed = false;
     uint64_t m_FirstShownSeq = 0;    // XR thread（m_SwMutex 內）：已經顯示過一次的 seq
     uint64_t m_SynthDrawn = 0;       // m_StatsMutex
     std::atomic<uint64_t> m_SynthShown{0};
@@ -516,7 +531,8 @@ private:
     bool m_StopThread = false;
     std::thread m_Thread;
     uint64_t m_FirstSubmitUs = 0;          // stall 測試的起點（submit 端）
-    uint64_t m_TestStallDropped = 0;
+    // §REVIEW-1119：decoder 執行緒在 submit() 遞增，XR frame thread 在 takeStatsDeferred 讀。一般整數會資料競爭。
+    std::atomic<uint64_t> m_TestStallDropped{0};
     uint64_t m_NoMetaDropped = 0;  // M4a R4：requireMeta 時丟掉的無 meta 幀（累計）
     bool m_TestStallLogged = false;
     xrlatch::Jitter m_Jitter;      // §VR-LDIAG（dev）：只在影像 render thread 用（init() 設定，之後不變）

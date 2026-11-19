@@ -715,6 +715,13 @@ unix:!macx:openxr {
 win32:openxr {
     message(OpenXR loader enabled (vcpkg))
 
+    # §REVIEW-1119：為什麼先擋——VCPKG_ROOT 是空的時候路徑會變成磁碟根目錄下的 installed，
+    # 共用建置機可能撈到別人放的標頭或函式庫。
+    VCPKG_ROOT_ENV = $$(VCPKG_ROOT)
+    isEmpty(VCPKG_ROOT_ENV) {
+        error("VCPKG_ROOT must be set for the Windows OpenXR build")
+    }
+
     INCLUDEPATH += $$(VCPKG_ROOT)/installed/x64-windows/include
     LIBS += -L$$(VCPKG_ROOT)/installed/x64-windows/lib -lopenxr_loader
     DEFINES += HAVE_OPENXR
@@ -819,6 +826,11 @@ contains(DEFINES, VIPLE_MPQUIC) {
     LIBS += -lpicotls-minicrypto
     unix:!macx: LIBS += -lssl -lcrypto
     win32 {
+        # §REVIEW-1119：為什麼先擋——同上，空的 VCPKG_ROOT 會去磁碟根目錄找 OpenSSL。
+        VCPKG_ROOT_ENV = $$(VCPKG_ROOT)
+        isEmpty(VCPKG_ROOT_ENV) {
+            error("VCPKG_ROOT must be set for the Windows MP-QUIC build")
+        }
         VCPKG_LIB = $$(VCPKG_ROOT)/installed/x64-windows/lib
         LIBS += -L$$VCPKG_LIB -llibssl -llibcrypto
         LIBS += -lws2_32 -lbcrypt -lcrypt32 -ladvapi32

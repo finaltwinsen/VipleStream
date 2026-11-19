@@ -44,17 +44,40 @@ inline QString pickLanguage(const QString& body, const QString& localeName)
     return en.isEmpty() ? zh : en;
 }
 
+// §REVIEW-1119：原本用 `.*\]\(#[^)]*\).*` 濾語言列。一行裡堆很多 `](#` 又沒有右括號時，
+// 兩個 `.*` 會在介面執行緒上二次方回溯。分隔線與「](#…)」都改成線性掃描，結果與原本相同。
+inline bool isReleaseChromeLine(const QString& line)
+{
+    if (line.size() >= 3) {
+        bool dashes = true;
+        for (int i = 0; i < line.size(); ++i) {
+            if (line.at(i) != QLatin1Char('-')) {
+                dashes = false;
+                break;
+            }
+        }
+        if (dashes) {
+            return true;
+        }
+    }
+    const int mark = line.indexOf(QLatin1String("](#"));
+    return mark >= 0 && line.indexOf(QLatin1Char(')'), mark + 3) >= 0;
+}
+
 inline QString summarize(const QString& body, const QString& localeName = QString())
 {
     static const QRegularExpression whatsNew(QStringLiteral("^#{2,4}\\s*(what'?s new|新功能|更新內容)"),
                                              QRegularExpression::CaseInsensitiveOption);
-    // 語言切換列（「**English** · [繁體中文](#…)」）與分隔線不是內容
-    static const QRegularExpression chrome(QStringLiteral("^(-{3,}|.*\\]\\(#[^)]*\\).*)$"));
-    const QString text = pickLanguage(body, localeName);
+    // 正規的 release notes 遠小於這個上限；再長就先截斷，避免 split 與逐行掃描吃完整包。
+    QString bounded = body;
+    if (bounded.size() > 256 * 1024) {
+        bounded.truncate(256 * 1024);
+    }
+    const QString text = pickLanguage(bounded, localeName);
     QStringList lines;
     const QStringList rawLines = text.split(QLatin1Char('\n'));
     for (const QString& l : rawLines) {
-        if (!chrome.match(l.trimmed()).hasMatch()) {
+        if (!isReleaseChromeLine(l.trimmed())) {
             lines << l;
         }
     }

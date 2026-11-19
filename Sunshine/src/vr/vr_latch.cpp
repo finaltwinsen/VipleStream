@@ -524,6 +524,10 @@ namespace vr::latch {
     // pacing（通常是切換後第一則新幀的 LATCH），那一次寫入會讓 bridge 把還沒結束的 burst 取消掉。
     v3_abort_round();
     refill_pending_ = false;  // §VR-BUFFER-REFILL：排定、還沒發的那一次作廢（盲區同上，不取消）
+    // §REVIEW-1119：v2 的一次到位／補緩衝用的是另一個盲區。換到 v3 時把它帶過來，v3 才會等那個 burst 走完再取樣本。
+    if (mode == mode_e::v3 && refill_blind_until_ns_ > blind_until_ns_) {
+      blind_until_ns_ = refill_blind_until_ns_;
+    }
   }
 
   // ── §VR-LATCH-V2-ACQ ─────────────────────────────────────────────────
@@ -651,6 +655,11 @@ namespace vr::latch {
 
   bool controller_t::can_step(int64_t now_ns) const {
     if (!options_.acquire || now_ns < no_step_until_ns_) {
+      return false;
+    }
+    // §REVIEW-1119：v3 的步進與 v2 的一次到位／補緩衝各有自己的盲區。中途換模式時，另一種模式的 burst 還在 bridge 那邊走，
+    // 這時再發一步會疊在一起。兩個盲區都過了才可以步進（同一種模式下這兩個條件原本就成立，行為不變）。
+    if (now_ns < blind_until_ns_ || now_ns < refill_blind_until_ns_) {
       return false;
     }
     // 任何 60 s 內最多 kV3StepsPerMin 步

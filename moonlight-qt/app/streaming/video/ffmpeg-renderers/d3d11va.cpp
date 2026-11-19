@@ -226,7 +226,11 @@ void D3D11VARenderer::initFrameDump()
 void D3D11VARenderer::teardownFrameDump()
 {
     if (m_FrameDumpWriterThread.joinable()) {
-        m_FrameDumpStop.store(true, std::memory_order_release);
+        {
+            // §REVIEW-1119：wait 的條件要在同一把 mutex 底下改。沒鎖就 notify，寫檔執行緒可能已經看過停止旗標是 false、還沒睡進 wait，喚醒會漏掉，join 就停住。
+            std::lock_guard<std::mutex> lk(m_FrameDumpQueueMutex);
+            m_FrameDumpStop.store(true, std::memory_order_release);
+        }
         m_FrameDumpQueueCv.notify_all();
         m_FrameDumpWriterThread.join();
     }
@@ -248,6 +252,42 @@ void D3D11VARenderer::dumpBackbufferIfActive(const char* slotLabel)
     ComPtr<ID3D11Texture2D> backbuffer;
     HRESULT hr = m_SwapChain->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
     if (FAILED(hr)) return;
+
+    // §REVIEW-1119：縮放後 staging 還是舊尺寸。CopyResource 對不上是靜默無效，接著 Map 會把沒寫過的內容存成 BMP。
+    // 只在尺寸或格式變了才重建；正常傾印不多配置。10-bit 本來就不支援。
+    if (!m_FrameDumpStaging) {
+        return;
+    }
+    D3D11_TEXTURE2D_DESC bbDesc = {};
+    backbuffer->GetDesc(&bbDesc);
+    if (bbDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ||
+            bbDesc.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS ||
+            bbDesc.Width == 0 || bbDesc.Height == 0) {
+        return;
+    }
+    D3D11_TEXTURE2D_DESC stDesc = {};
+    m_FrameDumpStaging->GetDesc(&stDesc);
+    if (bbDesc.Width != stDesc.Width || bbDesc.Height != stDesc.Height || bbDesc.Format != stDesc.Format) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = bbDesc.Width;
+        desc.Height = bbDesc.Height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = bbDesc.Format;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        hr = m_RenderDevice->CreateTexture2D(&desc, nullptr, &staging);
+        if (FAILED(hr)) {
+            return;
+        }
+        m_FrameDumpStaging = std::move(staging);
+        m_FrameDumpStagingFormat = bbDesc.Format;
+        m_FrameDumpSwizzleBR = (bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                                bbDesc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+                                bbDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+    }
 
     // Copy backbuffer → staging.  CopyResource is on the render device
     // context (graphics queue).  m_FrameDumpStaging is sized to display.
@@ -273,7 +313,6 @@ void D3D11VARenderer::dumpBackbufferIfActive(const char* slotLabel)
 
     // Build job from mapped pixels.  Use staging dimensions (== swapchain
     // size, may differ from m_DisplayWidth in resized window cases).
-    D3D11_TEXTURE2D_DESC stDesc = {};
     m_FrameDumpStaging->GetDesc(&stDesc);
     FrameDumpJob job;
     job.width  = stDesc.Width;
@@ -341,6 +380,8 @@ D3D11VARenderer::~D3D11VARenderer()
     teardownFrameDump();
 
     // VipleStream: Cleanup FRUC
+    m_FRUCPub.store(nullptr);         // §REVIEW-1119：先收回給其他執行緒看的副本
+    m_GenericFRUCPub.store(nullptr);
     if (m_FRUC) {
         delete m_FRUC;
         m_FRUC = nullptr;
@@ -1025,6 +1066,28 @@ bool D3D11VARenderer::prepareDecoderContextInGetFormat(AVCodecContext *context, 
         d3d11vaFramesContext->MiscFlags |= D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
     }
 
+    // §REVIEW-1119：av_hwframe_ctx_init 才會真的配置貼圖陣列。寬高或 pool 在那之後才擋，惡意 SPS 已經把 VRAM 吃掉。
+    // 256 是編碼區塊對齊的寬容（HEVC CTU、AV1 superblock），不是另一組解析度。pool 上限留白給參考幀，正常串流遠低於它。
+    const int pool = framesContext->initial_pool_size;
+    int maxW = 16384;
+    int maxH = 16384;
+    if (m_DecoderParams.width > 0 && m_DecoderParams.width < 16384 - 256) {
+        maxW = m_DecoderParams.width + 256;
+    }
+    if (m_DecoderParams.height > 0 && m_DecoderParams.height < 16384 - 256) {
+        maxH = m_DecoderParams.height + 256;
+    }
+    if (framesContext->width <= 0 || framesContext->height <= 0 ||
+            framesContext->width > maxW || framesContext->height > maxH ||
+            pool <= 0 || pool > 128) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "D3D11VA hwframes rejected: %dx%d pool=%d (negotiated %dx%d)",
+                     framesContext->width, framesContext->height, pool,
+                     m_DecoderParams.width, m_DecoderParams.height);
+        av_buffer_unref(&context->hw_frames_ctx);
+        return false;
+    }
+
     // Mimic the logic in ff_decode_get_hw_frames_ctx() which adds an extra 3 frames
     if (framesContext->initial_pool_size) {
         framesContext->initial_pool_size += 3;
@@ -1074,6 +1137,15 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
     // access from inside FFmpeg's decoding code
     if (m_DecodeDevice == m_RenderDevice) {
         lockContext(this);
+    }
+
+    // §REVIEW-1119：ResizeBuffers 失敗時 RTV 已經放掉，呼叫端要等解鎖後才重建解碼器。
+    // 這段空窗不能把空指標交給 ClearRenderTargetView。正常情況只多一次比較。
+    if (!m_RenderTargetView) {
+        if (m_DecodeDevice == m_RenderDevice) {
+            unlockContext(this);
+        }
+        return;
     }
 
     const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -1132,10 +1204,12 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         static std::atomic<bool> s_FrucGateLogged{false};
         bool expected = false;
         if (s_FrucGateLogged.compare_exchange_strong(expected, true)) {
+            // §REVIEW-1119：%p 會把堆積位址寫進一般日誌。這個閘門只需要知道指標在不在。
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-FRUC] D3D11 gate (first frame): enable=%d vrFlags=0x%x fruc=%p generic=%p initFailed=%d prefs=%p",
+                        "[VIPLE-FRUC] D3D11 gate (first frame): enable=%d vrFlags=0x%x fruc=%d generic=%d initFailed=%d hasPrefs=%d",
                         (int)StreamingPreferences::get(nullptr)->enableFrameInterpolation, (unsigned)LiGetVrFlags(),
-                        (void*)m_FRUC, (void*)m_GenericFRUC, (int)m_FRUCInitFailed, (void*)StreamingPreferences::get(nullptr));
+                        (int)(m_FRUC != nullptr), (int)(m_GenericFRUC != nullptr), (int)m_FRUCInitFailed,
+                        (int)(StreamingPreferences::get(nullptr) != nullptr));
         }
     }
     // §VR：VR session 不做 FRUC（幀與 0x81 pose 一一對應，補幀會破壞配對）
@@ -1569,6 +1643,10 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
 
 void D3D11VARenderer::renderOverlay(Overlay::OverlayType type)
 {
+    // §REVIEW-1119：type 直接當浮層陣列索引。繪製迴圈本身有上限，這裡再擋一次越界。
+    if (type < 0 || type >= Overlay::OverlayMax) {
+        return;
+    }
     if (!Session::get()->getOverlayManager().isOverlayEnabled(type)) {
         return;
     }
@@ -1650,13 +1728,24 @@ void D3D11VARenderer::bindVideoVertexBuffer(bool frameChanged, AVFrame* frame)
         D3D11_SUBRESOURCE_DATA vbData = {};
         vbData.pSysMem = verts;
 
-        HRESULT hr = m_RenderDevice->CreateBuffer(&vbDesc, &vbData, &m_VideoVertexBuffer);
+        // §REVIEW-1119：ComPtr 的 operator& 會先放掉舊緩衝。先建在區域變數，成功才換上，失敗時上一張頂點緩衝還在。
+        ComPtr<ID3D11Buffer> newVertexBuffer;
+        HRESULT hr = m_RenderDevice->CreateBuffer(&vbDesc, &vbData, &newVertexBuffer);
         if (FAILED(hr)) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "ID3D11Device::CreateBuffer() failed: %x",
                          hr);
-            return;
+            // §REVIEW-1119：這裡直接 return 會跳過下面的 IASetVertexBuffers。上一幀的浮層或補幀
+            // 已經把 IA slot 0 換成別的頂點緩衝；舊的視訊緩衝還在就要重新綁上，否則 DrawIndexed 用錯幾何。
         }
+        else {
+            m_VideoVertexBuffer = std::move(newVertexBuffer);
+        }
+    }
+
+    // §REVIEW-1119：第一次建立就失敗時沒有舊緩衝可綁，交給 renderVideo 跳過 DrawIndexed。
+    if (!m_VideoVertexBuffer) {
+        return;
     }
 
     // Bind video rendering vertex buffer
@@ -1757,31 +1846,59 @@ void D3D11VARenderer::renderVideo(AVFrame* frame)
         unlockContext(this);
     }
 
+    // §REVIEW-1119：後面的 bind 會直接用 hw_frames_ctx 的寬高當除數。缺這塊或寬高不是正數就不要畫。正常影格只多幾次比較。
+    if (!frame->hw_frames_ctx || !frame->hw_frames_ctx->data ||
+            frame->width <= 0 || frame->height <= 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "D3D11VA frame is missing hw_frames_ctx or has a non-positive size (%dx%d)",
+                     frame->width, frame->height);
+        return;
+    }
+    {
+        auto hwFrames = (AVHWFramesContext*)frame->hw_frames_ctx->data;
+        if (hwFrames->width <= 0 || hwFrames->height <= 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "D3D11VA hw frame pool size is non-positive (%dx%d)",
+                         hwFrames->width, hwFrames->height);
+            return;
+        }
+    }
+
     UINT srvIndex;
     if (m_BindDecoderOutputTextures) {
         // Our indexing logic depends on a direct mapping into m_VideoTextureResourceViews
         // based on the texture index provided by FFmpeg.
-        srvIndex = (uintptr_t)frame->data[1];
-        SDL_assert(srvIndex < m_VideoTextureResourceViews.size());
-        if (srvIndex >= m_VideoTextureResourceViews.size()) {
+        // §REVIEW-1119：data[1] 在 64 位元是完整的 intptr 索引。先截成 32 位元再比大小，高位不是 0 的值可能撞進合法範圍。
+        const uintptr_t rawIndex = (uintptr_t)frame->data[1];
+        SDL_assert(rawIndex < m_VideoTextureResourceViews.size());
+        if (rawIndex >= m_VideoTextureResourceViews.size()) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "Unexpected texture index: %u",
-                         srvIndex);
+                         "Unexpected texture index: %llu",
+                         (unsigned long long)rawIndex);
             return;
         }
+        srvIndex = (UINT)rawIndex;
     }
     else {
         // Copy this frame into our video texture
         // §REVIEW-1111（第二輪）：和上面那個分支一樣先對過索引。重建解碼用的貼圖陣列之後，佇列裡還可能有
         // 舊陣列的影格，它的索引對新的陣列可能已經超出範圍。
-        D3D11_TEXTURE2D_DESC arrayDesc = {};
-        m_RenderSharedTextureArray->GetDesc(&arrayDesc);
-        const UINT sliceIndex = (UINT)(uintptr_t)frame->data[1];
-        if (sliceIndex >= arrayDesc.ArraySize) {
+        // §REVIEW-1119：重建失敗時這兩個貼圖會是空的。索引一樣先比完整的 uintptr，再轉成 UINT。
+        if (!m_RenderSharedTextureArray || !m_VideoTexture) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "Frame slice index %u is out of range for the texture array (%u)", sliceIndex, arrayDesc.ArraySize);
+                         "D3D11VA video texture is not ready");
             return;
         }
+        D3D11_TEXTURE2D_DESC arrayDesc = {};
+        m_RenderSharedTextureArray->GetDesc(&arrayDesc);
+        const uintptr_t rawSlice = (uintptr_t)frame->data[1];
+        if (rawSlice >= arrayDesc.ArraySize) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Frame slice index %llu is out of range for the texture array (%u)",
+                         (unsigned long long)rawSlice, arrayDesc.ArraySize);
+            return;
+        }
+        const UINT sliceIndex = (UINT)rawSlice;
         m_RenderDeviceContext->CopySubresourceRegion1(m_VideoTexture.Get(), 0, 0, 0, 0,
                                                       m_RenderSharedTextureArray.Get(),
                                                       sliceIndex,
@@ -1799,16 +1916,19 @@ void D3D11VARenderer::renderVideo(AVFrame* frame)
     // Bind our CSC shader (and constant buffer, if required)
     bindColorConversion(frameChanged, frame);
 
-    // Bind SRVs for this frame
-    ID3D11ShaderResourceView* frameSrvs[] = { m_VideoTextureResourceViews[srvIndex][0].Get(), m_VideoTextureResourceViews[srvIndex][1].Get() };
-    m_RenderDeviceContext->PSSetShaderResources(0, 2, frameSrvs);
+    // §REVIEW-1119：頂點緩衝沒建起來，或 SRV 向量是空的，不要拿空指標去 DrawIndexed。複製已經做完，後面的 fence 仍要送。
+    if (m_VideoVertexBuffer && srvIndex < m_VideoTextureResourceViews.size()) {
+        // Bind SRVs for this frame
+        ID3D11ShaderResourceView* frameSrvs[] = { m_VideoTextureResourceViews[srvIndex][0].Get(), m_VideoTextureResourceViews[srvIndex][1].Get() };
+        m_RenderDeviceContext->PSSetShaderResources(0, 2, frameSrvs);
 
-    // Draw the video
-    m_RenderDeviceContext->DrawIndexed(6, 0, 0);
+        // Draw the video
+        m_RenderDeviceContext->DrawIndexed(6, 0, 0);
 
-    // Unbind SRVs for this frame
-    ID3D11ShaderResourceView* nullSrvs[2] = {};
-    m_RenderDeviceContext->PSSetShaderResources(0, 2, nullSrvs);
+        // Unbind SRVs for this frame
+        ID3D11ShaderResourceView* nullSrvs[2] = {};
+        m_RenderDeviceContext->PSSetShaderResources(0, 2, nullSrvs);
+    }
 
     // Insert a fence to force the decode context to wait for the render context to finish reading
     if (m_DecodeDevice != m_RenderDevice) {
@@ -1848,6 +1968,10 @@ void D3D11VARenderer::setViewport(int width, int height)
 // VipleStream: Blit a BGRA SRV full-screen using the overlay shader + FRUC blit vertex buffer.
 void D3D11VARenderer::blitFRUCTexture(ID3D11ShaderResourceView* srv)
 {
+    // §REVIEW-1119：CreateBuffer 失敗時這個緩衝是空的，照樣 DrawIndexed 會用未綁定的頂點。正常情況只多一次比較。
+    if (!m_FRUCBlitVertexBuffer) {
+        return;
+    }
     m_RenderDeviceContext->PSSetShader(m_OverlayPixelShader.Get(), nullptr, 0);
     UINT stride = sizeof(VERTEX);
     UINT offset = 0;
@@ -1862,6 +1986,11 @@ void D3D11VARenderer::blitFRUCTexture(ID3D11ShaderResourceView* srv)
 // since it can be called on an arbitrary thread!
 void D3D11VARenderer::notifyOverlayUpdated(Overlay::OverlayType type)
 {
+    // §REVIEW-1119：type 直接當三個浮層陣列的索引，越界會碰到別的成員。
+    if (type < 0 || type >= Overlay::OverlayMax) {
+        return;
+    }
+
     HRESULT hr;
 
     SDL_Surface* newSurface = Session::get()->getOverlayManager().getUpdatedOverlaySurface(type);
@@ -1924,8 +2053,13 @@ void D3D11VARenderer::notifyOverlayUpdated(Overlay::OverlayType type)
         return;
     }
 
+    // §REVIEW-1119：顯示尺寸在繪製鎖裡改。採樣和寫回頂點緩衝要同一段持鎖，
+    // 否則視窗調整會在中間換尺寸，舊幾何會蓋掉新的。順序與 notifyWindowChanged 相同：先繪製鎖、再浮層鎖。
+    // CreateTexture 留在鎖外，避免浮層更新卡住整幀。
+    SDL_LockMutex(m_RenderLock);
     ComPtr<ID3D11Buffer> newVertexBuffer;
     if (!createOverlayVertexBuffer(type, newSurface->w, newSurface->h, newVertexBuffer)) {
+        SDL_UnlockMutex(m_RenderLock);
         SDL_FreeSurface(newSurface);
         return;
     }
@@ -1939,11 +2073,20 @@ void D3D11VARenderer::notifyOverlayUpdated(Overlay::OverlayType type)
     m_OverlayTextures[type] = std::move(newTexture);
     m_OverlayTextureResourceViews[type] = std::move(newTextureResourceView);
     SDL_AtomicUnlock(&m_OverlayLock);
+    SDL_UnlockMutex(m_RenderLock);
 }
 
 bool D3D11VARenderer::createOverlayVertexBuffer(Overlay::OverlayType type, int width, int height, ComPtr<ID3D11Buffer>& newVertexBuffer)
 {
     SDL_FRect renderRect = {};
+
+    // §REVIEW-1119：顯示尺寸只在繪製鎖裡寫。兩個呼叫端進來時都已經持有那把鎖，這裡再鎖會多一次重入。
+    // 尺寸不是正數時 NDC 會除以 0。
+    const int displayWidth = m_DisplayWidth;
+    const int displayHeight = m_DisplayHeight;
+    if (displayWidth <= 0 || displayHeight <= 0) {
+        return false;
+    }
 
     if (type == Overlay::OverlayStatusUpdate) {
         // Bottom Left
@@ -1953,14 +2096,14 @@ bool D3D11VARenderer::createOverlayVertexBuffer(Overlay::OverlayType type, int w
     else if (type == Overlay::OverlayDebug) {
         // Top left
         renderRect.x = 0;
-        renderRect.y = m_DisplayHeight - height;
+        renderRect.y = displayHeight - height;
     }
 
     renderRect.w = width;
     renderRect.h = height;
 
     // Convert screen space to normalized device coordinates
-    StreamUtils::screenSpaceToNormalizedDeviceCoords(&renderRect, m_DisplayWidth, m_DisplayHeight);
+    StreamUtils::screenSpaceToNormalizedDeviceCoords(&renderRect, displayWidth, displayHeight);
 
     VERTEX verts[] =
     {
@@ -2050,6 +2193,9 @@ bool D3D11VARenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO stateInfo)
         // Release the video vertex buffer so we will upload a new one after resize
         m_VideoVertexBuffer.Reset();
 
+        // §REVIEW-1119：immediate context 還綁著舊 RTV 時，ResizeBuffers 會失敗。先解綁再放掉。
+        ID3D11RenderTargetView* unboundRtv = nullptr;
+        m_RenderDeviceContext->OMSetRenderTargets(1, &unboundRtv, nullptr);
         // We must release all references to the back buffer
         m_RenderTargetView.Reset();
         m_RenderDeviceContext->Flush();
@@ -2061,6 +2207,8 @@ bool D3D11VARenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO stateInfo)
                          hr);
             m_DisplayWidth = oldDisplayWidth;
             m_DisplayHeight = oldDisplayHeight;
+            // §REVIEW-1119：失敗時 swapchain 維持舊尺寸，但 RTV 已經放掉。補建，避免解鎖後清畫面收到空指標。
+            setupSwapchainDependentResources();
             unlockContext(this); SDL_UnlockMutex(m_RenderLock);
             return false;
         }
@@ -2069,6 +2217,8 @@ bool D3D11VARenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO stateInfo)
         if (!setupSwapchainDependentResources()) {
             m_DisplayWidth = oldDisplayWidth;
             m_DisplayHeight = oldDisplayHeight;
+            // §REVIEW-1119：swapchain 可能已是新尺寸。再試一次只為了不要留空 RTV；還是失敗就靠 renderFrame 的空檢查。
+            setupSwapchainDependentResources();
             unlockContext(this); SDL_UnlockMutex(m_RenderLock);
             return false;
         }
@@ -2337,7 +2487,8 @@ IFFmpegRenderer::InitFailureReason D3D11VARenderer::getInitFailureReason()
 bool D3D11VARenderer::initFRUC()
 {
     // Helper: create blit vertex buffer (shared by both backends)
-    auto createBlitVB = [this]() {
+    // §REVIEW-1119：CreateBuffer 失敗仍回傳 true 的話，後面每幀 blit 會綁到空的頂點緩衝。
+    auto createBlitVB = [this]() -> bool {
         VERTEX blitVerts[] = {
             {-1.f, -1.f, 0.f, 1.f},
             {-1.f,  1.f, 0.f, 0.f},
@@ -2351,7 +2502,14 @@ bool D3D11VARenderer::initFRUC()
         vbDesc.StructureByteStride = sizeof(VERTEX);
         D3D11_SUBRESOURCE_DATA vbData = {};
         vbData.pSysMem = blitVerts;
-        m_RenderDevice->CreateBuffer(&vbDesc, &vbData, &m_FRUCBlitVertexBuffer);
+        HRESULT hr = m_RenderDevice->CreateBuffer(&vbDesc, &vbData, &m_FRUCBlitVertexBuffer);
+        if (FAILED(hr)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreateBuffer() failed for FRUC blit VB: %x",
+                         hr);
+            return false;
+        }
+        return true;
     };
 
     // FRUC does 2x Present per input frame. Increase max frame latency from 1 to 2
@@ -2411,9 +2569,15 @@ bool D3D11VARenderer::initFRUC()
 
     if (preferNvidia) {
         // User explicitly requested NVIDIA Optical Flow — try it first
-        m_FRUC = new NvOFRUCWrapper();
-        if (m_FRUC->initialize(m_RenderDevice.Get(), fruW, fruH)) {
-            createBlitVB();
+        // §REVIEW-1119：解碼執行緒的統計浮層不拿繪製鎖就讀 m_FRUC。初始化或頂點緩衝失敗時若成員已指向這顆物件，delete 會釋放後使用。成功後才發布。
+        auto* nv = new NvOFRUCWrapper();
+        if (nv->initialize(m_RenderDevice.Get(), fruW, fruH)) {
+            if (!createBlitVB()) {
+                delete nv;
+                return false;
+            }
+            m_FRUC = nv;
+            m_FRUCPub.store(nv);
             boostLatency();
             m_FrucTextureWidth  = (int)fruW;
             m_FrucTextureHeight = (int)fruH;
@@ -2422,8 +2586,7 @@ bool D3D11VARenderer::initFRUC()
                         fruW, fruH, m_DisplayWidth, m_DisplayHeight);
             return true;
         }
-        delete m_FRUC;
-        m_FRUC = nullptr;
+        delete nv;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] NVIDIA Optical Flow unavailable, falling back to Generic");
     }
@@ -2570,8 +2733,13 @@ bool D3D11VARenderer::initFRUC()
         }
 
         if (picked) {
+            // §REVIEW-1119：createBlitVB 失敗會 delete。先寫進 m_GenericFRUC 再刪，統計執行緒會釋放後使用。成功後才發布。
+            if (!createBlitVB()) {
+                delete picked;
+                return false;
+            }
             m_GenericFRUC = picked;
-            createBlitVB();
+            m_GenericFRUCPub.store(picked);
             boostLatency();
             m_FrucTextureWidth  = (int)dmlW;
             m_FrucTextureHeight = (int)dmlH;
@@ -2643,8 +2811,13 @@ bool D3D11VARenderer::initFRUC()
             const bool bypassBudgetN =
                 qEnvironmentVariableIntValue("VIPLE_FRUC_BYPASS_BUDGET") != 0;
             if (ms > 0.0 && (ms <= budgetThrMsN || bypassBudgetN)) {
+                // §REVIEW-1119：同上，頂點緩衝失敗時不要先發布再 delete。
+                if (!createBlitVB()) {
+                    delete ncnn;
+                    return false;
+                }
                 m_GenericFRUC = ncnn;   // IFRUCBackend slot
-                createBlitVB();
+                m_GenericFRUCPub.store(ncnn);
                 boostLatency();
                 m_FrucTextureWidth  = (int)fruW;
                 m_FrucTextureHeight = (int)fruH;
@@ -2676,8 +2849,13 @@ ncnn_cascade_done:;
     auto* gen = new GenericFRUC();
     gen->setQualityLevel(static_cast<int>(prefs->frucQuality));
     if (gen->initialize(m_RenderDevice.Get(), fruW, fruH)) {
+        // §REVIEW-1119：同上，頂點緩衝失敗時不要先發布再 delete。
+        if (!createBlitVB()) {
+            delete gen;
+            return false;
+        }
         m_GenericFRUC = gen;
-        createBlitVB();
+        m_GenericFRUCPub.store(gen);
         boostLatency();
         m_FrucTextureWidth  = (int)fruW;
         m_FrucTextureHeight = (int)fruH;
@@ -2697,9 +2875,12 @@ ncnn_cascade_done:;
 bool D3D11VARenderer::isFRUCActive() const
 {
     // §REVIEW-1103：使用者暫停補幀時不算啟用（原本狀態顯示仍說補幀中）
+    // §REVIEW-1119：解碼執行緒也會呼叫，讀原子副本
+    auto* nv = m_FRUCPub.load();
+    auto* gen = m_GenericFRUCPub.load();
     return !m_FRUCPaused.load() &&
-           ((m_FRUC && m_FRUC->isInitialized()) ||
-            (m_GenericFRUC && m_GenericFRUC->isInitialized()));
+           ((nv && nv->isInitialized()) ||
+            (gen && gen->isInitialized()));
 }
 
 bool D3D11VARenderer::lastFrameHadFRUCInterp() const
@@ -2709,8 +2890,10 @@ bool D3D11VARenderer::lastFrameHadFRUCInterp() const
 
 const char* D3D11VARenderer::getFRUCBackendName() const
 {
-    if (m_FRUC && m_FRUC->isInitialized()) return "NVIDIA Optical Flow";
-    if (m_GenericFRUC && m_GenericFRUC->isInitialized()) return m_GenericFRUC->backendName();
+    auto* nv = m_FRUCPub.load();   // §REVIEW-1119：同 isFRUCActive
+    auto* gen = m_GenericFRUCPub.load();
+    if (nv && nv->isInitialized()) return "NVIDIA Optical Flow";
+    if (gen && gen->isInitialized()) return gen->backendName();
     return "None";
 }
 
@@ -2957,7 +3140,46 @@ bool D3D11VARenderer::setupSwapchainDependentResources()
 // NB: This can be called more than once (and with different frame dimensions!)
 bool D3D11VARenderer::setupFrameRenderingResources(AVHWFramesContext* framesContext)
 {
+    // §REVIEW-1119：pool 不是正數時，setupTexturePoolViews 的 resize 會把負值轉成極大的 size_t。貼圖陣列是空的也不能往下解參考。
+    // 寬或高不是正數時，後面轉成 UINT 會繞成極大值再拿去建貼圖。
+    if (framesContext == nullptr || framesContext->hwctx == nullptr ||
+            framesContext->initial_pool_size <= 0 ||
+            framesContext->width <= 0 || framesContext->height <= 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "D3D11VA frames context has no usable texture pool (pool=%d size=%dx%d)",
+                     framesContext ? framesContext->initial_pool_size : 0,
+                     framesContext ? framesContext->width : 0,
+                     framesContext ? framesContext->height : 0);
+        return false;
+    }
     auto d3d11vaFramesContext = (AVD3D11VAFramesContext*)framesContext->hwctx;
+    if (d3d11vaFramesContext->texture_infos == nullptr ||
+            d3d11vaFramesContext->texture_infos->texture == nullptr) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "D3D11VA frames context is missing the decoder texture array");
+        return false;
+    }
+
+    // §REVIEW-1119：renderVideo 在 m_RenderLock 裡讀共享貼圖與 SRV 向量。這裡不拿鎖就換掉，resize 會讓繪製執行緒釋放後使用。
+    // 只在 av_hwframe_ctx_init 返回後進入，不拿 m_ContextLock，避免和 renderFrame「先 m_RenderLock、再 m_ContextLock」交叉。
+    struct RenderLockGuard {
+        SDL_mutex* m;
+        explicit RenderLockGuard(SDL_mutex* mtx) : m(mtx) { SDL_LockMutex(m); }
+        ~RenderLockGuard() { SDL_UnlockMutex(m); }
+    } renderLockGuard(m_RenderLock);
+
+    // §REVIEW-1119：OpenSharedResource1、Attach 與 CreateTexture2D 的 ComPtr::operator& 會先放掉舊資源。
+    // 重建中途失敗就還原，避免共享貼圖、格式與 SRV 只換一半，繪製執行緒解鎖後拿到空貼圖。
+    const ComPtr<ID3D11Texture2D> savedShared = m_RenderSharedTextureArray;
+    const DXGI_FORMAT savedFormat = m_TextureFormat;
+    const ComPtr<ID3D11Texture2D> savedVideo = m_VideoTexture;
+    const auto savedSrvs = m_VideoTextureResourceViews;
+    auto restoreFrameResources = [&]() {
+        m_RenderSharedTextureArray = savedShared;
+        m_TextureFormat = savedFormat;
+        m_VideoTexture = savedVideo;
+        m_VideoTextureResourceViews = savedSrvs;
+    };
 
     // Open the decoder texture array on the renderer device if we're using separate devices
     if (m_DecodeDevice != m_RenderDevice) {
@@ -2983,6 +3205,7 @@ bool D3D11VARenderer::setupFrameRenderingResources(AVHWFramesContext* framesCont
         hr = m_RenderDevice->OpenSharedResource1(sharedHandle, IID_PPV_ARGS(&m_RenderSharedTextureArray));
         CloseHandle(sharedHandle);
         if (FAILED(hr)) {
+            restoreFrameResources();
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "ID3D11Device1::OpenSharedResource1() failed: %x",
                          hr);
@@ -2997,17 +3220,28 @@ bool D3D11VARenderer::setupFrameRenderingResources(AVHWFramesContext* framesCont
     // Query the format of the underlying texture array
     D3D11_TEXTURE2D_DESC textureDesc;
     m_RenderSharedTextureArray->GetDesc(&textureDesc);
+    // §REVIEW-1119：直接綁定解碼貼圖時，pool 比陣列大，後面的 SRV 切片會超出範圍。
+    if (m_BindDecoderOutputTextures &&
+            textureDesc.ArraySize < (UINT)framesContext->initial_pool_size) {
+        restoreFrameResources();
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "D3D11VA texture array (%u) is smaller than the frame pool (%d)",
+                     textureDesc.ArraySize, framesContext->initial_pool_size);
+        return false;
+    }
     m_TextureFormat = textureDesc.Format;
 
     if (m_BindDecoderOutputTextures) {
         // Create SRVs for all textures in the decoder pool
         if (!setupTexturePoolViews(framesContext)) {
+            restoreFrameResources();
             return false;
         }
     }
     else {
         // Create our internal texture to copy and render
         if (!setupVideoTexture(framesContext)) {
+            restoreFrameResources();
             return false;
         }
     }
@@ -3081,11 +3315,24 @@ bool D3D11VARenderer::setupVideoTexture(AVHWFramesContext* framesContext)
         srvIndex++;
     }
 
+    // §REVIEW-1119：YUV444 只建一個 SRV。同一個 slot 若是上一輪 4:2:0 留下的，[1] 還指著舊貼圖。
+    for (; srvIndex < m_VideoTextureResourceViews[0].size(); srvIndex++) {
+        m_VideoTextureResourceViews[0][srvIndex].Reset();
+    }
+
     return true;
 }
 
 bool D3D11VARenderer::setupTexturePoolViews(AVHWFramesContext* framesContext)
 {
+    // §REVIEW-1119：負的 initial_pool_size 轉成 size_t 會變成極大值，resize 會把程序撐爆。
+    if (framesContext == nullptr || framesContext->hwctx == nullptr || framesContext->initial_pool_size <= 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "D3D11VA texture pool size is not usable (%d)",
+                     framesContext ? framesContext->initial_pool_size : 0);
+        return false;
+    }
+
     AVD3D11VAFramesContext* d3d11vaFramesContext = (AVD3D11VAFramesContext*)framesContext->hwctx;
 
     SDL_assert(m_BindDecoderOutputTextures);
@@ -3103,6 +3350,14 @@ bool D3D11VARenderer::setupTexturePoolViews(AVHWFramesContext* framesContext)
         HRESULT hr;
 
         // Our rendering logic depends on the texture index working to map into our SRV array
+        // §REVIEW-1119：release 版沒有 SDL_assert。索引對不上時，data[1] 會拿到別張切片的 SRV。
+        if (d3d11vaFramesContext->texture_infos == nullptr ||
+                d3d11vaFramesContext->texture_infos[i].index != (intptr_t)i) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "D3D11VA texture pool slot %d does not match its array index",
+                         i);
+            return false;
+        }
         SDL_assert(i == d3d11vaFramesContext->texture_infos[i].index);
 
         srvDesc.Texture2DArray.FirstArraySlice = d3d11vaFramesContext->texture_infos[i].index;
@@ -3123,6 +3378,11 @@ bool D3D11VARenderer::setupTexturePoolViews(AVHWFramesContext* framesContext)
             }
 
             srvIndex++;
+        }
+
+        // §REVIEW-1119：YUV444 只建一個 SRV。同一個 slot 若是上一輪 4:2:0 留下的，[1] 還指著舊貼圖。
+        for (; srvIndex < m_VideoTextureResourceViews[i].size(); srvIndex++) {
+            m_VideoTextureResourceViews[i][srvIndex].Reset();
         }
     }
 

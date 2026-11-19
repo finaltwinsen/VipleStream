@@ -31,9 +31,10 @@ public:
     static bool lookup(int64_t pts, VIPLE_VR_FRAME_META* meta);
 
 private:
-    static constexpr int kSize = 512;  // M4a R4：128 格時在途幀雜湊碰撞會蓋掉 meta（見 xrvideo.cpp）
-    // pts 是 90 kHz 的 rtpTimestamp（60 fps 每幀 +1500），直接取餘數只會落在少數格子，改用雜湊
-    static int slot(int64_t pts) { return (int)(((uint64_t)pts * 0x9E3779B97F4A7C15ull) >> 55); }  // 64−log2(kSize)
+    // §REVIEW-1119：原本用 pts 雜湊直接定址（512 格、沒有碰撞處理），解碼超前繪製一兩張時，後面的影格有約
+    // 1/512 的機會蓋掉還沒被查走的那一格，那一張就因為查不到 meta 被丟掉。改成依登記順序寫的環：
+    // 只有「登記之後又過了 kSize 張還沒查」才會被蓋。查的時候從最新往回比 pts，正常在前一兩格就命中。
+    static constexpr int kSize = 128;
     struct Entry {
         int64_t pts;
         bool used;
@@ -41,6 +42,7 @@ private:
     };
     static std::mutex s_Lock;
     static Entry s_Entries[kSize];
+    static unsigned s_Write;  // 下一格要寫的位置（只在 s_Lock 內動）
 };
 
 // 2026-10-05：XR 模式的單幀解碼延遲（DU 進佇列到解出，與統計浮層同定義），decoder 執行緒寫、XR frame thread

@@ -76,6 +76,9 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/config_acl.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/config_acl.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/input.cpp"
+        # §STREAM-MENU：2D 串流期間把 Windows 的電源選單換成串流控制選單
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/stream_menu.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/stream_menu.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_base.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram.h"
@@ -117,6 +120,7 @@ if(NOT MSVC)
             libcrypto.a)
 endif()
 
+# §STREAM-MENU：gdi32（選單繪製）、oleaut32（UI Automation 回傳的 BSTR）、powrprof（SetSuspendState）
 if(MSVC)
     list(PREPEND PLATFORM_LIBRARIES
             ${CURL_STATIC_LIBRARIES}
@@ -129,6 +133,7 @@ if(MSVC)
             mfuuid
             dwmapi
             dxgi
+            gdi32
             hid
             iphlpapi
             ksuser
@@ -136,6 +141,8 @@ if(MSVC)
             ntdll
             setupapi
             ole32
+            oleaut32
+            powrprof
             shell32
             shlwapi
             uuid
@@ -158,6 +165,7 @@ else()
             mfuuid
             dwmapi
             dxgi
+            gdi32
             hid
             iphlpapi
             ksuser
@@ -168,6 +176,8 @@ else()
             ntdll
             setupapi
             ole32
+            oleaut32
+            powrprof
             shell32
             shlwapi
             uuid

@@ -299,7 +299,7 @@ gitignore，別放那裡）。以下 `<host>` 是測試 server 的 `user@address
 | G1 client 收到 | client `[SC-HID] rx stats(final)` | `id42 ≥ 500`（Puck slot 約 266 Hz） |
 | G2 client 轉發 | 同上 `fwd` | `fwd ≈ id42` |
 | G3 host 注入 | host `[SC-HID] write stats(10s)` 的 **per-session 差值欄位** | `okS − keepalive ≥ 500`（`okS`＝本 session 寫入成功數；`ok` 是 process 級累計、跨 session 不歸零，不能拿來減）、`skipped=0`、`failed=0` |
-| G4 握手 | host `drvSet>0`（Feature 0x05 統計）+ 成對的 host `Steam feature → client`（input 路徑 `Steam feature op → client` 或 poll thread `Poll-thread: Steam feature → client`，grep pattern `Steam feature (op )?→ client`）／ client `Feature req … lat=ms` ／ host `Feature response delivered`；host Steam log | 不再每秒 `Read failure`、`Firmware Version` 非 0、無 zombie 重開 |
+| G4 握手 | host `drvSet>0`（Feature 0x05 統計）+ 成對的 host `Steam feature → client`（input 路徑 `Steam feature op → client` 或 poll thread `Poll-thread: Steam feature → client`，grep pattern `Steam feature (op )?→ client`）／ client `Feature req … lat=ms` ／ host `Feature response delivered`；host Steam log。host 的逐筆行每次重新連線後只印前 32 筆（client 有實體控制器在回應時不限），`Sending feature request to client` 是 debug 等級；對帳用前 32 筆與 `Feature response delivered: seq=` | 不再每秒 `Read failure`、`Firmware Version` 非 0、無 zombie 重開 |
 | G5 使用者可見 | host Steam 設定 → 控制器；遊戲內 | 顯示「Steam Controller」、按鍵／搖桿／觸控板有反應、閒置 90 s 不掉 |
 
 注意：client 本機若有 Steam 常駐，它會跟轉發鏈搶實體控制器的**一次性** feature 回應暫存器
@@ -391,7 +391,7 @@ GitHub Issues at `https://github.com/finaltwinsen/VipleStream`. Include:
   client-side
 
 Logs:
-- Windows server: `C:\Program Files\VipleStream-Server\config\sunshine.log`
+- Windows server: `C:\Program Files\VipleStream-Server\config\sunshine.log` (the previous run is `sunshine.log.1`, the one before `.2`; very short runs are appended to `sunshine.log.0` — attach those too when the problem happened before the last restart)
 - Windows client: `%TEMP%\VipleStream-*.log` (latest by mtime)
 - Android client: `adb logcat -d | grep -E 'com.piinsta|VKBE|VIPLE-'` from
   a connected device

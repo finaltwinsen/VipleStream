@@ -520,6 +520,8 @@ private:
     // frame thread only: consecutive failed uploads of the current image (retry is bounded)
     int m_BattUploadRetries = 0;
     int m_ToastUploadRetries = 0;
+    int m_SubUploadRetries = 0;    // §REVIEW-1119：字幕、控制列上傳失敗時下一格再試（同 toast，最多 30 次）
+    int m_PanelUploadRetries = 0;
     int m_ShellUploadRetries = 0;
     bool m_BattDirty = false;                   // m_BattMutex
     std::atomic<bool> m_BattVisible{false};
@@ -833,10 +835,11 @@ private:
     // fbSeq／fbDrawnUs（§VR-BUFFER）：LATCH slack 照這一張算（開緩衝時＝最新發布的，不是顯示的那張）；0＝同 seq／lastDrawnUs
     void pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
                            uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs,
-                           uint64_t fbSeq = 0, uint64_t fbDrawnUs = 0);
+                           uint64_t fbSeq = 0, uint64_t fbDrawnUs = 0, bool feedRate = true);
     // §VR-LATCH-RELATCH：這一格改送另一張影像（參數是新的那一張）——把 pcvrTimingOnLatch 對原本那張記的帳改過來
     void pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta, uint32_t echoSampleId,
-                           const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs);
+                           const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs,
+                           uint64_t fbSeq = 0, uint64_t fbDrawnUs = 0);
     void pcvrTimingTick(uint64_t nowNs, uint64_t periodNs);
     // §VR-LATCH A/B：同場切換只有一個主人——換邊只發生在 pcvrTimingTick 的 10 s 區塊。受它控制的開關這一刻開不開：
     // 沒開切換（pcvrLatchAbSec＝0）恆為開，否則看現在是哪一邊。只在 frame thread 呼叫

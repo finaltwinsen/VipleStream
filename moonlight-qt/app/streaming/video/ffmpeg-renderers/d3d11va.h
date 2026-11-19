@@ -138,6 +138,10 @@ private:
     // backend concrete type is chosen at initFRUC() time per
     // prefs->frucBackend.
     class IFRUCBackend* m_GenericFRUC = nullptr;
+    // §REVIEW-1119：上面兩個指標只給繪製執行緒用。解碼執行緒的統計浮層（isFRUCActive／getFRUCBackendName）
+    // 不拿繪製鎖，改讀這兩份原子副本：初始化完全成功才寫入，解構時先清掉再 delete。
+    std::atomic<class NvOFRUCWrapper*> m_FRUCPub{nullptr};
+    std::atomic<class IFRUCBackend*> m_GenericFRUCPub{nullptr};
 
     bool m_FRUCLastFrameInterpolated = false;
     bool m_FRUCInitFailed = false;

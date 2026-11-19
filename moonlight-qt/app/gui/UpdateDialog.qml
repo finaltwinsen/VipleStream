@@ -116,7 +116,10 @@ NavigableDialog {
                 width: notesView.availableWidth
                 wrapMode: Text.Wrap
                 textFormat: Text.MarkdownText
-                text: Updater.releaseNotes
+                // §REVIEW-1119：MarkdownText 排版就會去抓 ![alt](url)，不必點連結。
+                // Windows 上 file:// 會連 UNC 並送出驗證。拿掉驚嘆號就變成一般連結，
+                // 下面仍只放行 https，打開對話框時不會自己抓圖。
+                text: String(Updater.releaseNotes).split("![").join("[")
                 // §REVIEW-1111（第二輪）：release notes 來自網路，只開 https 連結
                 onLinkActivated: function(link) {
                     if (String(link).indexOf("https://") === 0) {
@@ -255,8 +258,25 @@ NavigableDialog {
                 text: qsTr("Open release page")
                 onClicked: {
                     // §REVIEW-1111（第二輪）：網址來自網路回應，只開我們自己的 GitHub 頁面
-                    if (String(dialog.releasePageUrl).indexOf("https://github.com/finaltwinsen/VipleStream/") === 0) {
-                        Qt.openUrlExternally(dialog.releasePageUrl)
+                    // §REVIEW-1119：只看前綴時，路徑裡的 /../、反斜線或 %2e%2e 會被瀏覽器折到別的 GitHub 專案。
+                    // 只放行本專案的 release tag。tag 限版號用得到的字元，且不得含 ..。不符合就開我們自己的 latest。
+                    var url = String(dialog.releasePageUrl)
+                    var prefix = "https://github.com/finaltwinsen/VipleStream/releases/tag/"
+                    var tag = url.indexOf(prefix) === 0 ? url.substring(prefix.length) : ""
+                    var tagOk = tag.length > 0 && tag.length <= 200 && tag.indexOf("..") < 0
+                    if (tagOk) {
+                        for (var i = 0; i < tag.length; i++) {
+                            var c = tag.charAt(i)
+                            if (!((c >= "0" && c <= "9") || (c >= "A" && c <= "Z") ||
+                                  (c >= "a" && c <= "z") || c === "." || c === "_" ||
+                                  c === "-" || c === "+")) {
+                                tagOk = false
+                                break
+                            }
+                        }
+                    }
+                    if (tagOk) {
+                        Qt.openUrlExternally(url)
                     }
                     else {
                         Qt.openUrlExternally("https://github.com/finaltwinsen/VipleStream/releases/latest")

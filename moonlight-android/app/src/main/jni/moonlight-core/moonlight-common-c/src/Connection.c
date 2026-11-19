@@ -79,6 +79,10 @@ static const char* stageNames[STAGE_MAX] = {
 
 // Get the name of the current stage based on its number
 const char* LiGetStageName(int stage) {
+    // §REVIEW-1119：stage 來自呼叫端，越界會讀出陣列。
+    if (stage < 0 || stage >= STAGE_MAX) {
+        return "unknown";
+    }
     return stageNames[stage];
 }
 
@@ -435,7 +439,8 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     // the given packet size to the nearest multiple of 16.
     StreamConfig.packetSize -= StreamConfig.packetSize % 16;
 
-    if (StreamConfig.packetSize == 0) {
+    // §REVIEW-1119：負值取 16 的餘數仍是負的，== 0 擋不住。
+    if (StreamConfig.packetSize <= 0) {
         Limelog("Invalid packet size specified\n");
         err = -1;
         goto Cleanup;

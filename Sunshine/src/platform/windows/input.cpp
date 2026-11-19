@@ -25,6 +25,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "stream_menu.h"
 
 namespace platf {
   using namespace std::literals;
@@ -594,6 +595,12 @@ namespace platf {
   }
 
   void button_mouse(input_t &input, int button, bool release) {
+    // §STREAM-MENU：2D 串流期間，左鍵按在開始選單的電源圖示上時不注入，改顯示串流控制選單
+    // （那一下的放開也吞掉）。一般點擊只多一次 WindowFromPoint 與行程比對；認不出來就照原樣注入。
+    if (stream_menu::on_mouse_button(button, release)) {
+      return;
+    }
+
     INPUT i {};
 
     i.type = INPUT_MOUSE;
@@ -641,6 +648,12 @@ namespace platf {
   }
 
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
+    // §STREAM-MENU：2D 串流期間，在桌面按 Alt+F4 的那個 F4 不注入（Windows 會跳「關閉 Windows」），
+    // 改顯示串流控制選單。放在這裡而不是上層：按鍵重複與 session 結束時補送的放開也都經過這個函式。
+    if (stream_menu::on_key(modcode, release)) {
+      return;
+    }
+
     INPUT i {};
     i.type = INPUT_KEYBOARD;
     auto &ki = i.ki;

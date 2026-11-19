@@ -90,18 +90,19 @@ bool intersectQuad(const XrPosef& pose, float w, float h, const Vec3& origin, co
 {
     const Vec3 o = rotateInv(pose.orientation, sub(origin, fromXr(pose.position)));
     const Vec3 d = rotateInv(pose.orientation, dir);
-    if (std::fabs(d.z) < 1e-6f || w <= 0.0f || h <= 0.0f) {
+    // §REVIEW-1119：NaN 跟任何數比都是 false。異常 pose 會被當成命中，把 NaN 送進濾波器。
+    if (!(std::fabs(d.z) >= 1e-6f) || !(w > 0.0f) || !(h > 0.0f)) {
         return false;
     }
     const float tt = -o.z / d.z;
-    if (tt <= 0.0f) {
+    if (!(tt > 0.0f)) {
         return false;
     }
     const float x = o.x + tt * d.x;
     const float y = o.y + tt * d.y;
     const float uu = x / w + 0.5f;
     const float vv = 0.5f - y / h;
-    if (uu < 0.0f || uu > 1.0f || vv < 0.0f || vv > 1.0f) {
+    if (!(uu >= 0.0f && uu <= 1.0f && vv >= 0.0f && vv <= 1.0f)) {
         return false;
     }
     *u = uu;
@@ -113,23 +114,24 @@ bool intersectQuad(const XrPosef& pose, float w, float h, const Vec3& origin, co
 bool intersectCylinder(const XrPosef& pose, float radius, float centralAngle, float aspect,
                        const Vec3& origin, const Vec3& dir, float* u, float* v, float* t)
 {
-    if (radius <= 0.0f || centralAngle <= 0.0f || aspect <= 0.0f) {
+    // §REVIEW-1119：同 intersectQuad，NaN 的比較要反過來，異常 pose 不能當成命中。
+    if (!(radius > 0.0f) || !(centralAngle > 0.0f) || !(aspect > 0.0f)) {
         return false;
     }
     const Vec3 o = rotateInv(pose.orientation, sub(origin, fromXr(pose.position)));
     const Vec3 d = rotateInv(pose.orientation, dir);
     const float a = d.x * d.x + d.z * d.z;
-    if (a < 1e-9f) {
-        return false;  // 射線與軸平行
+    if (!(a >= 1e-9f)) {
+        return false;  // 射線與軸平行，或 a 不是有限值
     }
     const float b = 2.0f * (o.x * d.x + o.z * d.z);
     const float c = o.x * o.x + o.z * o.z - radius * radius;
     const float disc = b * b - 4.0f * a * c;
-    if (disc < 0.0f) {
+    if (!(disc >= 0.0f)) {
         return false;
     }
     const float tt = (-b + std::sqrt(disc)) / (2.0f * a);  // 從圓柱內出發：取較遠（正）的根
-    if (tt <= 0.0f) {
+    if (!(tt > 0.0f)) {
         return false;
     }
     const float x = o.x + tt * d.x;
@@ -139,7 +141,7 @@ bool intersectCylinder(const XrPosef& pose, float radius, float centralAngle, fl
     const float height = radius * centralAngle / aspect;
     const float uu = theta / centralAngle + 0.5f;
     const float vv = 0.5f - y / height;
-    if (uu < 0.0f || uu > 1.0f || vv < 0.0f || vv > 1.0f) {
+    if (!(uu >= 0.0f && uu <= 1.0f && vv >= 0.0f && vv <= 1.0f)) {
         return false;
     }
     *u = uu;
@@ -717,6 +719,13 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
                 m_MenuDownNs[h] = 0;
                 m_MenuLongFired[h] = false;
             }
+            // §REVIEW-1119：失焦沒有把控制列 hover 清掉，高亮會留到焦點回來。
+            if (m_PanelHit) {
+                m_PanelHit = false;
+                if (m_Sink.panel) {
+                    m_Sink.panel(-1.0f, -1.0f);
+                }
+            }
         }
         m_Hit = false;
         m_FiltU.reset();
@@ -755,9 +764,18 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         if (combo && !m_ComboWas) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] exit combo (A+X+trigger+grip)");
             releaseAll("exit combo");
+            // §REVIEW-1119：releaseAll 只放滑鼠鍵。不在這裡停下的話，同一格後面會把還按著的扳機又送成按下。
+            releaseKeyboard("exit combo");
+            if (m_PadMode && m_Sink.gamepad && !(m_PadSent == XrPadState())) {
+                m_PadSent = XrPadState();
+                m_Sink.gamepad(m_PadSent);
+            }
             m_Sink.exitCombo();
         }
         m_ComboWas = combo;
+        if (combo) {
+            return;
+        }
     }
 
     // ── 鍵盤開關：熱鍵要求與控制器（任一手）上升緣 ──
@@ -823,7 +841,8 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
                 constexpr uint64_t kRecenterHoldNs = 1000000000ull;
                 if (now && !m_KbToggleWas[h]) {
                     m_MenuDownNs[h] = nowNs;
-                    m_MenuLongFired[h] = false;
+                    // §REVIEW-1119：雙手選單鍵同一格按下時，上面已把長按旗標設成 true。這裡無條件清掉的話，短放左手會去開鍵盤。
+                    m_MenuLongFired[h] = padCombo;
                 }
                 else if (now && !m_MenuLongFired[h] && m_MenuDownNs[h] != 0 && nowNs - m_MenuDownNs[h] >= kRecenterHoldNs) {
                     m_MenuLongFired[h] = true;
@@ -909,9 +928,25 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             m_Sink.panel(-1.0f, -1.0f);
         }
         m_PanelHit = false;
+        // §REVIEW-1119：這條路不會走到鍵盤求交，高亮不要留在上一顆鍵。
+        m_KbHover = -1;
+        m_KbHit = false;
         // §REVIEW-1104：沒有平面螢幕就返回；影片模式按住的扳機，放開前不要補送成左鍵
         if (playerMode && !m_TestPointer && m_TestKbText.isEmpty()) {
-            m_TrigOnKb = m_PlayerWas[0][0] || m_PlayerWas[0][1];
+            const bool anyTrig = m_PlayerWas[0][0] || m_PlayerWas[0][1];
+            m_TrigOnKb = anyTrig;
+            // §REVIEW-1119：叫出控制列的這一記扳機還按著。沒記進邊緣的話，下一格控制列出現會被當成點擊。
+            m_KbTrigPrev = anyTrig;
+            m_TriggerDown[0] = m_PlayerWas[0][0];
+            m_TriggerDown[1] = m_PlayerWas[0][1];
+            if (!anyTrig) {
+                kbRelease();
+            }
+        }
+        else if (!playerMode && (m_Pressed[0] || m_Pressed[1] || m_KbActiveKey >= 0 || m_Sticky != 0)) {
+            // §REVIEW-1119：提早 return 看不到放開。畫面不在時滑鼠鍵與鍵盤鍵會停在按下送給 host。
+            releaseAll("no screen");
+            releaseKeyboard("no screen");
         }
         sendPlayerTrigger();
         return;
@@ -934,6 +969,7 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
     }
     else {
         float trig[2] = {0.0f, 0.0f};
+        bool down[2] = {false, false};
         for (int h = 0; h < 2; h++) {
             XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
             gi.action = m_Trigger;
@@ -943,15 +979,29 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
                 trig[h] = fs.currentState;
             }
             const bool was = m_TriggerDown[h];
-            m_TriggerDown[h] = was ? trig[h] > kPressOff : trig[h] > kPressOn;
-            if (!was && m_TriggerDown[h] && h != m_Dominant) {
-                // 慣用手＝最近按過 trigger 的那隻；切換時放開另一隻手留下的按鍵
-                releaseAll("dominant hand change");
-                m_Dominant = h;
-                m_TriggerDown[h] = true;
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dominant hand: %s", h ? "right" : "left");
+            down[h] = was ? trig[h] > kPressOff : trig[h] > kPressOn;
+        }
+        // §REVIEW-1119：兩手都算完再切一次。releaseAll 會把兩手的 m_TriggerDown 清掉，
+        // 放在迴圈裡的話另一手這一格又像新按下，雙手按住時每一格左右互換。
+        int switchTo = -1;
+        for (int h = 0; h < 2; h++) {
+            if (!m_TriggerDown[h] && down[h] && h != m_Dominant) {
+                switchTo = h;
             }
         }
+        if (switchTo >= 0) {
+            // 慣用手＝最近按過 trigger 的那隻；切換時放開另一隻手留下的按鍵
+            releaseAll("dominant hand change");
+            // §REVIEW-1119：releaseAll 只放滑鼠鍵。鍵盤上按住的鍵與扳機邊緣不重設的話，host 會一直連發，新手也點不下去。
+            kbRelease();
+            m_KbTrigPrev = false;
+            m_TrigOnKb = false;
+            m_TrigOnPanel = false;
+            m_Dominant = switchTo;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dominant hand: %s", switchTo ? "right" : "left");
+        }
+        m_TriggerDown[0] = down[0];
+        m_TriggerDown[1] = down[1];
         const int d = m_Dominant;
         leftDesired = m_TriggerDown[d];
 
@@ -1033,6 +1083,9 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             m_FiltU.reset();
             m_FiltV.reset();
             m_LastFilterNs = nowNs;
+            // §REVIEW-1119：命中控制列就離開，不會走到清鍵盤 hover 的地方，高亮停在上一顆鍵。
+            m_KbHover = -1;
+            m_KbHit = false;
             return;
         }
     }
@@ -1052,6 +1105,9 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             kbRelease();  // §REVIEW-1111（第二輪）：同上（螢幕不在時）
         }
         m_KbTrigPrev = leftDesired;
+        // §REVIEW-1119：螢幕不在就離開，同樣不會清鍵盤 hover。
+        m_KbHover = -1;
+        m_KbHit = false;
         sendPlayerTrigger();
         return;
     }

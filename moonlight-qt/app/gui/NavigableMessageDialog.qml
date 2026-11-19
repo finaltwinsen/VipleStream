@@ -49,6 +49,9 @@ NavigableDialog {
             text: dialogText + ((helpText && (standardButtons & Dialog.Help)) ? (helpTextSeparator + helpText) : "")
             wrapMode: Text.Wrap
             elide: Label.ElideRight
+            // §REVIEW-1119：內容會帶主機名稱與 host 回的錯誤文字。預設的 AutoText 看到標籤就當成 HTML 排版
+            //（會去載入 <img> 的網址）。這裡的訊息都是純文字。
+            textFormat: Text.PlainText
 
             // Cap the width so the dialog doesn't grow horizontally forever. This
             // will cause word wrap to kick in.

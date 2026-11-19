@@ -141,7 +141,7 @@ VipleStream opens in its own VR interface (laser pointer: trigger = click, grip 
 |---|---|
 | **VR mode** | SteamVR games from your PC. Pick the host, then **SteamVR Home** or a VR game; the host starts SteamVR and the game. Before starting, the client measures the round trip and waits if the connection is too slow for VR. |
 | **Desktop mode** | Your PC desktop or a game on a large virtual screen. |
-| **Video mode** | Flat, 3D side-by-side / top-bottom, 180° and 360° videos from the headset, a URL, folders shared by a paired PC (turn off with `media_share = disabled`), or YouTube through the built-in browser's **Play in VR**. |
+| **Video mode** | Flat, 3D side-by-side / top-bottom, 180° and 360° videos from the headset, a URL, folders shared by a paired PC (turn off with `media_share = disabled`), or YouTube through the built-in browser's **Play in VR**. Built-in file manager: new folder, copy, move and delete on the headset and, when the PC allows it (`media_write = enabled`), in the shared folders. |
 
 **Video mode controls:** A play/pause · B exit · trigger control bar · grip recentre · stick left/right ±10 s · stick up/down nearer/farther.
 
@@ -391,7 +391,7 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 |---|---|
 | **VR 模式** | 在頭盔玩 PC 上的 SteamVR 遊戲。選主機，再選 **SteamVR Home** 或 VR 遊戲，主機會啟動 SteamVR 和遊戲。開始前會先量往返時間，連線太慢時會先等。 |
 | **桌面模式** | 把電腦桌面或遊戲放在大型虛擬螢幕上。 |
-| **影片模式** | 播放平面、3D 左右／上下、180°、360° 影片；來源可以是頭盔本機、網址、配對 PC 分享的資料夾（`media_share = disabled` 可關閉），或內建瀏覽器的「**在 VR 播放**」（YouTube 等）。 |
+| **影片模式** | 播放平面、3D 左右／上下、180°、360° 影片；來源可以是頭盔本機、網址、配對 PC 分享的資料夾（`media_share = disabled` 可關閉），或內建瀏覽器的「**在 VR 播放**」（YouTube 等）。內建檔案管理：頭盔本機可新增資料夾、複製、移動、刪除；PC 允許時（`media_write = enabled`）分享的資料夾也可以。 |
 
 **影片模式操作：** A 播放／暫停 · B 離開 · 扳機叫出控制列 · 握把重新置中 · 搖桿左右快轉 ±10 秒 · 搖桿上下調遠近。
 

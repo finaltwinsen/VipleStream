@@ -2641,7 +2641,9 @@ namespace video {
     // 一張的份量）；PyroWave 自己用幀率算每張的上限，改傳實際的幀率。設定值不超過這個 session 建立時的碼率
     // （編碼器的 level 是照它選的）。
     int vr_enc_div = 1;
-    const auto apply_encoder_bitrate = [&](int kbps, bool is_decrease) {
+    // §REVIEW-1119：回傳編碼器有沒有真的套用。NVENC 重設失敗時呼叫端不可以把 last_applied_bitrate_kbps 往前推，
+    // 否則之後的升降方向（要不要 IDR）會拿一個沒生效的值來比。
+    const auto apply_encoder_bitrate = [&](int kbps, bool is_decrease) -> bool {
       const int div = std::max(1, vr_enc_div);
       const int enc_kbps = div > 1 ? std::min(kbps * div, std::max(config.bitrate, kbps)) : kbps;
       auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
@@ -2662,7 +2664,7 @@ namespace video {
         }
         BOOST_LOG(info) << "[VIPLE-ABR] AVCodec bitrate updated to " << kbps
                         << " kbps (" << (is_decrease ? "cut" : "ramp") << (div > 1 ? std::format(", encoder setting {} kbps for 1/{} rate", enc_kbps, div) : std::string {}) << ")";
-        return;
+        return true;
       }
       if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(session.get())) {
         auto nvenc_dev = nvenc_session->get_nvenc_device();
@@ -2670,14 +2672,15 @@ namespace video {
           // §VR F13：VR session 降碼也走平滑過渡（不 reset、不 IDR）；一幀大 IDR 在 VR
           // 就是一次明顯卡頓，恢復交給 intra refresh。一般 session 行為不變。
           // §LAT-2D：abr_cut_idr = disabled 時 2D 也平滑降碼（A/B 用）
-          nvenc_dev->nvenc->reconfigure_bitrate(enc_kbps, config.framerate,
-                                                is_decrease && !config.vrProfile && config::video.abr_cut_idr);
+          return nvenc_dev->nvenc->reconfigure_bitrate(enc_kbps, config.framerate,
+                                                       is_decrease && !config.vrProfile && config::video.abr_cut_idr);
         }
-        return;
+        return false;
       }
       if (auto pyro_session = dynamic_cast<pyrowave::pyrowave_encode_session_t *>(session.get())) {
         pyro_session->reconfigure_bitrate(kbps, config.framerate / div);
       }
+      return true;
     };
     // 編碼器在半速期間重建（解析度／格式變更）時，新的編碼器是照全速建立的：一開始就換算一次
     if (vr_state && config.captureSource == 1 && vr_state->rate_div() > 1) {
@@ -2808,8 +2811,12 @@ namespace video {
       if (bitrate_events->peek()) {
         if (auto newBitrateKbps = bitrate_events->pop(0ms)) {
           bool isDecrease = *newBitrateKbps < last_applied_bitrate_kbps;
-          last_applied_bitrate_kbps = *newBitrateKbps;
-          apply_encoder_bitrate(*newBitrateKbps, isDecrease);
+          if (apply_encoder_bitrate(*newBitrateKbps, isDecrease)) {
+            last_applied_bitrate_kbps = *newBitrateKbps;
+          } else {
+            BOOST_LOG(warning) << "[VIPLE-ABR] encoder did not take " << *newBitrateKbps << " kbps - keeping "
+                               << last_applied_bitrate_kbps << " kbps as the applied value";
+          }
         }
       }
 

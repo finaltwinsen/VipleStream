@@ -1817,6 +1817,13 @@ host（§VR-HOTSPOT-YIELD，2.0.207）：這張網卡上有別的程式在連（
 [VIPLE-VR-HOTSPOT] another program (usually Steam) is connecting this adapter N ms after the hotspot info - leaving the connection to it (K attempt(s) of ours so far)
 [VIPLE-VR-HOTSPOT] the other program stopped connecting this adapter - connecting it ourselves
 ```
+host（§VR-HOTSPOT-RESTART-EARLY，2.0.233）：熱點資訊到達 12 秒後還沒連上，就重啟這張網卡一次（算進 `vr_hotspot_restart_max`）。
+閒置一段時間之後 Windows 會一直回報找不到這個網路，等不到頭盔 45 秒的期限；重啟後約 6～10 秒連上
+（2026-11-19 實測：閒置兩小時後 12 秒重啟、23 秒連上）。`joined …` 那一行的括號會多 `after an early adapter restart`：
+```
+[VIPLE-VR-HOTSPOT] not joined 12 s after the hotspot info - restarting the adapter early (n/max)
+[VIPLE-VR-HOTSPOT] early adapter restart done|failed
+```
 
 §FLAT-ML（2.0.213 起，平面／2D 場次的多連線：每張網卡一條 UDP、影像與音訊各送一份）。log 沿用 `[VIPLE-VR-LINK]`
 （每條連線的 10 秒統計、`link N confirmed`、`hot-add` 都和 VR 相同），另外多這幾行：
@@ -2066,7 +2073,12 @@ client（§FRAME-HOTSPOT-PAUSE，2026-11-14，`moonlight-qt/app/streaming/frameh
 [VIPLE-MEDIA] serving root=<n> size=<bytes>           ← 某個檔案第一次從頭讀（之後的範圍請求不印）
 [VIPLE-MEDIA] file denied root=<n> (<原因>)            ← 路徑跑出分享資料夾、不存在、或不是檔案
 [VIPLE-MEDIA] thumb denied root=<n> (<原因>) / thumb unavailable root=<n>: <原因>   ← §VR-PLAYER-THUMB：縮圖的路徑不對，或系統拿不到縮圖（Windows Shell／Linux 快取與 ffmpeg 都沒有）；成功的只在 debug 等級印耗時
+[VIPLE-MEDIA] op=<mkdir|delete|copy|move> root=<n> [droot=<n>] result=<ok|cancelled|busy|exists|read-only|not found|bad name|bad request|into itself|no space|failed: …>
+                                                      ← §MEDIA-FILEOPS（2.0.231 起）：每個檔案操作一行，不印路徑。copy／move／delete 是背景工作，這一行在工作結束時才印
 ```
+- §MEDIA-FILEOPS：`/viple/media/op`、`/opstatus`、`/opcancel` 只在 `media_write = enabled` 時能改東西（預設關，回 `read-only`）；
+  同時只跑一個背景工作（第二個回 `busy`）、不覆蓋既有項目（`exists`）、不跟隨連結、整台 PC 模式的磁碟機一律唯讀。
+  取消或失敗時這次建立的目的項目會被刪掉。
 - 只有 HTTPS、配對過的 client。`media_dirs` 沒設時根是預設資料夾（2.0.134 起；Windows「公用影片」、Linux `~/Videos`，`folder`）；
   `media_dirs = *` 時是整台 PC 的磁碟機（`<Kind>drive</Kind>`，編號＝磁碟機代號 A＝0…；Linux 是 `/`）；其他值是那些資料夾（`folder`）；`media_share = disabled` 時 `/viple/media/roots` 回空清單、其他回 404。
 
@@ -2080,6 +2092,37 @@ client（§FRAME-HOTSPOT-PAUSE，2026-11-14，`moonlight-qt/app/streaming/frameh
 [VIPLE-STEAM-QUIT] refusing unexpected install dir: <路徑>                        ← 防呆：不在 steamapps\common 底下、或是 SteamVR
 ```
 - 只在 /cancel（使用者按「結束 APP」）觸發；斷線、快捷鍵中斷串流、閒置收尾都不會關遊戲。
+
+### `[VIPLE-STREAM-MENU]` —— 2D 串流期間把 Windows 的電源選單換成串流控制選單（server，§STREAM-MENU，2026-11-19）
+
+`platform/windows/stream_menu.cpp`。只在有串流 session、而且不是 VR session 時動作；`stream_menu = disabled` 時完全沒有這些行。
+
+```
+[VIPLE-STREAM-MENU] uia: ready (CUIAutomation8)                          ← 第一個 session 開始時建立 UI Automation（退回舊版時是 CUIAutomation）
+[VIPLE-STREAM-MENU] intercepted: power-button (start menu)               ← 遠端左鍵按在開始選單的電源圖示：那一下沒有注入、送 ESC 關掉開始選單
+[VIPLE-STREAM-MENU] intercepted: alt-f4 (desktop)                        ← 遠端在桌面（Progman／WorkerW）按 Alt+F4：F4 沒有注入
+[VIPLE-STREAM-MENU] intercepted: shutdown-dialog (cancelled)             ← 保險：出現「關閉 Windows」對話框，已送取消
+[VIPLE-STREAM-MENU] intercepted: <入口> - menu is already open           ← 選單已經開著，不重開
+[VIPLE-STREAM-MENU] selected: disconnect|quit-app|lock|sleep|shutdown|restart|cancel   ← 使用者選的項目（Esc、串流結束自動關閉都算 cancel）
+[VIPLE-STREAM-MENU] action <項目>: ok (<說明>)                            ← 動作送出成功；sleep 的這一行在系統喚醒之後才出現
+[VIPLE-STREAM-MENU] action <項目>: failed (<原因>)                        ← warning；鎖定／關機／重新啟動失敗多半是沒有登入的使用者
+[VIPLE-STREAM-MENU] action sleep: suspending (privilege enabled)         ← 呼叫 SetSuspendState 之前
+```
+
+認不出來就照原樣注入，這時只有下面這些 warning（同一種每分鐘最多一行，`suppressed=` 是這段時間略過的次數）：
+
+```
+[VIPLE-STREAM-MENU] uia: unavailable (hr=0x…) - the power button will not be intercepted   ← UI Automation 建不起來；Alt+F4 與對話框兩個入口不受影響
+[VIPLE-STREAM-MENU] uia: query timed out after 100 ms - click passed through (suppressed=N) ← 查詢逾時，那一下照常點在電源圖示上
+[VIPLE-STREAM-MENU] uia: previous query is still running - click passed through (suppressed=N)   ← 上一次查詢還卡著
+[VIPLE-STREAM-MENU] uia: query failed (hr=0x…) - click passed through (suppressed=N)
+[VIPLE-STREAM-MENU] shutdown-dialog: still open 2 s after IDCANCEL - sending WM_CLOSE       ← 對話框沒被取消掉，改送 WM_CLOSE（只試一次）
+[VIPLE-STREAM-MENU] menu: CreateWindowEx failed (<錯誤碼>)                                  ← 選單沒顯示（當成取消）
+```
+
+- 點了電源圖示卻跳出 Windows 原本的選單、log 又沒有任何 `[VIPLE-STREAM-MENU]`：游標底下的頂層視窗不屬於 `StartMenuExperienceHost.exe`
+  （便宜的第一關就沒過，不會查 UIA），或 AutomationId 不再是 `PowerButton`——把 log 等級調到 debug 看
+  `uia: ElementFromPoint(x,y) -> PowerButton|other|failed in N ms`。
 
 ## 6. 分析工具
 

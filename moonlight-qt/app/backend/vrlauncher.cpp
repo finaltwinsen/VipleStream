@@ -11,6 +11,7 @@
 #include <QThreadPool>
 #include <QTimer>
 #include <QFile>
+#include <QMutex>
 #include <QProcessEnvironment>
 
 #include <atomic>
@@ -59,6 +60,23 @@ QString userFacingError(const QString& line)
     return QString();
 }
 
+// §REVIEW-1119：app 名稱、錯誤與子行程狀態會進日誌。控制字元會把一列拆開，看起來像另一條系統日誌。
+QString logSafe(const QString& text)
+{
+    QString cleaned;
+    const int n = qMin(text.size(), 200);
+    cleaned.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        const ushort u = text.at(i).unicode();
+        cleaned.append((u < 0x20 || u == 0x7F) ? QLatin1Char(' ') : text.at(i));
+    }
+    return cleaned;
+}
+
+// §REVIEW-1119：開熱點的背景工作可能超過 10 秒。結束流程先設旗標，再跟「要不要丟回主執行緒」互斥。
+std::atomic<bool> s_HotspotClosing{false};
+QMutex s_HotspotDecisionMu;
+
 std::function<void(VrLauncher::ChildEvent)> s_ChildHook;  // §VR-SHELL
 std::function<bool(const VrLauncher::PlayRequest&)> s_PlayerHandler;  // §VR-SHELL（A2）
 VrLauncher* s_Instance = nullptr;  // QML singleton（playerFinished 用）
@@ -95,8 +113,18 @@ void VrLauncher::lanVrHostOnline()
         if (!Session::readVrHotspotCreds(&ssid, &key) || !FrameHotspot::openAtAppStart(ssid, key)) {
             return;
         }
+        // §REVIEW-1119：openAtAppStart 返回時程式可能已在結束。旗標在解構與 aboutToQuit 先設。
+        // 鎖只包這次決定，避免看完旗標之後 qApp 才被解構、invokeMethod 用到已釋放的 qApp。
+        // 熱點是這條工作開的、主執行緒又不會再排等待計時器，就在這裡關掉。
+        QMutexLocker decision(&s_HotspotDecisionMu);
+        if (s_HotspotClosing.load(std::memory_order_acquire) || QCoreApplication::closingDown() ||
+                QCoreApplication::instance() == nullptr) {
+            FrameHotspot::closeIfOwner();
+            return;
+        }
         QMetaObject::invokeMethod(qApp, [self]() {
-            if (self.isNull()) {
+            if (self.isNull() || s_HotspotClosing.load(std::memory_order_acquire)) {
+                FrameHotspot::closeIfOwner();
                 return;
             }
             auto* wait = new QTimer(self.data());
@@ -105,17 +133,28 @@ void VrLauncher::lanVrHostOnline()
             connect(wait, &QTimer::timeout, self.data(), [wait, waited]() {
                 *waited += 5;
                 const FrameHotspot::AppWait st = FrameHotspot::appStartState();
-                if (st == FrameHotspot::AppWait::Waiting && *waited < FrameHotspot::kAppJoinWaitS) {
+                if (st == FrameHotspot::AppWait::Waiting && *waited < FrameHotspot::kAppJoinWaitS &&
+                        !s_HotspotClosing.load(std::memory_order_acquire)) {
                     return;
                 }
                 wait->stop();
                 wait->deleteLater();
+                if (s_HotspotClosing.load(std::memory_order_acquire)) {
+                    return;
+                }
                 if (st == FrameHotspot::AppWait::Joined) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                 "[VIPLE-VR-HOTSPOT] app: a device joined the hotspot after about %d s - keeping it on", *waited);
                 }
                 else if (st == FrameHotspot::AppWait::Waiting) {
-                    QThreadPool::globalInstance()->start([]() { FrameHotspot::closeAppStart(); });
+                    QThreadPool::globalInstance()->start([]() {
+                        // §REVIEW-1119：和 aboutToQuit 的 closeIfOwner 搶同一顆 socket。先看旗標，結束流程優先。
+                        QMutexLocker decision(&s_HotspotDecisionMu);
+                        if (s_HotspotClosing.load(std::memory_order_acquire)) {
+                            return;
+                        }
+                        FrameHotspot::closeAppStart();
+                    });
                 }
             });
             wait->start();
@@ -145,7 +184,7 @@ void VrLauncher::inProcessPlayerEnded(int exitCode, const QString& error)
     m_LastError = error;
     const QString shown = playerError(exitCode, false);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] video player (in the VR interface) finished exit=%d%s%s", exitCode,
-                shown.isEmpty() ? "" : " error=", qPrintable(shown));
+                shown.isEmpty() ? "" : " error=", qPrintable(logSafe(shown)));
     emit runningChanged();
     emit finished(exitCode, shown);
 }
@@ -165,7 +204,12 @@ VrLauncher::VrLauncher(QObject* parent)
         hotspotBeat->setInterval(15000);
         connect(hotspotBeat, &QTimer::timeout, this, []() { FrameHotspot::heartbeat(); });
         hotspotBeat->start();
-        connect(qApp, &QCoreApplication::aboutToQuit, this, []() { FrameHotspot::closeIfOwner(); });
+        connect(qApp, &QCoreApplication::aboutToQuit, this, []() {
+            // §REVIEW-1119：先擋住背景工作再丟回 qApp，再關熱點。closeIfOwner 與那個決定共用一把鎖。
+            s_HotspotClosing.store(true, std::memory_order_release);
+            QMutexLocker decision(&s_HotspotDecisionMu);
+            FrameHotspot::closeIfOwner();
+        });
         // §FRAME-HOTSPOT-EARLY
         if (s_LanVrHostSeen) {
             QTimer::singleShot(0, this, []() { lanVrHostOnline(); });
@@ -198,7 +242,12 @@ VrLauncher::~VrLauncher()
     if (s_Instance == this) {
         s_Instance = nullptr;
     }
-    FrameHotspot::closeIfOwner();  // §FRAME-HOTSPOT-AUTO：App 結束
+    // §REVIEW-1119：同 aboutToQuit。背景的 openAtAppStart 若這時才成功，看到旗標就自己關，不再碰 qApp。
+    s_HotspotClosing.store(true, std::memory_order_release);
+    {
+        QMutexLocker decision(&s_HotspotDecisionMu);
+        FrameHotspot::closeIfOwner();  // §FRAME-HOTSPOT-AUTO：App 結束
+    }
     if (m_Proc == nullptr) {
         return;
     }
@@ -329,7 +378,7 @@ bool VrLauncher::launchDesktop(const QString& hostAddress, const QString& appNam
     args << QStringLiteral("--xr-handback") << QStringLiteral("--") << hostAddress << appName;
     m_ChildIsPlayer = false;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] launching desktop stream (XR screen): app=\"%s\"%s",
-                qPrintable(appName), takeover ? " (takeover)" : "");
+                qPrintable(logSafe(appName)), takeover ? " (takeover)" : "");
     if (!startChild(args, QStringLiteral("desktop stream"))) {
         return false;
     }
@@ -571,7 +620,7 @@ bool VrLauncher::startProcess(const QString& hostAddress, const QString& appName
     args << QStringLiteral("--") << hostAddress << appName;
     m_ChildIsPlayer = false;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] launching VR stream: app=\"%s\"%s",
-                qPrintable(appName), takeover ? " (takeover)" : "");
+                qPrintable(logSafe(appName)), takeover ? " (takeover)" : "");
     return startChild(args, QStringLiteral("VR stream"));
 }
 
@@ -606,6 +655,8 @@ bool VrLauncher::startChild(const QStringList& args, const QString& what)
         connect(m_Proc, &QProcess::finished, this, &VrLauncher::processEnded);
         connect(m_Proc, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
             if (err == QProcess::FailedToStart) {
+                // §REVIEW-1119：這個訊號在 start() 返回前就進來。呼叫端若看到 true 會再把 launching 設回去。
+                m_StartFailed = true;
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] failed to start the stream process");
                 if (!singleInstanceReacquire()) {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] could not take the single-instance lock back");
@@ -658,7 +709,12 @@ bool VrLauncher::startChild(const QStringList& args, const QString& what)
     // 子行程是同一支程式，會自己拿單一實例鎖：開之前先放掉，結束後再拿回
     singleInstanceReleaseForChild();
     s_ChildGuardUntilMs.store(INT64_MAX, std::memory_order_release);
+    m_StartFailed = false;
     m_Proc->start(QCoreApplication::applicationFilePath(), args);
+    // §REVIEW-1119：FailedToStart 不會再來一次 finished。回 false，launchDesktop／launchNetBenchStep 才不會把遮罩設回去。
+    if (m_StartFailed) {
+        return false;
+    }
     emit runningChanged();
     return true;
 }
@@ -694,7 +750,7 @@ void VrLauncher::onStderr()
         m_StderrPartial.remove(0, nl + 1);
         if (line.startsWith(QLatin1String("VIPLE-XR-STATE "))) {
             const QString st = line.mid(15);
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] child XR session %s", qPrintable(st));
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] child XR session %s", qPrintable(logSafe(st)));
             if (st == QLatin1String("HANDBACK") && s_ChildHook) {
                 s_ChildHook(ChildEvent::HandBack);
             }
@@ -747,7 +803,7 @@ void VrLauncher::processEnded(int exitCode, QProcess::ExitStatus status)
                                        : tr("The VR stream ended with an error (code %1).").arg(exitCode);
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-LAUNCHER] stream process finished exit=%d status=%d%s%s",
-                exitCode, static_cast<int>(status), error.isEmpty() ? "" : " error=", qPrintable(error));
+                exitCode, static_cast<int>(status), error.isEmpty() ? "" : " error=", qPrintable(logSafe(error)));
     // §FRAME-HOTSPOT-PAUSE：子行程正常結束時自己會還原熱點；被強制結束或當掉的話在這裡補做
     FrameHotspot::recoverStale();
     setLaunching(false, QString(), "process ended");

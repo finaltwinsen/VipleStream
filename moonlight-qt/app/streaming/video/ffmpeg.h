@@ -111,7 +111,8 @@ private:
 
     static bool isSeparateTestDecoderRequired(const AVCodec* decoder);
 
-    void reset();
+    // §REVIEW-1119：回傳 true 代表解碼執行緒被放生。呼叫端不要再讀它還可能寫入的成員。
+    bool reset();
 
     void writeBuffer(PLENTRY entry, int& offset);
 
@@ -232,7 +233,18 @@ private:
     // §DEC-STUCK-RESET（2026-11-11）：看門狗已確認解碼執行緒卡在送封包，reset() 不必等滿 3 秒
     std::atomic<bool> m_DecoderKnownStuck{false};
     // §DEC-ABANDON：這個實例的解碼執行緒被放生了沒有（獨立於物件的生命期，見 ffmpeg.cpp 的 parkIfAbandoned）
-    std::shared_ptr<std::atomic<bool>> m_AbandonFlag = std::make_shared<std::atomic<bool>>(false);
+    // §REVIEW-1119：改成三個旗標的交接（見 ffmpeg.cpp 的 decEnterBlocking）。只看「放生了沒」不夠：旗標立起來的當下
+    // 那條執行緒可能正在跑我們自己的程式（剛過檢查、正要送幀），reset() 接著刪 Pacer、清佇列就是釋放後使用。
+    // inBlocking＝它正在 avcodec_send_packet／avcodec_receive_frame 裡；parked＝它已經看到放生、原地停住了。
+    // reset() 只在這兩者之一成立時才往下釋放。
+public:
+    struct DecThreadGate {
+        std::atomic<bool> abandoned{false};
+        std::atomic<bool> inBlocking{false};
+        std::atomic<bool> parked{false};
+    };
+private:
+    std::shared_ptr<DecThreadGate> m_AbandonFlag = std::make_shared<DecThreadGate>();
 
     // Data buffers in the queued DU are not valid
     QQueue<DECODE_UNIT> m_FrameInfoQueue;
@@ -251,6 +263,8 @@ private:
     // M4a R1：PCVR 走 XR projection 時，查不到 0x81 meta 的幀要丟（沒有 render pose 就無法正確投影）
     bool m_VrDropOnMetaMiss = false;
     uint32_t m_VrMetaMissDropped = 0;
+    // §REVIEW-1119：vrPairDecodedFrame 回 false 的原因是「查不到 meta」（這一幀真的出來了）而不是測試用的注入吞幀。只有解碼執行緒讀寫
+    bool m_VrPairMetaMiss = false;
     VIPLE_VR_FRAME_META m_VrPendingMeta {};
     bool m_VrPendingMetaValid = false;
     int64_t m_VrPendingMetaFrame = 0;

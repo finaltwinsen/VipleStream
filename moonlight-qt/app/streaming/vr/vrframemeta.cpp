@@ -193,6 +193,7 @@ void VrFrameMetaTracker::maybeLog(bool final)
 // ── M4a R1：VrRenderMetaRing ──
 std::mutex VrRenderMetaRing::s_Lock;
 VrRenderMetaRing::Entry VrRenderMetaRing::s_Entries[VrRenderMetaRing::kSize];
+unsigned VrRenderMetaRing::s_Write = 0;
 
 void VrRenderMetaRing::reset()
 {
@@ -205,7 +206,7 @@ void VrRenderMetaRing::reset()
 void VrRenderMetaRing::publish(int64_t pts, const VIPLE_VR_FRAME_META& meta)
 {
     std::lock_guard<std::mutex> lock(s_Lock);
-    Entry& e = s_Entries[slot(pts)];
+    Entry& e = s_Entries[s_Write++ % kSize];  // §REVIEW-1119：依序寫，見標頭
     e.pts = pts;
     e.used = true;
     e.meta = meta;
@@ -214,12 +215,15 @@ void VrRenderMetaRing::publish(int64_t pts, const VIPLE_VR_FRAME_META& meta)
 bool VrRenderMetaRing::lookup(int64_t pts, VIPLE_VR_FRAME_META* meta)
 {
     std::lock_guard<std::mutex> lock(s_Lock);
-    const Entry& e = s_Entries[slot(pts)];
-    if (!e.used || e.pts != pts) {
-        return false;
+    // §REVIEW-1119：從最新一格往回找。同一個 pts 被登記兩次時拿到的是比較新的那一筆。
+    for (unsigned i = 1; i <= (unsigned)kSize; i++) {
+        const Entry& e = s_Entries[(s_Write - i) % kSize];
+        if (e.used && e.pts == pts) {
+            *meta = e.meta;
+            return true;
+        }
     }
-    *meta = e.meta;
-    return true;
+    return false;
 }
 
 // ── 2026-10-05：VrDecodeTiming ──

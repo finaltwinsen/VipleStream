@@ -92,8 +92,12 @@ QString Updater::manualUpdateHint() const
 Updater::~Updater()
 {
     if (m_CurrentReply) {
+        // §REVIEW-1119：abort() 會同步發出 finished，槽函式把 m_CurrentReply 清成空之後再 deleteLater 就會崩。
+        // 和下面的 m_NotesReply 一樣，先斷開這個物件的連線。
+        m_CurrentReply->disconnect(this);
         m_CurrentReply->abort();
         m_CurrentReply->deleteLater();
+        m_CurrentReply = nullptr;
     }
     // §REVIEW-1111：更新摘要的請求也要中止。原本解構後它的 finished 還會進來，槽裡用的是已經解構的 Updater。
     if (m_NotesReply) {
@@ -116,9 +120,24 @@ void Updater::setStatus(const QString& s)
     }
 }
 
+// §REVIEW-1119：錯誤與安裝路徑會進除錯日誌。家目錄前綴改成 ~，才不會把帳號名稱一起寫出去。
+static QString redactHomePath(QString text)
+{
+    const QString home = QDir::homePath();
+    if (home.size() <= 3) {
+        return text;
+    }
+    text.replace(home, QStringLiteral("~"));
+    const QString nativeHome = QDir::toNativeSeparators(home);
+    if (nativeHome != home) {
+        text.replace(nativeHome, QStringLiteral("~"));
+    }
+    return text;
+}
+
 void Updater::fail(const QString& errorMessage)
 {
-    qWarning() << "[VIPLE-UPDATE] failed:" << errorMessage;
+    qWarning() << "[VIPLE-UPDATE] failed:" << redactHomePath(errorMessage);
     if (m_CurrentReply) {
         m_CurrentReply->abort();
         m_CurrentReply->deleteLater();
@@ -129,6 +148,13 @@ void Updater::fail(const QString& errorMessage)
         m_DownloadFile->remove();
         delete m_DownloadFile;
         m_DownloadFile = nullptr;
+    }
+    // §REVIEW-1119：spawnHelperAndQuit 失敗（找不到 powershell、UAC 取消）時下載檔已經先關掉，
+    // 這裡原本沒清暫存目錄，zip 和腳本會留在 %TEMP%。成功交給 helper 的那條不會進 fail()。
+    if (!m_StageDir.isEmpty()) {
+        QDir(m_StageDir).removeRecursively();
+        m_StageDir.clear();
+        m_DownloadPath.clear();
     }
     setStatus(QString());
     emit updateFailed(errorMessage);
@@ -168,8 +194,16 @@ void Updater::startUpdate(const QString& version)
 #else
     request.setAttribute(QNetworkRequest::HTTP2AllowedAttribute, true);
 #endif
+    request.setTransferTimeout(15000);
 
     m_CurrentReply = m_Nam->get(request);
+    connect(m_CurrentReply, &QNetworkReply::readyRead, this, [this]() {
+        // §REVIEW-1119：GitHub 的 release JSON 只有幾十 KB。太大就中止，避免整包讀進記憶體再解析。
+        auto* reply = qobject_cast<QNetworkReply*>(sender());
+        if (reply && reply->bytesAvailable() > (2 * 1024 * 1024)) {
+            reply->abort();
+        }
+    });
     connect(m_CurrentReply, &QNetworkReply::finished,
             this, &Updater::handleAssetListFinished);
 }
@@ -198,6 +232,13 @@ void Updater::fetchReleaseNotes(const QString& version)
     request.setTransferTimeout(15000);
     m_NotesReply = m_Nam->get(request);
     m_NotesReply->setProperty("notesVersion", version);
+    connect(m_NotesReply, &QNetworkReply::readyRead, this, [this]() {
+        // §REVIEW-1119：同資產清單，release notes 的 JSON 不該超過 2 MB。
+        auto* reply = qobject_cast<QNetworkReply*>(sender());
+        if (reply && reply->bytesAvailable() > (2 * 1024 * 1024)) {
+            reply->abort();
+        }
+    });
     connect(m_NotesReply, &QNetworkReply::finished, this, &Updater::handleNotesFinished);
 }
 
@@ -217,8 +258,14 @@ void Updater::handleNotesFinished()
 
     QString body;
     if (reply->error() == QNetworkReply::NoError) {
-        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
-        body = doc.object().value(QStringLiteral("body")).toString();
+        const QByteArray raw = reply->readAll();
+        if (raw.size() > (2 * 1024 * 1024)) {
+            qWarning() << "[VIPLE-UPDATE] release notes for" << m_NotesVersion << "exceeded 2 MB";
+        }
+        else {
+            const QJsonDocument doc = QJsonDocument::fromJson(raw);
+            body = doc.object().value(QStringLiteral("body")).toString();
+        }
     }
     else {
         qWarning() << "[VIPLE-UPDATE] release notes for" << m_NotesVersion << "failed:" << reply->errorString();
@@ -291,6 +338,10 @@ void Updater::handleAssetListFinished()
     }
 
     QByteArray body = reply->readAll();
+    if (body.size() > (2 * 1024 * 1024)) {
+        fail(tr("Release JSON malformed: %1").arg(QStringLiteral("response too large")));
+        return;
+    }
     QJsonParseError pe;
     QJsonDocument doc = QJsonDocument::fromJson(body, &pe);
     if (doc.isNull() || !doc.isObject()) {
@@ -359,9 +410,25 @@ void Updater::handleAssetListFinished()
 
     // §UPDATE-DIGEST（§REVIEW-1111 第二輪）：下載回來的檔案原本只核對大小就覆蓋安裝目錄（需要時還提權）。
     // 現在：(1) 只從自己 repo 的 release 下載；(2) release 一定要帶 sha256，下載完核對（host 的自我更新早就這樣做）。
-    if (!m_AssetUrl.startsWith(QLatin1String("https://github.com/finaltwinsen/VipleStream/releases/download/"))) {
-        fail(tr("Download failed: %1").arg(QStringLiteral("unexpected download address")));
-        return;
+    // §REVIEW-1119：字首比對擋不住 download/../../ 其他 repo。正規化後的路徑必須仍在自己的 releases 底下。
+    {
+        const QUrl assetUrl(m_AssetUrl);
+        const QString normalizedPath = assetUrl.adjusted(QUrl::NormalizePathSegments).path();
+        bool dotDotSegment = false;
+        for (const QString& segment : assetUrl.path().split(QLatin1Char('/'))) {
+            if (segment == QLatin1String("..")) {
+                dotDotSegment = true;
+                break;
+            }
+        }
+        if (!assetUrl.isValid() || assetUrl.scheme() != QLatin1String("https") ||
+                assetUrl.host() != QLatin1String("github.com") || assetUrl.port(-1) != -1 ||
+                !assetUrl.userInfo().isEmpty() || m_AssetUrl.contains(QLatin1Char('\\')) ||
+                dotDotSegment ||
+                !normalizedPath.startsWith(QLatin1String("/finaltwinsen/VipleStream/releases/download/"))) {
+            fail(tr("Download failed: %1").arg(QStringLiteral("unexpected download address")));
+            return;
+        }
     }
     if (m_AssetSha256.isEmpty()) {
         fail(tr("Download failed: %1").arg(QStringLiteral("the release does not list a SHA-256 for %1").arg(m_AssetName)));
@@ -399,6 +466,8 @@ void Updater::handleAssetListFinished()
 #else
     request.setAttribute(QNetworkRequest::HTTP2AllowedAttribute, true);
 #endif
+    // §REVIEW-1119：資產查詢有 15 秒逾時，下載這條沒有。60 秒沒有任何位元組才中止，慢速但持續的下載不受影響。
+    request.setTransferTimeout(60000);
 
     m_CurrentReply = m_Nam->get(request);
     connect(m_CurrentReply, &QNetworkReply::downloadProgress,
@@ -408,13 +477,18 @@ void Updater::handleAssetListFinished()
             const QByteArray data = m_CurrentReply->readAll();
             m_DownloadHash.addData(data);
             // §REVIEW-1104：磁碟滿時 write 會少寫；先記下，收尾改走 fail()，不要把截斷的 zip 交給 helper
+            // §REVIEW-1119：只設旗標的話檔案大小不再增加，1 GB 上限與閒置逾時都不會到，下載會一直收。
+            // abort() 可能同步跑到 finished；這裡要立刻返回，不能再碰已經收掉的檔案。
             if (m_DownloadFile->write(data) != data.size()) {
                 m_DownloadWriteFailed = true;
+                m_CurrentReply->abort();
+                return;
             }
             // §UPDATE-DIGEST：安裝檔不到 200 MB；超過 1 GB 就不是我們的檔案，別把磁碟寫滿
             if (m_DownloadFile->size() > (qint64(1) << 30)) {
                 m_DownloadWriteFailed = true;
                 m_CurrentReply->abort();
+                return;
             }
         }
     });
@@ -459,6 +533,15 @@ void Updater::handleDownloadFinished()
         fail(tr("Update cancelled."));
         return;
     }
+    // §REVIEW-1119：寫入失敗時會 abort()，reply 的錯誤會變成 Operation canceled。先看旗標，磁碟已滿才不會被蓋掉。
+    if (m_DownloadWriteFailed) {
+        if (reply) {
+            reply->deleteLater();
+        }
+        QFile::remove(m_DownloadPath);
+        fail(tr("Could not save the downloaded update. The disk may be full."));
+        return;
+    }
     if (reply && reply->error() != QNetworkReply::NoError) {
         QString err = reply->errorString();
         reply->deleteLater();
@@ -471,12 +554,6 @@ void Updater::handleDownloadFinished()
         return;
     }
     if (reply) reply->deleteLater();
-
-    if (m_DownloadWriteFailed) {
-        QFile::remove(m_DownloadPath);
-        fail(tr("Could not save the downloaded update. The disk may be full."));
-        return;
-    }
 
     // §UPDATE-DIGEST：和 release 回報的 sha256 不同就不安裝
     {
@@ -619,8 +696,14 @@ bool Updater::spawnHelperAndQuit()
         "if ((Split-Path -Leaf $sd) -like 'viplestream-update-*') { Remove-Item -LiteralPath $sd -Recurse -Force -ErrorAction SilentlyContinue }\n"
         "if ($DropAdmin -ne 0) {\n"
         "  try {\n"
-        "    $shell = New-Object -ComObject Shell.Application\n"
-        "    $shell.ShellExecute($ExePath, '', $InstallDir, 'open', 1)\n"
+        // §REVIEW-1119：New-Object -ComObject Shell.Application 是載進這個（已提權的）PowerShell 行程裡的 shell32，
+        // 它的 ShellExecute 開出來的程式一樣是系統管理員權限。改成向桌面的 explorer 要它的 Shell 物件
+        // （ShellWindows 由 explorer 行程提供；FindWindowSW 的 8＝SWC_DESKTOP、1＝SWFO_NEEDDISPATCH），
+        // 由 explorer 以一般權限啟動。11-19 在開發機實測開出來的行程是 Medium。explorer 沒在跑時才退回 Start-Process。
+        "    $sw = [Activator]::CreateInstance([Type]::GetTypeFromCLSID('9BA05972-F6A8-11CF-A442-00A0C90A8F39'))\n"
+        "    $hw = 0\n"
+        "    $desk = $sw.FindWindowSW(0, $null, 8, [ref]$hw, 1)\n"
+        "    $desk.Document.Application.ShellExecute($ExePath, '', $InstallDir, 'open', 1)\n"
         "  } catch {\n"
         "    Start-Process -FilePath $ExePath\n"
         "  }\n"
@@ -654,23 +737,33 @@ bool Updater::spawnHelperAndQuit()
     sf.close();
 
     bool needElevate = !isPathWritable(installDir);
-    qDebug() << "[VIPLE-UPDATE] install dir" << installDir
+    qDebug() << "[VIPLE-UPDATE] install dir" << redactHomePath(installDir)
              << "writable =" << !needElevate;
 
     // 構造 PowerShell argv：-NoProfile -ExecutionPolicy Bypass -File <script> -AppPid ... -ZipPath ...
+    // §REVIEW-1119：連續 .arg() 會把路徑裡的 %2～%7 再換一次。七個參數一次代入就不會。
+    // 路徑以單一反斜線結尾時（磁碟根目錄 D:\），CommandLineToArgvW 會把 \" 當成跳脫的引號。
+    const auto nativeArg = [](QString path) {
+        path = QDir::toNativeSeparators(path);
+        if (path.endsWith(QLatin1Char('\\'))) {
+            path.append(QLatin1Char('\\'));
+        }
+        return path;
+    };
     QString args = QStringLiteral(
         "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden "
         "-File \"%1\" -AppPid %2 -ZipPath \"%3\" -InstallDir \"%4\" -ExePath \"%5\" -DropAdmin %6 -Sha256 %7"
-    ).arg(QDir::toNativeSeparators(helperPath))
-     .arg(pid)
-     .arg(QDir::toNativeSeparators(m_DownloadPath))
-     .arg(QDir::toNativeSeparators(installDir))
-     .arg(QDir::toNativeSeparators(exePath))
-     .arg(needElevate ? 1 : 0)
-     .arg(m_AssetSha256);
+    ).arg(nativeArg(helperPath),
+          QString::number(pid),
+          nativeArg(m_DownloadPath),
+          nativeArg(installDir),
+          nativeArg(exePath),
+          QString::number(needElevate ? 1 : 0),
+          m_AssetSha256);
 
     // §REVIEW-1111（第二輪）：用系統目錄裡的 PowerShell 的完整路徑。只給檔名時會照 PATH 找，提權執行到的可能是別人放的同名程式。
-    QString psExe = QStringLiteral("powershell.exe");
+    // §REVIEW-1119：找不到完整路徑就放棄。退回 "powershell.exe" 仍會被目錄或 PATH 劫持。
+    QString psExe;
     {
         wchar_t sysDir[MAX_PATH];
         const UINT n = GetSystemDirectoryW(sysDir, MAX_PATH);
@@ -680,6 +773,10 @@ bool Updater::spawnHelperAndQuit()
                 psExe = full;
             }
         }
+    }
+    if (psExe.isEmpty()) {
+        fail(tr("Failed to launch updater (UAC denied or PowerShell missing)."));
+        return false;
     }
     if (!shellExecuteRunas(psExe, args, needElevate)) {
         // 使用者取消 UAC prompt 也會走這條

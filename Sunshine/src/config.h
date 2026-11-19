@@ -535,6 +535,11 @@ namespace config {
 
     bool high_resolution_scrolling;
     bool native_pen_touch;
+
+    /// §STREAM-MENU：stream_menu。enabled（預設）＝2D 串流期間，遠端使用者按開始選單的電源圖示、或在桌面按 Alt+F4 時，
+    /// 不顯示 Windows 的電源選單，改顯示串流控制選單（中斷串流、結束 App、鎖定、睡眠、關機、重新啟動）。
+    /// disabled＝完全不介入，行為與之前相同。只有 Windows 有作用；VR session 不介入。
+    bool stream_menu;
   };
 
   namespace flag {

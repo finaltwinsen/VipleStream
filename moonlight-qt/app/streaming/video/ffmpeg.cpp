@@ -139,15 +139,33 @@ std::atomic<uint64_t> s_LastStuckUs {0};  // 上一次判定卡住的時間；�
 // 做法：每條解碼執行緒開跑時把「這個實例的放生旗標」（shared_ptr，獨立於物件）存進 thread_local；會卡住的 FFmpeg 呼叫
 // 一返回就先看旗標，被放生了就在原地永遠睡下去，不再碰 this（執行緒本來就已經 detach，行程結束時跟著消失）。
 // 不是解碼執行緒呼叫的（測試解碼在主執行緒）thread_local 是空的，什麼都不做。
-thread_local std::shared_ptr<std::atomic<bool>> t_DecAbandoned;
+thread_local std::shared_ptr<FFmpegVideoDecoder::DecThreadGate> t_DecAbandoned;
 inline void parkIfAbandoned()
 {
-    if (t_DecAbandoned && t_DecAbandoned->load(std::memory_order_acquire)) {
+    if (t_DecAbandoned && t_DecAbandoned->abandoned.load()) {
+        t_DecAbandoned->parked.store(true);  // §REVIEW-1119：告訴 reset() 這條執行緒不會再碰物件
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-DEC] an abandoned decoder thread came back from the hardware decoder - parking it for good");
         for (;;) {
             SDL_Delay(60000);
         }
+    }
+}
+// §REVIEW-1119：解碼執行緒進出「可能卡很久的 FFmpeg 呼叫」時的交接。兩邊都是先寫自己的旗標、再讀對方的（seq_cst），
+// 所以 reset() 立起 abandoned 之後，要嘛看得到 inBlocking，要嘛這條執行緒下一次檢查一定看得到 abandoned 而停住。
+// 每幀多幾次原子寫入，沒有鎖也沒有配置。不是解碼執行緒呼叫的（測試解碼）thread_local 是空的，什麼都不做。
+inline void decEnterBlocking()
+{
+    if (t_DecAbandoned) {
+        t_DecAbandoned->inBlocking.store(true);
+        parkIfAbandoned();
+    }
+}
+inline void decLeaveBlocking()
+{
+    if (t_DecAbandoned) {
+        t_DecAbandoned->inBlocking.store(false);
+        parkIfAbandoned();
     }
 }
 // dev：--vr-inject-dec-stuck 已經觸發過（整個行程只卡一次，重建後的解碼器照常運作）
@@ -487,18 +505,46 @@ QSize FFmpegVideoDecoder::getDecoderMaxResolution()
 enum AVPixelFormat FFmpegVideoDecoder::ffGetFormat(AVCodecContext* context,
                                                    const enum AVPixelFormat* pixFmts)
 {
+    // §REVIEW-1119：放生之後 this 已經釋放，FFmpeg 仍可能在卡住的 avcodec_* 裡面呼叫 get_format。
+    // 旗標在 thread_local，不靠 this。已經放生就回 NONE，不要再碰 renderer。
+    // 只在入口看一次不夠：prepareDecoderContextInGetFormat 會建硬體幀，可能比 reset() 的等待還久，
+    // 返回後若再讀 decoder 就是使用已釋放的物件。進來時先把要用的欄位抄出來。放生只把成員清成空指標，
+    // renderer 與 codec context 刻意不刪，抄到的指標在那次呼叫返回後仍有效。
+    const auto abandoned = []() {
+        return t_DecAbandoned && t_DecAbandoned->abandoned.load();
+    };
+    if (abandoned()) {
+        return AV_PIX_FMT_NONE;
+    }
+
+    // get_format 是在 avcodec_* 裡面被叫的（阻塞區）。讀 decoder 的欄位前先離開阻塞區：reset() 看到的就是
+    // 「正在跑我們的程式」，會等這幾行讀完；已經放生的話在這裡停住。讀完再回到阻塞區。
+    decLeaveBlocking();
     FFmpegVideoDecoder* decoder = (FFmpegVideoDecoder*)context->opaque;
+    const auto* hwCfg = decoder->m_HwDecodeCfg;
+    const auto requiredFmt = decoder->m_RequiredPixelFormat;
+    const int videoFormat = decoder->m_VideoFormat;
+    auto* frontend = decoder->m_FrontendRenderer;
+    auto* backend = decoder->m_BackendRenderer;
+    decEnterBlocking();
+    if (abandoned() || backend == nullptr) {
+        return AV_PIX_FMT_NONE;
+    }
+
     const AVPixelFormat *p;
     AVPixelFormat desiredFmt;
 
-    if (decoder->m_HwDecodeCfg) {
-        desiredFmt = decoder->m_HwDecodeCfg->pix_fmt;
+    if (hwCfg) {
+        desiredFmt = hwCfg->pix_fmt;
     }
-    else if (decoder->m_RequiredPixelFormat != AV_PIX_FMT_NONE) {
-        desiredFmt = decoder->m_RequiredPixelFormat;
+    else if (requiredFmt != AV_PIX_FMT_NONE) {
+        desiredFmt = requiredFmt;
+    }
+    else if (frontend == nullptr) {
+        return AV_PIX_FMT_NONE;
     }
     else {
-        desiredFmt = decoder->m_FrontendRenderer->getPreferredPixelFormat(decoder->m_VideoFormat);
+        desiredFmt = frontend->getPreferredPixelFormat(videoFormat);
     }
 
     for (p = pixFmts; *p != AV_PIX_FMT_NONE; p++) {
@@ -506,17 +552,23 @@ enum AVPixelFormat FFmpegVideoDecoder::ffGetFormat(AVCodecContext* context,
         // format (if not using hardware decoding). It's crucial
         // to override the default get_format() which will try
         // to gracefully fall back to software decode and break us.
-        if (*p == desiredFmt && decoder->m_BackendRenderer->prepareDecoderContextInGetFormat(context, *p)) {
+        if (*p == desiredFmt && backend->prepareDecoderContextInGetFormat(context, *p)) {
+            if (abandoned()) {
+                return AV_PIX_FMT_NONE;
+            }
             return *p;
         }
     }
 
     // Failed to match the preferred pixel formats. Try non-preferred pixel format options
     // for non-hwaccel decoders if we didn't have a required pixel format to use.
-    if (decoder->m_HwDecodeCfg == nullptr && decoder->m_RequiredPixelFormat == AV_PIX_FMT_NONE) {
+    if (hwCfg == nullptr && requiredFmt == AV_PIX_FMT_NONE && frontend != nullptr) {
         for (p = pixFmts; *p != AV_PIX_FMT_NONE; p++) {
-            if (decoder->m_FrontendRenderer->isPixelFormatSupported(decoder->m_VideoFormat, *p) &&
-                    decoder->m_BackendRenderer->prepareDecoderContextInGetFormat(context, *p)) {
+            if (frontend->isPixelFormatSupported(videoFormat, *p) &&
+                    backend->prepareDecoderContextInGetFormat(context, *p)) {
+                if (abandoned()) {
+                    return AV_PIX_FMT_NONE;
+                }
                 return *p;
             }
         }
@@ -770,19 +822,23 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
 
 FFmpegVideoDecoder::~FFmpegVideoDecoder()
 {
-    // §LOGHYG-NET10 — teardown flush：凍結中退出（quit-during-freeze）時
-    // 視窗不再 flip，ring 內「進入凍結前」的秒級樣本不 flush 就永遠消失
-    // ——那正是事故屍檢最需要的斜坡。testOnly decoder 無 ring 資料不印。
-    for (int i = m_NetRingCount; i >= 1; i--) {
-        const NetSecondSample& s =
-            m_NetRing[(m_NetRingHead - i + 2 * k_NetRingSize) % k_NetRingSize];
-        if (!s.flushed) {
-            logNetSecondLine(s, "(tail) ", "");
+    // §REVIEW-1119：m_NetRing 是解碼執行緒在 submitDecodeUnit 裡寫的。
+    // 先讓 reset() 把那條執行緒停掉再讀，否則解構同時寫入是資料競態。
+    // 放生時它可能還在寫，不要碰。
+    const bool abandoned = reset();
+    if (!abandoned) {
+        // §LOGHYG-NET10 — teardown flush：凍結中退出（quit-during-freeze）時
+        // 視窗不再 flip，ring 內「進入凍結前」的秒級樣本不 flush 就永遠消失
+        // ——那正是事故屍檢最需要的斜坡。testOnly decoder 無 ring 資料不印。
+        for (int i = m_NetRingCount; i >= 1; i--) {
+            const NetSecondSample& s =
+                m_NetRing[(m_NetRingHead - i + 2 * k_NetRingSize) % k_NetRingSize];
+            if (!s.flushed) {
+                logNetSecondLine(s, "(tail) ", "");
+            }
         }
+        m_NetRingCount = 0;
     }
-    m_NetRingCount = 0;
-
-    reset();
 
     // §SF-PROBE（M2a）：串流 decoder 解構時關掉 `--dump-bitstream` 的檔案（印 closed 行）。
     // reset() 已經 join decoder 執行緒，這裡不會和 writeAccessUnit() 並行。decoder 若之後
@@ -807,7 +863,7 @@ IFFmpegRenderer* FFmpegVideoDecoder::getBackendRenderer()
     return m_BackendRenderer;
 }
 
-void FFmpegVideoDecoder::reset()
+bool FFmpegVideoDecoder::reset()
 {
     // Terminate the decoder thread before doing anything else.
     // It might be touching things we're about to free.
@@ -831,10 +887,30 @@ void FFmpegVideoDecoder::reset()
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-DEC] decoder thread did not stop within %d ms (stuck in the hardware decoder) - leaving it and "
                         "its decoder objects behind (frames in=%d out=%d)", joinLimitMs, m_FramesIn, m_FramesOut);
-            SDL_DetachThread(m_DecoderThread);
             // §DEC-ABANDON：那條執行緒之後醒來就原地停住，不會再碰這個物件；之後的執行緒用新的旗標
-            m_AbandonFlag->store(true, std::memory_order_release);
-            m_AbandonFlag = std::make_shared<std::atomic<bool>>(false);
+            // §REVIEW-1119：立起旗標之後，等它確定在 FFmpeg 裡（inBlocking）或已經停住（parked）才往下釋放。
+            // 它若正在跑我們的程式（例如剛從 FFmpeg 回來、正要送幀給 Pacer），幾毫秒內就會走到下一個檢查點。
+            // 最多再等 2 秒；還是等不到＝卡在別的地方，照舊往下做（log 會留一行）。這段期間它自己結束了就正常 join。
+            m_AbandonFlag->abandoned.store(true);
+            int gateWaitMs = 0;
+            while (!m_AbandonFlag->inBlocking.load() && !m_AbandonFlag->parked.load() &&
+                   !m_DecoderThreadExited.load() && gateWaitMs < 2000) {
+                SDL_Delay(2);
+                gateWaitMs += 2;
+            }
+            if (m_DecoderThreadExited.load()) {
+                SDL_WaitThread(m_DecoderThread, NULL);
+                abandoned = false;
+            }
+            else {
+                if (!m_AbandonFlag->inBlocking.load() && !m_AbandonFlag->parked.load()) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-DEC] abandoned decoder thread is neither inside FFmpeg nor parked after %d ms",
+                                gateWaitMs);
+                }
+                SDL_DetachThread(m_DecoderThread);
+            }
+            m_AbandonFlag = std::make_shared<DecThreadGate>();
         }
         SDL_AtomicSet(&m_DecoderThreadShouldQuit, 0);
         m_DecoderThread = nullptr;
@@ -858,7 +934,13 @@ void FFmpegVideoDecoder::reset()
     m_FrameInfoQueue.clear();
     // §PERF-1113：正常情況 submitDecodeUnit 送完就放掉了；只有解碼執行緒卡在 avcodec_send_packet 裡被放生時這裡還留著
     // 一份參照（FFmpeg 進函式時已經自己加了參照，這裡放掉不影響它）。清掉，免得重用這個物件時測試幀帶著舊的 buf
-    if (m_Pkt != nullptr && m_Pkt->buf != nullptr) {
+    // §REVIEW-1119：放生時那條執行緒可能還在 avcodec_send_packet 裡。契約是返回前這顆 AVPacket 都要留著，
+    // 所以不改欄位、也不 free。成員改指新的空 packet，舊的跟著那條執行緒漏掉。
+    // 配置失敗也要改指空指標。留著舊指標的話，解構函式的 av_packet_free 會把還在用的那顆放掉。
+    if (abandoned) {
+        m_Pkt = av_packet_alloc();
+    }
+    else if (m_Pkt != nullptr && m_Pkt->buf != nullptr) {
         av_buffer_unref(&m_Pkt->buf);
         m_Pkt->data = nullptr;
         m_Pkt->size = 0;
@@ -927,6 +1009,7 @@ void FFmpegVideoDecoder::reset()
         // Test-only decoders can't have any frames submitted
         SDL_assert(m_GlobalVideoStats.totalFrames == 0);
     }
+    return abandoned;
 }
 
 bool FFmpegVideoDecoder::initializeRendererInternal(IFFmpegRenderer* renderer, PDECODER_PARAMETERS params)
@@ -1703,6 +1786,10 @@ void FFmpegVideoDecoder::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst)
 
 void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, int length)
 {
+    // §REVIEW-1119：除錯浮層每秒進來一次，中間的位址探測會堵住。放生之後不能再碰 this。
+    // 主執行緒的 thread_local 是空的，這裡什麼都不做。
+    parkIfAbandoned();
+
     int offset = 0;
     const char* codecString;
     int ret;
@@ -1726,8 +1813,26 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             stats.renderedFrames);
     }
 
+    // §REVIEW-1119：length <= 0 時下一行會寫出緩衝區。
+    if (output == nullptr || length <= 0) {
+        return;
+    }
+
     // Start with an empty string
     output[offset] = 0;
+
+    // §REVIEW-1119：截斷時若還從同一個 offset 繼續 snprintf，前一段會被蓋掉。
+    // 中段原本 SDL_assert(false)，除錯建置會直接中止。緩衝區不夠就停在已經寫好的內容。
+    const auto appendStats = [&](int n) -> bool {
+        if (n >= 0 && n < length - offset) {
+            offset += n;
+            return true;
+        }
+        if (n < 0 && offset >= 0 && offset < length) {
+            output[offset] = '\0';
+        }
+        return false;
+    };
 
     switch (m_VideoFormat)
     {
@@ -1845,13 +1950,29 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                     stunNull = computer->stunAddress.isNull();
                     stunAddrStr = computer->stunAddress.address();
                 }
+                // §REVIEW-1119：這兩個 static 是整個行程共用的。放生的解碼執行緒和 reset()／下一場的
+                // 解碼執行緒會同時進來，QString 無鎖讀寫是未定義行為。探測最多 800ms，不要佔著鎖。
                 static QString s_ReachAddr;
                 static NvComputer::ReachabilityType s_Reach = NvComputer::RI_UNKNOWN;
-                if (s_ReachAddr != activeAddr) {
-                    s_Reach = computer->getActiveAddressReachability();
+                static std::mutex s_ReachMu;
+                NvComputer::ReachabilityType reach = NvComputer::RI_UNKNOWN;
+                bool reachCached = false;
+                {
+                    std::lock_guard<std::mutex> reachLock(s_ReachMu);
+                    if (s_ReachAddr == activeAddr) {
+                        reach = s_Reach;
+                        reachCached = true;
+                    }
+                }
+                if (!reachCached) {
+                    reach = computer->getActiveAddressReachability();
+                    // §REVIEW-1119：探測最多 800ms，看門狗放生只等 200ms。返回時 this、computer、
+                    // output 都可能已經釋放。先停住，不要寫快取，也不要再往下格式化。
+                    parkIfAbandoned();
+                    std::lock_guard<std::mutex> reachLock(s_ReachMu);
+                    s_Reach = reach;
                     s_ReachAddr = activeAddr;
                 }
-                NvComputer::ReachabilityType reach = s_Reach;
                 bool isStunAddr = (!stunNull && activeAddr == stunAddrStr);
 
                 if (reach == NvComputer::RI_LAN) {
@@ -1882,8 +2003,8 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                     connIcon, connTypeStr);
             }
 
-            if (ret >= 0 && ret < length - offset) {
-                offset += ret;
+            if (!appendStats(ret)) {
+                return;
             }
 
             // STUN info (if available)
@@ -1900,8 +2021,8 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                     u8"STUN: %s (NAT: %s)\n",
                     qPrintable(stunText),
                     qPrintable(stunNat));
-                if (ret >= 0 && ret < length - offset) {
-                    offset += ret;
+                if (!appendStats(ret)) {
+                    return;
                 }
             }
 
@@ -1949,12 +2070,9 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                            peakVideoMbps
 #endif
                            );
-            if (ret < 0 || ret >= length - offset) {
-                SDL_assert(false);
+            if (!appendStats(ret)) {
                 return;
             }
-
-            offset += ret;
         }
 
         ret = snprintf(&output[offset],
@@ -1963,12 +2081,9 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                        stats.receivedFps,
                        stats.decodedFps,
                        stats.renderedFps);
-        if (ret < 0 || ret >= length - offset) {
-            SDL_assert(false);
+        if (!appendStats(ret)) {
             return;
         }
-
-        offset += ret;
     }
 
     if (stats.framesWithHostProcessingLatency > 0) {
@@ -1978,12 +2093,9 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                        (float)stats.minHostProcessingLatency / 10,
                        (float)stats.maxHostProcessingLatency / 10,
                        (float)stats.totalHostProcessingLatency / 10 / stats.framesWithHostProcessingLatency);
-        if (ret < 0 || ret >= length - offset) {
-            SDL_assert(false);
+        if (!appendStats(ret)) {
             return;
         }
-
-        offset += ret;
     }
 
     if (stats.renderedFrames != 0) {
@@ -2002,18 +2114,16 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                        u8"\u7DB2\u8DEF: \u4E1F\u5E40 %.2f%% / \u6296\u52D5 %.2f%% / \u5EF6\u9072 %s\n"
                        // VipleStream: \u5E73\u5747\u6642\u9593\u4E09\u9805\u5408\u4E00\u884C (\u89E3\u78BC/\u4F47\u5217/\u7E6A\u88FD)
                        u8"\u5E73\u5747\u6642\u9593: \u89E3\u78BC %.2f / \u4F47\u5217 %.2f / \u7E6A\u88FD %.2f ms\n",
-                       (float)stats.networkDroppedFrames / stats.totalFrames * 100,
-                       (float)stats.pacerDroppedFrames / stats.decodedFrames * 100,
+                       // §REVIEW-1119：renderedFrames 不為 0 時，totalFrames／decodedFrames 仍可能是 0。
+                       stats.totalFrames > 0 ? (float)stats.networkDroppedFrames / stats.totalFrames * 100 : 0.0f,
+                       stats.decodedFrames > 0 ? (float)stats.pacerDroppedFrames / stats.decodedFrames * 100 : 0.0f,
                        rttString,
-                       (double)(stats.totalDecodeTimeUs / 1000.0) / stats.decodedFrames,
+                       stats.decodedFrames > 0 ? (double)(stats.totalDecodeTimeUs / 1000.0) / stats.decodedFrames : 0.0,
                        (double)(stats.totalPacerTimeUs / 1000.0) / stats.renderedFrames,
                        (double)(stats.totalRenderTimeUs / 1000.0) / stats.renderedFrames);
-        if (ret < 0 || ret >= length - offset) {
-            SDL_assert(false);
+        if (!appendStats(ret)) {
             return;
         }
-
-        offset += ret;
     }
 
     // VipleStream \u00A7ABR overlay
@@ -2026,8 +2136,8 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                            u8"ABR: %s (\u8A2D\u5B9A %d Mbps)\n",
                            abrEnabled ? u8"\u5DF2\u555F\u7528" : u8"\u672A\u555F\u7528",
                            configuredBr / 1000);
-            if (ret >= 0 && ret < length - offset) {
-                offset += ret;
+            if (!appendStats(ret)) {
+                return;
             }
         }
     }
@@ -2053,8 +2163,16 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
             double interpRatio  = (stats.renderedFrames > 0)
                 ? ((double)stats.frucInterpolatedFrames / stats.renderedFrames * 100.0)
                 : 0.0;
-            double effectiveFps = stats.renderedFps + ((double)stats.frucInterpolatedFrames /
-                ((double)(LiGetMicroseconds() - stats.measurementStartUs) / 1000000.0));
+            // §REVIEW-1119：measurementStartUs 與現在同一微秒（或時鐘倒退）時分母是 0。
+            // 補幀數也是 0 會得到 NaN，否則是 Inf。
+            const uint64_t frucNowUs = LiGetMicroseconds();
+            const double frucElapsedSec = frucNowUs > stats.measurementStartUs
+                ? (double)(frucNowUs - stats.measurementStartUs) / 1000000.0
+                : 0.0;
+            double effectiveFps = stats.renderedFps;
+            if (frucElapsedSec > 0.0) {
+                effectiveFps += (double)stats.frucInterpolatedFrames / frucElapsedSec;
+            }
             // v1.4.153 \u00A7R2-\u03B3-6: \u62FF\u6389\u6A19\u984C\u5C3E (Nx), \u6A21\u5F0F/ratio \u6539\u653E\u5167\u6587.
             // v1.4.156 \u00A7R2-\u03B6-3: \u6A21\u5F0F\u884C\u52A0\u4E0A autotier \u7576\u524D tier.
             const bool passive = m_FrontendRenderer && m_FrontendRenderer->isPassiveFrucMode();
@@ -2087,8 +2205,8 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                 u8"\u72C0\u614B: %s\n",
                 frucActive ? u8"\u7B49\u5F85\u4E2D..." : u8"\u672A\u555F\u7528");
         }
-        if (ret >= 0 && ret < length - offset) {
-            offset += ret;
+        if (!appendStats(ret)) {
+            return;
         }
     }
 
@@ -2103,8 +2221,8 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         if (sfCount > 0) {
             ret = snprintf(&output[offset], length - offset,
                 u8"--- 多路徑 (MPQUIC) ---\n");
-            if (ret >= 0 && ret < length - offset)
-                offset += ret;
+            if (!appendStats(ret))
+                return;
 
             for (int i = 0; i < sfCount && offset < length - 1; i++) {
                 const char* stateStr = sfStats[i].active
@@ -2121,15 +2239,15 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
                     sfStats[i].rttMs,
                     sfStats[i].throughputMbps,
                     sfStats[i].lossPercent);
-                if (ret >= 0 && ret < length - offset)
-                    offset += ret;
+                if (!appendStats(ret))
+                    return;
             }
 
             ret = snprintf(&output[offset], length - offset,
                 u8"活躍路徑: %d / %d\n",
                 quicGetActiveSubflowCount(), sfCount);
-            if (ret >= 0 && ret < length - offset)
-                offset += ret;
+            if (!appendStats(ret))
+                return;
         }
     }
 #endif
@@ -3632,13 +3750,27 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
     // 前一個位元組；write_nal_unit 回 −1 時 offset 倒退），解析函式庫本身也有兩處沒有上限（已另外補）。
     // 任何一步不對就照原樣複製這個 SPS，不做修正。
     bool spsFixed = false;
-    if (m_NeedsSpsFixup && entry->bufferType == BUFFER_TYPE_SPS && entry->length >= 5) {
+    // §REVIEW-1119：長度來自網路。fullLength 對不上、或 SPS 修正後變長，都會寫過 pool。
+    // 放不下就讓呼叫端丟這幀（offset < 0），不要 memcpy。
+    if (entry->length < 0 || offset < 0 ||
+            (int64_t)offset + entry->length >
+                (int64_t)m_PktBufPoolSize - AV_INPUT_BUFFER_PADDING_SIZE) {
+        offset = -1;
+        return;
+    }
+    // §REVIEW-1119：SPS 修正會把同一段再送進 h264bitstream，它會另外配置一份約 3/4 大小。
+    // 正常 SPS 只有幾百位元組。超過 4096 就照原樣複製，避免超大 SPS 把解析緩衝區拉大，
+    // 也避開 write_nal_unit 的 size*3/4 有號乘法。h264_new 失敗回空指標時不要再解析或釋放。
+    if (m_NeedsSpsFixup && entry->bufferType == BUFFER_TYPE_SPS &&
+            entry->length >= 5 && entry->length <= 4096) {
         h264_stream_t* stream = h264_new();
         int nalStart = 0, nalEnd = 0;
 
         // Read the old NALU
-        const int found = find_nal_unit((uint8_t*)entry->data, entry->length, &nalStart, &nalEnd);
-        const bool parsed = found > 0 && (nalStart == 3 || nalStart == 4) && nalEnd > nalStart && nalEnd <= entry->length &&
+        const int found = stream != nullptr
+                              ? find_nal_unit((uint8_t*)entry->data, entry->length, &nalStart, &nalEnd)
+                              : 0;
+        const bool parsed = stream != nullptr && found > 0 && (nalStart == 3 || nalStart == 4) && nalEnd > nalStart && nalEnd <= entry->length &&
                             read_nal_unit(stream, (unsigned char *)&entry->data[nalStart], nalEnd - nalStart) >= 0;
         if (parsed) {
 
@@ -3665,19 +3797,29 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
 
         // Copy the modified NALU data. This clobbers byte 0 and starts NALU data at byte 1.
         // Since it prepended one extra byte, subtract one from the returned length.
-        const int written = write_nal_unit(stream, &m_Pkt->buf->data[initialOffset + nalStart - 1],
-                                           MAX_SPS_EXTRA_SIZE + entry->length - nalStart);
+        // §REVIEW-1119：修正後最多再長 MAX_SPS_EXTRA_SIZE。pool 沒留這段就不要寫，改走下面的原樣複製。
+        const bool fixupFits = (int64_t)initialOffset + entry->length + MAX_SPS_EXTRA_SIZE <=
+                               (int64_t)m_PktBufPoolSize - AV_INPUT_BUFFER_PADDING_SIZE;
+        const int written = fixupFits
+                                ? write_nal_unit(stream, &m_Pkt->buf->data[initialOffset + nalStart - 1],
+                                                 MAX_SPS_EXTRA_SIZE + entry->length - nalStart)
+                                : -1;
         if (written > 0) {
-            offset += written - 1;
+            const int64_t end = (int64_t)initialOffset + (written - 1) + nalStart;
+            if (end <= (int64_t)m_PktBufPoolSize - AV_INPUT_BUFFER_PADDING_SIZE) {
+                offset += written - 1;
 
-            // Copy the NALU prefix over from the original SPS
-            memcpy(&m_Pkt->buf->data[initialOffset], entry->data, nalStart);
-            offset += nalStart;
-            spsFixed = true;
+                // Copy the NALU prefix over from the original SPS
+                memcpy(&m_Pkt->buf->data[initialOffset], entry->data, nalStart);
+                offset += nalStart;
+                spsFixed = true;
+            }
         }
         }
 
-        h264_free(stream);
+        if (stream != nullptr) {
+            h264_free(stream);
+        }
     }
     if (!spsFixed) {
         // Write the buffer as-is
@@ -3821,12 +3963,18 @@ bool FFmpegVideoDecoder::pyroWaveSkipStale(VIDEO_FRAME_HANDLE handle, PDECODE_UN
         m_ActiveWndVideoStats.pacerDroppedFrames++;
         // §REVIEW-1103：跳過的幀也要推進 m_LastFrameNumber（照 submitDecodeUnit 的算法先補算中間的網路丟幀），
         // 否則下一幀會把這一幀再算成 networkDroppedFrames、totalFrames 重複計入，誤觸網路警告。
+        // §REVIEW-1119：frameNumber 是網路上的 uint32，存成有號 int。last+1 在 INT_MAX 是未定義行為，
+        // 倒退的負差值加進 uint32 統計會繞成超大丟幀。只計算往前且小於半圈的差距。
         if (!m_LastFrameNumber) {
             m_ActiveWndVideoStats.measurementStartUs = LiGetMicroseconds();
         }
-        else if (frameNumber > m_LastFrameNumber + 1) {
-            m_ActiveWndVideoStats.networkDroppedFrames += frameNumber - (m_LastFrameNumber + 1);
-            m_ActiveWndVideoStats.totalFrames += frameNumber - (m_LastFrameNumber + 1);
+        else {
+            const uint32_t delta = (uint32_t)frameNumber - (uint32_t)m_LastFrameNumber;
+            if (delta > 1u && delta < 0x80000000u) {
+                const uint32_t dropped = delta - 1u;
+                m_ActiveWndVideoStats.networkDroppedFrames += dropped;
+                m_ActiveWndVideoStats.totalFrames += dropped;
+            }
         }
         m_LastFrameNumber = frameNumber;
         m_PwStaleSkipped++;
@@ -3889,6 +4037,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                                 strstr(m_VideoDecoderCtx->codec->name, "_v4l2m2m") != nullptr;
     const bool pollStats = m_VrDropOnMetaMiss || v4l2m2mDecoder;
     const uint32_t vrPollUs = pollStats ? 100u : 0u;
+    // §REVIEW-1119：這三個向量只在成功配對出幀後才清空。一直配對失敗就無上限成長。
+    // 4096 蓋過 10 秒、360 fps 的正常視窗，平常不會碰到；超過就不再推，避免在送幀路徑上重新配置。
+    const size_t kVrPollCap = 4096;
     const int vrInjectStuckAt = m_VrDropOnMetaMiss && StreamingPreferences::get(nullptr) != nullptr
                                     ? StreamingPreferences::get(nullptr)->vrInjectDecStuckAt : 0;
 
@@ -3946,8 +4097,12 @@ void FFmpegVideoDecoder::decoderThreadProc()
             // §VR-RATE-CAUSE：送進去的這張排在佇列尾，最舊的那張可能是它（佇列原本是空的）
             VrDecodeTiming::publishOldestPending(m_FrameInfoQueue.isEmpty() ? 0 : m_FrameInfoQueue.head().enqueueTimeUs);
         }
-        vrPoll.queueWaitUs.push_back((uint32_t)(std::min<uint64_t>)(t0 > enq ? t0 - enq : 0, 0xffffffffu));
-        vrPoll.submitUs.push_back((uint32_t)(std::min<uint64_t>)(t1 - t0, 0xffffffffu));
+        if (vrPoll.queueWaitUs.size() < kVrPollCap) {
+            vrPoll.queueWaitUs.push_back((uint32_t)(std::min<uint64_t>)(t0 > enq ? t0 - enq : 0, 0xffffffffu));
+        }
+        if (vrPoll.submitUs.size() < kVrPollCap) {
+            vrPoll.submitUs.push_back((uint32_t)(std::min<uint64_t>)(t1 - t0, 0xffffffffu));
+        }
         return st;
     };
     // nowUs＝剛取到的那一幀的時刻；那一幀已經交出去之後才呼叫，排序與印 log 不佔它的時間
@@ -4032,8 +4187,16 @@ void FFmpegVideoDecoder::decoderThreadProc()
             if (!frame) {
                 // Failed to allocate a frame but we did submit,
                 // so we can return DR_OK
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "Failed to allocate frame");
+                // §REVIEW-1119：這條執行緒是高優先權。配置失敗就立刻 continue 會緊迴圈，
+                // 而且每一圈都印 log。歇 5 ms，同一秒只記一次。
+                static uint32_t s_LastAllocFailLogMs = 0;
+                const uint32_t nowMs = SDL_GetTicks();
+                if (nowMs - s_LastAllocFailLogMs >= 1000) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "Failed to allocate frame");
+                    s_LastAllocFailLogMs = nowMs;
+                }
+                SDL_Delay(5);
                 continue;
             }
 
@@ -4052,15 +4215,50 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     }
                 }
                 else {
+                    decEnterBlocking();  // §REVIEW-1119
                     err = avcodec_receive_frame(m_VideoDecoderCtx, frame);
+                    decLeaveBlocking();
                     parkIfAbandoned();  // §DEC-ABANDON
                 }
                 if (err == 0) {
                     SDL_assert(m_FrameInfoQueue.size() == m_FramesIn - m_FramesOut);
                     m_FramesOut++;
 
+                    // §REVIEW-1119：平面串流也對齊一次。avcodec_receive_frame 回錯誤的那一張不會再出來，它的 FIFO
+                    // 項目卻留著，之後每一張都配到前一張的資訊（幀號、延遲統計），佇列也只增不減。
+                    // pts 就是送進去時的幀號：FIFO 後面找得到這一張才把前面的丟掉（找不到＝這個解碼器沒有原樣帶回 pts，不動）。
+                    // 正常情況只多一次比較。
+                    if (!m_VrTracker && frame->pts != AV_NOPTS_VALUE && m_FrameInfoQueue.size() > 1 &&
+                            (int64_t)m_FrameInfoQueue.head().frameNumber != frame->pts) {
+                        int at = -1;
+                        for (int qi = 1; qi < m_FrameInfoQueue.size(); qi++) {
+                            if ((int64_t)m_FrameInfoQueue.at(qi).frameNumber == frame->pts) {
+                                at = qi;
+                                break;
+                            }
+                        }
+                        for (; at > 0; at--) {
+                            m_FrameInfoQueue.dequeue();
+                            m_FramesOut++;
+                        }
+                    }
+
                     // §VR：pts 配對＋FIFO 對齊（見 vrPairDecodedFrame）
                     if (m_VrTracker && !vrPairDecodedFrame(frame)) {
+                        if (m_VrPairMetaMiss) {
+                            // §REVIEW-1119：查不到 meta 而丟掉的這一幀是真的從解碼器出來了，跟下面「注入吞幀」不同：
+                            // 它的 FIFO 項目要拿掉、m_FramesOut 也不退回。原本借用注入吞幀的路徑，帳會差一筆直到下一幀
+                            // 才被補上；串流在這時停住的話，這條執行緒就一直以 100 µs 輪詢、回不到阻塞等待。
+                            m_VrPairMetaMiss = false;
+                            if (!m_FrameInfoQueue.isEmpty()) {
+                                m_FrameInfoQueue.dequeue();
+                            }
+                            VrDecodeTiming::publishOldestPending(
+                                m_FrameInfoQueue.isEmpty() ? 0 : m_FrameInfoQueue.head().enqueueTimeUs);
+                            av_frame_free(&frame);
+                            err = 0;
+                            break;
+                        }
                         // 注入的「decoder 吞幀」：這一幀當作沒出來，FIFO 項目留著，
                         // 下一幀配對時會被跳過（正是要驗證的情境）
                         m_FramesOut--;
@@ -4143,7 +4341,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // Capture a frame timestamp to measuring pacing delay
                     const uint64_t receivedAtUs = LiGetMicroseconds();
                     frame->pkt_dts = receivedAtUs;
-                    if (pollStats && vrPoll.lastSubmitUs != 0) {
+                    if (pollStats && vrPoll.lastSubmitUs != 0 && vrPoll.recvWaitUs.size() < kVrPollCap) {
                         // §VR-DECPOLL：沿用上面那一次讀到的時鐘，不另外取
                         vrPoll.recvWaitUs.push_back((uint32_t)(std::min<uint64_t>)(
                             receivedAtUs > vrPoll.lastSubmitUs ? receivedAtUs - vrPoll.lastSubmitUs : 0, 0xffffffffu));
@@ -4383,6 +4581,7 @@ bool FFmpegVideoDecoder::vrPairDecodedFrame(AVFrame* frame)
                             (long long)frame->pts, hit ? "has no 0x81 VR header" : "not in the meta map",
                             m_VrMetaMissDropped);
             }
+            m_VrPairMetaMiss = true;  // §REVIEW-1119：見呼叫端
             return false;
         }
         // 配對用的 pts（frameNumber）稍後會被改成 rtpTimestamp（呈現時間）；等改完再以最終 pts 發布
@@ -4456,11 +4655,26 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
             m_VideoDecoderCtx->codec != nullptr &&
             strstr(m_VideoDecoderCtx->codec->name, "_v4l2m2m") != nullptr) {
         QByteArray paramSets;
+        // §REVIEW-1119：這段在 fullLength 上限之前。length 是負的時，QByteArray::append 會改走 strlen。
+        // 正常的 VPS／SPS／PPS 遠小於 64KB。超過就拒這幀，也不要留在 m_V4l2ParamSets。
+        const int kMaxV4l2ParamSetBytes = 64 * 1024;
+        bool paramSetsTooBig = false;
         for (PLENTRY e = du->bufferList; e != nullptr; e = e->next) {
             if (e->bufferType == BUFFER_TYPE_VPS || e->bufferType == BUFFER_TYPE_SPS ||
                     e->bufferType == BUFFER_TYPE_PPS) {
+                if (e->length < 0 ||
+                        (int64_t)paramSets.size() + e->length > kMaxV4l2ParamSetBytes) {
+                    paramSetsTooBig = true;
+                    break;
+                }
                 paramSets.append(e->data, e->length);
             }
+        }
+        if (paramSetsTooBig) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-LNXFE] parameter sets on IDR frame %d exceed %d bytes or have a bad length; dropping",
+                        du->frameNumber, kMaxV4l2ParamSetBytes);
+            return DR_NEED_IDR;
         }
         if (!paramSets.isEmpty()) {
             if (!m_V4l2ParamSets.isEmpty() && paramSets != m_V4l2ParamSets) {
@@ -4490,9 +4704,15 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         }
     }
     else {
-        // Any frame number greater than m_LastFrameNumber + 1 represents a dropped frame
-        m_ActiveWndVideoStats.networkDroppedFrames += du->frameNumber - (m_LastFrameNumber + 1);
-        m_ActiveWndVideoStats.totalFrames += du->frameNumber - (m_LastFrameNumber + 1);
+        // Any frame number greater than m_LastFrameNumber + 1 represents a dropped frame.
+        // §REVIEW-1119：frameNumber 是網路上的 uint32，存成有號 int。last+1 在 INT_MAX 是未定義行為；
+        // 幀號重對齊倒退時，負差值加進 uint32 統計會繞成超大丟幀。只計算往前且小於半圈的差距。
+        const uint32_t delta = (uint32_t)du->frameNumber - (uint32_t)m_LastFrameNumber;
+        if (delta > 1u && delta < 0x80000000u) {
+            const uint32_t dropped = delta - 1u;
+            m_ActiveWndVideoStats.networkDroppedFrames += dropped;
+            m_ActiveWndVideoStats.totalFrames += dropped;
+        }
         m_LastFrameNumber = du->frameNumber;
     }
 
@@ -4977,7 +5197,12 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         return DR_OK;
     }
 
-    int requiredBufferSize = du->fullLength;
+    // §REVIEW-1119：fullLength 與下面的加法都是有號 int。負值、或接近 INT_MAX 時再加 25%，
+    // 會溢位成很小的數，pool 只配 1MB，後面的 memcpy 寫穿。
+    if (du->fullLength < 0) {
+        return DR_NEED_IDR;
+    }
+    int64_t required64 = du->fullLength;
     if (du->frameType == FRAME_TYPE_IDR) {
         // Add some extra space in case we need to do an SPS fixup
         // §REVIEW-1111（第二輪）：每個 SPS 各留一份。原本整幀只留一份，而每個 SPS 修正後都可能變長；
@@ -4988,7 +5213,18 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                 spsCount++;
             }
         }
-        requiredBufferSize += MAX_SPS_EXTRA_SIZE * (spsCount > 0 ? spsCount : 1);
+        required64 += (int64_t)MAX_SPS_EXTRA_SIZE * (spsCount > 0 ? spsCount : 1);
+    }
+    else if (m_NeedsSpsFixup) {
+        // §REVIEW-1119：writeBuffer 不看是不是 IDR。P 幀後面若夾了 SPS，修正後一樣會變長，
+        // 只在 IDR 預留的話，寫入會超過 pool。
+        int spsCount = 0;
+        for (PLENTRY e = du->bufferList; e != nullptr; e = e->next) {
+            if (e->bufferType == BUFFER_TYPE_SPS && e->length >= 5) {
+                spsCount++;
+            }
+        }
+        required64 += (int64_t)MAX_SPS_EXTRA_SIZE * spsCount;
     }
 
     // Ensure the decoder buffer is large enough
@@ -4996,7 +5232,16 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     // avcodec_send_packet 內部的 av_packet_ref 因此每幀配置一塊同樣大小的記憶體再整包複製一次。
     // pool 的每一塊一樣大（起始 1 MB，與原本的緩衝區相同）；遇到更大的幀就換一個更大的 pool，
     // 舊 pool 等還在外面的緩衝區歸還後自己釋放
-    const int neededBufferSize = requiredBufferSize + AV_INPUT_BUFFER_PADDING_SIZE;
+    const int64_t needed64 = required64 + AV_INPUT_BUFFER_PADDING_SIZE;
+    // av_buffer_pool_init 的大小是 int。needed + 25% 溢位就不要配。
+    // §REVIEW-1119：只擋有號溢位的話，單幀仍可到約 1.7GB。pool 被拉上去之後，
+    // av_buffer_pool_get 失敗也不會縮回來，後面的正常幀一直向同一塊要不到的大小要緩衝區。
+    const int64_t kMaxPacketBufferBytes = 64ll * 1024 * 1024;
+    if (needed64 <= 0 || needed64 > kMaxPacketBufferBytes ||
+            needed64 > 0x7fffffffLL - needed64 / 4) {
+        return DR_NEED_IDR;
+    }
+    const int neededBufferSize = (int)needed64;
     if (m_PktBufPool == nullptr || neededBufferSize > m_PktBufPoolSize) {
         av_buffer_pool_uninit(&m_PktBufPool);
         m_PktBufPoolSize = qMax(neededBufferSize + neededBufferSize / 4, 1024 * 1024);
@@ -5005,7 +5250,10 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     av_buffer_unref(&m_Pkt->buf);  // 正常是空的（上一次送完就放了），保險
     m_Pkt->buf = m_PktBufPool != nullptr ? av_buffer_pool_get(m_PktBufPool) : nullptr;
     if (m_Pkt->buf == nullptr) {
-        // 配置失敗：這一張沒有送進解碼器，比照送封包失敗要一張 IDR
+        // 配置失敗：這一張沒有送進解碼器，比照送封包失敗要一張 IDR。
+        // §REVIEW-1119：拆掉這顆 pool 並把大小歸零，下一張才會按自己的尺寸重建。
+        av_buffer_pool_uninit(&m_PktBufPool);
+        m_PktBufPoolSize = 0;
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "Failed to allocate a %d byte packet buffer (frame %d)", neededBufferSize, du->frameNumber);
         m_Pkt->data = nullptr;
@@ -5014,9 +5262,18 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     }
 
     int offset = 0;
-    while (entry != nullptr) {
+    while (entry != nullptr && offset >= 0) {
         writeBuffer(entry, offset);
         entry = entry->next;
+    }
+    if (offset < 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Rejecting frame %d: bitstream does not fit in the %d byte packet buffer",
+                    du->frameNumber, m_PktBufPoolSize);
+        av_buffer_unref(&m_Pkt->buf);
+        m_Pkt->data = nullptr;
+        m_Pkt->size = 0;
+        return DR_NEED_IDR;
     }
 
     // FFmpeg 要求封包後面 AV_INPUT_BUFFER_PADDING_SIZE 個位元組是 0（SIMD 解析器會讀過頭）；
@@ -5128,8 +5385,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         // populated by decode-queue cmd buffer).
     }
 
+    decEnterBlocking();  // §REVIEW-1119
     err = avcodec_send_packet(m_VideoDecoderCtx, m_Pkt);
-    parkIfAbandoned();  // §DEC-ABANDON
+    decLeaveBlocking();  // §DEC-ABANDON
     // §PERF-1113：FFmpeg 已經自己加了參照（或失敗了沒有收），放掉我們這一份，緩衝區用完才會回 pool
     av_buffer_unref(&m_Pkt->buf);
     m_Pkt->data = nullptr;

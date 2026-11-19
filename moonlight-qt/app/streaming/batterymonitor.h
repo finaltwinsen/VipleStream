@@ -55,8 +55,13 @@ public:
         BatteryReading r;
         bool ok = false;
         r.capacity = readText(m_Path + "/capacity").toInt(&ok);
-        if (!ok) {
+        // §REVIEW-1119：負值會被當成低電量而嘟一聲，圖示卻把小於 0 當成隱藏，兩個狀態會打架。
+        // 超過 100 的滿充讀數夾回 100，這一筆的充電狀態仍要留下。
+        if (!ok || r.capacity < 0) {
             return std::nullopt;
+        }
+        if (r.capacity > 100) {
+            r.capacity = 100;
         }
         const QString st = readText(m_Path + "/status");
         // Frame 插著電、充滿時是 "Not charging"：另外看充電器的 online

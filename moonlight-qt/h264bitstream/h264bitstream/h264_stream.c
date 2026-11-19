@@ -678,12 +678,22 @@ void read_hrd_parameters(hrd_t* hrd, bs_t* b)
     hrd->cpb_cnt_minus1 = bs_read_ue(b);
     hrd->bit_rate_scale = bs_read_u(b, 4);
     hrd->cpb_size_scale = bs_read_u(b, 4);
-    for( int SchedSelIdx = 0; SchedSelIdx <= hrd->cpb_cnt_minus1; SchedSelIdx++ )
+    // VipleStream §REVIEW-1119：cpb_cnt_minus1 來自網路上的 SPS，規格上限 31，三個陣列都只有 32 格。
+    // 超過的項目照樣讀掉位元（後面的欄位才不會錯位）但不存，讀完把計數夾回 31；讀到結尾就停。
+    for( int SchedSelIdx = 0; SchedSelIdx <= hrd->cpb_cnt_minus1 && SchedSelIdx >= 0 && !bs_eof(b); SchedSelIdx++ )
     {
-        hrd->bit_rate_value_minus1[ SchedSelIdx ] = bs_read_ue(b);
-        hrd->cpb_size_value_minus1[ SchedSelIdx ] = bs_read_ue(b);
-        hrd->cbr_flag[ SchedSelIdx ] = bs_read_u1(b);
+        int brv = bs_read_ue(b);
+        int csv = bs_read_ue(b);
+        int cbr = bs_read_u1(b);
+        if (SchedSelIdx < 32)
+        {
+            hrd->bit_rate_value_minus1[ SchedSelIdx ] = brv;
+            hrd->cpb_size_value_minus1[ SchedSelIdx ] = csv;
+            hrd->cbr_flag[ SchedSelIdx ] = cbr;
+        }
     }
+    if (hrd->cpb_cnt_minus1 < 0) hrd->cpb_cnt_minus1 = 0;
+    if (hrd->cpb_cnt_minus1 > 31) hrd->cpb_cnt_minus1 = 31;
     hrd->initial_cpb_removal_delay_length_minus1 = bs_read_u(b, 5);
     hrd->cpb_removal_delay_length_minus1 = bs_read_u(b, 5);
     hrd->dpb_output_delay_length_minus1 = bs_read_u(b, 5);
@@ -2004,6 +2014,8 @@ void write_vui_parameters(sps_t* sps, bs_t* b)
 //Appendix E.1.2 HRD parameters syntax
 void write_hrd_parameters(hrd_t* hrd, bs_t* b)
 {
+    if (hrd->cpb_cnt_minus1 < 0) hrd->cpb_cnt_minus1 = 0;    // VipleStream §REVIEW-1119：同 read_hrd_parameters
+    if (hrd->cpb_cnt_minus1 > 31) hrd->cpb_cnt_minus1 = 31;
     bs_write_ue(b, hrd->cpb_cnt_minus1);
     bs_write_u(b, 4, hrd->bit_rate_scale);
     bs_write_u(b, 4, hrd->cpb_size_scale);

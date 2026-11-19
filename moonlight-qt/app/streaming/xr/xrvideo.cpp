@@ -96,6 +96,15 @@ XrVideo::XrVideo(XrContext* ctx, const Config& config) : m_Ctx(ctx), m_Config(co
         // flightNotify（§VR-LATCH-FLIGHT）不在這裡關：它只看第一次發布，補幀開著時照樣作用（見 xrvideo.h）
         m_Config.atomicPublish = false;
         m_Config.notifyPublish = false;
+        // §REVIEW-1119：補幀的第二次發布只改 m_Published，沒寫 m_RingPub。兩者同時開時
+        // current() 走緩衝分支，releaseNo 會一直和快照差 1。bringUp 已經互斥，這裡再擋一次。
+        m_Config.buffer = 0;
+        m_Config.bufferAuto = false;
+    }
+    // §REVIEW-1119：ring 只有 kRing 條。深度超過 kRing-2 會覆寫還可能被顯示的那一條；
+    // 負值會讓 ringSize() 變成負的，後面取餘數沒有定義。設定已經夾在 0..2，這裡再擋一次。
+    if (m_Config.buffer < 0 || m_Config.buffer > kRing - 2) {
+        m_Config.buffer = m_Config.buffer < 0 ? 0 : kRing - 2;
     }
 }
 
@@ -251,6 +260,7 @@ void XrVideo::destroySwapchainSet(SwapchainSet& s)
         s.swapchain = XR_NULL_HANDLE;
     }
     s.width = s.height = 0;
+    s.pendingWait = -1;  // §REVIEW-1119：swapchain 拆掉之後不能再沿用上次沒等到的索引
 }
 
 void XrVideo::destroyAllSwapchains()
@@ -300,10 +310,14 @@ void XrVideo::reapRetired()
             }
         }
     }
-    for (SwapchainSet& s : dead) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video swapchain gen=%llu %dx%d retired and destroyed",
-                    static_cast<unsigned long long>(s.generation), s.width, s.height);
-        destroySwapchainSet(s);
+    if (!dead.empty()) {
+        // §REVIEW-1119：pl_tex_destroy 必須和另一條執行緒的 libplacebo 送出互斥。沒有要銷毀的就不拿鎖。
+        std::lock_guard<std::mutex> submitLk(m_PlSubmitMutex);
+        for (SwapchainSet& s : dead) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video swapchain gen=%llu %dx%d retired and destroyed",
+                        static_cast<unsigned long long>(s.generation), s.width, s.height);
+            destroySwapchainSet(s);
+        }
     }
 }
 
@@ -440,12 +454,18 @@ void XrVideo::setDisplayIdle(bool idle)
         // 不會漏掉這一次；mailbox 裡有等著的那一張就馬上畫。「等了多久」從現在重新算——閒置時是故意不取的，
         // 不該被 §VR-RATE-CAUSE 當成頭盔端跟不上
         // 複核（11-13）：記下恢復的時刻——緩衝（§VR-BUFFER）挑到閒置期間畫的那一張時改用最新的（見 current()）
-        m_IdleEndUs.store(nowUs(), std::memory_order_relaxed);
+        const uint64_t now = nowUs();
+        m_IdleEndUs.store(now, std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> lk(m_MailboxMutex);
             // 有在等的（mailbox 裡，或剛被取走正在畫）都從現在算，不然 §VR-RATE-CAUSE 會多記一次「頭盔端跟不上」
+            // §REVIEW-1119：只改 m_WaitSinceUs 不夠。這一張畫完時 WaitReset 會把它寫回閒置期間的
+            // m_PendingAtUs，恢復顯示後仍會被當成頭盔端跟不上，mboxUs 也把沒取幀的時間算進去。
+            if (m_Pending != nullptr) {
+                m_PendingAtUs = now;
+            }
             if (m_WaitSinceUs.load(std::memory_order_relaxed) != 0) {
-                m_WaitSinceUs.store(nowUs(), std::memory_order_relaxed);
+                m_WaitSinceUs.store(now, std::memory_order_relaxed);
             }
         }
         m_MailboxCv.notify_one();
@@ -470,7 +490,7 @@ void XrVideo::submit(const AVFrame* frame)
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev test stall: dropping frames for %d ms",
                             m_Config.testStallMs);
             }
-            m_TestStallDropped++;
+            m_TestStallDropped.fetch_add(1, std::memory_order_relaxed);
             return;
         }
     }
@@ -479,6 +499,7 @@ void XrVideo::submit(const AVFrame* frame)
         return;
     }
     bool overwrote = false;
+    bool notify = true;
     {
         std::lock_guard<std::mutex> lk(m_MailboxMutex);
         if (m_Pending != nullptr) {
@@ -490,8 +511,14 @@ void XrVideo::submit(const AVFrame* frame)
         if (m_WaitSinceUs.load(std::memory_order_relaxed) == 0) {
             m_WaitSinceUs.store(m_PendingAtUs, std::memory_order_relaxed);  // §VR-RATE-CAUSE：已經有在等的就保留較早的
         }
+        // §REVIEW-1119：閒置時每 200 ms 才取一張。每幀都叫醒，render thread 看條件不成立又睡回去。
+        // m_IdleLastTakeUs 只在這把鎖裡寫。恢復顯示時 setDisplayIdle(false) 自己會叫醒。
+        notify = !m_DisplayIdle.load(std::memory_order_relaxed) ||
+                 m_PendingAtUs - m_IdleLastTakeUs >= kIdleTakeIntervalUs;
     }
-    m_MailboxCv.notify_one();
+    if (notify) {
+        m_MailboxCv.notify_one();
+    }
     std::lock_guard<std::mutex> lk(m_StatsMutex);
     m_Received++;
     if (overwrote) {
@@ -625,6 +652,9 @@ bool XrVideo::testMap(const AVFrame* frame)
         return false;
     }
     std::lock_guard<std::mutex> lk(m_TestMutex);
+    // §REVIEW-1119：解碼器重建時這條執行緒和影像／全景送出同時用同一顆 pl_gpu。
+    // 只拿 m_TestMutex 擋不住 tu_autotune::on_submit 崩潰。解碼器初始化才走這裡，不是每幀。
+    std::lock_guard<std::mutex> submitLk(m_PlSubmitMutex);
     pl_frame mapped;
     std::memset(&mapped, 0, sizeof(mapped));
     if (!mapFrame(frame, &mapped, m_TestTex, false)) {
@@ -648,7 +678,19 @@ bool XrVideo::ensureSwapchain(XrSession session, int width, int height)
     if (m_Sw.swapchain != XR_NULL_HANDLE) {
         // 解析度改變：舊的一代可能還被 XR thread 的 layer 引用（最後 release 的那張），先退休，
         // 等 XR thread 用新一代送出 xrEndFrame 後由 reapRetired() 銷毀
+        // §REVIEW-1119：takeStatsDeferred 在 m_StatsMutex 裡讀 m_Sw 的寬高。這裡把 m_Sw 清成空的也要拿同一把鎖，
+        // 否則和 10 秒統計資料競爭。先拿統計鎖再拿 m_SwMutex：frame thread 不會拿著 m_SwMutex 再去拿統計鎖。
+        std::lock_guard<std::mutex> stats(m_StatsMutex);
         std::lock_guard<std::mutex> lk(m_SwMutex);
+        // §REVIEW-1119：多格緩衝每一條的 generation 是建立時給的。XR thread 送出較新的一條之後，
+        // 舊的那條已經小於 m_XrAckGeneration，下一輪 reapRetired 會立刻銷毀，但 m_RingPub 或合成器還指著它。
+        // 拉到目前最新的世代，等更新的一代被 xrEndFrame 確認才銷毀；這一條的發布快照清掉，current() 才不會挑到它。
+        if (m_NextGeneration > 1 && m_Sw.generation < m_NextGeneration - 1) {
+            m_Sw.generation = m_NextGeneration - 1;
+        }
+        if (m_CurSlot >= 0 && m_CurSlot < kRing) {
+            m_RingPub[m_CurSlot] = Current();
+        }
         m_Retired.push_back(std::move(m_Sw));
         m_Sw = SwapchainSet();
     }
@@ -712,43 +754,53 @@ bool XrVideo::ensureSwapchain(XrSession session, int width, int height)
         }
         std::vector<pl_tex> wrapped;
         bool wrapOk = true;
-        for (uint32_t i = 0; i < count; i++) {
-            pl_vulkan_wrap_params wp = {};
-            wp.image = imgs[i].image;
-            wp.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-            wp.width = width;
-            wp.height = height;
-            wp.depth = 0;
-            wp.format = c.view;
-            wp.usage = vkUsage;
-            wp.debug_tag = PL_DEBUG_TAG;
-            pl_tex t = pl_vulkan_wrap(m_Vulkan->gpu, &wp);
-            if (t == nullptr || !t->params.renderable) {
-                if (t != nullptr) {
+        {
+            // §REVIEW-1119：pl_vulkan_wrap／pl_tex_destroy 和全景那條執行緒的送出互斥。尺寸沒變時函式開頭就返回，不加鎖。
+            std::lock_guard<std::mutex> submitLk(m_PlSubmitMutex);
+            for (uint32_t i = 0; i < count; i++) {
+                pl_vulkan_wrap_params wp = {};
+                wp.image = imgs[i].image;
+                wp.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+                wp.width = width;
+                wp.height = height;
+                wp.depth = 0;
+                wp.format = c.view;
+                wp.usage = vkUsage;
+                wp.debug_tag = PL_DEBUG_TAG;
+                pl_tex t = pl_vulkan_wrap(m_Vulkan->gpu, &wp);
+                if (t == nullptr || !t->params.renderable) {
+                    if (t != nullptr) {
+                        pl_tex_destroy(m_Vulkan->gpu, &t);
+                    }
+                    wrapOk = false;
+                    break;
+                }
+                wrapped.push_back(t);
+            }
+            if (!wrapOk) {
+                for (pl_tex& t : wrapped) {
                     pl_tex_destroy(m_Vulkan->gpu, &t);
                 }
-                wrapOk = false;
-                break;
             }
-            wrapped.push_back(t);
         }
         if (!wrapOk) {
-            for (pl_tex& t : wrapped) {
-                pl_tex_destroy(m_Vulkan->gpu, &t);
-            }
             xrDestroySwapchain(sc);
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video swapchain fmt=%d view=%d %s: pl_vulkan_wrap not renderable; trying next",
                         static_cast<int>(c.sw), static_cast<int>(c.view), modeName(static_cast<int>(c.mode)));
             continue;
         }
-        m_Sw.swapchain = sc;
-        m_Sw.width = width;
-        m_Sw.height = height;
-        m_Sw.wrapped = std::move(wrapped);
-        m_Sw.generation = m_NextGeneration++;
-        m_SwFormat = c.sw;
-        m_ViewFormat = c.view;
-        m_Mode = c.mode;
+        // §REVIEW-1119：寬高與 m_Mode 和上面同一把統計鎖。takeStatsDeferred 才不會讀到寫到一半的尺寸。
+        {
+            std::lock_guard<std::mutex> stats(m_StatsMutex);
+            m_Sw.swapchain = sc;
+            m_Sw.width = width;
+            m_Sw.height = height;
+            m_Sw.wrapped = std::move(wrapped);
+            m_Sw.generation = m_NextGeneration++;
+            m_SwFormat = c.sw;
+            m_ViewFormat = c.view;
+            m_Mode = c.mode;
+        }
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-XR] video swapchain gen=%llu %dx%d fmt=%d view=%d mode=%s images=%u",
                     static_cast<unsigned long long>(m_Sw.generation), width, height, static_cast<int>(c.sw),
@@ -759,9 +811,10 @@ bool XrVideo::ensureSwapchain(XrSession session, int width, int height)
     return false;
 }
 
-QImage XrVideo::readbackTexture(pl_tex tex)
+QImage XrVideo::readbackTexture(pl_tex tex, bool forceRgba)
 {
-    if (m_Mode == TargetMode::Float16Linear || !tex->params.host_readable) {
+    // §REVIEW-1119：沉浸模式的 dump 材質是另外建的 UNORM8。沿用平面 swapchain 的 m_Mode／m_ViewFormat 會整張跳過，或把 RGBA 當成 BGRA。
+    if ((!forceRgba && m_Mode == TargetMode::Float16Linear) || !tex->params.host_readable) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] frame dump skipped (mode=%s hostReadable=%d)",
                     modeName(static_cast<int>(m_Mode)), tex->params.host_readable ? 1 : 0);
         return QImage();
@@ -777,7 +830,7 @@ QImage XrVideo::readbackTexture(pl_tex tex)
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] frame dump: pl_tex_download failed");
         return QImage();
     }
-    const bool bgra = m_ViewFormat == VK_FORMAT_B8G8R8A8_UNORM;
+    const bool bgra = !forceRgba && m_ViewFormat == VK_FORMAT_B8G8R8A8_UNORM;
     // Format_ARGB32 在 little-endian 記憶體中就是 B,G,R,A
     QImage img(buf.data(), w, h, w * 4, bgra ? QImage::Format_ARGB32 : QImage::Format_RGBA8888);
     // copy()：img 借用的是 buf（區域變數），尺寸沒變時 scaled() 可能直接共用同一塊資料
@@ -857,7 +910,7 @@ void XrVideo::dumpSynthInputs(const QString& prevPath, const QString& curPath, c
                 fv[0], fv[1], fv[2], fv[3], fvCyR, fvU0);
 }
 
-bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
+bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive)
 {
     const uint64_t t0 = nowUs();
     // §VR-LDIAG：發布紀錄要帶 pts（host 的 Present 時刻，90 kHz）；發布時 frame 可能已經放掉，先抄下來
@@ -876,7 +929,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         m_NoMetaDropped++;
         return false;
     }
-    if (m_Immersive.load(std::memory_order_acquire)) {
+    // §REVIEW-1119：模式由 renderThreadMain 讀一次傳進來。這裡再讀，切回平面的空窗會跳過 ensureSwapchain 仍走平面路徑。
+    if (immersive) {
         return renderEquiFrame(frame, t0);  // §VR-PLAYER（V2）
     }
 
@@ -907,19 +961,32 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     // release 前也要回到這個 layout
     auto acquire = [&](pl_tex* texOut) {
         uint32_t idx = 0;
-        XrSwapchainImageAcquireInfo ai = xrS<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
-        XrResult r;
-        {
-            std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
-            r = xrAcquireSwapchainImage(m_Sw.swapchain, &ai, &idx);
-        }
-        if (XR_FAILED(r) || idx >= m_Sw.wrapped.size()) {
-            return false;
+        // §REVIEW-1119：逾時時影像仍是 acquired。再 acquire 會拿到新索引，接下來的 wait 等的卻是較舊的那張，
+        // 寫進 wrapped[新索引] 就和 wait／release 錯位。沿用同一個索引繼續等。
+        if (m_Sw.pendingWait >= 0) {
+            idx = static_cast<uint32_t>(m_Sw.pendingWait);
+            if (m_Sw.swapchain == XR_NULL_HANDLE || idx >= m_Sw.wrapped.size()) {
+                m_Sw.pendingWait = -1;
+                return false;
+            }
+        } else {
+            if (m_Sw.swapchain == XR_NULL_HANDLE) {
+                return false;
+            }
+            XrSwapchainImageAcquireInfo ai = xrS<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
+            XrResult r;
+            {
+                std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
+                r = xrAcquireSwapchainImage(m_Sw.swapchain, &ai, &idx);
+            }
+            if (XR_FAILED(r) || idx >= m_Sw.wrapped.size()) {
+                return false;
+            }
+            m_Sw.pendingWait = static_cast<int>(idx);
         }
         XrSwapchainImageWaitInfo wi = xrS<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
         wi.timeout = 100000000;  // 100 ms
         // §VR-XRLOOP：只量這個呼叫花多久、回的是不是 XR_SUCCESS（等到逾時回 XR_TIMEOUT_EXPIRED，也是成功碼）。
-        // 流程不看結果，和原本一樣
         const uint64_t tw0 = nowUs();
         XrResult wr = xrWaitSwapchainImage(m_Sw.swapchain, &wi);
         // §REVIEW-1111（第二輪）：逾時（合成器還沒放掉這張）照規格可以再等——最多再等 4 次（共 500 ms），
@@ -931,9 +998,18 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
             swm.waitUs[swm.waits++] = sat32(nowUs() - tw0);
         }
         swm.notOk += wr != XR_SUCCESS ? 1u : 0u;
-        if (XR_FAILED(wr)) {
-            return false;  // session 不在可畫的狀態：這張不畫
+        // §REVIEW-1119：XR_TIMEOUT_EXPIRED 是成功類回傳值（XR_FAILED 為 false），但影像還在合成器手上，不可以畫。
+        // 逾時留著 pendingWait。硬失敗才 release：不放的話這張影像會一直佔著，下一張 acquire 又對不齊。
+        if (wr != XR_SUCCESS) {
+            if (XR_FAILED(wr)) {
+                XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
+                std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
+                xrReleaseSwapchainImage(m_Sw.swapchain, &ri);
+                m_Sw.pendingWait = -1;
+            }
+            return false;
         }
+        m_Sw.pendingWait = -1;
         pl_vulkan_release_params rp = {};
         rp.tex = m_Sw.wrapped[idx];
         rp.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1005,17 +1081,34 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         flushSwLocked();
     };
 
-    pl_tex tex = nullptr;
-    if (!acquire(&tex)) {
+    pl_frame mapped;
+    std::memset(&mapped, 0, sizeof(mapped));
+    const bool mappedOk = mapFrame(frame, &mapped, m_Tex, true);
+    if (!mappedOk) {
+        // §REVIEW-1119：acquire 成功之後就必須 release。map 失敗時若已經取過影像，
+        // 會把沒畫過的那張 release 出去，合成器改顯示殘留畫面，releaseNo 也和快照差 1。
+        // map 不依賴 swapchain，失敗就不要碰它。
+        if (!m_LoggedFormat) {
+            const char* fmt = av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format));
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video frame map failed (format=%s)", fmt ? fmt : "?");
+            m_LoggedFormat = true;
+        }
         av_frame_free(&frame);
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_RenderErrors++;
         return false;
     }
 
-    pl_frame mapped;
-    std::memset(&mapped, 0, sizeof(mapped));
-    const bool mappedOk = mapFrame(frame, &mapped, m_Tex, true);
+    pl_tex tex = nullptr;
+    if (!acquire(&tex)) {
+        pl_unmap_avframe(g, &mapped);
+        av_frame_free(&frame);
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_RenderErrors++;
+        // §REVIEW-1119：不是 XR_SUCCESS 才會從 acquire 回來。漏掉 flush 的話 swNotOk 永遠是 0，逾時的等待也不進統計。
+        flushSwLocked();
+        return false;
+    }
     bool rendered = false;
     int insetW = 0, insetH = 0;
     // §VR-FOVEA-LAYERS：swapchain 的高度＝影像＋中央區那一條（outputSize 用同一個條件算的）。高度對不上（條件剛變、
@@ -1109,6 +1202,12 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
                     fv[3] = meta.foveaCentre[0][1];
                     cyR = meta.foveaCentre[1][1];
                 }
+                // §REVIEW-1119：圖層位置下面才夾到 [0.05, 0.95]，取樣卻用未夾的中心。
+                // 注視點貼邊時中央區的內容和 quad 的位置會錯開。和周邊還原用同一組界限。
+                fv[1] = std::clamp(fv[1], 0.05f, 0.95f);
+                fv[2] = std::clamp(fv[2], 0.05f, 0.95f);
+                fv[3] = std::clamp(fv[3], 0.05f, 0.95f);
+                cyR = std::clamp(cyR, 0.05f, 0.95f);
                 if (renderInsets(&mapped, tex, frameH, insetW, insetH, fv, cyR, u0)) {
                     m_PendInset = true;
                     // 中央區在每眼影像裡的範圍：[c−a·u0·c, c+a·u0·(1−c)]（x、y 各自；c＝這張的注視中心）
@@ -1139,11 +1238,6 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] pl_render_image failed");
         }
     }
-    else if (!m_LoggedFormat) {
-        const char* fmt = av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format));
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] video frame map failed (format=%s)", fmt ? fmt : "?");
-        m_LoggedFormat = true;
-    }
 
     m_TotalDrawn += rendered ? 1 : 0;
     // §VR-SYNTH：開著合成時等到第 2400 張之後、而且那一張真的有合成影像才存（存第二張：上半真的、下半合成）。
@@ -1159,7 +1253,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         QString ins = m_DumpsDone > 0 ? QStringLiteral("-%1").arg(m_DumpsDone + 1) : QString();
         ins += QLatin1String(suffix);
         const int dot = p.lastIndexOf(QLatin1Char('.'));
-        if (dot > p.lastIndexOf(QLatin1Char('/'))) {
+        // §REVIEW-1119：Windows 路徑用反斜線。目錄名裡的點（例如 C:\out.v1\frame）不能當成副檔名，否則後綴會插進資料夾名稱。
+        const int sep = std::max(p.lastIndexOf(QLatin1Char('/')), p.lastIndexOf(QLatin1Char('\\')));
+        if (dot > sep) {
             p.insert(dot, ins);
         }
         else {
@@ -1202,7 +1298,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         wedged("video render did not finish within 1 s");
         return false;
     }
-    const bool held = fin > 0;
+    const bool held = fin > 0;  // 1＝hold 成功，有送出時刻。0＝hold 失敗但 pl_gpu_finish 已等完，影像仍是畫好的
     const uint64_t tGpuEnd = nowUs();
     // 第二張要再用一次解碼幀（mapped）：做合成時先不放掉
     // 分塊但直接讀 YUV 的那一趟用不了時不做合成（合成的那一半也要靠它）；分塊卻沒帶位置的幀也不做
@@ -1263,7 +1359,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
             m_RingRel[m_CurSlot].store(releaseNo, std::memory_order_relaxed);  // §VR-BUFFER
         }
         const uint64_t tPub = nowUs();
-        if (rendered && held) {
+        // §REVIEW-1119：hold 失敗（fin==0）時 GPU 工作已經做完。不發布的話合成器顯示這張新影像，current() 卻留著上一張的姿態。
+        if (rendered && fin >= 0) {
             std::lock_guard<std::mutex> lk(m_SwMutex);
             publishLocked(releaseNo, tPub);
         }
@@ -1272,7 +1369,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     else {
         const uint64_t releaseNo = releaseImage();
         const uint64_t tPub = nowUs();
-        if (rendered && held) {
+        // §REVIEW-1119：同上，fin==0 也要發布，releaseNo 才跟得上這次 release。
+        if (rendered && fin >= 0) {
             std::lock_guard<std::mutex> lk(m_SwMutex);
             publishLocked(releaseNo, tPub);
         }
@@ -1282,7 +1380,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
         // 若剛好在這兩步之間讀，看到的是 flightSeq == latestSeq，判成沒有在途、不等，接著本來就挑得到新的那一張
         m_FlightSeq.store(0);
     }
-    if ((m_Config.notifyPublish || m_Config.flightNotify) && rendered && held) {
+    if ((m_Config.notifyPublish || m_Config.flightNotify) && rendered && fin >= 0) {
         // §VR-LATCH-WAIT／§VR-LATCH-FLIGHT：frame thread 可能正在等這一格的影像（waitNewerThan）。鎖都放掉了才叫醒。
         // 以「有發布」為準（上面的 release 是無條件的，沒畫成功的那一張 seq 不會變）。
         // §VR-SYNTH 的第二次發布（下面）沿用同一個 seq，不叫
@@ -1310,7 +1408,7 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
                                               : xrphase::Handoff::Clear;
     {
         std::lock_guard<std::mutex> lk(m_StatsMutex);
-        if (rendered && held) {
+        if (rendered && fin >= 0) {
             m_Drawn++;
             m_CpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tCpuEnd - t0, 0xffffffffu)));
             m_GpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tGpuEnd - tCpuEnd, 0xffffffffu)));
@@ -1343,13 +1441,35 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     if (!acquire(&tex2)) {
         pl_unmap_avframe(g, &mapped);
         av_frame_free(&frame);
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        // §REVIEW-1119：第二次 acquire 逾時也走這條提早返回，等待時間同樣要寫進統計。
+        flushSwLocked();
         return true;
     }
     pl_frame t2 = target;
     t2.planes[0].texture = tex2;
-    const bool r2 = tiles ? renderTilesSynth(&mapped, &t2, tex2, tileW, tileH, tileRW, tileRH, tileOrg, hasMeta, meta, frame->pts,
-                                             &synthOk, &synthMeta)
-                          : renderSynth(&mapped, &t2, tex2, frame->width, frame->height, hasMeta, meta, frame->pts, &synthOk, &synthMeta);
+    bool r2 = tiles ? renderTilesSynth(&mapped, &t2, tex2, tileW, tileH, tileRW, tileRH, tileOrg, hasMeta, meta, frame->pts,
+                                       &synthOk, &synthMeta)
+                    : renderSynth(&mapped, &t2, tex2, frame->width, frame->height, hasMeta, meta, frame->pts, &synthOk, &synthMeta);
+    if (!r2 && tiles) {
+        // §REVIEW-1119：renderTilesSynth 在 renderTiles 失敗時直接回 false，沒把真幀畫進已經 acquire 的 tex2。
+        // 下面仍會 release，合成器就改顯示這張沒畫過的影像，蓋掉上一張已經畫好的真幀。比照 renderSynth 的失敗退回先畫上半。
+        // 不標記失敗的話，下一幀仍會再走這條，而且退回的畫面沒有注視塊漸層。這條只在補幀失敗時跑。
+        {
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            if (!m_SynthFailed) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-SYNTH] tiles synth pass failed - frame synthesis off for this session");
+                m_SynthFailed = true;
+            }
+        }
+        pl_frame tp = t2;
+        tp.crop.x0 = 0.0f;
+        tp.crop.y0 = 0.0f;
+        tp.crop.x1 = static_cast<float>(m_Sw.width);
+        tp.crop.y1 = static_cast<float>(2 * tileH);
+        r2 = pl_render_image(m_Renderer, &mapped, &tp, &m_RenderParams);
+    }
     if (r2 && wantDump && (synthOk || m_SynthFailed)) {
         dumpTexture(tex2, dumpPathFor(""));
         // 第一次發布的那一張存成 <路徑>-first.png（副檔名之前插 -first）
@@ -1376,11 +1496,16 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     pl_unmap_avframe(g, &mapped);
     av_frame_free(&frame);
     const uint64_t releaseNo2 = releaseImage();
-    if (r2 && fin2 > 0) {
+    // §REVIEW-1119：fin2==0 是 hold 失敗但 pl_gpu_finish 已等完，影像畫好了。只在 fin2>0 才更新的話，
+    // releaseNo 停在上一張，和 m_ReleaseNo 差 1。fin2<0 已在上面 wedged 返回。
+    // r2 為假時 release 已經做了，合成器顯示的是這張；releaseNo 不跟著走，每一格都會被算成姿態錯配。
+    if (fin2 >= 0) {
         std::lock_guard<std::mutex> lk(m_SwMutex);
         m_Published.releaseNo = releaseNo2;
-        m_Published.hasSynth = synthOk;
-        m_Published.synthMeta = synthMeta;
+        if (r2) {
+            m_Published.hasSynth = synthOk;
+            m_Published.synthMeta = synthMeta;
+        }
     }
     // §VR-XRLOOP：補幀那一批的兩個相位（格點沿用這一張第一批讀到的那一組；hold 失敗就沒有送出的時刻，不記）
     const bool synthPhaseOk = gridPeriodUs != 0 && r2 && fin2 > 0;
@@ -1388,6 +1513,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs)
     const uint32_t synthDonePhase = synthPhaseOk ? xrphase::phaseUs(tSynthEnd, gridUs, gridPeriodUs) : 0u;
     {
         std::lock_guard<std::mutex> lk(m_StatsMutex);
+        if (!r2) {
+            m_RenderErrors++;
+        }
         m_SynthDrawn += synthOk ? 1 : 0;
         m_SynthGpuUs.push_back(static_cast<uint32_t>(std::min<uint64_t>(tSynthEnd - tGpuEnd, 0xffffffffu)));
         if (synthPhaseOk) {
@@ -1520,8 +1648,11 @@ void XrVideo::renderThreadMain()
                 }
             }
         } ringRestore{this, slot, m_Published.seq};
-        if (session != XR_NULL_HANDLE && usable() && ensureSwapchain(session, outW, m_Config.synth ? outH * 2 : outH)) {
-            renderNewFrame(f, mboxUs);
+        // §REVIEW-1119：沉浸模式走 renderEquiFrame，不用平面 swapchain。先建它失敗會 markUnusable，全景也跟著停。
+        const bool immersiveNow = m_Immersive.load(std::memory_order_acquire);
+        if (session != XR_NULL_HANDLE && usable() &&
+            (immersiveNow || ensureSwapchain(session, outW, m_Config.synth ? outH * 2 : outH))) {
+            renderNewFrame(f, mboxUs, immersiveNow);
             if (m_Config.passTimers) {
                 // §VR-PASS：每 60 秒印一行各個 pass 的 GPU 時間（這一張已經發布了，不佔它的時間）
                 const std::string line = m_PassStats.takeLine(nowUs());
@@ -1532,7 +1663,7 @@ void XrVideo::renderThreadMain()
         }
         else {
             av_frame_free(&f);
-            if (session != XR_NULL_HANDLE && usable() && m_Sw.swapchain == XR_NULL_HANDLE) {
+            if (!immersiveNow && session != XR_NULL_HANDLE && usable() && m_Sw.swapchain == XR_NULL_HANDLE) {
                 markUnusable("no usable video swapchain");
             }
         }
@@ -2136,16 +2267,21 @@ bool XrVideo::synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& m
     float half[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     // 這裡的 pts 已經不是幀號（decoder 把它換成呈現時間）：用間隔的移動平均當一幀的長度，超過 1.6 倍就是中間掉過幀
     // §REVIEW-1104：幀間隔基準改成成員，destroy 會歸零；單次大間隔仍不上修
-    const int64_t ptsDelta = pts - m_PrevPts;
-    if (m_HavePrevMeta && ptsDelta > 0) {
-        if (m_NominalDelta == 0) {
+    // §REVIEW-1119：pts 或上一張可能是 AV_NOPTS_VALUE（INT64_MIN）。先減再判斷是有號溢位（未定義行為）。
+    // m_PrevPts >= 0 且 pts 更大時，差一定落在 int64 裡。1.6 倍改成先除再比，避免 ptsDelta * 10 溢位。
+    const int64_t ptsDelta = (m_PrevPts >= 0 && pts > m_PrevPts) ? pts - m_PrevPts : static_cast<int64_t>(0);
+    // §REVIEW-1119：上限原本只擋移動平均的進入條件。第一次賦值，以及 (7*舊+新)/8，都還是可以超過 1e9；
+    // 一旦超過，兩個條件都進不去，consecutive 也永遠是假，補幀整場停掉。pts 是 90 kHz，正常一幀遠小於這個上限。
+    if (m_HavePrevMeta && ptsDelta > 0 && ptsDelta <= 1000000000) {
+        if (m_NominalDelta == 0 || m_NominalDelta > 1000000000) {
             m_NominalDelta = ptsDelta;
         }
         else if (ptsDelta < m_NominalDelta * 3) {
             m_NominalDelta = (m_NominalDelta * 7 + ptsDelta) / 8;
         }
     }
-    const bool consecutive = ptsDelta > 0 && m_NominalDelta > 0 && ptsDelta * 10 <= m_NominalDelta * 16;
+    const bool consecutive = ptsDelta > 0 && m_NominalDelta > 0 && m_NominalDelta <= 1000000000 &&
+                             ptsDelta <= (m_NominalDelta * 16) / 10;
     if (smallOk && m_HavePrevSmall && hasMeta && m_HavePrevMeta && consecutive) {
         // d＝q_prev⁻¹·q_cur（上一張到這一張的轉動，機體座標）；half＝它的一半＝normalize(d ＋ 1)
         const float* a = m_PrevMeta.renderRot;
@@ -2221,7 +2357,11 @@ bool XrVideo::synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& m
                          runFlow(m_Small[cur], m_Small[prev], m_FlowC, m_Flow, 3.0f, 1.0f);
                 if (!flowOk) {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] flow pass failed - frame synthesis off for this session");
-                    m_SynthFailed = true;
+                    // §REVIEW-1119：和 takeStatsDeferred 的讀用同一把鎖，避免資料競爭。只在這條失敗路徑拿。
+                    {
+                        std::lock_guard<std::mutex> lk(m_StatsMutex);
+                        m_SynthFailed = true;
+                    }
                 }
             }
         }
@@ -2246,10 +2386,11 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     float fvU0;
     loadFoveation(fv, &fvCyR, &fvU0);
     if (hasMeta && meta.foveated) {
-        fv[1] = meta.foveaCentre[0][0];
-        fv[2] = meta.foveaCentre[1][0];
-        fv[3] = meta.foveaCentre[0][1];
-        fvCyR = meta.foveaCentre[1][1];
+        // §REVIEW-1119：封包的注視中心沒夾過。0 或 1 會讓 shader 用 c 或 1-c 當除數，得到 NaN。和圖層位置同一段 [0.05, 0.95]。
+        fv[1] = std::clamp(meta.foveaCentre[0][0], 0.05f, 0.95f);
+        fv[2] = std::clamp(meta.foveaCentre[1][0], 0.05f, 0.95f);
+        fv[3] = std::clamp(meta.foveaCentre[0][1], 0.05f, 0.95f);
+        fvCyR = std::clamp(meta.foveaCentre[1][1], 0.05f, 0.95f);
     }
     float osz[2] = {ow, oh};
     pl_fmt fmtSmall = pl_find_fmt(g, PL_FMT_UNORM, 4, 8, 8, caps);
@@ -2275,7 +2416,10 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         !mk(&m_Mid[0], mw, mh, fmtSmall) || !mk(&m_Mid[1], mw, mh, fmtSmall) || !mk(&m_FlowC, mw, mh, fmtFlow) ||
         !mk(&m_Small[0], sw, sh, fmtSmall) || !mk(&m_Small[1], sw, sh, fmtSmall) || !mk(&m_Flow, sw, sh, fmtFlow)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] texture setup failed - frame synthesis off for this session");
-        m_SynthFailed = true;
+        {
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            m_SynthFailed = true;  // §REVIEW-1119：見 synthFlow，寫入要跟統計讀取同一把鎖
+        }
         pl_frame t = *targetProto;
         t.crop.x0 = 0.0f;
         t.crop.y0 = 0.0f;
@@ -2303,7 +2447,10 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     if (!pl_render_image(m_Renderer, mapped, &tFull, &m_RenderParams)) {
         // §REVIEW-1104：畫進 m_Full 失敗也要關掉合成，並把真幀畫進已 acquire 的 swapchain，否則 release 的是沒畫過的影像
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] render to full failed - frame synthesis off for this session");
-        m_SynthFailed = true;
+        {
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            m_SynthFailed = true;
+        }
         pl_frame t = *targetProto;
         t.crop.x0 = 0.0f;
         t.crop.y0 = 0.0f;
@@ -2403,7 +2550,10 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     }
     if (!combined) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] combine pass failed - frame synthesis off for this session");
-        m_SynthFailed = true;
+        {
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            m_SynthFailed = true;
+        }
         pl_frame t = *targetProto;
         t.crop.x0 = 0.0f;
         t.crop.y0 = 0.0f;
@@ -2437,6 +2587,9 @@ void XrVideo::loadFoveation(float fv[4], float* cyR, float* u0) const
         fv[2] = m_FvCxR.load(std::memory_order_relaxed);
         fv[3] = m_FvCyL.load(std::memory_order_relaxed);
         *cyR = m_FvCyR.load(std::memory_order_relaxed);
+        // §REVIEW-1119：ARM64 上面那幾個 relaxed 讀可能被排到第二次序號讀之後，比對通過卻混到下一次寫入的值。
+        // seqlock 讀取端的標準寫法（Boehm, MSPC 2012）：資料讀完先下 acquire fence，再讀第二次序號。x86 上沒有指令。
+        std::atomic_thread_fence(std::memory_order_acquire);
         if ((s0 & 1u) == 0 && m_ParamSeq.load() == s0) {
             break;
         }
@@ -2457,6 +2610,7 @@ bool XrVideo::tilesFor(int fw, int fh, int* tw, int* th, int* rw, int* rh) const
         h = m_TileH.load(std::memory_order_relaxed);
         renderW = m_TileRW.load(std::memory_order_relaxed);
         renderH = m_TileRH.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);  // §REVIEW-1119：同 loadFoveation
         if ((s0 & 1u) == 0 && m_ParamSeq.load() == s0) {
             break;
         }
@@ -2477,8 +2631,13 @@ bool XrVideo::insetSize(int fw, int fh, int* iw, int* ih) const
     if (tilesFor(fw, fh, &tw, &th, &rw, &rh)) {
         return false;  // §VR-FOVEA-TILES：分塊的畫面沒有幾何變形，swapchain 就是解碼尺寸
     }
-    const float a = m_FvA.load(std::memory_order_relaxed);
-    const float u0 = m_FvU0.load(std::memory_order_relaxed);
+    float fv[4] = {};
+    float cyR = 0.0f;
+    float u0 = 0.0f;
+    // §REVIEW-1119：a 和 u0 是一組。各讀一次會在 setFoveation 寫到一半時配成新的 a、舊的 u0，
+    // swapchain 高度算錯，下一張才重建。
+    loadFoveation(fv, &cyR, &u0);
+    const float a = fv[0];
     if (!m_Config.fovLayers || m_InsetFailed || m_Config.synth || !m_Config.unwarpYuv || m_UnwarpYuvFailed ||
         m_UnwarpFailed || !(a >= 0.4f && a < 0.999f) || !(u0 > 0.05f && u0 < 0.95f) || fw < 4 || fh < 2) {
         return false;
@@ -2492,6 +2651,12 @@ void XrVideo::outputSize(int fw, int fh, int* ow, int* oh) const
 {
     *ow = fw;
     *oh = fh;
+    int tw = 0, th = 0, rw = 0, rh = 0;
+    // §REVIEW-1119：分塊沒有幾何變形，swapchain 維持解碼尺寸。insetSize 因分塊回 false 之後
+    // 若仍依 m_FvA 放大，尺寸對不上，分塊路徑整場進不去。
+    if (tilesFor(fw, fh, &tw, &th, &rw, &rh)) {
+        return;
+    }
     int iw = 0, ih = 0;
     if (insetSize(fw, fh, &iw, &ih)) {
         // §VR-FOVEA-LAYERS：周邊＝解碼原尺寸（上方），兩眼的中央區並排在下方一條
@@ -2575,10 +2740,11 @@ bool XrVideo::renderUnwarpYuv(pl_frame* mapped, const pl_frame* targetProto, pl_
     float fvU0;
     loadFoveation(fv, &fvCyR, &fvU0);
     if (hasMeta && meta.foveated) {
-        fv[1] = meta.foveaCentre[0][0];
-        fv[2] = meta.foveaCentre[1][0];
-        fv[3] = meta.foveaCentre[0][1];
-        fvCyR = meta.foveaCentre[1][1];
+        // §REVIEW-1119：見 renderSynth。注視中心貼邊時 vs_inv1s 的分母是 0。
+        fv[1] = std::clamp(meta.foveaCentre[0][0], 0.05f, 0.95f);
+        fv[2] = std::clamp(meta.foveaCentre[1][0], 0.05f, 0.95f);
+        fv[3] = std::clamp(meta.foveaCentre[0][1], 0.05f, 0.95f);
+        fvCyR = std::clamp(meta.foveaCentre[1][1], 0.05f, 0.95f);
     }
     // §VR-FOVEA-LAYERS：targetProto 有 crop（下方留給中央區）時只畫上面那一塊
     const int outH = targetProto->crop.y1 > 0.0f ? static_cast<int>(targetProto->crop.y1 + 0.5f)
@@ -2768,6 +2934,11 @@ color.a = ta;
 
 bool XrVideo::renderInsets(pl_frame* mapped, pl_tex swTex, int top, int iw, int ih, const float fv[4], float cyR, float u0)
 {
+    // §REVIEW-1119：沒開補幀時 init() 不建 m_Dp。pl_dispatch_create 失敗時 renderUnwarp 退回
+    // pl_render_image 仍回傳成功，呼叫端還是會進來。空的 m_Dp 進 pl_dispatch_begin 會解參考。
+    if (m_Dp == nullptr) {
+        return false;
+    }
     if (mapped->num_planes != 2 || mapped->planes[0].texture == nullptr || mapped->planes[1].texture == nullptr) {
         return false;
     }
@@ -3151,7 +3322,10 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
     pl_gpu g = m_Vulkan->gpu;
     const auto fail = [this](const char* what) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] tiles: %s - frame synthesis off for this session", what);
-        m_SynthFailed = true;
+        {
+            std::lock_guard<std::mutex> lk(m_StatsMutex);
+            m_SynthFailed = true;  // §REVIEW-1119：見 synthFlow
+        }
         return true;  // 上半已經畫好，這張照常顯示
     };
     const auto caps = static_cast<pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
@@ -3269,6 +3443,16 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
     // 縮圖是 kTilesDownBody 從亮度平面縮的（再縮一半那一張也是）：灰階
     const bool flowOk = synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, true);
     if (m_SynthFailed) {
+        return true;
+    }
+    if (!flowOk) {
+        // §REVIEW-1119：上半真幀已經畫好。下半在 !flowOk 時 k＝0 只是複製，hasSynth 為假，不會被顯示。
+        // 快速轉頭時每一幀都白跑一整張合成。縮圖狀態仍要更新，下一幀才比得了。
+        m_HavePrevSmall = smallOk;
+        m_HavePrevMeta = hasMeta;
+        m_PrevMeta = meta;
+        m_PrevPts = pts;
+        m_SmallCur = prev;
         return true;
     }
 
@@ -3408,13 +3592,17 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
         float fvU0;
         loadFoveation(fv, &fvCyR, &fvU0);
         if (hasMeta && meta.foveated) {
-            fv[1] = meta.foveaCentre[0][0];
-            fv[2] = meta.foveaCentre[1][0];
-            fv[3] = meta.foveaCentre[0][1];
-            fvCyR = meta.foveaCentre[1][1];
+            // §REVIEW-1119：見 renderSynth。RGB 退回這條同樣把未夾限的中心送進 vs_inv1。
+            fv[1] = std::clamp(meta.foveaCentre[0][0], 0.05f, 0.95f);
+            fv[2] = std::clamp(meta.foveaCentre[1][0], 0.05f, 0.95f);
+            fv[3] = std::clamp(meta.foveaCentre[0][1], 0.05f, 0.95f);
+            fvCyR = std::clamp(meta.foveaCentre[1][1], 0.05f, 0.95f);
         }
-        // swapchain 可能是兩倍高（合成壞掉之後）：一張影像的高度由寬度照比例算
-        float osz[2] = {static_cast<float>(m_Sw.width), static_cast<float>(m_Config.synth ? m_Sw.height / 2 : m_Sw.height)};
+        // §REVIEW-1119：和 renderUnwarpYuv 一樣。crop.y1 是這一張真正要畫的高度（補幀的上半，或中央區上面的周邊）。
+        // 不看 crop、又不設 rect 時會畫滿整張 swapchain：補幀多畫一倍用不到的下半；中央區退回這一幀則把畫面拉高、底下被裁掉。
+        const int outH = targetProto->crop.y1 > 0.0f ? static_cast<int>(targetProto->crop.y1 + 0.5f)
+                                                     : (m_Config.synth ? m_Sw.height / 2 : m_Sw.height);
+        float osz[2] = {static_cast<float>(m_Sw.width), static_cast<float>(outH)};
         pl_shader sh = pl_dispatch_begin(m_Dp);
         pl_shader_desc dd[1] = {sampledTex("vs_full", m_Full)};
         float fsz[2] = {static_cast<float>(fw), static_cast<float>(fh)};
@@ -3449,6 +3637,7 @@ bool XrVideo::renderUnwarp(pl_frame* mapped, const pl_frame* targetProto, pl_tex
             pl_dispatch_params dpar = {};
             dpar.shader = &sh;
             dpar.target = swTex;
+            dpar.rect = {0, 0, m_Sw.width, outH};  // §REVIEW-1119：見上面 outH
             ok = pl_dispatch_finish(m_Dp, &dpar);
         }
         else {
@@ -3566,6 +3755,14 @@ bool XrVideo::renderEquiFrame(AVFrame* frame, uint64_t t0)
     pl_frame mapped;
     std::memset(&mapped, 0, sizeof(mapped));
     const bool mappedOk = mapFrame(frame, &mapped, m_Tex, true);
+    if (!mappedOk) {
+        // §REVIEW-1119：這張沒送進 GPU。接著 poll 若看到材質還被別的工作佔著，會把沒被參照的幀塞進 m_WedgedFrames，
+        // 並把整場判成 GPU 卡住。
+        av_frame_free(&frame);
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_RenderErrors++;
+        return false;
+    }
     bool ok = false;
     if (mappedOk) {
         // 存 sRGB 編碼的值（和平面模式寫進 swapchain 的值相同），frame thread 取樣時視需要再換成線性
@@ -3606,6 +3803,8 @@ bool XrVideo::renderEquiFrame(AVFrame* frame, uint64_t t0)
         m_WedgedFrames.push_back(frame);
         m_Ctx->markGpuWedged("equirect render did not finish within 1 s");
         markUnusable("GPU wedged");
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_RenderErrors++;
         return false;
     }
     if (mappedOk) {
@@ -3616,7 +3815,10 @@ bool XrVideo::renderEquiFrame(AVFrame* frame, uint64_t t0)
     const uint64_t tEnd = nowUs();
     if (ok) {
         std::lock_guard<std::mutex> lk(m_EquiMutex);
-        m_EquiReady = slot;
+        // §REVIEW-1119：和 setImmersive(false) 清 m_EquiReady 用同一把鎖。切回平面之後才寫回來，下一部全景會先顯示這張舊畫面。
+        if (m_Immersive.load(std::memory_order_acquire)) {
+            m_EquiReady = slot;
+        }
     }
     std::lock_guard<std::mutex> lk(m_StatsMutex);
     if (ok) {
@@ -3635,11 +3837,20 @@ bool XrVideo::ensureProjSwapchain(XrSession session, int width, int height)
     if (m_Proj.swapchain != XR_NULL_HANDLE && m_Proj.width == width && m_Proj.height == height) {
         return true;
     }
-    // §REVIEW-1111（第二輪）：換尺寸：舊的那一組可能還有送出去沒做完的 GPU 工作，等做完再銷毀
-    if (m_Proj.swapchain != XR_NULL_HANDLE && m_Vulkan != nullptr) {
-        pl_gpu_finish(m_Vulkan->gpu);
+    // §REVIEW-1119：寬高不是正數時先返回，不要先拆掉現有的。轉成 uint32_t 之後會變成很大的尺寸。
+    if (width <= 0 || height <= 0) {
+        return false;
     }
-    destroySwapchainSet(m_Proj);
+    // §REVIEW-1111（第二輪）：換尺寸：舊的那一組可能還有送出去沒做完的 GPU 工作，等做完再銷毀
+    // §REVIEW-1119：pl_gpu_finish／銷毀材質必須和 renderEquiFrame 的送出互斥，否則驅動會在 tu_autotune::on_submit 崩潰。
+    // 尺寸沒變時函式開頭就返回，這段不是每幀路徑。
+    if (m_Proj.swapchain != XR_NULL_HANDLE && m_Vulkan != nullptr) {
+        std::lock_guard<std::mutex> lk(m_PlSubmitMutex);
+        pl_gpu_finish(m_Vulkan->gpu);
+        destroySwapchainSet(m_Proj);
+    } else {
+        destroySwapchainSet(m_Proj);
+    }
     uint32_t n = 0;
     // §REVIEW-1111（第二輪）：查不到格式清單時這一次不建（下一張再試），不要拿空清單把每個候選都判成不支援
     if (XR_FAILED(xrEnumerateSwapchainFormats(session, 0, &n, nullptr)) || n == 0) {
@@ -3694,29 +3905,35 @@ bool XrVideo::ensureProjSwapchain(XrSession session, int width, int height)
         }
         std::vector<pl_tex> wrapped;
         bool wrapOk = true;
-        for (uint32_t i = 0; i < count; i++) {
-            pl_vulkan_wrap_params wp = {};
-            wp.image = imgs[i].image;
-            wp.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-            wp.width = width;
-            wp.height = height;
-            wp.format = c.view;
-            wp.usage = vkUsage;
-            wp.debug_tag = PL_DEBUG_TAG;
-            pl_tex t = pl_vulkan_wrap(m_Vulkan->gpu, &wp);
-            if (t == nullptr || !t->params.renderable) {
-                if (t != nullptr) {
+        {
+            // §REVIEW-1119：pl_vulkan_wrap／pl_tex_destroy 和 renderEquiFrame 的送出互斥（見 m_PlSubmitMutex）。
+            std::lock_guard<std::mutex> lk(m_PlSubmitMutex);
+            for (uint32_t i = 0; i < count; i++) {
+                pl_vulkan_wrap_params wp = {};
+                wp.image = imgs[i].image;
+                wp.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+                wp.width = width;
+                wp.height = height;
+                wp.format = c.view;
+                wp.usage = vkUsage;
+                wp.debug_tag = PL_DEBUG_TAG;
+                pl_tex t = pl_vulkan_wrap(m_Vulkan->gpu, &wp);
+                if (t == nullptr || !t->params.renderable) {
+                    if (t != nullptr) {
+                        pl_tex_destroy(m_Vulkan->gpu, &t);
+                    }
+                    wrapOk = false;
+                    break;
+                }
+                wrapped.push_back(t);
+            }
+            if (!wrapOk) {
+                for (pl_tex& t : wrapped) {
                     pl_tex_destroy(m_Vulkan->gpu, &t);
                 }
-                wrapOk = false;
-                break;
             }
-            wrapped.push_back(t);
         }
         if (!wrapOk) {
-            for (pl_tex& t : wrapped) {
-                pl_tex_destroy(m_Vulkan->gpu, &t);
-            }
             xrDestroySwapchain(sc);
             continue;
         }
@@ -3730,6 +3947,8 @@ bool XrVideo::ensureProjSwapchain(XrSession session, int width, int height)
         return true;
     }
     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PLAYER] no usable immersive swapchain format for %dx%d", width, height);
+    // §REVIEW-1119：走完候選仍沒有格式才是這個 session 不再試。查格式暫時失敗的那幾條在上面直接返回，下一張再試。
+    m_ProjFailed = true;
     return false;
 }
 
@@ -3741,6 +3960,8 @@ bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj
     }
     pl_gpu g = m_Vulkan->gpu;
     if (m_DpFrame == nullptr) {
+        // §REVIEW-1119：和全景 render thread 同一顆 pl_gpu。建立 dispatch／semaphore 也拿送出鎖，只做一次。
+        std::lock_guard<std::mutex> lk(m_PlSubmitMutex);
         m_DpFrame = pl_dispatch_create(m_Log, g);
         pl_vulkan_sem_params sp = {};
         sp.type = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -3752,7 +3973,8 @@ bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj
         }
     }
     if (!ensureProjSwapchain(session, eyeW * 2, eyeH)) {
-        m_ProjFailed = true;
+        // §REVIEW-1119：查格式暫時失敗時函式故意不建、下一張再試。這裡一律設 m_ProjFailed 會把恢復關掉。
+        // 真的沒有可用格式時，ensureProjSwapchain 自己會設。
         return false;
     }
     int slot = -1;
@@ -3780,17 +4002,27 @@ bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj
     } inUse{this};
 
     uint32_t idx = 0;
-    XrSwapchainImageAcquireInfo ai = xrS<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
-    {
-        std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
-        if (XR_FAILED(xrAcquireSwapchainImage(m_Proj.swapchain, &ai, &idx))) {
+    // §REVIEW-1119：同 renderNewFrame 的 acquire。逾時時影像仍是 acquired，下一格要沿用同一個索引繼續等。
+    if (m_Proj.pendingWait >= 0) {
+        idx = static_cast<uint32_t>(m_Proj.pendingWait);
+        if (m_Proj.swapchain == XR_NULL_HANDLE || idx >= m_Proj.wrapped.size()) {
+            m_Proj.pendingWait = -1;
             return false;
         }
-        if (idx >= m_Proj.wrapped.size()) {
-            XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
-            xrReleaseSwapchainImage(m_Proj.swapchain, &ri);
-            return false;
+    } else {
+        XrSwapchainImageAcquireInfo ai = xrS<XrSwapchainImageAcquireInfo>(XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO);
+        {
+            std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
+            if (XR_FAILED(xrAcquireSwapchainImage(m_Proj.swapchain, &ai, &idx))) {
+                return false;
+            }
+            if (idx >= m_Proj.wrapped.size()) {
+                XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
+                xrReleaseSwapchainImage(m_Proj.swapchain, &ri);
+                return false;
+            }
         }
+        m_Proj.pendingWait = static_cast<int>(idx);
     }
     XrSwapchainImageWaitInfo wi = xrS<XrSwapchainImageWaitInfo>(XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO);
     wi.timeout = 50000000;  // 50 ms
@@ -3800,9 +4032,18 @@ bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj
         for (int again = 0; wr == XR_TIMEOUT_EXPIRED && again < 4; again++) {
             wr = xrWaitSwapchainImage(m_Proj.swapchain, &wi);
         }
-        if (XR_FAILED(wr)) {
+        // §REVIEW-1119：XR_TIMEOUT_EXPIRED 不是失敗碼，但影像還在合成器手上，不可以畫。
+        // 逾時留著 pendingWait。硬失敗才 release，否則這張影像一直佔著，後面的 acquire 會失敗。
+        if (wr != XR_SUCCESS) {
+            if (XR_FAILED(wr)) {
+                XrSwapchainImageReleaseInfo ri = xrS<XrSwapchainImageReleaseInfo>(XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO);
+                std::lock_guard<std::mutex> lk(m_Ctx->queueMutex());
+                xrReleaseSwapchainImage(m_Proj.swapchain, &ri);
+                m_Proj.pendingWait = -1;
+            }
             return false;
         }
+        m_Proj.pendingWait = -1;
     }
     std::unique_lock<std::mutex> submitLock(m_PlSubmitMutex);
     pl_tex dst = m_Proj.wrapped[idx];
@@ -3911,8 +4152,10 @@ bool XrVideo::renderImmersive(XrSession session, const XrView views[2], int proj
         if (dumpTex != nullptr && drawEye(0, dumpTex, 0, false)) {
             QString path = m_Config.dumpPath;
             const int dot = path.lastIndexOf(QLatin1Char('.'));
-            path.insert(dot > path.lastIndexOf(QLatin1Char('/')) ? dot : path.size(), QStringLiteral("-immersive"));
-            saveDump(readbackTexture(dumpTex), path, eyeW, eyeH);
+            // §REVIEW-1119：和 dumpPathFor 一樣。Windows 路徑的資料夾名稱若含 '.'，只看 '/' 會把後綴插進資料夾。
+            const int sep = std::max(path.lastIndexOf(QLatin1Char('/')), path.lastIndexOf(QLatin1Char('\\')));
+            path.insert(dot > sep ? dot : path.size(), QStringLiteral("-immersive"));
+            saveDump(readbackTexture(dumpTex, true), path, eyeW, eyeH);
         }
         pl_tex_destroy(g, &dumpTex);
     }
@@ -3986,7 +4229,7 @@ std::function<std::string()> XrVideo::takeStatsDeferred()
         snap->drawn = m_Drawn;
         snap->overwritten = m_Overwritten;
         snap->renderErrors = m_RenderErrors;
-        snap->stallDropped = m_TestStallDropped;
+        snap->stallDropped = m_TestStallDropped.load(std::memory_order_relaxed);
         snap->noMetaDropped = m_NoMetaDropped;
         snap->mode = modeName(static_cast<int>(m_Mode));
         snap->w = m_Sw.width;

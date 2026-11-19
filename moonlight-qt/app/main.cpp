@@ -27,6 +27,7 @@
 #ifdef Q_OS_UNIX
 #include <sys/socket.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -515,11 +516,14 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    WCHAR dmpFileName[MAX_PATH];
-    swprintf_s(dmpFileName, L"%ls\\VipleStream-%I64u.dmp",
-               (PWCHAR)QDir::toNativeSeparators(Path::getLogDir()).utf16(), QDateTime::currentSecsSinceEpoch());
-    QString qDmpFileName = QString::fromUtf16((const char16_t*)dmpFileName);
-    HANDLE dumpHandle = CreateFileW(dmpFileName, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // §REVIEW-1119：swprintf_s 寫進固定的 MAX_PATH。log 目錄太深時路徑放不下，會直接中止例外處理，WER 接手不到。
+    // 改用 QString 組路徑。CreateFileW 放不下就走下面的失敗分支，仍然回 EXCEPTION_CONTINUE_SEARCH。
+    const QString qDmpFileName = QDir::toNativeSeparators(Path::getLogDir())
+            + QStringLiteral("\\VipleStream-")
+            + QString::number(QDateTime::currentSecsSinceEpoch())
+            + QStringLiteral(".dmp");
+    HANDLE dumpHandle = CreateFileW(reinterpret_cast<LPCWSTR>(qDmpFileName.utf16()),
+                                    GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (dumpHandle != INVALID_HANDLE_VALUE) {
         MINIDUMP_EXCEPTION_INFORMATION info;
 
@@ -679,6 +683,17 @@ void configureSignalHandlers()
         return;
     }
 
+    // §REVIEW-1119：macOS 沒有 SOCK_CLOEXEC，上面把旗標定義成 0，這兩個 fd 會被子行程繼承。
+    // 子行程握著寫入端就能對父行程注入訊號。這裡補上 FD_CLOEXEC；Linux 上再設一次沒有副作用。
+#ifdef FD_CLOEXEC
+    for (int i = 0; i < 2; ++i) {
+        const int fdFlags = ::fcntl(signalFds[i], F_GETFD);
+        if (fdFlags >= 0) {
+            ::fcntl(signalFds[i], F_SETFD, fdFlags | FD_CLOEXEC);
+        }
+    }
+#endif
+
     // Create a thread to handle our signals safely outside of signal context
     SDL_Thread* thread = SDL_CreateThread(signalHandlerThread, "Signal Handler", nullptr);
     SDL_DetachThread(thread);
@@ -833,21 +848,46 @@ int main(int argc, char *argv[])
             // 執行期間仍持有，其他實例照樣被擋。
             s_SingleInstanceMutex = hMutex;
 #elif defined(Q_OS_UNIX)
-            const char* lockPath = "/tmp/viplestream-client.lock";
-            int lockFd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-            if (lockFd >= 0) {
-                if (flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
-                    fprintf(stderr,
-                        "Error: VipleStream is already running.\n"
-                        "Close the existing instance before starting a new session.\n"
-                        "  pkill -f VipleStream\n");
-                    close(lockFd);
-                    return 1;
+            // §REVIEW-1119：固定的 /tmp/viplestream-client.lock 在全域可寫目錄。其他帳號先建唯讀檔，
+            // open 失敗就靜默跳過鎖；先建可寫檔並持有 flock 就能擋啟動；沒有 O_NOFOLLOW 會跟著符號連結。
+            // 改放自己的 runtime／暫存目錄（必須是自己的，而且群組與其他人不可寫）。開不到或檔主不是自己就結束。
+            QByteArray lockDir;
+#if defined(Q_OS_DARWIN)
+            lockDir = QFile::encodeName(QDir::tempPath());
+#else
+            lockDir = qgetenv("XDG_RUNTIME_DIR");
+#endif
+            struct stat dirSt;
+            const bool privateDir = !lockDir.isEmpty() && lockDir.startsWith('/')
+                    && ::stat(lockDir.constData(), &dirSt) == 0 && S_ISDIR(dirSt.st_mode)
+                    && dirSt.st_uid == ::getuid() && (dirSt.st_mode & 022) == 0;
+            const QByteArray lockPath = privateDir
+                    ? lockDir + "/viplestream-client.lock"
+                    : QByteArray("/tmp/viplestream-client-") + QByteArray::number(qulonglong(::getuid())) + ".lock";
+            int lockFlags = O_CREAT | O_RDWR | O_CLOEXEC | O_NONBLOCK;
+#ifdef O_NOFOLLOW
+            lockFlags |= O_NOFOLLOW;
+#endif
+            int lockFd = ::open(lockPath.constData(), lockFlags, 0600);
+            struct stat lockSt;
+            if (lockFd < 0 || ::fstat(lockFd, &lockSt) != 0 || !S_ISREG(lockSt.st_mode) || lockSt.st_uid != ::getuid()) {
+                const int openErr = errno;
+                if (lockFd >= 0) {
+                    ::close(lockFd);
                 }
-                // lockFd 故意不 close — 保持到 process 結束，
-                // flock 會自動在 fd 關閉時釋放。
-                s_SingleInstanceLockFd = lockFd;
+                fprintf(stderr, "Error: cannot open the single-instance lock (errno %d).\n", openErr);
+                return 1;
             }
+            if (::flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
+                fprintf(stderr,
+                    "Error: VipleStream is already running.\n"
+                    "Close the existing instance before starting a new session.\n"
+                    "  pkill -f VipleStream\n");
+                ::close(lockFd);
+                return 1;
+            }
+            // lockFd 故意不 close — 保持到 process 結束，flock 會在 fd 關閉時釋放。
+            s_SingleInstanceLockFd = lockFd;
 #endif
         }
     }
@@ -1043,8 +1083,38 @@ int main(int argc, char *argv[])
                                                    .arg(QDateTime::currentMSecsSinceEpoch())
                                                    .arg(QCoreApplication::applicationPid())
                 : QString("VipleStream-%1.log").arg(QDateTime::currentSecsSinceEpoch());
-        s_LoggerFile = new QFile(tempDir.filePath(logFileName));
-        if (s_LoggerFile->open(QIODevice::WriteOnly | QIODevice::Text)) {
+        const QString logPath = tempDir.filePath(logFileName);
+        s_LoggerFile = new QFile(logPath);
+        bool logOpened = false;
+#ifdef Q_OS_UNIX
+        // §REVIEW-1119：macOS 的 log 固定在 /tmp，Linux 家目錄不可寫時也退回共用暫存。
+        // QFile::open 會跟著符號連結把目標截斷，umask 也常讓其他帳號讀得到。
+        // 不跟隨連結、確認是自己的一般檔，再把權限收到只有自己能讀寫，然後才截斷。O_NONBLOCK 避免對方先放的 FIFO 把啟動卡住。
+        {
+            int flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NONBLOCK;
+#ifdef O_NOFOLLOW
+            flags |= O_NOFOLLOW;
+#endif
+            const int logFd = ::open(QFile::encodeName(logPath).constData(), flags, 0600);
+            struct stat st;
+            if (logFd >= 0 && ::fstat(logFd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == ::getuid()) {
+                if (s_LoggerFile->open(logFd, QIODevice::WriteOnly | QIODevice::Text, QFileDevice::AutoCloseHandle)
+                        && s_LoggerFile->resize(0)) {
+                    s_LoggerFile->setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);  // §REVIEW-1119：既有檔可能是舊版 umask 0644
+                    logOpened = true;
+                } else if (s_LoggerFile->isOpen()) {
+                    s_LoggerFile->close();
+                } else {
+                    ::close(logFd);
+                }
+            } else if (logFd >= 0) {
+                ::close(logFd);
+            }
+        }
+#else
+        logOpened = s_LoggerFile->open(QIODevice::WriteOnly | QIODevice::Text);
+#endif
+        if (logOpened) {
             QTextStream(stderr) << "Redirecting log output to " << s_LoggerFile->fileName() << Qt::endl;
             s_LoggerStream.setDevice(s_LoggerFile);
         }
@@ -1104,7 +1174,7 @@ int main(int argc, char *argv[])
     else {
         // §SF-PROBE（M2a R1）：探測動作不動 VipleStream-*.log（Day-1 會連跑幾十次 probe，
         // 不能把真正的串流 log 擠掉），只把 probe-*.log 修到最新 50 份。
-        QStringList probeLogNames = tempDir.entryList(QStringList("probe-*.log"), QDir::Files, QDir::SortFlag::Time);
+        QStringList probeLogNames = tempDir.entryList(QStringList("probe-*.log"), QDir::Files | QDir::NoSymLinks, QDir::SortFlag::Time);  // §REVIEW-1119：同上面的串流 log，輪替不要把符號連結算進去
         for (int i = 50; i < probeLogNames.size(); i++) {
             qInfo() << "Removing old probe log file:" << probeLogNames.at(i);
             QFile(tempDir.filePath(probeLogNames.at(i))).remove();

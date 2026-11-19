@@ -488,6 +488,15 @@ static void inputSendThreadProc(void* context) {
 
             PltLockMutex(&batchedInputMutex);
 
+            // §REVIEW-1119：配置 holder 的空窗，或這 1 ms 批次睡眠裡，位移可能已經被送完或正負抵銷。
+            // 這裡仍送的話，累計模式會白發兩包、傳統模式會把下一筆真的移動多擋 1 ms。
+            if (currentRelativeMouseState.deltaX == 0 && currentRelativeMouseState.deltaY == 0) {
+                currentRelativeMouseState.dirty = false;
+                PltUnlockMutex(&batchedInputMutex);
+                freePacketHolder(holder);
+                continue;
+            }
+
             // §LAT-2D：host 支援時改送累計位移（不保證送達、每筆送兩份）：掉一個由下一個或另一份補回，不必等 ACK
             if (RelativeMouseCumulative && encryptedControlStream) {
                 RelCumX += (uint32_t)currentRelativeMouseState.deltaX;
@@ -510,7 +519,13 @@ static void inputSendThreadProc(void* context) {
                 // §REVIEW-1118B：第一筆失敗就不再送第二筆。要不要進重連等待只看這一筆的回傳，不再重問 QUIC。
                 sendResult = sendInputPacket(holder, false);
                 if (sendResult == INPUT_SEND_OK) {
-                    sendResult = sendInputPacket(holder, false);
+                    // §REVIEW-1119：第二份是冗餘。第一份已經送出，第二份只是暫時失敗就去睡 100 ms，
+                    // 會把鍵盤、手把一起停住。通道真的斷了，下一筆的第一份會自己進重連等待。
+                    int secondResult = sendInputPacket(holder, false);
+                    if (secondResult == INPUT_SEND_TERMINATED) {
+                        freePacketHolder(holder);
+                        return;
+                    }
                 }
                 if (sendResult != INPUT_SEND_OK) {
                     freePacketHolder(holder);
@@ -678,7 +693,12 @@ static void inputSendThreadProc(void* context) {
             uint8_t motionType = holder->packet.controllerMotion.motionType;
 
             LC_ASSERT(controllerNumber < MAX_GAMEPADS);
-            LC_ASSERT(motionType - 1 < MAX_MOTION_EVENTS);
+            // §REVIEW-1119：motionType 是 1-based。傳入 0 時 motionType-1 先提升成有號 int，
+            // 結果是 -1，會讀寫 currentGamepadSensorState 的前一格。發行版 LC_ASSERT 是空的。
+            if (motionType == 0 || motionType > MAX_MOTION_EVENTS) {
+                freePacketHolder(holder);
+                continue;
+            }
 
             PltLockMutex(&batchedInputMutex);
 
@@ -719,16 +739,26 @@ static void inputSendThreadProc(void* context) {
             // have been processed prior to sending these UTF-8 events to avoid interference between
             // the two (especially with modifier keys).
             flushInputOnControlStream();
-            while (!PltIsThreadInterrupted(&inputSendThread) && isControlDataInTransit()) {
+            while (initialized && !PltIsThreadInterrupted(&inputSendThread) && isControlDataInTransit()) {
                 PltSleepMs(10);
+            }
+            // §REVIEW-1119：stopInputStream 只清 initialized、不會 interrupt。
+            // peer 仍連著且還有可靠資料在途時，只看 interrupt 會讓 join 一直睡。
+            if (!initialized) {
+                freePacketHolder(holder);
+                return;
             }
 
             // Finally, sleep an additional 50 ms to allow the events to be processed by Windows
             PltSleepMs(50);
+            if (!initialized) {
+                freePacketHolder(holder);
+                return;
+            }
 
             // We send each Unicode code point individually. This way we can always ensure they will
             // never straddle a packet boundary (which will cause a parsing error on the host).
-            while (i < totalLength && !PltIsThreadInterrupted(&inputSendThread)) {
+            while (i < totalLength && initialized && !PltIsThreadInterrupted(&inputSendThread)) {
                 uint32_t codePointLength;
                 uint8_t firstByte = (uint8_t)holder->packet.unicode.text[i];
                 if ((firstByte & 0x80) == 0x00) {
@@ -749,11 +779,19 @@ static void inputSendThreadProc(void* context) {
                 }
                 else {
                     Limelog("Invalid unicode code point starting byte: %02x\n", firstByte);
+                    // §REVIEW-1119：前面的字元以 moreData 只入佇列。這裡直接 break 就不會 flush，要等下一筆輸入才送出。
+                    if (i > 0) {
+                        flushInputOnControlStream();
+                    }
                     break;
                 }
 
                 if (i + codePointLength > totalLength) {
                     Limelog("Truncated UTF-8 code point in input packet\n");
+                    // §REVIEW-1119：同上，截斷前已入佇列的字元要先送出去。
+                    if (i > 0) {
+                        flushInputOnControlStream();
+                    }
                     break;
                 }
 
@@ -991,7 +1029,9 @@ int LiSendMouseMoveEvent(short deltaX, short deltaY) {
 
         PltLockMutex(&batchedInputMutex);
         // 等待配置時另一條執行緒可能已經排進佇列。持鎖檢查，避免排兩份。
-        if (!currentRelativeMouseState.dirty) {
+        // §REVIEW-1119：也可能已經被送出執行緒消費完，dirty 回到 false、位移是 0。再排就會送出空包。
+        if (!currentRelativeMouseState.dirty &&
+                (currentRelativeMouseState.deltaX != 0 || currentRelativeMouseState.deltaY != 0)) {
             err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
             if (err == LBQ_SUCCESS) {
                 currentRelativeMouseState.dirty = true;
@@ -1800,8 +1840,10 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
     }
 
     // Check for valid motion type values
-    if (motionType - 1 >= MAX_MOTION_EVENTS) {
-        LC_ASSERT(motionType - 1 < MAX_MOTION_EVENTS);
+    // §REVIEW-1119：uint8_t 先提升成 int。motionType 為 0 時 motionType-1 是 -1，
+    // -1 >= MAX_MOTION_EVENTS 為假，接著用索引 -1 寫感測狀態。0 與超過上限都要拒絕。
+    if (motionType == 0 || motionType > MAX_MOTION_EVENTS) {
+        LC_ASSERT(motionType >= 1 && motionType <= MAX_MOTION_EVENTS);
         return -3;
     }
 
@@ -1928,7 +1970,8 @@ int LiSendScHidInputReport(const uint8_t* data, int dataLen) {
         return LI_ERR_UNSUPPORTED;
     }
 
-    if (dataLen != SS_SC_HID_REPORT_MAX) {
+    // §REVIEW-1119：dataLen 剛好 64 但 data 是 NULL 時，下面的 memcpy 會對空指標讀 64 bytes。
+    if (data == NULL || dataLen != SS_SC_HID_REPORT_MAX) {
         return -3;
     }
 
@@ -1969,7 +2012,8 @@ int LiSendScHidFeatureReport(uint8_t seq, uint8_t reportId, const uint8_t* data,
         return LI_ERR_UNSUPPORTED;
     }
 
-    if (dataLen != SS_SC_HID_REPORT_MAX) {
+    // §REVIEW-1119：dataLen 剛好 64 但 data 是 NULL 時，下面的 memcpy 會對空指標讀 64 bytes。
+    if (data == NULL || dataLen != SS_SC_HID_REPORT_MAX) {
         return -3;
     }
 

@@ -756,7 +756,9 @@ public class AppUpdater {
                     }
                     URL u = new URL(currentUrl);
                     dlConn = (HttpURLConnection) u.openConnection();
-                    dlConn.setInstanceFollowRedirects(true);
+                    // §REVIEW-1119：為什麼關掉自動跟隨——getResponseCode() 會自行吃掉同協定轉址，
+                    // 上面的 https 檢查、5 次上限、串流中止都看不到。絕對網址維持原字串，避免簽名參數被改寫。
+                    dlConn.setInstanceFollowRedirects(false);
                     dlConn.setConnectTimeout(15000);
                     dlConn.setReadTimeout(30000);
                     dlConn.setRequestProperty("User-Agent", "VipleStream-Android/" + BuildConfig.VERSION_NAME);
@@ -768,7 +770,15 @@ public class AppUpdater {
                             code == 307 || code == 308) {
                         String newLoc = dlConn.getHeaderField("Location");
                         dlConn.disconnect();
-                        currentUrl = newLoc;
+                        if (newLoc == null) {
+                            throw new IOException("下載轉址沒有位置");
+                        }
+                        if (newLoc.startsWith("https://") || newLoc.startsWith("http://")) {
+                            currentUrl = newLoc;
+                        }
+                        else {
+                            currentUrl = new URL(u, newLoc).toString();
+                        }
                         redirectCount++;
                         continue;
                     }
@@ -1116,13 +1126,27 @@ public class AppUpdater {
         return true;
     }
 
+    // §REVIEW-1119：為什麼設上限並關掉串流——這段把對端的 HTTP 本文整份讀進記憶體，
+    // 沒有上限時超長回應會把行程撐爆；呼叫端只 disconnect，輸入串流沒關。
     private static String readStreamToString(InputStream is) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         byte[] buf = new byte[4096];
         int len;
-        while ((len = is.read(buf)) != -1) {
-            baos.write(buf, 0, len);
+        int total = 0;
+        try {
+            while ((len = is.read(buf)) != -1) {
+                total += len;
+                if (total > 1024 * 1024) {
+                    throw new IOException("HTTP 回應超過大小上限");
+                }
+                baos.write(buf, 0, len);
+            }
+            return baos.toString("UTF-8");
+        } finally {
+            try {
+                is.close();
+            } catch (IOException ignored) {
+            }
         }
-        return baos.toString("UTF-8");
     }
 }

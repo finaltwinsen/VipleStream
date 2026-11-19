@@ -722,6 +722,42 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### stream_menu
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            While a regular (non-VR) stream is running, replace the Windows power menu with a stream menu drawn
+            by the host. The stream menu appears when the remote user clicks the power icon in the Start menu or
+            presses Alt+F4 on the desktop, and offers: disconnect the stream (the host and the app keep running),
+            quit the app and disconnect, lock, sleep, shut down, restart, and cancel. It can be used with the
+            mouse or the keyboard (arrow keys, Enter, Esc to cancel).
+            <br>
+            <br>
+            If the Windows "Shut Down Windows" dialog still shows up during a stream, it is cancelled and the
+            stream menu is shown instead. The Ctrl+Alt+Del screen is not affected.
+            <br>
+            <br>
+            Whenever the click or key press cannot be identified with certainty, it is passed to Windows
+            unchanged. Disable this option to always get the regular Windows power menu.
+            @caution{Applies to Windows only. VR sessions are never affected.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            stream_menu = disabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### keybindings
 
 <table>
@@ -1862,7 +1898,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Description</td>
         <td colspan="2">
             VipleStream: let paired clients browse and play video files on this host (the headset's video mode).
-            Read-only; only sub-folders and video files are listed.
+            Only sub-folders and video files are listed. Read-only unless [media_write](#media_write) is enabled.
         </td>
     </tr>
     <tr>
@@ -1903,6 +1939,33 @@ editing the `conf` file in a text editor. Use the examples as reference.
         <td>Example</td>
         <td colspan="2">@code{}
             media_dirs = D:\Movies,E:\Recordings
+            @endcode</td>
+    </tr>
+</table>
+
+### media_write
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream: let paired clients create folders and copy, move and delete items inside the folders
+            [media_share](#media_share) offers (the file manager in the headset's video mode). Nothing is ever
+            overwritten, links are not followed, and deleting is permanent (no recycle bin).
+            Drives shared with `media_dirs = *` stay read-only even when this is enabled.
+            @warning{Every paired device can then change or delete the shared files.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            media_write = enabled
             @endcode</td>
     </tr>
 </table>

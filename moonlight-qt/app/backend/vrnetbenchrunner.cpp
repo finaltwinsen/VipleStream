@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -32,12 +33,24 @@ constexpr qint64 kStepTimeoutExtraMs = 150000;
 bool stateIsAdapterOnly(int idx) { return idx == 1; }
 QString stateName(int idx) { return stateIsAdapterOnly(idx) ? QStringLiteral("C") : QStringLiteral("B"); }
 qint64 nowMs() { return QDateTime::currentMSecsSinceEpoch(); }
+
+// §REVIEW-1119：跟 vrnetmode.h 的 locKeySafe 一樣。/、\ 或換行會讓 QSettings 切成別的群組，讀取端也會拒讀。
+bool locKeySafe(const QString& loc)
+{
+    return !loc.isEmpty() && loc.size() <= 128
+        && !loc.contains(QLatin1Char('/')) && !loc.contains(QLatin1Char('\\'))
+        && !loc.contains(QLatin1Char('\n')) && !loc.contains(QLatin1Char('\r'));
+}
 }  // namespace
 
 VrNetBenchRunner::VrNetBenchRunner(QObject* parent) : QObject(parent)
 {
     QString dataHome = qEnvironmentVariable("XDG_DATA_HOME");
-    if (dataHome.isEmpty()) {
+    // §REVIEW-1119：XDG 規定必須是絕對路徑。相對路徑會跟著工作目錄走。
+    // QStandardPaths 會讀同一個變數，所以不能拿它當退路，這個測試直接不做。
+    if (!dataHome.isEmpty() && !QDir::isAbsolutePath(dataHome)) {
+        dataHome.clear();
+    } else if (dataHome.isEmpty()) {
         dataHome = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
     }
     if (!dataHome.isEmpty()) {
@@ -166,7 +179,10 @@ bool VrNetBenchRunner::start(QObject* launcher, QObject* computerManager)
     // 直接發出來的，那時階段還沒改成 Step、訊號被丟掉，之後整個測試停在那一階，取消也結束不了。
     connect(m_Launcher, &VrLauncher::finished, this, &VrNetBenchRunner::onChildFinished,
             static_cast<Qt::ConnectionType>(Qt::QueuedConnection | Qt::UniqueConnection));
-    log(QStringLiteral("start: host=%1 loc=%2").arg(hostFor(false), m_Loc.isEmpty() ? QStringLiteral("(none)") : m_Loc));
+    // §REVIEW-1119：loc 不合鍵名規則時不印原文，避免換行把 log 拆開。
+    const QString locLog = m_Loc.isEmpty() ? QStringLiteral("(none)")
+                                           : (locKeySafe(m_Loc) ? m_Loc : QStringLiteral("(rejected)"));
+    log(QStringLiteral("start: host=%1 loc=%2").arg(hostFor(false), locLog));
     m_Timer.start();
     beginState();
     return true;
@@ -400,8 +416,9 @@ void VrNetBenchRunner::finish(const QString& failure)
             .arg(m_Ladders[0].topHeld()).arg(m_Ladders[1].topHeld()).arg(b2 != nullptr ? b2->topHeld() : -1));
     const QString date = QDate::currentDate().toString(Qt::ISODate);
     QSettings settings;
-    if (!m_Loc.isEmpty()) {
+    if (locKeySafe(m_Loc)) {
         // vrnetmode.h 的「自動」讀這個（14 天後重測）
+        // §REVIEW-1119：不合鍵名規則的 loc 不寫。QSettings 會把 /、\ 切成子群組，讀取端也會拒讀。
         settings.setValue(QStringLiteral("vrnetsel/") + m_Loc, QStringLiteral("%1|%2").arg(pickC ? QStringLiteral("C") : QStringLiteral("B"), date));
     }
     const int topB = (std::min)(m_Ladders[0].topHeld(), b2 != nullptr ? b2->topHeld() : m_Ladders[0].topHeld());
@@ -436,13 +453,22 @@ void VrNetBenchRunner::writeRequest(bool adapterOnly)
 VrNetBenchRunner::NetStatus VrNetBenchRunner::readStatus() const
 {
     NetStatus s;
-    QFile f(QDir(m_Dir).filePath(QStringLiteral("netmode-status.json")));
+    const QString path = QDir(m_Dir).filePath(QStringLiteral("netmode-status.json"));
+    // §REVIEW-1119：狀態檔在使用者可寫的目錄。符號連結、裝置檔或超大檔會讓讀取堵在介面執行緒，或一次吃進整份內容。
+    const QFileInfo fi(path);
+    if (!fi.isFile() || fi.isSymLink() || fi.size() < 0 || fi.size() > 64 * 1024) {
+        return s;
+    }
+    QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
         return s;
     }
-    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    const QJsonObject o = QJsonDocument::fromJson(f.read(64 * 1024)).object();
     const qint64 t = o.value(QStringLiteral("t")).toVariant().toLongLong();
-    s.fresh = t > 0 && qAbs(QDateTime::currentSecsSinceEpoch() - t) <= 5;  // REVIEW-1111 (round 2): a timestamp in the future is not "fresh" either
+    // §REVIEW-1119：t 若遠大於現在，直接相減可能有號溢位。未來 5 秒內仍算新鮮（同 REVIEW-1111）。
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    const bool recent = t > 0 && (t >= now ? (t - now <= 5) : (now - t <= 5));
+    s.fresh = recent;
     s.apStation = o.value(QStringLiteral("ap_station")).toBool();
     s.applied = o.value(QStringLiteral("applied")).toString();
     s.loc = o.value(QStringLiteral("loc")).toString();
@@ -479,10 +505,21 @@ QString VrNetBenchRunner::hostFor(bool adapterOnly) const
                 continue;
             }
             for (const QNetworkAddressEntry& e : ni.addressEntries()) {
-                if (e.ip().protocol() == QAbstractSocket::IPv4Protocol && e.prefixLength() > 0 &&
-                        host.isInSubnet(e.ip(), e.prefixLength())) {
-                    return adv.address;
+                if (e.ip().protocol() != QAbstractSocket::IPv4Protocol || e.prefixLength() <= 0 ||
+                        !host.isInSubnet(e.ip(), e.prefixLength())) {
+                    continue;
                 }
+                // §REVIEW-1119：位址來自遠端 /serverinfo。自己、網路位址、廣播、迴環、多播、未指定都不是主機。
+                // 前綴小於 31 才把主機位元全 0／全 1 排掉；/31 的兩個位址都可用。broadcast() 有時是空的。
+                const int prefix = e.prefixLength();
+                const quint32 ipv4 = host.toIPv4Address();
+                const quint32 hostMask = (prefix > 0 && prefix < 31) ? (0xFFFFFFFFu >> prefix) : 0u;
+                const bool edgeAddr = hostMask != 0 && ((ipv4 & hostMask) == 0 || (ipv4 & hostMask) == hostMask);
+                if (host.isNull() || host.isLoopback() || host.isMulticast() || edgeAddr ||
+                        host == e.ip() || host == e.broadcast() || host == QHostAddress::Broadcast) {
+                    continue;
+                }
+                return host.toString();
             }
         }
     }

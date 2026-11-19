@@ -513,7 +513,8 @@ TEST(VrLatchTest, V2ClosedLoopLocksFromAnyPhase120Hz) {
 // ── §VR-LATCH-V3 ──────────────────────────────────────────────────────────
 
 TEST(VrLatchTest, V3DefaultUnchanged) {
-  // 沒設定＝legacy；v3 的欄位在 legacy／v2 一律是初值，帶不帶 options 對 v2 沒有差別
+  // 沒設定＝legacy；v3 的欄位在 legacy 一律是初值。v2 不看種子（have_seed），帶不帶對結果沒有差別；
+  // acquire 從 §VR-LATCH-V2-ACQ（2026-10-31）起 v2 也會用，所以這裡不開（開著的行為由 V2Acquire 系列測）
   controller_t l;
   int64_t now = 0;
   auto r = feed(l, 3000, 3, now);
@@ -530,8 +531,8 @@ TEST(VrLatchTest, V3DefaultUnchanged) {
   controller_t b;
   a.configure(mode_e::v2, 40, kPeriod90);
   vr::latch::options_t opt;
-  opt.acquire = true;  // v2 不看
-  opt.have_seed = true;
+  opt.acquire = false;
+  opt.have_seed = true;  // v2 不看
   opt.seed_integral_ppm = -46.0;
   b.configure(mode_e::v2, 40, kPeriod90, opt);
   int64_t na = 0;
@@ -1629,7 +1630,8 @@ TEST(VrLatchTest, V3InvariantsUnderRandomInput) {
       ASSERT_LE(r.phase, vr::latch::kPhaseTrack);
       if (r.burst_us > 0) {
         ++steps_seen;
-        ASSERT_EQ(r.mode, mode_e::v3);
+        // §VR-LATCH-V2-ACQ：v2 開著 acquire 也會一次移到位；legacy 永遠不會
+        ASSERT_NE(r.mode, mode_e::legacy);
         ASSERT_TRUE(opt.acquire);
         ASSERT_TRUE(r.update);
         ASSERT_LE(r.burst_us, 1'500'000u);
@@ -2576,8 +2578,9 @@ TEST(VrLatchTest, SessionLatchV3Interface) {
 
 TEST(VrLatchTest, TlvLayouts) {
   EXPECT_EQ(sizeof(VIPLE_VR_TLV_LATCH), 12u);
-  EXPECT_EQ(sizeof(VIPLE_VR_TLV_HAPTIC), 20u);
-  EXPECT_EQ(sizeof(VIPLE_VR_TLV_CLIENT_TIMING), 36u);
+  // 跟 VipleVr.h 現在的版面一致（兩個結構後來各加了欄位；舊 client 送短的，host 依長度判斷）
+  EXPECT_EQ(sizeof(VIPLE_VR_TLV_HAPTIC), 28u);
+  EXPECT_EQ(sizeof(VIPLE_VR_TLV_CLIENT_TIMING), 44u);
 }
 
 TEST(VrLatchTest, HapticTlvRoundTrip) {

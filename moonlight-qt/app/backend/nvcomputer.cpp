@@ -34,6 +34,56 @@ bool logOnceOnChange(const QString& key, const QString& signature)
     s_LastLoggedSignature.insert(cacheKey, stored);
     return true;
 }
+
+// §REVIEW-1119：排序進行中把模式固定住。比較函式若每次重讀，使用者中途改排序會讓同一次 stable_sort 的順序不一致。
+thread_local const StreamingPreferences::AppSortMode* t_PinnedAppSortMode = nullptr;
+
+struct PinnedAppSortMode
+{
+    explicit PinnedAppSortMode(StreamingPreferences::AppSortMode m)
+        : mode(m)
+    {
+        t_PinnedAppSortMode = &mode;
+    }
+    ~PinnedAppSortMode()
+    {
+        t_PinnedAppSortMode = nullptr;
+    }
+    PinnedAppSortMode(const PinnedAppSortMode&) = delete;
+    PinnedAppSortMode& operator=(const PinnedAppSortMode&) = delete;
+    StreamingPreferences::AppSortMode mode;
+};
+
+// §REVIEW-1119：serverinfo 的位址沒有憑證。主機名稱會讓輪詢發 HTTP、喚醒做 DNS；
+// 迴環、未指定、多播、鏈路本地（含 169.254.169.254）也不收。IPv4-mapped 先還原再判。
+bool isUsableServerLiteral(const QString& text)
+{
+    QHostAddress ha;
+    if (text.size() > 64 || !ha.setAddress(text)) {
+        return false;
+    }
+    // §REVIEW-1119：toIPv4Address() 在「不是 IPv4」和 0.0.0.0 都回 0。不看 ok 的話，
+    // ::ffff:0.0.0.0 不會還原，後面的單一位址比對就擋不到。帶 zone 的字面值換一台機器不能用。
+    if (!ha.scopeId().isEmpty()) {
+        return false;
+    }
+    if (ha.protocol() == QAbstractSocket::IPv6Protocol) {
+        bool isV4 = false;
+        const quint32 v4 = ha.toIPv4Address(&isV4);
+        if (isV4) {
+            ha = QHostAddress(v4);
+        }
+    }
+    if (ha.isLoopback() || ha.isLinkLocal() || ha.isMulticast() ||
+            ha == QHostAddress::Any || ha == QHostAddress::AnyIPv4 ||
+            ha == QHostAddress::AnyIPv6 || ha == QHostAddress::Broadcast ||
+            (ha.protocol() == QAbstractSocket::IPv4Protocol &&
+             ha.isInSubnet(QHostAddress(QStringLiteral("0.0.0.0")), 8))) {
+        return false;
+    }
+    return ha.protocol() == QAbstractSocket::IPv4Protocol ||
+           ha.protocol() == QAbstractSocket::IPv6Protocol;
+}
 }
 
 #define SER_NAME "hostname"
@@ -222,9 +272,17 @@ bool NvComputer::appLessThan(const NvApp& a, const NvApp& b)
         return a.source < b.source;
     }
 
-    StreamingPreferences* prefs = StreamingPreferences::get(nullptr);
-    StreamingPreferences::AppSortMode mode =
-        prefs ? prefs->appSortMode : StreamingPreferences::ASM_RECENT;
+    // §REVIEW-1119：sortAppList 會把模式釘住。沒釘住時（AppModel 的插入排序）仍每次讀，維持原行為。
+    StreamingPreferences::AppSortMode mode = StreamingPreferences::ASM_RECENT;
+    if (t_PinnedAppSortMode != nullptr) {
+        mode = *t_PinnedAppSortMode;
+    }
+    else {
+        StreamingPreferences* prefs = StreamingPreferences::get(nullptr);
+        if (prefs != nullptr) {
+            mode = prefs->appSortMode;
+        }
+    }
 
     auto byName = [](const NvApp& x, const NvApp& y) {
         return x.name.toLower() < y.name.toLower();
@@ -264,6 +322,9 @@ void NvComputer::sortAppList()
 {
     // VipleStream H Phase 2 + 2.2: pinning + configurable sort mode.
     // See appLessThan() for the ordering rules.
+    // §REVIEW-1119：同一次排序只看開始時的模式。中途被改掉會破壞嚴格弱序。
+    StreamingPreferences* prefs = StreamingPreferences::get(nullptr);
+    const PinnedAppSortMode pin(prefs ? prefs->appSortMode : StreamingPreferences::ASM_RECENT);
     std::stable_sort(appList.begin(), appList.end(), appLessThan);
 }
 
@@ -343,6 +404,35 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
 
     // §MP-ADV: 解析伺服器廣告的網路介面清單
     this->serverAdvertisedInterfaces = NvHTTP::getNetworkInterfaceList(serverInfo);
+    {
+        // §REVIEW-1119：位址沒驗過就會進多路徑候選與日誌。不是單播字面值的整筆丟掉。
+        // 名稱與類型截短並拿掉控制字元，避免每次輪詢把換行灌進日誌。
+        auto clipField = [](QString s, int maxLen) {
+            QString out;
+            out.reserve(qMin(s.size(), maxLen));
+            for (const QChar ch : s) {
+                if (out.size() >= maxLen) {
+                    break;
+                }
+                const ushort u = ch.unicode();
+                if (u >= 0x20 && u != 0x7F) {
+                    out.append(ch);
+                }
+            }
+            return out;
+        };
+        QVector<NvNetworkInterface> kept;
+        kept.reserve(this->serverAdvertisedInterfaces.size());
+        for (NvNetworkInterface iface : std::as_const(this->serverAdvertisedInterfaces)) {
+            if (!isUsableServerLiteral(iface.address)) {
+                continue;
+            }
+            iface.name = clipField(iface.name, 64);
+            iface.type = clipField(iface.type, 32);
+            kept.append(iface);
+        }
+        this->serverAdvertisedInterfaces.swap(kept);
+    }
     if (!this->serverAdvertisedInterfaces.isEmpty()) {
         // 內容變化才印（見 logOnceOnChange）
         QString ifaceSig;
@@ -386,11 +476,10 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
         }
     }
 
-    // We can get an IPv4 loopback address if we're using the GS IPv6 Forwarder
-    this->localAddress = NvAddress(NvHTTP::getXmlString(serverInfo, "LocalIP"), http.httpPort());
-    if (this->localAddress.address().startsWith("127.")) {
-        this->localAddress = NvAddress();
-    }
+    // We can get an IPv4 loopback address if we're using the GS IPv6 Forwarder.
+    // §REVIEW-1119：只收單播 IP 字面值（見 isUsableServerLiteral）。127. 前綴擋不到 ::1、主機名稱與鏈路本地。
+    const QString localIp = NvHTTP::getXmlString(serverInfo, "LocalIP");
+    this->localAddress = isUsableServerLiteral(localIp) ? NvAddress(localIp, http.httpPort()) : NvAddress();
 
     QString httpsPort = NvHTTP::getXmlString(serverInfo, "HttpsPort");
     if (httpsPort.isEmpty() || (this->activeHttpsPort = httpsPort.toUShort()) == 0) {
@@ -404,38 +493,38 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
         this->externalPort = http.httpPort();
     }
 
-    QString remoteAddress = NvHTTP::getXmlString(serverInfo, "ExternalIP");
-    if (!remoteAddress.isEmpty()) {
-        this->remoteAddress = NvAddress(remoteAddress, this->externalPort);
-    }
-    else {
-        this->remoteAddress = NvAddress();
-    }
+    const QString remoteIp = NvHTTP::getXmlString(serverInfo, "ExternalIP");
+    this->remoteAddress = isUsableServerLiteral(remoteIp) ? NvAddress(remoteIp, this->externalPort) : NvAddress();
 
     // VipleStream: Parse STUN endpoint from serverInfo
+    // Format: "IP:port" or "[IPv6]:port" (port is UDP control port, but we need HTTP port for API)
     QString stunEndpoint = NvHTTP::getXmlString(serverInfo, "StunEndpoint");
-    if (!stunEndpoint.isEmpty()) {
-        // Format: "IP:port" (port is UDP control port, but we need HTTP port for API)
+    if (!stunEndpoint.isEmpty() && stunEndpoint.size() <= 80) {
         int colonIdx = stunEndpoint.lastIndexOf(':');
         if (colonIdx > 0) {
             QString stunIp = stunEndpoint.left(colonIdx);
-            // Use HTTP port (same as how the server is reached) not the STUN control port
-            // This allows Moonlight to reach the GameStream API via the public IP
-            this->stunAddress = NvAddress(stunIp, http.httpPort());
-            // §REVIEW-1104（使用者決策 B）：冒號後面就是 host 控制埠在公網上的實際埠，打洞要打這個
-            bool portOk = false;
-            const uint punchPort = stunEndpoint.mid(colonIdx + 1).toUInt(&portOk);
-            if (portOk && punchPort > 0 && punchPort < 65536) {
-                this->stunPunchPort = static_cast<uint16_t>(punchPort);
+            if (stunIp.startsWith(QLatin1Char('[')) && stunIp.endsWith(QLatin1Char(']'))) {
+                stunIp = stunIp.mid(1, stunIp.size() - 2);
             }
-        }
-        this->stunNatType = NvHTTP::getXmlString(serverInfo, "StunNatType");
-        // 值變化才印（見 logOnceOnChange）
-        if (logOnceOnChange(QStringLiteral("stun:") + this->uuid,
-                            stunEndpoint + QLatin1Char('|') + this->stunNatType)) {
-            qInfo() << "STUN endpoint:" << stunEndpoint
-                    << "-> HTTP address:" << this->stunAddress.address() << ":" << this->stunAddress.port()
-                    << "NAT:" << this->stunNatType;
+            // §REVIEW-1119：切出來的位址不是單播字面值就整筆不要（含打洞埠）。超長或帶換行的原文也不要印。
+            if (isUsableServerLiteral(stunIp)) {
+                this->stunAddress = NvAddress(stunIp, http.httpPort());
+                // §REVIEW-1104（使用者決策 B）：冒號後面就是 host 控制埠在公網上的實際埠，打洞要打這個
+                bool portOk = false;
+                const uint punchPort = stunEndpoint.mid(colonIdx + 1).toUInt(&portOk);
+                if (portOk && punchPort > 0 && punchPort < 65536) {
+                    this->stunPunchPort = static_cast<uint16_t>(punchPort);
+                }
+                this->stunNatType = NvHTTP::getXmlString(serverInfo, "StunNatType");
+                if (this->stunNatType.size() > 32) {
+                    this->stunNatType.truncate(32);
+                }
+                if (logOnceOnChange(QStringLiteral("stun:") + this->uuid,
+                                    this->stunAddress.address() + QLatin1Char('|') + this->stunNatType)) {
+                    qInfo() << "STUN endpoint:" << this->stunAddress.toString()
+                            << "NAT:" << this->stunNatType;
+                }
+            }
         }
     }
 
@@ -485,17 +574,22 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
 bool NvComputer::wake() const
 {
     QByteArray wolPayload;
+    // §REVIEW-1119：下面送封包時已經放開鎖。name 會被改名與 update() 換掉，解鎖後再讀 QString 是資料競爭。
+    QString hostName;
+    QString manualHost;
 
     {
         QReadLocker readLocker(&lock);
+        hostName = name;
+        manualHost = manualAddress.address();
 
         if (state == NvComputer::CS_ONLINE) {
-            qWarning() << name << "is already online";
+            qWarning() << hostName << "is already online";
             return true;
         }
 
         if (macAddress.size() != 6) {
-            qWarning() << name << "has no MAC address stored";
+            qWarning() << hostName << "has no MAC address stored";
             return false;
         }
 
@@ -526,7 +620,11 @@ bool NvComputer::wake() const
     const auto uniqueHostAddresses = uniqueAddresses();
     for (const NvAddress& addr : uniqueHostAddresses) {
         addressMap.insert(addr.address(), addr.port());
-        basePortSet.insert(addr.port());
+        // §REVIEW-1119：埠 0（存檔預設）或低埠配上動態偏移，會打到 DNS／NTP 那些埠。
+        // 標準 WoL 的 9 走下面的固定清單，不從這裡進。
+        if (addr.port() >= 1024) {
+            basePortSet.insert(addr.port());
+        }
     }
     addressMap.insert("255.255.255.255", 0);
 
@@ -569,7 +667,8 @@ bool NvComputer::wake() const
         if (literalAddress.setAddress(i.key())) {
             addressList.append(literalAddress);
         }
-        else {
+        else if (!manualHost.isEmpty() && i.key() == manualHost) {
+            // §REVIEW-1119：serverinfo 來的名稱不做 DNS。只有使用者自己填的 manualAddress 才解析。
             QHostInfo hostInfo = QHostInfo::fromName(i.key());
             if (hostInfo.error() != QHostInfo::NoError) {
                 qWarning() << "Error resolving" << i.key() << ":" << hostInfo.errorString();
@@ -577,6 +676,9 @@ bool NvComputer::wake() const
             }
 
             addressList.append(hostInfo.addresses());
+        }
+        else {
+            continue;
         }
 
         // Try all IP addresses that this string resolves to
@@ -586,7 +688,7 @@ bool NvComputer::wake() const
             // Send to all static ports
             for (quint16 port : STATIC_WOL_PORTS) {
                 if (sock.writeDatagram(wolPayload, address, port) == wolPayload.size()) {  // REVIEW-1111 (round 2): -1 (failure) is also "true"
-                    qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
+                    qInfo().nospace().noquote() << "Sent WoL packet to " << hostName << " via " << address.toString() << ":" << port;
                     success = true;
                 }
                 else {
@@ -607,10 +709,15 @@ bool NvComputer::wake() const
             // Send to all dynamic ports using the HTTP port offset(s) for this address
             for (quint16 basePort : basePorts) {
                 for (quint16 port : DYNAMIC_WOL_PORTS) {
-                    port = (port - 47989) + basePort;
+                    // §REVIEW-1119：ExternalPort 很大時 uint16 相加會繞回，變成對任意 UDP 埠送喚醒包。
+                    // 很小的 ExternalPort 不用溢位也會打進 1024 以下的埠，一樣跳過。
+                    const int mapped = int(port) - 47989 + int(basePort);
+                    if (basePort < 1024 || mapped < 1024 || mapped > 65535) {
+                        continue;
+                    }
 
-                    if (sock.writeDatagram(wolPayload, address, port) == wolPayload.size()) {  // REVIEW-1111 (round 2): -1 (failure) is also "true"
-                        qInfo().nospace().noquote() << "Sent WoL packet to " << name << " via " << address.toString() << ":" << port;
+                    if (sock.writeDatagram(wolPayload, address, quint16(mapped)) == wolPayload.size()) {  // REVIEW-1111 (round 2): -1 (failure) is also "true"
+                        qInfo().nospace().noquote() << "Sent WoL packet to " << hostName << " via " << address.toString() << ":" << mapped;
                         success = true;
                     }
                     else {
@@ -627,6 +734,8 @@ bool NvComputer::wake() const
 NvComputer::ReachabilityType NvComputer::getActiveAddressReachability(int* mtuOut, QHostAddress* peerOut) const
 {
     NvAddress copyOfActiveAddress;
+    // §REVIEW-1119：探測在放開鎖之後才打 log。uuid 在鎖內先抄出來。
+    QString hostUuid;
 
     if (mtuOut != nullptr) {
         *mtuOut = 0;
@@ -637,6 +746,7 @@ NvComputer::ReachabilityType NvComputer::getActiveAddressReachability(int* mtuOu
 
     {
         QReadLocker readLocker(&lock);
+        hostUuid = uuid;
 
         if (activeAddress.isNull()) {
             return ReachabilityType::RI_UNKNOWN;
@@ -673,7 +783,7 @@ NvComputer::ReachabilityType NvComputer::getActiveAddressReachability(int* mtuOu
                     nicSig += QLatin1Char('|') + QString::number(int(nic.type()))
                             + QLatin1Char('|') + QString::number(nic.maximumTransmissionUnit());
 #endif
-                    const bool logNic = logOnceOnChange(QStringLiteral("reach-nic:") + this->uuid, nicSig);
+                    const bool logNic = logOnceOnChange(QStringLiteral("reach-nic:") + hostUuid, nicSig);
                     if (logNic) {
                         qInfo() << "Found matching interface:" << nic.humanReadableName() << nic.hardwareAddress() << nic.flags();
                     }
@@ -767,22 +877,49 @@ bool NvComputer::updateAppList(QVector<NvApp> newAppList) {
     if (newAppList.size() > 8192) {
         newAppList.resize(8192);
     }
+    // §REVIEW-1119：單筆字串沒有上限，超長名稱會跟著設定檔長大。
+    for (NvApp& app : newAppList) {
+        if (app.name.size() > 256) {
+            app.name.truncate(256);
+        }
+        if (app.source.size() > 64) {
+            app.source.truncate(64);
+        }
+        if (app.steamAppId.size() > 64) {
+            app.steamAppId.truncate(64);
+        }
+        if (app.steamOwners.size() > 1024) {
+            app.steamOwners.truncate(1024);
+        }
+    }
+
+    // §REVIEW-1119：雙層比對在 8192 筆時會在寫鎖裡做數千萬次。用 id 沿用本機的隱藏與直接啟動。
+    QHash<int, quint8> localFlags;
+    localFlags.reserve(appList.size());
+    for (const NvApp& existingApp : std::as_const(appList)) {
+        localFlags.insert(existingApp.id,
+                          static_cast<quint8>((existingApp.hidden ? 1 : 0) | (existingApp.directLaunch ? 2 : 0)));
+    }
+    for (NvApp& newApp : newAppList) {
+        const auto it = localFlags.constFind(newApp.id);
+        if (it == localFlags.constEnd()) {
+            continue;
+        }
+        newApp.hidden = (it.value() & 1) != 0;
+        newApp.directLaunch = (it.value() & 2) != 0;
+    }
+
+    {
+        StreamingPreferences* prefs = StreamingPreferences::get(nullptr);
+        const PinnedAppSortMode pin(prefs ? prefs->appSortMode : StreamingPreferences::ASM_RECENT);
+        std::stable_sort(newAppList.begin(), newAppList.end(), appLessThan);
+    }
+    // §REVIEW-1119：合併、排序之後相同就不要回報變更，避免每一輪輪詢都重寫設定。
     if (appList == newAppList) {
         return false;
     }
 
-    // Propagate client-side attributes to the new app list
-    for (const NvApp& existingApp : std::as_const(appList)) {
-        for (NvApp& newApp : newAppList) {
-            if (existingApp.id == newApp.id) {
-                newApp.hidden = existingApp.hidden;
-                newApp.directLaunch = existingApp.directLaunch;
-            }
-        }
-    }
-
     appList = newAppList;
-    sortAppList();
     return true;
 }
 
@@ -816,9 +953,8 @@ QVector<NvAddress> NvComputer::uniqueAddresses() const
         }
     }
 
-    // We must have at least 1 address
-    Q_ASSERT(!uniqueAddressList.isEmpty());
-
+    // §REVIEW-1119：非單播字面值拒收之後，六個會存檔的位址可以全空（區網位址不在這份清單）。
+    // Debug 在這裡斷言會讓輪詢那台主機時整個行程中止。空清單交給呼叫端跳過。
     return uniqueAddressList;
 }
 

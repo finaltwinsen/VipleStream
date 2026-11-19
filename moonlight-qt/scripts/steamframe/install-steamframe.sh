@@ -55,7 +55,7 @@ if [ "$UNINSTALL" = 1 ]; then
     rm -f "$HOME/.config/systemd/user/viplestream-hotspot.service" "$HOME/.config/systemd/user/viplestream-netmode.service" "$HOME/.config/systemd/user/viplestream-update.service" "$HOME/.config/systemd/user/viplestream-update.timer"
     systemctl --user daemon-reload 2>/dev/null || true
     rm -rf "$DEST/update"
-    rm -f "$LAUNCHER" "$SHIM" "$DEST/update-hotspot.sh" "$DEST/netmode.sh" "$DEST/auto-update.sh" "$DEST/auto-update.log" "$DEST/installed-version" "$DESKTOP"
+    rm -f "$LAUNCHER" "$SHIM" "$DEST/update-hotspot.sh" "$DEST/netmode.sh" "$DEST/auto-update.sh" "$DEST/auto-update.log" "$DEST/installed-version" "$DEST/icon.png" "$DEST/no-steam" "$DESKTOP"
     rmdir "$DEST" 2>/dev/null || true
     flatpak --user uninstall -y "$APP_ID//$BRANCH" 2>/dev/null || true
     say "removed. Delete the VipleStream shortcut from your Steam library by hand."
@@ -81,6 +81,12 @@ say "installing $(basename "$BUNDLE") (the first install also downloads the KDE 
 flatpak --user install -y --noninteractive --reinstall --bundle "$BUNDLE"
 
 mkdir -p "$DEST" "$(dirname "$DESKTOP")"
+# §REVIEW-1119：--no-steam 要留到自動更新。否則 auto-update.sh 重跑安裝腳本時會補上使用者不要的 Steam 捷徑。
+if [ "$ADD_STEAM" = 0 ]; then
+    : > "$DEST/no-steam"
+else
+    rm -f "$DEST/no-steam"
+fi
 
 # bwrap 包裝：只拿掉 --unshare-pid。flatpak 把大部分 bwrap 參數放在 --args <fd>（NUL 分隔），少數直接放在命令列，兩種都處理
 cat > "$SHIM" <<'EOF'
@@ -174,10 +180,16 @@ PYEOF
     # 欄位以 Tab 分隔（2026-10-30 在頭盔上確認），SSID 可能含空白，所以只用 Tab 切
     rest="${line#*\[create$'\t'}"
     IFS=$'\t' read -r ssid key band_tok _unused <<< "$rest"
-    [[ "$line" == *--hidden* ]] && hidden=true
+    # §REVIEW-1119：--hidden 必須是獨立的 Tab 欄位。比對子字串會把 SSID 或金鑰裡的字樣當成旗標。
+    case "$rest" in
+        *$'\t--hidden'|*$'\t--hidden'$'\t'*) hidden=true ;;
+    esac
 
     # 驗證：SSID 1–32 位元組；WPA passphrase 8–63 字元或 64 個十六進位字元
-    if [ -z "${ssid:-}" ] || [ ${#ssid} -gt 32 ] || [ -z "${key:-}" ] || [ ${#key} -lt 8 ] || [ ${#key} -gt 64 ]; then
+    # §REVIEW-1119：${#ssid} 在 UTF-8 語系算的是字數。超過 32 位元組的 SSID，App 會拒收這份憑證。
+    ssid_bytes=$(printf '%s' "$ssid" | wc -c)
+    ssid_bytes=${ssid_bytes//[[:space:]]/}
+    if [ -z "${ssid:-}" ] || [ -z "${ssid_bytes:-}" ] || [ "$ssid_bytes" -gt 32 ] || [ -z "${key:-}" ] || [ ${#key} -lt 8 ] || [ ${#key} -gt 64 ]; then
         rm -f "$TARGET_FILE"
         echo "[VIPLE-VR-HOTSPOT] could not parse the softapmanager create line; hotspot.json removed"
         return 0
@@ -211,7 +223,9 @@ if [ "${1:-}" = "--daemon" ] || [ "${1:-}" = "--follow" ]; then
         while sleep 20; do
             MARK="$TARGET_DIR/hotspot-opened"
             [ -f "$MARK" ] || continue
-            age=$(( $(date +%s) - $(stat -c %Y "$MARK" 2>/dev/null || echo 0) ))
+            # §REVIEW-1119：檢查存在和 stat 中間檔案可能被刪掉。stat 失敗若當成 mtime 0，age 會變成現在的秒數，誤送 teardown。
+            mtime="$(stat -c %Y "$MARK" 2>/dev/null)" || continue
+            age=$(( $(date +%s) - mtime ))
             [ "$age" -ge 120 ] || continue
             HS_MARK="$MARK" python3 - <<'PYEOF' || true
 import os, socket
@@ -336,7 +350,10 @@ if flatpak ps --columns=application 2>/dev/null | grep -qx "$APP_ID"; then
     exit 0
 fi
 log "installing v$loc"
-if bash "$WORK/VipleStream-SteamFrame-Install-$loc.sh" "$WORK/VipleStream-Client-$loc-linux-arm64.flatpak" >> "$LOG" 2>&1; then
+# §REVIEW-1119：安裝時若指定 --no-steam，標記檔還在就原樣傳下去，避免自動更新補上 Steam 捷徑。
+nosteam=
+if [ -f "$DEST/no-steam" ]; then nosteam=--no-steam; fi
+if bash "$WORK/VipleStream-SteamFrame-Install-$loc.sh" $nosteam "$WORK/VipleStream-Client-$loc-linux-arm64.flatpak" >> "$LOG" 2>&1; then
     log "updated to v$loc"
     rm -rf "$WORK"
 else
@@ -387,7 +404,7 @@ applied=normal
 since=0
 loc=""
 err=""
-station=false; wl=""; next_probe=0  # §REVIEW-1118：閒置時沿用上一輪網卡狀態，不要每秒重查
+station=false; wl=""; next_probe=0; reconnecting_until=0  # §REVIEW-1118：閒置時沿用上一輪網卡狀態，不要每秒重查
 
 give_back() {
     nmcli device set wlan0 managed yes >/dev/null 2>&1 || true
@@ -414,8 +431,9 @@ while :; do
     fi
     # §REVIEW-1118：沒在暫停、也沒有新要求時，網卡 5 秒才查一次。要暫停或已暫停則每次都查，不能拿過期 station 去動 wlan0。
     probe_rest=0
-    # 家用 Wi-Fi 還沒連回來時也每圈查：實機測試（2026-11-18）交還後狀態檔的 wlan0 比實際晚了 5 秒才變成 connected。
-    if [ "$want" = adapter-only ] || [ "$applied" = adapter-only ] || [ "$now" -ge "$next_probe" ] || [ "${wl#connected}" = "$wl" ]; then
+    # §REVIEW-1119：交還後 20 秒內每圈查，避免狀態檔的 wlan0 晚 5 秒才變成 connected。
+    # 不能用「只要不是 connected 就每圈查」：平常沒連家用 Wi-Fi 時會把 5 秒快取整段關掉，閒置仍每 3 秒 fork iw／nmcli。
+    if [ "$want" = adapter-only ] || [ "$applied" = adapter-only ] || [ "$now" -ge "$next_probe" ] || [ "$now" -lt "$reconnecting_until" ]; then
     ap="$(ap_iface)"
     station=false
     if [ -n "$ap" ] && iw dev "$ap" station dump 2>/dev/null | grep -q '^Station'; then station=true; fi
@@ -437,8 +455,13 @@ while :; do
             give_back
             applied=normal; err=""
             next_probe=$now  # §REVIEW-1118：剛交還，下一圈就重查 wlan0，不要吃到 5 秒快取
+            reconnecting_until=$((now + 20))
             echo "[VIPLE-VR-NETSEL] home Wi-Fi given back"
         fi
+    elif [ "$want" = normal ]; then
+        # §REVIEW-1119：暫停失敗時 applied 仍是 normal。之後要求回到 normal 進不了上面的分支，err 會一直留在狀態檔。
+        # app 看到非空的 err 會當成這一次暫停失敗。已經停在 normal 就清掉。
+        err=""
     fi
     if [ "$probe_rest" = 1 ]; then
     # 地點：目前連著的家用 Wi-Fi 名稱的雜湊（不存名稱本身）；暫停中沿用上一次的
@@ -449,8 +472,9 @@ while :; do
     fi # §REVIEW-1118：沒進來就沿用上一輪的 loc 與 wlan0，不重跑 iw／nmcli
     # §REVIEW-1118：目錄在就不要每秒 mkdir。狀態改由 shell 組（欄位順序與 json.dumps 相同）；跳脫引號與換行，避免錯誤文字把 JSON 弄壞。
     [ -d "$DIR" ] || mkdir -p -m 0700 "$DIR"
-    e_wl=$wl; e_wl=${e_wl//\\/\\\\}; e_wl=${e_wl//\"/\\\"}; e_wl=${e_wl//$'\n'/ }; e_wl=${e_wl//$'\r'/ }
-    e_err=$err; e_err=${e_err//\\/\\\\}; e_err=${e_err//\"/\\\"}; e_err=${e_err//$'\n'/ }; e_err=${e_err//$'\r'/ }
+    # §REVIEW-1119：Tab 和其他控制字元沒跳脫的話，整份 JSON 會壞，app 會當成服務沒在跑。
+    e_wl=$wl; e_wl=${e_wl//\\/\\\\}; e_wl=${e_wl//\"/\\\"}; e_wl=${e_wl//[[:cntrl:]]/ }
+    e_err=$err; e_err=${e_err//\\/\\\\}; e_err=${e_err//\"/\\\"}; e_err=${e_err//[[:cntrl:]]/ }
     if [ "$station" = true ]; then ap_json=true; else ap_json=false; fi
     printf -v now '%(%s)T' -1 2>/dev/null || now=$(date +%s)  # §REVIEW-1118：nmcli 之後再取時間，t 才不會把查詢耗掉的秒數算進 5 秒新鮮窗口
     printf '{"t": %s, "applied": "%s", "ap_station": %s, "loc": "%s", "wlan0": "%s", "err": "%s"}\n' \
@@ -543,7 +567,7 @@ for path in sys.argv[2:]:
         continue
     for e in root.get("shortcuts", {}).values():
         if isinstance(e, dict) and launcher in e.get("exe", b"") and "appid" in e:
-            print(os.path.dirname(path), e["appid"] & 0xFFFFFFFF)
+            print("%s\t%s" % (os.path.dirname(path), e["appid"] & 0xFFFFFFFF))
 PY
 }
 
@@ -560,12 +584,13 @@ install_art() {
         say "the Steam shortcut is not saved yet: run this script again later to add its library artwork"
         return 0
     fi
-    while read -r cfg appid; do
+    # §REVIEW-1119：路徑改用 Tab 分隔，HOME 含空白才不會切錯欄位。缺圖就跳過那一張，不要讓 set -e 中止整個安裝。
+    while IFS=$'\t' read -r cfg appid; do
         mkdir -p "$cfg/grid"
         cp "$ART/capsule.png" "$cfg/grid/$appid.png"
-        cp "$ART/portrait.png" "$cfg/grid/${appid}p.png"
-        cp "$ART/hero.png" "$cfg/grid/${appid}_hero.png"
-        cp "$ART/logo.png" "$cfg/grid/${appid}_logo.png"
+        [ -f "$ART/portrait.png" ] && cp "$ART/portrait.png" "$cfg/grid/${appid}p.png"
+        [ -f "$ART/hero.png" ] && cp "$ART/hero.png" "$cfg/grid/${appid}_hero.png"
+        [ -f "$ART/logo.png" ] && cp "$ART/logo.png" "$cfg/grid/${appid}_logo.png"
         say "Steam library artwork set (shortcut $appid)"
     done <<< "$ids"
 }

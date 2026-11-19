@@ -435,6 +435,12 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         return false;
     }
     shutdown();  // 重入：清掉前一次
+    // §REVIEW-1119：上一場留下的中斷／GPU 卡住旗標要在這裡清（shutdown 已經照舊旗標收完舊資源）。原本等到 READY 之後才清：
+    // waitForReadyAndBegin 第一圈的 pollEvents 就會因為 m_Lost 還是 true 而失敗，同一個物件永遠起不來；這一次建立失敗時
+    // destroyAll 也會把新的 device 當成卡住的而不釋放。目前三個呼叫端都是新建物件，這是讓標頭寫的「可直接再呼叫」成立。
+    m_Lost.store(false);
+    m_LostByGpu.store(false, std::memory_order_release);
+    m_GpuWedged.store(false, std::memory_order_release);
 
     QString err;
     // [VIPLE-STARTUP]（A44，量測）：log 的時間戳只到秒，開場的時間點自己帶毫秒。t 是 steady clock 的絕對值，和 session.cpp
@@ -1805,7 +1811,13 @@ bool XrContext::ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count,
     if (XR_FAILED(ar)) {
         return false;
     }
-    if (XR_FAILED(xrWaitSwapchainImage(sc, &swi))) {
+    // §REVIEW-1119：XR_TIMEOUT_EXPIRED 是「成功類」的回傳值（XR_FAILED 為 false），但影像還在合成器手上，不可以寫。
+    // 逾時時影像仍是 acquired 狀態，照規格再等；最多再等 2 秒（這裡不是每幀路徑）。
+    XrResult swr = xrWaitSwapchainImage(sc, &swi);
+    for (int tries = 0; swr == XR_TIMEOUT_EXPIRED && tries < 20; tries++) {
+        swr = xrWaitSwapchainImage(sc, &swi);
+    }
+    if (swr != XR_SUCCESS) {
         // §REVIEW-1111：acquire 成功之後就算 wait 失敗也要 release，否則這個 swapchain 每失敗一次就少一張可用的影像
         XrSwapchainImageReleaseInfo failedRi = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         std::lock_guard<std::mutex> lk(m_QueueMutex);
@@ -1937,7 +1949,13 @@ bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, con
     if (XR_FAILED(ar)) {
         return false;
     }
-    if (XR_FAILED(xrWaitSwapchainImage(sc, &swi))) {
+    // §REVIEW-1119：XR_TIMEOUT_EXPIRED 是「成功類」的回傳值（XR_FAILED 為 false），但影像還在合成器手上，不可以寫。
+    // 逾時時影像仍是 acquired 狀態，照規格再等；最多再等 2 秒（這裡不是每幀路徑）。
+    XrResult swr = xrWaitSwapchainImage(sc, &swi);
+    for (int tries = 0; swr == XR_TIMEOUT_EXPIRED && tries < 20; tries++) {
+        swr = xrWaitSwapchainImage(sc, &swi);
+    }
+    if (swr != XR_SUCCESS) {
         // §REVIEW-1111：acquire 成功之後就算 wait 失敗也要 release，否則這個 swapchain 每失敗一次就少一張可用的影像
         XrSwapchainImageReleaseInfo failedRi = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         std::lock_guard<std::mutex> lk(m_QueueMutex);
@@ -2160,6 +2178,30 @@ bool XrContext::maybeLogStats(uint64_t nowNs, bool deferPrint)
     byLap(3);
     return true;
 }
+
+namespace {
+// §REVIEW-1119：網路來的算圖姿態。NaN、Inf，或四元數長度是 0，都不能拿去建 projection。
+// 這裡只比較有限值與長度，不加鎖、不配置、不寫 log。
+bool renderPoseUsable(const float renderRot[4], const float renderPos[3])
+{
+    float rotLen2 = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        if (!std::isfinite(renderRot[i])) {
+            return false;
+        }
+        rotLen2 += renderRot[i] * renderRot[i];
+    }
+    if (!(rotLen2 > 1e-6f) || !std::isfinite(rotLen2)) {
+        return false;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (!std::isfinite(renderPos[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+}  // namespace
 
 void XrContext::frameThreadMain()
 {
@@ -2457,6 +2499,10 @@ void XrContext::frameThreadMain()
                                             xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD)};  // §VR-FOVEA-LAYERS
         XrCompositionLayerQuad fullQ[2] = {xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD),
                                            xrStruct<XrCompositionLayerQuad>(XR_TYPE_COMPOSITION_LAYER_QUAD)};  // §VR-FOVEA-REPROJ
+        // §REVIEW-1119：送出前重建 projection（relatch／synthGuard）時要照同一套做法重建，所以記下這一格用的設定
+        bool pcvrInsetsOn = false;      // 這一格有疊注視點 quad（insetQ 已在 layers[] 裡）
+        bool pcvrFullQuadsOn = false;   // 這一格有疊全視野 quad（fullQ 已在 layers[] 裡）
+        int pcvrLayersMode = 0;
         float playerEyeAspect = 0.0f;  // §VR-PLAYER：這一格每眼的畫面比例（螢幕高度＝寬÷它）
         if (m_Options.player && m_PlayerScreenDirty.exchange(false, std::memory_order_acq_rel)) {
             m_Screen->setGeometry(m_PlayerDistM.load(std::memory_order_relaxed), m_PlayerFovDeg.load(std::memory_order_relaxed));
@@ -2541,7 +2587,9 @@ void XrContext::frameThreadMain()
                 ageMs = nowUs > vcur.lastDrawnUs ? (nowUs - vcur.lastDrawnUs) / 1000ull : 0;
             }
             int ps = 0;
-            if (haveVideo && vcur.hasMeta) {
+            // §REVIEW-1119：姿態不是有限值，或四元數長度是 0，就跟沒有 meta 一樣：不建 projection、不記姿態誤差，
+            // 這一格改走載入畫面。不然 NaN 會送進 xrEndFrame，runtime 可能連續拒收、畫面變黑。
+            if (haveVideo && vcur.hasMeta && renderPoseUsable(vcur.meta.renderRot, vcur.meta.renderPos)) {
                 ps = ageMs < 500 ? 1 : (ageMs < 2000 ? 2 : 3);
             }
             else if (haveVideo) {
@@ -2602,15 +2650,18 @@ void XrContext::frameThreadMain()
                     if (layersMode >= 1) {
                         relocateViewsToDisplay(projViews);
                     }
+                    pcvrLayersMode = layersMode;
                     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
                     if (insets) {
                         if (layersMode >= 2 && buildFullQuads(projViews, fullQ)) {
                             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fullQ[0]);
                             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fullQ[1]);
+                            pcvrFullQuadsOn = true;
                         }
                         if (buildInsetQuads(vcur.subImage.swapchain, vcur.insetRect, vcur.insetOut, projViews, insetQ)) {
                             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[0]);
                             layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&insetQ[1]);
+                            pcvrInsetsOn = true;
                         }
                     }
                     videoLayer = true;
@@ -2956,8 +3007,17 @@ void XrContext::frameThreadMain()
             }
             if (ready && (wantMods != m_KbUploadedMods || !m_KbUploaded)) {
                 const QImage& img = m_KbCache[wantMods];
-                m_KbUploaded = uploadImage(m_KbSwapchain, m_KbImages, m_KbImageCount, img);
-                m_KbUploadedMods = m_KbUploaded ? wantMods : -1;
+                // §REVIEW-1119：換修飾鍵版面時上傳失敗，swapchain 裡原本那一張還在、可以繼續顯示；不要把整塊鍵盤收掉。
+                // m_KbUploadedMods 留著舊值，下一格條件仍成立會再試。第一次（還沒有任何一張）失敗才算沒有。
+                const bool kbHadImage = m_KbUploaded;
+                if (uploadImage(m_KbSwapchain, m_KbImages, m_KbImageCount, img)) {
+                    m_KbUploaded = true;
+                    m_KbUploadedMods = wantMods;
+                }
+                else if (!kbHadImage) {
+                    m_KbUploaded = false;
+                    m_KbUploadedMods = -1;
+                }
                 if (!m_KbUploaded && !m_KbUnsupportedLogged) {
                     m_KbUnsupportedLogged = true;
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] keyboard texture upload failed (format %lld)",
@@ -3172,7 +3232,19 @@ void XrContext::frameThreadMain()
                 }
             }
             if (!img.isNull() && img.width() == kSubW && img.height() == kSubH) {
-                m_SubUploaded = uploadImage(m_SubSwapchain, m_SubImages, m_SubImageCount, img) || m_SubUploaded;
+                // §REVIEW-1119：上傳失敗（指令緩衝區還在忙、swapchain 等不到）時原本就把這次更新丟了，畫面停在上一句字幕。
+                // 把 dirty 設回去下一格再試；期間有更新的內容進來也沒關係，下一格拿到的就是最新的。
+                if (uploadImage(m_SubSwapchain, m_SubImages, m_SubImageCount, img)) {
+                    m_SubUploaded = true;
+                    m_SubUploadRetries = 0;
+                }
+                else if (++m_SubUploadRetries <= 30) {
+                    std::lock_guard<std::mutex> lk(m_SubMutex);
+                    m_SubDirty = true;
+                }
+                else {
+                    m_SubUploadRetries = 0;
+                }
             }
             if (m_SubUploaded && layerCount < 6) {
                 XrPosef sp = m_Screen->quadPose();
@@ -3231,7 +3303,18 @@ void XrContext::frameThreadMain()
                 }
             }
             if (!img.isNull() && img.width() == kPanelW && img.height() == kPanelH) {
-                m_PanelUploaded = uploadImage(m_PanelSwapchain, m_PanelImages, m_PanelImageCount, img) || m_PanelUploaded;
+                // §REVIEW-1119：同字幕，失敗時下一格再試
+                if (uploadImage(m_PanelSwapchain, m_PanelImages, m_PanelImageCount, img)) {
+                    m_PanelUploaded = true;
+                    m_PanelUploadRetries = 0;
+                }
+                else if (++m_PanelUploadRetries <= 30) {
+                    std::lock_guard<std::mutex> lk(m_PanelMutex);
+                    m_PanelDirty = true;
+                }
+                else {
+                    m_PanelUploadRetries = 0;
+                }
             }
             if (m_PanelUploaded && layerCount < 7) {
                 XrPosef sp = m_Screen->quadPose();
@@ -3534,6 +3617,17 @@ void XrContext::frameThreadMain()
                     const VIPLE_VR_FRAME_META& gm = haveNew ? v2.meta : vcur.meta;
                     if (buildProjection(vcur.subImage.swapchain, top, gm.renderRot, gm.renderPos, gm.echoSampleId, &proj, projViews)) {
                         m_PcvrTiming.synthGuard10s++;
+                        // §REVIEW-1119：重建後眼睛位置回到算圖當時的值，要再換成顯示時的（同上面第一次建立）；
+                        // 全視野 quad 跟著新的 projection 重算。注視點 quad 的裁切屬於原本那張影像，這裡沒換影像，只更新姿態。
+                        if (pcvrLayersMode >= 1) {
+                            relocateViewsToDisplay(projViews);
+                        }
+                        if (pcvrFullQuadsOn) {
+                            buildFullQuads(projViews, fullQ);
+                        }
+                        if (pcvrInsetsOn) {
+                            buildInsetQuads(vcur.subImage.swapchain, vcur.insetRect, vcur.insetOut, projViews, insetQ);
+                        }
                     }
                     lk.lock();
                 }
@@ -3542,11 +3636,24 @@ void XrContext::frameThreadMain()
                 if (relatchOn) {
                     lk.unlock();
                     XrVideo::Current v2;
+                    // §REVIEW-1119：注視點 quad 已經在 layers[] 裡時，新的那一張也要有注視點那一塊才換（沒有的話 quad 會貼到
+                    // 不存在的區域）；換了之後 projection 的眼睛位置、全視野 quad、注視點 quad 的裁切與姿態都照新的那一張重算，
+                    // 否則周邊是新影像、注視點那一塊還是舊影像的裁切位置與姿態。
                     if (m_Video->peek(&v2) && v2.seq != vcur.seq && v2.hasMeta && v2.generation == vcur.generation &&
+                        (!pcvrInsetsOn || v2.hasInset) &&
                         buildProjection(v2.subImage.swapchain, v2.subImage.imageRect, v2.meta.renderRot, v2.meta.renderPos,
                                         v2.meta.echoSampleId, &proj, projViews)) {
+                        if (pcvrLayersMode >= 1) {
+                            relocateViewsToDisplay(projViews);
+                        }
+                        if (pcvrFullQuadsOn) {
+                            buildFullQuads(projViews, fullQ);
+                        }
+                        if (pcvrInsetsOn) {
+                            buildInsetQuads(v2.subImage.swapchain, v2.insetRect, v2.insetOut, projViews, insetQ);
+                        }
                         pcvrTimingRelatch(v2.seq, v2.lastDrawnUs, v2.renderUs, v2.hasMeta, v2.meta.echoSampleId,
-                                          v2.meta.renderRot, v2.meta.renderPos, steadyNowNs(), periodUs);
+                                          v2.meta.renderRot, v2.meta.renderPos, steadyNowNs(), periodUs, v2.fbSeq, v2.fbDrawnUs);
                         vcur = v2;
                         videoGen = v2.generation;
                         fixed = true;
@@ -3715,7 +3822,13 @@ void XrContext::frameThreadMain()
             }
         }
     }
-    m_FrameThreadRunning.store(false, std::memory_order_release);
+    // §REVIEW-1119：waitViews／waitRefreshHz 在 m_StatsMutex 裡等這面旗標。這裡若沒拿同一把鎖就改值、也不 notify，
+    // 等的人可能已經看過舊值，接著要睡滿 timeout（呼叫端是 3 秒）才返回。
+    {
+        std::lock_guard<std::mutex> lk(m_StatsMutex);
+        m_FrameThreadRunning.store(false, std::memory_order_release);
+        m_ViewsCv.notify_all();
+    }
 }
 
 // ── M4a R1（PCVR）──
@@ -3884,7 +3997,7 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs)
 // 真的那一張＋一個週期（它的內容來自那一張，外插補回來的部分不算）。所以拿 age 比補幀開／關會低估補幀。
 void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
                                   uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs,
-                                  uint64_t fbSeq, uint64_t fbDrawnUs)
+                                  uint64_t fbSeq, uint64_t fbDrawnUs, bool feedRate)
 {
     auto& t = m_PcvrTiming;
     t.lastAgePushed = false;
@@ -3892,7 +4005,9 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     if (seq == 0) {
         return;
     }
-    pcvrRateSlot(seq != t.lastLatchedSeq, latchNs / 1000ull, periodUs);  // §VR-RATE-AUTO：每個顯示格餵一次
+    if (feedRate) {
+        pcvrRateSlot(seq != t.lastLatchedSeq, latchNs / 1000ull, periodUs);  // §VR-RATE-AUTO：每個顯示格餵一次
+    }
     if (seq == t.lastLatchedSeq) {
         t.repeat10s++;  // 同一張影像重送（沒有新幀）：只計數
         t.lastWasRepeat = true;
@@ -3976,7 +4091,8 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
 // 再照「這一格挑到新的那一張」記一次（參數都是新的那一張）。改的只有計數：原本那一張已經記進 MTP／slack／render
 // 統計與 pcvrPoseErr 的樣本不拿掉，10 Hz 的 LATCH 在這之前若剛好輪到送出，帶的也是原本那一張（每 10 s 不到兩次）。
 void XrContext::pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta, uint32_t echoSampleId,
-                                  const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs)
+                                  const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs,
+                                  uint64_t fbSeq, uint64_t fbDrawnUs)
 {
     auto& t = m_PcvrTiming;
     // pcvrTimingTick 排在 pcvrTimingOnLatch 與這裡之間：10 s 視窗若剛好在這一格印出並歸零，原本那一筆已經印在上一個
@@ -4000,12 +4116,20 @@ void XrContext::pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
         if (t.presentedTotal > 0) {
             t.presentedTotal--;
         }
+        // §REVIEW-1119：§VR-NETSEL 的新影像計數也要扣回來，下面的 pcvrTimingOnLatch 會替新的那一張再加一次
+        if (m_PcvrNewFrames.load(std::memory_order_relaxed) > 0) {
+            m_PcvrNewFrames.fetch_sub(1, std::memory_order_relaxed);
+        }
     }
+    // §REVIEW-1119：自動半速（AutoRate）每個顯示格只能餵一次。這一格原本已經以「新影像」餵過就不再餵；原本是「重複」的
+    // 才補餵一次新影像（那一筆重複收不回來，但至少連續重複的計數會在這裡結束）。
+    const bool feedRate = t.lastWasRepeat;
     if (t.lastAgePushed && !m_LatchDiag.age10s.empty()) {
         m_LatchDiag.age10s.pop_back();  // §VR-LDIAG：這一格的內容年齡改記新的那一張
     }
     // 序號剛好是上一張 +1：算成新影像，不會再加 skip
-    pcvrTimingOnLatch(seq, lastDrawnUs, renderUs, hasMeta, echoSampleId, nowNs, periodUs);
+    // §REVIEW-1119：fbSeq／fbDrawnUs 也要帶新的那一張的；少了它們，開緩衝時 lastFbSeq 會被改回顯示的那一張，下一格的 LATCH slack 就量錯
+    pcvrTimingOnLatch(seq, lastDrawnUs, renderUs, hasMeta, echoSampleId, nowNs, periodUs, fbSeq, fbDrawnUs, feedRate);
     if (rolled && t.new10s > 0) {
         t.new10s--;
     }
@@ -4859,7 +4983,9 @@ void XrContext::pcvrAfterWaitFrame(XrTime predictedDisplayTime, uint64_t periodN
                                 gridOk ? static_cast<uint32_t>(periodNs / 1000ull) : 0u);
     }
 #endif
-    if (m_Options.pcvrTrackLock && m_TimeConv != nullptr && periodNs > 0) {
+    // §REVIEW-1119：aheadExact 為 false 時，上面的時刻只是「返回後約兩個週期」的估計，不在顯示格點上。
+    // 影像路徑已經用 gridOk 排除；這裡漏掉的話，追蹤鎖相會跟著估計值走。
+    if (m_Options.pcvrTrackLock && aheadExact && m_TimeConv != nullptr && periodNs > 0) {
         // §VR-TRACK-LOCK：預測的顯示時刻是 runtime 排好的等間隔格點，拿它當追蹤樣本的節拍
         VrTrackingSender::setDisplayGrid(m_PcvrTiming.predictedDisplayClientNs, periodNs);
     }
@@ -5293,6 +5419,10 @@ bool XrContext::buildProjection(XrSwapchain swapchain, const XrRect2Di& rect, co
                                 const float renderPos[3], uint32_t echoSampleId, XrCompositionLayerProjection* proj,
                                 XrCompositionLayerProjectionView views[2])
 {
+    // §REVIEW-1119：relatch／synthGuard 會帶另一張的 meta 進來，沒經過上面那個判斷。不合格就不要寫 views。
+    if (!renderPoseUsable(renderRot, renderPos)) {
+        return false;
+    }
     XrPosef eye[2];
     XrFovf fov[2];
     {

@@ -204,6 +204,8 @@ private:
     bool m_ChildIsPlayer = false; // 目前（或剛結束）的子行程是影片模式（結束碼的意思不同）
     bool m_InProcessPlayer = false; // §VR-SHELL：影片模式正在 VR 介面的 session 裡播（沒有子行程）
     bool m_Launching = false;       // §VR-SHELL-LAUNCHING
+    // §REVIEW-1119：start() 失敗時 errorOccurred(FailedToStart) 是同步進來的。用來讓 startChild 回 false。
+    bool m_StartFailed = false;
     QString m_LaunchingApp;
 
     // §VR-PREFLIGHT：檢查通過之後要開的那一場

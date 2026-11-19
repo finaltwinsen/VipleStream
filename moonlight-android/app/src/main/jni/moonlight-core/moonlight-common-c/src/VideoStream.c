@@ -335,6 +335,9 @@ void initializeVideoStream(void) {
     rrDelayedAny = 0;
     rrDelayedReleaseMs = 0;
     rrRulesNow = 0;
+    // §REVIEW-1119：分頻在這裡歸 1，不要等接收執行緒開頭。控制串流先啟動，
+    // S2C_RATE 可能在 VideoReceiveThreadProc 跑到賦值之前就寫入，接著被蓋回 1。
+    vrStreamDiv = 1;
 
 #ifdef VIPLE_MPQUIC
     // §Q-VIDEO-RING: 防禦性清空 — 與 AudioStream 同理。
@@ -416,6 +419,10 @@ static void VideoReceiveThreadProc(void* context) {
     // 改為 thread 區域變數，每個接收執行緒（= 每場串流）自然歸零。
     uint64_t prevFireLastFrameUs = 0;
     uint32_t consecutiveIneffectiveFires = 0;
+    // §REVIEW-1119：這兩個若是函式內 static，上一場剛觸發過 watchdog 時，
+    // 1 秒內重連會被 nowUs - lastWatchdogFireUs > 1000000 多擋一次。
+    uint64_t lastWatchdogCheckUs = 0;
+    uint64_t lastWatchdogFireUs = 0;
     // §M01-D：-101 診斷，加密視訊在進 RtpVideoQueue 之前就會丟掉的封包
     // （只計數、不改行為；每個接收執行緒 = 每場串流自然歸零）。
     // 加密時落後封包在解密前就被丟，佇列的 far 組一律是 0，要看這兩個數。
@@ -423,6 +430,10 @@ static void VideoReceiveThreadProc(void* context) {
     uint32_t diagPreDecryptStalePkts = 0;    // 解密前依幀號判落後而丟棄（含正常尾端 parity）
     uint32_t diagPreDecryptFarStalePkts = 0; // 同上，lag > RTPV_DIAG_FAR_STALE_LAG
 #endif
+
+    // §REVIEW-1119：放在失敗分支裡當 static 會跨場次留次數。新場前幾次解密失敗
+    // 不印（只在 2 的冪次才印）。每個接收執行緒歸零。
+    unsigned int decryptFailLogged = 0;
 
     // §VR-MULTILINK：連線在影像串流啟動前就建好了（vrmlPrepare），這裡只看數量；0＝單一路徑，以下行為不變
     const int mlLinks = vrmlLinkCount();
@@ -441,7 +452,6 @@ static void VideoReceiveThreadProc(void* context) {
     uint32_t mlFramePeriodUs = mlBasePeriodUs;
     // §VR-RATE-AUTO：分頻改了就重算（半速時等待上限從約 8 ms 放寬到 14 ms，遠端時救回的幀多很多）
     uint32_t mlDivApplied = 0;
-    vrStreamDiv = 1;
     int rxLink = -1;
     // §VR-REPAIR-RTT：每場串流重來
     memset(&rr, 0, sizeof(rr));
@@ -716,7 +726,6 @@ static void VideoReceiveThreadProc(void* context) {
         // 上限壓到 ~2 秒：重置 RTP 佇列 + 重新對齊 depacketizer 幀號 +
         // 要求 IDR。誤觸（server 出 IDR 慢於 2s）僅多要一張 IDR。
         if (receivedFullFrame) {
-            static uint64_t lastWatchdogCheckUs, lastWatchdogFireUs;
             const uint64_t nowUs = pktNowUs;  // §PERF-1113：共用這個封包已經讀過的時刻
             if (nowUs - lastWatchdogCheckUs > 250000) {
                 lastWatchdogCheckUs = nowUs;
@@ -872,7 +881,6 @@ static void VideoReceiveThreadProc(void* context) {
 #endif
                 {
                     // §REVIEW-1111（第二輪）：每一包印一行會把接收執行緒綁在 log 上；第 1、2、4、8… 次才印
-                    static unsigned int decryptFailLogged;
                     decryptFailLogged++;
                     if ((decryptFailLogged & (decryptFailLogged - 1)) == 0) {
                         Limelog("Failed to decrypt video packet! (%u so far)\n", decryptFailLogged);
@@ -908,7 +916,9 @@ static void VideoReceiveThreadProc(void* context) {
             VRRR_OUT out;
             const int feat = mlLinks > 0 ? vrmlFeatures() : 0;
             {
-                const uint32_t div = vrStreamDiv >= 1 && vrStreamDiv <= 4 ? vrStreamDiv : 1;
+                // §REVIEW-1119：volatile 連讀三次，中間被改寫會配出這一包不存在的分頻。先讀一次。
+                const uint32_t divNow = vrStreamDiv;
+                const uint32_t div = divNow >= 1 && divNow <= 4 ? divNow : 1;
                 if (div != mlDivApplied) {
                     mlDivApplied = div;
                     mlFramePeriodUs = mlBasePeriodUs * div;
@@ -1066,6 +1076,19 @@ void stopVideoStream(void) {
     VideoCallbacks.cleanup();
 }
 
+#ifdef VIPLE_MPQUIC
+// §REVIEW-1119：startVideoStream 註冊視訊回呼之後失敗時，stage 還沒到
+// STAGE_VIDEO_STREAM_START，LiStopConnection 不會走 stopVideoStream。
+// QuicIO 會繼續把封包寫進 ring，直到更後面的 quicTransportCleanup。
+// 只在接收執行緒已結束（或根本沒建起來）之後呼叫：useQuicVideo 不是原子變數。
+static void quicVideoDropRecvCallback(void) {
+    if (useQuicVideo) {
+        quicSetRecvCallbackForFlow(QUIC_FLOW_VIDEO, NULL, NULL);
+        useQuicVideo = false;
+    }
+}
+#endif
+
 // Start the video stream
 int startVideoStream(void* rendererContext, int drFlags) {
     int err;
@@ -1105,6 +1128,9 @@ int startVideoStream(void* rendererContext, int drFlags) {
                               RTP_RECV_PACKETS_BUFFERED * (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE),
                               SOCK_QOS_TYPE_VIDEO);
     if (rtpSocket == INVALID_SOCKET) {
+#ifdef VIPLE_MPQUIC
+        quicVideoDropRecvCallback();
+#endif
         VideoCallbacks.cleanup();
         return LastSocketError();
     }
@@ -1116,6 +1142,9 @@ int startVideoStream(void* rendererContext, int drFlags) {
         VideoCallbacks.stop();
         closeSocket(rtpSocket);
         rtpSocket = INVALID_SOCKET;
+#ifdef VIPLE_MPQUIC
+        quicVideoDropRecvCallback();
+#endif
         VideoCallbacks.cleanup();
         return err;
     }
@@ -1128,6 +1157,9 @@ int startVideoStream(void* rendererContext, int drFlags) {
             PltJoinThread(&receiveThread);
             closeSocket(rtpSocket);
             rtpSocket = INVALID_SOCKET;
+#ifdef VIPLE_MPQUIC
+            quicVideoDropRecvCallback();
+#endif
             VideoCallbacks.cleanup();
             return err;
         }
@@ -1150,6 +1182,9 @@ int startVideoStream(void* rendererContext, int drFlags) {
             }
             closeSocket(rtpSocket);
             rtpSocket = INVALID_SOCKET;
+#ifdef VIPLE_MPQUIC
+            quicVideoDropRecvCallback();
+#endif
             VideoCallbacks.cleanup();
             return LastSocketError();
         }
@@ -1175,6 +1210,9 @@ int startVideoStream(void* rendererContext, int drFlags) {
             closeSocket(firstFrameSocket);
             firstFrameSocket = INVALID_SOCKET;
         }
+#ifdef VIPLE_MPQUIC
+        quicVideoDropRecvCallback();
+#endif
         VideoCallbacks.cleanup();
         return err;
     }

@@ -456,7 +456,8 @@ static void configureVrThrottle(ENetPeer* p);
 // ReportVrLoss）的閘門。VrFlags 在 LiStartConnection 一開頭就設、在
 // LiStopConnection 最後才清，比 enetMutex 與加密內容的生命週期寬：XR
 // 執行緒每幀都在呼叫，重連建線那幾秒或收尾時會用到已刪除的 mutex 與
-// 已釋放的 encryptionCtx。只在 initializeControlStream 建好之後打開，
+// 已釋放的 encryptionCtx。§REVIEW-1119：閘門改到 startControlStream 成功才開。
+// initialize 之後 ENet 還在無鎖建立與失敗銷毀，這時放行會讓 XR 執行緒跟銷毀搶 peer。
 // LiStopConnection 一進來就關。
 static volatile bool vrApiReady = false;
 
@@ -533,7 +534,6 @@ int initializeControlStream(void) {
     serverAudioStatus = -1;
     serverAudioStatusSeq = 0;
 
-    vrApiReady = true;  // §VR-API-GATE
     return 0;
 }
 
@@ -551,6 +551,16 @@ static void freeBasicLbqList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
 void destroyControlStream(void) {
     LC_ASSERT(stopping);
     vrApiReady = false;  // §VR-API-GATE
+#ifdef VIPLE_MPQUIC
+    // §REVIEW-1119：startControlStream 失敗不會走 stopControlStream。快照留著的話，
+    // 銷毀之後 LiGetEstimatedRttInfo 仍回上一場的 RTT。
+    enetRttValid = 0;
+#endif
+    // §REVIEW-1119：packetTypes 斷線後仍指著靜態表。LiRequestFpsChange 只看它，
+    // 會在下面刪掉 enetMutex 之後上鎖。先清掉，這個公開 API 直接返回。
+    packetTypes = NULL;
+    payloadLengths = NULL;
+    preconstructedPayloads = NULL;
     // §REVIEW-1118B：encryptControlMessage 只在已持 enetMutex 時使用 encryptionCtx。
     // 這裡先拿同一把鎖再銷毀，銷毀後立刻清成 NULL，後來的送出看到 NULL 就失敗，
     // 不會拿到已釋放的 context。mutex 是本函式末尾才刪，這個時間點還在。
@@ -644,13 +654,17 @@ static bool sendMessageAndForget(short ptype, short paylen, const void* payload,
 
 // VipleStream: Request dynamic FPS change from server
 void LiRequestFpsChange(int newFps) {
-    if (packetTypes == NULL || packetTypes[IDX_FPS_CHANGE] == -1) {
+    // §REVIEW-1119：packetTypes 不是 volatile，條件與送出各讀一次。銷毀把指標清成
+    // NULL 的中間，第二次會解參考空指標。先抄到區域變數。vrApiReady 在開流成功前
+    // 與 LiStopConnection 一進來就是關的，擋掉那兩段還去碰尚未持鎖的 ENet。
+    short* types = packetTypes;
+    if (!vrApiReady || stopping || types == NULL || types[IDX_FPS_CHANGE] == -1) {
         Limelog("FPS change not supported on this protocol version\n");
         return;
     }
 
     uint32_t payload = LE32((uint32_t)newFps);
-    if (!sendMessageAndForget(packetTypes[IDX_FPS_CHANGE],
+    if (!sendMessageAndForget(types[IDX_FPS_CHANGE],
                               sizeof(payload),
                               &payload,
                               CTRL_CHANNEL_GENERIC,
@@ -739,6 +753,8 @@ static struct {
 // 分支可能持鎖 service 將近 1 秒），而送 LOSS 要加密＋enet_host_service。
 static PLT_THREAD vrSendThread;
 static bool vrSendThreadStarted;
+// §REVIEW-1119：lossStats 正在代跑 vrSendTick。跟 vrSendThreadStarted 同一把 vrRecMutex。
+static int vrSendFallbackBusy;
 // §PERF-1113：VrSend 在這個條件變數上等（配 vrRecMutex）；登記 LOSS 或結束串流時 signal
 static PLT_COND vrSendCond;
 // §ABR-ADAPT：下一則 FRAME_FEEDBACK 最早什麼時候送（隔 100 ms；VrSend 的等待逾時會對到這個時間）
@@ -761,6 +777,7 @@ static void vrRecoveryInit(void) {
     memset(&vrRec, 0, sizeof(vrRec));
     vrSessionAtInit = (VrFlags & VIPLE_VR_SF_ENABLED) != 0;
     vrSendThreadStarted = false;
+    vrSendFallbackBusy = 0;
     vrFbDueMs = 0;
     vrFbPendingLen = 0;
     vrTrackingConsecutiveFails = 0;
@@ -791,11 +808,11 @@ static uint32_t vrGetEnetRttMs(void) {
 #ifdef VIPLE_MPQUIC
     // §REVIEW-1118B：degraded 時每拍鎖 enetMutex，會被斷線 service（最長約 1.1 秒）卡住，
     // LOSS 重送整段停住。快照是控制接收執行緒在持鎖 service 之後寫的，有快照就直接讀。
-    // 還沒有快照（斷線後已清掉）才走下面的鎖，重送間隔公式不改。
-    if (enetRttValid) {
-        return enetRttSnap;
-    }
-#endif
+    // §REVIEW-1119：沒有快照就是 peer 已斷或正在拆（物件可能還在）。再去鎖會跟
+    // disconnectPending 裡最長 1 秒的 service 互搶，VrSend 整段停住。這個窗口 RTT 當 0
+    //（重送間隔落到 20 ms 下限），跟 LiGetEstimatedRttInfo 一樣不碰 peer。
+    return enetRttValid ? enetRttSnap : 0;
+#else
     uint32_t rtt = 0;
     PltLockMutex(&enetMutex);
     if (peer != NULL) {
@@ -803,6 +820,7 @@ static uint32_t vrGetEnetRttMs(void) {
     }
     PltUnlockMutex(&enetMutex);
     return rtt;
+#endif
 }
 
 // 送一份 LOSS（只能在 VrSend 執行緒或退回路徑呼叫：會持 enetMutex）
@@ -947,6 +965,10 @@ static VR_RECOVERY_ACTION vrEvaluateTimersLocked(uint64_t now, uint32_t rttMs,
         vrRec.idrRequestedMs = now;
         vrRec.idrFallbacks++;
         vrRec.totalIdrFallbacks++;
+        // §REVIEW-1119：改走 IDR 後若還送排隊的 LOSS，server 會把上一波重開。
+        vrRec.lossSendPending = false;
+        vrRec.twin[0].pending = false;
+        vrRec.twin[1].pending = false;
         return VR_ACTION_REQUEST_IDR;
     }
 
@@ -1054,7 +1076,9 @@ static void vrRecoveryReportLoss(uint32_t firstLost, uint32_t lastLost, uint8_t 
             vrRec.pendingSinceMs = now;
             vrRec.resendCount = 0;
         }
-        send = !vrRec.idrRequested;
+        // §REVIEW-1119：這一波的起點已經晚於新的掉幀，wave 涵蓋得到。再送 LOSS 會讓 server 重開一波，
+        // refreshSeen 仍是 true，新的 REFRESH_START 會被當成過期丟掉，然後空等 VR_WAVE_TIMEOUT_MS。
+        send = !vrRec.idrRequested && !vrRec.refreshSeen;
     }
     // 其餘情況：範圍已涵蓋，交給逾時重送
     if (send) {
@@ -1100,6 +1124,15 @@ static void vrRecoveryOnRefreshStart(uint32_t startFrame, uint8_t frameCnt) {
         vrRec.waveStart = startFrame;
         vrRec.waveEnd = startFrame + (frameCnt ? frameCnt : 1) - 1;
         vrRec.refreshSeenMs = now;
+        // §REVIEW-1119：這一波已涵蓋 lastLost。還沒送的 LOSS 照送會讓 server 重開 wave，
+        // 新的 REFRESH_START 又被當成過期丟掉。比 startFrame 更晚的 twin 留著。
+        vrRec.lossSendPending = false;
+        if (vrRec.twin[0].pending && isBefore32(vrRec.twin[0].lastLost, startFrame)) {
+            vrRec.twin[0].pending = false;
+        }
+        if (vrRec.twin[1].pending && isBefore32(vrRec.twin[1].lastLost, startFrame)) {
+            vrRec.twin[1].pending = false;
+        }
         vrRec.refreshRx++;
         vrRec.totalRefreshRx++;
         vrRec.rttSamples++;
@@ -1144,6 +1177,10 @@ void vrRecoveryOnFrame(uint32_t frameIndex, uint8_t vrFrameFlags, bool isIdr) {
             vrRec.degraded = false;
             vrRec.refreshSeen = false;
             vrRec.idrRequested = false;
+            // §REVIEW-1119：已經恢復。留下的 LOSS 會讓 server 再開一波。
+            vrRec.lossSendPending = false;
+            vrRec.twin[0].pending = false;
+            vrRec.twin[1].pending = false;
             vrRec.recovered++;
             vrRec.totalRecovered++;
             vrRec.recoverSamples++;
@@ -1352,6 +1389,28 @@ static int vrSendTick(void) {
         waitMs = VR_SEND_TICK_MS;
     }
     return waitMs;
+}
+
+// §REVIEW-1119：lossStats 只在 VrSend 還沒起來時代跑。旗標與「正在代跑」要同一把鎖，
+// 否則 VrSend 剛起來時兩條執行緒會一起改沒有鎖的 vrFbPending*。
+static void vrSendTickIfNoSender(void) {
+    int run = 0;
+
+    if ((VrFlags & VIPLE_VR_SF_ENABLED) == 0) {
+        return;
+    }
+    PltLockMutex(&vrRecMutex);
+    if (!vrSendThreadStarted) {
+        vrSendFallbackBusy = 1;
+        run = 1;
+    }
+    PltUnlockMutex(&vrRecMutex);
+    if (run) {
+        vrSendTick();
+        PltLockMutex(&vrRecMutex);
+        vrSendFallbackBusy = 0;
+        PltUnlockMutex(&vrRecMutex);
+    }
 }
 
 static void vrSendThreadFunc(void* context) {
@@ -1746,8 +1805,9 @@ static bool decryptControlMessageToV1(PNVCTL_ENCRYPTED_PACKET_HEADER encPacket, 
     LC_ASSERT(encPacket->encryptedHeaderType == 0x0001);
 
     // Make sure the host isn't lying to us about the packet length
+    // §REVIEW-1119：長度來自尚未驗證的網路封包。Android 出貨 NDK_DEBUG=1，
+    // 這裡的 LC_ASSERT 會在下面的比較之前直接中止程序。
     int expectedEncLength = encPacket->length + sizeof(encPacket->encryptedHeaderType) + sizeof(encPacket->length);
-    LC_ASSERT(encPacketLength == expectedEncLength);
     if (encPacketLength < expectedEncLength) {
         Limelog("Length exceeds packet boundary (needed %d, got %d)\n", expectedEncLength, encPacketLength);
         return false;
@@ -1917,6 +1977,10 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
     }
     else {
         PNVCTL_ENET_PACKET_HEADER_V1 packet;
+        // §REVIEW-1119：加密分支已擋負長度。這裡負的 short 轉成 size_t 會把封包配太小，memcpy 寫過界。
+        if (paylen < 0) {
+            return false;
+        }
         enetPacket = enet_packet_create(NULL, sizeof(*packet) + paylen,
                                         flags);
         if (enetPacket == NULL) {
@@ -2088,6 +2152,16 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         enetPacket->freeCallback = NULL;
     }
 
+#ifdef VIPLE_MPQUIC
+    // §REVIEW-1119：peer／client 只在 enetMutex 裡改。解鎖之後再讀是資料競爭，
+    // 啟動期可能把已經拆掉的連線看成送成功。
+    bool startupFailed = false;
+    if (!controlStreamStarted) {
+        startupFailed = startupControlFailed || enetReconnectPending || enetReconnecting ||
+                        disconnectPending || peer == NULL || client == NULL;
+    }
+#endif
+
     PltUnlockMutex(&enetMutex);
 
     if (err < 0) {
@@ -2118,9 +2192,7 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
 #ifdef VIPLE_MPQUIC
     // §REVIEW-1118B：封包可能已經交給 ENet（由 teardown 釋放，這裡不銷毀）。
     // 啟動期只要重連已開始、連線已拆、或接收執行緒已走上斷線收尾，就不能回成功。
-    if (!controlStreamStarted &&
-            (startupControlFailed || enetReconnectPending || enetReconnecting ||
-             disconnectPending || peer == NULL || client == NULL)) {
+    if (startupFailed) {
         static int preStartDropLog;
         if (preStartDropLog < 3) {
             preStartDropLog++;
@@ -2137,6 +2209,11 @@ static bool sendMessageTcp(short ptype, short paylen, const void* payload) {
     bool ret;
 
     LC_ASSERT(AppVersionQuad[0] < 5);
+
+    // §REVIEW-1119：加密路徑已擋負的 paylen。這裡 short 轉成 size_t 會把 malloc 配太小，memcpy 寫過界。
+    if (paylen < 0) {
+        return false;
+    }
 
     packet = malloc(sizeof(*packet) + paylen);
     if (packet == NULL) {
@@ -2431,10 +2508,14 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
     else if (packetTypes[IDX_SC_HID_FEATURE_REQ] != -1 &&
              ctlHdr->type == packetTypes[IDX_SC_HID_FEATURE_REQ]) {
         // §SC-HID Phase 2C: host relays a Steam feature op (op + seq + Steam's query)
-        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.reportId);
-        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.op);
-        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.seq);
-        BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.queryLen);
+        // §REVIEW-1119：截斷封包的 BbGet8 失敗時不要照樣排進 scHidFeatureRequest。其他類型在 §REVIEW-1118 已經是讀不齊就丟。
+        if (!BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.reportId) ||
+            !BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.op) ||
+            !BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.seq) ||
+            !BbGet8(&bb, &queuedCb->data.scHidFeatureRequest.queryLen)) {
+            free(queuedCb);
+            return;
+        }
         // VipleStream REVIEW-1111 (round 2): queryLen comes from the wire (0..255) and the query buffer is 64 bytes;
         // a short packet also left the buffer unfilled. Clamp the length and zero the query when it cannot be read.
         if (!BbGetBytes(&bb, queuedCb->data.scHidFeatureRequest.query, 64)) {
@@ -2696,11 +2777,20 @@ enet_main_loop:
                             ctrlPrimaryGoodSinceMs = ctrlRouteCheckMs;
                         }
                         else if (ctrlRouteCheckMs - ctrlPrimaryGoodSinceMs >= 15000) {
-                            Limelog("[VIPLE-VR-LINK] control connection: the session interface has been answering for 15 s - moving back to it\n");
-                            ctrlPrimaryGoodSinceMs = 0;
-                            ctrlRouteFails = 0;
-                            enetReconnectPending = 1;
-                            goto enet_reconnect_wait;
+                            struct sockaddr_storage backLocal;
+                            SOCKADDR_LEN backLen = 0;
+                            // §REVIEW-1119：重連是從 session 位址重來，不是從現在這條（可能已改連別的 host）。
+                            // OS 此刻若不會從 LocalAddr 出去，結果不是白拆一條還在用的連線，就是指到不通的網卡後
+                            // 又被綁回現在這張，每 15 秒一次。路由還沒回來就把計時歸到現在，避免每 250 ms 探一次。
+                            if (enetReconnectProbeRoute(&RemoteAddr, &backLocal, &backLen) == 0 &&
+                                    enetReconnectSameIp(&backLocal, &LocalAddr)) {
+                                Limelog("[VIPLE-VR-LINK] control connection: the session interface has been answering for 15 s - moving back to it\n");
+                                ctrlPrimaryGoodSinceMs = 0;
+                                ctrlRouteFails = 0;
+                                enetReconnectPending = 1;
+                                goto enet_reconnect_wait;
+                            }
+                            ctrlPrimaryGoodSinceMs = ctrlRouteCheckMs;
                         }
                     }
                     else {
@@ -2949,6 +3039,9 @@ enet_main_loop:
                         hdrTruncLogCount++;
                         Limelog("[VIPLE-CTRL] discarding truncated HDR info (existing HDR state unchanged)\n");
                     }
+                    // §REVIEW-1119：狀態沒改，下面仍會排 setHdrMode，app 會以為模式又變了一次。這包直接丟掉。
+                    free(ctlHdr);
+                    continue;
                 }
             }
 
@@ -3220,16 +3313,37 @@ enet_reconnect_wait:
             int probeErr = enetReconnectProbeRoute(&reconnTarget, &probeLocal, &probeLocalLen);
             bool haveRoute = (probeErr == 0);
             // §VR-CTRL-ROUTE：session 位址那條連線已經收不到 PONG，也不必等兩次失敗
+            // §REVIEW-1119：切到備援位址之後若它沒有路由，targetTries 不會加（下面 !haveRoute 就 continue），
+            // 條件又要求 !reconnAlt，於是再也切不回 session 位址。先確認 session 位址有路由才切，兩邊都沒有就不要互切。
+            bool sessionRouteBack = false;
+            if (reconnAlt && !haveRoute) {
+                struct sockaddr_storage backLocal;
+                SOCKADDR_LEN backLen = 0;
+                sessionRouteBack = enetReconnectProbeRoute(&RemoteAddr, &backLocal, &backLen) == 0;
+            }
             if (targetTries >= 2 || (!haveRoute && !reconnAlt) ||
-                    (!reconnAlt && vrmlServerAddrState(&reconnTarget) == 0)) {
+                    (!reconnAlt && vrmlServerAddrState(&reconnTarget) == 0) ||
+                    sessionRouteBack) {
                 struct sockaddr_storage other;
                 bool haveOther;
                 if (reconnAlt) {
-                    memcpy(&other, &RemoteAddr, sizeof(other));
-                    haveOther = true;
+                    if (!haveRoute && !sessionRouteBack) {
+                        haveOther = false;
+                    }
+                    else {
+                        memcpy(&other, &RemoteAddr, sizeof(other));
+                        haveOther = true;
+                    }
                 }
                 else {
                     haveOther = vrmlOtherAliveServer(&RemoteAddr, &other) != 0;
+                    // §REVIEW-1119（Argon 複審）：備援位址沒有路由就不要切過去。切過去之後下一圈會因為
+                    // sessionRouteBack 馬上切回來、把退避歸零，兩個位址每圈互換一次。
+                    if (haveOther) {
+                        struct sockaddr_storage altLocal;
+                        SOCKADDR_LEN altLen = 0;
+                        haveOther = enetReconnectProbeRoute(&other, &altLocal, &altLen) == 0;
+                    }
                 }
                 if (haveOther) {
                     char fromStr[URLSAFESTRING_LEN], toStr[URLSAFESTRING_LEN];
@@ -3243,6 +3357,12 @@ enet_reconnect_wait:
                     targetTries = 0;
                     probeErr = enetReconnectProbeRoute(&reconnTarget, &probeLocal, &probeLocalLen);
                     haveRoute = (probeErr == 0);
+                    // §REVIEW-1119：這是重連自己換了目標，出口 IP 跟著變不是 OS 改路由。
+                    // 不先對齊 lastLocal 的話，下面步驟 (e) 會把退避和連續拒絕次數歸零，
+                    // 兩個位址來回切時退避永遠停在 1～2 秒。第一次還沒試過（lastLocal 是空的）則留給 (e) 立刻試。
+                    if (haveRoute && lastLocal.ss_family != 0) {
+                        lastLocal = probeLocal;
+                    }
                 }
             }
             // §CTRL-LINK-LOCAL：路由選到的那張網卡，它的那條連線已經收不到 PONG，而另一張網卡的連線還活著：
@@ -3261,10 +3381,24 @@ enet_reconnect_wait:
                         Limelog("[VIPLE-VR-LINK] control reconnect: the link on %s gets no answer - using the interface of another live link (%s '%s')\n",
                                 fromStr, toStr, forceIf);
                     }
+                    // §REVIEW-1119：目標真的換了位址才把次數歸零。同一個位址只是換網卡出去時（兩張網卡同網段）每圈都會走到這裡，
+                    // 每圈歸零的話「試兩次就換另一個位址」永遠不會成立。
+                    const bool forcedTargetChanged = !enetReconnectSameIp(&reconnTarget, &srv);
                     memcpy(&reconnTarget, &srv, sizeof(reconnTarget));
+                    // §REVIEW-1119：srv 的 host 可能不是 RemoteAddr。不更新 reconnAlt 的話，
+                    // 之後仍以為目標是 session 位址，這條失聯時切不回去。次數也要歸零，
+                    // 否則下一圈 targetTries 已經夠大，立刻又切走並把退避清掉。
+                    reconnAlt = !enetReconnectSameIp(&reconnTarget, &RemoteAddr);
+                    if (forcedTargetChanged) {
+                        targetTries = 0;
+                    }
                     memcpy(&probeLocal, &loc, sizeof(probeLocal));
                     probeLocalLen = (SOCKADDR_LEN)sizeof(struct sockaddr_in);
                     forceBind = true;
+                    // §REVIEW-1119：改綁另一張網卡也是自己決定的，不是 OS 路由變了。理由同上。
+                    if (lastLocal.ss_family != 0) {
+                        lastLocal = probeLocal;
+                    }
                 }
             }
             bool routeRegained = false;
@@ -3466,8 +3600,14 @@ enet_reconnect_wait:
                                 currentEnetSequenceNumber);
                         memcpy(&enetPeerAddr, &reconnTarget, sizeof(enetPeerAddr));  // §VR-CTRL-ROUTE
                         ctrlRouteFails = 0;
+                        // §REVIEW-1119：重連前累計的「原本那張已經通了多久」不能帶過重連。
+                        // 回到主迴圈時 ctrlRouteCheckMs 還是舊的，15 秒條件會立刻成立，剛建好的連線馬上又被拆掉。
+                        ctrlPrimaryGoodSinceMs = 0;
+                        ctrlRouteCheckMs = doneMs;
                         // §CTRL-LINK-LOCAL：記下這條控制連線實際綁的本機位址（之後的檢查看這張網卡的連線）
                         memcpy(&ctrlLocal, &probeLocal, sizeof(ctrlLocal));
+                        // §REVIEW-1119（G032-03#1，未改）：沒強制綁網卡的重連也綁了 probeLocal，但這裡維持只在 forceBind 時記成有效：
+                        // 改成一律有效會讓 §CTRL-REGAIN 在「路由自己換了網卡」的情況也啟動，重連後若路由仍選同一張就每 15 秒重連一次。要三台機器實測才能改。
                         ctrlLocalValid = forceBind;
                         if (forceBind) {
                             Limelog("[VIPLE-VR-LINK] control connection now on interface '%s' (local=%s)\n", forceIf, localStr);
@@ -3555,7 +3695,8 @@ static void lossStatsThreadMain(void* context) {
     BYTE_BUFFER byteBuffer;
 
     if (usePeriodicPing) {
-        char periodicPingPayload[8];
+        // §REVIEW-1119：BbPut 只寫前 6 bytes。尾端 2 bytes 不先清成 0，會把堆疊內容送上網路。
+        char periodicPingPayload[8] = { 0 };
 
         BbInitializeWrappedBuffer(&byteBuffer, periodicPingPayload, 0, sizeof(periodicPingPayload), BYTE_ORDER_LITTLE);
         BbPut16(&byteBuffer, 4); // Length of payload
@@ -3564,9 +3705,7 @@ static void lossStatsThreadMain(void* context) {
         while (!PltIsThreadInterrupted(&lossStatsThread)) {
             // §VR-SEND-FALLBACK (ultrareview #5)：VrSend 執行緒沒起來時，恢復狀態機的
             // 逾時（重送 LOSS、500 ms 退回 IDR）只能在這裡跑，否則永遠不重試
-            if (!vrSendThreadStarted && (VrFlags & VIPLE_VR_SF_ENABLED)) {
-                vrSendTick();
-            }
+            vrSendTickIfNoSender();
             // For Sunshine servers, send the more detailed per-frame FEC messages
             if (IS_SUNSHINE()) {
                 PQUEUED_FRAME_FEC_STATUS queuedFrameStatus;
@@ -3595,7 +3734,9 @@ static void lossStatsThreadMain(void* context) {
                 while (LbqPollQueueElement(&frameFecStatusQueue, (void**)&queuedFrameStatus) == LBQ_SUCCESS) {
                     int sent = 0;
 #ifdef VIPLE_MPQUIC
-                    if (enetReconnectPending || !peer) {
+                    // §REVIEW-1119：只看 enetReconnectPending 會漏掉 enetReconnecting。
+                    // pending 已清、peer 還沒 NULL 的窗口會誤走 ENet，送進即將銷毀的 peer。
+                    if (enetControlChannelDown()) {
                         // ENet 確定不通 → 直接走 QUIC，不嘗試 ENet
                         if (quicIsConnected()) {
                             unsigned char buf[1 + sizeof(queuedFrameStatus->fecStatus)];
@@ -3642,6 +3783,11 @@ static void lossStatsThreadMain(void* context) {
                             free(queuedFrameStatus);
                             return;
                         }
+                        // §REVIEW-1119：重連期間 ENet 已不可用。這裡若當成送失敗收掉整場，會跳過接收執行緒的 2 秒收尾。
+                        if (enetReconnecting) {
+                            free(queuedFrameStatus);
+                            break;
+                        }
 #endif
                         ListenerCallbacks.connectionTerminated(LastSocketFail());
                         free(queuedFrameStatus);
@@ -3656,7 +3802,8 @@ static void lossStatsThreadMain(void* context) {
             {
                 int pingSent = 0;
 #ifdef VIPLE_MPQUIC
-                if (enetReconnectPending || !peer) {
+                // §REVIEW-1119：同上面 FEC。漏看 enetReconnecting 時，定期 ping 會送進即將銷毀的 peer。
+                if (enetControlChannelDown()) {
                     if (quicIsConnected()) {
                         static const unsigned char pingMarker = 0x50; // 'P'
                         pingSent = (quicSendStream(&pingMarker, 1) == 0) ? 1 : 0;
@@ -3681,7 +3828,8 @@ static void lossStatsThreadMain(void* context) {
                 if (!pingSent) {
                     Limelog("Loss Stats: Transaction failed: %d\n", (int)LastSocketError());
 #ifdef VIPLE_MPQUIC
-                    if (quicIsConnected() || vrLinksAlive()) {
+                    // §REVIEW-1119：重連期間不要因為 ping 送不出去就結束整場（接收執行緒有 2 秒收尾）。
+                    if (quicIsConnected() || vrLinksAlive() || enetReconnecting) {
                         // QUIC still alive — continue loop, don't terminate（§VR-LINK-GRACE：多連線活著也一樣）
                     } else if (quicIsFailoverActive()) {
                         return;
@@ -3703,7 +3851,7 @@ static void lossStatsThreadMain(void* context) {
             // 一輪、不會和 ENet ping 重複計步——它的 ACK 讓主路徑維持「有收到東西」。
             // ENet 斷線時上面的分支本來就每 100 ms 送 'P'，這裡不重複送。
             // 一般 session 的 QUIC 上有視訊流量，不送（不變式 5）。
-            if ((VrFlags & VIPLE_VR_SF_ENABLED) && !(enetReconnectPending || !peer) && quicIsConnected()) {
+            if ((VrFlags & VIPLE_VR_SF_ENABLED) && !enetControlChannelDown() && quicIsConnected()) {
                 if (++vrQuicKeepaliveTicks >= VR_QUIC_KEEPALIVE_TICKS) {
                     static const unsigned char vrKeepaliveMarker = 0x50; // 'P'
                     vrQuicKeepaliveTicks = 0;
@@ -3732,9 +3880,7 @@ static void lossStatsThreadMain(void* context) {
         while (!PltIsThreadInterrupted(&lossStatsThread)) {
             // §VR-SEND-FALLBACK (ultrareview #5)：VrSend 執行緒沒起來時，恢復狀態機的
             // 逾時（重送 LOSS、500 ms 退回 IDR）只能在這裡跑，否則永遠不重試
-            if (!vrSendThreadStarted && (VrFlags & VIPLE_VR_SF_ENABLED)) {
-                vrSendTick();
-            }
+            vrSendTickIfNoSender();
             // Construct the payload
             BbInitializeWrappedBuffer(&byteBuffer, lossStatsPayload, 0, payloadLengths[IDX_LOSS_STATS], BYTE_ORDER_LITTLE);
             BbPut32(&byteBuffer, 0);
@@ -4146,15 +4292,29 @@ int stopControlStream(void) {
         PltJoinThread(&invalidateRefFramesThread);
     }
 
-    if (peer != NULL) {
-        // Gracefully disconnect to ensure the remote host receives all of our final
-        // outbound traffic, including any key up events that might be sent.
-        gracefullyDisconnectEnetPeer(client, peer, CONTROL_STREAM_LINGER_TIMEOUT_SEC * 1000);
+    // §REVIEW-1119：銷毀 peer／client 沒拿 enetMutex 的話，還在 sendMessageEnet 裡的執行緒會用到已釋放的 host。
+    // 鎖內把指標摘下來並清成 NULL，鎖外再斷線與銷毀，linger 才不會卡住還在送的人。
+    {
+        ENetHost* hostToDestroy;
+        ENetPeer* peerToDrop;
+
+        PltLockMutex(&enetMutex);
+        peerToDrop = peer;
+        hostToDestroy = client;
         peer = NULL;
-    }
-    if (client != NULL) {
-        enet_host_destroy(client);
         client = NULL;
+        // §REVIEW-1119（Argon 複審）：斷線與銷毀也留在鎖內（最多 linger 2 秒）。sendMessageEnet 的可靠封包等待會放鎖睡 1 ms，
+        // 鎖外銷毀的話，它醒來時 host 正在釋放那個封包，free callback 會寫進它的堆疊變數、它也會去碰已釋放的封包。
+        // 留在鎖內：等待的人要拿到鎖才會醒，那時 packetFreed 已經設好、peer 也是 NULL。內部執行緒這時都已經 join 完。
+        if (peerToDrop != NULL) {
+            // Gracefully disconnect to ensure the remote host receives all of our final
+            // outbound traffic, including any key up events that might be sent.
+            gracefullyDisconnectEnetPeer(hostToDestroy, peerToDrop, CONTROL_STREAM_LINGER_TIMEOUT_SEC * 1000);
+        }
+        if (hostToDestroy != NULL) {
+            enet_host_destroy(hostToDestroy);
+        }
+        PltUnlockMutex(&enetMutex);
     }
 #ifdef VIPLE_MPQUIC
     // §M01-C：開頭清過之後，controlReceiveThread 在被 join 前的最後一輪
@@ -4551,11 +4711,18 @@ int startControlStream(void) {
             ConnectionInterrupted = true;
         }
 
-        PltInterruptThread(&lossStatsThread);
-        PltJoinThread(&lossStatsThread);
-
+        // §REVIEW-1119：跟 stopControlStream 同一順序。先 join lossStats 時，
+        // 接收執行緒可能正在 §LOSSSTATS-RESTART 裡 join 同一條，兩邊互等。
+        // 先打斷 lossStats，等接收執行緒結束（它可能剛重建一條）再 join。
+        if (!lossStatsJoined) {
+            PltInterruptThread(&lossStatsThread);
+        }
         PltInterruptThread(&controlReceiveThread);
         PltJoinThread(&controlReceiveThread);
+        if (!lossStatsJoined) {
+            PltInterruptThread(&lossStatsThread);
+            PltJoinThread(&lossStatsThread);
+        }
 
         if (ctlSock != INVALID_SOCKET) {
             closeSocket(ctlSock);
@@ -4588,11 +4755,18 @@ int startControlStream(void) {
             ConnectionInterrupted = true;
         }
 
-        PltInterruptThread(&lossStatsThread);
-        PltJoinThread(&lossStatsThread);
-
+        // §REVIEW-1119：跟 stopControlStream 同一順序。先 join lossStats 時，
+        // 接收執行緒可能正在 §LOSSSTATS-RESTART 裡 join 同一條，兩邊互等。
+        // 先打斷 lossStats，等接收執行緒結束（它可能剛重建一條）再 join。
+        if (!lossStatsJoined) {
+            PltInterruptThread(&lossStatsThread);
+        }
         PltInterruptThread(&controlReceiveThread);
         PltJoinThread(&controlReceiveThread);
+        if (!lossStatsJoined) {
+            PltInterruptThread(&lossStatsThread);
+            PltJoinThread(&lossStatsThread);
+        }
 
         PltInterruptThread(&requestIdrFrameThread);
         PltJoinThread(&requestIdrFrameThread);
@@ -4631,11 +4805,18 @@ int startControlStream(void) {
                 ConnectionInterrupted = true;
             }
 
-            PltInterruptThread(&lossStatsThread);
-            PltJoinThread(&lossStatsThread);
-
+            // §REVIEW-1119：跟 stopControlStream 同一順序。先 join lossStats 時，
+            // 接收執行緒可能正在 §LOSSSTATS-RESTART 裡 join 同一條，兩邊互等。
+            // 先打斷 lossStats，等接收執行緒結束（它可能剛重建一條）再 join。
+            if (!lossStatsJoined) {
+                PltInterruptThread(&lossStatsThread);
+            }
             PltInterruptThread(&controlReceiveThread);
             PltJoinThread(&controlReceiveThread);
+            if (!lossStatsJoined) {
+                PltInterruptThread(&lossStatsThread);
+                PltJoinThread(&lossStatsThread);
+            }
 
             PltInterruptThread(&requestIdrFrameThread);
             PltJoinThread(&requestIdrFrameThread);
@@ -4666,14 +4847,27 @@ int startControlStream(void) {
     // §VR：其餘執行緒都成功之後才建立（失敗路徑因此不用管它）。建立失敗時
     // vrRecoveryReportLoss 會退回同步送 LOSS，功能不受影響。
     if (VrFlags & VIPLE_VR_SF_ENABLED) {
-        if (PltCreateThread("VrSend", vrSendThreadFunc, NULL, &vrSendThread) == 0) {
-            vrSendThreadStarted = true;
+        // §REVIEW-1119：先在鎖內把旗標設上，並等 lossStats 的代跑離開，再建立 VrSend。
+        // 反過來的話，VrSend 一跑起來 lossStats 還在 vrSendTick 裡，兩邊同時改 vrFbPending*。
+        PltLockMutex(&vrRecMutex);
+        vrSendThreadStarted = true;
+        while (vrSendFallbackBusy) {
+            PltUnlockMutex(&vrRecMutex);
+            PltSleepMs(1);
+            PltLockMutex(&vrRecMutex);
         }
-        else {
+        PltUnlockMutex(&vrRecMutex);
+        if (PltCreateThread("VrSend", vrSendThreadFunc, NULL, &vrSendThread) != 0) {
+            PltLockMutex(&vrRecMutex);
+            vrSendThreadStarted = false;
+            PltUnlockMutex(&vrRecMutex);
             Limelog("[VIPLE-VR-LOSS] failed to create VrSend thread — LOSS will be sent synchronously\n");
         }
     }
 
+    // §REVIEW-1119：ENet 與附屬執行緒都起來之後才開閘門。失敗收尾會銷毀 peer，
+    // 閘門維持關閉，XR 與 FPS 請求進不了 sendMessageEnet。
+    vrApiReady = true;
     return 0;
 }
 

@@ -784,8 +784,15 @@ VIPLE_VR_INLINE void VipleVrUnpackQuat48(const uint8_t in[6], float q[4]) {
         sumSq += v * v;
         n++;
     }
-    // 最大分量由單位長度還原；數值誤差讓 sumSq 略大於 1 時取 0。
-    q[largest] = sumSq < 1.0f ? sqrtf(1.0f - sumSq) : 0.0f;
+    // §REVIEW-1119：合法單位四元數的另外三分量平方和最多約 0.75。封包壞掉或送端把分量夾到上限時
+    // sumSq 可到 1.5，最大分量被設成 0 會得到長度約 1.22 的四元數。呼叫端直接寫進 OpenXR 的
+    // orientation，renderPoseUsable 只擋長度 0。這種輸入改成單位四元數，線上格式不變。
+    if (!(sumSq < 1.0f)) {
+        q[0] = q[1] = q[2] = 0.0f;
+        q[3] = 1.0f;
+        return;
+    }
+    q[largest] = sqrtf(1.0f - sumSq);
 }
 
 // IEEE 754 half-precision float（binary16）轉換工具

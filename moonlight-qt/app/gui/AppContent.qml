@@ -253,6 +253,7 @@ Page {
             }
 
             Label {
+                textFormat: Text.PlainText  // §REVIEW-1119：sectionMeta 也串了網路來的主機名稱，不當成 HTML
                 text: titleLabel.sectionMeta
                 anchors.horizontalCenter: parent.horizontalCenter
                 font.pointSize: 9
@@ -866,6 +867,7 @@ Page {
                 height: 96
             }
             Label {
+                textFormat: Text.PlainText  // §REVIEW-1119：應用程式名稱來自遠端清單，不當成 HTML
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap

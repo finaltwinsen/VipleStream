@@ -55,7 +55,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private final ArrayList<byte[]> spsBuffers = new ArrayList<>();
     private final ArrayList<byte[]> ppsBuffers = new ArrayList<>();
     private boolean submittedCsd;
-    private byte[] currentHdrMetadata;
+    // §REVIEW-1119：為什麼 volatile——控制串流寫、解碼執行緒在重設時讀，沒有同步的話參考可能看不到最新值。
+    private volatile byte[] currentHdrMetadata;
 
     private int nextInputBufferIndex = -1;
     private ByteBuffer nextInputBuffer;
@@ -837,9 +838,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private void configureAndStartDecoder(MediaFormat format) {
         // Set HDR metadata if present
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            if (currentHdrMetadata != null) {
+            // §REVIEW-1119：為什麼先抄出來——setHdrMode 可能在判空之後把欄位清成 null。
+            // 再讀一次的話 ByteBuffer.wrap 會丟出沒人接的 NullPointerException，復原流程就跳過 notifyAll()。
+            byte[] hdrMetadataBytes = currentHdrMetadata;
+            if (hdrMetadataBytes != null) {
                 ByteBuffer hdrStaticInfo = ByteBuffer.allocate(25).order(ByteOrder.LITTLE_ENDIAN);
-                ByteBuffer hdrMetadata = ByteBuffer.wrap(currentHdrMetadata).order(ByteOrder.LITTLE_ENDIAN);
+                ByteBuffer hdrMetadata = ByteBuffer.wrap(hdrMetadataBytes).order(ByteOrder.LITTLE_ENDIAN);
 
                 // Create a HDMI Dynamic Range and Mastering InfoFrame as defined by CTA-861.3
                 hdrStaticInfo.put((byte) 0); // Metadata type
@@ -1331,6 +1335,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         return true;
     }
 
+    // §REVIEW-1119：為什麼當成已經清掉——prepareForStop 與復原成功都會把類型設回 NONE。
+    // CAS 都失敗後讀到 NONE 是這場競爭，不是壞狀態；這裡丟 IllegalStateException 會穿透 JNI。
+    private boolean recoveryTypeCleared() {
+        return stopping || codecRecoveryType.get() == CR_RECOVERY_TYPE_NONE;
+    }
+
     // Returns true if the exception is transient
     private boolean handleDecoderException(IllegalStateException e) {
         // Eat decoder exceptions if we're in the process of stopping
@@ -1363,6 +1373,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                         e.printStackTrace();
                     }
                     else if (codecRecoveryType.get() != CR_RECOVERY_TYPE_RESET && codecRecoveryType.get() != CR_RECOVERY_TYPE_RESTART) {
+                        if (recoveryTypeCleared()) {
+                            return false;
+                        }
                         throw new IllegalStateException("Unexpected codec recovery type: " + codecRecoveryType.get());
                     }
                 }
@@ -1380,6 +1393,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                         e.printStackTrace();
                     }
                     else if (codecRecoveryType.get() != CR_RECOVERY_TYPE_RESET) {
+                        if (recoveryTypeCleared()) {
+                            return false;
+                        }
                         throw new IllegalStateException("Unexpected codec recovery type: " + codecRecoveryType.get());
                     }
                 }
@@ -1407,6 +1423,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     e.printStackTrace();
                 }
                 else if (codecRecoveryType.get() != CR_RECOVERY_TYPE_RESET) {
+                    if (recoveryTypeCleared()) {
+                        return false;
+                    }
                     throw new IllegalStateException("Unexpected codec recovery type: " + codecRecoveryType.get());
                 }
 
@@ -1459,7 +1478,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         // Don't render unless a new frame is due. This prevents microstutter when streaming
         // at a frame rate that doesn't match the display (such as 60 FPS on 120 Hz).
         long actualFrameTimeDeltaNs = frameTimeNanos - lastRenderedFrameTimeNanos;
-        long expectedFrameTimeDeltaNs = 800000000 / refreshRate; // within 80% of the next frame
+        // §REVIEW-1119：為什麼看更新率——redrawRate 為 0（例如補幀把 1Hz 再除以 2）時這行整數除零，
+        // Choreographer 執行緒會直接死掉。不是正數就不擋幀，也不改記下來的更新率。
+        long expectedFrameTimeDeltaNs = refreshRate > 0 ? 800000000 / refreshRate : 0; // within 80% of the next frame
         if (actualFrameTimeDeltaNs >= expectedFrameTimeDeltaNs) {
             // Render up to one frame when in frame pacing mode.
             //
@@ -2105,17 +2126,31 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         if (frameType == MoonBridge.FRAME_TYPE_IDR) {
             // H264 SPS
             if (decodeUnitType == MoonBridge.BUFFER_TYPE_SPS && (videoFormat & MoonBridge.VIDEO_FORMAT_MASK_H264) != 0) {
+                // §REVIEW-1119：為什麼限縮長度——decodeUnitData 是跨幀共用、不歸零的緩衝區，只覆寫前面那段。
+                // 整段包進去的話，截斷的 SPS 會把上一幀殘留解析進去；畸形位元流的例外也沒人接，會穿透 JNI。
+                if (decodeUnitData == null || decodeUnitLength < 5 || decodeUnitLength > decodeUnitData.length) {
+                    return MoonBridge.DR_NEED_IDR;
+                }
+                int startSeqLen = decodeUnitData[2] == 0x01 ? 3 : 4;
+                if (decodeUnitLength <= startSeqLen + 1) {
+                    return MoonBridge.DR_NEED_IDR;
+                }
+
                 numSpsIn++;
 
-                ByteBuffer spsBuf = ByteBuffer.wrap(decodeUnitData);
-                int startSeqLen = decodeUnitData[2] == 0x01 ? 3 : 4;
+                ByteBuffer spsBuf = ByteBuffer.wrap(decodeUnitData, 0, decodeUnitLength);
 
                 // Skip to the start of the NALU data
                 spsBuf.position(startSeqLen + 1);
 
                 // The H264Utils.readSPS function safely handles
                 // Annex B NALUs (including NALUs with escape sequences)
-                SeqParameterSet sps = H264Utils.readSPS(spsBuf);
+                final SeqParameterSet sps;
+                try {
+                    sps = H264Utils.readSPS(spsBuf);
+                } catch (RuntimeException ignored) {
+                    return MoonBridge.DR_NEED_IDR;
+                }
 
                 // Some decoders rely on H264 level to decide how many buffers are needed
                 // Since we only need one frame buffered, we'll set the level as low as we can
@@ -2227,7 +2262,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
                 // The H264Utils.writeSPS function safely handles
                 // Annex B NALUs (including NALUs with escape sequences)
-                ByteBuffer escapedNalu = H264Utils.writeSPS(sps, decodeUnitLength);
+                // §REVIEW-1119：為什麼接住——重寫失敗（緩衝區不夠或畸形 SPS）以前會穿透 JNI 把行程打死。
+                final ByteBuffer escapedNalu;
+                try {
+                    escapedNalu = H264Utils.writeSPS(sps, decodeUnitLength);
+                } catch (RuntimeException ignored) {
+                    return MoonBridge.DR_NEED_IDR;
+                }
 
                 // Construct the patched SPS
                 byte[] naluBuffer = new byte[startSeqLen + 1 + escapedNalu.limit()];
@@ -2242,6 +2283,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 return MoonBridge.DR_OK;
             }
             else if (decodeUnitType == MoonBridge.BUFFER_TYPE_VPS) {
+                // §REVIEW-1119：為什麼先看長度——負值會讓 new byte[len] 丟出沒人接的 NegativeArraySizeException。
+                if (!decodeUnitBytesOk(decodeUnitData, decodeUnitLength)) {
+                    return MoonBridge.DR_NEED_IDR;
+                }
                 numVpsIn++;
 
                 // Batch this to submit together with other CSD per AOSP docs
@@ -2255,6 +2300,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             }
             // Only the HEVC SPS hits this path (H.264 is handled above)
             else if (decodeUnitType == MoonBridge.BUFFER_TYPE_SPS) {
+                // §REVIEW-1119：為什麼先看長度——同上，負長度或超過陣列都會在複製時丟出沒人接的例外。
+                if (!decodeUnitBytesOk(decodeUnitData, decodeUnitLength)) {
+                    return MoonBridge.DR_NEED_IDR;
+                }
                 numSpsIn++;
 
                 // Batch this to submit together with other CSD per AOSP docs
@@ -2267,6 +2316,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 return MoonBridge.DR_OK;
             }
             else if (decodeUnitType == MoonBridge.BUFFER_TYPE_PPS) {
+                // §REVIEW-1119：為什麼先看長度——同上，負長度或超過陣列都會在複製時丟出沒人接的例外。
+                if (!decodeUnitBytesOk(decodeUnitData, decodeUnitLength)) {
+                    return MoonBridge.DR_NEED_IDR;
+                }
                 numPpsIn++;
 
                 // Batch this to submit together with other CSD per AOSP docs
@@ -2287,6 +2340,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     }
 
                     // Submit all CSD when we receive the first non-CSD blob in an IDR frame
+                    ensureCsdFits();
                     for (byte[] vpsBuffer : vpsBuffers) {
                         nextInputBuffer.put(vpsBuffer);
                     }
@@ -2364,6 +2418,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             return res;
         }
 
+        // §REVIEW-1119：為什麼在這裡擋——負長度會讓下面的有號容量比較直接通過，put 才丟出沒人接的例外。
+        // PyroWave 不讀這份 Java 陣列（長度可以大於陣列），所以要放在它 return 之後。
+        if (!decodeUnitBytesOk(decodeUnitData, decodeUnitLength)) {
+            return MoonBridge.DR_NEED_IDR;
+        }
+
         if (!fetchNextInputBuffer()) {
             return MoonBridge.DR_NEED_IDR;
         }
@@ -2375,6 +2435,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
             // If we are using fused IDR frames, submit the CSD with each IDR frame
             if (fusedIdrFrame && !csdSubmittedForThisFrame) {
+                ensureCsdFits();
                 for (byte[] vpsBuffer : vpsBuffers) {
                     nextInputBuffer.put(vpsBuffer);
                 }
@@ -2426,6 +2487,35 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         onInputBufferQueued(timestampUs, recvTimeNs, submitTimeNs, frameHostProcessingLatency);
 
         return MoonBridge.DR_OK;
+    }
+
+    // §REVIEW-1119：為什麼擋下——負長度或超過共用緩衝區的長度，arraycopy／put 會丟出沒人接的例外。
+    private static boolean decodeUnitBytesOk(byte[] data, int length) {
+        return data != null && length >= 0 && length <= data.length;
+    }
+
+    // §REVIEW-1119：為什麼先量——CSD 直接 put 進輸入緩衝區，放不下會丟出沒人接的 BufferOverflowException，
+    // JNI 看到未處理例外會拆掉解碼執行緒。影格資料下面有檢查，這裡以前沒有。
+    private void ensureCsdFits() {
+        long total = 0;
+        for (int i = 0, n = vpsBuffers.size(); i < n; i++) {
+            total += vpsBuffers.get(i).length;
+        }
+        for (int i = 0, n = spsBuffers.size(); i < n; i++) {
+            total += spsBuffers.get(i).length;
+        }
+        for (int i = 0, n = ppsBuffers.size(); i < n; i++) {
+            total += ppsBuffers.get(i).length;
+        }
+        if (total > nextInputBuffer.remaining()) {
+            IllegalArgumentException exception = new IllegalArgumentException(
+                    "CSD length "+total+" too large for input buffer "+nextInputBuffer.limit());
+            if (!reportedCrash) {
+                reportedCrash = true;
+                crashListener.notifyCrash(exception);
+            }
+            throw new RendererException(this, exception);
+        }
     }
 
     private boolean replaySps() {

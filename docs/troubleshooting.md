@@ -238,7 +238,7 @@ the full diagnosis trail.
 
 | Log | Default path |
 |---|---|
-| Server (Sunshine) | `C:\Program Files\VipleStream-Server\config\sunshine.log` |
+| Server (Sunshine) | `C:\Program Files\VipleStream-Server\config\sunshine.log` — the current run. A new file starts on every server start and when it reaches 32 MB: the previous run is `sunshine.log.1`, the one before `sunshine.log.2`; runs shorter than 64 KB are appended to `sunshine.log.0`. In service mode `viplestream-svc.log` no longer repeats every line. |
 | Windows client | `%TEMP%\VipleStream-*.log` (one per session, latest by mtime) |
 | Android client | Available via `adb logcat -d`, filter on `com.piinsta`, `VKBE`, or `VIPLE-` tags |
 

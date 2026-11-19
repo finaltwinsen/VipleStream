@@ -255,6 +255,10 @@ Item {
                 var toast = Qt.createQmlObject('import QtQuick.Controls 2.2; ToolTip {}', parent, '')
                 toast.timeout = 3000
                 toast.text = text
+                // §REVIEW-1119：警告文字帶主機名稱，不要讓它被當成 HTML
+                if (toast.contentItem) {
+                    toast.contentItem.textFormat = Text.PlainText
+                }
                 toast.y += yOffset
                 toast.visible = true
 

@@ -168,7 +168,15 @@ public:
         if (!match.hasMatch()) {
             showError(QString("Invalid %1 format: %2").arg(name, value(name)));
         }
-        return qMakePair(match.captured(1).toInt(), match.captured(2).toInt());
+        bool okW = false;
+        bool okH = false;
+        const int w = match.captured(1).toInt(&okW);
+        const int h = match.captured(2).toInt(&okH);
+        // §REVIEW-1119：超過 int 範圍時 toInt 不帶 ok 會靜默回 0，呼叫端會把它當成合法寬高。
+        if (!okW || !okH) {
+            showError(QString("Invalid %1 format: %2").arg(name, value(name)));
+        }
+        return qMakePair(w, h);
     }
 
     void addFlagOption(QString name, QString descriptiveName)
@@ -810,6 +818,11 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                 preferences->cliAutoResolution = 1;
             } else {
                 auto resolution = parser.getResolutionOptionValue(name);
+                // §REVIEW-1119：跟 StreamingPreferences 載入時一樣，超過 16384 或 0 不寫進設定。
+                if (!inRange(resolution.first, 1, 16384) || !inRange(resolution.second, 1, 16384)) {
+                    parser.showError(QString("Resolution must be within 1-16384 per dimension (got %1x%2)")
+                                         .arg(resolution.first).arg(resolution.second));
+                }
                 preferences->width  = resolution.first;
                 preferences->height = resolution.second;
             }
@@ -1290,9 +1303,14 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         preferences->vrEyeHeight = eye.second;
     }
     if (parser.isSet("vr-netbench")) {
-        NetBench::config().resultPath = parser.value("vr-netbench");
+        const QString path = parser.value("vr-netbench");
+        // §REVIEW-1119：空路徑會讓測試靜默不啟用。非法秒數原本被夾成 30，打錯字看不出來。
+        if (path.isEmpty()) {
+            parser.showError("vr-netbench requires a file path");
+        }
+        NetBench::config().resultPath = QFileInfo(path).absoluteFilePath();
         if (parser.isSet("vr-netbench-secs")) {
-            NetBench::config().seconds = std::clamp(parser.value("vr-netbench-secs").toInt(), 30, 600);
+            NetBench::config().seconds = getBoundedIntOption(parser, "vr-netbench-secs", 30, 600);
         }
     }
     if (parser.isSet("vr-hz")) {
@@ -1493,14 +1511,24 @@ void PlayCommandLineParser::parse(const QStringList &args)
         parser.showError("Usage: play <file-or-url>");
     }
     source = pos.at(1);
+    // §REVIEW-1119：空字串不是檔案也不是網址。這裡不轉絕對路徑，來源可以是 https。
+    if (source.isEmpty()) {
+        parser.showError("Usage: play <file-or-url>");
+    }
     if (parser.isSet("vr-format")) {
         format = parser.value("vr-format");
     }
     if (parser.isSet("start")) {
-        startSec = parser.value("start").toDouble();
+        bool ok = false;
+        const double v = parser.value("start").toDouble(&ok);
+        // §REVIEW-1119：非數字會變成 0。inf 或過大的秒數在 seek 轉成 int64 時間戳時是未定義行為。
+        if (!ok || !std::isfinite(v) || v < 0.0 || v > 1.0e7) {
+            parser.showError(QString("start must be a finite number of seconds within 0-10000000: %1").arg(parser.value("start")));
+        }
+        startSec = v;
     }
     if (parser.isSet("volume")) {
-        volume = qBound(0, parser.value("volume").toInt(), 200) / 100.0f;
+        volume = getBoundedIntOption(parser, "volume", 0, 200) / 100.0f;
     }
     if (parser.isSet("screen")) {
         const QString v = parser.getChoiceOptionValue("screen");
@@ -1512,15 +1540,35 @@ void PlayCommandLineParser::parse(const QStringList &args)
     xrHandBack = parser.isSet("xr-handback");
     userAgent = parser.value("user-agent");
     httpHeaders = parser.value("http-headers").replace(QLatin1String("\\r\\n"), QLatin1String("\r\n"));
-    durationSec = parser.value("duration").toInt();
+    if (parser.isSet("duration")) {
+        durationSec = getBoundedIntOption(parser, "duration", 0, 864000);
+    }
     noXr = parser.isSet("no-xr");
     testScript = parser.value("test-script");
-    dumpPanelPath = parser.value("dump-panel");
-    dumpFramePath = parser.value("xr-dump-frame");
+    if (parser.isSet("dump-panel")) {
+        const QString path = parser.value("dump-panel");
+        if (path.isEmpty()) {
+            parser.showError("dump-panel requires a file path");
+        }
+        dumpPanelPath = QFileInfo(path).absoluteFilePath();
+    }
+    if (parser.isSet("xr-dump-frame")) {
+        const QString path = parser.value("xr-dump-frame");
+        if (path.isEmpty()) {
+            parser.showError("xr-dump-frame requires a file path");
+        }
+        dumpFramePath = QFileInfo(path).absoluteFilePath();
+    }
     testPointer = parser.isSet("xr-test-pointer");
-    traceFrames = parser.value("trace-frames").toInt();
+    if (parser.isSet("trace-frames")) {
+        traceFrames = getBoundedIntOption(parser, "trace-frames", 0, 100000);
+    }
     if (parser.isSet("xr-runtime-json")) {
-        xrRuntimeJson = QFileInfo(parser.value("xr-runtime-json")).absoluteFilePath();
+        const QString path = parser.value("xr-runtime-json");
+        if (path.isEmpty()) {
+            parser.showError("xr-runtime-json requires a file path");
+        }
+        xrRuntimeJson = QFileInfo(path).absoluteFilePath();
     }
 }
 
@@ -1559,13 +1607,19 @@ void FrucOfflineCommandLineParser::parse(const QStringList &args)
     if (posArgs.length() < 5) {
         parser.showError("Usage: fruc-offline <input_dir> <dump_dir> <width> <height>");
     }
+    rejectExtraPositionals(parser, 5);
     m_InputDir = posArgs.at(1);
     m_DumpDir  = posArgs.at(2);
-    m_Width    = posArgs.at(3).toInt();
-    m_Height   = posArgs.at(4).toInt();
-
-    if (m_Width <= 0 || m_Height <= 0) {
-        parser.showError("Invalid width/height (must be positive integers)");
+    // §REVIEW-1119：空目錄會讓 QDir("") 作用在目前工作目錄。寬高沒有上限時，後面的畫面緩衝區大小會溢位。
+    if (m_InputDir.isEmpty() || m_DumpDir.isEmpty()) {
+        parser.showError("Usage: fruc-offline <input_dir> <dump_dir> <width> <height>");
+    }
+    bool okW = false;
+    bool okH = false;
+    m_Width = posArgs.at(3).toInt(&okW);
+    m_Height = posArgs.at(4).toInt(&okH);
+    if (!okW || !okH || !inRange(m_Width, 1, 16384) || !inRange(m_Height, 1, 16384)) {
+        parser.showError("Invalid width/height (must be integers within 1-16384)");
     }
 }
 
