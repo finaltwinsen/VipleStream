@@ -44,10 +44,90 @@ static bool resyncFrameNumberPending;
 #define CONSECUTIVE_DROP_LIMIT 120
 static unsigned int consecutiveFrameDrops;
 
-// §PERF-1113 A32：定義在 RtpVideoQueue.c——「Network dropped」行和那邊的 Unrecoverable 行共用同一組限流與 10 秒彙總
-// （[VIPLE-VIDEO] loss 10s）。回傳 true＝這一行可以印。宣告在兩個 .c 各寫一份：這一輪只動這兩個檔，之後可以搬進
-// Limelight-internal.h
-bool RtpvLossLogDropped(uint32_t frames, uint64_t nowUs);
+// §IDR-RETRY：等 IDR 期間的計時重試。原本送出一次請求後，要等連續丟滿 CONSECUTIVE_DROP_LIMIT 張
+// （60 fps 是 2 秒）才再要一次；請求或 IDR 本身丟了就白等。改成距離上一次請求（任何來源，
+// 時刻由 ControlStream 的 LiRequestIdrFrame 記）300 ms 沒等到 IDR 就再要一次，之後 600、1200 ms，
+// 到 1200 ms 封頂；等到 IDR 重置。限流仍在 host（冷卻與延後補送），這裡保證的是計時重試之間
+// 至少隔 IDR_RETRY_FIRST_MS。
+// 只在「等 IDR 中又收到一張完整幀」時檢查（跟第一次請求同一個時機：網路還通才要，
+// 不在斷線時堆請求）；完全沒有完整幀時由 §FRZ-WATCHDOG 與「no video packets」那條路負責。
+// VR session 不走這裡（它有自己的 LOSS／REFRESH 狀態機與逾時），PyroWave 每幀都是 intra 也不走。
+// 狀態只在 VideoRecv 執行緒讀寫。
+#define IDR_RETRY_FIRST_MS 300
+#define IDR_RETRY_MAX_MS 1200
+static bool idrRetryTracking;         // 這一輪等待已經開始計時
+static uint32_t idrRetryWaitStartMs;  // 這一輪等待第一次檢查的時刻（上一輪留下的請求時刻不算數）
+static unsigned int idrRetryCount;    // 這一輪等待已經計時重試幾次
+
+static bool idrRetryApplies(void) {
+    return !vrSession && !(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE);
+}
+
+// 等到 IDR（或重新初始化）：下一輪等待從 300 ms 重新開始
+static void idrRetryReset(void) {
+    idrRetryTracking = false;
+    idrRetryCount = 0;
+}
+
+// 等 IDR 中、收到一張（要丟掉的）完整幀時呼叫。nowMs 是 PltGetMillis()
+static void idrRetryPoll(uint64_t nowMs, uint32_t frameIndex) {
+    uint32_t now32 = (uint32_t)nowMs;
+    uint32_t baseMs;
+    uint32_t lastReqMs;
+    uint32_t intervalMs;
+    unsigned int i;
+
+    if (!idrRetryApplies()) {
+        return;
+    }
+
+    if (!idrRetryTracking) {
+        idrRetryTracking = true;
+        idrRetryWaitStartMs = now32;
+        idrRetryCount = 0;
+    }
+
+    // 基準＝這一輪等待開始之後的最近一次請求；這一輪還沒人要過就從等待開始起算
+    baseMs = idrRetryWaitStartMs;
+    if (idrRequestLastTimeMs(&lastReqMs) && (int32_t)(lastReqMs - baseMs) > 0) {
+        baseMs = lastReqMs;
+    }
+
+    intervalMs = IDR_RETRY_FIRST_MS;
+    for (i = 0; i < idrRetryCount && intervalMs < IDR_RETRY_MAX_MS; i++) {
+        intervalMs *= 2;
+    }
+    if (intervalMs > IDR_RETRY_MAX_MS) {
+        intervalMs = IDR_RETRY_MAX_MS;
+    }
+
+    // 有號比較：別的執行緒剛寫進來的請求時刻可能比 now32 晚 1 ms
+    if ((int32_t)(now32 - baseMs) < (int32_t)intervalMs) {
+        return;
+    }
+
+    idrRetryCount++;
+    Limelog("[VIPLE-DEPACK] §IDR-RETRY: no IDR %u ms after last request — retry #%u (interval %u ms, frame %u)\n",
+            (unsigned int)(now32 - baseMs), idrRetryCount, (unsigned int)intervalMs, (unsigned int)frameIndex);
+    LiRequestIdrFrame();
+}
+
+// 連續丟幀上限（後備）要送之前問：是不是剛剛才要過。是的話這一次不送，免得跟計時重試成對送出
+static bool idrRetryRequestedRecently(uint32_t* agoMs) {
+    uint32_t lastReqMs;
+    uint32_t ago;
+
+    if (!idrRetryApplies() || !idrRequestLastTimeMs(&lastReqMs)) {
+        return false;
+    }
+
+    ago = (uint32_t)PltGetMillis() - lastReqMs;
+    if ((int32_t)ago < 0) {
+        ago = 0;
+    }
+    *agoMs = ago;
+    return ago < IDR_RETRY_FIRST_MS;
+}
 
 static LINKED_BLOCKING_QUEUE decodeUnitQueue;
 
@@ -111,6 +191,7 @@ void initializeVideoDepacketizer(int pktSize) {
     dropFrameCallCount = 0;
     lastQueuedFrameTimeUs = 0;          // §FRZ-WATCHDOG
     resyncFrameNumberPending = false;   // §FRZ-WATCHDOG
+    idrRetryReset();                    // §IDR-RETRY
     Limelog("[VIPLE-DEPACK] init: strictIdrFrameWait=%d (RFI %s%s)\n",
             (int)strictIdrFrameWait,
             isReferenceFrameInvalidationEnabled() ? "enabled" : "disabled",
@@ -167,14 +248,24 @@ static void dropFrameStateFrom(int caller) {
 
     // If we reach our limit, immediately request an IDR frame and reset
     if (consecutiveFrameDrops == CONSECUTIVE_DROP_LIMIT) {
-        Limelog("Reached consecutive drop limit\n");
+        uint32_t idrAgoMs = 0;
 
         // Restart the count
         consecutiveFrameDrops = 0;
 
         // Request an IDR frame
         waitingForIdrFrame = true;
-        LiRequestIdrFrame();
+
+        // §IDR-RETRY：次數上限留著當後備（沒有完整幀進來時計時重試不會跑）。
+        // 300 ms 內已經要過就不再送：計時重試會接手，兩條路不成對送出。
+        if (idrRetryRequestedRecently(&idrAgoMs)) {
+            Limelog("Reached consecutive drop limit (IDR requested %u ms ago, not requesting again)\n",
+                    (unsigned int)idrAgoMs);
+        }
+        else {
+            Limelog("Reached consecutive drop limit\n");
+            LiRequestIdrFrame();
+        }
     }
 
     cleanupFrameState();
@@ -756,6 +847,7 @@ static void processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos, PLENTRY_INTERN
             }
             waitingForIdrFrame = false;
             waitingForRefInvalFrame = false;
+            idrRetryReset();  // §IDR-RETRY：等到 IDR
 
             // Cancel any pending IDR frame request
             waitingForNextSuccessfulFrame = false;
@@ -983,6 +1075,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                 if (!(NegotiatedVideoFormat & (VIDEO_FORMAT_MASK_H264 | VIDEO_FORMAT_MASK_H265))) {
                     waitingForIdrFrame = false;
                     waitingForNextSuccessfulFrame = false;
+                    idrRetryReset();  // §IDR-RETRY：等到 IDR
                     frameType = FRAME_TYPE_IDR;
                 }
                 // Fall-through
@@ -1270,6 +1363,10 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                 if (waitingForNextSuccessfulFrame) {
                     LiRequestIdrFrame();
                 }
+
+                // §IDR-RETRY：上面剛送的話基準就是現在，這裡不會再送；否則距上一次請求
+                // 滿 300／600／1200 ms 還沒等到 IDR 就再要一次（VR、PyroWave 在函式裡直接返回）
+                idrRetryPoll(nowMs, frameIndex);
             }
             else {
                 // If we need an RFI frame first, then drop this frame

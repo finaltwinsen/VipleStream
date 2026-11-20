@@ -22,6 +22,7 @@ extern "C" {
 }
 
 // local includes
+#include "abr_congestion.h"
 #include "cbs.h"
 #include "config.h"
 #include "display_device.h"
@@ -425,6 +426,11 @@ namespace video {
 
     void request_normal_frame() override {
       force_idr = false;
+    }
+
+    /// §P2：下一張是不是已經排定 IDR（編碼迴圈用它看 RFI 有沒有退回 IDR，記進 IDR 連發的帳）
+    bool idr_pending() const {
+      return force_idr;
     }
 
     void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
@@ -2454,7 +2460,6 @@ namespace video {
   // §IDR-FAST（2026-11-20）：桌面 session 平常時（最近 kIdrCalmWindow 內送出的 IDR 不到 kIdrCalmMax 張）的最短間隔，
   // 以及「落在間隔內的請求延後補送」的規則。說明見 encode_run 的 §S.19 註解。
   constexpr std::chrono::milliseconds kDesktopIdrFastGapMs {250};
-  constexpr std::chrono::milliseconds kIdrTwinWindowMs {35};
   constexpr std::chrono::seconds kIdrCalmWindow {10};
   constexpr int kIdrCalmMax = 3;
 
@@ -2636,9 +2641,13 @@ namespace video {
     // client 等滿連續丟幀上限（約 1.06 秒）再要，還在冷卻裡、又被丟掉 → 第三次才過，畫面凍結 2.3 秒；網路上
     // 實際只丟了 2 張。所以桌面 session 分兩種狀況：
     //   平常（最近 kIdrCalmWindow 內送出的 IDR 不到 kIdrCalmMax 張）：間隔縮到 kDesktopIdrFastGapMs，落在間隔內的
-    //   請求不丟、間隔一到就補送（250 ms 也剛好等那一陣丟包過去）。距離上一張不到 kIdrTwinWindowMs 的請求仍然丟掉：
-    //   那是 client 成對送出的另一半（上面說的 5～30 ms），補送只會多一張。
-    //   丟包連發（視窗內已經送了 kIdrCalmMax 張）：回到原本的 1500 ms、請求照舊丟掉，§S.19 要擋的 IDR 風暴不變。
+    //   請求不丟、間隔一到就補送（250 ms 也剛好等那一陣丟包過去）。
+    //   丟包連發（視窗內已經送了 kIdrCalmMax 張）：間隔回到原本的 1500 ms，請求一樣到期補送。IDR 的頻率上限
+    //   （§S.19 要擋的風暴）沒有變，只是不再讓 client 白等。
+    // 同日審查後拿掉的兩條規則：
+    //   「距離上一張不到 35 ms 的請求當成成對請求丟掉」——IDR 本身丟了的時候，區網上 client 的再請求 15～30 ms 就到，
+    //   正好落在裡面，凍結約 1 秒。成對請求只在已經凍結的恢復時出現，多補一張的代價小得多。
+    //   「丟包連發時丟掉請求」——10 秒內第 4 張起又回到等兩輪的 2 秒凍結，client 的凍結看門狗還會清掉收包佇列。
     // VR session 不走這裡（有自己的 300 ms 與 intra refresh）。
     const bool idr_fast = !config.vrProfile;
     std::array<std::chrono::steady_clock::time_point, kIdrCalmMax> idr_recent;
@@ -2650,6 +2659,25 @@ namespace video {
     };
     const auto idr_note_emit = [&](std::chrono::steady_clock::time_point now) {
       *std::min_element(idr_recent.begin(), idr_recent.end()) = now;
+    };
+    // §P2（2026-11-20）：閘門不知道網路塞住。RTT 幾秒的時候 client 每秒都在要，上面的規則讓壅塞開頭 10 秒內
+    // 250 ms 一張連出 3 張、之後 1.5 秒一張，全部排進同一條已經滿的佇列。ABR 那一側（stream.cpp 的 run_abr_aimd，
+    // 握 abrMutex）每輪把壅塞等級對應的最短間隔寫進 abr_cong::idr_gap_hint（atomic），這裡（編碼執行緒）讀：
+    //   沒有提示（L0、沒有 RTT 樣本、ABR 關閉、提示超過 2 秒沒更新）→ 上面的規則，一點都不變。
+    //   L1／L2 → 不走 250 ms，間隔 1500 ms。
+    //   L3 → 間隔 clamp(1.5 × RTT + 500, 1500, 6000) ms。
+    // 落在間隔內的請求照舊延後補送；間隔每一輪重算，提示一消失就回到原本的間隔。最長 6 秒一定放行一張，
+    // 提示來源一停 2 秒內自動解除（§S.19 的前科是冷卻永遠成立）。VR 不讀提示。
+    bool idr_congested = false;  // 上一次算間隔時有沒有提示（只用來在變化時印一行）
+    const auto idr_gap = [&](std::chrono::steady_clock::time_point now) {
+      const int hint_ms = idr_fast ? abr_cong::idr_hint_load(now) : 0;
+      if ((hint_ms > 0) != idr_congested) {
+        idr_congested = hint_ms > 0;
+        BOOST_LOG(info) << "[VIPLE-QLOG] IDR-GAP congestion hint " << (idr_congested ? "on" : "off") << " f=" << frame_nr
+                        << (idr_congested ? std::format(" (min gap {} ms, fast path off)", hint_ms) : std::string {" (back to the normal gap)"});
+      }
+      return std::chrono::milliseconds {abr_cong::idr_gate_gap_ms(idr_calm(now), (int) idr_cooldown.count(),
+                                                                   (int) kDesktopIdrFastGapMs.count(), hint_ms)};
     };
     constexpr int STARTUP_IDR_RETRY_FRAME = 16;  // §K.14（見下方）
     // §S.19 診斷：標示本 encoder 生命期的 frame_nr 起點，一眼看出
@@ -2699,8 +2727,15 @@ namespace video {
           // §VR F13：VR session 降碼也走平滑過渡（不 reset、不 IDR）；一幀大 IDR 在 VR
           // 就是一次明顯卡頓，恢復交給 intra refresh。一般 session 行為不變。
           // §LAT-2D：abr_cut_idr = disabled 時 2D 也平滑降碼（A/B 用）
-          return nvenc_dev->nvenc->reconfigure_bitrate(enc_kbps, config.framerate,
-                                                       is_decrease && !config.vrProfile && config::video.abr_cut_idr);
+          const bool cut_idr = is_decrease && !config.vrProfile && config::video.abr_cut_idr;
+          const bool ok = nvenc_dev->nvenc->reconfigure_bitrate(enc_kbps, config.framerate, cut_idr);
+          if (ok && cut_idr) {
+            // §P2：降碼強制的 IDR（abr_cut_idr = enabled 才有，預設關）不經閘門，以前不算進「最近送了幾張」。
+            // 只記進 idr_recent，last_idr_emit 不動（同 RFI 退回的那一張）
+            idr_note_emit(std::chrono::steady_clock::now());
+            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-HOST f=" << frame_nr << " (bitrate cut forced an IDR, counted as a recent IDR)";
+          }
+          return ok;
         }
         return false;
       }
@@ -2739,12 +2774,26 @@ namespace video {
       }
 
       bool requested_idr_frame = false;
+      // §P2：這一輪 host 自己排了一張 IDR、而且已經記進 idr_recent（下面的閘門同一輪又放行時不重複記）
+      bool host_idr_noted = false;
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
           BOOST_LOG(info) << "[VIPLE-QLOG] REF-INVAL f=" << frame_nr
             << " [" << frames->first << "," << frames->second << "]";
+          // §P2：NVENC 的 RFI 做不到（參考幀已經不在 DPB）時會退回 IDR，這張不經閘門、以前也不算進「最近送了幾張」，
+          // 丟包連發的判斷因此偏樂觀（RFI 啟用的 client 在遠端路徑上常走這裡）。只記進 idr_recent；last_idr_emit 不動，
+          // client 接著要的 IDR 不會因此多等。VR 沒有人讀 idr_recent，不記。
+          auto nvenc_rfi = idr_fast ? dynamic_cast<nvenc_encode_session_t *>(session.get()) : nullptr;
+          const bool idr_was_pending = nvenc_rfi && nvenc_rfi->idr_pending();
           session->invalidate_ref_frames(frames->first, frames->second);
+          if (nvenc_rfi && !idr_was_pending && nvenc_rfi->idr_pending()) {
+            if (!host_idr_noted) {
+              idr_note_emit(std::chrono::steady_clock::now());
+              host_idr_noted = true;
+            }
+            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-HOST f=" << frame_nr << " (RFI fell back to IDR, counted as a recent IDR)";
+          }
         }
       }
 
@@ -2759,7 +2808,8 @@ namespace video {
         // VipleStream: §S.19 cooldown gate (see top of run() for rationale).
         auto now = std::chrono::steady_clock::now();
         const bool calm = idr_calm(now);
-        if (now >= last_idr_emit + (calm ? kDesktopIdrFastGapMs : idr_cooldown)) {
+        const auto gap = idr_gap(now);  // §P2：沒有壅塞提示時＝calm ? 250 ms : 冷卻（原本的式子）
+        if (now >= last_idr_emit + gap) {
           session->request_idr_frame();
           idr_deferred = false;
           // §IDR-OPEN：f=1 是 capture() 開場自己要的那一張（frame_nr 跨 encoder 重建累加，1 只出現在 session 的第一個
@@ -2768,7 +2818,9 @@ namespace video {
           const bool opening_idr = frame_nr == 1;
           if (!opening_idr) {
             last_idr_emit = now;
-            idr_note_emit(now);
+            if (!host_idr_noted) {  // §P2：同一張（RFI 退回的 IDR）已經記過
+              idr_note_emit(now);
+            }
           }
           BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << (opening_idr ? " (opening, cooldown not started)" : " (cooldown OK)");
           if (vr_state) {
@@ -2784,20 +2836,22 @@ namespace video {
         }
         else {
           requested_idr_frame = false;  // suppress for this iteration; client will re-request
-          if (calm && now >= last_idr_emit + kIdrTwinWindowMs) {
+          if (idr_fast) {
+            if (!idr_deferred) {
+              BOOST_LOG(info) << "[VIPLE-QLOG] IDR-DEFER f=" << frame_nr << " ("
+                              << std::chrono::duration_cast<std::chrono::milliseconds>(now - last_idr_emit).count() << " ms after the last one, "
+                              << (idr_congested ? "congested" : calm ? "calm" : "burst") << ", gap " << gap.count() << " ms)";
+            }
             idr_deferred = true;  // §IDR-FAST：間隔一到就補送
-            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-DEFER f=" << frame_nr << " ("
-                            << std::chrono::duration_cast<std::chrono::milliseconds>(now - last_idr_emit).count() << " ms after the last one)";
           } else {
-            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-SUPPRESS f=" << frame_nr << (calm ? " (paired request)" : " (cooldown active)");
+            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-SUPPRESS f=" << frame_nr << " (cooldown active)";
           }
         }
       }
       if (idr_deferred && !requested_idr_frame) {
         const auto now = std::chrono::steady_clock::now();
-        if (!idr_calm(now)) {
-          idr_deferred = false;  // 期間變成丟包連發：照 §S.19 丟掉，client 會再要
-        } else if (now >= last_idr_emit + kDesktopIdrFastGapMs) {
+        // 間隔每一輪重算：等待期間變成丟包連發就改等 1500 ms；§P2 壅塞提示出現或消失也在這裡跟著變
+        if (now >= last_idr_emit + idr_gap(now)) {
           session->request_idr_frame();
           requested_idr_frame = true;
           last_idr_emit = now;

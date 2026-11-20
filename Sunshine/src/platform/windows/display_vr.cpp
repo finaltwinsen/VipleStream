@@ -9,7 +9,7 @@
  *   fence_waiter_t 在 CPU 端確認 sharedFence（§B.7；上限依週期 2～6 ms，§VR-FENCE-WAIT；不變式 8：絕不 GPU Wait
  *   對方的 fence）→ CopyResource
  *   到影像池 → Signal(影像 fence)、Signal(consumedFence)、Flush。driver 還沒 HMD_PRESENTING 時 10 fps 推黑幀。
- * - §VR-FENCE-LATE（2026-10-09；config `vr_capture_late`，預設關）：第一段等待逾時後不丟這一張，繼續在 CPU 端等同一個
+ * - §VR-FENCE-LATE（2026-10-09；config `vr_capture_late`，2.0.30 起預設開）：第一段等待逾時後不丟這一張，繼續在 CPU 端等同一個
  *   fence 值到「等待預算」為止，晚到照樣複製；拆線改由 src/vr/vr_capture_health.h 判定（完成值 3 s 不動、或 5 s 沒有
  *   一張複製成功，而且有退避），不再用「連續逾時滿 1 s」。放棄可以連續很久（退避期最長 30 s），所以開關開著時
  *   所有不交影像的路徑都會每 100 ms 讓 captureThread 檢查一次停止（keepalive）。開關關著時走的每一條路徑與之前
@@ -1278,12 +1278,8 @@ namespace platf::dxgi {
         window_.present_to_fence_ms.push_back(pf);
         window_.late += late ? 1 : 0;
         window_.over_period += over_period ? 1 : 0;
-        stats_.late += late ? 1 : 0;
-        stats_.over_period += over_period ? 1 : 0;
-        if (stats_.fence_wait_ms.size() < k_stats_samples_max) {
-          stats_.fence_wait_ms.push_back(fw);
-          stats_.present_to_fence_ms.push_back(pf);
-        }
+        // 這四個 §VR-FENCE-LATE 欄位只記在 10 秒窗（log 用）：累計那一份（stats_）沒有人讀（selftest 只看
+        // copied／evt_to_push_ms 等），不再寫
       }
       // 複製成功的影像不會觸發拆線，回覆只可能帶「退避歸零」（feed 裡印）
       feed(late ? vr::capture::outcome_e::late : vr::capture::outcome_e::on_time, d, observed, fence_qpc - evt_qpc, push_qpc);

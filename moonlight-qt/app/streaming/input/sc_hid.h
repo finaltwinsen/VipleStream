@@ -55,6 +55,14 @@ public:
     // 只 prepare 沒 start 的情況也會把 handle 關掉。
     void stop();
 
+    // §INPUT-STALL（A.3-2）：給 SDL 主迴圈用的不阻塞版本（§SC-HOTPLUG 發現裝置不在了的時候）。
+    // 先要求讀取執行緒停；它已經退出（或根本沒啟動）就立刻收尾並回 true。還沒退出就回 false、
+    // 什麼都不等，呼叫端下一次輪詢再呼叫；從第一次呼叫起累計超過 kStopJoinTimeoutMs 仍沒退出，
+    // 就照 stop() 的規則遺棄並回 true。回 false 期間 isPrepared() 仍為 true、isActive() 為 false。
+    // 中途改呼叫 stop()（場次結束）也可以：已經等過的時間會算進去。
+    // 與 prepare()／start()／stop() 一樣只能由擁有者循序呼叫（不可與它們並行）。
+    bool stopNonBlocking();
+
     bool isActive() const;
     bool isPrepared() const { return m_devCount.load() > 0; }
 
@@ -118,6 +126,8 @@ private:
     // 世代：每次 prepare() +1。被遺棄的執行緒醒來後比對世代不符就退出，不碰任何成員。
     std::atomic<uint32_t> m_gen{0};
     bool m_abandoned = false;                   // 上一場 stop() 逾時遺棄了執行緒＋handle（只供 log）
+    Uint32 m_stopReqTick = 0;                   // stopNonBlocking() 第一次要求停止的時間（0 = 沒有進行中的要求）
+    void stopImpl(Uint32 priorWaitMs);          // priorWaitMs：之前已經等過的時間，從 kStopJoinTimeoutMs 扣掉
 
     // 讀取執行緒目前／最後一次進入的 hidapi 呼叫（stop() 逾時時印出卡在哪一步）
     enum LastOp : int { OpIdle = 0, OpRead = 1, OpSetFeature = 2, OpGetFeature = 3 };

@@ -37,6 +37,7 @@ extern "C" {
 #include "network.h"
 #include "platform/common.h"
 #include "process.h"
+#include "abr_congestion.h"
 #include "abr_signals.h"
 #include "relay.h"
 #include "rtsp.h"
@@ -726,6 +727,11 @@ namespace stream {
       std::chrono::steady_clock::time_point abrRttLastHeartbeat{};
       bool abrRttSampled{false};       // 是否已取得過任何 RTT 樣本（0 也算）
       bool abrRttWindowRolled{false};  // 兩段視窗是否已輪換過一次
+      // §P2（2026-11-20）：2D 的壅塞等級、分級降幅、緊急降碼冷卻、塞車點記憶（規則見 abr_congestion.h）。
+      // 握 abrMutex：run_abr_aimd（ENet control 執行緒或 picoquic IO 執行緒）每輪更新，
+      // abr_on_idr_request（同樣兩條執行緒）在收到 client 的 IDR 請求時讀寫。VR session 不碰。
+      ::abr_cong::congestion_t abrCong;
+      int abrIdrReq{0};  // 上一輪 ABR 之後收到幾次 client 的 IDR 請求（只給 log 用；握 abrMutex）
 
       // §VR-ABR-OUTAGE（2026-10-04）：VR 斷訊事件（斷訊前的位元率，恢復後直接拉回）。abrMutex 保護。
       vr::abr::outage_state_t vrOutage;
@@ -3160,6 +3166,72 @@ namespace stream {
     return 100.0f * (float) lossCount / (float) expected;
   }
 
+  /// 2D 的碼率下限（§ABR-FLOOR-FIX／§ABR-FLOOR-DERP，說明在 run_abr_aimd 內）。run_abr_aimd 與 abr_on_idr_request 共用
+  static int abr_floor_kbps_for(int maxBr) {
+    return std::min(maxBr, std::max(config::stream.abr_floor_kbps, maxBr * 8 / 100));  // floor ≤ cap
+  }
+
+  /// §P2：把目前壅塞等級對應的 IDR 最短間隔交給編碼迴圈（video.cpp 的 IDR 閘門）。只有 2D 呼叫；呼叫者持 abrMutex。
+  /// 每輪都重寫（值裡帶寫入時刻），這一側停擺 2 秒提示就自動失效。
+  static void abr_publish_idr_hint(session_t *session, std::chrono::steady_clock::time_point now) {
+    ::abr_cong::idr_hint_store(session->video.abrCong.idr_gap_hint(), now);
+  }
+
+  /**
+   * @brief §P2：client 要 IDR 時先經過這裡（ENet 的 IDX_REQUEST_IDR_FRAME 與 QUIC 的 IDR 標記），之後呼叫端照舊 raise idr_events。
+   *
+   * 壅塞等級已經在 L1 以上（延遲異常）又收到 IDR 請求（畫面已經壞掉）＝兩個獨立訊號同時成立：當場把碼率砍半，
+   * 不等下一輪 ABR。3 秒內最多一次（client 的請求常成對出現，watchdog 每秒還會再要）。
+   * 編碼迴圈先處理 IDR 事件、再處理碼率事件、之後才編碼，所以放行的那張 IDR 就是用降過的碼率編的。
+   * L0（乾淨網路上掉一張）不降碼；VR session 與沒開自動碼率的 session 完全不走。
+   * 執行緒不限（ENet＝controlBroadcastThread、QUIC＝picoquic ioLoop）；內部取 abrMutex，呼叫者不可持鎖。
+   */
+  static void abr_on_idr_request(session_t *session, const char *via) {
+    if (session->vr) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(session->video.abrMutex);
+    const int maxBr = session->video.configuredBitrateKbps;
+    if (maxBr <= 0 || !session->video.autoAdjustBitrate) {
+      return;
+    }
+    session->video.abrIdrReq++;
+    auto &cong = session->video.abrCong;
+    const auto now = std::chrono::steady_clock::now();
+    if (!cong.idr_request_wants_cut(now)) {
+      return;
+    }
+    int applied = session->video.adaptiveBitrateKbps.load();
+    if (applied <= 0) {
+      applied = maxBr;
+    }
+    int target = session->video.targetBitrateKbps.load();
+    if (target <= 0) {
+      target = applied;
+    }
+    const int minBr = abr_floor_kbps_for(maxBr);
+    const int base = std::min(target, applied);
+    const int cut = std::max(minBr, base * ::abr_cong::k_cut_emergency_pct / 100);
+    const auto prevLevel = cong.level();
+    // 已經在下限也照樣記帳：冷卻起算、等級進 L3（IDR 間隔拉長），只是碼率不動
+    const bool pointSet = cong.commit_cut(::abr_cong::action_e::cut_emergency, applied, now, std::min(cut, applied));
+    session->video.abrRttLastCutTime = now;
+    session->video.bitrateZeroLossStreak = 0;
+    if (cut < applied) {
+      session->video.targetBitrateKbps.store(cut);
+      session->video.adaptiveBitrateKbps.store(cut);
+      session->mail->event<int>(mail::bitrate_change)->raise(cut);
+    }
+    abr_publish_idr_hint(session, now);
+    BOOST_LOG(info) << "[VIPLE-ABR] cong level L" << (int) prevLevel << "->L" << (int) cong.level()
+                    << " rtt=" << session->video.abrRttLastMs << "ms base=" << abr_rtt_baseline(session)
+                    << "ms action=emergency-cut (idr request via " << via << ") "
+                    << applied << "->" << std::min(cut, applied) << " kbps"
+                    << (cut < applied ? "" : " (already at the floor)")
+                    << " idrGap=" << cong.idr_gap_hint() << "ms"
+                    << (pointSet ? std::format(" congestedAt={}kbps", applied) : std::string {});
+  }
+
   void run_abr_aimd(session_t *session, int lossCount, long long elapsedMs, const char *src) {
     int maxBr = session->video.configuredBitrateKbps;
     if (maxBr <= 0 || !session->video.autoAdjustBitrate) {
@@ -3192,7 +3264,7 @@ namespace stream {
     // AIMD 降到 floor 仍持續丟包、§Q-STALE 照丟 → 永遠回不升。
     // 1500kbps + 1% FEC（§K.5-FEC-CLAMP-FIX 後）+ audio ≈ 1.85Mbps，
     // 落在窄路徑 goodput 內。
-    int minBr = std::min(maxBr, std::max(config::stream.abr_floor_kbps, maxBr * 8 / 100));  // floor ≤ cap
+    int minBr = abr_floor_kbps_for(maxBr);  // floor ≤ cap
     // abrNow 供 fast ABR 與 outage 統一使用
     const auto abrNow = std::chrono::steady_clock::now();
     bool fastBitrateChanged = false;
@@ -3302,6 +3374,7 @@ namespace stream {
     // 對端瞬間忙碌之類的雜訊干擾，寧可晚一輪也不要誤降畫質。
     bool rttCongested = false;
     bool rttSevere = false;
+    bool rttSevereNow = false;  // §P2：這一輪「≥ 4 倍且多 200 ms」成立（不含連 2 輪與冷卻）；2D 的壅塞等級用
     {
       using namespace std::chrono_literals;
       uint32_t rtt = session->video.abrRttLastMs;
@@ -3324,6 +3397,7 @@ namespace stream {
         uint32_t excess = (rtt > baseline) ? (rtt - baseline) : 0;
         rttCongested = (rtt >= denom * 2) && (excess >= 50);
         bool severeNow = (rtt >= denom * 4) && (excess >= 200);
+        rttSevereNow = severeNow;
         if (severeNow) {
           session->video.abrRttCongestedRounds++;
         } else {
@@ -3352,8 +3426,9 @@ namespace stream {
             << "ms inflation=" << ((float) rtt / (float) denom)
             << "x action=OK heartbeat"
             << (session->vr ? std::string {} :
-                              std::format(" trend base/jit={:.0f}/{:.0f}ms trend={:.1f} gamma={:.1f} {}", ts.base_ms, ts.jitter_ms, ts.trend_ms,
-                                          ts.gamma_ms, ::vr::abr::trend_state_name(ts.state)));
+                              std::format(" trend base/jit={:.0f}/{:.0f}ms trend={:.1f} gamma={:.1f} {} level=L{}", ts.base_ms, ts.jitter_ms,
+                                          ts.trend_ms, ts.gamma_ms, ::vr::abr::trend_state_name(ts.state),
+                                          (int) session->video.abrCong.level()));
         }
       }
     }
@@ -3367,17 +3442,53 @@ namespace stream {
       using namespace std::chrono_literals;
       const auto &tr = session->video.abrTrend;
       deskTrendOver = tr.state() == ::vr::abr::trend_state_e::overuse || tr.overuse_recently(abrNow, 1500ms);
-      const bool cooled2 = session->video.abrRttLastCutTime.time_since_epoch().count() == 0 ||
-                           abrNow - session->video.abrRttLastCutTime >= 2s;
+      // （§P2：降碼與冷卻的判斷搬到下面的 abr_cong::congestion_t，這裡只剩暫停回升的條件）
       // §LAT-2D（2026-11-05 限速 A/B）：趨勢只看「排隊延遲還在不在漲」。瓶頸佇列塞滿後延遲停在 300～400 ms 不再上升，
       // 趨勢回到 normal，結果在 RTT 是基線幾百倍時照樣回升、佇列永遠排不掉（實測限速 15 Mbps 時碼率在 10～14 Mbps 鋸齒、
       // RTT 整段 250～500 ms）。所以舊的絕對門檻（≥ 2 倍且多 50 ms 暫停回升；≥ 4 倍且多 200 ms 連 2 輪就降）也要算：
       // 趨勢抓變化、絕對門檻抓「一直很高」，任一成立就成立
-      const bool legacySevere = rttSevere;
       const bool legacyCongested = rttCongested;
-      rttSevere = (tr.state() == ::vr::abr::trend_state_e::overuse && cooled2) || legacySevere;
       // 排空中（underuse）也不回升：等佇列清掉
       rttCongested = deskTrendOver || tr.state() == ::vr::abr::trend_state_e::underuse || legacyCongested;
+    }
+
+    // §P2（2026-11-20）：2D 把上面的判斷整理成四個等級（規則與數值在 abr_congestion.h）。和以前的差別：
+    //   降幅分級——趨勢過載 ×0.85（不變）；「≥ 4 倍且多 200 ms 連 2 輪」×0.70、冷卻由 5 秒改 2 秒（原本也是 ×0.85，
+    //   要 20 Mbps、瓶頸 5 Mbps 時要 9 刀約 18 秒才降得到）；高出基線 max(500 ms, 8 倍抖動) 連 2 輪＝深度壅塞，
+    //   ×0.50、3 秒內最多一次。
+    //   等級另外交給 IDR 閘門（L1 以上不走 §IDR-FAST 的 250 ms、L3 把間隔拉到最多 6 秒）與 abr_on_idr_request。
+    // 沒有 RTT 樣本時等級固定 L0、不建議任何動作；RTT 正常時三個條件都不成立，結果與以前相同。VR 不走。
+    ::abr_cong::action_e congAction = ::abr_cong::action_e::none;
+    if (!session->vr) {
+      auto &cong = session->video.abrCong;
+      ::abr_cong::cong_in_t in;
+      in.sampled = session->video.abrRttSampled;
+      if (in.sampled) {
+        const auto &tr = session->video.abrTrend;
+        in.rtt_ms = session->video.abrRttLastMs;
+        in.base_ms = abr_rtt_baseline(session);
+        in.jitter_ms = tr.jitter_ms();
+        in.hold = rttCongested || quicCongested;
+        in.trend_over = tr.state() == ::vr::abr::trend_state_e::overuse;
+        in.severe = rttSevereNow && session->video.abrRttCongestedRounds >= 2;
+      }
+      const auto co = cong.update(in, abrNow);
+      congAction = co.action;
+      rttSevere = congAction != ::abr_cong::action_e::none;
+      abr_publish_idr_hint(session, abrNow);
+      if (co.level != co.prev_level) {
+        BOOST_LOG(info) << "[VIPLE-ABR] cong level L" << (int) co.prev_level << "->L" << (int) co.level
+                        << " rtt=" << in.rtt_ms << "ms base=" << in.base_ms << "ms jit=" << std::format("{:.0f}", in.jitter_ms)
+                        << "ms trend=" << (in.sampled ? ::vr::abr::trend_state_name(session->video.abrTrend.state()) : "no-sample")
+                        << " hold=" << in.hold << " severe=" << in.severe << " idrReq=" << session->video.abrIdrReq
+                        << " action=" << ::abr_cong::action_name(co.action) << " idrGap=" << cong.idr_gap_hint()
+                        << "ms applied=" << applied << "kbps (src=" << src << ")";
+      }
+      if (co.point_expired) {
+        BOOST_LOG(info) << "[VIPLE-ABR] cong point cleared: " << co.expired_kbps
+                        << " kbps (no cut-level congestion for 30 s), fast ramp no longer capped";
+      }
+      session->video.abrIdrReq = 0;
     }
 
     // §ABR-ADAPT：VR 的丟包分類——延遲沒有上升（不是塞車）的丟包是無線環境的隨機掉包，交給 FEC／補包，不降碼。
@@ -3421,6 +3532,24 @@ namespace stream {
       } else {
         target = base;  // 輕微（≤3/s）→ hold，不升不降
       }
+      // §P2：2D 這一輪同時有延遲降碼的建議時取降得多的那一個。以前丟包分支會蓋掉延遲分支：佇列塞滿後趨勢回到
+      // normal、丟包被分類成隨機丟包（不降），只要每輪都有幾個丟包，延遲規則就永遠輪不到
+      if (!session->vr && congAction != ::abr_cong::action_e::none) {
+        const int congTarget = base * ::abr_cong::action_pct(congAction) / 100;
+        if (congTarget < target) {
+          target = congTarget;
+          const int congAfter = std::max(minBr, target);
+          const bool pointSet = session->video.abrCong.commit_cut(congAction, applied, abrNow, congAfter);
+          session->video.abrRttLastCutTime = abrNow;
+          abr_publish_idr_hint(session, abrNow);
+          // 已經在下限（這一刀沒有東西可降）就不記這一行：壅塞持續時每 1～2 秒會來一次
+          if (congAfter < applied) BOOST_LOG(info) << "[VIPLE-ABR] cong cut action=" << ::abr_cong::action_name(congAction) << " x0."
+                          << ::abr_cong::action_pct(congAction) << " (with loss) base=" << base << " target=" << std::max(minBr, target)
+                          << " kbps level=L" << (int) session->video.abrCong.level() << " rtt=" << session->video.abrRttLastMs
+                          << "ms base=" << abr_rtt_baseline(session) << "ms"
+                          << (pointSet ? std::format(" congestedAt={}kbps", applied) : std::string {});
+        }
+      }
       session->video.bitrateZeroLossStreak = 0;
     } else if (rttSevere) {
       // §ABR-DELAY：RTT 相對基線嚴重膨脹且持續 → 管線已深度積壓
@@ -3432,9 +3561,20 @@ namespace stream {
       // 還沒真正套用的樂觀 target 往下打折（否則實際降幅會不如預期）。
       int base = std::min(target, applied);
       // §ABR-ADAPT（2D）：趨勢判定比舊的倍數門檻早、且每 2 s 可以再降，單次降幅改 ×85%（同 VR 的 delay-trend）
-      target = base * (session->vr ? 75 : 85) / 100;
+      // §P2：2D 的降幅依壅塞等級分級（趨勢 ×0.85、嚴重 ×0.70、深度 ×0.50）；VR 不變
+      target = base * (session->vr ? 75 : ::abr_cong::action_pct(congAction)) / 100;
       session->video.bitrateZeroLossStreak = 0;
       session->video.abrRttLastCutTime = std::chrono::steady_clock::now();
+      if (!session->vr) {
+        const int congAfter = std::max(minBr, target);
+        const bool pointSet = session->video.abrCong.commit_cut(congAction, applied, abrNow, congAfter);
+        abr_publish_idr_hint(session, abrNow);  // 緊急降碼會把等級推到 L3
+        if (congAfter < applied) BOOST_LOG(info) << "[VIPLE-ABR] cong cut action=" << ::abr_cong::action_name(congAction) << " x0."
+                        << ::abr_cong::action_pct(congAction) << " base=" << base << " target=" << std::max(minBr, target)
+                        << " kbps level=L" << (int) session->video.abrCong.level() << " rtt=" << session->video.abrRttLastMs
+                        << "ms base=" << abr_rtt_baseline(session) << "ms"
+                        << (pointSet ? std::format(" congestedAt={}kbps", applied) : std::string {});
+      }
     } else if (quicCongested || rttCongested || repairHold) {
       // §VR-LINK-REPAIR：補包量大（repairHold）也走這裡——不降碼、不回升
       if (repairHold) {
@@ -3492,11 +3632,21 @@ namespace stream {
         // 多不到 20 ms 才算回到基線（LAN 基線 1 ms 時 1.5 倍沒有意義，看絕對差就好）
         deskClean = r <= b + 20;
       }
-      const int rampRounds = deskClean ? 3 : 5;
+      // §P2 塞車點記憶：上面的快回升假設「升過頭會馬上被抓到」，但延遲訊號要 1 秒以上才反應，1.5 秒 +15% 比訊號快，
+      // 結果在瓶頸附近鋸齒（§LAT-2D 註解記的 10～14 Mbps 就是）。最近 30 秒內塞過車時，快回升只能加到塞車點的 9 成；
+      // 到了之後改回 5 輪 +5% 上限的慢爬。沒有塞車點（rampCap = 0）時和以前完全一樣
+      const int rampCap = deskClean ? session->video.abrCong.ramp_cap_kbps(abrNow) : 0;
+      const bool fastRamp = deskClean && (rampCap <= 0 || target < rampCap);
+      const int rampRounds = fastRamp ? 3 : 5;
       if (session->video.bitrateZeroLossStreak >= rampRounds) {
         // §VR-ABR-FAST 啟用時由 fast controller 控制回升（RAMP），不執行舊 AIMD +5%
         if (!session->vr || !session->video.vrAbrFast) {
-          const int step = deskClean ? std::max(maxBr * 5 / 100, target * 15 / 100) : maxBr * 5 / 100;
+          int step = fastRamp ? std::max(maxBr * 5 / 100, target * 15 / 100) : maxBr * 5 / 100;
+          if (fastRamp && rampCap > 0 && target + step >= rampCap) {
+            step = rampCap - target;  // fastRamp 成立時 target < rampCap，step 一定是正的
+            BOOST_LOG(info) << "[VIPLE-ABR] cong ramp capped at " << rampCap << " kbps (90% of the congestion point "
+                            << session->video.abrCong.congested_kbps() << " kbps), slow ramp from here";
+          }
           target += step;  // additive increase: +5% of max（2D 延遲乾淨時改乘法 15%）
         }
         session->video.bitrateZeroLossStreak = 0;
@@ -3877,6 +4027,7 @@ namespace stream {
     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
 
+      abr_on_idr_request(session, "enet");  // §P2：壅塞中的 IDR 請求先降碼，下面那張 IDR 用降過的碼率編
       session->video.idr_events->raise(true);
     });
 
@@ -4709,6 +4860,7 @@ namespace stream {
         BOOST_LOG(info)
             << "[VIPLE-MPQUIC] §Q-IDR-VIA-QUIC: received IDR "
             << "request from client via QUIC stream #0";
+        abr_on_idr_request(session, "quic");  // §P2（這裡握著 gate->mtx，鎖序 gate→abr 與下面的 FEC status 分支相同）
         session->video.idr_events->raise(true);
       }
       // §Q-REMOTE Fix R.2: FEC status via QUIC stream #0

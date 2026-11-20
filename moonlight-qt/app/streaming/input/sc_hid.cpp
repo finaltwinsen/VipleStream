@@ -668,6 +668,32 @@ void ScHidPassthrough::start() {
 }
 
 void ScHidPassthrough::stop() {
+    // stopNonBlocking() 已經要求過停止的話，等過的時間算進上限
+    Uint32 prior = 0;
+    if (m_stopReqTick != 0) {
+        prior = SDL_GetTicks() - m_stopReqTick;
+        m_stopReqTick = 0;
+    }
+    stopImpl(prior);
+}
+
+bool ScHidPassthrough::stopNonBlocking() {
+    m_running = false;   // 讀取執行緒每個 hidapi 呼叫前都看它
+    if (m_thread && m_threadCtx && !m_threadCtx->exited.load()) {
+        const Uint32 now = SDL_GetTicks();
+        if (m_stopReqTick == 0) {
+            m_stopReqTick = now ? now : 1;
+        }
+        if (now - m_stopReqTick < kStopJoinTimeoutMs) {
+            return false;   // 還在收尾：不等，呼叫端稍後再來
+        }
+    }
+    // 執行緒已退出（join 立刻返回）、沒有執行緒、或已經等滿上限（立刻遺棄）：下面都不會再等
+    stop();
+    return true;
+}
+
+void ScHidPassthrough::stopImpl(Uint32 priorWaitMs) {
     if (m_running) {
         m_running = false;   // 讀取執行緒每個 hidapi 呼叫前都看它；正常情況 ≤ ~150 ms 退出
     }
@@ -683,10 +709,11 @@ void ScHidPassthrough::stop() {
     if (m_thread) {
         ScHidThreadCtx* ctx = m_threadCtx;
         const Uint32 t0 = SDL_GetTicks();
-        while (!ctx->exited.load() && (SDL_GetTicks() - t0) < kStopJoinTimeoutMs) {
+        const Uint32 budget = priorWaitMs >= kStopJoinTimeoutMs ? 0 : kStopJoinTimeoutMs - priorWaitMs;
+        while (!ctx->exited.load() && (SDL_GetTicks() - t0) < budget) {
             SDL_Delay(kStopPollStepMs);
         }
-        const Uint32 waited = SDL_GetTicks() - t0;
+        const Uint32 waited = priorWaitMs + (SDL_GetTicks() - t0);
         if (ctx->exited.load()) {
             SDL_WaitThread(m_thread, nullptr);   // 已退出：立即返回
             m_thread = nullptr;

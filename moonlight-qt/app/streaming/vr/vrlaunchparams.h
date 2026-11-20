@@ -2,7 +2,8 @@
  * @file streaming/vr/vrlaunchparams.h
  * @brief VipleStream 2.0 §VR：/launch 的 VR 參數編碼與 <VipleStreamVRSession> 解析。
  *
- * 直連（NvHTTP::startApp）與 relay（Session::tryRelayLaunch）共用這一份，格式見
+ * 只有直連（NvHTTP::startApp，Session 把 toQuery() 接在 query 尾端）會用到；relay（Session::tryRelayLaunch）
+ * 自己組 /launch、不帶 VR 參數（relay 路徑目前不要求 VR，以平面串流）。格式見
  * docs/vr_protocol.md §4.2：全部是十進位定點數（vrCaps 是十六進位），不用 base64。
  * server 端的嚴格解析在 Sunshine/src/vr/vr_session.cpp，兩邊要一起改。
  */

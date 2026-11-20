@@ -246,6 +246,12 @@ static LINKED_BLOCKING_QUEUE frameFecStatusQueue;
 static LINKED_BLOCKING_QUEUE asyncCallbackQueue;
 static PLT_EVENT idrFrameRequiredEvent;
 
+// §IDR-RETRY：最近一次 LiRequestIdrFrame() 的時刻（PltGetMillis 截成 32 位元，差值用無號減法，迴繞無妨）。
+// 任何執行緒都可能要 IDR（接收、解碼、控制），讀的是 VideoRecv 的計時重試：各自只有一個字的讀寫，
+// 不加鎖；先寫時刻再寫 valid，讀的那邊先看 valid。兩個請求同時寫時留下哪一個都可以（差不到 1 ms）。
+static volatile uint32_t idrLastRequestMs;
+static volatile int idrLastRequestValid;
+
 static PPLT_CRYPTO_CONTEXT encryptionCtx;
 static PPLT_CRYPTO_CONTEXT decryptionCtx;
 
@@ -467,6 +473,7 @@ void vrApiSetReady(bool ready) {
 
 int initializeControlStream(void) {
     stopping = false;
+    idrLastRequestValid = 0;  // §IDR-RETRY：上一場的請求時刻不可沿用
     PltCreateEvent(&idrFrameRequiredEvent);
     LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
@@ -645,8 +652,21 @@ void LiRequestIdrFrame(void) {
     // We require a full IDR frame to recover.
     freeBasicLbqList(LbqFlushQueueItems(&referenceFrameControlQueue));
 
+    // §IDR-RETRY：記下時刻，depacketizer 的計時重試以「任何來源的上一次請求」為基準
+    idrLastRequestMs = (uint32_t)PltGetMillis();
+    idrLastRequestValid = 1;
+
     // Request the IDR frame
     PltSetEvent(&idrFrameRequiredEvent);
+}
+
+// §IDR-RETRY：最近一次 IDR 請求的時刻（32 位元毫秒）。這一場還沒要過就回 false。
+bool idrRequestLastTimeMs(uint32_t* lastMs) {
+    if (!idrLastRequestValid) {
+        return false;
+    }
+    *lastMs = idrLastRequestMs;
+    return true;
 }
 
 // Forward declaration (defined later in this file)

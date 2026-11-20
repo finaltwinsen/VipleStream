@@ -2210,7 +2210,7 @@ PHY 1.7 Gbps。同樣 200 Mbps、90 Hz、30 s：
   **鎖定狀態下會不會真的擋下來還沒驗**（要有人把 host 鎖起來再連一次）。
 - 查的方法：`<dev-client>` 用 `--vr-emulate` 連 host、`--dump-bitstream` 存下串流，用 ffmpeg 抽一幀看。
 
-**host 擷取端的 fence 晚到：遊戲的 GPU 負載一重，舊規則就丟影像、再重就整場黑畫面（§VR-FENCE-LATE，2026-10-09；server `vr_capture_late`，預設關閉）**
+**host 擷取端的 fence 晚到：遊戲的 GPU 負載一重，舊規則就丟影像、再重就整場黑畫面（§VR-FENCE-LATE，2026-10-09；server `vr_capture_late`，2.0.30 起預設開啟）**
 
 事故（2026-10-09 的配戴場次，桌球遊戲）：
 
@@ -2257,7 +2257,7 @@ host 管線延遲有關的無人驗測都要先停用儀表板；儀表板開著
 
 修正（§VR-FENCE-LATE；只改 server，driver、IPC 的版面、client、線上協定都沒有動；設定見 `Sunshine/docs/configuration.md`）：
 
-| 項目 | `vr_capture_late = disabled`（預設） | `vr_capture_late = enabled` |
+| 項目 | `vr_capture_late = disabled` | `vr_capture_late = enabled`（2.0.30 起的預設） |
 |---|---|---|
 | 第一段等待（`fence_wait_ms`＝700 ÷ 幀率取整數毫秒、夾在 2～6 ms：120 Hz 是 5 ms，100 Hz 以下是 6 ms）內到值 | 複製 | 複製（和關著時走同一條路徑） |
 | 第一段逾時 | 丟這一張 | 繼續在 CPU 端等同一個 fence 值，到值就照常複製（計入 `late`）；從被叫醒起累計超過等待預算才丟 |
@@ -2284,7 +2284,7 @@ host 管線延遲有關的無人驗測都要先停用儀表板；儀表板開著
   `fenceWait`（被叫醒 → 到值）在晚到超過一個發布間隔時會貼在發布間隔上，不代表只晚那麼多。欄位說明在 `log_tags.md`。
 - **驗證到哪裡**：判定邏輯（等待預算、卡死、餓死、退避、過載旗標）與 LATCH 的 hold 入口有單元測試；擷取迴圈「卡死時仍然
   每 100 ms 檢查停止」只用模型推演過；`<host>` 上的實測（四個負載、開關開與關）在 2026-10-10 做了，見下面。
-  **預設關閉**，等有人配戴驗過才改預設。
+  當時**預設關閉**；2.0.30 起預設開啟（`Sunshine/src/config.h` 的 `capture_late = true`）。
 - 開關關著時遇到的避開法：從 SteamVR 的介面把遊戲關掉再開（設定檔裡的超取樣在啟動時不會套用），不要在遊戲裡把它調高。
   打開 SteamVR 儀表板的期間串流是正常的，但那時操作不到遊戲內的選單，只能用來確認連線還活著。
 - 已知的限制：

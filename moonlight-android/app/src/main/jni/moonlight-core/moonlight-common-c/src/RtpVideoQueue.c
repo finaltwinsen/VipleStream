@@ -417,8 +417,7 @@ static bool llNoteUnrecoverable(PRTP_VIDEO_QUEUE queue, int kind) {
 }
 
 // VideoDepacketizer 的「Network dropped」行（frames＝這一次跳過幾幀；nowUs＝這一幀第一個封包到達的時刻，和上面同一個時鐘）。
-// 回傳 true＝這一行可以印。宣告在兩個 .c 各寫一份：這一輪只動這兩個檔，之後可以搬進 Limelight-internal.h
-bool RtpvLossLogDropped(uint32_t frames, uint64_t nowUs);
+// 回傳 true＝這一行可以印。原型在 Limelight-internal.h
 bool RtpvLossLogDropped(uint32_t frames, uint64_t nowUs) {
     llRoll(nowUs);
     ll.dropEvents++;

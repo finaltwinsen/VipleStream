@@ -51,8 +51,15 @@
 #include <windows.h>
 #include <SDL_syswm.h>   // §INPUT-STALL watchdog 需要 HWND
 #include <dbghelp.h>     // §INPUT-STALL 主執行緒堆疊擷取
+#include <wct.h>         // §INPUT-STALL 等待鏈（Wait Chain Traversal，advapi32）
+#include <cstdarg>
+#include <string>
+#include <QDateTime>
+#include <QCoreApplication>
+#include "path.h"        // §INPUT-STALL 不輪替的紀錄檔放在 log 目錄
 #ifdef _MSC_VER
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "advapi32.lib")
 #endif
 // Scaling the icon down on Win32 looks dreadful, so render at lower res
 #define ICON_SIZE 32
@@ -69,29 +76,118 @@
 // 合成輸入也算）且本視窗在前景時記一筆 [VIPLE-INPUT-STALL]，恢復時再記總長。
 // 停在 wait 相位＝卡在 SDL 內部（PumpEvents／joystick／hidapi 列舉）；停在
 // 事件相位＝我們自己的 handler。純閒置不會誤報。
+// 只在 Windows 啟動：「停滯期間有使用者輸入」與「本視窗在前景」都靠 Win32 API 判斷，堆疊擷取也是。其他平台
+// 沒有這兩個條件，只能退成「事件處理 ≥50 ms 就報」——重建解碼器、XR session 重建這類本來就會超過 50 ms 的
+// 正常處理全被印成 "with user input pending"，又沒有堆疊可查，是純誤報。所以非 Windows 不開 watchdog 執行緒
+// （節拍與相位照樣更新，只是兩次 atomic 寫入，沒有人讀）。
 #include <atomic>
 namespace {
 std::atomic<uint32_t> s_LoopBeat {0};
-std::atomic<int32_t>  s_LoopPhase {-2};   // -2 未啟動, -1 wait, >=0 事件
+std::atomic<int32_t>  s_LoopPhase {-2};   // -3 迴圈開頭（等待之前的輪詢）, -2 未啟動, -1 wait, >=0 事件
 std::atomic<bool>     s_StallWatchdogRun {false};
 #ifdef Q_OS_WIN32
 HWND                  s_StallWatchdogHwnd = nullptr;
 DWORD                 s_StallMainThreadId = 0;
 static uint32_t stallNowMs() { return GetTickCount(); }   // 與 GetLastInputInfo 同時基
 
-// §INPUT-STALL 堆疊擷取（2026-09-22）：儀器化第一晚抓到 26 次主迴圈停頓，每次都
+// §INPUT-STALL 堆疊擷取（2026-09-22；2026-11-20 改寫）：儀器化第一晚抓到 26 次主迴圈停頓，每次都
 // 固定 ≈2016 ms、phase 全是 SDL_WaitEventTimeout（卡在 SDL 內部），log 前後沒有任何
-// 觸發事件。要知道是 SDL 的哪條路（hidapi 列舉／DirectInput／WGI／訊息泵）只能看
-// 堆疊：停頓 ≥300 ms 時暫停主執行緒、StackWalk64 抄下 PC，恢復後再用 dbghelp 解成
-// module!symbol+offset（SDL3.dll 沒 PDB 也能解到最近的匯出符號）。每次停頓只抄一次，
-// 暫停時間只有幾百微秒。dbghelp 非 thread-safe，只在 watchdog 執行緒使用。
-static void stallCaptureMainThreadStack(uint32_t staleMs)
+// 觸發事件。要知道是 SDL 的哪條路（hidapi 列舉／DirectInput／WGI／訊息泵）只能看堆疊。
+// 兩個月下來證據一筆都沒留住（log 只保留幾份、CLI 串流只寫 stdout），所以 11-20 起：
+//   - 一次停頓抄兩次（≥300 ms 與 ≥1000 ms）：最上面幾格相同＝卡在同一個呼叫；不同＝一連串慢呼叫。
+//   - 每一格都印「模組+RVA」，SDL3.dll 沒有 PDB 也能拿同版符號離線解；解得到符號時一併印。
+//   - 印主執行緒的等待鏈（Wait Chain Traversal）：跨行程的等待（輸入法／hook／SendMessage／ALPC）
+//     鏈上會出現別的行程；卡在同步 IOCTL 時鏈上只有本執行緒。
+//   - 同樣內容附加寫進 log 目錄下不輪替的 input-stall.log（上限 1 MB，滿了只留後半）。
+// 全部在 watchdog 執行緒上做。主執行緒被暫停的那一小段只做三件不拿使用者態鎖、不配置記憶體的事：
+// GetThreadContext、VirtualQuery（都是系統呼叫）、把堆疊記憶體 memcpy 到靜態緩衝區。展開堆疊
+// （StackWalk64 會進 dbghelp，可能配置記憶體、拿 loader 相關的鎖）一律等恢復主執行緒之後，
+// 對著那份副本做——主執行緒若正拿著 heap 鎖被暫停，在暫停期間配置記憶體就是死結。
+// dbghelp 非 thread-safe，只在 watchdog 執行緒使用。
+struct StallStack {
+    DWORD64 pcs[32];
+    int n;
+};
+
+static constexpr uint32_t kStallCapture1Ms = 300;
+static constexpr uint32_t kStallCapture2Ms = 1000;
+static constexpr qint64 kStallFileMaxBytes = 1024 * 1024;
+
+// 主執行緒堆疊的副本（只有 watchdog 執行緒讀寫；256 KB 足夠涵蓋 32 格）
+static BYTE    s_StallStackCopy[256 * 1024];
+static DWORD64 s_StallStackCopyBase = 0;
+static SIZE_T  s_StallStackCopyLen = 0;
+
+// StackWalk64 的記憶體讀取：落在副本範圍內的從副本讀（主執行緒已經繼續跑，現場的堆疊內容可能變了），
+// 其餘（程式碼、unwind 資料）直接讀行程本身。
+static BOOL CALLBACK stallReadMemory(HANDLE hProcess, DWORD64 addr, PVOID buf, DWORD size, LPDWORD bytesRead)
 {
+    if (addr >= s_StallStackCopyBase) {
+        const DWORD64 off = addr - s_StallStackCopyBase;
+        if (off < s_StallStackCopyLen && size <= s_StallStackCopyLen - off) {
+            memcpy(buf, s_StallStackCopy + off, size);
+            if (bytesRead) *bytesRead = size;
+            return TRUE;
+        }
+    }
+    SIZE_T got = 0;
+    const BOOL ok = ReadProcessMemory(hProcess, (LPCVOID)(uintptr_t)addr, buf, size, &got);
+    if (bytesRead) *bytesRead = (DWORD)got;
+    return ok;
+}
+
+// 印一行到一般 log，同時（rec 不為空時）累積到要寫進 input-stall.log 的文字
+static void stallEmit(std::string* rec, const char* fmt, ...)
+{
+    char line[640];
+    va_list ap;
+    va_start(ap, fmt);
+    SDL_vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-INPUT-STALL] %s", line);
+    if (rec != nullptr) {
+        rec->append(line);
+        rec->push_back('\n');
+    }
+}
+
+// 附加寫入 input-stall.log（watchdog 執行緒；主執行緒此時沒有被暫停）。超過上限時只留後半。
+static void stallAppendToFile(const std::string& rec)
+{
+    if (rec.empty()) return;
+    static const QString s_path = QDir(Path::getLogDir()).filePath(QStringLiteral("input-stall.log"));
+    QFile f(s_path);
+    if (f.size() > kStallFileMaxBytes) {
+        QByteArray tail;
+        if (f.open(QIODevice::ReadOnly)) {
+            f.seek(f.size() - kStallFileMaxBytes / 2);
+            tail = f.readAll();
+            f.close();
+            const int nl = tail.indexOf('\n');
+            if (nl >= 0) tail.remove(0, nl + 1);   // 從完整的一行開始
+        }
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            f.write("[older entries trimmed]\n");
+            f.write(tail);
+            f.close();
+        }
+    }
+    if (f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        f.write(rec.data(), (qint64)rec.size());
+        f.close();
+    }
+}
+
+// 暫停主執行緒、抄暫存器與堆疊記憶體、恢復，之後才展開。回傳格數（0 = 沒抄到）。
+static void stallCaptureMainThreadStack(StallStack* out)
+{
+    out->n = 0;
     if (s_StallMainThreadId == 0) return;
     HANDLE hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION,
                                 FALSE, s_StallMainThreadId);
     if (hThread == nullptr) return;
 
+    // 符號引擎先初始化好（會配置記憶體、載入模組清單），不可留到暫停期間
     static bool s_symInit = false;
     if (!s_symInit) {
         SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_NO_PROMPTS);
@@ -99,74 +195,209 @@ static void stallCaptureMainThreadStack(uint32_t staleMs)
         s_symInit = true;
     }
 
-    DWORD64 pcs[24];
-    int nPcs = 0;
+    CONTEXT ctx;
+    ZeroMemory(&ctx, sizeof(ctx));
+    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    bool haveCtx = false;
+    s_StallStackCopyBase = 0;
+    s_StallStackCopyLen = 0;
+
+    // ── 暫停期間：不配置記憶體、不印 log、不呼叫 dbghelp ──
     if (SuspendThread(hThread) != (DWORD)-1) {
-        CONTEXT ctx;
-        ZeroMemory(&ctx, sizeof(ctx));
-        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
         if (GetThreadContext(hThread, &ctx)) {
-            STACKFRAME64 sf;
-            ZeroMemory(&sf, sizeof(sf));
-#ifdef _M_X64
-            const DWORD machine = IMAGE_FILE_MACHINE_AMD64;
-            sf.AddrPC.Offset = ctx.Rip;
-            sf.AddrFrame.Offset = ctx.Rbp;
-            sf.AddrStack.Offset = ctx.Rsp;
+            haveCtx = true;
+#if defined(_M_X64)
+            const uintptr_t sp = (uintptr_t)ctx.Rsp;
+#elif defined(_M_ARM64)
+            const uintptr_t sp = (uintptr_t)ctx.Sp;
 #else
-            const DWORD machine = IMAGE_FILE_MACHINE_I386;
-            sf.AddrPC.Offset = ctx.Eip;
-            sf.AddrFrame.Offset = ctx.Ebp;
-            sf.AddrStack.Offset = ctx.Esp;
+            const uintptr_t sp = (uintptr_t)ctx.Esp;
 #endif
-            sf.AddrPC.Mode = sf.AddrFrame.Mode = sf.AddrStack.Mode = AddrModeFlat;
-            while (nPcs < (int)(sizeof(pcs) / sizeof(pcs[0])) &&
-                   StackWalk64(machine, GetCurrentProcess(), hThread, &sf, &ctx, nullptr,
-                               SymFunctionTableAccess64, SymGetModuleBase64, nullptr) &&
-                   sf.AddrPC.Offset != 0) {
-                pcs[nPcs++] = sf.AddrPC.Offset;
+            // 堆疊已提交的部分（sp 所在頁到堆疊底）是同一個區域；只抄到區域結尾，不會讀到未提交的頁
+            MEMORY_BASIC_INFORMATION mbi;
+            if (VirtualQuery((LPCVOID)sp, &mbi, sizeof(mbi)) == sizeof(mbi) && mbi.State == MEM_COMMIT &&
+                    !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+                const uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+                SIZE_T len = end > sp ? (SIZE_T)(end - sp) : 0;
+                if (len > sizeof(s_StallStackCopy)) len = sizeof(s_StallStackCopy);
+                memcpy(s_StallStackCopy, (const void*)sp, len);
+                s_StallStackCopyBase = (DWORD64)sp;
+                s_StallStackCopyLen = len;
             }
         }
         ResumeThread(hThread);
     }
-    CloseHandle(hThread);
+    // ── 主執行緒已恢復 ──
 
-    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-INPUT-STALL] main thread stack at %u ms (%d frames):", staleMs, nPcs);
-    for (int i = 0; i < nPcs; i++) {
+    if (haveCtx && s_StallStackCopyLen > 0) {
+        STACKFRAME64 sf;
+        ZeroMemory(&sf, sizeof(sf));
+#if defined(_M_X64)
+        const DWORD machine = IMAGE_FILE_MACHINE_AMD64;
+        sf.AddrPC.Offset = ctx.Rip;
+        sf.AddrFrame.Offset = ctx.Rbp;
+        sf.AddrStack.Offset = ctx.Rsp;
+#elif defined(_M_ARM64)
+        const DWORD machine = IMAGE_FILE_MACHINE_ARM64;
+        sf.AddrPC.Offset = ctx.Pc;
+        sf.AddrFrame.Offset = ctx.Fp;
+        sf.AddrStack.Offset = ctx.Sp;
+#else
+        const DWORD machine = IMAGE_FILE_MACHINE_I386;
+        sf.AddrPC.Offset = ctx.Eip;
+        sf.AddrFrame.Offset = ctx.Ebp;
+        sf.AddrStack.Offset = ctx.Esp;
+#endif
+        sf.AddrPC.Mode = sf.AddrFrame.Mode = sf.AddrStack.Mode = AddrModeFlat;
+        while (out->n < (int)(sizeof(out->pcs) / sizeof(out->pcs[0])) &&
+               StackWalk64(machine, GetCurrentProcess(), hThread, &sf, &ctx, stallReadMemory,
+                           SymFunctionTableAccess64, SymGetModuleBase64, nullptr) &&
+               sf.AddrPC.Offset != 0) {
+            out->pcs[out->n++] = sf.AddrPC.Offset;
+        }
+    }
+    CloseHandle(hThread);
+}
+
+// 每一格印「模組+RVA」，解得到符號再加「(符號+位移)」。prev 不為空時在標題列註明和上一次相同的格數。
+static void stallLogStack(std::string* rec, const StallStack& st, uint32_t staleMs, int index, const StallStack* prev)
+{
+    char same[64] = "";
+    if (prev != nullptr) {
+        int top = 0;
+        while (top < st.n && top < prev->n && st.pcs[top] == prev->pcs[top]) top++;
+        // 由最外層往內比對：兩次堆疊深度不同時，共同的呼叫者也看得出來
+        int bottom = 0;
+        while (bottom < st.n && bottom < prev->n &&
+               st.pcs[st.n - 1 - bottom] == prev->pcs[prev->n - 1 - bottom]) bottom++;
+        SDL_snprintf(same, sizeof(same), ", same as capture 1: top %d, outermost %d", top, bottom);
+    }
+    stallEmit(rec, "main thread stack %d at %u ms (%d frames%s):", index, staleMs, st.n, same);
+    for (int i = 0; i < st.n; i++) {
         char modName[MAX_PATH] = "?";
         HMODULE hMod = nullptr;
         if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               (LPCSTR)(uintptr_t)pcs[i], &hMod) && hMod != nullptr) {
+                               (LPCSTR)(uintptr_t)st.pcs[i], &hMod) && hMod != nullptr) {
             char full[MAX_PATH];
-            if (GetModuleFileNameA(hMod, full, sizeof(full)) > 0) {
+            const DWORD n = GetModuleFileNameA(hMod, full, sizeof(full));
+            if (n > 0 && n < sizeof(full)) {
                 const char* base = strrchr(full, '\\');
                 SDL_strlcpy(modName, base ? base + 1 : full, sizeof(modName));
             }
         }
+        const unsigned long long rva =
+            (unsigned long long)(hMod ? st.pcs[i] - (DWORD64)(uintptr_t)hMod : st.pcs[i]);
         char symBuf[sizeof(SYMBOL_INFO) + 256];
         SYMBOL_INFO* sym = (SYMBOL_INFO*)symBuf;
         ZeroMemory(symBuf, sizeof(symBuf));
         sym->SizeOfStruct = sizeof(SYMBOL_INFO);
         sym->MaxNameLen = 255;
         DWORD64 disp = 0;
-        if (SymFromAddr(GetCurrentProcess(), pcs[i], &disp, sym)) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-INPUT-STALL]   #%02d %s!%s+0x%llx",
-                        i, modName, sym->Name, (unsigned long long)disp);
+        if (SymFromAddr(GetCurrentProcess(), st.pcs[i], &disp, sym)) {
+            stallEmit(rec, "  #%02d %s+0x%llx (%s+0x%llx)", i, modName, rva, sym->Name, (unsigned long long)disp);
         }
         else {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-INPUT-STALL]   #%02d %s+0x%llx",
-                        i, modName, (unsigned long long)(hMod ? pcs[i] - (DWORD64)(uintptr_t)hMod : pcs[i]));
+            stallEmit(rec, "  #%02d %s+0x%llx", i, modName, rva);
         }
     }
 }
-#else
-static uint32_t stallNowMs() { return SDL_GetTicks(); }
-#endif
+
+static const char* stallWctTypeName(int t)
+{
+    switch (t) {
+    case WctCriticalSectionType: return "CriticalSection";
+    case WctSendMessageType:     return "SendMessage";
+    case WctMutexType:           return "Mutex";
+    case WctAlpcType:            return "ALPC";
+    case WctComType:             return "COM";
+    case WctThreadWaitType:      return "ThreadWait";
+    case WctProcessWaitType:     return "ProcessWait";
+    case WctThreadType:          return "Thread";
+    case WctComActivationType:   return "ComActivation";
+    case WctSocketIoType:        return "SocketIo";
+    case WctSmbIoType:           return "SmbIo";
+    default:                     return "Unknown";
+    }
+}
+
+static const char* stallWctStatusName(int s)
+{
+    switch (s) {
+    case WctStatusNoAccess:     return "no-access";
+    case WctStatusRunning:      return "running";
+    case WctStatusBlocked:      return "blocked";
+    case WctStatusPidOnly:      return "pid-only";
+    case WctStatusPidOnlyRpcss: return "pid-only-rpcss";
+    case WctStatusOwned:        return "owned";
+    case WctStatusNotOwned:     return "not-owned";
+    case WctStatusAbandoned:    return "abandoned";
+    case WctStatusError:        return "error";
+    default:                    return "unknown";
+    }
+}
+
+// 主執行緒的等待鏈（同步查詢、唯讀；不需要暫停主執行緒）。COM 的等待要另外註冊 ole32 的 callback 才展得開，
+// 這裡沒有做：鏈上會停在 COM 節點，看得到「在等 COM」但看不到對方是誰。
+static void stallLogWaitChain(std::string* rec)
+{
+    if (s_StallMainThreadId == 0) return;
+    HWCT wct = OpenThreadWaitChainSession(0, nullptr);
+    if (wct == nullptr) {
+        stallEmit(rec, "wait chain: OpenThreadWaitChainSession failed (%lu)", GetLastError());
+        return;
+    }
+    WAITCHAIN_NODE_INFO nodes[WCT_MAX_NODE_COUNT];
+    DWORD count = WCT_MAX_NODE_COUNT;
+    BOOL isCycle = FALSE;
+    if (!GetThreadWaitChain(wct, 0, WCTP_GETINFO_ALL_FLAGS, s_StallMainThreadId, &count, nodes, &isCycle)) {
+        stallEmit(rec, "wait chain: GetThreadWaitChain failed (%lu)", GetLastError());
+        CloseThreadWaitChainSession(wct);
+        return;
+    }
+    if (count > WCT_MAX_NODE_COUNT) count = WCT_MAX_NODE_COUNT;   // 鏈比緩衝區長時 count 回報實際長度
+    stallEmit(rec, "wait chain (%lu node(s)%s):", count, isCycle ? ", DEADLOCK CYCLE" : "");
+    const DWORD myPid = GetCurrentProcessId();
+    for (DWORD i = 0; i < count; i++) {
+        const WAITCHAIN_NODE_INFO& n = nodes[i];
+        if (n.ObjectType == WctThreadType) {
+            char procName[MAX_PATH] = "";
+            const DWORD pid = n.ThreadObject.ProcessId;
+            if (pid == myPid) {
+                SDL_strlcpy(procName, "self", sizeof(procName));
+            }
+            else if (HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+                char full[MAX_PATH];
+                DWORD len = sizeof(full);
+                if (QueryFullProcessImageNameA(hp, 0, full, &len)) {
+                    const char* base = strrchr(full, '\\');
+                    SDL_strlcpy(procName, base ? base + 1 : full, sizeof(procName));
+                }
+                CloseHandle(hp);
+            }
+            stallEmit(rec, "  [%lu] Thread pid=%lu (%s) tid=%lu %s wait=%lu ms ctxsw=%lu",
+                      i, pid, procName[0] ? procName : "?", n.ThreadObject.ThreadId,
+                      stallWctStatusName(n.ObjectStatus), n.ThreadObject.WaitTime, n.ThreadObject.ContextSwitches);
+        }
+        else {
+            // ObjectName 不保證有結尾的 0：先抄到自己的緩衝區補上
+            WCHAR wname[WCT_OBJNAME_LENGTH + 1];
+            memcpy(wname, n.LockObject.ObjectName, sizeof(n.LockObject.ObjectName));
+            wname[WCT_OBJNAME_LENGTH] = 0;
+            char objName[WCT_OBJNAME_LENGTH * 3 + 1] = "";
+            WideCharToMultiByte(CP_UTF8, 0, wname, -1, objName, sizeof(objName), nullptr, nullptr);
+            objName[sizeof(objName) - 1] = '\0';
+            stallEmit(rec, "  [%lu] %s %s name=\"%s\"%s",
+                      i, stallWctTypeName(n.ObjectType), stallWctStatusName(n.ObjectStatus), objName,
+                      n.LockObject.Alertable ? " alertable" : "");
+        }
+    }
+    CloseThreadWaitChainSession(wct);
+}
 
 static void stallPhaseName(int32_t phase, char* buf, size_t len)
 {
     if (phase == -2) SDL_snprintf(buf, len, "not-started");
+    else if (phase == -3) SDL_snprintf(buf, len, "loop-top");
     else if (phase == -1) SDL_snprintf(buf, len, "SDL_WaitEventTimeout");
     else if (phase & 0x10000) SDL_snprintf(buf, len, "SDL_USEREVENT code=%d", phase & 0xFFFF);
     else SDL_snprintf(buf, len, "event 0x%x", phase);
@@ -177,42 +408,59 @@ static int inputStallWatchdogProc(void*)
     uint32_t lastBeat = s_LoopBeat.load();
     uint32_t lastBeatChangeMs = stallNowMs();
     bool reported = false;
-    bool stackCaptured = false;
+    int captures = 0;          // 這次停頓已經抄了幾次堆疊（0～2）
+    StallStack firstStack = {};
     int32_t reportedPhase = -2;
     uint32_t stallCount = 0;
     while (s_StallWatchdogRun.load()) {
-#ifdef Q_OS_WIN32
         SDL_Delay(10);
-#else
-        // §PERF-1113：非 Windows 沒有輸入時刻也沒有堆疊擷取，這條執行緒只剩「卡在自己的事件處理 ≥50 ms 就印一行」，
-        // 卻整場串流（含頭盔 VR 串流）每 10 ms 醒一次。改 25 ms：門檻仍是 50 ms，回報的毫秒數解析度變成 25 ms
-        SDL_Delay(25);
-#endif
         uint32_t now = stallNowMs();
         uint32_t beat = s_LoopBeat.load();
         if (beat != lastBeat) {
             if (reported) {
                 char pn[48]; stallPhaseName(reportedPhase, pn, sizeof(pn));
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-INPUT-STALL] recovered: main loop was unresponsive %u ms (phase=%s) #%u",
-                            now - lastBeatChangeMs, pn, stallCount);
+                // 有抄過堆疊的停頓，把總長也寫進 input-stall.log，一筆紀錄才完整
+                std::string rec;
+                stallEmit(captures > 0 ? &rec : nullptr,
+                          "recovered: main loop was unresponsive %u ms (phase=%s) #%u",
+                          now - lastBeatChangeMs, pn, stallCount);
+                stallAppendToFile(rec);
                 reported = false;
-                stackCaptured = false;
+                captures = 0;
             }
             lastBeat = beat;
             lastBeatChangeMs = now;
             continue;
         }
         uint32_t stale = now - lastBeatChangeMs;
-#ifdef Q_OS_WIN32
-        if (reported && !stackCaptured && stale >= 300) {
-            stackCaptured = true;
-            stallCaptureMainThreadStack(stale);
+        if (reported && ((captures == 0 && stale >= kStallCapture1Ms) ||
+                         (captures == 1 && stale >= kStallCapture2Ms))) {
+            StallStack st;
+            stallCaptureMainThreadStack(&st);
+            // 抄完才算停頓長度：節拍若在抄的當下已經恢復，這份堆疊就不是停頓現場
+            const bool stillStalled = (s_LoopBeat.load() == lastBeat);
+            char pn[48]; stallPhaseName(reportedPhase, pn, sizeof(pn));
+            std::string rec;
+            if (captures == 0) {
+                rec = "==== " + QDateTime::currentDateTime().toString(Qt::ISODateWithMs).toStdString() +
+                      " v" + QCoreApplication::applicationVersion().toStdString() +
+                      " pid=" + std::to_string(GetCurrentProcessId()) + " ====\n";
+                stallEmit(&rec, "stall #%u: main loop unresponsive %u ms so far (phase=%s)", stallCount, stale, pn);
+            }
+            else {
+                rec = "---- " + QDateTime::currentDateTime().toString(Qt::ISODateWithMs).toStdString() + " ----\n";
+            }
+            stallLogStack(&rec, st, stale, captures + 1, captures == 1 ? &firstStack : nullptr);
+            if (!stillStalled) {
+                stallEmit(&rec, "  (main loop resumed while capturing; this stack may be past the stall)");
+            }
+            stallLogWaitChain(&rec);
+            stallAppendToFile(rec);
+            if (captures == 0) firstStack = st;
+            captures++;
         }
-#endif
         if (stale < 50 || reported) continue;
         bool inputPending = true;
-#ifdef Q_OS_WIN32
         LASTINPUTINFO lii; lii.cbSize = sizeof(lii); lii.dwTime = 0;
         if (GetLastInputInfo(&lii)) {
             // 只有「節拍停滯後仍有使用者輸入且已等 ≥50 ms」才算鍵鼠受影響
@@ -223,12 +471,6 @@ static int inputStallWatchdogProc(void*)
         if (inputPending && s_StallWatchdogHwnd != nullptr && GetForegroundWindow() != s_StallWatchdogHwnd) {
             inputPending = false;   // 使用者在別的視窗操作，主迴圈閒置是正常的
         }
-#else
-        // §REVIEW-1103：非 Windows 沒有 GetLastInputInfo，原本 inputPending 恆真 → 主迴圈在
-        // SDL_WaitEventTimeout 正常閒置（最多 1 s）也成對印 unresponsive／recovered，CachyOS、頭盔 log 被洗版。
-        // 只在卡在我們自己的事件處理（相位不是等事件）時才報。
-        inputPending = (s_LoopPhase.load() >= 0);
-#endif
         if (!inputPending) continue;
         reported = true;
         reportedPhase = s_LoopPhase.load();
@@ -240,6 +482,7 @@ static int inputStallWatchdogProc(void*)
     }
     return 0;
 }
+#endif // Q_OS_WIN32
 } // namespace
 
 
@@ -5254,7 +5497,13 @@ void Session::pollScHidHotplug()
 
     if (m_ScHid.isPrepared()) {
         if (m_ScHid.devicesGone()) {
-            m_ScHid.stop();
+            // §INPUT-STALL（A.3-2）：這裡是主執行緒，不可用會等讀取執行緒最多 1 秒的 stop()。
+            // stopNonBlocking() 不等：讀取執行緒設了 devicesGone 之後通常幾毫秒內就退出，這一次就收掉；
+            // 還沒退出就回 false，下一次輪詢（約 1 秒後）再來，等滿上限照 stop() 的規則遺棄。
+            // 收掉之前 isPrepared() 仍為 true，下面的重新 prepare() 不會跑，SDL 忽略清單也維持不變。
+            if (!m_ScHid.stopNonBlocking()) {
+                return;
+            }
             m_InputHandler->setScHidPassthroughPrepared(false);
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[SC-HID] hotplug: Steam Controller gone - passthrough stopped, waiting for it to come back");
@@ -5544,8 +5793,13 @@ void Session::exec()
 #ifdef Q_OS_WIN32
     s_StallMainThreadId = GetCurrentThreadId();
 #endif
+    // 只在 Windows 開 watchdog 執行緒（理由見檔頭 §INPUT-STALL 註解）；其他平台 stallWatchdog 維持 nullptr，
+    // 結尾的收尾本來就會檢查
+    SDL_Thread* stallWatchdog = nullptr;
+#ifdef Q_OS_WIN32
     s_StallWatchdogRun.store(true);
-    SDL_Thread* stallWatchdog = SDL_CreateThread(inputStallWatchdogProc, "InputStallWD", nullptr);
+    stallWatchdog = SDL_CreateThread(inputStallWatchdogProc, "InputStallWD", nullptr);
+#endif
 
     // §VR-LOWBATT：XR（頭盔）時才看電量
     BatteryMonitor battery(m_Preferences->vrFakeBatteryPct, m_Preferences->vrLowBatteryAtPct);
@@ -5557,7 +5811,7 @@ void Session::exec()
 
     for (;;) {
         s_LoopBeat.fetch_add(1);
-        s_LoopPhase.store(-1);
+        s_LoopPhase.store(-3);
         pollScHidHotplug();
 #ifdef HAVE_OPENXR
 #ifdef Q_OS_LINUX
@@ -5623,7 +5877,17 @@ void Session::exec()
                 lastHotspotPollTime = SDL_GetTicks();
                 checkAndSendVrHotspotInfo();
                 // §HOTSPOT-VERIFY：有多連線時以「這一場有沒有連線走熱點」為準（熱點上有別台 host 的網卡不算）
-                m_FrameHotspot.tick(LiGetVrLinkCount() > 0 ? LiVrLinkOnDedicated() : -1);  // §FRAME-HOTSPOT-AUTO
+                // §HOTSPOT-ADAPT：沒有多連線的場次多給一個線索——這台 host 自己回報的位址出現在熱點上就是它
+                const bool hotspotHaveLinks = LiGetVrLinkCount() > 0;
+                std::vector<std::string> hotspotHostAddrs;
+                if (!hotspotHaveLinks && m_FrameHotspot.wantsHostAddrs()) {
+                    QReadLocker computerLock(&m_Computer->lock);
+                    for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
+                        hotspotHostAddrs.push_back(iface.address.toStdString());
+                    }
+                    hotspotHostAddrs.push_back(m_Computer->activeAddress.address().toStdString());
+                }
+                m_FrameHotspot.tick(hotspotHaveLinks ? LiVrLinkOnDedicated() : -1, hotspotHostAddrs);  // §FRAME-HOTSPOT-AUTO
                 if (m_HotspotFlat) {
                     // §HOTSPOT-FLAT：host 的無線網卡這時才連上熱點：把它的位址交給 MP-QUIC（已經有就不動）
                     for (const std::string& ip : FrameHotspot::peerAddresses()) {
@@ -5695,6 +5959,8 @@ void Session::exec()
             }
             audioOverlayMsg = nullptr;
         }
+        // §INPUT-STALL：從這裡起才是「在 SDL 事件泵裡」；迴圈開頭到這一行是 -3（loop-top）
+        s_LoopPhase.store(-1);
 #if SDL_VERSION_ATLEAST(2, 0, 18) && !defined(STEAM_LINK)
         // SDL 2.0.18 has a proper wait event implementation that uses platform
         // support to block on events rather than polling on Windows, macOS, X11,
@@ -6344,6 +6610,11 @@ void Session::checkAndSendVrHotspotInfo()
 
     // §VR-HOTSPOT-AUTO：VR session，或 §HOTSPOT-FLAT 成立的平面場次
     if (!(m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) && !m_HotspotFlat) {
+        return;
+    }
+    // §HOTSPOT-ADAPT（2026-11-20）：熱點確定沒開（這台 host 最近連不上所以這一場不開、開不起來、等不到已經關掉）就不送，
+    // 否則 host 整場對不存在的熱點重試、還會重啟網卡。已經送出去的那一則收不回來（wire 沒有「關了」的訊息）
+    if (!m_FrameHotspot.advertiseToHost()) {
         return;
     }
 

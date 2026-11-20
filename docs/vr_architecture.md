@@ -200,7 +200,7 @@ SDL 視窗：有 Wayland 時照常建立；沒有時用 SDL offscreen driver（�
 >   遊戲這一幀算完；等待超過第一段的上限，那些影像就被丟——不必把 GPU 壓滿：2026-10-10 實測解析度倍率 300%、遊戲仍是每秒
 >   120 幀，舊規則就丟掉六成多的影像，350% 就是拆線循環。2026-10-09 的事故是每一張都超過：每一張都被丟，「連續逾時滿 1 秒就
 >   拆線」讓 driver 每 1.5 秒重連一次，頭盔全黑（`steam_frame_client.md` §8.7「host 擷取端的 fence 晚到」）。
-> - §VR-FENCE-LATE（server 設定 `vr_capture_late`，預設關閉）：第一段逾時後不丟，繼續在 CPU 端等同一個 fence 值，到值就照常
+> - §VR-FENCE-LATE（server 設定 `vr_capture_late`，2.0.30 起預設開啟）：第一段逾時後不丟，繼續在 CPU 端等同一個 fence 值，到值就照常
 >   複製（晚到照收）；從被叫醒起累計超過等待預算（3 個發布間隔，夾在 3 個顯示週期與 `vr_capture_late_max_ms` 之間）才丟。
 >   拆線改成「完成值 3 秒不動」或「5 秒沒有一張複製成功」（期間 driver 仍在發布），而且有 5／15／30 秒的退避。
 > - 不變式 8 沒有變：整段都是 CPU 端的 `GetCompletedValue()`／`SetEventOnCompletion`，確認到值之後才在本端下 CopyResource，

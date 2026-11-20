@@ -611,11 +611,12 @@ NvHTTP::openConnection(QUrl baseUrl,
     }
     loop.exec(QEventLoop::ExcludeUserInputEvents);
 
-    // Abort the request if it timed out
+    // 沒完成就中止。事件迴圈有兩個出口會讓請求停在未完成：逾時計時器，以及 aboutToQuit（App 正在結束）——
+    // 訊息不能只寫「逾時」，否則結束 App 時的中止會被讀成網路問題
     if (!reply->isFinished())
     {
         if (logLevel >= NvLogLevel::NVLL_ERROR) {
-            qWarning() << "Aborting timed out request for" << url.toString();
+            qWarning() << "Aborting unfinished request (timed out or app quitting) for" << url.toString();
         }
         reply->abort();
     }

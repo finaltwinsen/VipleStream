@@ -2320,6 +2320,84 @@ namespace platf {
     constexpr auto kDownRetry = std::chrono::seconds(5);
     std::atomic<std::int64_t> rival_last_ms {0};  // 最後一次看到別人在這張網卡上連線的時刻（steady_clock 毫秒；0＝沒看過）
 
+    // §HOTSPOT-ADAPT（2026-11-20，設計 temp/specs/2026-11-20/hotspot_adaptive.md 的 host 端、不動 wire 的部分）：
+    //   - 快速加入（arm 後先聽、退讓、每 kFastRetry 連一次、kFastRestart 提早重啟）一項都不改；
+    //   - arm 後滿 kVerdict（上一場看過別人在連時 kVerdictKnown）、這一輪從沒連上過、看到的連線失敗至少 kVerdictMinFails 次、
+    //     提早重啟做過（或做不了）而且重啟後已經等了 kVerdictAfterRestart、這時沒有別人在連 → 判定連不上，
+    //     重試改成 15 → 30 → 60 秒（之後維持 60 秒）。條件不成立就照舊快速加入到 kFastJoin，之後 5 → 10 → 20 → 40 → 60 秒；
+    //   - 這一輪從沒連上過就不為它重啟網卡（提早重啟那一次除外）。以前把「快速加入沒成功」當成斷線，每場多重啟一次；
+    //   - 連上過、後來斷線：照舊每 kDownRetry 重連、照舊重啟。記了放棄之後改成每 kGaveUpRetry（以前重連排在
+    //     次數上限的檢查之前，記了放棄仍然每 5 秒連一次）；
+    //   - on_acm 收到的失敗原因碼留下來（以前丟掉），判定時印一行；之後 wire 回報（HOTSPOT_STATUS）要用。
+    constexpr auto kVerdict = std::chrono::seconds(22);
+    constexpr auto kVerdictKnown = std::chrono::seconds(30);
+    constexpr auto kVerdictAfterRestart = std::chrono::seconds(8);  // 重啟後實測 6 秒連上，留 2 秒
+    constexpr std::uint32_t kVerdictMinFails = 4;
+    constexpr auto kGaveUpRetry = std::chrono::seconds(60);
+    // §VR-HOTSPOT-IDLESTALL（2026-11-20）：連著、收送計數都不動（11-09 有一次是這樣，手動重啟網卡才恢復）。
+    // 閒置時本來就可能兩邊都沒有流量，所以不能只看計數：收到的計數 kRxStall 沒動、送出的也沒到 kRxStallMinSent 時，
+    // 自己對熱點那一端（DHCP 伺服器，沒有就用閘道）發 ARP。有回應＝通的，重新起算；連續 kIdleProbeFails 次都沒有回應
+    // （間隔至少一輪輪詢，合計約 20 秒以上；頭盔熱點被家用 Wi-Fi 搶走無線電最長量到 16 秒）才照接收卡住處理。
+    constexpr int kIdleProbeFails = 4;
+    // 連線失敗的統計（on_acm 寫、看門狗讀；arm 時歸零）。只放數字，不放 SSID、BSSID
+    std::atomic<std::uint32_t> fail_completes {0};  // connection_complete 帶失敗原因的次數
+    std::atomic<std::uint32_t> fail_attempts {0};  // connection_attempt_fail 的次數
+    std::atomic<std::uint32_t> last_fail_reason {0};  // 最後一次失敗的 WLAN_REASON_CODE；0＝沒有
+    std::atomic<bool> fail_assoc {false};  // 有失敗是走到關聯或驗證階段之後才發生的（＝看得到熱點）
+
+    // 原因碼的含義（只給 log 用）。數值以 wlanapi.h 為準
+    const char *reason_name(DWORD r) {
+      switch (r) {
+        case WLAN_REASON_CODE_SUCCESS: return "none";
+        case WLAN_REASON_CODE_UNKNOWN: return "unknown";
+        case WLAN_REASON_CODE_NETWORK_NOT_COMPATIBLE: return "network not compatible";
+        case WLAN_REASON_CODE_PROFILE_NOT_COMPATIBLE: return "profile not compatible";
+        case WLAN_REASON_CODE_NOT_VISIBLE: return "network not visible";
+        case WLAN_REASON_CODE_IN_FAILED_LIST: return "network in the failed list";
+        case WLAN_REASON_CODE_IN_BLOCKED_LIST: return "network in the blocked list";
+        case WLAN_REASON_CODE_CONNECT_CALL_FAIL: return "connect call failed";
+        case WLAN_REASON_CODE_SCAN_CALL_FAIL: return "scan call failed";
+        case WLAN_REASON_CODE_NETWORK_NOT_AVAILABLE: return "network not available (not in range)";
+        case WLAN_REASON_CODE_PROFILE_CHANGED_OR_DELETED: return "profile changed or deleted";
+        case WLAN_REASON_CODE_KEY_MISMATCH: return "key mismatch";
+        case WLAN_REASON_CODE_USER_CANCELLED: return "cancelled";
+        case WLAN_REASON_CODE_ASSOCIATION_FAILURE: return "association failure";
+        case WLAN_REASON_CODE_ASSOCIATION_TIMEOUT: return "association timeout";
+        case WLAN_REASON_CODE_SECURITY_FAILURE: return "security failure";
+        case WLAN_REASON_CODE_SECURITY_TIMEOUT: return "security timeout";
+        case WLAN_REASON_CODE_DRIVER_DISCONNECTED: return "driver disconnected";
+        case WLAN_REASON_CODE_DRIVER_OPERATION_FAILURE: return "driver operation failure";
+        case WLAN_REASON_CODE_IHV_NOT_AVAILABLE: return "interface not available";
+        case WLAN_REASON_CODE_INTERNAL_FAILURE: return "internal failure";
+        case WLAN_REASON_CODE_MSMSEC_CANCELLED: return "security cancelled";
+        case WLAN_REASON_CODE_MSMSEC_PSK_MISMATCH_SUSPECTED: return "key mismatch suspected";
+        default: break;
+      }
+      if (r >= WLAN_REASON_CODE_AC_BASE && r <= WLAN_REASON_CODE_AC_END) {
+        return "other (before association)";
+      }
+      if (r >= WLAN_REASON_CODE_MSM_BASE && r <= WLAN_REASON_CODE_MSM_END) {
+        return "other (association)";
+      }
+      if (r >= WLAN_REASON_CODE_MSMSEC_BASE && r <= WLAN_REASON_CODE_MSMSEC_END) {
+        return "other (security)";
+      }
+      return "other";
+    }
+
+    std::string reason_text(DWORD r) {
+      return std::format("0x{:x} {}", static_cast<std::uint32_t>(r), reason_name(r));
+    }
+
+    // 判定之後（verdict）或快速加入逾時之後（沒判定），從沒連上過的慢速重試：做過 n 次之後，下一次之前要等多久
+    std::chrono::seconds slow_interval(bool verdict, int n) {
+      static const int kAfterVerdict[] = {15, 30, 60};
+      static const int kNoVerdict[] = {5, 10, 20, 40, 60};
+      const int *tbl = verdict ? kAfterVerdict : kNoVerdict;
+      const int len = verdict ? 3 : 5;
+      return std::chrono::seconds(tbl[std::clamp(n, 0, len - 1)]);
+    }
+
     std::mutex mtx;
     GUID guid {};
     std::string want_ssid;  // §REVIEW-1111：arm 時記住的熱點 SSID
@@ -2376,11 +2454,15 @@ namespace platf {
     // 介面狀態：1＝已連線、0＝沒連線、-1＝查不到（網卡被拔掉）
     // §REVIEW-1111：連著、但連的不是頭盔熱點（網卡自己改連到家用 Wi-Fi）也算沒連線。原本只看「已連線」，
     // 那張卡有正常收發，斷線與接收卡住兩條規則都不成立，就一直停在別的網路上。
-    int query_state(HANDLE hClient, const GUID &ifGuid, const std::string &ssid) {
+    int query_state(HANDLE hClient, const GUID &ifGuid, const std::string &ssid, DWORD *err = nullptr) {
       DWORD sz = 0;
       PVOID data = nullptr;
       WLAN_OPCODE_VALUE_TYPE vt;
-      if (fn_WlanQueryInterface(hClient, &ifGuid, wlan_intf_opcode_interface_state, nullptr, &sz, &data, &vt) != ERROR_SUCCESS || !data) {
+      const DWORD rc = fn_WlanQueryInterface(hClient, &ifGuid, wlan_intf_opcode_interface_state, nullptr, &sz, &data, &vt);
+      if (err) {
+        *err = rc;
+      }
+      if (rc != ERROR_SUCCESS || !data) {
         return -1;
       }
       const auto st = *static_cast<WLAN_INTERFACE_STATE *>(data);
@@ -2429,6 +2511,19 @@ namespace platf {
       if (info->wlanConnectionMode != wlan_connection_mode_profile) {  // §VR-HOTSPOT-PROFILE：我們一律用已存的設定檔連
         rival_last_ms.store(now_ms());
       }
+      // §HOTSPOT-ADAPT：失敗的原因碼留下來（不分是我們還是別人發起的，退讓中也數得到）。這裡只寫幾個 atomic，不做別的
+      const DWORD reason = info->wlanReasonCode;
+      if (code != wlan_notification_acm_connection_start && reason != WLAN_REASON_CODE_SUCCESS) {
+        last_fail_reason.store(reason);
+        if (reason >= WLAN_REASON_CODE_MSM_BASE && reason <= WLAN_REASON_CODE_MSMSEC_END) {
+          fail_assoc.store(true);
+        }
+        if (code == wlan_notification_acm_connection_complete) {
+          fail_completes.fetch_add(1);
+        } else {
+          fail_attempts.fetch_add(1);
+        }
+      }
     }
 
     // §VR-HOTSPOT-FASTJOIN：網卡是不是「未連線、也沒有正在連」（正在關聯或驗證時不要打斷它）
@@ -2469,6 +2564,53 @@ namespace platf {
       return true;
     }
 
+    // §VR-HOTSPOT-IDLESTALL：對熱點那一端發一次 ARP。1＝有回應、0＝沒有回應、-1＝沒有可以問的對象（還沒拿到位址等）。
+    // 會擋住最多幾秒，只能在看門狗自己的執行緒呼叫、不可拿著 mtx。位址只拿來發 ARP，不印出來
+    int probe_peer(const GUID &ifGuid) {
+      NET_LUID luid {};
+      if (ConvertInterfaceGuidToLuid(&ifGuid, &luid) != NO_ERROR) {
+        return -1;
+      }
+      constexpr ULONG flags = GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+      std::vector<std::uint8_t> buf;
+      ULONG size = 16 * 1024;
+      ULONG rc = ERROR_BUFFER_OVERFLOW;
+      for (int i = 0; i < 3 && rc == ERROR_BUFFER_OVERFLOW; ++i) {
+        buf.resize(size);
+        rc = GetAdaptersAddresses(AF_INET, flags, nullptr, reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data()), &size);
+      }
+      if (rc != NO_ERROR) {
+        return -1;
+      }
+      auto ipv4_of = [](const SOCKET_ADDRESS &sa) -> IPAddr {
+        if (!sa.lpSockaddr || sa.lpSockaddr->sa_family != AF_INET || sa.iSockaddrLength < (int) sizeof(sockaddr_in)) {
+          return 0;
+        }
+        const IPAddr a = reinterpret_cast<const sockaddr_in *>(sa.lpSockaddr)->sin_addr.s_addr;
+        return a == INADDR_NONE ? 0 : a;
+      };
+      for (auto a = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data()); a; a = a->Next) {
+        if (a->Luid.Value != luid.Value) {
+          continue;
+        }
+        IPAddr src = 0;
+        for (auto u = a->FirstUnicastAddress; u && !src; u = u->Next) {
+          src = ipv4_of(u->Address);
+        }
+        IPAddr dst = ipv4_of(a->Dhcpv4Server);
+        for (auto gw = a->FirstGatewayAddress; gw && !dst; gw = gw->Next) {
+          dst = ipv4_of(gw->Address);
+        }
+        if (!src || !dst || src == dst) {
+          return -1;
+        }
+        ULONG mac[2] {};
+        ULONG len = 6;
+        return SendARP(dst, src, mac, &len) == NO_ERROR ? 1 : 0;
+      }
+      return -1;
+    }
+
     void loop() {
       HANDLE hClient = nullptr;
       DWORD ver = 0;
@@ -2496,6 +2638,22 @@ namespace platf {
       bool yield_logged = false;
       bool resumed_logged = false;
       bool fast_restarted = false;  // §VR-HOTSPOT-RESTART-EARLY
+      // §HOTSPOT-ADAPT
+      bool joined = false;  // 這一輪（這次 arm 之後）連上過
+      bool early_done = false;  // 提早重啟真的做了（fast_restarted 在次數用完時也會是 true）
+      bool verdict = false;  // 判定連不上
+      clock::duration verdict_after = kVerdict;
+      int slow_n = 0;  // 從沒連上過的慢速重試做了幾次
+      std::uint32_t slow_logged_reason = 0;
+      DWORD slow_logged_rc = ERROR_SUCCESS;
+      clock::time_point retry_due {};  // 快速加入之後，下一次自己重連的時刻
+      int idle_probe_fails = 0;  // §VR-HOTSPOT-IDLESTALL
+      // §HOTSPOT-MISSING
+      constexpr std::chrono::seconds kRestartSettle {30};
+      constexpr std::chrono::seconds kMissingReopen {10};
+      std::optional<clock::time_point> missing_since;
+      clock::time_point missing_reopen_at {};
+      bool came_back = false;
       while (true) {
         std::this_thread::sleep_for(fast ? std::chrono::duration_cast<clock::duration>(kFastPoll) : std::chrono::duration_cast<clock::duration>(kPoll));
         const auto now = clock::now();
@@ -2503,6 +2661,7 @@ namespace platf {
         std::string ssid;
         int max_restarts;
         clock::time_point armed;
+        bool given_up;
         {
           std::lock_guard lk(mtx);
           if (now > alive_until) {
@@ -2513,6 +2672,7 @@ namespace platf {
           ssid = want_ssid;
           max_restarts = config::vr.hotspot_restart_max;
           armed = armed_at;
+          given_up = gave_up;
         }
         if (armed != fast_armed_at) {
           // 新的一場（或同一場重新送了熱點資訊）：重新進入快速加入
@@ -2524,8 +2684,53 @@ namespace platf {
           rival_known = rival_last_ms.load() != 0;
           yield_logged = false;
           resumed_logged = false;
+          // §HOTSPOT-ADAPT：這一輪的狀態從頭算（失敗統計在 arm() 歸零）
+          joined = false;
+          early_done = false;
+          verdict = false;
+          verdict_after = rival_known ? std::chrono::duration_cast<clock::duration>(kVerdictKnown) : std::chrono::duration_cast<clock::duration>(kVerdict);
+          slow_n = 0;
+          slow_logged_reason = 0;
+          slow_logged_rc = ERROR_SUCCESS;
+          retry_due = {};
+          down_since.reset();  // 上一輪留下來的斷線時刻不算在這一輪
         }
-        const int st = query_state(hClient, g, ssid);
+        DWORD st_err = ERROR_SUCCESS;
+        const int st = query_state(hClient, g, ssid, &st_err);
+        // §HOTSPOT-MISSING（2026-11-20）：我們自己重啟網卡之後，介面有一段時間查不到。原本一查不到就離開快速加入、
+        // 當成「網卡被拔掉」，之後整場沒有再連（11-20 實測：第 12 秒提早重啟，第 21 秒記「adapter not present」，
+        // 接下來 2 分鐘到場次結束都沒有動作；下一場 4.5 秒就連上，網卡其實好好的）。所以：
+        //   重啟後 kRestartSettle 內查不到＝還在回來的路上，留在原本的階段等；
+        //   查不到持續 kMissingReopen＝WLAN 控制代碼可能還指著重啟前的介面，重開一次（之後每 kMissingReopen 再試）；
+        //   介面回來時（下面 missing_logged 那一段）馬上重連，不等慢速重試的間隔。
+        if (st < 0) {
+          if (!missing_since) {
+            missing_since = now;
+            missing_reopen_at = now + std::chrono::duration_cast<clock::duration>(kMissingReopen);
+          } else if (now >= missing_reopen_at) {
+            missing_reopen_at = now + std::chrono::duration_cast<clock::duration>(kMissingReopen);
+            HANDLE h2 = nullptr;
+            DWORD ver2 = 0;
+            const DWORD orc = fn_WlanOpenHandle(WLAN_API_MAKE_VERSION(2, 0), nullptr, &ver2, &h2);
+            if (orc == ERROR_SUCCESS && h2) {
+              fn_WlanCloseHandle(hClient, nullptr);
+              hClient = h2;
+              if (fn_WlanRegisterNotification) {
+                fn_WlanRegisterNotification(hClient, WLAN_NOTIFICATION_SOURCE_ACM, TRUE, on_acm, nullptr, nullptr, nullptr);
+              }
+            }
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] adapter not found for "
+                            << std::chrono::duration_cast<std::chrono::seconds>(now - *missing_since).count() << " s (query err=" << st_err
+                            << ") - reopened the WLAN handle (rc=" << orc << ')';
+          }
+          if (last_restart && now - *last_restart < kRestartSettle) {
+            continue;  // 剛重啟：等它回來，不改階段
+          }
+        } else if (missing_since) {
+          BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] adapter is back after "
+                          << std::chrono::duration_cast<std::chrono::seconds>(now - *missing_since).count() << " s";
+          missing_since.reset();
+        }
         if (fast) {
           if (st == 1) {
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] joined the headset hotspot "
@@ -2533,11 +2738,19 @@ namespace platf {
                             << fast_tries << " connect attempt(s) of ours" << (fast_restarted ? ", after an early adapter restart" : "")
                             << (yield_logged ? "; the connection was left to the other program" : "") << ')';
             fast = false;
+            joined = true;
           } else if (st < 0 || now - armed > kFastJoin) {
             fast = false;
             if (st == 0) {
+              // §HOTSPOT-ADAPT：沒判定（失敗次數不夠、或別人一直在連）就走到快速加入的期限：放慢，但不當成斷線、不重啟網卡
+              slow_n = 0;
+              retry_due = now + slow_interval(false, 0);
+              down_since = now;
               BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not joined after " << std::chrono::duration_cast<std::chrono::seconds>(kFastJoin).count()
-                              << " s (" << fast_tries << " connect attempt(s) of ours) - leaving it to the automatic reconnect";
+                              << " s (" << fast_tries << " connect attempt(s) of ours, " << fail_completes.load() << " failed connection(s), "
+                              << fail_attempts.load() << " failed attempt(s), reached association=" << (fail_assoc.load() ? 1 : 0)
+                              << ", last reason=" << reason_text(last_fail_reason.load())
+                              << ") - no verdict; retrying slower (5/10/20/40/60 s), no adapter restart unless it joins first";
             }
           } else {
             // §VR-HOTSPOT-RESTART-EARLY（2026-11-18）：網卡隔一陣子（實測 57 分鐘、3 小時、15 小時）沒連頭盔熱點之後，
@@ -2552,6 +2765,7 @@ namespace platf {
               const int n = allowed ? ++restarts : restarts;
               lk.unlock();
               if (allowed) {
+                early_done = true;
                 BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] not joined "
                                    << std::chrono::duration_cast<std::chrono::seconds>(now - armed).count()
                                    << " s after the hotspot info - restarting the adapter early (" << n << '/' << max_restarts << ')';
@@ -2565,6 +2779,33 @@ namespace platf {
             const auto armed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(armed.time_since_epoch()).count();
             const auto rival_ms = rival_last_ms.load();
             const bool rival_this_session = rival_ms >= armed_ms;
+            // §HOTSPOT-ADAPT：判定連不上（條件見 kVerdict 的說明）。成立就離開快速加入，往下走慢速重試；
+            // 不成立時下面的快速加入照舊。verdict_after 最短 22 秒，在那之前這一段不會成立
+            if (now - armed >= verdict_after && fast_restarted &&
+                (!early_done || !last_restart || now - *last_restart >= kVerdictAfterRestart) &&
+                !(rival_this_session && now_ms() - rival_ms < std::chrono::duration_cast<std::chrono::milliseconds>(kRivalQuiet).count())) {
+              const auto completes = fail_completes.load();
+              const auto attempts = fail_attempts.load();
+              if (std::max(completes, attempts) >= kVerdictMinFails) {
+                const bool assoc = fail_assoc.load();
+                fast = false;
+                verdict = true;
+                slow_n = 0;
+                slow_logged_reason = last_fail_reason.load();
+                retry_due = now + slow_interval(true, 0);
+                down_since = now;
+                BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] verdict: " << (assoc ? "failed (hotspot seen, cannot connect)" : "unreachable") << ' '
+                                   << std::chrono::duration_cast<std::chrono::milliseconds>(now - armed).count() << " ms after the hotspot info ("
+                                   << completes << " failed connection(s), " << attempts << " failed attempt(s), reached association=" << (assoc ? 1 : 0)
+                                   << ", last reason=" << reason_text(slow_logged_reason) << ", " << fast_tries << " connect attempt(s) of ours, early restart "
+                                   << (early_done ? "done" : "not available")
+                                   << ") - next retry in 15 s, then 30 s, then every 60 s; no adapter restart unless it joins first";
+              }
+            }
+            if (verdict) {
+              // 離開快速加入：這一輪到這裡為止，下一輪起走下面的慢速重試
+              continue;
+            }
             if (now - armed < (rival_known ? kHoldKnown : kHold) && !rival_this_session) {
               continue;  // 還在聽
             }
@@ -2594,7 +2835,16 @@ namespace platf {
           }
         }
         if (st == 1) {
-          if (down_since) {
+          if (!joined) {
+            // §HOTSPOT-ADAPT：快速加入沒成功、放慢之後才連上
+            joined = true;
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] joined the headset hotspot "
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(now - armed).count()
+                            << " ms after the hotspot info (late, after " << slow_n << " slow retr" << (slow_n == 1 ? "y" : "ies")
+                            << (verdict ? ", after the verdict" : "") << ')';
+            verdict = false;
+            slow_n = 0;
+          } else if (down_since) {
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter connected again after "
                             << std::chrono::duration_cast<std::chrono::seconds>(now - *down_since).count() << " s";
           }
@@ -2604,17 +2854,37 @@ namespace platf {
           ULONG64 in = 0, out = 0;
           if (!query_counters(g, &in, &out)) {
             rx_still_since.reset();
+            idle_probe_fails = 0;
             continue;
           }
           if (!rx_still_since || in != rx_in0) {
             rx_still_since = now;
             rx_in0 = in;
             rx_out0 = out;
+            idle_probe_fails = 0;
             continue;
           }
-          if (now - *rx_still_since < kRxStall || out < rx_out0 + kRxStallMinSent ||
-              (last_restart && now - *last_restart < kGap)) {
+          if (now - *rx_still_since < kRxStall || (last_restart && now - *last_restart < kGap)) {
             continue;
+          }
+          const bool sent_enough = out >= rx_out0 + kRxStallMinSent;
+          if (!sent_enough) {
+            // §VR-HOTSPOT-IDLESTALL：收、送都不動。可能只是閒置，所以自己發 ARP 問熱點那一端，連續沒有回應才算卡住
+            if (given_up) {
+              continue;  // 次數用完就不再探測
+            }
+            const int pr = probe_peer(g);
+            if (pr != 0) {
+              // 有回應（通的，重新起算）或沒有可以問的對象（不判斷）
+              idle_probe_fails = 0;
+              if (pr > 0) {
+                rx_still_since.reset();
+              }
+              continue;
+            }
+            if (++idle_probe_fails < kIdleProbeFails) {
+              continue;
+            }
           }
           std::unique_lock lk(mtx);
           if (restarts >= max_restarts) {
@@ -2628,35 +2898,75 @@ namespace platf {
           }
           const int n = ++restarts;
           lk.unlock();
-          BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: connected but received nothing for "
-                             << std::chrono::duration_cast<std::chrono::seconds>(now - *rx_still_since).count() << " s while sending "
-                             << (out - rx_out0) << " packet(s) - restarting the adapter (" << n << '/' << max_restarts << ')';
+          if (sent_enough) {
+            BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: connected but received nothing for "
+                               << std::chrono::duration_cast<std::chrono::seconds>(now - *rx_still_since).count() << " s while sending "
+                               << (out - rx_out0) << " packet(s) - restarting the adapter (" << n << '/' << max_restarts << ')';
+          } else {
+            BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: connected but no traffic either way for "
+                               << std::chrono::duration_cast<std::chrono::seconds>(now - *rx_still_since).count() << " s and the hotspot side did not answer "
+                               << idle_probe_fails << " probe(s) in a row - restarting the adapter (" << n << '/' << max_restarts << ')';
+          }
           const bool ok = restart_adapter(g);
           BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter restart " << (ok ? "done" : "failed");
           last_restart = clock::now();
           rx_still_since.reset();
+          idle_probe_fails = 0;
           continue;
         }
         rx_still_since.reset();
+        idle_probe_fails = 0;
         if (st < 0) {
-          // 網卡不在（被拔掉）：不重啟，插回來後由 Windows 依設定檔自動重連
+          // 網卡不在（被拔掉）：不重啟；插回來後由下面的重連接手（設定檔是 manual，Windows 不會自己連）
           if (!missing_logged) {
-            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter not present - not restarting"sv;
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter not present - not restarting (query err=" << st_err << ')';
             missing_logged = true;
           }
+          came_back = true;
           down_since.reset();
           continue;
         }
         if (!down_since) {
           down_since = now;
-          BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter disconnected from the headset hotspot"sv;
+          if (joined) {
+            retry_due = now;  // 下一輪就重連（照舊）
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter disconnected from the headset hotspot"sv;
+          } else {
+            // §HOTSPOT-ADAPT：這一輪從沒連上過（例如網卡不在、後來才出現），不記成「斷線」
+            // §HOTSPOT-MISSING：剛從「查不到」回來的那一次馬上連
+            retry_due = came_back ? now : now + slow_interval(verdict, slow_n);
+            came_back = false;
+            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter present but never joined in this round - retrying slowly, no adapter restart"sv;
+          }
           continue;
         }
-        // §VR-HOTSPOT-PROFILE：設定檔是 manual，Windows 不會自己連回去。沒有別人（Steam）在連就自己再連
-        if (now_ms() - rival_last_ms.load() >= std::chrono::duration_cast<std::chrono::milliseconds>(kRivalQuiet).count() &&
-            (!fast_last_try || now - *fast_last_try >= kDownRetry) && is_idle_disconnected(hClient, g)) {
+        // §VR-HOTSPOT-PROFILE：設定檔是 manual，Windows 不會自己連回去。沒有別人（Steam）在連就自己再連。
+        // §HOTSPOT-ADAPT：間隔——連上過：每 kDownRetry，記了放棄之後每 kGaveUpRetry；從沒連上過：slow_interval()
+        if (now >= retry_due &&
+            now_ms() - rival_last_ms.load() >= std::chrono::duration_cast<std::chrono::milliseconds>(kRivalQuiet).count() &&
+            is_idle_disconnected(hClient, g)) {
           fast_last_try = now;
-          connect_profile(hClient, g, ssid);
+          const DWORD rc = connect_profile(hClient, g, ssid);
+          if (joined) {
+            retry_due = now + (given_up ? std::chrono::duration_cast<clock::duration>(kGaveUpRetry) : std::chrono::duration_cast<clock::duration>(kDownRetry));
+          } else {
+            ++slow_n;
+            const auto next = slow_interval(verdict, slow_n);
+            retry_due = now + next;
+            // 間隔還在拉長、原因碼或 WlanConnect 的回傳值變了才記；到上限之後每 10 次記一行
+            const auto reason = last_fail_reason.load();
+            if (slow_n <= (verdict ? 3 : 5) || slow_n % 10 == 0 || reason != slow_logged_reason || rc != slow_logged_rc) {
+              slow_logged_reason = reason;
+              slow_logged_rc = rc;
+              BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] slow retry #" << slow_n << " (never joined, "
+                              << std::chrono::duration_cast<std::chrono::seconds>(now - armed).count() << " s after the hotspot info, "
+                              << (verdict ? "after the verdict" : "no verdict") << "; connect rc=" << rc << ", last reason=" << reason_text(reason)
+                              << ", " << fail_completes.load() << " failed connection(s)) - next in " << next.count() << " s";
+            }
+          }
+        }
+        if (!joined) {
+          continue;  // §HOTSPOT-ADAPT：從沒連上過，不為它重啟網卡（提早重啟那一次除外）
         }
         if (now - *down_since < kDown || (last_restart && now - *last_restart < kGap)) {
           continue;
@@ -2667,7 +2977,9 @@ namespace platf {
             gave_up = true;
             lk.unlock();
             BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: still disconnected after " << max_restarts
-                               << " restart(s) - giving up for this session; unplug and replug the adapter";
+                               << " restart(s) - giving up for this session; unplug and replug the adapter (reconnect attempts continue every "
+                               << std::chrono::duration_cast<std::chrono::seconds>(kGaveUpRetry).count() << " s, last reason="
+                               << reason_text(last_fail_reason.load()) << ')';
           }
           continue;
         }
@@ -2697,6 +3009,11 @@ namespace platf {
       gave_up = false;
       alive_until = clock::now() + kAlive;
       armed_at = clock::now();
+      // §HOTSPOT-ADAPT：失敗統計每一輪重新起算
+      fail_completes.store(0);
+      fail_attempts.store(0);
+      last_fail_reason.store(0);
+      fail_assoc.store(false);
       if (!running) {
         running = true;
         std::thread(loop).detach();

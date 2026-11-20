@@ -423,6 +423,10 @@ static void VideoReceiveThreadProc(void* context) {
     // 1 秒內重連會被 nowUs - lastWatchdogFireUs > 1000000 多擋一次。
     uint64_t lastWatchdogCheckUs = 0;
     uint64_t lastWatchdogFireUs = 0;
+    // §FRZ-WD-RTT：watchdog 兩個門檻跟著控制通道 RTT 放寬（見下方檢查處）。這兩個只管 log：
+    // 上一次印出來的門檻與時刻。
+    uint32_t wdLoggedStarveMs = 2000;
+    uint64_t wdLoggedUs = 0;
     // §M01-D：-101 診斷，加密視訊在進 RtpVideoQueue 之前就會丟掉的封包
     // （只計數、不改行為；每個接收執行緒 = 每場串流自然歸零）。
     // 加密時落後封包在解密前就被丟，佇列的 far 組一律是 0，要看這兩個數。
@@ -741,16 +745,51 @@ static void VideoReceiveThreadProc(void* context) {
                     pktWindowStartUs = nowUs;
                 }
                 uint64_t lastFrameUs = videoDepacketizerLastFrameTimeUs();
+                // §FRZ-WD-RTT：往返時間很長（塞車、遠端）時，2 秒內 IDR 根本到不了；固定門檻會把
+                // 還在路上的 IDR 連同佇列一起清掉再要一張，每秒重來一次。門檻改成
+                //   starve = clamp(2×rtt + 500, 2000, 8000) ms（多久沒有完整幀就觸發）
+                //   refire = clamp(  rtt + 500, 1000, 5000) ms（兩次觸發的最短間隔）
+                // rtt 先向上取到 250 ms 的倍數（門檻不跟著每個樣本抖）。rtt ≤ 750 ms（兩個都不放寬）、還沒有樣本
+                //（LiGetEstimatedRttInfo 回 false）、或 VR session 時就是原本的 2000／1000 ms。
+                // 上限 8 秒／5 秒：佇列被毒化時的凍結仍然有界。RTT 是無鎖快照，這個執行緒可以讀。
+                uint32_t wdRttMs = 0;
+                uint32_t wdStarveMs = 2000;
+                uint32_t wdRefireMs = 1000;
+                if ((VrFlags & VIPLE_VR_SF_ENABLED) == 0 && LiGetEstimatedRttInfo(&wdRttMs, NULL)) {
+                    // 先封頂再算：2×4000＋500 已經超過 starve 上限，再大也一樣
+                    uint32_t rttQ = wdRttMs > 4000 ? 4000 : ((wdRttMs + 249) / 250) * 250;
+                    wdStarveMs = 2 * rttQ + 500;
+                    wdRefireMs = rttQ + 500;
+                    if (wdStarveMs > 8000) wdStarveMs = 8000;
+                    if (wdRefireMs > 5000) wdRefireMs = 5000;
+                    if (wdStarveMs <= 2000) {
+                        // rtt ≤ 750 ms：兩個門檻都維持原值（rtt＋500 在 500～750 ms 之間會超過 1000，
+                        // 不能只靠下限夾住）
+                        wdStarveMs = 2000;
+                        wdRefireMs = 1000;
+                    }
+                }
+                // 門檻變了印一行；RTT 在級距邊界來回時最多 2 秒一行（只限流 log，門檻照算）
+                if (wdStarveMs != wdLoggedStarveMs &&
+                    (wdLoggedUs == 0 || nowUs - wdLoggedUs >= 2000000)) {
+                    Limelog("[VIPLE-VIDEO] §FRZ-WD-RTT: watchdog threshold %u -> %u ms (refire %u ms, rtt=%u ms)\n",
+                            (unsigned int)wdLoggedStarveMs, (unsigned int)wdStarveMs,
+                            (unsigned int)wdRefireMs, (unsigned int)wdRttMs);
+                    wdLoggedStarveMs = wdStarveMs;
+                    wdLoggedUs = nowUs;
+                }
                 if (lastFrameUs != 0 &&
-                    nowUs - lastFrameUs > 2000000 &&
-                    nowUs - lastWatchdogFireUs > 1000000) {
+                    nowUs - lastFrameUs > (uint64_t)wdStarveMs * 1000 &&
+                    nowUs - lastWatchdogFireUs > (uint64_t)wdRefireMs * 1000) {
                     lastWatchdogFireUs = nowUs;
                     Limelog("[VIPLE-VIDEO] §FRZ-WATCHDOG: packets flowing but "
-                            "no decode unit for %.1fs (queue frame=%u, pkts last 1s=%u) — "
+                            "no decode unit for %.1fs (queue frame=%u, pkts last 1s=%u, "
+                            "rtt=%ums starve=%ums) — "
                             "resetting RTP queue and requesting IDR\n",
                             (float)(nowUs - lastFrameUs) / 1e6f,
                             RtpvGetCurrentFrameNumber(&rtpQueue),
-                            pktsLastSecond);
+                            pktsLastSecond,
+                            (unsigned int)wdRttMs, (unsigned int)wdStarveMs);
                     // §FRZ-GAP-FIX 2026-07-17：reset 只為清掉可能毒化的
                     // 佇列內容，幀號連續性必須保留。RtpvInitializeQueue
                     // 會把 currentFrameNumber 打回 1，下一個到達的幀

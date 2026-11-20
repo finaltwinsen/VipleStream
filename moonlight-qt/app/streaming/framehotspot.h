@@ -82,6 +82,9 @@ public:
         }
         scrub(ssid);
         scrub(key);
+        if (m_HostId.empty()) {
+            m_HostId = hostId;  // 下面提早返回時 tick() 也要知道是哪一台（使用者自己開的熱點連上了要清紀錄）
+        }
         struct stat st;
         if (!fieldsOk || m_Opened || m_GaveUp || !m_RestoreCmd.empty() || stat(kSocket, &st) != 0) {
             scrub(cmd);
@@ -102,19 +105,25 @@ public:
         m_Verified = false;
         // §HOTSPOT-VERIFY（2026-11-19）：這台 host 不久前才等過一輪、沒有連上熱點（例如它的無線網卡掃不到頭盔的 6 GHz 熱點）：
         // 這一場不再開著等。熱點是我們開的（App 啟動時先開、或上一台 host 留下的）就關掉——上面掛著別台的網卡也一樣，
-        // 它對這一場沒有用，卻要和家用 Wi-Fi 分同一顆無線電。kNoJoinRetryS 秒之後會再試一次
-        if (noJoinRecent(hostId)) {
+        // 它對這一場沒有用，卻要和家用 Wi-Fi 分同一顆無線電。
+        // §HOTSPOT-ADAPT（2026-11-20）：多久之後再試看這台連續失敗幾次（noJoinBackoffS）
+        int fails = 0;
+        const long remainS = noJoinRemainingS(hostId, &fails);
+        if (remainS > 0) {
             scrub(cmd);
             m_GaveUp = true;
             long pid = 0;
             std::string prevHost;
-            if (state == "2" && readOpenedMarker(&pid, &prevHost)) {
+            const bool ours = state == "2" && readOpenedMarker(&pid, &prevHost);
+            // 熱點資訊只在熱點確實開著時才送給 host：這裡剩下「使用者自己開的」那一種還開著（我們不碰它，host 連得上就清紀錄）
+            m_Advertise = state == "2" && !ours;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: this host could not join the hotspot a short while ago (%d time(s) in a row) - "
+                        "not switching it on for this session (it is tried again in about %ld min)%s",
+                        fails, (remainS + 59) / 60,
+                        m_Advertise ? "; the hotspot was switched on by the user and is left alone" : "");
+            if (ours) {
                 closeOpened("this host could not join the hotspot a short while ago");
-            }
-            else {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VR-HOTSPOT] auto: this host could not join the hotspot a short while ago - not switching it on "
-                            "for this session (it is tried again after %d min)", kNoJoinRetryS / 60);
             }
             return;
         }
@@ -163,6 +172,7 @@ public:
         if (!ok) {
             removeOpenedMarker();
             m_GaveUp = true;
+            m_Advertise = false;  // 熱點沒有開起來：不叫 host 來連
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: softapmanager did not accept create - hotspot left off");
             return;
         }
@@ -184,18 +194,35 @@ public:
     // §HOTSPOT-VERIFY（2026-11-19）：hostLinkOnHotspot＝這一場有沒有一條已確認的連線走熱點（1 有、0 沒有、-1 這一場沒有
     // 多連線、無從判斷）。能判斷時只認它：「熱點上有裝置」可能是另一台 host 的網卡（它存著連線設定檔，熱點一出現就自己
     // 連上來），11-19 實測連開發機的場次因此把熱點整場開著，家用 Wi-Fi 那條每隔幾秒掉一批影格。
-    void tick(int hostLinkOnHotspot = -1)
+    // §HOTSPOT-ADAPT（2026-11-20）：hostAddrs＝這台 host 自己回報的位址（/serverinfo 的網卡清單＋場次位址），只在沒有多連線
+    // 的場次（-1）用：熱點上出現其中一個位址＝這台 host 的網卡確實掛在上面，不管它是不是早就在（換 host 時的 baseline 裡）。
+    // 時間：這裡的間隔一律用單調時鐘（m_OpenedAt、m_LinkReadSince）；牆上時鐘只用在 hotspot-nojoin 的存檔
+    void tick(int hostLinkOnHotspot = -1, const std::vector<std::string>& hostAddrs = std::vector<std::string>())
     {
 #if defined(__linux__)
         if (!m_Opened) {
+            // 熱點不是這個行程開的（使用者自己開的）或已經放棄：不動它。但這一場確認有連線走熱點＝這台 host 現在連得上，
+            // 把它的失敗紀錄清掉，之後恢復自動開（熱點是誰開的都一樣）
+            if (hostLinkOnHotspot == 1 && !m_Verified && !m_HostId.empty()) {
+                m_Verified = true;
+                if (clearNoJoin(m_HostId)) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-HOTSPOT] auto: this session has a link to the host over a hotspot this app did not switch "
+                                "on - cleared the host's no-join record");
+                }
+            }
             return;
         }
         touchOpenedMarker();
-        const int waitedS = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_OpenedAt).count());
+        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+        const int waitedS = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(now - m_OpenedAt).count());
         if (hostLinkOnHotspot >= 0) {
             if (m_Verified) {
                 return;
+            }
+            if (!m_LinkReadValid) {
+                m_LinkReadValid = true;
+                m_LinkReadSince = now;
             }
             if (hostLinkOnHotspot == 1) {
                 m_Verified = true;
@@ -205,30 +232,72 @@ public:
                             "[VIPLE-VR-HOTSPOT] auto: this session has a link to the host over the hotspot (%d s) - keeping it on", waitedS);
                 return;
             }
-            if (waitedS >= kJoinWaitS) {
+            // 多連線很晚才協商好（控制連線重連之類）時，第一次讀到 0 不算數：能判斷的讀數要連續 kLinkReadMinS 秒
+            const int readS = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(now - m_LinkReadSince).count());
+            if (waitedS >= kJoinWaitS && readS >= kLinkReadMinS) {
                 const int others = static_cast<int>(hotspotPeers().size());
+                int fails = 0;
+                const long retryS = recordNoJoin(m_HostId, &fails);
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VR-HOTSPOT] auto: no link to this host over the hotspot after %d s (%d other device(s) on it do not count)",
-                            waitedS, others);
-                writeNoJoin(m_HostId);
+                            "[VIPLE-VR-HOTSPOT] auto: no link to this host over the hotspot after %d s (%d other device(s) on it do not "
+                            "count); %d time(s) in a row - not tried again for this host for %ld min",
+                            waitedS, others, fails, retryS / 60);
                 closeOpened("this host is not on the hotspot");
                 m_GaveUp = true;
+                m_Advertise = false;  // 之後不再把熱點資訊送給 host（已經送出去的那一則收不回來：wire 沒有「關了」的訊息）
             }
             return;
         }
+        m_LinkReadValid = false;
         if (m_PeerSeen) {
             return;
         }
-        if (hotspotHasNewPeer(m_Baseline)) {
+        const bool ownAddr = hotspotHasAnyOf(hostAddrs);
+        if (ownAddr || hotspotHasNewPeer(m_Baseline)) {
             m_PeerSeen = true;
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: the host joined the hotspot after %d s - keeping it on",
-                        waitedS);
+            if (ownAddr) {
+                clearNoJoin(m_HostId);
+            }
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: the host joined the hotspot after %d s - keeping it on (%s)",
+                        waitedS, ownAddr ? "one of this host's own addresses is on it" : "a device is on it");
             return;
         }
         if (waitedS >= kJoinWaitS) {
             closeOpened("the host did not join the hotspot");
             m_GaveUp = true;
+            m_Advertise = false;
         }
+#else
+        (void) hostLinkOnHotspot;
+        (void) hostAddrs;
+#endif
+    }
+
+    // §HOTSPOT-ADAPT：這一場要不要把熱點資訊送給 host。熱點確定沒開（因為失敗紀錄不開、開不起來、等不到已經關掉、
+    // 經 VPN 的場次暫停了）就不送，否則 host 整場對不存在的熱點重試、還會重啟網卡。狀態不明（不是 Frame、softapmanager
+    // 沒回應、熱點正在變動）維持原本的行為：送
+    bool advertiseToHost()
+    {
+#if defined(__linux__)
+        const bool yes = m_Advertise && m_RestoreCmd.empty();
+        if (!yes && !m_AdvertiseLogged) {
+            m_AdvertiseLogged = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: the hotspot is not on for this session - no (more) hotspot info is sent to the host");
+        }
+        return yes;
+#else
+        return true;
+#endif
+    }
+
+    // §HOTSPOT-ADAPT：tick() 這一輪用不用得到 hostAddrs（用不到時呼叫端不必去拿）
+    bool wantsHostAddrs() const
+    {
+#if defined(__linux__)
+        return m_Opened && !m_PeerSeen;
+#else
+        return false;
 #endif
     }
 
@@ -544,7 +613,16 @@ private:
     static constexpr const char* kApInterface = "wlanap";
     static constexpr int kJoinWaitS = 45;    // §FRAME-HOTSPOT-AUTO：自動開了之後等這台 host 多久
     static constexpr int kOwnerFreshS = 60;  // 標記檔這麼久沒被更新＝擁有者不在了
-    static constexpr int kNoJoinRetryS = 1800;  // §HOTSPOT-VERIFY：host 沒連上熱點之後，隔這麼久才再為它開一次
+    static constexpr int kLinkReadMinS = 10;   // 多連線的讀數至少連續這麼久是「沒有」才關
+    static constexpr int kNoJoinMaxHosts = 8;  // §HOTSPOT-ADAPT：hotspot-nojoin 最多記幾台（超過丟最舊的）
+    static constexpr int kNoJoinMaxFails = 99;
+    static constexpr long kNoJoinStaleS = 7L * 24 * 3600;  // 紀錄這麼久沒更新就當作沒有
+
+    // §HOTSPOT-ADAPT：連續失敗 n 次之後隔多久才再為這台 host 開一次熱點：10 → 30 → 90 分鐘 → 上限 4 小時
+    static long noJoinBackoffS(int fails)
+    {
+        return fails <= 1 ? 600L : fails == 2 ? 1800L : fails == 3 ? 5400L : 14400L;
+    }
 
     // §FRAME-HOTSPOT-AUTO：關掉這個行程開的熱點
     void closeOpened(const char* why)
@@ -687,58 +765,220 @@ private:
         }
     }
 
-    // §HOTSPOT-VERIFY：「這台 host 等過、沒有連上熱點」的紀錄（0600，沒有機密：一行 host 的 uuid，時間看檔案的 mtime）。
-    // 只記最近一台；串流行程每場都是新的行程，所以放檔案
+    // §HOTSPOT-VERIFY／§HOTSPOT-ADAPT：「這台 host 等過、沒有連上熱點」的紀錄（0600，沒有機密）。串流行程每場都是新的行程，
+    // 所以放檔案。每行一台、tab 分隔，最多 kNoJoinMaxHosts 台：
+    //   <host uuid>\t<類別 S|R>\t<連續失敗次數>\t<最後一次失敗的 epoch 秒>\t<最後的 state>
+    // 類別與 state 是給之後 server 回報用的欄位，現在一律寫 R 與 0、讀到什麼就原樣留著。
+    // 時間是牆上時鐘（要跨行程、跨重開機）；下次可重試的時刻＝最後一次失敗＋noJoinBackoffS(次數)。時鐘往回跳（年齡為負）
+    // 或紀錄超過 kNoJoinStaleS 都當作到期。舊格式（只有一行 uuid、時間看檔案的 mtime）讀成一筆、失敗 1 次。
+    struct NoJoinEntry {
+        std::string host;
+        char cls = 'R';
+        int fails = 1;
+        long long at = 0;  // 最後一次失敗（epoch 秒）
+        long state = 0;
+    };
+
     static std::string noJoinPath()
     {
         const std::string p = markerPath();
         return p.empty() ? p : p.substr(0, p.size() - strlen("hotspot-paused")) + "hotspot-nojoin";
     }
 
-    static void writeNoJoin(const std::string& hostId)
+    static bool validHostId(const std::string& h)
     {
-        const std::string path = noJoinPath();
-        if (path.empty() || hostId.empty()) {
-            return;
-        }
-        const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        if (fd >= 0) {
-            const std::string body = hostId + "\n";
-            if (write(fd, body.data(), body.size()) < 0) {
-                // 寫不進去只是下一場會再等一輪
-            }
-            close(fd);
-        }
+        return !h.empty() && h.size() <= 64 && h.find_first_of("\t\r\n") == std::string::npos;
     }
 
-    static bool noJoinRecent(const std::string& hostId)
+    // 整串都是十進位數字才算數（不用會丟例外的 std::stoi／stoll）
+    static bool parseNum(const std::string& s, long long* out)
     {
+        if (s.empty() || s.size() > 18) {
+            return false;
+        }
+        long long v = 0;
+        for (const char c : s) {
+            if (c < '0' || c > '9') {
+                return false;
+            }
+            v = v * 10 + (c - '0');
+        }
+        *out = v;
+        return true;
+    }
+
+    // 讀不到、內容不對的行一律跳過（當作沒有那一筆）
+    static std::vector<NoJoinEntry> loadNoJoin()
+    {
+        std::vector<NoJoinEntry> out;
         const std::string path = noJoinPath();
         struct stat st;
         std::string s;
-        if (path.empty() || hostId.empty() || stat(path.c_str(), &st) != 0 || !readSmallFile(path.c_str(), &s)) {
-            return false;
+        if (path.empty() || stat(path.c_str(), &st) != 0 || !readSmallFile(path.c_str(), &s)) {
+            return out;
         }
-        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
-            s.pop_back();
+        size_t pos = 0;
+        while (pos < s.size() && static_cast<int>(out.size()) < kNoJoinMaxHosts) {
+            size_t nl = s.find('\n', pos);
+            if (nl == std::string::npos) {
+                nl = s.size();
+            }
+            std::string line = s.substr(pos, nl - pos);
+            pos = nl + 1;
+            while (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            if (line.empty()) {
+                continue;
+            }
+            std::vector<std::string> f;
+            size_t a = 0;
+            for (;;) {
+                const size_t tab = line.find('\t', a);
+                if (tab == std::string::npos) {
+                    f.push_back(line.substr(a));
+                    break;
+                }
+                f.push_back(line.substr(a, tab - a));
+                a = tab + 1;
+            }
+            NoJoinEntry e;
+            e.host = f[0];
+            if (!validHostId(e.host)) {
+                continue;
+            }
+            if (f.size() == 1) {
+                // 舊格式：整個檔只有一行 uuid，時間是檔案的 mtime。新格式的檔裡出現沒有 tab 的行＝壞掉的行，跳過
+                if (!out.empty() || s.find_first_not_of("\r\n", pos < s.size() ? pos : s.size()) != std::string::npos) {
+                    continue;
+                }
+                e.at = static_cast<long long>(st.st_mtime);
+            }
+            else {
+                long long fails = 0, at = 0, state = 0;
+                if (f.size() < 4 || f[1].size() != 1 || (f[1][0] != 'S' && f[1][0] != 'R') || !parseNum(f[2], &fails) ||
+                    !parseNum(f[3], &at) || fails < 1 || at <= 0) {
+                    continue;
+                }
+                if (f.size() >= 5 && parseNum(f[4], &state) && state <= 255) {
+                    e.state = static_cast<long>(state);
+                }
+                e.cls = f[1][0];
+                e.fails = static_cast<int>(fails > kNoJoinMaxFails ? kNoJoinMaxFails : fails);
+                e.at = at;
+            }
+            bool dup = false;
+            for (const NoJoinEntry& o : out) {
+                dup = dup || o.host == e.host;
+            }
+            if (!dup) {
+                out.push_back(e);
+            }
         }
-        const long ageS = static_cast<long>(time(nullptr) - st.st_mtime);
-        return s == hostId && ageS >= 0 && ageS < kNoJoinRetryS;
+        return out;
     }
 
-    static void clearNoJoin(const std::string& hostId)
+    // 先寫暫存檔再 rename（讀的人不會看到寫到一半的內容）；一筆都沒有就把檔案刪掉
+    static void saveNoJoin(std::vector<NoJoinEntry>& entries)
     {
         const std::string path = noJoinPath();
-        std::string s;
-        if (path.empty() || !readSmallFile(path.c_str(), &s)) {
+        if (path.empty()) {
             return;
         }
-        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
-            s.pop_back();
-        }
-        if (s == hostId) {
+        if (entries.empty()) {
             unlink(path.c_str());
+            return;
         }
+        while (static_cast<int>(entries.size()) > kNoJoinMaxHosts) {
+            size_t oldest = 0;
+            for (size_t i = 1; i < entries.size(); ++i) {
+                if (entries[i].at < entries[oldest].at) {
+                    oldest = i;
+                }
+            }
+            entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(oldest));
+        }
+        std::string body;
+        for (const NoJoinEntry& e : entries) {
+            body += e.host + "\t" + std::string(1, e.cls) + "\t" + std::to_string(e.fails) + "\t" + std::to_string(e.at) + "\t" +
+                    std::to_string(e.state) + "\n";
+        }
+        const std::string tmp = path + ".tmp";
+        unlink(tmp.c_str());
+        const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            return;  // 寫不進去只是下一場會再等一輪
+        }
+        const bool ok = write(fd, body.data(), body.size()) == static_cast<ssize_t>(body.size());
+        close(fd);
+        if (!ok || rename(tmp.c_str(), path.c_str()) != 0) {
+            unlink(tmp.c_str());
+        }
+    }
+
+    // 這台 host 還要等多久才再為它開熱點（秒；0＝沒有紀錄或已經到期）。fails 回傳目前的連續失敗次數
+    static long noJoinRemainingS(const std::string& hostId, int* fails)
+    {
+        *fails = 0;
+        if (!validHostId(hostId)) {
+            return 0;
+        }
+        const long long now = static_cast<long long>(time(nullptr));
+        for (const NoJoinEntry& e : loadNoJoin()) {
+            if (e.host != hostId) {
+                continue;
+            }
+            const long long ageS = now - e.at;
+            if (ageS < 0 || ageS >= kNoJoinStaleS) {
+                return 0;
+            }
+            *fails = e.fails;
+            const long waitS = noJoinBackoffS(e.fails);
+            return ageS < waitS ? static_cast<long>(waitS - ageS) : 0;
+        }
+        return 0;
+    }
+
+    // 這台 host 又一次沒有連上：連續失敗次數加一（紀錄太舊就從 1 算起）。回傳接下來要等多久（秒）
+    static long recordNoJoin(const std::string& hostId, int* fails)
+    {
+        *fails = 1;
+        if (!validHostId(hostId)) {
+            return noJoinBackoffS(1);
+        }
+        const long long now = static_cast<long long>(time(nullptr));
+        std::vector<NoJoinEntry> entries = loadNoJoin();
+        NoJoinEntry mine;
+        mine.host = hostId;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].host == hostId) {
+                const long long ageS = now - entries[i].at;
+                if (ageS >= 0 && ageS < kNoJoinStaleS) {
+                    mine.fails = entries[i].fails >= kNoJoinMaxFails ? kNoJoinMaxFails : entries[i].fails + 1;
+                }
+                entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
+                break;
+            }
+        }
+        mine.at = now;
+        *fails = mine.fails;
+        entries.push_back(mine);
+        saveNoJoin(entries);
+        return noJoinBackoffS(mine.fails);
+    }
+
+    // 這台 host 連上了：整筆刪掉。回傳原本有沒有紀錄
+    static bool clearNoJoin(const std::string& hostId)
+    {
+        std::vector<NoJoinEntry> entries = loadNoJoin();
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].host == hostId) {
+                entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
+                saveNoJoin(entries);
+                return true;
+            }
+        }
+        return false;
     }
 
     // 熱點沒在運作、而且有上一個行程留下的暫停：接手，這一場結束時還原
@@ -917,6 +1157,20 @@ private:
         return false;
     }
 
+    // 熱點上有沒有 addrs 裡的任何一個位址（addrs＝這台 host 自己回報的位址）
+    static bool hotspotHasAnyOf(const std::vector<std::string>& addrs)
+    {
+        if (addrs.empty()) {
+            return false;
+        }
+        for (const std::string& ip : hotspotPeers()) {
+            if (std::find(addrs.begin(), addrs.end(), ip) != addrs.end()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static std::string markerPath()
     {
         const char* base = getenv("XDG_DATA_HOME");
@@ -1004,5 +1258,9 @@ private:
     bool m_OwnerIsSelf = true; // 熱點記在這個行程名下（不是 App 的子行程）：這一場結束就關
     std::vector<std::string> m_Baseline;  // 換 host 時上一台留在熱點上的裝置，不算這一台連上
     std::chrono::steady_clock::time_point m_OpenedAt;
+    bool m_Advertise = true;         // §HOTSPOT-ADAPT：false＝熱點確定沒開，不把熱點資訊送給 host
+    bool m_AdvertiseLogged = false;
+    bool m_LinkReadValid = false;    // 多連線的讀數（≥0）目前連續中
+    std::chrono::steady_clock::time_point m_LinkReadSince;  // 連續讀數從什麼時候開始
 #endif
 };

@@ -183,6 +183,13 @@ void notifyFrameLost(unsigned int frameNumber, bool speculative);
 // §FRZ-WATCHDOG: VideoStream 斷糧 watchdog 用（皆 VideoRecv 執行緒）
 uint64_t videoDepacketizerLastFrameTimeUs(void);
 void videoDepacketizerRequestResync(void);
+// §PERF-1113 A32（RtpVideoQueue.c）：VideoDepacketizer 的「Network dropped」行和 RtpVideoQueue 的 Unrecoverable 行共用
+// 同一組限流與 10 秒彙總（[VIPLE-VIDEO] loss 10s）。frames＝這一次跳過幾幀；nowUs＝這一幀第一個封包到達的時刻。
+// 回傳 true＝這一行可以印。原型只放這裡：原本兩個 .c 各寫一份，改簽章時編譯器抓不到兩邊不一致
+bool RtpvLossLogDropped(uint32_t frames, uint64_t nowUs);
+// §IDR-RETRY（ControlStream.c）：最近一次 LiRequestIdrFrame() 的時刻（PltGetMillis 截成 32 位元）。
+// 這一場還沒要過就回 false。無鎖，任何執行緒可呼叫
+bool idrRequestLastTimeMs(uint32_t* lastMs);
 
 void initializeVideoStream(void);
 void destroyVideoStream(void);
