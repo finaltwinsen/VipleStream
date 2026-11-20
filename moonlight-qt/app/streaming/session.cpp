@@ -4389,10 +4389,16 @@ bool Session::startConnectionAsync()
                     // §REVIEW-1119：std::fill 寫完沒人再讀，最佳化可以整段刪掉，熱點金鑰留在 SSO 或堆積。
                     wipeStdString(hsSsid);
                     wipeStdString(hsKey);
-                    if (paired < 2 && !frameHotspot) {
+                    // §FLAT-REPAIR（2026-11-20）：只有一條路、而且這一場本來就不會走 MP-QUIC 時也要求——多連線的 hub 在只有
+                    // 一條連線時照樣運作，丟包補傳（VIPLE_VR_LINK_F_REPAIR_FLAT）掛在它上面，單一 Wi-Fi 正是最需要補傳的情況。
+                    // 會走 MP-QUIC 的場次維持原樣（多連線會把 QUIC 關掉，那是使用者選的傳輸）。host 不支援補傳時（2.0.249 以前）
+                    // 這一場只是改由 hub 的單一連線送，影像內容與封包格式相同。
+                    const bool singlePath = paired < 2 && !frameHotspot;
+                    const bool quicWanted = m_Preferences->enableMpQuic && m_Computer->isMpQuicCapable;
+                    if (singlePath && quicWanted) {
                         flatMlAsked = false;
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                    "[VIPLE-VR-LINK] flat (2D) session: only %d network interface(s) can reach the host - multi-link not requested",
+                                    "[VIPLE-VR-LINK] flat (2D) session: only %d network interface(s) can reach the host and MP-QUIC is in use - multi-link not requested",
                                     paired);
                     }
                     // 經 VPN 連回來（別的 VPN 剛好用私有網段，例如自架 WireGuard 的 10.x）不要求：那種場次只有一條連線，
@@ -4402,6 +4408,11 @@ bool Session::startConnectionAsync()
                         flatMlAsked = false;
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                     "[VIPLE-VR-LINK] flat (2D) session: the host is reached through a VPN - multi-link not requested");
+                    }
+                    else if (singlePath) {
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-FLAT-REPAIR] flat (2D) session: one network interface reaches the host - multi-link requested "
+                                    "with a single link so lost packets can be resent");
                     }
                 }
             }

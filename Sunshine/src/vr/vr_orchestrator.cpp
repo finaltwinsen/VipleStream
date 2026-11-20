@@ -60,6 +60,10 @@ namespace vr::orchestrator {
     // g_prewarm_done；PRECHECK 只在序號對得上「呼叫端交給 start() 的那一個」時沿用，用過就清
     bool g_prewarm_req = false;
     uint64_t g_prewarm_seq = 0;
+    // `--steamvr-driver uninstall`（都在 g_mtx 下讀寫）：unregister_driver() 設要求並等 g_unreg_done；
+    // 編排執行緒回到迴圈開頭（＝沒有編排在跑）時才做
+    bool g_unreg_req = false;
+    std::optional<unregister_result_t> g_unreg_done;
     std::optional<prewarm_done_t> g_prewarm_done;
 
     std::atomic<uint8_t> g_state {0};
@@ -1002,6 +1006,47 @@ namespace vr::orchestrator {
       }
     }
 
+    /// `--steamvr-driver uninstall`：install（DEPLOY＋REGISTER）的反向。只在編排執行緒、沒有編排進行中時呼叫
+    unregister_result_t do_unregister() {
+      unregister_result_t r;
+      const auto t0 = steady::now();
+      auto done = [&](bool ok, std::string reason) {
+        r.ok = ok;
+        r.reason = std::move(reason);
+        step("unregister", ok, std::format("{}{}found={} guard_restored={}", r.reason, r.reason.empty() ? "" : " ", r.found, r.guard_restored ? 1 : 0), t0);
+        return r;
+      };
+      // vrserver 在跑：它結束時會把記憶體中的設定寫回 vrsettings（guard 還原不了），driver DLL 也還被載入著
+      if (platform::vrserver_pid() != 0) {
+        return done(false, "steamvr-running");
+      }
+      // 先還原 guard：註冊拿掉之後 forcedDriver=viplestream 還留著的話，SteamVR 會找不到 HMD
+      if (platform::guard_pending()) {
+        const auto g = platform::guard_restore();
+        if (g.result != platform::guard_e::ok && g.result != platform::guard_e::nothing_to_do) {
+          return done(false, g.result == platform::guard_e::vrserver_running ? "steamvr-running"s :
+                             g.result == platform::guard_e::no_user          ? "guard-restore:no-user"s :
+                                                                               "guard-restore:" + g.detail);
+        }
+        r.guard_restored = g.result == platform::guard_e::ok;
+      }
+      const auto before = platform::registered_viplestream_drivers();
+      if (!before) {
+        return done(false, "openvrpaths-unreadable");
+      }
+      r.found = static_cast<int>(before->size());
+      if (!before->empty()) {
+        platform::remove_other_registrations(""s);  // keep 是空的＝全部移除
+        const auto after = platform::registered_viplestream_drivers();
+        if (!after || !after->empty()) {
+          return done(false, "still-registered");
+        }
+      }
+      // 已部署的版本目錄（<install>\config\steamvr\<ver>）：下一次 VR /launch 會從 <install>\steamvr 重新部署
+      platform::prune_old_versions(""s);
+      return done(true, ""s);
+    }
+
     void thread_main() {
       platf::set_thread_name("vr_orchestrator");
       steady::time_point last_env {};
@@ -1010,13 +1055,24 @@ namespace vr::orchestrator {
       for (;;) {
         std::optional<job_t> job;
         std::optional<uint64_t> prewarm_seq;
+        bool unreg = false;
         {
           std::unique_lock lk(g_mtx);
           g_cv.wait_for(lk, 2s, []() {
-            return g_quit || g_pending.has_value() || g_kick || g_prewarm_req;
+            return g_quit || g_pending.has_value() || g_kick || g_prewarm_req || g_unreg_req;
           });
           if (g_quit) {
             break;
+          }
+          // `--steamvr-driver uninstall`：job 已經排進來就不做（它馬上要部署、註冊），直接回覆
+          if (g_unreg_req) {
+            if (g_pending) {
+              g_unreg_req = false;
+              g_unreg_done = unregister_result_t {false, "session-active"s};
+              g_cv.notify_all();
+            } else {
+              unreg = true;
+            }
           }
           // §PREWARM：job 已經排進來的話 PRECHECK 自己會完整探測，不必先探一次
           if (g_prewarm_req) {
@@ -1051,6 +1107,19 @@ namespace vr::orchestrator {
           std::lock_guard lk(g_mtx);
           g_prewarm_done = prewarm_done_t {*prewarm_seq, std::move(env), steady::now()};
           continue;
+        }
+        if (unreg) {
+          // 這時 job 一定是空的（上面在同一次鎖內看過）；做的期間排進來的 /launch 會在下一輪照常部署、註冊
+          auto res = do_unregister();
+          {
+            std::lock_guard lk(g_mtx);
+            // 呼叫端等到逾時已經走了（g_unreg_req 被它清掉）就不留結果，免得下一次呼叫拿到舊的
+            if (g_unreg_req) {
+              g_unreg_req = false;
+              g_unreg_done = std::move(res);
+            }
+          }
+          g_cv.notify_all();
         }
         if (job) {
           g_idle_quit_reset = true;  // §REVIEW-1103（B041-1）
@@ -1238,6 +1307,34 @@ namespace vr::orchestrator {
       g_kick = true;
     }
     g_cv.notify_all();
+  }
+
+  unregister_result_t unregister_driver() {
+    std::unique_lock lk(g_mtx);
+    if (!g_running) {
+      return {false, "not-running"s};
+    }
+    if (g_unreg_req) {
+      return {false, "busy"s};
+    }
+    const auto s = cur();
+    if (g_pending || (s != state_e::idle && s != state_e::restore_pending && s != state_e::error)) {
+      return {false, "session-active"s};
+    }
+    g_unreg_done.reset();
+    g_unreg_req = true;
+    g_cv.notify_all();
+    // 編排執行緒可能正在跑一輪維護（閒置關 SteamVR 最久等十幾秒）；vrpathreg 每個註冊最多 15 秒
+    const bool got = g_cv.wait_for(lk, 60s, []() {
+      return g_unreg_done.has_value() || g_quit;
+    });
+    if (!got || !g_unreg_done) {
+      g_unreg_req = false;
+      return {false, g_quit ? "not-running"s : "timeout"s};
+    }
+    auto res = std::move(*g_unreg_done);
+    g_unreg_done.reset();
+    return res;
   }
 
   uint64_t prewarm() {

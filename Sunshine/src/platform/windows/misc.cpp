@@ -2389,6 +2389,18 @@ namespace platf {
       return std::format("0x{:x} {}", static_cast<std::uint32_t>(r), reason_name(r));
     }
 
+    // 「看得到熱點、但連不上」的判斷。fail_assoc 從 arm 起只會由 false 變 true，而且不分是誰發起的連線：
+    // 提早重啟網卡、或網卡原本連著的別的網路斷開，都會留下關聯階段的原因碼（例如 driver disconnected），
+    // 之後每一次都是「不在範圍內」也還是 1（實測：原因碼 0x2800b，判定卻印 hotspot seen）。
+    // 所以以最後一次的原因碼為準：它屬於關聯之前的那一類（AC 區段：not available、not visible 等）就是找不到熱點。
+    bool hotspot_seen() {
+      const DWORD last = last_fail_reason.load();
+      if (last >= WLAN_REASON_CODE_AC_BASE && last <= WLAN_REASON_CODE_AC_END) {
+        return false;
+      }
+      return fail_assoc.load();
+    }
+
     // 判定之後（verdict）或快速加入逾時之後（沒判定），從沒連上過的慢速重試：做過 n 次之後，下一次之前要等多久
     std::chrono::seconds slow_interval(bool verdict, int n) {
       static const int kAfterVerdict[] = {15, 30, 60};
@@ -2748,7 +2760,8 @@ namespace platf {
               down_since = now;
               BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not joined after " << std::chrono::duration_cast<std::chrono::seconds>(kFastJoin).count()
                               << " s (" << fast_tries << " connect attempt(s) of ours, " << fail_completes.load() << " failed connection(s), "
-                              << fail_attempts.load() << " failed attempt(s), reached association=" << (fail_assoc.load() ? 1 : 0)
+                              << fail_attempts.load() << " failed attempt(s), hotspot seen=" << (hotspot_seen() ? 1 : 0)
+                              << ", association-stage failure this round=" << (fail_assoc.load() ? 1 : 0)
                               << ", last reason=" << reason_text(last_fail_reason.load())
                               << ") - no verdict; retrying slower (5/10/20/40/60 s), no adapter restart unless it joins first";
             }
@@ -2787,7 +2800,7 @@ namespace platf {
               const auto completes = fail_completes.load();
               const auto attempts = fail_attempts.load();
               if (std::max(completes, attempts) >= kVerdictMinFails) {
-                const bool assoc = fail_assoc.load();
+                const bool assoc = hotspot_seen();  // 以最後一次的原因碼為準，見 hotspot_seen()
                 fast = false;
                 verdict = true;
                 slow_n = 0;
@@ -2796,7 +2809,8 @@ namespace platf {
                 down_since = now;
                 BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] verdict: " << (assoc ? "failed (hotspot seen, cannot connect)" : "unreachable") << ' '
                                    << std::chrono::duration_cast<std::chrono::milliseconds>(now - armed).count() << " ms after the hotspot info ("
-                                   << completes << " failed connection(s), " << attempts << " failed attempt(s), reached association=" << (assoc ? 1 : 0)
+                                   << completes << " failed connection(s), " << attempts << " failed attempt(s), hotspot seen=" << (assoc ? 1 : 0)
+                                   << ", association-stage failure this round=" << (fail_assoc.load() ? 1 : 0)
                                    << ", last reason=" << reason_text(slow_logged_reason) << ", " << fast_tries << " connect attempt(s) of ours, early restart "
                                    << (early_done ? "done" : "not available")
                                    << ") - next retry in 15 s, then 30 s, then every 60 s; no adapter restart unless it joins first";

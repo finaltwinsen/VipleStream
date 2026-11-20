@@ -656,16 +656,33 @@ namespace vr::multilink {
     return std::clamp<int64_t>((int64_t) eta_ms * 750'000, kRepairGapMinNs, kRepairRttGapMaxNs);
   }
 
+  // §FLAT-REPAIR（2026-11-20）：平面（2D）場次的補包。數值與 client 的 VipleVr.h 相同；這裡另外定義是因為 server 用的
+  // 那一份標頭（third-party/moonlight-common-c）還沒有這個位元。client 在平面場次的 LINK_HELLO 提出、server 在 LINK_READY
+  // 的 hubCaps 連同 F_CTRL｜F_REPAIR 一起回才成立；VR 場次兩邊都不提、不回。
+#ifndef VIPLE_VR_LINK_F_REPAIR_FLAT
+  #define VIPLE_VR_LINK_F_REPAIR_FLAT 0x40
+#endif
+
   /**
    * @brief 連線層功能的協商：client 提出的（每條連線的 flags 取交集）裡，server 的開關也開的才啟用。
    *        REPAIR 要 CTRL 成立，REPAIR_RTT 要 REPAIR 成立；HOTADD 獨立（不依賴 CTRL／REPAIR）。不認得的位元一律不回。
    *        §VR-REPAIR-WAN：repair_rtt 關著、repair_far 開著（預設）時，client 有提 REPAIR_FAR 才給 REPAIR_RTT｜REPAIR_FAR
    *        （RTT 規則只用在原本規則不補的路徑上）；沒提 REPAIR_FAR 的舊 client 照舊拿不到 REPAIR_RTT。
    */
-  inline uint8_t negotiate_link_features(uint8_t offered, bool ctrl, bool repair, bool repair_rtt, bool hotadd, bool repair_far = false) {
+  inline uint8_t negotiate_link_features(uint8_t offered, bool ctrl, bool repair, bool repair_rtt, bool hotadd, bool repair_far = false, bool flat_repair = false) {
     uint8_t feat = 0;
     if (hotadd && (offered & VIPLE_VR_LINK_F_HOTADD)) {
       feat |= VIPLE_VR_LINK_F_HOTADD;
+    }
+    if (flat_repair) {
+      // §FLAT-REPAIR：平面（2D）場次的 hub。CTRL 與 REPAIR 只為補包而開，三個位元要嘛一起成立、要嘛都不給：
+      // client 要提 REPAIR_FLAT（2.0.249 以前的 client 在平面場次也會提 CTRL｜REPAIR，但它的 2D 接收路徑沒有為補包
+      // 驗過，不給它）。RTT 規則不在平面場次用。
+      const uint8_t need = VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_REPAIR_FLAT;
+      if (ctrl && repair && (offered & need) == need) {
+        feat |= need;
+      }
+      return feat;
     }
     if (ctrl && (offered & VIPLE_VR_LINK_F_CTRL)) {
       feat |= VIPLE_VR_LINK_F_CTRL;

@@ -388,7 +388,8 @@ public:
 
 private:
     bool createInstance(QString* error);
-    bool createSystem(QString* error);
+    // waitBudgetMs：頭盔還沒準備好（XR_ERROR_FORM_FACTOR_UNAVAILABLE）時最多重試多久（上限 10 s）
+    bool createSystem(int waitBudgetMs, QString* error);
     bool createVulkan(QString* error);
     bool createVulkanAt(QString* error, bool pyroWave13);  // §PYROWAVE-XR-ZC：createVulkan 的本體
     void destroyVulkanObjects();                           // 建到一半失敗時清掉（不碰 XrInstance）
@@ -444,7 +445,7 @@ private:
     VkImage* m_KbImages = nullptr;
     bool m_KbUploaded = false;
     bool m_KbUnsupportedLogged = false;
-    bool m_KbDumped = false;
+    uint64_t m_KbDumpedMask = 0;  // dev --xr-dump-keyboard：已經存過檔的狀態（bit＝鍵盤狀態位元組）
     XrSwapchain m_KbHoverSwapchain = XR_NULL_HANDLE;
     uint32_t m_KbHoverImageCount = 0;
     VkImage* m_KbHoverImages = nullptr;
@@ -460,10 +461,11 @@ private:
     std::thread m_KbRenderThread;
     std::mutex m_KbRenderMutex;
     std::condition_variable m_KbRenderCv;
-    int m_KbRenderRequest = -1;               // 要畫的修飾鍵組合（-1＝沒有）；受 m_KbRenderMutex 保護
+    // 索引＝鍵盤狀態位元組（黏滯修飾鍵 4 bit｜Caps｜頁面，見 XrKeyboard::kState*）；只有用到的組合才會畫
+    int m_KbRenderRequest = -1;               // 要畫的狀態（-1＝沒有）；受 m_KbRenderMutex 保護
     bool m_KbRenderCancel = false;            // 受 m_KbRenderMutex 保護
-    std::atomic<uint32_t> m_KbReadyMask{0};   // bit m＝m_KbCache[m] 已畫好
-    QImage m_KbCache[16];
+    std::atomic<uint64_t> m_KbReadyMask{0};   // bit m＝m_KbCache[m] 已畫好
+    QImage m_KbCache[XrKeyboard::kStateCount];
     int m_KbUploadedMods = -1;                // 目前 swapchain 裡是哪一種組合
     VkBuffer m_Staging = VK_NULL_HANDLE;
     VkDeviceMemory m_StagingMem = VK_NULL_HANDLE;

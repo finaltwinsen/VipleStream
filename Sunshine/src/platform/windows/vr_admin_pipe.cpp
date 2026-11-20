@@ -5,6 +5,7 @@
 // standard includes
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -1165,8 +1166,7 @@ namespace platf::vr_admin {
       void cmd_steamvr_driver(const nlohmann::json &args) {
         const std::string op = args.contains("op") && args["op"].is_string() ? args["op"].get<std::string>() : std::string {};
         if (op == "uninstall") {
-          send_result(vr::selftest::rc_unsupported, "steamvr-driver uninstall is not implemented until V5"sv);
-          wait_client_close(2000);
+          cmd_steamvr_driver_uninstall(args);
           return;
         }
         if (op != "status") {
@@ -1199,6 +1199,78 @@ namespace platf::vr_admin {
         }
         wait_client_close(2000);
       }
+
+      /**
+       * `--steamvr-driver uninstall [--wait-steamvr S]`：註銷 SteamVR driver（install＝編排器的 DEPLOY＋REGISTER 的反向）。
+       * 實際動作在編排執行緒上（`vr::orchestrator::unregister_driver()`）；這裡只決定要不要等 SteamVR 結束。
+       * SteamVR 在跑時不動手也不替使用者關掉它（和 REGISTER_FINALIZE 一樣只在 vrserver 沒在跑時改註冊）：
+       * 沒給 `--wait-steamvr` 就直接回報，給了就每秒重試、最多等 S 秒。
+       */
+      void cmd_steamvr_driver_uninstall(const nlohmann::json &args) {
+        int wait_s = 0;
+        if (auto it = args.find("wait_steamvr_s"); it != args.end() && it->is_number_integer()) {
+          wait_s = std::clamp(it->get<int>(), 0, k_uninstall_wait_max_s);
+        }
+        reap_finished_run();
+        {
+          std::lock_guard lk {mtx_};
+          if (current_) {
+            send_result(vr::selftest::rc_busy, "a selftest is running (use --vr-status / --vr-abort)"sv);
+            wait_client_close(2000);
+            return;
+          }
+        }
+        BOOST_LOG(info) << "[VIPLE-VR-ADMIN] steamvr-driver uninstall requested wait_steamvr="sv << wait_s << 's';
+        const auto t0 = std::chrono::steady_clock::now();
+        bool announced = false;
+        vr::orchestrator::unregister_result_t res;
+        for (;;) {
+          res = vr::orchestrator::unregister_driver();
+          if (res.ok || res.reason != "steamvr-running" || std::chrono::steady_clock::now() - t0 >= std::chrono::seconds(wait_s)) {
+            break;
+          }
+          if (!announced) {
+            announced = true;
+            if (!send({{"t", "line"}, {"text", std::format("[VIPLE-VR-ADMIN] steamvr-driver uninstall: SteamVR is running, waiting up to {} s for it to exit", wait_s)}})) {
+              return;  // CLI 走了：還沒改任何東西，不繼續
+            }
+          }
+          if (wait_stop(1s)) {
+            res.reason = "server-stopping";
+            break;
+          }
+        }
+        const std::string line = std::format(
+          "[VIPLE-VR-ADMIN] steamvr-driver uninstall result={} reason={} registrations_found={} guard_restored={}",
+          res.ok ? "ok"sv : "fail"sv,
+          res.reason.empty() ? "-"sv : std::string_view {res.reason},
+          res.found,
+          res.guard_restored ? 1 : 0
+        );
+        BOOST_LOG(res.ok ? info : warning) << line;
+        send({{"t", "line"}, {"text", line}});
+        if (res.ok) {
+          if (config::vr.pcvr == config::vr_t::pcvr_e::enabled) {
+            send({{"t", "line"}, {"text", "[VIPLE-VR-ADMIN] note: vr_pcvr is enabled - the next VR session will deploy and register the driver again"s}});
+          }
+          send_result(vr::selftest::rc_ok, ""sv);
+        } else if (res.reason == "not-running") {
+          send_result(vr::selftest::rc_unsupported, "the VR orchestrator is not running (vr_pcvr disabled or unsupported)"sv);
+        } else if (res.reason == "session-active") {
+          send_result(vr::selftest::rc_session_active, "a VR session is being set up or is active"sv);
+        } else if (res.reason == "busy") {
+          send_result(vr::selftest::rc_busy, "another uninstall is in progress"sv);
+        } else if (res.reason == "steamvr-running") {
+          send_result(vr::selftest::rc_failed, "SteamVR is running; close it and retry, or pass --wait-steamvr <seconds>"sv);
+        } else if (res.reason == "server-stopping") {
+          send_result(vr::selftest::rc_aborted, "server is stopping"sv);
+        } else {
+          send_result(vr::selftest::rc_failed, res.reason);
+        }
+        wait_client_close(2000);
+      }
+
+      static constexpr int k_uninstall_wait_max_s = 600;
 
       handle_t stop_evt_;
       std::thread thread_;
@@ -1466,17 +1538,32 @@ namespace platf::vr_admin {
 
   int cli_steamvr_driver(int argc, char **argv) {
     std::string op;
+    int wait_s = 0;
+    // uninstall 等 SteamVR 結束的上限（秒）；status 接受但用不到
+    auto parse_wait = [&](std::string_view v) {
+      int n = 0;
+      const auto [end, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+      if (ec != std::errc {} || end != v.data() + v.size() || n < 0 || n > 600) {
+        BOOST_LOG(error) << "[VIPLE-VR-ADMIN] --wait-steamvr needs a number of seconds (0-600)"sv;
+        return false;
+      }
+      wait_s = n;
+      return true;
+    };
     for (int i = 0; i < argc; ++i) {
       const std::string_view a = argv[i] ? std::string_view {argv[i]} : std::string_view {};
       if (a == "--wait-steamvr"sv) {
-        // V5 才用得到（uninstall 等 SteamVR 結束的上限）；V2 只接受並忽略
-        if (i + 1 >= argc) {
-          BOOST_LOG(error) << "[VIPLE-VR-ADMIN] --wait-steamvr needs a value"sv;
+        if (i + 1 >= argc || !argv[i + 1] || !parse_wait(argv[i + 1])) {
+          if (i + 1 >= argc) {
+            BOOST_LOG(error) << "[VIPLE-VR-ADMIN] --wait-steamvr needs a value"sv;
+          }
           return vr::selftest::rc_bad_request;
         }
         ++i;
       } else if (a.starts_with("--wait-steamvr="sv)) {
-        continue;
+        if (!parse_wait(a.substr("--wait-steamvr="sv.size()))) {
+          return vr::selftest::rc_bad_request;
+        }
       } else if (op.empty() && (a == "status"sv || a == "uninstall"sv)) {
         op = std::string {a};
       } else {
@@ -1489,9 +1576,10 @@ namespace platf::vr_admin {
       return vr::selftest::rc_bad_request;
     }
     if (op == "uninstall") {
-      // K21：CLI 不自己碰 Steam 樹；註銷要由執行中的 server 以使用者身分做（V5 的編排器）
-      BOOST_LOG(error) << "[VIPLE-VR-ADMIN] --steamvr-driver uninstall: not implemented until V5"sv;
-      return vr::selftest::rc_unsupported;
+      // K21：CLI 不自己碰 Steam 樹；註銷由執行中的 server 的編排器以使用者身分做。
+      // 逾時：等 SteamVR 的時間＋編排器那邊最多約 60 秒（維護一輪＋每個註冊的 vrpathreg）
+      const DWORD timeout_ms = static_cast<DWORD>(wait_s + 90) * 1000;
+      return cli_request({{"v", 1}, {"cmd", "steamvr-driver"}, {"args", {{"op", op}, {"wait_steamvr_s", wait_s}}}}, timeout_ms, timeout_ms);
     }
     return cli_request({{"v", 1}, {"cmd", "steamvr-driver"}, {"args", {{"op", op}}}}, 15000, 15000);
   }

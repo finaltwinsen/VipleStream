@@ -282,6 +282,8 @@
     "mouse_desc": "允許訪客使用滑鼠控制主機系統",
     "native_pen_touch": "原生筆/觸控支援",
     "native_pen_touch_desc": "啟用後，VipleStream-Server 將從 VipleStream 用戶端傳遞本機筆觸事件。對於沒有原生筆/觸控支援的舊版應用程式來說，停用此功能可能很有用。",
+    "stream_menu": "用串流控制選單取代 Windows 的電源選單",
+    "stream_menu_desc": "一般（非 VR）串流期間，遠端使用者按開始選單的電源圖示、或在桌面按 Alt+F4 時，改顯示串流控制選單：中斷串流、結束應用程式並中斷、鎖定、睡眠、關機、重新啟動、取消。停用後一律顯示 Windows 原本的電源選單。只適用於 Windows；VR 場次不受影響。",
     "notify_pre_releases": "發佈前通知",
     "notify_pre_releases_desc": "是否接收 VipleStream-Server 的新預發佈版本通知",
     "nvenc_h264_cavlc": "在 H.264 中選擇 CAVLC 而非 CABAC",

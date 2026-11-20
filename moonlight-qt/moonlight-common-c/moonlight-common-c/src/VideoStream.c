@@ -456,6 +456,8 @@ static void VideoReceiveThreadProc(void* context) {
     uint32_t mlFramePeriodUs = mlBasePeriodUs;
     // §VR-RATE-AUTO：分頻改了就重算（半速時等待上限從約 8 ms 放寬到 14 ms，遠端時救回的幀多很多）
     uint32_t mlDivApplied = 0;
+    // §FLAT-REPAIR：上一次算 mlHoldUs 時，平面場次的補包有沒有協商成立（變了就重算）
+    bool mlFlatRepairApplied = false;
     int rxLink = -1;
     // §VR-REPAIR-RTT：每場串流重來
     memset(&rr, 0, sizeof(rr));
@@ -958,11 +960,26 @@ static void VideoReceiveThreadProc(void* context) {
                 // §REVIEW-1119：volatile 連讀三次，中間被改寫會配出這一包不存在的分頻。先讀一次。
                 const uint32_t divNow = vrStreamDiv;
                 const uint32_t div = divNow >= 1 && divNow <= 4 ? divNow : 1;
-                if (div != mlDivApplied) {
+                // §FLAT-REPAIR：平面（2D）場次協商了補包（LINK_READY 可能比第一個影像封包晚到，所以每個封包看一次）
+                const bool flatRepair = (feat & VIPLE_VR_LINK_F_REPAIR_FLAT) != 0;
+                if (div != mlDivApplied || flatRepair != mlFlatRepairApplied) {
                     mlDivApplied = div;
+                    mlFlatRepairApplied = flatRepair;
                     mlFramePeriodUs = mlBasePeriodUs * div;
                     // 單一路徑（沒有多連線）時照舊不等：mlHoldUs＝0
                     mlHoldUs = mlLinks <= 0 ? 0 : (mlFramePeriodUs < 4000 ? 4000 : (mlFramePeriodUs > 14000 ? 14000 : mlFramePeriodUs));
+                    if (flatRepair && mlLinks > 0) {
+                        // §FLAT-REPAIR：2D 的等待上限＝兩個幀週期，夾在 8～25 ms（VR 是一個幀週期、4～14 ms，不變）。
+                        // 2D 丟一幀的代價是整段凍結到 IDR 進來（實測約 270 ms 起跳），比 VR 的 intra refresh 貴得多，值得
+                        // 多等一輪重報；25 ms 的上限讓「等不到」的情況最多比現在晚這麼久才去要 IDR。往返時間的門檻在
+                        // 下面 vrrrDecide 之後另外收緊（一趟往返＋2 ms 要落在這個上限內），超過就不回報、不等，行為和沒有
+                        // 補包時相同。host 的封包倉留三個幀週期，和這個上限對得上。
+                        // 沒有缺包時不會走到等待：封包照到達順序直接進佇列，延遲不變。
+                        const uint32_t two = 2u * mlFramePeriodUs;
+                        mlHoldUs = two < 8000 ? 8000 : (two > 25000 ? 25000 : two);
+                        Limelog("[VIPLE-FLAT-REPAIR] wait limit %.1f ms (2 frame periods, 8-25 ms); repair is used while the link RTT is at most %.0f ms\n",
+                                mlHoldUs / 1000.0, (mlHoldUs - 2000) / 1000.0);
+                    }
                 }
             }
             // 上一個封包（與它之後的等待逾時、REPAIR_GONE）是照 RTT 規則處理的，那段時間的結果才交給保險
@@ -993,6 +1010,14 @@ static void VideoReceiveThreadProc(void* context) {
             rr.seenOk = rtpQueue.mlTot.repairedUsed;
             rr.seenBad = rtpQueue.mlTot.lostNacked;
             vrrrDecide(&in, &rr.state, &out);
+            // §FLAT-REPAIR：2D 的等待上限是兩個幀週期，vrrrDecide 的門檻（往返＋2 ms ≤ 上限的 1.5 倍）跟著變得太寬——
+            // 往返比上限還長時，回報換來的補包一定趕不上，只是白等一輪再去要 IDR。2D 改成「一趟往返＋2 ms 要落在上限內」
+            // （60 fps：往返 ≤ 23 ms；120 fps：≤ 14 ms）；超過就和沒有補包時一樣（不回報、不為補包等）
+            if (mlFlatRepairApplied && out.mlRepair && !out.mlRttMode &&
+                    (uint32_t)in.legacyRttMs * 1000u + 2000u > in.holdUs) {
+                out.mlRepair = false;
+                out.mlHoldMaxUs = out.mlHoldDual ? in.holdUs : 0;
+            }
             RtpvSetRepairDecision(&rtpQueue, &out, mlFramePeriodUs, StreamConfig.vrRepairNoAhead == 0);
             if (out.mlRepair) {
                 // 各條連線平常晚多久（要在算出這個封包的 mlRepair 之後才填，否則剛變成可以補包的那個封包拿到的是舊值）

@@ -659,6 +659,7 @@ namespace logging {
       << "    --vr-status               | show the progress or result of the last VR self-test"sv << std::endl
       << "    --vr-abort                | abort the running VR self-test"sv << std::endl
       << "    --steamvr-driver status   | show the VR bridge state of the running server"sv << std::endl
+      << "    --steamvr-driver uninstall [--wait-steamvr S] | unregister the SteamVR driver (SteamVR must not be running; elevated admin)"sv << std::endl
 #endif
       << std::endl
       << "    flags"sv << std::endl

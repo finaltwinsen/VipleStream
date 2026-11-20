@@ -278,28 +278,48 @@ XrInput::XrInput(const XrInputSink& sink, bool testPointer, const QString& testK
       m_TestKbText(testKeyboardText)
 {
     // dev --xr-test-keyboard：把文字展開成按鍵序列（大寫／Shift 字元先點一次黏滯 Shift）
-    const int shiftKey = m_Kb.findKind(XrKeyboard::Kind::Shift);
     // 結尾的 "{close}"：打完字之後點鍵盤的關閉鍵，扳機按住 0.6 秒才放（驗關掉鍵盤之後不會點到後面的螢幕）
     QString typed = m_TestKbText;
     const bool closeAtEnd = typed.endsWith(QLatin1String("{close}"));
     if (closeAtEnd) {
         typed.chop(7);
     }
-    for (const QChar c : typed) {
-        int idx = -1;
-        bool needShift = false;
-        if (!m_Kb.keyForChar(c, &idx, &needShift)) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev test keyboard: no key for U+%04X, skipped",
-                        static_cast<unsigned>(c.unicode()));
+    // §KBD-CAPS／§KBD-NUMPAD：文字中間的 "{caps}"＝點 Caps 鍵、"{num}"＝點頁面切換鍵（之後的字元在另一頁找）
+    int page = 0;
+    for (int i = 0; i < typed.size(); i++) {
+        if (typed.mid(i, 6) == QLatin1String("{caps}")) {
+            const int capsKey = m_Kb.findKind(XrKeyboard::Kind::Caps, page);
+            if (capsKey >= 0) {
+                m_TestKbSteps.push_back({capsKey});
+            }
+            i += 5;
             continue;
         }
+        if (typed.mid(i, 5) == QLatin1String("{num}")) {
+            const int pageKey = m_Kb.findKind(XrKeyboard::Kind::Page, page);
+            if (pageKey >= 0) {
+                m_TestKbSteps.push_back({pageKey});
+                page ^= 1;
+            }
+            i += 4;
+            continue;
+        }
+        const QChar c = typed.at(i);
+        int idx = -1;
+        bool needShift = false;
+        if (!m_Kb.keyForChar(c, &idx, &needShift, page)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev test keyboard: no key for U+%04X on page %d, skipped",
+                        static_cast<unsigned>(c.unicode()), page);
+            continue;
+        }
+        const int shiftKey = m_Kb.findKind(XrKeyboard::Kind::Shift, page);
         if (needShift && shiftKey >= 0) {
             m_TestKbSteps.push_back({shiftKey});
         }
         m_TestKbSteps.push_back({idx});
     }
     if (closeAtEnd) {
-        const int closeKey = m_Kb.findKind(XrKeyboard::Kind::Close);
+        const int closeKey = m_Kb.findKind(XrKeyboard::Kind::Close, page);
         if (closeKey >= 0) {
             TestKbStep st = {closeKey};
             st.holdPast = true;
@@ -1120,7 +1140,7 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         float ku = 0.0f, kv = 0.0f, kt = 0.0f;
         if (XrRay::intersectQuad(screen.kbPose, screen.kbWidthM, screen.kbHeightM, origin, dir, &ku, &kv, &kt)) {
             kbHit = true;
-            m_KbHover = m_Kb.keyAt(ku, kv);
+            m_KbHover = m_Kb.keyAt(ku, kv, XrKeyboard::pageOf(m_KbLocks));
             const XrRay::Vec3 p = XrRay::quadPoint(screen.kbPose, screen.kbWidthM, screen.kbHeightM, ku, kv);
             m_HitPose.position = {p.x, p.y, p.z};
             m_HitPose.orientation = screen.kbPose.orientation;
@@ -1384,8 +1404,9 @@ void XrInput::releaseKeyboard(const char* why)
 {
     const bool had = m_KbActiveKey >= 0 || m_Sticky != 0;
     kbRelease();
-    if (m_Sticky != 0) {
+    if (m_Sticky != 0 || m_KbLocks != 0) {
         m_Sticky = 0;
+        m_KbLocks = 0;  // §KBD-CAPS／§KBD-NUMPAD：下次打開回到小寫的 QWERTY 頁（Caps 沒有送給 host，不必還原）
         m_KbDirty = true;
     }
     m_KbHover = -1;
@@ -1430,6 +1451,17 @@ void XrInput::kbPress(int idx)
                         static_cast<unsigned>(m_Sticky));
         }
         break;
+    case K::Caps:
+    case K::Page:
+        // §KBD-CAPS／§KBD-NUMPAD：本地的鎖定狀態，按一下切換、不送任何鍵給 host（理由見 xrkeyboard.h）。
+        // 切頁之後 hover 的鍵號下一格才會依新的一頁重算；這一格扳機已經按下，不會誤按新頁同位置的鍵
+        m_KbLocks ^= XrKeyboard::lockBit(k.kind);
+        m_KbDirty = true;
+        if (!m_TestKbText.isEmpty()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev keyboard locks=0x%X (0x10 caps, 0x20 numpad page)",
+                        static_cast<unsigned>(m_KbLocks));
+        }
+        break;
     case K::Close:
         setKeyboardOpen(false, "close key");
         break;
@@ -1440,7 +1472,7 @@ void XrInput::kbPress(int idx)
         m_StatKeys++;
         break;
     case K::Normal: {
-        const uint8_t mods = m_Sticky;
+        const uint8_t mods = XrKeyboard::effectiveMods(k, m_Sticky, m_KbLocks);  // Caps 對字母＝反轉 Shift
         uint8_t cur = 0;
         for (K mk : {K::Ctrl, K::Alt, K::Shift, K::Win}) {
             if (mods & XrKeyboard::modBit(mk)) {

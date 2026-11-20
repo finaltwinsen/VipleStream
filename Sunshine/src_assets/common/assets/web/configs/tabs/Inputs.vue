@@ -181,6 +181,16 @@ const config = ref(props.config)
               v-model="config.native_pen_touch"
               default="true"
     ></Checkbox>
+
+    <!-- §STREAM-MENU：串流控制選單取代 Windows 的電源選單（只有 Windows） -->
+    <hr v-if="platform === 'windows'">
+    <Checkbox v-if="platform === 'windows'"
+              class="mb-3"
+              id="stream_menu"
+              locale-prefix="config"
+              v-model="config.stream_menu"
+              default="true"
+    ></Checkbox>
   </div>
 </template>
 

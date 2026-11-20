@@ -759,6 +759,7 @@ void XrVrControllers::setKeyboardOpen(bool open, const char* why)
     if (!open) {
         kbRelease();
         m_KbSticky = 0;
+        m_KbLocks = 0;  // §KBD-CAPS／§KBD-NUMPAD：下次打開回到小寫的 QWERTY 頁
         m_KbHover = -1;
         m_KbHit = false;
         m_KbDragHand = -1;
@@ -796,6 +797,16 @@ void XrVrControllers::kbPress(int idx)
     case K::Win:
         m_KbSticky ^= XrKeyboard::modBit(k.kind);  // 黏滯：按一下保持，下一個一般鍵放開後自動放開
         break;
+    case K::Caps:
+    case K::Page:
+        // §KBD-CAPS／§KBD-NUMPAD：本地的鎖定狀態，按一下切換、不送任何鍵給 host（理由見 xrkeyboard.h）
+        m_KbLocks ^= XrKeyboard::lockBit(k.kind);
+        m_KbHover = -1;  // 切頁之後原本的鍵號屬於另一頁；下一格依新的一頁重算
+        if (!m_KbTestText.isEmpty()) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] dev keyboard locks=0x%X (0x10 caps, 0x20 numpad page)",
+                        static_cast<unsigned>(m_KbLocks));
+        }
+        break;
     case K::Close:
         setKeyboardOpen(false, "close key");
         break;
@@ -805,7 +816,7 @@ void XrVrControllers::kbPress(int idx)
         m_StatKbKeys++;
         break;
     case K::Normal: {
-        const uint8_t mods = m_KbSticky;
+        const uint8_t mods = XrKeyboard::effectiveMods(k, m_KbSticky, m_KbLocks);  // Caps 對字母＝反轉 Shift
         uint8_t cur = 0;
         for (K mk : {K::Ctrl, K::Alt, K::Shift, K::Win}) {
             if (mods & XrKeyboard::modBit(mk)) {
@@ -950,7 +961,7 @@ void XrVrControllers::updateKeyboard(XrTime t, XrSpace space, bool shown, const 
         float u = 0.0f, v = 0.0f, dist = 0.0f;
         if (XrRay::intersectQuad(pose, w, h, origin, dir, &u, &v, &dist)) {
             hit[hnd] = true;
-            key[hnd] = m_Kb.keyAt(u, v);
+            key[hnd] = m_Kb.keyAt(u, v, XrKeyboard::pageOf(m_KbLocks));
             point[hnd] = XrRay::quadPoint(pose, w, h, u, v);
         }
         else if (barW > 0.0f && XrRay::intersectQuad(bar, barW, barH, origin, dir, &u, &v, &dist)) {

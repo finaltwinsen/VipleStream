@@ -136,6 +136,20 @@ Qt::Key vkToQt(int vk, bool shift, QString* text)
             return static_cast<Qt::Key>(QChar(c).toUpper().unicode());
         }
     }
+    // 數字鍵盤（虛擬鍵盤的「123」頁）：介面的文字欄位把它當一般數字與符號
+    if (vk >= 0x60 && vk <= 0x69) {
+        *text = QString(QChar('0' + (vk - 0x60)));
+        return static_cast<Qt::Key>(Qt::Key_0 + (vk - 0x60));
+    }
+    switch (vk) {
+    case 0x6A: *text = QStringLiteral("*"); return Qt::Key_Asterisk;
+    case 0x6B: *text = QStringLiteral("+"); return Qt::Key_Plus;
+    case 0x6D: *text = QStringLiteral("-"); return Qt::Key_Minus;
+    case 0x6E: *text = QStringLiteral("."); return Qt::Key_Period;
+    case 0x6F: *text = QStringLiteral("/"); return Qt::Key_Slash;
+    case 0x90: return Qt::Key_NumLock;
+    default: break;
+    }
     switch (vk) {
     case 0x08: return Qt::Key_Backspace;
     case 0x09: *text = QStringLiteral("\t"); return Qt::Key_Tab;

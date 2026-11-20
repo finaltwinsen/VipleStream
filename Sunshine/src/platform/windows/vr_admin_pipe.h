@@ -67,6 +67,6 @@ namespace platf::vr_admin {
   /// `--vr-abort`：中止進行中的 selftest（主要給 `--detach` 的執行用）
   int cli_vr_abort(int argc, char **argv);
 
-  /// `--steamvr-driver status|uninstall [--wait-steamvr S]`（V2：status 只有 bridge 狀態；uninstall 到 V5 才實作）
+  /// `--steamvr-driver status|uninstall [--wait-steamvr S]`（status 只有 bridge 狀態；uninstall 交給編排器註銷 driver，SteamVR 在跑時最多等 S 秒）
   int cli_steamvr_driver(int argc, char **argv);
 }  // namespace platf::vr_admin

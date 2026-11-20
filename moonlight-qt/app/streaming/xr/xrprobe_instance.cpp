@@ -30,6 +30,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <thread>    // §XR-HMD-WAIT：重試之間的 sleep_for
 #include <utility>   // std::as_const
 #include <vector>
 
@@ -295,7 +296,33 @@ bool probeSystem(XrInstance instance, bool eyeGazeEnabled, XrSystemId* systemId,
     QJsonObject o;
     XrSystemGetInfo getInfo = xrStruct<XrSystemGetInfo>(XR_TYPE_SYSTEM_GET_INFO);
     getInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    // §XR-HMD-WAIT（2026-11-20）：XR_ERROR_FORM_FACTOR_UNAVAILABLE（runtime 在、頭盔還沒準備好）時每 500 ms 重試一次、
+    // 最多 10 s，同正式流程的 XrContext::createSystem；其他錯誤碼照舊立刻失敗。probe 是命令列工具，在 main thread 上等沒有影響。
+    constexpr int kRetryIntervalMs = 500;
+    constexpr int kRetryMaxMs = 10000;
+    const auto waitStart = std::chrono::steady_clock::now();
+    auto waitedMs = [&]() {
+        return static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - waitStart).count());
+    };
+    int attempts = 1;
     XrResult r = xrGetSystem(instance, &getInfo, systemId);
+    while (r == XR_ERROR_FORM_FACTOR_UNAVAILABLE && waitedMs() + kRetryIntervalMs <= kRetryMaxMs) {
+        if (attempts == 1) {
+            // 只印一次（不是每次重試都印）
+            ProbeUtil::printLine(kTag, "system: HMD not available yet, retrying every %d ms for up to %d ms", kRetryIntervalMs,
+                                 kRetryMaxMs);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kRetryIntervalMs));
+        r = xrGetSystem(instance, &getInfo, systemId);
+        attempts++;
+    }
+    if (attempts > 1) {
+        o[QStringLiteral("xrGetSystemAttempts")] = attempts;
+        o[QStringLiteral("xrGetSystemWaitMs")] = static_cast<double>(waitedMs());
+        ProbeUtil::printLine(kTag, "system: xrGetSystem %s after %lld ms (%d attempts)", XR_SUCCEEDED(r) ? "succeeded" : "still failing",
+                             waitedMs(), attempts);
+    }
     if (!st.check(o, "xrGetSystem", r)) {
         // 常見：XR_ERROR_FORM_FACTOR_UNAVAILABLE（runtime 在、頭盔沒接或沒開）
         ProbeUtil::printLine(kTag, "system: HMD unavailable (%s); view configuration and vulkan skipped",

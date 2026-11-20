@@ -46,15 +46,11 @@ protected:
     std::set<std::string, std::less<>> options;
     std::string content = file_handler::read_file("src/config.cpp");
 
-    // Regex patterns to match different config option types in config.cpp
+    // 所有 `<名稱>_f(vars, "<選項>"` 形式的呼叫都算（string_f、int_between_f、list_string_f、string_list_f、
+    // vr_opt::bool_strict_f、vr_opt::int_strict_f……）。原本逐一列出函式名，後來加的變體沒列進去，那些選項就沒被比對。
+    // 函式定義的第一個參數是 `std::unordered_map<…> &vars`，不符合這個樣式。
     const std::vector patterns = {
-      std::regex(R"DELIM((?:string_f|path_f|string_restricted_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
-      std::regex(R"DELIM((?:int_f|int_between_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
-      std::regex(R"DELIM(bool_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
-      std::regex(R"DELIM((?:double_f|double_between_f)\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
-      std::regex(R"DELIM(generic_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
-      std::regex(R"DELIM(list_prep_cmd_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM"),
-      std::regex(R"DELIM(map_int_int_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM")
+      std::regex(R"DELIM([A-Za-z0-9_]+_f\s*\(\s*vars\s*,\s*"([^"]+)")DELIM")
     };
 
     for (const auto &pattern : patterns) {
@@ -359,6 +355,125 @@ protected:
 
   std::map<std::string, std::string, std::less<>> expectedDocToTabMapping;
 
+  // Options that are internal/special and shouldn't be in UI/docs
+  static inline const std::set<std::string, std::less<>> internalOptions = {
+    "flags"  // Internal config flags, not user-configurable
+  };
+
+  // 只在設定檔、不進設定頁的選項（config.html 與 en.json 不必有；configuration.md 仍然要有，除非另外列在
+  // configFileOnlyUndocumentedOptions）。內部調校值不放進設定頁是刻意的決定：選項多、彼此有相依、調錯會讓串流變差，
+  // 要改的人直接改 sunshine.conf。
+  // 新增選項時二選一：補進設定頁（config.html＋en.json＋configuration.md），或在這裡加一行並寫明為什麼不進設定頁。
+  // 兩邊都沒有、或這裡列了但 config.cpp 已經沒有、或這裡列了但其實已經進了設定頁，測試都會失敗。
+  static inline const std::set<std::string, std::less<>> configFileOnlyOptions = {
+    // abr_*：2D 自適應碼率的調校值，預設值是實測定的
+    "abr_cut_idr",
+    "abr_floor_kbps",
+
+    // mpquic_*：多路徑 QUIC 傳輸的開關與調校，client 也要對應設定才有作用
+    "mpquic_congestion",
+    "mpquic_enabled",
+    "mpquic_fec_floor",
+    "mpquic_port",
+    "mpquic_scheduler",
+
+    // relay_*、stun_server、udp_tunnel_mode：外網穿透用的中繼與打洞設定；relay_psk 是機密，不經設定頁顯示
+    "relay_psk",
+    "relay_url",
+    "stun_server",
+    "udp_tunnel_mode",
+
+    // vr_pcvr、vr_mic、vr_padmode、vr_netbench_clip：VR 功能的開關。設定頁目前沒有 VR 分頁，
+    // 一般使用者從頭盔 client 的設定頁操作，host 這邊只留設定檔
+    "vr_mic",
+    "vr_netbench_clip",
+    "vr_padmode",
+    "vr_pcvr",
+
+    // vr_abr_*：VR 自適應碼率的調校值
+    "vr_abr_ceiling_kbps",
+    "vr_abr_experimental",
+    "vr_abr_fast",
+
+    // vr_capture_*、vr_gpu_priority、vr_direct_kick、vr_stale_policy：host 擷取端的等待、過載判定與 GPU 排程
+    "vr_capture_late",
+    "vr_capture_late_max_ms",
+    "vr_capture_overload",
+    "vr_direct_kick",
+    "vr_gpu_priority",
+    "vr_stale_policy",
+
+    // vr_latch_*、vr_pace_*、vr_buffer_refill、vr_vsync_to_photons_us：幀節拍控制器與顯示時間預測
+    "vr_buffer_refill",
+    "vr_latch_ab",
+    "vr_latch_acquire",
+    "vr_latch_acquire_ppm",
+    "vr_latch_mode",
+    "vr_latch_target_pct",
+    "vr_latch_target_v3_pct",
+    "vr_pace_ab_s",
+    "vr_pace_spread_pct",
+    "vr_vsync_to_photons_us",
+
+    // vr_ctrl_*、vr_angvel_local、vr_edge_hold_ms、vr_haptic_redundancy：頭部與手把姿態的預測、外插與震動補送
+    "vr_angvel_local",
+    "vr_ctrl_extrap_ms",
+    "vr_ctrl_pose_offset",
+    "vr_edge_hold_ms",
+    "vr_haptic_redundancy",
+
+    // vr_fovea_*、vr_gaze_fovea、vr_render_*：注視點編碼與算圖解析度的上限與調校
+    "vr_fovea_gaze_slew_dps",
+    "vr_fovea_periph_qp",
+    "vr_fovea_tiles",
+    "vr_gaze_fovea",
+    "vr_render_scale_pct",
+    "vr_render_target_max",
+
+    // vr_intra_refresh_*：畫面修復（intra refresh）的週期與保險時間
+    "vr_intra_refresh_frames",
+    "vr_intra_refresh_safety_ms",
+
+    // vr_multilink*：多連線（每張網卡一條 UDP）的開關、補包與測試用的故障注入
+    "vr_multilink",
+    "vr_multilink_ctrl",
+    "vr_multilink_fault",
+    "vr_multilink_hotadd",
+    "vr_multilink_repair",
+    "vr_multilink_repair_far",
+    "vr_multilink_repair_rtt",
+    "vr_multilink_uso",
+
+    // vr_hotspot_*：host 自動連頭盔熱點與網卡重啟次數上限（只有接了頭盔網卡的 host 用得到）
+    "vr_hotspot_autoconnect",
+    "vr_hotspot_restart_max",
+
+    // vr_dev_*：開發與驗測用，不給一般使用者
+    "vr_dev_kick_every_s",
+    "vr_dev_kick_ms",
+    "vr_dev_rawdump",
+  };
+
+  // configFileOnlyOptions 裡連 configuration.md 都還沒有條目的（早期加的傳輸選項）。只能減、不要再加：
+  // 新選項至少要有文件。補了文件就從這裡拿掉（留著測試會失敗）。
+  static inline const std::set<std::string, std::less<>> configFileOnlyUndocumentedOptions = {
+    "abr_floor_kbps",
+    "mpquic_congestion",
+    "mpquic_enabled",
+    "mpquic_fec_floor",
+    "mpquic_port",
+    "mpquic_scheduler",
+    "relay_psk",
+    "relay_url",
+    "stun_server",
+    "udp_tunnel_mode",
+  };
+
+  // configuration.md 裡沒有對應設定頁分頁的章節（裡面的選項都在 configFileOnlyOptions）
+  static inline const std::set<std::string, std::less<>> docOnlySections = {
+    "VR (VipleStream 2.0)",
+  };
+
   // Helper function to check if an option exists in HTML options
   static bool isOptionInHtml(const std::string &option, const std::map<std::string, std::string, std::less<>> &htmlOptions) {
     return htmlOptions.contains(option);
@@ -370,16 +485,20 @@ protected:
   }
 
   // Helper function to validate option existence across files
+  // 只在設定檔的選項（configFileOnlyOptions）不查 config.html 與 en.json；configuration.md 照查，
+  // 除非也列在 configFileOnlyUndocumentedOptions
   static void validateOptionExistence(const std::string &option, const std::map<std::string, std::string, std::less<>> &htmlOptions, const std::map<std::string, std::string, std::less<>> &mdOptions, const std::set<std::string, std::less<>> &jsonOptions, std::vector<std::string> &missingFromFiles) {
-    if (!isOptionInHtml(option, htmlOptions)) {
+    const bool fileOnly = configFileOnlyOptions.contains(option);
+
+    if (!fileOnly && !isOptionInHtml(option, htmlOptions)) {
       missingFromFiles.push_back(std::format("config.html missing: {}", option));
     }
 
-    if (!isOptionInMd(option, mdOptions)) {
+    if (!isOptionInMd(option, mdOptions) && !(fileOnly && configFileOnlyUndocumentedOptions.contains(option))) {
       missingFromFiles.push_back(std::format("configuration.md missing: {}", option));
     }
 
-    if (!jsonOptions.contains(option)) {
+    if (!fileOnly && !jsonOptions.contains(option)) {
       missingFromFiles.push_back(std::format("en.json missing: {}", option));
     }
   }
@@ -443,11 +562,6 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
   const auto mdOptions = extractConfigMdOptions();
   const auto jsonOptions = extractEnJsonConfigOptions();
 
-  // Options that are internal/special and shouldn't be in UI/docs
-  const std::set<std::string, std::less<>> internalOptions = {
-    "flags"  // Internal config flags, not user-configurable
-  };
-
   std::vector<std::string> missingFromFiles;
 
   // Check that all config.cpp options exist in other files (except internal ones)
@@ -463,6 +577,41 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
     std::string errorMsg = "Config options missing from files:\n";
     for (const auto &missing : missingFromFiles) {
       errorMsg += std::format("  {}\n", missing);
+    }
+    FAIL() << errorMsg;
+  }
+}
+
+// 豁免清單本身要跟得上現況：不能列已經不存在的選項、不能列其實已經進了設定頁的選項；
+// 「沒有文件」那一份只能是豁免清單的子集，而且補了文件就要拿掉
+TEST_F(ConfigConsistencyTest, ConfigFileOnlyListIsCurrent) {
+  const auto cppOptions = extractConfigCppOptions();
+  const auto htmlOptions = extractConfigHtmlOptions();
+  const auto mdOptions = extractConfigMdOptions();
+  const auto jsonOptions = extractEnJsonConfigOptions();
+
+  std::vector<std::string> problems;
+
+  for (const auto &option : configFileOnlyOptions) {
+    if (!cppOptions.contains(option)) {
+      problems.push_back(std::format("configFileOnlyOptions lists '{}' but config.cpp no longer has it", option));
+    } else if (htmlOptions.contains(option) && jsonOptions.contains(option)) {
+      problems.push_back(std::format("configFileOnlyOptions lists '{}' but it is in config.html and en.json - remove it from the list", option));
+    }
+  }
+
+  for (const auto &option : configFileOnlyUndocumentedOptions) {
+    if (!configFileOnlyOptions.contains(option)) {
+      problems.push_back(std::format("configFileOnlyUndocumentedOptions lists '{}' which is not in configFileOnlyOptions", option));
+    } else if (mdOptions.contains(option)) {
+      problems.push_back(std::format("configFileOnlyUndocumentedOptions lists '{}' but configuration.md documents it - remove it from the list", option));
+    }
+  }
+
+  if (!problems.empty()) {
+    std::string errorMsg = "Config-file-only exemption list is out of date:\n";
+    for (const auto &problem : problems) {
+      errorMsg += std::format("  {}\n", problem);
     }
     FAIL() << errorMsg;
   }
@@ -493,6 +642,9 @@ TEST_F(ConfigConsistencyTest, ConfigTabsMatchDocumentationSections) {
 
   // Check that each documentation section has a corresponding HTML tab
   for (const auto &section : mdSections) {
+    if (docOnlySections.contains(section)) {
+      continue;  // 沒有分頁的章節：裡面都是只在設定檔的選項
+    }
     if (!expectedDocToTabMapping.contains(section)) {
       inconsistencies.push_back(std::format("Documentation section '{}' has no corresponding UI tab", section));
     }
@@ -625,30 +777,16 @@ TEST_F(ConfigConsistencyTest, TestFrameworkDetectsMissingOptions) {
   const std::string testDummyOption = "test_framework_validation_option";
   modifiedCppOptions.insert(testDummyOption);
 
-  // Options that are internal/special and shouldn't be in UI/docs
-  std::set<std::string, std::less<>> internalOptions = {
-    "flags"  // Internal config flags, not user-configurable
-  };
-
   std::vector<std::string> missingFromFiles;
 
   // Check that the fake option is detected as missing from other files
+  // （和 AllConfigOptionsExistInAllFiles 走同一個檢查，豁免清單也一併套用：沒進清單的假選項必須被抓到）
   for (const auto &option : modifiedCppOptions) {
     if (internalOptions.contains(option)) {
       continue;  // Skip internal options
     }
 
-    if (!htmlOptions.contains(option)) {
-      missingFromFiles.push_back(std::format("config.html missing: {}", option));
-    }
-
-    if (!mdOptions.contains(option)) {
-      missingFromFiles.push_back(std::format("configuration.md missing: {}", option));
-    }
-
-    if (!jsonOptions.contains(option)) {
-      missingFromFiles.push_back(std::format("en.json missing: {}", option));
-    }
+    validateOptionExistence(option, htmlOptions, mdOptions, jsonOptions, missingFromFiles);
   }
 
   // Verify that the test framework detected the missing fake option

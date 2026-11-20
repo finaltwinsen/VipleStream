@@ -191,6 +191,8 @@ public:
     bool keyboardOpen() const { return m_KbOpen; }
     const XrKeyboard& keyboard() const { return m_Kb; }
     uint8_t stickyModifiers() const { return m_Sticky; }
+    // 鍵盤貼圖要畫哪一種狀態：黏滯修飾鍵｜Caps 鎖定｜頁面（XrKeyboard::kMod*／kState*）
+    uint8_t keyboardRenderState() const { return static_cast<uint8_t>((m_Sticky & 0x0F) | m_KbLocks); }
     // 貼圖需要重畫（黏滯修飾鍵變了）；取回即清除
     bool takeKeyboardDirty() { const bool d = m_KbDirty; m_KbDirty = false; return d; }
     // 高亮：目前射線指著的鍵（-1＝沒有）與是否按住中
@@ -281,6 +283,7 @@ private:
     bool m_BackWas = false;           // §VR-SHELL：B 上一格（back 的上升緣）
     bool m_ComboWas = false;          // §VR-EXIT-COMBO：上一格是否整組按住
     uint8_t m_Sticky = 0;          // 黏滯修飾鍵（XrKeyboard::kMod*）
+    uint8_t m_KbLocks = 0;         // §KBD-CAPS／§KBD-NUMPAD：Caps 鎖定與頁面（XrKeyboard::kState*）；關鍵盤時歸零
     int m_KbHover = -1;            // 射線指著的鍵
     int m_KbActiveKey = -1;        // 已送出按下、尚未放開的一般鍵
     uint8_t m_KbActiveMods = 0;    // 該鍵按下時送出的修飾鍵

@@ -930,8 +930,11 @@ namespace stream {
     uint64_t vrTxFrames = 0;
 
     // §FLAT-ML（2026-11-18）：平面場次的多連線。hub 和 VR 用同一個（下面的 vrLinks），但沒有 session->vr：
-    // 不補包、不走連線上的控制訊息、不收追蹤；週期工作（LINK_ADDRS、10 秒統計）在控制迴圈的平面分支做
+    // 不走連線上的 VR 控制訊息、不收追蹤；週期工作（LINK_ADDRS、10 秒統計）在控制迴圈的平面分支做
+    // §FLAT-REPAIR（2026-11-20）：client 提了 VIPLE_VR_LINK_F_REPAIR_FLAT 時補包（連線上只收 NACK，見 flat_handle_c2s_from_link）
     bool flatMl = false;
+    std::atomic<bool> flatRepairFirstLogged {false};  // 這一場第一次補送已經印過（hub 的接收執行緒）
+    std::atomic<bool> flatRepairRefuseLogged {false};  // 這一場第一次因為壅塞不補已經印過
     std::vector<std::array<std::uint8_t, 4>> flatLinkAddrs;
     bool flatLinkAddrsSent = false;
     std::chrono::steady_clock::time_point flatAddrsAt {};
@@ -2677,6 +2680,55 @@ namespace stream {
     return true;
   }
 
+  /**
+   * @brief §FLAT-REPAIR（2026-11-20）：平面（2D）場次從連線層收到的 0x5507（hub 的接收執行緒；已解密、已去重）。
+   *        只認 NACK——LOSS／LATCH 等綁著 VR 的恢復狀態機，平面場次沒有 session->vr，一律忽略。
+   *
+   * 保護（補包不可以讓壅塞更嚴重）：
+   *   - hub 自己的額度：每秒補送的封包數不超過影像封包率的 15%（repair_budget_t，最多存 600 個），用完回 GONE；
+   *   - 壅塞等級到 L2（延遲降碼的條件成立）以上就不補：這時掉的包是佇列滿出來的，再送只會更滿，交給 ABR 降碼與 IDR；
+   *   - 補不了的一律回 REPAIR_GONE，client 立刻照原本的方式放棄這一幀（要 IDR），不會白等到期限。
+   * 補送的封包記進 videoShardsSentAccum（實際送出的 shard 數）；丟包的帳不動——補回來的在 client 看來就是收到了，
+   * 補不回來的照原本的 FEC status／loss stats 回報。
+   */
+  static void flat_handle_c2s_from_link(session_t *session, const std::string_view &payload) {
+    if (!session->flatMl || !session->vrLinks) {
+      return;
+    }
+    const auto *p = (const std::uint8_t *) payload.data();
+    const std::size_t size = payload.size();
+    std::size_t off = 0;
+    while (off + 2 <= size) {
+      const std::uint8_t type = p[off];
+      const std::uint8_t len = p[off + 1];
+      if (off + 2 + len > size) {
+        break;
+      }
+      if (type == VIPLE_VR_C2S_NACK) {
+        ::abr_cong::level_e level;
+        {
+          std::lock_guard<std::mutex> lk(session->video.abrMutex);
+          level = session->video.abrCong.level();
+        }
+        const bool refuse = level >= ::abr_cong::level_e::cut;
+        const auto r = session->vrLinks->on_nack(p + off + 2, len, refuse);
+        if (refuse) {
+          if (!session->flatRepairRefuseLogged.exchange(true, std::memory_order_relaxed)) {
+            BOOST_LOG(info) << "[VIPLE-FLAT-REPAIR] first refusal this session: congestion level L" << (int) level
+                            << " - lost packets are not resent while the link is congested (IDR and bitrate control take over)";
+          }
+        } else if (r.resent > 0) {
+          session->video.videoShardsSentAccum.fetch_add((int) r.resent, std::memory_order_relaxed);
+          if (!session->flatRepairFirstLogged.exchange(true, std::memory_order_relaxed)) {
+            BOOST_LOG(info) << "[VIPLE-FLAT-REPAIR] first resend this session: " << r.resent << " packets (" << r.needed
+                            << " needed to rebuild the block)";
+          }
+        }
+      }
+      off += 2 + len;
+    }
+  }
+
   // §FLAT-ML：平面場次的多連線週期工作（控制執行緒；放在函式裡——控制迴圈在 KITTY_WHILE_LOOP 巨集內，逗號會被當成引數分隔）
   static void flat_link_tick(session_t *session, std::chrono::steady_clock::time_point now) {
     // §FLAT-ML：VR 場次在 vr_control_tick 做的兩件事——熱加入的位址通知、每條連線的 10 秒統計
@@ -2699,6 +2751,10 @@ namespace stream {
         session->flatStatsAt = now;
         if (const auto line = session->vrLinks->take_stats_line(); !line.empty()) {
           BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s: " << line;
+        }
+        // §FLAT-REPAIR：補包的 10 秒彙總（這 10 秒沒有任何回報時是空字串，不印）
+        if (const auto line = session->vrLinks->take_repair_line(); !line.empty()) {
+          BOOST_LOG(info) << "[VIPLE-FLAT-REPAIR] 10s: " << line;
         }
       }
     }
@@ -7212,7 +7268,11 @@ namespace stream {
         session->control.loopTimeout.store(std::chrono::milliseconds {4}, std::memory_order_relaxed);
       } else if (launch_session.flat_ml && (config.encryptionFlagsEnabled & SS_ENC_CONTROL_V2)) {
         // §FLAT-ML：平面場次的多連線 hub。影像照 auto（第二條先量、夠快才送滿；主連線不通時每條還活著的都送）。
-        // 補包與連線上的控制訊息都不開（那兩樣綁著 VR 的恢復機制）；熱加入開著（熱點、之後才插上的網卡）
+        // 熱加入開著（熱點、之後才插上的網卡）。
+        // §FLAT-REPAIR（2026-11-20）：補包開著，但只給提了 VIPLE_VR_LINK_F_REPAIR_FLAT 的 client（opt.flat_repair）；連線上的
+        // 控制訊息只為了 NACK／REPAIR_GONE 而開，LOSS／LATCH 等 VR 的訊息在 flat_handle_c2s_from_link 一律忽略。
+        // 舊 client 不提那個位元，拿到的功能和以前一樣（只有 hotadd）。往返時間的補包規則（repair_rtt／repair_far）不用：
+        // 平面多連線只在區網啟用，原本的規則就夠。沒有設定項——跟著 vr_multilink 的開關走（disabled 時根本不會有這個 hub）。
         ::vr::multilink::options_t opt;
         opt.video = config::vr.multilink == config::vr_t::multilink_e::primary ? ::vr::multilink::options_t::video_e::primary :
                     config::vr.multilink == config::vr_t::multilink_e::always  ? ::vr::multilink::options_t::video_e::always :
@@ -7222,8 +7282,9 @@ namespace stream {
         opt.video_max_age = std::chrono::microseconds {std::clamp<int64_t>(2 * 1'000'000LL / fps, 8000, 40000)};
         opt.video_qos = config.videoQosType != 0;
         opt.audio_qos = config.audioQosType != 0;
-        opt.ctrl = false;
-        opt.repair = false;
+        opt.ctrl = true;
+        opt.repair = true;
+        opt.flat_repair = true;
         opt.repair_rtt = false;
         opt.repair_far = false;
         opt.hotadd = config::vr.multilink_hotadd;
@@ -7237,12 +7298,18 @@ namespace stream {
         session->vrLinks = std::make_shared<::vr::multilink::hub_t>(
           launch_session.gcm_key,
           opt,
-          [](uint8_t, uint16_t, std::string_view) {
-            return false;  // 平面場次沒有追蹤，也沒有協商連線上的控制訊息
+          // session 的裸指標：和 VR 那個 hub 同樣的生命週期保證（hub 的執行緒在 session::join 的 hub->stop() 就結束；
+          // 沒經過 join 時 vrLinks 是 session_t 最後一個成員、第一個解構）
+          [s = session.get()](uint8_t, uint16_t ptype, std::string_view payload) {
+            if (ptype == VIPLE_VR_PTYPE_C2S) {
+              flat_handle_c2s_from_link(s, payload);  // §FLAT-REPAIR：hub 只在協商了連線上的控制訊息時才交過來
+            }
+            return false;  // 平面場次沒有追蹤
           }
         );
         session->flatMl = true;
-        BOOST_LOG(info) << "[VIPLE-VR-LINK] flat (2D) session: multi-link negotiated (fps=" << fps << ", repair=off, ctrl=off)";
+        BOOST_LOG(info) << "[VIPLE-VR-LINK] flat (2D) session: multi-link negotiated (fps=" << fps
+                        << ", loss repair offered - on only if the client asks for it)";
       }
 
       session->mail = std::move(mail);

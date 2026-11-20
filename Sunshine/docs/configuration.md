@@ -3459,18 +3459,18 @@ not matter). Any other value is reported in the log as an invalid value and the 
             [vr_vsync_to_photons_us](#vr_vsync_to_photons_us) ignore the client's measurements, which then
             reflect the host's GPU load rather than timing; the pacing controller keeps applying only the
             clock difference it has already learned.
-            @note{Applies to PCVR sessions on Windows hosts only. With `disabled` the behaviour is identical to
-            earlier versions; only the log has additional lines and fields. The default will change after
-            headset testing.}
+            @note{Applies to PCVR sessions on Windows hosts only. Enabled by default. With `disabled` the host
+            behaves as it did before this option existed (every late frame is dropped); only the log has
+            additional lines and fields.}
             @note{Known limitation: "late" means later than that first wait (5 ms at 120 Hz). A game whose
             frames are steadily a little later than that, but which still keeps up with the display rate, is
             treated like an overloaded one: pacing and prediction tracking stay paused for the whole session.
             In the one headset session measured in this state the share of repeated frames was 7.2% against 3.4%
             at normal load; roughly a third of that difference is attributable to the paused pacing, the rest to
             encoding taking longer and less regularly while the GPU is that busy, which this option does not
-            change. The condition will be narrowed to the case where the game no longer keeps up with the virtual
-            vsync before the default changes. For the pacing controller it is already narrowed by
-            [vr_capture_overload](#vr_capture_overload) `= cadence`, which is off by default.}
+            change. For the pacing controller the condition can be narrowed to the case where the game no longer
+            keeps up with the virtual vsync by setting [vr_capture_overload](#vr_capture_overload) `= cadence`,
+            which is off by default.}
         </td>
     </tr>
     <tr>

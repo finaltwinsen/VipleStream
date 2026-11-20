@@ -93,6 +93,8 @@ public:
     bool keyboardOpen() const { return m_KbOpen; }
     const XrKeyboard& keyboard() const { return m_Kb; }
     uint8_t stickyModifiers() const { return m_KbSticky; }
+    // 鍵盤貼圖要畫哪一種狀態：黏滯修飾鍵｜Caps 鎖定｜頁面（XrKeyboard::kMod*／kState*）
+    uint8_t keyboardRenderState() const { return static_cast<uint8_t>((m_KbSticky & 0x0F) | m_KbLocks); }
     int keyboardHover(bool* pressed) const
     {
         *pressed = m_KbActiveKey >= 0 && m_KbActiveKey == m_KbHover;
@@ -202,6 +204,7 @@ private:
     int m_KbHand = 1;            // 目前用哪一手指（最近按過扳機、或唯一指著鍵盤的那一手）
     int m_KbPressHand = -1;      // 按著鍵的那一手
     uint8_t m_KbSticky = 0;
+    uint8_t m_KbLocks = 0;       // §KBD-CAPS／§KBD-NUMPAD：Caps 鎖定與頁面（XrKeyboard::kState*）；關鍵盤時歸零
     int m_KbHover = -1;
     int m_KbActiveKey = -1;
     uint8_t m_KbActiveMods = 0;

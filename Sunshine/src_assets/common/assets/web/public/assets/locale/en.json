@@ -285,6 +285,8 @@
     "mouse_desc": "Allows guests to control the host system with the mouse",
     "native_pen_touch": "Native Pen/Touch Support",
     "native_pen_touch_desc": "When enabled, VipleStream-Server will pass through native pen/touch events from VipleStream clients. This can be useful to disable for older applications without native pen/touch support.",
+    "stream_menu": "Stream menu instead of the Windows power menu",
+    "stream_menu_desc": "During a regular (non-VR) stream, show a stream menu when the remote user clicks the power icon in the Start menu or presses Alt+F4 on the desktop. It offers: disconnect the stream, quit the app and disconnect, lock, sleep, shut down, restart, and cancel. Disable to always get the regular Windows power menu. Windows only; VR sessions are never affected.",
     "notify_pre_releases": "PreRelease Notifications",
     "notify_pre_releases_desc": "Whether to be notified of new pre-release versions of VipleStream-Server",
     "nvenc_h264_cavlc": "Prefer CAVLC over CABAC in H.264",

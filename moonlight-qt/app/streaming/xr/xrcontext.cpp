@@ -1,6 +1,7 @@
 // VipleStream 2.0 §VR M3a X1 — XrContext 實作。設計見 xrcontext.h。
 
 #include "xrcontext.h"
+#include "backend/sfenv.h"  // §XR-HMD-WAIT：isSteamFrame()
 #include "xrdesktopscreen.h"
 #include "xrphase.h"  // §VR-XRLOOP：相位換算、延遲鏈（header-only）
 #include "xrdevknobs.h"  // §VR-FOVEA-REPROJ：圖層的做法（header-only，不依賴 OpenXR）
@@ -456,7 +457,9 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     };
     bool ok = createInstance(&err);
     stageMs[0] = sinceMs();
-    ok = ok && createSystem(&err) && createVulkan(&err);
+    // §XR-HMD-WAIT：等頭盔的時間以呼叫端給的 timeoutMs 為限（Session 在 main thread 上給 5 s），和後面等 READY 各算各的
+    // 只在頭盔上等：桌機「SteamVR 開著但沒接頭盔」是常態，那裡等只會讓每次開串流多卡一段才退回平面
+    ok = ok && createSystem(SfEnv::isSteamFrame() ? timeoutMs : 0, &err) && createVulkan(&err);
     stageMs[1] = sinceMs();
 #ifdef HAVE_XR_VIDEO
     if (ok && m_Options.enableVideo) {
@@ -752,14 +755,44 @@ bool XrContext::createInstance(QString* error)
     return true;
 }
 
-bool XrContext::createSystem(QString* error)
+bool XrContext::createSystem(int waitBudgetMs, QString* error)
 {
     XrSystemGetInfo gi = xrStruct<XrSystemGetInfo>(XR_TYPE_SYSTEM_GET_INFO);
     gi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    // §XR-HMD-WAIT（2026-11-20）：XR_ERROR_FORM_FACTOR_UNAVAILABLE＝runtime 在、頭盔還沒準備好（SteamVR 還在啟動、頭盔剛喚醒）。
+    // 規格允許之後再問同一個 instance，所以每 500 ms 重試一次，最多 10 s、也不超過呼叫端的 bring-up 逾時；其他錯誤碼
+    // 照舊立刻失敗。這一段在呼叫 bringUp 的執行緒上睡（Session 的首次建立與重建都在 main thread，逾時給 5 s），
+    // 所以上限跟著 waitBudgetMs 走，不是固定 10 s。
+    constexpr int kRetryIntervalMs = 500;
+    constexpr int kRetryMaxMs = 10000;
+    const int budgetMs = std::clamp(waitBudgetMs, 0, kRetryMaxMs);
+    const auto waitStart = std::chrono::steady_clock::now();
+    auto waitedMs = [&]() {
+        return static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - waitStart).count());
+    };
+    int attempts = 1;
     XrResult r = xrGetSystem(m_Instance, &gi, &m_SystemId);
+    while (r == XR_ERROR_FORM_FACTOR_UNAVAILABLE && waitedMs() + kRetryIntervalMs <= budgetMs) {
+        if (attempts == 1) {
+            // 只印一次（不是每次重試都印）
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-XR] xrGetSystem: HMD not available yet, retrying every %d ms for up to %d ms", kRetryIntervalMs,
+                        budgetMs);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kRetryIntervalMs));
+        r = xrGetSystem(m_Instance, &gi, &m_SystemId);
+        attempts++;
+    }
     if (XR_FAILED(r)) {
-        *error = QStringLiteral("xrGetSystem(HMD): %1").arg(xrResultStr(m_Instance, r));
+        *error = attempts > 1 ? QStringLiteral("xrGetSystem(HMD): %1 (after %2 attempts over %3 ms)")
+                                    .arg(xrResultStr(m_Instance, r)).arg(attempts).arg(waitedMs())
+                              : QStringLiteral("xrGetSystem(HMD): %1").arg(xrResultStr(m_Instance, r));
         return false;
+    }
+    if (attempts > 1) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] xrGetSystem: HMD became available after %lld ms (%d attempts)",
+                    waitedMs(), attempts);
     }
     XrSystemProperties sp = xrStruct<XrSystemProperties>(XR_TYPE_SYSTEM_PROPERTIES);
     XrSystemEyeGazeInteractionPropertiesEXT eyeGaze =
@@ -1852,12 +1885,12 @@ void XrContext::keyboardRenderThreadMain()
             m = m_KbRenderRequest;
             m_KbRenderRequest = -1;
         }
-        if (m_KbReadyMask.load(std::memory_order_acquire) & (1u << m)) {
+        if (m_KbReadyMask.load(std::memory_order_acquire) & (1ull << m)) {
             continue;
         }
         const uint64_t t0 = steadyNowNs();
         m_KbCache[m] = kb.render(static_cast<uint8_t>(m));
-        m_KbReadyMask.fetch_or(1u << m, std::memory_order_release);
+        m_KbReadyMask.fetch_or(1ull << m, std::memory_order_release);
         if (first) {
             first = false;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] keyboard texture ready in %.0f ms (first render warms up fonts)",
@@ -2997,7 +3030,7 @@ void XrContext::frameThreadMain()
         // 鍵盤貼圖：要的那一種修飾鍵組合還沒畫好就請背景執行緒畫，畫好了而 swapchain 裡不是它就上傳。回傳 swapchain 裡
         // 有沒有可以顯示的貼圖（XR 桌面與 §VR-KBD 共用）
         auto kbTexture = [&](int wantMods) -> bool {
-            const bool ready = (m_KbReadyMask.load(std::memory_order_acquire) & (1u << wantMods)) != 0;
+            const bool ready = (m_KbReadyMask.load(std::memory_order_acquire) & (1ull << wantMods)) != 0;
             if (!ready) {
                 std::lock_guard<std::mutex> lk(m_KbRenderMutex);
                 if (m_KbRenderRequest != wantMods) {
@@ -3023,14 +3056,21 @@ void XrContext::frameThreadMain()
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] keyboard texture upload failed (format %lld)",
                                 static_cast<long long>(m_QuadFormat));
                 }
-                if (m_KbUploaded && !m_KbDumped && !m_Options.dumpKeyboardPath.isEmpty()) {
-                    m_KbDumped = true;
+                if (m_KbUploaded && m_KbUploadedMods == wantMods && !(m_KbDumpedMask & (1ull << wantMods)) &&
+                    !m_Options.dumpKeyboardPath.isEmpty()) {
+                    // 每一種狀態第一次上傳時各存一張：基本版面存到指定的檔名，其餘（黏滯修飾鍵、Caps、數字鍵盤頁）
+                    // 在檔名後面加 ".sXX.png"（XX＝狀態位元組，0x10 Caps、0x20 數字鍵盤頁）
+                    m_KbDumpedMask |= 1ull << wantMods;
+                    const QString dumpPath = wantMods == 0 ? m_Options.dumpKeyboardPath
+                                                           : m_Options.dumpKeyboardPath +
+                                                                 QStringLiteral(".s%1.png").arg(wantMods, 2, 16, QLatin1Char('0'));
                     const QImage out = img.width() > 1280 || img.height() > 1280
                                            ? img.scaled(QSize(1280, 1280), Qt::KeepAspectRatio, Qt::SmoothTransformation)
                                            : img;
-                    const bool saved = out.save(m_Options.dumpKeyboardPath, "PNG");
-                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev keyboard dump %dx%d -> %s (%s)", out.width(),
-                                out.height(), qUtf8Printable(m_Options.dumpKeyboardPath), saved ? "ok" : "FAILED");
+                    const bool saved = out.save(dumpPath, "PNG");
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] dev keyboard dump state=0x%02x %dx%d -> %s (%s)",
+                                static_cast<unsigned>(wantMods), out.width(), out.height(), qUtf8Printable(dumpPath),
+                                saved ? "ok" : "FAILED");
                 }
             }
             return m_KbUploaded;
@@ -3039,7 +3079,7 @@ void XrContext::frameThreadMain()
             (videoLayer || loadingLayer || shellLayer) && m_KbSwapchain != XR_NULL_HANDLE) {
             const XrKeyboard& kb = m_Input->keyboard();
             m_Input->takeKeyboardDirty();
-            if (kbTexture(m_Input->stickyModifiers() & 0x0F)) {
+            if (kbTexture(m_Input->keyboardRenderState())) {
                 const XrPosef sp = m_Screen->quadPose();
                 const float scrH = (useCylinder && videoLayer ? m_Screen->cylinderRadiusM() * m_Screen->cylinderAngleRad() : screenW) /
                                    screenAspect;
@@ -3101,7 +3141,7 @@ void XrContext::frameThreadMain()
                                     static_cast<double>(yaw) * 57.29578, 0.32);
                     }
                 }
-                if (m_VrKbPlaced && kbTexture(m_VrCtl->stickyModifiers() & 0x0F)) {
+                if (m_VrKbPlaced && kbTexture(m_VrCtl->keyboardRenderState())) {
                     kbW = 0.56f;
                     kbH = kbW / kb.aspect();
                     kbPose = m_VrKbPose;

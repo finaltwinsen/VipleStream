@@ -556,6 +556,11 @@ typedef struct _VIPLE_VR_TLV_STATS {
 // 區網照舊。server 明確開了 vr_multilink_repair_rtt 時只回 F_REPAIR_RTT（RTT 規則到處都用）。
 // 不認得的舊 client 不會提，server 就不給它 F_REPAIR_RTT：舊 client 的行為完全不變。
 #define VIPLE_VR_LINK_F_REPAIR_FAR 0x20
+// §FLAT-REPAIR（2026-11-20）：平面（2D）場次的補包。平面多連線（§FLAT-ML）的 hub 原本不開 F_CTRL／F_REPAIR；client 在平面場次
+// 的 LINK_HELLO 提出這個位元＝它的 2D 接收路徑會補包（NACK／REPAIR_GONE 與 VR 相同，其餘走連線的控制訊息一律不送）。
+// server 回 F_CTRL｜F_REPAIR｜F_REPAIR_FLAT 三個一起才成立；少任何一個 client 就當成沒協商。VR 場次兩邊都不提、不回。
+// 舊 server 不認得這個位元、平面場次也不開 F_CTRL，回的 hubCaps 和以前一樣；舊 client 不提，新 server 就不給。
+#define VIPLE_VR_LINK_F_REPAIR_FLAT 0x40
 #define VIPLE_VR_LINK_PING_F_CONFIRMED  0x01  // client 最近 1 s 內在這條連線收過 PONG。§VR-LINK-STANDBY：有區網直連時，
                                              // 走 Tailscale 的那一條即使收得到 PONG 也不帶（server 就不在上面送影像）
 #define VIPLE_VR_LINK_READY_OK       0

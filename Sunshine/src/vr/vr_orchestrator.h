@@ -107,4 +107,25 @@ namespace vr::orchestrator {
 
   /// 等到狀態是 IDLE（或 timeout）；selftest 用
   bool wait_idle(std::chrono::milliseconds timeout);
+
+  /// `--steamvr-driver uninstall` 的結果
+  struct unregister_result_t {
+    bool ok = false;
+    /// 失敗原因：not-running（編排器沒在跑＝vr_pcvr 停用）｜session-active｜busy｜steamvr-running｜
+    /// guard-restore[:細節]｜openvrpaths-unreadable｜still-registered｜timeout
+    std::string reason;
+    int found = 0;  ///< 註銷前 openvrpaths 裡的 viplestream 註冊數
+    bool guard_restored = false;  ///< 這一次順便還原了 steamvr.vrsettings 的 guard
+  };
+
+  /**
+   * @brief 註銷 SteamVR driver（vr_architecture §3.8 的註銷路徑；install 的反向：DEPLOY＋REGISTER）。
+   *        在編排執行緒上做（會讀使用者可寫的檔案、以使用者身分跑 vrpathreg），呼叫端等結果（最多約 60 秒）。
+   *        只在沒有編排進行中、而且 SteamVR 沒在跑時動手（和 REGISTER_FINALIZE 同一個條件；vrserver 在跑時
+   *        guard 也還原不了）；SteamVR 在跑時回 `steamvr-running`、什麼都不改，要不要等由呼叫端決定。
+   *        動作：還原 guard（有 marker 時）→ `vrpathreg removedriver` 每一個 viplestream 註冊 → 確認 openvrpaths 裡
+   *        沒有了 → 刪 `<install>\config\steamvr\` 下的版本目錄（來源 `<install>\steamvr\` 不動）。
+   *        不碰使用者其他的 SteamVR 設定。`vr_pcvr` 仍是 enabled 時，下一次 VR /launch 會重新部署並註冊。
+   */
+  unregister_result_t unregister_driver();
 }  // namespace vr::orchestrator

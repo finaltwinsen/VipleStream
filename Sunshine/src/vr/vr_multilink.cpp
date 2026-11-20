@@ -223,6 +223,7 @@ namespace vr::multilink {
     struct repair_stats_t {
       uint64_t nack = 0, rounds = 0, pkts = 0, gone_expired = 0, gone_budget = 0, gone_unknown = 0, nothing = 0, exhausted = 0;
       uint64_t rtt = 0;  // §VR-REPAIR-RTT：其中帶旗標（照 RTT 規則送）的份數
+      uint64_t refused = 0;  // §FLAT-REPAIR：呼叫端因為壅塞要求不補的份數（已含在 gone_budget 裡）
     };
     repair_stats_t rstats;  // 握 store_mtx
     int64_t nack_age_max_ns = 0;  // §VR-REPAIR-RTT：這 10 秒收到的回報裡，block 年齡最大的一份（握 store_mtx；印的時候歸零）
@@ -1117,7 +1118,7 @@ namespace vr::multilink {
       for (const auto &h : links) {
         offered &= h.flags;
       }
-      const uint8_t feat = negotiate_link_features(offered, m.opt.ctrl, m.opt.repair, m.opt.repair_rtt, m.opt.hotadd, m.opt.repair_far);
+      const uint8_t feat = negotiate_link_features(offered, m.opt.ctrl, m.opt.repair, m.opt.repair_rtt, m.opt.hotadd, m.opt.repair_far, m.opt.flat_repair);
       if (m.features.exchange(feat, std::memory_order_relaxed) != feat || m.count.load(std::memory_order_relaxed) == 0) {
         BOOST_LOG(info) << "[VIPLE-VR-LINK] link features: ctrl=" << ((feat & VIPLE_VR_LINK_F_CTRL) ? "on" : "off")
                         << " repair=" << ((feat & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off")
@@ -1126,7 +1127,8 @@ namespace vr::multilink {
                         << " (client offered 0x" << std::format("{:02x}", (unsigned) offered)
                         << ", server ctrl=" << (m.opt.ctrl ? "enabled" : "disabled") << " repair=" << (m.opt.repair ? "enabled" : "disabled")
                         << " repairRtt=" << (m.opt.repair_rtt ? "enabled" : "disabled") << " repairFar=" << (m.opt.repair_far ? "enabled" : "disabled")
-                        << " hotadd=" << (m.opt.hotadd ? "enabled" : "disabled") << ')';
+                        << " hotadd=" << (m.opt.hotadd ? "enabled" : "disabled") << ')'
+                        << (m.opt.flat_repair ? ((feat & VIPLE_VR_LINK_F_REPAIR_FLAT) ? " [flat session: loss repair on]" : " [flat session: loss repair off - the client did not offer it]") : "");
       }
     }
 
@@ -1570,7 +1572,7 @@ namespace vr::multilink {
     }
   }
 
-  hub_t::nack_result_t hub_t::on_nack(const uint8_t *body, size_t len) {
+  hub_t::nack_result_t hub_t::on_nack(const uint8_t *body, size_t len, bool refuse) {
     auto &m = *impl_;
     nack_result_t res;
     nack_t nack;
@@ -1624,7 +1626,16 @@ namespace vr::multilink {
         log_detail = std::format("age={:.1f}ms have={}/{} (data {}) attempt={} round={}", (now_ns - b->first_ns) / 1e6, have, (unsigned) b->total,
                                  (unsigned) b->data, (unsigned) nack.attempt, (unsigned) b->rounds + 1);
       }
-      if (!b) {
+      if (refuse) {
+        // §FLAT-REPAIR：呼叫端說鏈路正在壅塞——補包只會更擠。回 GONE 讓 client 立刻照原本的方式放棄（要 IDR），不白等
+        res.gone = VIPLE_VR_GONE_BUDGET;
+        ++m.rstats.gone_budget;
+        ++m.rstats.refused;
+        if (log_it || m.gone_logs++ < 30 || m.gone_logs % 20 == 0) {  // 和「太舊」「額度用完」共用同一個節流
+          log_it = true;
+          log_detail = std::format("attempt={} refused (link congested)", (unsigned) nack.attempt);
+        }
+      } else if (!b) {
         res.gone = VIPLE_VR_GONE_UNKNOWN;
         ++m.rstats.gone_unknown;
       } else if (now_ns - b->first_ns > max_age_ns) {
@@ -1792,6 +1803,10 @@ namespace vr::multilink {
       if (m.features.load(std::memory_order_relaxed) & VIPLE_VR_LINK_F_REPAIR_RTT) {
         // §VR-REPAIR-RTT：帶旗標的回報份數、這 10 秒裡年齡最大的一份回報（block 第一批送出到收到回報；新欄位加在行尾）
         s += std::format(" | rtt={} ageMaxMs={:.1f}", c.rtt - p.rtt, age_max_ns / 1e6);
+      }
+      if (m.opt.flat_repair) {
+        // §FLAT-REPAIR：平面場次才有的欄位（加在行尾；VR 的行不變）。congested＝因為壅塞沒補的份數（已含在 budget 裡）
+        s += std::format(" | congested={} ageMaxMs={:.1f}", c.refused - p.refused, age_max_ns / 1e6);
       }
     }
     m.rstats_prev = c;

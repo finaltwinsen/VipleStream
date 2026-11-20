@@ -64,6 +64,9 @@ namespace vr::multilink {
     /// §VR-REPAIR-WAN（vr_multilink_repair_far）：repair_rtt 關著時，認得 VIPLE_VR_LINK_F_REPAIR_FAR 的 client 仍可用 RTT 規則，
     /// 但只用在原本規則不補的路徑上（遠端）
     bool repair_far = false;
+    /// §FLAT-REPAIR：這個 hub 屬於平面（2D）場次。ctrl 與 repair 只為補包而開，而且只給提了 VIPLE_VR_LINK_F_REPAIR_FLAT 的
+    /// client（三個位元一起成立或都不成立）；repair_rtt／repair_far 不看。VR 場次恆為 false
+    bool flat_repair = false;
     /// §VR-MULTILINK-HOTADD（vr_multilink_hotadd）：client 也支援時，允許同 id 重綁與死亡 slot 回收
     bool hotadd = false;
     /// §PERF-1113（審查 05 第 1 項）：影像批次改成一次 WSASendMsg＋UDP_SEND_MSG_SIZE（USO）交給系統，不再逐包 send_to。
@@ -146,8 +149,10 @@ namespace vr::multilink {
     /**
      * @brief §VR-LINK-REPAIR：處理一則 NACK（0x5507/0B 的 TLV 本體；hub 的接收執行緒）。從封包倉挑出 client 缺的
      *        shard，原樣排進正在送影像的連線的補包佇列（插在影像前面）；補不了就回 REPAIR_GONE。
+     * @param refuse §FLAT-REPAIR：true＝呼叫端判斷現在不該補（鏈路壅塞）。不補、不動額度，直接回
+     *        REPAIR_GONE（VIPLE_VR_GONE_BUDGET），client 收到就不再等這個 block。
      */
-    nack_result_t on_nack(const uint8_t *body, size_t len);
+    nack_result_t on_nack(const uint8_t *body, size_t len, bool refuse = false);
 
     /// §VR-LINK-REPAIR 的 10 秒統計（control 執行緒；沒協商補包或這 10 秒沒有任何動靜時回空字串）
     /// @param requests 不是 nullptr 時填這段期間收到的補包請求份數（§VR-PACE-AUTO 用；沒有就是 0）

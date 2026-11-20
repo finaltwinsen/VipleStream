@@ -595,6 +595,11 @@ int vrmlLinkCount(void) {
     return linkCount;
 }
 
+// §FLAT-REPAIR：這一場是平面（2D）場次的多連線（§FLAT-ML），不是 VR
+static bool flatSession(void) {
+    return StreamConfig.flatMultilink != 0 && !(StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED);
+}
+
 static void sendHello(void) {
     // §VR-MULTILINK-HOTADD：尾端多 count 個 epoch（舊 server 只檢查最小長度，會自然忽略）
     uint8_t tlv[2 + 1 + VIPLE_VR_LINK_MAX * sizeof(VIPLE_VR_LINK_DESC) + VIPLE_VR_LINK_MAX];
@@ -613,6 +618,8 @@ static void sendHello(void) {
         d.flags = VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_HOTADD |
                   // §VR-REPAIR-WAN：提 RTT 規則的同時也表示認得「只用在遠端路徑」的限制（server 預設只給這一種）
                   ((StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) ? (VIPLE_VR_LINK_F_REPAIR_RTT | VIPLE_VR_LINK_F_REPAIR_FAR) : 0) |
+                  // §FLAT-REPAIR：平面（2D）場次才提（VR 場次送出的位元組不變）
+                  (flatSession() ? VIPLE_VR_LINK_F_REPAIR_FLAT : 0) |
                   (isDedicatedIf(L->pending ? L->pendingIfName : L->ifName) ? VIPLE_VR_LINK_F_DEDICATED : 0);
         // §VR-MULTILINK-HOTADD：重綁中要送的是新路徑的埠與位址（LINK_READY 之後才會換掉 L->videoSock）
         if (L->pending) {
@@ -1524,6 +1531,17 @@ void vrmlOnS2C(const unsigned char* tlv, int len) {
                 if (used > blen) {
                     caps = hubCaps;
                 }
+                // §FLAT-REPAIR：平面場次的 F_CTRL／F_REPAIR 只為補包而存在，要連同 F_REPAIR_FLAT 三個一起回才算數；
+                // 少一個就整組不用（退回原本的行為：不等、不回報）。VR 場次不認這個位元
+                if (flatSession()) {
+                    const uint8_t need = VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_REPAIR_FLAT;
+                    if ((caps & need) != need) {
+                        caps &= (uint8_t)~need;
+                    }
+                }
+                else {
+                    caps &= (uint8_t)~VIPLE_VR_LINK_F_REPAIR_FLAT;
+                }
                 // §VR-REPAIR-RTT：我們沒提的（設定或 --vr-repair-rtt off）、或補包本身沒成立的，server 就算回了也不用
                 if (!(StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) || !(caps & VIPLE_VR_LINK_F_REPAIR)) {
                     caps &= (uint8_t)~VIPLE_VR_LINK_F_REPAIR_RTT;
@@ -1536,6 +1554,11 @@ void vrmlOnS2C(const unsigned char* tlv, int len) {
                     Limelog("[VIPLE-VR-LINK] link features agreed by the server: ctrl=%s repair=%s repairRtt=%s\n",
                             (caps & VIPLE_VR_LINK_F_CTRL) ? "on" : "off", (caps & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off",
                             !(caps & VIPLE_VR_LINK_F_REPAIR_RTT) ? "off" : ((caps & VIPLE_VR_LINK_F_REPAIR_FAR) ? "far paths only" : "on"));
+                    if (flatSession()) {
+                        Limelog("[VIPLE-FLAT-REPAIR] loss repair for this flat (2D) session: %s\n",
+                                (caps & VIPLE_VR_LINK_F_REPAIR_FLAT) ? "on (missing packets are requested again before asking for an IDR frame)"
+                                                                     : "off (the server did not agree)");
+                    }
                 }
                 hubCaps = caps;
             }

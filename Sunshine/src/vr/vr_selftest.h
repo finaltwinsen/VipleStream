@@ -33,7 +33,7 @@ namespace vr::selftest {
   // ── 回傳碼（CLI 的 exit code 與 admin pipe result.rc 共用）──────────────────
   inline constexpr int rc_ok = 0;  ///< 選到的子測試全部通過
   inline constexpr int rc_failed = 1;  ///< 至少一項檢查失敗
-  inline constexpr int rc_unsupported = 2;  ///< 平台不支援、vr_pcvr=disabled、或功能尚未實作（V5 之前的 uninstall）
+  inline constexpr int rc_unsupported = 2;  ///< 平台不支援、vr_pcvr=disabled、或功能尚未實作
   inline constexpr int rc_busy = 3;  ///< 已經有一個指令在執行
   inline constexpr int rc_session_active = 4;  ///< 有串流 session 或 VR 預約，selftest 不開始（或中途被搶先而中止）
   inline constexpr int rc_access_denied = 5;  ///< 不是提升的管理員（CLI 端 CreateFileW 被 kernel 擋，或 server 端深度防禦）
