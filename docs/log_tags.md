@@ -38,9 +38,19 @@ Client log 位置：`%TEMP%\VipleStream-*.log`（檔名的數字是啟動時的 
 - `[VIPLE-RES] Stream config requested: WxH; host advertises max: WxH (switchable max|current mode)`
   （`session.cpp` 的 §H.4 clamp）。`switchable max`＝host 回了 `<DisplayModeSwitchable>1`，max 是 host
   串流前可切到的最高模式；`current mode`＝舊 host 或沒開 dd，max 是 host 目前模式。
-- `[VIPLE-RES] auto display mode: resolution=auto|manual fps=auto|manual local=WxH@Hz (...) host=... -> stream WxH@N, bitrate K kbps (...)`
+- `[VIPLE-RES] auto display mode: resolution=auto|manual fps=auto|manual local=WxH@Hz (...) host=... -> stream WxH@N (bitrate decided after the host display clamp: follows default|--bitrate|user setting)`
   —— §H.4-AUTO：「自動（本機螢幕最佳）」解析結果（本機串流視窗所在螢幕的桌面模式；XR 桌面固定 2560x1440）
-  與 host 可切換最高模式取小，以及位元率是否跟著重算（`default, recomputed`／`user setting kept`）。
+  與 host 可切換最高模式取小。2.0.258 起這一行不再帶碼率（舊版的 `bitrate K kbps (default, recomputed|user setting kept)` 已拿掉），碼率看下面兩行。
+- **§RES-BITRATE（2.0.258～2.0.260）：自動解析度／自動幀率下的碼率重算**。開場先決定「碼率跟不跟著預設值」：帶了 `--bitrate` 照它；
+  CLI 改了解析度或幀率而重算過照預設值；`autoAdjustBitrate` 關著照使用者的值；其餘看存的碼率**是否等於目前這一組解析度與幀率的預設值**
+  （`StreamingPreferences::bitrateLooksDefault()`，和設定頁「使用預設值」按鈕同一個條件；旗標開著但值對不上時當成使用者的值保留）。
+  跟著預設值時，每個改寫串流解析度或幀率的地方（`initial`、`GFE 4K limit`、`XR desktop auto fps`、`WS tunnel`、`no 4:4:4 this session`）都用
+  實際串流的寬高、幀率重算一次；4:4:4 全幀（補幀＋4:4:4 且 host 支援）時預設碼率照全幀算（不砍半）。場次**不再**把解析結果與 CLI 的解析度、
+  幀率、碼率存回設定（存檔時寫回套用 CLI 之前的值）；CLI 只切 4:4:4、補幀等開關而碼率原本跟著預設值時，存回的碼率跟著那組開關重算。
+  log：每個改寫點一行 `[VIPLE-RES] bitrate A -> B kbps (<原因>; WxH@N, yuv444=0|1 fruc=0|1, …)`，送出前 `[VIPLE-RES] final: stream WxH, host fps N (display fps M), bitrate K kbps (default|user setting|--bitrate|VR[, capped])`；
+  值對不上預設時另印 `[VIPLE-RES] bitrate: autoAdjustBitrate is on but the stored N kbps is not the default of the saved mode … keeping it as a user setting`。
+  相關檔案：`moonlight-qt/app/streaming/session.cpp`（`decideBitrateFollowsDefault`、`refreshSessionBitrate`）、`app/settings/streamingpreferences.cpp`、
+  `app/cli/commandlineparser.cpp`、`app/gui/SettingsView.qml`。PCVR 用自己的碼率、不重算。
 - `[VIPLE-RES] auto fps (XR desktop): runtime X Hz, host max N Hz -> stream WxH@N (was M)` —— XR 桌面自動
   更新率在 XrContext bring-up 後（/launch 之前）換成 runtime 實際顯示更新率。
 - server 端：`[VIPLE-RES] /serverinfo advertising switchable max of \\.\DISPLAYn: WxH @ NHz (K modes[, cached])`
@@ -277,6 +287,109 @@ Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)
 （bufferbloat）。要做真正的 RTT 基線追蹤請用
 `LiGetEstimatedRttInfo()`（`ControlStream.c:2453`，讀 `peer->roundTripTime`）。
 
+### 2D 丟包後的恢復：§IDR-FAST、§P2、§FLAT-REPAIR、§IDR-RETRY、§FRZ-WD-RTT（2.0.245～2.0.260，2026-11-20）
+
+五項都只作用在**平面（2D）session**；VR session 有自己的 300 ms 冷卻、intra refresh 與補包規則，行為不變。
+都沒有設定項（數值寫死）。整體順序：丟了一部分封包 → 先補傳（§FLAT-REPAIR）→ 補不回來才要 IDR（client §IDR-RETRY 計時重試）
+→ host 的 IDR 閘門照壅塞等級決定多快放行（§IDR-FAST／§P2）→ 一直組不出幀時由凍結看門狗清佇列再要（§FRZ-WD-RTT）。
+
+#### §IDR-FAST：桌面 IDR 冷卻與延後補送（host，`Sunshine/src/video.cpp` encode_run）
+
+- **為什麼**：舊的 §S.19 冷卻固定 1500 ms，落在冷卻裡的請求直接丟掉。同一陣丟包 45～60 ms 後再丟一張時，第二次請求被丟、
+  client 等滿連續丟幀上限（約 1 秒）再要還在冷卻裡，第三次才過——網路上只丟兩張卻凍結 2.3 秒（頭盔經 Wi-Fi 連開發機實測）。
+- **規則**：
+  - 「平常」＝最近 10 秒（`kIdrCalmWindow`）送出的 IDR 不到 3 張（`kIdrCalmMax`）：最短間隔 250 ms（`kDesktopIdrFastGapMs`）。
+  - 「丟包連發」＝10 秒內已送 3 張：間隔回到 1500 ms（`kDesktopIdrCooldownMs`）。IDR 頻率上限（§S.19 要擋的風暴）不變。
+  - 兩種狀況下落在間隔內的請求都**不丟**，記成延後、間隔一到就補送一張（間隔每一輪重算，等待期間變成連發就改等 1500 ms）。
+  - 開場 f=1 那一張不啟動冷卻（§IDR-OPEN）；同一幀只記一張（RFI 退回的 IDR、閘門放行、延後補送、降碼強制以幀號去重）。
+  - 同日審查拿掉兩條規則：「距上一張不到 35 ms 的請求當成成對請求丟掉」（IDR 本身丟了時 client 的再請求 15～30 ms 就到，凍結約 1 秒）、
+    「丟包連發時丟掉請求」。
+- **log**（sunshine.log）：`[VIPLE-QLOG] IDR-DEFER f=N (X ms after the last one, calm|burst|congested, gap G ms)`＝延後；
+  `IDR-EMIT f=N (deferred request)`＝到期補送；`IDR-EMIT f=N (cooldown OK)`＝直接放行；
+  `IDR-DEFER skipped f=N (congested, the RFI fallback IDR of this frame covers the request)`＝壅塞中這一幀本來就是 IDR，不另排。
+  桌面 session 不再印 `IDR-SUPPRESS`（只剩 VR 會印）。
+- **已知限制**：「平常」只看 IDR 張數，不看網路；壅塞時的長間隔由下面的 §P2 提示接手。
+
+#### §P2：2D 壅塞分級（host，`Sunshine/src/abr_congestion.h`，用在 `stream.cpp` 的 `run_abr_aimd`／`abr_on_idr_request`）
+
+- **為什麼**：RTT 幾秒的時候 client 每秒都在要 IDR，§IDR-FAST 讓壅塞開頭 10 秒內 250 ms 一張連出 3 張，全部排進同一條已經滿的佇列；
+  舊的延遲降碼每刀都是 ×0.85、冷卻 5 秒，碼率 20 Mbps、瓶頸 5 Mbps 時要約 18 秒才降得到；快回升又會在瓶頸附近鋸齒。
+- **四個等級**（每輪 ABR 約 500 ms 算一次；沒有 RTT 樣本＝固定 L0、所有新規則不動作，行為和以前相同）：
+
+  | 等級 | 條件 | 動作 |
+  |---|---|---|
+  | L0 | 乾淨 | 無 |
+  | L1 | 暫停回升的條件（趨勢過載或剛過載、排空中、RTT ≥ 2 倍且多 50 ms、QUIC 背壓） | 暫停回升；**不改 IDR 間隔**（Wi-Fi 一陣丟包時 RTT 常短暫翻倍，那正是要快速補送的時候） |
+  | L2 | 延遲趨勢過載，或 RTT ≥ 4 倍基線且多 200 ms 連 2 輪 | 趨勢 ×0.85、嚴重膨脹 ×0.70；兩刀間隔 ≥ 2 秒；IDR 間隔提示 1500 ms |
+  | L3 | RTT 高出基線 ≥ max(500 ms, min(8 × 壅塞前抖動, 1000 ms))，連 2 輪且 ≥ 450 ms；高出不到 300 ms 連 2 輪且 ≥ 450 ms 才退出（先落到 L2） | 緊急降碼 ×0.50，3 秒內最多一次；IDR 間隔提示 clamp(1.5 × RTT＋500, 1500, 6000) ms |
+
+  - 往下掉（L2→L1→L0）要連續 1 秒都在較低的等級；往上升立刻生效。
+  - L3 門檻用的「壅塞前抖動」只在完全乾淨的輪次更新，往上調要先連續乾淨 10 秒（第三輪審查 C01，延遲逐漸升高時 1～2 秒內介入）。
+  - **排空中不追加**：緊急降碼後 RTT 比基準低一成以上＝佇列在排空，緊急降碼與嚴重膨脹（×0.70）都不再追加；基準每 3 秒往前推一格，
+    停在平台上最慢約 6 秒就不算排空。離開 L3 或沒有樣本時基準作廢。
+- **IDR 間隔提示**：只在「L2 以上**而且** RTT ≥ 150 ms（遲滯到 100 ms 以下關）」時給（`congested_for_recovery()`；
+  §FLAT-REPAIR 的拒補用同一個條件）。給了就不走 250 ms、間隔＝提示值（不短於冷卻、不長於 6 秒）。提示是行程內唯一一份 atomic，
+  2 秒沒更新就失效；同時超過一場 session 時一律寫 0（兩場都回到 §IDR-FAST 的規則）。
+- **IDR 請求觸發的緊急降碼**：收到 client 的 IDR 請求（ENet、RFI 退回、QUIC 三個入口）時，若等級是 2 秒內算的、L2 以上、RTT ≥ 150 ms、
+  不在排空中、距上次緊急降碼 ≥ 3 秒，當場 ×0.50 並進 L3。乾淨網路上單獨的 IDR 請求（L0）一律不降。
+- **塞車點**：真的降了碼時記下降碼前的碼率（5 秒內的後續刀不覆寫；已在下限、沒有真的降時不記）。30 秒沒再到 L2 以上就清掉；
+  有塞車點時快回升（§LAT-2D 的 1.5 秒 +15%）最多到它的 9 成，之後改回 5 輪 +5% 的慢爬。
+- **RTT 樣本**：超過 3 秒沒更新視為沒有樣本；但在 ENet 重傳可能擋住 ping 的範圍內（max(3 秒, min(4 × RTT, 4 秒)＋1 秒)，最長 5 秒）
+  狀態維持、不做新動作，超過才歸零。丟包分支與延遲建議同一輪都要降時取降得多的那一個，且只要真的降了就記帳（冷卻、塞車點起算）。
+- **log**：`[VIPLE-ABR] cong level La->Lb rtt= base= jit= calmJit= deepAt=+… trend= hold= severe= idrReq= action= idrGap= applied= (src=…)`
+  （等級改變時）；`[VIPLE-ABR] cong level La->L3 … action=emergency-cut (idr request via enet|rfi|quic) A->B kbps[ (already at the floor)] idrGap=…`；
+  `[VIPLE-ABR] cong cut action=cut-trend|cut-severe|emergency-cut x0.NN … congestedAt=…kbps`；`[VIPLE-ABR] cong level held|hold ended: ENet RTT sample N ms old …`；
+  `[VIPLE-ABR] cong point cleared: N kbps (no cut-level congestion for 30 s)`；`[VIPLE-ABR] cong ramp capped at N kbps (90% of the congestion point …)`；
+  `[VIPLE-ABR-RTT] rtt= baseline= inflation= rounds= cong=<動作> level=Ln`、`[VIPLE-ABR-RTT] action=NO-SAMPLE heartbeat …`；
+  編碼執行緒 `[VIPLE-QLOG] IDR-GAP congestion hint on (min gap N ms, fast path off)|off (back to the normal gap)`。
+- **相關檔案**：`Sunshine/src/abr_congestion.h`（純邏輯，單元測試 `Sunshine/tests/unit/test_abr_congestion.cpp`）、`Sunshine/src/stream.cpp`、`Sunshine/src/video.cpp`。
+- **已知限制**：只靠 ENet 的 RTT；只走 QUIC、沒有 ENet RTT 樣本的場次固定 L0。IDR 提示只有一份，多場並存時停用。
+
+#### §FLAT-REPAIR：2D 丟包補傳（client common-c＋host，重用 VR 的補包）
+
+- **為什麼**：一張畫格只丟幾個封包時，原本只能凍結到 IDR 進來（區網實測約 270 ms 起跳）。補傳只晚一次往返。
+- **協商**：2D 場次走 §FLAT-ML 的多連線 hub 時，client 在 `LINK_HELLO` 提 `VIPLE_VR_LINK_F_REPAIR_FLAT 0x40`；server 回
+  `F_CTRL｜F_REPAIR｜F_REPAIR_FLAT` 三個一起才成立，少一個就整組不用（`docs/vr_protocol.md` §4.2、§4.10）。任一端是 2.0.249 以前的版本就不用。
+  為了讓單一連線也能補，**單網卡的區網 2D 場次也要求多連線**（`&flatMl=1`）——條件：host 位址和本機某張網卡同網段、不是經 VPN、
+  而且這一場本來就不會走 MP-QUIC（會走 MP-QUIC 的單路徑場次維持原樣）。連線上的控制訊息只載 NACK／REPAIR_GONE。
+- **client 規則**（`VideoStream.c`、`RtpVideoQueue.c`）：
+  - 等待上限＝兩個幀週期，夾在 8～25 ms（VR 是一個幀週期、4～14 ms，不變）。
+  - 往返門檻：訊號＝最近一筆連線 PING 往返（250 ms 一筆）與最近 8 筆中位數取小。開著時「訊號＋2 ms 超過上限」才算該關；
+    關著時要「訊號＋2 ms＋margin ≤ 上限」才算該開（margin＝上限的四分之一、最多 3 ms）；兩個方向都要連續站滿 500 ms 才換邊。
+    60 fps 約往返 ≤ 23 ms、120 fps 約 ≤ 14 ms 才補。
+  - 已經回報過的 block 等到它結束（門檻中途關掉也不放棄，但不對新 block 開始回報）；逾時或 server 回 `REPAIR_GONE` 才走原本的 IDR 流程。
+- **host 規則**（`stream.cpp` `flat_handle_c2s_from_link`、`vr_multilink.cpp`）：補送量上限＝影像封包率的 15%（token bucket、最多存 600 個；
+  平面場次用實際量到的封包率、下限 100 pps）；`congested_for_recovery()`（L2 以上且 RTT ≥ 150 ms）時一律回 GONE（拒補）；
+  封包倉留三個幀週期。往返時間的補包規則（`repair_rtt`／`repair_far`）在平面場次不用。
+- **log**：client `[VIPLE-FLAT-REPAIR] flat (2D) session: N network interface(s) … multi-link requested with a single link …`、
+  `loss repair for this flat (2D) session: on (…)|off (the server did not agree)`、`wait limit X ms (2 frame periods, 8-25 ms); repair turns off when …`、
+  `repair initially on|off: link RTT …`、`repair on|off: link RTT … (last … ms, median … ms), wait limit …`；
+  host `[VIPLE-VR-LINK] … [flat session: loss repair on|off - the client did not offer it]`、`[VIPLE-FLAT-REPAIR] first resend this session: N packets (M needed …)`、
+  `first refusal this session: congestion level Ln rtt=…`、`[VIPLE-FLAT-REPAIR] 10s: nack= rounds= pkts= gone= (expired= budget= unknown=) … | congested=N ageMaxMs=…`
+  （格式同 `[VIPLE-VR-REPAIR] 10s`，行尾多 `congested`＝因壅塞拒補的份數）。
+- **實測**：頭盔經 Wi-Fi 連開發機 5 分鐘（113 fps）：5 次丟包全補回、沒有要 IDR、0 丟幀。
+- **已知限制**：只在區網、host 位址和本機同網段時啟用；經 VPN、會走 MP-QUIC 的單路徑場次不用。多連線的場次 common-c 不做推測式丟幀回報，
+  補包沒在用時（舊 host、往返超過門檻）RFI／IDR 最多晚一個幀週期。
+
+#### §IDR-RETRY：client 等 IDR 的計時重試（common-c `VideoDepacketizer.c`、`ControlStream.c`）
+
+- **為什麼**：原本送出一次請求後要等連續丟滿 `CONSECUTIVE_DROP_LIMIT` 張（60 fps 是 2 秒）才再要；請求或 IDR 本身丟了就白等。
+- **規則**：等 IDR 期間每收到一張（要丟掉的）完整幀檢查一次：距上一次請求（任何來源）300 ms 沒等到就再要，之後 600、1200 ms，1200 ms 封頂；
+  等到 IDR 重置。間隔另有下限 2 × RTT＋100 ms（RTT 封頂 4000 ms；RTT ≤ 100 ms 時不影響）。RTT 來源依序 ENet → 多連線控制 PONG →
+  QUIC active 路徑最小 smoothed RTT → 這一場最後一個有效值（`vipleRecoveryRtt()`），都沒有才用 300／600／1200。
+  連續丟幀上限留著當後備，但下限內已經要過就不再送（不和計時重試成對送出）。VR、PyroWave 不走。
+- **log**：`[VIPLE-DEPACK] §IDR-RETRY: no IDR N ms after last request — retry #K (interval I ms, frame F, rtt R ms enet|link|quic|cached|none)`；
+  `Reached consecutive drop limit (IDR requested N ms ago, within W ms, not requesting again)`。
+- **已知限制**：完全沒有完整幀進來時計時重試不會跑（交給下面的看門狗與「no video packets」那條路）。限流仍在 host。
+
+#### §FRZ-WD-RTT：凍結看門狗的門檻跟著 RTT 放寬（common-c `VideoStream.c`）
+
+- **為什麼**：RTT 很長（塞車、遠端）時 2 秒內 IDR 根本到不了，固定門檻會把還在路上的 IDR 連同佇列一起清掉再要一張，每秒重來一次。
+- **規則**：starve（多久沒有完整幀就觸發）＝clamp(2 × RTTq＋500, 2000, 8000) ms，RTTq＝RTT 向上取到 250 ms 的倍數（封頂 4000）；
+  refire（兩次觸發的最短間隔）＝starve。RTT ≤ 750 ms、沒有樣本或 VR session 時維持原本的 2000／1000 ms。RTT 來源與 §IDR-RETRY 相同。
+- **log**：`[VIPLE-VIDEO] §FRZ-WD-RTT: watchdog threshold A -> B ms (refire R ms, rtt=N ms <來源>)`（門檻改變時）；觸發行仍是上面的 `§FRZ-WATCHDOG`。
+- **已知限制**：上限 8 秒——佇列被毒化時的凍結仍然有界，但遠端路徑上最壞要等到 8 秒才清。
+
 ---
 
 ## 5. 其他
@@ -292,10 +405,10 @@ Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)
 | `[VIPLE-PREFS]` | 多處 | 設定載入／存檔 |
 | `AutoUpdateChecker` / `[AutoUpdateChecker]` | `backend/autoupdatechecker.cpp` | §UPDATE-HEAD 自動更新檢查（每次啟動、5 分鐘 debounce）：`HEAD https://github.com/…/releases/latest` → `HEAD 302 → …/releases/tag/vX`（免 API 配額）→ `up to date` / `update available (head)`；HEAD 失敗才退回 REST API：`GET … (If-None-Match)` → `API 200 OK` / `API 304 Not Modified`（**匿名 304 仍計入 60 次/小時/IP 配額**）/ `API rate limited … back-off until <epoch>`；不打網路時（`debounce`／`back-off`／`error`）用上次快取判斷。發佈當天第一次啟動就該看到 `update available`；沒有就看是哪一行 |
 | `[SC-HID]` | `streaming/input/sc_hid.cpp` | Steam Controller 原生 HID 轉發（見下節；host 端同 tag） |
-| `[VIPLE-INPUT-STALL]` | `session.cpp`（watchdog 執行緒） | **非 Windows 會誤報**：只有 Windows 以 `GetLastInputInfo` 確認真的有輸入，其他平台一律當作有輸入，主迴圈閒置（例如 Linux PlVk 在 Pacer 執行緒繪製）就會被記成停頓（TODO）。主迴圈（鍵鼠唯一入口）停頓 ≥50 ms 且期間有使用者輸入、本視窗在前景才記；`phase=SDL_WaitEventTimeout`＝卡在 SDL 內部，`phase=event 0x…`＝我們的 handler；停頓 ≥300 ms 另抄一份主執行緒堆疊（`module!symbol+offset`）。影像由 Pacer 執行緒繪製，所以「畫面正常但鍵鼠斷續」要看這行 |
+| `[VIPLE-INPUT-STALL]` | `session.cpp`（watchdog 執行緒，**2.0.249 起只在 Windows**） | 主迴圈（鍵鼠唯一入口）停頓 ≥50 ms 且期間有使用者輸入（`GetLastInputInfo`）、本視窗在前景才記（每 10 ms 檢查）；`phase=SDL_WaitEventTimeout`＝卡在 SDL 內部，`phase=event 0x…`＝我們的 handler，`phase=loop-top`＝迴圈頂端。以前非 Windows 一律當作有輸入而誤報，2.0.249 起 watchdog 整段只在 Windows 編譯，其他平台不再印。**§INPUT-STALL 證據保存（2.0.249）**：停頓 300 ms 與 1000 ms 各抄一次主執行緒堆疊（暫停期間只複製堆疊，恢復後才展開；每格 `模組+RVA (符號+disp)`，最多 32 格；暫停當下迴圈已恢復時註明 `this stack is past the stall`），並抄 WCT 等待鏈（標出 `DEADLOCK CYCLE`；COM 等待只看得到停在 COM 節點）。行：`stall #N: main loop unresponsive N ms so far (phase=…)`、`main thread stack K at N ms (…):`、`wait chain (…)`、`recovered: main loop was unresponsive N ms (phase=…) #N`。同樣內容另存不輪替的 `input-stall.log`（log 目錄，Windows 是 `%TEMP%`；上限 1 MB，超過留後半 512 KB 並加 `[older entries trimmed]`），一般 log 輪替掉之後還找得到。手把熱插拔收掉 SC-HID 改成不阻塞主執行緒（`ScHidPassthrough::stopNonBlocking()`，讀取執行緒 1 秒內沒退出就遺棄）。影像由 Pacer 執行緒繪製，所以「畫面正常但鍵鼠斷續」要看這行 |
 | `[VIPLE-INPUT-GAP]` / `[VIPLE-INPUT-QUEUE-LAG]` / `[VIPLE-INPUT-SENDINPUT-SLOW]` | **host** `stream.cpp` / `input.cpp` / `platform/windows/input.cpp` | 輸入封包到達間隔 >150 ms（前 1 秒 ≥30 包才算）／task_pool 排隊 ≥50 ms／`SendInput` ≥20 ms（被其他行程的 low-level hook 卡住）。四者對時可分辨停頓在 client、傳輸還是 host 注入 |
-| `[VIPLE-QLOG] §S.19 cooldown armed f=N (K.14 pending\|skipped)` / `IDR-REQ` / `IDR-EMIT` / `IDR-SUPPRESS` | **host** `video.cpp` encode_run | IDR cooldown 閘門：`armed` 標示本 encoder 生命期起點（`K.14 skipped: rebuilt encoder`＝顯示拓樸切換後重建）；client 要 IDR 卻只見 SUPPRESS、無 EMIT 就是 §S.19-INIT-FIX 修掉的永久凍結型態。`IDR-EMIT f=1 (opening, cooldown not started)`＝session 開場 host 自己要的那一張，不啟動冷卻（§IDR-OPEN，2026-11-14）；`§K.14` 第 16 幀的重送同樣不重設冷卻。開場之後 client 的第一個 `IDR-REQ` 應該緊接同一幀的 `IDR-EMIT … (cooldown OK)`，開場不該再出現 `IDR-SUPPRESS`；串流中途（encoder 重建後）的冷卻不變 |
-| `[VIPLE-UPDATE]` | **host** `self_update.cpp` / `system_tray.cpp` | §SELF-UPDATE 常駐圖示兩段式「Check for updates...」→「Install update vX」與 CLI `--check-update`／`--self-update [--force] [package]`：`latest via HEAD: X`（github.com 302 取 tag，免 API 配額）／`falling back to API`／`up to date`／`update available: A → B`／`downloaded … bytes`／`sha256 verified`（GitHub asset digest，拿不到就拒裝）／`updater launched (pid N) … service=1`（Windows：PowerShell 腳本在 `<install>/config/update`，停 service→rename .old→覆蓋→啟 service，失敗回滾；細節在 `config/self_update.log`）／`sudo path rc=` `pkexec path rc=`（Linux：apt-get install .deb；細節在 `~/.config/sunshine/self_update.log`）／`self-update completed: now running X` 或 `last self-update failed: …`（重啟後讀 result 檔） |
+| `[VIPLE-QLOG] §S.19 cooldown armed f=N (K.14 pending\|skipped)` / `IDR-REQ` / `IDR-EMIT` / `IDR-SUPPRESS` | **host** `video.cpp` encode_run | IDR cooldown 閘門：`armed` 標示本 encoder 生命期起點（`K.14 skipped: rebuilt encoder`＝顯示拓樸切換後重建）；client 要 IDR 卻只見 SUPPRESS、無 EMIT 就是 §S.19-INIT-FIX 修掉的永久凍結型態。`IDR-EMIT f=1 (opening, cooldown not started)`＝session 開場 host 自己要的那一張，不啟動冷卻（§IDR-OPEN，2026-11-14）；`§K.14` 第 16 幀的重送同樣不重設冷卻。開場之後 client 的第一個 `IDR-REQ` 應該緊接同一幀的 `IDR-EMIT … (cooldown OK)`。**2.0.245 起（§IDR-FAST）桌面 session 不再丟請求**：平常最短間隔 250 ms、10 秒內送滿 3 張後 1500 ms，落在間隔內的印 `IDR-DEFER …`、到期印 `IDR-EMIT … (deferred request)`；壅塞提示另印 `IDR-GAP congestion hint on|off`（§P2）。`IDR-SUPPRESS` 只剩 VR session 會印。細節見第 4 節「2D 丟包後的恢復」 |
+| `[VIPLE-UPDATE]` | **host** `self_update.cpp` / `system_tray.cpp` | §SELF-UPDATE 常駐圖示兩段式「Check for updates...」→「Install update vX」與 CLI `--check-update`／`--self-update [--force] [package]`：`latest via HEAD: X`（github.com 302 取 tag，免 API 配額）／`falling back to API`／`up to date`／`update available: A → B`／`downloaded … bytes`／`sha256 verified`（GitHub asset digest，拿不到就拒裝）／`updater launched (pid N) … service=1`（Windows：PowerShell 腳本在 `<install>/config/update`，停 service→rename .old→覆蓋→啟 service，失敗回滾；細節在 `config/self_update.log`）／`sudo path rc=` `pkexec path rc=`（Linux：apt-get install .deb；細節在 `~/.config/sunshine/self_update.log`）／`self-update completed: now running X` 或 `last self-update failed: …`（重啟後讀 result 檔）。**§UPDATE-NOTES-TRAY（2.0.252）**：常駐圖示的「有新版」通知多一行這一版的標題——每個新版號在一個行程裡只多查一次 `releases/tags/v<ver>`（逾時 10 秒；查失敗也算查過，不重查，保住匿名 API 配額），依 web 設定頁的語系（`locale` 以 `zh` 開頭取中文段）在 release notes 的 `# 繁體中文` 分隔行切段、取該段第一個 `## ` 標題（沒有分隔行就用唯一的那段，選定那段沒標題就退回另一段），截到 120 字元、通知內文放不下就不接：`release notes summary for vX (zh\|en): …\|<none>`／`release notes for vX not available (…)`；查詢期間按「Install update」會回 `Still finishing the update check. Try again in a moment.`。**Linux 更新授權（2.0.252）**：.deb 附固定路徑的 helper `<prefix>/libexec/viplestream-server/self-update` 與 polkit 政策 `<datadir>/polkit-1/actions/app.viplestream.server.self-update.policy`（action `app.viplestream.server.self-update`，三種情境都是 `auth_admin`），pkexec 的授權對話框顯示看得懂的說明；helper 必須是 root 擁有、group／other 不可寫才用，否則退回寫到使用者目錄的內嵌腳本：`installer: helper …\|embedded script …`。prefix 不是 `/usr` 時政策檔不生效（pkexec 顯示預設提示）；FreeBSD、AppImage、Flatpak 不用 helper |
 | `[VIPLE-UI-NAV]` | `gui/sdlgamepadkeynavigation.cpp` | 介面（不是串流中）的手把導覽，§UI-SCROLL（2026-10-11）。每次啟用手把導覽（啟動、串流或 VR 子行程結束回到介面）各印一行：`enabled: N gamepad(s): <名稱…>` = 介面行程看到的手把；`polling started (window has focus)` = 視窗拿到焦點、開始輪詢（沒有這一行＝視窗沒有焦點，手把在介面裡不會有反應）；`first gamepad input: button N (uiNav=0\|1)` = 第一個按鍵進來了（`uiNav=1`＝設定頁的 Tab 導覽模式）；`right stick scroll in use (axis=N)` = 第一次用右搖桿捲設定頁。另有 `gamepad added: <名稱> (now N)` = 啟用之後才接上的手把。使用者回報「手把在介面裡沒反應」時，先看有沒有前兩行、手把的名稱是什麼。影片模式選片頁（捲動模式）另印 `10s input: wheel=N keys=N clicks=N`：雷射指標模式實測只有 clicks，搖桿到不了視窗。`gamepad navigation not started: this process has no window to navigate`（每個行程最多一行，2026-11-14）＝頭盔 VR 介面（`--vr-shell`）與 Qt 用 offscreen 的串流子行程不開介面的手把導覽，這些行程不會有 `enabled: …`；串流本身的手把（`SdlInputHandler`）不受影響 |
 | `[VIPLE-HID]` | `backend/hidprobe.cpp` + 四個閘控點（`gamepad.cpp` getUnmappedGamepads / `sdlgamepadkeynavigation.cpp` enable / `input.cpp` SdlInputHandler ctor / `sc_hid.cpp` prepare） | 啟動前與每場開始前的 HID 探測（§HID-PROBE，2026-09-19 Puck 卡死事故）。`probe (startup\|refresh) OK: N HID interface(s) responded in X ms (slowest VID:PID Y ms, limit 1000 ms)` = 正常；`UNRESPONSIVE <name> vid= pid= stuck_at=<CreateFile\|HidD_GetAttributes\|HidD_GetProductString\|enumeration> path=` = 該裝置無回應 → 手把偵測、手把 UI 導覽、串流手把與 SC-HID 停用，各閘控點各印一行 `skipped/refused`；重插裝置後下一次 refresh（開串流／回 UI）自動恢復，不必重啟。**刻意比 SDL 保守**：對所有 HID 介面查字串，卡死的普通鍵鼠也會觸發。`(simulated via VIPLE_HID_PROBE_SIMULATE_HANG, dev-only)` = 測試注入（`VID:PID` 直接注入；`VID:PID:stall` 對實體介面真的卡在字串查詢；`enumerate:stall` 整個列舉逾時），不是真故障 |
 | `[VIPLE-CTRL]` | `ControlStream.c`（common-c，Q／A 兩份相同） | 控制通道的防衛，四種行都代表防衛生效（拒送、改送 IDR 或忽略），不是崩潰。**§F2**（`sendMessageEnet` 加密分支）：`§F2 payload too large (ptype=0x%04x len=%d) — limit 251, dropped (count=N)` ＝ 明文超過 256 B stack buffer（payload 上限 251 B）被拒送、回傳 false；前 10 次都印、之後每 1000 次一筆。現有呼叫端都是固定長度（最大是 input 132 B），**1.5.x 正常 log 不該出現**；出現代表有新呼叫端（2.0 VR 送出 API）組出超長封包。**§F1-DBG-ASSERT**（幀號狀態倒帶，三行都改送 IDR）：`Invalid frame loss range (%u to %u) — requesting IDR frame instead`（`queueFrameInvalidationTuple`，每秒最多 1 筆）、`Non-monotonic RFI ranges (start %u, last end %u) — requesting IDR frame instead`（`referenceFrameControlFunc` 聚合時）、`connectionSawFrame: stale frame=%u (lastSeen=%u) — ignored`（倒退幀號不計入統計，每秒最多 1 筆）。這三行與 `[VIPLE-DEPACK] notifyFrameLost: stale` 同時出現＝§FRZ-WATCHDOG 哨兵重置後採納了 failback 殘留的 stale 幀；舊版 Android（debug native、assert 生效）會在這裡 SIGABRT 閃退 |
@@ -393,9 +506,10 @@ VR 相關 tag 只在 VR session 出現：client 帶 `--display-target pcvr`，�
 
 全速串流時網路不穩就要求 host 中途改半速（每兩張送一張、頭盔每張顯示兩格），穩了再試著升回。設定「幀率＝自動」（`vrrateauto`，預設開；`--vr-rate-auto`）。
 
-- client：`automatic frame rate on: 120 Hz, drops to 60 Hz ...`（開場）；`request div=<1|2> seq=<n> (<原因>): short repeats last 15 s=<格> , last 5 s=<格> stalls=<次>; next try after <秒> s`；
+- client：`automatic frame rate on: 120 Hz, drops to 60 Hz ...`（開場）；`request div=<1|2> seq=<n> (<原因>): short repeats last 15 s=<格> (headset <格>), last 5 s=<格> stalls=<次> lateHost=<格> (15 s, not counted); next try after <秒> s`；
   `host applied|refused div=<n> (seq=<n>)`；host 不回時 `automatic frame rate is off for this session`。
-  `[VIPLE-VR-MTP10]` 尾端 `| rate div=<1|2> short15s=<格> downs= ups= probeFails= outageSkips=`（outageSkips＝最近有中斷而沒判斷降速的次數）。
+  `[VIPLE-VR-MTP10]` 尾端 `| rate div=<1|2> short15s=<格> downs= ups= probeFails= outageSkips= lateNet= lateHeadset= lateHost= fnBreaks=a/b`（outageSkips＝最近有中斷而沒判斷降速的次數；
+  fnBreaks＝幀號不連號的組數／全部組數，累計）。
 - 判斷（`streaming/xr/xrrateauto.h`）：只算預期外、連續不超過 6 格的重複（更長的是斷流，半速救不了）。5 秒一個視窗；
   降＝最近 3 個視窗合計 ≥ 45 且至少 2 個視窗各 ≥ 10、而且 3 個都不是中斷（斷流 ≥ 3 次的視窗＝網路中斷，不觸發降速；試升失敗也不看它）；升＝半速滿 60 秒（試升失敗後加倍，上限 10 分鐘）且最近 30 秒每個視窗 ≤ 10、每 15 秒合計 ≤ 22、沒有斷流；
   升回後 30 秒內最新視窗 ≥ 12 且和前一個合計 ≥ 22 就退回半速。半速且自動緩衝 2 格時鎖住每張顯示兩格（節奏鎖）。開場 15 秒、每次切換後 4 秒不判斷。
@@ -404,10 +518,26 @@ VR 相關 tag 只在 VR session 出現：client 帶 `--display-target pcvr`，�
   `request` 行多 `(headset <格>)`；`[VIPLE-VR-MTP10]` 尾端多 `lateNet=<累計> lateHeadset=<累計>`。
 - server：`[VIPLE-VR-RATE] request div=<n> seq=<n> reason=auto-down|auto-up|manual (was <n>)`、`refused ...`、
   `applied div=<n> from f=<幀號> (stream <fps> fps, skipped so far <n>)`；`[VIPLE-VR-TX] 10s` 尾端 `rateDiv=<n> skipped=<累計>`。
-- server（§VR-RATE-ENC，2026-11-14）：`[VIPLE-VR-RATE] encoder bitrate setting rescaled for 1/<n> rate ([new encoder, ]target <kbps> kbps)`
-  ——分頻變了（或編碼器在半速期間重建），交給編碼器的碼率設定值乘上分頻。半速時每 n 張只編一張，編碼器的碼率控制卻照
+- server（§VR-RATE-ENC，2026-11-14）：`[VIPLE-VR-RATE] encoder bitrate setting rescaled for 1/<n> rate (target <kbps> kbps)`（分頻變了）；
+  編碼器在半速期間重建時是 `… rescaled for 1/<n> rate (new encoder starts from the session bitrate <kbps> kbps, setting <kbps> kbps; the controller value is re-sent only when it changes)`
+  ——交給編碼器的碼率設定值乘上分頻（＝min(目標 × n, max(session 碼率, 目標))）。半速時每 n 張只編一張，編碼器的碼率控制卻照
   建立時的幀率分每一張的位元，不換算的話實際輸出只有目標的一半（11-14 配戴場次：72 fps 時實際是目標的 42%，全速時 66～89%）。
   之後 `[VIPLE-VR-ABR-FAST] 10s` 的 `enc=` 在半速時是 `applied` 的 n 倍（上限是 session 建立時的碼率），這是正常的。
+- server（2.0.259 起）：半速時控制器的上限夾在**設定碼率 ÷ 分頻**，降碼每一刀都有效；升回全速從實際送出量逐步爬升、不再翻倍。
+  `[VIPLE-VR-RATE] bitrate controller cap <kbps> kbps for 1/<n> rate (…), applied …`／`… (full rate again: ramping from <kbps> kbps, not jumping)`；
+  目標超過半速送得出的量時 `[VIPLE-VR-RATE] target <kbps> kbps is above what 1/<n> rate can send (<kbps> kbps): the controller caps it on its next tick (<= 500 ms)`
+  （`vr_abr_fast` 關著時行尾改說沒有控制器會夾）。
+- **§VR-RATE-CAUSE-HOST：分辨「host 沒出畫格」（client，`streaming/xr/xrrateauto.h` 的 `HostCadence`，2.0.258～259）**。
+  遊戲或 host 擷取端沒出新畫格時，頭盔上看到的也是重複格，但降半速救不了（反而少一半畫格）。所以每段預期外的重複先扣掉 host 的份，剩下的才分短重複、
+  補包、斷流：
+  - 一般影像：和上一張（不是 REPEATED 的那張）**幀號連號**，而且 Present 間隔 ≥（張數 × 分頻＋0.75）格，就記 host 少出 round(間隔)−張數 × 分頻 格。
+    幀號不連號、或拿不到幀號（PyroWave）一律不算 host。
+  - host 重送的那一張（REPEATED）：不當 Present 基準；不是關鍵幀、而且比上一張晚到 ≥ 80 ms 時記 floor(100 ms ÷ 週期)−分頻 格，下一張真影像再補差額。
+    **關鍵幀的 REPEATED 不記**（host 回應 IDR 請求而重編上一張，不是沒出畫格，2.0.259）。
+  - host 的格數只記錄（`lateHost`），不進降速與試升失敗的判斷。最近 15 秒 host ≥ 45 格而且佔七成以上時印
+    `host is not producing frames (lateHost <格> slots in 15 s, network+headset <格>): not counted as network trouble, rate stays at div=<n>`；
+    降到 22 格以下、而且有 3 個新視窗後印 `host is producing frames again (…)`。
+  - 已知限制：跨 5 秒視窗邊界的那一段分不出是不是 host，照舊算網路（可能記一次斷流，只影響試升）。
 
 #### `[VIPLE-VR-NETBENCH]`（client）—— 設定頁「測試網路」（§VR-NETBENCH，2026-11-09）
 
@@ -1794,22 +1924,26 @@ client `streaming/xr/xrcontext.cpp`；server `stream.cpp`、`vr/vr_latch.cpp`
 伺服器端（`Sunshine/src/platform/windows/misc.cpp`）。SSID 只印前 3 字元、金鑰只印長度。
 ```
 [VIPLE-VR-HOTSPOT] received ssid=abc*** keylen=%d band=6GHz
-[VIPLE-VR-HOTSPOT] profile set | connect ok | already connected - ensuring the auto-reconnect profile
+[VIPLE-VR-HOTSPOT] profile set | already connected - ensuring the reconnect profile | connect failed err=…
 [VIPLE-VR-HOTSPOT] watchdog: adapter disconnected from the headset hotspot
 [VIPLE-VR-HOTSPOT] watchdog: disconnected for %d s - restarting the adapter (n/max)
 [VIPLE-VR-HOTSPOT] watchdog: adapter restart done|failed
 [VIPLE-VR-HOTSPOT] watchdog: adapter connected again after %d s
 [VIPLE-VR-HOTSPOT] watchdog: still disconnected after %d restart(s) - giving up for this session; unplug and replug the adapter
-[VIPLE-VR-HOTSPOT] watchdog: adapter not present - not restarting
+[VIPLE-VR-HOTSPOT] watchdog: adapter not present - not restarting (query err=…)
+[VIPLE-VR-HOTSPOT] watchdog: adapter present but never joined in this round - retrying slowly, no adapter restart
 ```
-  - 看門狗只在 VR 串流中監看；斷線連續 30 s 才重啟、每場最多 `vr_hotspot_restart_max` 次（預設 2）、間隔至少 2 min。
+  - 看門狗監看送過熱點資訊的那一場（VR，以及 §HOTSPOT-FLAT 的平面場次）；**這一輪連上過**、之後斷線連續 30 s 才重啟，每場最多
+    `vr_hotspot_restart_max` 次（預設 2）、間隔至少 2 min。這一輪從沒連上過不為它重啟（提早重啟那一次除外，見下面 §HOTSPOT-ADAPT）。
+    舊版的 `connect ok` 那一行已經沒有了。
 
 host（§VR-HOTSPOT-FASTJOIN，2026-11-16）：熱點資訊到達後 40 秒內，網卡是「未連線」就每 2 秒再連一次
 （頭盔在串流開始時才開熱點，約 3 秒後才出現；只靠 Windows 的自動連線要 20～30 秒，主動重試後約 6 秒）：
 ```
 [VIPLE-VR-HOTSPOT] joined the headset hotspot N ms after the hotspot info (K extra connect attempt(s))
-[VIPLE-VR-HOTSPOT] not joined after 40 s (K connect attempt(s) of ours) - leaving it to the automatic reconnect
+[VIPLE-VR-HOTSPOT] not joined after N s (fast-join window W s[, adapter back B s after the hotspot info]; …) - no verdict; retrying slower (5/10/20/40/60 s), no adapter restart unless it joins first
 ```
+（2.0.249 起；舊版是 `not joined after 40 s … - leaving it to the automatic reconnect`。提早重啟後介面晚回來時快速加入的期限會延長，最晚到第 60 秒。）
 host（§VR-HOTSPOT-YIELD，2.0.207）：這張網卡上有別的程式在連（host 的 Steam 開著時它自己一直用暫時設定檔連，而且會中斷
 不是它發起的連線）就退讓，不再自己連；收到熱點資訊後先聽 3 秒（上一場看過別人時 11 秒），沒有別人才照 FASTJOIN 連。
 `joined …` 那一行的括號改成 `(K connect attempt(s) of ours[; the connection was left to the other program])`：
@@ -1829,9 +1963,13 @@ host（§VR-HOTSPOT-RESTART-EARLY，2.0.233）：熱點資訊到達 12 秒後還
 （每條連線的 10 秒統計、`link N confirmed`、`hot-add` 都和 VR 相同），另外多這幾行：
 ```
 client  [VIPLE-VR-LINK] flat (2D) session: the server accepted multi-link - video and audio go over every usable network interface (MP-QUIC stays off for this session)
-client  [VIPLE-VR-LINK] flat (2D) session: only N network interface(s) can reach the host - multi-link not requested
-host    [VIPLE-VR-LINK] flat (2D) session: multi-link negotiated (fps=N, repair=off, ctrl=off)
+client  [VIPLE-VR-LINK] flat (2D) session: only N network interface(s) can reach the host and MP-QUIC is in use - multi-link not requested
+client  [VIPLE-VR-LINK] flat (2D) session: the host address in use is not on a subnet of any of this device's network interfaces - multi-link not requested
+client  [VIPLE-VR-LINK] flat (2D) session: the host is reached through a VPN - multi-link not requested
+host    [VIPLE-VR-LINK] flat (2D) session: multi-link negotiated (fps=N, loss repair offered - on only if the client asks for it)
 ```
+（2.0.251 起：單一網卡、不走 MP-QUIC 的區網場次也要求多連線，好讓 §FLAT-REPAIR 補傳；條件改看「host 位址和本機網卡同網段」，不再看是不是私有位址。
+舊版的 `only N network interface(s) can reach the host - multi-link not requested` 與 host 的 `repair=off, ctrl=off` 已不再出現，見第 4 節「2D 丟包後的恢復」。）
 控制連線換路（§CTRL-TAKEOVER、§CTRL-LINK-LOCAL、§CTRL-REGAIN，VR 與平面共用）：
 ```
 host    [VIPLE-VR-LINK] control connection taken over by a new connection from the same client (<ip>:<port>) - the old one is dropped
@@ -1842,7 +1980,7 @@ client  [VIPLE-VR-LINK] control connection: the session interface has been answe
 換路花多久看 client 的 `§Q-ENET-RECONNECT: ENet reconnected! (§M01-C after N ms, attempts=…, rejects=…)`。
 
 §HOTSPOT-FLAT（2.0.210，平面／2D 場次也用頭盔熱點當第二條路徑）：host 在 `<VipleStreamVR>` 多宣告 `0x200`
-（`VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT`），平面場次的 0x5507 只認 HOTSPOT_INFO、其餘照舊丟掉；client 在「不是經 VPN、這一場有
+（`VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT`），平面場次的 0x5507 只認 HOTSPOT_INFO（2.0.252 起另認 HOTSPOT_STATE；§FLAT-ML 的 LINK_HELLO 也收）、其餘照舊丟掉；client 在「不是經 VPN、這一場有
 MP-QUIC、host 有這個能力」時照 VR 場次一樣開熱點、送熱點資訊，並把熱點上的裝置位址交給 MP-QUIC 當 alt peer
 （開場時一次，之後每 5 秒補）。熱點的 log 沿用 `[VIPLE-VR-HOTSPOT]`，路徑看 `[VIPLE-MPQUIC] §MP-ONLINK`／`§Q.path-recovery`：
 ```
@@ -1870,13 +2008,13 @@ client（§FRAME-HOTSPOT-EARLY，2.0.208，`framehotspot.h`＋`vrlauncher.cpp`�
 
 client（§FRAME-HOTSPOT-AUTO，2026-11-15～16，同一個檔；區網的 VR 場次、熱點關著時自動開，host 沒連上就關）：
 ```
-[VIPLE-VR-HOTSPOT] auto: the host is on the local network and the streaming adapter hotspot was off - switched it on; it is switched off again if the host does not join within 45 s, and when this session ends | and when the app exits (it stays on between games)
-[VIPLE-VR-HOTSPOT] auto: the host joined the hotspot after N s - keeping it on
-[VIPLE-VR-HOTSPOT] auto: the host did not join the hotspot - hotspot switched off again
+[VIPLE-VR-HOTSPOT] auto: the host is on the local network and the streaming adapter hotspot was off - switched it on; it is switched off again if the host does not join within about 45 s (up to 75 s while the host reports it is still connecting), and when this session ends | and when the app exits (it stays on between games)
+[VIPLE-VR-HOTSPOT] auto: the host joined the hotspot after N s - keeping it on (…)
+[VIPLE-VR-HOTSPOT] auto: <原因> - hotspot switched off again
 [VIPLE-VR-HOTSPOT] auto: the session ended - hotspot left on until the app exits        ← 串流行程是 App 開的：留給下一個遊戲
 [VIPLE-VR-HOTSPOT] auto: the session ended - hotspot switched off again                  ← 直接從命令列跑的串流：自己就是 App
 [VIPLE-VR-HOTSPOT] auto: the hotspot is still on from the previous session with this host (host connected|waiting for the host again)
-[VIPLE-VR-HOTSPOT] auto: the hotspot is on from a session with another host - waiting up to 45 s for this host to join (N device(s) of the previous one ignored)
+[VIPLE-VR-HOTSPOT] auto: the hotspot is on from a session with another host - waiting about 45 s (up to 75 s while the host reports it is still connecting) for this host to join (N device(s) of the previous one ignored)
 [VIPLE-VR-HOTSPOT] auto: the app is exiting - hotspot switched off again
 [VIPLE-VR-HOTSPOT] auto: hotspot switched off (the app that switched it on ended without switching it off)
 [VIPLE-VR-HOTSPOT] auto: remote session and the hotspot we switched on earlier has nothing on it - switched off
@@ -1902,6 +2040,61 @@ client（§FRAME-HOTSPOT-PAUSE，2026-11-14，`moonlight-qt/app/streaming/frameh
   - 暫停的條件：這一場經 VPN 連到 host、熱點正在運作、熱點上沒有任何對端（ARP 表）。使用者自己在 Steam 設定關掉的不碰，也不會被打開。
   - 沒有任何一行＝條件不成立（區網場次、熱點本來就關著、不是 Frame、沙箱沒有那兩個路徑）。
   - 這些行都不含 SSID 與金鑰。
+
+#### 熱點自動啟閉的驗證、退避與狀態回報（§HOTSPOT-VERIFY、§HOTSPOT-ADAPT、§HOTSPOT-MISSING，2.0.245～2.0.260）
+
+**為什麼**：頭盔自動開的熱點以前只看「熱點上有沒有裝置」決定留不留，掛著別台裝置時整場開著（熱點和家用 Wi-Fi 共用頭盔唯一的無線電，
+開著就有丟包）；host 連不上時要等滿 45 秒，下一場又照樣開；host 這一端每場多重啟一次網卡、網卡重啟後查不到介面就整場放棄。
+
+**§HOTSPOT-VERIFY（client，`moonlight-qt/app/streaming/framehotspot.h`）**
+- 保留熱點的依據是**這一場有一條已確認的多連線走熱點**（`LiVrLinkOnDedicated()`：一條 ready 的連線、介面是 `wlanap*`、1 秒內收過 PONG）。
+  熱點上的其他裝置不算數。沒有多連線的場次（`-1`）才看熱點上有沒有出現 host 自己的位址、host 回報 JOINED、或新裝置。
+- 讀數是「沒有」時，要到期限而且讀數已連續 ≥ 10 秒才關。期限：舊 server 或還沒收到回報 45 秒；host 回報 JOINED＝連上時刻＋20 秒（夾在 45～75 秒）；
+  host 回報 TRYING 且帶 SEEN 或 RESTARTED 旗標＝75 秒。會回報的 server 5 秒內沒有任何一則就退回 45 秒。
+- 還在等 host 時每 1 秒輪詢一次，其餘每 5 秒。
+
+**§HOTSPOT-ADAPT（client＋host；線上格式見 `docs/vr_protocol.md` §4.5.1）**
+- client 沒開熱點或已關掉時不再把熱點資訊送給 host（`the hotspot is not on for this session - no (more) hotspot info is sent to the host`）；
+  關熱點時送 C2S `HOTSPOT_STATE CLOSED`，host 立刻停止重試。開熱點（softapmanager 的 status＋create）在背景執行緒做，不卡主迴圈（§HOTSPOT-REOPEN-ASYNC）。
+- **client 的失敗紀錄**：存在資料目錄的 `hotspot-nojoin`（每台 host 一行，最多 8 台，超過丟最舊的；權限 0600，暫存檔再 rename；7 天沒更新視為沒有）。
+  - R 類（連不到）：連續失敗 1／2／3／≥4 次後各隔 10 分鐘／30 分鐘／90 分鐘／4 小時才再為這台開熱點；熱點關掉之後 host 才回報 JOINED 時次數降回 1。
+  - S 類（host 的靜態原因：UNSUPPORTED、DISABLED、NO_ADAPTER）不走時間退避：下一場熱點關著時只送 `QUERY`，5 秒內沒答案就這一場不開，回 READY 才清紀錄並開熱點。
+    DISABLED 一律延後關、其他兩種只在熱點上已有新裝置時延後，延後 20 秒內沒有連線才關。DISABLED 的紀錄照 R 類的時間退避會過期（再回 DISABLED 時不刷新時刻）。
+  - App 啟動時（§FRAME-HOTSPOT-EARLY），**所有已知 host 都在退避中**才不先開（已知 host＝設定裡有伺服器憑證的那些；清單空的照常開；60 秒後再查一次）。
+- **client 怎麼用 host 的回報**：UNREACHABLE／FAILED＝立刻關、記 R 類、送 CLOSED；REMOTE＝關但不記；JOINED／TRYING 只延長期限。已確認過連線之後否定的回報一律不理。
+- **host**（`Sunshine/src/platform/windows/misc.cpp`）：快速加入（先聽 3 秒／11 秒、退讓、每 2 秒連一次、第 12 秒提早重啟）不變；
+  - **判定連不上**：arm 後滿 22 秒（上一場看過別人在連時 30 秒）、這一輪從沒連上、看到的連線失敗 ≥ 4 次、這時沒有別人在連；提早重啟做過時另要
+    介面回來後滿 8 秒、回來後自己連過一次、回來後新增 ≥ 2 次失敗、網卡是「未連線也沒在連」（§HOTSPOT-VERDICT-AFTER-RESTART）。介面晚回來時快速加入的期限延到
+    min(回來＋18 秒, arm＋60 秒)。最後一次失敗的原因碼落在「看得到熱點」那一段就報 FAILED（帶 SEEN），否則 UNREACHABLE。
+  - 判定之後重試 15 → 30 → 60 秒（之後每 60 秒）；沒判定的慢速重試 5 → 10 → 20 → 40 → 60 秒。**這一輪從沒連上過不重啟網卡**。
+    連上過後斷線照舊每 5 秒重連、照舊重啟；記了放棄之後改成每 60 秒。
+  - 每一則 INFO／QUERY 開新的一輪（世代號，§HOTSPOT-REQ-GEN），過期請求的結果不 arm、不回報；看門狗只替自己 arm 的那一場續命。
+  - 狀態回報：變了就送，之後每 5 秒重送同一則；`vr_hotspot_autoconnect = disabled` 回 DISABLED、非 Windows 回 UNSUPPORTED。
+- **§HOTSPOT-MISSING（host）**：重啟網卡後 30 秒內查不到介面就留在原階段等它回來；查不到持續 10 秒就重開 WLAN 控制代碼並重新註冊通知，
+  重啟後 90 秒內每 10 秒一次，之外 20 → 40 → 60 秒；設定檔建不起來時報 FAILED（附原因碼）而不是 NO_ADAPTER；介面回來馬上重連。
+- **log**（tag 都是 `[VIPLE-VR-HOTSPOT]`，不含 SSID 與金鑰）：
+```
+host    verdict: failed (hotspot seen, cannot connect)|unreachable N ms after the hotspot info (… last reason=0x.. <名稱> …) - next retry in 15 s, then 30 s, then every 60 s; no adapter restart unless it joins first
+host    slow retry #n (never joined, N s after the hotspot info, after the verdict|no verdict; connect rc=…, last reason=…) - next in N s
+host    joined the headset hotspot N ms after the hotspot info (late, after n slow retries …)
+host    adapter not found for N s (query err=…) - reopened the WLAN handle (rc=…, #n, next in N s)
+host    adapter is back after N s
+host    no free interface, and the adapter of the previous round is not listed (probably restarting) - waiting up to N s
+host    received state=closed|query from the client / the client closed its hotspot - … / query: … / status sent state=N …
+host    a newer hotspot request (info, query or close) arrived … - this result is not reported
+client  status state=N flags=0x.. attempts=N restarts=N elapsed=N.Ns reason=0x..
+client  auto: this session has a link to the host over the hotspot (N s) - keeping it on
+client  auto: no link to this host over the hotspot after N s (N other device(s) on it do not count); N time(s) in a row - not tried again for this host for N min
+client  auto: the host reports it cannot reach the hotspot (state N: …) / … reports it will not join the hotspot by itself (state N, N s) - …
+client  auto: no link over the hotspot after N s, but the host reports it is still getting there … waiting until N s
+client  auto: no status from the host after N s - falling back to the N s wait
+client  auto: this host could not join the hotspot a short while ago (N time(s) in a row) - … / this host reported it has no way to join the hotspot (N time(s)) - …
+client  auto: switching the hotspot on in the background / softapmanager did not give a usable status - hotspot not switched on
+client  sent hotspot state=closed|query to the host
+client  app: every known host could not join the hotspot a short while ago - not switching it on ahead of the first game …
+```
+- **已知限制**：舊 server 收不到 CLOSED，照舊重試到它自己的期限；介面反覆閃斷只會讓判定往後延；已知 host 清單分不出哪些 host 會用熱點，
+  不用熱點的 host 也算一台（結果是照常開）。2.0.245 commit 訊息寫的「記住這台 host 30 分鐘」已被上面的退避表取代。
 
 ### `[VIPLE-PORTAL]` —— Linux 擷取權限對話框被拒（§PORTAL-DENY-BACKOFF，2026-11-01）
 伺服器端（`Sunshine/src/platform/linux/portalgrab.cpp`）。使用者在 XDG portal 的權限對話框按取消（回應碼 1）後，
@@ -2189,6 +2382,47 @@ pwsh scripts\benchmark\analyze_client_log.ps1 -Path C:\Users\me\Downloads -Json 
   兩個 quad（分段曲線的中央區也印這一行）。位置每幀都在變，這裡只印第一幀的。
 - client `[VIPLE-VR-GAZE] dev: --vr-synthetic-gaze - …`：送給 host 的視線是合成的（dev）。
 - `[VIPLE-VR-PASS]` 裡分塊那一趟記在 `unwarp:`（名稱含 fovea）。
+
+### VR 畫質門檻、補包擋回升與頭盔端銳化（§VR-QP-ROOM、§RATE-UNIFIED、§VR-SHARPEN，2.0.253～2.0.260）
+
+**§VR-QP-ROOM：畫質門檻（host，`Sunshine/src/vr/vr_abr_fast.h`）**
+
+- **為什麼**：「畫質飽和就停止回升（QP 20）、多到用不完就回收（QP 15）」是 11 月初在外地省流量時定的，穩態只送 16～47 Mbps；
+  在家配戴拿 Steam 內建串流並排比（影像結構相同、約 200 Mbps）糊很多。
+- **現行規則**（2.0.258 起；2.0.253 的「RTT 基線 10 ms 以內才放寬」與「回收門檻隨線路切換」都已拿掉，**不看遠近、不看 RTT**）：
+  - 回收（`quality-trim`）門檻**固定 QP 6**（`k_fast_qp_trim_roomy_x100`）。不隨線路狀況切換——切換時 trim 與 restore 會在界線上互相追打。
+  - 停止回升的門檻：線路「有餘裕」時 QP 10，否則 QP 20。
+  - 「有餘裕」＝30 秒內沒有因為網路降過碼（延遲、persistent、單向延遲、丟包率那幾種刀；開場 10 秒內的 rate-shortfall 不算），
+    **而且**沒有貼著塞車點：已套用碼率 < min(0.8 × 放寬後的塞車點, 0.9 × 原始塞車點)（塞車點安靜 30 秒後每秒放寬 0.1%、最多 +50%；
+    已在界線上要再低到 ×0.94 才算離開）。
+  - 塞車點界線 150 秒沒再塞車就失效；失效後 120 秒內又在原始塞車點的 0.85～1.15 倍附近塞車，有效期加倍（150→300→600 秒封頂）。
+    碼率爬過原始塞車點 1.15 倍沒塞、在離舊點很遠的地方塞、或很久沒塞時縮回 150 秒。
+  - 實測（在家、寬線路）：升到 100～150 Mbps、QP 3～9。線路窄的場次碼率本來就被壅塞控制壓在容量附近、QP 到不了門檻，行為不變。
+- **§RATE-UNIFIED 補包量擋回升**：補包救回的封包佔影像封包的比例，最近 3 秒平均比這條線路「平常的量」多 3 個百分點以上就停止回升（`block=repair`）；
+  單一視窗與 3 秒平均都還多 1.5 個百分點才續期（每次 2 秒）。平常的量＝時間常數 30 秒的慢速平均、上限 10%，擋著時只往下學。
+  擋滿 25 秒、期間碼率沒往上、補包量也沒降到開頭的一半以下＝補包跟碼率無關，放行；擋之前 10 秒內剛加碼 ≥ 3% 時改等 90 秒，連續這樣放行就加倍（最多 600 秒）。
+  quality-trim 收下的碼率往回補不受這條擋。
+- **RTT 嚴重膨脹改交給控制器**：舊 AIMD 的「RTT ≥ 4 倍基線且多 200 ms 連 2 輪」原本直接 ×0.75、不經控制器。現在單向延遲可用而且最近 8 張的中位數
+  比這一場最低值高不到 50 ms＝只有上行塞，不降；其餘照樣 ×0.75，但走控制器（有冷卻、記塞車點）。
+- **半速**：控制器上限＝設定碼率 ÷ 分頻（見 `[VIPLE-VR-RATE]`）。
+- **log**：`[VIPLE-VR-ABR-FAST] 10s: … block=<delay|decode|repair|quality|none> qpGate=<停>/<收>[(roomy)] … rttSevere=<降>/<略> repair=<pct>/<usual>[(hold)]`；
+  `[VIPLE-VR-ABR-FAST] repair load high: ramp held|not bitrate-related: ramp released|eased: ramp allowed again (repaired=… mean3s=…% usual=…% …)`；
+  `[VIPLE-VR-ABR-FAST] rtt-severe: rtt=… baseline=… owdExcess=…|n/a -> cut queued in the controller (x0.75, …)|-> no cut (one-way delay is normal: only the uplink is delayed) …`；
+  回收／補回仍是 `cut reason=quality-trim`／`ramp reason=quality-restore`。
+- **設定**：沒有新增設定項；跟著 `vr_abr_fast`（預設開）走，上限仍是 `vr_abr_ceiling_kbps`。
+- **已知限制**：計量線路（手機熱點分享）沒有處理——線路自己量不出「要不要省」，在那種線路上也會往 QP 10 推。
+  `vr_abr_fast.h` 開頭與幾處註解仍寫著舊的 QP 22／17／15，以常數為準。
+
+**§VR-SHARPEN：頭盔端銳化（client，`moonlight-qt/app/streaming/xr/xrvideo.cpp`）**
+
+- **為什麼**：Steam 的客戶端有銳化，我們原本沒有；同樣的影像結構並排看明顯偏糊。
+- **規則**：分塊路徑（§VR-FOVEA-TILES）對亮度做對比自適應銳化（AMD FidelityFX CAS 的寫法，只取上下左右四個鄰點），色度不動。
+  強度：注視點那一塊 0.6（`kTilesSharpGaze`）、全視野那一塊 0.3（`kTilesSharpWhole`，即「周邊減弱」）。
+  依影像的黑白位準計算（limited range 時黑＝16、白＝235 換算到實際位元深度；full range 是 0／1），結果夾在標稱範圍與五點原有範圍之內。
+  補幀（§VR-SYNTH）的分塊路徑在位移後的位置做同樣的銳化。
+- **設定**：沒有開關也沒有 CLI，分塊路徑一律開。
+- **log**：`[VIPLE-VR-FOVEA] tiles: … luma sharpened: whole view 0.30, gaze 0.60, black … white …, synthesized frames too); …`（每場一次）。
+- **已知限制**：只在分塊路徑；分段曲線（沒有分塊）的場次沒有銳化。
 
 ### `[VIPLE-VR-FOVEA]` 中央區兩圖層（§VR-FOVEA-LAYERS，2.0.118）
 - `centre layers: <w>x<h> per eye at y=<top> (u0=… a=…) under a <W>x<H> periphery`：render thread 第一次畫中央區。

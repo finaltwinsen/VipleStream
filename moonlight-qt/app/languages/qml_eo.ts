@@ -1510,6 +1510,11 @@ Se ĝi haltas pli longe, kontrolu la gastiganton — eble Steam Guard petas dufa
         <translation>Malsukcesis pravalorigi la videan malkodilon.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Malsukcesis generi la ĉifroŝlosilon de enigo.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Via gastiga programaro aŭ GPU ne subtenas PyroWave-kodadon.</translation>

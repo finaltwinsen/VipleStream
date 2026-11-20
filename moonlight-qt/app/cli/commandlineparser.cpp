@@ -666,6 +666,11 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
                                             "Overrides the size chosen in the settings for this session (off = the older warped foveation). Not saved.");
     parser.addFlagOption("vr-synthetic-gaze", "(dev) PCVR: send a synthetic gaze (saccades, pursuit, blinks) to the host instead of the tracked one, "
                                               "to exercise gaze-driven foveation with nobody wearing the headset. Not saved.");
+    parser.addChoiceOption("vr-sharpen", "(dev) PCVR with gaze tiles: headset-side luma sharpening (not saved): "
+                           "on = sharpen, luma fetched with 2 textureGather when the format allows it (default); "
+                           "offset = sharpen with the 5-sample textureOffset fetch (A/B against on); "
+                           "off = no sharpening at all, the neighbour fetch is skipped (real and synthesized frames)",
+                           QStringList() << "on" << "offset" << "off");
     parser.addValueOption("vr-unwarp-max", "(dev) PCVR with foveated encoding: largest scale of the restored image over the decoded one, 1.0-2.0 (default 2.0; not saved)");
     parser.addChoiceOption("vr-fovea-layers", "(dev) PCVR with gaze tiles: how the two image layers are given to the headset's compositor (not saved): "
                            "legacy = the whole view is a projection layer that keeps the eye positions it was rendered from; "
@@ -1111,6 +1116,11 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
     if (parser.isSet("vr-synthetic-gaze")) {
         preferences->vrSyntheticGaze = true;  // §VR-FOVEA-TILES（dev）
+    }
+    if (parser.isSet("vr-sharpen")) {
+        // §SHARPEN-COST（dev）：頭盔端亮度銳化的 A/B（off 真的跳過鄰點取樣，量銳化本身的 GPU 與功耗）
+        const QString v = parser.getChoiceOptionValue("vr-sharpen").toLower();
+        preferences->vrSharpenMode = v == "off" ? 2 : v == "offset" ? 1 : 0;
     }
     if (parser.isSet("vr-unwarp-max")) {
         // §VR-UNWARP-MAX（dev）：量「還原後的影像有多大」對頭盔功耗的影響（11-10：2.0 倍比關掉注視點多約 4 W）

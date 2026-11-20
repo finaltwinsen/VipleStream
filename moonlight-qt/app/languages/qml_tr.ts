@@ -1505,6 +1505,11 @@ Daha uzun sürerse ana bilgisayarı kontrol edin — Steam Guard 2FA onay istiyo
         <translation>Video kod çözücü başlatılamadı.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Giriş şifreleme anahtarı oluşturulamadı.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Ana bilgisayar yazılımınız veya ekran kartınız PyroWave kodlamayı desteklemiyor.</translation>

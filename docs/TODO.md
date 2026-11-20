@@ -45,110 +45,121 @@
 
 ## 各章節待辦補充
 
-### 2026-11-20 晚：第三輪細部審查（元件 × 角度，2.0.260，**未經無人驗證**）
+### 2026-11-20 深夜：瘦身第一期、Linux 更新加固、審查收尾（2.0.261，**未經無人驗證**）
 
-73 個發現、49 確認、13 爭議（`temp/specs/2026-11-20/review_1120_r3.json`），確認的全修、爭議的逐項判斷（成立的修）。單元測試 80＋37＋6＋13 全過、
-三端建得過、Windows `--help` 冷熱各一次 rc=0、host 已是 2.0.260（使用者家人在用 host 時被我部署、服務重啟了一次）。**待驗**（host 有人用時不可做）：
-2D 注入丟包、熱點兩條時間軸、VR 無人場次（`host is not producing frames` 新判斷）、從 VR 介面點擊連線的碼率。重點改動：L3 門檻改用壅塞前的抖動、
-排空期間不追加降碼、補包比例用實際經過時間、熱點請求加世代號作廢、HOTSPOT_STATUS 與 IDR 時刻補記憶體屏障（arm64）、頭盔開熱點移出主迴圈、
-REPEATED 幀的 host 判斷依 host 端時戳實際語意重做、鍵盤 Caps／數字頁只在關鍵盤時清。瘦身研究在 `temp/specs/2026-11-20/slim_all_platforms.md`，
-六項待使用者決定。
+- 瘦身第一期（`temp/specs/2026-11-20/slim_phase01_patches.md`）：Windows server 39.1 → 21.7 MiB、client 52 → 44 MiB；server 執行檔沒有除錯資訊、
+  `dxgi-info.exe` 37 → 4.9 MB 且實跑列得出顯示卡；未剝的原檔放不發佈的 `-debug.zip`（**不可解到同一個資料夾**，會蓋回未剝版）。Linux AppImage 剝主程式、
+  Linux 與頭盔不內附 `flownet.bin`、web UI 建置前清空輸出：**沒建過**（下次 CachyOS 建 client 時看 `[VIPLE-SIZE]`）。瘦身其餘六項等使用者決定。
+- Linux 更新 helper 短期加固（`security_linux_self_update.md`）：CachyOS 容器建得過、.deb 裡的 helper 與內嵌腳本逐位元組相同。**沒驗**：實際走一次更新
+  （對話框文字、降版被拒、暫存目錄清空、`--force` 同版重裝）——要在 CachyOS 輸入密碼，等使用者。拒絕降版的代價：開發版比正式版新時 `--force` 會被拒。
+- 頭盔銳化改用兩次 `textureGather`（逐位元相同、不支援時退回），新增 dev 參數 `--vr-sharpen on|offset|off`。**沒驗**：Turnip 上 gather 是否正常、
+  on 與 offset 傾印是否逐位元相同（要 VR 場次＝要 host）。
+- v2.0.260 審查（`review_ed47f9be.md`）的兩個低嚴重度問題已修；Android 相容性審查沒有問題（APK 2.0.260 建得過）；翻譯補一句；技術文件補今天的功能。
+- 測試腳本：`scripts/lib/host_guard.sh`／`HostGuard.ps1`（host 有人在用就 exit 9）套到約 55 支腳本；回歸測試框架在 `scripts/regress/`（28 案例，**一次都沒跑過**，
+  第一次用 `--dry-run`；它的本地版守衛要併到共用版）。頭盔 `/tmp` 與 host 上的舊注入腳本要重新複製。
 
-### 2026-11-20 晚：第二輪審查（修正 commit 本身＋端到端情境，server／client 2.0.259）
+### 2026-11-20 一整天（2.0.245～2.0.260，已提交；host 的 server 已是 2.0.260）：彙整
 
-23 個發現、15 確認、4 爭議（`temp/specs/2026-11-20/review_1120_r2.json`），全部處理：確認的都修了，爭議的兩項成立（RTT 新鮮度在連丟兩次
-ping 時過期、host 重啟後介面再消失）、一項不成立（舊 host 宣告多連線卻不給補包：宣告的版本都沒發佈過）。無人驗過：2D 注入丟包（補回 11、
-放棄退回 IDR 3，比 2.0.257 的 6 次少）、掃不到熱點的 host 仍第 23 秒關、VR 場次開場載入時記到 `host is not producing frames` 而不降半速、
-從 VR 介面連 1080p host 的碼率 31000→20000→31000。**沒驗**：VR 半速換算（要網路真的不穩讓它降半速）、補包擋加碼的新規則（3 秒平均、
-25／90 秒放行）、同一塞車點重撞時界線加倍、host 熱點延長快速加入期（介面晚回來）、DISABLED 紀錄過期後重試、2D 碼率「看起來像預設值」
-改嚴格之後舊設定檔的行為。另外四份設計（計量訊號、VR 單一連線上限、VPN 的 2D 補包、無人回歸測試）在同目錄，等使用者決定。
+今天 10 個 commit（`git log --oneline ddcde13b..ed47f9be`）：§IDR-FAST、§P2 第 1／2 期、§HOTSPOT-ADAPT 第 1／3 步、§FLAT-REPAIR、
+頭盔鍵盤 Caps／數字鍵盤、§VR-QP-ROOM、§VR-SHARPEN，接著三輪審查修正（2.0.258／259／260）。審查全文在本機
+`temp/specs/2026-11-20/review_1120.json`、`review_1120_r2.json`、`review_1120_r3.json`，設計文件在同目錄。2.0.260 只過了單元測試
+（80＋37＋6＋13）、三端建置與 Windows `--help` 冷熱各一次，**實機無人驗證還沒做**。下面只列還成立的事項；已修掉或被後面取代的都刪了。
 
-### 2026-11-20 晚：多 agent 審查今天的改動（server 2.0.257／client 2.0.258）
+現行規則速記（後面各項以此為準）：
+- §IDR-FAST（`video.cpp`，桌面 session）：10 秒內送出的 IDR 不到 3 張時間隔 250 ms，已送 3 張起間隔 1500 ms；兩種情況落在間隔內的
+  請求都**到期補送**，不再丟（35 ms 成對請求的規則已拿掉）；同一幀只記一張。壅塞（L2 以上且 RTT ≥ 150 ms，100 ms 解除）時改用
+  §P2 的提示間隔（L2 1500 ms、L3 最多 6 秒）。log：`[VIPLE-QLOG] IDR-DEFER f=… (… calm|burst|congested, gap … ms)`。VR 不走這裡。
+- §VR-QP-ROOM（`vr_abr_fast.h`）：回收門檻固定 QP 6；停止回升平常 QP 10，剛塞過車 30 秒或接近塞車點時 QP 20；接近塞車點的界線
+  夾在原始塞車點九成以內、有遲滯，150 秒沒再塞就失效，同一點重撞時有效期加倍（最多 600 秒）。「有餘裕」不看遠近。
+- VR 補包量擋加碼：看 3 秒平均，比這條線路平常多 3 個百分點才擋；擋滿 25 秒碼率沒動、補包沒變少就放行（擋之前剛加過碼則 90 秒）。
+  舊的 RTT 延遲降碼由快速控制器處理，單向延遲沒升高＝只有上行塞、不降。
+- §VR-SHARPEN：周邊 0.3、注視點 0.6，依影像黑白位準計算，補幀那條路也有。
 
-78 個 agent（12 區審查、每個發現兩位從不同角度嘗試推翻）＋4 份設計。31 個發現：25 確認、4 有爭議、2 推翻；全文在本機
-`temp/specs/2026-11-20/review_1120.json`，設計在同目錄 `rate_unified.md`、`vr_rate_auto_cause.md`、`vr_quality_power.md`、
-`xr2d_bitrate_recompute.md`。確認的與有爭議而成立的都修了，下面只列**還沒做／還沒驗**的：
+#### 等使用者決定（每項一行）
 
-- **使用者的要求：區網與遠端的碼率規則不可以打架，最好不靠遠近區分。** 現況：VR 與 2D 的控制器都只看線路自己量到的狀況。
-  還留著的遠近代理：(1) 封包大小（VPN → 1024／1184）；(2) 2D 經 VPN 不要求多連線 hub，所以沒有補包（拿掉會讓 VPN 場次改走沒驗過的
-  路徑）；(3) VR「沒有多連線，或只剩一條且不是頭盔轉接器」時碼率上限 75 Mbps（`stream.cpp` 的 `set_cap_kbps(min(maxBr, 75000))`）——
-  同樣寬的線路只因有沒有轉接器，上限差一倍。(3) 等使用者決定（改成會自己上調的起點？）。
-- **計量線路（手機熱點）沒有保護**：§VR-QP-ROOM 之後，頻寬夠的線路都會加到 QP 10，流量約為之前的 2～3 倍。線路自己量不出
-  「要不要省」。設計建議頭盔讀系統的計量旗標回報給 host、設定頁可蓋過（`rate_unified.md` 第 1 期）。等使用者決定。
-- §VR-QP-ROOM 現行規則（回收門檻固定 QP 6；停止回升平常 QP 10，剛塞過車 30 秒或接近塞車點時 QP 20，界線有遲滯、150 秒失效）：
-  無人場次（靜止場景）碼率穩定在 23 Mbps、QP 6，沒有擺盪。**沒驗**：真的塞過車之後的行為、中等頻寬線路。
-- VR 補包量高就不回升（比這條線路平常的量多 3 個百分點才擋、30 秒學習）、舊的 RTT 延遲降碼改由快速控制器處理（單向延遲沒升高＝
-  只有上行塞，不降）：只有單元測試（65 項過）。實機看 `[VIPLE-VR-ABR-FAST] rtt-severe:`、`repair load high`、10 秒行的 `repair=`／`rttSevere=`。
-- 自動半速分辨「host 沒出畫格」（幀號連號、Present 間隔卻超過 (div＋0.75) 格）：無人場次確認幀號拿得到（`fnBreaks=1/9536`）、
-  `lateHost=` 有數字。**沒驗**：host 真的掉格時不降半速（要在 host 製造負載；測完要在 host 上確認程式已結束）。設計第二期
-  （host 回報 presentMissed、頭盔提示「主機忙碌」）沒做。
-- 2D 的壅塞提示只在 RTT ≥ 150 ms（100 ms 解除）時介入 IDR 間隔與緊急降碼；多場並存時提示停用。**沒驗**：RTT 在 100～150 ms 附近
-  徘徊時收斂會不會太慢；兩台 2D client 同時連。
-- 2D 自動解析度／幀率的碼率重算（`refreshSessionBitrate()`）：Windows 命令列驗過 `[VIPLE-RES] final`。**沒驗**：頭盔從 VR 介面啟動連
-  1080p 的 host（今天出問題的那條路，預期 `initial 40000 -> 20000`、`XR desktop auto fps … -> 31000`）、設定頁自動估計改看旗標後的行為、
-  CLI 的 `--resolution`／`--fps`／`--bitrate` 不再存檔（其他 CLI 覆寫仍會存）。host 不可切換模式時自動 fps 要不要夾到 host 的更新率：等使用者決定。
-- 頭盔熱點：host 回報 TRYING 且看得到熱點或重啟過網卡時等到 75 秒；靜態原因延後關；App 啟動時所有已知 host 都在退避中才不開。
-  host：重啟網卡後要「介面回來滿 8 秒、自己連過、新增 2 次失敗、不在關聯中」才判定。掃不到熱點的 host 重驗仍是第 23 秒關。
-  **沒驗**：重啟後才連上的場次（要網卡閒置約一小時）、靜態原因、多台 host 的啟動判斷。
-- 銳化：周邊強度 0.3、注視點 0.6、依影像的黑白位準計算、補幀那條路也有。**待配戴**：注視點的觀感有沒有變（limited range 時中間調約少 5%）。
-- 沒做：VPN 場次的 2D 補包、舊 host 與 RTT 超過門檻時推測式丟幀回報被關掉（要改 common-c）、`abr_signals.h` 的 QP／碼率訊號也是
-  全域一份（多場並存會混）、Linux 更新 helper 的參數檢查與 TOCTOU（爭議項，1／2）、頭盔耗電沒有回饋到碼率（爭議項，1／2）。
+1. **計量線路（手機熱點）**：§VR-QP-ROOM 之後頻寬夠的線路都加到 QP 10，流量約之前的 2～3 倍。跟系統計量旗標（頭盔由 netmode 服務代讀）、
+   只給手動開關、還是先不處理；計量時回到 QP 20／15 或再加硬上限；iPhone 熱點要不要「記住這個網路」——`temp/specs/2026-11-20/metered_signal.md`、`rate_unified.md` 第 1 期。
+2. **VR 單一連線 75 Mbps 上限**（`stream.cpp` 的 `kVrSingleLinkCapKbps`；同樣寬的線路只因有沒有頭盔轉接器，上限差一倍）：改成「有證據才上調」的
+   上限、維持固定 75，或照 `rate_unified.md` 2-a；要不要等計量一起上——`temp/specs/2026-11-20/vr_single_link_cap.md`。
+3. **其餘遠近代理與碼率分期**：VR 起始碼率（快爬／記住上一場／不動）、封包大小改由 MTU 推導（取代 VPN → 1024／1184）、2D 的 FEC 從影像扣、
+   第 4 期共用估計器、刪掉預設關的 `vr_abr_experimental`——`temp/specs/2026-11-20/rate_unified.md`。
+4. **VPN 場次的 2D 補包**（現在經 VPN 不要求多連線 hub，所以沒有補包）：先做 P0＋P1 或 P0～P2、補失敗時 IDR 最多晚 80 ms 可否、在家用 tailnet
+   位址連時影像改走區網、開 MP-QUIC 的 VPN 場次怎麼處理——`temp/specs/2026-11-20/vpn_flat_repair.md`。
+5. **瘦身六項**（Aftermath、ORT／ncnn 改用到才下載、Android 壓縮存放、AppImage 的 CJK 字型、server 軟體編碼器、頭盔影片模式瀏覽器拆成選用）——
+   `temp/specs/2026-11-20/slim_all_platforms.md` §10。
+6. **host 不可切換模式時，自動 fps 要不要夾到 host 目前的更新率**——`temp/specs/2026-11-20/xr2d_bitrate_recompute.md`（第 3 期、決定事項第 4 點）。
+7. **`vr_pcvr` 不是 enabled 時 `--steamvr-driver uninstall` 做不到**（disabled 沒有 admin pipe、stub 回 orchestrator not running；目前要先在 enabled 下
+   執行再改設定，或用 `Install-VipleSteamVR.ps1 -Remove`）：要不要讓 disabled／stub 也能註銷；uninstall 從沒執行過，第一次在 host 上跑要使用者同意——
+   `temp/specs/2026-11-20/review_1120_r3.json`（爭議項）。
+8. **自動半速遇到 host 掉格**：目前只是不降（方案 A）；要不要做方案 B（重度持續時也降）、頭盔提示「主機忙碌」、第二期 `presentMissed` 欄位——
+   `temp/specs/2026-11-20/vr_rate_auto_cause.md`。
+9. **VR 畫質與耗電**：銳化要不要進設定頁（關／弱／中／強）、低電量自動降畫質（含「碼率沒有耗電回饋」的爭議項）、塞車後要不要自動退回省流量畫質、
+   耗電門檻（建議小檔位比 Steam 多 0.5 W 以內）、第 3 期做不做——`temp/specs/2026-11-20/vr_quality_power.md`。
+10. **熱點生命週期**：App 啟動時開的熱點有裝置連上後就開到 App 結束，要不要「沒有場次連續 N 分鐘就關」（S2）——`temp/specs/2026-11-20/hotspot_adaptive.md` §5.2、§8。
+11. **無人回歸測試框架**：要不要做；host 自動播測試畫面與加負載的時段、Pixel 5 當第二台 client、頭盔能不能用 ifb、2D 對「只有上行慢」也降碼
+    要不要改成分得出來——`temp/specs/2026-11-20/net_regression_harness.md`。
 
-### 2026-11-20 傍晚：使用者在家配戴，VR 比 Steam 內建串流糊（server／頭盔 2.0.253）
+#### 待無人驗證（**host 現在有家人在用，全部等 host 空閒**；驗的是 2.0.260）
 
-- **§VR-QP-ROOM**：線路有餘裕時，畫質門檻從「QP 20 停止回升、QP 15 回收」改成 10／6。配戴前後：16～47 Mbps（QP 10～18）→
-  100～150 Mbps（QP 3～9），使用者「好多了」。2.0.254 起「有餘裕」不看遠近（原本用 RTT 基線 ≤ 10 ms，使用者指出這是在分區網與遠端）：
-  只看 30 秒內沒有因為網路降過碼、而且還沒塞過車或碼率低於塞車點的八成。**沒驗**：2.0.254 的判斷沒有實際場次跑過（只有單元測試）；
-  中等頻寬的線路會不會在八成附近來回、計量線路（手機熱點）多用多少流量。
-- **§VR-SHARPEN**：頭盔端分塊路徑對亮度做對比自適應銳化（Steam 的客戶端有銳化、我們原本沒有）。配戴「差不多了」。
-  強度寫死在 shader（`mix(8, 5, 0.6)`）；**待做**：要不要做成設定、半速補幀那條路（`kTilesSynthBody`）沒有加、頭盔多耗多少電沒量
-  （11-10 量過高碼率約 11 W、Steam 約 9.4 W）。
-- **host 供不出畫格被當成網路不穩**：這次是我留在 host 的四個測試播放器佔了 CPU／GPU，合成器漏格 → 頭盔重複顯示 → 自動半速
-  （`[VIPLE-VR-RATE] network unstable: short repeats`）。兩條連線的空檔同時出現＝來源端沒出畫格。**待做**：自動半速要分得出
-  「host 沒出畫格」和「網路送不到」（host 已有 `VR-DRV timing 10s … missed=`）。
-- **2D XR 桌面從頭盔介面啟動時碼率沒重算**：先照 1440p60 算出 40 Mbps，解析度被 host 壓到 1080p、幀率之後才改成 144，碼率停在 40 Mbps
-  （命令列啟動一開始就知道 144 Hz，同場景是 62 Mbps）。`session.cpp` 的 `[VIPLE-RES] auto fps (XR desktop)` 那一段。**待修**。
-- host SteamVR 裡「The Thrill of the Fight」的每款解析度是 78%（每眼 1900），依使用者指示改成 100%（備份 `steamvr.vrsettings.bak-1120-thrill78`）。
-- 在別台機器開的程式要在那一台確認真的關掉（`scripts/benchmark/pace_run.sh` 用 SSH 的 Stop-Process 沒關掉 host 的 ffplay，`-autoexit -t` 對 lavfi 也沒生效）。**待修腳本**。
+開工前：VR 場次先跑 `bash scripts/vr/precheck_updates.sh`；頭盔沒戴才跑（`t2d.sh` 會自己擋）；在 host 開的程式（ffplay、負載程式）測完要在 host 上
+確認真的結束；`scripts/net/host_throttle.sh` 跑完一定 `off`。server 證據看 host 的 `sunshine.log.1`＋`.0`。
 
-### 2026-11-20 午：清 TODO 這一輪（server 2.0.248／client 2.0.249）
+1. **2D 注入丟包（補包＋§IDR-FAST）**：`scripts/vr/t2d.sh` 頭盔 → host，頭盔端 `tc` 注入 8% 隨機丟包與兩段式斷訊。看 server
+   `[VIPLE-FLAT-REPAIR] 10s:`／`first resend`、`[VIPLE-QLOG] IDR-DEFER`，client 丟幀數；對照 2.0.259（補回 11、退回 IDR 3）。
+   另外要讓 10 秒內第 4 張 IDR 起間隔 < 1.5 秒（斷訊間隔縮短），確認出現 `IDR-DEFER … burst, gap 1500 ms` 且之後真的補送、沒有 2 秒凍結。
+2. **§P2 真的限速**（到目前只驗過「單純加延遲」）：`host_throttle.sh on <Mbps>` 壓到低於碼率，2D 用 REMNANT。看 `[VIPLE-ABR] cong level` 的升降、
+   2.0.260 的 L3 門檻（壅塞前的抖動）是否 1～2 秒內介入、排空期間有沒有再追加降碼、`emergency-cut` 與 IDR 間隔；再用頭盔端延遲讓 RTT 停在
+   100～150 ms 附近，看收斂速度。真實 Wi-Fi 場次另外數 L1 的行數（L1 太容易進的話要調）。
+3. **§IDR-RETRY 與 §FRZ-WD-RTT**：頭盔端注入讓 RTT > 750 ms 的延遲，看 client 的 300／600／1200 ms 計時重試與 `[VIPLE-FREEZE]` 門檻放寬
+   （§FRZ-WD-RTT 從沒觸發過）；RTT 樣本被擋住時（連丟 ping）維持最多 5 秒、ENet 失效時改用多連線或 QUIC 的 RTT。
+4. **2D 碼率重算**：頭盔從 VR 介面點擊連線 1080p 的 host（2.0.259 看過 31000→20000→31000，2.0.260 又改了存回邏輯），看 client `[VIPLE-RES] final`；
+   設定頁自動估計改看旗標後的行為；CLI 的 `--resolution`／`--fps`／`--bitrate` 不再存檔、只切 4:4:4 或補幀時存回的碼率跟著重算（跑前後比對設定檔）；
+   「碼率看起來像預設值」改嚴格後，舊設定檔的行為。
+5. **VR 無人場次**（`scripts/vr/hs_run.sh`，`HS_HOST_NO_DASH=1`＋`HS_HIDE_DASH=1`）：開場載入記到 `[VIPLE-VR-RATE] host is not producing frames`、
+   不降半速；host 回應 IDR 重編上一張不算 host 沒出畫格。碼率看 `[VIPLE-VR-ABR-FAST] repair load`、`rtt-severe:`、10 秒行的 `repair=`／`rttSevere=`
+   （補包擋加碼的 3 秒平均與 25／90 秒放行）。用 `host_throttle.sh` 短暫限速做出塞車：塞過之後的 §VR-QP-ROOM 界線、同一點重撞時有效期加倍；
+   限在中等頻寬時 `quality-trim`／`quality-restore` 不在八成附近來回。目前只有靜止場景的結果（23 Mbps、QP 6、沒有擺盪）。
+6. **VR 半速相關**：(a) host 真的掉格時不降半速——在 host 製造 GPU 負載，看 client `lateHost=`、host `VR-DRV timing 10s … missed=`，測完在 host
+   確認負載程式已結束；(b) 網路真的不穩讓它降半速（限速）時，控制器上限＝設定碼率除以分頻、每刀都有效，升回全速從實際送出量逐步爬、不翻倍。
+7. **熱點兩條時間軸與邊界**（client `[VIPLE-VR-HOTSPOT]`、host `sunshine.log` 的熱點行）：連得上的 host 約 8 秒加入、熱點保留；掃不到熱點的 host
+   （開發機）第 23 秒關（2.0.260 加了請求世代號與看門狗只為送過熱點資訊的那一場續命）；host 沒有無線介面的靜態原因與下一場的 QUERY；
+   回報遺失時退回 45 秒；連開兩場時上一輪的判定有沒有漏給新場次；新舊 client／server 混用；DISABLED 紀錄過期後重試；多台 host 的 App 啟動判斷；
+   host 重啟網卡後才連上、介面晚回來時快速加入期延長（最多第 60 秒）與 §HOTSPOT-MISSING——這兩項要網卡閒置約一小時才走得到。
+8. **§FLAT-REPAIR 的邊界**：RTT 超過門檻的連線應自動不用（頭盔端加延遲）、補傳額度用完（高丟包率）、host 分批送一幀時尾端誤報；Android 與
+   CachyOS client 還沒跑過（Linux host 沒有這條路）。看 `[VIPLE-FLAT-REPAIR] first refusal`／`10s:`。
+9. **兩台 2D client 同時連**：多場並存時壅塞提示應停用；`abr_signals.h` 的訊號是全域一份，順便看會不會混。
+10. **頭盔鍵盤**：`--xr-dump-keyboard <png>`＋`--xr-test-keyboard "a{caps}ab{num}5+{close}"` 無人跑一次（Caps 與數字頁只在關鍵盤時清）；
+    host 端 numpad 鍵碼的掃描碼對應沒讀過。
+11. web 設定頁的「串流控制選單」開關、找不到頭盔時 `xrGetSystem` 的重試（只在頭盔上等）：沒實測。
 
-做了什麼（細節看 git log 與 `temp/specs/2026-11-20/` 四份設計）：§IDR-FAST 審查後的兩個修正、§P2 第 1／2 期（壅塞分級、分級降碼、
-壅塞時的 IDR 間隔、塞車點、client 等 IDR 的計時重試、凍結看門狗跟著 RTT 放寬）、§HOTSPOT-ADAPT 第一步（兩端）、§HOTSPOT-MISSING、
-§INPUT-STALL 的證據保存、一批小修正。已無人驗：三種注入丟包型態（頭盔 → host）、600 ms 注入延遲的降碼與回升、連不上熱點的 host
-（開發機）兩端的時間軸。
+#### 待配戴或使用者日常使用
 
-**還沒驗／還沒做**
-- §P2：只用「單純加延遲」驗過（不是真的頻寬不足，降碼救不回延遲，會一路降到下限）。真的限速（頭盔端要 `ifb`）還沒試；
-  L1 太容易進不進得去要看實際 Wi-Fi 場次的 `[VIPLE-ABR] cong level` 行數。第 3 期（即時延遲下界、2D 用 FRAME_FEEDBACK、QUIC-only 的 RTT）沒排。
-- §IDR-FAST：「10 秒內第 4 張起間隔 1500 ms 並到期補送」那一支，注入的間隔剛好 ≥1.5 秒，沒真的走到延後。
-- client 計時重試（`§IDR-RETRY`）只在延遲場次觸發過一次；`§FRZ-WD-RTT` 沒觸發過（要 RTT > 750 ms）。
-- §HOTSPOT-ADAPT 第 3 步（兩端的狀態回報，2.0.252）驗過兩個場景：掃不到熱點的 host 第 23 秒關熱點、host 收到 CLOSED 就停止重試；
-  連得上的 host 8 秒加入、熱點保留。**沒驗**：靜態原因（host 沒有無線介面）與下一場的 QUERY、回報遺失時退回 45 秒、連開兩場時上一輪的判定
-  有沒有漏給新場次、舊 client／舊 server 混用。`docs/vr_protocol.md` 的 wire 表還沒補這兩則訊息（0x0C、0x10、能力位元 0x800）。
-  設計文件 S1／S2／S4／S6／S7 沒做。
-- host 常駐圖示的更新摘要、QUIC `SO_RCVBUF`、Linux 更新的 polkit 政策檔（2.0.252）：都只確認建得過（.deb 裡有政策檔與 helper）；
-  摘要要等下一次 release 才看得到、polkit 對話框文字要在 Linux host 上實際走一次更新。Windows 通知的中文標題長度要實機看。
-- STUN 重量：沒做（探測 socket 綁在控制埠上，重量會和串流搶埠；乾淨的做法是由控制埠的 ENet socket 自己送 STUN，要動 `stream.cpp`）。
-- Linux x64：2.0.252 的 AppImage 與 .deb 在 CachyOS 容器建得過（順手拿掉 metainfo 裡已 404 的上游截圖網址）；沒有裝起來跑過。
-- §HOTSPOT-MISSING（host 重啟網卡後查不到介面就整場不再連）：改了但沒重現過（要網卡閒置約一小時才會走到提早重啟）。
-- §INPUT-STALL：`input-stall.log` 與兩次堆疊、等待鏈還沒看到實際輸出；2 秒停頓的來源仍未找到（三個嫌疑見設計文件）。
-- 2D 丟包補傳（§FLAT-REPAIR，2.0.251）：注入 8% 隨機丟包 5／5 補回；真實負載 5 分鐘（頭盔 → 開發機、113 fps）5 次丟包全補回、
-  沒有要 IDR、0 丟幀。**沒驗**：RTT 超過門檻的連線（應該自動不用）、補傳額度用完、host 分批送一幀時尾端誤報、Linux host（沒有這條路）、
-  Android client、CachyOS client。單網卡的區網 2D 場次現在都改走多連線的 hub 送影像，使用者日常串流要留意有沒有異狀。
-- 頭盔虛擬鍵盤的 Caps 鎖定與數字鍵盤（2.0.251）：只確認編得過、裝得上；版面與 Caps 的視覺提示待配戴看，按鍵碼可用
-  `--xr-dump-keyboard <png>`＋`--xr-test-keyboard "a{caps}ab{num}5+{close}"` 無人驗（還沒跑）。host 端 numpad 鍵碼的掃描碼對應沒讀過。
-- `--steamvr-driver uninstall`（2.0.251）：實作了、從沒執行過（會動 host 的 SteamVR 註冊，要使用者同意才試）。
-- web 設定頁的「串流控制選單」開關、找不到頭盔時 `xrGetSystem` 的重試（只在頭盔上等）：沒實測。
-- 開發機 server 的 log 要用旗標檔取：`temp\deploy_local.logs` 放著再 `schtasks /Run /TN VipleStream-DeployServerLocal`，複製到 `temp\devsrv\`。
+- §IDR-FAST 的實際體感；單網卡的區網 2D 場次現在都改走多連線 hub，日常串流要留意有沒有異狀。
+- §VR-SHARPEN：注視點的觀感（limited range 時中間調約少 5%）；碼率階梯對頭盔耗電（`vr_quality_power.md` 第 0 期，要拔線用電池電流量）。
+- 頭盔鍵盤的版面與 Caps 的視覺提示。
 
-### 2026-11-20 早：§IDR-FAST 丟包後 2 秒凍結（server 2.0.245，已提交 v2.0.245）
+#### 要等 release 或別台機器
 
-- **修正（`video.cpp` §IDR-FAST）**：平常（10 秒內送出的 IDR 不到 3 張）間隔縮到 250 ms、落在間隔內的請求到期補送（距上一張不到 35 ms
-  的成對請求仍丟掉）；10 秒內已送 3 張就回到原本的 1500 ms 與丟棄。VR session 不走這裡。
-- **待確認**：使用者實際串流的體感；丟包連發時（退回 1500 ms 那一支）還沒實測。
-- 開發機 server 部署：`schtasks /Run /TN VipleStream-DeployServerLocal`（使用者已登錄的最高權限排程工作，`scripts\setup_local_deploy_task.ps1`），
-  結果看 `temp\deploy_local_elevated.log`。
+- host 常駐圖示的更新摘要（下一次 release 才看得到）、Windows 通知的中文標題長度；Linux 更新的 polkit 對話框要在 Linux host 上實際走一次更新。
+- QUIC `SO_RCVBUF`（2.0.260 已考慮 Linux 核心加倍）只確認建得過。
+- Linux x64：2.0.252 的 AppImage 與 .deb 在 CachyOS 容器建得過，沒有裝起來跑過。
+
+#### 還沒做（不需決定，未排）
+
+- §P2 第 3 期：即時延遲下界、2D 用 FRAME_FEEDBACK、QUIC-only 的 RTT。
+- 有 hub 時推測式丟幀回報被關掉（`RtpVideoQueue.c` 的 `!queue->multiLink`，要改 common-c；也是 `vpn_flat_repair.md` P0 的前置）。
+- `abr_signals.h` 的 QP／碼率訊號是全域一份（多場並存會混）。
+- Linux 更新 helper 信任呼叫端給的 sha、各步驟各自開檔（爭議項 1／2，判定影響很小，見 `review_1120.json`）。
+- STUN 重量：探測 socket 綁在控制埠上會和串流搶埠，乾淨的做法是由控制埠的 ENet socket 自己送 STUN（要動 `stream.cpp`）。
+- §HOTSPOT-ADAPT 設計 §5.2 的 S1／S4／S6／S7（S2 在上面決定事項）。
+- §INPUT-STALL：`input-stall.log`、兩次堆疊與等待鏈還沒看到實際輸出（要等使用者平常使用時自然發生）；2 秒停頓來源未找到（嫌疑見 `small_items.md` A 節）。
+- `scripts/benchmark/pace_run.sh`：`-autoexit -t` 對 lavfi 沒效（改用 `duration=`），SSH 的 `Stop-Process` 沒關掉 host 的 ffplay，收尾要驗證。
+
+#### 備忘
+
+- 開發機 server 部署：`schtasks /Run /TN VipleStream-DeployServerLocal`（`scripts\setup_local_deploy_task.ps1` 登錄），結果看 `temp\deploy_local_elevated.log`；
+  要取 log 先放 `temp\deploy_local.logs` 旗標檔再執行，會複製到 `temp\devsrv\`。
+- host SteamVR 裡「The Thrill of the Fight」的每款解析度依使用者指示從 78% 改成 100%，備份 `steamvr.vrsettings.bak-1120-thrill78`。
 
 ### 2026-11-19 晚：使用者四台實測、§HOTSPOT-VERIFY（client 2.0.244／server 2.0.243，已提交 v2.0.245）
 - **§HOTSPOT-VERIFY**（對象是掃不到頭盔 6 GHz 熱點的 host，例如開發機）：有多連線時只認「這一場有一條已確認的連線走熱點」（`LiVrLinkOnDedicated()`），

@@ -1510,6 +1510,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>无法初始化视频解码器。</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>无法生成输入加密密钥。</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>你的主机软件或显卡不支持进行 PyroWave 编码。</translation>

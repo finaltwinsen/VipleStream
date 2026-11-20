@@ -64,6 +64,9 @@ export default defineConfig({
     root: resolve(assetsSrcPath),
     build: {
         outDir: resolve(assetsDstPath),
+        // §SLIM-2 S3：outDir 在 root 之外，Vite 預設不清，舊 hash 的 bundle 會一直累積進 server zip 與 .deb
+        // （2.0.259 的 221 個檔裡只有 24 個還被 html 引用）。這個目錄只放 Vite 的輸出與 public/，清空是安全的。
+        emptyOutDir: true,
         rollupOptions: {
             input: {
                 apps: resolve(assetsSrcPath, 'apps.html'),

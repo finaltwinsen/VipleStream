@@ -1510,6 +1510,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>دەستپێکردنی کۆدکەرەوەی ڤیدیۆ سەرکەوتوو نەبوو.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation type="unfinished" />
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>نەرمەکاڵا یان GPU ی هۆستەکەت پشتگیری ئینکۆدکردنی PyroWave ناکات.</translation>

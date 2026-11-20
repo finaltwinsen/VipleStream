@@ -1510,6 +1510,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>வீடியோ டிகோடரைத் தொடங்க முடியவில்லை.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>உள்ளீட்டு குறியாக்க விசையை உருவாக்க முடியவில்லை.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>உங்கள் ஹோஸ்ட் மென்பொருள் அல்லது GPU, PyroWave குறியாக்கத்தை ஆதரிக்கவில்லை.</translation>

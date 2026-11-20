@@ -29,7 +29,10 @@ int main(int argc, char *argv[]) {
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
   dxgi::factory1_t::pointer factory_p {};
-  const HRESULT status = CreateDXGIFactory1(IID_IDXGIFactory1, static_cast<void **>(static_cast<void *>(&factory_p)));
+  // §SLIM-2：用 __uuidof（編譯期常數）而不是外部符號 IID_IDXGIFactory1。連結清單裡 FFmpeg 排在 -ldxgi／-luuid 前面，
+  // 參照 IID_IDXGIFactory1 會讓連結器從 libavcodec.a(dxva2.o) 取得它，再經 decode.o → utils.o → allcodecs.o
+  // 把所有編碼器（x264／x265／SVT-AV1／NVENC…）拉進這支 80 行的診斷工具（37 MB → 約 5 MB）。
+  const HRESULT status = CreateDXGIFactory1(__uuidof(IDXGIFactory1),static_cast<void **>(static_cast<void *>(&factory_p)));
   dxgi::factory1_t factory {factory_p};
   if (FAILED(status)) {
     std::cout << "Failed to create DXGIFactory1 [0x"sv << util::hex(status).to_string_view() << ']' << std::endl;

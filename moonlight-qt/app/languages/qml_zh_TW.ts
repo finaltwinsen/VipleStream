@@ -1365,6 +1365,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>無法初始化視訊解碼器。</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>無法產生輸入加密金鑰。</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2115" />
         <source>The version of GeForce Experience on %1 is not supported by this build of Moonlight. You must update Moonlight to stream from %1.</source>
         <translation>此 Moonlight 版本不支援 %1 上的 GeForce Experience 版本。您必須更新 Moonlight 才能從 %1 串流傳輸。</translation>

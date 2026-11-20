@@ -1510,6 +1510,11 @@ Om det står still längre, kontrollera värden — Steam Guard kanske ber om tv
         <translation>Det gick inte att initiera videoavkodaren.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Det gick inte att generera krypteringsnyckeln för indata.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Din värdprogramvara eller GPU stöder inte PyroWave-kodning.</translation>

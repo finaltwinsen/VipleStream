@@ -8,17 +8,24 @@
   the message of this action instead of the generic "run /bin/sh as the super user" text.
   Authorization stays the same as pkexec's default: an administrator has to authenticate
   every time (auth_admin, not kept).
+
+  安全前提（2026-11-20 審查 F1／F3）：helper（src_assets/linux/misc/self-update-helper.sh）不驗套件來源，
+  套件的安裝腳本以 root 執行，所以通過這個 action 等於以 root 執行任意程式碼。
+  不可把下面三個 auth_admin 放寬成 yes 或 auth_admin_keep，也不可另加 polkit rules 或 sudoers NOPASSWD
+  放行這支 helper；要做無人值守更新，必須先在 root 那一側驗套件簽章。
+  訊息因此如實寫出「會以系統管理員權限執行套件的安裝腳本」，不寫成只是「安裝更新」。
 -->
 <policyconfig>
   <vendor>VipleStream</vendor>
   <vendor_url>https://github.com/finaltwinsen/VipleStream</vendor_url>
   <action id="@PROJECT_FQDN@.self-update">
-    <description>Install a VipleStream Server update</description>
-    <description xml:lang="zh_TW">安裝 VipleStream Server 更新</description>
-    <message>Authentication is required to install the VipleStream Server update</message>
-    <message xml:lang="zh_TW">需要驗證身分才能安裝 VipleStream Server 更新</message>
+    <description>Install a VipleStream Server update package (its install scripts run with administrator privileges)</description>
+    <description xml:lang="zh_TW">安裝 VipleStream Server 更新套件（會以系統管理員權限執行套件的安裝腳本）</description>
+    <message>Authentication is required to install a VipleStream Server update package. The package's install scripts will run with administrator privileges.</message>
+    <message xml:lang="zh_TW">需要驗證身分才能安裝 VipleStream Server 更新套件（會以系統管理員權限執行套件的安裝腳本）</message>
     <icon_name>@PROJECT_FQDN@</icon_name>
     <defaults>
+      <!-- 不可放寬成 yes 或 auth_admin_keep（見檔頭） -->
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin</allow_active>

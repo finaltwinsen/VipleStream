@@ -1510,6 +1510,11 @@ Nếu lâu hơn, hãy kiểm tra máy chủ — có thể Steam Guard 2FA đang 
         <translation>Không thể khởi tạo bộ giải mã video.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Không thể tạo khóa mã hóa đầu vào.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Phần mềm hoặc GPU của máy chủ không hỗ trợ mã hoá PyroWave.</translation>

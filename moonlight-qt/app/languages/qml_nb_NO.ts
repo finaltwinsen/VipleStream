@@ -1510,6 +1510,11 @@ Hvis det tar lenger tid, sjekk verten — Steam Guard 2FA kan be om bekreftelse.
         <translation>Klarte ikke å initialisere videodekoderen.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Klarte ikke å generere krypteringsnøkkelen for inndata.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Din verts programvare eller GPU støtter ikke PyroWave-koding.</translation>

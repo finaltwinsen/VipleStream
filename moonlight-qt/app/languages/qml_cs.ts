@@ -1510,6 +1510,11 @@ Pokud to trvá déle, zkontrolujte hostitele — může se ptát Steam Guard 2FA
         <translation>Nepodařilo se inicializovat video dekodér.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Nepodařilo se vygenerovat šifrovací klíč pro vstup.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Software nebo GPU vašeho hostitele nepodporuje enkódování PyroWave.</translation>

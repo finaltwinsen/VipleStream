@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 
 namespace abr_cong {
 
@@ -35,8 +36,15 @@ namespace abr_cong {
   constexpr double k_deep_jitter_cap_ms = 1000.0;
   /// 審查 11-20 第三輪 C01：L3 門檻用的「平常抖動」要往上調，必須先連續乾淨這麼久（＝延遲趨勢估計器的歷史視窗
   /// k_trend_history_window，10 秒）——視窗裡還有上一次壅塞的樣本時 p90−p10 就是那次壅塞的膨脹量，不是路徑的抖動。
-  /// 往下調、以及還沒有任何值時的第一筆，不必等
+  /// 往下調、以及還沒有任何值時的第一筆，不必等。審查 11-20 第四輪：往上調時採用的是最近這麼久之內乾淨輪抖動的
+  /// 最小值（不是這一輪的值），壅塞剛開始、還沒判成 L1 的那幾輪就推不高它
   constexpr std::chrono::milliseconds k_calm_jitter_settle {10000};
+  /// 審查 11-20 第四輪：第一筆平常抖動要等延遲趨勢視窗有這麼多個樣本才採用（＝abr_delay_trend.h 的
+  /// k_trend_min_samples_base；樣本少於它時估計器的抖動是 max−min，開場只有 1～2 筆時接近 0）。cong_in_t 沒有樣本數，
+  /// 以「間隔至少 k_calm_jitter_warmup_gap 的有樣本輪」計數（ENet ping 約 500 ms 一次，ABR 約 500 ms 一輪）。
+  /// 數滿之前乾淨輪的值只是暫定（跟著估計器走、不鎖住），數滿那一輪才定下來
+  constexpr int k_calm_jitter_warmup_rounds = 5;
+  constexpr std::chrono::milliseconds k_calm_jitter_warmup_gap {450};
   /// 審查 11-20 第三輪 C03：「排空中」要持續有進展——每 3 秒 RTT 要比上一個檢查點再低一成，停在平台上就不算排空
   constexpr std::chrono::milliseconds k_drain_checkpoint {3000};
   /// L3 退出：RTT 高出基線不到 300 ms，持續 2 輪且至少 k_deep_sustain（500 與 300 之間是遲滯帶）
@@ -332,7 +340,15 @@ namespace abr_cong {
       // 審查 11-20 第三輪 C01：L3 門檻用壅塞前的抖動。in.jitter_ms 是 10 秒視窗的 p90−p10，RTT 一路膨脹時它就是膨脹量本身，
       // 8 × 它永遠大於膨脹量，L3 要等視窗九成換成高原值（約 9～10 秒）才進得去。這裡只在「這一輪完全乾淨」（等級 L0、
       // 沒有暫停回升、趨勢沒過載、沒有嚴重膨脹、L3 沒鎖著）時更新：往下調、第一筆立刻採用；往上調要先連續乾淨滿
-      // k_calm_jitter_settle（視窗裡已經沒有上一次壅塞的尾巴）。還沒有值時用 0（門檻＝下限 500 ms）
+      // k_calm_jitter_settle（視窗裡已經沒有上一次壅塞的尾巴）。還沒有值時用 0（門檻＝下限 500 ms）。
+      // 審查 11-20 第四輪：(a) 往上調只採用最近 k_calm_jitter_settle 內乾淨輪的最小值——乾淨很久之後 calm_since_ 停在
+      // 很久以前，舊寫法每一輪都直接採用這一輪的值，RTT 緩慢爬升、還沒判成 L1 的那幾輪會把膨脹量學進去；
+      // (b) 第一筆要等趨勢視窗的樣本夠（k_calm_jitter_warmup_rounds）才定下來，之前只是暫定值——開場的值接近 0，抖動大的
+      // 路徑上 L1 常常閃一下、乾淨期一直數不滿 10 秒，舊寫法會讓它整場停在 0
+      if (warm_rounds_ < k_calm_jitter_warmup_rounds && (warm_rounds_ == 0 || now - warm_last_ >= k_calm_jitter_warmup_gap)) {
+        ++warm_rounds_;
+        warm_last_ = now;
+      }
       const bool calm_round = level_ == level_e::clean && !deep_latched_ && !in.hold && !in.trend_over && !in.severe;
       if (calm_round) {
         if (!calm_since_valid_) {
@@ -340,8 +356,16 @@ namespace abr_cong {
           calm_since_ = now;
         }
         const double j = std::max(0.0, in.jitter_ms);
-        if (calm_jitter_ms_ < 0.0 || j <= calm_jitter_ms_ || now - calm_since_ >= k_calm_jitter_settle) {
-          calm_jitter_ms_ = j;
+        if (warm_rounds_ < k_calm_jitter_warmup_rounds) {
+          calm_jitter_ms_ = j;  // 暖身中：暫定值跟著估計器走（往上往下都跟），不鎖住
+        } else {
+          push_calm_sample(j, now);
+          if (!calm_locked_ || j <= calm_jitter_ms_) {
+            calm_jitter_ms_ = j;  // 暖身後第一筆一律採用（定下來）；往下調立刻採用
+            calm_locked_ = true;
+          } else if (now - calm_since_ >= k_calm_jitter_settle) {
+            calm_jitter_ms_ = std::max(calm_jitter_ms_, calm_window_min());
+          }
         }
       } else {
         calm_since_valid_ = false;  // 進 L1 以上就凍結
@@ -577,6 +601,22 @@ namespace abr_cong {
       drain_at_ = {};
     }
 
+    /// 審查 11-20 第四輪：最近 k_calm_jitter_settle 內乾淨輪抖動的滑動最小值（單調佇列：由前往後時間遞增、抖動遞增）
+    void push_calm_sample(double j, steady::time_point now) {
+      while (!calm_win_.empty() && now - calm_win_.front().at > k_calm_jitter_settle) {
+        calm_win_.pop_front();
+      }
+      while (!calm_win_.empty() && calm_win_.back().j >= j) {
+        calm_win_.pop_back();
+      }
+      calm_win_.push_back({now, j});
+    }
+
+    /// push_calm_sample 之後才呼叫（佇列不會是空的）
+    double calm_window_min() const {
+      return calm_win_.empty() ? 0.0 : calm_win_.front().j;
+    }
+
     level_e level_ = level_e::clean;
     bool have_update_ = false;
     steady::time_point last_update_ {};
@@ -604,6 +644,14 @@ namespace abr_cong {
     double calm_jitter_ms_ = -1.0;  ///< C01：壅塞前的抖動（L3 門檻用）；< 0＝還沒有值
     bool calm_since_valid_ = false;
     steady::time_point calm_since_ {};  ///< 這一段連續乾淨從什麼時候開始
+    struct calm_sample_t {
+      steady::time_point at;
+      double j;
+    };
+    std::deque<calm_sample_t> calm_win_;  ///< 第四輪：最近 k_calm_jitter_settle 內乾淨輪的抖動（單調佇列）
+    int warm_rounds_ = 0;  ///< 第四輪：數到 k_calm_jitter_warmup_rounds 才把平常抖動定下來（之前是暫定值）
+    bool calm_locked_ = false;  ///< 第四輪：平常抖動已經定下來（之後往上調要等 k_calm_jitter_settle、用窗口最小值）
+    steady::time_point warm_last_ {};
 
     bool point_have_ = false;
     int point_kbps_ = 0;

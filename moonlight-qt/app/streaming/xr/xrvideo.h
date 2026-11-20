@@ -455,6 +455,10 @@ private:
     bool m_LoggedTiles = false;
     bool m_TilesVaFailed = false; // §PERF-1113：取樣座標用頂點屬性的那一版畫失敗過（或拿不到頂點格式）→ 這個 session 改回每像素算座標
     bool m_LoggedTilesVa = false;
+    // §SHARPEN-COST（2026-11-20）：真幀的亮度五點改用兩次 textureGather；不能 gather 或畫失敗過 → 這個 session 改回 textureOffset
+    bool m_TilesGatherFailed = false;
+    bool m_LoggedSharpen = false;
+    int m_SharpenMode = -1;       // --vr-sharpen（dev）：0 開（預設）、1 固定 textureOffset、2 關；−1＝還沒讀（renderTiles 第一次用到時讀）
     bool m_UnwarpFailed = false;     // 還原的 shader 或材質失敗過：這個 session 改回直接畫（影像會是壓縮過的樣子）
     pl_tex m_Tex[4] = {};       // XR thread 的 map 材質
     pl_tex m_TestTex[4] = {};   // testMap 用（m_TestMutex）

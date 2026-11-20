@@ -755,6 +755,72 @@ TEST_F(AbrCongestionTest, CalmJitterRaiseNeedsSettle) {
   }
 }
 
+// 第四輪 (a). 乾淨很久之後 RTT 緩慢爬升、還沒判成 L1 的幾輪：抖動已經被膨脹量拉大，平常抖動不可以跟著被推高
+TEST_F(AbrCongestionTest, CalmJitterIgnoresRampBeforeL1) {
+  auto t = t0;
+  for (int i = 0; i < 30; ++i, t += 500ms) {  // 15 秒乾淨，平常抖動 20 ms
+    c.update(in(160, 150, 20.0), t);
+  }
+  ASSERT_DOUBLE_EQ(c.calm_jitter_ms(), 20.0);
+  // 基線 150 ms 的遠端路徑慢慢塞：RTT 還沒到 2 倍、趨勢也還沒判過載，但視窗的 p90−p10 一路變大
+  for (int k = 1; k <= 6; ++k, t += 500ms) {
+    ASSERT_EQ(c.update(in(160 + 20 * k, 150, 20.0 + 40.0 * k), t).level, ac::level_e::clean);
+  }
+  EXPECT_DOUBLE_EQ(c.calm_jitter_ms(), 20.0);  // 舊寫法是 260（門檻被推到 1000 ms）
+  // 接著塞滿：高出 600 ms 兩輪就進 L3（門檻 max(500, 8×20)＝500）
+  c.update(in(750, 150, 600.0, true, true), t);
+  EXPECT_EQ(c.update(in(750, 150, 600.0, true, true), t + 500ms).level, ac::level_e::deep);
+
+  // 抖動真的變大、而且穩定超過 10 秒：照樣往上調
+  ac::congestion_t d;
+  auto u = t0;
+  for (int i = 0; i < 10; ++i, u += 500ms) {
+    d.update(in(160, 150, 20.0), u);
+  }
+  for (int i = 0; i < 22; ++i, u += 500ms) {
+    d.update(in(160, 150, 90.0), u);
+  }
+  EXPECT_DOUBLE_EQ(d.calm_jitter_ms(), 90.0);
+}
+
+// 第四輪 (b). 開場的抖動接近 0（趨勢視窗只有 1～2 個樣本）；抖動大的路徑上 L1 一直閃，乾淨期數不滿 10 秒，
+// 平常抖動也不可以整場停在 0
+TEST_F(AbrCongestionTest, CalmJitterWaitsForTrendSamplesAndSurvivesL1Flicker) {
+  auto t = t0;
+  // 開場兩輪：估計器的抖動是 max−min，接近 0；還沒數滿暖身輪數，只是暫定值（跟著走、不鎖住）
+  c.update(in(100, 100, 0.0), t);
+  t += 500ms;
+  c.update(in(110, 100, 10.0), t);
+  t += 500ms;
+  EXPECT_DOUBLE_EQ(c.calm_jitter_ms(), 10.0);
+  // 抖動 80 ms 的路徑，每 3 秒 L1 閃一下（暫停回升條件成立一輪）
+  for (int i = 0; i < 40; ++i, t += 500ms) {
+    const bool flick = i % 6 == 5;
+    c.update(in(flick ? 210 : 140, 100, 80.0, flick), t);
+  }
+  EXPECT_DOUBLE_EQ(c.calm_jitter_ms(), 80.0);  // 舊寫法停在 0
+  // 門檻 640：換基地台那種 RTT 跳高 600 ms 約 1 秒不進 L3
+  for (int i = 0; i < 3; ++i, t += 500ms) {
+    EXPECT_NE(c.update(in(700, 100, 80.0, true), t).level, ac::level_e::deep);
+  }
+}
+
+// 第四輪 (b). 暖身輪數要間隔夠久才算：同一瞬間插進來的多次呼叫只算一次
+TEST_F(AbrCongestionTest, CalmJitterWarmupCountsSpacedRounds) {
+  for (int i = 0; i < 10; ++i) {
+    c.update(in(42, 40, 1.0), t0 + i * 10ms);  // 算 1 輪（10 輪的話會在這裡把 1 定下來）
+  }
+  auto t = t0 + 500ms;
+  for (int i = 0; i < 3; ++i, t += 500ms) {
+    c.update(in(42, 40, 30.0), t);  // 第 2～4 輪：暫定值跟著到 30
+  }
+  EXPECT_DOUBLE_EQ(c.calm_jitter_ms(), 30.0);
+  c.update(in(42, 40, 10.0), t);  // 第 5 輪：定下來
+  t += 500ms;
+  c.update(in(42, 40, 30.0), t);  // 已經定下來、乾淨還不滿 10 秒：不往上調
+  EXPECT_DOUBLE_EQ(c.calm_jitter_ms(), 10.0);
+}
+
 // C02. 排空中收到 IDR 請求不降碼；RTT 回升後才降
 TEST_F(AbrCongestionTest, IdrRequestDoesNotCutWhileDraining) {
   c.update(in(1000, 40, 5.0, true), t0);

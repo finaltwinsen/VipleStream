@@ -1510,6 +1510,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>वीडियो डिकोडर प्रारंभ करने में विफल।</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>इनपुट एन्क्रिप्शन कुंजी बनाने में विफल।</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>आपका होस्ट सॉफ़्टवेयर या GPU PyroWave एन्कोडिंग का समर्थन नहीं करता।</translation>

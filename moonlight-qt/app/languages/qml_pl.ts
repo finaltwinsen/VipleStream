@@ -1510,6 +1510,11 @@ Jeśli trwa to dłużej, sprawdź hosta — może pojawić się monit Steam Guar
         <translation>Nie udało się zainicjować dekodera wideo.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Nie udało się wygenerować klucza szyfrowania wejścia.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Oprogramowanie lub karta graficzna komputera-gospodarza nie wspiera kodowania z użyciem kodeka PyroWave.</translation>

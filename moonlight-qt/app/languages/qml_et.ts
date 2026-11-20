@@ -1510,6 +1510,11 @@ Kui see venib kauem, kontrollige hosti — võimalik, et Steam Guardi 2FA ootab 
         <translation>Videodekooderi lähtestamine ebaõnnestus.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Sisendi krüpteerimisvõtme loomine ebaõnnestus.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Teie hosti tarkvara või GPU ei toeta PyroWave kodeerimist.</translation>

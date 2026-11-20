@@ -1505,6 +1505,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>Не вдалося ініціалізувати відеодекодер.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Не вдалося створити ключ шифрування введення.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Програмне забезпечення або GPU вашого хоста не підтримує кодування PyroWave.</translation>

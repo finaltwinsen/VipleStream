@@ -519,7 +519,8 @@ public:
     int vrFoveaTilesReq = -1;        // dev（§VR-FOVEA-TILES）：--vr-fovea-tiles off|small|medium|large → 0～3；-1＝沒指定（照下面存的 vrFoveaTiles），不存設定
     bool vrSyntheticGaze = false;    // dev（§VR-FOVEA-TILES）：--vr-synthetic-gaze，送給 host 的視線換成合成的掃視／追視（沒人戴也能量），不存設定
     bool vrUnwarpRgb = false;        // dev（§VR-UNWARP-YUV）：--vr-unwarp-rgb，還原前先轉成 RGB 中間圖（舊做法，A/B 用），不存設定
-    double vrUnwarpMax = 2.0;        // dev（§VR-UNWARP-MAX，2026-11-10）：--vr-unwarp-max，注視點還原後 swapchain 對解碼影像的放大倍率上限（1.0～2.0），不存設定
+    int  vrSharpenMode = 0;          // dev（§SHARPEN-COST，2026-11-20）：--vr-sharpen on|offset|off → 0／1／2（XrVideo 直接讀），不存設定
+    double vrUnwarpMax = 2.0;       // dev（§VR-UNWARP-MAX，2026-11-10）：--vr-unwarp-max，注視點還原後 swapchain 對解碼影像的放大倍率上限（1.0～2.0），不存設定
     int vrGpuPriority = 0;           // dev（§VR-GPU-PRIO）：--vr-gpu-priority，XR VkDevice queue 的全域優先權（0 預設／1 high／2 realtime），不存設定
     int xrTestRecenterSec = 0;       // dev（M3a X3）：bring-up 後第 N 秒自動 recenter 一次，不存設定
     bool xrTestPointer = false;       // §VR M3a X4（dev）：--xr-test-pointer，不寫入設定

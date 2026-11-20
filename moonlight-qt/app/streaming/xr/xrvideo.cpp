@@ -7,6 +7,7 @@
 #include "streaming/vr/vrframemeta.h"
 #include "streaming/video/pyrowave_decoder_bridge.h"  // §PYROWAVE-XR-ZC：PyroWaveVkInterop
 #include "streaming/video/bitstreamdump.h"  // §VR-REC：開了 --dump-bitstream 時記下每一格顯示哪一張
+#include "settings/streamingpreferences.h"  // §SHARPEN-COST：--vr-sharpen（dev）
 
 #include <QFile>
 #include <QImage>
@@ -2911,41 +2912,103 @@ color.a = fa;
 // 配戴拿 Steam 內建串流並排比，碼率追到同一級（100～150 Mbps、QP 3～9）之後仍然「差很多」；兩邊的影像結構相同
 // （每眼注視點與全視野各一塊 1152×1152），剩下的差別是 Steam 的客戶端有銳化（使用者的設定 useSharpening=true）、我們沒有。
 // 權重跟著局部對比走：平坦或已經很銳利的地方少加，不會把雜訊與壓縮瑕疵一起放大；只動亮度，色度不變。
-// 強度＝mix(8, 5, ysh) 的 ysh：0＝最弱（鄰點權重 −1/8）、1＝最強（−1/5）。跨到隔壁那一塊的鄰點只影響每塊最外圈一個像素：
+// 強度 s（鄰點權重 −1/mix(8, 5, s)）：0＝最弱（鄰點權重 −1/8）、1＝最強（−1/5）。跨到隔壁那一塊的鄰點只影響每塊最外圈一個像素：
 // 注視點那兩塊的邊緣本來就漸層到透明，全視野那兩塊的邊緣在視野最外側。
 //
 // §REVIEW-1120：三支 shader（kTilesBody、kTilesVaBody、kTilesSynthBody）共用下面這一段，真幀與補幀合成的那一張
 // 銳化完全相同（原本合成的那一張沒有銳化，半速＋補幀時畫面每隔一格交替銳利／柔和）。
-// 使用前要先宣告：yy（中心點的亮度）、yuv_pos（中心點的取樣座標）、ysh（這個像素的強度）。
-// vs_cas＝(黑位準, 1／(白位準−黑位準), 全視野那排的強度, 注視點那排的強度)，位準是貼圖取樣值的單位（見 tilesCasParams）。
+// 使用前要先宣告：yy（中心點的亮度）、ya／yb／yd／ye（上、左、右、下四個鄰點）、yk（這個像素的鄰點權重）。
+// 黑白位準與權重是編譯期常數（pl_shader_const，見 tilesCasParams／tilesCasConsts），位準是貼圖取樣值的單位：
+//   vs_cblk＝黑位準、vs_cscl＝1／(白位準−黑位準)、vs_cwht＝白位準、vs_cww／vs_cwg＝全視野／注視點那排的權重 −1／mix(8, 5, 強度)。
 //  - 收斂量照影像實際的範圍算：limited range 的黑是 16/255、白是 235/255，原本當成 0～1，貼近黑白的邊緣不會收斂、
 //    暗部幾乎用到最大強度。換成 0＝黑、1＝白再算（full range 時黑＝0、白＝1，和原本的式子相同）。
 //  - 結果夾在「標稱範圍」與「這五點原有的範圍」的聯集內：過衝不超出黑白位準，來源本來就超出的值不動。
 //  - 全視野那一排（放大約 1.9 倍顯示、量化也比較粗）強度減半，免得把壓縮的方塊邊緣一起加強；注視點那一排維持 0.6。
-static const char* const kTilesCasGlsl = R"GLSL(
+// §SHARPEN-COST（2026-11-20，推薦二）：原本 vs_cas 是 uniform，每個像素要算一次 mix 與一次倒數（-1/mix(8,5,ysh)），
+// 白位準也是 vs_cas.x + 1/vs_cas.y。改成在 CPU 先算好、以編譯期常數交給 shader：
+//   - 每個像素少一次 mix 與一次倒數；權重只剩依排選一個常數。
+//   - full range（黑＝0、比例＝1）時 (ymn − 0.0)·1.0 會被編譯器（SPIR-V 特化常數 → NIR 常數摺疊）整段消成 ymn 本身。
+//   - 數值差別只有 −1/mix(8,5,s) 改在 CPU 用 double 算再轉 float，和 GPU 上 float 算的差 < 1e-6（遠小於 1/255）。
+//   - 黑白位準整場不變，libplacebo 只會特化一次 pipeline；位準真的變了（換串流）也只是重新特化一次。
+static const char* const kTilesCasCore = R"GLSL(
 {
-    float ya = textureOffset(vs_y, yuv_pos, ivec2(0, -1)).r;
-    float yb = textureOffset(vs_y, yuv_pos, ivec2(-1, 0)).r;
-    float yd = textureOffset(vs_y, yuv_pos, ivec2(1, 0)).r;
-    float ye = textureOffset(vs_y, yuv_pos, ivec2(0, 1)).r;
     float ymn = min(yy, min(min(ya, yb), min(yd, ye)));
     float ymx = max(yy, max(max(ya, yb), max(yd, ye)));
-    float ylo = (ymn - vs_cas.x) * vs_cas.y;
-    float yhi = (ymx - vs_cas.x) * vs_cas.y;
+    float ylo = (ymn - vs_cblk) * vs_cscl;
+    float yhi = (ymx - vs_cblk) * vs_cscl;
     float yamp = sqrt(clamp(min(ylo, 1.0 - yhi) / max(yhi, 1.0e-4), 0.0, 1.0));
-    float yw = yamp * (-1.0 / mix(8.0, 5.0, ysh));
+    float yw = yamp * yk;
     yy = clamp((yy + (ya + yb + yd + ye) * yw) / (1.0 + 4.0 * yw),
-               min(ymn, vs_cas.x), max(ymx, vs_cas.x + 1.0 / vs_cas.y));
+               min(ymn, vs_cblk), max(ymx, vs_cwht));
 }
 )GLSL";
 
-// vs_gzy＝注視點那一排從第幾列像素開始（上排是全視野）
-static const std::string kTilesBody = std::string(R"GLSL(
+// 亮度五點的取法（使用前要有 yuv_pos＝中心那個像素的中心座標）。
+// 原本的寫法：中心一次 texture()、四個鄰點各一次 textureOffset()＝5 次取樣。補幀那一支（中心是小數座標的雙線性取樣）只能用這一種。
+static const char* const kTilesLumaOffset = R"GLSL(
+float yy = texture(vs_y, yuv_pos).r;
+float ya = textureOffset(vs_y, yuv_pos, ivec2(0, -1)).r;
+float yb = textureOffset(vs_y, yuv_pos, ivec2(-1, 0)).r;
+float yd = textureOffset(vs_y, yuv_pos, ivec2(1, 0)).r;
+float ye = textureOffset(vs_y, yuv_pos, ivec2(0, 1)).r;
+)GLSL";
+
+// §SHARPEN-COST（2026-11-20，推薦一）：真幀的兩支（中心點一定在像素中心）改成兩次 textureGather＝2 次取樣。
+// 記號：中心像素的整數索引是 (i, j)，yuv_pos＝((i+0.5)/W, (j+0.5)/H)。Vulkan／GLSL 的 gather 在座標 (u, v) 取
+//   i0＝floor(u·W − 0.5)、j0＝floor(v·H − 0.5)、i1＝i0+1、j1＝j0+1，回傳 (x, y, z, w)＝((i0,j1), (i1,j1), (i1,j0), (i0,j0)) 的第 0 個分量。
+//   - yg0 在 yuv_pos − 1/4 像素：u·W − 0.5＝i − 0.25 → i0＝i−1、i1＝i；j 同理 j0＝j−1、j1＝j。
+//       x＝(i−1, j)＝左（textureOffset(−1,0)）→ yb；y＝(i, j)＝中心 → yy；z＝(i, j−1)＝上（textureOffset(0,−1)）→ ya；w＝(i−1, j−1) 不用。
+//   - yg1 在 yuv_pos + 1/4 像素：u·W − 0.5＝i + 0.25 → i0＝i、i1＝i+1；j0＝j、j1＝j+1。
+//       x＝(i, j+1)＝下（textureOffset(0,1)）→ ye；z＝(i+1, j)＝右（textureOffset(1,0)）→ yd；w＝(i, j) 又是中心；y＝(i+1, j+1) 不用。
+//   「上下」是貼圖的索引方向（j−1／j+1），和 textureOffset 的 ivec2 同一個座標系，不必管畫面有沒有翻轉。
+// 偏移用 ±1/4 像素而不是剛好落在像素邊界：頂點屬性內插與硬體座標換算有捨入誤差（子像素精度保證至少 1/16 像素），
+// 落在邊界上可能選錯格；1/4 的餘量遠大於誤差，floor 的結果一定是上面那組索引。
+// 為什麼和原本逐位元相同：gather 回傳的是原始 texel，不做濾波（與 sampler 的 filter 無關，VA 版綁最近點也一樣）。
+//   原本 VA 版是最近點取樣、kTilesBody 版是雙線性但座標正好在像素中心（座標誤差遠小於子像素精度，權重量化後是 0／1），
+//   兩者取到的都是同一個 texel 的原值；textureOffset 的偏移是整數像素，取到的也是鄰格原值。
+// 邊界：每塊最外圈取到隔壁那一塊的那一圈，在貼圖裡就是相鄰的 texel，兩種寫法讀的是同一格；整張貼圖的最外圈用 CLAMP，
+//   gather 對 2×2 的每個索引各自套 address mode（夾到 0～W−1），和 textureOffset 超出時夾回邊緣取到的值相同。
+// textureGather 不帶 offset 是 GLSL 400／ESSL 310 的核心功能，不需要 shaderImageGatherExtended（那只管 textureGatherOffset(s)）。
+static const char* const kTilesLumaGather = R"GLSL(
+vec2 yq = 0.25 / vec2(textureSize(vs_y, 0));
+vec4 yg0 = textureGather(vs_y, yuv_pos - yq);
+vec4 yg1 = textureGather(vs_y, yuv_pos + yq);
+float yy = yg0.y;
+float ya = yg0.z;
+float yb = yg0.x;
+float yd = yg1.z;
+float ye = yg1.x;
+)GLSL";
+
+// --vr-sharpen off（dev）：只取中心點，四個鄰點與整段 CAS 都不進 shader（量銳化本身的成本，不是只把強度設 0）
+static const char* const kTilesLumaPlain = R"GLSL(
+float yy = texture(vs_y, yuv_pos).r;
+)GLSL";
+
+// 真幀那兩支亮度的三種取法（索引就是這個 enum）
+enum TilesLuma { kTilesLumaUseGather = 0, kTilesLumaUseOffset = 1, kTilesLumaUseOff = 2 };
+
+static std::string tilesBodyWith(const char* head, int luma, const char* tail)
+{
+    std::string s(head);
+    if (luma == kTilesLumaUseOff) {
+        s += kTilesLumaPlain;
+    }
+    else {
+        s += luma == kTilesLumaUseGather ? kTilesLumaGather : kTilesLumaOffset;
+        // vs_gzy＝注視點那一排從第幾列像素開始（上排是全視野）
+        s += "float yk = gl_FragCoord.y < vs_gzy ? vs_cww : vs_cwg;\n";
+        s += kTilesCasCore;
+    }
+    s += tail;
+    return s;
+}
+
+static const char* const kTilesHead = R"GLSL(
 vec2 lp = vs_crop.xy + gl_FragCoord.xy;
 vec2 yuv_pos = (floor(lp) + 0.5) / vs_ysz;
-float yy = texture(vs_y, yuv_pos).r;
-float ysh = gl_FragCoord.y < vs_gzy ? vs_cas.z : vs_cas.w;
-)GLSL") + kTilesCasGlsl + R"GLSL(
+)GLSL";
+static const char* const kTilesTail = R"GLSL(
 vec2 cc = texture(vs_uv, ((lp - vs_csh) / vs_rr) / vs_csz).rg;
 color = vec4(yy, cc.x, cc.y, 1.0);
 )GLSL";
@@ -2953,21 +3016,34 @@ color = vec4(yy, cc.x, cc.y, 1.0);
 // §PERF-1113：同 kTilesBody，取樣座標改由頂點屬性內插（vs_yc＝亮度、vs_cc＝色度，四個角在 renderTiles 算好）。
 // 兩個座標都是像素位置的一次函數，不必每像素算；座標直接來自內插值，GPU 也能在 shader 開始前先取樣。
 // 亮度用最近點取樣（vs_y 在這一版綁的是最近點），取到的就是原本 floor()＋0.5 的那一個像素
-static const std::string kTilesVaBody = std::string(R"GLSL(
+static const char* const kTilesVaHead = R"GLSL(
 vec2 yuv_pos = vs_yc;
-float yy = texture(vs_y, yuv_pos).r;
-float ysh = gl_FragCoord.y < vs_gzy ? vs_cas.z : vs_cas.w;
-)GLSL") + kTilesCasGlsl + R"GLSL(
+)GLSL";
+static const char* const kTilesVaTail = R"GLSL(
 vec2 cc = texture(vs_uv, vs_cc).rg;
 color = vec4(yy, cc.x, cc.y, 1.0);
 )GLSL";
 
-// §REVIEW-1120：kTilesCasGlsl 的 vs_cas。亮度貼圖的取樣值不一定是 0～1 對到黑～白：limited range 的黑白位準是 16／235
+static const std::string kTilesBody[3] = {tilesBodyWith(kTilesHead, kTilesLumaUseGather, kTilesTail),
+                                          tilesBodyWith(kTilesHead, kTilesLumaUseOffset, kTilesTail),
+                                          tilesBodyWith(kTilesHead, kTilesLumaUseOff, kTilesTail)};
+static const std::string kTilesVaBody[3] = {tilesBodyWith(kTilesVaHead, kTilesLumaUseGather, kTilesVaTail),
+                                            tilesBodyWith(kTilesVaHead, kTilesLumaUseOffset, kTilesVaTail),
+                                            tilesBodyWith(kTilesVaHead, kTilesLumaUseOff, kTilesVaTail)};
+
+// §REVIEW-1120：kTilesCasCore 的黑白位準。亮度貼圖的取樣值不一定是 0～1 對到黑～白：limited range 的黑白位準是 16／235
 // （8 bit），高位元深度放在 16 bit 貼圖裡時還有位移與比例。照 libplacebo 自己轉換時用的同一套規則換算
 // （pl_color_repr_normalize 回傳「取樣值要乘多少才是正規化的碼值」，levels 未標示時 pl_color_levels_guess 對 YCbCr 猜 limited）。
 static const float kTilesSharpGaze = 0.6f;   // 注視點那一排：11-20 配戴確認過的強度，不要動
 static const float kTilesSharpWhole = 0.3f;  // 全視野那一排：一半
-static void tilesCasParams(const pl_frame* mapped, float out[4])
+struct TilesCas {
+    float black;   // 黑位準（取樣值單位）
+    float scale;   // 1／(白位準−黑位準)
+    float white;   // 白位準（取樣值單位）＝原本 shader 裡的 black + 1/scale
+    float wWhole;  // 全視野那排的鄰點權重 −1／mix(8, 5, kTilesSharpWhole)
+    float wGaze;   // 注視點那排的鄰點權重 −1／mix(8, 5, kTilesSharpGaze)
+};
+static TilesCas tilesCasParams(const pl_frame* mapped)
 {
     pl_color_repr r = mapped->repr;
     float scale = pl_color_repr_normalize(&r);
@@ -2983,10 +3059,38 @@ static void tilesCasParams(const pl_frame* mapped, float out[4])
         black = 16.0 * unit / maxCode;
         white = 235.0 * unit / maxCode;
     }
-    out[0] = static_cast<float>(black / scale);
-    out[1] = static_cast<float>(scale / (white - black));
-    out[2] = kTilesSharpWhole;
-    out[3] = kTilesSharpGaze;
+    // GLSL mix(x, y, a)＝x·(1−a)＋y·a
+    const auto weight = [](double s) { return static_cast<float>(-1.0 / (8.0 * (1.0 - s) + 5.0 * s)); };
+    TilesCas c;
+    c.black = static_cast<float>(black / scale);
+    c.scale = static_cast<float>(scale / (white - black));
+    c.white = static_cast<float>(white / scale);  // full range：0／1 → 黑 0.0、白 1.0、比例 1.0，都是精確值
+    c.wWhole = weight(kTilesSharpWhole);
+    c.wGaze = weight(kTilesSharpGaze);
+    return c;
+}
+
+// kTilesCasCore 用的五個編譯期常數（名字不能和同一支 shader 裡其他段的變數相同）。data 指向 c，c 要活到 pl_dispatch_finish 之後
+static void tilesCasConsts(const TilesCas& c, pl_shader_const out[5])
+{
+    const char* const names[5] = {"vs_cblk", "vs_cscl", "vs_cwht", "vs_cww", "vs_cwg"};
+    const float* const data[5] = {&c.black, &c.scale, &c.white, &c.wWhole, &c.wGaze};
+    for (int i = 0; i < 5; i++) {
+        out[i] = {};
+        out[i].type = PL_VAR_FLOAT;
+        out[i].name = names[i];
+        out[i].data = data[i];
+        out[i].compile_time = true;
+    }
+}
+
+// --vr-sharpen（dev，§SHARPEN-COST）：0＝開（能 gather 就用 gather，預設）、1＝開但固定用原本的 textureOffset（A/B 用）、
+// 2＝關（真的不取鄰點、不跑 CAS；補幀那張也關）。命令列寫進 StreamingPreferences（不存設定），這裡第一次用到時讀一次
+static int readSharpenMode()
+{
+    const StreamingPreferences* prefs = StreamingPreferences::get();
+    const int m = prefs != nullptr ? prefs->vrSharpenMode : 0;
+    return m >= 0 && m <= 2 ? m : 0;
 }
 
 // 下排注視點那兩塊的邊緣漸層，照 Steam 自己的 OpenXR 客戶端（Quest 版 Steam Link，libvrlink_scene.so 內嵌的 GLSL）：
@@ -3202,19 +3306,52 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     float csh[2] = {pc.shift_x, pc.shift_y};
     float tile[2] = {static_cast<float>(tw), static_cast<float>(th)};
     float enc = m_Mode == TargetMode::SrgbMutable ? 1.0f : 0.0f;
-    float cas[4];
-    tilesCasParams(mapped, cas);  // §REVIEW-1120：銳化用的黑白位準與兩排的強度
+    const TilesCas cas = tilesCasParams(mapped);  // §REVIEW-1120：銳化用的黑白位準與兩排的權重
+    pl_shader_const casConst[5];
+    tilesCasConsts(cas, casConst);                // §SHARPEN-COST：編譯期常數（推薦二）
     float gzy = tile[1];          // 注視點那一排從這一列開始（這一趟從 swapchain 的 (0,0) 畫起）
+    if (m_SharpenMode < 0) {
+        m_SharpenMode = readSharpenMode();
+    }
     if (!m_LoggedTiles) {
         m_LoggedTiles = true;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-FOVEA] tiles: %dx%d per tile, frame %dx%d -> swapchain %dx%d 1:1 (whole view on top, gaze tiles below with a rounded soft edge; "
-                    "luma sharpened: whole view %.2f, gaze %.2f, black %.4f white %.4f, synthesized frames too); "
+                    "luma sharpened: whole view %.2f, gaze %.2f, black %.4f white %.4f, synthesized frames too%s); "
                     "luma %dx%d chroma %dx%d crop %.0f,%.0f chroma shift %.2f,%.2f sys=%d levels=%d",
                     tw, th, static_cast<int>(crop[2]), static_cast<int>(crop[3]), m_Sw.width, m_Sw.height,
-                    cas[2], cas[3], cas[0], cas[0] + 1.0f / cas[1], ty->params.w, ty->params.h,
+                    static_cast<double>(kTilesSharpWhole), static_cast<double>(kTilesSharpGaze),
+                    static_cast<double>(cas.black), static_cast<double>(cas.white),
+                    m_SharpenMode == 2 ? " - OFF by --vr-sharpen off" : "", ty->params.w, ty->params.h,
                     tc->params.w, tc->params.h, crop[0], crop[1], csh[0], csh[1], static_cast<int>(mapped->repr.sys),
                     static_cast<int>(mapped->repr.levels));
+    }
+
+    // §SHARPEN-COST：亮度五點用哪一種取法。gatherWhy＝不用 gather 的原因（nullptr＝用 gather）
+    int luma = kTilesLumaUseGather;
+    const char* gatherWhy = nullptr;
+    {
+        const pl_glsl_version& gv = m_Vulkan->gpu->glsl;
+        if (m_SharpenMode == 2) {
+            luma = kTilesLumaUseOff;
+            gatherWhy = "sharpening off (--vr-sharpen off)";
+        }
+        else if (m_SharpenMode == 1) {
+            gatherWhy = "forced by --vr-sharpen offset";
+        }
+        else if (m_TilesGatherFailed) {
+            gatherWhy = "the gather pass failed earlier in this session";
+        }
+        else if (!ty->params.format->gatherable) {
+            // libplacebo 的 pl_fmt.gatherable：這個格式能不能 textureGather()（Vulkan 後端照 format feature 判斷）
+            gatherWhy = "luma format is not gatherable";
+        }
+        else if (gv.version < (gv.gles ? 310 : 400)) {
+            gatherWhy = "GLSL version below 400 / ESSL 310";
+        }
+        if (gatherWhy != nullptr && luma == kTilesLumaUseGather) {
+            luma = kTilesLumaUseOffset;
+        }
     }
 
     // §PERF-1113：取樣座標在四個角算好、交給頂點屬性內插（見 kTilesVaBody）。順序是左上、右上、左下、右下；
@@ -3236,25 +3373,25 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     const pl_fmt vaFmt = m_TilesVaFailed ? nullptr : pl_find_vertex_fmt(m_Vulkan->gpu, PL_FMT_FLOAT, 2);
 
     // 畫一次。回傳 nullptr＝畫好了，否則是失敗的原因
-    const auto drawPass = [&](bool useVa) -> const char* {
+    // lumaSel＝亮度的取法（TilesLuma）
+    const auto drawPass = [&](bool useVa, int lumaSel) -> const char* {
+        const bool withCas = lumaSel != kTilesLumaUseOff;
         pl_shader sh = pl_dispatch_begin(m_Dp);
         pl_shader_desc dd[2] = {sampledTex("vs_y", ty), sampledTex("vs_uv", tc)};
-        // 前兩個（銳化用）兩種版本都要；後五個只有每像素算座標的那一版用
-        pl_shader_var vv[7] = {};
-        vv[0].var = pl_var_vec4("vs_cas");
-        vv[0].data = cas;
-        vv[1].var = pl_var_float("vs_gzy");
-        vv[1].data = &gzy;
-        vv[2].var = pl_var_vec4("vs_crop");
-        vv[2].data = crop;
-        vv[3].var = pl_var_vec2("vs_ysz");
-        vv[3].data = ysz;
-        vv[4].var = pl_var_vec2("vs_csz");
-        vv[4].data = csz;
-        vv[5].var = pl_var_vec2("vs_rr");
-        vv[5].data = rr;
-        vv[6].var = pl_var_vec2("vs_csh");
-        vv[6].data = csh;
+        // 前五個只有每像素算座標的那一版用；最後一個（vs_gzy，分排）只有銳化開著時用
+        pl_shader_var vv[6] = {};
+        vv[0].var = pl_var_vec4("vs_crop");
+        vv[0].data = crop;
+        vv[1].var = pl_var_vec2("vs_ysz");
+        vv[1].data = ysz;
+        vv[2].var = pl_var_vec2("vs_csz");
+        vv[2].data = csz;
+        vv[3].var = pl_var_vec2("vs_rr");
+        vv[3].data = rr;
+        vv[4].var = pl_var_vec2("vs_csh");
+        vv[4].data = csh;
+        vv[5].var = pl_var_float("vs_gzy");
+        vv[5].data = &gzy;
         for (pl_shader_var& v : vv) {
             v.dynamic = true;
         }
@@ -3265,6 +3402,10 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         cs.output = PL_SHADER_SIG_COLOR;
         cs.descriptors = dd;
         cs.num_descriptors = 2;
+        if (withCas) {
+            cs.constants = casConst;
+            cs.num_constants = 5;
+        }
         if (useVa) {
             dd[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;  // 亮度取所在的那一個像素，內插的捨入誤差不會混進隔壁
             va[0].attr.name = "vs_yc";
@@ -3275,16 +3416,16 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
                 va[0].data[i] = vaY[i];
                 va[1].data[i] = vaC[i];
             }
-            cs.body = kTilesVaBody.c_str();
+            cs.body = kTilesVaBody[lumaSel].c_str();
             cs.vertex_attribs = va;
             cs.num_vertex_attribs = 2;
-            cs.variables = vv;
-            cs.num_variables = 2;
+            cs.variables = &vv[5];
+            cs.num_variables = withCas ? 1 : 0;
         }
         else {
-            cs.body = kTilesBody.c_str();
+            cs.body = kTilesBody[lumaSel].c_str();
             cs.variables = vv;
-            cs.num_variables = 7;
+            cs.num_variables = withCas ? 6 : 5;
         }
         if (!pl_shader_custom(sh, &cs)) {
             pl_dispatch_abort(m_Dp, &sh);
@@ -3331,15 +3472,57 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         return nullptr;
     };
 
+    // §SHARPEN-COST：用 gather 畫不出來時，同一種座標來源改用原本的 textureOffset 再畫一次。那一次成功＝問題出在 gather，
+    // 整場不再試（照 m_TilesVaFailed 的做法）；兩種都失敗＝不是 gather 的問題，交給外層換座標來源（那邊仍會先試 gather）
+    const auto drawLuma = [&](bool useVa) -> const char* {
+        if (luma != kTilesLumaUseGather) {
+            return drawPass(useVa, luma);
+        }
+        const char* gErr = drawPass(useVa, kTilesLumaUseGather);
+        if (gErr == nullptr) {
+            return nullptr;
+        }
+        const char* oErr = drawPass(useVa, kTilesLumaUseOffset);
+        if (oErr != nullptr) {
+            return oErr;
+        }
+        m_TilesGatherFailed = true;
+        luma = kTilesLumaUseOffset;
+        gatherWhy = "the gather pass failed";
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-SHARPEN] tiles: textureGather pass failed (%s) - luma neighbours fetched with textureOffset for this session", gErr);
+        return nullptr;
+    };
+    // 場次開始畫成功的第一張印一次：這一場真幀的亮度用哪一種取法
+    const auto logLuma = [&]() {
+        if (m_LoggedSharpen) {
+            return;
+        }
+        m_LoggedSharpen = true;
+        if (luma == kTilesLumaUseGather) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-SHARPEN] tiles: luma centre + 4 neighbours via 2x textureGather (real frames; synthesized frames keep 5x textureOffset)");
+        }
+        else if (luma == kTilesLumaUseOffset) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-SHARPEN] tiles: luma centre + 4 neighbours via 5 samples (textureOffset): %s", gatherWhy != nullptr ? gatherWhy : "?");
+        }
+        else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-SHARPEN] tiles: luma sharpening OFF (--vr-sharpen off): centre sample only, no neighbour fetch, real and synthesized frames");
+        }
+    };
+
     if (!m_TilesVaFailed) {
         // 拿不到頂點格式也當成這一版失敗：記下來，之後每格不必再查格式表，log 也留得下原因
-        const char* vaErr = vaFmt != nullptr ? drawPass(true) : "no vertex format";
+        const char* vaErr = vaFmt != nullptr ? drawLuma(true) : "no vertex format";
         if (vaErr == nullptr) {
             if (!m_LoggedTilesVa) {
                 m_LoggedTilesVa = true;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VR-FOVEA] tiles: sampling positions come from vertex attributes (interpolated from the four corners)");
             }
+            logLuma();
             return true;
         }
         // 這一版畫不出來：整場改回每像素算座標，這一張馬上用那一版重畫（swapchain 這張還沒被寫過）
@@ -3347,11 +3530,12 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-FOVEA] tiles: vertex-attribute sampling positions not used (%s) - computing them per pixel as before", vaErr);
     }
-    const char* err = drawPass(false);
+    const char* err = drawLuma(false);
     if (err != nullptr) {
         *why = err;
         return false;
     }
+    logLuma();
     return true;
 }
 
@@ -3373,10 +3557,12 @@ color = vec4(vec3(acc / 16.0), 1.0);
 // 位移場的座標是上排（兩眼並排）的 UV。全視野那塊的像素直接對到它；注視點那塊的像素先換成它在該眼全視野裡的位置
 // （vs_org＝那一塊左上角的算圖像素、vs_rsz＝每眼算圖尺寸），位移再乘回算圖像素。取樣不離開自己那一塊。
 // 位移的平滑與物體邊緣的處理照 kCombineBody。輸出 (Y, Cb, Cr)。
-// §REVIEW-1120：取樣的是和真幀同一張亮度貼圖（還沒轉 RGB），所以在位移後的位置做同一段銳化（kTilesCasGlsl）；
+// §REVIEW-1120：取樣的是和真幀同一張亮度貼圖（還沒轉 RGB），所以在位移後的位置做同一段銳化（kTilesCasCore）；
 // 中心點是雙線性取樣，四個鄰點是同一個座標各偏一個像素。位移是 0 時（靜止畫面）取到的五點和真幀完全相同。
 // 鄰點最多跨到隔壁那一塊一個像素，和真幀一樣（sp 已經夾在自己那一塊內）。
-static const std::string kTilesSynthBody = std::string(R"GLSL(
+// §SHARPEN-COST：這一支維持 5 次 textureOffset（中心是小數座標的雙線性，五點合起來是 4×4 去掉四角，gather 要 4 次還要自己
+// 算雙線性，不划算），只套推薦二（黑白位準與權重改成編譯期常數）。[0]＝銳化、[1]＝--vr-sharpen off（只取中心點）
+static const char* const kTilesSynthHead = R"GLSL(
 vec2 fc = gl_FragCoord.xy - vec2(0.0, vs_stop);
 bool gaze = fc.y >= vs_stile.y;
 bool right = fc.x >= vs_stile.x;
@@ -3412,12 +3598,10 @@ vec2 dpx = vs_k * mv * (gaze ? vec2(2.0 * vs_rsz.x, vs_rsz.y) : tsz);
 vec2 sp = clamp(tp + dpx, vec2(0.5), vs_stile - 0.5);
 vec2 lp = vs_crop.xy + vec2(right ? vs_stile.x : 0.0, gaze ? vs_stile.y : 0.0) + sp;
 vec2 yuv_pos = lp / vs_ysz;
-float yy = texture(vs_y, yuv_pos).r;
-float ysh = gaze ? vs_cas.w : vs_cas.z;
-)GLSL") + kTilesCasGlsl + R"GLSL(
-vec2 cc = texture(vs_uv, ((lp - vs_csh) / vs_rr) / vs_csz).rg;
-color = vec4(yy, cc.x, cc.y, 1.0);
 )GLSL";
+static const std::string kTilesSynthBody[2] = {
+    std::string(kTilesSynthHead) + kTilesLumaOffset + "float yk = gaze ? vs_cwg : vs_cww;\n" + kTilesCasCore + kTilesTail,
+    std::string(kTilesSynthHead) + kTilesLumaPlain + kTilesTail};
 
 // swapchain 是兩倍高：上半再畫一次真的（renderTiles），下半畫合成的。org＝兩眼注視點那塊左上角的算圖像素
 // （Lx, Ly, Rx, Ry）。回傳 false＝真的那一半也沒畫成功；*synthOk＝下半可以拿來顯示。
@@ -3574,11 +3758,11 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
     float enc = m_Mode == TargetMode::SrgbMutable ? 1.0f : 0.0f;
     pl_shader shs = pl_dispatch_begin(m_Dp);
     pl_shader_desc dd[3] = {sampledTex("vs_y", ty), sampledTex("vs_uv", tc), sampledTex("vs_flow", m_Flow)};
-    float cas[4];
-    tilesCasParams(mapped, cas);  // §REVIEW-1120：和 renderTiles 同一組，兩種幀的銳化才會一樣
-    pl_shader_var vv[11] = {};
-    vv[10].var = pl_var_vec4("vs_cas");
-    vv[10].data = cas;
+    const TilesCas cas = tilesCasParams(mapped);  // §REVIEW-1120：和 renderTiles 同一組，兩種幀的銳化才會一樣
+    pl_shader_const casConst[5];
+    tilesCasConsts(cas, casConst);
+    const bool sharpen = m_SharpenMode != 2;      // renderTiles 已經讀過 --vr-sharpen
+    pl_shader_var vv[10] = {};
     vv[0].var = pl_var_vec4("vs_crop");
     vv[0].data = crop;
     vv[1].var = pl_var_vec2("vs_ysz");
@@ -3604,13 +3788,17 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
     }
     pl_custom_shader cs = {};
     cs.description = "viple vr synth combine";
-    cs.body = kTilesSynthBody.c_str();
+    cs.body = kTilesSynthBody[sharpen ? 0 : 1].c_str();
     cs.input = PL_SHADER_SIG_NONE;
     cs.output = PL_SHADER_SIG_COLOR;
     cs.descriptors = dd;
     cs.num_descriptors = 3;
     cs.variables = vv;
-    cs.num_variables = 11;
+    cs.num_variables = 10;
+    if (sharpen) {
+        cs.constants = casConst;
+        cs.num_constants = 5;
+    }
     if (!pl_shader_custom(shs, &cs)) {
         pl_dispatch_abort(m_Dp, &shs);
         return fail("synth shader rejected");

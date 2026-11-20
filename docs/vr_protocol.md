@@ -561,6 +561,7 @@ FEC 補不回來的 block（掉的比 parity 多）原本只能整幀放棄、�
 | `STREAM_CONFIGURATION.vrFlags` | `0x10 VIPLE_VR_SF_REPAIR_RTT`：本機用，client 願意用（決定 `LINK_HELLO` 帶不帶下一列的位元） |
 | `VIPLE_VR_LINK_DESC.flags`／`hubCaps` | `0x04 VIPLE_VR_LINK_F_REPAIR_RTT`：server 的主開關開著、補包成立、client 有帶，`hubCaps` 才有 |
 | `VIPLE_VR_LINK_DESC.flags`／`hubCaps` | `0x20 VIPLE_VR_LINK_F_REPAIR_FAR`（§VR-REPAIR-WAN，2026-11-15）：client 提出＝認得「RTT 規則只用在原本規則不補的路徑上」這個限制（提 `0x04` 的同時一律帶）。server 的 `vr_multilink_repair_rtt` 關著、`vr_multilink_repair_far` 開著（預設）、而且 client 有提時，`hubCaps` 回 `0x04｜0x20`：client 只在原本規則的門檻關著（往返＋2 ms > 一個半 hold）時用 RTT 規則，其餘照原本的規則逐位元不變。`vr_multilink_repair_rtt` 開著時只回 `0x04`。沒提 `0x20` 的舊 client 在預設設定下拿不到 `0x04`，行為不變 |
+| `VIPLE_VR_LINK_DESC.flags`／`hubCaps` | `0x40 VIPLE_VR_LINK_F_REPAIR_FLAT`（§FLAT-REPAIR，2026-11-20）：**只在平面（2D）場次**。client 在平面場次的 `LINK_HELLO` 提出＝它的 2D 接收路徑會補包；server 的平面 hub 回 `F_CTRL｜F_REPAIR｜F_REPAIR_FLAT`（`0x01｜0x02｜0x40`）三個一起才成立，少任何一個 client 就整組不用（不等、不回報）。連線上的控制訊息只載 NACK 與 REPAIR_GONE，server 收到 LOSS／LATCH 等一律忽略；`0x04`／`0x20` 的 RTT 規則在平面場次不給。VR 場次兩邊都不提、不回；舊 client 不提、舊 server 不回，行為和以前相同。規則與數值見 `docs/log_tags.md` 第 4 節「2D 丟包後的恢復」 |
 | `VIPLE_VR_TLV_NACK.flags` | bit7 `VIPLE_VR_NACK_F_RTT`＝這份回報照這一段的規則送出；低 7 bit（`VIPLE_VR_NACK_ETA_MASK`）＝client 的 `eta`，毫秒、無條件進位、1～127。只有協商了 `REPAIR_RTT` 才看 |
 
 `VIPLE_VR_TLV_NACK` 仍是 9 B，`LINK_HELLO`／`LINK_READY` 的長度不變；預先回報用既有的 `total＝0` NACK。

@@ -1510,6 +1510,11 @@ Jei užtrunka ilgiau, patikrinkite pagrindinį kompiuterį — galbūt Steam Gua
         <translation>Nepavyko inicializuoti vaizdo dekoderio.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Nepavyko sugeneruoti įvesties šifravimo rakto.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Pagrindinio kompiuterio programinė įranga arba GPU nepalaiko PyroWave kodavimo.</translation>

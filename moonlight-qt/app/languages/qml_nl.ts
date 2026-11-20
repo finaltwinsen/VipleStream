@@ -1510,6 +1510,11 @@ Als het langer blijft hangen, controleer dan de host — mogelijk vraagt Steam G
         <translation>Videodecoder initialiseren mislukt.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Versleutelingssleutel voor invoer genereren mislukt.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>De software of GPU van uw host ondersteunt het coderen van PyroWave niet.</translation>

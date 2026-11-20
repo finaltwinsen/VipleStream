@@ -13,7 +13,7 @@
  *   - 實際送達速率（on_rates）：鏈路飽和（send >= recv * 1.05）時，壅塞降碼一步落至 clamp(0.95 * recv / send, 0.5, 0.85)。
  *     §ABR-SHORTFALL（11-05）：送出比收到多 15% 以上連續 2 次回報（約 1 秒）＝已經在排隊，直接降（原因 rate-shortfall+delay），
  *     不等延遲趨勢累積（模擬頭盔實測：送 84.8／收 58.6 Mbps 時單向延遲 p95 83 ms，趨勢要約 10 秒才判 overuse）。
- *   - 畫質飽和（on_quality）：H.264/HEVC QP <= 22 時暫停回升；連續 10 秒 QP <= 15 時每 3 秒回收 5%～25%（quality-trim，QP 離門檻越遠收越多）。
+ *   - 畫質飽和（on_quality）：H.264/HEVC 的 QP 低於飽和門檻時暫停回升（§VR-QP-ROOM：平常 QP 10，剛塞過車 30 秒內或接近塞車點時 QP 20）；連續 10 秒 QP <= 6 時每 3 秒回收 5%～25%（quality-trim，QP 離門檻越遠收越多）。
  *   - 解碼負載（on_decode）：p95 > 0.85 * period 時暫停回升（有效 3 秒）；連 2 筆 > 1.0 * period 觸發 decode-overload 中度降碼。
  *   - 丟包分類：
  *     * 延遲過載時丟包（或剛脫離過載 1.5 秒內）-> 視為網路壅塞降碼（原因加註 +delay）。
@@ -856,7 +856,7 @@ namespace vr::abr {
       last_qp_x100_ = avg_qp_x100;
       last_codec_ = codec;
 
-      // 檢查是否符合 quality-trim 條件（codec != 2 且 QP <= 17）
+      // 檢查是否符合 quality-trim 條件（codec != 2 且 QP <= qp_trim_x100()，目前固定 QP 6）
       if (codec != 2 && avg_qp_x100 <= qp_trim_x100(now)) {
         if (qp_low_start_ == steady::time_point{} || gap_too_long) {
           qp_low_start_ = now;

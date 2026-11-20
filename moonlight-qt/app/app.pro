@@ -923,8 +923,11 @@ unix:!macx: {
     # 這個位置, 因為 QCoreApplication::setApplicationName("VipleStream") 後
     # QStandardPaths::AppDataLocation 會找這條路徑; AppImage mount 後路徑
     # 對應 $APPDIR/usr/share/VipleStream/rife-v4.25-lite/.
-    rife_models.files = rife_models/rife-v4.25-lite
-    rife_models.path = $$PREFIX/$$DATADIR/VipleStream/
+    # §SLIM-2 L2／F1（2026-11-20）：只裝 flownet.param（36 KB）。flownet.bin（11 MB）
+    # 和 Windows 一樣由 ensureRifeModelDir()（modelfetcher.cpp）第一次用到時下載、
+    # 驗 sha256，放在 AppLocalDataLocation/fruc_models/。AppImage 與 Flatpak 各少約 10 MB。
+    rife_models.files = rife_models/rife-v4.25-lite/flownet.param
+    rife_models.path = $$PREFIX/$$DATADIR/VipleStream/rife-v4.25-lite/
 
     INSTALLS += target desktop icons appstream rife_models
 }

@@ -195,6 +195,31 @@ server 換消費者（VR 斷線後 `/resume`、encoder 重建）時，ring 裡�
 
 手動檢查：`powershell -File <install>\steamvr\Install-VipleSteamVR.ps1 -Status`（以一般使用者身分）。
 
+### 7.1 註銷：`--steamvr-driver uninstall`（2.0.251；**還沒在實機執行過**）
+
+**為什麼**：`docs/vr_architecture.md` §3.8 的註銷路徑之一。要把 driver 從 SteamVR 拿掉（例如不再用 PCVR、或要回到原生的 Steam
+串流）時，不必手動跑 `vrpathreg` 或那支 PowerShell 腳本，由執行中的 service 以使用者身分做，和部署走同一套權限邊界。
+
+**用法**：`viplestream-server.exe --steamvr-driver uninstall [--wait-steamvr S]`（S＝0～600 秒）。只在 Windows；其他平台回
+`--steamvr-driver is not supported on this platform`。指令經 admin pipe 交給執行中的 service，CLI 等 (S＋90) 秒。
+
+**步驟**（`Sunshine/src/platform/windows/vr_admin_pipe.cpp` 的 `cmd_steamvr_driver_uninstall` → `vr_orchestrator.cpp` 的 `unregister_driver()`／`do_unregister()`，
+工作在編排執行緒上做、最多等 60 秒）：
+
+1. selftest 在跑 → 回忙碌（rc 3）；有 VR session 在跑 → rc 4。
+2. vrserver 在跑 → 結果 `steamvr-running`。沒給 `--wait-steamvr` 就直接回報（rc 1，訊息提示關掉 SteamVR 或帶 `--wait-steamvr`）；給了就每秒唯讀查一次
+   SteamVR 是否結束，期間 CLI 離開（pipe 斷）就印 `uninstall cancelled reason=client-left` 結束、**什麼都不改**；SteamVR 結束或逾時才再試一次。
+3. 有 guard marker 時還原 `steamvr.vrsettings` 的 guard。
+4. 對每一筆 viplestream 的註冊以使用者 token 跑 `vrpathreg removedriver`，再確認 `openvrpaths` 裡已經沒有。
+5. 刪掉 `<install>\config\steamvr\<ver>` 版本目錄；來源 `<install>\steamvr\` 不動。
+
+**結果與回傳碼**：`[VIPLE-VR-ADMIN] steamvr-driver uninstall result=ok|fail reason=… registrations_found=N guard_restored=0|1`。
+0＝成功（`vr_pcvr` 仍是 `enabled` 時另一行提醒：下一次 VR session 會重新部署）、1＝SteamVR 在跑或其他失敗、2＝`vr_pcvr` 沒開
+（替代做法 `Install-VipleSteamVR.ps1 -Remove`）、3＝忙碌、4＝有 session、6＝server 正在停止、7＝參數錯（`--wait-steamvr needs a number of seconds (0-600)`）。
+其他 log：`steamvr-driver uninstall requested wait_steamvr=Ns`、`steamvr-driver uninstall: SteamVR is running, waiting up to S s for it to exit`；每一步另有 `step=unregister` 的 step log。
+
+**已知限制**：沒有實機跑過；`vr_pcvr` 沒開時 service 的編排器不在，只能用腳本移除。
+
 ## 8. 測試
 
 | 層級 | 指令 | 內容 |

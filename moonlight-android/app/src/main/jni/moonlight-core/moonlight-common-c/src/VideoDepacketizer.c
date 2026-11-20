@@ -103,6 +103,12 @@ const char* vipleRecoveryRtt(uint64_t nowMs, uint32_t* rttMs) {
         return "link";
     }
 #ifdef VIPLE_MPQUIC
+    // quicGetSubflowStats 不加鎖（跟 overlay 的讀法相同），這裡刻意不拿 picoquicMutex：IO 執行緒處理封包時會長時間
+    // 持有它，VideoRecv 等鎖會卡收包；而且 teardown 會刪掉這個 mutex。不加鎖也安全：subflows[] 是 g_ctx 裡的固定陣列
+    // （不會被釋放，subflowCount 不超過 QUIC_MAX_SUBFLOWS）；rttMs／active 是對齊的 32 位元與 bool，單一指令讀寫；
+    // name 的最後一個位元組永遠是 0（新增時先 memset 再有長度上限地複製、移除時整筆結構複製），兩邊 buffer 都是
+    // LC_NETIF_MAX_NAME，非 MSVC 的 strlen＋strcpy 不會越界。最壞是 slot 正在新增／回收時讀到舊的或別條路徑的 rtt，
+    // 只影響這一次的重試下限，下一輪就更新
     if (quicIsConnected()) {
         QUIC_SUBFLOW_STATS st[QUIC_MAX_SUBFLOWS];
         float best = -1.0f;

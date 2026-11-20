@@ -1510,6 +1510,11 @@ Wenn es länger hängt, prüfen Sie den Host — möglicherweise wartet Steam Gu
         <translation>Videodecoder konnte nicht initialisiert werden.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Eingabe-Verschlüsselungsschlüssel konnte nicht erzeugt werden.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Ihre Host-Software oder Ihre GPU unterstützt die PyroWave-Kodierung nicht.</translation>

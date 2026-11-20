@@ -1510,6 +1510,11 @@ Si cela dure plus longtemps, vérifiez l'hôte : Steam Guard demande peut-être 
         <translation>Échec de l'initialisation du décodeur vidéo.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Échec de la génération de la clé de chiffrement des entrées.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>Votre logiciel hôte ou GPU ne prend pas en charge l'encodage du PyroWave.</translation>

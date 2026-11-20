@@ -388,6 +388,14 @@ arm64 Flatpak 的 release 一定要，見 §8）。建完核對產物版號和 `
 - `.deb` 的 Depends 要維持擇一寫法 `libayatana-appindicator3-1 | libappindicator3-1`
   （`Sunshine/cmake/packaging/linux.cmake`）。兩者在 Ubuntu 26.04 互相 Conflicts，兩個都硬列會讓 apt
   判定套件無法安裝；host 的自我更新也要靠這個 `.deb` 裝得起來。
+- **自我更新的 helper 與 polkit 政策（2.0.252 起）**：`Sunshine/cmake/packaging/linux.cmake` 把
+  `src_assets/linux/misc/self-update-helper.sh` 裝成 `<prefix>/libexec/viplestream-server/self-update`，政策檔
+  `packaging/linux/app.viplestream.server.self-update.policy.in` 產生後裝到 `<datadir>/polkit-1/actions/`
+  （action `app.viplestream.server.self-update`，`exec.path` 指向 helper，一律 `auth_admin`）。helper 的路徑由
+  `cmake/compile_definitions/linux.cmake` 編進 server（FreeBSD、AppImage、Flatpak 不定義，照舊用內嵌腳本）。
+  prefix 不是 `/usr` 時 polkit 不認這個政策，pkexec 只會顯示預設的授權提示。建完可用 `dpkg -c` 確認兩個檔都在 `.deb` 裡。
+- **metainfo 的截圖網址**：`app.viplestream.server.metainfo.xml` 原本沿用上游的截圖網址，失效後 `linux_build.sh` 的
+  appstream 驗證步驟會失敗；2.0.252 起拿掉 `<screenshots>`。之後要加截圖時用自己可長期存取的網址。
 
 **qmake 變數**（M2a 起；由建置腳本傳入，不要自己跑 qmake）。沒傳時一律用預設值，Windows 與 x64 AppImage 的行為和
 以前相同：

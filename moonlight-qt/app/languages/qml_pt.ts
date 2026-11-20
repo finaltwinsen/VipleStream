@@ -1510,6 +1510,11 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
         <translation>Falha ao inicializar o descodificador de vídeo.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Falha ao gerar a chave de encriptação da entrada.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>O software ou a GPU do seu host não suporta codificação PyroWave.</translation>

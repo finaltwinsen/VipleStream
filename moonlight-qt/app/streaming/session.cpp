@@ -3105,7 +3105,7 @@ private:
         // §SC-HID: Stop Steam Controller passthrough before LiStopConnection
         m_Session->m_ScHid.stop();
         m_Session->m_WifiScanBlock.stop();  // §WIFI-SCANBLOCK
-        m_Session->m_FrameHotspot.resume();  // §FRAME-HOTSPOT-PAUSE：這一場暫停過熱點就還原
+        // §FRAME-HOTSPOT-PAUSE 的 resume() 移到 LiStopConnection() 之後（見下方）
         // §VR：tracking 執行緒會呼叫 LiSendVrTracking，必須在 LiStopConnection 之前停
         m_Session->m_VrTracking.stop();
         m_Session->m_Mic.reset();  // §VR-MIC：編碼執行緒會呼叫 LiSendVrMessage，同理
@@ -3121,6 +3121,11 @@ private:
         // LiStopConnection 會等那些執行緒停，這裡再排一次才收得到最後那一批（視窗建立失敗、沒走到主迴圈排水的也靠這次）。
         // 這次執行緒已停，不設上限，避免主迴圈那次為了不被灌住而提早停、漏掉剩下的。
         freeQueuedUserPayloads(false);
+
+        // §FRAME-HOTSPOT-PAUSE：這一場暫停過熱點就還原。§REVIEW-1120 第四輪：放在 LiStopConnection 之後——
+        // resume() 可能同步等背景的「再開熱點」（最久約 19 秒），排在前面時 host 會一直對這台送影像。
+        // 它只碰 softapmanager 與標記檔；要送 host 的 HOTSPOT_STATE 只由主迴圈送（主迴圈已經停了），不依賴連線
+        m_Session->m_FrameHotspot.resume();
 
         // VipleStream: tear down the relay UDP tunnel. LiStopConnection
         // has already closed all moonlight-common-c sockets so nothing

@@ -41,6 +41,9 @@
   #include <sys/stat.h>
   #include <sys/wait.h>
   #include <unistd.h>
+
+  // 由 cmake/compile_definitions/common.cmake 從 src_assets/linux/misc/self-update-helper.sh 產生（kLinuxScript 的來源）
+  #include "self_update_helper_script.h"
 #endif
 
 using namespace std::literals;
@@ -826,30 +829,13 @@ catch {
     }
 #else
     // 內嵌的 Linux 更新腳本（以 root 執行，位於使用者 0700 的 update 目錄）。
-    //   §SELF-UPDATE (4)（2026-11-20）：.deb 另外把同一支腳本裝在固定路徑（SUNSHINE_UPDATE_HELPER，
-    //   來源 src_assets/linux/misc/self-update-helper.sh，兩邊內容要一起改）；那一支存在時優先用它，
-    //   這份內嵌的只當備援（還沒裝過帶 helper 的版本、或不是從 .deb 安裝）。
-    //   sha256 與 Package 名稱驗過才裝；apt-get --no-remove、鎖逾時、同版 --reinstall；
-    //   apt 失敗退回 dpkg -i + apt-get -f。結果檔由呼叫端（使用者身分）寫。
-    constexpr const char *kLinuxScript = R"SH(#!/bin/sh
-DEB="$1"; SHA="$2"; REINSTALL="$3"
-export DEBIAN_FRONTEND=noninteractive
-if [ "$SHA" != "-" ]; then
-  echo "$SHA  $DEB" | sha256sum -c - >/dev/null 2>&1 || { echo "sha256 mismatch"; exit 4; }
-fi
-PKG=$(dpkg-deb -f "$DEB" Package 2>/dev/null)
-[ "$PKG" = "viplestream-server" ] || { echo "unexpected package name: $PKG"; exit 4; }
-if command -v apt-get >/dev/null 2>&1; then
-  set -- -y --allow-downgrades --no-remove -o DPkg::Lock::Timeout=120
-  [ "$REINSTALL" = "1" ] && set -- "$@" --reinstall
-  apt-get install "$@" "$DEB" && exit 0
-  echo "apt-get install failed; trying dpkg -i + apt-get -f install"
-  dpkg -i "$DEB" && apt-get -f install -y --no-remove && exit 0
-  exit 2
-fi
-dpkg -i "$DEB" || exit 2
-exit 0
-)SH";
+    //   §SELF-UPDATE (4)（2026-11-20）：.deb 另外把同一支腳本裝在固定路徑（SUNSHINE_UPDATE_HELPER）；
+    //   那一支存在時優先用它，這份內嵌的只當備援（還沒裝過帶 helper 的版本、或不是從 .deb 安裝）。
+    //   審查 F7：兩者共用同一份來源 src_assets/linux/misc/self-update-helper.sh——建置時由
+    //   cmake/compile_definitions/common.cmake 包成 self_update_helper_script.h，這裡不再手寫腳本內容；
+    //   腳本行為（參數格式、複製到 root 目錄再驗再裝、拒絕降版）看那支 .sh 的檔頭。
+    //   參數：<套件絕對路徑> <64 字元小寫 sha256> <0|1：同版時是否 --reinstall>；結果檔由呼叫端（使用者身分）寫。
+    constexpr const char *kLinuxScript = kViplestreamSelfUpdateHelperScript;
 
     // fork/execvp（不經 shell、不需引號逃逸），stdout/stderr 導向 log 檔
     int run_argv(const std::vector<std::string> &argv, const std::filesystem::path &log) {
@@ -914,14 +900,36 @@ exit 0
       }
       BOOST_LOG(info) << "[VIPLE-UPDATE] installer: " << (helper.empty() ? "embedded script " + script.string() : "helper " + helper);
       const auto log = platf::appdata() / "self_update.log";
-      const std::string sha = rel.asset_sha256.empty() ? "-" : rel.asset_sha256;
+      // 審查 F5：helper 不再接受 "-"（略過驗證）。下載路徑（常駐圖示與 CLI 不帶路徑）拿不到 digest 時
+      // 在下載前就拒裝了，走到這裡一定有 digest；只有 CLI `--self-update <本機檔案>` 會清空 digest
+      // （來源由下指令的人負責）。那種情況就在這裡算出檔案目前的 sha256 傳下去：helper 複製到 root 目錄後
+      // 比對的是「server 看到的那份內容」，驗證之後才被換掉的檔案不會被裝上去。
+      std::string sha = rel.asset_sha256;
+      if (sha.empty()) {
+        sha = sha256_file(package);
+        if (sha.size() != 64) {
+          if (error) *error = "cannot compute sha256 of " + package.string();
+          return false;
+        }
+        BOOST_LOG(info) << "[VIPLE-UPDATE] local package sha256 " << sha;
+      }
       const auto cmp = compare_versions(current_version(), rel.version);
+      // 審查 F6：helper 一律拒絕降版（比對 dpkg 已安裝版本），這個旗標只決定「同版時要不要 --reinstall」。
+      // 同版重裝的明確情況：`--self-update --force` 在已是最新版時重裝最新版，以及 `--self-update <本機檔案>`
+      // （target.version＝目前版本）。`--force` 在目前版本比 latest 新（開發版）時會被 helper 以降版拒絕。
       const std::string reinstall = (cmp && *cmp == 0) ? "1" : "0";
+
+      // helper 要求絕對路徑（審查 F5）；CLI 的本機檔案可能是相對路徑，這裡先轉成絕對路徑
+      const auto package_abs = std::filesystem::absolute(package, ec);
+      if (ec || package_abs.empty()) {
+        if (error) *error = "cannot resolve package path " + package.string();
+        return false;
+      }
 
       // helper 直接當成被執行的程式（pkexec 用它的路徑找 polkit action）；備援才是 /bin/sh＋使用者目錄的腳本
       std::vector<std::string> base = helper.empty() ?
-                                        std::vector<std::string> {"/bin/sh", script.string(), package.string(), sha, reinstall} :
-                                        std::vector<std::string> {helper, package.string(), sha, reinstall};
+                                        std::vector<std::string> {"/bin/sh", script.string(), package_abs.string(), sha, reinstall} :
+                                        std::vector<std::string> {helper, package_abs.string(), sha, reinstall};
       int rc = -1;
       // 1) 免密碼 sudo：先探測，不行就不用它（避免把安裝失敗誤判成沒權限）
       if (run_argv({"sudo", "-n", "true"}, log) == 0) {
@@ -1096,6 +1104,16 @@ exit 0
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
+#ifndef _WIN32
+    // 審查 F8：下載（含重新導向）只走 https；GitHub 的 asset 一律是 https 轉到 objects.githubusercontent.com。
+  #if LIBCURL_VERSION_NUM >= 0x075500  // 7.85.0 起用字串版，舊的 bitmask 版已標為 deprecated
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+  #else
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, (long) CURLPROTO_HTTPS);
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long) CURLPROTO_HTTPS);
+  #endif
+#endif
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);

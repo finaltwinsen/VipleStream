@@ -2685,6 +2685,19 @@ not matter). Any other value is reported in the log as an invalid value and the 
             QP shows the picture is already saturated or when the headset's decoder is near its frame budget, and
             the bitrate is trimmed slowly when quality is far beyond saturation. The lower limit is a 2 Mbps
             technical floor. See also [vr_abr_ceiling_kbps](#vr_abr_ceiling_kbps).
+            <br>
+            <br>
+            Quality thresholds (§VR-QP-ROOM, since 2.0.258; they do not depend on the round-trip time or on whether
+            the client is on the local network): the ramp stops at an average QP of 10 while the link has room, and
+            at QP 20 when the bitrate was cut for network reasons in the last 30 seconds or is close to the last
+            congestion point (80% of it, never above 90% of the original point; this limit expires after
+            150 seconds without congestion, doubling up to 600 seconds when congestion keeps recurring at the same
+            point). Trimming starts only below QP 6. The ramp is also held while the share of resent packets is
+            clearly above the usual amount for this link (3-second average at least 3 percentage points higher),
+            and released after 25 seconds when that share does not follow the bitrate. A severe round-trip
+            inflation is handled by this controller with its cooldown; it does not cut when the one-way delay
+            towards the headset is normal (only the uplink is delayed). During automatic half rate the controller's
+            limit is the configured bitrate divided by the rate divider.
             Accepts `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
             When disabled, the legacy AIMD ABR behavior is retained.
             @note{Applies to VR sessions only.}
@@ -2744,7 +2757,22 @@ not matter). Any other value is reported in the log as an invalid value and the 
             named `VipleStream-Frame` (WPA2/WPA3-Personal), and initiates automatic connection.
             Accepts `enabled`/`disabled` (also `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`).
             When disabled, incoming hotspot information TLVs are acknowledged but no connection is attempted.
-            @note{Windows hosts only; on Linux hosts, a diagnostic message is logged and the TLV is ignored.}
+            Also used for regular (2D) sessions whose client sends hotspot information (§HOTSPOT-FLAT).
+            <br>
+            <br>
+            Retries (§HOTSPOT-ADAPT, since 2.0.249): if the adapter has not joined after about 22 seconds (30 when
+            another program was seen connecting the adapter in an earlier session) and several connection attempts
+            failed, the host decides that it cannot reach the hotspot and retries after 15, 30 and then every
+            60 seconds; without that decision it retries after 5, 10, 20, 40 and then every 60 seconds. An adapter
+            that never joined in the current round is not restarted (except for the one early restart 12 seconds
+            after the hotspot information arrives). If the adapter is missing after a restart, the host waits for
+            it to come back and reopens its Wi-Fi handle (§HOTSPOT-MISSING).
+            Since 2.0.252 the host reports its joining state to clients that support it (trying, joined, cannot
+            reach the hotspot, no free wireless interface, disabled, …), so the headset can switch its hotspot off
+            early; with `disabled` the host reports "disabled" and the headset does not switch its hotspot on for
+            this host until that record expires.
+            @note{Windows hosts only; on Linux hosts, a diagnostic message is logged, the TLV is ignored and the host
+            reports "unsupported" to clients that support the status report.}
         </td>
     </tr>
     <tr>
@@ -2768,7 +2796,8 @@ not matter). Any other value is reported in the log as an invalid value and the 
         <td>Description</td>
         <td colspan="2">
             VipleStream 2.0 (§VR-HOTSPOT-WATCHDOG): Recovery of the Wi-Fi adapter connected to the headset hotspot.
-            While a VR session is streaming, the host watches the adapter selected by `vr_hotspot_autoconnect`. If it stays
+            While a session that sent hotspot information is streaming, the host watches the adapter selected by
+            `vr_hotspot_autoconnect`. If it joined the hotspot in this round and then stays
             disconnected for 30 seconds, the host restarts the adapter's driver (the same as `Restart-NetAdapter`), at most
             this many times per session and at least 2 minutes apart. When the limit is reached it stops and logs that the
             adapter must be unplugged and plugged back in; repeated software resets of a USB device can leave it in a
@@ -2990,8 +3019,20 @@ not matter). Any other value is reported in the log as an invalid value and the 
             the current frame. Not yet verified on a headset at a weak-signal position.
             Sending video on a link that is too slow costs the headset radio time and degrades the other link as
             well, which is why `auto` measures first.
-            @note{Applies to VR sessions only, and only when the client supports it. With `disabled` the behaviour
-            is identical to earlier versions.}
+            <br>
+            <br>
+            Regular (2D) sessions (§FLAT-ML, since 2.0.213): when the client asks for it (the host address it uses is
+            on the same subnet as one of its network interfaces and it is not connected through a VPN), a 2D
+            session also uses one link per interface; MP-QUIC stays off for that session. Since 2.0.251 (§FLAT-REPAIR)
+            2D sessions that use these links also resend lost video packets on request when the client offers it,
+            so a client with a single network interface asks for a single link as well, unless the session would
+            use MP-QUIC. 2D resends wait at most two frame periods (8–25 ms), are used only while the measured
+            round trip fits in that wait, are limited to 15% of the video packet rate, and are refused while the
+            automatic bitrate control reports congestion with a round trip of 150 ms or more. They follow this
+            option only; [vr_multilink_ctrl](#vr_multilink_ctrl) and [vr_multilink_repair](#vr_multilink_repair)
+            apply to VR sessions.
+            @note{Applies only when the client supports it. With `disabled` the behaviour is identical to earlier
+            versions, for VR and 2D sessions alike.}
         </td>
     </tr>
     <tr>
@@ -3110,8 +3151,11 @@ not matter). Any other value is reported in the log as an invalid value and the 
             Resends are limited to 15% of the video packet rate; beyond that, and for frames that are already
             too old, the host tells the client not to wait and the normal loss recovery takes over.
             Packets recovered this way are not treated as packet loss by the automatic bitrate control; a large
-            amount of them (3% or more) only stops the bitrate from rising.
-            @note{Requires `vr_multilink_ctrl = enabled`.}
+            amount of them only stops the bitrate from rising (3% or more of the video packets; with
+            [vr_abr_fast](#vr_abr_fast), a 3-second average at least 3 percentage points above the usual amount
+            for this link, see there).
+            @note{Requires `vr_multilink_ctrl = enabled`. Applies to VR sessions; resends in regular (2D) sessions
+            follow [vr_multilink](#vr_multilink).}
         </td>
     </tr>
     <tr>

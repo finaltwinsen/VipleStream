@@ -278,6 +278,12 @@ chmod 644 "$INFO_OUT"
 [ -x /app/bin/viplestream ] || die "/app/bin/viplestream 不存在或不可執行（make install 的 PREFIX 不對？）"
 [ -f /app/share/applications/viplestream.desktop ] || die "找不到 viplestream.desktop（rename-desktop-file 會失敗）"
 [ -f /app/share/metainfo/viplestream.appdata.xml ] || die "找不到 viplestream.appdata.xml（rename-appdata-file 會失敗）"
+# §SLIM-2 F1：RIFE 只內附 flownet.param；flownet.bin 執行期由 ModelFetcher 下載（app.pro 的 rife_models）
+[ -f /app/share/VipleStream/rife-v4.25-lite/flownet.param ] || die "找不到 flownet.param（app.pro 的 rife_models 安裝規則改了？RIFE 補幀會停用）"
+if [ -e /app/share/VipleStream/rife-v4.25-lite/flownet.bin ]; then
+	log "WARN: flownet.bin 被裝進 /app 了（應該執行期下載），刪掉"
+	rm -f /app/share/VipleStream/rife-v4.25-lite/flownet.bin
+fi
 
 if command -v ldd >/dev/null 2>&1; then
 	LDD_OUT=$(ldd /app/bin/viplestream 2>&1)

@@ -1505,6 +1505,11 @@ Ha tovább elakad, nézd meg a gazdagépet — lehet, hogy a Steam Guard kétlé
         <translation>Nem sikerült inicializálni a videódekódert.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="2262" />
+        <source>Failed to generate input encryption key.</source>
+        <translation>Nem sikerült létrehozni a bemenet titkosítási kulcsát.</translation>
+    </message>
+    <message>
         <location filename="../streaming/session.cpp" line="2131" />
         <source>Your host software or GPU doesn't support encoding PyroWave.</source>
         <translation>A gazdagépen futó szoftver vagy a GPU nem támogatja az PyroWave kódolást.</translation>
