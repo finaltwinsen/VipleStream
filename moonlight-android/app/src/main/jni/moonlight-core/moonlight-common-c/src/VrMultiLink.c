@@ -2274,6 +2274,22 @@ int vrmlLocalIsDedicated(const struct sockaddr_storage* local) {
     return 0;
 }
 
+int vrmlDedicatedConfirmed(void) {
+    const uint64_t nowMs = PltGetMillis();
+    const int nLinks = linkCount;
+    VRML_ACQUIRE_FENCE();
+    for (int i = 0; i < nLinks; i++) {
+        if (!links[i].ready) {
+            continue;
+        }
+        VRML_ACQUIRE_FENCE();  // 同 vrmlLocalIsDedicated：看到 ready 再讀 ifName
+        if (isDedicatedIf(links[i].ifName) && isConfirmed(&links[i], nowMs)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int vrmlPickOtherAlive(const struct sockaddr_storage* excludeLocal, struct sockaddr_storage* serverOut,
                        struct sockaddr_storage* localOut, char* ifNameOut, int ifNameLen) {
     const uint64_t nowMs = PltGetMillis();
@@ -2976,6 +2992,7 @@ int vrmlOtherAliveServer(const struct sockaddr_storage* exclude, struct sockaddr
 int vrmlServerAddrState(const struct sockaddr_storage* addr) { (void)addr; return -1; }
 int vrmlLinkQuietMsByLocal(const struct sockaddr_storage* local) { (void)local; return -1; }
 int vrmlLocalIsDedicated(const struct sockaddr_storage* local) { (void)local; return 0; }
+int vrmlDedicatedConfirmed(void) { return 0; }
 int vrmlPickOtherAlive(const struct sockaddr_storage* excludeLocal, struct sockaddr_storage* serverOut,
                        struct sockaddr_storage* localOut, char* ifNameOut, int ifNameLen) {
     (void)excludeLocal; (void)serverOut; (void)localOut; (void)ifNameOut; (void)ifNameLen; return 0;

@@ -5622,7 +5622,8 @@ void Session::exec()
             if (SDL_TICKS_PASSED(SDL_GetTicks(), lastHotspotPollTime + 5000)) {
                 lastHotspotPollTime = SDL_GetTicks();
                 checkAndSendVrHotspotInfo();
-                m_FrameHotspot.tick();  // §FRAME-HOTSPOT-AUTO
+                // §HOTSPOT-VERIFY：有多連線時以「這一場有沒有連線走熱點」為準（熱點上有別台 host 的網卡不算）
+                m_FrameHotspot.tick(LiGetVrLinkCount() > 0 ? LiVrLinkOnDedicated() : -1);  // §FRAME-HOTSPOT-AUTO
                 if (m_HotspotFlat) {
                     // §HOTSPOT-FLAT：host 的無線網卡這時才連上熱點：把它的位址交給 MP-QUIC（已經有就不動）
                     for (const std::string& ip : FrameHotspot::peerAddresses()) {

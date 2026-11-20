@@ -55,6 +55,9 @@ int vrmlLinkQuietMsByLocal(const struct sockaddr_storage* local);
 // 找一條「已確認、本機位址不是 excludeLocal」的連線（先找不走 VPN 的）。回傳 1＝找到，填 server 位址、本機位址、介面名稱
 // 這個本機位址的那條連線是不是頭盔自己的串流轉接器熱點（專用鏈路）
 int vrmlLocalIsDedicated(const struct sockaddr_storage* local);
+// §HOTSPOT-VERIFY（2026-11-19）：有沒有一條「已確認（最近收得到 PONG）」的連線走頭盔自己的熱點介面。
+// app 用它判斷這一場的 server 是不是真的掛在熱點上（熱點上有別台裝置不算）。可從任何執行緒呼叫。
+int vrmlDedicatedConfirmed(void);
 int vrmlPickOtherAlive(const struct sockaddr_storage* excludeLocal, struct sockaddr_storage* serverOut,
                        struct sockaddr_storage* localOut, char* ifNameOut, int ifNameLen);
 // 同一份統計的另外兩個面向（只在影像接收執行緒呼叫）：哪幾條在送（bit i＝連線索引 i），以及每條連線平常比最先

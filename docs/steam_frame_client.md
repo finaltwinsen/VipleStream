@@ -362,6 +362,15 @@ manifest 必須同步修改）。
 
 測試時才需要的權限一律在命令列臨時加（`flatpak run --filesystem=<dir>:ro …`），不進 manifest。
 
+### 5.0 頭盔只裝 `stable`（2026-11-19 起）
+
+其他平台都沒有另外的開發版，頭盔也改成只裝正式版的 `stable` 分支；`dev` 分支不再安裝到頭盔。
+日常測試用 `bash moonlight-qt/scripts/build-steamframe.sh --arch aarch64 --flavor release --snapshot`：
+建置方式與正式版相同（開 LTO、branch=stable），來源改成工作樹快照（含未提交的修改），不檢查來源、不強制出 bundle。
+頭盔向建置機的倉庫增量更新（`flatpak update`），測到的就是之後發出去的建置方式。`--snapshot` 的產物不可上 release；
+正式發佈仍用不帶 `--snapshot` 的 `--flavor release`（來源必須乾淨、pin 在 HEAD）。`--flavor dev`（關 LTO）保留給 x86_64 開發機與需要快速迭代的情況。
+
+
 ### 5.1 使用者安裝：`install-steamframe.sh`（2.0.2 起）
 
 2.0.0／2.0.1 的說明只叫使用者裝 `.flatpak`，結果從收藏庫開起來 VR 模式與影片模式都停用（2026-10-20 發現：頭盔實測

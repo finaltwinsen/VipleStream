@@ -1155,6 +1155,10 @@ int LiSendVrTracking(const VIPLE_VR_TRACKING* sample);
 // app 用它判斷 tracking 上行是不是只有 session 位址那一條路可走。可從任何執行緒呼叫。
 int LiGetVrLinkCount(void);
 
+// §HOTSPOT-VERIFY：1＝有一條已確認的多連線走頭盔自己的串流轉接器熱點（這一場的 server 真的掛在熱點上）。
+// 沒啟用多連線、或沒有那樣的連線回 0。可從任何執行緒呼叫。
+int LiVrLinkOnDedicated(void);
+
 // 送一則 0x5507 VR_C2S（TLV 串，1–251 B）。reliable=true 走一般控制 channel
 // 的可靠傳輸；false 走 VR channel UNSEQUENCED。回傳 0 表示已送出。
 int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable);

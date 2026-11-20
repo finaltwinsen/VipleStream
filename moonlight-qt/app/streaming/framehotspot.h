@@ -98,6 +98,26 @@ public:
         const long owner = appPid();
         m_OwnerIsSelf = owner == static_cast<long>(getpid());
         m_Baseline.clear();
+        m_HostId = hostId;
+        m_Verified = false;
+        // §HOTSPOT-VERIFY（2026-11-19）：這台 host 不久前才等過一輪、沒有連上熱點（例如它的無線網卡掃不到頭盔的 6 GHz 熱點）：
+        // 這一場不再開著等。熱點是我們開的（App 啟動時先開、或上一台 host 留下的）就關掉——上面掛著別台的網卡也一樣，
+        // 它對這一場沒有用，卻要和家用 Wi-Fi 分同一顆無線電。kNoJoinRetryS 秒之後會再試一次
+        if (noJoinRecent(hostId)) {
+            scrub(cmd);
+            m_GaveUp = true;
+            long pid = 0;
+            std::string prevHost;
+            if (state == "2" && readOpenedMarker(&pid, &prevHost)) {
+                closeOpened("this host could not join the hotspot a short while ago");
+            }
+            else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: this host could not join the hotspot a short while ago - not switching it on "
+                            "for this session (it is tried again after %d min)", kNoJoinRetryS / 60);
+            }
+            return;
+        }
         if (state == "2") {
             scrub(cmd);
             // 已經開著。是我們之前開的（App 還在、連著玩下一個遊戲）就接手；不是就是使用者自己開的，不碰
@@ -161,18 +181,44 @@ public:
     }
 
     // §FRAME-HOTSPOT-AUTO：串流中定期呼叫（約每 5 秒）。更新標記檔的時間；等對端，等不到就關掉
-    void tick()
+    // §HOTSPOT-VERIFY（2026-11-19）：hostLinkOnHotspot＝這一場有沒有一條已確認的連線走熱點（1 有、0 沒有、-1 這一場沒有
+    // 多連線、無從判斷）。能判斷時只認它：「熱點上有裝置」可能是另一台 host 的網卡（它存著連線設定檔，熱點一出現就自己
+    // 連上來），11-19 實測連開發機的場次因此把熱點整場開著，家用 Wi-Fi 那條每隔幾秒掉一批影格。
+    void tick(int hostLinkOnHotspot = -1)
     {
 #if defined(__linux__)
         if (!m_Opened) {
             return;
         }
         touchOpenedMarker();
+        const int waitedS = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_OpenedAt).count());
+        if (hostLinkOnHotspot >= 0) {
+            if (m_Verified) {
+                return;
+            }
+            if (hostLinkOnHotspot == 1) {
+                m_Verified = true;
+                m_PeerSeen = true;
+                clearNoJoin(m_HostId);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: this session has a link to the host over the hotspot (%d s) - keeping it on", waitedS);
+                return;
+            }
+            if (waitedS >= kJoinWaitS) {
+                const int others = static_cast<int>(hotspotPeers().size());
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: no link to this host over the hotspot after %d s (%d other device(s) on it do not count)",
+                            waitedS, others);
+                writeNoJoin(m_HostId);
+                closeOpened("this host is not on the hotspot");
+                m_GaveUp = true;
+            }
+            return;
+        }
         if (m_PeerSeen) {
             return;
         }
-        const int waitedS = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_OpenedAt).count());
         if (hotspotHasNewPeer(m_Baseline)) {
             m_PeerSeen = true;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: the host joined the hotspot after %d s - keeping it on",
@@ -498,6 +544,7 @@ private:
     static constexpr const char* kApInterface = "wlanap";
     static constexpr int kJoinWaitS = 45;    // §FRAME-HOTSPOT-AUTO：自動開了之後等這台 host 多久
     static constexpr int kOwnerFreshS = 60;  // 標記檔這麼久沒被更新＝擁有者不在了
+    static constexpr int kNoJoinRetryS = 1800;  // §HOTSPOT-VERIFY：host 沒連上熱點之後，隔這麼久才再為它開一次
 
     // §FRAME-HOTSPOT-AUTO：關掉這個行程開的熱點
     void closeOpened(const char* why)
@@ -636,6 +683,60 @@ private:
     {
         const std::string path = openedMarkerPath();
         if (!path.empty()) {
+            unlink(path.c_str());
+        }
+    }
+
+    // §HOTSPOT-VERIFY：「這台 host 等過、沒有連上熱點」的紀錄（0600，沒有機密：一行 host 的 uuid，時間看檔案的 mtime）。
+    // 只記最近一台；串流行程每場都是新的行程，所以放檔案
+    static std::string noJoinPath()
+    {
+        const std::string p = markerPath();
+        return p.empty() ? p : p.substr(0, p.size() - strlen("hotspot-paused")) + "hotspot-nojoin";
+    }
+
+    static void writeNoJoin(const std::string& hostId)
+    {
+        const std::string path = noJoinPath();
+        if (path.empty() || hostId.empty()) {
+            return;
+        }
+        const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            const std::string body = hostId + "\n";
+            if (write(fd, body.data(), body.size()) < 0) {
+                // 寫不進去只是下一場會再等一輪
+            }
+            close(fd);
+        }
+    }
+
+    static bool noJoinRecent(const std::string& hostId)
+    {
+        const std::string path = noJoinPath();
+        struct stat st;
+        std::string s;
+        if (path.empty() || hostId.empty() || stat(path.c_str(), &st) != 0 || !readSmallFile(path.c_str(), &s)) {
+            return false;
+        }
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
+            s.pop_back();
+        }
+        const long ageS = static_cast<long>(time(nullptr) - st.st_mtime);
+        return s == hostId && ageS >= 0 && ageS < kNoJoinRetryS;
+    }
+
+    static void clearNoJoin(const std::string& hostId)
+    {
+        const std::string path = noJoinPath();
+        std::string s;
+        if (path.empty() || !readSmallFile(path.c_str(), &s)) {
+            return;
+        }
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
+            s.pop_back();
+        }
+        if (s == hostId) {
             unlink(path.c_str());
         }
     }
@@ -898,6 +999,8 @@ private:
     bool m_Opened = false;     // §FRAME-HOTSPOT-AUTO：這個行程把熱點開起來了
     bool m_PeerSeen = false;
     bool m_GaveUp = false;     // 這一場試過、沒有成功：不再試
+    bool m_Verified = false;   // §HOTSPOT-VERIFY：這一場確認過有一條連線走熱點
+    std::string m_HostId;      // 這一場的 host（uuid）
     bool m_OwnerIsSelf = true; // 熱點記在這個行程名下（不是 App 的子行程）：這一場結束就關
     std::vector<std::string> m_Baseline;  // 換 host 時上一台留在熱點上的裝置，不算這一台連上
     std::chrono::steady_clock::time_point m_OpenedAt;

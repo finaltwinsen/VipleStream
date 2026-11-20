@@ -1483,6 +1483,10 @@ int LiGetVrLinkCount(void) {
     return vrmlLinkCount();
 }
 
+int LiVrLinkOnDedicated(void) {
+    return vrmlDedicatedConfirmed();
+}
+
 int LiSendVrTracking(const VIPLE_VR_TRACKING* sample) {
     uint64_t now;
 

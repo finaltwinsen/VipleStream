@@ -3,6 +3,7 @@
  * @brief Definitions for video.
  */
 // standard includes
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bitset>
@@ -2450,6 +2451,12 @@ namespace video {
   // cooldown 縮到 300 ms，避免恢復被卡住一秒半。
   constexpr std::chrono::milliseconds kDesktopIdrCooldownMs {1500};
   constexpr std::chrono::milliseconds kVrIdrCooldownMs {300};
+  // §IDR-FAST（2026-11-20）：桌面 session 平常時（最近 kIdrCalmWindow 內送出的 IDR 不到 kIdrCalmMax 張）的最短間隔，
+  // 以及「落在間隔內的請求延後補送」的規則。說明見 encode_run 的 §S.19 註解。
+  constexpr std::chrono::milliseconds kDesktopIdrFastGapMs {250};
+  constexpr std::chrono::milliseconds kIdrTwinWindowMs {35};
+  constexpr std::chrono::seconds kIdrCalmWindow {10};
+  constexpr int kIdrCalmMax = 3;
 
   namespace {
     /**
@@ -2624,6 +2631,26 @@ namespace video {
     // §VR：cooldown 改成具名常數，依 vrProfile 選用（桌面 1500 ms 與舊版相同，VR 300 ms）。
     const auto idr_cooldown = config.vrProfile ? kVrIdrCooldownMs : kDesktopIdrCooldownMs;
     auto last_idr_emit = std::chrono::steady_clock::now() - idr_cooldown;
+    // §IDR-FAST（2026-11-20）：上面「被丟掉的請求最多多等 1 秒」在零星丟包時不成立。頭盔→開發機實測（Wi-Fi、
+    // 120 fps）：一張丟了 → IDR 送出 → 45～60 ms 後同一陣丟包又丟一張 → 這次請求落在 1500 ms 冷卻裡被丟掉 →
+    // client 等滿連續丟幀上限（約 1.06 秒）再要，還在冷卻裡、又被丟掉 → 第三次才過，畫面凍結 2.3 秒；網路上
+    // 實際只丟了 2 張。所以桌面 session 分兩種狀況：
+    //   平常（最近 kIdrCalmWindow 內送出的 IDR 不到 kIdrCalmMax 張）：間隔縮到 kDesktopIdrFastGapMs，落在間隔內的
+    //   請求不丟、間隔一到就補送（250 ms 也剛好等那一陣丟包過去）。距離上一張不到 kIdrTwinWindowMs 的請求仍然丟掉：
+    //   那是 client 成對送出的另一半（上面說的 5～30 ms），補送只會多一張。
+    //   丟包連發（視窗內已經送了 kIdrCalmMax 張）：回到原本的 1500 ms、請求照舊丟掉，§S.19 要擋的 IDR 風暴不變。
+    // VR session 不走這裡（有自己的 300 ms 與 intra refresh）。
+    const bool idr_fast = !config.vrProfile;
+    std::array<std::chrono::steady_clock::time_point, kIdrCalmMax> idr_recent;
+    idr_recent.fill(std::chrono::steady_clock::now() - std::chrono::hours(1));
+    bool idr_deferred = false;
+    const auto idr_calm = [&](std::chrono::steady_clock::time_point now) {
+      // idr_recent 存最近 kIdrCalmMax 張的送出時間；最舊的那張超過視窗＝視窗內不到 kIdrCalmMax 張
+      return idr_fast && now - *std::min_element(idr_recent.begin(), idr_recent.end()) > kIdrCalmWindow;
+    };
+    const auto idr_note_emit = [&](std::chrono::steady_clock::time_point now) {
+      *std::min_element(idr_recent.begin(), idr_recent.end()) = now;
+    };
     constexpr int STARTUP_IDR_RETRY_FRAME = 16;  // §K.14（見下方）
     // §S.19 診斷：標示本 encoder 生命期的 frame_nr 起點，一眼看出
     // §K.14 會不會再觸發（encoder 重建後 frame_nr 已 >16 就不會）。
@@ -2731,14 +2758,17 @@ namespace video {
       if (requested_idr_frame) {
         // VipleStream: §S.19 cooldown gate (see top of run() for rationale).
         auto now = std::chrono::steady_clock::now();
-        if (now >= last_idr_emit + idr_cooldown) {
+        const bool calm = idr_calm(now);
+        if (now >= last_idr_emit + (calm ? kDesktopIdrFastGapMs : idr_cooldown)) {
           session->request_idr_frame();
+          idr_deferred = false;
           // §IDR-OPEN：f=1 是 capture() 開場自己要的那一張（frame_nr 跨 encoder 重建累加，1 只出現在 session 的第一個
           // encoder）。這時 client 的解碼器還沒建好、一定解不到；讓它啟動冷卻的話，client 建好解碼器後要的第一張 IDR
           // 會落在冷卻裡被丟掉（2D 1.5 s）。冷卻要擋的是丟包時成串的請求，不是 host 自己發的這一張。
           const bool opening_idr = frame_nr == 1;
           if (!opening_idr) {
             last_idr_emit = now;
+            idr_note_emit(now);
           }
           BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << (opening_idr ? " (opening, cooldown not started)" : " (cooldown OK)");
           if (vr_state) {
@@ -2754,7 +2784,26 @@ namespace video {
         }
         else {
           requested_idr_frame = false;  // suppress for this iteration; client will re-request
-          BOOST_LOG(info) << "[VIPLE-QLOG] IDR-SUPPRESS f=" << frame_nr << " (cooldown active)";
+          if (calm && now >= last_idr_emit + kIdrTwinWindowMs) {
+            idr_deferred = true;  // §IDR-FAST：間隔一到就補送
+            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-DEFER f=" << frame_nr << " ("
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(now - last_idr_emit).count() << " ms after the last one)";
+          } else {
+            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-SUPPRESS f=" << frame_nr << (calm ? " (paired request)" : " (cooldown active)");
+          }
+        }
+      }
+      if (idr_deferred && !requested_idr_frame) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!idr_calm(now)) {
+          idr_deferred = false;  // 期間變成丟包連發：照 §S.19 丟掉，client 會再要
+        } else if (now >= last_idr_emit + kDesktopIdrFastGapMs) {
+          session->request_idr_frame();
+          requested_idr_frame = true;
+          last_idr_emit = now;
+          idr_note_emit(now);
+          idr_deferred = false;
+          BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << " (deferred request)";
         }
       }
 

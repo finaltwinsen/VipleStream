@@ -46,6 +46,9 @@ JOBS=""
 DO_CLEAN=0
 DOWNLOAD_ONLY=0
 DO_BUNDLE=0
+# --snapshot（2026-11-19）：頭盔只留 stable 一個分支之後，日常測試也用正式版的建置方式（開 LTO、branch=stable），
+# 只是來源改成工作樹快照。其餘流程比照 dev（不檢查來源乾淨與否、不強制出 bundle）。
+SNAPSHOT=0
 DO_SMOKE=0
 SMOKE_ONLY=0
 CHECK_ONLY=0
@@ -134,6 +137,9 @@ VipleStream Steam Frame client — Flatpak 建置（app-id $APP_ID，KDE runtime
                           release：pin 在 HEAD 的 git 來源、branch=stable、app 開 LTO；
                           moonlight-qt 與 picoquic 必須乾淨，version.txt 必須等於 version.json。
                           只允許 aarch64（x86_64 Flatpak 只給開發用，見 finish-args.md「libdrm 決定」）。
+  --snapshot              搭配 --flavor release：建置方式同正式版（開 LTO、branch=stable），來源改成工作樹快照
+                          （含未 commit 的改動），不檢查來源、不強制出 bundle。頭盔日常測試用（頭盔只裝 stable）；
+                          產物不可上 release。
 
 選項：
   --work DIR        工作目錄（預設 \$HOME/viple-steamframe；不可在 repo 內）。state（下載與快取）、
@@ -246,6 +252,7 @@ parse_args()
 			--clean) DO_CLEAN=1; shift ;;
 			--download-only) DOWNLOAD_ONLY=1; shift ;;
 			--bundle) DO_BUNDLE=1; shift ;;
+			--snapshot) SNAPSHOT=1; shift ;;
 			--smoke) DO_SMOKE=1; shift ;;
 			--smoke-only) SMOKE_ONLY=1; DO_SMOKE=1; shift ;;
 			--check) CHECK_ONLY=1; shift ;;
@@ -266,6 +273,13 @@ parse_args()
 			"") die "$RC_USAGE" "缺少 --flavor（dev 或 release）" ;;
 			*) die "$RC_USAGE" "--flavor 只能是 dev 或 release（收到 '$FLAVOR'）" ;;
 		esac
+	fi
+
+	if [ "$SNAPSHOT" -eq 1 ]; then
+		[ "$FLAVOR" = "release" ] || die "$RC_USAGE" "--snapshot 只能和 --flavor release 一起用（dev 本來就是工作樹快照）"
+		[ "$ARCH" = "aarch64" ] || die "$RC_USAGE" "--snapshot 只給 aarch64（頭盔）用"
+		# 之後的流程走 dev 那一套（快照來源、放寬檢查）；LTO 與分支另外看 SNAPSHOT
+		FLAVOR="dev"
 	fi
 
 	if [ "$ARCH" = "x86_64" ] && [ "$FLAVOR" = "release" ]; then
@@ -628,7 +642,12 @@ prepare_manifest()
 	cp -R -- "$FLATPAK_SRC_DIR/gamescope-wsi" "$MANIFEST_DIR/" || return 1
 	# manifest 裡 type: patch 的來源（路徑相對於 manifest）要跟著過去
 	cp -- "$FLATPAK_SRC_DIR"/*.patch "$MANIFEST_DIR/" 2>/dev/null || true
-	printf '%s\n' "$FLAVOR" > "$MANIFEST_DIR/flavor.txt" || return 1
+	# flavor.txt 決定 build-viplestream.sh 要不要關 LTO：--snapshot 要和正式版一樣開著
+	if [ "$SNAPSHOT" -eq 1 ]; then
+		printf 'release\n' > "$MANIFEST_DIR/flavor.txt" || return 1
+	else
+		printf '%s\n' "$FLAVOR" > "$MANIFEST_DIR/flavor.txt" || return 1
+	fi
 
 	if [ "$FLAVOR" = "dev" ]; then
 		write_source_info snapshot > "$MANIFEST_DIR/SOURCE_INFO" || return 1
@@ -899,7 +918,7 @@ mkdir -p "$LOG_DIR" "$OUT_DIR" "$TMP_DIR" || die "$RC_USAGE" "無法建立 $WORK
 MAIN_LOG="$LOG_DIR/steamframe-$ARCH-$FLAVOR-$TS.log"
 OUT_FILE=""
 FB_LOG=""
-if [ "$FLAVOR" = "release" ]; then
+if [ "$FLAVOR" = "release" ] || [ "$SNAPSHOT" -eq 1 ]; then
 	BRANCH="stable"
 else
 	BRANCH="dev"
@@ -1010,7 +1029,7 @@ if [ "$FLAVOR" = "release" ] || [ "$DO_BUNDLE" -eq 1 ]; then
 	if [ "$FLAVOR" = "release" ]; then
 		OUT_NAME=$(release_bundle_name "$HEAD_PUBLISHED")
 	else
-		OUT_NAME="VipleStream-Client-$VERSION-linux-$(bundle_arch_name "$ARCH")-dev.flatpak"
+		OUT_NAME="VipleStream-Client-$VERSION-linux-$(bundle_arch_name "$ARCH")-$([ "$SNAPSHOT" -eq 1 ] && echo snapshot || echo dev).flatpak"
 	fi
 	OUT_FILE="$OUT_DIR/$OUT_NAME"
 	rm -f -- "$OUT_FILE" "$OUT_FILE.sha256"

@@ -782,6 +782,10 @@ namespace platf::stream_menu {
             // 和 client 的「結束 App」（/cancel）同樣的順序：先請 Steam 遊戲正常關閉（背景執行、不是 Steam 遊戲時不做事），
             // 再走 web UI「Force Disconnect」那條現成路徑（收 session、作廢 VR 預約、結束 App、還原顯示設定）。
             proc::proc.quit_steam_game();
+            // 兩條收場路徑都會先 terminate_sessions()，控制迴圈來不及送正常結束的通知，client 會以
+            //「與伺服器的控制連線中斷」的錯誤結束（2026-11-19 CachyOS 實測）。和「中斷串流」一樣先送通知。
+            stream::request_graceful_termination_notice();
+            std::this_thread::sleep_for(400ms);
             const bool had_app = nvhttp::force_cancel_current_session();
             if (!had_app) {
               // 沒有 App 在跑（例如已經自己結束）：至少把串流收掉
