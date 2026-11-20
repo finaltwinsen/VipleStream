@@ -45,6 +45,21 @@
 
 ## 各章節待辦補充
 
+### 2026-11-20 傍晚：使用者在家配戴，VR 比 Steam 內建串流糊（server／頭盔 2.0.253）
+
+- **§VR-QP-ROOM**：線路有餘裕（RTT 基線 ≤ 10 ms、30 秒內沒有因為網路降過碼）時，畫質門檻從「QP 20 停止回升、QP 15 回收」改成 10／6。
+  配戴前後：16～47 Mbps（QP 10～18）→ 100～150 Mbps（QP 3～9），使用者「好多了」。外地與剛塞過車時不變。
+- **§VR-SHARPEN**：頭盔端分塊路徑對亮度做對比自適應銳化（Steam 的客戶端有銳化、我們原本沒有）。配戴「差不多了」。
+  強度寫死在 shader（`mix(8, 5, 0.6)`）；**待做**：要不要做成設定、半速補幀那條路（`kTilesSynthBody`）沒有加、頭盔多耗多少電沒量
+  （11-10 量過高碼率約 11 W、Steam 約 9.4 W）。
+- **host 供不出畫格被當成網路不穩**：這次是我留在 host 的四個測試播放器佔了 CPU／GPU，合成器漏格 → 頭盔重複顯示 → 自動半速
+  （`[VIPLE-VR-RATE] network unstable: short repeats`）。兩條連線的空檔同時出現＝來源端沒出畫格。**待做**：自動半速要分得出
+  「host 沒出畫格」和「網路送不到」（host 已有 `VR-DRV timing 10s … missed=`）。
+- **2D XR 桌面從頭盔介面啟動時碼率沒重算**：先照 1440p60 算出 40 Mbps，解析度被 host 壓到 1080p、幀率之後才改成 144，碼率停在 40 Mbps
+  （命令列啟動一開始就知道 144 Hz，同場景是 62 Mbps）。`session.cpp` 的 `[VIPLE-RES] auto fps (XR desktop)` 那一段。**待修**。
+- host SteamVR 裡「The Thrill of the Fight」的每款解析度是 78%（每眼 1900），依使用者指示改成 100%（備份 `steamvr.vrsettings.bak-1120-thrill78`）。
+- 在別台機器開的程式要在那一台確認真的關掉（`scripts/benchmark/pace_run.sh` 用 SSH 的 Stop-Process 沒關掉 host 的 ffplay，`-autoexit -t` 對 lavfi 也沒生效）。**待修腳本**。
+
 ### 2026-11-20 午：清 TODO 這一輪（server 2.0.248／client 2.0.249）
 
 做了什麼（細節看 git log 與 `temp/specs/2026-11-20/` 四份設計）：§IDR-FAST 審查後的兩個修正、§P2 第 1／2 期（壅塞分級、分級降碼、

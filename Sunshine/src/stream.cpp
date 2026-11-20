@@ -3221,6 +3221,7 @@ namespace stream {
                         << " floor=" << f.floor_kbps()
                         << " state=" << f.state_str()
                         << " block=" << f.ramp_block_reason(now)
+                        << " qpGate=" << f.qp_saturated_x100(now) / 100 << '/' << f.qp_trim_x100(now) / 100 << (f.link_roomy(now) ? "(roomy)" : "")
                         << " randomLoss=" << f.random_losses()
                         << " lossRateCuts=" << f.loss_rate_cuts() << '/' << f.loss_rate_reverts()
                         << (f.loss_rate_disabled(now) ? "(off)" : "")

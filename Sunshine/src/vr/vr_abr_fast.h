@@ -131,6 +131,15 @@ namespace vr::abr {
   constexpr auto k_fast_quality_trim_interval = std::chrono::seconds(3);       ///< quality-trim 間隔 3 秒
   constexpr int k_fast_qp_saturated_x100 = 2000;  ///< 畫質飽和門檻 QP 20（×100）；11-04 實測 22 對 VR 偏鬆（鏡片放大壓縮瑕疵）
   constexpr int k_fast_qp_trim_threshold_x100 = 1500;  ///< 畫質多到用不完的門檻 QP 15（×100）
+  // §VR-QP-ROOM（2026-11-20）：線路有餘裕時改用的兩個門檻。上面兩個（QP 20 停止回升、QP 15 開始回收）是外地省流量、
+  // 頭盔省電時定的，穩態 QP 落在 10～18；在家配戴拿 Steam 內建串流對照（同樣四塊 1152×1152，約 200 Mbps）「糊很多」，
+  // 那一場我們只送 16～47 Mbps。線路有餘裕＝RTT 基線 ≤ k_fast_roomy_rtt_ms，而且最近 k_fast_roomy_quiet 內沒有因為
+  // 網路降過碼；任一條不成立就回到原本的門檻（外地、熱點分享、剛塞過車的行為都不變）。回升仍受碼率上限、解碼吃緊、
+  // 延遲趨勢三個既有條件管。
+  constexpr int k_fast_qp_saturated_roomy_x100 = 1000;  ///< 有餘裕時 QP 10 才算飽和（停止回升）
+  constexpr int k_fast_qp_trim_roomy_x100 = 600;        ///< 有餘裕時 QP 6 以下才回收
+  constexpr double k_fast_roomy_rtt_ms = 10.0;
+  constexpr auto k_fast_roomy_quiet = std::chrono::seconds(30);
   constexpr auto k_fast_decode_tight_duration = std::chrono::seconds(3);       ///< 解碼吃緊有效時間 3 秒
 
   // §ABR-LOSSRATE／慢爬常數（11-04）
@@ -390,6 +399,21 @@ namespace vr::abr {
       return is_congested(now);
     }
 
+    /// §VR-QP-ROOM：線路有餘裕（RTT 基線低、最近沒有因為網路降過碼）
+    bool link_roomy(steady::time_point now) const {
+      const double base = trend_.base_ms();
+      if (!(base > 0.0) || base > k_fast_roomy_rtt_ms) {
+        return false;
+      }
+      return last_congested_time_ == steady::time_point {} || (now >= last_congested_time_ && now - last_congested_time_ >= k_fast_roomy_quiet);
+    }
+    int qp_saturated_x100(steady::time_point now) const {
+      return link_roomy(now) ? k_fast_qp_saturated_roomy_x100 : k_fast_qp_saturated_x100;
+    }
+    int qp_trim_x100(steady::time_point now) const {
+      return link_roomy(now) ? k_fast_qp_trim_roomy_x100 : k_fast_qp_trim_threshold_x100;
+    }
+
     bool quality_saturated(steady::time_point now) const {
       if (last_quality_time_ == steady::time_point{}) return false;
       if (now < last_quality_time_ || (now - last_quality_time_ > k_fast_quality_recent_window)) {
@@ -398,7 +422,7 @@ namespace vr::abr {
       if (last_codec_ == 2) {
         return false;  // AV1 先不判斷，一律視為未飽和
       }
-      return last_qp_x100_ <= k_fast_qp_saturated_x100;
+      return last_qp_x100_ <= qp_saturated_x100(now);
     }
 
     const char *ramp_block_reason(steady::time_point now) const {
@@ -567,7 +591,7 @@ namespace vr::abr {
       last_codec_ = codec;
 
       // 檢查是否符合 quality-trim 條件（codec != 2 且 QP <= 17）
-      if (codec != 2 && avg_qp_x100 <= k_fast_qp_trim_threshold_x100) {
+      if (codec != 2 && avg_qp_x100 <= qp_trim_x100(now)) {
         if (qp_low_start_ == steady::time_point{} || gap_too_long) {
           qp_low_start_ = now;
           last_trim_time_ = {};
@@ -776,7 +800,7 @@ namespace vr::abr {
           // gap 個 QP 時碼率約多了 2^(gap/6) 倍；每步只收回其中一半（留餘裕，不要一步收過頭又得回升），再乘原本的 5%，
           // 單步最多收 25%。QP 剛好在門檻時仍是原本的 −5%。實測（桌球、分塊小）開場 QP 約 10：原本 30 秒只從 49 降到
           // 36 Mbps，約一分鐘後才到穩態的 32 Mbps，這段時間頭盔白白多解碼、多耗電。
-          const double gap_qp = std::max(0, k_fast_qp_trim_threshold_x100 - last_qp_x100_) / 100.0;
+          const double gap_qp = std::max(0, qp_trim_x100(now) - last_qp_x100_) / 100.0;
           const double factor = std::max(0.75, 0.95 * std::pow(2.0, -gap_qp / 12.0));
           int new_target = static_cast<int>(std::round(applied_kbps_ * factor));
           new_target = std::max(eff_floor, new_target);
@@ -817,8 +841,8 @@ namespace vr::abr {
           // §VR-ABR-TRIM-PROP（回程）：這個碼率是 quality-trim 收下來的（不是網路塞車降的），畫面一變複雜、QP 回到飽和門檻
           // 以上，就照 QP 離「門檻中間值」的距離一步補回去，上限是收之前的碼率——那個碼率幾十秒前網路才剛送得動。
           // 實測（桌球）：載入畫面 QP 約 4，碼率被收到 3 Mbps；進場景後 QP 27，原本的回升 40 秒才到 12 Mbps。
-          if (trim_origin_kbps_ > applied_kbps_ && last_qp_x100_ > k_fast_qp_saturated_x100) {
-            const double mid_x100 = (k_fast_qp_saturated_x100 + k_fast_qp_trim_threshold_x100) / 2.0;
+          if (trim_origin_kbps_ > applied_kbps_ && last_qp_x100_ > qp_saturated_x100(now)) {
+            const double mid_x100 = (qp_saturated_x100(now) + qp_trim_x100(now)) / 2.0;
             const double up = std::pow(2.0, (last_qp_x100_ - mid_x100) / 600.0);
             const int restored = static_cast<int>(std::min<double>(trim_origin_kbps_, std::round(applied_kbps_ * up)));
             if (restored > new_target) {

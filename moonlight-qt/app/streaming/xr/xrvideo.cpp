@@ -2880,9 +2880,27 @@ color.a = fa;
 
 // §VR-FOVEA-TILES（2026-11-10）：解碼出來的畫面和 swapchain 同尺寸、同排法，整張 1:1 搬——亮度取所在像素、色度雙線性
 // （4:2:0 的取樣位置照 libplacebo 的平面位移），輸出 (Y, Cb, Cr)，之後接 libplacebo 的色彩轉換
+// §VR-SHARPEN（2026-11-20）：亮度做對比自適應銳化（AMD FidelityFX CAS 的做法，MIT；只取上下左右四個鄰點）。
+// 配戴拿 Steam 內建串流並排比，碼率追到同一級（100～150 Mbps、QP 3～9）之後仍然「差很多」；兩邊的影像結構相同
+// （每眼注視點與全視野各一塊 1152×1152），剩下的差別是 Steam 的客戶端有銳化（使用者的設定 useSharpening=true）、我們沒有。
+// 權重跟著局部對比走：平坦或已經很銳利的地方少加，不會把雜訊與壓縮瑕疵一起放大；只動亮度，色度不變。
+// 強度寫在 shader 裡的 mix(8, 5, 0.6)：0＝最弱（鄰點權重 −1/8）、1＝最強（−1/5）。跨到隔壁那一塊的鄰點只影響每塊最外圈一個像素：
+// 注視點那兩塊的邊緣本來就漸層到透明，全視野那兩塊的邊緣在視野最外側。
 static const char* const kTilesBody = R"GLSL(
 vec2 lp = vs_crop.xy + gl_FragCoord.xy;
-float yy = texture(vs_y, (floor(lp) + 0.5) / vs_ysz).r;
+vec2 yuv_pos = (floor(lp) + 0.5) / vs_ysz;
+float yy = texture(vs_y, yuv_pos).r;
+{
+    float ya = textureOffset(vs_y, yuv_pos, ivec2(0, -1)).r;
+    float yb = textureOffset(vs_y, yuv_pos, ivec2(-1, 0)).r;
+    float yd = textureOffset(vs_y, yuv_pos, ivec2(1, 0)).r;
+    float ye = textureOffset(vs_y, yuv_pos, ivec2(0, 1)).r;
+    float ymn = min(yy, min(min(ya, yb), min(yd, ye)));
+    float ymx = max(yy, max(max(ya, yb), max(yd, ye)));
+    float yamp = sqrt(clamp(min(ymn, 1.0 - ymx) / max(ymx, 1.0e-4), 0.0, 1.0));
+    float yw = yamp * (-1.0 / mix(8.0, 5.0, 0.6));
+    yy = clamp((yy + (ya + yb + yd + ye) * yw) / (1.0 + 4.0 * yw), 0.0, 1.0);
+}
 vec2 cc = texture(vs_uv, ((lp - vs_csh) / vs_rr) / vs_csz).rg;
 color = vec4(yy, cc.x, cc.y, 1.0);
 )GLSL";
@@ -2891,7 +2909,19 @@ color = vec4(yy, cc.x, cc.y, 1.0);
 // 兩個座標都是像素位置的一次函數，不必每像素算；座標直接來自內插值，GPU 也能在 shader 開始前先取樣。
 // 亮度用最近點取樣（vs_y 在這一版綁的是最近點），取到的就是原本 floor()＋0.5 的那一個像素
 static const char* const kTilesVaBody = R"GLSL(
-float yy = texture(vs_y, vs_yc).r;
+vec2 yuv_pos = vs_yc;
+float yy = texture(vs_y, yuv_pos).r;
+{
+    float ya = textureOffset(vs_y, yuv_pos, ivec2(0, -1)).r;
+    float yb = textureOffset(vs_y, yuv_pos, ivec2(-1, 0)).r;
+    float yd = textureOffset(vs_y, yuv_pos, ivec2(1, 0)).r;
+    float ye = textureOffset(vs_y, yuv_pos, ivec2(0, 1)).r;
+    float ymn = min(yy, min(min(ya, yb), min(yd, ye)));
+    float ymx = max(yy, max(max(ya, yb), max(yd, ye)));
+    float yamp = sqrt(clamp(min(ymn, 1.0 - ymx) / max(ymx, 1.0e-4), 0.0, 1.0));
+    float yw = yamp * (-1.0 / mix(8.0, 5.0, 0.6));
+    yy = clamp((yy + (ya + yb + yd + ye) * yw) / (1.0 + 4.0 * yw), 0.0, 1.0);
+}
 vec2 cc = texture(vs_uv, vs_cc).rg;
 color = vec4(yy, cc.x, cc.y, 1.0);
 )GLSL";
@@ -3112,7 +3142,7 @@ bool XrVideo::renderTiles(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     if (!m_LoggedTiles) {
         m_LoggedTiles = true;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VR-FOVEA] tiles: %dx%d per tile, frame %dx%d -> swapchain %dx%d 1:1 (whole view on top, gaze tiles below with a rounded soft edge); "
+                    "[VIPLE-VR-FOVEA] tiles: %dx%d per tile, frame %dx%d -> swapchain %dx%d 1:1 (whole view on top, gaze tiles below with a rounded soft edge; luma sharpened); "
                     "luma %dx%d chroma %dx%d crop %.0f,%.0f chroma shift %.2f,%.2f sys=%d levels=%d",
                     tw, th, static_cast<int>(crop[2]), static_cast<int>(crop[3]), m_Sw.width, m_Sw.height, ty->params.w, ty->params.h,
                     tc->params.w, tc->params.h, crop[0], crop[1], csh[0], csh[1], static_cast<int>(mapped->repr.sys),
