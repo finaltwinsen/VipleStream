@@ -133,12 +133,20 @@ namespace vr::abr {
   constexpr int k_fast_qp_trim_threshold_x100 = 1500;  ///< 畫質多到用不完的門檻 QP 15（×100）
   // §VR-QP-ROOM（2026-11-20）：線路有餘裕時改用的兩個門檻。上面兩個（QP 20 停止回升、QP 15 開始回收）是外地省流量、
   // 頭盔省電時定的，穩態 QP 落在 10～18；在家配戴拿 Steam 內建串流對照（同樣四塊 1152×1152，約 200 Mbps）「糊很多」，
-  // 那一場我們只送 16～47 Mbps。線路有餘裕＝RTT 基線 ≤ k_fast_roomy_rtt_ms，而且最近 k_fast_roomy_quiet 內沒有因為
-  // 網路降過碼；任一條不成立就回到原本的門檻（外地、熱點分享、剛塞過車的行為都不變）。回升仍受碼率上限、解碼吃緊、
-  // 延遲趨勢三個既有條件管。
+  // 那一場我們只送 16～47 Mbps。
+  // 「有餘裕」不看遠近（不看 RTT、不看是不是區網），只看這條線路自己量到的狀況：
+  //   (1) 最近 k_fast_roomy_quiet 內沒有因為網路降過碼；
+  //   (2) 還沒有塞過車，或目前的碼率離塞車點還遠（< k_fast_roomy_ceiling_ratio × 塞車點；塞車點用 eff_congested_kbps()，
+  //       30 秒沒再塞就每秒放寬 0.1%）。
+  // 兩條都成立才用下面較嚴的門檻。所以：
+  //   線路寬（在家、外地的好線路都一樣）：一路加到 QP 10 或碼率上限。
+  //   線路窄：碼率本來就被塞車控制壓在容量附近，QP 降不到 20 以下，這兩組門檻都碰不到——行為和以前完全相同。
+  //   線路中等（容量夠到 QP 15 但到不了 QP 10）：會加到塞車點的八成就停（那裡 QP 已經 ≤ 20，照原本的門檻算飽和），
+  //       不會為了那一點畫質一直去撞塞車點。
+  // 回升仍受碼率上限、解碼吃緊、延遲趨勢三個既有條件管。
   constexpr int k_fast_qp_saturated_roomy_x100 = 1000;  ///< 有餘裕時 QP 10 才算飽和（停止回升）
   constexpr int k_fast_qp_trim_roomy_x100 = 600;        ///< 有餘裕時 QP 6 以下才回收
-  constexpr double k_fast_roomy_rtt_ms = 10.0;
+  constexpr double k_fast_roomy_ceiling_ratio = 0.8;
   constexpr auto k_fast_roomy_quiet = std::chrono::seconds(30);
   constexpr auto k_fast_decode_tight_duration = std::chrono::seconds(3);       ///< 解碼吃緊有效時間 3 秒
 
@@ -399,13 +407,13 @@ namespace vr::abr {
       return is_congested(now);
     }
 
-    /// §VR-QP-ROOM：線路有餘裕（RTT 基線低、最近沒有因為網路降過碼）
+    /// §VR-QP-ROOM：線路有餘裕（最近沒有因為網路降過碼，而且離塞車點還遠）。不看 RTT、不分遠近
     bool link_roomy(steady::time_point now) const {
-      const double base = trend_.base_ms();
-      if (!(base > 0.0) || base > k_fast_roomy_rtt_ms) {
+      if (last_congested_time_ != steady::time_point {} && (now < last_congested_time_ || now - last_congested_time_ < k_fast_roomy_quiet)) {
         return false;
       }
-      return last_congested_time_ == steady::time_point {} || (now >= last_congested_time_ && now - last_congested_time_ >= k_fast_roomy_quiet);
+      const int ceiling = eff_congested_kbps();
+      return ceiling <= 0 || applied_kbps_ < static_cast<int>(k_fast_roomy_ceiling_ratio * ceiling);
     }
     int qp_saturated_x100(steady::time_point now) const {
       return link_roomy(now) ? k_fast_qp_saturated_roomy_x100 : k_fast_qp_saturated_x100;

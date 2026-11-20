@@ -675,18 +675,18 @@ TEST_F(VrAbrFastTest, QualitySaturationBlocksRampUntilQpRises) {
   EXPECT_GT(c.ramps(), 0);
 }
 
-// 5. quality-trim：QP 一直 15、HEALTHY -> 10 s 後開始每 3 s −5%，cuts() 不變、trims() 增加、狀態不進 HOLD；
+// 5. quality-trim（沒有塞過車＝有餘裕，回收門檻是 QP 6）：QP 一直 6、HEALTHY -> 10 s 後開始每 3 s −5%，cuts() 不變、trims() 增加、狀態不進 HOLD；
 //    QP 回到 25 -> 停止 trim 並開始回升
 TEST_F(VrAbrFastTest, QualityTrimReducesBitrateWithoutHoldAndRecoversWhenQpRises) {
   fast::fast_controller_t c(kConfigured50Mbps);
   EXPECT_EQ(c.state(), fast::fast_state_e::healthy);
 
-  // t = 0 起餵 QP = 15 (1500)，前 9.9 秒尚未滿 10 秒門檻，不觸發 trim
-  c.on_quality(1500, 1, t0);
+  // t = 0 起餵 QP = 6 (600)，前 9.9 秒尚未滿 10 秒門檻，不觸發 trim
+  c.on_quality(600, 1, t0);
   for (int i = 1; i < 100; ++i) {
     const auto t = t0 + i * 100ms;
     if (i % 5 == 0) {
-      c.on_quality(1500, 1, t);
+      c.on_quality(600, 1, t);
     }
     EXPECT_FALSE(c.tick(t).has_value());
   }
@@ -696,7 +696,7 @@ TEST_F(VrAbrFastTest, QualityTrimReducesBitrateWithoutHoldAndRecoversWhenQpRises
 
   // 滿 10 秒（t0 + 10000ms）：第一次 quality-trim（-5% -> 47500），狀態維持 HEALTHY（不進 HOLD）
   const auto t_10s = t0 + 10000ms;
-  c.on_quality(1500, 1, t_10s);
+  c.on_quality(600, 1, t_10s);
   auto trim1 = c.tick(t_10s);
   ASSERT_TRUE(trim1.has_value());
   EXPECT_EQ(*trim1, 47500);
@@ -709,7 +709,7 @@ TEST_F(VrAbrFastTest, QualityTrimReducesBitrateWithoutHoldAndRecoversWhenQpRises
   for (int i = 101; i < 130; ++i) {
     const auto t = t0 + i * 100ms;
     if (i % 5 == 0) {
-      c.on_quality(1500, 1, t);
+      c.on_quality(600, 1, t);
     }
     EXPECT_FALSE(c.tick(t).has_value());
     EXPECT_NE(c.state(), fast::fast_state_e::hold);
@@ -718,7 +718,7 @@ TEST_F(VrAbrFastTest, QualityTrimReducesBitrateWithoutHoldAndRecoversWhenQpRises
 
   // 滿 13 秒（距上次 trim 滿 3 秒）：第二次 quality-trim（round(47500 * 0.95) = 45125）
   const auto t_13s = t0 + 13000ms;
-  c.on_quality(1500, 1, t_13s);
+  c.on_quality(600, 1, t_13s);
   auto trim2 = c.tick(t_13s);
   ASSERT_TRUE(trim2.has_value());
   EXPECT_EQ(*trim2, 45125);
@@ -742,7 +742,8 @@ TEST_F(VrAbrFastTest, QualityTrimReducesBitrateWithoutHoldAndRecoversWhenQpRises
   EXPECT_GT(c.ramps(), 0);
 }
 
-// 5b. §VR-ABR-TRIM-PROP：QP 比門檻（15）低越多，單步收得越多；QP 13 -> ×0.95×2^(-2/12)，QP 9 -> 封頂 −25%
+// 5b. §VR-ABR-TRIM-PROP：QP 比門檻低越多，單步收得越多。這個測試沒有塞過車＝§VR-QP-ROOM 的「有餘裕」，門檻是 6：
+//     QP 6 -> ×0.95，QP 4 -> ×0.95×2^(-2/12)，QP 1 以下 -> 封頂 −25%
 TEST_F(VrAbrFastTest, QualityTrimStepGrowsWithQpGap) {
   auto first_trim = [&](int qp_x100) {
     fast::fast_controller_t c(kConfigured50Mbps);
@@ -758,21 +759,21 @@ TEST_F(VrAbrFastTest, QualityTrimStepGrowsWithQpGap) {
     EXPECT_TRUE(r.has_value());
     return r.value_or(0);
   };
-  EXPECT_EQ(first_trim(1500), 47500);
-  EXPECT_EQ(first_trim(1300), 42318);
-  EXPECT_EQ(first_trim(900), 37500);
+  EXPECT_EQ(first_trim(600), 47500);
+  EXPECT_EQ(first_trim(400), 42318);
   EXPECT_EQ(first_trim(100), 37500);
+  EXPECT_EQ(first_trim(0), 37500);
 }
 
 // 5c. §VR-ABR-TRIM-PROP 回程：quality-trim 收下來的碼率，QP 變差時幾步內補回收之前的水準（不超過）
 TEST_F(VrAbrFastTest, QualityRestoreReturnsToPreTrimRateQuickly) {
   fast::fast_controller_t c(kConfigured50Mbps);
   auto t = t0;
-  // 載入畫面：QP 4，30 秒
+  // 載入畫面：QP 1，30 秒（有餘裕時的回收門檻是 6，QP 1 每步收到封頂的 −25%）
   for (int i = 0; i <= 300; ++i) {
     t = t0 + i * 100ms;
     if (i % 5 == 0) {
-      c.on_quality(400, 1, t);
+      c.on_quality(100, 1, t);
     }
     c.tick(t);
   }
@@ -852,8 +853,8 @@ TEST_F(VrAbrFastTest, RampBlockReasonFollowsPriorityOrder) {
   // 初始無任何阻擋 -> "none"
   EXPECT_STREQ(c.ramp_block_reason(t0), "none");
 
-  // 1. 僅畫質飽和 (QP = 20 <= 22) -> "quality"
-  c.on_quality(2000, 1, t0);
+  // 1. 僅畫質飽和（沒有塞過車＝有餘裕，門檻是 QP 10）-> "quality"
+  c.on_quality(1000, 1, t0);
   EXPECT_STREQ(c.ramp_block_reason(t0), "quality");
 
   // 2. 同時解碼吃緊 (p95 = 9000 > 8500) 與畫質飽和 -> 優先回傳 "decode"
@@ -1665,4 +1666,16 @@ TEST_F(VrAbrFastTest, ExperimentalRulesOffBehavesLikeBefore) {
   EXPECT_LE(end, 10000);  // 一路降下去（原本的行為）
   c.on_path_upgraded(t0 + 62000ms);
   EXPECT_EQ(c.path_upgrades(), 0);
+}
+
+// §VR-QP-ROOM：沒有塞過車時用較嚴的門檻（QP 10 才算飽和）；QP 15 在這時不擋回升
+TEST_F(VrAbrFastTest, RoomyLinkUsesStricterQualityGates) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  EXPECT_TRUE(c.link_roomy(t0));
+  EXPECT_EQ(c.qp_saturated_x100(t0), fast::k_fast_qp_saturated_roomy_x100);
+  EXPECT_EQ(c.qp_trim_x100(t0), fast::k_fast_qp_trim_roomy_x100);
+  c.on_quality(1500, 1, t0);
+  EXPECT_STREQ(c.ramp_block_reason(t0), "none");
+  c.on_quality(900, 1, t0 + 100ms);
+  EXPECT_STREQ(c.ramp_block_reason(t0 + 100ms), "quality");
 }
