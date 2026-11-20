@@ -13,6 +13,18 @@
 
 #include <enet/enet.h>
 
+// §REVIEW-1120：一般用途的記憶體屏障（不分 VIPLE_MPQUIC）。HOTSPOT_STATUS 的 seqlock、IDR 請求時刻等「一個執行緒寫、
+// 另一個執行緒讀」的 volatile 欄位用：volatile 只擋編譯器重排，arm64（Frame、Android）的 CPU 還是會重排。
+// 做法同下面的 QUIC_RING_*：Windows 用 MemoryBarrier()（Platform.h 已引入 Windows.h），其他平台（GCC／Clang／NDK）
+// 用 __atomic_thread_fence。
+#if defined(_WIN32)
+#define VIPLE_ACQUIRE_FENCE() MemoryBarrier()
+#define VIPLE_RELEASE_FENCE() MemoryBarrier()
+#else
+#define VIPLE_ACQUIRE_FENCE() __atomic_thread_fence(__ATOMIC_ACQUIRE)
+#define VIPLE_RELEASE_FENCE() __atomic_thread_fence(__ATOMIC_RELEASE)
+#endif
+
 #ifdef VIPLE_MPQUIC
 // §M01-A：QUIC 接收 ring（AudioStream.c 的 quicAudioRing、VideoStream.c 的
 // quicVideoRing）共用的記憶體屏障。兩個 ring 都是 SPSC：生產端是 QuicIO
@@ -190,6 +202,10 @@ bool RtpvLossLogDropped(uint32_t frames, uint64_t nowUs);
 // §IDR-RETRY（ControlStream.c）：最近一次 LiRequestIdrFrame() 的時刻（PltGetMillis 截成 32 位元）。
 // 這一場還沒要過就回 false。無鎖，任何執行緒可呼叫
 bool idrRequestLastTimeMs(uint32_t* lastMs);
+// §IDR-RETRY-RTT-FB／§REVIEW-1120（VideoDepacketizer.c）：2D 復原（IDR 重試、連續丟幀上限、§FRZ-WD-RTT watchdog）用的 RTT。
+// 依序 ENet → 多連線控制 PONG → QUIC active 路徑最小 smoothed rtt → 這一場最後一個有效值；回傳來源標籤（"enet"、
+// "link"、"quic"、"cached"），都拿不到回 NULL。只在 VideoRecv 執行緒呼叫。
+const char* vipleRecoveryRtt(uint64_t nowMs, uint32_t* rttMs);
 
 void initializeVideoStream(void);
 void destroyVideoStream(void);

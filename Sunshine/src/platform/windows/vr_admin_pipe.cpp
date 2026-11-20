@@ -1236,7 +1236,9 @@ namespace platf::vr_admin {
         bool announced = false;
         vr::orchestrator::unregister_result_t res;
         for (;;) {
-          res = vr::orchestrator::unregister_driver();
+          // 第三輪審查 D4：等結果期間每秒看 stop 事件——server 關閉時這條執行緒先被 join、g_quit 之後才設，
+          // 不看的話最久要等滿 60 秒
+          res = vr::orchestrator::unregister_driver([this]() { return stopping(); });
           if (res.ok || res.reason != "steamvr-running" || std::chrono::steady_clock::now() - t0 >= std::chrono::seconds(wait_s)) {
             break;
           }
@@ -1252,10 +1254,10 @@ namespace platf::vr_admin {
           // 現在等待的每一輪：先看 CLI 還在不在（走了就不再動手，直接結束、把 pipe 讓出來），再只查 vrserver 在不在
           // （唯讀，不進編排執行緒、不寫 step=unregister 的 log）；它結束或逾時才回到上面再要求一次。
           // 「CLI 剛走、SteamVR 剛好結束」之間不到 1 秒的空窗消不掉，可以接受。
-          bool stopping = false;
+          bool stop_seen = false;
           for (;;) {
             if (wait_stop(1s)) {
-              stopping = true;
+              stop_seen = true;
               break;
             }
             if (client_gone()) {
@@ -1268,7 +1270,7 @@ namespace platf::vr_admin {
               break;
             }
           }
-          if (stopping) {
+          if (stop_seen) {
             res.reason = "server-stopping";
             break;
           }
@@ -1288,11 +1290,17 @@ namespace platf::vr_admin {
           }
           send_result(vr::selftest::rc_ok, ""sv);
         } else if (res.reason == "not-running") {
-          send_result(vr::selftest::rc_unsupported, "the VR orchestrator is not running (vr_pcvr disabled or unsupported)"sv);
+          // 第三輪審查 D6：編排器只在 vr_pcvr=enabled 時存在。說清楚怎麼移除，而不是只說做不到
+          send_result(vr::selftest::rc_unsupported,
+                      "the VR orchestrator is not running (vr_pcvr is not enabled): set vr_pcvr=enabled, run uninstall, then set it back; "
+                      "or remove the driver manually with Install-VipleSteamVR.ps1 -Remove"sv);
         } else if (res.reason == "session-active") {
           send_result(vr::selftest::rc_session_active, "a VR session is being set up or is active"sv);
         } else if (res.reason == "busy") {
           send_result(vr::selftest::rc_busy, "another uninstall is in progress"sv);
+        } else if (res.reason == "in-progress") {
+          // 第三輪審查 C12：編排執行緒已經在做、等不到結果（逾時或 server 關閉）；之後照樣做完
+          send_result(vr::selftest::rc_busy, "the uninstall is still running on the orchestrator; check sunshine.log step=unregister"sv);
         } else if (res.reason == "steamvr-running") {
           send_result(vr::selftest::rc_failed, "SteamVR is running; close it and retry, or pass --wait-steamvr <seconds>"sv);
         } else if (res.reason == "server-stopping") {

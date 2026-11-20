@@ -2657,7 +2657,15 @@ namespace video {
       // idr_recent 存最近 kIdrCalmMax 張的送出時間；最舊的那張超過視窗＝視窗內不到 kIdrCalmMax 張
       return idr_fast && now - *std::min_element(idr_recent.begin(), idr_recent.end()) > kIdrCalmWindow;
     };
+    // 第三輪審查 C10：同一幀（frame_nr）只會編出一張 IDR，不論是 RFI 退回、閘門放行、延後補送還是降碼強制。
+    // 以前延後補送與降碼強制兩條路沒看「這一輪已經記過」，同一張記兩格，10 秒內再一張就被當成丟包連發（間隔回到 1500 ms）。
+    // 這裡以幀號去重，四條路與以後新增的路一起涵蓋。這一輪沒編碼時 frame_nr 不變、IDR 也還在排，本來就是同一張。
+    int idr_noted_frame = -1;
     const auto idr_note_emit = [&](std::chrono::steady_clock::time_point now) {
+      if (idr_noted_frame == frame_nr) {
+        return;
+      }
+      idr_noted_frame = frame_nr;
       *std::min_element(idr_recent.begin(), idr_recent.end()) = now;
     };
     // §P2（2026-11-20）：閘門不知道網路塞住。RTT 幾秒的時候 client 每秒都在要，上面的規則讓壅塞開頭 10 秒內
@@ -2703,12 +2711,9 @@ namespace video {
     const auto apply_encoder_bitrate = [&](int kbps, bool is_decrease) -> bool {
       const int div = std::max(1, vr_enc_div);
       const int enc_kbps = div > 1 ? std::min(kbps * div, std::max(config.bitrate, kbps)) : kbps;
-      // 第二輪審查 C11：半速時每秒實際送出＝enc_kbps ÷ div。目標高過「建立時的碼率 ÷ div」的部分送不出去——控制器的上限
-      // 已經夾在這裡（stream.cpp set_rate_div），只有剛換分頻、控制器還沒跟上的那一下（≤ 500 ms）會看到這行
-      if (div > 1 && kbps > config.bitrate / div) {
-        BOOST_LOG(info) << "[VIPLE-VR-RATE] target " << kbps << " kbps is above what 1/" << div << " rate can send ("
-                        << config.bitrate / div << " kbps): encoder output limited until the controller caps it";
-      }
+      // 第二輪審查 C11：半速時每秒實際送出＝enc_kbps ÷ div。目標高過「建立時的碼率 ÷ div」的部分送不出去。
+      // 第三輪審查 C13：這個提示不在這裡印（每次調碼率都會走這裡；沒開 vr_abr_fast 時沒有控制器夾上限，會整段半速洗版），
+      // 改在分頻剛變動的那一次（下方 vr_rate_applied）照實印一行
       auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
       if (avcodec_session && avcodec_session->avcodec_ctx) {
         auto &ctx = avcodec_session->avcodec_ctx;
@@ -2768,8 +2773,11 @@ namespace video {
     if (vr_state && config.captureSource == 1 && vr_state->rate_div() > 1) {
       vr_enc_div = vr_state->rate_div();
       apply_encoder_bitrate(last_applied_bitrate_kbps, false);
-      BOOST_LOG(info) << "[VIPLE-VR-RATE] encoder bitrate setting rescaled for 1/" << vr_enc_div << " rate (new encoder, target "
-                      << last_applied_bitrate_kbps << " kbps)";
+      // 第三輪審查 C13：重建後的編碼器從 session 建立時的碼率起跑（last_applied_bitrate_kbps＝config.bitrate），不是控制器
+      // 目前的值；控制器的值沒變就不會重送。照實寫，不說「等控制器夾住」
+      BOOST_LOG(info) << "[VIPLE-VR-RATE] encoder bitrate setting rescaled for 1/" << vr_enc_div << " rate (new encoder starts from the session bitrate "
+                      << last_applied_bitrate_kbps << " kbps, setting " << std::min(last_applied_bitrate_kbps * vr_enc_div, config.bitrate)
+                      << " kbps; the controller value is re-sent only when it changes)";
     }
 
     // §ENC-DUP（量測，行為不變）：2D 來源等滿一個幀間隔沒有新畫面就重編上一張（重複幀）；重複幀編碼期間才到的
@@ -2891,7 +2899,7 @@ namespace video {
           session->request_idr_frame();
           requested_idr_frame = true;
           last_idr_emit = now;
-          idr_note_emit(now);
+          idr_note_emit(now);  // 這一幀若已是 RFI 退回的 IDR（已記過），idr_note_emit 依幀號略過
           idr_deferred = false;
           BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << " (deferred request)";
         }
@@ -3038,6 +3046,14 @@ namespace video {
                 apply_encoder_bitrate(last_applied_bitrate_kbps, false);
                 BOOST_LOG(info) << "[VIPLE-VR-RATE] encoder bitrate setting rescaled for 1/" << vr_enc_div << " rate (target "
                                 << last_applied_bitrate_kbps << " kbps)";
+                // 第三輪審查 C11／C13：目標高過半速送得出的量時，分頻變動的這一次印一行（不再每次調碼率都印）。
+                // 有控制器（vr_abr_fast）時它下一輪會把上限夾到 config.bitrate ÷ div；沒有時半速期間實際最多只送得出這麼多
+                if (vr_enc_div > 1 && last_applied_bitrate_kbps > config.bitrate / vr_enc_div) {
+                  BOOST_LOG(info) << "[VIPLE-VR-RATE] target " << last_applied_bitrate_kbps << " kbps is above what 1/" << vr_enc_div
+                                  << " rate can send (" << config.bitrate / vr_enc_div << " kbps): "
+                                  << (config::vr.abr_fast ? "the controller caps it on its next tick (<= 500 ms)" :
+                                                            "no controller caps it (vr_abr_fast off), output is limited for the whole half-rate period");
+                }
               }
             }
             if (vr_rate_skip) {

@@ -1202,22 +1202,24 @@ namespace platf {
     std::uint32_t seq = 0;  ///< 每有一輪新的結果、或狀態／旗標改變就加一；0＝還沒有任何狀態
     std::uint8_t state = 0;  ///< VIPLE_VR_HS_*；0＝沒有
     std::uint8_t flags = 0;  ///< VIPLE_VR_HS_F_*
-    std::uint8_t attempts = 0;  ///< 這一輪我們自己發起的連線次數（飽和）
-    std::uint8_t restarts = 0;  ///< 這一輪重啟網卡的次數
+    std::uint8_t attempts = 0;  ///< 這一輪我們自己發起的連線次數（飽和）；沒走到看門狗的結果（READY、NO_ADAPTER 等）是 0
+    std::uint8_t restarts = 0;  ///< 這一輪重啟網卡的次數；同上
     std::uint16_t elapsed_ds = 0;  ///< 這一輪開始到現在（0.1 秒，飽和）
-    std::uint32_t reason = 0;  ///< 最後一次失敗的 WLAN_REASON_CODE；0＝沒有
+    std::uint32_t reason = 0;  ///< 這一輪最後一次失敗的 WLAN_REASON_CODE（設定檔被拒時沒有原因碼就放錯誤碼）；0＝沒有
   };
   vr_hotspot_status_t vr_hotspot_status();
 
   /**
    * @brief 場次收到新的 HOTSPOT_INFO／QUERY、還沒交給背景執行緒之前呼叫：上一輪留下來的狀態從此不再更新，
    *        直到這一輪有結果為止。回傳目前的 seq——之後 seq 和它不同＝這一輪的結果。
+   *        同時讓排著或處理中的舊請求過期（不再啟動看門狗、不再寫結果）。
    */
   std::uint32_t vr_hotspot_expect();
 
   /**
    * @brief 頭盔說熱點關了（C2S HOTSPOT_STATE CLOSED）：立刻停止重連與重啟網卡，看門狗收工；設定檔留著。
-   *        正在處理中的 vr_hotspot_connect 也不會再啟動看門狗。之後收到新的 HOTSPOT_INFO 照常重新開始。
+   *        正在處理中或還排著的 vr_hotspot_connect 也不會再啟動看門狗、不再寫結果（比對與啟動在同一把鎖底下）。
+   *        之後收到新的 HOTSPOT_INFO 照常重新開始。
    */
   void vr_hotspot_stop();
 
@@ -1225,7 +1227,8 @@ namespace platf {
    * @brief 頭盔只問「現在能不能連」（C2S HOTSPOT_STATE QUERY，熱點沒開）：只看有沒有閒著的無線介面，
    *        不建設定檔、不啟動看門狗；結果（READY 或 NO_ADAPTER）放進狀態快照。會開 WLAN handle，不要在控制執行緒呼叫。
    *        上一輪還在跑的看門狗會一併收掉（熱點沒開，它沒有東西可連，也不可以再改這次的結果）；
-   *        vr_hotspot_connect 沒走到啟動看門狗就失敗時也一樣。
+   *        還排著或處理中的舊 vr_hotspot_connect 從此過期。vr_hotspot_connect 沒走到啟動看門狗就失敗時也會收掉上一輪
+   *        （挑不到介面報 NO_ADAPTER、設定檔被拒報 FAILED）。
    */
   void vr_hotspot_query();
 

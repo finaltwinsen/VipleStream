@@ -1394,6 +1394,9 @@ void XrInput::setKeyboardOpen(bool open, const char* why)
     }
     if (!open) {
         releaseKeyboard(why);
+        // §KBD-CAPS／§KBD-NUMPAD：只有關掉鍵盤時才回到小寫的 QWERTY 頁（Caps 沒有送給 host，不必還原）。
+        // §REVIEW-1120 第三輪 C46／C47：失焦、exit combo、畫面不在時鍵盤還開著，保留 Caps 與頁面（和 XrVrControllers 一致）
+        m_KbLocks = 0;
     }
     m_KbOpen = open;
     m_KbDirty = true;
@@ -1404,9 +1407,8 @@ void XrInput::releaseKeyboard(const char* why)
 {
     const bool had = m_KbActiveKey >= 0 || m_Sticky != 0;
     kbRelease();
-    if (m_Sticky != 0 || m_KbLocks != 0) {
-        m_Sticky = 0;
-        m_KbLocks = 0;  // §KBD-CAPS／§KBD-NUMPAD：下次打開回到小寫的 QWERTY 頁（Caps 沒有送給 host，不必還原）
+    if (m_Sticky != 0) {
+        m_Sticky = 0;  // Caps 與數字頁（m_KbLocks）不在這裡清：只是本地狀態，關鍵盤時由 setKeyboardOpen 清
         m_KbDirty = true;
     }
     m_KbHover = -1;

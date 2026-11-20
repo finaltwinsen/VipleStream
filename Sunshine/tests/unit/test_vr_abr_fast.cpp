@@ -2002,6 +2002,124 @@ TEST_F(VrAbrFastTest, UnmeasurableRepairWindowIsIgnored) {
 }
 
 // ==============================================================================
+// 補包比例的視窗（第三輪審查 C07／C08／C09）
+// ==============================================================================
+
+namespace {
+  /// 和 stream.cpp abr_expected_packets 同一條式子：kbps × 125 ÷ 封包大小 × 秒數
+  auto expected_at(int kbps, int pkt = 1392) {
+    return [kbps, pkt](long long ms) {
+      return (int) ((double) kbps * 125.0 / (double) pkt * (double) ms / 1000.0);
+    };
+  }
+}  // namespace
+
+// C07／C09：3 Mbps 時 500 ms 只有約 134 個封包（不到 200）：這一輪不取走，和下一輪合起來算，分母是合起來的 1000 ms。
+// 以前每一輪都取走、比例回 −1 被丟掉，低碼率時控制器整段看不到補包量
+TEST_F(VrAbrFastTest, RepairWindowCarriesOverUntilEnoughPackets) {
+  fast::repair_window_t w;
+  const auto exp = expected_at(3000);
+  int accum = 0;
+  accum += 5;
+  EXPECT_EQ(w.settle(t0, 500, 200, exp), 0);  // 134 個：不取
+  accum += 5;
+  const long long win = w.settle(t0 + 500ms, 500, 200, exp);
+  ASSERT_EQ(win, 1000);
+  const double pct = 100.0 * accum / exp(win);
+  EXPECT_NEAR(pct, 10.0 * 100.0 / 269.0, 0.01);  // 約 3.7%，不是用 500 ms 的分母放大成兩倍
+  accum = 0;
+  // 結算之後從這一刻重新起算
+  EXPECT_EQ(w.settle(t0 + 1000ms, 500, 200, exp), 0);
+  EXPECT_EQ(w.settle(t0 + 1500ms, 500, 200, exp), 1000);
+}
+
+// C08：FEC status 停下後的第一個 ping-tick 涵蓋 1.2 秒，呼叫端照樣傳 500：分母要用實際的 1200 ms
+TEST_F(VrAbrFastTest, RepairWindowUsesRealElapsedTimeNotCallerWindow) {
+  fast::repair_window_t w;
+  const auto exp = expected_at(50000);
+  EXPECT_EQ(w.settle(t0, 500, 200, exp), 500);  // 第一次：照呼叫端的視窗
+  EXPECT_EQ(w.settle(t0 + 1200ms, 500, 200, exp), 1200);
+  EXPECT_EQ(w.settle(t0 + 1700ms, 500, 200, exp), 500);
+}
+
+// 沒有視窗的呼叫（fast-loss，elapsedMs = 0）不結算、也不移動起點
+TEST_F(VrAbrFastTest, RepairWindowIgnoresCallsWithoutAWindow) {
+  fast::repair_window_t w;
+  const auto exp = expected_at(50000);
+  EXPECT_EQ(w.settle(t0, 500, 200, exp), 500);
+  EXPECT_EQ(w.settle(t0 + 300ms, 0, 200, exp), 0);
+  EXPECT_EQ(w.settle(t0 + 700ms, 500, 200, exp), 700);
+}
+
+// 碼率估不出來（0 個封包）時不會無限期累積：10 秒後回 −1（呼叫端丟掉），從那一刻重新起算
+TEST_F(VrAbrFastTest, RepairWindowDropsStaleDataWhenNeverMeasurable) {
+  fast::repair_window_t w;
+  const auto none = [](long long) { return 0; };
+  long long r = 0;
+  int calls = 0;
+  for (int i = 0; i <= 20 && r == 0; ++i) {
+    r = w.settle(t0 + i * 500ms, 500, 200, none);
+    ++calls;
+  }
+  EXPECT_EQ(r, -1);
+  EXPECT_EQ(calls, 20);  // 起點是 t0 − 500 ms，t0 + 9.5 s 剛好滿 10 秒
+  EXPECT_EQ(w.settle(t0 + 10000ms, 500, 200, none), 0);
+}
+
+// C11：換到更好的路（on_path_upgraded）時，舊路徑上的補包狀態一起作廢：不再擋、3 秒平均歸零、平常的量壓到門檻以下，
+// 新路徑上又「越加碼補越多」時，等待時間從 90 秒起算，不沿用舊路徑判定放行後加倍的 180 秒
+TEST_F(VrAbrFastTest, PathUpgradeResetsRepairState) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  c.set_experimental_rules(true);
+  c.set_applied_kbps(20000);
+  c.tick(t0);
+  auto t = t0;
+  int i = 1;
+  for (; i <= 2400 && c.repair_unrelated_releases() == 0; ++i) {
+    t = t0 + i * 500ms;
+    c.on_repair_load(rising_repair_pct(c.applied_kbps()), t);
+    c.tick(t);
+  }
+  ASSERT_EQ(c.repair_unrelated_releases(), 1);
+  // 判定放行後讓它再擋一次，確認舊路徑上的等待已經加倍
+  fast::steady::time_point tight_again {};
+  for (int k = 0; k < 600 && tight_again == fast::steady::time_point {}; ++k) {
+    t += 500ms;
+    c.on_repair_load(rising_repair_pct(c.applied_kbps()) + 5.0, t);
+    if (c.repair_tight(t)) {
+      tight_again = t;
+      EXPECT_EQ(c.take_repair_event(t), 1);
+    }
+    c.tick(t);
+  }
+  ASSERT_NE(tight_again, fast::steady::time_point {});
+  ASSERT_TRUE(c.repair_related());
+  ASSERT_EQ(c.repair_judge_s(), 180);
+
+  t += 500ms;
+  c.on_path_upgraded(t);
+  EXPECT_FALSE(c.repair_tight(t));
+  EXPECT_DOUBLE_EQ(c.repair_mean_pct(), 0.0);
+  EXPECT_LE(c.repair_floor_pct(), fast::k_fast_repair_tight_pct);
+  EXPECT_EQ(c.take_repair_event(t), -1);  // 解除事件照常印出
+
+  // 新路徑上補包又隨碼率上升（以換路當下的碼率為零點）
+  const int base = c.applied_kbps();
+  fast::steady::time_point tight_new {};
+  for (int k = 0; k < 600 && tight_new == fast::steady::time_point {}; ++k) {
+    t += 500ms;
+    c.on_repair_load(std::max(0.0, (c.applied_kbps() - base) / 1000.0), t);
+    if (c.repair_tight(t)) {
+      tight_new = t;
+    }
+    c.tick(t);
+  }
+  ASSERT_NE(tight_new, fast::steady::time_point {});
+  EXPECT_TRUE(c.repair_related());
+  EXPECT_EQ(c.repair_judge_s(), 90);
+}
+
+// ==============================================================================
 // §VR-QP-ROOM 退避（第二輪審查 C12）
 // ==============================================================================
 

@@ -199,6 +199,47 @@ namespace vr::abr {
   constexpr auto k_fast_repair_related_lookback = std::chrono::seconds(10);  ///< 與 k_fast_stable_window 相同（用同一份 applied 紀錄）
   constexpr double k_fast_repair_related_rise = 1.03;
   constexpr double k_fast_repair_decrease_ratio = 0.5;
+  constexpr auto k_repair_window_stale = std::chrono::seconds(10);  ///< 補包視窗這麼久還估不出封包數＝資料過時
+
+  /**
+   * @brief 第三輪審查 C07／C08／C09：補包比例的視窗（stream.cpp run_abr_aimd 用，呼叫端握 abrMutex）。
+   *
+   * 補包累計（vrRepairAccum）涵蓋的是「上一次取走到現在」，分母要用這段實際經過的時間，不能用呼叫端的名目視窗
+   * （ping-tick 固定傳 500 ms；FEC status 停下後的第一個 ping-tick 常涵蓋 1.0～1.2 秒，比例被高估最多約 2.4 倍）。
+   * 而且只在估得出封包數（≥ min_expected）時才取走：以前估不出來（碼率低於約 4.5 Mbps 的 500 ms 視窗）也取走，
+   * 比例回 −1 被丟掉，低碼率時控制器整段看不到補包量。估不出來就留著，和下一輪合起來算。
+   */
+  struct repair_window_t {
+    steady::time_point start {};  ///< 上一次取走的時刻（{}＝還沒取過）
+
+    /// expected_packets(ms)：照目前碼率這段時間大約送出幾個影像封包。caller_ms：呼叫端的視窗（只用在第一次，當成起點）。
+    /// 回傳 > 0：這次結算，值＝分母的實際經過時間（ms），呼叫端取走累計值；
+    /// 0：封包數估不出來（不到 min_expected），這次不取，累計值與起點都留給下一輪；
+    /// −1：起點已超過 k_repair_window_stale 仍估不出來（碼率估不出來之類）＝資料過時，呼叫端取走丟掉、從現在重新起算
+    template<class F>
+    long long settle(steady::time_point now, long long caller_ms, int min_expected, F &&expected_packets) {
+      if (caller_ms <= 0) {
+        return 0;  // fast-loss 之類沒有視窗的呼叫：不結算
+      }
+      if (start == steady::time_point {} || now < start) {
+        start = now - std::chrono::milliseconds(caller_ms);  // 第一次：照舊用呼叫端的視窗
+      }
+      const long long win = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+      if (win <= 0) {
+        return 0;
+      }
+      if (expected_packets(win) >= min_expected) {
+        start = now;
+        return win;
+      }
+      if (now - start >= k_repair_window_stale) {
+        start = now;
+        return -1;
+      }
+      return 0;
+    }
+  };
+
   constexpr double k_fast_rtt_severe_owd_excess_ms = 50.0;  ///< 單向延遲比這一場最低值高出這麼多＝影像方向也在排隊
   constexpr double k_fast_owd_floor_leak_ms_per_s = 0.2;    ///< 單向延遲最低值每秒往上放寬（時鐘漂移）
 
@@ -436,6 +477,22 @@ namespace vr::abr {
       outage_hold_until_ = {};
       owd_overuse_since_ = {};
       rtt_overuse_since_ = {};
+      // 第三輪審查 C11（§RATE-UNIFIED）：補包的 3 秒平均、這一段擋回升、加倍後的判定時間都是舊路徑的，一起作廢。
+      // 「平常的量」不歸零、只壓到門檻以下：從 0 起算的話新路徑本來就有的 Wi-Fi 底量會一開始就擋住加速回升；
+      // 保留舊值（例如中繼上的 7%）又會讓新路徑補到 9% 都不擋。repair_tight_reported_ 保留，解除事件照常印出
+      repair_recent_.clear();
+      repair_mean_pct_ = 0.0;
+      repair_floor_pct_ = std::min(repair_floor_pct_, k_fast_repair_tight_pct);
+      last_repair_time_ = {};
+      repair_tight_until_ = {};
+      repair_since_ = {};
+      repair_first_sum_ = 0.0;
+      repair_first_n_ = 0;
+      repair_entry_kbps_ = 0;
+      repair_related_ = false;
+      repair_judge_ = k_fast_repair_judge;
+      repair_judge_related_ = k_fast_repair_judge_related;
+      repair_released_by_judge_ = false;
       path_boost_until_ = now + k_fast_path_boost;
       ++path_upgrades_;
       if (!pending_target_.has_value() && (state_ == fast_state_e::hold || state_ == fast_state_e::cut || state_ == fast_state_e::healthy)) {

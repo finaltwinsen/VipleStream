@@ -31,6 +31,14 @@ namespace abr_cong {
   /// L3 進入：RTT 高出基線 max(500 ms, 8 × 抖動)，持續 2 輪且至少 k_deep_sustain
   constexpr int k_deep_enter_excess_ms = 500;
   constexpr double k_deep_jitter_mult = 8.0;
+  /// 審查 11-20 第三輪 C01：8 × 抖動那一項的上限。抖動再大的路徑，高出基線 1 秒也已經是佇列滿出來
+  constexpr double k_deep_jitter_cap_ms = 1000.0;
+  /// 審查 11-20 第三輪 C01：L3 門檻用的「平常抖動」要往上調，必須先連續乾淨這麼久（＝延遲趨勢估計器的歷史視窗
+  /// k_trend_history_window，10 秒）——視窗裡還有上一次壅塞的樣本時 p90−p10 就是那次壅塞的膨脹量，不是路徑的抖動。
+  /// 往下調、以及還沒有任何值時的第一筆，不必等
+  constexpr std::chrono::milliseconds k_calm_jitter_settle {10000};
+  /// 審查 11-20 第三輪 C03：「排空中」要持續有進展——每 3 秒 RTT 要比上一個檢查點再低一成，停在平台上就不算排空
+  constexpr std::chrono::milliseconds k_drain_checkpoint {3000};
   /// L3 退出：RTT 高出基線不到 300 ms，持續 2 輪且至少 k_deep_sustain（500 與 300 之間是遲滯帶）
   constexpr int k_deep_exit_excess_ms = 300;
   /// ABR 大約 500 ms 一輪；其他入口（FEC status、loss stats）可能插進來，所以除了輪數也看時間
@@ -119,9 +127,10 @@ namespace abr_cong {
     return "none";
   }
 
-  /// L3 的進入門檻（ms）：max(500, 8 × 抖動)
+  /// L3 的進入門檻（ms）：max(500, min(8 × 抖動, 1000))。抖動要用壅塞前的值（congestion_t 的 calm_jitter_ms_）
   inline double deep_enter_threshold_ms(double jitter_ms) {
-    return std::max((double) k_deep_enter_excess_ms, k_deep_jitter_mult * std::max(0.0, jitter_ms));
+    const double mult = std::min(k_deep_jitter_mult * std::max(0.0, jitter_ms), k_deep_jitter_cap_ms);
+    return std::max((double) k_deep_enter_excess_ms, mult);
   }
 
   /// 這個等級要給 IDR 閘門的最短間隔（ms）；0＝不提示（照原本的規則）。
@@ -309,7 +318,8 @@ namespace abr_cong {
 
       if (!in.sampled) {
         // 沒有 RTT 樣本（QUIC-only、peer 還沒連上、樣本太舊）：等級歸零，行為與沒有這個類別時相同
-        emergency_rtt_ms_ = 0;  // 「排空中」的比較基準只在同一次壅塞事件內有效
+        clear_drain();  // 「排空中」的比較基準只在同一次壅塞事件內有效
+        calm_since_valid_ = false;  // 平常抖動本身保留（那是路徑的性質，不屬於這一次事件），但乾淨期要重新數
         deep_latched_ = false;
         deep_rounds_ = 0;
         exit_rounds_ = 0;
@@ -319,8 +329,26 @@ namespace abr_cong {
         return out;
       }
 
+      // 審查 11-20 第三輪 C01：L3 門檻用壅塞前的抖動。in.jitter_ms 是 10 秒視窗的 p90−p10，RTT 一路膨脹時它就是膨脹量本身，
+      // 8 × 它永遠大於膨脹量，L3 要等視窗九成換成高原值（約 9～10 秒）才進得去。這裡只在「這一輪完全乾淨」（等級 L0、
+      // 沒有暫停回升、趨勢沒過載、沒有嚴重膨脹、L3 沒鎖著）時更新：往下調、第一筆立刻採用；往上調要先連續乾淨滿
+      // k_calm_jitter_settle（視窗裡已經沒有上一次壅塞的尾巴）。還沒有值時用 0（門檻＝下限 500 ms）
+      const bool calm_round = level_ == level_e::clean && !deep_latched_ && !in.hold && !in.trend_over && !in.severe;
+      if (calm_round) {
+        if (!calm_since_valid_) {
+          calm_since_valid_ = true;
+          calm_since_ = now;
+        }
+        const double j = std::max(0.0, in.jitter_ms);
+        if (calm_jitter_ms_ < 0.0 || j <= calm_jitter_ms_ || now - calm_since_ >= k_calm_jitter_settle) {
+          calm_jitter_ms_ = j;
+        }
+      } else {
+        calm_since_valid_ = false;  // 進 L1 以上就凍結
+      }
+
       const double excess = in.rtt_ms > in.base_ms ? (double) (in.rtt_ms - in.base_ms) : 0.0;
-      const bool deep_now = excess >= deep_enter_threshold_ms(in.jitter_ms);
+      const bool deep_now = excess >= deep_enter_threshold_ms(calm_jitter_ms_ < 0.0 ? 0.0 : calm_jitter_ms_);
 
       // L3 進入：條件連續成立 2 輪且滿 k_deep_sustain
       if (deep_now) {
@@ -348,7 +376,7 @@ namespace abr_cong {
           deep_left = true;
           // 這一次壅塞事件結束：「排空中」的比較基準作廢。不清的話，之後 RTT 較低的深度壅塞（例如上次 3000 ms、
           // 這次 900 ms）永遠被當成「還在排空」，緊急降碼整場不再觸發。冷卻（have_emergency_／last_emergency_）不動
-          emergency_rtt_ms_ = 0;
+          clear_drain();
           exit_rounds_ = 0;
         }
       } else {
@@ -390,11 +418,18 @@ namespace abr_cong {
       // 這一輪建議的動作
       // 上一刀之後 RTT 已經降了一成以上＝管線正在排空（ENet 的平滑 RTT 降得慢），不再追加一刀；否則會一路砍到下限。
       // 基準（emergency_rtt_ms_）離開 L3 或沒有樣本時歸零，歸零後這個條件恆不成立
-      const bool draining = have_emergency_ && (uint64_t) in.rtt_ms * 10 < (uint64_t) emergency_rtt_ms_ * 9;
+      // 審查 11-20 第三輪 C03：基準每 k_drain_checkpoint（3 秒）往前推一格——比較的是「上一個檢查點的 RTT」，所以
+      // 每 3 秒要再低一成才繼續算排空；停在平台上（佇列滿著、只是不再漲）最慢約 6 秒就不算排空，降碼恢復。
+      // 不推的話 RTT 降一成後停住，排空就整段 L3 都成立，碼率永遠不再往下
+      advance_drain(in.rtt_ms, now);
+      const bool draining = draining_for(in.rtt_ms);
+      // C03：L3 鎖著而且正在排空時，嚴重膨脹（×0.70）也不追加——ENet 的平滑 RTT 降得慢，絕對值還在 4 倍以上
+      // 只是因為還沒排完。趨勢過載（×0.85）照舊：那代表佇列又在長大。沒有在排空（RTT 沒降）時行為不變
+      const bool drain_block = deep_latched_ && draining;
       if (deep_sustained && !draining && cooled(have_emergency_, last_emergency_, now, k_emergency_cooldown)) {
         out.action = action_e::cut_emergency;
       } else if (cooled(have_cut_, last_cut_, now, k_cut_cooldown)) {
-        if (in.severe) {
+        if (in.severe && !drain_block) {
           out.action = action_e::cut_severe;
         } else if (in.trend_over) {
           out.action = action_e::cut_trend;
@@ -418,6 +453,11 @@ namespace abr_cong {
       if (!congested_for_recovery()) {
         return false;
       }
+      // 審查 11-20 第三輪 C02：和週期那條路用同一個「排空中」判斷。深度壅塞排空期間 client 的 watchdog 每秒都要 IDR，
+      // 以前每 3 秒就砍一次 ×0.50 一路到下限（還把排空基準換成正在降的 RTT）。排空中不降碼，等級與 IDR 長間隔照舊
+      if (draining_for(last_rtt_ms_)) {
+        return false;
+      }
       return cooled(have_emergency_, last_emergency_, now, k_emergency_cooldown);
     }
 
@@ -438,6 +478,8 @@ namespace abr_cong {
         have_emergency_ = true;
         last_emergency_ = now;
         emergency_rtt_ms_ = last_rtt_ms_;
+        drain_next_ms_ = last_rtt_ms_;
+        drain_at_ = now;
         // IDR 請求觸發的那一種也進 L3（IDR 閘門改用長間隔）；之後照 L3 的退出規則出來
         deep_latched_ = true;
         exit_rounds_ = 0;
@@ -499,6 +541,11 @@ namespace abr_cong {
       return held_;
     }
 
+    /// C01：L3 門檻用的壅塞前抖動（ms；還沒有值時 0）；給 log 與測試看
+    double calm_jitter_ms() const {
+      return calm_jitter_ms_ < 0.0 ? 0.0 : calm_jitter_ms_;
+    }
+
     /// RTT 是否夠長（150 ms 開、100 ms 以下關）；給 log 與測試看
     bool rtt_slow() const {
       return rtt_slow_;
@@ -507,6 +554,27 @@ namespace abr_cong {
   private:
     static bool cooled(bool have, steady::time_point last, steady::time_point now, std::chrono::milliseconds gap) {
       return !have || now - last >= gap;
+    }
+
+    /// 「排空中」：這一次壅塞事件裡有緊急降碼的基準，而且 RTT 比基準低一成以上。update() 與 idr_request_wants_cut() 共用
+    bool draining_for(uint32_t rtt) const {
+      return have_emergency_ && emergency_rtt_ms_ > 0 && (uint64_t) rtt * 10 < (uint64_t) emergency_rtt_ms_ * 9;
+    }
+
+    /// C03：排空基準每 k_drain_checkpoint 推一格（基準＝上一個檢查點記下的 RTT、再記下這一刻的 RTT）
+    void advance_drain(uint32_t rtt, steady::time_point now) {
+      if (emergency_rtt_ms_ == 0 || now < drain_at_ || now - drain_at_ < k_drain_checkpoint) {
+        return;
+      }
+      emergency_rtt_ms_ = drain_next_ms_ > 0 ? drain_next_ms_ : rtt;
+      drain_next_ms_ = rtt;
+      drain_at_ = now;
+    }
+
+    void clear_drain() {
+      emergency_rtt_ms_ = 0;
+      drain_next_ms_ = 0;
+      drain_at_ = {};
     }
 
     level_e level_ = level_e::clean;
@@ -529,7 +597,13 @@ namespace abr_cong {
     steady::time_point last_cut_ {};
     bool have_emergency_ = false;
     steady::time_point last_emergency_ {};
-    uint32_t emergency_rtt_ms_ = 0;  ///< 這一次壅塞事件裡上一次緊急降碼當時的 RTT；0＝沒有基準
+    uint32_t emergency_rtt_ms_ = 0;  ///< 「排空中」的比較基準（緊急降碼當時的 RTT，之後每 3 秒推一格）；0＝沒有基準
+    uint32_t drain_next_ms_ = 0;  ///< 上一個檢查點記下的 RTT：下一格的基準
+    steady::time_point drain_at_ {};  ///< 上一個檢查點（或緊急降碼）的時刻
+
+    double calm_jitter_ms_ = -1.0;  ///< C01：壅塞前的抖動（L3 門檻用）；< 0＝還沒有值
+    bool calm_since_valid_ = false;
+    steady::time_point calm_since_ {};  ///< 這一段連續乾淨從什麼時候開始
 
     bool point_have_ = false;
     int point_kbps_ = 0;

@@ -2273,22 +2273,31 @@ namespace quic_server {
     }
     // §Q-SOCK-RCVBUF（2026-11-20）：接收緩衝原本沒設（Windows 預設 64 KB、Linux 約 208 KB）。這個 socket 收的是所有 client、
     // 所有路徑的 ACK、輸入與回報；IO 執行緒忙著送一張大畫面時收不及，緩衝一滿 ACK 就被 OS 丟掉，picoquic 會當成對方沒收到
-    // 而重傳、壓低壅塞視窗。要 2 MB（與 client 的 QuicTransport.c 相同）。Linux 的 getsockopt 回的是核心加倍後的值，
-    // 被 net.core.rmem_max 夾住時仍會小於要求值，所以直接比大小就能看出來。
+    // 而重傳、壓低壅塞視窗。要 2 MB（與 client 的 QuicTransport.c 相同）。
+    // 2026-11-20 第三輪審查：Linux 的 getsockopt 回的是核心加倍後的值（實際採用 min(要求值, net.core.rmem_max)，回報它的兩倍），
+    // 直接比大小時 rmem_max 介於 1～2 MB 被夾住也看不出來，夠大時又印成要求值的兩倍。所以 Linux 先除以 2 換回實際採用的值
+    // 再比與印（另附核心回報的原值）；Windows 與 macOS 回的就是設定的值，照原樣比。
     {
       int want = 2 * 1024 * 1024;
       const int rc = setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char *) &want, sizeof(want));
       int got = 0;
       socklen_t gotLen = sizeof(got);
       const int grc = getsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char *) &got, &gotLen);
-      if (rc != 0 || grc != 0 || got < want) {
-        BOOST_LOG(warning) << "[VIPLE-MPQUIC] §Q-SOCK-RCVBUF: receive buffer " << got << " bytes, asked for " << want
+#ifdef __linux__
+      const int effective = got / 2;
+      const std::string raw = " (kernel reports " + std::to_string(got) + ")";
+#else
+      const int effective = got;
+      const std::string raw;
+#endif
+      if (rc != 0 || grc != 0 || effective < want) {
+        BOOST_LOG(warning) << "[VIPLE-MPQUIC] §Q-SOCK-RCVBUF: receive buffer " << effective << " bytes" << raw << ", asked for " << want
 #ifndef _WIN32
                            << " (limited by net.core.rmem_max?)"
 #endif
                            << "; ACKs may be dropped while the IO thread is busy";
       } else {
-        BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SOCK-RCVBUF: receive buffer " << got << " bytes (asked for " << want << ")";
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SOCK-RCVBUF: receive buffer " << effective << " bytes" << raw << " (asked for " << want << ")";
       }
     }
 

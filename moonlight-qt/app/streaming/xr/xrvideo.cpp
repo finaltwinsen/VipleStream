@@ -934,8 +934,9 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive)
     if (pts90 != AV_NOPTS_VALUE) {
         const int64_t frameNo =
             frame->best_effort_timestamp != AV_NOPTS_VALUE ? frame->best_effort_timestamp : xrrate::HostCadence::kNoFrameNo;
-        // §RATE-CAUSE-HOST-IDR：關鍵幀（host 收到 IDR 要求時可能直接重編上一張、也帶 REPEATED）不整段算 host。
-        // 解碼器沒標的話是 false，退回只看 Present 間隔的規則
+        // §RATE-CAUSE-HOST-IDR：關鍵幀（host 收到 IDR 要求時可能直接重編上一張、也帶 REPEATED）不算 host 逾時重編。
+        // §RATE-CAUSE-HOST-REPEAT：REPEATED 那一張的時戳不是 Present，另外要「到這裡的時刻」：比上一張晚 80 ms 以上才當成
+        // host 逾時重編（解碼器沒標關鍵幀的 IDR 重編通常緊接著上一張到，不會被誤記）
 #ifdef AV_FRAME_FLAG_KEY
         const bool keyframe = (frame->flags & AV_FRAME_FLAG_KEY) != 0;
 #else
@@ -943,7 +944,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive)
 #endif
         m_HostCadence.onFrame(frameNo, pts90, static_cast<double>(m_RatePeriodUs.load(std::memory_order_relaxed)),
                               m_StreamDiv.load(std::memory_order_relaxed),
-                              hasMeta && (meta.vrFlags & VIPLE_VR_FF_REPEATED) != 0, keyframe);
+                              hasMeta && (meta.vrFlags & VIPLE_VR_FF_REPEATED) != 0, keyframe,
+                              t0 > mboxUs ? t0 - mboxUs : t0);  // 放進 mailbox 的時刻（不含 render thread 忙的時間）
         m_HostFnPairs.store(m_HostCadence.pairs(), std::memory_order_relaxed);
         m_HostFnBreaks.store(m_HostCadence.breaks(), std::memory_order_relaxed);
     }

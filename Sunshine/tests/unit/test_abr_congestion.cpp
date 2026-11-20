@@ -677,3 +677,130 @@ TEST_F(AbrCongestionTest, LanStaleSampleUnchanged) {
   EXPECT_FALSE(o.held);
   EXPECT_EQ(o.level, ac::level_e::clean);
 }
+
+// ── 審查 11-20 第三輪 ────────────────────────────────────────────────────
+
+// C01. RTT 一路膨脹時趨勢估計器的抖動（p90−p10）≈ 膨脹量本身；L3 門檻要用壅塞前的抖動，超出 500 ms 後兩輪內就鎖上
+TEST_F(AbrCongestionTest, DeepThresholdUsesPreCongestionJitter) {
+  auto t = t0;
+  for (int i = 0; i < 24; ++i, t += 500ms) {
+    ASSERT_EQ(c.update(in(40, 38, 5.0), t).level, ac::level_e::clean);
+  }
+  // 20 Mbps 進 15 Mbps 的瓶頸：每 500 ms RTT 多 166 ms；送進去的抖動就是視窗被汙染後的值（＝超出量）
+  bool deep = false;
+  int rounds_over = 0;
+  for (int k = 1; k <= 8 && !deep; ++k, t += 500ms) {
+    const uint32_t rtt = 40 + 166 * k;
+    const double excess = (double) rtt - 38.0;
+    const auto o = c.update(in(rtt, 38, excess, true, true), t);
+    if (excess >= 500.0) {
+      ++rounds_over;
+    }
+    if (o.level == ac::level_e::deep) {
+      deep = true;
+      EXPECT_EQ(o.action, ac::action_e::cut_emergency);
+    }
+  }
+  EXPECT_TRUE(deep);
+  EXPECT_LE(rounds_over, 2);
+}
+
+// C01. 8 × 抖動有上限 1000 ms
+TEST(AbrCongestionDeep, JitterTermIsCapped) {
+  EXPECT_DOUBLE_EQ(ac::deep_enter_threshold_ms(100.0), 800.0);
+  EXPECT_DOUBLE_EQ(ac::deep_enter_threshold_ms(125.0), 1000.0);
+  EXPECT_DOUBLE_EQ(ac::deep_enter_threshold_ms(300.0), 1000.0);
+  ac::congestion_t c;
+  const auto t0 = ac::steady::time_point {} + 10ms;
+  ac::cong_in_t i;
+  i.sampled = true;
+  i.rtt_ms = 40;
+  i.base_ms = 40;
+  i.jitter_ms = 300.0;  // 很吵的路徑：平常抖動 300 ms
+  c.update(i, t0);
+  i.rtt_ms = 1140;  // 高出 1100 > 1000（沒有上限時門檻是 2400）
+  i.jitter_ms = 900.0;
+  i.hold = true;
+  c.update(i, t0 + 500ms);
+  EXPECT_EQ(c.update(i, t0 + 1000ms).level, ac::level_e::deep);
+}
+
+// C01. 平常抖動往上調要先連續乾淨 10 秒：壅塞剛結束、視窗裡還有尾巴時不採用；乾淨夠久才採用
+TEST_F(AbrCongestionTest, CalmJitterRaiseNeedsSettle) {
+  for (int i = 0; i < 5; ++i) {
+    c.update(in(42, 40, 5.0), t0 + i * 500ms);
+  }
+  for (int i = 5; i < 9; ++i) {
+    c.update(in(150, 40, 5.0, true), t0 + i * 500ms);  // 一陣 L1
+  }
+  for (int i = 9; i < 16; ++i) {
+    c.update(in(42, 40, 200.0), t0 + i * 500ms);  // 乾淨了，但抖動還是上一陣的尾巴
+  }
+  // 平常抖動還是 5（門檻 500）：高出 600 兩輪就進 L3
+  EXPECT_DOUBLE_EQ(c.calm_jitter_ms(), 5.0);
+  c.update(in(640, 40, 200.0, true), t0 + 8000ms);
+  EXPECT_EQ(c.update(in(640, 40, 200.0, true), t0 + 8500ms).level, ac::level_e::deep);
+
+  // 另一條路徑：一直乾淨、抖動真的是 100 ms，滿 10 秒後門檻變 800，高出 600 不進 L3
+  ac::congestion_t d;
+  for (int i = 0; i < 2; ++i) {
+    d.update(in(42, 40, 5.0), t0 + i * 500ms);
+  }
+  for (int i = 2; i < 24; ++i) {
+    d.update(in(42, 40, 100.0), t0 + i * 500ms);
+  }
+  EXPECT_DOUBLE_EQ(d.calm_jitter_ms(), 100.0);
+  for (int i = 24; i < 30; ++i) {
+    EXPECT_NE(d.update(in(640, 40, 100.0, true), t0 + i * 500ms).level, ac::level_e::deep);
+  }
+}
+
+// C02. 排空中收到 IDR 請求不降碼；RTT 回升後才降
+TEST_F(AbrCongestionTest, IdrRequestDoesNotCutWhileDraining) {
+  c.update(in(1000, 40, 5.0, true), t0);
+  auto o = c.update(in(1000, 40, 5.0, true), t0 + 500ms);
+  ASSERT_EQ(o.action, ac::action_e::cut_emergency);
+  c.commit_cut(o.action, 20000, t0 + 500ms);
+  c.update(in(850, 40, 5.0, true), t0 + 3600ms);  // 3 秒冷卻過了、RTT 降了一成以上
+  ASSERT_EQ(c.level(), ac::level_e::deep);
+  EXPECT_FALSE(c.idr_request_wants_cut(t0 + 3700ms));
+  EXPECT_GT(c.idr_gap_hint(), 0);  // IDR 長間隔照舊
+  c.update(in(1000, 40, 5.0, true), t0 + 4100ms);
+  EXPECT_TRUE(c.idr_request_wants_cut(t0 + 4200ms));
+}
+
+// C03. 排空中嚴重膨脹不追加 ×0.70；趨勢過載仍可 ×0.85；停在平台上，下一個檢查點之後緊急降碼恢復
+TEST_F(AbrCongestionTest, DrainingBlocksSevereAndEndsOnPlateau) {
+  c.update(in(1000, 40, 5.0, true, false, true), t0);
+  auto o = c.update(in(1000, 40, 5.0, true, false, true), t0 + 500ms);
+  ASSERT_EQ(o.action, ac::action_e::cut_emergency);
+  c.commit_cut(o.action, 20000, t0 + 500ms);
+
+  o = c.update(in(800, 40, 5.0, true, false, true), t0 + 2600ms);  // 一般降碼的 2 秒冷卻過了
+  EXPECT_EQ(o.level, ac::level_e::deep);
+  EXPECT_EQ(o.action, ac::action_e::none);
+  o = c.update(in(800, 40, 5.0, true, true, true), t0 + 2700ms);  // 佇列又在長
+  EXPECT_EQ(o.action, ac::action_e::cut_trend);
+
+  // RTT 停在 800：第一個檢查點（基準還是 1000）仍算排空，第二個檢查點基準換成 800，不再算排空
+  for (int i = 0; i < 7; ++i) {
+    o = c.update(in(800, 40, 5.0, true, false, true), t0 + 3100ms + i * 500ms);
+    EXPECT_EQ(o.action, ac::action_e::none) << i;
+  }
+  o = c.update(in(800, 40, 5.0, true, false, true), t0 + 6600ms);
+  EXPECT_EQ(o.action, ac::action_e::cut_emergency);
+}
+
+// C03. 持續有進展（每 3 秒低一成以上）就一直算排空：緊急降碼之後一刀都不追加
+TEST_F(AbrCongestionTest, SteadyDrainKeepsBlocking) {
+  c.update(in(3000, 40, 5.0, true, false, true), t0);
+  auto o = c.update(in(3000, 40, 5.0, true, false, true), t0 + 500ms);
+  ASSERT_EQ(o.action, ac::action_e::cut_emergency);
+  c.commit_cut(o.action, 20000, t0 + 500ms);
+  double rtt = 3000.0;
+  for (int i = 1; i <= 24; ++i) {
+    rtt *= 0.97;  // 每 500 ms 降 3%（2 秒就低過一成、之後每 3 秒約 17%）
+    o = c.update(in((uint32_t) rtt, 40, 5.0, true, false, true), t0 + 500ms + i * 500ms);
+    EXPECT_EQ(o.action, ac::action_e::none) << i;
+  }
+}

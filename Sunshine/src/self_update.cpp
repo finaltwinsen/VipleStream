@@ -1186,17 +1186,15 @@ exit 0
         return;
       }
       BOOST_LOG(info) << "[VIPLE-UPDATE] update available: " << cur << " → " << latest->version;
+      // §UPDATE-NOTES-TRAY：先拿更新摘要（一版只查一次；拿不到就照舊只報版號），再把選單換成「Install update」。
+      // 2026-11-20 第三輪審查：原本先改選單再查（最多 10 秒），這段期間 worker 還佔著，按「Install update」會被擋下來
+      // 顯示「already in progress」。現在查摘要時狀態還是 checking（選單停用），選單變成可按時 worker 只剩發通知
+      latest->summary = notes_summary_for(latest->version);
       {
         std::lock_guard<std::mutex> lg(g_pending_mtx);
         g_pending = latest;
       }
       set_state(state_e::update_available, on_state);
-      // §UPDATE-NOTES-TRAY：選單已經換成「Install update」，再去拿更新摘要（一版只查一次；拿不到就照舊只報版號）
-      latest->summary = notes_summary_for(latest->version);
-      if (!latest->summary.empty()) {
-        std::lock_guard<std::mutex> lg(g_pending_mtx);
-        if (g_pending && g_pending->version == latest->version) g_pending->summary = latest->summary;
-      }
       if (notify) notify("VipleStream update available", with_summary("Version " + latest->version + " is available. Click \"Install update v" + latest->version + "\" in the tray menu to install (streaming will be interrupted).", latest->summary));
     });
   }
@@ -1216,7 +1214,7 @@ exit 0
       return false;
     }
     auto target = *rel;  // 非 const：by-value 捕捉會保留 const，mutable lambda 內也改不了
-    return start_worker([notify, on_state, target]() mutable {
+    const bool started = start_worker([notify, on_state, target]() mutable {
       worker_guard_t guard {on_state};
       std::string err;
       set_state(state_e::downloading, on_state);
@@ -1299,6 +1297,12 @@ exit 0
       }
 #endif
     });
+    if (!started && why_not) {
+      // 還有一個 worker 在跑。查版剛做完、只剩發通知時（state 已是 update_available）提示稍後再按；下載／安裝中維持原本的說法
+      *why_not = g_state.load() == state_e::update_available ? "Still finishing the update check. Try again in a moment." :
+                                                               "An update is already in progress.";
+    }
+    return started;
   }
 
   // ── §AUTO-UPDATE ──

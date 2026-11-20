@@ -882,6 +882,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     }
 
     // Resolve --bitrate option
+    bool bitrateRecomputed = false;
     if (parser.isSet("bitrate")) {
         preferences->bitrateKbps = parser.getIntOption("bitrate");
         preferences->bitrateFromCli = true;  // VipleStream M4a：VR session 的預設位元率不覆蓋明確指定的值
@@ -898,6 +899,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
             preferences->enableYUV444, preferences->enableFrameInterpolation);
         // §RES-BITRATE：場次依最終的串流解析度／fps 再算一次（Session::refreshSessionBitrate）
         preferences->bitrateDefaultFromCli = true;
+        bitrateRecomputed = true;
     }
     // §RES-BITRATE：只有 CLI 真的改到的欄位才換成「存檔用舊值」
     if (preferences->width != savedWidth || preferences->height != savedHeight) {
@@ -909,9 +911,22 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         preferences->cliPersist.fps = true;
         preferences->cliPersist.fpsValue = savedFps;
     }
-    if (preferences->bitrateKbps != savedBitrate) {
+    // §RES-BITRATE（第三輪審查 C36／C40）：4:4:4、補幀、renderer、vk-triple 不在 cliPersist 裡，照 CLI 的新值存。
+    // 原本跟著預設值、這次碼率是重算出來的：存回去的碼率要是「存回去的那一組」（舊的解析度／fps＋新的開關）的預設值，
+    // 下次 bitrateLooksDefault() 才對得上；直接存 savedBitrate 會留下「4:4:4 開＋4:2:0 的碼率」，從此被當成使用者的值。
+    // getDefaultBitrate 讀 renderer／triple 的來源和上面重算時同一份（這時已經是 CLI 的值，和存回去的一致）。
+    // 使用者自訂的碼率（bitrateWasDefault 為否）照舊存原值
+    int persistBitrate = savedBitrate;
+    if (bitrateRecomputed && bitrateWasDefault) {
+        persistBitrate = preferences->getDefaultBitrate(savedWidth, savedHeight, savedFps, preferences->enableYUV444,
+                                                        preferences->enableFrameInterpolation);
+    }
+    if (preferences->bitrateKbps != persistBitrate) {
         preferences->cliPersist.bitrate = true;
-        preferences->cliPersist.bitrateKbps = savedBitrate;
+        preferences->cliPersist.bitrateKbps = persistBitrate;
+    }
+    else {
+        preferences->cliPersist.bitrate = false;  // 這一場的碼率就是要存的值
     }
 
     // Resolve --packet-size option

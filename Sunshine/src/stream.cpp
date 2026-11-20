@@ -628,6 +628,8 @@ namespace stream {
       std::chrono::steady_clock::time_point fecAccumStart{std::chrono::steady_clock::now()};
       // §VR-LINK-REPAIR：補包救回來的缺包數（下一次 run_abr_aimd 取走）。不進 fecLossAccum，見 kVrAbrRepairHoldPct
       std::atomic<int> vrRepairAccum{0};
+      // 第三輪審查 C07／C08：vrRepairAccum 上一次取走的時刻（補包比例的分母＝實際經過時間）。握 abrMutex
+      ::vr::abr::repair_window_t vrRepairWin;
       // §ABR-ADAPT（第 2 期）：每幀送完的時間（server 單調時鐘 µs）與送出的位元組（影像＋FEC）。videoBroadcastThread 寫、
       // control 執行緒讀 client 的 FRAME_FEEDBACK 時對照，算單向延遲（相對值）與實際送達速率。只有 VR session 會寫。
       // §VIPLE-VR-LAT10：擴充記錄各階段時間戳（server steady µs），供幀延遲分解統計使用。
@@ -893,6 +895,11 @@ namespace stream {
       std::atomic<std::uint8_t> local {0};  // 這裡就能決定的狀態（DISABLED／REMOTE／UNSUPPORTED）；0＝看平台的快照
       std::atomic<std::uint32_t> base_seq {0};  // 收到那一則時平台快照的序號：和它不同的才是這一輪的結果
       std::atomic<std::uint32_t> gen {0};  // 每收到一則 INFO／QUERY 加一
+      // 審查 11-20 第三輪 C04：這一場自己把熱點資訊交給 host 去連（看門狗是這一場 arm 的）才替看門狗續命。
+      // 平台的 vr_hotspot_keepalive 不分是哪一場 arm 的；沒送熱點資訊、REMOTE／DISABLED、送了 CLOSED 或 QUERY 的場次
+      // 不續命，上一場留下的看門狗 25 秒內自己收工
+      std::atomic<bool> watch {false};
+      std::chrono::steady_clock::time_point keepalive_at {};  // 平面場次續命的 10 秒間隔（只在 controlBroadcastThread 用）
       std::uint32_t sent_gen = 0;
       std::uint32_t sent_seq = 0;
       bool sent_any = false;
@@ -1767,6 +1774,7 @@ namespace stream {
   static void vr_hotspot_round_begin(session_t *session, std::uint8_t local) {
     auto &hs = session->hotspot;
     hs.local.store(local);
+    hs.watch.store(false);  // C04：新的一輪先不續命；真的交給 vr_hotspot_connect 時才打開
 #if defined(_WIN32)
     if (local == 0) {
       hs.base_seq.store(platf::vr_hotspot_expect());
@@ -1785,6 +1793,7 @@ namespace stream {
     if (st.state == VIPLE_VR_HOTSPOT_STATE_CLOSED) {
       // 頭盔的熱點關了（或這一場不開）：還沒處理的熱點資訊拿掉、重試與看門狗立刻停、這一輪不再回報
       hs.closed.store(true);
+      hs.watch.store(false);  // C04
       {
         std::lock_guard hlk(hotspot_mtx);
         hotspot_next.reset();
@@ -1892,6 +1901,7 @@ namespace stream {
         // 看門狗還會在 30 s 後重啟 host 的熱點網卡——這場不連、不監看
         BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] client is on Tailscale (remote) - not joining the headset hotspot this session"sv;
       } else if (config::vr.hotspot_autoconnect) {
+        session->hotspot.watch.store(true);  // C04：這一場 arm 的看門狗由這一場續命
         // 丟到背景執行緒處理（不可卡住 control 執行緒）
         // §REVIEW-1111：同時最多一條背景執行緒。原本每一則 HOTSPOT_INFO 都另起一條去連 Wi-Fi，client 連續送就一直堆
         // （每條都開 WLAN handle、可以跑好幾秒）。已經有一條在連時，把這一則記成「下一則」（只留最新的一份），
@@ -3030,7 +3040,9 @@ namespace stream {
     }
 
     if (now - ctl.lastLog >= 10s) {
-      platf::vr_hotspot_keepalive();  // §VR-HOTSPOT-WATCHDOG：串流還在，熱點網卡繼續監看
+      if (session->hotspot.watch.load()) {
+        platf::vr_hotspot_keepalive();  // §VR-HOTSPOT-WATCHDOG：串流還在，熱點網卡繼續監看（C04：只替這一場 arm 的續命）
+      }
       const auto cur = vr_state.stats();
       const auto &prev = ctl.lastLogStats;
       const double secs = std::chrono::duration<double>(now - ctl.lastLog).count();
@@ -3509,27 +3521,48 @@ namespace stream {
     // 2D 沒有 vrRepairAccum（repaired 恆為 0、repairPct = −1、repairHold = false），行為不變。
     // 第二輪審查 C02／C14：fast-loss（elapsedMs = 0）估不出封包數、量不出比例，不可以把累計值取走丟掉——
     // 留給下一個有正常視窗長度的呼叫（ping-tick／FEC status／loss-stats）一起算
-    const int repaired = (session->vr && elapsedMs > 0) ? session->video.vrRepairAccum.exchange(0) : 0;
-    const float repairPct = vr_abr_loss_pct(session, repaired, elapsedMs);
+    // 第三輪審查 C07／C08／C09：分母改成「上一次取走到這一次」的實際經過時間（repairWinMs），不用呼叫端的名目視窗
+    // （ping-tick 固定 500 ms）；而且只在估得出封包數（≥ kVrAbrMinExpected）時才取走，估不出來就留給下一輪合起來算
+    // ——以前碼率低於約 4.5 Mbps 時每一輪都取走後丟掉，控制器整段看不到補包量。
+    // repairPct：有結算時就是比例（0 也是有效量測，沒有在補）；沒結算＝−1（不交樣本）
+    int repaired = 0;
+    long long repairWinMs = 0;
+    float repairPct = -1.0f;
+    if (session->vr) {
+      const long long win = session->video.vrRepairWin.settle(abrNow, elapsedMs, kVrAbrMinExpected,
+                                                               [session](long long ms) { return abr_expected_packets(session, ms); });
+      if (win != 0) {
+        repaired = session->video.vrRepairAccum.exchange(0);
+      }
+      if (win > 0) {
+        repairWinMs = win;
+        repairPct = 100.0f * (float) repaired / (float) abr_expected_packets(session, win);
+      } else {
+        repaired = 0;  // 沒結算（留著）或過時丟掉：這一輪當成沒有補包資料
+      }
+    }
     const bool repairHold = repairPct >= kVrAbrRepairHoldPct;
     bool fastBitrateChanged = false;
     if (session->vr && session->video.vrAbrFast) {
       session->video.vrAbrFast->set_applied_kbps(applied);
       session->video.vrAbrFast->set_configured_kbps(session->video.configuredBitrateKbps);
-      // repaired == 0 時 vr_abr_loss_pct 回 −1（它把 0 當成沒有資料）；對補包量來說 0 是有效的量測（沒有在補），要照實交進去，
-      // 否則「平常的量」只會往上學、解除也只能靠逾時。封包數估不出來（視窗太短）時才真的略過
+      // 0 是有效的量測（沒有在補），要照實交進去，否則「平常的量」只會往上學、解除也只能靠逾時。
+      // 這一輪沒結算（repairPct = −1）時才略過，累計值留到下一輪
       {
         auto &f = *session->video.vrAbrFast;
-        const double repairLoad = repaired > 0 ? (double) repairPct :
-                                                 (abr_expected_packets(session, elapsedMs) >= kVrAbrMinExpected ? 0.0 : -1.0);
+        const double repairLoad = (double) repairPct;
         f.on_repair_load(repairLoad, abrNow);
         if (const int ev = f.take_repair_event(abrNow); ev != 0) {
           // C01／C13：判斷看的是 3 s 平均（mean=）；released＝擋了一段時間、碼率沒往上、補包量沒變少，判定跟碼率無關而放行
           const char *what = ev > 0                          ? "high: ramp held" :
                              f.repair_last_release_judged() ? "not bitrate-related: ramp released" :
                                                               "eased: ramp allowed again";
+          // 審查 11-20 第三輪 D3：這一輪沒有量測（fast-loss、視窗太短）時不印「0 shards in 0 ms = 上一輪的比例」，
+          // 明寫是最後一筆量測的值（解除的依據本來就是它）
           BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] repair load " << what
-                          << " (repaired=" << repaired << " shards in " << elapsedMs << " ms = " << std::format("{:.1f}", f.repair_pct())
+                          << (repairLoad >= 0.0 ? std::format(" (repaired={} shards in {} ms = ", repaired, repairWinMs) :
+                                                  std::string(" (no measurement this round, last measured "))
+                          << std::format("{:.1f}", f.repair_pct())
                           << "% of the video packets, mean3s=" << std::format("{:.1f}", f.repair_mean_pct())
                           << "%, usual=" << std::format("{:.1f}", f.repair_floor_pct()) << "%, at " << applied << " kbps"
                           << (ev > 0 ? std::format(", after ramp={}, judge in {} s", f.repair_related() ? 1 : 0, f.repair_judge_s()) : std::string {})
@@ -3650,6 +3683,7 @@ namespace stream {
     bool rttCongested = false;
     bool rttSevere = false;
     bool rttSevereNow = false;  // §P2：這一輪「≥ 4 倍且多 200 ms」成立（不含連 2 輪與冷卻）；2D 的壅塞等級用
+    std::string deskRttLog;  // C06：2D 的 [VIPLE-ABR-RTT] 那一行，等 cong.update 之後補上建議再印
     {
       using namespace std::chrono_literals;
       uint32_t rtt = session->video.abrRttLastMs;
@@ -3693,7 +3727,14 @@ namespace stream {
                       nowTp - session->video.abrRttLastCutTime >= 5s;
         rttSevere = severeNow && session->video.abrRttCongestedRounds >= 2 && cooled;
 
-        if (rttCongested) {
+        if (rttCongested && !session->vr) {
+          // 審查 11-20 第三輪 C06：2D 的降碼由下面的 abr_cong 決定（2 秒冷卻、趨勢刀、緊急刀），這裡的 5 秒規則已經不是
+          // 實際動作。這一行等 cong.update 之後才印，動作欄位改成 cong=<建議>（不再印 action=CUT／HOLD）；
+          // 實際有沒有降、降多少以 [VIPLE-ABR] cong cut 那一行為準
+          deskRttLog = std::format("[VIPLE-ABR-RTT] rtt={}ms baseline={}ms inflation={:.6g}x rounds={}", rtt, baseline,
+                                   (float) rtt / (float) denom, session->video.abrRttCongestedRounds);
+          session->video.abrRttLastHeartbeat = nowTp;
+        } else if (rttCongested) {
           BOOST_LOG(info) << "[VIPLE-ABR-RTT] rtt=" << rtt << "ms baseline=" << baseline
             << "ms inflation=" << ((float) rtt / (float) denom) << "x rounds="
             << session->video.abrRttCongestedRounds
@@ -3787,9 +3828,15 @@ namespace stream {
       congAction = co.action;
       rttSevere = congAction != ::abr_cong::action_e::none;
       abr_publish_idr_hint(session, abrNow);
+      if (!deskRttLog.empty()) {
+        BOOST_LOG(info) << deskRttLog << " cong=" << ::abr_cong::action_name(congAction) << " level=L" << (int) co.level
+                        << " (src=" << src << ")";
+      }
       if (co.level != co.prev_level) {
         BOOST_LOG(info) << "[VIPLE-ABR] cong level L" << (int) co.prev_level << "->L" << (int) co.level
                         << " rtt=" << in.rtt_ms << "ms base=" << in.base_ms << "ms jit=" << std::format("{:.0f}", in.jitter_ms)
+                        << "ms calmJit=" << std::format("{:.0f}", cong.calm_jitter_ms()) << "ms deepAt=+"
+                        << std::format("{:.0f}", ::abr_cong::deep_enter_threshold_ms(cong.calm_jitter_ms()))
                         << "ms trend=" << (in.sampled ? ::vr::abr::trend_state_name(session->video.abrTrend.state()) : "no-sample")
                         << " hold=" << in.hold << " severe=" << in.severe << " idrReq=" << session->video.abrIdrReq
                         << " action=" << ::abr_cong::action_name(co.action) << " idrGap=" << cong.idr_gap_hint()
@@ -3906,7 +3953,7 @@ namespace stream {
         using namespace std::chrono_literals;
         if (session->video.vrRepairHoldLog == std::chrono::steady_clock::time_point {} || abrNow - session->video.vrRepairHoldLog >= 5s) {
           session->video.vrRepairHoldLog = abrNow;
-          BOOST_LOG(info) << "[VIPLE-ABR] ramp held: " << repaired << " shards repaired in " << elapsedMs << " ms ("
+          BOOST_LOG(info) << "[VIPLE-ABR] ramp held: " << repaired << " shards repaired in " << repairWinMs << " ms ("
                           << std::format("{:.1f}", repairPct) << "% of the video packets; src=" << src << ')';
         }
       }
@@ -4671,6 +4718,10 @@ namespace stream {
         << "firstFrame [" << firstFrame << ']' << std::endl
         << "lastFrame [" << lastFrame << ']';
 
+      // 審查 11-20 第三輪 C05：開了 RFI 的 client（HEVC／AV1 的硬體解碼，Windows 2D 的預設組合）掉包時只送這一則、不送
+      // IDX_REQUEST_IDR_FRAME，一樣代表「畫面已經壞掉」。§P2 的壅塞中緊急降碼也要看到它；內部已經擋掉 VR、沒開自動碼率、
+      // L0／L1、RTT 不夠長、排空中與 3 秒冷卻，乾淨網路上行為不變。（RFI 做不到退回的 IDR 仍不經 L3 的長間隔，那在 video.cpp）
+      abr_on_idr_request(session, "rfi");
       session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
     });
 
@@ -4974,10 +5025,11 @@ namespace stream {
             } else if (session->vr && session->vrLinks && session->vrLinks->any_alive()) {
               vr_drain_s2c_ctrl_down(session);  // §VR-CTRL-DOWN-S2C
             } else if (!session->vr && session->control.peer) {
-              // §HOTSPOT-FLAT：平面場次沒有 vr_control_tick，熱點網卡的看門狗在這裡續命（沒有 arm 過時只是一次上鎖）
-              static std::chrono::steady_clock::time_point flat_keepalive {};
-              if (now - flat_keepalive >= 10s) {
-                flat_keepalive = now;
+              // §HOTSPOT-FLAT：平面場次沒有 vr_control_tick，熱點網卡的看門狗在這裡續命。
+              // C04：只有這一場自己送過熱點資訊、host 真的去連時才續命；間隔計時放在 session 裡，兩場平面場次不互相吃掉
+              auto &hsk = session->hotspot;
+              if (hsk.watch.load() && now - hsk.keepalive_at >= 10s) {
+                hsk.keepalive_at = now;
                 platf::vr_hotspot_keepalive();
               }
               vr_hotspot_status_tick(session, now);  // §HOTSPOT-ADAPT

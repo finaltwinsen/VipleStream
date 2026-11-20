@@ -4028,7 +4028,8 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs, u
                              "not counted as network trouble, rate stays at div=%d",
                              host15, other15, m_RateAuto.div());
         }
-        else if (m_RateHostEpisode && host15 < xrrate::AutoRate::kDownSum / 2) {
+        else if (m_RateHostEpisode && m_RateAuto.hostHistoryReady(3) && host15 < xrrate::AutoRate::kDownSum / 2) {
+            // §REVIEW-1120 第三輪 C48：換分頻會清掉歷史視窗，那時的 0 是「還沒有資料」，要等 3 個新視窗才判斷結束
             m_RateHostEpisode = false;
             m_AsyncLog.postf("[VIPLE-VR-RATE] host is producing frames again (lateHost %u slots in 15 s, total %llu)", host15,
                              static_cast<unsigned long long>(m_RateAuto.totalHostSlots()));

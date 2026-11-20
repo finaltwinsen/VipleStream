@@ -757,33 +757,45 @@ static void VideoReceiveThreadProc(void* context) {
                 // §FRZ-WD-RTT：往返時間很長（塞車、遠端）時，2 秒內 IDR 根本到不了；固定門檻會把
                 // 還在路上的 IDR 連同佇列一起清掉再要一張，每秒重來一次。門檻改成
                 //   starve = clamp(2×rtt + 500, 2000, 8000) ms（多久沒有完整幀就觸發）
-                //   refire = clamp(  rtt + 500, 1000, 5000) ms（兩次觸發的最短間隔）
-                // rtt 先向上取到 250 ms 的倍數（門檻不跟著每個樣本抖）。rtt ≤ 750 ms（兩個都不放寬）、還沒有樣本
-                //（LiGetEstimatedRttInfo 回 false）、或 VR session 時就是原本的 2000／1000 ms。
-                // 上限 8 秒／5 秒：佇列被毒化時的凍結仍然有界。RTT 是無鎖快照，這個執行緒可以讀。
+                //   refire = starve（兩次觸發的最短間隔）
+                // rtt 先向上取到 250 ms 的倍數（門檻不跟著每個樣本抖）。rtt ≤ 750 ms（兩個都不放寬）、還沒有樣本、
+                // 或 VR session 時就是原本的 2000／1000 ms。上限 8 秒：佇列被毒化時的凍結仍然有界。
+                // §REVIEW-1120：(1) rtt 改用 vipleRecoveryRtt（ENet → 多連線 PONG → QUIC → 這一場的快取值，和
+                // §IDR-RETRY-RTT 同一組來源）：原本只看 ENet，ENet 因往返太長斷掉、重連期間（最需要放寬的時候）反而
+                // 退回 2000／1000 ms，每秒清一次佇列。(2) refire 原本是 rtt＋500，比 IDR 從要求到收齊的時間（§IDR-RETRY-RTT
+                // 用 2×rtt＋100）短，watchdog 會把剛要到、還在到達中的 IDR 連同佇列清掉再要一張；改成和 starve 相同
+                //（2×rttQ＋500 ≥ 2×rtt＋100，rtt 3950 ms 以上時封頂 8000 ms，比重試下限少不到 100 ms）。
                 uint32_t wdRttMs = 0;
                 uint32_t wdStarveMs = 2000;
                 uint32_t wdRefireMs = 1000;
-                if ((VrFlags & VIPLE_VR_SF_ENABLED) == 0 && LiGetEstimatedRttInfo(&wdRttMs, NULL)) {
+                const char* wdRttSrc = NULL;
+                char wdRttStr[24];
+                if ((VrFlags & VIPLE_VR_SF_ENABLED) == 0) {
+                    wdRttSrc = vipleRecoveryRtt(nowUs / 1000, &wdRttMs);
+                }
+                if (wdRttSrc != NULL) {
                     // 先封頂再算：2×4000＋500 已經超過 starve 上限，再大也一樣
                     uint32_t rttQ = wdRttMs > 4000 ? 4000 : ((wdRttMs + 249) / 250) * 250;
                     wdStarveMs = 2 * rttQ + 500;
-                    wdRefireMs = rttQ + 500;
                     if (wdStarveMs > 8000) wdStarveMs = 8000;
-                    if (wdRefireMs > 5000) wdRefireMs = 5000;
+                    wdRefireMs = wdStarveMs;
                     if (wdStarveMs <= 2000) {
-                        // rtt ≤ 750 ms：兩個門檻都維持原值（rtt＋500 在 500～750 ms 之間會超過 1000，
-                        // 不能只靠下限夾住）
+                        // rtt ≤ 750 ms：兩個門檻都維持原值
                         wdStarveMs = 2000;
                         wdRefireMs = 1000;
                     }
+                    snprintf(wdRttStr, sizeof(wdRttStr), "%u ms %s", (unsigned int)wdRttMs, wdRttSrc);
+                }
+                else {
+                    // 沒有樣本（或 VR session 不看 RTT）：印 none，不要印成像量到的 0 ms
+                    snprintf(wdRttStr, sizeof(wdRttStr), "none");
                 }
                 // 門檻變了印一行；RTT 在級距邊界來回時最多 2 秒一行（只限流 log，門檻照算）
                 if (wdStarveMs != wdLoggedStarveMs &&
                     (wdLoggedUs == 0 || nowUs - wdLoggedUs >= 2000000)) {
-                    Limelog("[VIPLE-VIDEO] §FRZ-WD-RTT: watchdog threshold %u -> %u ms (refire %u ms, rtt=%u ms)\n",
+                    Limelog("[VIPLE-VIDEO] §FRZ-WD-RTT: watchdog threshold %u -> %u ms (refire %u ms, rtt=%s)\n",
                             (unsigned int)wdLoggedStarveMs, (unsigned int)wdStarveMs,
-                            (unsigned int)wdRefireMs, (unsigned int)wdRttMs);
+                            (unsigned int)wdRefireMs, wdRttStr);
                     wdLoggedStarveMs = wdStarveMs;
                     wdLoggedUs = nowUs;
                 }
@@ -793,12 +805,12 @@ static void VideoReceiveThreadProc(void* context) {
                     lastWatchdogFireUs = nowUs;
                     Limelog("[VIPLE-VIDEO] §FRZ-WATCHDOG: packets flowing but "
                             "no decode unit for %.1fs (queue frame=%u, pkts last 1s=%u, "
-                            "rtt=%ums starve=%ums) — "
+                            "rtt=%s starve=%ums) — "
                             "resetting RTP queue and requesting IDR\n",
                             (float)(nowUs - lastFrameUs) / 1e6f,
                             RtpvGetCurrentFrameNumber(&rtpQueue),
                             pktsLastSecond,
-                            (unsigned int)wdRttMs, (unsigned int)wdStarveMs);
+                            wdRttStr, (unsigned int)wdStarveMs);
                     // §FRZ-GAP-FIX 2026-07-17：reset 只為清掉可能毒化的
                     // 佇列內容，幀號連續性必須保留。RtpvInitializeQueue
                     // 會把 currentFrameNumber 打回 1，下一個到達的幀
@@ -988,7 +1000,8 @@ static void VideoReceiveThreadProc(void* context) {
                         // 沒有缺包時不會走到等待：封包照到達順序直接進佇列，延遲不變。
                         const uint32_t two = 2u * mlFramePeriodUs;
                         mlHoldUs = two < 8000 ? 8000 : (two > 25000 ? 25000 : two);
-                        Limelog("[VIPLE-FLAT-REPAIR] wait limit %.1f ms (2 frame periods, 8-25 ms); repair turns off when the link RTT stays above %.0f ms and back on at %.0f ms or less\n",
+                        // §REVIEW-1120：門檻用 %.1f 印（120／144 fps 的上限不是整數毫秒，%.0f 會四捨五入成錯的數字）
+                        Limelog("[VIPLE-FLAT-REPAIR] wait limit %.1f ms (2 frame periods, 8-25 ms); repair turns off when the link RTT stays above %.1f ms and back on at %.1f ms or less\n",
                                 mlHoldUs / 1000.0, (mlHoldUs - 2000) / 1000.0,
                                 (mlHoldUs - 2000 - (mlHoldUs / 4 > 3000 ? 3000 : mlHoldUs / 4)) / 1000.0);
                     }
@@ -1040,6 +1053,7 @@ static void VideoReceiveThreadProc(void* context) {
             if (mlFlatRepairApplied && !out.mlRttMode && !out.eligible) {
                 const uint32_t dualHoldUs = mlFramePeriodUs < 4000 ? 4000 : (mlFramePeriodUs > 14000 ? 14000 : mlFramePeriodUs);
                 bool flatRepairOn = false;
+                bool flatCarryOnly = false;
 
                 if (in.negotiatedRepair && in.legacyRttMs >= 0) {
                     const uint32_t sampleUs = (uint32_t)in.legacyRttMs * 1000u;
@@ -1051,6 +1065,10 @@ static void VideoReceiveThreadProc(void* context) {
                         mlFlatGateInit = true;
                         mlFlatGateOpen = sigUs + 2000u <= in.holdUs;
                         mlFlatGateFlipping = false;
+                        // §REVIEW-1120：初始狀態也印（之後只有換邊才印；一開場就關著時原本整場都看不到）
+                        Limelog("[VIPLE-FLAT-REPAIR] repair initially %s: link RTT %.1f ms (last %d ms, median %.1f ms), wait limit %.1f ms\n",
+                                mlFlatGateOpen ? "on" : "off", sigUs / 1000.0, in.legacyRttMs,
+                                haveRtt ? in.st.midUs / 1000.0 : -1.0, in.holdUs / 1000.0);
                     }
                     want = mlFlatGateOpen ? (sigUs + 2000u <= in.holdUs) : (sigUs + 2000u + marginUs <= in.holdUs);
                     if (want == mlFlatGateOpen) {
@@ -1068,8 +1086,11 @@ static void VideoReceiveThreadProc(void* context) {
                                 want ? "on" : "off", sigUs / 1000.0, in.legacyRttMs,
                                 haveRtt ? in.st.midUs / 1000.0 : -1.0, in.holdUs / 1000.0);
                     }
-                    // 上一個封包的決定是補、而且那個 block 已經回報過：沿用到它結束
+                    // 上一個封包的決定是補、而且那個 block 已經回報過：沿用到它結束。
+                    // §REVIEW-1120：沿用時佇列只把那個 block 等完（mlCarryOnly），不對新的對象開始回報，
+                    // 沿用不會一路傳給下一個 block
                     flatRepairOn = mlFlatGateOpen || (rtpQueue.mlRepair && RtpvRepairNackPending(&rtpQueue));
+                    flatCarryOnly = flatRepairOn && !mlFlatGateOpen;
                 }
                 else {
                     mlFlatGateFlipping = false;  // 沒有樣本：不計時，狀態留著
@@ -1085,6 +1106,11 @@ static void VideoReceiveThreadProc(void* context) {
                     out.mlRepairRtoUs = 0;
                     out.mlHoldMaxUs = out.mlHoldDual ? dualHoldUs : 0;
                 }
+                rtpQueue.mlCarryOnly = flatCarryOnly;
+                rtpQueue.mlCarryHoldUs = out.mlHoldDual ? dualHoldUs : 0;
+            }
+            else {
+                rtpQueue.mlCarryOnly = false;  // VR 場次、照 RTT 規則處理的封包不受影響
             }
             RtpvSetRepairDecision(&rtpQueue, &out, mlFramePeriodUs, StreamConfig.vrRepairNoAhead == 0);
             if (out.mlRepair) {

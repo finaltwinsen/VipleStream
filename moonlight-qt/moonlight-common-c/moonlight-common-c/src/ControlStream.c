@@ -251,7 +251,8 @@ static PLT_EVENT idrFrameRequiredEvent;
 
 // §IDR-RETRY：最近一次 LiRequestIdrFrame() 的時刻（PltGetMillis 截成 32 位元，差值用無號減法，迴繞無妨）。
 // 任何執行緒都可能要 IDR（接收、解碼、控制），讀的是 VideoRecv 的計時重試：各自只有一個字的讀寫，
-// 不加鎖；先寫時刻再寫 valid，讀的那邊先看 valid。兩個請求同時寫時留下哪一個都可以（差不到 1 ms）。
+// 不加鎖；先寫時刻、VIPLE_RELEASE_FENCE、再寫 valid，讀的那邊先看 valid、VIPLE_ACQUIRE_FENCE、再讀時刻
+//（§REVIEW-1120：只靠 volatile 在 arm64 擋不住 CPU 重排）。兩個請求同時寫時留下哪一個都可以（差不到 1 ms）。
 static volatile uint32_t idrLastRequestMs;
 static volatile int idrLastRequestValid;
 
@@ -477,6 +478,7 @@ void vrApiSetReady(bool ready) {
 int initializeControlStream(void) {
     stopping = false;
     idrLastRequestValid = 0;  // §IDR-RETRY：上一場的請求時刻不可沿用
+    idrLastRequestMs = 0;     // 時刻也一起清（這時還沒有其他執行緒在要 IDR）
     PltCreateEvent(&idrFrameRequiredEvent);
     LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
@@ -659,6 +661,7 @@ void LiRequestIdrFrame(void) {
 
     // §IDR-RETRY：記下時刻，depacketizer 的計時重試以「任何來源的上一次請求」為基準
     idrLastRequestMs = (uint32_t)PltGetMillis();
+    VIPLE_RELEASE_FENCE();  // 時刻先可見，才公開 valid
     idrLastRequestValid = 1;
 
     // Request the IDR frame
@@ -670,6 +673,7 @@ bool idrRequestLastTimeMs(uint32_t* lastMs) {
     if (!idrLastRequestValid) {
         return false;
     }
+    VIPLE_ACQUIRE_FENCE();  // 看到 valid 之後才讀時刻
     *lastMs = idrLastRequestMs;
     return true;
 }
@@ -3080,6 +3084,7 @@ enet_main_loop:
                 const uint8_t* p = (const uint8_t*)(ctlHdr + 1);
                 // p[0]＝版本（目前 1），p[1]＝狀態
                 serverAudioStatus = p[1];
+                VIPLE_RELEASE_FENCE();  // §REVIEW-1120：狀態先可見，才把 seq 加一（讀端先讀 seq）
                 serverAudioStatusSeq++;
                 Limelog("[VIPLE-AUD-MON] server audio status %u (v%u)\n", (unsigned)p[1], (unsigned)p[0]);
             }
@@ -3099,10 +3104,15 @@ enet_main_loop:
                     if (hsType == VIPLE_VR_S2C_HOTSPOT_STATUS && hsBody >= sizeof(VIPLE_VR_TLV_HOTSPOT_STATUS)) {
                         uint32_t words[3];
                         memcpy(words, &hsTlv[hsOff + 2], sizeof(words));
+                        // §REVIEW-1120：seqlock 要有屏障，arm64（Frame）的 store-store 可以重排。
+                        // Windows 的 MemoryBarrier 是 full fence；其他平台的 release fence 在 arm64 編成 dmb ish，
+                        // 第一道同時擋住「奇數 seq」與後面三個字的順序。
                         hotspotStatusSeq++;  // 奇數：寫入中
+                        VIPLE_RELEASE_FENCE();
                         hotspotStatusWords[0] = words[0];
                         hotspotStatusWords[1] = words[1];
                         hotspotStatusWords[2] = words[2];
+                        VIPLE_RELEASE_FENCE();  // 三個字寫完才把 seq 變回偶數
                         hotspotStatusSeq++;
                     }
                     hsOff += 2 + hsBody;
@@ -4933,6 +4943,7 @@ bool LiGetCurrentHostDisplayHdrMode(void) {
 int LiGetServerAudioStatus(uint32_t* seq) {
     if (seq != NULL) {
         *seq = serverAudioStatusSeq;
+        VIPLE_ACQUIRE_FENCE();  // 看到新的 seq 之後讀到的狀態不會比它舊
     }
     return serverAudioStatus;
 }
@@ -4943,9 +4954,11 @@ int LiGetVrHotspotStatus(VIPLE_VR_TLV_HOTSPOT_STATUS* status, uint32_t* seq) {
     for (tries = 0; tries < 8; tries++) {
         uint32_t before = hotspotStatusSeq;
         uint32_t words[3];
+        VIPLE_ACQUIRE_FENCE();  // §REVIEW-1120：先讀 seq 再讀內容（arm64 的 load-load 可以重排）
         words[0] = hotspotStatusWords[0];
         words[1] = hotspotStatusWords[1];
         words[2] = hotspotStatusWords[2];
+        VIPLE_ACQUIRE_FENCE();  // 內容讀完才重讀 seq
         if ((before & 1) == 0 && before == hotspotStatusSeq) {
             VIPLE_VR_TLV_HOTSPOT_STATUS st;
             if (before == 0) {

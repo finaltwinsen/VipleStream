@@ -50,6 +50,7 @@
 
 #if defined(__linux__)
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -146,6 +147,7 @@ public:
             const bool ours = state == "2" && readOpenedMarker(&pid, &prevHost);
             // 熱點資訊只在熱點確實開著時才送給 host：這裡剩下「使用者自己開的」那一種還開著（我們不碰它，host 連得上就清紀錄）
             m_Advertise = state == "2" && !ours;
+            m_UserHotspot = m_Advertise;  // §REVIEW-1120 第三輪 C39：沒有多連線的場次也要能清紀錄（tick／onHostStatus）
             if (!m_Advertise) {
                 m_StateToSend = VIPLE_VR_HOTSPOT_STATE_CLOSED;  // 上一場的看門狗可能還在跑：請 host 停手
             }
@@ -161,39 +163,7 @@ public:
         }
         if (state == "2") {
             scrub(cmd);
-            // 已經開著。是我們之前開的（App 還在、連著玩下一個遊戲）就接手；不是就是使用者自己開的，不碰
-            long pid = 0;
-            std::string prevHost;
-            if (!readOpenedMarker(&pid, &prevHost)) {
-                return;
-            }
-            writeOpenedMarker(owner, hostId);
-            m_Opened = true;
-            m_OpenedAt = std::chrono::steady_clock::now();
-            resetRound();
-            if (prevHost.empty()) {
-                // §FRAME-HOTSPOT-EARLY：App 啟動時先開的（還沒有對應到哪一台 host）：上面已經有裝置就算這台連上了
-                m_PeerSeen = hotspotHasNewPeer(m_Baseline);
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VR-HOTSPOT] auto: the hotspot was switched on when the app started (%s)",
-                            m_PeerSeen ? "a device is already connected to it" : "nothing connected to it yet - waiting for the host");
-            }
-            else if (prevHost == hostId) {
-                m_PeerSeen = hotspotHasNewPeer(m_Baseline);
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VR-HOTSPOT] auto: the hotspot is still on from the previous session with this host (%s)",
-                            m_PeerSeen ? "host connected" : "waiting for the host again");
-            }
-            else {
-                // 換了一台 host：上一台的網卡可能還掛在熱點上，不算數——等一個新的對端
-                m_Baseline = hotspotPeers();
-                m_PeerSeen = false;
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "[VIPLE-VR-HOTSPOT] auto: the hotspot is on from a session with another host - waiting about %d s (up to "
-                            "%d s while the host reports it is still connecting) for this host to join (%d device(s) of the "
-                            "previous one ignored)",
-                            kJoinWaitS, kJoinWaitMaxS, static_cast<int>(m_Baseline.size()));
-            }
+            adoptRunning(owner, hostId);
             return;
         }
         if (state != "0") {
@@ -205,25 +175,108 @@ public:
         scrub(cmd);
         if (!ok) {
             removeOpenedMarker();
-            m_GaveUp = true;
-            m_Advertise = false;  // 熱點沒有開起來：不叫 host 來連
-            m_StateToSend = VIPLE_VR_HOTSPOT_STATE_CLOSED;
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: softapmanager did not accept create - hotspot left off");
-            return;
         }
-        m_Opened = true;
-        m_PeerSeen = false;
-        m_OpenedAt = std::chrono::steady_clock::now();
-        resetRound();
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-VR-HOTSPOT] auto: the host is on the local network and the streaming adapter hotspot was off - "
-                    "switched it on; it is switched off again if the host does not join within about %d s (up to %d s while the "
-                    "host reports it is still connecting), %s",
-                    kJoinWaitS, kJoinWaitMaxS, m_OwnerIsSelf ? "and when this session ends" : "and when the app exits (it stays on between games)");
+        applyCreate(ok);
 #else
         (void) ssid;
         (void) key;
         (void) hostId;
+#endif
+    }
+
+    // §HOTSPOT-REOPEN-ASYNC（2026-11-20 第三輪審查 C35／C41／D13）：QUERY 得到 READY 之後的「再開一次」。這時在 SDL 主迴圈上，
+    // softapmanager 的 status＋create 最久要等十幾秒（逾時＋重試），不可以在這裡同步做：只在主迴圈上做判斷，socket 的
+    // 往返與標記檔交給一條背景執行緒（只碰它自己的副本與靜態函式，不碰任何成員），結果放在一個 atomic 裡；主迴圈下一輪
+    // 用 finishReopen() 取回、在主迴圈上套用。進行中 waitingForHost()＝true（每秒輪詢）、advertiseToHost()＝false
+    // （熱點還沒開好不叫 host 來連）。resume()／解構會先等它做完再套用，不會和還原、關熱點同時碰 softapmanager。
+    // 回傳 false＝沒有開始（條件不成立：已經開著、已經放棄、暫停中、不是 Frame、正在做）；ssid／key 一律清掉
+    bool startReopen(std::string& ssid, std::string& key, const std::string& hostId)
+    {
+#if defined(__linux__)
+        std::string cmd;
+        const bool fieldsOk = !ssid.empty() && ssid.size() <= 32 && key.size() >= 8 && key.size() <= 64 &&
+                              ssid.find_first_of("\t\r\n") == std::string::npos && key.find_first_of("\t\r\n") == std::string::npos;
+        if (fieldsOk) {
+            cmd = "create\t" + ssid + "\t" + key + "\thbs6\tnoroute\t--hidden";
+        }
+        scrub(ssid);
+        scrub(key);
+        if (m_HostId.empty()) {
+            m_HostId = hostId;
+        }
+        struct stat st;
+        if (!fieldsOk || m_ReopenRunning || m_Opened || m_GaveUp || !m_RestoreCmd.empty() || stat(kSocket, &st) != 0) {
+            scrub(cmd);
+            return false;
+        }
+        m_ReopenOwner = appPid();
+        m_ReopenHostId = hostId;
+        m_ReopenResult.store(kReopenPending, std::memory_order_relaxed);
+        std::atomic<int>* out = &m_ReopenResult;
+        const long owner = m_ReopenOwner;
+        std::string host = hostId;
+        try {
+            // cmd 含金鑰：搬進執行緒（不留副本），用完在那邊清掉
+            m_ReopenThread = std::thread([out, owner, host = std::move(host), cmd = std::move(cmd)]() mutable {
+                std::string reply;
+                const bool asked = ask("status", &reply, 2000);
+                const std::string state = firstField(reply);
+                scrub(reply);
+                int r = kReopenSkipped;
+                if (asked && state == "2") {
+                    r = kReopenAlreadyOn;
+                }
+                else if (asked && state == "0") {
+                    writeOpenedMarker(owner, host);
+                    if (sendCreate(cmd)) {
+                        r = kReopenOpened;
+                    }
+                    else {
+                        removeOpenedMarker();
+                        r = kReopenFailed;
+                    }
+                }
+                scrub(cmd);
+                out->store(r, std::memory_order_release);
+            });
+        }
+        catch (...) {
+            scrub(cmd);
+            return false;  // 開不了執行緒：這一場不再開（和 softapmanager 沒回應一樣，熱點資訊照舊送）
+        }
+        scrub(cmd);
+        m_ReopenRunning = true;
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: switching the hotspot on in the background");
+        return true;
+#else
+        (void) ssid;
+        (void) key;
+        (void) hostId;
+        return false;
+#endif
+    }
+
+    // §HOTSPOT-REOPEN-ASYNC：背景的「再開一次」做完了就在呼叫端的執行緒（主迴圈）套用結果。回傳 true＝這一輪剛套用
+    // （呼叫端接著送熱點資訊）
+    bool finishReopen()
+    {
+#if defined(__linux__)
+        if (!m_ReopenRunning || m_ReopenResult.load(std::memory_order_acquire) == kReopenPending) {
+            return false;
+        }
+        joinReopen();
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    bool reopenRunning() const
+    {
+#if defined(__linux__)
+        return m_ReopenRunning;
+#else
+        return false;
 #endif
     }
 
@@ -237,23 +290,20 @@ public:
     void tick(int hostLinkOnHotspot = -1, const std::vector<std::string>& hostAddrs = std::vector<std::string>())
     {
 #if defined(__linux__)
-        if (m_QueryPending &&
-            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_QueryAt).count() >= kStatusWaitS) {
-            m_QueryPending = false;
-            m_GaveUp = true;
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-VR-HOTSPOT] auto: the host did not answer the query within %d s - hotspot left off for this session",
-                        kStatusWaitS);
-        }
+        // §REVIEW-1120 第三輪 D12：QUERY 的逾時不在這裡判斷，改在這一輪讀過 host 的回報之後（expireQuery）
+        m_LastLinkRead = hostLinkOnHotspot;
         if (!m_Opened) {
             // 熱點不是這個行程開的（使用者自己開的）或已經放棄：不動它。但這一場確認有連線走熱點＝這台 host 現在連得上，
             // 把它的失敗紀錄清掉，之後恢復自動開（熱點是誰開的都一樣）
-            if (hostLinkOnHotspot == 1 && !m_Verified && !m_HostId.empty()) {
+            // §REVIEW-1120 第三輪 C39：使用者自己開的熱點、這一場沒有多連線（-1）時，改看這台 host 自己的位址在不在熱點上
+            // （host 回報 JOINED 在 onHostStatus 處理）
+            const bool ownOnUserAp = m_UserHotspot && hostLinkOnHotspot < 0 && hotspotHasAnyOf(hostAddrs);
+            if ((hostLinkOnHotspot == 1 || ownOnUserAp) && !m_Verified && !m_HostId.empty()) {
                 m_Verified = true;
                 if (clearNoJoin(m_HostId)) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                "[VIPLE-VR-HOTSPOT] auto: this session has a link to the host over a hotspot this app did not switch "
-                                "on - cleared the host's no-join record");
+                                "[VIPLE-VR-HOTSPOT] auto: %s a hotspot this app did not switch on - cleared the host's no-join record",
+                                ownOnUserAp ? "one of this host's own addresses is on" : "this session has a link to the host over");
                 }
             }
             return;
@@ -432,6 +482,17 @@ public:
             return;
         }
         if (!m_Opened) {
+            // §REVIEW-1120 第三輪 C39：使用者自己開的熱點（我們沒開也沒關過）、這一場沒有多連線可以確認：host 說它連上了就清紀錄
+            if (state == VIPLE_VR_HS_JOINED && m_UserHotspot && m_ClosedAtCount < 0 && m_LastLinkRead < 0 && !m_Verified &&
+                !m_HostId.empty()) {
+                m_Verified = true;
+                if (clearNoJoin(m_HostId)) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                "[VIPLE-VR-HOTSPOT] auto: the host reports it joined a hotspot this app did not switch on - cleared the "
+                                "host's no-join record");
+                }
+                return;
+            }
             if (state == VIPLE_VR_HS_JOINED && m_GaveUp && m_ClosedAtCount >= 0 && !m_LateJoinHandled && !m_HostId.empty()) {
                 m_LateJoinHandled = true;
                 const bool eased = easeNoJoin(m_HostId);
@@ -453,12 +514,17 @@ public:
             static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_OpenedAt).count());
         if (isStatic) {
             if (deferStatic(state)) {
+                // §REVIEW-1120 第三輪 C37：等 kStaticWaitS 秒是從「延後的這一刻」起算（joinDeadlineS），不是從開熱點起算。
+                // 已經在延後中又來一則靜態回報（例如 DISABLED → NO_ADAPTER）不重新起算
+                if (m_StaticPending == 0) {
+                    m_StaticPendingAtS = waitedS;
+                }
                 m_StaticPending = state;
                 m_PeerSeen = false;  // 之前因為「熱點上有裝置」算數的不算了：要連線確認或這台自己的位址
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VR-HOTSPOT] auto: the host reports it will not join the hotspot by itself (state %d, %d s) - "
-                            "something else on the host may still join: waiting up to %d s for a link before switching it off",
-                            state, waitedS, kStaticWaitS);
+                            "something else on the host may still join: waiting until %d s for a link before switching it off",
+                            state, waitedS, m_StaticPendingAtS + kStaticWaitS);
                 return;
             }
             closeForStatic(state, waitedS);
@@ -503,6 +569,10 @@ public:
         }
         const int st = m_StateToSend;
         m_StateToSend = -1;
+        if (st == VIPLE_VR_HOTSPOT_STATE_QUERY && m_QueryPending) {
+            // §REVIEW-1120 第三輪 D12：QUERY 的逾時從真正送出的這一刻起算（送不出去、下一輪重送時再往後移）
+            m_QueryAt = std::chrono::steady_clock::now();
+        }
         return st;
 #else
         return -1;
@@ -520,7 +590,24 @@ public:
 #endif
     }
 
-    // §HOTSPOT-ADAPT 第 3 步：QUERY 得到 READY：呼叫端重新讀熱點的 SSID 與金鑰、再呼叫一次 openForLan()
+    // §HOTSPOT-ADAPT 第 3 步：QUERY 送出後 kStatusWaitS 秒沒有答案就放棄。每輪在 onHostStatus() 之後呼叫
+    // （§REVIEW-1120 第三輪 D12：原本在 tick() 開頭，排在同一輪讀 host 回報之前，第 4～5 秒之間到的 READY 會先被判成
+    // 「host 沒回答」、READY 本身被丟掉）
+    void expireQuery()
+    {
+#if defined(__linux__)
+        if (m_QueryPending &&
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_QueryAt).count() >= kStatusWaitS) {
+            m_QueryPending = false;
+            m_GaveUp = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: the host did not answer the query within %d s - hotspot left off for this session",
+                        kStatusWaitS);
+        }
+#endif
+    }
+
+    // §HOTSPOT-ADAPT 第 3 步：QUERY 得到 READY：呼叫端重新讀熱點的 SSID 與金鑰、再呼叫 startReopen()
     bool takeReopen()
     {
 #if defined(__linux__)
@@ -537,7 +624,7 @@ public:
     bool waitingForHost() const
     {
 #if defined(__linux__)
-        return m_QueryPending || (m_Opened && !m_Verified && !m_PeerSeen);
+        return m_QueryPending || m_ReopenRunning || (m_Opened && !m_Verified && !m_PeerSeen);
 #else
         return false;
 #endif
@@ -549,6 +636,9 @@ public:
     bool advertiseToHost()
     {
 #if defined(__linux__)
+        if (m_ReopenRunning) {
+            return false;  // §HOTSPOT-REOPEN-ASYNC：熱點還在背景開，開好了（finishReopen）才送
+        }
         const bool yes = m_Advertise && m_RestoreCmd.empty();
         if (!yes && !m_AdvertiseLogged) {
             m_AdvertiseLogged = true;
@@ -565,7 +655,8 @@ public:
     bool wantsHostAddrs() const
     {
 #if defined(__linux__)
-        return m_Opened && !m_PeerSeen;
+        // §REVIEW-1120 第三輪 C39：使用者自己開的熱點還沒確認過這台時也要（清失敗紀錄用）
+        return (m_Opened && !m_PeerSeen) || (m_UserHotspot && !m_Opened && !m_Verified);
 #else
         return false;
 #endif
@@ -843,6 +934,22 @@ public:
     void resume()
     {
 #if defined(__linux__)
+        // §HOTSPOT-REOPEN-ASYNC：背景的「再開一次」還在跑：等它做完、套用結果（開起來了就照下面「這一場開的」處理），
+        // 不和下面的 teardown／還原同時碰 softapmanager。這裡是場次結束的清理執行緒或解構，主迴圈已經停了
+        if (m_ReopenRunning) {
+            joinReopen();
+        }
+        if (m_Opened && !m_Verified && !m_PeerSeen && m_StaticPending != 0) {
+            // §REVIEW-1120 第三輪 C42：延後判斷中的靜態回報（host 說它不會自己連）、場次就結束了：host 的說法照樣記成 S 類，
+            // 不要丟掉（不然下一場又開著等一整輪）。熱點本身照下面的規則處理（App 還在就留著：沒有場次時不自動關）
+            int fails = 0;
+            recordNoJoin(m_HostId, &fails, 'S', m_StaticPending);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: the session ended while waiting on the host's report that it will not join "
+                        "(state %d; %d time(s) in a row) - recorded as static",
+                        m_StaticPending, fails);
+            m_StaticPending = 0;
+        }
         if (m_Opened) {
             if (m_OwnerIsSelf) {
                 closeOpened("the session ended");
@@ -929,6 +1036,12 @@ private:
     static constexpr int kNoJoinMaxHosts = 8;  // §HOTSPOT-ADAPT：hotspot-nojoin 最多記幾台（超過丟最舊的）
     static constexpr int kNoJoinMaxFails = 99;
     static constexpr long kNoJoinStaleS = 7L * 24 * 3600;  // 紀錄這麼久沒更新就當作沒有
+    // §HOTSPOT-REOPEN-ASYNC：背景再開的結果
+    static constexpr int kReopenPending = -1;
+    static constexpr int kReopenSkipped = 0;    // status 沒回、或回的不是 0／2
+    static constexpr int kReopenOpened = 1;
+    static constexpr int kReopenFailed = 2;     // create 沒被接受
+    static constexpr int kReopenAlreadyOn = 3;  // status 回 2
 
     // §HOTSPOT-ADAPT：連續失敗 n 次之後隔多久才再為這台 host 開一次熱點：10 → 30 → 90 分鐘 → 上限 4 小時
     static long noJoinBackoffS(int fails)
@@ -941,7 +1054,7 @@ private:
     int joinDeadlineS() const
     {
         if (m_StaticPending != 0) {
-            return kStaticWaitS;
+            return m_StaticPendingAtS + kStaticWaitS;  // §REVIEW-1120 第三輪 C37：從延後的那一刻起算
         }
         if (!m_ServerReports || m_StatusCount == 0) {
             return kJoinWaitS;
@@ -963,8 +1076,95 @@ private:
     {
         m_JoinedAtS = -1;
         m_StaticPending = 0;
+        m_StaticPendingAtS = 0;
         m_OwnAddrSeen = false;
         m_ExtendLogged = false;
+    }
+
+    // 熱點已經開著（openForLan／背景再開時 status 回 "2"）。是我們之前開的（App 還在、連著玩下一個遊戲）就接手；
+    // 不是就是使用者自己開的，不碰
+    void adoptRunning(long owner, const std::string& hostId)
+    {
+        long pid = 0;
+        std::string prevHost;
+        if (!readOpenedMarker(&pid, &prevHost)) {
+            m_UserHotspot = true;  // §REVIEW-1120 第三輪 C39
+            return;
+        }
+        writeOpenedMarker(owner, hostId);
+        m_Opened = true;
+        m_OpenedAt = std::chrono::steady_clock::now();
+        resetRound();
+        if (prevHost.empty()) {
+            // §FRAME-HOTSPOT-EARLY：App 啟動時先開的（還沒有對應到哪一台 host）：上面已經有裝置就算這台連上了
+            m_PeerSeen = hotspotHasNewPeer(m_Baseline);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: the hotspot was switched on when the app started (%s)",
+                        m_PeerSeen ? "a device is already connected to it" : "nothing connected to it yet - waiting for the host");
+        }
+        else if (prevHost == hostId) {
+            m_PeerSeen = hotspotHasNewPeer(m_Baseline);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: the hotspot is still on from the previous session with this host (%s)",
+                        m_PeerSeen ? "host connected" : "waiting for the host again");
+        }
+        else {
+            // 換了一台 host：上一台的網卡可能還掛在熱點上，不算數——等一個新的對端
+            m_Baseline = hotspotPeers();
+            m_PeerSeen = false;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: the hotspot is on from a session with another host - waiting about %d s (up to "
+                        "%d s while the host reports it is still connecting) for this host to join (%d device(s) of the "
+                        "previous one ignored)",
+                        kJoinWaitS, kJoinWaitMaxS, static_cast<int>(m_Baseline.size()));
+        }
+    }
+
+    // create 送完（openForLan 或背景再開）：套用結果。標記檔已經由呼叫端寫好或刪掉
+    void applyCreate(bool ok)
+    {
+        if (!ok) {
+            m_GaveUp = true;
+            m_Advertise = false;  // 熱點沒有開起來：不叫 host 來連
+            m_StateToSend = VIPLE_VR_HOTSPOT_STATE_CLOSED;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: softapmanager did not accept create - hotspot left off");
+            return;
+        }
+        m_Opened = true;
+        m_PeerSeen = false;
+        m_OpenedAt = std::chrono::steady_clock::now();
+        resetRound();
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-HOTSPOT] auto: the host is on the local network and the streaming adapter hotspot was off - "
+                    "switched it on; it is switched off again if the host does not join within about %d s (up to %d s while the "
+                    "host reports it is still connecting), %s",
+                    kJoinWaitS, kJoinWaitMaxS, m_OwnerIsSelf ? "and when this session ends" : "and when the app exits (it stays on between games)");
+    }
+
+    // §HOTSPOT-REOPEN-ASYNC：等背景的「再開一次」結束，在呼叫端的執行緒套用（主迴圈的 finishReopen，或 resume）
+    void joinReopen()
+    {
+        if (m_ReopenThread.joinable()) {
+            m_ReopenThread.join();
+        }
+        m_ReopenRunning = false;
+        const int r = m_ReopenResult.exchange(kReopenPending, std::memory_order_acquire);
+        // openForLan 在 status 之後做的那幾件（這一輪的基準）
+        m_OwnerIsSelf = m_ReopenOwner == static_cast<long>(getpid());
+        m_Baseline.clear();
+        m_HostId = m_ReopenHostId;
+        m_Verified = false;
+        if (r == kReopenAlreadyOn) {
+            adoptRunning(m_ReopenOwner, m_ReopenHostId);
+        }
+        else if (r == kReopenOpened || r == kReopenFailed) {
+            applyCreate(r == kReopenOpened);
+        }
+        else {
+            // softapmanager 沒有回應或熱點正在變動：和 openForLan 一樣什麼都不做（狀態不明，熱點資訊照舊送）
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: softapmanager did not give a usable status - hotspot not switched on");
+        }
     }
 
     // 靜態回報要不要延後（見 onHostStatus 的說明）。DISABLED＝server 不主動連，host 的 Steam 仍可能自己連上來；
@@ -1663,6 +1863,15 @@ private:
     int m_HostFlags = 0;
     int m_JoinedAtS = -1;            // 第一次看到 JOINED 是開熱點後第幾秒；-1＝目前不是 JOINED
     int m_StaticPending = 0;         // 延後處理中的靜態回報（VIPLE_VR_HS_*）；0＝沒有
+    int m_StaticPendingAtS = 0;      // 開始延後的那一刻是開熱點後第幾秒（C37）
+    bool m_UserHotspot = false;      // 這一場的熱點是使用者自己開的、熱點資訊照送（C39）
+    int m_LastLinkRead = -1;         // 最近一輪 tick() 的 hostLinkOnHotspot（-1＝這一場沒有多連線）
+    // §HOTSPOT-REOPEN-ASYNC：背景再開。m_ReopenResult 是唯一跨執行緒的欄位；其餘只有主迴圈（或 resume）碰
+    std::thread m_ReopenThread;
+    std::atomic<int> m_ReopenResult {kReopenPending};
+    bool m_ReopenRunning = false;
+    long m_ReopenOwner = 0;
+    std::string m_ReopenHostId;
     bool m_OwnAddrSeen = false;      // 沒有多連線的場次：在熱點上看到這台 host 自己的位址了
     bool m_ExtendLogged = false;
     unsigned m_StatusSeq = 0;

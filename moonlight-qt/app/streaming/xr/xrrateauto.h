@@ -29,7 +29,8 @@
 // 試升又必然失敗。半速換不回 host 沒出的畫格，所以這一種**不降、不判試升失敗，只記錄**（使用者 11-20 的決定）。
 //   判斷（HostCadence，下面）：每張影像的時戳是 host 的 Present 時刻（90 kHz）、幀號連續（半速跳過的不佔號）。
 //   「這一張與前一張幀號連號、Present 卻隔了 (div＋0.75) 格以上」＝中間 host 少出了 round(間隔)−div 格；網路造不出這個訊號
-//   （掉一張幀號就不連號）。幀號不連號、拿不到幀號的一律不算 host（寧可少算）。
+//   （掉一張幀號就不連號）。幀號不連號、拿不到幀號的一律不算 host（寧可少算）。host 重編上一張（REPEATED）的那一張
+//   時戳不是 Present，另外處理（§RATE-CAUSE-HOST-REPEAT，見 HostCadence）。
 //   一段預期外的重複在結束它的那張新影像到的時候結算：先扣掉 host 少出的格數（記進 hostRep），剩下的才照原本的規則
 //   分短重複／補包／斷流、分頭盔端／網路。decide() 的式子沒有改——shortRep 本來就只剩網路＋頭盔端。
 #pragma once
@@ -52,41 +53,60 @@ namespace xrrate {
     // §VR-RATE-CAUSE-HOST：從每一張解出來的影像（依解碼順序，被跳過沒顯示的也要給）算「host 累計少出了幾個顯示格」。
     // 不依賴 OpenXR／FFmpeg；影像 render thread 餵、把累計值跟著影像發布，frame thread 拿「這一張的累計 − 上一張顯示的
     // 累計」當這一段重複裡 host 的份量——中間有影像被跳過也對得上。
+    //
+    // §RATE-CAUSE-HOST-REPEAT（2026-11-20 第三輪審查 C44／C45／C49）：帶 REPEATED 的那一張（host 重編上一張）的 RTP 時戳
+    // **不是** Present 時刻。host 端（Sunshine/src/video.cpp 3019～3077）只有 pop 到新影像時才設 frame_timestamp；逾時重編
+    // 與「要了 IDR、不等影像」重編都留空，stream.cpp 6102～6104 就把它填成 ratecontrol_next_frame_start——6294 在每一張
+    // 送完時更新成「上一張開始送的時刻＋送完需要的時間」，閒置期間不會往前走。所以 REPEATED 那一張的時戳只比上一張的
+    // Present 晚幾 ms，拿它量 Present 間隔永遠量不到缺口（第二輪的門檻讓整段算 host 的分支走不到）。新的判斷：
+    //   1. REPEATED 的那一張不當 Present 的基準：下一張真的影像改跟「最後一張不是 REPEATED 的影像」（anchor）比 Present，
+    //      期望的間隔是中間的張數 ×div（重編的那幾張也各佔 div 格顯示）。
+    //   2. REPEATED、不是關鍵幀、而且到這裡的時間比上一張晚 ≥ kRepeatArrivalMinUs：這是 host 等滿 pop 逾時（VR 是 100 ms，
+    //      video.cpp 2561～2563 的 def_fps_target=10）沒有新影像才重編的——host 在上一張之後至少 kHostRepeatWaitUs 沒出畫格。
+    //      這一張先記 repeatSlots() 格（逾時長度換算的下限，不是整段），之後那張真的影像再補「Present 缺口 − 已記的」。
+    //      關鍵幀＝要了 IDR 的那一種，不記；到得太快（< kRepeatArrivalMinUs）也不記：解碼器沒標關鍵幀的 IDR 重編、
+    //      或 host 的 minimum_fps_target 設得比 10 高時，都可能是這種，寧可少算。
+    // 寧可少算 host：多算會讓網路真的不穩時該降半速而不降。
     class HostCadence {
     public:
         // Present 間隔要比該有的多出這麼多格才算少出（host 的 Present 時刻有抖動；沿用 xrlatchstats.h 配戴驗過的容忍值）
         static constexpr double kGapTolerance = 0.75;
-        // 帶 REPEATED、Present 間隔也有缺口、而且不是關鍵幀的那一張（host 等到逾時沒有新畫面才重編上一張）：整段重複都算 host
-        static constexpr uint32_t kWholeRun = 0xffffu;
         static constexpr int64_t kNoFrameNo = INT64_MIN;
+        // host 的 VR 逾時重編間隔（video.cpp 2561～2563：captureSource==1 時 def_fps_target=10 → 100 ms）
+        static constexpr double kHostRepeatWaitUs = 100000.0;
+        // REPEATED 的那一張比上一張晚這麼久才到，才當成逾時重編（逾時 100 ms，留 20 ms 給到達時間的抖動）
+        static constexpr uint64_t kRepeatArrivalMinUs = 80000;
 
-        // 這一張與前一張之間 host 少出了幾個顯示格。frameNoDelta＝幀號差（1＝連號）；ptsDelta90＝Present 時刻的差
-        // （90 kHz，已經處理過 32 bit 繞回）；periodUs＝顯示週期；div＝串流每張佔幾格；repeated＝這一張帶 REPEATED；
-        // keyframe＝這一張是關鍵幀（解碼端拿不到時給 false）。
-        // §RATE-CAUSE-HOST-IDR（2026-11-20 審查 C05）：host 收到 IDR 要求、當下沒有新影像時會直接重編上一張當 IDR，
-        // 也帶 REPEATED、幀號照樣連號，但 Present 間隔只有幾 ms。那張大 IDR 在壅塞線路上晚到，前面那段重複是網路造成的。
-        // 所以 REPEATED 也要先通過同一條 Present 間隔門檻（不寫死 100 ms，跟著實際週期走）；關鍵幀就算有缺口也只算
-        // 缺口本身的格數，不整段算 host。寧可少算 host：多算會讓網路真的不穩時該降半速而不降。
-        static uint32_t missedSlots(int64_t frameNoDelta, int64_t ptsDelta90, double periodUs, int div, bool repeated,
-                                    bool keyframe = false)
+        // 一張真的影像（不是 REPEATED）與 anchor 之間 host 少出了幾個顯示格。frameNoDelta＝與 anchor 的幀號差
+        // （中間都連號；1＝緊接著）；ptsDelta90＝與 anchor 的 Present 差（90 kHz，已經處理過 32 bit 繞回）；
+        // periodUs＝顯示週期；div＝串流每張佔幾格。中間那幾張 REPEATED 已經記過的格數由呼叫端扣掉
+        static uint32_t missedSlots(int64_t frameNoDelta, int64_t ptsDelta90, double periodUs, int div)
         {
-            if (frameNoDelta != 1) {
-                return 0;  // 中間掉了一張（或幀號不可用）：歸網路
+            if (frameNoDelta < 1) {
+                return 0;  // 幀號不可用
             }
             const double ptsPerPeriod = 90000.0 * periodUs / 1e6;
             if (!(ptsPerPeriod >= 1.0) || ptsDelta90 <= 0) {
                 return 0;
             }
-            const double d = div >= 2 ? 2.0 : 1.0;
+            const double d = (div >= 2 ? 2.0 : 1.0) * static_cast<double>(frameNoDelta);
             const double periods = static_cast<double>(ptsDelta90) / ptsPerPeriod;
             if (periods < d + kGapTolerance) {
                 return 0;
             }
-            if (repeated && !keyframe) {
-                return kWholeRun;
-            }
             const double missed = std::floor(periods + 0.5) - d;
-            return missed <= 0.0 ? 0u : static_cast<uint32_t>((std::min)(missed, static_cast<double>(kWholeRun)));
+            return missed <= 0.0 ? 0u : static_cast<uint32_t>((std::min)(missed, 65535.0));
+        }
+
+        // 逾時重編的那一張：host 在上一張之後至少 kHostRepeatWaitUs 沒出畫格，換算成「那一段重複裡 host 的份量」的下限
+        // （上一張自己佔的 div 格不算）
+        static uint32_t repeatSlots(double periodUs, int div)
+        {
+            if (!(periodUs >= 1.0)) {
+                return 0;
+            }
+            const double n = std::floor(kHostRepeatWaitUs / periodUs + 1e-6) - (div >= 2 ? 2.0 : 1.0);
+            return n <= 0.0 ? 0u : static_cast<uint32_t>(n);
         }
 
         // 32 bit 的 RTP 時戳（約 13 小時繞一圈）相減
@@ -99,22 +119,51 @@ namespace xrrate {
             return d;
         }
 
-        // 每一張解出來的影像一次。frameNo＝kNoFrameNo 表示拿不到幀號。回傳到這一張為止的累計（32 bit，會繞回，只拿來相減）
-        uint32_t onFrame(int64_t frameNo, int64_t pts90, double periodUs, int div, bool repeated, bool keyframe = false)
+        // 每一張解出來的影像一次。frameNo＝kNoFrameNo 表示拿不到幀號；repeated＝這一張帶 REPEATED；keyframe＝這一張是
+        // 關鍵幀（解碼端拿不到時給 false）；arrivalUs＝這一張到這裡的時刻（單調時鐘，µs；0＝不知道，REPEATED 就不記）。
+        // 回傳到這一張為止的累計（32 bit，會繞回，只拿來相減）
+        uint32_t onFrame(int64_t frameNo, int64_t pts90, double periodUs, int div, bool repeated, bool keyframe = false,
+                         uint64_t arrivalUs = 0)
         {
+            bool chained = false;  // 與上一張連號
             if (m_Have && frameNo != kNoFrameNo && m_PrevFrameNo != kNoFrameNo) {
                 const int64_t dn = frameNo - m_PrevFrameNo;
-                if (dn == 1) {
+                chained = dn == 1;
+                if (chained) {
                     ++m_Pairs;
                 }
                 else {
                     ++m_Breaks;
                 }
-                m_Cum += missedSlots(dn, ptsDelta(pts90, m_PrevPts), periodUs, div, repeated, keyframe);
+            }
+            if (chained && m_AnchorValid) {
+                if (repeated) {
+                    ++m_AnchorRepeats;
+                    if (!keyframe && arrivalUs != 0 && m_PrevArrivalUs != 0 && arrivalUs >= m_PrevArrivalUs + kRepeatArrivalMinUs) {
+                        const uint32_t c = repeatSlots(periodUs, div);
+                        m_Cum += c;
+                        m_AnchorCredit += c;
+                    }
+                }
+                else {
+                    const uint32_t missed =
+                        missedSlots(static_cast<int64_t>(m_AnchorRepeats) + 1, ptsDelta(pts90, m_AnchorPts), periodUs, div);
+                    m_Cum += missed > m_AnchorCredit ? missed - m_AnchorCredit : 0u;
+                }
+            }
+            if (!repeated) {
+                // 真的 Present：之後的影像跟它比
+                m_AnchorValid = true;
+                m_AnchorPts = pts90;
+                m_AnchorRepeats = 0;
+                m_AnchorCredit = 0;
+            }
+            else if (!chained) {
+                m_AnchorValid = false;  // 掉了一張之後第一張就是 REPEATED：沒有可以比的 Present，等下一張真的影像
             }
             m_Have = true;
             m_PrevFrameNo = frameNo;
-            m_PrevPts = pts90;
+            m_PrevArrivalUs = arrivalUs;
             return m_Cum;
         }
 
@@ -125,7 +174,12 @@ namespace xrrate {
     private:
         bool m_Have = false;
         int64_t m_PrevFrameNo = kNoFrameNo;
-        int64_t m_PrevPts = 0;
+        uint64_t m_PrevArrivalUs = 0;
+        // anchor＝最後一張不是 REPEATED 的影像（它的時戳才是 Present）
+        bool m_AnchorValid = false;
+        int64_t m_AnchorPts = 0;
+        uint32_t m_AnchorRepeats = 0;  // anchor 之後連號的 REPEATED 張數
+        uint32_t m_AnchorCredit = 0;   // 那幾張 REPEATED 已經記進 m_Cum 的格數
         uint32_t m_Cum = 0;
         uint32_t m_Pairs = 0, m_Breaks = 0;
     };
@@ -282,6 +336,8 @@ namespace xrrate {
         uint64_t totalHeadsetSlots() const { return m_TotHeadsetSlots; }
         // §VR-RATE-CAUSE-HOST：整場累計、host 沒出畫格造成的重複格（不算進上面兩個，也不進降速與試升的判斷）
         uint64_t totalHostSlots() const { return m_TotHostSlots; }
+        // 歷史視窗夠 n 個了沒（換分頻後會清空；不夠時 recentHostSum 等於「沒有資料」，不是「host 恢復了」）
+        bool hostHistoryReady(int n = 3) const { return m_HistN >= n; }
         uint32_t recentHostSum(int n) const
         {
             uint32_t sum = 0;
@@ -361,6 +417,9 @@ namespace xrrate {
             const int before = m_Div;
             m_Div = div;
             m_SinceNew = 0;
+            // §REVIEW-1120 第三輪 C48：進行中的那一段先算進整場累計（分不出是不是 host，照網路／頭盔端），再歸零。
+            // 歷史視窗照舊清掉（舊分頻量到的不能拿來判斷新分頻）；「host 沒出畫格」那一行的結束判斷看 hostHistoryReady()
+            addTotals(m_RunUnexpected, m_RunHeadset);
             m_RunUnexpected = 0;
             m_RunHeadset = 0;
             m_SwitchUs = nowUs;

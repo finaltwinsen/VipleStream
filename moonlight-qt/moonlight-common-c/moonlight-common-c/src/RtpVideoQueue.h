@@ -168,6 +168,11 @@ typedef struct _RTP_VIDEO_QUEUE {
     uint64_t nkAnyRxUs;                 // 最近一次有任何影像封包到的時間（不分 block；不跟著對象重設）
     uint32_t nkLogCount;                // 逐筆 log 的節流（整場累計）
     uint32_t nkGiveUpLogCount;          // 放棄的 log 另外節流（少數事件，要看得到）
+    // §FLAT-REPAIR（§REVIEW-1120）：平面場次的往返門檻已經關了、只是沿用到「關之前已回報的那個 block」結束。
+    // 這時佇列不對新的對象開始回報；新對象（還沒報過）的等待上限改成 mlCarryHoldUs（兩條在送＝一個幀週期，
+    // 一條＝0 不等），和門檻關著時相同。由 VideoStream 每次加封包前設定（VR 場次恆為 false）。
+    bool mlCarryOnly;
+    uint32_t mlCarryHoldUs;
     uint32_t mlStatNack;                // 以下三個是 10 s 統計：回報次數、回報之後收齊的 block、server 回補不了的次數
     uint32_t mlStatRepaired;
     uint32_t mlStatGone;

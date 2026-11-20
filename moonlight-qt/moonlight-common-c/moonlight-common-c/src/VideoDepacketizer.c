@@ -61,8 +61,10 @@ static unsigned int consecutiveFrameDrops;
 // 封頂 4000 ms 和 §FRZ-WD-RTT 同一個值，下限最多 8100 ms，那時 watchdog（最長 8 秒）本來就會接手。
 // §IDR-RETRY-RTT-FB：ENet 的 rtt 拿不到（ENet 斷線或重連、控制改走 QUIC）時依序改用：多連線控制 PONG 的
 // rtt（vrmlCtrlRttMs，只算已確認的連線）→ QUIC 目前 active 路徑裡最小的 smoothed rtt（取最小，避免壞掉那條
-// 膨脹的值把重試拖到好幾秒）→ 這一場最後一個有效值（只在等 IDR 時記，沒等過就沒有）。都沒有才是原本的 300／600／1200。
-// LiGetEstimatedRttInfo 的語意不動（§FRZ-WD-RTT 等呼叫端依賴「ENet 斷了就回 false」）。
+// 膨脹的值把重試拖到好幾秒）→ 這一場最後一個有效值（等 IDR 與 §FRZ-WD-RTT 的 watchdog 檢查時記，都沒跑過就沒有）。
+// 都沒有才是原本的 300／600／1200。LiGetEstimatedRttInfo 的語意不動。
+// §REVIEW-1120：這條後備鏈改成 vipleRecoveryRtt()（Limelight-internal.h），§FRZ-WD-RTT 的 watchdog 與連續丟幀上限的
+// 後備請求也用它，三處對 RTT 的看法一致（原本 watchdog 只看 ENet，ENet 重連期間退回 2000／1000 ms）。
 // 只在「等 IDR 中又收到一張完整幀」時檢查（跟第一次請求同一個時機：網路還通才要，
 // 不在斷線時堆請求）；完全沒有完整幀時由 §FRZ-WATCHDOG 與「no video packets」那條路負責。
 // VR session 不走這裡（它有自己的 LOSS／REFRESH 狀態機與逾時），PyroWave 每幀都是 intra 也不走。
@@ -85,8 +87,9 @@ static void idrRetryReset(void) {
     idrRetryCount = 0;
 }
 
-// §IDR-RETRY-RTT-FB：取重試下限用的 rtt。回傳來源標籤（log 用），都拿不到回 NULL
-static const char* idrRetryRtt(uint64_t nowMs, uint32_t* rttMs) {
+// §IDR-RETRY-RTT-FB：取重試下限用的 rtt。回傳來源標籤（log 用），都拿不到回 NULL。
+// 只在 VideoRecv 執行緒呼叫（idrRetryLastRttMs 不加鎖）：IDR 重試、連續丟幀上限、§FRZ-WD-RTT 都在這條執行緒
+const char* vipleRecoveryRtt(uint64_t nowMs, uint32_t* rttMs) {
     int linkRtt;
 
     if (LiGetEstimatedRttInfo(rttMs, NULL)) {
@@ -160,8 +163,8 @@ static void idrRetryPoll(uint64_t nowMs, uint32_t frameIndex) {
     }
 
     // §IDR-RETRY-RTT：往返時間的下限（ENet 是無鎖快照，這個執行緒可以讀；§FRZ-WD-RTT 也在同一條執行緒讀；
-    // 後備來源見 idrRetryRtt）
-    rttSrc = idrRetryRtt(nowMs, &rttMs);
+    // 後備來源見 vipleRecoveryRtt）
+    rttSrc = vipleRecoveryRtt(nowMs, &rttMs);
     if (rttSrc != NULL) {
         uint32_t floorMs;
 
@@ -186,21 +189,34 @@ static void idrRetryPoll(uint64_t nowMs, uint32_t frameIndex) {
     LiRequestIdrFrame();
 }
 
-// 連續丟幀上限（後備）要送之前問：是不是剛剛才要過。是的話這一次不送，免得跟計時重試成對送出
-static bool idrRetryRequestedRecently(uint32_t* agoMs) {
+// 連續丟幀上限（後備）要送之前問：是不是剛剛才要過。是的話這一次不送，免得跟計時重試成對送出。
+// §REVIEW-1120：「剛剛」＝IDR_RETRY_FIRST_MS 與 §IDR-RETRY-RTT 的下限 2×rtt＋100 取大的（rtt 來源同計時重試）。
+// 原本固定 300 ms：往返 600 ms 時計時重試要等 1300 ms，後備請求卻每 0.5～1 秒（120 幀）就再要一張。
+static bool idrRetryRequestedRecently(uint32_t* agoMs, uint32_t* windowMs) {
+    const uint64_t nowMs = PltGetMillis();
     uint32_t lastReqMs;
     uint32_t ago;
+    uint32_t rttMs = 0;
+    uint32_t win = IDR_RETRY_FIRST_MS;
 
+    *windowMs = win;
     if (!idrRetryApplies() || !idrRequestLastTimeMs(&lastReqMs)) {
         return false;
     }
 
-    ago = (uint32_t)PltGetMillis() - lastReqMs;
+    ago = (uint32_t)nowMs - lastReqMs;
     if ((int32_t)ago < 0) {
         ago = 0;
     }
+    if (vipleRecoveryRtt(nowMs, &rttMs) != NULL) {
+        const uint32_t floorMs = 2 * (rttMs > IDR_RETRY_RTT_CAP_MS ? IDR_RETRY_RTT_CAP_MS : rttMs) + 100;
+        if (floorMs > win) {
+            win = floorMs;
+        }
+    }
     *agoMs = ago;
-    return ago < IDR_RETRY_FIRST_MS;
+    *windowMs = win;
+    return ago < win;
 }
 
 static LINKED_BLOCKING_QUEUE decodeUnitQueue;
@@ -324,6 +340,7 @@ static void dropFrameStateFrom(int caller) {
     // If we reach our limit, immediately request an IDR frame and reset
     if (consecutiveFrameDrops == CONSECUTIVE_DROP_LIMIT) {
         uint32_t idrAgoMs = 0;
+        uint32_t idrWindowMs = 0;
 
         // Restart the count
         consecutiveFrameDrops = 0;
@@ -332,10 +349,10 @@ static void dropFrameStateFrom(int caller) {
         waitingForIdrFrame = true;
 
         // §IDR-RETRY：次數上限留著當後備（沒有完整幀進來時計時重試不會跑）。
-        // 300 ms 內已經要過就不再送：計時重試會接手，兩條路不成對送出。
-        if (idrRetryRequestedRecently(&idrAgoMs)) {
-            Limelog("Reached consecutive drop limit (IDR requested %u ms ago, not requesting again)\n",
-                    (unsigned int)idrAgoMs);
+        // 重試間隔的下限內（300 ms 或 2×rtt＋100）已經要過就不再送：計時重試會接手，兩條路不成對送出。
+        if (idrRetryRequestedRecently(&idrAgoMs, &idrWindowMs)) {
+            Limelog("Reached consecutive drop limit (IDR requested %u ms ago, within %u ms, not requesting again)\n",
+                    (unsigned int)idrAgoMs, (unsigned int)idrWindowMs);
         }
         else {
             Limelog("Reached consecutive drop limit\n");

@@ -94,7 +94,7 @@ static uint32_t stallNowMs() { return GetTickCount(); }   // 與 GetLastInputInf
 // 固定 ≈2016 ms、phase 全是 SDL_WaitEventTimeout（卡在 SDL 內部），log 前後沒有任何
 // 觸發事件。要知道是 SDL 的哪條路（hidapi 列舉／DirectInput／WGI／訊息泵）只能看堆疊。
 // 兩個月下來證據一筆都沒留住（log 只保留幾份、CLI 串流只寫 stdout），所以 11-20 起：
-//   - 一次停頓抄兩次（≥300 ms 與 ≥1000 ms）：最上面幾格相同＝卡在同一個呼叫；不同＝一連串慢呼叫。
+//   - 一次停頓抄兩次（≥300 ms 與 ≥1000 ms，兩次至少相隔 700 ms）：最上面幾格相同＝卡在同一個呼叫；不同＝一連串慢呼叫。
 //   - 每一格都印「模組+RVA」，SDL3.dll 沒有 PDB 也能拿同版符號離線解；解得到符號時一併印。
 //   - 印主執行緒的等待鏈（Wait Chain Traversal）：跨行程的等待（輸入法／hook／SendMessage／ALPC）
 //     鏈上會出現別的行程；卡在同步 IOCTL 時鏈上只有本執行緒。
@@ -104,13 +104,30 @@ static uint32_t stallNowMs() { return GetTickCount(); }   // 與 GetLastInputInf
 // （StackWalk64 會進 dbghelp，可能配置記憶體、拿 loader 相關的鎖）一律等恢復主執行緒之後，
 // 對著那份副本做——主執行緒若正拿著 heap 鎖被暫停，在暫停期間配置記憶體就是死結。
 // dbghelp 非 thread-safe，只在 watchdog 執行緒使用。
+// §REVIEW-1120 第三輪 C43：等待鏈在恢復主執行緒後立刻抓（展開堆疊、解符號之前），節點先放靜態緩衝區、晚點才格式化
+struct StallWaitChain {
+    bool ok = false;
+    const char* failed = nullptr;  // 失敗的 API 名稱
+    DWORD err = 0;
+    DWORD count = 0;
+    BOOL cycle = FALSE;
+    bool beatMoved = false;        // 抓完時主迴圈已經恢復（這份等待鏈可能已經不是停頓當下的狀態）
+};
+
 struct StallStack {
     DWORD64 pcs[32];
     int n;
+    bool movedAtSuspend;  // §REVIEW-1120 第三輪 C43：暫停主執行緒當下節拍已經變了＝抄到的不是停頓現場
+    StallWaitChain wct;
 };
 
 static constexpr uint32_t kStallCapture1Ms = 300;
 static constexpr uint32_t kStallCapture2Ms = 1000;
+// §REVIEW-1120 第三輪 C38：第二次至少要比第一次晚這麼久。停頓常在主迴圈閒置（SDL_WaitEventTimeout 最多約 1 秒）之後才被
+// 回報，那時 stale 早就過了 300 ms，兩個門檻會在相鄰兩輪（約 10 ms）先後成立，兩份堆疊必然相同，看不出是不是同一個呼叫
+static constexpr uint32_t kStallCaptureGapMs = 700;
+// 等待鏈的節點（只有 watchdog 執行緒讀寫）
+static WAITCHAIN_NODE_INFO s_StallWctNodes[WCT_MAX_NODE_COUNT];
 static constexpr qint64 kStallFileMaxBytes = 1024 * 1024;
 
 // 主執行緒堆疊的副本（只有 watchdog 執行緒讀寫；256 KB 足夠涵蓋 32 格）
@@ -178,14 +195,46 @@ static void stallAppendToFile(const std::string& rec)
     }
 }
 
+// 主執行緒的等待鏈（同步查詢、唯讀；不需要暫停主執行緒）。只抓、不格式化（節點放 s_StallWctNodes）：
+// 要在主執行緒剛恢復、還沒做任何慢的事（載入符號、展開堆疊）之前呼叫，才是停頓當下的狀態。
+// COM 的等待要另外註冊 ole32 的 callback 才展得開，這裡沒有做：鏈上會停在 COM 節點，看得到「在等 COM」但看不到對方是誰。
+static void stallReadWaitChain(StallWaitChain* w, uint32_t stalledBeat)
+{
+    *w = StallWaitChain();
+    if (s_StallMainThreadId == 0) return;
+    HWCT wct = OpenThreadWaitChainSession(0, nullptr);
+    if (wct == nullptr) {
+        w->failed = "OpenThreadWaitChainSession";
+        w->err = GetLastError();
+        return;
+    }
+    DWORD count = WCT_MAX_NODE_COUNT;
+    if (!GetThreadWaitChain(wct, 0, WCTP_GETINFO_ALL_FLAGS, s_StallMainThreadId, &count, s_StallWctNodes, &w->cycle)) {
+        w->failed = "GetThreadWaitChain";
+        w->err = GetLastError();
+    }
+    else {
+        w->ok = true;
+        w->count = count > WCT_MAX_NODE_COUNT ? WCT_MAX_NODE_COUNT : count;   // 鏈比緩衝區長時 count 回報實際長度
+    }
+    CloseThreadWaitChainSession(wct);
+    w->beatMoved = s_LoopBeat.load() != stalledBeat;
+}
+
 // 暫停主執行緒、抄暫存器與堆疊記憶體、恢復，之後才展開。回傳格數（0 = 沒抄到）。
-static void stallCaptureMainThreadStack(StallStack* out)
+// stalledBeat＝停頓中的節拍值：暫停當下（ResumeThread 之前）就比對，抄到的是不是停頓現場以那一刻為準（C43）
+static void stallCaptureMainThreadStack(StallStack* out, uint32_t stalledBeat)
 {
     out->n = 0;
+    out->movedAtSuspend = false;
+    out->wct = StallWaitChain();
     if (s_StallMainThreadId == 0) return;
     HANDLE hThread = OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION,
                                 FALSE, s_StallMainThreadId);
-    if (hThread == nullptr) return;
+    if (hThread == nullptr) {
+        stallReadWaitChain(&out->wct, stalledBeat);  // 堆疊抄不到，等待鏈照樣抓
+        return;
+    }
 
     // 符號引擎先初始化好（會配置記憶體、載入模組清單），不可留到暫停期間
     static bool s_symInit = false;
@@ -225,9 +274,12 @@ static void stallCaptureMainThreadStack(StallStack* out)
                 s_StallStackCopyLen = len;
             }
         }
+        out->movedAtSuspend = s_LoopBeat.load() != stalledBeat;   // atomic 讀取：不拿鎖、不配置記憶體
         ResumeThread(hThread);
     }
     // ── 主執行緒已恢復 ──
+    // 等待鏈立刻抓：下面的 SymRefreshModuleList／StackWalk64 第一次碰到某個模組時要載入符號，可能花上幾百毫秒
+    stallReadWaitChain(&out->wct, stalledBeat);
 
     if (haveCtx && s_StallStackCopyLen > 0) {
         // §REVIEW-1120：SymInitialize 只在第一次擷取時列模組，之後才載入的 DLL（驅動的 user-mode 元件、輸入法、
@@ -341,29 +393,22 @@ static const char* stallWctStatusName(int s)
     }
 }
 
-// 主執行緒的等待鏈（同步查詢、唯讀；不需要暫停主執行緒）。COM 的等待要另外註冊 ole32 的 callback 才展得開，
-// 這裡沒有做：鏈上會停在 COM 節點，看得到「在等 COM」但看不到對方是誰。
-static void stallLogWaitChain(std::string* rec)
+// 印 stallReadWaitChain 抓到的等待鏈（節點在 s_StallWctNodes；這一筆紀錄格式化完之前不可以再抓下一次）
+static void stallLogWaitChain(std::string* rec, const StallWaitChain& w)
 {
     if (s_StallMainThreadId == 0) return;
-    HWCT wct = OpenThreadWaitChainSession(0, nullptr);
-    if (wct == nullptr) {
-        stallEmit(rec, "wait chain: OpenThreadWaitChainSession failed (%lu)", GetLastError());
+    if (!w.ok) {
+        if (w.failed != nullptr) {
+            stallEmit(rec, "wait chain: %s failed (%lu)", w.failed, w.err);
+        }
         return;
     }
-    WAITCHAIN_NODE_INFO nodes[WCT_MAX_NODE_COUNT];
-    DWORD count = WCT_MAX_NODE_COUNT;
-    BOOL isCycle = FALSE;
-    if (!GetThreadWaitChain(wct, 0, WCTP_GETINFO_ALL_FLAGS, s_StallMainThreadId, &count, nodes, &isCycle)) {
-        stallEmit(rec, "wait chain: GetThreadWaitChain failed (%lu)", GetLastError());
-        CloseThreadWaitChainSession(wct);
-        return;
-    }
-    if (count > WCT_MAX_NODE_COUNT) count = WCT_MAX_NODE_COUNT;   // 鏈比緩衝區長時 count 回報實際長度
-    stallEmit(rec, "wait chain (%lu node(s)%s):", count, isCycle ? ", DEADLOCK CYCLE" : "");
+    const DWORD count = w.count;
+    stallEmit(rec, "wait chain (%lu node(s)%s)%s:", count, w.cycle ? ", DEADLOCK CYCLE" : "",
+              w.beatMoved ? " (main loop resumed before the wait chain was read)" : "");
     const DWORD myPid = GetCurrentProcessId();
     for (DWORD i = 0; i < count; i++) {
-        const WAITCHAIN_NODE_INFO& n = nodes[i];
+        const WAITCHAIN_NODE_INFO& n = s_StallWctNodes[i];
         if (n.ObjectType == WctThreadType) {
             char procName[MAX_PATH] = "";
             const DWORD pid = n.ThreadObject.ProcessId;
@@ -396,7 +441,6 @@ static void stallLogWaitChain(std::string* rec)
                       n.LockObject.Alertable ? " alertable" : "");
         }
     }
-    CloseThreadWaitChainSession(wct);
 }
 
 static void stallPhaseName(int32_t phase, char* buf, size_t len)
@@ -414,6 +458,7 @@ static int inputStallWatchdogProc(void*)
     uint32_t lastBeatChangeMs = stallNowMs();
     bool reported = false;
     int captures = 0;          // 這次停頓已經抄了幾次堆疊（0～2）
+    uint32_t cap1Ms = 0;       // 第一次抄的時刻（C38：第二次至少晚 kStallCaptureGapMs）
     StallStack firstStack = {};
     int32_t reportedPhase = -2;
     uint32_t stallCount = 0;
@@ -439,11 +484,13 @@ static int inputStallWatchdogProc(void*)
         }
         uint32_t stale = now - lastBeatChangeMs;
         if (reported && ((captures == 0 && stale >= kStallCapture1Ms) ||
-                         (captures == 1 && stale >= kStallCapture2Ms))) {
+                         (captures == 1 && stale >= kStallCapture2Ms && now - cap1Ms >= kStallCaptureGapMs))) {
+            if (captures == 0) cap1Ms = now;
             StallStack st;
-            stallCaptureMainThreadStack(&st);
-            // 抄完才算停頓長度：節拍若在抄的當下已經恢復，這份堆疊就不是停頓現場
-            const bool stillStalled = (s_LoopBeat.load() == lastBeat);
+            stallCaptureMainThreadStack(&st, lastBeat);
+            // §REVIEW-1120 第三輪 C43：是不是停頓現場看「暫停主執行緒的當下」節拍有沒有變（抄完、展開之後才看會把
+            // 展開堆疊、載入符號那段時間內恢復的停頓也標成不可信——暫存器與堆疊副本是暫停時抄的，一定是現場）
+            const bool stillStalled = !st.movedAtSuspend;
             char pn[48]; stallPhaseName(reportedPhase, pn, sizeof(pn));
             std::string rec;
             if (captures == 0) {
@@ -457,9 +504,9 @@ static int inputStallWatchdogProc(void*)
             }
             stallLogStack(&rec, st, stale, captures + 1, captures == 1 ? &firstStack : nullptr);
             if (!stillStalled) {
-                stallEmit(&rec, "  (main loop resumed while capturing; this stack may be past the stall)");
+                stallEmit(&rec, "  (main loop resumed before the thread was suspended; this stack is past the stall)");
             }
-            stallLogWaitChain(&rec);
+            stallLogWaitChain(&rec, st.wct);
             stallAppendToFile(rec);
             if (captures == 0) firstStack = st;
             captures++;
@@ -6000,39 +6047,46 @@ void Session::exec()
             // §HOTSPOT-ADAPT 第 3 步：還在等 host 時每秒一輪（host 的否定回報一秒內生效），其餘照舊每 5 秒
             if (SDL_TICKS_PASSED(SDL_GetTicks(), lastHotspotPollTime + (m_FrameHotspot.waitingForHost() ? 1000 : 5000))) {
                 lastHotspotPollTime = SDL_GetTicks();
+                // §HOTSPOT-REOPEN-ASYNC（第三輪審查 C35／C41／D13）：背景的「再開一次」做完了就在這裡（主迴圈）套用，
+                // 接著的 checkAndSendVrHotspotInfo 把熱點資訊送出去。還在做的期間不送熱點資訊（advertiseToHost 為否）、
+                // 也不跑 tick 與 host 回報的判斷（HOTSPOT_STATUS 留在 common-c 裡，seq 不變，做完的下一輪照樣讀得到）
+                m_FrameHotspot.finishReopen();
                 checkAndSendVrHotspotInfo();
-                // §HOTSPOT-VERIFY：有多連線時以「這一場有沒有連線走熱點」為準（熱點上有別台 host 的網卡不算）
-                // §HOTSPOT-ADAPT：沒有多連線的場次多給一個線索——這台 host 自己回報的位址出現在熱點上就是它
-                const bool hotspotHaveLinks = LiGetVrLinkCount() > 0;
-                std::vector<std::string> hotspotHostAddrs;
-                if (!hotspotHaveLinks && m_FrameHotspot.wantsHostAddrs()) {
-                    QReadLocker computerLock(&m_Computer->lock);
-                    for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
-                        hotspotHostAddrs.push_back(iface.address.toStdString());
+                if (!m_FrameHotspot.reopenRunning()) {
+                    // §HOTSPOT-VERIFY：有多連線時以「這一場有沒有連線走熱點」為準（熱點上有別台 host 的網卡不算）
+                    // §HOTSPOT-ADAPT：沒有多連線的場次多給一個線索——這台 host 自己回報的位址出現在熱點上就是它
+                    const bool hotspotHaveLinks = LiGetVrLinkCount() > 0;
+                    std::vector<std::string> hotspotHostAddrs;
+                    if (!hotspotHaveLinks && m_FrameHotspot.wantsHostAddrs()) {
+                        QReadLocker computerLock(&m_Computer->lock);
+                        for (const auto& iface : std::as_const(m_Computer->serverAdvertisedInterfaces)) {
+                            hotspotHostAddrs.push_back(iface.address.toStdString());
+                        }
+                        hotspotHostAddrs.push_back(m_Computer->activeAddress.address().toStdString());
                     }
-                    hotspotHostAddrs.push_back(m_Computer->activeAddress.address().toStdString());
-                }
-                m_FrameHotspot.tick(hotspotHaveLinks ? LiVrLinkOnDedicated() : -1, hotspotHostAddrs);  // §FRAME-HOTSPOT-AUTO
-                // §HOTSPOT-ADAPT 第 3 步：host 的回報（排在 tick 之後：這一輪剛確認的連線優先於 host 的說法）
-                {
+                    m_FrameHotspot.tick(hotspotHaveLinks ? LiVrLinkOnDedicated() : -1, hotspotHostAddrs);  // §FRAME-HOTSPOT-AUTO
+                    // §HOTSPOT-ADAPT 第 3 步：host 的回報（排在 tick 之後：這一輪剛確認的連線優先於 host 的說法）
                     VIPLE_VR_TLV_HOTSPOT_STATUS hsStatus;
                     uint32_t hsSeq = 0;
                     if (LiGetVrHotspotStatus(&hsStatus, &hsSeq) >= 0) {
                         m_FrameHotspot.onHostStatus(hsStatus.state, hsStatus.flags, hsStatus.attempts, hsStatus.restarts,
                                                     hsStatus.elapsedDs, hsStatus.wlanReason, hsSeq);
                     }
+                    // 第三輪審查 D12：QUERY 的逾時排在這一輪的回報之後判斷（剛到的 READY 優先）
+                    m_FrameHotspot.expireQuery();
                     if (m_FrameHotspot.takeReopen()) {
-                        // 問過 host、它現在有閒著的無線介面：這時才開熱點、送熱點資訊
+                        // 問過 host、它現在有閒著的無線介面：這時才開熱點（背景）；開好了下一輪才送熱點資訊
                         std::string ssid, key;
-                        if (readVrHotspotCreds(&ssid, &key)) {
-                            m_FrameHotspot.openForLan(ssid, key, m_Computer->uuid.toStdString());
-                        }
+                        const bool haveCreds = readVrHotspotCreds(&ssid, &key);
+                        const bool started = haveCreds && m_FrameHotspot.startReopen(ssid, key, m_Computer->uuid.toStdString());
                         wipeStdString(ssid);
                         wipeStdString(key);
-                        checkAndSendVrHotspotInfo();
+                        if (!started) {
+                            checkAndSendVrHotspotInfo();  // 沒有開始（不是 Frame、讀不到設定等）：照舊送熱點資訊
+                        }
                     }
-                    sendVrHotspotStateIfAny(m_FrameHotspot);
                 }
+                sendVrHotspotStateIfAny(m_FrameHotspot);
                 if (m_HotspotFlat) {
                     // §HOTSPOT-FLAT：host 的無線網卡這時才連上熱點：把它的位址交給 MP-QUIC（已經有就不動）
                     for (const std::string& ip : FrameHotspot::peerAddresses()) {

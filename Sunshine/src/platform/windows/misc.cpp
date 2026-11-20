@@ -2449,7 +2449,25 @@ namespace platf {
     bool pub_hold = false;
     clock::time_point pub_at {};  // 這一輪的起點
     std::atomic<std::uint32_t> pub_attempts {0};  // 這一輪我們自己發起的連線次數（不加序號，重送時順便帶）
-    std::atomic<std::uint32_t> stop_gen {0};  // vr_hotspot_stop 每呼叫一次加一
+    // §HOTSPOT-REQ-GEN（2026-11-20 第三輪審查）：熱點請求的世代號，取代原本只在 CLOSED 時加一的 stop_gen。由 mtx 保護。
+    //   req_gen：每一則 INFO／QUERY 加一（vr_hotspot_expect，在交給背景執行緒之前）；
+    //   closed_gen：這個世代已經有了不是 INFO 的答案——頭盔說熱點關了（vr_hotspot_stop）或回答了查詢（vr_hotspot_query）。
+    // vr_hotspot_connect 進來時記下 req_gen，之後「req_gen 變了，或 closed_gen 等於它」＝過期：不寫快照、不 arm。
+    // 原本只認 stop_gen：排在佇列裡或還在等介面的舊 INFO，在下一場的 QUERY 之後才做完時，照樣用舊的 SSID arm 看門狗、
+    // 把快照從 READY 改成 TRYING（失敗時則用 NO_ADAPTER 蓋掉 READY）；比對又在鎖外，CLOSED 夾在比對與 arm 之間也擋不住。
+    // QUERY 標 closed_gen 是因為 stream.cpp 從佇列取出請求時沒有帶世代號：上一場排著的 INFO 在 QUERY 之後才取出時，
+    // 讀到的 req_gen 已經是 QUERY 那一則的，只靠 req_gen 認不出來
+    std::uint32_t req_gen = 0;
+    std::uint32_t closed_gen = ~0u;
+    // §HOTSPOT-STATUS-ROUND（第三輪審查）：快照的 attempts／restarts／reason 只在看門狗那一輪（arm 之後）有意義。
+    // 沒走到 arm 的結果（回答查詢、挑不到介面、設定檔建不起來）改報 0（reason 用 pub_reason），
+    // 不帶上一輪留下的計數；被收掉的舊看門狗收工前寫進計數器的值也一併遮掉
+    bool pub_counters = false;
+    std::uint32_t pub_reason = 0;
+
+    bool stale_locked(std::uint32_t gen) {
+      return req_gen != gen || closed_gen == gen;
+    }
 
     void publish_locked(int state, int flags, bool fresh) {
       if (fresh) {
@@ -2463,26 +2481,28 @@ namespace platf {
       ++pub_seq;
     }
 
-    // 不可拿著 mtx 呼叫
-    void publish(int state, int flags, bool fresh = false) {
-      std::lock_guard lk(mtx);
-      publish_locked(state, flags, fresh);
-    }
-
     // §HOTSPOT-SUPERSEDE（2026-11-20 審查）：新的一輪沒有走到 arm()（挑不到介面、設定檔建不起來、只是查詢）時，
     // 以 fresh 寫入結果，同時解除上一輪。原本只寫快照：fresh 會把 pub_hold 清掉，而 armed、armed_at、alive_until
     // 都沒動，上一輪還活著的看門狗（連開兩場、同一場重送熱點資訊）繼續被 keepalive 續命、照舊對舊的介面重連與重啟，
     // 它的 TRYING／LEFT／GAVE_UP 還會蓋掉這裡剛寫的結果。所以和 vr_hotspot_stop 一樣：不再續命、下一輪醒來就收工，
     // 並把 pub_hold 設回去——收工前（最慢 kPoll）它不可以再改快照；下一次 fresh 發佈（arm、查詢）自然解除。
-    // 回傳上一輪是不是還在跑。不可拿著 mtx 呼叫
-    bool publish_and_supersede(int state) {
+    // §HOTSPOT-REQ-GEN：gen＝這一則請求進來時的 req_gen。過期（connect：stale_locked；查詢：req_gen 變了——查詢自己標了
+    // closed_gen，所以不看它）就什麼都不寫、不收掉任何東西，回 false。reason 只給沒走到 arm 的結果用（見 pub_reason）。
+    // *was_running＝上一輪是不是還在跑。不可拿著 mtx 呼叫
+    bool publish_and_supersede(int state, std::uint32_t gen, bool is_query, std::uint32_t reason, bool *was_running) {
       std::lock_guard lk(mtx);
-      const bool was_running = armed && running;
+      *was_running = false;
+      if (is_query ? req_gen != gen : stale_locked(gen)) {
+        return false;
+      }
+      *was_running = armed && running;
       publish_locked(state, 0, true);
+      pub_counters = false;
+      pub_reason = reason;
       armed = false;
       alive_until = {};
       pub_hold = true;
-      return was_running;
+      return true;
     }
 
     // 看門狗用：round＝這一輪迴圈開頭讀到的 armed_at。迴圈跑到一半時新的一輪已經 arm 了，就不可以把上一輪的狀態寫進去
@@ -2689,6 +2709,17 @@ namespace platf {
         if (!src || !dst || src == dst) {
           return -1;
         }
+        // 2026-11-20 第三輪審查：SendARP 在本機鄰居表裡已經有這個位址時直接回表裡的值、不上線（文件如此；Windows 的 Stale
+        // 項目沒有流量時會一直留著）。接收卡住、兩邊都沒有流量時表裡多半還有熱點那一端，探測就一直回「有回應」、
+        // 卡住永遠判不出來。所以先把這一筆（不是手動設的固定項目才刪）拿掉，逼它真的發 ARP。走到這裡時這張網卡
+        // 已經 kRxStall 以上收送都不動，刪一筆鄰居項目不會影響進行中的流量
+        MIB_IPNET_ROW2 nb {};
+        nb.InterfaceLuid = luid;
+        nb.Address.Ipv4.sin_family = AF_INET;
+        nb.Address.Ipv4.sin_addr.s_addr = dst;
+        if (GetIpNetEntry2(&nb) == NO_ERROR && nb.State != NlnsPermanent) {
+          DeleteIpNetEntry2(&nb);
+        }
         ULONG mac[2] {};
         ULONG len = 6;
         return SendARP(dst, src, mac, &len) == NO_ERROR ? 1 : 0;
@@ -2739,10 +2770,15 @@ namespace platf {
       constexpr std::chrono::seconds kMissingReopen {10};
       std::optional<clock::time_point> missing_since;
       clock::time_point missing_reopen_at {};
+      int reopen_n = 0;  // 這一段查不到期間重開了幾次控制代碼（第三輪審查 C23：退避與限制 log）
+      DWORD reopen_last_rc = ERROR_SUCCESS;
       bool came_back = false;
-      // §HOTSPOT-VERDICT-AFTER-RESTART：提早重啟後介面第一次查得到的時刻，與當時的失敗次數、我們自己的連線次數
+      // §HOTSPOT-VERDICT-AFTER-RESTART：提早重啟後介面第一次查得到的時刻，與當時的兩種失敗次數、我們自己的連線次數。
+      // 第三輪審查 C16：兩種失敗通知分開記基準、各自取增量再取大。原本基準是兩者的 max、判定時再拿 max 去減：
+      // 重啟前 attempt_fail 比較多、重啟後只增加 connection_complete（熱點看不到時就是這樣）時，新增的失敗被基準吃掉
       std::optional<clock::time_point> restart_ready_at;
-      std::uint32_t restart_fail_base = 0;
+      std::uint32_t restart_complete_base = 0;
+      std::uint32_t restart_attempt_base = 0;
       int restart_try_base = 0;
       while (true) {
         std::this_thread::sleep_for(fast ? std::chrono::duration_cast<clock::duration>(kFastPoll) : std::chrono::duration_cast<clock::duration>(kPoll));
@@ -2786,7 +2822,8 @@ namespace platf {
           down_since.reset();  // 上一輪留下來的斷線時刻不算在這一輪
           hs_flags = 0;  // 這一輪的 TRYING 已經在 arm() 放進快照
           restart_ready_at.reset();
-          restart_fail_base = 0;
+          restart_complete_base = 0;
+          restart_attempt_base = 0;
           restart_try_base = 0;
           // 上一輪記過「網卡不在」：這一輪介面還是查不到時要再回報一次（arm 已經把快照改回 TRYING）
           missing_logged = false;
@@ -2809,8 +2846,17 @@ namespace platf {
           if (!missing_since) {
             missing_since = now;
             missing_reopen_at = now + std::chrono::duration_cast<clock::duration>(kMissingReopen);
+            reopen_n = 0;
+            reopen_last_rc = ERROR_SUCCESS;
           } else if (now >= missing_reopen_at) {
-            missing_reopen_at = now + std::chrono::duration_cast<clock::duration>(kMissingReopen);
+            // 第三輪審查 C23：原本整段查不到期間每 10 秒重開一次、每次印一行，網卡被拔掉的長場次沒有上限。
+            // 我們自己重啟後的 kRestartSettle＋60 秒內維持每 kMissingReopen（重啟後介面晚回來時要靠它換控制代碼，時間軸不變）；
+            // 之外改成 10 → 20 → 40 → 60 秒（之後每 60 秒）。log 只印第一次、回傳值變了、之後每 10 次一行
+            ++reopen_n;
+            const bool after_our_restart = last_restart && now - *last_restart < kRestartSettle + std::chrono::seconds(60);
+            const int backoff_s = after_our_restart ? static_cast<int>(kMissingReopen.count()) :
+                                                      std::min(60, static_cast<int>(kMissingReopen.count()) << std::min(reopen_n, 3));
+            missing_reopen_at = now + std::chrono::duration_cast<clock::duration>(std::chrono::seconds(backoff_s));
             HANDLE h2 = nullptr;
             DWORD ver2 = 0;
             const DWORD orc = fn_WlanOpenHandle(WLAN_API_MAKE_VERSION(2, 0), nullptr, &ver2, &h2);
@@ -2821,9 +2867,12 @@ namespace platf {
                 fn_WlanRegisterNotification(hClient, WLAN_NOTIFICATION_SOURCE_ACM, TRUE, on_acm, nullptr, nullptr, nullptr);
               }
             }
-            BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] adapter not found for "
-                            << std::chrono::duration_cast<std::chrono::seconds>(now - *missing_since).count() << " s (query err=" << st_err
-                            << ") - reopened the WLAN handle (rc=" << orc << ')';
+            if (reopen_n == 1 || orc != reopen_last_rc || reopen_n % 10 == 0) {
+              BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] adapter not found for "
+                              << std::chrono::duration_cast<std::chrono::seconds>(now - *missing_since).count() << " s (query err=" << st_err
+                              << ") - reopened the WLAN handle (rc=" << orc << ", #" << reopen_n << ", next in " << backoff_s << " s)";
+            }
+            reopen_last_rc = orc;
           }
           if (last_restart && now - *last_restart < kRestartSettle) {
             continue;  // 剛重啟：等它回來，不改階段
@@ -2840,7 +2889,8 @@ namespace platf {
           if (early_done && !restart_ready_at) {
             // §HOTSPOT-VERDICT-AFTER-RESTART：提早重啟後第一次查得到。判定從這裡起算
             restart_ready_at = now;
-            restart_fail_base = std::max(fail_completes.load(), fail_attempts.load());
+            restart_complete_base = fail_completes.load();
+            restart_attempt_base = fail_attempts.load();
             restart_try_base = fast_tries;
           }
         }
@@ -2922,8 +2972,11 @@ namespace platf {
               const auto completes = fail_completes.load();
               const auto attempts = fail_attempts.load();
               const auto fails = std::max(completes, attempts);
-              // 重啟後新增的失敗（fails 只增不減；重啟後失敗統計沒有歸零，所以用差值）
-              const auto fails_after = early_done ? (fails >= restart_fail_base ? fails - restart_fail_base : 0) : fails;
+              // 重啟後新增的失敗（計數只增不減；重啟後失敗統計沒有歸零，所以用差值）。兩種通知各自相減再取大（C16）：
+              // 關聯失敗兩種都會發、熱點看不到時只有 connection_complete，取大不會比原本多算
+              const auto dc = completes >= restart_complete_base ? completes - restart_complete_base : 0u;
+              const auto da = attempts >= restart_attempt_base ? attempts - restart_attempt_base : 0u;
+              const auto fails_after = early_done ? std::max(dc, da) : fails;
               // 最後才查介面狀態（多一次 WLAN 查詢）：正在關聯或驗證時不判，等它有結果
               if (fails >= kVerdictMinFails && (!early_done || fails_after >= kVerdictMinFailsAfterRestart) &&
                   (!early_done || is_idle_disconnected(hClient, g))) {
@@ -3044,8 +3097,12 @@ namespace platf {
             if (!gave_up) {
               gave_up = true;
               lk.unlock();
-              BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: still receiving nothing after " << max_restarts
-                                 << " restart(s) - giving up for this session; unplug and replug the adapter";
+              if (max_restarts <= 0) {
+                BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: connected but receiving nothing - adapter restarts are disabled (vr_hotspot_restart_max = 0)";
+              } else {
+                BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: still receiving nothing after " << max_restarts
+                                   << " restart(s) - giving up for this session; unplug and replug the adapter";
+              }
             }
             continue;
           }
@@ -3139,7 +3196,9 @@ namespace platf {
             }
             lk.unlock();
             BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: still disconnected after " << max_restarts
-                               << " restart(s) - giving up for this session; unplug and replug the adapter (reconnect attempts continue every "
+                               << (max_restarts <= 0 ? " restart(s) - adapter restarts are disabled (vr_hotspot_restart_max = 0)" :
+                                                       " restart(s) - giving up for this session; unplug and replug the adapter")
+                               << " (reconnect attempts continue every "
                                << std::chrono::duration_cast<std::chrono::seconds>(kGaveUpRetry).count() << " s, last reason="
                                << reason_text(last_fail_reason.load()) << ')';
           }
@@ -3158,13 +3217,17 @@ namespace platf {
       fn_WlanCloseHandle(hClient, nullptr);
     }
 
-    // vr_hotspot_connect 選定網卡後呼叫：每場重新起算次數
-    void arm(const GUID &g, const std::string &ssid) {
-      if (config::vr.hotspot_restart_max <= 0) {
-        publish(VIPLE_VR_HS_DISABLED, 0, true);  // 沒有看門狗就沒有人會連
-        return;
-      }
+    // vr_hotspot_connect 選定網卡後呼叫：每場重新起算次數。gen＝那一則請求進來時的 req_gen；過期就不 arm、回 false。
+    // 比對和寫入在同一把鎖底下（第三輪審查 C20）：vr_hotspot_stop、vr_hotspot_query、vr_hotspot_expect 都在鎖內改世代號，
+    // 所以這裡讀到「沒過期」時它們的臨界區還沒開始，之後進來的會照常把這一輪收掉。
+    // 第三輪審查 C18：vr_hotspot_restart_max = 0 時原本直接發 DISABLED、不啟動看門狗（之後沒有人會去連），但查詢照樣回 READY，
+    // 頭盔每場都開熱點再關、退避一直被清掉。文件寫的是「0 只關掉重啟」，所以看門狗照常啟動；每條重啟路徑本來就用
+    // restarts < max_restarts 擋著，0 時一次都不重啟
+    bool arm(const GUID &g, const std::string &ssid, std::uint32_t gen) {
       std::lock_guard lk(mtx);
+      if (stale_locked(gen)) {
+        return false;
+      }
       guid = g;
       want_ssid = ssid;
       armed = true;
@@ -3178,11 +3241,14 @@ namespace platf {
       last_fail_reason.store(0);
       fail_assoc.store(false);
       pub_attempts.store(0);
+      pub_counters = true;
+      pub_reason = 0;
       publish_locked(VIPLE_VR_HS_TRYING, 0, true);  // §HOTSPOT-ADAPT 第 3 步：這一輪的第一個狀態
       if (!running) {
         running = true;
         std::thread(loop).detach();
       }
+      return true;
     }
   }  // namespace hotspot_wd
 
@@ -3200,25 +3266,28 @@ namespace platf {
     out.seq = hotspot_wd::pub_seq;
     out.state = hotspot_wd::pub_state;
     out.flags = hotspot_wd::pub_flags;
-    out.attempts = static_cast<std::uint8_t>(std::min<std::uint32_t>(hotspot_wd::pub_attempts.load(), 255));
-    out.restarts = static_cast<std::uint8_t>(std::clamp(hotspot_wd::restarts, 0, 255));
+    // §HOTSPOT-STATUS-ROUND：計數只屬於看門狗那一輪；沒走到 arm 的結果報 0（reason 用那個結果自己的）
+    const bool counters = hotspot_wd::pub_counters;
+    out.attempts = static_cast<std::uint8_t>(counters ? std::min<std::uint32_t>(hotspot_wd::pub_attempts.load(), 255) : 0u);
+    out.restarts = static_cast<std::uint8_t>(counters ? std::clamp(hotspot_wd::restarts, 0, 255) : 0);
     const auto ds = std::chrono::duration_cast<std::chrono::milliseconds>(hotspot_wd::clock::now() - hotspot_wd::pub_at).count() / 100;
     out.elapsed_ds = static_cast<std::uint16_t>(std::clamp<std::int64_t>(ds, 0, 65535));
-    out.reason = hotspot_wd::last_fail_reason.load();
+    out.reason = counters ? hotspot_wd::last_fail_reason.load() : hotspot_wd::pub_reason;
     return out;
   }
 
   std::uint32_t vr_hotspot_expect() {
     std::lock_guard lk(hotspot_wd::mtx);
     hotspot_wd::pub_hold = true;
+    ++hotspot_wd::req_gen;  // §HOTSPOT-REQ-GEN：排著或處理中的舊請求從此過期
     return hotspot_wd::pub_seq;
   }
 
   void vr_hotspot_stop() {
-    hotspot_wd::stop_gen.fetch_add(1);
     bool was_running;
     {
       std::lock_guard lk(hotspot_wd::mtx);
+      hotspot_wd::closed_gen = hotspot_wd::req_gen;  // §HOTSPOT-REQ-GEN：這一則（含排著、處理中的）不再 arm、不再寫結果
       was_running = hotspot_wd::armed && hotspot_wd::running;
       hotspot_wd::armed = false;  // keepalive 不再延長
       hotspot_wd::alive_until = {};  // 看門狗下一輪（最慢 kPoll）醒來先看這個就收工，不會再連
@@ -3231,6 +3300,14 @@ namespace platf {
   void vr_hotspot_query() {
     // 熱點沒開，所以「已連線」的介面一定是連在別的網路上：只要有一張沒連線的無線介面就算可以
     bool ready = false;
+    // §HOTSPOT-REQ-GEN：這一則查詢的世代（它的 expect 已經在 round_begin 做完）。標成 closed：排著或還在等介面的舊 INFO
+    // 不可以在這個答案之後再 arm 或寫結果
+    std::uint32_t gen;
+    {
+      std::lock_guard lk(hotspot_wd::mtx);
+      gen = hotspot_wd::req_gen;
+      hotspot_wd::closed_gen = gen;
+    }
     ensure_wlanapi_loaded();
     if (fn_WlanOpenHandle && fn_WlanCloseHandle && fn_WlanFreeMemory && fn_WlanEnumInterfaces && fn_WlanSetProfile && fn_WlanConnect) {
       HANDLE hClient = nullptr;
@@ -3247,9 +3324,11 @@ namespace platf {
       }
     }
     // §HOTSPOT-SUPERSEDE：頭盔明說熱點沒開，上一輪的看門狗沒有東西可連，一併收掉（之後的熱點資訊會重新 arm）
-    const bool superseded = hotspot_wd::publish_and_supersede(ready ? VIPLE_VR_HS_READY : VIPLE_VR_HS_NO_ADAPTER);
+    bool superseded = false;
+    const bool published = hotspot_wd::publish_and_supersede(ready ? VIPLE_VR_HS_READY : VIPLE_VR_HS_NO_ADAPTER, gen, true, 0, &superseded);
     BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] query: " << (ready ? "a wireless interface is free (ready)" : "no free wireless interface")
-                    << (superseded ? "; the watchdog of the previous round was still running - stopped it" : "");
+                    << (superseded ? "; the watchdog of the previous round was still running - stopped it" : "")
+                    << (published ? "" : "; a newer hotspot request arrived meanwhile - answer not reported");
   }
 
   void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key) {
@@ -3257,16 +3336,30 @@ namespace platf {
     (void) channel;
     // §HOTSPOT-ADAPT 第 3 步：走不到 arm() 就離開（沒有 wlanapi、沒有閒著的無線介面、設定檔建不起來）＝這台現在沒有
     // 可以連熱點的介面，放進狀態快照讓頭盔馬上知道（以前只有一行 log，頭盔要空等 45 秒）
+    // §HOTSPOT-REQ-GEN：這一則的世代。之後 INFO／QUERY／CLOSED 任一則到了，這一則就過期（不寫快照、不 arm）
+    std::uint32_t gen_at_entry;
+    {
+      std::lock_guard lk(hotspot_wd::mtx);
+      gen_at_entry = hotspot_wd::req_gen;
+    }
+    // 第三輪審查 C19／C21：設定檔建不起來（介面其實閒著）改報 FAILED＋原因碼，不再報 NO_ADAPTER。NO_ADAPTER 是靜態原因，
+    // 頭盔之後只送 QUERY，查詢只看有沒有閒著的介面、回 READY，頭盔清掉紀錄重開熱點、又建不起來，每場循環、退避失效。
+    // FAILED 是判定，頭盔照時間退避。其餘提早離開（沒有 wlanapi、開不了控制代碼、列不了介面、挑不到介面）查詢也回
+    // NO_ADAPTER，兩邊一致，照舊
+    int fail_state = VIPLE_VR_HS_NO_ADAPTER;
+    std::uint32_t fail_reason = 0;
     bool status_done = false;
-    auto status_guard = util::fail_guard([&status_done]() {
+    auto status_guard = util::fail_guard([&status_done, &fail_state, &fail_reason, gen_at_entry]() {
       if (!status_done) {
         // §HOTSPOT-SUPERSEDE：上一輪還在跑的看門狗一併收掉，不讓它蓋掉這個結果、也不讓它繼續動那張網卡
-        if (hotspot_wd::publish_and_supersede(VIPLE_VR_HS_NO_ADAPTER)) {
+        bool was_running = false;
+        if (!hotspot_wd::publish_and_supersede(fail_state, gen_at_entry, false, fail_reason, &was_running)) {
+          BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] a newer hotspot request (info, query or close) arrived meanwhile - this result is not reported"sv;
+        } else if (was_running) {
           BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] the watchdog of the previous round was still running - stopped it"sv;
         }
       }
     });
-    const auto stop_gen_at_entry = hotspot_wd::stop_gen.load();
     ensure_wlanapi_loaded();
     if (!fn_WlanOpenHandle || !fn_WlanCloseHandle || !fn_WlanFreeMemory || !fn_WlanEnumInterfaces ||
         !fn_WlanQueryInterface || !fn_WlanGetAvailableNetworkList || !fn_WlanSetProfile || !fn_WlanConnect) {
@@ -3288,7 +3381,10 @@ namespace platf {
     // （§HOTSPOT-MISSING：可能超過 10 秒）。這時回 NO_ADAPTER，頭盔會當成「這台沒有可用的網卡」關掉熱點，
     // 其實是我們自己造成的暫時狀態。所以每秒重列一次、最多 kEnumRetries 次；這條是背景執行緒，等得起。
     // 介面列得到（只是連著別的網路）、或沒有上一輪，照舊馬上有結果。
-    constexpr int kEnumRetries = 15;
+    // 第三輪審查 D7：原本等 15 秒，比看門狗自己的寬限（kRestartSettle＝30 秒）短：重啟後介面要二十幾秒才回來時，
+    // 熱點資訊若在重啟後幾秒內到，這裡先報 NO_ADAPTER、還把會接手重連的看門狗收掉。改成跟寬限一樣 30 秒；
+    // 等的期間新的 INFO／QUERY／CLOSED 一到就放棄（§HOTSPOT-REQ-GEN），不會多擋
+    constexpr int kEnumRetries = 30;
     GUID wd_guid {};
     bool wd_alive = false;
     {
@@ -3362,9 +3458,14 @@ namespace platf {
                         << kEnumRetries << " s for it"sv;
       }
       std::this_thread::sleep_for(std::chrono::seconds(1));
-      if (hotspot_wd::stop_gen.load() != stop_gen_at_entry) {
-        // 等的時候頭盔說熱點關了：vr_hotspot_stop 已經收掉上一輪、凍結快照，這裡不再寫結果
-        BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] the client closed its hotspot while waiting for the adapter - giving up this request"sv;
+      bool stale;
+      {
+        std::lock_guard lk(hotspot_wd::mtx);
+        stale = hotspot_wd::stale_locked(gen_at_entry);
+      }
+      if (stale) {
+        // 等的時候頭盔說熱點關了、或新的 INFO／QUERY 到了：結果歸新的那一則，這裡不再寫結果
+        BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] a newer hotspot request (info, query or close) arrived while waiting for the adapter - giving up this request"sv;
         status_done = true;
         fn_WlanCloseHandle(hClient, nullptr);
         SecureZeroMemory(key.data(), key.size());
@@ -3439,7 +3540,11 @@ namespace platf {
     SecureZeroMemory(profileXmlW.data(), profileXmlW.size() * sizeof(wchar_t));
 
     if (setRes != ERROR_SUCCESS) {
-      BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] connect failed err=" << setRes;
+      // C19／C21：介面是閒著的，只是設定檔被拒（例如網卡不支援 WPA3-SAE）：報 FAILED＋原因碼（沒有 WLAN 原因碼就放 setRes）
+      fail_state = VIPLE_VR_HS_FAILED;
+      fail_reason = reasonCode ? reasonCode : setRes;
+      BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] connect failed: profile rejected err=" << setRes << " reason=" << hotspot_wd::reason_text(reasonCode)
+                         << " auth=" << authStr << " - reporting failed";
       fn_WlanCloseHandle(hClient, nullptr);
       SecureZeroMemory(key.data(), key.size());
       return;
@@ -3451,11 +3556,9 @@ namespace platf {
       BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] removed the old auto-connect profile (VipleStream-Frame)"sv;
     }
     status_done = true;
-    if (hotspot_wd::stop_gen.load() == stop_gen_at_entry) {
-      hotspot_wd::arm(selectedGuid, ssid);
-    } else {
-      // 這一則熱點資訊還在處理時頭盔就說熱點關了：以後到的為準，不啟動看門狗
-      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] the client closed its hotspot while the profile was being set - not starting the watchdog"sv;
+    if (!hotspot_wd::arm(selectedGuid, ssid, gen_at_entry)) {
+      // 這一則熱點資訊還在處理（或還排著）時頭盔就說熱點關了、或新的 INFO／QUERY 到了：以後到的為準，不啟動看門狗、不寫快照
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] a newer hotspot request (info, query or close) arrived while the profile was being set - not starting the watchdog"sv;
     }
     if (already_connected) {
       fn_WlanCloseHandle(hClient, nullptr);

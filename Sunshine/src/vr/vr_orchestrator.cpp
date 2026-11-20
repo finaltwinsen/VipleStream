@@ -3,6 +3,7 @@
  * @brief VipleStream 2.0 §VR M1b V5：SteamVR 編排器（設計 §D）。
  */
 // standard includes
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -63,6 +64,10 @@ namespace vr::orchestrator {
     // `--steamvr-driver uninstall`（都在 g_mtx 下讀寫）：unregister_driver() 設要求並等 g_unreg_done；
     // 編排執行緒回到迴圈開頭（＝沒有編排在跑）時才做
     bool g_unreg_req = false;
+    // 第三輪審查 C12：編排執行緒取走要求時就清 g_unreg_req、改設 g_unreg_running（do_unregister 做完才清）；
+    // g_unreg_waiting＝有呼叫端在等結果。兩者讓「逾時之後立刻重試」拿到 busy，而不是拿到上一輪的結果、這一輪根本沒做
+    bool g_unreg_running = false;
+    bool g_unreg_waiting = false;
     std::optional<unregister_result_t> g_unreg_done;
     std::optional<prewarm_done_t> g_prewarm_done;
 
@@ -1066,11 +1071,14 @@ namespace vr::orchestrator {
           }
           // `--steamvr-driver uninstall`：job 已經排進來就不做（它馬上要部署、註冊），直接回覆
           if (g_unreg_req) {
+            g_unreg_req = false;
             if (g_pending) {
-              g_unreg_req = false;
-              g_unreg_done = unregister_result_t {false, "session-active"s};
+              if (g_unreg_waiting) {
+                g_unreg_done = unregister_result_t {false, "session-active"s};
+              }
               g_cv.notify_all();
             } else {
+              g_unreg_running = true;  // C12：取走就清要求，做的期間由這個旗標擋住新的呼叫
               unreg = true;
             }
           }
@@ -1113,10 +1121,14 @@ namespace vr::orchestrator {
           auto res = do_unregister();
           {
             std::lock_guard lk(g_mtx);
-            // 呼叫端等到逾時已經走了（g_unreg_req 被它清掉）就不留結果，免得下一次呼叫拿到舊的
-            if (g_unreg_req) {
-              g_unreg_req = false;
+            g_unreg_running = false;
+            // 呼叫端等到逾時已經走了（g_unreg_waiting 被它清掉）就不留結果；做的期間新的呼叫一律回 busy，
+            // 所以這份結果只可能交給發出這一次要求的呼叫端
+            if (g_unreg_waiting) {
               g_unreg_done = std::move(res);
+            } else {
+              BOOST_LOG(info) << "[VIPLE-VR-ORCH] unregister finished after the caller stopped waiting ok=" << (res.ok ? 1 : 0)
+                              << " reason=" << (res.reason.empty() ? "-"s : res.reason);
             }
           }
           g_cv.notify_all();
@@ -1309,12 +1321,12 @@ namespace vr::orchestrator {
     g_cv.notify_all();
   }
 
-  unregister_result_t unregister_driver() {
+  unregister_result_t unregister_driver(const std::function<bool()> &stop_requested) {
     std::unique_lock lk(g_mtx);
     if (!g_running) {
       return {false, "not-running"s};
     }
-    if (g_unreg_req) {
+    if (g_unreg_req || g_unreg_running || g_unreg_waiting) {
       return {false, "busy"s};
     }
     const auto s = cur();
@@ -1323,14 +1335,38 @@ namespace vr::orchestrator {
     }
     g_unreg_done.reset();
     g_unreg_req = true;
+    g_unreg_waiting = true;
     g_cv.notify_all();
-    // 編排執行緒可能正在跑一輪維護（閒置關 SteamVR 最久等十幾秒）；vrpathreg 每個註冊最多 15 秒
-    const bool got = g_cv.wait_for(lk, 60s, []() {
-      return g_unreg_done.has_value() || g_quit;
-    });
-    if (!got || !g_unreg_done) {
+    // 編排執行緒可能正在跑一輪維護（閒置關 SteamVR 最久等十幾秒）；vrpathreg 每個註冊最多 15 秒。
+    // 第三輪審查 D4：每秒看一次呼叫端的停止要求（admin pipe 的 stop 事件）。server 關閉時 admin pipe 先 join 這條執行緒、
+    // 之後才 orchestrator::shutdown() 設 g_quit，只等 g_quit 的話最久要等滿 60 秒；還沒被取走的要求就此撤回
+    const auto deadline = steady::now() + 60s;
+    bool stopping = false;
+    while (!g_unreg_done && !g_quit) {
+      const auto now = steady::now();
+      if (now >= deadline) {
+        break;
+      }
+      g_cv.wait_for(lk, std::min<steady::duration>(1s, deadline - now), []() {
+        return g_unreg_done.has_value() || g_quit;
+      });
+      if (!g_unreg_done && stop_requested) {
+        lk.unlock();
+        stopping = stop_requested();
+        lk.lock();
+        if (stopping) {
+          break;
+        }
+      }
+    }
+    g_unreg_waiting = false;
+    if (!g_unreg_done) {
+      // 第三輪審查 C12：編排執行緒已經在做（do_unregister 中止不了）就回 in-progress，不說失敗；還沒取走才撤回要求
+      if (g_unreg_running) {
+        return {false, "in-progress"s};
+      }
       g_unreg_req = false;
-      return {false, g_quit ? "not-running"s : "timeout"s};
+      return {false, g_quit ? "not-running"s : stopping ? "server-stopping"s : "timeout"s};
     }
     auto res = std::move(*g_unreg_done);
     g_unreg_done.reset();

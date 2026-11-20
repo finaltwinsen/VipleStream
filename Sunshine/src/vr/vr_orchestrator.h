@@ -13,6 +13,7 @@
 // standard includes
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -112,7 +113,7 @@ namespace vr::orchestrator {
   struct unregister_result_t {
     bool ok = false;
     /// 失敗原因：not-running（編排器沒在跑＝vr_pcvr 停用）｜session-active｜busy｜steamvr-running｜
-    /// guard-restore[:細節]｜openvrpaths-unreadable｜still-registered｜timeout
+    /// guard-restore[:細節]｜openvrpaths-unreadable｜still-registered｜timeout｜in-progress｜server-stopping
     std::string reason;
     int found = 0;  ///< 註銷前 openvrpaths 裡的 viplestream 註冊數
     bool guard_restored = false;  ///< 這一次順便還原了 steamvr.vrsettings 的 guard
@@ -126,8 +127,11 @@ namespace vr::orchestrator {
    *        動作：還原 guard（有 marker 時）→ `vrpathreg removedriver` 每一個 viplestream 註冊 → 確認 openvrpaths 裡
    *        沒有了 → 刪 `<install>\config\steamvr\` 下的版本目錄（來源 `<install>\steamvr\` 不動）。
    *        不碰使用者其他的 SteamVR 設定。`vr_pcvr` 仍是 enabled 時，下一次 VR /launch 會重新部署並註冊。
+   *        stop_requested：等待期間每秒呼叫一次（不持鎖），回 true＝呼叫端要停（server 關閉）：還沒開始做就撤回、回
+   *        `server-stopping`。編排執行緒已經開始做（中止不了）時，停止或逾時都回 `in-progress`（之後照樣做完，結果寫在 log），
+   *        做的期間新的呼叫一律回 `busy`。
    */
-  unregister_result_t unregister_driver();
+  unregister_result_t unregister_driver(const std::function<bool()> &stop_requested = {});
 
   /**
    * @brief SteamVR（vrserver）是不是在跑。給 `--steamvr-driver uninstall --wait-steamvr` 的等待迴圈用：

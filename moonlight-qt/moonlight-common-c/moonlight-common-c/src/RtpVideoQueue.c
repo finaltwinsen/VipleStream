@@ -1960,6 +1960,11 @@ static uint64_t nkNextDueUs(PRTP_VIDEO_QUEUE queue, uint64_t nowUs, bool idleOk)
     if (queue->nkGone || queue->nkCount >= RTPV_NACK_MAX) {
         return 0;
     }
+    if (queue->mlCarryOnly && queue->nkCount + queue->nkRefunds == 0) {
+        // §FLAT-REPAIR（§REVIEW-1120）：門檻已經關了，只沿用到關之前回報過的那個 block；換到新的對象就不再開始回報
+        //（否則同一次加封包／接收逾時裡就先對下一個 block 送出回報，下一包又因為「已回報」沿用下去，一路傳下去）
+        return 0;
+    }
     if (queue->mlRttMode && queue->nkTooMany) {
         return 0;  // §VR-REPAIR-RTT：後面缺太多幀，這一輪整個不補
     }
@@ -2484,6 +2489,16 @@ static uint64_t mlHeadDeadlineUs(PRTP_VIDEO_QUEUE queue, const RTPV_HELD_PACKET*
                                   queue->nkCount + queue->nkRefunds > 0);
     }
     limit = mlHeadLimitUs(queue, h);
+
+    if (queue->mlCarryOnly) {
+        // §FLAT-REPAIR（§REVIEW-1120）：沿用中、但佇列等的已經不是那個回報過的 block：照門檻關著的規則等
+        //（一條在送＝不等；兩條在送＝等另一條那一份，上限一個幀週期）
+        nkSync(queue);
+        if (queue->nkCount + queue->nkRefunds == 0) {
+            const uint64_t cap = h->arrivalUs + queue->mlCarryHoldUs;
+            return limit < cap ? limit : cap;
+        }
+    }
 
     if (!queue->mlHoldDual || (queue->mlRepair && nkAllPassed(queue))) {
         if (!queue->mlRepair) {
