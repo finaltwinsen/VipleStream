@@ -34,6 +34,20 @@ else()
     endif()
 endif()
 
+# VipleStream §SELF-UPDATE (4)：自我更新的安裝 helper（固定路徑、root 擁有）與它的 polkit 政策檔。
+# SUNSHINE_UPDATE_HELPER 在 cmake/compile_definitions/linux.cmake 定義（AppImage／Flatpak 沒有）。
+# polkit 只讀 /usr/share/polkit-1/actions，prefix 不是 /usr 時政策檔不會生效（pkexec 退回預設提示，功能不受影響）。
+if(SUNSHINE_UPDATE_HELPER)
+    get_filename_component(SUNSHINE_UPDATE_HELPER_DIR "${SUNSHINE_UPDATE_HELPER}" DIRECTORY)
+    install(PROGRAMS "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/self-update-helper.sh"
+            DESTINATION "${SUNSHINE_UPDATE_HELPER_DIR}"
+            RENAME "self-update")
+    configure_file("${CMAKE_SOURCE_DIR}/packaging/linux/${PROJECT_FQDN}.self-update.policy.in"
+            "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_FQDN}.self-update.policy" @ONLY)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_FQDN}.self-update.policy"
+            DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/polkit-1/actions")
+endif()
+
 # RPM specific
 set(CPACK_RPM_PACKAGE_LICENSE "GPLv3")
 

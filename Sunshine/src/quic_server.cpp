@@ -2271,6 +2271,26 @@ namespace quic_server {
       getsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char *) &got, &gotLen);
       BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SOCK-SNDBUF: send buffer " << got << " bytes (asked for " << want << ")";
     }
+    // §Q-SOCK-RCVBUF（2026-11-20）：接收緩衝原本沒設（Windows 預設 64 KB、Linux 約 208 KB）。這個 socket 收的是所有 client、
+    // 所有路徑的 ACK、輸入與回報；IO 執行緒忙著送一張大畫面時收不及，緩衝一滿 ACK 就被 OS 丟掉，picoquic 會當成對方沒收到
+    // 而重傳、壓低壅塞視窗。要 2 MB（與 client 的 QuicTransport.c 相同）。Linux 的 getsockopt 回的是核心加倍後的值，
+    // 被 net.core.rmem_max 夾住時仍會小於要求值，所以直接比大小就能看出來。
+    {
+      int want = 2 * 1024 * 1024;
+      const int rc = setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char *) &want, sizeof(want));
+      int got = 0;
+      socklen_t gotLen = sizeof(got);
+      const int grc = getsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char *) &got, &gotLen);
+      if (rc != 0 || grc != 0 || got < want) {
+        BOOST_LOG(warning) << "[VIPLE-MPQUIC] §Q-SOCK-RCVBUF: receive buffer " << got << " bytes, asked for " << want
+#ifndef _WIN32
+                           << " (limited by net.core.rmem_max?)"
+#endif
+                           << "; ACKs may be dropped while the IO thread is busy";
+      } else {
+        BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-SOCK-RCVBUF: receive buffer " << got << " bytes (asked for " << want << ")";
+      }
+    }
 
     // §PERF-1113（審查 05 第 4 項）：喚醒用的 socket。影像執行緒把 datagram 推進 _pendingQueue 之後，IO 執行緒原本要等
     // 下面 select 的 1 ms 逾時（或剛好有 ACK 進來）才會 drain，每一批平均多等約 0.5 ms。這裡開一個綁在 127.0.0.1、

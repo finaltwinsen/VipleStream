@@ -43,6 +43,8 @@
 
 #include <SDL_log.h>
 
+#include <Limelight.h>  // VipleVr.h：§HOTSPOT-ADAPT 的 VIPLE_VR_HS_*、VIPLE_VR_HOTSPOT_STATE_*
+
 #include <string>
 #include <vector>
 
@@ -108,7 +110,26 @@ public:
         // 它對這一場沒有用，卻要和家用 Wi-Fi 分同一顆無線電。
         // §HOTSPOT-ADAPT（2026-11-20）：多久之後再試看這台連續失敗幾次（noJoinBackoffS）
         int fails = 0;
-        const long remainS = noJoinRemainingS(hostId, &fails);
+        char cls = 'R';
+        long remainS = noJoinRemainingS(hostId, &fails, &cls);
+        // §HOTSPOT-ADAPT 第 3 步：靜態原因（S 類：host 沒有閒著的無線介面、功能關閉、平台不支援）不用時間退避。
+        // server 會回報時：熱點關著就不開、只送一則 QUERY，回 READY 才開（takeReopen）；熱點已經開著就照常送熱點資訊，
+        // server 半秒內就有答案。舊 server 沒辦法問，S 類照 R 類的時間退避
+        if (m_ServerReports && cls == 'S' && fails > 0) {
+            if (state == "0") {
+                scrub(cmd);
+                m_Advertise = false;
+                m_QueryPending = true;
+                m_QueryAt = std::chrono::steady_clock::now();
+                m_StateToSend = VIPLE_VR_HOTSPOT_STATE_QUERY;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: this host reported it has no way to join the hotspot (%d time(s)) - "
+                            "not switching it on, asking the host first",
+                            fails);
+                return;
+            }
+            remainS = 0;
+        }
         if (remainS > 0) {
             scrub(cmd);
             m_GaveUp = true;
@@ -117,6 +138,9 @@ public:
             const bool ours = state == "2" && readOpenedMarker(&pid, &prevHost);
             // 熱點資訊只在熱點確實開著時才送給 host：這裡剩下「使用者自己開的」那一種還開著（我們不碰它，host 連得上就清紀錄）
             m_Advertise = state == "2" && !ours;
+            if (!m_Advertise) {
+                m_StateToSend = VIPLE_VR_HOTSPOT_STATE_CLOSED;  // 上一場的看門狗可能還在跑：請 host 停手
+            }
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VR-HOTSPOT] auto: this host could not join the hotspot a short while ago (%d time(s) in a row) - "
                         "not switching it on for this session (it is tried again in about %ld min)%s",
@@ -173,6 +197,7 @@ public:
             removeOpenedMarker();
             m_GaveUp = true;
             m_Advertise = false;  // 熱點沒有開起來：不叫 host 來連
+            m_StateToSend = VIPLE_VR_HOTSPOT_STATE_CLOSED;
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: softapmanager did not accept create - hotspot left off");
             return;
         }
@@ -200,6 +225,14 @@ public:
     void tick(int hostLinkOnHotspot = -1, const std::vector<std::string>& hostAddrs = std::vector<std::string>())
     {
 #if defined(__linux__)
+        if (m_QueryPending &&
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_QueryAt).count() >= kStatusWaitS) {
+            m_QueryPending = false;
+            m_GaveUp = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: the host did not answer the query within %d s - hotspot left off for this session",
+                        kStatusWaitS);
+        }
         if (!m_Opened) {
             // 熱點不是這個行程開的（使用者自己開的）或已經放棄：不動它。但這一場確認有連線走熱點＝這台 host 現在連得上，
             // 把它的失敗紀錄清掉，之後恢復自動開（熱點是誰開的都一樣）
@@ -216,6 +249,11 @@ public:
         touchOpenedMarker();
         const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
         const int waitedS = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(now - m_OpenedAt).count());
+        if (m_ServerReports && m_StatusCount == 0 && !m_NoStatusLogged && waitedS >= kStatusWaitS && m_Advertise) {
+            m_NoStatusLogged = true;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: no status from the host after %d s - falling back to the %d s wait", waitedS, kJoinWaitS);
+        }
         if (hostLinkOnHotspot >= 0) {
             if (m_Verified) {
                 return;
@@ -244,7 +282,9 @@ public:
                             waitedS, others, fails, retryS / 60);
                 closeOpened("this host is not on the hotspot");
                 m_GaveUp = true;
-                m_Advertise = false;  // 之後不再把熱點資訊送給 host（已經送出去的那一則收不回來：wire 沒有「關了」的訊息）
+                m_Advertise = false;  // 之後不再把熱點資訊送給 host
+                m_StateToSend = VIPLE_VR_HOTSPOT_STATE_CLOSED;  // 已經送出去的那一則：請 host 停手（舊 server 收不到，照舊重試）
+                m_ClosedAtCount = m_StatusCount;
             }
             return;
         }
@@ -252,24 +292,195 @@ public:
         if (m_PeerSeen) {
             return;
         }
-        const bool ownAddr = hotspotHasAnyOf(hostAddrs);
+        // §HOTSPOT-ADAPT 第 3 步：沒有多連線可以確認的場次，host 自己說連上了（這一場的 JOINED）也算數
+        const bool ownAddr = hotspotHasAnyOf(hostAddrs) || m_HostState == VIPLE_VR_HS_JOINED;
         if (ownAddr || hotspotHasNewPeer(m_Baseline)) {
             m_PeerSeen = true;
             if (ownAddr) {
                 clearNoJoin(m_HostId);
             }
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] auto: the host joined the hotspot after %d s - keeping it on (%s)",
-                        waitedS, ownAddr ? "one of this host's own addresses is on it" : "a device is on it");
+                        waitedS,
+                        m_HostState == VIPLE_VR_HS_JOINED ? "the host reports it joined" :
+                        ownAddr ? "one of this host's own addresses is on it" : "a device is on it");
             return;
         }
         if (waitedS >= kJoinWaitS) {
             closeOpened("the host did not join the hotspot");
             m_GaveUp = true;
             m_Advertise = false;
+            m_StateToSend = VIPLE_VR_HOTSPOT_STATE_CLOSED;
+            m_ClosedAtCount = m_StatusCount;
         }
 #else
         (void) hostLinkOnHotspot;
         (void) hostAddrs;
+#endif
+    }
+
+    // §HOTSPOT-ADAPT 第 3 步（2026-11-20）：這台 server 會不會回報熱點加入狀態（<VipleStreamVR> 有
+    // VIPLE_VR_SERVER_CAP_HOTSPOT_STATUS）。openForLan() 之前呼叫。不會回報時下面幾個函式都不做事，行為和以前一樣
+    void setServerReports(bool yes)
+    {
+#if defined(__linux__)
+        m_ServerReports = yes;
+#else
+        (void) yes;
+#endif
+    }
+
+    // §HOTSPOT-ADAPT 第 3 步：server 最新一則 HOTSPOT_STATUS（LiGetVrHotspotStatus）。每輪 tick() 之後呼叫；seq 沒變就不做事。
+    // 回報只用來提早關與分類失敗，留不留熱點仍以 tick() 的連線確認為準：
+    //   - 靜態原因（平台不支援、功能關閉、沒有可用的無線介面）→ 立刻關掉這一場為它開的熱點，記 S 類；
+    //   - 經 VPN → 立刻關，不記；
+    //   - 判定連不上（不在範圍內／看得到但連不上）→ 立刻關，記 R 類（照退避表）；
+    //   - 已連上、正在連 → 不動（期限還是 kJoinWaitS；沒有多連線的場次 tick(-1) 會把「已連上」當成這台連上了）。
+    // 冪等：每一則依當下的狀態判斷，重送的同一則、遲到的訊息都不會重複動作——
+    //   - 這一場已經確認過連線（m_Verified）之後，任何否定的回報都不理（連線是實測，回報只是 host 的說法）；
+    //   - 熱點不是這個行程開的（使用者自己開的、已經關掉）就不會再關一次、不會重複記失敗；
+    //   - 熱點已經因為等不到或否定的回報關掉之後才收到「已連上」：這一場不重開（中途重開會把分時放進遊玩當中），
+    //     只把這台的連續失敗次數降回 1，下一場（最短的退避到期後）再試。
+    // 不印也不保存任何位址、SSID
+    void onHostStatus(int state, int flags, int attempts, int restarts, int elapsedDs, unsigned reason, unsigned seq)
+    {
+#if defined(__linux__)
+        if (!m_ServerReports || (m_StatusCount != 0 && seq == m_StatusSeq)) {
+            return;
+        }
+        m_StatusSeq = seq;
+        ++m_StatusCount;
+        const bool changed = state != m_HostState || flags != m_HostFlags;
+        m_HostState = state;
+        m_HostFlags = flags;
+        if (!changed) {
+            return;  // 每 5 秒重送的同一則
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-VR-HOTSPOT] status state=%d flags=0x%x attempts=%d restarts=%d elapsed=%d.%ds reason=0x%x", state, flags,
+                    attempts, restarts, elapsedDs / 10, elapsedDs % 10, reason);
+        const bool isStatic = state == VIPLE_VR_HS_UNSUPPORTED || state == VIPLE_VR_HS_DISABLED || state == VIPLE_VR_HS_NO_ADAPTER;
+        const bool isVerdict = state == VIPLE_VR_HS_UNREACHABLE || state == VIPLE_VR_HS_FAILED;
+        if (m_QueryPending) {
+            // 熱點沒開、只問了一句的那種場次
+            if (state == VIPLE_VR_HS_READY) {
+                m_QueryPending = false;
+                clearNoJoin(m_HostId);
+                m_Advertise = true;
+                m_Reopen = true;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: the host now has a free wireless interface - record cleared, switching the hotspot on");
+            }
+            else if (isStatic || state == VIPLE_VR_HS_REMOTE) {
+                m_QueryPending = false;
+                m_GaveUp = true;
+                if (isStatic) {
+                    int fails = 0;
+                    recordNoJoin(m_HostId, &fails, 'S', state);
+                }
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: the host still cannot join (state %d) - hotspot left off for this session", state);
+            }
+            return;
+        }
+        if (!m_Opened) {
+            if (state == VIPLE_VR_HS_JOINED && m_GaveUp && m_ClosedAtCount >= 0 && !m_LateJoinHandled && !m_HostId.empty()) {
+                m_LateJoinHandled = true;
+                const bool eased = easeNoJoin(m_HostId);
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: the host reports it joined after the hotspot was already switched off - not "
+                            "switching it on again this session%s",
+                            eased ? "; its failure count is back to 1, so the next try comes sooner" : "");
+            }
+            return;
+        }
+        if (m_Verified || !(isStatic || isVerdict || state == VIPLE_VR_HS_REMOTE)) {
+            return;
+        }
+        const int waitedS =
+            static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_OpenedAt).count());
+        if (state == VIPLE_VR_HS_REMOTE) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] auto: the host reports this session is remote for it (%d s) - no record", waitedS);
+        }
+        else {
+            int fails = 0;
+            const long retryS = recordNoJoin(m_HostId, &fails, isStatic ? 'S' : 'R', state);
+            if (isStatic) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: the host reports it has no way to join the hotspot (state %d, %d s; %d time(s) in a "
+                            "row) - recorded as static: the next session asks the host before switching the hotspot on",
+                            state, waitedS, fails);
+            }
+            else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] auto: the host reports it cannot reach the hotspot (state %d: %s, %d s; %d time(s) in a "
+                            "row) - not tried again for this host for %ld min",
+                            state, state == VIPLE_VR_HS_FAILED ? "seen but cannot connect" : "not in range", waitedS, fails, retryS / 60);
+            }
+        }
+        closeOpened("the host reports it cannot join the hotspot");
+        m_GaveUp = true;
+        m_Advertise = false;
+        m_StateToSend = VIPLE_VR_HOTSPOT_STATE_CLOSED;
+        m_ClosedAtCount = m_StatusCount;
+#else
+        (void) state;
+        (void) flags;
+        (void) attempts;
+        (void) restarts;
+        (void) elapsedDs;
+        (void) reason;
+        (void) seq;
+#endif
+    }
+
+    // §HOTSPOT-ADAPT 第 3 步：有沒有一則 C2S HOTSPOT_STATE 要送（VIPLE_VR_HOTSPOT_STATE_*；-1＝沒有）。拿走就算送了；
+    // 送不出去時呼叫端用 stateSendFailed() 放回來，下一輪再送。server 不會回報（舊 server）時永遠是 -1
+    int takeStateToSend()
+    {
+#if defined(__linux__)
+        if (!m_ServerReports) {
+            return -1;
+        }
+        const int st = m_StateToSend;
+        m_StateToSend = -1;
+        return st;
+#else
+        return -1;
+#endif
+    }
+
+    void stateSendFailed(int state)
+    {
+#if defined(__linux__)
+        if (m_StateToSend < 0) {
+            m_StateToSend = state;  // 這期間有新的就以新的為準
+        }
+#else
+        (void) state;
+#endif
+    }
+
+    // §HOTSPOT-ADAPT 第 3 步：QUERY 得到 READY：呼叫端重新讀熱點的 SSID 與金鑰、再呼叫一次 openForLan()
+    bool takeReopen()
+    {
+#if defined(__linux__)
+        const bool yes = m_Reopen;
+        m_Reopen = false;
+        return yes;
+#else
+        return false;
+#endif
+    }
+
+    // §HOTSPOT-ADAPT 第 3 步：還在等這台 host（熱點開了還沒確認、或問了還沒回）：呼叫端這段時間每秒輪詢一次，
+    // 否定的回報才能在一秒內生效；其餘時間照舊每 5 秒
+    bool waitingForHost() const
+    {
+#if defined(__linux__)
+        return m_QueryPending || (m_Opened && !m_Verified && !m_PeerSeen);
+#else
+        return false;
 #endif
     }
 
@@ -614,6 +825,7 @@ private:
     static constexpr int kJoinWaitS = 45;    // §FRAME-HOTSPOT-AUTO：自動開了之後等這台 host 多久
     static constexpr int kOwnerFreshS = 60;  // 標記檔這麼久沒被更新＝擁有者不在了
     static constexpr int kLinkReadMinS = 10;   // 多連線的讀數至少連續這麼久是「沒有」才關
+    static constexpr int kStatusWaitS = 5;     // §HOTSPOT-ADAPT 第 3 步：會回報的 server 這麼久沒有任何一則＝退回 kJoinWaitS／不問了
     static constexpr int kNoJoinMaxHosts = 8;  // §HOTSPOT-ADAPT：hotspot-nojoin 最多記幾台（超過丟最舊的）
     static constexpr int kNoJoinMaxFails = 99;
     static constexpr long kNoJoinStaleS = 7L * 24 * 3600;  // 紀錄這麼久沒更新就當作沒有
@@ -768,7 +980,8 @@ private:
     // §HOTSPOT-VERIFY／§HOTSPOT-ADAPT：「這台 host 等過、沒有連上熱點」的紀錄（0600，沒有機密）。串流行程每場都是新的行程，
     // 所以放檔案。每行一台、tab 分隔，最多 kNoJoinMaxHosts 台：
     //   <host uuid>\t<類別 S|R>\t<連續失敗次數>\t<最後一次失敗的 epoch 秒>\t<最後的 state>
-    // 類別與 state 是給之後 server 回報用的欄位，現在一律寫 R 與 0、讀到什麼就原樣留著。
+    // 類別：S＝host 回報的靜態原因（VIPLE_VR_HS_UNSUPPORTED／DISABLED／NO_ADAPTER），R＝收不到（host 判定連不上、或等不到）；
+    // state＝host 最後回報的 VIPLE_VR_HS_*（等不到的那一種是 0）。S 類在會回報的 server 上不看時間（每場先問），其餘照退避。
     // 時間是牆上時鐘（要跨行程、跨重開機）；下次可重試的時刻＝最後一次失敗＋noJoinBackoffS(次數)。時鐘往回跳（年齡為負）
     // 或紀錄超過 kNoJoinStaleS 都當作到期。舊格式（只有一行 uuid、時間看檔案的 mtime）讀成一筆、失敗 1 次。
     struct NoJoinEntry {
@@ -917,7 +1130,7 @@ private:
     }
 
     // 這台 host 還要等多久才再為它開熱點（秒；0＝沒有紀錄或已經到期）。fails 回傳目前的連續失敗次數
-    static long noJoinRemainingS(const std::string& hostId, int* fails)
+    static long noJoinRemainingS(const std::string& hostId, int* fails, char* cls = nullptr)
     {
         *fails = 0;
         if (!validHostId(hostId)) {
@@ -933,6 +1146,9 @@ private:
                 return 0;
             }
             *fails = e.fails;
+            if (cls != nullptr) {
+                *cls = e.cls;
+            }
             const long waitS = noJoinBackoffS(e.fails);
             return ageS < waitS ? static_cast<long>(waitS - ageS) : 0;
         }
@@ -940,7 +1156,7 @@ private:
     }
 
     // 這台 host 又一次沒有連上：連續失敗次數加一（紀錄太舊就從 1 算起）。回傳接下來要等多久（秒）
-    static long recordNoJoin(const std::string& hostId, int* fails)
+    static long recordNoJoin(const std::string& hostId, int* fails, char cls = 'R', long state = 0)
     {
         *fails = 1;
         if (!validHostId(hostId)) {
@@ -961,10 +1177,29 @@ private:
             }
         }
         mine.at = now;
+        mine.cls = cls;
+        mine.state = state;
         *fails = mine.fails;
         entries.push_back(mine);
         saveNoJoin(entries);
         return noJoinBackoffS(mine.fails);
+    }
+
+    // §HOTSPOT-ADAPT 第 3 步：熱點關掉之後 host 才說連上了：連續失敗次數降回 1（時間不動）。回傳有沒有改到
+    static bool easeNoJoin(const std::string& hostId)
+    {
+        std::vector<NoJoinEntry> entries = loadNoJoin();
+        for (NoJoinEntry& e : entries) {
+            if (e.host == hostId) {
+                if (e.fails <= 1) {
+                    return false;
+                }
+                e.fails = 1;
+                saveNoJoin(entries);
+                return true;
+            }
+        }
+        return false;
     }
 
     // 這台 host 連上了：整筆刪掉。回傳原本有沒有紀錄
@@ -1261,6 +1496,19 @@ private:
     bool m_Advertise = true;         // §HOTSPOT-ADAPT：false＝熱點確定沒開，不把熱點資訊送給 host
     bool m_AdvertiseLogged = false;
     bool m_LinkReadValid = false;    // 多連線的讀數（≥0）目前連續中
+    // §HOTSPOT-ADAPT 第 3 步：server 的回報
+    bool m_ServerReports = false;    // server 有 VIPLE_VR_SERVER_CAP_HOTSPOT_STATUS
+    int m_HostState = 0;             // 最新一則的 VIPLE_VR_HS_*；0＝還沒收到
+    int m_HostFlags = 0;
+    unsigned m_StatusSeq = 0;
+    int m_StatusCount = 0;           // 這一場收到幾則（含重送）
+    bool m_NoStatusLogged = false;
+    int m_StateToSend = -1;          // 要送給 host 的 VIPLE_VR_HOTSPOT_STATE_*；-1＝沒有
+    bool m_QueryPending = false;     // 送了 QUERY、還沒有答案（熱點沒開）
+    std::chrono::steady_clock::time_point m_QueryAt;
+    bool m_Reopen = false;           // QUERY 得到 READY：請呼叫端再開一次
+    int m_ClosedAtCount = -1;        // 這一場為這台開的熱點被關掉時已經收到幾則回報；-1＝沒有關過
+    bool m_LateJoinHandled = false;
     std::chrono::steady_clock::time_point m_LinkReadSince;  // 連續讀數從什麼時候開始
 #endif
 };

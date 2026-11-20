@@ -27,6 +27,7 @@
 
 // local includes
 #include "self_update.h"
+#include "config.h"
 #include "entry_handler.h"
 #include "logging.h"
 #include "platform/common.h"
@@ -285,7 +286,7 @@ namespace self_update {
       return make_release(*tag);
     }
 
-    std::optional<nlohmann::json> api_get_json(const std::string &url, std::string *error, long *http_code) {
+    std::optional<nlohmann::json> api_get_json(const std::string &url, std::string *error, long *http_code, long timeout_s = 30L) {
       CURL *curl = curl_easy_init();  // NOSONAR
       if (!curl) {
         if (error) *error = "curl init failed";
@@ -300,7 +301,7 @@ namespace self_update {
       curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_string);
       curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
-      curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+      curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
       const CURLcode rc = curl_easy_perform(curl);
       long code = 0;
       curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
@@ -330,6 +331,141 @@ namespace self_update {
       return it != j.end() && it->is_boolean() && it->get<bool>();
     }
 
+    // ── §UPDATE-NOTES-TRAY（2026-11-20）：「有新版」通知後面接一行更新摘要 ──
+    // 摘要＝release 內文裡第一個「## 」標題行（「vX.Y.Z — 一句話主軸」）。內文是雙語：英文段在前，單獨一行
+    // 「# 繁體中文」之後是中文段（規則同 client 的 moonlight-qt/app/backend/updatenotes.h）；介面語系 zh 開頭取中文段。
+    // 內文要打 GitHub API（匿名每小時 60 次）才拿得到，所以一個版號在這個行程裡只查一次（失敗也算），結果記在這裡；
+    // 備援查版（/latest）與安裝前取 digest（/tags/vX）拿到的 JSON 也順手存進來，之後同一版就不用為了摘要再打一次。
+    std::mutex g_notes_mtx;
+    std::string g_notes_version;  ///< 已經查過內文的版號（查失敗也記，body 留空）
+    std::string g_notes_body;
+
+    void remember_notes(const std::string &version, const nlohmann::json &j) {
+      std::string body = json_str(j, "body");
+      if (body.size() > 256 * 1024) body.resize(256 * 1024);  // 正規的 release notes 遠小於這個上限
+      std::lock_guard<std::mutex> lg(g_notes_mtx);
+      g_notes_version = version;
+      g_notes_body = std::move(body);
+    }
+
+    std::string trim_ws(const std::string &s) {
+      const auto b = s.find_first_not_of(" \t\r\n");
+      if (b == std::string::npos) return {};
+      const auto e = s.find_last_not_of(" \t\r\n");
+      return s.substr(b, e - b + 1);
+    }
+
+    /// 從 release 內文取出這個語系那一段的標題；找不到就回空字串
+    std::string notes_headline(const std::string &body, bool want_zh) {
+      std::string en, zh;
+      bool in_zh = false;
+      std::istringstream in(body);
+      std::string raw;
+      while (std::getline(in, raw)) {
+        const std::string line = trim_ws(raw);
+        if (!in_zh && !raw.empty() && raw[0] == '#' && raw.compare(0, 2, "##") != 0 && trim_ws(raw.substr(1)) == "繁體中文") {
+          in_zh = true;  // 分隔行：單獨一行的一級標題「# 繁體中文」
+          continue;
+        }
+        if (line.compare(0, 3, "## ") != 0) continue;
+        std::string &dst = in_zh ? zh : en;
+        if (dst.empty()) dst = trim_ws(line.substr(3));
+        if (in_zh && !zh.empty()) break;  // 中文段的標題拿到了，後面不用看
+      }
+      // 沒有分隔行的舊 release 只有一段（落在 en），任何語系都顯示它；那個語系的段落沒有標題就退回另一段
+      if (want_zh) return zh.empty() ? en : zh;
+      return en.empty() ? zh : en;
+    }
+
+    /// UTF-8 字串佔幾個 UTF-16 單位（Windows 的通知文字是 256 個 wchar_t 的固定緩衝，放不下時整段轉換會失敗）
+    size_t utf16_units(const std::string &s) {
+      size_t n = 0;
+      for (unsigned char c : s) {
+        if ((c & 0xC0) == 0x80) continue;  // 接續位元組
+        n += (c >= 0xF0) ? 2 : 1;
+      }
+      return n;
+    }
+
+    /// 截到最多 max_units 個 UTF-16 單位（不切在一個字的中間）；截過就在尾端加「…」
+    std::string clip_utf16(const std::string &s, size_t max_units) {
+      if (utf16_units(s) <= max_units) return s;
+      if (max_units == 0) return {};
+      size_t units = 0;
+      size_t i = 0;
+      while (i < s.size()) {
+        const unsigned char c = (unsigned char) s[i];
+        const size_t len = c < 0x80 ? 1 : (c >= 0xF0 ? 4 : (c >= 0xE0 ? 3 : (c >= 0xC0 ? 2 : 1)));
+        const size_t w = c >= 0xF0 ? 2 : 1;
+        if (i + len > s.size() || units + w > max_units - 1) break;  // 留一格給「…」
+        units += w;
+        i += len;
+      }
+      return trim_ws(s.substr(0, i)) + "…";
+    }
+
+    /// 這個版號的更新摘要。沒查過就打一次 API（在背景工作執行緒上，最多等 10 秒）；拿不到就回空字串，不影響查版與安裝
+    std::string notes_summary_for(const std::string &version) {
+      bool known = false;
+      std::string body;
+      {
+        std::lock_guard<std::mutex> lg(g_notes_mtx);
+        if (g_notes_version == version) {
+          known = true;
+          body = g_notes_body;
+        }
+        else {
+          // 先記下「這一版查過了」：下面失敗（沒網路、限流）也不再重查，免得把匿名配額用掉
+          g_notes_version = version;
+          g_notes_body.clear();
+        }
+      }
+      if (!known) {
+        std::string err;
+        long code = 0;
+        auto j = api_get_json(std::string(kApiBase) + "/tags/v" + version, &err, &code, 10L);
+        if (!j) {
+          BOOST_LOG(info) << "[VIPLE-UPDATE] release notes for v" << version << " not available (" << err
+                          << "); the notification goes without a summary";
+          return {};
+        }
+        remember_notes(version, *j);
+        body = json_str(*j, "body");
+        if (body.size() > 256 * 1024) body.resize(256 * 1024);
+      }
+      const bool want_zh = config::sunshine.locale.compare(0, 2, "zh") == 0;
+      std::string head = notes_headline(body, want_zh);
+      for (char &c : head) {
+        const unsigned char u = (unsigned char) c;
+        if (u < 0x20 || u == 0x7F) {
+          c = ' ';
+        }
+        else if (c == '<') {
+          c = '(';  // Linux 的通知內文可能被通知服務當成標記語言解析
+        }
+        else if (c == '>') {
+          c = ')';
+        }
+#ifndef _WIN32
+        else if (c == '&') {
+          c = '+';
+        }
+#endif
+      }
+      head = clip_utf16(trim_ws(head), 120);
+      BOOST_LOG(info) << "[VIPLE-UPDATE] release notes summary for v" << version << " (" << (want_zh ? "zh" : "en")
+                      << "): " << (head.empty() ? "<none>" : head);
+      return head;
+    }
+
+    /// 把摘要接在通知文字後面（另起一行）；整段不超過 250 個 UTF-16 單位，放不下就不接
+    std::string with_summary(const std::string &text, const std::string &summary) {
+      if (summary.empty()) return text;
+      const size_t used = utf16_units(text) + 1;
+      if (used + 16 > 250) return text;
+      return text + "\n" + clip_utf16(summary, std::min<size_t>(120, 250 - used));
+    }
+
     // 備援：REST API JSON（匿名 60 次/小時/IP）
     std::optional<release_info> query_via_api(std::string *error) {
       long code = 0;
@@ -346,6 +482,7 @@ namespace self_update {
         if (error) *error = "API tag not version-like: " + tag;
         return std::nullopt;
       }
+      remember_notes(tag, *j);  // §UPDATE-NOTES-TRAY：內文已經在這份 JSON 裡，不用再查一次
       return make_release(tag);
     }
 
@@ -689,6 +826,9 @@ catch {
     }
 #else
     // 內嵌的 Linux 更新腳本（以 root 執行，位於使用者 0700 的 update 目錄）。
+    //   §SELF-UPDATE (4)（2026-11-20）：.deb 另外把同一支腳本裝在固定路徑（SUNSHINE_UPDATE_HELPER，
+    //   來源 src_assets/linux/misc/self-update-helper.sh，兩邊內容要一起改）；那一支存在時優先用它，
+    //   這份內嵌的只當備援（還沒裝過帶 helper 的版本、或不是從 .deb 安裝）。
     //   sha256 與 Package 名稱驗過才裝；apt-get --no-remove、鎖逾時、同版 --reinstall；
     //   apt 失敗退回 dpkg -i + apt-get -f。結果檔由呼叫端（使用者身分）寫。
     constexpr const char *kLinuxScript = R"SH(#!/bin/sh
@@ -739,29 +879,49 @@ exit 0
       return -1;
     }
 
+    /// §SELF-UPDATE (4)：.deb 裝在固定路徑的 helper 可不可以用。要是 root 擁有、其他人不可寫的一般檔案才算——
+    /// polkit 的政策檔（app.viplestream.server.self-update）靠這個路徑對上 action，授權對話框才會顯示看得懂的說明；
+    /// 也不必再讓 root 執行放在使用者目錄裡的腳本。
+    std::string installed_helper() {
+#ifdef SUNSHINE_UPDATE_HELPER
+      struct stat st {};
+      if (lstat(SUNSHINE_UPDATE_HELPER, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == 0 &&
+          (st.st_mode & 022) == 0 && (st.st_mode & 0100) != 0) {
+        return SUNSHINE_UPDATE_HELPER;
+      }
+#endif
+      return {};
+    }
+
     bool apply_linux(const std::filesystem::path &package, const release_info &rel, std::string *error) {
       const auto dir = update_dir();
       if (dir.empty()) {
         if (error) *error = "update directory is not private (refusing to run installer)";
         return false;
       }
+      std::error_code ec;
+      const std::string helper = installed_helper();
       const auto script = dir / "self_update.sh";
-      {
+      if (helper.empty()) {
         std::ofstream out(script, std::ios::binary | std::ios::trunc);
         if (!out) {
           if (error) *error = "cannot write " + script.string();
           return false;
         }
         out << kLinuxScript;
+        out.close();
+        std::filesystem::permissions(script, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, ec);
       }
-      std::error_code ec;
-      std::filesystem::permissions(script, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, ec);
+      BOOST_LOG(info) << "[VIPLE-UPDATE] installer: " << (helper.empty() ? "embedded script " + script.string() : "helper " + helper);
       const auto log = platf::appdata() / "self_update.log";
       const std::string sha = rel.asset_sha256.empty() ? "-" : rel.asset_sha256;
       const auto cmp = compare_versions(current_version(), rel.version);
       const std::string reinstall = (cmp && *cmp == 0) ? "1" : "0";
 
-      std::vector<std::string> base = {"/bin/sh", script.string(), package.string(), sha, reinstall};
+      // helper 直接當成被執行的程式（pkexec 用它的路徑找 polkit action）；備援才是 /bin/sh＋使用者目錄的腳本
+      std::vector<std::string> base = helper.empty() ?
+                                        std::vector<std::string> {"/bin/sh", script.string(), package.string(), sha, reinstall} :
+                                        std::vector<std::string> {helper, package.string(), sha, reinstall};
       int rc = -1;
       // 1) 免密碼 sudo：先探測，不行就不用它（避免把安裝失敗誤判成沒權限）
       if (run_argv({"sudo", "-n", "true"}, log) == 0) {
@@ -862,6 +1022,7 @@ exit 0
     long code = 0;
     auto j = api_get_json(std::string(kApiBase) + "/tags/v" + rel.version, error, &code);
     if (!j) return false;
+    remember_notes(rel.version, *j);  // §UPDATE-NOTES-TRAY：同一份 JSON 帶著內文
     auto assets = j->find("assets");
     if (assets == j->end() || !assets->is_array()) {
       if (error) *error = "release JSON has no assets[]";
@@ -1030,7 +1191,13 @@ exit 0
         g_pending = latest;
       }
       set_state(state_e::update_available, on_state);
-      if (notify) notify("VipleStream update available", "Version " + latest->version + " is available. Click \"Install update v" + latest->version + "\" in the tray menu to install (streaming will be interrupted).");
+      // §UPDATE-NOTES-TRAY：選單已經換成「Install update」，再去拿更新摘要（一版只查一次；拿不到就照舊只報版號）
+      latest->summary = notes_summary_for(latest->version);
+      if (!latest->summary.empty()) {
+        std::lock_guard<std::mutex> lg(g_pending_mtx);
+        if (g_pending && g_pending->version == latest->version) g_pending->summary = latest->summary;
+      }
+      if (notify) notify("VipleStream update available", with_summary("Version " + latest->version + " is available. Click \"Install update v" + latest->version + "\" in the tray menu to install (streaming will be interrupted).", latest->summary));
     });
   }
 
@@ -1175,8 +1342,8 @@ exit 0
         mode = g_auto_mode;
       }
       if (mode == "install") {
-        ui_notify()(title, "Version " + pend->version + " will be installed automatically when nobody is streaming. "
-                           "You can also install it now from the tray menu.");
+        ui_notify()(title, with_summary("Version " + pend->version + " will be installed automatically when nobody is streaming. "
+                                        "You can also install it now from the tray menu.", pend->summary));
       } else {
         ui_notify()(title, text);
       }

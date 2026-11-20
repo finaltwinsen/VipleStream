@@ -3160,7 +3160,10 @@ not matter). Any other value is reported in the log as an invalid value and the 
             this option is set, a warning is logged and it stays off. Applies only when the client supports it;
             with `disabled`, with an older client, or while two or more links carry video, the behaviour is
             identical to earlier versions. The setting applies to all VR sessions of this host, including
-            single-link sessions on the local network. The default will change after headset testing.}
+            single-link sessions on the local network. The default stays `disabled`: since 2.0.202 the paths
+            where these rules matter most (a round trip longer than one and a half frame periods) get them
+            through [vr_multilink_repair_far](#vr_multilink_repair_far), which is enabled by default and leaves
+            the local network on the original rules.}
         </td>
     </tr>
     <tr>

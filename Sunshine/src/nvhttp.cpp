@@ -1214,6 +1214,9 @@ namespace nvhttp {
         vr_caps |= VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT;
       }
 #endif
+      // §HOTSPOT-ADAPT（2026-11-20）：回報熱點加入狀態（S2C HOTSPOT_STATUS）、收 C2S HOTSPOT_STATE。每個平台都宣告：
+      // 沒有連熱點功能的平台回 UNSUPPORTED，頭盔不必空等
+      vr_caps |= VIPLE_VR_SERVER_CAP_HOTSPOT_STATUS;
       tree.put("root.VipleStreamVR", vr_caps);
       tree.put("root.VipleStreamVRProto", VIPLE_VR_PROTO_VERSION);
     }

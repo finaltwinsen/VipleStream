@@ -57,8 +57,14 @@
   L1 太容易進不進得去要看實際 Wi-Fi 場次的 `[VIPLE-ABR] cong level` 行數。第 3 期（即時延遲下界、2D 用 FRAME_FEEDBACK、QUIC-only 的 RTT）沒排。
 - §IDR-FAST：「10 秒內第 4 張起間隔 1500 ms 並到期補送」那一支，注入的間隔剛好 ≥1.5 秒，沒真的走到延後。
 - client 計時重試（`§IDR-RETRY`）只在延遲場次觸發過一次；`§FRZ-WD-RTT` 沒觸發過（要 RTT > 750 ms）。
-- §HOTSPOT-ADAPT 剩下的：兩端的狀態回報訊息（`HOTSPOT_STATUS`／`CLOSED`，免掉第一場的 45 秒）、host 判定行把「不在範圍內」寫成
-  「看得到但連不上」（`fail_assoc` 的判斷）、設計文件 S1／S2／S4／S6／S7。
+- §HOTSPOT-ADAPT 第 3 步（兩端的狀態回報，2.0.252）驗過兩個場景：掃不到熱點的 host 第 23 秒關熱點、host 收到 CLOSED 就停止重試；
+  連得上的 host 8 秒加入、熱點保留。**沒驗**：靜態原因（host 沒有無線介面）與下一場的 QUERY、回報遺失時退回 45 秒、連開兩場時上一輪的判定
+  有沒有漏給新場次、舊 client／舊 server 混用。`docs/vr_protocol.md` 的 wire 表還沒補這兩則訊息（0x0C、0x10、能力位元 0x800）。
+  設計文件 S1／S2／S4／S6／S7 沒做。
+- host 常駐圖示的更新摘要、QUIC `SO_RCVBUF`、Linux 更新的 polkit 政策檔（2.0.252）：都只確認建得過（.deb 裡有政策檔與 helper）；
+  摘要要等下一次 release 才看得到、polkit 對話框文字要在 Linux host 上實際走一次更新。Windows 通知的中文標題長度要實機看。
+- STUN 重量：沒做（探測 socket 綁在控制埠上，重量會和串流搶埠；乾淨的做法是由控制埠的 ENet socket 自己送 STUN，要動 `stream.cpp`）。
+- Linux x64：2.0.252 的 AppImage 與 .deb 在 CachyOS 容器建得過（順手拿掉 metainfo 裡已 404 的上游截圖網址）；沒有裝起來跑過。
 - §HOTSPOT-MISSING（host 重啟網卡後查不到介面就整場不再連）：改了但沒重現過（要網卡閒置約一小時才會走到提早重啟）。
 - §INPUT-STALL：`input-stall.log` 與兩次堆疊、等待鏈還沒看到實際輸出；2 秒停頓的來源仍未找到（三個嫌疑見設計文件）。
 - 2D 丟包補傳（§FLAT-REPAIR，2.0.251）：注入 8% 隨機丟包 5／5 補回；真實負載 5 分鐘（頭盔 → 開發機、113 fps）5 次丟包全補回、
@@ -68,7 +74,6 @@
   `--xr-dump-keyboard <png>`＋`--xr-test-keyboard "a{caps}ab{num}5+{close}"` 無人驗（還沒跑）。host 端 numpad 鍵碼的掃描碼對應沒讀過。
 - `--steamvr-driver uninstall`（2.0.251）：實作了、從沒執行過（會動 host 的 SteamVR 註冊，要使用者同意才試）。
 - web 設定頁的「串流控制選單」開關、找不到頭盔時 `xrGetSystem` 的重試（只在頭盔上等）：沒實測。
-- host 常駐圖示顯示更新摘要：沒做（發現新版時多打一次 `/tags/vX` 取第一個 `## ` 標題）。
 - 開發機 server 的 log 要用旗標檔取：`temp\deploy_local.logs` 放著再 `schtasks /Run /TN VipleStream-DeployServerLocal`，複製到 `temp\devsrv\`。
 
 ### 2026-11-20 早：§IDR-FAST 丟包後 2 秒凍結（server 2.0.245，已提交 v2.0.245）

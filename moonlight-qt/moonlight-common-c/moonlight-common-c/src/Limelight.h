@@ -1100,6 +1100,12 @@ bool LiGetCurrentHostDisplayHdrMode(void);
 #define LI_AUDIO_STATUS_INIT_FAILED 3 // 擷取初始化失敗，這場串流沒有聲音
 int LiGetServerAudioStatus(uint32_t* seq);
 
+// VipleStream §HOTSPOT-ADAPT：server 回報的「host 這一端加入頭盔熱點的狀態」（0x5508 的 HOTSPOT_STATUS，VR 與平面場次都收）。
+// 回傳最後一則的 state（VIPLE_VR_HS_*），內容寫進 status（可為 NULL）；這一場還沒收到過（舊 server、或沒送過
+// version 2 的 HOTSPOT_INFO／HOTSPOT_STATE）回 -1。seq（可為 NULL）每收到一則 +1（重送的同一則也算）。
+// 只是 server 的說法：留不留熱點仍以 LiVrLinkOnDedicated() 為準。可從任何執行緒呼叫。
+int LiGetVrHotspotStatus(VIPLE_VR_TLV_HOTSPOT_STATUS* status, uint32_t* seq);
+
 typedef struct _SS_HDR_METADATA {
     // RGB order
     struct {

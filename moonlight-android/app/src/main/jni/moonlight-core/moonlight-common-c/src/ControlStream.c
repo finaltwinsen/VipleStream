@@ -140,6 +140,9 @@ static bool hdrEnabled;
 #define VIPLE_AUDIO_STATUS_PTYPE 0x5510
 static volatile int serverAudioStatus = -1;
 static volatile uint32_t serverAudioStatusSeq;
+// §HOTSPOT-ADAPT：server 最新一則 HOTSPOT_STATUS（控制接收執行緒寫、app 輪詢）。seq 是奇數＝正在寫
+static volatile uint32_t hotspotStatusSeq;
+static volatile uint32_t hotspotStatusWords[3];
 static SS_HDR_METADATA hdrMetadata;
 
 static int intervalGoodFrameCount;
@@ -540,6 +543,8 @@ int initializeControlStream(void) {
     memset(&hdrMetadata, 0, sizeof(hdrMetadata));
     serverAudioStatus = -1;
     serverAudioStatusSeq = 0;
+    hotspotStatusSeq = 0;
+    memset((void*)hotspotStatusWords, 0, sizeof(hotspotStatusWords));
 
     return 0;
 }
@@ -1558,6 +1563,7 @@ int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable) {
     if (!(VrFlags & VIPLE_VR_SF_ENABLED) &&
             !(reliable && length >= 2 && 2 + (int)tlv[1] == length &&
               (tlv[0] == VIPLE_VR_C2S_HOTSPOT_INFO ||
+               tlv[0] == VIPLE_VR_C2S_HOTSPOT_STATE ||  // §HOTSPOT-ADAPT：呼叫端要先確認 VIPLE_VR_SERVER_CAP_HOTSPOT_STATUS
                (tlv[0] == VIPLE_VR_C2S_LINK_HELLO && StreamConfig.flatMultilink)))) {
         return -1;
     }
@@ -3076,6 +3082,31 @@ enet_main_loop:
                 serverAudioStatus = p[1];
                 serverAudioStatusSeq++;
                 Limelog("[VIPLE-AUD-MON] server audio status %u (v%u)\n", (unsigned)p[1], (unsigned)p[0]);
+            }
+
+            // §HOTSPOT-ADAPT：HOTSPOT_STATUS 由 common-c 自己認（VR 與平面場次都認），只記下最新一則，
+            // app 自己輪詢（LiGetVrHotspotStatus）。VR 場次整則訊息之後仍照常轉給 app
+            if (IS_SUNSHINE() && ctlHdr->type == (unsigned short)VIPLE_VR_PTYPE_S2C) {
+                const uint8_t* hsTlv = (const uint8_t*)(ctlHdr + 1);
+                int hsLen = packetLength - (int)sizeof(*ctlHdr);
+                int hsOff = 0;
+                while (hsLen <= VIPLE_VR_MAX_CTRL_PAYLOAD && hsOff + 2 <= hsLen) {
+                    uint8_t hsType = hsTlv[hsOff];
+                    uint8_t hsBody = hsTlv[hsOff + 1];
+                    if (hsOff + 2 + hsBody > hsLen) {
+                        break;
+                    }
+                    if (hsType == VIPLE_VR_S2C_HOTSPOT_STATUS && hsBody >= sizeof(VIPLE_VR_TLV_HOTSPOT_STATUS)) {
+                        uint32_t words[3];
+                        memcpy(words, &hsTlv[hsOff + 2], sizeof(words));
+                        hotspotStatusSeq++;  // 奇數：寫入中
+                        hotspotStatusWords[0] = words[0];
+                        hotspotStatusWords[1] = words[1];
+                        hotspotStatusWords[2] = words[2];
+                        hotspotStatusSeq++;
+                    }
+                    hsOff += 2 + hsBody;
+                }
             }
 
             // §VR：REFRESH_START 由控制接收執行緒直接交給恢復狀態機
@@ -4904,6 +4935,33 @@ int LiGetServerAudioStatus(uint32_t* seq) {
         *seq = serverAudioStatusSeq;
     }
     return serverAudioStatus;
+}
+
+// §HOTSPOT-ADAPT：見 Limelight.h
+int LiGetVrHotspotStatus(VIPLE_VR_TLV_HOTSPOT_STATUS* status, uint32_t* seq) {
+    int tries;
+    for (tries = 0; tries < 8; tries++) {
+        uint32_t before = hotspotStatusSeq;
+        uint32_t words[3];
+        words[0] = hotspotStatusWords[0];
+        words[1] = hotspotStatusWords[1];
+        words[2] = hotspotStatusWords[2];
+        if ((before & 1) == 0 && before == hotspotStatusSeq) {
+            VIPLE_VR_TLV_HOTSPOT_STATUS st;
+            if (before == 0) {
+                return -1;
+            }
+            memcpy(&st, words, sizeof(st));
+            if (status != NULL) {
+                *status = st;
+            }
+            if (seq != NULL) {
+                *seq = before / 2;
+            }
+            return st.state;
+        }
+    }
+    return -1;  // 一直撞到寫入（不該發生）：這一輪當作沒有，下一輪再讀
 }
 
 bool LiGetHdrMetadata(PSS_HDR_METADATA metadata) {

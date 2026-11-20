@@ -2420,6 +2420,44 @@ namespace platf {
     int restarts = 0;
     bool gave_up = false;
 
+    // §HOTSPOT-ADAPT 第 3 步：給 wire 回報（S2C HOTSPOT_STATUS）的狀態快照。pub_* 由 mtx 保護。
+    // 只在狀態或旗標改變時加序號（stream.cpp 的控制執行緒比序號，變了才送）；fresh＝新的一輪有了第一個結果
+    // （arm、挑不到介面、回答查詢），一定加序號。pub_hold：場次收到新的熱點資訊（vr_hotspot_expect）或頭盔說熱點
+    // 關了（vr_hotspot_stop）之後，上一輪還在跑的看門狗不可以再改快照，否則新的場次會收到上一輪的判定。
+    std::uint32_t pub_seq = 0;
+    std::uint8_t pub_state = 0;
+    std::uint8_t pub_flags = 0;
+    bool pub_hold = false;
+    clock::time_point pub_at {};  // 這一輪的起點
+    std::atomic<std::uint32_t> pub_attempts {0};  // 這一輪我們自己發起的連線次數（不加序號，重送時順便帶）
+    std::atomic<std::uint32_t> stop_gen {0};  // vr_hotspot_stop 每呼叫一次加一
+
+    void publish_locked(int state, int flags, bool fresh) {
+      if (fresh) {
+        pub_hold = false;
+        pub_at = clock::now();
+      } else if (pub_hold || (state == pub_state && flags == pub_flags)) {
+        return;
+      }
+      pub_state = static_cast<std::uint8_t>(state);
+      pub_flags = static_cast<std::uint8_t>(flags);
+      ++pub_seq;
+    }
+
+    // 不可拿著 mtx 呼叫
+    void publish(int state, int flags, bool fresh = false) {
+      std::lock_guard lk(mtx);
+      publish_locked(state, flags, fresh);
+    }
+
+    // 看門狗用：round＝這一輪迴圈開頭讀到的 armed_at。迴圈跑到一半時新的一輪已經 arm 了，就不可以把上一輪的狀態寫進去
+    void publish_round(clock::time_point round, int state, int flags) {
+      std::lock_guard lk(mtx);
+      if (round == armed_at) {
+        publish_locked(state, flags, false);
+      }
+    }
+
     // 依 wlan 介面 GUID（＝網路卡的 NetCfgInstanceId）找到裝置節點，送 DICS_PROPCHANGE（停止＋啟動，等同 devcon restart）
     bool restart_adapter(const GUID &ifGuid) {
       wchar_t want[64] {};
@@ -2660,6 +2698,7 @@ namespace platf {
       DWORD slow_logged_rc = ERROR_SUCCESS;
       clock::time_point retry_due {};  // 快速加入之後，下一次自己重連的時刻
       int idle_probe_fails = 0;  // §VR-HOTSPOT-IDLESTALL
+      int hs_flags = 0;  // §HOTSPOT-ADAPT 第 3 步：這一輪的 VIPLE_VR_HS_F_*
       // §HOTSPOT-MISSING
       constexpr std::chrono::seconds kRestartSettle {30};
       constexpr std::chrono::seconds kMissingReopen {10};
@@ -2706,6 +2745,7 @@ namespace platf {
           slow_logged_rc = ERROR_SUCCESS;
           retry_due = {};
           down_since.reset();  // 上一輪留下來的斷線時刻不算在這一輪
+          hs_flags = 0;  // 這一輪的 TRYING 已經在 arm() 放進快照
         }
         DWORD st_err = ERROR_SUCCESS;
         const int st = query_state(hClient, g, ssid, &st_err);
@@ -2751,6 +2791,8 @@ namespace platf {
                             << (yield_logged ? "; the connection was left to the other program" : "") << ')';
             fast = false;
             joined = true;
+            hs_flags &= ~VIPLE_VR_HS_F_RIVAL;
+            publish_round(armed, VIPLE_VR_HS_JOINED, hs_flags);
           } else if (st < 0 || now - armed > kFastJoin) {
             fast = false;
             if (st == 0) {
@@ -2758,6 +2800,8 @@ namespace platf {
               slow_n = 0;
               retry_due = now + slow_interval(false, 0);
               down_since = now;
+              hs_flags = hotspot_seen() ? (hs_flags | VIPLE_VR_HS_F_SEEN) : (hs_flags & ~VIPLE_VR_HS_F_SEEN);
+              publish_round(armed, VIPLE_VR_HS_TRYING, hs_flags);
               BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not joined after " << std::chrono::duration_cast<std::chrono::seconds>(kFastJoin).count()
                               << " s (" << fast_tries << " connect attempt(s) of ours, " << fail_completes.load() << " failed connection(s), "
                               << fail_attempts.load() << " failed attempt(s), hotspot seen=" << (hotspot_seen() ? 1 : 0)
@@ -2779,6 +2823,8 @@ namespace platf {
               lk.unlock();
               if (allowed) {
                 early_done = true;
+                hs_flags |= VIPLE_VR_HS_F_RESTARTED;
+                publish_round(armed, VIPLE_VR_HS_TRYING, hs_flags);
                 BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] not joined "
                                    << std::chrono::duration_cast<std::chrono::seconds>(now - armed).count()
                                    << " s after the hotspot info - restarting the adapter early (" << n << '/' << max_restarts << ')';
@@ -2807,6 +2853,9 @@ namespace platf {
                 slow_logged_reason = last_fail_reason.load();
                 retry_due = now + slow_interval(true, 0);
                 down_since = now;
+                hs_flags = assoc ? (hs_flags | VIPLE_VR_HS_F_SEEN) : (hs_flags & ~VIPLE_VR_HS_F_SEEN);
+                hs_flags &= ~VIPLE_VR_HS_F_RIVAL;
+                publish_round(armed, assoc ? VIPLE_VR_HS_FAILED : VIPLE_VR_HS_UNREACHABLE, hs_flags);
                 BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] verdict: " << (assoc ? "failed (hotspot seen, cannot connect)" : "unreachable") << ' '
                                    << std::chrono::duration_cast<std::chrono::milliseconds>(now - armed).count() << " ms after the hotspot info ("
                                    << completes << " failed connection(s), " << attempts << " failed attempt(s), hotspot seen=" << (assoc ? 1 : 0)
@@ -2826,6 +2875,8 @@ namespace platf {
             if (rival_this_session && now_ms() - rival_ms < std::chrono::duration_cast<std::chrono::milliseconds>(kRivalQuiet).count()) {
               if (!yield_logged) {
                 yield_logged = true;
+                hs_flags |= VIPLE_VR_HS_F_RIVAL;
+                publish_round(armed, VIPLE_VR_HS_TRYING, hs_flags);
                 BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] another program (usually Steam) is connecting this adapter "
                                 << std::chrono::duration_cast<std::chrono::milliseconds>(now - armed).count()
                                 << " ms after the hotspot info - leaving the connection to it (" << fast_tries << " attempt(s) of ours so far)";
@@ -2838,11 +2889,14 @@ namespace platf {
             }
             if (yield_logged && !resumed_logged) {
               resumed_logged = true;
+              hs_flags &= ~VIPLE_VR_HS_F_RIVAL;
+              publish_round(armed, VIPLE_VR_HS_TRYING, hs_flags);
               BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] the other program stopped connecting this adapter - connecting it ourselves";
             }
             if ((!fast_last_try || now - *fast_last_try >= kFastRetry) && is_idle_disconnected(hClient, g)) {
               fast_last_try = now;
               ++fast_tries;
+              pub_attempts.fetch_add(1);
               connect_profile(hClient, g, ssid);
             }
             continue;  // 快速加入期間不算斷線、不重啟網卡
@@ -2864,6 +2918,8 @@ namespace platf {
           }
           down_since.reset();
           missing_logged = false;
+          hs_flags &= ~VIPLE_VR_HS_F_RIVAL;
+          publish_round(armed, VIPLE_VR_HS_JOINED, hs_flags);  // 沒變就不加序號
           // §VR-HOTSPOT-RXSTALL：連著，但收到的計數 kRxStall 都沒動、同時送出的有在增加＝接收卡住，照斷線一樣重啟網卡
           ULONG64 in = 0, out = 0;
           if (!query_counters(g, &in, &out)) {
@@ -2935,6 +2991,7 @@ namespace platf {
           if (!missing_logged) {
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter not present - not restarting (query err=" << st_err << ')';
             missing_logged = true;
+            publish_round(armed, VIPLE_VR_HS_NO_ADAPTER, hs_flags);
           }
           came_back = true;
           down_since.reset();
@@ -2944,12 +3001,16 @@ namespace platf {
           down_since = now;
           if (joined) {
             retry_due = now;  // 下一輪就重連（照舊）
+            publish_round(armed, VIPLE_VR_HS_LEFT, hs_flags);
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter disconnected from the headset hotspot"sv;
           } else {
             // §HOTSPOT-ADAPT：這一輪從沒連上過（例如網卡不在、後來才出現），不記成「斷線」
             // §HOTSPOT-MISSING：剛從「查不到」回來的那一次馬上連
             retry_due = came_back ? now : now + slow_interval(verdict, slow_n);
             came_back = false;
+            if (!verdict) {
+              publish_round(armed, VIPLE_VR_HS_TRYING, hs_flags);  // 判定過的維持判定（頭盔已經依它關了熱點）
+            }
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] watchdog: adapter present but never joined in this round - retrying slowly, no adapter restart"sv;
           }
           continue;
@@ -2960,6 +3021,7 @@ namespace platf {
             now_ms() - rival_last_ms.load() >= std::chrono::duration_cast<std::chrono::milliseconds>(kRivalQuiet).count() &&
             is_idle_disconnected(hClient, g)) {
           fast_last_try = now;
+          pub_attempts.fetch_add(1);
           const DWORD rc = connect_profile(hClient, g, ssid);
           if (joined) {
             retry_due = now + (given_up ? std::chrono::duration_cast<clock::duration>(kGaveUpRetry) : std::chrono::duration_cast<clock::duration>(kDownRetry));
@@ -2989,6 +3051,9 @@ namespace platf {
         if (restarts >= max_restarts) {
           if (!gave_up) {
             gave_up = true;
+            if (armed == armed_at) {
+              publish_locked(VIPLE_VR_HS_GAVE_UP, hs_flags, false);
+            }
             lk.unlock();
             BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] watchdog: still disconnected after " << max_restarts
                                << " restart(s) - giving up for this session; unplug and replug the adapter (reconnect attempts continue every "
@@ -3013,6 +3078,7 @@ namespace platf {
     // vr_hotspot_connect 選定網卡後呼叫：每場重新起算次數
     void arm(const GUID &g, const std::string &ssid) {
       if (config::vr.hotspot_restart_max <= 0) {
+        publish(VIPLE_VR_HS_DISABLED, 0, true);  // 沒有看門狗就沒有人會連
         return;
       }
       std::lock_guard lk(mtx);
@@ -3028,6 +3094,8 @@ namespace platf {
       fail_attempts.store(0);
       last_fail_reason.store(0);
       fail_assoc.store(false);
+      pub_attempts.store(0);
+      publish_locked(VIPLE_VR_HS_TRYING, 0, true);  // §HOTSPOT-ADAPT 第 3 步：這一輪的第一個狀態
       if (!running) {
         running = true;
         std::thread(loop).detach();
@@ -3043,9 +3111,74 @@ namespace platf {
     }
   }
 
+  vr_hotspot_status_t vr_hotspot_status() {
+    vr_hotspot_status_t out;
+    std::lock_guard lk(hotspot_wd::mtx);
+    out.seq = hotspot_wd::pub_seq;
+    out.state = hotspot_wd::pub_state;
+    out.flags = hotspot_wd::pub_flags;
+    out.attempts = static_cast<std::uint8_t>(std::min<std::uint32_t>(hotspot_wd::pub_attempts.load(), 255));
+    out.restarts = static_cast<std::uint8_t>(std::clamp(hotspot_wd::restarts, 0, 255));
+    const auto ds = std::chrono::duration_cast<std::chrono::milliseconds>(hotspot_wd::clock::now() - hotspot_wd::pub_at).count() / 100;
+    out.elapsed_ds = static_cast<std::uint16_t>(std::clamp<std::int64_t>(ds, 0, 65535));
+    out.reason = hotspot_wd::last_fail_reason.load();
+    return out;
+  }
+
+  std::uint32_t vr_hotspot_expect() {
+    std::lock_guard lk(hotspot_wd::mtx);
+    hotspot_wd::pub_hold = true;
+    return hotspot_wd::pub_seq;
+  }
+
+  void vr_hotspot_stop() {
+    hotspot_wd::stop_gen.fetch_add(1);
+    bool was_running;
+    {
+      std::lock_guard lk(hotspot_wd::mtx);
+      was_running = hotspot_wd::armed && hotspot_wd::running;
+      hotspot_wd::armed = false;  // keepalive 不再延長
+      hotspot_wd::alive_until = {};  // 看門狗下一輪（最慢 kPoll）醒來先看這個就收工，不會再連
+      hotspot_wd::pub_hold = true;
+    }
+    BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] the client closed its hotspot - "
+                    << (was_running ? "stopping the retries and the watchdog for this round (profile kept)" : "nothing was running");
+  }
+
+  void vr_hotspot_query() {
+    // 熱點沒開，所以「已連線」的介面一定是連在別的網路上：只要有一張沒連線的無線介面就算可以
+    bool ready = false;
+    ensure_wlanapi_loaded();
+    if (fn_WlanOpenHandle && fn_WlanCloseHandle && fn_WlanFreeMemory && fn_WlanEnumInterfaces && fn_WlanSetProfile && fn_WlanConnect) {
+      HANDLE hClient = nullptr;
+      DWORD negotiatedVersion = 0;
+      if (fn_WlanOpenHandle(WLAN_API_MAKE_VERSION(2, 0), nullptr, &negotiatedVersion, &hClient) == ERROR_SUCCESS && hClient) {
+        PWLAN_INTERFACE_INFO_LIST ifList = nullptr;
+        if (fn_WlanEnumInterfaces(hClient, nullptr, &ifList) == ERROR_SUCCESS && ifList) {
+          for (DWORD i = 0; i < ifList->dwNumberOfItems && !ready; ++i) {
+            ready = ifList->InterfaceInfo[i].isState != wlan_interface_state_connected;
+          }
+          fn_WlanFreeMemory(ifList);
+        }
+        fn_WlanCloseHandle(hClient, nullptr);
+      }
+    }
+    BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] query: " << (ready ? "a wireless interface is free (ready)" : "no free wireless interface");
+    hotspot_wd::publish(ready ? VIPLE_VR_HS_READY : VIPLE_VR_HS_NO_ADAPTER, 0, true);
+  }
+
   void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key) {
     (void) version;
     (void) channel;
+    // §HOTSPOT-ADAPT 第 3 步：走不到 arm() 就離開（沒有 wlanapi、沒有閒著的無線介面、設定檔建不起來）＝這台現在沒有
+    // 可以連熱點的介面，放進狀態快照讓頭盔馬上知道（以前只有一行 log，頭盔要空等 45 秒）
+    bool status_done = false;
+    auto status_guard = util::fail_guard([&status_done]() {
+      if (!status_done) {
+        hotspot_wd::publish(VIPLE_VR_HS_NO_ADAPTER, 0, true);
+      }
+    });
+    const auto stop_gen_at_entry = hotspot_wd::stop_gen.load();
     ensure_wlanapi_loaded();
     if (!fn_WlanOpenHandle || !fn_WlanCloseHandle || !fn_WlanFreeMemory || !fn_WlanEnumInterfaces ||
         !fn_WlanQueryInterface || !fn_WlanGetAvailableNetworkList || !fn_WlanSetProfile || !fn_WlanConnect) {
@@ -3186,7 +3319,13 @@ namespace platf {
     if (fn_WlanDeleteProfile && fn_WlanDeleteProfile(hClient, &selectedGuid, hotspot_wd::kLegacyProfile, nullptr) == ERROR_SUCCESS) {
       BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] removed the old auto-connect profile (VipleStream-Frame)"sv;
     }
-    hotspot_wd::arm(selectedGuid, ssid);
+    status_done = true;
+    if (hotspot_wd::stop_gen.load() == stop_gen_at_entry) {
+      hotspot_wd::arm(selectedGuid, ssid);
+    } else {
+      // 這一則熱點資訊還在處理時頭盔就說熱點關了：以後到的為準，不啟動看門狗
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] the client closed its hotspot while the profile was being set - not starting the watchdog"sv;
+    }
     if (already_connected) {
       fn_WlanCloseHandle(hClient, nullptr);
       SecureZeroMemory(key.data(), key.size());

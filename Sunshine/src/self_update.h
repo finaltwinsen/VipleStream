@@ -41,6 +41,7 @@ namespace self_update {
     std::string asset_sha256;  ///< API digest（hex，小寫）；空字串＝未知
     long long asset_size = 0;  ///< API size；0＝未知
     bool asset_listed = false; ///< API 是否列出本平台的 asset
+    std::string summary;       ///< §UPDATE-NOTES-TRAY：release 內文的標題行（依介面語系）；空字串＝沒有／拿不到
   };
 
   enum class state_e {

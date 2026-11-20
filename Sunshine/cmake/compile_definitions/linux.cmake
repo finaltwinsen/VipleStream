@@ -12,6 +12,14 @@ if(${SUNSHINE_BUILD_APPIMAGE})
     string(REPLACE "${CMAKE_INSTALL_PREFIX}" ".${CMAKE_INSTALL_PREFIX}" SUNSHINE_ASSETS_DIR_DEF ${SUNSHINE_ASSETS_DIR})
 endif()
 
+# VipleStream §SELF-UPDATE (4)：自我更新的安裝 helper 放在固定路徑（root 擁有），polkit 政策檔
+# （packaging/linux/*.self-update.policy.in）的 exec.path 與 self_update.cpp 都用這個路徑；
+# 安裝規則在 cmake/packaging/linux.cmake。AppImage／Flatpak 不是用 .deb 更新，不裝也不定義。
+if(NOT FREEBSD AND NOT SUNSHINE_BUILD_APPIMAGE AND NOT SUNSHINE_BUILD_FLATPAK)
+    set(SUNSHINE_UPDATE_HELPER "${CMAKE_INSTALL_PREFIX}/libexec/viplestream-server/self-update")
+    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_UPDATE_HELPER="${SUNSHINE_UPDATE_HELPER}")
+endif()
+
 # cuda
 set(CUDA_FOUND OFF)
 if(${SUNSHINE_ENABLE_CUDA})

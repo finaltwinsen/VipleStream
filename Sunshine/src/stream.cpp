@@ -882,6 +882,22 @@ namespace stream {
     // 非 VR session 收到 VR ptype 時只記一次 log（handler 可能在 control 或 QUIC IO 執行緒）
     std::atomic<bool> vrDropLogged {false};
 
+    // §HOTSPOT-ADAPT（2026-11-20）：熱點狀態回報（S2C HOTSPOT_STATUS）。atomic 的幾個由收訊息的執行緒寫
+    // （control 或 QUIC IO），其餘只在 controlBroadcastThread 用
+    struct {
+      std::atomic<bool> report {false};  // client 送過 version ≥ 2 的 HOTSPOT_INFO 或 HOTSPOT_STATE：會認回報
+      std::atomic<bool> closed {false};  // 最後一則是 HOTSPOT_STATE CLOSED：這一輪不再回報
+      std::atomic<std::uint8_t> local {0};  // 這裡就能決定的狀態（DISABLED／REMOTE／UNSUPPORTED）；0＝看平台的快照
+      std::atomic<std::uint32_t> base_seq {0};  // 收到那一則時平台快照的序號：和它不同的才是這一輪的結果
+      std::atomic<std::uint32_t> gen {0};  // 每收到一則 INFO／QUERY 加一
+      std::uint32_t sent_gen = 0;
+      std::uint32_t sent_seq = 0;
+      bool sent_any = false;
+      int fail_logs = 0;
+      std::chrono::steady_clock::time_point sent_at {};
+      std::chrono::steady_clock::time_point polled_at {};
+    } hotspot;
+
     // 以下只在 controlBroadcastThread 存取
     struct {
       net::peer_t statePeer = nullptr;  // STATE 已送給這個 peer（§Q-ENET-RECONNECT 換 peer 後重送）
@@ -1717,11 +1733,148 @@ namespace stream {
     }
   }
 
+  // §HOTSPOT-ADAPT：等著交給背景執行緒的那一則熱點資訊（只留最新的一份）。原本是 vr_hotspot_info_received 裡的
+  // static，搬出來是因為 HOTSPOT_STATE CLOSED 要能把還沒處理的那一則拿掉
+  struct hotspot_req_t {
+    VIPLE_VR_TLV_HOTSPOT_INFO info;
+    std::string ssid;
+    std::string key;
+  };
+  static std::mutex hotspot_mtx;
+  static bool hotspot_running = false;
+  static std::optional<hotspot_req_t> hotspot_next;
+
+  // §HOTSPOT-ADAPT：這一則（INFO 或 QUERY）在這裡就有答案的情況。回傳 0＝要問平台
+  static std::uint8_t vr_hotspot_local_state(session_t *session) {
+#if defined(_WIN32)
+    if (!config::vr.hotspot_autoconnect) {
+      return VIPLE_VR_HS_DISABLED;
+    }
+    if (session->tsPathGen != 0) {
+      return VIPLE_VR_HS_REMOTE;
+    }
+    return 0;
+#else
+    (void) session;
+    return VIPLE_VR_HS_UNSUPPORTED;
+#endif
+  }
+
+  // §HOTSPOT-ADAPT：新的一輪（收到 INFO 或 QUERY）。local≠0＝狀態在這裡就決定了；否則記下平台快照目前的序號
+  static void vr_hotspot_round_begin(session_t *session, std::uint8_t local) {
+    auto &hs = session->hotspot;
+    hs.local.store(local);
+#if defined(_WIN32)
+    if (local == 0) {
+      hs.base_seq.store(platf::vr_hotspot_expect());
+    }
+#endif
+    hs.closed.store(false);
+    hs.gen.fetch_add(1);
+  }
+
+  // §HOTSPOT-ADAPT：C2S HOTSPOT_STATE（VR 與平面場次共用）。body 至少 sizeof(VIPLE_VR_TLV_HOTSPOT_STATE)
+  static void vr_hotspot_state_received(session_t *session, const std::uint8_t *body) {
+    VIPLE_VR_TLV_HOTSPOT_STATE st {};
+    std::memcpy(&st, body, sizeof(st));
+    auto &hs = session->hotspot;
+    hs.report.store(true);
+    if (st.state == VIPLE_VR_HOTSPOT_STATE_CLOSED) {
+      // 頭盔的熱點關了（或這一場不開）：還沒處理的熱點資訊拿掉、重試與看門狗立刻停、這一輪不再回報
+      hs.closed.store(true);
+      {
+        std::lock_guard hlk(hotspot_mtx);
+        hotspot_next.reset();
+      }
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] received state=closed from the client"sv;
+#if defined(_WIN32)
+      platf::vr_hotspot_stop();
+#endif
+    } else if (st.state == VIPLE_VR_HOTSPOT_STATE_QUERY) {
+      const auto local = vr_hotspot_local_state(session);
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] received state=query from the client"sv;
+      vr_hotspot_round_begin(session, local);
+#if defined(_WIN32)
+      if (local == 0) {
+        std::thread([]() {
+          platf::vr_hotspot_query();  // 會開 WLAN handle，不可卡住 control 執行緒
+        }).detach();
+      }
+#endif
+    }
+  }
+
+  // §HOTSPOT-ADAPT：把 host 這一端的熱點狀態送給頭盔。只在 control 執行緒呼叫（send_vr_s2c 的限制）。
+  // 狀態改變時送一則，之後每 5 秒重送同一則（reliable；只有改變時記 log）。舊 client（沒送過 version 2）一則都不送
+  static void vr_hotspot_status_tick(session_t *session, std::chrono::steady_clock::time_point now) {
+    auto &hs = session->hotspot;
+    if (!hs.report.load(std::memory_order_relaxed) || hs.closed.load(std::memory_order_relaxed) || now - hs.polled_at < 200ms) {
+      return;
+    }
+    hs.polled_at = now;
+    const auto gen = hs.gen.load();
+    VIPLE_VR_TLV_HOTSPOT_STATUS st {};
+    st.version = 1;
+    std::uint32_t seq = 0;
+    if (const auto local = hs.local.load(); local != 0) {
+      st.state = local;
+    } else {
+#if defined(_WIN32)
+      const auto snap = platf::vr_hotspot_status();
+      if (snap.state == 0 || snap.seq == hs.base_seq.load()) {
+        return;  // 這一輪還沒有結果（背景執行緒還在挑介面、建設定檔）
+      }
+      seq = snap.seq;
+      st.state = snap.state;
+      st.flags = snap.flags;
+      st.attempts = snap.attempts;
+      st.restarts = snap.restarts;
+      st.elapsedDs = snap.elapsed_ds;
+      st.wlanReason = snap.reason;
+#else
+      return;
+#endif
+    }
+    if (gen == 0) {
+      return;  // 還沒有任何一輪（只收過 CLOSED 之類）
+    }
+    const bool changed = !hs.sent_any || gen != hs.sent_gen || seq != hs.sent_seq;
+    if (!changed && now - hs.sent_at < 5s) {
+      return;
+    }
+    ::vr::s2c_msg_t msg;
+    msg.tlv.resize(2 + sizeof(st));
+    msg.tlv[0] = VIPLE_VR_S2C_HOTSPOT_STATUS;
+    msg.tlv[1] = (std::uint8_t) sizeof(st);
+    std::memcpy(msg.tlv.data() + 2, &st, sizeof(st));
+    msg.reliable = true;
+    hs.sent_at = now;  // 送不出去也等下一個 5 秒，不要每 200 ms 重試
+    if (send_vr_s2c(session, msg)) {
+      if (hs.fail_logs++ < 3) {
+        BOOST_LOG(warning) << "[VIPLE-VR-HOTSPOT] could not send status state=" << (int) st.state;
+      }
+      return;
+    }
+    hs.sent_any = true;
+    hs.sent_gen = gen;
+    hs.sent_seq = seq;
+    if (changed) {
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] status sent state=" << (int) st.state
+                      << std::format(" flags=0x{:x} attempts={} restarts={} elapsed={:.1f}s reason=0x{:x}", (unsigned) st.flags, (unsigned) st.attempts,
+                                     (unsigned) st.restarts, (unsigned) st.elapsedDs / 10.0, (std::uint32_t) st.wlanReason);
+    }
+  }
+
   // §HOTSPOT-FLAT：C2S HOTSPOT_INFO 的處理（VR 與平面場次共用）。body 至少 sizeof(VIPLE_VR_TLV_HOTSPOT_INFO)
   static void vr_hotspot_info_received(session_t *session, const std::uint8_t *body) {
     VIPLE_VR_TLV_HOTSPOT_INFO hotspot {};
     std::memcpy(&hotspot, body, sizeof(hotspot));
     if (hotspot.ssidLen > 0 && hotspot.ssidLen <= 32 && hotspot.keyLen > 0 && hotspot.keyLen <= 64) {
+      // §HOTSPOT-ADAPT：version ≥ 2 的 client 認得 HOTSPOT_STATUS；新的一輪從這裡開始（要在交給背景執行緒之前）
+      if (hotspot.version >= VIPLE_VR_HOTSPOT_VERSION_2) {
+        session->hotspot.report.store(true);
+      }
+      vr_hotspot_round_begin(session, vr_hotspot_local_state(session));
       std::string ssid(reinterpret_cast<const char *>(hotspot.ssid), hotspot.ssidLen);
       std::string key(reinterpret_cast<const char *>(hotspot.key), hotspot.keyLen);
 
@@ -1740,14 +1893,6 @@ namespace stream {
         // §REVIEW-1111：同時最多一條背景執行緒。原本每一則 HOTSPOT_INFO 都另起一條去連 Wi-Fi，client 連續送就一直堆
         // （每條都開 WLAN handle、可以跑好幾秒）。已經有一條在連時，把這一則記成「下一則」（只留最新的一份），
         // 那條做完會接著處理——client 只在內容改變時才送，所以不能直接丟掉。
-        struct hotspot_req_t {
-          decltype(hotspot) info;
-          std::string ssid;
-          std::string key;
-        };
-        static std::mutex hotspot_mtx;
-        static bool hotspot_running = false;
-        static std::optional<hotspot_req_t> hotspot_next;
         {
           std::lock_guard hlk(hotspot_mtx);
           hotspot_next = hotspot_req_t {hotspot, std::move(ssid), std::move(key)};
@@ -1770,6 +1915,8 @@ namespace stream {
             }).detach();
           }
         }
+      } else {
+        BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] vr_hotspot_autoconnect is disabled - not joining the headset hotspot"sv;
       }
     }
 #if defined(_WIN32)
@@ -4176,6 +4323,9 @@ namespace stream {
           if (ftype == VIPLE_VR_C2S_HOTSPOT_INFO && flen >= sizeof(VIPLE_VR_TLV_HOTSPOT_INFO)) {
             vr_hotspot_info_received(session, fp + foff + 2);
             handled = true;
+          } else if (ftype == VIPLE_VR_C2S_HOTSPOT_STATE && flen >= sizeof(VIPLE_VR_TLV_HOTSPOT_STATE)) {
+            vr_hotspot_state_received(session, fp + foff + 2);  // §HOTSPOT-ADAPT
+            handled = true;
           } else if (ftype == VIPLE_VR_C2S_LINK_HELLO && session->flatMl && session->vrLinks) {
             // §FLAT-ML：和 VR 分支同一套處理（只在 control 執行緒；從 QUIC 轉進來的不理）
             handled = true;
@@ -4373,6 +4523,9 @@ namespace stream {
         } else if (type == VIPLE_VR_C2S_HOTSPOT_INFO && len >= sizeof(VIPLE_VR_TLV_HOTSPOT_INFO)) {
           vr_state->count_c2s(type);
           vr_hotspot_info_received(session, body);
+        } else if (type == VIPLE_VR_C2S_HOTSPOT_STATE && len >= sizeof(VIPLE_VR_TLV_HOTSPOT_STATE)) {
+          vr_state->count_c2s(type);
+          vr_hotspot_state_received(session, body);  // §HOTSPOT-ADAPT
         } else {
           // 不認得的 subtype 依 len 跳過
           vr_state->count_c2s(type);
@@ -4695,6 +4848,7 @@ namespace stream {
             // VipleStream 2.0 §VR：S→C 只能在這條執行緒送（STATE／STATS／REFRESH_START 等）
             if (session->vr && session->control.peer) {
               vr_control_tick(session, now);
+              vr_hotspot_status_tick(session, now);  // §HOTSPOT-ADAPT
             } else if (session->vr && session->vrLinks && session->vrLinks->any_alive()) {
               vr_drain_s2c_ctrl_down(session);  // §VR-CTRL-DOWN-S2C
             } else if (!session->vr && session->control.peer) {
@@ -4704,6 +4858,7 @@ namespace stream {
                 flat_keepalive = now;
                 platf::vr_hotspot_keepalive();
               }
+              vr_hotspot_status_tick(session, now);  // §HOTSPOT-ADAPT
               flat_link_tick(session, now);  // §FLAT-ML
             }
           }

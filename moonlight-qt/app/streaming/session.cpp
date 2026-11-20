@@ -2905,6 +2905,8 @@ static void wipeQByteArray(QByteArray& b)
     b.clear();
 }
 
+static void sendVrHotspotStateIfAny(FrameHotspot& hotspot);  // §HOTSPOT-ADAPT 第 3 步，定義在 readVrHotspotCreds 前面
+
 static void wipeStdString(std::string& s)
 {
     if (!s.empty()) {
@@ -5193,6 +5195,8 @@ bool Session::startConnectionAsync()
                         (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT);
         if (!viaVpn && ((m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) || m_HotspotFlat)) {
             std::string ssid, key;
+            // §HOTSPOT-ADAPT 第 3 步：server 會回報熱點加入狀態時，FrameHotspot 才會依回報提早關、送 HOTSPOT_STATE
+            m_FrameHotspot.setServerReports((m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_HOTSPOT_STATUS) != 0);
             if (readVrHotspotCreds(&ssid, &key)) {
                 m_FrameHotspot.openForLan(ssid, key, m_Computer->uuid.toStdString());
             }
@@ -5225,9 +5229,11 @@ bool Session::startConnectionAsync()
 
     if (m_HotspotFlat) {
         checkAndSendVrHotspotInfo();  // §HOTSPOT-FLAT
+        sendVrHotspotStateIfAny(m_FrameHotspot);  // §HOTSPOT-ADAPT：這一場不開熱點（CLOSED）或只問（QUERY）
     }
     if (m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) {
         checkAndSendVrHotspotInfo();
+        sendVrHotspotStateIfAny(m_FrameHotspot);  // §HOTSPOT-ADAPT
         // §VR-MIC：頭盔麥克風 → host 的 Steam Streaming Microphone
         if ((m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_MIC) && m_Preferences->vrMic) {
             m_Mic = MicCapture::start([](const uint8_t* payload, int len) {
@@ -5884,7 +5890,8 @@ void Session::exec()
 #endif
         if ((m_StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED) || m_HotspotFlat) {
             static Uint32 lastHotspotPollTime = 0;
-            if (SDL_TICKS_PASSED(SDL_GetTicks(), lastHotspotPollTime + 5000)) {
+            // §HOTSPOT-ADAPT 第 3 步：還在等 host 時每秒一輪（host 的否定回報一秒內生效），其餘照舊每 5 秒
+            if (SDL_TICKS_PASSED(SDL_GetTicks(), lastHotspotPollTime + (m_FrameHotspot.waitingForHost() ? 1000 : 5000))) {
                 lastHotspotPollTime = SDL_GetTicks();
                 checkAndSendVrHotspotInfo();
                 // §HOTSPOT-VERIFY：有多連線時以「這一場有沒有連線走熱點」為準（熱點上有別台 host 的網卡不算）
@@ -5899,6 +5906,26 @@ void Session::exec()
                     hotspotHostAddrs.push_back(m_Computer->activeAddress.address().toStdString());
                 }
                 m_FrameHotspot.tick(hotspotHaveLinks ? LiVrLinkOnDedicated() : -1, hotspotHostAddrs);  // §FRAME-HOTSPOT-AUTO
+                // §HOTSPOT-ADAPT 第 3 步：host 的回報（排在 tick 之後：這一輪剛確認的連線優先於 host 的說法）
+                {
+                    VIPLE_VR_TLV_HOTSPOT_STATUS hsStatus;
+                    uint32_t hsSeq = 0;
+                    if (LiGetVrHotspotStatus(&hsStatus, &hsSeq) >= 0) {
+                        m_FrameHotspot.onHostStatus(hsStatus.state, hsStatus.flags, hsStatus.attempts, hsStatus.restarts,
+                                                    hsStatus.elapsedDs, hsStatus.wlanReason, hsSeq);
+                    }
+                    if (m_FrameHotspot.takeReopen()) {
+                        // 問過 host、它現在有閒著的無線介面：這時才開熱點、送熱點資訊
+                        std::string ssid, key;
+                        if (readVrHotspotCreds(&ssid, &key)) {
+                            m_FrameHotspot.openForLan(ssid, key, m_Computer->uuid.toStdString());
+                        }
+                        wipeStdString(ssid);
+                        wipeStdString(key);
+                        checkAndSendVrHotspotInfo();
+                    }
+                    sendVrHotspotStateIfAny(m_FrameHotspot);
+                }
                 if (m_HotspotFlat) {
                     // §HOTSPOT-FLAT：host 的無線網卡這時才連上熱點：把它的位址交給 MP-QUIC（已經有就不動）
                     for (const std::string& ip : FrameHotspot::peerAddresses()) {
@@ -6559,6 +6586,28 @@ DispatchDeferredCleanup:
 }
 
 
+// §HOTSPOT-ADAPT 第 3 步（2026-11-20）：頭盔的熱點關了、這一場不開（CLOSED），或熱點沒開只問 host 能不能連（QUERY）。
+// FrameHotspot 只在 server 有 VIPLE_VR_SERVER_CAP_HOTSPOT_STATUS 時才會交出要送的東西（舊 server 不認得這一則）
+static void sendVrHotspotStateIfAny(FrameHotspot& hotspot)
+{
+    const int state = hotspot.takeStateToSend();
+    if (state < 0) {
+        return;
+    }
+    uint8_t tlv[2 + sizeof(VIPLE_VR_TLV_HOTSPOT_STATE)];
+    tlv[0] = VIPLE_VR_C2S_HOTSPOT_STATE;
+    tlv[1] = static_cast<uint8_t>(sizeof(VIPLE_VR_TLV_HOTSPOT_STATE));
+    tlv[2] = 1;
+    tlv[3] = static_cast<uint8_t>(state);
+    if (LiSendVrMessage(tlv, sizeof(tlv), true) == 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-HOTSPOT] sent hotspot state=%s to the host",
+                    state == VIPLE_VR_HOTSPOT_STATE_QUERY ? "query" : "closed");
+    }
+    else {
+        hotspot.stateSendFailed(state);  // 下一輪再送
+    }
+}
+
 // §FRAME-HOTSPOT-AUTO：hotspot.json 裡的 SSID 與金鑰（呼叫端用完要清掉；這裡不印任何內容）
 bool Session::readVrHotspotCreds(std::string* ssid, std::string* key)
 {
@@ -6624,7 +6673,7 @@ void Session::checkAndSendVrHotspotInfo()
         return;
     }
     // §HOTSPOT-ADAPT（2026-11-20）：熱點確定沒開（這台 host 最近連不上所以這一場不開、開不起來、等不到已經關掉）就不送，
-    // 否則 host 整場對不存在的熱點重試、還會重啟網卡。已經送出去的那一則收不回來（wire 沒有「關了」的訊息）
+    // 否則 host 整場對不存在的熱點重試、還會重啟網卡。已經送出去的那一則由 HOTSPOT_STATE CLOSED 收回（sendVrHotspotStateIfAny；舊 server 收不回來）
     if (!m_FrameHotspot.advertiseToHost()) {
         return;
     }
@@ -6679,7 +6728,8 @@ void Session::checkAndSendVrHotspotInfo()
     }
 
     VIPLE_VR_TLV_HOTSPOT_INFO info {};
-    info.version = VIPLE_VR_HOTSPOT_VERSION_1;
+    // §HOTSPOT-ADAPT 第 3 步：version 2＝這個 client 認得 S2C HOTSPOT_STATUS（格式不變）。只對宣告了能力的 server 送 2
+    info.version = (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_HOTSPOT_STATUS) ? VIPLE_VR_HOTSPOT_VERSION_2 : VIPLE_VR_HOTSPOT_VERSION_1;
     info.authType = static_cast<uint8_t>(authType);
     if (bandStr.contains(QStringLiteral("6G"), Qt::CaseInsensitive)) {
         info.band = VIPLE_VR_HOTSPOT_BAND_6GHZ;

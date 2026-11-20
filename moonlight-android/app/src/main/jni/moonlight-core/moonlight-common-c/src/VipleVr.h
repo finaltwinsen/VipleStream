@@ -51,6 +51,7 @@ extern "C" {
 #define VIPLE_VR_SERVER_CAP_GAZE_FOVEA      0x80  // §VR-GAZE-FOVEA：支援 0x82 幀標頭（逐幀動態注視點中心）
 #define VIPLE_VR_SERVER_CAP_FLAT_ML         0x400 // §FLAT-ML：平面（2D）場次也能用多連線（/launch 帶 flatMl=1，回應 <VipleStreamFlatMl>1）
 #define VIPLE_VR_SERVER_CAP_HOTSPOT_FLAT    0x200 // §HOTSPOT-FLAT：不是 VR 的場次也收 C2S HOTSPOT_INFO（host 的無線網卡照樣連上頭盔熱點）
+#define VIPLE_VR_SERVER_CAP_HOTSPOT_STATUS  0x800 // §HOTSPOT-ADAPT：回報熱點加入狀態（S2C HOTSPOT_STATUS）、收 C2S HOTSPOT_STATE
 #define VIPLE_VR_SERVER_CAP_MIC             0x100 // §VR-MIC：收頭盔麥克風（C2S MIC），寫進 host 的虛擬麥克風（<VipleStreamVR> 是十進位整數，放得下）
 
 // /launch 的 vrCaps（十六進位）
@@ -321,6 +322,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
 #define VIPLE_VR_C2S_MIC               0x0D  // §VR-MIC：VR channel unsequenced，每 20 ms 一則：{u16 seq（LE）, Opus 封包}（48 kHz 單聲道）
 #define VIPLE_VR_C2S_RATE              0x0E  // reliable，§VR-RATE-AUTO：要求 host 每幾張送一張（VIPLE_VR_TLV_RATE）
 #define VIPLE_VR_C2S_NET_SWITCH        0x0F  // reliable（另在連線上各送一份），§VR-NETSEL-HOLD：頭盔要切網路了（VIPLE_VR_TLV_NET_SWITCH）
+#define VIPLE_VR_C2S_HOTSPOT_STATE     0x10  // reliable，§HOTSPOT-ADAPT：頭盔的熱點關了／只問能不能連（VIPLE_VR_TLV_HOTSPOT_STATE）；server 有 CAP_HOTSPOT_STATUS 才送
 #define VIPLE_VR_C2S_RESERVED_MIC      0x7F  // 舊保留值（未使用；新版改用 0x0D）
 
 // S→C subtype
@@ -334,6 +336,7 @@ typedef struct _VIPLE_VR_FRAME_HEADER_GAZE {
 #define VIPLE_VR_S2C_REPAIR_GONE       0x08  // §VR-LINK-REPAIR：只走連線的 T_S2C
 #define VIPLE_VR_S2C_LINK_ADDRS        0x09  // reliable，§VR-MULTILINK-HOTADD：server 目前可廣告的位址完整快照
 #define VIPLE_VR_S2C_RATE              0x0B  // reliable，§VR-RATE-AUTO：host 已套用的分頻（VIPLE_VR_TLV_RATE_APPLIED）
+#define VIPLE_VR_S2C_HOTSPOT_STATUS    0x0C  // reliable，§HOTSPOT-ADAPT：host 這一端的熱點加入狀態（VIPLE_VR_TLV_HOTSPOT_STATUS）；VR 與平面場次都送
 #define VIPLE_VR_S2C_NOTICE            0x0A  // reliable，§VR-PADMODE：要在頭盔裡短暫顯示的提示，payload {u8 code}（VIPLE_VR_NOTICE_*）
 
 // NOTICE.code（不認得的代碼略過）
@@ -474,6 +477,7 @@ typedef struct _VIPLE_VR_TLV_STATE {
 
 // §VR-HOTSPOT-AUTO（2026-10-30）：頭盔熱點憑證與頻段資訊
 #define VIPLE_VR_HOTSPOT_VERSION_1         1
+#define VIPLE_VR_HOTSPOT_VERSION_2         2  // §HOTSPOT-ADAPT：格式與 1 相同；表示「這個 client 認得 S2C HOTSPOT_STATUS」，server 只對送過 ≥2 的場次回報
 
 #define VIPLE_VR_HOTSPOT_AUTH_WPA2_PSK     1
 #define VIPLE_VR_HOTSPOT_AUTH_WPA3_SAE     2
@@ -495,6 +499,46 @@ typedef struct _VIPLE_VR_TLV_HOTSPOT_INFO {
     uint8_t ssid[32];      // SSID 字串（以 ssidLen 為準）
     uint8_t key[64];       // 金鑰字串（PSK，以 keyLen 為準）
 } VIPLE_VR_TLV_HOTSPOT_INFO;
+
+// §HOTSPOT-ADAPT（2026-11-20）：host 回報自己這一端加入頭盔熱點的狀態（S→C，12 B，reliable）。
+// 狀態或旗標改變時送一則，之後每 5 秒重送同一則直到再變。不含 SSID、BSSID、介面名稱。
+// 協商：server 的 <VipleStreamVR> 有 VIPLE_VR_SERVER_CAP_HOTSPOT_STATUS；client 的 HOTSPOT_INFO.version 送 2（或送過 HOTSPOT_STATE）。
+#define VIPLE_VR_HS_UNSUPPORTED   1   // 這個平台不會連（靜態）
+#define VIPLE_VR_HS_DISABLED      2   // vr_hotspot_autoconnect 關掉（靜態）
+#define VIPLE_VR_HS_REMOTE        3   // 這一場經 Tailscale，不連（不記失敗）
+#define VIPLE_VR_HS_NO_ADAPTER    4   // 沒有 wlanapi、沒有閒著的無線介面、設定檔建不起來、網卡被拔掉（靜態）
+#define VIPLE_VR_HS_READY         5   // 只回答 QUERY：有閒著的無線介面
+#define VIPLE_VR_HS_TRYING        6   // 正在連（含退讓給別的程式）
+#define VIPLE_VR_HS_JOINED        7   // 這張介面連上了這個 SSID
+#define VIPLE_VR_HS_UNREACHABLE   8   // 判定連不到（不在範圍內）
+#define VIPLE_VR_HS_FAILED        9   // 看得到但連不上
+#define VIPLE_VR_HS_LEFT          10  // 連上過、現在斷了，看門狗在處理
+#define VIPLE_VR_HS_GAVE_UP       11  // 重啟次數用完還是沒連回來
+
+#define VIPLE_VR_HS_F_SEEN        0x01  // 有證據看得到熱點（連線走到關聯階段之後才失敗）
+#define VIPLE_VR_HS_F_RIVAL       0x02  // 別的程式在連，我們退讓中
+#define VIPLE_VR_HS_F_RESTARTED   0x04  // 這一輪重啟過網卡
+
+typedef struct _VIPLE_VR_TLV_HOTSPOT_STATUS {
+    uint8_t  version;      // 1
+    uint8_t  state;        // VIPLE_VR_HS_*
+    uint8_t  flags;        // VIPLE_VR_HS_F_*
+    uint8_t  attempts;     // 這一輪我們自己發起的連線次數（飽和在 255）
+    uint8_t  restarts;     // 這一輪重啟網卡的次數
+    uint8_t  reserved;     // 0
+    uint16_t elapsedDs;    // 收到熱點資訊到現在，0.1 秒為單位（飽和）
+    uint32_t wlanReason;   // 最後一次失敗的 WLAN_REASON_CODE 原值，只給 log 用；0＝沒有
+} VIPLE_VR_TLV_HOTSPOT_STATUS;
+
+// §HOTSPOT-ADAPT（2026-11-20）：頭盔告訴 host 熱點的狀態（C→S，2 B，reliable）。server 一律以最後收到的一則
+// （HOTSPOT_INFO 或這一則）為準。CLOSED＝熱點關了或這一場不開，請停手；QUERY＝熱點沒開，只問你現在有沒有閒著的無線介面
+#define VIPLE_VR_HOTSPOT_STATE_CLOSED  0
+#define VIPLE_VR_HOTSPOT_STATE_QUERY   1
+
+typedef struct _VIPLE_VR_TLV_HOTSPOT_STATE {
+    uint8_t version;       // 1
+    uint8_t state;         // VIPLE_VR_HOTSPOT_STATE_*
+} VIPLE_VR_TLV_HOTSPOT_STATE;
 
 typedef struct _VIPLE_VR_TLV_HAPTIC {
     uint8_t  device;      // VIPLE_VR_POSE_LEFT／RIGHT
@@ -692,6 +736,8 @@ VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_ADDRS) == 33, link_addrs_33);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TRACKING) <= VIPLE_VR_MAX_CTRL_PAYLOAD, tracking_fits);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_INFO) == 102, tlv_hotspot_102);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_INFO) <= VIPLE_VR_MAX_CTRL_PAYLOAD, hotspot_fits);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_STATUS) == 12, tlv_hotspot_status_12);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_HOTSPOT_STATE) == 2, tlv_hotspot_state_2);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_TLV_FRAME_FEEDBACK_HDR) == 12, tlv_frame_feedback_hdr_12);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_FRAME_FEEDBACK_REC) == 12, tlv_frame_feedback_rec_12);
 VIPLE_VR_STATIC_ASSERT(2 + sizeof(VIPLE_VR_TLV_FRAME_FEEDBACK_HDR) + VIPLE_VR_FRAME_FEEDBACK_MAX * sizeof(VIPLE_VR_FRAME_FEEDBACK_REC) <= VIPLE_VR_MAX_CTRL_PAYLOAD, frame_feedback_fits);

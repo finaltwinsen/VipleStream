@@ -50,12 +50,6 @@
   <developer id="dev.finaltwinsen">
     <name>finaltwinsen (VipleStream fork; upstream LizardByte/Sunshine)</name>
   </developer>
-  <screenshots>
-    <screenshot type="default">
-      <image>https://app.lizardbyte.dev/Sunshine/assets/img/screenshots/01-sunshine-welcome-page.png</image>
-      <caption>Sunshine welcome page</caption>
-    </screenshot>
-  </screenshots>
   <content_rating type="oars-1.0">
     <content_attribute id="language-profanity">moderate</content_attribute>
     <content_attribute id="language-humor">mild</content_attribute>

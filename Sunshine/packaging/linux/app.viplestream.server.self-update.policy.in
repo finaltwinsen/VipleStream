@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  VipleStream §SELF-UPDATE (4): polkit action for the host's self-update.
+  pkexec picks this action when the program it is asked to run is the path in the
+  org.freedesktop.policykit.exec.path annotation below (the installed helper), and then shows
+  the message of this action instead of the generic "run /bin/sh as the super user" text.
+  Authorization stays the same as pkexec's default: an administrator has to authenticate
+  every time (auth_admin, not kept).
+-->
+<policyconfig>
+  <vendor>VipleStream</vendor>
+  <vendor_url>https://github.com/finaltwinsen/VipleStream</vendor_url>
+  <action id="@PROJECT_FQDN@.self-update">
+    <description>Install a VipleStream Server update</description>
+    <description xml:lang="zh_TW">安裝 VipleStream Server 更新</description>
+    <message>Authentication is required to install the VipleStream Server update</message>
+    <message xml:lang="zh_TW">需要驗證身分才能安裝 VipleStream Server 更新</message>
+    <icon_name>@PROJECT_FQDN@</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">@SUNSHINE_UPDATE_HELPER@</annotate>
+  </action>
+</policyconfig>
