@@ -2703,6 +2703,12 @@ namespace video {
     const auto apply_encoder_bitrate = [&](int kbps, bool is_decrease) -> bool {
       const int div = std::max(1, vr_enc_div);
       const int enc_kbps = div > 1 ? std::min(kbps * div, std::max(config.bitrate, kbps)) : kbps;
+      // 第二輪審查 C11：半速時每秒實際送出＝enc_kbps ÷ div。目標高過「建立時的碼率 ÷ div」的部分送不出去——控制器的上限
+      // 已經夾在這裡（stream.cpp set_rate_div），只有剛換分頻、控制器還沒跟上的那一下（≤ 500 ms）會看到這行
+      if (div > 1 && kbps > config.bitrate / div) {
+        BOOST_LOG(info) << "[VIPLE-VR-RATE] target " << kbps << " kbps is above what 1/" << div << " rate can send ("
+                        << config.bitrate / div << " kbps): encoder output limited until the controller caps it";
+      }
       auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
       if (avcodec_session && avcodec_session->avcodec_ctx) {
         auto &ctx = avcodec_session->avcodec_ctx;

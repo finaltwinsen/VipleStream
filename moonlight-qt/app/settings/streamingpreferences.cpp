@@ -746,6 +746,12 @@ int StreamingPreferences::getPyroWaveRecommendedBitrate(int width, int height, i
     return qBound(20000, rounded, 350000);
 }
 
+bool StreamingPreferences::bitrateLooksDefault() const
+{
+    // §RES-BITRATE（C06／C07）：只比這一組，不要加候選（見標頭說明）
+    return bitrateKbps == getDefaultBitrate(width, height, fps, enableYUV444, enableFrameInterpolation);
+}
+
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444, bool fruc)
 {
     // v1.4.151 §R2-α-2: 還原 v1.4.145 半切邏輯 (R1-2 revert).

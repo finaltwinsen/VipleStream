@@ -1,4 +1,9 @@
 #include "Limelight-internal.h"
+#include "VrMultiLink.h"
+
+#ifdef VIPLE_MPQUIC
+#include "QuicTransport.h"
+#endif
 
 // Uncomment to test 3 byte Annex B start sequences with GFE
 //#define FORCE_3_BYTE_START_SEQUENCES
@@ -51,9 +56,13 @@ static unsigned int consecutiveFrameDrops;
 // 至少隔 IDR_RETRY_FIRST_MS。
 // §IDR-RETRY-RTT：間隔另外有一個跟著控制通道往返時間走的下限 2×rtt＋100 ms（rtt 封頂 IDR_RETRY_RTT_CAP_MS）。
 // 請求上行、IDR 下行各半趟，300 ms 內 IDR 根本到不了時重試只會讓 host 多送一張（新版 host 是延後補送，
-// 一樣多一張）。rtt ≤ 100 ms 時下限不超過 300 ms，行為和原本完全相同；還沒有樣本（LiGetEstimatedRttInfo
-// 回 false）也是原本的 300／600／1200。下限是 rtt 的連續函數（ENet 的 rtt 本身是平滑值），沒有開關、不需要遲滯；
+// 一樣多一張）。rtt ≤ 100 ms 時下限不超過 300 ms，行為和原本完全相同；所有來源都沒有樣本時
+// （見下面 §IDR-RETRY-RTT-FB）也是原本的 300／600／1200。下限是 rtt 的連續函數（ENet 的 rtt 本身是平滑值），沒有開關、不需要遲滯；
 // 封頂 4000 ms 和 §FRZ-WD-RTT 同一個值，下限最多 8100 ms，那時 watchdog（最長 8 秒）本來就會接手。
+// §IDR-RETRY-RTT-FB：ENet 的 rtt 拿不到（ENet 斷線或重連、控制改走 QUIC）時依序改用：多連線控制 PONG 的
+// rtt（vrmlCtrlRttMs，只算已確認的連線）→ QUIC 目前 active 路徑裡最小的 smoothed rtt（取最小，避免壞掉那條
+// 膨脹的值把重試拖到好幾秒）→ 這一場最後一個有效值（只在等 IDR 時記，沒等過就沒有）。都沒有才是原本的 300／600／1200。
+// LiGetEstimatedRttInfo 的語意不動（§FRZ-WD-RTT 等呼叫端依賴「ENet 斷了就回 false」）。
 // 只在「等 IDR 中又收到一張完整幀」時檢查（跟第一次請求同一個時機：網路還通才要，
 // 不在斷線時堆請求）；完全沒有完整幀時由 §FRZ-WATCHDOG 與「no video packets」那條路負責。
 // VR session 不走這裡（它有自己的 LOSS／REFRESH 狀態機與逾時），PyroWave 每幀都是 intra 也不走。
@@ -64,6 +73,7 @@ static unsigned int consecutiveFrameDrops;
 static bool idrRetryTracking;         // 這一輪等待已經開始計時
 static uint32_t idrRetryWaitStartMs;  // 這一輪等待第一次檢查的時刻（上一輪留下的請求時刻不算數）
 static unsigned int idrRetryCount;    // 這一輪等待已經計時重試幾次
+static uint32_t idrRetryLastRttMs;    // §IDR-RETRY-RTT-FB：這一場最後一個有效 rtt（0＝還沒有）；init 歸零
 
 static bool idrRetryApplies(void) {
     return !vrSession && !(NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE);
@@ -75,6 +85,46 @@ static void idrRetryReset(void) {
     idrRetryCount = 0;
 }
 
+// §IDR-RETRY-RTT-FB：取重試下限用的 rtt。回傳來源標籤（log 用），都拿不到回 NULL
+static const char* idrRetryRtt(uint64_t nowMs, uint32_t* rttMs) {
+    int linkRtt;
+
+    if (LiGetEstimatedRttInfo(rttMs, NULL)) {
+        idrRetryLastRttMs = *rttMs > 0 ? *rttMs : 1;
+        return "enet";
+    }
+    linkRtt = vrmlCtrlRttMsAt(nowMs);
+    if (linkRtt >= 0) {
+        *rttMs = (uint32_t)linkRtt;
+        idrRetryLastRttMs = *rttMs > 0 ? *rttMs : 1;
+        return "link";
+    }
+#ifdef VIPLE_MPQUIC
+    if (quicIsConnected()) {
+        QUIC_SUBFLOW_STATS st[QUIC_MAX_SUBFLOWS];
+        float best = -1.0f;
+        int n = quicGetSubflowStats(st, QUIC_MAX_SUBFLOWS);
+        int i;
+
+        for (i = 0; i < n; i++) {
+            if (st[i].active && st[i].rttMs > 0.0f && (best < 0.0f || st[i].rttMs < best)) {
+                best = st[i].rttMs;
+            }
+        }
+        if (best > 0.0f) {
+            *rttMs = (uint32_t)(best + 0.5f);
+            idrRetryLastRttMs = *rttMs > 0 ? *rttMs : 1;
+            return "quic";
+        }
+    }
+#endif
+    if (idrRetryLastRttMs > 0) {
+        *rttMs = idrRetryLastRttMs;
+        return "cached";
+    }
+    return NULL;
+}
+
 // 等 IDR 中、收到一張（要丟掉的）完整幀時呼叫。nowMs 是 PltGetMillis()
 static void idrRetryPoll(uint64_t nowMs, uint32_t frameIndex) {
     uint32_t now32 = (uint32_t)nowMs;
@@ -82,7 +132,7 @@ static void idrRetryPoll(uint64_t nowMs, uint32_t frameIndex) {
     uint32_t lastReqMs;
     uint32_t intervalMs;
     uint32_t rttMs = 0;
-    bool haveRtt;
+    const char* rttSrc;
     unsigned int i;
 
     if (!idrRetryApplies()) {
@@ -109,9 +159,10 @@ static void idrRetryPoll(uint64_t nowMs, uint32_t frameIndex) {
         intervalMs = IDR_RETRY_MAX_MS;
     }
 
-    // §IDR-RETRY-RTT：往返時間的下限（無鎖快照，這個執行緒可以讀；§FRZ-WD-RTT 也在同一條執行緒讀）
-    haveRtt = LiGetEstimatedRttInfo(&rttMs, NULL);
-    if (haveRtt) {
+    // §IDR-RETRY-RTT：往返時間的下限（ENet 是無鎖快照，這個執行緒可以讀；§FRZ-WD-RTT 也在同一條執行緒讀；
+    // 後備來源見 idrRetryRtt）
+    rttSrc = idrRetryRtt(nowMs, &rttMs);
+    if (rttSrc != NULL) {
         uint32_t floorMs;
 
         if (rttMs > IDR_RETRY_RTT_CAP_MS) {
@@ -129,9 +180,9 @@ static void idrRetryPoll(uint64_t nowMs, uint32_t frameIndex) {
     }
 
     idrRetryCount++;
-    Limelog("[VIPLE-DEPACK] §IDR-RETRY: no IDR %u ms after last request — retry #%u (interval %u ms, frame %u, rtt %d ms)\n",
+    Limelog("[VIPLE-DEPACK] §IDR-RETRY: no IDR %u ms after last request — retry #%u (interval %u ms, frame %u, rtt %d ms %s)\n",
             (unsigned int)(now32 - baseMs), idrRetryCount, (unsigned int)intervalMs, (unsigned int)frameIndex,
-            haveRtt ? (int)rttMs : -1);
+            rttSrc != NULL ? (int)rttMs : -1, rttSrc != NULL ? rttSrc : "none");
     LiRequestIdrFrame();
 }
 
@@ -215,6 +266,7 @@ void initializeVideoDepacketizer(int pktSize) {
     lastQueuedFrameTimeUs = 0;          // §FRZ-WATCHDOG
     resyncFrameNumberPending = false;   // §FRZ-WATCHDOG
     idrRetryReset();                    // §IDR-RETRY
+    idrRetryLastRttMs = 0;              // §IDR-RETRY-RTT-FB：上一場的 rtt 不沿用
     Limelog("[VIPLE-DEPACK] init: strictIdrFrameWait=%d (RFI %s%s)\n",
             (int)strictIdrFrameWait,
             isReferenceFrameInvalidationEnabled() ? "enabled" : "disabled",

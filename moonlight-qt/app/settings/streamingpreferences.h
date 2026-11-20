@@ -30,6 +30,12 @@ public:
     Q_INVOKABLE static int
     getPyroWaveRecommendedBitrate(int width, int height, int fps);
 
+    // §RES-BITRATE（第二輪審查 C06／C07）：存的碼率是不是「目前偏好組合」（寬高、fps、4:4:4、補幀）的預設值。
+    // 跟設定頁「使用預設值」按鈕的顯示條件完全相同（按鈕看得到＝這裡回 false）。場次開場（Session::
+    // decideBitrateFollowsDefault）與設定頁開頁時的自動估計同步共用這一個判定：autoAdjustBitrate 是 true、
+    // 但這裡回 false 時，一律當成使用者的值保留，不蓋掉。不窮舉其他模式（候選一多，整數碼率幾乎都會被判成預設值）。
+    Q_INVOKABLE bool bitrateLooksDefault() const;
+
     Q_INVOKABLE void save();
 
     void reload();

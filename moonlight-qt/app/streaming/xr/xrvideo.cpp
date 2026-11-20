@@ -934,9 +934,16 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive)
     if (pts90 != AV_NOPTS_VALUE) {
         const int64_t frameNo =
             frame->best_effort_timestamp != AV_NOPTS_VALUE ? frame->best_effort_timestamp : xrrate::HostCadence::kNoFrameNo;
+        // §RATE-CAUSE-HOST-IDR：關鍵幀（host 收到 IDR 要求時可能直接重編上一張、也帶 REPEATED）不整段算 host。
+        // 解碼器沒標的話是 false，退回只看 Present 間隔的規則
+#ifdef AV_FRAME_FLAG_KEY
+        const bool keyframe = (frame->flags & AV_FRAME_FLAG_KEY) != 0;
+#else
+        const bool keyframe = frame->key_frame != 0;
+#endif
         m_HostCadence.onFrame(frameNo, pts90, static_cast<double>(m_RatePeriodUs.load(std::memory_order_relaxed)),
                               m_StreamDiv.load(std::memory_order_relaxed),
-                              hasMeta && (meta.vrFlags & VIPLE_VR_FF_REPEATED) != 0);
+                              hasMeta && (meta.vrFlags & VIPLE_VR_FF_REPEATED) != 0, keyframe);
         m_HostFnPairs.store(m_HostCadence.pairs(), std::memory_order_relaxed);
         m_HostFnBreaks.store(m_HostCadence.breaks(), std::memory_order_relaxed);
     }

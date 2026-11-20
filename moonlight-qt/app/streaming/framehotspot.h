@@ -111,11 +111,19 @@ public:
         // §HOTSPOT-ADAPT（2026-11-20）：多久之後再試看這台連續失敗幾次（noJoinBackoffS）
         int fails = 0;
         char cls = 'R';
-        long remainS = noJoinRemainingS(hostId, &fails, &cls);
+        long recState = 0;
+        long remainS = noJoinRemainingS(hostId, &fails, &cls, &recState);
         // §HOTSPOT-ADAPT 第 3 步：靜態原因（S 類：host 沒有閒著的無線介面、功能關閉、平台不支援）不用時間退避。
         // server 會回報時：熱點關著就不開、只送一則 QUERY，回 READY 才開（takeReopen）；熱點已經開著就照常送熱點資訊，
         // server 半秒內就有答案。舊 server 沒辦法問，S 類照 R 類的時間退避
-        if (m_ServerReports && cls == 'S' && fails > 0) {
+        // §HOTSPOT-DISABLED-EXPIRE（2026-11-20 第二輪審查 C15）：DISABLED（host 關掉 vr_hotspot_autoconnect）例外——
+        // host 的 Steam 仍可能自己連上（所以 deferStatic 對它一律延後），只靠 QUERY 的話熱點永遠不會再開、紀錄每場刷新、
+        // 永遠不過期。所以 DISABLED 照 R 類的時間退避（10／30／90 分鐘、上限 4 小時）：退避期間照舊只送 QUERY
+        // （READY＝設定被打開了，這一場就開；回 DISABLED 不刷新紀錄的時刻，見 onHostStatus），到期後照一般流程開熱點，
+        // 讓 deferStatic 的延後判斷有機會成立；Steam 還是沒連上，closeForStatic 再記一筆、次數加一、退避拉長
+        const bool disabledRec = cls == 'S' && recState == VIPLE_VR_HS_DISABLED;
+        m_QueryRecState = recState;
+        if (m_ServerReports && cls == 'S' && fails > 0 && (!disabledRec || remainS > 0)) {
             if (state == "0") {
                 scrub(cmd);
                 m_Advertise = false;
@@ -413,7 +421,8 @@ public:
             else if (isStatic || state == VIPLE_VR_HS_REMOTE) {
                 m_QueryPending = false;
                 m_GaveUp = true;
-                if (isStatic) {
+                // §HOTSPOT-DISABLED-EXPIRE：紀錄本來就是 DISABLED、這次也回 DISABLED＝沒有新的資訊，不刷新時刻（讓退避會到期）
+                if (isStatic && !(state == VIPLE_VR_HS_DISABLED && m_QueryRecState == VIPLE_VR_HS_DISABLED)) {
                     int fails = 0;
                     recordNoJoin(m_HostId, &fails, 'S', state);
                 }
@@ -1276,9 +1285,12 @@ private:
     }
 
     // 這台 host 還要等多久才再為它開熱點（秒；0＝沒有紀錄或已經到期）。fails 回傳目前的連續失敗次數
-    static long noJoinRemainingS(const std::string& hostId, int* fails, char* cls = nullptr)
+    static long noJoinRemainingS(const std::string& hostId, int* fails, char* cls = nullptr, long* state = nullptr)
     {
         *fails = 0;
+        if (state != nullptr) {
+            *state = 0;
+        }
         if (!validHostId(hostId)) {
             return 0;
         }
@@ -1294,6 +1306,9 @@ private:
             *fails = e.fails;
             if (cls != nullptr) {
                 *cls = e.cls;
+            }
+            if (state != nullptr) {
+                *state = e.state;
             }
             const long waitS = noJoinBackoffS(e.fails);
             return ageS < waitS ? static_cast<long>(waitS - ageS) : 0;
@@ -1656,6 +1671,7 @@ private:
     int m_StateToSend = -1;          // 要送給 host 的 VIPLE_VR_HOTSPOT_STATE_*；-1＝沒有
     bool m_QueryPending = false;     // 送了 QUERY、還沒有答案（熱點沒開）
     std::chrono::steady_clock::time_point m_QueryAt;
+    long m_QueryRecState = 0;        // 這一場開始時 hotspot-nojoin 裡這台的 state（§HOTSPOT-DISABLED-EXPIRE）
     bool m_Reopen = false;           // QUERY 得到 READY：請呼叫端再開一次
     int m_ClosedAtCount = -1;        // 這一場為這台開的熱點被關掉時已經收到幾則回報；-1＝沒有關過
     bool m_LateJoinHandled = false;

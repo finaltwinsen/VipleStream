@@ -1864,6 +1864,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
     // §RES-BITRATE：畫面 fps 與碼率的來源在任何改寫之前定下來；之後只改 m_StreamConfig 與這幾個成員，不寫 m_Preferences
     m_OriginalFps = m_Preferences->fps;
     m_BitrateYuv444 = m_Preferences->enableYUV444;
+    m_BitrateFruc = false;  // §RES-BITRATE（C08）：下面補幀分支定案時才設
     m_BitrateCapKbps = 0;
     m_BitrateVrKbps = 0;
     decideBitrateFollowsDefault();
@@ -2041,6 +2042,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
         // LiGetVrFlags() 關掉），偏好設定本身不動（會被 save() 寫回）
         m_StreamConfig.fps = m_VrLaunch.refreshHz;
         m_OriginalFps = m_VrLaunch.refreshHz;
+        m_BitrateFruc = false;  // §RES-BITRATE（C08）：VR 不補幀（PCVR 碼率也不走 refreshSessionBitrate）
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-SESSION] VR request: stream %dx%d@%d (FRUC %s)",
                     m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps,
@@ -2053,6 +2055,9 @@ bool Session::initialize(QQuickWindow* qtWindow)
         // 原本照樣把 host 的幀率砍半，結果是「只有一半的幀率、也沒有補幀」（設定 60 實際 30 fps）。
         // 補不了就請 host 送完整幀率；兩個設定本身不動。
         m_StreamConfig.fps = m_OriginalFps;
+        // §RES-BITRATE（C08）：host 送全幀，預設碼率不砍半、不加補幀 headroom。之後就算 4:4:4 談不到
+        // （"no 4:4:4 this session"），fps 已經是全幀，維持 false。
+        m_BitrateFruc = false;
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] YUV 4:4:4 is on and this host offers it: frame interpolation cannot run on a 4:4:4 stream, "
                     "so the host is asked for the full %d fps instead of half",
@@ -2062,6 +2067,8 @@ bool Session::initialize(QQuickWindow* qtWindow)
         // §REVIEW-1104：只有 rendererSelection == RS_VULKAN 才啟用被動補幀，其他 renderer 視為關閉以與預設位元率計算一致
         const bool isVulkan = m_Preferences && m_Preferences->rendererSelection == StreamingPreferences::RS_VULKAN;
         const bool passive = isVulkan && m_Preferences->vkfrucPassiveMode;
+        // §RES-BITRATE（C08）：主動與被動都交給 getDefaultBitrate 判斷（被動＝全幀、不加 headroom；主動＝÷2／÷3）
+        m_BitrateFruc = true;
         if (passive) {
             m_StreamConfig.fps = m_OriginalFps;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -3307,9 +3314,12 @@ void Session::applyXrDesktopAutoFps()
 
 // §RES-BITRATE：開場判定一次「碼率跟著預設值」。以 autoAdjustBitrate 旗標為準（拖滑桿→false、按「使用預設值」→true），
 // 不再用「目前值＝某組寬高／fps 的預設值」去猜——三個改寫點各比各的，中間有一步沒重算就永遠對不上。
-// 保守處理：旗標是 true、但存的碼率不是任何常見模式的預設值（例如舊版把 CLI 的 --bitrate 存進設定檔、或手改設定檔
-// 只改了 bitrate 那一鍵）時，當成使用者的值保留，不蓋掉。存的值「看起來是某個模式的預設值」（舊版場次寫回造成的
-// 不一致，例如 2560x1440@144 配 40000）才跟著預設值走。
+// 保守處理：旗標是 true、但存的碼率不是「偏好組合」的預設值（StreamingPreferences::bitrateLooksDefault，
+// 和設定頁「使用預設值」按鈕的顯示條件相同）時，當成使用者的值保留，不蓋掉。
+// §RES-BITRATE（第二輪審查 C06）：原本拿常見解析度 × 更新率 × 4:4:4 × 補幀、加上所有螢幕的桌面模式去比（約 2000 組），
+// 預設值都是 1000 kbps 的整數倍，5～85 Mbps 每個 5 Mbps 的整數幾乎全中，舊版 CLI 存進來的 30000／50000 會被蓋掉，
+// 設定頁卻還顯示 50 Mbps 與「使用預設值」按鈕。改成只比一組：按鈕看得到的時候，串流一定用存的值。
+// 舊版場次寫回造成的不一致（例如 2560x1440@144 配 40000）也照存的值送（2.0.257 本來就是這樣），按一下「使用預設值」就回來。
 void Session::decideBitrateFollowsDefault()
 {
     m_BitrateFollowsDefault = false;
@@ -3324,37 +3334,18 @@ void Session::decideBitrateFollowsDefault()
         return;  // 使用者拖過滑桿
     }
 
-    const int stored = m_Preferences->bitrateKbps;
-    // 候選模式：偏好值、本機桌面模式、XR 桌面的虛擬螢幕、常見解析度 × 常見更新率 × 4:4:4 × 補幀
-    QVector<QPair<int, int>> sizes = {{m_Preferences->width, m_Preferences->height},
-                                      {1280, 720}, {1920, 1080}, {2560, 1440}, {3440, 1440}, {3840, 2160},
-                                      {1920, 1200}, {2560, 1600}, {1280, 800}};
-    QVector<int> rates = {m_Preferences->fps, 30, 48, 50, 60, 72, 75, 80, 90, 100, 120, 144, 165, 180, 240, 360};
-    const int displays = SDL_GetNumVideoDisplays();
-    for (int i = 0; i < displays; i++) {
-        SDL_DisplayMode dm;
-        if (SDL_GetDesktopDisplayMode(i, &dm) == 0 && dm.w > 0 && dm.h > 0) {
-            sizes.append({dm.w, dm.h});
-            if (dm.refresh_rate > 0) {
-                rates.append(dm.refresh_rate);
-            }
-        }
-    }
-    bool looksDefault = false;
-    for (int s = 0; s < sizes.size() && !looksDefault; s++) {
-        for (int r = 0; r < rates.size() && !looksDefault; r++) {
-            for (int v = 0; v < 4 && !looksDefault; v++) {
-                looksDefault = stored == StreamingPreferences::getDefaultBitrate(sizes[s].first, sizes[s].second, rates[r],
-                                                                                 (v & 1) != 0, (v & 2) != 0);
-            }
-        }
-    }
+    const bool looksDefault = m_Preferences->bitrateLooksDefault();
     m_BitrateFollowsDefault = looksDefault;
     if (!looksDefault) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[VIPLE-RES] bitrate: autoAdjustBitrate is on but the stored %d kbps is not the default of any known mode - "
-                    "keeping it as a user setting (press \"Use Default\" in settings to follow the default again)",
-                    stored);
+                    "[VIPLE-RES] bitrate: autoAdjustBitrate is on but the stored %d kbps is not the default of the saved mode "
+                    "(%dx%d@%d yuv444=%d fruc=%d -> %d kbps) - keeping it as a user setting "
+                    "(press \"Use Default\" in settings to follow the default again)",
+                    m_Preferences->bitrateKbps, m_Preferences->width, m_Preferences->height, m_Preferences->fps,
+                    (int)m_Preferences->enableYUV444, (int)m_Preferences->enableFrameInterpolation,
+                    StreamingPreferences::getDefaultBitrate(m_Preferences->width, m_Preferences->height, m_Preferences->fps,
+                                                            m_Preferences->enableYUV444,
+                                                            m_Preferences->enableFrameInterpolation));
     }
 }
 
@@ -3364,6 +3355,8 @@ void Session::decideBitrateFollowsDefault()
 //   否則                    → 偏好值（使用者滑桿或 --bitrate），原樣
 //   最後有傳輸上限（WS 隧道）就取小
 // 畫面 fps＝補幀除 2／3 之前的 m_OriginalFps：getDefaultBitrate 自己會處理補幀。
+// 補幀用 m_BitrateFruc（這一場 host 是不是真的送半幀），不讀偏好旗標：§FRUC-444-FULLFPS 時偏好開著補幀，
+// host 卻送全幀（第二輪審查 C08）。
 void Session::refreshSessionBitrate(const char* why)
 {
     const int before = m_StreamConfig.bitrate;
@@ -3375,7 +3368,7 @@ void Session::refreshSessionBitrate(const char* why)
     }
     else if (m_BitrateFollowsDefault) {
         kbps = StreamingPreferences::getDefaultBitrate(m_StreamConfig.width, m_StreamConfig.height, m_OriginalFps,
-                                                       m_BitrateYuv444, m_Preferences->enableFrameInterpolation);
+                                                       m_BitrateYuv444, m_BitrateFruc);
         source = "default";
     }
     else {
@@ -3390,7 +3383,7 @@ void Session::refreshSessionBitrate(const char* why)
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-RES] bitrate %d -> %d kbps (%s; %dx%d@%d, yuv444=%d fruc=%d, %s%s)", before, kbps, why,
                 m_StreamConfig.width, m_StreamConfig.height, m_OriginalFps,
-                (int)m_BitrateYuv444, (int)m_Preferences->enableFrameInterpolation, source, capped ? ", capped" : "");
+                (int)m_BitrateYuv444, (int)m_BitrateFruc, source, capped ? ", capped" : "");
 }
 
 int Session::getStreamDisplayIndex()
@@ -4917,7 +4910,7 @@ bool Session::startConnectionAsync()
     // If the user has adjusted the bitrate from default, we'll assume they really wanted
     // that value and not second guess them.
     // §RES-BITRATE：「使用者有沒有調過」改由開場判定的 m_BitrateFollowsDefault 決定（原本用值相等，寬高被 host 壓過
-    // 就永遠對不上）。這裡只把 4:4:4 拿掉再推導一次；fps 用畫面 fps（m_OriginalFps），補幀由 getDefaultBitrate 自己處理。
+    // 就永遠對不上）。這裡只把 4:4:4 拿掉再推導一次；fps 用畫面 fps（m_OriginalFps），補幀看 m_BitrateFruc（4:4:4 全幀那一支維持 false）。
     // 一定要經過 refreshSessionBitrate：WS 隧道的上限在這之前就設了，直接重算會把它蓋掉。
     if (m_BitrateYuv444 && !(m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444)) {
         m_BitrateYuv444 = false;

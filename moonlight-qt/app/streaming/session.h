@@ -466,6 +466,7 @@ private:
     // §RES-BITRATE：這一場的碼率怎麼決定（場次不再把解析結果寫回 m_Preferences）
     bool m_BitrateFollowsDefault = false;  // 一場判定一次：碼率跟著預設值（使用者沒自訂、CLI 沒帶 --bitrate）
     bool m_BitrateYuv444 = false;          // 預設碼率要不要算 4:4:4（這一場談不到 4:4:4 時改 false）
+    bool m_BitrateFruc = false;            // 預設碼率要不要算補幀（initialize 的補幀分支定案；VR／4:4:4 全幀／補幀關閉＝false）
     int m_BitrateCapKbps = 0;              // 傳輸上限（WS 隧道），0＝沒有
     int m_BitrateVrKbps = 0;               // PCVR 自己決定的碼率（>0 時不重算，只套上限；晚退回平面也沿用）
 

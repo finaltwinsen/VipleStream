@@ -2836,7 +2836,8 @@ namespace stream {
    *
    * 保護（補包不可以讓壅塞更嚴重）：
    *   - hub 自己的額度：每秒補送的封包數不超過影像封包率的 15%（repair_budget_t，最多存 600 個），用完回 GONE；
-   *   - 壅塞等級到 L2（延遲降碼的條件成立）以上就不補：這時掉的包是佇列滿出來的，再送只會更滿，交給 ABR 降碼與 IDR；
+   *   - 壅塞等級到 L2（延遲降碼的條件成立）以上、而且 RTT 夠長（≥ 150 ms，遲滯到 100 ms；與 IDR 提示同一個條件
+   *     abr_cong::congestion_t::congested_for_recovery）就不補：這時掉的包是佇列滿出來的，再送只會更滿，交給 ABR 降碼與 IDR；
    *   - 補不了的一律回 REPAIR_GONE，client 立刻照原本的方式放棄這一幀（要 IDR），不會白等到期限。
    * 補送的封包記進 videoShardsSentAccum（實際送出的 shard 數）；丟包的帳不動——補回來的在 client 看來就是收到了，
    * 補不回來的照原本的 FEC status／loss stats 回報。
@@ -2856,16 +2857,22 @@ namespace stream {
       }
       if (type == VIPLE_VR_C2S_NACK) {
         ::abr_cong::level_e level;
+        bool refuse;
+        uint32_t rttMs;
         {
           std::lock_guard<std::mutex> lk(session->video.abrMutex);
           level = session->video.abrCong.level();
+          // 審查 11-20 第二輪（C09）：和 IDR 提示同一個條件（L2 以上且 RTT ≥ 150 ms，遲滯到 100 ms）。
+          // 以前 L2 就拒補：區網 Wi-Fi 一陣停頓讓趨勢判成過載時，IDR 閘門照 §IDR-FAST 快速補送（不是壅塞），
+          // 補包卻被關掉（是壅塞），本來幾毫秒救得回來的幀變成凍結到 IDR 進來
+          refuse = session->video.abrCong.refuse_repair();
+          rttMs = session->video.abrRttLastMs;
         }
-        const bool refuse = level >= ::abr_cong::level_e::cut;
         const auto r = session->vrLinks->on_nack(p + off + 2, len, refuse);
         if (refuse) {
           if (!session->flatRepairRefuseLogged.exchange(true, std::memory_order_relaxed)) {
-            BOOST_LOG(info) << "[VIPLE-FLAT-REPAIR] first refusal this session: congestion level L" << (int) level
-                            << " - lost packets are not resent while the link is congested (IDR and bitrate control take over)";
+            BOOST_LOG(info) << "[VIPLE-FLAT-REPAIR] first refusal this session: congestion level L" << (int) level << " rtt=" << rttMs
+                            << "ms (rttSlow=1) - lost packets are not resent while the link is congested (IDR and bitrate control take over)";
           }
         } else if (r.resent > 0) {
           session->video.videoShardsSentAccum.fetch_add((int) r.resent, std::memory_order_relaxed);
@@ -3500,7 +3507,9 @@ namespace stream {
     // §RATE-UNIFIED 第 0 期（2026-11-20）：原本在下面才算，而且只接到舊 AIMD 的回升（VR 有控制器時那個回升本來就關著），
     // 控制器的 RAMP 完全看不到。搬到 tick() 之前、交給控制器（on_repair_load），這一輪的回升就會被擋。算式沒有改；
     // 2D 沒有 vrRepairAccum（repaired 恆為 0、repairPct = −1、repairHold = false），行為不變。
-    const int repaired = session->vr ? session->video.vrRepairAccum.exchange(0) : 0;
+    // 第二輪審查 C02／C14：fast-loss（elapsedMs = 0）估不出封包數、量不出比例，不可以把累計值取走丟掉——
+    // 留給下一個有正常視窗長度的呼叫（ping-tick／FEC status／loss-stats）一起算
+    const int repaired = (session->vr && elapsedMs > 0) ? session->video.vrRepairAccum.exchange(0) : 0;
     const float repairPct = vr_abr_loss_pct(session, repaired, elapsedMs);
     const bool repairHold = repairPct >= kVrAbrRepairHoldPct;
     bool fastBitrateChanged = false;
@@ -3515,10 +3524,16 @@ namespace stream {
                                                  (abr_expected_packets(session, elapsedMs) >= kVrAbrMinExpected ? 0.0 : -1.0);
         f.on_repair_load(repairLoad, abrNow);
         if (const int ev = f.take_repair_event(abrNow); ev != 0) {
-          BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] repair load " << (ev > 0 ? "high: ramp held" : "eased: ramp allowed again")
+          // C01／C13：判斷看的是 3 s 平均（mean=）；released＝擋了一段時間、碼率沒往上、補包量沒變少，判定跟碼率無關而放行
+          const char *what = ev > 0                          ? "high: ramp held" :
+                             f.repair_last_release_judged() ? "not bitrate-related: ramp released" :
+                                                              "eased: ramp allowed again";
+          BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] repair load " << what
                           << " (repaired=" << repaired << " shards in " << elapsedMs << " ms = " << std::format("{:.1f}", f.repair_pct())
-                          << "% of the video packets, usual=" << std::format("{:.1f}", f.repair_floor_pct()) << "%, at " << applied
-                          << " kbps, src=" << src << ')';
+                          << "% of the video packets, mean3s=" << std::format("{:.1f}", f.repair_mean_pct())
+                          << "%, usual=" << std::format("{:.1f}", f.repair_floor_pct()) << "%, at " << applied << " kbps"
+                          << (ev > 0 ? std::format(", after ramp={}, judge in {} s", f.repair_related() ? 1 : 0, f.repair_judge_s()) : std::string {})
+                          << ", src=" << src << ')';
         }
       }
       // 只剩一條連線（沒有適配器直連，只走家用 Wi-Fi）時先把上限壓在 75 Mbps：10-30 實測 149 Mbps（含 FEC 約 195 Mbps）
@@ -3528,7 +3543,20 @@ namespace stream {
       // 同一場兩條都活著時跑到 95 Mbps 都沒事。家用 Wi-Fi 上的 Tailscale 隧道在有區網直連時由 client 設成待命（不算活著）
       const bool singleLink = !session->vrLinks ||
                               (session->vrLinks->alive_count() <= 1 && session->vrLinks->alive_dedicated_count() == 0);
-      session->video.vrAbrFast->set_cap_kbps(singleLink ? std::min(maxBr, kVrSingleLinkCapKbps) : maxBr);
+      // §VR-RATE-ENC（第二輪審查 C11）：半速時編碼器每秒最多只送得出「建立時的碼率 ÷ 分頻」（video.cpp apply_encoder_bitrate），
+      // 控制器的上限跟著夾住，applied 就等於實際送出量：半速期間每一刀都真的降、塞車點記的是真的值；升回全速時 applied 就是
+      // 半速時實際送出的量，線上流量不會一下翻倍，之後照 RAMP 往上爬。rate_div() 是編碼端已套用的分頻
+      {
+        auto &f = *session->video.vrAbrFast;
+        const int div = std::max(1, session->vr->rate_div());
+        const int before = f.applied_kbps();
+        f.set_cap_kbps(singleLink ? std::min(maxBr, kVrSingleLinkCapKbps) : maxBr);
+        if (f.set_rate_div(div)) {
+          BOOST_LOG(info) << "[VIPLE-VR-RATE] bitrate controller cap " << f.cap_kbps() << " kbps for 1/" << div << " rate"
+                          << (div > 1 ? std::format(" (what the encoder can send: {} / {}), applied {} kbps", session->video.configuredBitrateKbps, div, before) :
+                                        std::format(" (full rate again: ramping from {} kbps, not jumping)", before));
+        }
+      }
       // §ABR-ADAPT（第 3 期）：畫質飽和（編碼器平均 QP）——飽和時不再加碼，畫質多到用不完時小幅回收
       session->video.vrAbrFast->on_quality(abr_signals::avg_qp_x100.load(std::memory_order_relaxed),
                                            abr_signals::codec.load(std::memory_order_relaxed), abrNow);
@@ -3742,6 +3770,10 @@ namespace stream {
       auto &cong = session->video.abrCong;
       ::abr_cong::cong_in_t in;
       in.sampled = rttFresh;  // 樣本太舊＝沒有樣本：等級歸 L0、不建議動作、IDR 提示歸 0
+      // 審查 11-20 第二輪（D1／D3）：超過 3 秒、但還在 ENet 重傳可能擋住 ping 的範圍內（max(3 s, min(4×RTT, 4 s)+1 s)）時
+      // 狀態維持、不做新動作；超過範圍才歸零。RTT 500 ms 以下時範圍就是 3 秒，行為不變
+      in.held = !rttFresh && ::abr_cong::rtt_sample_held(session->video.abrRttSampled, session->video.abrRttSampleAt, abrNow,
+                                                          session->video.abrRttLastMs);
       if (in.sampled) {
         const auto &tr = session->video.abrTrend;
         in.rtt_ms = session->video.abrRttLastMs;
@@ -3762,6 +3794,15 @@ namespace stream {
                         << " hold=" << in.hold << " severe=" << in.severe << " idrReq=" << session->video.abrIdrReq
                         << " action=" << ::abr_cong::action_name(co.action) << " idrGap=" << cong.idr_gap_hint()
                         << "ms applied=" << applied << "kbps (src=" << src << ")";
+      }
+      if (co.held != co.prev_held) {
+        BOOST_LOG(info) << "[VIPLE-ABR] cong level " << (co.held ? "held" : "hold ended") << ": ENet RTT sample "
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(abrNow - session->video.abrRttSampleAt).count()
+                        << " ms old (last " << session->video.abrRttLastMs << " ms, hold window "
+                        << ::abr_cong::rtt_hold_window(session->video.abrRttLastMs).count() << " ms) level=L" << (int) co.level
+                        << " idrGap=" << cong.idr_gap_hint() << "ms"
+                        << (co.held ? " - keeping the congestion state, no new cuts" :
+                                      (in.sampled ? " - sample is back" : " - treated as no sample from now on"));
       }
       if (co.point_expired) {
         BOOST_LOG(info) << "[VIPLE-ABR] cong point cleared: " << co.expired_kbps

@@ -804,6 +804,14 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     const int savedHeight = preferences->cliPersist.resolution ? preferences->cliPersist.height : preferences->height;
     const int savedFps = preferences->cliPersist.fps ? preferences->cliPersist.fpsValue : preferences->fps;
     const int savedBitrate = preferences->cliPersist.bitrate ? preferences->cliPersist.bitrateKbps : preferences->bitrateKbps;
+    // §RES-BITRATE（第二輪審查 C06）：場次只認「存的值＝偏好組合的預設值」才跟著預設值走。CLI 只改 4:4:4／補幀／
+    // renderer／vk-triple（不改解析度、fps）時，預設值變了、存的值沒跟著變，會被當成使用者的值。套用 CLI 之前先記下
+    // 「原本是不是跟著預設值」，下面沒帶 --bitrate 時照這個決定要不要重算。
+    const bool bitrateWasDefault = preferences->autoAdjustBitrate && preferences->bitrateLooksDefault();
+    const bool savedYuv444 = preferences->enableYUV444;
+    const bool savedFrameInterp = preferences->enableFrameInterpolation;
+    const bool savedTriple = preferences->vkfrucEnableTriple;
+    const auto savedRenderer = preferences->rendererSelection;
     if (displaySet) {
         QString name = resoOptions.last();
         if (name == "720") {
@@ -880,7 +888,11 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         if (!inRange(preferences->bitrateKbps, 500, 500000)) {
             fprintf(stderr, "Warning: Bitrate is out of the supported range (500 - 500000 Kbps). Performance may suffer!\n");
         }
-    } else if (displaySet || parser.isSet("fps")) {
+    } else if (displaySet || parser.isSet("fps") ||
+               (bitrateWasDefault &&
+                (preferences->enableYUV444 != savedYuv444 || preferences->enableFrameInterpolation != savedFrameInterp ||
+                 preferences->vkfrucEnableTriple != savedTriple || preferences->rendererSelection != savedRenderer))) {
+        // §RES-BITRATE（C06）：後半＝原本跟著預設值、CLI 只改了會影響預設碼率的開關
         preferences->bitrateKbps = preferences->getDefaultBitrate(
             preferences->width, preferences->height, preferences->fps,
             preferences->enableYUV444, preferences->enableFrameInterpolation);

@@ -60,6 +60,18 @@ namespace abr_cong {
   constexpr uint32_t k_idr_slow_exit_rtt_ms = 100;
   /// RTT 樣本超過這麼久沒有更新就當成沒有樣本（ENet 的 ping 是 reliable 封包，丟包時會被重傳延後，所以不能太短）
   constexpr std::chrono::milliseconds k_rtt_fresh {3000};
+  /// 審查 11-20 第二輪（D1／D3）：超過 k_rtt_fresh、但還在「ping 被 ENet 重傳擋住」可能的範圍內時，壅塞狀態維持原樣
+  /// （不歸零、也不依凍結的值做任何新動作）。範圍＝max(3 秒, min(4 × RTT, 4 秒) + 1 秒)：
+  /// client 的 ENet 重傳逾時是 RTT + min(RTT, 4 × 變異)、上限 timeoutMaximum/5＝2 秒（protocol.c；enet_peer_timeout
+  /// 10000），所以同一個 ping 連丟兩次最多擋 min(4 × RTT, 4 秒)，再加 ping 間隔與上行排隊的餘量 1 秒。
+  /// RTT 500 ms 以下時範圍就是 3 秒（＝沒有維持段，行為與以前相同）；最長 5 秒，遠短於 ENet 的斷線逾時（10 秒）。
+  constexpr uint32_t k_rtt_hold_rto_cap_ms = 2000;
+  constexpr uint32_t k_rtt_hold_slack_ms = 1000;
+  inline std::chrono::milliseconds rtt_hold_window(uint32_t last_rtt_ms) {
+    const uint64_t two_rto = std::min<uint64_t>((uint64_t) last_rtt_ms * 4, (uint64_t) k_rtt_hold_rto_cap_ms * 2);
+    const auto w = std::chrono::milliseconds {(int64_t) (two_rto + k_rtt_hold_slack_ms)};
+    return std::max(w, k_rtt_fresh);
+  }
   /// 提示寫入後超過這麼久沒有更新就當成沒有提示
   constexpr int64_t k_idr_hint_ttl_us = 2'000'000;
   /// IDR 請求觸發緊急降碼時，等級必須是這麼久以內算出來的
@@ -169,6 +181,11 @@ namespace abr_cong {
     return sampled && now >= sampled_at && now - sampled_at <= k_rtt_fresh;
   }
 
+  /// 樣本已經不新（超過 k_rtt_fresh），但還在 rtt_hold_window(last_rtt_ms) 內：壅塞狀態維持原樣（cong_in_t::held）
+  inline bool rtt_sample_held(bool sampled, steady::time_point sampled_at, steady::time_point now, uint32_t last_rtt_ms) {
+    return sampled && now >= sampled_at && now - sampled_at > k_rtt_fresh && now - sampled_at <= rtt_hold_window(last_rtt_ms);
+  }
+
   /// 丟包分支與壅塞建議同一輪都要降碼時怎麼合併（stream.cpp 的 run_abr_aimd 用）
   struct loss_merge_t {
     int target = 0;  ///< 合併後的目標（還沒夾下限）
@@ -233,6 +250,9 @@ namespace abr_cong {
   /// 每一輪 ABR 的輸入。hold／trend_over／severe 是 run_abr_aimd 既有的判斷，這裡不重算
   struct cong_in_t {
     bool sampled = false;  ///< 有沒有 RTT 樣本；沒有就固定 L0、所有新規則不動作
+    /// sampled＝false 時才看：樣本只是被 ENet 重傳暫時擋住（rtt_sample_held）。等級與事件狀態維持原樣、不建議動作、
+    /// IDR 請求不降碼；超過維持範圍（呼叫端不再設這個旗標）才照「沒有樣本」歸零
+    bool held = false;
     uint32_t rtt_ms = 0;  ///< 最近一次 RTT
     uint32_t base_ms = 0;  ///< 基線（兩段 30 秒視窗最小值）
     double jitter_ms = 0.0;  ///< 延遲趨勢估計器的抖動（p90−p10）
@@ -247,6 +267,8 @@ namespace abr_cong {
     action_e action = action_e::none;  ///< 這一輪建議的降碼；真的降了要呼叫 commit_cut
     bool point_expired = false;  ///< 這一輪塞車點過期被清掉
     int expired_kbps = 0;
+    bool held = false;  ///< 這一輪是「樣本被擋住、狀態維持」
+    bool prev_held = false;  ///< 上一輪是不是（給 log 判斷進出）
   };
 
   class congestion_t {
@@ -255,9 +277,9 @@ namespace abr_cong {
     cong_out_t update(const cong_in_t &in, steady::time_point now) {
       cong_out_t out;
       out.prev_level = level_;
+      out.prev_held = held_;
       have_update_ = true;
       last_update_ = now;
-      last_rtt_ms_ = in.sampled ? in.rtt_ms : 0;
 
       // 塞車點過期（和有沒有樣本無關）
       if (point_have_ && now - point_seen_at_ >= k_point_ttl) {
@@ -266,6 +288,17 @@ namespace abr_cong {
         point_have_ = false;
         point_kbps_ = 0;
       }
+
+      // 審查 11-20 第二輪（D1／D3）：樣本只是被 ENet 重傳擋住——等級、L3 鎖定、排空基準、rtt_slow_、上一個 RTT
+      // （IDR 提示用）全部維持，也不往下掉（below_ 計時不動）；不建議動作。凍結的值不拿來做新判斷，
+      // 但也不因為「暫時量不到」就把深度壅塞當成乾淨網路（IDR 回到 250 ms 快速補送、下一個樣本來時重新數輪再砍一刀）
+      held_ = !in.sampled && in.held;
+      if (held_) {
+        out.held = true;
+        out.level = level_;
+        return out;
+      }
+      last_rtt_ms_ = in.sampled ? in.rtt_ms : 0;
 
       // IDR 長間隔與 IDR 請求降碼用的「RTT 夠長」：150 ms 開、100 ms 以下關；沒有樣本就關
       if (!in.sampled || in.rtt_ms < k_idr_slow_exit_rtt_ms) {
@@ -379,10 +412,10 @@ namespace abr_cong {
      * §IDR-FAST 的快速補送關掉）、距上一次緊急降碼滿 3 秒。乾淨網路上單獨的 IDR 請求（L0）一律回 false。
      */
     bool idr_request_wants_cut(steady::time_point now) const {
-      if (!have_update_ || now - last_update_ > k_level_fresh) {
-        return false;
+      if (!have_update_ || now - last_update_ > k_level_fresh || held_) {
+        return false;  // held_：RTT 量不到的那幾秒不做新的降碼（等級照舊撐住、IDR 間隔照舊）
       }
-      if (level_ < level_e::cut || !rtt_slow_) {
+      if (!congested_for_recovery()) {
         return false;
       }
       return cooled(have_emergency_, last_emergency_, now, k_emergency_cooldown);
@@ -443,7 +476,27 @@ namespace abr_cong {
 
     /// 目前等級要給 IDR 閘門的間隔（ms）；0＝不提示。RTT 不夠長（k_idr_slow_*）時不提示，閘門照 §IDR-FAST 走
     int idr_gap_hint() const {
-      return rtt_slow_ ? idr_gap_hint_ms(level_, last_rtt_ms_) : 0;
+      return congested_for_recovery() ? idr_gap_hint_ms(level_, last_rtt_ms_) : 0;
+    }
+
+    /**
+     * @brief 「這是壅塞，恢復手段要讓路」的共用判斷：等級 L2 以上，而且 RTT 夠長（k_idr_slow_*，150 ms 開、100 ms 以下關）。
+     * 三處用同一個條件，免得又分岔：IDR 長間隔提示（idr_gap_hint）、IDR 請求觸發的緊急降碼（idr_request_wants_cut）、
+     * 平面補包拒補（refuse_repair）。RTT 只有幾毫秒時，趨勢短暫過載加上一陣丟包是 Wi-Fi 的停頓不是佇列滿出來，
+     * 補包與 §IDR-FAST 都照常。只看量到的 RTT 與等級，不分路徑種類。L3 的進入門檻（高出基線 ≥ 500 ms）本身就讓 RTT ≥ 150。
+     */
+    bool congested_for_recovery() const {
+      return level_ >= level_e::cut && rtt_slow_;
+    }
+
+    /// §FLAT-REPAIR：平面補包要不要拒補（審查 11-20 第二輪 C09：以前只看 L2 以上，區網一陣丟包就把補包關掉）
+    bool refuse_repair() const {
+      return congested_for_recovery();
+    }
+
+    /// 這一輪是不是「樣本被擋住、狀態維持」；給 log 與測試看
+    bool held() const {
+      return held_;
     }
 
     /// RTT 是否夠長（150 ms 開、100 ms 以下關）；給 log 與測試看
@@ -460,7 +513,8 @@ namespace abr_cong {
     bool have_update_ = false;
     steady::time_point last_update_ {};
     uint32_t last_rtt_ms_ = 0;
-    bool rtt_slow_ = false;  ///< RTT ≥ 150 ms 開、< 100 ms 關：IDR 長間隔與 IDR 請求降碼才生效
+    bool rtt_slow_ = false;  ///< RTT ≥ 150 ms 開、< 100 ms 關：IDR 長間隔、IDR 請求降碼、拒補才生效
+    bool held_ = false;  ///< 最近一輪是 cong_in_t::held（樣本被 ENet 重傳擋住）
 
     bool deep_latched_ = false;
     int deep_rounds_ = 0;

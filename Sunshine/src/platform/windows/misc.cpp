@@ -2343,6 +2343,15 @@ namespace platf {
     //   - 這時網卡是「未連線、也沒有正在連」（正在關聯或驗證＝可能就要連上了，不判）。
     // 介面重啟後沒有消失過（開發機實測）時，回來的時刻≈重啟返回的時刻，判定仍在第 22 秒前後。
     constexpr std::uint32_t kVerdictMinFailsAfterRestart = 2;
+    // §HOTSPOT-VERDICT-LATE（2026-11-20 第二輪審查 C03）：判定只寫在快速加入裡，快速加入在 arm 後 kFastJoin 結束。介面在提早重啟後
+    // 查不到十幾秒才回來時（重啟在第 12 秒、回來在第 3x 秒），「回來後滿 kVerdictAfterRestart＋回來後至少 2 次失敗」在期限內湊不齊，
+    // 之後的慢速重試又不判定，整輪停在 TRYING|RESTARTED，頭盔要等滿 75 秒（kJoinWaitMaxS）才關熱點。
+    // 所以提早重啟做過、介面已經回來時，快速加入的期限延到「回來＋kVerdictAfterRestart＋kVerdictEvidence」，但不超過 arm 後
+    // kFastJoinMaxAfterRestart（判定最晚在第 60 秒，頭盔第 75 秒才關，留 15 秒給回報）。介面沒有消失過時回來≈重啟返回（第 13 秒），
+    // 延後的期限早於 kFastJoin，行為不變。沒有改成在慢速重試裡判定：慢速時輪詢是 kPoll（5 秒）、重連是 5／10 秒，
+    // 湊滿回來後 2 次失敗要到第 57～62 秒，而且時間不固定；快速加入每 kFastRetry 連一次，回來後第 8 秒就判得出來。
+    constexpr auto kVerdictEvidence = std::chrono::seconds(10);
+    constexpr auto kFastJoinMaxAfterRestart = std::chrono::seconds(60);
     constexpr auto kGaveUpRetry = std::chrono::seconds(60);
     // §VR-HOTSPOT-IDLESTALL（2026-11-20）：連著、收送計數都不動（11-09 有一次是這樣，手動重啟網卡才恢復）。
     // 閒置時本來就可能兩邊都沒有流量，所以不能只看計數：收到的計數 kRxStall 沒動、送出的也沒到 kRxStallMinSent 時，
@@ -2791,6 +2800,12 @@ namespace platf {
         //   查不到持續 kMissingReopen＝WLAN 控制代碼可能還指著重啟前的介面，重開一次（之後每 kMissingReopen 再試）；
         //   介面回來時（下面 missing_logged 那一段）馬上重連，不等慢速重試的間隔。
         if (st < 0) {
+          // §HOTSPOT-VERDICT-AFTER-RESTART（第二輪審查 D2）：重啟後先查得到、又消失、再回來時，「回來」以最後一次為準，
+          // 判定的時間與兩個基準在下一次查得到時重取（查不到的期間判定段本來就不會跑）。介面反覆閃斷只會讓判定往後延，
+          // 快速加入最晚在 kFastJoinMaxAfterRestart 結束，頭盔也有自己的 75 秒期限
+          if (early_done && !joined && !verdict) {
+            restart_ready_at.reset();
+          }
           if (!missing_since) {
             missing_since = now;
             missing_reopen_at = now + std::chrono::duration_cast<clock::duration>(kMissingReopen);
@@ -2829,6 +2844,13 @@ namespace platf {
             restart_try_base = fast_tries;
           }
         }
+        // §HOTSPOT-VERDICT-LATE：快速加入的期限（見 kVerdictEvidence 的說明）
+        auto fast_deadline = armed + std::chrono::duration_cast<clock::duration>(kFastJoin);
+        if (early_done && restart_ready_at && !verdict) {
+          fast_deadline = std::max(fast_deadline,
+                                   std::min(*restart_ready_at + std::chrono::duration_cast<clock::duration>(kVerdictAfterRestart + kVerdictEvidence),
+                                            armed + std::chrono::duration_cast<clock::duration>(kFastJoinMaxAfterRestart)));
+        }
         if (fast) {
           if (st == 1) {
             BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] joined the headset hotspot "
@@ -2839,7 +2861,7 @@ namespace platf {
             joined = true;
             hs_flags &= ~VIPLE_VR_HS_F_RIVAL;
             publish_round(armed, VIPLE_VR_HS_JOINED, hs_flags);
-          } else if (st < 0 || now - armed > kFastJoin) {
+          } else if (st < 0 || now > fast_deadline) {
             fast = false;
             if (st == 0) {
               // §HOTSPOT-ADAPT：沒判定（失敗次數不夠、或別人一直在連）就走到快速加入的期限：放慢，但不當成斷線、不重啟網卡
@@ -2848,8 +2870,13 @@ namespace platf {
               down_since = now;
               hs_flags = hotspot_seen() ? (hs_flags | VIPLE_VR_HS_F_SEEN) : (hs_flags & ~VIPLE_VR_HS_F_SEEN);
               publish_round(armed, VIPLE_VR_HS_TRYING, hs_flags);
-              BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not joined after " << std::chrono::duration_cast<std::chrono::seconds>(kFastJoin).count()
-                              << " s (" << fast_tries << " connect attempt(s) of ours, " << fail_completes.load() << " failed connection(s), "
+              BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] not joined after " << std::chrono::duration_cast<std::chrono::seconds>(now - armed).count()
+                              << " s (fast-join window "
+                              << std::chrono::duration_cast<std::chrono::seconds>(fast_deadline - armed).count() << " s"
+                              << (restart_ready_at ? std::format(", adapter back {} s after the hotspot info",
+                                                                 std::chrono::duration_cast<std::chrono::seconds>(*restart_ready_at - armed).count())
+                                                   : std::string())
+                              << "; " << fast_tries << " connect attempt(s) of ours, " << fail_completes.load() << " failed connection(s), "
                               << fail_attempts.load() << " failed attempt(s), hotspot seen=" << (hotspot_seen() ? 1 : 0)
                               << ", association-stage failure this round=" << (fail_assoc.load() ? 1 : 0)
                               << ", last reason=" << reason_text(last_fail_reason.load())

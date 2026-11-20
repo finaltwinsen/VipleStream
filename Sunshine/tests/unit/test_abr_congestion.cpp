@@ -537,3 +537,143 @@ TEST_F(AbrCongestionTest, EqualLossCutStartsCooldownAndRecordsPoint) {
   EXPECT_EQ(c2.congested_kbps(), 0);
   EXPECT_EQ(c2.ramp_cap_kbps(t0 + 1s), 0);
 }
+
+// ── 審查 11-20 第二輪 ─────────────────────────────────────────────────────
+
+// C09. 平面補包拒補與 IDR 提示同一個條件：L2 以上且 RTT 夠長；區網一陣丟包（RTT 幾毫秒、趨勢短暫過載）不拒補
+TEST_F(AbrCongestionTest, RefuseRepairNeedsSlowRtt) {
+  EXPECT_FALSE(c.refuse_repair());  // 還沒有任何一輪
+  // 區網：RTT 15 ms、趨勢過載＝L2，但不拒補（也不提示 IDR 長間隔）
+  auto o = c.update(in(15, 2, 5.0, true, true), t0);
+  ASSERT_EQ(o.level, ac::level_e::cut);
+  EXPECT_FALSE(c.refuse_repair());
+  EXPECT_EQ(c.refuse_repair(), c.idr_gap_hint() > 0);
+  // k_level_exit_hold 撐住 L2 的那 1 秒裡也不拒補
+  o = c.update(in(3, 2), t0 + 500ms);
+  ASSERT_EQ(o.level, ac::level_e::cut);
+  EXPECT_FALSE(c.refuse_repair());
+  // RTT 400 ms 的 L2：拒補（和 IDR 提示一致）
+  o = c.update(in(400, 40, 5.0, true, true), t0 + 1000ms);
+  ASSERT_EQ(o.level, ac::level_e::cut);
+  EXPECT_TRUE(c.refuse_repair());
+  EXPECT_EQ(c.refuse_repair(), c.idr_gap_hint() > 0);
+  // 遲滯帶（120 ms）：維持
+  c.update(in(120, 40, 5.0, true, true), t0 + 1500ms);
+  EXPECT_TRUE(c.refuse_repair());
+  // L1（暫停回升）不論 RTT 都不拒
+  ac::congestion_t c2;
+  c2.update(in(400, 40, 5.0, true), t0);
+  ASSERT_EQ(c2.level(), ac::level_e::hold);
+  EXPECT_FALSE(c2.refuse_repair());
+  // L3：拒
+  c.update(in(1500, 40), t0 + 2000ms);
+  o = c.update(in(1500, 40), t0 + 2500ms);
+  ASSERT_EQ(o.level, ac::level_e::deep);
+  EXPECT_TRUE(c.refuse_repair());
+  // 沒有樣本：歸零、不拒
+  c.update(ac::cong_in_t {}, t0 + 3000ms);
+  EXPECT_FALSE(c.refuse_repair());
+}
+
+// D1／D3. 維持範圍：max(3 s, min(4 × RTT, 4 s) + 1 s)；RTT 500 ms 以下沒有維持段
+TEST(AbrCongestionHold, HoldWindow) {
+  EXPECT_EQ(ac::rtt_hold_window(0).count(), 3000);
+  EXPECT_EQ(ac::rtt_hold_window(5).count(), 3000);
+  EXPECT_EQ(ac::rtt_hold_window(500).count(), 3000);
+  EXPECT_EQ(ac::rtt_hold_window(600).count(), 3400);
+  EXPECT_EQ(ac::rtt_hold_window(1000).count(), 5000);
+  EXPECT_EQ(ac::rtt_hold_window(4000).count(), 5000);
+  EXPECT_EQ(ac::rtt_hold_window(0xFFFFFFFFu).count(), 5000);  // 不溢位、最長 5 秒
+
+  const auto at = ac::steady::time_point {} + 1h;
+  EXPECT_FALSE(ac::rtt_sample_held(true, at, at + 3000ms, 1500));  // 還新鮮，不是維持
+  EXPECT_TRUE(ac::rtt_sample_held(true, at, at + 3001ms, 1500));
+  EXPECT_TRUE(ac::rtt_sample_held(true, at, at + 5000ms, 1500));
+  EXPECT_FALSE(ac::rtt_sample_held(true, at, at + 5001ms, 1500));
+  EXPECT_FALSE(ac::rtt_sample_held(true, at, at + 3001ms, 5));  // 區網：3 秒一過就是沒有樣本（與以前相同）
+  EXPECT_FALSE(ac::rtt_sample_held(false, at, at + 3500ms, 1500));  // peer 逾時作廢過的樣本
+  EXPECT_FALSE(ac::rtt_sample_held(true, at + 1s, at, 1500));  // 時刻不合理
+}
+
+namespace {
+  // 照 stream.cpp 的組法：新鮮＝完整輸入、維持段＝held、其餘＝空的（沒有樣本）
+  ac::cong_in_t staged(const ac::cong_in_t &fresh, ac::steady::time_point at, ac::steady::time_point now, uint32_t rtt) {
+    if (ac::rtt_sample_fresh(true, at, now)) {
+      return fresh;
+    }
+    ac::cong_in_t ci;
+    ci.held = ac::rtt_sample_held(true, at, now, rtt);
+    return ci;
+  }
+}  // namespace
+
+// D1／D3. 深度壅塞中 ping 被 ENet 重傳擋了 4 秒（同一個 ping 連丟兩次）：L3、IDR 長間隔都撐住，不做新的降碼；
+// 樣本回來後接著原本的事件（不會重新數輪、不會因為「排空基準」被清掉而多砍）
+TEST_F(AbrCongestionTest, BlockedPingKeepsDeepState) {
+  auto fresh = in(1500, 40);
+  c.update(fresh, t0);
+  auto o = c.update(fresh, t0 + 500ms);
+  ASSERT_EQ(o.action, ac::action_e::cut_emergency);
+  c.commit_cut(o.action, 20000, t0 + 500ms, 10000);
+  const int hint = c.idr_gap_hint();
+  ASSERT_EQ(hint, 2750);  // 1.5 × 1500 + 500
+
+  // 佇列開始排空：最後一個樣本 1200 ms（t0 + 1000），之後 ping 被擋到 t0 + 5100
+  const auto at = t0 + 1000ms;
+  o = c.update(in(1200, 40), at);
+  EXPECT_EQ(o.action, ac::action_e::none);  // 排空中
+  const int hint2 = c.idr_gap_hint();
+  for (auto now = at + 500ms; now < t0 + 5100ms; now += 500ms) {
+    o = c.update(staged(in(1200, 40), at, now, 1200), now);
+    EXPECT_EQ(o.level, ac::level_e::deep);
+    EXPECT_EQ(o.action, ac::action_e::none);
+    EXPECT_EQ(c.idr_gap_hint(), hint2);
+    EXPECT_TRUE(c.refuse_repair());
+    if (now - at > 3000ms) {
+      EXPECT_TRUE(o.held);
+      EXPECT_FALSE(c.idr_request_wants_cut(now + 10ms));  // 量不到 RTT 的那幾秒不做新的降碼
+    }
+  }
+  // 卡住的 ping 一起到：RTT 900 ms（還在排空，低於 1500 的九成）——不追加一刀，等級還是 L3
+  o = c.update(in(900, 40), t0 + 5100ms);
+  EXPECT_FALSE(o.held);
+  EXPECT_TRUE(o.prev_held);
+  EXPECT_EQ(o.level, ac::level_e::deep);
+  EXPECT_EQ(o.action, ac::action_e::none);
+}
+
+// D1／D3. 維持段過了還沒有樣本（ENet 真的不通）：照舊歸零，凍結的值不會一直撐著 L3 與 IDR 長間隔
+TEST_F(AbrCongestionTest, HeldExpiresToNoSample) {
+  auto fresh = in(1500, 40);
+  c.update(fresh, t0);
+  auto o = c.update(fresh, t0 + 500ms);
+  c.commit_cut(o.action, 20000, t0 + 500ms, 10000);
+  const auto at = t0 + 500ms;
+  int cuts = 0;
+  for (auto now = at + 500ms; now <= at + 8000ms; now += 500ms) {
+    o = c.update(staged(fresh, at, now, 1500), now);
+    if (o.action != ac::action_e::none) {
+      c.commit_cut(o.action, 10000, now, 5000);
+      cuts += now - at > 3000ms;  // 只數新鮮期之後的
+    }
+    if (now - at <= 5000ms) {
+      EXPECT_EQ(o.level, ac::level_e::deep);
+    } else {
+      EXPECT_FALSE(o.held);
+      EXPECT_EQ(o.level, ac::level_e::clean);
+      EXPECT_EQ(c.idr_gap_hint(), 0);
+      EXPECT_FALSE(c.refuse_repair());
+    }
+  }
+  EXPECT_EQ(cuts, 0);  // 新鮮期內冷卻滿 3 秒時照樣一刀；之後維持段與沒有樣本的 5 秒，凍結的 1500 ms 不觸發任何刀
+}
+
+// D1／D3. 區網（RTT 幾毫秒）沒有維持段：3 秒沒樣本就歸零，和以前完全相同
+TEST_F(AbrCongestionTest, LanStaleSampleUnchanged) {
+  const auto at = t0;
+  c.update(in(15, 2, 5.0, true, true), at);
+  ASSERT_EQ(c.level(), ac::level_e::cut);
+  const auto o = c.update(staged(in(15, 2, 5.0, true, true), at, at + 3500ms, 15), at + 3500ms);
+  EXPECT_FALSE(o.held);
+  EXPECT_EQ(o.level, ac::level_e::clean);
+}

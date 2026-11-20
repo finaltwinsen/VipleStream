@@ -56,19 +56,22 @@ namespace xrrate {
     public:
         // Present 間隔要比該有的多出這麼多格才算少出（host 的 Present 時刻有抖動；沿用 xrlatchstats.h 配戴驗過的容忍值）
         static constexpr double kGapTolerance = 0.75;
-        // 帶 REPEATED（host 等了 100 ms 沒有新畫面才重編上一張）的那一張：整段重複都算 host
+        // 帶 REPEATED、Present 間隔也有缺口、而且不是關鍵幀的那一張（host 等到逾時沒有新畫面才重編上一張）：整段重複都算 host
         static constexpr uint32_t kWholeRun = 0xffffu;
         static constexpr int64_t kNoFrameNo = INT64_MIN;
 
         // 這一張與前一張之間 host 少出了幾個顯示格。frameNoDelta＝幀號差（1＝連號）；ptsDelta90＝Present 時刻的差
-        // （90 kHz，已經處理過 32 bit 繞回）；periodUs＝顯示週期；div＝串流每張佔幾格；repeated＝這一張帶 REPEATED。
-        static uint32_t missedSlots(int64_t frameNoDelta, int64_t ptsDelta90, double periodUs, int div, bool repeated)
+        // （90 kHz，已經處理過 32 bit 繞回）；periodUs＝顯示週期；div＝串流每張佔幾格；repeated＝這一張帶 REPEATED；
+        // keyframe＝這一張是關鍵幀（解碼端拿不到時給 false）。
+        // §RATE-CAUSE-HOST-IDR（2026-11-20 審查 C05）：host 收到 IDR 要求、當下沒有新影像時會直接重編上一張當 IDR，
+        // 也帶 REPEATED、幀號照樣連號，但 Present 間隔只有幾 ms。那張大 IDR 在壅塞線路上晚到，前面那段重複是網路造成的。
+        // 所以 REPEATED 也要先通過同一條 Present 間隔門檻（不寫死 100 ms，跟著實際週期走）；關鍵幀就算有缺口也只算
+        // 缺口本身的格數，不整段算 host。寧可少算 host：多算會讓網路真的不穩時該降半速而不降。
+        static uint32_t missedSlots(int64_t frameNoDelta, int64_t ptsDelta90, double periodUs, int div, bool repeated,
+                                    bool keyframe = false)
         {
             if (frameNoDelta != 1) {
                 return 0;  // 中間掉了一張（或幀號不可用）：歸網路
-            }
-            if (repeated) {
-                return kWholeRun;
             }
             const double ptsPerPeriod = 90000.0 * periodUs / 1e6;
             if (!(ptsPerPeriod >= 1.0) || ptsDelta90 <= 0) {
@@ -78,6 +81,9 @@ namespace xrrate {
             const double periods = static_cast<double>(ptsDelta90) / ptsPerPeriod;
             if (periods < d + kGapTolerance) {
                 return 0;
+            }
+            if (repeated && !keyframe) {
+                return kWholeRun;
             }
             const double missed = std::floor(periods + 0.5) - d;
             return missed <= 0.0 ? 0u : static_cast<uint32_t>((std::min)(missed, static_cast<double>(kWholeRun)));
@@ -94,7 +100,7 @@ namespace xrrate {
         }
 
         // 每一張解出來的影像一次。frameNo＝kNoFrameNo 表示拿不到幀號。回傳到這一張為止的累計（32 bit，會繞回，只拿來相減）
-        uint32_t onFrame(int64_t frameNo, int64_t pts90, double periodUs, int div, bool repeated)
+        uint32_t onFrame(int64_t frameNo, int64_t pts90, double periodUs, int div, bool repeated, bool keyframe = false)
         {
             if (m_Have && frameNo != kNoFrameNo && m_PrevFrameNo != kNoFrameNo) {
                 const int64_t dn = frameNo - m_PrevFrameNo;
@@ -104,7 +110,7 @@ namespace xrrate {
                 else {
                     ++m_Breaks;
                 }
-                m_Cum += missedSlots(dn, ptsDelta(pts90, m_PrevPts), periodUs, div, repeated);
+                m_Cum += missedSlots(dn, ptsDelta(pts90, m_PrevPts), periodUs, div, repeated, keyframe);
             }
             m_Have = true;
             m_PrevFrameNo = frameNo;

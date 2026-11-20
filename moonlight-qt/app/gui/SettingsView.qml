@@ -909,8 +909,11 @@ Flickable {
                                 var est = autoLocalResolution()
                                 if (est.width > 0 && est.height > 0 &&
                                         (StreamingPreferences.width !== est.width || StreamingPreferences.height !== est.height)) {
-                                    // §RES-BITRATE：跟同檔其他處一樣以旗標為準，不用「值＝舊預設」去猜
-                                    var wasDefault = StreamingPreferences.autoAdjustBitrate
+                                    // §RES-BITRATE（第二輪審查 C07）：開頁時的被動同步要和場次開場（decideBitrateFollowsDefault）
+                                    // 用同一個判定：旗標是 true、而且存的值是目前偏好組合的預設值，才跟著重算。旗標 true 但值
+                                    // 對不上（舊版 CLI 留下的 47000 之類）就保留，不要一開設定頁就蓋掉。一定要在改寬高之前算。
+                                    // 使用者主動操作（換解析度、切 4:4:4、切補幀）仍只看旗標。
+                                    var wasDefault = StreamingPreferences.autoAdjustBitrate && StreamingPreferences.bitrateLooksDefault()
                                     StreamingPreferences.width = est.width
                                     StreamingPreferences.height = est.height
                                     if (wasDefault) {
@@ -1429,8 +1432,8 @@ Flickable {
                                 }
                                 var estFps = autoLocalFps()
                                 if (StreamingPreferences.fps !== estFps) {
-                                    // §RES-BITRATE：以旗標為準
-                                    var wasDefault = StreamingPreferences.autoAdjustBitrate
+                                    // §RES-BITRATE（C07）：同解析度那一處，旗標＋「值＝目前偏好組合的預設值」；在改 fps 之前算
+                                    var wasDefault = StreamingPreferences.autoAdjustBitrate && StreamingPreferences.bitrateLooksDefault()
                                     StreamingPreferences.fps = estFps
                                     if (wasDefault) {
                                         StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
