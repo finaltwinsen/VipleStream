@@ -726,6 +726,9 @@ namespace stream {
       // DEC-DEPTH 的做法，安靜時每 60 秒印一次存活確認。
       std::chrono::steady_clock::time_point abrRttLastHeartbeat{};
       bool abrRttSampled{false};       // 是否已取得過任何 RTT 樣本（0 也算）
+      // §P2（審查 11-20）：最近一次取樣的時刻（abr_sample_rtt 寫，握 abrMutex）。2D 的 run_abr_aimd 用它判斷樣本新不新：
+      // ENet 的 ping 停了但 peer 還沒逾時的那段，abrRttLastMs 凍結在壅塞時的高值，不可以拿來當成「現在還在塞」。
+      std::chrono::steady_clock::time_point abrRttSampleAt{};
       bool abrRttWindowRolled{false};  // 兩段視窗是否已輪換過一次
       // §P2（2026-11-20）：2D 的壅塞等級、分級降幅、緊急降碼冷卻、塞車點記憶（規則見 abr_congestion.h）。
       // 握 abrMutex：run_abr_aimd（ENet control 執行緒或 picoquic IO 執行緒）每輪更新，
@@ -3229,6 +3232,10 @@ namespace stream {
                         << " lastCong=" << f.last_congested_kbps() << '/' << f.effective_congested_kbps()
                         << " owdStall=" << f.owd_stall_skips()
                         << " netSwitchSkips=" << f.net_switch_skips()
+                        // §RATE-UNIFIED：rttSevere＝舊 RTT 絕對門檻交給控制器後「降了／判成只有上行塞而沒降」的累計次數；
+                        // repair＝最近一輪的補包比例／這條線路平常的量（%），(hold)＝正在因此停止回升
+                        << " rttSevere=" << f.rtt_severe_cuts() << '/' << f.rtt_severe_skips()
+                        << std::format(" repair={:.1f}/{:.1f}{}", f.repair_pct(), f.repair_floor_pct(), f.repair_tight(now) ? "(hold)" : "")
                         << std::format(" rtt base/jit/p50={:.0f}/{:.0f}/{:.0f}ms trend={:.1f} gamma={:.1f} {}", rt.base_ms, rt.jitter_ms, rt.p50_ms,
                                        rt.trend_ms, rt.gamma_ms, ::vr::abr::trend_state_name(rt.state))
                         << (owd ? std::format(" owd jit={:.1f}ms trend={:.1f} gamma={:.1f} {}", ot.jitter_ms, ot.trend_ms, ot.gamma_ms,
@@ -3295,11 +3302,12 @@ namespace stream {
     uint32_t rtt = peer->roundTripTime;
     session->video.abrRttLastMs = rtt;
     session->video.abrRttSampled = true;
+    auto now = std::chrono::steady_clock::now();
+    session->video.abrRttSampleAt = now;  // §P2：樣本新鮮度（2D 的 run_abr_aimd 讀）
     if (!session->vr) {
-      session->video.abrTrend.on_rtt(rtt == 0 ? 0.5 : (double) rtt, std::chrono::steady_clock::now());  // §ABR-ADAPT（2D）
+      session->video.abrTrend.on_rtt(rtt == 0 ? 0.5 : (double) rtt, now);  // §ABR-ADAPT（2D）
     }
 
-    auto now = std::chrono::steady_clock::now();
     if (session->video.abrRttWindowStart.time_since_epoch().count() == 0) {
       session->video.abrRttWindowStart = now;
       session->video.abrRttMinCurMs = rtt;
@@ -3375,10 +3383,21 @@ namespace stream {
     return std::min(maxBr, std::max(config::stream.abr_floor_kbps, maxBr * 8 / 100));  // floor ≤ cap
   }
 
+  namespace session {
+    extern std::atomic_uint running_sessions;  // 定義在本檔後段
+  }
+
+  /// 行程內正在跑的 session 數（2D 與 VR 都算）。獨立成函式：下面的參數也叫 session，不在那裡寫 session::
+  static unsigned abr_running_sessions() {
+    return session::running_sessions.load(std::memory_order_relaxed);
+  }
+
   /// §P2：把目前壅塞等級對應的 IDR 最短間隔交給編碼迴圈（video.cpp 的 IDR 閘門）。只有 2D 呼叫；呼叫者持 abrMutex。
   /// 每輪都重寫（值裡帶寫入時刻），這一側停擺 2 秒提示就自動失效。
+  /// 提示在行程內只有一份：同時超過一場 session（不論 2D 或 VR）時一律寫 0，每一場的閘門都回到原本的規則——
+  /// 否則遠端那一場的 6 秒間隔會套到區網那一場，區網那一場寫的 0 又把遠端的提示蓋掉。
   static void abr_publish_idr_hint(session_t *session, std::chrono::steady_clock::time_point now) {
-    ::abr_cong::idr_hint_store(session->video.abrCong.idr_gap_hint(), now);
+    ::abr_cong::idr_hint_store(::abr_cong::idr_hint_for_publish(session->video.abrCong.idr_gap_hint(), abr_running_sessions()), now);
   }
 
   /**
@@ -3471,10 +3490,37 @@ namespace stream {
     int minBr = abr_floor_kbps_for(maxBr);  // floor ≤ cap
     // abrNow 供 fast ABR 與 outage 統一使用
     const auto abrNow = std::chrono::steady_clock::now();
+    // §P2（審查 11-20）：RTT 樣本的新鮮度。樣本只在 ENet 的 ping 更新；ENet 那條路在壅塞中不通、ping 改走 QUIC 之後，
+    // peer 逾時（abr_forget_enet_rtt）之前 abrRttLastMs 會凍結在最後一個膨脹的值，§P2 會拿它每 2～3 秒連砍到下限。
+    // 2D 超過 3 秒沒有新樣本就當成沒有樣本（走既有的 NO-SAMPLE／QUIC-only 規則）；下一個 ping 一到自動恢復。
+    // VR 不看新鮮度（行為不變）；abrRttSampled 本身不改（ENet ping 與 VR 的控制器還在用）。
+    const bool rttFresh = session->vr ? session->video.abrRttSampled :
+                                        ::abr_cong::rtt_sample_fresh(session->video.abrRttSampled, session->video.abrRttSampleAt, abrNow);
+    // §VR-LINK-REPAIR：這段時間補包救回來的缺包。不算丟包；比例高時暫停回升。
+    // §RATE-UNIFIED 第 0 期（2026-11-20）：原本在下面才算，而且只接到舊 AIMD 的回升（VR 有控制器時那個回升本來就關著），
+    // 控制器的 RAMP 完全看不到。搬到 tick() 之前、交給控制器（on_repair_load），這一輪的回升就會被擋。算式沒有改；
+    // 2D 沒有 vrRepairAccum（repaired 恆為 0、repairPct = −1、repairHold = false），行為不變。
+    const int repaired = session->vr ? session->video.vrRepairAccum.exchange(0) : 0;
+    const float repairPct = vr_abr_loss_pct(session, repaired, elapsedMs);
+    const bool repairHold = repairPct >= kVrAbrRepairHoldPct;
     bool fastBitrateChanged = false;
     if (session->vr && session->video.vrAbrFast) {
       session->video.vrAbrFast->set_applied_kbps(applied);
       session->video.vrAbrFast->set_configured_kbps(session->video.configuredBitrateKbps);
+      // repaired == 0 時 vr_abr_loss_pct 回 −1（它把 0 當成沒有資料）；對補包量來說 0 是有效的量測（沒有在補），要照實交進去，
+      // 否則「平常的量」只會往上學、解除也只能靠逾時。封包數估不出來（視窗太短）時才真的略過
+      {
+        auto &f = *session->video.vrAbrFast;
+        const double repairLoad = repaired > 0 ? (double) repairPct :
+                                                 (abr_expected_packets(session, elapsedMs) >= kVrAbrMinExpected ? 0.0 : -1.0);
+        f.on_repair_load(repairLoad, abrNow);
+        if (const int ev = f.take_repair_event(abrNow); ev != 0) {
+          BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] repair load " << (ev > 0 ? "high: ramp held" : "eased: ramp allowed again")
+                          << " (repaired=" << repaired << " shards in " << elapsedMs << " ms = " << std::format("{:.1f}", f.repair_pct())
+                          << "% of the video packets, usual=" << std::format("{:.1f}", f.repair_floor_pct()) << "%, at " << applied
+                          << " kbps, src=" << src << ')';
+        }
+      }
       // 只剩一條連線（沒有適配器直連，只走家用 Wi-Fi）時先把上限壓在 75 Mbps：10-30 實測 149 Mbps（含 FEC 約 195 Mbps）
       // 塞家用 Wi-Fi，人一走動每 10 s 就有幾十張救不回。之後依兩端訊號強弱細分（設計稿第 3 節，§VR-LINK-SIGNAL）
       constexpr int kVrSingleLinkCapKbps = 75000;
@@ -3555,10 +3601,7 @@ namespace stream {
     if (lossPct >= 0.0f && lossPct < kVrAbrIgnorePct) {
       effectiveLoss = 0;
     }
-    // §VR-LINK-REPAIR：這段時間補包救回來的缺包。不算丟包；比例高時暫停回升（下面和 RTT 膨脹走同一道 gate）
-    const int repaired = session->vr ? session->video.vrRepairAccum.exchange(0) : 0;
-    const float repairPct = vr_abr_loss_pct(session, repaired, elapsedMs);
-    const bool repairHold = repairPct >= kVrAbrRepairHoldPct;
+    // （§VR-LINK-REPAIR 的 repaired／repairPct／repairHold 搬到上面、控制器的 tick() 之前算）
     // §VR-ABR-OUTAGE：丟包 ≥ 30% 的視窗是斷訊（只有 VR 才有 lossPct）——照常降碼，但記下降碼前的位元率，
     // 連線恢復後在下面的零丟包分支直接拉回
     // abrNow 供 fast ABR 與 outage 統一使用
@@ -3584,14 +3627,24 @@ namespace stream {
       uint32_t rtt = session->video.abrRttLastMs;
       uint32_t baseline = abr_rtt_baseline(session);
       auto nowHb = std::chrono::steady_clock::now();
-      if (!session->video.abrRttSampled) {
-        // 還沒有任何樣本（peer 尚未連上／非 ENet 路徑）。這種情況也要能
+      if (!rttFresh) {
+        // 還沒有任何樣本（peer 尚未連上／非 ENet 路徑），或 2D 的樣本超過 3 秒沒更新。這種情況也要能
         // 從 log 看出來，否則又會退化成「沒印＝不知道是正常還是沒跑到」。
+        const bool stale = session->video.abrRttSampled;  // 只有 2D 會成立（VR 的 rttFresh 就是 abrRttSampled）
+        if (stale) {
+          session->video.abrRttCongestedRounds = 0;  // 舊樣本累積的輪數不帶到恢復後的第一個樣本
+        }
         if (session->video.abrRttLastHeartbeat.time_since_epoch().count() == 0 ||
             nowHb - session->video.abrRttLastHeartbeat >= 60s) {
           session->video.abrRttLastHeartbeat = nowHb;
-          BOOST_LOG(info) << "[VIPLE-ABR-RTT] action=NO-SAMPLE heartbeat "
-                             "(peer 尚未連上或非 ENet 路徑，delay 偵測待命)";
+          if (stale) {
+            BOOST_LOG(info) << "[VIPLE-ABR-RTT] action=NO-SAMPLE heartbeat (last ENet RTT sample " << rtt << " ms is "
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(nowHb - session->video.abrRttSampleAt).count()
+                            << " ms old - ignored until the next ping)";
+          } else {
+            BOOST_LOG(info) << "[VIPLE-ABR-RTT] action=NO-SAMPLE heartbeat "
+                               "(peer 尚未連上或非 ENet 路徑，delay 偵測待命)";
+          }
         }
       }
       else {
@@ -3638,11 +3691,32 @@ namespace stream {
     }
     // 註：inflation 用 denom 當分母（baseline 可能為 0），見上方註解。
 
+    // §RATE-UNIFIED 第 0 期（2026-11-20）：VR 有控制器時，上面的「嚴重膨脹」不再由舊 AIMD 直接降（下面的 rttSevere 分支：
+    // ×0.75、不經控制器——沒有冷卻、不記塞車點，控制器接著每秒 +8% 爬回去，5 秒後再被砍，呈鋸齒；而且單向延遲正常、
+    // 只有上行塞的時候也照降）。改成把訊號交給控制器決定：塞的只是上行 → 不降；其餘照樣 ×0.75，但有冷卻、記塞車點，
+    // 下一個 tick 套用（log 會是 by=fast reason=rtt-severe+delay）。2D 與沒開 vr_abr_fast 的 VR 不走這裡。
+    if (rttSevere && session->vr && session->video.vrAbrFast) {
+      rttSevere = false;
+      auto &f = *session->video.vrAbrFast;
+      const auto res = f.on_rtt_severe(abrNow);
+      if (res != vr::abr::fast_controller_t::rtt_severe_e::held) {
+        // 沿用舊規則的 5 秒間隔（不降的那一種也算，這一行才不會每輪印）；held＝控制器剛降過，下一輪再問
+        session->video.abrRttLastCutTime = abrNow;
+        const double ex = f.rtt_severe_owd_excess_ms();
+        BOOST_LOG(info) << "[VIPLE-VR-ABR-FAST] rtt-severe: rtt=" << session->video.abrRttLastMs << "ms baseline="
+                        << abr_rtt_baseline(session) << "ms owdExcess=" << (ex >= 0.0 ? std::format("{:.0f}ms", ex) : std::string("n/a"))
+                        << (res == vr::abr::fast_controller_t::rtt_severe_e::cut ?
+                              " -> cut queued in the controller (x0.75, cooldown and congestion point apply)" :
+                              " -> no cut (one-way delay is normal: only the uplink is delayed)")
+                        << " applied=" << applied << " kbps total cut/skipped=" << f.rtt_severe_cuts() << '/' << f.rtt_severe_skips();
+      }
+    }
+
     // §ABR-ADAPT（2D）：桌面 session 改用自適應延遲趨勢判斷壅塞。固定門檻（2 倍且 +50 ms）在行動網路這類 RTT 本來就跳
     // 20～30 ms 的路徑上會誤判、在 LAN 又太鈍；趨勢看的是「排隊延遲是否持續上升」，門檻依實測抖動自己調。
     // 舊的計算保留給 log 與心跳；VR 不受影響（VR 的控制器有自己的一份）。
     bool deskTrendOver = false;
-    if (!session->vr && session->video.abrRttSampled) {
+    if (!session->vr && rttFresh) {
       using namespace std::chrono_literals;
       const auto &tr = session->video.abrTrend;
       deskTrendOver = tr.state() == ::vr::abr::trend_state_e::overuse || tr.overuse_recently(abrNow, 1500ms);
@@ -3660,13 +3734,14 @@ namespace stream {
     //   降幅分級——趨勢過載 ×0.85（不變）；「≥ 4 倍且多 200 ms 連 2 輪」×0.70、冷卻由 5 秒改 2 秒（原本也是 ×0.85，
     //   要 20 Mbps、瓶頸 5 Mbps 時要 9 刀約 18 秒才降得到）；高出基線 max(500 ms, 8 倍抖動) 連 2 輪＝深度壅塞，
     //   ×0.50、3 秒內最多一次。
-    //   等級另外交給 IDR 閘門（L1 以上不走 §IDR-FAST 的 250 ms、L3 把間隔拉到最多 6 秒）與 abr_on_idr_request。
+    //   等級另外交給 IDR 閘門（L2 以上且 RTT 夠長時不走 §IDR-FAST 的 250 ms、L3 把間隔拉到最多 6 秒）與 abr_on_idr_request。
+    //   審查 11-20：RTT 樣本超過 3 秒沒更新當成沒有樣本（rttFresh）；IDR 提示與 IDR 請求降碼要 RTT ≥ 150 ms（遲滯到 100 ms）。
     // 沒有 RTT 樣本時等級固定 L0、不建議任何動作；RTT 正常時三個條件都不成立，結果與以前相同。VR 不走。
     ::abr_cong::action_e congAction = ::abr_cong::action_e::none;
     if (!session->vr) {
       auto &cong = session->video.abrCong;
       ::abr_cong::cong_in_t in;
-      in.sampled = session->video.abrRttSampled;
+      in.sampled = rttFresh;  // 樣本太舊＝沒有樣本：等級歸 L0、不建議動作、IDR 提示歸 0
       if (in.sampled) {
         const auto &tr = session->video.abrTrend;
         in.rtt_ms = session->video.abrRttLastMs;
@@ -3715,7 +3790,7 @@ namespace stream {
       int base = std::min(target, applied);
       // §ABR-ADAPT（2D）：丟包分類。延遲沒有上升、server 也沒有自己丟（staleDrops／QUIC 壅塞）＝無線環境的隨機掉包，
       // 降碼沒用（FEC 與 RFI 處理）：只有很重（> 30 個／秒）才小降一階，其餘維持。沒有 RTT 樣本（QUIC-only）時照舊
-      const bool deskRandomLoss = !session->vr && session->video.abrRttSampled && staleDrops == 0 && !quicCongested && !deskTrendOver;
+      const bool deskRandomLoss = !session->vr && rttFresh && staleDrops == 0 && !quicCongested && !deskTrendOver;
       if (deskRandomLoss) {
         target = lossPerSec > 30 ? base * 85 / 100 : base;
       } else if (lossPct >= 0.0f) {
@@ -3738,17 +3813,22 @@ namespace stream {
       }
       // §P2：2D 這一輪同時有延遲降碼的建議時取降得多的那一個。以前丟包分支會蓋掉延遲分支：佇列塞滿後趨勢回到
       // normal、丟包被分類成隨機丟包（不降），只要每輪都有幾個丟包，延遲規則就永遠輪不到
+      // 審查 11-20：丟包分支降得一樣多或更多（例如丟包 ×0.50 對上 emergency ×0.50／severe ×0.70）時，以前不記帳——
+      // 冷卻與塞車點都沒有起算，下一輪沒有丟包就再砍一次、回升時直接衝回剛才塞住的碼率。現在只要這一輪真的有降就記
+      // （規則在 abr_cong::merge_loss_cut）；動作照 update() 建議的那一級記，不因為丟包降得深就升級成緊急降碼。
       if (!session->vr && congAction != ::abr_cong::action_e::none) {
         const int congTarget = base * ::abr_cong::action_pct(congAction) / 100;
-        if (congTarget < target) {
-          target = congTarget;
+        const auto merged = ::abr_cong::merge_loss_cut(target, congTarget, applied, minBr);
+        target = merged.target;
+        if (merged.commit) {
           const int congAfter = std::max(minBr, target);
           const bool pointSet = session->video.abrCong.commit_cut(congAction, applied, abrNow, congAfter);
           session->video.abrRttLastCutTime = abrNow;
           abr_publish_idr_hint(session, abrNow);
           // 已經在下限（這一刀沒有東西可降）就不記這一行：壅塞持續時每 1～2 秒會來一次
           if (congAfter < applied) BOOST_LOG(info) << "[VIPLE-ABR] cong cut action=" << ::abr_cong::action_name(congAction) << " x0."
-                          << ::abr_cong::action_pct(congAction) << " (with loss) base=" << base << " target=" << std::max(minBr, target)
+                          << ::abr_cong::action_pct(congAction) << (merged.cong_wins ? " (with loss)" : " (loss cut at least as deep, accounted)")
+                          << " base=" << base << " target=" << std::max(minBr, target)
                           << " kbps level=L" << (int) session->video.abrCong.level() << " rtt=" << session->video.abrRttLastMs
                           << "ms base=" << abr_rtt_baseline(session) << "ms"
                           << (pointSet ? std::format(" congestedAt={}kbps", applied) : std::string {});
@@ -3830,7 +3910,7 @@ namespace stream {
       // 加幅取「上限 5%」與「目前 15%」較大者（乘法探頂）。限速 A/B 裡解除後要 33 s 才從 8 回到 37 Mbps；
       // 延遲門檻修好後升過頭會馬上被 RTT 或丟包抓到，敢升快一點。延遲沒回到基線時照舊 5 輪＋5%
       bool deskClean = false;
-      if (!session->vr && session->video.abrRttSampled) {
+      if (!session->vr && rttFresh) {
         const uint32_t r = session->video.abrRttLastMs;
         const uint32_t b = abr_rtt_baseline(session);
         // 多不到 20 ms 才算回到基線（LAN 基線 1 ms 時 1.5 倍沒有意義，看絕對差就好）

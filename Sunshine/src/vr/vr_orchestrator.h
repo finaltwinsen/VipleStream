@@ -128,4 +128,11 @@ namespace vr::orchestrator {
    *        不碰使用者其他的 SteamVR 設定。`vr_pcvr` 仍是 enabled 時，下一次 VR /launch 會重新部署並註冊。
    */
   unregister_result_t unregister_driver();
+
+  /**
+   * @brief SteamVR（vrserver）是不是在跑。給 `--steamvr-driver uninstall --wait-steamvr` 的等待迴圈用：
+   *        `unregister_driver()` 回 `steamvr-running` 之後，等待期間只用這個查（唯讀、不進編排執行緒、不寫 step log），
+   *        它結束了才再呼叫一次 `unregister_driver()`。任何執行緒都可以呼叫。
+   */
+  bool steamvr_running();
 }  // namespace vr::orchestrator

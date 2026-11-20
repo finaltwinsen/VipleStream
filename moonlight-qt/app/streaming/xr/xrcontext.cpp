@@ -2700,7 +2700,7 @@ void XrContext::frameThreadMain()
                     videoLayer = true;
                     videoGen = vcur.generation;
                     pcvrTimingOnLatch(vcur.seq, vcur.lastDrawnUs, vcur.renderUs, vcur.hasMeta,
-                                      vcur.meta.echoSampleId, cpuT0, periodUs, vcur.fbSeq, vcur.fbDrawnUs);
+                                      vcur.meta.echoSampleId, cpuT0, periodUs, vcur.fbSeq, vcur.fbDrawnUs, true, vcur.hostGapCum);
                     pcvrPoseErr(vcur.meta.renderRot, vcur.meta.renderPos, vcur.seq != m_PoseErrLastSeq);
                     m_PoseErrLastSeq = vcur.seq;
                     std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -3693,7 +3693,8 @@ void XrContext::frameThreadMain()
                             buildInsetQuads(v2.subImage.swapchain, v2.insetRect, v2.insetOut, projViews, insetQ);
                         }
                         pcvrTimingRelatch(v2.seq, v2.lastDrawnUs, v2.renderUs, v2.hasMeta, v2.meta.echoSampleId,
-                                          v2.meta.renderRot, v2.meta.renderPos, steadyNowNs(), periodUs, v2.fbSeq, v2.fbDrawnUs);
+                                          v2.meta.renderRot, v2.meta.renderPos, steadyNowNs(), periodUs, v2.fbSeq, v2.fbDrawnUs,
+                                          v2.hostGapCum);
                         vcur = v2;
                         videoGen = v2.generation;
                         fixed = true;
@@ -3970,7 +3971,7 @@ void XrContext::resetPcvrRate()
 }
 
 // §VR-RATE-AUTO：frame thread，每個顯示格一次。newFrame＝這一格顯示的是新影像
-void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs)
+void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs, uint32_t hostGapCum)
 {
     if (!m_Options.pcvrRateAuto) {
         return;
@@ -3978,6 +3979,22 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs)
     if (m_RateResetReq.exchange(false, std::memory_order_acquire)) {
         m_RateAuto = xrrate::AutoRate();
         m_RateDisabledLogged = false;
+        m_RateHostCumValid = false;
+        m_RateHostEpisode = false;
+    }
+    // §VR-RATE-CAUSE-HOST：這一張新影像與上一張顯示的影像之間 host 少出了幾格（XrVideo 跟著影像發布的累計值相減；
+    // 中間有影像被跳過也對得上）。第一張、或累計值倒退（影像路徑重建）時不算
+    uint32_t hostSlots = 0;
+    if (newFrame) {
+        if (m_RateHostCumValid) {
+            const uint32_t d = hostGapCum - m_RateHostCum;
+            hostSlots = d < 0x40000000u ? d : 0u;
+        }
+        m_RateHostCum = hostGapCum;
+        m_RateHostCumValid = true;
+    }
+    if (m_Video != nullptr) {
+        m_Video->setRatePeriodUs(periodUs);  // 影像 render thread 把 Present 間隔換成格數要用
     }
     const uint32_t reply = m_RateReply.exchange(0, std::memory_order_acquire);
     if (reply & 0x80000000u) {
@@ -3998,7 +4015,25 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs)
     }
     // §VR-REPAIR-WAN：這一張新影像是被補包拖晚、剛放行的（放行到顯示約 20～30 ms）→ 它前面那段重複是等補包，不是斷流
     const bool repairReleased = newFrame && LiGetVrRepairQuietMs() < 50u;
-    m_RateAuto.onSlot(newFrame, nowUs, headsetLate, repairReleased);
+    m_RateAuto.onSlot(newFrame, nowUs, headsetLate, repairReleased, hostSlots);
+    // §VR-RATE-CAUSE-HOST：host 持續沒出畫格的那一段，開始與結束各印一行（不降半速，只記錄）。
+    // 開始：最近 15 秒 host 的格數達到降速門檻、而且佔預期外重複的七成以上；結束：降到門檻的一半以下（遲滯）
+    if (newFrame) {
+        const uint32_t host15 = m_RateAuto.recentHostSum(3);
+        const uint32_t other15 = m_RateAuto.recentSum(3);
+        if (!m_RateHostEpisode && host15 >= xrrate::AutoRate::kDownSum &&
+            static_cast<double>(host15) >= xrrate::AutoRate::kHeadsetShare * static_cast<double>(host15 + other15)) {
+            m_RateHostEpisode = true;
+            m_AsyncLog.postf("[VIPLE-VR-RATE] host is not producing frames (lateHost %u slots in 15 s, network+headset %u): "
+                             "not counted as network trouble, rate stays at div=%d",
+                             host15, other15, m_RateAuto.div());
+        }
+        else if (m_RateHostEpisode && host15 < xrrate::AutoRate::kDownSum / 2) {
+            m_RateHostEpisode = false;
+            m_AsyncLog.postf("[VIPLE-VR-RATE] host is producing frames again (lateHost %u slots in 15 s, total %llu)", host15,
+                             static_cast<unsigned long long>(m_RateAuto.totalHostSlots()));
+        }
+    }
     const xrrate::AutoRate::Request r = m_RateAuto.poll(nowUs);
     if (r.div != 0) {
         VIPLE_VR_TLV_RATE req{};
@@ -4016,10 +4051,11 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs)
                                                                             : "network unstable";
         // §PERF-1113（A33）：pcvrRateSlot 在 frame thread 每個顯示格都跑；這一行交給 log 執行緒印
         m_AsyncLog.postf(
-                    "[VIPLE-VR-RATE] request div=%d seq=%u%s (%s): short repeats last 15 s=%u (headset %u), last 5 s=%u stalls=%u; next try after %llu s%s",
+                    "[VIPLE-VR-RATE] request div=%d seq=%u%s (%s): short repeats last 15 s=%u (headset %u), last 5 s=%u stalls=%u lateHost=%u (15 s, not counted); next try after %llu s%s",
                     r.div, req.seq, r.retry ? " (resend)" : "", why, m_RateAuto.recentSum(3), m_RateAuto.recentHeadsetSum(3),
                     m_RateAuto.lastWindow().shortRep,
-                    m_RateAuto.lastWindow().stalls, static_cast<unsigned long long>(m_RateAuto.upDwellUs() / 1000000ull),
+                    m_RateAuto.lastWindow().stalls, m_RateAuto.recentHostSum(3),
+                    static_cast<unsigned long long>(m_RateAuto.upDwellUs() / 1000000ull),
                     rc == 0 ? "" : " - send failed");
     }
     if (m_RateAuto.disabled() && !m_RateDisabledLogged) {
@@ -4037,7 +4073,7 @@ void XrContext::pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs)
 // 真的那一張＋一個週期（它的內容來自那一張，外插補回來的部分不算）。所以拿 age 比補幀開／關會低估補幀。
 void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
                                   uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs,
-                                  uint64_t fbSeq, uint64_t fbDrawnUs, bool feedRate)
+                                  uint64_t fbSeq, uint64_t fbDrawnUs, bool feedRate, uint32_t hostGapCum)
 {
     auto& t = m_PcvrTiming;
     t.lastAgePushed = false;
@@ -4046,7 +4082,13 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
         return;
     }
     if (feedRate) {
-        pcvrRateSlot(seq != t.lastLatchedSeq, latchNs / 1000ull, periodUs);  // §VR-RATE-AUTO：每個顯示格餵一次
+        pcvrRateSlot(seq != t.lastLatchedSeq, latchNs / 1000ull, periodUs, hostGapCum);  // §VR-RATE-AUTO：每個顯示格餵一次
+    }
+    else if (seq != t.lastLatchedSeq) {
+        // §VR-RATE-CAUSE-HOST：這一格已經餵過（pcvrTimingRelatch 換了一張），不再餵，但「上一張顯示的影像」要跟著換，
+        // 否則下一張新影像會把這一張之前 host 少出的格數也算進去
+        m_RateHostCum = hostGapCum;
+        m_RateHostCumValid = true;
     }
     if (seq == t.lastLatchedSeq) {
         t.repeat10s++;  // 同一張影像重送（沒有新幀）：只計數
@@ -4132,7 +4174,7 @@ void XrContext::pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
 // 統計與 pcvrPoseErr 的樣本不拿掉，10 Hz 的 LATCH 在這之前若剛好輪到送出，帶的也是原本那一張（每 10 s 不到兩次）。
 void XrContext::pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta, uint32_t echoSampleId,
                                   const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs,
-                                  uint64_t fbSeq, uint64_t fbDrawnUs)
+                                  uint64_t fbSeq, uint64_t fbDrawnUs, uint32_t hostGapCum)
 {
     auto& t = m_PcvrTiming;
     // pcvrTimingTick 排在 pcvrTimingOnLatch 與這裡之間：10 s 視窗若剛好在這一格印出並歸零，原本那一筆已經印在上一個
@@ -4169,7 +4211,7 @@ void XrContext::pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t r
     }
     // 序號剛好是上一張 +1：算成新影像，不會再加 skip
     // §REVIEW-1119：fbSeq／fbDrawnUs 也要帶新的那一張的；少了它們，開緩衝時 lastFbSeq 會被改回顯示的那一張，下一格的 LATCH slack 就量錯
-    pcvrTimingOnLatch(seq, lastDrawnUs, renderUs, hasMeta, echoSampleId, nowNs, periodUs, fbSeq, fbDrawnUs, feedRate);
+    pcvrTimingOnLatch(seq, lastDrawnUs, renderUs, hasMeta, echoSampleId, nowNs, periodUs, fbSeq, fbDrawnUs, feedRate, hostGapCum);
     if (rolled && t.new10s > 0) {
         t.new10s--;
     }
@@ -4406,6 +4448,10 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
             w.lateHeadset = m_RateAuto.totalHeadsetSlots();
             NetBench::Collector::get().pushWindow(w, nowNs / 1000ull);
         }
+        uint32_t rateFnPairs = 0, rateFnBreaks = 0;  // §VR-RATE-CAUSE-HOST
+        if (m_Video != nullptr) {
+            m_Video->hostFrameNoStats(&rateFnPairs, &rateFnBreaks);
+        }
         // 2026-10-05：尾端加 frames new／repeat／skip（前段欄位順序不變）
         m_AsyncLog.postf(
                          "[VIPLE-VR-MTP10] n=%zu p50=%.1f p95=%.1f p99=%.1f ms noSample=%u | latch sent=%u (%.1f/s) lastSlack=%d us | timing sent=%u%s"
@@ -4444,7 +4490,7 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
                          t.latchSkip10s, t.rrSeen10s == 3u ? "m" : (t.rrSeen10s == 2u ? "1" : "0"),
                          // §VR-RATE-AUTO：目前的分頻與判斷器的統計（自動開著才印）
                          m_Options.pcvrRateAuto
-                             ? qUtf8Printable(QString(" | rate div=%1 short15s=%2 downs=%3 ups=%4 probeFails=%5 outageSkips=%7%6 lateNet=%8 lateHeadset=%9")
+                             ? qUtf8Printable(QString(" | rate div=%1 short15s=%2 downs=%3 ups=%4 probeFails=%5 outageSkips=%7%6 lateNet=%8 lateHeadset=%9 lateHost=%10 fnBreaks=%11/%12")
                                                   .arg(m_RateDiv.load(std::memory_order_relaxed))
                                                   .arg(m_RateAuto.recentSum(3))
                                                   .arg(m_RateAuto.downs())
@@ -4454,7 +4500,13 @@ void XrContext::pcvrTimingTick(uint64_t nowNs, uint64_t periodNs)
                                                   .arg(m_RateAuto.outageSkips())
                                                   // §VR-RATE-CAUSE：整場累計的預期外重複格（網路晚到／頭盔端解碼晚）
                                                   .arg(m_RateAuto.totalNetSlots())
-                                                  .arg(m_RateAuto.totalHeadsetSlots()))
+                                                  .arg(m_RateAuto.totalHeadsetSlots())
+                                                  // §VR-RATE-CAUSE-HOST：host 沒出畫格造成的重複格（整場累計，不進判斷）；
+                                                  // fnBreaks＝幀號不連號的組數／全部組數（累計）。不連號佔大多數＝幀號
+                                                  // 拿不到或不可信，lateHost 會一直是 0
+                                                  .arg(m_RateAuto.totalHostSlots())
+                                                  .arg(rateFnBreaks)
+                                                  .arg(static_cast<quint64>(rateFnPairs) + rateFnBreaks))
                              : "");
         t.repRunMax10s = t.repRunGe3 = t.repRunGe5 = 0;
         t.latchSkip10s = 0;

@@ -295,7 +295,7 @@ public:
     // §VR-RATE-AUTO：main thread 收到 host 的 S2C_RATE。accepted 時立刻換分頻（等待閘門、補包上限、緩衝），
     // 判斷器的狀態交給 frame thread 在下一格更新
     void onPcvrRateApplied(int div, bool accepted, uint16_t seq);
-    void pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs);
+    void pcvrRateSlot(bool newFrame, uint64_t nowUs, uint32_t periodUs, uint32_t hostGapCum = 0);
     // §VR-RATE-AUTO：新的一場從全速重新開始（main thread；判斷器由 frame thread 在下一格重設）
     void resetPcvrRate();
     bool trackingThreadMode() const { return m_TimeConv != nullptr; }
@@ -609,6 +609,11 @@ private:
     std::atomic<uint32_t> m_RateReply {0};
     std::atomic<int> m_RateDiv {1};
     bool m_RateDisabledLogged = false;
+    // §VR-RATE-CAUSE-HOST（frame thread）：上一張顯示的影像帶的 host 累計缺格（XrVideo::Current::hostGapCum）；
+    // m_RateHostEpisode＝「host 沒出畫格」那一行已經印過、還沒結束
+    uint32_t m_RateHostCum = 0;
+    bool m_RateHostCumValid = false;
+    bool m_RateHostEpisode = false;
     std::atomic<bool> m_RateResetReq {false};
 
     // §VR-LOGASYNC：10 s 彙總行（[VIPLE-XR] 10s、[VIPLE-VR-LDIAG]、[VIPLE-VR-XRLOOP]、[VIPLE-VR-MTP10] 等）frame thread 只組字串，
@@ -837,11 +842,11 @@ private:
     // fbSeq／fbDrawnUs（§VR-BUFFER）：LATCH slack 照這一張算（開緩衝時＝最新發布的，不是顯示的那張）；0＝同 seq／lastDrawnUs
     void pcvrTimingOnLatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta,
                            uint32_t echoSampleId, uint64_t latchNs, uint32_t periodUs,
-                           uint64_t fbSeq = 0, uint64_t fbDrawnUs = 0, bool feedRate = true);
+                           uint64_t fbSeq = 0, uint64_t fbDrawnUs = 0, bool feedRate = true, uint32_t hostGapCum = 0);
     // §VR-LATCH-RELATCH：這一格改送另一張影像（參數是新的那一張）——把 pcvrTimingOnLatch 對原本那張記的帳改過來
     void pcvrTimingRelatch(uint64_t seq, uint64_t lastDrawnUs, uint32_t renderUs, bool hasMeta, uint32_t echoSampleId,
                            const float renderRot[4], const float renderPos[3], uint64_t nowNs, uint32_t periodUs,
-                           uint64_t fbSeq = 0, uint64_t fbDrawnUs = 0);
+                           uint64_t fbSeq = 0, uint64_t fbDrawnUs = 0, uint32_t hostGapCum = 0);
     void pcvrTimingTick(uint64_t nowNs, uint64_t periodNs);
     // §VR-LATCH A/B：同場切換只有一個主人——換邊只發生在 pcvrTimingTick 的 10 s 區塊。受它控制的開關這一刻開不開：
     // 沒開切換（pcvrLatchAbSec＝0）恆為開，否則看現在是哪一邊。只在 frame thread 呼叫

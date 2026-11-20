@@ -247,6 +247,9 @@ namespace vr::multilink {
     std::atomic<uint32_t> video_peak_mbps {0};  // 近 30 秒的峰值（恢復門檻用）
     peak_rate_t rate_peak;  // 只在影像執行緒存取
     uint64_t rate_bytes = 0;  // 只在影像執行緒存取
+    // §FLAT-REPAIR：同一個 500 ms 視窗量到的影像封包率（個／秒）。只有平面場次的補包額度讀它
+    std::atomic<uint32_t> video_pps {0};
+    uint64_t rate_pkts = 0;  // 只在影像執行緒存取
     clock::time_point rate_since {};
 
     bool alive(const link_t &L, int64_t now_ns) const {
@@ -1467,6 +1470,7 @@ namespace vr::multilink {
 
     // 影像位元率（automatic 的恢復門檻用）
     m.rate_bytes += bytes;
+    m.rate_pkts += count;
     if (m.rate_since == clock::time_point {}) {
       m.rate_since = now;
     } else if (now - m.rate_since >= 500ms) {
@@ -1474,7 +1478,9 @@ namespace vr::multilink {
       const uint32_t mbps_now = (uint32_t) (m.rate_bytes * 8 / secs / 1e6);
       m.video_mbps.store(mbps_now, std::memory_order_relaxed);
       m.video_peak_mbps.store(m.rate_peak.update(mbps_now, to_ns(now)), std::memory_order_relaxed);
+      m.video_pps.store((uint32_t) std::min((double) m.rate_pkts / secs + 0.5, 4.0e9), std::memory_order_relaxed);
       m.rate_bytes = 0;
+      m.rate_pkts = 0;
       m.rate_since = now;
     }
 
@@ -1662,7 +1668,11 @@ namespace vr::multilink {
           ++m.rstats.exhausted;
         } else {
           const uint32_t mbps = m.video_mbps.load(std::memory_order_relaxed);
-          const double pps = mbps > 0 ? (double) mbps * 1e6 / 8.0 / (double) b->pkt_size : 15000.0;
+          // §FLAT-REPAIR（2026-11-20 審查）：平面場次改用實際量到的封包率（不到 1 Mbps 時整數 Mbps＝0，
+          // 會退回 15000 pps 的保底值、15% 的上限形同沒有）。VR 場次維持原本的算式，一個位元都不變
+          const double pps = m.opt.flat_repair ? flat_repair_video_pps(m.video_pps.load(std::memory_order_relaxed)) :
+                             mbps > 0          ? (double) mbps * 1e6 / 8.0 / (double) b->pkt_size :
+                                                 15000.0;
           if (!m.budget.take((unsigned) plan.size(), pps, now_ns)) {
             res.gone = VIPLE_VR_GONE_BUDGET;
             ++m.rstats.gone_budget;

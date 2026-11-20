@@ -798,6 +798,12 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     static QRegularExpression resolutionRexExp("^(720|1080|1440|4K|resolution)$");
     QStringList resoOptions = parser.optionNames().filter(resolutionRexExp);
     bool displaySet = !resoOptions.isEmpty();
+    // §RES-BITRATE：套用 CLI 之前的值先記下來，save() 存的是這一份（CLI 的值只用在這一場）。
+    // 同一個行程解析兩次時保留第一次記的值（那才是設定檔裡的）。
+    const int savedWidth = preferences->cliPersist.resolution ? preferences->cliPersist.width : preferences->width;
+    const int savedHeight = preferences->cliPersist.resolution ? preferences->cliPersist.height : preferences->height;
+    const int savedFps = preferences->cliPersist.fps ? preferences->cliPersist.fpsValue : preferences->fps;
+    const int savedBitrate = preferences->cliPersist.bitrate ? preferences->cliPersist.bitrateKbps : preferences->bitrateKbps;
     if (displaySet) {
         QString name = resoOptions.last();
         if (name == "720") {
@@ -878,6 +884,22 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         preferences->bitrateKbps = preferences->getDefaultBitrate(
             preferences->width, preferences->height, preferences->fps,
             preferences->enableYUV444, preferences->enableFrameInterpolation);
+        // §RES-BITRATE：場次依最終的串流解析度／fps 再算一次（Session::refreshSessionBitrate）
+        preferences->bitrateDefaultFromCli = true;
+    }
+    // §RES-BITRATE：只有 CLI 真的改到的欄位才換成「存檔用舊值」
+    if (preferences->width != savedWidth || preferences->height != savedHeight) {
+        preferences->cliPersist.resolution = true;
+        preferences->cliPersist.width = savedWidth;
+        preferences->cliPersist.height = savedHeight;
+    }
+    if (preferences->fps != savedFps) {
+        preferences->cliPersist.fps = true;
+        preferences->cliPersist.fpsValue = savedFps;
+    }
+    if (preferences->bitrateKbps != savedBitrate) {
+        preferences->cliPersist.bitrate = true;
+        preferences->cliPersist.bitrateKbps = savedBitrate;
     }
 
     // Resolve --packet-size option

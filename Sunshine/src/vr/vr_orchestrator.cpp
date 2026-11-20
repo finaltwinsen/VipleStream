@@ -1337,6 +1337,10 @@ namespace vr::orchestrator {
     return res;
   }
 
+  bool steamvr_running() {
+    return platform::vrserver_pid() != 0;
+  }
+
   uint64_t prewarm() {
     uint64_t token = 0;
     {

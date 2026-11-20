@@ -1679,3 +1679,242 @@ TEST_F(VrAbrFastTest, RoomyLinkUsesStricterQualityGates) {
   c.on_quality(900, 1, t0 + 100ms);
   EXPECT_STREQ(c.ramp_block_reason(t0 + 100ms), "quality");
 }
+
+// §VR-QP-ROOM：回收門檻固定 QP 6，不隨線路狀況切換；剛塞過車的 30 秒內停止回升的門檻回到 QP 20
+TEST_F(VrAbrFastTest, RecentCongestionUsesLooseSaturationGateButSameTrimGate) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
+  const auto t_loss = t0 + 10000ms;
+  c.on_fec_failed(2, t_loss);
+  ASSERT_TRUE(c.tick(t_loss).has_value());
+  ASSERT_GT(c.last_congested_kbps(), 0);
+  const auto t1 = t_loss + 5000ms;
+  EXPECT_TRUE(c.recently_congested(t1));
+  EXPECT_FALSE(c.link_roomy(t1));
+  EXPECT_EQ(c.qp_saturated_x100(t1), fast::k_fast_qp_saturated_x100);
+  EXPECT_EQ(c.qp_trim_x100(t1), fast::k_fast_qp_trim_roomy_x100);
+}
+
+// §VR-QP-ROOM：接近塞車點（原始塞車點的九成以內）時停止回升的門檻是 QP 20；離開要低過遲滯；150 秒沒再塞車後界線失效
+TEST_F(VrAbrFastTest, NearCeilingGateHasHysteresisAndExpires) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
+  const auto t_loss = t0 + 10000ms;
+  c.on_fec_failed(2, t_loss);
+  ASSERT_TRUE(c.tick(t_loss).has_value());
+  const int ceiling = c.last_congested_kbps();
+  ASSERT_GT(ceiling, 0);
+  const auto t1 = t_loss + 40000ms;  // 安靜期過了、界線還有效
+  ASSERT_FALSE(c.recently_congested(t1));
+  const int limit = static_cast<int>(fast::k_fast_roomy_ceiling_ratio * ceiling);  // 40 秒只放寬 1%，仍是八成那一條
+  c.set_applied_kbps(limit / 2);
+  EXPECT_FALSE(c.near_ceiling(t1));
+  EXPECT_EQ(c.qp_saturated_x100(t1), fast::k_fast_qp_saturated_roomy_x100);
+  c.set_applied_kbps(static_cast<int>(ceiling * 0.89));
+  EXPECT_TRUE(c.near_ceiling(t1));
+  EXPECT_EQ(c.qp_saturated_x100(t1), fast::k_fast_qp_saturated_x100);
+  // 遲滯：剛好低於界線一點點仍算接近；低過 6% 才離開
+  c.set_applied_kbps(static_cast<int>(limit * 1.01 * 0.97));
+  EXPECT_TRUE(c.near_ceiling(t1));
+  c.set_applied_kbps(static_cast<int>(limit * 0.90));
+  EXPECT_FALSE(c.near_ceiling(t1));
+  // 150 秒沒再塞車：界線失效，碼率高於塞車點也不算接近
+  c.set_applied_kbps(ceiling);
+  EXPECT_FALSE(c.near_ceiling(t_loss + 151000ms));
+  EXPECT_TRUE(c.link_roomy(t_loss + 151000ms));
+}
+
+// ==============================================================================
+// §RATE-UNIFIED 第 0 期（2026-11-20）：RTT 嚴重膨脹交給控制器、補包量大停止回升
+// ==============================================================================
+
+// 沒有單向延遲的 client：照樣降 ×0.75，但走控制器——有冷卻、記塞車點；冷卻中再來一次不疊刀
+TEST_F(VrAbrFastTest, RttSevereWithoutOwdCutsThroughController) {
+  using sev = fast::fast_controller_t::rtt_severe_e;
+  fast::fast_controller_t c(kConfigured50Mbps);
+  c.tick(t0);
+  const auto t1 = t0 + 1000ms;
+  EXPECT_EQ(c.on_rtt_severe(t1), sev::cut);
+  EXPECT_STREQ(c.last_reason(), "rtt-severe+delay");
+  EXPECT_LT(c.rtt_severe_owd_excess_ms(), 0.0);  // 沒有單向延遲可看
+  auto r = c.tick(t1);
+  ASSERT_TRUE(r.has_value());
+  EXPECT_EQ(*r, 37500);  // 50000 × 0.75
+  EXPECT_EQ(c.state(), fast::fast_state_e::hold);
+  EXPECT_EQ(c.last_congested_kbps(), 50000);
+  EXPECT_TRUE(c.recently_congested(t1 + 500ms));
+  EXPECT_FALSE(c.link_roomy(t1 + 500ms));
+  // 冷卻中（沒有 RTT 樣本時冷卻 2 秒）：不處理
+  EXPECT_EQ(c.on_rtt_severe(t1 + 500ms), sev::held);
+  EXPECT_FALSE(c.tick(t1 + 500ms).has_value());
+  EXPECT_EQ(c.cuts(), 1);
+  EXPECT_EQ(c.rtt_severe_cuts(), 1);
+  // 冷卻過了還是嚴重：再降一刀
+  c.tick(t1 + 2100ms);
+  EXPECT_EQ(c.on_rtt_severe(t1 + 2200ms), sev::cut);
+  r = c.tick(t1 + 2200ms);
+  ASSERT_TRUE(r.has_value());
+  EXPECT_EQ(*r, 28125);  // 37500 × 0.75
+  EXPECT_EQ(c.rtt_severe_cuts(), 2);
+  EXPECT_EQ(c.rtt_severe_skips(), 0);
+}
+
+// 單向延遲可用而且平穩：塞的是上行，不降；單向延遲樣本斷了（回饋到不了）就退回照 RTT 降
+TEST_F(VrAbrFastTest, RttSevereWithFlatOwdIsUplinkOnly) {
+  using sev = fast::fast_controller_t::rtt_severe_e;
+  fast::fast_controller_t c(kConfigured50Mbps);
+  for (int i = 0; i < 50; ++i) {
+    c.on_owd(20.0, t0 + i * 10ms);
+  }
+  const auto t1 = t0 + 500ms;
+  c.tick(t1);
+  EXPECT_EQ(c.on_rtt_severe(t1), sev::uplink_only);
+  EXPECT_NEAR(c.rtt_severe_owd_excess_ms(), 0.0, 0.5);
+  EXPECT_FALSE(c.tick(t1).has_value());
+  EXPECT_EQ(c.cuts(), 0);
+  EXPECT_EQ(c.rtt_severe_skips(), 1);
+  EXPECT_EQ(c.last_congested_kbps(), 0);
+  EXPECT_TRUE(c.link_roomy(t1));
+  // 3 秒沒有單向延遲樣本
+  const auto t2 = t1 + 3000ms;
+  ASSERT_FALSE(c.owd_active(t2));
+  EXPECT_EQ(c.on_rtt_severe(t2), sev::cut);
+  auto r = c.tick(t2);
+  ASSERT_TRUE(r.has_value());
+  EXPECT_EQ(*r, 37500);
+}
+
+// 單向延遲慢慢墊高（每秒 1 ms，趨勢抓不到）到比這一場的最低值高出 50 ms 以上：影像方向也在排隊，RTT 嚴重膨脹時要降
+TEST_F(VrAbrFastTest, RttSevereWithStandingOwdCuts) {
+  using sev = fast::fast_controller_t::rtt_severe_e;
+  fast::fast_controller_t c(kConfigured50Mbps);
+  auto t = t0;
+  for (int i = 0; i < 5000; ++i) {  // 100 秒
+    t = t0 + i * 20ms;
+    c.on_owd(20.0 + i * 0.02, t);
+    if (i % 25 == 0) {
+      c.tick(t);
+    }
+  }
+  ASSERT_EQ(c.cuts(), 0);  // 趨勢與安全網都沒有判過載
+  ASSERT_EQ(c.applied_kbps(), 50000);
+  EXPECT_EQ(c.on_rtt_severe(t), sev::cut);
+  EXPECT_GE(c.rtt_severe_owd_excess_ms(), fast::k_fast_rtt_severe_owd_excess_ms);
+  auto r = c.tick(t);
+  ASSERT_TRUE(r.has_value());
+  EXPECT_EQ(*r, 37500);
+  EXPECT_STREQ(c.last_reason(), "rtt-severe+delay");
+}
+
+// 補包量 ≥ 3%：停止回升；降到 1.5% 以下、再過 2 秒才解除（遲滯）；估不出來（−1）的那一輪不算
+TEST_F(VrAbrFastTest, RepairLoadBlocksRampWithHysteresis) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  c.set_applied_kbps(20000);
+  c.tick(t0);
+  ASSERT_EQ(c.state(), fast::fast_state_e::ramp);
+  EXPECT_EQ(c.take_repair_event(t0), 0);
+  c.on_repair_load(4.0, t0);
+  EXPECT_TRUE(c.repair_tight(t0));
+  EXPECT_STREQ(c.ramp_block_reason(t0), "repair");
+  EXPECT_EQ(c.take_repair_event(t0), 1);
+  EXPECT_EQ(c.take_repair_event(t0), 0);
+  // 3 秒、每 500 ms 一筆 2%（比平常多 1.5 個百分點以上）：還擋著
+  for (int i = 1; i <= 6; ++i) {
+    const auto t = t0 + i * 500ms;
+    c.on_repair_load(2.0, t);
+    EXPECT_FALSE(c.tick(t).has_value());
+  }
+  EXPECT_EQ(c.applied_kbps(), 20000);
+  EXPECT_EQ(c.ramps(), 0);
+  // 降到 0.5%：最後一次超過門檻（t0+3000）之後 2 秒內仍擋
+  for (int i = 7; i <= 9; ++i) {
+    const auto t = t0 + i * 500ms;
+    c.on_repair_load(i == 8 ? -1.0 : 0.5, t);
+    EXPECT_STREQ(c.ramp_block_reason(t), "repair");
+    EXPECT_FALSE(c.tick(t).has_value());
+  }
+  EXPECT_EQ(c.take_repair_event(t0 + 4500ms), 0);
+  // 滿 2 秒：解除、回升
+  const auto t_free = t0 + 5000ms;
+  c.on_repair_load(0.5, t_free);
+  EXPECT_FALSE(c.repair_tight(t_free));
+  EXPECT_STREQ(c.ramp_block_reason(t_free), "none");
+  EXPECT_EQ(c.take_repair_event(t_free), -1);
+  auto r = c.tick(t_free + 250ms);
+  ASSERT_TRUE(r.has_value());
+  EXPECT_GT(*r, 20000);
+  EXPECT_EQ(c.cuts(), 0);
+}
+
+// 線路乾淨（補包量 0～1%）：完全不擋，回升照常
+TEST_F(VrAbrFastTest, SmallRepairLoadNeverBlocksRamp) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  c.set_applied_kbps(20000);
+  c.tick(t0);
+  for (int i = 1; i <= 40; ++i) {
+    const auto t = t0 + i * 500ms;
+    c.on_repair_load(i % 2 ? 0.0 : 1.0, t);
+    EXPECT_FALSE(c.repair_tight(t));
+    c.tick(t);
+  }
+  EXPECT_EQ(c.take_repair_event(t0 + 20000ms), 0);
+  EXPECT_GT(c.ramps(), 0);
+  EXPECT_GT(c.applied_kbps(), 20000);
+  EXPECT_LT(c.repair_floor_pct(), 1.0);
+}
+
+// 補包量一直固定在 4%（跟碼率無關的無線成串掉包）：約 30 秒後當成這條線路平常的量，不再擋；再多出 3 個百分點才又擋
+TEST_F(VrAbrFastTest, RepairUsualLevelIsLearnedSoConstantLoadDoesNotBlockForever) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  c.set_applied_kbps(20000);
+  c.tick(t0);
+  for (int i = 0; i <= 90; ++i) {  // 45 秒
+    const auto t = t0 + i * 500ms;
+    c.on_repair_load(4.0, t);
+    if (i == 40) {
+      EXPECT_TRUE(c.repair_tight(t));  // 20 秒時還擋著
+      EXPECT_STREQ(c.ramp_block_reason(t), "repair");
+    }
+  }
+  const auto t1 = t0 + 45000ms;
+  EXPECT_FALSE(c.repair_tight(t1));
+  EXPECT_STREQ(c.ramp_block_reason(t1), "none");
+  EXPECT_GT(c.repair_floor_pct(), 2.5);
+  EXPECT_LT(c.repair_floor_pct(), 4.0);
+  c.on_repair_load(5.0, t1 + 500ms);  // 只多 2 個百分點
+  EXPECT_FALSE(c.repair_tight(t1 + 500ms));
+  c.on_repair_load(8.0, t1 + 1000ms);  // 多了將近 5 個百分點
+  EXPECT_TRUE(c.repair_tight(t1 + 1000ms));
+  EXPECT_STREQ(c.ramp_block_reason(t1 + 1000ms), "repair");
+}
+
+// quality-trim 收下來的碼率往回補（quality-restore）不受補包量擋：那是回到剛才送得動的碼率
+TEST_F(VrAbrFastTest, RepairLoadDoesNotBlockQualityRestore) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  auto t = t0;
+  for (int i = 0; i <= 300; ++i) {  // 載入畫面：QP 1，30 秒
+    t = t0 + i * 100ms;
+    if (i % 5 == 0) {
+      c.on_quality(100, 1, t);
+    }
+    c.tick(t);
+  }
+  ASSERT_LT(c.applied_kbps(), 15000);
+  const auto t1 = t;
+  for (int i = 1; i <= 100; ++i) {  // 進場景：QP 27，同時補包量 5%
+    t = t1 + i * 100ms;
+    if (i % 5 == 0) {
+      c.on_quality(c.applied_kbps() < 30000 ? 2700 : 1800, 1, t);
+      c.on_repair_load(5.0, t);
+    }
+    c.tick(t);
+  }
+  EXPECT_TRUE(c.repair_tight(t));
+  EXPECT_GE(c.applied_kbps(), 30000);
+  EXPECT_LE(c.applied_kbps(), 50000);
+  EXPECT_EQ(c.cuts(), 0);
+}

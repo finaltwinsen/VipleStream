@@ -1224,6 +1224,8 @@ namespace platf {
   /**
    * @brief 頭盔只問「現在能不能連」（C2S HOTSPOT_STATE QUERY，熱點沒開）：只看有沒有閒著的無線介面，
    *        不建設定檔、不啟動看門狗；結果（READY 或 NO_ADAPTER）放進狀態快照。會開 WLAN handle，不要在控制執行緒呼叫。
+   *        上一輪還在跑的看門狗會一併收掉（熱點沒開，它沒有東西可連，也不可以再改這次的結果）；
+   *        vr_hotspot_connect 沒走到啟動看門狗就失敗時也一樣。
    */
   void vr_hotspot_query();
 

@@ -131,24 +131,49 @@ namespace vr::abr {
   constexpr auto k_fast_quality_trim_interval = std::chrono::seconds(3);       ///< quality-trim 間隔 3 秒
   constexpr int k_fast_qp_saturated_x100 = 2000;  ///< 畫質飽和門檻 QP 20（×100）；11-04 實測 22 對 VR 偏鬆（鏡片放大壓縮瑕疵）
   constexpr int k_fast_qp_trim_threshold_x100 = 1500;  ///< 畫質多到用不完的門檻 QP 15（×100）
-  // §VR-QP-ROOM（2026-11-20）：線路有餘裕時改用的兩個門檻。上面兩個（QP 20 停止回升、QP 15 開始回收）是外地省流量、
-  // 頭盔省電時定的，穩態 QP 落在 10～18；在家配戴拿 Steam 內建串流對照（同樣四塊 1152×1152，約 200 Mbps）「糊很多」，
-  // 那一場我們只送 16～47 Mbps。
-  // 「有餘裕」不看遠近（不看 RTT、不看是不是區網），只看這條線路自己量到的狀況：
-  //   (1) 最近 k_fast_roomy_quiet 內沒有因為網路降過碼；
-  //   (2) 還沒有塞過車，或目前的碼率離塞車點還遠（< k_fast_roomy_ceiling_ratio × 塞車點；塞車點用 eff_congested_kbps()，
-  //       30 秒沒再塞就每秒放寬 0.1%）。
-  // 兩條都成立才用下面較嚴的門檻。所以：
-  //   線路寬（在家、外地的好線路都一樣）：一路加到 QP 10 或碼率上限。
-  //   線路窄：碼率本來就被塞車控制壓在容量附近，QP 降不到 20 以下，這兩組門檻都碰不到——行為和以前完全相同。
-  //   線路中等（容量夠到 QP 15 但到不了 QP 10）：會加到塞車點的八成就停（那裡 QP 已經 ≤ 20，照原本的門檻算飽和），
-  //       不會為了那一點畫質一直去撞塞車點。
-  // 回升仍受碼率上限、解碼吃緊、延遲趨勢三個既有條件管。
-  constexpr int k_fast_qp_saturated_roomy_x100 = 1000;  ///< 有餘裕時 QP 10 才算飽和（停止回升）
-  constexpr int k_fast_qp_trim_roomy_x100 = 600;        ///< 有餘裕時 QP 6 以下才回收
+  // §VR-QP-ROOM（2026-11-20）：畫質門檻。上面兩個（QP 20 停止回升、QP 15 開始回收）是 11 月初定的，穩態 QP 落在 10～18；
+  // 在家配戴拿 Steam 內建串流對照（同樣四塊 1152×1152，約 200 Mbps）「糊很多」，那一場我們只送 16～47 Mbps。
+  // 現在的規則不看遠近（不看 RTT、不看是不是區網），只看這條線路自己量到的紀錄：
+  //   回收門檻固定 QP 6（k_fast_qp_trim_roomy_x100），不隨線路狀況切換。同日審查指出，回收門檻跟著「有沒有餘裕」
+  //     切換時，quality-trim 與 quality-restore 會在界線上互相追打（每十幾秒 ±20%）；塞一次車之後在家的寬線路也會被
+  //     收回原本的低碼率。所以界線上只留「停止回升」一個動作，沒有反向的力。
+  //   停止回升的門檻平常是 QP 10；兩種情況用原本的 QP 20：
+  //     (1) 最近 k_fast_roomy_quiet 內因為網路降過碼（剛塞過車，先不要為了畫質往上推）；
+  //     (2) 碼率已經接近塞車點：≥ min(k_fast_roomy_ceiling_ratio × eff_congested_kbps(), k_fast_roomy_ceiling_raw_ratio ×
+  //         原始塞車點)。塞車點會隨時間放寬（每秒 0.1%、最多 +50%），所以另外夾在原始塞車點的九成，界線永遠到不了
+  //         塞車點；離開界線要再低 k_fast_roomy_ceiling_hyst（遲滯）。這條界線在 k_fast_roomy_ceiling_expire 沒再塞車後
+  //         失效——單次暫時性的塞車不會變成整場的上限，真正容量有限的線路往上探會再塞、界線就繼續有效。
+  //   線路窄的場次碼率本來就被塞車控制壓在容量附近、QP 降不到 20 以下，這些門檻都碰不到，行為和以前相同。
+  // 回升仍受碼率上限、解碼吃緊、延遲趨勢三個既有條件管。計量線路（手機熱點）沒有處理：線路自己量不出「要不要省」，
+  // 要另外的訊號（見 temp/specs/2026-11-20/rate_unified.md 第 1 期）。
+  constexpr int k_fast_qp_saturated_roomy_x100 = 1000;  ///< 平常 QP 10 才算飽和（停止回升）
+  constexpr int k_fast_qp_trim_roomy_x100 = 600;        ///< QP 6 以下才回收
   constexpr double k_fast_roomy_ceiling_ratio = 0.8;
+  constexpr double k_fast_roomy_ceiling_raw_ratio = 0.9;
+  constexpr double k_fast_roomy_ceiling_hyst = 0.94;
   constexpr auto k_fast_roomy_quiet = std::chrono::seconds(30);
+  constexpr auto k_fast_roomy_ceiling_expire = std::chrono::seconds(150);
   constexpr auto k_fast_decode_tight_duration = std::chrono::seconds(3);       ///< 解碼吃緊有效時間 3 秒
+
+  // §RATE-UNIFIED 第 0 期（2026-11-20，設計在 temp/specs/2026-11-20/rate_unified.md）：一個 VR session 只有一個碼率決策者。
+  // (1) 補包量（on_repair_load）：補包救回來的封包佔影像封包的比例。比「這條線路平常的量」多出 3 個百分點以上＝線路
+  //     正在靠補包撐，停止回升（ramp_block_reason 回 "repair"）；降到多不到 1.5 個百分點、再過 2 秒才解除（遲滯）。
+  //     「平常的量」是補包比例的慢速平均（時間常數 30 秒、上限 10%）：有些無線環境的成串掉包跟碼率無關（S0：每 500 ms
+  //     斷 12 ms、全數補回），固定用 3% 會讓那種線路整場不能回升；量持平約 30 秒後就當成這條線路的底，只擋「再往上多出來」
+  //     的部分。quality-trim 收下來的碼率（trim_origin）往回補不受這一條擋——那是回到剛才送得動的碼率，不是加碼。
+  // (2) RTT 嚴重膨脹（on_rtt_severe）：舊 AIMD 的「RTT ≥ 4 倍基線且多 200 ms 連 2 輪」原本直接把 VR 降 ×0.75，不經控制器
+  //     （沒有冷卻、不記塞車點，控制器接著每秒 +8% 爬回去、5 秒後再被砍）。現在由呼叫端把這個訊號交進來：
+  //     單向延遲可用、而且最近幾張的單向延遲沒有比這一場的最低值高出 50 ms＝塞的是上行（頭盔 → host），影像方向沒事，不降；
+  //     其餘（沒有單向延遲的 client，或影像方向的延遲也一直很高）照樣降 ×0.75，但走 trigger_cut：有冷卻、記塞車點。
+  //     延遲趨勢只抓「正在漲」，佇列塞滿後延遲停在高點、10 秒後趨勢的基準跟上去就看不到了；所以另外留一個這一場的
+  //     單向延遲最低值（每秒往上放 0.2 ms 吸收兩端時鐘的漂移）當參考。
+  constexpr double k_fast_repair_tight_pct = 3.0;        ///< 補包比例比平常多這麼多（百分點）就停止回升
+  constexpr double k_fast_repair_tight_exit_pct = 1.5;   ///< 多不到這麼多才算緩和（遲滯）
+  constexpr auto k_fast_repair_tight_hold = std::chrono::milliseconds(2000);  ///< 最後一次超過門檻之後維持多久
+  constexpr double k_fast_repair_floor_tau_s = 30.0;     ///< 「平常的量」的時間常數
+  constexpr double k_fast_repair_floor_max_pct = 10.0;   ///< 「平常的量」的上限：再高就不當成正常
+  constexpr double k_fast_rtt_severe_owd_excess_ms = 50.0;  ///< 單向延遲比這一場最低值高出這麼多＝影像方向也在排隊
+  constexpr double k_fast_owd_floor_leak_ms_per_s = 0.2;    ///< 單向延遲最低值每秒往上放寬（時鐘漂移）
 
   // §ABR-LOSSRATE／慢爬常數（11-04）
   constexpr auto k_fast_congest_episode = std::chrono::seconds(5);         ///< 同一次塞車的視窗：5 秒內後續刀不覆寫塞車點
@@ -359,6 +384,7 @@ namespace vr::abr {
       trend_ = delay_trend_t {};
       owd_trend_ = delay_trend_t {};
       owd_have_offset_ = false;
+      owd_floor_valid_ = false;
       owd_recent_pos_ = 0;
       last_owd_time_ = {};
       outage_hold_until_ = {};
@@ -407,19 +433,32 @@ namespace vr::abr {
       return is_congested(now);
     }
 
-    /// §VR-QP-ROOM：線路有餘裕（最近沒有因為網路降過碼，而且離塞車點還遠）。不看 RTT、不分遠近
-    bool link_roomy(steady::time_point now) const {
-      if (last_congested_time_ != steady::time_point {} && (now < last_congested_time_ || now - last_congested_time_ < k_fast_roomy_quiet)) {
+    /// §VR-QP-ROOM：最近因為網路降過碼（k_fast_roomy_quiet 內）
+    bool recently_congested(steady::time_point now) const {
+      return last_congested_time_ != steady::time_point {} && (now < last_congested_time_ || now - last_congested_time_ < k_fast_roomy_quiet);
+    }
+    /// §VR-QP-ROOM：碼率已經接近塞車點（有遲滯；k_fast_roomy_ceiling_expire 沒再塞車就失效）
+    bool near_ceiling(steady::time_point now) const {
+      const int raw = last_congested_kbps_;
+      if (raw <= 0 || last_congested_time_ == steady::time_point {} ||
+          (now >= last_congested_time_ && now - last_congested_time_ >= k_fast_roomy_ceiling_expire)) {
+        near_ceiling_latch_ = false;
         return false;
       }
-      const int ceiling = eff_congested_kbps();
-      return ceiling <= 0 || applied_kbps_ < static_cast<int>(k_fast_roomy_ceiling_ratio * ceiling);
+      const double limit = std::min(k_fast_roomy_ceiling_ratio * eff_congested_kbps(), k_fast_roomy_ceiling_raw_ratio * raw);
+      near_ceiling_latch_ = applied_kbps_ >= limit * (near_ceiling_latch_ ? k_fast_roomy_ceiling_hyst : 1.0);
+      return near_ceiling_latch_;
+    }
+    /// §VR-QP-ROOM：線路有餘裕（沒有剛塞過車、也沒有貼著塞車點）。不看 RTT、不分遠近
+    bool link_roomy(steady::time_point now) const {
+      return !recently_congested(now) && !near_ceiling(now);
     }
     int qp_saturated_x100(steady::time_point now) const {
       return link_roomy(now) ? k_fast_qp_saturated_roomy_x100 : k_fast_qp_saturated_x100;
     }
-    int qp_trim_x100(steady::time_point now) const {
-      return link_roomy(now) ? k_fast_qp_trim_roomy_x100 : k_fast_qp_trim_threshold_x100;
+    /// 回收門檻不隨線路狀況切換（見常數那一段的說明）
+    int qp_trim_x100(steady::time_point) const {
+      return k_fast_qp_trim_roomy_x100;
     }
 
     bool quality_saturated(steady::time_point now) const {
@@ -442,11 +481,79 @@ namespace vr::abr {
       if (decode_tight_until_ != steady::time_point{} && now <= decode_tight_until_) {
         return "decode";
       }
+      // §RATE-UNIFIED：補包量大。quality-trim 收下來的碼率往回補不擋（回到剛才送得動的碼率）
+      if (repair_tight(now) && trim_origin_kbps_ <= applied_kbps_) {
+        return "repair";
+      }
       if (quality_saturated(now)) {
         return "quality";
       }
       return "none";
     }
+
+    /// §RATE-UNIFIED：這段時間補包救回來的封包佔影像封包的比例（%）。pct < 0＝這一輪估不出來，忽略。
+    /// 要在 tick() 之前呼叫（這一輪的回升才看得到）
+    void on_repair_load(double pct, steady::time_point now) {
+      if (!(pct >= 0.0)) return;
+      last_repair_pct_ = pct;
+      // 先用「到上一筆為止」的平常量判斷，再把這一筆算進去
+      const bool tight = now < repair_tight_until_;
+      if (pct >= repair_floor_pct_ + (tight ? k_fast_repair_tight_exit_pct : k_fast_repair_tight_pct)) {
+        repair_tight_until_ = now + k_fast_repair_tight_hold;
+      }
+      if (last_repair_time_ != steady::time_point {} && now > last_repair_time_) {
+        const double dt_s = std::min(5.0, std::chrono::duration<double>(now - last_repair_time_).count());
+        repair_floor_pct_ += (1.0 - std::exp(-dt_s / k_fast_repair_floor_tau_s)) * (pct - repair_floor_pct_);
+        repair_floor_pct_ = std::clamp(repair_floor_pct_, 0.0, k_fast_repair_floor_max_pct);
+      }
+      last_repair_time_ = now;
+    }
+    bool repair_tight(steady::time_point now) const { return now < repair_tight_until_; }
+    double repair_pct() const { return last_repair_pct_; }
+    double repair_floor_pct() const { return repair_floor_pct_; }
+    /// 補包量的狀態有變、還沒印過 log 時回 +1（開始擋回升）或 −1（解除），其餘回 0
+    int take_repair_event(steady::time_point now) {
+      const bool tight = repair_tight(now);
+      if (tight == repair_tight_reported_) return 0;
+      repair_tight_reported_ = tight;
+      return tight ? 1 : -1;
+    }
+
+    enum class rtt_severe_e {
+      cut,          ///< 排了一刀（下一個 tick 套用）
+      uplink_only,  ///< 單向延遲沒有跟著高：塞的是上行，不降
+      held,         ///< 剛降過還在冷卻、或正在切網路／斷訊保護：這次不處理，呼叫端下一輪再問
+    };
+    /// §RATE-UNIFIED：呼叫端（舊 AIMD 的 RTT 絕對門檻）判定往返時間嚴重膨脹且持續。見常數那一段的說明
+    rtt_severe_e on_rtt_severe(steady::time_point now) {
+      last_rtt_severe_owd_excess_ms_ = -1.0;
+      if (owd_active(now) && owd_floor_valid_ && owd_recent_pos_ >= k_fast_owd_recent_n) {
+        double v[k_fast_owd_recent_n];
+        std::copy(std::begin(owd_recent_), std::end(owd_recent_), v);
+        std::nth_element(v, v + k_fast_owd_recent_n / 2, v + k_fast_owd_recent_n);
+        last_rtt_severe_owd_excess_ms_ = std::max(0.0, v[k_fast_owd_recent_n / 2] - owd_floor_ms_);
+        if (last_rtt_severe_owd_excess_ms_ < k_fast_rtt_severe_owd_excess_ms) {
+          ++rtt_severe_skips_;
+          return rtt_severe_e::uplink_only;
+        }
+      }
+      // 控制器剛降過（冷卻中，或 1 秒內有別的刀）就不疊上去：等那一刀生效再看
+      if (now < hold_until_ || pending_target_.has_value() ||
+          (last_cut_time_ != steady::time_point {} && now >= last_cut_time_ && now - last_cut_time_ <= k_fast_cut_window)) {
+        return rtt_severe_e::held;
+      }
+      const int before = cuts_count_;
+      trigger_cut(severity_e::fast, "rtt-severe+delay", now);  // 嚴重級、非趨勢類＝×0.75，和舊規則的降幅相同
+      if (cuts_count_ == before) {
+        return rtt_severe_e::held;
+      }
+      ++rtt_severe_cuts_;
+      return rtt_severe_e::cut;
+    }
+    int rtt_severe_cuts() const { return rtt_severe_cuts_; }
+    int rtt_severe_skips() const { return rtt_severe_skips_; }
+    /// 最近一次 on_rtt_severe 看到的「單向延遲比這一場最低值高出多少」（ms）；−1＝沒有單向延遲可看
+    double rtt_severe_owd_excess_ms() const { return last_rtt_severe_owd_excess_ms_; }
 
     int floor_kbps() const {
       const int f = k_floor_tech_kbps;
@@ -502,6 +609,16 @@ namespace vr::abr {
       // 扣除首筆固定時鐘偏移並平移 +1000 ms，確保餵給 delay_trend_t 的相對值恆為正數
       // §ABR-ADAPT（審查）：餘裕 10 s——第一筆若是慢的（大 IDR、開場擁塞），之後較快的幀不會被夾成同一個值
       const double rel_owd_ms = std::max(1.0, (owd_ms - owd_offset_ms_) + 10000.0);
+      // §RATE-UNIFIED：這一場的單向延遲最低值（on_rtt_severe 用）。只會被更低的樣本往下帶，另外每秒往上放一點
+      if (!owd_floor_valid_) {
+        owd_floor_valid_ = true;
+        owd_floor_ms_ = rel_owd_ms;
+      } else {
+        const double dt_s = (last_owd_time_ != steady::time_point {} && now > last_owd_time_) ?
+                              std::chrono::duration<double>(now - last_owd_time_).count() :
+                              0.0;
+        owd_floor_ms_ = std::min(rel_owd_ms, owd_floor_ms_ + k_fast_owd_floor_leak_ms_per_s * dt_s);
+      }
       last_owd_time_ = now;
       owd_recent_[owd_recent_pos_++ % k_fast_owd_recent_n] = rel_owd_ms;
       const auto prev_state = owd_trend_.state();
@@ -1377,6 +1494,7 @@ namespace vr::abr {
     int trims_count_ = 0;
     int random_loss_events_ = 0;
     int last_congested_kbps_ = 0;
+    mutable bool near_ceiling_latch_ = false;  ///< §VR-QP-ROOM：near_ceiling() 的遲滯（只在控制器自己的執行緒上讀寫）
     steady::time_point last_congested_time_ {};
     steady::time_point last_tick_ {};
 
@@ -1482,6 +1600,18 @@ namespace vr::abr {
 
     steady::time_point decode_tight_until_{};
     int consecutive_decode_overload_ = 0;
+
+    // §RATE-UNIFIED 第 0 期
+    steady::time_point repair_tight_until_ {};  ///< 這之前補包量算大（停止回升）
+    steady::time_point last_repair_time_ {};
+    double repair_floor_pct_ = 0.0;             ///< 補包比例的慢速平均（這條線路平常的量）
+    double last_repair_pct_ = 0.0;
+    bool repair_tight_reported_ = false;
+    bool owd_floor_valid_ = false;
+    double owd_floor_ms_ = 0.0;                 ///< 這一場單向延遲的最低值（和 owd_recent_ 同一個平移後的刻度）
+    double last_rtt_severe_owd_excess_ms_ = -1.0;
+    int rtt_severe_cuts_ = 0;
+    int rtt_severe_skips_ = 0;
   };
 
 }  // namespace vr::abr

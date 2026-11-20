@@ -490,6 +490,18 @@ public:
     bool effectiveAutoResolution() const { return cliAutoResolution >= 0 ? cliAutoResolution == 1 : autoResolution; }
     bool effectiveAutoFps() const { return cliAutoFps >= 0 ? cliAutoFps == 1 : autoFps; }
     bool bitrateFromCli = false;     // M4a 收尾：這次 CLI 明確帶了 --bitrate（不存設定；VR 預設位元率不覆蓋它）
+    bool bitrateDefaultFromCli = false;  // §RES-BITRATE：這次 CLI 改了解析度或 fps 而沒帶 --bitrate（碼率跟著預設值；不存設定）
+    // §RES-BITRATE：CLI 帶的 --resolution／--fps／--bitrate 只用在這一場，save() 仍寫回套用 CLI 之前的值。
+    // 各欄位分開記：CLI 沒動到的欄位照記憶體裡的值存。
+    struct CliPersist {
+        bool resolution = false;
+        bool fps = false;
+        bool bitrate = false;
+        int width = 0;
+        int height = 0;
+        int fpsValue = 0;
+        int bitrateKbps = 0;
+    } cliPersist;
     int  vrInjectDropEvery = 0;      // dev：每 N 個解出的幀丟一幀（模擬 decoder 吞幀），0＝關
     int  vrInjectDecStuckAt = 0;     // dev（§DEC-STUCK-RESET）：第 N 個送進解碼器的封包卡住不回來（模擬硬體解碼器卡死），0＝關；只觸發一次
     int  vrInjectLossSec = 0;        // dev：每 N 秒注入一次 LOSS，0＝關

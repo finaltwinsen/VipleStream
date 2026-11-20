@@ -775,6 +775,20 @@ namespace vr::multilink {
     }
   };
 
+  /**
+   * @brief §FLAT-REPAIR：平面（2D）場次補包額度用的影像封包率。只給平面場次用，VR 場次的算法不經過這裡。
+   * @details VR 的額度由整數 Mbps 反推封包率、量到 0 時用 15000 pps 保底——VR 永遠是幾十 Mbps，保底值碰不到。
+   *          2D 很常低於 1 Mbps（靜態桌面、碼率設在 1000 kbps 以下、自動碼率降到下限），整數 Mbps＝0，
+   *          額度就變成 15000 pps × 15%＝每秒 2250 個，等於沒有上限。所以平面場次改用實際量到的封包率；
+   *          下限 kFlatRepairMinPps（約 1 Mbps 的封包率）：畫面幾乎不動時實際封包率趨近 0，額度補不回來會讓
+   *          每一次掉包都退回 IDR；下限換算每秒約 15 個補包，流量可以忽略。場次剛開始還沒量到（0）也是用下限，
+   *          開場靠桶子原有的 kBurst。
+   */
+  constexpr double kFlatRepairMinPps = 100.0;
+  inline double flat_repair_video_pps(uint32_t measured_pps) {
+    return std::max((double) measured_pps, kFlatRepairMinPps);
+  }
+
   // ── LINK_HELLO／LINK_READY ─────────────────────────────────────────
 
   struct hello_link_t {

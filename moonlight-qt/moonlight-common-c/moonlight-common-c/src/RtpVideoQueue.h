@@ -313,6 +313,8 @@ void RtpvPollGrace(PRTP_VIDEO_QUEUE queue);  // §K.17-GRACE-TIMEOUT
 void RtpvRepairGone(PRTP_VIDEO_QUEUE queue, uint32_t frame, uint8_t block);
 // §VR-REPAIR-RTT：佇列正在等的 block（或它後面預先報過的幀）是照 RTT 規則回報的——這段期間規則不可以切回去
 bool RtpvRepairLatched(PRTP_VIDEO_QUEUE queue);
+// §FLAT-REPAIR：佇列正在等的 block 已經回報過、補包還可能在路上（server 沒說補不了）。只讀，不改狀態。
+bool RtpvRepairNackPending(PRTP_VIDEO_QUEUE queue);
 // §VR-REPAIR-RTT（量測）：影像有應用層加密時，比佇列目前的幀號舊的封包在解密前就被丟掉、進不了佇列。VideoStream
 // 丟掉之前把幀號交進來，讓「放棄之後多久才到齊」的量測以幀為單位數（分不出 block、也去不了重，數字只能當參考）。
 void RtpvMeasLateFrame(PRTP_VIDEO_QUEUE queue, uint32_t frame);

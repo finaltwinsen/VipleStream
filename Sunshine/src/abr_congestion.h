@@ -11,8 +11,10 @@
  *                   （ENet control 執行緒與 picoquic IO 執行緒都會進來）。
  *   idr_gap_hint ── 行程內唯一的 atomic。寫：握 abrMutex 的 ABR 那一側（run_abr_aimd、abr_on_idr_request）；
  *                   讀：編碼執行緒（video.cpp 的 IDR 閘門）。值與寫入時刻包在同一個 64 位元裡，讀寫各一次、不會撕裂。
- *                   同時只有一路編碼在跑（同 abr_signals.h 的前提）；提示 2 秒沒有更新就失效，
- *                   所以上一個 session 留下的值、ABR 停擺、沒有 RTT 樣本時，閘門都自動回到原本的規則。
+ *                   只有一份，所以只在「行程內只有一場 session」時有效：同時超過一場時寫入端一律寫 0
+ *                   （idr_hint_for_publish；stream.cpp 的 abr_publish_idr_hint 用 running_sessions 判斷），每一場的閘門
+ *                   都回到原本的規則，不會把一場的間隔套到另一場。提示 2 秒沒有更新就失效，
+ *                   所以上一個 session 留下的值、ABR 停擺、沒有 RTT 樣本時，閘門也自動回到原本的規則。
  */
 #pragma once
 
@@ -51,6 +53,13 @@ namespace abr_cong {
   /// 要快速補送的場合，所以 L1 不改 IDR 的間隔，也不觸發緊急降碼。
   constexpr int k_idr_gap_base_ms = 1500;
   constexpr int k_idr_gap_max_ms = 6000;
+  /// IDR 的長間隔（提示）與「IDR 請求觸發的緊急降碼」只在 RTT 本身夠長時才用：RTT 到 150 ms 開、回到 100 ms 以下關
+  /// （遲滯）。RTT 比這個短時，§IDR-FAST 的 250 ms 間隔本來就比一個來回加排隊長，上一張 IDR 到不了的話 250 ms 後
+  /// 的請求就是新的一次丟失，不是同一次凍結的重複請求——照 §IDR-FAST 快速補送才對。看的是量到的 RTT，不分路徑種類。
+  constexpr uint32_t k_idr_slow_enter_rtt_ms = 150;
+  constexpr uint32_t k_idr_slow_exit_rtt_ms = 100;
+  /// RTT 樣本超過這麼久沒有更新就當成沒有樣本（ENet 的 ping 是 reliable 封包，丟包時會被重傳延後，所以不能太短）
+  constexpr std::chrono::milliseconds k_rtt_fresh {3000};
   /// 提示寫入後超過這麼久沒有更新就當成沒有提示
   constexpr int64_t k_idr_hint_ttl_us = 2'000'000;
   /// IDR 請求觸發緊急降碼時，等級必須是這麼久以內算出來的
@@ -103,7 +112,8 @@ namespace abr_cong {
     return std::max((double) k_deep_enter_excess_ms, k_deep_jitter_mult * std::max(0.0, jitter_ms));
   }
 
-  /// 這個等級要給 IDR 閘門的最短間隔（ms）；0＝不提示（照原本的規則）
+  /// 這個等級要給 IDR 閘門的最短間隔（ms）；0＝不提示（照原本的規則）。
+  /// congestion_t::idr_gap_hint() 另外要求 RTT 夠長（k_idr_slow_*）才會用到這個值
   inline int idr_gap_hint_ms(level_e level, uint32_t rtt_ms) {
     switch (level) {
       case level_e::clean:
@@ -135,6 +145,50 @@ namespace abr_cong {
       return capped > cooldown_ms ? capped : cooldown_ms;
     }
     return calm ? fast_ms : cooldown_ms;
+  }
+
+  /**
+   * @brief 實際要發布的提示：行程內同時超過一場 session 時一律 0（提示只有一份，不能把一場的間隔套到另一場）。
+   * 寫 0 會立刻清掉另一場留下的值，所以第二場加入後最慢一輪 ABR（約 500 ms）內兩場都回到原本的規則。
+   */
+  constexpr int idr_hint_for_publish(int hint_ms, unsigned running_sessions) {
+    return running_sessions > 1 ? 0 : hint_ms;
+  }
+
+  /**
+   * @brief host 自己發了一張不經閘門的 IDR（RFI 做不到退回 IDR）時，延後中的 client 請求要不要取消。
+   * 有壅塞提示時取消：那一張就是完整的恢復點，再補一張只是往塞住的佇列多排一張大幀；它丟了的話 client 會再要。
+   * 沒有提示（平常的 250 ms 快速路徑）時不取消，行為與以前相同——寧可多一張也不要回到 1 秒凍結。
+   */
+  constexpr bool host_idr_cancels_deferred(int hint_ms) {
+    return hint_ms > 0;
+  }
+
+  /// RTT 樣本還算不算新（沒有樣本、時刻不合理、超過 k_rtt_fresh 沒更新都回 false）
+  inline bool rtt_sample_fresh(bool sampled, steady::time_point sampled_at, steady::time_point now) {
+    return sampled && now >= sampled_at && now - sampled_at <= k_rtt_fresh;
+  }
+
+  /// 丟包分支與壅塞建議同一輪都要降碼時怎麼合併（stream.cpp 的 run_abr_aimd 用）
+  struct loss_merge_t {
+    int target = 0;  ///< 合併後的目標（還沒夾下限）
+    bool cong_wins = false;  ///< 壅塞建議降得比較多
+    bool commit = false;  ///< 要不要呼叫 commit_cut 記帳
+  };
+
+  /**
+   * @param loss_target 丟包分支算出來的目標；cong_target＝壅塞建議的目標；applied＝已套用的碼率；floor＝下限。
+   * 目標取兩者較小的。記帳：壅塞建議降得多時照舊一定記（已在下限由 commit_cut 自己擋塞車點）；丟包降得一樣多或
+   * 更多時，只要這一輪真的有降（夾過下限後低於已套用值）也要記——否則冷卻與塞車點都沒有起算，下一輪又砍一次、
+   * 回升時直接衝回剛才塞住的碼率。
+   */
+  constexpr loss_merge_t merge_loss_cut(int loss_target, int cong_target, int applied, int floor) {
+    loss_merge_t m;
+    m.cong_wins = cong_target < loss_target;
+    m.target = m.cong_wins ? cong_target : loss_target;
+    const int after = m.target > floor ? m.target : floor;
+    m.commit = m.cong_wins || after < applied;
+    return m;
   }
 
   // ── 給編碼執行緒的提示（唯一的跨執行緒狀態）──────────────────────────────
@@ -213,8 +267,16 @@ namespace abr_cong {
         point_kbps_ = 0;
       }
 
+      // IDR 長間隔與 IDR 請求降碼用的「RTT 夠長」：150 ms 開、100 ms 以下關；沒有樣本就關
+      if (!in.sampled || in.rtt_ms < k_idr_slow_exit_rtt_ms) {
+        rtt_slow_ = false;
+      } else if (in.rtt_ms >= k_idr_slow_enter_rtt_ms) {
+        rtt_slow_ = true;
+      }
+
       if (!in.sampled) {
-        // 沒有 RTT 樣本（QUIC-only、peer 還沒連上）：等級歸零，行為與沒有這個類別時相同
+        // 沒有 RTT 樣本（QUIC-only、peer 還沒連上、樣本太舊）：等級歸零，行為與沒有這個類別時相同
+        emergency_rtt_ms_ = 0;  // 「排空中」的比較基準只在同一次壅塞事件內有效
         deep_latched_ = false;
         deep_rounds_ = 0;
         exit_rounds_ = 0;
@@ -251,6 +313,9 @@ namespace abr_cong {
         if (exit_rounds_ >= 2 && now - exit_since_ >= k_deep_sustain) {
           deep_latched_ = false;
           deep_left = true;
+          // 這一次壅塞事件結束：「排空中」的比較基準作廢。不清的話，之後 RTT 較低的深度壅塞（例如上次 3000 ms、
+          // 這次 900 ms）永遠被當成「還在排空」，緊急降碼整場不再觸發。冷卻（have_emergency_／last_emergency_）不動
+          emergency_rtt_ms_ = 0;
           exit_rounds_ = 0;
         }
       } else {
@@ -290,7 +355,8 @@ namespace abr_cong {
       }
 
       // 這一輪建議的動作
-      // 上一刀之後 RTT 已經降了一成以上＝管線正在排空（ENet 的平滑 RTT 降得慢），不再追加一刀；否則會一路砍到下限
+      // 上一刀之後 RTT 已經降了一成以上＝管線正在排空（ENet 的平滑 RTT 降得慢），不再追加一刀；否則會一路砍到下限。
+      // 基準（emergency_rtt_ms_）離開 L3 或沒有樣本時歸零，歸零後這個條件恆不成立
       const bool draining = have_emergency_ && (uint64_t) in.rtt_ms * 10 < (uint64_t) emergency_rtt_ms_ * 9;
       if (deep_sustained && !draining && cooled(have_emergency_, last_emergency_, now, k_emergency_cooldown)) {
         out.action = action_e::cut_emergency;
@@ -309,13 +375,14 @@ namespace abr_cong {
     /**
      * @brief 收到 client 的 IDR 請求時問：要不要當場做一次緊急降碼。
      * 要同時成立：等級是最近 2 秒內算出來的、已經在 L2 以上（延遲降碼的條件成立＋畫面已經壞掉，兩個獨立訊號）、
-     * 距上一次緊急降碼滿 3 秒。乾淨網路上單獨的 IDR 請求（L0）一律回 false。
+     * RTT 夠長（k_idr_slow_*；RTT 只有幾十毫秒時趨勢短暫過載加上丟一張不算深度壅塞，砍半並鎖進 L3 會把
+     * §IDR-FAST 的快速補送關掉）、距上一次緊急降碼滿 3 秒。乾淨網路上單獨的 IDR 請求（L0）一律回 false。
      */
     bool idr_request_wants_cut(steady::time_point now) const {
       if (!have_update_ || now - last_update_ > k_level_fresh) {
         return false;
       }
-      if (level_ < level_e::cut) {
+      if (level_ < level_e::cut || !rtt_slow_) {
         return false;
       }
       return cooled(have_emergency_, last_emergency_, now, k_emergency_cooldown);
@@ -374,9 +441,14 @@ namespace abr_cong {
       return point_have_ ? point_kbps_ : 0;
     }
 
-    /// 目前等級要給 IDR 閘門的間隔（ms）；0＝不提示
+    /// 目前等級要給 IDR 閘門的間隔（ms）；0＝不提示。RTT 不夠長（k_idr_slow_*）時不提示，閘門照 §IDR-FAST 走
     int idr_gap_hint() const {
-      return idr_gap_hint_ms(level_, last_rtt_ms_);
+      return rtt_slow_ ? idr_gap_hint_ms(level_, last_rtt_ms_) : 0;
+    }
+
+    /// RTT 是否夠長（150 ms 開、100 ms 以下關）；給 log 與測試看
+    bool rtt_slow() const {
+      return rtt_slow_;
     }
 
   private:
@@ -388,6 +460,7 @@ namespace abr_cong {
     bool have_update_ = false;
     steady::time_point last_update_ {};
     uint32_t last_rtt_ms_ = 0;
+    bool rtt_slow_ = false;  ///< RTT ≥ 150 ms 開、< 100 ms 關：IDR 長間隔與 IDR 請求降碼才生效
 
     bool deep_latched_ = false;
     int deep_rounds_ = 0;
@@ -402,7 +475,7 @@ namespace abr_cong {
     steady::time_point last_cut_ {};
     bool have_emergency_ = false;
     steady::time_point last_emergency_ {};
-    uint32_t emergency_rtt_ms_ = 0;  ///< 上一次緊急降碼當時的 RTT
+    uint32_t emergency_rtt_ms_ = 0;  ///< 這一次壅塞事件裡上一次緊急降碼當時的 RTT；0＝沒有基準
 
     bool point_have_ = false;
     int point_kbps_ = 0;

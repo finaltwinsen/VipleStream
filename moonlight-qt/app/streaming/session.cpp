@@ -230,6 +230,11 @@ static void stallCaptureMainThreadStack(StallStack* out)
     // ── 主執行緒已恢復 ──
 
     if (haveCtx && s_StallStackCopyLen > 0) {
+        // §REVIEW-1120：SymInitialize 只在第一次擷取時列模組，之後才載入的 DLL（驅動的 user-mode 元件、輸入法、
+        // 外掛）不在清單裡，StackWalk64 查不到 unwind 資料就在那一格斷掉。每次展開前補一次。
+        // 放在恢復主執行緒之後：暫停期間不可呼叫 dbghelp（它會配置記憶體、可能等 loader lock）；暫存器與堆疊也已經
+        // 抄好，這裡就算被擋住也只是延後展開，不影響擷取時刻。失敗就照舊用舊清單，回傳值不看。
+        SymRefreshModuleList(GetCurrentProcess());
         STACKFRAME64 sf;
         ZeroMemory(&sf, sizeof(sf));
 #if defined(_M_X64)
@@ -1856,6 +1861,12 @@ bool Session::initialize(QQuickWindow* qtWindow)
     LiInitializeStreamConfiguration(&m_StreamConfig);
     m_StreamConfig.width = m_Preferences->width;
     m_StreamConfig.height = m_Preferences->height;
+    // §RES-BITRATE：畫面 fps 與碼率的來源在任何改寫之前定下來；之後只改 m_StreamConfig 與這幾個成員，不寫 m_Preferences
+    m_OriginalFps = m_Preferences->fps;
+    m_BitrateYuv444 = m_Preferences->enableYUV444;
+    m_BitrateCapKbps = 0;
+    m_BitrateVrKbps = 0;
+    decideBitrateFollowsDefault();
 
     // §VR：PCVR 串流的是 SBS 打包畫面（2W×H），不受 host 顯示器解析度限制
     decideVrRequest();
@@ -1998,8 +2009,8 @@ bool Session::initialize(QQuickWindow* qtWindow)
         m_Preferences->save();
     }
 
-    m_StreamConfig.fps = m_Preferences->fps;
-    m_OriginalFps = m_Preferences->fps;
+    // §RES-BITRATE：m_OriginalFps＝這一場的畫面 fps（自動模式由 resolveAutoDisplayMode 解析；否則＝偏好值）
+    m_StreamConfig.fps = m_OriginalFps;
 
     // §B-DUMP — VIPLE_VKFRUC_DUMP_DIR forces enableFrameInterpolation so the
     // dump path actually has interp frames to capture.  Without this, server
@@ -2041,7 +2052,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
         // §FRUC-444-FULLFPS（2026-11-12）：4:4:4 的畫面由 libplacebo 顯示，那條路沒有補幀（§FRUC-444-NOTICE 會提示）。
         // 原本照樣把 host 的幀率砍半，結果是「只有一半的幀率、也沒有補幀」（設定 60 實際 30 fps）。
         // 補不了就請 host 送完整幀率；兩個設定本身不動。
-        m_StreamConfig.fps = m_Preferences->fps;
+        m_StreamConfig.fps = m_OriginalFps;
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-FRUC] YUV 4:4:4 is on and this host offers it: frame interpolation cannot run on a 4:4:4 stream, "
                     "so the host is asked for the full %d fps instead of half",
@@ -2052,7 +2063,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
         const bool isVulkan = m_Preferences && m_Preferences->rendererSelection == StreamingPreferences::RS_VULKAN;
         const bool passive = isVulkan && m_Preferences->vkfrucPassiveMode;
         if (passive) {
-            m_StreamConfig.fps = m_Preferences->fps;
+            m_StreamConfig.fps = m_OriginalFps;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-FRUC] mode=PASSIVE — server fps = %d (UI 全推), "
                         "client 依 recv%% 動態升 ratio (≥70%% 1x, 40-70%% 2x, <40%% 3x)",
@@ -2075,15 +2086,15 @@ bool Session::initialize(QQuickWindow* qtWindow)
                 reason = "user override (env/pref)";
             }
             // Floor: server fps < 30 不允許, 改回 dual.
-            if (m_Preferences->fps / frucRatio < 30 && frucRatio == 3) {
+            if (m_OriginalFps / frucRatio < 30 && frucRatio == 3) {
                 frucRatio = 2;
                 reason = "ratio floor (server fps < 30)";
             }
-            m_StreamConfig.fps = m_Preferences->fps / frucRatio;
+            m_StreamConfig.fps = m_OriginalFps / frucRatio;
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-FRUC] mode=ACTIVE — server fps = %d "
                         "(UI %d fps target ÷ %dx FRUC, display=%dHz, reason: %s)",
-                        m_StreamConfig.fps, m_Preferences->fps, frucRatio,
+                        m_StreamConfig.fps, m_OriginalFps, frucRatio,
                         displayHz, reason);
         }
     } else {
@@ -2095,7 +2106,7 @@ bool Session::initialize(QQuickWindow* qtWindow)
     if (m_StreamConfig.fps <= 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Invalid stream FPS: %d (preference FPS: %d)",
-                     m_StreamConfig.fps, m_Preferences ? m_Preferences->fps : 0);
+                     m_StreamConfig.fps, m_OriginalFps);
         emit displayLaunchError(tr("Invalid stream frame rate (%1 FPS).").arg(m_StreamConfig.fps));
         // §REVIEW-1119：同上，失敗就還 XR，不要等 QML 回收 Session。
         destroyXrContext();
@@ -2136,10 +2147,16 @@ bool Session::initialize(QQuickWindow* qtWindow)
             m_StreamConfig.bitrate = std::clamp(vrDefault, 10000, maxKbps);
             source = "VR default";
         }
+        // §RES-BITRATE：PCVR 的碼率在這裡定案，refreshSessionBitrate 不重算（只套 WS 隧道上限）
+        m_BitrateVrKbps = m_StreamConfig.bitrate;
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-VR-SESSION] bitrate %d kbps (%s; %dx%d@%d, flat setting %d kbps / flat default %d kbps ignored, ABR %s)",
                     m_StreamConfig.bitrate, source, m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps,
                     m_Preferences->bitrateKbps, flatDefault, m_StreamConfig.autoAdjustBitrate ? "on" : "off");
+    }
+    else {
+        // §RES-BITRATE：寬高這時已經過自動模式與 host 顯示器 clamp，fps 已是這一場的畫面 fps
+        refreshSessionBitrate("initial");
     }
 
 #ifndef STEAM_LINK
@@ -2804,6 +2821,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
 
             m_StreamConfig.width = 1920;
             m_StreamConfig.height = 1080;
+            refreshSessionBitrate("GFE 4K limit");  // §RES-BITRATE
         }
     }
 
@@ -3116,8 +3134,8 @@ private:
 //   與 host 取小：host 回報 DisplayModeSwitchable（串流前會把顯示器切到要求模式）時，解析度與
 //           更新率都跟它回報的「可切換最高模式」取小；沒有時更新率不夾、解析度交給下面原本的
 //           §H.4 clamp（夾到 host 目前模式）。
-//   位元率：偏好值仍等於「舊解析度／fps 的預設值」（沒自訂過、CLI 沒帶 --bitrate）時跟著重算。
-// 結果寫回 m_Preferences（width/height/fps 在自動模式下本來就只是「上次解析的值」）。
+//   位元率：這裡不算（§RES-BITRATE）。後面還有 host 顯示器 clamp，由 refreshSessionBitrate 依最終值推導。
+// 結果只放在 m_StreamConfig.width/height 與 m_OriginalFps，不寫回 m_Preferences（寫回會被 save() 存成使用者設定）。
 void Session::resolveAutoDisplayMode()
 {
     const bool autoRes = m_Preferences->effectiveAutoResolution();
@@ -3201,30 +3219,20 @@ void Session::resolveAutoDisplayMode()
         }
     }
 
-    const int oldDefault = StreamingPreferences::getDefaultBitrate(m_Preferences->width, m_Preferences->height,
-                                                                   m_Preferences->fps, m_Preferences->enableYUV444,
-                                                                   m_Preferences->enableFrameInterpolation);
-    const bool bitrateWasDefault = !m_Preferences->bitrateFromCli && m_Preferences->bitrateKbps == oldDefault;
-
-    m_Preferences->width = newW;
-    m_Preferences->height = newH;
-    m_Preferences->fps = newFps;
+    // §RES-BITRATE：結果只放在這一場（m_StreamConfig 與 m_OriginalFps），不寫 m_Preferences——那會被 save() 存成
+    // 使用者的設定。碼率這時還沒定案（後面還有 host 顯示器 clamp），由 refreshSessionBitrate 依最終值算。
     m_StreamConfig.width = newW;
     m_StreamConfig.height = newH;
-    if (bitrateWasDefault) {
-        m_Preferences->bitrateKbps = StreamingPreferences::getDefaultBitrate(newW, newH, newFps,
-                                                                            m_Preferences->enableYUV444,
-                                                                            m_Preferences->enableFrameInterpolation);
-    }
+    m_OriginalFps = newFps;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "[VIPLE-RES] auto display mode: resolution=%s fps=%s local=%dx%d@%d (%s, display %d) "
-                "host=%s%dx%d@%d -> stream %dx%d@%d, bitrate %d kbps (%s)",
+                "host=%s%dx%d@%d -> stream %dx%d@%d (bitrate decided after the host display clamp: %s)",
                 autoRes ? "auto" : "manual", autoFps ? "auto" : "manual",
                 localW, localH, localHz, xrDesktop ? "XR desktop" : "desktop mode", displayIndex,
                 hostSwitchable ? "switchable max " : "not switchable ", hostW, hostH, hostHz,
-                newW, newH, newFps, m_Preferences->bitrateKbps,
-                bitrateWasDefault ? "default, recomputed" : "user setting kept");
+                newW, newH, newFps,
+                m_BitrateFollowsDefault ? "follows default" : (m_Preferences->bitrateFromCli ? "--bitrate" : "user setting"));
 }
 
 // §H.4-AUTO：XR 桌面自動更新率。XrContext 在 startConnectionAsync（/launch 之前）才 bring-up，
@@ -3279,25 +3287,110 @@ void Session::applyXrDesktopAutoFps()
                     "[VIPLE-RES] auto fps (XR desktop): runtime %.2f Hz -> %d fps (unchanged)", (double)measured, fps);
         return;
     }
-    const bool bitrateWasDefault =
-        !m_Preferences->bitrateFromCli &&
-        m_StreamConfig.bitrate == StreamingPreferences::getDefaultBitrate(m_StreamConfig.width, m_StreamConfig.height,
-                                                                          m_Preferences->fps, m_Preferences->enableYUV444,
-                                                                          false);
+    // §RES-BITRATE：只改這一場的值，不寫 m_Preferences；碼率由 refreshSessionBitrate 依新的 fps 推導
     const int oldFps = m_StreamConfig.fps;
     m_StreamConfig.fps = fps;
     m_OriginalFps = fps;
-    m_Preferences->fps = fps;
-    if (bitrateWasDefault) {
-        m_StreamConfig.bitrate = StreamingPreferences::getDefaultBitrate(m_StreamConfig.width, m_StreamConfig.height, fps,
-                                                                         m_Preferences->enableYUV444, false);
-        m_Preferences->bitrateKbps = m_StreamConfig.bitrate;
+    char hostDesc[48];
+    if (hostHz > 0) {
+        SDL_snprintf(hostDesc, sizeof(hostDesc), "host max %d Hz", hostHz);
+    }
+    else {
+        SDL_strlcpy(hostDesc, "host not switchable", sizeof(hostDesc));  // 不印「0 Hz」：那不是 host 回報的值
     }
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-RES] auto fps (XR desktop): runtime %.2f Hz, host max %d Hz -> stream %dx%d@%d (was %d), bitrate %d kbps%s",
-                (double)measured, hostHz, m_StreamConfig.width, m_StreamConfig.height, fps, oldFps,
-                m_StreamConfig.bitrate, bitrateWasDefault ? " (default, recomputed)" : "");
+                "[VIPLE-RES] auto fps (XR desktop): runtime %.2f Hz, %s -> stream %dx%d@%d (was %d)",
+                (double)measured, hostDesc, m_StreamConfig.width, m_StreamConfig.height, fps, oldFps);
+    refreshSessionBitrate("XR desktop auto fps");
 #endif
+}
+
+// §RES-BITRATE：開場判定一次「碼率跟著預設值」。以 autoAdjustBitrate 旗標為準（拖滑桿→false、按「使用預設值」→true），
+// 不再用「目前值＝某組寬高／fps 的預設值」去猜——三個改寫點各比各的，中間有一步沒重算就永遠對不上。
+// 保守處理：旗標是 true、但存的碼率不是任何常見模式的預設值（例如舊版把 CLI 的 --bitrate 存進設定檔、或手改設定檔
+// 只改了 bitrate 那一鍵）時，當成使用者的值保留，不蓋掉。存的值「看起來是某個模式的預設值」（舊版場次寫回造成的
+// 不一致，例如 2560x1440@144 配 40000）才跟著預設值走。
+void Session::decideBitrateFollowsDefault()
+{
+    m_BitrateFollowsDefault = false;
+    if (m_Preferences->bitrateFromCli) {
+        return;  // --bitrate：原樣
+    }
+    if (m_Preferences->bitrateDefaultFromCli) {
+        m_BitrateFollowsDefault = true;  // CLI 改了解析度／fps 而沒帶 --bitrate：照舊跟著預設值
+        return;
+    }
+    if (!m_Preferences->autoAdjustBitrate) {
+        return;  // 使用者拖過滑桿
+    }
+
+    const int stored = m_Preferences->bitrateKbps;
+    // 候選模式：偏好值、本機桌面模式、XR 桌面的虛擬螢幕、常見解析度 × 常見更新率 × 4:4:4 × 補幀
+    QVector<QPair<int, int>> sizes = {{m_Preferences->width, m_Preferences->height},
+                                      {1280, 720}, {1920, 1080}, {2560, 1440}, {3440, 1440}, {3840, 2160},
+                                      {1920, 1200}, {2560, 1600}, {1280, 800}};
+    QVector<int> rates = {m_Preferences->fps, 30, 48, 50, 60, 72, 75, 80, 90, 100, 120, 144, 165, 180, 240, 360};
+    const int displays = SDL_GetNumVideoDisplays();
+    for (int i = 0; i < displays; i++) {
+        SDL_DisplayMode dm;
+        if (SDL_GetDesktopDisplayMode(i, &dm) == 0 && dm.w > 0 && dm.h > 0) {
+            sizes.append({dm.w, dm.h});
+            if (dm.refresh_rate > 0) {
+                rates.append(dm.refresh_rate);
+            }
+        }
+    }
+    bool looksDefault = false;
+    for (int s = 0; s < sizes.size() && !looksDefault; s++) {
+        for (int r = 0; r < rates.size() && !looksDefault; r++) {
+            for (int v = 0; v < 4 && !looksDefault; v++) {
+                looksDefault = stored == StreamingPreferences::getDefaultBitrate(sizes[s].first, sizes[s].second, rates[r],
+                                                                                 (v & 1) != 0, (v & 2) != 0);
+            }
+        }
+    }
+    m_BitrateFollowsDefault = looksDefault;
+    if (!looksDefault) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-RES] bitrate: autoAdjustBitrate is on but the stored %d kbps is not the default of any known mode - "
+                    "keeping it as a user setting (press \"Use Default\" in settings to follow the default again)",
+                    stored);
+    }
+}
+
+// §RES-BITRATE：碼率＝最終串流參數的函式，不是一路改上來的累積值。
+//   PCVR（或 PCVR 晚退回平面）→ VR 段落定下的值，不重算
+//   跟著預設值              → 預設(實際串流寬高, 畫面 fps, 這一場是否真的用 4:4:4, 補幀)
+//   否則                    → 偏好值（使用者滑桿或 --bitrate），原樣
+//   最後有傳輸上限（WS 隧道）就取小
+// 畫面 fps＝補幀除 2／3 之前的 m_OriginalFps：getDefaultBitrate 自己會處理補幀。
+void Session::refreshSessionBitrate(const char* why)
+{
+    const int before = m_StreamConfig.bitrate;
+    const char* source;
+    int kbps;
+    if (m_BitrateVrKbps > 0) {
+        kbps = m_BitrateVrKbps;
+        source = "VR";
+    }
+    else if (m_BitrateFollowsDefault) {
+        kbps = StreamingPreferences::getDefaultBitrate(m_StreamConfig.width, m_StreamConfig.height, m_OriginalFps,
+                                                       m_BitrateYuv444, m_Preferences->enableFrameInterpolation);
+        source = "default";
+    }
+    else {
+        kbps = m_Preferences->bitrateKbps;
+        source = m_Preferences->bitrateFromCli ? "--bitrate" : "user setting";
+    }
+    const bool capped = m_BitrateCapKbps > 0 && kbps > m_BitrateCapKbps;
+    if (capped) {
+        kbps = m_BitrateCapKbps;
+    }
+    m_StreamConfig.bitrate = kbps;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RES] bitrate %d -> %d kbps (%s; %dx%d@%d, yuv444=%d fruc=%d, %s%s)", before, kbps, why,
+                m_StreamConfig.width, m_StreamConfig.height, m_OriginalFps,
+                (int)m_BitrateYuv444, (int)m_Preferences->enableFrameInterpolation, source, capped ? ", capped" : "");
 }
 
 int Session::getStreamDisplayIndex()
@@ -4334,7 +4427,15 @@ bool Session::startConnectionAsync()
         try {
             NvHTTP http(m_Computer);
             QString launchResponse;
-            // §FLAT-ML（2026-11-18）：平面場次、host 在區網（私有 IPv4）、host 支援時要求多連線
+            // §FLAT-ML（2026-11-18）：平面場次、host 支援、這台裝置有網卡和 host 同網段時要求多連線。
+            // 2026-11-20 審查：原本另外要求「host 位址是私有 IPv4（10/8、172.16/12、192.168/16）」，那是拿位址類別當遠近的代理，
+            // 已拿掉。現在的條件都是結構上的事實或使用者的選擇，補包實際用不用由 common-c 量到的往返時間決定：
+            //   - 位址是 IPv4：多連線的線上格式（LINK_HELLO 的 VIPLE_VR_LINK_DESC）只放得下 IPv4；
+            //   - 這一場連的那個 host 位址和這台裝置的某張網卡同網段（activeOnLink）：hub 的連線要 host 看到的來源位址等於
+            //     client 宣告的位址才會確認，中間有 NAT（另一層路由器、公網位址）時永遠不會確認，只會白白關掉 QUIC 與
+            //     推測式丟幀回報。只看「同網段」這個從網卡表讀得到的事實，不看位址屬於哪一類；
+            //   - 單一路徑而且這一場會走 MP-QUIC 時不要求（使用者選的傳輸）；
+            //   - 經 VPN 的場次不要求（保留，理由見下面）。
             bool flatMlAsked = false;
             m_StreamConfig.flatMultilink = 0;
             if (!m_VrRequested && (m_Computer->vipleStreamVr & VIPLE_VR_SERVER_CAP_FLAT_ML)) {
@@ -4345,10 +4446,10 @@ bool Session::startConnectionAsync()
                     activeAddrCopy = m_Computer->activeAddress.address();
                 }
                 bool isV4 = false;
-                const quint32 a4 = QHostAddress(activeAddrCopy).toIPv4Address(&isV4);
-                flatMlAsked = isV4 && ((a4 >> 24) == 10 || (a4 >> 20) == 0xAC1 || (a4 >> 16) == 0xC0A8);
-                // 這台裝置要有第二條路可用才要求：兩張以上的網卡和 host 的某個位址同網段（桌機的有線＋Wi-Fi），
-                // 或者是有串流轉接器熱點的頭盔（熱點在場次開始後才出現）。只有一條路時維持原本的傳輸（例如使用者開著的 MP-QUIC）
+                QHostAddress(activeAddrCopy).toIPv4Address(&isV4);
+                flatMlAsked = isV4;
+                // 第二條路：兩張以上的網卡和 host 的某個位址同網段（桌機的有線＋Wi-Fi），或者是有串流轉接器熱點的頭盔
+                // （熱點在場次開始後才出現）。只有一條路時，會走 MP-QUIC 的場次維持原本的傳輸
                 if (flatMlAsked) {
                     QVector<QHostAddress> hostAddrs;
                     QVector<NvNetworkInterface> advertisedIfaces;
@@ -4365,6 +4466,7 @@ bool Session::startConnectionAsync()
                         }
                     }
                     int paired = 0;
+                    bool activeOnLink = false;  // hostAddrs[0]（這一場連的位址）和某張網卡同網段
                     const auto netIfs = QNetworkInterface::allInterfaces();
                     for (const QNetworkInterface& nif : netIfs) {
                         if (!(nif.flags() & QNetworkInterface::IsUp) || !(nif.flags() & QNetworkInterface::IsRunning) ||
@@ -4377,6 +4479,7 @@ bool Session::startConnectionAsync()
                             if (e.ip().protocol() != QAbstractSocket::IPv4Protocol || e.prefixLength() <= 0 || e.prefixLength() >= 32) {
                                 continue;
                             }
+                            activeOnLink = activeOnLink || hostAddrs.first().isInSubnet(e.ip(), e.prefixLength());
                             for (const QHostAddress& ha : std::as_const(hostAddrs)) {
                                 if (ha.isInSubnet(e.ip(), e.prefixLength())) {
                                     hit = true;
@@ -4395,16 +4498,32 @@ bool Session::startConnectionAsync()
                     // 一條連線時照樣運作，丟包補傳（VIPLE_VR_LINK_F_REPAIR_FLAT）掛在它上面，單一 Wi-Fi 正是最需要補傳的情況。
                     // 會走 MP-QUIC 的場次維持原樣（多連線會把 QUIC 關掉，那是使用者選的傳輸）。host 不支援補傳時（2.0.249 以前）
                     // 這一場只是改由 hub 的單一連線送，影像內容與封包格式相同。
+                    // 2026-11-20 審查：和沒有 hub 的場次有一處不同——common-c 在多連線的場次不做推測式丟幀回報，補包沒在用時
+                    // （舊 host、往返時間超過門檻）RFI／IDR 最多晚一個幀週期。那要在 common-c 的 VideoStream.c 修（只在真的有
+                    // 東西可等時才關掉推測式回報），這裡能做的只有不在連線建不起來的情況要求 hub（下面的 !activeOnLink）。
                     const bool singlePath = paired < 2 && !frameHotspot;
                     const bool quicWanted = m_Preferences->enableMpQuic && m_Computer->isMpQuicCapable;
-                    if (singlePath && quicWanted) {
+                    if (!activeOnLink) {
+                        // 這一場連的位址不在任何一張網卡的網段裡：中間隔著路由器，有 NAT 時 hub 的連線永遠不會確認（host 退回
+                        // 原本的單一路徑送），要求了只會少掉 QUIC 與推測式丟幀回報。分不出有沒有 NAT，一律不要求（原本靠
+                        // 「私有位址」擋掉公網位址，雙層 NAT 的私有位址擋不住）。不用 paired 判斷：host 廣告的區網位址可能
+                        // 剛好和人在外面時的網段撞號（192.168.1.x 之類）
+                        flatMlAsked = false;
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VR-LINK] flat (2D) session: the host address in use is not on a subnet of any of this "
+                                    "device's network interfaces - multi-link not requested");
+                    }
+                    else if (singlePath && quicWanted) {
                         flatMlAsked = false;
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                     "[VIPLE-VR-LINK] flat (2D) session: only %d network interface(s) can reach the host and MP-QUIC is in use - multi-link not requested",
                                     paired);
                     }
-                    // 經 VPN 連回來（別的 VPN 剛好用私有網段，例如自架 WireGuard 的 10.x）不要求：那種場次只有一條連線，
+                    // 經 VPN 連回來（VPN 的介面剛好和 host 同網段，例如自架 WireGuard 的 10.x）不要求：那種場次只有一條連線，
                     // 多連線沒有好處、還會讓它用不了 QUIC。頭盔有熱點憑證時上面的網卡檢查擋不住這種情況。
+                    // 2026-11-20 審查：這一條仍然是用「是不是 VPN」分流，刻意保留——拿掉會讓經 VPN 的場次改走 hub（開著 MP-QUIC
+                    // 的還會失去 QUIC），而 hub 經 VPN 的行為沒有驗過（連線配對只認同網段的網卡、host 的補包規則 repair_rtt／
+                    // repair_far 在平面場次是關的）。要讓 VPN 場次也用量到的往返時間決定補包，得連同 host 與 common-c 另做一輪。
                     // m_ViaVpn 在使用者自訂封包大小時不會被設定，所以這裡自己問一次（會做一次 TCP 連線，host 在線上時很快）
                     else if (m_ViaVpn || m_Computer->getActiveAddressReachability() == NvComputer::RI_VPN) {
                         flatMlAsked = false;
@@ -4413,8 +4532,10 @@ bool Session::startConnectionAsync()
                     }
                     else if (singlePath) {
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                    "[VIPLE-FLAT-REPAIR] flat (2D) session: one network interface reaches the host - multi-link requested "
-                                    "with a single link so lost packets can be resent");
+                                    "[VIPLE-FLAT-REPAIR] flat (2D) session: %d network interface(s) on a subnet of the host - multi-link "
+                                    "requested with a single link so lost packets can be resent (used only if the host offers it "
+                                    "and the measured round trip is short enough)",
+                                    paired);
                     }
                 }
             }
@@ -4585,8 +4706,10 @@ bool Session::startConnectionAsync()
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-NAT] capping bitrate %d -> %d kbps for WS tunnel",
                             m_StreamConfig.bitrate, TUNNEL_BITRATE_CAP_KBPS);
-                m_StreamConfig.bitrate = TUNNEL_BITRATE_CAP_KBPS;
             }
+            // §RES-BITRATE：上限記成成員，後面 4:4:4 回退重算時才不會把它蓋掉
+            m_BitrateCapKbps = TUNNEL_BITRATE_CAP_KBPS;
+            refreshSessionBitrate("WS tunnel");
             // Tell moonlight-common-c to target our ephemeral loopback
             // ports instead of the parsed Sunshine ports. The RTSP
             // traffic is end-to-end encrypted (corever=1), so rewriting
@@ -4793,28 +4916,12 @@ bool Session::startConnectionAsync()
     // had if the host supported YUV444 (though obviously with 4:2:0 subsampling).
     // If the user has adjusted the bitrate from default, we'll assume they really wanted
     // that value and not second guess them.
-    // VipleStream: use m_Preferences->fps (not m_StreamConfig.fps) as
-    // the fps argument to getDefaultBitrate — m_StreamConfig.fps may
-    // already have been halved by the FRUC path above, and
-    // getDefaultBitrate's `fruc=true` branch will halve it again
-    // internally. Both the "did the user adjust bitrate" comparison
-    // and the YUV420-fallback recompute must pass through the same
-    // fps/fruc pair that streamingpreferences.cpp used at load time
-    // (user fps + enableFrameInterpolation), otherwise we'll never
-    // match the stored default and the user's adjusted bitrate
-    // could silently get overwritten.
-    if (m_Preferences->enableYUV444 &&
-        !(m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444) &&
-        m_StreamConfig.bitrate == StreamingPreferences::getDefaultBitrate(m_StreamConfig.width,
-                                                                          m_StreamConfig.height,
-                                                                          m_Preferences->fps,
-                                                                          true,
-                                                                          m_Preferences->enableFrameInterpolation)) {
-        m_StreamConfig.bitrate = StreamingPreferences::getDefaultBitrate(m_StreamConfig.width,
-                                                                         m_StreamConfig.height,
-                                                                         m_Preferences->fps,
-                                                                         false,
-                                                                         m_Preferences->enableFrameInterpolation);
+    // §RES-BITRATE：「使用者有沒有調過」改由開場判定的 m_BitrateFollowsDefault 決定（原本用值相等，寬高被 host 壓過
+    // 就永遠對不上）。這裡只把 4:4:4 拿掉再推導一次；fps 用畫面 fps（m_OriginalFps），補幀由 getDefaultBitrate 自己處理。
+    // 一定要經過 refreshSessionBitrate：WS 隧道的上限在這之前就設了，直接重算會把它蓋掉。
+    if (m_BitrateYuv444 && !(m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_YUV444)) {
+        m_BitrateYuv444 = false;
+        refreshSessionBitrate("no 4:4:4 this session");
     }
 
     // VipleStream: If no STUN endpoint cached, try relay lookup.
@@ -5117,6 +5224,13 @@ bool Session::startConnectionAsync()
     LiSetRelativeMouseCumulative((m_Computer->vipleStreamInput & 1) != 0 && !m_Preferences->inputTestUnreliable);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-INPUT] relative mouse: %s",
                 ((m_Computer->vipleStreamInput & 1) != 0 && !m_Preferences->inputTestUnreliable) ? "cumulative (unreliable, no ACK wait)" : "reliable (legacy)");
+    // §RES-BITRATE：最後送出的值（前面每個改寫點各印一行 [VIPLE-RES] bitrate a -> b）
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-RES] final: stream %dx%d, host fps %d (display fps %d), bitrate %d kbps (%s%s)",
+                m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps, m_OriginalFps, m_StreamConfig.bitrate,
+                m_BitrateVrKbps > 0 ? "VR" :
+                (m_BitrateFollowsDefault ? "default" : (m_Preferences->bitrateFromCli ? "--bitrate" : "user setting")),
+                (m_BitrateCapKbps > 0 && m_StreamConfig.bitrate == m_BitrateCapKbps) ? ", capped" : "");
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks, &m_AudioCallbacks,
                                 NULL, 0, NULL, 0);

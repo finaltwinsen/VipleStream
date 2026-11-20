@@ -633,12 +633,13 @@ void StreamingPreferences::save()
 {
     QSettings settings;
 
-    settings.setValue(SER_WIDTH, width);
-    settings.setValue(SER_HEIGHT, height);
-    settings.setValue(SER_FPS, fps);
+    // §RES-BITRATE：CLI 這次帶的解析度／fps／碼率不是使用者的設定，存回套用 CLI 之前的值
+    settings.setValue(SER_WIDTH, cliPersist.resolution ? cliPersist.width : width);
+    settings.setValue(SER_HEIGHT, cliPersist.resolution ? cliPersist.height : height);
+    settings.setValue(SER_FPS, cliPersist.fps ? cliPersist.fpsValue : fps);
     settings.setValue(SER_AUTORES, autoResolution);
     settings.setValue(SER_AUTOFPS, autoFps);
-    settings.setValue(SER_BITRATE, bitrateKbps);
+    settings.setValue(SER_BITRATE, cliPersist.bitrate ? cliPersist.bitrateKbps : bitrateKbps);
     settings.setValue(SER_UNLOCK_BITRATE, unlockBitrate);
     settings.setValue(SER_AUTOADJUSTBITRATE, autoAdjustBitrate);
     settings.setValue(SER_ADAPTIVEBITRATE, adaptiveBitrate);

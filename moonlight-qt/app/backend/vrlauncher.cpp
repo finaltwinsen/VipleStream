@@ -13,8 +13,12 @@
 #include <QFile>
 #include <QMutex>
 #include <QProcessEnvironment>
+#include <QSettings>
 
+#include <algorithm>
 #include <atomic>
+#include <string>
+#include <vector>
 #include <memory>
 #include <chrono>
 #include <climits>
@@ -83,6 +87,33 @@ VrLauncher* s_Instance = nullptr;  // QML singleton（playerFinished 用）
 bool s_ShellFocused = true;        // §PERF-1113：見 VrLauncher::setShellFocused
 bool s_LanVrHostSeen = false;      // §FRAME-HOTSPOT-EARLY：VrLauncher 建立之前就看到區網上的 host 了
 
+#if defined(Q_OS_LINUX)
+// §HOTSPOT-ADAPT 3.5：這台裝置已知（配對過、存著 server 憑證）的每一台 host 的 uuid。直接讀 ComputerManager 存的清單
+// （QSettings 的 "hosts"；寫到一半時在 "hostsbackup"，兩邊都讀）——lanVrHostOnline() 的呼叫端不帶 uuid，
+// 這裡也拿不到 ComputerManager。清單裡沒有「會不會用熱點」的資訊，所以不會用熱點的 host 也算一台：
+// 它沒有紀錄，結果就是照原本的開（寧可多開，不要漏開）。QSettings 可重入，可以在背景執行緒用
+std::vector<std::string> knownHostIds()
+{
+    std::vector<std::string> ids;
+    QSettings settings;
+    for (const char* array : {"hosts", "hostsbackup"}) {
+        const int count = settings.beginReadArray(QLatin1String(array));
+        for (int i = 0; i < count; i++) {
+            settings.setArrayIndex(i);
+            const std::string uuid = settings.value(QStringLiteral("uuid")).toString().toStdString();
+            if (uuid.empty() || settings.value(QStringLiteral("srvcert")).toByteArray().isEmpty()) {
+                continue;  // 沒配對過的不會觸發先開熱點
+            }
+            if (std::find(ids.begin(), ids.end(), uuid) == ids.end()) {
+                ids.push_back(uuid);
+            }
+        }
+        settings.endArray();
+    }
+    return ids;
+}
+#endif
+
 }  // namespace
 
 void VrLauncher::setChildHook(std::function<void(ChildEvent)> hook)
@@ -97,8 +128,13 @@ void VrLauncher::setChildHook(std::function<void(ChildEvent)> hook)
 void VrLauncher::lanVrHostOnline()
 {
 #if defined(Q_OS_LINUX)
-    static bool s_Tried = false;  // 這個行程只試一次（等不到就交給場次開始時的那條路徑）
-    if (s_Tried) {
+    // 這個行程只試一次（等不到就交給場次開始時的那條路徑）。「試過」＝背景工作已經排入；它查到每一台已知的 host
+    // 都還在「連不上熱點」的紀錄期間（§HOTSPOT-ADAPT 3.5）時不算試過，把旗標放開，過 kRecheckMs 之後有 host 上線再查一次
+    static std::atomic<bool> s_Tried{false};
+    static std::atomic<long long> s_RecheckAtMs{0};
+    static std::atomic<bool> s_HeldLogged{false};
+    static constexpr long long kRecheckMs = 60000;
+    if (s_Tried.load(std::memory_order_acquire)) {
         return;
     }
     if (s_Instance == nullptr) {
@@ -106,9 +142,29 @@ void VrLauncher::lanVrHostOnline()
         s_LanVrHostSeen = true;
         return;
     }
-    s_Tried = true;
+    const auto steadyMs = []() {
+        return static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    };
+    if (steadyMs() < s_RecheckAtMs.load(std::memory_order_acquire)) {
+        return;
+    }
+    s_Tried.store(true, std::memory_order_release);
     QPointer<VrLauncher> self(s_Instance);
-    QThreadPool::globalInstance()->start([self]() {
+    QThreadPool::globalInstance()->start([self, steadyMs]() {
+        // §HOTSPOT-ADAPT 3.5（2026-11-20 審查）：App 啟動時還不知道使用者要連哪一台，所以只在「已知的每一台 host 都有
+        // 還沒到期的紀錄」這種明確情況才不開（先開只會白佔無線電、場次開始又被關掉）；有任何一台沒有紀錄就照原本的開。
+        // 讀設定與紀錄檔都在這條背景工作裡，不佔介面執行緒
+        if (FrameHotspot::allHostsHeldOff(knownHostIds())) {
+            if (!s_HeldLogged.exchange(true)) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-VR-HOTSPOT] app: every known host could not join the hotspot a short while ago - not switching it "
+                            "on ahead of the first game (a session still decides for its own host)");
+            }
+            s_RecheckAtMs.store(steadyMs() + kRecheckMs, std::memory_order_release);
+            s_Tried.store(false, std::memory_order_release);
+            return;
+        }
         std::string ssid, key;
         if (!Session::readVrHotspotCreds(&ssid, &key) || !FrameHotspot::openAtAppStart(ssid, key)) {
             return;

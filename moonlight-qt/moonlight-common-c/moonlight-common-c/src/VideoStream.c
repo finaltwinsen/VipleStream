@@ -28,6 +28,8 @@ static RTP_VIDEO_QUEUE rtpQueue;
 // 多合併一次各條連線的往返統計——server 的主開關關著時也一樣（gate 10s 要用），不改任何決定。
 // log 的欄位見 docs/log_tags.md。rr 只在影像接收執行緒存取，每場串流在執行緒開頭歸零。
 #define RR_GATE_WINDOW_US 10000000
+// §FLAT-REPAIR：平面（2D）場次的往返門檻換邊前，訊號要連續站在另一邊多久（PING 250 ms 一筆 → 至少兩筆）
+#define FLAT_GATE_DWELL_US 500000
 
 typedef struct _RR_GATE_WINDOW {
     uint64_t startUs;         // 這個視窗從什麼時候開始（0＝還沒開始）
@@ -458,6 +460,11 @@ static void VideoReceiveThreadProc(void* context) {
     uint32_t mlDivApplied = 0;
     // §FLAT-REPAIR：上一次算 mlHoldUs 時，平面場次的補包有沒有協商成立（變了就重算）
     bool mlFlatRepairApplied = false;
+    // §FLAT-REPAIR：平面場次的往返門檻（有遲滯；說明見下方 vrrrDecide 之後）。只在這條執行緒讀寫，每場串流重來。
+    bool mlFlatGateInit = false;      // 這一場決定過初始狀態了
+    bool mlFlatGateOpen = false;      // 門檻開著＝丟包時回報、等補包
+    bool mlFlatGateFlipping = false;  // 訊號已經站到另一邊，正在計時
+    uint64_t mlFlatGateFlipUs = 0;    // 訊號站到另一邊的時刻
     int rxLink = -1;
     // §VR-REPAIR-RTT：每場串流重來
     memset(&rr, 0, sizeof(rr));
@@ -965,6 +972,9 @@ static void VideoReceiveThreadProc(void* context) {
                 if (div != mlDivApplied || flatRepair != mlFlatRepairApplied) {
                     mlDivApplied = div;
                     mlFlatRepairApplied = flatRepair;
+                    // 上限變了（分頻、協商結果）：門檻照新的上限重新決定初始狀態
+                    mlFlatGateInit = false;
+                    mlFlatGateFlipping = false;
                     mlFramePeriodUs = mlBasePeriodUs * div;
                     // 單一路徑（沒有多連線）時照舊不等：mlHoldUs＝0
                     mlHoldUs = mlLinks <= 0 ? 0 : (mlFramePeriodUs < 4000 ? 4000 : (mlFramePeriodUs > 14000 ? 14000 : mlFramePeriodUs));
@@ -972,13 +982,15 @@ static void VideoReceiveThreadProc(void* context) {
                         // §FLAT-REPAIR：2D 的等待上限＝兩個幀週期，夾在 8～25 ms（VR 是一個幀週期、4～14 ms，不變）。
                         // 2D 丟一幀的代價是整段凍結到 IDR 進來（實測約 270 ms 起跳），比 VR 的 intra refresh 貴得多，值得
                         // 多等一輪重報；25 ms 的上限讓「等不到」的情況最多比現在晚這麼久才去要 IDR。往返時間的門檻在
-                        // 下面 vrrrDecide 之後另外收緊（一趟往返＋2 ms 要落在這個上限內），超過就不回報、不等，行為和沒有
-                        // 補包時相同。host 的封包倉留三個幀週期，和這個上限對得上。
+                        // 下面 vrrrDecide 之後另外收緊（一趟往返＋2 ms 要落在這個上限內，有遲滯），門檻關著就不回報、
+                        // 不為補包等；兩條連線都在送時「等另一條連線那一份」仍然是原本的一個幀週期（4～14 ms）。
+                        // host 的封包倉留三個幀週期，和這個上限對得上。
                         // 沒有缺包時不會走到等待：封包照到達順序直接進佇列，延遲不變。
                         const uint32_t two = 2u * mlFramePeriodUs;
                         mlHoldUs = two < 8000 ? 8000 : (two > 25000 ? 25000 : two);
-                        Limelog("[VIPLE-FLAT-REPAIR] wait limit %.1f ms (2 frame periods, 8-25 ms); repair is used while the link RTT is at most %.0f ms\n",
-                                mlHoldUs / 1000.0, (mlHoldUs - 2000) / 1000.0);
+                        Limelog("[VIPLE-FLAT-REPAIR] wait limit %.1f ms (2 frame periods, 8-25 ms); repair turns off when the link RTT stays above %.0f ms and back on at %.0f ms or less\n",
+                                mlHoldUs / 1000.0, (mlHoldUs - 2000) / 1000.0,
+                                (mlHoldUs - 2000 - (mlHoldUs / 4 > 3000 ? 3000 : mlHoldUs / 4)) / 1000.0);
                     }
                 }
             }
@@ -1012,11 +1024,67 @@ static void VideoReceiveThreadProc(void* context) {
             vrrrDecide(&in, &rr.state, &out);
             // §FLAT-REPAIR：2D 的等待上限是兩個幀週期，vrrrDecide 的門檻（往返＋2 ms ≤ 上限的 1.5 倍）跟著變得太寬——
             // 往返比上限還長時，回報換來的補包一定趕不上，只是白等一輪再去要 IDR。2D 改成「一趟往返＋2 ms 要落在上限內」
-            // （60 fps：往返 ≤ 23 ms；120 fps：≤ 14 ms）；超過就和沒有補包時一樣（不回報、不為補包等）
-            if (mlFlatRepairApplied && out.mlRepair && !out.mlRttMode &&
-                    (uint32_t)in.legacyRttMs * 1000u + 2000u > in.holdUs) {
-                out.mlRepair = false;
-                out.mlHoldMaxUs = out.mlHoldDual ? in.holdUs : 0;
+            // （60 fps：往返 ≤ 23 ms；120 fps：≤ 14 ms）。
+            // 只有平面場次會進來（VIPLE_VR_LINK_F_REPAIR_FLAT 只在平面場次提出，VR 場次的 mlFlatRepairApplied 恆為 false）；
+            // 照 RTT 規則處理的封包（mlRttMode／eligible）也不碰。進來之後補不補由這裡決定，取代 vrrrDecide 現行規則那一段
+            // 的單筆樣本門檻（門檻開著時算出來的 mlRepair、重報間隔、等待上限和 vrrrDecide 相同）：
+            //  1. 訊號：最近一筆往返（vrmlCtrlRttMsAt，各連線取最小，250 ms 一筆、沒有平滑）與視窗中位數（最近 8 筆，約 2 秒）
+            //     取小的。丟包那一刻（塞車、省電、掃描）單獨一筆變慢的樣本不算數；沒有統計時只看最近一筆。
+            //  2. 遲滯：開著時訊號＋2 ms 超過上限才算該關；關著時要回到上限減 margin 以內才算該開
+            //     （margin＝上限的四分之一、最多 3 ms：上限 25／13.9／8 ms → 3／3／2 ms）。兩個方向都要連續站滿
+            //     FLAT_GATE_DWELL_US（500 ms，至少兩筆樣本）才換邊。這一場第一次決定時直接照當下的訊號（和原本相同）。
+            //  3. 已經回報過的 block（補包還可能在路上）等到它結束：門檻這時關掉不套用到它。等待仍然有上限
+            //     （mlHoldMaxUs，有進展時最多兩倍）與回報次數上限，不會卡住。
+            //  4. 門檻關著而兩條連線都在送：等另一條連線那一份的上限維持原本的一個幀週期（4～14 ms），不是兩個幀週期。
+            //     沒有已確認的連線（legacyRttMs＝−1）時同樣處理。
+            if (mlFlatRepairApplied && !out.mlRttMode && !out.eligible) {
+                const uint32_t dualHoldUs = mlFramePeriodUs < 4000 ? 4000 : (mlFramePeriodUs > 14000 ? 14000 : mlFramePeriodUs);
+                bool flatRepairOn = false;
+
+                if (in.negotiatedRepair && in.legacyRttMs >= 0) {
+                    const uint32_t sampleUs = (uint32_t)in.legacyRttMs * 1000u;
+                    const uint32_t sigUs = haveRtt && in.st.midUs < sampleUs ? in.st.midUs : sampleUs;
+                    const uint32_t marginUs = in.holdUs / 4u > 3000u ? 3000u : in.holdUs / 4u;
+                    bool want;
+
+                    if (!mlFlatGateInit) {
+                        mlFlatGateInit = true;
+                        mlFlatGateOpen = sigUs + 2000u <= in.holdUs;
+                        mlFlatGateFlipping = false;
+                    }
+                    want = mlFlatGateOpen ? (sigUs + 2000u <= in.holdUs) : (sigUs + 2000u + marginUs <= in.holdUs);
+                    if (want == mlFlatGateOpen) {
+                        mlFlatGateFlipping = false;
+                    }
+                    else if (!mlFlatGateFlipping) {
+                        mlFlatGateFlipping = true;
+                        mlFlatGateFlipUs = pktNowUs;
+                    }
+                    else if (pktNowUs - mlFlatGateFlipUs >= FLAT_GATE_DWELL_US) {
+                        mlFlatGateOpen = want;
+                        mlFlatGateFlipping = false;
+                        // 換邊才印（遲滯＋500 ms，最多一秒兩行）
+                        Limelog("[VIPLE-FLAT-REPAIR] repair %s: link RTT %.1f ms (last %d ms, median %.1f ms), wait limit %.1f ms\n",
+                                want ? "on" : "off", sigUs / 1000.0, in.legacyRttMs,
+                                haveRtt ? in.st.midUs / 1000.0 : -1.0, in.holdUs / 1000.0);
+                    }
+                    // 上一個封包的決定是補、而且那個 block 已經回報過：沿用到它結束
+                    flatRepairOn = mlFlatGateOpen || (rtpQueue.mlRepair && RtpvRepairNackPending(&rtpQueue));
+                }
+                else {
+                    mlFlatGateFlipping = false;  // 沒有樣本：不計時，狀態留著
+                }
+                out.mlRepair = flatRepairOn;
+                if (flatRepairOn) {
+                    // 和 vrrrDecide 現行規則同一個式子
+                    const uint32_t rtoUs = 2000u * (uint32_t)in.legacyRttMs + 3000u;
+                    out.mlRepairRtoUs = rtoUs < 4000u ? 4000u : (rtoUs > 10000u ? 10000u : rtoUs);
+                    out.mlHoldMaxUs = in.holdUs;
+                }
+                else {
+                    out.mlRepairRtoUs = 0;
+                    out.mlHoldMaxUs = out.mlHoldDual ? dualHoldUs : 0;
+                }
             }
             RtpvSetRepairDecision(&rtpQueue, &out, mlFramePeriodUs, StreamConfig.vrRepairNoAhead == 0);
             if (out.mlRepair) {

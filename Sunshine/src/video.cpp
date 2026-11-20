@@ -2664,8 +2664,10 @@ namespace video {
     // 250 ms 一張連出 3 張、之後 1.5 秒一張，全部排進同一條已經滿的佇列。ABR 那一側（stream.cpp 的 run_abr_aimd，
     // 握 abrMutex）每輪把壅塞等級對應的最短間隔寫進 abr_cong::idr_gap_hint（atomic），這裡（編碼執行緒）讀：
     //   沒有提示（L0、沒有 RTT 樣本、ABR 關閉、提示超過 2 秒沒更新）→ 上面的規則，一點都不變。
-    //   L1／L2 → 不走 250 ms，間隔 1500 ms。
+    //   L2 → 不走 250 ms，間隔 1500 ms（L1 不提示）。
     //   L3 → 間隔 clamp(1.5 × RTT + 500, 1500, 6000) ms。
+    //   審查 11-20：L2／L3 的提示另外要求 RTT 本身夠長（150 ms 開、100 ms 以下關）——RTT 只有幾十毫秒時 250 ms 已經
+    //   比一個來回長，照上面的快速補送；行程內同時超過一場 session 時也不提示（提示只有一份）。
     // 落在間隔內的請求照舊延後補送；間隔每一輪重算，提示一消失就回到原本的間隔。最長 6 秒一定放行一張，
     // 提示來源一停 2 秒內自動解除（§S.19 的前科是冷卻永遠成立）。VR 不讀提示。
     bool idr_congested = false;  // 上一次算間隔時有沒有提示（只用來在變化時印一行）
@@ -2731,9 +2733,21 @@ namespace video {
           const bool ok = nvenc_dev->nvenc->reconfigure_bitrate(enc_kbps, config.framerate, cut_idr);
           if (ok && cut_idr) {
             // §P2：降碼強制的 IDR（abr_cut_idr = enabled 才有，預設關）不經閘門，以前不算進「最近送了幾張」。
-            // 只記進 idr_recent，last_idr_emit 不動（同 RFI 退回的那一張）
-            idr_note_emit(std::chrono::steady_clock::now());
-            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-HOST f=" << frame_nr << " (bitrate cut forced an IDR, counted as a recent IDR)";
+            // 審查 11-20：這一張是 host 在降碼（多半是壅塞）當下主動送的完整恢復點，所以也啟動間隔（last_idr_emit）、
+            // 並取消延後中的 client 請求。以前兩者都不動：IDR 請求觸發緊急降碼時，同一輪閘門先把請求延後、接著這裡
+            // 強制一張，幾秒後延後的那張又送一次——每次緊急降碼都是兩張大幀，L3 的長間隔等於沒有作用。
+            // 這一張丟了的話 client 會再要，照間隔放行或延後補送。只在有壅塞提示時這樣做（緊急降碼會先發布提示再送
+            // 碼率事件）；沒有提示的降碼（例如單純丟包）照舊只記進 idr_recent。
+            const auto cut_now = std::chrono::steady_clock::now();
+            idr_note_emit(cut_now);
+            const bool congested = abr_cong::host_idr_cancels_deferred(abr_cong::idr_hint_load(cut_now));
+            const bool had_deferred = congested && idr_deferred;
+            if (congested) {
+              last_idr_emit = cut_now;
+              idr_deferred = false;
+            }
+            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-HOST f=" << frame_nr << " (bitrate cut forced an IDR, counted as a recent IDR"
+                            << (congested ? ", congested: gap restarted" : "") << (had_deferred ? ", deferred request dropped)" : ")");
           }
           return ok;
         }
@@ -2776,6 +2790,8 @@ namespace video {
       bool requested_idr_frame = false;
       // §P2：這一輪 host 自己排了一張 IDR、而且已經記進 idr_recent（下面的閘門同一輪又放行時不重複記）
       bool host_idr_noted = false;
+      // 審查 11-20：這一輪 RFI 退回的 IDR 發生在壅塞提示存在時——同一輪到的 client 請求由它代替，不另外延後補送
+      bool host_idr_covers = false;
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
@@ -2792,7 +2808,18 @@ namespace video {
               idr_note_emit(std::chrono::steady_clock::now());
               host_idr_noted = true;
             }
-            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-HOST f=" << frame_nr << " (RFI fell back to IDR, counted as a recent IDR)";
+            // 審查 11-20：有壅塞提示（長間隔）時，這一張就當成延後中那個請求的恢復點——不取消的話間隔到期後會再補
+            // 一張，第二張大幀排進同一條塞住的佇列。last_idr_emit 仍然不動：這一張丟了，client 再要時照原本的期限
+            // 放行或重新延後。沒有提示（平常的 250 ms 快速路徑）時不取消，行為與以前相同。
+            if (abr_cong::host_idr_cancels_deferred(abr_cong::idr_hint_load(std::chrono::steady_clock::now()))) {
+              host_idr_covers = true;
+            }
+            const bool drop_deferred = host_idr_covers && idr_deferred;
+            if (drop_deferred) {
+              idr_deferred = false;
+            }
+            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-HOST f=" << frame_nr << " (RFI fell back to IDR, counted as a recent IDR"
+                            << (drop_deferred ? ", congested: deferred request dropped)" : ")");
           }
         }
       }
@@ -2836,7 +2863,10 @@ namespace video {
         }
         else {
           requested_idr_frame = false;  // suppress for this iteration; client will re-request
-          if (idr_fast) {
+          if (idr_fast && host_idr_covers) {
+            // 這一幀已經會是 IDR（RFI 退回的那一張），而且現在是壅塞中的長間隔：不再排一張延後補送的
+            BOOST_LOG(info) << "[VIPLE-QLOG] IDR-DEFER skipped f=" << frame_nr << " (congested, the RFI fallback IDR of this frame covers the request)";
+          } else if (idr_fast) {
             if (!idr_deferred) {
               BOOST_LOG(info) << "[VIPLE-QLOG] IDR-DEFER f=" << frame_nr << " ("
                               << std::chrono::duration_cast<std::chrono::milliseconds>(now - last_idr_emit).count() << " ms after the last one, "

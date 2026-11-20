@@ -189,10 +189,11 @@ TEST_F(AbrCongestionTest, IdrRequestCutNeedsCongestionAndCooldown) {
   c.update(in(42, 40), t0);
   EXPECT_FALSE(c.idr_request_wants_cut(t0 + 10ms));  // L0：乾淨網路上掉一張
 
-  c.update(in(130, 40, 5.0, true), t0 + 500ms);
+  // RTT 200 ms：夠長（k_idr_slow_enter_rtt_ms 以上），IDR 請求降碼才會考慮
+  c.update(in(200, 40, 5.0, true), t0 + 500ms);
   ASSERT_EQ(c.level(), ac::level_e::hold);
   EXPECT_FALSE(c.idr_request_wants_cut(t0 + 520ms));  // L1：只是暫停回升，不砍
-  c.update(in(130, 40, 5.0, true, true), t0 + 550ms);
+  c.update(in(200, 40, 5.0, true, true), t0 + 550ms);
   ASSERT_EQ(c.level(), ac::level_e::cut);
   EXPECT_TRUE(c.idr_request_wants_cut(t0 + 600ms));
   c.commit_cut(ac::action_e::cut_emergency, 20000, t0 + 600ms);
@@ -334,4 +335,205 @@ TEST_F(AbrCongestionTest, DeepDoesNotCutAgainWhileRttIsFalling) {
   o = c.update(in(1000, 40), t0 + 4600ms);
   o = c.update(in(1000, 40), t0 + 5100ms);
   EXPECT_EQ(o.action, ac::action_e::cut_emergency);
+}
+
+// ── 審查 11-20 的六項 ─────────────────────────────────────────────────────
+
+// R1. RTT 很短時 L2 不提示、IDR 請求也不觸發緊急降碼（§IDR-FAST 的 250 ms 快速補送照常）；RTT 夠長才有
+TEST_F(AbrCongestionTest, ShortRttCutLevelKeepsIdrFastPath) {
+  auto o = c.update(in(15, 2, 5.0, true, true), t0);
+  EXPECT_EQ(o.level, ac::level_e::cut);
+  EXPECT_EQ(o.action, ac::action_e::cut_trend);  // 趨勢的 ×0.85 照舊
+  EXPECT_FALSE(c.rtt_slow());
+  EXPECT_EQ(c.idr_gap_hint(), 0);
+  EXPECT_FALSE(c.idr_request_wants_cut(t0 + 50ms));
+
+  // L2 且 RTT 400 ms：提示 1500、IDR 請求會降碼
+  o = c.update(in(400, 40, 5.0, true, true), t0 + 500ms);
+  EXPECT_EQ(o.level, ac::level_e::cut);
+  EXPECT_TRUE(c.rtt_slow());
+  EXPECT_EQ(c.idr_gap_hint(), 1500);
+  EXPECT_TRUE(c.idr_request_wants_cut(t0 + 550ms));
+
+  // L3 且 RTT 1240 ms：提示 1.5 × 1240 + 500 = 2360
+  c.update(in(1240, 40), t0 + 1000ms);
+  o = c.update(in(1240, 40), t0 + 1500ms);
+  EXPECT_EQ(o.level, ac::level_e::deep);
+  EXPECT_EQ(c.idr_gap_hint(), 2360);
+}
+
+// R1. 遲滯：150 ms 開、100 ms 以下才關，中間維持原狀
+TEST_F(AbrCongestionTest, IdrSlowRttHysteresis) {
+  const auto step = [&](uint32_t rtt, int i) {
+    c.update(in(rtt, 40, 5.0, true, true), t0 + i * 500ms);  // 趨勢一直過載：等級固定 L2，只看 RTT 的效果
+    EXPECT_EQ(c.level(), ac::level_e::cut);
+    return c.idr_gap_hint();
+  };
+  EXPECT_EQ(step(149, 0), 0);  // 還沒到 150
+  EXPECT_EQ(step(150, 1), 1500);
+  EXPECT_EQ(step(120, 2), 1500);  // 遲滯帶：維持
+  EXPECT_EQ(step(100, 3), 1500);
+  EXPECT_EQ(step(99, 4), 0);
+  EXPECT_EQ(step(120, 5), 0);  // 遲滯帶：維持
+  EXPECT_EQ(step(149, 6), 0);
+  EXPECT_EQ(step(150, 7), 1500);
+  // 沒有樣本：關掉
+  c.update(ac::cong_in_t {}, t0 + 4000ms);
+  EXPECT_FALSE(c.rtt_slow());
+  EXPECT_EQ(c.idr_gap_hint(), 0);
+}
+
+// R2. 行程內同時超過一場 session：提示一律 0（寫 0 也會清掉另一場留下的值）
+TEST(AbrCongestionIdr, HintDisabledWithMultipleSessions) {
+  EXPECT_EQ(ac::idr_hint_for_publish(1500, 0), 1500);
+  EXPECT_EQ(ac::idr_hint_for_publish(1500, 1), 1500);
+  EXPECT_EQ(ac::idr_hint_for_publish(6000, 1), 6000);
+  EXPECT_EQ(ac::idr_hint_for_publish(1500, 2), 0);
+  EXPECT_EQ(ac::idr_hint_for_publish(6000, 3), 0);
+  EXPECT_EQ(ac::idr_hint_for_publish(0, 1), 0);
+
+  const auto now = ac::steady::now();
+  ac::idr_hint_store(ac::idr_hint_for_publish(6000, 1), now);  // 遠端那一場獨自在跑
+  EXPECT_EQ(ac::idr_hint_load(now + 100ms), 6000);
+  ac::idr_hint_store(ac::idr_hint_for_publish(6000, 2), now + 200ms);  // 第二場加入後的下一次寫入
+  EXPECT_EQ(ac::idr_hint_load(now + 300ms), 0);
+  // 閘門回到原本的規則
+  EXPECT_EQ(ac::idr_gate_gap_ms(true, 1500, 250, ac::idr_hint_load(now + 300ms)), 250);
+  ac::idr_hint_store(0, now);
+}
+
+// R3. host 自發的 IDR：有壅塞提示才取消延後中的請求；沒有提示時不取消（平常的行為不變）
+TEST(AbrCongestionIdr, HostIdrCancelsDeferredOnlyWhenCongested) {
+  EXPECT_FALSE(ac::host_idr_cancels_deferred(0));
+  EXPECT_FALSE(ac::host_idr_cancels_deferred(-1));
+  EXPECT_TRUE(ac::host_idr_cancels_deferred(1500));
+  EXPECT_TRUE(ac::host_idr_cancels_deferred(6000));
+  // 提示過期（ABR 那一側停了 2 秒）＝沒有提示
+  const int64_t at = 5'000'000'000;
+  EXPECT_TRUE(ac::host_idr_cancels_deferred(ac::idr_hint_unpack(ac::idr_hint_pack(2360, at), at + 1'000'000)));
+  EXPECT_FALSE(ac::host_idr_cancels_deferred(ac::idr_hint_unpack(ac::idr_hint_pack(2360, at), at + 2'000'001)));
+}
+
+// R4. 「排空中」的基準只在同一次壅塞事件內有效：離開 L3 之後，RTT 較低的下一次深度壅塞照樣緊急降碼
+TEST_F(AbrCongestionTest, DrainingBaselineEndsWithTheEpisode) {
+  c.update(in(3000, 30), t0);
+  auto o = c.update(in(3000, 30), t0 + 500ms);
+  ASSERT_EQ(o.action, ac::action_e::cut_emergency);
+  c.commit_cut(o.action, 20000, t0 + 500ms, 10000);
+
+  // 回到基線：兩輪後離開 L3，再 1 秒回到 L0
+  o = c.update(in(35, 30), t0 + 1000ms);
+  EXPECT_EQ(o.level, ac::level_e::deep);
+  o = c.update(in(35, 30), t0 + 1500ms);
+  EXPECT_EQ(o.level, ac::level_e::cut);
+  c.update(in(35, 30), t0 + 2000ms);
+  o = c.update(in(35, 30), t0 + 2500ms);
+  ASSERT_EQ(o.level, ac::level_e::clean);
+
+  // 一分鐘後再塞一次，RTT 只有 900 ms（不到上次 3000 的九成）：不可以被當成還在排空
+  o = c.update(in(900, 30), t0 + 60s);
+  EXPECT_EQ(o.action, ac::action_e::none);  // 第一輪還不算
+  o = c.update(in(900, 30), t0 + 60s + 500ms);
+  EXPECT_EQ(o.level, ac::level_e::deep);
+  EXPECT_EQ(o.action, ac::action_e::cut_emergency);
+}
+
+// R4. 沒有樣本也算事件結束（等級歸零的同時基準作廢）
+TEST_F(AbrCongestionTest, DrainingBaselineClearedWithoutSample) {
+  c.update(in(3000, 30), t0);
+  auto o = c.update(in(3000, 30), t0 + 500ms);
+  ASSERT_EQ(o.action, ac::action_e::cut_emergency);
+  c.commit_cut(o.action, 20000, t0 + 500ms, 10000);
+  o = c.update(ac::cong_in_t {}, t0 + 1000ms);
+  EXPECT_EQ(o.level, ac::level_e::clean);
+  // 樣本回來、RTT 2000 ms（低於 3000 的九成）、3 秒冷卻已過：照樣緊急降碼
+  c.update(in(2000, 30), t0 + 3600ms);
+  o = c.update(in(2000, 30), t0 + 4100ms);
+  EXPECT_EQ(o.action, ac::action_e::cut_emergency);
+}
+
+// R5. RTT 樣本的新鮮度：超過 3 秒沒更新就當成沒有樣本，凍結的高 RTT 不再觸發任何動作
+TEST_F(AbrCongestionTest, StaleRttSampleIsNoSample) {
+  const auto at = t0;
+  EXPECT_FALSE(ac::rtt_sample_fresh(false, at, at));
+  EXPECT_TRUE(ac::rtt_sample_fresh(true, at, at));
+  EXPECT_TRUE(ac::rtt_sample_fresh(true, at, at + 3000ms));
+  EXPECT_FALSE(ac::rtt_sample_fresh(true, at, at + 3001ms));
+  EXPECT_FALSE(ac::rtt_sample_fresh(true, at + 1s, at));  // 時刻不合理
+  EXPECT_FALSE(ac::rtt_sample_fresh(true, ac::steady::time_point {}, t0 + 1h));  // 從來沒有寫過時刻
+
+  // 最後一個樣本是 1500 ms（t0 取樣），之後 ping 停了：run_abr_aimd 每 500 ms 還是跑一輪
+  int cuts = 0;
+  for (int i = 0; i < 40; ++i) {
+    const auto now = t0 + i * 500ms;
+    ac::cong_in_t ci;  // stream.cpp：沒有樣本時其他欄位都不填
+    if (ac::rtt_sample_fresh(true, at, now)) {
+      ci = in(1500, 40, 5.0, true, false, true);
+    }
+    const auto o = c.update(ci, now);
+    if (o.action != ac::action_e::none) {
+      c.commit_cut(o.action, 20000, now, 10000);
+      ++cuts;
+    }
+    if (i > 6) {  // 樣本超過 3 秒之後
+      EXPECT_EQ(o.level, ac::level_e::clean);
+      EXPECT_EQ(o.action, ac::action_e::none);
+      EXPECT_EQ(c.idr_gap_hint(), 0);
+      EXPECT_FALSE(c.idr_request_wants_cut(now + 10ms));
+    }
+  }
+  // 新鮮的那 3 秒（7 輪）內：嚴重一次（第 1 輪）、緊急一次（第 2 輪）、2 秒冷卻後再嚴重一次；之後 17 秒一刀都沒有
+  EXPECT_EQ(cuts, 3);
+}
+
+// R6. 丟包分支與壅塞建議合併：目標取小的；丟包降得一樣多或更多、而且真的有降時也要記帳
+TEST(AbrCongestionMerge, LossCutIsAccounted) {
+  // 相等（丟包 ×0.50 對 emergency ×0.50）：以前不記帳
+  auto m = ac::merge_loss_cut(10000, 10000, 20000, 1500);
+  EXPECT_FALSE(m.cong_wins);
+  EXPECT_EQ(m.target, 10000);
+  EXPECT_TRUE(m.commit);
+  // 丟包降得更深（×0.50 對 severe ×0.70）
+  m = ac::merge_loss_cut(10000, 14000, 20000, 1500);
+  EXPECT_FALSE(m.cong_wins);
+  EXPECT_EQ(m.target, 10000);
+  EXPECT_TRUE(m.commit);
+  // 壅塞建議降得多（丟包分支維持）：照舊
+  m = ac::merge_loss_cut(20000, 17000, 20000, 1500);
+  EXPECT_TRUE(m.cong_wins);
+  EXPECT_EQ(m.target, 17000);
+  EXPECT_TRUE(m.commit);
+  // 已經在下限、丟包那一側較深：這一輪沒有東西可降，不記帳（冷卻不起算、不記塞車點）
+  m = ac::merge_loss_cut(750, 750, 1500, 1500);
+  EXPECT_FALSE(m.commit);
+  m = ac::merge_loss_cut(750, 1050, 1500, 1500);
+  EXPECT_FALSE(m.commit);
+  // 已經在下限、壅塞建議較深：照舊呼叫 commit_cut（塞車點由 commit_cut 自己擋）
+  m = ac::merge_loss_cut(1500, 1275, 1500, 1500);
+  EXPECT_TRUE(m.cong_wins);
+  EXPECT_TRUE(m.commit);
+}
+
+// R6. 相等降幅記帳之後：下一輪不再建議動作（冷卻有起算），回升有塞車點壓住
+TEST_F(AbrCongestionTest, EqualLossCutStartsCooldownAndRecordsPoint) {
+  c.update(in(1000, 40), t0);
+  auto o = c.update(in(1000, 40), t0 + 500ms);
+  ASSERT_EQ(o.action, ac::action_e::cut_emergency);
+  const int applied = 20000;
+  const int floor_kbps = 1500;
+  const auto m = ac::merge_loss_cut(applied * 50 / 100, applied * ac::action_pct(o.action) / 100, applied, floor_kbps);
+  ASSERT_TRUE(m.commit);
+  EXPECT_TRUE(c.commit_cut(o.action, applied, t0 + 500ms, std::max(floor_kbps, m.target)));
+
+  // 下一輪剛好沒有丟包、嚴重條件也成立：緊急降碼 3 秒冷卻、一般降碼 2 秒冷卻都在算，不再砍
+  o = c.update(in(1000, 40, 5.0, true, false, true), t0 + 1000ms);
+  EXPECT_EQ(o.action, ac::action_e::none);
+  EXPECT_EQ(c.congested_kbps(), 20000);
+  EXPECT_EQ(c.ramp_cap_kbps(t0 + 5s), 18000);
+
+  // 已經在下限：commit_cut 不記塞車點
+  ac::congestion_t c2;
+  EXPECT_FALSE(c2.commit_cut(ac::action_e::cut_severe, 1500, t0, 1500));
+  EXPECT_EQ(c2.congested_kbps(), 0);
+  EXPECT_EQ(c2.ramp_cap_kbps(t0 + 1s), 0);
 }

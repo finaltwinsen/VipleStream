@@ -779,6 +779,17 @@ namespace platf::vr_admin {
       }
 
       /// 送完最後一則之後，等 CLI 讀完並關掉它那端（DisconnectNamedPipe 會丟掉還沒讀的資料）
+      /// CLI 是不是已經關掉它那一端（不讀資料、不等待）。只認「對端不在了」的錯誤碼，其他查詢失敗一律當成還在，
+      /// 免得誤判成取消
+      bool client_gone() const {
+        DWORD avail = 0;
+        if (PeekNamedPipe(pipe_.h, nullptr, 0, nullptr, &avail, nullptr)) {
+          return false;
+        }
+        const DWORD e = GetLastError();
+        return e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED || e == ERROR_NO_DATA;
+      }
+
       void wait_client_close(DWORD timeout_ms) {
         std::string ignored;
         for (int i = 0; i < 4; ++i) {
@@ -1235,7 +1246,29 @@ namespace platf::vr_admin {
               return;  // CLI 走了：還沒改任何東西，不繼續
             }
           }
-          if (wait_stop(1s)) {
+          // 等 SteamVR 結束（2026-11-20 審查）。原本每秒呼叫一次 unregister_driver()，而且送出「waiting」之後不再看
+          // CLI 還在不在：使用者按 Ctrl+C 取消後，這條執行緒（管理 pipe 只有一個實例）仍然佔著最久 wait_s 秒，
+          // --vr-status、--vr-abort 都連不上；之後 SteamVR 一關，照樣還原 guard、移除註冊、刪版本目錄。
+          // 現在等待的每一輪：先看 CLI 還在不在（走了就不再動手，直接結束、把 pipe 讓出來），再只查 vrserver 在不在
+          // （唯讀，不進編排執行緒、不寫 step=unregister 的 log）；它結束或逾時才回到上面再要求一次。
+          // 「CLI 剛走、SteamVR 剛好結束」之間不到 1 秒的空窗消不掉，可以接受。
+          bool stopping = false;
+          for (;;) {
+            if (wait_stop(1s)) {
+              stopping = true;
+              break;
+            }
+            if (client_gone()) {
+              BOOST_LOG(info) << "[VIPLE-VR-ADMIN] steamvr-driver uninstall cancelled reason=client-left waited="sv
+                              << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - t0).count()
+                              << "s (nothing was changed)"sv;
+              return;
+            }
+            if (!vr::orchestrator::steamvr_running() || std::chrono::steady_clock::now() - t0 >= std::chrono::seconds(wait_s)) {
+              break;
+            }
+          }
+          if (stopping) {
             res.reason = "server-stopping";
             break;
           }

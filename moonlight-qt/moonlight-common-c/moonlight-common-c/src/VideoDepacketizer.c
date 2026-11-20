@@ -49,12 +49,18 @@ static unsigned int consecutiveFrameDrops;
 // 時刻由 ControlStream 的 LiRequestIdrFrame 記）300 ms 沒等到 IDR 就再要一次，之後 600、1200 ms，
 // 到 1200 ms 封頂；等到 IDR 重置。限流仍在 host（冷卻與延後補送），這裡保證的是計時重試之間
 // 至少隔 IDR_RETRY_FIRST_MS。
+// §IDR-RETRY-RTT：間隔另外有一個跟著控制通道往返時間走的下限 2×rtt＋100 ms（rtt 封頂 IDR_RETRY_RTT_CAP_MS）。
+// 請求上行、IDR 下行各半趟，300 ms 內 IDR 根本到不了時重試只會讓 host 多送一張（新版 host 是延後補送，
+// 一樣多一張）。rtt ≤ 100 ms 時下限不超過 300 ms，行為和原本完全相同；還沒有樣本（LiGetEstimatedRttInfo
+// 回 false）也是原本的 300／600／1200。下限是 rtt 的連續函數（ENet 的 rtt 本身是平滑值），沒有開關、不需要遲滯；
+// 封頂 4000 ms 和 §FRZ-WD-RTT 同一個值，下限最多 8100 ms，那時 watchdog（最長 8 秒）本來就會接手。
 // 只在「等 IDR 中又收到一張完整幀」時檢查（跟第一次請求同一個時機：網路還通才要，
 // 不在斷線時堆請求）；完全沒有完整幀時由 §FRZ-WATCHDOG 與「no video packets」那條路負責。
 // VR session 不走這裡（它有自己的 LOSS／REFRESH 狀態機與逾時），PyroWave 每幀都是 intra 也不走。
 // 狀態只在 VideoRecv 執行緒讀寫。
 #define IDR_RETRY_FIRST_MS 300
 #define IDR_RETRY_MAX_MS 1200
+#define IDR_RETRY_RTT_CAP_MS 4000
 static bool idrRetryTracking;         // 這一輪等待已經開始計時
 static uint32_t idrRetryWaitStartMs;  // 這一輪等待第一次檢查的時刻（上一輪留下的請求時刻不算數）
 static unsigned int idrRetryCount;    // 這一輪等待已經計時重試幾次
@@ -75,6 +81,8 @@ static void idrRetryPoll(uint64_t nowMs, uint32_t frameIndex) {
     uint32_t baseMs;
     uint32_t lastReqMs;
     uint32_t intervalMs;
+    uint32_t rttMs = 0;
+    bool haveRtt;
     unsigned int i;
 
     if (!idrRetryApplies()) {
@@ -101,14 +109,29 @@ static void idrRetryPoll(uint64_t nowMs, uint32_t frameIndex) {
         intervalMs = IDR_RETRY_MAX_MS;
     }
 
+    // §IDR-RETRY-RTT：往返時間的下限（無鎖快照，這個執行緒可以讀；§FRZ-WD-RTT 也在同一條執行緒讀）
+    haveRtt = LiGetEstimatedRttInfo(&rttMs, NULL);
+    if (haveRtt) {
+        uint32_t floorMs;
+
+        if (rttMs > IDR_RETRY_RTT_CAP_MS) {
+            rttMs = IDR_RETRY_RTT_CAP_MS;
+        }
+        floorMs = 2 * rttMs + 100;
+        if (floorMs > intervalMs) {
+            intervalMs = floorMs;
+        }
+    }
+
     // 有號比較：別的執行緒剛寫進來的請求時刻可能比 now32 晚 1 ms
     if ((int32_t)(now32 - baseMs) < (int32_t)intervalMs) {
         return;
     }
 
     idrRetryCount++;
-    Limelog("[VIPLE-DEPACK] §IDR-RETRY: no IDR %u ms after last request — retry #%u (interval %u ms, frame %u)\n",
-            (unsigned int)(now32 - baseMs), idrRetryCount, (unsigned int)intervalMs, (unsigned int)frameIndex);
+    Limelog("[VIPLE-DEPACK] §IDR-RETRY: no IDR %u ms after last request — retry #%u (interval %u ms, frame %u, rtt %d ms)\n",
+            (unsigned int)(now32 - baseMs), idrRetryCount, (unsigned int)intervalMs, (unsigned int)frameIndex,
+            haveRtt ? (int)rttMs : -1);
     LiRequestIdrFrame();
 }
 

@@ -23,10 +23,20 @@
 //   降速照樣做（流暢第一，半速讓解碼多一倍時間），但原因記成 Headset；頭盔端的上限不會自己變好，所以試升的等待
 //   從 kUpDwellHeadsetUs 起算（每 60 秒試一次只會每次都頓一下）。
 //   最近 3 個視窗的短段重複裡頭盔端佔 ≥ kHeadsetShare 才算頭盔端。
+//
+// §VR-RATE-CAUSE-HOST（2026-11-20）：第三種原因——host 那一格沒出畫格（遊戲／合成器掉幀、擷取放棄）。11-20 的實例：
+// host 被別的程式佔住，10 秒只出 1054／1440 張、網路零丟包，舊版把每 15 秒 404 格重複全算成網路，20 分鐘內四度降到半速，
+// 試升又必然失敗。半速換不回 host 沒出的畫格，所以這一種**不降、不判試升失敗，只記錄**（使用者 11-20 的決定）。
+//   判斷（HostCadence，下面）：每張影像的時戳是 host 的 Present 時刻（90 kHz）、幀號連續（半速跳過的不佔號）。
+//   「這一張與前一張幀號連號、Present 卻隔了 (div＋0.75) 格以上」＝中間 host 少出了 round(間隔)−div 格；網路造不出這個訊號
+//   （掉一張幀號就不連號）。幀號不連號、拿不到幀號的一律不算 host（寧可少算）。
+//   一段預期外的重複在結束它的那張新影像到的時候結算：先扣掉 host 少出的格數（記進 hostRep），剩下的才照原本的規則
+//   分短重複／補包／斷流、分頭盔端／網路。decide() 的式子沒有改——shortRep 本來就只剩網路＋頭盔端。
 #pragma once
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 
 namespace xrrate {
@@ -36,6 +46,82 @@ namespace xrrate {
         uint32_t stalls = 0;    // 斷流（預期外的重複連續超過 kShortRunSlots 格）的次數
         uint32_t slotCount = 0; // 這個視窗顯示了幾格（太少＝沒在串流，不算數）；不叫 slots：Qt 把它定義成巨集
         uint32_t headsetRep = 0; // §VR-RATE-CAUSE：shortRep 裡屬於頭盔端（影格收到了還沒解出）的格數
+        uint32_t hostRep = 0;    // §VR-RATE-CAUSE-HOST：host 沒出畫格造成的重複格數（不在 shortRep 裡，不進任何判斷）
+    };
+
+    // §VR-RATE-CAUSE-HOST：從每一張解出來的影像（依解碼順序，被跳過沒顯示的也要給）算「host 累計少出了幾個顯示格」。
+    // 不依賴 OpenXR／FFmpeg；影像 render thread 餵、把累計值跟著影像發布，frame thread 拿「這一張的累計 − 上一張顯示的
+    // 累計」當這一段重複裡 host 的份量——中間有影像被跳過也對得上。
+    class HostCadence {
+    public:
+        // Present 間隔要比該有的多出這麼多格才算少出（host 的 Present 時刻有抖動；沿用 xrlatchstats.h 配戴驗過的容忍值）
+        static constexpr double kGapTolerance = 0.75;
+        // 帶 REPEATED（host 等了 100 ms 沒有新畫面才重編上一張）的那一張：整段重複都算 host
+        static constexpr uint32_t kWholeRun = 0xffffu;
+        static constexpr int64_t kNoFrameNo = INT64_MIN;
+
+        // 這一張與前一張之間 host 少出了幾個顯示格。frameNoDelta＝幀號差（1＝連號）；ptsDelta90＝Present 時刻的差
+        // （90 kHz，已經處理過 32 bit 繞回）；periodUs＝顯示週期；div＝串流每張佔幾格；repeated＝這一張帶 REPEATED。
+        static uint32_t missedSlots(int64_t frameNoDelta, int64_t ptsDelta90, double periodUs, int div, bool repeated)
+        {
+            if (frameNoDelta != 1) {
+                return 0;  // 中間掉了一張（或幀號不可用）：歸網路
+            }
+            if (repeated) {
+                return kWholeRun;
+            }
+            const double ptsPerPeriod = 90000.0 * periodUs / 1e6;
+            if (!(ptsPerPeriod >= 1.0) || ptsDelta90 <= 0) {
+                return 0;
+            }
+            const double d = div >= 2 ? 2.0 : 1.0;
+            const double periods = static_cast<double>(ptsDelta90) / ptsPerPeriod;
+            if (periods < d + kGapTolerance) {
+                return 0;
+            }
+            const double missed = std::floor(periods + 0.5) - d;
+            return missed <= 0.0 ? 0u : static_cast<uint32_t>((std::min)(missed, static_cast<double>(kWholeRun)));
+        }
+
+        // 32 bit 的 RTP 時戳（約 13 小時繞一圈）相減
+        static int64_t ptsDelta(int64_t cur, int64_t prev)
+        {
+            int64_t d = cur - prev;
+            if (d < -(static_cast<int64_t>(1) << 31)) {
+                d += static_cast<int64_t>(1) << 32;
+            }
+            return d;
+        }
+
+        // 每一張解出來的影像一次。frameNo＝kNoFrameNo 表示拿不到幀號。回傳到這一張為止的累計（32 bit，會繞回，只拿來相減）
+        uint32_t onFrame(int64_t frameNo, int64_t pts90, double periodUs, int div, bool repeated)
+        {
+            if (m_Have && frameNo != kNoFrameNo && m_PrevFrameNo != kNoFrameNo) {
+                const int64_t dn = frameNo - m_PrevFrameNo;
+                if (dn == 1) {
+                    ++m_Pairs;
+                }
+                else {
+                    ++m_Breaks;
+                }
+                m_Cum += missedSlots(dn, ptsDelta(pts90, m_PrevPts), periodUs, div, repeated);
+            }
+            m_Have = true;
+            m_PrevFrameNo = frameNo;
+            m_PrevPts = pts90;
+            return m_Cum;
+        }
+
+        uint32_t cumulative() const { return m_Cum; }
+        uint32_t pairs() const { return m_Pairs; }    // 幀號連號的組數（累計）
+        uint32_t breaks() const { return m_Breaks; }  // 幀號不連號的組數（累計；掉幀、被 mailbox 蓋掉、解碼丟幀）
+
+    private:
+        bool m_Have = false;
+        int64_t m_PrevFrameNo = kNoFrameNo;
+        int64_t m_PrevPts = 0;
+        uint32_t m_Cum = 0;
+        uint32_t m_Pairs = 0, m_Breaks = 0;
     };
 
     class AutoRate {
@@ -90,26 +176,25 @@ namespace xrrate {
 
         // 每個顯示格呼叫一次。newFrame＝這一格顯示的是新影像；headsetLate＝這一格有一張影格已經收齊超過兩格還沒解出
         //（§VR-RATE-CAUSE，只在預期外的重複格有意義）；repairReleased＝這一張新影像是被補包拖晚、剛放行的
-        //（§VR-REPAIR-WAN，只在 newFrame 時有意義）
-        void onSlot(bool newFrame, uint64_t nowUs, bool headsetLate = false, bool repairReleased = false)
+        //（§VR-REPAIR-WAN，只在 newFrame 時有意義）；hostSlots＝這一張新影像與上一張顯示的影像之間 host 少出了幾格
+        //（§VR-RATE-CAUSE-HOST，HostCadence 的累計值相減；只在 newFrame 時有意義）
+        void onSlot(bool newFrame, uint64_t nowUs, bool headsetLate = false, bool repairReleased = false, uint32_t hostSlots = 0)
         {
             if (m_StartUs == 0) {
                 reset(nowUs);
             }
             if (newFrame) {
-                closeRun(repairReleased);
+                closeRun(repairReleased, hostSlots);
                 m_SinceNew = 0;
             }
             else {
                 ++m_SinceNew;
                 if (m_SinceNew >= static_cast<uint32_t>(m_Div)) {
-                    ++m_RunUnexpected;  // 已經顯示滿該佔的格數，這一格是晚到（網路或頭盔端）造成的
+                    // 已經顯示滿該佔的格數，這一格是預期外的重複。原因（host 沒出／頭盔端／網路）等這一段結束才分得出來，
+                    // 整場累計也在結算時才加（closeRun／rollWindow）
+                    ++m_RunUnexpected;
                     if (headsetLate) {
                         ++m_RunHeadset;
-                        ++m_TotHeadsetSlots;
-                    }
-                    else {
-                        ++m_TotNetSlots;
                     }
                 }
             }
@@ -189,6 +274,16 @@ namespace xrrate {
         // §VR-RATE-CAUSE：整場累計的預期外重複格，分網路（影格還沒到）與頭盔端（收到了還沒解出）
         uint64_t totalNetSlots() const { return m_TotNetSlots; }
         uint64_t totalHeadsetSlots() const { return m_TotHeadsetSlots; }
+        // §VR-RATE-CAUSE-HOST：整場累計、host 沒出畫格造成的重複格（不算進上面兩個，也不進降速與試升的判斷）
+        uint64_t totalHostSlots() const { return m_TotHostSlots; }
+        uint32_t recentHostSum(int n) const
+        {
+            uint32_t sum = 0;
+            for (int i = 0; i < (std::min)(n, m_HistN); ++i) {
+                sum += hist(i).hostRep;
+            }
+            return sum;
+        }
         uint32_t headsetDowns() const { return m_HeadsetDowns; }
         uint32_t recentHeadsetSum(int n) const
         {
@@ -213,14 +308,33 @@ namespace xrrate {
         const Window& hist(int back) const { return m_Hist[(m_HistHead + kHist - 1 - back) % kHist]; }
         static bool outage(const Window& w) { return w.stalls >= kOutageStalls; }
 
-        void closeRun(bool repairReleased = false)
+        // 整場累計：一段裡不是 host 的那幾格，分頭盔端與網路
+        void addTotals(uint32_t slotsNotHost, uint32_t headset)
+        {
+            headset = (std::min)(headset, slotsNotHost);
+            m_TotHeadsetSlots += headset;
+            m_TotNetSlots += slotsNotHost - headset;
+        }
+
+        void closeRun(bool repairReleased = false, uint32_t hostSlots = 0)
         {
             if (m_RunUnexpected > 0) {
-                if (m_RunUnexpected <= kShortRunSlots) {
-                    m_Cur.shortRep += m_RunUnexpected;
-                    m_Cur.headsetRep += m_RunHeadset;
+                // §VR-RATE-CAUSE-HOST：先扣掉 host 少出的格數（以這一段的長度為上限：多出來的仍算網路或頭盔端），
+                // 剩下的才照原本的規則分類。host 卡 100 ms（整段都由 Present 的缺口解釋）不會記成斷流、不會擋試升
+                const uint32_t host = (std::min)(m_RunUnexpected, hostSlots);
+                const uint32_t rest = m_RunUnexpected - host;
+                const uint32_t headset = (std::min)(m_RunHeadset, rest);
+                m_Cur.hostRep += host;
+                m_TotHostSlots += host;
+                addTotals(rest, headset);
+                if (rest == 0) {
+                    // 整段都是 host 沒出畫格
                 }
-                else if (repairReleased && m_RunUnexpected <= kRepairRunSlots) {
+                else if (rest <= kShortRunSlots) {
+                    m_Cur.shortRep += rest;
+                    m_Cur.headsetRep += headset;
+                }
+                else if (repairReleased && rest <= kRepairRunSlots) {
                     m_Cur.shortRep += kShortRunSlots;  // 等補包的那一段：一段短重複，不是斷流
                     ++m_RepairRuns;
                 }
@@ -275,14 +389,19 @@ namespace xrrate {
             // §REVIEW-1119：新影像還沒到就切視窗的話，進行中的重複不會進 closeRun。整段斷流的視窗
             // shortRep 與 stalls 都是 0，半速會把它當成乾淨而升回全速。長過補包上限才在這裡算斷流並歸零；
             // 還可能是補包（7～14 格）的先留著，等 newFrame 的 repairReleased，避免把補包記成斷流。m_SinceNew 不重設。
+            // §VR-RATE-CAUSE-HOST：這裡結算的段還沒等到結束它的那張新影像，分不出是不是 host，照舊算網路／頭盔端。
+            // 每個視窗最多一段（短的 ≤ 6 格，低於 kDownEach），不會因此誤降；host 長時間停住而跨過視窗邊界的那一段
+            // 會記成一次斷流（只影響試升，不觸發降速）。
             if (m_RunUnexpected > kRepairRunSlots) {
                 ++m_Cur.stalls;
+                addTotals(m_RunUnexpected, m_RunHeadset);
                 m_RunUnexpected = 0;
                 m_RunHeadset = 0;
             }
             else if (m_RunUnexpected > 0 && m_RunUnexpected <= kShortRunSlots) {
                 m_Cur.shortRep += m_RunUnexpected;
                 m_Cur.headsetRep += m_RunHeadset;
+                addTotals(m_RunUnexpected, m_RunHeadset);
                 m_RunUnexpected = 0;
                 m_RunHeadset = 0;
             }
@@ -390,6 +509,7 @@ namespace xrrate {
         uint32_t m_RepairRuns = 0;
         Reason m_PendingCause = Reason::None;  // 最近一次送出的降速要求的原因
         uint64_t m_TotNetSlots = 0, m_TotHeadsetSlots = 0;
+        uint64_t m_TotHostSlots = 0;  // §VR-RATE-CAUSE-HOST
         uint32_t m_HeadsetDowns = 0;
     };
 

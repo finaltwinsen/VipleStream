@@ -2888,6 +2888,14 @@ bool RtpvRepairLatched(PRTP_VIDEO_QUEUE queue) {
     return false;
 }
 
+// §FLAT-REPAIR：平面（2D）場次的往返門檻用（VideoStream.c）。已經回報過的 block 等到它結束，門檻中途關掉也不放棄。
+// 只讀：不呼叫 nkSync（對象換了的話 nkFrame／nkBlock 對不上，回 false）。VR 場次不會呼叫這裡。
+bool RtpvRepairNackPending(PRTP_VIDEO_QUEUE queue) {
+    return queue->nkValid && !queue->nkGone && queue->nkCount > 0 &&
+           queue->nkFrame == queue->currentFrameNumber &&
+           queue->nkBlock == queue->multiFecCurrentBlockNumber;
+}
+
 void RtpvRepairGone(PRTP_VIDEO_QUEUE queue, uint32_t frame, uint8_t block) {
     if (!queue->mlRepair) {
         return;

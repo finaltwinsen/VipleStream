@@ -138,6 +138,9 @@ public:
         uint64_t releaseNo = 0;
         // §VR-LATCH-WAIT：這張影像發布的時刻（steady 時鐘，µs；和 PubRec::pubUs 是同一個值）
         uint64_t publishedUs = 0;
+        // §VR-RATE-CAUSE-HOST：到這張影像為止，host 累計少出了幾個顯示格（xrrate::HostCadence；32 bit 會繞回，只拿來相減）。
+        // frame thread 用「這一張 − 上一張顯示的」當這一段重複裡 host 的份量
+        uint32_t hostGapCum = 0;
         // §VR-SYNTH：這張 swapchain 影像的下半有合成影像時，它的範圍與姿態（current() 視情況換進 subImage／meta）
         bool hasSynth = false;
         XrRect2Di synthRect = {};
@@ -173,6 +176,15 @@ public:
     bool bufferTotals(uint32_t* lag1, uint32_t* lag0) const;
     // §VR-RATE-AUTO：host 改了「每幾張送一張」（main thread 收到 S2C_RATE 時設）
     void setStreamDiv(int div) { m_StreamDiv.store(div >= 2 ? 2 : 1, std::memory_order_relaxed); }
+    // §VR-RATE-CAUSE-HOST：顯示週期（µs；frame thread 每格設）。影像 render thread 用它把兩張影像的 Present 間隔換成格數；
+    // 還沒設（0）之前不會有任何一格算成 host
+    void setRatePeriodUs(uint32_t periodUs) { m_RatePeriodUs.store(periodUs, std::memory_order_relaxed); }
+    // 幀號連號／不連號的組數（累計；log 用——不連號的比例很高＝幀號拿不到或不可信）
+    void hostFrameNoStats(uint32_t* pairs, uint32_t* breaks) const
+    {
+        *pairs = m_HostFnPairs.load(std::memory_order_relaxed);
+        *breaks = m_HostFnBreaks.load(std::memory_order_relaxed);
+    }
 
     XrVideo(XrContext* ctx, const Config& config);
     ~XrVideo();
@@ -501,6 +513,10 @@ private:
     int m_BufDepth = 0;                    // 0＝還沒初始化
     xrbuf::AutoDepth m_BufAuto;
     std::atomic<int> m_StreamDiv {1};      // §VR-RATE-AUTO：串流每張佔幾格（main thread 設、frame thread 讀）
+    // §VR-RATE-CAUSE-HOST：m_HostCadence 只有影像 render thread 用；其餘是給別的執行緒讀寫的
+    xrrate::HostCadence m_HostCadence;
+    std::atomic<uint32_t> m_RatePeriodUs {0};
+    std::atomic<uint32_t> m_HostFnPairs {0}, m_HostFnBreaks {0};
     uint32_t m_BufShownCount = 0;          // §VR-RATE-AUTO：m_BufLastShown 那一張已經顯示了幾格（m_SwMutex）
     std::atomic<int> m_BufDepthLog{0};     // 給 10 s log 讀
     std::atomic<uint32_t> m_BufUp{0}, m_BufDown{0}, m_BufShed{0};  // m_BufShed：§VR-BUFFER-SHED 讓掉的次數

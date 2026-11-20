@@ -32,13 +32,19 @@
 ### 4.2 能力協商
 
 1. **`/serverinfo`**：`<VipleStreamVR>` 是 bitmask。b0 PROTO_V1、b1 PCVR（只有 Windows）、b2 HAPTICS、b3 GAZE_UPLINK、b4 QP_FOVEATION、b5 RECOVERY_INTRA（encoder 支援 IR）、b7 GAZE_FOVEA (0x80)。
-   b8 MIC (0x100)、b9 HOTSPOT_FLAT (0x200，平面場次也收 C2S `HOTSPOT_INFO`)、b10 FLAT_ML (0x400，平面場次的多連線，見下)。
-   **§FLAT-ML（2026-11-18）平面（2D）場次的多連線**：client 在「不是 VR、host 位址是私有 IPv4、host 有 0x400、而且這台有第二條路
-   （兩張以上的網卡和 host 同網段，或是有串流轉接器熱點的頭盔）」時在 `/launch`／`/resume` 帶 `&flatMl=1`；server 接受
+   b8 MIC (0x100)、b9 HOTSPOT_FLAT (0x200，平面場次也收 C2S `HOTSPOT_INFO`)、b10 FLAT_ML (0x400，平面場次的多連線，見下)、
+   b11 HOTSPOT_STATUS (0x800，§HOTSPOT-ADAPT：會回報熱點加入狀態 S2C `HOTSPOT_STATUS`、收 C2S `HOTSPOT_STATE`；每個平台都宣告，見 §4.5.1)。
+   下一個空位是 b12 (0x1000)；配新位元以 `VipleVr.h` 的 `VIPLE_VR_SERVER_CAP_*` 為準。
+   **§FLAT-ML（2026-11-18）平面（2D）場次的多連線**：client 在「不是 VR、host 有 0x400、這一場連的 host 位址是 IPv4
+   而且和這台裝置的某張網卡同網段（2026-11-20 起不再看位址是不是私有網段）、不是經 VPN、而且這台有第二條路
+   （兩張以上的網卡和 host 同網段，或是有串流轉接器熱點的頭盔）或這一場不會走 MP-QUIC（§FLAT-REPAIR：單一連線也要求，
+   補包掛在 hub 上）」時在 `/launch`／`/resume` 帶 `&flatMl=1`；server 接受
    （`vr_multilink` 沒關、請求沒有 `vr=1`）就在回應加根元素 `<VipleStreamFlatMl>1</VipleStreamFlatMl>`。client 看到才設
    `StreamConfig.flatMultilink`：這一場不走 QUIC，影像與音訊走 RTP/UDP，多連線 hub 與 VR 相同（`LINK_HELLO`／`LINK_READY`／
-   `LINK_ADDRS`、PING/PONG、熱加入、`auto` 探測），但補包（`F_REPAIR`）與連線上的控制訊息（`F_CTRL`）一律不協商，
-   0x5507 在平面場次只認 `HOTSPOT_INFO` 與 `LINK_HELLO`、0x5508 只交給多連線。舊 client 不送 `flatMl`、舊 server 不回元素，
+   `LINK_ADDRS`、PING/PONG、熱加入、`auto` 探測），但 VR 的補包（`F_REPAIR`）不協商（§FLAT-REPAIR 2026-11-20 起
+   平面場次的補包另由 `VIPLE_VR_LINK_F_REPAIR_FLAT` 協商，連線上的控制訊息只載 NACK／REPAIR_GONE，定義見 `VipleVr.h`）。
+   0x5507 在平面場次只認 `HOTSPOT_INFO`、`HOTSPOT_STATE`（§HOTSPOT-ADAPT）與 `LINK_HELLO`（client 的 `LiSendVrMessage()` 也只放行
+   這三種，而且必須 reliable）；0x5508 的 `HOTSPOT_STATUS` 由 common-c 自己記下（VR 與平面場次都認），其餘只交給多連線。舊 client 不送 `flatMl`、舊 server 不回元素，
    兩種組合都和以前一樣。
    **§CTRL-TAKEOVER（2026-11-18）**：多連線的場次（VR 或平面）裡，連線識別碼（connect data）相同的新 ENet 連線可以直接接手
    還沒逾時的舊控制連線（client 換路重連時不必等 host 的 ENet 逾時）。
@@ -142,6 +148,8 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 sampleAgeMs                   
 ### 4.5 VR_C2S（0x5507）與 VR_S2C（0x5508）：TLV 容器
 
 - **格式**：`u8 subtype, u8 len, payload[len]`，總長 ≤ 251 B，不認得的 subtype 依 len 跳過。
+- **編號以 `VipleVr.h` 的 `VIPLE_VR_C2S_*`／`VIPLE_VR_S2C_*` 為準**，本表可能落後；配新編號前先看標頭。2026-11-20 時
+  C→S 用到 0x10（下一個空號 0x11；0x7F 是舊保留值），S→C 用到 0x0C（下一個空號 0x0D）。
 
 | ptype | subtype | 內容 | 通道 |
 |---|---|---|---|
@@ -155,7 +163,7 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 sampleAgeMs                   
 | | **09 LOSS** | `{firstLost u32, lastLost u32, reason u8}`，送 2 次 | ch 0x07 unseq |
 | | **0A LINK_HELLO** | 連線宣告（§VR-MULTILINK，見 §7） | reliable |
 | | **0B NACK** | 補包請求（§VR-LINK-REPAIR，走連線 DATA，見 §7） | 連線 DATA |
-| | **0C HOTSPOT_INFO** | §VR-HOTSPOT-AUTO（2026-10-30，102 B）：頭盔熱點憑證與頻段資訊。`{version u8, authType u8, band u8, channel u8, ssidLen u8, keyLen u8, ssid[32] u8, key[64] u8}`。底層經由已加密的 ENet reliable 控制通道（AES-GCM）傳輸；舊 server 依 TLV len 自動忽略。 | reliable |
+| | **0C HOTSPOT_INFO** | §VR-HOTSPOT-AUTO（2026-10-30，102 B）：頭盔熱點憑證與頻段資訊。`{version u8, authType u8, band u8, channel u8, ssidLen u8, keyLen u8, ssid[32] u8, key[64] u8}`。底層經由已加密的 ENet reliable 控制通道（AES-GCM）傳輸；舊 server 依 TLV len 自動忽略。§HOTSPOT-ADAPT（2026-11-20）：`version` 送 2 表示 client 認得 S2C `HOTSPOT_STATUS`（欄位與長度不變，server 有 0x800 才送 2），見 §4.5.1。 | reliable |
 | | 7F | 保留：麥克風 | — |
 | 0x5508 S→C | 01 HAPTIC | 28 B（舊版 20 B）：`{device u8, reserved[3] u8, durationUs u32, frequencyHz f32, amplitude f32, eventId u32, timestampNs u64}`（§VR-HAPTIC-REDUNDANT 2026-10-31；`timestampNs` 為 client 單調時鐘 ns，0＝未提供）。client 依 `eventId` 分左右手去重，若 `timestampNs != 0` 且時差超過 `durationUs + 10 ms` 則過期丟棄；server 採 0/8/20 ms 三次冗餘發送，multilink 啟用時鏡像至每條活連線 | ch 0x07 unseq |
 | | 02 STATE | `{state, code, progress}`：編排進度、HMD 就緒、safe mode、`VRLINK_ACTIVE`、`ABI_MISMATCH_RESTART_STEAMVR` | reliable |
@@ -167,6 +175,78 @@ gaze：f16 yaw, f16 pitch, u8 conf, u8 flags, u16 sampleAgeMs                   
 | 0x5507 C→S | 0D MIC | §VR-MIC（2026-11-05）：`{seq u16 LE, Opus 封包}`，48 kHz 單聲道、每 20 ms 一則、in-band FEC。server 宣告 `VIPLE_VR_SERVER_CAP_MIC 0x100` 才送；server 寫進 Steam Streaming Microphone，找不到就回 NOTICE 5 | ch 0x07 unseq |
 | 0x5507 C→S | 0E RATE | §VR-RATE-AUTO（2026-11-08）：`{div u8, reason u8, seq u16}`，要求串流中途改「每 div 張送一張」（1＝全速、2＝半速；reason 1＝自動降、2＝自動升、3＝手動）。SteamVR 與遊戲照協商的更新率跑，host 只跳過編碼；串流率／div < 45 Hz 或不是 PCVR 時拒絕。舊 host 不認得就不回，client 重送 3 次後放棄、維持全速 | reliable |
 | 0x5508 S→C | 0B RATE | §VR-RATE-AUTO：`{div u8, accepted u8, seq u16, firstFrame u32}`，host 已套用（accepted＝1，從幀號 firstFrame 起照新分頻送）或拒絕（div＝原本的值）。client 收到就換分頻：等待閘門、補包等待上限（半速時 14 ms）、緩衝（半速時少一格） | reliable |
+| 0x5507 C→S | 0F NET_SWITCH | §VR-NETSEL-HOLD：頭盔要切網路了（`VIPLE_VR_TLV_NET_SWITCH`，欄位見 `VipleVr.h`）；另在每條連線上各送一份 | reliable |
+| 0x5507 C→S | 10 HOTSPOT_STATE | §HOTSPOT-ADAPT（2026-11-20，2 B）：`{version u8 = 1, state u8}`，state 0 CLOSED／1 QUERY。server 有 `0x800` 才送；VR 與平面場次都收。見 §4.5.1 | reliable |
+| 0x5508 S→C | 0C HOTSPOT_STATUS | §HOTSPOT-ADAPT（2026-11-20，12 B）：host 這一端加入頭盔熱點的狀態。只對送過 version ≥ 2 的 `HOTSPOT_INFO` 或送過 `HOTSPOT_STATE` 的場次送；VR 與平面場次都送。見 §4.5.1 | reliable |
+
+#### 4.5.1 §HOTSPOT-ADAPT：熱點加入狀態回報（2026-11-20）
+
+定義在 `VipleVr.h`（`VIPLE_VR_TLV_HOTSPOT_STATUS`、`VIPLE_VR_TLV_HOTSPOT_STATE`、`VIPLE_VR_HS_*`、`VIPLE_VR_HOTSPOT_STATE_*`，
+三份拷貝逐位元組相同，各有 `static_assert` 釘住大小）。下面是線上格式的摘要，數值有出入時以標頭為準。
+三則訊息都不含 BSSID、介面名稱；`HOTSPOT_STATUS`／`HOTSPOT_STATE` 也不含 SSID 與金鑰。
+
+**協商**
+
+| 誰 | 怎麼表示 | 意思 |
+|---|---|---|
+| server | `<VipleStreamVR>` 的 b11 `HOTSPOT_STATUS` (0x800) | 會送 S2C `HOTSPOT_STATUS`、認得 C2S `HOTSPOT_STATE` |
+| client | C2S `HOTSPOT_INFO.version` ＝ 2（`VIPLE_VR_HOTSPOT_VERSION_2`） | 認得 S2C `HOTSPOT_STATUS`。**version 2 的欄位與長度和 version 1 完全相同**（102 B），只多這個語意；server 有 0x800 時 client 才送 2 |
+| client | 送過任何一則 C2S `HOTSPOT_STATE` | 同上（不開熱點、只送 QUERY／CLOSED 的場次沒有 `HOTSPOT_INFO` 可以帶 version） |
+
+**C→S `0x5507/10 HOTSPOT_STATE`（2 B，reliable，走 ENet 控制通道）**
+
+| 位移 | 欄位 | 內容 |
+|---|---|---|
+| 0 | `version` u8 | 1 |
+| 1 | `state` u8 | `0 CLOSED`：頭盔的熱點關了或這一場不開，請停手（server 丟掉還沒處理的熱點資訊、停止重試與看門狗、這一輪不再回報；連線設定檔留著）。`1 QUERY`：熱點沒開，只問 host 現在有沒有辦法連（server 不建設定檔、不連線，只回 `READY` 或靜態原因） |
+
+server 以 TLV 的 `len ≥ 2` 接受，只讀前 2 B（之後加欄位要往後加）。server 一律以最後收到的一則（`HOTSPOT_INFO` 或這一則）為準：
+`HOTSPOT_INFO` 與 `QUERY` 各開始新的一輪（清掉 CLOSED）。
+
+**S→C `0x5508/0C HOTSPOT_STATUS`（12 B，reliable，走 ENet 控制通道；多位元組欄位 little-endian）**
+
+| 位移 | 欄位 | 內容 |
+|---|---|---|
+| 0 | `version` u8 | 1 |
+| 1 | `state` u8 | `VIPLE_VR_HS_*`，見下表 |
+| 2 | `flags` u8 | `0x01 SEEN`（有證據看得到熱點：連線走到關聯階段之後才失敗）、`0x02 RIVAL`（別的程式在連，server 退讓中）、`0x04 RESTARTED`（這一輪重啟過網卡） |
+| 3 | `attempts` u8 | 這一輪 server 自己發起的連線次數（飽和在 255） |
+| 4 | `restarts` u8 | 這一輪重啟網卡的次數 |
+| 5 | `reserved` u8 | 0 |
+| 6 | `elapsedDs` u16 LE | 收到熱點資訊到現在，0.1 秒為單位（飽和） |
+| 8 | `wlanReason` u32 LE | 最後一次失敗的 `WLAN_REASON_CODE` 原值，只給 log 用；0＝沒有 |
+
+| `state` | 值 | 意思 | 類別 |
+|---|---|---|---|
+| `UNSUPPORTED` | 1 | 這個平台不會連（Windows 以外的 server 一律回這個） | 靜態 |
+| `DISABLED` | 2 | `vr_hotspot_autoconnect` 關掉（server 不主動連；host 上別的程式仍可能自己連） | 靜態 |
+| `REMOTE` | 3 | 這一場經 Tailscale，不連 | 不記失敗 |
+| `NO_ADAPTER` | 4 | 沒有 wlanapi、沒有閒著的無線介面、設定檔建不起來、網卡被拔掉 | 靜態 |
+| `READY` | 5 | 只回答 `QUERY`：有閒著的無線介面 | — |
+| `TRYING` | 6 | 正在連（含退讓給別的程式） | 進行中 |
+| `JOINED` | 7 | 這張介面連上了這個 SSID | 進行中（不等於多連線已確認） |
+| `UNREACHABLE` | 8 | 判定連不到（不在範圍內） | 判定 |
+| `FAILED` | 9 | 看得到但連不上 | 判定 |
+| `LEFT` | 10 | 連上過、現在斷了，看門狗在處理 | 進行中 |
+| `GAVE_UP` | 11 | 重啟次數用完還是沒連回來 | — |
+
+- **什麼時候送**：這一輪的狀態、旗標或次數改變時送一則，之後每 5 秒重送同一則直到再變（server 約每 200 ms 檢查一次）。
+  收到 `CLOSED` 之後這一輪不再送。`DISABLED`／`REMOTE`／`UNSUPPORTED` 在收到 `HOTSPOT_INFO`／`QUERY` 當下就能決定，
+  其餘要等平台那一端（挑介面、建設定檔、連線）有結果。
+- **client 接收**：common-c 在控制接收執行緒認這一則（VR 與平面場次都認；TLV 的 `len ≥ 12` 才收，只讀前 12 B），只記下最新一則，
+  app 用 `LiGetVrHotspotStatus(&status, &seq)` 輪詢（還沒收到回 -1；`seq` 每收到一則 +1，重送的同一則也算）。
+  VR 場次這一則之後仍照常轉給 app 的 `vrMessage` 回呼。
+- **client 怎麼用**（`moonlight-qt/app/streaming/framehotspot.h`）：回報只用來提早關熱點、分類失敗與調整等待期限；
+  熱點留不留的依據仍是多連線確認（`LiVrLinkOnDedicated()`）。
+
+**新舊相容**
+
+| 組合 | 行為 |
+|---|---|
+| 新 client＋新 server | client 送 version 2 的 `HOTSPOT_INFO`（或 `HOTSPOT_STATE`）→ server 回報 |
+| 新 client＋舊 server（沒有 0x800） | client 送 version 1、**不送** `HOTSPOT_STATE`（舊 server 在 VR 場次會依 len 跳過，但在平面場次會把整則 0x5507 丟掉並記一行警告，所以一定要先看位元）；等待期限用固定值 |
+| 舊 client＋新 server | `HOTSPOT_INFO.version` 是 1、沒有 `HOTSPOT_STATE` → server 一則 `HOTSPOT_STATUS` 都不送；`HOTSPOT_INFO` 照舊處理（server 不檢查 version 的上限，`≥ 2` 才算認得回報） |
+| 有 0x800 但 client 收不到回報 | client 5 秒內沒有任何一則就退回固定的等待期限 |
 
 - **client 接收（`Q/ControlStream.c`）**：
   - 新增偽 typeIndex `IDX_VIPLE_VR_S2C = 0x100`（不進 packetTypes 表）；

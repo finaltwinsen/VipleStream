@@ -909,12 +909,8 @@ Flickable {
                                 var est = autoLocalResolution()
                                 if (est.width > 0 && est.height > 0 &&
                                         (StreamingPreferences.width !== est.width || StreamingPreferences.height !== est.height)) {
-                                    var oldDefault = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
-                                                                                            StreamingPreferences.height,
-                                                                                            StreamingPreferences.fps,
-                                                                                            StreamingPreferences.enableYUV444,
-                                                                                            StreamingPreferences.enableFrameInterpolation)
-                                    var wasDefault = StreamingPreferences.bitrateKbps === oldDefault
+                                    // §RES-BITRATE：跟同檔其他處一樣以旗標為準，不用「值＝舊預設」去猜
+                                    var wasDefault = StreamingPreferences.autoAdjustBitrate
                                     StreamingPreferences.width = est.width
                                     StreamingPreferences.height = est.height
                                     if (wasDefault) {
@@ -1433,12 +1429,8 @@ Flickable {
                                 }
                                 var estFps = autoLocalFps()
                                 if (StreamingPreferences.fps !== estFps) {
-                                    var oldDefault = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
-                                                                                            StreamingPreferences.height,
-                                                                                            StreamingPreferences.fps,
-                                                                                            StreamingPreferences.enableYUV444,
-                                                                                            StreamingPreferences.enableFrameInterpolation)
-                                    var wasDefault = StreamingPreferences.bitrateKbps === oldDefault
+                                    // §RES-BITRATE：以旗標為準
+                                    var wasDefault = StreamingPreferences.autoAdjustBitrate
                                     StreamingPreferences.fps = estFps
                                     if (wasDefault) {
                                         StreamingPreferences.bitrateKbps = StreamingPreferences.getDefaultBitrate(StreamingPreferences.width,
