@@ -731,6 +731,12 @@ namespace stream {
       // §P2（審查 11-20）：最近一次取樣的時刻（abr_sample_rtt 寫，握 abrMutex）。2D 的 run_abr_aimd 用它判斷樣本新不新：
       // ENet 的 ping 停了但 peer 還沒逾時的那段，abrRttLastMs 凍結在壅塞時的高值，不可以拿來當成「現在還在塞」。
       std::chrono::steady_clock::time_point abrRttSampleAt{};
+      // §ABR-TAKEOVER-HOLD（2026-11-22）：控制連線被同一個 client 換路接手時，舊 peer 的 RTT 不能再拿來判斷，
+      // 但壅塞本身還在。作廢前有樣本才把這三個設起來（握 abrMutex，和 abrRttSampled 一樣）：2D 在新連線的第一筆
+      // RTT 之前沿用壅塞等級，最長 rtt_hold_window(作廢前的 RTT)。真的斷線會清掉旗標，避免沒有連線時還維持舊等級。
+      bool abrRttTakeover{false};
+      std::chrono::steady_clock::time_point abrRttTakeoverAt{};
+      uint32_t abrRttTakeoverLastMs{0};
       bool abrRttWindowRolled{false};  // 兩段視窗是否已輪換過一次
       // §P2（2026-11-20）：2D 的壅塞等級、分級降幅、緊急降碼冷卻、塞車點記憶（規則見 abr_congestion.h）。
       // 握 abrMutex：run_abr_aimd（ENet control 執行緒或 picoquic IO 執行緒）每輪更新，
@@ -980,7 +986,9 @@ namespace stream {
   // VR handler 據此把 viaQuic 計入統計。
   static thread_local bool t_ctrl_via_quic = false;
 
-  void abr_forget_enet_rtt(session_t *session);  // §ABR-RTT-STALE（定義在 abr_sample_rtt 前）
+  // §ABR-RTT-STALE（定義在 abr_sample_rtt 前）。takeover：同一個 client 接手控制連線。
+  // 回傳 2D 接手維持窗的毫秒數（這次有記下舊樣本才非 0），給接手那一行印 log；斷線呼叫點用預設 false、忽略回傳值。
+  int abr_forget_enet_rtt(session_t *session, bool takeover = false);
 
   /**
    * First part of cipher must be struct of type control_encrypted_t
@@ -1082,7 +1090,12 @@ namespace stream {
         }
         enet_peer_reset(session_p->control.peer);
         session_p->control.peer = nullptr;
-        abr_forget_enet_rtt(session_p);  // §ABR-RTT-STALE
+        // §ABR-RTT-STALE／§ABR-TAKEOVER-HOLD：回傳非 0 才是 2D、而且舊樣本還新鮮或還在原本的維持窗裡。
+        // 樣本早就逾時、等級已歸零時不重新開窗。換的是控制路徑，等級先維持。
+        if (const int takeoverHoldMs = abr_forget_enet_rtt(session_p, true)) {
+          BOOST_LOG(info) << "[VIPLE-ABR] control takeover: congestion state is held until the new connection has an RTT sample (up to "
+                          << takeoverHoldMs << " ms)";
+        }
       }
 
       // Identify the connection by the unique connect data if the client supports it.
@@ -3320,11 +3333,38 @@ namespace stream {
   // 呼叫者需持有 video.abrMutex。
   // §ABR-RTT-STALE (ultrareview #7)：ENet peer 消失時作廢 RTT 樣本。abr_sample_rtt 只在
   // ENet ping 時取樣，peer 沒了之後 abrRttLastMs 凍結在斷線前（常是被壅塞撐大的值）→
-  // QUIC-only failover 期間 run_abr_aimd 每輪都判壅塞、回升被擋或一路砍到底。作廢後走
-  // 既有的 NO-SAMPLE 分支（不做延遲判斷）；ENet 重連後第一個 ping 重新取樣。
-  void abr_forget_enet_rtt(session_t *session) {
+  // QUIC-only failover 期間 run_abr_aimd 每輪都判壅塞、回升被擋或一路砍到底。作廢後不做
+  // 延遲判斷；ENet 重連後第一個 ping 重新取樣。
+  // §ABR-TAKEOVER-HOLD：takeover 為真是同一個 client 換了一條控制連線，壅塞沒有結束。
+  // 只有舊樣本還新鮮、或還在原本的維持窗內，才記下接手維持（新連線的第一筆 RTT 之前、最長一個維持窗，等級不歸零）。
+  // 樣本早就超過維持窗時等級已經歸零，再記會把窗重新打開。真的斷線不記，而且清掉先前的接手維持——
+  // 否則斷線後沒有樣本的那幾秒還會被當成還在塞。
+  // 回傳值只給接手那一行印 log：2D 且這次有記下時是維持窗的毫秒數（rtt_hold_window），其餘是 0。
+  int abr_forget_enet_rtt(session_t *session, bool takeover) {
     std::lock_guard<std::mutex> lk(session->video.abrMutex);
+    int holdLogMs = 0;
+    const auto now = std::chrono::steady_clock::now();
+    // 為什麼看新鮮與維持窗、不只看旗標：ENet 逾時前 abrRttSampled 還是 true，但 3～5 秒沒有新 ping 時等級已經歸 L0。
+    // 這時再記接手維持，等於把已經結束的壅塞重新開窗。
+    const bool sampleStillCounts =
+      ::abr_cong::rtt_sample_fresh(session->video.abrRttSampled, session->video.abrRttSampleAt, now) ||
+      ::abr_cong::rtt_sample_held(session->video.abrRttSampled, session->video.abrRttSampleAt, now, session->video.abrRttLastMs);
+    if (takeover && sampleStillCounts) {
+      session->video.abrRttTakeover = true;
+      session->video.abrRttTakeoverAt = now;
+      session->video.abrRttTakeoverLastMs = session->video.abrRttLastMs;
+      // VR 不組 cong_in_t，旗標留著也沒人讀；log 只在 2D 印，避免把 VR 換路說成桌面的等級維持
+      if (!session->vr) {
+        holdLogMs = (int) ::abr_cong::rtt_hold_window(session->video.abrRttTakeoverLastMs).count();
+      }
+    } else if (!takeover) {
+      // 真的斷線不保留：接手之後又斷線時，不能繼續沿用上一次的維持
+      session->video.abrRttTakeover = false;
+    }
+    // takeover 但樣本已經不新鮮、也不在維持窗：不記。第二次換路、中間沒有新樣本時，上面的條件不成立
+    // （旗標已清），沿用上一次記下的起算，不會因為一直換路把維持窗往後推。
     session->video.abrRttSampled = false;
+    return holdLogMs;
   }
 
   void abr_sample_rtt(session_t *session) {
@@ -3343,6 +3383,7 @@ namespace stream {
     uint32_t rtt = peer->roundTripTime;
     session->video.abrRttLastMs = rtt;
     session->video.abrRttSampled = true;
+    session->video.abrRttTakeover = false;  // §ABR-TAKEOVER-HOLD：新連線已有第一筆樣本，改看這筆，不再凍結接手前的等級
     auto now = std::chrono::steady_clock::now();
     session->video.abrRttSampleAt = now;  // §P2：樣本新鮮度（2D 的 run_abr_aimd 讀）
     if (!session->vr) {
@@ -3566,7 +3607,8 @@ namespace stream {
     const bool repairHold = repairPct >= kVrAbrRepairHoldPct;
     bool fastBitrateChanged = false;
     if (session->vr && session->video.vrAbrFast) {
-      session->video.vrAbrFast->set_applied_kbps(applied);
+      // §VR-ABR-RESTORE-STEP：帶上這一輪的時刻。沒有分步時這個參數沒有作用
+      session->video.vrAbrFast->set_applied_kbps(applied, abrNow);
       session->video.vrAbrFast->set_configured_kbps(session->video.configuredBitrateKbps);
       // 0 是有效的量測（沒有在補），要照實交進去，否則「平常的量」只會往上學、解除也只能靠逾時。
       // 這一輪沒結算（repairPct = −1）時才略過，累計值留到下一輪
@@ -3835,8 +3877,14 @@ namespace stream {
       in.sampled = rttFresh;  // 樣本太舊＝沒有樣本：等級歸 L0、不建議動作、IDR 提示歸 0
       // 審查 11-20 第二輪（D1／D3）：超過 3 秒、但還在 ENet 重傳可能擋住 ping 的範圍內（max(3 s, min(4×RTT, 4 s)+1 s)）時
       // 狀態維持、不做新動作；超過範圍才歸零。RTT 500 ms 以下時範圍就是 3 秒，行為不變
-      in.held = !rttFresh && ::abr_cong::rtt_sample_held(session->video.abrRttSampled, session->video.abrRttSampleAt, abrNow,
-                                                          session->video.abrRttLastMs);
+      // §ABR-TAKEOVER-HOLD：接手會把 abrRttSampled 清掉，rtt_sample_held 看的是「旗標還在、只是太舊」，不會成立。
+      // 改看接手當下記下的旗標與作廢前的 RTT。rttFresh 在 2D 要求 abrRttSampled，所以這種情況 in.sampled 一定是 false，
+      // held 才吃得到（congestion_t 只在 !sampled 時維持）。整段在 !session->vr 裡，VR 的 rttFresh 仍是 abrRttSampled，不走這裡。
+      in.held = (!rttFresh && ::abr_cong::rtt_sample_held(session->video.abrRttSampled, session->video.abrRttSampleAt, abrNow,
+                                                          session->video.abrRttLastMs)) ||
+                (!session->video.abrRttSampled &&
+                 ::abr_cong::rtt_takeover_held(session->video.abrRttTakeover, session->video.abrRttTakeoverAt, abrNow,
+                                               session->video.abrRttTakeoverLastMs));
       if (in.sampled) {
         const auto &tr = session->video.abrTrend;
         in.rtt_ms = session->video.abrRttLastMs;
@@ -3865,13 +3913,26 @@ namespace stream {
                         << "ms applied=" << applied << "kbps (src=" << src << ")";
       }
       if (co.held != co.prev_held) {
-        BOOST_LOG(info) << "[VIPLE-ABR] cong level " << (co.held ? "held" : "hold ended") << ": ENet RTT sample "
-                        << std::chrono::duration_cast<std::chrono::milliseconds>(abrNow - session->video.abrRttSampleAt).count()
-                        << " ms old (last " << session->video.abrRttLastMs << " ms, hold window "
-                        << ::abr_cong::rtt_hold_window(session->video.abrRttLastMs).count() << " ms) level=L" << (int) co.level
-                        << " idrGap=" << cong.idr_gap_hint() << "ms"
-                        << (co.held ? " - keeping the congestion state, no new cuts" :
-                                      (in.sampled ? " - sample is back" : " - treated as no sample from now on"));
+        // 為什麼分兩句：接手維持的年齡要從作廢那一刻算。沿用 abrRttSampleAt 會印出「樣本已經超過維持窗卻還在維持」，
+        // 跟上一行的 hold window 矛盾。樣本只是太舊、旗標還在的那種，文字維持原樣。
+        const bool takeoverHold = co.held && !session->video.abrRttSampled &&
+                                  ::abr_cong::rtt_takeover_held(session->video.abrRttTakeover, session->video.abrRttTakeoverAt, abrNow,
+                                                                session->video.abrRttTakeoverLastMs);
+        if (takeoverHold) {
+          BOOST_LOG(info) << "[VIPLE-ABR] cong level held: control connection was taken over "
+                          << std::chrono::duration_cast<std::chrono::milliseconds>(abrNow - session->video.abrRttTakeoverAt).count()
+                          << " ms ago (last RTT " << session->video.abrRttTakeoverLastMs << " ms, hold window "
+                          << ::abr_cong::rtt_hold_window(session->video.abrRttTakeoverLastMs).count()
+                          << " ms) level=L" << (int) co.level;
+        } else {
+          BOOST_LOG(info) << "[VIPLE-ABR] cong level " << (co.held ? "held" : "hold ended") << ": ENet RTT sample "
+                          << std::chrono::duration_cast<std::chrono::milliseconds>(abrNow - session->video.abrRttSampleAt).count()
+                          << " ms old (last " << session->video.abrRttLastMs << " ms, hold window "
+                          << ::abr_cong::rtt_hold_window(session->video.abrRttLastMs).count() << " ms) level=L" << (int) co.level
+                          << " idrGap=" << cong.idr_gap_hint() << "ms"
+                          << (co.held ? " - keeping the congestion state, no new cuts" :
+                                        (in.sampled ? " - sample is back" : " - treated as no sample from now on"));
+        }
       }
       if (co.point_expired) {
         BOOST_LOG(info) << "[VIPLE-ABR] cong point cleared: " << co.expired_kbps
@@ -3991,6 +4052,7 @@ namespace stream {
     } else {
       if (session->vr && session->video.vrAbrFast) {
         if (session->video.vrAbrFast->state() == vr::abr::fast_state_e::hold) {
+          // 分步拉回會在這裡停約 1.5 秒。只是不要走舊 AIMD 的零丟包回升；下面的 on_clean 仍要累積，下一階才拉得到。
           session->video.bitrateZeroLossStreak = 0;
         } else {
           session->video.bitrateZeroLossStreak++;
@@ -3999,19 +4061,39 @@ namespace stream {
         session->video.bitrateZeroLossStreak++;
       }
       // §VR-ABR-OUTAGE：斷訊後安靜 1 s、2 個乾淨視窗、影像確實在送達 → 直接拉回斷訊前的位元率（每次斷訊只拉一次）
+      // §VR-ABR-RESTORE-STEP：塞車事件只拉一階時，把實際拉到的值回報回去，事件先不要結束
       if (session->vr) {
         int restored = vr::abr::on_clean(session->video.vrOutage, target, maxBr, abrNow);
+        bool stepped = false;
         // §ABR-RESTORE-STABLE（11-08）：只拉回到斷訊前穩定撐住 10 秒的碼率；允許時一併清掉斷訊連刀觸發的防振盪上限
         if (restored > target && session->video.vrAbrFast) {
           const int wanted = restored;
-          restored = session->video.vrAbrFast->on_outage_restored(wanted, abrNow);
-          if (restored <= target) {
-            BOOST_LOG(info) << "[VIPLE-ABR] VR link clean again: not restoring " << wanted << " kbps (stable before outage="
-                            << session->video.vrAbrFast->stable_kbps() << " kbps, now " << target << ")";
+          restored = session->video.vrAbrFast->on_outage_restored(wanted, abrNow, session->video.vrOutage.episode_start);
+          // 只有「×2 這一階、還沒到控制器願意給的值」才回報部分拉回。穩定值或上限把一步拉回夾得比斷訊前低，
+          // 仍是拉完：照 actual<want 回報會清掉 restored_at，兩個乾淨視窗後又要一次，沒有塞車的斷訊就不再是一步拉回。
+          // 控制器拒絕（回 0）或一次給完：不呼叫 note_restore，on_clean 已經設好的 restored_at 留著，和以前一樣。
+          if (restored > target && restored < wanted && session->video.vrAbrFast->restore_stepped_this_call()) {
+            stepped = true;
+            vr::abr::note_restore(session->video.vrOutage, restored, wanted);
+            BOOST_LOG(info) << "[VIPLE-ABR] VR link clean again: stepping " << target << " -> " << restored
+                            << " kbps toward " << wanted << " (congestion episode)";
+          } else if (restored <= target) {
+            // 分步後又降碼：每個事件只印一次，而且不要蓋掉下面那行舊的 not restoring（回歸在認那一行）
+            if (session->video.vrAbrFast->restore_step_blocked_this_call()) {
+              if (session->video.vrAbrFast->take_restore_step_block_log()) {
+                BOOST_LOG(info) << "[VIPLE-ABR] VR link clean again: not restoring " << wanted
+                                << " kbps (a restore step in this congestion episode was followed by a cut)";
+              }
+            } else {
+              BOOST_LOG(info) << "[VIPLE-ABR] VR link clean again: not restoring " << wanted << " kbps (stable before outage="
+                              << session->video.vrAbrFast->stable_kbps() << " kbps, now " << target << ")";
+            }
           }
         }
         if (restored > target) {
-          BOOST_LOG(info) << "[VIPLE-ABR] VR link clean again: restoring " << target << " -> " << restored << " kbps (pre-outage bitrate)";
+          if (!stepped) {
+            BOOST_LOG(info) << "[VIPLE-ABR] VR link clean again: restoring " << target << " -> " << restored << " kbps (pre-outage bitrate)";
+          }
           target = restored;
           session->video.bitrateZeroLossStreak = 0;
         }
@@ -4068,7 +4150,8 @@ namespace stream {
       bitrateEvents->raise(target);
 
       if (session->vr && session->video.vrAbrFast) {
-        session->video.vrAbrFast->set_applied_kbps(target);
+        // 舊 AIMD 或上限把碼率降下來也要帶時刻，分步後 5 秒內的降碼才封鎖得準
+        session->video.vrAbrFast->set_applied_kbps(target, abrNow);
         const char *act = (target < applied) ? "cut" : (target > applied ? "ramp" : "hold");
         // 每套用一步只印這一行：以前同一步另有 [VIPLE-ABR] Bitrate 與 NvEnc 各一行，回升時每分鐘多一兩百行。
         // 到 state= 為止的欄位照舊（分析腳本比對行首）；後面是原本 Bitrate 行的內容。by＝這一步誰決定的：

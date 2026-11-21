@@ -608,6 +608,22 @@ TEST(AbrCongestionHold, HoldWindow) {
   EXPECT_FALSE(ac::rtt_sample_held(true, at + 1s, at, 1500));  // 時刻不合理
 }
 
+// §ABR-TAKEOVER-HOLD：接手把樣本作廢，維持從作廢那一刻起算（不必先等過 3 秒新鮮期）。
+// 1500 ms 的窗是 5 秒（公式在 HoldWindow）。forgot＝false 是真的斷線，不能把舊等級留著。
+TEST(AbrCongestionHold, TakeoverHold) {
+  const auto at = ac::steady::time_point {} + 1h;
+  const uint32_t rtt = 1500;
+  const auto win = ac::rtt_hold_window(rtt);
+  ASSERT_EQ(win.count(), 5000);
+
+  EXPECT_FALSE(ac::rtt_takeover_held(false, at, at + 1000ms, rtt));  // 不是接手作廢
+  EXPECT_TRUE(ac::rtt_takeover_held(true, at, at, rtt));  // 窗的起點（含）：作廢當下就要維持
+  EXPECT_TRUE(ac::rtt_takeover_held(true, at, at + 1000ms, rtt));  // 窗內
+  EXPECT_TRUE(ac::rtt_takeover_held(true, at, at + win, rtt));  // 剛好等於窗
+  EXPECT_FALSE(ac::rtt_takeover_held(true, at, at + win + 1ms, rtt));  // 超過窗，之後照沒有樣本
+  EXPECT_FALSE(ac::rtt_takeover_held(true, at + 1s, at, rtt));  // 時刻不合理
+}
+
 namespace {
   // 照 stream.cpp 的組法：新鮮＝完整輸入、維持段＝held、其餘＝空的（沒有樣本）
   ac::cong_in_t staged(const ac::cong_in_t &fresh, ac::steady::time_point at, ac::steady::time_point now, uint32_t rtt) {

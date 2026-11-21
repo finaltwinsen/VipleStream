@@ -203,6 +203,14 @@ namespace abr_cong {
     return sampled && now >= sampled_at && now - sampled_at > k_rtt_fresh && now - sampled_at <= rtt_hold_window(last_rtt_ms);
   }
 
+  /// §ABR-TAKEOVER-HOLD：控制連線被同一個 client 換路接手，舊的 RTT 樣本作廢，但壅塞沒有結束（只是換了一條控制路徑）。
+  /// 作廢後、新連線還沒有第一筆樣本之前，等級要沿用 held。時間從作廢那一刻起算——樣本是被拿掉的，不是還在等一支遲到的 ping，
+  /// 所以不像 rtt_sample_held 要先過 k_rtt_fresh。最長 rtt_hold_window(作廢前的 RTT)：逾時仍沒有樣本就照 NO-SAMPLE 歸零，
+  /// 避免連線真的沒了還一直撐著舊等級。now < forgot_at 是時刻不合理（呼叫端的 now 比作廢還早），不當成維持。
+  inline bool rtt_takeover_held(bool forgot, steady::time_point forgot_at, steady::time_point now, uint32_t last_rtt_ms) {
+    return forgot && now >= forgot_at && now - forgot_at <= rtt_hold_window(last_rtt_ms);
+  }
+
   /// 丟包分支與壅塞建議同一輪都要降碼時怎麼合併（stream.cpp 的 run_abr_aimd 用）
   struct loss_merge_t {
     int target = 0;  ///< 合併後的目標（還沒夾下限）
@@ -267,8 +275,9 @@ namespace abr_cong {
   /// 每一輪 ABR 的輸入。hold／trend_over／severe 是 run_abr_aimd 既有的判斷，這裡不重算
   struct cong_in_t {
     bool sampled = false;  ///< 有沒有 RTT 樣本；沒有就固定 L0、所有新規則不動作
-    /// sampled＝false 時才看：樣本只是被 ENet 重傳暫時擋住（rtt_sample_held）。等級與事件狀態維持原樣、不建議動作、
-    /// IDR 請求不降碼；超過維持範圍（呼叫端不再設這個旗標）才照「沒有樣本」歸零
+    /// sampled＝false 時才看：樣本只是被 ENet 重傳暫時擋住（rtt_sample_held），或控制連線被接手、新連線還沒有第一筆
+    /// 樣本（rtt_takeover_held）。等級與事件狀態維持原樣、不建議動作、IDR 請求不降碼；超過維持範圍（呼叫端不再設
+    /// 這個旗標）才照「沒有樣本」歸零
     bool held = false;
     uint32_t rtt_ms = 0;  ///< 最近一次 RTT
     uint32_t base_ms = 0;  ///< 基線（兩段 30 秒視窗最小值）
@@ -309,6 +318,7 @@ namespace abr_cong {
       // 審查 11-20 第二輪（D1／D3）：樣本只是被 ENet 重傳擋住——等級、L3 鎖定、排空基準、rtt_slow_、上一個 RTT
       // （IDR 提示用）全部維持，也不往下掉（below_ 計時不動）；不建議動作。凍結的值不拿來做新判斷，
       // 但也不因為「暫時量不到」就把深度壅塞當成乾淨網路（IDR 回到 250 ms 快速補送、下一個樣本來時重新數輪再砍一刀）
+      // §ABR-TAKEOVER-HOLD 也走這裡：控制連線被接手時樣本被作廢，但壅塞沒結束，呼叫端在維持窗內仍設 held。
       held_ = !in.sampled && in.held;
       if (held_) {
         out.held = true;
@@ -624,7 +634,7 @@ namespace abr_cong {
     steady::time_point last_update_ {};
     uint32_t last_rtt_ms_ = 0;
     bool rtt_slow_ = false;  ///< RTT ≥ 150 ms 開、< 100 ms 關：IDR 長間隔、IDR 請求降碼、拒補才生效
-    bool held_ = false;  ///< 最近一輪是 cong_in_t::held（樣本被 ENet 重傳擋住）
+    bool held_ = false;  ///< 最近一輪是 cong_in_t::held（樣本被 ENet 重傳擋住，或控制連線被接手、新樣本還沒到）
 
     bool deep_latched_ = false;
     int deep_rounds_ = 0;

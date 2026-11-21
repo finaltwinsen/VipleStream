@@ -3099,7 +3099,10 @@ namespace video {
       // datagram 丟失而無法組裝完整 IDR。15 frame 後（30fps 下
       // ≈500ms）cwnd 已充分爬升，自動送出第二個 IDR 確保 client
       // 收到完整關鍵幀。配合 §K.14 的握手後 cwnd 重設使用。
-      if (frame_nr == STARTUP_IDR_RETRY_FRAME) {
+      // 為什麼還要看 idr_emitted_once：client 的 IDR 若在第 16 幀前已由閘門送出，這裡再無條件補一張，
+      // 開場約 120 ms 內會編成三張關鍵幀。開場那張（frame 1）不設這個旗標，沒有 client 請求時重試照舊。
+      // idr_emitted_once 是這個 encode_run（一個 encoder 生命期）的區域變數，與上面的閘門是同一個 session。
+      if (frame_nr == STARTUP_IDR_RETRY_FRAME && !idr_emitted_once) {
         session->request_idr_frame();
         // §IDR-OPEN：這一張也是 host 自己重送的，不更新 last_idr_emit——原本會把冷卻從第 16 幀重新起算，
         // client 這時才建好解碼器的話，第一個請求又被壓一整個冷卻。
@@ -3107,6 +3110,9 @@ namespace video {
         if (vr_state) {
           BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=startup-retry f=" << frame_nr;
         }
+      } else if (frame_nr == STARTUP_IDR_RETRY_FRAME) {
+        BOOST_LOG(info) << "[VIPLE-IDR] §K.14 startup IDR retry skipped at frame " << frame_nr
+                        << " (a client-requested IDR was already sent)";
       }
 
       // VipleStream 2.0 §VR：encode 之前取最新的 tracking 樣本，連同 wave 狀態一起帶進這一幀

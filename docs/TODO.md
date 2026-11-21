@@ -784,6 +784,36 @@ lazy fetch 兩條路徑都已接 ModelFetcher（見總覽 §SLIM）。還沒做�
 
 - **串流底部撕裂（最下一排像素重複好幾排、間歇）** — 2026-06-18 雙來源讀碼確認 **HEAD（6f2411f9）無此機制**。FRUC 整條（NV12→RGB buffer／warp `frameHeight`／interp 輸出 buffer／libplacebo override 貼圖／present crop／原生 `vkfruc_interp.frag`）高度全鎖同一個 `frame->height`（`vkfruc.cpp:6972-73 / 11394 / 8556`，`plvk.cpp:5421 / 6300-02 / 6331`）；warp `clamp(y,0,frameHeight-1)`（`plvk.cpp:2522-39`）+ interp.frag 正規化 UV 取樣 + `clamp(y,0,srcH-1)`→ 顯示高度永不超過 buffer 高度，無從複製。y-clamp 自 **v1.3.113** 就在；FRUC renderer 無任何 commit 在修此 artifact（「23X 後變少」非 code fix，推測係 §FRUC-XPLAT 後 block-match 不再是主力引擎）。唯一理論殘餘（某解碼器把 `frame->height` 報成 coded 1088）會是**每幀穩定**、非間歇，與症狀不符故排除。實修代價：無（不需改）。
 
+### 2026-11-22 凌晨：v2.0.263 無人驗證＋回歸框架首輪（v2.0.265）
+
+回歸框架（`scripts/regress/`，本機）第一次真的跑場次；結果在 `scripts/benchmark/results/v263-r*`、`v265-r*`。
+
+已驗（host 2.0.263／2.0.265、頭盔最新建置、Windows client 2.0.263）：
+- 開場第一次 IDR 請求同一毫秒送出；只帶 `--resolution`／`--fps` 時手動碼率不變。
+- 熱點：自動開、host 約 8 秒加入、場次結束自動關（H-1）。
+- 2D：兩條連線都擋的斷訊下，IDR 延後補送、最小間隔 254 ms、連發退到 1500 ms（L2-4、L2-5）；請求到送出 0 ms（L2-3）；
+  只有上行慢時降碼、不需要 IDR（D2-1）；8% 隨機丟包零丟幀（L2-1、L2-2）。
+- VR：基準、8% 丟包、上行 250 ms、半速切換、限 40 Mbps（V-0、V-1、V-2、V-6、V-4）通過。
+- Linux x64 兩件在 CachyOS 容器編得過（2.0.263）。
+
+這一輪修的產品問題（都由回歸場次的 log 找到）：
+- §VR-ABR-RESTORE-STEP：頻寬真的變窄、碼率降下來變乾淨後，被當成斷訊結束一步拉回斷訊前的值（10→75 Mbps、0.35 秒後丟 48%）。
+  事件裡有過飽和降碼就改成每次最多加倍；某一階後 5 秒內又降碼，這個事件不再拉回。
+  **V-4 修正後限速期間拉回 0 次（原 1 次）、降碼次數 73→9；但分步那條路徑這場沒走到（被既有的 6 秒規則先擋下），只有單元測試驗過。**
+- §VR-ABR-CUT-NO-RAISE：舊 AIMD 砍半後，fast 控制器同一秒第二刀用舊基準算、或套用先前排入的目標，把碼率反拉高。V-4 反彈 2→0。
+- §ABR-TAKEOVER-HOLD：2D 控制連線在壅塞當下被同一 client 的新連線接手，壅塞等級立刻歸零；改成維持到新連線有樣本（上限 3～5 秒）。
+- 開場：client 的 IDR 已送出時，§K.14 第 16 幀不再多送一張（只改 encode_run；encode_run_sync 沒有對應狀態，未改）。
+
+待辦／待決定：
+- **host 本地訊號也要能觸發 2D 降碼**：BW2-1 第三輪限速一套上控制連線斷約 3 秒，client 的回報到不了，host 完全沒跑碼率判斷
+  （第一刀 2.9 秒、救不回 305 張；前兩輪控制連線沒斷時 0.1 秒、75～91 張）。host 自己 1 秒內就知道「link 2 cannot keep up」。待設計。
+- BW2-1 的「unrecoverable ≤ 5」門檻不現實（兩條各送一份、共用程序限速），等上一項做完用 `--baseline` 量過再定。
+- V-1b（兩條各丟 1/3）整場放棄 30 張、注入期間 0 張，門檻待基準。
+- 開發機當 server 的案例（H-2、H-3、*-dev）這一輪沒跑（開發機 server 有人在用，仍是 2.0.261）。
+- 還沒驗：頭盔輸入（鍵盤重開、失焦多按一下）、XR 桌面碼率、頭盔銳化（要注視點分塊的遊戲場次）、熱點請求交錯的時序。
+- §VR-ABR-RESTORE-STEP 與 §VR-ABR-CUT-NO-RAISE 改的是 VR 碼率控制核心，需要配戴確認體感。
+- `scripts/rps.sh`：腳本超過約 2 KB 時遠端回「命令列太長」而且不執行（host 探測因此一直是空的）；已改成長腳本走 stdin。
+
 ## 鐵律（任何改動都不能破壞）
 
 1. **Fallback 機制保留** — renderer cascade 失敗不能讓使用者 crash

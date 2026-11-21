@@ -146,3 +146,47 @@ TEST_F(AbrOutageTest, NoEpisodeNoChange) {
   EXPECT_EQ(abr::on_clean(s, 50000, kMax, t0), 50000);
   EXPECT_EQ(s.ref_kbps, 0);
 }
+
+// §VR-ABR-RESTORE-STEP：只拉到一部分時事件繼續；拉完之後，5 秒內又斷的打折規則照舊
+TEST_F(AbrOutageTest, PartialRestoreDoesNotFinishTheEpisode) {
+  EXPECT_EQ(abr::on_outage(s, 140000, t0), abr::outage_e::started);
+  EXPECT_EQ(s.episode_start, t0);
+  EXPECT_EQ(abr::on_clean(s, 10000, kMax, t0 + 1000ms), 10000);
+  ASSERT_EQ(abr::on_clean(s, 10000, kMax, t0 + 1500ms), 140000);
+  EXPECT_NE(s.restored_at, abr::steady::time_point {});
+
+  abr::note_restore(s, 20000, 140000);  // 控制器只拉到 20000
+  EXPECT_EQ(s.restored_at, abr::steady::time_point {});
+  EXPECT_EQ(s.clean_windows, 0);
+  EXPECT_EQ(s.ref_kbps, 140000);
+  EXPECT_EQ(s.episode_start, t0);
+
+  EXPECT_EQ(abr::on_clean(s, 20000, kMax, t0 + 2000ms), 20000);  // 重新累積，第 1 個還不拉
+  EXPECT_EQ(abr::on_clean(s, 20000, kMax, t0 + 2500ms), 140000);
+  abr::note_restore(s, 140000, 140000);  // 這次拉完
+  EXPECT_NE(s.restored_at, abr::steady::time_point {});
+
+  EXPECT_EQ(abr::on_outage(s, 140000, t0 + 3000ms), abr::outage_e::lowered);
+  EXPECT_EQ(s.ref_kbps, 105000);
+  EXPECT_EQ(s.episode_start, t0);  // 打折不是新事件，開始時刻留著
+}
+
+// 控制器回 0：這次拉回仍然算用掉，不會每個乾淨視窗都再要一次
+TEST_F(AbrOutageTest, RefusedRestoreStillConsumesTheAttempt) {
+  abr::on_outage(s, 140000, t0);
+  abr::on_clean(s, 10000, kMax, t0 + 1000ms);
+  ASSERT_EQ(abr::on_clean(s, 10000, kMax, t0 + 1500ms), 140000);
+  abr::note_restore(s, 0, 140000);
+  EXPECT_NE(s.restored_at, abr::steady::time_point {});
+  EXPECT_EQ(abr::on_clean(s, 10000, kMax, t0 + 2000ms), 10000);
+}
+
+TEST_F(AbrOutageTest, EpisodeStartIsSetWhenStartedAndClearedWhenEnded) {
+  EXPECT_EQ(abr::on_outage(s, 140000, t0), abr::outage_e::started);
+  EXPECT_EQ(s.episode_start, t0);
+  EXPECT_EQ(abr::on_outage(s, 80000, t0 + 500ms), abr::outage_e::extended);
+  EXPECT_EQ(s.episode_start, t0);  // 延長不重設
+  EXPECT_EQ(abr::on_clean(s, 10000, kMax, t0 + 31s), 10000);
+  EXPECT_EQ(s.ref_kbps, 0);
+  EXPECT_EQ(s.episode_start, abr::steady::time_point {});
+}

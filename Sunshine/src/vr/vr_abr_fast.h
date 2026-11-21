@@ -35,6 +35,8 @@
  *   - 斷訊後拉回（on_outage_restored，§VR-ABR-OUTAGE）：斷訊期間連降多刀會順便觸發防振盪上限（applied × 0.85），
  *     拉回斷訊前碼率時一起清掉，否則下一輪就被上限壓回斷訊時的低點（11-07：拉回 29.6 Mbps 後 0.6 秒被壓回 5.9 Mbps）。
  *     但只拉回到斷訊前穩定撐住 10 秒的碼率（§ABR-RESTORE-STABLE，11-08：拉回沒撐住過的 75 Mbps，3 分鐘內塞了 6 次）。
+ *     §VR-ABR-RESTORE-STEP（2026-11-22）：事件開始之後有過飽和降碼時，拉回改成每次最多翻倍。
+ *     翻倍後 5 秒內又降碼，同一個事件不再拉，交給一般回升慢慢爬。呼叫端沒帶事件開始時刻時與以前相同。
  *   - 防振盪懲罰：RAMP 中 5 秒內再次降碼 -> 上限暫壓至 applied * 0.85 維持 30 秒。
  *   - ※ 以下四組（§ABR-PERSIST-VERIFY、§ABR-STALL-LOSS、§ABR-OUTAGE-HOLD、§ABR-PATH-UPGRADE）都在 set_experimental_rules(true)
  *     才生效（host 設定 vr_abr_experimental，預設關）。11-13 晚的逐封包量測推翻了它們的前提：那條線路的丟包隨碼率上升
@@ -121,6 +123,14 @@ namespace vr::abr {
   constexpr auto k_fast_rates_fresh_window = std::chrono::milliseconds(1000);  ///< 送達速率有效視窗 1 秒
   constexpr double k_fast_rates_saturated_ratio = 1.05;  ///< 鏈路飽和判定倍數 1.05
   constexpr auto k_fast_saturated_no_restore = std::chrono::milliseconds(6000);  ///< 飽和降碼後這段時間內不做斷訊拉回
+  // §VR-ABR-RESTORE-STEP（2026-11-22）：6 秒過了只代表「先不要拉」，不代表容量回到斷訊前。
+  // 塞車把連線弄斷時，一次最多翻倍；翻倍後這段時間內又降碼，這個事件就不再拉。
+  constexpr int k_fast_restore_step_factor = 2;
+  constexpr auto k_fast_restore_step_guard = std::chrono::seconds(5);
+  // 分步之後若立刻回到 healthy，下一個 tick 會排回升。乾淨視窗約 500 ms 一個，
+  // 回升一開始就把 fastBitrateChanged 設上，呼叫端會跳過 on_clean，下一階永遠湊不滿。
+  // 停 1.5 秒：兩個乾淨視窗（約 1 秒）落在這段裡面，回升還沒開始。最後一階（已到目標）不走這段。
+  constexpr auto k_fast_restore_step_hold = std::chrono::milliseconds(1500);
   constexpr auto k_fast_saturated_startup_grace = std::chrono::seconds(10);     ///< 開場這段時間的飽和降碼不算
   constexpr double k_fast_shortfall_ratio = 1.15;    ///< §ABR-SHORTFALL：送出 ≥ 收到 × 1.15 才算排隊（避開無線零星掉包的小落差）
   constexpr int k_fast_shortfall_reports = 2;        ///< 連續幾次回報（每 500 ms 一次）
@@ -324,8 +334,20 @@ namespace vr::abr {
     }
     int rate_div() const { return rate_div_; }
 
-    void set_applied_kbps(int applied_kbps) {
+    /// now：這一拍的時刻。外部把碼率降下來時，分步拉回要用它判斷是不是在 5 秒內。
+    /// 不傳（{}）時先記住有降過，下一個帶時刻的入口再判斷。既有呼叫不傳，沒有分步時沒有作用。
+    /// 不在這裡改 fast_cut_base_applied_：這支函式也用來確認控制器自己的第一刀。基準跟著降的話，
+    /// 同一秒第二刀會從「第一刀之前的碼率 × 係數」變成「第一刀結果 × 係數」，既有的第二刀深度就變了。
+    /// 外部砍到比第二刀還低時，由 trigger_cut 用現在的 applied 再乘同一個係數。
+    void set_applied_kbps(int applied_kbps, steady::time_point now = {}) {
       if (applied_kbps > 0) {
+        if (applied_kbps < applied_kbps_) {
+          if (now != steady::time_point {}) {
+            note_restore_step_cut(now);
+          } else if (restore_step_at_ != steady::time_point {}) {
+            restore_step_external_drop_ = true;
+          }
+        }
         applied_kbps_ = applied_kbps;
       }
     }
@@ -378,8 +400,40 @@ namespace vr::abr {
     /// §VR-ABR-SATURATED-NO-RESTORE（11-09 午）：最近 k_fast_saturated_no_restore 內有過「鏈路飽和」的降碼（送出 ≥ 收到 × 1.05）
     /// -> 這次的「斷訊」是塞車造成的，不拉回。11-09 拳擊：碼率爬到 140 Mbps 塞爆轉接器那條（host「link 2 cannot keep up」），
     /// 降到 75 後被當成斷訊拉回 126、2 秒後又斷，自動半速啟動，最後 1 分半停在 72 Hz
-    int on_outage_restored(int kbps, steady::time_point now) {
+    ///
+    /// §VR-ABR-RESTORE-STEP（2026-11-22）：episode_start 是這次斷訊事件的開始（{}＝呼叫端不知道，回傳值與以前完全相同）。
+    /// 6 秒內不拉的規則不動。過了 6 秒，若事件開始之後有過飽和降碼，乾淨是因為碼率降下來了，容量還沒回來：
+    /// 允許的值再夾 applied × k_fast_restore_step_factor，一次最多翻倍，last_reason 用 outage-restore-step。
+    /// 翻倍之後 k_fast_restore_step_guard 內又降碼，同一個 episode_start 後續一律回 0，交給一般回升慢慢爬。
+    /// episode_start 換成另一個值才解除。事件裡沒有飽和降碼：仍是一步拉回。
+    /// 分步那一階先停在 hold（k_fast_restore_step_hold），不進 healthy，下一階的乾淨視窗才數得到。已到目標的那一階仍是 healthy。
+    /// 「換事件、延後的外部降碼、已封鎖」放在 6 秒冷卻之前：冷卻若搶先返回，封鎖那一行 log 印不出來。6 秒規則的條件不變。
+    int on_outage_restored(int kbps, steady::time_point now, steady::time_point episode_start = {}) {
+      restore_step_block_hit_ = false;
+      restore_stepped_hit_ = false;
       if (kbps <= 0) return 0;
+      // 為什麼排在 6 秒冷卻前面：分步後又飽和降碼時，冷卻會搶先回 0，restore_step_block_hit_ 設不了，
+      // 呼叫端只印得出舊的 not restoring（stable=0）。on_clean 已經把 restored_at 鎖上，同事件不會再進來，
+      // 「分步後又降碼」那一行就永遠不會出現。這三段的條件與以前相同，只是提早做；6 秒規則的條件不改。
+      const bool know_episode = episode_start != steady::time_point {};
+      if (know_episode && episode_start != restore_step_episode_) {
+        // 換成另一個事件：上一事件「分步後又降碼」的封鎖到此為止
+        restore_step_episode_ = episode_start;
+        restore_step_blocked_ = false;
+        restore_step_block_logged_ = false;
+        restore_step_at_ = {};
+        restore_step_external_drop_ = false;
+      }
+      if (restore_step_external_drop_) {
+        // set_applied 降了碼但沒帶時刻：用這次呼叫的時刻看是不是還在 5 秒內
+        restore_step_external_drop_ = false;
+        note_restore_step_cut(now);
+      }
+      if (know_episode && restore_step_blocked_) {
+        restore_step_block_hit_ = true;
+        return 0;
+      }
+      // 6 秒規則與改這條之前同一行：塞車剛發生，分步也不拉
       if (last_saturated_cut_ != steady::time_point {} && now >= last_saturated_cut_ && now - last_saturated_cut_ <= k_fast_saturated_no_restore) {
         return 0;
       }
@@ -392,7 +446,19 @@ namespace vr::abr {
       }
       const int allowed = std::min({kbps, ref, std::max(floor_kbps(), cap_kbps_)});
       if (allowed <= applied_kbps_) return 0;
-      kbps = allowed;
+      int granted = allowed;
+      bool stepped = false;
+      // 飽和降碼的時刻 >= 事件開始，才算這次事件裡的塞車。不知道事件開始、或那一刀在事件之前：一步拉回
+      if (know_episode && last_saturated_cut_ != steady::time_point {} && last_saturated_cut_ >= episode_start) {
+        // applied 與係數都是 int。直接乘在 applied > INT_MAX/2 時是有號溢位，繞成負數後會被當成已超過目標而拒絕拉回。
+        const long long step_cap = static_cast<long long>(applied_kbps_) * k_fast_restore_step_factor;
+        if (step_cap < static_cast<long long>(granted)) {
+          granted = static_cast<int>(step_cap);
+          stepped = true;
+        }
+      }
+      if (granted <= applied_kbps_) return 0;
+      kbps = granted;
       restore_time_ = now;
       penalty_until_ = {};
       loss_cap_until_ = {};
@@ -404,10 +470,44 @@ namespace vr::abr {
       if (last_congested_kbps_ > 0 && last_congested_kbps_ < applied_kbps_) {
         last_congested_kbps_ = applied_kbps_;
       }
-      state_ = fast_state_e::healthy;
-      hold_until_ = now;
-      last_reason_ = half_restore_ ? "outage-restore-half" : "outage-restore";
+      if (stepped) {
+        last_reason_ = "outage-restore-step";
+        restore_step_at_ = now;
+        restore_step_episode_ = episode_start;
+        restore_stepped_hit_ = true;  // 呼叫端靠這個回報「只拉了一階」，不要用回傳值比 want（穩定值也會比 want 小）
+        // 為什麼是 hold 不是 healthy：healthy 的下一個 tick 會排 RAMP。約 500 ms 後每輪都回升，
+        // run_abr_aimd 看到 fastBitrateChanged 就跳過 on_clean，第 2 階要的兩個乾淨視窗停在 1。
+        // hold 期間 tick 回 nullopt；hold 只清掉舊 AIMD 的零丟包累計，不擋下面的 on_clean。
+        state_ = fast_state_e::hold;
+        hold_until_ = now + k_fast_restore_step_hold;
+      } else if (know_episode) {
+        last_reason_ = half_restore_ ? "outage-restore-half" : "outage-restore";
+        // 這次已經拉到想拉的值，不是半路的一階。之後的降碼不要沿用上一階的 5 秒窗
+        restore_step_at_ = {};
+        restore_step_external_drop_ = false;
+        state_ = fast_state_e::healthy;
+        hold_until_ = now;
+      } else {
+        // 不知道事件開始：不碰分步狀態，回傳值與理由都和以前一樣
+        last_reason_ = half_restore_ ? "outage-restore-half" : "outage-restore";
+        state_ = fast_state_e::healthy;
+        hold_until_ = now;
+      }
       return applied_kbps_;
+    }
+    /// 這一輪 on_outage_restored 是因為「分步後又降碼」而回 0。呼叫端用它選 log，不要蓋掉舊的 not restoring 那一行
+    bool restore_step_blocked_this_call() const { return restore_step_block_hit_; }
+    /// 這一輪真的只拉了一階（applied×2 夾住，還沒到控制器願意給的值）。穩定值或上限把一步拉回夾低時是 false
+    bool restore_stepped_this_call() const { return restore_stepped_hit_; }
+    /// 同一個事件的封鎖 log 只印一次。回 true＝這次要印
+    bool take_restore_step_block_log() {
+      if (!restore_step_block_hit_ || restore_step_block_logged_) {
+        restore_step_block_hit_ = false;
+        return false;
+      }
+      restore_step_block_hit_ = false;
+      restore_step_block_logged_ = true;
+      return true;
     }
     /// 11-13 當天加的四組規則的總開關（見檔頭 ※）。預設關
     void set_experimental_rules(bool on) { experimental_rules_ = on; }
@@ -459,6 +559,13 @@ namespace vr::abr {
       delay_congestion_seen_ = false;
       half_restore_blocked_ = false;
       last_saturated_cut_ = {};
+      restore_step_at_ = {};
+      restore_step_episode_ = {};
+      restore_step_blocked_ = false;
+      restore_step_block_logged_ = false;
+      restore_step_block_hit_ = false;
+      restore_stepped_hit_ = false;
+      restore_step_external_drop_ = false;
       pe_last_cut_ = {};
       persist_off_until_ = {};
       pending_restore_.reset();
@@ -1005,6 +1112,11 @@ namespace vr::abr {
     /// 推進狀態機，返回新目標碼率（若無調整則為 std::nullopt）
     std::optional<int> tick(steady::time_point now) {
       last_tick_ = now;
+      if (restore_step_external_drop_) {
+        // 上一拍 set_applied 降了碼但沒帶時刻：用這一拍的時刻看是不是還在分步後的 5 秒內
+        restore_step_external_drop_ = false;
+        note_restore_step_cut(now);
+      }
       update_stable(now);
       // §VR-QP-ROOM 退避：碼率爬過原始塞車點的 1.15 倍都沒塞＝線路變好了，有效期縮回 150 秒
       if (ceiling_expire_ > k_fast_roomy_ceiling_expire && last_congested_kbps_ > 0 &&
@@ -1015,6 +1127,17 @@ namespace vr::abr {
       if (pending_target_.has_value()) {
         const int target = *pending_target_;
         pending_target_.reset();
+        // 為什麼丟掉：pending 是上一拍排好的降碼。中間若被外部砍得更低，套用會把碼率拉回去
+        // （V-4：applied 17187、pending 25781，下一輪印成 ramp ... by=fast）。
+        // applied 已經低於下限時仍套用，否則會停在技術下限以下。hold_until_ 沿用排這一刀時設的冷卻。
+        if (target > applied_kbps_ && applied_kbps_ >= floor_kbps()) {
+          current_target_kbps_ = applied_kbps_;
+          state_ = fast_state_e::hold;
+          return std::nullopt;
+        }
+        if (target < applied_kbps_) {
+          note_restore_step_cut(now);  // §VR-ABR-RESTORE-STEP：這一刀真的把碼率降下來了
+        }
         applied_kbps_ = target;
         state_ = fast_state_e::hold;
         return target;
@@ -1041,6 +1164,7 @@ namespace vr::abr {
 
       // 1b. 上限往下調時立刻壓到上限
       if (const int eff_cap = effective_cap_kbps(now); applied_kbps_ > eff_cap) {
+        note_restore_step_cut(now);  // 上限往下夾也是降碼：分步後 5 秒內一樣要停掉後續拉回
         applied_kbps_ = eff_cap;
         current_target_kbps_ = eff_cap;
         last_reason_ = "cap";
@@ -1087,6 +1211,9 @@ namespace vr::abr {
           if (new_target < applied_kbps_) {
             trim_origin_kbps_ = std::max(trim_origin_kbps_, applied_kbps_);
             last_trim_time_ = now;
+            // 為什麼不算降碼：這是畫面靜態、QP 很低時的省頻寬，不是網路塞車。
+            // 分步後 5 秒內若記成降碼，後續拉回整起被封鎖，log 還會寫成 followed by a cut。
+            // 上限下壓（上面的 cap）仍算降碼。
             applied_kbps_ = new_target;
             current_target_kbps_ = new_target;
             last_reason_ = "quality-trim";
@@ -1554,6 +1681,17 @@ namespace vr::abr {
       stable_kbps_ = lowest;
     }
 
+    /// §VR-ABR-RESTORE-STEP：分步拉回之後的這段時間裡碼率又下降，同一個事件不再拉回。
+    /// 沒有分步（restore_step_at_ 是空的）時直接返回，既有的降碼路徑不受影響。
+    void note_restore_step_cut(steady::time_point now) {
+      if (restore_step_at_ == steady::time_point {} || restore_step_blocked_) {
+        return;
+      }
+      if (now >= restore_step_at_ && now - restore_step_at_ <= k_fast_restore_step_guard) {
+        restore_step_blocked_ = true;
+      }
+    }
+
     void trigger_cut(severity_e sev, const char *reason, steady::time_point now) {
       // 降碼後的冷卻期（hold_until_ 之前）只接受嚴重訊號：送達率每 250 ms、LATCH 每 100 ms 就回報一次，
       // 中度訊號不擋的話一兩秒內會連降好幾次直接壓到下限（HOLD 期間只有嚴重訊號能二度打折）
@@ -1649,13 +1787,23 @@ namespace vr::abr {
 
       if (sev == severity_e::fast) {
         if (last_fast_cut_time_ != steady::time_point {} && now - last_fast_cut_time_ <= k_fast_cut_window) {
-          // 同一秒內第二次嚴重降碼
+          // 同一秒內第二次嚴重降碼。基準是這一秒第一刀之前的 applied。
+          // §VR-ABR-CUT-NO-RAISE（2026-11-22）：舊 AIMD 可能在兩刀之間把 applied 砍到比「基準 × 係數」還低。
+          // 用舊基準算出來會比現在的 applied 高，一行降碼反而把碼率拉回去（V-4：17187→48125、9402→18805）。
+          // 算出來不比目前 applied 低（含剛好相等）時，改以現在的 applied 乘同一個係數。
+          // 相等時用 <= 會得到 from_base 自己，這一拍又收到嚴重丟包卻完全沒再降。
+          // 沒有外部降碼時 from_base 仍低於 applied（基準 100000、第一刀後 75000、第二刀仍是 100000×0.60＝60000，不是 75000×0.60）。
+          // 中度降碼與視窗內第一刀乘的都是目前的 applied，係數小於 1，沒有「用舊基準算過了頭」這件事。
           if (has_saturated_rates) {
-            double factor = std::min(saturated_factor, 0.70);
-            new_target = static_cast<int>(std::round(fast_cut_base_applied_ * factor));
+            const double factor = std::min(saturated_factor, 0.70);
+            const int from_base = static_cast<int>(std::round(fast_cut_base_applied_ * factor));
+            const int from_applied = static_cast<int>(std::round(applied_kbps_ * factor));
+            new_target = from_base < applied_kbps_ ? from_base : from_applied;
           } else {
-            float factor = is_delay_trend ? 0.70f : 0.60f;
-            new_target = static_cast<int>(fast_cut_base_applied_ * factor);
+            const float factor = is_delay_trend ? 0.70f : 0.60f;
+            const int from_base = static_cast<int>(fast_cut_base_applied_ * factor);
+            const int from_applied = static_cast<int>(applied_kbps_ * factor);
+            new_target = from_base < applied_kbps_ ? from_base : from_applied;
           }
         } else {
           // 視窗內第一次嚴重降碼
@@ -1669,7 +1817,7 @@ namespace vr::abr {
           last_fast_cut_time_ = now;
         }
       } else {
-        // 中度降碼
+        // 中度降碼：係數乘的是目前的 applied，不會高過它
         if (has_saturated_rates) {
           new_target = static_cast<int>(std::round(applied_kbps_ * saturated_factor));
         } else {
@@ -1680,6 +1828,11 @@ namespace vr::abr {
       const int eff_cap = effective_cap_kbps(now);
       const int eff_floor = floor_kbps();
       new_target = std::clamp(new_target, eff_floor, eff_cap);
+      // §VR-ABR-CUT-NO-RAISE：降碼路徑的結果不得高於目前的 applied。
+      // 下限夾取只在 applied 已經低於下限時才會把它抬上去；那種情況仍守下限，否則會低於技術下限。
+      if (new_target > applied_kbps_ && applied_kbps_ >= eff_floor) {
+        new_target = applied_kbps_;
+      }
 
       if (persistent_cut && pe_last_cut_ != steady::time_point {}) {
         // 這一串實際降了一刀：刀數與累計降幅（只算 +persistent 自己降的，quality-trim 之類不算）
@@ -1803,8 +1956,16 @@ namespace vr::abr {
     std::deque<std::pair<steady::time_point, int>> applied_hist_;
     int stable_kbps_ = 0;
     bool delay_congestion_seen_ = false;  ///< §VR-ABR-STARTUP-RESTORE：這一場曾因延遲上升降碼
-    steady::time_point last_saturated_cut_ {};
-    steady::time_point first_rates_time_ {};  ///< 第一次收到送達速率（≈ 串流開始）  ///< §VR-ABR-SATURATED-NO-RESTORE：最近一次鏈路飽和時的降碼
+    steady::time_point last_saturated_cut_ {};  ///< §VR-ABR-SATURATED-NO-RESTORE：最近一次鏈路飽和時的降碼
+    // §VR-ABR-RESTORE-STEP：最近一次「只拉了一階」的時刻。空的＝沒有待觀察的分步
+    steady::time_point restore_step_at_ {};
+    steady::time_point restore_step_episode_ {};  ///< 這組封鎖屬於哪個事件；換成別的值就解除
+    bool restore_step_blocked_ = false;
+    bool restore_step_block_logged_ = false;  ///< 這個事件的封鎖 log 已經交出去印過
+    bool restore_step_block_hit_ = false;     ///< 這一輪 on_outage_restored 是因為封鎖而回 0
+    bool restore_stepped_hit_ = false;        ///< 這一輪真的只拉了一階（×2 夾住）
+    bool restore_step_external_drop_ = false; ///< set_applied 降了碼但沒帶時刻
+    steady::time_point first_rates_time_ {};  ///< 第一次收到送達速率（≈ 串流開始）
     bool half_restore_ = false;           ///< 最近一次拉回是「沒有穩定值、拉回一半」
     bool half_restore_blocked_ = false;   ///< 拉回一半後很快又降碼：這一場不再拉回一半
 

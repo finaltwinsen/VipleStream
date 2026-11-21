@@ -35,6 +35,28 @@ namespace {
       }
     }
   };
+
+  /// 穩定在 75 Mbps、事件開始之後有過飽和降碼、applied 被放到 10 Mbps。給分步拉回的測試用。
+  struct congestion_episode_t {
+    fast::fast_controller_t c{kConfigured100Mbps};
+    fast::steady::time_point episode;
+    fast::steady::time_point t_sat;
+
+    explicit congestion_episode_t(fast::steady::time_point t0)
+        : episode(t0 + 13s), t_sat(t0 + 14s) {
+      c.set_cap_kbps(75000);
+      c.set_applied_kbps(75000);
+      c.on_rates(75000, 75000, t0);  // 開場起點：14 秒後的飽和降碼才算數（開場 10 秒內不算）
+      for (auto t = t0; t <= t0 + 12s; t += 100ms) {
+        c.set_applied_kbps(75000);
+        c.tick(t);
+      }
+      c.on_rates(40000, 75000, t_sat);  // 收 40、送 75：飽和
+      c.on_loss(12, t_sat);
+      c.tick(t_sat);
+      c.set_applied_kbps(10000);
+    }
+  };
 }  // namespace
 
 // ==============================================================================
@@ -126,6 +148,121 @@ TEST_F(VrAbrFastTest, SecondCriticalCutWithinSameSecondCutsToSixtyPercent) {
   ASSERT_TRUE(res2.has_value());
   EXPECT_EQ(*res2, 60000);  // 基準 100000 * 0.60 = 60000
   EXPECT_STREQ(c.last_reason(), "drop-block+delay");
+}
+
+// §VR-ABR-CUT-NO-RAISE：第一刀之後舊 AIMD 把 applied 砍半，同一秒第二刀不可用舊基準把碼率拉高。
+// 要繼續降（以砍半後的 applied × 同一個 0.60），不是停在原地，更不是拉回 60000。
+TEST_F(VrAbrFastTest, SecondCriticalCutAfterExternalHalveStaysBelowApplied) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
+
+  const auto t1 = t0 + 10000ms;
+  c.on_loss(2, t1);
+  auto res1 = c.tick(t1);
+  ASSERT_TRUE(res1.has_value());
+  EXPECT_EQ(*res1, 75000);  // 第一刀：100000 × 0.75，基準留在 100000
+
+  c.set_applied_kbps(37500);  // 舊 AIMD（丟包 ≥ 30%）再砍半
+
+  const auto t2 = t1 + 500ms;
+  c.on_drop_block(t2);
+  auto res2 = c.tick(t2);
+  ASSERT_TRUE(res2.has_value());
+  EXPECT_LT(*res2, 37500);
+  EXPECT_EQ(*res2, static_cast<int>(37500 * 0.60f));  // 不是舊基準 100000 × 0.60 = 60000
+  EXPECT_STREQ(c.last_reason(), "drop-block+delay");
+}
+
+// 同一條規則的飽和分支（V-4：17187 被拉回 48125）。收／送 = 0.8 時飽和係數約 0.76，
+// 第二刀係數是 min(飽和係數, 0.70)＝0.70。外部砍半之後要從砍半後的 applied 再乘 0.70。
+TEST_F(VrAbrFastTest, SecondSaturatedCutAfterExternalHalveStaysBelowApplied) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(100000);
+  c.set_applied_kbps(100000);
+  c.on_rates(100000, 100000, t0);  // 開場起點，後面的飽和降碼才算數
+  const auto t1 = t0 + 20s;
+  c.on_rates(80000, 100000, t1);  // 收 80、送 100
+  c.on_loss(12, t1);
+  auto res1 = c.tick(t1);
+  ASSERT_TRUE(res1.has_value());
+
+  const int half = *res1 / 2;
+  c.set_applied_kbps(half);
+
+  const auto t2 = t1 + 500ms;
+  c.on_loss(12, t2);
+  auto res2 = c.tick(t2);
+  ASSERT_TRUE(res2.has_value());
+  EXPECT_LT(*res2, half);
+  EXPECT_EQ(*res2, static_cast<int>(std::round(half * 0.70)));
+}
+
+// §VR-ABR-CUT-NO-RAISE：pending 是上一拍排好的降碼。外部把 applied 砍到 pending 以下之後，
+// tick 不可以把那個 pending 套回去把碼率拉高。
+TEST_F(VrAbrFastTest, PendingCutDoesNotRaiseAfterExternalDrop) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
+
+  const auto t_loss = t0 + 10000ms;
+  c.on_loss(2, t_loss);           // 排入 100000 × 0.75＝75000，applied 還是 100000
+  c.set_applied_kbps(50000);      // 外部砍到 pending 以下
+  const int before = c.applied_kbps();
+  auto r = c.tick(t_loss);
+  EXPECT_FALSE(r.has_value());
+  EXPECT_EQ(c.applied_kbps(), before);
+  EXPECT_EQ(c.applied_kbps(), 50000);
+  EXPECT_EQ(c.state(), fast::fast_state_e::hold);
+}
+
+// 同秒第二刀：外部降碼剛好落在「基準 × 係數」上時，仍要以現在的 applied 再乘同一個係數，不能停在原地。
+TEST_F(VrAbrFastTest, SecondCriticalCutAtFromBaseKeepsCutting) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  make_trend_overuse(c, t0);
+  c.tick(t0 + 7000ms);
+  c.set_applied_kbps(100000);
+
+  const auto t1 = t0 + 10000ms;
+  c.on_loss(2, t1);
+  auto res1 = c.tick(t1);
+  ASSERT_TRUE(res1.has_value());
+  EXPECT_EQ(*res1, 75000);
+
+  const int from_base = static_cast<int>(100000 * 0.60f);  // 第二刀用的舊基準 × 0.60
+  c.set_applied_kbps(from_base);
+
+  const auto t2 = t1 + 500ms;
+  c.on_drop_block(t2);
+  auto res2 = c.tick(t2);
+  ASSERT_TRUE(res2.has_value());
+  EXPECT_EQ(*res2, static_cast<int>(from_base * 0.60f));
+  EXPECT_LT(*res2, from_base);
+}
+
+// 飽和分支的同一種邊界：from_base 剛好等於 applied 時，第二刀要繼續降。
+TEST_F(VrAbrFastTest, SecondSaturatedCutAtFromBaseKeepsCutting) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(100000);
+  c.set_applied_kbps(100000);
+  c.on_rates(100000, 100000, t0);
+  const auto t1 = t0 + 20s;
+  c.on_rates(80000, 100000, t1);  // 飽和係數 0.76，第二刀係數是 min(0.76, 0.70)＝0.70
+  c.on_loss(12, t1);
+  auto res1 = c.tick(t1);
+  ASSERT_TRUE(res1.has_value());
+
+  const int from_base = static_cast<int>(std::round(100000 * 0.70));
+  c.set_applied_kbps(from_base);
+
+  const auto t2 = t1 + 500ms;
+  c.on_loss(12, t2);
+  auto res2 = c.tick(t2);
+  ASSERT_TRUE(res2.has_value());
+  EXPECT_EQ(*res2, static_cast<int>(std::round(from_base * 0.70)));
+  EXPECT_LT(*res2, from_base);
 }
 
 // 4. HOLD 期間禁止任何碼率回升
@@ -1056,6 +1193,214 @@ TEST_F(VrAbrFastTest, NoOutageRestoreRightAfterSaturatedCut) {
   c.set_applied_kbps(40000);
   EXPECT_EQ(c.on_outage_restored(90000, t1 + 3000ms), 0);
   EXPECT_EQ(c.on_outage_restored(90000, t1 + 8000ms), 0);  // 沒有穩定值、又塞過：也不拉回一半
+}
+
+// §VR-ABR-RESTORE-STEP：塞車事件過了 6 秒也不一步拉回，每次最多翻倍，直到達到目標
+TEST_F(VrAbrFastTest, CongestionEpisodeRestoreDoublesUntilTarget) {
+  congestion_episode_t f(t0);
+  ASSERT_EQ(f.c.stable_kbps(), 75000);
+  ASSERT_EQ(f.c.applied_kbps(), 10000);
+
+  EXPECT_EQ(f.c.on_outage_restored(75000, f.t_sat + 3000ms, f.episode), 0);  // 6 秒內仍不拉
+
+  const auto t_step = f.t_sat + 7000ms;
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_step, f.episode), 20000);
+  EXPECT_STREQ(f.c.last_reason(), "outage-restore-step");
+  EXPECT_TRUE(f.c.restore_stepped_this_call());  // stream 靠這個回報部分拉回，不靠回傳值比 want
+  EXPECT_EQ(f.c.applied_kbps(), 20000);
+
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_step + 100ms, f.episode), 40000);
+  EXPECT_STREQ(f.c.last_reason(), "outage-restore-step");
+  EXPECT_TRUE(f.c.restore_stepped_this_call());
+
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_step + 200ms, f.episode), 75000);
+  EXPECT_STREQ(f.c.last_reason(), "outage-restore");  // 這一階已經到目標，不再是分步
+  EXPECT_FALSE(f.c.restore_stepped_this_call());
+}
+
+// 分步後 5 秒內外部把碼率降下來：同一個事件之後回 0；換一個 episode_start 才可以再拉
+TEST_F(VrAbrFastTest, RestoreStepCutBlocksSameEpisodeUntilANewOne) {
+  congestion_episode_t f(t0);
+  ASSERT_EQ(f.c.stable_kbps(), 75000);
+  const auto t_step = f.t_sat + 7000ms;
+  ASSERT_EQ(f.c.on_outage_restored(75000, t_step, f.episode), 20000);
+
+  f.c.set_applied_kbps(12000, t_step + 1s);  // 外部降碼，穩定值不會被清掉
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_step + 1s, f.episode), 0);
+  EXPECT_TRUE(f.c.restore_step_blocked_this_call());
+  EXPECT_TRUE(f.c.take_restore_step_block_log());
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_step + 1500ms, f.episode), 0);
+  EXPECT_TRUE(f.c.restore_step_blocked_this_call());
+  EXPECT_FALSE(f.c.take_restore_step_block_log());  // 同一個事件只記一次
+
+  // 新事件的起點晚於那次飽和降碼：不是塞車事件，旗標已清，一步拉回穩定值
+  const auto episode2 = f.t_sat + 1s;
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_step + 2s, episode2), 75000);
+  EXPECT_STREQ(f.c.last_reason(), "outage-restore");
+}
+
+// 分步後 5 秒內控制器自己的降碼也封鎖同一個事件。穩定值會被既有的「拉回失敗」清掉，
+// 重新撐住之後同一個事件仍回 0；換事件才拉得回去。
+TEST_F(VrAbrFastTest, FastCutAfterRestoreStepBlocksSameEpisode) {
+  congestion_episode_t f(t0);
+  const auto t_step = f.t_sat + 7000ms;
+  ASSERT_EQ(f.c.on_outage_restored(75000, t_step, f.episode), 20000);
+
+  const auto t_cut = t_step + 500ms;
+  f.c.on_loss(12, t_cut);
+  auto cut = f.c.tick(t_cut);
+  ASSERT_TRUE(cut.has_value());
+  EXPECT_EQ(*cut, 15000);  // 20000 × 0.75，收送樣本已經超過 1 秒，不是飽和刀
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_cut + 100ms, f.episode), 0);
+
+  const int held = f.c.applied_kbps();
+  for (auto t = t_cut; t <= t_cut + 12s; t += 100ms) {
+    f.c.set_applied_kbps(held);
+    f.c.tick(t);
+  }
+  ASSERT_EQ(f.c.stable_kbps(), held);
+  f.c.set_applied_kbps(held / 2);
+  // 穩定值回來了、也過了飽和降碼的 6 秒，仍因同一個事件的旗標拒絕
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_cut + 13s, f.episode), 0);
+  const auto episode2 = t_cut + 13s;
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_cut + 13s, episode2), held);
+}
+
+// 事件裡沒有飽和降碼：有 episode_start 也是一步拉回
+TEST_F(VrAbrFastTest, OutageRestoreWithoutSaturatedCutIsOneShot) {
+  fast::fast_controller_t c(kConfigured100Mbps);
+  c.set_cap_kbps(75000);
+  c.set_applied_kbps(75000);
+  for (auto t = t0; t <= t0 + 12s; t += 100ms) {
+    c.set_applied_kbps(75000);
+    c.tick(t);
+  }
+  ASSERT_EQ(c.stable_kbps(), 75000);
+  c.set_applied_kbps(10000);
+  EXPECT_EQ(c.on_outage_restored(75000, t0 + 13s, t0 + 13s), 75000);
+  EXPECT_STREQ(c.last_reason(), "outage-restore");
+}
+
+// 飽和降碼在事件開始之前：這次事件裡沒有那一刀，一步拉回
+TEST_F(VrAbrFastTest, SaturatedCutBeforeEpisodeStartRestoresInOneStep) {
+  congestion_episode_t f(t0);
+  ASSERT_EQ(f.c.stable_kbps(), 75000);
+  const auto later = f.t_sat + 1s;
+  EXPECT_EQ(f.c.on_outage_restored(75000, f.t_sat + 7000ms, later), 75000);
+  EXPECT_STREQ(f.c.last_reason(), "outage-restore");
+}
+
+// 不傳 episode_start：過了 6 秒、有穩定值時仍一步拉回（既有呼叫的結果不變）
+TEST_F(VrAbrFastTest, OutageRestoreWithoutEpisodeStartMatchesPreviousBehavior) {
+  congestion_episode_t f(t0);
+  ASSERT_EQ(f.c.stable_kbps(), 75000);
+  ASSERT_EQ(f.c.applied_kbps(), 10000);
+  EXPECT_EQ(f.c.on_outage_restored(75000, f.t_sat + 7000ms), 75000);
+  EXPECT_STREQ(f.c.last_reason(), "outage-restore");
+}
+
+// 分步後先停 hold：每 500 ms 的 tick（乾淨視窗）在 1.5 秒內不得回升，之後第 2 階才是 applied×2。
+// 最後一階到達目標，回到 healthy。
+TEST_F(VrAbrFastTest, SteppedRestoreHoldBlocksRampUntilSecondStep) {
+  congestion_episode_t f(t0);
+  const auto t_step = f.t_sat + 7000ms;
+  ASSERT_EQ(f.c.on_outage_restored(75000, t_step, f.episode), 20000);
+  EXPECT_EQ(f.c.state(), fast::fast_state_e::hold);
+  EXPECT_EQ(f.c.applied_kbps(), 20000);
+
+  for (int i = 1; i <= 3; ++i) {  // +500、+1000、+1500 ms，涵蓋整個維持窗
+    auto r = f.c.tick(t_step + i * 500ms);
+    EXPECT_FALSE(r.has_value()) << "tick +" << (i * 500) << " ms";
+    EXPECT_EQ(f.c.applied_kbps(), 20000);
+  }
+
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_step + 1600ms, f.episode), 40000);
+  EXPECT_TRUE(f.c.restore_stepped_this_call());
+  EXPECT_EQ(f.c.state(), fast::fast_state_e::hold);
+
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_step + 1700ms, f.episode), 75000);
+  EXPECT_FALSE(f.c.restore_stepped_this_call());
+  EXPECT_STREQ(f.c.last_reason(), "outage-restore");
+  EXPECT_EQ(f.c.state(), fast::fast_state_e::healthy);
+}
+
+// 分步後 5 秒內的 quality-trim 是省頻寬，不是降碼，不可以封鎖下一階。
+TEST_F(VrAbrFastTest, QualityTrimAfterRestoreStepDoesNotBlockNextStep) {
+  congestion_episode_t f(t0);
+  const auto t_step = f.t_sat + 7000ms;
+  ASSERT_EQ(f.c.on_outage_restored(75000, t_step, f.episode), 20000);
+
+  const auto t_trim = t_step + 2s;  // hold 1.5 秒已過，tick 才會做到 quality-trim
+  for (auto t = t_trim - 10s; t <= t_trim; t += 1s) {
+    f.c.on_quality(600, 1, t);  // QP 6，間隔 1 秒小於 1.5 秒的新鮮窗，連續滿 10 秒
+  }
+  auto trim = f.c.tick(t_trim);
+  ASSERT_TRUE(trim.has_value());
+  EXPECT_EQ(*trim, 19000);  // round(20000 × 0.95)
+  EXPECT_STREQ(f.c.last_reason(), "quality-trim");
+
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_trim, f.episode), 38000);
+  EXPECT_TRUE(f.c.restore_stepped_this_call());
+  EXPECT_FALSE(f.c.restore_step_blocked_this_call());
+}
+
+// 上限往下夾仍算降碼：分步後 5 秒內要把同一個事件的後續拉回停掉。
+TEST_F(VrAbrFastTest, CapCutAfterRestoreStepStillBlocks) {
+  congestion_episode_t f(t0);
+  const auto t_step = f.t_sat + 7000ms;
+  ASSERT_EQ(f.c.on_outage_restored(75000, t_step, f.episode), 20000);
+
+  f.c.set_cap_kbps(15000);
+  auto cut = f.c.tick(t_step + 100ms);
+  ASSERT_TRUE(cut.has_value());
+  EXPECT_EQ(*cut, 15000);
+
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_step + 200ms, f.episode), 0);
+  EXPECT_TRUE(f.c.restore_step_blocked_this_call());
+}
+
+// 分步後又飽和降碼，6 秒冷卻還沒過也要標成封鎖，呼叫端才印得出那一行。
+TEST_F(VrAbrFastTest, BlockedRestoreInsideSaturatedCooldownFlagsTheBlock) {
+  congestion_episode_t f(t0);
+  const auto t_step = f.t_sat + 7000ms;
+  ASSERT_EQ(f.c.on_outage_restored(75000, t_step, f.episode), 20000);
+
+  const auto t_cut = t_step + 500ms;
+  f.c.on_rates(10000, 20000, t_cut);  // 新鮮的飽和收送，這一刀才會改寫 last_saturated_cut_
+  f.c.on_loss(12, t_cut);
+  auto cut = f.c.tick(t_cut);
+  ASSERT_TRUE(cut.has_value());
+  EXPECT_LT(*cut, 20000);
+
+  const auto t_ask = t_cut + 2000ms;  // 仍在這次飽和降碼的 6 秒內，也在分步後的 5 秒內
+  EXPECT_EQ(f.c.on_outage_restored(75000, t_ask, f.episode), 0);
+  EXPECT_TRUE(f.c.restore_step_blocked_this_call());
+}
+
+// applied > INT_MAX/2 時，applied×2 用 32 位元會溢位成負數、拉回被拒絕。64 位元計算後應一步給到目標。
+TEST_F(VrAbrFastTest, RestoreStepMultiplyStaysPositiveAboveIntMaxHalf) {
+  constexpr int kBig = 2000000000;
+  constexpr int kApplied = 1500000000;  // > INT_MAX/2，×2 超出 int
+  static_assert(kApplied > 2147483647 / 2, "must overflow a 32-bit multiply");
+  fast::fast_controller_t c(kBig);
+  c.on_rates(kBig, kBig, t0);
+  for (auto t = t0; t <= t0 + 12s; t += 100ms) {
+    c.set_applied_kbps(kBig);
+    c.tick(t);
+  }
+  ASSERT_EQ(c.stable_kbps(), kBig);
+
+  const auto t_cut = t0 + 20s;
+  const auto episode = t_cut - 1s;
+  c.on_rates(kBig / 2, kBig, t_cut);
+  c.on_loss(12, t_cut);
+  auto cut = c.tick(t_cut);
+  ASSERT_TRUE(cut.has_value());
+  c.set_applied_kbps(kApplied);
+
+  EXPECT_EQ(c.on_outage_restored(kBig, t_cut + 7s, episode), kBig);
+  EXPECT_FALSE(c.restore_stepped_this_call());
+  EXPECT_STREQ(c.last_reason(), "outage-restore");
 }
 
 // §ABR-LOSSRATE：零星（每 15 秒一張）不觸發

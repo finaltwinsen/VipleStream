@@ -18,6 +18,12 @@
  *   - client 重送的 LOSS（RESEND）只延長事件，不開新事件、不打折。30 s 沒有斷訊訊號 → 事件結束。
  * 真的壅塞（位元率超過連線容量）時丟包比例通常在個位數，照原本的 AIMD 處理。
  *
+ * §VR-ABR-RESTORE-STEP（2026-11-22）：塞車時碼率降下來也會讓視窗變乾淨，不代表容量回到斷訊前。
+ * on_clean 仍先假設整段拉完（沒呼叫 note_restore 的舊路徑結果不變）。呼叫端把實際拉到的值傳回來：
+ * 比想拉的少＝只拉了一階，清掉 restored_at、乾淨視窗歸零，事件繼續，要再累積 2 個乾淨視窗才拉下一階。
+ * 回報 0（控制器拒絕）或已經拉到想拉的值＝這次拉回完成，和以前一樣。
+ * episode_start 是事件開始的時刻，讓碼率控制器分辨「這次事件裡有沒有飽和降碼」。
+ *
  * 純函式、不碰 session／log，可單元測試；呼叫端（stream.cpp）持 abrMutex 呼叫並負責記 log。
  */
 #pragma once
@@ -45,6 +51,7 @@ namespace vr::abr {
     steady::time_point restored_at {};  ///< 這次斷訊之後已拉回的時間；{}＝還沒拉回
     int clean_windows = 0;  ///< 最後一個斷訊訊號之後的乾淨視窗數
     int min_outage_applied = 0;  ///< 這次事件裡出現斷訊訊號時的最低已套用位元率
+    steady::time_point episode_start {};  ///< §VR-ABR-RESTORE-STEP：事件開始；{}＝不在事件中。之後的飽和降碼才算這次塞車
     // 事件外也一直維護
     std::uint32_t last_latch_frame = 0;
     steady::time_point last_progress {};  ///< 最近一次 LATCH 幀號前進；{}＝從沒收過 LATCH
@@ -63,6 +70,7 @@ namespace vr::abr {
     s.restored_at = {};
     s.clean_windows = 0;
     s.min_outage_applied = 0;
+    s.episode_start = {};  // 事件結束後不要把舊的開始時刻拿去跟後來的飽和降碼比
   }
 
   /// client LATCH（約 100 ms 一筆）：幀號前進＝影像確實在送達。
@@ -104,6 +112,7 @@ namespace vr::abr {
       }
       end_episode(s);
       s.ref_kbps = std::max(ref, 1);
+      s.episode_start = now;  // §VR-ABR-RESTORE-STEP：這個時刻之後的飽和降碼才算這次事件裡的塞車
       r = outage_e::started;
     }
     s.min_outage_applied = s.min_outage_applied == 0 ? applied_kbps : std::min(s.min_outage_applied, applied_kbps);
@@ -114,6 +123,8 @@ namespace vr::abr {
   }
 
   /// 乾淨視窗（零丟包回升的分支）。@return 拉回後的 target；不拉回時回傳原本的 target。
+  /// 決定拉回時先把這次當成拉完（設 restored_at）。沒有分步的呼叫端不用再回報，結果與以前相同。
+  /// 只拉了一階時，呼叫端要接著呼叫 note_restore。
   inline int on_clean(outage_state_t &s, int target, int max_kbps, steady::time_point now) {
     if (s.ref_kbps == 0) {
       return target;
@@ -135,6 +146,19 @@ namespace vr::abr {
     }
     s.restored_at = now;
     return want;
+  }
+
+  /// §VR-ABR-RESTORE-STEP：呼叫端回報這次實際拉到多少。on_clean 已經先假設整段拉完。
+  /// actual <= 0：控制器拒絕。維持已經設好的 restored_at，這次拉回算用掉（和以前控制器回 0 時一樣）。
+  /// actual >= want：確實拉完，維持 restored_at。
+  /// 0 < actual < want：只拉了一階。清掉 restored_at、乾淨視窗歸零，事件繼續——
+  /// 要再累積 k_restore_clean_windows 個乾淨視窗才會再回 want。碼率降下來才變乾淨，不代表容量回來了。
+  inline void note_restore(outage_state_t &s, int actual, int want) {
+    if (actual <= 0 || want <= 0 || actual >= want) {
+      return;
+    }
+    s.restored_at = {};
+    s.clean_windows = 0;
   }
 
 }  // namespace vr::abr
