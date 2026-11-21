@@ -1104,15 +1104,14 @@ catch {
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
-#ifndef _WIN32
     // 審查 F8：下載（含重新導向）只走 https；GitHub 的 asset 一律是 https 轉到 objects.githubusercontent.com。
-  #if LIBCURL_VERSION_NUM >= 0x075500  // 7.85.0 起用字串版，舊的 bitmask 版已標為 deprecated
+    // 審查 11-21：這段以前包在 #ifndef _WIN32，Windows 下載沒有限制協定，重新導向可以離開 https。兩個平台共用。
+#if LIBCURL_VERSION_NUM >= 0x075500  // 7.85.0 起用字串版，舊的 bitmask 版已標為 deprecated
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-  #else
+#else
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS, (long) CURLPROTO_HTTPS);
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long) CURLPROTO_HTTPS);
-  #endif
 #endif
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);

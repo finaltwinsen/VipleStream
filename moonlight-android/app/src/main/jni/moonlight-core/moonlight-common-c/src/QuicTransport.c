@@ -3406,7 +3406,11 @@ int quicGetSubflowStats(PQUIC_SUBFLOW_STATS out, int maxCount) {
         if (sf->picoquicDeleted)
             continue;  // 死 slot，跳過
         out[outIdx].interfaceIndex = sf->interfaceIndex;
-        PltSafeStrcpy(out[outIdx].interfaceName, sizeof(out[outIdx].interfaceName), sf->name);
+        // 審查 11-21：這裡不加鎖。LC_DEBUG 的 PltSafeStrcpy 會先把目的緩衝區填 0xFE，寫入端 quicAddSubflow()
+        // 回收 slot 時也用它寫 sf->name；讀端若先 strlen，可能讀到沒有結尾 0 的字串而越界。
+        // 固定複製 LC_NETIF_MAX_NAME 個位元組後強制結尾，不再對共享字串做 strlen。
+        memcpy(out[outIdx].interfaceName, sf->name, LC_NETIF_MAX_NAME);
+        out[outIdx].interfaceName[LC_NETIF_MAX_NAME - 1] = '\0';
         out[outIdx].interfaceType = sf->type;
         out[outIdx].rttMs = sf->rttMs;
         out[outIdx].throughputMbps = sf->throughputMbps;

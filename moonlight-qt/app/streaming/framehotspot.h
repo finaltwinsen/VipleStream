@@ -33,7 +33,7 @@
 //      或頭盔上常駐的 update-hotspot.sh（沙箱外，看得到同一個檔）發現它過期就補關。
 // 擁有者：串流行程是 App 開的子行程時，擁有者是 App（父行程）；直接從命令列跑的串流行程自己就是 App，結束時關。
 // 標記檔（0600，沒有機密）：第一行擁有者的 pid、第二行開給哪一台 host（uuid）。pid 只在同一個沙箱裡有意義，
-// 所以「還活著」＝pid 在而且檔案最近 kOwnerFreshS 秒內被更新過。
+// 所以「還活著」＝pid 在、程式名稱相同，而且最近 kOwnerFreshS 秒內寫過（看檔案的 mtime）。
 // SSID 與金鑰來自 hotspot.json（頭盔上的 update-hotspot.sh 維護），指令格式是 2026-11-14 在頭盔上確認的
 // "create\t<SSID>\t<金鑰>\thbs6\tnoroute\t--hidden"；softapmanager 不接受就什麼都不做。
 //
@@ -66,6 +66,11 @@
 #include <time.h>
 #include <unistd.h>
 #include <vector>
+
+#include <QLockFile>
+#include <QString>
+
+#include <memory>
 #endif
 
 class FrameHotspot
@@ -93,6 +98,9 @@ public:
             scrub(cmd);
             return;
         }
+        // 審查 11-21：查 status、讀寫 hotspot-opened、呼叫 softapmanager 和 App 行程的開關會交錯。
+        // 等 host 加入不在這支函式裡。拿不到鎖就照原本沒鎖的流程走。
+        const HotspotOpLock hotspotLock;
         std::string reply;
         const bool asked = ask("status", &reply, 2000);
         const std::string state = firstField(reply);
@@ -218,6 +226,9 @@ public:
         try {
             // cmd 含金鑰：搬進執行緒（不留副本），用完在那邊清掉
             m_ReopenThread = std::thread([out, owner, host = std::move(host), cmd = std::move(cmd)]() mutable {
+                // 審查 11-21：這條背景執行緒自己查狀態、寫標記、送 create，不能跟 App 的 teardown 同時做。
+                // 鎖在執行緒結束前放開；resume() 先 join 再關熱點，不會握著鎖等這條執行緒。
+                const HotspotOpLock hotspotLock;
                 std::string reply;
                 const bool asked = ask("status", &reply, 2000);
                 const std::string state = firstField(reply);
@@ -445,11 +456,12 @@ public:
         if (!changed) {
             return;  // 每 5 秒重送的同一則
         }
-        // 第一次看到「已連上」的時刻（從開熱點起算的秒數）：joinDeadlineS() 從這裡起算確認連線的時間。離開 JOINED 就清掉
-        if (state != VIPLE_VR_HS_JOINED) {
+        // 第一次看到「已連上」的時刻（從開熱點起算的秒數）：joinDeadlineS() 從這裡起算確認連線的時間。
+        // 審查 11-21：LEFT 是連上之後的短暫抖動，看門狗會重連。這裡清掉的話，期限會從延長中的 75 秒掉回 45 秒。
+        if (state != VIPLE_VR_HS_JOINED && state != VIPLE_VR_HS_LEFT) {
             m_JoinedAtS = -1;
         }
-        else if (prevState != VIPLE_VR_HS_JOINED && m_Opened) {
+        else if (state == VIPLE_VR_HS_JOINED && prevState != VIPLE_VR_HS_JOINED && m_Opened) {
             m_JoinedAtS = static_cast<int>(
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_OpenedAt).count());
         }
@@ -472,7 +484,11 @@ public:
                 m_QueryPending = false;
                 m_GaveUp = true;
                 // §HOTSPOT-DISABLED-EXPIRE：紀錄本來就是 DISABLED、這次也回 DISABLED＝沒有新的資訊，不刷新時刻（讓退避會到期）
-                if (isStatic && !(state == VIPLE_VR_HS_DISABLED && m_QueryRecState == VIPLE_VR_HS_DISABLED)) {
+                // 審查 11-21：同一種靜態原因（例如每場 QUERY 都回 NO_ADAPTER）不再累加 fails。
+                // 會回報的 server 上 S 類不看時間，次數卻一直加；退回不會回報的舊 server 時，
+                // noJoinBackoffS 會直接用那個次數，四次以上就是 4 小時。DISABLED 原本就不刷新時刻。
+                if (isStatic && state != m_QueryRecState &&
+                    !(state == VIPLE_VR_HS_DISABLED && m_QueryRecState == VIPLE_VR_HS_DISABLED)) {
                     int fails = 0;
                     recordNoJoin(m_HostId, &fails, 'S', state);
                 }
@@ -524,7 +540,7 @@ public:
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-VR-HOTSPOT] auto: the host reports it will not join the hotspot by itself (state %d, %d s) - "
                             "something else on the host may still join: waiting until %d s for a link before switching it off",
-                            state, waitedS, m_StaticPendingAtS + kStaticWaitS);
+                            state, waitedS, joinDeadlineS());
                 return;
             }
             closeForStatic(state, waitedS);
@@ -600,6 +616,11 @@ public:
             std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - m_QueryAt).count() >= kStatusWaitS) {
             m_QueryPending = false;
             m_GaveUp = true;
+            // 審查 11-21：送出失敗時 QUERY 會被放回 m_StateToSend。這裡不清掉的話，放棄之後緊接著的
+            // sendVrHotspotStateIfAny 仍會把它送出去；host 回 READY 時這場已經不看，熱點不會開。
+            if (m_StateToSend == VIPLE_VR_HOTSPOT_STATE_QUERY) {
+                m_StateToSend = -1;
+            }
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-VR-HOTSPOT] auto: the host did not answer the query within %d s - hotspot left off for this session",
                         kStatusWaitS);
@@ -685,6 +706,8 @@ public:
             scrub(cmd);
             return false;
         }
+        // 審查 11-21：上面的 paused／socket 檢查不碰熱點。從 status 起和子行程的接手互斥。
+        const HotspotOpLock hotspotLock;
         std::string reply;
         const bool asked = ask("status", &reply, 2000);
         const std::string state = firstField(reply);
@@ -778,6 +801,9 @@ public:
     static void closeAppStart()
     {
 #if defined(__linux__)
+        // 審查 11-21：60 秒的等待在呼叫端的計時器，不在這把鎖裡。進來再查一次，
+        // 子行程若已寫入 host 欄就不會拆掉它剛接手的熱點。
+        const HotspotOpLock hotspotLock;
         if (appStartState() != AppWait::Waiting) {
             return;
         }
@@ -828,6 +854,8 @@ public:
     static void closeIfOwner()
     {
 #if defined(__linux__)
+        // 審查 11-21：和子行程的接手、再開同一段臨界區。
+        const HotspotOpLock hotspotLock;
         long pid = 0;
         std::string host;
         if (!readOpenedMarker(&pid, &host) || pid != static_cast<long>(getpid())) {
@@ -866,6 +894,9 @@ public:
         if (stat(kSocket, &st) != 0) {
             return;  // 不是 Frame，或沙箱沒有開這條路徑
         }
+        // 審查 11-21：經 VPN 關掉我們先前開的熱點，和區網場次的開熱點用同一把鎖。
+        // 介面停下來的那幾百毫秒是 teardown 的一部分，不是等 host 加入。
+        const HotspotOpLock hotspotLock;
         std::string reply;
         if (!ask("status", &reply, 2000)) {
             return;
@@ -939,6 +970,8 @@ public:
         if (m_ReopenRunning) {
             joinReopen();
         }
+        // 審查 11-21：先等背景再開結束再拿鎖。握著鎖 join 會和那條執行緒互相等。
+        const HotspotOpLock hotspotLock;
         if (m_Opened && !m_Verified && !m_PeerSeen && m_StaticPending != 0) {
             // §REVIEW-1120 第三輪 C42：延後判斷中的靜態回報（host 說它不會自己連）、場次就結束了：host 的說法照樣記成 S 類，
             // 不要丟掉（不然下一場又開著等一整輪）。熱點本身照下面的規則處理（App 還在就留著：沒有場次時不自動關）
@@ -983,6 +1016,8 @@ public:
     static void recoverStale()
     {
 #if defined(__linux__)
+        // 審查 11-21：補關與還原都呼叫 softapmanager，和另一個行程的開熱點互斥。
+        const HotspotOpLock hotspotLock;
         recoverStaleOpened();
         long pid = 0;
         std::string cmd;
@@ -1022,6 +1057,65 @@ public:
 
 private:
 #if defined(__linux__)
+    // 審查 11-21：App 與串流子行程（以及同一行程的背景再開）同時查狀態、改標記檔、呼叫 softapmanager。
+    // 鎖檔放在標記檔同一個資料夾。tryLock 最多 2 秒；拿不到就照沒鎖的流程走，並只記一行。
+    // QLockFile 不是遞迴鎖，同一執行緒重入（openForLan 再進 closeOpened）若再等，會白耗 2 秒，
+    // 所以用執行緒內的深度：外層拿著時內層不再鎖。等 host 加入不在持鎖的範圍。
+    class HotspotOpLock {
+    public:
+        HotspotOpLock()
+        {
+            if (depth() > 0) {
+                ++depth();
+                m_Counted = true;
+                return;
+            }
+            const std::string path = FrameHotspot::hotspotLockPath();
+            if (path.empty()) {
+                ++depth();
+                m_Counted = true;
+                logMiss();
+                return;
+            }
+            auto file = std::make_unique<QLockFile>(QString::fromStdString(path));
+            if (!file->tryLock(2000)) {
+                ++depth();
+                m_Counted = true;
+                logMiss();
+                return;
+            }
+            m_File = std::move(file);
+            ++depth();
+            m_Counted = true;
+        }
+        ~HotspotOpLock()
+        {
+            if (!m_Counted) {
+                return;
+            }
+            if (m_File) {
+                m_File->unlock();
+            }
+            --depth();
+        }
+        HotspotOpLock(const HotspotOpLock&) = delete;
+        HotspotOpLock& operator=(const HotspotOpLock&) = delete;
+
+    private:
+        static int& depth()
+        {
+            static thread_local int d = 0;
+            return d;
+        }
+        static void logMiss()
+        {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-VR-HOTSPOT] could not lock hotspot state within 2 s - continuing without the lock");
+        }
+        bool m_Counted = false;
+        std::unique_ptr<QLockFile> m_File;
+    };
+
     static constexpr const char* kSocket = "/run/softapmanager.socket";
     static constexpr const char* kLastState = "/run/softapmanager.laststate";
     static constexpr const char* kApInterface = "wlanap";
@@ -1053,21 +1147,29 @@ private:
     // 上限固定 kJoinWaitMaxS：回報中斷、狀態停在舊的 TRYING 也不會一直等。否定的回報不經過這裡（onHostStatus 直接關）
     int joinDeadlineS() const
     {
+        int d = kJoinWaitS;
         if (m_StaticPending != 0) {
-            return m_StaticPendingAtS + kStaticWaitS;  // §REVIEW-1120 第三輪 C37：從延後的那一刻起算
+            d = m_StaticPendingAtS + kStaticWaitS;  // §REVIEW-1120 第三輪 C37：從延後的那一刻起算
         }
-        if (!m_ServerReports || m_StatusCount == 0) {
-            return kJoinWaitS;
+        else if (!m_ServerReports || m_StatusCount == 0) {
+            d = kJoinWaitS;
         }
-        if (m_HostState == VIPLE_VR_HS_JOINED) {
+        else if (m_HostState == VIPLE_VR_HS_JOINED) {
             // 例：重啟網卡後第 33 秒才連上 → 53 秒；第 8 秒連上 → 仍是 45 秒
-            const int d = (m_JoinedAtS > 0 ? m_JoinedAtS : 0) + kJoinConfirmS;
-            return d < kJoinWaitS ? kJoinWaitS : d > kJoinWaitMaxS ? kJoinWaitMaxS : d;
+            const int j = (m_JoinedAtS > 0 ? m_JoinedAtS : 0) + kJoinConfirmS;
+            d = j < kJoinWaitS ? kJoinWaitS : j;
         }
-        if (m_HostState == VIPLE_VR_HS_TRYING && (m_HostFlags & (VIPLE_VR_HS_F_SEEN | VIPLE_VR_HS_F_RESTARTED)) != 0) {
-            return kJoinWaitMaxS;
+        else if (m_HostState == VIPLE_VR_HS_LEFT &&
+                 ((m_HostFlags & (VIPLE_VR_HS_F_SEEN | VIPLE_VR_HS_F_RESTARTED)) != 0 || m_JoinedAtS >= 0)) {
+            // 審查 11-21：LEFT 是連上後的短暫抖動，看門狗約每 5 秒重連。掉回 45 秒會把剛連上、
+            // 多連線還沒確認的熱點關掉。有 SEEN／RESTARTED，或這一輪見過 JOINED，就維持 75 秒。
+            d = kJoinWaitMaxS;
         }
-        return kJoinWaitS;
+        else if (m_HostState == VIPLE_VR_HS_TRYING && (m_HostFlags & (VIPLE_VR_HS_F_SEEN | VIPLE_VR_HS_F_RESTARTED)) != 0) {
+            d = kJoinWaitMaxS;
+        }
+        // 審查 11-21：75 秒是每一條路徑的上限。靜態延後從較晚的秒數起算時，不能再加出 75 秒以後。
+        return d > kJoinWaitMaxS ? kJoinWaitMaxS : d;
     }
 
     // 新的一輪（openForLan 把熱點開起來或接手）：上一輪留下的判斷歸零。host 的最新回報（m_HostState／m_HostFlags）不動，
@@ -1085,6 +1187,8 @@ private:
     // 不是就是使用者自己開的，不碰
     void adoptRunning(long owner, const std::string& hostId)
     {
+        // 審查 11-21：讀寫標記檔。openForLan 已經持鎖時這裡只是重入，不會再等 2 秒。
+        const HotspotOpLock hotspotLock;
         long pid = 0;
         std::string prevHost;
         if (!readOpenedMarker(&pid, &prevHost)) {
@@ -1194,6 +1298,8 @@ private:
     // §FRAME-HOTSPOT-AUTO：關掉這個行程開的熱點
     void closeOpened(const char* why)
     {
+        // 審查 11-21：teardown 與刪標記要和 App 的查狀態同一段。呼叫端若已持鎖，這裡只是重入。
+        const HotspotOpLock hotspotLock;
         std::string reply;
         const bool ok = ask("teardown", &reply, 5000) && firstField(reply) == "1";
         scrub(reply);
@@ -1212,6 +1318,8 @@ private:
     // 擁有者不在了（App 當掉、被強制結束）而熱點還開著：補關。擁有者是自己、或還活著就不動
     static void recoverStaleOpened()
     {
+        // 審查 11-21：判定擁有者過期後的 status／teardown／刪檔，和還活著的 App 更新標記互斥。
+        const HotspotOpLock hotspotLock;
         long pid = 0;
         std::string host;
         if (!readOpenedMarker(&pid, &host)) {
@@ -1298,7 +1406,9 @@ private:
         hostId->clear();
         const size_t nl = s.find('\n');
         if (nl != std::string::npos) {
-            *hostId = s.substr(nl + 1);
+            // host 只取第二行。兩行的檔案與取到檔尾相同；多出來的一行不併進 host。
+            const size_t nl2 = s.find('\n', nl + 1);
+            *hostId = nl2 == std::string::npos ? s.substr(nl + 1) : s.substr(nl + 1, nl2 - (nl + 1));
             while (!hostId->empty() && (hostId->back() == '\n' || hostId->back() == '\r')) {
                 hostId->pop_back();
             }
@@ -1306,6 +1416,8 @@ private:
         return *pid > 0;
     }
 
+    // 新鮮度看檔案 mtime。這裡在介面執行緒與串流主迴圈每幾秒呼叫，只 utimensat：
+    // 不拿鎖、不重寫，避免別的行程持鎖時卡住，也避免蓋掉對方剛寫入的 host 欄。
     static void touchOpenedMarker()
     {
         const std::string path = openedMarkerPath();
@@ -1611,9 +1723,40 @@ private:
         return tab == std::string::npos ? reply : reply.substr(0, tab);
     }
 
+    static bool readProcComm(const char* path, char* out, size_t outLen)
+    {
+        FILE* f = fopen(path, "r");
+        if (f == nullptr) {
+            return false;
+        }
+        if (fgets(out, static_cast<int>(outLen), f) == nullptr) {
+            out[0] = '\0';
+            fclose(f);
+            return false;
+        }
+        fclose(f);
+        size_t n = strlen(out);
+        while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) {
+            out[--n] = '\0';
+        }
+        return out[0] != '\0';
+    }
+
     static bool processAlive(long pid)
     {
-        return kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+        if (!(kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM)) {
+            return false;
+        }
+        // 審查 11-21：pid 被別的程式重用時 kill 仍成功。App 與串流子行程是同一支程式，
+        // comm 不同就不是擁有者。讀不到時維持原本的判斷，避免讀檔失敗誤關還在用的熱點。
+        char self[64] = {};
+        char other[64] = {};
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%ld/comm", pid);
+        if (!readProcComm("/proc/self/comm", self, sizeof(self)) || !readProcComm(path, other, sizeof(other))) {
+            return true;
+        }
+        return strcmp(self, other) == 0;
     }
 
     static bool interfaceUp(const char* name)
@@ -1765,6 +1908,12 @@ private:
             }
         }
         return false;
+    }
+
+    static std::string hotspotLockPath()
+    {
+        const std::string p = markerPath();
+        return p.empty() ? p : p.substr(0, p.size() - strlen("hotspot-paused")) + "hotspot.lock";
     }
 
     static std::string markerPath()

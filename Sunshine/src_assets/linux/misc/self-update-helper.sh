@@ -69,7 +69,9 @@ trap 'rm -rf "$WORK"' EXIT
 trap 'exit 3' HUP INT TERM
 # apt-get 只把結尾是 .deb、含 / 的參數當成本機檔案，所以副本固定叫 package.deb
 DEB="$WORK/package.deb"
-cp -- "$SRC" "$DEB" || { echo "cannot copy package"; exit 4; }
+# 審查 11-21：cp 預設會跟隨符號連結。上面的 [ -L "$SRC" ] 與這裡的複製之間，來源可能被換成符號連結，
+# 跟隨複製會把連結目標的內容讀進來。-P 原樣複製連結，下一行的 [ -L "$DEB" ] 就會擋下。
+cp -P -- "$SRC" "$DEB" || { echo "cannot copy package"; exit 4; }
 if [ -L "$DEB" ] || [ ! -f "$DEB" ]; then
   echo "copied package is not a regular file"
   exit 4
@@ -91,6 +93,10 @@ case "$NEWV" in
 esac
 
 # --- 拒絕降版 ---
+# 審查 11-21：dpkg --compare-versions 在版本字串語法不合法時回傳 2。舊的 lt 只把回傳 0 當成降版，
+# 回傳 2 會被 if 當成不成立而放行。改成「不是大於或等於就拒絕」（回傳 1 或 2 都拒絕）。
+# 比較前先 validate-version，不論有沒有已安裝版本；語法不合法就拒絕。
+dpkg --validate-version "$NEWV" || { echo "invalid package version: $NEWV"; exit 4; }
 # shellcheck disable=SC2016  # ${...} 是 dpkg-query 的欄位格式，不是 shell 展開
 INST=$(dpkg-query -W -f='${db:Status-Abbrev}|${Version}' viplestream-server 2>/dev/null) || INST=""
 OLDV="${INST#*|}"
@@ -99,7 +105,7 @@ case "$INST" in
 esac
 SAME=0
 if [ -n "$OLDV" ]; then
-  if dpkg --compare-versions "$NEWV" lt "$OLDV"; then
+  if ! dpkg --compare-versions "$NEWV" ge "$OLDV"; then
     echo "refusing downgrade: package $NEWV is older than installed $OLDV"
     exit 4
   fi

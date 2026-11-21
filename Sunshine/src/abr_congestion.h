@@ -555,9 +555,11 @@ namespace abr_cong {
       return level_ >= level_e::cut && rtt_slow_;
     }
 
-    /// §FLAT-REPAIR：平面補包要不要拒補（審查 11-20 第二輪 C09：以前只看 L2 以上，區網一陣丟包就把補包關掉）
-    bool refuse_repair() const {
-      return congested_for_recovery();
+    /// §FLAT-REPAIR：平面補包要不要拒補（審查 11-20 第二輪 C09：以前只看 L2 以上，區網一陣丟包就把補包關掉）。
+    /// 審查 11-21：ABR 停在 L3 之後如果不再有新的一輪，last_update_ 不前進，只看等級會永久拒絕補包。
+    /// 等級必須還在 k_level_fresh（2 秒）內算出來，和 idr_request_wants_cut 的新鮮度同一條界線。
+    bool refuse_repair(steady::time_point now) const {
+      return have_update_ && now - last_update_ <= k_level_fresh && congested_for_recovery();
     }
 
     /// 這一輪是不是「樣本被擋住、狀態維持」；給 log 與測試看

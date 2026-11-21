@@ -899,6 +899,8 @@ namespace stream {
       // 平台的 vr_hotspot_keepalive 不分是哪一場 arm 的；沒送熱點資訊、REMOTE／DISABLED、送了 CLOSED 或 QUERY 的場次
       // 不續命，上一場留下的看門狗 25 秒內自己收工
       std::atomic<bool> watch {false};
+      // 審查 11-21：這一場排進 hotspot_next 的世代（0＝沒排）。session::stop 只清這一則，並讓進行中、還沒 arm 的連線過期。
+      std::atomic<std::uint32_t> queued_gen {0};
       std::chrono::steady_clock::time_point keepalive_at {};  // 平面場次續命的 10 秒間隔（只在 controlBroadcastThread 用）
       std::uint32_t sent_gen = 0;
       std::uint32_t sent_seq = 0;
@@ -1749,6 +1751,7 @@ namespace stream {
     VIPLE_VR_TLV_HOTSPOT_INFO info;
     std::string ssid;
     std::string key;
+    std::uint32_t req_gen = 0;  // 審查 11-21：排程當下的世代，交給 vr_hotspot_connect，不在函式裡重讀全域
   };
   static std::mutex hotspot_mtx;
   static bool hotspot_running = false;
@@ -1770,18 +1773,23 @@ namespace stream {
 #endif
   }
 
-  // §HOTSPOT-ADAPT：新的一輪（收到 INFO 或 QUERY）。local≠0＝狀態在這裡就決定了；否則記下平台快照目前的序號
-  static void vr_hotspot_round_begin(session_t *session, std::uint8_t local) {
+  // §HOTSPOT-ADAPT：新的一輪（收到 INFO 或 QUERY）。local≠0＝狀態在這裡就決定了；否則記下平台快照目前的序號。
+  // 回傳排程當下的 req_gen（非 Windows 或狀態在這裡就決定時是 0）。審查 11-21：這個值要一路傳進 query／connect。
+  static std::uint32_t vr_hotspot_round_begin(session_t *session, std::uint8_t local) {
     auto &hs = session->hotspot;
     hs.local.store(local);
     hs.watch.store(false);  // C04：新的一輪先不續命；真的交給 vr_hotspot_connect 時才打開
+    std::uint32_t gen = 0;
 #if defined(_WIN32)
     if (local == 0) {
-      hs.base_seq.store(platf::vr_hotspot_expect());
+      const auto exp = platf::vr_hotspot_expect();
+      hs.base_seq.store(exp.seq);
+      gen = exp.gen;
     }
 #endif
     hs.closed.store(false);
     hs.gen.fetch_add(1);
+    return gen;
   }
 
   // §HOTSPOT-ADAPT：C2S HOTSPOT_STATE（VR 與平面場次共用）。body 至少 sizeof(VIPLE_VR_TLV_HOTSPOT_STATE)
@@ -1797,6 +1805,7 @@ namespace stream {
       {
         std::lock_guard hlk(hotspot_mtx);
         hotspot_next.reset();
+        hs.queued_gen.store(0, std::memory_order_release);  // 審查 11-21：這一則已經作廢，session 結束不要再拿它去標世代
       }
       BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] received state=closed from the client"sv;
 #if defined(_WIN32)
@@ -1805,11 +1814,13 @@ namespace stream {
     } else if (st.state == VIPLE_VR_HOTSPOT_STATE_QUERY) {
       const auto local = vr_hotspot_local_state(session);
       BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] received state=query from the client"sv;
-      vr_hotspot_round_begin(session, local);
+      const auto hotspot_gen = vr_hotspot_round_begin(session, local);
 #if defined(_WIN32)
       if (local == 0) {
-        std::thread([]() {
-          platf::vr_hotspot_query();  // 會開 WLAN handle，不可卡住 control 執行緒
+        // 審查 11-21：世代在排程當下就綁進這條執行緒。進 vr_hotspot_query 才讀全域 req_gen 的話，
+        // 晚一步執行的查詢會把後到的 HOTSPOT_INFO 的世代標成 closed。
+        std::thread([hotspot_gen]() {
+          platf::vr_hotspot_query(hotspot_gen);  // 會開 WLAN handle，不可卡住 control 執行緒
         }).detach();
       }
 #endif
@@ -1886,7 +1897,7 @@ namespace stream {
       if (hotspot.version >= VIPLE_VR_HOTSPOT_VERSION_2) {
         session->hotspot.report.store(true);
       }
-      vr_hotspot_round_begin(session, vr_hotspot_local_state(session));
+      const auto hotspot_gen = vr_hotspot_round_begin(session, vr_hotspot_local_state(session));
       std::string ssid(reinterpret_cast<const char *>(hotspot.ssid), hotspot.ssidLen);
       std::string key(reinterpret_cast<const char *>(hotspot.key), hotspot.keyLen);
 
@@ -1901,31 +1912,41 @@ namespace stream {
         // 看門狗還會在 30 s 後重啟 host 的熱點網卡——這場不連、不監看
         BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] client is on Tailscale (remote) - not joining the headset hotspot this session"sv;
       } else if (config::vr.hotspot_autoconnect) {
-        session->hotspot.watch.store(true);  // C04：這一場 arm 的看門狗由這一場續命
         // 丟到背景執行緒處理（不可卡住 control 執行緒）
         // §REVIEW-1111：同時最多一條背景執行緒。原本每一則 HOTSPOT_INFO 都另起一條去連 Wi-Fi，client 連續送就一直堆
         // （每條都開 WLAN handle、可以跑好幾秒）。已經有一條在連時，把這一則記成「下一則」（只留最新的一份），
         // 那條做完會接著處理——client 只在內容改變時才送，所以不能直接丟掉。
         {
           std::lock_guard hlk(hotspot_mtx);
-          hotspot_next = hotspot_req_t {hotspot, std::move(ssid), std::move(key)};
-          if (!hotspot_running) {
-            hotspot_running = true;
-            std::thread([]() {
-              for (;;) {
-                std::optional<hotspot_req_t> req;
-                {
-                  std::lock_guard hlk2(hotspot_mtx);
-                  if (!hotspot_next) {
-                    hotspot_running = false;
-                    return;
+          // 審查 11-21：stop 先清掉佇列、場次已是 STOPPING 時，不能再把這一則排進去（否則清完才放上，結束後仍會 arm）。
+          if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
+#if defined(_WIN32)
+            SecureZeroMemory(key.data(), key.size());
+#else
+            explicit_bzero(key.data(), key.size());
+#endif
+          } else {
+            session->hotspot.watch.store(true);  // C04：這一場 arm 的看門狗由這一場續命
+            session->hotspot.queued_gen.store(hotspot_gen, std::memory_order_release);
+            hotspot_next = hotspot_req_t {hotspot, std::move(ssid), std::move(key), hotspot_gen};
+            if (!hotspot_running) {
+              hotspot_running = true;
+              std::thread([]() {
+                for (;;) {
+                  std::optional<hotspot_req_t> req;
+                  {
+                    std::lock_guard hlk2(hotspot_mtx);
+                    if (!hotspot_next) {
+                      hotspot_running = false;
+                      return;
+                    }
+                    req = std::move(hotspot_next);
+                    hotspot_next.reset();
                   }
-                  req = std::move(hotspot_next);
-                  hotspot_next.reset();
+                  platf::vr_hotspot_connect(req->info.version, req->info.authType, req->info.band, req->info.channel, std::move(req->ssid), std::move(req->key), req->req_gen);
                 }
-                platf::vr_hotspot_connect(req->info.version, req->info.authType, req->info.band, req->info.channel, std::move(req->ssid), std::move(req->key));
-              }
-            }).detach();
+              }).detach();
+            }
           }
         }
       } else {
@@ -2875,7 +2896,8 @@ namespace stream {
           // 審查 11-20 第二輪（C09）：和 IDR 提示同一個條件（L2 以上且 RTT ≥ 150 ms，遲滯到 100 ms）。
           // 以前 L2 就拒補：區網 Wi-Fi 一陣停頓讓趨勢判成過載時，IDR 閘門照 §IDR-FAST 快速補送（不是壅塞），
           // 補包卻被關掉（是壅塞），本來幾毫秒救得回來的幀變成凍結到 IDR 進來
-          refuse = session->video.abrCong.refuse_repair();
+          // 審查 11-21：另外要等級還新鮮。ABR 停在 L3、不再有新的一輪時 last_update_ 不前進，不看新鮮度會永久拒補。
+          refuse = session->video.abrCong.refuse_repair(std::chrono::steady_clock::now());
           rttMs = session->video.abrRttLastMs;
         }
         const auto r = session->vrLinks->on_nack(p + off + 2, len, refuse);
@@ -7015,6 +7037,22 @@ namespace stream {
 
       session.shutdown_event->raise(true);
       tailscale_path::on_session_end(session.tsPathGen);  // §TS-PATH
+
+      // 審查 11-21：沒送 CLOSED 就結束時，清掉這一場還沒執行的 hotspot_next，並讓進行中的 connect
+      // 在 arm 前發現世代過期而退出。已經 arm、跨場延續的看門狗不在這裡停（不呼叫 vr_hotspot_stop）。
+      std::uint32_t pending_gen = 0;
+      {
+        std::lock_guard hlk(hotspot_mtx);
+        pending_gen = session.hotspot.queued_gen.exchange(0, std::memory_order_acq_rel);
+        if (pending_gen != 0 && hotspot_next && hotspot_next->req_gen == pending_gen) {
+          hotspot_next.reset();
+        }
+      }
+#if defined(_WIN32)
+      if (pending_gen != 0) {
+        platf::vr_hotspot_cancel_pending(pending_gen);
+      }
+#endif
     }
 
     void join(session_t &session) {

@@ -777,6 +777,27 @@ void XrShell::mouseButton(Qt::MouseButton button, bool pressed)
     QMouseEvent ev(pressed ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease, m_Pointer, m_Pointer, button, m_Buttons,
                    Qt::NoModifier);
     QCoreApplication::sendEvent(m_Win, &ev);
+#ifdef HAVE_OPENXR
+    // 審查 11-21：鍵盤右下的 ✕ 是 XrInput 自己關的，Qt 焦點沒變，focusChanged 看到狀態相同就返回，
+    // 再點同一個欄位不會重開。不能每張圖硬重送，否則 ✕ 下一張又被打開。只在左鍵點在仍要輸入的欄位上補一次。
+    if (pressed && button == Qt::LeftButton && m_Xr != nullptr) {
+        const bool wasText = m_TextFocus;
+        focusChanged();
+        QQuickItem* focusItem = m_Win->activeFocusItem();
+        if (wasText && m_TextFocus && focusItem != nullptr && m_Win->contentItem() != nullptr) {
+            bool onFocus = false;
+            for (QQuickItem* it = deepestItemAt(m_Win->contentItem(), m_Pointer); it != nullptr; it = it->parentItem()) {
+                if (it == focusItem) {
+                    onFocus = true;
+                    break;
+                }
+            }
+            if (onFocus) {
+                m_Xr->requestKeyboard(true);
+            }
+        }
+    }
+#endif
 }
 
 void XrShell::wheel(int amount)

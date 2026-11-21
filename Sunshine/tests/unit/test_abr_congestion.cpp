@@ -542,37 +542,50 @@ TEST_F(AbrCongestionTest, EqualLossCutStartsCooldownAndRecordsPoint) {
 
 // C09. 平面補包拒補與 IDR 提示同一個條件：L2 以上且 RTT 夠長；區網一陣丟包（RTT 幾毫秒、趨勢短暫過載）不拒補
 TEST_F(AbrCongestionTest, RefuseRepairNeedsSlowRtt) {
-  EXPECT_FALSE(c.refuse_repair());  // 還沒有任何一輪
+  EXPECT_FALSE(c.refuse_repair(t0));  // 還沒有任何一輪
   // 區網：RTT 15 ms、趨勢過載＝L2，但不拒補（也不提示 IDR 長間隔）
   auto o = c.update(in(15, 2, 5.0, true, true), t0);
   ASSERT_EQ(o.level, ac::level_e::cut);
-  EXPECT_FALSE(c.refuse_repair());
-  EXPECT_EQ(c.refuse_repair(), c.idr_gap_hint() > 0);
+  EXPECT_FALSE(c.refuse_repair(t0));
+  EXPECT_EQ(c.refuse_repair(t0), c.idr_gap_hint() > 0);
   // k_level_exit_hold 撐住 L2 的那 1 秒裡也不拒補
   o = c.update(in(3, 2), t0 + 500ms);
   ASSERT_EQ(o.level, ac::level_e::cut);
-  EXPECT_FALSE(c.refuse_repair());
+  EXPECT_FALSE(c.refuse_repair(t0 + 500ms));
   // RTT 400 ms 的 L2：拒補（和 IDR 提示一致）
   o = c.update(in(400, 40, 5.0, true, true), t0 + 1000ms);
   ASSERT_EQ(o.level, ac::level_e::cut);
-  EXPECT_TRUE(c.refuse_repair());
-  EXPECT_EQ(c.refuse_repair(), c.idr_gap_hint() > 0);
+  EXPECT_TRUE(c.refuse_repair(t0 + 1000ms));
+  EXPECT_EQ(c.refuse_repair(t0 + 1000ms), c.idr_gap_hint() > 0);
   // 遲滯帶（120 ms）：維持
   c.update(in(120, 40, 5.0, true, true), t0 + 1500ms);
-  EXPECT_TRUE(c.refuse_repair());
+  EXPECT_TRUE(c.refuse_repair(t0 + 1500ms));
   // L1（暫停回升）不論 RTT 都不拒
   ac::congestion_t c2;
   c2.update(in(400, 40, 5.0, true), t0);
   ASSERT_EQ(c2.level(), ac::level_e::hold);
-  EXPECT_FALSE(c2.refuse_repair());
+  EXPECT_FALSE(c2.refuse_repair(t0));
   // L3：拒
   c.update(in(1500, 40), t0 + 2000ms);
   o = c.update(in(1500, 40), t0 + 2500ms);
   ASSERT_EQ(o.level, ac::level_e::deep);
-  EXPECT_TRUE(c.refuse_repair());
+  EXPECT_TRUE(c.refuse_repair(t0 + 2500ms));
   // 沒有樣本：歸零、不拒
   c.update(ac::cong_in_t {}, t0 + 3000ms);
-  EXPECT_FALSE(c.refuse_repair());
+  EXPECT_FALSE(c.refuse_repair(t0 + 3000ms));
+}
+
+// 審查 11-21：進到 L3 且 RTT 夠長時拒補；之後 3 秒沒有新的一輪（last_update_ 不前進）就不再拒。
+// 以前不看新鮮度，ABR 停在 L3 之後平面補包會被永久拒絕。
+TEST_F(AbrCongestionTest, RefuseRepairExpiresWhenRoundStops) {
+  c.update(in(1500, 40), t0);
+  const auto o = c.update(in(1500, 40), t0 + 500ms);
+  ASSERT_EQ(o.level, ac::level_e::deep);
+  EXPECT_TRUE(c.rtt_slow());
+  const auto at = t0 + 500ms;
+  EXPECT_TRUE(c.refuse_repair(at));
+  EXPECT_FALSE(c.refuse_repair(at + 3s));
+  EXPECT_EQ(c.level(), ac::level_e::deep);  // 沒有新的一輪，等級還停在 L3，只是拒補過期
 }
 
 // D1／D3. 維持範圍：max(3 s, min(4 × RTT, 4 s) + 1 s)；RTT 500 ms 以下沒有維持段
@@ -628,7 +641,7 @@ TEST_F(AbrCongestionTest, BlockedPingKeepsDeepState) {
     EXPECT_EQ(o.level, ac::level_e::deep);
     EXPECT_EQ(o.action, ac::action_e::none);
     EXPECT_EQ(c.idr_gap_hint(), hint2);
-    EXPECT_TRUE(c.refuse_repair());
+    EXPECT_TRUE(c.refuse_repair(now));
     if (now - at > 3000ms) {
       EXPECT_TRUE(o.held);
       EXPECT_FALSE(c.idr_request_wants_cut(now + 10ms));  // 量不到 RTT 的那幾秒不做新的降碼
@@ -662,7 +675,7 @@ TEST_F(AbrCongestionTest, HeldExpiresToNoSample) {
       EXPECT_FALSE(o.held);
       EXPECT_EQ(o.level, ac::level_e::clean);
       EXPECT_EQ(c.idr_gap_hint(), 0);
-      EXPECT_FALSE(c.refuse_repair());
+      EXPECT_FALSE(c.refuse_repair(now));
     }
   }
   EXPECT_EQ(cuts, 0);  // 新鮮期內冷卻滿 3 秒時照樣一刀；之後維持段與沒有樣本的 5 秒，凍結的 1500 ms 不觸發任何刀

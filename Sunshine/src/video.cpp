@@ -2636,6 +2636,10 @@ namespace video {
     // §VR：cooldown 改成具名常數，依 vrProfile 選用（桌面 1500 ms 與舊版相同，VR 300 ms）。
     const auto idr_cooldown = config.vrProfile ? kVrIdrCooldownMs : kDesktopIdrCooldownMs;
     auto last_idr_emit = std::chrono::steady_clock::now() - idr_cooldown;
+    // 審查 11-21：初值只往前推一個 idr_cooldown（1500 ms），壅塞提示卻可把 gap 拉到 6000 ms。
+    // 開場 IDR（frame_nr == 1）與這個 encoder 生命期還沒送過非開場 IDR 的第一個請求，會被上一場留下的提示
+    // 或開場就壅塞延後最多 4.5 秒。還沒送過就放行；開場那張仍不啟動冷卻。host 記帳若也更新 last_idr_emit，同樣算送出過。
+    bool idr_emitted_once = false;
     // §IDR-FAST（2026-11-20）：上面「被丟掉的請求最多多等 1 秒」在零星丟包時不成立。頭盔→開發機實測（Wi-Fi、
     // 120 fps）：一張丟了 → IDR 送出 → 45～60 ms 後同一陣丟包又丟一張 → 這次請求落在 1500 ms 冷卻裡被丟掉 →
     // client 等滿連續丟幀上限（約 1.06 秒）再要，還在冷卻裡、又被丟掉 → 第三次才過，畫面凍結 2.3 秒；網路上
@@ -2756,6 +2760,8 @@ namespace video {
             if (congested) {
               last_idr_emit = cut_now;
               idr_deferred = false;
+              // 審查 11-21：這一張更新了 last_idr_emit，算已送出非開場 IDR，下一張請求不可再走「還沒送過」的放行
+              idr_emitted_once = true;
             }
             BOOST_LOG(info) << "[VIPLE-QLOG] IDR-HOST f=" << frame_nr << " (bitrate cut forced an IDR, counted as a recent IDR"
                             << (congested ? ", congested: gap restarted" : "") << (had_deferred ? ", deferred request dropped)" : ")");
@@ -2850,20 +2856,28 @@ namespace video {
         auto now = std::chrono::steady_clock::now();
         const bool calm = idr_calm(now);
         const auto gap = idr_gap(now);  // §P2：沒有壅塞提示時＝calm ? 250 ms : 冷卻（原本的式子）
-        if (now >= last_idr_emit + gap) {
+        // 審查 11-21：開場、或這個 encoder 還沒送過非開場 IDR，不看 gap。gap 可能被上一場的壅塞提示拉到 6 秒，
+        // 而 last_idr_emit 初值只退一個冷卻，第一張會被延後最多 4.5 秒。
+        const bool opening_idr = frame_nr == 1;
+        const bool time_ok = now >= last_idr_emit + gap;
+        const bool first_gate_bypass = !opening_idr && !idr_emitted_once && !time_ok;
+        if (frame_nr == 1 || !idr_emitted_once || time_ok) {
           session->request_idr_frame();
           idr_deferred = false;
           // §IDR-OPEN：f=1 是 capture() 開場自己要的那一張（frame_nr 跨 encoder 重建累加，1 只出現在 session 的第一個
           // encoder）。這時 client 的解碼器還沒建好、一定解不到；讓它啟動冷卻的話，client 建好解碼器後要的第一張 IDR
           // 會落在冷卻裡被丟掉（2D 1.5 s）。冷卻要擋的是丟包時成串的請求，不是 host 自己發的這一張。
-          const bool opening_idr = frame_nr == 1;
           if (!opening_idr) {
             last_idr_emit = now;
+            idr_emitted_once = true;  // 審查 11-21：非開場 IDR 已送出
             if (!host_idr_noted) {  // §P2：同一張（RFI 退回的 IDR）已經記過
               idr_note_emit(now);
             }
           }
-          BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << (opening_idr ? " (opening, cooldown not started)" : " (cooldown OK)");
+          BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr
+                          << (opening_idr ? " (opening, cooldown not started)" :
+                              first_gate_bypass ? " (first, gate bypassed)" :
+                              " (cooldown OK)");
           if (vr_state) {
             // idr_events 的來源：起播、client 的 IDR 要求、recovery=idr 的 LOSS
             BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=request f=" << frame_nr;
@@ -2899,6 +2913,7 @@ namespace video {
           session->request_idr_frame();
           requested_idr_frame = true;
           last_idr_emit = now;
+          idr_emitted_once = true;  // 審查 11-21：非開場 IDR 已送出
           idr_note_emit(now);  // 這一幀若已是 RFI 退回的 IDR（已記過），idr_note_emit 依幀號略過
           idr_deferred = false;
           BOOST_LOG(info) << "[VIPLE-QLOG] IDR-EMIT f=" << frame_nr << " (deferred request)";
@@ -2921,6 +2936,7 @@ namespace video {
               session->request_idr_frame();
               requested_idr_frame = true;
               last_idr_emit = now;
+              idr_emitted_once = true;  // 審查 11-21：非開場 IDR 已送出
               vr_wave.start(1, VIPLE_VR_REFRESH_IDR);
               BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=refresh-fallback f=" << frame_nr << " (encoder has no intra refresh)";
             } else {
@@ -2938,6 +2954,7 @@ namespace video {
           session->request_idr_frame();
           requested_idr_frame = true;
           last_idr_emit = now;
+          idr_emitted_once = true;  // 審查 11-21：非開場 IDR 已送出
           vr_idr_retry_pending = false;
           vr_wave.start(1, VIPLE_VR_REFRESH_IDR);
           BOOST_LOG(info) << "[VIPLE-VR-ENC] idr reason=refresh-fallback-retry f=" << frame_nr;

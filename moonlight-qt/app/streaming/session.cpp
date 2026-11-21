@@ -3295,7 +3295,8 @@ void Session::resolveAutoDisplayMode()
 }
 
 // §H.4-AUTO：XR 桌面自動更新率。XrContext 在 startConnectionAsync（/launch 之前）才 bring-up，
-// 所以更新率要在這裡、/launch 之前才換成 runtime 實際值。FRUC 開著時不動（server fps 已依 UI fps 折半）。
+// 所以更新率要在這裡、/launch 之前才換成 runtime 實際值。這一場真的在補幀（m_BitrateFruc）時不動
+// （server fps 已依 UI fps 折半）。偏好開著但 4:4:4 走全幀時不能早退。
 void Session::applyXrDesktopAutoFps()
 {
 #ifdef HAVE_OPENXR
@@ -3335,7 +3336,9 @@ void Session::applyXrDesktopAutoFps()
             fps = hostHz;
         }
     }
-    if (m_Preferences->enableFrameInterpolation) {
+    // 審查 11-21：早退看這一場是不是真的在補幀，不看偏好。4:4:4＋補幀偏好開著時 host 送的是全幀
+    // （m_BitrateFruc 為 false），暫定的 SDL 更新率仍要換成 runtime，否則頭盔 120 Hz 會停在 60。
+    if (m_BitrateFruc) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-RES] auto fps (XR desktop): runtime %.2f Hz, FRUC on - keeping server fps %d",
                     (double)measured, m_StreamConfig.fps);

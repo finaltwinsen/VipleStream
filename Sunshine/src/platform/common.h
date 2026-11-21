@@ -1183,8 +1183,10 @@ namespace platf {
    * @details Windows 上透過 Native Wi-Fi API (wlanapi) 挑選看得到該 SSID 且未被佔用的介面，
    *          設定 all-user profile 並連線；Linux / macOS 則記 log 並忽略。
    *          金鑰絕不輸出於任何 log。
+   *          req_gen 是排程當下 vr_hotspot_expect() 分配的世代（審查 11-21）。函式內不再重讀全域 req_gen
+   *          當自己的世代；Linux／macOS 忽略這個參數。
    */
-  void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key);
+  void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key, std::uint32_t req_gen);
 
   /**
    * @brief §VR-HOTSPOT-WATCHDOG（2026-10-31）：VR session 每 10 s 呼叫一次，表示「串流還在」。
@@ -1195,7 +1197,7 @@ namespace platf {
 
   /**
    * @brief §HOTSPOT-ADAPT（2026-11-20）：給 wire 回報（S2C HOTSPOT_STATUS）用的狀態快照。
-   * @details 以下四個函式只有 Windows 有實作（Linux／macOS 沒有連熱點的功能，stream.cpp 在那些平台自己回
+   * @details 以下函式只有 Windows 有實作（Linux／macOS 沒有連熱點的功能，stream.cpp 在那些平台自己回
    *          UNSUPPORTED、不呼叫它們）。都可以從任何執行緒呼叫；不含 SSID、BSSID、介面名稱。
    */
   struct vr_hotspot_status_t {
@@ -1211,17 +1213,32 @@ namespace platf {
 
   /**
    * @brief 場次收到新的 HOTSPOT_INFO／QUERY、還沒交給背景執行緒之前呼叫：上一輪留下來的狀態從此不再更新，
-   *        直到這一輪有結果為止。回傳目前的 seq——之後 seq 和它不同＝這一輪的結果。
-   *        同時讓排著或處理中的舊請求過期（不再啟動看門狗、不再寫結果）。
+   *        直到這一輪有結果為止。同時讓排著或處理中的舊請求過期（不再啟動看門狗、不再寫結果）。
+   *        seq：呼叫當下的快照序號，之後 seq 和它不同＝這一輪的結果（原先的回傳值）。
+   *        gen：這一則的 req_gen，在排程當下分配（審查 11-21）。傳進 vr_hotspot_query／vr_hotspot_connect，
+   *        函式內不再重讀全域 req_gen 當自己的世代。
    */
-  std::uint32_t vr_hotspot_expect();
+  struct vr_hotspot_expect_t {
+    std::uint32_t seq = 0;
+    std::uint32_t gen = 0;
+  };
+  vr_hotspot_expect_t vr_hotspot_expect();
 
   /**
    * @brief 頭盔說熱點關了（C2S HOTSPOT_STATE CLOSED）：立刻停止重連與重啟網卡，看門狗收工；設定檔留著。
    *        正在處理中或還排著的 vr_hotspot_connect 也不會再啟動看門狗、不再寫結果（比對與啟動在同一把鎖底下）。
    *        之後收到新的 HOTSPOT_INFO 照常重新開始。
+   *        同時把 req_gen 往前推一號（審查 11-21）：查詢的發布只比 req_gen、不看 closed_gen，
+   *        不推的話，已經在列舉介面的查詢仍會用同一世代覆寫快照。
    */
   void vr_hotspot_stop();
+
+  /**
+   * @brief 場次結束時，把這一則還沒 arm 的連線標成過期（審查 11-21）。
+   *        不停止已經 arm、設計上跨場延續的看門狗。req_gen 已經往前（更新的 INFO／QUERY）時不蓋。
+   *        只有 Windows 有實作。
+   */
+  void vr_hotspot_cancel_pending(std::uint32_t gen);
 
   /**
    * @brief 頭盔只問「現在能不能連」（C2S HOTSPOT_STATE QUERY，熱點沒開）：只看有沒有閒著的無線介面，
@@ -1229,7 +1246,8 @@ namespace platf {
    *        上一輪還在跑的看門狗會一併收掉（熱點沒開，它沒有東西可連，也不可以再改這次的結果）；
    *        還排著或處理中的舊 vr_hotspot_connect 從此過期。vr_hotspot_connect 沒走到啟動看門狗就失敗時也會收掉上一輪
    *        （挑不到介面報 NO_ADAPTER、設定檔被拒報 FAILED）。
+   *        gen 是排程當下 vr_hotspot_expect() 分配的世代（審查 11-21），不再進函式重讀全域 req_gen。
    */
-  void vr_hotspot_query();
+  void vr_hotspot_query(std::uint32_t gen);
 
 }  // namespace platf

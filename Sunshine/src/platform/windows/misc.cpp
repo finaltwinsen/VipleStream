@@ -2452,11 +2452,12 @@ namespace platf {
     // §HOTSPOT-REQ-GEN（2026-11-20 第三輪審查）：熱點請求的世代號，取代原本只在 CLOSED 時加一的 stop_gen。由 mtx 保護。
     //   req_gen：每一則 INFO／QUERY 加一（vr_hotspot_expect，在交給背景執行緒之前）；
     //   closed_gen：這個世代已經有了不是 INFO 的答案——頭盔說熱點關了（vr_hotspot_stop）或回答了查詢（vr_hotspot_query）。
-    // vr_hotspot_connect 進來時記下 req_gen，之後「req_gen 變了，或 closed_gen 等於它」＝過期：不寫快照、不 arm。
+    // vr_hotspot_connect 使用排程當下傳入的世代，之後「req_gen 變了，或 closed_gen 等於它」＝過期：不寫快照、不 arm。
     // 原本只認 stop_gen：排在佇列裡或還在等介面的舊 INFO，在下一場的 QUERY 之後才做完時，照樣用舊的 SSID arm 看門狗、
     // 把快照從 READY 改成 TRYING（失敗時則用 NO_ADAPTER 蓋掉 READY）；比對又在鎖外，CLOSED 夾在比對與 arm 之間也擋不住。
-    // QUERY 標 closed_gen 是因為 stream.cpp 從佇列取出請求時沒有帶世代號：上一場排著的 INFO 在 QUERY 之後才取出時，
-    // 讀到的 req_gen 已經是 QUERY 那一則的，只靠 req_gen 認不出來
+    // QUERY 標 closed_gen 是因為舊的 INFO 可能還在等介面：只靠「進來才讀 req_gen」會讀到查詢的世代。
+    // 審查 11-21：世代在排程當下就定下來、傳進 query／connect，函式內不再重讀 req_gen。
+    // 重讀會讓晚一步才執行的查詢把後到的 INFO 的世代寫進 closed_gen，或讓舊的 INFO 冒用新世代。
     std::uint32_t req_gen = 0;
     std::uint32_t closed_gen = ~0u;
     // §HOTSPOT-STATUS-ROUND（第三輪審查）：快照的 attempts／restarts／reason 只在看門狗那一輪（arm 之後）有意義。
@@ -2745,6 +2746,7 @@ namespace platf {
       bool fast = true;
       int fast_tries = 0;
       clock::time_point fast_armed_at {};
+      GUID round_guid {};  // 審查 11-21：上一輪的介面。換了介面才清 last_restart
       std::optional<clock::time_point> fast_last_try;
       // §VR-HOTSPOT-YIELD
       if (fn_WlanRegisterNotification) {
@@ -2802,6 +2804,9 @@ namespace platf {
         }
         if (armed != fast_armed_at) {
           // 新的一場（或同一場重新送了熱點資訊）：重新進入快速加入
+          // 審查 11-21：g 與 armed 是這一輪迴圈開頭一起讀的，跟這次 arm 是同一組。
+          const bool other_adapter = !IsEqualGUID(round_guid, g);
+          round_guid = g;
           fast_armed_at = armed;
           fast = true;
           fast_tries = 0;
@@ -2827,6 +2832,16 @@ namespace platf {
           restart_try_base = 0;
           // 上一輪記過「網卡不在」：這一輪介面還是查不到時要再回報一次（arm 已經把快照改回 TRYING）
           missing_logged = false;
+          // 審查 11-21：這條執行緒在 kAlive 內被下一輪重用時，上面沒清這幾個，新的一輪會沿用上一輪的
+          // 接收停滯、閒置探測與網卡失蹤。同一張網卡剛重啟過，冷卻（kRestartSettle／kGap）仍要算在這張卡上；
+          // 換成另一張介面，上次重啟的時刻不算。
+          rx_still_since.reset();
+          idle_probe_fails = 0;
+          missing_since.reset();
+          came_back = false;
+          if (other_adapter) {
+            last_restart.reset();
+          }
         }
         DWORD st_err = ERROR_SUCCESS;
         const int st = query_state(hClient, g, ssid, &st_err);
@@ -2939,8 +2954,13 @@ namespace platf {
             // Steam 一直在重連，WlanScan 每次都回 ERROR_BUSY。所以 kFastRestart 還沒連上就先重啟一次（算進這一場的重啟次數）；
             // 平常 3～8 秒就連上，不會走到這裡。
             if (!fast_restarted && now - armed >= kFastRestart && st == 0) {
-              fast_restarted = true;
               std::unique_lock lk(mtx);
+              // 審查 11-21：query_state 放鎖之後才走到這裡。CLOSED 已把 armed 清掉，或新的一輪 arm 換了輪次時，
+              // 不能重啟網卡，也不能扣新一輪的 restarts。
+              if (!hotspot_wd::armed || armed != armed_at) {
+                continue;
+              }
+              fast_restarted = true;
               const bool allowed = restarts < max_restarts;
               const int n = allowed ? ++restarts : restarts;
               lk.unlock();
@@ -3093,6 +3113,10 @@ namespace platf {
             }
           }
           std::unique_lock lk(mtx);
+          // 審查 11-21：probe_peer 會堵住數秒。回來時這一輪可能已經結束或被新的 arm 換掉，先確認仍是這一輪再重啟、再記放棄。
+          if (!hotspot_wd::armed || armed != armed_at) {
+            continue;
+          }
           if (restarts >= max_restarts) {
             if (!gave_up) {
               gave_up = true;
@@ -3188,6 +3212,10 @@ namespace platf {
           continue;
         }
         std::unique_lock lk(mtx);
+        // 審查 11-21：斷線判斷在鎖外。gave_up 要等確認仍是這一輪之後才設，否則會把新一輪提前標成放棄，或在 CLOSED 之後仍重啟網卡。
+        if (!hotspot_wd::armed || armed != armed_at) {
+          continue;
+        }
         if (restarts >= max_restarts) {
           if (!gave_up) {
             gave_up = true;
@@ -3217,7 +3245,7 @@ namespace platf {
       fn_WlanCloseHandle(hClient, nullptr);
     }
 
-    // vr_hotspot_connect 選定網卡後呼叫：每場重新起算次數。gen＝那一則請求進來時的 req_gen；過期就不 arm、回 false。
+    // vr_hotspot_connect 選定網卡後呼叫：每場重新起算次數。gen＝排程當下傳入的 req_gen（審查 11-21）；過期就不 arm、回 false。
     // 比對和寫入在同一把鎖底下（第三輪審查 C20）：vr_hotspot_stop、vr_hotspot_query、vr_hotspot_expect 都在鎖內改世代號，
     // 所以這裡讀到「沒過期」時它們的臨界區還沒開始，之後進來的會照常把這一輪收掉。
     // 第三輪審查 C18：vr_hotspot_restart_max = 0 時原本直接發 DISABLED、不啟動看門狗（之後沒有人會去連），但查詢照樣回 READY，
@@ -3276,18 +3304,22 @@ namespace platf {
     return out;
   }
 
-  std::uint32_t vr_hotspot_expect() {
+  vr_hotspot_expect_t vr_hotspot_expect() {
     std::lock_guard lk(hotspot_wd::mtx);
     hotspot_wd::pub_hold = true;
     ++hotspot_wd::req_gen;  // §HOTSPOT-REQ-GEN：排著或處理中的舊請求從此過期
-    return hotspot_wd::pub_seq;
+    // 審查 11-21：seq 與 gen 在同一把鎖裡一起交出去。呼叫端拿 gen 傳進 query／connect，不再進函式重讀。
+    return {hotspot_wd::pub_seq, hotspot_wd::req_gen};
   }
 
   void vr_hotspot_stop() {
     bool was_running;
     {
       std::lock_guard lk(hotspot_wd::mtx);
+      // 審查 11-21：查詢的 publish_and_supersede 在 is_query 時只比 req_gen、不看 closed_gen。
+      // 只標 closed_gen 的話，已經在列舉介面的查詢仍會用同一世代寫上 READY／NO_ADAPTER，並把看門狗收掉。
       hotspot_wd::closed_gen = hotspot_wd::req_gen;  // §HOTSPOT-REQ-GEN：這一則（含排著、處理中的）不再 arm、不再寫結果
+      ++hotspot_wd::req_gen;
       was_running = hotspot_wd::armed && hotspot_wd::running;
       hotspot_wd::armed = false;  // keepalive 不再延長
       hotspot_wd::alive_until = {};  // 看門狗下一輪（最慢 kPoll）醒來先看這個就收工，不會再連
@@ -3297,16 +3329,33 @@ namespace platf {
                     << (was_running ? "stopping the retries and the watchdog for this round (profile kept)" : "nothing was running");
   }
 
-  void vr_hotspot_query() {
+  void vr_hotspot_cancel_pending(std::uint32_t gen) {
+    std::lock_guard lk(hotspot_wd::mtx);
+    // 審查 11-21：場次結束只讓「還沒 arm 的這一則」過期。connect 在等待迴圈與 arm() 都用 stale_locked，
+    // 對得上就會自己退出。不改 armed、alive_until：已經連上、跨場延續的看門狗要留到存活期限。
+    // req_gen 已經被更新的 INFO／QUERY 往前推時不能蓋掉那個世代。
+    if (gen != 0 && hotspot_wd::req_gen == gen && hotspot_wd::closed_gen != gen) {
+      hotspot_wd::closed_gen = gen;
+    }
+  }
+
+  void vr_hotspot_query(std::uint32_t gen) {
     // 熱點沒開，所以「已連線」的介面一定是連在別的網路上：只要有一張沒連線的無線介面就算可以
     bool ready = false;
-    // §HOTSPOT-REQ-GEN：這一則查詢的世代（它的 expect 已經在 round_begin 做完）。標成 closed：排著或還在等介面的舊 INFO
-    // 不可以在這個答案之後再 arm 或寫結果
-    std::uint32_t gen;
+    // §HOTSPOT-REQ-GEN：gen 是排程當下的世代（expect 在 round_begin 做完）。還是這一則才標 closed：
+    // 排著或還在等介面的舊 INFO 不可以在這個答案之後再 arm 或寫結果。
+    // 審查 11-21：這裡再讀全域 req_gen 當自己的世代，會把等待期間新到的 INFO 標成 closed。
+    bool stale = false;
     {
       std::lock_guard lk(hotspot_wd::mtx);
-      gen = hotspot_wd::req_gen;
-      hotspot_wd::closed_gen = gen;
+      stale = hotspot_wd::req_gen != gen || hotspot_wd::closed_gen == gen;
+      if (!stale) {
+        hotspot_wd::closed_gen = gen;
+      }
+    }
+    if (stale) {
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] query: a newer hotspot request arrived meanwhile - answer not reported"sv;
+      return;
     }
     ensure_wlanapi_loaded();
     if (fn_WlanOpenHandle && fn_WlanCloseHandle && fn_WlanFreeMemory && fn_WlanEnumInterfaces && fn_WlanSetProfile && fn_WlanConnect) {
@@ -3331,17 +3380,14 @@ namespace platf {
                     << (published ? "" : "; a newer hotspot request arrived meanwhile - answer not reported");
   }
 
-  void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key) {
+  void vr_hotspot_connect(uint8_t version, uint8_t auth_type, uint8_t band, uint8_t channel, std::string ssid, std::string key, std::uint32_t req_gen) {
     (void) version;
     (void) channel;
     // §HOTSPOT-ADAPT 第 3 步：走不到 arm() 就離開（沒有 wlanapi、沒有閒著的無線介面、設定檔建不起來）＝這台現在沒有
     // 可以連熱點的介面，放進狀態快照讓頭盔馬上知道（以前只有一行 log，頭盔要空等 45 秒）
     // §HOTSPOT-REQ-GEN：這一則的世代。之後 INFO／QUERY／CLOSED 任一則到了，這一則就過期（不寫快照、不 arm）
-    std::uint32_t gen_at_entry;
-    {
-      std::lock_guard lk(hotspot_wd::mtx);
-      gen_at_entry = hotspot_wd::req_gen;
-    }
+    // 審查 11-21：世代是排程當下傳進來的。這裡再讀全域 req_gen，等介面的那幾秒裡新到的 INFO 會被這一則冒用。
+    const std::uint32_t gen_at_entry = req_gen;
     // 第三輪審查 C19／C21：設定檔建不起來（介面其實閒著）改報 FAILED＋原因碼，不再報 NO_ADAPTER。NO_ADAPTER 是靜態原因，
     // 頭盔之後只送 QUERY，查詢只看有沒有閒著的介面、回 READY，頭盔清掉紀錄重開熱點、又建不起來，每場循環、退避失效。
     // FAILED 是判定，頭盔照時間退避。其餘提早離開（沒有 wlanapi、開不了控制代碼、列不了介面、挑不到介面）查詢也回

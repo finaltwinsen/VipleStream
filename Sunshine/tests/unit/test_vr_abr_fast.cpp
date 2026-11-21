@@ -1901,6 +1901,34 @@ TEST_F(VrAbrFastTest, RepairUsualLevelIsLearnedSoConstantLoadDoesNotBlockForever
   EXPECT_STREQ(c.ramp_block_reason(t1 + 4000ms), "repair");
 }
 
+// 審查 11-21：平常補包量約 14%（高過 floor 上限 10）。放行時 floor 被夾成 10，若再觸發仍用 floor+3＝13，
+// 下一個 14% 樣本立刻又擋，放行等於沒有。接受量記的是放行當下的量（不夾 10），連續 14% 不該再擋；升到 20% 以上才再觸發。
+TEST_F(VrAbrFastTest, HighUsualRepairLoadStaysReleasedUntilItRisesFurther) {
+  fast::fast_controller_t c(kConfigured50Mbps);
+  c.set_applied_kbps(20000);
+  c.tick(t0);
+  for (int i = 0; i <= 90; ++i) {  // 45 秒，涵蓋 25 秒判定
+    const auto t = t0 + i * 500ms;
+    c.on_repair_load(14.0, t);
+  }
+  const auto t1 = t0 + 45000ms;
+  EXPECT_FALSE(c.repair_tight(t1));
+  EXPECT_EQ(c.repair_unrelated_releases(), 1);
+  EXPECT_DOUBLE_EQ(c.repair_floor_pct(), fast::k_fast_repair_floor_max_pct);  // 14% 被夾成 10
+  for (int i = 1; i <= 40; ++i) {  // 放行後再 20 秒的 14%
+    const auto t = t1 + i * 500ms;
+    c.on_repair_load(14.0, t);
+    EXPECT_FALSE(c.repair_tight(t));
+  }
+  EXPECT_EQ(c.repair_unrelated_releases(), 1);
+  const auto t2 = t1 + 20000ms;
+  for (int i = 1; i <= 8; ++i) {  // 升到 20%，3 秒平均超過接受量 + 3 後再擋
+    c.on_repair_load(20.0, t2 + i * 500ms);
+  }
+  EXPECT_TRUE(c.repair_tight(t2 + 4000ms));
+  EXPECT_STREQ(c.ramp_block_reason(t2 + 4000ms), "repair");
+}
+
 // C01：每 1.5 秒有一個視窗補 5%、其餘 0（跟碼率無關的週期性成串補包）。3 秒平均約 1.4～2.1%，從頭到尾都不擋，回升照常
 TEST_F(VrAbrFastTest, PeriodicRepairBurstsDoNotBlockRamp) {
   fast::fast_controller_t c(kConfigured50Mbps);

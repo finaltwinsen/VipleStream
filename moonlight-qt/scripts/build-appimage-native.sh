@@ -139,9 +139,11 @@ ls -1t "$DEBUG_DIR"/*.unstripped 2>/dev/null | tail -n +6 | xargs -r rm -f
 # 這裡只是防呆：app.pro 改回去或別的步驟又帶進來時，不要默默多 10 MB。
 RIFE_DIR="$DEPLOY_FOLDER/usr/share/VipleStream/rife-v4.25-lite"
 [ -f "$RIFE_DIR/flownet.param" ] || fail "flownet.param missing in $RIFE_DIR - RIFE FRUC would be disabled"
-if [ -e "$RIFE_DIR/flownet.bin" ]; then
+# 審查 11-21：-e 在符號連結壞掉（目標不存在）時為假，會漏刪；-L 補上這種連結。刪不掉要中止，不能把 flownet.bin 留進包裝。
+p="$RIFE_DIR/flownet.bin"
+if [ -e "$p" ] || [ -L "$p" ]; then
     echo "[WARN] flownet.bin was installed into the AppDir - removing (it is lazy-fetched at runtime)"
-    rm -f "$RIFE_DIR/flownet.bin"
+    rm -f "$p" || fail "failed to remove $p"
 fi
 
 # Patch 4: metainfo 檔名與 <id> 已對齊（viplestream.appdata.xml / <id>viplestream</id>，

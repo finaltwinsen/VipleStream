@@ -288,6 +288,8 @@ private:
     int m_KbActiveKey = -1;        // 已送出按下、尚未放開的一般鍵
     uint8_t m_KbActiveMods = 0;    // 該鍵按下時送出的修飾鍵
     bool m_KbTrigPrev = false;
+    // 審查 11-21：失焦或離開手把模式後，下一格讀到扳機時把上一格狀態對齊實際狀態（吞掉假的上升緣）
+    bool m_SwallowTriggerRise = false;
     bool m_TrigOnKb = false;       // 這次 trigger 按下發生在鍵盤上：放開前不轉成滑鼠左鍵
     bool m_KbHit = false;
     uint64_t m_StatKeys = 0;

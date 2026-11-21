@@ -894,10 +894,12 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         if (!inRange(preferences->bitrateKbps, 500, 500000)) {
             fprintf(stderr, "Warning: Bitrate is out of the supported range (500 - 500000 Kbps). Performance may suffer!\n");
         }
-    } else if (displaySet || parser.isSet("fps") ||
-               (bitrateWasDefault &&
-                (preferences->enableYUV444 != savedYuv444 || preferences->enableFrameInterpolation != savedFrameInterp ||
-                 preferences->vkfrucEnableTriple != savedTriple || preferences->rendererSelection != savedRenderer))) {
+    } else if (bitrateWasDefault &&
+               (displaySet || parser.isSet("fps") ||
+                preferences->enableYUV444 != savedYuv444 || preferences->enableFrameInterpolation != savedFrameInterp ||
+                preferences->vkfrucEnableTriple != savedTriple || preferences->rendererSelection != savedRenderer)) {
+        // 審查 11-21：只有碼率本來就跟著預設走，命令列改解析度／幀率才重算。
+        // 手動設的碼率留在這一場，不能蓋成 getDefaultBitrate。
         // §RES-BITRATE（C06）：後半＝原本跟著預設值、CLI 只改了會影響預設碼率的開關
         preferences->bitrateKbps = preferences->getDefaultBitrate(
             preferences->width, preferences->height, preferences->fps,

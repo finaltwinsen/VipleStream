@@ -483,6 +483,8 @@ namespace vr::abr {
       repair_recent_.clear();
       repair_mean_pct_ = 0.0;
       repair_floor_pct_ = std::min(repair_floor_pct_, k_fast_repair_tight_pct);
+      // 審查 11-21：接受量是舊路徑放行時記的，換路要歸零。留著會讓新路徑要補到那個量以上才擋。
+      repair_accept_pct_ = 0.0;
       last_repair_time_ = {};
       repair_tight_until_ = {};
       repair_since_ = {};
@@ -614,15 +616,18 @@ namespace vr::abr {
       repair_mean_pct_ = sum / static_cast<double>(repair_recent_.size());
       // 先用「到上一筆為止」的平常量判斷，再把這一筆算進去
       const bool tight = now < repair_tight_until_;
+      // 審查 11-21：floor 上限是 10。平常補包 14% 放行後若還用 floor+3（13）當門檻，下一筆 14% 立刻又擋，放行等於沒有。
+      // 基準改成 floor 與「判定跟碼率無關時接受的量」的較大者；接受量不夾 10。
+      const double repair_usual_pct = std::max(repair_floor_pct_, repair_accept_pct_);
       if (!tight) {
-        if (repair_mean_pct_ >= repair_floor_pct_ + k_fast_repair_tight_pct) {
+        if (repair_mean_pct_ >= repair_usual_pct + k_fast_repair_tight_pct) {
           repair_tight_until_ = now + k_fast_repair_tight_hold;
           repair_episode_start(now);
           repair_first_sum_ = pct;
           repair_first_n_ = 1;
         }
       } else {
-        if (std::min(pct, repair_mean_pct_) >= repair_floor_pct_ + k_fast_repair_tight_exit_pct) {
+        if (std::min(pct, repair_mean_pct_) >= repair_usual_pct + k_fast_repair_tight_exit_pct) {
           repair_tight_until_ = now + k_fast_repair_tight_hold;
         }
         // 這一段擋回升的頭 3 秒的平均（之後拿來比「補包量有沒有變少」）
@@ -638,6 +643,10 @@ namespace vr::abr {
         if (!tight || pct < repair_floor_pct_) {
           repair_floor_pct_ += (1.0 - std::exp(-dt_s / k_fast_repair_floor_tau_s)) * (pct - repair_floor_pct_);
           repair_floor_pct_ = std::clamp(repair_floor_pct_, 0.0, k_fast_repair_floor_max_pct);
+        }
+        // 審查 11-21：接受量只往下跟。線路變好（這一筆比接受量低）時用和 floor 相同的時間常數靠近，門檻才會收回。
+        if (pct < repair_accept_pct_) {
+          repair_accept_pct_ += (1.0 - std::exp(-dt_s / k_fast_repair_floor_tau_s)) * (pct - repair_accept_pct_);
         }
       }
       last_repair_time_ = now;
@@ -1420,6 +1429,9 @@ namespace vr::abr {
       ++repair_unrelated_releases_;
       repair_released_by_judge_ = true;
       repair_floor_pct_ = std::clamp(repair_mean_pct_, 0.0, k_fast_repair_floor_max_pct);
+      // 審查 11-21：floor 會被夾到 10。平常 14% 若只留 floor，放行後門檻是 13，下一筆 14% 立刻又擋。
+      // 另外記住放行當下的量，不夾 10。
+      repair_accept_pct_ = repair_mean_pct_;
       repair_tight_until_ = now;
       repair_judge_related_ = repair_related_ ?
                                 std::min<std::chrono::seconds>(repair_judge_related_ * 2, k_fast_repair_judge_related_max) :
@@ -1836,6 +1848,7 @@ namespace vr::abr {
     steady::time_point repair_tight_until_ {};  ///< 這之前補包量算大（停止回升）
     steady::time_point last_repair_time_ {};
     double repair_floor_pct_ = 0.0;             ///< 補包比例的慢速平均（這條線路平常的量）
+    double repair_accept_pct_ = 0.0;            ///< 審查 11-21：判定跟碼率無關時接受的量（不夾 10）；只往下跟
     double last_repair_pct_ = 0.0;
     bool repair_tight_reported_ = false;
     struct repair_sample_t {

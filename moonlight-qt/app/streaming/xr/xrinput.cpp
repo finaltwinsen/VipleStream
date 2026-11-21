@@ -733,6 +733,9 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
             m_PadMenuHold = xrwheel::Hold();
             m_PadWheelHold = xrwheel::Hold();
             m_WasFocused = false;
+            // 審查 11-21：releaseKeyboard 把上一格扳機清成沒按，手指可能還壓著。
+            // 等焦點回來、這格真的讀到扳機時再對齊，否則同一顆鍵會再送一次 down。
+            m_SwallowTriggerRise = true;
             // §REVIEW-1111（第二輪）：選單鍵的長按狀態一起清。原本失去焦點時按著的那一下，回來放開會被當成短按（開關鍵盤）
             for (int h = 0; h < 2; h++) {
                 m_KbToggleWas[h] = false;
@@ -1024,6 +1027,17 @@ void XrInput::update(XrTime displayTime, XrSpace local, XrSpace view, const Scre
         m_TriggerDown[1] = down[1];
         const int d = m_Dominant;
         leftDesired = m_TriggerDown[d];
+        // 審查 11-21：焦點剛回來、離開手把模式的第一格，扳機可能從頭到尾都壓著，不是新的按下：上一格狀態對齊實際狀態，
+        // 吞掉這一次的上升緣（不然同一顆鍵再打一次，或射線底下多一記左鍵）。切手不在此列——切手本身就是另一隻手
+        // 新按下扳機，那一下要照常算點擊（兩手輪流打字時每一下都是切手）。
+        if (m_SwallowTriggerRise && switchTo < 0) {
+            m_KbTrigPrev = leftDesired;
+            if (leftDesired) {
+                m_TrigOnKb = true;
+                m_TrigOnPanel = true;
+            }
+        }
+        m_SwallowTriggerRise = false;
 
         XrActionStateGetInfo gi = xrStruct<XrActionStateGetInfo>(XR_TYPE_ACTION_STATE_GET_INFO);
         gi.subactionPath = m_Hands[d];
@@ -1289,6 +1303,11 @@ void XrInput::setPadMode(bool on, const char* why)
     else if (m_Sink.gamepad) {
         m_PadSent = XrPadState();
         m_Sink.gamepad(m_PadSent);  // 全部放開
+    }
+    if (!on) {
+        // 審查 11-21：進手把模式時扳機狀態已被清掉。離開這一格食指可能還壓著油門，
+        // 回到射線後要吞掉假的上升緣，否則射線指到的圖示會被按下去。
+        m_SwallowTriggerRise = true;
     }
     if (m_Sink.padMode) {
         m_Sink.padMode(on);
