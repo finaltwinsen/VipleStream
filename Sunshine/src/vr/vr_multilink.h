@@ -182,6 +182,24 @@ namespace vr::multilink {
 
     /// §VR-ABR-FAST（2026-10-30）：現在活著的連線數（定義同 any_alive）。任何執行緒
     int alive_count() const;
+
+    /// §ABR-LOCAL：一條連線此刻的影像送出累計（唯讀快照）。
+    /// sending＝這一刻 send_video 會把影像排進這條連線：有任何 carrier 時就是 video_carrier；
+    /// 一條 carrier 都沒有時，保底強制送出的 alive 連線也算（和 send_video 的 !any_carrier 同一條路）
+    struct video_tx_link_t {
+      bool sending = false;
+      int id = 0;  ///< 協定上的 link id，只給 log。判斷用的是 slot 順序
+      uint64_t tx_pkts = 0;  ///< 累計送出（含補包；與既有的 tx_pkts 同一顆計數器）
+      uint64_t drop_pkts = 0;  ///< dropAge + dropBlock + dropFull。不含 drop_fault、drop_muted、drop_policy、也不扣 tx_err
+    };
+
+    /// §ABR-LOCAL：各 slot 的累計。count 之後的元素不要看。任何執行緒；只讀 atomic，不拿鎖
+    struct video_tx_counters_t {
+      int count = 0;
+      std::array<video_tx_link_t, kMaxLinks> links {};
+    };
+
+    video_tx_counters_t video_tx_counters() const;
     /// §VR-LINK-DEDICATED（11-08）：活著的連線裡走頭盔轉接器熱點（專用 6 GHz）的有幾條。任何執行緒
     int alive_dedicated_count() const;
 

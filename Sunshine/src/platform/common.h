@@ -1234,9 +1234,15 @@ namespace platf {
   void vr_hotspot_stop();
 
   /**
-   * @brief 場次結束時，把這一則還沒 arm 的連線標成過期（審查 11-21）。
-   *        不停止已經 arm、設計上跨場延續的看門狗。req_gen 已經往前（更新的 INFO／QUERY）時不蓋。
-   *        只有 Windows 有實作。
+   * @brief 場次結束、client 沒送 CLOSED 時呼叫（審查 11-21；11-22 補上「已 arm 但還沒連上」）。
+   *        gen 是這一場最後一則 HOTSPOT_INFO 的世代。arm 之後它仍留在 session 上，直到這裡或 CLOSED 清成 0。
+   *        判斷與修改在同一把鎖內，不在持鎖時呼叫 WLAN。只有 Windows 有實作。
+   *        - req_gen 已經往前，或這一則已經 closed（更新的 INFO／QUERY／CLOSED）：不動。
+   *        - 這一則已經 arm（armed_gen == gen）、從這次 arm 到現在一次都沒連上：比照 vr_hotspot_stop
+   *          標 closed、把 req_gen 往前、清掉 armed 與 alive_until、設 pub_hold。設定檔留著。
+   *          看門狗下一輪醒來就收工，不再重連、不再重啟網卡。
+   *        - 這次 arm 之後連上過：只把這一則標成 closed，不停止看門狗。跨場延續（頭盔 VR 介面連開兩場沿用）維持這樣。
+   *        - 還沒 arm：只標 closed，進行中的 connect 在 arm 前自己退出。上一輪留下的看門狗不在這裡停。
    */
   void vr_hotspot_cancel_pending(std::uint32_t gen);
 

@@ -899,3 +899,175 @@ TEST_F(AbrCongestionTest, SteadyDrainKeepsBlocking) {
     EXPECT_EQ(o.action, ac::action_e::none) << i;
   }
 }
+
+// §ABR-LOCAL：commit_cut(severe) 不升等級，IDR 提示仍是 0。note_local_cut 補到 L2；沒有慢 RTT 時提示仍是 0
+TEST_F(AbrCongestionTest, CommitCutSevereDoesNotRaiseLevel) {
+  EXPECT_EQ(c.level(), ac::level_e::clean);
+  c.commit_cut(ac::action_e::cut_severe, 20000, t0, 14000);
+  EXPECT_EQ(c.level(), ac::level_e::clean);
+  EXPECT_EQ(c.idr_gap_hint(), 0);
+
+  c.note_local_cut(t0);
+  EXPECT_EQ(c.level(), ac::level_e::cut);
+  EXPECT_EQ(c.idr_gap_hint(), 0);
+  EXPECT_FALSE(c.rtt_slow());
+}
+
+// 已經在 L3 的不降級
+TEST_F(AbrCongestionTest, NoteLocalCutLeavesDeepAlone) {
+  auto o = c.update(in(700, 40, 5.0, true), t0);
+  EXPECT_EQ(o.level, ac::level_e::hold);  // 第一輪只鎖門檻，還沒進 L3
+  o = c.update(in(700, 40, 5.0, true), t0 + 500ms);
+  ASSERT_EQ(o.level, ac::level_e::deep);
+  c.note_local_cut(t0 + 500ms);
+  EXPECT_EQ(c.level(), ac::level_e::deep);
+}
+
+// 往下掉的計時被清掉：若沒清，t0+400 起算到 t0+1400 就滿 1 秒、會掉回 L0
+TEST_F(AbrCongestionTest, NoteLocalCutRestartsExitTimer) {
+  auto o = c.update(in(150, 40, 5.0, true, true), t0);
+  ASSERT_EQ(o.level, ac::level_e::cut);
+
+  o = c.update(in(40, 40), t0 + 400ms);
+  EXPECT_EQ(o.level, ac::level_e::cut);
+
+  c.note_local_cut(t0 + 700ms);
+  EXPECT_EQ(c.level(), ac::level_e::cut);
+
+  o = c.update(in(40, 40), t0 + 900ms);
+  EXPECT_EQ(o.level, ac::level_e::cut);
+  o = c.update(in(40, 40), t0 + 1400ms);
+  EXPECT_EQ(o.level, ac::level_e::cut);
+  o = c.update(in(40, 40), t0 + 1900ms);
+  EXPECT_EQ(o.level, ac::level_e::clean);
+}
+
+// note 自己不起算降碼冷卻。同一輪若另外 commit_cut，冷卻仍有效
+TEST_F(AbrCongestionTest, NoteLocalCutDoesNotStartCutCooldown) {
+  c.note_local_cut(t0);
+  EXPECT_EQ(c.level(), ac::level_e::cut);
+  auto o = c.update(in(200, 40, 5.0, false, false, true), t0 + 100ms);
+  EXPECT_EQ(o.action, ac::action_e::cut_severe);
+  EXPECT_EQ(o.level, ac::level_e::cut);
+
+  ac::congestion_t cooled;
+  cooled.note_local_cut(t0);
+  cooled.commit_cut(ac::action_e::cut_severe, 20000, t0, 14000);
+  o = cooled.update(in(200, 40, 5.0, false, false, true), t0 + 100ms);
+  EXPECT_EQ(o.action, ac::action_e::none);
+  EXPECT_EQ(cooled.level(), ac::level_e::cut);
+}
+
+// held 的 update 維持等級、不動作。note 把 L0 補成 L2 之後，下一輪 held 仍留在 L2、仍不動作
+TEST_F(AbrCongestionTest, NoteLocalCutDuringHoldIsKeptByNextHeldUpdate) {
+  ac::cong_in_t held;
+  held.held = true;
+  auto o = c.update(held, t0);
+  EXPECT_EQ(o.level, ac::level_e::clean);
+  EXPECT_EQ(o.action, ac::action_e::none);
+  EXPECT_TRUE(o.held);
+
+  c.note_local_cut(t0);
+  EXPECT_EQ(c.level(), ac::level_e::cut);
+  EXPECT_TRUE(c.held());  // note 不清 held_
+
+  o = c.update(held, t0 + 100ms);
+  EXPECT_TRUE(o.held);
+  EXPECT_EQ(o.level, ac::level_e::cut);
+  EXPECT_EQ(o.action, ac::action_e::none);
+  EXPECT_EQ(c.idr_gap_hint(), 0);  // 這條路徑沒有量到 RTT
+}
+
+// 沒有樣本、也不是 held：update() 仍會把等級歸零。note 要在 update 之後才補得回來
+TEST_F(AbrCongestionTest, NoSampleAfterNoteLocalCutReturnsToL0) {
+  c.note_local_cut(t0);
+  ASSERT_EQ(c.level(), ac::level_e::cut);
+  ac::cong_in_t none;
+  const auto o = c.update(none, t0 + 100ms);
+  EXPECT_EQ(o.level, ac::level_e::clean);
+  EXPECT_EQ(o.action, ac::action_e::none);
+}
+
+// update（沒有樣本 → L0）再 note 會補回 L2。local-sat 不再這樣呼叫：那一輪不走 update()
+TEST_F(AbrCongestionTest, NoSampleThenNoteLocalCutStaysAtCut) {
+  ac::cong_in_t none;
+  const auto o = c.update(none, t0);
+  EXPECT_EQ(o.level, ac::level_e::clean);
+  c.note_local_cut(t0);
+  EXPECT_EQ(c.level(), ac::level_e::cut);
+}
+
+// L1 且 RTT 已經夠長：note 之後 IDR 間隔提示才出現（L2 的 1500 ms）
+TEST_F(AbrCongestionTest, NoteLocalCutFromHoldEnablesIdrHintWhenRttIsSlow) {
+  const auto o = c.update(in(200, 40, 5.0, true), t0);
+  EXPECT_EQ(o.level, ac::level_e::hold);
+  EXPECT_EQ(o.action, ac::action_e::none);
+  EXPECT_TRUE(c.rtt_slow());
+  EXPECT_EQ(c.idr_gap_hint(), 0);
+
+  c.note_local_cut(t0);
+  EXPECT_EQ(c.level(), ac::level_e::cut);
+  EXPECT_EQ(c.idr_gap_hint(), 1500);
+}
+
+// §ABR-LOCAL：expire_congestion_point 只清塞車點。等級、慢 RTT、held、IDR 間隔提示留著。
+// note_local_cut 事後也不把點救回來。update() 那條路仍由 CongestionPointMemory 覆蓋
+TEST_F(AbrCongestionTest, ExpireCongestionPointLeavesLevelAndSlowRtt) {
+  auto o = c.update(in(200, 40, 5.0, true, true), t0);
+  ASSERT_EQ(o.level, ac::level_e::cut);
+  ASSERT_TRUE(c.rtt_slow());
+  ASSERT_FALSE(c.held());
+  ASSERT_TRUE(c.commit_cut(ac::action_e::cut_severe, 20000, t0, 14000));
+  EXPECT_EQ(c.congested_kbps(), 20000);
+  EXPECT_EQ(c.idr_gap_hint(), 1500);
+
+  EXPECT_EQ(c.expire_congestion_point(t0 - 1ms), 0);  // 比點還早
+  EXPECT_EQ(c.congested_kbps(), 20000);
+
+  EXPECT_EQ(c.expire_congestion_point(t0 + 29999ms), 0);
+  EXPECT_EQ(c.congested_kbps(), 20000);
+  EXPECT_EQ(c.ramp_cap_kbps(t0 + 29999ms), 18000);
+
+  EXPECT_EQ(c.expire_congestion_point(t0 + 30000ms), 20000);
+  EXPECT_EQ(c.congested_kbps(), 0);
+  EXPECT_EQ(c.ramp_cap_kbps(t0 + 30000ms), 0);
+  EXPECT_EQ(c.expire_congestion_point(t0 + 30000ms), 0);
+  EXPECT_EQ(c.level(), ac::level_e::cut);
+  EXPECT_TRUE(c.rtt_slow());
+  EXPECT_FALSE(c.held());
+  EXPECT_EQ(c.idr_gap_hint(), 1500);
+
+  c.note_local_cut(t0 + 30000ms);
+  EXPECT_EQ(c.congested_kbps(), 0);
+  EXPECT_EQ(c.level(), ac::level_e::cut);
+  EXPECT_EQ(c.idr_gap_hint(), 1500);
+}
+
+// L3：兩輪鎖進深度、緊急降碼記下塞車點。30 秒後只清點，不再呼叫 update()（那會把 point_seen_at_ 往後延）
+TEST_F(AbrCongestionTest, ExpireCongestionPointOnDeepDoesNotDemote) {
+  auto o = c.update(in(700, 40, 5.0, true), t0);
+  EXPECT_EQ(o.level, ac::level_e::hold);
+  o = c.update(in(700, 40, 5.0, true), t0 + 500ms);
+  ASSERT_EQ(o.level, ac::level_e::deep);
+  ASSERT_TRUE(c.rtt_slow());
+  ASSERT_TRUE(c.commit_cut(ac::action_e::cut_emergency, 20000, t0 + 500ms, 10000));
+  EXPECT_EQ(c.level(), ac::level_e::deep);
+  EXPECT_EQ(c.congested_kbps(), 20000);
+  const int gap = c.idr_gap_hint();
+  EXPECT_GT(gap, 0);
+
+  const auto point = t0 + 500ms;
+  EXPECT_EQ(c.expire_congestion_point(point + 29999ms), 0);
+  EXPECT_EQ(c.expire_congestion_point(point + 30000ms), 20000);
+  EXPECT_EQ(c.level(), ac::level_e::deep);
+  EXPECT_TRUE(c.rtt_slow());
+  EXPECT_FALSE(c.held());
+  EXPECT_EQ(c.congested_kbps(), 0);
+  EXPECT_EQ(c.ramp_cap_kbps(point + 30000ms), 0);
+  EXPECT_EQ(c.idr_gap_hint(), gap);
+
+  c.note_local_cut(point + 30000ms);
+  EXPECT_EQ(c.congested_kbps(), 0);
+  EXPECT_EQ(c.level(), ac::level_e::deep);
+  EXPECT_EQ(c.idr_gap_hint(), gap);
+}

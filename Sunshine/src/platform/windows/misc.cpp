@@ -2433,6 +2433,13 @@ namespace platf {
     GUID guid {};
     std::string want_ssid;  // §REVIEW-1111：arm 時記住的熱點 SSID
     bool armed = false;
+    // §HOTSPOT-SESSION-END（2026-11-22）：這次 arm 之後，看門狗有沒有看過「已連上這個熱點」（query_state 回 1，
+    // 或 arm 當下網卡已經在熱點上）。只在 mtx 下讀寫。arm() 重新起算；note_joined() 在對得上這次 armed_at 時設 true。
+    // 場次結束：已 arm 且這面旗標仍是 false 才停掉重試與看門狗；true 的留給跨場延續。
+    bool ever_joined = false;
+    // arm() 成功時的世代。vr_hotspot_expect 會把 req_gen 往前推、但不會重 arm，
+    // 所以 req_gen == gen 且 armed 仍可能是上一輪。只有 armed_gen == gen 才是「這一則已經 arm」。
+    std::uint32_t armed_gen = 0;
     bool running = false;
     clock::time_point alive_until {};
     clock::time_point armed_at {};  // §VR-HOTSPOT-FASTJOIN
@@ -2451,7 +2458,8 @@ namespace platf {
     std::atomic<std::uint32_t> pub_attempts {0};  // 這一輪我們自己發起的連線次數（不加序號，重送時順便帶）
     // §HOTSPOT-REQ-GEN（2026-11-20 第三輪審查）：熱點請求的世代號，取代原本只在 CLOSED 時加一的 stop_gen。由 mtx 保護。
     //   req_gen：每一則 INFO／QUERY 加一（vr_hotspot_expect，在交給背景執行緒之前）；
-    //   closed_gen：這個世代已經有了不是 INFO 的答案——頭盔說熱點關了（vr_hotspot_stop）或回答了查詢（vr_hotspot_query）。
+    //   closed_gen：這個世代已經有了不是 INFO 的答案——頭盔說熱點關了（vr_hotspot_stop）、回答了查詢（vr_hotspot_query），
+    //   或場次沒送 CLOSED 就結束（vr_hotspot_cancel_pending）。
     // vr_hotspot_connect 使用排程當下傳入的世代，之後「req_gen 變了，或 closed_gen 等於它」＝過期：不寫快照、不 arm。
     // 原本只認 stop_gen：排在佇列裡或還在等介面的舊 INFO，在下一場的 QUERY 之後才做完時，照樣用舊的 SSID arm 看門狗、
     // 把快照從 READY 改成 TRYING（失敗時則用 NO_ADAPTER 蓋掉 READY）；比對又在鎖外，CLOSED 夾在比對與 arm 之間也擋不住。
@@ -2511,6 +2519,14 @@ namespace platf {
       std::lock_guard lk(mtx);
       if (round == armed_at) {
         publish_locked(state, flags, false);
+      }
+    }
+
+    // §HOTSPOT-SESSION-END：看門狗觀測到已連上這一輪的熱點。round 對不上這次 armed_at（新的一輪已經 arm）就不寫。
+    void note_joined(clock::time_point round) {
+      std::lock_guard lk(mtx);
+      if (round == armed_at) {
+        ever_joined = true;
       }
     }
 
@@ -2955,8 +2971,8 @@ namespace platf {
             // 平常 3～8 秒就連上，不會走到這裡。
             if (!fast_restarted && now - armed >= kFastRestart && st == 0) {
               std::unique_lock lk(mtx);
-              // 審查 11-21：query_state 放鎖之後才走到這裡。CLOSED 已把 armed 清掉，或新的一輪 arm 換了輪次時，
-              // 不能重啟網卡，也不能扣新一輪的 restarts。
+              // 審查 11-21／11-22：query_state 放鎖之後才走到這裡。CLOSED、或場次結束收掉還沒連上的這一輪，已把 armed 清掉；
+              // 新的一輪 arm 換了輪次時也不能重啟，也不能扣新一輪的 restarts。
               if (!hotspot_wd::armed || armed != armed_at) {
                 continue;
               }
@@ -3059,6 +3075,9 @@ namespace platf {
           }
         }
         if (st == 1) {
+          // §HOTSPOT-SESSION-END：場次結束靠 ever_joined 分辨這次 arm 之後連上過沒有。
+          // 快速加入當下連上會從上面落到這裡，所以只在這一處記。
+          note_joined(armed);
           if (!joined) {
             // §HOTSPOT-ADAPT：快速加入沒成功、放慢之後才連上
             joined = true;
@@ -3246,12 +3265,13 @@ namespace platf {
     }
 
     // vr_hotspot_connect 選定網卡後呼叫：每場重新起算次數。gen＝排程當下傳入的 req_gen（審查 11-21）；過期就不 arm、回 false。
+    // already_joined：選定時這張網卡已經連在熱點上。看門狗下一輪才看得到，場次可能在那之前結束，所以 arm 當下就記下。
     // 比對和寫入在同一把鎖底下（第三輪審查 C20）：vr_hotspot_stop、vr_hotspot_query、vr_hotspot_expect 都在鎖內改世代號，
     // 所以這裡讀到「沒過期」時它們的臨界區還沒開始，之後進來的會照常把這一輪收掉。
     // 第三輪審查 C18：vr_hotspot_restart_max = 0 時原本直接發 DISABLED、不啟動看門狗（之後沒有人會去連），但查詢照樣回 READY，
     // 頭盔每場都開熱點再關、退避一直被清掉。文件寫的是「0 只關掉重啟」，所以看門狗照常啟動；每條重啟路徑本來就用
     // restarts < max_restarts 擋著，0 時一次都不重啟
-    bool arm(const GUID &g, const std::string &ssid, std::uint32_t gen) {
+    bool arm(const GUID &g, const std::string &ssid, std::uint32_t gen, bool already_joined) {
       std::lock_guard lk(mtx);
       if (stale_locked(gen)) {
         return false;
@@ -3259,6 +3279,8 @@ namespace platf {
       guid = g;
       want_ssid = ssid;
       armed = true;
+      armed_gen = gen;
+      ever_joined = already_joined;
       restarts = 0;
       gave_up = false;
       alive_until = clock::now() + kAlive;
@@ -3330,12 +3352,33 @@ namespace platf {
   }
 
   void vr_hotspot_cancel_pending(std::uint32_t gen) {
-    std::lock_guard lk(hotspot_wd::mtx);
-    // 審查 11-21：場次結束只讓「還沒 arm 的這一則」過期。connect 在等待迴圈與 arm() 都用 stale_locked，
-    // 對得上就會自己退出。不改 armed、alive_until：已經連上、跨場延續的看門狗要留到存活期限。
-    // req_gen 已經被更新的 INFO／QUERY 往前推時不能蓋掉那個世代。
-    if (gen != 0 && hotspot_wd::req_gen == gen && hotspot_wd::closed_gen != gen) {
-      hotspot_wd::closed_gen = gen;
+    // 審查 11-21／11-22：場次沒送 CLOSED 就結束。
+    // 還沒 arm 的只標 closed，connect 在等待迴圈與 arm() 都用 stale_locked，對得上就自己退出。
+    // 這一則已經 arm、從這次 arm 起一次都沒連上：比照 vr_hotspot_stop 收掉重試與看門狗（設定檔留著）。
+    // 頭盔把熱點關了、client 來不及送 CLOSED 時，不能讓看門狗在 12 秒後重啟網卡。
+    // 已經連上過的不改 armed、alive_until，留給跨場延續，活到存活期限。
+    // req_gen 已經被更新的 INFO／QUERY／CLOSED 往前推時不動。
+    // 判斷與修改都在這把鎖裡。不在持鎖時做 WLAN 呼叫；log 在放鎖之後。
+    bool stop_unjoined = false;
+    {
+      std::lock_guard lk(hotspot_wd::mtx);
+      if (gen == 0 || hotspot_wd::req_gen != gen || hotspot_wd::closed_gen == gen) {
+        return;
+      }
+      if (hotspot_wd::armed && hotspot_wd::armed_gen == gen && !hotspot_wd::ever_joined) {
+        hotspot_wd::closed_gen = gen;
+        ++hotspot_wd::req_gen;
+        hotspot_wd::armed = false;  // keepalive 不再延長；進行中的重啟路徑再拿鎖時會看到
+        hotspot_wd::alive_until = {};  // 看門狗下一輪（最慢 kPoll；快速加入時 kFastPoll）醒來就收工
+        hotspot_wd::pub_hold = true;  // 收工前不可以再改快照
+        stop_unjoined = true;
+      } else {
+        // 還沒 arm，或這次 arm 之後連上過：只讓這一則過期
+        hotspot_wd::closed_gen = gen;
+      }
+    }
+    if (stop_unjoined) {
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] the session ended before the host joined the hotspot - stopping the retries and the watchdog (profile kept)";
     }
   }
 
@@ -3602,7 +3645,7 @@ namespace platf {
       BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] removed the old auto-connect profile (VipleStream-Frame)"sv;
     }
     status_done = true;
-    if (!hotspot_wd::arm(selectedGuid, ssid, gen_at_entry)) {
+    if (!hotspot_wd::arm(selectedGuid, ssid, gen_at_entry, already_connected)) {
       // 這一則熱點資訊還在處理（或還排著）時頭盔就說熱點關了、或新的 INFO／QUERY 到了：以後到的為準，不啟動看門狗、不寫快照
       BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] a newer hotspot request (info, query or close) arrived while the profile was being set - not starting the watchdog"sv;
     }

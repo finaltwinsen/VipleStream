@@ -307,12 +307,10 @@ namespace abr_cong {
       have_update_ = true;
       last_update_ = now;
 
-      // 塞車點過期（和有沒有樣本無關）
-      if (point_have_ && now - point_seen_at_ >= k_point_ttl) {
+      // 塞車點過期（和有沒有樣本無關）。和 local-sat 共用同一個入口，過期條件只寫在一處
+      if (const int expired = expire_congestion_point(now)) {
         out.point_expired = true;
-        out.expired_kbps = point_kbps_;
-        point_have_ = false;
-        point_kbps_ = 0;
+        out.expired_kbps = expired;
       }
 
       // 審查 11-20 第二輪（D1／D3）：樣本只是被 ENet 重傳擋住——等級、L3 鎖定、排空基準、rtt_slow_、上一個 RTT
@@ -532,6 +530,41 @@ namespace abr_cong {
         point_seen_at_ = now;
       }
       return recorded;
+    }
+
+    /**
+     * @brief 只清掉 TTL 已到的塞車點。回傳被清掉的碼率；0＝沒有清（沒有點，或還沒滿 k_point_ttl，或 now 比點還早）。
+     * 不改等級、輪數、冷卻、L3 鎖定、held_、rtt_slow_、below_、last_update_。
+     * local-sat 不呼叫 update()（凍結的 RTT 不能再推進狀態），但接下來的 commit_cut 會把 point_seen_at_ 刷新；
+     * 過期的點要先從這裡清掉，否則會被這一刀救活。update() 也走這裡，過期條件只有這一份。
+     */
+    int expire_congestion_point(steady::time_point now) {
+      if (!point_have_ || now - point_seen_at_ < k_point_ttl) {
+        return 0;
+      }
+      const int kbps = point_kbps_;
+      point_have_ = false;
+      point_kbps_ = 0;
+      return kbps;
+    }
+
+    /**
+     * @brief §ABR-LOCAL：送出端自己判定要降（連線送不出去），不靠這一輪有沒有 RTT 樣本。
+     * commit_cut(cut_severe) 只記冷卻與塞車點，不升等級；停在 L0 時 IDR 間隔提示不會出現
+     * （congested_for_recovery 要 L2 以上而且 RTT 夠長）。這裡把等級至少推到 L2，已在 L3 的留在 L3
+     * （不降級、也不在這裡新鎖進 L3），並清掉正在往下掉的計時，
+     * 免得等級剛補上、下一輪乾淨樣本又沿用舊的 below_ 計時把它打回 L0。
+     * 不碰 held_（維持中的狀態照舊）、不碰 rtt_slow_（沒有量到長 RTT 就不假裝有，IDR 提示維持 0）、
+     * 不寫 have_cut_／last_cut_（冷卻由同一輪的 commit_cut 起算）、也不刷新塞車點（同一輪的 commit_cut 已經處理；
+     * 在這裡再寫一次會把剛剛清掉的過期塞車點救活。local-sat 要先呼叫 expire_congestion_point）。
+     */
+    void note_local_cut(steady::time_point now) {
+      have_update_ = true;
+      last_update_ = now;
+      if (level_ < level_e::cut) {
+        level_ = level_e::cut;
+      }
+      below_ = false;
     }
 
     level_e level() const {

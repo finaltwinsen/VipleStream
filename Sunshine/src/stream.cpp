@@ -38,6 +38,7 @@ extern "C" {
 #include "platform/common.h"
 #include "process.h"
 #include "abr_congestion.h"
+#include "abr_local.h"
 #include "abr_signals.h"
 #include "relay.h"
 #include "rtsp.h"
@@ -744,6 +745,15 @@ namespace stream {
       ::abr_cong::congestion_t abrCong;
       int abrIdrReq{0};  // 上一輪 ABR 之後收到幾次 client 的 IDR 請求（只給 log 用；握 abrMutex）
 
+      // §ABR-LOCAL：2D 多連線送出端自己的降碼訊號（規則在 abr_local.h，逐條連線的基準也在那裡）。
+      // 只在 !vr && vrLinks 時由控制迴圈更新。abrLocal、pending、回報時刻握 abrMutex。
+      ::abr_local::local_signal_t abrLocal;
+      bool abrLocalCutPending = false;
+      ::abr_local::local_out_t abrLocalCutOut {};
+      long long abrLocalFeedbackAgeMs = -1;  // 觸發這一刀時 client 回報的年齡（ms）；−1＝這一場還沒收過
+      std::chrono::steady_clock::time_point abrClientFeedbackAt {};
+      bool abrClientFeedbackSeen = false;
+
       // §VR-ABR-OUTAGE（2026-10-04）：VR 斷訊事件（斷訊前的位元率，恢復後直接拉回）。abrMutex 保護。
       vr::abr::outage_state_t vrOutage;
       // §VR-ABR-FAST（2026-10-30）：VR 反應式快速降碼率控制器。abrMutex 保護。
@@ -905,7 +915,9 @@ namespace stream {
       // 平台的 vr_hotspot_keepalive 不分是哪一場 arm 的；沒送熱點資訊、REMOTE／DISABLED、送了 CLOSED 或 QUERY 的場次
       // 不續命，上一場留下的看門狗 25 秒內自己收工
       std::atomic<bool> watch {false};
-      // 審查 11-21：這一場排進 hotspot_next 的世代（0＝沒排）。session::stop 只清這一則，並讓進行中、還沒 arm 的連線過期。
+      // 審查 11-21／11-22：這一場最後排進 hotspot_next 的 INFO 世代（0＝沒排）。
+      // 背景執行緒取走 hotspot_next 之後這裡仍留著（arm 不會清），直到 CLOSED 或 session::stop 清成 0。
+      // stop 拿它叫 vr_hotspot_cancel_pending：還沒 arm 的標過期；已 arm 但從沒連上的停掉看門狗。
       std::atomic<std::uint32_t> queued_gen {0};
       std::chrono::steady_clock::time_point keepalive_at {};  // 平面場次續命的 10 秒間隔（只在 controlBroadcastThread 用）
       std::uint32_t sent_gen = 0;
@@ -3572,6 +3584,13 @@ namespace stream {
     int minBr = abr_floor_kbps_for(maxBr);  // floor ≤ cap
     // abrNow 供 fast ABR 與 outage 統一使用
     const auto abrNow = std::chrono::steady_clock::now();
+    // §ABR-LOCAL：這一輪是不是送出端自己觸發的。VR 不會走這條（呼叫端只在 !vr 時傳這個 src），
+    // 這裡再擋一次。lossCount／elapsedMs 都是 0：不能當成 client 回報，也不能拿去結算丟包。
+    const bool localSatSrc = !session->vr && src != nullptr && std::strcmp(src, "local-sat") == 0;
+    if (!session->vr && !localSatSrc) {
+      session->video.abrClientFeedbackAt = abrNow;
+      session->video.abrClientFeedbackSeen = true;
+    }
     // §P2（審查 11-20）：RTT 樣本的新鮮度。樣本只在 ENet 的 ping 更新；ENet 那條路在壅塞中不通、ping 改走 QUIC 之後，
     // peer 逾時（abr_forget_enet_rtt）之前 abrRttLastMs 會凍結在最後一個膨脹的值，§P2 會拿它每 2～3 秒連砍到下限。
     // 2D 超過 3 秒沒有新樣本就當成沒有樣本（走既有的 NO-SAMPLE／QUIC-only 規則）；下一個 ping 一到自動恢復。
@@ -3707,19 +3726,30 @@ namespace stream {
     // 丟棄的幀 client 也會以 FEC status 回報，sum 會雙倍計算 lossPerSec。
     uint64_t staleDrops = 0;
     bool quicCongested = false;
+    // §ABR-LOCAL：local-sat 的視窗長度是 0。取走 stale drop 會讓下一輪真的 client 回報少算，
+    // 而且 effectiveLoss ÷ max(elapsed,1) 會變成「一整段丟棄 ÷ 1 ms」。isRecentlyCongested 的結果只餵給
+    // cong.update 的 hold，這一輪不呼叫 update，所以連 getSession 都不做（不拿 _sessionMutex）。
+    if (!localSatSrc) {
 #ifdef VIPLE_MPQUIC
-    if (config::stream.mpquic_enabled && quic_server::g_listener) {
-      auto quicSession = quic_server::g_listener->getSession(
-          session->video.peer.address());
-      if (quicSession) {
-        staleDrops = quicSession->consumeStaleDropsForAbr();
-        quicCongested = quicSession->isRecentlyCongested();
+      if (config::stream.mpquic_enabled && quic_server::g_listener) {
+        auto quicSession = quic_server::g_listener->getSession(
+            session->video.peer.address());
+        if (quicSession) {
+          staleDrops = quicSession->consumeStaleDropsForAbr();
+          quicCongested = quicSession->isRecentlyCongested();
+        }
       }
-    }
 #endif
+    }
     int effectiveLoss = (int) std::min<uint64_t>(
         std::max<uint64_t>((uint64_t) std::max(lossCount, 0), staleDrops),
         (uint64_t) std::numeric_limits<int>::max());
+    if (localSatSrc) {
+      // lossCount 與 elapsedMs 都是 0。丟包分支的 lossPerSec 用 max(elapsed,1) 不會除以零，
+      // 但只要 effectiveLoss > 0 就會把這一輪當成有丟包。清成 0 之後走下面的 rttSevere：
+      // 零丟包累積被清成 0，也不會被當成乾淨窗回升。FEC 的累計（fecLossAccum 等）這條路徑不碰。
+      effectiveLoss = 0;
+    }
 
     // §VR-ABR-RATIO：VR session 的丟包改看比例；< 1% 當成零丟包（見上方說明）。lossPct < 0 = 不適用
     const float lossPct = vr_abr_loss_pct(session, effectiveLoss, elapsedMs);
@@ -3746,8 +3776,15 @@ namespace stream {
     // 對端瞬間忙碌之類的雜訊干擾，寧可晚一輪也不要誤降畫質。
     bool rttCongested = false;
     bool rttSevere = false;
+    bool localCut = false;  // §ABR-LOCAL：這一輪的降碼是送出端飽和觸發的（VR 恆為 false）
+    bool localSatHold = false;  // §ABR-LOCAL：最近 3 秒內有過飽和窗，暫停回升（VR 恆為 false）
     bool rttSevereNow = false;  // §P2：這一輪「≥ 4 倍且多 200 ms」成立（不含連 2 輪與冷卻）；2D 的壅塞等級用
+    bool deskTrendOver = false;  // §ABR-ADAPT（2D）。local-sat 不讀趨勢估計器，維持 false
     std::string deskRttLog;  // C06：2D 的 [VIPLE-ABR-RTT] 那一行，等 cong.update 之後補上建議再印
+    // §ABR-LOCAL：local-sat 沒有新的 RTT 樣本。下面整段會用凍結的 abrRttLastMs 推進 abrRttCongestedRounds、
+    // 心跳時刻、deskRttLog，並讓後面的 cong.update 把同一筆樣本再算一次（L3、緊急刀、exit_rounds_ 都會被憑空推進）。
+    // 趨勢估計器與基線的寫入在 abr_sample_rtt，不在這裡；這一輪連「拿凍結樣本去讀估計器、組 deskRttLog」都不做。
+    if (!localSatSrc) {
     {
       using namespace std::chrono_literals;
       uint32_t rtt = session->video.abrRttLastMs;
@@ -3848,7 +3885,6 @@ namespace stream {
     // §ABR-ADAPT（2D）：桌面 session 改用自適應延遲趨勢判斷壅塞。固定門檻（2 倍且 +50 ms）在行動網路這類 RTT 本來就跳
     // 20～30 ms 的路徑上會誤判、在 LAN 又太鈍；趨勢看的是「排隊延遲是否持續上升」，門檻依實測抖動自己調。
     // 舊的計算保留給 log 與心跳；VR 不受影響（VR 的控制器有自己的一份）。
-    bool deskTrendOver = false;
     if (!session->vr && rttFresh) {
       using namespace std::chrono_literals;
       const auto &tr = session->video.abrTrend;
@@ -3862,6 +3898,7 @@ namespace stream {
       // 排空中（underuse）也不回升：等佇列清掉
       rttCongested = deskTrendOver || tr.state() == ::vr::abr::trend_state_e::underuse || legacyCongested;
     }
+    }  // !localSatSrc：凍結的 RTT 樣本這一輪不推進輪數、心跳、趨勢讀取、deskRttLog
 
     // §P2（2026-11-20）：2D 把上面的判斷整理成四個等級（規則與數值在 abr_congestion.h）。和以前的差別：
     //   降幅分級——趨勢過載 ×0.85（不變）；「≥ 4 倍且多 200 ms 連 2 輪」×0.70、冷卻由 5 秒改 2 秒（原本也是 ×0.85，
@@ -3872,7 +3909,44 @@ namespace stream {
     // 沒有 RTT 樣本時等級固定 L0、不建議任何動作；RTT 正常時三個條件都不成立，結果與以前相同。VR 不走。
     ::abr_cong::action_e congAction = ::abr_cong::action_e::none;
     if (!session->vr) {
+      // §ABR-LOCAL：最近飽和過就暫停回升。有樣本時併進 in.hold（等級至少 L1）；沒有樣本時 in.hold 吃不到，
+      // 下面回升分支另外看 localSatHold。沒有多連線送出端的場次不看。
+      localSatHold = session->vrLinks && session->video.abrLocal.saturated_recently(abrNow);
       auto &cong = session->video.abrCong;
+      if (localSatSrc) {
+        // 不呼叫 update()：凍結的 RTT 不能再推進 deep_rounds_、exit_rounds_、warm_rounds_、below_、L3 鎖定。
+        // 塞車點的 TTL 過期原本只在 update() 裡做。這一刀後面的 commit_cut 會刷新 point_seen_at_，
+        // 過期的點要先清掉，否則會被救活。這個入口只動塞車點。
+        if (const int expired = cong.expire_congestion_point(abrNow)) {
+          BOOST_LOG(info) << "[VIPLE-ABR] cong point cleared: " << expired
+                          << " kbps (no cut-level congestion for 30 s), fast ramp no longer capped";
+        }
+        if (session->video.abrLocalCutPending) {
+          session->video.abrLocalCutPending = false;
+          localCut = true;
+          // 一律 ×0.70。凍結的 RTT 即使看起來該進 L3、該砍 ×0.50，這一輪也沒有新樣本，不升成 emergency。
+          // 等級已是 L3 時 note_local_cut 保留 L3（不降級，也不在這裡新鎖進去）。這一刀仍是 severe：
+          // commit_cut(cut_severe) 不改 deep_latched_、不起算緊急冷卻、不把凍結的 last_rtt 寫進排空基準。
+          congAction = ::abr_cong::action_e::cut_severe;
+          const auto prevLevel = cong.level();
+          cong.note_local_cut(abrNow);
+          rttSevere = true;
+          const auto levelNow = cong.level();
+          abr_publish_idr_hint(session, abrNow);  // L0 被補成 L2、而且先前的樣本已經夠慢時，IDR 提示才看得到
+          if (levelNow != prevLevel) {
+            BOOST_LOG(info) << "[VIPLE-ABR] cong level L" << (int) prevLevel << "->L" << (int) levelNow
+                            << " action=" << ::abr_cong::action_name(congAction)
+                            << " idrReq=" << session->video.abrIdrReq
+                            << " idrGap=" << cong.idr_gap_hint() << "ms applied=" << applied
+                            << "kbps (src=" << src << ", no new RTT sample)";
+          }
+          // 不清 abrIdrReq：這一輪沒有 client 回報，次數留給下一輪真的回報印出來再清
+        } else {
+          // tick 只有 cut 才會以 local-sat 進來，pending 在同一把 abrMutex 裡剛設上。
+          // 沒有待處理的刀時，loss=0 不能被當成乾淨窗回升。
+          localSatHold = true;
+        }
+      } else {
       ::abr_cong::cong_in_t in;
       in.sampled = rttFresh;  // 樣本太舊＝沒有樣本：等級歸 L0、不建議動作、IDR 提示歸 0
       // 審查 11-20 第二輪（D1／D3）：超過 3 秒、但還在 ENet 重傳可能擋住 ping 的範圍內（max(3 s, min(4×RTT, 4 s)+1 s)）時
@@ -3890,26 +3964,28 @@ namespace stream {
         in.rtt_ms = session->video.abrRttLastMs;
         in.base_ms = abr_rtt_baseline(session);
         in.jitter_ms = tr.jitter_ms();
-        in.hold = rttCongested || quicCongested;
+        in.hold = rttCongested || quicCongested || localSatHold;
         in.trend_over = tr.state() == ::vr::abr::trend_state_e::overuse;
         in.severe = rttSevereNow && session->video.abrRttCongestedRounds >= 2;
       }
       const auto co = cong.update(in, abrNow);
       congAction = co.action;
       rttSevere = congAction != ::abr_cong::action_e::none;
+      const auto levelNow = cong.level();
       abr_publish_idr_hint(session, abrNow);
       if (!deskRttLog.empty()) {
-        BOOST_LOG(info) << deskRttLog << " cong=" << ::abr_cong::action_name(congAction) << " level=L" << (int) co.level
+        // 這一行是這一輪 RTT 樣本自己的建議。真正降多少以下面的 cong cut 為準。local-sat 不組這一行
+        BOOST_LOG(info) << deskRttLog << " cong=" << ::abr_cong::action_name(co.action) << " level=L" << (int) co.level
                         << " (src=" << src << ")";
       }
-      if (co.level != co.prev_level) {
-        BOOST_LOG(info) << "[VIPLE-ABR] cong level L" << (int) co.prev_level << "->L" << (int) co.level
+      if (levelNow != co.prev_level) {
+        BOOST_LOG(info) << "[VIPLE-ABR] cong level L" << (int) co.prev_level << "->L" << (int) levelNow
                         << " rtt=" << in.rtt_ms << "ms base=" << in.base_ms << "ms jit=" << std::format("{:.0f}", in.jitter_ms)
                         << "ms calmJit=" << std::format("{:.0f}", cong.calm_jitter_ms()) << "ms deepAt=+"
                         << std::format("{:.0f}", ::abr_cong::deep_enter_threshold_ms(cong.calm_jitter_ms()))
                         << "ms trend=" << (in.sampled ? ::vr::abr::trend_state_name(session->video.abrTrend.state()) : "no-sample")
                         << " hold=" << in.hold << " severe=" << in.severe << " idrReq=" << session->video.abrIdrReq
-                        << " action=" << ::abr_cong::action_name(co.action) << " idrGap=" << cong.idr_gap_hint()
+                        << " action=" << ::abr_cong::action_name(congAction) << " idrGap=" << cong.idr_gap_hint()
                         << "ms applied=" << applied << "kbps (src=" << src << ")";
       }
       if (co.held != co.prev_held) {
@@ -3923,12 +3999,12 @@ namespace stream {
                           << std::chrono::duration_cast<std::chrono::milliseconds>(abrNow - session->video.abrRttTakeoverAt).count()
                           << " ms ago (last RTT " << session->video.abrRttTakeoverLastMs << " ms, hold window "
                           << ::abr_cong::rtt_hold_window(session->video.abrRttTakeoverLastMs).count()
-                          << " ms) level=L" << (int) co.level;
+                          << " ms) level=L" << (int) levelNow;
         } else {
           BOOST_LOG(info) << "[VIPLE-ABR] cong level " << (co.held ? "held" : "hold ended") << ": ENet RTT sample "
                           << std::chrono::duration_cast<std::chrono::milliseconds>(abrNow - session->video.abrRttSampleAt).count()
                           << " ms old (last " << session->video.abrRttLastMs << " ms, hold window "
-                          << ::abr_cong::rtt_hold_window(session->video.abrRttLastMs).count() << " ms) level=L" << (int) co.level
+                          << ::abr_cong::rtt_hold_window(session->video.abrRttLastMs).count() << " ms) level=L" << (int) levelNow
                           << " idrGap=" << cong.idr_gap_hint() << "ms"
                           << (co.held ? " - keeping the congestion state, no new cuts" :
                                         (in.sampled ? " - sample is back" : " - treated as no sample from now on"));
@@ -3939,6 +4015,7 @@ namespace stream {
                         << " kbps (no cut-level congestion for 30 s), fast ramp no longer capped";
       }
       session->video.abrIdrReq = 0;
+      }  // 有新的 client 回報才走 update()
     }
 
     // §ABR-ADAPT：VR 的丟包分類——延遲沒有上升（不是塞車）的丟包是無線環境的隨機掉包，交給 FEC／補包，不降碼。
@@ -4023,14 +4100,33 @@ namespace stream {
       if (!session->vr) {
         const int congAfter = std::max(minBr, target);
         const bool pointSet = session->video.abrCong.commit_cut(congAction, applied, abrNow, congAfter);
-        abr_publish_idr_hint(session, abrNow);  // 緊急降碼會把等級推到 L3
-        if (congAfter < applied) BOOST_LOG(info) << "[VIPLE-ABR] cong cut action=" << ::abr_cong::action_name(congAction) << " x0."
-                        << ::abr_cong::action_pct(congAction) << " base=" << base << " target=" << std::max(minBr, target)
-                        << " kbps level=L" << (int) session->video.abrCong.level() << " rtt=" << session->video.abrRttLastMs
-                        << "ms base=" << abr_rtt_baseline(session) << "ms"
-                        << (pointSet ? std::format(" congestedAt={}kbps", applied) : std::string {});
+        // 緊急降碼（cut_emergency）會把等級推到 L3。local-sat 的動作固定是 severe，不走那條；
+        // L0 補到 L2 是 note_local_cut 做的，已在 L3 的留在 L3
+        abr_publish_idr_hint(session, abrNow);
+        // 已經在下限（這一刀沒有東西可降）就不記。local cut 與 cong cut 只印一行，避免同一刀出現兩次
+        if (congAfter < applied) {
+          if (localCut) {
+            const auto &w = session->video.abrLocalCutOut;
+            const long long age = session->video.abrLocalFeedbackAgeMs;
+            const std::string feedback = age < 0 ? std::string("never") : std::format("{} ms old", age);
+            // drop／tx 是代表連線（這一窗丟棄比例最低的合格連線）的數字。link＝它的 id，links＝合格條數
+            BOOST_LOG(info) << "[VIPLE-ABR] local cut: links cannot send (drop=" << w.win_drop << '/'
+                            << (w.win_tx + w.win_drop) << " pkts " << std::format("{:.1f}", w.drop_permille / 10.0)
+                            << "% in " << w.win_ms << " ms, link=" << w.link_id << ", links=" << w.links
+                            << ", client feedback " << feedback << ") x0."
+                            << ::abr_cong::action_pct(congAction) << " base=" << base << " target=" << std::max(minBr, target)
+                            << " kbps level=L" << (int) session->video.abrCong.level();
+          } else {
+            BOOST_LOG(info) << "[VIPLE-ABR] cong cut action=" << ::abr_cong::action_name(congAction) << " x0."
+                            << ::abr_cong::action_pct(congAction) << " base=" << base << " target=" << std::max(minBr, target)
+                            << " kbps level=L" << (int) session->video.abrCong.level() << " rtt=" << session->video.abrRttLastMs
+                            << "ms base=" << abr_rtt_baseline(session) << "ms"
+                            << (pointSet ? std::format(" congestedAt={}kbps", applied) : std::string {});
+          }
+        }
       }
-    } else if (quicCongested || rttCongested || repairHold) {
+    } else if (quicCongested || rttCongested || repairHold || localSatHold) {
+      // §ABR-LOCAL：localSatHold 在沒有 RTT 樣本時也要擋住回升（in.hold 只有有樣本才吃得到）。VR 的這個旗標恆為 false
       // §VR-LINK-REPAIR：補包量大（repairHold）也走這裡——不降碼、不回升
       if (repairHold) {
         using namespace std::chrono_literals;
@@ -4224,6 +4320,52 @@ namespace stream {
         }
       }
     }
+  }
+
+  // §ABR-LOCAL：控制迴圈每輪叫一次（不靠 client 回報）。VR 或沒有多連線送出端的場次直接返回。
+  // 自動碼率關著或上限還沒有時，這一場不會降：不取快照、不上鎖（這兩個值在場次生命週期內不變）。
+  // 呼叫端已握 _sessions。要降時再握 abrMutex，接著呼叫 run_abr_aimd（它的呼叫者本來就要持這把鎖）。
+  // 逐條連線的基準在 abr_local::local_signal_t 裡，和 abrMutex 一起更新。
+  static void abr_local_tick(session_t *session, std::chrono::steady_clock::time_point now) {
+    if (session->vr || !session->vrLinks) {
+      return;
+    }
+    if (!session->video.autoAdjustBitrate || session->video.configuredBitrateKbps <= 0) {
+      return;
+    }
+    const auto snap = session->vrLinks->video_tx_counters();
+
+    std::lock_guard<std::mutex> lk(session->video.abrMutex);
+    auto &v = session->video;
+    static_assert(::abr_local::k_max_links == ::vr::multilink::kMaxLinks,
+                  "abr_local::k_max_links must match vr::multilink::kMaxLinks");
+    std::array<::abr_local::link_in_t, ::abr_local::k_max_links> links {};
+    const int n = std::min(snap.count, ::abr_local::k_max_links);
+    for (int i = 0; i < n; ++i) {
+      const auto &L = snap.links[(size_t) i];
+      auto &dst = links[(size_t) i];
+      dst.tx_pkts = L.tx_pkts;
+      dst.drop_pkts = L.drop_pkts;
+      dst.sending = L.sending;
+      dst.id = L.id;
+    }
+    // 還沒收過任何 client 回報不算斷：開場本來就沒有回報，既有的 held 機制也不該在這時被本地訊號取代
+    const bool stale = v.abrClientFeedbackSeen && now >= v.abrClientFeedbackAt &&
+                       now - v.abrClientFeedbackAt >= ::abr_local::k_feedback_stale;
+    const auto out = v.abrLocal.update(links, n, stale, now);
+    if (out.verdict != ::abr_local::verdict_e::cut) {
+      return;
+    }
+    v.abrLocalCutPending = true;
+    v.abrLocalCutOut = out;
+    if (!v.abrClientFeedbackSeen) {
+      v.abrLocalFeedbackAgeMs = -1;
+    } else if (now < v.abrClientFeedbackAt) {
+      v.abrLocalFeedbackAgeMs = 0;
+    } else {
+      v.abrLocalFeedbackAgeMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - v.abrClientFeedbackAt).count();
+    }
+    run_abr_aimd(session, 0, 0, "local-sat");
   }
 
   // §A1-QUIC-TICK-FIX (review batch 2)：零丟包 AIMD tick 共用實作。
@@ -5140,6 +5282,12 @@ namespace stream {
               vr_hotspot_status_tick(session, now);  // §HOTSPOT-ADAPT
               flat_link_tick(session, now);  // §FLAT-ML
             }
+          }
+
+          // §ABR-LOCAL：2D 多連線的送出端降碼。peer 斷了也要跑（控制連線被掐住時正是要靠它降的時候）。
+          // STOPPING 的場次已在上面 continue。逗號寫在函式呼叫的括號裡，KITTY_WHILE_LOOP 不會把它當成引數分隔。
+          if (!session->vr && session->vrLinks) {
+            abr_local_tick(session, now);
           }
 
           // §F4：只計入沒被移除的 session（STOPPING 的已在上面 continue）。
@@ -7121,8 +7269,10 @@ namespace stream {
       session.shutdown_event->raise(true);
       tailscale_path::on_session_end(session.tsPathGen);  // §TS-PATH
 
-      // 審查 11-21：沒送 CLOSED 就結束時，清掉這一場還沒執行的 hotspot_next，並讓進行中的 connect
-      // 在 arm 前發現世代過期而退出。已經 arm、跨場延續的看門狗不在這裡停（不呼叫 vr_hotspot_stop）。
+      // 審查 11-21／11-22：沒送 CLOSED 就結束時，清掉這一場還沒執行的 hotspot_next。
+      // pending_gen 是這一場最後一則 INFO 的世代，arm 之後仍留在 queued_gen（只有 CLOSED 或這裡清成 0）。
+      // cancel_pending：還沒 arm 的標過期；已 arm 但從這次 arm 起沒連上過的，停掉重試與看門狗。
+      // 已經連上過的跨場看門狗留著（不呼叫 vr_hotspot_stop）。
       std::uint32_t pending_gen = 0;
       {
         std::lock_guard hlk(hotspot_mtx);
@@ -7758,6 +7908,12 @@ namespace stream {
           }
         );
         session->flatMl = true;
+        // §ABR-LOCAL：hub 剛建立，逐條基準從零起算（session 是新的；這行把預設狀態再清一次）
+        session->video.abrLocal.reset();
+        session->video.abrLocalCutPending = false;
+        session->video.abrLocalCutOut = {};
+        session->video.abrLocalFeedbackAgeMs = -1;
+        session->video.abrClientFeedbackSeen = false;
         BOOST_LOG(info) << "[VIPLE-VR-LINK] flat (2D) session: multi-link negotiated (fps=" << fps
                         << ", loss repair offered - on only if the client asks for it)";
       }

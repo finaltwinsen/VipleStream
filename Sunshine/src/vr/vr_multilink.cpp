@@ -1895,6 +1895,37 @@ namespace vr::multilink {
     return alive;
   }
 
+  // §ABR-LOCAL：給 2D 降碼看的唯讀快照。和 alive_count 同一種發布規則（count 用 acquire，
+  // slot 在發布前就穩定），不拿 hello_mtx、不改送出路徑。沒在送的連線也帶計數，呼叫端才知道它這一窗中途退出。
+  // 「正在送」對齊 send_video：先看有沒有任何 carrier；一條都沒有時，alive 的連線會被保底強制送出。
+  // tx_err 不從 drop 扣。它把影像送出錯誤和補包送出錯誤算在同一顆計數器，補包錯誤不在 drop_age／drop_block／drop_full 裡，
+  // 扣了會少算。單條網卡錯誤不會拖累另一條送得出去的連線（代表值取丟棄比例最低的那一條）。
+  hub_t::video_tx_counters_t hub_t::video_tx_counters() const {
+    video_tx_counters_t out;
+    if (!impl_) {
+      return out;
+    }
+    const int64_t now_ns = to_ns(clock::now());
+    const int n = std::min(impl_->count.load(std::memory_order_acquire), kMaxLinks);
+    out.count = n;
+    const bool primary_ok = impl_->primary_usable(now_ns);
+    bool any_carrier = false;
+    for (int i = 0; i < n && !any_carrier; ++i) {
+      any_carrier = impl_->video_carrier(*impl_->links[i], now_ns, primary_ok);
+    }
+    for (int i = 0; i < n; ++i) {
+      const auto &L = *impl_->links[i];
+      auto &s = out.links[(size_t) i];
+      // 有 carrier 時只算 video_carrier。一條都沒有時，send_video 對每條 alive 保底強制送出，那些連線的 drop 也要看得到
+      s.sending = any_carrier ? impl_->video_carrier(L, now_ns, primary_ok) : impl_->alive(L, now_ns);
+      s.id = (int) L.id;  // 發布前就寫好。熱加入就地重綁的那一瞬間可能讀到新舊任一值，只影響 log
+      s.tx_pkts = L.tx_pkts.load(std::memory_order_relaxed);
+      s.drop_pkts = L.drop_age.load(std::memory_order_relaxed) + L.drop_block.load(std::memory_order_relaxed) +
+                    L.drop_full.load(std::memory_order_relaxed);
+    }
+    return out;
+  }
+
   int hub_t::alive_dedicated_count() const {
     if (!impl_) {
       return 0;
