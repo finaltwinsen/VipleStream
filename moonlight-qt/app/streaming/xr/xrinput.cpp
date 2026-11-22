@@ -295,6 +295,15 @@ XrInput::XrInput(const XrInputSink& sink, bool testPointer, const QString& testK
             i += 5;
             continue;
         }
+        // §KBD-IME-STATE："{ime}"＝點「中/英」鍵（驗 host 依輸入法狀態切換）
+        if (typed.mid(i, 5) == QLatin1String("{ime}")) {
+            const int imeKey = m_Kb.findKind(XrKeyboard::Kind::Ime, page);
+            if (imeKey >= 0) {
+                m_TestKbSteps.push_back({imeKey});
+            }
+            i += 4;
+            continue;
+        }
         if (typed.mid(i, 5) == QLatin1String("{num}")) {
             const int pageKey = m_Kb.findKind(XrKeyboard::Kind::Page, page);
             if (pageKey >= 0) {
@@ -1439,18 +1448,18 @@ void XrInput::releaseKeyboard(const char* why)
     }
 }
 
-void XrInput::sendKey(int vk, bool down, uint8_t mods)
+void XrInput::sendKey(int vk, bool down, uint8_t mods, uint8_t flags)
 {
     if (!m_TestKbText.isEmpty()) {
         // dev 才逐鍵記錄（一般模式只記數量，避免 log 變成 keylogger）
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev key vk=0x%02X %s mods=0x%X", vk,
-                    down ? "down" : "up", static_cast<unsigned>(mods));
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR-INPUT] dev key vk=0x%02X %s mods=0x%X flags=0x%02X", vk,
+                    down ? "down" : "up", static_cast<unsigned>(mods), static_cast<unsigned>(flags));
     }
     if (down && !m_TestKbText.isEmpty()) {
         m_TestKbSent++;
     }
     if (m_Sink.key) {
-        m_Sink.key(vk, down, mods);
+        m_Sink.key(vk, down, mods, flags);
     }
 }
 
@@ -1487,9 +1496,9 @@ void XrInput::kbPress(int idx)
         setKeyboardOpen(false, "close key");
         break;
     case K::Ime:
-        // 中/英：Shift 單擊（Windows 注音預設的中／英切換；見 xrkeyboard.h）
-        sendKey(k.vk, true, MODIFIER_SHIFT);
-        sendKey(k.vk, false, 0);
+        // §KBD-IME-STATE：左 Shift 按下＋放開，flags 帶 VIPLE_KBE_FLAG_IME_TOGGLE（語意見 xrkeyboard.h）
+        sendKey(k.vk, true, MODIFIER_SHIFT, VIPLE_KBE_FLAG_IME_TOGGLE);
+        sendKey(k.vk, false, 0, VIPLE_KBE_FLAG_IME_TOGGLE);
         m_StatKeys++;
         break;
     case K::Normal: {

@@ -95,7 +95,9 @@ struct XrInputSink {
     std::function<void(float u, float v)> pointer;         // 命中點（濾波後），0..1
     std::function<void(int button, bool pressed)> button;  // Limelight BUTTON_LEFT／BUTTON_RIGHT
     std::function<void(int amount)> scroll;                 // 高解析捲動量（120＝一格）
-    std::function<void(int vk, bool down, uint8_t modifiers)> key;  // 虛擬鍵盤：Win32 VK＋Limelight MODIFIER_*
+    // 虛擬鍵盤：Win32 VK、Limelight MODIFIER_*、LiSendKeyboardEvent2 的 flags。
+    // flags 只有「中/英」帶 VIPLE_KBE_FLAG_IME_TOGGLE，其餘為 0（§KBD-IME-STATE）
+    std::function<void(int vk, bool down, uint8_t modifiers, uint8_t flags)> key;
     // §VR-PLAYER（影片模式）：有設才用。stick＝慣用手搖桿（每格，focused 時；死區內為 0）；menu＝鍵盤開關那顆鍵的上升緣
     // （設了就不開虛擬鍵盤，交給呼叫端，例如切換控制列）；panel＝射線指在控制列上的位置（沒指在上面 u＝v＝-1）、
     // panelClick＝在控制列上按下扳機（那一次的按壓不會變成螢幕上的左鍵）
@@ -204,7 +206,7 @@ private:
     void releaseKeyboard(const char* why);
     void kbPress(int idx);
     void kbRelease();
-    void sendKey(int vk, bool down, uint8_t mods);
+    void sendKey(int vk, bool down, uint8_t mods, uint8_t flags = 0);
     bool syntheticKeyboardRay(XrTime t, XrSpace local, XrSpace view, const Screen& s, uint64_t nowNs,
                               XrRay::Vec3* origin, XrRay::Vec3* dir, bool* trigger);
     void setButton(int idx, bool pressed);

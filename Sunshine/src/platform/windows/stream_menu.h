@@ -8,6 +8,9 @@
  *
  * 只在「有串流 session、而且不是 VR session」時生效；設定 `stream_menu = disabled` 可整個關掉。
  * 任何一步認不出來（UIA 建不起來、逾時、Windows 改版）都當成沒攔到，輸入照原樣注入。
+ *
+ * §STREAM-MENU-HOOK：Steam 這類程式用 SendInput 把虛擬手把轉成滑鼠時，點擊不經過 button_mouse。
+ * 串流期間另裝 WH_MOUSE_LL，用同一套電源圖示判斷攔下來。我們自己注入的左鍵帶 k_own_input_tag，hook 看到就放行。
  */
 #pragma once
 
@@ -15,10 +18,19 @@
 #include <cstdint>
 
 namespace platf::stream_menu {
+  /**
+   * @brief 我們經 SendInput 注入的左鍵，寫進 MOUSEINPUT::dwExtraInfo。
+   * WH_MOUSE_LL 看到這個值就放行（那一下已經由 on_mouse_button 判斷過）。
+   * 型別用 std::uintptr_t：與 ULONG_PTR 同寬、可直接賦值，標頭不必引入 Windows.h
+   * （這個標頭也會被先 include WinSock2 的翻譯單元用到）。0x56495053 是 'VIPS'。
+   */
+  constexpr std::uintptr_t k_own_input_tag = 0x56495053;
+
   /// 第一個串流 session 開始（platf::streaming_will_start）。啟動背景執行緒、開始看「關閉 Windows」對話框。
+  /// `stream_menu` 開著時另外裝 WH_MOUSE_LL（§STREAM-MENU-HOOK）。
   void session_started();
 
-  /// 最後一個串流 session 結束（platf::streaming_will_stop）。停止攔截，還開著的選單一併關掉。
+  /// 最後一個串流 session 結束（platf::streaming_will_stop）。停止攔截（含卸下滑鼠 hook），還開著的選單一併關掉。
   void session_stopped();
 
   /**

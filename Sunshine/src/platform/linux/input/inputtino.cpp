@@ -60,6 +60,8 @@ namespace platf {
   }
 
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
+    // §KBD-IME-STATE：0x80 只在 Windows host 依輸入法狀態處理。這裡清掉再注入，未知位元不會進到後面。
+    flags = static_cast<uint8_t>(flags & static_cast<uint8_t>(~VIPLE_KBE_FLAG_IME_TOGGLE));
     auto raw = (input_raw_t *) input.get();
     platf::keyboard::update(raw, modcode, release, flags);
   }

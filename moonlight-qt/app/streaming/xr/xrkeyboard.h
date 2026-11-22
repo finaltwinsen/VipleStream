@@ -9,9 +9,10 @@
 //   - XrContext：擺放（影像螢幕下方、朝向使用者、後仰 30°）、貼圖上傳到 swapchain、hover／按下高亮 quad。
 //
 // 按鍵碼一律是 Win32 VK（LiSendKeyboardEvent 的約定，host 以 US 版面解讀）。
-// 「中/英」鍵送 Shift 單擊：Windows 內建注音（台灣最常見的輸入法）預設以 Shift 切換中／英文模式，
-// 也是中文版 Windows 螢幕小鍵盤「中/英」的語意；Win+Space 是切換「鍵盤配置／輸入語言」，
-// 對只裝一個中文輸入法的 host 會在語言間循環，不是使用者按「中/英」時期待的行為。
+// 「中/英」鍵（K::Ime）送 VK_LSHIFT 的按下與放開，兩個事件的 flags 都帶 VIPLE_KBE_FLAG_IME_TOGGLE（0x80）。
+// 新的 Windows host 看到這個位元，就讀前景視窗的輸入法狀態來切換中／英（不靠快速鍵）；切成功就把這組按鍵吞掉。
+// 舊 host 不認得這個位元，照舊注入左 Shift 單擊，行為與改之前相同（注音預設也是用 Shift 切，但使用者可以改到別的鍵）。
+// Win+Space 是切換鍵盤配置／輸入語言，不是這個鍵要做的事。
 //
 // §KBD-CAPS（2026-11-20）：Caps 是鍵盤自己的鎖定狀態，不送 VK_CAPITAL。理由：(1) client 讀不到 host 的 Caps 狀態，
 // 送切換鍵的話鍵面的燈號和 host 可能從一開始就相反，而且串流結束後 host 會留在大寫鎖定；(2) Shift 也是同一種做法

@@ -2,19 +2,24 @@
  * @file src/platform/windows/stream_menu.cpp
  * @brief §STREAM-MENU：2D 串流期間，把 Windows 的電源選單換成串流控制選單（說明見 stream_menu.h）。
  *
- * 三個入口：
+ * 四個入口：
  *   1. 遠端左鍵按在開始選單的電源圖示（UI Automation 的 AutomationId == "PowerButton"）。
  *   2. 遠端在桌面（前景視窗類別 Progman／WorkerW）按 Alt+F4。
- *   3. 保險：串流期間出現「關閉 Windows」對話框（前兩個入口沒攔到時），取消它。
+ *   3. 保險：串流期間出現「關閉 Windows」對話框（前面的入口沒攔到時），取消它。
+ *   4. §STREAM-MENU-HOOK：不是經由我們注入的左鍵（Steam 把虛擬手把轉成的滑鼠、本機滑鼠）點同一個電源圖示。
  *
  * 執行緒：
  *   - 輸入執行緒（呼叫 on_mouse_button／on_key）：只做便宜的檢查；UIA 查詢丟給專用執行緒、最多等 100 ms。
  *   - UIA 執行緒：常駐，持有 IUIAutomation。跨行程 COM 呼叫可能卡住，不能放在輸入執行緒上。
  *   - 對話框監看執行緒：常駐，串流期間每 300 ms 找一次「關閉 Windows」對話框。
  *   - 選單執行緒：每次顯示選單開一條，建立視窗、跑訊息迴圈、執行選到的動作後結束。
+ *   - §STREAM-MENU-HOOK：滑鼠 hook 執行緒。stream_menu 開著時，session 開始裝 WH_MOUSE_LL、結束就卸。
+ *     這條執行緒只跑 hook 回呼與 GetMessage；回呼裡做事會拖慢整台 host 的滑鼠
+ *     （SendInput 會同步等所有 WH_MOUSE_LL，見 input.cpp send_input 的 §INPUT-SENDINPUT）。
  *
  * 桌面：這幾條執行緒都不呼叫 SetThreadDesktop，留在行程的啟動桌面（winsta0\default）——開始選單、
  * 桌面與「關閉 Windows」對話框都只會出現在那裡；input.cpp 的 syncThreadDesktop 是每條執行緒各自的事。
+ * WH_MOUSE_LL 收的是 hook 執行緒所在桌面的滑鼠，所以那條執行緒也不換桌面。
  */
 // standard includes
 #include <atomic>
@@ -22,6 +27,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cwchar>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -61,7 +67,8 @@ namespace platf::stream_menu {
     std::atomic<bool> g_menu_open {false};  ///< 選單執行緒存在（同時間只會有一個選單）
     std::atomic<HWND> g_menu_hwnd {nullptr};
 
-    std::atomic<bool> g_left_swallowed {false};  ///< 左鍵按下被吞，對應的放開也要吞
+    std::atomic<bool> g_left_swallowed {false};  ///< 注入路徑吞掉的左鍵按下（on_mouse_button）；對應的放開也要吞
+    std::atomic<bool> g_hook_left_swallowed {false};  ///< hook 吞掉的左鍵按下。兩個旗標各管各的事件，不交叉清除
     std::atomic<std::uint64_t> g_f4_swallowed_ms {0};  ///< F4 按下被吞的時刻（0＝沒有）；重複與放開也要吞
     std::atomic<unsigned> g_alt_mask {0};  ///< 遠端按著的 Alt（bit0＝VK_MENU、bit1＝左、bit2＝右）
 
@@ -74,7 +81,8 @@ namespace platf::stream_menu {
     constexpr auto k_uia_timeout = 100ms;
 
     enum class source_e {
-      power_button,
+      power_button,  ///< 我們注入的左鍵（on_mouse_button）
+      power_button_host,  ///< WH_MOUSE_LL：不是我們注入的左鍵（Steam、本機滑鼠、其他虛擬裝置）
       alt_f4,
       shutdown_dialog,
     };
@@ -831,6 +839,8 @@ namespace platf::stream_menu {
       switch (source) {
         case source_e::power_button:
           return "power-button (start menu)";
+        case source_e::power_button_host:
+          return "power-button (start menu, click not from our input path)";
         case source_e::alt_f4:
           return "alt-f4 (desktop)";
         default:
@@ -838,16 +848,35 @@ namespace platf::stream_menu {
       }
     }
 
-    /// 記下攔到的入口並顯示選單；已經有選單時只記不重開
+    void send_escape();  // 定義在下面。§STREAM-MENU-HOOK 要在選單執行緒裡、建立視窗之前送
+
+    /// 記下攔到的入口並顯示選單；已經有選單時只記不重開。
+    /// power_button_host（WH_MOUSE_LL）不能在 hook 回呼裡 SendInput，Esc 改由這裡丟到別的執行緒。
     void show_menu(source_e source) {
       if (g_menu_open.exchange(true)) {
         BOOST_LOG(info) << "[VIPLE-STREAM-MENU] intercepted: "sv << source_name(source) << " - menu is already open"sv;
+        if (source == source_e::power_button_host) {
+          // 判斷當下選單還沒開，呼叫前被別的入口搶先打開。注入路徑這時已經同步送過 Esc；
+          // hook 路徑還沒送，改丟到短執行緒（回呼裡不能 SendInput）。
+          try {
+            std::thread([] {
+              send_escape();
+            }).detach();
+          } catch (const std::exception &e) {
+            BOOST_LOG(warning) << "[VIPLE-STREAM-MENU] hook: could not send Escape ("sv << e.what() << ')';
+          }
+        }
         return;
       }
       BOOST_LOG(info) << "[VIPLE-STREAM-MENU] intercepted: "sv << source_name(source);
 
       try {
         std::thread([source] {
+          if (source == source_e::power_button_host) {
+            // 注入路徑的 Esc 是 on_mouse_button 在呼叫 show_menu 之前同步送的。
+            // 這條路徑的呼叫端是 hook 回呼，SendInput 改在建立視窗前、這條執行緒上做（run_menu 接著才等開始選單收起來）。
+            send_escape();
+          }
           const int action = run_menu(source);
           // 動作可能很久才回來（睡眠要到喚醒）；先放掉旗標，之後還能再開選單
           g_menu_open.store(false);
@@ -971,10 +1000,194 @@ namespace platf::stream_menu {
       in[1].ki.dwFlags = KEYEVENTF_KEYUP;
       SendInput(2, in, sizeof(INPUT));
     }
+
+    /**
+     * §STREAM-MENU：pt（螢幕座標）底下是不是開始選單的電源圖示。只判斷、不攔截、不開選單。
+     * 注入路徑（on_mouse_button）與 WH_MOUSE_LL 共用。不成立：功能沒開、沒在串流、選單已經開著、
+     * 頂層視窗不是 StartMenuExperienceHost.exe、VR session、UIA 認不出 PowerButton。
+     * image_name_is 會更新 pid 快取（原本就在判斷裡，不是攔截的副作用）。
+     */
+    bool power_button_at(POINT pt) {
+      if (!armed() || g_menu_open.load(std::memory_order_relaxed)) {
+        return false;
+      }
+
+      const HWND under = WindowFromPoint(pt);
+      if (!under) {
+        return false;
+      }
+      const HWND root = GetAncestor(under, GA_ROOT);
+      DWORD pid = 0;
+      GetWindowThreadProcessId(root ? root : under, &pid);
+      if (!pid || !image_name_is(pid, L"StartMenuExperienceHost.exe", g_start_menu_pid)) {
+        return false;
+      }
+
+      // 以下只有點在開始選單上才會走到
+      if (::vr::active()) {
+        return false;  // VR session：桌面不是使用者正在看的畫面，不介入
+      }
+      return uia_worker().probe(pt, k_uia_timeout) == probe_e::hit;
+    }
+
+    // ── §STREAM-MENU-HOOK：WH_MOUSE_LL ────────────────────────────────────
+    //
+    // Steam 把虛擬手把轉成桌面滑鼠時，是 Steam 自己呼叫 SendInput，不經過 button_mouse，
+    // on_mouse_button 不會被叫到。串流期間在專用執行緒裝全域低階滑鼠 hook，左鍵點在電源圖示上就吞掉。
+    // 不分 LLMHF_INJECTED：本機實體滑鼠、Steam、其他虛擬裝置都一樣；只放行帶 k_own_input_tag 的。
+    //
+    // 回呼裡不呼叫 SendInput：這條執行緒正停在回呼、沒在抽訊息，SendInput 若再進自己的 hook 會自己等自己。
+    // 允許的阻塞只有 power_button_at → probe 的 k_uia_timeout（100 ms，低於系統的 LowLevelHooksTimeout）。
+    // 不呼叫 SetThreadDesktop，理由見檔頭「桌面」。
+
+    HHOOK g_ll_hook = nullptr;  ///< 只由 hook 執行緒讀寫
+
+    struct mouse_hook_state_t {
+      std::mutex mtx;  ///< 保護 thread／tid。start 與 stop 可能連續呼叫，不能留下兩條 hook 執行緒
+      std::thread thread;
+      DWORD tid = 0;
+    };
+
+    /// 永不解構。joinable 的 std::thread 若放在靜態物件裡，串流中途行程結束會在解構時 std::terminate。
+    mouse_hook_state_t &mouse_hook_state() {
+      static auto *s = new mouse_hook_state_t;
+      return *s;
+    }
+
+    struct hook_ready_t {
+      std::mutex mtx;
+      std::condition_variable cv;
+      bool done = false;
+      bool ok = false;
+      DWORD tid = 0;
+    };
+
+    LRESULT CALLBACK mouse_ll_proc(int nCode, WPARAM wp, LPARAM lp) {
+      // 移動與其他按鍵什麼都不做，立刻往下送。nCode != HC_ACTION 也一樣。
+      if (nCode != HC_ACTION || (wp != WM_LBUTTONDOWN && wp != WM_LBUTTONUP)) {
+        return CallNextHookEx(g_ll_hook, nCode, wp, lp);
+      }
+      if (!lp) {
+        return CallNextHookEx(g_ll_hook, nCode, wp, lp);
+      }
+
+      const auto *hs = reinterpret_cast<const MSLLHOOKSTRUCT *>(lp);
+      // 我們自己注入的左鍵：不拿鎖、不做查詢。輸入執行緒正卡在 SendInput 等這次回呼。
+      // 放開也不碰 g_hook_left_swallowed，避免清掉另一個來源的按下留下的旗標、或把我們的放開吞掉。
+      if (hs->dwExtraInfo == static_cast<ULONG_PTR>(k_own_input_tag)) {
+        return CallNextHookEx(g_ll_hook, nCode, wp, lp);
+      }
+
+      if (wp == WM_LBUTTONDOWN) {
+        if (power_button_at(hs->pt)) {
+          g_hook_left_swallowed.store(true, std::memory_order_relaxed);
+          show_menu(source_e::power_button_host);
+          return 1;  // 吞掉，不往下送
+        }
+      } else if (g_hook_left_swallowed.exchange(false, std::memory_order_relaxed)) {
+        return 1;
+      }
+      return CallNextHookEx(g_ll_hook, nCode, wp, lp);
+    }
+
+    void hook_thread_main(const std::shared_ptr<hook_ready_t> &ready) {
+      // 一次就好，不在回呼裡。卡住時 dump 才認得出這條執行緒（§INPUT-SENDINPUT）。
+      platf::set_thread_name("stream-menu-hook");
+
+      // 先建立訊息佇列。佇列還沒有就 PostThreadMessage(WM_QUIT) 會失敗，stop 的 join 就等不到。
+      MSG msg;
+      PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
+
+      g_ll_hook = SetWindowsHookExW(WH_MOUSE_LL, mouse_ll_proc, GetModuleHandleW(nullptr), 0);
+      const DWORD install_err = g_ll_hook ? 0 : GetLastError();
+      if (!g_ll_hook) {
+        BOOST_LOG(warning) << "[VIPLE-STREAM-MENU] hook: SetWindowsHookEx failed ("sv << install_err << ')';
+      } else {
+        BOOST_LOG(info) << "[VIPLE-STREAM-MENU] hook: installed"sv;
+      }
+
+      {
+        std::lock_guard lk {ready->mtx};
+        ready->tid = GetCurrentThreadId();
+        ready->ok = g_ll_hook != nullptr;
+        ready->done = true;
+      }
+      ready->cv.notify_all();
+
+      if (!g_ll_hook) {
+        return;  // 功能退回只有注入路徑
+      }
+
+      // 回呼在 GetMessage 裡面就呼叫了。不 Translate、不 Dispatch：這條執行緒沒有自己的視窗。
+      while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+      }
+
+      if (!UnhookWindowsHookEx(g_ll_hook)) {
+        BOOST_LOG(warning) << "[VIPLE-STREAM-MENU] hook: UnhookWindowsHookEx failed ("sv << GetLastError() << ')';
+      }
+      g_ll_hook = nullptr;
+      BOOST_LOG(info) << "[VIPLE-STREAM-MENU] hook: removed"sv;
+    }
+
+    void start_mouse_hook() {
+      auto &st = mouse_hook_state();
+      std::lock_guard lk {st.mtx};
+      if (st.thread.joinable()) {
+        return;  // 已經在跑。連續 start 不能再裝一條
+      }
+
+      auto ready = std::make_shared<hook_ready_t>();
+      try {
+        st.thread = std::thread([ready] {
+          hook_thread_main(ready);
+        });
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "[VIPLE-STREAM-MENU] hook: could not start the hook thread ("sv << e.what() << ") - only injected clicks will be intercepted"sv;
+        return;
+      }
+
+      bool ok = false;
+      {
+        std::unique_lock rlk {ready->mtx};
+        ready->cv.wait(rlk, [&] {
+          return ready->done;
+        });
+        ok = ready->ok;
+        if (ok) {
+          st.tid = ready->tid;
+        }
+      }
+      if (!ok) {
+        // 安裝失敗：執行緒已經返回。收回 joinable，下次 start 才會再試。
+        st.thread.join();
+        st.tid = 0;
+      }
+    }
+
+    void stop_mouse_hook() {
+      auto &st = mouse_hook_state();
+      std::thread exiting;
+      DWORD tid = 0;
+      {
+        std::lock_guard lk {st.mtx};
+        if (!st.thread.joinable()) {
+          return;
+        }
+        tid = st.tid;
+        st.tid = 0;
+        exiting = std::move(st.thread);
+      }
+      // 鎖外 join。回呼不拿 st.mtx；呼叫端（session::join）持有的 running_sessions_mtx 回呼也不拿。
+      if (tid != 0 && !PostThreadMessageW(tid, WM_QUIT, 0, 0)) {
+        BOOST_LOG(warning) << "[VIPLE-STREAM-MENU] hook: PostThreadMessage failed ("sv << GetLastError() << ')';
+      }
+      exiting.join();
+    }
   }  // namespace
 
   void session_started() {
     g_left_swallowed.store(false);
+    g_hook_left_swallowed.store(false);
     g_f4_swallowed_ms.store(0);
     g_alt_mask.store(0);
     {
@@ -986,11 +1199,15 @@ namespace platf::stream_menu {
       uia_worker().start();
       start_watch_thread();
       g_watch_cv.notify_all();
+      start_mouse_hook();
     }
   }
 
   void session_stopped() {
     g_streaming.store(false);
+    // hook 回呼可能還在 probe（最多 k_uia_timeout）。join 等它返回並卸掉 hook，不會留下執行緒。
+    stop_mouse_hook();
+    g_hook_left_swallowed.store(false);
     // 串流結束後選單沒有人看得到，留在桌面上只會擋住本機的使用者
     if (const HWND hwnd = g_menu_hwnd.load()) {
       PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -1007,31 +1224,17 @@ namespace platf::stream_menu {
     }
     g_left_swallowed.store(false, std::memory_order_relaxed);
 
+    // 便宜的短路跟原本一樣放在取游標之前。判斷本身在 power_button_at，hook 與這裡共用。
     if (!armed() || g_menu_open.load(std::memory_order_relaxed)) {
       return false;
     }
 
-    // §STREAM-MENU：一般點擊的成本到這裡為止——游標底下的頂層視窗屬於哪個行程（pid 有快取）。
+    // §STREAM-MENU：一般點擊的成本到 power_button_at 的行程比對為止（pid 有快取）。
     POINT pt;
     if (!GetCursorPos(&pt)) {
       return false;
     }
-    const HWND under = WindowFromPoint(pt);
-    if (!under) {
-      return false;
-    }
-    const HWND root = GetAncestor(under, GA_ROOT);
-    DWORD pid = 0;
-    GetWindowThreadProcessId(root ? root : under, &pid);
-    if (!pid || !image_name_is(pid, L"StartMenuExperienceHost.exe", g_start_menu_pid)) {
-      return false;
-    }
-
-    // 以下只有點在開始選單上才會走到
-    if (::vr::active()) {
-      return false;  // VR session：桌面不是使用者正在看的畫面，不介入
-    }
-    if (uia_worker().probe(pt, k_uia_timeout) != probe_e::hit) {
+    if (!power_button_at(pt)) {
       return false;
     }
 

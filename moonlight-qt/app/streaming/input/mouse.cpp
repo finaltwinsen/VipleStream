@@ -367,10 +367,11 @@ void SdlInputHandler::handleXrButton(int button, bool pressed)
     LiSendMouseButtonEvent(pressed ? BUTTON_ACTION_PRESS : BUTTON_ACTION_RELEASE, button);
 }
 
-// §VR M3a：XR 虛擬鍵盤。VK 與修飾鍵由 XrInput 依實體按鍵的順序產生（修飾鍵先按後放），這裡直接送出。
-void SdlInputHandler::handleXrKey(int vk, bool down, uint8_t modifiers)
+// §VR M3a：XR 虛擬鍵盤。VK 與修飾鍵由螢幕鍵盤依實體按鍵的順序產生（修飾鍵先按後放），這裡直接送出。
+// §KBD-IME-STATE：flags 原樣交給 host（「中/英」帶 VIPLE_KBE_FLAG_IME_TOGGLE；其餘為 0）。
+void SdlInputHandler::handleXrKey(int vk, bool down, uint8_t modifiers, uint8_t flags)
 {
-    LiSendKeyboardEvent((short)vk, down ? KEY_ACTION_DOWN : KEY_ACTION_UP, (char)modifiers);
+    LiSendKeyboardEvent2((short)vk, down ? KEY_ACTION_DOWN : KEY_ACTION_UP, (char)modifiers, (char)flags);
 }
 
 void SdlInputHandler::handleXrScroll(int amount)

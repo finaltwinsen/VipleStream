@@ -2286,6 +2286,17 @@ client  app: every known host could not join the hotspot a short while ago - not
 ```
 - 只在 /cancel（使用者按「結束 APP」）觸發；斷線、快捷鍵中斷串流、閒置收尾都不會關遊戲。
 
+### `[VIPLE-IME]` —— 頭盔鍵盤的「中/英」由 host 依輸入法狀態切換（server，§KBD-IME-STATE，2026-11-22）
+
+`platform/windows/ime_state.cpp`。頭盔螢幕鍵盤的「中/英」仍送左 Shift，但鍵盤事件 flags 帶 `VIPLE_KBE_FLAG_IME_TOGGLE`（0x80）；
+Windows host 看到就讀取並反轉前景視窗輸入法的中英模式，成功時吞掉按鍵，失敗時照舊注入左 Shift。舊 host 不認得位元，照舊注入。
+
+```
+[VIPLE-IME] toggle by state: fg=<視窗類別> open <a>-><b> conv 0x<前>->0x<後> result=ok|unchanged|no-ime-window|timeout
+```
+
+只記視窗類別、不記標題。`result` 不是 `ok` 的那一次會退回左 Shift。
+
 ### `[VIPLE-STREAM-MENU]` —— 2D 串流期間把 Windows 的電源選單換成串流控制選單（server，§STREAM-MENU，2026-11-19）
 
 `platform/windows/stream_menu.cpp`。只在有串流 session、而且不是 VR session 時動作；`stream_menu = disabled` 時完全沒有這些行。
@@ -2293,6 +2304,8 @@ client  app: every known host could not join the hotspot a short while ago - not
 ```
 [VIPLE-STREAM-MENU] uia: ready (CUIAutomation8)                          ← 第一個 session 開始時建立 UI Automation（退回舊版時是 CUIAutomation）
 [VIPLE-STREAM-MENU] intercepted: power-button (start menu)               ← 遠端左鍵按在開始選單的電源圖示：那一下沒有注入、送 ESC 關掉開始選單
+[VIPLE-STREAM-MENU] intercepted: power-button (start menu, click not from our input path)   ← §STREAM-MENU-HOOK（2.0.267）：不是我們注入的左鍵（host 的 Steam 把手把轉成的滑鼠、本機實體滑鼠）點在電源圖示
+[VIPLE-STREAM-MENU] hook: installed | hook: removed                      ← 串流期間的 WH_MOUSE_LL（session 開始裝、結束卸）；`hook: SetWindowsHookEx failed (<err>)` 時只剩注入路徑
 [VIPLE-STREAM-MENU] intercepted: alt-f4 (desktop)                        ← 遠端在桌面（Progman／WorkerW）按 Alt+F4：F4 沒有注入
 [VIPLE-STREAM-MENU] intercepted: shutdown-dialog (cancelled)             ← 保險：出現「關閉 Windows」對話框，已送取消
 [VIPLE-STREAM-MENU] intercepted: <入口> - menu is already open           ← 選單已經開著，不重開

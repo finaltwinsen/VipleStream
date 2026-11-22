@@ -25,6 +25,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "ime_state.h"
 #include "stream_menu.h"
 
 namespace platf {
@@ -608,6 +609,10 @@ namespace platf {
 
     if (button == 1) {
       mi.dwFlags = release ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_LEFTDOWN;
+      // §STREAM-MENU-HOOK：讓 WH_MOUSE_LL 認得這是我們注入的左鍵而直接放行。
+      // 不標的話 SendInput 會同步進到 hook 回呼，再走一次判斷，而且可能把這一下吞掉。
+      // 按下與放開都要標（放開若沒標，可能清掉另一個來源留下的吞鍵旗標）。
+      mi.dwExtraInfo = stream_menu::k_own_input_tag;
     } else if (button == 2) {
       mi.dwFlags = release ? MOUSEEVENTF_MIDDLEUP : MOUSEEVENTF_MIDDLEDOWN;
     } else if (button == 3) {
@@ -647,7 +652,45 @@ namespace platf {
     send_input(i);
   }
 
+  // §KBD-IME-STATE：這一輪「中/英」按下的決定。task_pool 只有一條輸入執行緒，按下、key repeat 的重送、
+  // 放開與 session 結束補送的放開都在這裡，不用鎖。
+  // swallowed＝狀態切換成功，這個按下、之後的重複、對應的放開都不要注入。
+  // injected＝切換失敗，已經退回注入按鍵。重複不要再問一次輸入法：若第二次問到成功，
+  // 對應的放開會被吞掉，退回注入的左 Shift 就鬆不開。
+  static bool take_ime_toggle(bool release) {
+    enum class decision_e { none, swallowed, injected };
+    static decision_e decision = decision_e::none;
+
+    if (!release) {
+      if (decision == decision_e::swallowed) {
+        return true;
+      }
+      if (decision == decision_e::injected) {
+        return false;
+      }
+      if (ime_toggle_by_state()) {
+        decision = decision_e::swallowed;
+        return true;
+      }
+      decision = decision_e::injected;
+      return false;
+    }
+
+    const bool swallow = decision == decision_e::swallowed;
+    decision = decision_e::none;
+    return swallow;
+  }
+
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
+    // §KBD-IME-STATE：螢幕鍵盤「中/英」。切成功就吞掉；失敗則清掉位元，退回下面原本的注入。
+    // VR session 不另做判斷。位元要在 SS_KBE_FLAG_NON_NORMALIZED 的判斷之前清掉。
+    if ((flags & VIPLE_KBE_FLAG_IME_TOGGLE) != 0) {
+      flags = static_cast<uint8_t>(flags & static_cast<uint8_t>(~VIPLE_KBE_FLAG_IME_TOGGLE));
+      if (take_ime_toggle(release)) {
+        return;
+      }
+    }
+
     // §STREAM-MENU：2D 串流期間，在桌面按 Alt+F4 的那個 F4 不注入（Windows 會跳「關閉 Windows」），
     // 改顯示串流控制選單。放在這裡而不是上層：按鍵重複與 session 結束時補送的放開也都經過這個函式。
     if (stream_menu::on_key(modcode, release)) {

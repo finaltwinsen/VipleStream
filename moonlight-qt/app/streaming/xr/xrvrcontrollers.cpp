@@ -79,7 +79,7 @@ void XrVrControllers::setWheel(uint8_t wire, std::function<void(bool on)> toggle
     m_WheelToggled = std::move(toggled);
 }
 
-void XrVrControllers::setKeyboard(std::function<void(int vk, bool down, uint8_t mods)> key, const QString& testText)
+void XrVrControllers::setKeyboard(std::function<void(int vk, bool down, uint8_t mods, uint8_t flags)> key, const QString& testText)
 {
     m_KbKey = std::move(key);
     m_KbTestText = testText;
@@ -773,15 +773,15 @@ void XrVrControllers::setKeyboardOpen(bool open, const char* why)
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] keyboard %s (%s)", open ? "opened" : "closed", why);
 }
 
-void XrVrControllers::kbSend(int vk, bool down, uint8_t mods)
+void XrVrControllers::kbSend(int vk, bool down, uint8_t mods, uint8_t flags)
 {
     if (!m_KbTestText.isEmpty()) {
         // dev 才逐鍵記錄（一般模式只記數量，避免 log 變成 keylogger）
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] dev key vk=0x%02X %s mods=0x%X", vk, down ? "down" : "up",
-                    static_cast<unsigned>(mods));
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-KBD] dev key vk=0x%02X %s mods=0x%X flags=0x%02X", vk,
+                    down ? "down" : "up", static_cast<unsigned>(mods), static_cast<unsigned>(flags));
     }
     if (m_KbKey) {
-        m_KbKey(vk, down, mods);
+        m_KbKey(vk, down, mods, flags);
     }
 }
 
@@ -811,8 +811,9 @@ void XrVrControllers::kbPress(int idx)
         setKeyboardOpen(false, "close key");
         break;
     case K::Ime:
-        kbSend(k.vk, true, MODIFIER_SHIFT);  // 中/英：Shift 單擊（見 xrkeyboard.h）
-        kbSend(k.vk, false, 0);
+        // §KBD-IME-STATE：左 Shift 按下＋放開，flags 帶 VIPLE_KBE_FLAG_IME_TOGGLE（語意見 xrkeyboard.h）
+        kbSend(k.vk, true, MODIFIER_SHIFT, VIPLE_KBE_FLAG_IME_TOGGLE);
+        kbSend(k.vk, false, 0, VIPLE_KBE_FLAG_IME_TOGGLE);
         m_StatKbKeys++;
         break;
     case K::Normal: {

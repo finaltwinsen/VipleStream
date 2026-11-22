@@ -84,9 +84,10 @@ public:
     void setWheel(uint8_t wire, std::function<void(bool on)> toggled);
 
     // ── §VR-KBD：虛擬鍵盤 ──
-    // key：按鍵事件（Win32 VK＋Limelight MODIFIER_*，frame thread 呼叫）；空＝沒有鍵盤。
+    // key：按鍵事件（Win32 VK、Limelight MODIFIER_*、LiSendKeyboardEvent2 的 flags，frame thread 呼叫）；空＝沒有鍵盤。
+    // flags 只有「中/英」帶 VIPLE_KBE_FLAG_IME_TOGGLE（§KBD-IME-STATE）。
     // testText（dev --xr-test-keyboard）：開始 20 s 後自動打開鍵盤、逐字按完再關，不必有控制器
-    void setKeyboard(std::function<void(int vk, bool down, uint8_t mods)> key, const QString& testText);
+    void setKeyboard(std::function<void(int vk, bool down, uint8_t mods, uint8_t flags)> key, const QString& testText);
     // 任何執行緒：要求切換開關（frame thread 下一格處理）
     void requestKeyboardToggle() { m_KbToggleReq.fetch_add(1, std::memory_order_acq_rel); }
     // 以下都在 frame thread
@@ -146,7 +147,7 @@ private:
     void setKeyboardOpen(bool open, const char* why);
     void kbPress(int idx);
     void kbRelease();
-    void kbSend(int vk, bool down, uint8_t mods);
+    void kbSend(int vk, bool down, uint8_t mods, uint8_t flags = 0);
     bool boolState(XrAction a, int h) const;
     float floatState(XrAction a, int h) const;
     XrVector2f vecState(XrAction a, int h) const;
@@ -192,7 +193,7 @@ private:
     // §VR-KBD（都只在 frame thread 用，m_KbToggleReq 除外）
     XrAction m_AimPose = XR_NULL_HANDLE;
     XrSpace m_AimSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
-    std::function<void(int, bool, uint8_t)> m_KbKey;
+    std::function<void(int, bool, uint8_t, uint8_t)> m_KbKey;
     std::atomic<int> m_KbToggleReq{0};
     XrKeyboard m_Kb;
     bool m_KbOpen = false;

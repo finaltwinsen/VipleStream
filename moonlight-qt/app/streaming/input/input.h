@@ -105,8 +105,9 @@ public:
     void handleXrPointer(uint16_t u16, uint16_t v16);
     void handleXrButton(int button, bool pressed);
     void handleXrScroll(int amount);
-    // §VR M3a：XR 虛擬鍵盤（Win32 VK＋Limelight MODIFIER_*）
-    void handleXrKey(int vk, bool down, uint8_t modifiers);
+    // §VR M3a：XR 虛擬鍵盤（Win32 VK、Limelight MODIFIER_*、LiSendKeyboardEvent2 的 flags）
+    // §KBD-IME-STATE：flags 只有「中/英」為 VIPLE_KBE_FLAG_IME_TOGGLE，其餘為 0
+    void handleXrKey(int vk, bool down, uint8_t modifiers, uint8_t flags = 0);
     // §XR-PADMODE：XR 桌面的手把模式——兩支 VR 控制器合成的一支 Xbox 手把（buttons＝Limelight *_FLAG）
     void handleXrGamepad(int buttons, uint8_t lt, uint8_t rt, short lx, short ly, short rx, short ry);
 

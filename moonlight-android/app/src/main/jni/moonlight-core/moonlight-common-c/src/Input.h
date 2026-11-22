@@ -23,6 +23,7 @@ typedef struct _NV_HAPTICS_PACKET {
 #define KEY_UP_EVENT_MAGIC 0x00000004
 typedef struct _NV_KEYBOARD_PACKET {
     NV_INPUT_HEADER header;
+    // §KBD-IME-STATE：bit0＝SS_KBE_FLAG_NON_NORMALIZED，bit7＝VIPLE_KBE_FLAG_IME_TOGGLE。其餘位元目前沒有定義。
     char flags; // Sunshine extension (always 0 for GFE)
     short keyCode;
     char modifiers;

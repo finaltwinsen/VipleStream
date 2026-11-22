@@ -804,6 +804,9 @@ int LiSendKeyboardEvent(short keyCode, char keyAction, char modifiers);
 // the keycode was not mapped to a standard US English scancode and should be
 // interpreted as-is. This is a Sunshine protocol extension.
 #define SS_KBE_FLAG_NON_NORMALIZED 0x01
+// §KBD-IME-STATE：頭盔螢幕鍵盤的「中/英」。Windows host 依輸入法狀態切換；不認得的舊 host 忽略這個位元，照舊注入按鍵。
+// 只佔 flags 的 bit7。char 可能是有號的，0x80 在線上仍是那個位元組，呼叫端不要另外遮掉。
+#define VIPLE_KBE_FLAG_IME_TOGGLE 0x80
 int LiSendKeyboardEvent2(short keyCode, char keyAction, char modifiers, char flags);
 
 // This function queues an UTF-8 encoded text to be sent to the remote server.

@@ -3925,11 +3925,12 @@ bool Session::createXrContext(bool isRebuild, QString* error)
         SDL_PushEvent(&ev);
     };
     // 虛擬鍵盤：按鍵依序推到 main loop（SDL 事件佇列保序，修飾鍵與一般鍵的先後不會亂）
-    xo.inputSink.key = [](int vk, bool down, uint8_t modifiers) {
+    // §KBD-IME-STATE：data1 的 bit24–31 是 LiSendKeyboardEvent2 的 flags（「中/英」才非 0）
+    xo.inputSink.key = [](int vk, bool down, uint8_t modifiers, uint8_t flags) {
         SDL_Event ev = {};
         ev.type = SDL_USEREVENT;
         ev.user.code = SDL_CODE_XR_KEY;
-        ev.user.data1 = (void*)(uintptr_t)(((uint32_t)modifiers << 16) | ((uint32_t)vk & 0xFFFFu));
+        ev.user.data1 = (void*)(uintptr_t)(((uint32_t)flags << 24) | ((uint32_t)modifiers << 16) | ((uint32_t)vk & 0xFFFFu));
         ev.user.data2 = (void*)(uintptr_t)(down ? 1 : 0);
         SDL_PushEvent(&ev);
     };
@@ -6260,7 +6261,8 @@ void Session::exec()
             case SDL_CODE_XR_KEY: {
                 const uint32_t packed = (uint32_t)(uintptr_t)event.user.data1;
                 m_InputHandler->handleXrKey((int)(packed & 0xFFFFu), (uintptr_t)event.user.data2 != 0,
-                                            (uint8_t)((packed >> 16) & 0xFFu));
+                                            (uint8_t)((packed >> 16) & 0xFFu),
+                                            (uint8_t)((packed >> 24) & 0xFFu));
                 break;
             }
             case SDL_CODE_XR_SCROLL:

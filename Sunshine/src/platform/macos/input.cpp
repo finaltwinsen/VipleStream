@@ -247,6 +247,10 @@ const KeyCodeMap kKeyCodesMap[] = {
   }
 
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
+    // §KBD-IME-STATE：0x80 只在 Windows host 依輸入法狀態處理。這條路徑不看 flags，清掉再照舊注入。
+    flags = static_cast<uint8_t>(flags & static_cast<uint8_t>(~VIPLE_KBE_FLAG_IME_TOGGLE));
+    (void) flags;
+
     auto key = keysym(modcode);
 
     BOOST_LOG(debug) << "got keycode: 0x"sv << std::hex << modcode << ", translated to: 0x" << std::hex << key << ", release:" << release;

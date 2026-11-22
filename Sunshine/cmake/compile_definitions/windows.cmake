@@ -79,6 +79,9 @@ set(PLATFORM_TARGET_FILES
         # §STREAM-MENU：2D 串流期間把 Windows 的電源選單換成串流控制選單
         "${CMAKE_SOURCE_DIR}/src/platform/windows/stream_menu.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/stream_menu.cpp"
+        # §KBD-IME-STATE：前景視窗輸入法的中／英切換（不靠快速鍵）
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/ime_state.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/ime_state.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_base.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_vram.h"
@@ -121,6 +124,7 @@ if(NOT MSVC)
 endif()
 
 # §STREAM-MENU：gdi32（選單繪製）、oleaut32（UI Automation 回傳的 BSTR）、powrprof（SetSuspendState）
+# §KBD-IME-STATE：imm32（ImmGetDefaultIMEWnd）
 if(MSVC)
     list(PREPEND PLATFORM_LIBRARIES
             ${CURL_STATIC_LIBRARIES}
@@ -135,6 +139,7 @@ if(MSVC)
             dxgi
             gdi32
             hid
+            imm32
             iphlpapi
             ksuser
             ${MINHOOK_LIBRARY}
@@ -167,6 +172,7 @@ else()
             dxgi
             gdi32
             hid
+            imm32
             iphlpapi
             ksuser
             libssp.a

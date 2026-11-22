@@ -45,6 +45,17 @@
 
 ## 各章節待辦補充
 
+### 2026-11-22：頭盔 2D 串流的兩個輸入問題（2.0.270，已發佈；host 與頭盔都是 2.0.270）
+
+- **§STREAM-MENU-HOOK**：頭盔上的 Steam Controller 經 §SC-HID 變成 host 的虛擬手把，host 的 Steam 把它轉成滑鼠，不經我們的注入路徑，
+  點電源圖示出現的是 Windows 的電源選單。串流期間加裝 `WH_MOUSE_LL`，任何來源的左鍵點到電源圖示都出串流控制選單（我們自己注入的
+  用 `dwExtraInfo` 標記放行）。無人驗：在 host 桌面模擬未標記的點擊有攔到、斷線時 hook 卸除。**待配戴**：用真的 Steam Controller 點一次。
+  行為變更：2D 串流期間 host 本機的實體滑鼠點電源圖示也會出串流控制選單。
+- **§KBD-IME-STATE**：「中/英」原本送左 Shift 單擊，host 的輸入法把切換設在別的鍵時無效。改成 host 讀寫輸入法狀態
+  （鍵盤事件 flags 的 0x80；舊 host 與讀不到狀態時退回左 Shift）。無人驗：兩次切換 host log 都是 `result=ok`，但當時前景是工作列。
+  **待配戴**：在一般的輸入框按「中/英」後實際打字確認；全螢幕遊戲內讀不到狀態時的退路。Linux／macOS host 不處理（清掉位元照舊注入）；
+  Android 那份 common-c 只同步標頭。
+
 ### 2026-11-21 上午：外部模型細部審查與修正（2.0.263，**未經無人驗證**；host 仍是 2.0.260）
 
 審查由 agy（Neon）、grok、opencode 做，修正由 grok 做，逐項看過 diff；報告在本機 `temp/review_1121/`。Windows 兩件與頭盔版建得過，

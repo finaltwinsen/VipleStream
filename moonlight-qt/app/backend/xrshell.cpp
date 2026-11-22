@@ -413,7 +413,8 @@ bool XrShell::bringUpXr(QString* error)
     xo.inputSink.scroll = [this](int amount) {
         QMetaObject::invokeMethod(this, [this, amount]() { wheel(amount); }, Qt::QueuedConnection);
     };
-    xo.inputSink.key = [this](int vk, bool down, uint8_t mods) {
+    // §KBD-IME-STATE：第四個參數是送給 host 的 flags。介面的鍵留在本機 Qt，用不到（0xA0 本來就在 key() 裡丟掉）。
+    xo.inputSink.key = [this](int vk, bool down, uint8_t mods, uint8_t) {
         QMetaObject::invokeMethod(this, [this, vk, down, mods]() { key(vk, down, mods); }, Qt::QueuedConnection);
     };
     xo.inputSink.back = [this]() { QMetaObject::invokeMethod(this, [this]() { back(); }, Qt::QueuedConnection); };
