@@ -21,6 +21,11 @@ import java.io.IOException;
  */
 public class UpdateFileProvider extends ContentProvider {
 
+    // §VITURE：診斷報告不能跟 APK 放同一個 updates 目錄。URI 只有檔名，所以用檔名前綴決定要去 glasses 還是 updates。
+    public static final String GLASSES_CACHE_DIR = "glasses";
+    private static final String GLASSES_NAME_PREFIX = "viplestream-glasses-";
+    private static final String GLASSES_NAME_SUFFIX = ".txt";
+
     private static final String[] DEFAULT_PROJECTION = {
             OpenableColumns.DISPLAY_NAME,
             OpenableColumns.SIZE
@@ -59,24 +64,16 @@ public class UpdateFileProvider extends ContentProvider {
             throw new SecurityException("不合法的檔案路徑");
         }
 
-        try {
-            // 限制僅能存取 cacheDir/updates/ 目錄下的檔案，並進行標準路徑檢查防範路徑遍歷攻擊
-            File updatesDir = new File(context.getCacheDir(), "updates").getCanonicalFile();
-            File requestedFile = new File(updatesDir, fileName).getCanonicalFile();
-            if (!requestedFile.getPath().startsWith(updatesDir.getPath() + File.separator)) {
-                throw new SecurityException("拒絕存取：偵測到路徑遍歷攻擊");
-            }
-            if (!requestedFile.exists()) {
-                throw new FileNotFoundException("找不到更新檔案：" + requestedFile.getAbsolutePath());
-            }
-            return ParcelFileDescriptor.open(requestedFile, ParcelFileDescriptor.MODE_READ_ONLY);
-        } catch (IOException e) {
-            throw new FileNotFoundException("無法解析檔案路徑：" + e.getMessage());
-        }
+        File requestedFile = resolveReadable(context, fileName);
+        return ParcelFileDescriptor.open(requestedFile, ParcelFileDescriptor.MODE_READ_ONLY);
     }
 
     @Override
     public String getType(Uri uri) {
+        String fileName = uri == null ? null : uri.getLastPathSegment();
+        if (fileName != null && isGlassesReportName(fileName)) {
+            return "text/plain";
+        }
         return "application/vnd.android.package-archive";
     }
 
@@ -95,28 +92,61 @@ public class UpdateFileProvider extends ContentProvider {
             return null;
         }
 
+        File requestedFile;
         try {
-            File updatesDir = new File(context.getCacheDir(), "updates").getCanonicalFile();
-            File requestedFile = new File(updatesDir, fileName).getCanonicalFile();
-            if (!requestedFile.getPath().startsWith(updatesDir.getPath() + File.separator) || !requestedFile.exists()) {
-                return null;
-            }
-
-            MatrixCursor cursor = new MatrixCursor(projection, 1);
-            MatrixCursor.RowBuilder row = cursor.newRow();
-            for (String col : projection) {
-                if (OpenableColumns.DISPLAY_NAME.equals(col)) {
-                    row.add(requestedFile.getName());
-                } else if (OpenableColumns.SIZE.equals(col)) {
-                    row.add(requestedFile.length());
-                } else {
-                    row.add(null);
-                }
-            }
-            return cursor;
-        } catch (IOException e) {
+            requestedFile = resolveReadable(context, fileName);
+        } catch (FileNotFoundException e) {
             return null;
         }
+
+        MatrixCursor cursor = new MatrixCursor(projection, 1);
+        MatrixCursor.RowBuilder row = cursor.newRow();
+        for (String col : projection) {
+            if (OpenableColumns.DISPLAY_NAME.equals(col)) {
+                row.add(requestedFile.getName());
+            } else if (OpenableColumns.SIZE.equals(col)) {
+                row.add(requestedFile.length());
+            } else {
+                row.add(null);
+            }
+        }
+        return cursor;
+    }
+
+    private static File resolveReadable(Context context, String fileName) throws FileNotFoundException {
+        try {
+            // 限制僅能存取 cacheDir/updates/ 目錄下的檔案，並進行標準路徑檢查防範路徑遍歷攻擊
+            File updatesDir = new File(context.getCacheDir(), "updates").getCanonicalFile();
+            File requestedFile = new File(updatesDir, fileName).getCanonicalFile();
+            if (!requestedFile.getPath().startsWith(updatesDir.getPath() + File.separator)) {
+                throw new SecurityException("拒絕存取：偵測到路徑遍歷攻擊");
+            }
+            if (requestedFile.exists()) {
+                return requestedFile;
+            }
+            if (!isGlassesReportName(fileName)) {
+                throw new FileNotFoundException("找不到更新檔案：" + requestedFile.getAbsolutePath());
+            }
+            File glassesDir = new File(context.getCacheDir(), GLASSES_CACHE_DIR).getCanonicalFile();
+            File glassesFile = new File(glassesDir, fileName).getCanonicalFile();
+            if (!glassesFile.getPath().startsWith(glassesDir.getPath() + File.separator)) {
+                throw new SecurityException("拒絕存取：偵測到路徑遍歷攻擊");
+            }
+            if (!glassesFile.exists()) {
+                throw new FileNotFoundException("找不到診斷報告：" + glassesFile.getAbsolutePath());
+            }
+            return glassesFile;
+        } catch (FileNotFoundException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new FileNotFoundException("無法解析檔案路徑：" + e.getMessage());
+        }
+    }
+
+    private static boolean isGlassesReportName(String fileName) {
+        return fileName.startsWith(GLASSES_NAME_PREFIX)
+                && fileName.endsWith(GLASSES_NAME_SUFFIX)
+                && fileName.length() > GLASSES_NAME_PREFIX.length() + GLASSES_NAME_SUFFIX.length();
     }
 
     @Override

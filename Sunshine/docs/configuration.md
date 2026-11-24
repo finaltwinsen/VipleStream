@@ -319,6 +319,43 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### log_upload
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream §LOGDROP: whether the server may send an anonymous log to the developer when a stream ends,
+            or when the previous process did not exit cleanly. The report is the recent server log, the version, and
+            the operating system. IP addresses, the computer name, and the user name are hidden first. It does not
+            include accounts or personal data, and it is stored in the developer's Google Drive. `ask` shows the
+            question once on the home page. The choice can be changed later on the settings page or the troubleshooting
+            page. Each automatic trigger waits at least 6 hours, and this process sends at most 3 automatic reports
+            per day. Those limits reset when the process starts. Manual upload from the troubleshooting page is
+            separate. If this build has no upload URL, nothing is sent.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            ask
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="3">Choices</td>
+        <td>ask</td>
+        <td>Ask on the home page. Nothing is sent automatically until the user agrees.</td>
+    </tr>
+    <tr>
+        <td>enabled</td>
+        <td>Send automatically when a stream ends and after an unclean exit.</td>
+    </tr>
+    <tr>
+        <td>disabled</td>
+        <td>Do not send automatically.</td>
+    </tr>
+</table>
+
 ## Input
 
 ### controller

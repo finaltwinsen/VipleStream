@@ -167,8 +167,13 @@ void QxrTrackingSender::run()
             const bool havePose = source->sample(&sample, nowNs / 1000ull);
             sample.version = VIPLE_VR_TRACKING_VERSION;
             sample.spaceEpoch = 0;
-            sample.sampleTimeNs = nowNs;
-            sample.predictNs = predictNs;
+            // §VITURE：來源把樣本標成較舊時 sampleTimeNs 不是 0，要留著。合成姿態維持 0，這裡仍填現在。
+            if (sample.sampleTimeNs == 0) {
+                sample.sampleTimeNs = nowNs;
+            }
+            // §QUEST-PCVR：OpenXR 來源在 sample() 裡寫入實際的 predictNs。這裡再指定一次的話，
+            // 上行會一直送上面那個「3 個顯示週期」。合成姿態沿用這次預填，它的樣本時間已經含這段預測。
+            // IMU 只外插到取樣當下，sample() 會把 predictNs 改成 0，讓 host 自己預測。
             if (!havePose) {
                 // 這一拍沒有姿態，不送、不占用 sampleId。
             }

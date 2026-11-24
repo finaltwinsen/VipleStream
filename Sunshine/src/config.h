@@ -600,6 +600,7 @@ namespace config {
     bool notify_pre_releases;
     bool system_tray;
     std::string update_mode;  ///< §AUTO-UPDATE：off／notify／install（預設）
+    std::string log_upload;  ///< §LOGDROP：ask／enabled／disabled。預設 ask，同意之後才在串流結束與異常結束時送。
     std::vector<prep_cmd_t> prep_cmds;
 
     // List of allowed origins for CSRF protection (e.g., "https://example.com,https://app.example.com")

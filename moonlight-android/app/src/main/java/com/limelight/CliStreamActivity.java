@@ -1,13 +1,21 @@
 package com.limelight;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.widget.Toast;
 
 import com.limelight.binding.PlatformBinding;
 import com.limelight.computers.ComputerDatabaseManager;
 import com.limelight.computers.IdentityManager;
+import com.limelight.glasses.GlassesVrLaunch;
+import com.limelight.glasses.VitureAxisMap;
+import com.limelight.glasses.VitureUsb;
+import com.limelight.glasses.VitureV2Protocol;
 import com.limelight.nvstream.http.ComputerDetails;
 import com.limelight.nvstream.http.NvApp;
 import com.limelight.nvstream.http.NvHTTP;
@@ -39,11 +47,15 @@ import java.util.List;
  *     [--ez enableMpQuic true]       # QUIC multipath on/off
  *     [--ez enableFruc true]         # FRUC frame interpolation on/off
  *     [--ez perfOverlay true]        # performance overlay on/off
+ *     [--ez external_display true]   # 有外接顯示器時把串流畫面放到外接顯示器；false 維持只畫在手機
  *     [--ez vr_screen false]         # true：Quest 且載入得到 viple-openxr 時改開沉浸式 2D 畫面
+ *     [--ez vr_pcvr false]           # true：Quest 且載入得到 viple-openxr 時改開頭盔 PCVR。app 先查一般清單，找不到再查 applist?vr=1。沒帶 vr_eye／vr_hz 就用 runtime
  *     [--ez vr_emulate false]        # true 且載入得到 viple-openxr：手機上協商真的 PCVR，合成姿態上行，畫面仍是 2D
  *     [--es vr_eye 1440x1440]        # 單眼寬高；串流解析度是兩眼並排
  *     [--ei vr_hz 72]                # 顯示更新率，tracking 送出頻率是它的 4 倍
  *     [--es vr_motion sine]          # still / sine / yaw30 / tilt30yaw / fast；預設 sine
+ *     [--ez glasses_vr false]        # true：VITURE 眼鏡當 3DoF PCVR。要載入得到 viple-openxr，而且找得到眼鏡 USB
+ *     [--es glasses_axis +x,+y,+z]   # 覆寫並存下軸向對應。格式錯誤就改回預設
  *
  * Prerequisites: the host must already be paired via the normal UI flow.
  */
@@ -73,6 +85,8 @@ public class CliStreamActivity extends Activity {
     }
 
     private void resolve(String host, String appName) {
+        storeGlassesAxis(getIntent());
+        boolean forwardGlasses = resolveGlassesVr();
         ComputerDatabaseManager dbManager = new ComputerDatabaseManager(this);
         try {
         ComputerDetails computer = findComputerByHost(dbManager, host);
@@ -91,8 +105,28 @@ public class CliStreamActivity extends Activity {
         String uniqueId = idManager.getUniqueId();
 
         // §QUEST-VR：VR 專用的 app 只在 applist?vr=1 裡，快取的 2D 清單找不到。
-        boolean wantVrApps = getIntent().getBooleanExtra("vr_emulate", false);
-        NvApp app = resolveApp(computer, appName, uniqueId, wantVrApps);
+        // §VITURE：眼鏡 VR 同樣要開 PCVR session，所以也走 VR app 清單。條件不成立就不改原本的清單。
+        // §QUEST-PCVR：條件不成立就不要改清單，後面仍照原本的方式開 Game。
+        // 條件成立時先走一般清單；找不到才查 applist?vr=1，VR 專用的 app 才進得去。
+        boolean vrPcvrRequested = getIntent().getBooleanExtra("vr_pcvr", false);
+        boolean vrPcvr = false;
+        if (vrPcvrRequested) {
+            if (!QuestSupport.isQuest(this)) {
+                LimeLog.info("[VIPLE-QXR-ACT] vr_pcvr=true but this is not a Quest; starting Game");
+            } else if (!QxrNative.isAvailable()) {
+                LimeLog.info("[VIPLE-QXR-ACT] vr_pcvr=true but viple-openxr is not loadable; starting Game");
+            } else {
+                vrPcvr = true;
+            }
+        }
+        boolean wantVrApps = forwardGlasses || getIntent().getBooleanExtra("vr_emulate", false);
+        NvApp app = vrPcvr
+                ? resolveApp(computer, appName, uniqueId, false)
+                : resolveApp(computer, appName, uniqueId, wantVrApps);
+        if (app == null && vrPcvr) {
+            LimeLog.info("[VIPLE-QXR-ACT] '" + appName + "' not in the flat app list; querying applist?vr=1");
+            app = resolveApp(computer, appName, uniqueId, true);
+        }
         if (app == null) {
             showError("CLI: app '" + appName + "' not found on '" + computer.name + "'");
             return;
@@ -124,6 +158,10 @@ public class CliStreamActivity extends Activity {
         }
 
         boolean forwardVrEmulate = getIntent().getBooleanExtra("vr_emulate", false);
+        if (forwardGlasses) {
+            // §VITURE：眼鏡路徑自己帶姿態。不要再把合成的 vr_emulate 傳進 Game。
+            forwardVrEmulate = false;
+        }
         if (forwardVrEmulate && !QxrNative.isAvailable()) {
             // §QUEST-VR：.so 載入失敗就不要把 vr_emulate 傳進 Game，後面照原本的方式開。
             LimeLog.info("[VIPLE-QXR-CLI] vr_emulate=true but viple-openxr is not loadable; starting a normal stream");
@@ -131,7 +169,11 @@ public class CliStreamActivity extends Activity {
         }
         boolean vrScreen = getIntent().getBooleanExtra("vr_screen", false);
         Class<?> streamActivity = Game.class;
-        if (forwardVrEmulate) {
+        if (vrPcvr) {
+            // §QUEST-PCVR：條件已經在上面擋過。這裡成立才進頭盔，不成立時下面的分支跟以前一樣。
+            streamActivity = VrStreamActivity.class;
+            LimeLog.info("[VIPLE-QXR-ACT] vr_pcvr=true; starting VrStreamActivity");
+        } else if (forwardVrEmulate) {
             // §QUEST-VR：模擬模式留在 Game，手機螢幕照常解碼。不要另開 VrStreamActivity 的 OpenXR。
             LimeLog.info("[VIPLE-QXR-CLI] vr_emulate=true; starting Game");
         } else if (vrScreen) {
@@ -178,11 +220,33 @@ public class CliStreamActivity extends Activity {
             gameIntent.putExtra("cli_autoAdjustBitrate", in.getBooleanExtra("autoAdjustBitrate", true));
         if (in.hasExtra("enableMpQuic"))
             gameIntent.putExtra("cli_enableMpQuic", in.getBooleanExtra("enableMpQuic", false));
+        // §QXR-VIDEO-TEST：開發用，見 Game.startQxrVideoTestIfRequested。
+        if (in.hasExtra("qxr_video_test"))
+            gameIntent.putExtra("qxr_video_test", in.getBooleanExtra("qxr_video_test", false));
+        if (in.hasExtra("qxr_video_test_srgb"))
+            gameIntent.putExtra("qxr_video_test_srgb", in.getBooleanExtra("qxr_video_test_srgb", false));
         if (in.hasExtra("enableFruc"))
             gameIntent.putExtra("cli_enableFruc", in.getBooleanExtra("enableFruc", false));
         if (in.hasExtra("perfOverlay"))
             gameIntent.putExtra("cli_perfOverlay", in.getBooleanExtra("perfOverlay", false));
-        if (forwardVrEmulate) {
+        if (in.hasExtra("external_display"))
+            gameIntent.putExtra("cli_externalDisplay", in.getBooleanExtra("external_display", true));
+        if (vrPcvr) {
+            // §QUEST-PCVR：沒帶 vr_eye／vr_hz 就不要塞預設值，Activity 才會改用 runtime 的建議尺寸與更新率。
+            gameIntent.putExtra("vr_pcvr", true);
+            if (in.hasExtra("vr_eye")) {
+                String eye = in.getStringExtra("vr_eye");
+                if (eye != null && !eye.isEmpty()) {
+                    gameIntent.putExtra("vr_eye", eye);
+                }
+            }
+            if (in.hasExtra("vr_hz")) {
+                gameIntent.putExtra("vr_hz", in.getIntExtra("vr_hz", 0));
+            }
+        } else if (forwardGlasses) {
+            GlassesVrLaunch.applyExtras(gameIntent, in.getStringExtra("vr_eye"),
+                    in.getIntExtra("vr_hz", GlassesVrLaunch.DEFAULT_HZ));
+        } else if (forwardVrEmulate) {
             String eye = in.getStringExtra("vr_eye");
             if (eye == null || eye.isEmpty()) {
                 eye = "1440x1440";
@@ -266,6 +330,45 @@ public class CliStreamActivity extends Activity {
         }
 
         return null;
+    }
+
+    private boolean resolveGlassesVr() {
+        if (!getIntent().getBooleanExtra("glasses_vr", false)) {
+            return false;
+        }
+        if (!QxrNative.isAvailable()) {
+            LimeLog.info("[VIPLE-VITURE] glasses_vr=true but viple-openxr is not loadable; starting a normal stream");
+            return false;
+        }
+        UsbManager usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+        if (usb == null) {
+            LimeLog.info("[VIPLE-VITURE] glasses_vr=true but usb manager is unavailable; starting a normal stream");
+            return false;
+        }
+        UsbDevice device = VitureUsb.findGlassesDevice(usb);
+        if (device == null) {
+            LimeLog.info("[VIPLE-VITURE] glasses_vr=true but no VITURE glasses USB device; starting a normal stream");
+            return false;
+        }
+        LimeLog.info("[VIPLE-VITURE] glasses_vr=true vid=" + VitureV2Protocol.hex16(device.getVendorId())
+                + " pid=" + VitureV2Protocol.hex16(device.getProductId()) + "; starting Game");
+        return true;
+    }
+
+    private void storeGlassesAxis(Intent in) {
+        if (in == null || !in.hasExtra("glasses_axis")) {
+            return;
+        }
+        String raw = in.getStringExtra("glasses_axis");
+        String canonical = VitureAxisMap.canonical(raw);
+        SharedPreferences prefs = getSharedPreferences(VitureAxisMap.PREFS_NAME, MODE_PRIVATE);
+        if (canonical == null) {
+            LimeLog.info("[VIPLE-VITURE] glasses_axis invalid '" + raw + "'; using " + VitureAxisMap.DEFAULT);
+            prefs.edit().putString(VitureAxisMap.PREFS_KEY, VitureAxisMap.DEFAULT).commit();
+            return;
+        }
+        prefs.edit().putString(VitureAxisMap.PREFS_KEY, canonical).commit();
+        LimeLog.info("[VIPLE-VITURE] glasses_axis=" + canonical);
     }
 
     private void showError(String msg) {

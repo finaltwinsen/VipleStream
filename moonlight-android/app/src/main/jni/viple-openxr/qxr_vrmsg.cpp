@@ -1,5 +1,7 @@
 #include "qxr_vrmsg.h"
 
+#include "qxr_log.h"
+
 #include <android/log.h>
 
 #include <cerrno>
@@ -69,6 +71,31 @@ void QxrVrMsg::setHapticCallback(HapticFn fn)
     hapticFn = std::move(fn);
 }
 
+void QxrVrMsg::setServerErrorCallback(ServerErrorFn fn)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    serverErrorFn = std::move(fn);
+    // 新的一場要能再報一次。呼叫端在登記 sink 之前設，進行中的訊息才不會先鎖住又被清掉。
+    serverErrorReported = false;
+}
+
+void QxrVrMsg::setTimingFill(TimingFillFn fn)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    timingFill = std::move(fn);
+}
+
+namespace {
+std::mutex g_rateMu;
+QxrVrMsg::RateAppliedFn g_rateFn;
+}  // namespace
+
+void QxrVrMsg::setRateHandler(RateAppliedFn fn)
+{
+    std::lock_guard<std::mutex> guard(g_rateMu);
+    g_rateFn = std::move(fn);
+}
+
 void QxrVrMsg::start()
 {
     if (running.load(std::memory_order_acquire)) {
@@ -94,6 +121,14 @@ void QxrVrMsg::sendTiming()
     // §QUEST-VR：欄位用 VipleVr.h 的 VIPLE_VR_TLV_CLIENT_TIMING，不自己排版。
     // 模擬沒有 XR 量測。空窗的填法對齊 xrcontext.cpp：沒有樣本的分位數是 0，
     // pose lag 樣本不足時用 VIPLE_VR_POSE_LAG_NONE。displayPeriodNs 用跟 /launch 一樣的整除。
+    TimingFillFn fillFn;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        fillFn = timingFill;
+    }
+    QxrClientTimingFill measured{};
+    const bool haveMeasured = static_cast<bool>(fillFn) && fillFn(&measured);
+
     VIPLE_VR_TLV_CLIENT_TIMING ct{};
     ct.framesPresented = 0;
     ct.xrMissed = 0;
@@ -111,6 +146,31 @@ void QxrVrMsg::sendTiming()
     ct.poseLagCount = 0;
     ct.bufLag1Total = 0;
     ct.bufLag0Total = 0;
+    if (haveMeasured) {
+        // §QUEST-PCVR：姿態落後與緩衝計數這裡量不到，維持上面的 NONE／0。解碼時間沒有樣本時也不要寫 0 蓋掉「沒量到」。
+        ct.framesPresented = measured.framesPresented;
+        ct.xrMissed = measured.xrMissed;
+        ct.metaMiss = measured.metaMiss;
+        if (measured.displayPeriodNs != 0) {
+            ct.displayPeriodNs = measured.displayPeriodNs;
+        }
+        if (measured.haveDecode) {
+            ct.decodeP50Us = measured.decodeP50Us;
+            ct.decodeP95Us = measured.decodeP95Us;
+        }
+        if (measured.haveRender) {
+            ct.renderP50Us = measured.renderP50Us;
+            ct.renderP95Us = measured.renderP95Us;
+        }
+        if (measured.haveSlack) {
+            ct.slackP50Us = measured.slackP50Us;
+            ct.slackP05Us = measured.slackP05Us;
+        }
+        if (measured.haveMtp) {
+            ct.mtpP50_100us = measured.mtpP50_100us;
+            ct.mtpP95_100us = measured.mtpP95_100us;
+        }
+    }
 
     uint8_t tlv[2 + sizeof(ct)];
     tlv[0] = VIPLE_VR_C2S_CLIENT_TIMING;
@@ -134,6 +194,7 @@ void QxrVrMsg::logSummary(const char* prefix)
     uint32_t entries = 0;
     uint32_t haptic = 0;
     uint32_t dup = 0;
+    uint32_t expired = 0;
     uint32_t counts[256];
     {
         std::lock_guard<std::mutex> guard(lock);
@@ -142,6 +203,7 @@ void QxrVrMsg::logSummary(const char* prefix)
         entries = s2cEntries;
         haptic = hapticOk;
         dup = hapticDup;
+        expired = hapticExpired;
         std::memcpy(counts, subtypeCount, sizeof(counts));
         if (prefix != nullptr && std::strcmp(prefix, "(final)") != 0) {
             timingSent = 0;
@@ -149,6 +211,7 @@ void QxrVrMsg::logSummary(const char* prefix)
             s2cEntries = 0;
             hapticOk = 0;
             hapticDup = 0;
+            hapticExpired = 0;
             std::memset(subtypeCount, 0, sizeof(subtypeCount));
         }
     }
@@ -179,16 +242,26 @@ void QxrVrMsg::logSummary(const char* prefix)
     }
 
     __android_log_print(ANDROID_LOG_INFO, "viple-openxr",
-                        "[VIPLE-VR-MSG] %s timingSent=%u timingFail=%u s2c=%u haptic=%u hapticDup=%u subtypes=%s",
-                        prefix, sent, fail, entries, haptic, dup, subtypes);
+                        "[VIPLE-VR-MSG] %s timingSent=%u timingFail=%u s2c=%u haptic=%u hapticDup=%u hapticExpired=%u subtypes=%s",
+                        prefix, sent, fail, entries, haptic, dup, expired, subtypes);
 }
 
 void QxrVrMsg::run()
 {
     // §QUEST-VR：LATCH 只在 XrContext::pcvrTimingTick 組包。Qt 的 vrEmulate 不呼叫 setupXrPcvr()，
-    // 不會進那個函式。這裡沒有幀 latch，不送 VIPLE_VR_C2S_LATCH。
-    __android_log_print(ANDROID_LOG_INFO, "viple-openxr",
-                        "[VIPLE-VR-MSG] client timing 1 Hz started; LATCH is not sent (no XR frame latch in emulation)");
+    // 不會進那個函式。模擬這裡沒有幀 latch，不送 VIPLE_VR_C2S_LATCH。投影輸出的 LATCH 由 frame thread 另送。
+    bool pcvrTiming = false;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        pcvrTiming = static_cast<bool>(timingFill);
+    }
+    if (pcvrTiming) {
+        QXR_LOGI("MSG", "client timing 1 Hz started");
+    }
+    else {
+        __android_log_print(ANDROID_LOG_INFO, "viple-openxr",
+                            "[VIPLE-VR-MSG] client timing 1 Hz started; LATCH is not sent (no XR frame latch in emulation)");
+    }
 
     timespec next{};
     clock_gettime(CLOCK_MONOTONIC, &next);
@@ -242,9 +315,17 @@ void QxrVrMsg::onMessage(const uint8_t* tlv, int length)
         return;
     }
 
+    RateAppliedFn rateFn;
+    {
+        std::lock_guard<std::mutex> guard(g_rateMu);
+        rateFn = g_rateFn;
+    }
+
     // 一則 0x5508 最長 251 B，震動脈衝塞不滿 8 筆。log 放到鎖外面，sink 才不會卡住 1 Hz 那條執行緒。
     VIPLE_VR_TLV_HAPTIC pending[8];
     int pendingCount = 0;
+    VIPLE_VR_TLV_RATE_APPLIED ratePending[4];
+    int rateCount = 0;
     struct FirstSeen {
         uint8_t type;
         uint8_t len;
@@ -256,6 +337,10 @@ void QxrVrMsg::onMessage(const uint8_t* tlv, int length)
     unsigned truncatedLen = 0;
     int truncatedRemaining = 0;
     HapticFn callback;
+    ServerErrorFn errorFn;
+    bool reportError = false;
+    uint16_t reportCode = 0;
+    int expiredNow = 0;
     {
         std::lock_guard<std::mutex> guard(lock);
         int off = 0;
@@ -293,15 +378,53 @@ void QxrVrMsg::onMessage(const uint8_t* tlv, int length)
                     else {
                         lastEventId[dev] = haptic.eventId;
                         haveEventId[dev] = true;
-                        hapticOk++;
-                        if (pendingCount < 8) {
-                            pending[pendingCount++] = haptic;
+                        // timestampNs 是 client 的 CLOCK_MONOTONIC。0 表示 host 沒給，不能拿來判過期。
+                        // 寬限 50 ms 要蓋過單程延遲，否則幾毫秒的短脈衝第一份就會被丟掉。
+                        bool expired = false;
+                        if (haptic.timestampNs != 0) {
+                            timespec nowTs{};
+                            clock_gettime(CLOCK_MONOTONIC, &nowTs);
+                            const uint64_t nowNs = monoNs(nowTs);
+                            if (nowNs > haptic.timestampNs) {
+                                const uint64_t maxAgeNs =
+                                    (static_cast<uint64_t>(haptic.durationUs) + 50000ull) * 1000ull;
+                                expired = nowNs - haptic.timestampNs > maxAgeNs;
+                            }
+                        }
+                        if (expired) {
+                            hapticExpired++;
+                            expiredNow++;
+                        }
+                        else {
+                            hapticOk++;
+                            if (pendingCount < 8) {
+                                pending[pendingCount++] = haptic;
+                            }
                         }
                     }
                     acceptedHaptic = true;
                 }
             }
-            if (!acceptedHaptic && !subtypeSeen[type] && firstSeenCount < 8) {
+            bool handledState = false;
+            if (type == VIPLE_VR_S2C_STATE && len >= sizeof(VIPLE_VR_TLV_STATE) && serverErrorFn) {
+                VIPLE_VR_TLV_STATE st{};
+                std::memcpy(&st, payload, sizeof(st));
+                if (st.state == VIPLE_VR_STATE_ERROR && !serverErrorReported) {
+                    serverErrorReported = true;
+                    reportError = true;
+                    reportCode = st.code;
+                    handledState = true;
+                }
+            }
+            bool handledRate = false;
+            if (type == VIPLE_VR_S2C_RATE && len >= sizeof(VIPLE_VR_TLV_RATE_APPLIED) && rateFn) {
+                if (rateCount < 4) {
+                    std::memcpy(&ratePending[rateCount], payload, sizeof(ratePending[rateCount]));
+                    rateCount++;
+                }
+                handledRate = true;
+            }
+            if (!handledRate && !acceptedHaptic && !handledState && !subtypeSeen[type] && firstSeenCount < 8) {
                 subtypeSeen[type] = true;
                 firstSeen[firstSeenCount].type = type;
                 firstSeen[firstSeenCount].len = len;
@@ -310,6 +433,21 @@ void QxrVrMsg::onMessage(const uint8_t* tlv, int length)
             off += 2 + len;
         }
         callback = hapticFn;
+        errorFn = serverErrorFn;
+    }
+
+    if (reportError) {
+        __android_log_print(ANDROID_LOG_ERROR, "viple-openxr",
+                            "[VIPLE-VR-MSG] server could not start VR (code=%u) - ending the stream",
+                            static_cast<unsigned>(reportCode));
+        // 回呼返回後這個 sink 才放掉讀鎖。裡面若同步 nativeStop，bridge 的寫鎖會互等。
+        if (errorFn) {
+            errorFn(reportCode);
+        }
+    }
+    if (expiredNow > 0) {
+        __android_log_print(ANDROID_LOG_INFO, "viple-openxr",
+                            "[VIPLE-VR-HAPTIC] dropped %d expired pulse(s)", expiredNow);
     }
 
     if (truncated) {
@@ -321,6 +459,11 @@ void QxrVrMsg::onMessage(const uint8_t* tlv, int length)
         __android_log_print(ANDROID_LOG_INFO, "viple-openxr",
                             "[VIPLE-VR-MSG] first s2c subtype=0x%02x len=%u",
                             firstSeen[i].type, firstSeen[i].len);
+    }
+    for (int i = 0; i < rateCount; i++) {
+        if (rateFn) {
+            rateFn(static_cast<int>(ratePending[i].div), ratePending[i].accepted != 0, ratePending[i].seq);
+        }
     }
     for (int i = 0; i < pendingCount; i++) {
         const VIPLE_VR_TLV_HAPTIC& haptic = pending[i];

@@ -34,6 +34,7 @@ extern "C" {
 #include "globals.h"
 #include "input.h"
 #include "logging.h"
+#include "logdrop.h"
 #include "network.h"
 #include "platform/common.h"
 #include "process.h"
@@ -7420,6 +7421,8 @@ namespace stream {
       }
 
       BOOST_LOG(debug) << "Session ended"sv;
+      // §LOGDROP：join 一場只會進來一次。延遲讀檔在 logdrop 裡，這裡不要等，鎖還握著。
+      logdrop::auto_upload_async("session-end");
     }
 
     /**

@@ -1,13 +1,17 @@
 package com.limelight.utils;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.widget.Toast;
 
 import com.limelight.AppView;
 import com.limelight.Game;
+import com.limelight.LimeLog;
 import com.limelight.R;
 import com.limelight.ShortcutTrampoline;
+import com.limelight.glasses.GlassesVrLaunch;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.computers.ComputerManagerService;
 import com.limelight.nvstream.http.ComputerDetails;
@@ -22,6 +26,8 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.UnknownHostException;
 import java.security.cert.CertificateEncodingException;
+import java.util.ArrayList;
+import java.util.List;
 
 public class ServerHelper {
     public static final String CONNECTION_TEST_SERVER = "android.conntest.moonlight-stream.org";
@@ -89,6 +95,101 @@ public class ServerHelper {
             return;
         }
         parent.startActivity(createStartIntent(parent, app, computer, managerBinder));
+    }
+
+    public static void doStartGlassesVr(Activity parent, NvApp app, ComputerDetails computer,
+                                        ComputerManagerService.ComputerManagerBinder managerBinder) {
+        if (computer == null || computer.state == ComputerDetails.State.OFFLINE || computer.activeAddress == null) {
+            Toast.makeText(parent, parent.getResources().getString(R.string.pair_pc_offline), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (managerBinder == null) {
+            Toast.makeText(parent, parent.getResources().getString(R.string.error_manager_not_running), Toast.LENGTH_LONG).show();
+            return;
+        }
+        Intent intent = createStartIntent(parent, app, computer, managerBinder);
+        // §VITURE：介面沒有 adb 的 vr_eye／vr_hz，跟 CLI 沒帶這兩個參數時用同一組預設。
+        GlassesVrLaunch.applyExtras(intent, null, GlassesVrLaunch.DEFAULT_HZ);
+        LimeLog.info("[VIPLE-VITURE] glasses_vr start appId=" + app.getAppId() + " name=" + app.getAppName());
+        parent.startActivity(intent);
+    }
+
+    /**
+     * §VITURE：跟 Frame 版的 VR 模式一樣，列出 host 標成 VR 的 app（VR 遊戲與 SteamVR Home）讓使用者選。
+     * host 那邊照常由 server 帶起 SteamVR 與遊戲，使用者不必自己操作 SteamVR。
+     */
+    public static void doPickGlassesVrApp(final Activity parent, final ComputerDetails computer,
+                                          final ComputerManagerService.ComputerManagerBinder managerBinder) {
+        if (computer == null || computer.state == ComputerDetails.State.OFFLINE || computer.activeAddress == null) {
+            Toast.makeText(parent, parent.getResources().getString(R.string.pair_pc_offline), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (managerBinder == null) {
+            Toast.makeText(parent, parent.getResources().getString(R.string.error_manager_not_running), Toast.LENGTH_LONG).show();
+            return;
+        }
+        final SpinnerDialog spinner = SpinnerDialog.displayDialog(parent,
+                parent.getResources().getString(R.string.glasses_vr_pick_title),
+                parent.getResources().getString(R.string.glasses_vr_pick_loading),
+                false);
+        final ComputerManagerService.ComputerManagerBinder binder = managerBinder;
+        // §VITURE：applist?vr=1 會打到主機，不能在主執行緒上等。
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final List<NvApp> vrApps = new ArrayList<>();
+                boolean lookupFailed = false;
+                try {
+                    NvHTTP http = new NvHTTP(getCurrentAddressFromComputer(computer), computer.httpsPort,
+                            binder.getUniqueId(), computer.serverCert, PlatformBinding.getCryptoProvider(parent));
+                    List<NvApp> apps = http.getVrAppList();
+                    if (apps != null) {
+                        for (NvApp app : apps) {
+                            if (app != null && app.isVr() && app.getAppName() != null) {
+                                vrApps.add(app);
+                            }
+                        }
+                    }
+                    LimeLog.info("[VIPLE-VITURE] applist?vr=1 total=" + (apps == null ? 0 : apps.size())
+                            + " vr=" + vrApps.size());
+                } catch (Exception error) {
+                    lookupFailed = true;
+                    LimeLog.warning("[VIPLE-VITURE] applist?vr=1 failed: " + error.getMessage());
+                }
+                final boolean failed = lookupFailed;
+                spinner.dismiss();
+                parent.runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (parent.isFinishing() || parent.isDestroyed()) {
+                            return;
+                        }
+                        if (failed) {
+                            Toast.makeText(parent, parent.getResources().getString(R.string.glasses_vr_pick_failed), Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        if (vrApps.isEmpty()) {
+                            Toast.makeText(parent, parent.getResources().getString(R.string.glasses_vr_pick_none), Toast.LENGTH_LONG).show();
+                            return;
+                        }
+                        CharSequence[] names = new CharSequence[vrApps.size()];
+                        for (int i = 0; i < names.length; i++) {
+                            names[i] = vrApps.get(i).getAppName();
+                        }
+                        new AlertDialog.Builder(parent)
+                                .setTitle(R.string.glasses_vr_pick_title)
+                                .setItems(names, new DialogInterface.OnClickListener() {
+                                    @Override
+                                    public void onClick(DialogInterface dialog, int which) {
+                                        doStartGlassesVr(parent, vrApps.get(which), computer, binder);
+                                    }
+                                })
+                                .setNegativeButton(android.R.string.cancel, null)
+                                .show();
+                    }
+                });
+            }
+        }, "viple-viture-vrapps").start();
     }
 
     public static void doNetworkTest(final Activity parent) {

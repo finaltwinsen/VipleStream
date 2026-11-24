@@ -45,16 +45,23 @@
 
 ## 各章節待辦補充
 
-### §QUEST Meta Quest 原生 OpenXR client（2026-11-24 開工，2.0.275；**OpenXR 顯示路徑沒有實機、從未執行**）
+### §QUEST Meta Quest 原生 OpenXR client（2026-11-24 開工；**OpenXR 那一端沒有實機、從未執行**）
 
-做在 `moonlight-android`：新 native 模組 `jni/viple-openxr/`（只建 arm64）＋`com.limelight.vr`。分期 Q0 2D 面板、Q1 浮空螢幕、Q2 PCVR、Q3 節拍與注視點、Q4 VR 介面與 release。
+做在 `moonlight-android`：native 模組 `jni/viple-openxr/`（只建 arm64）＋`com.limelight.vr`。分期 Q0 2D 面板、Q1 浮空螢幕、Q2 PCVR、Q3 節拍與注視點、Q4 VR 介面與 release。
 
-- **驗過**：編譯；手機對 Windows server 的一般串流回歸；PCVR 協定（協商、追蹤上行 288/s、0x81 配對、1 Hz 回報）用手機的 `--ez vr_emulate true` 對 server 跑通，兩端計數一致。
-- **只編譯過、待 Quest 實機**：Q0 的 Quest 分支（`QuestSupport.isQuest()`；看 `[VIPLE-QUEST-2D] detect`／`pointer`）、`qxr_session`／`qxr_video`（OpenXR、AHardwareBuffer→Vulkan）、`VrStreamActivity`（`--ez vr_screen true`）。外部模型審過一輪並修正，修正後沒有再審。
-- **待做（Q2 的 OpenXR 半邊）**：真的頭手姿態接 `QxrPoseSource`、projection layer、Touch／Touch Plus 綁定與 haptic 輸出、LATCH 上行、VR 被拒後 quit、依裝置解碼能力協商 codec（Quest 3 有 AV1）、從介面進入的入口。haptic 下行的接收路徑還沒被觸發過。
-- **待做（Q3）**：直接 include Frame 版只用標準庫的標頭（`xrrateauto.h`、`xrbufferauto.h`、`xrflight.h`、`xrlatchstats.h` 等；`Android.mk` 已設路徑）。`xrphase.h` 的 vblank 常數只在 Frame 120 Hz 量過，Quest 不可套用。
-- `qxr_video` 不依賴 OpenXR，可以在手機上單獨驗影像匯入，測試入口還沒寫。
+- **在手機上驗過**：PCVR 協定（`--ez vr_emulate true`：協商、追蹤上行 288/s、0x81 配對 99%、1 Hz 回報，兩端計數一致）；影像路徑（`--ez qxr_video_test true`：AImageReader→AHardwareBuffer→Vulkan YCbCr→renderTo，方向、色彩、裁切、sRGB 正確，匯入快取 100% 命中）。
+- **寫完、編譯過、外部審查兩輪並修正，待 Quest 實機**：OpenXR 手把（Touch／Touch Plus、按鍵、haptic）、頭手姿態來源與 predictAhead、projection layer（0x81 render pose＋眼睛偏移、stale 政策）、LATCH 與 CLIENT_TIMING 實測值、自動半速（直接 include Frame 的 `xrrateauto.h`）、坐姿零點、`VrStreamActivity` 的 PCVR 流程（`--ez vr_pcvr true`；Quest 上 app／主機長按選單也有入口）。Q0 的 Quest 2D 分支同樣待實機。
+- **待做**：Touch Plus 的 proximity 元件綁定（路徑沒把握，先沒綁）；Quest 3 的 AV1 協商；`xrbufferauto.h`／`xrflight.h` 等其餘 Frame 標頭；注視點；VR 內的介面（目前從 2D 面板選主機與 app）。
+- `xrphase.h` 的 vblank 常數只在 Frame 120 Hz 量過，Quest 不可套用。
 
+### §VITURE Beast 眼鏡（2026-11-24 開工，不使用官方 SDK；**沒有接過實機**）
+
+走開源 V2 HID 協定（`elasticjava/viture-v2`，MIT；授權全文在 `assets/licenses/viture-v2/`）。實機事實來自另一位開發者在 Galaxy S25＋Beast 上的量測：HID 在 interface 5、原始 IMU 約 400 Hz、裝置端融合姿態不會送、只有 1920×1080@60 與 3840×1080@60 兩種模式、拔插後顯示器約 7 秒才回來且回到 2D。
+
+- **在手機上驗過**：外接顯示器全螢幕＋手機觸控板（模擬次要顯示器）、顯示器消失 4 秒後以不同模式接回並要求 IDR、診斷畫面在沒接眼鏡時產生報告；`ImuFusion` 與協定的 JVM 單元測試 20 項全過。
+- **寫完、編譯過、外部審查兩輪並修正，待眼鏡實機**：USB 連線與讀取、主機端 Mahony 融合（靜止零偏、回正、可設定軸向對應）、3DoF PCVR 頭盔模式（`glasses_vr`；主機／app 長按選單有入口）、自動切 3D（`SET_DISPLAY_MODE 0x32`，Beast 上未驗證；失敗就提示按實體鍵）、觸控板上的 2D／3D 與音量按鈕、一般串流 3840×1080 時自動切 3D、配戴偵測、診斷畫面的手動測試與 IMU 軸向測試。
+- **待實機確認**：`SET_DISPLAY_MODE` 是否有效；感測器軸向對應（軸向測試報告回來後用診斷畫面的「軸向對應」設定）；IMU 樣本在切 3D 後是否持續；沒有磁力計時的 yaw 漂移速度。
+- **不靠 SDK 做不到**：亮度、鏡片調光、眼鏡內建錨定（native DOF／回正／畫面大小距離）。
 
 ### 2026-11-22：頭盔 2D 串流的兩個輸入問題（2.0.270，已發佈；host 與頭盔都是 2.0.270）
 
@@ -842,6 +849,12 @@ lazy fetch 兩條路徑都已接 ModelFetcher（見總覽 §SLIM）。還沒做�
   連上過的跨場延續不變。5 秒短場次實測通過。
 - §VR-ABR-RESTORE-STEP 與 §VR-ABR-CUT-NO-RAISE 改的是 VR 碼率控制核心，需要配戴確認體感。
 - `scripts/rps.sh`：腳本超過約 2 KB 時遠端回「命令列太長」而且不執行（host 探測因此一直是空的）；已改成長腳本走 stdin。
+
+### §LOGDROP 匿名 log 收集（2026-11-25，未提交）
+收件端 `tools/logdrop/Code.gs`（Apps Script → 使用者雲端硬碟），同意制＋匿名安裝 ID。已做：Android 眼鏡（首次詢問、設定頁開關、診斷完成與眼鏡串流結束自動上傳、診斷頁「立即上傳」）、server（`log_upload=ask|enabled|disabled`、首頁詢問卡、疑難排解頁、串流結束與異常結束後自動上傳）。
+- 已驗：Pixel 5 首次詢問／設定頁／診斷自動上傳（遮罩讀回確認）；host 2.0.278 的 upload-status、consent、手動上傳、串流結束自動上傳。
+- 未驗：server 首頁詢問卡與疑難排解頁的畫面、異常結束（`crash`）觸發、眼鏡串流結束（要眼鏡）、Linux server。
+- 待做：其他平台（Windows／Linux client、Steam Frame、Android 一般串流）；server 手動上傳期間整個網頁介面會卡住（confighttp 只有一條 io 執行緒），改成非同步。
 
 ## 鐵律（任何改動都不能破壞）
 

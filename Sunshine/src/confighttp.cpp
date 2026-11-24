@@ -41,6 +41,7 @@
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
+#include "logdrop.h"
 #include "network.h"
 #include "nvhttp.h"
 #include "platform/common.h"
@@ -1819,6 +1820,147 @@ pollListing();
     response->write(SimpleWeb::StatusCode::success_ok, content, headers);
   }
 
+  // §LOGDROP：curl 最長 120 秒，這個處理函式又跑在 SimpleWeb 的 io 執行緒上
+  // （thread_pool_size 維持預設 1，計時器要等函式返回才排得到）。標頭讀完時設的
+  // timeout_content 預設 300 秒，confighttp 沒有改過，比上傳上限長，不會先切斷。
+  void uploadLogs(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    const std::string client_id = get_client_id(request);
+    if (!validate_csrf_token(response, request, client_id)) {
+      return;
+    }
+
+    print_req(request);
+
+    if (logdrop::ENDPOINT.empty()) {
+      nlohmann::json output_tree;
+      output_tree["status"] = false;
+      output_tree["error"] = "not_configured";
+      send_response(response, output_tree);
+      return;
+    }
+
+    std::string note;
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+    const std::string body = ss.str();
+    if (body.find_first_not_of(" \t\r\n") != std::string::npos) {
+      try {
+        const auto input = nlohmann::json::parse(body);
+        if (!input.is_object()) {
+          bad_request(response, request, "Invalid request body");
+          return;
+        }
+        if (input.contains("note") && !input["note"].is_null()) {
+          if (!input["note"].is_string()) {
+            bad_request(response, request, "note must be a string");
+            return;
+          }
+          note = input["note"].get<std::string>();
+        }
+      } catch (const std::exception &e) {
+        BOOST_LOG(warning) << "UploadLogs: "sv << e.what();
+        bad_request(response, request, e.what());
+        return;
+      }
+    }
+
+    // §LOGDROP：網頁按鈕是手動，跟串流結束、異常結束的 trigger 分開。
+    const auto result = logdrop::upload(note, "manual");
+    nlohmann::json output_tree;
+    if (result.ok) {
+      output_tree["status"] = true;
+      output_tree["code"] = result.code;
+    } else {
+      output_tree["status"] = false;
+      output_tree["error"] = result.error.empty() ? "internal"sv : result.error;
+    }
+    send_response(response, output_tree);
+  }
+
+  // §LOGDROP：給首頁決定要不要問，以及疑難排解頁顯示匿名 ID。驗證跟其他 GET 一樣，沒有 CSRF。
+  void getLogUploadStatus(const resp_https_t &response, const req_https_t &request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    const auto st = logdrop::status();
+    nlohmann::json output_tree;
+    output_tree["configured"] = st.configured;
+    output_tree["mode"] = st.mode;
+    output_tree["install_id"] = st.install_id;
+    output_tree["last_code"] = st.last_code;
+    output_tree["last_time"] = st.last_time;
+    send_response(response, output_tree);
+  }
+
+  // §LOGDROP：只改 log_upload。整份覆寫會把使用者同時開著的設定頁改掉的其他鍵清掉。
+  void setLogUploadConsent(const resp_https_t &response, const req_https_t &request) {
+    if (!check_content_type(response, request, "application/json")) {
+      return;
+    }
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    const std::string client_id = get_client_id(request);
+    if (!validate_csrf_token(response, request, client_id)) {
+      return;
+    }
+
+    print_req(request);
+
+    std::stringstream ss;
+    ss << request->content.rdbuf();
+    std::string mode;
+    try {
+      const auto input = nlohmann::json::parse(ss.str());
+      if (!input.is_object()) {
+        bad_request(response, request, "Invalid request body");
+        return;
+      }
+      // 兩個都有時以 enabled 為準，避免舊頁面的 mode 蓋掉明確的同意或拒絕。
+      if (input.contains("enabled") && !input["enabled"].is_null()) {
+        if (!input["enabled"].is_boolean()) {
+          bad_request(response, request, "enabled must be a boolean");
+          return;
+        }
+        mode = input["enabled"].get<bool>() ? "enabled" : "disabled";
+      } else if (input.contains("mode") && input["mode"].is_string()) {
+        mode = input["mode"].get<std::string>();
+        if (mode != "ask" && mode != "enabled" && mode != "disabled") {
+          bad_request(response, request, "invalid_mode");
+          return;
+        }
+      } else {
+        bad_request(response, request, "missing enabled");
+        return;
+      }
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "LogUploadConsent: "sv << e.what();
+      bad_request(response, request, e.what());
+      return;
+    }
+
+    if (!logdrop::persist_mode(mode)) {
+      nlohmann::json output_tree;
+      output_tree["status"] = false;
+      output_tree["error"] = "write_failed";
+      send_response(response, output_tree);
+      return;
+    }
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["mode"] = mode;
+    send_response(response, output_tree);
+  }
+
   /**
    * @brief Update existing credentials.
    * @param response The HTTP response object.
@@ -2402,6 +2544,9 @@ pollListing();
     server.resource["^/api/password$"]["POST"] = savePassword;
     server.resource["^/api/pin$"]["POST"] = savePin;
     server.resource["^/api/logs$"]["GET"] = getLogs;
+    server.resource["^/api/logs/upload$"]["POST"] = uploadLogs;
+    server.resource["^/api/logs/upload-status$"]["GET"] = getLogUploadStatus;
+    server.resource["^/api/logs/upload-consent$"]["POST"] = setLogUploadConsent;
     server.resource["^/api/reset-display-device-persistence$"]["POST"] = resetDisplayDevicePersistence;
     server.resource["^/api/restart$"]["POST"] = restart;
     server.resource["^/api/vigembus/status$"]["GET"] = getViGEmBusStatus;

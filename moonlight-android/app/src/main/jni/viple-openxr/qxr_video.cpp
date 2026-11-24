@@ -12,6 +12,8 @@
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
 
+#include <time.h>
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -110,23 +112,30 @@ bool ahbUsesYcbcr(const VkAndroidHardwareBufferFormatPropertiesANDROID& props) {
         || props.suggestedYcbcrModel != VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY;
 }
 
-VkChromaLocation legalChromaOffset(VkChromaLocation suggested, VkFormatFeatureFlags features) {
+// 回傳 true 時 *out 是 vkCreateSamplerYcbcrConversion 接受的位置。
+// Vulkan 的 format feature：沒有 MIDPOINT_CHROMA_SAMPLES 就不能填 MIDPOINT（否則只能是 COSITED_EVEN）；
+// 沒有 COSITED_CHROMA_SAMPLES 就不能填 COSITED_EVEN（否則只能是 MIDPOINT）。
+// 兩個 bit 都沒有時，兩種列舉值都會違反 valid usage，這個格式不能用 YCbCr conversion 取樣。
+bool legalChromaOffset(VkChromaLocation suggested, VkFormatFeatureFlags features, VkChromaLocation* out) {
     const bool midpoint = (features & VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT) != 0;
     const bool cosited = (features & VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT) != 0;
     if (suggested == VK_CHROMA_LOCATION_MIDPOINT && midpoint) {
-        return VK_CHROMA_LOCATION_MIDPOINT;
+        *out = VK_CHROMA_LOCATION_MIDPOINT;
+        return true;
     }
     if (suggested == VK_CHROMA_LOCATION_COSITED_EVEN && cosited) {
-        return VK_CHROMA_LOCATION_COSITED_EVEN;
+        *out = VK_CHROMA_LOCATION_COSITED_EVEN;
+        return true;
     }
     if (midpoint) {
-        return VK_CHROMA_LOCATION_MIDPOINT;
+        *out = VK_CHROMA_LOCATION_MIDPOINT;
+        return true;
     }
     if (cosited) {
-        return VK_CHROMA_LOCATION_COSITED_EVEN;
+        *out = VK_CHROMA_LOCATION_COSITED_EVEN;
+        return true;
     }
-    // 兩個 feature 都沒有時，這個格式用不到 chroma offset，保留驅動給的建議值。
-    return suggested;
+    return false;
 }
 
 }  // namespace
@@ -155,6 +164,8 @@ bool QxrVideo::create(const QxrVideoCreateInfo& info, const char** error) {
     streamHeight = info.streamHeight;
     stopping.store(0, std::memory_order_release);
     pending.store(0, std::memory_order_release);
+    // 同一個物件再 create 時，上一場的到達時刻不能算進這一場。
+    imageAvailableNs.store(0, std::memory_order_release);
 
     if (device == VK_NULL_HANDLE || physicalDevice == VK_NULL_HANDLE) {
         return fail("video create: Vulkan device is null");
@@ -208,12 +219,24 @@ bool QxrVideo::create(const QxrVideoCreateInfo& info, const char** error) {
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &reference;
 
-    VkSubpassDependency dependency{};
-    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    VkSubpassDependency dependencies[2]{};
+    // 進來的上一手是 color attachment write（swapchain 與測試都把目標留在 COLOR_ATTACHMENT_OPTIMAL）。
+    // srcAccess 留 0 時，CLEAR 與單張 in-flight 暫時蓋得住；loadOp 改成 LOAD 或兩張重疊，tiled GPU 會 WAW。
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    // 出去不用 BOTTOM_OF_PIPE：它當 destination 不會擋住後面較早的階段。
+    // 同一條 command buffer 裡的 copy 要 TRANSFER read。swapchain 交給 runtime 之後，合成器以 SAMPLED 在 fragment shader 讀。
+    // 外部依賴要同時涵蓋這兩種，否則取樣可能讀到還沒寫完的像素。
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
 
     VkRenderPassCreateInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -221,8 +244,8 @@ bool QxrVideo::create(const QxrVideoCreateInfo& info, const char** error) {
     renderPassInfo.pAttachments = &attachment;
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpass;
-    renderPassInfo.dependencyCount = 1;
-    renderPassInfo.pDependencies = &dependency;
+    renderPassInfo.dependencyCount = 2;
+    renderPassInfo.pDependencies = dependencies;
     const VkResult passResult = vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass);
     if (passResult != VK_SUCCESS) {
         QXR_LOGE("VIDEO", "vkCreateRenderPass failed: VkResult=%d", static_cast<int>(passResult));
@@ -272,9 +295,13 @@ bool QxrVideo::create(const QxrVideoCreateInfo& info, const char** error) {
 }
 
 void QxrVideo::destroy() {
-    stopping.store(1, std::memory_order_release);
-    if (waitCv) {
-        static_cast<std::condition_variable*>(waitCv)->notify_all();
+    if (waitMu) {
+        auto* wait = static_cast<QxrWait*>(waitMu);
+        std::lock_guard<std::mutex> lock(wait->mu);
+        stopping.store(1, std::memory_order_release);
+        wait->cv.notify_all();
+    } else {
+        stopping.store(1, std::memory_order_release);
     }
     if (reader) {
         AImageReader_setImageListener(static_cast<AImageReader*>(reader), nullptr);
@@ -322,6 +349,26 @@ void QxrVideo::destroy() {
     // 呼叫端接著會拆 VkDevice。解構子還會再進來一次，留著失效的 handle 會在第二次碰到已拆的裝置。
     device = VK_NULL_HANDLE;
     physicalDevice = VK_NULL_HANDLE;
+    // 同一個物件會再 create。旗標與計數留著的話，第一次之後就不再記 first image，10 秒窗也會跨過上一次。
+    loggedFirstImage = false;
+    loggedMaxImages = false;
+    loggedAcquireError = false;
+    loggedGetId = false;
+    loggedBadCrop = false;
+    loggedFbFull = false;
+    loggedNoChroma = false;
+    statReceived = 0;
+    statAdopted = 0;
+    statDiscarded = 0;
+    statHit = 0;
+    statMiss = 0;
+    snapReceived = 0;
+    snapAdopted = 0;
+    snapDiscarded = 0;
+    snapHit = 0;
+    snapMiss = 0;
+    statWindowStartNs = 0;
+    imageAvailableNs.store(0, std::memory_order_release);
 }
 
 bool QxrVideo::waitForImage(int timeoutMs) {
@@ -334,11 +381,10 @@ bool QxrVideo::waitForImage(int timeoutMs) {
     auto* wait = static_cast<QxrWait*>(waitMu);
     std::unique_lock<std::mutex> lock(wait->mu);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-    while (pending.load(std::memory_order_acquire) == 0 && stopping.load(std::memory_order_acquire) == 0) {
-        if (wait->cv.wait_until(lock, deadline) == std::cv_status::timeout) {
-            break;
-        }
-    }
+    // predicate 在鎖內重讀。signalImage 也在這把鎖裡寫 pending 再 notify，喚醒不會落在檢查與等待之間。
+    wait->cv.wait_until(lock, deadline, [this] {
+        return pending.load(std::memory_order_acquire) != 0 || stopping.load(std::memory_order_acquire) != 0;
+    });
     const bool ready = pending.load(std::memory_order_acquire) != 0;
     pending.store(0, std::memory_order_release);
     return ready;
@@ -349,15 +395,40 @@ void QxrVideo::onImageAvailable(void* context, void*) {
     if (!self || self->stopping.load(std::memory_order_acquire)) {
         return;
     }
-    // 不在這條執行緒取圖。漏掉這次喚醒時，呼叫端最壞只是等滿自己的 timeout。
+    // 不在回呼裡取圖。這條執行緒一旦阻塞就會卡住解碼器，鎖只在 signalImage 裡短暫持有。
+    // 到達時刻給投影的速率判斷。影格執行緒可能比這個 store 更早採用這張，下一格再對上。
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const uint64_t ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
+    self->imageAvailableNs.store(ns, std::memory_order_release);
+    self->statListener.fetch_add(1, std::memory_order_relaxed);
     self->signalImage();
 }
 
-void QxrVideo::signalImage() {
-    pending.store(1, std::memory_order_release);
-    if (waitCv) {
-        static_cast<std::condition_variable*>(waitCv)->notify_one();
+void QxrVideo::clearTargetFramebuffers() {
+    if (device == VK_NULL_HANDLE) {
+        return;
     }
+    for (TargetFb& target : targets) {
+        if (target.framebuffer != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device, target.framebuffer, nullptr);
+        }
+        target = {};
+    }
+}
+
+void QxrVideo::signalImage() {
+    if (!waitMu) {
+        pending.store(1, std::memory_order_release);
+        return;
+    }
+    auto* wait = static_cast<QxrWait*>(waitMu);
+    std::lock_guard<std::mutex> lock(wait->mu);
+    if (stopping.load(std::memory_order_acquire)) {
+        return;
+    }
+    pending.store(1, std::memory_order_release);
+    wait->cv.notify_one();
 }
 
 void* QxrVideo::pullNewest() {
@@ -727,8 +798,25 @@ bool QxrVideo::createYcbcrSampler(const void* formatPropsVoid) {
         const bool linearSample = (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
         lumaFilter = linearSample ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     }
-    conversionInfo.xChromaOffset = legalChromaOffset(formatProps->suggestedXChromaOffset, features);
-    conversionInfo.yChromaOffset = legalChromaOffset(formatProps->suggestedYChromaOffset, features);
+    VkChromaLocation xOffset = VK_CHROMA_LOCATION_COSITED_EVEN;
+    VkChromaLocation yOffset = VK_CHROMA_LOCATION_COSITED_EVEN;
+    if (!legalChromaOffset(formatProps->suggestedXChromaOffset, features, &xOffset)
+        || !legalChromaOffset(formatProps->suggestedYChromaOffset, features, &yOffset)) {
+        // 兩種 chroma 位置都會被拒。送進去只會讓 vkCreateSamplerYcbcrConversion 失敗，這裡直接讓 ensureFormat 失敗。
+        if (!loggedNoChroma) {
+            loggedNoChroma = true;
+            QXR_LOGE("VIDEO",
+                     "ensureFormat: formatFeatures=0x%x has neither MIDPOINT_CHROMA_SAMPLES nor COSITED_CHROMA_SAMPLES "
+                     "(suggested x=%d y=%d external=0x%llx). Vulkan accepts no chroma location, so this format cannot be "
+                     "sampled with a YCbCr conversion",
+                     static_cast<unsigned>(features), static_cast<int>(formatProps->suggestedXChromaOffset),
+                     static_cast<int>(formatProps->suggestedYChromaOffset),
+                     static_cast<unsigned long long>(formatProps->externalFormat));
+        }
+        return false;
+    }
+    conversionInfo.xChromaOffset = xOffset;
+    conversionInfo.yChromaOffset = yOffset;
     conversionInfo.chromaFilter = chromaFilter;
     conversionInfo.forceExplicitReconstruction = VK_FALSE;
 
@@ -1034,6 +1122,10 @@ QxrVideo::CacheEntry* QxrVideo::takeCacheSlot() {
 }
 
 VkFramebuffer QxrVideo::framebufferFor(VkImageView view, uint32_t width, uint32_t height) {
+    // 跟 VkImage 快取同一條前提：呼叫端同一時間只讓一張 command buffer 在飛，等過 fence 才再呼叫 renderTo。
+    // 淘汰時沒有還沒做完的指令在用這些 framebuffer。
+    // 容量 kTargetCap 必須大於呼叫端同時在用的目標數（2D quad 與 projection 的 swapchain 張數、測試的那一張離屏）。
+    // 達不到時新目標會拆最久沒用的那張，那張可能還在用；這種情況只記一次。
     if (!view || !renderPass || width == 0 || height == 0) {
         return VK_NULL_HANDLE;
     }
@@ -1052,6 +1144,13 @@ VkFramebuffer QxrVideo::framebufferFor(VkImageView view, uint32_t width, uint32_
         }
     }
     TargetFb* slot = empty ? empty : oldest;
+    if (!empty && !loggedFbFull) {
+        loggedFbFull = true;
+        QXR_LOGW("VIDEO",
+                 "framebuffer cache full (cap=%d); evicting the least recently used target. simultaneous in-use targets "
+                 "must stay below this cap, and the previous fence must already have been waited",
+                 kTargetCap);
+    }
     if (slot->framebuffer) {
         vkDestroyFramebuffer(device, slot->framebuffer, nullptr);
         slot->framebuffer = VK_NULL_HANDLE;
@@ -1117,6 +1216,9 @@ void QxrVideo::recordQueueTransfer(VkCommandBuffer cmd, VkImage image, bool toDe
 }
 
 bool QxrVideo::renderTo(VkCommandBuffer cmd, VkImageView target, uint32_t width, uint32_t height, QxrUvRect src) {
+    // 呼叫端同一時間只讓一張 command buffer 在飛，等過 fence 才錄下一條。
+    // 所以更新這個 descriptor set 時，沒有還沒做完的 command buffer 在讀同一組。
+    // 有的 GPU 在 vkCmdBeginRenderPass 就抓住 descriptor，寫在 begin 之後會畫到上一張或全黑。
     if (!cmd || !target || !renderPass || width == 0 || height == 0) {
         return false;
     }
@@ -1130,6 +1232,17 @@ bool QxrVideo::renderTo(VkCommandBuffer cmd, VkImageView target, uint32_t width,
     const VkImageLayout sampleLayout = useYcbcr ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (canDraw) {
         recordQueueTransfer(cmd, currentImage, true, sampleLayout);
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageView = currentView;
+        imageInfo.imageLayout = sampleLayout;
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = descSet;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &imageInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     }
 
     VkClearValue clear{};
@@ -1147,18 +1260,6 @@ bool QxrVideo::renderTo(VkCommandBuffer cmd, VkImageView target, uint32_t width,
     vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
 
     if (canDraw) {
-        VkDescriptorImageInfo imageInfo{};
-        imageInfo.imageView = currentView;
-        imageInfo.imageLayout = sampleLayout;
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = descSet;
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.pImageInfo = &imageInfo;
-        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descSet, 0, nullptr);
         VkViewport viewport{};
@@ -1210,10 +1311,12 @@ void QxrVideo::pumpStats() {
 }
 
 void QxrVideo::logStats() {
-    QXR_LOGI("VIDEO", "received=%llu adopted=%llu discarded=%llu cacheHit=%llu cacheMiss=%llu (10s)",
+    QXR_LOGI("VIDEO", "listenerTotal=%llu", static_cast<unsigned long long>(statListener.load(std::memory_order_relaxed)));
+    QXR_LOGI("VIDEO", "received=%llu adopted=%llu discarded=%llu cacheHit=%llu cacheMiss=%llu format=%s (10s)",
              static_cast<unsigned long long>(statReceived - snapReceived),
              static_cast<unsigned long long>(statAdopted - snapAdopted),
              static_cast<unsigned long long>(statDiscarded - snapDiscarded),
              static_cast<unsigned long long>(statHit - snapHit),
-             static_cast<unsigned long long>(statMiss - snapMiss));
+             static_cast<unsigned long long>(statMiss - snapMiss),
+             targetSrgb ? "SRGB" : "UNORM");
 }

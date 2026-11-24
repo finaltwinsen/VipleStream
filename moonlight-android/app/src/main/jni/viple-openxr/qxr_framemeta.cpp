@@ -59,6 +59,33 @@ void QxrFrameMeta::logLine(const char* prefix, const Interval& stats, std::vecto
                         prefix, stats.frames, headerPct, echoPct, stats.echoKnown, stats.withHeader, p50, p95);
 }
 
+void QxrFrameMeta::setHistory(QxrSampleHistory* historyIn)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    history = historyIn;
+}
+
+bool QxrFrameMeta::lookup(int64_t frameNumber, VIPLE_VR_FRAME_META* meta, uint64_t* sinkMonoNs) const
+{
+    if (meta == nullptr || frameNumber < 0) {
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(lock);
+    const uint32_t filled = ringWrite < static_cast<uint32_t>(kRing) ? ringWrite : static_cast<uint32_t>(kRing);
+    for (uint32_t i = 0; i < filled; i++) {
+        const uint32_t idx = (ringWrite - 1 - i) % static_cast<uint32_t>(kRing);
+        if (!ring[idx].occupied || ring[idx].frameNumber != frameNumber) {
+            continue;
+        }
+        *meta = ring[idx].meta;
+        if (sinkMonoNs != nullptr) {
+            *sinkMonoNs = ring[idx].sinkMonoNs;
+        }
+        return true;
+    }
+    return false;
+}
+
 void QxrFrameMeta::onFrame(int frameNumber, const VIPLE_VR_FRAME_META* meta)
 {
     (void)frameNumber;
@@ -88,6 +115,20 @@ void QxrFrameMeta::onFrame(int frameNumber, const VIPLE_VR_FRAME_META* meta)
                     }
                 }
             }
+        }
+        // §QUEST-PCVR：回呼返回後 meta 就不能再讀。幀號是影像 PTS 除回來的那一個，projection 用它配姿態。
+        {
+            Slot& slot = ring[ringWrite % kRing];
+            slot.frameNumber = frameNumber;
+            slot.occupied = true;
+            slot.sinkMonoNs = arriveNs;
+            if (meta != nullptr) {
+                slot.meta = *meta;
+            }
+            else {
+                slot.meta = {};
+            }
+            ringWrite++;
         }
         if (lastLogNs == 0) {
             lastLogNs = arriveNs;

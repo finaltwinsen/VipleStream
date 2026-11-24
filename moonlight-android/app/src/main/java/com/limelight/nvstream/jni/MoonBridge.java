@@ -463,6 +463,9 @@ public class MoonBridge {
     // §QUEST-VR：這一場 common-c 實際用的 VIPLE_VR_SF_*。一般 session 為 0。
     public static native int getVrFlags();
 
+    // §EXT-DISPLAY：要求 host 送一張 IDR。只在串流中呼叫。
+    public static native void requestIdrFrame();
+
     // VipleStream: client-side NAT hole punch. Must be called BEFORE startConnection()
     // so LocalControlPort is set when ENet binds. Returns 0 on success, negative on failure.
     public static native int holePunch(String serverAddr, int serverPort,

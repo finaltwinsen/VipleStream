@@ -212,6 +212,58 @@
         </div>
       </div>
     </div>
+    <div class="card my-4">
+      <div class="card-body">
+        <h2 id="logdrop">{{ $t('troubleshooting.logdrop_title') }}</h2>
+        <p>{{ $t('troubleshooting.logdrop_desc') }}</p>
+        <p class="mb-1">
+          {{ $t('troubleshooting.logdrop_id_label') }}
+          <span class="font-monospace user-select-all">{{ logdropInstallId || "—" }}</span>
+        </p>
+        <p class="form-text">{{ $t('troubleshooting.logdrop_id_hint') }}</p>
+        <p v-if="logdropLastCode" class="mb-2">
+          {{ $t('troubleshooting.logdrop_last') }}
+          <span class="font-monospace user-select-all">{{ logdropLastCode }}</span>
+          <span v-if="formatLogdropTime(logdropLastTime)"> {{ formatLogdropTime(logdropLastTime) }}</span>
+        </p>
+        <p v-else class="text-muted mb-2">{{ $t('troubleshooting.logdrop_last_none') }}</p>
+        <div class="mb-3">
+          <label for="logdrop-mode" class="form-label">{{ $t('troubleshooting.logdrop_mode') }}</label>
+          <select id="logdrop-mode" class="form-select" style="max-width: 24rem" :value="logdropMode" :disabled="logdropModeSaving" @change="setLogdropMode($event.target.value)">
+            <option value="ask">{{ $t('config.log_upload_ask') }}</option>
+            <option value="enabled">{{ $t('config.log_upload_enabled') }}</option>
+            <option value="disabled">{{ $t('config.log_upload_disabled') }}</option>
+          </select>
+          <div class="form-text">{{ $t('config.log_upload_desc') }}</div>
+        </div>
+        <div class="mb-3">
+          <label for="logdrop-note" class="form-label">{{ $t('troubleshooting.logdrop_note') }}</label>
+          <textarea
+            id="logdrop-note"
+            class="form-control"
+            rows="3"
+            maxlength="2000"
+            v-model="logdropNote"
+            :placeholder="$t('troubleshooting.logdrop_note_placeholder')"
+          ></textarea>
+        </div>
+        <button class="btn btn-primary" type="button" :disabled="logdropUploading" @click="uploadLogdrop">
+          {{ logdropUploading ? $t('troubleshooting.logdrop_uploading') : $t('troubleshooting.logdrop_upload') }}
+        </button>
+        <div class="mt-3" v-if="logdropCode">
+          <div class="display-6 font-monospace user-select-all">{{ logdropCode }}</div>
+          <p class="mb-2">{{ $t('troubleshooting.logdrop_code_hint') }}</p>
+          <button class="btn btn-outline-secondary btn-sm" type="button" @click="copyLogdropCode">
+            <copy :size="18" class="icon"></copy>
+            {{ logdropCopied ? $t('troubleshooting.logdrop_copied') : $t('troubleshooting.logdrop_copy') }}
+          </button>
+        </div>
+        <div class="alert alert-danger mt-3" v-if="logdropError">
+          <alert-triangle :size="18" class="icon"></alert-triangle>
+          {{ logdropError }}
+        </div>
+      </div>
+    </div>
   </div>
 
   <script type="module">
@@ -292,6 +344,16 @@
           vigemBusInstallError: null,
           currentLogIndex: -1,
           logLines: [],
+          logdropNote: "",
+          logdropUploading: false,
+          logdropCode: "",
+          logdropError: "",
+          logdropCopied: false,
+          logdropMode: "ask",
+          logdropModeSaving: false,
+          logdropInstallId: "",
+          logdropLastCode: "",
+          logdropLastTime: "",
         };
       },
       computed: {
@@ -435,9 +497,14 @@
         }, 5000);
         this.refreshLogs();
         this.refreshClients();
+        this.refreshLogdropStatus();
       },
       beforeDestroy() {
         clearInterval(this.logInterval);
+      },
+      beforeUnmount() {
+        // §LOGDROP：這個頁面是 Vue 3，beforeDestroy 不會被呼叫。
+        if (this._logdropCopyTimeout) clearTimeout(this._logdropCopyTimeout);
       },
       methods: {
         filterLogText(text) {
@@ -805,6 +872,114 @@
           if (where === 'bottom') {
             container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
           }
+        },
+        refreshLogdropStatus() {
+          fetch("./api/logs/upload-status")
+            .then((r) => r.json())
+            .then((st) => {
+              if (!st) return;
+              if (st.mode === "ask" || st.mode === "enabled" || st.mode === "disabled") {
+                this.logdropMode = st.mode;
+              }
+              this.logdropInstallId = st.install_id || "";
+              this.logdropLastCode = st.last_code || "";
+              this.logdropLastTime = st.last_time || "";
+            })
+            .catch(() => {});
+        },
+        formatLogdropTime(value) {
+          if (!value) return "";
+          const d = new Date(value);
+          if (Number.isNaN(d.getTime())) return value;
+          return d.toLocaleString();
+        },
+        setLogdropMode(mode) {
+          if (this.logdropModeSaving || mode === this.logdropMode) return;
+          if (mode !== "ask" && mode !== "enabled" && mode !== "disabled") return;
+          const prev = this.logdropMode;
+          this.logdropMode = mode;
+          this.logdropModeSaving = true;
+          const body = mode === "ask" ? { mode: "ask" } : { enabled: mode === "enabled" };
+          apiFetch("./api/logs/upload-consent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          })
+            .then((r) => r.json())
+            .then((res) => {
+              if (!res || res.status !== true) {
+                this.logdropMode = prev;
+                return;
+              }
+              if (res.mode === "ask" || res.mode === "enabled" || res.mode === "disabled") {
+                this.logdropMode = res.mode;
+              }
+            })
+            .catch(() => {
+              this.logdropMode = prev;
+            })
+            .finally(() => {
+              this.logdropModeSaving = false;
+            });
+        },
+        uploadLogdrop() {
+          if (this.logdropUploading) return;
+          // 已經同意自動上傳就不必每次再問。其他狀態先說明會送出什麼。
+          if (this.logdropMode !== "enabled") {
+            if (!window.confirm(this.$t("troubleshooting.logdrop_confirm"))) return;
+          }
+          this.logdropUploading = true;
+          this.logdropCode = "";
+          this.logdropError = "";
+          this.logdropCopied = false;
+          const note = (this.logdropNote || "").slice(0, 2000);
+          apiFetch("./api/logs/upload", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ note }),
+          })
+            .then((r) => r.text().then((text) => ({ ok: r.ok, status: r.status, text })))
+            .then(({ ok, status, text }) => {
+              let body = null;
+              try {
+                body = text ? JSON.parse(text) : null;
+              } catch (e) {
+                body = null;
+              }
+              if (body && body.status === true && body.code) {
+                this.logdropCode = String(body.code);
+                return;
+              }
+              const code = body && body.error ? String(body.error) : (ok ? "bad_response" : ("http_" + status));
+              this.logdropError = this.logdropErrorText(code);
+            })
+            .catch(() => {
+              this.logdropError = this.logdropErrorText("network");
+            })
+            .finally(() => {
+              this.logdropUploading = false;
+            });
+        },
+        logdropErrorText(code) {
+          if (code === "not_configured") return this.$t("troubleshooting.logdrop_not_configured");
+          if (code === "rate_limit" || code === "daily_limit") return this.$t("troubleshooting.logdrop_rate_limit");
+          if (code === "busy") return this.$t("troubleshooting.logdrop_busy");
+          if (code === "network") return this.$t("troubleshooting.logdrop_network");
+          return this.$t("troubleshooting.logdrop_error", { error: code || "" });
+        },
+        copyLogdropCode() {
+          if (!this.logdropCode) return;
+          const done = () => {
+            if (this._logdropCopyTimeout) clearTimeout(this._logdropCopyTimeout);
+            this.logdropCopied = true;
+            this._logdropCopyTimeout = setTimeout(() => {
+              this.logdropCopied = false;
+            }, 2000);
+          };
+          // 剪貼簿被瀏覽器拒絕時代碼還在畫面上，使用者可以自己選取。
+          navigator.clipboard.writeText(this.logdropCode).then(done).catch(() => {});
         },
       },
     });

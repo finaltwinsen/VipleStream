@@ -22,6 +22,13 @@ public:
     // frame sink 呼叫。不可阻塞，不可呼叫 VipleVrBridgeSet*。
     void onFrame(int frameNumber, const VIPLE_VR_FRAME_META* meta);
 
+    // §QUEST-PCVR：上行的環比 session 晚建立，停掉時也先摘掉。onFrame 跟這裡同一把鎖，避免讀到半套的指標。
+    void setHistory(QxrSampleHistory* historyIn);
+
+    // §QUEST-PCVR：影像幀號對 0x81。sink 返回後 meta 指標就失效，所以 onFrame 先複製。
+    // 回 false＝這張還沒進環（遺失或解碼比封包早）。present 仍可能是 0，呼叫端要再看。
+    bool lookup(int64_t frameNumber, VIPLE_VR_FRAME_META* meta, uint64_t* sinkMonoNs) const;
+
 private:
     struct Interval {
         uint32_t frames = 0;
@@ -29,10 +36,22 @@ private:
         uint32_t echoKnown = 0;
     };
 
+    // 120 Hz 約 4 秒。解碼通常晚幾個幀號才出來，用不到更長的。
+    static constexpr int kRing = 512;
+    struct Slot {
+        int64_t frameNumber = -1;
+        bool occupied = false;
+        uint64_t sinkMonoNs = 0;
+        VIPLE_VR_FRAME_META meta{};
+    };
+
     void logLine(const char* prefix, const Interval& stats, std::vector<float>& ages) const;
 
     QxrSampleHistory* history = nullptr;
-    std::mutex lock;
+    Slot ring[kRing]{};
+    uint32_t ringWrite = 0;
+    // §QUEST-PCVR：lookup 給 frame thread 用，簽章是 const；鎖仍要能在 const 裡拿。
+    mutable std::mutex lock;
     Interval interval;
     Interval total;
     std::vector<float> intervalAgesMs;

@@ -22,6 +22,21 @@
         <requestFocus />
     </com.limelight.ui.StreamView>
 
+    <!-- §EXT-DISPLAY：預設隱藏。只有串流畫到外接顯示器時才顯示，避免擋到手機上的畫面。 -->
+    <TextView
+        android:id="@+id/externalDisplayHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center"
+        android:padding="24dp"
+        android:text="@string/external_display_touchpad_hint"
+        android:textColor="#CCFFFFFF"
+        android:textSize="16sp"
+        android:clickable="false"
+        android:focusable="false"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/performanceOverlay"
         android:layout_width="wrap_content"

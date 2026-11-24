@@ -30,13 +30,19 @@ import android.view.WindowInsets;
 import com.limelight.LimeLog;
 import com.limelight.PcView;
 import com.limelight.R;
+import com.limelight.glasses.GlassesDiagnosticsActivity;
 import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.utils.Dialog;
+import com.limelight.utils.LogDrop;
 import com.limelight.utils.UiHelper;
 
 import java.lang.reflect.Method;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
 
 public class StreamSettings extends Activity {
     private PreferenceConfiguration previousPrefs;
@@ -280,6 +286,30 @@ public class StreamSettings extends Activity {
             super.onCreate(savedInstanceState);
 
             addPreferencesFromResource(R.xml.preferences);
+            // §VITURE：XML intent 會寫死 applicationId，debug 後綴對不上，所以用明確 Intent 開診斷畫面。
+            Preference glassesDiagnostics = findPreference("glasses_diagnostics");
+            if (glassesDiagnostics != null) {
+                glassesDiagnostics.setOnPreferenceClickListener(new Preference.OnPreferenceClickListener() {
+                    @Override
+                    public boolean onPreferenceClick(Preference preference) {
+                        Activity activity = getActivity();
+                        if (activity == null) {
+                            return false;
+                        }
+                        activity.startActivity(new Intent(activity, GlassesDiagnosticsActivity.class));
+                        return true;
+                    }
+                });
+            }
+            // Android TV 沒有這台裝置的螢幕可當觸控板，沒有 USB host 也接不了眼鏡。跟手把 USB 選項一樣直接拿掉。
+            if (getActivity().getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+                    || !getActivity().getPackageManager().hasSystemFeature(PackageManager.FEATURE_USB_HOST)) {
+                PreferenceCategory basic =
+                        (PreferenceCategory) findPreference("category_basic_settings");
+                basic.removePreference(findPreference("checkbox_external_display"));
+                basic.removePreference(findPreference("checkbox_external_display_dim"));
+                basic.removePreference(findPreference("glasses_diagnostics"));
+            }
             PreferenceScreen screen = getPreferenceScreen();
 
             // hide on-screen controls category on non touch screen devices
@@ -699,6 +729,7 @@ public class StreamSettings extends Activity {
 
             // 放在最後：上面的程式還會用 findPreference 找進階區的選項（例如 unlock FPS），先移除就找不到了
             setupAdvancedToggle();
+            setupLogDrop();
         }
 
         // §SETTINGS-ADV：「顯示進階與實驗性選項」關著時，進階區收起這些測試、除錯與實驗性的選項。
@@ -750,6 +781,54 @@ public class StreamSettings extends Activity {
                 else if (!show && shown) {
                     category.removePreference(pref);
                 }
+            }
+        }
+
+        private void setupLogDrop() {
+            PreferenceCategory category =
+                    (PreferenceCategory) findPreference("category_advanced_settings");
+            CheckBoxPreference toggle = (CheckBoxPreference) findPreference("checkbox_logdrop_auto");
+            if (category == null || toggle == null) {
+                return;
+            }
+            if (!LogDrop.isConfigured()) {
+                // §LOGDROP：還沒填收件端網址就不要出現，避免勾了卻沒有任何上傳。
+                category.removePreference(toggle);
+                return;
+            }
+            Activity activity = getActivity();
+            if (activity == null) {
+                return;
+            }
+            boolean allow = "yes".equals(LogDrop.consent(activity));
+            toggle.setChecked(allow);
+            applyLogDropSummary(toggle, activity);
+            toggle.setOnPreferenceChangeListener(new Preference.OnPreferenceChangeListener() {
+                @Override
+                public boolean onPreferenceChange(Preference preference, Object newValue) {
+                    Activity host = getActivity();
+                    if (host == null) {
+                        return false;
+                    }
+                    boolean next = Boolean.TRUE.equals(newValue);
+                    LogDrop.setConsent(host, next);
+                    applyLogDropSummary((CheckBoxPreference) preference, host);
+                    return true;
+                }
+            });
+        }
+
+        private void applyLogDropSummary(CheckBoxPreference toggle, Context context) {
+            String id = LogDrop.installId(context);
+            String code = LogDrop.lastSuccessCode(context);
+            long at = LogDrop.lastSuccessAt(context);
+            if (code.length() > 0 && at > 0L) {
+                SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US);
+                format.setTimeZone(TimeZone.getDefault());
+                toggle.setSummary(getString(R.string.summary_logdrop_auto_with_last,
+                        id, code, format.format(new Date(at))));
+            } else {
+                toggle.setSummary(getString(R.string.summary_logdrop_auto, id));
             }
         }
     }

@@ -2,6 +2,7 @@ package com.limelight;
 
 import java.io.IOException;
 import java.io.StringReader;
+import java.security.cert.CertificateEncodingException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -10,6 +11,7 @@ import java.util.List;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.computers.ComputerManagerListener;
 import com.limelight.computers.ComputerManagerService;
+import com.limelight.glasses.GlassesVrLaunch;
 import com.limelight.grid.AppGridAdapter;
 import com.limelight.grid.assets.CachedAppAssetLoader;
 import com.limelight.nvstream.http.ComputerDetails;
@@ -24,13 +26,16 @@ import com.limelight.ui.AdapterFragment;
 import com.limelight.ui.AdapterFragmentCallbacks;
 import com.limelight.utils.CacheHelper;
 import com.limelight.utils.Dialog;
+import com.limelight.utils.QuestSupport;
 import com.limelight.utils.ServerHelper;
+import com.limelight.vr.VrStreamActivity;
 import com.limelight.utils.ShortcutHelper;
 import com.limelight.utils.SpinnerDialog;
 import com.limelight.utils.UiHelper;
 
 import android.app.Activity;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
@@ -76,6 +81,7 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
     // §REVIEW-1104：將 inForeground 設為 volatile，並新增 contextMenuAppId 與完整應用清單 allApps
     private volatile boolean inForeground;
     private int contextMenuAppId;
+    private BroadcastReceiver glassesUsbWatcher;
     private final ArrayList<AppObject> allApps = new ArrayList<>();
     private boolean showHiddenApps;
     private HashSet<Integer> hiddenAppIds = new HashSet<>();
@@ -100,6 +106,9 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
     private final static int VIEW_DETAILS_ID = 5;
     private final static int CREATE_SHORTCUT_ID = 6;
     private final static int HIDE_APP_ID = 7;
+    private final static int VR_PCVR_ID = 8;
+    private final static int VR_SCREEN_ID = 9;
+    private final static int GLASSES_VR_ID = 10;
 
     public final static String HIDDEN_APPS_PREF_FILENAME = "HiddenApps";
 
@@ -697,6 +706,8 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
 
         // Display a decoder crash notification if we've returned after a crash
         UiHelper.showDecoderCrashDialog(this);
+        // 長按選單只讀快取。掃描放背景，插拔廣播再更新。
+        glassesUsbWatcher = GlassesVrLaunch.registerPresenceWatcher(this);
 
         // VipleStream H Phase 2: re-read prefs in case the user just
         // changed the app sort mode in the settings activity. Cheap
@@ -742,6 +753,8 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
 
         inForeground = false;
         stopComputerUpdates();
+        GlassesVrLaunch.unregisterPresenceWatcher(this, glassesUsbWatcher);
+        glassesUsbWatcher = null;
     }
 
     @Override
@@ -773,6 +786,17 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
         }
 
         menu.add(Menu.NONE, VIEW_DETAILS_ID, 4, getResources().getString(R.string.applist_menu_details));
+
+        if (QuestSupport.isQuest(this)) {
+            // §QUEST-PCVR：手機沒有這兩條頭盔路徑，選單維持原樣。
+            menu.add(Menu.NONE, VR_PCVR_ID, 6, getResources().getString(R.string.applist_menu_vr_pcvr));
+            menu.add(Menu.NONE, VR_SCREEN_ID, 7, getResources().getString(R.string.applist_menu_vr_screen));
+        }
+
+        if (selectedApp.app.isVr() && GlassesVrLaunch.canShowMenu(this)) {
+            // §VITURE：跟 Frame 版一樣只有 VR 遊戲能用 VR 開。沒接眼鏡或程式庫沒載入時不加入，其他裝置的選單維持原樣。
+            menu.add(Menu.NONE, GLASSES_VR_ID, 8, getResources().getString(R.string.applist_menu_glasses_vr));
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             // Only add an option to create shortcut if box art is loaded
@@ -862,6 +886,18 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                 updateHiddenApps(false);
                 return true;
 
+            case VR_PCVR_ID:
+                startHeadsetStream(app.app, true);
+                return true;
+
+            case VR_SCREEN_ID:
+                startHeadsetStream(app.app, false);
+                return true;
+
+            case GLASSES_VR_ID:
+                ServerHelper.doStartGlassesVr(AppView.this, app.app, computer, managerBinder);
+                return true;
+
             case CREATE_SHORTCUT_ID:
                 ImageView appImageView = info.targetView.findViewById(R.id.grid_image);
                 Bitmap appBits = ((BitmapDrawable)appImageView.getDrawable()).getBitmap();
@@ -873,6 +909,43 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
             default:
                 return super.onContextItemSelected(item);
         }
+    }
+
+    private void startHeadsetStream(NvApp app, boolean pcvr) {
+        if (computer == null || computer.state == ComputerDetails.State.OFFLINE || computer.activeAddress == null) {
+            Toast.makeText(this, getResources().getString(R.string.pair_pc_offline), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (managerBinder == null) {
+            return;
+        }
+        Intent intent = new Intent(this, VrStreamActivity.class);
+        intent.putExtra(Game.EXTRA_HOST, computer.activeAddress.address);
+        intent.putExtra(Game.EXTRA_PORT, computer.activeAddress.port);
+        intent.putExtra(Game.EXTRA_HTTPS_PORT, computer.httpsPort);
+        intent.putExtra(Game.EXTRA_APP_NAME, app.getAppName());
+        intent.putExtra(Game.EXTRA_APP_ID, app.getAppId());
+        intent.putExtra(Game.EXTRA_APP_HDR, app.isHdrSupported());
+        intent.putExtra(Game.EXTRA_UNIQUEID, managerBinder.getUniqueId());
+        intent.putExtra(Game.EXTRA_PC_UUID, computer.uuid);
+        intent.putExtra(Game.EXTRA_PC_NAME, computer.name);
+        intent.putExtra(Game.EXTRA_SERVER_CODEC_MODE_SUPPORT, computer.serverCodecModeSupport);
+        if (computer.stunAddress != null) {
+            intent.putExtra(Game.EXTRA_STUN_ADDRESS, computer.stunAddress);
+            intent.putExtra(Game.EXTRA_STUN_PUNCH_PORT, computer.stunPunchPort);
+        }
+        try {
+            if (computer.serverCert != null) {
+                intent.putExtra(Game.EXTRA_SERVER_CERT, computer.serverCert.getEncoded());
+            }
+        } catch (CertificateEncodingException e) {
+            e.printStackTrace();
+        }
+        if (pcvr) {
+            intent.putExtra("vr_pcvr", true);
+        }
+        LimeLog.info("[VIPLE-QXR-ACT] app menu " + (pcvr ? "vr_pcvr" : "vr_screen") + " appId=" + app.getAppId());
+        startActivity(intent);
     }
 
     private void updateUiWithServerinfo(final ComputerDetails details) {

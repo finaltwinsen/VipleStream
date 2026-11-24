@@ -11,6 +11,15 @@
     <h1 class="my-4">{{ $t('index.welcome') }}</h1>
     <p>{{ $t('index.description') }}</p>
 
+    <div class="card border-primary my-4" v-if="logdropAsk">
+      <div class="card-body">
+        <h2>{{ $t('index.logdrop_title') }}</h2>
+        <p>{{ $t('index.logdrop_body') }}</p>
+        <button class="btn btn-primary me-2" type="button" :disabled="logdropConsenting" @click="logdropConsent(true)">{{ $t('index.logdrop_yes') }}</button>
+        <button class="btn btn-outline-secondary" type="button" :disabled="logdropConsenting" @click="logdropConsent(false)">{{ $t('index.logdrop_no') }}</button>
+      </div>
+    </div>
+
     <!-- Fatal Errors Alert -->
     <div class="alert alert-danger my-4" v-if="fancyLogs.find(x => x.level === 'Fatal')">
       <div>
@@ -219,9 +228,12 @@
         currentSessionInterval: null,
         forceCancelPressed: false,
         forceCancelStatus: null,
+        logdropAsk: false,
+        logdropConsenting: false,
       }
     },
     async created() {
+      this.refreshLogdropConsent();
       try {
         let config = await fetch("./api/config").then((r) => r.json());
         this.notifyPreReleases = config.notify_pre_releases;
@@ -299,6 +311,35 @@
       }
     },
     methods: {
+      refreshLogdropConsent() {
+        fetch("./api/logs/upload-status")
+          .then((r) => r.json())
+          .then((st) => {
+            this.logdropAsk = !!(st && st.configured && st.mode === "ask");
+          })
+          .catch(() => {
+            this.logdropAsk = false;
+          });
+      },
+      logdropConsent(enabled) {
+        if (this.logdropConsenting) return;
+        this.logdropConsenting = true;
+        apiFetch("./api/logs/upload-consent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: !!enabled }),
+        })
+          .then((r) => r.json())
+          .then((body) => {
+            if (body && body.status === true) {
+              this.logdropAsk = false;
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            this.logdropConsenting = false;
+          });
+      },
       convertMarkdownToHtml(markdown) {
         if (!markdown) return '';
         return marked.parse(markdown);

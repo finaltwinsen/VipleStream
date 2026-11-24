@@ -8,10 +8,10 @@ import com.limelight.LimeLog;
 
 /**
  * §QUEST-2D：判斷是不是 Meta Quest（Horizon OS），好把 2D 面板專屬行為收在單一分支。
- * 條件是依公開資料寫的，尚未在實機確認：製造商字串 {@code Oculus}／{@code Meta}
- * （不分大小寫）為主，輔以 {@code oculus.hardware.standalone_vr} 或
- * {@code android.hardware.vr.headtracking}。製造商字串若和實機不符，側載後
- * 看 log {@code [VIPLE-QUEST-2D] detect} 的 manufacturer 欄位。
+ * 製造商字串 {@code Oculus}／{@code Meta}（不分大小寫），或 {@code oculus.hardware.standalone_vr}。
+ * {@code android.hardware.vr.headtracking} 是 AOSP 的 Daydream feature，非 Quest 也會宣告，
+ * 拿來判斷會關掉滑鼠鎖定、自動橫向與子母畫面，所以只記進 log。
+ * 製造商字串若和實機不符，側載後看 log {@code [VIPLE-QUEST-2D] detect} 的 manufacturer 欄位。
  */
 public final class QuestSupport {
     private static final String FEATURE_STANDALONE_VR = "oculus.hardware.standalone_vr";
@@ -53,13 +53,17 @@ public final class QuestSupport {
                 headtracking = packageManager.hasSystemFeature(FEATURE_HEADTRACKING);
             }
         }
-        boolean quest = manufacturerMatch || standaloneVr || headtracking;
+        boolean quest = manufacturerMatch || standaloneVr;
         // 所有裝置只打一次，用來核對實機製造商字串；非 Quest 之後不會再進 Quest 分支
         LimeLog.info("[VIPLE-QUEST-2D] detect manufacturer=" + manufacturer
                 + " manufacturerMatch=" + manufacturerMatch
                 + " standaloneVr=" + standaloneVr
                 + " headtracking=" + headtracking
                 + " result=" + quest);
+        if (headtracking && !quest) {
+            // 實機上若這行出現，代表有 headtracking feature 但沒被當成 Quest。
+            LimeLog.info("[VIPLE-QUEST-2D] android.hardware.vr.headtracking is present but ignored");
+        }
         return quest;
     }
 }

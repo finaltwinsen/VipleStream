@@ -7,6 +7,7 @@ import java.net.UnknownHostException;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.computers.ComputerManagerListener;
 import com.limelight.computers.ComputerManagerService;
+import com.limelight.glasses.GlassesVrLaunch;
 import com.limelight.grid.PcGridAdapter;
 import com.limelight.grid.assets.DiskAssetLoader;
 import com.limelight.nvstream.http.ComputerDetails;
@@ -24,21 +25,28 @@ import com.limelight.ui.AdapterFragmentCallbacks;
 import com.limelight.utils.AppUpdater;
 import com.limelight.utils.Dialog;
 import com.limelight.utils.HelpLauncher;
+import com.limelight.utils.LogDrop;
 import com.limelight.utils.ServerHelper;
 import com.limelight.utils.ShortcutHelper;
 import com.limelight.utils.UiHelper;
 
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.app.AlertDialog;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.opengl.GLSurfaceView;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.preference.PreferenceManager;
 import android.view.ContextMenu;
 import android.view.Menu;
@@ -78,6 +86,31 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     private volatile boolean inForeground;
     private volatile boolean isDestroyed;
     private boolean serviceBound;
+    private BroadcastReceiver glassesUsbWatcher;
+    private AlertDialog logDropConsentDialog;
+    private boolean logDropConsentScheduled;
+    private int logDropConsentWaits;
+    private final Handler logDropHandler = new Handler(Looper.getMainLooper());
+    private final Runnable logDropConsentPoll = new Runnable() {
+        @Override
+        public void run() {
+            if (isDestroyed || isFinishing() || !inForeground) {
+                logDropConsentScheduled = false;
+                return;
+            }
+            if (decoderCrashPending() && logDropConsentWaits < 40) {
+                logDropConsentWaits++;
+                logDropHandler.postDelayed(this, 500);
+                return;
+            }
+            logDropConsentScheduled = false;
+            if (decoderCrashPending()) {
+                // §LOGDROP：解碼器當機對話框還在。這次先讓路，下次回到前景再問。
+                return;
+            }
+            showLogDropConsent();
+        }
+    };
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         public void onServiceConnected(ComponentName className, IBinder binder) {
             final ComputerManagerService.ComputerManagerBinder localBinder =
@@ -147,6 +180,7 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     private final static int FULL_APP_LIST_ID = 9;
     private final static int TEST_NETWORK_ID = 10;
     private final static int GAMESTREAM_EOL_ID = 11;
+    private final static int GLASSES_VR_APPS_ID = 12;
 
     private void initializeViews() {
         setContentView(R.layout.activity_pc_view);
@@ -342,6 +376,9 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
 
     @Override
     public void onDestroy() {
+        // §LOGDROP：沒有選項就關掉。這裡寫入的話，使用者只是離開主畫面也會被當成拒絕。
+        dismissLogDropConsent();
+
         super.onDestroy();
 
         // §REVIEW-1104：設 volatile 停止旗標並依 serviceBound 必定解綁一次，避免洩漏 PcView 與 Service
@@ -369,6 +406,9 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
 
         // 檢查應用程式自我更新
         AppUpdater.onActivityResume(this);
+        // 長按選單只讀快取。掃描放背景，插拔廣播再更新。
+        glassesUsbWatcher = GlassesVrLaunch.registerPresenceWatcher(this);
+        maybeAskLogDropConsent();
     }
 
     @Override
@@ -377,6 +417,8 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
 
         inForeground = false;
         stopComputerUpdates(false);
+        GlassesVrLaunch.unregisterPresenceWatcher(this, glassesUsbWatcher);
+        glassesUsbWatcher = null;
     }
 
     @Override
@@ -442,6 +484,10 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
             }
 
             menu.add(Menu.NONE, FULL_APP_LIST_ID, 4, getResources().getString(R.string.pcview_menu_app_list));
+            if (GlassesVrLaunch.canShowMenu(this)) {
+                // §VITURE：跟 Frame 版一樣列出 host 標成 VR 的 app 讓使用者選。沒接眼鏡時不加入，這份選單才跟以前一樣。
+                menu.add(Menu.NONE, GLASSES_VR_APPS_ID, 4, getResources().getString(R.string.pcview_menu_glasses_vr_apps));
+            }
         }
 
         menu.add(Menu.NONE, TEST_NETWORK_ID, 5, getResources().getString(R.string.pcview_menu_test_network));
@@ -739,6 +785,10 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                 doAppList(computer.details, false, true);
                 return true;
 
+            case GLASSES_VR_APPS_ID:
+                ServerHelper.doPickGlassesVrApp(PcView.this, computer.details, managerBinder);
+                return true;
+
             case RESUME_ID:
                 if (managerBinder == null) {
                     Toast.makeText(PcView.this, getResources().getString(R.string.error_manager_not_running), Toast.LENGTH_LONG).show();
@@ -876,6 +926,82 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
         });
         UiHelper.applyStatusBarPadding(listView);
         registerForContextMenu(listView);
+    }
+
+    private void maybeAskLogDropConsent() {
+        if (logDropConsentScheduled) {
+            return;
+        }
+        if (logDropConsentDialog != null && logDropConsentDialog.isShowing()) {
+            return;
+        }
+        if (!LogDrop.isConfigured() || !"".equals(LogDrop.consent(this))) {
+            return;
+        }
+        logDropConsentScheduled = true;
+        logDropConsentWaits = 0;
+        logDropHandler.post(logDropConsentPoll);
+    }
+
+    private boolean decoderCrashPending() {
+        // §LOGDROP：當機對話框要等使用者關掉才寫 LastNotifiedCrashCount。同一時間問同意會疊兩個。
+        SharedPreferences prefs = getSharedPreferences("DecoderTombstone", MODE_PRIVATE);
+        int crashCount = prefs.getInt("CrashCount", 0);
+        int notified = prefs.getInt("LastNotifiedCrashCount", 0);
+        return crashCount != 0 && crashCount != notified;
+    }
+
+    private void showLogDropConsent() {
+        if (isDestroyed || isFinishing() || !inForeground) {
+            return;
+        }
+        if (!LogDrop.isConfigured() || !"".equals(LogDrop.consent(this))) {
+            return;
+        }
+        if (logDropConsentDialog != null && logDropConsentDialog.isShowing()) {
+            return;
+        }
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.logdrop_consent_title)
+                .setMessage(R.string.logdrop_consent_message)
+                .setCancelable(false)
+                .setPositiveButton(R.string.logdrop_consent_yes, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        LogDrop.setConsent(PcView.this, true);
+                    }
+                })
+                .setNegativeButton(R.string.logdrop_consent_no, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        LogDrop.setConsent(PcView.this, false);
+                    }
+                })
+                .create();
+        dialog.setCanceledOnTouchOutside(false);
+        try {
+            dialog.show();
+        } catch (RuntimeException error) {
+            return;
+        }
+        logDropConsentDialog = dialog;
+    }
+
+    private void dismissLogDropConsent() {
+        logDropHandler.removeCallbacks(logDropConsentPoll);
+        logDropConsentScheduled = false;
+        AlertDialog dialog = logDropConsentDialog;
+        logDropConsentDialog = null;
+        if (dialog == null) {
+            return;
+        }
+        try {
+            if (dialog.isShowing()) {
+                dialog.dismiss();
+            }
+        } catch (RuntimeException ignored) {
+            // §LOGDROP：視窗已經被系統拿掉時，不能順便把沒選的同意寫成拒絕。
+        }
     }
 
     public static class ComputerObject {

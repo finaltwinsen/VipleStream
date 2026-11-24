@@ -51,6 +51,23 @@
             android:key="checkbox_stretch_video"
             android:title="@string/title_checkbox_stretch_video"
             android:defaultValue="false" />
+        <!-- §EXT-DISPLAY：預設關。接上 XR 眼鏡時程式會自己開；其他外接螢幕不要一接上就把畫面抽走。 -->
+        <CheckBoxPreference
+            android:key="checkbox_external_display"
+            android:title="@string/title_checkbox_external_display"
+            android:summary="@string/summary_checkbox_external_display"
+            android:defaultValue="false" />
+        <CheckBoxPreference
+            android:key="checkbox_external_display_dim"
+            android:title="@string/title_checkbox_external_display_dim"
+            android:summary="@string/summary_checkbox_external_display_dim"
+            android:defaultValue="true" />
+        <!-- §VITURE：測試者沒有 adb，從設定頁進診斷畫面才能把報告分享回來。 -->
+        <Preference
+            android:key="glasses_diagnostics"
+            android:title="@string/title_glasses_diagnostics"
+            android:summary="@string/summary_glasses_diagnostics"
+            android:persistent="false" />
         <!-- VipleStream H Phase 2: app-list ordering. Mirrors the Qt
              client setting; values are AppSortMode enum names so the
              two clients write the same persisted strings. -->
@@ -375,6 +392,11 @@
             android:key="checkbox_enable_post_stream_toast"
             android:title="@string/title_enable_post_stream_toast"
             android:summary="@string/summary_enable_post_stream_toast"
+            android:defaultValue="false"/>
+        <!-- §LOGDROP：收件端網址是空的時，StreamSettings 會移掉這一項。 -->
+        <CheckBoxPreference
+            android:key="checkbox_logdrop_auto"
+            android:title="@string/title_logdrop_auto"
             android:defaultValue="false"/>
     </PreferenceCategory>
     <!--PreferenceCategory android:title="@string/category_help"

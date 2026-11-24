@@ -21,6 +21,7 @@
 #include "globals.h"
 #include "httpcommon.h"
 #include "logging.h"
+#include "logdrop.h"
 #include "main.h"
 #include "nvhttp.h"
 #include "process.h"
@@ -296,6 +297,9 @@ int main(int argc, char *argv[]) {
     return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
 
+  // §LOGDROP：CLI 在上面就返回。寫了標記的話，一次查詢會被看成服務沒正常結束。
+  logdrop::mark_process_start();
+
 #ifdef _WIN32
   // VipleStream [VIPLE-SEC]：server 模式、以 SYSTEM 執行時，把 config 目錄內的機密檔案（sunshine.conf、
   // sunshine*.conf* 備份、sunshine_state.json（或 config 頂層的 credentials_file／file_state）、
@@ -511,6 +515,8 @@ int main(int argc, char *argv[]) {
 
   // FIXME: Temporary workaround: Simple-Web_server needs to be updated or replaced
   if (shutdown_event->peek()) {
+    // §LOGDROP：啟動途中就被要求停，算正常結束，下次不要當成當機。
+    logdrop::mark_clean_exit();
     return lifetime::desired_exit_code;
   }
 
@@ -552,7 +558,13 @@ int main(int argc, char *argv[]) {
   // §AUTO-UPDATE：update_mode（off／notify／install）的自動檢查；有常駐圖示時由它登記通知出口
   self_update::start_auto(config::sunshine.update_mode);
 
+  // §LOGDROP：到這裡才算啟動完成。上次的標記還在，才會等 log 寫完再送上一輪。
+  logdrop::startup_complete();
+
   mainThreadLoop(shutdown_event);
+
+  // §LOGDROP：迴圈返回就是正常關閉。要在拆執行緒之前清掉，收尾中的串流結束才看得到關閉旗標。
+  logdrop::mark_clean_exit();
 
 #ifdef _WIN32
   // 先中止進行中的 selftest（它持有 VR 預約、可能開著 vr_probe），再停 admin pipe 與 bridge（BYE(SERVER_SHUTDOWN)）

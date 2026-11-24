@@ -53,6 +53,14 @@ public:
     // listener 只把旗標設起來。沒有 OpenXR 的測試可以停在這裡等下一張。
     bool waitForImage(int timeoutMs);
 
+    // onImageAvailable 寫入的 CLOCK_MONOTONIC。還沒進過圖是 0。
+    uint64_t lastImageAvailableNs() const {
+        return imageAvailableNs.load(std::memory_order_acquire);
+    }
+
+    // 呼叫端必須已經等完 GPU。projection 的 VkImageView 即將銷毀，綁在上面的 framebuffer 不能留著。
+    void clearTargetFramebuffers();
+
     // 上一張用到這些 VkImage 的指令必須已經做完。快取淘汰會拆掉它們。
     // 回傳值：目前有沒有一張可以取樣的畫面（含上一張還沒被換掉的）。
     bool consumeLatest();
@@ -133,6 +141,8 @@ private:
     bool loggedAcquireError = false;
     bool loggedGetId = false;
     bool loggedBadCrop = false;
+    bool loggedFbFull = false;
+    bool loggedNoChroma = false;
 
     bool formatReady = false;
     bool useYcbcr = false;
@@ -152,10 +162,14 @@ private:
     VkDescriptorSet descSet = VK_NULL_HANDLE;
     VkRenderPass renderPass = VK_NULL_HANDLE;
 
-    static constexpr int kCacheCap = 8;
+    // 匯入快取要涵蓋解碼器實際輪替的緩衝區數。Pixel 5（Codec2）實測容量 8 時命中率只有約 50%，
+    // 也就是一半的畫面每次都重新匯入；Codec2 的 max dequeue 是 25，再加 AImageReader 的 4 張。
+    static constexpr int kCacheCap = 32;
     CacheEntry cache[kCacheCap];
     uint64_t cacheTick = 0;
-    TargetFb targets[kCacheCap];
+    // framebuffer 快取只需涵蓋同時在用的 swapchain 張數（2D quad 加上 projection），與匯入快取分開。
+    static constexpr int kTargetCap = 16;
+    TargetFb targets[kTargetCap];
 
     uint64_t statReceived = 0;
     uint64_t statAdopted = 0;
@@ -169,11 +183,15 @@ private:
     uint64_t snapMiss = 0;
     int64_t statWindowStartNs = 0;
 
-    // 只保護 waitForImage 的條件變數。listener 不拿這把鎖：回呼裡不能阻塞。
+    // waitForImage 與 signalImage 共用。pending 要在這把鎖裡寫入再 notify，喚醒才不會落在「已檢查、尚未等待」之間。
+    // listener 只在 signalImage 裡短暫持有，不能拿去取圖或匯入。
     void* waitMu = nullptr;
     void* waitCv = nullptr;
     std::atomic<int> pending{0};
+    // 診斷：listener 被呼叫的累計次數。取圖少於這個數字代表佇列被別的東西吃掉；兩者都停代表生產端沒送。
+    std::atomic<unsigned long long> statListener{0};
     std::atomic<int> stopping{0};
+    std::atomic<uint64_t> imageAvailableNs{0};
 
     const char* failReason = nullptr;
 };

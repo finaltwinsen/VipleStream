@@ -70,6 +70,18 @@ public class NvApp {
         this.hdrSupported = hdrSupported;
     }
 
+    // §VITURE：host 對 VR 遊戲與 SteamVR Home 送 <IsVr>1</IsVr>，跟 Frame 版一樣只拿它決定能不能用 VR 開。
+    // 上游 host 不送這個 tag，維持 false。
+    private boolean vr;
+
+    public void setVr(boolean vr) {
+        this.vr = vr;
+    }
+
+    public boolean isVr() {
+        return this.vr;
+    }
+
     // VipleStream: setters parse the raw XML text — null/blank is OK,
     // we just preserve the default "" / 0L. Numeric setters use the
     // String overload so XML pull-parser callers don't need to do the

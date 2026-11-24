@@ -860,6 +860,8 @@ public class NvHTTP {
                     app.setAppId(xpp.getText());
                 } else if (currentTag.peek().equals("IsHdrSupported")) {
                     app.setHdrSupported(xpp.getText().equals("1"));
+                } else if (currentTag.peek().equals("IsVr")) {
+                    app.setVr(xpp.getText().equals("1"));
                 }
                 // VipleStream H Phase 2: parse provenance + Steam fields
                 // emitted by Sunshine when the app comes from the

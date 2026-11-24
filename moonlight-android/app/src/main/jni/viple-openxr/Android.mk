@@ -8,13 +8,13 @@ LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
 
 LOCAL_MODULE := viple-openxr
-LOCAL_SRC_FILES := qxr_video.cpp qxr_session.cpp qxr_synthetic.cpp qxr_tracking.cpp qxr_framemeta.cpp qxr_vrmsg.cpp qxr_jni.cpp
+LOCAL_SRC_FILES := qxr_vk_test.cpp qxr_vk_test_jni.cpp qxr_video.cpp qxr_session.cpp qxr_xr_input.cpp qxr_xr_pose.cpp qxr_synthetic.cpp qxr_imu_pose.cpp qxr_tracking.cpp qxr_framemeta.cpp qxr_latch.cpp qxr_vrmsg.cpp qxr_jni.cpp
 
 # moonlight-core 沒有 LOCAL_EXPORT_C_INCLUDES，所以標頭路徑寫在 LOCAL_C_INCLUDES，不改那個 module。
 LOCAL_SHARED_LIBRARIES := moonlight-core openxr_loader
 LOCAL_LDLIBS := -lvulkan -lmediandk -landroid -llog
 
-# moonlight-qt/app/streaming/xr：之後要直接 include 那邊只用標準庫的標頭，這次不 include。
+# moonlight-qt/app/streaming/xr：qxr_session.cpp 直接 include xrrateauto.h（只用 C++ 標準庫，不複製一份）。
 LOCAL_C_INCLUDES := \
     $(LOCAL_PATH) \
     $(LOCAL_PATH)/shaders \

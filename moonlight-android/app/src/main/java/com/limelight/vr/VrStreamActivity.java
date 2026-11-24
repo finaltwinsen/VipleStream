@@ -7,6 +7,9 @@ import android.content.SharedPreferences;
 import android.media.AudioManager;
 import android.net.ConnectivityManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Display;
 import android.view.Surface;
 import android.view.WindowManager;
@@ -14,6 +17,7 @@ import android.widget.Toast;
 
 import com.limelight.Game;
 import com.limelight.LimeLog;
+import com.limelight.R;
 import com.limelight.binding.PlatformBinding;
 import com.limelight.binding.audio.AndroidAudioRenderer;
 import com.limelight.binding.video.CrashListener;
@@ -27,20 +31,52 @@ import com.limelight.nvstream.http.ComputerDetails;
 import com.limelight.nvstream.http.NvApp;
 import com.limelight.nvstream.http.NvHTTP;
 import com.limelight.nvstream.jni.MoonBridge;
+import com.limelight.nvstream.vr.VrLaunchConfig;
 import com.limelight.preferences.GlPreferences;
 import com.limelight.preferences.PreferenceConfiguration;
 
 import java.io.ByteArrayInputStream;
 import java.security.cert.CertificateException;
+import java.util.Locale;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 
 /**
  * §QUEST-VR：頭盔裡一塊平面畫面，走一般 2D 串流。不送 vr* 參數，也不處理輸入。
+ * §QUEST-PCVR：extra {@code vr_pcvr} 為 true 才送 vr*。2D 路徑不讀它，行為維持原樣。
  */
 public class VrStreamActivity extends Activity implements NvConnectionListener, QxrNative.SessionListener {
     private static final int PREFERRED_HZ_MIN = 72;
     private static final int PREFERRED_HZ_MAX = 120;
+    private static final int VIEW_CONFIG_POLL_MS = 100;
+    private static final int VIEW_CONFIG_TIMEOUT_MS = 10000;
+    private static final int VIEW_FLOATS = 33;
+    private static final int VIEW_EYE_W = 0;
+    private static final int VIEW_EYE_H = 1;
+    private static final int VIEW_HZ = 2;
+    private static final int VIEW_LEFT_ANGLE = 3;
+    private static final int VIEW_LEFT_POS = 7;
+    private static final int VIEW_LEFT_ROT = 10;
+    private static final int VIEW_RIGHT_ANGLE = 14;
+    private static final int VIEW_RIGHT_POS = 18;
+    private static final int VIEW_RIGHT_ROT = 21;
+    private static final int VIEW_AREA_W = 25;
+    private static final int VIEW_AREA_D = 26;
+    private static final int VIEW_SEATED_VALID = 27;
+    private static final int VIEW_SEATED_X = 28;
+    private static final int VIEW_SEATED_Y = 29;
+    private static final int VIEW_SEATED_Z = 30;
+    private static final int VIEW_SEATED_YAW = 31;
+    private static final int VIEW_TIME_CONV = 32;
+    // VipleVr.h 的 VIPLE_VR_HZ_MIN／VIPLE_VR_HZ_MAX。
+    // docs/vr_protocol.md §4.2：vrHz 與 vrDispHz 都是 60–144；超出或 vrDispHz < vrHz 回 400 VR_BAD_PARAMS。
+    private static final int VR_HZ_MIN = 60;
+    private static final int VR_HZ_MAX = 144;
+    private static final int EYE_MAX = 2304;
+    private static final int EYE_ALIGN = 16;
+    // §QUEST-PCVR：nativeCreate 不接受 0。還沒有單眼尺寸時用這個把 runtime 拉起來，量完再換成打包尺寸。
+    private static final int PCVR_PLACEHOLDER_WIDTH = 1280;
+    private static final int PCVR_PLACEHOLDER_HEIGHT = 720;
 
     private final Object releaseLock = new Object();
 
@@ -59,6 +95,33 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
     private boolean connectionStartRequested;
     private boolean released;
     private volatile boolean reportedCrash;
+    // §QUEST-PCVR：2D 維持 false，releaseSession 才不會多叫 nativePcvrStop。
+    private volatile boolean pcvrMode;
+    private final Handler pcvrPollHandler = new Handler(Looper.getMainLooper());
+    private int pcvrPollGeneration;
+    // §QUEST-PCVR：重建 session 時舊的結束回呼不能把新的這場關掉。兩者相等才處理。
+    private volatile int sessionEpoch;
+    private volatile int boundEpoch;
+    private int pcvrCreateWidth;
+    private int pcvrCreateHeight;
+    // 解碼器的 AImageReader 尺寸在 nativeCreate 就定死，只為它重建一次。第二次還不合就停。
+    private boolean pcvrRecreatedForSize;
+    private boolean pcvrAwaitingRecreatedViews;
+    private int requestedEyeW;
+    private int requestedEyeH;
+    private boolean hasRequestedEye;
+    private int requestedHz;
+    private int pcvrHz;
+    private int pcvrPackedW;
+    private int pcvrPackedH;
+    private GlPreferences pcvrGlPrefs;
+    private boolean pcvrMetered;
+    private String pcvrHost;
+    private int pcvrPort;
+    private int pcvrHttpsPort;
+    private NvApp pcvrApp;
+    private String pcvrUniqueId;
+    private X509Certificate pcvrCert;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -180,6 +243,21 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
         boolean metered = connMgr != null && connMgr.isActiveNetworkMetered();
 
         tombstonePrefs = getSharedPreferences("DecoderTombstone", MODE_PRIVATE);
+
+        if (getIntent().getBooleanExtra("vr_pcvr", false)) {
+            pcvrMode = true;
+            VrStreamDefaults.applySessionLimits(prefConfig);
+            pcvrGlPrefs = glPrefs;
+            pcvrMetered = metered;
+            pcvrHost = host;
+            pcvrPort = port;
+            pcvrHttpsPort = httpsPort;
+            pcvrApp = app;
+            pcvrUniqueId = uniqueId;
+            pcvrCert = serverCert;
+            beginPcvr();
+            return;
+        }
 
         handle = QxrNative.nativeCreate(this, prefConfig.width, prefConfig.height, preferredHz);
         if (handle == 0) {
@@ -503,12 +581,536 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
         }
     }
 
+    private void beginPcvr() {
+        if (getIntent().hasExtra("cli_width") || getIntent().hasExtra("cli_height") || getIntent().hasExtra("cli_fps")) {
+            LimeLog.info("[VIPLE-QXR-ACT] pcvr ignores cli width, height, and fps");
+        }
+        int[] eye = parseEyeSize(getIntent().getStringExtra("vr_eye"));
+        if (eye != null) {
+            hasRequestedEye = true;
+            requestedEyeW = eye[0];
+            requestedEyeH = eye[1];
+        } else if (getIntent().hasExtra("vr_eye")) {
+            LimeLog.warning("[VIPLE-QXR-ACT] invalid vr_eye '" + getIntent().getStringExtra("vr_eye")
+                    + "'; using recommended eye size");
+        }
+        if (getIntent().hasExtra("vr_hz")) {
+            int hz = getIntent().getIntExtra("vr_hz", 0);
+            if (hz > 0) {
+                requestedHz = hz;
+            } else {
+                LimeLog.warning("[VIPLE-QXR-ACT] invalid vr_hz " + hz + "; using view refresh");
+            }
+        }
+        if (requestedHz > 0) {
+            int clamped = clampVrHz(requestedHz);
+            if (clamped != requestedHz) {
+                LimeLog.info("[VIPLE-QXR-ACT] requested vr_hz " + requestedHz + " clamped to " + clamped);
+                requestedHz = clamped;
+            }
+        }
+        int width;
+        int height;
+        if (hasRequestedEye) {
+            // §QUEST-PCVR：打包寬是單眼寬的兩倍。溢位會變成負值，nativeCreate 直接失敗。
+            if (requestedEyeW > Integer.MAX_VALUE / 2) {
+                abortPcvr("eye size is unusable: " + requestedEyeW + "x" + requestedEyeH,
+                        R.string.vr_pcvr_bad_view);
+                return;
+            }
+            width = requestedEyeW * 2;
+            height = requestedEyeH;
+        } else {
+            width = PCVR_PLACEHOLDER_WIDTH;
+            height = PCVR_PLACEHOLDER_HEIGHT;
+            LimeLog.info("[VIPLE-QXR-ACT] pcvr placeholder " + width + "x" + height);
+        }
+        if (!bringUpXr(width, height, requestedHz)) {
+            return;
+        }
+        pollViewConfig();
+    }
+
+    private boolean bringUpXr(int width, int height, int preferredHz) {
+        handle = QxrNative.nativeCreate(this, width, height, preferredHz);
+        if (handle == 0) {
+            String error = QxrNative.nativeLastError();
+            if (error == null || error.isEmpty()) {
+                error = "nativeCreate returned 0";
+            }
+            abort(error, true);
+            return false;
+        }
+        LimeLog.info("[VIPLE-QXR-ACT] nativeCreate handle=" + handle
+                + " " + width + "x" + height + " preferredHz=" + preferredHz);
+        if (!QxrNative.nativeEnablePcvr(handle)) {
+            abortPcvr("nativeEnablePcvr failed" + errorSuffix(QxrNative.nativeLastError()),
+                    R.string.vr_pcvr_enable_failed);
+            return false;
+        }
+        LimeLog.info("[VIPLE-QXR-ACT] nativeEnablePcvr");
+        boundEpoch = sessionEpoch;
+        QxrNative.setListener(handle, this);
+        if (!QxrNative.nativeStart(handle)) {
+            abort("OpenXR session start failed" + errorSuffix(QxrNative.nativeLastError()), true);
+            return false;
+        }
+        LimeLog.info("[VIPLE-QXR-ACT] nativeStart");
+        pcvrCreateWidth = width;
+        pcvrCreateHeight = height;
+        if (isFinishing()) {
+            return false;
+        }
+        return true;
+    }
+
+    private void pollViewConfig() {
+        final int generation = pcvrPollGeneration;
+        final long deadline = SystemClock.uptimeMillis() + VIEW_CONFIG_TIMEOUT_MS;
+        pcvrPollHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (generation != pcvrPollGeneration || released || isFinishing()) {
+                    return;
+                }
+                float[] cfg = null;
+                try {
+                    cfg = QxrNative.nativeGetViewConfig(handle);
+                } catch (Throwable t) {
+                    LimeLog.warning("[VIPLE-QXR-ACT] nativeGetViewConfig failed: " + t);
+                }
+                if (cfg != null && cfg.length >= VIEW_FLOATS) {
+                    LimeLog.info("[VIPLE-QXR-ACT] view config eye=" + cfg[VIEW_EYE_W] + "x" + cfg[VIEW_EYE_H]
+                            + " hz=" + cfg[VIEW_HZ]);
+                    try {
+                        onPcvrViewConfig(cfg);
+                    } catch (Exception | UnsatisfiedLinkError e) {
+                        LimeLog.severe("[VIPLE-QXR-ACT] pcvr setup failed: " + e);
+                        if (!isFinishing()) {
+                            abort("could not start OpenXR stream", true);
+                        }
+                    }
+                    return;
+                }
+                long now = SystemClock.uptimeMillis();
+                if (now >= deadline) {
+                    if (!isFinishing()) {
+                        String why = pcvrAwaitingRecreatedViews
+                                ? "recreated session view config timed out after " + VIEW_CONFIG_TIMEOUT_MS + " ms"
+                                : "view config timed out after " + VIEW_CONFIG_TIMEOUT_MS + " ms";
+                        abortPcvr(why, R.string.vr_pcvr_view_timeout);
+                    }
+                    return;
+                }
+                pcvrPollHandler.postDelayed(this, Math.min(VIEW_CONFIG_POLL_MS, deadline - now));
+            }
+        });
+    }
+
+    private void onPcvrViewConfig(float[] cfg) {
+        pcvrPollGeneration++;
+        pcvrAwaitingRecreatedViews = false;
+        int eyeW;
+        int eyeH;
+        if (hasRequestedEye) {
+            eyeW = requestedEyeW;
+            eyeH = requestedEyeH;
+        } else {
+            int[] fit = fitRecommendedEye(Math.round(cfg[VIEW_EYE_W]), Math.round(cfg[VIEW_EYE_H]));
+            if (fit == null) {
+                abortPcvr("recommended eye size is unusable: " + cfg[VIEW_EYE_W] + "x" + cfg[VIEW_EYE_H],
+                        R.string.vr_pcvr_bad_view);
+                return;
+            }
+            eyeW = fit[0];
+            eyeH = fit[1];
+        }
+        int measuredRaw = Math.round(cfg[VIEW_HZ]);
+        int hz = requestedHz > 0 ? requestedHz : measuredRaw;
+        if (hz <= 0) {
+            abortPcvr("view refresh is unusable: " + cfg[VIEW_HZ], R.string.vr_pcvr_bad_view);
+            return;
+        }
+        int streamHz = clampVrHz(hz);
+        if (streamHz != hz) {
+            LimeLog.info("[VIPLE-QXR-ACT] stream hz " + hz + " clamped to " + streamHz);
+            hz = streamHz;
+        }
+        int displayHz = measuredRaw > 0 ? clampVrHz(measuredRaw) : hz;
+        if (measuredRaw > 0 && displayHz != measuredRaw) {
+            LimeLog.info("[VIPLE-QXR-ACT] display hz " + measuredRaw + " clamped to " + displayHz);
+        }
+        if (displayHz < hz) {
+            // 協定不接受比 vrHz 低的 vrDispHz。不帶表示與串流更新率相同。
+            LimeLog.info("[VIPLE-QXR-ACT] display hz " + displayHz + " is below stream hz " + hz
+                    + "; omitting vrDispHz");
+            displayHz = 0;
+        }
+        if (eyeW <= 0 || eyeH <= 0 || eyeW > Integer.MAX_VALUE / 2) {
+            abortPcvr("eye size is unusable: " + eyeW + "x" + eyeH, R.string.vr_pcvr_bad_view);
+            return;
+        }
+        int packedW = eyeW * 2;
+        int packedH = eyeH;
+        if (packedW != pcvrCreateWidth || packedH != pcvrCreateHeight) {
+            // 重建是為了解碼器的 AImageReader，不是 projection swapchain。
+            // 後者在 nativePcvrStart 才依打包尺寸建立。新 session 的視角還沒鎖，不能拿上一場繼續。
+            if (pcvrRecreatedForSize) {
+                abortPcvr("recreated session eye size still does not match the packed size",
+                        R.string.vr_pcvr_bad_view);
+                return;
+            }
+            pcvrRecreatedForSize = true;
+            LimeLog.info("[VIPLE-QXR-ACT] recreate session packed=" + packedW + "x" + packedH
+                    + " was " + pcvrCreateWidth + "x" + pcvrCreateHeight
+                    + "; waiting for the new view config");
+            invalidateSessionEnd();
+            destroyXrHandle();
+            if (!bringUpXr(packedW, packedH, hz)) {
+                return;
+            }
+            if (isFinishing()) {
+                return;
+            }
+            pcvrAwaitingRecreatedViews = true;
+            pollViewConfig();
+            return;
+        }
+
+        prefConfig.width = packedW;
+        prefConfig.height = packedH;
+        prefConfig.fps = hz;
+        boolean bitrateFromCli = getIntent().hasExtra("cli_bitrate")
+                && getIntent().getIntExtra("cli_bitrate", 0) > 0;
+        if (!bitrateFromCli) {
+            prefConfig.bitrate = VrStreamDefaults.defaultBitrateKbps(packedW, packedH, hz);
+            LimeLog.info("[VIPLE-QXR-ACT] bitrate " + prefConfig.bitrate + " kbps (VR default; "
+                    + packedW + "x" + packedH + "@" + hz + ")");
+        }
+
+        decoderSurface = QxrNative.nativeGetDecoderSurface(handle);
+        if (decoderSurface == null) {
+            String error = QxrNative.nativeLastError();
+            abort("no decoder Surface" + errorSuffix(error), true);
+            return;
+        }
+
+        decoderRenderer = new MediaCodecDecoderRenderer(
+                this,
+                prefConfig,
+                new CrashListener() {
+                    @Override
+                    public void notifyCrash(Exception e) {
+                        reportedCrash = true;
+                        tombstonePrefs.edit()
+                                .putInt("CrashCount", tombstonePrefs.getInt("CrashCount", 0) + 1)
+                                .commit();
+                        LimeLog.severe("[VIPLE-QXR-ACT] decoder crash: " + e);
+                    }
+                },
+                tombstonePrefs.getInt("CrashCount", 0),
+                pcvrMetered,
+                false,
+                pcvrGlPrefs.glRenderer,
+                new PerfOverlayListener() {
+                    @Override
+                    public void onPerfUpdate(String text) {
+                    }
+                });
+        decoderRenderer.setDirectOutputSurface(decoderSurface);
+        // §QUEST-PCVR：PTS 用幀號乘固定步距，host 才對得回這一幀。
+        decoderRenderer.setVrSession(true);
+        if (!decoderRenderer.isAvcSupported()) {
+            abort("no H.264 hardware decoder", true);
+            return;
+        }
+
+        int supportedVideoFormats = VrStreamDefaults.retainVrCodecs(
+                buildSupportedVideoFormats(),
+                decoderRenderer.isHevcSupported(),
+                prefConfig.videoFormat);
+        LimeLog.info("[VIPLE-QXR-ACT] vr codecs mask=0x" + Integer.toHexString(supportedVideoFormats));
+
+        VrLaunchConfig launch = new VrLaunchConfig();
+        launch.eyeWidth = eyeW;
+        launch.eyeHeight = eyeH;
+        launch.refreshHz = hz;
+        // §QUEST-RATE：Frame 只在顯示 Hz 和串流 Hz 不同時才把 vrDispHz 放進 /launch
+        // （session.cpp 設 displayHz；VrLaunchConfig.toQuery 在兩者相等或 displayHz 為 0 時不帶）。
+        // 這裡的 displayHz 已夾進協定範圍；比串流低時是 0，避免 400 VR_BAD_PARAMS。
+        launch.displayHz = displayHz;
+        // §QUEST-PCVR：toQuery 在 periodNs 為 0 時用 1e9/refreshHz 的整數除法。先寫上，避免兩處以後分叉。
+        launch.periodNs = 1000000000L / hz;
+        launch.controller = "touch";
+        writeFov(launch, 0,
+                cfg[VIEW_LEFT_ANGLE], cfg[VIEW_LEFT_ANGLE + 1],
+                cfg[VIEW_LEFT_ANGLE + 2], cfg[VIEW_LEFT_ANGLE + 3]);
+        writeFov(launch, 1,
+                cfg[VIEW_RIGHT_ANGLE], cfg[VIEW_RIGHT_ANGLE + 1],
+                cfg[VIEW_RIGHT_ANGLE + 2], cfg[VIEW_RIGHT_ANGLE + 3]);
+        writeEyePose(launch, 0,
+                cfg[VIEW_LEFT_POS], cfg[VIEW_LEFT_POS + 1], cfg[VIEW_LEFT_POS + 2],
+                cfg[VIEW_LEFT_ROT], cfg[VIEW_LEFT_ROT + 1], cfg[VIEW_LEFT_ROT + 2], cfg[VIEW_LEFT_ROT + 3]);
+        writeEyePose(launch, 7,
+                cfg[VIEW_RIGHT_POS], cfg[VIEW_RIGHT_POS + 1], cfg[VIEW_RIGHT_POS + 2],
+                cfg[VIEW_RIGHT_ROT], cfg[VIEW_RIGHT_ROT + 1], cfg[VIEW_RIGHT_ROT + 2], cfg[VIEW_RIGHT_ROT + 3]);
+        // §QUEST-PCVR：setIpd 會把 eyeToHead 覆寫成只有水平偏移的單位四元數。IPD 只寫欄位。
+        // 瞳距是兩眼的三維距離，不是只有水平差。
+        float ipdX = cfg[VIEW_RIGHT_POS] - cfg[VIEW_LEFT_POS];
+        float ipdY = cfg[VIEW_RIGHT_POS + 1] - cfg[VIEW_LEFT_POS + 1];
+        float ipdZ = cfg[VIEW_RIGHT_POS + 2] - cfg[VIEW_LEFT_POS + 2];
+        launch.ipd = (int) Math.round(Math.sqrt(ipdX * ipdX + ipdY * ipdY + ipdZ * ipdZ) * 100000.0);
+        if (cfg[VIEW_SEATED_VALID] != 0f) {
+            launch.hasSeated = true;
+            launch.seatedPosMm[0] = (int) Math.round(cfg[VIEW_SEATED_X] * 1000.0);
+            launch.seatedPosMm[1] = (int) Math.round(cfg[VIEW_SEATED_Y] * 1000.0);
+            launch.seatedPosMm[2] = (int) Math.round(cfg[VIEW_SEATED_Z] * 1000.0);
+            // 弧度換成毫度。57295.7795＝1000×180/π，跟 Frame session.cpp 同一係數。
+            launch.seatedYawMdeg = (int) Math.round(cfg[VIEW_SEATED_YAW] * 57295.7795);
+        } else {
+            LimeLog.info("[VIPLE-QXR-ACT] seated zero unavailable; vrSeated omitted");
+        }
+        if (cfg[VIEW_TIME_CONV] == 0f) {
+            // 沒有 XrTime 換算時，上行不能離開影格執行緒。toQuery 既有欄位的格式不變，只拿掉這一個位元。
+            launch.caps &= ~VrLaunchConfig.CAP_TRACK_THREAD;
+            LimeLog.info("[VIPLE-QXR-ACT] no XrTime conversion; clearing CAP_TRACK_THREAD");
+        }
+        if (cfg[VIEW_AREA_W] > 0f && cfg[VIEW_AREA_D] > 0f) {
+            launch.playAreaWidthMm = (int) Math.round(cfg[VIEW_AREA_W] * 1000.0);
+            launch.playAreaDepthMm = (int) Math.round(cfg[VIEW_AREA_D] * 1000.0);
+        } else if (cfg[VIEW_AREA_W] > 0f || cfg[VIEW_AREA_D] > 0f) {
+            LimeLog.info("[VIPLE-QXR-ACT] play area incomplete widthM=" + cfg[VIEW_AREA_W]
+                    + " depthM=" + cfg[VIEW_AREA_D]);
+        }
+        launch.codecs = VrStreamDefaults.launchCodecMask(supportedVideoFormats);
+        LimeLog.info("[VIPLE-QXR-ACT] pcvr eye=" + eyeW + "x" + eyeH
+                + " packed=" + packedW + "x" + packedH
+                + " hz=" + hz
+                + " displayHz=" + launch.displayHz
+                + " periodNs=" + launch.periodNs
+                + " ipd=" + launch.ipd
+                + " seated=" + (launch.hasSeated
+                        ? (launch.seatedPosMm[0] + "," + launch.seatedPosMm[1] + "," + launch.seatedPosMm[2]
+                        + "," + launch.seatedYawMdeg)
+                        : "omitted")
+                + " caps=0x" + Integer.toHexString(launch.caps)
+                + " fov=" + launch.fovTan[0] + "," + launch.fovTan[1] + "," + launch.fovTan[2] + "," + launch.fovTan[3]
+                + "," + launch.fovTan[4] + "," + launch.fovTan[5] + "," + launch.fovTan[6] + "," + launch.fovTan[7]
+                + " play=" + launch.playAreaWidthMm + "x" + launch.playAreaDepthMm
+                + " codecs=" + launch.codecs);
+
+        // §QUEST-PCVR：這時候的 2D 面板更新率不是雙眼顯示的更新率。
+        StreamConfiguration config = new StreamConfiguration.Builder()
+                .setResolution(packedW, packedH)
+                .setLaunchRefreshRate(hz)
+                .setRefreshRate(hz)
+                .setApp(pcvrApp)
+                .setBitrate(prefConfig.bitrate)
+                .setEnableSops(prefConfig.enableSops)
+                .enableLocalAudioPlayback(prefConfig.playHostAudio)
+                .setMaxPacketSize(prefConfig.packetSize)
+                .setRemoteConfiguration(StreamConfiguration.STREAM_CFG_AUTO)
+                .setSupportedVideoFormats(supportedVideoFormats)
+                .setAttachedGamepadMask(0)
+                .setClientRefreshRateX100(hz * 100)
+                .setAudioConfiguration(prefConfig.audioConfiguration)
+                .setColorSpace(decoderRenderer.getPreferredColorSpace())
+                .setColorRange(decoderRenderer.getPreferredColorRange())
+                .setPersistGamepadsAfterDisconnect(!prefConfig.multiController)
+                .setMpQuic(prefConfig.enableMpQuic, prefConfig.mpQuicScheduler)
+                .setAutoAdjustBitrate(cliAutoAdjustBitrate != null ? cliAutoAdjustBitrate : true)
+                .setVrLaunch(launch)
+                .build();
+
+        conn = new NvConnection(getApplicationContext(),
+                new ComputerDetails.AddressTuple(pcvrHost, pcvrPort),
+                pcvrHttpsPort, pcvrUniqueId, config,
+                PlatformBinding.getCryptoProvider(this), pcvrCert);
+        conn.setRelayConfig(prefConfig.relayUrl, prefConfig.relayPsk,
+                getIntent().getStringExtra(Game.EXTRA_PC_UUID),
+                getIntent().getStringExtra(Game.EXTRA_STUN_ADDRESS),
+                getIntent().getIntExtra(Game.EXTRA_STUN_PUNCH_PORT, 0));
+
+        pcvrHz = hz;
+        pcvrPackedW = packedW;
+        pcvrPackedH = packedH;
+        streamHost = pcvrHost;
+        streamHttpsPort = pcvrHttpsPort;
+        streamServerCert = pcvrCert;
+        connectionStartRequested = true;
+        LimeLog.info("[VIPLE-QXR-ACT] conn.start");
+        conn.start(new AndroidAudioRenderer(this, prefConfig.enableAudioFx), decoderRenderer, this);
+    }
+
+    private void destroyXrHandle() {
+        long session = handle;
+        handle = 0;
+        if (session == 0) {
+            return;
+        }
+        try {
+            QxrNative.setListener(session, null);
+        } catch (Throwable t) {
+            LimeLog.warning("[VIPLE-QXR-ACT] clear listener failed: " + t);
+        }
+        try {
+            QxrNative.nativeStop(session);
+        } catch (Throwable t) {
+            LimeLog.warning("[VIPLE-QXR-ACT] nativeStop failed: " + t);
+        }
+        try {
+            QxrNative.nativeDestroy(session);
+        } catch (Throwable t) {
+            LimeLog.warning("[VIPLE-QXR-ACT] nativeDestroy failed: " + t);
+        }
+    }
+
+    private void invalidateSessionEnd() {
+        sessionEpoch++;
+    }
+
+    private void startPcvrUplink() {
+        long session = handle;
+        if (session == 0 || pcvrPackedW <= 0 || pcvrPackedH <= 0) {
+            LimeLog.severe("[VIPLE-QXR-ACT] nativePcvrStart skipped: session is not ready");
+            failPcvrFromAnyThread(R.string.vr_pcvr_tracking_failed);
+            return;
+        }
+        LimeLog.info("[VIPLE-QXR-ACT] nativePcvrStart hz=" + pcvrHz
+                + " packed=" + pcvrPackedW + "x" + pcvrPackedH);
+        boolean ok;
+        try {
+            ok = QxrNative.nativePcvrStart(session, pcvrHz, pcvrPackedW, pcvrPackedH);
+        } catch (Throwable t) {
+            LimeLog.severe("[VIPLE-QXR-ACT] nativePcvrStart threw: " + t);
+            failPcvrFromAnyThread(R.string.vr_pcvr_tracking_failed);
+            return;
+        }
+        if (!ok) {
+            LimeLog.severe("[VIPLE-QXR-ACT] nativePcvrStart failed" + errorSuffix(QxrNative.nativeLastError()));
+            failPcvrFromAnyThread(R.string.vr_pcvr_tracking_failed);
+        }
+    }
+
+    private static int[] parseEyeSize(String eye) {
+        if (eye == null || eye.isEmpty()) {
+            return null;
+        }
+        String lowered = eye.toLowerCase(Locale.US);
+        int split = lowered.indexOf('x');
+        if (split <= 0 || split + 1 >= lowered.length()) {
+            return null;
+        }
+        try {
+            int width = Integer.parseInt(lowered.substring(0, split).trim());
+            int height = Integer.parseInt(lowered.substring(split + 1).trim());
+            if (width <= 0 || height <= 0) {
+                return null;
+            }
+            return new int[] { width, height };
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    // §QUEST-PCVR：host 編碼與解碼器要 16 的倍數，預設碼率下單眼超過 2304 畫質也不划算。先縮進上限再對齊，對齊後仍不超過上限。
+    private static int[] fitRecommendedEye(int recommendedW, int recommendedH) {
+        if (recommendedW <= 0 || recommendedH <= 0) {
+            return null;
+        }
+        double scale = 1.0;
+        if (recommendedW > EYE_MAX) {
+            scale = Math.min(scale, EYE_MAX / (double) recommendedW);
+        }
+        if (recommendedH > EYE_MAX) {
+            scale = Math.min(scale, EYE_MAX / (double) recommendedH);
+        }
+        int width = align16(recommendedW * scale);
+        int height = align16(recommendedH * scale);
+        if (width > EYE_MAX) {
+            width = EYE_MAX;
+        }
+        if (height > EYE_MAX) {
+            height = EYE_MAX;
+        }
+        if (width < EYE_ALIGN) {
+            width = EYE_ALIGN;
+        }
+        if (height < EYE_ALIGN) {
+            height = EYE_ALIGN;
+        }
+        return new int[] { width, height };
+    }
+
+    private static int align16(double value) {
+        return (int) Math.round(value / EYE_ALIGN) * EYE_ALIGN;
+    }
+
+    // §QUEST-PCVR：左、下在 OpenXR 是負角，協定存 tan 的絕對值。過大或過小的值夾到跟 Qt client 同一範圍，避免壞角度進 /launch。
+    private static void writeFov(VrLaunchConfig launch, int eye,
+                                 float angleLeft, float angleRight, float angleUp, float angleDown) {
+        int base = eye * 4;
+        launch.fovTan[base] = fovTanFromAngle(angleLeft, true);
+        launch.fovTan[base + 1] = fovTanFromAngle(angleRight, false);
+        launch.fovTan[base + 2] = fovTanFromAngle(angleUp, false);
+        launch.fovTan[base + 3] = fovTanFromAngle(angleDown, true);
+    }
+
+    private static int fovTanFromAngle(float radians, boolean negate) {
+        double tangent = Math.tan(negate ? -radians : radians);
+        double magnitude = Math.abs(tangent);
+        if (Double.isNaN(magnitude) || Double.isInfinite(magnitude) || magnitude < 0.01) {
+            magnitude = 0.01;
+        } else if (magnitude > 10.0) {
+            magnitude = 10.0;
+        }
+        return (int) Math.round(magnitude * 10000.0);
+    }
+
+    private static void writeEyePose(VrLaunchConfig launch, int base,
+                                     float x, float y, float z,
+                                     float qx, float qy, float qz, float qw) {
+        // §QUEST-PCVR：位置是公尺，欄位是 mm×100；四元數欄位是 ×10000。
+        launch.eyeToHead[base] = (int) Math.round(x * 100000.0);
+        launch.eyeToHead[base + 1] = (int) Math.round(y * 100000.0);
+        launch.eyeToHead[base + 2] = (int) Math.round(z * 100000.0);
+        launch.eyeToHead[base + 3] = (int) Math.round(qx * 10000.0);
+        launch.eyeToHead[base + 4] = (int) Math.round(qy * 10000.0);
+        launch.eyeToHead[base + 5] = (int) Math.round(qz * 10000.0);
+        launch.eyeToHead[base + 6] = (int) Math.round(qw * 10000.0);
+    }
+
+    private static String errorSuffix(String error) {
+        if (error == null || error.isEmpty()) {
+            return "";
+        }
+        return ": " + error;
+    }
+
     private void abort(String message, boolean toast) {
         LimeLog.severe("[VIPLE-QXR-ACT] " + message);
         if (toast) {
             Toast.makeText(this, message, Toast.LENGTH_LONG).show();
         }
         finish();
+    }
+
+    private void abortPcvr(String logMessage, int toastRes) {
+        LimeLog.severe("[VIPLE-QXR-ACT] " + logMessage);
+        Toast.makeText(this, toastRes, Toast.LENGTH_LONG).show();
+        finish();
+    }
+
+    private void failPcvrFromAnyThread(final int toastRes) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (!isFinishing() && !isDestroyed()) {
+                    Toast.makeText(VrStreamActivity.this, toastRes, Toast.LENGTH_LONG).show();
+                    finish();
+                }
+            }
+        });
     }
 
     private void finishOnMainThread() {
@@ -531,6 +1133,11 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
             released = true;
         }
 
+        if (pcvrMode) {
+            pcvrPollGeneration++;
+            pcvrPollHandler.removeCallbacksAndMessages(null);
+        }
+
         // §QUEST-VR：Game 在拆連線前先 prepareForStop。沒先做的話，拆連線期間解碼器的例外會被當成崩潰。
         if (decoderRenderer != null) {
             try {
@@ -547,6 +1154,15 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
         final int cancelHttpsPort = streamHttpsPort;
         final X509Certificate cancelCert = streamServerCert;
         final Context appContext = getApplicationContext();
+
+        if (pcvrMode && handle != 0) {
+            try {
+                // §QUEST-PCVR：上行要在拆連線前停。nativeStop 還在解碼器放掉之後，那時連線已經沒了。
+                QxrNative.nativePcvrStop(handle);
+            } catch (Throwable t) {
+                LimeLog.warning("[VIPLE-QXR-ACT] nativePcvrStop failed: " + t);
+            }
+        }
 
         if (started && conn != null) {
             try {
@@ -611,6 +1227,13 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
 
         long session = handle;
         handle = 0;
+        // 結束回呼若在 nativeStop 之後才清，拆 session 的同時還會進 onSessionEnded。
+        // destroyXrHandle 也是先清 listener。nativePcvrStop 仍在 conn.stop 之前。
+        try {
+            QxrNative.setListener(session, null);
+        } catch (Throwable t) {
+            LimeLog.warning("[VIPLE-QXR-ACT] clear listener failed: " + t);
+        }
         if (session != 0) {
             try {
                 QxrNative.nativeStop(session);
@@ -622,11 +1245,6 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
             } catch (Throwable t) {
                 LimeLog.warning("[VIPLE-QXR-ACT] nativeDestroy failed: " + t);
             }
-        }
-        try {
-            QxrNative.setListener(session, null);
-        } catch (Throwable t) {
-            LimeLog.warning("[VIPLE-QXR-ACT] clear listener failed: " + t);
         }
 
         // §QUEST-VR：跟 Game 共用 DecoderTombstone。正常結束不清掉的話，下次會一直關掉參考影格失效。
@@ -645,8 +1263,73 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
 
     @Override
     public void onSessionEnded(int reason) {
+        if (boundEpoch != sessionEpoch) {
+            // §QUEST-PCVR：拆掉暫定 session 時，舊的結束回呼不能把已經量到視角的那一場關掉。
+            LimeLog.info("[VIPLE-QXR-ACT] onSessionEnded ignored reason=" + reason);
+            return;
+        }
         LimeLog.info("[VIPLE-QXR-ACT] onSessionEnded reason=" + reason);
         finishOnMainThread();
+    }
+
+    @Override
+    public void onVrServerError(int code) {
+        if (boundEpoch != sessionEpoch || !pcvrMode) {
+            LimeLog.info("[VIPLE-QXR-ACT] onVrServerError ignored code=" + code);
+            return;
+        }
+        LimeLog.severe("[VIPLE-QXR-ACT] host could not start VR code=" + code);
+        // 這個回呼在 VR message sink 執行緒，bridge 還握著讀鎖。這裡不能呼叫 nativeStop，
+        // 否則跟 stop 的寫鎖互等。先回主執行緒再 finish，releaseSession 才拆 session。
+        final String text = hostVrError(code);
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
+                Toast.makeText(VrStreamActivity.this, text, Toast.LENGTH_LONG).show();
+                finish();
+            }
+        });
+    }
+
+    private static String hostVrError(int code) {
+        // 編號是 VIPLE_VR_STATE_CODE_*。Java 不能 include 那個標頭。
+        switch (code) {
+            case 1:
+            case 8:
+                return "Another headset is using SteamVR on the host. Disconnect it, then try again.";
+            case 2:
+                return "SteamVR on the host started in safe mode and blocked the VipleStream driver. Restart SteamVR on the host, then try again.";
+            case 5:
+                return "SteamVR is not installed on the host.";
+            case 6:
+                return "Nobody is signed in on the host.";
+            case 7:
+            case 10:
+                return "SteamVR on the host did not start in time. Try again.";
+            case 9:
+                return "A VR game is already running on the host without VipleStream. Quit it, then try again.";
+            case 17:
+                return "Steam is not signed in on the host. Sign in on the host, then try again.";
+            case 19:
+                return "SteamVR on the host has to restart, but a VR game is still running there. Quit the game, then try again.";
+            case 22:
+                return "The host is on the sign-in or lock screen. Sign in on the host, then try again.";
+            default:
+                return "The host could not start VR (error " + code + ").";
+        }
+    }
+
+    private static int clampVrHz(int hz) {
+        if (hz < VR_HZ_MIN) {
+            return VR_HZ_MIN;
+        }
+        if (hz > VR_HZ_MAX) {
+            return VR_HZ_MAX;
+        }
+        return hz;
     }
 
     @Override
@@ -668,6 +1351,20 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
 
     @Override
     public void connectionStarted() {
+        if (pcvrMode) {
+            // §QUEST-PCVR：這次回呼在連線執行緒，而 nativePcvrStart 會等 frame thread 把 projection swapchain 建好才返回。
+            // 先返回，改在主執行緒呼叫，避免連線啟動和 frame thread 互相等待。
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (isFinishing() || isDestroyed() || !pcvrMode) {
+                        return;
+                    }
+                    startPcvrUplink();
+                }
+            });
+            return;
+        }
         // §QUEST-VR：螢幕喚醒在 onCreate 就設了。這一階段不處理輸入。
     }
 

@@ -668,6 +668,15 @@ Java_com_limelight_nvstream_jni_MoonBridge_getVrFlags(JNIEnv *env, jclass clazz)
     return (jint)LiGetVrFlags();
 }
 
+// §EXT-DISPLAY：解碼器換了輸出 Surface 之後，畫面要等下一張 IDR 才乾淨。
+// host 平常不會主動送，所以由 client 要一張。沒有連線時 common-c 自己會忽略。
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_requestIdrFrame(JNIEnv *env, jclass clazz) {
+    (void)env;
+    (void)clazz;
+    LiRequestIdrFrame();
+}
+
 // VipleStream: JNI bridge to LiHolePunch (client-side NAT punch)
 JNIEXPORT jint JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_holePunch(JNIEnv *env, jclass clazz,

@@ -76,6 +76,21 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private SurfaceHolder renderTarget;
     // Quest OpenXR 把解碼器接到 AImageReader。null 時走原本的 SurfaceHolder。
     private Surface directOutputSurface;
+    // §EXT-DISPLAY：setOutputSurface 不能跟任何 MediaCodec 方法同時呼叫。
+    // 解碼執行緒、輸出迴圈、Choreographer 平常各自用 videoDecoder，只有復原時才靠 codecRecoveryMonitor 會合。
+    // 這裡只計「正在呼叫」的人數，鎖不包住會阻塞的 dequeue。
+    // outputSurfaceSwapArmed 為 false 時熱路徑完全不進這把鎖：一般串流不會換輸出 Surface，沒有人需要這個計數。
+    // 只有外接模式與直接輸出會設成 true，而且要在任何 setOutputSurface 與解碼執行緒之前。
+    // 從 true 改回 false 只發生在 cleanup：stopVideoStream 已先 stop() 並 join 送幀執行緒，沒有人還卡在 begin 與 end 之間。
+    private final Object outputSurfaceLock = new Object();
+    private int decoderCallers;
+    private boolean outputSurfaceSwap;
+    private volatile boolean outputSurfaceSwapArmed;
+    // setOutputSurface 只允許 Executing。create 之後、stop/reset 之後到下一次 start 之前都是 false。
+    private boolean decoderExecuting;
+    // 熱切換成功後，重設解碼器要沿用這張，不能回到已經拆掉的 holder。null 代表還沒熱切換過。
+    private Surface swappedOutputSurface;
+    private static final int OUTPUT_SURFACE_SWAP_TIMEOUT_MS = 500;
     // VipleStream §I.B.0: holds the abstract backend so we can plug
     // in a Vulkan implementation without touching the Game/MediaCodec
     // wiring. Concrete type chosen at init based on prefs / fallback.
@@ -643,6 +658,214 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     // 為什麼不包補幀：補幀會把解碼器改接到自己的輸入 Surface，呼叫端就拿不到 AHardwareBuffer。
     public void setDirectOutputSurface(Surface surface) {
         this.directOutputSurface = surface;
+        if (surface != null) {
+            // 直接輸出仍可能在解碼執行緒以外碰到輸出 Surface。要在那些執行緒開始前就開始計數。
+            armOutputSurfaceSwap();
+        }
+    }
+
+    // 外接模式也呼叫這支。必須在任何 setOutputSurface，以及解碼執行緒開始之前。
+    public void armOutputSurfaceSwap() {
+        outputSurfaceSwapArmed = true;
+    }
+
+    /**
+     * §EXT-DISPLAY：串流中把解碼器輸出改到另一張 Surface。
+     * holder 不是 null 時一併換掉 renderTarget，之後重設與 setFrameRate 的尺寸才不會還指著舊畫面。
+     * 寬限期的暫存 Surface 沒有 holder，傳 null，renderTarget 維持原樣。
+     * 必須在解碼執行緒以外呼叫。失敗回 false，呼叫端結束串流。
+     */
+    public boolean setOutputSurface(Surface surface, SurfaceHolder holder) {
+        if (surface == null || !surface.isValid()) {
+            LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface rejected an invalid surface");
+            return false;
+        }
+        if (!outputSurfaceSwapArmed) {
+            // 熱路徑沒在計數。這時換 Surface 會跟正在進行的 MediaCodec 呼叫重疊。
+            LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface refused because output surface swap is not armed");
+            return false;
+        }
+        // 解碼器實際畫到補幀的輸入 Surface，再由補幀畫到顯示 Surface。這階段不改那條鏈。
+        if (frucRenderer != null || frucInputSurface != null) {
+            LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface unsupported while FRUC or Vulkan owns the decoder output");
+            return false;
+        }
+        // PyroWave 不走 MediaCodec 的輸出 Surface。directOutputSurface 重設時仍優先於 holder，換過去也會被改回來。
+        if (pyroWaveActive || directOutputSurface != null) {
+            LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface unsupported; decoder is not writing to the display holder");
+            return false;
+        }
+        if (Thread.currentThread() == rendererThread) {
+            LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface called on the renderer thread");
+            return false;
+        }
+        synchronized (outputSurfaceLock) {
+            if (stopping) {
+                LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface aborted because the decoder is stopping");
+                return false;
+            }
+            // 連線執行緒可能還沒 start，或正在 stop/reset。setOutputSurface 在那時候會丟 IllegalStateException。
+            // 先把目標記下來，下次 configure 會在同一個鎖裡讀走。呼叫端仍握著 hold surface，切回或結束時才放。
+            // 開了補幀就不能記：configure 看到這張就會跳過補幀初始化，這次串流的補幀就消失了。
+            if (videoDecoder == null || !decoderExecuting) {
+                if (!storeOutputSurfaceForConfigure(surface, holder)) {
+                    return false;
+                }
+                LimeLog.info("[VIPLE-EXTDISP] decoder not executing; output surface stored for configure");
+                return true;
+            }
+            outputSurfaceSwap = true;
+            long deadline = SystemClock.uptimeMillis() + OUTPUT_SURFACE_SWAP_TIMEOUT_MS;
+            try {
+                while (decoderCallers > 0 && !stopping) {
+                    long remain = deadline - SystemClock.uptimeMillis();
+                    if (remain <= 0) {
+                        LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface timed out waiting for decoder threads");
+                        return false;
+                    }
+                    try {
+                        outputSurfaceLock.wait(remain);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface interrupted");
+                        return false;
+                    }
+                }
+                if (stopping || videoDecoder == null) {
+                    LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface aborted because the decoder is stopping");
+                    return false;
+                }
+                if (!decoderExecuting) {
+                    if (!storeOutputSurfaceForConfigure(surface, holder)) {
+                        return false;
+                    }
+                    LimeLog.info("[VIPLE-EXTDISP] decoder left executing while waiting; output surface stored for configure");
+                    return true;
+                }
+                videoDecoder.setOutputSurface(surface);
+                swappedOutputSurface = surface;
+                if (holder != null) {
+                    renderTarget = holder;
+                }
+                LimeLog.info("[VIPLE-EXTDISP] decoder output surface switched");
+                return true;
+            } catch (RuntimeException e) {
+                LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface failed: " + e);
+                return false;
+            } finally {
+                outputSurfaceSwap = false;
+                outputSurfaceLock.notifyAll();
+            }
+        }
+    }
+
+    private void beginDecoderExclusive() {
+        if (!outputSurfaceSwapArmed) {
+            return;
+        }
+        synchronized (outputSurfaceLock) {
+            while (outputSurfaceSwap && !stopping) {
+                try {
+                    outputSurfaceLock.wait(50);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            decoderCallers++;
+        }
+    }
+
+    private void endDecoderExclusive() {
+        if (!outputSurfaceSwapArmed) {
+            return;
+        }
+        synchronized (outputSurfaceLock) {
+            decoderCallers--;
+            // 沒有人在換 Surface，或還有別的呼叫在用解碼器時，沒有等待者。
+            if (outputSurfaceSwap && decoderCallers == 0) {
+                outputSurfaceLock.notifyAll();
+            }
+        }
+    }
+
+    private boolean storeOutputSurfaceForConfigure(Surface surface, SurfaceHolder holder) {
+        if (prefs.enableFruc && frucRenderer == null && frucInputSurface == null) {
+            LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface unsupported before the decoder is executing while FRUC is enabled");
+            return false;
+        }
+        if (frucRenderer != null || frucInputSurface != null) {
+            LimeLog.warning("[VIPLE-EXTDISP] setOutputSurface unsupported while FRUC owns the decoder output");
+            return false;
+        }
+        swappedOutputSurface = surface;
+        if (holder != null) {
+            renderTarget = holder;
+        }
+        return true;
+    }
+
+    private int dequeueOutputBufferSync(BufferInfo info, long timeoutUs) {
+        beginDecoderExclusive();
+        try {
+            return videoDecoder.dequeueOutputBuffer(info, timeoutUs);
+        } finally {
+            endDecoderExclusive();
+        }
+    }
+
+    private void releaseOutputBufferSync(int index, boolean render) {
+        beginDecoderExclusive();
+        try {
+            videoDecoder.releaseOutputBuffer(index, render);
+        } finally {
+            endDecoderExclusive();
+        }
+    }
+
+    private void releaseOutputBufferSync(int index, long renderTimestampNs) {
+        beginDecoderExclusive();
+        try {
+            videoDecoder.releaseOutputBuffer(index, renderTimestampNs);
+        } finally {
+            endDecoderExclusive();
+        }
+    }
+
+    private MediaFormat getOutputFormatSync() {
+        beginDecoderExclusive();
+        try {
+            return videoDecoder.getOutputFormat();
+        } finally {
+            endDecoderExclusive();
+        }
+    }
+
+    private int dequeueInputBufferSync(long timeoutUs) {
+        beginDecoderExclusive();
+        try {
+            return videoDecoder.dequeueInputBuffer(timeoutUs);
+        } finally {
+            endDecoderExclusive();
+        }
+    }
+
+    private ByteBuffer getInputBufferSync(int index) {
+        beginDecoderExclusive();
+        try {
+            return videoDecoder.getInputBuffer(index);
+        } finally {
+            endDecoderExclusive();
+        }
+    }
+
+    private void queueInputBufferSync(int index, int offset, int size, long presentationTimeUs, int flags) {
+        beginDecoderExclusive();
+        try {
+            videoDecoder.queueInputBuffer(index, offset, size, presentationTimeUs, flags);
+        } finally {
+            endDecoderExclusive();
+        }
     }
 
     public MediaCodecDecoderRenderer(Activity activity, PreferenceConfiguration prefs,
@@ -942,7 +1165,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         Surface decoderOutputSurface = directOutputSurface != null
                 ? directOutputSurface
                 : renderTarget.getSurface();
-        if (directOutputSurface == null && context != null && prefs.enableFruc) {
+        // §EXT-DISPLAY：已經熱切換過才會進這裡。沒切過時 swappedOutputSurface 是 null，補幀條件與改之前相同。
+        // 重設時若又去建補幀，會抓到寬限期裡已經拆掉的 holder。
+        if (directOutputSurface == null && swappedOutputSurface == null && context != null && prefs.enableFruc) {
             // §REVIEW-1104：MediaFormat.getInteger(String, int) 為 API 29+，改用相容 API 16 的 getInteger(String) 避免 NoSuchMethodError
             int w = format.containsKey(MediaFormat.KEY_WIDTH) ? format.getInteger(MediaFormat.KEY_WIDTH) : 1920;
             int h = format.containsKey(MediaFormat.KEY_HEIGHT) ? format.getInteger(MediaFormat.KEY_HEIGHT) : 1080;
@@ -1040,29 +1265,41 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             }
         }
 
-        videoDecoder.configure(format, decoderOutputSurface, null, 0);
+        // §EXT-DISPLAY：跟 setOutputSurface 同一個計數。重設進行到一半不能讓另一條執行緒把輸出換走，
+        // 也不能在換完之後還 configure 到換之前讀到的那張 Surface。
+        beginDecoderExclusive();
+        try {
+            decoderExecuting = false;
+            if (directOutputSurface == null && swappedOutputSurface != null) {
+                decoderOutputSurface = swappedOutputSurface;
+            }
+            videoDecoder.configure(format, decoderOutputSurface, null, 0);
 
-        configuredFormat = format;
+            configuredFormat = format;
 
-        // After reconfiguration, we must resubmit CSD buffers
-        submittedCsd = false;
-        vpsBuffers.clear();
-        spsBuffers.clear();
-        ppsBuffers.clear();
+            // After reconfiguration, we must resubmit CSD buffers
+            submittedCsd = false;
+            vpsBuffers.clear();
+            spsBuffers.clear();
+            ppsBuffers.clear();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            // This will contain the actual accepted input format attributes
-            inputFormat = videoDecoder.getInputFormat();
-            LimeLog.info("Input format: "+inputFormat);
-        }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                // This will contain the actual accepted input format attributes
+                inputFormat = videoDecoder.getInputFormat();
+                LimeLog.info("Input format: "+inputFormat);
+            }
 
-        videoDecoder.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT);
+            videoDecoder.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT);
 
-        // Start the decoder
-        videoDecoder.start();
+            // Start the decoder
+            videoDecoder.start();
+            decoderExecuting = true;
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-            legacyInputBuffers = videoDecoder.getInputBuffers();
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+                legacyInputBuffers = videoDecoder.getInputBuffers();
+            }
+        } finally {
+            endDecoderExclusive();
         }
     }
 
@@ -1090,8 +1327,16 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             }
         } finally {
             if (!configured && videoDecoder != null) {
-                videoDecoder.release();
-                videoDecoder = null;
+                beginDecoderExclusive();
+                try {
+                    if (videoDecoder != null) {
+                        decoderExecuting = false;
+                        videoDecoder.release();
+                        videoDecoder = null;
+                    }
+                } finally {
+                    endDecoderExclusive();
+                }
             }
         }
         return configured;
@@ -1269,7 +1514,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 if (codecRecoveryType.get() == CR_RECOVERY_TYPE_FLUSH) {
                     LimeLog.warning("Flushing decoder");
                     try {
-                        videoDecoder.flush();
+                        beginDecoderExclusive();
+                        try {
+                            videoDecoder.flush();
+                        } finally {
+                            endDecoderExclusive();
+                        }
                         codecRecoveryType.set(CR_RECOVERY_TYPE_NONE);
                     } catch (IllegalStateException e) {
                         e.printStackTrace();
@@ -1290,7 +1540,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 if (codecRecoveryType.get() == CR_RECOVERY_TYPE_RESTART) {
                     LimeLog.warning("Trying to restart decoder after CodecException");
                     try {
-                        videoDecoder.stop();
+                        beginDecoderExclusive();
+                        try {
+                            decoderExecuting = false;
+                            videoDecoder.stop();
+                        } finally {
+                            endDecoderExclusive();
+                        }
                         configureAndStartDecoder(configuredFormat);
                         codecRecoveryType.set(CR_RECOVERY_TYPE_NONE);
                     } catch (IllegalArgumentException e) {
@@ -1313,7 +1569,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 if (codecRecoveryType.get() == CR_RECOVERY_TYPE_RESET && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     LimeLog.warning("Trying to reset decoder after CodecException");
                     try {
-                        videoDecoder.reset();
+                        beginDecoderExclusive();
+                        try {
+                            decoderExecuting = false;
+                            videoDecoder.reset();
+                        } finally {
+                            endDecoderExclusive();
+                        }
                         configureAndStartDecoder(configuredFormat);
                         codecRecoveryType.set(CR_RECOVERY_TYPE_NONE);
                     } catch (IllegalArgumentException e) {
@@ -1334,7 +1596,14 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 // throw away the old decoder and reinitialize a new one from scratch.
                 if (codecRecoveryType.get() == CR_RECOVERY_TYPE_RESET) {
                     LimeLog.warning("Trying to recreate decoder after CodecException");
-                    videoDecoder.release();
+                    beginDecoderExclusive();
+                    try {
+                        decoderExecuting = false;
+                        videoDecoder.release();
+                        videoDecoder = null;
+                    } finally {
+                        endDecoderExclusive();
+                    }
 
                     try {
                         int err = initializeDecoder(true);
@@ -1556,13 +1825,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 try {
                     if (directOutputSurface != null) {
                         // 時間戳多載會把 AImage 的時間戳改成呈現時間，native 就除不回 frameNumber。
-                        videoDecoder.releaseOutputBuffer(nextOutputBuffer, true);
+                        releaseOutputBufferSync(nextOutputBuffer, true);
                     }
                     else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                        videoDecoder.releaseOutputBuffer(nextOutputBuffer, frameTimeNanos);
+                        releaseOutputBufferSync(nextOutputBuffer, frameTimeNanos);
                     }
                     else {
-                        videoDecoder.releaseOutputBuffer(nextOutputBuffer, true);
+                        releaseOutputBufferSync(nextOutputBuffer, true);
                     }
 
                     // VipleStream: Run FRUC interpolation after frame is sent to SurfaceTexture
@@ -1577,7 +1846,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                     try {
                         // Try to avoid leaking the output buffer by releasing it without rendering
                         onOutputBufferReleased(nextOutputBuffer, false);
-                        videoDecoder.releaseOutputBuffer(nextOutputBuffer, false);
+                        releaseOutputBufferSync(nextOutputBuffer, false);
                     } catch (IllegalStateException e) {
                         // This will leak nextOutputBuffer, but there's really nothing else we can do
                         e.printStackTrace();
@@ -1624,7 +1893,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 while (!stopping) {
                     try {
                         // Try to output a frame
-                        int outIndex = videoDecoder.dequeueOutputBuffer(info, 50000);
+                        int outIndex = dequeueOutputBufferSync(info, 50000);
                         if (outIndex >= 0) {
                             long presentationTimeUs = info.presentationTimeUs;
                             int lastIndex = outIndex;
@@ -1635,9 +1904,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                             // Render the latest frame now if frame pacing isn't in balanced mode
                             if (prefs.framePacing != PreferenceConfiguration.FRAME_PACING_BALANCED) {
                                 // Get the last output buffer in the queue
-                                while ((outIndex = videoDecoder.dequeueOutputBuffer(info, 0)) >= 0) {
+                                while ((outIndex = dequeueOutputBufferSync(info, 0)) >= 0) {
                                     onOutputBufferReleased(lastIndex, false);
-                                    videoDecoder.releaseOutputBuffer(lastIndex, false);
+                                    releaseOutputBufferSync(lastIndex, false);
 
                                     numFramesOut++;
 
@@ -1648,27 +1917,27 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
                                 if (directOutputSurface != null) {
                                     // 同 doFrame：保留 queueInputBuffer 寫進去的 PTS。
-                                    videoDecoder.releaseOutputBuffer(lastIndex, true);
+                                    releaseOutputBufferSync(lastIndex, true);
                                 }
                                 else if (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
                                         prefs.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS) {
                                     // In max smoothness or cap FPS mode, we want to never drop frames
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                                         // Use a PTS that will cause this frame to never be dropped
-                                        videoDecoder.releaseOutputBuffer(lastIndex, 0);
+                                        releaseOutputBufferSync(lastIndex, 0);
                                     }
                                     else {
-                                        videoDecoder.releaseOutputBuffer(lastIndex, true);
+                                        releaseOutputBufferSync(lastIndex, true);
                                     }
                                 }
                                 else {
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                                         // Use a PTS that will cause this frame to be dropped if another comes in within
                                         // the same V-sync period
-                                        videoDecoder.releaseOutputBuffer(lastIndex, System.nanoTime());
+                                        releaseOutputBufferSync(lastIndex, System.nanoTime());
                                     }
                                     else {
-                                        videoDecoder.releaseOutputBuffer(lastIndex, true);
+                                        releaseOutputBufferSync(lastIndex, true);
                                     }
                                 }
 
@@ -1693,7 +1962,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                     try {
                                         int droppedBuffer = outputBufferQueue.take();
                                         onOutputBufferReleased(droppedBuffer, false);
-                                        videoDecoder.releaseOutputBuffer(droppedBuffer, false);
+                                        releaseOutputBufferSync(droppedBuffer, false);
                                     } catch (InterruptedException e) {
                                         // We're shutting down, so we can just drop this buffer on the floor
                                         // and it will be reclaimed when the codec is released.
@@ -1733,7 +2002,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                     break;
                                 case MediaCodec.INFO_OUTPUT_FORMAT_CHANGED:
                                     LimeLog.info("Output format changed");
-                                    outputFormat = videoDecoder.getOutputFormat();
+                                    outputFormat = getOutputFormatSync();
                                     LimeLog.info("New output format: " + outputFormat);
                                     break;
                                 default:
@@ -1772,7 +2041,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         try {
             // If we don't have an input buffer index yet, fetch one now
             while (nextInputBufferIndex < 0 && !stopping) {
-                nextInputBufferIndex = videoDecoder.dequeueInputBuffer(10000);
+                nextInputBufferIndex = dequeueInputBufferSync(10000);
             }
 
             // Get the backing ByteBuffer for the input buffer index
@@ -1780,7 +2049,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 // Using the new getInputBuffer() API on Lollipop allows
                 // the framework to do some performance optimizations for us
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    nextInputBuffer = videoDecoder.getInputBuffer(nextInputBufferIndex);
+                    nextInputBuffer = getInputBufferSync(nextInputBufferIndex);
                     if (nextInputBuffer == null) {
                         // According to the Android docs, getInputBuffer() can return null "if the
                         // index is not a dequeued input buffer". I don't think this ever should
@@ -1845,6 +2114,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     public void prepareForStop() {
         // Let the decoding code know to ignore codec exceptions now
         stopping = true;
+        synchronized (outputSurfaceLock) {
+            // §EXT-DISPLAY：換 Surface 若正卡在等待，這裡不叫醒的話 stop() 的 join 會一直停著。
+            outputSurfaceLock.notifyAll();
+        }
 
         // §PERF-1113：收掉統計／浮層的背景執行緒（已排入的工作會跑完；不 join）
         quitPerfReportThread();
@@ -1945,14 +2218,25 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         if (pyroWaveActive) {
             MoonBridge.pyroWaveCleanup();
             pyroWaveActive = false;
+            // stopVideoStream 會先 join 送幀執行緒才進來。這時改旗標不會讓 begin 與 end 一個進鎖、一個不進。
+            outputSurfaceSwapArmed = false;
             return;
         }
         // VipleStream §REVIEW-1111: a failed decoder reset leaves videoDecoder null; release() on it threw a
         // NullPointerException out of the JNI cleanup callback, which aborts the process.
         if (videoDecoder != null) {
-            videoDecoder.release();
-            videoDecoder = null;
+            beginDecoderExclusive();
+            try {
+                if (videoDecoder != null) {
+                    decoderExecuting = false;
+                    videoDecoder.release();
+                    videoDecoder = null;
+                }
+            } finally {
+                endDecoderExclusive();
+            }
         }
+        outputSurfaceSwapArmed = false;
     }
 
     @Override
@@ -1992,7 +2276,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         boolean codecRecovered;
 
         try {
-            videoDecoder.queueInputBuffer(nextInputBufferIndex,
+            queueInputBufferSync(nextInputBufferIndex,
                     0, nextInputBuffer.position(),
                     timestampUs, codecFlags);
 

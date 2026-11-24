@@ -152,6 +152,17 @@ function removeCmd(index) {
       <div class="form-text">{{ $t('config.update_mode_desc') }}</div>
     </div>
 
+    <!-- §LOGDROP：預設詢問。第一次在首頁決定，這裡改了要存檔並重啟才寫進設定。 -->
+    <div class="mb-3">
+      <label for="log_upload" class="form-label">{{ $t('config.log_upload') }}</label>
+      <select id="log_upload" class="form-select" v-model="config.log_upload">
+        <option value="ask">{{ $t('config.log_upload_ask') }}</option>
+        <option value="enabled">{{ $t('config.log_upload_enabled') }}</option>
+        <option value="disabled">{{ $t('config.log_upload_disabled') }}</option>
+      </select>
+      <div class="form-text">{{ $t('config.log_upload_desc') }}</div>
+    </div>
+
     <!-- Enable system tray -->
     <Checkbox class="mb-3"
               id="system_tray"
