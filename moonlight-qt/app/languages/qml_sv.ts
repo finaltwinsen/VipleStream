@@ -1687,6 +1687,11 @@ Om det står still längre, kontrollera värden — Steam Guard kanske ber om tv
         <translation>Det går inte att initiera videoavkodningen. Kontrollera dina strömningsinställningar och försök igen.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Maskinvaruvideodekodern kunde inte tilldela minne. Starta om den här enheten och försök igen.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Väntar på video från värden</translation>

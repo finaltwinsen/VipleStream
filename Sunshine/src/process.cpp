@@ -35,6 +35,7 @@
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_padmode.h"
 #include "vr/vr_platform.h"
+#include "vr/vr_shortcuts.h"
 #include "system_tray.h"
 #include "utility.h"
 
@@ -1665,9 +1666,25 @@ namespace proc {
         // VipleStream 2.0 §VR M1b V5（S1-16、§D.12）：只在 vr_pcvr=enabled 時改變 app 清單
         // （disabled／stub 與 M1b 之前逐字相同，ops-M7）：250820 不當平面 app，改合成「SteamVR Home」；
         // steamapps.vrmanifest 裡的 VR 遊戲帶 vr_launch_url。
+        // §VR-SHORTCUT：vr_shortcuts 裡的 app 也視為 VR。2D 的 cmd 仍是 steam://rungameid/<id>。
         const bool vr_apps = config::vr.pcvr == config::vr_t::pcvr_e::enabled;
         const auto vr_ids = vr_apps ? ::vr::platform::vr_manifest_app_ids(true) : std::map<std::string, std::string> {};
+        // 語法警告在 apply_config 印過；重掃不重印。pcvr 沒開就不解析、不套用。
+        const auto vr_shortcuts = vr_apps ? ::vr::shortcuts::parse_warned(config::vr.shortcuts, {}) : std::vector<::vr::shortcuts::entry_t> {};
+        const auto shortcut_for = [&](const std::string &app_id) -> const ::vr::shortcuts::entry_t * {
+          for (const auto &e : vr_shortcuts) {
+            if (e.app_id == app_id) {
+              return &e;
+            }
+          }
+          return nullptr;
+        };
+        // 含名稱衝突、250820：有掃到就不算「沒安裝」
+        std::set<std::string> shortcut_installed;
         for (const auto &sa : steam_result->apps) {
+          if (vr_apps) {
+            shortcut_installed.insert(sa.app_id);
+          }
           if (vr_apps && sa.app_id == "250820") {
             proc::ctx_t ctx;
             ctx.name = "SteamVR Home";
@@ -1691,6 +1708,11 @@ namespace proc {
           std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
           if (manual_names.count(lower)) {
             steam_skipped++;
+            // 手動 app 同名時這筆 Steam ctx 不會進清單，shortcut 也套不上去
+            if (shortcut_for(sa.app_id)) {
+              BOOST_LOG(info) << "[VIPLE-VR-SHORTCUT] app=" << sa.app_id << " \"" << sa.name
+                              << "\" skipped: a manual app has the same name";
+            }
             continue;
           }
           proc::ctx_t ctx;
@@ -1705,6 +1727,17 @@ namespace proc {
           ctx.steam_playtime_minutes = sa.playtime_minutes;
           if (const auto vr_it = vr_ids.find(sa.app_id); vr_apps && vr_it != vr_ids.end()) {
             ctx.vr_launch_url = "steam://launch/" + sa.app_id + "/" + vr_it->second;  // "VR" 或 "openxr"
+          }
+          if (const auto *sc = shortcut_for(sa.app_id)) {
+            // 不在 vrmanifest：rungameid 是「這是 VR」的標記，也是 -applaunch 失敗時的退路。
+            // 已在 vrmanifest：保留官方 VR 網址當退路；有參數時啟動仍先走 -applaunch。pad 也照 shortcut。
+            if (ctx.vr_launch_url.empty()) {
+              ctx.vr_launch_url = "steam://rungameid/" + sa.app_id;
+            }
+            ctx.vr_launch_args = sc->args;
+            ctx.vr_pad = ::vr::shortcuts::pad_name(sc->pad);
+            BOOST_LOG(info) << "[VIPLE-VR-SHORTCUT] app=" << sa.app_id << " \"" << sa.name << "\" pad=" << ctx.vr_pad
+                            << " args=\"" << sc->args << '"';
           }
 
           // VipleStream H Phase 2.3: cover the "launching game" desktop
@@ -1760,6 +1793,11 @@ namespace proc {
           ids.insert(ctx.id);
           apps.emplace_back(std::move(ctx));
           steam_added++;
+        }
+        for (const auto &e : vr_shortcuts) {
+          if (shortcut_installed.count(e.app_id) == 0) {
+            BOOST_LOG(info) << "[VIPLE-VR-SHORTCUT] app=" << e.app_id << " not installed";
+          }
         }
         BOOST_LOG(info) << "[steam-import] merged " << steam_added
                         << " Steam apps (" << steam_skipped

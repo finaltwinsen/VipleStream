@@ -1687,6 +1687,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>वीडियो डिकोडर प्रारंभ नहीं किया जा सका। कृपया अपनी स्ट्रीमिंग सेटिंग्स जाँचें और फिर से प्रयास करें।</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>हार्डवेयर वीडियो डिकोडर मेमोरी आवंटित नहीं कर सका। इस डिवाइस को पुनः प्रारंभ करें और फिर से प्रयास करें।</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>होस्ट से वीडियो की प्रतीक्षा</translation>

@@ -28,6 +28,7 @@ namespace {
     uint32_t pid = 0;
     std::map<uint32_t, app_t> apps;
     std::map<std::string, std::optional<bool>> tracked;
+    int tracked_calls = 0;
     std::map<std::string, bool> overrides;
     int next_id = 3;
     bool alloc_fails = false;
@@ -46,6 +47,7 @@ namespace {
         return it->second;
       };
       h.tracked = [this](const std::string &id) -> std::optional<bool> {
+        tracked_calls++;
         const auto it = tracked.find(id);
         return it == tracked.end() ? std::nullopt : it->second;
       };
@@ -212,6 +214,82 @@ TEST(VrPadmodeController, AllocFailureNoticesOnce) {
   EXPECT_FALSE(c.pad_active());
   ASSERT_EQ(f.notices.size(), 1u);
   EXPECT_EQ(f.notices[0], notice_e::pad_unavailable);
+}
+
+TEST(VrPadmodeController, ShortcutVrBeatsStoreAndRememberedManual) {
+  fake_t f;
+  f.apps[1] = {"593600", "593600", "PixARK"};
+  f.tracked["593600"] = false;  // 商店沒有分類 52，本來會切手把
+  f.overrides["593600"] = true;  // 記住的手動選擇也是手把
+  f.pid = 1;
+  auto h = f.hooks();
+  h.shortcut = [](const std::string &) {
+    return std::optional<bool> {false};  // shortcut：一律 VR 手把
+  };
+  controller_t c(std::move(h), false);
+  c.poll_once();
+  EXPECT_FALSE(c.pad_active());
+  EXPECT_EQ(f.tracked_calls, 0);
+  EXPECT_TRUE(f.notices.empty());
+  EXPECT_TRUE(f.overrides["593600"]);  // 記住的選擇還在，只是這一場不採用
+}
+
+TEST(VrPadmodeController, ShortcutXboxTurnsPadOnWithoutStore) {
+  fake_t f;
+  f.apps[1] = {"593600", "593600", "PixARK"};
+  f.tracked["593600"] = true;
+  f.pid = 1;
+  auto h = f.hooks();
+  h.shortcut = [](const std::string &id) {
+    EXPECT_EQ(id, "593600");
+    return std::optional<bool> {true};
+  };
+  controller_t c(std::move(h), false);
+  c.poll_once();
+  EXPECT_TRUE(c.pad_active());
+  EXPECT_EQ(f.tracked_calls, 0);
+  ASSERT_EQ(f.notices.size(), 1u);
+  EXPECT_EQ(f.notices[0], notice_e::pad_on_auto);
+}
+
+TEST(VrPadmodeController, ShortcutAutoFallsThroughToStore) {
+  fake_t f;
+  f.apps[1] = {"593600", "593600", "PixARK"};
+  f.tracked["593600"] = false;
+  f.pid = 1;
+  auto h = f.hooks();
+  h.shortcut = [](const std::string &) {
+    return std::optional<bool> {};
+  };
+  controller_t c(std::move(h), false);
+  c.poll_once();
+  EXPECT_TRUE(c.pad_active());
+  EXPECT_EQ(f.tracked_calls, 1);
+}
+
+TEST(VrPadmodeController, UnidentifiedSceneUsesEmptyIdAndGoneSceneDoesNot) {
+  fake_t f;
+  f.apps[9] = {"exe:pixark.exe", "", "pixark.exe"};
+  f.pid = 9;
+  int calls = 0;
+  std::string seen = "unset";
+  auto h = f.hooks();
+  h.shortcut = [&](const std::string &id) {
+    calls++;
+    seen = id;
+    return std::optional<bool> {true};  // 若 pid 變 0 還被叫到，手把會被重新插上
+  };
+  controller_t c(std::move(h), false);
+  c.poll_once();
+  EXPECT_EQ(calls, 1);
+  EXPECT_EQ(seen, "");
+  EXPECT_TRUE(c.pad_active());
+
+  f.pid = 0;
+  c.poll_once();
+  EXPECT_EQ(calls, 1);
+  EXPECT_FALSE(c.pad_active());
+  EXPECT_EQ(f.notices.size(), 1u);  // 自動關不另外提示
 }
 
 TEST(VrPadmodeController, DestructorFreesPad) {

@@ -1687,6 +1687,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>לא ניתן לאתחל את מפענח הווידאו. בדקו את הגדרות ההזרמה ונסו שוב.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>מפענח הווידאו בחומרה לא הצליח להקצות זיכרון. הפעילו מחדש את המכשיר ונסו שוב.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>ממתין לווידאו מהמחשב המארח</translation>

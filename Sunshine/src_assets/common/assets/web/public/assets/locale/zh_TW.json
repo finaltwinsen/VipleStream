@@ -401,6 +401,8 @@
     "virtual_sink": "虛擬音訊輸出",
     "virtual_sink_desc": "手動指定要使用的虛擬音訊裝置。如果未設定，則會自動選擇裝置。我們強烈建議將此欄位留空，以使用自動裝置選擇！",
     "virtual_sink_placeholder": "Steam 串流喇叭",
+    "vr_shortcuts": "VR 捷徑",
+    "vr_shortcuts_desc": "不在 Steam VR 清單裡、仍要當成 VR 遊戲的 Steam 遊戲。用分號分隔，每項是 <app id>[,auto|vr|xbox] [參數]。auto（預設）照既有的手把判斷；vr 一律用 VR 手把；xbox 一律用虛擬 Xbox 手把。例如：593600,vr -pixarkvr。參數只在 VR 開遊戲、經 Steam（steam.exe -applaunch）啟動時帶上。這個遊戲的一般 2D 啟動不受影響。",
     "vt_coder": "VideoToolbox 編碼器",
     "vt_realtime": "VideoToolbox 即時編碼",
     "vt_software": "VideoToolbox 軟體編碼",

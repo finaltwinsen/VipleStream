@@ -1687,6 +1687,11 @@ Daha uzun sürerse ana bilgisayarı kontrol edin — Steam Guard 2FA onay istiyo
         <translation>Video kod çözücü başlatılamıyor. Lütfen yayın ayarlarınızı kontrol edin ve tekrar deneyin.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Donanım video kod çözücüsü bellek ayıramadı. Bu cihazı yeniden başlatıp tekrar deneyin.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Ana bilgisayardan görüntü bekleniyor</translation>

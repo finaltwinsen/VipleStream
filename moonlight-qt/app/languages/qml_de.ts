@@ -1687,6 +1687,11 @@ Wenn es länger hängt, prüfen Sie den Host — möglicherweise wartet Steam Gu
         <translation>Videodecoder konnte nicht initialisiert werden. Bitte prüfen Sie Ihre Streaming-Einstellungen und versuchen Sie es erneut.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Der Hardware-Videodecoder konnte keinen Speicher zuweisen. Starten Sie dieses Gerät neu und versuchen Sie es erneut.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Warte auf Video vom Host</translation>

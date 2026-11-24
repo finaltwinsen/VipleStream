@@ -1687,6 +1687,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>வீடியோ டிகோடரை துவக்க முடியவில்லை. உங்கள் ச்ட்ரீமிங் அமைப்புகளை சரிபார்த்து மீண்டும் முயற்சிக்கவும்.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>வன்பொருள் வீடியோ டிகோடரால் நினைவகத்தை ஒதுக்க முடியவில்லை. இந்த சாதனத்தை மறுதொடக்கம் செய்து மீண்டும் முயற்சிக்கவும்.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>புரவலனிடமிருந்து வீடியோவுக்காகக் காத்திருக்கிறது</translation>

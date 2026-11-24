@@ -137,8 +137,11 @@ namespace vr {
     /// 以使用者身分開 `steam://rungameid/250820`（§D.8）
     bool launch_steamvr();
 
-    /// 以使用者身分開 `steam://launch/<id>/VR`（失敗退 `steam://rungameid/<id>`）
-    bool launch_vr_app(const std::string &url);
+    /// 以使用者身分開 url（`steam://launch/<id>/VR|openxr` 或 `steam://rungameid/<id>`）。
+    /// §VR-SHORTCUT：args 非空時改以主控台使用者執行 `steam.exe -applaunch <app_id> <args>`；
+    /// 找不到 steam.exe、啟動失敗或 id／args 再驗不過，退回 url 並印 warning。args 空＝只開 url。
+    /// Linux／macOS 沒有 PCVR，恆回 false。
+    bool launch_vr_app(const std::string &url, const std::string &app_id = {}, const std::string &args = {});
 
     enum class quit_e {
       not_running,  ///< 本來就沒在跑

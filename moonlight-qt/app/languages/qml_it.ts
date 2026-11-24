@@ -1687,6 +1687,11 @@ Se si blocca più a lungo, controlla l'host: Steam Guard potrebbe richiedere l'a
         <translation>Impossibile inizializzare il decoder video. Controlla le impostazioni di streaming e prova di nuovo.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Il decoder video hardware non è riuscito ad allocare memoria. Riavvia questo dispositivo e prova di nuovo.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>In attesa del video dall'host</translation>

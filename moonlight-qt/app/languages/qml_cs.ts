@@ -1687,6 +1687,11 @@ Pokud to trvá déle, zkontrolujte hostitele — může se ptát Steam Guard 2FA
         <translation>Nezdařilo se inicializovat dekodér videa. Prosím zkontrolujte nastavení streamování a zkuste to znovu.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Hardwarový dekodér videa nemohl přidělit paměť. Restartujte toto zařízení a zkuste to znovu.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Čekání na video od hostitele</translation>

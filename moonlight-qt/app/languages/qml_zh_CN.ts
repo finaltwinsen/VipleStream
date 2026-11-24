@@ -1687,6 +1687,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>无法初始化视频解码器。请检查你的流式传输设置，然后重试。</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>硬件视频解码器无法分配内存。请重新启动这台设备后再试一次。</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>正在等待主机的视频画面</translation>

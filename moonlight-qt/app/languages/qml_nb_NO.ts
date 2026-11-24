@@ -1687,6 +1687,11 @@ Hvis det tar lenger tid, sjekk verten — Steam Guard 2FA kan be om bekreftelse.
         <translation>Kunne ikke starte videodekoder. Sjekk strømmeinnstillingene dine og prøv igjen.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Maskinvarevideodekoderen kunne ikke tildele minne. Start denne enheten på nytt og prøv igjen.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Venter på video fra verten</translation>

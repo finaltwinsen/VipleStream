@@ -1,0 +1,17 @@
+--- a/src/vulkan/malloc.c	2026-11-23 23:22:39.971765100 +0800
++++ b/src/vulkan/malloc.c	2026-11-23 23:22:48.436442600 +0800
+@@ -969,7 +969,13 @@
+     }
+ 
+     VkMemoryPropertyFlags flags = ma->props.memoryTypes[ainfo.memoryTypeIndex].propertyFlags;
+-    if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
++    /* VipleStream: do not map a dma-buf imported for a texture. Nothing reads such a texture through the
++     * CPU, and on the Qualcomm msm DRM driver (seen on kernel 6.18) mmap() of an imported GEM object never
++     * drops the object reference it took: every imported decoder frame buffer then stays allocated after
++     * the process exits, until the hardware decoder runs out of address space (no picture at all, only a
++     * reboot recovers). Imported buffers (params->buf_usage != 0) keep the mapping because pl_buf users need it. */
++    bool skip_map = params->import_handle == PL_HANDLE_DMA_BUF && !params->buf_usage;
++    if ((flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !skip_map) {
+         VK(vk->MapMemory(vk->dev, slab->mem, 0, VK_WHOLE_SIZE, 0, &slab->data));
+         slab->coherent = flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+         out->data = (uint8_t *) slab->data + out->offset;

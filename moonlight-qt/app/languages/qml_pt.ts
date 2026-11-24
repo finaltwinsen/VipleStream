@@ -1687,6 +1687,11 @@ Se demorar mais, verifique o host — o Steam Guard pode estar a pedir a autenti
         <translation>Impossivel inicializar o decodificador de vídeo. Por favor verificar suas configurações de streaming e tente novamente.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>O decodificador de vídeo por hardware não conseguiu alocar memória. Reinicie este dispositivo e tente novamente.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>A aguardar vídeo do host</translation>

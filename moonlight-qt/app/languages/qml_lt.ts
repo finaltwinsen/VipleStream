@@ -1687,6 +1687,11 @@ Jei užtrunka ilgiau, patikrinkite pagrindinį kompiuterį — galbūt Steam Gua
         <translation>Nepavyko inicijuoti vaizdo dekoderio. Patikrinkite transliacijos nustatymus ir bandykite dar kartą.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Aparatinis vaizdo dekoderis negalėjo paskirti atminties. Paleiskite šį įrenginį iš naujo ir bandykite dar kartą.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Laukiama vaizdo iš pagrindinio kompiuterio</translation>

@@ -1687,6 +1687,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>비디오 디코더를 초기화 할 수 없습니다. 스트리밍 설정을 확인하고 다시 시도하십시오.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>하드웨어 비디오 디코더가 메모리를 할당할 수 없습니다. 이 장치를 다시 시작한 후 다시 시도하십시오.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>호스트에서 영상을 기다리는 중</translation>

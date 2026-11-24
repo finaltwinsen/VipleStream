@@ -93,6 +93,12 @@
         :platform="platform">
       </advanced>
 
+      <vr-tab
+        v-if="currentTab === 'vr'"
+        :config="config"
+        :platform="platform">
+      </vr-tab>
+
       <container-encoders
         :current-tab="currentTab"
         :config="config"
@@ -131,6 +137,7 @@
   import Network from './configs/tabs/Network.vue'
   import Files from './configs/tabs/Files.vue'
   import Advanced from './configs/tabs/Advanced.vue'
+  import VrTab from './configs/tabs/Vr.vue'
   import AudioVideo from './configs/tabs/AudioVideo.vue'
   import ContainerEncoders from './configs/tabs/ContainerEncoders.vue'
   import {$tp, usePlatformI18n} from './platform-i18n'
@@ -156,6 +163,7 @@
       Network,
       Files,
       Advanced,
+      VrTab,
       // They will be accessible via audio-video, container-encoders only.
       AudioVideo,
       ContainerEncoders,
@@ -286,6 +294,13 @@
               "capture": "",
               "capture_phase_lock": "enabled",
               "encoder": "",
+            },
+          },
+          {
+            id: "vr",
+            name: "VR",
+            options: {
+              "vr_shortcuts": "",
             },
           },
           {
@@ -448,6 +463,7 @@
           'network': 'NetworkIcon',
           'files': 'FileCog',
           'advanced': 'Sliders',
+          'vr': 'Gamepad2',
           'nv': 'Gpu',
           'amd': 'Gpu',
           'qsv': 'Gpu',

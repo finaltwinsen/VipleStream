@@ -1811,7 +1811,7 @@ namespace nvhttp {
         put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, "selftest running on this host");
         return std::nullopt;
       }
-      return ::vr::orchestrator::app_ref_t {app->name, app->vr_class, app->vr_launch_url};
+      return ::vr::orchestrator::app_ref_t {app->name, app->vr_class, app->vr_launch_url, app->steam_app_id, app->vr_launch_args};
     }
     const auto c = ::vr::platform::cached_conflicts();
     // §VR-REARM（2026-10-04）：SteamVR 用的是我們的 driver 時，執行中的 VR 遊戲多半是上一個 VR session 留下的
@@ -1826,7 +1826,7 @@ namespace nvhttp {
       put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, "selftest running on this host");
       return std::nullopt;
     }
-    return ::vr::orchestrator::app_ref_t {app->name, app->vr_class, app->vr_launch_url};
+    return ::vr::orchestrator::app_ref_t {app->name, app->vr_class, app->vr_launch_url, app->steam_app_id, app->vr_launch_args};
   }
 
   /// §C.6：pcvr 的 encoder 探測形狀

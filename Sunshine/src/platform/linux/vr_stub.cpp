@@ -100,7 +100,7 @@ namespace vr::platform {
     return false;
   }
 
-  bool launch_vr_app(const std::string &) {
+  bool launch_vr_app(const std::string &, const std::string &, const std::string &) {
     return false;
   }
 

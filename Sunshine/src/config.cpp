@@ -32,6 +32,7 @@
 #include "rtsp.h"
 #include "utility.h"
 #include "vr/vr_capture_health.h"
+#include "vr/vr_shortcuts.h"
 
 #ifdef _WIN32
   #include <shellapi.h>
@@ -1652,6 +1653,10 @@ namespace config {
     vr_opt::int_strict_f(vars, "vr_latch_acquire_ppm", vr.latch_acquire_ppm, 1000, 5000, false);
     vr_opt::bool_strict_f(vars, "vr_buffer_refill", vr.buffer_refill);  // §VR-BUFFER-REFILL
     vr_opt::bool_strict_f(vars, "vr_padmode", vr.padmode);  // §VR-PADMODE
+    string_f(vars, "vr_shortcuts", vr.shortcuts);  // §VR-SHORTCUT：原樣字串，這裡驗一次（重掃與手把輪詢不再重印）
+    (void) ::vr::shortcuts::parse_warned(vr.shortcuts, [](std::string_view message) {
+      warn_config(std::string {message});
+    });
     vr_opt::bool_strict_f(vars, "vr_mic", vr.mic);  // §VR-MIC
     vr_opt::int_strict_f(vars, "vr_render_scale_pct", vr.render_scale_pct, 100, 250, false);
     vr_opt::int_strict_f(vars, "vr_render_target_max", vr.render_target_max, 1000, 8192, false);

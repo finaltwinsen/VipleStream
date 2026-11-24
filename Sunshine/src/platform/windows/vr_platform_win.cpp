@@ -43,6 +43,7 @@
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_ipc_abi.h"
 #include "src/vr/vr_platform.h"
+#include "src/vr/vr_shortcuts.h"
 #include "steam_scanner.h"
 #include "utf_utils.h"
 #include "vdf_parser.h"
@@ -1192,7 +1193,50 @@ namespace vr {
       return true;
     }
 
-    bool launch_vr_app(const std::string &url) {
+    bool launch_vr_app(const std::string &url, const std::string &app_id, const std::string &args) {
+      // §VR-SHORTCUT：-applaunch 不會跳 Steam 的確認視窗。steam://run/<id>//<args>/ 會跳，不要用。
+      // 只引用 steam.exe；id 是數字、args 再驗過字元集，所以後面不再加引號（引號、&、| 都不在允許的字元裡）。
+      if (!args.empty()) {
+        bool launched = false;
+        if (!::vr::shortcuts::app_id_ok(app_id) || !::vr::shortcuts::args_ok(args)) {
+          BOOST_LOG(warning) << "[VIPLE-VR-SHORTCUT] launch rejected: app id or args failed validation; falling back to vr_launch_url";
+        } else if (!console_user_present()) {
+          BOOST_LOG(warning) << "[VIPLE-VR-SHORTCUT] launch app=" << app_id << " failed: no console user; falling back to vr_launch_url";
+        } else {
+          // 跟 vr_manifest_app_ids 一樣：先快取的 steam_root，沒有再讀 WOW6432Node。
+          // 再補 HKLM\SOFTWARE\Valve\Steam（find_steamvr 有、vrmanifest 那條沒有），32-bit 登錄路徑不在時才找得到。
+          auto root = cached_environment().steam_root;
+          if (root.empty()) {
+            root = utf_utils::to_utf8(reg_sz(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Valve\\Steam", L"InstallPath"));
+          }
+          if (root.empty()) {
+            root = utf_utils::to_utf8(reg_sz(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Valve\\Steam", L"InstallPath"));
+          }
+          const std::filesystem::path dir = root.empty() ? std::filesystem::path {} : std::filesystem::path {utf_utils::from_utf8(root)};
+          const std::filesystem::path exe = dir / L"steam.exe";
+          std::error_code fec;
+          if (root.empty() || !std::filesystem::exists(exe, fec)) {
+            BOOST_LOG(warning) << "[VIPLE-VR-SHORTCUT] launch app=" << app_id << " failed: steam.exe not found; falling back to vr_launch_url";
+          } else {
+            const std::string cmd = std::format("\"{}\" -applaunch {} {}", utf_utils::to_utf8(exe.wstring()), app_id, args);
+            BOOST_LOG(info) << "[VIPLE-VR-SHORTCUT] launch app=" << app_id << " via steam -applaunch args=\"" << args << '"';
+            boost::filesystem::path wd {dir.wstring()};
+            std::error_code ec;
+            auto env = boost::this_process::environment();
+            auto child = platf::run_command(false, false, cmd, wd, env, nullptr, ec, nullptr);
+            if (ec) {
+              BOOST_LOG(warning) << "[VIPLE-VR-SHORTCUT] launch app=" << app_id << " failed (" << ec.message() << "); falling back to vr_launch_url";
+            } else {
+              child.detach();
+              launched = true;
+            }
+          }
+        }
+        if (launched) {
+          return true;
+        }
+      }
+
       static const std::regex ok_url {R"(^steam://(launch/\d{1,10}/(VR|openxr)|rungameid/\d{1,10})$)"};
       if (!std::regex_match(url, ok_url) || !console_user_present()) {
         return false;

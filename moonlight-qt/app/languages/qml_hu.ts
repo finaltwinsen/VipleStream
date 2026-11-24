@@ -1687,6 +1687,11 @@ Ha tovább elakad, nézd meg a gazdagépet — lehet, hogy a Steam Guard kétlé
         <translation>Nem sikerült inicializálni a videódekódert. Ellenőrizd a streaming beállításokat, majd próbáld újra.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>A hardveres videodekóder nem tudott memóriát lefoglalni. Indítsd újra ezt az eszközt, majd próbáld újra.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Várakozás a videóra a gazdagéptől</translation>

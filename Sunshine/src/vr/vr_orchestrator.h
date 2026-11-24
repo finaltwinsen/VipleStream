@@ -55,7 +55,11 @@ namespace vr::orchestrator {
   struct app_ref_t {
     std::string name;
     bool vr_class = false;  ///< SteamVR Home（不另外啟動遊戲）
-    std::string vr_launch_url;  ///< `steam://launch/<id>/VR`
+    std::string vr_launch_url;  ///< `steam://launch/<id>/VR`，或 §VR-SHORTCUT 的 `steam://rungameid/<id>`
+    /// §VR-SHORTCUT：Steam app id（空＝不是 Steam 遊戲）。padmode 認不出場景程式時拿來對 vr_shortcuts
+    std::string steam_app_id;
+    /// §VR-SHORTCUT：非空時以 `steam.exe -applaunch` 啟動；空則走 vr_launch_url
+    std::string vr_launch_args;
   };
 
   enum class stop_reason_e {
@@ -82,6 +86,9 @@ namespace vr::orchestrator {
    * @return 已排入；已有編排進行中（非 IDLE／RESTORE_PENDING／ERROR）時 false。
    */
   bool start(const negotiated_t &neg, const app_ref_t &app, bool force, uint64_t prewarm_token = 0);
+
+  /// §VR-SHORTCUT：這一場 /launch 的 Steam app id（空＝沒有）。start() 成功就設定，場次結束或啟動前被取消就清掉
+  std::string session_steam_app_id();
 
   /// session 結束：STOPPING → RESTORE_PENDING（不關 SteamVR，§D.8）
   void stop(stop_reason_e reason);

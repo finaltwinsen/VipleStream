@@ -156,6 +156,36 @@ Client log 位置：`%TEMP%\VipleStream-*.log`（檔名的數字是啟動時的 
   沒有 heartbeat 字尾的才是真事件（§LOGHYG-A4 改成事件驅動，同況每秒最多 1 行）。
 - 2026-11-14 起這一行在這一幀交給 Pacer 之後才印（數值是交出去之前抄的），內容與出現條件不變。
 
+### `[VIPLE-DEC-NOMEM]` —— 硬體解碼器配置不到記憶體（2026-11-23；2026-11-24 縮短等待）
+`streaming/video/ffmpeg.cpp`（ENOMEM、提前重置）、`streaming/session.cpp`（放棄或重建失敗後結束這一場）
+
+```
+[VIPLE-DEC-NOMEM] hardware decoder reported out of memory during %s
+[VIPLE-DEC-NOMEM] decoder out of memory on frame %d (decoder=%s %dx%d) attempt=%d
+[VIPLE-DEC-NOMEM] early reset after %d failed decodes (no frame decoded yet)
+[VIPLE-DEC-NOMEM] giving up after %d failed decoder starts - ending the session
+[VIPLE-DEC-NOMEM] decoder could not be created - ending the session
+```
+
+- **什麼時候印**：只算硬體解碼器（`FFmpegVideoDecoder::isHardwareAccelerated()`；`hevc_v4l2m2m` 走 `AV_CODEC_CAP_HARDWARE`，沒有 hwaccel）。軟體解碼的 ENOMEM、丟包造成的一般解碼錯誤，不印這些行，重置與 IDR 照舊。
+- `during %s`（warning）：這個**行程**第一次有硬體解碼器在 `avcodec_open2`（`open`）、測試解碼的 `avcodec_send_packet`／`avcodec_receive_frame`（`test decode`）、或串流中的送出／取出（`decode`）回 `AVERROR(ENOMEM)`。之後同一個行程不再重複印。有硬體解碼器成功交出第一張才把這個紀錄清掉；軟體解碼成功不清。
+- `on frame`（warning）：這個解碼器實例**第一次**串流中 `avcodec_send_packet` 或 `avcodec_receive_frame` 回 `AVERROR(ENOMEM)`。`attempt` 從 1 起算。同一個實例後面多半變成 `Device or resource busy`，不再重複印。
+- 「開不起來」＝這個實例一張都沒解出來，而且連續失敗達到重置門檻（`Resetting decoder due to consistent failure`），這一輪又出現過 ENOMEM。門檻：這種情況是 **3** 次（接著印 `early reset after`），否則仍是 20 次。3 次是因為失敗被 IDR 請求間隔卡住（約 0.85 秒一次），20 次要約 17 秒、兩輪約 34 秒才看得到錯誤。計數在 Session，解碼器重建不會把它清掉。連續 **2** 次就不再重建。中間只要成功解出過任何一張，次數歸零。同一個實例只推一次 `SDL_RENDER_DEVICE_RESET`。
+- `giving up`（error）：第二次開不起來。串流結束，使用者看到「硬體視訊解碼器配置不到記憶體，請重新啟動這台裝置後再試」。啟動時的 1280x720 測試解碼**成功**不計入（那一張成功擋不住真正解析度的配置失敗）；測試解碼本身回 ENOMEM 仍會計入上面的 `during test decode`。
+- `decoder could not be created`（error）：重建解碼器失敗（`Failed to recreate decoder after reset`），而且這個行程的硬體解碼器出現過 ENOMEM。同一句使用者訊息。XR 場次不再退回軟體解碼時，多半走這裡而不是再解一輪。
+- **處理方式**：重新啟動這台裝置（解碼器所在的那一台，例如 Steam Frame 頭盔），再重連。這不是調低碼率或重送 IDR 能解的。
+
+### `[VIPLE-DEC-NOSW]` —— XR 場次不退回軟體解碼（2026-11-24）
+`streaming/video/ffmpeg.cpp`（`initializeInternal` 的軟體解碼器迴圈）
+
+```
+[VIPLE-DEC-NOSW] no hardware decoder for an XR session (format=0x%x %dx%d@%d nomem=%d) - not falling back to software decoding
+```
+
+- **什麼時候印**（error）：`params->xr != nullptr` 且解碼器選擇是自動（`VDS_AUTO`），硬體解碼器都失敗，而且「這個行程的硬體解碼器回過 ENOMEM（`nomem=1`）」或「像素率超過 1080p120」。整段軟體解碼器迴圈跳過，接著印既有的 `Unable to find working decoder`。
+- **為什麼**：頭盔的 CPU 解不動每眼 2304 的 144 fps（2026-11-24 實測每張 8～65 ms），畫面不能用。直接報錯。低像素率的虛擬螢幕仍可退回軟體解碼。
+- 使用者明確選「強制軟體解碼」（`VDS_FORCE_SOFTWARE`）時不印、仍走軟體解碼。能力探測（`testOnly`）的 `params->xr` 一律是 nullptr，不受影響。
+
 ---
 
 ## 3. 呈現節奏（判斷「順不順」的主要依據）
@@ -2285,6 +2315,37 @@ client  app: every known host could not join the hotspot a short while ago - not
 [VIPLE-STEAM-QUIT] refusing unexpected install dir: <路徑>                        ← 防呆：不在 steamapps\common 底下、或是 SteamVR
 ```
 - 只在 /cancel（使用者按「結束 APP」）觸發；斷線、快捷鍵中斷串流、閒置收尾都不會關遊戲。
+
+### `[VIPLE-VR-SHORTCUT]` —— 不在 Steam VR 清單的遊戲當成 VR，並帶啟動參數（server，§VR-SHORTCUT，2026-11-23）
+
+`src/vr/vr_shortcuts.h` 解析 `vr_shortcuts`；`process.cpp` 的 Steam 自動匯入套到遊戲清單；`vr_platform_win.cpp` 的 `launch_vr_app` 負責啟動。
+格式：以 `;` 分隔，每項 `<appid>[,auto|vr|xbox] [參數]`。`auto`（預設）照 §VR-PADMODE；`vr` 一律 VR 手把；`xbox` 一律虛擬 Xbox 手把。
+
+```
+[VIPLE-VR-SHORTCUT] ignored entry "<原文前 40 字>": <原因>          ← 套用設定時整項略過。原因：invalid app id｜invalid pad｜invalid characters in args｜args longer than 200
+[VIPLE-VR-SHORTCUT] app=<id> "<名稱>" pad=<auto|vr|xbox> args="<參數>"   ← 每次重掃清單，這筆 shortcut 套到已安裝的遊戲
+[VIPLE-VR-SHORTCUT] app=<id> "<名稱>" skipped: a manual app has the same name   ← 手動 app 同名，Steam 那筆沒進清單，shortcut 也沒套上
+[VIPLE-VR-SHORTCUT] app=<id> not installed                               ← 設定裡有、這次掃描沒看到已安裝。同一次重掃每個 id 一行
+[VIPLE-VR-SHORTCUT] launch app=<id> via steam -applaunch args="<參數>"   ← VR 啟動改走 steam.exe -applaunch
+[VIPLE-VR-SHORTCUT] launch app=<id> failed: steam.exe not found; falling back to vr_launch_url   ← 找不到 steam.exe，退回原本的 steam:// 網址
+[VIPLE-VR-SHORTCUT] launch app=<id> failed: no console user; falling back to vr_launch_url
+[VIPLE-VR-SHORTCUT] launch app=<id> failed (<系統錯誤>); falling back to vr_launch_url   ← CreateProcess 那一步失敗
+[VIPLE-VR-SHORTCUT] launch rejected: app id or args failed validation; falling back to vr_launch_url   ← 啟動前再驗不合法，不印參數原文
+```
+
+手把覆寫記在既有的 `[VIPLE-VR-PADMODE]`（這份文件先前沒有獨立章節）：
+
+```
+[VIPLE-VR-PADMODE] <appid>: shortcut override: vr controllers
+[VIPLE-VR-PADMODE] <appid>: shortcut override: xbox pad
+[VIPLE-VR-PADMODE] session shortcut: shortcut override: vr controllers   ← 場景行程對不到 Steam app id，用這一場啟動的 shortcut
+[VIPLE-VR-PADMODE] xbox pad mode ON (shortcut)                            ← 覆寫成手把時；切回 VR 手把不另外提示
+```
+
+- 參數只影響 VR session 的啟動。一般 2D 仍是 `steam://rungameid/<id>`。
+- 不合法的項目整項略過。同一個 app id 重複時取第一個，不另外警告。
+- 清單重掃不再印語法警告（那一行只在套用設定時出現一次，並寫進 sunshine.log）。
+- 場景 pid 是 0 時不套用手把覆寫，遊戲結束仍會關掉虛擬手把。
 
 ### `[VIPLE-IME]` —— 頭盔鍵盤的「中/英」由 host 依輸入法狀態切換（server，§KBD-IME-STATE，2026-11-22）
 

@@ -1687,6 +1687,11 @@ Si cela dure plus longtemps, vérifiez l'hôte : Steam Guard demande peut-être 
         <translation>Impossible d'initialiser le décodeur vidéo. Veuillez vérifier vos paramètres de streaming et réessayez.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Le décodeur vidéo matériel n'a pas pu allouer de mémoire. Redémarrez cet appareil, puis réessayez.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>En attente de la vidéo de l'hôte</translation>

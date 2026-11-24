@@ -50,6 +50,14 @@ namespace vr::orchestrator {
 
     std::mutex g_mtx;
     std::condition_variable g_cv;
+    // §VR-SHORTCUT：跟 g_mtx 分開。只會在已持有 g_mtx 時再拿這把，或完全不拿 g_mtx，避免鎖順序倒過來
+    std::mutex g_session_app_mtx;
+    std::string g_session_steam_app_id;
+
+    void set_session_steam_app_id(const std::string &id) {
+      std::lock_guard lk(g_session_app_mtx);
+      g_session_steam_app_id = id;
+    }
     std::thread g_thread;
     bool g_running = false;
     bool g_quit = false;
@@ -792,7 +800,8 @@ namespace vr::orchestrator {
         return;  // §REVIEW-1111：HMD 早就在呈現時上面的等待會直接成立、不看停止要求；取消了就不要再把遊戲開起來
       }
       if (!job.app.vr_class && !job.app.vr_launch_url.empty()) {
-        const bool ok = platform::launch_vr_app(job.app.vr_launch_url);
+        // args 非空時 launch_vr_app 改走 steam.exe -applaunch；失敗會自己退回 url 並印 warning
+        const bool ok = platform::launch_vr_app(job.app.vr_launch_url, job.app.steam_app_id, job.app.vr_launch_args);
         step("launch-app", ok, ok ? ""s : "open_url"s, t0);  // 不致命
       }
 
@@ -1102,6 +1111,7 @@ namespace vr::orchestrator {
             // start() 現在在鎖內同時設 g_pending 與 PRECHECK，鎖內看到「PRECHECK 但沒有 job」就一定是被取消的。
             // 在鎖內復原：放鎖後才改的話，中間插進來的新 start() 設的 PRECHECK 會被蓋掉
             BOOST_LOG(info) << "[VIPLE-VR-ORCH] start cancelled before run - leaving PRECHECK";
+            set_session_steam_app_id({});
             set_state(platform::guard_pending() ? state_e::restore_pending : state_e::idle);
           }
         }
@@ -1137,7 +1147,16 @@ namespace vr::orchestrator {
           g_idle_quit_reset = true;  // §REVIEW-1103（B041-1）
           BOOST_LOG(info) << "[VIPLE-VR-ORCH] start app=\"" << job->app.name << "\" vrClass=" << job->app.vr_class << " eye=" << job->neg.params.eye_width << 'x' << job->neg.params.eye_height
                           << " hz=" << job->neg.params.hz << " force=" << job->force << " session=" << log_guid(job->neg.guid);
-          run_session(*job);
+          {
+            // run_session 任何路徑返回都清掉，避免下一場沒有 Steam id 時還套用這一場的 shortcut
+            struct session_id_clear_t {
+              ~session_id_clear_t() {
+                set_session_steam_app_id({});
+              }
+            } session_id_clear;
+            set_session_steam_app_id(job->app.steam_app_id);
+            run_session(*job);
+          }
           if (cur() != state_e::error) {
             // 14 STOPPING → 15 RESTORE_PENDING（先清 stop 要求，wait_for 才會真的等 HMD_STANDBY）
             {
@@ -1262,9 +1281,16 @@ namespace vr::orchestrator {
       g_start_from.store(g_state.load());
       g_state.store(static_cast<uint8_t>(state_e::precheck));
       publish(VIPLE_VR_STATE_ORCHESTRATING, 0, 0);
+      // padmode 可能在編排執行緒進入 run_session 之前就開始輪詢（/launch 返回後串流 session 就建立）
+      set_session_steam_app_id(app.steam_app_id);
     }
     g_cv.notify_all();
     return true;
+  }
+
+  std::string session_steam_app_id() {
+    std::lock_guard lk(g_session_app_mtx);
+    return g_session_steam_app_id;
   }
 
   void stop(stop_reason_e reason) {

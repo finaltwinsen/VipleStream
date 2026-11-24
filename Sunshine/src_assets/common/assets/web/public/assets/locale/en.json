@@ -414,6 +414,8 @@
     "virtual_sink": "Virtual Sink",
     "virtual_sink_desc": "Manually specify a virtual audio device to use. If unset, the device is chosen automatically. We strongly recommend leaving this field blank to use automatic device selection!",
     "virtual_sink_placeholder": "Steam Streaming Speakers",
+    "vr_shortcuts": "VR shortcuts",
+    "vr_shortcuts_desc": "Steam games to treat as VR even when they are not in Steam's VR list. Separate entries with semicolons: <app id>[,auto|vr|xbox] [arguments]. auto (the default) follows the existing controller check; vr always uses VR controllers; xbox always uses the virtual Xbox pad. Example: 593600,vr -pixarkvr. Arguments are passed only when a VR session launches the game through Steam (steam.exe -applaunch). The game's normal 2D launch is unchanged.",
     "vt_coder": "VideoToolbox Coder",
     "vt_realtime": "VideoToolbox Realtime Encoding",
     "vt_software": "VideoToolbox Software Encoding",

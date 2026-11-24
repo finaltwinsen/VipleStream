@@ -1687,6 +1687,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>Αδυναμία αρχικοποίησης του αποκωδικοποιητή βίντεο. Ελέγξτε τις ρυθμίσεις ροής και δοκιμάστε ξανά.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Ο αποκωδικοποιητής βίντεο υλικού δεν μπόρεσε να εκχωρήσει μνήμη. Επανεκκινήστε αυτήν τη συσκευή και δοκιμάστε ξανά.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Αναμονή για βίντεο από τον κεντρικό υπολογιστή</translation>

@@ -1687,6 +1687,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>Не вдалося ініціалізувати відеодекодер. Перевірте налаштування трансляції та спробуйте ще раз.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Апаратний відеодекодер не зміг виділити пам’ять. Перезавантажте цей пристрій і спробуйте ще раз.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Очікування відео від хоста</translation>

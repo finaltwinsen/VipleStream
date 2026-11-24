@@ -1687,6 +1687,11 @@ Als het langer blijft hangen, controleer dan de host — mogelijk vraagt Steam G
         <translation>Videodecoder kan niet worden geïnitialiseerd. Controleer uw streaminginstellingen en probeer het opnieuw.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>De hardwarevideodecoder kon geen geheugen toewijzen. Start dit apparaat opnieuw op en probeer het opnieuw.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Wachten op video van de host</translation>

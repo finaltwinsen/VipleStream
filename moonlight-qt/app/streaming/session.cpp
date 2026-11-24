@@ -5738,6 +5738,33 @@ void Session::pollScHidHotplug()
     m_ScHid.start();
 }
 
+bool Session::hardwareDecoderNomemGiveUp(IVideoDecoder* decoder)
+{
+#ifndef HAVE_FFMPEG
+    Q_UNUSED(decoder);
+    return false;
+#else
+    // 連續兩次：這個實例一張都沒交出，而且是連續失敗重置、這一輪出現過 ENOMEM。只算硬體解碼器。
+    static constexpr int kHwDecoderNomemGiveUpStarts = 2;
+
+    auto* ffmpeg = dynamic_cast<FFmpegVideoDecoder*>(decoder);
+    if (ffmpeg == nullptr) {
+        return false;
+    }
+    const FFmpegVideoDecoder::NomemFacts facts = ffmpeg->nomemFacts();
+    if (facts.decodedAnyFrame) {
+        // 第一張成功時解碼執行緒已經歸零。這裡再寫一次，蓋掉和這次重置交錯的窗口。
+        m_HwDecNomemFailedStarts.store(0, std::memory_order_release);
+        return false;
+    }
+    if (!facts.hardware || !facts.sawEnomem || !facts.consistentFailureReset) {
+        return false;
+    }
+    const int starts = m_HwDecNomemFailedStarts.fetch_add(1, std::memory_order_acq_rel) + 1;
+    return starts >= kHwDecoderNomemGiveUpStarts;
+#endif
+}
+
 void Session::exec()
 {
     // If the connection failed, clean up and abort the connection.
@@ -6443,6 +6470,14 @@ void Session::exec()
 
             // Fall through
         case SDL_RENDER_DEVICE_RESET:
+            // §DEC-NOMEM：硬體解碼器連續兩次開不起來就不再重建，沿用啟動錯誤的顯示路徑結束這一場。
+            if (m_VideoDecoder != nullptr && hardwareDecoderNomemGiveUp(m_VideoDecoder)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "[VIPLE-DEC-NOMEM] giving up after %d failed decoder starts - ending the session",
+                             m_HwDecNomemFailedStarts.load(std::memory_order_acquire));
+                emit displayLaunchError(tr("The hardware video decoder could not allocate memory. Restart this device and try again."));
+                goto DispatchDeferredCleanup;
+            }
 
             if (event.type != SDL_WINDOWEVENT) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -6530,7 +6565,19 @@ void Session::exec()
                     SDL_UnlockMutex(m_DecoderLock);
                     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                  "Failed to recreate decoder after reset");
-                    emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
+#ifdef HAVE_FFMPEG
+                    // 重建也失敗，而且這個行程的硬體解碼器出現過 ENOMEM
+                    // （XR 不再退回軟體解碼時多半是這裡）。沿用既有那句，譯文不用重翻。
+                    if (FFmpegVideoDecoder::hardwareDecoderNomemSeen()) {
+                        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                                     "[VIPLE-DEC-NOMEM] decoder could not be created - ending the session");
+                        emit displayLaunchError(tr("The hardware video decoder could not allocate memory. Restart this device and try again."));
+                    }
+                    else
+#endif
+                    {
+                        emit displayLaunchError(tr("Unable to initialize video decoder. Please check your streaming settings and try again."));
+                    }
                     goto DispatchDeferredCleanup;
                 }
 

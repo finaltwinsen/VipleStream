@@ -385,6 +385,105 @@ bool FFmpegVideoDecoder::isHardwareAccelerated()
             (getAVCodecCapabilities(m_VideoDecoderCtx->codec) & AV_CODEC_CAP_HARDWARE) != 0;
 }
 
+std::atomic<bool> FFmpegVideoDecoder::s_HwDecoderNomemSeen{false};
+
+bool FFmpegVideoDecoder::hardwareDecoderNomemSeen()
+{
+    return s_HwDecoderNomemSeen.load(std::memory_order_acquire);
+}
+
+void FFmpegVideoDecoder::clearHardwareDecoderNomemSeen()
+{
+    s_HwDecoderNomemSeen.store(false, std::memory_order_release);
+}
+
+void FFmpegVideoDecoder::noteProcessHardwareNomem(const char* phase)
+{
+    // 行程只記第一次。後面的實例沿用，直到有硬體解碼器真的交出一張。
+    if (s_HwDecoderNomemSeen.exchange(true)) {
+        return;
+    }
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-DEC-NOMEM] hardware decoder reported out of memory during %s",
+                phase);
+}
+
+int FFmpegVideoDecoder::failedDecodesResetThreshold() const
+{
+    // 硬體、出現過 ENOMEM、一張都還沒交出才縮短。解出過一張就回到 20。
+    if (m_NomemHw.load(std::memory_order_relaxed) &&
+            m_SawDecodeEnomem.load(std::memory_order_relaxed) &&
+            !m_DecodedAnyFrame.load(std::memory_order_relaxed)) {
+        return 3;
+    }
+    return FAILED_DECODES_RESET_THRESHOLD;
+}
+
+void FFmpegVideoDecoder::noteHardwareDecodeEnomem(int frameNumber)
+{
+    // 測試解碼（1280x720）與軟體解碼不記。硬體旗標在解碼執行緒開頭設好，
+    // 這裡不再呼叫 isHardwareAccelerated()：失敗路徑不要再碰 renderer。
+    if (!m_NomemHw.load(std::memory_order_relaxed)) {
+        return;
+    }
+    noteProcessHardwareNomem("decode");
+    m_SawDecodeEnomem.store(true, std::memory_order_release);
+    // 同一個實例只印第一次。後面多半變成 Device busy，不是新的資訊。
+    if (m_NomemLogged.exchange(true, std::memory_order_relaxed)) {
+        return;
+    }
+    int attempt = 1;
+    if (Session* session = Session::get()) {
+        attempt = session->hardwareDecoderNomemAttempt();
+    }
+    const char* name = "?";
+    int w = 0;
+    int h = 0;
+    if (m_VideoDecoderCtx != nullptr) {
+        if (m_VideoDecoderCtx->codec != nullptr && m_VideoDecoderCtx->codec->name != nullptr) {
+            name = m_VideoDecoderCtx->codec->name;
+        }
+        w = m_VideoDecoderCtx->width;
+        h = m_VideoDecoderCtx->height;
+    }
+    if (w <= 0 || h <= 0) {
+        w = m_OriginalVideoWidth;
+        h = m_OriginalVideoHeight;
+    }
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-DEC-NOMEM] decoder out of memory on frame %d (decoder=%s %dx%d) attempt=%d",
+                frameNumber, name, w, h, attempt);
+}
+
+void FFmpegVideoDecoder::noteDecodedFrame()
+{
+    // 每一張都會進來。已經記過就返回，避免每張都做一次帶鎖的寫入。
+    if (m_DecodedAnyFrame.load(std::memory_order_relaxed)) {
+        return;
+    }
+    // 這個實例已經交出過一張。Session 的連續「開不起來」歸零。
+    if (m_DecodedAnyFrame.exchange(true, std::memory_order_release)) {
+        return;
+    }
+    // 只有硬體解碼器交出的第一張才清行程層級的 ENOMEM。軟體解碼成功不算。
+    if (m_NomemHw.load(std::memory_order_relaxed)) {
+        clearHardwareDecoderNomemSeen();
+    }
+    if (Session* session = Session::get()) {
+        session->clearHardwareDecoderNomemFailures();
+    }
+}
+
+FFmpegVideoDecoder::NomemFacts FFmpegVideoDecoder::nomemFacts() const
+{
+    NomemFacts facts;
+    facts.hardware = m_NomemHw.load(std::memory_order_acquire);
+    facts.sawEnomem = m_SawDecodeEnomem.load(std::memory_order_acquire);
+    facts.consistentFailureReset = m_ConsistentFailureReset.load(std::memory_order_acquire);
+    facts.decodedAnyFrame = m_DecodedAnyFrame.load(std::memory_order_acquire);
+    return facts;
+}
+
 bool FFmpegVideoDecoder::isAlwaysFullScreen()
 {
     return m_FrontendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FULLSCREEN_ONLY;
@@ -1478,9 +1577,15 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     SDL_assert(m_VideoDecoderCtx->opaque == nullptr);
     m_VideoDecoderCtx->opaque = this;
 
+    // §DEC-NOMEM：先問硬體。avcodec_open2 失敗會把 ctx->codec 清掉；
+    // v4l2m2m 沒有 m_HwDecodeCfg，失敗後再呼叫 isHardwareAccelerated() 會碰到空指標。
+    const bool hwDecoderAtOpen = isHardwareAccelerated();
     int err = avcodec_open2(m_VideoDecoderCtx, decoder, &options);
     av_dict_free(&options);
     if (err < 0) {
+        if (err == AVERROR(ENOMEM) && hwDecoderAtOpen) {
+            noteProcessHardwareNomem("open");
+        }
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Unable to open decoder for format: %x",
                      params->videoFormat);
@@ -1575,9 +1680,14 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
                 av_frame_free(&frame);
                 char errorstring[512];
                 av_strerror(err, errorstring, sizeof(errorstring));
+                // open 已成功，codec 還在，這裡問硬體跟下面既有的 log 一樣安全。
+                const bool hw = isHardwareAccelerated();
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-DIAG] Test decode FAILED (avcodec_send_packet): %s (format=0x%x hw=%d)",
-                            errorstring, params->videoFormat, isHardwareAccelerated());
+                            errorstring, params->videoFormat, hw);
+                if (err == AVERROR(ENOMEM) && hw) {
+                    noteProcessHardwareNomem("test decode");  // §DEC-NOMEM
+                }
                 return false;
             }
 
@@ -1602,9 +1712,13 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
         if (err < 0) {
             char errorstring[512];
             av_strerror(err, errorstring, sizeof(errorstring));
+            const bool hw = isHardwareAccelerated();
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-DIAG] Test decode FAILED (avcodec_receive_frame): %s (format=0x%x hw=%d)",
-                        errorstring, params->videoFormat, isHardwareAccelerated());
+                        errorstring, params->videoFormat, hw);
+            if (err == AVERROR(ENOMEM) && hw) {
+                noteProcessHardwareNomem("test decode");  // §DEC-NOMEM：open 已成功才會走到這裡
+            }
             av_frame_free(&frame);
             return false;
         }
@@ -3706,8 +3820,22 @@ bool FFmpegVideoDecoder::initializeInternal(PDECODER_PARAMETERS params)
         }
     }
 
+    // §DEC-NOSW：XR 場次自動選解碼器時，下列情況不退回軟體解碼、直接報錯：
+    //  - 硬體解碼器這個行程回過 ENOMEM（頭盔核心的緩衝區洩漏吃滿了，重啟裝置才會好）；
+    //  - 像素率超過 1080p120（PCVR 每眼 1440 以上）：頭盔的 CPU 解不動（2026-11-24 實測每眼 2304 的 144 fps，每張 8～65 ms），
+    //    畫面不能用、又白白耗電，不如明講。
+    // 低像素率的虛擬螢幕（硬體不支援的格式）照舊可以用軟體解碼；使用者明確選強制軟體解碼也照舊。
+    // testOnly 探測在 chooseDecoder 把 params->xr 清成 nullptr，不受這段影響。
+    const int64_t pixelRate = (int64_t)params->width * params->height * params->frameRate;
+    if (params->xr != nullptr && params->vds == StreamingPreferences::VDS_AUTO &&
+            (hardwareDecoderNomemSeen() || pixelRate > (int64_t)1920 * 1080 * 120)) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "[VIPLE-DEC-NOSW] no hardware decoder for an XR session (format=0x%x %dx%d@%d nomem=%d) - not falling back to software decoding",
+                     params->videoFormat, params->width, params->height, params->frameRate,
+                     hardwareDecoderNomemSeen() ? 1 : 0);
+    }
     // Iterate through all software decoders if allowed
-    if (params->vds != StreamingPreferences::VDS_FORCE_HARDWARE) {
+    else if (params->vds != StreamingPreferences::VDS_FORCE_HARDWARE) {
         codecIterator = NULL;
         while ((decoder = av_codec_iterate(&codecIterator))) {
             // Skip codecs that aren't decoders
@@ -4036,6 +4164,12 @@ void FFmpegVideoDecoder::decoderThreadProc()
     const bool v4l2m2mDecoder = m_VideoDecoderCtx != nullptr && m_VideoDecoderCtx->codec != nullptr &&
                                 strstr(m_VideoDecoderCtx->codec->name, "_v4l2m2m") != nullptr;
     const bool pollStats = m_VrDropOnMetaMiss || v4l2m2mDecoder;
+    // §DEC-NOMEM：沿用 isHardwareAccelerated()（hwaccel、AV_CODEC_CAP_HARDWARE；v4l2m2m 在這裡）。
+    // 軟體解碼的 ENOMEM 不記。只在執行緒開頭讀一次，失敗路徑不再碰 renderer。
+    if ((m_PyroWaveBridge || (m_VideoDecoderCtx != nullptr && m_VideoDecoderCtx->codec != nullptr)) &&
+            isHardwareAccelerated()) {
+        m_NomemHw.store(true, std::memory_order_relaxed);
+    }
     const uint32_t vrPollUs = pollStats ? 100u : 0u;
     // §REVIEW-1119：這三個向量只在成功配對出幀後才清空。一直配對失敗就無上限成長。
     // 4096 蓋過 10 秒、360 fps 的正常視窗，平常不會碰到；超過就不再推，避免在送幀路徑上重新配置。
@@ -4223,6 +4357,7 @@ void FFmpegVideoDecoder::decoderThreadProc()
                 if (err == 0) {
                     SDL_assert(m_FrameInfoQueue.size() == m_FramesIn - m_FramesOut);
                     m_FramesOut++;
+                    noteDecodedFrame();  // §DEC-NOMEM：解碼器交出過一張，連續「開不起來」歸零
 
                     // §REVIEW-1119：平面串流也對齊一次。avcodec_receive_frame 回錯誤的那一張不會再出來，它的 FIFO
                     // 項目卻留著，之後每一張都配到前一張的資訊（幀號、延遲統計），佇列也只增不減。
@@ -4512,9 +4647,24 @@ void FFmpegVideoDecoder::decoderThreadProc()
                                 errorstring,
                                 !m_FrameInfoQueue.isEmpty() ? m_FrameInfoQueue.head().frameNumber : -1);
 
-                    if (++m_ConsecutiveFailedDecodes == FAILED_DECODES_RESET_THRESHOLD) {
+                    if (err == AVERROR(ENOMEM)) {
+                        noteHardwareDecodeEnomem(!m_FrameInfoQueue.isEmpty()
+                                                     ? m_FrameInfoQueue.head().frameNumber : -1);
+                    }
+
+                    // §DEC-NOMEM：門檻會在計數途中從 20 降到 3，用 == 會跳過。
+                    // >= 之後每一次失敗都成立，exchange 只讓這個實例推一次重置事件。
+                    ++m_ConsecutiveFailedDecodes;
+                    const int resetThreshold = failedDecodesResetThreshold();
+                    if (m_ConsecutiveFailedDecodes >= resetThreshold &&
+                            !m_ConsistentFailureReset.exchange(true)) {
                         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                                      "Resetting decoder due to consistent failure");
+                        if (resetThreshold < FAILED_DECODES_RESET_THRESHOLD) {
+                            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                        "[VIPLE-DEC-NOMEM] early reset after %d failed decodes (no frame decoded yet)",
+                                        m_ConsecutiveFailedDecodes);
+                        }
 
                         SDL_Event event;
                         event.type = SDL_RENDER_DEVICE_RESET;
@@ -5400,12 +5550,26 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     errorstring,
                     du->frameNumber);
 
+        if (err == AVERROR(ENOMEM)) {
+            noteHardwareDecodeEnomem(du->frameNumber);  // §DEC-NOMEM
+        }
+
         // If we've failed a bunch of decodes in a row, the decoder/renderer is
         // clearly unhealthy, so let's generate a synthetic reset event to trigger
         // the event loop to destroy and recreate the decoder.
-        if (++m_ConsecutiveFailedDecodes == FAILED_DECODES_RESET_THRESHOLD) {
+        // §DEC-NOMEM：門檻會在計數途中從 20 降到 3，用 == 會跳過。
+        // >= 之後每一次失敗都成立，exchange 只讓這個實例推一次重置事件。
+        ++m_ConsecutiveFailedDecodes;
+        const int resetThreshold = failedDecodesResetThreshold();
+        if (m_ConsecutiveFailedDecodes >= resetThreshold &&
+                !m_ConsistentFailureReset.exchange(true)) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Resetting decoder due to consistent failure");
+            if (resetThreshold < FAILED_DECODES_RESET_THRESHOLD) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "[VIPLE-DEC-NOMEM] early reset after %d failed decodes (no frame decoded yet)",
+                            m_ConsecutiveFailedDecodes);
+            }
 
             SDL_Event event;
             event.type = SDL_RENDER_DEVICE_RESET;

@@ -2562,6 +2562,40 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### vr_shortcuts
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream §VR-SHORTCUT: treat an installed Steam game as a VR game even when it is not in
+            Steam's `steamapps.vrmanifest`, and optionally pass launch arguments. Separate entries with
+            semicolons. Each entry is `&lt;app id&gt;[,&lt;pad&gt;] [arguments]`. `&lt;pad&gt;` is `auto`
+            (the default: the existing [vr_padmode](#vr_padmode) check), `vr` (always use VR controllers;
+            do not plug in the virtual Xbox pad), or `xbox` (always use the virtual Xbox pad).
+            Examples: `593600,vr -pixarkvr` and `593600 -pixarkvr; 12345,xbox`.
+            Arguments are passed only when a VR session starts the game through Steam
+            (`steam.exe -applaunch &lt;id&gt; &lt;arguments&gt;`). The game's normal 2D launch
+            (`steam://rungameid/&lt;id&gt;`) is unchanged. An invalid entry is skipped and a warning is
+            written to the log. If the same app id appears twice, the first entry is kept.
+            The host web UI has this field on the VR tab.
+            @note{Only a Windows host launches PC VR games. Other platforms still accept the value.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            (empty)
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            vr_shortcuts = 593600,vr -pixarkvr
+            @endcode</td>
+    </tr>
+</table>
+
 ### vr_latch_acquire_ppm
 
 <table>

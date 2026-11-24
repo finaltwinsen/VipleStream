@@ -1687,6 +1687,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>دەستپێکردنی دیکۆدەری ڤیدیۆ سەرکەوتوو نەبوو. تکایە ڕێکخستنەکانی پەخش بپشکنە و دووبارە هەوڵبدەرەوە.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>دیکۆدەری ڤیدیۆی ڕەقەکاڵە نەیتوانی بیرگە تەرخان بکات. ئەم ئامێرە دووبارە پێبکەرەوە و دووبارە هەوڵبدەرەوە.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>چاوەڕوانیی ڤیدیۆ لە هۆستەوە</translation>

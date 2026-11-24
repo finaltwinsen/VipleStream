@@ -37,7 +37,9 @@ protected:
       {"VideoToolbox Encoder", "vt"},
       {"VA-API Encoder", "vaapi"},
       {"Vulkan Encoder", "vulkan"},
-      {"Software Encoder", "sw"}
+      {"Software Encoder", "sw"},
+      // vr_shortcuts 在設定頁的 VR 分頁；其餘 vr_* 仍只在設定檔，章節留在 docOnlySections
+      {"VR (VipleStream 2.0)", "vr"}
     };
   }
 
@@ -383,8 +385,9 @@ protected:
     "stun_server",
     "udp_tunnel_mode",
 
-    // vr_pcvr、vr_mic、vr_padmode、vr_netbench_clip：VR 功能的開關。設定頁目前沒有 VR 分頁，
-    // 一般使用者從頭盔 client 的設定頁操作，host 這邊只留設定檔
+    // vr_pcvr、vr_mic、vr_padmode、vr_netbench_clip：VR 功能的開關。設定頁的 VR 分頁只有 vr_shortcuts
+    // （不在這份清單）；其餘 vr_* 不進設定頁，一般使用者從頭盔 client 操作，host 這邊只留設定檔。
+    // 文件章節仍列在 docOnlySections，所以其餘選項不必各做一個欄位
     "vr_mic",
     "vr_netbench_clip",
     "vr_padmode",

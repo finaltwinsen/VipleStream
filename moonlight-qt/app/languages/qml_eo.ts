@@ -1687,6 +1687,11 @@ Se ĝi haltas pli longe, kontrolu la gastiganton — eble Steam Guard petas dufa
         <translation>Ne eblas pravalorizi la videomalkodilon. Bonvolu kontroli viajn fluadajn agordojn kaj reprovi.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>La aparata videomalkodilo ne povis asigni memoron. Restartigu ĉi tiun aparaton kaj reprovu.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Atendante videon de la gastiganto</translation>

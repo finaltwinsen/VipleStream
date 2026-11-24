@@ -264,6 +264,12 @@ modules:
         url: https://github.com/haasn/libplacebo.git
         # tag: v7.360.1（含 submodule：Vulkan-Headers、glad、jinja 等）
         commit: 'cee9b076f2c63104ccfd497fa79c39a867293ec4'
+      # §DMABUF-NOMAP（2026-11-23）：匯入的 dma-buf 材質不做 vkMapMemory。頭盔的 msm DRM 驅動（kernel 6.18）對
+      # 「匯入的 GEM 物件」做 mmap 會永久漏掉一個物件參照：每一個匯入過的解碼輸出緩衝區在行程結束後仍留在核心，
+      # 約兩天累積到 iris 解碼器配置不到記憶體，之後每一場 VR 都沒有畫面（灰畫面），只有重啟頭盔能清掉。
+      # 最小重現：PRIME_FD_TO_HANDLE → MSM_INFO_GET_OFFSET → mmap → munmap → GEM_CLOSE，dmabuf 就不會被釋放。
+      - type: patch
+        path: libplacebo-no-map-imported-dmabuf-tex.patch
 
   # gamescope WSI layer（implicit layer，ENABLE_GAMESCOPE_WSI=1 才啟用）：JSON 的
   # library_path 指向 host 的 .so（經 --filesystem=host-os:ro 在 /var/run/host 底下）。

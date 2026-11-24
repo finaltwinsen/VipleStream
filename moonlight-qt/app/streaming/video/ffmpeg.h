@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <QQueue>
@@ -38,6 +39,19 @@ public:
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info) override;
 
     virtual IFFmpegRenderer* getBackendRenderer();
+
+    // §DEC-NOMEM：主執行緒在刪掉這個實例之前讀。解碼執行緒寫。
+    struct NomemFacts {
+        bool hardware = false;               // isHardwareAccelerated()，解碼執行緒一開始記下來
+        bool sawEnomem = false;              // 這一輪送出或取出失敗出現過 AVERROR(ENOMEM)
+        bool consistentFailureReset = false; // 連續失敗達到門檻，已要求重建
+        bool decodedAnyFrame = false;        // 解碼器交出過至少一張
+    };
+    NomemFacts nomemFacts() const;
+
+    // §DEC-NOMEM：這個行程有沒有硬體解碼器回過 ENOMEM（跨實例）。
+    // 有硬體解碼器交出第一張才清掉。主執行緒在重建失敗時讀。
+    static bool hardwareDecoderNomemSeen();
 
     // §SF-PROBE（M2a）：借出啟動測試用的單一 IDR 測試幀（全部 720p，見
     // ffmpeg_videosamples.cpp），給 v4l2-probe 的 header-test 用。videoFormat 是
@@ -129,6 +143,17 @@ private:
     // 表示已送 LOSS、呼叫端不必要 IDR。
     bool vrHandleDecodeError(int frameNumber);
 
+    // §DEC-NOMEM：硬體解碼器這一輪第一次 ENOMEM 印一行，並記下「出現過 ENOMEM」。
+    void noteHardwareDecodeEnomem(int frameNumber);
+    // §DEC-NOMEM：解出過任何一張，通知 Session 把連續「開不起來」歸零。
+    void noteDecodedFrame();
+    // §DEC-NOMEM：一張都沒交出且出現過 ENOMEM 時門檻是 3，否則是 20。
+    // 失敗被 IDR 間隔卡住（約 0.85 秒一次），20 次要約 17 秒。
+    int failedDecodesResetThreshold() const;
+    // §DEC-NOMEM：行程層級。第一次設成 true 才印 phase（open／test decode／decode）。
+    static void noteProcessHardwareNomem(const char* phase);
+    static void clearHardwareDecoderNomemSeen();
+
     static int decoderThreadProcThunk(void* context);
 
     // §SF-FREEZE：凍結診斷 watchdog（非 Windows）。解碼執行緒可能卡在 FFmpeg 裡出不來，
@@ -152,6 +177,14 @@ private:
     IFFmpegRenderer* m_BackendRenderer;
     IFFmpegRenderer* m_FrontendRenderer;
     int m_ConsecutiveFailedDecodes;
+    // §DEC-NOMEM：這個實例的紀錄。解碼執行緒寫、主執行緒在刪除前讀。
+    std::atomic<bool> m_NomemHw{false};
+    std::atomic<bool> m_SawDecodeEnomem{false};
+    std::atomic<bool> m_ConsistentFailureReset{false};
+    std::atomic<bool> m_DecodedAnyFrame{false};
+    std::atomic<bool> m_NomemLogged{false};
+    // §DEC-NOMEM：行程層級，不跟這個實例一起死。定義在 ffmpeg.cpp。
+    static std::atomic<bool> s_HwDecoderNomemSeen;
     Pacer* m_Pacer;
     BandwidthTracker m_BwTracker;
     VIDEO_STATS m_ActiveWndVideoStats;

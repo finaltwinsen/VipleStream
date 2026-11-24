@@ -147,6 +147,8 @@ VipleStream opens in its own VR interface (laser pointer: trigger = click, grip 
 
 **Xbox controller mode (2.0.68+):** some VR games (for example Assetto Corsa, Assetto Corsa Competizione, GRIP) only read a gamepad or wheel, so VR controllers do nothing in them. When the running game's Steam store page does not list *Tracked Controller Support*, the host plugs in a virtual Xbox 360 controller and drives it from both Frame controllers (right A/B/X/Y, left d-pad, bumpers → LB/RB, triggers → LT/RT, sticks → LS/RS, right menu → Start, left view → Back). Hold **both menu buttons for 2 seconds** to switch by hand; the choice is remembered per game. Needs ViGEmBus on the host; turn it off with `vr_padmode = disabled`.
 
+**VR shortcuts:** a Steam game that is not in Steam's VR list can still be started as VR. On the host, set `vr_shortcuts` (web UI, VR tab, or `sunshine.conf`). Entries are separated by semicolons: `<app id>[,auto|vr|xbox] [arguments]`, for example `593600,vr -pixarkvr`. `auto` uses the controller check above; `vr` always uses VR controllers; `xbox` always uses the virtual pad. Arguments are passed only for the VR launch (`steam.exe -applaunch`). The game's normal 2D launch is unchanged.
+
 **Steering wheel (2.0.75+):** in Xbox controller mode you can steer by turning the two controllers like a wheel; the angle replaces the left stick's left/right. Turn it on in the settings, or press and hold both thumbsticks for 1.5 seconds during a stream, and pick the steering range (180° to 900°).
 
 **Virtual keyboard and flat-screen streams (2.0.175+):** in a VR stream, hold **menu + grip on one hand for 1 second** to open a keyboard in front of you; point and pull the trigger to type on the host, and drag the white bar under it to move it. While it is open, controller buttons are not sent to the game. In a flat-screen stream on the headset the same two gestures as in VR work: both menu buttons for 2 seconds turns the controllers into an Xbox controller instead of a laser mouse, both thumbsticks for 1.5 seconds switches the steering wheel. Some racing games need their own input setting changed first (Assetto Corsa Competizione: Options → Controls → Driving control → gamepad). The **?** button in the toolbar lists every shortcut.
@@ -397,6 +399,8 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 **影片模式操作：** A 播放／暫停 · B 離開 · 扳機叫出控制列 · 握把重新置中 · 搖桿左右快轉 ±10 秒 · 搖桿上下調遠近。
 
 **Xbox 手把模式（2.0.68 起）：** 有些 VR 遊戲（例如 Assetto Corsa、Assetto Corsa Competizione、GRIP）只讀手把或方向盤，VR 手把在裡面完全沒反應。執行中的遊戲在 Steam 商店沒有標「Tracked Controller Support」時，主機會插上一支虛擬 Xbox 360 手把，用兩支 Frame 手把操作（右手 A／B／X／Y、左手十字鍵、肩鍵→LB／RB、扳機→LT／RT、搖桿→LS／RS、右手 menu→Start、左手 view→Back）。**兩支選單鍵同時按住 2 秒**可以手動切換，每款遊戲會記住你的選擇。主機要裝 ViGEmBus；用 `vr_padmode = disabled` 可以關閉。
+
+**VR 捷徑：** 不在 Steam VR 清單裡的 Steam 遊戲也可以當成 VR 啟動。在主機設定 `vr_shortcuts`（網頁設定的 VR 頁，或 `sunshine.conf`）。以分號分隔，每項 `<app id>[,auto|vr|xbox] [參數]`，例如 `593600,vr -pixarkvr`。`auto` 照上面的手把判斷；`vr` 一律用 VR 手把；`xbox` 一律用虛擬手把。參數只在 VR 啟動時經 `steam.exe -applaunch` 帶上，這個遊戲的一般 2D 啟動不變。
 
 **方向盤（2.0.75 起）：** Xbox 手把模式下，可以把兩支手把像握方向盤一樣轉動來轉向，角度取代左搖桿的左右。在設定頁打開，或串流中同時按住兩支搖桿 1.5 秒切換；轉向角度可選（180°～900°）。
 

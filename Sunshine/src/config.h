@@ -288,6 +288,10 @@ namespace config {
     /// 遊戲（例：Assetto Corsa、ACC、GRIP——只吃手把或方向盤）時，另外插一支虛擬 Xbox 360 手把，把 Frame 兩手的狀態送過去；
     /// 兩支選單鍵長按 2 秒手動切換並記住。disabled＝不做（Frame 手把只交給 SteamVR）
     bool padmode = true;
+    /// §VR-SHORTCUT：vr_shortcuts（預設空）。以 `;` 分隔，每項 `<appid>[,auto|vr|xbox] [參數]`。
+    /// 把不在 steamapps.vrmanifest 的 Steam 遊戲當成 VR；參數只在 VR 啟動時經 `steam.exe -applaunch` 帶上，2D 啟動不變。
+    /// auto＝照 §VR-PADMODE、vr＝一律 VR 手把、xbox＝一律手把模式。不合法的項目在套用設定時警告並略過。
+    std::string shortcuts;
     /// §VR-MIC（2026-11-05）：vr_mic（enabled 預設）。頭盔麥克風寫進 host 的「Steam Streaming Microphone」（Steam 裝的虛擬裝置），
     /// 遊戲或 Discord 選「Microphone (Steam Streaming Microphone)」就收得到。disabled＝不宣告、收到也丟
     bool mic = true;

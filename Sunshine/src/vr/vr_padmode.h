@@ -40,6 +40,9 @@ namespace vr::padmode {
     std::function<uint32_t()> scene_pid;  ///< SteamVR 目前的場景程式 PID；0＝沒有
     std::function<std::optional<app_t>(uint32_t)> resolve;  ///< PID → 遊戲
     std::function<std::optional<bool>(const std::string &)> tracked;  ///< appid → 商店有沒有 Tracked Controller Support；nullopt＝還不知道
+    /// §VR-SHORTCUT：場景的 Steam app id → 覆寫。true＝xbox、false＝VR 手把、nullopt＝不覆寫。
+    /// 空字串＝場景行程認不出 Steam app，由 hook 改查這一場啟動的 shortcut。要在商店與記住的選擇之前。空的 function＝沒有覆寫
+    std::function<std::optional<bool>(const std::string &scene_appid)> shortcut;
     std::function<std::optional<bool>(const std::string &)> get_override;  ///< key → 手動選擇（true＝手把模式）
     std::function<void(const std::string &, bool)> set_override;
     std::function<int()> pad_alloc;  ///< 建虛擬手把，回傳 id；< 0＝失敗
@@ -74,7 +77,7 @@ namespace vr::padmode {
     bool pad_active() const;
 
   private:
-    enum class source_e { none, store, manual };
+    enum class source_e { none, store, manual, shortcut };
 
     void apply(bool want_pad, source_e source);
 

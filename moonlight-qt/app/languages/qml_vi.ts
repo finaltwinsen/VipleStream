@@ -1687,6 +1687,11 @@ Nếu lâu hơn, hãy kiểm tra máy chủ — có thể Steam Guard 2FA đang 
         <translation>Không thể khởi tạo trình giải mã video. Vui lòng kiểm tra cài đặt stream của bạn và thử lại.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Bộ giải mã video phần cứng không thể cấp phát bộ nhớ. Hãy khởi động lại thiết bị này rồi thử lại.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Đang chờ video từ máy chủ</translation>

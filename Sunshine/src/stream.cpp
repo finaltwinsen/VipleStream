@@ -56,6 +56,7 @@ extern "C" {
 #include "vr/vr_orchestrator.h"
 #include "vr/vr_padmode.h"
 #include "vr/vr_platform.h"
+#include "vr/vr_shortcuts.h"
 #include "vr/vr_scene_focus.h"
 #include "vr/vr_abr_outage.h"
 #include "vr/vr_abr_fast.h"
@@ -7499,6 +7500,15 @@ namespace stream {
           return ::vr::bridge::status().scene_pid;
         };
         h.resolve = ::vr::padmode::resolve_pid;
+        // §VR-SHORTCUT：pad=vr／xbox 在讀商店之前就定案。空的 scene app id 才改用這一場啟動的 id，
+        // 而且那個 id 只進覆寫、不進下面的商店查詢（回 nullopt 時 poll 仍用場景自己的 app id）。
+        h.shortcut = [](const std::string &scene_appid) -> std::optional<bool> {
+          std::string id = scene_appid;
+          if (id.empty()) {
+            id = ::vr::orchestrator::session_steam_app_id();
+          }
+          return ::vr::shortcuts::pad_for(config::vr.shortcuts, id);
+        };
         // 商店說「不支援 VR 手把」時再看一眼：遊戲向 SteamVR 的 OpenXR 登記過 VR 手把的按鍵對應，就是用 VR 手把玩的
         // （Pixel Dungeon VR：商店沒有那個分類，實際上有 Touch／Index 的對應）
         h.tracked = [](const std::string &appid) -> std::optional<bool> {

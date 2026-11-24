@@ -1687,6 +1687,11 @@ If it stalls longer, check the host — Steam Guard 2FA may be prompting.</sourc
         <translation>ビデオデコーダを初期化できませんでした。ストリーミングの設定を確認して再度お試しください。</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>ハードウェアビデオデコーダがメモリを確保できませんでした。このデバイスを再起動してから、もう一度お試しください。</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>ホストからの映像を待っています</translation>

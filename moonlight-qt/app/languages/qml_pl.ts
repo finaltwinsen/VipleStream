@@ -1687,6 +1687,11 @@ Jeśli trwa to dłużej, sprawdź hosta — może pojawić się monit Steam Guar
         <translation>Nie udało się zainicjalizować dekodera wideo. Sprawdź ustawienia strumieniowania i spróbuj ponownie.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>Sprzętowy dekoder wideo nie mógł przydzielić pamięci. Uruchom ponownie to urządzenie i spróbuj ponownie.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Oczekiwanie na obraz wideo z hosta</translation>

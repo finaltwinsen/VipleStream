@@ -147,6 +147,16 @@ public:
     // §FRUC-444-NOTICE：解碼器發現補幀因串流格式無法使用時呼叫（任意執行緒），主迴圈顯示一次提示
     void notifyFrucUnavailable() { m_FrucUnavailablePending.store(true); }
 
+    // §DEC-NOMEM：解碼執行緒印第一筆 ENOMEM 時讀（1 起算）。成功解出任何一張時歸零。
+    int hardwareDecoderNomemAttempt() const
+    {
+        return m_HwDecNomemFailedStarts.load(std::memory_order_acquire) + 1;
+    }
+    void clearHardwareDecoderNomemFailures()
+    {
+        m_HwDecNomemFailedStarts.store(0, std::memory_order_release);
+    }
+
     // §VR-SHELL：同一個程式只能有一個 XR session。頭盔 VR 介面（backend/xrshell.cpp）設這個鉤子：串流第一次要開
     // XrContext 之前呼叫 hook(true)（同步，介面先關掉自己的 session），整場串流結束後呼叫 hook(false)。任何執行緒呼叫
     static void setXrOwnerHook(std::function<void(bool sessionWantsXr)> hook);
@@ -201,6 +211,10 @@ signals:
 
 private:
     void exec();
+
+    // §DEC-NOMEM：即將刪掉的解碼器若是「硬體、一張都沒解出、連續失敗、這一輪有 ENOMEM」，計一次。
+    // 回傳 true＝已經連續兩次，呼叫端不要重建、結束這一場。
+    bool hardwareDecoderNomemGiveUp(IVideoDecoder* decoder);
 
     void pollScHidHotplug();   // §SC-HOTPLUG
 
@@ -377,6 +391,8 @@ private:
     NvApp m_App;
     SDL_Window* m_Window;
     IVideoDecoder* m_VideoDecoder;
+    // §DEC-NOMEM：連續「開不起來」的次數。解碼執行緒在第一張成功時歸零，主執行緒在重置時累加。
+    std::atomic<int> m_HwDecNomemFailedStarts{0};
     SDL_mutex* m_DecoderLock;
     bool m_AudioDisabled;
     // 主執行緒（焦點變化）寫、音訊解碼執行緒每包讀（opt B042）

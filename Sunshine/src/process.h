@@ -94,7 +94,11 @@ namespace proc {
     int64_t steam_playtime_minutes = 0;
     // VipleStream 2.0 §VR M1b V5（S1-16、§D.12）：只在 vr_pcvr=enabled 時設定
     bool vr_class = false;  ///< 「SteamVR Home」：只在 /applist?vr=1 出現，一般 /launch 回 VR_NEEDS_VR_CLIENT
-    std::string vr_launch_url;  ///< steamapps.vrmanifest 裡的 VR 遊戲：`steam://launch/<id>/VR`
+    std::string vr_launch_url;  ///< steamapps.vrmanifest 裡的 VR 遊戲：`steam://launch/<id>/VR`；§VR-SHORTCUT 不在清單裡的則是 `steam://rungameid/<id>`
+    /// §VR-SHORTCUT：非空時 VR 啟動改走 `steam.exe -applaunch <id> <args>`；空＝沒有額外參數。2D 的 cmd 不變
+    std::string vr_launch_args;
+    /// §VR-SHORTCUT：手把覆寫 "auto"／"vr"／"xbox"；空＝這筆不是 shortcut
+    std::string vr_pad;
     /// §VR-NETBENCH（2026-11-08）：「VR Network Test」——不啟動 SteamVR，host 播放預錄片段（vr_netbench_clip）
     bool vr_bench = false;
   };

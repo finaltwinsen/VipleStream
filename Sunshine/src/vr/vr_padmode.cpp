@@ -156,6 +156,21 @@ namespace vr::padmode {
       return;
     }
 
+    // §VR-SHORTCUT：覆寫在記住的手動選擇與商店快取之前，快取才蓋不掉。
+    // pid 為 0（沒有場景、遊戲已結束）不套用，避免 xbox 在空場景被插上，也保留「遊戲結束就關手把」。
+    // 對得到 Steam app id 就用那個；有行程但對不到才傳空字串，hook 改用這一場啟動的 shortcut，而且那個 id 不進商店查詢。
+    const bool have_steam_id = app_ && !app_->appid.empty();
+    if (h_.shortcut && (have_steam_id || pid_ != 0)) {
+      const std::string scene_id = have_steam_id ? app_->appid : std::string {};
+      if (const auto o = h_.shortcut(scene_id)) {
+        decided_ = true;
+        BOOST_LOG(info) << "[VIPLE-VR-PADMODE] " << (scene_id.empty() ? "session shortcut" : scene_id)
+                        << ": shortcut override: " << (*o ? "xbox pad" : "vr controllers");
+        apply(*o, source_e::shortcut);
+        return;
+      }
+    }
+
     if (!app_ || app_->key.empty()) {
       decided_ = true;
       if (session_override_set_) {
@@ -213,7 +228,8 @@ namespace vr::padmode {
         pad_id_ = id;
         sent_ = false;
       }
-      BOOST_LOG(info) << "[VIPLE-VR-PADMODE] xbox pad mode ON (" << (source == source_e::manual ? "manual" : "auto") << ") pad=" << id;
+      const char *how = source == source_e::manual ? "manual" : source == source_e::shortcut ? "shortcut" : "auto";
+      BOOST_LOG(info) << "[VIPLE-VR-PADMODE] xbox pad mode ON (" << how << ") pad=" << id;
       if (h_.notice) {
         h_.notice(source == source_e::manual ? notice_e::pad_on_manual : notice_e::pad_on_auto);
       }
@@ -226,7 +242,8 @@ namespace vr::padmode {
       if (h_.pad_free) {
         h_.pad_free(cur);
       }
-      BOOST_LOG(info) << "[VIPLE-VR-PADMODE] xbox pad mode OFF (" << (source == source_e::manual ? "manual" : "auto") << ")";
+      const char *how = source == source_e::manual ? "manual" : source == source_e::shortcut ? "shortcut" : "auto";
+      BOOST_LOG(info) << "[VIPLE-VR-PADMODE] xbox pad mode OFF (" << how << ")";
       // 自動關（遊戲結束、換成 VR 手把遊戲）不提示，只有手動切回才提示
       if (source == source_e::manual && h_.notice) {
         h_.notice(notice_e::pad_off_manual);

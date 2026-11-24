@@ -1687,6 +1687,11 @@ Se demorar mais, verifique o host — o Steam Guard (2FA) pode estar pedindo con
         <translation>Não foi possível inicializar o decodificador de vídeo. Verifique as configurações de transmissão e tente novamente.</translation>
     </message>
     <message>
+        <location filename="../streaming/session.cpp" line="6478" />
+        <source>The hardware video decoder could not allocate memory. Restart this device and try again.</source>
+        <translation>O decodificador de vídeo por hardware não conseguiu alocar memória. Reinicie este dispositivo e tente novamente.</translation>
+    </message>
+    <message>
         <location filename="../streaming/xr/xrcontext.cpp" line="1780" />
         <source>Waiting for video from the host</source>
         <translation>Aguardando vídeo do host</translation>
