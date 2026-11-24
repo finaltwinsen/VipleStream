@@ -45,6 +45,17 @@
 
 ## 各章節待辦補充
 
+### §QUEST Meta Quest 原生 OpenXR client（2026-11-24 開工，2.0.275；**OpenXR 顯示路徑沒有實機、從未執行**）
+
+做在 `moonlight-android`：新 native 模組 `jni/viple-openxr/`（只建 arm64）＋`com.limelight.vr`。分期 Q0 2D 面板、Q1 浮空螢幕、Q2 PCVR、Q3 節拍與注視點、Q4 VR 介面與 release。
+
+- **驗過**：編譯；手機對 Windows server 的一般串流回歸；PCVR 協定（協商、追蹤上行 288/s、0x81 配對、1 Hz 回報）用手機的 `--ez vr_emulate true` 對 server 跑通，兩端計數一致。
+- **只編譯過、待 Quest 實機**：Q0 的 Quest 分支（`QuestSupport.isQuest()`；看 `[VIPLE-QUEST-2D] detect`／`pointer`）、`qxr_session`／`qxr_video`（OpenXR、AHardwareBuffer→Vulkan）、`VrStreamActivity`（`--ez vr_screen true`）。外部模型審過一輪並修正，修正後沒有再審。
+- **待做（Q2 的 OpenXR 半邊）**：真的頭手姿態接 `QxrPoseSource`、projection layer、Touch／Touch Plus 綁定與 haptic 輸出、LATCH 上行、VR 被拒後 quit、依裝置解碼能力協商 codec（Quest 3 有 AV1）、從介面進入的入口。haptic 下行的接收路徑還沒被觸發過。
+- **待做（Q3）**：直接 include Frame 版只用標準庫的標頭（`xrrateauto.h`、`xrbufferauto.h`、`xrflight.h`、`xrlatchstats.h` 等；`Android.mk` 已設路徑）。`xrphase.h` 的 vblank 常數只在 Frame 120 Hz 量過，Quest 不可套用。
+- `qxr_video` 不依賴 OpenXR，可以在手機上單獨驗影像匯入，測試入口還沒寫。
+
+
 ### 2026-11-22：頭盔 2D 串流的兩個輸入問題（2.0.270，已發佈；host 與頭盔都是 2.0.270）
 
 - **§STREAM-MENU-HOOK**：頭盔上的 Steam Controller 經 §SC-HID 變成 host 的虛擬手把，host 的 Steam 把它轉成滑鼠，不經我們的注入路徑，

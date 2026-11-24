@@ -52,6 +52,8 @@ import com.limelight.LimeLog;
 import com.limelight.nvstream.ConnectionContext;
 import com.limelight.nvstream.http.PairingManager.PairState;
 import com.limelight.nvstream.jni.MoonBridge;
+import com.limelight.nvstream.vr.VrLaunchConfig;
+import com.limelight.nvstream.vr.VrSessionInfo;
 
 import okhttp3.ConnectionPool;
 import okhttp3.HttpUrl;
@@ -382,6 +384,30 @@ public class NvHTTP {
         return getXmlString(new StringReader(str), tagname, throwIfMissing);
     }
     
+    // §QUEST-VR：launch 的 HTTP 本文已經到手，錯誤在 XML 屬性，不會自己變成例外。
+    private static void throwIfVrHostError(String xmlStr) throws XmlPullParserException, IOException {
+        XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
+        XmlPullParser xpp = factory.newPullParser();
+        xpp.setInput(new StringReader(xmlStr));
+        int event = xpp.getEventType();
+        while (event != XmlPullParser.END_DOCUMENT) {
+            if (event == XmlPullParser.START_TAG && "root".equals(xpp.getName())) {
+                // 沒有 status_code 就維持原本用 gamesession 判斷，不把舊版回應變成連線失敗。
+                if (xpp.getAttributeValue(XmlPullParser.NO_NAMESPACE, "status_code") == null) {
+                    return;
+                }
+                try {
+                    verifyResponseStatus(xpp);
+                } catch (NumberFormatException e) {
+                    // 為什麼吞掉：不是數字就交給 gamesession，不另外發明一種失敗。
+                    return;
+                }
+                return;
+            }
+            event = xpp.next();
+        }
+    }
+
     private static void verifyResponseStatus(XmlPullParser xpp) throws HostHttpResponseException {
         // We use Long.parseLong() because in rare cases GFE can send back a status code of
         // 0xFFFFFFFF, which will cause Integer.parseInt() to throw a NumberFormatException due
@@ -524,6 +550,9 @@ public class NvHTTP {
                 details.serverCodecModeSupport = 0;
             }
         }
+        // §QUEST-VR：沒有這兩個元素時維持 0，呼叫端才知道這台 host 不能開 VR。
+        details.vipleStreamVr = getVipleStreamVr(serverInfo);
+        details.vipleStreamVrProto = getVipleStreamVrProto(serverInfo);
         details.supportedDisplayModes = parseDisplayModes(serverInfo);
 
         // We could reach it so it's online
@@ -534,6 +563,27 @@ public class NvHTTP {
     
     public ComputerDetails getComputerDetails(boolean likelyOnline) throws IOException, XmlPullParserException {
         return getComputerDetails(getServerInfo(likelyOnline));
+    }
+
+    // §QUEST-VR：十進位 bitmask。元素不在、或不是整數，回 0（對齊 Qt QString::toInt() 失敗當 0）。
+    public int getVipleStreamVr(String serverInfo) throws XmlPullParserException, IOException {
+        return parseDecimalOrZero(getXmlString(serverInfo, "VipleStreamVR", false));
+    }
+
+    // §QUEST-VR：<VipleStreamVRProto>。沒有元素回 0。
+    public int getVipleStreamVrProto(String serverInfo) throws XmlPullParserException, IOException {
+        return parseDecimalOrZero(getXmlString(serverInfo, "VipleStreamVRProto", false));
+    }
+
+    private static int parseDecimalOrZero(String text) {
+        if (text == null) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(text.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     // This hack is Android-specific but we do it on all platforms
@@ -856,6 +906,13 @@ public class NvHTTP {
         return openHttpConnectionToString(httpClientLongConnectTimeout, getHttpsUrl(true), "applist");
     }
     
+    // §QUEST-VR：vr=1 時 host 在標準清單之外加上 VR 專用的 app（例如 SteamVR Home）。
+    // 一般清單不帶這個參數，query 與原本相同。不寫進快取檔：快取是給 2D 介面用的。
+    public LinkedList<NvApp> getVrAppList() throws HostHttpResponseException, IOException, XmlPullParserException {
+        return getAppListByReader(new StringReader(
+                openHttpConnectionToString(httpClientLongConnectTimeout, getHttpsUrl(true), "applist", "vr=1")));
+    }
+
     public LinkedList<NvApp> getAppList() throws HostHttpResponseException, IOException, XmlPullParserException {
         if (verbose) {
             // Use the raw function so the app list is printed
@@ -919,6 +976,22 @@ public class NvHTTP {
     }
     
     public boolean launchApp(ConnectionContext context, String verb, int appId, boolean enableHdr) throws IOException, XmlPullParserException {
+        // §QUEST-VR：Steam 自己的 VR 串流還開著時 host 回 VRLINK_ACTIVE。Qt 會把 vrForce 設上再送一次。
+        VrLaunchConfig vrLaunch = context.streamConfig.getVrLaunch();
+        try {
+            return launchAppOnce(context, verb, appId, enableHdr, vrLaunch);
+        } catch (HostHttpResponseException e) {
+            String status = e.getErrorMessage();
+            if (vrLaunch != null && !vrLaunch.force && status != null && status.contains("VRLINK_ACTIVE")) {
+                vrLaunch.force = true;
+                LimeLog.info("[VIPLE-VR-SESSION] host busy with Steam's own VR streaming; retrying " + verb + " with vrForce=1");
+                return launchAppOnce(context, verb, appId, enableHdr, vrLaunch);
+            }
+            throw e;
+        }
+    }
+
+    private boolean launchAppOnce(ConnectionContext context, String verb, int appId, boolean enableHdr, VrLaunchConfig vrLaunch) throws IOException, XmlPullParserException {
         // Using an FPS value over 60 causes SOPS to default to 720p60,
         // so force it to 0 to ensure the correct resolution is set. We
         // used to use 60 here but that locked the frame rate to 60 FPS
@@ -941,6 +1014,9 @@ public class NvHTTP {
             }
         }
 
+        // §QUEST-VR：vrLaunch == null 時尾端是空字串，query 與改動前逐字相同。
+        String vrQuery = vrLaunch != null ? vrLaunch.toQuery() : "";
+
         String xmlStr = openHttpConnectionToString(httpClientLongConnectNoReadTimeout, getHttpsUrl(true), verb,
             "appid=" + appId +
             "&mode=" + context.negotiatedWidth + "x" + context.negotiatedHeight + "x" + fps +
@@ -953,11 +1029,22 @@ public class NvHTTP {
             "&remoteControllersBitmap=" + context.streamConfig.getAttachedGamepadMask() +
             "&gcmap=" + context.streamConfig.getAttachedGamepadMask() +
             "&gcpersist="+(context.streamConfig.getPersistGamepadsAfterDisconnect() ? 1 : 0) +
-            MoonBridge.getLaunchUrlQueryParameters());
+            MoonBridge.getLaunchUrlQueryParameters() +
+            vrQuery);
+        // §QUEST-VR：為什麼只在 VR 檢查——Sunshine 的錯誤是 HTTP 200，status_code 寫在 root。
+        // 不檢查的話 VRLINK_ACTIVE 只會讓 launchApp 回 false，vrForce 重試不會發生。
+        // 一般 session 不走這裡，成敗仍只看 gamesession／resume 是不是 0。
+        if (vrLaunch != null) {
+            throwIfVrHostError(xmlStr);
+        }
         if ((verb.equals("launch") && !getXmlString(xmlStr, "gamesession", true).equals("0") ||
                 (verb.equals("resume") && !getXmlString(xmlStr, "resume", true).equals("0")))) {
             // sessionUrl0 will be missing for older GFE versions
             context.rtspSessionUrl = getXmlString(xmlStr, "sessionUrl0", false);
+            // §QUEST-VR：沒要求 VR 就不讀這個元素，避免多一次解析改到一般 session 的失敗路徑。
+            if (vrLaunch != null) {
+                context.vrSession = VrSessionInfo.parse(getXmlString(xmlStr, "VipleStreamVRSession", false));
+            }
             return true;
         }
         else {

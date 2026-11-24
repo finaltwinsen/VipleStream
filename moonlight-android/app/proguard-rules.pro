@@ -7,6 +7,9 @@
 # Moonlight common
 -keep class com.limelight.nvstream.jni.* {*;}
 
+# native 會叫 onSessionEnded；Java 沒有呼叫點，R8 會當成沒用到拿掉。
+-keep class com.limelight.vr.QxrNative { *; }
+
 # Okio
 -keep class sun.misc.Unsafe {*;}
 -dontwarn java.nio.file.*

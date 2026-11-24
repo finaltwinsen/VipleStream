@@ -18,6 +18,7 @@ import android.view.WindowInsets;
 import android.view.WindowManager;
 
 import com.limelight.Game;
+import com.limelight.LimeLog;
 import com.limelight.R;
 import com.limelight.nvstream.http.ComputerDetails;
 import com.limelight.preferences.PreferenceConfiguration;
@@ -29,9 +30,21 @@ public class UiHelper {
     private static final int TV_VERTICAL_PADDING_DP = 15;
     private static final int TV_HORIZONTAL_PADDING_DP = 15;
 
+    private static boolean loggedMissingGameManager;
+    private static boolean loggedMissingLocaleManager;
+
     private static void setGameModeStatus(Context context, boolean streaming, boolean interruptible) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             GameManager gameManager = context.getSystemService(GameManager.class);
+            // §QUEST-2D：API 33 有這個類別，不代表系統服務存在。Horizon OS 不保證有 GameManager，
+            // 直接呼叫會 NPE。所有裝置都先檢查；有服務時仍走下面原本的 setGameState。
+            if (gameManager == null) {
+                if (!loggedMissingGameManager) {
+                    loggedMissingGameManager = true;
+                    LimeLog.info("[VIPLE-QUEST-2D] GameManager is null; skip setGameState");
+                }
+                return;
+            }
 
             if (streaming) {
                 gameManager.setGameState(new GameState(false, interruptible ? GameState.MODE_GAMEPLAY_INTERRUPTIBLE : GameState.MODE_GAMEPLAY_UNINTERRUPTIBLE));
@@ -69,8 +82,17 @@ public class UiHelper {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 // On Android 13, migrate this non-default language setting into the OS native API
                 LocaleManager localeManager = activity.getSystemService(LocaleManager.class);
-                localeManager.setApplicationLocales(LocaleList.forLanguageTags(locale));
-                PreferenceConfiguration.completeLanguagePreferenceMigration(activity);
+                // §QUEST-2D：跟 GameManager 同一類。服務是 null 就留在原本的偏好設定，不要遷移，也不要解參考。
+                if (localeManager == null) {
+                    if (!loggedMissingLocaleManager) {
+                        loggedMissingLocaleManager = true;
+                        LimeLog.info("[VIPLE-QUEST-2D] LocaleManager is null; skip setApplicationLocales");
+                    }
+                }
+                else {
+                    localeManager.setApplicationLocales(LocaleList.forLanguageTags(locale));
+                    PreferenceConfiguration.completeLanguagePreferenceMigration(activity);
+                }
             }
             else {
                 Configuration config = new Configuration(activity.getResources().getConfiguration());
@@ -113,6 +135,8 @@ public class UiHelper {
     {
         View rootView = activity.findViewById(android.R.id.content);
         UiModeManager modeMgr = (UiModeManager) activity.getSystemService(Context.UI_MODE_SERVICE);
+        // §QUEST-2D：UI_MODE_SERVICE 允許回 null，直接 getCurrentModeType 會 NPE。
+        // null 就當成不是電視，走下面原本的非電視分支。
 
         // Set GameState.MODE_NONE initially for all activities
         setGameModeStatus(activity, false, false);
@@ -127,7 +151,7 @@ public class UiHelper {
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
 
-        if (modeMgr.getCurrentModeType() == Configuration.UI_MODE_TYPE_TELEVISION) {
+        if (modeMgr != null && modeMgr.getCurrentModeType() == Configuration.UI_MODE_TYPE_TELEVISION) {
             // Increase view padding on TVs
             float scale = activity.getResources().getDisplayMetrics().density;
             int verticalPaddingPixels = (int) (TV_VERTICAL_PADDING_DP*scale + 0.5f);

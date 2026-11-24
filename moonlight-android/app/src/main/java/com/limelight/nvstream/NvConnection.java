@@ -40,6 +40,7 @@ import com.limelight.nvstream.http.NvHTTP;
 import com.limelight.nvstream.http.PairingManager;
 import com.limelight.nvstream.input.MouseButtonPacket;
 import com.limelight.nvstream.jni.MoonBridge;
+import com.limelight.nvstream.vr.VrSessionInfo;
 import com.limelight.relay.RelayClient;
 import com.limelight.relay.RelayTcpTunnel;
 
@@ -515,7 +516,15 @@ public class NvConnection {
                             context.connListener.displayMessage("Failed to resume existing session");
                             return false;
                         }
+                        if (!acceptVrSession(context)) {
+                            return false;
+                        }
                     } catch (IOException resumeEx) {
+                        // §QUEST-VR：relay 的 /resume 不帶 vr*，接上去會變成平面 session。
+                        if (context.streamConfig.getVrLaunch() != null) {
+                            context.connListener.displayMessage("Connection to the host failed. VR streaming was not started.");
+                            return false;
+                        }
                         // VipleStream: Direct resume failed, try relay
                         if (!tryRelayLaunch("resume", app.getAppId(), context)) {
                             throw resumeEx;
@@ -582,7 +591,15 @@ public class NvConnection {
                 context.connListener.displayMessage("Failed to launch application");
                 return false;
             }
+            if (!acceptVrSession(context)) {
+                return false;
+            }
         } catch (IOException e) {
+            // §QUEST-VR：relay 的 /launch 不帶 vr*，接上去會變成平面 session。
+            if (context.streamConfig.getVrLaunch() != null) {
+                context.connListener.displayMessage("Connection to the host failed. VR streaming was not started.");
+                return false;
+            }
             // VipleStream: Direct launch failed, try relay
             if (!tryRelayLaunch("launch", context.streamConfig.getApp().getAppId(), context)) {
                 throw e; // No relay configured or relay also failed, re-throw
@@ -591,6 +608,34 @@ public class NvConnection {
 
         LimeLog.info("Launched new game session");
 
+        return true;
+    }
+
+    // §QUEST-VR：要求了 VR 卻沒有有效的 <VipleStreamVRSession> 就結束，不改走平面。
+    // 分塊注視點的編碼尺寸是 packed，不是兩眼並排；這裡改的是後面 RTSP 用的寬高。
+    private boolean acceptVrSession(ConnectionContext context) {
+        if (context.streamConfig.getVrLaunch() == null) {
+            return true;
+        }
+        VrSessionInfo session = context.vrSession;
+        if (session == null || !session.valid) {
+            LimeLog.warning("[VIPLE-VR-SESSION] server did not confirm a VR session");
+            context.connListener.displayMessage("The host did not start a VR session. The host does not support VR, or PCVR is not enabled.");
+            return false;
+        }
+        if (session.tileW > 0) {
+            LimeLog.info("[VIPLE-VR-FOVEA] tiles: " + session.tileW + "x" + session.tileH
+                    + " stream " + session.packedWidth + "x" + session.packedHeight
+                    + " (was " + context.negotiatedWidth + "x" + context.negotiatedHeight + ")");
+            context.negotiatedWidth = session.packedWidth;
+            context.negotiatedHeight = session.packedHeight;
+        }
+        LimeLog.info("[VIPLE-VR-SESSION] negotiated proto=" + session.proto
+                + " packed=" + session.packedWidth + "x" + session.packedHeight
+                + " hz=" + session.refreshHz
+                + " recovery=" + (session.recoveryIntra ? "intra" : "idr")
+                + " multilink=" + (session.multilink ? 1 : 0)
+                + " vrFlags=0x" + Integer.toHexString(session.toVrFlags()));
         return true;
     }
 
@@ -966,9 +1011,17 @@ public class NvConnection {
                                 + MoonBridge.getLocalControlPort());
                     }
 
+                    // §QUEST-VR：沒有談成的 session 時 vrFlags 是 0，下面 QUIC 的條件與改動前相同。
+                    int vrFlags = 0;
+                    if (context.streamConfig.getVrLaunch() != null && context.vrSession != null && context.vrSession.valid) {
+                        vrFlags = context.vrSession.toVrFlags();
+                        videoDecoderRenderer.setVrSession(true);
+                    }
+
                     // VipleStream §Q: inject network interfaces before starting
                     // so QUIC multipath can create subflows for WiFi + Cellular.
-                    if (context.streamConfig.getMpQuicEnabled()) {
+                    // §QUEST-VR：VR 不走 QUIC 視訊，所以不進這個區塊（ticket、行動網路待命都是 QUIC）。
+                    if (context.streamConfig.getMpQuicEnabled() && vrFlags == 0) {
                         try {
                             ConnectivityManager cm = (ConnectivityManager)
                                     appContext.getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -1000,6 +1053,18 @@ public class NvConnection {
                             MoonBridge.setQuicTicketStorePath(null);
                         }
                     }
+                    else if ((vrFlags & VrSessionInfo.SF_MULTILINK) != 0) {
+                        // §QUEST-VR：Android 的網卡清單只有這次注入。不開 QUIC 的 ticket，也不要求行動網路待命。
+                        try {
+                            ConnectivityManager cm = (ConnectivityManager)
+                                    appContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+                            if (cm != null) {
+                                injectNetInterfaces(cm);
+                            }
+                        } catch (Exception e) {
+                            LimeLog.warning("[VIPLE-VR-LINK] Failed to enumerate interfaces: " + e.getMessage());
+                        }
+                    }
 
                     // §PERF-1113 A22：自動判定成遠端（VPN）而用了 1024 的保守值時，確定是 Tailscale 就改 1184。
                     // 放在這裡而不是 startApp()：要等 /launch 做完才知道有沒有改走 relay
@@ -1025,10 +1090,11 @@ public class NvConnection {
                             context.videoCapabilities,
                             context.streamConfig.getColorSpace(),
                             context.streamConfig.getColorRange(),
-                            context.streamConfig.getMpQuicEnabled(),
+                            vrFlags == 0 && context.streamConfig.getMpQuicEnabled(),
                             context.streamConfig.getMpQuicScheduler(),
                             context.streamConfig.getMpQuicPort(),
-                            context.streamConfig.getAutoAdjustBitrate());
+                            context.streamConfig.getAutoAdjustBitrate(),
+                            vrFlags);
                     if (ret != 0) {
                         // §REVIEW-1104：startConnection 失敗時及時關閉 relay tunnel，避免洩漏 WebSocket 連線
                         if (relayTunnel != null) {

@@ -161,6 +161,7 @@ LOCAL_SRC_FILES := moonlight-common-c/src/AudioStream.c \
                    moonlight-common-c/enet/win32.c \
                    simplejni.c \
                    callbacks.c \
+                   viple_vr_bridge.c \
                    minisdl.c \
                    vk_probe.c \
                    vk_backend.c \

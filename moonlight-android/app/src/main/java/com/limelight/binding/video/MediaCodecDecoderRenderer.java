@@ -74,6 +74,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private int initialWidth, initialHeight;
     private int videoFormat;
     private SurfaceHolder renderTarget;
+    // Quest OpenXR 把解碼器接到 AImageReader。null 時走原本的 SurfaceHolder。
+    private Surface directOutputSurface;
     // VipleStream §I.B.0: holds the abstract backend so we can plug
     // in a Vulkan implementation without touching the Game/MediaCodec
     // wiring. Concrete type chosen at init based on prefs / fallback.
@@ -194,6 +196,19 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private final long[] inFlightSubmitNs = new long[IN_FLIGHT_CAPACITY];
     private int inFlightHead = 0;
 
+    // §QUEST-VR：VR 的 PTS 是 frameNumber，不能拿來當牆上時鐘。64 格從最新往回找；
+    // 超過這個視窗就略過這一筆，避免用幀號算出錯誤的解碼耗時。
+    private volatile boolean vrSession;
+    private static final int VR_SUBMIT_RING = 64;
+    // PTS＝frameNumber×這個步距（微秒）。直接用幀號會讓相鄰兩幀只差 1 µs，有的硬體解碼器拿 PTS 間隔估幀率，
+    // 行為無法預期；8 ms 相當於 125 fps，落在正常範圍。native 端用同一個常數除回幀號
+    // （viple_vr_bridge.h 的 VIPLE_VR_BRIDGE_PTS_STEP_US，兩邊必須相同）。
+    public static final long VR_PTS_STEP_US = 8000;
+    private final int[] vrSubmitFrame = new int[VR_SUBMIT_RING];
+    private final long[] vrSubmitUs = new long[VR_SUBMIT_RING];
+    private int vrSubmitHead;
+    private int vrSubmitFilled;
+
     // 依 MediaCodec 輸出緩衝區索引 (outIndex) 記錄出列與接收時間
     private final long[] outBufferDequeueNs = new long[MAX_OUT_BUFFERS];
     private final long[] outBufferRecvNs = new long[MAX_OUT_BUFFERS];
@@ -266,6 +281,46 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 }
             }
         }
+    }
+
+    // §QUEST-VR
+    @Override
+    public void setVrSession(boolean vrSession) {
+        this.vrSession = vrSession;
+        synchronized (perfLock) {
+            // 為什麼清掉：上一場留下的 frameNumber 會讓這一場配到舊的送入時刻。
+            vrSubmitHead = 0;
+            vrSubmitFilled = 0;
+        }
+    }
+
+    // 回傳值只由 frameNumber 決定：輸出端要靠 PTS 找回 0x81，不能為了單調再加 1。
+    private long noteVrSubmit(int frameNumber) {
+        long submitUs = System.nanoTime() / 1000;
+        synchronized (perfLock) {
+            int slot = vrSubmitHead & (VR_SUBMIT_RING - 1);
+            vrSubmitFrame[slot] = frameNumber;
+            vrSubmitUs[slot] = submitUs;
+            vrSubmitHead++;
+            if (vrSubmitFilled < VR_SUBMIT_RING) {
+                vrSubmitFilled++;
+            }
+        }
+        return frameNumber * VR_PTS_STEP_US;
+    }
+
+    // 查不到回 Long.MIN_VALUE。nanoTime()/1000 到不了這個值，不會和真的送入時刻撞上。
+    private long lookupVrSubmitUs(int frameNumber) {
+        synchronized (perfLock) {
+            int n = vrSubmitFilled;
+            for (int i = 0; i < n; i++) {
+                int slot = (vrSubmitHead - 1 - i) & (VR_SUBMIT_RING - 1);
+                if (vrSubmitFrame[slot] == frameNumber) {
+                    return vrSubmitUs[slot];
+                }
+            }
+        }
+        return Long.MIN_VALUE;
     }
 
     // 記錄輸出緩衝區從 MediaCodec 取出 (dequeue) 事件
@@ -584,6 +639,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         this.renderTarget = renderTarget;
     }
 
+    // 解碼器直接輸出到這張 Surface，不再讀 SurfaceHolder，也不包補幀。
+    // 為什麼不包補幀：補幀會把解碼器改接到自己的輸入 Surface，呼叫端就拿不到 AHardwareBuffer。
+    public void setDirectOutputSurface(Surface surface) {
+        this.directOutputSurface = surface;
+    }
+
     public MediaCodecDecoderRenderer(Activity activity, PreferenceConfiguration prefs,
                                      CrashListener crashListener, int consecutiveCrashCount,
                                      boolean meteredData, boolean requestedHdr,
@@ -877,8 +938,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         //      Default users have neither → Vulkan path skipped entirely.
         //   2. GLES (existing FrucRenderer) as fallback. Init failure here
         //      drops to direct rendering (FRUC OFF) the same way as before.
-        Surface decoderOutputSurface = renderTarget.getSurface();
-        if (context != null && prefs.enableFruc) {
+        // directOutputSurface 為 null 時，下面這行與補幀條件和改之前相同（Game 沒設這張 Surface）。
+        Surface decoderOutputSurface = directOutputSurface != null
+                ? directOutputSurface
+                : renderTarget.getSurface();
+        if (directOutputSurface == null && context != null && prefs.enableFruc) {
             // §REVIEW-1104：MediaFormat.getInteger(String, int) 為 API 29+，改用相容 API 16 的 getInteger(String) 避免 NoSuchMethodError
             int w = format.containsKey(MediaFormat.KEY_WIDTH) ? format.getInteger(MediaFormat.KEY_WIDTH) : 1920;
             int h = format.containsKey(MediaFormat.KEY_HEIGHT) ? format.getInteger(MediaFormat.KEY_HEIGHT) : 1080;
@@ -1095,7 +1159,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
         else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE) != 0) {
             int err = MoonBridge.pyroWaveInit(
-                    renderTarget.getSurface(),
+                    directOutputSurface != null ? directOutputSurface : renderTarget.getSurface(),
                     videoFormat,
                     initialWidth,
                     initialHeight,
@@ -1490,7 +1554,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             Integer nextOutputBuffer = outputBufferQueue.poll();
             if (nextOutputBuffer != null) {
                 try {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    if (directOutputSurface != null) {
+                        // 時間戳多載會把 AImage 的時間戳改成呈現時間，native 就除不回 frameNumber。
+                        videoDecoder.releaseOutputBuffer(nextOutputBuffer, true);
+                    }
+                    else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                         videoDecoder.releaseOutputBuffer(nextOutputBuffer, frameTimeNanos);
                     }
                     else {
@@ -1578,7 +1646,11 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                     onOutputBufferDequeued(outIndex, presentationTimeUs, System.nanoTime());
                                 }
 
-                                if (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
+                                if (directOutputSurface != null) {
+                                    // 同 doFrame：保留 queueInputBuffer 寫進去的 PTS。
+                                    videoDecoder.releaseOutputBuffer(lastIndex, true);
+                                }
+                                else if (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
                                         prefs.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS) {
                                     // In max smoothness or cap FPS mode, we want to never drop frames
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -1639,7 +1711,15 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                             // gives us sub-millisecond resolution for hardware
                             // decoders that finish a frame in < 1 ms (was always
                             // 0 in the old ms-truncated form).
-                            long deltaUs = (System.nanoTime() / 1000) - presentationTimeUs;
+                            long deltaUs;
+                            if (vrSession) {
+                                // §QUEST-VR：PTS 是 frameNumber。用送入當下記下的牆上時鐘；查不到就不計。
+                                long submitUs = lookupVrSubmitUs((int) (presentationTimeUs / VR_PTS_STEP_US));
+                                deltaUs = submitUs == Long.MIN_VALUE ? -1L : (System.nanoTime() / 1000) - submitUs;
+                            }
+                            else {
+                                deltaUs = (System.nanoTime() / 1000) - presentationTimeUs;
+                            }
                             if (deltaUs >= 0 && deltaUs < 1_000_000) {
                                 activeWindowVideoStats.decoderTimeUs += deltaUs;
                                 if (!USE_FRAME_RENDER_TIME) {
@@ -2456,13 +2536,20 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         // MediaCodec and read back in BufferInfo.presentationTimeUs;
         // it's NOT used for releaseOutputBuffer renderTimestamp here, so
         // changing the source is safe.
-        long timestampUs = System.nanoTime() / 1000;
-        if (timestampUs <= lastTimestampUs) {
-            // We can't submit multiple buffers with the same timestamp
-            // so bump it up by one before queuing
-            timestampUs = lastTimestampUs + 1;
+        long timestampUs;
+        if (vrSession) {
+            // §QUEST-VR：對齊 vrframemeta.h，輸出端用 PTS 查回 0x81。加 1 會讓那次查詢落空。
+            timestampUs = noteVrSubmit(frameNumber);
         }
-        lastTimestampUs = timestampUs;
+        else {
+            timestampUs = System.nanoTime() / 1000;
+            if (timestampUs <= lastTimestampUs) {
+                // We can't submit multiple buffers with the same timestamp
+                // so bump it up by one before queuing
+                timestampUs = lastTimestampUs + 1;
+            }
+            lastTimestampUs = timestampUs;
+        }
 
         numFramesIn++;
 

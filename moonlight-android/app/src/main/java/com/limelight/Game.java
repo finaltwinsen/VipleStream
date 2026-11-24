@@ -27,15 +27,18 @@ import com.limelight.nvstream.input.ControllerPacket;
 import com.limelight.nvstream.input.KeyboardPacket;
 import com.limelight.nvstream.input.MouseButtonPacket;
 import com.limelight.nvstream.jni.MoonBridge;
+import com.limelight.nvstream.vr.VrLaunchConfig;
 import com.limelight.preferences.GlPreferences;
 import com.limelight.preferences.PreferenceConfiguration;
 import com.limelight.ui.GameGestures;
 import com.limelight.ui.StreamView;
 import com.limelight.utils.Dialog;
+import com.limelight.utils.QuestSupport;
 import com.limelight.utils.ServerHelper;
 import com.limelight.utils.ShortcutHelper;
 import com.limelight.utils.SpinnerDialog;
 import com.limelight.utils.UiHelper;
+import com.limelight.vr.QxrNative;
 
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
@@ -101,6 +104,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     }
 
     private int lastButtonState = 0;
+    // §QUEST-2D：實機只留前幾筆指標 log，避免 hover 洗版
+    private int questPointerLogsLeft = 12;
+    private int questLoggedButtonState = -1;
 
     // Only 2 touches are supported
     private final TouchContext[] touchContextMap = new TouchContext[2];
@@ -173,6 +179,16 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private WifiManager.WifiLock lowLatencyWifiLock;
 
     private boolean connectedToUsbDriverService = false;
+
+    // §QUEST-VR：vr_emulate 沒開時這些維持預設，一般串流不讀它們。
+    private boolean vrEmulate;
+    private int vrEyeWidth = 1440;
+    private int vrEyeHeight = 1440;
+    private int vrHz = 72;
+    private String vrMotion = "sine";
+    private VrLaunchConfig vrLaunch;
+    private long vrEmuHandle;
+    private boolean vrEmuReleased;
     private ServiceConnection usbDriverServiceConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName componentName, IBinder iBinder) {
@@ -255,6 +271,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         // VipleStream CLI mode: override prefConfig with intent extras from CliStreamActivity
         applyCliOverrides(prefConfig, getIntent());
 
+        // §QUEST-VR：只有帶 vr_emulate 才改偏好。沒有這個 extra 時，後面的組態跟以前相同。
+        if (getIntent().getBooleanExtra("vr_emulate", false)) {
+            applyVrEmulatePrefs(prefConfig, getIntent());
+        }
+
         // Enter landscape unless we're on a square screen
         setPreferredOrientationForCurrentDisplay();
 
@@ -332,26 +353,34 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         // Warn the user if they're on a metered connection
         ConnectivityManager connMgr = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (connMgr.isActiveNetworkMetered()) {
+        // §QUEST-2D：getSystemService 允許回 null，直接 isActiveNetworkMetered 會在開串流時 NPE。
+        // 有服務時條件與原本相同。
+        if (connMgr != null && connMgr.isActiveNetworkMetered()) {
             displayTransientMessage(getResources().getString(R.string.conn_metered));
         }
 
         // Make sure Wi-Fi is fully powered up
         WifiManager wifiMgr = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        try {
-            highPerfWifiLock = wifiMgr.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Moonlight High Perf Lock");
-            highPerfWifiLock.setReferenceCounted(false);
-            highPerfWifiLock.acquire();
+        // §QUEST-2D：沒有 Wi-Fi 服務時這裡是 null。下面的 try 只接 SecurityException，接不到 NPE。
+        if (wifiMgr != null) {
+            try {
+                highPerfWifiLock = wifiMgr.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "Moonlight High Perf Lock");
+                highPerfWifiLock.setReferenceCounted(false);
+                highPerfWifiLock.acquire();
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                lowLatencyWifiLock = wifiMgr.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "Moonlight Low Latency Lock");
-                lowLatencyWifiLock.setReferenceCounted(false);
-                lowLatencyWifiLock.acquire();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    lowLatencyWifiLock = wifiMgr.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "Moonlight Low Latency Lock");
+                    lowLatencyWifiLock.setReferenceCounted(false);
+                    lowLatencyWifiLock.acquire();
+                }
+            } catch (SecurityException e) {
+                // Some Samsung Galaxy S10+/S10e devices throw a SecurityException from
+                // WifiLock.acquire() even though we have android.permission.WAKE_LOCK in our manifest.
+                e.printStackTrace();
             }
-        } catch (SecurityException e) {
-            // Some Samsung Galaxy S10+/S10e devices throw a SecurityException from
-            // WifiLock.acquire() even though we have android.permission.WAKE_LOCK in our manifest.
-            e.printStackTrace();
+        }
+        else {
+            LimeLog.warning("[VIPLE-QUEST-2D] WifiManager is null; skip wifi lock");
         }
 
         appName = Game.this.getIntent().getStringExtra(EXTRA_APP_NAME);
@@ -551,6 +580,21 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             }
         }
 
+        if (vrEmulate) {
+            // §QUEST-VR：VR profile 是 SDR 4:2:0（session.cpp 約 2534 行把 AV1、4:4:4、沒開 vr10bit 的 10-bit 拿掉）。
+            // 模擬另外關掉 PyroWave。FORCE_H264 時解碼器不會接 HEVC，遮罩裡也不能留。
+            int vrStrip = MoonBridge.VIDEO_FORMAT_MASK_AV1
+                    | MoonBridge.VIDEO_FORMAT_MASK_10BIT
+                    | MoonBridge.VIDEO_FORMAT_MASK_YUV444
+                    | MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE;
+            if (!decoderRenderer.isHevcSupported()
+                    || prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_H264) {
+                vrStrip |= MoonBridge.VIDEO_FORMAT_MASK_H265;
+            }
+            supportedVideoFormats &= ~vrStrip;
+            LimeLog.info("[VIPLE-QXR-EMU] vr codecs mask=0x" + Integer.toHexString(supportedVideoFormats));
+        }
+
         int gamepadMask = ControllerHandler.getAttachedControllerMask(this);
         if (!prefConfig.multiController) {
             // Always set gamepad 1 present for when multi-controller is
@@ -613,7 +657,33 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             }
         }
 
-        StreamConfiguration config = new StreamConfiguration.Builder()
+        if (vrEmulate) {
+            prefConfig.width = vrEyeWidth * 2;
+            prefConfig.height = vrEyeHeight;
+            prefConfig.fps = vrHz;
+            chosenFrameRate = vrHz;
+            boolean bitrateFromCli = getIntent().hasExtra("cli_bitrate")
+                    && getIntent().getIntExtra("cli_bitrate", 0) > 0;
+            if (!bitrateFromCli) {
+                int vrDefault = vrDefaultBitrateKbps(prefConfig.width, prefConfig.height, prefConfig.fps);
+                prefConfig.bitrate = vrDefault;
+                LimeLog.info("[VIPLE-VR-SESSION] bitrate " + vrDefault + " kbps (VR default; "
+                        + prefConfig.width + "x" + prefConfig.height + "@" + prefConfig.fps + ")");
+            }
+            vrLaunch = new VrLaunchConfig();
+            vrLaunch.eyeWidth = vrEyeWidth;
+            vrLaunch.eyeHeight = vrEyeHeight;
+            vrLaunch.refreshHz = vrHz;
+            vrLaunch.periodNs = 1000000000L / vrHz;
+            vrLaunch.controller = "touch";
+            int codecs = VrLaunchConfig.CODEC_H264;
+            if ((supportedVideoFormats & MoonBridge.VIDEO_FORMAT_H265) != 0) {
+                codecs |= VrLaunchConfig.CODEC_HEVC;
+            }
+            vrLaunch.codecs = codecs;
+        }
+
+        StreamConfiguration.Builder streamConfigBuilder = new StreamConfiguration.Builder()
                 .setResolution(prefConfig.width, prefConfig.height)
                 // §REVIEW-1104（使用者決策 B）：開補幀時 host 顯示器／遊戲跟實際串流幀率（半幀）對齊，與 Qt 一致——
                 // 全幀時 host 從 120 張挑 60 張，間隔不均會讓補出來的動作抖，GPU 也白畫一半
@@ -633,8 +703,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 .setColorRange(decoderRenderer.getPreferredColorRange())
                 .setPersistGamepadsAfterDisconnect(!prefConfig.multiController)
                 .setMpQuic(prefConfig.enableMpQuic, prefConfig.mpQuicScheduler)
-                .setAutoAdjustBitrate(cliAutoAdjustBitrate != null ? cliAutoAdjustBitrate : true)
-                .build();
+                .setAutoAdjustBitrate(cliAutoAdjustBitrate != null ? cliAutoAdjustBitrate : true);
+        if (vrEmulate) {
+            streamConfigBuilder.setVrLaunch(vrLaunch);
+        }
+        StreamConfiguration config = streamConfigBuilder.build();
 
         // Initialize the connection
         conn = new NvConnection(getApplicationContext(),
@@ -652,7 +725,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         keyboardTranslator = new KeyboardTranslator();
 
         InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
-        inputManager.registerInputDeviceListener(keyboardTranslator, null);
+        // §QUEST-2D：服務缺失時不要註冊，否則開串流直接 NPE。有服務時仍是原本那一行。
+        if (inputManager != null) {
+            inputManager.registerInputDeviceListener(keyboardTranslator, null);
+        }
+        else {
+            LimeLog.warning("[VIPLE-QUEST-2D] InputManager is null; skip keyboard device listener");
+        }
 
         // Initialize touch contexts
         for (int i = 0; i < touchContextMap.length; i++) {
@@ -693,11 +772,28 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             return;
         }
 
+        if (vrEmulate && QxrNative.isAvailable()) {
+            // §QUEST-VR：sink 要在 surface 回呼裡 conn.start 之前就登記好。沒有 H.264 的裝置走不到這裡。
+            vrEmuHandle = QxrNative.nativeEmuCreate(vrHz, vrMotion);
+            if (vrEmuHandle == 0) {
+                LimeLog.warning("[VIPLE-QXR-EMU] nativeEmuCreate failed: " + QxrNative.nativeLastError());
+            }
+            else {
+                LimeLog.info("[VIPLE-QXR-EMU] emulation handle=" + vrEmuHandle);
+            }
+        }
+
         // The connection will be started when the surface gets created
         streamView.getHolder().addCallback(this);
     }
 
     private void setPreferredOrientationForCurrentDisplay() {
+        // §QUEST-2D：Quest 的 2D 面板方向由系統合成器決定。要求 USER_LANDSCAPE 可能讓面板被重建，或被系統拒絕。
+        // 未在實機確認。非 Quest 不進這裡，下面仍會 setRequestedOrientation。
+        if (QuestSupport.isQuest(this)) {
+            LimeLog.info("[VIPLE-QUEST-2D] skip setRequestedOrientation");
+            return;
+        }
         Display display = getWindowManager().getDefaultDisplay();
 
         // For semi-square displays, we use more complex logic to determine which orientation to use (if any)
@@ -749,6 +845,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         }
 
         // Hide on-screen overlays in PiP mode
+        // §QUEST-2D：這裡只查 isInPictureInPictureMode，不會呼叫 enterPictureInPictureMode，查詢本身不丟例外。
+        // Quest 的進入路徑已跳過，所以這個分支維持走不到。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (isInPictureInPictureMode()) {
                 isHidingOverlays = true;
@@ -834,6 +932,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     }
 
     private void updatePipAutoEnter() {
+        // §QUEST-2D：Android 12 以後是靠 setPictureInPictureParams 的 auto-enter 進 PiP，不是 onUserLeaveHint。
+        // Quest 面板沒有手機那種子母畫面，這個呼叫可能丟 IllegalStateException，或把 2D 面板收成系統不支援的狀態。
+        // 未在實機確認。非 Quest 仍從下面的 enablePip 判斷開始。
+        if (QuestSupport.isQuest(this)) {
+            LimeLog.info("[VIPLE-QUEST-2D] skip PiP auto-enter");
+            return;
+        }
         if (!prefConfig.enablePip) {
             return;
         }
@@ -881,6 +986,14 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     public void onUserLeaveHint() {
         super.onUserLeaveHint();
 
+        // §QUEST-2D：離開前景不該把 Quest 面板收進子母畫面。
+        // 下面的 enter 原本就只在 API 26–29；Quest 是 12L 以上，其實走不到。仍先返回，
+        // 避免以後把版本判斷放寬時誤進。未在實機確認。非 Quest 仍走原本的版本判斷。
+        if (QuestSupport.isQuest(this)) {
+            LimeLog.info("[VIPLE-QUEST-2D] onUserLeaveHint skip PiP");
+            return;
+        }
+
         // PiP is only supported on Oreo and later, and we don't need to manually enter PiP on
         // Android S and later. On Android R, we will use onPictureInPictureRequested() instead.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
@@ -900,6 +1013,14 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     @Override
     @TargetApi(Build.VERSION_CODES.R)
     public boolean onPictureInPictureRequested() {
+        // §QUEST-2D：不要呼叫 enterPictureInPictureMode。API 31 以上這支原本就不會 enter
+        // （條件是 SDK < S），但回傳 true 表示已處理，系統就不會再代為進入。
+        // 若改回傳 false，框架可能自己再進一次。未在實機確認 Horizon 是否仍會送這個 callback。
+        // 非 Quest 仍走原本的 enter 判斷，最後一樣 return true。
+        if (QuestSupport.isQuest(this)) {
+            LimeLog.info("[VIPLE-QUEST-2D] onPictureInPictureRequested ignored");
+            return true;
+        }
         // Enter PiP when requested unless we're on Android 12 which supports auto-enter.
         if (autoEnterPip && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             enterPictureInPictureMode(getPictureInPictureParams(false));
@@ -1060,6 +1181,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         display.getMode().getPhysicalWidth() != bestMode.getPhysicalWidth() ||
                         display.getMode().getPhysicalHeight() != bestMode.getPhysicalHeight()) {
                     // Apply the display mode change
+                    // §QUEST-2D：Quest 也留著這兩行。preferredDisplayModeId 只是提示，
+                    // Window.setAttributes 不會因為合成器拒絕該模式而丟例外。未在實機確認是否真的切換。
+                    // 看既有的 "Best display mode" log。
                     windowLayoutParams.preferredDisplayModeId = bestMode.getModeId();
                     getWindow().setAttributes(windowLayoutParams);
                 }
@@ -1208,12 +1332,17 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         // 串流活動銷毀，清除串流進行中旗標
         sIsStreaming = false;
 
+        releaseVrEmulation();
+
         if (controllerHandler != null) {
             controllerHandler.destroy();
         }
         if (keyboardTranslator != null) {
             InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
-            inputManager.unregisterInputDeviceListener(keyboardTranslator);
+            // §QUEST-2D：跟註冊時同一種 null。沒註冊過就不需要反註冊，有服務時仍是原本那一行。
+            if (inputManager != null) {
+                inputManager.unregisterInputDeviceListener(keyboardTranslator);
+            }
         }
 
         if (lowLatencyWifiLock != null) {
@@ -1664,7 +1793,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     public void toggleKeyboard() {
         LimeLog.info("Toggling keyboard overlay");
         InputMethodManager inputManager = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-        inputManager.toggleSoftInput(0, 0);
+        // §QUEST-2D：沒有輸入法服務時不要解參考。有服務時仍是原本的 toggleSoftInput。
+        if (inputManager != null) {
+            inputManager.toggleSoftInput(0, 0);
+        }
     }
 
     private byte getLiTouchTypeFromEvent(MotionEvent event) {
@@ -2057,6 +2189,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     // Otherwise send absolute position based on the view for SOURCE_CLASS_POINTER
                     updateMousePosition(view, event);
                 }
+                else if (QuestSupport.isQuest(this)) {
+                    // §QUEST-2D：Activity.onGenericMotionEvent 傳進來的 view 是 null，上面那支不會送絕對座標。
+                    // 非 Quest 不會進這裡，維持原本不送。
+                    updateMousePosition(null, event);
+                }
 
                 if (event.getActionMasked() == MotionEvent.ACTION_SCROLL) {
                     // Send the vertical scroll packet
@@ -2156,6 +2293,15 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             // This case is for fingers
             else
             {
+                // §QUEST-2D：下面的 switch 沒有 HOVER／BUTTON，default 直接回 false，絕對位置與左鍵都不會送。
+                // Quest 雷射可能是 SOURCE_TOUCHSCREEN + TOOL_TYPE_FINGER 的 HOVER。未在實機確認。
+                // 抓取旗標還沒立起時不送，否則連線中的 hover 會先推遠端游標。
+                // 非 Quest 不呼叫；Quest 上不是這兩類事件時回 false，仍走下面原本的手指路徑。
+                if (QuestSupport.isQuest(this) && inputCaptureProvider.isCapturingActive()
+                        && handleQuestFingerHover(view, event)) {
+                    return true;
+                }
+
                 if (virtualController != null &&
                         (virtualController.getControllerMode() == VirtualController.ControllerMode.MoveButtons ||
                          virtualController.getControllerMode() == VirtualController.ControllerMode.ResizeButtons)) {
@@ -2301,6 +2447,43 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
     }
 
+    // §QUEST-2D：手指分支的 default 會把 hover 丟掉，BUTTON 也不在 switch 裡。手機的 DOWN／MOVE 不進這裡。
+    private boolean handleQuestFingerHover(View view, MotionEvent event) {
+        int action = event.getActionMasked();
+        boolean hoverOrButton = action == MotionEvent.ACTION_HOVER_ENTER
+                || action == MotionEvent.ACTION_HOVER_MOVE
+                || action == MotionEvent.ACTION_BUTTON_PRESS
+                || action == MotionEvent.ACTION_BUTTON_RELEASE;
+        if (!hoverOrButton) {
+            return false;
+        }
+
+        // 只送按鍵的話，主機游標還停在按下前的位置。
+        updateMousePosition(view, event);
+
+        int buttonState = event.getButtonState();
+        int actionButton = event.getActionButton();
+        // 有的裝置 ACTION_BUTTON_PRESS 的 getButtonState 還沒含這個鍵，放開時則已經拿掉。用 actionButton 補。
+        if (action == MotionEvent.ACTION_BUTTON_PRESS) {
+            buttonState |= actionButton;
+        }
+        else if (action == MotionEvent.ACTION_BUTTON_RELEASE) {
+            buttonState &= ~actionButton;
+        }
+
+        int changedButtons = buttonState ^ lastButtonState;
+        if ((changedButtons & MotionEvent.BUTTON_PRIMARY) != 0) {
+            if ((buttonState & MotionEvent.BUTTON_PRIMARY) != 0) {
+                conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
+            }
+            else {
+                conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_LEFT);
+            }
+        }
+        lastButtonState = buttonState;
+        return true;
+    }
+
     private void updateMousePosition(View touchedView, MotionEvent event) {
         // X and Y are already relative to the provided view object
         float eventX, eventY;
@@ -2309,6 +2492,16 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         if (touchedView == streamView) {
             eventX = event.getX(0);
             eventY = event.getY(0);
+        }
+        else if (touchedView == null) {
+            // §QUEST-2D：只有 Quest 會傳 null。假設 Activity.onGenericMotionEvent 的 getX/getY
+            // 是視窗座標（子 view 沒吃掉事件時，分發過程的位移已還原，原點是視窗而不是 streamView）。
+            // streamView.getX() 只相對父層，面板有黑邊時會偏，所以改扣 getLocationInWindow。
+            // 未在實機確認。若游標整體平移，比對 [VIPLE-QUEST-2D] pointer 的 x,y、raw、streamWin。
+            int[] locationInWindow = new int[2];
+            streamView.getLocationInWindow(locationInWindow);
+            eventX = event.getX(0) - locationInWindow[0];
+            eventY = event.getY(0) - locationInWindow[1];
         }
         else {
             // For the containing background view, we must subtract the origin
@@ -2351,7 +2544,46 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         eventX = Math.min(Math.max(eventX, 0), streamView.getWidth());
         eventY = Math.min(Math.max(eventY, 0), streamView.getHeight());
 
+        // §QUEST-2D：實機要靠這幾筆對事件來源。移動會洗版，所以有額度；點擊不能被額度吃掉。
+        if (QuestSupport.isQuest(this)) {
+            logQuestPointer(event, touchedView, eventX, eventY);
+        }
+
         conn.sendMousePosition((short)eventX, (short)eventY, (short)streamView.getWidth(), (short)streamView.getHeight());
+    }
+
+    // §QUEST-2D：主鍵若只出現在 HOVER_MOVE 的 buttonState，移動額度用完後會看不到點擊。
+    private void logQuestPointer(MotionEvent event, View touchedView, float sentX, float sentY) {
+        int action = event.getActionMasked();
+        boolean buttonEdge = event.getActionButton() != 0 || event.getButtonState() != questLoggedButtonState;
+        if (buttonEdge) {
+            questLoggedButtonState = event.getButtonState();
+        }
+        boolean always = action == MotionEvent.ACTION_HOVER_ENTER
+                || action == MotionEvent.ACTION_BUTTON_PRESS
+                || action == MotionEvent.ACTION_BUTTON_RELEASE
+                || buttonEdge;
+        if (!always) {
+            if (questPointerLogsLeft <= 0) {
+                return;
+            }
+            questPointerLogsLeft--;
+        }
+        int[] locationInWindow = new int[2];
+        streamView.getLocationInWindow(locationInWindow);
+        String viewName = touchedView == null ? "null" : (touchedView == streamView ? "stream" : "other");
+        LimeLog.info("[VIPLE-QUEST-2D] pointer source=0x" + Integer.toHexString(event.getSource())
+                + " action=" + action
+                + " tool=" + (event.getPointerCount() > 0 ? event.getToolType(0) : -1)
+                + " buttons=0x" + Integer.toHexString(event.getButtonState())
+                + " actionButton=0x" + Integer.toHexString(event.getActionButton())
+                + " view=" + viewName
+                + " xy=" + event.getX() + "," + event.getY()
+                + " raw=" + event.getRawX() + "," + event.getRawY()
+                + " streamWin=" + locationInWindow[0] + "," + locationInWindow[1]
+                + " sent=" + sentX + "," + sentY
+                + " size=" + streamView.getWidth() + "x" + streamView.getHeight()
+                + (questPointerLogsLeft == 0 && !always ? " (further moves suppressed)" : ""));
     }
 
     @Override
@@ -2442,6 +2674,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     // 使用者自己離開、或 host 正常結束時才送；意外斷線（沒畫面、控制通道斷、Wi-Fi 切換）不送——
     // host 會留著遊戲約 60 秒讓同一台裝置接回去（桌面 client 一直是這樣做的）。
     private void stopConnection(final boolean releaseOwnership) {
+        // §QUEST-VR：連線還沒標成 connecting 也要停。下面的 if 沒進去時，模擬執行緒不能留著。
+        releaseVrEmulation();
+
         // VipleStream §N — stop transfer polling before tearing down stream
         stopFileTransferClient();
 
@@ -2547,6 +2782,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                releaseVrEmulation();
+
                 // Let the display go to sleep now
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
@@ -2706,6 +2943,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
                 connected = true;
                 connecting = false;
+                if (vrEmulate && vrEmuHandle != 0) {
+                    QxrNative.nativeEmuStart(vrEmuHandle);
+                }
                 updatePipAutoEnter();
 
                 // Hide the mouse cursor now after a short delay.
@@ -2915,11 +3155,28 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             // We want to change frame rate even if it's not seamless, since prepareDisplayForRendering()
             // will not set the display mode on S+ if it only differs by the refresh rate. It depends
             // on us to trigger the frame rate switch here.
-            holder.getSurface().setFrameRate(desiredFrameRate,
-                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
-                    Surface.CHANGE_FRAME_RATE_ALWAYS);
+            // §QUEST-2D：Quest（12L，API 32+）走這支，不走下面的 R。參數合法時這只是提示，
+            // 合成器不支援會忽略；非法參數才 IllegalArgumentException，surface 已釋放才 IllegalStateException。
+            // Horizon 未在實機確認，所以 Quest 多接這兩個例外，避免 surfaceCreated 把串流打掛。
+            // 非 Quest 仍是下面原本那一行。
+            if (QuestSupport.isQuest(this)) {
+                try {
+                    LimeLog.info("[VIPLE-QUEST-2D] setFrameRate " + desiredFrameRate);
+                    holder.getSurface().setFrameRate(desiredFrameRate,
+                            Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                            Surface.CHANGE_FRAME_RATE_ALWAYS);
+                } catch (IllegalArgumentException | IllegalStateException e) {
+                    LimeLog.warning("[VIPLE-QUEST-2D] setFrameRate failed: " + e);
+                }
+            }
+            else {
+                holder.getSurface().setFrameRate(desiredFrameRate,
+                        Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                        Surface.CHANGE_FRAME_RATE_ALWAYS);
+            }
         }
         else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // §QUEST-2D：Quest 是 API 32 以上，不會走到這支。參數規則與上面相同，原本就不會因「裝置沒這個能力」而丟例外。
             holder.getSurface().setFrameRate(desiredFrameRate,
                     Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
         }
@@ -3059,6 +3316,85 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 return handleKeyMultiple(keyEvent);
             default:
                 return false;
+        }
+    }
+
+    // §QUEST-VR：公式出自 moonlight-qt session.cpp 的 VR default（約 2196–2201 行）。
+    // pixRate = 打包後寬×高×fps，ref = 3456×1728×90，base = 150000。
+    // 模擬關掉 PyroWave，所以不用那邊的 250000／350000。結果夾在 10000 與 200000。
+    private static int vrDefaultBitrateKbps(int width, int height, int fps) {
+        double pixRate = (double) width * height * fps;
+        double ref = 3456.0 * 1728.0 * 90.0;
+        int vrDefault = (int) Math.round(150000.0 * pixRate / ref);
+        if (vrDefault < 10000) {
+            vrDefault = 10000;
+        }
+        else if (vrDefault > 200000) {
+            vrDefault = 200000;
+        }
+        return vrDefault;
+    }
+
+    private void applyVrEmulatePrefs(PreferenceConfiguration pref, Intent intent) {
+        vrEmulate = true;
+        String eye = intent.getStringExtra("vr_eye");
+        if (eye == null || eye.isEmpty()) {
+            eye = "1440x1440";
+        }
+        int width = 1440;
+        int height = 1440;
+        boolean parsed = false;
+        String lowered = eye.toLowerCase(Locale.US);
+        int split = lowered.indexOf('x');
+        if (split > 0 && split + 1 < lowered.length()) {
+            try {
+                width = Integer.parseInt(lowered.substring(0, split).trim());
+                height = Integer.parseInt(lowered.substring(split + 1).trim());
+                parsed = width > 0 && height > 0;
+            } catch (NumberFormatException ignored) {
+                parsed = false;
+            }
+        }
+        if (!parsed) {
+            LimeLog.warning("[VIPLE-QXR-EMU] invalid vr_eye '" + eye + "'; using 1440x1440");
+            width = 1440;
+            height = 1440;
+        }
+        vrEyeWidth = width;
+        vrEyeHeight = height;
+        int hz = intent.getIntExtra("vr_hz", 72);
+        if (hz <= 0) {
+            LimeLog.warning("[VIPLE-QXR-EMU] invalid vr_hz " + hz + "; using 72");
+            hz = 72;
+        }
+        vrHz = hz;
+        String motion = intent.getStringExtra("vr_motion");
+        if (motion == null || motion.trim().isEmpty()) {
+            motion = "sine";
+        }
+        else {
+            motion = motion.trim();
+        }
+        vrMotion = motion;
+        // 模擬沒有頭盔 HDR，也不做補幀。AV1／PyroWave 不在這次的 codec 交集裡，先改回 AUTO，避免原本的提示把使用者帶去那條路。
+        pref.enableHdr = false;
+        pref.enableFruc = false;
+        if (pref.videoFormat == PreferenceConfiguration.FormatOption.FORCE_AV1
+                || pref.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE) {
+            pref.videoFormat = PreferenceConfiguration.FormatOption.AUTO;
+        }
+        LimeLog.info("[VIPLE-QXR-EMU] vr_emulate eye=" + width + "x" + height + " hz=" + hz + " motion=" + motion);
+    }
+
+    private void releaseVrEmulation() {
+        if (!vrEmulate || vrEmuReleased) {
+            return;
+        }
+        vrEmuReleased = true;
+        if (vrEmuHandle != 0 && QxrNative.isAvailable()) {
+            QxrNative.nativeEmuStop(vrEmuHandle);
+            QxrNative.nativeEmuDestroy(vrEmuHandle);
+            vrEmuHandle = 0;
         }
     }
 

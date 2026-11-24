@@ -18,4 +18,8 @@ public abstract class VideoDecoderRenderer {
     public abstract int getCapabilities();
 
     public abstract void setHdrMode(boolean enabled, byte[] hdrMetadata);
+
+    // §QUEST-VR：預設不改行為。只有 MediaCodec 路徑在 VR 時把 PTS 改成 frameNumber。
+    public void setVrSession(boolean vrSession) {
+    }
 }

@@ -12,6 +12,9 @@ import com.limelight.nvstream.http.ComputerDetails;
 import com.limelight.nvstream.http.NvApp;
 import com.limelight.nvstream.http.NvHTTP;
 import com.limelight.utils.CacheHelper;
+import com.limelight.utils.QuestSupport;
+import com.limelight.vr.QxrNative;
+import com.limelight.vr.VrStreamActivity;
 
 import org.xmlpull.v1.XmlPullParserException;
 
@@ -36,6 +39,11 @@ import java.util.List;
  *     [--ez enableMpQuic true]       # QUIC multipath on/off
  *     [--ez enableFruc true]         # FRUC frame interpolation on/off
  *     [--ez perfOverlay true]        # performance overlay on/off
+ *     [--ez vr_screen false]         # true：Quest 且載入得到 viple-openxr 時改開沉浸式 2D 畫面
+ *     [--ez vr_emulate false]        # true 且載入得到 viple-openxr：手機上協商真的 PCVR，合成姿態上行，畫面仍是 2D
+ *     [--es vr_eye 1440x1440]        # 單眼寬高；串流解析度是兩眼並排
+ *     [--ei vr_hz 72]                # 顯示更新率，tracking 送出頻率是它的 4 倍
+ *     [--es vr_motion sine]          # still / sine / yaw30 / tilt30yaw / fast；預設 sine
  *
  * Prerequisites: the host must already be paired via the normal UI flow.
  */
@@ -82,7 +90,9 @@ public class CliStreamActivity extends Activity {
         IdentityManager idManager = new IdentityManager(this);
         String uniqueId = idManager.getUniqueId();
 
-        NvApp app = resolveApp(computer, appName, uniqueId);
+        // §QUEST-VR：VR 專用的 app 只在 applist?vr=1 裡，快取的 2D 清單找不到。
+        boolean wantVrApps = getIntent().getBooleanExtra("vr_emulate", false);
+        NvApp app = resolveApp(computer, appName, uniqueId, wantVrApps);
         if (app == null) {
             showError("CLI: app '" + appName + "' not found on '" + computer.name + "'");
             return;
@@ -113,7 +123,28 @@ public class CliStreamActivity extends Activity {
             }
         }
 
-        Intent gameIntent = new Intent(this, Game.class);
+        boolean forwardVrEmulate = getIntent().getBooleanExtra("vr_emulate", false);
+        if (forwardVrEmulate && !QxrNative.isAvailable()) {
+            // §QUEST-VR：.so 載入失敗就不要把 vr_emulate 傳進 Game，後面照原本的方式開。
+            LimeLog.info("[VIPLE-QXR-CLI] vr_emulate=true but viple-openxr is not loadable; starting a normal stream");
+            forwardVrEmulate = false;
+        }
+        boolean vrScreen = getIntent().getBooleanExtra("vr_screen", false);
+        Class<?> streamActivity = Game.class;
+        if (forwardVrEmulate) {
+            // §QUEST-VR：模擬模式留在 Game，手機螢幕照常解碼。不要另開 VrStreamActivity 的 OpenXR。
+            LimeLog.info("[VIPLE-QXR-CLI] vr_emulate=true; starting Game");
+        } else if (vrScreen) {
+            // §QUEST-VR：條件不成立就維持原本的 Game，只多一行 log 說明原因。
+            if (!QuestSupport.isQuest(this)) {
+                LimeLog.info("[VIPLE-QXR-CLI] vr_screen=true but this is not a Quest; starting Game");
+            } else if (!QxrNative.isAvailable()) {
+                LimeLog.info("[VIPLE-QXR-CLI] vr_screen=true but viple-openxr is not loadable; starting Game");
+            } else {
+                streamActivity = VrStreamActivity.class;
+            }
+        }
+        Intent gameIntent = new Intent(this, streamActivity);
         gameIntent.putExtra(Game.EXTRA_HOST, addr.address);
         gameIntent.putExtra(Game.EXTRA_PORT, addr.port);
         gameIntent.putExtra(Game.EXTRA_HTTPS_PORT, httpsPort);
@@ -151,6 +182,20 @@ public class CliStreamActivity extends Activity {
             gameIntent.putExtra("cli_enableFruc", in.getBooleanExtra("enableFruc", false));
         if (in.hasExtra("perfOverlay"))
             gameIntent.putExtra("cli_perfOverlay", in.getBooleanExtra("perfOverlay", false));
+        if (forwardVrEmulate) {
+            String eye = in.getStringExtra("vr_eye");
+            if (eye == null || eye.isEmpty()) {
+                eye = "1440x1440";
+            }
+            String motion = in.getStringExtra("vr_motion");
+            if (motion == null || motion.isEmpty()) {
+                motion = "sine";
+            }
+            gameIntent.putExtra("vr_emulate", true);
+            gameIntent.putExtra("vr_eye", eye);
+            gameIntent.putExtra("vr_hz", in.getIntExtra("vr_hz", 72));
+            gameIntent.putExtra("vr_motion", motion);
+        }
 
         LimeLog.info("[VIPLE-CLI] Launching stream: " + addr.address + " -> " + app.getAppName()
                      + " (appId=" + app.getAppId() + ")");
@@ -186,8 +231,8 @@ public class CliStreamActivity extends Activity {
         return addr != null && host.equals(addr.address);
     }
 
-    private NvApp resolveApp(ComputerDetails computer, String appName, String uniqueId) {
-        try {
+    private NvApp resolveApp(ComputerDetails computer, String appName, String uniqueId, boolean vrApps) {
+        if (!vrApps) try {
             String rawAppList = CacheHelper.readInputStreamToString(
                     CacheHelper.openCacheFileForInput(getCacheDir(), "applist", computer.uuid));
             if (rawAppList != null && !rawAppList.isEmpty()) {
@@ -210,7 +255,7 @@ public class CliStreamActivity extends Activity {
 
             NvHTTP http = new NvHTTP(addr, computer.httpsPort, uniqueId,
                     computer.serverCert, PlatformBinding.getCryptoProvider(this));
-            List<NvApp> apps = http.getAppList();
+            List<NvApp> apps = vrApps ? http.getVrAppList() : http.getAppList();
             for (NvApp a : apps) {
                 if (a.getAppName().equalsIgnoreCase(appName)) {
                     return a;

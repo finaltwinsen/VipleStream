@@ -2,6 +2,7 @@ package com.limelight.nvstream;
 
 import com.limelight.nvstream.http.NvApp;
 import com.limelight.nvstream.jni.MoonBridge;
+import com.limelight.nvstream.vr.VrLaunchConfig;
 
 public class StreamConfiguration {
     public static final int INVALID_APP_ID = 0;
@@ -32,6 +33,8 @@ public class StreamConfiguration {
     private int mpQuicScheduler;
     private int mpQuicPort = 48010;
     private boolean autoAdjustBitrate = true;
+    // §QUEST-VR：null 才是一般 session。非 null 就會把 vr* 接到 /launch，沒有 session 回應就失敗，不降成平面。
+    private VrLaunchConfig vrLaunch;
 
     public static class Builder {
         private StreamConfiguration config = new StreamConfiguration();
@@ -143,6 +146,12 @@ public class StreamConfiguration {
             return this;
         }
 
+        // §QUEST-VR
+        public StreamConfiguration.Builder setVrLaunch(VrLaunchConfig vrLaunch) {
+            config.vrLaunch = vrLaunch;
+            return this;
+        }
+
         public StreamConfiguration build() {
             return config;
         }
@@ -251,5 +260,10 @@ public class StreamConfiguration {
 
     public int getMpQuicPort() {
         return mpQuicPort;
+    }
+
+    // §QUEST-VR
+    public VrLaunchConfig getVrLaunch() {
+        return vrLaunch;
     }
 }

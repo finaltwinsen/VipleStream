@@ -49,6 +49,14 @@
         android:name="android.hardware.type.pc"
         android:required="false"/>
 
+    <!-- §QUEST-2D：讓 Horizon OS 知道這支程式可以裝在有頭戴追蹤的裝置上。
+         required=false，手機／平板／Android TV 不會被擋。不要加 com.oculus.intent.category.VR，
+         否則系統會把 2D Activity 當 VR app。 -->
+    <uses-feature
+        android:name="android.hardware.vr.headtracking"
+        android:version="1"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:fullBackupContent="@xml/backup_rules"
@@ -100,6 +108,9 @@
         <meta-data
             android:name="android.game_mode_config"
             android:resource="@xml/game_mode_config" />
+
+        <!-- §QUEST-2D：Horizon OS 用這筆名單決定 2D 面板可側載的機型。不是 VR intent。 -->
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3|quest3s" />
 
         <!-- Samsung DeX support requires explicit placement of android:resizeableActivity="true"
              in each activity even though it is implied by targeting API 24+ -->
@@ -198,6 +209,21 @@
             <meta-data
                 android:name="com.nvidia.rawCursorInput"
                 android:value="true" />
+        </activity>
+        <!-- §QUEST-VR：沉浸式（OpenXR）串流畫面。只由 app 內部啟動，所以不 exported、沒有 LAUNCHER。
+             未確認：Horizon 是否要求這個 category 的 Activity exported=true。同一支程式的 startActivity 不需要。 -->
+        <activity
+            android:name=".vr.VrStreamActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode|smallestScreenSize|layoutDirection">
+            <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="com.oculus.intent.category.VR" />
+            </intent-filter>
         </activity>
 
         <service

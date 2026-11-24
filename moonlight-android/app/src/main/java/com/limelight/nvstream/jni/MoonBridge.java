@@ -457,7 +457,11 @@ public class MoonBridge {
                                               int colorSpace, int colorRange,
                                               boolean enableMpQuic, int mpQuicScheduler,
                                               int mpQuicPort,
-                                              boolean autoAdjustBitrate);
+                                              boolean autoAdjustBitrate,
+                                              int vrFlags);
+
+    // §QUEST-VR：這一場 common-c 實際用的 VIPLE_VR_SF_*。一般 session 為 0。
+    public static native int getVrFlags();
 
     // VipleStream: client-side NAT hole punch. Must be called BEFORE startConnection()
     // so LocalControlPort is set when ENet binds. Returns 0 on success, negative on failure.

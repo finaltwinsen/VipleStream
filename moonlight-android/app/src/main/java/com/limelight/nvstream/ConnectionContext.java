@@ -1,6 +1,7 @@
 package com.limelight.nvstream;
 
 import com.limelight.nvstream.http.ComputerDetails;
+import com.limelight.nvstream.vr.VrSessionInfo;
 
 import java.security.cert.X509Certificate;
 
@@ -38,4 +39,7 @@ public class ConnectionContext {
     public String serverUuid;
     public String stunAddress;  // STUN public IP from serverinfo
     public int stunPunchPort;   // §REVIEW-1104：STUN 回報的實際控制埠（0＝不知道，退回 HTTP 埠＋10）
+
+    // §QUEST-VR：這次 /launch 或 /resume 的 <VipleStreamVRSession>。沒要求 VR 時維持 null。
+    public VrSessionInfo vrSession;
 }

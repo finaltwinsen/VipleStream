@@ -117,6 +117,10 @@ public class ComputerDetails {
     public int serverCodecModeSupport;
     public List<DisplayMode> supportedDisplayModes = new ArrayList<>();
 
+    // §QUEST-VR：/serverinfo 的 <VipleStreamVR> bitmask 與 <VipleStreamVRProto>。沒有元素是 0。
+    public int vipleStreamVr;
+    public int vipleStreamVrProto;
+
     public ComputerDetails() {
         // Use defaults
         state = State.UNKNOWN;
@@ -196,6 +200,9 @@ public class ComputerDetails {
         this.isVipleStreamPeer = details.isVipleStreamPeer;
         this.vipleStreamProtocol = details.vipleStreamProtocol;
         this.serverCodecModeSupport = details.serverCodecModeSupport;
+        // §QUEST-VR：漏複製的話，輪詢換過一份 ComputerDetails 之後能力會變回 0。
+        this.vipleStreamVr = details.vipleStreamVr;
+        this.vipleStreamVrProto = details.vipleStreamVrProto;
         if (details.supportedDisplayModes != null && !details.supportedDisplayModes.isEmpty()) {
             this.supportedDisplayModes = details.supportedDisplayModes;
         }

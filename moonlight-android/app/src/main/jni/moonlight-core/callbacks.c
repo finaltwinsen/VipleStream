@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include <Limelight.h>
+#include "viple_vr_bridge.h"  // §QUEST-VR
 #include "HolePunch.h"  // VipleStream: LiHolePunch + LocalControlPort
 extern void PyroWaveAndroid_SetCurrentDecodeUnit(PDECODE_UNIT du);
 #ifdef VIPLE_MPQUIC
@@ -190,6 +191,12 @@ static void EnsureDecodedFrameBufferCapacity(JNIEnv* env, int needed) {
 }
 
 int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
+    // §QUEST-VR：進 Java 之前先交 vrMeta。指標只在這次回呼期間有效，所以不能排到後面。
+    // 一般場次只讀一次旗標，不拿鎖、不呼叫 sink。
+    if (decodeUnit != NULL && (LiGetVrFlags() & VIPLE_VR_SF_ENABLED) != 0) {
+        VipleVrBridgeOnFrame(decodeUnit);
+    }
+
     JNIEnv* env = GetThreadEnv();
     int ret;
 
@@ -483,6 +490,12 @@ void BridgeClLogMessage(const char* format, ...) {
     va_end(va);
 }
 
+// §QUEST-VR：0x5508 不進 Java。沒有登記 sink 時 bridge 直接丟掉。
+// FakeCallbacks 看到 NULL 會換成空函式，所以這裡必須掛上，訊息才出得去。
+static void BridgeClVrMessage(const uint8_t* tlv, int length) {
+    VipleVrBridgeOnMessage(tlv, length);
+}
+
 static DECODER_RENDERER_CALLBACKS BridgeVideoRendererCallbacks = {
         .setup = BridgeDrSetup,
         .start = BridgeDrStart,
@@ -514,6 +527,7 @@ static CONNECTION_LISTENER_CALLBACKS BridgeConnListenerCallbacks = {
         .setMotionEventState = BridgeClSetMotionEventState,
         .setControllerLED = BridgeClSetControllerLED,
         .scHidFeatureRequest = BridgeClScHidFeatureRequest,  // §SC-HID feature tunnel
+        .vrMessage = BridgeClVrMessage,  // §QUEST-VR
 };
 
 static bool
@@ -552,7 +566,8 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
                                                            jint colorSpace, jint colorRange,
                                                            jboolean enableMpQuic, jint mpQuicScheduler,
                                                            jint mpQuicPort,
-                                                           jboolean autoAdjustBitrate) {
+                                                           jboolean autoAdjustBitrate,
+                                                           jint vrFlags) {
     SERVER_INFORMATION serverInfo = {
             .address = (*env)->GetStringUTFChars(env, address, 0),
             .serverInfoAppVersion = (*env)->GetStringUTFChars(env, appVersion, 0),
@@ -581,6 +596,27 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
             .quicCongestion = 1, // BBR default, optimal for streaming
 #endif
     };
+
+    // §QUEST-VR：一般場次傳 0，與指定初始化器清掉的值相同，線上封包不變。
+    streamConfig.vrFlags = vrFlags;
+    if ((vrFlags & VIPLE_VR_SF_ENABLED) != 0) {
+        // 為什麼寫死 0：Qt 這四個來自偏好設定，預設就是 0
+        // （streamingpreferences.h：vrRepairHoldMs、cliRepairAbSec、cliRepairIdle、cliRepairNoAhead）。
+        // Android 沒有那些設定，先用同一組預設。一般場次不進這段。
+        streamConfig.vrRepairHoldMs = 0;
+        streamConfig.vrRepairAbSec = 0;
+        streamConfig.vrRepairIdle = 0;
+        streamConfig.vrRepairNoAhead = 0;
+        // 為什麼再寫一次：Qt 的 VR 場次把 flatMultilink 留 0（session.cpp）。指定初始化器已經是 0。
+        streamConfig.flatMultilink = 0;
+#ifdef VIPLE_MPQUIC
+        // 為什麼關掉：Qt 開 QUIC 視訊的條件排除了 VR（session.cpp）。Java 也已把 enableMpQuic 傳成 false。
+        streamConfig.useQuicTransport = 0;
+#endif
+        __android_log_print(ANDROID_LOG_INFO, "moonlight-common-c",
+                            "[VIPLE-VR-SESSION] vrFlags=0x%x repair hold=0 ab=0 idle=0 ahead=on quicVideo=0 flatMultilink=0",
+                            vrFlags);
+    }
 
     jbyte* riAesKeyBuf = (*env)->GetByteArrayElements(env, riAesKey, NULL);
     memcpy(streamConfig.remoteInputAesKey, riAesKeyBuf, sizeof(streamConfig.remoteInputAesKey));
@@ -622,6 +658,14 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
     }
 
     return ret;
+}
+
+// §QUEST-VR：這一場 common-c 實際用的 VIPLE_VR_SF_*。一般 session 為 0。
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_getVrFlags(JNIEnv *env, jclass clazz) {
+    (void)env;
+    (void)clazz;
+    return (jint)LiGetVrFlags();
 }
 
 // VipleStream: JNI bridge to LiHolePunch (client-side NAT punch)
