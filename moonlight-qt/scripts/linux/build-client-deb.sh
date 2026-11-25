@@ -98,7 +98,9 @@ GLIBC_MIN=$(grep -raoh 'GLIBC_2\.[0-9]\+' "$PKG/opt/viplestream" 2>/dev/null \
     | sed 's/GLIBC_//' | sort -t. -k1,1n -k2,2n -u | tail -1)
 GLIBC_MIN=${GLIBC_MIN:-2.35}
 echo "[INFO] minimum glibc $GLIBC_MIN" >&2
-# 只列 AppImage 依慣例不打包、一定要系統提供的函式庫；其餘都在 /opt/viplestream 裡
+# 只列 AppImage 依慣例不打包、一定要系統提供的函式庫；其餘都在 /opt/viplestream 裡。
+# 清單是在乾淨的 Ubuntu 26.04 容器裝好後對 /opt/viplestream 全部 ELF 跑 ldd 找出來的（2026-11-25：
+# 只列 libgl1／libegl1 時裝得起來但執行時缺 libOpenGL.so.0）。
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: viplestream-client
 Version: $VERSION
@@ -106,7 +108,7 @@ Section: games
 Priority: optional
 Architecture: amd64
 Installed-Size: $INSTALLED_KB
-Depends: libc6 (>= $GLIBC_MIN), libgl1, libegl1
+Depends: libc6 (>= $GLIBC_MIN), libgl1, libegl1, libopengl0, libfontconfig1, libfreetype6, libharfbuzz0b, libfribidi0, libsm6, libice6, libasound2t64 | libasound2
 Recommends: libvulkan1, libva2, libpulse0
 Maintainer: VipleStream <noreply@users.noreply.github.com>
 Homepage: https://github.com/finaltwinsen/VipleStream
