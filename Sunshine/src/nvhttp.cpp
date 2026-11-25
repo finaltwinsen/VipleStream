@@ -66,6 +66,7 @@
 
 #ifdef _WIN32
   #include "platform/windows/steam_scanner.h"
+  #include "platform/windows/console_session.h"
 #endif
 
 using namespace std::literals;
@@ -1797,9 +1798,23 @@ namespace nvhttp {
   std::optional<::vr::orchestrator::app_ref_t> vr_pcvr_checks(pt::ptree &tree, const ::vr::launch_params_t &params, int64_t appid) {
     std::string reason;
     if (!::vr::platform::pcvr_available(&reason)) {
+#ifdef _WIN32
+      // §CONSOLE-LOGIN：這一種不再用 VR_DISABLED。其他 reason 維持原樣。
+      if (reason == "no console user") {
+        put_vr_error(tree, false, 403, "VR_NEEDS_LOGIN", "sign in to Windows first");
+        return std::nullopt;
+      }
+#endif
       put_vr_error(tree, false, 403, VIPLE_VR_ERR_DISABLED, reason);
       return std::nullopt;
     }
+#ifdef _WIN32
+    // §CONSOLE-LOGIN：人已經在主控台但畫面鎖著。PCVR 這時送出去的是單色，而且不能沒打密碼就進桌面。
+    if (::vr::platform::cached_environment().console_locked) {
+      put_vr_error(tree, false, 403, "VR_NEEDS_LOGIN", "sign in to Windows first");
+      return std::nullopt;
+    }
+#endif
     const auto app = find_app(appid);
     if (!app || (!app->vr_class && app->vr_launch_url.empty())) {
       put_vr_error(tree, false, 400, VIPLE_VR_ERR_BAD_PARAMS, "not a VR app");
@@ -1854,6 +1869,33 @@ namespace nvhttp {
     return std::max<std::chrono::milliseconds>(config::stream.ping_timeout, 10s) + 5s;
   }
 
+#ifdef _WIN32
+  // §CONSOLE-LOGIN：/launch 與 /resume 一進來就做，在 VR 檢查與 app 啟動之前。
+  // 成功後要寫回 VR 快取。pcvr_available() 只讀快取，不能等下一輪 60 秒的 probe_environment()。
+  void reclaim_console_session() {
+    if (config::sunshine.console_reclaim == "off") {
+      return;
+    }
+    const auto st = platf::console::query();
+    if (st.user_on_console || st.disconnected_id == platf::console::k_no_session) {
+      if (!st.user_on_console) {
+        BOOST_LOG(info) << "[VIPLE-CONSOLE] no disconnected session to reclaim console=" << st.console_id;
+      }
+      return;
+    }
+    std::string why;
+    const bool lock_after = config::sunshine.console_reclaim != "unlock";
+    BOOST_LOG(info) << "[VIPLE-CONSOLE] reclaiming disconnected session=" << st.disconnected_id << " user=" << st.user << " lock_after=" << (lock_after ? 1 : 0);
+    if (!platf::console::reclaim_disconnected(lock_after, &why)) {
+      BOOST_LOG(warning) << "[VIPLE-CONSOLE] reclaim failed: " << why;
+      return;
+    }
+    ::vr::platform::refresh_cached_volatile_environment();
+    const auto env = ::vr::platform::cached_environment();
+    BOOST_LOG(info) << "[VIPLE-CONSOLE] volatile cache refreshed probed=" << env.probed << " user_present=" << env.user_present << " console_locked=" << env.console_locked;
+  }
+#endif
+
   template <class T>
   void launch(bool &host_audio,
               std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response,
@@ -1877,6 +1919,10 @@ namespace nvhttp {
         display_device::revert_configuration();
       }
     });
+
+#ifdef _WIN32
+    reclaim_console_session();
+#endif
 
     auto args = request->parse_query_string();
     if (
@@ -2090,8 +2136,13 @@ namespace nvhttp {
       auto owner_name = caller_name_for(caller_uuid);
       auto err = proc::proc.execute((int) appid, launch_session, caller_uuid, owner_name);
       if (err) {
-        tree.put("root.<xmlattr>.status_code", err);
-        tree.put("root.<xmlattr>.status_message", "Failed to start the specified application");
+        if (err == proc::ERR_NEEDS_LOGIN) {
+          tree.put("root.<xmlattr>.status_code", 403);
+          tree.put("root.<xmlattr>.status_message", "NEEDS_LOGIN: sign in to Windows first");
+        } else {
+          tree.put("root.<xmlattr>.status_code", err);
+          tree.put("root.<xmlattr>.status_message", "Failed to start the specified application");
+        }
         tree.put("root.gamesession", 0);
 
         return;
@@ -2156,6 +2207,10 @@ namespace nvhttp {
       response->write(data.str());
       response->close_connection_after_response = true;
     });
+
+#ifdef _WIN32
+    reclaim_console_session();
+#endif
 
     auto current_appid = proc::proc.running();
     if (current_appid == 0) {
@@ -2234,6 +2289,16 @@ namespace nvhttp {
 
     // M1b V5（S1-11）：pcvr 的 /resume 只接回進行中的編排，而且 VR 參數要一致
     const bool pcvr_resume = vr_params && config::vr.pcvr == config::vr_t::pcvr_e::enabled;
+#ifdef _WIN32
+    if (pcvr_resume) {
+      const auto env = ::vr::platform::cached_environment();
+      // §CONSOLE-LOGIN：與 /launch 相同。沒探測過時不在這裡改錯誤，維持原本的回應。
+      if (env.probed && (!env.user_present || env.console_locked)) {
+        put_vr_error(tree, true, 403, "VR_NEEDS_LOGIN", "sign in to Windows first");
+        return;
+      }
+    }
+#endif
     std::optional<video::vr_probe_scope> vr_scope;
     // §REVIEW-1111：「VR Network Test」不經過 SteamVR 編排器（host 直接播片段），所以沒有「進行中的編排」可以比對。
     // 原本這裡一律要求編排器 active：網路測試中途斷線重連時 /resume 永遠 503，而 app 還算在跑，client 下一次仍然走

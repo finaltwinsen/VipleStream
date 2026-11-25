@@ -1,6 +1,9 @@
 package com.limelight.preferences;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -9,6 +12,8 @@ import android.media.MediaCodecInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.ProgressDialog;
 import android.os.Handler;
 import android.os.Vibrator;
 import android.preference.CheckBoxPreference;
@@ -20,12 +25,15 @@ import android.preference.PreferenceManager;
 import android.preference.PreferenceScreen;
 import android.util.DisplayMetrics;
 import android.util.Range;
+import android.util.TypedValue;
 import android.view.Display;
 import android.view.DisplayCutout;
+import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.WindowManager;
 
 import com.limelight.LimeLog;
 import com.limelight.PcView;
@@ -35,6 +43,11 @@ import com.limelight.binding.video.MediaCodecHelper;
 import com.limelight.utils.Dialog;
 import com.limelight.utils.LogDrop;
 import com.limelight.utils.UiHelper;
+
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import java.lang.reflect.Method;
 import java.text.SimpleDateFormat;
@@ -131,6 +144,8 @@ public class StreamSettings extends Activity {
     public static class SettingsFragment extends PreferenceFragment {
         private int nativeResolutionStartIndex = Integer.MAX_VALUE;
         private boolean nativeFramerateShown = false;
+        private volatile boolean logDropUploading;
+        private android.app.Dialog logDropDialog;
 
         private void setValue(String preferenceKey, String value) {
             ListPreference pref = (ListPreference) findPreference(preferenceKey);
@@ -306,8 +321,9 @@ public class StreamSettings extends Activity {
                     || !getActivity().getPackageManager().hasSystemFeature(PackageManager.FEATURE_USB_HOST)) {
                 PreferenceCategory basic =
                         (PreferenceCategory) findPreference("category_basic_settings");
-                basic.removePreference(findPreference("checkbox_external_display"));
+                basic.removePreference(findPreference("list_external_display_mode"));
                 basic.removePreference(findPreference("checkbox_external_display_dim"));
+                basic.removePreference(findPreference("checkbox_glasses_timewarp"));
                 basic.removePreference(findPreference("glasses_diagnostics"));
             }
             PreferenceScreen screen = getPreferenceScreen();
@@ -788,12 +804,16 @@ public class StreamSettings extends Activity {
             PreferenceCategory category =
                     (PreferenceCategory) findPreference("category_advanced_settings");
             CheckBoxPreference toggle = (CheckBoxPreference) findPreference("checkbox_logdrop_auto");
+            Preference uploadNow = findPreference("pref_logdrop_upload_now");
             if (category == null || toggle == null) {
                 return;
             }
             if (!LogDrop.isConfigured()) {
                 // §LOGDROP：還沒填收件端網址就不要出現，避免勾了卻沒有任何上傳。
                 category.removePreference(toggle);
+                if (uploadNow != null) {
+                    category.removePreference(uploadNow);
+                }
                 return;
             }
             Activity activity = getActivity();
@@ -816,6 +836,220 @@ public class StreamSettings extends Activity {
                     return true;
                 }
             });
+            if (uploadNow != null) {
+                uploadNow.setOnPreferenceClickListener(new Preference.OnPreferenceClickListener() {
+                    @Override
+                    public boolean onPreferenceClick(Preference preference) {
+                        startLogDropUpload();
+                        return true;
+                    }
+                });
+            }
+        }
+
+        @Override
+        public void onDestroy() {
+            dismissLogDropDialog();
+            super.onDestroy();
+        }
+
+        private void startLogDropUpload() {
+            if (logDropUploading || !canUpdateLogDropUi()) {
+                return;
+            }
+            final Activity activity = getActivity();
+            if (activity == null) {
+                return;
+            }
+            if (!LogDrop.isConfigured()) {
+                Toast.makeText(activity, R.string.logdrop_not_configured, Toast.LENGTH_LONG).show();
+                return;
+            }
+            logDropUploading = true;
+            setLogDropUploadEnabled(false);
+            ProgressDialog progress = new ProgressDialog(activity);
+            progress.setMessage(getString(R.string.logdrop_upload_progress));
+            progress.setProgressStyle(ProgressDialog.STYLE_SPINNER);
+            progress.setIndeterminate(true);
+            progress.setCancelable(false);
+            progress.setCanceledOnTouchOutside(false);
+            if (!showLogDropDialog(progress)) {
+                logDropUploading = false;
+                setLogDropUploadEnabled(true);
+                return;
+            }
+            // §LOGDROP：Quest 用 android-quest。眼鏡診斷頁維持自己的 android-glasses。
+            final Context app = activity.getApplicationContext();
+            final String source = LogDrop.sourceFor(app);
+            final String report = LogDrop.deviceSummary();
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    LogDrop.Result result;
+                    try {
+                        result = LogDrop.upload(app, source, report, "", "manual");
+                    } catch (RuntimeException error) {
+                        result = new LogDrop.Result(false, "", "exception");
+                    }
+                    final LogDrop.Result done = result;
+                    if (activity.isDestroyed() || activity.isFinishing()) {
+                        logDropUploading = false;
+                        return;
+                    }
+                    activity.runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            logDropUploading = false;
+                            if (!canUpdateLogDropUi()) {
+                                return;
+                            }
+                            setLogDropUploadEnabled(true);
+                            CheckBoxPreference current = (CheckBoxPreference) findPreference("checkbox_logdrop_auto");
+                            Activity host = getActivity();
+                            if (current != null && host != null) {
+                                applyLogDropSummary(current, host);
+                            }
+                            showLogDropUploadResult(done);
+                        }
+                    });
+                }
+            }, "viple-logdrop-upload").start();
+        }
+
+        private void showLogDropUploadResult(LogDrop.Result result) {
+            if (!canUpdateLogDropUi()) {
+                return;
+            }
+            if (result != null && result.ok && result.code != null && result.code.length() > 0) {
+                showLogDropCode(result.code);
+                return;
+            }
+            String error = result == null ? "" : result.error;
+            String message;
+            if ("rate_limit".equals(error) || "daily_limit".equals(error) || "install_limit".equals(error)) {
+                message = getString(R.string.logdrop_upload_busy);
+            } else if ("network".equals(error)) {
+                message = getString(R.string.logdrop_upload_network);
+            } else {
+                if (error == null || error.length() == 0) {
+                    error = "bad_response";
+                }
+                message = getString(R.string.logdrop_upload_failed, error);
+            }
+            Activity activity = getActivity();
+            if (activity == null) {
+                return;
+            }
+            showLogDropDialog(new AlertDialog.Builder(activity)
+                    .setMessage(message)
+                    .setPositiveButton(android.R.string.ok, null)
+                    .create());
+        }
+
+        private void showLogDropCode(final String code) {
+            Activity activity = getActivity();
+            if (activity == null) {
+                return;
+            }
+            LinearLayout box = new LinearLayout(activity);
+            box.setOrientation(LinearLayout.VERTICAL);
+            TextView codeView = new TextView(activity);
+            codeView.setText(code);
+            codeView.setGravity(Gravity.CENTER);
+            codeView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 34);
+            codeView.setTypeface(android.graphics.Typeface.MONOSPACE);
+            codeView.setTextIsSelectable(true);
+            int pad = (int) (16 * activity.getResources().getDisplayMetrics().density + 0.5f);
+            codeView.setPadding(pad, pad, pad, pad / 2);
+            TextView message = new TextView(activity);
+            message.setText(R.string.logdrop_upload_code_message);
+            message.setGravity(Gravity.CENTER);
+            message.setPadding(pad, 0, pad, pad);
+            box.addView(codeView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            box.addView(message, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            final AlertDialog dialog = new AlertDialog.Builder(activity)
+                    .setView(box)
+                    .setNeutralButton(R.string.logdrop_upload_copy, new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface d, int which) {
+                            copyLogDropCode(code);
+                        }
+                    })
+                    .setPositiveButton(android.R.string.ok, null)
+                    .create();
+            dialog.setOnShowListener(new DialogInterface.OnShowListener() {
+                @Override
+                public void onShow(DialogInterface d) {
+                    Button copy = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+                    if (copy == null) {
+                        return;
+                    }
+                    // §LOGDROP：預設按鈕會關掉對話框，代碼還沒看完就沒了。
+                    copy.setOnClickListener(new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            copyLogDropCode(code);
+                        }
+                    });
+                }
+            });
+            showLogDropDialog(dialog);
+        }
+
+        private void copyLogDropCode(String code) {
+            Activity activity = getActivity();
+            if (activity == null) {
+                return;
+            }
+            ClipboardManager clipboard = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard == null) {
+                Toast.makeText(activity, R.string.logdrop_upload_copy_failed, Toast.LENGTH_LONG).show();
+                return;
+            }
+            clipboard.setPrimaryClip(ClipData.newPlainText("logdrop-code", code));
+            Toast.makeText(activity, R.string.logdrop_upload_copied, Toast.LENGTH_SHORT).show();
+        }
+
+        private void setLogDropUploadEnabled(boolean enabled) {
+            Preference uploadNow = findPreference("pref_logdrop_upload_now");
+            if (uploadNow != null) {
+                uploadNow.setEnabled(enabled);
+            }
+        }
+
+        private boolean canUpdateLogDropUi() {
+            Activity activity = getActivity();
+            return isAdded() && activity != null && !activity.isFinishing() && !activity.isDestroyed();
+        }
+
+        private boolean showLogDropDialog(android.app.Dialog dialog) {
+            if (!canUpdateLogDropUi()) {
+                return false;
+            }
+            dismissLogDropDialog();
+            try {
+                dialog.show();
+            } catch (WindowManager.BadTokenException error) {
+                return false;
+            }
+            logDropDialog = dialog;
+            return true;
+        }
+
+        private void dismissLogDropDialog() {
+            android.app.Dialog dialog = logDropDialog;
+            logDropDialog = null;
+            if (dialog == null) {
+                return;
+            }
+            try {
+                if (dialog.isShowing()) {
+                    dialog.dismiss();
+                }
+            } catch (RuntimeException ignored) {
+            }
         }
 
         private void applyLogDropSummary(CheckBoxPreference toggle, Context context) {

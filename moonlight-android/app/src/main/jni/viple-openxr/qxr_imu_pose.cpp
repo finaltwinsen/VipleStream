@@ -1,4 +1,5 @@
 #include "qxr_imu_pose.h"
+#include "qxr_framemeta.h"
 
 #include <android/log.h>
 
@@ -94,6 +95,10 @@ void QxrImuPoseSource::push(float qw, float qx, float qy, float qz,
     w[0] = wx;
     w[1] = wy;
     w[2] = wz;
+    // 約 240 Hz 的一階平均（時間常數約 15 ms）：預測 30 ms 時陀螺儀雜訊不會被放大成抖動，轉頭的反應又不會慢一拍
+    for (int i = 0; i < 3; i++) {
+        wSmooth[i] = wSmooth[i] * 0.75f + (i == 0 ? wx : (i == 1 ? wy : wz)) * 0.25f;
+    }
     sourceNs = sourceTimeNs;
     has = true;
 }
@@ -116,6 +121,7 @@ bool QxrImuPoseSource::sample(VIPLE_VR_TRACKING* out, uint64_t nowUs)
     }
     float quat[4];
     float ang[3];
+    float angSmooth[3];
     int64_t sourceTime = 0;
     bool present = false;
     {
@@ -124,6 +130,7 @@ bool QxrImuPoseSource::sample(VIPLE_VR_TRACKING* out, uint64_t nowUs)
         if (present) {
             std::memcpy(quat, q, sizeof(quat));
             std::memcpy(ang, w, sizeof(ang));
+            std::memcpy(angSmooth, wSmooth, sizeof(angSmooth));
             sourceTime = sourceNs;
         }
     }
@@ -147,6 +154,28 @@ bool QxrImuPoseSource::sample(VIPLE_VR_TRACKING* out, uint64_t nowUs)
     if (extrapolateNow && ageNs > 0) {
         extrapolate(quat, ang, static_cast<double>(ageNs) * 1.0e-9);
     }
+    // §VITURE-PREDICT（2026-11-25 實機回報「會抖」）：眼鏡沒有 compositor 在顯示前用最新姿態重投影，host 的 SteamVR 也只
+    // 預測到它自己的 vsync，「網路＋解碼＋等眼鏡刷新」這 25～35 ms 沒人補，轉頭時畫面拖在後面、停下再追上。
+    // 所以這裡把姿態往前推到大約被看到的時刻：量到的「取樣→畫面到手機」平均，加約一格 60 Hz 的解碼與顯示等待。
+    // 用平滑過的角速度，夾在 15～45 ms，量不到時用 25 ms。只在姿態夠新時做（舊樣本本來就不外插）。
+    float aheadMs = 25.0f;
+    const float frameAgeMs = qxrFrameAgeEmaMs();
+    if (frameAgeMs > 0.0f) {
+        aheadMs = frameAgeMs + 16.0f;
+    }
+    if (aheadMs < 15.0f) {
+        aheadMs = 15.0f;
+    } else if (aheadMs > 45.0f) {
+        aheadMs = 45.0f;
+    }
+    if (extrapolateNow) {
+        extrapolate(quat, angSmooth, static_cast<double>(aheadMs) * 1.0e-3);
+    }
+    if (lastPredictLogNs == 0 || static_cast<uint64_t>(nowNs) - lastPredictLogNs >= 10000000000ull) {
+        lastPredictLogNs = static_cast<uint64_t>(nowNs);
+        __android_log_print(ANDROID_LOG_INFO, "VipleViture",
+                            "[VIPLE-VITURE] predict aheadMs=%.1f frameAgeEmaMs=%.1f", aheadMs, frameAgeMs);
+    }
     // 只外插到取樣當下（或來源時間）。predictNs 留著的話，host 會以為這筆已經含 3 個顯示週期。
     out->sampleTimeNs = extrapolateNow ? 0 : static_cast<uint64_t>(sourceTime);
     out->predictNs = 0;
@@ -164,15 +193,100 @@ bool QxrImuPoseSource::sample(VIPLE_VR_TRACKING* out, uint64_t nowUs)
     const float identityW = 1.0f;
     writePose(&out->pose[VIPLE_VR_POSE_LEFT], -0.2f, kHeadHeightM - 0.3f, -0.3f,
               0.0f, 0.0f, 0.0f, identityW, 0.0f, 0.0f, 0.0f);
-    writePose(&out->pose[VIPLE_VR_POSE_RIGHT], 0.2f, kHeadHeightM - 0.3f, -0.3f,
-              0.0f, 0.0f, 0.0f, identityW, 0.0f, 0.0f, 0.0f);
+    // §VITURE-TRIGGER：右手的方向跟頭一致，放在頭的正下方一點（不放側邊，雷射才幾乎對準視線中央）。
+    // 位置用頭的方向轉過去，頭左右轉時手跟著繞，雷射起點不會留在原地。
+    float offset[3] = {0.0f, -0.12f, -0.15f};
+    float worldOffset[3];
+    rotateBodyToWorld(quat, offset, worldOffset);
+    // 遊戲畫雷射用的是「自然握著」的指向，比手把本體的前方低約 40°（11-18 逐款驗 VR 遊戲時量的）。手把方向若直接等於頭，
+    // 雷射會落在視線下方的空處，DeoVR 在空處按扳機是「隱藏介面」，使用者看到的是一按雷射就消失（11-25 實機）。
+    // 所以右手再繞機體 X 軸抬起 kAimPitchRad，雷射才落在視線正前方。
+    constexpr float kAimPitchRad = 0.698f;  // 40°
+    const float hs = std::sin(0.5f * kAimPitchRad);
+    const float hc = std::cos(0.5f * kAimPitchRad);
+    // q_ctrl = q_head ⊗ q_pitch（xyzw；q_pitch = (hs, 0, 0, hc)）
+    const float cx = quat[3] * hs + quat[0] * hc;
+    const float cy = quat[1] * hc + quat[2] * hs;
+    const float cz = quat[2] * hc - quat[1] * hs;
+    const float cw = quat[3] * hc - quat[0] * hs;
+    writePose(&out->pose[VIPLE_VR_POSE_RIGHT], worldOffset[0], kHeadHeightM + worldOffset[1], worldOffset[2],
+              cx, cy, cz, cw, worldAng[0], worldAng[1], worldAng[2]);
 
+    uint32_t buttons;
+    uint16_t trigger;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        buttons = rightButtons;
+        trigger = rightTrigger;
+    }
     for (int i = 0; i < 2; i++) {
         std::memset(&out->input[i], 0, sizeof(out->input[i]));
         out->input[i].battery = 100;
         out->input[i].flags = VIPLE_VR_CTRL_ACTIVE | VIPLE_VR_CTRL_FOCUSED;
         out->input[i].profile = VIPLE_VR_CTRL_PROFILE_TOUCH;
     }
+    out->input[1].buttons = buttons;
+    out->input[1].touches = buttons;
+    out->input[1].trigger = trigger;
     std::memset(&out->gaze, 0, sizeof(out->gaze));
     return true;
+}
+
+bool QxrImuPoseSource::currentPose(float qOut[4], int64_t displayAheadNs)
+{
+    if (qOut == nullptr) {
+        return false;
+    }
+    // §VITURE-WARP：呼叫端約 8 ms。夾住是為了壞參數不會把四元數轉飛；正常的 ahead 落在這段裡。
+    if (displayAheadNs < 0) {
+        displayAheadNs = 0;
+    }
+    else if (displayAheadNs > 50000000) {
+        displayAheadNs = 50000000;
+    }
+    float quat[4];
+    float angSmooth[3];
+    int64_t sourceTime = 0;
+    bool present = false;
+    {
+        std::lock_guard<std::mutex> guard(mu);
+        present = has;
+        if (present) {
+            std::memcpy(quat, q, sizeof(quat));
+            std::memcpy(angSmooth, wSmooth, sizeof(angSmooth));
+            sourceTime = sourceNs;
+        }
+    }
+    if (!present) {
+        return false;
+    }
+    timespec nowTs{};
+    clock_gettime(CLOCK_MONOTONIC, &nowTs);
+    const int64_t nowNs = static_cast<int64_t>(static_cast<uint64_t>(nowTs.tv_sec) * 1000000000ull
+                                                + static_cast<uint64_t>(nowTs.tv_nsec));
+    // sourceNs 是 Java 的 nanoTime，跟 CLOCK_MONOTONIC 同一顆鐘。太舊的樣本再外插只會把畫面甩開。
+    if (nowNs - sourceTime > kStaleLimitNs) {
+        return false;
+    }
+    int64_t dtNs = nowNs + displayAheadNs - sourceTime;
+    if (dtNs < 0) {
+        dtNs = 0;
+    }
+    if (dtNs > 0) {
+        extrapolate(quat, angSmooth, static_cast<double>(dtNs) * 1.0e-9);
+    }
+    std::memcpy(qOut, quat, sizeof(quat));
+    return true;
+}
+
+void QxrImuPoseSource::setRightController(uint32_t buttons, float trigger) {
+    if (!(trigger >= 0.0f)) {
+        trigger = 0.0f;
+    }
+    if (trigger > 1.0f) {
+        trigger = 1.0f;
+    }
+    std::lock_guard<std::mutex> lock(mu);
+    rightButtons = buttons;
+    rightTrigger = static_cast<uint16_t>(trigger * 65535.0f + 0.5f);
 }

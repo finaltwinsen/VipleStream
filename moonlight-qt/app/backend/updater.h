@@ -26,7 +26,7 @@ class Updater : public QObject
     Q_PROPERTY(qint64 bytesReceived READ bytesReceived NOTIFY progressChanged)
     Q_PROPERTY(qint64 bytesTotal    READ bytesTotal    NOTIFY progressChanged)
     Q_PROPERTY(QString status       READ status        NOTIFY statusChanged)
-    // §F9：本平台能不能自動下載安裝（Windows x64、從 AppImage 執行的 Linux x64）。
+    // §F9：本平台能不能自動下載安裝（Windows x64、AppImage 或 /opt 的 .deb 的 Linux x64）。
     // false 時 UpdateDialog 只通知新版＋顯示 manualUpdateHint，不下載。
     Q_PROPERTY(bool autoInstallSupported READ autoInstallSupported CONSTANT)
     Q_PROPERTY(QString manualUpdateHint  READ manualUpdateHint     CONSTANT)

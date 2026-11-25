@@ -886,6 +886,7 @@ namespace config {
     true,  // system_tray
     "install",  // update_mode（§AUTO-UPDATE：2026-11-05 使用者指示預設自動安裝）
     "ask",  // log_upload（§LOGDROP：預設先問，不要一安裝就送）
+    "lock",  // console_reclaim（§CONSOLE-LOGIN：預設鎖定，實體螢幕不會直接看到桌面）
     {},  // prep commands
   };
 
@@ -1774,6 +1775,7 @@ namespace config {
     bool_f(vars, "system_tray", sunshine.system_tray);
     string_restricted_f(vars, "update_mode", sunshine.update_mode, {"off"sv, "notify"sv, "install"sv});  // §AUTO-UPDATE
     string_restricted_f(vars, "log_upload", sunshine.log_upload, {"ask"sv, "enabled"sv, "disabled"sv});  // §LOGDROP
+    string_restricted_f(vars, "console_reclaim", sunshine.console_reclaim, {"lock"sv, "unlock"sv, "off"sv});  // §CONSOLE-LOGIN
 
     int port = sunshine.port;
     int_between_f(vars, "port"s, port, {1024 - nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});

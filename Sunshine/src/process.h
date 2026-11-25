@@ -28,6 +28,9 @@
 #define DEFAULT_APP_IMAGE_PATH SUNSHINE_ASSETS_DIR "/box.png"
 
 namespace proc {
+  /// §CONSOLE-LOGIN：Windows 以 SYSTEM 執行、沒有主控台使用者、app 卻有指令時，execute() 回這個值。
+  inline constexpr int ERR_NEEDS_LOGIN = 403;
+
   using file_t = util::safe_ptr_v2<FILE, int, fclose>;
 
   typedef config::prep_cmd_t cmd_t;

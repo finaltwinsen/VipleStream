@@ -68,7 +68,11 @@ public class GlassesDiagnosticsActivity extends Activity implements GlassesDiagn
     private Button mode3dButton;
     private Button mode2dButton;
     private Button mode120Button;
+    private Button readModeButton;
     private Button axisButton;
+    private TextView beastModeNote;
+    /** §VITURE：-1 是軸向測試。讀取模式不能用正的模式代碼，否則會送出 SET。 */
+    private static final int MANUAL_READ_MODE = -2;
     private TextView axisCurrentView;
     private EditText axisInput;
     private TextView axisErrorView;
@@ -135,6 +139,7 @@ public class GlassesDiagnosticsActivity extends Activity implements GlassesDiagn
         getWindow().setSoftInputMode(inputMode);
         root.setFocusableInTouchMode(true);
         root.requestFocus();
+        applyBeastManualUi();
         updateButtons();
 
         IntentFilter filter = new IntentFilter(VitureUsb.ACTION_USB_PERMISSION);
@@ -149,6 +154,7 @@ public class GlassesDiagnosticsActivity extends Activity implements GlassesDiagn
     @Override
     protected void onResume() {
         super.onResume();
+        applyBeastManualUi();
         updateButtons();
     }
 
@@ -336,13 +342,21 @@ public class GlassesDiagnosticsActivity extends Activity implements GlassesDiagn
         warningParams.bottomMargin = dp(8);
         root.addView(manualWarning, warningParams);
 
+        beastModeNote = new TextView(this);
+        beastModeNote.setText(R.string.glasses_diag_beast_mode);
+        beastModeNote.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        beastModeNote.setVisibility(View.GONE);
+        root.addView(beastModeNote, manualButtonParams(0));
+
         mode3dButton = manualButton(R.string.glasses_diag_mode_3d, VitureV2Protocol.DISPLAY_3D_SBS_60);
         mode2dButton = manualButton(R.string.glasses_diag_mode_2d, VitureV2Protocol.DISPLAY_2D_60);
         mode120Button = manualButton(R.string.glasses_diag_mode_120, VitureV2Protocol.DISPLAY_2D_120);
+        readModeButton = manualButton(R.string.glasses_diag_read_mode, MANUAL_READ_MODE);
         axisButton = manualButton(R.string.glasses_diag_axis, -1);
         root.addView(mode3dButton, manualButtonParams(0));
         root.addView(mode2dButton, manualButtonParams(8));
         root.addView(mode120Button, manualButtonParams(8));
+        root.addView(readModeButton, manualButtonParams(8));
         root.addView(axisButton, manualButtonParams(8));
 
         reportView = new TextView(this);
@@ -533,6 +547,7 @@ public class GlassesDiagnosticsActivity extends Activity implements GlassesDiagn
         mode3dButton.setEnabled(manualEnabled);
         mode2dButton.setEnabled(manualEnabled);
         mode120Button.setEnabled(manualEnabled);
+        readModeButton.setEnabled(manualEnabled);
         axisButton.setEnabled(manualEnabled);
         boolean canExport = reportText != null && !running;
         shareButton.setEnabled(canExport);
@@ -643,7 +658,7 @@ public class GlassesDiagnosticsActivity extends Activity implements GlassesDiagn
         SharedPreferences prefs = getSharedPreferences(VitureAxisMap.PREFS_NAME, MODE_PRIVATE);
         String saved = prefs.getString(VitureAxisMap.PREFS_KEY, null);
         if (saved == null || saved.length() == 0) {
-            return VitureAxisMap.DEFAULT;
+            return VitureAxisMap.defaultFor(connectedIsBeast());
         }
         return saved;
     }
@@ -680,8 +695,9 @@ public class GlassesDiagnosticsActivity extends Activity implements GlassesDiagn
     }
 
     private void restoreAxisMap() {
-        if (writeAxisMap(VitureAxisMap.DEFAULT)) {
-            VitureUsb.logI("axis map restored " + VitureAxisMap.DEFAULT);
+        String restored = VitureAxisMap.defaultFor(connectedIsBeast());
+        if (writeAxisMap(restored)) {
+            VitureUsb.logI("axis map restored " + restored);
         }
     }
 
@@ -713,14 +729,18 @@ public class GlassesDiagnosticsActivity extends Activity implements GlassesDiagn
         running = true;
         cancelled = false;
         updateButtons();
-        progressView.setText(R.string.glasses_diag_progress_manual);
+        progressView.setText(mode == MANUAL_READ_MODE
+                ? R.string.glasses_diag_progress_queries
+                : R.string.glasses_diag_progress_manual);
         final GlassesDiagnosticsActivity activity = this;
         Thread thread = new Thread(new Runnable() {
             @Override
             public void run() {
                 String text;
                 try {
-                    if (mode < 0) {
+                    if (mode == MANUAL_READ_MODE) {
+                        text = GlassesManualTest.readDisplayMode(activity, activity);
+                    } else if (mode < 0) {
                         text = GlassesManualTest.axisTest(activity, activity);
                     } else {
                         text = GlassesManualTest.displayMode(activity, activity, mode);
@@ -755,6 +775,36 @@ public class GlassesDiagnosticsActivity extends Activity implements GlassesDiagn
         }, "viple-viture-manual");
         probeThread = thread;
         thread.start();
+    }
+
+    // §VITURE-AXIS：「還原預設」與顯示目前對應時，Beast 的預設不同
+    private boolean connectedIsBeast() {
+        try {
+            UsbManager usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+            return VitureUsb.isBeast(VitureUsb.findGlassesDevice(usb));
+        } catch (RuntimeException error) {
+            return false;
+        }
+    }
+
+    private void applyBeastManualUi() {
+        if (mode3dButton == null || readModeButton == null || beastModeNote == null) {
+            return;
+        }
+        boolean beast = false;
+        try {
+            UsbManager usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+            beast = VitureUsb.isBeast(VitureUsb.findGlassesDevice(usb));
+        } catch (RuntimeException error) {
+            VitureUsb.logW("beast check failed", error);
+        }
+        // §VITURE：三個 SET 會把 Beast 打黑。讀取只送 GET 0x3141，用來對 2D／3D 各回哪個代碼。
+        int setVisibility = beast ? View.GONE : View.VISIBLE;
+        mode3dButton.setVisibility(setVisibility);
+        mode2dButton.setVisibility(setVisibility);
+        mode120Button.setVisibility(setVisibility);
+        beastModeNote.setVisibility(beast ? View.VISIBLE : View.GONE);
+        readModeButton.setVisibility(beast ? View.VISIBLE : View.GONE);
     }
 
     private int messageFor(GlassesDiagnostics.Stage stage) {

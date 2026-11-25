@@ -17,8 +17,9 @@
    `stream --dump-bitstream`，是 Frame 到貨後 Day 1 的主要工具。所有平台都編得進去，用不到的建置回 10。
 4. Frame 上的證據一律用 `frame-poc-collect.sh` 在本機打包，再由 `<dev-client>` 用 scp 拉回。
 5. S3／PoC-F-pre（需要 Steam 登入）**延到 M3a 開頭**（使用者 2026-09-28 決定）。
-6. **使用者安裝一律走 `install-steamframe.sh`**（2.0.2 起，release asset `VipleStream-SteamFrame-Install-X.Y.Z.sh`），
-   不要只裝 `.flatpak`：Flatpak 一定開 PID namespace，VR 模式與影片模式會被程式停用，只剩桌面模式。見 §5.1。
+6. **使用者安裝：下載 `VipleStream-SteamFrame-X.Y.Z.run`，用 `bash` 執行**（單一檔，內含安裝腳本與 `.flatpak`）。
+   不要只裝 `.flatpak`：Flatpak 一定開 PID namespace，VR 模式與影片模式會被程式停用，只剩桌面模式。
+   舊的兩檔（`VipleStream-SteamFrame-Install-X.Y.Z.sh` 與 `.flatpak`）仍隨 release 附上，當備援。見 §5.1。
 7. **頭盔上的介面是全 VR 的**（2.0.3 起，§VR-SHELL）：主畫面不再是平面視窗，而是畫進 XR 面板、用雷射操作；影片模式在同一個
    XR session 裡播，SteamVR 不必換程式。見 §12。
 
@@ -118,7 +119,7 @@ repo 內的 `.sh` 是 100644，一律用 `bash …` 呼叫。
 | `--jobs N` | 平行度，傳給 `flatpak-builder --jobs` |
 | `--clean` | 建置前清掉 state 的 `cache/ ccache/ build/ checksums/` 與 `build-<arch>/`，保留 `git/ downloads/`（量乾淨建置時不把下載時間算進去）。快取兩種 arch 共用，會一起清 |
 | `--download-only` | 只下載來源，不建置、不計時。runtime 還沒裝好也能先跑 |
-| `--bundle` | 產出 `.flatpak`（release 一律產） |
+| `--bundle` | 產出 `.flatpak`（release 一律產）。release 另外把安裝腳本與單一 `.run` 放到 `out/`（§3.4） |
 | `--smoke` | 建置完成後安裝到 `--user` 的本地 remote，跑 smoke test（§3.7） |
 | `--smoke-only` | 不準備來源、不下載、不建置，直接對 `--work` 的 `repo/` 裡現有的 `<app-id>//<branch>` 跑 `--smoke` 那幾輪（§3.7）；`--arch`／`--flavor`（與 `--work`）要和當初建置時相同。`--version` 以安裝進來的 `SOURCE_INFO` 版號核對（`version.txt` 之後改過也不影響）；release 另外拿 `out/` 裡同版號最新的 bundle 驗，沒有就略過那一輪。前置檢查只要 flatpak、Platform runtime 與 binfmt（不需要 flatpak-builder、SDK）。不能和 `--clean`、`--download-only`、`--bundle` 一起用（rc 1）。用途：GUI 那一輪記成 `SKIPPED` 之後，有人登入桌面時補跑，不必為了 smoke test 重建（viplestream 模組每次都會整個重建） |
 | `--check` | 只做前置檢查，印出缺什麼與確切的安裝指令，不建置 |
@@ -186,10 +187,14 @@ logs/gbuild-history.tsv                       每次建置一行（G-BUILD 紀�
 logs/smoke-<arch>-<flavor>-<時間>-<case>.txt    smoke test 各次輸出
 repo/                                         ostree repo（branch dev／stable）
 out/VipleStream-Client-<版號>-linux-arm64.flatpak            release（HEAD 已在 GitHub 上）
+out/VipleStream-SteamFrame-Install-<版號>.sh                 同上，舊安裝腳本檔名（已裝的自動更新仍會找它）
+out/VipleStream-SteamFrame-<版號>.run                        同上，單一安裝檔
 out/VipleStream-Client-<版號>-linux-arm64-unpublished.flatpak
+out/VipleStream-SteamFrame-Install-<版號>-unpublished.sh
+out/VipleStream-SteamFrame-<版號>-unpublished.run
                                               release 但 HEAD 還沒 push：不可上 release（§3.2）
 out/VipleStream-Client-<版號>-linux-<arm64|x64>-dev.flatpak   dev（--bundle）
-                                              每個 .flatpak 旁附 .sha256
+                                              每個產物旁附 .sha256。release 結束時印這三個檔的路徑與 sha256
 ```
 
 `gbuild-history.tsv` 的欄位：`time arch flavor clean jobs rc total_s viplestream_s head`。
@@ -371,13 +376,40 @@ manifest 必須同步修改）。
 正式發佈仍用不帶 `--snapshot` 的 `--flavor release`（來源必須乾淨、pin 在 HEAD）。`--flavor dev`（關 LTO）保留給 x86_64 開發機與需要快速迭代的情況。
 
 
-### 5.1 使用者安裝：`install-steamframe.sh`（2.0.2 起）
+### 5.1 使用者安裝：單一檔 `.run`（兩檔仍是備援）
+
+下載 release 的 `VipleStream-SteamFrame-X.Y.Z.run`，在頭盔上以一般使用者執行（不需要 root、不需要網路）：
+
+```bash
+bash VipleStream-SteamFrame-X.Y.Z.run
+bash VipleStream-SteamFrame-X.Y.Z.run --no-steam       # 不加 Steam 捷徑
+bash VipleStream-SteamFrame-X.Y.Z.run --uninstall      # 移除（Steam 捷徑要自己刪）
+bash VipleStream-SteamFrame-X.Y.Z.run --extract <目錄>  # 只解開，不安裝
+```
+
+`.run` 是一段 bash 標頭、一行標記、再接 tar.gz（裡面是 `install-steamframe.sh` 與該版 `.flatpak`）。執行時先用標頭裡建置時算好的 sha256 核對標記之後的 payload，不符就中止；通過才解到暫存目錄，呼叫裡面的安裝腳本，並把解出來的 `.flatpak` 接在參數後面。結束碼跟安裝腳本一樣。只用 bash、coreutils、tar、sha256sum（頭盔上沒有 makeself）。
+
+**備援（2.0.2 起的兩個檔）**：release 仍附 `VipleStream-Client-X.Y.Z-linux-arm64.flatpak` 與 `VipleStream-SteamFrame-Install-X.Y.Z.sh`（repo 裡的 `install-steamframe.sh` 改名）。已安裝的自動更新若這版沒有 `.run`，會退回下載這兩個檔。手動：
+
+```bash
+bash VipleStream-SteamFrame-Install-X.Y.Z.sh [VipleStream-Client-X.Y.Z-linux-arm64.flatpak]
+```
+
+沒給 bundle 時，腳本在自己旁邊與目前目錄找版號最新的 `.flatpak`。
+
+頭盔上的 `viplestream-update.timer`（開機 10 分鐘後、之後每 6 小時）看到新版時：release 有 `.run` 就只下載那個檔、用 GitHub 的 sha256 驗證，在 VipleStream 沒開著時執行 `bash <下載的 .run>`（`--no-steam` 看 `~/.local/share/viplestream-frame/no-steam`）。沒有 `.run` 才下載上面兩個檔。設定頁「App updates」的 `updatemode`：0 不檢查、1 只通知、2 才安裝（預設 2）。
+
+開發時可把 release JSON 換成自己的網址（只這次、不讀環境變數；`updatemode` 仍是 0 就不會打網路）。只接受 `http://127.0.0.1`、`http://localhost` 或 `https`：
+
+```bash
+bash ~/.local/share/viplestream-frame/auto-update.sh --api-url http://127.0.0.1:18080/releases/latest
+```
 
 2.0.0／2.0.1 的說明只叫使用者裝 `.flatpak`，結果從收藏庫開起來 VR 模式與影片模式都停用（2026-10-20 發現：頭盔實測
 一般 `flatpak run` 時沙盒的 `/proc/1/comm` 是 `bwrap`，`vrlauncher.cpp` 的 `inPidNamespacedSandbox()` 成立）。開發時一直
 沒露出來，是因為使用者平常開的是 dev 捷徑（`~/viplestream-galpha/VipleStream-GAlpha`，自帶不隔 PID 的 bwrap）。
 
-`moonlight-qt/scripts/steamframe/install-steamframe.sh`（release 時改名成 `VipleStream-SteamFrame-Install-X.Y.Z.sh` 上傳）：
+腳本本體 `moonlight-qt/scripts/steamframe/install-steamframe.sh`（`.run` 裡的那份，以及備援用的 `VipleStream-SteamFrame-Install-X.Y.Z.sh`）做這些事：
 
 - `flatpak --user install --reinstall --bundle`（branch `stable`）。
 - `~/.local/share/viplestream-frame/bwrap-nopid`：轉呼叫 `/usr/bin/bwrap`，只拿掉 `--unshare-pid`（`--args <fd>` 與命令列兩種

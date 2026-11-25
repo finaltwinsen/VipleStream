@@ -14,6 +14,7 @@
 #include "backend/richpresencemanager.h"
 #include "backend/hidprobe.h"   // §HID-PROBE
 #include "backend/sfenv.h"      // §SF-ENV（M2a）
+#include "backend/logdrop.h"    // §LOGDROP
 #include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -3171,6 +3172,11 @@ private:
                 }
             }
         }
+
+        // §LOGDROP：清理完成只會進這一次。延遲放在上傳執行緒，這裡睡會拖住下一場串流的 semaphore。
+        // 必須排在 sessionFinished 與 quit() 前面：命令列串流收到 sessionFinished 就結束程式，
+        // 排在後面的話主執行緒可能已經離開事件迴圈，這次上傳就不會開始。
+        LogDrop::autoUpload(QStringLiteral("session-end"));
 
         if (shouldQuitClientApp) {
             // Session is finished now (the earlier UI emit was quitStarting,

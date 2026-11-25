@@ -62,6 +62,23 @@ public class ImuFusionTest {
     }
 
     @Test
+    public void sequenceThatStepsByFourStillIntegratesOneSamplePerUpdate() {
+        // §VITURE-DT：Beast 的序號是裝置時鐘，每筆跳 4～5。轉頭角度不可因此放大。
+        ImuFusion fusion = new ImuFusion();
+        feedStep(fusion, 0f, 0f, 0f, 0f, 1f, 0f, 201, 0L, 0L, 4);
+        feedStep(fusion, 0f, YAW_RATE, 0f, 0f, 1f, 0f, 400, 201L * 4, 201L * STEP_NS, 4);
+        float[] euler = eulerOf(fusion);
+        Assert.assertEquals(90f, euler[0], 2f);
+    }
+
+    private static void feedStep(ImuFusion fusion, float gx, float gy, float gz,
+                                 float ax, float ay, float az, int count, long sequence, long arrivalNs, int step) {
+        for (int i = 0; i < count; i++) {
+            fusion.update(gx, gy, gz, ax, ay, az, sequence + (long) i * step, arrivalNs + i * STEP_NS);
+        }
+    }
+
+    @Test
     public void recenterZerosYawAndKeepsPitch() {
         ImuFusion fusion = new ImuFusion();
         float pitch = (float) Math.toRadians(20.0);

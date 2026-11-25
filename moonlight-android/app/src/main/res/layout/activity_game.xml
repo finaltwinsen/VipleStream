@@ -37,6 +37,24 @@
         android:focusable="false"
         android:visibility="gone" />
 
+    <!-- §VITURE：Beast 在 3D 卻在播 2D 時的一行字。不可點，否則會把觸控板的滑動吃掉。 -->
+    <TextView
+        android:id="@+id/beastModeHint"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="48dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:gravity="center"
+        android:padding="12dp"
+        android:textColor="#FFFFFFFF"
+        android:textSize="16sp"
+        android:background="#CC000000"
+        android:clickable="false"
+        android:focusable="false"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/performanceOverlay"
         android:layout_width="wrap_content"

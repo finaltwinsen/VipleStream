@@ -83,12 +83,17 @@ public class ComputerDetails {
     public AddressTuple remoteAddress;
     public AddressTuple manualAddress;
     public AddressTuple ipv6Address;
+    // §LAN-PREF：host 的 <VipleStreamLanAddress>，只留私有 IPv4。沒寫進資料庫時，下一輪輪詢會再拿到。
+    public List<AddressTuple> lanAddresses = new ArrayList<>();
     public String macAddress;
     public X509Certificate serverCert;
 
     // Transient attributes
     public State state;
     public AddressTuple activeAddress;
+    // §LAN-PREF：這兩個只活在輪詢中的那份物件。update() 不抄，否則每輪成功都會把探測時間清成 0。
+    public long lanProbeAtElapsed;
+    public boolean lanPrefActive;
     public int httpsPort;
     public int externalPort;
     public PairingManager.PairState pairState;
@@ -206,6 +211,83 @@ public class ComputerDetails {
         if (details.supportedDisplayModes != null && !details.supportedDisplayModes.isEmpty()) {
             this.supportedDisplayModes = details.supportedDisplayModes;
         }
+        // §LAN-PREF：這一輪 serverinfo 的清單整個換上。空清單代表 host 這次沒廣告區網位址。
+        List<AddressTuple> incomingLan = details.lanAddresses;
+        this.lanAddresses = incomingLan == null
+                ? new ArrayList<AddressTuple>()
+                : new ArrayList<AddressTuple>(incomingLan);
+    }
+
+    public boolean hasLanAddress(AddressTuple tuple) {
+        if (tuple == null || lanAddresses == null) {
+            return false;
+        }
+        for (int i = 0; i < lanAddresses.size(); i++) {
+            if (tuple.equals(lanAddresses.get(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // §LAN-PREF：不用 InetAddress.getByName。主機名稱會去做 DNS，輪詢執行緒會被卡住。
+    public static int[] parseIpv4(String address) {
+        if (address == null || address.length() == 0 || address.length() > 15) {
+            return null;
+        }
+        int[] out = new int[4];
+        int part = 0;
+        int value = 0;
+        int digits = 0;
+        for (int i = 0; i < address.length(); i++) {
+            char c = address.charAt(i);
+            if (c == '.') {
+                if (digits == 0 || part >= 3) {
+                    return null;
+                }
+                out[part++] = value;
+                value = 0;
+                digits = 0;
+                continue;
+            }
+            if (c < '0' || c > '9') {
+                return null;
+            }
+            digits++;
+            if (digits > 3) {
+                return null;
+            }
+            value = value * 10 + (c - '0');
+            if (value > 255) {
+                return null;
+            }
+        }
+        if (part != 3 || digits == 0) {
+            return null;
+        }
+        out[3] = value;
+        return out;
+    }
+
+    // 10/8、172.16/12、192.168/16。169.254 與 100.64/10 不在這裡。
+    public static boolean isPrivateLanIpv4(String address) {
+        int[] parts = parseIpv4(address);
+        if (parts == null) {
+            return false;
+        }
+        if (parts[0] == 10) {
+            return true;
+        }
+        if (parts[0] == 172 && parts[1] >= 16 && parts[1] <= 31) {
+            return true;
+        }
+        return parts[0] == 192 && parts[1] == 168;
+    }
+
+    // §LAN-PREF：對齊 Qt tryLanPreferred，只認 100.64.0.0/10。NvConnection 的 IPv6 判斷不在這條規則裡。
+    public static boolean isTailscaleIpv4(String address) {
+        int[] parts = parseIpv4(address);
+        return parts != null && parts[0] == 100 && (parts[1] & 0xC0) == 0x40;
     }
 
     @Override
@@ -219,6 +301,7 @@ public class ComputerDetails {
         str.append("Remote Address: ").append(remoteAddress).append("\n");
         str.append("IPv6 Address: ").append(ipv6Address).append("\n");
         str.append("Manual Address: ").append(manualAddress).append("\n");
+        str.append("LAN Addresses: ").append(lanAddresses).append("\n");
         str.append("MAC Address: ").append(macAddress).append("\n");
         str.append("Pair State: ").append(pairState).append("\n");
         str.append("Running Game ID: ").append(runningGameId).append("\n");

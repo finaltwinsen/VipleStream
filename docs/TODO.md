@@ -54,14 +54,13 @@
 - **待做**：Touch Plus 的 proximity 元件綁定（路徑沒把握，先沒綁）；Quest 3 的 AV1 協商；`xrbufferauto.h`／`xrflight.h` 等其餘 Frame 標頭；注視點；VR 內的介面（目前從 2D 面板選主機與 app）。
 - `xrphase.h` 的 vblank 常數只在 Frame 120 Hz 量過，Quest 不可套用。
 
-### §VITURE Beast 眼鏡（2026-11-24 開工，不使用官方 SDK；**沒有接過實機**）
+### §VITURE Beast 眼鏡（2.0.285 發佈；實機在使用者朋友那邊，Galaxy S25＋巨龍 RTX 5070 Ti）
 
-走開源 V2 HID 協定（`elasticjava/viture-v2`，MIT；授權全文在 `assets/licenses/viture-v2/`）。實機事實來自另一位開發者在 Galaxy S25＋Beast 上的量測：HID 在 interface 5、原始 IMU 約 400 Hz、裝置端融合姿態不會送、只有 1920×1080@60 與 3840×1080@60 兩種模式、拔插後顯示器約 7 秒才回來且回到 2D。
+走開源 V2 HID 協定（`elasticjava/viture-v2`，MIT），不用官方 SDK。
 
-- **在手機上驗過**：外接顯示器全螢幕＋手機觸控板（模擬次要顯示器）、顯示器消失 4 秒後以不同模式接回並要求 IDR、診斷畫面在沒接眼鏡時產生報告；`ImuFusion` 與協定的 JVM 單元測試 20 項全過。
-- **寫完、編譯過、外部審查兩輪並修正，待眼鏡實機**：USB 連線與讀取、主機端 Mahony 融合（靜止零偏、回正、可設定軸向對應）、3DoF PCVR 頭盔模式（`glasses_vr`；主機／app 長按選單有入口）、自動切 3D（`SET_DISPLAY_MODE 0x32`，Beast 上未驗證；失敗就提示按實體鍵）、觸控板上的 2D／3D 與音量按鈕、一般串流 3840×1080 時自動切 3D、配戴偵測、診斷畫面的手動測試與 IMU 軸向測試。
-- **待實機確認**：`SET_DISPLAY_MODE` 是否有效；感測器軸向對應（軸向測試報告回來後用診斷畫面的「軸向對應」設定）；IMU 樣本在切 3D 後是否持續；沒有磁力計時的 yaw 漂移速度。
-- **不靠 SDK 做不到**：亮度、鏡片調光、眼鏡內建錨定（native DOF／回正／畫面大小距離）。
+- **實機確認過**：Beast 的 2D＝1920×1080、3D＝3840×1080；`SET_DISPLAY_MODE 0x32` 會讓 Beast 黑屏，一律不送（以寬度 ≥3000 判斷 3D）；原始 IMU 240 Hz、序號是約 1 kHz 的裝置 tick（每筆跳 4～5）；軸向 `+x,-y,-z`（配戴確認）；眼鏡 VR 60 fps、延遲中位數 11～14 ms；DeoVR 可用；扳機按鈕（手把朝上 40°）可用。
+- **2.0.285 新做、還沒配戴驗**：§VITURE-PREDICT 姿態往前預測（量到的畫面延遲＋16 ms，夾 15～45 ms）；§VITURE-WARP 時間扭曲（`GlassesWarpRenderer`，設定頁可關；算圖姿態優先用 header 的 renderRot，跟上傳那筆差 >15° 改用上傳那筆）。驗法：看 `warp 10s`、`warp pose source`、`predict aheadMs` 三行；請使用者比較開關，注意轉頭停下時有沒有「多轉再彈回」。
+- **待做**：沒有磁力計時的長時間 yaw 漂移量測；亮度、調光等只有 SDK 做得到的功能。
 
 ### 2026-11-22：頭盔 2D 串流的兩個輸入問題（2.0.270，已發佈；host 與頭盔都是 2.0.270）
 

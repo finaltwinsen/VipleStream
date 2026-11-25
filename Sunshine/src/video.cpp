@@ -2528,8 +2528,13 @@ namespace video {
     std::unique_ptr<platf::encode_device_t> encode_device,
     safe::signal_t &reinit_event,
     const encoder_t &encoder,
-    void *channel_data
+    void *channel_data,
+    int *qsv_rebuild_kbps = nullptr
   ) {
+    // §QSV-ABR：上一輪因為碼率改變而重建時，用那個碼率建立，不要回到 session 起始碼率又被調降一次。
+    if (qsv_rebuild_kbps && *qsv_rebuild_kbps > 0) {
+      config.bitrate = *qsv_rebuild_kbps;
+    }
     auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
     if (!session) {
       // §VR-PROBE-CACHE：探測說可以、真的要用時卻建不起來——快取的結果不可信了，下一次 /launch 重新完整探測
@@ -2710,6 +2715,14 @@ namespace video {
     // 一張的份量）；PyroWave 自己用幀率算每張的上限，改傳實際的幀率。設定值不超過這個 session 建立時的碼率
     // （編碼器的 level 是照它選的）。
     int vr_enc_div = 1;
+    // §QSV-ABR（2026-11-25）：Intel QuickSync（hevc_qsv）不接受執行中改碼率：FFmpeg 改 bit_rate 後呼叫 MFX Reset，
+    // 回「incompatible video parameters」，之後每張都編不出來、編碼器重建，重建又用 session 起始碼率（VR 是 150 Mbps 上限），
+    // ABR 再調降又失敗——實機（UHD 770、眼鏡 VR）每秒只剩約 10 張，連續 30 次後整場結束。
+    // 所以 QuickSync 的碼率變動改成「用新碼率重建編碼器」：變動不到 10% 不動；同一個編碼器至少用 2 秒才重建，
+    // 期間到的變動只留最後一個。
+    const bool qsv_rebuild_mode = qsv_rebuild_kbps != nullptr && std::string_view(encoder.name) == "quicksync"sv;
+    const auto encoder_created_at = std::chrono::steady_clock::now();
+    int qsv_pending_kbps = 0;
     // §REVIEW-1119：回傳編碼器有沒有真的套用。NVENC 重設失敗時呼叫端不可以把 last_applied_bitrate_kbps 往前推，
     // 否則之後的升降方向（要不要 IDR）會拿一個沒生效的值來比。
     const auto apply_encoder_bitrate = [&](int kbps, bool is_decrease) -> bool {
@@ -2719,6 +2732,17 @@ namespace video {
       // 第三輪審查 C13：這個提示不在這裡印（每次調碼率都會走這裡；沒開 vr_abr_fast 時沒有控制器夾上限，會整段半速洗版），
       // 改在分頻剛變動的那一次（下方 vr_rate_applied）照實印一行
       auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(session.get());
+      if (qsv_rebuild_mode && avcodec_session && avcodec_session->avcodec_ctx) {
+        const int64_t current_kbps = std::max<int64_t>(1, avcodec_session->avcodec_ctx->rc_max_rate / 1000);
+        const int64_t diff = enc_kbps > current_kbps ? enc_kbps - current_kbps : current_kbps - enc_kbps;
+        if (diff * 10 < current_kbps) {
+          qsv_pending_kbps = 0;
+          return true;  // 差不到 10%：維持目前的編碼器，當作已套用
+        }
+        qsv_pending_kbps = enc_kbps;
+        BOOST_LOG(info) << "[VIPLE-ABR] quicksync: " << kbps << " kbps needs an encoder rebuild (in-place change is rejected)";
+        return true;
+      }
       if (avcodec_session && avcodec_session->avcodec_ctx) {
         auto &ctx = avcodec_session->avcodec_ctx;
         int64_t newBitrate = enc_kbps * 1000LL;
@@ -2982,6 +3006,12 @@ namespace video {
                                << last_applied_bitrate_kbps << " kbps as the applied value";
           }
         }
+      }
+      // §QSV-ABR：到時間就用最後一個待套用的碼率重建（離開 encode_run，外層迴圈會照 *qsv_rebuild_kbps 建新的編碼器）
+      if (qsv_pending_kbps > 0 && std::chrono::steady_clock::now() - encoder_created_at >= std::chrono::seconds {2}) {
+        *qsv_rebuild_kbps = qsv_pending_kbps;
+        BOOST_LOG(info) << "[VIPLE-ABR] quicksync: rebuilding the encoder at " << qsv_pending_kbps << " kbps";
+        return;
       }
 
       // VipleStream: Dynamic FPS change — apply new framerate from client (FRUC toggle)
@@ -3594,6 +3624,7 @@ namespace video {
     // 馬上再建一個編碼器重試，沒有間隔也沒有上限——持續失敗時就是全速空轉（Windows 的 NVENC 每次還多一條拆除執行緒）。
     // 很快就返回、又不是顯示器重新初始化造成的，算一次快速失敗：之後每次多等一點，連續 30 次就結束這條串流。
     int fast_failures = 0;
+    int qsv_rebuild_kbps = 0;  // §QSV-ABR：QuickSync 因碼率改變而重建時，下一個編碼器用的碼率
 
     while (!shutdown_event->peek() && images->running()) {
       // Wait for the main capture event when the display is being reinitialized
@@ -3646,7 +3677,8 @@ namespace video {
         std::move(encode_device),
         ref->reinit_event,
         *ref->encoder_p,
-        channel_data
+        channel_data,
+        &qsv_rebuild_kbps
       );
       if (shutdown_event->peek() || !images->running()) {
         break;

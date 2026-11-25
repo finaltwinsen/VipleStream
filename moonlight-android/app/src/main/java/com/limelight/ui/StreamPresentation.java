@@ -8,9 +8,11 @@ import android.view.Display;
 import android.view.Gravity;
 import android.view.SurfaceHolder;
 import android.view.ViewGroup;
+import android.util.TypedValue;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
+import android.widget.TextView;
 
 /**
  * §EXT-DISPLAY：串流畫面畫在外接顯示器上。手機 Activity 另外當觸控板。
@@ -19,6 +21,7 @@ public class StreamPresentation extends Presentation {
     private final Display.Mode preferredMode;
     private Runnable onDisplayLost;
     private StreamView streamView;
+    private TextView topHint;
 
     public StreamPresentation(Context outerContext, Display display, Display.Mode preferredMode, Runnable onDisplayLost) {
         super(outerContext, display);
@@ -46,7 +49,40 @@ public class StreamPresentation extends Presentation {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 Gravity.CENTER));
+        topHint = new TextView(getContext());
+        topHint.setTextColor(Color.WHITE);
+        topHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        topHint.setGravity(Gravity.CENTER);
+        topHint.setBackgroundColor(0xCC000000);
+        int pad = (int) (12 * getContext().getResources().getDisplayMetrics().density + 0.5f);
+        topHint.setPadding(pad, pad, pad, pad);
+        // §VITURE：這行蓋在畫面上緣。設成可點的話，眼鏡上的觸控會被提示吃掉。
+        topHint.setClickable(false);
+        topHint.setFocusable(false);
+        topHint.setVisibility(ViewGroup.GONE);
+        FrameLayout.LayoutParams hintParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        hintParams.topMargin = pad;
+        hintParams.leftMargin = pad * 2;
+        hintParams.rightMargin = pad * 2;
+        root.addView(topHint, hintParams);
         setContentView(root);
+    }
+
+    /** 空字串會藏起來。呼叫端在切回 2D 時清掉。 */
+    public void setTopHint(CharSequence text) {
+        if (topHint == null) {
+            return;
+        }
+        if (text == null || text.length() == 0) {
+            topHint.setVisibility(ViewGroup.GONE);
+            topHint.setText("");
+            return;
+        }
+        topHint.setText(text);
+        topHint.setVisibility(ViewGroup.VISIBLE);
     }
 
     public StreamView getStreamView() {

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  §CLIENT-DEB: polkit action for the Linux x64 client's .deb self-update.
+  pkexec picks this action when the program it is asked to run is the path in
+  org.freedesktop.policykit.exec.path (the installed helper) and shows this
+  message instead of the generic "run a program as the super user" text.
+  The annotation only allows that one helper path. Arguments are checked by the helper.
+
+  auth_admin_keep: an administrator authenticates once per desktop session, so a
+  failed install can be retried without another password prompt. It is not "yes".
+  The helper does not verify a package signature, so a kept authorization still
+  means the package's install scripts run as root. Do not widen this to yes, and
+  do not add a sudoers NOPASSWD rule or an extra polkit rule for this helper.
+
+  為什麼用 keep 而不是每次都問：安裝失敗後，使用者再點一次更新不該再打一次密碼。
+  新的工作階段仍要管理者核可。helper 不驗簽章，所以不能放成 yes。
+-->
+<policyconfig>
+  <vendor>VipleStream</vendor>
+  <vendor_url>https://github.com/finaltwinsen/VipleStream</vendor_url>
+  <action id="app.viplestream.client.self-update">
+    <description>Install a VipleStream update package (its install scripts run with administrator privileges)</description>
+    <description xml:lang="zh_TW">安裝 VipleStream 更新套件（會以系統管理員權限執行套件的安裝腳本）</description>
+    <message>Authentication is required to install a VipleStream update package. The package's install scripts will run with administrator privileges.</message>
+    <message xml:lang="zh_TW">需要驗證身分才能安裝 VipleStream 更新套件（會以系統管理員權限執行套件的安裝腳本）</message>
+    <icon_name>viplestream</icon_name>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/viplestream-client/self-update</annotate>
+  </action>
+</policyconfig>

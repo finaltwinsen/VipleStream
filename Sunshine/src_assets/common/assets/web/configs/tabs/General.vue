@@ -163,6 +163,17 @@ function removeCmd(index) {
       <div class="form-text">{{ $t('config.log_upload_desc') }}</div>
     </div>
 
+    <!-- §CONSOLE-LOGIN：預設鎖定。unlock 會讓實體螢幕直接顯示桌面。 -->
+    <div class="mb-3">
+      <label for="console_reclaim" class="form-label">{{ $t('config.console_reclaim') }}</label>
+      <select id="console_reclaim" class="form-select" v-model="config.console_reclaim">
+        <option value="lock">{{ $t('config.console_reclaim_lock') }}</option>
+        <option value="unlock">{{ $t('config.console_reclaim_unlock') }}</option>
+        <option value="off">{{ $t('config.console_reclaim_off') }}</option>
+      </select>
+      <div class="form-text">{{ $t('config.console_reclaim_desc') }}</div>
+    </div>
+
     <!-- Enable system tray -->
     <Checkbox class="mb-3"
               id="system_tray"

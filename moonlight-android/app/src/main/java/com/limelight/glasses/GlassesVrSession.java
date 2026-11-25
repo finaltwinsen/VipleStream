@@ -111,6 +111,7 @@ public final class GlassesVrSession {
                 }
                 session.fusion.copyQuaternion(session.quat);
                 session.fusion.copyAngularVelocity(session.ang);
+                session.maybeLogPose(arrivalNs);
                 if (nativeHandle != 0 && QxrNative.isAvailable()) {
                     QxrNative.nativeImuPush(nativeHandle,
                             session.quat[3], session.quat[0], session.quat[1], session.quat[2],
@@ -137,6 +138,9 @@ public final class GlassesVrSession {
             return null;
         }
         GlassesVrSession session = new GlassesVrSession(glasses, nativeHandle, onDetached, wearListener);
+        session.biasContext = activity.getApplicationContext();
+        session.biasKey = biasKeyFor(device);
+        session.beast = VitureUsb.isBeast(device);
         // holder 先設好，但要等 attach 把 push 打開。否則拆除時 session 還不在 Game 手上。
         holder[0] = session;
         if (attach == null || !attach.attach(session)) {
@@ -164,6 +168,103 @@ public final class GlassesVrSession {
         fusion.recenter();
     }
 
+    // §VITURE-TRIGGER：VipleVr.h 的 VIPLE_VR_BTN_TRIGGER。
+    private static final int BTN_TRIGGER = 0x0020;
+
+    /** 手機上的扳機鈕。右手控制器跟著頭的方向，看著選項按下就是點選。 */
+    public void setTrigger(boolean pressed) {
+        if (nativeHandle == 0 || !QxrNative.isAvailable()) {
+            return;
+        }
+        QxrNative.nativeImuSetController(nativeHandle, pressed ? BTN_TRIGGER : 0, pressed ? 1f : 0f);
+    }
+
+    // §VITURE-DRIFT：接著眼鏡時每 10 秒一行姿態。漂移、軸向、零偏是不是有在更新，
+    // 都要從自動上傳的 log 遠端看出來，不必再擷取眼鏡畫面推算。只在讀取執行緒呼叫。
+    private static final long POSE_LOG_NS = 10_000_000_000L;
+    private long poseLogAtNs;
+    private final float[] poseLogQuat = new float[4];
+    private final float[] poseLogEuler = new float[3];
+    private final float[] poseLogBias = new float[4];
+    private final long[] poseLogCounts = new long[4];
+
+    private void maybeLogPose(long nowNs) {
+        if (poseLogAtNs == 0L) {
+            poseLogAtNs = nowNs;
+            return;
+        }
+        if (nowNs - poseLogAtNs < POSE_LOG_NS) {
+            return;
+        }
+        poseLogAtNs = nowNs;
+        fusion.copyQuaternion(poseLogQuat);
+        ImuFusion.eulerDegrees(poseLogQuat[0], poseLogQuat[1], poseLogQuat[2], poseLogQuat[3], poseLogEuler);
+        fusion.takeStats(poseLogBias, poseLogCounts);
+        long n = Math.max(1L, poseLogCounts[0]);
+        VitureUsb.logI(String.format(java.util.Locale.US,
+                "pose 10s: yaw=%.2f pitch=%.2f roll=%.2f biasMrad=%.2f,%.2f,%.2f deadbandMrad=%.1f inDeadband=%d%% biasUpdates=%d quasi=%d",
+                poseLogEuler[0], poseLogEuler[1], poseLogEuler[2],
+                poseLogBias[0] * 1000f, poseLogBias[1] * 1000f, poseLogBias[2] * 1000f,
+                poseLogBias[3] * 1000f, poseLogCounts[1] * 100L / n, poseLogCounts[2], poseLogCounts[3]));
+    }
+
+    // §VITURE-ADAPT：每副眼鏡的零偏不同、同一副也會隨溫度變。存下上次結束時的估計，下次同一副從這裡開始，
+    // 開場那段不必等靜止窗才收斂；之後照樣在執行中持續更新。key 用序號的雜湊，不把序號原樣寫進偏好。
+    private static final String BIAS_PREFS = "viture_imu_bias";
+    private String biasKey;
+    // §VITURE-AXIS：沒存過軸向設定時，Beast 用自己的預設
+    private boolean beast;
+    private String fusionAxisTag = "default";
+    private android.content.Context biasContext;
+
+    private static String biasKeyFor(UsbDevice device) {
+        String id = null;
+        try {
+            id = device.getSerialNumber();
+        } catch (SecurityException ignored) {
+            // 沒權限讀序號時用型號，至少同型號共用一個起點
+        }
+        if (id == null || id.isEmpty()) {
+            id = Integer.toHexString(device.getVendorId()) + ":" + Integer.toHexString(device.getProductId());
+        }
+        return "b_" + Integer.toHexString(id.hashCode());
+    }
+
+    private void loadBias() {
+        if (biasContext == null || biasKey == null) {
+            return;
+        }
+        // 零偏存的是對應後的座標。軸向設定一換，同一組數字的正負就不對了（11-25 實機：換軸向後開場就慢慢偏），
+        // 所以 key 帶上目前的軸向。
+        biasKey = biasKey + "_" + fusionAxisTag;
+        SharedPreferences prefs = biasContext.getSharedPreferences(BIAS_PREFS, Context.MODE_PRIVATE);
+        if (!prefs.contains(biasKey + "_x")) {
+            VitureUsb.logI("imu bias: no saved value");
+            return;
+        }
+        float x = prefs.getFloat(biasKey + "_x", 0f);
+        float y = prefs.getFloat(biasKey + "_y", 0f);
+        float z = prefs.getFloat(biasKey + "_z", 0f);
+        boolean ok = fusion.seedBias(x, y, z);
+        VitureUsb.logI(String.format(java.util.Locale.US, "imu bias seeded=%b mrad=%.2f,%.2f,%.2f",
+                ok, x * 1000f, y * 1000f, z * 1000f));
+    }
+
+    private void saveBias() {
+        if (biasContext == null || biasKey == null) {
+            return;
+        }
+        float[] b = new float[3];
+        fusion.copyBias(b);
+        biasContext.getSharedPreferences(BIAS_PREFS, Context.MODE_PRIVATE).edit()
+                .putFloat(biasKey + "_x", b[0])
+                .putFloat(biasKey + "_y", b[1])
+                .putFloat(biasKey + "_z", b[2])
+                .apply();
+        VitureUsb.logI(String.format(java.util.Locale.US, "imu bias saved mrad=%.2f,%.2f,%.2f",
+                b[0] * 1000f, b[1] * 1000f, b[2] * 1000f));
+    }
+
     public boolean copyStatus(float[] hzYawPitchRoll) {
         if (hzYawPitchRoll == null || hzYawPitchRoll.length < 4 || !fusion.hasPose()) {
             return false;
@@ -180,6 +281,10 @@ public final class GlassesVrSession {
     /**
      * §VITURE：跟 shutdown 共用切換器的同一把鎖。結束流程進鎖之後就不再送 0x32，避免關掉以後又被切回 3D。
      */
+    public boolean isBeast() {
+        return glasses.isBeast();
+    }
+
     public VitureGlasses.CommandResult setDisplayMode(int mode) {
         synchronized (switcher.lock()) {
             if (closing) {
@@ -190,8 +295,13 @@ public final class GlassesVrSession {
         }
     }
 
-    /** 送 0x32。還原旗標在共用的切換器裡；這行 log 跟以前寫在 Game 的那行相同。 */
+    /** 送 0x32。還原旗標在共用的切換器裡；這行 log 跟以前寫在 Game 的那行相同。Beast 不送。 */
     public VitureGlasses.CommandResult switchTo3d() {
+        if (glasses.isBeast()) {
+            // §VITURE：Beast 切 3D 是眼鏡自己重新列舉成 3840×1080，0x32 會黑屏。
+            VitureUsb.logI("SET display mode 0x32 skipped; beast");
+            return new VitureGlasses.CommandResult(false, VitureGlasses.STATUS_IO, new byte[0]);
+        }
         VitureGlasses.CommandResult result = setDisplayMode(VitureV2Protocol.DISPLAY_3D_SBS_60);
         VitureUsb.logI("SET display mode 0x32 status=" + result.status + " ok=" + result.ok);
         return result;
@@ -206,6 +316,9 @@ public final class GlassesVrSession {
         VitureUsb.checkNotMainThread();
         // 讀取執行緒看到這面旗標就不再 push。USB 指令還要等它收 ACK，所以先不要停它。
         closing = true;
+        if (sessionLive) {
+            saveBias();
+        }
         Thread watch = imuWatchThread;
         if (watch != null) {
             watch.interrupt();
@@ -242,6 +355,13 @@ public final class GlassesVrSession {
             notifySessionEnd();
         }
         return stopped;
+    }
+
+    public boolean willUploadSessionEnd() {
+        synchronized (sessionEndLock) {
+            // §LOGDROP：Game 用這個決定要不要再送一次。arm 之前與已經送過都不是這場的結束報告。
+            return sessionLive && !sessionEndSent;
+        }
     }
 
     private void notifySessionEnd() {
@@ -295,15 +415,19 @@ public final class GlassesVrSession {
 
     private void applySavedAxis(Activity activity) {
         SharedPreferences prefs = activity.getSharedPreferences(VitureAxisMap.PREFS_NAME, Context.MODE_PRIVATE);
-        String saved = prefs.getString(VitureAxisMap.PREFS_KEY, VitureAxisMap.DEFAULT);
+        String fallback = VitureAxisMap.defaultFor(beast);
+        String saved = prefs.getString(VitureAxisMap.PREFS_KEY, fallback);
         if (!fusion.applyAxisText(saved)) {
-            VitureUsb.logI("viture_axis_map invalid '" + saved + "'; using " + VitureAxisMap.DEFAULT);
-            fusion.applyAxisText(VitureAxisMap.DEFAULT);
-            VitureUsb.logI("axis=" + VitureAxisMap.DEFAULT);
+            VitureUsb.logI("viture_axis_map invalid '" + saved + "'; using " + fallback);
+            fusion.applyAxisText(fallback);
+            fusionAxisTag = Integer.toHexString(fallback.hashCode());
+            VitureUsb.logI("axis=" + fallback);
             return;
         }
         String canonical = VitureAxisMap.canonical(saved);
-        VitureUsb.logI("axis=" + (canonical == null ? VitureAxisMap.DEFAULT : canonical));
+        fusionAxisTag = Integer.toHexString((canonical == null ? fallback : canonical).hashCode());
+        VitureUsb.logI("axis=" + (canonical == null ? fallback : canonical)
+                + (prefs.contains(VitureAxisMap.PREFS_KEY) ? " (saved)" : " (default beast=" + beast + ")"));
     }
 
     private void logQueries() {
@@ -324,6 +448,7 @@ public final class GlassesVrSession {
 
     private void startStreams(Activity activity) {
         applySavedAxis(activity);
+        loadBias();
         synchronized (switcher.lock()) {
             if (closing) {
                 return;

@@ -11,6 +11,13 @@ public final class VitureAxisMap {
     public static final String PREFS_NAME = "viture_glasses";
     public static final String PREFS_KEY = "viture_axis_map";
     public static final String DEFAULT = "+x,+y,+z";
+    // §VITURE-AXIS（2026-11-25 Beast 實機配戴確認）：Beast 的 IMU 繞左右軸轉了 180° 裝，戴著時預設對應算出的側傾約 -176°，
+    // 畫面倒過來、轉頭反向。上下與前後軸反過來（仍是右手座標）就對了；試過 -x,-y,+z 會讓點頭反向。只在沒有存過設定時當預設。
+    public static final String BEAST_DEFAULT = "+x,-y,-z";
+
+    public static String defaultFor(boolean beast) {
+        return beast ? BEAST_DEFAULT : DEFAULT;
+    }
 
     private VitureAxisMap() {
     }

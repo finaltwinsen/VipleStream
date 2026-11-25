@@ -850,7 +850,9 @@ namespace logdrop {
     constexpr std::string_view kInstallAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     constexpr int kSessionEndDelaySec = 5;
     constexpr int kCrashDelaySec = 30;
-    constexpr int kMaxAutoPerDay = 3;
+    // 測試者要能在一兩場之內看到報告；收件端另有每個安裝每日 20 份的上限，所以 client 端不必卡到 6 小時。
+    constexpr int kMaxAutoPerDay = 8;
+    constexpr std::chrono::minutes kTriggerGap {10};
 
     std::atomic<bool> g_shutdown {false};
     std::atomic<bool> g_unclean {false};
@@ -1058,7 +1060,7 @@ namespace logdrop {
         return false;
       }
       const auto it = g_last_trigger.find(trigger);
-      if (it != g_last_trigger.end() && now - it->second < std::chrono::hours {6}) {
+      if (it != g_last_trigger.end() && now - it->second < kTriggerGap) {
         return false;
       }
       g_attempts.push_back(now);

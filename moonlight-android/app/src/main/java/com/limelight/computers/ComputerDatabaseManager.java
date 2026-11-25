@@ -5,6 +5,7 @@ import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
@@ -19,6 +20,7 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteException;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -33,6 +35,7 @@ public class ComputerDatabaseManager {
         String REMOTE = "remote";
         String MANUAL = "manual";
         String IPv6 = "ipv6";
+        String LAN = "lan";
 
         String ADDRESS = "address";
         String PORT = "port";
@@ -120,6 +123,56 @@ public class ComputerDatabaseManager {
                 address.getString(AddressFields.ADDRESS), address.getInt(AddressFields.PORT));
     }
 
+    private static JSONArray lanTuplesToJson(List<ComputerDetails.AddressTuple> tuples) throws JSONException {
+        JSONArray array = new JSONArray();
+        if (tuples == null) {
+            return array;
+        }
+        int count = 0;
+        for (int i = 0; i < tuples.size() && count < 16; i++) {
+            ComputerDetails.AddressTuple tuple = tuples.get(i);
+            if (tuple == null || !ComputerDetails.isPrivateLanIpv4(tuple.address)) {
+                continue;
+            }
+            JSONObject item = tupleToJson(tuple);
+            if (item == null) {
+                continue;
+            }
+            array.put(item);
+            count++;
+        }
+        return array;
+    }
+
+    // §LAN-PREF：單筆壞掉就跳過。舊資料沒有這個欄位時，下一輪輪詢會再拿到。
+    private static List<ComputerDetails.AddressTuple> lanTuplesFromJson(JSONObject addresses) {
+        ArrayList<ComputerDetails.AddressTuple> list = new ArrayList<ComputerDetails.AddressTuple>();
+        if (addresses == null || !addresses.has(AddressFields.LAN) || addresses.isNull(AddressFields.LAN)) {
+            return list;
+        }
+        JSONArray array = addresses.optJSONArray(AddressFields.LAN);
+        if (array == null) {
+            return list;
+        }
+        int count = Math.min(array.length(), 16);
+        for (int i = 0; i < count; i++) {
+            JSONObject item = array.optJSONObject(i);
+            if (item == null) {
+                continue;
+            }
+            try {
+                String address = item.getString(AddressFields.ADDRESS);
+                int port = item.getInt(AddressFields.PORT);
+                if (!ComputerDetails.isPrivateLanIpv4(address) || port <= 0 || port > 65535) {
+                    continue;
+                }
+                list.add(new ComputerDetails.AddressTuple(address, port));
+            } catch (RuntimeException | JSONException ignored) {
+            }
+        }
+        return list;
+    }
+
     public boolean updateComputer(ComputerDetails details) {
         ContentValues values = new ContentValues();
         values.put(COMPUTER_UUID_COLUMN_NAME, details.uuid);
@@ -131,6 +184,7 @@ public class ComputerDatabaseManager {
             addresses.put(AddressFields.REMOTE, tupleToJson(details.remoteAddress));
             addresses.put(AddressFields.MANUAL, tupleToJson(details.manualAddress));
             addresses.put(AddressFields.IPv6, tupleToJson(details.ipv6Address));
+            addresses.put(AddressFields.LAN, lanTuplesToJson(details.lanAddresses));
             values.put(ADDRESSES_COLUMN_NAME, addresses.toString());
         } catch (JSONException e) {
             throw new RuntimeException(e);
@@ -162,6 +216,7 @@ public class ComputerDatabaseManager {
             details.remoteAddress = tupleFromJson(addresses, AddressFields.REMOTE);
             details.manualAddress = tupleFromJson(addresses, AddressFields.MANUAL);
             details.ipv6Address = tupleFromJson(addresses, AddressFields.IPv6);
+            details.lanAddresses = lanTuplesFromJson(addresses);
         } catch (JSONException e) {
             throw new RuntimeException(e);
          }

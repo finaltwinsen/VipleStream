@@ -219,6 +219,131 @@ namespace self_update {
       return ss.str();
     }
 
+    std::string ascii_lower(std::string s) {
+      for (char &c : s) {
+        const unsigned char u = (unsigned char) c;
+        if (u >= 'A' && u <= 'Z') c = (char) (u - 'A' + 'a');
+      }
+      return s;
+    }
+
+    struct url_parts {
+      std::string scheme;
+      std::string host;
+      std::string port;
+      bool ok = false;
+    };
+
+    // §SELF-UPDATE：--update-url 與 asset URL 都靠這份拆解。不接受 userinfo，避免把帳密寫進 log 或下載位址。
+    url_parts split_url(const std::string &raw) {
+      url_parts p;
+      if (raw.empty() || raw.find_first_of(" \t\r\n\\") != std::string::npos) return p;
+      const auto scheme_end = raw.find("://");
+      if (scheme_end == std::string::npos || scheme_end == 0) return p;
+      p.scheme = ascii_lower(raw.substr(0, scheme_end));
+      if (p.scheme != "http" && p.scheme != "https") return p;
+      const std::string rest = raw.substr(scheme_end + 3);
+      if (rest.empty() || rest.find('@') != std::string::npos) return p;
+      const auto auth_end = rest.find_first_of("/?#");
+      const std::string hostport = auth_end == std::string::npos ? rest : rest.substr(0, auth_end);
+      if (hostport.empty()) return p;
+      if (hostport.front() == '[') {
+        const auto br = hostport.find(']');
+        if (br == std::string::npos) return p;
+        p.host = ascii_lower(hostport.substr(0, br + 1));
+        if (br + 1 < hostport.size()) {
+          if (hostport[br + 1] != ':') return p;
+          p.port = hostport.substr(br + 2);
+        }
+      }
+      else {
+        const auto colon = hostport.rfind(':');
+        if (colon != std::string::npos && hostport.find(':') != colon) return p;
+        if (colon != std::string::npos) {
+          p.host = ascii_lower(hostport.substr(0, colon));
+          p.port = hostport.substr(colon + 1);
+        }
+        else {
+          p.host = ascii_lower(hostport);
+        }
+      }
+      if (p.host.empty()) return p;
+      if (!p.port.empty() && p.port.find_first_not_of("0123456789") != std::string::npos) return p;
+      p.ok = true;
+      return p;
+    }
+
+    bool loopback_http_host(const url_parts &p) {
+      return p.ok && p.scheme == "http" && (p.host == "127.0.0.1" || p.host == "localhost");
+    }
+
+    // §SELF-UPDATE：開發用 base 不寫設定、不讀環境變數。http 只留迴圈位址，否則同一參數能打內網任意主機。
+    bool update_base_allowed(const std::string &raw, std::string *why) {
+      auto fail = [&](const char *msg) {
+        if (why) *why = msg;
+        return false;
+      };
+      if (raw.find_first_of("?#") != std::string::npos) return fail("base URL must not contain '?' or '#'");
+      const auto p = split_url(raw);
+      if (!p.ok) return fail("base URL must be http://127.0.0.1, http://localhost, or https");
+      if (p.scheme == "https") return true;
+      if (loopback_http_host(p)) return true;
+      return fail("http is only allowed for 127.0.0.1 and localhost");
+    }
+
+    std::string normalize_update_base(std::string base) {
+      while (base.size() > 8 && base.back() == '/') base.pop_back();
+      return base;
+    }
+
+    // §SELF-UPDATE：正式下載只許 https。本機假 release 的 asset 是 http://127.0.0.1 或 http://localhost；
+    // 這裡若一律禁 http，--update-url 的下載一定失敗。其他 http 仍拒絕。
+    bool download_url_acceptable(const std::string &url) {
+      const auto p = split_url(url);
+      if (!p.ok) return false;
+      if (p.scheme == "https") return true;
+      return loopback_http_host(p);
+    }
+
+    void curl_apply_protocols(CURL *curl, const std::string &url) {
+      const bool plain = loopback_http_host(split_url(url));
+#if LIBCURL_VERSION_NUM >= 0x075500  // 7.85.0 起用字串版，舊的 bitmask 版已標為 deprecated
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, plain ? "http,https" : "https");
+      curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, plain ? "http,https" : "https");
+#else
+      const long mask = plain ? (long) (CURLPROTO_HTTPS | CURLPROTO_HTTP) : (long) CURLPROTO_HTTPS;
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS, mask);
+      curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, mask);
+#endif
+    }
+
+    // 回 false：參數不合法（log 已寫）。沒有 --update-url 時 base 為空、回 true。
+    // 服務背景不呼叫這裡，所以這個參數不會改到自動更新。
+    // 參數不叫 error：BOOST_LOG(error) 的 error 是嚴重度名稱，同名參數會把它遮掉而編不過
+    bool extract_update_base(int argc, char **argv, std::string &base, std::string &err) {
+      base.clear();
+      for (int i = 0; i < argc; ++i) {
+        if (std::string_view(argv[i]) != "--update-url"sv) continue;
+        if (i + 1 >= argc) {
+          err = "--update-url needs a base URL";
+          BOOST_LOG(error) << "[VIPLE-UPDATE] " << err;
+          return false;
+        }
+        ++i;
+        std::string why;
+        if (!update_base_allowed(argv[i], &why)) {
+          err = "rejected --update-url: " + why;
+          BOOST_LOG(error) << "[VIPLE-UPDATE] " << err;
+          return false;
+        }
+        base = normalize_update_base(argv[i]);
+      }
+      if (!base.empty()) {
+        BOOST_LOG(info) << "[VIPLE-UPDATE] CLI release base " << base;
+      }
+      return true;
+    }
+
     bool parse_version_parts(const std::string &s, std::vector<int> &out) {
       out.clear();
       std::stringstream ss(s);
@@ -300,6 +425,7 @@ namespace self_update {
       headers = curl_slist_append(headers, "Accept: application/vnd.github+json");
       headers = curl_slist_append(headers, "X-GitHub-Api-Version: 2022-11-28");
       curl_common(curl);
+      curl_apply_protocols(curl, url);
       curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
       curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
       curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_string);
@@ -489,6 +615,67 @@ namespace self_update {
       return make_release(tag);
     }
 
+    // §SELF-UPDATE：--update-url 與 GitHub /tags 若各寫一份解析，假 release 會漏掉 digest 仍去抓正式版。
+    bool apply_asset_fields(release_info &rel, const nlohmann::json &release_json, std::string *error) {
+      auto assets = release_json.find("assets");
+      if (assets == release_json.end() || !assets->is_array()) {
+        if (error) *error = "release JSON has no assets[]";
+        return false;
+      }
+      for (const auto &a : *assets) {
+        if (!a.is_object() || json_str(a, "name") != rel.asset_name) continue;
+        rel.asset_listed = true;
+        const std::string url = json_str(a, "browser_download_url");
+        if (!url.empty()) rel.asset_url = url;
+        auto sz = a.find("size");
+        if (sz != a.end() && sz->is_number_integer()) rel.asset_size = sz->get<long long>();
+        std::string digest = json_str(a, "digest");  // "sha256:<hex>"
+        if (digest.rfind("sha256:", 0) == 0) {
+          digest.erase(0, 7);
+          digest = ascii_lower(std::move(digest));
+          if (digest.size() == 64 && digest.find_first_not_of("0123456789abcdef") == std::string::npos) {
+            rel.asset_sha256 = std::move(digest);
+          }
+        }
+        return true;
+      }
+      rel.asset_listed = false;
+      return true;
+    }
+
+    // §SELF-UPDATE：假 release 用一份 JSON 同時給版號與 asset（模仿 GitHub /releases/latest）。
+    // 不走 HEAD 302，失敗也不退回真正的 GitHub，避免測到一半裝上正式版。
+    std::optional<release_info> query_from_base(const std::string &base, std::string *error) {
+      const std::string url = base + "/releases/latest";
+      long code = 0;
+      auto j = api_get_json(url, error, &code);
+      if (!j) return std::nullopt;
+      if (json_bool(*j, "draft") || json_bool(*j, "prerelease")) {
+        if (error) *error = "latest release is draft/prerelease";
+        return std::nullopt;
+      }
+      std::string tag = json_str(*j, "tag_name");
+      if (!tag.empty() && (tag[0] == 'v' || tag[0] == 'V')) tag.erase(0, 1);
+      std::vector<int> parts;
+      if (!parse_version_parts(tag, parts)) {
+        if (error) *error = "release tag not version-like: " + tag;
+        return std::nullopt;
+      }
+      auto rel = make_release(tag);
+      // make_release 填的是 GitHub。假 release 只信這份 JSON，留著會在測試時去抓正式版。
+      rel.page_url = url;
+      rel.asset_url.clear();
+      rel.asset_sha256.clear();
+      rel.asset_size = 0;
+      rel.asset_listed = false;
+      std::string asset_err;
+      if (!apply_asset_fields(rel, *j, &asset_err)) {
+        BOOST_LOG(warning) << "[VIPLE-UPDATE] " << url << ": " << asset_err;
+      }
+      BOOST_LOG(info) << "[VIPLE-UPDATE] latest via --update-url: " << rel.version << " (" << url << ")";
+      return rel;
+    }
+
     bool looks_like_package(const std::filesystem::path &file) {
       std::error_code ec;
       const auto size = std::filesystem::file_size(file, ec);
@@ -517,6 +704,9 @@ namespace self_update {
     //   standalone：解壓成功後寫 ProceedMarker（server 看到才退出）→ 等 ParentPid 結束 → 覆蓋 → 重啟。
     //   非管理員且需要提權：Start-Process -Verb RunAs -Wait，回傳子行程 exit code；取消 → exit 3。
     //   結果寫 config\self_update.result（版號或 "FAILED …"），tray 下次啟動讀取。
+    //   §SELF-UPDATE：NSIS 服務實際跑 tools\viplestream-svc.exe，zip 沒有這個目錄。不另外複製的話，服務程式永遠停在安裝時那一版。
+    //   服務確認已停才換檔，所以不會被鎖；先改名 .old 再複製，失敗走同一條回滾。
+    //   §SELF-UPDATE：解除安裝登錄的 DisplayVersion 不會跟著 zip 走。空版號不寫，避免把欄位清成空白；寫失敗不回滾，檔案已經是新的。
     constexpr const char *kWindowsScript = R"PS1(
 param(
     [string]$ZipPath,
@@ -639,6 +829,23 @@ try {
         $copied++
     }
     Log "copied $copied top-level entries"
+    # §SELF-UPDATE：NSIS 實際跑的是 tools\viplestream-svc.exe，zip 只在根目錄放一份。
+    # 服務這時已停，檔案沒被鎖。先改名 .old 再複製，後面失敗才跟其他項目一起還原。
+    $svcDst = Join-Path (Join-Path $InstallPath 'tools') 'viplestream-svc.exe'
+    $svcSrc = Join-Path $root 'viplestream-svc.exe'
+    if (Test-Path -LiteralPath $svcDst -PathType Leaf) {
+        if (Test-Path -LiteralPath $svcSrc -PathType Leaf) {
+            $svcOld = $svcDst + '.old'
+            if (Test-Path -LiteralPath $svcOld) { Remove-Item -LiteralPath $svcOld -Force -ErrorAction SilentlyContinue }
+            Move-Item -LiteralPath $svcDst -Destination $svcOld -Force
+            $script:renamed += ,@($svcDst, $svcOld)
+            Copy-Item -LiteralPath $svcSrc -Destination $svcDst -Force
+            Log 'updated tools\viplestream-svc.exe'
+        }
+        else {
+            Log 'tools\viplestream-svc.exe present but package has no viplestream-svc.exe; left unchanged'
+        }
+    }
     Write-Result $Version
     if ($serviceMode) {
         Log 'starting service'
@@ -650,6 +857,22 @@ try {
     else {
         Log 'relaunching standalone server'
         Start-Process -FilePath (Join-Path $InstallPath 'viplestream-server.exe') -WorkingDirectory $InstallPath
+    }
+    # §SELF-UPDATE：覆蓋成功而且服務已拉起（或 standalone 已重開）才寫。
+    # 登錄不會跟著 zip 走，「新增或移除程式」會停在安裝時的版號。
+    # $Version 空不寫，避免把 DisplayVersion 清成空白。寫失敗不回滾：檔案已經是新的。
+    if ($Version) {
+        $uninst = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\VipleStreamServer'
+        try {
+            if (Test-Path -LiteralPath $uninst) {
+                Set-ItemProperty -LiteralPath $uninst -Name 'DisplayVersion' -Value $Version
+                Log ("DisplayVersion set to " + $Version)
+            }
+        }
+        catch {
+            # 登錄寫失敗不能把已經覆蓋好的檔案回滾掉。
+            Log ('WARN: DisplayVersion not updated: ' + $_.Exception.Message)
+        }
     }
     foreach ($pair in $renamed) { Remove-Item -LiteralPath $pair[1] -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
@@ -741,6 +964,10 @@ catch {
           if (error) *error = "cannot write " + script.string();
           return false;
         }
+        // 必須帶 UTF-8 BOM：Windows PowerShell 5.1 讀沒有 BOM 的 .ps1 會用系統字碼頁（中文 Windows 是 Big5），
+        // 腳本裡的中文註解被誤讀時會吃掉換行，把下一行程式碼併進註解，整支腳本語法錯誤、更新器一啟動就以 1 結束
+        // （2026-11-25 在中文 Windows 實測：self_update.log 都沒寫出來）。
+        out << "\xEF\xBB\xBF";
         out << kWindowsScript;
       }
       const auto marker = work / ("proceed-" + std::to_string(GetCurrentProcessId()));
@@ -865,6 +1092,13 @@ catch {
       return -1;
     }
 
+    // §SELF-UPDATE：背景路徑用這個判斷要不要跳過 pkexec。-n 失敗就代表一定會互動或直接失敗。
+    bool passwordless_sudo() {
+      // 探測失敗時 sudo 會把 "a password is required" 寫進 stderr。導到 /dev/null，
+      // 避免 self_update.log 看起來像安裝已經失敗。真正的安裝輸出仍走原本的 log。
+      return run_argv({"sudo", "-n", "true"}, "/dev/null") == 0;
+    }
+
     /// §SELF-UPDATE (4)：.deb 裝在固定路徑的 helper 可不可以用。要是 root 擁有、其他人不可寫的一般檔案才算——
     /// polkit 的政策檔（app.viplestream.server.self-update）靠這個路徑對上 action，授權對話框才會顯示看得懂的說明；
     /// 也不必再讓 root 執行放在使用者目錄裡的腳本。
@@ -932,7 +1166,7 @@ catch {
                                         std::vector<std::string> {helper, package_abs.string(), sha, reinstall};
       int rc = -1;
       // 1) 免密碼 sudo：先探測，不行就不用它（避免把安裝失敗誤判成沒權限）
-      if (run_argv({"sudo", "-n", "true"}, log) == 0) {
+      if (passwordless_sudo()) {
         std::vector<std::string> argv = {"sudo", "-n"};
         argv.insert(argv.end(), base.begin(), base.end());
         rc = run_argv(argv, log);
@@ -1031,30 +1265,7 @@ catch {
     auto j = api_get_json(std::string(kApiBase) + "/tags/v" + rel.version, error, &code);
     if (!j) return false;
     remember_notes(rel.version, *j);  // §UPDATE-NOTES-TRAY：同一份 JSON 帶著內文
-    auto assets = j->find("assets");
-    if (assets == j->end() || !assets->is_array()) {
-      if (error) *error = "release JSON has no assets[]";
-      return false;
-    }
-    for (const auto &a : *assets) {
-      if (!a.is_object() || json_str(a, "name") != rel.asset_name) continue;
-      rel.asset_listed = true;
-      const std::string url = json_str(a, "browser_download_url");
-      if (!url.empty()) rel.asset_url = url;
-      auto sz = a.find("size");
-      if (sz != a.end() && sz->is_number_integer()) rel.asset_size = sz->get<long long>();
-      std::string digest = json_str(a, "digest");  // "sha256:<hex>"
-      if (digest.rfind("sha256:", 0) == 0) {
-        digest.erase(0, 7);
-        std::transform(digest.begin(), digest.end(), digest.begin(), [](unsigned char c) { return (char) std::tolower(c); });
-        if (digest.size() == 64 && digest.find_first_not_of("0123456789abcdef") == std::string::npos) {
-          rel.asset_sha256 = digest;
-        }
-      }
-      return true;
-    }
-    rel.asset_listed = false;
-    return true;
+    return apply_asset_fields(rel, *j, error);
   }
 
   std::string sha256_file(const std::filesystem::path &file) {
@@ -1083,6 +1294,12 @@ catch {
   }
 
   bool download_file(const std::string &url, const std::filesystem::path &dest, std::string *error) {
+    if (!download_url_acceptable(url)) {
+      const std::string msg = "refusing download URL (only https, or http on 127.0.0.1/localhost): " + url;
+      BOOST_LOG(warning) << "[VIPLE-UPDATE] " << msg;
+      if (error) *error = msg;
+      return false;
+    }
     CURL *curl = curl_easy_init();  // NOSONAR
     if (!curl) {
       if (error) *error = "curl init failed";
@@ -1101,18 +1318,10 @@ catch {
       return false;
     }
     curl_common(curl);
+    curl_apply_protocols(curl, url);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
-    // 審查 F8：下載（含重新導向）只走 https；GitHub 的 asset 一律是 https 轉到 objects.githubusercontent.com。
-    // 審查 11-21：這段以前包在 #ifndef _WIN32，Windows 下載沒有限制協定，重新導向可以離開 https。兩個平台共用。
-#if LIBCURL_VERSION_NUM >= 0x075500  // 7.85.0 起用字串版，舊的 bitmask 版已標為 deprecated
-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
-    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-#else
-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, (long) CURLPROTO_HTTPS);
-    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, (long) CURLPROTO_HTTPS);
-#endif
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
@@ -1216,7 +1425,7 @@ catch {
     });
   }
 
-  bool install_pending_async(notify_fn notify, state_fn on_state, std::string *why_not) {
+  bool install_pending_async(notify_fn notify, state_fn on_state, std::string *why_not, bool from_auto) {
     std::optional<release_info> rel;
     {
       std::lock_guard<std::mutex> lg(g_pending_mtx);
@@ -1231,7 +1440,7 @@ catch {
       return false;
     }
     auto target = *rel;  // 非 const：by-value 捕捉會保留 const，mutable lambda 內也改不了
-    const bool started = start_worker([notify, on_state, target]() mutable {
+    const bool started = start_worker([notify, on_state, target, from_auto]() mutable {
       worker_guard_t guard {on_state};
       std::string err;
       set_state(state_e::downloading, on_state);
@@ -1262,32 +1471,61 @@ catch {
         return;
       }
       const auto dest = dir / target.asset_name;
-      if (notify) notify("Downloading update", "Version " + target.version + " (" + target.asset_name + ")...");
-      if (!download_file(target.asset_url, dest, &err)) {
-        set_state(state_e::update_available, on_state);
-        if (notify) notify("Update download failed", err);
-        return;
+      // §SELF-UPDATE：pkexec 取消、或背景已經下載待安裝時，檔案還在。雜湊相符就不要再抓一次。
+      std::error_code reuse_ec;
+      const auto reuse_st = std::filesystem::symlink_status(dest, reuse_ec);
+      const bool reuse = !reuse_ec && std::filesystem::is_regular_file(reuse_st) && looks_like_package(dest) &&
+                         sha256_file(dest) == target.asset_sha256;
+      if (reuse) {
+        BOOST_LOG(info) << "[VIPLE-UPDATE] reusing verified package " << dest.string();
       }
-      const auto sum = sha256_file(dest);
-      if (sum != target.asset_sha256) {
-        std::error_code ec;
-        std::filesystem::remove(dest, ec);
-        set_state(state_e::update_available, on_state);
-        BOOST_LOG(warning) << "[VIPLE-UPDATE] sha256 mismatch: got " << sum << " expected " << target.asset_sha256;
-        if (notify) notify("Update failed", "Package checksum mismatch; download discarded.");
-        return;
+      else {
+        if (notify) notify("Downloading update", "Version " + target.version + " (" + target.asset_name + ")...");
+        if (!download_file(target.asset_url, dest, &err)) {
+          set_state(state_e::update_available, on_state);
+          if (notify) notify("Update download failed", err);
+          return;
+        }
+        const auto sum = sha256_file(dest);
+        if (sum != target.asset_sha256) {
+          std::error_code ec;
+          std::filesystem::remove(dest, ec);
+          set_state(state_e::update_available, on_state);
+          BOOST_LOG(warning) << "[VIPLE-UPDATE] sha256 mismatch: got " << sum << " expected " << target.asset_sha256;
+          if (notify) notify("Update failed", "Package checksum mismatch; download discarded.");
+          return;
+        }
+        BOOST_LOG(info) << "[VIPLE-UPDATE] sha256 verified " << sum;
       }
-      BOOST_LOG(info) << "[VIPLE-UPDATE] sha256 verified " << sum;
       // §REVIEW-1111：「串流中不安裝」原本只在開始下載前看一次；下載與驗證期間開始的串流會被停服務打斷。
+      // §SELF-UPDATE：套件已核對過就留下。刪掉的話，串流結束後的下一輪會把同一份再抓一次。
       if (rtsp_stream::session_count() > 0) {
-        std::error_code ec;
-        std::filesystem::remove(dest, ec);
         g_deferred_by_stream.store(true);
         set_state(state_e::update_available, on_state);
         BOOST_LOG(info) << "[VIPLE-UPDATE] a stream started during the download; install postponed";
         if (notify) notify("Update postponed", "A stream started while downloading. The update will be installed later.");
         return;
       }
+#ifndef _WIN32
+      // §SELF-UPDATE：背景自動安裝沒有免密碼 sudo 時不跑 pkexec。
+      // 每輪重試不是突然彈密碼框，就是沒有 polkit agent 時直接失敗，而且這一版會被標成試過。
+      // 套件留下，選單維持 Install update，等使用者點了才授權。
+      if (from_auto && !passwordless_sudo()) {
+        set_state(state_e::update_available, on_state);
+        BOOST_LOG(info) << "[VIPLE-UPDATE] no passwordless sudo; package kept at " << dest.string()
+                        << "; waiting for tray Install update (pkexec). Headless: sudo viplestream-server --self-update "
+                        << dest.string();
+        if (notify) {
+          notify("Update ready to install",
+                 with_summary("Version " + target.version + " is downloaded and waiting. Click \"Install update v" + target.version +
+                              "\" in the tray menu to install. An administrator password will be requested.",
+                              target.summary));
+        }
+        return;
+      }
+#else
+      (void) from_auto;
+#endif
       set_state(state_e::installing, on_state);
       if (notify) notify("Installing update", "Version " + target.version + ". The server will restart shortly.");
       if (!apply_package(dest, target, true, &err)) {
@@ -1363,6 +1601,13 @@ catch {
         mode = g_auto_mode;
       }
       if (mode == "install") {
+#ifndef _WIN32
+        // §SELF-UPDATE：沒有免密碼 sudo 時背景不會真的裝上。通知若仍說即將自動安裝，人會空等。
+        if (!passwordless_sudo()) {
+          ui_notify()(title, with_summary("Version " + pend->version + " is available. It will be downloaded and kept ready. Click \"Install update v" + pend->version + "\" in the tray menu to install (an administrator password will be requested).", pend->summary));
+          return;
+        }
+#endif
         ui_notify()(title, with_summary("Version " + pend->version + " will be installed automatically when nobody is streaming. "
                                         "You can also install it now from the tray menu.", pend->summary));
       } else {
@@ -1414,7 +1659,7 @@ catch {
           }
           BOOST_LOG(info) << "[VIPLE-UPDATE] auto install v" << pend->version << " (no stream for 10 min)";
           std::string why;
-          if (install_pending_async(ui_notify(), ui_state(), &why)) {
+          if (install_pending_async(ui_notify(), ui_state(), &why, true)) {
             // 開始了就記住：這一版裝失敗不再自動重試（失敗通知已由安裝流程跳出），等下一版或手動
             std::lock_guard<std::mutex> lg(g_auto_mtx);
             g_auto_tried = pend->version;
@@ -1474,10 +1719,15 @@ catch {
     g_worker.join();
   }
 
-  int cli_check_update(int, char **) {
+  int cli_check_update(int argc, char **argv) {
+    std::string base;
     std::string err;
+    if (!extract_update_base(argc, argv, base, err)) {
+      std::cout << err << std::endl;
+      return 1;
+    }
     const auto cur = current_version();
-    auto latest = query_latest(&err);
+    auto latest = base.empty() ? query_latest(&err) : query_from_base(base, &err);
     if (!latest) {
       std::cout << "current " << cur << "; check failed: " << err << std::endl;
       return 1;
@@ -1493,18 +1743,26 @@ catch {
   }
 
   int cli_self_update(int argc, char **argv) {
+    std::string base;
+    std::string err;
+    if (!extract_update_base(argc, argv, base, err)) {
+      std::cout << err << std::endl;
+      return 1;
+    }
     bool force = false;
     std::filesystem::path package;
     for (int i = 0; i < argc; i++) {
       const std::string_view a = argv[i];
       if (a == "--force"sv) force = true;
+      else if (a == "--update-url"sv) {
+        if (i + 1 < argc) ++i;  // 值已在 extract_update_base 驗過；不當成套件路徑
+      }
       else if (!a.empty() && a[0] != '-') package = std::string(a);
     }
     const auto cur = current_version();
-    std::string err;
     release_info target = make_release(cur);
     if (package.empty()) {
-      auto latest = query_latest(&err);
+      auto latest = base.empty() ? query_latest(&err) : query_from_base(base, &err);
       if (!latest) {
         std::cout << "check failed: " << err << std::endl;
         return 1;
@@ -1516,7 +1774,8 @@ catch {
         return 0;
       }
       target = *latest;
-      if (!fetch_asset_details(target, &err)) {
+      // §SELF-UPDATE：--update-url 的 JSON 已經帶 asset。再打 GitHub /tags 會裝到正式版，或在假伺服器上失敗。
+      if (base.empty() && !fetch_asset_details(target, &err)) {
         std::cout << "cannot verify package integrity: " << err << std::endl;
         return 1;
       }
@@ -1528,25 +1787,45 @@ catch {
         std::cout << "release asset has no sha256 digest; refusing to install unverified package" << std::endl;
         return 1;
       }
+      if (target.asset_url.empty()) {
+        std::cout << "release asset has no download URL" << std::endl;
+        BOOST_LOG(error) << "[VIPLE-UPDATE] asset " << target.asset_name << " has no download URL";
+        return 1;
+      }
       const auto dir = update_dir();
       if (dir.empty()) {
         std::cout << "no safe update directory" << std::endl;
         return 1;
       }
       package = dir / target.asset_name;
-      std::cout << "downloading " << target.asset_url << std::endl;
-      if (!download_file(target.asset_url, package, &err)) {
-        std::cout << "download failed: " << err << std::endl;
-        return 1;
+      // §SELF-UPDATE：同一份已核對的套件不要重抓（背景待安裝、或上一次 pkexec 取消後再下指令）。
+      std::error_code reuse_ec;
+      const auto reuse_st = std::filesystem::symlink_status(package, reuse_ec);
+      const bool reuse = !reuse_ec && std::filesystem::is_regular_file(reuse_st) && looks_like_package(package) &&
+                         sha256_file(package) == target.asset_sha256;
+      if (reuse) {
+        std::cout << "reusing verified package " << package.string() << std::endl;
+        BOOST_LOG(info) << "[VIPLE-UPDATE] reusing verified package " << package.string();
       }
-      const auto sum = sha256_file(package);
-      if (sum != target.asset_sha256) {
-        std::cout << "sha256 mismatch: got " << sum << " expected " << target.asset_sha256 << std::endl;
-        return 1;
+      else {
+        std::cout << "downloading " << target.asset_url << std::endl;
+        if (!download_file(target.asset_url, package, &err)) {
+          std::cout << "download failed: " << err << std::endl;
+          return 1;
+        }
+        const auto sum = sha256_file(package);
+        if (sum != target.asset_sha256) {
+          std::cout << "sha256 mismatch: got " << sum << " expected " << target.asset_sha256 << std::endl;
+          return 1;
+        }
+        std::cout << "sha256 verified" << std::endl;
       }
-      std::cout << "sha256 verified" << std::endl;
     }
     else {
+      if (!base.empty()) {
+        // 呼叫端已經指定本機套件。--update-url 若仍拿去查版，會蓋掉他要裝的那一份。
+        BOOST_LOG(info) << "[VIPLE-UPDATE] --update-url ignored because a local package was given";
+      }
       // 本機套件：不驗 digest（來源由使用者負責），但腳本仍驗套件形式
       target.asset_sha256.clear();
     }

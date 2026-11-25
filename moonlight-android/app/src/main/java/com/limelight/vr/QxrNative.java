@@ -97,6 +97,15 @@ public final class QxrNative {
     public static native void nativeImuPush(long handle, float qw, float qx, float qy, float qz,
                                             float wx, float wy, float wz, long sourceTimeNs);
 
+    /** §VITURE-TRIGGER：右手控制器的按鍵（VipleVr.h 的 VIPLE_VR_BTN_*）與扳機（0–1）。 */
+    public static native void nativeImuSetController(long handle, int buttons, float trigger);
+
+    // §VITURE-WARP：ptsUs 是影像 PTS（微秒）。outXyzw 長度至少 4，成功時寫入算圖用的那筆 HMD 旋轉。
+    public static native boolean nativeWarpRenderPose(long handle, long ptsUs, float[] outXyzw);
+
+    // §VITURE-WARP：displayAheadNs 加在現在之後，對到眼鏡實際亮起的時間。outXyzw 寫入外插後的融合姿態。
+    public static native boolean nativeWarpCurrentPose(long handle, long displayAheadNs, float[] outXyzw);
+
     // §QUEST-VR：native 回呼只帶 handle，沒有 Activity。同一時間只留一筆，用 handle 對上。
     public static void setListener(long handle, SessionListener sessionListener) {
         synchronized (LISTENER_LOCK) {

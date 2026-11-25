@@ -520,6 +520,12 @@ public class NvConnection {
                             return false;
                         }
                     } catch (IOException resumeEx) {
+                        // §VR-LAUNCH-ERR：host 有回應但拒絕（VR_* 錯誤碼等）是 HostHttpResponseException，也是 IOException。
+                        // 以前在這裡被換成「連線失敗」，使用者與 log 都看不到 host 說的原因。照原樣往上丟，由 start() 顯示訊息。
+                        if (resumeEx instanceof HostHttpResponseException) {
+                            LimeLog.warning("[VIPLE-VR-LAUNCH] host rejected resume: " + resumeEx.getMessage());
+                            throw resumeEx;
+                        }
                         // §QUEST-VR：relay 的 /resume 不帶 vr*，接上去會變成平面 session。
                         if (context.streamConfig.getVrLaunch() != null) {
                             context.connListener.displayMessage("Connection to the host failed. VR streaming was not started.");
@@ -595,6 +601,11 @@ public class NvConnection {
                 return false;
             }
         } catch (IOException e) {
+            // §VR-LAUNCH-ERR：同上，host 拒絕不是連線失敗，照原樣往上丟。
+            if (e instanceof HostHttpResponseException) {
+                LimeLog.warning("[VIPLE-VR-LAUNCH] host rejected launch: " + e.getMessage());
+                throw e;
+            }
             // §QUEST-VR：relay 的 /launch 不帶 vr*，接上去會變成平面 session。
             if (context.streamConfig.getVrLaunch() != null) {
                 context.connListener.displayMessage("Connection to the host failed. VR streaming was not started.");

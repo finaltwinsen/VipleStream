@@ -46,6 +46,13 @@ import java.security.cert.X509Certificate;
  * §QUEST-PCVR：extra {@code vr_pcvr} 為 true 才送 vr*。2D 路徑不讀它，行為維持原樣。
  */
 public class VrStreamActivity extends Activity implements NvConnectionListener, QxrNative.SessionListener {
+    // 供 AppUpdater 判斷 VR 串流是否進行中，避免串流期間檢查或下載更新搶用頻寬。
+    private static volatile boolean sIsStreaming = false;
+
+    public static boolean isStreaming() {
+        return sIsStreaming;
+    }
+
     private static final int PREFERRED_HZ_MIN = 72;
     private static final int PREFERRED_HZ_MAX = 120;
     private static final int VIEW_CONFIG_POLL_MS = 100;
@@ -126,6 +133,7 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        sIsStreaming = true;
         LimeLog.info("[VIPLE-QXR-ACT] onCreate");
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -181,6 +189,7 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
     @Override
     protected void onDestroy() {
         LimeLog.info("[VIPLE-QXR-ACT] onDestroy");
+        sIsStreaming = false;
         releaseSession();
         super.onDestroy();
     }
@@ -1125,6 +1134,7 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
     }
 
     private void releaseSession() {
+        sIsStreaming = false;
         synchronized (releaseLock) {
             // onPause、onStop、onDestroy 都會進來。第二次直接返回，避免重複 stop 與重複 /cancel。
             if (released) {

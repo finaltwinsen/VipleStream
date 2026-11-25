@@ -59,12 +59,21 @@ void QxrSampleHistory::reset()
     std::memset(entries, 0, sizeof(entries));
 }
 
-void QxrSampleHistory::record(uint32_t sampleId, uint64_t sampleTimeNs)
+void QxrSampleHistory::record(uint32_t sampleId, uint64_t sampleTimeNs, const float quatXyzw[4])
 {
     std::lock_guard<std::mutex> guard(lock);
     Entry& entry = entries[sampleId % kSize];
     entry.sampleId = sampleId;
     entry.sampleTimeNs = sampleTimeNs;
+    if (quatXyzw != nullptr) {
+        std::memcpy(entry.quat, quatXyzw, sizeof(entry.quat));
+    }
+    else {
+        entry.quat[0] = 0.0f;
+        entry.quat[1] = 0.0f;
+        entry.quat[2] = 0.0f;
+        entry.quat[3] = 1.0f;
+    }
 }
 
 bool QxrSampleHistory::lookup(uint32_t sampleId, uint64_t* sampleTimeNs) const
@@ -78,6 +87,20 @@ bool QxrSampleHistory::lookup(uint32_t sampleId, uint64_t* sampleTimeNs) const
         return false;
     }
     *sampleTimeNs = entry.sampleTimeNs;
+    return true;
+}
+
+bool QxrSampleHistory::lookupPose(uint32_t sampleId, float q[4]) const
+{
+    if (sampleId == 0 || q == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(lock);
+    const Entry& entry = entries[sampleId % kSize];
+    if (entry.sampleId != sampleId) {
+        return false;
+    }
+    std::memcpy(q, entry.quat, sizeof(entry.quat));
     return true;
 }
 
@@ -180,7 +203,9 @@ void QxrTrackingSender::run()
             else {
                 sample.sampleId = ++sampleId;
                 if (history != nullptr) {
-                    history->record(sample.sampleId, sample.sampleTimeNs);
+                    // §VITURE-WARP：記送出去的 HMD 旋轉。sample() 裡的預測已經寫進 rot，不能改記融合原值。
+                    history->record(sample.sampleId, sample.sampleTimeNs,
+                                    sample.pose[VIPLE_VR_POSE_HMD].rot);
                 }
                 if (LiSendVrTracking(&sample) == 0) {
                     sent++;

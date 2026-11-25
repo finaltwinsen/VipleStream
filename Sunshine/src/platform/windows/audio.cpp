@@ -44,7 +44,9 @@ DEFINE_PROPERTYKEY(PKEY_Device_FriendlyName, 0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0
 DEFINE_PROPERTYKEY(PKEY_DeviceInterface_FriendlyName, 0x026e516e, 0xb814, 0x414b, 0x83, 0xcd, 0x85, 0x6d, 0x6f, 0xef, 0x48, 0x22, 2);
 
 #if defined(__x86_64) || defined(__x86_64__) || defined(__amd64) || defined(__amd64__) || defined(_M_AMD64)
-constexpr auto STEAM_DRIVER_SUBDIR = L"x64";
+// §AUDIO-STEAM-SPK（2026-11-25）：必須是巨集。下面用 #ifdef 判斷、也拿它跟字串常值接起來；改成 constexpr 變數後
+// #ifdef 永遠不成立，沒有播放裝置的電腦（例如只接螢幕、喇叭沒插）裝不了 Steam Streaming Speakers，串流整場沒有聲音。
+#define STEAM_DRIVER_SUBDIR L"x64"
 #endif
 
 namespace {

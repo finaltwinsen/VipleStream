@@ -92,6 +92,7 @@
 #include "backend/medialibrary.h"  // §VR-PLAYER
 #include "backend/videothumbs.h"  // §VR-PLAYER-THUMB
 #include "backend/xrshell.h"  // §VR-SHELL
+#include "backend/logdrop.h"  // §LOGDROP
 
 #include <QQuickWindow>
 #include <QSGRendererInterface>
@@ -707,6 +708,33 @@ void configureSignalHandlers()
 }
 
 #endif
+
+// §LOGDROP：上傳前要知道這次行程寫的是哪一個檔，並把已經進佇列的行刷進檔案。
+// 非同步時不能拿著寫入鎖去等 log 執行緒，否則那一行寫不完、這裡也等不到。
+QString vipleCurrentLogFilePath()
+{
+#ifdef LOG_TO_FILE
+    QMutexLocker locker(&s_SyncLoggerMutex);
+    if (s_LoggerFile != nullptr && s_LoggerFile->isOpen()) {
+        return s_LoggerFile->fileName();
+    }
+#endif
+    return QString();
+}
+
+void vipleFlushLogFile()
+{
+    if (g_AsyncLoggingEnabled.loadRelaxed() != 0) {
+        s_LoggerThread.waitForDone(2000);
+    }
+    QMutexLocker locker(&s_SyncLoggerMutex);
+    s_LoggerStream.flush();
+#ifdef LOG_TO_FILE
+    if (s_LoggerFile != nullptr && s_LoggerFile->isOpen()) {
+        s_LoggerFile->flush();
+    }
+#endif
+}
 
 int main(int argc, char *argv[])
 {
@@ -1875,6 +1903,14 @@ int main(int argc, char *argv[])
                                                return new MediaLibrary();
                                            });
 
+    // §LOGDROP：QML 只拿這一個物件。引擎不能刪它，結束流程還要拿來清標記。
+    qmlRegisterSingletonType<LogDrop>("LogDrop", 1, 0, "LogDrop",
+                                      [](QQmlEngine*, QJSEngine*) -> QObject* {
+                                          LogDrop* drop = LogDrop::instance();
+                                          QQmlEngine::setObjectOwnership(drop, QQmlEngine::CppOwnership);
+                                          return drop;
+                                      });
+
     // Create the identity manager on the main thread
     IdentityManager::get();
 
@@ -2190,7 +2226,21 @@ int main(int argc, char *argv[])
         }
     }
 
+    // §LOGDROP：--help／--version／probe／fruc-offline 在上面就離開，不會寫到這裡。
+    // pair、list、quit 幾秒就結束；若在這裡清掉標記，上次當掉的那份會被這次短行程吃掉，30 秒上傳還來不及跑。
+    const bool logDropTrackExit =
+            commandLineParserResult == GlobalCommandLineParser::NormalStartRequested
+            || commandLineParserResult == GlobalCommandLineParser::StreamRequested
+            || commandLineParserResult == GlobalCommandLineParser::PlayRequested;
+    if (logDropTrackExit) {
+        LogDrop::prepareForRun();
+    }
+
     int err = app.exec();
+
+    if (logDropTrackExit) {
+        LogDrop::markCleanExit();
+    }
 
     // §VR-SHELL：先停播放器等，XR session 留到最後（見下面 return 之前）
     if (vrShell) {

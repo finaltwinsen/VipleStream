@@ -12,12 +12,16 @@ import SystemProperties 1.0
 import SdlGamepadKeyNavigation 1.0
 import VrLauncher 1.0
 import VrNetBench 1.0
+import LogDrop 1.0
 
 // §VR-SHELL（2026-10-20）：主畫面的內容（工具列、StackView、對話框）。外殼有兩種：平面視窗 main.qml（ApplicationWindow）
 // 與頭盔 VR 介面 VrShell.qml（離屏畫進 XR 面板，backend/xrshell.cpp）。兩個外殼的根物件都叫 window，都提供 theme、
 // pollingActive、clearOnBack；其他頁面照舊用 window.theme 等存取。視窗的顯示／隱藏與主機輪詢由外殼處理。
 Page {
     id: appContent
+
+    // §LOGDROP：模式對話框先關再問。兩顆 modal 疊在一起時，手把不知道焦點在哪一顆。
+    property bool logDropConsentPending: false
 
     // This function runs prior to creation of the initial StackView item
     function doEarlyInit() {
@@ -43,6 +47,10 @@ Page {
         }
         else if (runConfigChecks && VrLauncher.available && VrLauncher.blockedReason === "") {
             modeDialog.open()
+            // §LOGDROP：open() 當下 opened 還是 false（進場動畫沒跑完）。用這個旗標，不要用 opened。
+            if (window.vrShell !== true && LogDrop.consent === "") {
+                logDropConsentPending = true
+            }
         }
 
         // Display any modal dialogs for configuration warnings
@@ -76,6 +84,11 @@ Page {
             else {
                 SystemProperties.startAsyncLoad()
             }
+        }
+
+        // §LOGDROP：同意是空的才問一次。頭盔 VR 介面把這頁畫進面板，桌面對話框會擋啟動；命令列串流不檢查設定。
+        if (runConfigChecks && window.vrShell !== true && LogDrop.consent === "" && !logDropConsentPending) {
+            logDropConsentDialog.open()
         }
     }
 
@@ -768,6 +781,15 @@ Page {
             focusCurrentMode()
         }
 
+        onClosed: {
+            if (logDropConsentPending) {
+                logDropConsentPending = false
+                if (LogDrop.consent === "") {
+                    logDropConsentDialog.open()
+                }
+            }
+        }
+
         ColumnLayout {
             spacing: 16
 
@@ -814,6 +836,54 @@ Page {
                 Layout.maximumWidth: 480
                 wrapMode: Text.Wrap
                 text: VrLauncher.blockedReason
+            }
+        }
+    }
+
+    // §LOGDROP：沒按允許或不允許就不算回答。Esc 關掉的話下次還會再問，使用者會以為已經拒絕。
+    NavigableDialog {
+        id: logDropConsentDialog
+        closePolicy: Popup.NoAutoClose
+        title: qsTr("Help improve VipleStream")
+
+        function choose(allow) {
+            LogDrop.setConsent(allow)
+            close()
+        }
+
+        onOpened: {
+            logDropAllowButton.forceActiveFocus(Qt.TabFocus)
+        }
+
+        ColumnLayout {
+            Label {
+                Layout.maximumWidth: 480
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
+                text: qsTr("When a stream ends, or this program exits unexpectedly, anonymous logs are sent automatically. The content is the program's runtime log, the version, and the operating system. IP addresses, computer names, and the user name are hidden first. It does not include an account or personal data. Logs are stored in the developer's Google Drive. You can change this anytime on the Settings page.")
+            }
+        }
+
+        footer: DialogButtonBox {
+            Button {
+                id: logDropDenyButton
+                flat: true
+                text: qsTr("Don't allow")
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                Keys.onReturnPressed: clicked()
+                Keys.onEnterPressed: clicked()
+                Keys.onRightPressed: logDropAllowButton.forceActiveFocus(Qt.TabFocus)
+                onClicked: logDropConsentDialog.choose(false)
+            }
+            Button {
+                id: logDropAllowButton
+                flat: true
+                text: qsTr("Allow")
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+                Keys.onReturnPressed: clicked()
+                Keys.onEnterPressed: clicked()
+                Keys.onLeftPressed: logDropDenyButton.forceActiveFocus(Qt.TabFocus)
+                onClicked: logDropConsentDialog.choose(true)
             }
         }
     }

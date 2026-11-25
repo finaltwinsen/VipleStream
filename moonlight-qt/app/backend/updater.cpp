@@ -1,5 +1,6 @@
 #include "updater.h"
 #include "updatenotes.h"
+#include "cli/commandlineparser.h"
 #include "settings/streamingpreferences.h"
 
 #include <QCoreApplication>
@@ -25,6 +26,12 @@
 static const char* RELEASE_API_URL =
     "https://api.github.com/repos/finaltwinsen/VipleStream/releases/latest";
 
+// §F9：--dev-update-url 只活在這次行程。空字串就是正式的 GitHub。
+static bool devUpdateActive()
+{
+    return !GlobalCommandLineParser::devUpdateUrl().isEmpty();
+}
+
 Updater::Updater(QObject *parent)
     : QObject(parent),
       m_Nam(new QNetworkAccessManager(this)),
@@ -39,6 +46,11 @@ Updater::Updater(QObject *parent)
 {
     m_Nam->setStrictTransportSecurityEnabled(true);
     m_Nam->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
+    if (devUpdateActive()) {
+        // §F9：測試用的 asset 可以是 http://127.0.0.1。開著 HSTS 會被改寫成 https。
+        m_Nam->setStrictTransportSecurityEnabled(false);
+        qDebug() << "[VIPLE-UPDATE] dev update url" << GlobalCommandLineParser::devUpdateUrl();
+    }
 
     qDebug() << "[VIPLE-UPDATE] platform" << UpdateAssetRules::describe(m_Platform)
              << "install mode =" << UpdateAssetRules::toString(UpdateAssetRules::installMode(m_Platform));
@@ -184,11 +196,20 @@ void Updater::startUpdate(const QString& version)
 
     setStatus(tr("Querying release assets…"));
 
-    QUrl url(RELEASE_API_URL);
+    QString releaseApi = QString::fromLatin1(RELEASE_API_URL);
+    if (devUpdateActive()) {
+        releaseApi = GlobalCommandLineParser::devUpdateUrl() + QStringLiteral("/releases/latest");
+        qDebug() << "[VIPLE-UPDATE] querying dev release" << releaseApi;
+    }
+    QUrl url(releaseApi);
     QNetworkRequest request(url);
     request.setRawHeader("Accept", "application/vnd.github+json");
     request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
     request.setRawHeader("User-Agent", "VipleStream-Qt-Updater/1.0");
+    if (devUpdateActive()) {
+        // 測試伺服器要自己回 200。跟著 3xx 會離開允許的網址。
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    }
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, true);
 #else
@@ -332,6 +353,11 @@ void Updater::handleAssetListFinished()
         fail(tr("Update cancelled."));
         return;
     }
+    const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (devUpdateActive() && httpStatus >= 300 && httpStatus < 400) {
+        fail(tr("Failed to query release info: %1").arg(QStringLiteral("unexpected redirect")));
+        return;
+    }
     if (reply->error() != QNetworkReply::NoError) {
         fail(tr("Failed to query release info: %1").arg(reply->errorString()));
         return;
@@ -413,7 +439,6 @@ void Updater::handleAssetListFinished()
     // §REVIEW-1119：字首比對擋不住 download/../../ 其他 repo。正規化後的路徑必須仍在自己的 releases 底下。
     {
         const QUrl assetUrl(m_AssetUrl);
-        const QString normalizedPath = assetUrl.adjusted(QUrl::NormalizePathSegments).path();
         bool dotDotSegment = false;
         for (const QString& segment : assetUrl.path().split(QLatin1Char('/'))) {
             if (segment == QLatin1String("..")) {
@@ -421,11 +446,22 @@ void Updater::handleAssetListFinished()
                 break;
             }
         }
-        if (!assetUrl.isValid() || assetUrl.scheme() != QLatin1String("https") ||
-                assetUrl.host() != QLatin1String("github.com") || assetUrl.port(-1) != -1 ||
-                !assetUrl.userInfo().isEmpty() || m_AssetUrl.contains(QLatin1Char('\\')) ||
-                dotDotSegment ||
-                !normalizedPath.startsWith(QLatin1String("/finaltwinsen/VipleStream/releases/download/"))) {
+        bool allowed = false;
+        if (devUpdateActive()) {
+            // §F9：測試伺服器不在 github.com。名單與 --dev-update-url 相同，sha256 一樣必填。
+            allowed = GlobalCommandLineParser::isAllowedDevUpdateUrl(m_AssetUrl)
+                    && !m_AssetUrl.contains(QLatin1Char('\\'))
+                    && !dotDotSegment;
+        }
+        else {
+            const QString normalizedPath = assetUrl.adjusted(QUrl::NormalizePathSegments).path();
+            allowed = assetUrl.isValid() && assetUrl.scheme() == QLatin1String("https")
+                    && assetUrl.host() == QLatin1String("github.com") && assetUrl.port(-1) != -1
+                    && assetUrl.userInfo().isEmpty() && !m_AssetUrl.contains(QLatin1Char('\\'))
+                    && !dotDotSegment
+                    && normalizedPath.startsWith(QLatin1String("/finaltwinsen/VipleStream/releases/download/"));
+        }
+        if (!allowed) {
             fail(tr("Download failed: %1").arg(QStringLiteral("unexpected download address")));
             return;
         }
@@ -468,6 +504,9 @@ void Updater::handleAssetListFinished()
 #endif
     // §REVIEW-1119：資產查詢有 15 秒逾時，下載這條沒有。60 秒沒有任何位元組才中止，慢速但持續的下載不受影響。
     request.setTransferTimeout(60000);
+    if (devUpdateActive()) {
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    }
 
     m_CurrentReply = m_Nam->get(request);
     connect(m_CurrentReply, &QNetworkReply::downloadProgress,
@@ -552,6 +591,15 @@ void Updater::handleDownloadFinished()
         }
         fail(tr("Download failed: %1").arg(err));
         return;
+    }
+    if (reply && devUpdateActive()) {
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (httpStatus >= 300 && httpStatus < 400) {
+            reply->deleteLater();
+            QFile::remove(m_DownloadPath);
+            fail(tr("Download failed: %1").arg(QStringLiteral("unexpected redirect")));
+            return;
+        }
     }
     if (reply) reply->deleteLater();
 
@@ -641,7 +689,7 @@ bool Updater::spawnHelperAndQuit()
     // ($PSScriptRoot 在 -File 模式下可用，這裡用絕對路徑所以不需要)
     // §REVIEW-1104：目錄要提權時，覆寫仍由已提高權限的 PowerShell 做；重開 exe 改經未提權的 explorer（Shell.Application），避免新行程維持系統管理員。COM 失敗才退回 Start-Process，避免更新好了卻沒有行程再開
     QString script = QStringLiteral(
-        "param([int]$AppPid,[string]$ZipPath,[string]$InstallDir,[string]$ExePath,[int]$DropAdmin,[string]$Sha256)\n"
+        "param([int]$AppPid,[string]$ZipPath,[string]$InstallDir,[string]$ExePath,[int]$DropAdmin,[string]$Sha256,[string]$Version)\n"
         "$ErrorActionPreference='Stop'\n"
         // §REVIEW-1104：舊程式最多等 90 秒（自己收尾最多 30 秒，VR 收尾更久）；還沒結束就不要覆蓋——
         // 檔案被鎖時 Expand-Archive 會解到一半中斷，留下新舊混雜、可能再也開不起來的安裝。改成放棄這次更新並提示
@@ -686,6 +734,22 @@ bool Updater::spawnHelperAndQuit()
         "  }\n"
         "  [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $stage)\n"
         "  Copy-Item -Path (Join-Path $stage '*') -Destination $InstallDir -Recurse -Force\n"
+        // §F9：檔案已經蓋上。沒提權寫不了 HKLM，失敗只記 log，不能把 $ok 改成 false（否則會把裝好的更新判成失敗）。
+        "  try {\n"
+        "    if ($Version) {\n"
+        "      $uninst = 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VipleStreamClient'\n"
+        "      if (Test-Path -LiteralPath $uninst) {\n"
+        "        Set-ItemProperty -LiteralPath $uninst -Name DisplayVersion -Value $Version\n"
+        "      }\n"
+        "    }\n"
+        "  } catch {\n"
+        "    Write-Host ('DisplayVersion not updated: ' + $_)\n"
+        "    try {\n"
+        "      $logDir = Join-Path $env:LOCALAPPDATA 'VipleStream'\n"
+        "      New-Item -ItemType Directory -Force -Path $logDir | Out-Null\n"
+        "      Add-Content -LiteralPath (Join-Path $logDir 'update.log') -Value ('DisplayVersion not updated: ' + $_)\n"
+        "    } catch {}\n"
+        "  }\n"
         "} catch {\n"
         "  Write-Host \"VipleStream updater: extract failed: $_\"\n"
         "  $ok = $false\n"
@@ -741,7 +805,7 @@ bool Updater::spawnHelperAndQuit()
              << "writable =" << !needElevate;
 
     // 構造 PowerShell argv：-NoProfile -ExecutionPolicy Bypass -File <script> -AppPid ... -ZipPath ...
-    // §REVIEW-1119：連續 .arg() 會把路徑裡的 %2～%7 再換一次。七個參數一次代入就不會。
+    // §REVIEW-1119：連續 .arg() 會把路徑裡的 %2～%8 再換一次。八個參數一次代入就不會。
     // 路徑以單一反斜線結尾時（磁碟根目錄 D:\），CommandLineToArgvW 會把 \" 當成跳脫的引號。
     const auto nativeArg = [](QString path) {
         path = QDir::toNativeSeparators(path);
@@ -752,14 +816,15 @@ bool Updater::spawnHelperAndQuit()
     };
     QString args = QStringLiteral(
         "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden "
-        "-File \"%1\" -AppPid %2 -ZipPath \"%3\" -InstallDir \"%4\" -ExePath \"%5\" -DropAdmin %6 -Sha256 %7"
+        "-File \"%1\" -AppPid %2 -ZipPath \"%3\" -InstallDir \"%4\" -ExePath \"%5\" -DropAdmin %6 -Sha256 %7 -Version \"%8\""
     ).arg(nativeArg(helperPath),
           QString::number(pid),
           nativeArg(m_DownloadPath),
           nativeArg(installDir),
           nativeArg(exePath),
           QString::number(needElevate ? 1 : 0),
-          m_AssetSha256);
+          m_AssetSha256,
+          m_Version);
 
     // §REVIEW-1111（第二輪）：用系統目錄裡的 PowerShell 的完整路徑。只給檔名時會照 PATH 找，提權執行到的可能是別人放的同名程式。
     // §REVIEW-1119：找不到完整路徑就放棄。退回 "powershell.exe" 仍會被目錄或 PATH 劫持。
@@ -786,6 +851,122 @@ bool Updater::spawnHelperAndQuit()
     return true;
 
 #elif defined(Q_OS_LINUX)
+    if (m_Platform.packaging == UpdateAssetRules::Packaging::Deb) {
+        // §CLIENT-DEB：下載檔在使用者可寫的暫存目錄。helper 會先複製再驗套件名與版號，
+        // 所以不把 sha256 當參數傳進去（呼叫端可以連雜湊一起換掉）。
+        // 安裝失敗不重開：更新模式 2 會一啟動就再叫 pkexec。下次使用者自己打開才再通知。
+        const QString helperBin = QStringLiteral("/usr/libexec/viplestream-client/self-update");
+        const QFileInfo helperInfo(helperBin);
+        const QFile::Permissions helperPerms = helperInfo.permissions();
+        if (helperInfo.isSymLink() || !helperInfo.isFile() || !helperInfo.isExecutable()
+                || helperInfo.ownerId() != 0
+                || (helperPerms & (QFileDevice::WriteGroup | QFileDevice::WriteOther))) {
+            fail(tr("This install cannot update itself yet. Install the new .deb from the release page once, then try again."));
+            return false;
+        }
+        const QFileInfo pkexec(QStringLiteral("/usr/bin/pkexec"));
+        if (!pkexec.isExecutable()) {
+            fail(tr("pkexec is not installed, so the update cannot be applied automatically."));
+            return false;
+        }
+
+        const qint64 pid = QCoreApplication::applicationPid();
+        const QString tempRoot = m_StageDir.isEmpty()
+                ? QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+                : m_StageDir;
+        const QString helperPath = QDir(tempRoot).filePath(QStringLiteral("viplestream_update_%1.sh").arg(m_Version));
+        const QString script = QStringLiteral(
+            "#!/bin/bash\n"
+            "set -u\n"
+            "APP_PID=\"$1\"\n"
+            "DEB=\"$2\"\n"
+            "HELPER=/usr/libexec/viplestream-client/self-update\n"
+            "LOG_DIR=\"${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/viplestream\"\n"
+            "umask 077\n"
+            "mkdir -p \"$LOG_DIR\" 2>/dev/null || true\n"
+            "LOG=\"$LOG_DIR/update.log\"\n"
+            "log() { echo \"$(date '+%F %T') [VIPLE-UPDATE] $*\" >> \"$LOG\" 2>/dev/null || true; }\n"
+            "note() {\n"
+            "  log \"$1\"\n"
+            "  if command -v notify-send >/dev/null 2>&1; then\n"
+            "    notify-send \"VipleStream\" \"$1\" >/dev/null 2>&1 || true\n"
+            "  fi\n"
+            "}\n"
+            "cleanup_download() {\n"
+            "  rm -f -- \"$DEB\" \"$0\"\n"
+            "  rmdir \"$(dirname -- \"$0\")\" 2>/dev/null || true\n"
+            "}\n"
+            "if [ -L \"$HELPER\" ] || [ ! -f \"$HELPER\" ] || [ ! -x \"$HELPER\" ]; then\n"
+            "  note \"self-update helper is missing; update not installed\"\n"
+            "  cleanup_download\n"
+            "  exit 4\n"
+            "fi\n"
+            "owner=$(stat -c '%u' \"$HELPER\" 2>/dev/null || true)\n"
+            "mode=$(stat -c '%a' \"$HELPER\" 2>/dev/null || true)\n"
+            "case \"$mode\" in\n"
+            "  ''|*[!0-7]*)\n"
+            "    note \"self-update helper mode is unexpected; update not installed\"\n"
+            "    cleanup_download\n"
+            "    exit 4\n"
+            "    ;;\n"
+            "esac\n"
+            "if [ \"$owner\" != 0 ] || [ $(( 8#$mode & 022 )) -ne 0 ]; then\n"
+            "  note \"self-update helper is not root-owned or is writable; update not installed\"\n"
+            "  cleanup_download\n"
+            "  exit 4\n"
+            "fi\n"
+            "for i in $(seq 1 180); do\n"
+            "  kill -0 \"$APP_PID\" 2>/dev/null || break\n"
+            "  sleep 0.5\n"
+            "done\n"
+            "if kill -0 \"$APP_PID\" 2>/dev/null; then\n"
+            "  note \"the app did not exit in time; update not installed\"\n"
+            "  cleanup_download\n"
+            "  exit 2\n"
+            "fi\n"
+            "log \"running pkexec self-update\"\n"
+            "pkexec \"$HELPER\" \"$DEB\" >> \"$LOG\" 2>&1\n"
+            "rc=$?\n"
+            "if [ \"$rc\" -ne 0 ]; then\n"
+            "  note \"deb install failed (rc $rc); the update notification returns the next time VipleStream starts\"\n"
+            "  cleanup_download\n"
+            "  exit 1\n"
+            "fi\n"
+            "log \"installed; restarting /usr/bin/viplestream\"\n"
+            "cleanup_download\n"
+            "nohup /usr/bin/viplestream >/dev/null 2>&1 &\n"
+            "disown\n"
+            "exit 0\n"
+        );
+
+        QFile sf(helperPath);
+        if (!sf.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            fail(tr("Cannot write helper script: %1").arg(sf.errorString()));
+            return false;
+        }
+        const QByteArray scriptBytes = script.toUtf8();
+        if (sf.write(scriptBytes) != scriptBytes.size() || !sf.flush()) {
+            const QString err = sf.errorString();
+            sf.close();
+            QFile::remove(helperPath);
+            fail(tr("Cannot write helper script: %1").arg(err));
+            return false;
+        }
+        sf.close();
+        QFile::setPermissions(helperPath,
+            QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+            QFileDevice::ReadGroup | QFileDevice::ExeGroup |
+            QFileDevice::ReadOther | QFileDevice::ExeOther);
+
+        if (!QProcess::startDetached(QStringLiteral("/bin/bash"),
+                                     QStringList{ helperPath, QString::number(pid), m_DownloadPath })) {
+            fail(tr("Failed to launch updater helper script."));
+            return false;
+        }
+        qDebug() << "[VIPLE-UPDATE] scheduling deb install via pkexec";
+        return true;
+    }
+
     // AppImage 路徑必須從 APPIMAGE 環境變數取得 — applicationFilePath()
     // 在 AppImage 內會回傳 mount 點下的內部 binary 路徑，不是 .AppImage 本身。
     QByteArray appImage = qgetenv("APPIMAGE");

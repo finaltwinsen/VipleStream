@@ -51,16 +51,25 @@
             android:key="checkbox_stretch_video"
             android:title="@string/title_checkbox_stretch_video"
             android:defaultValue="false" />
-        <!-- §EXT-DISPLAY：預設關。接上 XR 眼鏡時程式會自己開；其他外接螢幕不要一接上就把畫面抽走。 -->
-        <CheckBoxPreference
-            android:key="checkbox_external_display"
+        <!-- §EXT-DISPLAY：預設「自動」＝只有接上 XR 眼鏡才開；其他外接螢幕不要一接上就把畫面抽走。
+             眼鏡使用者也要能關掉（想讓眼鏡鏡像手機畫面、直接用手機觸控時）。 -->
+        <ListPreference
+            android:key="list_external_display_mode"
             android:title="@string/title_checkbox_external_display"
-            android:summary="@string/summary_checkbox_external_display"
-            android:defaultValue="false" />
+            android:summary="%s"
+            android:entries="@array/external_display_mode_names"
+            android:entryValues="@array/external_display_mode_values"
+            android:defaultValue="auto" />
         <CheckBoxPreference
             android:key="checkbox_external_display_dim"
             android:title="@string/title_checkbox_external_display_dim"
             android:summary="@string/summary_checkbox_external_display_dim"
+            android:defaultValue="true" />
+        <!-- §VITURE-WARP：沒接眼鏡的裝置在 StreamSettings 拿掉。預設開，方便實機跟直接顯示比較。 -->
+        <CheckBoxPreference
+            android:key="checkbox_glasses_timewarp"
+            android:title="@string/title_checkbox_glasses_timewarp"
+            android:summary="@string/summary_checkbox_glasses_timewarp"
             android:defaultValue="true" />
         <!-- §VITURE：測試者沒有 adb，從設定頁進診斷畫面才能把報告分享回來。 -->
         <Preference
@@ -398,6 +407,10 @@
             android:key="checkbox_logdrop_auto"
             android:title="@string/title_logdrop_auto"
             android:defaultValue="false"/>
+        <Preference
+            android:key="pref_logdrop_upload_now"
+            android:title="@string/title_logdrop_upload_now"
+            android:summary="@string/summary_logdrop_upload_now" />
     </PreferenceCategory>
     <!--PreferenceCategory android:title="@string/category_help"
         android:key="category_help">

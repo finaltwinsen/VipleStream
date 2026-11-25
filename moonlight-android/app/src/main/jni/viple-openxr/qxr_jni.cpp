@@ -814,6 +814,76 @@ void nativeImuPush(JNIEnv*, jclass, jlong raw, jfloat qw, jfloat qx, jfloat qy, 
     handle->imu->push(qw, qx, qy, qz, wx, wy, wz, static_cast<int64_t>(sourceTimeNs));
 }
 
+void nativeImuSetController(JNIEnv*, jclass, jlong raw, jint buttons, jfloat trigger) {
+    std::lock_guard<std::mutex> life(g_imuLifeMu);
+    QxrEmuHandle* handle = castEmu(raw);
+    if (handle == nullptr || handle->imu == nullptr) {
+        return;
+    }
+    handle->imu->setRightController(static_cast<uint32_t>(buttons), trigger);
+}
+
+// §VITURE-WARP：outXyzw 由 Java 配置。Get／SetFloatArrayRegion 都走呼叫端那塊，不另配。
+bool readWarpOut(JNIEnv* env, jfloatArray outXyzw, float q[4]) {
+    if (outXyzw == nullptr) {
+        return false;
+    }
+    const jsize length = env->GetArrayLength(outXyzw);
+    if (env->ExceptionCheck() || length < 4) {
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+        return false;
+    }
+    env->GetFloatArrayRegion(outXyzw, 0, 4, q);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
+bool writeWarpOut(JNIEnv* env, jfloatArray outXyzw, const float q[4]) {
+    env->SetFloatArrayRegion(outXyzw, 0, 4, q);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
+jboolean nativeWarpRenderPose(JNIEnv* env, jclass, jlong raw, jlong ptsUs, jfloatArray outXyzw) {
+    float q[4];
+    if (!readWarpOut(env, outXyzw, q)) {
+        return JNI_FALSE;
+    }
+    std::lock_guard<std::mutex> life(g_imuLifeMu);
+    QxrEmuHandle* handle = castEmu(raw);
+    if (handle == nullptr || handle->frameMeta == nullptr) {
+        return JNI_FALSE;
+    }
+    if (!handle->frameMeta->lookupRenderPose(static_cast<int64_t>(ptsUs), q)) {
+        return JNI_FALSE;
+    }
+    return writeWarpOut(env, outXyzw, q) ? JNI_TRUE : JNI_FALSE;
+}
+
+jboolean nativeWarpCurrentPose(JNIEnv* env, jclass, jlong raw, jlong displayAheadNs, jfloatArray outXyzw) {
+    float q[4];
+    if (!readWarpOut(env, outXyzw, q)) {
+        return JNI_FALSE;
+    }
+    std::lock_guard<std::mutex> life(g_imuLifeMu);
+    QxrEmuHandle* handle = castEmu(raw);
+    if (handle == nullptr || handle->imu == nullptr) {
+        return JNI_FALSE;
+    }
+    if (!handle->imu->currentPose(q, static_cast<int64_t>(displayAheadNs))) {
+        return JNI_FALSE;
+    }
+    return writeWarpOut(env, outXyzw, q) ? JNI_TRUE : JNI_FALSE;
+}
+
 bool cacheJavaClass(JNIEnv* env) {
     jclass local = env->FindClass("com/limelight/vr/QxrNative");
     if (local == nullptr) {
@@ -876,6 +946,9 @@ extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
         {"nativeEmuDestroy", "(J)V", reinterpret_cast<void*>(nativeEmuDestroy)},
         {"nativeImuCreate", "(I)J", reinterpret_cast<void*>(nativeImuCreate)},
         {"nativeImuPush", "(JFFFFFFFJ)V", reinterpret_cast<void*>(nativeImuPush)},
+        {"nativeImuSetController", "(JIF)V", reinterpret_cast<void*>(nativeImuSetController)},
+        {"nativeWarpRenderPose", "(JJ[F)Z", reinterpret_cast<void*>(nativeWarpRenderPose)},
+        {"nativeWarpCurrentPose", "(JJ[F)Z", reinterpret_cast<void*>(nativeWarpCurrentPose)},
     };
     if (env->RegisterNatives(g_class, methods, static_cast<jint>(sizeof(methods) / sizeof(methods[0]))) != JNI_OK) {
         QXR_LOGE("JNI", "RegisterNatives failed");

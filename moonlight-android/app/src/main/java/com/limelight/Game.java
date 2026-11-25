@@ -2,6 +2,7 @@ package com.limelight;
 
 
 import com.limelight.binding.PlatformBinding;
+import com.limelight.computers.ComputerManagerService;
 import com.limelight.binding.audio.AndroidAudioRenderer;
 import com.limelight.binding.input.ControllerHandler;
 import com.limelight.binding.input.KeyboardTranslator;
@@ -29,6 +30,7 @@ import com.limelight.nvstream.input.MouseButtonPacket;
 import com.limelight.nvstream.jni.MoonBridge;
 import com.limelight.glasses.GlassesDisplaySwitcher;
 import com.limelight.glasses.GlassesVrSession;
+import com.limelight.glasses.GlassesWarpRenderer;
 import com.limelight.glasses.GlassesWearMonitor;
 import com.limelight.glasses.VitureGlasses;
 import com.limelight.glasses.VitureUsb;
@@ -40,7 +42,9 @@ import com.limelight.ui.ExternalDisplayHelper;
 import com.limelight.ui.GameGestures;
 import com.limelight.ui.StreamPresentation;
 import com.limelight.ui.StreamView;
+import com.limelight.utils.CacheHelper;
 import com.limelight.utils.Dialog;
+import com.limelight.utils.LogDrop;
 import com.limelight.utils.QuestSupport;
 import com.limelight.utils.ServerHelper;
 import com.limelight.utils.ShortcutHelper;
@@ -56,9 +60,11 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.PictureInPictureParams;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
@@ -108,12 +114,17 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.ByteArrayInputStream;
+import java.io.StringReader;
+import java.util.List;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
 public class Game extends Activity implements SurfaceHolder.Callback,
@@ -162,8 +173,21 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private int xferHttpsPort;
     private X509Certificate xferServerCert;
     private boolean displayedFailureDialog = false;
+    // §CONSOLE-LOGIN：host 拒絕訊息先到 displayMessage，對話框在 stageFailed 才畫。
+    private volatile boolean hostNeedsLogin;
+    private AlertDialog consoleLoginDialog;
+    private boolean consoleLoginStarting;
+    private boolean consoleLoginServiceBound;
+    private ServiceConnection consoleLoginServiceConnection;
     private boolean connecting = false;
     private boolean connected = false;
+    // §LOGDROP：MIN_VALUE 代表 connectionTerminated／stageFailed 都還沒給結束碼。0 是正常結束碼，不能拿來當空值。
+    private volatile int streamEndError = Integer.MIN_VALUE;
+    private volatile String streamEndStage;
+    // §LOGDROP：connectionTerminated 會先拆眼鏡再 stopConnection。旗標在物件被清掉之前寫上，同一場才不會送兩次。
+    private volatile boolean glassesSessionEndOwned;
+    private volatile long streamAttemptElapsed;
+    private volatile long streamLiveElapsed;
     private boolean autoEnterPip = false;
     private boolean surfaceCreated = false;
     private boolean attemptedConnection = false;
@@ -263,8 +287,14 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     // §QXR-VIDEO-TEST：開發用。解碼輸出改進 native 的 AImageReader→Vulkan，驗 Quest 的影像路徑；一般串流永遠是 0。
     private long qxrVideoTestHandle;
     private boolean vrEmuReleased;
+    // §VITURE-WARP：解碼器改接到 SurfaceTexture。釋放必須在 conn.stop() 之後，不能跟 native handle 一起拆。
+    private GlassesWarpRenderer glassesWarp;
+    private final Object glassesWarpLock = new Object();
+    private boolean glassesWarpReleaseOnStopThread;
     // §VITURE：只有 glasses_vr 會設。vr_emulate 維持 false，下面的組態分支才不會改到合成姿態。
     private boolean glassesVr;
+    private volatile boolean vitureBeast;
+    private boolean glassesBeastPausedFor2d;
     private boolean glassesWaitFor3d;
     private boolean glassesBringupStarted;
     private Thread glassesBringupThread;
@@ -274,8 +304,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private final Object glassesLife = new Object();
     private LinearLayout glassesControls;
     private TextView glassesStatusView;
-    private static final int GLASSES_3D_WIDTH = 3840;
     private static final int GLASSES_3D_HEIGHT = 1080;
+    private static final long BEAST_3D_WAIT_MS = 60000L;
     // 權限等待可被 interrupt 立刻返回。bulkTransfer 最久約 1 秒，多留幾次指令的時間。
     private static final long GLASSES_BRINGUP_JOIN_MS = 8000L;
     private static final long GLASSES_READER_JOIN_MS = 1500L;
@@ -295,6 +325,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private Button plainVolumeDownButton;
     private Button plainVolumeUpButton;
     private TextView plainModeResult;
+    private TextView plainBeastModeNote;
     private TextView plainVolumeResult;
     private TextView glassesRemovedNotice;
     private int modeWatchBaselineWidth;
@@ -1614,8 +1645,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     }
 
     private void maybeStartExternalDisplay() {
+        noteVitureBeast();
         boolean glassesUsb = false;
-        if (!prefConfig.externalDisplay && !glassesVr) {
+        if (!prefConfig.externalDisplay && !glassesVr && prefConfig.externalDisplayAutoGlasses) {
             // 偏好與 glasses_vr 都沒開才掃。結果要在 HDR 之前用到，所以這次不能丟到背景。
             glassesUsb = vitureGlassesUsbPresent();
         }
@@ -1683,6 +1715,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             applyExternalVideoLayout();
             videoView.getHolder().addCallback(this);
             LimeLog.info("[VIPLE-EXTDISP] presenting on displayId=" + externalDisplayId);
+            refreshBeast2dHint();
         } catch (RuntimeException e) {
             // 串流組態已經依外接更新率算過。這裡只能改畫回手機，fps 上限不會重算。
             LimeLog.warning("[VIPLE-EXTDISP] presentation failed: " + e);
@@ -1759,6 +1792,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         }
         else {
             videoView.setDesiredAspectRatio((double) streamWidth / (double) streamHeight);
+            // §VITURE-WARP：EGL window 要跟解碼緩衝同一尺寸。callback 之前設，才不會在 surfaceChanged 裡重建 Surface。
+            if (glassesVr && prefConfig.glassesTimewarp) {
+                videoView.getHolder().setFixedSize(streamWidth, streamHeight);
+            }
         }
         String layout = "video layout stream=" + streamWidth + "x" + streamHeight
                 + " stretch=" + prefConfig.stretchVideo
@@ -1775,7 +1812,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         backgroundTouchView.setBackgroundColor(Color.BLACK);
         getWindow().getDecorView().setBackgroundColor(Color.BLACK);
         TextView hint = findViewById(R.id.externalDisplayHint);
-        hint.setVisibility(View.VISIBLE);
+        // §VITURE：glasses_vr 的手機頁只放眼鏡狀態、回正與結束；觸控板說明跟狀態文字會疊在同一塊（實機截圖）。
+        hint.setVisibility(glassesVr ? View.GONE : View.VISIBLE);
         if (prefConfig.externalDisplayDim) {
             // 只改這個視窗。0 是最暗；-1 才是交回系統亮度。Activity 結束後系統會自己還原。
             externalTouchpadDimmed = true;
@@ -1784,12 +1822,59 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             getWindow().setAttributes(params);
         }
         applyPhoneTouchpadAspect();
+        showExternalExitButton();
+    }
+
+    // §EXT-DISPLAY：觸控板頁整個手機都在吃觸控，返回鍵在全螢幕手勢導覽下不好按。放一顆固定的結束鈕。
+    // glasses_vr 的控制列已經有「結束」，不重複放。
+    private Button externalExitButton;
+
+    private void showExternalExitButton() {
+        if (glassesVr) {
+            return;
+        }
+        if (externalExitButton == null) {
+            Button button = new Button(this);
+            button.setText(R.string.external_display_exit);
+            button.setAllCaps(false);
+            button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            button.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    LimeLog.info("[VIPLE-EXTDISP] end requested from touchpad");
+                    finish();
+                }
+            });
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
+            params.topMargin = dp(24);
+            params.rightMargin = dp(16);
+            params.setMarginEnd(dp(16));
+            View hint = findViewById(R.id.externalDisplayHint);
+            ViewGroup parent = hint == null ? null : (ViewGroup) hint.getParent();
+            if (parent == null) {
+                parent = findViewById(android.R.id.content);
+            }
+            parent.addView(button, params);
+            externalExitButton = button;
+        }
+        externalExitButton.setVisibility(View.VISIBLE);
     }
 
     private void hideExternalTouchpadUi() {
+        if (externalExitButton != null) {
+            externalExitButton.setVisibility(View.GONE);
+        }
         TextView hint = findViewById(R.id.externalDisplayHint);
         if (hint != null) {
             hint.setVisibility(View.GONE);
+        }
+        TextView beastHint = findViewById(R.id.beastModeHint);
+        if (beastHint != null) {
+            beastHint.setVisibility(View.GONE);
+        }
+        if (externalPresentation != null) {
+            externalPresentation.setTopHint(null);
         }
         View backgroundTouchView = findViewById(R.id.backgroundTouchView);
         if (backgroundTouchView != null) {
@@ -1847,7 +1932,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             return;
         }
         hint.setText(R.string.external_display_touchpad_hint);
-        hint.setVisibility(View.VISIBLE);
+        // §VITURE：glasses_vr 的手機頁只放眼鏡狀態、回正與結束，觸控板說明會跟狀態文字疊在一起。
+        hint.setVisibility(glassesVr ? View.GONE : View.VISIBLE);
     }
 
     private void cancelExternalDisplayGraceTimer() {
@@ -1883,6 +1969,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     tryReconnectExternalDisplay();
                     return;
                 }
+                if (glassesVr && vitureBeast && !glassesPresented && !attemptedConnection) {
+                    // §VITURE：Beast 切到 3D 會先拆掉再加回。這次 added 交給等待迴圈，不能當成開串後才插上。
+                    LimeLog.info("[VIPLE-EXTDISP] beast panel added before present id=" + displayId);
+                    return;
+                }
                 // 開串之後才插上的不接管。解碼器已經綁在手機的 Surface 上。
                 if (!externalDisplayActive
                         && ExternalDisplayHelper.isPresentationCandidate(displayManager, displayId,
@@ -1894,6 +1985,21 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             @Override
             public void onDisplayRemoved(int displayId) {
                 if (externalDisplayLossHandled || isFinishing() || isDestroyed()) {
+                    return;
+                }
+                if (glassesVr && vitureBeast && !glassesPresented && !attemptedConnection) {
+                    // §VITURE：切模式的 removed 不是拔線。還沒開始畫之前就結束的話，按了按鈕也等不到 3840。
+                    LimeLog.info("[VIPLE-EXTDISP] beast panel removed before present id=" + displayId);
+                    return;
+                }
+                if (glassesVr && vitureBeast && glassesBeastPausedFor2d) {
+                    if (beast2dPanelPresent(displayId)) {
+                        // §VITURE：拆掉的是別台。2D 眼鏡還在，不能把暫停當成拔線。
+                        LimeLog.info("[VIPLE-EXTDISP] beast 2d pause ignored removal id=" + displayId);
+                        return;
+                    }
+                    LimeLog.info("[VIPLE-EXTDISP] beast 2d panel removed id=" + displayId);
+                    onBeast2dPanelRemoved();
                     return;
                 }
                 if (displayId == externalDisplayId && (externalDisplayActive || externalDisplayAwaiting)) {
@@ -1916,6 +2022,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     }
                     return;
                 }
+                if (glassesVr && vitureBeast && !glassesPresented && !attemptedConnection) {
+                    LimeLog.info("[VIPLE-EXTDISP] beast panel changed before present id=" + displayId);
+                    return;
+                }
                 if (!externalDisplayActive || displayId != externalDisplayId) {
                     return;
                 }
@@ -1931,6 +2041,15 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 if (display == null) {
                     return;
                 }
+                if (glassesVr && vitureBeast && !isGlasses3d(display)) {
+                    // §VITURE：同一台沒被拔掉卻變成 1920 時，不能繼續把雙眼畫面留在上面。
+                    LimeLog.info("[VIPLE-EXTDISP] beast panel changed to 2d id=" + displayId);
+                    beginExternalDisplayGrace();
+                    if (externalDisplayAwaiting) {
+                        pauseBeastGlassesOn2d();
+                    }
+                    return;
+                }
                 externalDisplay = display;
                 Display.Mode previous = externalChosenMode;
                 Display.Mode mode = ExternalDisplayHelper.pickMode(
@@ -1941,6 +2060,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         + " old=" + ExternalDisplayHelper.formatMode(previous)
                         + " new=" + ExternalDisplayHelper.formatMode(mode));
                 logExternalModeRefreshGap();
+                if (!glassesVr && vitureBeast) {
+                    applyExternalVideoLayout();
+                    refreshBeast2dHint();
+                }
             }
         };
         displayManager.registerDisplayListener(externalDisplayListener, externalDisplayHandler);
@@ -2017,9 +2140,20 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         showExternalWaitingHint();
         cancelExternalDisplayGraceTimer();
         externalDisplayHandler.postDelayed(externalDisplayGraceRunnable, EXTERNAL_DISPLAY_GRACE_MS);
+        refreshBeast2dHint();
     }
 
     private boolean attachExternalHoldSurface() {
+        GlassesWarpRenderer warp;
+        synchronized (glassesWarpLock) {
+            warp = glassesWarp;
+        }
+        if (warp != null) {
+            // §VITURE-WARP：direct surface 時 setOutputSurface 會被拒絕。解碼器留在 SurfaceTexture，只拆眼鏡上的 EGL window。
+            warp.detachOutput();
+            LimeLog.info("[VIPLE-VITURE] warp window detached; decoder stays on the texture");
+            return true;
+        }
         if (externalHoldSurface != null) {
             return true;
         }
@@ -2071,9 +2205,17 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     currentActivityDisplayId(), windowActivityDisplayId());
             if (candidate == null || (glassesVr && !isGlasses3d(candidate.display))) {
                 // glasses_vr 退回最大面積時會挑到 1920×1080。3D 串流不能綁上那張 2D 面板。
-                LimeLog.info("[VIPLE-EXTDISP] reconnect: no usable display yet");
+                if (glassesVr && vitureBeast && candidate != null) {
+                    pauseBeastGlassesOn2d();
+                    LimeLog.info("[VIPLE-EXTDISP] reconnect: beast 2d panel "
+                            + ExternalDisplayHelper.formatMode(candidate.chosen));
+                } else {
+                    LimeLog.info("[VIPLE-EXTDISP] reconnect: no usable display yet");
+                }
                 return;
             }
+            boolean resumeFrom2d = glassesBeastPausedFor2d;
+            glassesBeastPausedFor2d = false;
             if (externalPresentation != null && externalPresentation.isShowing()
                     && externalDisplay != null
                     && candidate.display.getDisplayId() == externalDisplay.getDisplayId()) {
@@ -2099,6 +2241,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         : externalDisplay.getRefreshRate();
             }
             externalDisplayActive = true;
+            if (resumeFrom2d) {
+                // §VITURE：暫停時把寬限期取消了。接回 3D 的這段若失敗，仍要能結束，不能一直停在暫存 Surface。
+                cancelExternalDisplayGraceTimer();
+                externalDisplayHandler.postDelayed(externalDisplayGraceRunnable, EXTERNAL_DISPLAY_GRACE_MS);
+            }
             externalPresentation = new StreamPresentation(this, externalDisplay, externalChosenMode, this::onExternalDisplayLost);
             externalPresentation.setOnDismissListener(dialog -> onExternalPresentationDismissed());
             externalPresentation.show();
@@ -2139,6 +2286,32 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             LimeLog.warning("[VIPLE-EXTDISP] reconnect surface is not valid");
             return;
         }
+        GlassesWarpRenderer warp;
+        synchronized (glassesWarpLock) {
+            warp = glassesWarp;
+        }
+        if (warp != null) {
+            // §VITURE-WARP：解碼器沒換輸出，不要求 IDR。視窗建不起來就無法退回直接顯示。
+            if (!warp.attachOutput(surface, videoView)) {
+                LimeLog.warning("[VIPLE-VITURE] warp output reattach failed; ending stream");
+                externalReconnectPending = false;
+                finishExternalDisplayLoss();
+                return;
+            }
+            externalReconnectPending = false;
+            externalDisplayAwaiting = false;
+            cancelExternalDisplayGraceTimer();
+            long elapsedMs = SystemClock.uptimeMillis() - externalDisplayLostUptimeMs;
+            LimeLog.info("[VIPLE-EXTDISP] external display back after " + elapsedMs
+                    + " ms old=" + ExternalDisplayHelper.formatMode(externalDisplayLostMode)
+                    + " new=" + ExternalDisplayHelper.formatMode(externalChosenMode));
+            logExternalModeRefreshGap();
+            LimeLog.info("[VIPLE-VITURE] warp output reattached; decoder surface unchanged");
+            glassesBeastPausedFor2d = false;
+            restoreExternalTouchpadHint();
+            refreshBeast2dHint();
+            return;
+        }
         if (decoderRenderer == null || !decoderRenderer.setOutputSurface(surface, holder)) {
             LimeLog.warning("[VIPLE-EXTDISP] failed to move decoder back to the external display; ending stream");
             externalReconnectPending = false;
@@ -2158,7 +2331,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         // §EXT-DISPLAY：換了輸出 Surface，舊的參考畫面對新 Surface 沒有意義，要一張 IDR 重新開始。
         MoonBridge.requestIdrFrame();
         LimeLog.info("[VIPLE-EXTDISP] requested an IDR frame after switching the output surface");
+        glassesBeastPausedFor2d = false;
         restoreExternalTouchpadHint();
+        refreshBeast2dHint();
     }
 
     private void noteExternalDisplayBackBeforeStart() {
@@ -2172,7 +2347,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 + " new=" + ExternalDisplayHelper.formatMode(externalChosenMode)
                 + "; stream had not started");
         logExternalModeRefreshGap();
+        glassesBeastPausedFor2d = false;
         restoreExternalTouchpadHint();
+        refreshBeast2dHint();
     }
 
     private void finishExternalDisplayLoss() {
@@ -2299,6 +2476,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         releaseVrEmulation();
         releaseQxrVideoTest();
+        // §VITURE-WARP：stop 執行緒會在 conn.stop() 之後釋放 SurfaceTexture。這裡只拆視窗，避免跟解碼器搶。
+        if (glassesWarpReleaseOnStopThread) {
+            detachGlassesWarpOutput();
+        }
+        else {
+            releaseGlassesWarp();
+        }
 
         if (controllerHandler != null) {
             controllerHandler.destroy();
@@ -2322,6 +2506,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             // Unbind from the discovery service
             unbindService(usbDriverServiceConnection);
         }
+
+        // §CONSOLE-LOGIN：按了「用串流登入」會綁 ComputerManagerService。銷毀時一定要解綁，否則 ServiceConnection 留在已結束的 Activity。
+        unbindConsoleLoginService();
 
         // §EXT-DISPLAY：有排程時由 stopConnection 的執行緒在 conn.stop() 之後才 dismiss。
         // 這裡先拆的話，解碼器可能還抓著外接 Surface。沒排程代表解碼器沒有輸出，直接拆以免視窗洩漏。
@@ -2361,6 +2548,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         SpinnerDialog.closeDialogs(this);
         Dialog.closeDialogs();
+        // §CONSOLE-LOGIN：這個對話框不在 Dialog 的清單裡。onStop 結尾會 finish，這裡先拆掉以免視窗洩漏。
+        if (consoleLoginDialog != null) {
+            consoleLoginDialog.setOnDismissListener(null);
+            consoleLoginDialog.dismiss();
+            consoleLoginDialog = null;
+        }
 
         if (virtualController != null) {
             virtualController.hide();
@@ -3715,6 +3908,88 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         QxrVideoTest.nativeDestroy(handle);
     }
 
+    // §VITURE-WARP：只在 glasses_vr、偏好開啟、而且 EGL 真的起來時才把解碼器改接過去。失敗就留在原本的直接顯示。
+    private void startGlassesWarpIfEnabled(SurfaceHolder holder) {
+        if (!glassesVr) {
+            return;
+        }
+        if (!prefConfig.glassesTimewarp) {
+            LimeLog.info("[VIPLE-VITURE] timewarp preference off; direct display");
+            return;
+        }
+        if (qxrVideoTestHandle != 0) {
+            LimeLog.info("[VIPLE-VITURE] timewarp skipped; video test owns the decoder surface");
+            return;
+        }
+        if (vrEmuHandle == 0 || !QxrNative.isAvailable()) {
+            LimeLog.info("[VIPLE-VITURE] timewarp skipped; imu pose source is not ready");
+            return;
+        }
+        Surface surface = holder.getSurface();
+        if (surface == null || !surface.isValid() || decoderRenderer == null) {
+            LimeLog.warning("[VIPLE-VITURE] timewarp skipped; output surface is not valid");
+            return;
+        }
+        float tanX = 0.4831f;
+        float tanY = 0.2718f;
+        if (vrLaunch != null && vrLaunch.fovTan[0] > 0 && vrLaunch.fovTan[2] > 0) {
+            tanX = vrLaunch.fovTan[0] / 10000f;
+            tanY = vrLaunch.fovTan[2] / 10000f;
+        }
+        int width = externalStreamWidth();
+        int height = externalStreamHeight();
+        if (width <= 0) {
+            width = 3840;
+        }
+        if (height <= 0) {
+            height = 1080;
+        }
+        GlassesWarpRenderer warp;
+        try {
+            warp = GlassesWarpRenderer.start(vrEmuHandle, tanX, tanY, width, height);
+        } catch (RuntimeException error) {
+            LimeLog.warning("[VIPLE-VITURE] timewarp init failed: " + error.getMessage());
+            return;
+        }
+        if (warp == null) {
+            LimeLog.warning("[VIPLE-VITURE] timewarp unavailable; direct display");
+            return;
+        }
+        Surface decoderSurface = warp.getDecoderSurface();
+        if (decoderSurface == null || !warp.attachOutput(surface, videoView)) {
+            warp.release();
+            LimeLog.warning("[VIPLE-VITURE] timewarp output attach failed; direct display");
+            return;
+        }
+        synchronized (glassesWarpLock) {
+            glassesWarp = warp;
+        }
+        decoderRenderer.setDirectOutputSurface(decoderSurface);
+        LimeLog.info("[VIPLE-VITURE] timewarp output " + width + "x" + height
+                + " tanX=" + tanX + " tanY=" + tanY);
+    }
+
+    private void detachGlassesWarpOutput() {
+        GlassesWarpRenderer warp;
+        synchronized (glassesWarpLock) {
+            warp = glassesWarp;
+        }
+        if (warp != null) {
+            warp.detachOutput();
+        }
+    }
+
+    private void releaseGlassesWarp() {
+        GlassesWarpRenderer warp;
+        synchronized (glassesWarpLock) {
+            warp = glassesWarp;
+            glassesWarp = null;
+        }
+        if (warp != null) {
+            warp.release();
+        }
+    }
+
     private void stopConnection() {
         stopConnection(true);
     }
@@ -3739,8 +4014,19 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         if (connecting || connected) {
             connecting = connected = false;
             updatePipAutoEnter();
+            // §LOGDROP：摘要在 conn.stop() 之前抓。解碼器拆掉之後就讀不到 codec。
+            // releaseVrEmulation 已經先跑過。眼鏡會送的那場旗標已寫上，這裡就不再送。
+            final String sessionEndSummary = glassesSessionEndOwned ? null : streamEndSummary();
+            final String sessionEndSource = sessionEndSummary == null ? null : LogDrop.sourceFor(this);
 
             controllerHandler.stop();
+
+            synchronized (glassesWarpLock) {
+                if (glassesWarp != null) {
+                    // §VITURE-WARP：SurfaceTexture 要等解碼器停掉。onDestroy 看到這個旗標就不再提早釋放。
+                    glassesWarpReleaseOnStopThread = true;
+                }
+            }
 
             // Update GameManager state to indicate we're no longer in game
             UiHelper.notifyStreamEnded(this);
@@ -3765,6 +4051,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     }
                     // §QXR-VIDEO-TEST：解碼器已經停了，才能拆它輸出的 AImageReader。
                     releaseQxrVideoTest();
+                    // §VITURE-WARP：同一個時機。解碼器還抓著 SurfaceTexture 時先 release，驅動行為不一致。
+                    releaseGlassesWarp();
 
                     if (externalDismissPending) {
                         // §EXT-DISPLAY：conn.stop() 會把解碼器停掉。Surface 比解碼器早消失時，各家解碼器行為不一致。
@@ -3801,13 +4089,95 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         // Defensive layer covers via RTSP teardown when implemented.
                         android.util.Log.w("VipleStream", "[§M.1.f] /cancel failed: " + e.getMessage());
                     }
+                    if (sessionEndSummary != null) {
+                        LogDrop.autoUploadAsync(getApplicationContext(), sessionEndSource, "session-end", sessionEndSummary);
+                    }
                 }
             }.start();
         }
     }
 
+    private String streamEndSummary() {
+        long now = SystemClock.elapsedRealtime();
+        long origin = streamLiveElapsed > 0L ? streamLiveElapsed : streamAttemptElapsed;
+        long duration = origin > 0L ? now - origin : 0L;
+        if (duration < 0L) {
+            duration = 0L;
+        }
+        int width = prefConfig != null ? prefConfig.width : 0;
+        int height = prefConfig != null ? prefConfig.height : 0;
+        int fps = prefConfig != null ? prefConfig.fps : 0;
+        int format = decoderRenderer != null ? decoderRenderer.getActiveVideoFormat() : 0;
+        StringBuilder out = new StringBuilder(128);
+        out.append("duration_ms=").append(duration);
+        out.append(" resolution=").append(width).append('x').append(height);
+        out.append(" fps=").append(fps);
+        out.append(" codec=").append(codecLabel(format));
+        boolean failed = streamEndStage != null
+                || (streamEndError != Integer.MIN_VALUE
+                && streamEndError != MoonBridge.ML_ERROR_GRACEFUL_TERMINATION);
+        if (!failed) {
+            out.append(" end=normal");
+            return out.toString();
+        }
+        out.append(" end=error");
+        if (streamEndError != Integer.MIN_VALUE) {
+            out.append(" error_code=").append(streamEndError);
+        }
+        if (streamEndStage != null) {
+            out.append(" stage=").append(safeStage(streamEndStage));
+        }
+        return out.toString();
+    }
+
+    private static String codecLabel(int videoFormat) {
+        String name;
+        if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_H264) != 0) {
+            name = "H.264";
+        } else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_H265) != 0) {
+            name = "HEVC";
+        } else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_PYROWAVE) != 0) {
+            name = "PyroWave";
+        } else if ((videoFormat & MoonBridge.VIDEO_FORMAT_MASK_AV1) != 0) {
+            name = "AV1";
+        } else {
+            name = "unknown";
+        }
+        if (!"unknown".equals(name) && (videoFormat & MoonBridge.VIDEO_FORMAT_MASK_10BIT) != 0) {
+            return name + " 10bit";
+        }
+        return name;
+    }
+
+    // §LOGDROP：摘要維持一行。stage 來自連線層，不把換行放進報告開頭。
+    private static String safeStage(String stage) {
+        StringBuilder out = new StringBuilder(Math.min(stage.length(), 32));
+        for (int i = 0; i < stage.length() && out.length() < 32; i++) {
+            char c = stage.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+                out.append(c);
+            }
+        }
+        return out.length() == 0 ? "unknown" : out.toString();
+    }
+
     @Override
     public void stageFailed(final String stage, final int portFlags, final int errorCode) {
+        // §LOGDROP：先記結束原因。對話框關掉之後才會 onStop → stopConnection。
+        if (streamEndError == Integer.MIN_VALUE) {
+            streamEndError = errorCode;
+            streamEndStage = stage;
+        }
+        // §CONSOLE-LOGIN：host 已用 HTTP 拒絕。這時去做連接埠測試會把登入對話框拖慢，而且失敗原因不是連接埠被擋。
+        if (hostNeedsLogin) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    showConsoleLoginFailure(stage, errorCode);
+                }
+            });
+            return;
+        }
         // Perform a connection test if the failure could be due to a blocked port
         // This does network I/O, so don't do it on the main thread.
         final int portTestResult = MoonBridge.testClientConnectivity(ServerHelper.CONNECTION_TEST_SERVER, 443, portFlags);
@@ -3849,6 +4219,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
     @Override
     public void connectionTerminated(final int errorCode) {
+        // §LOGDROP：先記結束碼。onStop 可能在這個回呼的 UI 工作之前就 stopConnection。
+        if (streamEndError == Integer.MIN_VALUE) {
+            streamEndError = errorCode;
+        }
         // Perform a connection test if the failure could be due to a blocked port
         // This does network I/O, so don't do it on the main thread.
         final int portFlags = MoonBridge.getPortFlagsFromTerminationErrorCode(errorCode);
@@ -4002,6 +4376,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
     @Override
     public void connectionStarted() {
+        // §LOGDROP：時長從串流真正起來算。這個回呼不一定在主執行緒。
+        if (streamLiveElapsed == 0L) {
+            streamLiveElapsed = SystemClock.elapsedRealtime();
+        }
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -4022,6 +4400,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 if (!glassesVr) {
                     // §VITURE：串流已經起來才切 3D。更早送的話，外接畫面會在連線前消失。
                     maybeAutoSwitchSbs();
+                    refreshBeast2dHint();
                 }
                 if (vrEmulate && vrEmuHandle != 0) {
                     QxrNative.nativeEmuStart(vrEmuHandle);
@@ -4073,12 +4452,244 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
     @Override
     public void displayMessage(final String message) {
+        // §CONSOLE-LOGIN：拒絕字串比 stageFailed 早到。旗標要在這條連線執行緒先寫上，
+        // 後面的 stageFailed 才看得到，不會先畫出一般錯誤對話框。
+        if (isConsoleLoginMessage(message)) {
+            hostNeedsLogin = true;
+            return;
+        }
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 Toast.makeText(Game.this, message, Toast.LENGTH_LONG).show();
             }
         });
+    }
+
+    // §CONSOLE-LOGIN：host 的 status_message 會包在 "Host PC returned error: ..." 裡。
+    private static boolean isConsoleLoginMessage(String message) {
+        return message != null && (message.contains("VR_NEEDS_LOGIN") || message.contains("NEEDS_LOGIN"));
+    }
+
+    private void showConsoleLoginFailure(String stage, int errorCode) {
+        if (spinner != null) {
+            spinner.dismiss();
+            spinner = null;
+        }
+        revealPhoneForFailureDialog();
+        if (displayedFailureDialog || isFinishing() || isDestroyed()) {
+            return;
+        }
+        displayedFailureDialog = true;
+        LimeLog.severe(stage + " failed: " + errorCode);
+        LimeLog.info("[VIPLE-CONSOLE] host asked for Windows sign-in");
+        showConsoleLoginDialog();
+    }
+
+    private void showConsoleLoginDialog() {
+        if (consoleLoginDialog != null && consoleLoginDialog.isShowing()) {
+            return;
+        }
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        consoleLoginDialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.pc_needs_login_title)
+                .setMessage(R.string.pc_needs_login_msg)
+                .setCancelable(false)
+                .setPositiveButton(R.string.pc_needs_login_yes, (dialog, which) -> {
+                    // 對話框關掉時的 onDismiss 不能再 finish，否則非同步找 app 的途中 Activity 會先被拆掉。
+                    consoleLoginStarting = true;
+                    beginConsoleLoginStream();
+                })
+                .setNegativeButton(R.string.pc_needs_login_no, (dialog, which) -> finish())
+                .create();
+        // Builder.setOnDismissListener 是 API 33 才有。minSdk 28 要設在 Dialog 上。
+        consoleLoginDialog.setOnDismissListener(dialog -> {
+            consoleLoginDialog = null;
+            if (!consoleLoginStarting && !isFinishing()) {
+                finish();
+            }
+        });
+        consoleLoginDialog.setCanceledOnTouchOutside(false);
+        consoleLoginDialog.show();
+    }
+
+    private void beginConsoleLoginStream() {
+        if (consoleLoginServiceBound || isFinishing() || isDestroyed()) {
+            return;
+        }
+        consoleLoginServiceConnection = new ServiceConnection() {
+            @Override
+            public void onServiceConnected(ComponentName name, IBinder service) {
+                if (!consoleLoginServiceBound || isFinishing() || isDestroyed()) {
+                    return;
+                }
+                final ComputerManagerService.ComputerManagerBinder binder =
+                        (ComputerManagerService.ComputerManagerBinder) service;
+                // waitForReady 會等到探索服務接上，不能佔著主執行緒。
+                new Thread(() -> {
+                    binder.waitForReady();
+                    final ComputerDetails computer = computerForConsoleLogin(binder);
+                    final NvApp target = pickConsoleLoginApp(computer);
+                    runOnUiThread(() -> launchConsoleLoginApp(binder, computer, target));
+                }).start();
+            }
+
+            @Override
+            public void onServiceDisconnected(ComponentName name) {
+            }
+        };
+        consoleLoginServiceBound = bindService(new Intent(this, ComputerManagerService.class),
+                consoleLoginServiceConnection, Context.BIND_AUTO_CREATE);
+        if (!consoleLoginServiceBound) {
+            LimeLog.warning("[VIPLE-CONSOLE] computer manager bind failed");
+            finish();
+        }
+    }
+
+    private void launchConsoleLoginApp(ComputerManagerService.ComputerManagerBinder binder,
+                                       ComputerDetails computer, NvApp target) {
+        if (isFinishing() || isDestroyed()) {
+            unbindConsoleLoginService();
+            return;
+        }
+        if (binder == null || target == null || computer == null || computer.activeAddress == null) {
+            LimeLog.warning("[VIPLE-CONSOLE] no Desktop app to sign in with");
+            unbindConsoleLoginService();
+            finish();
+            return;
+        }
+        LimeLog.info("[VIPLE-CONSOLE] starting sign-in stream app=" + target.getAppName()
+                + " id=" + target.getAppId());
+        // 這次 /launch 在 HTTP 就被拒，連線執行緒已經返回，MoonBridge 還沒開始。
+        // onStop 看到 connecting 仍為 true 會非同步送 /cancel，剛好打到下一筆 Desktop /launch。
+        connecting = false;
+        connected = false;
+        // Game 是 singleTask，而且沒有 onNewIntent。還活著時 doStart 會送回這個 Activity，接著被 finish 一起關掉。
+        // 先標成 finishing，系統才會另建一個 Game。createStartIntent 不會帶 glasses_vr，登入串流維持一般畫面。
+        finish();
+        ServerHelper.doStart(this, target, computer, binder);
+        unbindConsoleLoginService();
+    }
+
+    private void unbindConsoleLoginService() {
+        if (!consoleLoginServiceBound) {
+            return;
+        }
+        consoleLoginServiceBound = false;
+        try {
+            unbindService(consoleLoginServiceConnection);
+        } catch (IllegalArgumentException e) {
+            LimeLog.warning("[VIPLE-CONSOLE] unbind failed");
+        }
+    }
+
+    // §CONSOLE-LOGIN：資料庫那份沒有這次連線的位址，狀態也常是 UNKNOWN。doStart 會把 OFFLINE 或沒有位址當成離線。
+    private ComputerDetails computerForConsoleLogin(ComputerManagerService.ComputerManagerBinder binder) {
+        Intent intent = getIntent();
+        String uuid = intent.getStringExtra(EXTRA_PC_UUID);
+        ComputerDetails computer = null;
+        if (binder != null && uuid != null) {
+            ComputerDetails live = binder.getComputer(uuid);
+            if (live != null) {
+                computer = new ComputerDetails(live);
+            }
+        }
+        if (computer == null) {
+            computer = new ComputerDetails();
+            computer.uuid = uuid;
+            computer.name = intent.getStringExtra(EXTRA_PC_NAME);
+        }
+        if (computer.activeAddress == null) {
+            String host = intent.getStringExtra(EXTRA_HOST);
+            int port = intent.getIntExtra(EXTRA_PORT, 0);
+            if (host != null && port > 0) {
+                computer.activeAddress = new ComputerDetails.AddressTuple(host, port);
+            }
+        }
+        if (computer.httpsPort == 0) {
+            computer.httpsPort = intent.getIntExtra(EXTRA_HTTPS_PORT, 0);
+        }
+        if (computer.name == null) {
+            computer.name = intent.getStringExtra(EXTRA_PC_NAME);
+        }
+        if (computer.uuid == null) {
+            computer.uuid = uuid;
+        }
+        if (computer.serverCert == null) {
+            byte[] der = intent.getByteArrayExtra(EXTRA_SERVER_CERT);
+            if (der != null) {
+                try {
+                    computer.serverCert = (X509Certificate) CertificateFactory.getInstance("X.509")
+                            .generateCertificate(new ByteArrayInputStream(der));
+                } catch (CertificateException e) {
+                    LimeLog.warning("[VIPLE-CONSOLE] server cert decode failed");
+                }
+            }
+        }
+        if (computer.stunAddress == null && intent.hasExtra(EXTRA_STUN_ADDRESS)) {
+            computer.stunAddress = intent.getStringExtra(EXTRA_STUN_ADDRESS);
+            computer.stunPunchPort = intent.getIntExtra(EXTRA_STUN_PUNCH_PORT, 0);
+        }
+        if (computer.serverCodecModeSupport == 0) {
+            computer.serverCodecModeSupport = intent.getIntExtra(EXTRA_SERVER_CODEC_MODE_SUPPORT, 0);
+        }
+        if (computer.activeAddress != null) {
+            computer.state = ComputerDetails.State.ONLINE;
+        }
+        return computer;
+    }
+
+    private NvApp pickConsoleLoginApp(ComputerDetails computer) {
+        if (computer == null) {
+            return null;
+        }
+        List<NvApp> apps = appsFromRaw(computer.rawAppList);
+        if (apps == null || apps.isEmpty()) {
+            apps = appsFromCache(computer.uuid);
+        }
+        if (apps == null || apps.isEmpty()) {
+            return null;
+        }
+        for (NvApp candidate : apps) {
+            if (candidate != null && "Desktop".equalsIgnoreCase(candidate.getAppName())) {
+                return candidate;
+            }
+        }
+        for (NvApp candidate : apps) {
+            if (candidate != null && !candidate.isVr()) {
+                LimeLog.info("[VIPLE-CONSOLE] Desktop app missing; using first non-VR app id=" + candidate.getAppId());
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private List<NvApp> appsFromRaw(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return null;
+        }
+        try {
+            return NvHTTP.getAppListByReader(new StringReader(raw));
+        } catch (Exception e) {
+            LimeLog.warning("[VIPLE-CONSOLE] applist parse failed");
+            return null;
+        }
+    }
+
+    private List<NvApp> appsFromCache(String uuid) {
+        if (uuid == null || uuid.isEmpty()) {
+            return null;
+        }
+        try {
+            String raw = CacheHelper.readInputStreamToString(
+                    CacheHelper.openCacheFileForInput(getCacheDir(), "applist", uuid));
+            return appsFromRaw(raw);
+        } catch (Exception e) {
+            LimeLog.info("[VIPLE-CONSOLE] cached applist unavailable");
+            return null;
+        }
     }
 
     @Override
@@ -4211,9 +4822,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
             decoderRenderer.setRenderTarget(holder);
             startQxrVideoTestIfRequested();
+            startGlassesWarpIfEnabled(holder);
             // §REVIEW-1104：connecting 原本從來沒被設成 true，連線建立前離開時 stopConnection() 什麼都不做，
             // 連線照樣在背景建起來。NvConnection.stop() 已處理「還沒拿到 permit 就被停」的情況
             connecting = true;
+            if (streamAttemptElapsed == 0L) {
+                streamAttemptElapsed = SystemClock.elapsedRealtime();
+            }
             conn.start(new AndroidAudioRenderer(Game.this, prefConfig.enableAudioFx),
                     decoderRenderer, Game.this);
         }
@@ -4306,6 +4921,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         }
 
         if (attemptedConnection) {
+            // §VITURE-WARP：這張 Surface 真的消失。先拆 EGL window，SurfaceTexture 仍留給解碼器直到 conn.stop()。
+            detachGlassesWarpOutput();
             // Let the decoder know immediately that the surface is gone
             decoderRenderer.prepareForStop();
 
@@ -4568,8 +5185,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             return false;
         }
         Display.Mode mode = display.getMode();
+        // §VITURE：3D 以寬度 >= 3000 判斷。高度仍要 1080，4K 電視不該被當成眼鏡面板。
         return mode != null
-                && mode.getPhysicalWidth() == GLASSES_3D_WIDTH
+                && GlassesDisplaySwitcher.isStereoWidth(mode.getPhysicalWidth())
                 && mode.getPhysicalHeight() == GLASSES_3D_HEIGHT;
     }
 
@@ -4595,6 +5213,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             return;
         }
         glassesBringupStarted = true;
+        noteVitureBeast();
         showGlassesVrControls();
         final boolean waitFor3d = glassesWaitFor3d;
         final long handle = vrEmuHandle;
@@ -4640,6 +5259,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 if (glassesShutdown || isFinishing() || isDestroyed() || Thread.currentThread().isInterrupted()) {
                     return;
                 }
+                if (session.isBeast()) {
+                    vitureBeast = true;
+                    bringUpBeastDisplay(waitFor3d);
+                    return;
+                }
                 if (!waitFor3d) {
                     VitureUsb.logI("display already 3840x1080; skip SET_DISPLAY_MODE");
                     if (!publishGlassesDisplay(0L)) {
@@ -4683,6 +5307,137 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             }
         }, "viple-viture-bringup");
         glassesBringupThread.start();
+    }
+
+    private void bringUpBeastDisplay(boolean waitFor3d) {
+        if (!waitFor3d) {
+            VitureUsb.logI("display already 3840x1080; skip SET_DISPLAY_MODE");
+            if (!publishGlassesDisplay(0L)) {
+                // §VITURE：開串流前面板又離開 3D。不要改畫到手機，也不要送 0x32。
+                VitureUsb.logI("display left 3840x1080 before present; waiting for the mode button");
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        showBeastPress3dPrompt();
+                    }
+                });
+                if (!waitForBeast3d(SystemClock.elapsedRealtime())) {
+                    failBeast3dWait();
+                }
+            }
+            return;
+        }
+        VitureUsb.logI("beast panel is 2d; waiting for the glasses button");
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                showBeastPress3dPrompt();
+            }
+        });
+        if (!waitForBeast3d(SystemClock.elapsedRealtime())) {
+            failBeast3dWait();
+        }
+    }
+
+    private boolean waitForBeast3d(long startedMs) {
+        long deadline = startedMs + BEAST_3D_WAIT_MS;
+        while (!glassesShutdown && !isFinishing() && !isDestroyed() && !glassesPresented) {
+            if (findGlasses3d() != null && publishGlassesDisplay(startedMs)) {
+                return true;
+            }
+            if (SystemClock.elapsedRealtime() >= deadline) {
+                return false;
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return glassesPresented;
+    }
+
+    private void failBeast3dWait() {
+        VitureUsb.logI("beast 3d wait timed out after " + BEAST_3D_WAIT_MS + " ms");
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (glassesShutdown || isFinishing() || isDestroyed() || glassesPresented) {
+                    return;
+                }
+                Dialog.displayDialog(Game.this, getResources().getString(R.string.conn_error_title),
+                        getResources().getString(R.string.glasses_vr_beast_timeout), true);
+            }
+        });
+    }
+
+    private void showBeastPress3dPrompt() {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        TextView hint = findViewById(R.id.externalDisplayHint);
+        if (hint == null) {
+            return;
+        }
+        hint.setText(R.string.glasses_vr_beast_press_3d);
+        hint.setVisibility(View.VISIBLE);
+    }
+
+    private void pauseBeastGlassesOn2d() {
+        if (!glassesVr || !vitureBeast || glassesShutdown || isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (!glassesBeastPausedFor2d) {
+            VitureUsb.logI("beast glasses_vr paused on 2d panel; waiting for 3840");
+        }
+        glassesBeastPausedFor2d = true;
+        // §VITURE：2D 面板還在。寬限期若繼續倒數，使用者還沒按回 3D 就會被結束。
+        cancelExternalDisplayGraceTimer();
+        showBeastPress3dPrompt();
+    }
+
+    private boolean beast2dPanelPresent(int removedDisplayId) {
+        DisplayManager displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        if (displayManager == null) {
+            return false;
+        }
+        Display[] displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
+        if (displays == null) {
+            return false;
+        }
+        for (int i = 0; i < displays.length; i++) {
+            Display display = displays[i];
+            if (display == null || display.getDisplayId() == removedDisplayId || isGlasses3d(display)) {
+                continue;
+            }
+            if (display.getDisplayId() == Display.DEFAULT_DISPLAY
+                    || (display.getFlags() & Display.FLAG_PRIVATE) != 0
+                    || display.getState() != Display.STATE_ON) {
+                continue;
+            }
+            Display.Mode mode = display.getMode();
+            if (mode != null && mode.getPhysicalWidth() > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void onBeast2dPanelRemoved() {
+        glassesBeastPausedFor2d = false;
+        if (externalDisplayLossHandled || isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (!externalDisplayAwaiting) {
+            beginExternalDisplayGrace();
+            return;
+        }
+        // §VITURE：2D 面板被拆是切回 3D 的前一步，不是拔線。重新計時，沒有再出現才結束。
+        cancelExternalDisplayGraceTimer();
+        externalDisplayHandler.postDelayed(externalDisplayGraceRunnable, EXTERNAL_DISPLAY_GRACE_MS);
+        showExternalWaitingHint();
+        LimeLog.info("[VIPLE-EXTDISP] beast 2d panel removed; waiting for the next display");
     }
 
     private boolean waitForGlasses3d(long startedMs, boolean forever) {
@@ -4773,7 +5528,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         TextView hint = findViewById(R.id.externalDisplayHint);
         if (hint != null) {
             hint.setText(R.string.external_display_touchpad_hint);
-            hint.setVisibility(View.VISIBLE);
+            hint.setVisibility(glassesVr ? View.GONE : View.VISIBLE);
         }
         keepGlassesScreenReadable();
         applyPhoneTouchpadAspect();
@@ -4825,7 +5580,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         if (glassesWaitFor3d) {
             TextView hint = findViewById(R.id.externalDisplayHint);
             if (hint != null) {
-                hint.setText(R.string.glasses_vr_switching);
+                // §VITURE：Beast 不會送切換指令。一開始就請使用者按眼鏡，而不是顯示「正在切換」。
+                hint.setText(vitureBeast ? R.string.glasses_vr_beast_press_3d : R.string.glasses_vr_switching);
                 hint.setVisibility(View.VISIBLE);
             }
         }
@@ -4843,6 +5599,33 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             glassesStatusView.setGravity(Gravity.CENTER);
             panel.addView(glassesStatusView, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            // §VITURE-TRIGGER：眼鏡沒有實體手把。按住＝扳機按下，放開＝鬆開；右手跟著頭的方向，看著選項按就是點選。
+            Button triggerButton = glassesActionButton(R.string.glasses_vr_trigger, null);
+            triggerButton.setMinHeight(dp(140));
+            triggerButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
+            triggerButton.setOnTouchListener(new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View v, MotionEvent event) {
+                    GlassesVrSession session = glassesSession;
+                    int action = event.getActionMasked();
+                    if (action == MotionEvent.ACTION_DOWN) {
+                        v.setPressed(true);
+                        if (session != null) {
+                            session.setTrigger(true);
+                        }
+                        return true;
+                    }
+                    if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                        v.setPressed(false);
+                        if (session != null) {
+                            session.setTrigger(false);
+                        }
+                        return true;
+                    }
+                    return true;
+                }
+            });
+            panel.addView(triggerButton);
             panel.addView(glassesActionButton(R.string.glasses_vr_recenter, new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -4937,7 +5720,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             session = glassesSession;
             glassesSession = null;
             bringup = glassesBringupThread;
-            restore2d = glassesPresented;
+            boolean beast = vitureBeast || (session != null && session.isBeast());
+            restore2d = glassesPresented && !beast;
+            // §LOGDROP：arm 之後 shutdown 才會送。這裡還看得到 session，拆掉之後 stopConnection 就判斷不到了。
+            if (session != null && session.willUploadSessionEnd()) {
+                glassesSessionEndOwned = true;
+            }
         }
         if (bringup != null) {
             bringup.interrupt();
@@ -5009,6 +5797,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 VitureUsb.logI("plain glasses skipped: no device");
                 return;
             }
+            if (VitureUsb.isBeast(device)) {
+                vitureBeast = true;
+                logBeastDisplayLine();
+            }
             boolean permitted;
             try {
                 permitted = usb.hasPermission(device);
@@ -5017,9 +5809,15 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 return;
             }
             if (!permitted) {
-                // §VITURE：權限對話框會蓋住眼鏡裡的畫面。診斷畫面跟 glasses_vr 才負責要求權限。
-                VitureUsb.logI("plain glasses present but usb permission missing; not requesting");
-                return;
+                if (VitureUsb.wasPermissionDenied(device)) {
+                    VitureUsb.logI("plain glasses usb permission denied earlier; not requesting");
+                    return;
+                }
+                // §VITURE：系統對話框畫在這顆 Activity 的手機視窗。外接 Presentation 是另一個視窗，不會被蓋住。
+                permitted = awaitPlainUsbPermission(usb, device);
+                if (!permitted) {
+                    return;
+                }
             }
             final VitureGlasses glasses;
             try {
@@ -5040,6 +5838,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 VitureUsb.logW("plain glasses open failed", error);
                 VitureUsb.logI("plain glasses open failed: " + error.getMessage());
                 return;
+            }
+            if (glasses.isBeast()) {
+                queryBeastDisplayCode(glasses);
             }
             int initialWear = -1;
             try {
@@ -5079,6 +5880,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 public void run() {
                     showPlainGlassesControls();
                     maybeAutoSwitchSbs();
+                    refreshBeast2dHint();
                 }
             });
         } catch (RuntimeException error) {
@@ -5122,6 +5924,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private void autoSwitchSbsBody() {
         VitureGlasses glasses = plainGlasses;
         if (glasses == null || plainDetached || plainSwitcher.isClosing()) {
+            return;
+        }
+        if (vitureBeast || glasses.isBeast()) {
+            int width = externalPhysicalWidth();
+            VitureUsb.logI("sbs auto skipped; beast mode="
+                    + (GlassesDisplaySwitcher.isStereoWidth(width) ? "3d" : "2d"));
             return;
         }
         final int width = externalPhysicalWidth();
@@ -5171,6 +5979,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             plainGlasses = null;
             handler = plainCommandHandler;
             monitor = plainWearMonitor;
+            // §LOGDROP：後面的 restore2d 一定會標記，close 才會送 session-end。stopConnection 可能在這次返回之後才跑。
+            if (toClose != null) {
+                glassesSessionEndOwned = true;
+            }
         }
         if (handler == null && toClose == null && monitor == null) {
             return;
@@ -5235,6 +6047,161 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         handler.post(command);
     }
 
+    private void noteVitureBeast() {
+        try {
+            UsbManager usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+            if (VitureUsb.isBeast(VitureUsb.findGlassesDevice(usb))) {
+                vitureBeast = true;
+            }
+        } catch (RuntimeException error) {
+            // §VITURE：判斷失敗就維持舊款那條路，避免沒接眼鏡時誤把顯示指令拿掉。
+            VitureUsb.logW("beast check failed", error);
+        }
+    }
+
+    private void logBeastDisplayLine() {
+        int width = -1;
+        int height = -1;
+        Display display = externalDisplay;
+        try {
+            if (display != null) {
+                Display.Mode mode = display.getMode();
+                if (mode != null) {
+                    width = mode.getPhysicalWidth();
+                    height = mode.getPhysicalHeight();
+                }
+            }
+        } catch (RuntimeException error) {
+            VitureUsb.logW("beast display size failed", error);
+        }
+        String panel = GlassesDisplaySwitcher.isStereoWidth(width) ? "3d" : "2d";
+        VitureUsb.logI("beast display=" + width + "x" + height + " mode=" + panel);
+    }
+
+    private void queryBeastDisplayCode(VitureGlasses glasses) {
+        try {
+            VitureGlasses.CommandResult displayMode = glasses.query(VitureV2Protocol.MSG_GET_DISPLAY);
+            String value = "none";
+            if (displayMode.ok && displayMode.body.length >= 1) {
+                value = String.format(Locale.US, "0x%02X", displayMode.body[0] & 0xFF);
+            }
+            VitureUsb.logI("beast GET 0x3141 status=" + displayMode.status + " value=" + value);
+        } catch (RuntimeException error) {
+            // §VITURE：這次查詢只為了記下 Beast 的代碼。失敗不能把一般串流一起停掉。
+            VitureUsb.logW("beast GET 0x3141 failed", error);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private boolean awaitPlainUsbPermission(final UsbManager usb, final UsbDevice device) {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final AtomicBoolean granted = new AtomicBoolean(false);
+        final AtomicBoolean denied = new AtomicBoolean(false);
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent == null || !VitureUsb.ACTION_USB_PERMISSION.equals(intent.getAction())) {
+                    return;
+                }
+                UsbDevice extra = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                if (extra == null || device.getDeviceName() == null
+                        || !device.getDeviceName().equals(extra.getDeviceName())) {
+                    return;
+                }
+                boolean ok = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+                granted.set(ok);
+                if (!ok) {
+                    denied.set(true);
+                }
+                latch.countDown();
+            }
+        };
+        IntentFilter filter = new IntentFilter(VitureUsb.ACTION_USB_PERMISSION);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (isFinishing() || isDestroyed()) {
+                    latch.countDown();
+                    return;
+                }
+                try {
+                    VitureUsb.requestPermission(Game.this, usb, device);
+                    VitureUsb.logI("plain glasses usb permission requested");
+                } catch (RuntimeException error) {
+                    VitureUsb.logW("plain glasses permission request failed", error);
+                    latch.countDown();
+                }
+            }
+        });
+        boolean timedOut = false;
+        try {
+            timedOut = !latch.await(30, TimeUnit.SECONDS);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            try {
+                unregisterReceiver(receiver);
+            } catch (RuntimeException ignored) {
+                // 已經解註冊。
+            }
+            return false;
+        }
+        try {
+            unregisterReceiver(receiver);
+        } catch (RuntimeException ignored) {
+            // 已經解註冊。
+        }
+        if (isFinishing() || isDestroyed()) {
+            return false;
+        }
+        if (denied.get()) {
+            VitureUsb.notePermissionDenied(device);
+            VitureUsb.logI("plain glasses usb permission denied");
+            return false;
+        }
+        if (timedOut || !granted.get()) {
+            VitureUsb.logI("plain glasses usb permission timed out");
+            return false;
+        }
+        try {
+            return usb.hasPermission(device);
+        } catch (SecurityException error) {
+            VitureUsb.logW("plain glasses permission check failed", error);
+            return false;
+        }
+    }
+
+    private void refreshBeast2dHint() {
+        if (isFinishing() || isDestroyed() || glassesVr) {
+            return;
+        }
+        boolean show = vitureBeast
+                && externalDisplayActive
+                && !externalDisplayAwaiting
+                && isGlasses3d(externalDisplay)
+                && prefConfig != null
+                && !GlassesDisplaySwitcher.streamIsSbs(prefConfig.width, prefConfig.height);
+        TextView phone = findViewById(R.id.beastModeHint);
+        if (phone != null) {
+            phone.setClickable(false);
+            phone.setFocusable(false);
+            if (show) {
+                phone.setText(R.string.glasses_beast_switch_to_2d);
+                phone.setVisibility(View.VISIBLE);
+            } else {
+                phone.setVisibility(View.GONE);
+            }
+        }
+        StreamPresentation presentation = externalPresentation;
+        if (presentation != null) {
+            presentation.setTopHint(show ? getString(R.string.glasses_beast_switch_to_2d) : null);
+        }
+    }
+
     private int externalPhysicalWidth() {
         Display display = externalDisplay;
         if (display == null) {
@@ -5254,6 +6221,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private void togglePlainDisplayMode() {
         VitureGlasses glasses = plainGlasses;
         if (glasses == null || plainDetached || plainSwitcher.isClosing()) {
+            return;
+        }
+        if (vitureBeast || glasses.isBeast()) {
+            VitureUsb.logI("display mode skipped; beast");
             return;
         }
         int width = externalPhysicalWidth();
@@ -5500,6 +6471,20 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     togglePlainDisplayMode();
                 }
             });
+            plainBeastModeNote = new TextView(this);
+            plainBeastModeNote.setText(R.string.glasses_beast_use_button);
+            plainBeastModeNote.setTextColor(Color.WHITE);
+            plainBeastModeNote.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+            plainBeastModeNote.setGravity(Gravity.CENTER);
+            plainBeastModeNote.setMinHeight(dp(72));
+            // §VITURE：說明放在原本按鈕的位置。這塊控制列本來就吃觸控，字本身不要再變成按鈕。
+            plainBeastModeNote.setClickable(false);
+            plainBeastModeNote.setFocusable(false);
+            plainBeastModeNote.setVisibility(View.GONE);
+            LinearLayout.LayoutParams noteParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(72));
+            noteParams.setMargins(dp(4), dp(4), dp(4), dp(4));
+            panel.addView(plainBeastModeNote, noteParams);
             LinearLayout.LayoutParams modeParams = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(72));
             modeParams.setMargins(dp(4), dp(4), dp(4), dp(4));
@@ -5540,7 +6525,21 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     Gravity.BOTTOM));
             plainGlassesBar = panel;
         }
-        plainModeButton.setEnabled(true);
+        if (vitureBeast) {
+            plainModeButton.setVisibility(View.GONE);
+            if (plainBeastModeNote != null) {
+                plainBeastModeNote.setVisibility(View.VISIBLE);
+            }
+            if (plainModeResult != null) {
+                plainModeResult.setVisibility(View.GONE);
+            }
+        } else {
+            plainModeButton.setVisibility(View.VISIBLE);
+            if (plainBeastModeNote != null) {
+                plainBeastModeNote.setVisibility(View.GONE);
+            }
+        }
+        plainModeButton.setEnabled(!vitureBeast);
         plainVolumeDownButton.setEnabled(true);
         plainVolumeUpButton.setEnabled(true);
         plainGlassesBar.setVisibility(View.VISIBLE);
@@ -5697,6 +6696,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         }
         if (intent.hasExtra("cli_externalDisplay")) {
             pref.externalDisplay = intent.getBooleanExtra("cli_externalDisplay", true);
+            // CLI 明確說 false＝只畫在手機，接著眼鏡也不要自動搬走。
+            pref.externalDisplayAutoGlasses = pref.externalDisplay;
             LimeLog.info("[VIPLE-EXTDISP] cli external_display=" + pref.externalDisplay);
         }
         if (intent.hasExtra("cli_autoAdjustBitrate")) {

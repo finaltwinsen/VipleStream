@@ -9,6 +9,7 @@ import SdlGamepadKeyNavigation 1.0
 import SystemProperties 1.0
 import VrLauncher 1.0
 import VrNetBench 1.0
+import LogDrop 1.0
 
 Flickable {
     id: settingsPage
@@ -19,6 +20,10 @@ Flickable {
     // §SETTINGS-MODE（2026-11-08）：設定頁只顯示目前模式下會生效的選項。頭盔（Steam Frame）上選了 VR 模式時只顯示 VR 的，
     // 2D 模式（含所有非頭盔平台）不顯示 VR 那一區。VR 串流不看 2D 的解析度、幀率、位元率、解碼器、HDR 等
     readonly property bool vrSettingsMode: VrLauncher.available && VrLauncher.vrMode
+
+    // §LOGDROP：第二次按下時錯誤是 busy。若先清掉進行中，第一個上傳會看起來已經結束。
+    property bool logDropSending: false
+    property string logDropResult: ""
 
     boundsBehavior: Flickable.OvershootBounds
 
@@ -3249,6 +3254,88 @@ Flickable {
                     ToolTip.text: qsTr("Display real-time stream performance information while streaming.") + "\n\n" +
                                   qsTr("You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.") + "\n\n" +
                                   qsTr("The performance overlay is not supported on Steam Link or Raspberry Pi.")
+                }
+            }
+        }
+
+        GroupBox {
+            id: logDropGroupBox
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            padding: 12
+            title: "<font color=\"#D4FF3A\">§ 09 · </font><font color=\"#F2F5E1\">" + qsTr("Anonymous logs") + "</font>"
+            font.pointSize: 12
+
+            Column {
+                anchors.fill: parent
+                spacing: 5
+
+                CheckBox {
+                    id: logDropConsentCheck
+                    width: parent.width
+                    text: qsTr("Automatically send anonymous logs")
+                    font.pointSize: 12
+                    checked: LogDrop.consent === "yes"
+                    // §LOGDROP：初始化也會跑 onToggled。而且勾選當下綁定可能把 checked 拉回舊值，所以看同意狀態，不看 checked。
+                    onClicked: LogDrop.setConsent(LogDrop.consent !== "yes")
+                }
+
+                Label {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    font.pointSize: 9
+                    text: qsTr("Anonymous ID: %1. Tell the developer this ID when reporting a problem.").arg(LogDrop.installId)
+                }
+
+                Label {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    font.pointSize: 9
+                    visible: LogDrop.lastCode !== ""
+                    text: qsTr("Last upload: %1 (%2)").arg(LogDrop.lastCode).arg(Qt.formatDateTime(new Date(LogDrop.lastTime), "yyyy-MM-dd HH:mm"))
+                }
+
+                Button {
+                    text: settingsPage.logDropSending ? qsTr("Sending…") : qsTr("Send logs now")
+                    enabled: !settingsPage.logDropSending
+                    onClicked: {
+                        settingsPage.logDropResult = ""
+                        settingsPage.logDropSending = true
+                        LogDrop.uploadNow("")
+                    }
+                }
+
+                TextEdit {
+                    width: parent.width
+                    visible: text !== ""
+                    readOnly: true
+                    selectByMouse: true
+                    persistentSelection: true
+                    textFormat: TextEdit.PlainText
+                    wrapMode: TextEdit.Wrap
+                    color: window.theme.paper
+                    selectionColor: window.theme.lime
+                    selectedTextColor: window.theme.limeInk
+                    text: settingsPage.logDropResult
+                }
+            }
+        }
+
+        Connections {
+            target: LogDrop
+
+            function onUploadFinished(ok, code, error) {
+                if (error === "busy") {
+                    return
+                }
+                if (!settingsPage.logDropSending) {
+                    return
+                }
+                settingsPage.logDropSending = false
+                if (ok) {
+                    settingsPage.logDropResult = qsTr("Upload code: %1").arg(code)
+                }
+                else {
+                    settingsPage.logDropResult = qsTr("Couldn't send logs (%1)").arg(error)
                 }
             }
         }

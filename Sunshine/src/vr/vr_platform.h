@@ -70,6 +70,14 @@ namespace vr {
     void refresh_volatile_environment(env_t &env);
 
     /**
+     * @brief §CONSOLE-LOGIN：把快取裡隨時會變的三項立刻重查寫回。
+     *        probe_environment() 會讀使用者可寫的檔案，HTTP 執行緒不能呼叫，而且 60 秒內它直接回快取。
+     *        既有的 refresh_volatile_environment() 只改呼叫端拿到的那份，不寫快取。
+     *        pcvr_available() 只讀快取，工作階段接回主控台之後要馬上看到 user_present。
+     */
+    void refresh_cached_volatile_environment();
+
+    /**
      * @brief `vr_pcvr=enabled` 時 serverinfo PCVR bit 與 /launch 的前提（只讀快取）。
      * @param reason 不可用時寫入原因（VR_DISABLED 說明用：steamvr not installed｜install dir unsafe｜
      *        pipe unavailable｜session mismatch｜adapter mismatch｜no console user｜not probed yet｜disabled until restart）

@@ -17,6 +17,9 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -55,12 +58,15 @@ public final class LogDrop {
     private static final String ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     private static final int INSTALL_ID_LENGTH = 8;
     private static final long TRIGGER_GAP_MS = 10L * 60L * 1000L;
-    private static final int DAILY_LIMIT = 5;
+    private static final int DAILY_LIMIT = 8;
     private static final int LOGCAT_LIMIT = 4 * 1024 * 1024;
     private static final long LOGCAT_TIMEOUT_MS = 10_000L;
     private static final int NOTE_LIMIT = 2000;
+    private static final String CRASH_FILE = "logdrop_crash";
+    private static final int CRASH_BYTES = 8 * 1024;
 
     private static OkHttpClient client;
+    private static volatile boolean crashHandlerInstalled;
 
     private LogDrop() {
     }
@@ -100,6 +106,87 @@ public final class LogDrop {
 
     public static boolean isAutoEnabled(Context ctx) {
         return isConfigured() && "yes".equals(consent(ctx));
+    }
+
+    public static String deviceSummary() {
+        return deviceLabel();
+    }
+
+    // §LOGDROP：眼鏡的呼叫點維持 android-glasses，不經過這裡。
+    public static String sourceFor(Context ctx) {
+        if (QuestSupport.isQuest(ctx)) {
+            return "android-quest";
+        }
+        return "android";
+    }
+
+    // §LOGDROP：沒有 Application 子類別。行程裡只包一層，並把原本的 handler 留在後面。
+    public static void installCrashHandler(Context ctx) {
+        if (ctx == null || crashHandlerInstalled) {
+            return;
+        }
+        synchronized (LogDrop.class) {
+            if (crashHandlerInstalled) {
+                return;
+            }
+            final Context app = ctx.getApplicationContext();
+            final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+            Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                @Override
+                public void uncaughtException(Thread thread, Throwable error) {
+                    writeCrashMarker(app, error);
+                    if (previous != null) {
+                        previous.uncaughtException(thread, error);
+                    } else {
+                        // 沒有上一層時把例外吃掉，這個行程會停在半死的狀態。
+                        android.os.Process.killProcess(android.os.Process.myPid());
+                        System.exit(10);
+                    }
+                }
+            });
+            crashHandlerInstalled = true;
+        }
+    }
+
+    /**
+     * 讀完就刪。呼叫端拿這段當 crash 報告；下一次啟動不該再送同一份。
+     *
+     * @return 沒有標記檔時是 null
+     */
+    public static String consumeCrashReport(Context ctx) {
+        if (ctx == null) {
+            return null;
+        }
+        File file = new File(ctx.getApplicationContext().getFilesDir(), CRASH_FILE);
+        if (!file.isFile()) {
+            return null;
+        }
+        byte[] buf = new byte[CRASH_BYTES];
+        int n = 0;
+        boolean unreadable = false;
+        try {
+            FileInputStream in = new FileInputStream(file);
+            try {
+                int read;
+                while (n < buf.length && (read = in.read(buf, n, buf.length - n)) > 0) {
+                    n += read;
+                }
+            } finally {
+                in.close();
+            }
+        } catch (IOException error) {
+            unreadable = true;
+            Log.w(TAG, LOG + "crash marker unreadable");
+        } finally {
+            // 讀失敗也刪。壞檔留著的話，每次進主畫面都會再試一次。
+            if (!file.delete()) {
+                Log.w(TAG, LOG + "crash marker delete failed");
+            }
+        }
+        if (unreadable) {
+            return "crash marker unreadable";
+        }
+        return new String(buf, 0, n, StandardCharsets.UTF_8);
     }
 
     public static String installId(Context ctx) {
@@ -195,6 +282,63 @@ public final class LogDrop {
                 }
             }
         }, "viple-logdrop").start();
+    }
+
+    // §LOGDROP：當機當下不能做網路。檔案要在系統收掉行程前寫進磁碟，下次啟動才讀。
+    private static void writeCrashMarker(Context app, Throwable error) {
+        if (app == null || error == null) {
+            return;
+        }
+        try {
+            byte[] raw = crashText(error).getBytes(StandardCharsets.UTF_8);
+            int n = raw.length;
+            if (n > CRASH_BYTES) {
+                n = CRASH_BYTES;
+                // 裁在 UTF-8 續碼中間，下次讀出來會壞掉。
+                while (n > 0 && (raw[n - 1] & 0xC0) == 0x80) {
+                    n--;
+                }
+            }
+            File file = new File(app.getFilesDir(), CRASH_FILE);
+            FileOutputStream out = new FileOutputStream(file);
+            try {
+                out.write(raw, 0, n);
+                out.flush();
+                out.getFD().sync();
+            } finally {
+                out.close();
+            }
+        } catch (Throwable ignored) {
+            // 這裡再丟出去會蓋掉原本的當機，上一層 handler 就跑不到。
+        }
+    }
+
+    private static String crashText(Throwable error) {
+        StringBuilder out = new StringBuilder(2048);
+        Throwable current = error;
+        int depth = 0;
+        while (current != null && depth < 4 && out.length() < CRASH_BYTES) {
+            if (depth > 0) {
+                out.append("Caused by: ");
+            }
+            out.append(current.getClass().getName());
+            String message = current.getMessage();
+            if (message != null && message.length() > 0) {
+                // 訊息太長會把 stack 擠出 8 KB。
+                int keep = Math.min(message.length(), 500);
+                out.append(": ").append(message, 0, keep);
+            }
+            out.append('\n');
+            StackTraceElement[] frames = current.getStackTrace();
+            if (frames != null) {
+                for (int i = 0; i < frames.length && out.length() < CRASH_BYTES; i++) {
+                    out.append("  at ").append(frames[i].toString()).append('\n');
+                }
+            }
+            current = current.getCause();
+            depth++;
+        }
+        return out.toString();
     }
 
     private static Result post(Context ctx, JSONObject json) throws IOException {

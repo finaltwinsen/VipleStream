@@ -5,9 +5,12 @@ import java.io.OutputStream;
 import java.io.StringReader;
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.UnknownHostException;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -43,6 +46,7 @@ import android.net.NetworkCapabilities;
 import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.SystemClock;
 
 import org.xmlpull.v1.XmlPullParserException;
@@ -56,6 +60,9 @@ public class ComputerManagerService extends Service {
     private static final int INITIAL_POLL_TRIES = 2;
     private static final int EMPTY_LIST_THRESHOLD = 3;
     private static final int POLL_DATA_TTL_MS = 30000;
+    // §LAN-PREF：跟 Qt 一樣，15 秒最多探一次，每次 TCP 400 ms。
+    private static final int LAN_PROBE_INTERVAL_MS = 15000;
+    private static final int LAN_PROBE_TIMEOUT_MS = 400;
 
     private final ComputerManagerBinder binder = new ComputerManagerBinder();
 
@@ -252,8 +259,17 @@ public class ComputerManagerService extends Service {
     // ComputerDatabaseManager.updateComputer 會寫的欄位（憑證另外比）串成一個字串，
     // 用來判斷這一輪輪詢有沒有東西要存。AddressTuple 的字串含位址與埠。
     private static String persistedFieldsOf(ComputerDetails d) {
+        StringBuilder lan = new StringBuilder();
+        if (d.lanAddresses != null) {
+            for (int i = 0; i < d.lanAddresses.size(); i++) {
+                if (i > 0) {
+                    lan.append(';');
+                }
+                lan.append(d.lanAddresses.get(i));
+            }
+        }
         return d.name + '\0' + d.localAddress + '\0' + d.remoteAddress + '\0' +
-                d.manualAddress + '\0' + d.ipv6Address + '\0' + d.macAddress;
+                d.manualAddress + '\0' + d.ipv6Address + '\0' + d.macAddress + '\0' + lan;
     }
 
     // 釘選的憑證有沒有變（比 DER 內容，不比物件）。編不出 DER 就當成有變，照舊寫入。
@@ -859,6 +875,13 @@ public class ComputerManagerService extends Service {
     }
 
     private boolean pollComputer(ComputerDetails details) throws InterruptedException {
+        // §LAN-PREF：已經改走區網的話先維持那個位址。沒探測成功過的主機不會進這段。
+        if (pollHeldLanAddress(details)) {
+            return true;
+        }
+        if (tryLanPreferred(details)) {
+            return true;
+        }
         // Poll all addresses in parallel to speed up the process
         LimeLog.info("Starting parallel poll for "+details.name+" ("+details.localAddress +", "+details.remoteAddress +", "+details.manualAddress+", "+details.ipv6Address+")");
         ComputerDetails polledDetails = parallelPollPc(details);
@@ -866,11 +889,116 @@ public class ComputerManagerService extends Service {
 
         if (polledDetails != null) {
             details.update(polledDetails);
+            if (!isHeldLan(details.activeAddress, details)) {
+                details.lanPrefActive = false;
+            }
             return true;
         }
         else {
             return false;
         }
+    }
+
+    // §LAN-PREF：換成區網之後，原本的位址順序可能下一輪又選回 Tailscale。只在探測成功之後才先問這個位址。
+    private boolean pollHeldLanAddress(ComputerDetails details) {
+        if (!details.lanPrefActive) {
+            return false;
+        }
+        ComputerDetails.AddressTuple active = details.activeAddress;
+        if (active == null || !ComputerDetails.isPrivateLanIpv4(active.address) || !details.hasLanAddress(active)) {
+            details.lanPrefActive = false;
+            return false;
+        }
+        if (isPollOnMainThread()) {
+            return false;
+        }
+        ComputerDetails polled = tryPollIp(details, active);
+        if (polled == null) {
+            return false;
+        }
+        polled.activeAddress = active;
+        details.update(polled);
+        return true;
+    }
+
+    // §LAN-PREF：active 還沒選、或仍是 100.64.0.0/10 時，先確認區網走得通再拿它輪詢。
+    // 探測在輪詢執行緒。失敗就回到下面原本的位址順序，多的只是這次 TCP。
+    private boolean tryLanPreferred(ComputerDetails details) throws InterruptedException {
+        if (details.lanAddresses == null || details.lanAddresses.isEmpty()) {
+            return false;
+        }
+        ComputerDetails.AddressTuple active = details.activeAddress;
+        boolean activeIsVpn = active != null && ComputerDetails.isTailscaleIpv4(active.address);
+        if (active != null && !activeIsVpn) {
+            return false;
+        }
+        if (isPollOnMainThread()) {
+            android.util.Log.w("LimeLog", "[VIPLE-LAN-PREF] refused to probe on the main thread");
+            return false;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (details.lanProbeAtElapsed != 0L && now - details.lanProbeAtElapsed < LAN_PROBE_INTERVAL_MS) {
+            return false;
+        }
+        details.lanProbeAtElapsed = now;
+        ArrayList<ComputerDetails.AddressTuple> lans = new ArrayList<ComputerDetails.AddressTuple>(details.lanAddresses);
+        for (int i = 0; i < lans.size(); i++) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException();
+            }
+            ComputerDetails.AddressTuple lan = lans.get(i);
+            if (!tcpReachable(lan, LAN_PROBE_TIMEOUT_MS)) {
+                continue;
+            }
+            ComputerDetails polled = tryPollIp(details, lan);
+            if (polled == null) {
+                continue;
+            }
+            polled.activeAddress = lan;
+            details.update(polled);
+            details.lanPrefActive = true;
+            String name = details.name == null ? "" : details.name.replace('\n', ' ').replace('\r', ' ');
+            // §LAN-PREF：這行要進 logcat。LimeLog 沒有接到 android.util.Log，上傳時才遮得到主機名稱。
+            android.util.Log.i("LimeLog", "[VIPLE-LAN-PREF] " + name + " reachable on the LAN - using it instead of the VPN address");
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isPollOnMainThread() {
+        Looper main = Looper.getMainLooper();
+        return main != null && main.isCurrentThread();
+    }
+
+    // §LAN-PREF：用字面 IPv4 連，避免主機名稱在這裡做 DNS。
+    private static boolean tcpReachable(ComputerDetails.AddressTuple address, int timeoutMs) {
+        if (address == null) {
+            return false;
+        }
+        int[] parts = ComputerDetails.parseIpv4(address.address);
+        if (parts == null || address.port <= 0 || address.port > 65535) {
+            return false;
+        }
+        try {
+            InetAddress inet = InetAddress.getByAddress(new byte[] {
+                    (byte) parts[0], (byte) parts[1], (byte) parts[2], (byte) parts[3]
+            });
+            Socket socket = new Socket();
+            try {
+                socket.connect(new InetSocketAddress(inet, address.port), timeoutMs);
+                return true;
+            } finally {
+                socket.close();
+            }
+        } catch (IOException error) {
+            return false;
+        }
+    }
+
+    private static boolean isHeldLan(ComputerDetails.AddressTuple active, ComputerDetails details) {
+        return active != null
+                && ComputerDetails.isPrivateLanIpv4(active.address)
+                && details.hasLanAddress(active);
     }
 
     @Override

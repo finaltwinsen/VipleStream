@@ -149,7 +149,7 @@ VipleStream Steam Frame client — Flatpak 建置（app-id $APP_ID，KDE runtime
   --clean           建置前清掉快取：state 的 cache/ ccache/ build/ checksums/ 與該 arch 的 build 目錄；
                     保留 git/ downloads/（量乾淨建置時不把下載時間算進去）。快取兩個 arch 共用，會一起清。
   --download-only   只下載來源，不建置、不計時。runtime 還沒裝好也能先跑。
-  --bundle          產出 .flatpak（release 一律產）。
+  --bundle          產出 .flatpak（release 一律產）。release 另外把安裝腳本與單一 .run 放到 out/。
   --smoke           把產物裝進 --user 的本地 remote（$LOCAL_REMOTE）後跑 --help ×2、--version ×1，
                     GUI 環境與純 SSH 環境（--nosocket=wayland --nosocket=fallback-x11）各一輪；
                     release 另外用 flatpak install --bundle 裝產出的 .flatpak 再驗一次。
@@ -177,10 +177,14 @@ VipleStream Steam Frame client — Flatpak 建置（app-id $APP_ID，KDE runtime
   logs/smoke-<arch>-<flavor>-<時間>-<case>.txt    smoke test 各次輸出
   repo/                                      ostree repo（branch dev／stable）
   out/VipleStream-Client-<版號>-linux-arm64.flatpak           release（HEAD 已在 GitHub 上）
+  out/VipleStream-SteamFrame-Install-<版號>.sh               同上，舊安裝腳本檔名（已裝的自動更新仍會找它）
+  out/VipleStream-SteamFrame-<版號>.run                      同上，單一安裝檔
   out/VipleStream-Client-<版號>-linux-arm64-unpublished.flatpak
+  out/VipleStream-SteamFrame-Install-<版號>-unpublished.sh
+  out/VipleStream-SteamFrame-<版號>-unpublished.run
                                              release 但 HEAD 還沒 push：不可上 release（見「原始碼同步」）
   out/VipleStream-Client-<版號>-linux-<arm64|x64>-dev.flatpak  dev（--bundle）
-                                             每個 .flatpak 旁附 .sha256
+                                             每個產物旁附 .sha256。release 結束時印這三個檔的路徑與 sha256
 
 長建置（SSH 斷線不影響；repo 內 .sh 是 100644，一律用 bash 呼叫）：
   nohup setsid bash moonlight-qt/scripts/build-steamframe.sh --arch aarch64 --flavor dev \\
@@ -1043,6 +1047,46 @@ if [ "$FLAVOR" = "release" ] || [ "$DO_BUNDLE" -eq 1 ]; then
 	log "bundle 完成（$(( $(date +%s) - BUNDLE_START )) 秒，G-BUILD 要一併記錄）：$OUT_FILE（$(du -h "$OUT_FILE" | awk '{ print $1 }')）sha256 $(awk '{ print $1 }' "$OUT_FILE.sha256")"
 	if [ "$FLAVOR" = "release" ] && [ "$HEAD_PUBLISHED" -eq 0 ]; then
 		log "WARN: HEAD 還不在 GitHub 上，這是 -unpublished 產物，不可上 release；push 後重跑同一條命令產出正式檔名"
+	fi
+	if [ "$FLAVOR" = "release" ]; then
+		# §FRAME-RUN：為什麼還複製舊的兩個檔名——已裝的 viplestream-update.timer 仍用它們，release 少附就更新不到。
+		if [ "$HEAD_PUBLISHED" -eq 1 ]; then
+			FRAME_INSTALL_NAME="VipleStream-SteamFrame-Install-$VERSION.sh"
+		else
+			FRAME_INSTALL_NAME="VipleStream-SteamFrame-Install-$VERSION-unpublished.sh"
+		fi
+		FRAME_INSTALL_FILE="$OUT_DIR/$FRAME_INSTALL_NAME"
+		rm -f -- "$FRAME_INSTALL_FILE" "$FRAME_INSTALL_FILE.sha256"
+		cp -- "$SCRIPT_DIR/steamframe/install-steamframe.sh" "$FRAME_INSTALL_FILE" \
+			|| die "$RC_BUNDLE" "無法複製安裝腳本"
+		chmod 755 "$FRAME_INSTALL_FILE" || die "$RC_BUNDLE" "無法設定安裝腳本權限"
+		( cd "$OUT_DIR" && sha256sum "$FRAME_INSTALL_NAME" > "$FRAME_INSTALL_NAME.sha256" ) \
+			|| die "$RC_BUNDLE" "安裝腳本 sha256sum 失敗"
+		FRAME_RUN_LOG="$TMP_DIR/make-frame-run-$TS.log"
+		FRAME_RUN_FILE=$(bash "$SCRIPT_DIR/steamframe/make-frame-run.sh" "$OUT_FILE" "$VERSION" "$OUT_DIR" 2>"$FRAME_RUN_LOG") \
+			|| {
+				while IFS= read -r line; do log "  $line"; done < "$FRAME_RUN_LOG"
+				die "$RC_BUNDLE" "make-frame-run.sh 失敗（見 $FRAME_RUN_LOG）"
+			}
+		FRAME_RUN_FILE=${FRAME_RUN_FILE//$'\r'/}
+		[ -n "$FRAME_RUN_FILE" ] && [ -f "$FRAME_RUN_FILE" ] || die "$RC_BUNDLE" "make-frame-run.sh 沒有產出 .run"
+		[ -f "$FRAME_RUN_FILE.sha256" ] || die "$RC_BUNDLE" "make-frame-run.sh 沒有寫 .sha256"
+		case "$(basename -- "$FRAME_RUN_FILE")" in
+			*-unpublished.run)
+				[ "$HEAD_PUBLISHED" -eq 0 ] || die "$RC_BUNDLE" ".run 檔名與 HEAD 是否已公開不一致"
+				;;
+			*.run)
+				[ "$HEAD_PUBLISHED" -eq 1 ] || die "$RC_BUNDLE" ".run 檔名與 HEAD 是否已公開不一致"
+				;;
+			*) die "$RC_BUNDLE" "make-frame-run.sh 的輸出不是 .run：$FRAME_RUN_FILE" ;;
+		esac
+		log "Steam Frame 產物（路徑與 sha256）："
+		log "  $OUT_FILE"
+		log "  sha256 $(awk '{ print $1 }' "$OUT_FILE.sha256")"
+		log "  $FRAME_INSTALL_FILE"
+		log "  sha256 $(awk '{ print $1 }' "$FRAME_INSTALL_FILE.sha256")"
+		log "  $FRAME_RUN_FILE"
+		log "  sha256 $(awk '{ print $1 }' "$FRAME_RUN_FILE.sha256")"
 	fi
 fi
 

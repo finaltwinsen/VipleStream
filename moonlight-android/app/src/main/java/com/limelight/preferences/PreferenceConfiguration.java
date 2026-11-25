@@ -106,9 +106,14 @@ public class PreferenceConfiguration {
     private static final String TOUCHSCREEN_TRACKPAD_PREF_STRING = "checkbox_touchscreen_trackpad";
     // §EXT-DISPLAY：預設關。接上 XR 眼鏡時 Game 會自己開；HDMI、DeX、無線投影維持畫在這台裝置上。
     private static final String EXTERNAL_DISPLAY_PREF_STRING = "checkbox_external_display";
+    // §EXT-DISPLAY：取代上面的勾選框。舊值只用來遷移（勾過的人視為「一律」）。
+    private static final String EXTERNAL_DISPLAY_MODE_PREF_STRING = "list_external_display_mode";
     private static final String EXTERNAL_DISPLAY_DIM_PREF_STRING = "checkbox_external_display_dim";
+    // §VITURE-WARP：預設開。沒接眼鏡的裝置在設定頁拿掉，一般串流不讀它。
+    private static final String GLASSES_TIMEWARP_PREF_STRING = "checkbox_glasses_timewarp";
     private static final boolean DEFAULT_EXTERNAL_DISPLAY = false;
     private static final boolean DEFAULT_EXTERNAL_DISPLAY_DIM = true;
+    private static final boolean DEFAULT_GLASSES_TIMEWARP = true;
     private static final String LATENCY_TOAST_PREF_STRING = "checkbox_enable_post_stream_toast";
     private static final String FRAME_PACING_PREF_STRING = "frame_pacing";
     private static final String ABSOLUTE_MOUSE_MODE_PREF_STRING = "checkbox_absolute_mouse_mode";
@@ -230,8 +235,13 @@ public class PreferenceConfiguration {
     public int vibrateFallbackToDeviceStrength;
     public boolean touchscreenTrackpad;
     // §EXT-DISPLAY：沒讀到偏好時預設開啟。Game 還要真的找到外接顯示器才會改行為。
+    /** 一律把畫面放到外接顯示器（模式「一律」，或 CLI／glasses_vr 強制）。 */
     public boolean externalDisplay;
+    /** 接上 VITURE 眼鏡時自動開外接模式（模式「自動」）。 */
+    public boolean externalDisplayAutoGlasses;
     public boolean externalDisplayDim;
+    /** glasses_vr 轉頭時用最新姿態校正畫面。預設開。 */
+    public boolean glassesTimewarp;
     public MoonBridge.AudioConfiguration audioConfiguration;
     public int framePacing;
     public boolean absoluteMouseMode;
@@ -759,8 +769,14 @@ public class PreferenceConfiguration {
         config.vibrateFallbackToDeviceStrength = prefs.getInt(VIBRATE_FALLBACK_STRENGTH_PREF_STRING, DEFAULT_VIBRATE_FALLBACK_STRENGTH);
         config.flipFaceButtons = prefs.getBoolean(FLIP_FACE_BUTTONS_PREF_STRING, DEFAULT_FLIP_FACE_BUTTONS);
         config.touchscreenTrackpad = prefs.getBoolean(TOUCHSCREEN_TRACKPAD_PREF_STRING, DEFAULT_TOUCHSCREEN_TRACKPAD);
-        config.externalDisplay = prefs.getBoolean(EXTERNAL_DISPLAY_PREF_STRING, DEFAULT_EXTERNAL_DISPLAY);
+        String externalMode = prefs.getString(EXTERNAL_DISPLAY_MODE_PREF_STRING, null);
+        if (externalMode == null) {
+            externalMode = prefs.getBoolean(EXTERNAL_DISPLAY_PREF_STRING, DEFAULT_EXTERNAL_DISPLAY) ? "on" : "auto";
+        }
+        config.externalDisplay = "on".equals(externalMode);
+        config.externalDisplayAutoGlasses = !"off".equals(externalMode);
         config.externalDisplayDim = prefs.getBoolean(EXTERNAL_DISPLAY_DIM_PREF_STRING, DEFAULT_EXTERNAL_DISPLAY_DIM);
+        config.glassesTimewarp = prefs.getBoolean(GLASSES_TIMEWARP_PREF_STRING, DEFAULT_GLASSES_TIMEWARP);
         config.enableLatencyToast = prefs.getBoolean(LATENCY_TOAST_PREF_STRING, DEFAULT_LATENCY_TOAST);
         config.absoluteMouseMode = prefs.getBoolean(ABSOLUTE_MOUSE_MODE_PREF_STRING, DEFAULT_ABSOLUTE_MOUSE_MODE);
         config.enableAudioFx = prefs.getBoolean(ENABLE_AUDIO_FX_PREF_STRING, DEFAULT_ENABLE_AUDIO_FX);

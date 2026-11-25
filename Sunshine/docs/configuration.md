@@ -294,8 +294,21 @@ editing the `conf` file in a text editor. Use the examples as reference.
             VipleStream §AUTO-UPDATE: automatic update checks. The server checks GitHub 3 minutes after start and then
             once a day (a HEAD request that does not use API quota). With `install`, the update is downloaded, verified
             against the release's sha256 digest and installed once nobody has streamed for 10 minutes; the server
-            restarts. A version that fails to install is not retried automatically. On Linux, automatic install needs
-            password-less `sudo`; otherwise it falls back to a notification.
+            restarts. A version that fails to install is not retried automatically. On Linux, that automatic install
+            runs only when `sudo -n` works without a password. Otherwise the package is downloaded and checked, the
+            tray item stays "Install update", and `pkexec` runs only after that item is clicked. A package already
+            saved with a matching sha256 is not downloaded again. On Windows, an NSIS layout also replaces
+            `tools\viplestream-svc.exe` (same `.old` rollback as the other files) and, after the new service is
+            running, writes `DisplayVersion` under
+            `HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\VipleStreamServer` when the new version
+            string is not empty.
+            <br><br>
+            Developers can point one command at a fake release without changing settings or the service background
+            check. Put the flag after the command: `--check-update --update-url &lt;base&gt;` or
+            `--self-update --update-url &lt;base&gt;` (no local package). `&lt;base&gt;` must be
+            `http://127.0.0.1…`, `http://localhost…`, or `https://…`. The process GETs `&lt;base&gt;/releases/latest`
+            and expects GitHub-like JSON: `tag_name`, `assets[].name`, `browser_download_url`, and
+            `digest` of `sha256:&lt;64 hex&gt;`. The flag is not read from the environment.
         </td>
     </tr>
     <tr>
@@ -315,7 +328,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
     <tr>
         <td>install</td>
-        <td>Notify, then install automatically when nobody is streaming.</td>
+        <td>Notify, then install automatically when nobody is streaming. On Linux without password-less sudo, the package is downloaded and the tray item waits for a click.</td>
     </tr>
 </table>
 
@@ -353,6 +366,41 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>disabled</td>
         <td>Do not send automatically.</td>
+    </tr>
+</table>
+
+### console_reclaim
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream §CONSOLE-LOGIN: when nobody is at the physical console but a Remote Desktop session was
+            disconnected, `/launch` and `/resume` can attach that session back to the console with `tscon` so a normal
+            stream can reach the Windows sign-in screen. The default locks the screen immediately afterwards. The
+            physical monitor then shows the lock screen, not the signed-in desktop. If locking fails, the session is
+            disconnected again. `unlock` leaves the signed-in desktop on the physical monitor. Use `unlock` only on a
+            computer nobody can reach. `off` does not attach the session. Windows only.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            lock
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="3">Choices</td>
+        <td>lock</td>
+        <td>Attach the disconnected session to the console, then lock it.</td>
+    </tr>
+    <tr>
+        <td>unlock</td>
+        <td>Attach the session and leave the desktop visible on the physical monitor. Only for a computer nobody can reach.</td>
+    </tr>
+    <tr>
+        <td>off</td>
+        <td>Do not attach a disconnected session.</td>
     </tr>
 </table>
 

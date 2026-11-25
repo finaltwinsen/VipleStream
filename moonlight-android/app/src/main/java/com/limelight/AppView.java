@@ -846,7 +846,12 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
 
             case START_OR_RESUME_ID:
                 // Resume is the same as start for us
-                ServerHelper.doStart(AppView.this, app.app, computer, managerBinder);
+                if (app.app.isVr() && GlassesVrLaunch.canShowMenu(AppView.this)) {
+                    // §VITURE：繼續一個 VR 遊戲也要走眼鏡 VR，否則接上的是 2D session，SteamVR 沒人接姿態與畫面
+                    ServerHelper.doStartGlassesVr(AppView.this, app.app, computer, managerBinder);
+                } else {
+                    ServerHelper.doStart(AppView.this, app.app, computer, managerBinder);
+                }
                 return true;
 
             case QUIT_ID:
@@ -1117,6 +1122,11 @@ public class AppView extends Activity implements AdapterFragmentCallbacks {
                 // Only open the context menu if something is running, otherwise start it
                 if (lastRunningAppId != 0) {
                     openContextMenu(arg1);
+                } else if (app.app.isVr() && GlassesVrLaunch.canShowMenu(AppView.this)) {
+                    // §VITURE：接著眼鏡時點 VR 遊戲就用眼鏡 VR 開（同 Frame）。以前會開成 2D 串流，遊戲照樣把 SteamVR
+                    // 帶起來卻沒有 VR session 接姿態與畫面，使用者看到的是「SteamVR 開不起來」（11-25 實機）。
+                    // 要用 2D 看的話，長按選單的「開始」仍是一般串流。
+                    ServerHelper.doStartGlassesVr(AppView.this, app.app, computer, managerBinder);
                 } else {
                     ServerHelper.doStart(AppView.this, app.app, computer, managerBinder);
                 }

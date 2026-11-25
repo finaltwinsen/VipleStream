@@ -20,12 +20,14 @@ private slots:
 private:
     // §UPDATE-HEAD：兩段式查詢——先 HEAD github.com 的 releases/latest（免 API 配額），
     // 失敗才退回 REST API（帶 ETag 條件請求）。
-    enum class Phase { Idle, HeadLatest, ApiLatest };
+    enum class Phase { Idle, HeadLatest, ApiLatest, DevLatest };
 
     void sendHeadLatest();
     void sendApiLatest();
+    void sendDevLatest(const QString& base);
     void handleHeadReply(QNetworkReply* reply);
     void handleApiReply(QNetworkReply* reply);
+    void handleDevReply(QNetworkReply* reply);
     void finishNam();
 
     bool parseStringToVersionQuad(const QString& string, QVector<int>& version);

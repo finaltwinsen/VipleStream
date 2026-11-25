@@ -18,7 +18,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * §VITURE：VID 符合就列出來。Beast 與社群回報的麥克風 PID 不固定，白名單會把要探測的介面濾掉。
@@ -40,6 +42,8 @@ public final class VitureUsb {
     private static final String LOG_TAG = "VipleViture";
     // §VITURE：Activity 結束時若探測執行緒還卡在傳輸裡，要用這份連線把介面放掉。
     private static volatile Session active;
+    // §VITURE：拒絕是這一次行程對這條 USB 路徑。重插通常會換 device name，下一輪才問得到。
+    private static final Set<String> permissionDeniedNames = Collections.synchronizedSet(new HashSet<String>());
 
     private VitureUsb() {
     }
@@ -93,6 +97,46 @@ public final class VitureUsb {
             default:
                 return "unknown-pid";
         }
+    }
+
+    /**
+     * §VITURE：0x1201、0x1211、0x1221 的顯示模式代碼跟 Pro／One 不同，SET 0x0141 會讓 Beast 黑屏。
+     */
+    public static boolean isBeast(UsbDevice device) {
+        if (device == null || device.getVendorId() != VENDOR_ID) {
+            return false;
+        }
+        switch (device.getProductId()) {
+            case PID_BEAST:
+            case PID_BEAST_ALT:
+            case PID_PHANTOM_BEAST:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    public static boolean wasPermissionDenied(UsbDevice device) {
+        String name = permissionDeviceName(device);
+        return name != null && permissionDeniedNames.contains(name);
+    }
+
+    public static void notePermissionDenied(UsbDevice device) {
+        String name = permissionDeviceName(device);
+        if (name != null) {
+            permissionDeniedNames.add(name);
+        }
+    }
+
+    private static String permissionDeviceName(UsbDevice device) {
+        if (device == null) {
+            return null;
+        }
+        String name = device.getDeviceName();
+        if (name == null || name.length() == 0) {
+            return null;
+        }
+        return name;
     }
 
     public static void requestPermission(Context context, UsbManager usb, UsbDevice device) {

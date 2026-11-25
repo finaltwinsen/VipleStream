@@ -34,6 +34,24 @@ public final class ImuFusion {
     static final float DEFAULT_HZ = 400f;
     static final int RATE_WINDOW = 32;
     static final int STILL_CAP = 2000;
+    // §VITURE-DRIFT（2026-11-25）：Beast 實機靜止一分鐘 yaw 漂約 1.3°（殘差約 0.0004 rad/s，靜止零偏估計之後還剩的）。
+    // 扣零偏後角速度小於這個值就不積分陀螺儀（傾斜照樣由重力修正）。0.008 rad/s ≈ 0.46°/s，人轉頭不會這麼慢，
+    // 配戴時察覺不到，但靜止與極慢的漂移被吃掉。太大會讓慢慢轉頭跟不上，不要隨意調高。
+    static final float GYRO_DEADBAND = 0.008f;
+    // §VITURE-ADAPT：死區改跟著這副眼鏡實際的陀螺儀雜訊走（嚴格靜止時量到的標準差 × 3），限制在這個範圍。
+    // 下限太小時雜訊本身就會累積成漂移；上限太大時慢慢轉頭（< 0.7°/s）會跟不上。
+    static final float DEADBAND_MIN = 0.004f;
+    static final float DEADBAND_MAX = 0.012f;
+    static final float DEADBAND_SIGMAS = 3f;
+    // §VITURE-ADAPT：戴在頭上時頭不會完全靜止，嚴格條件可能整場都不成立，零偏就一直停在接上時的值。
+    // 「近似靜止」用較寬的變異數上限，但只接受跟目前零偏差很小的估計、而且只小步混入：
+    // 慢慢轉頭的平均角速度遠大於 QUASI_MAX_STEP，不會被當成零偏吃掉。
+    static final float QUASI_GYRO_STD = 0.03f;
+    static final float QUASI_ACCEL_STD = 0.06f;
+    static final float QUASI_MAX_STEP = 0.004f;
+    static final float QUASI_BLEND = 0.05f;
+    // 存下來的零偏若比這個大，多半是存錯或換了眼鏡，不採用。
+    static final float BIAS_SANE_LIMIT = 0.05f;
 
     // §VITURE：感測器安裝方向還沒在 Beast 上核對。先用單位矩陣，等軸向測試報告再改。
     private final int[] perm = new int[] {0, 1, 2};
@@ -47,6 +65,12 @@ public final class ImuFusion {
     private float oy;
     private float oz;
     private float ow = 1f;
+    private float deadband = GYRO_DEADBAND;
+    private float noiseEst;
+    private long statQuasiUpdates;
+    private long statSamples;
+    private long statDeadband;
+    private long statBiasUpdates;
     private float biasX;
     private float biasY;
     private float biasZ;
@@ -71,6 +95,7 @@ public final class ImuFusion {
     private long sequence;
     private long arrivalNs;
     private float hz = DEFAULT_HZ;
+    private float seqStep;
     private final long[] arrivals = new long[RATE_WINDOW];
     private int rateCount;
     private int ratePos;
@@ -205,7 +230,14 @@ public final class ImuFusion {
         if (delta > SEQ_DELTA_CAP) {
             delta = SEQ_DELTA_CAP;
         }
-        float dt = delta / hz;
+        // §VITURE-DT（2026-11-25 Beast 實機）：序號不一定每筆加 1。Beast 的是約 1 kHz 的裝置時鐘，240 Hz 取樣時
+        // 每筆跳 4～5，直接「序號差 ÷ 取樣率」會把時間算成 4 倍多，轉頭角度跟著放大 4 倍（使用者回報動一點畫面動很多）。
+        // 改成學每筆平均跳多少，用它把序號差換回「幾筆」再除取樣率；逐筆計數的眼鏡平均是 1，結果跟以前一樣。
+        if (delta >= 1 && delta <= SEQ_DELTA_CAP) {
+            seqStep = seqStep <= 0f ? delta : 0.98f * seqStep + 0.02f * delta;
+        }
+        float steps = seqStep > 0f ? delta / seqStep : delta;
+        float dt = steps / hz;
         if (dt > 0f) {
             integrate(gx, gy, gz, ax, ay, az, dt);
         }
@@ -214,6 +246,48 @@ public final class ImuFusion {
         outWz = gz - biasZ;
         publish();
         pushStill(gx, gy, gz, ax, ay, az);
+        return true;
+    }
+
+    /**
+     * §VITURE-DRIFT：給每 10 秒一行的姿態 log。out = {biasX, biasY, biasZ}（rad/s，對應後的座標），
+     * counts = {樣本數, 落在死區的樣本數, 零偏更新次數}，讀完歸零。
+     */
+    public synchronized void takeStats(float[] out, long[] counts) {
+        out[0] = biasX;
+        out[1] = biasY;
+        out[2] = biasZ;
+        if (out.length > 3) {
+            out[3] = deadband;
+        }
+        counts[0] = statSamples;
+        counts[1] = statDeadband;
+        counts[2] = statBiasUpdates;
+        if (counts.length > 3) {
+            counts[3] = statQuasiUpdates;
+        }
+        statSamples = 0;
+        statDeadband = 0;
+        statBiasUpdates = 0;
+        statQuasiUpdates = 0;
+    }
+
+    /** §VITURE-ADAPT：對應後座標的零偏（rad/s）。結束時存下，下次同一副眼鏡從這裡開始。 */
+    public synchronized void copyBias(float[] xyz) {
+        xyz[0] = biasX;
+        xyz[1] = biasY;
+        xyz[2] = biasZ;
+    }
+
+    /** §VITURE-ADAPT：開流前呼叫。超出合理範圍就不採用，照舊從 0 開始收斂。 */
+    public synchronized boolean seedBias(float x, float y, float z) {
+        if (Float.isNaN(x) || Float.isNaN(y) || Float.isNaN(z)
+                || Math.abs(x) > BIAS_SANE_LIMIT || Math.abs(y) > BIAS_SANE_LIMIT || Math.abs(z) > BIAS_SANE_LIMIT) {
+            return false;
+        }
+        biasX = x;
+        biasY = y;
+        biasZ = z;
         return true;
     }
 
@@ -366,9 +440,28 @@ public final class ImuFusion {
             intY = clamp(intY + ey * dt);
             intZ = clamp(intZ + ez * dt);
         }
-        float wx = gx - biasX + KP * ex + (correct ? KI * intX : 0f);
-        float wy = gy - biasY + KP * ey + (correct ? KI * intY : 0f);
-        float wz = gz - biasZ + KP * ez + (correct ? KI * intZ : 0f);
+        float rx = gx - biasX;
+        float ry = gy - biasY;
+        float rz = gz - biasZ;
+        statSamples++;
+        // §VITURE-DRIFT：軟死區（收縮）。硬切換時頭幾乎不動、讀數在門檻上下跳，積分在「不轉」與「整段轉」之間來回，
+        // 戴著看是抖（11-25 實機回報）。改成扣掉門檻那一段：門檻內是 0，門檻外連續、沒有跳變；正常轉頭（每秒數十度）
+        // 少掉的 deadband（< 0.7°/s）感覺不出來。
+        float mag = (float) Math.sqrt(rx * rx + ry * ry + rz * rz);
+        if (mag <= deadband) {
+            rx = 0f;
+            ry = 0f;
+            rz = 0f;
+            statDeadband++;
+        } else {
+            float k = (mag - deadband) / mag;
+            rx *= k;
+            ry *= k;
+            rz *= k;
+        }
+        float wx = rx + KP * ex + (correct ? KI * intX : 0f);
+        float wy = ry + KP * ey + (correct ? KI * intY : 0f);
+        float wz = rz + KP * ez + (correct ? KI * intZ : 0f);
         float half = 0.5f * dt;
         float nx = qx + half * (qw * wx + qy * wz - qz * wy);
         float ny = qy + half * (qw * wy - qx * wz + qz * wx);
@@ -422,15 +515,23 @@ public final class ImuFusion {
             return;
         }
         double inv = 1d / stillWindow;
-        double gyroVarLimit = (double) STILL_GYRO_STD * STILL_GYRO_STD;
-        double accelVarLimit = (double) STILL_ACCEL_STD * STILL_ACCEL_STD;
-        if (variance(sumGx, sumGxx, inv) > gyroVarLimit
-                || variance(sumGy, sumGyy, inv) > gyroVarLimit
-                || variance(sumGz, sumGzz, inv) > gyroVarLimit
-                || variance(sumAx, sumAxx, inv) > accelVarLimit
-                || variance(sumAy, sumAyy, inv) > accelVarLimit
-                || variance(sumAz, sumAzz, inv) > accelVarLimit
-                || sumOmega * inv >= STILL_MEAN_OMEGA) {
+        double vgx = variance(sumGx, sumGxx, inv);
+        double vgy = variance(sumGy, sumGyy, inv);
+        double vgz = variance(sumGz, sumGzz, inv);
+        double vax = variance(sumAx, sumAxx, inv);
+        double vay = variance(sumAy, sumAyy, inv);
+        double vaz = variance(sumAz, sumAzz, inv);
+        double gyroVarMax = Math.max(vgx, Math.max(vgy, vgz));
+        double accelVarMax = Math.max(vax, Math.max(vay, vaz));
+        if (sumOmega * inv >= STILL_MEAN_OMEGA) {
+            return;
+        }
+        boolean strict = gyroVarMax <= (double) STILL_GYRO_STD * STILL_GYRO_STD
+                && accelVarMax <= (double) STILL_ACCEL_STD * STILL_ACCEL_STD;
+        boolean quasi = !strict
+                && gyroVarMax <= (double) QUASI_GYRO_STD * QUASI_GYRO_STD
+                && accelVarMax <= (double) QUASI_ACCEL_STD * QUASI_ACCEL_STD;
+        if (!strict && !quasi) {
             return;
         }
         double meanAx = sumAx * inv;
@@ -440,9 +541,30 @@ public final class ImuFusion {
         if (Math.abs(meanNorm - 1d) > STILL_ACCEL_NORM) {
             return;
         }
-        biasX = BIAS_BLEND_OLD * biasX + BIAS_BLEND_NEW * (float) (sumGx * inv);
-        biasY = BIAS_BLEND_OLD * biasY + BIAS_BLEND_NEW * (float) (sumGy * inv);
-        biasZ = BIAS_BLEND_OLD * biasZ + BIAS_BLEND_NEW * (float) (sumGz * inv);
+        float mx = (float) (sumGx * inv);
+        float my = (float) (sumGy * inv);
+        float mz = (float) (sumGz * inv);
+        float blendNew = BIAS_BLEND_NEW;
+        if (quasi) {
+            float dx = mx - biasX;
+            float dy = my - biasY;
+            float dz = mz - biasZ;
+            if (dx * dx + dy * dy + dz * dz > QUASI_MAX_STEP * QUASI_MAX_STEP) {
+                return;
+            }
+            blendNew = QUASI_BLEND;
+            statQuasiUpdates++;
+        } else {
+            // 只用嚴格靜止的窗量雜訊：近似靜止的窗含頭部微動，會把死區撐大。
+            float noise = (float) Math.sqrt(gyroVarMax);
+            noiseEst = noiseEst <= 0f ? noise : 0.8f * noiseEst + 0.2f * noise;
+            deadband = Math.max(DEADBAND_MIN, Math.min(DEADBAND_MAX, DEADBAND_SIGMAS * noiseEst));
+        }
+        float blendOld = 1f - blendNew;
+        biasX = blendOld * biasX + blendNew * mx;
+        biasY = blendOld * biasY + blendNew * my;
+        biasZ = blendOld * biasZ + blendNew * mz;
+        statBiasUpdates++;
         // §VITURE：零偏一更新，舊的積分還在拉同一個方向，會把剛修掉的誤差加回去。
         intX = 0f;
         intY = 0f;

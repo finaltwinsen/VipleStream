@@ -11,6 +11,7 @@
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QUrl>
 
 #include <Limelight.h>  // §VR：VIPLE_VR_* 範圍常數
 #include <VrRepairRtt.h>  // §VR-REPAIR-RTT：--vr-repair-idle 的 VRRR_IDLE_*（header-only）
@@ -292,8 +293,60 @@ GlobalCommandLineParser::~GlobalCommandLineParser()
 {
 }
 
+namespace {
+QString& devUpdateUrlStorage()
+{
+    static QString url;
+    return url;
+}
+}
+
+QString GlobalCommandLineParser::devUpdateUrl()
+{
+    return devUpdateUrlStorage();
+}
+
+bool GlobalCommandLineParser::isAllowedDevUpdateUrl(const QString& url)
+{
+    if (url.isEmpty() || url.size() > 2048) {
+        return false;
+    }
+    if (url.contains(QLatin1Char('\\')) || url.contains(QLatin1Char('@'))
+            || url.contains(QLatin1Char(' ')) || url.contains(QLatin1Char('\t'))
+            || url.contains(QLatin1Char('\n')) || url.contains(QLatin1Char('\r'))) {
+        return false;
+    }
+    // %2e%2e 解出來就是 ..。QUrl 不一定會先解路徑再讓我們看。
+    if (url.toLower().contains(QLatin1String("%2e%2e"))) {
+        return false;
+    }
+    const QUrl u(url, QUrl::StrictMode);
+    if (!u.isValid() || u.isRelative() || !u.userInfo().isEmpty() || u.hasQuery() || u.hasFragment()) {
+        return false;
+    }
+    if (u.host().isEmpty()) {
+        return false;
+    }
+    for (const QString& segment : u.path().split(QLatin1Char('/'))) {
+        if (segment == QLatin1String("..")) {
+            return false;
+        }
+    }
+    const QString scheme = u.scheme().toLower();
+    const QString host = u.host().toLower();
+    if (scheme == QLatin1String("https")) {
+        return true;
+    }
+    if (scheme == QLatin1String("http")) {
+        return host == QLatin1String("127.0.0.1") || host == QLatin1String("localhost");
+    }
+    return false;
+}
+
 GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStringList &args)
 {
+    // 每次解析都清掉，避免上一輪的測試網址留在這個行程裡。
+    devUpdateUrlStorage().clear();
     CommandLineParser parser;
     parser.setupCommonOptions();
     parser.setApplicationDescription(
@@ -322,7 +375,11 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
     parser.addValueOption("vr-shell", "(dev) headset VR interface: \"<xr|noxr|off>[,dump=<sec>:<png>][,test=<script>]\" (xr is the default on the Steam Frame; off = use the window)");
     parser.addValueOption("dev-video", "(dev) open the video mode page at start: \"<tab>[,url=<url>][,grab=<sec>:<png>][,play=<sec>][,host=<name>][,dir=<path>]\"");
     parser.addFlagOption("dev-netbench", "(dev) start the VR network test (Settings > Test network) as soon as a VR host is online");
-    parser.parse(args);
+    parser.addValueOption("dev-update-url", "(dev) this run only: check and download updates from <base>/releases/latest "
+                          "(http://127.0.0.1, http://localhost, or https; not saved)");
+    if (!parser.parse(args) && parser.errorText().contains(QLatin1String("dev-update-url"))) {
+        parser.showError(parser.errorText());
+    }
     auto posArgs = parser.positionalArguments();
 
     if (posArgs.isEmpty()) {
@@ -343,6 +400,16 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         }
         m_DevVideo = parser.value("dev-video");
         m_DevNetBench = parser.isSet("dev-netbench");
+        if (parser.isSet("dev-update-url")) {
+            QString base = parser.value("dev-update-url").trimmed();
+            while (base.endsWith(QLatin1Char('/'))) {
+                base.chop(1);
+            }
+            if (!isAllowedDevUpdateUrl(base)) {
+                parser.showError(QString("dev-update-url: only http://127.0.0.1, http://localhost, or https is allowed (got '%1')").arg(base));
+            }
+            devUpdateUrlStorage() = base;
+        }
         if (parser.isSet("vr-shell")) {
             XrShell::Config shellConfig;
             QString shellErr;
@@ -379,6 +446,7 @@ static bool optionValueIsNextArg(const char* arg)
 {
     static const char* k_Names[] = {
         "dev-video",
+        "dev-update-url",
         "vr-shell",
         "vr-test-preflight",
     };

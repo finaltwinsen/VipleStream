@@ -234,6 +234,7 @@ service → 覆蓋 → 確認 SC-HID driver 版號 → 啟 service；預設挑 `
 │   ├── VipleStream-Client-X.Y.Z-debug.zip            ← Client 的 PDB（當機分析用）
 │   ├── VipleStream-Android-X.Y.Z.apk                 ← Android
 │   ├── VipleStream-Client-X.Y.Z-linux-x64.AppImage   ← Linux Client（build_all 的 WSL 步驟，或從 Linux 機 scp 回來）
+│   ├── VipleStream-Client-X.Y.Z-linux-x64.deb        ← Linux Client 安裝包（由 AppImage 再包，見 §7）
 │   ├── VipleStream-Client-X.Y.Z-linux-arm64.flatpak  ← Steam Frame Client（2.0.0 起；從 Linux 機 scp 回來，見 §8）
 │   └── VipleStream-Server-X.Y.Z-linux-x64.deb        ← Linux Server（從 Linux 機 scp 回來，見 §7）
 ├── temp\
@@ -330,11 +331,12 @@ build_moonlight.cmd                         :: 重 build
 
 ## 7. Linux 建置（x64 AppImage／.deb）
 
-Linux 兩件要在 Ubuntu 26.04 x64 環境建。入口是兩支**已入 git** 的腳本：
+Linux 的 AppImage 與 server `.deb` 要在 Ubuntu 26.04 x64 環境建。入口是兩支**已入 git** 的腳本；client `.deb` 是 AppImage 建完之後另包的，不再開一次容器建置：
 
 | 產物 | 腳本（在 git 裡） | 輸出 | 上 release 的檔名 |
 |---|---|---|---|
 | Client AppImage | `moonlight-qt/scripts/build-appimage-native.sh`（在 `moonlight-qt/` 目錄執行） | `moonlight-qt/build/installer-release/VipleStream-Client-X.Y.Z-linux-x64.AppImage` | 同左 |
+| Client `.deb` | `moonlight-qt/scripts/linux/build-client-deb.sh <AppImage> <X.Y.Z> <輸出目錄>` | `<輸出目錄>/VipleStream-Client-X.Y.Z-linux-x64.deb` | 同左 |
 | Server `.deb` | `Sunshine/scripts/linux_build.sh`（在 `Sunshine/` 目錄執行，例如 `bash scripts/linux_build.sh --skip-cuda --skip-cleanup`；`--help` 列出全部選項） | `Sunshine/build/cpack_artifacts/VipleStream-Server.deb`（檔名沒有版號，套件內的 Version 正確） | 改名成 `VipleStream-Server-X.Y.Z-linux-x64.deb` |
 
 **建置環境（2026-11-03 起）**：在開發者的 Arch 系桌機（CachyOS）上用 podman 跑 `ubuntu:26.04` 容器，
@@ -380,6 +382,8 @@ arm64 Flatpak 的 release 一定要，見 §8）。建完核對產物版號和 `
   不再落到 EGLFS 去做 KMS modeset；linuxdeploy-plugin-qt 預設只部署 `libqxcb.so`，少了這個外掛 AppImage 會找不到
   offscreen 平台而 abort。打包後確認 `usr/plugins/platforms/libqoffscreen.so` 存在。
 - 有裝 `fonts-noto-cjk` 就會把 CJK 字型包進去，沒裝就用系統 fontconfig。
+
+**Client `.deb`（`scripts/linux/build-client-deb.sh`）**：把上面的 AppImage 解開，裝到 `/opt/viplestream`，`/usr/bin/viplestream` 轉呼叫 AppRun。同一包還有 root 擁有的 `/usr/libexec/viplestream-client/self-update`，以及 `/usr/share/polkit-1/actions/app.viplestream.client.self-update.policy`（action `app.viplestream.client.self-update`，三種情境都是 `auth_admin_keep`，只允許那支 helper）。從 `/opt/viplestream/` 執行時，client 下載 `VipleStream-Client-X.Y.Z-linux-x64.deb`、核對 sha256，再以 `pkexec` 呼叫 helper。helper 再驗檔名、套件名 `viplestream-client`、架構 amd64，而且版號必須比已安裝的新。不把 polkit／pkexec 寫進 Depends（套件名隨發行版不同；機器上要已經有 pkexec）。
 
 **Server（`linux_build.sh`）前置**：
 - `third-party/inputtino`、`third-party/wlr-protocols` 兩個 submodule 沒有 vendor 進 repo，要依本 fork

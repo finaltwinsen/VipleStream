@@ -25,11 +25,11 @@ public final class VitureV2Protocol {
     public static final int EVENT_POSE = 0x7308;
     public static final int EVENT_RAW = 0x7309;
 
-    /** 1920×1080 @ 60 Hz，一般 2D。 */
+    /** 1920×1080 @ 60 Hz，一般 2D。Beast 的 GET 也會回這個值，但 SET 會黑屏，不能送。 */
     public static final int DISPLAY_2D_60 = 0x31;
-    /** 3840×1080 @ 60 Hz，左眼在左半的 3D SBS。Beast 上還沒有人送過這個指令。 */
+    /** 3840×1080 @ 60 Hz，左眼在左半的 3D SBS。Beast 送這個值會黑屏。 */
     public static final int DISPLAY_3D_SBS_60 = 0x32;
-    /** 1920×1080 @ 120 Hz。Beast 上還沒有人送過。 */
+    /** 1920×1080 @ 120 Hz。Beast 不能送。 */
     public static final int DISPLAY_2D_120 = 0x34;
 
     public static final int INSPECT_MALFORMED = -1;

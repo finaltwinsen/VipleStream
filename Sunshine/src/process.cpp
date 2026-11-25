@@ -41,6 +41,8 @@
 
 #ifdef _WIN32
   #include "platform/windows/steam_scanner.h"
+  #include "platform/windows/console_session.h"
+  #include "platform/windows/misc.h"
   // from_utf8() string conversion function
   #include "platform/windows/utf_utils.h"
 
@@ -603,6 +605,25 @@ namespace proc {
       terminate();
     });
 
+#ifdef _WIN32
+    // §CONSOLE-LOGIN：SYSTEM 沒有主控台使用者時，run_command 拿不到 token，立刻 permission_denied，不會卡住。
+    // 有指令的 app 要讓 client 看得到 NEEDS_LOGIN。沒有指令的 Desktop 仍要成功，畫面就是登入畫面。
+    if (platf::is_running_as_system() && !platf::console::query().user_on_console) {
+      if (!_app.cmd.empty()) {
+        BOOST_LOG(info) << "[VIPLE-CONSOLE] refusing app command; no console user";
+        return proc::ERR_NEEDS_LOGIN;
+      }
+      if (!_app.prep_cmds.empty() || !_app.detached.empty()) {
+        BOOST_LOG(info) << "[VIPLE-CONSOLE] skipping prep and detached commands; no console user";
+        // 沒跑成的 do 不能留在已執行範圍，結束時才不會去跑對應的 undo。
+        _app.prep_cmds.clear();
+        _app.detached.clear();
+        _app_prep_begin = std::begin(_app.prep_cmds);
+        _app_prep_it = _app_prep_begin;
+      }
+    }
+#endif
+
     for (; _app_prep_it != std::end(_app.prep_cmds); ++_app_prep_it) {
       auto &cmd = *_app_prep_it;
 
@@ -623,8 +644,17 @@ namespace proc {
         // This is to prevent the issue where users reboot their PC and need to log in with Sunshine.
         // permission_denied is typically returned when the user impersonation fails, which can happen when user is not signed in yet.
         if (!(_app.cmd.empty() && ec == std::errc::permission_denied)) {
+#ifdef _WIN32
+          if (ec == std::errc::permission_denied && platf::is_running_as_system() && !platf::console::query().user_on_console) {
+            return proc::ERR_NEEDS_LOGIN;
+          }
+#endif
           return -1;
         }
+        // §CONSOLE-LOGIN：啟動失敗的 child 再 wait 會得到 no_such_process，Desktop 就被判失敗。
+        // 留下的 ec 會讓下一條 prep 即使建立成功也被當成失敗。
+        ec.clear();
+        continue;
       }
 
       child.wait(ec);
@@ -663,6 +693,11 @@ namespace proc {
       _process = platf::run_command(_app.elevated, true, _app.cmd, working_dir, _env, _pipe.get(), ec, &_process_group);
       if (ec) {
         BOOST_LOG(warning) << "Couldn't run ["sv << _app.cmd << "]: System: "sv << ec.message();
+#ifdef _WIN32
+        if (ec == std::errc::permission_denied && platf::is_running_as_system() && !platf::console::query().user_on_console) {
+          return proc::ERR_NEEDS_LOGIN;
+        }
+#endif
         return -1;
       }
     }

@@ -8,8 +8,9 @@
 #   - 執行期加上 OpenXR 連 SteamVR 需要的 /opt/steamvr（唯讀）、/tmp、/dev/shm（這三條不進 manifest，理由同上）；
 #   - 把啟動器加進 Steam 收藏庫，並蓋掉選單裡 Flatpak 匯出的捷徑，兩個入口開的都是同一個啟動器；
 #   - §AUTO-UPDATE：裝一個 systemd user timer（viplestream-update.timer），開機 10 分鐘後、之後每 6 小時檢查 GitHub
-#     最新版；有新版就下載 .flatpak 與新的安裝腳本、用 GitHub 的 sha256 驗證，在 VipleStream 沒開著時執行新的安裝腳本。
+#     最新版；有 VipleStream-SteamFrame-<版>.run 就只下載它（驗 sha256 後執行），沒有才退回 .flatpak 與安裝腳本。沒開著才裝。
 #     依 app 設定頁的「App updates」（updatemode：0 不檢查、1 只通知、2 自動安裝，預設 2）決定要不要裝；
+#     開發可執行 auto-update.sh --api-url <url>（本機 http 或 https 的 release JSON，只這次，不讀環境變數）；
 #   - §VR-NETSEL：裝 viplestream-netmode.service。VipleStream 串流 VR 時可以要求「只用轉接器」：服務把 wlan0 暫時交出
 #     NetworkManager 的管理（頭盔只有一個無線電，家用 Wi-Fi 連著會輪流用、熱點那條整段收不到）；app 5 秒沒更新請求、
 #     轉接器沒有連線、或 app 要求恢復時立刻交還（自動接回家用 Wi-Fi）。重開機本來就會還原；
@@ -290,9 +291,10 @@ if [ -n "$ver" ]; then echo "$ver" > "$DEST/installed-version"; fi
 cat > "$DEST/auto-update.sh.tmp" <<'AUTO_EOF'
 #!/bin/bash
 # auto-update.sh — VipleStream for Steam Frame 自動更新（§AUTO-UPDATE；install-steamframe.sh 安裝，viplestream-update.timer 執行）
-# 1. HEAD github.com/.../releases/latest（不吃 API 配額）讀最新版號，跟 installed-version 比
-# 2. 有新版：API 取 .flatpak 與安裝腳本的 sha256（digest），下載後驗證；缺 digest 或不符就放棄（fail closed）
-# 3. VipleStream 沒開著才執行新的安裝腳本（開著就等下一輪）；設定頁選「只通知」或「不檢查」時不安裝
+# 1. HEAD github.com/.../releases/latest（不吃 API 配額）讀最新版號，跟 installed-version 比。
+#    §FRAME-RUN：--api-url <url> 改拿這份 release JSON（這次執行），就不打 GitHub 的 HEAD。
+# 2. 有新版：API 若有 VipleStream-SteamFrame-<版>.run 就只下載它，沒有才取 .flatpak 與安裝腳本。都驗 GitHub sha256；缺 digest 或不符就放棄
+# 3. VipleStream 沒開著才安裝（開著就等下一輪）；設定頁選「只通知」或「不檢查」時不安裝。--no-steam 沿用 $DEST/no-steam
 set -uo pipefail
 REPO=finaltwinsen/VipleStream
 APP_ID=io.github.finaltwinsen.VipleStream
@@ -305,14 +307,125 @@ log() { echo "$(date '+%F %T') [VIPLE-UPDATE] $*" >> "$LOG"; }
 trim_log() { [ -f "$LOG" ] && tail -n 300 "$LOG" > "$LOG.tmp" && mv -f "$LOG.tmp" "$LOG"; }
 trap trim_log EXIT
 
+# §FRAME-RUN：--api-url 只換 release JSON 的來源。systemd 的 timer 不帶參數，正式路徑不變。
+# 不用網址前綴比對：http://127.0.0.1.evil.com 會被當成 127.0.0.1。
+API_URL=
+url_ok() {
+  local u rest hostport host port
+  u=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$u" in
+    *\\*|*'@'*|*' '*|*'	'*|*'
+'*|*'
+'*) return 1 ;;
+    *..*) return 1 ;;
+    *[?]*) return 1 ;;
+    *[#]*) return 1 ;;
+  esac
+  case "$u" in
+    https://?*)
+      rest=${u#https://}
+      ;;
+    http://*)
+      rest=${u#http://}
+      case "$rest" in
+        127.0.0.1|127.0.0.1/*|localhost|localhost/*) ;;
+        127.0.0.1:*|localhost:*) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  hostport=${rest%%/*}
+  case "$hostport" in
+    *:*)
+      host=${hostport%%:*}
+      port=${hostport#*:}
+      case "$port" in
+        ''|*[!0-9]*) return 1 ;;
+      esac
+      ;;
+    *) host=$hostport ;;
+  esac
+  case "$host" in
+    '' ) return 1 ;;
+  esac
+  case "$u" in
+    http://*)
+      case "$host" in
+        127.0.0.1|localhost) ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  return 0
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --api-url)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then log "--api-url needs a url"; exit 0; fi
+      API_URL=$2
+      shift 2
+      ;;
+    --api-url=*)
+      API_URL=${1#--api-url=}
+      if [ -z "$API_URL" ]; then log "--api-url needs a url"; exit 0; fi
+      shift
+      ;;
+    *)
+      log "unknown argument: $1"
+      exit 0
+      ;;
+  esac
+done
+if [ -n "$API_URL" ] && ! url_ok "$API_URL"; then
+  log "refusing api url"
+  exit 0
+fi
+
 mode="$(sed -n 's/^updatemode=\([0-9]\)$/\1/p' "$CONF" 2>/dev/null | tail -n 1)"
 mode="${mode:-2}"
 if [ "$mode" = 0 ]; then exit 0; fi
 
 cur="$(cat "$DEST/installed-version" 2>/dev/null || true)"
-loc="$(curl -fsSI --max-time 30 -A "VipleStream-SteamFrame-Updater/${cur:-0}" "https://github.com/$REPO/releases/latest" \
-       | tr -d '\r' | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/v\{0,1\}\([0-9][0-9.]*\)$/\1/p')"
-if [ -z "$loc" ]; then log "check failed (no network or GitHub unreachable)"; exit 0; fi
+api=
+if [ -n "$API_URL" ]; then
+  # 有 --api-url 就不打 GitHub 的 HEAD。這支 URL 就是整份 release JSON，不跟著重新導向。
+  json_tmp=$(mktemp 2>/dev/null) || { log "dev release JSON failed"; exit 0; }
+  code=$(curl -sS --max-time 30 -o "$json_tmp" -w '%{http_code}' -H 'Accept: application/vnd.github+json' "$API_URL") \
+    || { log "dev release JSON failed"; rm -f "$json_tmp"; exit 0; }
+  if [ "$code" != 200 ]; then log "dev release JSON status $code"; rm -f "$json_tmp"; exit 0; fi
+  api=$(cat "$json_tmp")
+  rm -f "$json_tmp"
+  parsed=$(printf '%s' "$api" | python3 -c '
+import json, sys
+try:
+    rel = json.load(sys.stdin)
+except Exception:
+    print("ERR parse")
+    raise SystemExit(0)
+if rel.get("draft") or rel.get("prerelease"):
+    print("ERR draft")
+    raise SystemExit(0)
+tag = (rel.get("tag_name") or "").strip()
+if tag[:1] in ("v", "V"):
+    tag = tag[1:]
+if not tag:
+    print("ERR tag")
+    raise SystemExit(0)
+print("OK " + tag)
+') || { log "dev release JSON has no usable tag"; exit 0; }
+  status=${parsed%% *}
+  loc=${parsed#* }
+  if [ "$status" != "OK" ]; then log "dev release JSON: $loc"; exit 0; fi
+  case "$loc" in
+    [0-9]*.*[0-9]*) ;;
+    *) log "dev tag is not a version: $loc"; exit 0 ;;
+  esac
+else
+  loc="$(curl -fsSI --max-time 30 -A "VipleStream-SteamFrame-Updater/${cur:-0}" "https://github.com/$REPO/releases/latest" \
+         | tr -d '\r' | sed -n 's/^[Ll]ocation: .*\/releases\/tag\/v\{0,1\}\([0-9][0-9.]*\)$/\1/p')"
+  if [ -z "$loc" ]; then log "check failed (no network or GitHub unreachable)"; exit 0; fi
+fi
 newer="$(printf '%s\n%s\n' "${cur:-0}" "$loc" | sort -V | tail -n 1)"
 if [ "$loc" = "$cur" ] || [ "$newer" != "$loc" ]; then exit 0; fi
 log "update available: ${cur:-unknown} -> $loc (updatemode=$mode)"
@@ -323,37 +436,82 @@ if flatpak ps --columns=application 2>/dev/null | grep -qx "$APP_ID"; then
 fi
 
 rm -rf "$WORK" && mkdir -p -m 0700 "$WORK"
-api="$(curl -fsS --max-time 30 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/releases/tags/v$loc")" \
+if [ -z "$api" ]; then
+  api="$(curl -fsS --max-time 30 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$REPO/releases/tags/v$loc")" \
     || { log "release API failed"; exit 0; }
+fi
 plan="$(printf '%s' "$api" | python3 -c '
 import json, sys
 v = sys.argv[1]
-want = {"VipleStream-Client-%s-linux-arm64.flatpak" % v: "bundle", "VipleStream-SteamFrame-Install-%s.sh" % v: "installer"}
+by = {}
 for a in json.load(sys.stdin).get("assets", []):
-    if a.get("name") in want:
-        d = a.get("digest") or ""
-        print(want[a["name"]], a["name"], d.split(":", 1)[1] if d.startswith("sha256:") else "", a.get("browser_download_url", ""))
+    name = a.get("name")
+    if name:
+        by[name] = a
+
+def emit(kind, name):
+    a = by.get(name)
+    if not a:
+        return
+    d = (a.get("digest") or "").strip().lower()
+    sha = d.split(":", 1)[1] if d.startswith("sha256:") and len(d) == 71 else ""
+    print(kind, name, sha, a.get("browser_download_url") or "")
+
+run_name = "VipleStream-SteamFrame-%s.run" % v
+if run_name in by:
+    emit("run", run_name)
+else:
+    emit("bundle", "VipleStream-Client-%s-linux-arm64.flatpak" % v)
+    emit("installer", "VipleStream-SteamFrame-Install-%s.sh" % v)
 ' "$loc")" || { log "cannot parse release"; exit 0; }
 n=0
+asset_kind=legacy
 # §REVIEW-1111（第二輪）：release 裡沒有頭盔的檔案時 plan 是空的；原本照樣進迴圈一次、記成「沒有 sha256」
+# §FRAME-RUN：有單一 .run 就只下載它。沒有才退回兩檔；任一個缺 digest、下載失敗或雜湊不符都放棄，不改走另一條。
 if [ -z "$plan" ]; then log "release v$loc is missing the Steam Frame files"; exit 0; fi
 while read -r kind name sha url; do
+    sha=$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')
     if [ -z "$sha" ] || [ -z "$url" ]; then log "$name has no sha256 digest; refusing"; exit 0; fi
-    curl -fsSL --max-time 1800 -o "$WORK/$name" "$url" || { log "download failed: $name"; exit 0; }
-    got="$(sha256sum "$WORK/$name" | awk '{print $1}')"
+    if [ -n "$API_URL" ] && ! url_ok "$url"; then log "refusing download url for $name"; exit 0; fi
+    if [ -n "$API_URL" ]; then
+        # 測試 JSON 不能把下載轉到別台。正式 GitHub asset 會 302，所以只有這條拿掉 -L。
+        code=$(curl -sS --max-time 1800 -o "$WORK/$name" -w '%{http_code}' "$url") || { log "download failed: $name"; exit 0; }
+        if [ "$code" != 200 ]; then log "download status $code: $name"; rm -f "$WORK/$name"; exit 0; fi
+    else
+        curl -fsSL --max-time 1800 -o "$WORK/$name" "$url" || { log "download failed: $name"; exit 0; }
+    fi
+    got="$(sha256sum "$WORK/$name" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
     if [ "$got" != "$sha" ]; then log "sha256 mismatch: $name"; rm -f "$WORK/$name"; exit 0; fi
+    if [ "$kind" = "run" ]; then asset_kind=run; fi
     n=$((n + 1))
 done <<< "$plan"
-if [ "$n" != 2 ]; then log "release v$loc is missing the Steam Frame files"; exit 0; fi
+if [ "$asset_kind" = "run" ]; then
+    if [ "$n" != 1 ]; then log "release v$loc .run plan is incomplete"; exit 0; fi
+elif [ "$n" != 2 ]; then
+    log "release v$loc is missing the Steam Frame files"
+    exit 0
+fi
 if flatpak ps --columns=application 2>/dev/null | grep -qx "$APP_ID"; then
     log "VipleStream started while downloading; will install next time"
     exit 0
+fi
+if [ "$asset_kind" = "run" ]; then
+    log "using VipleStream-SteamFrame-$loc.run"
+else
+    log "no .run in release v$loc; using the two-file installer"
 fi
 log "installing v$loc"
 # §REVIEW-1119：安裝時若指定 --no-steam，標記檔還在就原樣傳下去，避免自動更新補上 Steam 捷徑。
 nosteam=
 if [ -f "$DEST/no-steam" ]; then nosteam=--no-steam; fi
-if bash "$WORK/VipleStream-SteamFrame-Install-$loc.sh" $nosteam "$WORK/VipleStream-Client-$loc-linux-arm64.flatpak" >> "$LOG" 2>&1; then
+install_ok=0
+if [ "$asset_kind" = "run" ]; then
+    # §FRAME-RUN：參數只沿用目前安裝的 --no-steam。單一檔自己會把包進去的 flatpak 交給安裝腳本。
+    bash "$WORK/VipleStream-SteamFrame-$loc.run" $nosteam >> "$LOG" 2>&1 && install_ok=1
+else
+    bash "$WORK/VipleStream-SteamFrame-Install-$loc.sh" $nosteam "$WORK/VipleStream-Client-$loc-linux-arm64.flatpak" >> "$LOG" 2>&1 && install_ok=1
+fi
+if [ "$install_ok" = 1 ]; then
     log "updated to v$loc"
     rm -rf "$WORK"
 else

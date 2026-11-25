@@ -959,6 +959,25 @@ namespace vr {
       return g_env;
     }
 
+    void refresh_cached_volatile_environment() {
+      // 還沒探測過就不要把 probed 設成 true：其餘欄位仍是空的，pcvr_available 會誤判成 steamvr not installed。
+      {
+        std::lock_guard lk(g_mtx);
+        if (!g_env.probed) {
+          return;
+        }
+      }
+      env_t vol;
+      refresh_volatile_environment(vol);
+      std::lock_guard lk(g_mtx);
+      if (!g_env.probed) {
+        return;
+      }
+      g_env.user_present = vol.user_present;
+      g_env.console_locked = vol.console_locked;
+      g_env.session_ok = vol.session_ok;
+    }
+
     bool pcvr_available(std::string *reason) {
       auto set = [&](const char *r) {
         if (reason) {

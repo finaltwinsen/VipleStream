@@ -9,6 +9,10 @@
 #include <mutex>
 #include <vector>
 
+// §VITURE-PREDICT：最近的「姿態取樣 → 這張畫面到手機」時間（ms，指數平均）。眼鏡沒有 compositor 重投影，
+// 送姿態時要往前預測這段時間；沒有資料時回 0。
+float qxrFrameAgeEmaMs();
+
 class QxrFrameMeta {
 public:
     // history 不擁有。null＝這條路徑還沒有追蹤環，echoKnown 維持 0。
@@ -28,6 +32,10 @@ public:
     // §QUEST-PCVR：影像幀號對 0x81。sink 返回後 meta 指標就失效，所以 onFrame 先複製。
     // 回 false＝這張還沒進環（遺失或解碼比封包早）。present 仍可能是 0，呼叫端要再看。
     bool lookup(int64_t frameNumber, VIPLE_VR_FRAME_META* meta, uint64_t* sinkMonoNs) const;
+
+    // §VITURE-WARP：ptsUs 是影像 PTS（微秒）＝幀號 × 8000。幀號 → echoSampleId → 送出的 HMD 四元數。
+    // 環裡沒有、echo 為 0、或那筆姿態已被蓋掉，回 false。q 為 xyzw。
+    bool lookupRenderPose(int64_t ptsUs, float q[4]) const;
 
 private:
     struct Interval {
@@ -50,6 +58,18 @@ private:
     QxrSampleHistory* history = nullptr;
     Slot ring[kRing]{};
     uint32_t ringWrite = 0;
+    // §VITURE-WARP：只要幀號對 echo，64 格蓋得住解碼延遲。跟上面 512 格的延遲統計分開，避免查 timewarp 時掃整段。
+    static constexpr uint32_t kWarpRing = 64;
+    struct WarpSlot {
+        int64_t frameNumber = -1;
+        uint32_t echoSampleId = 0;
+        // host 實際算圖的旋轉（header 的 renderRot）。SteamVR 拿到上傳姿態後還會自己再預測，所以優先用這個。
+        float renderRot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        bool hasRenderRot = false;
+        bool occupied = false;
+    };
+    WarpSlot warpRing[kWarpRing]{};
+    uint32_t warpWrite = 0;
     // §QUEST-PCVR：lookup 給 frame thread 用，簽章是 const；鎖仍要能在 const 裡拿。
     mutable std::mutex lock;
     Interval interval;

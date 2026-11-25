@@ -41,6 +41,11 @@ if [ ! -x "$(command -v rpm-ostree)" ]; then
   # not against cold boots.
   unit="app-app.viplestream.server.service"
   unit_file="/usr/lib/systemd/user/$unit"
+  # §SELF-UPDATE：從常駐圖示以 pkexec 升級時只有 PKEXEC_UID，沒有 SUDO_USER。
+  # 不還原使用者名稱的話，這次升級會跳過 user service 與 linger。
+  if [ -z "${SUDO_USER:-}" ] && [ -n "${PKEXEC_UID:-}" ]; then
+    SUDO_USER=$(getent passwd "$PKEXEC_UID" | cut -d: -f1)
+  fi
   if [ -f "$unit_file" ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
     user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
     if [ -d "$user_home" ]; then

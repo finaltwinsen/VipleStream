@@ -73,6 +73,9 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/publish.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.cpp"
+        # §CONSOLE-LOGIN：中斷的工作階段接回主控台。Wtsapi32 下面已經有連結。
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/console_session.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/console_session.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/config_acl.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/config_acl.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/input.cpp"

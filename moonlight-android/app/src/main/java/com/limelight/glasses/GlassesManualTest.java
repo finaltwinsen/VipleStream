@@ -49,6 +49,11 @@ public final class GlassesManualTest {
         }
         DisplayWatch watch = new DisplayWatch(context);
         try {
+            if (glasses.isBeast()) {
+                // §VITURE：診斷按鈕在 Beast 上會先藏起來。這裡再擋一次，避免 0x0141 把面板打黑。
+                report.append("SET display mode skipped beast\n");
+                return report.toString();
+            }
             watch.start();
             VitureGlasses.CommandResult result = glasses.setDisplayMode(mode);
             report.append("SET display mode=0x").append(hexByte(mode))
@@ -59,9 +64,7 @@ public final class GlassesManualTest {
             report.append(watch.dump());
             VitureGlasses.CommandResult query = glasses.query(VitureV2Protocol.MSG_GET_DISPLAY);
             report.append("GET display id=0x3141 status=").append(query.status)
-                    .append(" value=").append(query.ok && query.body.length >= 1
-                            ? String.format(Locale.US, "0x%02X", query.body[0] & 0xFF)
-                            : "none")
+                    .append(" value=").append(displayValue(query))
                     .append('\n');
         } catch (RuntimeException error) {
             report.append("manual error=").append(VitureProbe.errorText(error)).append('\n');
@@ -70,6 +73,28 @@ public final class GlassesManualTest {
             host.setManualGlasses(null);
             glasses.close();
         }
+        return report.toString();
+    }
+
+    /** 只讀 0x3141 與當下外接畫面。不送 SET，Beast 才能安全地對代碼。 */
+    public static String readDisplayMode(Context context, Host host) {
+        StringBuilder report = new StringBuilder();
+        report.append("READ display mode\n");
+        VitureGlasses glasses = open(context, host, report);
+        if (glasses != null) {
+            try {
+                VitureGlasses.CommandResult query = glasses.query(VitureV2Protocol.MSG_GET_DISPLAY);
+                report.append("GET display id=0x3141 status=").append(query.status)
+                        .append(" value=").append(displayValue(query))
+                        .append('\n');
+            } catch (RuntimeException error) {
+                report.append("GET display error=").append(VitureProbe.errorText(error)).append('\n');
+            } finally {
+                host.setManualGlasses(null);
+                glasses.close();
+            }
+        }
+        appendReadDisplays(context, report);
         return report.toString();
     }
 
@@ -249,6 +274,78 @@ public final class GlassesManualTest {
 
     private static String hexByte(int value) {
         return String.format(Locale.US, "%02X", value & 0xFF);
+    }
+
+    private static String displayValue(VitureGlasses.CommandResult query) {
+        if (query == null || !query.ok || query.body.length < 1) {
+            return "none";
+        }
+        return String.format(Locale.US, "0x%02X", query.body[0] & 0xFF);
+    }
+
+    private static void appendReadDisplays(Context context, StringBuilder report) {
+        DisplayManager manager = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
+        if (manager == null) {
+            report.append("external display_manager=unavailable\n");
+            return;
+        }
+        Display[] displays;
+        try {
+            displays = manager.getDisplays();
+        } catch (RuntimeException error) {
+            report.append("external error=").append(VitureProbe.errorText(error)).append('\n');
+            return;
+        }
+        int listed = 0;
+        if (displays != null) {
+            for (int i = 0; i < displays.length; i++) {
+                Display display = displays[i];
+                if (!isReadDisplay(display)) {
+                    continue;
+                }
+                listed++;
+                Display.Mode mode = display.getMode();
+                int width = mode == null ? -1 : mode.getPhysicalWidth();
+                int height = mode == null ? -1 : mode.getPhysicalHeight();
+                String refresh = mode == null ? "none" : trimHz(mode.getRefreshRate());
+                report.append("external id=").append(display.getDisplayId())
+                        .append(" name=").append(VitureUsb.quoted(display.getName()))
+                        .append(" width=").append(width)
+                        .append(" height=").append(height)
+                        .append(" refresh=").append(refresh)
+                        .append('\n');
+            }
+        }
+        if (listed == 0) {
+            report.append("external none\n");
+        }
+    }
+
+    private static boolean isReadDisplay(Display display) {
+        if (display == null) {
+            return false;
+        }
+        String name = display.getName();
+        if (name != null && name.toUpperCase(Locale.US).contains("VITURE")) {
+            return true;
+        }
+        // §VITURE：名稱不一定帶 VITURE。預設那台是手機，其餘才是這次要對的外接畫面。
+        return display.getDisplayId() != Display.DEFAULT_DISPLAY;
+    }
+
+    private static String trimHz(float hz) {
+        String text = String.format(Locale.US, "%.3f", hz);
+        int end = text.length();
+        while (end > 0 && text.charAt(end - 1) == '0') {
+            end--;
+        }
+        if (end > 0 && text.charAt(end - 1) == '.') {
+            end--;
+        }
+        if (end <= 0) {
+            return "0";
+        }
+        return text.substring(0, end);
     }
 
     private static final class RawPoint {

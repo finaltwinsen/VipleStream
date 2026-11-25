@@ -256,6 +256,14 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // §LOGDROP：沒有 Application 子類別。這是啟動入口，行程裡只裝一次，並鏈回原本的 handler。
+        // 標記檔是上一個行程留下的；現在的 logcat 不是當機那次。
+        LogDrop.installCrashHandler(this);
+        String crashReport = LogDrop.consumeCrashReport(this);
+        if (crashReport != null) {
+            LogDrop.autoUploadAsync(getApplicationContext(), LogDrop.sourceFor(this), "crash", crashReport);
+        }
+
         // 這裡原本每次啟動都跑一次只寫 log 的 Vulkan 探測（[VIPLE-VK-PROBE]）。
         // VkBackend 初始化時會自己呼叫 VkProbe.run()，啟動時那一次的結果沒人用，
         // 還讓所有使用者多跑一次 vkCreateInstance，所以拿掉。
@@ -395,6 +403,13 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // 讓已存活的 PcView 也能收到 adb am start 傳入的單次測試 extra。
+        setIntent(intent);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
 
@@ -403,6 +418,13 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
 
         inForeground = true;
         startComputerUpdates();
+
+        // 單次讀取開發測試更新網址並立即從 Intent 移除，避免返回畫面時重複觸發或寫入偏好。
+        Intent intent = getIntent();
+        if (intent != null && intent.hasExtra(AppUpdater.EXTRA_DEV_UPDATE_URL)) {
+            AppUpdater.setDevUpdateUrl(intent.getStringExtra(AppUpdater.EXTRA_DEV_UPDATE_URL));
+            intent.removeExtra(AppUpdater.EXTRA_DEV_UPDATE_URL);
+        }
 
         // 檢查應用程式自我更新
         AppUpdater.onActivityResume(this);

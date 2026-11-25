@@ -13,10 +13,13 @@
 //
 //   平台（建置架構）       接受的檔名                                        動作
 //   Windows x64            VipleStream-Client-X.Y.Z.zip                      自動安裝
-//   Linux x86_64           VipleStream-Client-X.Y.Z-linux-x64.AppImage       從 AppImage 執行才自動安裝，
-//                                                                            否則只通知
-//   Linux arm64            VipleStream-Client-X.Y.Z-linux-arm64.flatpak      只通知（使用者自己裝）
+//   Linux x86_64 AppImage  VipleStream-Client-X.Y.Z-linux-x64.AppImage       自動安裝
+//   Linux x86_64 .deb      VipleStream-Client-X.Y.Z-linux-x64.deb             自動安裝（執行檔在 /opt/viplestream/）
+//   Linux x86_64 其他      VipleStream-Client-X.Y.Z-linux-x64.AppImage       只通知
+//   Linux arm64            VipleStream-Client-X.Y.Z-linux-arm64.flatpak      只通知
 //                          VipleStream-Client-X.Y.Z-linux-arm64.zip          只通知
+//                          VipleStream-SteamFrame-X.Y.Z.run                   只通知（§FRAME-RUN；有它就優先通知這個檔名）
+//                          （-unpublished、SteamFrame-Install-….sh 不是這個規則的 asset）
 //   其他架構／其他 OS                                                         不選
 //
 // 架構看的是「這支 binary 的建置架構」（QSysInfo::buildCpuArchitecture），
@@ -35,8 +38,8 @@
 // 這支 header 只依賴 QtCore、沒有 Q_OBJECT、平台資訊與 release JSON 由呼叫端
 // 傳入，所以離線測試可以直接 include、模擬各平台＋各種 release JSON 跑決策，
 // 不必連網也不必建整個 client。平台偵測（detectPlatform）只讀 QSysInfo、
-// /.flatpak-info 與 AppImage runtime 注入的 APPIMAGE——都是「偵測執行環境」，
-// 不是設定開關。
+// /.flatpak-info、/proc/self/exe 是否在 /opt/viplestream/、以及 AppImage runtime
+// 注入的 APPIMAGE——都是「偵測執行環境」，不是設定開關。
 
 #include <QtGlobal>
 #include <QString>
@@ -53,7 +56,7 @@ namespace UpdateAssetRules {
 
 enum class Os { Windows, Linux, Other };
 enum class Arch { X64, Arm64, Other };
-enum class Packaging { Plain, AppImage, Flatpak };
+enum class Packaging { Plain, AppImage, Flatpak, Deb };
 
 // 整個平台的更新方式（和這次 release 裡有哪些 asset 無關）
 enum class InstallMode { AutoInstall, NotifyOnly, Unsupported };
@@ -99,6 +102,20 @@ inline Platform makePlatform(Os os, const QString& currentArch, const QString& b
     return p;
 }
 
+// §CLIENT-DEB：deb 的包裝把 AppImage 解到 /opt/viplestream，沒有 APPIMAGE。
+// 不讀 QCoreApplication，這支 header 在 QApplication 之前、以及離線測試裡也能用。
+#if defined(Q_OS_LINUX)
+inline bool linuxExeUnderDebPrefix()
+{
+    const auto under = [](const QString& path) {
+        return path == QLatin1String("/opt/viplestream")
+            || path.startsWith(QLatin1String("/opt/viplestream/"));
+    };
+    const QFileInfo exe(QStringLiteral("/proc/self/exe"));
+    return under(exe.symLinkTarget()) || under(exe.canonicalFilePath());
+}
+#endif
+
 inline Platform detectPlatform()
 {
 #if defined(Q_OS_WIN)
@@ -110,10 +127,13 @@ inline Platform detectPlatform()
 #endif
     Packaging packaging = Packaging::Plain;
 #if defined(Q_OS_LINUX)
-    // Flatpak 沙箱一定有 /.flatpak-info（flatpak 官方的判斷方式）；
-    // AppImage runtime 會注入 APPIMAGE＝.AppImage 本體路徑（spawnHelperAndQuit 也靠它）。
+    // Flatpak 沙箱一定有 /.flatpak-info（flatpak 官方的判斷方式）。
+    // deb 要排在 APPIMAGE 前面：/opt 裡的 AppRun 不會設那個環境變數。
     if (QFileInfo::exists(QStringLiteral("/.flatpak-info"))) {
         packaging = Packaging::Flatpak;
+    }
+    else if (linuxExeUnderDebPrefix()) {
+        packaging = Packaging::Deb;
     }
     else if (qEnvironmentVariableIsSet("APPIMAGE")) {
         packaging = Packaging::AppImage;
@@ -129,9 +149,11 @@ inline InstallMode installMode(const Platform& p)
         return InstallMode::AutoInstall;
     }
     if (p.os == Os::Linux && p.arch == Arch::X64) {
-        // 只有從 AppImage 執行時才有「自己那個檔案」可以換掉
-        return p.packaging == Packaging::AppImage ? InstallMode::AutoInstall
-                                                  : InstallMode::NotifyOnly;
+        // AppImage 換的是 APPIMAGE 指到的檔。deb 裝在 /opt，交給 pkexec 的 helper。
+        if (p.packaging == Packaging::AppImage || p.packaging == Packaging::Deb) {
+            return InstallMode::AutoInstall;
+        }
+        return InstallMode::NotifyOnly;
     }
     if (p.os == Os::Linux && p.arch == Arch::Arm64) {
         return InstallMode::NotifyOnly;
@@ -150,22 +172,36 @@ inline AssetAction classifyAsset(const QString& name, const Platform& p,
         QStringLiteral("^VipleStream-Client-(\\d+\\.\\d+\\.\\d+)\\.zip$"));
     static const QRegularExpression linuxX64(
         QStringLiteral("^VipleStream-Client-(\\d+\\.\\d+\\.\\d+)-linux-x64\\.AppImage$"));
+    // §CLIENT-DEB：deb 不收 AppImage。檔名裡多一段字（-evil-）不能靠寬鬆的前綴放行。
+    static const QRegularExpression linuxX64Deb(
+        QStringLiteral("^VipleStream-Client-(\\d+\\.\\d+\\.\\d+)-linux-x64\\.deb$"));
     static const QRegularExpression linuxArm64(
         QStringLiteral("^VipleStream-Client-(\\d+\\.\\d+\\.\\d+)-linux-arm64\\.(flatpak|zip)$"));
+    // §FRAME-RUN：單一檔不叫 Client。版號仍是第 1 個捕捉，才跟下面「必須等於 release tag」同一條規則。
+    static const QRegularExpression linuxArm64Run(
+        QStringLiteral("^VipleStream-SteamFrame-(\\d+\\.\\d+\\.\\d+)\\.run$"));
 
     const QRegularExpression* re = nullptr;
+    const QRegularExpression* re2 = nullptr;
     AssetAction action = AssetAction::Skip;
     if (p.os == Os::Windows && p.arch == Arch::X64) {
         re = &winX64;
         action = AssetAction::AutoInstall;
     }
     else if (p.os == Os::Linux && p.arch == Arch::X64) {
-        re = &linuxX64;
-        action = p.packaging == Packaging::AppImage ? AssetAction::AutoInstall
-                                                    : AssetAction::NotifyOnly;
+        if (p.packaging == Packaging::Deb) {
+            re = &linuxX64Deb;
+            action = AssetAction::AutoInstall;
+        }
+        else {
+            re = &linuxX64;
+            action = p.packaging == Packaging::AppImage ? AssetAction::AutoInstall
+                                                        : AssetAction::NotifyOnly;
+        }
     }
     else if (p.os == Os::Linux && p.arch == Arch::Arm64) {
         re = &linuxArm64;
+        re2 = &linuxArm64Run;
         action = AssetAction::NotifyOnly;
     }
     else {
@@ -173,7 +209,10 @@ inline AssetAction classifyAsset(const QString& name, const Platform& p,
         return AssetAction::Skip;
     }
 
-    const QRegularExpressionMatch m = re->match(name);
+    QRegularExpressionMatch m = re->match(name);
+    if (!m.hasMatch() && re2 != nullptr) {
+        m = re2->match(name);
+    }
     if (!m.hasMatch()) {
         if (reason) *reason = QStringLiteral("name does not match this platform");
         return AssetAction::Skip;
@@ -188,8 +227,8 @@ inline AssetAction classifyAsset(const QString& name, const Platform& p,
 }
 
 // 從 asset 名單挑一個。回傳 index（-1 表示沒有），outAction 填動作。
-// 優先序：自動安裝 > 符合打包型態的只通知（Flatpak 優先 .flatpak，其餘優先 .zip）
-// > 其他只通知；同級取第一個出現的。
+// 優先序：自動安裝 > Linux arm64 的 .run（§FRAME-RUN）> 符合打包型態的只通知
+// （Flatpak 優先 .flatpak，其餘優先 .zip）> 其他只通知；同級取第一個出現的。
 inline int selectAsset(const QStringList& names, const Platform& p,
                        const QString& expectedVersion, AssetAction* outAction)
 {
@@ -200,12 +239,20 @@ inline int selectAsset(const QStringList& names, const Platform& p,
         const AssetAction a = classifyAsset(names.at(i), p, expectedVersion);
         int rank = 0;
         if (a == AssetAction::AutoInstall) {
-            rank = 3;
+            rank = 4;
         }
         else if (a == AssetAction::NotifyOnly) {
-            const bool preferFlatpak = (p.packaging == Packaging::Flatpak);
-            const bool isFlatpak = names.at(i).endsWith(QLatin1String(".flatpak"));
-            rank = (isFlatpak == preferFlatpak) ? 2 : 1;
+            // §FRAME-RUN：arm64 同時有 .run 與 .flatpak 時，通知要指向使用者下載的單一檔。
+            // 沒有 .run 的舊 release 仍走下面的 flatpak／zip 順序。
+            if (p.os == Os::Linux && p.arch == Arch::Arm64
+                    && names.at(i).endsWith(QLatin1String(".run"))) {
+                rank = 3;
+            }
+            else {
+                const bool preferFlatpak = (p.packaging == Packaging::Flatpak);
+                const bool isFlatpak = names.at(i).endsWith(QLatin1String(".flatpak"));
+                rank = (isFlatpak == preferFlatpak) ? 2 : 1;
+            }
         }
         if (rank > bestRank) {
             bestRank = rank;
@@ -333,9 +380,14 @@ inline ReleasePlan planRelease(const QJsonObject& release, const Platform& p,
         return plan;
     }
 
-    // 只收集 Client asset 的跳過原因（Server／Android 一定跳過，記了是雜訊）
+    // 只收集 Client 與 Steam Frame .run 的跳過原因（Server／Android／安裝腳本記了是雜訊）
     for (const QString& name : plan.assetNames) {
-        if (!name.startsWith(QLatin1String("VipleStream-Client-"))) continue;
+        // §FRAME-RUN：Install-….sh 本來就不是這個平台的安裝包，跳過原因每版都會吵。
+        // 對不上的 .run 要記，否則版號錯了會安靜地沒有通知。
+        const bool client = name.startsWith(QLatin1String("VipleStream-Client-"));
+        const bool frameRun = name.startsWith(QLatin1String("VipleStream-SteamFrame-"))
+                && name.endsWith(QLatin1String(".run"));
+        if (!client && !frameRun) continue;
         QString reason;
         if (classifyAsset(name, p, plan.releaseVersion, &reason) == AssetAction::Skip) {
             plan.skippedClient.append(name + QStringLiteral(" — ") + reason);
@@ -377,6 +429,7 @@ inline const char* toString(Packaging v)
     switch (v) {
     case Packaging::AppImage: return "appimage";
     case Packaging::Flatpak:  return "flatpak";
+    case Packaging::Deb:      return "deb";
     default:                  return "plain";
     }
 }

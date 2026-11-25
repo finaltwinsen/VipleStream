@@ -651,8 +651,10 @@ namespace logging {
       << "    --help                    | print help"sv << std::endl
       << "    --creds username password | set user credentials for the Web manager"sv << std::endl
       << "    --version                 | print the version of sunshine"sv << std::endl
-      << "    --check-update            | query the latest GitHub release (exit 2 = update available)"sv << std::endl
-      << "    --self-update [--force] [package] | download and install the latest release (or a local zip/deb)"sv << std::endl
+      // §SELF-UPDATE：--update-url 只跟這兩個指令走。寫成一般選項的話，服務行程的命令列也可能吃到，背景更新就不再打 GitHub。
+      << "    --check-update [--update-url <base>] | query the latest release (exit 2 = update available)"sv << std::endl
+      << "    --self-update [--force] [--update-url <base>] [package] | download and install the latest release (or a local zip/deb)"sv << std::endl
+      << "        --update-url <base>   | dev only, this command only: GET <base>/releases/latest (http://127.0.0.1, http://localhost, or https)"sv << std::endl
 #ifdef _WIN32
       // VipleStream 2.0 §VR（M1b §F.5）：經 admin pipe 交給執行中的 server；需要提升的管理員
       << "    --vr-selftest [--only T0,T2,T6] [--detach] [--probe-path exe] | run the VR self-test in the running server (elevated admin)"sv << std::endl

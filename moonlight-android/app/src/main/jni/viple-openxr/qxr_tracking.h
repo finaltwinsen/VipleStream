@@ -15,14 +15,18 @@ public:
     static constexpr int kSize = 2048;
 
     void reset();
-    void record(uint32_t sampleId, uint64_t sampleTimeNs);
+    // quatXyzw 是這一筆實際上行的 HMD 旋轉（xyzw，含預測）。null 時記單位旋轉。
+    void record(uint32_t sampleId, uint64_t sampleTimeNs, const float quatXyzw[4]);
     // sampleId 0，或那一格已經被蓋掉，回 false。
     bool lookup(uint32_t sampleId, uint64_t* sampleTimeNs) const;
+    // §VITURE-WARP：timewarp 的算圖基準必須是送出去的那一筆，不是融合器裡還沒預測的姿態。
+    bool lookupPose(uint32_t sampleId, float q[4]) const;
 
 private:
     struct Entry {
         uint32_t sampleId = 0;
         uint64_t sampleTimeNs = 0;
+        float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     };
 
     mutable std::mutex lock;

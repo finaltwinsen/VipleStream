@@ -16,10 +16,16 @@
  *   service 模式：Stop-Service（逾時強殺、確認 Stopped 才動檔）→ 兩段式 rename .old
  *   再覆蓋、失敗回滾 → Start-Service（確認 Running）。standalone：腳本取得管理員權限並
  *   解壓成功後寫 proceed 標記，server 看到標記才退出，腳本再覆蓋、重新啟動。
+ *   §SELF-UPDATE：NSIS 真正啟動的是 tools\viplestream-svc.exe，zip 只在根目錄放一份。
+ *   那個路徑已存在才用套件裡的同名檔換掉，並跟其他項目共用 .old 回滾；服務已停，檔案不會被鎖。
+ *   服務確認 Running（或 standalone 已重開）之後，解除安裝機碼在且版號非空才寫 DisplayVersion，
+ *   避免「新增或移除程式」停在安裝當下的版號，也避免把空白寫進去。
  *   Linux：腳本與 .deb 放 <config>/update（0700、驗 owner）；先 `sudo -n true` 探測，
  *   不行才 pkexec；fork/execvp 不經 shell；apt-get install（--no-remove、鎖逾時、同版
  *   --reinstall），退回 dpkg -i + apt-get -f；成功後由使用者身分寫 result 檔、重啟
  *   （systemd 下直接退出交給 Restart=always）。
+ *   §SELF-UPDATE：背景自動安裝沒有免密碼 sudo 時不跑 pkexec（沒人在座位上會每輪彈密碼框或直接失敗）。
+ *   套件下載並核對 sha256 後停在待安裝，選單維持 Install update；已核對過的套件不重抓。
  *   重啟後 tray 讀到 <config>/self_update.result 就跳一次「已更新」通知。
  *
  * 背景執行緒可 join：關機路徑呼叫 shutdown() 取消 curl 並 join。
@@ -70,7 +76,8 @@ namespace self_update {
   /// 第一段：背景查版本；有新版 → state=update_available + pending。回 false＝忙碌中。
   bool check_async(notify_fn notify, state_fn on_state);
   /// 第二段：背景下載＋驗證＋安裝 pending。回 false＝沒有 pending／忙碌中／串流中。
-  bool install_pending_async(notify_fn notify, state_fn on_state, std::string *why_not);
+  /// from_auto：背景排程，不是使用者點選單。Linux 沒有免密碼 sudo 時不能在這條路徑跑 pkexec。
+  bool install_pending_async(notify_fn notify, state_fn on_state, std::string *why_not, bool from_auto = false);
   /// 關機：停止自動檢查、取消 curl、join 背景執行緒。
   void shutdown();
 
@@ -80,6 +87,7 @@ namespace self_update {
    * off：不自動查（常駐圖示仍可手動）。notify：開機 3 分鐘後、之後每 24 小時查一次，有新版就跳一次通知、
    * 選單換成「Install update」。install（預設，2026-11-05 使用者指示）：同上，另外在連續 10 分鐘沒有人串流時自動下載＋驗證＋安裝（安裝會重啟服務）；
    * 同一版裝失敗就不再自動重試，等下一版或手動。檢查走免 API 配額的 HEAD 302，「已是最新」與「查詢失敗」不跳通知。
+   * §SELF-UPDATE：Linux 上這條背景路徑沒有免密碼 sudo 時只下載、不 pkexec，否則無人值守會每輪失敗或突然要密碼。
    */
   void start_auto(const std::string &mode);
   /// 常駐圖示建立後登記通知與選單狀態的出口（自動檢查用）；沒有常駐圖示時只寫 log
@@ -87,6 +95,7 @@ namespace self_update {
 
   std::optional<std::string> take_last_result();
 
+  /// §SELF-UPDATE：`--update-url` 只在這兩個指令的參數裡生效，不寫設定、不讀環境變數，服務背景仍打 GitHub。
   int cli_check_update(int argc, char **argv);
   int cli_self_update(int argc, char **argv);
 

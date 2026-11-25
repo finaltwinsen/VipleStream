@@ -10,6 +10,8 @@ public final class GlassesDisplaySwitcher {
     public static final int WIDTH_2D = 1920;
     public static final int WIDTH_3D = 3840;
     public static final int HEIGHT_SBS = 1080;
+    /** §VITURE：Beast 的 3D 是 3840，2D 是 1920。3000 落在兩者中間，避免把 1920 看成 3D。 */
+    public static final int WIDTH_3D_MIN = 3000;
     /** §VITURE：跟 glasses_vr 等 3D 面板的時間相同。指令被接受不代表面板真的換了。 */
     public static final int MODE_WAIT_MS = 10000;
 
@@ -27,6 +29,10 @@ public final class GlassesDisplaySwitcher {
 
     public static boolean streamIsSbs(int width, int height) {
         return width == WIDTH_3D && height == HEIGHT_SBS;
+    }
+
+    public static boolean isStereoWidth(int width) {
+        return width >= WIDTH_3D_MIN;
     }
 
     public boolean isClosing() {
@@ -62,6 +68,11 @@ public final class GlassesDisplaySwitcher {
                 VitureUsb.logI("display mode 0x" + hexByte(mode) + " skipped; session closing");
                 return new VitureGlasses.CommandResult(false, VitureGlasses.STATUS_IO, new byte[0]);
             }
+            if (glasses != null && glasses.isBeast()) {
+                // §VITURE：Beast 的 0x31／0x32／0x34 會黑屏，模式改看外接顯示器寬度。
+                VitureUsb.logI("display mode 0x" + hexByte(mode) + " skipped; beast");
+                return new VitureGlasses.CommandResult(false, VitureGlasses.STATUS_IO, new byte[0]);
+            }
             VitureGlasses.CommandResult result = glasses.setDisplayMode(mode);
             // 這次 0x32 成功才代表指令把模式改掉。本來就在 3D、沒有成功的 0x32，
             // 要等呼叫端看到 3D 面板真的被這次串流用過，才在 markClosingLocked 要求送回 2D。
@@ -77,8 +88,12 @@ public final class GlassesDisplaySwitcher {
         }
     }
 
-    /** 送 0x32，並留下跟 glasses_vr 相同的那行 log。 */
+    /** 送 0x32，並留下跟 glasses_vr 相同的那行 log。Beast 不送，避免下面那行被看成有送出。 */
     public VitureGlasses.CommandResult switchTo3d(VitureGlasses glasses) {
+        if (glasses != null && glasses.isBeast()) {
+            VitureUsb.logI("SET display mode 0x32 skipped; beast");
+            return new VitureGlasses.CommandResult(false, VitureGlasses.STATUS_IO, new byte[0]);
+        }
         VitureGlasses.CommandResult result = setDisplayMode(glasses, VitureV2Protocol.DISPLAY_3D_SBS_60);
         VitureUsb.logI("SET display mode 0x32 status=" + result.status + " ok=" + result.ok);
         return result;
@@ -105,6 +120,14 @@ public final class GlassesDisplaySwitcher {
 
     /** 呼叫端已持有 {@link #lock()}。沒切過 3D 就什麼都不送。 */
     void restore2dLocked(VitureGlasses glasses) {
+        if (glasses != null && glasses.isBeast()) {
+            // §VITURE：Beast 沒有對得上的 2D 代碼。0x31 照樣會黑屏，還原留給眼鏡上的按鈕。
+            if (restore2d) {
+                VitureUsb.logI("restore display mode skipped; beast");
+            }
+            restore2d = false;
+            return;
+        }
         if (!restore2d) {
             return;
         }

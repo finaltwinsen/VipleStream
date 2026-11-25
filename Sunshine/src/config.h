@@ -601,6 +601,8 @@ namespace config {
     bool system_tray;
     std::string update_mode;  ///< §AUTO-UPDATE：off／notify／install（預設）
     std::string log_upload;  ///< §LOGDROP：ask／enabled／disabled。預設 ask，同意之後才在串流結束與異常結束時送。
+    /// §CONSOLE-LOGIN：lock／unlock／off。預設 lock，接回主控台後立刻鎖定，避免實體螢幕直接顯示桌面。
+    std::string console_reclaim;
     std::vector<prep_cmd_t> prep_cmds;
 
     // List of allowed origins for CSRF protection (e.g., "https://example.com,https://app.example.com")

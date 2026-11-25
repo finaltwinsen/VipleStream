@@ -38,6 +38,9 @@ namespace vr::platform {
   void refresh_volatile_environment(env_t &) {
   }
 
+  void refresh_cached_volatile_environment() {
+  }
+
   bool pcvr_available(std::string *reason) {
     if (reason) {
       *reason = "platform unsupported";

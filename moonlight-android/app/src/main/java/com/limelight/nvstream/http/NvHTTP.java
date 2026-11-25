@@ -383,6 +383,50 @@ public class NvHTTP {
     static String getXmlString(String str, String tagname, boolean throwIfMissing) throws XmlPullParserException, IOException {
         return getXmlString(new StringReader(str), tagname, throwIfMissing);
     }
+
+    // §LAN-PREF：同名 tag 會出現多次，順序照 host 給的。
+    static java.util.List<String> getXmlStringList(String xml, String tagName) throws XmlPullParserException, IOException {
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        XmlPullParserFactory factory = XmlPullParserFactory.newInstance();
+        factory.setNamespaceAware(true);
+        XmlPullParser xpp = factory.newPullParser();
+        xpp.setInput(new StringReader(xml));
+        int eventType = xpp.getEventType();
+        StringBuilder current = null;
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            if (eventType == XmlPullParser.START_TAG && tagName.equals(xpp.getName())) {
+                current = new StringBuilder();
+            } else if (eventType == XmlPullParser.TEXT && current != null) {
+                String text = xpp.getText();
+                if (text != null) {
+                    current.append(text);
+                }
+            } else if (eventType == XmlPullParser.END_TAG && current != null && tagName.equals(xpp.getName())) {
+                out.add(current.toString().trim());
+                current = null;
+            }
+            eventType = xpp.next();
+        }
+        return out;
+    }
+
+    // §LAN-PREF：埠用這次連上的 HTTP 埠。只收私有 IPv4，上限 16，跟 Qt 一樣。
+    private java.util.List<ComputerDetails.AddressTuple> parseLanAddresses(String serverInfo) throws XmlPullParserException, IOException {
+        java.util.ArrayList<ComputerDetails.AddressTuple> out = new java.util.ArrayList<>();
+        int port = baseUrlHttp.port();
+        if (port <= 0 || port > 65535) {
+            return out;
+        }
+        java.util.List<String> raw = getXmlStringList(serverInfo, "VipleStreamLanAddress");
+        for (int i = 0; i < raw.size() && out.size() < 16; i++) {
+            String address = raw.get(i);
+            if (!ComputerDetails.isPrivateLanIpv4(address)) {
+                continue;
+            }
+            out.add(new ComputerDetails.AddressTuple(address, port));
+        }
+        return out;
+    }
     
     // §QUEST-VR：launch 的 HTTP 本文已經到手，錯誤在 XML 屬性，不會自己變成例外。
     private static void throwIfVrHostError(String xmlStr) throws XmlPullParserException, IOException {
@@ -554,6 +598,8 @@ public class NvHTTP {
         details.vipleStreamVr = getVipleStreamVr(serverInfo);
         details.vipleStreamVrProto = getVipleStreamVrProto(serverInfo);
         details.supportedDisplayModes = parseDisplayModes(serverInfo);
+        // §LAN-PREF：可能有多個同名 tag。getXmlString 只會拿到第一個。
+        details.lanAddresses = parseLanAddresses(serverInfo);
 
         // We could reach it so it's online
         details.state = ComputerDetails.State.ONLINE;

@@ -462,6 +462,26 @@
         <source>Press B to cancel.</source>
         <translation>按 B 鍵取消。</translation>
     </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="847" />
+        <source>Help improve VipleStream</source>
+        <translation>協助改善 VipleStream</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="863" />
+        <source>When a stream ends, or this program exits unexpectedly, anonymous logs are sent automatically. The content is the program's runtime log, the version, and the operating system. IP addresses, computer names, and the user name are hidden first. It does not include an account or personal data. Logs are stored in the developer's Google Drive. You can change this anytime on the Settings page.</source>
+        <translation>串流結束或這個程式異常結束時，會自動傳送匿名 log。內容是程式的執行紀錄、版本與作業系統。IP、電腦名稱與使用者名稱會先遮掉。不含帳號或個人資料。log 存在開發者的 Google 雲端硬碟。可以隨時在設定頁更改。</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="871" />
+        <source>Don't allow</source>
+        <translation>不允許</translation>
+    </message>
+    <message>
+        <location filename="../gui/AppContent.qml" line="881" />
+        <source>Allow</source>
+        <translation>允許</translation>
+    </message>
 </context>
 <context>
     <name>AppModel</name>
@@ -2880,6 +2900,46 @@ Performance: 4-neighbor search + minimal processing (~6ms on iGPU)</source>
         <location filename="../gui/SettingsView.qml" line="478" />
         <source>Waits a few milliseconds before choosing which frame to show, so the frame is fresher. Too long makes the headset skip frames.</source>
         <translation>先等幾毫秒再決定顯示哪一張，畫面會比較新。等太久頭盔會漏幀。</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="3265" />
+        <source>Anonymous logs</source>
+        <translation>匿名 log</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="3275" />
+        <source>Automatically send anonymous logs</source>
+        <translation>自動傳送匿名 log</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="3286" />
+        <source>Anonymous ID: %1. Tell the developer this ID when reporting a problem.</source>
+        <translation>匿名 ID：%1。回報問題時把這組 ID 告訴開發者。</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="3294" />
+        <source>Last upload: %1 (%2)</source>
+        <translation>最近一次上傳：%1（%2）</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="3298" />
+        <source>Sending…</source>
+        <translation>傳送中…</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="3298" />
+        <source>Send logs now</source>
+        <translation>立即傳送 log</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="3335" />
+        <source>Upload code: %1</source>
+        <translation>上傳代碼：%1</translation>
+    </message>
+    <message>
+        <location filename="../gui/SettingsView.qml" line="3338" />
+        <source>Couldn't send logs (%1)</source>
+        <translation>無法傳送 log（%1）</translation>
     </message>
 </context>
 <context>

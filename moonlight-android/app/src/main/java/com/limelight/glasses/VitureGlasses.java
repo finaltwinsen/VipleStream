@@ -208,11 +208,20 @@ public final class VitureGlasses {
         return transact(msgId, VitureV2Protocol.packet(msgId));
     }
 
+    public boolean isBeast() {
+        return VitureUsb.isBeast(device);
+    }
+
     public CommandResult setDisplayMode(int mode) {
         if (mode != VitureV2Protocol.DISPLAY_2D_60
                 && mode != VitureV2Protocol.DISPLAY_3D_SBS_60
                 && mode != VitureV2Protocol.DISPLAY_2D_120) {
             throw new IllegalArgumentException("mode");
+        }
+        if (isBeast()) {
+            // §VITURE：最後一道。上面的切換器沒擋到時，這裡仍不能把 0x0141 送上 Beast。
+            VitureUsb.logI("SET display mode 0x" + hexByte(mode) + " skipped; beast");
+            return new CommandResult(false, STATUS_IO, EMPTY);
         }
         return transact(VitureV2Protocol.MSG_SET_DISPLAY_MODE, VitureV2Protocol.setDisplayMode(mode));
     }
