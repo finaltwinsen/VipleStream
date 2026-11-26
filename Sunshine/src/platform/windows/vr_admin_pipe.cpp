@@ -31,6 +31,7 @@
 #include "misc.h"
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/platform/windows/vr_mv_bridge_win.h"
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_orchestrator.h"
 #include "src/vr/vr_selftest.h"
@@ -1351,6 +1352,7 @@ namespace platf::vr_admin {
         }
         delete server;  // 先中止 selftest（它會用到 bridge），再停 admin pipe
         vr::orchestrator::shutdown();
+        vr::mv_bridge::stop();
         vr::bridge::stop();
       }
     };

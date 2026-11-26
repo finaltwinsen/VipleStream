@@ -27,14 +27,18 @@
  */
 // standard includes
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <format>
 #include <fstream>
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 // platform includes
@@ -47,10 +51,14 @@
 #include "misc.h"
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/platform/windows/vr_mv_bridge_win.h"
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_capture_health.h"
 #include "src/vr/vr_capture_publish.h"
+#include "src/vr/vr_game_mv_job.h"
 #include "src/vr/vr_ipc_abi.h"
+#include "src/vr/vr_mv_codec.h"
+#include "src/vr/vr_mv_pair.h"
 #include "src/vr/vr_netbench.h"
 #include "src/vr/vr_session.h"
 #include "utf_utils.h"
@@ -332,7 +340,337 @@ namespace platf::dxgi {
 
   namespace {
     std::atomic<bool> g_rawdump_written {false};
+    std::atomic<bool> g_mvdump_written {false};
   }  // namespace
+
+  /// §VR-GAME-MV（M-MV1）：10 秒統計視窗（只在擷取執行緒寫入與重置）
+  struct display_vr_t::mv_window_stats_t {
+    uint64_t total = 0;
+    uint64_t hits = 0;
+    uint64_t miss_no_data = 0;
+    uint64_t miss_too_old = 0;
+    uint64_t miss_too_new = 0;
+    uint64_t miss_eye_incomplete = 0;
+    uint64_t miss_already_used = 0;
+    uint64_t miss_torn = 0;
+    uint64_t miss_enc_busy = 0;
+    uint64_t miss_pending = 0;
+    uint64_t k_step_counts[4] {};
+    std::vector<double> wait_us;
+    std::vector<double> copy_compress_us;
+    std::vector<double> compressed_bytes;
+
+    void reserve() {
+      constexpr size_t k_cap = 2048;
+      wait_us.reserve(k_cap);
+      copy_compress_us.reserve(k_cap);
+      compressed_bytes.reserve(k_cap);
+    }
+
+    void reset() {
+      total = 0;
+      hits = 0;
+      miss_no_data = 0;
+      miss_too_old = 0;
+      miss_too_new = 0;
+      miss_eye_incomplete = 0;
+      miss_already_used = 0;
+      miss_torn = 0;
+      miss_enc_busy = 0;
+      miss_pending = 0;
+      std::fill(std::begin(k_step_counts), std::end(k_step_counts), 0);
+      wait_us.clear();
+      copy_compress_us.clear();
+      compressed_bytes.clear();
+    }
+  };
+
+  /// §VR-GAME-MV（M-MV1）：vr_dev_mvdump = <開始秒>:<幀數>，於背景執行緒解碼並寫出 mvpair_<driverFrameId>.{json,bin}
+  struct display_vr_t::mvdump_t {
+    struct item_t {
+      uint64_t driver_frame_id = 0;
+      int64_t present_qpc = 0;
+      uint64_t mv_frame_id = 0;
+      int64_t game_present_qpc = 0;
+      double delta_us = 0.0;
+      uint8_t k_step = 0;
+      uint16_t grid_w = 0;
+      uint16_t grid_h = 0;
+      uint8_t flags = 0;
+      uint32_t desc_flags = 0;
+      std::shared_ptr<::video::vr_game_mv_job_t> job;  // 背景壓縮完才寫檔（worker 先 wait_ready）
+    };
+
+    int start_sec = 0;
+    int frames = 0;
+    int64_t first_qpc = 0;
+    int queued = 0;
+    bool done = false;
+
+    std::mutex mtx;
+    std::condition_variable cv;
+    std::deque<item_t> queue;
+    bool stop_worker = false;
+    std::thread worker;
+
+    mvdump_t(int s, int f):
+        start_sec(s),
+        frames(f) {
+      worker = std::thread([this]() {
+        worker_main();
+      });
+    }
+
+    ~mvdump_t() {
+      {
+        std::lock_guard lk(mtx);
+        stop_worker = true;
+      }
+      cv.notify_all();
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+
+    void on_frame_seen(int64_t now_qpc) noexcept {
+      if (first_qpc == 0) {
+        first_qpc = now_qpc;
+        BOOST_LOG(info) << "[VIPLE-VR-MV] mvdump armed: "sv << frames << " matched frames from "sv << start_sec
+                        << " s after the first frame"sv;
+      }
+    }
+
+    void enqueue_if_active(int64_t now_qpc, item_t &&item) {
+      if (done || first_qpc == 0) {
+        return;
+      }
+      if (qpc_to_ms(now_qpc - first_qpc) < start_sec * 1000.0) {
+        return;
+      }
+      {
+        std::lock_guard lk(mtx);
+        if (queued >= frames) {
+          done = true;
+          return;
+        }
+        queue.push_back(std::move(item));
+        if (++queued >= frames) {
+          done = true;
+          g_mvdump_written.store(true, std::memory_order_release);
+        }
+      }
+      cv.notify_one();
+    }
+
+    void worker_main() {
+      platf::set_thread_name("vr_mvdump");
+      const auto dir = platf::appdata();
+      int written = 0;
+      for (;;) {
+        item_t item;
+        {
+          std::unique_lock lk(mtx);
+          cv.wait(lk, [this]() {
+            return stop_worker || !queue.empty();
+          });
+          if (queue.empty()) {
+            break;
+          }
+          item = std::move(queue.front());
+          queue.pop_front();
+        }
+        if (!item.job || !item.job->wait_ready(std::chrono::milliseconds(200)) || item.job->compressed.empty()) {
+          BOOST_LOG(warning) << "[VIPLE-VR-MV] mvdump: encode not ready for driver_frame_id="sv << item.driver_frame_id;
+          continue;
+        }
+        const auto &compressed = item.job->compressed;
+        vr::mv_codec::decoded_planes_t dec {};
+        if (!vr::mv_codec::decode(compressed.data(), compressed.size(), dec)) {
+          BOOST_LOG(warning) << "[VIPLE-VR-MV] mvdump decode failed for driver_frame_id="sv << item.driver_frame_id;
+          continue;
+        }
+        const auto json_path = dir / std::format("mvpair_{}.json", item.driver_frame_id);
+        const auto bin_path = dir / std::format("mvpair_{}.bin", item.driver_frame_id);
+        {
+          std::ofstream jout(json_path, std::ios::binary | std::ios::trunc);
+          if (jout) {
+            const std::string jtxt = std::format(
+              "{{\n"
+              "  \"driver_frame_id\": {},\n"
+              "  \"present_qpc\": {},\n"
+              "  \"mv_frame_id\": {},\n"
+              "  \"game_present_qpc\": {},\n"
+              "  \"delta_us\": {:.3f},\n"
+              "  \"k_step\": {},\n"
+              "  \"grid_w\": {},\n"
+              "  \"grid_h\": {},\n"
+              "  \"flags\": {},\n"
+              "  \"desc_flags\": {},\n"
+              "  \"compressed_bytes\": {}\n"
+              "}}\n",
+              item.driver_frame_id,
+              item.present_qpc,
+              item.mv_frame_id,
+              item.game_present_qpc,
+              item.delta_us,
+              static_cast<unsigned>(item.k_step),
+              item.grid_w,
+              item.grid_h,
+              static_cast<unsigned>(item.flags),
+              item.desc_flags,
+              compressed.size()
+            );
+            jout.write(jtxt.data(), static_cast<std::streamsize>(jtxt.size()));
+          }
+        }
+        {
+          std::ofstream bout(bin_path, std::ios::binary | std::ios::trunc);
+          if (bout) {
+            if (!dec.vx.empty()) {
+              bout.write(reinterpret_cast<const char *>(dec.vx.data()), static_cast<std::streamsize>(dec.vx.size() * sizeof(int16_t)));
+            }
+            if (!dec.vy.empty()) {
+              bout.write(reinterpret_cast<const char *>(dec.vy.data()), static_cast<std::streamsize>(dec.vy.size() * sizeof(int16_t)));
+            }
+            if (!dec.depth.empty()) {
+              bout.write(reinterpret_cast<const char *>(dec.depth.data()), static_cast<std::streamsize>(dec.depth.size() * sizeof(uint8_t)));
+            }
+          }
+        }
+        ++written;
+        if (written == frames) {
+          BOOST_LOG(info) << "[VIPLE-VR-MV] mvdump wrote "sv << written << " matched frames to "sv << dir.string();
+        }
+      }
+    }
+  };
+
+  /// §VR-GAME-MV（M-MV1）：MV 量化＋Planar＋LZ4 的背景執行緒。擷取執行緒只複製 payload 再 submit（不等它）：
+  /// 360×180 在 host 上量化＋壓縮約 0.4 ms（變化大的畫面約 1.1 ms），放在擷取執行緒會直接加在延遲上。
+  /// 佇列上限 4：落後時新的那筆不帶 MV（統計 encBusy），不會累積延遲。
+  struct display_vr_t::mv_encoder_t {
+    struct task_t {
+      std::shared_ptr<::video::vr_game_mv_job_t> job;
+      vrmv_desc_t desc {};
+      std::vector<uint8_t> payload;
+    };
+
+    std::mutex mtx;
+    std::condition_variable cv;
+    std::deque<task_t> queue;
+    std::vector<std::vector<uint8_t>> pool;  // payload 緩衝重複使用（每個 VRMV_SLOT_PAYLOAD_BYTES）
+    bool stop = false;
+    std::vector<uint8_t> planar_scratch;  // 只有 worker 用
+
+    // 統計（worker 寫、擷取執行緒每 10 秒取走；都在 mtx 內）
+    std::vector<double> encode_us;
+    std::vector<double> compressed_bytes;
+    uint64_t failed = 0;
+
+    std::thread worker;  // 最後一個成員：建構時其他成員都已初始化
+
+    mv_encoder_t() {
+      worker = std::thread([this]() {
+        worker_main();
+      });
+    }
+
+    ~mv_encoder_t() {
+      {
+        std::lock_guard lk(mtx);
+        stop = true;
+      }
+      cv.notify_all();
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+
+    std::vector<uint8_t> take_buffer() {
+      {
+        std::lock_guard lk(mtx);
+        if (!pool.empty()) {
+          auto b = std::move(pool.back());
+          pool.pop_back();
+          return b;
+        }
+      }
+      return std::vector<uint8_t>(VRMV_SLOT_PAYLOAD_BYTES);
+    }
+
+    void give_back_locked(std::vector<uint8_t> &&b) {
+      if (b.size() == VRMV_SLOT_PAYLOAD_BYTES && pool.size() < 6) {
+        pool.push_back(std::move(b));
+      }
+    }
+
+    void give_back(std::vector<uint8_t> &&b) {
+      std::lock_guard lk(mtx);
+      give_back_locked(std::move(b));
+    }
+
+    bool submit(const std::shared_ptr<::video::vr_game_mv_job_t> &job, const vrmv_desc_t &desc, std::vector<uint8_t> &&payload) {
+      {
+        std::lock_guard lk(mtx);
+        if (queue.size() >= 4) {
+          give_back_locked(std::move(payload));
+          return false;
+        }
+        queue.push_back(task_t {job, desc, std::move(payload)});
+      }
+      cv.notify_one();
+      return true;
+    }
+
+    void take_stats(std::vector<double> &enc_us, std::vector<double> &bytes, uint64_t &fail) {
+      std::lock_guard lk(mtx);
+      enc_us.swap(encode_us);
+      bytes.swap(compressed_bytes);
+      encode_us.clear();
+      compressed_bytes.clear();
+      fail = failed;
+      failed = 0;
+    }
+
+    void worker_main() {
+      platf::set_thread_name("vr_mvenc");
+      const int64_t freq = platf::qpc_frequency();
+      for (;;) {
+        task_t t;
+        {
+          std::unique_lock lk(mtx);
+          cv.wait(lk, [this]() {
+            return stop || !queue.empty();
+          });
+          if (stop) {
+            break;  // 沒做完的 job 留在 pending：送出端 wait_ready 逾時就當沒有 MV
+          }
+          t = std::move(queue.front());
+          queue.pop_front();
+        }
+        const int64_t t0 = platf::qpc_counter();
+        const bool ok = vr::mv_codec::encode_rgba16f(t.desc, t.payload.data(), t.desc.payload_bytes, t.job->compressed, &planar_scratch);
+        const double us = freq > 0 ? static_cast<double>(platf::qpc_counter() - t0) * 1e6 / static_cast<double>(freq) : 0.0;
+        t.job->encode_us = us;
+        if (!ok) {
+          t.job->compressed.clear();
+        }
+        t.job->state.store(ok ? ::video::vr_game_mv_job_t::ready : ::video::vr_game_mv_job_t::failed, std::memory_order_release);
+        {
+          std::lock_guard lk(mtx);
+          if (ok) {
+            if (encode_us.size() < 4096) {
+              encode_us.push_back(us);
+              compressed_bytes.push_back(static_cast<double>(t.job->compressed.size()));
+            }
+          } else {
+            ++failed;
+          }
+          give_back_locked(std::move(t.payload));
+        }
+      }
+    }
+  };
 
   void display_vr_t::rawdump_copy(ID3D11Texture2D *src, uint64_t frame_id) {
     auto &r = *rawdump_;
@@ -510,6 +848,21 @@ namespace platf::dxgi {
         rawdump_->frames = frames;
       } else {
         BOOST_LOG(warning) << "[VIPLE-VR-RAWDUMP] invalid vr_dev_rawdump '"sv << config::vr.dev_rawdump << "' (want <startSec>:<frames>, frames 1-2000)"sv;
+      }
+    }
+
+    // §VR-GAME-MV（M-MV1）：初始化 MV 統計視窗與 vr_dev_mvdump 背景傾印
+    last_matched_mv_frame_id_ = 0;
+    mv_window_ = std::make_shared<mv_window_stats_t>();
+    mv_window_->reserve();
+    mvdump_.reset();
+    if (!config::vr.dev_mvdump.empty() && !g_mvdump_written.load(std::memory_order_acquire)) {
+      int start_sec = -1;
+      int frames = -1;
+      if (std::sscanf(config::vr.dev_mvdump.c_str(), "%d:%d", &start_sec, &frames) == 2 && start_sec >= 0 && frames > 0 && frames <= 2000) {
+        mvdump_ = std::make_shared<mvdump_t>(start_sec, frames);
+      } else {
+        BOOST_LOG(warning) << "[VIPLE-VR-MV] invalid vr_dev_mvdump '"sv << config::vr.dev_mvdump << "' (want <startSec>:<frames>, frames 1-2000)"sv;
       }
     }
     return 0;
@@ -861,6 +1214,56 @@ namespace platf::dxgi {
                       << " cadHold="sv << (health_pub.published() && health_.latch_hold_if_cadence() ? 1 : 0)
                       // §PERF-1113：行尾再加一欄。rateDrop＝半速時在複製之前就丟掉的張數（copied 不含它；全速恆為 0）
                       << " rateDrop="sv << rate_dropped_w;
+
+      // §VR-GAME-MV（M-MV1）：每 10 秒一行 [VIPLE-VR-MV] 統計（外掛有連線或本視窗有配對紀錄時印出）
+      if (mv_window_ && (mv_window_->total > 0 || vr::mv_bridge::is_active())) {
+        auto &mw = *mv_window_;
+        double w50 = 0.0, w95 = 0.0, c50 = 0.0, c95 = 0.0, b50 = 0.0, b95 = 0.0;
+        percentiles(std::move(mw.wait_us), w50, w95);
+        percentiles(std::move(mw.copy_compress_us), c50, c95);
+        std::vector<double> enc_us, enc_bytes;
+        uint64_t enc_failed = 0;
+        if (mv_encoder_) {
+          mv_encoder_->take_stats(enc_us, enc_bytes, enc_failed);
+        }
+        double e50 = 0.0, e95 = 0.0;
+        percentiles(std::move(enc_us), e50, e95);
+        percentiles(std::move(enc_bytes), b50, b95);
+        const double hit_pct = mw.total > 0 ? (static_cast<double>(mw.hits) * 100.0 / static_cast<double>(mw.total)) : 0.0;
+        vrmv_writer_block_t wb {};
+        uint64_t mv_gen = 0;
+        uint64_t write_idx = 0;
+        const bool have_wb = vr::mv_bridge::read_writer_block(wb, &mv_gen);
+        vr::mv_bridge::peek_write_index(write_idx);
+        BOOST_LOG(info) << "[VIPLE-VR-MV] 10s: gen="sv << mv_gen
+                        << " hit="sv << mw.hits << '/' << mw.total << " ("sv << std::format("{:.1f}", hit_pct) << "%)"sv
+                        << " miss(noData="sv << mw.miss_no_data
+                        << " tooOld="sv << mw.miss_too_old
+                        << " tooNew="sv << mw.miss_too_new
+                        << " eyeInc="sv << mw.miss_eye_incomplete
+                        << " used="sv << mw.miss_already_used
+                        << " torn="sv << mw.miss_torn
+                        << " encBusy="sv << mw.miss_enc_busy
+                        << " pend="sv << mw.miss_pending << ')'
+                        << " waitUs p50="sv << std::format("{:.1f}", w50) << " p95="sv << std::format("{:.1f}", w95)
+                        << " copyUs p50="sv << std::format("{:.1f}", c50) << " p95="sv << std::format("{:.1f}", c95)
+                        << " encUs p50="sv << std::format("{:.1f}", e50) << " p95="sv << std::format("{:.1f}", e95)
+                        << " encFail="sv << enc_failed
+                        << " compBytes p50="sv << static_cast<uint64_t>(std::llround(b50))
+                        << " p95="sv << static_cast<uint64_t>(std::llround(b95))
+                        << " kStep(1="sv << mw.k_step_counts[0]
+                        << " 2="sv << mw.k_step_counts[1]
+                        << " 3="sv << mw.k_step_counts[2]
+                        << " 4="sv << mw.k_step_counts[3] << ')'
+                        << " writer(active="sv << (have_wb ? 1 : 0)
+                        << " writeIdx="sv << write_idx
+                        << " published="sv << wb.frames_published
+                        << " dropGpuLate="sv << wb.frames_dropped_gpu_late
+                        << " dropIncomplete="sv << wb.frames_dropped_incomplete
+                        << " pid="sv << wb.writer_pid << ')';
+        mw.reset();
+        mw.reserve();
+      }
       last_log_ = now;
     };
 
@@ -1224,6 +1627,134 @@ namespace platf::dxgi {
       meta.space_epoch = d.space_epoch;
       meta.frame_id = d.frame_id;
       meta.present_qpc = d.present_qpc;
+
+      // §VR-GAME-MV（M-MV1）：在確定要編碼此筆 driver frame 之後、push 之前執行 MV 配對、複製與壓縮。
+      // 未啟用或無外掛連線時，vr::mv_bridge::is_active() 僅為一次 inline atomic 讀取（零成本）。
+      if (mvdump_) {
+        mvdump_->on_frame_seen(platf::qpc_counter());
+      }
+      if (vr::mv_bridge::is_active()) {
+        const int64_t mv_t0 = platf::qpc_counter();
+        const int64_t freq = platf::qpc_frequency();
+        const int64_t vsync_ticks = period_qpc > 0 ? period_qpc : (freq / 90);
+
+        std::array<vrmv_desc_t, VRMV_SLOTS> mv_descs {};
+        size_t mv_count = 0;
+        uint64_t last_wi = 0;
+        int64_t writer_hb = 0;
+        if (vr::mv_bridge::snapshot_latest(mv_descs, mv_count, &last_wi, &writer_hb)) {
+          vrmv_writer_block_t wb_now {};
+          vr::mv_bridge::read_writer_block(wb_now, nullptr);
+          auto match = vr::mv_pair::match_mv_frame(
+            mv_descs.data(),
+            mv_count,
+            d.present_qpc,
+            last_matched_mv_frame_id_,
+            vsync_ticks,
+            freq,
+            wb_now.pending_mv_frame_id,
+            wb_now.pending_gpu_done_qpc
+          );
+
+          // 不再輪詢等待：配對改成「driver Present 之前 GPU 已做完的最新一筆」（vr_mv_pair.cpp），
+          // 那一筆在 Present 時一定已發布（GPU 完成到發布約 80 µs，合成本身就比這久），等也等不到別的。
+          const int64_t mv_t_waited = platf::qpc_counter();
+          const double wait_us = freq > 0 ? static_cast<double>(mv_t_waited - mv_t0) * 1e6 / static_cast<double>(freq) : 0.0;
+          if (!mv_window_) {
+            mv_window_ = std::make_shared<mv_window_stats_t>();
+            mv_window_->reserve();
+          }
+          auto &mw = *mv_window_;
+          ++mw.total;
+          mw.wait_us.push_back(wait_us);
+
+          if (match.hit) {
+            if (!mv_encoder_) {
+              mv_encoder_ = std::make_shared<mv_encoder_t>();
+            }
+            auto &enc = *mv_encoder_;
+            std::vector<uint8_t> buf = enc.take_buffer();
+            const int64_t mv_t_copy0 = platf::qpc_counter();
+            if (!vr::mv_bridge::copy_payload(match.matched, buf.data(), buf.size())) {
+              ++mw.miss_torn;
+              enc.give_back(std::move(buf));
+            } else {
+              const int64_t mv_t_copy1 = platf::qpc_counter();
+              const double copy_us = freq > 0 ? static_cast<double>(mv_t_copy1 - mv_t_copy0) * 1e6 / static_cast<double>(freq) : 0.0;
+              last_matched_mv_frame_id_ = match.matched.mv_frame_id;
+
+              uint8_t codec_flags = ((match.matched.flags & VRMV_F_HAS_DEPTH) != 0) ? vr::mv_codec::k_flag_has_depth : 0u;
+              if ((match.matched.flags & VRMV_F_RESET) != 0) {
+                codec_flags |= vr::mv_codec::k_flag_reset;
+              }
+              auto job = std::make_shared<::video::vr_game_mv_job_t>();
+              if (!enc.submit(job, match.matched, std::move(buf))) {
+                ++mw.miss_enc_busy;  // 背景執行緒落後（佇列滿）：這張不帶 MV
+              } else {
+                meta.game_mv = job;
+                meta.game_mv_meta.mv_frame_id = match.matched.mv_frame_id;
+                meta.game_mv_meta.game_present_qpc = match.matched.game_present_qpc;
+                uint16_t tx_w = 0, tx_h = 0;  // 實際傳出去的網格（codec v2 是 1/16），不是外掛的 1/8
+                vr::mv_codec::output_grid_dims(match.matched, tx_w, tx_h);
+                meta.game_mv_meta.grid_w = tx_w;
+                meta.game_mv_meta.grid_h = tx_h;
+                meta.game_mv_meta.k_step = match.k_step;
+                meta.game_mv_meta.flags = codec_flags;
+                meta.game_mv_meta.desc_flags = match.matched.flags;
+
+                ++mw.hits;
+                mw.copy_compress_us.push_back(copy_us);
+                if (match.k_step >= 1 && match.k_step <= 4) {
+                  ++mw.k_step_counts[match.k_step - 1];
+                }
+
+                if (mvdump_ && !mvdump_->done) {
+                  mvdump_t::item_t dump_item {};
+                  dump_item.driver_frame_id = d.frame_id;
+                  dump_item.present_qpc = d.present_qpc;
+                  dump_item.mv_frame_id = match.matched.mv_frame_id;
+                  dump_item.game_present_qpc = match.matched.game_present_qpc;
+                  dump_item.delta_us = freq > 0 ? static_cast<double>(d.present_qpc - match.matched.game_present_qpc) * 1e6 / static_cast<double>(freq) : 0.0;
+                  dump_item.k_step = match.k_step;
+                  dump_item.grid_w = meta.game_mv_meta.grid_w;
+                  dump_item.grid_h = meta.game_mv_meta.grid_h;
+                  dump_item.flags = codec_flags;
+                  dump_item.desc_flags = match.matched.flags;
+                  dump_item.job = job;
+                  mvdump_->enqueue_if_active(mv_t_copy1, std::move(dump_item));
+                }
+              }
+            }
+          } else {
+            switch (match.miss_reason) {
+              case vr::mv_pair::miss_reason_e::no_data:
+                ++mw.miss_no_data;
+                break;
+              case vr::mv_pair::miss_reason_e::too_old:
+                ++mw.miss_too_old;
+                break;
+              case vr::mv_pair::miss_reason_e::too_new:
+                ++mw.miss_too_new;
+                break;
+              case vr::mv_pair::miss_reason_e::missing_eye:
+                ++mw.miss_eye_incomplete;
+                break;
+              case vr::mv_pair::miss_reason_e::already_used:
+                ++mw.miss_already_used;
+                break;
+              case vr::mv_pair::miss_reason_e::torn:
+                ++mw.miss_torn;
+                break;
+              case vr::mv_pair::miss_reason_e::pending:
+                ++mw.miss_pending;
+                break;
+              default:
+                break;
+            }
+          }
+        }
+      }
+
       img->vr = meta;
       img->frame_timestamp = frame_ts;  // S1-01 修正後的換算（§PERF-1113：上面已經換算過，同一個值）
 

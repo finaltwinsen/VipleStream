@@ -557,6 +557,15 @@ namespace platf::dxgi {
     std::shared_ptr<rawdump_t> rawdump_;
     void rawdump_copy(ID3D11Texture2D *src, uint64_t frame_id);  ///< 在 signal_consumed 之前呼叫（同一個 context，讀到的一定是這一張）
     void rawdump_after_frame(ID3D11Texture2D *src);  ///< signal_consumed 之後：第一次配 staging；抓滿了就讀回寫檔（會停住擷取執行緒幾秒）
+
+    /// §VR-GAME-MV（M-MV1）：遊戲運動向量配對狀態、10 秒統計與背景傾印（只在擷取執行緒存取）
+    struct mv_window_stats_t;
+    struct mvdump_t;
+    struct mv_encoder_t;
+    uint64_t last_matched_mv_frame_id_ = 0;  ///< 上一張實際送進編碼器的影像配對到的 mv_frame_id
+    std::shared_ptr<mv_encoder_t> mv_encoder_;  ///< 量化＋壓縮的背景執行緒（第一次配對命中才建）
+    std::shared_ptr<mv_window_stats_t> mv_window_;  ///< 10 秒統計視窗
+    std::shared_ptr<mvdump_t> mvdump_;  ///< vr_dev_mvdump 背景寫檔佇列（未啟用時為 nullptr）
   };
 
   class vr_clip_source_t;

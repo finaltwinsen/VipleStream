@@ -110,6 +110,15 @@ set(PLATFORM_TARGET_FILES
         # §VR M1b V2：vr_bridge（pipe／shm／ring 貼圖／握手）、admin pipe（--vr-selftest 的 server 端）、
         # selftest 的 Windows 平台層（T0／T2／T6）
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_bridge_win.cpp"
+        # §VR-GAME-MV（M-MV1）：遊戲運動向量 IPC 橋接、配對、編解碼與 LZ4
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_mv_bridge_win.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_mv_bridge_win.cpp"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_mv_pair.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_mv_pair.cpp"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_mv_codec.h"
+        "${CMAKE_SOURCE_DIR}/src/vr/vr_mv_codec.cpp"
+        "${CMAKE_SOURCE_DIR}/third-party/lz4/lz4.h"
+        "${CMAKE_SOURCE_DIR}/third-party/lz4/lz4.c"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_admin_pipe.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_admin_pipe.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/vr_selftest_win.cpp"

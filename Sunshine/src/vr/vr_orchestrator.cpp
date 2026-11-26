@@ -27,6 +27,9 @@
 #if VIPLE_VR_BRIDGE_HAS_ABI
   #include "vr_ipc_abi.h"
 #endif
+#ifdef _WIN32
+  #include "src/platform/windows/vr_mv_bridge_win.h"
+#endif
 
 using namespace std::literals;
 
@@ -262,6 +265,11 @@ namespace vr::orchestrator {
     void fail(uint16_t code, const std::string &why) {
       BOOST_LOG(error) << "[VIPLE-VR-ORCH] error code=" << code << " reason=" << why;
       bridge::set_armed(false);
+#ifdef _WIN32
+      if (!::vr::active()) {
+        ::vr::mv_bridge::stop();
+      }
+#endif
       g_error_until_ms.store(now_ms() + 10000);
       set_state(state_e::error, code);
     }
@@ -620,6 +628,9 @@ namespace vr::orchestrator {
         return fail(VIPLE_VR_STATE_CODE_IPC_UNAVAILABLE, "session config rejected");
       }
       bridge::set_armed(true);
+#ifdef _WIN32
+      ::vr::mv_bridge::start();
+#endif
       if (!need_launch) {
         const bool ready = wait_for(5s, []() {
           const auto s = bridge::status();
@@ -1165,6 +1176,11 @@ namespace vr::orchestrator {
             }
             set_state(state_e::stopping);
             bridge::set_armed(false);
+#ifdef _WIN32
+            if (!::vr::active()) {
+              ::vr::mv_bridge::stop();
+            }
+#endif
             const bool standby = wait_for(1s, []() {
               return !bridge::status().hmd_presenting;
             });

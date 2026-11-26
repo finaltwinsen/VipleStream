@@ -27,6 +27,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <windows.h>
 
@@ -40,6 +42,8 @@
 #include "probe_d3d.h"
 #include "virtual_vsync.h"
 #include "vr_math.h"
+#include "vr_mv_codec.h"
+#include "vr_mv_pair.h"
 #include "vr_scene_pattern.h"
 
 namespace probe {
@@ -1979,6 +1983,422 @@ namespace probe {
       t.end();
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    // §VR-GAME-MV（M-MV1）：(a) seqlock 撕裂壓力測試、(b) codec round-trip 與計時、(c) 配對規則
+    // ════════════════════════════════════════════════════════════════════
+    void test_mv_seqlock(tally_t &t) {
+      t.begin("mv-seqlock");
+      std::vector<uint8_t> raw_mem(VRMV_SECTION_SIZE + 64, 0);
+      const uintptr_t raw_addr = reinterpret_cast<uintptr_t>(raw_mem.data());
+      const uintptr_t aligned_addr = (raw_addr + 63u) & ~uintptr_t {63u};
+      auto *shm = reinterpret_cast<vrmv_shm_t *>(aligned_addr);
+
+      constexpr uint64_t k_gen = 7;
+      constexpr uint16_t k_gw = 160;
+      constexpr uint16_t k_gh = 90;
+      constexpr uint32_t k_payload_bytes = static_cast<uint32_t>(k_gw) * static_cast<uint32_t>(k_gh) * VRMV_CELL_BYTES;
+      constexpr size_t k_u64_words = k_payload_bytes / sizeof(uint64_t);
+
+      shm->server.magic = VRMV_MAGIC_SHM;
+      shm->server.abi_version = VRMV_ABI_VERSION;
+      shm->server.section_size = VRMV_SECTION_SIZE;
+      shm->server.generation = k_gen;
+
+      std::atomic<bool> stop_writer {false};
+      std::atomic<uint64_t> writes_done {0};
+
+      // 寫入執行緒：高速循環寫入 desc + payload（每次 payload 全填同一個值 = 完成時的偶數 seq）
+      std::thread writer([&]() {
+        std::vector<uint64_t> write_buf(k_u64_words, 0);
+        uint64_t seq_counter = 0;
+        uint64_t frame_id = 0;
+        while (!stop_writer.load(std::memory_order_relaxed)) {
+          ++frame_id;
+          const uint64_t expected_even_seq = (seq_counter * 2u) + 2u;
+          std::fill(write_buf.begin(), write_buf.end(), expected_even_seq);
+
+          vrmv_desc_t d {};
+          d.mv_frame_id = frame_id;
+          d.generation = k_gen;
+          d.game_present_qpc = static_cast<int64_t>(frame_id * 1000);
+          d.flags = VRMV_F_BOTH_EYES | VRMV_F_HAS_DEPTH;
+          d.payload_bytes = k_payload_bytes;
+          d.grid_w = k_gw;
+          d.grid_h = k_gh;
+          d.render_eye_w = 1280;
+          d.render_eye_h = 1440;
+          d.mv_tex_w = 1280;
+          d.mv_tex_h = 1440;
+          d.mv_units = VRMV_UNITS_MVTEX_PIXELS;
+          d.upscaler_kind = VRMV_UPSCALER_DLSS;
+          d.game_frame_step = 1;
+          d.mv_scale[0] = 1.0f;
+          d.mv_scale[1] = 1.0f;
+          d.depth_ref = 1.0f;
+
+          vr::mv_pair::shm_write_slot_for_test(shm, d, write_buf.data(), seq_counter);
+          writes_done.fetch_add(1, std::memory_order_relaxed);
+        }
+      });
+
+      // 讀取執行緒：連續讀 >= 220 ms，讀到一致時 payload 每個 word 都必須等於 desc.seq
+      const int64_t start_qpc = qpc();
+      const int64_t min_duration_qpc = 220 * own_qpf() / 1000;  // 220 ms（>= 200 ms）
+      std::vector<uint64_t> read_buf(k_u64_words, 0);
+      uint64_t consistent_reads = 0;
+      uint64_t torn_leaks = 0;
+      uint32_t slot_cursor = 0;
+
+      while (qpc() - start_qpc < min_duration_qpc || consistent_reads < 10) {
+        const uint32_t slot_idx = (slot_cursor++) % VRMV_SLOTS;
+        vrmv_desc_t out_d {};
+        if (vr::mv_pair::shm_read_slot_with_payload(shm, slot_idx, k_gen, out_d, read_buf.data(), k_payload_bytes)) {
+          ++consistent_reads;
+          const uint64_t expect_val = out_d.seq;
+          if (expect_val == 0 || (expect_val & 1u) != 0) {
+            ++torn_leaks;
+          } else {
+            for (size_t w = 0; w < k_u64_words; ++w) {
+              if (read_buf[w] != expect_val) {
+                ++torn_leaks;
+                break;
+              }
+            }
+          }
+        }
+        // 同時驗證兩段式 snapshot_descs + copy_payload
+        if ((slot_cursor & 3u) == 0) {
+          vrmv_desc_t snaps[VRMV_SLOTS] {};
+          const size_t n = vr::mv_pair::shm_snapshot_descs(shm, k_gen, snaps, VRMV_SLOTS);
+          if (n > 0) {
+            const vrmv_desc_t &picked = snaps[n - 1];
+            if (vr::mv_pair::shm_copy_payload(shm, picked, read_buf.data(), k_payload_bytes)) {
+              ++consistent_reads;
+              const uint64_t expect_val = picked.seq;
+              for (size_t w = 0; w < k_u64_words; ++w) {
+                if (read_buf[w] != expect_val) {
+                  ++torn_leaks;
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const int64_t elapsed_qpc = qpc() - start_qpc;
+      stop_writer.store(true, std::memory_order_relaxed);
+      writer.join();
+
+      const double elapsed_ms = static_cast<double>(elapsed_qpc) * 1000.0 / static_cast<double>(own_qpf());
+      t.check(elapsed_ms >= 200.0, "duration-ge-200ms", "elapsed=%.1fms", elapsed_ms);
+      t.check(writes_done.load() > 0 && consistent_reads > 0, "reads-and-writes-active", "writes=%llu reads=%llu",
+              static_cast<unsigned long long>(writes_done.load()), static_cast<unsigned long long>(consistent_reads));
+      t.check(torn_leaks == 0, "zero-torn-payload", "torn_leaks=%llu consistent_reads=%llu writes=%llu",
+              static_cast<unsigned long long>(torn_leaks), static_cast<unsigned long long>(consistent_reads),
+              static_cast<unsigned long long>(writes_done.load()));
+      t.end();
+    }
+
+    void test_mv_codec(tally_t &t) {
+      t.begin("mv-codec");
+
+      // 基本 half<->float 與量化邊界驗證
+      {
+        const uint16_t h_zero = vr::mv_codec::float_to_half(0.0f);
+        const uint16_t h_one = vr::mv_codec::float_to_half(1.0f);
+        const uint16_t h_neg = vr::mv_codec::float_to_half(-0.5f);
+        t.check(vr::mv_codec::half_to_float(h_zero) == 0.0f &&
+                  vr::mv_codec::half_to_float(h_one) == 1.0f &&
+                  vr::mv_codec::half_to_float(h_neg) == -0.5f,
+                "half-basic");
+        t.check(vr::mv_codec::quantize_sbs_uv(std::numeric_limits<float>::quiet_NaN()) == 0 &&
+                  vr::mv_codec::quantize_sbs_uv(std::numeric_limits<float>::infinity()) == 0 &&
+                  vr::mv_codec::quantize_sbs_uv(-std::numeric_limits<float>::infinity()) == 0,
+                "quantize-nan-inf-zero");
+        t.check(vr::mv_codec::quantize_sbs_uv(10.0f) == 32767 &&
+                  vr::mv_codec::quantize_sbs_uv(-10.0f) == -32767 &&
+                  vr::mv_codec::quantize_sbs_uv(0.5f) == 2048 &&
+                  vr::mv_codec::quantize_sbs_uv(0.0f) == 0,
+                "quantize-clamp");
+        t.check(vr::mv_codec::quantize_depth(-0.5f) == 0 &&
+                  vr::mv_codec::quantize_depth(0.0f) == 0 &&
+                  vr::mv_codec::quantize_depth(1.0f) == 63 &&
+                  vr::mv_codec::quantize_depth(0.25f) == 32,
+                "quantize-depth");
+      }
+
+      // v2 降採樣：2×2 內取逆深度最大（前景）那格的位移；右眼取右眼自己的格子；死區把 |q|≤1 歸 0
+      {
+        vrmv_desc_t d {};
+        d.flags = VRMV_F_BOTH_EYES | VRMV_F_HAS_DEPTH;
+        d.grid_w = 8;
+        d.grid_h = 2;
+        d.payload_bytes = 8 * 2 * VRMV_CELL_BYTES;
+        d.mv_units = VRMV_UNITS_EYE_UV;
+        std::vector<uint16_t> c(8 * 2 * 4, vr::mv_codec::float_to_half(0.0f));
+        auto put = [&](int x, int y, float u, float v, float z) {
+          const size_t i = static_cast<size_t>(y) * 8 + x;
+          c[i * 4 + 0] = vr::mv_codec::float_to_half(u);
+          c[i * 4 + 1] = vr::mv_codec::float_to_half(v);
+          c[i * 4 + 2] = vr::mv_codec::float_to_half(z);
+        };
+        put(0, 0, 0.0f, 0.0f, 0.2f);   // 左眼第一個 2×2：背景
+        put(1, 1, 0.25f, -0.125f, 0.9f);  // 同一塊的前景 → 該被選
+        put(4, 0, 0.0001f, 0.0f, 0.5f);  // 右眼第一塊：極小位移 → 死區歸 0
+        uint16_t ow = 0, oh = 0;
+        const bool dims_ok = vr::mv_codec::output_grid_dims(d, ow, oh) && ow == 4 && oh == 1;
+        int16_t vx[4] {}, vy[4] {};
+        uint8_t dz[4] {};
+        const bool q_ok = dims_ok && vr::mv_codec::quantize_rgba16f_to_planes(d, c.data(), d.payload_bytes, vx, vy, dz);
+        // 左眼 u=0.25 → SBS 0.125 → ×4096 = 512；v=-0.125 → -512；深度 sqrt(0.9)·63 ≈ 60
+        t.check(q_ok && vx[0] == 512 && vy[0] == -512 && dz[0] == 60 && vx[2] == 0 && vy[2] == 0,
+                "downsample-foreground-pick", "vx0=%d vy0=%d d0=%d vx2=%d", vx[0], vy[0], dz[0], vx[2]);
+      }
+
+      struct grid_shape_t {
+        uint16_t w;
+        uint16_t h;
+      };
+      const grid_shape_t shapes[] = {{360, 180}, {540, 270}};
+      const char *pattern_names[] = {"random", "smooth", "mostly-zero"};
+
+      uint32_t rng_state = 0x5649504Cu;
+      auto next_rng = [&]() -> uint32_t {
+        uint32_t x = rng_state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        return rng_state = x;
+      };
+
+      std::vector<uint8_t> scratch_planar;
+      for (const auto &sh : shapes) {
+        const size_t n_cells = static_cast<size_t>(sh.w) * static_cast<size_t>(sh.h);
+        vrmv_desc_t desc {};
+        desc.seq = 2;
+        desc.mv_frame_id = 1;
+        desc.generation = 1;
+        desc.flags = VRMV_F_BOTH_EYES | VRMV_F_HAS_DEPTH;
+        desc.grid_w = sh.w;
+        desc.grid_h = sh.h;
+        desc.payload_bytes = static_cast<uint32_t>(n_cells * VRMV_CELL_BYTES);
+        desc.mv_tex_w = static_cast<uint16_t>((sh.w / 2) * 8);
+        desc.mv_tex_h = static_cast<uint16_t>(sh.h * 8);
+        desc.mv_units = VRMV_UNITS_MVTEX_PIXELS;
+        desc.mv_scale[0] = 1.0f;
+        desc.mv_scale[1] = 1.0f;
+        desc.depth_ref = 1.0f;
+
+        std::vector<uint16_t> rgba16f(n_cells * 4, 0);
+        uint16_t out_w = 0, out_h = 0;
+        vr::mv_codec::output_grid_dims(desc, out_w, out_h);
+        const size_t n_out = static_cast<size_t>(out_w) * out_h;  // v2：1/16 網格
+        std::vector<int16_t> ref_vx(n_out, 0);
+        std::vector<int16_t> ref_vy(n_out, 0);
+        std::vector<uint8_t> ref_depth(n_out, 0);
+        std::vector<uint8_t> compressed;
+
+        for (int pat = 0; pat < 3; ++pat) {
+          for (uint16_t y = 0; y < sh.h; ++y) {
+            for (uint16_t x = 0; x < sh.w; ++x) {
+              const size_t idx = static_cast<size_t>(y) * sh.w + x;
+              float px = 0.0f;
+              float py = 0.0f;
+              float pz = 0.0f;
+              if (pat == 0) {
+                // 隨機網格（含正負與極值）
+                const int32_t rx = static_cast<int32_t>(next_rng() % 2001u) - 1000;
+                const int32_t ry = static_cast<int32_t>(next_rng() % 2001u) - 1000;
+                px = static_cast<float>(rx) * 0.25f;
+                py = static_cast<float>(ry) * 0.25f;
+                pz = static_cast<float>(next_rng() % 1001u) / 1000.0f;
+              } else if (pat == 1) {
+                // 平滑網格（模擬鏡頭平移與深度漸層）
+                px = 12.5f + 4.0f * std::sin(static_cast<float>(x) * 0.03f) + 2.0f * std::cos(static_cast<float>(y) * 0.04f);
+                py = -6.0f + 3.0f * std::cos(static_cast<float>(x) * 0.02f) - 1.5f * std::sin(static_cast<float>(y) * 0.05f);
+                pz = std::clamp(0.1f + 0.8f * (static_cast<float>(y) / static_cast<float>(sh.h)), 0.0f, 1.0f);
+              } else {
+                // 大面積 0 網格（僅中央小區塊有非零位移，其餘皆 0）
+                if (x >= sh.w * 3 / 8 && x < sh.w * 5 / 8 && y >= sh.h * 3 / 8 && y < sh.h * 5 / 8) {
+                  px = 8.0f;
+                  py = -4.0f;
+                  pz = 0.5f;
+                } else {
+                  px = 0.0f;
+                  py = 0.0f;
+                  pz = 0.0f;
+                }
+              }
+              rgba16f[idx * 4 + 0] = vr::mv_codec::float_to_half(px);
+              rgba16f[idx * 4 + 1] = vr::mv_codec::float_to_half(py);
+              rgba16f[idx * 4 + 2] = vr::mv_codec::float_to_half(pz);
+              rgba16f[idx * 4 + 3] = vr::mv_codec::float_to_half(1.0f);
+            }
+          }
+
+          const bool q_ok = vr::mv_codec::quantize_rgba16f_to_planes(
+            desc, rgba16f.data(), desc.payload_bytes, ref_vx.data(), ref_vy.data(), ref_depth.data()
+          );
+          const bool enc_ok = vr::mv_codec::encode_rgba16f(
+            desc, rgba16f.data(), desc.payload_bytes, compressed, &scratch_planar
+          );
+          vr::mv_codec::decoded_planes_t dec {};
+          const bool dec_ok = enc_ok && vr::mv_codec::decode(compressed.data(), compressed.size(), dec, &scratch_planar);
+
+          const bool match_vx = dec_ok && dec.vx.size() == n_out &&
+                                std::memcmp(dec.vx.data(), ref_vx.data(), n_out * sizeof(int16_t)) == 0;
+          const bool match_vy = dec_ok && dec.vy.size() == n_out &&
+                                std::memcmp(dec.vy.data(), ref_vy.data(), n_out * sizeof(int16_t)) == 0;
+          const bool match_d = dec_ok && dec.depth.size() == n_out &&
+                               std::memcmp(dec.depth.data(), ref_depth.data(), n_out * sizeof(uint8_t)) == 0;
+
+          char case_name[64];
+          snprintf(case_name, sizeof(case_name), "roundtrip-%ux%u-%s", sh.w, sh.h, pattern_names[pat]);
+          t.check(q_ok && enc_ok && dec_ok && match_vx && match_vy && match_d, case_name,
+                  "compBytes=%zu vx=%d vy=%d d=%d", compressed.size(), match_vx ? 1 : 0, match_vy ? 1 : 0, match_d ? 1 : 0);
+
+          // 量測 360x180 編碼＋解碼時間並印出（目標 < 0.05 ms，超過也如實印出）
+          if (sh.w == 360 && sh.h == 180) {
+            constexpr int k_iters = 50;
+            const int64_t t0 = qpc();
+            for (int it = 0; it < k_iters; ++it) {
+              vr::mv_codec::encode_rgba16f(desc, rgba16f.data(), desc.payload_bytes, compressed, &scratch_planar);
+            }
+            const int64_t t1 = qpc();
+            for (int it = 0; it < k_iters; ++it) {
+              vr::mv_codec::decode(compressed.data(), compressed.size(), dec, &scratch_planar);
+            }
+            const int64_t t2 = qpc();
+            const double enc_ms = static_cast<double>(t1 - t0) * 1000.0 / (static_cast<double>(own_qpf()) * k_iters);
+            const double dec_ms = static_cast<double>(t2 - t1) * 1000.0 / (static_cast<double>(own_qpf()) * k_iters);
+            const double total_ms = enc_ms + dec_ms;
+            line("unit-metric name=mv_codec_360x180 pattern=%s encode_ms=%.4f decode_ms=%.4f total_ms=%.4f comp_bytes=%zu target_ms=0.0500",
+                 pattern_names[pat], enc_ms, dec_ms, total_ms, compressed.size());
+          }
+        }
+      }
+      t.end();
+    }
+
+    void test_mv_pair(tally_t &t) {
+      t.begin("mv-pair");
+      const int64_t freq = 10'000'000;        // 10 MHz (1 ms = 10,000 ticks)
+      const int64_t t_vsync = freq / 90;      // 111,111 ticks (~11.11 ms); 1.5 * T_vsync = 166,666 ticks (~16.67 ms)
+      const int64_t drv_qpc = 1'000'000'000;
+
+      // gpu_done 預設＝game_present + 7 ms（Palworld 實測 p50 7.5 ms）
+      auto make_cand = [&](uint64_t id, int64_t game_qpc, uint32_t flags = VRMV_F_BOTH_EYES, int64_t gpu_lag = 70'000) {
+        vrmv_desc_t d {};
+        d.seq = id * 2;
+        d.mv_frame_id = id;
+        d.generation = 1;
+        d.game_present_qpc = game_qpc;
+        d.gpu_done_qpc = game_qpc + gpu_lag;
+        d.publish_qpc = d.gpu_done_qpc + 800;
+        d.flags = flags;
+        d.grid_w = 360;
+        d.grid_h = 180;
+        d.payload_bytes = 360 * 180 * VRMV_CELL_BYTES;
+        d.mv_tex_w = 1440;
+        d.mv_tex_h = 1440;
+        d.mv_units = VRMV_UNITS_EYE_UV;
+        d.mv_scale[0] = 1.0f;
+        d.mv_scale[1] = 1.0f;
+        d.depth_ref = 1.0f;
+        return d;
+      };
+
+      // 1. 正常命中：GPU 在 Present 前 3 ms 做完
+      {
+        const vrmv_desc_t cands[] = {make_cand(10, drv_qpc - 100'000)};
+        const auto r = vr::mv_pair::match_mv_frame(cands, 1, drv_qpc, 9, t_vsync, freq);
+        t.check(r.hit && r.matched.mv_frame_id == 10 && r.k_step == 1 && r.miss_reason == vr::mv_pair::miss_reason_e::none,
+                "normal-hit");
+      }
+
+      // 1b. GPU 吃滿：Present→driver Present 22 ms（舊規則的 1.5·T_vsync 會判太舊）仍命中
+      {
+        const vrmv_desc_t cands[] = {make_cand(10, drv_qpc - 220'000, VRMV_F_BOTH_EYES, 110'000)};
+        const auto r = vr::mv_pair::match_mv_frame(cands, 1, drv_qpc, 9, t_vsync, freq);
+        t.check(r.hit && r.matched.mv_frame_id == 10, "gpu-bound-hit", "reason=%s", vr::mv_pair::miss_reason_name(r.miss_reason));
+      }
+
+      // 2. 太舊（> max(6·T_vsync, 50 ms) = 66.7 ms）
+      {
+        const vrmv_desc_t cands[] = {make_cand(11, drv_qpc - 800'000)};
+        const auto r = vr::mv_pair::match_mv_frame(cands, 1, drv_qpc, 10, t_vsync, freq);
+        t.check(!r.hit && r.miss_reason == vr::mv_pair::miss_reason_e::too_old,
+                "miss-too-old", "reason=%s", vr::mv_pair::miss_reason_name(r.miss_reason));
+      }
+
+      // 3. 太新：GPU 在 Present 之後才做完（不可能是被合成的那張）
+      {
+        const vrmv_desc_t cands[] = {make_cand(12, drv_qpc - 20'000)};  // gpu_done = Present + 5 ms
+        const auto r = vr::mv_pair::match_mv_frame(cands, 1, drv_qpc, 10, t_vsync, freq);
+        t.check(!r.hit && r.miss_reason == vr::mv_pair::miss_reason_e::too_new,
+                "miss-too-new", "reason=%s", vr::mv_pair::miss_reason_name(r.miss_reason));
+      }
+
+      // 4. 缺眼（只有左眼或只有右眼）
+      {
+        const vrmv_desc_t cands_l[] = {make_cand(13, drv_qpc - 100'000, VRMV_F_LEFT_VALID)};
+        const vrmv_desc_t cands_r[] = {make_cand(14, drv_qpc - 100'000, VRMV_F_RIGHT_VALID)};
+        const auto rl = vr::mv_pair::match_mv_frame(cands_l, 1, drv_qpc, 10, t_vsync, freq);
+        const auto rr = vr::mv_pair::match_mv_frame(cands_r, 1, drv_qpc, 10, t_vsync, freq);
+        t.check(!rl.hit && rl.miss_reason == vr::mv_pair::miss_reason_e::missing_eye &&
+                  !rr.hit && rr.miss_reason == vr::mv_pair::miss_reason_e::missing_eye,
+                "miss-missing-eye");
+      }
+
+      // 5. 已用過＝合成器重送同一張（最新一筆已配過，不退回去配更舊的）
+      {
+        const vrmv_desc_t cands[] = {make_cand(14, drv_qpc - 300'000), make_cand(15, drv_qpc - 100'000)};
+        const auto r_eq = vr::mv_pair::match_mv_frame(cands, 2, drv_qpc, 15, t_vsync, freq);
+        const auto r_lt = vr::mv_pair::match_mv_frame(cands, 2, drv_qpc, 16, t_vsync, freq);
+        t.check(!r_eq.hit && r_eq.miss_reason == vr::mv_pair::miss_reason_e::already_used &&
+                  !r_lt.hit && r_lt.miss_reason == vr::mv_pair::miss_reason_e::already_used,
+                "miss-already-used");
+      }
+
+      // 6. 多筆：取 Present 前已做完的最新一筆；GPU 還沒做完的那筆不算
+      {
+        const vrmv_desc_t cands[] = {
+          make_cand(20, drv_qpc - 400'000),  // 做完、較舊
+          make_cand(21, drv_qpc - 150'000),  // 做完、最新 → 選它
+          make_cand(22, drv_qpc - 30'000),  // gpu_done = Present + 4 ms：還沒做完
+        };
+        const auto r = vr::mv_pair::match_mv_frame(cands, 3, drv_qpc, 19, t_vsync, freq);
+        t.check(r.hit && r.matched.mv_frame_id == 21 && r.index == 1 && r.k_step == 2,
+                "pick-newest-completed", "matched=%llu k_step=%u",
+                static_cast<unsigned long long>(r.matched.mv_frame_id), r.k_step);
+      }
+
+      // 6b. pending：最新一幀 GPU 在 Present 前做完但還沒發布 → 不拿較舊的 21 頂替；pending 的 GPU 在 Present 後才做完 → 照配 21
+      {
+        const vrmv_desc_t cands[] = {make_cand(20, drv_qpc - 400'000), make_cand(21, drv_qpc - 150'000)};
+        const auto r_p = vr::mv_pair::match_mv_frame(cands, 2, drv_qpc, 19, t_vsync, freq, 22, drv_qpc - 5'000);
+        const auto r_np = vr::mv_pair::match_mv_frame(cands, 2, drv_qpc, 19, t_vsync, freq, 22, drv_qpc + 5'000);
+        const auto r_same = vr::mv_pair::match_mv_frame(cands, 2, drv_qpc, 19, t_vsync, freq, 21, drv_qpc - 80'000);
+        t.check(!r_p.hit && r_p.miss_reason == vr::mv_pair::miss_reason_e::pending &&
+                  r_np.hit && r_np.matched.mv_frame_id == 21 && r_same.hit && r_same.matched.mv_frame_id == 21,
+                "pending-not-substituted", "p=%s np=%d same=%d", vr::mv_pair::miss_reason_name(r_p.miss_reason), r_np.hit ? 1 : 0, r_same.hit ? 1 : 0);
+      }
+
+      // 7. K_step = clamp(M_cur - M_prev, 1, 4) 夾限
+      {
+        t.check(vr::mv_pair::compute_k_step(10, 0) == 1, "kstep-first-frame");
+        t.check(vr::mv_pair::compute_k_step(11, 10) == 1, "kstep-1");
+        t.check(vr::mv_pair::compute_k_step(12, 10) == 2, "kstep-2");
+        t.check(vr::mv_pair::compute_k_step(13, 10) == 3, "kstep-3");
+        t.check(vr::mv_pair::compute_k_step(14, 10) == 4, "kstep-4");
+        t.check(vr::mv_pair::compute_k_step(25, 10) == 4, "kstep-clamp-max-4");
+        t.check(vr::mv_pair::compute_k_step(10, 10) == 1, "kstep-clamp-min-1");
+      }
+
+      t.end();
+    }
+
   }  // namespace
 
   int run_unit(const args_t &a) {
@@ -1996,6 +2416,9 @@ namespace probe {
     test_pose_history(t);
     test_pose_policy(t);
     test_stale_blender(t);
+    test_mv_seqlock(t);
+    test_mv_codec(t);
+    test_mv_pair(t);
     if (a.no_loopback) {
       line("unit-skip case=loop reason=no-loopback");
     } else {

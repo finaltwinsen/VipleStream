@@ -286,8 +286,26 @@ function Build-Probe {
         $p = Join-Path $DrvDir $shared
         if (Test-Path -LiteralPath $p) { $srcs += $p }
     }
+    # §VR-GAME-MV（M-MV1）：server 端純模組（配對與編解碼）加入 vr_probe 單元測試
+    foreach ($mvSrc in @('vr_mv_pair.cpp', 'vr_mv_codec.cpp')) {
+        $p = Join-Path $VrIncDir $mvSrc
+        if (Test-Path -LiteralPath $p) { $srcs += $p }
+    }
     $pdbObj = Join-Path $objDir 'vc.pdb'
-    $cl = $CommonCl + @('/DVRDRV_PEER_HOOKS', "/I$DrvDir", "/I$ProbeDir", "/external:I$CommonCDir", "/Fo$objDir/", "/Fd$pdbObj") + $srcs
+    $lz4Src = Join-Path $SunshineDir 'third-party\lz4\lz4.c'
+    if (Test-Path -LiteralPath $lz4Src) {
+        $clLz4 = @(
+            '/nologo', '/c', '/MT', '/TC', '/utf-8', '/W0',
+            '/Zi', '/FS', '/guard:cf',
+            '/DUNICODE', '/D_UNICODE', '/DWIN32_LEAN_AND_MEAN', '/DNOMINMAX', '/D_WIN32_WINNT=0x0A00',
+            "/Fo$objDir/", "/Fd$pdbObj"
+        )
+        if ($Config -eq 'Release') { $clLz4 += @('/O2', '/DNDEBUG') } else { $clLz4 += @('/Od', '/D_DEBUG') }
+        $clLz4 += $lz4Src
+        Say 'cl：third-party\lz4\lz4.c'
+        Invoke-Native 'cl.exe' $clLz4 'cl（lz4.c）'
+    }
+    $cl = $CommonCl + @('/DVRDRV_PEER_HOOKS', "/I$DrvDir", "/I$ProbeDir", "/I$SunshineDir", "/external:I$CommonCDir", "/Fo$objDir/", "/Fd$pdbObj") + $srcs
     Say "cl：$($srcs.Count) 個來源檔"
     Invoke-Native 'cl.exe' $cl 'cl（vr_probe）'
 

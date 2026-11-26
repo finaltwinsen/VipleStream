@@ -3,21 +3,28 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 :: ============================================================================
 :: build.cmd
-:: VipleStream §VR-GAME-MV (M-MV0) — viple_uevr_mv_plugin.dll 獨立建置腳本
+:: VipleStream §VR-GAME-MV (M-MV0 / M-MV1) — viple_uevr_mv_plugin.dll 獨立建置腳本
 ::
 :: 說明：
 ::   1. 從 repo 根目錄的 build-config.local.cmd 讀取 VCVARS 路徑
 ::      （格式參考 docs/building.md §1.2 與 build-config.template.cmd）。
-::   2. 啟動 vcvars64.bat 後，以 CMake (優先使用 Ninja，若無則使用 NMake Makefiles
+::   2. 引入相對路徑 Sunshine\src\vr（含 vr_mv_ipc_abi.h）。
+::   3. 啟動 vcvars64.bat 後，以 CMake (優先使用 Ninja，若無則使用 NMake Makefiles
 ::      或 Visual Studio 2022) 建置 x64 Release DLL。
-::   3. 產出位置：<repo_root>\temp\uevr_mv_plugin\viple_uevr_mv_plugin.dll
+::   4. 產出位置：<repo_root>\temp\uevr_mv_plugin\viple_uevr_mv_plugin.dll
 :: ============================================================================
 
 set "PLUGIN_DIR=%~dp0"
 if "%PLUGIN_DIR:~-1%"=="\" set "PLUGIN_DIR=%PLUGIN_DIR:~0,-1%"
 
 for %%I in ("%PLUGIN_DIR%\..\..\..") do set "REPO_ROOT=%%~fI"
+set "VR_INCLUDE_DIR=%PLUGIN_DIR%\..\..\src\vr"
 set "CONFIG_FILE=%REPO_ROOT%\build-config.local.cmd"
+
+if not exist "%VR_INCLUDE_DIR%\vr_mv_ipc_abi.h" (
+    echo [ERROR] vr_mv_ipc_abi.h not found at relative path: "%VR_INCLUDE_DIR%\vr_mv_ipc_abi.h"
+    exit /b 1
+)
 
 if not exist "%CONFIG_FILE%" (
     echo [ERROR] build-config.local.cmd not found at: "%CONFIG_FILE%"

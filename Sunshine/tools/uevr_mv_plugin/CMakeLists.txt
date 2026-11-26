@@ -29,6 +29,7 @@ set_source_files_properties(cs_downsample_mv_8x8.hlsl PROPERTIES HEADER_FILE_ONL
 target_include_directories(viple_uevr_mv_plugin PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/vr"
 )
 
 target_compile_definitions(viple_uevr_mv_plugin PRIVATE
@@ -53,6 +54,7 @@ target_link_libraries(viple_uevr_mv_plugin PRIVATE
     d3d12
     dxgi
     d3dcompiler
+    advapi32
 )
 
 # 統一將輸出 DLL 放置在 CMAKE_BINARY_DIR (即 temp/uevr_mv_plugin/)

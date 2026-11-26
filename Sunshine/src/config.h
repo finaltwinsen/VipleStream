@@ -489,6 +489,16 @@ namespace config {
     /// 位元八成以上花在注視點那塊，頭盔解碼也因此快。周邊越粗流量越少、頭盔解碼越快，但視線以外的地方越糊。
     /// 預設 26＝和 Steam 內建串流同級（使用者 2026-11-11 指定先用這個當預設）。
     int fovea_periph_qp = 26;
+
+    /// §VR-GAME-MV（M-MV1）：vr_game_mv = auto|disabled（預設 auto＝有 VR session 就開 pipe 接受外掛；disabled＝不開 pipe）。
+    enum class game_mv_e {
+      disabled,
+      automatic,
+    };
+
+    game_mv_e game_mv = game_mv_e::automatic;
+    /// §VR-GAME-MV（dev，M-MV1）：vr_dev_mvdump = <開始秒>:<幀數>（比照 vr_dev_rawdump，預設空＝關）。
+    std::string dev_mvdump;
   };
 
   struct nvhttp_t {

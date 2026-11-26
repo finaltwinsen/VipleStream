@@ -67,6 +67,9 @@ extern "C" {
 #include "vr/vr_fec_spread.h"
 #include "vr/vr_predict.h"
 #include "vr/vr_session.h"
+#ifdef _WIN32
+  #include "platform/windows/vr_mv_bridge_win.h"
+#endif
 
 #ifdef VIPLE_MPQUIC
 #include "quic_server.h"
@@ -7664,6 +7667,9 @@ namespace stream {
 #if VIPLE_VR_BRIDGE_HAS_ABI
         if (session.vr->negotiated().pcvr) {
           ::vr::bridge::set_haptic_sink(nullptr);  // M4a R3：先摘 sink，再清 active
+  #ifdef _WIN32
+          ::vr::mv_bridge::stop();  // §VR-GAME-MV（M-MV1）：VR session 結束時關閉 MV pipe 並拆除 SHM
+  #endif
         }
 #endif
         ::vr::clear_active_if(session.vr.get());
@@ -7855,6 +7861,9 @@ namespace stream {
         session.vr_focus = ::vr::scene_focus::start([]() {
           return ::vr::bridge::status().scene_pid;
         }, proc::proc.steam_game_pid_lister());
+#ifdef _WIN32
+        ::vr::mv_bridge::start();  // §VR-GAME-MV（M-MV1）：PCVR session 開始時啟動 MV pipe 接受外掛連線
+#endif
       }
 #endif
 

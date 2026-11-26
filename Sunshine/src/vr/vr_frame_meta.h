@@ -17,8 +17,25 @@
 
 // standard includes
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 namespace video {
+
+  struct vr_game_mv_job_t;  // src/vr/vr_game_mv_job.h
+
+  /**
+   * @brief §VR-GAME-MV（M-MV1）：配對到的遊戲內動態向量（MV）與深度中繼資訊。
+   */
+  struct vr_game_mv_meta_t {
+    uint64_t mv_frame_id = 0;  // 遊戲端單調遞增幀號
+    int64_t game_present_qpc = 0;  // 遊戲端 on_present QPC
+    uint16_t grid_w = 0;  // 雙眼並排、實際傳送的網格總寬（codec v2：1/16）
+    uint16_t grid_h = 0;  // 實際傳送的網格高度
+    uint8_t k_step = 1;  // 跨越的遊戲幀數 K_step（1..4）
+    uint8_t flags = 0;  // 壓縮流 flags（b0: hasDepth, b1: reset, b2: headRotSubtracted）
+    uint32_t desc_flags = 0;  // vrmv_desc_t.flags（VRMV_F_*）
+  };
 
   /**
    * @brief VipleStream 2.0 §VR：一幀的 VR metadata（encode 執行緒填、videoBroadcast 執行緒
@@ -50,6 +67,11 @@ namespace video {
     // §VR-GAZE-FOVEA：注視點渲染資訊（由 driver frame descriptor 帶出）
     bool foveated = false;
     float fovea_centre[2][2] = {{0.5f, 0.5f}, {0.5f, 0.5f}};
+
+    // ── §VR-GAME-MV（M-MV1）：配對到的遊戲內動態向量與深度（選填；M-MV2 才送出）──
+    // 壓縮在背景執行緒做，送出端先 wait_ready（vr_game_mv_job.h）；這裡只放不完整型別，一般 session 不 include 它
+    std::shared_ptr<vr_game_mv_job_t> game_mv {};
+    vr_game_mv_meta_t game_mv_meta {};
   };
 
 }  // namespace video

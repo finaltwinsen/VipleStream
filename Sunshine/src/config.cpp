@@ -267,6 +267,18 @@ namespace config {
       return 1;
     }
 
+    /// §VR-GAME-MV（M-MV1）：vr_game_mv＝auto｜disabled（值寫錯警告並維持 auto）
+    vr_t::game_mv_e game_mv_from_view(const std::string_view value, const std::string_view key) {
+      if (value == "disabled"sv) {
+        return vr_t::game_mv_e::disabled;
+      }
+      if (value == "auto"sv) {
+        return vr_t::game_mv_e::automatic;
+      }
+      warn_config(std::format("config: invalid value for '{}': '{}' -- accepted values: auto, disabled. Falling back to 'auto'", key, value));
+      return vr_t::game_mv_e::automatic;
+    }
+
     /**
      * @brief 嚴格解析 vr_* 的整數設定項：不是十進位整數、或不在允許範圍就警告並保留預設值。
      *
@@ -1748,6 +1760,9 @@ namespace config {
     generic_f(vars, "vr_fovea_tiles", vr.fovea_tiles, vr_opt::fovea_tiles_from_view);
     // §VR-FOVEA-QP（2026-11-11）：分塊時全視野那一塊比注視點那塊粗多少（QP 差，0＝不分）
     vr_opt::int_strict_f(vars, "vr_fovea_periph_qp", vr.fovea_periph_qp, 0, 30, false);
+    // §VR-GAME-MV（M-MV1）：遊戲行程內動態向量擷取開關（auto｜disabled，預設 auto）與開發傾印（<開始秒>:<幀數>）
+    generic_f(vars, "vr_game_mv", vr.game_mv, vr_opt::game_mv_from_view);
+    string_f(vars, "vr_dev_mvdump", vr.dev_mvdump);
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

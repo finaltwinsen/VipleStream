@@ -108,8 +108,38 @@ typedef void (NVSDK_CONV *PFN_NVSDK_NGX_ProgressCallback)(float InCurrentProgres
 #define NVSDK_NGX_Parameter_OutWidth                             "OutWidth"
 #define NVSDK_NGX_Parameter_OutHeight                            "OutHeight"
 #define NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags            "DLSS.Feature.Create.Flags"
-#define NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width  "DLSS.Render.Subrect.Dimensions.Width"
-#define NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height "DLSS.Render.Subrect.Dimensions.Height"
+
+// ----------------------------------------------------------------------------
+// 對照官方檔名：include/nvsdk_ngx_defs.h
+// DLSS 每次評估的子區域（Subrect）參數名稱常數（官方標頭實際字串定義）
+// 出處：NVIDIA DLSS SDK include/nvsdk_ngx_defs.h
+//   #define NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X       "DLSS.Input.Color.Subrect.Base.X"
+//   #define NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y       "DLSS.Input.Color.Subrect.Base.Y"
+//   #define NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X       "DLSS.Input.Depth.Subrect.Base.X"
+//   #define NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y       "DLSS.Input.Depth.Subrect.Base.Y"
+//   #define NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X           "DLSS.Input.MV.Subrect.Base.X"
+//   #define NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y           "DLSS.Input.MV.Subrect.Base.Y"
+//   #define NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X            "DLSS.Output.Subrect.Base.X"
+//   #define NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y            "DLSS.Output.Subrect.Base.Y"
+//   #define NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width  "DLSS.Render.Subrect.Dimensions.Width"
+//   #define NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height "DLSS.Render.Subrect.Dimensions.Height"
+//   #define NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects           "DLSS.Enable.Output.Subrects"
+// 註：官方巨集名稱為 SubrectBase（無底線），其對應字串為 "DLSS.Input.MV.Subrect.Base.X/Y"；
+//     另附無點別名常數 NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_NoDot_X/Y 作為相容備援查詢。
+// ----------------------------------------------------------------------------
+#define NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X        "DLSS.Input.Color.Subrect.Base.X"
+#define NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y        "DLSS.Input.Color.Subrect.Base.Y"
+#define NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X        "DLSS.Input.Depth.Subrect.Base.X"
+#define NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y        "DLSS.Input.Depth.Subrect.Base.Y"
+#define NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X            "DLSS.Input.MV.Subrect.Base.X"
+#define NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y            "DLSS.Input.MV.Subrect.Base.Y"
+#define NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_NoDot_X      "DLSS.Input.MV.SubrectBase.X"
+#define NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_NoDot_Y      "DLSS.Input.MV.SubrectBase.Y"
+#define NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X             "DLSS.Output.Subrect.Base.X"
+#define NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y             "DLSS.Output.Subrect.Base.Y"
+#define NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width   "DLSS.Render.Subrect.Dimensions.Width"
+#define NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height  "DLSS.Render.Subrect.Dimensions.Height"
+#define NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects            "DLSS.Enable.Output.Subrects"
 
 #ifdef __cplusplus
 } // extern "C"
