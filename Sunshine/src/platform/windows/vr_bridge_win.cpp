@@ -52,6 +52,7 @@
 #include "src/platform/windows/utf_utils.h"
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_direct_kick.h"
+#include "src/vr/vr_platform.h"
 #include "src/vr/vr_edge_hold.h"
 #include "src/vr/vr_echo_handoff.h"
 
@@ -71,6 +72,12 @@ namespace vr::bridge {
     constexpr int64_t kHeartbeatMs = 100;
     constexpr int64_t kDriverHungMs = 2000;
     constexpr int64_t kDriverFirstBeatMs = 3000;
+    // §VR-IPC-1126（2026-11-26）：連開兩場、SteamVR 還在重啟時，map 當下那一筆心跳會先被寫進 shm，
+    // ipc 執行緒接著可能卡在開貼圖、超過 2 秒沒有下一筆，舊的 stale 規則會把這一代拆掉。
+    // 心跳「還沒建立」的期間不以 stale 判 hung；從 welcome 起算的上限。超過仍判。
+    constexpr int64_t kDriverStartupGraceMs = 15000;
+    // welcome_qpc 是 WELCOME 寫完才記的，driver 可能在 write 回來之前就寫了第一筆心跳，留一點裕度仍算這一代。
+    constexpr int64_t kDriverHbWelcomeSlackMs = 200;
     constexpr int64_t kPipeRetryMs = 30000;
     constexpr int64_t kUserPollNoUserMs = 5000;
     constexpr int64_t kUserPollMs = 30000;
@@ -490,6 +497,33 @@ namespace vr::bridge {
     }
 
     /**
+     * @brief driver log ring 轉印到 sunshine.log 之前的過濾。
+     * @details §VR-IPC-1126（2026-11-26）：sanitize() 把 '[' 換成 '?' 是為了不讓對方偽造 `[VIPLE-VR-IPC]` 這類
+     *          server 前綴，但 driver 自己的 tag（`[VIPLE-VR-STALE]`）會變成 `?VIPLE-VR-STALE]`，和文件對不上。
+     *          這裡改成 '('：仍是可列印 ASCII，拼不出以 '[' 開頭的 tag（grep `[VIPLE-VR-IPC]` 不會命中偽造行），
+     *          轉印後是 `(VIPLE-VR-STALE]`，grep "VIPLE-VR-STALE" 找得到。不用 '‹'：非 ASCII 會被這條規則再換成 '?'。
+     *          不採用「只拿掉行首的 '['」：行中間仍可再寫一個 `[VIPLE-VR-IPC]`。
+     */
+    std::string sanitize_driver_log(const char *s, size_t max_len) {
+      if (!s) {
+        return {};
+      }
+      std::string out;
+      out.reserve(max_len);
+      for (size_t i = 0; i < max_len && s[i] != '\0'; ++i) {
+        const auto c = (unsigned char) s[i];
+        if (c == '[') {
+          out.push_back('(');
+        } else if (c >= 0x20 && c <= 0x7E) {
+          out.push_back((char) c);
+        } else {
+          out.push_back('?');
+        }
+      }
+      return out;
+    }
+
+    /**
      * @brief 對方可控制的路徑（連線行程的映像等）進 log／event 之前：與 sanitize() 同規則，另把空白與 '=' 也換成 '?'，
      *        上限 260 字元。
      * @details 同一使用者的任何 medium 行程都能把自己放在任意可寫目錄（Win32 檔名允許 '['、']'、'='、空白），
@@ -648,6 +682,10 @@ namespace vr::bridge {
       bool textures_sent = false;
       bool ready = false;
       int64_t welcome_qpc = 0;
+      // §VR-IPC-1126（2026-11-26）：連開兩場時 map 那一筆心跳先寫進 shm，ipc 執行緒可能接著卡在開貼圖；要看到更新的一筆才算心跳已建立。
+      int64_t driver_hb_first = 0;
+      bool driver_hb_established = false;
+      bool startup_grace_logged = false;
       int64_t ready_deadline = 0;
       bool armed_sent = false;
       uint64_t pacing_seq = 0;  ///< 單格 seqlock 的本地 seq（偶數 = 完成）
@@ -730,6 +768,7 @@ namespace vr::bridge {
       bool abi_mismatch = false;
       uint32_t peer_abi = 0;
       std::string reason;
+      bool expected_unset = false;  ///< §VR-IPC-1126（2026-11-26）：宿主路徑還沒填，這次拒絕不是身分異常
       conn_t conn;
     };
 
@@ -797,6 +836,7 @@ namespace vr::bridge {
       void on_read_event();
       void on_connected();
       verify_result_t verify(const FILETIME &connected_at);
+      void ensure_host_image();
       void reject_and_disconnect(verify_result_t &r);
       void handshake(conn_t &&c);
       bool ensure_device(const luid_t &luid, HRESULT &hr);
@@ -878,6 +918,8 @@ namespace vr::bridge {
       uint32_t last_refresh_mhz_ = 0;
       std::optional<peer_allow_t> peer_allow_;
       std::wstring host_image_;
+      // §VR-IPC-1126（2026-11-26）：宿主路徑還是空的時候，rejected 的 info 每個 generation 只印一次。~0＝這一段還沒印。
+      uint64_t image_unset_logged_gen_ = ~uint64_t{0};
       sid_t user_logon_copy_;  ///< check_pipe_security() 用（bridge 執行緒寫、呼叫端讀）
       std::shared_ptr<frame_source_t> source_;
       event_cb event_sink_;
@@ -1161,6 +1203,40 @@ namespace vr::bridge {
     void bridge_t::set_host_image(const std::wstring &path) {
       std::lock_guard lk(mtx_);
       host_image_ = normalize_path(path);
+      // §VR-IPC-1126（2026-11-26）：路徑補上之後，若之後又變空，要能再印一次「還沒填」的 info。
+      if (!host_image_.empty()) {
+        image_unset_logged_gen_ = ~uint64_t{0};
+      }
+    }
+
+    void bridge_t::ensure_host_image() {
+      {
+        std::lock_guard lk(mtx_);
+        if (!host_image_.empty()) {
+          return;
+        }
+      }
+      // §VR-IPC-1126（2026-11-26）：pipe 在服務啟動就建好，編排器要等探測或 ARM 才填宿主路徑；使用者先開的 SteamVR 會被 expected=<none> 拒掉。
+      // 不握 mtx_（查詢會掃行程）。查不到就留空，下一次連線再試，仍然拒連；不把對方自己的映像直接當成合法路徑。
+      const std::wstring img = ::vr::platform::expected_driver_host_image();
+      if (img.empty()) {
+        return;
+      }
+      const std::wstring norm = normalize_path(img);
+      if (norm.empty()) {
+        return;
+      }
+      std::wstring logged;
+      {
+        std::lock_guard lk(mtx_);
+        if (!host_image_.empty()) {
+          return;
+        }
+        host_image_ = norm;
+        image_unset_logged_gen_ = ~uint64_t{0};
+        logged = host_image_;
+      }
+      BOOST_LOG(info) << "[VIPLE-VR-IPC] host image set before handshake image=" << loggable_path(logged);
     }
 
     void bridge_t::set_event_sink(event_cb cb) {
@@ -1606,6 +1682,8 @@ namespace vr::bridge {
       pipe_reason_logged_ = "ok";
       BOOST_LOG(info) << "[VIPLE-VR-IPC] pipe ready session=" << self << " dacl=system-only";
       emit({event_e::pipe_state, 0, 0, 0, "ok"});
+      // §VR-IPC-1126（2026-11-26）：能在開始聽連線前補上宿主路徑就補；這時多半還沒探測，補不到就等驗證時再試。
+      ensure_host_image();
       return true;
     }
 
@@ -1915,6 +1993,8 @@ namespace vr::bridge {
       }
 
       // 5. 深度防禦：映像路徑字串比對（不開檔）；selftest peer 例外需 PID＋建立時間＋映像三者相符
+      // §VR-IPC-1126（2026-11-26）：比對前若宿主路徑還是空的，先用執行中的 vrserver（否則快取的 runtime）補上。
+      ensure_host_image();
       const std::wstring image = process_image(hp);
       std::wstring host;
       std::wstring peer_image;
@@ -1931,6 +2011,8 @@ namespace vr::bridge {
       }
       if (!is_peer && !path_equal(image, host)) {
         r.reject = VRIPC_REJ_IDENTITY;
+        // §VR-IPC-1126（2026-11-26）：expected 仍是空的代表宿主路徑還沒填，不是對方映像異常。
+        r.expected_unset = host.empty();
         // r.reason 同時進 sunshine.log 與 event_e::rejected 的 text：對方可控制的映像路徑一律先過濾（loggable_path）
         r.reason = std::format("image image={} expected={}{}", loggable_path(image), loggable_path(host), peer_image.empty() ? std::string {} : " peer=" + loggable_path(peer_image));
         return r;
@@ -1977,23 +2059,44 @@ namespace vr::bridge {
       }
       DisconnectNamedPipe(pipe_.get());
 
-      streak_ = std::min<uint32_t>(streak_ + 1, 1000);
-      const int64_t backoff_s = reject_backoff_sec(streak_);
-      backoff_until_ = now_qpc() + ms_to_qpc(backoff_s * 1000);
+      // §VR-IPC-1126（2026-11-26）：宿主路徑還沒填不是異常。不累加 streak、不拉長退避，info 每個 generation 只印一次。
+      const bool unset = r.expected_unset;
+      int64_t backoff_s = 0;
+      bool log_unset = false;
+      if (!unset) {
+        streak_ = std::min<uint32_t>(streak_ + 1, 1000);
+        backoff_s = reject_backoff_sec(streak_);
+        backoff_until_ = now_qpc() + ms_to_qpc(backoff_s * 1000);
+      } else {
+        backoff_until_ = now_qpc();
+      }
       {
         std::lock_guard lk(mtx_);
         counters_.rejects[std::min<uint32_t>(r.reject, std::size(counters_.rejects) - 1)]++;
         status_.rejects++;
-        status_.reject_streak = streak_;
+        if (!unset) {
+          status_.reject_streak = streak_;
+        }
         status_.last_reject_reason = r.reject;
         status_.peer_abi_version = r.peer_abi;
         if (r.abi_mismatch) {
           status_.abi_mismatch_seen = true;
         }
         status_.phase = phase_e::backoff;
+        if (unset && image_unset_logged_gen_ != generation_counter_) {
+          image_unset_logged_gen_ = generation_counter_;
+          log_unset = true;
+        }
       }
-      BOOST_LOG(warning) << "[VIPLE-VR-IPC] rejected reason=" << r.reason << " rej=" << r.reject << " pid=" << r.conn.pid
-                         << " streak=" << streak_ << " backoff=" << backoff_s << 's';
+      if (unset) {
+        if (log_unset) {
+          BOOST_LOG(info) << "[VIPLE-VR-IPC] rejected reason=" << r.reason << " rej=" << r.reject << " pid=" << r.conn.pid
+                          << " host-image-unset=1 logged-once-per-gen=1 backoff=0";
+        }
+      } else {
+        BOOST_LOG(warning) << "[VIPLE-VR-IPC] rejected reason=" << r.reason << " rej=" << r.reject << " pid=" << r.conn.pid
+                           << " streak=" << streak_ << " backoff=" << backoff_s << 's';
+      }
       emit({event_e::rejected, 0, r.reject, 0, r.reason});
       if (r.abi_mismatch) {
         emit({event_e::abi_mismatch, 0, r.peer_abi, 0, r.reason});
@@ -2819,18 +2922,42 @@ namespace vr::bridge {
         status_.ring_corrupt = c.ring_corrupt;
       }
 
-      // driver heartbeat > 2 s 而 pipe 仍開 → hung（第一次 heartbeat 給 3 s）
-      const bool hung = hb_ok ? (now - d.driver_heartbeat_qpc > ms_to_qpc(kDriverHungMs)) : (now - c.welcome_qpc > ms_to_qpc(kDriverFirstBeatMs));
-      if (hung) {
-        const uint64_t gen = c.gen->generation;
-        {
-          std::lock_guard lk(mtx_);
-          counters_.driver_hung++;
+      // §VR-IPC-1126（2026-11-26）：連開兩場時 map／送 STATE 會先寫一筆心跳，ipc 執行緒接著可能卡在開貼圖。
+      // 看到屬於這一代的心跳、之後又看到更新的一筆，才算已建立；建立前不以 stale 判 hung，從 welcome 起最多 15 秒。完全沒有心跳仍是 3 秒。
+      const int64_t hb = d.driver_heartbeat_qpc;
+      if (!c.driver_hb_established && hb > 0 && hb + ms_to_qpc(kDriverHbWelcomeSlackMs) >= c.welcome_qpc && hb_ok) {
+        if (c.driver_hb_first == 0) {
+          c.driver_hb_first = hb;
+        } else if (hb > c.driver_hb_first) {
+          c.driver_hb_established = true;
         }
-        BOOST_LOG(warning) << "[VIPLE-VR-IPC] driver-hung gen=" << gen << " heartbeat=" << (hb_ok ? "stale" : "none");
-        emit({event_e::driver_hung, gen, 0, 0, hb_ok ? "stale" : "none"});
-        teardown("driver-hung", true, VRIPC_BYE_PROTOCOL_ERROR, VRIPC_REJ_TIMEOUT);
-        return false;
+      }
+      const int64_t waited = now - c.welcome_qpc;
+      const bool stale_hung = hb_ok && (now - hb > ms_to_qpc(kDriverHungMs));
+      const bool none_hung = !hb_ok && (waited > ms_to_qpc(kDriverFirstBeatMs));
+      const bool in_startup_grace = !c.driver_hb_established && waited <= ms_to_qpc(kDriverStartupGraceMs);
+      const bool hung = none_hung || (stale_hung && !in_startup_grace);
+      const uint64_t gen = c.gen->generation;
+      // 健康連線每 100 ms 會進這裡：只有真的要印的時候才把 QPC 換成毫秒字串。
+      if ((stale_hung && in_startup_grace && !c.startup_grace_logged) || hung) {
+        const std::string hb_age = hb > 0 ? std::to_string(std::llround(qpc_to_ms(now - hb))) : std::string {"none"};
+        const auto waited_ms = std::llround(qpc_to_ms(waited < 0 ? 0 : waited));
+        if (stale_hung && in_startup_grace && !c.startup_grace_logged) {
+          c.startup_grace_logged = true;
+          BOOST_LOG(info) << "[VIPLE-VR-IPC] driver-heartbeat grace gen=" << gen << " hbAgeMs=" << hb_age << " waitedMs=" << waited_ms
+                          << " capMs=" << kDriverStartupGraceMs;
+        }
+        if (hung) {
+          {
+            std::lock_guard lk(mtx_);
+            counters_.driver_hung++;
+          }
+          BOOST_LOG(warning) << "[VIPLE-VR-IPC] driver-hung gen=" << gen << " heartbeat=" << (hb_ok ? "stale" : "none") << " hbAgeMs=" << hb_age
+                             << " waitedMs=" << waited_ms;
+          emit({event_e::driver_hung, gen, 0, 0, hb_ok ? "stale" : "none"});
+          teardown("driver-hung", true, VRIPC_BYE_PROTOCOL_ERROR, VRIPC_REJ_TIMEOUT);
+          return false;
+        }
       }
       return true;
     }
@@ -2988,9 +3115,10 @@ namespace vr::bridge {
         }
         ++c.log_in_window;
         ++log_lines;
-        // §B.8 第 8 條：level 夾到 0–2、len 夾到 < 240、非可列印字元與 '[' 換成 '?'、前綴由 server 加
+        // §B.8 第 8 條：level 夾到 0–2、len 夾到 < 240、非可列印字元換成 '?'、前綴由 server 加。
+        // §VR-IPC-1126（2026-11-26）：'[' 改成 '('，driver 的 [VIPLE-VR-STALE] 仍可被 grep，又拼不出伺服器前綴。路徑欄位仍走 sanitize()。
         const size_t len = std::min<size_t>(l.len, VRIPC_LOG_TEXT - 1);
-        const std::string text = sanitize(l.text, len);
+        const std::string text = sanitize_driver_log(l.text, len);
         switch (std::min<uint32_t>(l.level, 2)) {
           case 0:
             BOOST_LOG(info) << "[VIPLE-VR-DRV] " << text;

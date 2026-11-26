@@ -37,6 +37,8 @@ namespace nvenc {
   protected:
     bool init_library() override;
     bool wait_for_async_event(uint32_t timeout_ms) override;
+    uint32_t driver_max_api_version() override;
+    bool recreate_function_list() override;
 
   private:
     HMODULE dll = nullptr;

@@ -104,6 +104,8 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
     private volatile boolean reportedCrash;
     // §QUEST-PCVR：2D 維持 false，releaseSession 才不會多叫 nativePcvrStop。
     private volatile boolean pcvrMode;
+    // §VR-CODE16（2026-11-26）：OpenXR runtime 警告一場只提示一次，STATE 重送不能洗版。
+    private boolean openxrRuntimeOtherNotified;
     private final Handler pcvrPollHandler = new Handler(Looper.getMainLooper());
     private int pcvrPollGeneration;
     // §QUEST-PCVR：重建 session 時舊的結束回呼不能把新的這場關掉。兩者相等才處理。
@@ -1288,6 +1290,11 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
             LimeLog.info("[VIPLE-QXR-ACT] onVrServerError ignored code=" + code);
             return;
         }
+        // §VR-CODE16（2026-11-26）：code 16 是 HMD_ACTIVE 的警告。一場只 Toast 一次，不能結束串流。
+        if (code == 16) {
+            showOpenxrRuntimeOtherOnce();
+            return;
+        }
         LimeLog.severe("[VIPLE-QXR-ACT] host could not start VR code=" + code);
         // 這個回呼在 VR message sink 執行緒，bridge 還握著讀鎖。這裡不能呼叫 nativeStop，
         // 否則跟 stop 的寫鎖互等。先回主執行緒再 finish，releaseSession 才拆 session。
@@ -1304,7 +1311,23 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
         });
     }
 
-    private static String hostVrError(int code) {
+    // §VR-CODE16（2026-11-26）：同一場若 STATE 再送 code 16，第二次直接略過。
+    private void showOpenxrRuntimeOtherOnce() {
+        final String text = hostVrError(16);
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (isFinishing() || isDestroyed() || openxrRuntimeOtherNotified) {
+                    return;
+                }
+                openxrRuntimeOtherNotified = true;
+                LimeLog.warning("[VIPLE-QXR-ACT] host OpenXR runtime is not SteamVR code=16");
+                Toast.makeText(VrStreamActivity.this, text, Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    private String hostVrError(int code) {
         // 編號是 VIPLE_VR_STATE_CODE_*。Java 不能 include 那個標頭。
         switch (code) {
             case 1:
@@ -1321,6 +1344,9 @@ public class VrStreamActivity extends Activity implements NvConnectionListener, 
                 return "SteamVR on the host did not start in time. Try again.";
             case 9:
                 return "A VR game is already running on the host without VipleStream. Quit it, then try again.";
+            case 16:
+                // §VR-CODE16（2026-11-26）：警告文案走字串資源，繁中介面才不會停在英文。
+                return getString(R.string.vr_openxr_runtime_other);
             case 17:
                 return "Steam is not signed in on the host. Sign in on the host, then try again.";
             case 19:

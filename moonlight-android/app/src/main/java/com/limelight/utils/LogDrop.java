@@ -537,6 +537,13 @@ public final class LogDrop {
         return clip(manufacturer + " " + model + " / Android " + release, 200);
     }
 
+    // §LOGDROP-HDR（2026-11-26）：logcat 是整個行程，檔頭數字只屬於剛結束的那一場。用裝置本地時間，才對得上 logcat 的時鐘。
+    public static String sessionEndStamp() {
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.US);
+        format.setTimeZone(TimeZone.getDefault());
+        return format.format(new Date());
+    }
+
     private static String combine(String report, String logcat) {
         String head = report == null ? "" : report;
         String tail = logcat == null ? "" : logcat;

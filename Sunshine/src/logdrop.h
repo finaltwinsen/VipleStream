@@ -22,6 +22,7 @@ namespace logdrop {
   };
 
   // trigger 給協定分辨手動、串流結束、上次沒正常結束。prefer_previous 只讀上一輪，因為這次的檔通常還沒有當時的錯誤。
+  // §LOGDROP-HDR（2026-11-26）：session-end 只送這次行程（最後一個分隔行之後）。crash 仍送上一輪。手動維持整份。
   result_t upload(const std::string &note, const std::string &trigger = "manual", bool prefer_previous = false);
 
   // 跟硬體無關。第一次需要時才產生，所以沒打開網頁、也沒自動送的機器不會多一個檔。

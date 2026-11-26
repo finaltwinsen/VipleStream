@@ -128,6 +128,30 @@ namespace config {
       return nvenc::nvenc_two_pass::quarter_resolution;
     }
 
+    // §NVENC-SPLIT：nvenc_split_encode 的值。打錯字一律退回 disabled（實驗選項不能讓串流因為設定值而改變行為）。
+    nvenc::nvenc_split_encode split_encode_from_view(const std::string_view &value) {
+      if (value == "disabled") {
+        return nvenc::nvenc_split_encode::disabled;
+      }
+      if (value == "auto") {
+        return nvenc::nvenc_split_encode::auto_mode;
+      }
+      if (value == "auto_forced") {
+        return nvenc::nvenc_split_encode::auto_forced;
+      }
+      if (value == "two") {
+        return nvenc::nvenc_split_encode::two;
+      }
+      if (value == "three") {
+        return nvenc::nvenc_split_encode::three;
+      }
+      if (value == "native_off") {
+        return nvenc::nvenc_split_encode::native_off;
+      }
+      warn_config(std::format("config: unknown nvenc_split_encode value: '{}' -- accepted values: disabled, auto, auto_forced, two, three, native_off. Falling back to 'disabled'", value));
+      return nvenc::nvenc_split_encode::disabled;
+    }
+
   }  // namespace nv
 
   // VipleStream 2.0 §VR：vr_* 設定項的轉換器。不能叫 namespace vr——config::vr 是設定變數。
@@ -1427,6 +1451,7 @@ namespace config {
     int_between_f(vars, "nvenc_vbv_increase", video.nv.vbv_percentage_increase, {0, 400});
     bool_f(vars, "nvenc_spatial_aq", video.nv.adaptive_quantization);
     generic_f(vars, "nvenc_twopass", video.nv.two_pass, nv::twopass_from_view);
+    generic_f(vars, "nvenc_split_encode", video.nv.split_encode, nv::split_encode_from_view);  // §NVENC-SPLIT
     bool_f(vars, "nvenc_h264_cavlc", video.nv.h264_cavlc);
     bool_f(vars, "nvenc_realtime_hags", video.nv_realtime_hags);
     bool_f(vars, "abr_cut_idr", video.abr_cut_idr);  // §LAT-2D

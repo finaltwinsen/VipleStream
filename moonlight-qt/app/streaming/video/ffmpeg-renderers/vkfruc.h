@@ -1588,8 +1588,7 @@ private:
     // === §J.3.e.X Path β.5 — RIFE flow extraction + native-res warp ===
     // Replaces β.4's bilinear-up-RGB approach with: extract RIFE flow + mask
     // tensors (small, smooth) → bilinear up to source res → custom warp+blend
-    // at native res preserves real frame sharpness.  See plan-mode design at
-    // C:\Users\final\.claude\plans\session-elegant-squid.md.
+    // at native res preserves real frame sharpness.
     bool m_Beta5Enabled = true;  // VIPLE_VKFRUC_RIFE_BETA5=0 → fallback to β.4
 
     // Intermediate: RIFE outputs at infer dim

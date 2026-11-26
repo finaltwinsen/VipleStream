@@ -12,6 +12,17 @@ namespace nvenc {
     full_resolution,  ///< Better overall statistics, slower and uses more extra vram
   };
 
+  /// §NVENC-SPLIT（實驗）：split-frame encoding，有 2～3 顆 NVENC 引擎的卡讓一幀由多顆引擎並行編碼。
+  /// 只有 HEVC／AV1、驅動支援 API 13.0 以上時才生效；除了 disabled，其他值都會改用 13.0 的結構跟驅動溝通。
+  enum class nvenc_split_encode {
+    disabled,  ///< 預設：不設 splitEncodeMode，照舊以 11.0／12.0 的結構跟驅動溝通
+    auto_mode,  ///< NV_ENC_SPLIT_AUTO_MODE：驅動依 preset、tuning、解析度自己決定要不要分
+    auto_forced,  ///< NV_ENC_SPLIT_AUTO_FORCED_MODE：一定分，分幾條由驅動決定
+    two,  ///< NV_ENC_SPLIT_TWO_FORCED_MODE：分兩條（只有一顆引擎時仍是一條）
+    three,  ///< NV_ENC_SPLIT_THREE_FORCED_MODE：分三條（引擎不足三顆時用引擎數）
+    native_off,  ///< NV_ENC_SPLIT_DISABLE_MODE：用 13.0 的結構但明確關閉 split（A/B 對照 API 版本本身的影響）
+  };
+
   /**
    * @brief NVENC encoder configuration.
    */
@@ -50,6 +61,9 @@ namespace nvenc {
 
     // Add filler data to encoded frames to stay at target bitrate, mainly for testing
     bool insert_filler_data = false;
+
+    // §NVENC-SPLIT（實驗，預設關）：sunshine.conf 的 nvenc_split_encode
+    nvenc_split_encode split_encode = nvenc_split_encode::disabled;
   };
 
 }  // namespace nvenc

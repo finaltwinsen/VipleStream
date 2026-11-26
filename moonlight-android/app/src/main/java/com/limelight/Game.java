@@ -304,8 +304,11 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private final Object glassesLife = new Object();
     private LinearLayout glassesControls;
     private TextView glassesStatusView;
+    // §BEAST-3D-UX（2026-11-26）：逾時對話框要能在拆串流時關掉，bring-up 執行緒才不會一直等按鈕。
+    private AlertDialog beast3dRetryDialog;
     private static final int GLASSES_3D_HEIGHT = 1080;
-    private static final long BEAST_3D_WAIT_MS = 60000L;
+    // §BEAST-3D-UX（2026-11-26）：空等上限從 60 秒改為 30 秒；到點改問再試，不直接結束。
+    private static final long BEAST_3D_WAIT_MS = 30000L;
     // 權限等待可被 interrupt 立刻返回。bulkTransfer 最久約 1 秒，多留幾次指令的時間。
     private static final long GLASSES_BRINGUP_JOIN_MS = 8000L;
     private static final long GLASSES_READER_JOIN_MS = 1500L;
@@ -5315,38 +5318,64 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             if (!publishGlassesDisplay(0L)) {
                 // §VITURE：開串流前面板又離開 3D。不要改畫到手機，也不要送 0x32。
                 VitureUsb.logI("display left 3840x1080 before present; waiting for the mode button");
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        showBeastPress3dPrompt();
-                    }
-                });
-                if (!waitForBeast3d(SystemClock.elapsedRealtime())) {
-                    failBeast3dWait();
-                }
+                // §BEAST-3D-UX（2026-11-26）：面板又掉回 2D 時同樣倒數，逾時改問再試。
+                waitBeast3dWithRetry();
             }
             return;
         }
         VitureUsb.logI("beast panel is 2d; waiting for the glasses button");
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                showBeastPress3dPrompt();
+        // §BEAST-3D-UX（2026-11-26）：Beast 不能送 SET_DISPLAY_MODE。只等按鈕，並把剩餘秒數畫出來。
+        waitBeast3dWithRetry();
+    }
+
+    // §BEAST-3D-UX（2026-11-26）：每一輪最多 30 秒。使用者選再試就重開一輪，選結束才關。
+    private void waitBeast3dWithRetry() {
+        while (!glassesShutdown && !isFinishing() && !isDestroyed() && !glassesPresented) {
+            if (waitForBeast3d(SystemClock.elapsedRealtime())) {
+                return;
             }
-        });
-        if (!waitForBeast3d(SystemClock.elapsedRealtime())) {
-            failBeast3dWait();
+            if (glassesShutdown || isFinishing() || isDestroyed() || glassesPresented
+                    || Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            if (!askBeast3dRetry()) {
+                return;
+            }
         }
     }
 
     private boolean waitForBeast3d(long startedMs) {
+        if (glassesShutdown || isFinishing() || isDestroyed() || glassesPresented) {
+            return glassesPresented;
+        }
+        // §BEAST-3D-UX（2026-11-26）：倒數只改提示。3D 仍每 200 ms 看 findGlasses3d，偵測到就立刻繼續。
+        VitureUsb.logI("beast 3d wait start");
         long deadline = startedMs + BEAST_3D_WAIT_MS;
+        int shownSeconds = -1;
         while (!glassesShutdown && !isFinishing() && !isDestroyed() && !glassesPresented) {
             if (findGlasses3d() != null && publishGlassesDisplay(startedMs)) {
+                long elapsed = SystemClock.elapsedRealtime() - startedMs;
+                VitureUsb.logI("panel switched after " + elapsed + " ms");
                 return true;
             }
-            if (SystemClock.elapsedRealtime() >= deadline) {
+            long now = SystemClock.elapsedRealtime();
+            if (now >= deadline) {
+                VitureUsb.logI("timeout");
                 return false;
+            }
+            int remainSec = (int) ((deadline - now + 999L) / 1000L);
+            if (remainSec < 1) {
+                remainSec = 1;
+            }
+            if (remainSec != shownSeconds) {
+                shownSeconds = remainSec;
+                final int seconds = remainSec;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        showBeastPress3dCountdown(seconds);
+                    }
+                });
             }
             try {
                 Thread.sleep(200);
@@ -5358,18 +5387,142 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         return glassesPresented;
     }
 
-    private void failBeast3dWait() {
-        VitureUsb.logI("beast 3d wait timed out after " + BEAST_3D_WAIT_MS + " ms");
+    // §BEAST-3D-UX（2026-11-26）：逾時不再用會關掉 Activity 的錯誤對話框。對話框還開著時若已切到 3D，直接繼續。
+    private boolean askBeast3dRetry() {
+        final CountDownLatch gate = new CountDownLatch(1);
+        final AtomicBoolean retry = new AtomicBoolean(false);
+        final AtomicBoolean decided = new AtomicBoolean(false);
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                if (glassesShutdown || isFinishing() || isDestroyed() || glassesPresented) {
-                    return;
-                }
-                Dialog.displayDialog(Game.this, getResources().getString(R.string.conn_error_title),
-                        getResources().getString(R.string.glasses_vr_beast_timeout), true);
+                showBeast3dRetryDialog(gate, retry, decided);
             }
         });
+        boolean postedStop = false;
+        boolean postedContinue = false;
+        long stopDeadline = 0L;
+        try {
+            while (!gate.await(200, TimeUnit.MILLISECONDS)) {
+                if (!postedStop && (glassesShutdown || isFinishing() || isDestroyed()
+                        || Thread.currentThread().isInterrupted())) {
+                    postedStop = true;
+                    // §BEAST-3D-UX（2026-11-26）：拆串流時主執行緒若沒跑到，最多再等 2 秒就離開，避免 join 卡滿 8 秒。
+                    stopDeadline = SystemClock.elapsedRealtime() + 2000L;
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (decided.compareAndSet(false, true)) {
+                                dismissBeast3dRetryDialog();
+                                gate.countDown();
+                            }
+                        }
+                    });
+                } else if (!postedContinue && findGlasses3d() != null) {
+                    postedContinue = true;
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (decided.compareAndSet(false, true)) {
+                                dismissBeast3dRetryDialog();
+                                retry.set(true);
+                                gate.countDown();
+                            }
+                        }
+                    });
+                }
+                if (postedStop && stopDeadline > 0L && SystemClock.elapsedRealtime() >= stopDeadline) {
+                    return false;
+                }
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (decided.compareAndSet(false, true)) {
+                        dismissBeast3dRetryDialog();
+                        gate.countDown();
+                    }
+                }
+            });
+            return false;
+        }
+        return retry.get() && !glassesShutdown && !isFinishing() && !isDestroyed() && !glassesPresented;
+    }
+
+    // §BEAST-3D-UX（2026-11-26）：再試一次重開一輪等待；結束才關。畫出對話框前若已是 3D，直接繼續。
+    private void showBeast3dRetryDialog(final CountDownLatch gate, final AtomicBoolean retry,
+                                        final AtomicBoolean decided) {
+        if (decided.get()) {
+            return;
+        }
+        if (glassesShutdown || isFinishing() || isDestroyed()) {
+            if (decided.compareAndSet(false, true)) {
+                gate.countDown();
+            }
+            return;
+        }
+        // 對話框畫出來之前面板已經回到 3D，就不要擋下這一次繼續。
+        if (glassesPresented || findGlasses3d() != null) {
+            if (decided.compareAndSet(false, true)) {
+                retry.set(true);
+                gate.countDown();
+            }
+            return;
+        }
+        dismissBeast3dRetryDialog();
+        showBeastPress3dPrompt();
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.glasses_vr_beast_wait_title)
+                .setMessage(getString(R.string.glasses_vr_beast_timeout_retry,
+                        (int) (BEAST_3D_WAIT_MS / 1000L)))
+                .setCancelable(false)
+                .setPositiveButton(R.string.glasses_vr_beast_retry, (whichDialog, which) -> {
+                    if (decided.compareAndSet(false, true)) {
+                        retry.set(true);
+                        gate.countDown();
+                    }
+                })
+                .setNegativeButton(R.string.glasses_vr_end, (whichDialog, which) -> {
+                    if (!decided.compareAndSet(false, true)) {
+                        return;
+                    }
+                    gate.countDown();
+                    if (!glassesPresented && !isFinishing() && !isDestroyed()) {
+                        finish();
+                    }
+                })
+                .create();
+        dialog.setCanceledOnTouchOutside(false);
+        dialog.setOnDismissListener(whichDialog -> {
+            if (beast3dRetryDialog == dialog) {
+                beast3dRetryDialog = null;
+            }
+            if (decided.compareAndSet(false, true)) {
+                gate.countDown();
+            }
+        });
+        beast3dRetryDialog = dialog;
+        try {
+            dialog.show();
+        } catch (RuntimeException error) {
+            // §BEAST-3D-UX（2026-11-26）：show 失敗若沒人放開閘門，bring-up 執行緒會一直停在對話框。
+            if (beast3dRetryDialog == dialog) {
+                beast3dRetryDialog = null;
+            }
+            VitureUsb.logW("beast 3d retry dialog failed", error);
+            if (decided.compareAndSet(false, true)) {
+                gate.countDown();
+            }
+        }
+    }
+
+    private void dismissBeast3dRetryDialog() {
+        AlertDialog dialog = beast3dRetryDialog;
+        beast3dRetryDialog = null;
+        if (dialog != null && dialog.isShowing()) {
+            dialog.dismiss();
+        }
     }
 
     private void showBeastPress3dPrompt() {
@@ -5381,6 +5534,19 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             return;
         }
         hint.setText(R.string.glasses_vr_beast_press_3d);
+        hint.setVisibility(View.VISIBLE);
+    }
+
+    // §BEAST-3D-UX（2026-11-26）：等待中每秒改剩餘秒數，使用者才知道還要按眼鏡，而不是畫面卡住。
+    private void showBeastPress3dCountdown(int secondsLeft) {
+        if (isFinishing() || isDestroyed() || glassesPresented || beast3dRetryDialog != null) {
+            return;
+        }
+        TextView hint = findViewById(R.id.externalDisplayHint);
+        if (hint == null) {
+            return;
+        }
+        hint.setText(getString(R.string.glasses_vr_beast_press_3d_countdown, secondsLeft));
         hint.setVisibility(View.VISIBLE);
     }
 

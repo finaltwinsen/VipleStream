@@ -2,6 +2,11 @@ FFmpeg version of headers required to interface with Nvidias codec APIs.
 
 Corresponds to Video Codec SDK version 12.0.16.
 
+VipleStream: include/ffnvcodec/nvEncodeAPI.h was replaced with the Video Codec SDK 13.0 version
+(NVENCAPI 13.0) for split-frame encoding (nvenc_split_encode). The dynlink_*.h files are still the
+sdk/12.0 ones. By default the NVENC code still talks to the driver with SDK 11.0/12.0 structures,
+see the comment at the top of src/nvenc/nvenc_base.cpp.
+
 Minimum required driver versions:
 Linux: 520.56.06 or newer
 Windows: 522.25 or newer

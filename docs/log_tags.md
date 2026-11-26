@@ -919,6 +919,9 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
 [VIPLE-VR-IPC] user-ace reapplied | user-ace reapply failed               ← 核對時發現 pipe 少了使用者 ACE
 [VIPLE-VR-IPC] handshake gen=<G> driver=<ver> abi=<N> vrserver-pid=<pid> iface=IVRDriverDirectModeComponent_009 ring=<W>x<H> luid=set identity=<身分> caps=0x…
 [VIPLE-VR-IPC] rejected reason=<原因> …                                    ← 映像路徑經 loggable_path 過濾（空白、`=`、`[` 會變成 `?`）
+[VIPLE-VR-IPC] host image set before handshake image=<路徑>                ← §VR-IPC-1126：開 pipe 或驗證前補上還沒填的宿主路徑
+[VIPLE-VR-IPC] driver-heartbeat grace gen=<G> hbAgeMs=<ms> waitedMs=<ms> capMs=15000
+[VIPLE-VR-IPC] driver-hung gen=<G> heartbeat=<stale|none> hbAgeMs=<ms|none> waitedMs=<ms>
 [VIPLE-VR-ADMIN] pipe ready
 [VIPLE-VR-ADMIN] selftest accepted run=<UTC 時間戳> (detached; …)
 [VIPLE-VR-ADMIN] result rc=<N> state=done|running|interrupted run=<…> pass=<N> fail=<N> notRun=<N> source=memory|file
@@ -935,6 +938,16 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
   rc=0 不代表所有情境都驗過，要看 `notRun`。
 - 2026-09-28 `<host>` 實測：T0＋T2 `pass=29 fail=0 notRun=2`、T6 `pass=30`；`T2.second-instance` 的 SYSTEM 探測在實例已滿時回
   ERROR_PIPE_BUSY（231），和 ERROR_ACCESS_DENIED（5）同樣算通過。
+- **§VR-IPC-1126（2026-11-26）**
+  - `driver-hung` 多了 `hbAgeMs`（上次心跳距今；沒有心跳是 `none`）與 `waitedMs`（從 welcome 起已等的時間）。
+    這一代的心跳還沒建立（看到一筆屬於這一代的心跳之後，又看到更新的一筆）之前，不以 `heartbeat=stale` 拆線，
+    從 welcome 起最多 15 秒；第一次因此放過時印一行 info `driver-heartbeat grace`（每個 gen 一次）。
+    完全沒有心跳仍是 3 秒（`heartbeat=none`）。貼圖已送出時，5 秒的 ready-timeout 仍會拆線。
+  - `host image set before handshake`：pipe 在服務啟動就建好，編排器往往還沒把合法 vrserver 路徑寫進來。
+    開 pipe 成功、以及每次驗證映像之前，若路徑還是空的，用執行中的 vrserver（否則快取的 runtime）補上。
+  - `rejected reason=image … expected=<none>` 且行尾 `host-image-unset=1 logged-once-per-gen=1 backoff=0`：
+    補完仍是空的。這不是異常，降為 info、每個 generation 只印一次、不累加 streak、不退避。
+    expected 有值但路徑不同仍是 Warning，streak 與退避（1、2、4、8、10 秒）照舊。
 
 ## 5c. Steam Frame 探測與執行環境（2.0 §SF，M2a 起）
 
@@ -983,7 +996,12 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
                                                                                        accMax＝這 10 秒估到的最大加速度（m/s²）。predict=0 時 ctrlKeepNowUs＝設定的上限（−1＝不限制）
 [VIPLE-VR-DRV] [VIPLE-VR-STALE] <hmd|ctrl left|ctrl right> enter age=…ms off0=…ms v=…m/s       ← 進入 stale（每秒最多 5 行，三個裝置共用）
 [VIPLE-VR-DRV] [VIPLE-VR-STALE] <hmd|ctrl left|ctrl right> recover gap=…ms jumpMm=… blend=<0|1>  ← 恢復；jumpMm＝恢復那一刻的落差。blend 是「重送的姿態」到新樣本的距離；
-                                                                                       coast 是「SteamVR 顯示出來的位置」的落差（含它照速度外插的那一段），等速運動時接近 0
+                                                                                       coast 是「SteamVR 顯示出來的位置」的落差（含它照速度外插的那一段），等速運動時接近 0。
+                                                                                       §VR-IPC-1126（2026-11-26）：上面兩行是 vrserver.txt 的原文。轉進 sunshine.log 時
+                                                                                       driver 內文的 `[` 改成 `(`（不用 `?`：`?VIPLE-VR-STALE]` 搜不到；不用 `‹`：非 ASCII 會再變成 `?`；
+                                                                                       不拿掉行首的 `[`：行中間仍可再寫一個 `[VIPLE-VR-IPC]`）。
+                                                                                       sunshine.log 是 `[VIPLE-VR-DRV] (VIPLE-VR-STALE] …`。grep `VIPLE-VR-STALE` 兩種檔案都找得到；
+                                                                                       這一行拼不出以 `[` 開頭的伺服器 tag。rejected 的映像路徑仍走 loggable_path，`[`、空白、`=` 還是 `?`。
 [VIPLE-VR-DRV] tracking recovered gap_ms=… total_ms=… hold=<0|1>                  ← stale 之後收到新樣本；gap_ms＝距上次 stale 重送、total_ms＝整段空窗（2026-10-05 起）
 [VIPLE-VR-EDGE] a button or trigger change arrived N ms later than usual: the game gets the hands as they were at that moment for H ms
                 (so far this session: N times, N samples skipped)                    ← server（§VR-EDGE-HOLD，2026-11-14，`vr_edge_hold_ms`，每秒最多一行）：
@@ -1031,6 +1049,12 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
 [VIPLE-VR-ENC] probe cache stored shape=<W>x<H>@<hz> irFrames=<n> entries=<N>
 [VIPLE-VR-ENC] probe cache hit encoder=<name> codec=hevc|h264 intraRefresh=0|1 hevc10bit=0|1 ms=<N> shape=<W>x<H>@<hz> irFrames=<n> codecs=0x<mask>
 [VIPLE-VR-ENC] probe cache hit but the VR shape no longer validates; running the full probe ms=<N> shape=…      ← warning
+[VIPLE-NVENC-SPLIT] requested=<值> applied=<mode> api=13.0 codec=hevc|av1 size=<W>x<H> engines=<N>   ← §NVENC-SPLIT（2026-11-26，host `nvenc_base.cpp`，
+                                                                                    nvenc_split_encode 不是 disabled 才印）：每建立一次 NVENC 編碼器一行（編碼器探測也算）；applied＝送出的
+                                                                                    NV_ENC_SPLIT_ENCODE_MODE（0 auto、1 auto_forced、2 two、3 three、15 native_off）、engines＝NV_ENC_CAPS_NUM_ENCODER_ENGINES
+[VIPLE-NVENC-SPLIT] requested=<值> applied=none api=11.0|12.0 codec=… size=… reason=…   ← 沒有啟用的原因（H.264、驅動 API < 13.0 等），照舊用 11.0／12.0 結構
+[VIPLE-NVENC-SPLIT] NvEncInitializeEncoder() rejected split-frame: requested=… mode=… api=… codec=… size=… error=…   ← error：驅動拒絕
+[VIPLE-NVENC-SPLIT] encoder creation with split-frame failed (…), retrying without split   ← warning：13.0 結構建立的任一步失敗，整個重來一次（等同 disabled）
 [VIPLE-VR-ENC] probe cache cleared (<原因>, entries=<N>)
                                                                                     探測結果在行程內依「形狀＋session config 的 adapter LUID＋指定的編碼器＋hevc_mode」快取（最多 8 筆）。
                                                                                     not used＝還沒有 session config（服務啟動後的第一場、selftest 之後的第一場），照舊完整探測、不存。

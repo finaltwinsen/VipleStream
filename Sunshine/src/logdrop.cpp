@@ -44,6 +44,8 @@ namespace logdrop {
     constexpr std::uint64_t kPreviousTailBytes = 2ull * 1024ull * 1024ull;
     // §LOGDROP：重啟後新檔常常只剩開頭。門檻用檔案大小，不是裁過的內容長度。
     constexpr std::uint64_t kSmallCurrentBytes = 256ull * 1024ull;
+    // §LOGDROP-HDR（2026-11-26）：上一輪和這次的界線。session-end 只留最後一次出現之後，避免每場都把已送過的內容再送一次。
+    constexpr std::string_view kRunSeparator = "----- [VIPLE-LOGDROP] previous log above / current log below -----\n";
     constexpr std::size_t kNoteChars = 2000;
     constexpr std::size_t kDeviceChars = 200;
     constexpr std::size_t kResponseCap = 1024ull * 1024ull;
@@ -624,7 +626,16 @@ namespace logdrop {
       return out;
     }
 
-    std::string build_payload(const std::string &log_path, const std::vector<std::string> &secrets, bool prefer_previous) {
+    // 分隔行不在檔裡時，整段就是這次行程。有多行時取最後一次之後，前面的是更早的行程。
+    std::string after_last_run(std::string text) {
+      const auto pos = text.rfind(kRunSeparator);
+      if (pos == std::string::npos) {
+        return text;
+      }
+      return text.substr(pos + kRunSeparator.size());
+    }
+
+    std::string build_payload(const std::string &log_path, const std::vector<std::string> &secrets, bool prefer_previous, std::string_view trigger) {
       // 空路徑再接 ".1" 會去開工作目錄裡名為 .1 的檔，那不是上一輪 log。
       if (log_path.empty()) {
         return {};
@@ -632,6 +643,7 @@ namespace logdrop {
       auto current = read_tail(log_path, kCurrentTailBytes);
       if (prefer_previous) {
         // 上次沒正常結束時，這次啟動已經把上一輪轉成 .1。問題在那一份，不要只送這次開頭的幾行。
+        // §LOGDROP-HDR（2026-11-26）：crash 維持送上一輪整份。當掉的內容在被輪替走的那份，不切成這次行程。
         auto prev = read_tail(log_path + ".1", kCurrentTailBytes);
         if (!prev.text.empty()) {
           return redact(prev.text, secrets);
@@ -639,6 +651,11 @@ namespace logdrop {
         BOOST_LOG(info) << "[VIPLE-LOGDROP] previous log unavailable, using current";
         return redact(current.text, secrets);
       }
+      if (trigger == "session-end") {
+        // §LOGDROP-HDR（2026-11-26）：串流結束只送這次行程。不再把 .1 接在前面，否則每一場都把已送過的上一輪再送一次。
+        return redact(after_last_run(std::move(current.text)), secrets);
+      }
+      // §LOGDROP-HDR（2026-11-26）：手動上傳維持現狀。目前檔很小就接上一輪，讓按按鈕的人一次看到前後文。
       std::string previous;
       if (current.size < kSmallCurrentBytes) {
         auto prev = read_tail(log_path + ".1", kPreviousTailBytes);
@@ -653,7 +670,7 @@ namespace logdrop {
       if (previous.back() != '\n') {
         previous.push_back('\n');
       }
-      previous += "----- [VIPLE-LOGDROP] previous log above / current log below -----\n";
+      previous += kRunSeparator;
       previous += cur;
       return previous;
     }
@@ -1097,7 +1114,8 @@ namespace logdrop {
 
     try {
       const auto secrets = collect_secrets();
-      const auto payload = build_payload(config::sunshine.log_file, secrets, prefer_previous);
+      // §LOGDROP-HDR（2026-11-26）：把 trigger 傳進去，session-end 才切得了這次行程，手動與 crash 維持原範圍。
+      const auto payload = build_payload(config::sunshine.log_file, secrets, prefer_previous, trigger);
       // 先裁再遮：說明很長時不必掃整段。遮完短名稱會變長，所以再裁一次，才不會超過協定的 2000。
       const auto note_out = clip_utf16_units(redact(clip_utf16_units(note, kNoteChars), secrets), kNoteChars);
 

@@ -4609,6 +4609,65 @@ not matter). Any other value is reported in the log as an invalid value and the 
     </tr>
 </table>
 
+### nvenc_split_encode
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            VipleStream §NVENC-SPLIT (experimental): split-frame encoding. On GPUs with two or three NVENC engines
+            (e.g. RTX 4070 Ti and above, RTX 5070 Ti and above) one frame of a single session is split into strips that
+            are encoded by several engines in parallel, which can lower the encode latency of large (VR) frames. The
+            output is still one standard bitstream, so clients need no change. Applies to both desktop and VR sessions.
+            Only HEVC and AV1 are supported, and the NVIDIA driver must support NVENC API 13.0 or newer; otherwise the
+            option is ignored and the reason is logged as `[VIPLE-NVENC-SPLIT] ... applied=none reason=...`.
+            Any value other than `disabled` makes the encoder talk to the driver with SDK 13.0 structures; with
+            `disabled` the encoder uses the same SDK 11.0/12.0 structures as before. If the driver rejects the
+            split-frame encoder, Sunshine logs it and recreates the encoder as if the option were `disabled`.
+            Measure `[VIPLE-VR-LAT10]` (enc, presentToFirstPkt) before and after enabling it.
+            @note{This option only applies when using NVENC [encoder](#encoder). Applies to Windows only.}
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            nvenc_split_encode = two
+            @endcode</td>
+    </tr>
+    <tr>
+        <td rowspan="6">Choices</td>
+        <td>disabled</td>
+        <td>Do not request split-frame encoding (SDK 11.0/12.0 structures, unchanged behavior)</td>
+    </tr>
+    <tr>
+        <td>auto</td>
+        <td>NV_ENC_SPLIT_AUTO_MODE: the driver decides from preset, tuning and resolution</td>
+    </tr>
+    <tr>
+        <td>auto_forced</td>
+        <td>NV_ENC_SPLIT_AUTO_FORCED_MODE: always split, the driver picks the number of strips</td>
+    </tr>
+    <tr>
+        <td>two</td>
+        <td>NV_ENC_SPLIT_TWO_FORCED_MODE: two strips (one strip on single-engine GPUs)</td>
+    </tr>
+    <tr>
+        <td>three</td>
+        <td>NV_ENC_SPLIT_THREE_FORCED_MODE: three strips (capped at the number of engines)</td>
+    </tr>
+    <tr>
+        <td>native_off</td>
+        <td>NV_ENC_SPLIT_DISABLE_MODE: SDK 13.0 structures with split-frame explicitly off (A/B baseline
+            for the API change itself)</td>
+    </tr>
+</table>
+
 ## Intel QuickSync Encoder
 
 ### qsv_preset

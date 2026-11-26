@@ -8,6 +8,8 @@
 // standard includes
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <format>
 #include <string>
 #include <vector>
@@ -26,16 +28,134 @@
 // - Incompatible struct changes in nvEncodeAPI.h (fields removed, semantics changed, etc.)
 // - Test both old and new drivers with all supported codecs
 //
-// VipleStream §K.1: accept both v12 (Windows MSYS2 build) and v13 (Linux FetchContent
-// FFmpeg bundle ships nv-codec-headers 13.0).  v13 renamed pixelBitDepthMinus8 →
+// VipleStream §K.1: accept both v12 and v13.  v13 renamed pixelBitDepthMinus8 →
 // outputBitDepth (uint32_t→NV_ENC_BIT_DEPTH enum) and inputPixelBitDepthMinus8 →
 // inputBitDepth.  Site-of-use uses #if NVENCAPI_MAJOR_VERSION >= 13.
+//
+// §NVENC-SPLIT（2026-11-26）：repo 內附的 third-party/nv-codec-headers 換成 13.0（Windows 的 FFmpeg 套件不帶
+// ffnvcodec，編的就是這份；實際編譯命令裡 -isystem 的順序是 FFmpeg 套件在前，套件若帶了 ffnvcodec 會用套件的）。
+// 預設不開 split 時，送給驅動的位元組必須和 12.0 標頭時完全相同，
+// 13.0 與 12.0 版面不同、而本檔有用到的地方（用 offsetof／逐位元探測兩份標頭比對過）：
+//   1. 結構版本號：一律改由 sdk12_ver::* 提供（見 nvenc_base.h）。
+//   2. NV_ENC_INITIALIZE_PARAMS：13.0 是 1800 bytes、12.0 是 1808（reserved 少了 8 bytes）。用 12.0 版本號送時
+//      驅動會讀 1808 bytes → 用 init_params_buffer 在尾端補 8 個 0。用到的欄位位移相同；13.0 新增的 splitEncodeMode:4
+//      佔的是 12.0 的 enableOutputInVidmem 與 reservedBitFields 位元，只在原生版本時寫。
+//   3. NV_ENC_RECONFIGURE_PARAMS：內含 INITIALIZE_PARAMS，所以 resetEncoder／forceIDR 從 1816 移到 1808 → send_reconfigure
+//      在 12.0 結構時自己排 12.0 版面（1824 bytes）。
+//   4. NV_ENC_CONFIG_HEVC：12.0 的 pixelBitDepthMinus8:3 在 13.0 變成 reserved3:3（位置相同），位元深度改成後面的
+//      outputBitDepth／inputBitDepth（列舉值 8／10）。12.0 結構時寫 reserved3。
+//   5. NV_ENC_CONFIG_AV1：12.0 的 inputPixelBitDepthMinus8:3／pixelBitDepthMinus8:3（offset 16 那個字的 bit 12～17）在
+//      13.0 被 enableLTR、enableTemporalSVC、outputMaxCll、outputMasteringDisplay、reserved4 佔走 → 12.0 結構時直接寫那個字。
+//   6. NV_ENC_PIC_PARAMS：codecPicParams 聯集 1552→1544，但後面以 reserved 補齊，用到的欄位（含 qpDeltaMap、
+//      各 codec 的 forceIntraRefreshWithFrameCnt）位移與結構大小都相同。
+//   7. NV_ENC_PRESET_CONFIG：位移相同，但 13.0 把 version 後的對齊補白改成具名的 `uint32_t reserved`，位置式初始化
+//      `{ver, {cfg_ver}}` 會把 CONFIG 版本塞進 reserved（2.0.287 的 INVALID_VERSION）→ 一律用欄位名稱設定。
+//      教訓：版面比對只看位移不夠，任何 `{a, b}` 位置式初始化都要對照新標頭的欄位順序。
+//   8. 函式表（NV_ENCODE_API_FUNCTION_LIST）的 API 版本必須和 session 的 apiVersion 一致，兩個方向混搭都回
+//      INVALID_VERSION → 13.0 與 11/12 之間切換時 recreate_function_list()。
+//   其餘用到的結構（OPEN_ENCODE_SESSION_EX_PARAMS、CAPS_PARAM、PRESET_CONFIG、CONFIG、RC_PARAMS、H264／VUI、
+//   EVENT_PARAMS、CREATE_BITSTREAM_BUFFER、MAP_INPUT_RESOURCE、LOCK_BITSTREAM、SEQUENCE_PARAM_PAYLOAD、REGISTER_RESOURCE、
+//   函式表）大小與用到的欄位位移完全相同；用到的列舉值與 GUID 也相同。
 #if NVENCAPI_VERSION != MAKE_NVENC_VER(12U, 0U) && \
     NVENCAPI_VERSION != MAKE_NVENC_VER(13U, 0U)
   #error Check and update NVENC code for backwards compatibility!
 #endif
 
+#if NVENCAPI_MAJOR_VERSION == 12
+// 標頭是 12.0 時，sdk12_ver 的表必須和標頭一致
+static_assert(nvenc::sdk12_ver::open_encode_session_ex_params == (NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::caps_param == (NV_ENC_CAPS_PARAM_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::initialize_params == (NV_ENC_INITIALIZE_PARAMS_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::preset_config == (NV_ENC_PRESET_CONFIG_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::config == (NV_ENC_CONFIG_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::event_params == (NV_ENC_EVENT_PARAMS_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::create_bitstream_buffer == (NV_ENC_CREATE_BITSTREAM_BUFFER_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::map_input_resource == (NV_ENC_MAP_INPUT_RESOURCE_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::pic_params == (NV_ENC_PIC_PARAMS_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::lock_bitstream == (NV_ENC_LOCK_BITSTREAM_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::sequence_param_payload == (NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::reconfigure_params == (NV_ENC_RECONFIGURE_PARAMS_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::register_resource == (NV_ENC_REGISTER_RESOURCE_VER & ~NVENCAPI_VERSION));
+static_assert(nvenc::sdk12_ver::function_list == (NV_ENCODE_API_FUNCTION_LIST_VER & ~NVENCAPI_VERSION));
+#endif
+
 namespace {
+
+#if NVENCAPI_MAJOR_VERSION >= 13
+  // 12.0 標頭在 64 位元下的大小（見檔頭說明 2、3）。這些數字只對 64 位元成立。
+  static_assert(sizeof(void *) == 8, "sdk12 layout constants assume a 64-bit build");
+  constexpr size_t kSdk12InitParamsSize = 1808;
+  constexpr size_t kSdk12ReconfigureParamsSize = 1824;
+  constexpr size_t kSdk12ReconfigureInitOffset = 8;
+  constexpr size_t kSdk12ReconfigureFlagsOffset = 1816;
+  static_assert(sizeof(NV_ENC_INITIALIZE_PARAMS) < kSdk12InitParamsSize);
+  static_assert(offsetof(NV_ENC_RECONFIGURE_PARAMS, reInitEncodeParams) == kSdk12ReconfigureInitOffset);
+  static_assert(kSdk12ReconfigureInitOffset + kSdk12InitParamsSize == kSdk12ReconfigureFlagsOffset);
+  // 12.0 的 presetCfg 也在 8（version 後是對齊補白）；13.0 在補白處放了具名的 reserved，所以只能用欄位名稱設定
+  static_assert(offsetof(NV_ENC_PRESET_CONFIG, presetCfg) == 8);
+  // NV_ENC_CAPS_PARAM 仍用 `{version, cap}` 位置式初始化：capsToQuery 必須緊接在 version 後
+  static_assert(offsetof(NV_ENC_CAPS_PARAM, capsToQuery) == 4);
+#endif
+
+  // 給 nvEncInitializeEncoder 的記憶體：12.0 結構時驅動讀 1808 bytes，尾端要是 0（13.0 的結構只有 1800）
+  struct init_params_buffer {
+    NV_ENC_INITIALIZE_PARAMS params;
+#if NVENCAPI_MAJOR_VERSION >= 13
+    uint8_t sdk12_tail[kSdk12InitParamsSize - sizeof(NV_ENC_INITIALIZE_PARAMS)];
+#endif
+  };
+
+#if NVENCAPI_MAJOR_VERSION >= 13
+  static_assert(sizeof(init_params_buffer) >= kSdk12InitParamsSize);
+
+  // 檔頭說明 5：12.0 結構的 AV1 10-bit。照 12.0 寫 inputPixelBitDepthMinus8 = 2、pixelBitDepthMinus8 = 2
+  // （offset 16 那個 32 位元字的 bit 12～14 與 15～17）。先用兩版位置相同的 chromaFormatIDC（bit 7～8）核對這個字。
+  bool set_av1_sdk12_10bit(NV_ENC_CONFIG_AV1 &cfg) {
+    constexpr size_t word_offset = 16;
+    static_assert(offsetof(NV_ENC_CONFIG_AV1, maxPartSize) + sizeof(NV_ENC_AV1_PART_SIZE) == word_offset);
+    NV_ENC_CONFIG_AV1 probe {};
+    probe.chromaFormatIDC = 3;
+    uint32_t word = 0;
+    std::memcpy(&word, reinterpret_cast<const uint8_t *>(&probe) + word_offset, sizeof(word));
+    if (word != (3u << 7)) {
+      return false;
+    }
+    std::memcpy(&word, reinterpret_cast<const uint8_t *>(&cfg) + word_offset, sizeof(word));
+    word &= ~(0x3Fu << 12);
+    word |= (2u << 12) | (2u << 15);
+    std::memcpy(reinterpret_cast<uint8_t *>(&cfg) + word_offset, &word, sizeof(word));
+    return true;
+  }
+#endif
+
+  const char *split_encode_name(nvenc::nvenc_split_encode value) {
+    switch (value) {
+      case nvenc::nvenc_split_encode::disabled:
+        return "disabled";
+      case nvenc::nvenc_split_encode::auto_mode:
+        return "auto";
+      case nvenc::nvenc_split_encode::auto_forced:
+        return "auto_forced";
+      case nvenc::nvenc_split_encode::two:
+        return "two";
+      case nvenc::nvenc_split_encode::three:
+        return "three";
+      case nvenc::nvenc_split_encode::native_off:
+        return "native_off";
+    }
+    return "unknown";
+  }
+
+  std::string api_version_string(uint32_t api_version) {
+    // NVENCAPI_VERSION 格式：major | (minor << 24)
+    return std::format("{}.{}", api_version & 0xFFFFFFu, api_version >> 24);
+  }
+
+  const char *codec_name(int video_format) {
+    return video_format == 0 ? "h264" : video_format == 1 ? "hevc" :
+                                          video_format == 2 ? "av1" :
+                                                              "unknown";
+  }
 
   GUID quality_preset_guid_from_number(unsigned number) {
     if (number > 7) {
@@ -109,6 +229,73 @@ namespace nvenc {
   }
 
   bool nvenc_base::create_encoder(const nvenc_config &config, const video::config_t &client_config, const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format) {
+    bool split_attempted = false;
+    if (create_encoder_impl(config, client_config, colorspace, buffer_format, true, split_attempted)) {
+      return true;
+    }
+    if (!split_attempted) {
+      return false;
+    }
+    // §NVENC-SPLIT：實驗選項不能讓串流開不起來。用 13.0 結構建立的任何一步失敗，都整個重來一次（走預設路徑）。
+    BOOST_LOG(warning) << "[VIPLE-NVENC-SPLIT] encoder creation with split-frame failed (" << last_nvenc_error_string
+                       << "), retrying without split";
+    bool unused = false;
+    return create_encoder_impl(config, client_config, colorspace, buffer_format, false, unused);
+  }
+
+  bool nvenc_base::split_encode_usable(const nvenc_config &config, const video::config_t &client_config, uint32_t &mode) {
+    mode = 0;
+    if (config.split_encode == nvenc_split_encode::disabled) {
+      return false;  // 預設：不印任何東西，log 與現在相同
+    }
+
+    auto not_applied = [&](const std::string &reason) {
+      BOOST_LOG(info) << "[VIPLE-NVENC-SPLIT] requested=" << split_encode_name(config.split_encode)
+                      << " applied=none api=" << api_version_string(minimum_api_version)
+                      << " codec=" << codec_name(client_config.videoFormat)
+                      << " size=" << client_config.width << 'x' << client_config.height
+                      << " reason=" << reason;
+      return false;
+    };
+
+#if NVENCAPI_MAJOR_VERSION < 13
+    return not_applied("built with NVENC SDK headers older than 13.0");
+#else
+    if (client_config.videoFormat != 1 && client_config.videoFormat != 2) {
+      return not_applied("split-frame encoding is HEVC/AV1 only");
+    }
+
+    const uint32_t driver_max = driver_max_api_version();
+    constexpr uint32_t needed = (13u << 4) | 0u;
+    if (driver_max < needed) {
+      return not_applied(driver_max ? std::format("driver supports NVENC API up to {}.{}, needs 13.0", driver_max >> 4, driver_max & 0xF) :
+                                      std::string("NvEncodeAPIGetMaxSupportedVersion unavailable"));
+    }
+
+    switch (config.split_encode) {
+      case nvenc_split_encode::auto_mode:
+        mode = NV_ENC_SPLIT_AUTO_MODE;
+        break;
+      case nvenc_split_encode::auto_forced:
+        mode = NV_ENC_SPLIT_AUTO_FORCED_MODE;
+        break;
+      case nvenc_split_encode::two:
+        mode = NV_ENC_SPLIT_TWO_FORCED_MODE;
+        break;
+      case nvenc_split_encode::three:
+        mode = NV_ENC_SPLIT_THREE_FORCED_MODE;
+        break;
+      case nvenc_split_encode::native_off:
+        mode = NV_ENC_SPLIT_DISABLE_MODE;
+        break;
+      case nvenc_split_encode::disabled:
+        return false;
+    }
+    return true;
+#endif
+  }
+
+  bool nvenc_base::create_encoder_impl(const nvenc_config &config, const video::config_t &client_config, const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format, bool allow_split, bool &split_attempted) {
     // Pick the minimum NvEncode API version required to support the specified codec
     // to maximize driver compatibility. AV1 was introduced in SDK v12.0.
     minimum_api_version = (client_config.videoFormat <= 1) ? MAKE_NVENC_VER(11U, 0U) : MAKE_NVENC_VER(12U, 0U);
@@ -118,8 +305,41 @@ namespace nvenc {
     }
 
     if (encoder) {
+      // 舊 session 用它自己的結構版本收尾（destroy_encoder 最後才把 native_structs 清掉）
       destroy_encoder();
     }
+    native_structs = false;
+
+    // §NVENC-SPLIT：只有選項開著、codec 與驅動都符合時，這個 session 才改用標頭原生版本（13.0）的結構
+    const uint32_t legacy_api_version = minimum_api_version;
+    uint32_t split_mode = 0;
+    if (allow_split && split_encode_usable(config, client_config, split_mode)) {
+      minimum_api_version = NVENCAPI_VERSION;
+      native_structs = true;
+      split_attempted = true;
+    }
+
+    // §NVENC-SPLIT：函式表的 API 版本必須和這個 session 一致（開發機 RTX 3060、驅動 621.01 實測：兩個方向混搭
+    // 都在 NvEncOpenEncodeSessionEx 回 NV_ENC_ERR_INVALID_VERSION）。預設路徑兩者都是 false，不會走進來。
+    if (native_structs != function_list_native) {
+      if (recreate_function_list()) {
+        function_list_native = native_structs;
+      } else if (native_structs) {
+        // 換不成 13.0 的函式表：原本的 11/12 函式表還在，這個 session 照預設路徑建立
+        BOOST_LOG(warning) << "[VIPLE-NVENC-SPLIT] requested=" << split_encode_name(config.split_encode)
+                           << " applied=none api=" << api_version_string(legacy_api_version)
+                           << " codec=" << codec_name(client_config.videoFormat)
+                           << " size=" << client_config.width << 'x' << client_config.height
+                           << " reason=could not create an API 13.0 function list";
+        native_structs = false;
+        minimum_api_version = legacy_api_version;
+        split_attempted = false;
+      } else {
+        BOOST_LOG(error) << "NvEnc: could not recreate the NVENC function list for API " << api_version_string(minimum_api_version);
+        return false;
+      }
+    }
+
     auto fail_guard = util::fail_guard([this] {
       destroy_encoder();
     });
@@ -130,7 +350,7 @@ namespace nvenc {
     encoder_params.rfi = true;
     encoder_params.video_format = client_config.videoFormat;
 
-    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS session_params = {min_struct_version(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER)};
+    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS session_params = {min_struct_version(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER, sdk12_ver::open_encode_session_ex_params)};
     session_params.device = device;
     session_params.deviceType = device_type;
     session_params.apiVersion = minimum_api_version;
@@ -156,7 +376,10 @@ namespace nvenc {
       return false;
     }
 
-    NV_ENC_INITIALIZE_PARAMS init_params = {min_struct_version(NV_ENC_INITIALIZE_PARAMS_VER)};
+    // 檔頭說明 2：放在 init_params_buffer 裡，12.0 結構時驅動多讀的尾端是 0
+    init_params_buffer init_params_storage {};
+    NV_ENC_INITIALIZE_PARAMS &init_params = init_params_storage.params;
+    init_params.version = min_struct_version(NV_ENC_INITIALIZE_PARAMS_VER, sdk12_ver::initialize_params);
 
     switch (client_config.videoFormat) {
       case 0:
@@ -190,7 +413,7 @@ namespace nvenc {
     }
 
     auto get_encoder_cap = [&](NV_ENC_CAPS cap) {
-      NV_ENC_CAPS_PARAM param = {min_struct_version(NV_ENC_CAPS_PARAM_VER), cap};
+      NV_ENC_CAPS_PARAM param = {min_struct_version(NV_ENC_CAPS_PARAM_VER, sdk12_ver::caps_param), cap};
       int value = 0;
       nvenc->nvEncGetEncodeCaps(encoder, init_params.encodeGUID, &param, &value);
       return value;
@@ -248,7 +471,12 @@ namespace nvenc {
       init_params.frameRateDen = fps.den;
     }
 
-    NV_ENC_PRESET_CONFIG preset_config = {min_struct_version(NV_ENC_PRESET_CONFIG_VER), {min_struct_version(NV_ENC_CONFIG_VER, 7, 8)}};
+    // §NVENC-SPLIT：一律用欄位名稱設定，不能用 `{ver, {cfg_ver}}` 的位置式初始化——13.0 在 version 後面多了
+    // `uint32_t reserved`，位置式寫法會把 CONFIG 的版本塞進 reserved、presetCfg.version 變 0
+    // （2.0.287 在 host 上 NvEncGetEncodePresetConfigEx() 回 NV_ENC_ERR_INVALID_VERSION 就是這個）。presetCfg 位移兩版相同（8）。
+    NV_ENC_PRESET_CONFIG preset_config {};
+    preset_config.version = min_struct_version(NV_ENC_PRESET_CONFIG_VER, sdk12_ver::preset_config);
+    preset_config.presetCfg.version = min_struct_version(NV_ENC_CONFIG_VER, sdk12_ver::config, 7, 8);
     if (nvenc_failed(nvenc->nvEncGetEncodePresetConfigEx(encoder, init_params.encodeGUID, init_params.presetGUID, init_params.tuningInfo, &preset_config))) {
       BOOST_LOG(error) << "NvEnc: NvEncGetEncodePresetConfigEx() failed: " << last_nvenc_error_string;
       return false;
@@ -428,9 +656,17 @@ namespace nvenc {
           // HEVC
           auto &format_config = enc_config.encodeCodecConfig.hevcConfig;
           set_h264_hevc_common_format_config(format_config);
-          if (buffer_is_10bit()) {
+          if (native_structs) {
 #if NVENCAPI_MAJOR_VERSION >= 13
-            format_config.outputBitDepth = NV_ENC_BIT_DEPTH_10;
+            // 13.0 結構：輸入與輸出位元深度都明確給
+            const auto depth = buffer_is_10bit() ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
+            format_config.outputBitDepth = depth;
+            format_config.inputBitDepth = depth;
+#endif
+          } else if (buffer_is_10bit()) {
+#if NVENCAPI_MAJOR_VERSION >= 13
+            // 檔頭說明 4：12.0 的 pixelBitDepthMinus8:3 就是 13.0 的 reserved3:3（同一組位元）
+            format_config.reserved3 = 2;
 #else
             format_config.pixelBitDepthMinus8 = 2;
 #endif
@@ -468,10 +704,19 @@ namespace nvenc {
             format_config.chromaFormatIDC = 3;
           }
           format_config.enableBitstreamPadding = config.insert_filler_data;
-          if (buffer_is_10bit()) {
+          if (native_structs) {
 #if NVENCAPI_MAJOR_VERSION >= 13
-            format_config.inputBitDepth = NV_ENC_BIT_DEPTH_10;
-            format_config.outputBitDepth = NV_ENC_BIT_DEPTH_10;
+            const auto depth = buffer_is_10bit() ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
+            format_config.inputBitDepth = depth;
+            format_config.outputBitDepth = depth;
+#endif
+          } else if (buffer_is_10bit()) {
+#if NVENCAPI_MAJOR_VERSION >= 13
+            // 檔頭說明 5：12.0 的位元在 13.0 被別的欄位佔走，直接寫那個字
+            if (!set_av1_sdk12_10bit(format_config)) {
+              BOOST_LOG(error) << "NvEnc: unexpected NV_ENC_CONFIG_AV1 layout, cannot set 10-bit for SDK 12.0 structs";
+              return false;
+            }
 #else
             format_config.inputPixelBitDepthMinus8 = 2;
             format_config.pixelBitDepthMinus8 = 2;
@@ -503,9 +748,35 @@ namespace nvenc {
 
     init_params.encodeConfig = &enc_config;
 
-    if (nvenc_failed(nvenc->nvEncInitializeEncoder(encoder, &init_params))) {
+#if NVENCAPI_MAJOR_VERSION >= 13
+    if (native_structs) {
+      // 13.0 新增的位元欄位；12.0 結構時這幾個位元是 enableOutputInVidmem／reservedBitFields，絕對不能寫
+      init_params.splitEncodeMode = split_mode;
+    }
+#endif
+
+    if (nvenc_failed(nvenc->nvEncInitializeEncoder(encoder, &init_params_storage.params))) {
       BOOST_LOG(error) << "NvEnc: NvEncInitializeEncoder() failed: " << last_nvenc_error_string;
+      if (native_structs) {
+        BOOST_LOG(error) << "[VIPLE-NVENC-SPLIT] NvEncInitializeEncoder() rejected split-frame: requested="
+                         << split_encode_name(config.split_encode) << " mode=" << split_mode
+                         << " api=" << api_version_string(minimum_api_version)
+                         << " codec=" << codec_name(client_config.videoFormat)
+                         << " size=" << encoder_params.width << 'x' << encoder_params.height
+                         << " error=" << last_nvenc_error_string;
+      }
       return false;
+    }
+
+    if (native_structs) {
+#if NVENCAPI_MAJOR_VERSION >= 13
+      BOOST_LOG(info) << "[VIPLE-NVENC-SPLIT] requested=" << split_encode_name(config.split_encode)
+                      << " applied=" << split_mode
+                      << " api=" << api_version_string(minimum_api_version)
+                      << " codec=" << codec_name(client_config.videoFormat)
+                      << " size=" << encoder_params.width << 'x' << encoder_params.height
+                      << " engines=" << get_encoder_cap(NV_ENC_CAPS_NUM_ENCODER_ENGINES);
+#endif
     }
 
     // VipleStream §ABR: deep-copy init params for mid-stream reconfigure
@@ -517,7 +788,7 @@ namespace nvenc {
     abr_signals::reset(client_config.videoFormat, static_cast<int>(stored_enc_config.rcParams.averageBitRate / 1000));
 
     if (async_event_handle) {
-      NV_ENC_EVENT_PARAMS event_params = {min_struct_version(NV_ENC_EVENT_PARAMS_VER)};
+      NV_ENC_EVENT_PARAMS event_params = {min_struct_version(NV_ENC_EVENT_PARAMS_VER, sdk12_ver::event_params)};
       event_params.completionEvent = async_event_handle;
       if (nvenc_failed(nvenc->nvEncRegisterAsyncEvent(encoder, &event_params))) {
         BOOST_LOG(error) << "NvEnc: NvEncRegisterAsyncEvent() failed: " << last_nvenc_error_string;
@@ -525,7 +796,7 @@ namespace nvenc {
       }
     }
 
-    NV_ENC_CREATE_BITSTREAM_BUFFER create_bitstream_buffer = {min_struct_version(NV_ENC_CREATE_BITSTREAM_BUFFER_VER)};
+    NV_ENC_CREATE_BITSTREAM_BUFFER create_bitstream_buffer = {min_struct_version(NV_ENC_CREATE_BITSTREAM_BUFFER_VER, sdk12_ver::create_bitstream_buffer)};
     if (nvenc_failed(nvenc->nvEncCreateBitstreamBuffer(encoder, &create_bitstream_buffer))) {
       BOOST_LOG(error) << "NvEnc: NvEncCreateBitstreamBuffer() failed: " << last_nvenc_error_string;
       return false;
@@ -577,6 +848,9 @@ namespace nvenc {
       if (config.insert_filler_data) {
         extra += " filler-data";
       }
+      if (native_structs) {
+        extra += std::format(" split-frame={}", split_mode);  // §NVENC-SPLIT
+      }
 
       BOOST_LOG(info) << "NvEnc: created encoder " << video_format_string << quality_preset_string_from_guid(init_params.presetGUID) << extra;
     }
@@ -594,7 +868,7 @@ namespace nvenc {
       output_bitstream = nullptr;
     }
     if (encoder && async_event_handle) {
-      NV_ENC_EVENT_PARAMS event_params = {min_struct_version(NV_ENC_EVENT_PARAMS_VER)};
+      NV_ENC_EVENT_PARAMS event_params = {min_struct_version(NV_ENC_EVENT_PARAMS_VER, sdk12_ver::event_params)};
       event_params.completionEvent = async_event_handle;
       if (nvenc_failed(nvenc->nvEncUnregisterAsyncEvent(encoder, &event_params))) {
         BOOST_LOG(error) << "NvEnc: NvEncUnregisterAsyncEvent() failed: " << last_nvenc_error_string;
@@ -623,6 +897,8 @@ namespace nvenc {
     pinned_video_format = -1;
     unpinned_level = 0;
     unpinned_tier = 0;
+    // §NVENC-SPLIT：上面的收尾呼叫要用這個 session 自己的結構版本，所以最後才清
+    native_structs = false;
   }
 
   nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr, uint32_t force_intra_refresh_frames) {
@@ -644,7 +920,7 @@ namespace nvenc {
       return {};
     }
 
-    NV_ENC_MAP_INPUT_RESOURCE mapped_input_buffer = {min_struct_version(NV_ENC_MAP_INPUT_RESOURCE_VER)};
+    NV_ENC_MAP_INPUT_RESOURCE mapped_input_buffer = {min_struct_version(NV_ENC_MAP_INPUT_RESOURCE_VER, sdk12_ver::map_input_resource)};
     mapped_input_buffer.registeredResource = registered_input_buffer;
 
     if (nvenc_failed(nvenc->nvEncMapInputResource(encoder, &mapped_input_buffer))) {
@@ -657,7 +933,7 @@ namespace nvenc {
       }
     });
 
-    NV_ENC_PIC_PARAMS pic_params = {min_struct_version(NV_ENC_PIC_PARAMS_VER, 4, 6)};
+    NV_ENC_PIC_PARAMS pic_params = {min_struct_version(NV_ENC_PIC_PARAMS_VER, sdk12_ver::pic_params, 4, 6)};
     if (!qp_delta_map.empty()) {  // §VR-FOVEA-QP
       pic_params.qpDeltaMap = qp_delta_map.data();
       pic_params.qpDeltaMapSize = (uint32_t) qp_delta_map.size();
@@ -695,7 +971,7 @@ namespace nvenc {
       return {};
     }
 
-    NV_ENC_LOCK_BITSTREAM lock_bitstream = {min_struct_version(NV_ENC_LOCK_BITSTREAM_VER, 1, 2)};
+    NV_ENC_LOCK_BITSTREAM lock_bitstream = {min_struct_version(NV_ENC_LOCK_BITSTREAM_VER, sdk12_ver::lock_bitstream, 1, 2)};
     lock_bitstream.outputBitstream = output_bitstream;
     lock_bitstream.doNotWait = async_event_handle ? 1 : 0;
 
@@ -853,7 +1129,7 @@ namespace nvenc {
 
     std::vector<uint8_t> header(1024);
     uint32_t header_size = 0;
-    NV_ENC_SEQUENCE_PARAM_PAYLOAD payload = {min_struct_version(NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER)};
+    NV_ENC_SEQUENCE_PARAM_PAYLOAD payload = {min_struct_version(NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER, sdk12_ver::sequence_param_payload)};
     payload.inBufferSize = static_cast<uint32_t>(header.size());
     payload.spsppsBuffer = header.data();
     payload.outSPSPPSPayloadSize = &header_size;
@@ -954,19 +1230,13 @@ namespace nvenc {
       stored_enc_config.rcParams.vbvInitialDelay = stored_enc_config.rcParams.vbvBufferSize;
     }
 
-    NV_ENC_RECONFIGURE_PARAMS reconfigure_params = {min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER)};
-    reconfigure_params.reInitEncodeParams = stored_init_params;
-    reconfigure_params.resetEncoder = force_idr ? 1 : 0;
-    reconfigure_params.forceIDR = force_idr ? 1 : 0;
-
-    bool reconfigured = !nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params));
+    bool reconfigured = send_reconfigure(force_idr, force_idr);
     if (!reconfigured && level_pinned) {
       // §SF-PARAMSETS：固定的 level／tier 被拒時退回自動選擇重試一次，ABR 不因固定而失效
       BOOST_LOG(warning) << "[VIPLE-ABR] NvEnc: reconfigure rejected with pinned level/tier ("
                          << last_nvenc_error_string << "), retrying with auto-selected level";
       unpin_level_for_reconfigure();
-      reconfigure_params.reInitEncodeParams = stored_init_params;
-      reconfigured = !nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params));
+      reconfigured = send_reconfigure(force_idr, force_idr);
     }
     if (!reconfigured) {
       BOOST_LOG(error) << "[VIPLE-ABR] NvEnc: NvEncReconfigureEncoder() failed: " << last_nvenc_error_string;
@@ -1026,16 +1296,11 @@ namespace nvenc {
       stored_enc_config.rcParams.vbvInitialDelay = vbv;
     }
 
-    NV_ENC_RECONFIGURE_PARAMS reconfigure_params = {min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER)};
-    reconfigure_params.reInitEncodeParams = stored_init_params;
     // 標頭的不支援清單沒有 frame rate。resetEncoder 是清碼率控制狀態，註解寫要配 IDR。
     // 封包處理端已經 raise idr，這裡再 forceIDR 會連送兩張。
-    reconfigure_params.resetEncoder = 0;
-    reconfigure_params.forceIDR = 0;
-
     // 不在這裡 unpin level 再重試。bitrate 那條失敗會把釘住的 level 拆掉再送一次；
     // 幀率若是因為別的原因被拒，拆掉 level 會讓下一筆 ABR 重設改到參數集。失敗就整筆放回去。
-    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params))) {
+    if (!send_reconfigure(false, false)) {
       BOOST_LOG(error) << "[VIPLE-FPS] NvEnc: NvEncReconfigureEncoder() failed: " << last_nvenc_error_string;
       stored_init_params.frameRateNum = old_num;
       stored_init_params.frameRateDen = old_den;
@@ -1102,12 +1367,40 @@ namespace nvenc {
     return false;
   }
 
-  uint32_t nvenc_base::min_struct_version(uint32_t version, uint32_t v11_struct_version, uint32_t v12_struct_version) {
+  bool nvenc_base::send_reconfigure(bool reset_encoder, bool force_idr) {
+#if NVENCAPI_MAJOR_VERSION >= 13
+    if (!native_structs) {
+      // 檔頭說明 3：12.0 的 NV_ENC_RECONFIGURE_PARAMS 版面（version、補齊、1808 bytes 的 INITIALIZE_PARAMS、
+      // resetEncoder:1／forceIDR:1 的字在 1816、結尾補齊），與 12.0 標頭時 `= {version}` 再逐欄填的位元組相同
+      alignas(NV_ENC_RECONFIGURE_PARAMS) uint8_t raw[kSdk12ReconfigureParamsSize] = {};
+      const uint32_t version = min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER, sdk12_ver::reconfigure_params);
+      std::memcpy(raw, &version, sizeof(version));
+      // 13.0 的 INITIALIZE_PARAMS 少 8 bytes，12.0 多出來的尾端（reserved2）留 0
+      std::memcpy(raw + kSdk12ReconfigureInitOffset, &stored_init_params, sizeof(NV_ENC_INITIALIZE_PARAMS));
+      // GCC（Windows MinGW 與 Linux 都是）的位元欄位從最低位元排：resetEncoder 是 bit 0、forceIDR 是 bit 1
+      const uint32_t flags = (reset_encoder ? 1u : 0u) | (force_idr ? 2u : 0u);
+      std::memcpy(raw + kSdk12ReconfigureFlagsOffset, &flags, sizeof(flags));
+      return !nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, reinterpret_cast<NV_ENC_RECONFIGURE_PARAMS *>(raw)));
+    }
+#endif
+    NV_ENC_RECONFIGURE_PARAMS reconfigure_params = {min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER, sdk12_ver::reconfigure_params)};
+    reconfigure_params.reInitEncodeParams = stored_init_params;
+    reconfigure_params.resetEncoder = reset_encoder ? 1 : 0;
+    reconfigure_params.forceIDR = force_idr ? 1 : 0;
+    return !nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &reconfigure_params));
+  }
+
+  uint32_t nvenc_base::min_struct_version(uint32_t version, uint32_t sdk12_version, uint32_t v11_struct_version, uint32_t v12_struct_version) {
     assert(minimum_api_version);
 
-    // Mask off and replace the original NVENCAPI_VERSION
-    version &= ~NVENCAPI_VERSION;
-    version |= minimum_api_version;
+    // §NVENC-SPLIT：原生版本的 session（13.0 結構）直接用標頭的版本，不套 v11／v12 覆寫
+    if (native_structs) {
+      return version;
+    }
+
+    // 12.0 標頭的結構版本配上這個 codec 需要的最低 API 版本。和原本「從標頭版本遮掉 NVENCAPI_VERSION 再填
+    // minimum_api_version」在 12.0 標頭時結果相同（sdk12_ver 的表在 12.0 標頭時有 static_assert 核對）。
+    version = sdk12_version | minimum_api_version;
 
     // If there's a struct version override, apply that too
     if (v11_struct_version || v12_struct_version) {

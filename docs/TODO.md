@@ -50,11 +50,13 @@
   D3D11 在 NVIDIA／AMD 每幀多拷一張解碼紋理（加 fence 後直接綁解碼 SRV）；GenericFRUC 靜態畫面跳過 ME。
 - **server**：畫面靜止仍照幀率重編（`minimum_fps_target`）；游標混色兩次整幀複製；`/serverinfo` 每次列舉網卡（約 15 ms，改快取＋變更通知）；
   有 QUIC session 時的 1 ms 輪詢（音訊沒有 wake）；Linux 擷取改事件喚醒。
+- **server §NVENC-SPLIT**（實驗鍵 `nvenc_split_encode`，預設 disabled；2.0.289 已在 host 5060 Ti（1 顆 NVENC）驗過：預設路徑三種 codec 正常、`two` 在 HEVC／AV1 套用＋失敗退回）：
+  剩在 2 顆 NVENC 的卡（如 5070 Ti）上量 `[VIPLE-VR-LAT10]` enc 與 presentToFirstPkt（對照組用 `native_off` 分開 API 13.0 本身的影響）。
 - **Android**：解碼輸入少一次 memcpy（JNI 直寫 input buffer）；operating rate；VR 追蹤取樣率；眼鏡 warp 的 `glGetError`（attach 依賴它清旗標）。
 - **common-c（三份同步）**：QUIC 佇列空時不再每 1 ms 空轉（事件叫醒）；多連線重複影像封包不重複解密；封包緩衝池取代每包 malloc；
   補包決策快取；RTT 穩定時放寬 reliable ping。
 
-### 2026-11-26：省電、喚醒 App、todo 純程式項目、第三輪效能審查（**未提交、未驗**）
+### 2026-11-26：省電、喚醒 App、todo 純程式項目、第三輪效能審查（2.0.286～2.0.289 已提交）
 
 - **各機省電**（本機工具，不入 git）：Windows 自己的閒置計時整晚沒觸發 → host 與開發機的守護改成
   連續 15 分鐘沒工作、沒鍵鼠、沒 power request 就自己 `SetSuspendState`；host 的鍵鼠閒置由使用者工作階段的 `VipleStreamInputIdle` 回報；
@@ -67,11 +69,13 @@
   核對後不成立：relay log 印出 rikey（`main.cpp` 的 log 出口已遮）、§CTRL-REGAIN 重連後沒重設計時（`ControlStream.c` 已重設）。
 - **使用者 log 分析（11-25 晚～11-26 早，VITURE＋5070 Ti 那組 9 場；報告 `temp/logdrop_1126/out_go.md`，opencode deepseek）**：
   VR 主線乾淨（loss 0、延遲 p50 12～13 ms）。已修：Android 音訊積壓每包一行 log 改 10 秒彙總、新安裝不再開不存在的舊資料庫（三段 SQLite 堆疊）。
-  **待處理**：(1) Beast 停在 2D 面板時開串流前空等 11～14 秒（不能送 SET_DISPLAY_MODE，會黑屏）——改成串流前先檢查並提示、加倒數，事件 log 記按鍵時刻；
-  (2) 3840x1080 VR 場被 `cut-trend` 從約 8.3 Mbps 砍到 6.7～7.1（rtt 6 ms、base 1 ms、jit 5 ms）——先核對這場的碼率為何只有 8 Mbps、base 太小時要不要設下限；
-  (3) 連開兩場時 `[VIPLE-VR-IPC] driver-hung heartbeat=stale` 拆橋（SteamVR 重啟中），開場寬限；(4) 開場 `rejected reason=image expected=<none>` 是 Warning＋退避，應降級；
-  (5) driver 轉印 log 把 `[` 換成 `?`（防偽造），tag 變成 `?VIPLE-VR-STALE]` 不好搜——改換成別的字元或保留 tag；(6) logdrop 檔頭的 duration／display_mode 與內容不符、server 上傳整份累積 log；
-  (7) `code=16`（OpenXR runtime 不在 SteamVR 下）client 沒有對應文案。
+  2.0.289 已修（host 驗過 VR 144 fps、熱點 0.5 s、停服務 0.8 s；Android 已建）：Beast 3D 倒數重試、driver 開場心跳寬限、`expected=<none>` 降級、
+  driver 轉印 log 改用 `(`、logdrop 只上傳本次執行那一段＋檔頭、code 16 文案。**剩**：3840x1080 VR 場被 `cut-trend` 從約 8.3 Mbps 砍到 6.7～7.1
+  （rtt 6 ms、base 1 ms、jit 5 ms）——先核對這場的碼率為何只有 8 Mbps、base 太小時要不要設下限；Beast 倒數要朋友實機確認。
+- **Palworld VR（repo 外的 mod 專案）**：UEVR 的交替幀在 Palworld 上右眼全黑（AFW、官方版、OpenXR／OpenVR 都一樣）→ AFW 不可用；
+  Native Stereo 正常。VR 每幀 11～14 ms、CPU／GPU 都沒滿（串行等姿態）→ 手動半速（基準 72 Hz）只剩 48 Hz 且不均，全速自然 72～74 Hz；
+  UEVR `VR_SynchronizationMode=0` 讓 p99 17.6→12.8 ms。**下一步**：遊戲動態向量（攔 DLSS／FSR 3.1／XeSS 的輸入）送頭盔補幀，設計稿待寫；
+  一卡一眼暫緩（需要 Linux VR 擷取後端，設計稿 `docs/specs/linux_vr_backend.md` 未審）。
 - **§PERF-R3 第三輪效能／功耗審查**：grok 四份報告（server、桌面 client、Android、頭盔 VR）逐項核實：不改行為的已改進 2.0.286（各處標 `§PERF-R3`）；會改時序的列在下一節待量測。
 
 ### §QUEST Meta Quest 原生 OpenXR client（2026-11-24 開工；**OpenXR 那一端沒有實機、從未執行**）

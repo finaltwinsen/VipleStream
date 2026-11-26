@@ -22,6 +22,34 @@
 namespace nvenc {
 
   /**
+   * @brief §NVENC-SPLIT：Video Codec SDK 12.0 標頭裡 NV_ENC_*_VER 去掉 API 版本位元之後的值。
+   * @details 編譯用的標頭是 13.0，但預設（不開 split）仍以 11.0／12.0 的結構跟驅動溝通，結構版本號必須照 12.0
+   *          標頭的值送（13.0 把 INITIALIZE_PARAMS 5→7、PRESET_CONFIG 4→5、CONFIG 8→9、EVENT_PARAMS 1→2、PIC_PARAMS 6→7、
+   *          RECONFIGURE_PARAMS 1→2、REGISTER_RESOURCE 4→5，LOCK_BITSTREAM 多了 bit 31）。標頭是 12.0 時
+   *          nvenc_base.cpp 會用 static_assert 核對這張表。
+   */
+  namespace sdk12_ver {
+    constexpr uint32_t make(uint32_t struct_version, bool high_bit = false) {
+      return (struct_version << 16) | (0x7u << 28) | (high_bit ? (1u << 31) : 0u);
+    }
+
+    constexpr uint32_t open_encode_session_ex_params = make(1);
+    constexpr uint32_t caps_param = make(1);
+    constexpr uint32_t initialize_params = make(5, true);
+    constexpr uint32_t preset_config = make(4, true);
+    constexpr uint32_t config = make(8, true);
+    constexpr uint32_t event_params = make(1);
+    constexpr uint32_t create_bitstream_buffer = make(1);
+    constexpr uint32_t map_input_resource = make(4);
+    constexpr uint32_t pic_params = make(6, true);
+    constexpr uint32_t lock_bitstream = make(2);
+    constexpr uint32_t sequence_param_payload = make(1);
+    constexpr uint32_t reconfigure_params = make(1, true);
+    constexpr uint32_t register_resource = make(4);
+    constexpr uint32_t function_list = make(2);
+  }  // namespace sdk12_ver
+
+  /**
    * @brief Abstract platform-agnostic base of standalone NVENC encoder.
    *        Derived classes perform platform-specific operations.
    */
@@ -136,17 +164,40 @@ namespace nvenc {
       return false;
     }
 
+    /**
+     * @brief Optional. §NVENC-SPLIT：驅動支援的最高 NvEncode API 版本（NvEncodeAPIGetMaxSupportedVersion，
+     *        格式 `(major << 4) | minor`）。查不到回 0（split-frame 就不會啟用）。
+     *        只在 `init_library()` 成功之後呼叫。
+     */
+    virtual uint32_t driver_max_api_version() {
+      return 0;
+    }
+
+    /**
+     * @brief Optional. §NVENC-SPLIT：用目前的 `min_struct_version(NV_ENCODE_API_FUNCTION_LIST_VER, ...)` 重新呼叫
+     *        NvEncodeAPICreateInstance，成功才換掉 `nvenc`。驅動要求函式表的 API 版本和 session 的 apiVersion 一致
+     *        （11/12 的函式表開 13.0 session、或反過來，都回 NV_ENC_ERR_INVALID_VERSION），所以在 13.0 與 11/12 之間切換時要重建。
+     *        只在沒有 session 存在時呼叫。
+     * @return `true` on success; 失敗時保留原本的函式表
+     */
+    virtual bool recreate_function_list() {
+      return false;
+    }
+
     bool nvenc_failed(NVENCSTATUS status);
 
     /**
      * @brief This function returns the corresponding struct version for the minimum API required by the codec.
      * @details Reducing the struct versions maximizes driver compatibility by avoiding needless API breaks.
+     *          §NVENC-SPLIT：這個 session 用標頭原生版本（split-frame）時直接回 `version`，忽略後面三個參數；
+     *          否則以 `sdk12_version`（12.0 標頭的值）配上 minimum_api_version，再套 v11／v12 覆寫。
      * @param version The raw structure version from `NVENCAPI_STRUCT_VERSION()`.
+     * @param sdk12_version 同一個結構在 12.0 標頭的版本值（`sdk12_ver::*`）。
      * @param v11_struct_version Optionally specifies the struct version to use with v11 SDK major versions.
      * @param v12_struct_version Optionally specifies the struct version to use with v12 SDK major versions.
      * @return A suitable struct version for the active codec.
      */
-    uint32_t min_struct_version(uint32_t version, uint32_t v11_struct_version = 0, uint32_t v12_struct_version = 0);
+    uint32_t min_struct_version(uint32_t version, uint32_t sdk12_version, uint32_t v11_struct_version = 0, uint32_t v12_struct_version = 0);
 
     const NV_ENC_DEVICE_TYPE device_type;
 
@@ -180,8 +231,22 @@ namespace nvenc {
                                          ///< Can be set in constructor or `init_library()`, must override `wait_for_async_event()`.
 
   private:
+    /// create_encoder() 的本體。allow_split=false 時一定走 11.0／12.0 結構（與不開 split 完全相同）。
+    /// split_attempted：這一次是否改用了標頭原生版本（失敗時呼叫端據此退回重試）。
+    bool create_encoder_impl(const nvenc_config &config, const video::config_t &client_config, const nvenc_colorspace_t &colorspace, NV_ENC_BUFFER_FORMAT buffer_format, bool allow_split, bool &split_attempted);
+
+    /// §NVENC-SPLIT：判斷這個 session 能不能開 split-frame；不能時印原因。mode 回傳要送的 NV_ENC_SPLIT_ENCODE_MODE。
+    bool split_encode_usable(const nvenc_config &config, const video::config_t &client_config, uint32_t &mode);
+
+    /// 以 stored_init_params 呼叫 nvEncReconfigureEncoder（12.0 結構時用 12.0 的 RECONFIGURE_PARAMS 版面）
+    bool send_reconfigure(bool reset_encoder, bool force_idr);
+
     NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
     uint32_t minimum_api_version = 0;
+    /// §NVENC-SPLIT：這個 session 以標頭原生版本（13.0）的結構跟驅動溝通。只有 split-frame 開著時為 true。
+    bool native_structs = false;
+    /// §NVENC-SPLIT：目前的 `nvenc` 函式表是以 13.0（原生）版本建立的。init_library() 一律建 11/12 版，所以預設 false。
+    bool function_list_native = false;
 
     // VipleStream §ABR: stored for mid-stream NvEncReconfigureEncoder() calls
     NV_ENC_INITIALIZE_PARAMS stored_init_params {};

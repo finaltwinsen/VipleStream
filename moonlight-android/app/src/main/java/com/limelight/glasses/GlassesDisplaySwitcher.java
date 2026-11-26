@@ -161,19 +161,21 @@ public final class GlassesDisplaySwitcher {
     }
 
     private String buildSummaryLocked() {
+        // §LOGDROP-HDR（2026-11-26）：沒送過指令就不要印 display_mode=none。Beast 會略過 0x32，面板仍可能是 3840x1080。
         StringBuilder summary = new StringBuilder();
-        if (!sawMode) {
-            summary.append("display_mode=none");
-        } else {
+        if (sawMode) {
             summary.append("display_mode=0x").append(hexByte(lastMode))
                     .append(" ok=").append(lastModeOk)
                     .append(" status=").append(lastModeStatus);
         }
-        if (!sawRestore) {
-            summary.append(" restore_2d=skipped");
-        } else {
-            summary.append(" restore_2d=").append(restoreOk ? "ok" : "failed")
+        if (sawRestore) {
+            if (summary.length() > 0) {
+                summary.append(' ');
+            }
+            summary.append("restore_2d=").append(restoreOk ? "ok" : "failed")
                     .append(" status=").append(restoreStatus);
+        } else if (sawMode) {
+            summary.append(" restore_2d=skipped");
         }
         return summary.toString();
     }

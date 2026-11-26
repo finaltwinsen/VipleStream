@@ -376,9 +376,14 @@ public final class GlassesVrSession {
         if (duration < 0L) {
             duration = 0L;
         }
-        String summary = "duration_ms=" + duration
-                + " imu_samples=" + glasses.rawSampleTotal()
-                + " " + switcher.sessionEndSummary();
+        // §LOGDROP-HDR（2026-11-26）：logcat 含更早的場。時間標的是這場結束，duration 與樣本數只屬於它。
+        String mode = switcher.sessionEndSummary();
+        String summary = "last_session_end=" + LogDrop.sessionEndStamp()
+                + " duration_ms=" + duration
+                + " imu_samples=" + glasses.rawSampleTotal();
+        if (mode.length() > 0) {
+            summary = summary + " " + mode;
+        }
         LogDrop.autoUploadAsync(glasses.applicationContext(), "android-glasses", "session-end", summary);
     }
 

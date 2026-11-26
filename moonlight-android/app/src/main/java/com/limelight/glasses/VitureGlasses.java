@@ -301,10 +301,14 @@ public final class VitureGlasses {
                     duration = 0L;
                 }
                 // §LOGDROP：標記只在一般串流的 restore2d 寫入。清掉再送，第二次 close 不會再送。
-                LogDrop.autoUploadAsync(appContext, "android-glasses", "session-end",
-                        "duration_ms=" + duration
-                                + " imu_samples=" + rawTotal.get()
-                                + " " + (summary == null ? "" : summary));
+                // §LOGDROP-HDR（2026-11-26）：logcat 含更早的場。時間標的是這場結束，數字也只屬於它。
+                String report = "last_session_end=" + LogDrop.sessionEndStamp()
+                        + " duration_ms=" + duration
+                        + " imu_samples=" + rawTotal.get();
+                if (summary != null && summary.length() > 0) {
+                    report = report + " " + summary;
+                }
+                LogDrop.autoUploadAsync(appContext, "android-glasses", "session-end", report);
             }
         }
     }

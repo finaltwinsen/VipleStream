@@ -223,6 +223,12 @@
     <string name="glasses_vr_press_mode">請按眼鏡上的模式鍵切到 3D。</string>
     <string name="glasses_vr_beast_press_3d">請按眼鏡上的 2D／3D 按鈕切到 3D。</string>
     <string name="glasses_vr_beast_timeout">眼鏡在 60 秒內沒有切到 3D，眼鏡 VR 已結束。</string>
+    <!-- §BEAST-3D-UX（2026-11-26）：2D 面板等待要顯示剩餘秒數，避免使用者以為畫面卡住。 -->
+    <string name="glasses_vr_beast_press_3d_countdown">請按眼鏡上的 2D／3D 按鈕切到 3D。（剩下 %1$d 秒）</string>
+    <!-- §BEAST-3D-UX（2026-11-26）：逾時改為可重試，不再直接結束眼鏡 VR。 -->
+    <string name="glasses_vr_beast_wait_title">眼鏡還在 2D</string>
+    <string name="glasses_vr_beast_timeout_retry">眼鏡在 %1$d 秒內沒有切到 3D。請按眼鏡上的 2D／3D 按鈕，然後再試一次。</string>
+    <string name="glasses_vr_beast_retry">再試一次</string>
     <string name="glasses_beast_switch_to_2d">眼鏡目前在 3D 模式，請按眼鏡上的 2D／3D 按鈕切到 2D。</string>
     <string name="glasses_beast_use_button">用眼鏡上的按鈕切換 2D／3D。</string>
     <string name="glasses_vr_trigger">扳機（按住）</string>
@@ -322,6 +328,8 @@
     <string name="vr_pcvr_enable_failed">無法啟用 VR 模式。</string>
     <string name="vr_pcvr_tracking_failed">無法開始 VR 追蹤。</string>
     <string name="vr_pcvr_bad_view">頭盔回報的 VR 視角無法使用。</string>
+    <!-- §VR-CODE16（2026-11-26）：OpenXR runtime 不是 SteamVR 時的非阻斷警告。 -->
+    <string name="vr_openxr_runtime_other">主機的 OpenXR 執行階段不是 SteamVR，部分 VR 遊戲可能無法啟動。</string>
     <string name="check_ports_msg">檢查您的防火牆和通訊埠轉送規則中的通訊埠：</string>
     <string name="early_termination_error">您的主機電腦在開始串流時出了點問題。
 \n

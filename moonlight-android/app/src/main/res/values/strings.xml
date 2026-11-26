@@ -152,6 +152,8 @@
     <string name="vr_pcvr_enable_failed">Could not enable VR mode.</string>
     <string name="vr_pcvr_tracking_failed">Could not start VR tracking.</string>
     <string name="vr_pcvr_bad_view">The headset reported an unusable VR view.</string>
+    <!-- §VR-CODE16（2026-11-26）：OpenXR runtime 不是 SteamVR 時的非阻斷警告。 -->
+    <string name="vr_openxr_runtime_other">The OpenXR runtime on the host is not SteamVR. Some VR games may not start.</string>
     <string name="applist_refresh_title">App List</string>
     <string name="applist_refresh_msg">Refreshing apps…</string>
     <string name="applist_refresh_error_title">Error</string>
@@ -278,6 +280,12 @@
     <string name="glasses_vr_press_mode">Press the mode button on the glasses to switch to 3D.</string>
     <string name="glasses_vr_beast_press_3d">Press the 2D/3D button on the glasses to switch to 3D.</string>
     <string name="glasses_vr_beast_timeout">The glasses did not switch to 3D within 60 seconds, so glasses VR ended.</string>
+    <!-- §BEAST-3D-UX（2026-11-26）：2D 面板等待要顯示剩餘秒數，避免使用者以為畫面卡住。 -->
+    <string name="glasses_vr_beast_press_3d_countdown">Press the 2D/3D button on the glasses to switch to 3D. %1$d s left.</string>
+    <!-- §BEAST-3D-UX（2026-11-26）：逾時改為可重試，不再直接結束眼鏡 VR。 -->
+    <string name="glasses_vr_beast_wait_title">Glasses are still in 2D</string>
+    <string name="glasses_vr_beast_timeout_retry">The glasses did not switch to 3D within %1$d seconds. Press the 2D/3D button on the glasses, then try again.</string>
+    <string name="glasses_vr_beast_retry">Try again</string>
     <string name="glasses_beast_switch_to_2d">The glasses are in 3D mode. Press the 2D/3D button on the glasses to switch to 2D.</string>
     <string name="glasses_beast_use_button">Use the button on the glasses to switch 2D/3D.</string>
     <string name="glasses_vr_trigger">Trigger (hold)</string>
