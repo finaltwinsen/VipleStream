@@ -200,8 +200,8 @@ namespace platf {
   }
 
   // 從原始列舉（沒過濾：全部網卡、含 IPv6 與虛擬網卡）找 address 所在網卡的 MAC；找不到回空字串
-  static std::string mac_from_adapters(const adapteraddrs_t &info, const std::string_view &address) {
-    for (auto adapter_pos = info.get(); adapter_pos != nullptr; adapter_pos = adapter_pos->Next) {
+  static std::string mac_from_adapters(const IP_ADAPTER_ADDRESSES *info, const std::string_view &address) {
+    for (auto adapter_pos = info; adapter_pos != nullptr; adapter_pos = adapter_pos->Next) {
       for (auto addr_pos = adapter_pos->FirstUnicastAddress; addr_pos != nullptr; addr_pos = addr_pos->Next) {
         if (adapter_pos->PhysicalAddressLength != 0 && address == from_sockaddr(addr_pos->Address.lpSockaddr)) {
           std::stringstream mac_addr;
@@ -230,8 +230,72 @@ namespace platf {
     return "00:00:00:00:00:00"s;
   }
 
+  namespace {
+    /**
+     * §PERF-R3-NETIF（2026-11-26）：/serverinfo 每個請求都要列舉一次網卡（GetAdaptersAddresses 約 15 ms），HTTPS 伺服器只有一條
+     * 處理執行緒，client 輪詢時整條排隊。改成快取一份列舉結果：網卡或位址有變（Windows 的變更通知）就作廢，另外最多用 30 秒
+     * （萬一漏收通知也會自己更新）。快取刻意配置在 heap、永不釋放：通知回呼是系統執行緒叫的，可能在行程結束、靜態物件解構之後才來。
+     */
+    struct adapter_cache_t {
+      std::mutex m;
+      std::shared_ptr<const IP_ADAPTER_ADDRESSES> snap;
+      std::chrono::steady_clock::time_point at {};
+      uint64_t snap_gen = ~0ull;
+      std::atomic<uint64_t> gen {0};
+      bool registered = false;
+      HANDLE h_if = nullptr;
+      HANDLE h_uaddr = nullptr;
+    };
+
+    adapter_cache_t &adapter_cache() {
+      static adapter_cache_t *c = new adapter_cache_t;
+      return *c;
+    }
+
+    VOID NETIOAPI_API_ on_netif_change(PVOID, PMIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE) {
+      adapter_cache().gen.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    VOID NETIOAPI_API_ on_addr_change(PVOID, PMIB_UNICASTIPADDRESS_ROW, MIB_NOTIFICATION_TYPE) {
+      adapter_cache().gen.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    std::shared_ptr<const IP_ADAPTER_ADDRESSES> cached_adapteraddrs() {
+      auto &c = adapter_cache();
+      std::lock_guard lk(c.m);
+      if (!c.registered) {
+        c.registered = true;
+        // 註冊失敗就只靠 30 秒上限（行為等於舊版每 30 秒列舉一次以上）
+        if (NotifyIpInterfaceChange(AF_UNSPEC, on_netif_change, nullptr, FALSE, &c.h_if) != NO_ERROR) {
+          c.h_if = nullptr;
+        }
+        if (NotifyUnicastIpAddressChange(AF_UNSPEC, on_addr_change, nullptr, FALSE, &c.h_uaddr) != NO_ERROR) {
+          c.h_uaddr = nullptr;
+        }
+      }
+      const auto now = std::chrono::steady_clock::now();
+      // 先讀代號再列舉：列舉期間又有變更的話，下一次呼叫會再列舉
+      const uint64_t g = c.gen.load(std::memory_order_relaxed);
+      const bool notified = c.h_if != nullptr && c.h_uaddr != nullptr;
+      if (!c.snap || g != c.snap_gen || now - c.at > std::chrono::seconds(notified ? 30 : 5)) {
+        auto fresh = get_adapteraddrs();
+        c.snap_gen = g;
+        c.at = now;
+        if (fresh) {
+          c.snap = std::shared_ptr<const IP_ADAPTER_ADDRESSES>(fresh.release(), [](const IP_ADAPTER_ADDRESSES *p) {
+            free(const_cast<IP_ADAPTER_ADDRESSES *>(p));
+          });
+        } else {
+          c.snap.reset();  // 失敗不快取：下一次再試
+        }
+      }
+      return c.snap;
+    }
+  }  // namespace
+
   std::string get_mac_address(const std::string_view &address) {
-    return mac_or_placeholder(mac_from_adapters(get_adapteraddrs(), address), address);
+    const auto adapters = cached_adapteraddrs();
+    return mac_or_placeholder(mac_from_adapters(adapters.get(), address), address);
   }
 
   /**
@@ -239,10 +303,10 @@ namespace platf {
    * 複用 get_adapteraddrs() helper，遍歷 UnicastAddress 收集 IPv4。
    * 過濾規則對齊客戶端 PlatformNetIf.c 的 classifyWindowsAdapter()。
    */
-  static std::vector<advertised_interface> advertised_from_adapters(const adapteraddrs_t &adapters) {
+  static std::vector<advertised_interface> advertised_from_adapters(const IP_ADAPTER_ADDRESSES *adapters) {
     std::vector<advertised_interface> result;
 
-    for (auto adapter = adapters.get(); adapter != nullptr; adapter = adapter->Next) {
+    for (auto adapter = adapters; adapter != nullptr; adapter = adapter->Next) {
       // 跳過非 UP 介面
       if (!(adapter->OperStatus == IfOperStatusUp))
         continue;
@@ -315,21 +379,22 @@ namespace platf {
   }
 
   std::vector<advertised_interface> enum_net_interfaces() {
-    auto result = advertised_from_adapters(get_adapteraddrs());
+    const auto adapters = cached_adapteraddrs();
+    auto result = advertised_from_adapters(adapters.get());
     log_advertised_interfaces_if_changed(result);  // §PERF-1113-R2（A2）：清單變了才印
     return result;
   }
 
   // §PERF-1113-R2（A2）：/serverinfo 用——一次 GetAdaptersAddresses 同時給 MAC 與廣告清單
   std::vector<advertised_interface> enum_net_interfaces(const std::string_view &mac_for, std::string &mac_out) {
-    const adapteraddrs_t adapters = get_adapteraddrs();
+    const auto adapters = cached_adapteraddrs();
     if (mac_for.empty()) {
       mac_out = "00:00:00:00:00:00"s;
     } else {
       // MAC 從沒過濾的列舉找，不可以從下面的 result 找（見 common.h 的說明）
-      mac_out = mac_or_placeholder(mac_from_adapters(adapters, mac_for), mac_for);
+      mac_out = mac_or_placeholder(mac_from_adapters(adapters.get(), mac_for), mac_for);
     }
-    auto result = advertised_from_adapters(adapters);
+    auto result = advertised_from_adapters(adapters.get());
     log_advertised_interfaces_if_changed(result);
     return result;
   }

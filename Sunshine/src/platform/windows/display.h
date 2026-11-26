@@ -404,6 +404,26 @@ namespace platf::dxgi {
     texture2d_t old_surface_delayed_destruction;
     std::chrono::steady_clock::time_point old_surface_timestamp;
     std::variant<std::monostate, texture2d_t, std::shared_ptr<platf::img_t>> last_frame_variant;
+
+    // §PERF-R3-B23：游標畫上去之前的底圖小塊。last_frame_variant 若是影像且
+    // cursor_bg_valid，那張影像已經含游標，這塊是 [cursor_bg_x, y, w, h] 的乾淨像素
+    // （擷取貼圖座標，已夾進畫面）。無效代表那張影像沒有游標，或上一張是整張中介面。
+    // 貼圖可以比這塊大（游標變小不重配），還原時只用 w×h。
+    texture2d_t cursor_bg;
+    DXGI_FORMAT cursor_bg_format = DXGI_FORMAT_UNKNOWN;
+    int cursor_bg_alloc_w = 0;
+    int cursor_bg_alloc_h = 0;
+    int cursor_bg_x = 0;
+    int cursor_bg_y = 0;
+    int cursor_bg_w = 0;
+    int cursor_bg_h = 0;
+    bool cursor_bg_valid = false;
+
+    // §PERF-R3-B23：成功擷取的張數，以及其中走小塊／整張中介面的張數。第一次與每 600 張印一行。
+    std::uint32_t cursor_copy_frames = 0;
+    std::uint32_t cursor_copy_small = 0;
+    std::uint32_t cursor_copy_full = 0;
+    bool cursor_copy_logged = false;
   };
 
   /**

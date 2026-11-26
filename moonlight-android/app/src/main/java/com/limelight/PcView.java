@@ -79,6 +79,10 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
     // §REVIEW-1119：配對要等主機上輸入 PIN。這段期間選單關閉與 onResume 會把輪詢開回來，
     // 跟配對請求同時打同一台主機。
     private volatile boolean pairingInProgress;
+    // §PAIR-BG：配對中的 PIN 對話框內容。切到別的 App 時 onStop 會把對話框關掉，切回來（onResume）時若還在配對就重新顯示
+    private volatile String pairingDialogMessage;
+    private volatile String pairingNotifTitle;
+    private volatile String pairingNotifText;
     // §REVIEW-1104：freezeUpdates 跨執行緒讀取需設為 volatile，並記錄選單目標主機之 uuid
     private volatile boolean freezeUpdates;
     private String contextMenuComputerUuid;
@@ -419,6 +423,12 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
         inForeground = true;
         startComputerUpdates();
 
+        // §PAIR-BG：還在配對（例如切去遠端桌面輸入 PIN 再回來）就把 PIN 再顯示出來
+        final String pairingMsg = pairingDialogMessage;
+        if (pairingInProgress && pairingMsg != null) {
+            Dialog.displayDialog(this, getResources().getString(R.string.pair_pairing_title), pairingMsg, false);
+        }
+
         // 單次讀取開發測試更新網址並立即從 Intent 移除，避免返回畫面時重複觸發或寫入偏好。
         Intent intent = getIntent();
         if (intent != null && intent.hasExtra(AppUpdater.EXTRA_DEV_UPDATE_URL)) {
@@ -525,6 +535,28 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
         startComputerUpdates();
     }
 
+    // §PAIR-BG：Android 13 起通知要權限。沒給也照樣配對（前景服務仍會讓行程不被凍結，只是看不到通知）
+    private void requestNotificationPermissionForPairing() {
+        if (Build.VERSION.SDK_INT < 33) {
+            return;
+        }
+        runOnUiThread(() -> {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 0x5041);
+            }
+        });
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        // §PAIR-BG：授權前送出的前景服務通知會被系統丟掉，授權後還在配對就重送一次（同一個服務，只更新通知）
+        if (requestCode == 0x5041 && grantResults.length > 0 && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            pairingInProgress && pairingNotifText != null) {
+            PairingKeepAliveService.start(this, pairingNotifTitle, pairingNotifText);
+        }
+    }
+
     private void doPair(final ComputerDetails computer) {
         if (computer.state == ComputerDetails.State.OFFLINE || computer.activeAddress == null) {
             Toast.makeText(PcView.this, getResources().getString(R.string.pair_pc_offline), Toast.LENGTH_SHORT).show();
@@ -566,9 +598,16 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                         final String pinStr = PairingManager.generatePinString();
 
                         // Spin the dialog off in a thread because it blocks
+                        final String dialogMsg = getResources().getString(R.string.pair_pairing_msg)+" "+pinStr+"\n\n"+
+                                getResources().getString(R.string.pair_pairing_help);
+                        pairingDialogMessage = dialogMsg;
                         Dialog.displayDialog(PcView.this, getResources().getString(R.string.pair_pairing_title),
-                                getResources().getString(R.string.pair_pairing_msg)+" "+pinStr+"\n\n"+
-                                getResources().getString(R.string.pair_pairing_help), false);
+                                dialogMsg, false);
+                        // §PAIR-BG：配對期間掛前景服務（切到別的 App 時行程不被凍結），通知顯示 PIN
+                        pairingNotifTitle = getResources().getString(R.string.pair_pairing_title) + " " + computer.name;
+                        pairingNotifText = getResources().getString(R.string.pair_pairing_msg) + " " + pinStr;
+                        requestNotificationPermissionForPairing();
+                        PairingKeepAliveService.start(PcView.this, pairingNotifTitle, pairingNotifText);
 
                         PairingManager pm = httpConn.getPairingManager();
 
@@ -624,6 +663,9 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
                     // §REVIEW-1119：成功、失敗、例外都要清旗標。留下 true 的話，
                     // 選單關閉與 onResume 會一直不輪詢。
                     pairingInProgress = false;
+                    pairingDialogMessage = null;
+                    pairingNotifText = null;
+                    PairingKeepAliveService.stop(PcView.this);  // §PAIR-BG
                 }
 
                 Dialog.closeDialogs();

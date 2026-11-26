@@ -13,6 +13,9 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- §PAIR-BG：配對期間的前景服務（Android 14 起 shortService）與顯示 PIN 的通知 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="com.android.providers.tv.permission.READ_EPG_DATA"/>
     <uses-permission android:name="com.android.providers.tv.permission.WRITE_EPG_DATA"/>
@@ -239,6 +242,10 @@
         <service
             android:name=".discovery.DiscoveryService"
             android:label="mDNS PC Auto-Discovery Service" />
+        <service
+            android:name=".PairingKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
         <service
             android:name=".computers.ComputerManagerService"
             android:label="Computer Management Service" />

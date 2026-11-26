@@ -82,6 +82,11 @@ public class NvHTTP {
     
     private OkHttpClient httpClientLongConnectTimeout;
     private OkHttpClient httpClientLongConnectNoReadTimeout;
+    // §PAIR-BG（2026-11-26）：等使用者在電腦上輸入 PIN 的 getservercert。原本沒有讀取逾時：沒人輸入 PIN、或回應在
+    // 路上丟了（切到別的 App 時行程被凍結），配對執行緒會永遠卡住，之後再按配對只會顯示「已在配對中」直到 App 重開。
+    // server 端等 PIN 的配對只保留 3 分鐘（nvhttp.cpp k_pair_session_ttl），Android 14 的 shortService 前景服務也約 3 分鐘
+    // 就被系統結束（之後行程又可能被凍結），所以等 170 秒就放棄，讓執行緒在服務還在時收尾
+    private OkHttpClient httpClientPairPinWait;
     // §REVIEW-1104：/cancel 專用，讀取最多 60 秒（host 收 VR 約 20 秒；卡住的 host 不可讓「結束遊戲」永遠轉圈）
     private OkHttpClient httpClientQuitTimeout;
     private OkHttpClient httpClientShortConnectTimeout;
@@ -191,6 +196,10 @@ public class NvHTTP {
 
         httpClientLongConnectNoReadTimeout = httpClientLongConnectTimeout.newBuilder()
                 .readTimeout(0, TimeUnit.MILLISECONDS)
+                .build();
+
+        httpClientPairPinWait = httpClientLongConnectTimeout.newBuilder()
+                .readTimeout(170000, TimeUnit.MILLISECONDS)
                 .build();
 
         httpClientQuitTimeout = httpClientLongConnectTimeout.newBuilder()
@@ -974,7 +983,7 @@ public class NvHTTP {
     }
 
     String executePairingCommand(String additionalArguments, boolean enableReadTimeout) throws HostHttpResponseException, IOException {
-        return openHttpConnectionToString(enableReadTimeout ? httpClientLongConnectTimeout : httpClientLongConnectNoReadTimeout,
+        return openHttpConnectionToString(enableReadTimeout ? httpClientLongConnectTimeout : httpClientPairPinWait,
                 baseUrlHttp, "pair", "devicename=roth&updateState=1&" + additionalArguments);
     }
 

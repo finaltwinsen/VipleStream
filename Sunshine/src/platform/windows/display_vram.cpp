@@ -1211,7 +1211,125 @@ namespace platf::dxgi {
       forward_last_img,
       copy_last_surface_and_blend_cursor,
       dummy_fallback,
+      // §PERF-R3-B23：小塊路徑已經寫好 img_out，下面兩個 switch 不再複製。
+      already_produced,
     };
+
+    // §PERF-R3-B23：這張走小塊還是整張中介面。沒有要為游標複製時維持 none。
+    enum class cursor_copy_e {
+      none,
+      small,
+      full,
+    };
+    auto copy_kind = cursor_copy_e::none;
+
+    // §PERF-R3-B23：游標 viewport 在 set_pos 裡已經換成擷取貼圖座標（含旋轉）。
+    // 像素 i 的中心是 i+0.5，viewport [e0, e1) 蓋到 ceil(e0-0.5) <= i < ceil(e1-0.5)。
+    // 整數邊界時就是 [e0, e1)。alpha 與 xor 取聯集，再各邊多留 1 像素後夾進畫面：
+    // 少存會在游標移開時留殘影；多存的像素還原成原值，結果仍與只畫 viewport 相同。
+    struct cursor_px_rect_t {
+      int x = 0;
+      int y = 0;
+      int w = 0;
+      int h = 0;
+      bool empty() const {
+        return w <= 0 || h <= 0;
+      }
+    };
+    auto covered_rect = [&](const D3D11_VIEWPORT &vp) -> cursor_px_rect_t {
+      cursor_px_rect_t r;
+      const int tex_w = width_before_rotation;
+      const int tex_h = height_before_rotation;
+      if (tex_w <= 0 || tex_h <= 0 || !(vp.Width > 0.f) || !(vp.Height > 0.f)) {
+        return r;
+      }
+      const double x0 = static_cast<double>(vp.TopLeftX);
+      const double y0 = static_cast<double>(vp.TopLeftY);
+      const double x1 = x0 + static_cast<double>(vp.Width);
+      const double y1 = y0 + static_cast<double>(vp.Height);
+      auto ceil_to_int = [](double v) -> int {
+        if (!(v > -1.0e9)) {
+          return -1000000000;
+        }
+        if (v > 1.0e9) {
+          return 1000000000;
+        }
+        return static_cast<int>(std::ceil(v));
+      };
+      int left = ceil_to_int(x0 - 0.5);
+      int top = ceil_to_int(y0 - 0.5);
+      int right = ceil_to_int(x1 - 0.5);
+      int bottom = ceil_to_int(y1 - 0.5);
+      if (left < 0) {
+        left = 0;
+      }
+      if (top < 0) {
+        top = 0;
+      }
+      if (right > tex_w) {
+        right = tex_w;
+      }
+      if (bottom > tex_h) {
+        bottom = tex_h;
+      }
+      if (right <= left || bottom <= top) {
+        return r;
+      }
+      r.x = left;
+      r.y = top;
+      r.w = right - left;
+      r.h = bottom - top;
+      return r;
+    };
+    auto unite_rect = [](cursor_px_rect_t a, cursor_px_rect_t b) -> cursor_px_rect_t {
+      if (a.empty()) {
+        return b;
+      }
+      if (b.empty()) {
+        return a;
+      }
+      const int x0 = std::min(a.x, b.x);
+      const int y0 = std::min(a.y, b.y);
+      const int x1 = std::max(a.x + a.w, b.x + b.w);
+      const int y1 = std::max(a.y + a.h, b.y + b.h);
+      return {x0, y0, x1 - x0, y1 - y0};
+    };
+
+    cursor_px_rect_t draw_rect;
+    if (blend_mouse_cursor_flag) {
+      if (cursor_alpha.texture) {
+        draw_rect = unite_rect(draw_rect, covered_rect(cursor_alpha.cursor_view));
+      }
+      if (cursor_xor.texture) {
+        draw_rect = unite_rect(draw_rect, covered_rect(cursor_xor.cursor_view));
+      }
+      if (!draw_rect.empty()) {
+        const int tex_w = width_before_rotation;
+        const int tex_h = height_before_rotation;
+        int left = draw_rect.x - 1;
+        int top = draw_rect.y - 1;
+        int right = draw_rect.x + draw_rect.w + 1;
+        int bottom = draw_rect.y + draw_rect.h + 1;
+        if (left < 0) {
+          left = 0;
+        }
+        if (top < 0) {
+          top = 0;
+        }
+        if (right > tex_w) {
+          right = tex_w;
+        }
+        if (bottom > tex_h) {
+          bottom = tex_h;
+        }
+        draw_rect.x = left;
+        draw_rect.y = top;
+        draw_rect.w = std::max(0, right - left);
+        draw_rect.h = std::max(0, bottom - top);
+      }
+    }
+    // 完全在畫面外、或還沒有游標貼圖：畫上去不會改任何像素，不必為了它複製整張。
+    const bool draw_cursor = blend_mouse_cursor_flag && !draw_rect.empty() && capture_format != DXGI_FORMAT_UNKNOWN;
 
     auto last_frame_action = lfa::nothing;
     auto out_frame_action = ofa::dummy_fallback;
@@ -1223,14 +1341,11 @@ namespace platf::dxgi {
     } else {
       if (src) {
         // We got a new frame from DesktopDuplication...
-        if (blend_mouse_cursor_flag) {
+        if (draw_cursor) {
           // ...and we need to blend the mouse cursor onto it.
-          // Copy the frame to intermediate surface so we can blend this and future mouse cursor updates
-          // without new frames from DesktopDuplication. We use direct3d surface directly here and not
-          // an image from pull_free_image_cb mainly because it's lighter (surface sharing between
-          // direct3d devices produce significant memory overhead).
+          // §PERF-R3-B23：預設仍是整張中介面。下面若小塊貼圖配置成功會改走 already_produced，
+          // 這裡留著是配置失敗時的退路（輸出與以前相同）。
           last_frame_action = lfa::copy_src_to_surface;
-          // Copy the intermediate surface to a new image from pull_free_image_cb and blend the mouse cursor onto it.
           out_frame_action = ofa::copy_last_surface_and_blend_cursor;
         } else {
           // ...and we don't need to blend the mouse cursor.
@@ -1242,7 +1357,7 @@ namespace platf::dxgi {
         }
       } else if (!std::holds_alternative<std::monostate>(last_frame_variant)) {
         // We didn't get a new frame from DesktopDuplication...
-        if (blend_mouse_cursor_flag) {
+        if (draw_cursor) {
           // ...but we need to blend the mouse cursor.
           if (std::holds_alternative<std::shared_ptr<platf::img_t>>(last_frame_variant)) {
             // We have the shared pointer of the last image, replace it with intermediate surface
@@ -1317,97 +1432,8 @@ namespace platf::dxgi {
       return {std::move(d3d_img), std::move(fence_helper)};
     };
 
-    switch (last_frame_action) {
-      case lfa::nothing:
-        {
-          break;
-        }
-
-      case lfa::replace_surface_with_img:
-        {
-          auto p_surface = std::get_if<texture2d_t>(&last_frame_variant);
-          if (!p_surface) {
-            BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
-            return capture_e::error;
-          }
-
-          std::shared_ptr<platf::img_t> img;
-          if (!pull_free_image_cb(img)) {
-            return capture_e::interrupted;
-          }
-
-          auto [d3d_img, lock] = get_locked_d3d_img(img);
-          if (!d3d_img) {
-            return capture_e::error;
-          }
-
-          device_ctx->CopyResource(d3d_img->capture_texture.get(), p_surface->get());
-
-          // We delay the destruction of intermediate surface in case the mouse cursor reappears shortly.
-          old_surface_delayed_destruction.reset(p_surface->release());
-          old_surface_timestamp = std::chrono::steady_clock::now();
-
-          last_frame_variant = img;
-          break;
-        }
-
-      case lfa::replace_img_with_surface:
-        {
-          auto p_img = std::get_if<std::shared_ptr<platf::img_t>>(&last_frame_variant);
-          if (!p_img) {
-            BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
-            return capture_e::error;
-          }
-          auto [d3d_img, lock] = get_locked_d3d_img(*p_img);
-          if (!d3d_img) {
-            return capture_e::error;
-          }
-
-          p_img = nullptr;
-          last_frame_variant = texture2d_t {};
-          auto &surface = std::get<texture2d_t>(last_frame_variant);
-          if (!create_surface(surface)) {
-            return capture_e::error;
-          }
-
-          device_ctx->CopyResource(surface.get(), d3d_img->capture_texture.get());
-          break;
-        }
-
-      case lfa::copy_src_to_img:
-        {
-          last_frame_variant = {};
-
-          std::shared_ptr<platf::img_t> img;
-          if (!pull_free_image_cb(img)) {
-            return capture_e::interrupted;
-          }
-
-          auto [d3d_img, lock] = get_locked_d3d_img(img);
-          if (!d3d_img) {
-            return capture_e::error;
-          }
-
-          device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
-          last_frame_variant = img;
-          break;
-        }
-
-      case lfa::copy_src_to_surface:
-        {
-          auto p_surface = std::get_if<texture2d_t>(&last_frame_variant);
-          if (!p_surface) {
-            last_frame_variant = texture2d_t {};
-            p_surface = std::get_if<texture2d_t>(&last_frame_variant);
-            if (!create_surface(*p_surface)) {
-              return capture_e::error;
-            }
-          }
-          device_ctx->CopyResource(p_surface->get(), src.get());
-          break;
-        }
-    }
-
+    // §PERF-R3-B23：游標合成留在 snapshot，不搬進 convert()。
+    // convert() 有五種輸出格式、可能跨 device，而且已經在 YUV 域，和這裡的桌面像素不等價。
     auto blend_cursor = [&](img_d3d_t &d3d_img) {
       device_ctx->VSSetShader(cursor_vs.get(), nullptr, 0);
       device_ctx->PSSetShader(cursor_ps.get(), nullptr, 0);
@@ -1439,6 +1465,324 @@ namespace platf::dxgi {
       ID3D11ShaderResourceView *emptyShaderResourceView = nullptr;
       device_ctx->PSSetShaderResources(0, 1, &emptyShaderResourceView);
     };
+
+    auto invalidate_bg = [&]() {
+      cursor_bg_valid = false;
+      cursor_bg_x = 0;
+      cursor_bg_y = 0;
+      cursor_bg_w = 0;
+      cursor_bg_h = 0;
+    };
+
+    auto bg_rect_ok = [&]() -> bool {
+      return static_cast<bool>(cursor_bg) && cursor_bg_valid && cursor_bg_w > 0 && cursor_bg_h > 0 &&
+             cursor_bg_x >= 0 && cursor_bg_y >= 0 &&
+             cursor_bg_w <= width_before_rotation && cursor_bg_h <= height_before_rotation &&
+             cursor_bg_x <= width_before_rotation - cursor_bg_w &&
+             cursor_bg_y <= height_before_rotation - cursor_bg_h;
+    };
+
+    auto make_box = [](int x, int y, int w, int h) {
+      D3D11_BOX box {};
+      box.left = static_cast<UINT>(x);
+      box.top = static_cast<UINT>(y);
+      box.front = 0;
+      box.right = static_cast<UINT>(x + w);
+      box.bottom = static_cast<UINT>(y + h);
+      box.back = 1;
+      return box;
+    };
+
+    auto create_cursor_bg = [&](int w, int h, texture2d_t &out) -> bool {
+      D3D11_TEXTURE2D_DESC t {};
+      t.Width = static_cast<UINT>(w);
+      t.Height = static_cast<UINT>(h);
+      t.MipLevels = 1;
+      t.ArraySize = 1;
+      t.SampleDesc.Count = 1;
+      t.Usage = D3D11_USAGE_DEFAULT;
+      t.Format = capture_format;
+      t.BindFlags = 0;
+      status = device->CreateTexture2D(&t, nullptr, &out);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Failed to create cursor background texture [0x"sv << util::hex(status).to_string_view() << ']';
+        return false;
+      }
+      return true;
+    };
+
+    // 小塊配置失敗、而上一張影像已經畫上游標時，先還原成整張乾淨中介面，再走舊的合成。
+    // 不這樣做的話，舊流程會把含游標的影像當成底圖，再畫一次，留下殘影。
+    auto promote_composited_to_surface = [&]() -> bool {
+      auto p_img = std::get_if<std::shared_ptr<platf::img_t>>(&last_frame_variant);
+      if (!p_img || !bg_rect_ok()) {
+        return false;
+      }
+      auto [d3d_img, lock] = get_locked_d3d_img(*p_img);
+      if (!d3d_img || !d3d_img->capture_texture) {
+        return false;
+      }
+      texture2d_t surface;
+      if (!create_surface(surface)) {
+        return false;
+      }
+      device_ctx->CopyResource(surface.get(), d3d_img->capture_texture.get());
+      const auto box = make_box(0, 0, cursor_bg_w, cursor_bg_h);
+      device_ctx->CopySubresourceRegion(
+        surface.get(),
+        0,
+        static_cast<UINT>(cursor_bg_x),
+        static_cast<UINT>(cursor_bg_y),
+        0,
+        cursor_bg.get(),
+        0,
+        &box
+      );
+      last_frame_variant = std::move(surface);
+      invalidate_bg();
+      return true;
+    };
+
+    // §PERF-R3-B23：有游標要畫時，桌面來源本來就沒有游標。新畫面只整張複製一次到影像池，
+    // 畫之前把游標底下那一塊存起來。只有游標動時，用上一張（已含舊游標）加上這塊底圖還原，
+    // 再畫新位置。沒有游標時仍沿用「整張影像指標」的舊做法，不另外複製。
+    texture2d_t fresh_bg;
+    ID3D11Texture2D *save_target = nullptr;
+    const bool have_base = static_cast<bool>(src) || !std::holds_alternative<std::monostate>(last_frame_variant);
+    if (draw_cursor && have_base) {
+      const bool reuse = cursor_bg && cursor_bg_format == capture_format && cursor_bg_alloc_w >= draw_rect.w && cursor_bg_alloc_h >= draw_rect.h;
+      if (reuse) {
+        save_target = cursor_bg.get();
+      } else if (create_cursor_bg(draw_rect.w, draw_rect.h, fresh_bg)) {
+        save_target = fresh_bg.get();
+      }
+    }
+
+    const bool last_is_image = std::holds_alternative<std::shared_ptr<platf::img_t>>(last_frame_variant);
+    if (draw_cursor && save_target && have_base) {
+      const bool from_composited = !src && cursor_bg_valid && last_is_image;
+      if (from_composited && !bg_rect_ok()) {
+        BOOST_LOG(error) << "Cursor background rect is out of range";
+        return capture_e::error;
+      }
+
+      std::shared_ptr<platf::img_t> held;
+      ID3D11Texture2D *full_src = nullptr;
+      if (src) {
+        full_src = src.get();
+      } else if (last_is_image) {
+        held = *std::get_if<std::shared_ptr<platf::img_t>>(&last_frame_variant);
+        full_src = std::static_pointer_cast<img_d3d_t>(held)->capture_texture.get();
+      } else if (auto p_surface = std::get_if<texture2d_t>(&last_frame_variant)) {
+        full_src = p_surface->get();
+      }
+      if (!full_src) {
+        BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
+        return capture_e::error;
+      }
+
+      std::shared_ptr<platf::img_t> img;
+      if (!pull_free_image_cb(img)) {
+        return capture_e::interrupted;
+      }
+      auto [d3d_img, lock] = get_locked_d3d_img(img);
+      if (!d3d_img || !d3d_img->capture_texture) {
+        return capture_e::error;
+      }
+
+      device_ctx->CopyResource(d3d_img->capture_texture.get(), full_src);
+      if (from_composited) {
+        const auto box = make_box(0, 0, cursor_bg_w, cursor_bg_h);
+        device_ctx->CopySubresourceRegion(
+          d3d_img->capture_texture.get(),
+          0,
+          static_cast<UINT>(cursor_bg_x),
+          static_cast<UINT>(cursor_bg_y),
+          0,
+          cursor_bg.get(),
+          0,
+          &box
+        );
+      }
+      const auto save_box = make_box(draw_rect.x, draw_rect.y, draw_rect.w, draw_rect.h);
+      device_ctx->CopySubresourceRegion(save_target, 0, 0, 0, 0, d3d_img->capture_texture.get(), 0, &save_box);
+      blend_cursor(*d3d_img);
+
+      if (auto p_surface = std::get_if<texture2d_t>(&last_frame_variant)) {
+        if (*p_surface) {
+          old_surface_delayed_destruction.reset(p_surface->release());
+          old_surface_timestamp = std::chrono::steady_clock::now();
+        }
+      }
+      if (fresh_bg) {
+        D3D11_TEXTURE2D_DESC bg_desc {};
+        fresh_bg->GetDesc(&bg_desc);
+        cursor_bg = std::move(fresh_bg);
+        cursor_bg_format = capture_format;
+        cursor_bg_alloc_w = static_cast<int>(bg_desc.Width);
+        cursor_bg_alloc_h = static_cast<int>(bg_desc.Height);
+      }
+      cursor_bg_x = draw_rect.x;
+      cursor_bg_y = draw_rect.y;
+      cursor_bg_w = draw_rect.w;
+      cursor_bg_h = draw_rect.h;
+      cursor_bg_valid = true;
+
+      last_frame_variant = img;
+      img_out = std::move(img);
+      last_frame_action = lfa::nothing;
+      out_frame_action = ofa::already_produced;
+      copy_kind = cursor_copy_e::small;
+    } else if (!draw_cursor && !src && last_is_image && cursor_bg_valid) {
+      // 游標關掉、移出畫面或形狀清空：上一張還畫著舊游標，要貼回底圖才不會留下殘影。
+      if (!bg_rect_ok()) {
+        BOOST_LOG(error) << "Cursor background rect is out of range";
+        return capture_e::error;
+      }
+      auto held = *std::get_if<std::shared_ptr<platf::img_t>>(&last_frame_variant);
+      std::shared_ptr<platf::img_t> img;
+      if (!pull_free_image_cb(img)) {
+        return capture_e::interrupted;
+      }
+      auto [d3d_img, lock] = get_locked_d3d_img(img);
+      if (!d3d_img || !d3d_img->capture_texture) {
+        return capture_e::error;
+      }
+      auto old_d3d = std::static_pointer_cast<img_d3d_t>(held);
+      if (!old_d3d->capture_texture) {
+        return capture_e::error;
+      }
+      device_ctx->CopyResource(d3d_img->capture_texture.get(), old_d3d->capture_texture.get());
+      const auto box = make_box(0, 0, cursor_bg_w, cursor_bg_h);
+      device_ctx->CopySubresourceRegion(
+        d3d_img->capture_texture.get(),
+        0,
+        static_cast<UINT>(cursor_bg_x),
+        static_cast<UINT>(cursor_bg_y),
+        0,
+        cursor_bg.get(),
+        0,
+        &box
+      );
+      invalidate_bg();
+      last_frame_variant = img;
+      img_out = std::move(img);
+      last_frame_action = lfa::nothing;
+      out_frame_action = ofa::already_produced;
+      copy_kind = cursor_copy_e::small;
+    } else if (draw_cursor && !save_target && !src && last_is_image && cursor_bg_valid) {
+      if (!promote_composited_to_surface()) {
+        BOOST_LOG(error) << "Failed to restore cursor background onto the full frame";
+        return capture_e::error;
+      }
+      last_frame_action = lfa::nothing;
+      out_frame_action = ofa::copy_last_surface_and_blend_cursor;
+    }
+
+    if (copy_kind == cursor_copy_e::none && out_frame_action != ofa::already_produced) {
+      if (last_frame_action == lfa::copy_src_to_surface || last_frame_action == lfa::replace_img_with_surface || last_frame_action == lfa::replace_surface_with_img || out_frame_action == ofa::copy_last_surface_and_blend_cursor) {
+        copy_kind = cursor_copy_e::full;
+      }
+    }
+
+    switch (last_frame_action) {
+      case lfa::nothing:
+        {
+          break;
+        }
+
+      case lfa::replace_surface_with_img:
+        {
+          auto p_surface = std::get_if<texture2d_t>(&last_frame_variant);
+          if (!p_surface) {
+            BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
+            return capture_e::error;
+          }
+
+          std::shared_ptr<platf::img_t> img;
+          if (!pull_free_image_cb(img)) {
+            return capture_e::interrupted;
+          }
+
+          auto [d3d_img, lock] = get_locked_d3d_img(img);
+          if (!d3d_img) {
+            return capture_e::error;
+          }
+
+          device_ctx->CopyResource(d3d_img->capture_texture.get(), p_surface->get());
+          // §PERF-R3-B23：中介面是沒畫游標的底圖，換成影像後小塊記錄作廢。
+          invalidate_bg();
+
+          // We delay the destruction of intermediate surface in case the mouse cursor reappears shortly.
+          old_surface_delayed_destruction.reset(p_surface->release());
+          old_surface_timestamp = std::chrono::steady_clock::now();
+
+          last_frame_variant = img;
+          break;
+        }
+
+      case lfa::replace_img_with_surface:
+        {
+          auto p_img = std::get_if<std::shared_ptr<platf::img_t>>(&last_frame_variant);
+          if (!p_img) {
+            BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
+            return capture_e::error;
+          }
+          auto [d3d_img, lock] = get_locked_d3d_img(*p_img);
+          if (!d3d_img) {
+            return capture_e::error;
+          }
+
+          p_img = nullptr;
+          last_frame_variant = texture2d_t {};
+          auto &surface = std::get<texture2d_t>(last_frame_variant);
+          if (!create_surface(surface)) {
+            return capture_e::error;
+          }
+
+          device_ctx->CopyResource(surface.get(), d3d_img->capture_texture.get());
+          // §PERF-R3-B23：中介面裝的是沒畫游標的底圖。
+          invalidate_bg();
+          break;
+        }
+
+      case lfa::copy_src_to_img:
+        {
+          last_frame_variant = {};
+          // §PERF-R3-B23：這張是桌面原樣，沒有游標。上一張若畫過游標，小塊不能再拿來還原。
+          invalidate_bg();
+
+          std::shared_ptr<platf::img_t> img;
+          if (!pull_free_image_cb(img)) {
+            return capture_e::interrupted;
+          }
+
+          auto [d3d_img, lock] = get_locked_d3d_img(img);
+          if (!d3d_img) {
+            return capture_e::error;
+          }
+
+          device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
+          last_frame_variant = img;
+          break;
+        }
+
+      case lfa::copy_src_to_surface:
+        {
+          auto p_surface = std::get_if<texture2d_t>(&last_frame_variant);
+          if (!p_surface) {
+            last_frame_variant = texture2d_t {};
+            p_surface = std::get_if<texture2d_t>(&last_frame_variant);
+            if (!create_surface(*p_surface)) {
+              return capture_e::error;
+            }
+          }
+          device_ctx->CopyResource(p_surface->get(), src.get());
+          // §PERF-R3-B23：中介面是這張新桌面，沒有游標。
+          invalidate_bg();
+          break;
+        }
+    }
 
     switch (out_frame_action) {
       case ofa::forward_last_img:
@@ -1478,6 +1822,11 @@ namespace platf::dxgi {
           break;
         }
 
+      case ofa::already_produced:
+        {
+          break;
+        }
+
       case ofa::dummy_fallback:
         {
           if (!pull_free_image_cb(img_out)) {
@@ -1514,6 +1863,21 @@ namespace platf::dxgi {
 
     if (img_out) {
       img_out->frame_timestamp = frame_timestamp;
+
+      // §PERF-R3-B23：第一次與每 600 張成功擷取印這一段走小塊／整張中介面的次數。印完歸零。
+      if (copy_kind == cursor_copy_e::small) {
+        ++cursor_copy_small;
+      } else if (copy_kind == cursor_copy_e::full) {
+        ++cursor_copy_full;
+      }
+      ++cursor_copy_frames;
+      if (!cursor_copy_logged || cursor_copy_frames >= 600) {
+        BOOST_LOG(info) << "[VIPLE-CURSOR-COPY] frames="sv << cursor_copy_frames << " small="sv << cursor_copy_small << " full="sv << cursor_copy_full;
+        cursor_copy_frames = 0;
+        cursor_copy_small = 0;
+        cursor_copy_full = 0;
+        cursor_copy_logged = true;
+      }
     }
 
     return capture_e::ok;

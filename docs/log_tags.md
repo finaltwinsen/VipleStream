@@ -2730,6 +2730,20 @@ host `Sunshine/src/tailscale_path.cpp`；client `backend/tailscalepath.cpp`
 - Windows 服務模式下 `viplestream-svc.log` 不再有 server 的每一行 log，只剩 logging 初始化之前的輸出、直接寫 stdout／stderr 的內容與 CRT 錯誤。
   找 server 的 log 一律看 `sunshine.log*`。CLI 指令仍寫 `sunshine-cli.log`（每次截斷）並照常印到 stdout。
 
+### `[VIPLE-CURSOR-COPY]` —— DDA 游標底圖走小塊還是整張（host，§PERF-R3-B23）
+`Sunshine/src/platform/windows/display_vram.cpp`（`display_ddup_vram_t::snapshot`）
+
+```
+[VIPLE-CURSOR-COPY] frames=<N> small=<S> full=<F>
+```
+
+- 只有 Windows DDA 硬體編碼擷取（桌面 2D）。WGC、軟體擷取、VR 不會印。
+- 成功拿出一張畫面才算。第一次印一行（`frames=1`），之後每滿 600 張印一行。數字是**這一段**的，印完歸零；把各行的 `small`／`full` 加總就是整場的次數。
+- `small`：這一段有幾張改走「游標底下那一小塊」的保存或還原（`CopySubresourceRegion`），沒有再為了游標多複製一整張中介面。有游標、而且畫面在變時，正常應該幾乎全落在這裡。
+- `full`：這一段有幾張仍走整張中介面。小塊貼圖配置失敗，或上一張乾淨畫面還留在中介面上、正在把它換成影像時才會出現。平常應該是 0。一直不是 0 代表退回路徑一直在用。
+- 沒有要畫的游標（全螢幕遊戲把游標藏起來、串流關掉游標繪製）不會加在 `small`／`full`，只算進 `frames`。
+- 游標合成仍在擷取端，沒有搬進 `convert()`。
+
 ### 2026-11-13～14 新增（其他）
 - host `[VIPLE-MPADV] Enumerated N network interface(s) for advertisement (logged only when the list changes)`＋每張網卡一行 `  <名稱> (<type>): <IPv4>`：只在清單和上次印的不同時印（第一次一定印）；原本每次列舉都印（VR 多連線中每秒一次、每次 /serverinfo 兩次）。log 輪替後清單沒變不會補印。
 - host `Unable to find MAC address for <位址> (logged once per address)`（warning）：每個位址只印一次。Tailscale 之類沒有實體位址的介面連進來時會看到一次，屬正常。

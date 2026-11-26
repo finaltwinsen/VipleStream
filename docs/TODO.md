@@ -74,7 +74,16 @@
   「8.3 Mbps 被 cut-trend 砍」那場其實是 VR 之後接著開的 BeamNG 2D（1280x720 預設 10 Mbps 扣 FEC／音訊＝8308），不是 VR。
   據此修了兩項（**未建置、未驗**；單元測試 test_abr_congestion 54 項過）：§ABR-TREND-FLOOR（趨勢過載但膨脹量 < max(6 ms, 抖動) 只暫停回升、
   不降碼；congestion_t 只用在 2D）、§ABR-DESK-TOPOFF（2D 回升最後一階不到 10% 時 target 頂到上限仍直接套用，不再停在 95%）。
-- **§VRDUAL 借鑑 vrdual 的五項（grok 實作、我審過並修正；2.0.290 已建、host 與頭盔已部署，未提交）**：
+- **§PERF-R3-B23 DDA 游標只存還原底下那一塊（2.0.295）**：有游標要畫時新畫面只整張複製一次到影像池、畫之前存游標底下的小塊，只有游標動時貼回舊位置再畫新位置（grok 實作、我審過）。開發機 server＋頭盔 2D 無人場次、程式畫圓移動游標 30 秒：`[VIPLE-CURSOR-COPY] frames=600 small=600 full=0` 連續 7 段、沒有錯誤。**待驗**：目視（殘影、I 形游標、螢幕邊緣、旋轉、HDR）。
+- **§PERF-R3-NETIF `/serverinfo` 網卡列舉快取（2.0.295）**：變更通知作廢＋30 秒上限。實測開發機 p50 3.4 ms，與 host 改前基準相同，審查估的約 15 ms 在這條路徑上不成立；保留（不傷），效益未證實。
+- **§VR-GAME-MV 遊戲動態向量補幀**：設計 `docs/specs/vr_game_motion_vectors.md`。**M-MV0** UEVR 外掛 `Sunshine/tools/uevr_mv_plugin/`（agy 實作、我補 `EvaluateFeature_C` 入口與建置腳本；只用 UEVR 三個 MIT 標頭）：`build.cmd` 建置通過，**未在遊戲內執行過**。下一步：host 上 Palworld＋UEVR Native Stereo＋DLSS 放外掛、傾印 10 幀、跑 `check_mv8.py`（通過標準見設計 6.2 節）。
+- **Linux VR 後端第二版規格** `docs/specs/linux_vr_backend_v2.md`（agy 依審查 18 項改寫；11-26 使用者決定：每眼 1920、P0 探針由開發機 SSH 跑、P1 先單路 SBS、VR 獨立音訊 sink）。下一步：P0 探針 `vk_dualgpu_probe`／`v4l2_dual_decode_bench`。
+- **§PAIR-BG Android 配對中切到別的 App 就失敗（2.0.293）**：使用者手機開 Chrome 遠端桌面去電腦輸入 PIN →
+  PcView.onStop 關掉 PIN 對話框、行程被凍結 → server 回的憑證收不到（server log 停在 `getservercert`、沒有 `clientchallenge`）。
+  改：配對期間掛 shortService 前景服務（通知顯示 PIN）、回前景時重新顯示 PIN、通知授權後重送、getservercert 讀取逾時 170 s
+  （原本無限，卡住後只會顯示「已在配對中」）。Pixel 5 驗過：背景 40 s 不凍結、通知有 PIN、對話框回來、背景 171 s 乾淨逾時。
+  **待驗**：使用者 Pixel 9 實際用遠端桌面輸入 PIN 完成配對。
+- **§VRDUAL 借鑑 vrdual 的五項（grok 實作、我審過並修正；2.0.290 已提交）**：
   4A ABI 表改由 `Sunshine/scripts/gen_vr_ipc_abi_table.py` 產生、建置時 `--check`（腳本原本把表頭的巨集定義也當成資料列，
   檢查永遠失敗，已修；找不到 Python 改成只警告）；7A server／driver build id 經握手的 reserved 欄位比對，不一致只印
   `[VIPLE-VR-BUILDID]`；1A layer 0 缺一眼 SRV 改畫另一眼（`[VIPLE-VR-MONO]`）；11A 頭盔 xrWaitFrame／BeginFrame／EndFrame 看門狗
@@ -87,7 +96,7 @@
   （`session.cpp` `xo.pcvrSynth = … && vrHalfRate && …`），但遊戲跟不上時 host 全速模式自然變成每 2 格一張（Palworld 實測頭盔穩定
   720 新／720 重複每 10 s），這時只是重複顯示 → 改成「新影像穩定在顯示率一半（host cadence divisor 2 或 rate div 2）」時自動開補幀；
   同一場 MTP p50 約 60 ms、p95 約 115 ms（正常全速約 40），原因待查（host 自然降半時的 latch／預測時間）。**下一步**：遊戲動態向量（攔 DLSS／FSR 3.1／XeSS 的輸入）送頭盔補幀，設計稿待寫；
-  一卡一眼暫緩（需要 Linux VR 擷取後端，設計稿 `docs/specs/linux_vr_backend.md` 未審）。
+  一卡一眼見下方 Linux VR 後端第二版規格。
 - **§PERF-R3 第三輪效能／功耗審查**：grok 四份報告（server、桌面 client、Android、頭盔 VR）逐項核實：不改行為的已改進 2.0.286（各處標 `§PERF-R3`）；會改時序的列在下一節待量測。
 
 ### §QUEST Meta Quest 原生 OpenXR client（2026-11-24 開工；**OpenXR 那一端沒有實機、從未執行**）
@@ -492,7 +501,6 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 - B12　driver 提供 hidden area mesh（預設分塊下頻寬只省 0.5～1.2%，主要是 host GPU 少著色 15～20% 像素）。
 - B17　影片模式全景投影沒有新影像就沿用上一張（30 fps 片源 GPU 約省 3～11%）。
 - B21　Tailscale 狀態輪詢在直連穩定時放寬到 15 秒（不要 30 秒，會漏掉短的中繼段）。
-- B23　DDA 畫游標時每張新畫面整張複製兩次，改成只保存與還原游標底下那一塊（1440p120 約 1% GPU）。
 - B31　沒有 client 的 Steam Controller 時，Steam 對虛擬裝置每秒數十到兩百多次的查詢（A1 只壓了 log，省不到這段；要實體 SC／Puck 驗）。
 - B32　server 行程重啟後自己開的 SteamVR 留著不關、也擋住 Steam Link（由程式碼推得，要先在 host 重現再立項）。
 - B18　（低優先）解碼輸出改 UBWC 零複製匯入：約 20～80 mW，照原審查的做法做不出正確畫面。
